@@ -236,6 +236,135 @@ pub fn large_domain_grid(p: &LargeGridParams) -> Grid {
     Grid::from_nodes(ni, nj, x, r)
 }
 
+/// Nose-cylinder body with an optional conical boattail and a flat base, on a sting or free (wake behind the base).
+///
+/// The axial profile is `body.r(x)` up to the shoulder `x = L_n + cyl_length`, then a boattail of `boat_length` and half-angle
+/// `boat_angle` (linear radius decrease) and a flat annular base of outer radius [`BaseBody::base_radius`] and inner radius
+/// `sting_radius` (`0` = no sting, the base is a full disc and a wake region reaches the axis).
+#[derive(Clone, Copy, Debug)]
+pub struct BaseBody {
+    pub body: Body,
+    pub cyl_length: f64,
+    pub boat_length: f64,
+    /// Boattail half-angle [rad].
+    pub boat_angle: f64,
+    pub sting_radius: f64,
+}
+
+impl BaseBody {
+    /// Axial position of the cylinder end (boattail start).
+    pub fn x_shoulder(&self) -> f64 {
+        self.body.nose_length() + self.cyl_length
+    }
+    /// Axial position of the flat base.
+    pub fn x_base(&self) -> f64 {
+        self.x_shoulder() + self.boat_length
+    }
+    /// Outer radius of the base face.
+    pub fn base_radius(&self) -> f64 {
+        self.body.radius() - self.boat_length * self.boat_angle.tan()
+    }
+    /// Body radius at `x` (0 upstream of the tip, base radius behind the base: the line the wall grid row follows).
+    pub fn r(&self, x: f64) -> f64 {
+        let xs = self.x_shoulder();
+        if x <= xs {
+            self.body.r(x)
+        } else if x < self.x_base() {
+            self.body.radius() - (x - xs) * self.boat_angle.tan()
+        } else {
+            self.base_radius()
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BaseGridParams {
+    pub body: BaseBody,
+    /// Inflow plane distance upstream of the tip, outflow plane distance behind the base, outer radius.
+    pub x_up: f64,
+    pub x_down: f64,
+    pub r_far: f64,
+    /// Cells upstream of the tip, along the nose, cylinder, boattail (0 without boattail) and behind the base.
+    pub n_up: usize,
+    pub n_nose: usize,
+    pub n_cyl: usize,
+    pub n_boat: usize,
+    pub n_wake: usize,
+    /// Rows inside the sting (solid; 0 without sting, otherwise >= 2), rows between the sting (or axis) and the base
+    /// radius behind the base (these rows are solid beside the body), rows above the body surface.
+    pub n_sting: usize,
+    pub n_gap: usize,
+    pub nj_out: usize,
+    /// End-cell size along x at the tip, shoulder, boattail ends and base, first cell height at walls / base corner.
+    pub dx_tip: f64,
+    pub dr_wall: f64,
+}
+
+/// Grid with a solid body block and base (see `solver::Block`): H-grid whose first `j_end = n_sting + n_gap` rows lie
+/// inside the body for `x < x_base` (solid cells) and behind the base between the sting / axis and the base radius (wake
+/// cells). Returns the grid and the block to pass to `Solver::set_block`.
+pub fn base_domain_grid(p: &BaseGridParams) -> (Grid, crate::solver::Block) {
+    let bb = &p.body;
+    let ln = bb.body.nose_length();
+    assert!(p.n_up >= 1 && p.n_nose >= 2 && p.n_cyl >= 1 && p.n_wake >= 2 && p.n_gap >= 2);
+    assert!((p.n_boat == 0) == (bb.boat_length == 0.0));
+    assert!(p.n_sting == 0 || p.n_sting >= 2);
+    assert!(bb.sting_radius < bb.base_radius(), "sting thicker than the base");
+    let nose = two_sided_nodes(ln, p.n_nose, p.dx_tip);
+    let d_tip = nose[1] - nose[0];
+    let mut xs: Vec<f64> = Vec::new();
+    let up = geometric_offsets(d_tip, p.x_up, p.n_up);
+    for k in (1..=p.n_up).rev() {
+        xs.push(-up[k]);
+    }
+    xs.extend(nose.iter().copied());
+    let cyl = two_sided_nodes(bb.cyl_length, p.n_cyl, p.dx_tip);
+    for k in 1..=p.n_cyl {
+        xs.push(ln + cyl[k]);
+    }
+    if p.n_boat > 0 {
+        let boat = two_sided_nodes(bb.boat_length, p.n_boat, p.dx_tip);
+        for k in 1..=p.n_boat {
+            xs.push(bb.x_shoulder() + boat[k]);
+        }
+    }
+    let i_end = xs.len() - 1 - 0; // node index of the base plane is xs.len() - 1 at this point
+    let d_base = xs[i_end] - xs[i_end - 1];
+    let wake = geometric_offsets(d_base, p.x_down, p.n_wake);
+    for k in 1..=p.n_wake {
+        xs.push(bb.x_base() + wake[k]);
+    }
+    let ni = xs.len() - 1;
+    let (j_sting, j_end) = (p.n_sting, p.n_sting + p.n_gap);
+    let nj = j_end + p.nj_out;
+    let (re, rs) = (bb.base_radius(), bb.sting_radius);
+    let gap = two_sided_nodes(re - rs, p.n_gap, p.dr_wall);
+    let sj = radial_fractions(p.dr_wall, p.r_far - re, p.nj_out);
+    let mut x = vec![0.0; (ni + 1) * (nj + 1)];
+    let mut r = vec![0.0; (ni + 1) * (nj + 1)];
+    for i in 0..=ni {
+        let rw = bb.r(xs[i]);
+        for j in 0..=nj {
+            let rad = if i >= i_end {
+                if j <= j_sting {
+                    rs - (j_sting - j) as f64 * p.dr_wall
+                } else if j <= j_end {
+                    rs + gap[j - j_sting]
+                } else {
+                    re + sj[j - j_end] * (p.r_far - re)
+                }
+            } else if j <= j_end {
+                rw - (j_end - j) as f64 * p.dr_wall
+            } else {
+                rw + sj[j - j_end] * (p.r_far - rw)
+            };
+            x[j * (ni + 1) + i] = xs[i];
+            r[j * (ni + 1) + i] = rad;
+        }
+    }
+    (Grid::from_nodes(ni, nj, x, r), crate::solver::Block { i_end, j_end, j_sting })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,5 +459,73 @@ mod tests {
         assert!((b.r(b.nose_length()) - 0.5).abs() < 1e-14);
         assert!((b.nose_length() - 0.5 / 10f64.to_radians().tan()).abs() < 1e-14);
         assert!((b.slope(1.0) - 10f64.to_radians().tan()).abs() < 1e-14);
+    }
+
+    fn base_params(sting: f64, boat: f64) -> BaseGridParams {
+        let body = BaseBody { body: Body { nose: Nose::TangentOgive { fineness: 3.0 } }, cyl_length: 3.0, boat_length: boat, boat_angle: 10f64.to_radians(), sting_radius: sting };
+        BaseGridParams {
+            body,
+            x_up: 20.0,
+            x_down: 20.0,
+            r_far: 20.0,
+            n_up: 12,
+            n_nose: 24,
+            n_cyl: 16,
+            n_boat: if boat > 0.0 { 8 } else { 0 },
+            n_wake: 16,
+            n_sting: if sting > 0.0 { 4 } else { 0 },
+            n_gap: 8,
+            nj_out: 20,
+            dx_tip: 0.05,
+            dr_wall: 0.05,
+        }
+    }
+
+    #[test]
+    fn base_grid_wall_lines_block_and_metrics_are_consistent() {
+        for (sting, boat) in [(0.0, 0.0), (0.13, 1.0), (0.0, 1.0)] {
+            let p = base_params(sting, boat);
+            let (g, b) = base_domain_grid(&p); // asserts positive cell areas
+            let bb = &p.body;
+            assert_eq!(b.j_end, p.n_sting + p.n_gap);
+            assert_eq!(b.j_sting, p.n_sting);
+            assert_eq!(b.i_end, p.n_up + p.n_nose + p.n_cyl + p.n_boat);
+            // the base plane is at x_base, the wall row follows the body radius, the far field is at r_far
+            assert!((g.node(b.i_end, 0).0 - bb.x_base()).abs() < 1e-12, "base plane");
+            for i in 0..=b.i_end {
+                let (x, r) = g.node(i, b.j_end);
+                assert!((r - bb.r(x)).abs() < 1e-12, "wall radius at i={i}");
+                assert!((g.node(i, g.nj).1 - p.r_far).abs() < 1e-12 || i > b.i_end);
+            }
+            // behind the base the row j_end sits at the base radius, the row j_sting at the sting radius (or the axis)
+            for i in b.i_end..=g.ni {
+                assert!((g.node(i, b.j_end).1 - bb.base_radius()).abs() < 1e-12);
+                assert!((g.node(i, b.j_sting).1 - bb.sting_radius).abs() < 1e-12 || b.j_sting == 0);
+                assert!(g.node(i, 0).1.abs() < 1e-12 || p.n_sting > 0);
+            }
+            // base face area (annulus between the sting and the base radius) equals pi (r_b^2 - r_s^2) in the r^2 weights
+            let mut a = 0.0;
+            for j in b.j_sting..b.j_end {
+                let (n0, n1) = (g.node(b.i_end, j), g.node(b.i_end, j + 1));
+                a += n1.1 * n1.1 - n0.1 * n0.1;
+            }
+            assert!((a - (bb.base_radius().powi(2) - bb.sting_radius.powi(2))).abs() < 1e-12);
+            // geometric consistency: base face normal points downstream (+x) for the i-face at i_end
+            assert!(g.iface[(b.j_end - 1) * (g.ni + 1) + b.i_end].nx > 0.99);
+            // cell sizes grow smoothly through the base plane
+            let xs: Vec<f64> = (0..=g.ni).map(|i| g.node(i, g.nj).0).collect();
+            let worst = xs.windows(3).map(|w| ((w[2] - w[1]) / (w[1] - w[0])).max((w[1] - w[0]) / (w[2] - w[1]))).fold(1.0, f64::max);
+            assert!(worst < 2.5, "neighbouring cell-size ratio {worst}");
+        }
+    }
+
+    #[test]
+    fn base_body_profile_is_continuous() {
+        let b = base_params(0.0, 1.0).body;
+        assert!((b.r(b.x_shoulder() - 1e-9) - 0.5).abs() < 1e-8);
+        assert!((b.r(b.x_shoulder() + 1e-9) - 0.5).abs() < 1e-8);
+        assert!((b.r(b.x_base() - 1e-9) - b.base_radius()).abs() < 1e-8);
+        assert!((b.base_radius() - (0.5 - 10f64.to_radians().tan())).abs() < 1e-14);
+        assert_eq!(b.r(b.x_base() + 5.0), b.base_radius());
     }
 }

@@ -7,19 +7,42 @@
 //! `i-1` and `i`) at `j*(ni+1) + i`, j-face at `j*ni + i`, primitive array with 2 ghost layers at
 //! `(j+2)*(ni+4) + (i+2)`.
 
-/// Uniform block shared by every kernel (96 bytes, matches `crate::Params`). `fs_lo_*`: low (df) parts of the free stream.
+/// Uniform block shared by every kernel (128 bytes, matches `crate::Params`). `fs_lo_*`: low (df) parts of the free stream.
 /// `limiter`: 0 = first order, 1 = minmod, 2 = van Albada. `bc*`: 0 = free stream, 1 = extrapolate,
 /// 2 = slip wall, 3 = characteristic far field, 4 = static-pressure outflow. `stage`: 1..3 (SSP-RK3 stage). `slot`:
-/// residual-history slot. `aux`: number of partial sums read by `HIST_FINAL`. `ra`, `rb`: RK stage update
-/// `u = ra (u + dt res) + rb u0`.
+/// residual-history slot. `aux`: number of partial sums read by `HIST_FINAL` (line solves: pass index). `ra`, `rb`: RK stage update
+/// `u = ra (u + dt res) + rb u0`. `low_mach`: 1 = Thornber low-Mach correction of the reconstructed face states.
+/// `blk_i, blk_j, blk_s`: solid body block (`bowshock_cfd::solver::Block`; all 0 = no block). `icfl`, `eps_fix`, `iflags`:
+/// implicit scheme (pseudo-time CFL, entropy fix of the Roe-type dissipation, bit 1 lines, 2 implicit BCs, 4 Roe-type
+/// dissipation, 8 `DtMode::MinDirection`).
 const COMMON_TEMPLATE: &str = r#"
 struct Params {
     ni: u32, nj: u32, limiter: u32, stage: u32,
     cfl: f32, fs_rho: f32, fs_u: f32, fs_v: f32,
     fs_p: f32, bc0: u32, bc1: u32, bc2: u32,
     bc3: u32, slot: u32, aux: u32, zero: u32,
-    ra: f32, rb: f32, pad2: u32, pad3: u32,
+    ra: f32, rb: f32, low_mach: u32, iflags: u32,
     fs_lo_rho: f32, fs_lo_u: f32, fs_lo_v: f32, fs_lo_p: f32,
+    blk_i: u32, blk_j: u32, blk_s: u32, ipad0: u32,
+    icfl: f32, eps_fix: f32, ipad1: u32, ipad2: u32,
+}
+
+// Solid body block (all-zero parameters: no block). Cell (i, j) is solid if i < blk_i && j < blk_j (body) or
+// i >= blk_i && j < blk_s (sting).
+fn is_solid(i: u32, j: u32) -> bool {
+    if (i < p.blk_i) { return j < p.blk_j; }
+    return j < p.blk_s;
+}
+// First fluid row of column i.
+fn col_start(i: u32) -> u32 {
+    if (i < p.blk_i) { return p.blk_j; }
+    return p.blk_s;
+}
+// First fluid cell of row j (`ni` if the whole row is solid).
+fn row_start(j: u32) -> u32 {
+    if (j < p.blk_s) { return p.ni; }
+    if (j < p.blk_j) { return p.blk_i; }
+    return 0u;
 }
 
 const NG: i32 = 2;
@@ -213,10 +236,31 @@ fn shock_weight(pl: f32, pr: f32) -> f32 {
     return t * t * (3.0 - 2.0 * t);
 }
 
-// Complete face kernel (bowshock-cfd `flux::face_flux`): MUSCL reconstruction + HLLC blended towards
+// Low-Mach correction of the reconstructed states (bowshock-cfd `flux::low_mach_states`, Thornber et al. 2008): the jump of the
+// face-normal velocity is scaled by z = clamp(max(M_L, M_R), LOW_MACH_FLOOR, 1); applied when `p.low_mach != 0`.
+fn low_mach_states(l: vec4<f32>, r: vec4<f32>, nx: f32, nr: f32) -> LeftRight {
+    let unl = l.y * nx + l.z * nr;
+    let unr = r.y * nx + r.z * nr;
+    let ml = sqrt(l.y * l.y + l.z * l.z) / sqrt(GAMMA * l.w / l.x);
+    let mr = sqrt(r.y * r.y + r.z * r.z) / sqrt(GAMMA * r.w / r.x);
+    let z = clamp(max(ml, mr), LOW_MACH_FLOOR, 1.0);
+    if (z >= 1.0) { return LeftRight(l, r); }
+    let avg = 0.5 * (unl + unr);
+    let dl = avg + z * (unl - avg) - unl;
+    let dr = avg + z * (unr - avg) - unr;
+    return LeftRight(vec4<f32>(l.x, l.y + dl * nx, l.z + dl * nr, l.w), vec4<f32>(r.x, r.y + dr * nx, r.z + dr * nr, r.w));
+}
+
+fn reconstruct_lm(m2: vec4<f32>, m1: vec4<f32>, p0: vec4<f32>, p1: vec4<f32>, lim: u32, nx: f32, nr: f32) -> LeftRight {
+    let lr = reconstruct(m2, m1, p0, p1, lim);
+    if (p.low_mach != 0u) { return low_mach_states(lr.l, lr.r, nx, nr); }
+    return lr;
+}
+
+// Complete face kernel (bowshock-cfd `flux::face_flux_lm`): MUSCL reconstruction (+ optional low-Mach correction) + HLLC blended towards
 // Rusanov inside shocks; the sensor uses the two cell-centred pressures adjacent to the face.
 fn face_flux(m2: vec4<f32>, m1: vec4<f32>, p0: vec4<f32>, p1: vec4<f32>, lim: u32, nx: f32, nr: f32) -> vec4<f32> {
-    let lr = reconstruct(m2, m1, p0, p1, lim);
+    let lr = reconstruct_lm(m2, m1, p0, p1, lim, nx, nr);
     let c = hllc(lr.l, lr.r, nx, nr);
     let t = shock_weight(m1.w, p0.w);
     if (t == 0.0) { return c; }
@@ -258,9 +302,10 @@ pub fn characteristic_exponent() -> f64 {
 pub fn common() -> String {
     assert!((characteristic_exponent() - 5.0).abs() < 1e-12, "characteristic_ghost assumes gamma = 1.4 (integer power 5)");
     format!(
-        "const SHOCK_SENSOR_LO: f32 = {:e};\nconst SHOCK_SENSOR_HI: f32 = {:e};\n{}",
+        "const SHOCK_SENSOR_LO: f32 = {:e};\nconst SHOCK_SENSOR_HI: f32 = {:e};\nconst LOW_MACH_FLOOR: f32 = {:e};\n{}",
         bowshock_cfd::flux::SHOCK_SENSOR_LO,
         bowshock_cfd::flux::SHOCK_SENSOR_HI,
+        bowshock_cfd::flux::LOW_MACH_FLOOR,
         COMMON_TEMPLATE
     )
 }
@@ -552,9 +597,15 @@ fn prim_i(i: i32, j: i32) -> vec4<f32> {
     return cell_prim(i, j);
 }
 
-// Cell (i, j) with j in [-2, nj + 1] and i interior.
+// Cell (i, j) with j in [-2, nj + 1] and i interior. Cells below the body / sting surface of a solid block (j < col_start(i),
+// `bowshock_cfd::solver::Solver::fill_block_ghosts`): mirror image of the fluid cells above the surface.
 fn prim_j(i: i32, j: i32) -> vec4<f32> {
     let nj = i32(p.nj);
+    let j0 = i32(col_start(u32(i)));
+    if (j < j0 && j0 > 0) {
+        let f = jface[u32(j0) * p.ni + u32(i)];
+        return reflect_wall(cell_prim(i, 2 * j0 - 1 - j), f.x, f.y);
+    }
     if (j < 0) {
         let k = -j;
         let f = jface[u32(i)];
@@ -578,6 +629,27 @@ fn prim_j(i: i32, j: i32) -> vec4<f32> {
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.y < p.nj) {
         if (gid.x > p.ni) { return; }
+        if (gid.y < p.blk_j) {
+            if (gid.y < p.blk_s || gid.x < p.blk_i) { fi[gid.y * (p.ni + 1u) + gid.x] = vec4<f32>(0.0); return; } // inside the body / sting
+            if (gid.x <= p.blk_i + 1u) {
+                // base wall (i = blk_i) and the face next to it: the solid stencil cells are the mirror image of the fluid cells
+                // across the base about the base-wall normal
+                let i = i32(gid.x);
+                let j = i32(gid.y);
+                let fb = iface[gid.y * (p.ni + 1u) + p.blk_i];
+                let f = iface[gid.y * (p.ni + 1u) + gid.x];
+                let p0 = prim_i(i, j);
+                let p1 = prim_i(i + 1, j);
+                var m1 = prim_i(i - 1, j);
+                var m2 = reflect_wall(m1, fb.x, fb.y);
+                if (gid.x == p.blk_i) {
+                    m1 = reflect_wall(p0, fb.x, fb.y);
+                    m2 = reflect_wall(p1, fb.x, fb.y);
+                }
+                fi[gid.y * (p.ni + 1u) + gid.x] = face_flux(m2, m1, p0, p1, p.limiter, f.x, f.y);
+                return;
+            }
+        }
         let i = i32(gid.x);
         let j = i32(gid.y);
         let k = gid.y * (p.ni + 1u) + gid.x;
@@ -586,6 +658,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else {
         let jr = gid.y - p.nj;
         if (gid.x >= p.ni || jr > p.nj) { return; }
+        if (jr < col_start(gid.x)) { fj[jr * p.ni + gid.x] = vec4<f32>(0.0); return; } // inside the body / sting
         let i = i32(gid.x);
         let j = i32(jr);
         let k = jr * p.ni + gid.x;
@@ -642,7 +715,7 @@ var<workgroup> sh: array<f32, 128>;
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32,
         @builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
     var r2: f32 = 0.0;
-    if (gid.x < p.ni && gid.y < p.nj) {
+    if (gid.x < p.ni && gid.y < p.nj && !is_solid(gid.x, gid.y)) {
         let i = gid.x;
         let j = gid.y;
         let c = j * p.ni + i;
@@ -702,8 +775,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let s = gid.x;
     if (s >= p.ni) { return; }
     let m2 = states[4u * s]; let m1 = states[4u * s + 1u]; let p0 = states[4u * s + 2u]; let p1 = states[4u * s + 3u];
-    let lr = reconstruct(m2, m1, p0, p1, p.limiter);
     let n = normals[s];
+    let lr = reconstruct_lm(m2, m1, p0, p1, p.limiter, n.x, n.y);
     out[4u * s] = lr.l;
     out[4u * s + 1u] = lr.r;
     out[4u * s + 2u] = hllc(lr.l, lr.r, n.x, n.y);

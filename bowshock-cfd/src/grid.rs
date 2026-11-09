@@ -115,6 +115,25 @@ impl Grid {
         let k = j * (self.ni + 1) + i;
         (self.x[k], self.r[k])
     }
+
+    /// Grid with every second node line removed in both directions (2x2 cells agglomerated into one). `None` if `ni` or
+    /// `nj` is odd. Used for the multigrid hierarchy: coarse cell `(I, J)` is the union of fine cells `(2I..2I+2, 2J..2J+2)`.
+    pub fn coarsen(&self) -> Option<Grid> {
+        if self.ni % 2 != 0 || self.nj % 2 != 0 {
+            return None;
+        }
+        let (ci, cj) = (self.ni / 2, self.nj / 2);
+        let mut x = Vec::with_capacity((ci + 1) * (cj + 1));
+        let mut r = Vec::with_capacity((ci + 1) * (cj + 1));
+        for j in 0..=cj {
+            for i in 0..=ci {
+                let k = 2 * j * (self.ni + 1) + 2 * i;
+                x.push(self.x[k]);
+                r.push(self.r[k]);
+            }
+        }
+        Some(Grid::from_nodes(ci, cj, x, r))
+    }
 }
 
 /// Parameters of the cone grid.

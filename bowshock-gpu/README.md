@@ -2,26 +2,31 @@
 
 GPU port of the CPU reference solver (`../bowshock-cfd`: 2D axisymmetric Euler, structured body-fitted grid,
 cell-centred FV, MUSCL (minmod / van Albada) + HLLC blended with Rusanov in shocks (`flux::face_flux`),
-SSP-RK3 with local time stepping, CFL 0.5) on [Luma](../../luma) custom kernels. The state lives in **f32 arrays**; how it is
+SSP-RK3 with local time stepping, CFL 0.5, or the line-implicit convergence scheme of M2) on [Luma](../../luma) custom kernels. The state lives in **f32 arrays**; how it is
 accumulated and how the residual is evaluated is selectable (`Precision`: `F32` = the original plain-f32 port, `Compensated`,
 `Extended` = default, see "The f32 residual floor"). With the default the GPU solver converges like the f64 CPU solver (6 orders on
-all 12 cone validation cases). The solver takes any structured axisymmetric grid and BC set of bowshock-cfd: cone, tangent-ogive cylinder (M = 1.98) and the transonic
-nose-cylinder case on the large-domain grid with characteristic far-field BCs ("Ogive-cylinder" and "Transonic" below). The CPU solver (f64, rayon) is the reference at run time: `cone_gpu`, `ogive_gpu` and `transonic_gpu` run both and compare them.
+all 12 cone validation cases). The solver takes any structured axisymmetric grid and BC set of bowshock-cfd: cone, tangent-ogive cylinder (M = 1.98), the transonic
+nose-cylinder case on the large-domain grid with characteristic far-field BCs ("Ogive-cylinder" and "Transonic" below) and, since M2, the subsonic (M ≈ 0.1 – 0.8) nose-cylinder cases with and without a flat blunt base and wake
+("Subsonic" below), with the **line-implicit convergence scheme**, the **low-Mach flux correction** and the **solid-block / base-wall handling** of bowshock-cfd. The CPU solver (f64, rayon) is the reference at run time: `cone_gpu`, `ogive_gpu`, `transonic_gpu` and `subsonic_gpu` run both and compare them.
 
 ```
 bowshock-gpu/
   src/shaders.rs        WGSL kernels (COMMON = translation of bowshock-cfd gas.rs/flux.rs; one source per kernel), f32 / compensated update
-  src/shaders_ext.rs    double-float (df) WGSL: error-free arithmetic + the df translation of the face kernels and the residual
+  src/shaders_ext.rs    double-float (df) WGSL: error-free arithmetic + the df translation of the face kernels and the residual (+ low-Mach correction, f32-geometry closure correction)
+  src/shaders_impl.rs   WGSL of the line-implicit scheme: 4x4 block library (flux Jacobian, Roe-type |A|, ghost Jacobians), block assembly, block-tridiagonal line solves, defect correction, positivity-damped update
   src/lib.rs            GpuSolver (Mode x Precision): uploads geometry once, records the kernels, residual history, state read-back
   src/cone.rs           cone runners (CPU loop, GPU loop with identical stopping criteria), post-processing, comparison metrics
   src/run.rs            case-independent CPU / GPU iteration loops (`Monitor` = the stopping criteria), GPU-vs-CPU field difference
   src/ogive.rs          ogive-cylinder runners, wall post-processing (CD, Cp), comparison metrics
-  src/transonic.rs      `GpuTransonic`: GPU run of `bowshock_cfd::transonic::TransonicCase` (cold / warm-started Mach sweeps, same stop rules and post-processing as the CPU `run_on`)
+  src/transonic.rs      `GpuTransonic`: GPU run of `bowshock_cfd::transonic::TransonicCase` (cold / warm-started Mach sweeps, same stop rules and post-processing as the CPU `run_on`; scheme + low-Mach from the case)
+  src/subsonic.rs       `GpuSubsonic`: GPU run of `bowshock_cfd::subsonic::SubsonicCase` (base on/off, drag breakdown, base-pressure history; same stop rules and post-processing as the CPU `run_on`)
   src/bin/cone_gpu.rs   validation + benchmark driver (writes out/gpu/*.csv)
   src/bin/ogive_gpu.rs  ogive validation + benchmark driver (writes out/gpu_ogive/*.csv)
-  src/bin/transonic_gpu.rs  transonic Mach-sweep validation + benchmark driver (writes out/gpu_transonic/*.csv)
-  tests/gpu_vs_cpu.rs   cargo tests (face kernels f32 + df on random states, 20-iteration state comparison for every mode x precision (cone, ogive, transonic grids),
-                        400x200 residual history, small-grid regression test of the residual floor, characteristic far-field BC: free-stream preservation, perturbed state, transonic run + warm start)
+  src/bin/transonic_gpu.rs  transonic Mach-sweep validation + benchmark driver (writes out/gpu_transonic/*.csv; `--scheme implicit|explicit`)
+  src/bin/subsonic_gpu.rs   subsonic Mach-sweep (base on/off) + Fox TM X-2439 validation + benchmark driver (writes out/gpu_subsonic/*.csv)
+  tests/gpu_vs_cpu.rs   cargo tests (face kernels f32 + df on random states, low-Mach face kernels, 20-iteration state comparison for every mode x precision (cone, ogive, transonic grids),
+                        400x200 residual history, small-grid regression test of the residual floor, characteristic far-field BC: free-stream preservation, perturbed state, transonic run + warm start,
+                        base block (explicit), line-implicit scheme (sting + base, state after 30 it, short runs, converged state, transonic warm start), cold restart)
   examples/f32_cpu_emulation.rs  CPU experiment: f64 arithmetic with the state constrained to f32 (floor diagnosis)
   examples/f32_diag.rs           GPU experiment: update size vs ulp, f64 vs f32 evaluation of the GPU state, where the residual lives
   examples/f32_floor.rs          GPU experiment: f32 floor vs CFL
@@ -31,7 +36,8 @@ Run: `cargo test --release -p bowshock-gpu`, `cargo run --release --bin cone_gpu
 extended, GPU-guarded f32, GPU-guarded compensated}, steady benchmark, Luma launch-overhead + sync-interval studies; ~4 min; `--quick`
 skips 400x200, `--limiter minmod|vanalbada`, `--chunk K`, `--bench [--no-cpu]` only the timing studies),
 `cargo run --release --bin ogive_gpu [-- --quick] [--direct] [--no-bench] [--bench-only] [--limiter ..] [--chunk K]` (ogive-cylinder, M = 1.98, coarse / medium / fine; ~1.5 min),
-`cargo run --release --bin transonic_gpu [-- --quick | --level 0|1|2] [--body cone|karman|lvhaack|sqrt|ogive] [--mach m1,m2,..] [--warm] [--no-bench] [--bench-only] ...` (the Mach sweep of the CPU `transonic` bin, same options; minutes).
+`cargo run --release --bin transonic_gpu [-- --quick | --level 0|1|2] [--body cone|karman|lvhaack|sqrt|ogive] [--mach m1,m2,..] [--warm] [--scheme explicit|implicit] [--lowmach on|off] [--no-bench] [--bench-only] ...` (the Mach sweep of the CPU `transonic` bin, same options; minutes),
+`cargo run --release --bin subsonic_gpu [-- --quick | --level 0|1|2] [--body ogive|cone|karman|lvhaack|sqrt|parabola] [--mach 0.1,..] [--base on|off|both] [--warm] [--lowmach on|off] [--scheme implicit|explicit] [--no-cpu] [--no-bench] [--bench-only] [--validate]` (the Mach sweep of the CPU `subsonic` bin, same options; ~5 min on level 0, ~30 min on level 1).
 
 ## Design
 
@@ -39,11 +45,12 @@ skips 400x200, `--limiter minmod|vanalbada`, `--chunk K`, `--bench [--no-cpu]` o
   direct mode only), face fluxes `fi`/`fj`, residual `res`, plus `Array<f32>` `dt`, `rho_res` (stage-1 `d rho/dt`). The compensated and
   extended precisions add the low words `ulo`, `u0lo` (same layout), and (extended) the fluxes / primitives are stored as `(hi, lo)` pairs of vec4.
   Geometry is uploaded once from the bowshock-cfd grid (`bowshock_cfd::cone::build_solver(...).grid`): `iface`/`jface` =
-  `(nx, nr, len, len*r_mid)` per face (weight computed in f64, then rounded), `cell` = `(A, V, x_c, r_c)`.
-* **Uniform block** (`Params`, encase struct of scalars, 96 B) is passed with every launch (Luma copies it into its own
-  arena slot per launch): sizes, limiter code (0 first order during the 300-iteration start-up, 1 minmod, 2 van Albada),
-  RK stage and stage coefficients, CFL, free stream (f32 + its low words), BC codes, residual-history slot, and a runtime `zero` (see
-  "compiler pitfalls"). So iteration-dependent parameters need no extra upload and everything stays in one recorded batch.
+  `(nx, nr, len, len*r_mid)` per face (weight computed in f64, then rounded), `cell` = `(A, V, Cx, Cr)` where `(Cx, Cr)` is the closure defect of the cell's f32 face data (see "Geometry closure correction").
+* **Uniform block** (`Params`, encase struct of scalars, 128 B) is passed with every launch (Luma copies it into its own
+  arena slot per launch): sizes, limiter code (0 first order during the start-up, 1 minmod, 2 van Albada),
+  RK stage and stage coefficients, CFL, free stream (f32 + its low words), BC codes, residual-history slot, the low-Mach flag, the solid-block extents (`blk_i, blk_j, blk_s` = `Block {i_end, j_end, j_sting}`),
+  the implicit-scheme parameters (pseudo-time CFL of this iteration, entropy fix, flags, pass index) and a runtime `zero` (see
+  "compiler pitfalls"). So iteration-dependent parameters (also the implicit CFL ramp) need no extra upload and everything stays in one recorded batch.
 * **Two formulations** (`Mode`), same physics, same WGSL functions:
   * `Direct` — line-by-line mirror of `Solver::eval_residual`/`step`: per RK stage `prim` (cons→prim of interior cells),
     `ghost` (BC fill, 2 layers), `flux_i`, `flux_j` (`face_flux` per face), `residual` (cell residual, stage 1 also `dt`
@@ -73,9 +80,28 @@ skips 400x200, `--limiter minmod|vanalbada`, `--chunk K`, `--bench [--no-cpu]` o
   from `bowshock_cfd::flux::SHOCK_SENSOR_LO/HI` when the WGSL source is generated (the df code has them, `GAMMA`, `GAMMA-1`, `1/(GAMMA-1)` and
   the van Albada eps as f64-rounded hi/lo constants).
 * **Boundary conditions** (`Config::bc` = `[imin, imax, jmin, jmax]`, converted per launch to the `bc0..bc3` uniforms; the solver is case-independent and takes any structured axisymmetric `bowshock_cfd::grid::Grid`: cone, ogive,
-  large-domain transonic grid): `Freestream` (0), `Extrapolate` (1), `SlipWall` (2, also the axis), `Characteristic` (3, Riemann-invariant far field of `bowshock_cfd::bc`) and `PressureOutflow` (4). The ghost-state functions get the
+  large-domain transonic grid, base/wake grid): `Freestream` (0), `Extrapolate` (1), `SlipWall` (2, also the axis), `Characteristic` (3, Riemann-invariant far field of `bowshock_cfd::bc`) and `PressureOutflow` (4). The ghost-state functions get the
   outward-normal sign of their boundary (`-1` for imin/jmin, `+1` for imax/jmax). The characteristic ghost depends on the first interior cell only (both ghost layers get the same state), so it is computed lazily by the guarded kernels like the
   other BCs; in the extended precision it is evaluated in df (no `pow`: `rho = rho_ref (c_b/c_ref)^5` for gamma = 1.4). Mach number sweeps change the free stream between runs without touching the state (`GpuSolver::config_mut`).
+* **Low-Mach correction** (`GpuSolver::set_low_mach`, `Params::low_mach`; mirrors `flux::low_mach_states` / `face_flux_lm`): after the MUSCL reconstruction the jump of the face-normal velocity between the left and right state is scaled by
+  `z = clamp(max(M_L, M_R), 0.05, 1)` before HLLC / Rusanov (Thornber et al. 2008). WGSL `low_mach_states`, `reconstruct_lm` (f32) and `dlow_mach_states`, `dreconstruct_lm` (df) inside `face_flux` / `dface_flux`; with the flag off the kernels are the previous ones.
+* **Solid block (base / wake grids)** (`GpuSolver::set_block`, `Params::blk_*`; mirrors `Solver::block`, `eval_residual`): cells `i < i_end && j < j_end` (body) and `i >= i_end && j < j_sting` (sting) are never updated and never enter the residual norm
+  (`n_active`, the history is `sqrt(sum rho_res^2 / n_active)`); in the guarded flux kernel (f32 and df): zero flux inside the block, the solid cells below the body / sting surface are the mirror image of the fluid cells above it (`prim_j`, = `fill_block_ghosts`),
+  and the base-wall face `i = i_end` and its neighbour build their solid stencil cells on the fly as the reflection of the fluid cells about the base-wall normal (the two corner cells need different mirrors for the two directions, hence not stored). Guarded formulation only.
+* **Line-implicit convergence scheme** (`GpuSolver::set_scheme(Scheme::Implicit(ImplicitParams))`, `from_host` takes it from the host `Solver`; mirrors `bowshock_cfd::implicit`, `shaders_impl.rs`; guarded formulation only; multigrid and implicit residual smoothing of the CPU crate are not ported:
+  they measured worse there). One iteration = 14 launches with the default `sub_iters = 3` (flux, residual, `hist_final`, 2 block assemblies, 2 line solves, then per extra pass `apply` + 2 line solves, update):
+  1. `flux_ext` / `flux_guarded`: face fluxes of the second-order scheme (the explicit kernels, unchanged);
+  2. `residual_store(_ext)`: cell residual (df sum collapsed to f32 `res`), pseudo-time step `dt = CFL A / (L_i + L_j)` with the CFL of this iteration (`cfl0 · growth^k` up to `cfl_max`, `k` = iterations since the last `reset` / `restart_ramp`), `rho_res`, workgroup partial sums; `hist_final`;
+  3. `assemble_i`, `assemble_j` (`[nj, ni]`, `[ni, nj]`): the 4x4 blocks `lo, d, up` of `I - dt J_dir` per cell from the first-order flux Jacobians with the Roe-type dissipation `|A|` (quadratic polynomial through the three eigenvalues, entropy fix 0.1 c) blended to `lambda I` with the face-flux shock weight,
+     the axisymmetric pressure-source Jacobian in the j factor, and the ghost-state Jacobians `T = dU_ghost/dU` (exact for free stream / extrapolation / slip wall and for the reflection of the solid block, central difference for `Characteristic` and `PressureOutflow`) added to the first / last block of every line. All f32 (only the left-hand side);
+  4. `line_i`, `line_j`: block-tridiagonal Thomas algorithm, one thread per line (`nj` i lines, `ni` j lines; lines of the solid block start at its fluid cells): pass 0 factorises (stores `minv = inverse of the pivot block`, `ys = minv · up`) and solves `(I - dt J_i) X = dt R`, then `(I - dt J_j) dU = X`;
+  5. `sub_iters - 1` defect-correction passes against the unfactored operator: `apply` forms `x = dt R - (A_i dU + A_j dU - dU)` from the stored blocks, `line_i`, `line_j` solve with the stored factors and add to `dU`;
+  6. `implicit_update`: `U += alpha dU` with the positivity damping of the CPU (halve `alpha` up to 7 times until rho, p > 0), in the compensated precisions with the error-free `df_add`.
+  The residual `R` is evaluated in the arithmetic of the selected precision (df in `Extended`), the left-hand side only steers the iteration, so the fixed point is that of the explicit scheme (`implicit_scheme_converged_state_matches_cpu`: the explicit GPU residual of the implicit solution is at the converged level). Blocks are stored as four column vec4 (Luma arrays hold vec4 at most) in
+  10 work arrays of `4 ni nj` vec4; i-line blocks are stored transposed (`i nj + j`) so that neighbouring threads (= neighbouring lines) read neighbouring blocks.
+* **Geometry closure correction** (`Extended` precision): the f32 face weights / normals of a cell do not satisfy `sum_f w n = (0, A)` exactly (relative error 6e-8), so a perfectly uniform flow has a spurious residual of order `p · 6e-8 · w / V`, large in
+  the high-aspect-ratio cells of the large-domain grids near the axis and in the far field (residual `1e-8` in `d rho / dt` units there). The host sums the defect `(Cx, Cr) = sum_f w n - (0, A)` of every cell in f64 from the very f32 numbers the GPU uses and stores it in `cell.zw` (the former `x_c, r_c`, unused by the kernels); the extended residual kernels add `Fx Cx + Fr Cr`
+  (`dgeo_corr`: the Euler flux of the cell state for unit normals in x and r) to the flux sum, i.e. they cancel the effect of the rounding on a uniform flow to df accuracy. Effect: the GPU residual floor on the subsonic cases fell from `1.5e-8` to `1.7e-10` (the CPU's own floor, 2e-10), and the GPU–CPU agreement of every extended-precision test improved (below).
 
 ## Kernel list
 
@@ -92,12 +118,17 @@ skips 400x200, `--limiter minmod|vanalbada`, `--chunk K`, `--bench [--no-cpu]` o
 | `hist_final` | `[256]` | `density_residual` per iteration | guarded |
 | `prim_ext`, `ghost_ext`, `flux_i_ext`, `flux_j_ext`, `residual_ext` | as the f32 kernels | the same functions in df; `update` is the compensated one | direct, extended |
 | `flux_ext`, `residual_update_ext` | as `flux_guarded`, `residual_update` | the same functions in df | guarded, extended |
+| `residual_store`, `residual_store_ext` | `[ni, nj]` | `eval_residual` + `compute_dt` (implicit: residual stored, `dt` of the pseudo-time CFL, workgroup partial sums) | implicit |
+| `assemble_i`, `assemble_j` | `[nj, ni]`, `[ni, nj]` | `implicit::assemble` (`cell_blocks`, `abs_jacobian`, `ghost_jacobian`) | implicit |
+| `line_i`, `line_j` | `[nj]`, `[ni]` | `implicit::solve_lines` (`block_thomas`), pass 0 factorises, later passes reuse the factors | implicit |
+| `apply` | `[ni, nj]` | `implicit::apply_factor` + defect `dt R - (A_i dU + A_j dU - dU)` | implicit |
+| `implicit_update` | `[ni, nj]` | update of `implicit::step` with positivity damping | implicit |
 | `face_test`, `face_test_ext` | `[n]` | test only: reconstruct / HLLC / `face_flux` on arbitrary states (f32 / df) | tests |
 
 WGSL functions (COMMON): `cons_to_prim`, `sound_speed`, `physical_flux`, `reflect_wall`, `ghost_state`, `limited_slope`
 (first order / minmod / van Albada), `reconstruct` (with the positivity fallback), `hllc`, `rusanov`, `shock_weight`, `face_flux`; `df_add` (compensated
 state update). `shaders_ext`: df arithmetic `ts/qts/tp/dadd/dsub/dmul/dmulf/ddiv/dsqrt/dmin/dmax/dabs` and the df versions `dcons_to_prim`, `dslope`,
-`dreconstruct`, `dhllc`, `drusanov`, `dshock_weight`, `dface_flux`.
+`dreconstruct`, `dhllc`, `drusanov`, `dshock_weight`, `dface_flux`, `dlow_mach_states`, `dreconstruct_lm`, `dgeo_corr`. `shaders_impl`: `inv4`, `flux_jacobian`, `abs_jacobian`, `reflection`, `ghost_jac`, `cell_blocks`.
 Far-field BCs (COMMON, f32): `characteristic_ghost`, `pressure_outflow_ghost`, `far_ghost` (ghost states of `bowshock_cfd::bc`; `ghost_state` dispatches on the BC code); df versions in `shaders_ext`: `dcharacteristic_ghost`, `dpressure_outflow_ghost`, `dfar_ghost`.
 
 ## Results
@@ -593,9 +624,14 @@ builtin (renamed `reflect_wall`); `workgroupBarrier()` must be in uniform contro
 * `Precision::Extended` depends on the driver honouring the opaque-identity workaround (`opq`, see "Compiler pitfalls"); it was verified on the RTX 3090 / Vulkan only, and
   `extended_face_kernels_match_cpu_to_1e9` is the canary on other devices or driver versions. It also needs `fma` to be a true fused multiply-add (two-product).
 * The extended GPU operator uses f32 geometry (face normals, weights, cell area/volume: converted from the f64 grid once), so it differs from the CPU operator by ≈ 6e-8 relative; the
-  GPU converges its own discrete problem (hence 1e-6-level field differences and residuals of the CPU operator evaluated on the GPU state of 8e-6 … 3e-5, see "The f32 residual floor"). Uploading the geometry as hi/lo pairs would remove it; not needed for the 6-orders target.
-* The GPU solver mirrors bowshock-cfd as of its SSP-RK3 + HLLC/Rusanov-blend version (`flux::face_flux`, `Solver::step`/`stage`); BCs, limiters, grid and
-  first-order start-up are as before.
+  GPU converges its own discrete problem. Before M2 this showed as 1e-6-level field differences and residuals of the CPU operator evaluated on the GPU state of 8e-6 … 3e-5 (see "The f32 residual floor") and, on the large-domain subsonic grids, as a residual floor of 1.5e-8 that
+  stopped the GPU at 5.4 – 5.7 of 6 orders. M2 adds the first-order correction of the geometry's closure defect ("Geometry closure correction"): it removes the residual floor of a uniform flow (floor 1.7e-10 = the CPU's), the iteration counts of the GPU now equal the CPU's, and every
+  extended-precision GPU–CPU comparison improved 2 – 10x (cone / ogive / transonic tests and runs). What remains is the second-order effect of the f32 geometry on non-uniform flow (≈ 1e-7). Uploading the geometry as hi/lo pairs would remove it as well.
+* The GPU solver mirrors bowshock-cfd as of its SSP-RK3 + HLLC/Rusanov-blend version (`flux::face_flux`, `Solver::step`/`stage`) plus the M2 additions (`flux::face_flux_lm`, `Solver::block`, `Scheme::Implicit`); BCs, limiters, grid and
+  first-order start-up are as before. Multigrid and implicit residual smoothing (`Scheme::Multigrid`, `Scheme::Smoothed`) are not ported (`GpuSolver::set_scheme` returns an error): they measured worse than the line-implicit scheme on the CPU.
+* The implicit scheme exists in the guarded formulation only (`set_scheme` / `set_block` return an error for `Mode::Direct`). Its left-hand side is assembled in f32 and the 4x4 blocks are inverted without pivoting (the pivot blocks `I - dt J` are diagonally dominant); the CPU uses f64 and pivoted
+  Gauss-Jordan. Both converge to the same fixed point; the iterates differ at the 1e-7 level and a nonlinear transient (shock formation, base-flow unsteadiness) amplifies that, so the GPU / CPU residual histories of the *unsteady* base-flow runs and of long transonic transients agree only until
+  the residual has dropped 3 – 4 orders (tests compare the short transients and the converged states).
 * `ogive.rs` / `transonic.rs` / `run.rs`: the CPU runs use the public `Solver::step` / `transonic::run_on` stopping rules (`run::Monitor` = `run_ogive`'s criteria; the transonic GPU loop calls
   `bowshock_cfd::transonic::stop_reason`, the very function `run_on` uses, and `finish` for the post-processing, so both sides stop and post-process identically); the ogive wall post-processing is a copy of the private
   `bowshock_cfd::ogive::postprocess`. The transonic GPU loop samples the forebody CD every 50 iterations and therefore synchronises every `transonic::SYNC` = 50 iterations (the CPU's sampling interval).

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "CPU reference 2D axisymmetric Euler solver (HLLC + MUSCL + SSP-RK2) used to validate Luma GPU kernels"
+description = "CPU reference 2D axisymmetric Euler solver (HLLC + MUSCL, SSP-RK3 / line-implicit) used to validate Luma GPU kernels"
 
 [lib]
 name = "bowshock_cfd"
@@ -21,6 +21,10 @@ path = "src/bin/ogive.rs"
 [[bin]]
 name = "transonic"
 path = "src/bin/transonic.rs"
+
+[[bin]]
+name = "subsonic"
+path = "src/bin/subsonic.rs"
 
 [dependencies]
 rayon = "1"

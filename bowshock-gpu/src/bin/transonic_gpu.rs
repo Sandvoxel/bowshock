@@ -4,14 +4,16 @@
 //!
 //! Usage: `cargo run --release --bin transonic_gpu -- [--body cone|karman|lvhaack|sqrt|ogive] [--level 0|1|2] [--quick]
 //!   [--mach 0.8,0.9,...] [--warm] [--domain <body lengths>] [--max-iter N] [--drop <orders>] [--outflow pressure]
-//!   [--limiter minmod|vanalbada] [--tag name] [--no-bench]`
+//!   [--limiter minmod|vanalbada] [--scheme explicit|implicit] [--lowmach on|off] [--tag name] [--no-bench] [--bench-only]`
+//! `--scheme implicit` = the line-implicit convergence scheme of `bowshock-cfd` (`bowshock_gpu::shaders_impl`; default limiter then van Albada).
 //! The options and defaults are those of the CPU bin (`--quick` = grid level 0; default level 1; 12 Mach numbers 0.7 ... 1.5;
 //! cold start for every Mach number, `--warm` = start from the previous converged field). Every Mach number is run by the CPU and by
 //! the GPU with the same procedure and stopping rules. The GPU synchronises every 50 iterations (the CD sampling interval).
 //! Output: `out/gpu_transonic/`.
 
 use bowshock_cfd::flux::Limiter;
-use bowshock_cfd::solver::Bc;
+use bowshock_cfd::implicit::ImplicitParams;
+use bowshock_cfd::solver::{Bc, Scheme};
 use bowshock_cfd::transonic::{named_body, run_on, stoney, tangent_cone_cd, TransonicCase, TransonicResult};
 use bowshock_gpu::transonic::{GpuTransonic, GpuTransonicRun, SYNC};
 use bowshock_gpu::{Mode, Precision};
@@ -65,6 +67,7 @@ fn write_case_files(dir: &Path, tag: &str, r: &Row) {
 /// Returns `(cpu_us, guarded_ext_us, direct_ext_us, guarded_f32_us)`.
 fn perf(case: &TransonicCase) -> (f64, f64, f64, f64) {
     let n = 1000usize;
+    let implicit = matches!(case.scheme, Scheme::Implicit(_));
     let mut case = case.clone();
     case.first_order_iters = 0;
     let mut best_cpu = f64::INFINITY;
@@ -79,8 +82,11 @@ fn perf(case: &TransonicCase) -> (f64, f64, f64, f64) {
         }
         best_cpu = best_cpu.min(1e6 * t0.elapsed().as_secs_f64() / n as f64);
     }
-    let mut gpu = [0.0f64; 3];
+    let mut gpu = [f64::NAN; 3];
     for (m, (mode, prec)) in [(Mode::Guarded, Precision::Extended), (Mode::Direct, Precision::Extended), (Mode::Guarded, Precision::F32)].into_iter().enumerate() {
+        if implicit && mode == Mode::Direct {
+            continue; // the line-implicit scheme exists in the guarded formulation only
+        }
         let mut gt = GpuTransonic::new(&case, mode, prec).unwrap();
         gt.gpu.run(1).unwrap();
         let mut best = f64::INFINITY;
@@ -110,8 +116,15 @@ fn main() {
         Some(l) => l.split(',').map(|v| v.parse().expect("Mach list")).collect(),
         None => DEFAULT_MACH.to_vec(),
     };
-    let limiter = if arg(&args, "--limiter") == Some("vanalbada") { Limiter::VanAlbada } else { Limiter::Minmod };
-    let tag = arg(&args, "--tag").map(String::from).unwrap_or_else(|| format!("{body_name}_L{level}{}", if warm { "_warm" } else { "" }));
+    let implicit = arg(&args, "--scheme") == Some("implicit");
+    let limiter = match arg(&args, "--limiter") {
+        Some("vanalbada") => Limiter::VanAlbada,
+        Some("minmod") => Limiter::Minmod,
+        _ if implicit => Limiter::VanAlbada,
+        _ => Limiter::Minmod,
+    };
+    let low_mach = arg(&args, "--lowmach") == Some("on");
+    let tag = arg(&args, "--tag").map(String::from).unwrap_or_else(|| format!("{body_name}_L{level}{}{}", if implicit { "_imp" } else { "" }, if warm { "_warm" } else { "" }));
     let out_dir: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("out").join("gpu_transonic");
     fs::create_dir_all(&out_dir).expect("create out dir");
 
@@ -119,6 +132,11 @@ fn main() {
         let cyl = 6.0;
         let mut c = TransonicCase::with_body(m, level, body, cyl);
         c.limiter = limiter;
+        c.low_mach = low_mach;
+        if implicit {
+            c.scheme = Scheme::Implicit(ImplicitParams::DEFAULT);
+            c.first_order_iters = 100;
+        }
         if let Some(v) = arg(&args, "--max-iter").and_then(|v| v.parse().ok()) {
             c.max_iter = v;
         }

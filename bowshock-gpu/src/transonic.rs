@@ -47,7 +47,7 @@ impl GpuTransonic {
     pub fn new(case: &TransonicCase, mode: Mode, prec: Precision) -> Result<GpuTransonic> {
         let host = case.build_solver();
         let t0 = Instant::now();
-        let gpu = GpuSolver::new_with(&luma::default_context()?, &host.grid, &host.cfg, mode, prec)?;
+        let gpu = GpuSolver::from_host(&luma::default_context()?, &host, mode, prec)?;
         Ok(GpuTransonic { gpu, host, setup_seconds: t0.elapsed().as_secs_f64() })
     }
 
@@ -67,10 +67,13 @@ impl GpuTransonic {
             cfg.limiter = case.limiter;
             cfg.first_order_iters = case.first_order_iters;
         }
+        self.host.low_mach = case.low_mach;
+        self.gpu.set_low_mach(case.low_mach);
         if warm {
             self.gpu.iter = case.first_order_iters;
+            self.gpu.restart_ramp(); // implicit scheme: CFL ramp restarts at every Mach number
         } else {
-            self.gpu.reset()?; // free stream of `case.mach`, iteration 0
+            self.gpu.reset()?; // free stream of `case.mach`, iteration 0, ramp restarted
         }
         self.gpu.context().sync()?;
 

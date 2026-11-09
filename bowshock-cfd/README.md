@@ -21,6 +21,12 @@ bowshock/
   bowshock-cfd/src/body_grid.rs   large-domain stretched grid for nose-cylinder bodies (ogive, cone, power/parabolic/Haack noses)
   bowshock-cfd/src/transonic.rs   transonic case runner, post-processing, Stoney (RM L53K17) and Czarnecki-Monta (TN D-3516) data
   bowshock-cfd/src/bin/transonic.rs   transonic Mach sweep driver -> out/transonic/
+  bowshock-cfd/src/implicit.rs    line-implicit (block-tridiagonal, approximate-factorization) pseudo-time scheme, Jacobians, ghost-state linearisation   <- convergence kernels
+  bowshock-cfd/src/multigrid.rs   FAS multigrid (measured, not selected: see "Subsonic")
+  bowshock-cfd/src/potential.rs   incompressible axisymmetric potential flow (axial source method) + Goethert rule: independent subsonic reference
+  bowshock-cfd/src/subsonic.rs    subsonic case runner (sting / flat base + wake), drag breakdown, NASA TM X-2439 data
+  bowshock-cfd/src/bin/subsonic.rs   subsonic Mach sweep, TM X-2439 validation, low-Mach study -> out/subsonic/
+  bowshock-cfd/examples/accel.rs  convergence-scheme comparison driver (one case, one scheme, residual history)
   bowshock-cfd/examples/diag.rs   convergence diagnostics (per-cell residual map -> out/diag/)
   out/                       CSV output of `cone`
 ```
@@ -119,6 +125,10 @@ cargo run --release --bin cone -- --limiter vanalbada [--mach 2.5]
 cargo run --release -p bowshock-cfd --example diag -- 10 200 100 minmod 8000   # residual map -> out/diag/
 cargo run --release --bin ogive -- --sweep  # ogive-cylinder validation M=1.98 (+ Mach sweep), ≈7 min; --quick skips the fine grid
 cargo run --release --bin transonic -- --body ogive --level 1   # transonic Mach sweep 0.7 – 1.5 -> out/transonic/ (see "Transonic")
+cargo run --release --bin subsonic -- --quick            # M = 0.1 ... 0.8, base on/off, level 0 -> out/subsonic/ (see "Subsonic")
+cargo run --release --bin subsonic -- --validate         # NASA TM X-2439 bodies at M = 0.404 / 0.608 / 0.831
+cargo run --release --bin subsonic -- --lowmach-study    # low-Mach correction on/off vs potential flow, M = 0.1 ... 0.5
+cargo run --release --example accel -- ogive 0 0.5 imp   # convergence-scheme driver (explicit | irs | mg | pt | imp)
 ```
 
 CSV files go to `out/`: `cp_<angle>deg_<ni>x<nj>_<limiter>.csv` (x/L, p/p∞, Cp from the wall-extrapolated

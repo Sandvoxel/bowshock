@@ -4,14 +4,16 @@
 //!
 //! Usage: `cargo run --release --bin transonic -- [--body cone|karman|lvhaack|sqrt|parabola|ogive] [--level 0|1|2] [--quick]
 //!   [--mach 0.8,0.9,...] [--warm] [--domain <body lengths>] [--max-iter N] [--drop <orders>] [--cd-tol <abs CD>]
-//!   [--outflow pressure] [--limiter minmod|vanalbada] [--tag name]`
+//!   [--outflow pressure] [--limiter minmod|vanalbada] [--scheme explicit|implicit] [--lowmach on|off] [--tag name]`
+//! `--scheme implicit` = line-implicit convergence acceleration (default limiter then van Albada; explicit SSP-RK3 + minmod stays the default).
 //! The ogive body is also compared with the NASA TN D-3516 surface-pressure data (M = 0.7, 0.9, 1.0, 1.1, 1.2).
 //!
 //! `--quick` = grid level 0. `--warm` = start every Mach number from the previous converged field (ascending order).
 //! Output: `out/transonic/` (`sweep_<tag>.csv`, `compare_<tag>.csv`, `cp_<tag>_M<m>.csv`, `residual_<tag>_M<m>.csv`, `tables_<tag>.md`).
 
 use bowshock_cfd::flux::Limiter;
-use bowshock_cfd::solver::Bc;
+use bowshock_cfd::implicit::ImplicitParams;
+use bowshock_cfd::solver::{Bc, Scheme};
 use bowshock_cfd::ogive::wall_cp_at;
 use bowshock_cfd::transonic::{named_body, run_on, stoney, tangent_cone_cd, TransonicCase, TransonicResult};
 use std::fmt::Write as _;
@@ -37,8 +39,15 @@ fn main() {
         Some(l) => l.split(',').map(|v| v.parse().expect("Mach list")).collect(),
         None => DEFAULT_MACH.to_vec(),
     };
-    let limiter = if arg(&args, "--limiter") == Some("vanalbada") { Limiter::VanAlbada } else { Limiter::Minmod };
-    let tag = arg(&args, "--tag").map(String::from).unwrap_or_else(|| format!("{body_name}_L{level}{}", if warm { "_warm" } else { "" }));
+    let implicit = arg(&args, "--scheme") == Some("implicit");
+    let limiter = match arg(&args, "--limiter") {
+        Some("vanalbada") => Limiter::VanAlbada,
+        Some("minmod") => Limiter::Minmod,
+        _ if implicit => Limiter::VanAlbada, // minmod stalls ~4.5 orders with the implicit scheme (README, "Subsonic")
+        _ => Limiter::Minmod,
+    };
+    let low_mach = arg(&args, "--lowmach") == Some("on");
+    let tag = arg(&args, "--tag").map(String::from).unwrap_or_else(|| format!("{body_name}_L{level}{}{}", if implicit { "_imp" } else { "" }, if warm { "_warm" } else { "" }));
     let out_dir: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("out").join("transonic");
     fs::create_dir_all(&out_dir).expect("create out dir");
 
@@ -46,6 +55,11 @@ fn main() {
         let cyl = 6.0;
         let mut c = TransonicCase::with_body(m, level, body, cyl);
         c.limiter = limiter;
+        c.low_mach = low_mach;
+        if implicit {
+            c.scheme = Scheme::Implicit(ImplicitParams::DEFAULT);
+            c.first_order_iters = 100;
+        }
         if let Some(v) = arg(&args, "--max-iter").and_then(|v| v.parse().ok()) {
             c.max_iter = v;
         }
@@ -70,13 +84,14 @@ fn main() {
     let (ni, nj) = c0.cells();
     let lb = body.nose_length() + c0.grid.cyl_length;
     println!(
-        "bowshock-cfd transonic: body {body_name} (nose l/d {:.3}, tip half angle {:.2} deg), grid L{level} {ni}x{nj}, upstream {:.0} d / radial {:.0} d / downstream {:.0} d (body length {:.1} d), limiter {limiter:?}, outflow {:?}, {}",
+        "bowshock-cfd transonic: body {body_name} (nose l/d {:.3}, tip half angle {:.2} deg), grid L{level} {ni}x{nj}, upstream {:.0} d / radial {:.0} d / downstream {:.0} d (body length {:.1} d), limiter {limiter:?}, scheme {}, low-Mach {low_mach}, outflow {:?}, {}",
         body.nose_length(),
         body.tip_half_angle().to_degrees(),
         c0.grid.x_up,
         c0.grid.r_far,
         c0.grid.x_down,
         lb,
+        if implicit { "line-implicit" } else { "explicit SSP-RK3" },
         c0.outflow,
         if warm { "warm-start sweep" } else { "cold start for every Mach" }
     );

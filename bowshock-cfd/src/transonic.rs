@@ -9,7 +9,7 @@ use crate::body_grid::{large_domain_grid, Body, LargeGridParams, Nose};
 use crate::flux::Limiter;
 use crate::gas::{cons_to_prim, freestream, sound_speed};
 use crate::ogive::WallPoint;
-use crate::solver::{Bc, Config, Solver};
+use crate::solver::{Bc, Config, Scheme, Solver};
 
 #[derive(Clone, Debug)]
 pub struct TransonicCase {
@@ -29,6 +29,10 @@ pub struct TransonicCase {
     pub cd_tol: f64,
     /// Boundary condition of the outflow plane (`Bc::Characteristic` or `Bc::PressureOutflow`).
     pub outflow: Bc,
+    /// Convergence scheme (`Scheme::Explicit` = SSP-RK3 as before).
+    pub scheme: Scheme,
+    /// Low-Mach correction of the reconstructed states (`flux::low_mach_states`).
+    pub low_mach: bool,
 }
 
 impl TransonicCase {
@@ -67,6 +71,8 @@ impl TransonicCase {
             cd_window: 2000,
             cd_tol: 2e-4,
             outflow: Bc::Characteristic,
+            scheme: Scheme::Explicit,
+            low_mach: false,
         }
     }
 
@@ -83,7 +89,10 @@ impl TransonicCase {
             bc: [Bc::Characteristic, self.outflow, Bc::SlipWall, Bc::Characteristic],
             first_order_iters: self.first_order_iters,
         };
-        Solver::new(large_domain_grid(&self.grid), cfg)
+        let mut s = Solver::new(large_domain_grid(&self.grid), cfg);
+        s.low_mach = self.low_mach;
+        s.set_scheme(self.scheme);
+        s
     }
 }
 
@@ -164,6 +173,8 @@ pub fn run_on(case: &TransonicCase, s: &mut Solver, warm: bool, r_ref: Option<f6
     s.cfg.limiter = case.limiter;
     s.cfg.first_order_iters = case.first_order_iters;
     s.iter = if warm { case.first_order_iters } else { 0 };
+    s.low_mach = case.low_mach;
+    s.restart_ramp();
 
     let mut residual = Vec::new();
     let mut cd_hist: Vec<(usize, f64)> = Vec::new();

@@ -22,6 +22,10 @@ path = "src/bin/ogive_gpu.rs"
 name = "transonic_gpu"
 path = "src/bin/transonic_gpu.rs"
 
+[[bin]]
+name = "subsonic_gpu"
+path = "src/bin/subsonic_gpu.rs"
+
 [dependencies]
 luma = { git = "https://github.com/flipnoteman/Luma.git", branch = "main" }
 bowshock-cfd = { path = "../bowshock-cfd" }

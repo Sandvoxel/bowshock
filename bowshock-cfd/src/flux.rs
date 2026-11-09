@@ -194,6 +194,61 @@ pub fn face_flux(m2: &Prim, m1: &Prim, p0: &Prim, p1: &Prim, lim: Limiter, nx: f
     out
 }
 
+/// Lower bound of the low-Mach scaling factor `z` in [`low_mach_states`].
+pub const LOW_MACH_FLOOR: f64 = 0.05;
+
+/// Low-Mach correction of the reconstructed face states (Thornber et al., "An improved reconstruction method for
+/// compressible flows with low Mach number features", J. Comput. Phys. 227 (2008) 4873): the jump of the face-normal
+/// velocity between the left and right state is scaled by `z = min(max(M_L, M_R), 1)` (`M = |V|/c` of the reconstructed
+/// states, floored at [`LOW_MACH_FLOOR`]):
+///
+/// ```text
+/// u_n,L' = u_n,avg + z (u_n,L - u_n,avg),     u_n,R' = u_n,avg + z (u_n,R - u_n,avg)
+/// ```
+///
+/// Without it the dissipation of an upwind Riemann solver contains a pressure term `~ rho c Delta u_n` that is `O(1/M)`
+/// larger than the dynamic pressure, so the pressure field degrades as `M -> 0` (and its error does not vanish with
+/// the mesh at fixed `M`). Only the normal velocity is touched (tangential velocity, density and pressure are unchanged),
+/// so a uniform state, a stationary contact and any state with `u_n,L = u_n,R` are unchanged; `z = 1` for `M >= 1`, i.e.
+/// the correction is inactive in supersonic regions. `p`, `rho` and the tangential velocity are not modified.
+#[inline]
+pub fn low_mach_states(l: &Prim, r: &Prim, nx: f64, nr: f64) -> (Prim, Prim) {
+    let unl = l[1] * nx + l[2] * nr;
+    let unr = r[1] * nx + r[2] * nr;
+    let ml = (l[1] * l[1] + l[2] * l[2]).sqrt() / (GAMMA * l[3] / l[0]).sqrt();
+    let mr = (r[1] * r[1] + r[2] * r[2]).sqrt() / (GAMMA * r[3] / r[0]).sqrt();
+    let z = ml.max(mr).clamp(LOW_MACH_FLOOR, 1.0);
+    if z >= 1.0 {
+        return (*l, *r);
+    }
+    let avg = 0.5 * (unl + unr);
+    let dl = avg + z * (unl - avg) - unl;
+    let dr = avg + z * (unr - avg) - unr;
+    ([l[0], l[1] + dl * nx, l[2] + dl * nr, l[3]], [r[0], r[1] + dr * nx, r[2] + dr * nr, r[3]])
+}
+
+/// [`face_flux`] with the optional low-Mach correction [`low_mach_states`] applied to the reconstructed states before the
+/// Riemann solvers; `low_mach = false` is exactly [`face_flux`].
+#[inline]
+pub fn face_flux_lm(m2: &Prim, m1: &Prim, p0: &Prim, p1: &Prim, lim: Limiter, nx: f64, nr: f64, low_mach: bool) -> Cons {
+    if !low_mach {
+        return face_flux(m2, m1, p0, p1, lim, nx, nr);
+    }
+    let (l, r) = reconstruct(m2, m1, p0, p1, lim);
+    let (l, r) = low_mach_states(&l, &r, nx, nr);
+    let c = hllc(&l, &r, nx, nr);
+    let t = shock_weight(m1[3], p0[3]);
+    if t == 0.0 {
+        return c;
+    }
+    let f = rusanov(&l, &r, nx, nr);
+    let mut out = c;
+    for k in 0..4 {
+        out[k] = (1.0 - t) * c[k] + t * f[k];
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,5 +315,42 @@ mod tests {
         for c in 0..4 {
             assert!((f[c] - r[c]).abs() < 1e-14);
         }
+    }
+
+    #[test]
+    fn low_mach_flux_is_consistent_and_reduces_to_the_standard_flux() {
+        // F(U, U) = F(U) with the correction on (the normal-velocity jump is zero)
+        let w: Prim = [1.1, 0.04, -0.02, 0.8];
+        for k in 0..8 {
+            let (nr, nx) = (0.8 * k as f64).sin_cos();
+            let f = face_flux_lm(&w, &w, &w, &w, Limiter::VanAlbada, nx, nr, true);
+            let g = physical_flux(&w, nx, nr);
+            for c in 0..4 {
+                assert!((f[c] - g[c]).abs() <= 1e-13 * (1.0 + g[c].abs()), "{k} {c}");
+            }
+        }
+        // low_mach = false is exactly the standard kernel
+        let (a, b, c, d): (Prim, Prim, Prim, Prim) = ([1.0, 0.1, 0.0, 0.7], [1.01, 0.12, 0.01, 0.71], [1.02, 0.15, 0.02, 0.72], [1.04, 0.2, 0.0, 0.73]);
+        assert_eq!(face_flux_lm(&a, &b, &c, &d, Limiter::Minmod, 0.6, 0.8, false), face_flux(&a, &b, &c, &d, Limiter::Minmod, 0.6, 0.8));
+        // supersonic faces (M >= 1 on either side): z = 1, the states are unchanged -> bit-identical flux
+        let (l, r): (Prim, Prim) = ([1.0, 1.3, 0.0, 0.714], [1.1, 1.5, 0.1, 0.8]);
+        assert_eq!(low_mach_states(&l, &r, 1.0, 0.0), (l, r));
+        assert_eq!(face_flux_lm(&l, &l, &r, &r, Limiter::FirstOrder, 1.0, 0.0, true), face_flux(&l, &l, &r, &r, Limiter::FirstOrder, 1.0, 0.0));
+    }
+
+    #[test]
+    fn low_mach_scaling_reduces_the_normal_velocity_jump_only() {
+        let (l, r): (Prim, Prim) = ([1.0, 0.12, 0.05, 0.714], [1.0, 0.08, 0.05, 0.714]);
+        let (lm, rm) = low_mach_states(&l, &r, 1.0, 0.0);
+        let m_local = (0.12f64.hypot(0.05)) / (GAMMA * 0.714f64).sqrt();
+        // jump scaled by z = M_local, mean preserved, everything but u unchanged
+        assert!(((rm[1] - lm[1]) - m_local * (0.08 - 0.12)).abs() < 1e-14);
+        assert!((0.5 * (lm[1] + rm[1]) - 0.10).abs() < 1e-14);
+        assert_eq!((lm[0], lm[2], lm[3]), (l[0], l[2], l[3]));
+        assert_eq!((rm[0], rm[2], rm[3]), (r[0], r[2], r[3]));
+        // z is floored: a near-stagnant pair still keeps LOW_MACH_FLOOR of the jump
+        let (a, b): (Prim, Prim) = ([1.0, 1e-6, 0.0, 0.714], [1.0, -1e-6, 0.0, 0.714]);
+        let (am, bm) = low_mach_states(&a, &b, 1.0, 0.0);
+        assert!(((bm[1] - am[1]) - LOW_MACH_FLOOR * (-2e-6)).abs() < 1e-18);
     }
 }

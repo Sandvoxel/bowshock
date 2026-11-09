@@ -55,6 +55,7 @@ fn d_igm1() -> D { return D(IGM1_H, IGM1_L); }
 fn d_va_eps() -> D { return D(VAEPS_H, VAEPS_L); }
 fn d_sens_lo() -> D { return D(SLO_H, SLO_L); }
 fn d_sens_inv() -> D { return D(SINV_H, SINV_L); }
+fn d_lm_floor() -> D { return D(LMFLOOR_H, LMFLOOR_L); }
 
 fn w_from_f32(w: vec4<f32>) -> W { return W(dc(w.x), dc(w.y), dc(w.z), dc(w.w)); }
 
@@ -216,8 +217,29 @@ fn dshock_weight(pl: D, pr: D) -> D {
     return dmul(dmul(t, t), dsub(dc(3.0), dmulf(t, 2.0)));
 }
 
-fn dface_flux(m2: W, m1: W, p0: W, p1: W, lim: u32, nx: f32, nr: f32) -> C {
+// df translation of `low_mach_states` (`COMMON`): applied by `dreconstruct_lm` when `p.low_mach != 0`.
+fn dlow_mach_states(l: W, r: W, nx: f32, nr: f32) -> LR {
+    let unl = dun(l, nx, nr);
+    let unr = dun(r, nx, nr);
+    let ml = ddiv(dsqrt(dadd(dmul(l.u, l.u), dmul(l.v, l.v))), dsound(l));
+    let mr = ddiv(dsqrt(dadd(dmul(r.u, r.u), dmul(r.v, r.v))), dsound(r));
+    var z = dmax(ml, mr);
+    if (z.h >= 1.0) { return LR(l, r); }
+    if (dlt(z, d_lm_floor())) { z = d_lm_floor(); }
+    let avg = dmulf(dadd(unl, unr), 0.5);
+    let dl = dsub(dadd(avg, dmul(z, dsub(unl, avg))), unl);
+    let dr = dsub(dadd(avg, dmul(z, dsub(unr, avg))), unr);
+    return LR(W(l.r, dadd(l.u, dmulf(dl, nx)), dadd(l.v, dmulf(dl, nr)), l.p), W(r.r, dadd(r.u, dmulf(dr, nx)), dadd(r.v, dmulf(dr, nr)), r.p));
+}
+
+fn dreconstruct_lm(m2: W, m1: W, p0: W, p1: W, lim: u32, nx: f32, nr: f32) -> LR {
     let lr = dreconstruct(m2, m1, p0, p1, lim);
+    if (p.low_mach != 0u) { return dlow_mach_states(lr.l, lr.r, nx, nr); }
+    return lr;
+}
+
+fn dface_flux(m2: W, m1: W, p0: W, p1: W, lim: u32, nx: f32, nr: f32) -> C {
+    let lr = dreconstruct_lm(m2, m1, p0, p1, lim, nx, nr);
     let c = dhllc(lr.l, lr.r, nx, nr);
     let t = dshock_weight(m1.p, p0.p);
     if (t.h == 0.0) { return c; }
@@ -237,6 +259,21 @@ fn c_hi(c: C) -> vec4<f32> { return vec4<f32>(c.a.h, c.b.h, c.c.h, c.d.h); }
 fn c_lo(c: C) -> vec4<f32> { return vec4<f32>(c.a.l, c.b.l, c.c.l, c.d.l); }
 fn w_hi(w: W) -> vec4<f32> { return vec4<f32>(w.r.h, w.u.h, w.v.h, w.p.h); }
 fn w_lo(w: W) -> vec4<f32> { return vec4<f32>(w.r.l, w.u.l, w.v.l, w.p.l); }
+
+// Free-stream-preserving correction of the f32 geometry: `cl = (Cx, Cr, 0, 0)` of a cell is the closure defect of its f32 face data
+// (`Cx = sum_f w n_x`, `Cr = sum_f w n_r - A`, summed in f64 on the host, `GpuSolver::new_with`), which an exact geometry would not have;
+// `-(Fx Cx + Fr Cr) / V` is what a uniform flow would produce as a spurious residual (`Fx`, `Fr` = Euler flux for unit normals in x
+// and r). The returned `Fx Cx + Fr Cr` is added to the flux sum, i.e. the residual of a uniform flow is zero to df accuracy instead of
+// ~1e-7 (f32 rounding of the weights and normals).
+fn dgeo_corr(wc: W, cl: vec4<f32>) -> C {
+    let fx = dphys(wc, 1.0, 0.0);
+    let fr = dphys(wc, 0.0, 1.0);
+    return C(
+        dadd(dmulf(fx.a, cl.x), dmulf(fr.a, cl.y)),
+        dadd(dmulf(fx.b, cl.x), dmulf(fr.b, cl.y)),
+        dadd(dmulf(fx.c, cl.x), dmulf(fr.c, cl.y)),
+        dadd(dmulf(fx.d, cl.x), dmulf(fr.d, cl.y)));
+}
 "#;
 
 fn split(x: f64) -> (f32, f32) {
@@ -258,6 +295,7 @@ pub fn common_ext() -> String {
         c("VAEPS", 1e-14),
         c("SLO", bowshock_cfd::flux::SHOCK_SENSOR_LO),
         c("SINV", 1.0 / (bowshock_cfd::flux::SHOCK_SENSOR_HI - bowshock_cfd::flux::SHOCK_SENSOR_LO)),
+        c("LMFLOOR", bowshock_cfd::flux::LOW_MACH_FLOOR),
     ]
     .concat();
     format!("{}\n{}\n{}", crate::shaders::common(), consts, DD_TEMPLATE)
@@ -305,8 +343,14 @@ fn prim_i(i: i32, j: i32) -> W {
     return cell_prim(i, j);
 }
 
+// Cells below the body / sting surface of a solid block (j < col_start(i)): mirror image of the fluid cells above the surface.
 fn prim_j(i: i32, j: i32) -> W {
     let nj = i32(p.nj);
+    let j0 = i32(col_start(u32(i)));
+    if (j < j0 && j0 > 0) {
+        let f = jface[u32(j0) * p.ni + u32(i)];
+        return dreflect_wall(cell_prim(i, 2 * j0 - 1 - j), f.x, f.y);
+    }
     if (j < 0) {
         let k = -j;
         let f = jface[u32(i)];
@@ -330,6 +374,34 @@ fn prim_j(i: i32, j: i32) -> W {
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.y < p.nj) {
         if (gid.x > p.ni) { return; }
+        if (gid.y < p.blk_j) {
+            if (gid.y < p.blk_s || gid.x < p.blk_i) {
+                let k = gid.y * (p.ni + 1u) + gid.x;
+                fi[2u * k] = vec4<f32>(0.0);
+                fi[2u * k + 1u] = vec4<f32>(0.0);
+                return; // inside the body / sting
+            }
+            if (gid.x <= p.blk_i + 1u) {
+                // base wall (i = blk_i) and the face next to it: mirrored solid stencil cells (see `shaders::FLUX_GUARDED`)
+                let i = i32(gid.x);
+                let j = i32(gid.y);
+                let k = gid.y * (p.ni + 1u) + gid.x;
+                let fb = iface[gid.y * (p.ni + 1u) + p.blk_i];
+                let f = iface[k];
+                let p0 = prim_i(i, j);
+                let p1 = prim_i(i + 1, j);
+                var m1 = prim_i(i - 1, j);
+                var m2 = dreflect_wall(m1, fb.x, fb.y);
+                if (gid.x == p.blk_i) {
+                    m1 = dreflect_wall(p0, fb.x, fb.y);
+                    m2 = dreflect_wall(p1, fb.x, fb.y);
+                }
+                let c = dface_flux(m2, m1, p0, p1, p.limiter, f.x, f.y);
+                fi[2u * k] = c_hi(c);
+                fi[2u * k + 1u] = c_lo(c);
+                return;
+            }
+        }
         let i = i32(gid.x);
         let j = i32(gid.y);
         let k = gid.y * (p.ni + 1u) + gid.x;
@@ -340,6 +412,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else {
         let jr = gid.y - p.nj;
         if (gid.x >= p.ni || jr > p.nj) { return; }
+        if (jr < col_start(gid.x)) {
+            let k = jr * p.ni + gid.x;
+            fj[2u * k] = vec4<f32>(0.0);
+            fj[2u * k + 1u] = vec4<f32>(0.0);
+            return; // inside the body / sting
+        }
         let i = i32(gid.x);
         let j = i32(jr);
         let k = jr * p.ni + gid.x;
@@ -380,7 +458,7 @@ fn dsum(gl: D, wl: f32, gr: D, wr: f32, gb: D, wb: f32, gt: D, wt: f32, pa: D) -
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32,
         @builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
     var r2: f32 = 0.0;
-    if (gid.x < p.ni && gid.y < p.nj) {
+    if (gid.x < p.ni && gid.y < p.nj && !is_solid(gid.x, gid.y)) {
         let i = gid.x;
         let j = gid.y;
         let c = j * p.ni + i;
@@ -397,12 +475,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
         let gt = c_from(fj[2u * ((j + 1u) * p.ni + i)], fj[2u * ((j + 1u) * p.ni + i) + 1u]);
         let geo = cell[c];
         let inv_v = 1.0 / geo.y;
-        let z = dc(0.0);
+        let gc = dgeo_corr(wc, cell[c].zwxy);
         let s = vec4<f32>(
-            dsum(gl.a, fl.w, gr.a, fr.w, gb.a, fb.w, gt.a, ft.w, z).h,
-            dsum(gl.b, fl.w, gr.b, fr.w, gb.b, fb.w, gt.b, ft.w, z).h,
-            dsum(gl.c, fl.w, gr.c, fr.w, gb.c, fb.w, gt.c, ft.w, dmulf(wc.p, geo.x)).h,
-            dsum(gl.d, fl.w, gr.d, fr.w, gb.d, fb.w, gt.d, ft.w, z).h);
+            dsum(gl.a, fl.w, gr.a, fr.w, gb.a, fb.w, gt.a, ft.w, gc.a).h,
+            dsum(gl.b, fl.w, gr.b, fr.w, gb.b, fb.w, gt.b, ft.w, gc.b).h,
+            dsum(gl.c, fl.w, gr.c, fr.w, gb.c, fb.w, gt.c, ft.w, dadd(dmulf(wc.p, geo.x), gc.c)).h,
+            dsum(gl.d, fl.w, gr.d, fr.w, gb.d, fb.w, gt.d, ft.w, gc.d).h);
         let res = s * inv_v;
         if (p.stage == 1u) {
             rho_res[c] = res.x;
@@ -450,8 +528,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (s >= p.ni) { return; }
     let m2 = w_from_f32(states[4u * s]); let m1 = w_from_f32(states[4u * s + 1u]);
     let p0 = w_from_f32(states[4u * s + 2u]); let p1 = w_from_f32(states[4u * s + 3u]);
-    let lr = dreconstruct(m2, m1, p0, p1, p.limiter);
     let n = normals[s];
+    let lr = dreconstruct_lm(m2, m1, p0, p1, p.limiter, n.x, n.y);
     let h = dhllc(lr.l, lr.r, n.x, n.y);
     let f = dface_flux(m2, m1, p0, p1, p.limiter, n.x, n.y);
     out[8u * s] = w_hi(lr.l); out[8u * s + 1u] = w_hi(lr.r); out[8u * s + 2u] = c_hi(h); out[8u * s + 3u] = c_hi(f);
@@ -616,12 +694,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let wc = w_from_hl(w[kc], w[kc + 1u]);
     let geo = cell[c];
     let inv_v = 1.0 / geo.y;
-    let z = dc(0.0);
+    let gc = dgeo_corr(wc, cell[c].zwxy);
     let s = vec4<f32>(
-        dsum(gl.a, fl.w, gr.a, fr.w, gb.a, fb.w, gt.a, ft.w, z).h,
-        dsum(gl.b, fl.w, gr.b, fr.w, gb.b, fb.w, gt.b, ft.w, z).h,
-        dsum(gl.c, fl.w, gr.c, fr.w, gb.c, fb.w, gt.c, ft.w, dmulf(wc.p, geo.x)).h,
-        dsum(gl.d, fl.w, gr.d, fr.w, gb.d, fb.w, gt.d, ft.w, z).h);
+        dsum(gl.a, fl.w, gr.a, fr.w, gb.a, fb.w, gt.a, ft.w, gc.a).h,
+        dsum(gl.b, fl.w, gr.b, fr.w, gb.b, fb.w, gt.b, ft.w, gc.b).h,
+        dsum(gl.c, fl.w, gr.c, fr.w, gb.c, fb.w, gt.c, ft.w, dadd(dmulf(wc.p, geo.x), gc.c)).h,
+        dsum(gl.d, fl.w, gr.d, fr.w, gb.d, fb.w, gt.d, ft.w, gc.d).h);
     let r = s * inv_v;
     res[c] = r;
     if (p.stage == 1u) {
