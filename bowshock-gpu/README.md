@@ -5,7 +5,8 @@ cell-centred FV, MUSCL (minmod / van Albada) + HLLC blended with Rusanov in shoc
 SSP-RK3 with local time stepping, CFL 0.5) on [Luma](../../luma) custom kernels. The state lives in **f32 arrays**; how it is
 accumulated and how the residual is evaluated is selectable (`Precision`: `F32` = the original plain-f32 port, `Compensated`,
 `Extended` = default, see "The f32 residual floor"). With the default the GPU solver converges like the f64 CPU solver (6 orders on
-all 12 validation cases). The CPU solver (f64, rayon) is the reference at run time: `cone_gpu` runs both and compares them.
+all 12 cone validation cases). The solver takes any structured axisymmetric grid and BC set of bowshock-cfd: cone, tangent-ogive cylinder (M = 1.98) and the transonic
+nose-cylinder case on the large-domain grid with characteristic far-field BCs ("Ogive-cylinder" and "Transonic" below). The CPU solver (f64, rayon) is the reference at run time: `cone_gpu`, `ogive_gpu` and `transonic_gpu` run both and compare them.
 
 ```
 bowshock-gpu/
@@ -13,9 +14,14 @@ bowshock-gpu/
   src/shaders_ext.rs    double-float (df) WGSL: error-free arithmetic + the df translation of the face kernels and the residual
   src/lib.rs            GpuSolver (Mode x Precision): uploads geometry once, records the kernels, residual history, state read-back
   src/cone.rs           cone runners (CPU loop, GPU loop with identical stopping criteria), post-processing, comparison metrics
+  src/run.rs            case-independent CPU / GPU iteration loops (`Monitor` = the stopping criteria), GPU-vs-CPU field difference
+  src/ogive.rs          ogive-cylinder runners, wall post-processing (CD, Cp), comparison metrics
+  src/transonic.rs      `GpuTransonic`: GPU run of `bowshock_cfd::transonic::TransonicCase` (cold / warm-started Mach sweeps, same stop rules and post-processing as the CPU `run_on`)
   src/bin/cone_gpu.rs   validation + benchmark driver (writes out/gpu/*.csv)
-  tests/gpu_vs_cpu.rs   cargo tests (face kernels f32 + df on random states, 20-iteration state comparison for every mode x precision,
-                        400x200 residual history, small-grid regression test of the residual floor)
+  src/bin/ogive_gpu.rs  ogive validation + benchmark driver (writes out/gpu_ogive/*.csv)
+  src/bin/transonic_gpu.rs  transonic Mach-sweep validation + benchmark driver (writes out/gpu_transonic/*.csv)
+  tests/gpu_vs_cpu.rs   cargo tests (face kernels f32 + df on random states, 20-iteration state comparison for every mode x precision (cone, ogive, transonic grids),
+                        400x200 residual history, small-grid regression test of the residual floor, characteristic far-field BC: free-stream preservation, perturbed state, transonic run + warm start)
   examples/f32_cpu_emulation.rs  CPU experiment: f64 arithmetic with the state constrained to f32 (floor diagnosis)
   examples/f32_diag.rs           GPU experiment: update size vs ulp, f64 vs f32 evaluation of the GPU state, where the residual lives
   examples/f32_floor.rs          GPU experiment: f32 floor vs CFL
@@ -23,7 +29,9 @@ bowshock-gpu/
 
 Run: `cargo test --release -p bowshock-gpu`, `cargo run --release --bin cone_gpu` (everything: 12 cases x {CPU, GPU-guarded extended, GPU-direct
 extended, GPU-guarded f32, GPU-guarded compensated}, steady benchmark, Luma launch-overhead + sync-interval studies; ~4 min; `--quick`
-skips 400x200, `--limiter minmod|vanalbada`, `--chunk K`, `--bench [--no-cpu]` only the timing studies).
+skips 400x200, `--limiter minmod|vanalbada`, `--chunk K`, `--bench [--no-cpu]` only the timing studies),
+`cargo run --release --bin ogive_gpu [-- --quick] [--direct] [--no-bench] [--bench-only] [--limiter ..] [--chunk K]` (ogive-cylinder, M = 1.98, coarse / medium / fine; ~1.5 min),
+`cargo run --release --bin transonic_gpu [-- --quick | --level 0|1|2] [--body cone|karman|lvhaack|sqrt|ogive] [--mach m1,m2,..] [--warm] [--no-bench] [--bench-only] ...` (the Mach sweep of the CPU `transonic` bin, same options; minutes).
 
 ## Design
 
@@ -64,6 +72,10 @@ skips 400x200, `--limiter minmod|vanalbada`, `--chunk K`, `--bench [--no-cpu]` o
 * **f32 specifics**: `max(ch2, 1e-300)` in HLLC → `1e-30`; van Albada eps `1e-14` kept; shock-sensor thresholds are read
   from `bowshock_cfd::flux::SHOCK_SENSOR_LO/HI` when the WGSL source is generated (the df code has them, `GAMMA`, `GAMMA-1`, `1/(GAMMA-1)` and
   the van Albada eps as f64-rounded hi/lo constants).
+* **Boundary conditions** (`Config::bc` = `[imin, imax, jmin, jmax]`, converted per launch to the `bc0..bc3` uniforms; the solver is case-independent and takes any structured axisymmetric `bowshock_cfd::grid::Grid`: cone, ogive,
+  large-domain transonic grid): `Freestream` (0), `Extrapolate` (1), `SlipWall` (2, also the axis), `Characteristic` (3, Riemann-invariant far field of `bowshock_cfd::bc`) and `PressureOutflow` (4). The ghost-state functions get the
+  outward-normal sign of their boundary (`-1` for imin/jmin, `+1` for imax/jmax). The characteristic ghost depends on the first interior cell only (both ghost layers get the same state), so it is computed lazily by the guarded kernels like the
+  other BCs; in the extended precision it is evaluated in df (no `pow`: `rho = rho_ref (c_b/c_ref)^5` for gamma = 1.4). Mach number sweeps change the free stream between runs without touching the state (`GpuSolver::config_mut`).
 
 ## Kernel list
 
@@ -86,6 +98,7 @@ WGSL functions (COMMON): `cons_to_prim`, `sound_speed`, `physical_flux`, `reflec
 (first order / minmod / van Albada), `reconstruct` (with the positivity fallback), `hllc`, `rusanov`, `shock_weight`, `face_flux`; `df_add` (compensated
 state update). `shaders_ext`: df arithmetic `ts/qts/tp/dadd/dsub/dmul/dmulf/ddiv/dsqrt/dmin/dmax/dabs` and the df versions `dcons_to_prim`, `dslope`,
 `dreconstruct`, `dhllc`, `drusanov`, `dshock_weight`, `dface_flux`.
+Far-field BCs (COMMON, f32): `characteristic_ghost`, `pressure_outflow_ghost`, `far_ghost` (ghost states of `bowshock_cfd::bc`; `ghost_state` dispatches on the BC code); df versions in `shaders_ext`: `dcharacteristic_ghost`, `dpressure_outflow_ghost`, `dfar_ghost`.
 
 ## Results
 
@@ -107,13 +120,13 @@ The CPU side reproduces bowshock-cfd's own reference table exactly (iteration co
   before −0.003 % vs −0.015 %). The field difference at the end of the runs is ≤ 2.8e-06 p∞ (max), rms ≤ 1.2e-07 p∞, max relative density difference ≤ 1.3e-06
   (before: ≤ 2.1e-04 / 2.6e-05). The systematic GPU-higher-than-CPU Cp offset of the f32 solver (it grew with refinement: it was the f32 state sitting on its noise floor) is gone.
   `Direct` and `Guarded` GPU formulations agree to the printed digits (columns "direct-mode ..." below). The remaining GPU–CPU difference is the f32 rounding of the geometry (see the floor section).
-* **Performance** (steady state, best of 3, sync every K = 50 iterations, per-iteration residual history included): CPU 601 / 1206 / 2930 µs, GPU-guarded **128.6 / 130.8 / 262.1 µs**
-  (4.7x / 9.2x / 11.2x faster), GPU-direct 238.6 / 232.3 / 375.6 µs (2.5x / 5.2x / 7.8x) for 100×50 / 200×100 / 400×200.
-  The extended precision costs **1.43x / 1.40x / 1.88x** of the f32 guarded solver (89.8 / 93.5 / 139.7 µs; which was 6.7× / 12.9× / 21.0× faster than the CPU). Time to each solver's own stop (6 orders for both now):
-  0.17 – 1.48 s on the GPU vs 0.81 – 17.23 s on the CPU, i.e. 4.6× – 11.6× in favour of the GPU-guarded solver (2.5× – 8.1× direct). Before, the GPU ran ≥ 8001 iterations until its plateau test fired
-  without reaching the criterion. Setup (kernel build + upload): ≤ 12 ms, first-launch warm-up ≤ 14 ms, context creation 0.2 s (the first time the GPU is touched).
-* **Small grids are Luma-host-bound**: 100×50 and 200×100 cost almost the same (128.6 / 130.8 µs) because a launch costs ≈ 8.5 µs of host time regardless of its size (see "Luma friction");
-  the df arithmetic is hidden behind it there (1.4×) and shows up at 400×200 (1.9×). Fusing 17 launches/iteration (direct) into 7 (guarded) is a 1.5 – 1.9× gain at all sizes.
+* **Performance** (steady state, best of 3, sync every K = 50 iterations, per-iteration residual history included; Luma main f29290fb): CPU 596 / 1211 / 2960 µs, GPU-guarded **66.9 / 74.2 / 235.8 µs**
+  (8.9x / 16.3x / 12.6x faster), GPU-direct 83.5 / 94.6 / 233.8 µs (7.1x / 12.8x / 12.7x) for 100×50 / 200×100 / 400×200.
+  The extended precision costs **2.86x / 2.58x / 3.93x** of the f32 guarded solver (23.4 / 28.8 / 60.0 µs; which is 25x / 42x / 49x faster than the CPU). Time to each solver's own stop (6 orders for both now; iterations × steady cost):
+  0.09 – 1.33 s on the GPU vs 0.81 – 17.40 s on the CPU, i.e. 8.8x – 17.0x in favour of the GPU-guarded solver (7.1x – 13.3x direct). Before, the GPU ran ≥ 8001 iterations until its plateau test fired
+  without reaching the criterion. Setup (kernel build + upload): ≤ 33 ms, first-launch warm-up ≤ 16 ms, context creation 0.2 s (the first time the GPU is touched).
+* **The solver is device-bound now**: with Luma's launch cost down to ≈ 0.8 µs (it was ≈ 8.5 µs when the first version of these tables was made) 100×50 and 200×100 still cost almost the same (66.9 / 74.2 µs extended) but the host recording of an iteration
+  is only 9 µs (guarded) / 24 µs (direct); fusing 17 launches/iteration (direct) into 7 (guarded) now gains 1.1 – 1.3x for the extended precision at 100×50 – 200×100 and nothing at 400×200, and the extended precision costs 2.6 – 3.9x the f32 solver on every grid.
 
 ### Accuracy: GPU (extended precision, default) vs CPU (f64) and vs Taylor-Maccoll; before = original f32 solver, compensated = compensated state only
 | cone | grid | limiter | Cp GPU | Cp CPU | Cp TM | GPU err vs TM % | CPU err vs TM % | avg Cp diff GPU-CPU % | max rel Cp diff (0.4<=x/L<=0.9) % | max rel Cp diff (all stations) % | beta GPU [deg] | beta CPU [deg] | direct-mode avg Cp diff vs CPU % | direct-mode max rel Cp diff (window) % | f32 (before) avg Cp diff % | f32 (before) max rel Cp diff (window) % | compensated avg Cp diff % |
@@ -180,86 +193,189 @@ The CPU side reproduces bowshock-cfd's own reference table exactly (iteration co
 | 15 deg | 200x100 | vanalbada | 3.70e-6 | 3.66e-5 | 4.00e-5 | 1.64e-5 | 4.51e-6 |
 | 15 deg | 400x200 | vanalbada | 5.73e-6 | 7.08e-5 | 7.66e-5 | 3.26e-5 | 8.28e-6 |
 
-### Steady per-iteration cost (15 deg, minmod, 2000 iterations from the free stream, best of 3, sync every K=50)
+### Steady per-iteration cost (15 deg, minmod, 2000 iterations from the free stream, best of 3, sync every K=50; Luma main f29290fb, RTX 3090, load average 7 at the start)
 | grid | cells | CPU f64 rayon us/iter | GPU-guarded extended us/iter | guarded compensated | guarded f32 | GPU-direct extended | direct f32 | guarded extended speed-up vs CPU | direct extended speed-up | extended / f32 cost (guarded) |
 |---|---|---|---|---|---|---|---|---|---|---|
-| 100x50 | 5000 | 601 | 128.6 | 84.8 | 89.8 | 238.6 | 198.7 | 4.7x | 2.5x | 1.43x |
-| 200x100 | 20000 | 1206 | 130.8 | 88.9 | 93.5 | 232.3 | 201.6 | 9.2x | 5.2x | 1.40x |
-| 400x200 | 80000 | 2930 | 262.1 | 154.8 | 139.7 | 375.6 | 232.8 | 11.2x | 7.8x | 1.88x |
+| 100x50 | 5000 | 596 | 66.9 | 24.4 | 23.4 | 83.5 | 44.2 | 8.9x | 7.1x | 2.86x |
+| 200x100 | 20000 | 1211 | 74.2 | 30.5 | 28.8 | 94.6 | 51.0 | 16.3x | 12.8x | 2.58x |
+| 400x200 | 80000 | 2960 | 235.8 | 75.5 | 60.0 | 233.8 | 99.1 | 12.6x | 12.7x | 3.93x |
 
-### Total time to the stopping criterion of each solver (iterations to stop x steady us/iter; GPU extended and CPU both stop at 6 orders; the f32 solver (before) ends at its plateau test)
+### Total time to the stopping criterion of each solver (iterations to stop x steady us/iter above; GPU extended and CPU both stop at 6 orders; the f32 solver (before) ends at its plateau test)
 | cone | grid | limiter | CPU iters | CPU s | GPU-guarded ext iters (stop) | GPU-guarded ext s | GPU-direct ext s | guarded speed-up | direct speed-up | f32 guarded iters (stop) | f32 guarded s | f32 orders reached |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 10 deg | 100x50 | minmod | 2785 | 1.67 | 2816 | 0.36 | 0.67 | 4.6x | 2.5x | 8001 | 0.72 | 4.1 |
-| 10 deg | 200x100 | minmod | 3918 | 4.72 | 3765 | 0.49 | 0.87 | 9.6x | 5.4x | 8001 | 0.75 | 3.9 |
-| 10 deg | 400x200 | minmod | 5880 | 17.23 | 5654 | 1.48 | 2.12 | 11.6x | 8.1x | 8001 | 1.12 | 3.9 |
-| 15 deg | 100x50 | minmod | 1900 | 1.14 | 1900 | 0.24 | 0.45 | 4.7x | 2.5x | 8001 | 0.72 | 4.4 |
-| 15 deg | 200x100 | minmod | 3824 | 4.61 | 3814 | 0.50 | 0.89 | 9.2x | 5.2x | 8001 | 0.75 | 4.3 |
-| 15 deg | 400x200 | minmod | 5185 | 15.19 | 5099 | 1.34 | 1.91 | 11.4x | 7.9x | 9001 | 1.26 | 4.1 |
-| 10 deg | 100x50 | vanalbada | 1352 | 0.81 | 1352 | 0.17 | 0.32 | 4.7x | 2.5x | 8001 | 0.72 | 4.3 |
-| 10 deg | 200x100 | vanalbada | 2240 | 2.70 | 2240 | 0.29 | 0.52 | 9.2x | 5.2x | 8001 | 0.75 | 4.3 |
-| 10 deg | 400x200 | vanalbada | 4080 | 11.96 | 4080 | 1.07 | 1.53 | 11.2x | 7.8x | 8001 | 1.12 | 4.2 |
-| 15 deg | 100x50 | vanalbada | 1518 | 0.91 | 1518 | 0.20 | 0.36 | 4.7x | 2.5x | 8001 | 0.72 | 4.6 |
-| 15 deg | 200x100 | vanalbada | 2531 | 3.05 | 2531 | 0.33 | 0.59 | 9.2x | 5.2x | 8001 | 0.75 | 4.6 |
-| 15 deg | 400x200 | vanalbada | 4654 | 13.64 | 4654 | 1.22 | 1.75 | 11.2x | 7.8x | 9001 | 1.26 | 4.4 |
+| 10 deg | 100x50 | minmod | 2785 | 1.66 | 2816 | 0.19 | 0.24 | 8.8x | 7.1x | 8001 | 0.19 | 4.1 |
+| 10 deg | 200x100 | minmod | 3918 | 4.74 | 3765 | 0.28 | 0.36 | 17.0x | 13.3x | 8001 | 0.23 | 3.9 |
+| 10 deg | 400x200 | minmod | 5880 | 17.40 | 5654 | 1.33 | 1.32 | 13.1x | 13.2x | 8001 | 0.48 | 3.9 |
+| 15 deg | 100x50 | minmod | 1900 | 1.13 | 1900 | 0.13 | 0.16 | 8.9x | 7.1x | 8001 | 0.19 | 4.4 |
+| 15 deg | 200x100 | minmod | 3824 | 4.63 | 3814 | 0.28 | 0.36 | 16.4x | 12.8x | 8001 | 0.23 | 4.3 |
+| 15 deg | 400x200 | minmod | 5185 | 15.35 | 5099 | 1.20 | 1.19 | 12.8x | 12.9x | 9001 | 0.54 | 4.1 |
+| 10 deg | 100x50 | vanalbada | 1352 | 0.81 | 1352 | 0.09 | 0.11 | 8.9x | 7.1x | 8001 | 0.19 | 4.3 |
+| 10 deg | 200x100 | vanalbada | 2240 | 2.71 | 2240 | 0.17 | 0.21 | 16.3x | 12.8x | 8001 | 0.23 | 4.3 |
+| 10 deg | 400x200 | vanalbada | 4080 | 12.08 | 4080 | 0.96 | 0.95 | 12.6x | 12.7x | 8001 | 0.48 | 4.2 |
+| 15 deg | 100x50 | vanalbada | 1518 | 0.90 | 1518 | 0.10 | 0.13 | 8.9x | 7.1x | 8001 | 0.19 | 4.6 |
+| 15 deg | 200x100 | vanalbada | 2531 | 3.07 | 2531 | 0.19 | 0.24 | 16.3x | 12.8x | 8001 | 0.23 | 4.6 |
+| 15 deg | 400x200 | vanalbada | 4654 | 13.78 | 4654 | 1.10 | 1.09 | 12.6x | 12.7x | 9001 | 0.54 | 4.4 |
 
-### One-time GPU setup (kernel build + geometry/state upload) and first-launch warm-up, seconds (context creation 0.24 s); extended precision
+### One-time GPU setup (kernel build + geometry/state upload) and first-launch warm-up, seconds (context creation 0.26 s); extended precision
 | cone | grid | limiter | guarded setup | guarded warm-up | direct setup | direct warm-up |
 |---|---|---|---|---|---|---|
-| 10 deg | 100x50 | minmod | 0.012 | 0.001 | 0.020 | 0.001 |
-| 10 deg | 200x100 | minmod | 0.003 | 0.003 | 0.001 | 0.001 |
-| 10 deg | 400x200 | minmod | 0.010 | 0.014 | 0.003 | 0.002 |
-| 15 deg | 100x50 | minmod | 0.000 | 0.003 | 0.000 | 0.001 |
+| 10 deg | 100x50 | minmod | 0.018 | 0.006 | 0.033 | 0.000 |
+| 10 deg | 200x100 | minmod | 0.003 | 0.003 | 0.001 | 0.000 |
+| 10 deg | 400x200 | minmod | 0.011 | 0.016 | 0.003 | 0.004 |
+| 15 deg | 100x50 | minmod | 0.000 | 0.001 | 0.000 | 0.000 |
 | 15 deg | 200x100 | minmod | 0.002 | 0.003 | 0.000 | 0.001 |
-| 15 deg | 400x200 | minmod | 0.008 | 0.011 | 0.002 | 0.002 |
-| 10 deg | 100x50 | vanalbada | 0.000 | 0.001 | 0.000 | 0.001 |
-| 10 deg | 200x100 | vanalbada | 0.000 | 0.002 | 0.000 | 0.001 |
-| 10 deg | 400x200 | vanalbada | 0.007 | 0.011 | 0.003 | 0.002 |
-| 15 deg | 100x50 | vanalbada | 0.000 | 0.001 | 0.000 | 0.001 |
-| 15 deg | 200x100 | vanalbada | 0.002 | 0.003 | 0.000 | 0.001 |
-| 15 deg | 400x200 | vanalbada | 0.008 | 0.010 | 0.002 | 0.001 |
+| 15 deg | 400x200 | minmod | 0.008 | 0.014 | 0.003 | 0.001 |
+| 10 deg | 100x50 | vanalbada | 0.000 | 0.000 | 0.000 | 0.000 |
+| 10 deg | 200x100 | vanalbada | 0.001 | 0.006 | 0.000 | 0.001 |
+| 10 deg | 400x200 | vanalbada | 0.008 | 0.014 | 0.003 | 0.001 |
+| 15 deg | 100x50 | vanalbada | 0.000 | 0.001 | 0.000 | 0.000 |
+| 15 deg | 200x100 | vanalbada | 0.001 | 0.006 | 0.000 | 0.001 |
+| 15 deg | 400x200 | vanalbada | 0.008 | 0.014 | 0.002 | 0.001 |
 
-### Wall time of the convergence runs themselves (iteration loop incl. history readback every K=50; setup excluded; shared desktop, noisy: see the steady benchmark above)
+### Wall time of the convergence runs themselves (iteration loop incl. history readback every K=50; setup excluded; measured while other heavy jobs kept the machine at load average 20 - 60, so the CPU column is inflated by ~1.5 - 2x and everything is noisy: use the steady benchmark above)
 | cone | grid | limiter | CPU iters | CPU us/iter | GPU-guarded ext us/iter | GPU-direct ext us/iter | GPU iters exec (stop) | CPU total s | GPU-guarded ext total s | GPU-direct ext total s | f32 guarded total s (8000+ its) |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| 10 deg | 100x50 | minmod | 2785 | 723 | 117 | 189 | 2850 (2816) | 2.01 | 0.33 | 0.54 | 0.53 |
-| 10 deg | 200x100 | minmod | 3918 | 1215 | 233 | 255 | 3800 (3765) | 4.76 | 0.89 | 0.97 | 0.87 |
-| 10 deg | 400x200 | minmod | 5880 | 3032 | 423 | 409 | 5700 (5654) | 17.83 | 2.41 | 2.33 | 1.17 |
-| 15 deg | 100x50 | minmod | 1900 | 594 | 128 | 260 | 1900 (1900) | 1.13 | 0.24 | 0.49 | 1.10 |
-| 15 deg | 200x100 | minmod | 3824 | 2023 | 230 | 263 | 3850 (3814) | 7.74 | 0.88 | 1.01 | 1.15 |
-| 15 deg | 400x200 | minmod | 5185 | 6058 | 409 | 410 | 5100 (5099) | 31.41 | 2.09 | 2.09 | 1.27 |
-| 10 deg | 100x50 | vanalbada | 1352 | 594 | 132 | 211 | 1400 (1352) | 0.80 | 0.18 | 0.30 | 0.68 |
-| 10 deg | 200x100 | vanalbada | 2240 | 1225 | 244 | 225 | 2250 (2240) | 2.74 | 0.55 | 0.51 | 0.72 |
-| 10 deg | 400x200 | vanalbada | 4080 | 3177 | 409 | 511 | 4100 (4080) | 12.96 | 1.68 | 2.09 | 1.66 |
-| 15 deg | 100x50 | vanalbada | 1518 | 989 | 191 | 265 | 1550 (1518) | 1.50 | 0.30 | 0.41 | 0.97 |
-| 15 deg | 200x100 | vanalbada | 2531 | 2247 | 281 | 368 | 2550 (2531) | 5.69 | 0.72 | 0.94 | 1.28 |
-| 15 deg | 400x200 | vanalbada | 4654 | 3355 | 383 | 448 | 4700 (4654) | 15.62 | 1.80 | 2.11 | 1.26 |
+| 10 deg | 100x50 | minmod | 2785 | 1037 | 131 | 88 | 2850 (2816) | 2.89 | 0.37 | 0.25 | 0.22 |
+| 10 deg | 200x100 | minmod | 3918 | 1871 | 158 | 97 | 3800 (3765) | 7.33 | 0.60 | 0.37 | 0.27 |
+| 10 deg | 400x200 | minmod | 5880 | 4499 | 276 | 217 | 5700 (5654) | 26.45 | 1.57 | 1.24 | 0.51 |
+| 15 deg | 100x50 | minmod | 1900 | 970 | 147 | 98 | 1900 (1900) | 1.84 | 0.28 | 0.19 | 0.24 |
+| 15 deg | 200x100 | minmod | 3824 | 1968 | 137 | 104 | 3850 (3814) | 7.53 | 0.53 | 0.40 | 0.37 |
+| 15 deg | 400x200 | minmod | 5185 | 5655 | 300 | 219 | 5100 (5099) | 29.32 | 1.53 | 1.12 | 0.63 |
+| 10 deg | 100x50 | vanalbada | 1352 | 1066 | 75 | 97 | 1400 (1352) | 1.44 | 0.10 | 0.14 | 0.24 |
+| 10 deg | 200x100 | vanalbada | 2240 | 1942 | 206 | 116 | 2250 (2240) | 4.35 | 0.46 | 0.26 | 0.31 |
+| 10 deg | 400x200 | vanalbada | 4080 | 4670 | 324 | 252 | 4100 (4080) | 19.05 | 1.33 | 1.03 | 0.53 |
+| 15 deg | 100x50 | vanalbada | 1518 | 756 | 75 | 111 | 1550 (1518) | 1.15 | 0.12 | 0.17 | 0.24 |
+| 15 deg | 200x100 | vanalbada | 2531 | 1783 | 185 | 112 | 2550 (2531) | 4.51 | 0.47 | 0.29 | 0.31 |
+| 15 deg | 400x200 | vanalbada | 4654 | 4653 | 323 | 250 | 4700 (4654) | 21.66 | 1.52 | 1.18 | 0.60 |
 
 ### Luma launch overhead: 4000 dependent launches of `a[i] += 1` (one storage binding, luma grid uniform only)
 | invocations | host record us/launch | record+sync us/launch |
 |---|---|---|
-| 64 | 8.59 | 9.19 |
-| 5000 | 8.12 | 8.76 |
-| 80000 | 8.23 | 8.95 |
-| 1000000 | 12.20 | 16.81 |
+| 64 | 0.86 | 1.23 |
+| 5000 | 0.75 | 1.30 |
+| 80000 | 0.83 | 2.06 |
+| 1000000 | 0.93 | 11.01 |
 
 ### GPU per-iteration timing study (15 deg, minmod, from free stream, 1000 iterations, f32 precision; first-order phase off)
 Residual history = per-iteration density residual (history kernels), read back every K iterations.
 | mode | grid | hist, sync K=1 | K=10 | K=50 | K=250 | Luma norm() every 50 (no hist kernels) | no residual at all, record+sync | host recording time only |
 |---|---|---|---|---|---|---|---|---|
-| Direct | 100x50 | 319.7 us | 286.4 us | 199.7 us | 175.0 us | 188.5 us | 159.5 us | 157.2 us |
-| Direct | 200x100 | 322.9 us | 298.7 us | 206.9 us | 178.3 us | 147.9 us | 141.3 us | 135.6 us |
-| Direct | 400x200 | 333.1 us | 306.2 us | 219.7 us | 194.0 us | 201.2 us | 172.4 us | 149.7 us |
-| Guarded | 100x50 | 133.3 us | 96.0 us | 84.2 us | 58.3 us | 89.6 us | 46.7 us | 43.9 us |
-| Guarded | 200x100 | 153.1 us | 108.8 us | 101.5 us | 70.6 us | 95.0 us | 52.4 us | 49.4 us |
-| Guarded | 400x200 | 192.6 us | 141.9 us | 134.1 us | 105.3 us | 131.2 us | 92.8 us | 60.0 us |
+| Direct | 100x50 | 120.3 us | 66.7 us | 45.9 us | 40.7 us | 42.2 us | 35.2 us | 23.8 us |
+| Direct | 200x100 | 126.8 us | 73.2 us | 50.9 us | 45.8 us | 46.5 us | 40.7 us | 23.3 us |
+| Direct | 400x200 | 177.5 us | 120.6 us | 102.1 us | 94.3 us | 94.8 us | 88.1 us | 25.4 us |
+| Guarded | 100x50 | 89.8 us | 32.8 us | 24.9 us | 18.6 us | 23.4 us | 15.5 us | 9.2 us |
+| Guarded | 200x100 | 90.1 us | 36.9 us | 28.7 us | 22.2 us | 27.2 us | 19.2 us | 9.4 us |
+| Guarded | 400x200 | 122.1 us | 66.9 us | 59.6 us | 52.8 us | 57.7 us | 48.7 us | 8.7 us |
 
-Reading the study (f32 precision): with `no residual at all` the guarded solver costs 46.7 / 52.4 / 92.8 µs per iteration for 100×50 / 200×100 / 400×200
-(host recording alone: 43.9 / 49.4 / 60.0 µs = 7 launches × 6 – 9 µs); the direct solver 159 / 141 / 172 µs (17 launches ≈ 135 – 157 µs of host
-time). The history kernel adds one launch per iteration; a synchronisation costs ≈ 0.08 ms at K = 1, ≈ 0.4 ms at K = 10 and ≈ 1.3 ms at K = 50 (guarded 100×50: (time/iter − time/iter at K = 250) × K), growing with the number of dispatches that are only submitted at the sync (up to 255, see the batching item below); K = 250 brings the
-guarded solver within 12 – 18 µs of the no-residual cost. `Luma norm() every 50` (Luma's `Array<f32>::norm`, no history kernels)
-costs about the same as the history kernels at K = 50 (90 / 95 / 131 µs vs 84 / 102 / 134 µs per iteration, guarded) and only gives the last iteration's residual, so the history kernels are the default. The extended
+Reading the study (f32 precision, Luma main): with `no residual at all` the guarded solver costs 15.5 / 19.2 / 48.7 µs per iteration for 100×50 / 200×100 / 400×200 (host recording alone: 9.2 / 9.4 / 8.7 µs = 7 launches × 1.3 µs), the direct solver
+35.2 / 40.7 / 88.1 µs (host recording ≈ 24 µs = 17 launches × 1.4 µs): both are device-side bound now, not host bound. The history kernel adds ≈ 9 – 11 µs per iteration to the guarded solver (24.9 / 28.7 / 59.6 µs at K = 50);
+a synchronisation costs ≈ 0.07 ms at K = 1, ≈ 0.14 ms at K = 10 and ≈ 0.3 ms at K = 50 (guarded 100×50: (time/iter − time/iter at K = 250) × K), and K = 250 brings the guarded solver within 3 – 4 µs of the no-residual cost.
+`Luma norm() every 50` (Luma's `Array<f32>::norm`, no history kernels) costs 23.4 / 27.2 / 57.7 µs, 1.5 – 2 µs less than the history kernels at K = 50, and only gives the last iteration's residual, so the history kernels remain the default. The extended
 solver adds only device time, see the steady-state table above.
+
+## Ogive-cylinder, M = 1.98 (`ogive_gpu`)
+
+The solver needed no change for this case: the grid (`bowshock_cfd::ogive::ogive_grid` via `OgiveCase::build_solver()`: 114×50 / 228×100 / 456×200 cells, free-stream inflow `imin` and outer boundary `jmax`, extrapolation outflow `imax`, slip wall + axis `jmin`)
+and `Config` are uploaded exactly like the cone's (`GpuSolver::new_with(&host.grid, &host.cfg, ..)`); the run loops (`run.rs`) and the wall post-processing (`ogive.rs`, a copy of the private `bowshock_cfd::ogive::postprocess`) are case-independent.
+Same stopping criterion as `run_ogive` (6 orders from the peak after iteration 20), minmod, CFL 0.5, 300 first-order iterations, default precision (`Extended`), guarded formulation (`--direct` also runs the direct one; it agrees to the printed digits).
+Output: `out/gpu_ogive/` (`cp_M1.98_<grid>.csv`: GPU/CPU wall Cp, `residual_*.csv`, `cp_compare_M1.98.csv`: orifice stations, `summary.csv`).
+
+### Accuracy, GPU (extended) vs CPU (f64), `cargo run --release --bin ogive_gpu -- --direct`
+| grid | cells | CD GPU | CD CPU | CD diff % | CD first-cell diff % | nose mean Cp diff % | max rel Cp diff, nose, abs(Cp) >= 0.05, % | max abs ΔCp (whole wall) | max Δp/p∞ | rms Δp/p∞ | max Δρ/ρ |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| coarse 114×50 | 5700 | 0.09565 | 0.09565 | −5.3e-6 | −7.1e-6 | −3.1e-6 | 8.6e-5 | 2.8e-7 | 7.34e-7 | 1.18e-7 | 7.21e-7 |
+| coarse, direct mode | | 0.09565 | | −5.3e-6 | −7.1e-6 | −3.1e-6 | 8.6e-5 | 2.8e-7 | 7.34e-7 | 1.18e-7 | 7.21e-7 |
+| medium 228×100 | 22800 | 0.09694 | 0.09694 | +1.1e-6 | +2.0e-6 | +5.9e-6 | 1.1e-4 | 3.8e-7 | 1.18e-6 | 1.57e-7 | 1.98e-6 |
+| medium, direct mode | | 0.09694 | | +1.1e-6 | +2.0e-6 | +5.9e-6 | 1.1e-4 | 3.8e-7 | 1.18e-6 | 1.57e-7 | 1.98e-6 |
+| fine 456×200 | 91200 | 0.09772 | 0.09772 | +2.2e-7 | +2.3e-7 | +8.1e-7 | 1.2e-4 | 3.4e-7 | 1.35e-6 | 1.67e-7 | 1.24e-6 |
+| fine, direct mode | | 0.09772 | | +2.2e-7 | +2.3e-7 | +8.1e-7 | 1.2e-4 | 3.4e-7 | 1.35e-6 | 1.67e-7 | 1.24e-6 |
+
+The forebody pressure drag CD (base-area reference, nose 0 ≤ x ≤ 3 d, extrapolated-wall Cp) and the averaged nose Cp agree with the CPU to **≤ 5.3e-6 %** (cone target: avg Cp diff ≪ 0.01 %; the cone cases give 2e-6 … 3e-5 %); the wall Cp differs by ≤ 3.8e-7 absolute everywhere
+(≤ 1.2e-4 % relative where |Cp| ≥ 0.05; Cp passes through zero near x/d = 2.3 where a relative difference means nothing, so those faces are excluded from the relative column), the field by ≤ 1.4e-6 p∞. The CPU result itself against the experiment
+(Perkins & Jorgensen, NACA RM A54H23, Table I(a)) and theory is the subject of the bowshock-cfd README (CD_forebody: experiment 0.1067 with tip extrapolated, shock-expansion 0.0625, tangent-cone 0.1158; CFD 0.0957 / 0.0969 / 0.0977).
+
+### Cp at the 15 orifice stations: experiment, shock-expansion, CPU and GPU (the GPU reproduces the CPU to the 4 printed digits at every station and grid)
+| x/d | Cp exp | shock-exp. | CPU coarse | GPU coarse | CPU medium | GPU medium | CPU fine | GPU fine |
+|---|---|---|---|---|---|---|---|---|
+| 0.22 | 0.260 | 0.252 | 0.2418 | 0.2418 | 0.2493 | 0.2493 | 0.2535 | 0.2535 |
+| 0.56 | 0.212 | 0.187 | 0.1983 | 0.1983 | 0.2003 | 0.2003 | 0.2019 | 0.2019 |
+| 0.89 | 0.165 | 0.130 | 0.1530 | 0.1530 | 0.1536 | 0.1536 | 0.1543 | 0.1543 |
+| 1.22 | 0.115 | 0.078 | 0.1096 | 0.1096 | 0.1104 | 0.1104 | 0.1108 | 0.1108 |
+| 1.61 | 0.074 | 0.023 | 0.0631 | 0.0631 | 0.0640 | 0.0640 | 0.0644 | 0.0644 |
+| 2.06 | 0.026 | -0.034 | 0.0164 | 0.0164 | 0.0169 | 0.0169 | 0.0171 | 0.0171 |
+| 2.50 | -0.014 | -0.083 | -0.0227 | -0.0227 | -0.0227 | -0.0227 | -0.0227 | -0.0227 |
+| 2.95 | -0.038 | -0.126 | -0.0573 | -0.0573 | -0.0574 | -0.0574 | -0.0574 | -0.0574 |
+| 3.62 | -0.030 | -0.131 | -0.0413 | -0.0413 | -0.0414 | -0.0414 | -0.0413 | -0.0413 |
+| 4.06 | -0.017 | -0.131 | -0.0320 | -0.0320 | -0.0320 | -0.0320 | -0.0321 | -0.0321 |
+| 4.50 | -0.012 | -0.131 | -0.0252 | -0.0252 | -0.0253 | -0.0253 | -0.0253 | -0.0253 |
+| 5.39 | -0.009 | -0.131 | -0.0162 | -0.0162 | -0.0163 | -0.0163 | -0.0163 | -0.0163 |
+| 6.28 | -0.001 | -0.131 | -0.0111 | -0.0111 | -0.0112 | -0.0112 | -0.0112 | -0.0112 |
+| 7.17 | 0.000 | -0.131 | -0.0079 | -0.0079 | -0.0080 | -0.0080 | -0.0080 | -0.0080 |
+| 8.06 | 0.006 | -0.131 | -0.0058 | -0.0058 | -0.0059 | -0.0059 | -0.0059 | -0.0059 |
+
+### Convergence (stop = criterion of `run_ogive`)
+| grid | CPU iters | CPU stop | CPU drop (orders) | CPU final res | GPU iters (stop/exec) | GPU stop | GPU drop (orders) | GPU final res |
+|---|---|---|---|---|---|---|---|---|
+| coarse 114×50 | 3505 | residual drop reached | 6.0 | 7.08e-7 | 3501/3550 | residual drop reached | 6.0 | 7.08e-7 |
+| medium 228×100 | 4060 | residual drop reached | 6.0 | 1.44e-6 | 4073/4100 | residual drop reached | 6.0 | 1.44e-6 |
+| fine 456×200 | 6452 | residual drop reached | 6.0 | 2.49e-6 | 6447/6450 | residual drop reached | 6.0 | 2.49e-6 |
+
+### Timing (Luma main f29290fb, RTX 3090; `ogive_gpu --bench-only`: 1000 iterations from the free stream, best of 3, sync every 50, history kernels on; load average 7 – 17)
+| grid | cells | CPU f64 rayon µs/iter | GPU-guarded extended µs/iter | GPU-direct extended | guarded f32 | guarded extended speed-up vs CPU | direct extended speed-up | extended / f32 cost | CPU s to stop | GPU-guarded s to stop | speed-up to stop |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| coarse 114×50 | 5700 | 636 | 76.3 | 85.8 | 23.6 | 8.3x | 7.4x | 3.24x | 2.23 | 0.27 | 8.3x |
+| medium 228×100 | 22800 | 1299 | 84.2 | 97.0 | 27.5 | 15.4x | 13.4x | 3.06x | 5.27 | 0.34 | 15.5x |
+| fine 456×200 | 91200 | 3302 | 252.7 | 241.3 | 71.9 | 13.1x | 13.7x | 3.52x | 21.30 | 1.63 | 13.1x |
+
+"to stop" = iterations to the stopping criterion (CPU 3505 / 4060 / 6452, GPU 3501 / 4073 / 6447) × the steady cost. Measured wall times of the convergence runs (loop incl. history read-back, setup excluded) in the final full run, taken while the machine was at load average 35 – 47 (CPU inflated): CPU 3.45 / 8.48 / 32.45 s,
+GPU-guarded 0.50 / 0.50 / 1.96 s. GPU setup (kernel build + upload) ≤ 18 ms, first-launch warm-up ≤ 18 ms.
+
+## Transonic: large-domain grid + characteristic far field (`transonic_gpu`)
+
+Case, grid and stopping rules are those of `bowshock_cfd::transonic` (nose-cylinder body of the CPU `transonic` bin, default `cone`, nose fineness 3 + 6 d cylinder, domain 10 body lengths upstream / radially and 5 downstream, level 0 / 1 / 2 = 144×70 / 288×140 / 576×280 cells,
+`Bc::Characteristic` on inflow plane, outer boundary and outflow plane, `SlipWall` on axis and body, minmod, CFL 0.5, 300 first-order iterations on a cold start; stop at 6 orders of residual drop or, from iteration 4000 on, when the CD (sampled every 50 iterations) varies by < 2e-4 over 2000 iterations after ≥ 2 orders).
+**GPU side:** the far-field BCs (`Bc::Characteristic`, `Bc::PressureOutflow`) are ghost-state functions of the first interior cell and the outward normal (WGSL `characteristic_ghost`, `pressure_outflow_ghost`, f32 and df); the solver itself is unchanged.
+`transonic::GpuTransonic::run_on` is the counterpart of `bowshock_cfd::transonic::run_on` (same arguments, cold start or warm start from the previous Mach number with the cold-start residual peak as reference; the free stream is switched with `GpuSolver::config_mut` without touching the state): it records 50 iterations,
+reads the residual history and the state, evaluates the CD sample with `wall_distribution`, applies `transonic::stop_reason` per iteration and finishes with `transonic::finish`, i.e. the CPU's own stop rules and post-processing. Sweep: M = 0.7, 0.8, 0.85, 0.9, 0.95, 0.98, 1.0, 1.02, 1.05, 1.1, 1.2, 1.5, cold start for each (`--warm` for a warm-started sweep).
+Output: `out/gpu_transonic/` (`sweep_<tag>.csv`, `cp_<tag>_M<m>.csv`, `residual_*.csv`, `cd_history_*.csv`, `steady_<tag>.csv`).
+
+### Accuracy: forebody CD vs Mach, GPU (guarded, extended) vs CPU (f64) — cone-cylinder, level 1 (288×140)
+| M | CD GPU | CD CPU | GPU − CPU | (GPU − CPU)/CPU % | Cp_min GPU | Cp_min CPU | max abs ΔCp (wall) | CPU iters | GPU iters (stop/exec) | stop rule | Stoney (digitised) | tangent-cone / T-M |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0.7 | 0.00531 | 0.00531 | -1.0e-08 | -1.9e-04 | -0.7204 | -0.7204 | 2.2e-06 | 19500 | 19500/19500 | CD stationary | - | - |
+| 0.8 | 0.01295 | 0.01295 | +1.9e-07 | +1.5e-03 | -0.8821 | -0.8821 | 1.5e-06 | 19000 | 19000/19000 | CD stationary | 0.020 | - |
+| 0.85 | 0.02632 | 0.02632 | +1.7e-07 | +6.5e-04 | -0.8681 | -0.8681 | 7.5e-07 | 22000 | 22000/22000 | CD stationary | 0.025 | - |
+| 0.9 | 0.04715 | 0.04715 | +2.7e-07 | +5.7e-04 | -0.7538 | -0.7538 | 8.6e-07 | 17500 | 17500/17500 | CD stationary | 0.030 | - |
+| 0.95 | 0.07737 | 0.07737 | +1.7e-07 | +2.2e-04 | -0.6451 | -0.6451 | 5.1e-07 | 19000 | 19000/19000 | CD stationary | 0.060 | - |
+| 0.98 | 0.10425 | 0.10425 | +1.8e-07 | +1.7e-04 | -0.5819 | -0.5819 | 5.9e-07 | 30000 | 30000/30000 | CD stationary | 0.090 | - |
+| 1 | 0.13014 | 0.13014 | +1.4e-07 | +1.1e-04 | -0.5391 | -0.5391 | 3.0e-07 | 7000 | 7000/7000 | CD stationary | 0.110 | - |
+| 1.02 | 0.15040 | 0.15040 | +1.3e-07 | +8.6e-05 | -0.5008 | -0.5008 | 3.5e-07 | 26000 | 26000/26000 | CD stationary | 0.130 | - |
+| 1.05 | 0.16262 | 0.16262 | +1.6e-07 | +9.8e-05 | -0.4481 | -0.4481 | 4.0e-07 | 20000 | 20000/20000 | CD stationary | 0.160 | 0.20587 |
+| 1.1 | 0.15503 | 0.15503 | +1.0e-07 | +6.5e-05 | -0.3746 | -0.3746 | 7.1e-07 | 11000 | 11000/11000 | CD stationary | 0.160 | 0.16197 |
+| 1.2 | 0.13604 | 0.13604 | +4.0e-08 | +2.9e-05 | -0.2823 | -0.2823 | 1.6e-06 | 5500 | 5500/5500 | CD stationary | 0.140 | 0.13872 |
+| 1.5 | 0.11231 | 0.11231 | +7.0e-08 | +6.2e-05 | -0.1664 | -0.1664 | 6.1e-07 | 4000 | 4000/4000 | CD stationary | - | 0.11315 |
+
+Level 0 (144×70): max |CD_GPU − CD_CPU| = 6.0e-08 (relative 3.7e-04 %), max |ΔCp| over the wall 5.8e-07; level 1 (288×140): max |ΔCD| = 2.7e-07 (relative 1.5e-03 %, at M = 0.8 where CD = 0.013), max |ΔCp| 2.2e-06.
+The GPU stops after the same number of iterations as the CPU at all 24 sweep points (both levels; the stop rule is evaluated on the GPU residual history, which agrees with the CPU's), by "CD stationary" except M = 1.5 on level 0 (6 orders reached). The Stoney column is the digitised free-flight data of
+`bowshock_cfd::transonic::stoney` (NACA RM L53K17, Fig. 5, ±0.01), shown for reference only: the comparison with experiment is the CPU README's; this crate only reproduces the CPU solution. Level 0 table: `out/gpu_transonic/sweep_cone_L0.csv`.
+
+### Timing
+Steady cost at M = 0.9 (`transonic_gpu --bench-only`, 1000 iterations from the free stream, best of 3, sync every 50, history kernels on; Luma main f29290fb, RTX 3090, load average 7 – 17):
+
+| grid | cells | CPU f64 rayon µs/iter | GPU-guarded extended µs/iter | GPU-direct extended | guarded f32 | guarded extended speed-up vs CPU | direct extended speed-up | extended / f32 cost |
+|---|---|---|---|---|---|---|---|---|
+| L0 144×70 | 10080 | 940 | 89.5 | 103.9 | 26.2 | 10.5x | 9.1x | 3.41x |
+| L1 288×140 | 40320 | 2121 | 145.1 | 152.9 | 33.6 | 14.6x | 13.9x | 4.32x |
+
+Time to convergence of the whole 12-point sweep (iterations × steady cost; 127 078 iterations on level 0, 200 500 on level 1, same count on CPU and GPU up to the ≤ 49 extra GPU iterations of the last chunk):
+level 0: CPU 119 s, GPU 11.4 s (10.5x); level 1: CPU 425 s, GPU 29 s (14.6x); per Mach number 0.3 – 1.7 s on the GPU (level 0), 0.6 – 4.4 s (level 1) vs 3 – 18 s / 8 – 64 s on the CPU (e.g. M = 0.98: 16 500 / 30 000 iterations).
+Measured wall time of the sweeps themselves (the loop including the residual-history and state read-back for the CD sample every 50 iterations; taken while the machine was at load average 20 – 60, CPU side inflated up to ~2x, see Caveats): level 0: CPU 271 s, GPU 15.2 s (17.8x, 2129 / 120 µs per iteration);
+level 1: CPU 639 s, GPU 41.0 s (15.6x, 3188 / 204 µs per iteration). The GPU loop's per-iteration cost is ≈ 1.3 – 1.4x the steady cost at both levels (state download every 50 iterations plus the load) [INFERENCE: not separated].
+
+### Far-field BC validation (tests)
+* `characteristic_far_field_preserves_the_free_stream` (M = 0.9 and 1.3, 40×20 box, 30 iterations from the uniform state): CPU deviation 2e-16; GPU 8.6e-8 / 6.6e-8 (extended), ≤ 4e-7 (f32): geometry rounding only, no growth.
+* `characteristic_far_field_matches_cpu_on_a_perturbed_state`: Riemann, free-stream and extrapolation branches and the pressure outflow (M = 0.9, 1.3 × `Characteristic`/`PressureOutflow` outflow × both formulations × f32/extended): state ≤ 5.2e-8 (extended) / 1.1e-6 (f32).
+* `transonic_state_after_20_iterations_matches_cpu`, `transonic_run_and_warm_start_match_cpu`: the real case at M = 0.9 / warm start 0.95: state ≤ 1.1e-7, CD ≤ 1.6e-7 relative, wall Cp ≤ 2.7e-7 (see "Tests").
 
 ## The f32 residual floor: cause, evidence, fix
 
@@ -361,7 +477,7 @@ All 12 cases reach the CPU's 6-orders criterion with the default precision, in t
 agree: the GPU solves the same discrete problem to ~1e-6), in both formulations (`Guarded`, `Direct`). The 15° / minmod / 100×50 case continues to 10.5 orders (see Evidence 2). Accuracy, with the CPU as reference, improved
 by 2 – 3 orders: avg Cp difference 2e-8 … 3e-7 (relative; before: 1.4e-5 … 1.1e-4) and field difference ≤ 2.8e-6 p/p∞ (before ≤ 2.2e-4); see the accuracy tables below.
 
-**Performance cost** (steady state, 15°, minmod, best of 3, history kernels on, sync every 50): 100x50: 128.6 µs/iter extended vs 89.8 µs f32 (1.43x cost; CPU 601 µs → speed-up 4.7x instead of 6.7x); 200x100: 130.8 µs/iter extended vs 93.5 µs f32 (1.40x cost; CPU 1206 µs → speed-up 9.2x instead of 12.9x); 400x200: 262.1 µs/iter extended vs 139.7 µs f32 (1.88x cost; CPU 2930 µs → speed-up 11.2x instead of 21.0x) (compensated: 84.8, 88.9, 154.8 µs). The extended precision is host-launch-bound on the small grids (7 launches/iteration, same count as f32) and device-bound at 400x200, where the df arithmetic costs ~2 x. See the steady-state table below.
+**Performance cost** (steady state, 15°, minmod, best of 3, history kernels on, sync every 50, Luma main f29290fb): 100x50: 66.9 µs/iter extended vs 23.4 µs f32 (2.86x cost; CPU 596 µs → speed-up 8.9x instead of 25x); 200x100: 74.2 µs/iter extended vs 28.8 µs f32 (2.58x cost; CPU 1211 µs → speed-up 16.3x instead of 42x); 400x200: 235.8 µs/iter extended vs 60.0 µs f32 (3.93x cost; CPU 2960 µs → speed-up 12.6x instead of 49x) (compensated: 24.4, 30.5, 75.5 µs). With the much cheaper Luma launches (0.8 µs instead of 8.5 µs) the f32 solver became device-bound at all sizes and the df arithmetic of the extended precision, which used to hide behind the launch overhead on the small grids (1.4x cost on the old Luma), costs 2.6 – 3.9x. See the steady-state table below.
 
 ### Compiler pitfalls found on the way (important for anybody doing error-free arithmetic in WGSL/Luma)
 
@@ -392,7 +508,7 @@ The floor scales like 1/CFL, i.e. like 1/dt (update quantisation), noise in the 
 The product floor × CFL is roughly constant (4 – 6e-5 at 100×50, 1.0 – 1.5e-4 at 200×100) and the floor doubles with refinement, as the update-quantisation estimate `ulp(u)/dt` predicts
 (`dt ∝ CFL·Δx`); together with Evidence 1 and 2 above this confirms the diagnosis (it was an inference before). With `Precision::Extended` the floor is gone: there is no CFL-dependent plateau, the residual keeps falling to 1e-10 (100×50).
 
-## Tests (`cargo test --release -p bowshock-gpu`, 5 tests, all pass)
+## Tests (`cargo test --release -p bowshock-gpu`, 10 tests, all pass, ~6 s)
 
 1. `hllc_and_reconstruction_match_cpu_on_random_states`: 20 000 random states (smooth neighbours with 0.3 % / 3 % perturbations and unrelated
    states; random normals) through the f32 GPU `reconstruct` + `hllc` + `face_flux` kernels vs `bowshock_cfd::flux` on the same f32 inputs, first
@@ -410,22 +526,30 @@ The product floor × CFL is roughly constant (4 – 6e-5 at 100×50, 1.0 – 1.5
 5. `extended_precision_reaches_six_orders_on_a_small_grid` (regression test of the residual floor, ~2 s): 60×30 cone grid, 15°, minmod, guarded. `F32`
    stalls at 4.5 orders and `Compensated` at 4.9 orders within 4000 iterations (asserted < 5.5), `Extended` reaches 6.2 orders after 1250
    iterations (asserted ≥ 6) and its state agrees with the f64 CPU solution after the same number of iterations to 2e-7 (asserted < 1e-5).
+6. `ogive_state_and_wall_cp_match_cpu`: ogive-cylinder, M = 1.98, coarse grid 114×50 (`bowshock_cfd::ogive::OgiveCase::level(1.98, 0)`: free-stream inflow, extrapolation outflow, slip wall /
+   axis, free-stream outer boundary; tip node at x = 0 and junction node on the grid): 20 iterations (5 first order), `Direct`/`Guarded` × `F32`/`Extended` vs CPU: max |ΔU|/(1+|U|) ≤ 1.2e-6 (f32) / 1.4e-7 (extended, asserted < 3e-7),
+   residual history ≤ 6.0e-7 / 7.1e-8 (asserted < 2e-7); then 500 iterations: forebody CD relative difference −5.9e-8, max |ΔCp| over the whole wall 1.0e-7 (asserted < 1e-5 each).
+7. `characteristic_far_field_preserves_the_free_stream`: 40×20 axisymmetric box (stretched grid, axis `jmin`, characteristic BC on imin / imax / jmax), 30 iterations from the uniform free stream at M = 0.9 (all far-field faces subsonic)
+   and M = 1.3: the CPU keeps it to 2e-16; the GPU (both formulations, `F32` and `Extended`) keeps it to 8.6e-8 / 6.6e-8 (extended) and 4.0e-7 / 9.4e-8 (f32) — the f32 geometry rounding, no growth, no spurious waves from the BC.
+8. `characteristic_far_field_matches_cpu_on_a_perturbed_state`: the same box with a smooth density / pressure / transverse-velocity perturbation of the free stream (so that the Riemann, free-stream and extrapolation branches and the pressure outflow
+   are all hit), 20 iterations, M = 0.9 and 1.3 × outflow `Characteristic` and `PressureOutflow` × `Direct`/`Guarded` × `F32`/`Extended`: state ≤ 5.2e-8 (extended) / 1.1e-6 (f32), residual history ≤ 6.3e-8 / 8.9e-7 relative.
+9. `transonic_state_after_20_iterations_matches_cpu`: the transonic case (`TransonicCase::level(0.9, 0)`, ogive-cylinder in the large domain, 144×70, characteristic far field), 20 iterations, both formulations, f32 / extended:
+   state ≤ 1.1e-7 (extended, asserted < 3e-7) / 8.0e-7 (f32), residual history ≤ 1.7e-7 (asserted < 5e-7) / 8.6e-7.
+10. `transonic_run_and_warm_start_match_cpu`: `GpuTransonic::run_on` vs `bowshock_cfd::transonic::run_on` with the same arguments, 200 iterations at M = 0.9 (cold start) and then 200 iterations at M = 0.95 warm-started from that field
+    (`r_ref` = cold-start peak): residual history ≤ 3.2e-7 / 2.4e-6 relative, forebody CD relative difference −1.2e-7 / +1.6e-7, max |ΔCp| ≤ 2.7e-7, CD-history samples ≤ 6.5e-8 (asserted < 1e-4 / 1e-5 / 1e-5 / 1e-6).
 
 ## Luma friction / feedback
 
 Everything worked without a Luma bug: no wrong result, no panic, poisoned arrays never triggered, argument/binding checking at launch was helpful.
 Observations, most important first (the first two decided the structure of the solver; item 9 was found while fixing the f32 floor):
 
-1. **Host cost per launch ≈ 8.2 – 8.6 µs, independent of problem size** (`launch_overhead` above: 4000 dependent trivial launches,
-   64 … 80 000 invocations; record+sync 9 µs). `Context::launch` creates a new compute pass per dispatch, allocates a `Vec` of bindings,
-   hashes a `BindKey` (cloned `wgpu::Buffer`s) into a `HashMap`, and takes fresh arena slots for the grid uniform and every uniform argument.
-   With 17 launches per iteration the direct solver is host-bound at every grid size (≈ 150 µs/iter); only fusing kernels (7 launches)
-   helped. Suggestions: one compute pass for consecutive launches of a batch (or at least for launches without barriers), cache the bind-group
-   key without cloning buffers, reuse the grid-uniform slot when the size is unchanged.
-2. **No public non-blocking submit; batches go out only every 256 dispatches or at a sync.** `Context::flush` is `pub(crate)`. For a pipeline
-   like 7 launches × K iterations the GPU receives nothing until 256 dispatches are recorded, and the sync then waits for the unsubmitted remainder serially
-   [INFERENCE from the code and the sync-cost numbers above: ≈ 1 ms per sync at K = 50]. A `ctx.flush()` (submit without waiting), a smaller adaptive auto-flush threshold, and a non-blocking
-   read-back (`to_vec_async` / a future, so the residual history of chunk n is fetched while chunk n+1 runs) would remove most of the sync cost.
+1. **Host cost per launch (older Luma): ≈ 8.2 – 8.6 µs, independent of problem size** (4000 dependent trivial launches, 64 … 80 000 invocations; record+sync 9 µs). `Context::launch` created a new compute pass per dispatch, allocated a `Vec` of bindings,
+   hashed a `BindKey` into a `HashMap` and took fresh arena slots for every uniform. With 17 launches per iteration the direct solver was host-bound at every grid size (≈ 150 µs/iter); only fusing kernels (7 launches) helped.
+   **On the current main (commit 8bc26d3 "Cut launch overhead ...") the same measurement gives 0.75 – 0.93 µs per launch recorded and 1.2 – 2.1 µs record+sync (table above)**: the guarded solver records an iteration (7 launches) in ≈ 9 µs and the direct one (17 launches) in ≈ 24 µs, so
+   neither is host-bound any more (steady costs 23 – 60 µs / 44 – 101 µs in f32). The df arithmetic of the extended precision now shows: 2.6 – 3.9 × the f32 cost at the same launch count.
+2. **No public non-blocking submit; batches go out only every 256 dispatches or at a sync** (older Luma). `Context::flush` was `pub(crate)`; with 7 launches × K iterations the GPU received nothing until 256 dispatches were recorded
+   [INFERENCE from the sync-cost numbers: ≈ 1 ms per sync at K = 50 then]. Luma commit 8bc26d3 ("add flush, profiling, vector reductions, scoped reflection") makes `Context::flush` public (verified in `context.rs`); `bowshock-gpu` does not use it yet.
+   On main the measured sync cost is ≈ 0.3 ms at K = 50 ((24.9 − 18.6) µs × 50, guarded f32, 100×50) and ≈ 0.07 ms at K = 1. A non-blocking read-back (`to_vec_async` / a future) would still let the history of chunk n be fetched while chunk n+1 runs.
 3. **Binding reflection covers all module-level globals, not those used by the entry point** (`build_core` iterates `module.global_variables`;
    verified: a module with `fn k1` using only `b` still reports bindings `[a, b]` for `k1`). A shared WGSL module with several entry points needing different
    bindings is therefore impossible; I build one source (COMMON + bindings + `main`) per kernel, i.e. compile the shared functions 8 times
@@ -457,9 +581,12 @@ builtin (renamed `reflect_wall`); `workgroupBarrier()` must be in uniform contro
 
 ## Caveats
 
-* Timings were taken on a shared desktop (browser, compositor, language server running); bowshock-cfd author's heavy CPU jobs had finished before the run
-  but the load average was still decaying at its start. The steady benchmark (best of 3 × 2000 iterations) is the reference; the per-run wall times
-  in "Wall time of the convergence runs themselves" are noisier (e.g. the CPU's 1379 µs/iter for the very first case vs ≈ 610 µs for the same grid later).
+* Timings were taken on a shared desktop (browser, compositor, language server) and, in part, while the bowshock-cfd side was running its own heavy CPU jobs (load average 20 – 60 on 32 threads). The steady benchmarks (best of 3,
+  `cone_gpu --bench`, `ogive_gpu --bench-only`, `transonic_gpu --bench-only`) were run at load average 7 – 17 and are the reference; "time to the stopping criterion" tables multiply iteration counts by these steady costs. Per-run wall times
+  (cone "Wall time of the convergence runs themselves", the sweep timings of `transonic_gpu`) were taken under the heavier load: the CPU side is inflated by up to ~2x there (e.g. 4 ms/iter vs 2.1 ms/iter on the 288×140 transonic grid at load 7 – 17),
+  the GPU side by 1.2 – 1.5x.
+* All timing tables were regenerated on Luma main f29290fb (Cargo.lock; the previous tables were taken on an older Luma with ≈ 8.5 µs of host time per launch, see "Luma friction"). The accuracy and convergence tables of the cone cases are unchanged to the printed digits (checked by re-running `cone_gpu`).
+* The NVIDIA driver printed `NVVM compilation failed: 3` once, in a combined bench session (`cone_gpu --bench`, `ogive_gpu --bench-only`, `transonic_gpu --bench-only` back to back); I could not attribute it to one binary and it did not reproduce when `ogive_gpu --bench-only --quick` and `cone_gpu --bench --quick --no-cpu` were re-run alone. All results of that session were correct (tests and tables agree with the CPU).
 * The CPU run in `cone.rs` repeats `run_cone`'s loop and stopping logic using the public `Solver::step` (so the final CPU state is available) and copies the
   private `postprocess` of `bowshock_cfd::cone`; it reproduces bowshock-cfd's reference iteration counts exactly. If bowshock-cfd's criteria change, `Monitor` must follow.
 * GPU runs execute up to K−1 = 49 iterations past the iteration where the criterion fired (`exec` vs `stop` in the tables); the final state is the one after `exec`.
@@ -469,3 +596,8 @@ builtin (renamed `reflect_wall`); `workgroupBarrier()` must be in uniform contro
   GPU converges its own discrete problem (hence 1e-6-level field differences and residuals of the CPU operator evaluated on the GPU state of 8e-6 … 3e-5, see "The f32 residual floor"). Uploading the geometry as hi/lo pairs would remove it; not needed for the 6-orders target.
 * The GPU solver mirrors bowshock-cfd as of its SSP-RK3 + HLLC/Rusanov-blend version (`flux::face_flux`, `Solver::step`/`stage`); BCs, limiters, grid and
   first-order start-up are as before.
+* `ogive.rs` / `transonic.rs` / `run.rs`: the CPU runs use the public `Solver::step` / `transonic::run_on` stopping rules (`run::Monitor` = `run_ogive`'s criteria; the transonic GPU loop calls
+  `bowshock_cfd::transonic::stop_reason`, the very function `run_on` uses, and `finish` for the post-processing, so both sides stop and post-process identically); the ogive wall post-processing is a copy of the private
+  `bowshock_cfd::ogive::postprocess`. The transonic GPU loop samples the forebody CD every 50 iterations and therefore synchronises every `transonic::SYNC` = 50 iterations (the CPU's sampling interval).
+* The characteristic far-field ghost state is evaluated with the integer power `rho = rho_ref (c_b / c_ref)^5` instead of the CPU's `powf` form (identical mathematically for gamma = 1.4,
+  asserted when the shaders are generated: `shaders::characteristic_exponent`); the difference is ~1e-16 relative in the df evaluation.

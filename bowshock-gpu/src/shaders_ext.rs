@@ -84,6 +84,40 @@ fn dreflect_wall(w: W, nx: f32, nr: f32) -> W {
     return W(w.r, dsub(w.u, dmulf(un, 2.0 * nx)), dsub(w.v, dmulf(un, 2.0 * nr)), w.p);
 }
 
+// df translations of `characteristic_ghost`, `pressure_outflow_ghost`, `far_ghost` of `COMMON` (bowshock-cfd `bc.rs`);
+// `w` is the first interior cell, `(nx, nr)` the outward unit normal. `rho = rho_ref (c_b / c_ref)^5` (see COMMON).
+fn dcharacteristic_ghost(fs: W, w: W, nx: f32, nr: f32) -> W {
+    let ci = dsound(w);
+    let uni = dun(w, nx, nr);
+    let m = ddiv(uni, ci);
+    if (!dlt(dc(-1.0), m)) { return fs; }
+    if (!dlt(m, dc(1.0))) { return w; }
+    let ce = dsound(fs);
+    let une = dun(fs, nx, nr);
+    let k2 = dmulf(d_igm1(), 2.0);
+    let r_out = dadd(uni, dmul(ci, k2));
+    let r_in = dsub(une, dmul(ce, k2));
+    let un_b = dmulf(dadd(r_out, r_in), 0.5);
+    let c_b = dmax(dmulf(dmul(d_gm1(), dsub(r_out, r_in)), 0.25), dc(1e-8));
+    var rf = fs; var un_ref = une; var c_ref = ce;
+    if (!dlt(un_b, dc(0.0))) { rf = w; un_ref = uni; c_ref = ci; }
+    let q = ddiv(c_b, c_ref);
+    let q2 = dmul(q, q);
+    let rho = dmul(rf.r, dmul(dmul(q2, q2), q));
+    let dn = dsub(un_b, un_ref);
+    return W(rho, dadd(rf.u, dmulf(dn, nx)), dadd(rf.v, dmulf(dn, nr)), ddiv(dmul(dmul(rho, c_b), c_b), d_gamma()));
+}
+
+fn dpressure_outflow_ghost(p_back: D, w: W, nx: f32, nr: f32) -> W {
+    if (!dlt(ddiv(dun(w, nx, nr), dsound(w)), dc(1.0))) { return w; }
+    return W(w.r, w.u, w.v, p_back);
+}
+
+fn dfar_ghost(bc: u32, fs: W, edge: W, f: vec4<f32>, outward: f32) -> W {
+    if (bc == 3u) { return dcharacteristic_ghost(fs, edge, outward * f.x, outward * f.y); }
+    return dpressure_outflow_ghost(fs.p, edge, outward * f.x, outward * f.y);
+}
+
 // a = q_i - q_{i-1}, b = q_{i+1} - q_i (bowshock-cfd `limited_slope`).
 fn dslope(a: D, b: D, lim: u32) -> D {
     if (lim == 0u) { return dc(0.0); }
@@ -257,14 +291,16 @@ fn prim_i(i: i32, j: i32) -> W {
         let f = iface[u32(j) * (p.ni + 1u)];
         if (p.bc0 == 0u) { return fs_state(); }
         if (p.bc0 == 1u) { return cell_prim(0, j); }
-        return dreflect_wall(cell_prim(k - 1, j), f.x, f.y);
+        if (p.bc0 == 2u) { return dreflect_wall(cell_prim(k - 1, j), f.x, f.y); }
+        return dfar_ghost(p.bc0, fs_state(), cell_prim(0, j), f, -1.0);
     }
     if (i >= ni) {
         let k = i - ni + 1;
         let f = iface[u32(j) * (p.ni + 1u) + p.ni];
         if (p.bc1 == 0u) { return fs_state(); }
         if (p.bc1 == 1u) { return cell_prim(ni - 1, j); }
-        return dreflect_wall(cell_prim(ni - k, j), f.x, f.y);
+        if (p.bc1 == 2u) { return dreflect_wall(cell_prim(ni - k, j), f.x, f.y); }
+        return dfar_ghost(p.bc1, fs_state(), cell_prim(ni - 1, j), f, 1.0);
     }
     return cell_prim(i, j);
 }
@@ -276,14 +312,16 @@ fn prim_j(i: i32, j: i32) -> W {
         let f = jface[u32(i)];
         if (p.bc2 == 0u) { return fs_state(); }
         if (p.bc2 == 1u) { return cell_prim(i, 0); }
-        return dreflect_wall(cell_prim(i, k - 1), f.x, f.y);
+        if (p.bc2 == 2u) { return dreflect_wall(cell_prim(i, k - 1), f.x, f.y); }
+        return dfar_ghost(p.bc2, fs_state(), cell_prim(i, 0), f, -1.0);
     }
     if (j >= nj) {
         let k = j - nj + 1;
         let f = jface[p.nj * p.ni + u32(i)];
         if (p.bc3 == 0u) { return fs_state(); }
         if (p.bc3 == 1u) { return cell_prim(i, nj - 1); }
-        return dreflect_wall(cell_prim(i, nj - k), f.x, f.y);
+        if (p.bc3 == 2u) { return dreflect_wall(cell_prim(i, nj - k), f.x, f.y); }
+        return dfar_ghost(p.bc3, fs_state(), cell_prim(i, nj - 1), f, 1.0);
     }
     return cell_prim(i, j);
 }
@@ -459,10 +497,11 @@ fn wset(i: i32, j: i32, v: W) {
     w[k] = w_hi(v);
     w[k + 1u] = w_lo(v);
 }
-fn dghost(bc: u32, fs: W, edge: W, mirror: W, f: vec4<f32>) -> W {
+fn dghost(bc: u32, fs: W, edge: W, mirror: W, f: vec4<f32>, outward: f32) -> W {
     if (bc == 0u) { return fs; }
     if (bc == 1u) { return edge; }
-    return dreflect_wall(mirror, f.x, f.y);
+    if (bc == 2u) { return dreflect_wall(mirror, f.x, f.y); }
+    return dfar_ghost(bc, fs, edge, f, outward);
 }
 
 @compute @workgroup_size(64)
@@ -475,18 +514,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let j = i32(t);
         for (var k: i32 = 1; k <= NG; k++) {
             var f = iface[t * (p.ni + 1u)];
-            wset(-k, j, dghost(p.bc0, fs, wget(0, j), wget(k - 1, j), f));
+            wset(-k, j, dghost(p.bc0, fs, wget(0, j), wget(k - 1, j), f, -1.0));
             f = iface[t * (p.ni + 1u) + p.ni];
-            wset(ni + k - 1, j, dghost(p.bc1, fs, wget(ni - 1, j), wget(ni - k, j), f));
+            wset(ni + k - 1, j, dghost(p.bc1, fs, wget(ni - 1, j), wget(ni - k, j), f, 1.0));
         }
     } else if (t < p.nj + p.ni) {
         let iu = t - p.nj;
         let i = i32(iu);
         for (var k: i32 = 1; k <= NG; k++) {
             var f = jface[iu];
-            wset(i, -k, dghost(p.bc2, fs, wget(i, 0), wget(i, k - 1), f));
+            wset(i, -k, dghost(p.bc2, fs, wget(i, 0), wget(i, k - 1), f, -1.0));
             f = jface[p.nj * p.ni + iu];
-            wset(i, nj + k - 1, dghost(p.bc3, fs, wget(i, nj - 1), wget(i, nj - k), f));
+            wset(i, nj + k - 1, dghost(p.bc3, fs, wget(i, nj - 1), wget(i, nj - k), f, 1.0));
         }
     }
 }

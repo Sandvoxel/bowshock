@@ -13,8 +13,11 @@
 //! the residual ([`shaders_ext`]), which converges like the f64 CPU solver. See the README, "The f32 residual floor".
 
 pub mod cone;
+pub mod ogive;
+pub mod run;
 pub mod shaders;
 pub mod shaders_ext;
+pub mod transonic;
 
 use bowshock_cfd::flux::Limiter;
 use bowshock_cfd::gas::prim_to_cons;
@@ -77,6 +80,8 @@ fn bc_code(b: Bc) -> u32 {
         Bc::Freestream => 0,
         Bc::Extrapolate => 1,
         Bc::SlipWall => 2,
+        Bc::Characteristic => 3,
+        Bc::PressureOutflow => 4,
     }
 }
 
@@ -497,6 +502,16 @@ impl GpuSolver {
 
     pub fn precision(&self) -> Precision {
         self.prec
+    }
+
+    pub fn config(&self) -> &Config {
+        &self.cfg
+    }
+
+    /// Mutable configuration, e.g. to switch the free stream (Mach number of a warm-started sweep), CFL or limiter between
+    /// runs without touching the state: every launch reads the configuration afresh (`params`).
+    pub fn config_mut(&mut self) -> &mut Config {
+        &mut self.cfg
     }
 
     /// Stage-1 `d rho / dt` of every cell from the last iteration (diagnostics).

@@ -18,6 +18,10 @@ path = "src/bin/cone.rs"
 name = "ogive"
 path = "src/bin/ogive.rs"
 
+[[bin]]
+name = "transonic"
+path = "src/bin/transonic.rs"
+
 [dependencies]
 rayon = "1"
 

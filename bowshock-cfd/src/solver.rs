@@ -5,6 +5,7 @@
 //! 2. flux per i-face / j-face (`face_flux`: MUSCL reconstruct + HLLC blended to Rusanov in shocks);
 //! 3. per-cell residual `dU/dt = -(1/V) sum_f w_f F_f + (0,0,pA/V,0)` and local `dt`.
 
+use crate::bc::{characteristic_ghost, pressure_outflow_ghost};
 use crate::flux::{face_flux, Limiter};
 use crate::gas::{cons_to_prim, prim_to_cons, reflect, sound_speed, Cons, Prim};
 use crate::grid::{Face, Grid};
@@ -20,6 +21,12 @@ pub enum Bc {
     /// normal. Also used for the symmetry axis `r=0` (normal = r direction); axis faces carry
     /// zero flux weight `r_mid = 0`.
     SlipWall,
+    /// Characteristic (Riemann-invariant) far field for subsonic / transonic flow: per face the normal Mach
+    /// number of the interior cell selects supersonic inflow (free stream), subsonic inflow/outflow
+    /// (1-D Riemann invariants, free stream outside) or supersonic outflow (zero gradient), see `bc.rs`.
+    Characteristic,
+    /// Fixed static pressure `p_inf` outflow (subsonic faces; supersonic faces extrapolate).
+    PressureOutflow,
 }
 
 #[derive(Clone, Debug)]
@@ -78,11 +85,15 @@ impl Solver {
         self.w[pidx(self.grid.ni, i as isize, j as isize)]
     }
 
-    fn ghost_state(bc: Bc, fs: &Prim, edge: &Prim, mirror: &Prim, f: &Face) -> Prim {
+    /// `outward` is `+1` if the face normal `(nx, nr)` (pointing towards increasing i or j) is the outward
+    /// normal of the domain (imax, jmax) and `-1` if it points into the domain (imin, jmin).
+    fn ghost_state(bc: Bc, fs: &Prim, edge: &Prim, mirror: &Prim, f: &Face, outward: f64) -> Prim {
         match bc {
             Bc::Freestream => *fs,
             Bc::Extrapolate => *edge,
             Bc::SlipWall => reflect(mirror, f.nx, f.nr),
+            Bc::Characteristic => characteristic_ghost(fs, edge, outward * f.nx, outward * f.nr).0,
+            Bc::PressureOutflow => pressure_outflow_ghost(fs[3], edge, outward * f.nx, outward * f.nr),
         }
     }
 
@@ -95,22 +106,22 @@ impl Solver {
             for k in 1..=NG as isize {
                 let f = &g.iface[j as usize * (ni + 1)];
                 let (edge, mir) = (w[pidx(ni, 0, j)], w[pidx(ni, k - 1, j)]);
-                w[pidx(ni, -k, j)] = Self::ghost_state(bc[0], &fs, &edge, &mir, f);
+                w[pidx(ni, -k, j)] = Self::ghost_state(bc[0], &fs, &edge, &mir, f, -1.0);
                 let f = &g.iface[j as usize * (ni + 1) + ni];
                 let n = ni as isize;
                 let (edge, mir) = (w[pidx(ni, n - 1, j)], w[pidx(ni, n - k, j)]);
-                w[pidx(ni, n + k - 1, j)] = Self::ghost_state(bc[1], &fs, &edge, &mir, f);
+                w[pidx(ni, n + k - 1, j)] = Self::ghost_state(bc[1], &fs, &edge, &mir, f, 1.0);
             }
         }
         for i in 0..ni as isize {
             for k in 1..=NG as isize {
                 let f = &g.jface[i as usize];
                 let (edge, mir) = (w[pidx(ni, i, 0)], w[pidx(ni, i, k - 1)]);
-                w[pidx(ni, i, -k)] = Self::ghost_state(bc[2], &fs, &edge, &mir, f);
+                w[pidx(ni, i, -k)] = Self::ghost_state(bc[2], &fs, &edge, &mir, f, -1.0);
                 let f = &g.jface[nj * ni + i as usize];
                 let n = nj as isize;
                 let (edge, mir) = (w[pidx(ni, i, n - 1)], w[pidx(ni, i, n - k)]);
-                w[pidx(ni, i, n + k - 1)] = Self::ghost_state(bc[3], &fs, &edge, &mir, f);
+                w[pidx(ni, i, n + k - 1)] = Self::ghost_state(bc[3], &fs, &edge, &mir, f, 1.0);
             }
         }
     }

@@ -4,6 +4,8 @@
 //! `solver`) is a plain function of its inputs with no hidden state so that it can be
 //! ported one-to-one to WGSL and validated against this crate.
 
+pub mod bc;
+pub mod body_grid;
 pub mod cone;
 pub mod flux;
 pub mod gas;
@@ -12,3 +14,4 @@ pub mod ogive;
 pub mod shock_expansion;
 pub mod solver;
 pub mod taylor_maccoll;
+pub mod transonic;

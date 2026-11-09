@@ -14,6 +14,14 @@ path = "src/lib.rs"
 name = "cone_gpu"
 path = "src/bin/cone_gpu.rs"
 
+[[bin]]
+name = "ogive_gpu"
+path = "src/bin/ogive_gpu.rs"
+
+[[bin]]
+name = "transonic_gpu"
+path = "src/bin/transonic_gpu.rs"
+
 [dependencies]
 luma = { git = "https://github.com/flipnoteman/Luma.git", branch = "main" }
 bowshock-cfd = { path = "../bowshock-cfd" }

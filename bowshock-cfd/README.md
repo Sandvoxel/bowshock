@@ -17,6 +17,10 @@ bowshock/
   bowshock-cfd/src/shock_expansion.rs  tangent-ogive geometry, tangent-cone and shock-expansion theory
   bowshock-cfd/src/ogive.rs       ogive-cylinder grid, case runner, wall post-processing, Perkins-Jorgensen data
   bowshock-cfd/src/bin/ogive.rs   ogive validation driver -> out/ogive/
+  bowshock-cfd/src/bc.rs          characteristic (Riemann-invariant) far-field + static-pressure outflow ghost states   <- BC kernels
+  bowshock-cfd/src/body_grid.rs   large-domain stretched grid for nose-cylinder bodies (ogive, cone, power/parabolic/Haack noses)
+  bowshock-cfd/src/transonic.rs   transonic case runner, post-processing, Stoney (RM L53K17) and Czarnecki-Monta (TN D-3516) data
+  bowshock-cfd/src/bin/transonic.rs   transonic Mach sweep driver -> out/transonic/
   bowshock-cfd/examples/diag.rs   convergence diagnostics (per-cell residual map -> out/diag/)
   out/                       CSV output of `cone`
 ```
@@ -73,6 +77,13 @@ Non-dimensionalisation: `rho_inf = 1`, `c_inf = 1` (⇒ `p_inf = 1/g`), `u_inf =
 | wall / axis (jmin) | slip wall: ghost layer k = interior cell k mirrored with the velocity reflected about the local face normal (`v_n → −v_n`). The same BC serves the symmetry axis `r = 0` for `x < 0` (normal = ±r) whose faces have zero weight. |
 | far field (jmax) | fixed free-stream ghost (valid because the outer boundary lies outside the shock and the flow is supersonic) |
 
+Selectable per boundary (`Config::bc`) in addition to the above (details in "Transonic" below):
+
+| `Bc` | condition |
+|---|---|
+| `Characteristic` | Riemann-invariant far field, regime per face by the interior normal Mach number (supersonic inflow = free stream, subsonic in/out = 1-D characteristic ghost, supersonic outflow = extrapolation). Valid on inflow, outflow and outer boundaries. |
+| `PressureOutflow` | fixed static pressure `p_inf` on subsonic outflow faces (`ρ, u, v` extrapolated), extrapolation if the face Mach number is ≥ 1. |
+
 ## Grid (`grid::cone_grid`)
 
 Cone nose at origin, half-angle `θc`, domain `x ∈ [-0.1 L, L]`, `L = 1`. Vertical grid lines `x = x_i`
@@ -101,12 +112,13 @@ Reference values, verified against independent sources:
 
 ```
 cd cfd
-cargo test --release                        # 17 unit tests (incl. a ~5 s convergence regression)
+cargo test --release                        # 28 unit tests (incl. a ~5 s convergence regression, BC / grid / transonic smoke tests)
 cargo run --release --bin cone              # M=2, 10° and 15°, grids 100x50, 200x100, 400x200 (≈2 min per limiter)
 cargo run --release --bin cone -- --quick   # skip the 400x200 grid
 cargo run --release --bin cone -- --limiter vanalbada [--mach 2.5]
 cargo run --release -p bowshock-cfd --example diag -- 10 200 100 minmod 8000   # residual map -> out/diag/
 cargo run --release --bin ogive -- --sweep  # ogive-cylinder validation M=1.98 (+ Mach sweep), ≈7 min; --quick skips the fine grid
+cargo run --release --bin transonic -- --body ogive --level 1   # transonic Mach sweep 0.7 – 1.5 -> out/transonic/ (see "Transonic")
 ```
 
 CSV files go to `out/`: `cp_<angle>deg_<ni>x<nj>_<limiter>.csv` (x/L, p/p∞, Cp from the wall-extrapolated
@@ -328,18 +340,171 @@ The two theories bracket the CFD at every Mach number; the shock-expansion estim
 * Experimental CD uncertainty: the assumed tip/tail Cp end values change CD by < 0.001 (they cover only `s < 0.021` and `s > 0.99`), so the bounds [0.1014, 0.1118] (±5 %) are dominated by the ±0.005 Cp uncertainty. The table values were transcribed by eye (see above).
 * The GPU port should be validated against the CFD, not the experiment: the CPU CFD (f64) is the reference for kernels; the experiment/theory comparison characterises the physics (Euler vs viscous flow), not the port.
 
-### Next: transonic (not done; out of scope)
+## Transonic (M ≈ 0.7 – 1.5): characteristic far field, large-domain grid, validation (`transonic` bin, `bc.rs`, `body_grid.rs`, `transonic.rs`)
 
-What the current solver lacks and what I recommend, in order:
+Additive: `cone_grid`, `ogive_grid`, the cone/ogive runners, flux and the existing BCs are untouched. The `cone --quick` / `ogive --quick`
+CSVs of the Cp and wall data are byte-identical to the previous ones (the residual-history files differ only at the 3e-16 relative level, from the
+order of the parallel `Σ r²` reduction; iteration counts are unchanged), and `cargo test --release -p bowshock-cfd` passes (28 tests).
 
-1. **Far-field / inflow-outflow BCs.** Fixed free-stream ghosts and zero-gradient outflow are only valid when every boundary is supersonic and the bow shock stays inside the domain. For M ≲ 1.3 the shock detaches far upstream
-   (and for M < 1 there is none, with a large subsonic perturbation field). Replace them with characteristic (Riemann-invariant) non-reflecting BCs, sub/supersonic switched per face by the sign of the normal Mach number, and an
-   outer boundary 20 – 50 body lengths away (or a far-field vortex/source correction) with strong radial stretching; the grid generator must stop sizing the domain from the attached-cone shock angle (`h_end` above).
-2. **Base / afterbody.** The body currently runs through the outflow plane, so there is no base. Transonic ogive-cylinders need either the cylinder extended long enough to be unaffected (done here) or a real base with a
-   wake: an H-grid with a base face and a wake block (or an O/C topology), plus a sting if comparing to sting-mounted data. Inviscid base pressure is ill-defined (set by numerical dissipation), so report forebody + cylinder pressure drag and
-   add base drag from an empirical base-pressure correlation, or move to a viscous model. Shoulder shock/boundary-layer interaction (flow on ogive-cylinders at M ≈ 0.8 – 1.2) is also a viscous problem: expect Euler to mis-place the shoulder shock and
-   over-predict its strength; at least a coupled integral boundary layer, ideally RANS (Spalart-Allmaras), is needed for credible transonic drag.
-3. **Convergence acceleration.** The explicit local-time-step SSP-RK3 at CFL 0.5 needs 3 – 9 k iterations at M ≥ 1.5 here; with subsonic regions the acoustic transit time grows like `1/(1 − M)` and the far field is large, so expect 10⁵+ iterations.
-   Recommended: FAS multigrid with the existing RK3 as smoother (Jameson-style; it maps to GPUs as plain stencil kernels and keeps the one-kernel-per-pass structure), optionally with implicit residual smoothing; a point-/line-implicit
-   or colour-ordered LU-SGS is the alternative but parallelises worse. Low-Mach preconditioning is not required down to M ≈ 0.5. Keep the Rusanov-blend shock sensor; add entropy fix/positivity checks for shock-induced separation-free but strong transonic shocks.
-4. **Validation data.** Not searched in this work; NACA Report 1386 (above) covers M = 1.24 – 7.4 but with the caveats given.
+### Far-field boundary conditions (`bc.rs`, `Bc::Characteristic`, `Bc::PressureOutflow`)
+
+Pure functions of the first interior cell, the free stream and the **outward** unit face normal; both ghost layers get the same boundary state (the GPU port
+mirrors them kernel-for-kernel). With `u_n = v·n`, `c` the sound speed:
+
+```
+R_out = u_n,i + 2 c_i/(g-1)   (u_n + c wave, from the interior)       R_in = u_n,e - 2 c_e/(g-1)   (u_n - c wave, from the free stream)
+u_n,b = (R_out + R_in)/2,   c_b = (g-1)/4 (R_out - R_in)
+entropy s = p/rho^g and tangential velocity: interior if u_n,b >= 0 (outflow), free stream otherwise (inflow)
+rho_b = (c_b²/(g s))^(1/(g-1)),   p_b = rho_b c_b²/g,   v_b = v_ref + (u_n,b - u_n,ref) n
+```
+
+The regime is chosen **per face from the interior normal Mach number** `M_n = v_i·n/c_i` (`bc::regime`): `M_n ≤ −1` supersonic inflow → ghost = free stream;
+`−1 < M_n < 0` subsonic inflow and `0 ≤ M_n < 1` subsonic outflow → the Riemann ghost above; `M_n ≥ 1` supersonic outflow → zero-gradient. A uniform stream is a fixed point for any
+normal (to 1e-13) in every regime, so the BC emits no spurious waves; `Bc::PressureOutflow` is the alternative outflow: subsonic faces take `ρ, u, v` from the interior and `p = p_inf`
+(supersonic faces extrapolate). The old `Freestream` / `Extrapolate` BCs stay available and are selected per boundary in `Config::bc`. Tests: regime selection by `M_n` (incl. the
+sign flip with the outward normal), ghost = free stream/interior for supersonic faces, Riemann invariants and entropy/tangential-velocity sources reproduced, free-stream fixed point
+for 16 normals × 7 Mach numbers, uniform flow preserved to < 1e-12 for 100 RK3 steps on a strongly curved stretched grid with the characteristic BCs on three sides at M = 0.5, 0.9, 0.98, 1.2
+(both outflow variants), and a pressure pulse leaving a subsonic domain (> 90 % of the perturbation gone through the BCs).
+
+### Large-domain grid (`body_grid::large_domain_grid`)
+
+H-grid like the existing ones (vertical lines, axis for `x < 0`, flat outer boundary `r = r_far`), `d = 1`, tip at the origin. Bodies: `Nose::{TangentOgive, Cone, Power, Parabolic, Haack}` on a cylinder.
+Default domain (`TransonicCase::with_body`, body length `L = L_nose + 6 d = 9 d`): inflow plane and outer boundary **10 L = 90 d** away, outflow plane 5 L = 45 d behind the shoulder
+(`--domain n` rescales the 10 L). x spacing: geometric growth upstream of the tip, `tanh` clustering on the nose at the tip **and** the shoulder with end cell `dx_tip`
+(0.03/0.015/0.0075 d for grid level 0/1/2), geometric growth along the cylinder and on the extension. r spacing: geometric from the wall (`dr_wall` = 0.03/0.015/0.0075 d).
+Levels 0/1/2 = 144×70 / 288×140 / 576×280 cells.
+**Afterbody choice: a sting.** The cylinder simply continues to the outflow plane (6 d inside the geometric cylinder segment, then the stretched extension). There is no base and no wake, so base pressure
+(ill-defined in Euler) cannot contaminate the forebody, and the zero-lift pressure drag of the body is the nose drag only (the cylinder has no axial projected area); the outflow plane is far away and coarse, and only
+exercised by the characteristic BC. The forebody CD is reported referenced to the base area, `CD = ∫₀¹ Cp d(r²/R²)` over the nose (extrapolated-wall Cp; the first-cell variant is also in the CSV).
+Limitation: MUSCL slopes are limited in index space (they ignore the stretching); growth ratios are 1.08 / 1.04 / 1.02 radially and 1.25 / 1.12 / 1.06 upstream of the tip for levels 0/1/2.
+
+### Case runner and convergence (`transonic::run_on`, `stop_reason`)
+
+Same scheme as before (HLLC/Rusanov blend, minmod, SSP-RK3, local dt, CFL 0.5, 300 first-order iterations on a cold start). Stop rule: density-residual drop of 6 orders (from the peak after iteration 20), **or**
+(every 500 iterations, from iteration 4000) forebody CD varied by < 2e-4 over the last 2000 iterations once the residual has dropped ≥ 2 orders ("CD stationary"). `--warm` starts every Mach number from the
+previous converged field (ascending order; the drop criterion is then relative to the cold-start peak). No implicit residual smoothing was added (the iteration counts below did not require it).
+
+### Data sources and their limits
+
+* **Czarnecki & Monta, NASA TN D-3516 (1966), NTRS 19660024157, Fig. 5 (p. 27)** — Cp(x) on a 3-caliber tangent-ogive cylinder (nose 3.00 d, ogive radius 9.25 d, d = 4.096 in, total 12.2 d, sting-mounted), α = 0, M = 0.7, 0.9, 1.0, 1.1, 1.2,
+  Langley 8-ft transonic pressure tunnel (slotted), fully turbulent (No. 60 carborundum 0.75 in from the tip), no Reynolds-number effect reported, no wall corrections. **Digitised from the plot by eye** (34 stations × 5 Mach numbers, embedded as
+  `transonic::czarnecki_monta`): ±0.01 Cp for x ≥ 6 in, ±0.02 on the nose (x < 5 in), ±0.015 within 1 in of a shock. The authors state that the slotted-wall reflection of the nose shock lands on the body at x ≈ 30 in (M = 1.1) and 48 in (M = 1.2), and the last points
+  (x ≥ 44 in) are near the base/sting (not described in what was read), so the statistics below use stations x ≤ 44.1 in (x ≤ 28.8 in at M = 1.1). The model is the `ogive` body.
+* **Stoney, NACA RM L53K17 (1954), NTRS 19930087953, Fig. 5 (p. 14)** — nose pressure drag CD (maximum-frontal-area = base-area reference) of eight fineness-ratio-3 noses vs Mach number 0.8 – 1.25, free flight (helium gun, no tunnel interference), Re = 8–15 × 10⁶, turbulent.
+  **Digitised from a poor scan** (curves, not tabulated): ±0.01 in CD and in M (more where curves overlap); embedded as `transonic::stoney` for the cone (9.46°), `x^1/2`, parabola K = 1, Von Kármán and LV-Haack. The "nose pressure drag" is derived by the author:
+  measured total CD − tare (afterbody + fins + base: 0.025 subsonic, ≈ 0.065 supersonic, Fig. 4, anchored at M = 1.2 on the Taylor-Maccoll cone drag) − calculated turbulent friction, so it carries an extra ≈ ±0.01 tare uncertainty (stated accuracy ±0.008 in total CD, ±0.005 in M).
+  Above M ≈ 1.225 the curves are fairings to the Ames data (NACA Rep. 1386) and second-order theory, not measurements (those rows are flagged and not used).
+* **Inspected, not used:** NACA Rep. 1386 / RM A52H28 (supersonic only, M ≥ 1.24); Swihart & Whitcomb RM L53H04 (tabulated Cp on a fineness-12 rounded fuselage body without cylinder, wall-interfered at M ≥ 1.02; partly transcribed during the search, not used); NACA TN 4234
+  (parabolic-arc bodies, plots only); NACA Rep. 1242 (Solomon, 20–30° cone-cylinders, too blunt); NASA TN D-6580 / D-7331 (supercritical blunt bodies).
+* **Transonic-similarity rule:** no verified tabulated similarity-rule drag prediction for a cone/ogive-cylinder was found, and none is given (an unverified formula would be fabricated data). The theory references used are Taylor-Maccoll (exact for the cone at supersonic speed)
+  and tangent-cone, valid only where the flow is attached and supersonic behind the shock (they agree with the CFD to 5 % from M = 1.1 up for the 9.46° cone, see below).
+
+### Results
+
+All runs: cold start, grid levels L0/L1/L2 = 144×70 / 288×140 / 576×280, minmod. CSV/tables in `out/transonic/` (`sweep_<body>_L<n>.csv`, `compare_<body>_L<n>.csv`, `cp_<body>_L<n>_M<m>.csv`, `residual_<body>_L<n>_M<m>.csv`
+(density residual + CD every 50 iterations), `cp_compare_ogive_L<n>_M<m>.csv`, `tables_<body>_L<n>.md`).
+
+**1. Surface Cp, tangent ogive cylinder vs TN D-3516** (CFD wall Cp extrapolated from cells 0/1, linearly interpolated at the orifices; RMS / max of CFD − data in Cp, "nose" = 8 orifices x/d ≤ 3, "valid" = 31 stations (25 at M = 1.1) as defined above)
+
+| M | grid | nose RMS | nose max | valid RMS | valid max | shoulder suction peak: data | CFD |
+|---|---|---|---|---|---|---|---|
+| 0.7 | L1 | 0.0144 | 0.0334 | 0.0092 | 0.0334 | −0.116 | −0.130 |
+| 0.9 | L1 | 0.0187 | 0.0556 | 0.0129 | 0.0556 | −0.167 | −0.180 |
+| 0.9 | L2 | 0.0181 | 0.0540 | 0.0124 | 0.0540 | −0.167 | −0.179 |
+| 1.0 | L1 | 0.0071 | 0.0138 | 0.0172 | 0.0415 | −0.241 | −0.248 |
+| 1.0 | L2 | 0.0079 | 0.0158 | 0.0180 | 0.0379 | −0.241 | −0.248 |
+| 1.1 | L1 | 0.0201 | 0.0416 | 0.0165 | 0.0416 | −0.172 | −0.172 |
+| 1.1 | L2 | 0.0213 | 0.0439 | 0.0168 | 0.0439 | −0.172 | −0.173 |
+| 1.2 | L1 | 0.0076 | 0.0137 | 0.0083 | 0.0162 | −0.131 | −0.140 |
+| 1.2 | L2 | 0.0083 | 0.0167 | 0.0086 | 0.0167 | −0.131 | −0.140 |
+
+(L0 = 144×70 gives the same numbers to ±0.005, e.g. M = 0.9: 0.0185 / 0.0530 / 0.0126 / 0.0530; M = 1.0: 0.0066 / 0.0104 / 0.0171 / 0.0469.) The grid change L1 → L2 moves the statistics by ≤ 0.0033, the data uncertainty is 0.01 – 0.02: **the Cp field is grid-converged to
+within the data uncertainty and agrees with the data to RMS 0.007 – 0.021** (the stated tunnel Mach non-uniformity, ±0.005 – 0.02 in M, is a comparable source of Cp scatter). Where the CFD misses the data by more than the digitisation uncertainty:
+(a) the shoulder at M = 0.7 / 0.9: the data peak earlier (x ≈ 9.8 in) and recover faster aft of the peak (CFD peak at x ≈ 10.5 in; largest errors at x = 11.8 in: −0.033 / −0.056) and the CFD suction peak is 0.013 – 0.014 deeper — **[INFERENCE]** boundary-layer displacement
+(the data are fully turbulent) and the sting, not tested; (b) M = 1.0 downstream of the shoulder: the data have a recompression shock at x ≈ 24 in (Cp −0.042 → +0.026), the free-air inviscid CFD recompresses smoothly with no shock: it is 0.013 – 0.037 above the data at x = 16.8 – 22.8 in (before the shock) and 0.028 – 0.042 below it at x = 24.7 – 28.8 in (after it);
+(c) the nose tip at M = 1.1: CFD +0.04 above the data at x = 1.0 and 1.95 in (digitisation ±0.02; the grit trip sits at 0.75 in); (d) M = 1.1, x > 30 in: the data contain the tunnel-reflected shock (Cp +0.06), absent in free air (excluded from "valid"). Peak suction agrees to 0.007 at M = 1.0, 0.000 at 1.1, 0.009 at 1.2.
+
+**2. Nose pressure drag vs Mach number.** Smooth noses (no shoulder corner) are the clean test: the Von Kármán nose, CFD L1 vs Stoney Fig. 5 (digitised, ±0.01 plus ≈ ±0.01 tare uncertainty):
+
+| M | CD CFD L1 | Stoney | CFD − Stoney |
+|---|---|---|---|
+| 0.7 – 0.9 | −0.0016 … −0.0010 | ≈ 0 (subsonic; assumed tare) | ≈ −0.001 |
+| 0.95 | 0.0079 | 0.000 | +0.008 |
+| 0.98 | 0.0285 | 0.018 (interpolated) | +0.011 |
+| 1.00 | 0.0445 | 0.030 | +0.015 |
+| 1.02 | 0.0616 | 0.046 (interpolated) | +0.016 |
+| 1.05 | 0.0791 | 0.070 | +0.009 |
+| 1.10 | 0.0857 | 0.075 | +0.011 |
+| 1.20 | 0.0871 | 0.080 | +0.007 |
+| 1.50 | 0.0841 | (faired, not used) | |
+
+The shape of the drag rise (onset at M ≈ 0.95, steep rise to M ≈ 1.05, plateau 0.08 – 0.09 above M = 1.1, nearly flat towards 1.5) is reproduced; the CFD lies **systematically 0.007 – 0.016 above** the digitised data, i.e. at the 1 – 1.5 σ level of the combined read-off + tare uncertainty
+(about ±0.014), so the agreement is to the uncertainty of the data but not better than that. The cone-cylinder (9.46° half angle, sharp shoulder corner), CD vs Stoney's cone curve:
+
+| M | L0 | L1 | L2 | Stoney cone | L1 − Stoney | Taylor-Maccoll cone |
+|---|---|---|---|---|---|---|
+| 0.8 | 0.0137 | 0.0129 | | 0.020 | −0.007 | |
+| 0.85 | 0.0217 | 0.0263 | | 0.025 | +0.001 | |
+| 0.9 | 0.0398 | 0.0471 | 0.0529 | 0.030 | +0.017 | |
+| 0.95 | 0.0701 | 0.0774 | | 0.060 | +0.017 | |
+| 0.98 | 0.0960 | 0.1042 | | 0.090 | +0.014 | |
+| 1.0 | 0.1215 | 0.1301 | 0.1351 | 0.110 | +0.020 | |
+| 1.02 | 0.1434 | 0.1504 | | 0.130 | +0.020 | |
+| 1.05 | 0.1545 | 0.1626 | 0.1669 | 0.160 | +0.003 | 0.2059 |
+| 1.1 | 0.1491 | 0.1550 | | 0.160 | −0.005 | 0.1620 |
+| 1.2 | 0.1333 | 0.1360 | 0.1374 | 0.140 | −0.004 | 0.1387 |
+| 1.5 | 0.1114 | 0.1123 | | (faired) | | 0.1132 |
+
+**Caveat for the cone-cylinder below M ≈ 1.05:** the sharp 9.46° shoulder corner is a singularity of the inviscid problem (the suction peak grows with refinement: `Cp_min` = −0.695 / −0.754 / −0.791 for L0/L1/L2 at M = 0.9), so the subsonic and
+low-transonic CD does **not** converge with the grid (M = 0.9: 0.0398 → 0.0471 → 0.0529; M = 1.0: 0.1215 → 0.1301 → 0.1351, successive increments shrink by ≈ 0.6 – 0.8 per refinement, i.e. slowly) and drifts away from the digitised data (+0.02 and rising); the agreement at L0 is partly fortuitous.
+At supersonic Mach numbers the corner cannot influence the nose and the CFD converges to Taylor-Maccoll (M = 1.2: −3.9 % / −2.0 % / −1.0 % for L0/L1/L2; M = 1.5: −1.5 % / −0.8 %). At M = 1.05 – 1.1 Taylor-Maccoll over-predicts the CFD (by 27 % / 4.5 % at L1): there the flow behind the nose shock is not supersonic enough for the cone solution to hold.
+Tangent-cone on the ogive nose is an upper bound (M = 1.2: 0.1725 vs CFD 0.106; M = 1.5: 0.1366 vs 0.103), as already seen at M = 1.98. Smooth noses (ogive, Kármán) are grid-insensitive: tangent-ogive CD L0 / L1 / L2 at M = 1.0: 0.0434 / 0.0438 / 0.0447, M = 1.2: 0.1038 / 0.1061 / 0.1074.
+
+The tangent parabola `K = 1` nose (`r/R = 2η − η²`, shoulder-tangent, the shape in Stoney's set closest to the tangent ogive; `--body parabola`) — CFD vs the digitised middle panel of Fig. 5 (the hardest panel to read; ±0.01, more where curves cross):
+
+| M | CD L0 | CD L1 | Stoney parabola | L1 − Stoney |
+|---|---|---|---|---|
+| 0.7 – 0.9 | −0.0029 … −0.0026 | −0.0019 … −0.0010 | ≈ 0 (subsonic) | ≈ −0.001 |
+| 0.95 | 0.0013 | 0.0026 | 0.010 | −0.007 |
+| 0.98 | 0.0188 | 0.0242 | 0.025 (interpolated) | −0.001 |
+| 1.00 | 0.0441 | 0.0446 | 0.045 | −0.000 |
+| 1.02 | 0.0680 | 0.0655 | 0.063 (interpolated) | +0.003 |
+| 1.05 | 0.0866 | 0.0875 | 0.090 | −0.003 |
+| 1.10 | 0.0986 | 0.1008 | 0.105 | −0.004 |
+| 1.20 | 0.1037 | 0.1060 | 0.120 (Van Dyke second-order marker 0.12) | −0.014 |
+| 1.50 | 0.1014 | 0.1028 | (faired, not used) | |
+
+Here the CFD sits within the ±0.01 read-off uncertainty (before the tare uncertainty) at every Mach number except M = 1.2 (−0.014) — the drag-rise Mach number and magnitude (0.045 at M = 1.0, 0.09 at 1.05) are reproduced. The Von Kármán nose above is
+offset by +0.007 – 0.016 and the parabola by −0.014 … +0.003, so the CFD-minus-data differences of the smooth noses lie within ±0.016 with no consistent sign across shapes: an uncertainty-level agreement, not a validation to better than ≈ 0.015 in CD.
+
+Tangent-ogive CD (base-area reference, nose only; no data for this exact shape) at L1: −0.0019 (0.7), −0.0017 (0.8), −0.0010 (0.9), 0.0022 (0.95), 0.0235 (0.98), 0.0438 (1.0), 0.0647 (1.02), 0.0868 (1.05), 0.1004 (1.1), 0.1061 (1.2), 0.1034 (1.5); the subsonic value is ≈ 0 as it must be
+(d'Alembert: the nose drag of a closed body is cancelled by the afterbody; the residual −0.002 is the numerical drag of the nose-only integral).
+
+**3. Convergence behaviour (honest numbers).** Subsonic and transonic runs do **not** reach 6 orders: the density residual falls ≈ 3 – 4 orders (L1: 2.6 – 4.2, L0: 3.1 – 5.3 orders for 0.7 ≤ M ≤ 1.2) and then sits on a floor of ≈ 5e-6 – 3e-4 (peak ≈ 0.1) set by the weakly
+unsteady shoulder shock; only M = 1.5 (L0) reached 6 orders. Iterations to the stop rule: L0 3 600 – 19 000 (M = 1.2 / 1.5: 3.6 – 4 k; M = 0.95, 0.98, 1.02: 16.5 – 19 k), L1 4 000 – 30 000 (typical 17 – 22 k), L2 9 000 – 34 000 for the Mach numbers run
+(cone M = 0.9: 29 k, 1.0: 11.5 k, 1.05: 33 k, 1.2: 9 k; ogive 9 – 34 k). Cost per iteration ≈ 1 ms (L0, 10 k cells) on 32 threads, ≈ 8 ms for L2 (161 k cells) on a loaded machine: a full L1 sweep takes 10 – 20 min, i.e. much slower than the supersonic cases but not the 10⁵+ iterations anticipated.
+The CD-stationary stop is a **weak** convergence statement (CD drifts < 2e-4 per 2000 iterations; the last-window CD range is 0.9 – 1.9e-4). Checks against much longer runs (cone, L0, no early stop, 80 000 iterations, residual 4.8 – 6.8 orders): CD at the stop → CD after the long run:
+M = 0.9: 0.03979 → 0.03973, 0.95: 0.07014 → 0.06983, 1.0: 0.12146 → 0.12138, 1.05: 0.15455 → 0.15469 (8 orders, 32 k iterations): ≤ 0.4 %. At L1, M = 0.95: 0.0774 → 0.0779 after 150 000 iterations (residual 2e-6, CD ±0.0005 oscillation).
+**Warm start does not help and can mislead:** the L1 warm-start sweep needed 19 500 – 60 000 iterations per Mach number for M < 1 (59 500 at M = 0.8 vs 19 000 cold; 60 000 = the iteration cap reached at 0.85 and 0.9) because the instantaneous free-stream change launches a large transient through the 90 d far field, and between M = 0.85 and 0.98 it landed on a different or still-unsteady
+state (CD range up to 5 × 10⁻³; M = 0.95: 0.0561 after 26 500 iterations / 2.3 orders vs 0.0774 cold, converged to 0.0779 in the 150 000-iteration cold run). At L0 the warm chain with long runs agrees with the cold values (0.8: 0.01367, 0.85: 0.02156, 0.9: 0.03987, 0.95: 0.0705 with a limit cycle of range 4 × 10⁻³, 1.0: 0.12085)
+but needs 44 000 – 60 000 iterations. For M ≥ 1.0 the warm and cold L1 CD agree to ≤ 0.003 (M = 1.0: 0.1277 vs 0.1301, 1.05: 0.1635 vs 0.1626, 1.1: 0.1560 vs 0.1550, ≥ 1.2 identical) except at M = 1.02 (0.1574 vs 0.1504). Use cold starts for the transonic range (the default; `--warm` is available).
+**Domain size:** (cone, L0, M = 0.9 / 1.0 / 1.05 / 1.2) with the inflow/outer boundary at 5 / 10 / 20 body lengths CD = 0.03966 / 0.03979 / 0.03987, 0.12141 / 0.12146 / 0.12155, 0.15461 / 0.15455 / 0.15451, 0.13325 / 0.13329 / 0.13332: ≤ 2 × 10⁻⁴ (the residual far-field disturbance in the boundary cells is |Δp/p∞| ≈ 1e-3 on the 10 L grid).
+
+### Uncertainty summary
+
+* Data: Cp ±0.01 – 0.02 (digitised), CD ±0.01 (digitised) ± ≈ 0.01 (tare), plus tunnel interference (TN D-3516, M ≥ 1.0) — the comparisons cannot discriminate CFD errors below those levels.
+* Numerics: Cp grid-converged to ≤ 0.003 (ogive, L1 → L2), smooth-nose CD to ≤ 0.002; cone-cylinder subsonic/low-transonic CD not grid-converged (corner singularity, see above); steady-state error ≲ 0.4 % of CD (long-run check), warm-started sweeps not trusted at M = 0.85 – 0.98.
+* Physics not modelled: viscosity (boundary-layer displacement at the shoulder, turbulent shock/boundary-layer interaction), the base and sting of the experiments; the wall-interference of the tunnel data.
+
+### Reproduce
+
+```
+cargo run --release --bin transonic -- --body ogive --level 1            # Cp vs TN D-3516 (M = 0.7 … 1.5), tables_ogive_L1.md, ≈ 10 min
+cargo run --release --bin transonic -- --body karman --level 1           # CD vs Stoney (Von Kármán), ≈ 20 min;  --body cone|parabola|sqrt|lvhaack likewise
+cargo run --release --bin transonic -- --quick                            # cone, level 0, ≈ 2 min;  --level 2 --mach 0.9,1.0,1.05,1.2 for the fine grid;  --warm, --domain n, --outflow pressure
+```
+
+### Still open
+
+Viscous effects (integral boundary layer or RANS, needed for the shoulder shock/boundary-layer interaction and the sting), a real base/wake, multigrid or implicit acceleration (iteration counts above are acceptable on the CPU but each L2 Mach number takes minutes),
+a far-field vortex/source correction (the domain study shows < 2e-4 sensitivity so it is not needed here), and a tabulated transonic-similarity reference.

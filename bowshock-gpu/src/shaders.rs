@@ -9,8 +9,9 @@
 
 /// Uniform block shared by every kernel (96 bytes, matches `crate::Params`). `fs_lo_*`: low (df) parts of the free stream.
 /// `limiter`: 0 = first order, 1 = minmod, 2 = van Albada. `bc*`: 0 = free stream, 1 = extrapolate,
-/// 2 = slip wall. `stage`: 1..3 (SSP-RK3 stage). `slot`: residual-history slot. `aux`: number of
-/// partial sums read by `HIST_FINAL`. `ra`, `rb`: RK stage update `u = ra (u + dt res) + rb u0`.
+/// 2 = slip wall, 3 = characteristic far field, 4 = static-pressure outflow. `stage`: 1..3 (SSP-RK3 stage). `slot`:
+/// residual-history slot. `aux`: number of partial sums read by `HIST_FINAL`. `ra`, `rb`: RK stage update
+/// `u = ra (u + dt res) + rb u0`.
 const COMMON_TEMPLATE: &str = r#"
 struct Params {
     ni: u32, nj: u32, limiter: u32, stage: u32,
@@ -54,12 +55,54 @@ fn reflect_wall(w: vec4<f32>, nx: f32, nr: f32) -> vec4<f32> {
     return vec4<f32>(w.x, w.y - 2.0 * un * nx, w.z - 2.0 * un * nr, w.w);
 }
 
-// Ghost state of boundary condition `bc` (0 free stream, 1 zero-gradient, 2 slip wall); `f` is the
-// boundary face (nx, nr, len, w).
-fn ghost_state(bc: u32, fs: vec4<f32>, edge: vec4<f32>, mirror: vec4<f32>, f: vec4<f32>) -> vec4<f32> {
+// Far-field ghost states (bowshock-cfd `bc.rs`); `w` is the first interior cell, `(nx, nr)` the OUTWARD unit normal.
+// Characteristic (Riemann-invariant) far field: the branch is selected by the interior normal Mach number; supersonic
+// inflow gives the free stream, supersonic outflow the interior state, in between the 1-D Riemann invariants fix the
+// normal velocity and the sound speed, and entropy + tangential velocity are taken from the interior (outflow) or the
+// free stream (inflow). The CPU evaluates `rho = (c_b^2 / (gamma s))^(1/(gamma-1))` with `s = p_ref / rho_ref^gamma`;
+// since `c_ref^2 = gamma p_ref / rho_ref` this is `rho_ref (c_b / c_ref)^(2/(gamma-1))`, an integer power (5) for
+// gamma = 1.4 (checked when the source is generated, `characteristic_exponent`), so no `pow` is needed.
+fn characteristic_ghost(fs: vec4<f32>, w: vec4<f32>, nx: f32, nr: f32) -> vec4<f32> {
+    let ci = sound_speed(w);
+    let uni = w.y * nx + w.z * nr;
+    let m = uni / ci;
+    if (m <= -1.0) { return fs; }
+    if (m >= 1.0) { return w; }
+    let ce = sound_speed(fs);
+    let une = fs.y * nx + fs.z * nr;
+    let r_out = uni + 2.0 * ci / (GAMMA - 1.0);
+    let r_in = une - 2.0 * ce / (GAMMA - 1.0);
+    let un_b = 0.5 * (r_out + r_in);
+    let c_b = max(0.25 * (GAMMA - 1.0) * (r_out - r_in), 1e-8);
+    var rf = fs; var un_ref = une; var c_ref = ce;
+    if (un_b >= 0.0) { rf = w; un_ref = uni; c_ref = ci; }
+    let q = c_b / c_ref;
+    let q2 = q * q;
+    let rho = rf.x * (q2 * q2 * q);
+    let dn = un_b - un_ref;
+    return vec4<f32>(rho, rf.y + dn * nx, rf.z + dn * nr, rho * c_b * c_b / GAMMA);
+}
+
+// Fixed static pressure `p_back` for subsonic faces, extrapolation for supersonic ones.
+fn pressure_outflow_ghost(p_back: f32, w: vec4<f32>, nx: f32, nr: f32) -> vec4<f32> {
+    if ((w.y * nx + w.z * nr) / sound_speed(w) >= 1.0) { return w; }
+    return vec4<f32>(w.x, w.y, w.z, p_back);
+}
+
+// Far-field ghost of boundary condition `bc` (3 characteristic, 4 static-pressure outflow) from the first interior cell.
+fn far_ghost(bc: u32, fs: vec4<f32>, edge: vec4<f32>, f: vec4<f32>, outward: f32) -> vec4<f32> {
+    if (bc == 3u) { return characteristic_ghost(fs, edge, outward * f.x, outward * f.y); }
+    return pressure_outflow_ghost(fs.w, edge, outward * f.x, outward * f.y);
+}
+
+// Ghost state of boundary condition `bc` (0 free stream, 1 zero-gradient, 2 slip wall, 3 characteristic far field,
+// 4 static-pressure outflow); `f` is the boundary face (nx, nr, len, w), `outward` = +1 if (nx, nr) points out of the
+// domain (imax, jmax) and -1 if it points into it (imin, jmin).
+fn ghost_state(bc: u32, fs: vec4<f32>, edge: vec4<f32>, mirror: vec4<f32>, f: vec4<f32>, outward: f32) -> vec4<f32> {
     if (bc == 0u) { return fs; }
     if (bc == 1u) { return edge; }
-    return reflect_wall(mirror, f.x, f.y);
+    if (bc == 2u) { return reflect_wall(mirror, f.x, f.y); }
+    return far_ghost(bc, fs, edge, f, outward);
 }
 
 const VA_EPS: f32 = 1e-14;
@@ -204,9 +247,16 @@ fn df_add(hi: vec4<f32>, lo: vec4<f32>, inc_in: vec4<f32>) -> DF {
 }
 "#;
 
+/// Exponent `2 / (gamma - 1)` of `c_b / c_ref` in the density of the characteristic far-field ghost state. The WGSL
+/// `characteristic_ghost` evaluates it as the integer power 5.
+pub fn characteristic_exponent() -> f64 {
+    2.0 / (bowshock_cfd::gas::GAMMA - 1.0)
+}
+
 /// Common WGSL prelude of every kernel: the `Params` block and the direct translations of bowshock-cfd's
-/// `gas.rs` / `flux.rs` functions. The shock-sensor thresholds are taken from `bowshock_cfd::flux`.
+/// `gas.rs` / `flux.rs` / `bc.rs` functions. The shock-sensor thresholds are taken from `bowshock_cfd::flux`.
 pub fn common() -> String {
+    assert!((characteristic_exponent() - 5.0).abs() < 1e-12, "characteristic_ghost assumes gamma = 1.4 (integer power 5)");
     format!(
         "const SHOCK_SENSOR_LO: f32 = {:e};\nconst SHOCK_SENSOR_HI: f32 = {:e};\n{}",
         bowshock_cfd::flux::SHOCK_SENSOR_LO,
@@ -250,11 +300,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             var f = iface[t * (p.ni + 1u)];
             var edge = w[pidx(p.ni, 0, j)];
             var mir = w[pidx(p.ni, k - 1, j)];
-            w[pidx(p.ni, -k, j)] = ghost_state(p.bc0, fs, edge, mir, f);
+            w[pidx(p.ni, -k, j)] = ghost_state(p.bc0, fs, edge, mir, f, -1.0);
             f = iface[t * (p.ni + 1u) + p.ni];
             edge = w[pidx(p.ni, ni - 1, j)];
             mir = w[pidx(p.ni, ni - k, j)];
-            w[pidx(p.ni, ni + k - 1, j)] = ghost_state(p.bc1, fs, edge, mir, f);
+            w[pidx(p.ni, ni + k - 1, j)] = ghost_state(p.bc1, fs, edge, mir, f, 1.0);
         }
     } else if (t < p.nj + p.ni) {
         let iu = t - p.nj;
@@ -263,11 +313,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             var f = jface[iu];
             var edge = w[pidx(p.ni, i, 0)];
             var mir = w[pidx(p.ni, i, k - 1)];
-            w[pidx(p.ni, i, -k)] = ghost_state(p.bc2, fs, edge, mir, f);
+            w[pidx(p.ni, i, -k)] = ghost_state(p.bc2, fs, edge, mir, f, -1.0);
             f = jface[p.nj * p.ni + iu];
             edge = w[pidx(p.ni, i, nj - 1)];
             mir = w[pidx(p.ni, i, nj - k)];
-            w[pidx(p.ni, i, nj + k - 1)] = ghost_state(p.bc3, fs, edge, mir, f);
+            w[pidx(p.ni, i, nj + k - 1)] = ghost_state(p.bc3, fs, edge, mir, f, 1.0);
         }
     }
 }
@@ -488,14 +538,16 @@ fn prim_i(i: i32, j: i32) -> vec4<f32> {
         let f = iface[u32(j) * (p.ni + 1u)];
         if (p.bc0 == 0u) { return fs_state(); }
         if (p.bc0 == 1u) { return cell_prim(0, j); }
-        return reflect_wall(cell_prim(k - 1, j), f.x, f.y);
+        if (p.bc0 == 2u) { return reflect_wall(cell_prim(k - 1, j), f.x, f.y); }
+        return far_ghost(p.bc0, fs_state(), cell_prim(0, j), f, -1.0);
     }
     if (i >= ni) {
         let k = i - ni + 1;
         let f = iface[u32(j) * (p.ni + 1u) + p.ni];
         if (p.bc1 == 0u) { return fs_state(); }
         if (p.bc1 == 1u) { return cell_prim(ni - 1, j); }
-        return reflect_wall(cell_prim(ni - k, j), f.x, f.y);
+        if (p.bc1 == 2u) { return reflect_wall(cell_prim(ni - k, j), f.x, f.y); }
+        return far_ghost(p.bc1, fs_state(), cell_prim(ni - 1, j), f, 1.0);
     }
     return cell_prim(i, j);
 }
@@ -508,14 +560,16 @@ fn prim_j(i: i32, j: i32) -> vec4<f32> {
         let f = jface[u32(i)];
         if (p.bc2 == 0u) { return fs_state(); }
         if (p.bc2 == 1u) { return cell_prim(i, 0); }
-        return reflect_wall(cell_prim(i, k - 1), f.x, f.y);
+        if (p.bc2 == 2u) { return reflect_wall(cell_prim(i, k - 1), f.x, f.y); }
+        return far_ghost(p.bc2, fs_state(), cell_prim(i, 0), f, -1.0);
     }
     if (j >= nj) {
         let k = j - nj + 1;
         let f = jface[p.nj * p.ni + u32(i)];
         if (p.bc3 == 0u) { return fs_state(); }
         if (p.bc3 == 1u) { return cell_prim(i, nj - 1); }
-        return reflect_wall(cell_prim(i, nj - k), f.x, f.y);
+        if (p.bc3 == 2u) { return reflect_wall(cell_prim(i, nj - k), f.x, f.y); }
+        return far_ghost(p.bc3, fs_state(), cell_prim(i, nj - 1), f, 1.0);
     }
     return cell_prim(i, j);
 }
