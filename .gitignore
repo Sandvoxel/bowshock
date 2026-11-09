@@ -1,0 +1,10 @@
+target/
+out/
+*.png
+*.gif
+*.mp4
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
