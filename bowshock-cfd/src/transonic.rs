@@ -175,6 +175,11 @@ pub fn run_on(case: &TransonicCase, s: &mut Solver, warm: bool, r_ref: Option<f6
     s.iter = if warm { case.first_order_iters } else { 0 };
     s.low_mach = case.low_mach;
     s.restart_ramp();
+    if warm {
+        if let Ok(k) = std::env::var("WARMRAMP") {
+            s.set_ramp(k.parse().unwrap());
+        }
+    }
 
     let mut residual = Vec::new();
     let mut cd_hist: Vec<(usize, f64)> = Vec::new();

@@ -3,7 +3,8 @@
 Branch `subsonic-wip`. Not reviewed; do not merge to `main` until finished and verified. Delete this file on merge.
 
 ## State when paused (2026-11-09)
-- Workspace builds (`cargo build --release --all-targets`, 0 errors). Full test run was not re-checked before pushing.
+- Workspace builds (`cargo build --release --all-targets`, 0 errors).
+- Tests: bowshock-cfd 44 passed, **1 failed: `subsonic::tests::subsonic_smoke_with_base`** (base/wake path unfinished). cargo stopped there, so bowshock-gpu tests were not run in this check; use `cargo test --release --no-fail-fast`.
 - bowshock-cfd (~74%): convergence acceleration (`implicit.rs`, `multigrid.rs`), low-Mach flux work (`flux.rs`), base/wake grid (`grid.rs`, `body_grid.rs`), panel-method check (`potential.rs`), `subsonic.rs` + `bin/subsonic.rs`, experiment examples (`accel`, `basetest`, `fox`, `lowmach`, `pot`, `pulse`, `resloc`, `trace`). Was running the convergence-scheme comparison.
 - bowshock-gpu (~72%): implicit-scheme WGSL (`shaders_impl.rs`) and solver wiring done; its tests passed. Was running benchmark sweeps.
 

@@ -78,6 +78,11 @@ impl Solver {
     pub fn restart_ramp(&mut self) {
         self.ramp_k = 0;
     }
+
+    /// Continue the CFL ramp from iteration `k` (a warm start from a converged neighbouring state needs no gentle start-up).
+    pub fn set_ramp(&mut self, k: usize) {
+        self.ramp_k = k;
+    }
 }
 
 /// `A = d(F.n)/dU` for the primitive state `w` (conservative variables `(rho, rho u, rho v, E)`).
