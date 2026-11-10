@@ -223,19 +223,18 @@ struct Imp {
     line_j: Kernel,
     apply: Kernel,
     update: Kernel,
-    /// Scratch of the line solves and the solution `dU`.
+    /// The solution `dU` and the right-hand side / solution `x` of the line solves.
     x: Array<[f32; 4]>,
     du: Array<[f32; 4]>,
     lo_i: Array<[f32; 4]>,
     d_i: Array<[f32; 4]>,
     up_i: Array<[f32; 4]>,
-    minv_i: Array<[f32; 4]>,
-    ys_i: Array<[f32; 4]>,
     lo_j: Array<[f32; 4]>,
     d_j: Array<[f32; 4]>,
     up_j: Array<[f32; 4]>,
-    minv_j: Array<[f32; 4]>,
-    ys_j: Array<[f32; 4]>,
+    /// Reduced rows of the cyclic-reduction line solves (two buffers, shared by the i and j lines).
+    scr_m: Array<[f32; 4]>,
+    scr_f: Array<[f32; 4]>,
 }
 
 /// Low (correction) words of the compensated state.
@@ -483,8 +482,8 @@ impl GpuSolver {
             },
             assemble_i: ctx.kernel(&shaders_impl::with_common(&shaders_impl::assemble_i())).label("assemble_i").build()?,
             assemble_j: ctx.kernel(&shaders_impl::with_common(&shaders_impl::assemble_j())).label("assemble_j").build()?,
-            line_i: ctx.kernel(&shaders_impl::with_common(&shaders_impl::line_i())).label("line_i").build()?,
-            line_j: ctx.kernel(&shaders_impl::with_common(&shaders_impl::line_j())).label("line_j").build()?,
+            line_i: ctx.kernel(&shaders_impl::with_common(&shaders_impl::line_i(ni))).label("line_i").build()?,
+            line_j: ctx.kernel(&shaders_impl::with_common(&shaders_impl::line_j(nj))).label("line_j").build()?,
             apply: ctx.kernel(&shaders_impl::with_common(&shaders_impl::apply())).label("apply").build()?,
             update: ctx.kernel(&shaders_impl::with_common(&shaders_impl::update(comp))).label("implicit_update").build()?,
             x: Array::zeros_on(ctx, n)?,
@@ -492,13 +491,11 @@ impl GpuSolver {
             lo_i: m()?,
             d_i: m()?,
             up_i: m()?,
-            minv_i: m()?,
-            ys_i: m()?,
             lo_j: m()?,
             d_j: m()?,
             up_j: m()?,
-            minv_j: m()?,
-            ys_j: m()?,
+            scr_m: Array::zeros_on(ctx, 16 * n)?,
+            scr_f: Array::zeros_on(ctx, 2 * n)?,
         })
     }
 
@@ -579,13 +576,13 @@ impl GpuSolver {
                     args![&imp.lo_i, &imp.d_i, &imp.up_i, &imp.lo_j, &imp.d_j, &imp.up_j, &imp.du, &self.res, &self.dt, &mut imp.x, uniform(&pp)],
                 )?;
             }
-            imp.line_i.launch(
-                [nj],
-                args![&imp.lo_i, &imp.d_i, &imp.up_i, &mut imp.minv_i, &mut imp.ys_i, &mut imp.x, &mut imp.du, &self.res, &self.dt, uniform(&pp)],
+            imp.line_i.launch_raw(
+                [nj, 1, 1],
+                args![&imp.lo_i, &imp.d_i, &imp.up_i, &mut imp.scr_m, &mut imp.scr_f, &mut imp.x, &mut imp.du, &self.res, &self.dt, uniform(&pp)],
             )?;
-            imp.line_j.launch(
-                [ni],
-                args![&imp.lo_j, &imp.d_j, &imp.up_j, &mut imp.minv_j, &mut imp.ys_j, &mut imp.x, &mut imp.du, &self.res, &self.dt, uniform(&pp)],
+            imp.line_j.launch_raw(
+                [ni, 1, 1],
+                args![&imp.lo_j, &imp.d_j, &imp.up_j, &mut imp.scr_m, &mut imp.scr_f, &mut imp.x, &mut imp.du, &self.res, &self.dt, uniform(&pp)],
             )?;
         }
         match &mut self.lo {

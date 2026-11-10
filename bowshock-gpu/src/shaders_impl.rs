@@ -457,22 +457,34 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-/// Block-tridiagonal solves along all lines of one direction, one thread per line. Pass `p.aux == 0`: factorisation + solve (stores
-/// `minv`, `ys = minv up`); `aux > 0`: solve with the stored factors. `dir_i` (`nj` lines): the right-hand side of pass 0 is `res * dt`,
-/// later passes read `x` (written by `APPLY`); the solution is written back to `x`. j lines: the right-hand side is `x` (the result of
-/// the i lines), the solution is written to `du` (pass 0) or added to it (`aux > 0`, defect correction).
-fn line(dir_i: bool) -> String {
+/// Block-tridiagonal solves along all lines of one direction, one workgroup of `wg` threads per line (`nj` i lines, `ni` j lines),
+/// by parallel cyclic reduction: the rows `(lo, d, up | r)` are normalised to `x_k + L x_{k-1} + U x_{k+1} = f`, then `ceil(log2 m)`
+/// levels (stride `s` = 1, 2, 4, ...) eliminate the unknowns at distance `s` with the rows `k -+ s`, which leaves couplings at
+/// distance `2 s`; after the last level `x = f`. The rows of a line are `k0 .. n`, `k0` the first fluid cell, and thread `t` handles
+/// the rows `t, t + wg, ...`. The reduced rows live in the scratch arrays `sm` (`L`, `U` of two buffers) and `sf`, exchanged between
+/// the threads through `storageBarrier`; the buffers are used alternately so that one barrier per level suffices.
+/// `dir_i`: the right-hand side of pass `p.aux == 0` is `res * dt`, later passes read `x` (written by `APPLY`); the solution is written
+/// back to `x`. j lines: the right-hand side is `x` (the result of the i lines), the solution is written to `du` (pass 0) or added to
+/// it (`aux > 0`, defect correction).
+fn line(dir_i: bool, wg: u32) -> String {
     LINE_TEMPLATE
-        .replace("//@ACC", &acc(&[("blo", false), ("bd", false), ("bup", false), ("minv", true), ("ys", true)]))
+        .replace("//@ACC", &acc(&[("blo", false), ("bd", false), ("bup", false), ("sm", true)]))
         .replace("//@DIR", if dir_i { "const DIR_I: bool = true;" } else { "const DIR_I: bool = false;" })
+        .replace("//@WG", &format!("const WG: u32 = {wg}u;"))
+}
+
+/// Threads per line of a line solve of length `n`: one per row up to 256, a multiple of the warp size.
+pub fn line_threads(n: usize) -> u32 {
+    let rows = n.div_ceil(256);
+    (n.div_ceil(rows).div_ceil(32) * 32) as u32
 }
 
 const LINE_TEMPLATE: &str = r#"
 @group(1) @binding(0) var<storage, read> blo: array<vec4<f32>>;
 @group(1) @binding(1) var<storage, read> bd: array<vec4<f32>>;
 @group(1) @binding(2) var<storage, read> bup: array<vec4<f32>>;
-@group(1) @binding(3) var<storage, read_write> minv: array<vec4<f32>>;
-@group(1) @binding(4) var<storage, read_write> ys: array<vec4<f32>>;
+@group(1) @binding(3) var<storage, read_write> sm: array<vec4<f32>>;
+@group(1) @binding(4) var<storage, read_write> sf: array<vec4<f32>>;
 //@ACC
 @group(1) @binding(5) var<storage, read_write> x: array<vec4<f32>>;
 @group(1) @binding(6) var<storage, read_write> du: array<vec4<f32>>;
@@ -481,6 +493,7 @@ const LINE_TEMPLATE: &str = r#"
 @group(1) @binding(9) var<uniform> p: Params;
 
 //@DIR
+//@WG
 
 fn cidx(l: u32, k: u32) -> u32 {
     if (DIR_I) { return l * p.ni + k; }
@@ -490,63 +503,86 @@ fn midx(l: u32, k: u32) -> u32 {
     if (DIR_I) { return k * p.nj + l; }
     return k * p.ni + l;
 }
+// Scratch of row `sc = l n + k` in buffer `b`: matrices `L`, `U` at `sm_at (+ 1)`, vector at `sf_at`.
+fn sm_at(b: u32, sc: u32) -> u32 { return 2u * (b * p.ni * p.nj + sc); }
+fn sf_at(b: u32, sc: u32) -> u32 { return b * p.ni * p.nj + sc; }
 
-@compute @workgroup_size(32)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let l = gid.x;
+@compute @workgroup_size(WG)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let l = wid.x;
     var k0: u32;
     var n: u32;
     if (DIR_I) {
-        if (l >= p.nj) { return; }
         k0 = row_start(l);
         n = p.ni;
     } else {
-        if (l >= p.ni) { return; }
         k0 = col_start(l);
         n = p.nj;
     }
     if (k0 >= n) { return; }
-    var xprev = vec4<f32>(0.0);
-    if (p.aux == 0u) {
-        var yprev = m_zero();
-        for (var k: u32 = k0; k < n; k++) {
-            let mi = midx(l, k);
-            let ci = cidx(l, k);
-            var m = ld_bd(mi);
-            var r = x[ci];
-            if (DIR_I) { r = res[ci] * dt[ci]; }
-            if (k > k0) {
-                let lo = ld_blo(mi);
-                m = m - lo * yprev;
-                r = r - lo * xprev;
-            }
-            let mv = inv4(m);
-            let xk = mv * r;
-            st_minv(mi, mv);
-            if (k + 1u < n) {
-                yprev = mv * ld_bup(mi);
-                st_ys(mi, yprev);
-            }
-            x[ci] = xk;
-            xprev = xk;
-        }
-    } else {
-        for (var k: u32 = k0; k < n; k++) {
-            let mi = midx(l, k);
-            let ci = cidx(l, k);
-            var r = x[ci];
-            if (k > k0) { r = r - ld_blo(mi) * xprev; }
-            let xk = ld_minv(mi) * r;
-            x[ci] = xk;
-            xprev = xk;
-        }
-    }
-    var xnext = vec4<f32>(0.0);
-    for (var kk: u32 = n; kk > k0; kk--) {
-        let k = kk - 1u;
+    let m = n - k0;
+    let base = l * n + k0;
+    for (var r: u32 = li; r < m; r += WG) {
+        let k = k0 + r;
+        let mi = midx(l, k);
         let ci = cidx(l, k);
-        var xk = x[ci];
-        if (k + 1u < n) { xk = xk - ld_ys(midx(l, k)) * xnext; }
+        var rhs = x[ci];
+        if (DIR_I && p.aux == 0u) { rhs = res[ci] * dt[ci]; }
+        let di = inv4(ld_bd(mi));
+        var lm = m_zero();
+        var um = m_zero();
+        if (r > 0u) { lm = di * ld_blo(mi); }
+        if (r + 1u < m) { um = di * ld_bup(mi); }
+        let o = sm_at(0u, base + r);
+        st_sm(o, lm);
+        st_sm(o + 1u, um);
+        sf[sf_at(0u, base + r)] = di * rhs;
+    }
+    storageBarrier();
+    workgroupBarrier();
+    var b = 0u;
+    for (var s: u32 = 1u; s < m; s = s << 1u) {
+        for (var r: u32 = li; r < m; r += WG) {
+            let sc = base + r;
+            let o = sm_at(b, sc);
+            let lk = ld_sm(o);
+            let uk = ld_sm(o + 1u);
+            var fk = sf[sf_at(b, sc)];
+            var d = m_eye();
+            var ln = m_zero();
+            var un = m_zero();
+            let has_lo = r >= s;
+            let has_up = r + s < m;
+            if (has_lo) {
+                let q = sm_at(b, sc - s);
+                d = d - lk * ld_sm(q + 1u);
+                ln = (lk * ld_sm(q)) * -1.0;
+                fk = fk - lk * sf[sf_at(b, sc - s)];
+            }
+            if (has_up) {
+                let q = sm_at(b, sc + s);
+                d = d - uk * ld_sm(q);
+                un = (uk * ld_sm(q + 1u)) * -1.0;
+                fk = fk - uk * sf[sf_at(b, sc + s)];
+            }
+            if (has_lo || has_up) {
+                let di = inv4(d);
+                ln = di * ln;
+                un = di * un;
+                fk = di * fk;
+            }
+            let w = sm_at(1u - b, sc);
+            st_sm(w, ln);
+            st_sm(w + 1u, un);
+            sf[sf_at(1u - b, sc)] = fk;
+        }
+        storageBarrier();
+        workgroupBarrier();
+        b = 1u - b;
+    }
+    for (var r: u32 = li; r < m; r += WG) {
+        let ci = cidx(l, k0 + r);
+        let xk = sf[sf_at(b, base + r)];
         if (DIR_I) {
             x[ci] = xk;
         } else if (p.aux == 0u) {
@@ -554,7 +590,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         } else {
             du[ci] = du[ci] + xk;
         }
-        xnext = xk;
     }
 }
 "#;
@@ -653,11 +688,13 @@ pub fn assemble_i() -> String {
 pub fn assemble_j() -> String {
     assemble(false)
 }
-pub fn line_i() -> String {
-    line(true)
+
+/// i lines (length `ni`) / j lines (length `nj`).
+pub fn line_i(ni: usize) -> String {
+    line(true, line_threads(ni))
 }
-pub fn line_j() -> String {
-    line(false)
+pub fn line_j(nj: usize) -> String {
+    line(false, line_threads(nj))
 }
 
 /// Kernel sources with their preludes: `(common + source)` for the f32 kernels and the extended residual.
