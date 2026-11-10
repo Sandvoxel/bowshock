@@ -4,9 +4,8 @@
 //!
 //! Usage: `cargo run --release --bin transonic_gpu -- [--body cone|karman|lvhaack|sqrt|ogive] [--level 0|1|2] [--quick]
 //!   [--mach 0.8,0.9,...] [--warm] [--domain <body lengths>] [--max-iter N] [--drop <orders>] [--outflow pressure]
-//!   [--limiter minmod|vanalbada] [--scheme implicit|explicit] [--lowmach on|off] [--tag name] [--no-bench] [--bench-only]`
-//! `--scheme implicit` (default) = the line-implicit convergence scheme of `bowshock-core` (`bowshock_gpu::shaders_impl`), default limiter
-//! van Albada; `--scheme explicit` = SSP-RK3 + minmod.
+//!   [--limiter minmod|vanalbada] [--scheme explicit|implicit] [--lowmach on|off] [--tag name] [--no-bench] [--bench-only]`
+//! `--scheme implicit` = the line-implicit convergence scheme of `bowshock-core` (`bowshock_gpu::shaders_impl`; default limiter then van Albada).
 //! The options and defaults are those of the CPU bin (`--quick` = grid level 0; default level 1; 12 Mach numbers 0.7 ... 1.5;
 //! cold start for every Mach number, `--warm` = start from the previous converged field). Every Mach number is run by the CPU and by
 //! the GPU with the same procedure and stopping rules. The GPU synchronises every 50 iterations (the CD sampling interval).
@@ -117,7 +116,7 @@ fn main() {
         Some(l) => l.split(',').map(|v| v.parse().expect("Mach list")).collect(),
         None => DEFAULT_MACH.to_vec(),
     };
-    let implicit = arg(&args, "--scheme") != Some("explicit");
+    let implicit = arg(&args, "--scheme") == Some("implicit");
     let limiter = match arg(&args, "--limiter") {
         Some("vanalbada") => Limiter::VanAlbada,
         Some("minmod") => Limiter::Minmod,
