@@ -13,6 +13,7 @@ use bowshock_core::gas::{cons_to_prim, freestream};
 use bowshock_core::implicit::ImplicitParams;
 use crate::ogive::WallPoint;
 use bowshock_core::solver::{Bc, Config, Scheme, Solver};
+use bowshock_reference::base_drag::base_drag_coefficient;
 
 #[derive(Clone, Debug)]
 pub struct SubsonicCase {
@@ -166,6 +167,11 @@ pub struct SubsonicResult {
     pub cd_base: f64,
     /// Sum of the four (inviscid pressure drag of the closed body; ~0 for attached potential flow, d'Alembert).
     pub cd_total: f64,
+    /// Base drag of the empirical free-flight correlation (`base_drag_coefficient`) scaled to `pi R^2`; 0 without base,
+    /// NaN for a sting-mounted base (the correlation is for free-flight bases).
+    pub cd_base_model: f64,
+    /// `cd_nose + cd_cyl + cd_boat + cd_base_model`: the inviscid forebody drag plus the modelled base drag.
+    pub cd_total_model: f64,
     /// Area-averaged base Cp (extrapolated wall values) and the first-cell variant; NaN without base.
     pub cp_base: f64,
     pub cp_base_cell: f64,
@@ -317,6 +323,11 @@ pub fn finish(case: &SubsonicCase, s: &Solver, residual: Vec<f64>, rmax: f64, hi
         wall.push(WallPoint { x: xm, r: rm, s0, s1, cp: cp(pw), cp_cell: cp(p0) });
     }
     let (base_wall, cd_base, cp_base, cp_base_cell) = base_state(s, rb2);
+    let cd_base_model = match (case.base, bb.sting_radius > 0.0) {
+        (false, _) => 0.0,
+        (true, false) => base_drag_coefficient(case.mach) * bb.base_radius().powi(2) / rb2,
+        (true, true) => f64::NAN,
+    };
 
     let (cp_min, x_cp_min) = wall.iter().fold((f64::INFINITY, 0.0), |(m, xm), w| if w.cp < m { (w.cp, w.x) } else { (m, xm) });
     let dev = |i: usize, j: usize| (s.pressure(i, j) / p_inf - 1.0).abs();
@@ -361,6 +372,8 @@ pub fn finish(case: &SubsonicCase, s: &Solver, residual: Vec<f64>, rmax: f64, hi
         cd_boat,
         cd_base,
         cd_total: cd_nose + cd_cyl + cd_boat + cd_base,
+        cd_base_model,
+        cd_total_model: cd_nose + cd_cyl + cd_boat + cd_base_model,
         cp_base,
         cp_base_cell,
         cp_base_mean,

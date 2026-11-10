@@ -169,8 +169,8 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
     let mut sweep_csv = String::from("mach,base,iters,seconds,stop_reason,drop_orders,cd_nose,cd_cylinder,cd_boattail,cd_base,cd_total,cp_base_mean,cp_base_range,cp_base_last,cp_min,x_cp_min,m_max,rms_vs_incompressible,rms_vs_goethert,farfield_dp_over_p\n");
     let mut md = String::new();
     writeln!(md, "### {body_name}, grid level {}, {} cells (no base) / {} cells (base), {}\n", opts.level, { let (a, b) = make(machs[0], false).cells(); a * b }, { let (a, b) = c0.cells(); a * b }, if warm { "warm starts" } else { "cold starts" }).unwrap();
-    writeln!(md, "| M | base | iters | time [s] | residual drop | CD nose | CD base | CD total | Cp_base (mean, range) | Cp_min | RMS vs Goethert | RMS vs incompressible |").unwrap();
-    writeln!(md, "|---|---|---|---|---|---|---|---|---|---|---|---|").unwrap();
+    writeln!(md, "| M | base | iters | time [s] | residual drop | CD nose | CD base | CD total | CD base corr. | CD total corr. | Cp_base (mean, range) | Cp_min | RMS vs Goethert | RMS vs incompressible |").unwrap();
+    writeln!(md, "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|").unwrap();
     for &base in &bases {
         let mut solver = None;
         let mut r_ref = None;
@@ -198,7 +198,7 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
                 base, res.iters, res.stop_reason, res.drop_orders, res.cd_nose, res.cd_cyl, res.cd_boat, res.cd_base, res.cd_total, res.cp_base_mean, res.cp_base_range, res.cp_min, res.x_cp_min, res.m_max, rg, ri, res.farfield_dp
             );
             writeln!(sweep_csv, "{m},{base},{},{dt:.1},{},{:.2},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.5},{:.3},{:.3},{:.5},{:.5},{:e}", res.iters, res.stop_reason, res.drop_orders, res.cd_nose, res.cd_cyl, res.cd_boat, res.cd_base, res.cd_total, res.cp_base_mean, res.cp_base_range, res.cp_base, res.cp_min, res.x_cp_min, res.m_max, ri, rg, res.farfield_dp).unwrap();
-            writeln!(md, "| {m} | {} | {} | {dt:.0} | {:.1} | {:+.4} | {:+.4} | {:+.4} | {} | {:.3} | {:.4} | {:.4} |", if base { "on" } else { "off" }, res.iters, res.drop_orders, res.cd_nose, res.cd_base, res.cd_total, if base { format!("{:+.3} ({:.0e})", res.cp_base_mean, res.cp_base_range) } else { "-".into() }, res.cp_min, rg, ri).unwrap();
+            writeln!(md, "| {m} | {} | {} | {dt:.0} | {:.1} | {:+.4} | {:+.4} | {:+.4} | {:+.4} | {:+.4} | {} | {:.3} | {:.4} | {:.4} |", if base { "on" } else { "off" }, res.iters, res.drop_orders, res.cd_nose, res.cd_base, res.cd_total, res.cd_base_model, res.cd_total_model, if base { format!("{:+.3} ({:.0e})", res.cp_base_mean, res.cp_base_range) } else { "-".into() }, res.cp_min, rg, ri).unwrap();
         }
     }
     fs::write(out_dir.join(format!("sweep_{tag}.csv")), sweep_csv).unwrap();
