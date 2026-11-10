@@ -10,7 +10,7 @@
 //! the reported stop iteration is the CPU-equivalent one; the GPU may execute up to `SYNC - 1` further iterations (`iters_exec`).
 
 use crate::{GpuSolver, Mode, Precision, Result};
-use bowshock_cfd::gas::freestream;
+use bowshock_cfd::gas::{cons_to_prim, freestream};
 use bowshock_cfd::solver::Solver;
 use bowshock_cfd::subsonic::{finish, stop_reason, SubsonicCase, SubsonicResult, HIST_EVERY};
 use std::time::Instant;
@@ -93,7 +93,7 @@ impl GpuSubsonic {
             let h = self.gpu.run(n)?;
             // base-pressure sample of iteration `done + SYNC` (needs the state at exactly the end of a full chunk)
             let cp_base = if let (Some(sampler), true) = (&sampler, n == SYNC) {
-                let pr = self.gpu.base_pressures()?;
+                let pr = self.gpu.base_cells()?;
                 Some(sampler.cp_base(&pr))
             } else {
                 None
@@ -123,7 +123,7 @@ impl GpuSubsonic {
 }
 
 /// Host side of the GPU base-pressure sample: the geometric weights of `bowshock_cfd::subsonic::base_state` per base row (extrapolation
-/// factor `d0 / (d1 - d0)` and area weight), applied in f64 to the two pressures per row of [`GpuSolver::base_pressures`].
+/// factor `d0 / (d1 - d0)` and area weight), applied in f64 to the two cells per row of [`GpuSolver::base_cells`].
 pub struct BaseSampler {
     rows: Vec<(f64, f64)>,
     p_inf: f64,
@@ -150,13 +150,13 @@ impl BaseSampler {
     }
 
     /// Area-mean Cp of the extrapolated base-wall pressure (`base_state(..).2`).
-    pub fn cp_base(&self, p: &[[f32; 2]]) -> f64 {
+    pub fn cp_base(&self, cells: &[[[f64; 4]; 2]]) -> f64 {
         let mean: f64 = self
             .rows
             .iter()
-            .zip(p)
-            .map(|(&(k, ds), p)| {
-                let (p0, p1) = (p[0] as f64, p[1] as f64);
+            .zip(cells)
+            .map(|(&(k, ds), c)| {
+                let (p0, p1) = (cons_to_prim(&c[0])[3], cons_to_prim(&c[1])[3]);
                 (p0 + (p0 - p1) * k - self.p_inf) / self.q_inf * ds
             })
             .sum();

@@ -310,32 +310,32 @@ pub fn common() -> String {
     )
 }
 
-/// Pressure of the two first cells behind the base face (`i = blk_i`, `blk_i + 1`) of every row `blk_s + y`, `y < blk_j - blk_s`
-/// (`bowshock_cfd::subsonic::base_state`); with `comp` the low energy word is added. Problem size `[blk_j - blk_s]`.
-pub fn base_pressure(comp: bool) -> String {
-    let (bind, out_bind, e0, e1) = if comp {
+/// Conserved state of the two first cells behind the base face (`i = blk_i`, `blk_i + 1`) of every row `blk_s + y`,
+/// `y < blk_j - blk_s`, as `[hi(i), hi(i+1), lo(i), lo(i+1)]` vec4 (`lo` = 0 without the compensated state); the host forms the
+/// pressure in f64 (`bowshock_cfd::subsonic::base_state`). Problem size `[blk_j - blk_s]`.
+pub fn base_cells(comp: bool) -> String {
+    let (bind, out_bind, lo0, lo1) = if comp {
         (
             "@group(1) @binding(1) var<storage, read> ulo: array<vec4<f32>>;\n",
             "@group(1) @binding(2) var<storage, read_write> out: array<vec4<f32>>;\n@group(1) @binding(3) var<uniform> p: Params;",
-            "ulo[c0].w",
-            "ulo[c0 + 1u].w",
+            "ulo[c0]",
+            "ulo[c0 + 1u]",
         )
     } else {
-        ("", "@group(1) @binding(1) var<storage, read_write> out: array<vec4<f32>>;\n@group(1) @binding(2) var<uniform> p: Params;", "0.0", "0.0")
+        ("", "@group(1) @binding(1) var<storage, read_write> out: array<vec4<f32>>;\n@group(1) @binding(2) var<uniform> p: Params;", "vec4<f32>(0.0)", "vec4<f32>(0.0)")
     };
     format!(
         "@group(1) @binding(0) var<storage, read> u: array<vec4<f32>>;\n{bind}{out_bind}
-fn pres(q: vec4<f32>, elo: f32) -> f32 {{
-    let ke = 0.5 * (q.y * q.y + q.z * q.z) / q.x;
-    return (GAMMA - 1.0) * ((q.w - ke) + elo);
-}}
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
     let y = gid.x;
     if (y >= p.blk_j - p.blk_s) {{ return; }}
     let c0 = (p.blk_s + y) * p.ni + p.blk_i;
-    out[y] = vec4<f32>(pres(u[c0], {e0}), pres(u[c0 + 1u], {e1}), 0.0, 0.0);
+    out[4u * y] = u[c0];
+    out[4u * y + 1u] = u[c0 + 1u];
+    out[4u * y + 2u] = {lo0};
+    out[4u * y + 3u] = {lo1};
 }}
 "
     )
