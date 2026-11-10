@@ -1,0 +1,48 @@
+[package]
+name = "bowshock-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Validation drivers of bowshock: CPU and GPU cone, ogive, transonic and subsonic sweeps"
+
+[[bin]]
+name = "cone"
+path = "src/bin/cone.rs"
+
+[[bin]]
+name = "ogive"
+path = "src/bin/ogive.rs"
+
+[[bin]]
+name = "transonic"
+path = "src/bin/transonic.rs"
+
+[[bin]]
+name = "subsonic"
+path = "src/bin/subsonic.rs"
+
+[[bin]]
+name = "cone_gpu"
+path = "src/bin/cone_gpu.rs"
+
+[[bin]]
+name = "ogive_gpu"
+path = "src/bin/ogive_gpu.rs"
+
+[[bin]]
+name = "transonic_gpu"
+path = "src/bin/transonic_gpu.rs"
+
+[[bin]]
+name = "subsonic_gpu"
+path = "src/bin/subsonic_gpu.rs"
+
+[dependencies]
+bowshock-core.workspace = true
+bowshock-reference.workspace = true
+bowshock-cases.workspace = true
+bowshock-gpu.workspace = true
+bowshock-gpu-cases.workspace = true
+luma.workspace = true
+rayon.workspace = true

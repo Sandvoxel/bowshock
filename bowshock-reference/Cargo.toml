@@ -1,0 +1,10 @@
+[package]
+name = "bowshock-reference"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Reference solutions for bowshock validation: Taylor-Maccoll cones, shock-expansion theory, axisymmetric potential flow"
+
+[dependencies]
+bowshock-core.workspace = true

@@ -4,25 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "f32 Luma/WGSL port of the bowshock-cfd axisymmetric Euler solver (HLLC + MUSCL + SSP-RK2), validated against the CPU f64 reference"
-
-[lib]
-name = "bowshock_gpu"
-path = "src/lib.rs"
-
-[[bin]]
-name = "cone_gpu"
-path = "src/bin/cone_gpu.rs"
-
-[[bin]]
-name = "ogive_gpu"
-path = "src/bin/ogive_gpu.rs"
-
-[[bin]]
-name = "transonic_gpu"
-path = "src/bin/transonic_gpu.rs"
+description = "f32 Luma/WGSL port of the bowshock-core axisymmetric Euler solver (HLLC + MUSCL, SSP-RK3 / line-implicit), validated against the CPU f64 reference"
 
 [dependencies]
-luma = { git = "https://github.com/flipnoteman/Luma.git", branch = "main" }
-bowshock-cfd = { path = "../bowshock-cfd" }
-encase = "0.13.0"
+bowshock-core.workspace = true
+luma.workspace = true
+encase.workspace = true

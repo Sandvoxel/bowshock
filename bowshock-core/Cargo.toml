@@ -1,0 +1,10 @@
+[package]
+name = "bowshock-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CPU reference 2D axisymmetric Euler solver (HLLC + MUSCL, SSP-RK3 / line-implicit) used to validate Luma GPU kernels"
+
+[dependencies]
+rayon.workspace = true
