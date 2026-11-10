@@ -210,6 +210,8 @@ pub struct GpuSolver {
     imp: Option<Imp>,
     /// Iterations since the start of the implicit CFL ramp ([`GpuSolver::restart_ramp`]).
     ramp_k: usize,
+    /// Kernel and output of [`GpuSolver::base_pressures`], built on first use.
+    base_probe: Option<(Kernel, Array<[f32; 4]>)>,
 }
 
 /// Kernels and work arrays of the line-implicit scheme (`bowshock_cfd::implicit`, [`shaders_impl`]). Every 4x4 block is stored as
@@ -337,6 +339,7 @@ impl GpuSolver {
             n_active: ni * nj,
             imp: None,
             ramp_k: 0,
+            base_probe: None,
         })
     }
 
@@ -768,6 +771,25 @@ impl GpuSolver {
             .enumerate()
             .map(|(c, h)| [0, 1, 2, 3].map(|k| h[k] as f64 + lo.as_ref().map_or(0.0, |l| l[c][k] as f64)))
             .collect())
+    }
+
+    /// Pressures `(p(i_end, j), p(i_end + 1, j))` of the two first cells behind the base face for every row `j_sting..j_end`
+    /// (the extrapolation stencil of `bowshock_cfd::subsonic::base_state`), from `hi + lo` in the compensated precision.
+    /// Reads back only these rows.
+    pub fn base_pressures(&mut self) -> Result<Vec<[f32; 2]>> {
+        let b = self.block.ok_or_else(|| LumaError::InvalidShape("base_pressures needs a solid block".into()))?;
+        let rows = b.j_end - b.j_sting;
+        if self.base_probe.is_none() {
+            let src = format!("{}\n{}", shaders::common(), shaders::base_pressure(self.lo.is_some()));
+            self.base_probe = Some((self.ctx.kernel(&src).label("base_pressure").build()?, Array::zeros_on(&self.ctx, rows)?));
+        }
+        let p = self.params(0, 0, 0);
+        let (kernel, out) = self.base_probe.as_mut().expect("built above");
+        match &self.lo {
+            Some(lo) => kernel.launch([rows as u32], args![&self.u, &lo.u, &mut *out, uniform(&p)])?,
+            None => kernel.launch([rows as u32], args![&self.u, &mut *out, uniform(&p)])?,
+        }
+        Ok(out.to_vec()?.into_iter().map(|v| [v[0], v[1]]).collect())
     }
 
     pub fn precision(&self) -> Precision {
