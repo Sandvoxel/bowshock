@@ -514,5 +514,71 @@ cargo run --release --bin transonic -- --quick                            # cone
 
 ### Still open
 
-Viscous effects (integral boundary layer or RANS, needed for the shoulder shock/boundary-layer interaction and the sting), a real base/wake, multigrid or implicit acceleration (iteration counts above are acceptable on the CPU but each L2 Mach number takes minutes),
+Viscous effects (integral boundary layer or RANS, needed for the shoulder shock/boundary-layer interaction and the sting),
 a far-field vortex/source correction (the domain study shows < 2e-4 sensitivity so it is not needed here), and a tabulated transonic-similarity reference.
+
+## Subsonic (M ≈ 0.1 – 0.8): line-implicit scheme, low-Mach correction, base / wake, modelled base drag
+
+Data: `subsonic_gpu --base both` (grid level 1, GPU guarded extended precision vs this f64 CPU solver) and `subsonic_gpu --validate`; CSV and tables in `out/gpu_subsonic/` (`sweep_*.csv`, `tables_validate.md`).
+
+### Setup
+
+* Body: tangent ogive nose l/d 3 + 6 d cylinder. Base off: the cylinder continues as a sting to the outflow. Base on: flat base plus wake.
+* Grid level 1: 288 × 140 (40 320 cells) base off, 312 × 152 (47 424 cells) base on. Domain: inflow / outer boundary 10 body lengths, outflow 5 body lengths; characteristic far field.
+* Scheme: line-implicit, van Albada limiter, low-Mach correction on.
+* Stop rules: 6-order residual drop, or "base pressure stationary" for base-on cases; iteration limit `10 000 << level` (`SubsonicCase::with_body`), i.e. 20 000 at level 1.
+
+### Results, ogive + cylinder, level 1, cold starts (GPU values)
+
+| M | base | CD nose | CD base (Euler) | CD total (Euler) | Cp_b | CD base corr. | CD total corr. | GPU iters | stop | drop [orders] | max abs dCp GPU–CPU (wall) |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0.1 | off | -0.00189 | +0.00000 | -0.00189 | - | +0.00000 | -0.00189 | 9587 | residual drop reached | 6.0 | 3.9e-6 |
+| 0.2 | off | -0.00176 | +0.00000 | -0.00176 | - | +0.00000 | -0.00176 | 20000 | max iterations | 4.1 | 4.4e-6 |
+| 0.3 | off | -0.00165 | +0.00000 | -0.00165 | - | +0.00000 | -0.00165 | 20000 | max iterations | 4.7 | 1.1e-7 |
+| 0.4 | off | -0.00156 | +0.00000 | -0.00156 | - | +0.00000 | -0.00156 | 3586 | residual drop reached | 6.0 | 1.8e-6 |
+| 0.5 | off | -0.00148 | +0.00000 | -0.00148 | - | +0.00000 | -0.00148 | 3261 | residual drop reached | 6.0 | 3.6e-7 |
+| 0.6 | off | -0.00142 | +0.00000 | -0.00142 | - | +0.00000 | -0.00142 | 1881 | residual drop reached | 6.0 | 2.0e-7 |
+| 0.7 | off | -0.00137 | +0.00000 | -0.00137 | - | +0.00000 | -0.00137 | 1361 | residual drop reached | 6.0 | 4.6e-7 |
+| 0.8 | off | -0.00132 | +0.00000 | -0.00132 | - | +0.00000 | -0.00132 | 876 | residual drop reached | 6.0 | 1.6e-6 |
+| 0.1 | on | -0.00358 | +0.00899 | +0.00541 | -0.0092 | +0.12130 | +0.11772 | 4000 | base pressure stationary | 4.8 | 4.5e-7 |
+| 0.2 | on | -0.00339 | +0.01368 | +0.01030 | -0.0137 | +0.12520 | +0.12181 | 4000 | base pressure stationary | 4.8 | 1.6e-7 |
+| 0.3 | on | -0.00324 | +0.02438 | +0.02114 | -0.0244 | +0.13170 | +0.12846 | 4000 | base pressure stationary | 5.1 | 8.2e-8 |
+| 0.4 | on | -0.00314 | +0.01981 | +0.01668 | -0.0310 | +0.14080 | +0.13766 | 20000 | max iterations | 1.8 | 4.0e-6 |
+| 0.5 | on | -0.00306 | +0.05220 | +0.04915 | -0.0358 | +0.15250 | +0.14944 | 20000 | max iterations | 1.4 | 3.8e-6 |
+| 0.6 | on | -0.00299 | +0.03320 | +0.03021 | -0.0389 | +0.16680 | +0.16381 | 20000 | max iterations | 1.4 | 2.8e-7 |
+| 0.7 | on | -0.00292 | +0.04594 | +0.04302 | -0.0392 | +0.18370 | +0.18078 | 20000 | max iterations | 1.4 | 4.0e-8 |
+| 0.8 | on | -0.00284 | +0.04531 | +0.04247 | -0.0450 | +0.20320 | +0.20036 | 20000 | max iterations | 1.7 | 1.2e-2 |
+
+CD is referenced to the cross-section area π R²; Cp_b is the base pressure coefficient.
+
+GPU vs CPU: max |ΔCp| (wall) ≤ 4.5e-6 on 15 of 16 rows. M 0.8 base-on reaches 1.2e-2 (CD base 0.04531 GPU vs 0.04895 CPU, CD total 0.04247 vs 0.04612). That case, like every base-on case with M ≥ 0.4, ends on `max iterations` (20 000) at 1.4 – 1.8 orders: the inviscid wake stays unsteady, and long unsteady transients of the f32-LHS GPU and the f64 CPU implicit iterations diverge (the gpu README's "Caveats" describe this). Base-off M 0.2 and 0.3 also end on `max iterations` (4.1 and 4.7 orders) but agree with the CPU to 4.4e-6 and 1.1e-7.
+
+### Base drag: Euler wake vs modelled
+
+* The inviscid (Euler) wake has no viscous mixing layer, so its base pressure is not physical: Cp_b stays slightly negative (-0.0092 at M 0.1 to -0.0450 at M 0.8), and CD base (Euler) is not monotone in M (0.02438 at M 0.3, 0.01981 at M 0.4, 0.05220 at M 0.5, 0.03320 at M 0.6) because the wake does not settle (see the convergence column above).
+* Modelled base drag: `bowshock_reference::base_drag::base_drag_coefficient(M)` = 0.12 + 0.13 M² for M < 1, 0.25 / M for M ≥ 1, referenced to the base area. Source: OpenRocket technical documentation (S. Niskanen; based on his 2009 M.Sc. thesis), eq. 3.94, after Fleeman, *Tactical Missile Design*.
+* It is scaled by (r_b / R)² to the reference area; 0 without base; NaN (printed `-`) for sting-mounted bases (the TM X-2439 configurations below), because it is a free-flight correlation. It is reported next to, not instead of, the Euler values (`SubsonicResult::cd_base_model`, `cd_total_model`). Here the full disc gives r_b = R, so `CD base corr.` = 0.12 + 0.13 M² (M 0.5: 0.15250).
+
+### Validation: NASA TM X-2439 (Fox 1971), sting-mounted nose-cylinder-boattail bodies, level 1
+
+Config 4 = ogive, config 2 = cone. RMS of the wall Cp against digitised data over the fore body + cylinder (x ≤ 3.4 ogive, x ≤ 4.2 cone).
+
+| config | M | GPU iters | CPU iters | RMS fore+cyl GPU | RMS fore+cyl CPU | base Cp GPU | base Cp CPU | data base Cp | CD total GPU | CD total CPU | max abs dCp GPU–CPU |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 4 (ogive) | 0.404 | 4000 | 4000 | 0.0170 | 0.0170 | +0.0564 | +0.0564 | +0.0691 | +0.0028 | +0.0028 | 1.3e-6 |
+| 4 (ogive) | 0.608 | 20000 | 20000 | 0.0227 | 0.0227 | +0.0643 | +0.0643 | +0.0836 | +0.0066 | +0.0066 | 3.1e-5 |
+| 4 (ogive) | 0.831 | 20000 | 20000 | 0.0596 | 0.0596 | +0.0859 | +0.0859 | +0.1317 | +0.0339 | +0.0339 | 4.6e-6 |
+| 2 (cone) | 0.404 | 4000 | 4000 | 0.0907 | 0.0907 | +0.0569 | +0.0569 | +0.0685 | +0.0083 | +0.0083 | 2.0e-4 |
+| 2 (cone) | 0.608 | 20000 | 4000 | 0.0871 | 0.0871 | +0.0647 | +0.0647 | +0.0813 | +0.0127 | +0.0131 | 3.3e-2 |
+| 2 (cone) | 0.831 | 20000 | 20000 | 0.0614 | 0.0614 | +0.0852 | +0.0852 | +0.1290 | +0.0601 | +0.0601 | 6.9e-6 |
+
+All six configurations complete. GPU vs CPU max |ΔCp| ≤ 3.1e-5 except cone M 0.404 (2.0e-4) and cone M 0.608 (3.3e-2). At cone M 0.608 the CPU stopped on "base pressure stationary" at 4000 iterations while the GPU ran to the 20 000 limit (1.8 orders): the same unsteady-transient divergence as the M 0.8 base-on sweep row. The CFD base Cp is below the data in all six configurations (by 0.0116 – 0.0458). `CD base corr.` and `CD total corr.` print `-` for all six (sting-mounted).
+
+### Timing (level 1, 32 CPU rayon threads vs RTX 3090 GPU, time to the stopping criterion)
+
+* Whole sweep (16 runs): CPU 1555.7 s, GPU 60.13 s, speed-up 25.9×; per run 12.2× (M 0.8 base off) to 29.2× (M 0.8 base on). Per iteration at M 0.5 (1000 iterations from the free stream): CPU 8001 µs (base off) / 9882 µs (base on), GPU extended 291.9 / 312.1 µs, i.e. 27.4× / 31.7×; the extended-precision GPU costs 1.20× the pure-f32 variant.
+* Validation: GPU 1.7 – 8.3 s per configuration against 46.8 – 240.3 s on the CPU. Full runs: sweep 28 min, validate 15 min wall (both include the CPU runs).
+
+### Known limit
+
+The level-2 sting case at M 0.5 stalls at 3.8 orders. It ends on `max iterations` at both 10 000 and 40 000 iterations, so it is a convergence floor, not an iteration limit.

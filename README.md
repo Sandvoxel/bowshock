@@ -9,20 +9,21 @@ transonic ogive-cylinder pressure and nose-drag data (NASA TN D-3516, NACA RM L5
 ## Capabilities and limits
 
 Current:
-- Inviscid, axisymmetric flow at zero angle of attack, transonic and supersonic (M ≈ 0.7 and up).
+- Inviscid, axisymmetric flow at zero angle of attack, from M ≈ 0.1 (low-Mach flux correction) through transonic to supersonic.
 - Characteristic (Riemann-invariant) far-field and pressure-outflow boundaries; large-domain stretched grids for
-  cone, tangent-ogive, power, parabolic and Haack noses on a cylinder (sting to the outflow, so no base flow).
+  cone, tangent-ogive, power, parabolic and Haack noses on a cylinder (sting to the outflow, or a flat base with a wake region).
 - Forebody pressure (wave) drag vs Mach, including the transonic drag rise.
+- Subsonic nose-cylinder bodies with a sting or a flat blunt base and wake (line-implicit convergence scheme). Base drag also
+  comes from an empirical free-flight correlation (OpenRocket technical documentation, eq. 3.94), because the inviscid wake gives no physical base pressure.
 - GPU solver in f32 storage with double-float evaluation that matches the f64 CPU solver on the cone, ogive and
   transonic cases and runs ~8–16× faster per iteration (see `bowshock-gpu/README.md`).
 
 Known limits:
 - Subsonic/transonic residuals stall ~3–4 orders down; runs stop when CD is stationary (≤0.4 % change vs 80k-iteration runs).
 - Sharp shoulders (cone-cylinder) are not grid-converged below M ≈ 1.05.
-- No viscous effects (skin friction, boundary-layer displacement), no base flow, no angle of attack.
+- No viscous effects (skin friction, boundary-layer displacement), no angle of attack. Base pressure from the inviscid wake is not physical; the modelled base drag is a Mach-only correlation.
 
-Roadmap: subsonic convergence (implicit/multigrid) and low-Mach accuracy, base/wake region, boundary layer and skin
-friction, aerodynamic coefficient tables.
+Roadmap: boundary layer and RANS (SST) with skin friction, aerodynamic coefficient tables.
 
 ## Quick start
 
@@ -34,6 +35,8 @@ cargo run --release --bin transonic                   # transonic Mach sweep M =
 cargo run --release --bin cone_gpu                    # GPU vs CPU vs Taylor-Maccoll
 cargo run --release --bin ogive_gpu                   # ogive-cylinder on the GPU vs CPU
 cargo run --release --bin transonic_gpu               # transonic sweep on the GPU vs CPU
+cargo run --release --bin subsonic -- --quick         # subsonic sweep M = 0.1–0.8, base on/off, potential-flow checks (CPU)
+cargo run --release --bin subsonic_gpu                # subsonic sweep on the GPU vs CPU (--validate: NASA TM X-2439 bodies)
 cargo run --release -p bowshock-cases --example animate # Mach-number animation of the ogive-cylinder (see the example's docs for flags)
 ```
 
