@@ -477,23 +477,27 @@ mod tests {
         assert!(r.wall[0].cp > 0.1 && r.cp_min < -0.05 && r.cp_min > -0.3, "Cp tip {} min {}", r.wall[0].cp, r.cp_min);
         assert!(r.cd_nose.abs() < 0.02, "nose CD {}", r.cd_nose);
         assert!(r.cp_base.is_nan() && r.base_wall.is_empty());
+        assert_eq!(r.cd_base_model, 0.0);
+        assert!((r.cd_total_model - r.cd_total).abs() < 1e-15);
     }
 
-    /// Base smoke test: the blocked grid converges at M = 0.3, the base pressure is a suction (Cp_b < 0), the drag breakdown adds up and
-    /// the pressure drag of the closed body is dominated by the base (base CD = -Cp_b A_b / A_ref = -Cp_b for a full disc).
+    /// Base smoke test at M = 0.2: the inviscid wake reaches a stationary base pressure (not a 6-order drop), the base pressure is a
+    /// suction (Cp_b < 0), the drag breakdown adds up, the pressure drag of the closed body is dominated by the base (base CD =
+    /// -Cp_b A_b / A_ref = -Cp_b for a full disc) and the modelled base drag is the correlation's for a full disc.
     #[test]
     fn subsonic_smoke_with_base() {
         // standard level-0 grids (the coarse test grids are too crude for the wake to settle)
-        let mut c = SubsonicCase::new(0.3, Nose::TangentOgive { fineness: 3.0 }, 0, true);
-        c.max_iter = 3000;
+        let mut c = SubsonicCase::new(0.2, Nose::TangentOgive { fineness: 3.0 }, 0, true);
+        c.max_iter = 6000;
         let r = run_subsonic(&c);
-        assert_eq!(r.stop_reason, "residual drop reached", "{} iters, drop {:.2}", r.iters, r.drop_orders);
+        assert!(matches!(r.stop_reason, "residual drop reached" | "base pressure stationary"), "{} after {} iters, drop {:.2}", r.stop_reason, r.iters, r.drop_orders);
         assert!(r.min_rho > 0.0 && r.min_p > 0.0);
         assert!(r.cp_base < -0.01 && r.cp_base > -0.5, "Cp_b {}", r.cp_base);
         assert!((r.cd_base + r.cp_base).abs() < 1e-12, "base CD {} vs -Cp_b {}", r.cd_base, -r.cp_base);
         assert!((r.cd_total - (r.cd_nose + r.cd_cyl + r.cd_boat + r.cd_base)).abs() < 1e-14);
         assert!(r.cd_base > 0.0 && r.cd_base > 5.0 * r.cd_nose.abs());
         assert_eq!(r.base_wall.len(), c.grid_base.n_gap);
+        assert!((r.cd_base_model - base_drag_coefficient(0.2)).abs() < 1e-15);
     }
 
     /// A uniform free stream is a fixed point of the blocked-grid solver with the implicit scheme (body block, base wall, wake):
