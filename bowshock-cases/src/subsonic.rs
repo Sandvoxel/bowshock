@@ -90,7 +90,7 @@ impl SubsonicCase {
             low_mach: true,
             scheme: Scheme::Implicit(ImplicitParams::DEFAULT),
             first_order_iters: 100,
-            max_iter: 10_000,
+            max_iter: 10_000 << level,
             drop_orders: 6.0,
             outflow: Bc::Characteristic,
             cfl: 0.5,
