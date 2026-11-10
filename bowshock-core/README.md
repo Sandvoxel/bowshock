@@ -22,7 +22,6 @@ bowshock/
   bowshock-cases/src/body_grid.rs   large-domain stretched grid for nose-cylinder bodies (ogive, cone, power/parabolic/Haack noses)
   bowshock-cases/src/transonic.rs   transonic case runner, post-processing, Stoney (RM L53K17) and Czarnecki-Monta (TN D-3516) data
   bowshock-cases/src/subsonic.rs    subsonic case runner (sting / flat base + wake), drag breakdown, NASA TM X-2439 data
-  bowshock-cases/examples/accel.rs  convergence-scheme comparison driver (one case, one scheme, residual history)
   bowshock-cases/examples/diag.rs   convergence diagnostics (per-cell residual map -> out/diag/)
   bowshock-cli/src/bin/cone.rs      validation driver
   bowshock-cli/src/bin/ogive.rs     ogive validation driver -> out/ogive/
@@ -122,13 +121,12 @@ cargo test --release                        # 28 unit tests (incl. a ~5 s conver
 cargo run --release --bin cone              # M=2, 10° and 15°, grids 100x50, 200x100, 400x200 (≈2 min per limiter)
 cargo run --release --bin cone -- --quick   # skip the 400x200 grid
 cargo run --release --bin cone -- --limiter vanalbada [--mach 2.5]
-cargo run --release -p bowshock-core --example diag -- 10 200 100 minmod 8000   # residual map -> out/diag/
+cargo run --release -p bowshock-cases --example diag -- 10 200 100 minmod 8000   # residual map -> out/diag/
 cargo run --release --bin ogive -- --sweep  # ogive-cylinder validation M=1.98 (+ Mach sweep), ≈7 min; --quick skips the fine grid
 cargo run --release --bin transonic -- --body ogive --level 1   # transonic Mach sweep 0.7 – 1.5 -> out/transonic/ (see "Transonic")
 cargo run --release --bin subsonic -- --quick            # M = 0.1 ... 0.8, base on/off, level 0 -> out/subsonic/ (see "Subsonic")
 cargo run --release --bin subsonic -- --validate         # NASA TM X-2439 bodies at M = 0.404 / 0.608 / 0.831
 cargo run --release --bin subsonic -- --lowmach-study    # low-Mach correction on/off vs potential flow, M = 0.1 ... 0.5
-cargo run --release --example accel -- ogive 0 0.5 imp   # convergence-scheme driver (explicit | irs | mg | pt | imp)
 ```
 
 CSV files go to `out/`: `cp_<angle>deg_<ni>x<nj>_<limiter>.csv` (x/L, p/p∞, Cp from the wall-extrapolated
