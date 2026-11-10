@@ -30,6 +30,8 @@ pub struct SubsonicCase {
     /// First-order start-up iterations (cold start only).
     pub first_order_iters: usize,
     pub max_iter: usize,
+    /// Stop rules other than a non-finite residual do not fire before this many iterations; the GPU-vs-CPU comparison sets it to the CPU's iteration count.
+    pub min_iter: usize,
     /// Stop at this many orders of density-residual drop below the peak (after iteration 20 on a cold start).
     pub drop_orders: f64,
     pub outflow: Bc,
@@ -91,6 +93,7 @@ impl SubsonicCase {
             scheme: Scheme::Implicit(ImplicitParams::DEFAULT),
             first_order_iters: 100,
             max_iter: 10_000 << level,
+            min_iter: 0,
             drop_orders: 6.0,
             outflow: Bc::Characteristic,
             cfl: 0.5,
@@ -234,13 +237,16 @@ pub const UNSTEADY_WINDOW: usize = 2000;
 /// A base-pressure history whose range over the window is below this (in Cp) counts as stationary.
 pub const CP_BASE_TOL: f64 = 1e-3;
 
-/// Stopping rule after iteration `it` with density residual `r`: non-finite residual; `drop_orders` below `reference`; or, with a
+/// Stopping rule after iteration `it` with density residual `r`: non-finite residual (always); then, from `case.min_iter` on, `drop_orders` below `reference`; or, with a
 /// base, every 500 iterations from `2 UNSTEADY_WINDOW` on, the area-mean base Cp (`hist`, one sample per `HIST_EVERY` iterations)
 /// varied by less than `CP_BASE_TOL` over the last `UNSTEADY_WINDOW` iterations once the residual has dropped 2 orders
 /// ("base pressure stationary"; the inviscid wake can be unsteady, the residual then stalls, see the README).
 pub fn stop_reason(case: &SubsonicCase, it: usize, r: f64, reference: f64, skip: usize, hist: &[(usize, f64)]) -> Option<&'static str> {
     if !r.is_finite() {
         return Some("non-finite residual");
+    }
+    if it + 1 < case.min_iter {
+        return None;
     }
     if it > skip && reference / r >= 10f64.powf(case.drop_orders) {
         return Some("residual drop reached");
