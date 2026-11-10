@@ -4,14 +4,15 @@
 //! stopping rules and the post-processing of `bowshock_cfd::subsonic::run_on`.
 //!
 //! The GPU records [`SYNC`] iterations back to back and reads the residual history. The base-pressure history of the CPU loop (every
-//! `HIST_EVERY` = 50 iterations, only with a base) needs the state: it is downloaded into a host `Solver` (only its `u` is used) once per
-//! chunk when the case has a base, and never otherwise. The residual-based stopping rules run on the history iteration by iteration, so
+//! `HIST_EVERY` = 50 iterations, only with a base) is sampled by a GPU kernel (the pressures of the two
+//! cells behind the base, read back once per chunk when the case has a base, never otherwise); the full state is downloaded once, at the
+//! end, for the post-processing. The residual-based stopping rules run on the history iteration by iteration, so
 //! the reported stop iteration is the CPU-equivalent one; the GPU may execute up to `SYNC - 1` further iterations (`iters_exec`).
 
 use crate::{GpuSolver, Mode, Precision, Result};
-use bowshock_cfd::gas::freestream;
+use bowshock_cfd::gas::{cons_to_prim, freestream};
 use bowshock_cfd::solver::Solver;
-use bowshock_cfd::subsonic::{base_state, finish, stop_reason, SubsonicCase, SubsonicResult, HIST_EVERY};
+use bowshock_cfd::subsonic::{finish, stop_reason, SubsonicCase, SubsonicResult, HIST_EVERY};
 use std::time::Instant;
 
 /// Iterations between two synchronisations; equal to the base-pressure sampling interval of `bowshock_cfd::subsonic::run_on`.
@@ -78,6 +79,7 @@ impl GpuSubsonic {
         self.gpu.context().sync()?;
 
         let rb2 = case.body.body.radius().powi(2);
+        let sampler = case.base.then(|| BaseSampler::new(&self.host, rb2));
         let mut residual = Vec::new();
         let mut hist: Vec<(usize, f64)> = Vec::new();
         let mut rmax: f64 = 0.0;
@@ -90,9 +92,9 @@ impl GpuSubsonic {
             let n = SYNC.min(case.max_iter - done);
             let h = self.gpu.run(n)?;
             // base-pressure sample of iteration `done + SYNC` (needs the state at exactly the end of a full chunk)
-            let cp_base = if case.base && n == SYNC {
-                self.download()?;
-                Some(base_state(&self.host, rb2).2)
+            let cp_base = if let (Some(sampler), true) = (&sampler, n == SYNC) {
+                let pr = self.gpu.base_cells()?;
+                Some(sampler.cp_base(&pr))
             } else {
                 None
             };
@@ -117,6 +119,48 @@ impl GpuSubsonic {
         self.download()?;
         let result = finish(case, &self.host, residual, rmax, hist, reason);
         Ok(GpuSubsonicRun { iters_stop: iters_stop.unwrap_or(done), iters_exec: done, loop_seconds, result })
+    }
+}
+
+/// Host side of the GPU base-pressure sample: the geometric weights of `bowshock_cfd::subsonic::base_state` per base row (extrapolation
+/// factor `d0 / (d1 - d0)` and area weight), applied in f64 to the two cells per row of [`GpuSolver::base_cells`].
+pub struct BaseSampler {
+    rows: Vec<(f64, f64)>,
+    p_inf: f64,
+    q_inf: f64,
+    s_sum: f64,
+}
+
+impl BaseSampler {
+    pub fn new(s: &Solver, rb2: f64) -> BaseSampler {
+        let b = s.block.expect("a case with a base has a solid block");
+        let (g, ni, fs) = (&s.grid, s.grid.ni, s.cfg.freestream);
+        let ie = b.i_end;
+        let rows: Vec<(f64, f64)> = (b.j_sting..b.j_end)
+            .map(|j| {
+                let (n0, n1) = (g.node(ie, j), g.node(ie, j + 1));
+                let (xm, rm) = (n0.0, 0.5 * (n0.1 + n1.1));
+                let d0 = (g.xc[j * ni + ie] - xm).hypot(g.rc[j * ni + ie] - rm);
+                let d1 = (g.xc[j * ni + ie + 1] - xm).hypot(g.rc[j * ni + ie + 1] - rm);
+                (d0 / (d1 - d0), (n1.1 * n1.1 - n0.1 * n0.1) / rb2)
+            })
+            .collect();
+        let s_sum = rows.iter().map(|r| r.1).sum();
+        BaseSampler { rows, p_inf: fs[3], q_inf: 0.5 * fs[0] * fs[1] * fs[1], s_sum }
+    }
+
+    /// Area-mean Cp of the extrapolated base-wall pressure (`base_state(..).2`).
+    pub fn cp_base(&self, cells: &[[[f64; 4]; 2]]) -> f64 {
+        let mean: f64 = self
+            .rows
+            .iter()
+            .zip(cells)
+            .map(|(&(k, ds), c)| {
+                let (p0, p1) = (cons_to_prim(&c[0])[3], cons_to_prim(&c[1])[3]);
+                (p0 + (p0 - p1) * k - self.p_inf) / self.q_inf * ds
+            })
+            .sum();
+        mean / self.s_sum
     }
 }
 

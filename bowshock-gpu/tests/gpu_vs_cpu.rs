@@ -580,6 +580,27 @@ fn base_block_explicit_state_matches_cpu() {
     subsonic_state_check("base explicit, 20 it", true, Scheme::Explicit, 20, 2e-7, 1e-5);
 }
 
+/// GPU base-pressure sample (kernel + host weights) vs `base_state` of the downloaded state, both precisions, at M = 0.1 (low dynamic
+/// pressure: the most sensitive case) and 0.5.
+#[test]
+fn gpu_base_cp_matches_base_state() {
+    for mach in [0.1, 0.5] {
+        let mut case = SubsonicCase::new(mach, Nose::TangentOgive { fineness: 3.0 }, 0, true);
+        case.first_order_iters = 5;
+        for prec in [Precision::F32, Precision::Extended] {
+            let mut gs = GpuSubsonic::new(&case, Mode::Guarded, prec).unwrap();
+            gs.gpu.run(100).unwrap();
+            let rb2 = case.body.body.radius().powi(2);
+            let sampler = bowshock_gpu::subsonic::BaseSampler::new(&gs.host, rb2);
+            let cp_gpu = sampler.cp_base(&gs.gpu.base_cells().unwrap());
+            gs.download().unwrap();
+            let cp_cpu = subsonic::base_state(&gs.host, rb2).2;
+            println!("base Cp sample M = {mach} {prec:?}: gpu {cp_gpu:.10} host {cp_cpu:.10} diff {:.2e}", (cp_gpu - cp_cpu).abs());
+            assert!((cp_gpu - cp_cpu).abs() < 1e-9, "M = {mach} {prec:?}: {cp_gpu} vs {cp_cpu}");
+        }
+    }
+}
+
 /// Line-implicit scheme (approximate factorization, Roe-type LHS, defect correction, CFL ramp) on the sting grid (no block) and on the base
 /// grid, vs CPU after 30 iterations. The GPU assembles the left-hand side in f32 (it only steers the iteration), so the agreement is
 /// that of two converging iterations with slightly different preconditioners, not round-off.
