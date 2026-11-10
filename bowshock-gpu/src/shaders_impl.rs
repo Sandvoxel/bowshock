@@ -457,26 +457,43 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-/// Block-tridiagonal solves along all lines of one direction, one workgroup of `wg` threads per line (`nj` i lines, `ni` j lines),
-/// by parallel cyclic reduction: the rows `(lo, d, up | r)` are normalised to `x_k + L x_{k-1} + U x_{k+1} = f`, then `ceil(log2 m)`
-/// levels (stride `s` = 1, 2, 4, ...) eliminate the unknowns at distance `s` with the rows `k -+ s`, which leaves couplings at
-/// distance `2 s`; after the last level `x = f`. The rows of a line are `k0 .. n`, `k0` the first fluid cell, and thread `t` handles
-/// the rows `t, t + wg, ...`. The reduced rows live in the scratch array `sm` (two buffers), exchanged between the threads through
-/// `storageBarrier`; the buffers are used alternately so that one barrier per level suffices.
+/// Block-tridiagonal solves along all lines of one direction, one workgroup per line (`nj` i lines, `ni` j lines), by cyclic
+/// reduction on the rows `k0 .. n` of the line (`k0` the first fluid cell, `m = n - k0` rows, `r = k - k0`). The rows
+/// `(lo, d, up | rhs)` are normalised to `x_r + L x_{r-1} + U x_{r+1} = f`. Forward level `h` = 1, 2, 4, ...: the rows `r = 2 h q`
+/// eliminate their neighbours `r -+ h` (rows that are not modified at this level, so the update is in place and one barrier per
+/// level suffices), which leaves couplings at distance `2 h`; the row 0 then holds its solution `x_0 = f_0`. Backward, `h` halving:
+/// the rows `h (2 q + 1)` follow from `x_r = f_r - L_r x_{r-h} - U_r x_{r+h}` with their own, never overwritten, `L`, `U`, `f`.
+/// A thread handles several rows of a level in a loop if the line is longer than the workgroup.
+///
+/// The rows live in workgroup memory (`L`, `U`, `f` as 9 vec4 per row, component-wise); if that exceeds [`LINE_SHARED_BYTES`] only the
+/// rows that are a multiple of `ks` do, the others (touched in the first and last `log2 ks` levels only) in the global scratch `sm`.
 /// `dir_i`: the right-hand side of pass `p.aux == 0` is `res * dt`, later passes read `x` (written by `APPLY`); the solution is written
 /// back to `x`. j lines: the right-hand side is `x` (the result of the i lines), the solution is written to `du` (pass 0) or added to
 /// it (`aux > 0`, defect correction).
-fn line(dir_i: bool, wg: u32) -> String {
+fn line(dir_i: bool, n: usize) -> String {
+    let ks = line_row_stride(n);
     LINE_TEMPLATE
         .replace("//@ACC", &acc(&[("blo", false), ("bd", false), ("bup", false)]))
         .replace("//@DIR", if dir_i { "const DIR_I: bool = true;" } else { "const DIR_I: bool = false;" })
-        .replace("//@WG", &format!("const WG: u32 = {wg}u;"))
+        .replace("//@CONSTS", &format!("const WG: u32 = {}u;\nconst KS: u32 = {ks}u;\nconst NSH: u32 = {}u;", line_threads(n), n.div_ceil(ks)))
 }
 
 /// Threads per line of a line solve of length `n`: one per row up to 256, a multiple of the warp size.
 pub fn line_threads(n: usize) -> u32 {
     let rows = n.div_ceil(256);
     (n.div_ceil(rows).div_ceil(32) * 32) as u32
+}
+
+/// Workgroup memory the rows of one line may take (wgpu's default limit); 9 vec4 per row.
+const LINE_SHARED_BYTES: usize = 16384;
+
+/// Power of two `ks`: the rows that are a multiple of `ks` live in workgroup memory, the others in global memory.
+fn line_row_stride(n: usize) -> usize {
+    let mut ks = 1;
+    while n.div_ceil(ks) * 144 > LINE_SHARED_BYTES {
+        ks *= 2;
+    }
+    ks
 }
 
 const LINE_TEMPLATE: &str = r#"
@@ -492,7 +509,10 @@ const LINE_TEMPLATE: &str = r#"
 @group(1) @binding(8) var<uniform> p: Params;
 
 //@DIR
-//@WG
+//@CONSTS
+
+var<workgroup> shs: array<vec4<f32>, 9u * NSH>;
+var<private> row_base: u32;
 
 fn cidx(l: u32, k: u32) -> u32 {
     if (DIR_I) { return l * p.ni + k; }
@@ -502,21 +522,48 @@ fn midx(l: u32, k: u32) -> u32 {
     if (DIR_I) { return k * p.nj + l; }
     return k * p.ni + l;
 }
-// Scratch of row `sc = l n + k` in buffer `b`, stored component-wise (index `(9 b + e) ni nj + sc`) so that neighbouring rows are
-// neighbouring vec4: `e` = 0..3 the columns of `L`, 4..7 those of `U`, 8 the vector `f`.
-fn s_at(b: u32, e: u32, sc: u32) -> u32 { return (9u * b + e) * p.ni * p.nj + sc; }
-fn ld_s(b: u32, e: u32, sc: u32) -> M4 {
+
+// Component `e` .. `e + 3` of the row `r`: `e` = 0 the columns of `L`, 4 those of `U`, 8 the vector `f` (single vec4). The global
+// scratch is component-wise (index `e ni nj + sc`, `sc = l n + k` the row) so that neighbouring rows are neighbouring vec4.
+fn in_shared(r: u32) -> bool { return (r & (KS - 1u)) == 0u; }
+fn ld_v(e: u32, r: u32) -> vec4<f32> {
+    if (in_shared(r)) { return shs[e * NSH + r / KS]; }
+    return sm[e * p.ni * p.nj + row_base + r];
+}
+fn st_v(e: u32, r: u32, v: vec4<f32>) {
+    if (in_shared(r)) { shs[e * NSH + r / KS] = v; return; }
+    sm[e * p.ni * p.nj + row_base + r] = v;
+}
+fn ld_m(e: u32, r: u32) -> M4 {
+    if (in_shared(r)) {
+        let o = e * NSH + r / KS;
+        return M4(shs[o], shs[o + NSH], shs[o + 2u * NSH], shs[o + 3u * NSH]);
+    }
     let c = p.ni * p.nj;
-    let o = s_at(b, e, sc);
+    let o = e * c + row_base + r;
     return M4(sm[o], sm[o + c], sm[o + 2u * c], sm[o + 3u * c]);
 }
-fn st_s(b: u32, e: u32, sc: u32, m: M4) {
+fn st_m(e: u32, r: u32, m: M4) {
+    if (in_shared(r)) {
+        let o = e * NSH + r / KS;
+        shs[o] = m[0];
+        shs[o + NSH] = m[1];
+        shs[o + 2u * NSH] = m[2];
+        shs[o + 3u * NSH] = m[3];
+        return;
+    }
     let c = p.ni * p.nj;
-    let o = s_at(b, e, sc);
+    let o = e * c + row_base + r;
     sm[o] = m[0];
     sm[o + c] = m[1];
     sm[o + 2u * c] = m[2];
     sm[o + 3u * c] = m[3];
+}
+
+// Barrier after rows were written; the global scratch needs the storage barrier, the rows in workgroup memory do not.
+fn sync(global_rows: bool) {
+    if (global_rows) { storageBarrier(); }
+    workgroupBarrier();
 }
 
 @compute @workgroup_size(WG)
@@ -533,7 +580,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
     }
     if (k0 >= n) { return; }
     let m = n - k0;
-    let base = l * n + k0;
+    row_base = l * n + k0;
     for (var r: u32 = li; r < m; r += WG) {
         let k = k0 + r;
         let mi = midx(l, k);
@@ -545,51 +592,49 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
         var um = m_zero();
         if (r > 0u) { lm = di * ld_blo(mi); }
         if (r + 1u < m) { um = di * ld_bup(mi); }
-        st_s(0u, 0u, base + r, lm);
-        st_s(0u, 4u, base + r, um);
-        sm[s_at(0u, 8u, base + r)] = di * rhs;
+        st_m(0u, r, lm);
+        st_m(4u, r, um);
+        st_v(8u, r, di * rhs);
     }
-    storageBarrier();
-    workgroupBarrier();
-    var b = 0u;
-    for (var s: u32 = 1u; s < m; s = s << 1u) {
-        for (var r: u32 = li; r < m; r += WG) {
-            let sc = base + r;
-            let lk = ld_s(b, 0u, sc);
-            let uk = ld_s(b, 4u, sc);
-            var fk = sm[s_at(b, 8u, sc)];
+    sync(KS > 1u);
+    var h = 1u;
+    for (; h < m; h = h << 1u) {
+        for (var r: u32 = 2u * h * li; r < m; r += 2u * h * WG) {
+            let lk = ld_m(0u, r);
+            let uk = ld_m(4u, r);
+            var fk = ld_v(8u, r);
             var d = m_eye();
             var ln = m_zero();
             var un = m_zero();
-            let has_lo = r >= s;
-            let has_up = r + s < m;
-            if (has_lo) {
-                d = d - lk * ld_s(b, 4u, sc - s);
-                ln = (lk * ld_s(b, 0u, sc - s)) * -1.0;
-                fk = fk - lk * sm[s_at(b, 8u, sc - s)];
+            if (r > 0u) {
+                d = d - lk * ld_m(4u, r - h);
+                ln = (lk * ld_m(0u, r - h)) * -1.0;
+                fk = fk - lk * ld_v(8u, r - h);
             }
-            if (has_up) {
-                d = d - uk * ld_s(b, 0u, sc + s);
-                un = (uk * ld_s(b, 4u, sc + s)) * -1.0;
-                fk = fk - uk * sm[s_at(b, 8u, sc + s)];
+            if (r + h < m) {
+                d = d - uk * ld_m(0u, r + h);
+                un = (uk * ld_m(4u, r + h)) * -1.0;
+                fk = fk - uk * ld_v(8u, r + h);
             }
-            if (has_lo || has_up) {
-                let di = inv4(d);
-                ln = di * ln;
-                un = di * un;
-                fk = di * fk;
-            }
-            st_s(1u - b, 0u, sc, ln);
-            st_s(1u - b, 4u, sc, un);
-            sm[s_at(1u - b, 8u, sc)] = fk;
+            let di = inv4(d);
+            st_m(0u, r, di * ln);
+            st_m(4u, r, di * un);
+            st_v(8u, r, di * fk);
         }
-        storageBarrier();
-        workgroupBarrier();
-        b = 1u - b;
+        sync(2u * h < KS);
+    }
+    while (h > 1u) {
+        h = h >> 1u;
+        for (var r: u32 = h + 2u * h * li; r < m; r += 2u * h * WG) {
+            var xk = ld_v(8u, r) - ld_m(0u, r) * ld_v(8u, r - h);
+            if (r + h < m) { xk = xk - ld_m(4u, r) * ld_v(8u, r + h); }
+            st_v(8u, r, xk);
+        }
+        sync(h < KS);
     }
     for (var r: u32 = li; r < m; r += WG) {
         let ci = cidx(l, k0 + r);
-        let xk = sm[s_at(b, 8u, base + r)];
+        let xk = ld_v(8u, r);
         if (DIR_I) {
             x[ci] = xk;
         } else if (p.aux == 0u) {
@@ -698,10 +743,10 @@ pub fn assemble_j() -> String {
 
 /// i lines (length `ni`) / j lines (length `nj`).
 pub fn line_i(ni: usize) -> String {
-    line(true, line_threads(ni))
+    line(true, ni)
 }
 pub fn line_j(nj: usize) -> String {
-    line(false, line_threads(nj))
+    line(false, nj)
 }
 
 /// Kernel sources with their preludes: `(common + source)` for the f32 kernels and the extended residual.

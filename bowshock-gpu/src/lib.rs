@@ -232,7 +232,7 @@ struct Imp {
     lo_j: Array<[f32; 4]>,
     d_j: Array<[f32; 4]>,
     up_j: Array<[f32; 4]>,
-    /// Reduced rows of the cyclic-reduction line solves (two buffers of 9 vec4 per row, shared by the i and j lines).
+    /// Reduced rows of the cyclic-reduction line solves (9 vec4 per row, shared by the i and j lines).
     scr: Array<[f32; 4]>,
 }
 
@@ -493,7 +493,7 @@ impl GpuSolver {
             lo_j: m()?,
             d_j: m()?,
             up_j: m()?,
-            scr: Array::zeros_on(ctx, 18 * n)?,
+            scr: Array::zeros_on(ctx, 9 * n)?,
         })
     }
 
