@@ -6,7 +6,7 @@
 //! (Original f32 precision: `Precision::F32`. See `f32_cpu_emulation` and `f32_diag` for the experiments that identify
 //! the cause and `Precision::Extended` for the fix.)
 //!
-//! `cargo run --release -p bowshock-gpu --example f32_floor`
+//! `cargo run --release -p bowshock-gpu-cases --example f32_floor`
 
 use bowshock_gpu::{GpuSolver, Mode, Precision};
 use bowshock_cases::cone::{build_solver, ConeCase};

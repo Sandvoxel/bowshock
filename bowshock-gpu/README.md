@@ -525,7 +525,7 @@ compensated update — whose first version had the same defect and gained only ~
 `extended_face_kernels_match_cpu_to_1e9` fails if a driver / compiler change breaks the transformations again. `fma` itself is honoured.
 The accurate df add was replaced by the cheaper "sloppy" df add and division uses 2 instead of 3 correction steps (same 6e-13 accuracy, 20 – 30 % faster).
 
-### f32 floor vs CFL (original `F32` precision; `cargo run --release -p bowshock-gpu --example f32_floor`, GPU only, 15°, minmod, 6000 iterations)
+### f32 floor vs CFL (original `F32` precision; `cargo run --release -p bowshock-gpu-cases --example f32_floor`, GPU only, 15°, minmod, 6000 iterations)
 
 The floor scales like 1/CFL, i.e. like 1/dt (update quantisation), noise in the flux evaluation alone would be CFL-independent:
 
@@ -543,7 +543,7 @@ The floor scales like 1/CFL, i.e. like 1/dt (update quantisation), noise in the 
 The product floor × CFL is roughly constant (4 – 6e-5 at 100×50, 1.0 – 1.5e-4 at 200×100) and the floor doubles with refinement, as the update-quantisation estimate `ulp(u)/dt` predicts
 (`dt ∝ CFL·Δx`); together with Evidence 1 and 2 above this confirms the diagnosis (it was an inference before). With `Precision::Extended` the floor is gone: there is no CFL-dependent plateau, the residual keeps falling to 1e-10 (100×50).
 
-## Tests (`cargo test --release -p bowshock-gpu`, 10 tests, all pass, ~6 s)
+## Tests (`cargo test --release -p bowshock-gpu-cases`, 10 tests, all pass, ~6 s)
 
 1. `hllc_and_reconstruction_match_cpu_on_random_states`: 20 000 random states (smooth neighbours with 0.3 % / 3 % perturbations and unrelated
    states; random normals) through the f32 GPU `reconstruct` + `hllc` + `face_flux` kernels vs `bowshock_core::flux` on the same f32 inputs, first

@@ -3,7 +3,7 @@
 //! Runs the 15 deg / minmod case on the GPU to the floor, then evaluates *that f32 state* with the f64 CPU solver
 //! and compares: residual in f64 vs f32, update `dt*res` vs the f32 ulp of the state, and where the residual lives.
 //!
-//! `cargo run --release -p bowshock-gpu --example f32_diag [-- ni nj]`
+//! `cargo run --release -p bowshock-gpu-cases --example f32_diag [-- ni nj]`
 
 use bowshock_gpu::{GpuSolver, Mode, Precision};
 use bowshock_cases::cone::{build_solver, ConeCase};

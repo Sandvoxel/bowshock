@@ -7,7 +7,7 @@
 //! * `eval on f32(u)` : the state is kept in f64, only the copy the residual is evaluated on is rounded to f32
 //!                      (state rounding noise in the residual, but updates are not quantised).
 //!
-//! `cargo run --release -p bowshock-gpu --example f32_cpu_emulation [-- ni nj]`
+//! `cargo run --release -p bowshock-gpu-cases --example f32_cpu_emulation [-- ni nj]`
 
 use bowshock_cases::cone::{build_solver, ConeCase};
 use bowshock_core::solver::Solver;
