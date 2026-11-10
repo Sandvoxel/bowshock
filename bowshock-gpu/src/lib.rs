@@ -232,9 +232,8 @@ struct Imp {
     lo_j: Array<[f32; 4]>,
     d_j: Array<[f32; 4]>,
     up_j: Array<[f32; 4]>,
-    /// Reduced rows of the cyclic-reduction line solves (two buffers, shared by the i and j lines).
-    scr_m: Array<[f32; 4]>,
-    scr_f: Array<[f32; 4]>,
+    /// Reduced rows of the cyclic-reduction line solves (two buffers of 9 vec4 per row, shared by the i and j lines).
+    scr: Array<[f32; 4]>,
 }
 
 /// Low (correction) words of the compensated state.
@@ -494,8 +493,7 @@ impl GpuSolver {
             lo_j: m()?,
             d_j: m()?,
             up_j: m()?,
-            scr_m: Array::zeros_on(ctx, 16 * n)?,
-            scr_f: Array::zeros_on(ctx, 2 * n)?,
+            scr: Array::zeros_on(ctx, 18 * n)?,
         })
     }
 
@@ -578,11 +576,11 @@ impl GpuSolver {
             }
             imp.line_i.launch_raw(
                 [nj, 1, 1],
-                args![&imp.lo_i, &imp.d_i, &imp.up_i, &mut imp.scr_m, &mut imp.scr_f, &mut imp.x, &mut imp.du, &self.res, &self.dt, uniform(&pp)],
+                args![&imp.lo_i, &imp.d_i, &imp.up_i, &mut imp.scr, &mut imp.x, &mut imp.du, &self.res, &self.dt, uniform(&pp)],
             )?;
             imp.line_j.launch_raw(
                 [ni, 1, 1],
-                args![&imp.lo_j, &imp.d_j, &imp.up_j, &mut imp.scr_m, &mut imp.scr_f, &mut imp.x, &mut imp.du, &self.res, &self.dt, uniform(&pp)],
+                args![&imp.lo_j, &imp.d_j, &imp.up_j, &mut imp.scr, &mut imp.x, &mut imp.du, &self.res, &self.dt, uniform(&pp)],
             )?;
         }
         match &mut self.lo {

@@ -1,5 +1,5 @@
 //! Per-kernel GPU time of the line-implicit scheme on the subsonic sting case (`subsonic_gpu --base off`): `imp_profile [--f32]`.
-//! Best of 5 profiled runs of 50 iterations per kernel (the GPU may be shared).
+//! Best of 20 profiled runs of 20 iterations per kernel (the GPU may be shared).
 use bowshock_cfd::body_grid::Nose;
 use bowshock_cfd::subsonic::SubsonicCase;
 use bowshock_gpu::{GpuSolver, Mode, Precision};
@@ -14,10 +14,10 @@ fn main() {
         let host = case.build_solver();
         let mut g = GpuSolver::from_host(&ctx, &host, Mode::Guarded, prec).unwrap();
         g.run(100).unwrap();
-        let n = 50;
+        let n = 20;
         let mut best: BTreeMap<String, f64> = BTreeMap::new();
         let mut best_total = f64::INFINITY;
-        for _ in 0..5 {
+        for _ in 0..20 {
             let (r, profile) = ctx.profile(|| g.run(n)).unwrap();
             r.unwrap();
             for k in &profile.kernels {

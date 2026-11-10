@@ -461,14 +461,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 /// by parallel cyclic reduction: the rows `(lo, d, up | r)` are normalised to `x_k + L x_{k-1} + U x_{k+1} = f`, then `ceil(log2 m)`
 /// levels (stride `s` = 1, 2, 4, ...) eliminate the unknowns at distance `s` with the rows `k -+ s`, which leaves couplings at
 /// distance `2 s`; after the last level `x = f`. The rows of a line are `k0 .. n`, `k0` the first fluid cell, and thread `t` handles
-/// the rows `t, t + wg, ...`. The reduced rows live in the scratch arrays `sm` (`L`, `U` of two buffers) and `sf`, exchanged between
-/// the threads through `storageBarrier`; the buffers are used alternately so that one barrier per level suffices.
+/// the rows `t, t + wg, ...`. The reduced rows live in the scratch array `sm` (two buffers), exchanged between the threads through
+/// `storageBarrier`; the buffers are used alternately so that one barrier per level suffices.
 /// `dir_i`: the right-hand side of pass `p.aux == 0` is `res * dt`, later passes read `x` (written by `APPLY`); the solution is written
 /// back to `x`. j lines: the right-hand side is `x` (the result of the i lines), the solution is written to `du` (pass 0) or added to
 /// it (`aux > 0`, defect correction).
 fn line(dir_i: bool, wg: u32) -> String {
     LINE_TEMPLATE
-        .replace("//@ACC", &acc(&[("blo", false), ("bd", false), ("bup", false), ("sm", true)]))
+        .replace("//@ACC", &acc(&[("blo", false), ("bd", false), ("bup", false)]))
         .replace("//@DIR", if dir_i { "const DIR_I: bool = true;" } else { "const DIR_I: bool = false;" })
         .replace("//@WG", &format!("const WG: u32 = {wg}u;"))
 }
@@ -484,13 +484,12 @@ const LINE_TEMPLATE: &str = r#"
 @group(1) @binding(1) var<storage, read> bd: array<vec4<f32>>;
 @group(1) @binding(2) var<storage, read> bup: array<vec4<f32>>;
 @group(1) @binding(3) var<storage, read_write> sm: array<vec4<f32>>;
-@group(1) @binding(4) var<storage, read_write> sf: array<vec4<f32>>;
 //@ACC
-@group(1) @binding(5) var<storage, read_write> x: array<vec4<f32>>;
-@group(1) @binding(6) var<storage, read_write> du: array<vec4<f32>>;
-@group(1) @binding(7) var<storage, read> res: array<vec4<f32>>;
-@group(1) @binding(8) var<storage, read> dt: array<f32>;
-@group(1) @binding(9) var<uniform> p: Params;
+@group(1) @binding(4) var<storage, read_write> x: array<vec4<f32>>;
+@group(1) @binding(5) var<storage, read_write> du: array<vec4<f32>>;
+@group(1) @binding(6) var<storage, read> res: array<vec4<f32>>;
+@group(1) @binding(7) var<storage, read> dt: array<f32>;
+@group(1) @binding(8) var<uniform> p: Params;
 
 //@DIR
 //@WG
@@ -503,9 +502,22 @@ fn midx(l: u32, k: u32) -> u32 {
     if (DIR_I) { return k * p.nj + l; }
     return k * p.ni + l;
 }
-// Scratch of row `sc = l n + k` in buffer `b`: matrices `L`, `U` at `sm_at (+ 1)`, vector at `sf_at`.
-fn sm_at(b: u32, sc: u32) -> u32 { return 2u * (b * p.ni * p.nj + sc); }
-fn sf_at(b: u32, sc: u32) -> u32 { return b * p.ni * p.nj + sc; }
+// Scratch of row `sc = l n + k` in buffer `b`, stored component-wise (index `(9 b + e) ni nj + sc`) so that neighbouring rows are
+// neighbouring vec4: `e` = 0..3 the columns of `L`, 4..7 those of `U`, 8 the vector `f`.
+fn s_at(b: u32, e: u32, sc: u32) -> u32 { return (9u * b + e) * p.ni * p.nj + sc; }
+fn ld_s(b: u32, e: u32, sc: u32) -> M4 {
+    let c = p.ni * p.nj;
+    let o = s_at(b, e, sc);
+    return M4(sm[o], sm[o + c], sm[o + 2u * c], sm[o + 3u * c]);
+}
+fn st_s(b: u32, e: u32, sc: u32, m: M4) {
+    let c = p.ni * p.nj;
+    let o = s_at(b, e, sc);
+    sm[o] = m[0];
+    sm[o + c] = m[1];
+    sm[o + 2u * c] = m[2];
+    sm[o + 3u * c] = m[3];
+}
 
 @compute @workgroup_size(WG)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
@@ -533,10 +545,9 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
         var um = m_zero();
         if (r > 0u) { lm = di * ld_blo(mi); }
         if (r + 1u < m) { um = di * ld_bup(mi); }
-        let o = sm_at(0u, base + r);
-        st_sm(o, lm);
-        st_sm(o + 1u, um);
-        sf[sf_at(0u, base + r)] = di * rhs;
+        st_s(0u, 0u, base + r, lm);
+        st_s(0u, 4u, base + r, um);
+        sm[s_at(0u, 8u, base + r)] = di * rhs;
     }
     storageBarrier();
     workgroupBarrier();
@@ -544,26 +555,23 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
     for (var s: u32 = 1u; s < m; s = s << 1u) {
         for (var r: u32 = li; r < m; r += WG) {
             let sc = base + r;
-            let o = sm_at(b, sc);
-            let lk = ld_sm(o);
-            let uk = ld_sm(o + 1u);
-            var fk = sf[sf_at(b, sc)];
+            let lk = ld_s(b, 0u, sc);
+            let uk = ld_s(b, 4u, sc);
+            var fk = sm[s_at(b, 8u, sc)];
             var d = m_eye();
             var ln = m_zero();
             var un = m_zero();
             let has_lo = r >= s;
             let has_up = r + s < m;
             if (has_lo) {
-                let q = sm_at(b, sc - s);
-                d = d - lk * ld_sm(q + 1u);
-                ln = (lk * ld_sm(q)) * -1.0;
-                fk = fk - lk * sf[sf_at(b, sc - s)];
+                d = d - lk * ld_s(b, 4u, sc - s);
+                ln = (lk * ld_s(b, 0u, sc - s)) * -1.0;
+                fk = fk - lk * sm[s_at(b, 8u, sc - s)];
             }
             if (has_up) {
-                let q = sm_at(b, sc + s);
-                d = d - uk * ld_sm(q);
-                un = (uk * ld_sm(q + 1u)) * -1.0;
-                fk = fk - uk * sf[sf_at(b, sc + s)];
+                d = d - uk * ld_s(b, 0u, sc + s);
+                un = (uk * ld_s(b, 4u, sc + s)) * -1.0;
+                fk = fk - uk * sm[s_at(b, 8u, sc + s)];
             }
             if (has_lo || has_up) {
                 let di = inv4(d);
@@ -571,10 +579,9 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
                 un = di * un;
                 fk = di * fk;
             }
-            let w = sm_at(1u - b, sc);
-            st_sm(w, ln);
-            st_sm(w + 1u, un);
-            sf[sf_at(1u - b, sc)] = fk;
+            st_s(1u - b, 0u, sc, ln);
+            st_s(1u - b, 4u, sc, un);
+            sm[s_at(1u - b, 8u, sc)] = fk;
         }
         storageBarrier();
         workgroupBarrier();
@@ -582,7 +589,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
     }
     for (var r: u32 = li; r < m; r += WG) {
         let ci = cidx(l, k0 + r);
-        let xk = sf[sf_at(b, base + r)];
+        let xk = sm[s_at(b, 8u, base + r)];
         if (DIR_I) {
             x[ci] = xk;
         } else if (p.aux == 0u) {
