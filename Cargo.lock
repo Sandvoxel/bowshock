@@ -75,11 +75,32 @@ dependencies = [
 ]
 
 [[package]]
-name = "bowshock-cfd"
+name = "bowshock-cases"
 version = "0.1.0"
 dependencies = [
+ "bowshock-core",
+ "bowshock-reference",
  "gif",
  "image",
+]
+
+[[package]]
+name = "bowshock-cli"
+version = "0.1.0"
+dependencies = [
+ "bowshock-cases",
+ "bowshock-core",
+ "bowshock-gpu",
+ "bowshock-gpu-cases",
+ "bowshock-reference",
+ "luma",
+ "rayon",
+]
+
+[[package]]
+name = "bowshock-core"
+version = "0.1.0"
+dependencies = [
  "rayon",
 ]
 
@@ -87,9 +108,27 @@ dependencies = [
 name = "bowshock-gpu"
 version = "0.1.0"
 dependencies = [
- "bowshock-cfd",
+ "bowshock-core",
  "encase",
  "luma",
+]
+
+[[package]]
+name = "bowshock-gpu-cases"
+version = "0.1.0"
+dependencies = [
+ "bowshock-cases",
+ "bowshock-core",
+ "bowshock-gpu",
+ "bowshock-reference",
+ "luma",
+]
+
+[[package]]
+name = "bowshock-reference"
+version = "0.1.0"
+dependencies = [
+ "bowshock-core",
 ]
 
 [[package]]

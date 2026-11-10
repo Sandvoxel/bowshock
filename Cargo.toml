@@ -1,5 +1,5 @@
 [workspace]
-members = ["bowshock-cfd", "bowshock-gpu"]
+members = ["bowshock-core", "bowshock-reference", "bowshock-cases", "bowshock-gpu", "bowshock-gpu-cases", "bowshock-cli"]
 resolver = "2"
 
 [workspace.package]
@@ -7,6 +7,18 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Sandvoxel/bowshock"
+
+[workspace.dependencies]
+bowshock-core = { path = "bowshock-core" }
+bowshock-reference = { path = "bowshock-reference" }
+bowshock-cases = { path = "bowshock-cases" }
+bowshock-gpu = { path = "bowshock-gpu" }
+bowshock-gpu-cases = { path = "bowshock-gpu-cases" }
+luma = { git = "https://github.com/flipnoteman/Luma.git", branch = "main" }
+rayon = "1"
+encase = "0.13.0"
+image = { version = "0.25", default-features = false, features = ["png"] }
+gif = "0.13"
 
 [profile.release]
 opt-level = 3

@@ -1,7 +1,7 @@
 //! Extended-precision (double-float, "df") WGSL for [`crate::Precision::Extended`].
 //!
 //! A df number is an unevaluated sum `h + l` of two f32 with `|l| <= ulp(h)/2` (about 48 significant bits). The face
-//! flux (`face_flux` of bowshock-cfd: MUSCL reconstruction, HLLC, Rusanov blend, shock sensor), the primitive variables of
+//! flux (`face_flux` of bowshock-core: MUSCL reconstruction, HLLC, Rusanov blend, shock sensor), the primitive variables of
 //! the stencil and the cell residual sum are evaluated in df, from a double-float state (`u` + `ulo`), so that the
 //! residual is accurate to ~1e-12 relative instead of the ~1e-7 of f32 arithmetic and f32-rounded states. Only
 //! geometry (face normals, weights, cell areas/volumes: f32 inputs), the time step and the final residual that enters
@@ -85,7 +85,7 @@ fn dreflect_wall(w: W, nx: f32, nr: f32) -> W {
     return W(w.r, dsub(w.u, dmulf(un, 2.0 * nx)), dsub(w.v, dmulf(un, 2.0 * nr)), w.p);
 }
 
-// df translations of `characteristic_ghost`, `pressure_outflow_ghost`, `far_ghost` of `COMMON` (bowshock-cfd `bc.rs`);
+// df translations of `characteristic_ghost`, `pressure_outflow_ghost`, `far_ghost` of `COMMON` (bowshock-core `bc.rs`);
 // `w` is the first interior cell, `(nx, nr)` the outward unit normal. `rho = rho_ref (c_b / c_ref)^5` (see COMMON).
 fn dcharacteristic_ghost(fs: W, w: W, nx: f32, nr: f32) -> W {
     let ci = dsound(w);
@@ -119,7 +119,7 @@ fn dfar_ghost(bc: u32, fs: W, edge: W, f: vec4<f32>, outward: f32) -> W {
     return dpressure_outflow_ghost(fs.p, edge, outward * f.x, outward * f.y);
 }
 
-// a = q_i - q_{i-1}, b = q_{i+1} - q_i (bowshock-cfd `limited_slope`).
+// a = q_i - q_{i-1}, b = q_{i+1} - q_i (bowshock-core `limited_slope`).
 fn dslope(a: D, b: D, lim: u32) -> D {
     if (lim == 0u) { return dc(0.0); }
     if (!((a.h > 0.0 && b.h > 0.0) || (a.h < 0.0 && b.h < 0.0))) { return dc(0.0); }
@@ -283,7 +283,7 @@ fn split(x: f64) -> (f32, f32) {
 
 /// `COMMON` + the df library with its constants (all rounded from f64, hi/lo split).
 pub fn common_ext() -> String {
-    let g = bowshock_cfd::gas::GAMMA;
+    let g = bowshock_core::gas::GAMMA;
     let c = |name: &str, x: f64| {
         let (h, l) = split(x);
         format!("const {name}_H: f32 = {h:e};\nconst {name}_L: f32 = {l:e};\n")
@@ -293,9 +293,9 @@ pub fn common_ext() -> String {
         c("GM1", g - 1.0),
         c("IGM1", 1.0 / (g - 1.0)),
         c("VAEPS", 1e-14),
-        c("SLO", bowshock_cfd::flux::SHOCK_SENSOR_LO),
-        c("SINV", 1.0 / (bowshock_cfd::flux::SHOCK_SENSOR_HI - bowshock_cfd::flux::SHOCK_SENSOR_LO)),
-        c("LMFLOOR", bowshock_cfd::flux::LOW_MACH_FLOOR),
+        c("SLO", bowshock_core::flux::SHOCK_SENSOR_LO),
+        c("SINV", 1.0 / (bowshock_core::flux::SHOCK_SENSOR_HI - bowshock_core::flux::SHOCK_SENSOR_LO)),
+        c("LMFLOOR", bowshock_core::flux::LOW_MACH_FLOOR),
     ]
     .concat();
     format!("{}\n{}\n{}", crate::shaders::common(), consts, DD_TEMPLATE)
@@ -538,7 +538,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 "#;
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Direct (bowshock-cfd mirror) formulation in df: the primitive array `w` and the face fluxes hold `(hi, lo)` vec4 pairs.
+// Direct (bowshock-core mirror) formulation in df: the primitive array `w` and the face fluxes hold `(hi, lo)` vec4 pairs.
 
 /// cons -> prim (df) of every interior cell. `w` has two vec4 per cell of the ghosted array: `(hi, lo)` at `2 k`, `2 k + 1`.
 /// Problem size `[ni, nj]`.

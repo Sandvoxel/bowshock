@@ -1,4 +1,4 @@
-//! WGSL of the line-implicit scheme (`bowshock_cfd::implicit`): approximate-factorization pseudo-time stepping
+//! WGSL of the line-implicit scheme (`bowshock_core::implicit`): approximate-factorization pseudo-time stepping
 //!
 //! ```text
 //!   (I - dt J_i) X = dt R      block-tridiagonal along every i line (one workgroup per line)
@@ -58,7 +58,7 @@ fn prim_to_cons(w: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(w.x, w.x * w.y, w.x * w.z, w.w / (GAMMA - 1.0) + 0.5 * w.x * (w.y * w.y + w.z * w.z));
 }
 
-// A = d(F.n)/dU for the primitive state w (bowshock-cfd `implicit::flux_jacobian`).
+// A = d(F.n)/dU for the primitive state w (bowshock-core `implicit::flux_jacobian`).
 fn flux_jacobian(w: vec4<f32>, nx: f32, nr: f32) -> M4 {
     let rho = w.x; let u = w.y; let v = w.z; let pr = w.w;
     let g1 = GAMMA - 1.0;
@@ -80,7 +80,7 @@ fn fix_eig(l: f32, eps: f32) -> f32 {
 }
 
 // |A| of the Roe-averaged state as the quadratic polynomial through |lambda| at the three eigenvalues, with the Harten-type
-// entropy fix `eps_fix c` (bowshock-cfd `implicit::abs_jacobian`).
+// entropy fix `eps_fix c` (bowshock-core `implicit::abs_jacobian`).
 fn abs_jacobian(wl: vec4<f32>, wr: vec4<f32>, nx: f32, nr: f32, eps_fix: f32) -> M4 {
     let sl = sqrt(wl.x);
     let sr = sqrt(wr.x);
@@ -142,7 +142,7 @@ fn ghost_jac(bc: u32, fs: vec4<f32>, edge: vec4<f32>, f: vec4<f32>, outward: f32
 
 struct Blk { lo: M4, d: M4, up: M4 }
 
-// Blocks of `I - dt J` of a cell (bowshock-cfd `implicit::cell_blocks`): `wk` the cell, `wm` / `wp` the lower / upper neighbour or
+// Blocks of `I - dt J` of a cell (bowshock-core `implicit::cell_blocks`): `wk` the cell, `wm` / `wp` the lower / upper neighbour or
 // ghost state, `fl` / `fr` the lower / upper face (nx, nr, len, weight), `src = A / V` for the axisymmetric pressure source (j lines).
 fn cell_blocks(wk: vec4<f32>, wm: vec4<f32>, wp: vec4<f32>, fl: vec4<f32>, fr: vec4<f32>, vol: f32, dt: f32, src: f32) -> Blk {
     let lines = (p.iflags & 1u) != 0u;
@@ -344,7 +344,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
 }
 "#;
 
-/// Assembly of the blocks `lo`, `d`, `up` of `I - dt J_dir` for every cell (bowshock-cfd `implicit::assemble`). `dir_i`: lines along
+/// Assembly of the blocks `lo`, `d`, `up` of `I - dt J_dir` for every cell (bowshock-core `implicit::assemble`). `dir_i`: lines along
 /// i, blocks stored at `i * nj + j`, launched as `[nj, ni]` (`gid.x` = j); otherwise lines along j, blocks at `j * ni + i`, launched
 /// as `[ni, nj]`. Neighbour states are the f32 primitives of the high state; at the ends of a line the ghost state of the BC (or the
 /// mirror image across a wall of the solid block) enters the pivot block through `T = dU_ghost / dU` (`lo`/`up` of that end = 0).
@@ -644,7 +644,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
 }
 "#;
 
-/// Defect `x = dt res - (A_i du + A_j du - du)` with the stored (unfactored) blocks of both directions (bowshock-cfd `implicit::step`,
+/// Defect `x = dt res - (A_i du + A_j du - du)` with the stored (unfactored) blocks of both directions (bowshock-core `implicit::step`,
 /// `apply_factor`), the right-hand side of a defect-correction pass; 0 in solid cells. Problem size `[ni, nj]`.
 pub fn apply() -> String {
     APPLY_TEMPLATE.replace(

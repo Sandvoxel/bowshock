@@ -1,0 +1,15 @@
+[package]
+name = "bowshock-cases"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Body grids, case runners and post-processing of the bowshock cone, ogive, transonic and subsonic validation cases"
+
+[dependencies]
+bowshock-core.workspace = true
+bowshock-reference.workspace = true
+
+[dev-dependencies]
+image.workspace = true
+gif.workspace = true

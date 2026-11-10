@@ -1,7 +1,7 @@
-//! `bowshock-gpu`: f32 port of the `bowshock-cfd` axisymmetric Euler solver (MUSCL + HLLC/Rusanov shock blend +
+//! `bowshock-gpu`: f32 port of the `bowshock-core` axisymmetric Euler solver (MUSCL + HLLC/Rusanov shock blend +
 //! SSP-RK3 with local time stepping) to Luma custom WGSL kernels.
 //!
-//! Every kernel in [`shaders`] is a direct translation of the corresponding `bowshock-cfd` function or
+//! Every kernel in [`shaders`] is a direct translation of the corresponding `bowshock-core` function or
 //! loop body, with the same data layout (cell-centred conserved state, primitives with two ghost
 //! layers, per-face HLLC flux, per-cell residual) so that differences are traceable. Everything is
 //! recorded into Luma's automatic batch; the host only synchronises when it reads the residual
@@ -12,26 +12,21 @@
 //! f32 rounding), a compensated `hi + lo` state, or (default) the compensated state plus a double-float evaluation of
 //! the residual ([`shaders_ext`]), which converges like the f64 CPU solver. See the README, "The f32 residual floor".
 
-pub mod cone;
-pub mod ogive;
-pub mod run;
 pub mod shaders;
 pub mod shaders_ext;
 pub mod shaders_impl;
-pub mod subsonic;
-pub mod transonic;
 
-use bowshock_cfd::flux::Limiter;
-use bowshock_cfd::gas::prim_to_cons;
-use bowshock_cfd::grid::Grid;
-use bowshock_cfd::implicit::{DtMode, ImplicitParams};
-use bowshock_cfd::solver::{Bc, Block, Config, Scheme, Solver};
+use bowshock_core::flux::Limiter;
+use bowshock_core::gas::prim_to_cons;
+use bowshock_core::grid::Grid;
+use bowshock_core::implicit::{DtMode, ImplicitParams};
+use bowshock_core::solver::{Bc, Block, Config, Scheme, Solver};
 use luma::{args, uniform, Array, Context, Kernel};
 
 pub use luma::{LumaError, Result};
 
 /// SSP-RK3 (Shu-Osher) stage coefficients `(a, b)` of `u = a (u + dt L(u)) + b u0`, as in
-/// `bowshock_cfd::solver::Solver::step`.
+/// `bowshock_core::solver::Solver::step`.
 const RK3: [(f32, f32); 3] = [(1.0, 0.0), (0.25, 0.75), ((2.0f64 / 3.0) as f32, (1.0f64 / 3.0) as f32)];
 
 /// Maximum number of iterations recorded between two residual-history reads.
@@ -61,7 +56,7 @@ pub struct Params {
     /// RK stage update `u = ra (u + dt res) + rb u0` (stages 2, 3).
     pub ra: f32,
     pub rb: f32,
-    /// 1: Thornber low-Mach correction of the reconstructed face states (`bowshock_cfd::flux::low_mach_states`).
+    /// 1: Thornber low-Mach correction of the reconstructed face states (`bowshock_core::flux::low_mach_states`).
     pub low_mach: u32,
     /// Line-implicit scheme flags: bit 1 block-tridiagonal lines (else point-implicit), 2 implicit BC Jacobians, 4 Roe-type
     /// dissipation matrix (else Rusanov `lambda I`), 8 `DtMode::MinDirection`.
@@ -71,7 +66,7 @@ pub struct Params {
     pub fs_lo_u: f32,
     pub fs_lo_v: f32,
     pub fs_lo_p: f32,
-    /// Solid body block `(i_end, j_end, j_sting)` of `bowshock_cfd::solver::Block` (all 0: none).
+    /// Solid body block `(i_end, j_end, j_sting)` of `bowshock_core::solver::Block` (all 0: none).
     pub blk_i: u32,
     pub blk_j: u32,
     pub blk_s: u32,
@@ -122,7 +117,7 @@ fn build_ext(ctx: &Context, src: &str, label: &str) -> Result<Kernel> {
 /// How one iteration is mapped to kernel launches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    /// Direct translation of bowshock-cfd: cons->prim, ghost fill, i-face flux, j-face flux, residual,
+    /// Direct translation of bowshock-core: cons->prim, ghost fill, i-face flux, j-face flux, residual,
     /// update per RK stage (17 launches per iteration incl. residual history).
     Direct,
     /// Index-guarded formulation: no primitive/ghost arrays; one flux kernel (i and j faces, ghost
@@ -168,7 +163,7 @@ enum Kernels {
     },
 }
 
-/// GPU solver state. Created from a `bowshock-cfd` grid and config (geometry is converted to f32 and
+/// GPU solver state. Created from a `bowshock-core` grid and config (geometry is converted to f32 and
 /// uploaded once).
 pub struct GpuSolver {
     ctx: Context,
@@ -214,7 +209,7 @@ pub struct GpuSolver {
     base_probe: Option<(Kernel, Array<[f32; 4]>)>,
 }
 
-/// Kernels and work arrays of the line-implicit scheme (`bowshock_cfd::implicit`, [`shaders_impl`]). Every 4x4 block is stored as
+/// Kernels and work arrays of the line-implicit scheme (`bowshock_core::implicit`, [`shaders_impl`]). Every 4x4 block is stored as
 /// four consecutive column vec4; the i-line blocks at `4 (i nj + j)` (coalesced across lines), the j-line blocks at `4 (j ni + i)`.
 struct Imp {
     p: ImplicitParams,
@@ -292,7 +287,7 @@ impl GpuSolver {
                 hist_final: build(ctx, shaders::HIST_FINAL, "hist_final")?,
             },
         };
-        let face = |f: &bowshock_cfd::grid::Face| [f.nx as f32, f.nr as f32, f.len as f32, f.w() as f32];
+        let face = |f: &bowshock_core::grid::Face| [f.nx as f32, f.nr as f32, f.len as f32, f.w() as f32];
         let iface: Vec<[f32; 4]> = grid.iface.iter().map(face).collect();
         let jface: Vec<[f32; 4]> = grid.jface.iter().map(face).collect();
         // `cell` = (A, V, Cx, Cr): the closure defect `C = sum_f w n - (0, A)` of the f32 face data of every cell, summed in f64 (exactly zero
@@ -405,7 +400,7 @@ impl GpuSolver {
         }
     }
 
-    /// Builds the solver of a host `bowshock_cfd` solver: its grid and config, low-Mach flag, solid block and convergence scheme
+    /// Builds the solver of a host `bowshock_core` solver: its grid and config, low-Mach flag, solid block and convergence scheme
     /// (`Scheme::Explicit` or `Scheme::Implicit`; the state starts at the free stream, not at `host.u`).
     pub fn from_host(ctx: &Context, host: &Solver, mode: Mode, prec: Precision) -> Result<GpuSolver> {
         let mut g = Self::new_with(ctx, &host.grid, &host.cfg, mode, prec)?;
@@ -415,12 +410,12 @@ impl GpuSolver {
         Ok(g)
     }
 
-    /// Switches the low-Mach correction of the reconstructed face states (`bowshock_cfd::flux::low_mach_states`) on or off.
+    /// Switches the low-Mach correction of the reconstructed face states (`bowshock_core::flux::low_mach_states`) on or off.
     pub fn set_low_mach(&mut self, on: bool) {
         self.low_mach = on;
     }
 
-    /// Declares the solid body block of a base / wake grid (`bowshock_cfd::solver::Solver::set_block`); only the guarded formulation
+    /// Declares the solid body block of a base / wake grid (`bowshock_core::solver::Solver::set_block`); only the guarded formulation
     /// supports blocks.
     pub fn set_block(&mut self, block: Option<Block>) -> Result<()> {
         if block.is_some() && self.mode == Mode::Direct {
@@ -611,7 +606,7 @@ impl GpuSolver {
                 for (stage, (ra, rb)) in RK3.into_iter().enumerate().map(|(k, c)| (k as u32 + 1, c)) {
                     p.stage = stage;
                     (p.ra, p.rb) = (ra, rb);
-                    // bowshock-cfd `eval_residual`: cons->prim, ghost fill, face fluxes, cell residual
+                    // bowshock-core `eval_residual`: cons->prim, ghost fill, face fluxes, cell residual
                     match &self.lo {
                         Some(lo) if ext => prim.launch([ni, nj], args![&self.u, &lo.u, &mut self.w, uniform(&p)])?,
                         _ => prim.launch([ni, nj], args![&self.u, &mut self.w, uniform(&p)])?,
@@ -713,7 +708,7 @@ impl GpuSolver {
     }
 
     /// Runs `n <= MAX_CHUNK` iterations without synchronising in between and then reads back the
-    /// per-iteration density residual (L2 of the stage-1 `d rho/dt` over sqrt(N), as in bowshock-cfd). This is the
+    /// per-iteration density residual (L2 of the stage-1 `d rho/dt` over sqrt(N), as in bowshock-core). This is the
     /// only synchronisation point.
     pub fn run(&mut self, n: usize) -> Result<Vec<f64>> {
         assert!(n >= 1 && n <= MAX_CHUNK);
@@ -748,7 +743,7 @@ impl GpuSolver {
         Ok(())
     }
 
-    /// Conserved state, `ni*nj`, same layout as `bowshock_cfd::solver::Solver::u` (the f32 high part in the compensated
+    /// Conserved state, `ni*nj`, same layout as `bowshock_core::solver::Solver::u` (the f32 high part in the compensated
     /// precision, which is what the flux kernels see).
     pub fn state(&self) -> Result<Vec<[f32; 4]>> {
         self.u.to_vec()
@@ -770,7 +765,7 @@ impl GpuSolver {
 
     /// Conserved state (`hi + lo` in the compensated precision, as f64) of the two first cells behind the base face,
     /// `[(i_end, j), (i_end + 1, j)]`, for every row `j_sting..j_end` (the extrapolation stencil of
-    /// `bowshock_cfd::subsonic::base_state`). Reads back only these rows.
+    /// `bowshock_cases::subsonic::base_state`). Reads back only these rows.
     pub fn base_cells(&mut self) -> Result<Vec<[[f64; 4]; 2]>> {
         let b = self.block.ok_or_else(|| LumaError::InvalidShape("base_cells needs a solid block".into()))?;
         let rows = b.j_end - b.j_sting;

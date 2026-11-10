@@ -1,9 +1,9 @@
-//! WGSL sources. `COMMON` holds direct translations of bowshock-cfd's pure functions
+//! WGSL sources. `COMMON` holds direct translations of bowshock-core's pure functions
 //! (`gas.rs`, `flux.rs`); every kernel is `COMMON` + its own bindings + one entry point `main`
 //! (Luma reflects *all* module-level bindings, so each kernel needs its own source string).
 //!
-//! State layouts (same as bowshock-cfd): conservative `(rho, rho u, rho v, E)`, primitive `(rho, u, v, p)`.
-//! Index conventions (same as bowshock-cfd): cell `(i, j)` at `j*ni + i`, i-face `(i, j)` (between cells
+//! State layouts (same as bowshock-core): conservative `(rho, rho u, rho v, E)`, primitive `(rho, u, v, p)`.
+//! Index conventions (same as bowshock-core): cell `(i, j)` at `j*ni + i`, i-face `(i, j)` (between cells
 //! `i-1` and `i`) at `j*(ni+1) + i`, j-face at `j*ni + i`, primitive array with 2 ghost layers at
 //! `(j+2)*(ni+4) + (i+2)`.
 
@@ -12,7 +12,7 @@
 /// 2 = slip wall, 3 = characteristic far field, 4 = static-pressure outflow. `stage`: 1..3 (SSP-RK3 stage). `slot`:
 /// residual-history slot. `aux`: number of partial sums read by `HIST_FINAL` (line solves: pass index). `ra`, `rb`: RK stage update
 /// `u = ra (u + dt res) + rb u0`. `low_mach`: 1 = Thornber low-Mach correction of the reconstructed face states.
-/// `blk_i, blk_j, blk_s`: solid body block (`bowshock_cfd::solver::Block`; all 0 = no block). `icfl`, `eps_fix`, `iflags`:
+/// `blk_i, blk_j, blk_s`: solid body block (`bowshock_core::solver::Block`; all 0 = no block). `icfl`, `eps_fix`, `iflags`:
 /// implicit scheme (pseudo-time CFL, entropy fix of the Roe-type dissipation, bit 1 lines, 2 implicit BCs, 4 Roe-type
 /// dissipation, 8 `DtMode::MinDirection`).
 const COMMON_TEMPLATE: &str = r#"
@@ -78,7 +78,7 @@ fn reflect_wall(w: vec4<f32>, nx: f32, nr: f32) -> vec4<f32> {
     return vec4<f32>(w.x, w.y - 2.0 * un * nx, w.z - 2.0 * un * nr, w.w);
 }
 
-// Far-field ghost states (bowshock-cfd `bc.rs`); `w` is the first interior cell, `(nx, nr)` the OUTWARD unit normal.
+// Far-field ghost states (bowshock-core `bc.rs`); `w` is the first interior cell, `(nx, nr)` the OUTWARD unit normal.
 // Characteristic (Riemann-invariant) far field: the branch is selected by the interior normal Mach number; supersonic
 // inflow gives the free stream, supersonic outflow the interior state, in between the 1-D Riemann invariants fix the
 // normal velocity and the sound speed, and entropy + tangential velocity are taken from the interior (outflow) or the
@@ -236,7 +236,7 @@ fn shock_weight(pl: f32, pr: f32) -> f32 {
     return t * t * (3.0 - 2.0 * t);
 }
 
-// Low-Mach correction of the reconstructed states (bowshock-cfd `flux::low_mach_states`, Thornber et al. 2008): the jump of the
+// Low-Mach correction of the reconstructed states (bowshock-core `flux::low_mach_states`, Thornber et al. 2008): the jump of the
 // face-normal velocity is scaled by z = clamp(max(M_L, M_R), LOW_MACH_FLOOR, 1); applied when `p.low_mach != 0`.
 fn low_mach_states(l: vec4<f32>, r: vec4<f32>, nx: f32, nr: f32) -> LeftRight {
     let unl = l.y * nx + l.z * nr;
@@ -257,7 +257,7 @@ fn reconstruct_lm(m2: vec4<f32>, m1: vec4<f32>, p0: vec4<f32>, p1: vec4<f32>, li
     return lr;
 }
 
-// Complete face kernel (bowshock-cfd `flux::face_flux_lm`): MUSCL reconstruction (+ optional low-Mach correction) + HLLC blended towards
+// Complete face kernel (bowshock-core `flux::face_flux_lm`): MUSCL reconstruction (+ optional low-Mach correction) + HLLC blended towards
 // Rusanov inside shocks; the sensor uses the two cell-centred pressures adjacent to the face.
 fn face_flux(m2: vec4<f32>, m1: vec4<f32>, p0: vec4<f32>, p1: vec4<f32>, lim: u32, nx: f32, nr: f32) -> vec4<f32> {
     let lr = reconstruct_lm(m2, m1, p0, p1, lim, nx, nr);
@@ -294,25 +294,25 @@ fn df_add(hi: vec4<f32>, lo: vec4<f32>, inc_in: vec4<f32>) -> DF {
 /// Exponent `2 / (gamma - 1)` of `c_b / c_ref` in the density of the characteristic far-field ghost state. The WGSL
 /// `characteristic_ghost` evaluates it as the integer power 5.
 pub fn characteristic_exponent() -> f64 {
-    2.0 / (bowshock_cfd::gas::GAMMA - 1.0)
+    2.0 / (bowshock_core::gas::GAMMA - 1.0)
 }
 
-/// Common WGSL prelude of every kernel: the `Params` block and the direct translations of bowshock-cfd's
-/// `gas.rs` / `flux.rs` / `bc.rs` functions. The shock-sensor thresholds are taken from `bowshock_cfd::flux`.
+/// Common WGSL prelude of every kernel: the `Params` block and the direct translations of bowshock-core's
+/// `gas.rs` / `flux.rs` / `bc.rs` functions. The shock-sensor thresholds are taken from `bowshock_core::flux`.
 pub fn common() -> String {
     assert!((characteristic_exponent() - 5.0).abs() < 1e-12, "characteristic_ghost assumes gamma = 1.4 (integer power 5)");
     format!(
         "const SHOCK_SENSOR_LO: f32 = {:e};\nconst SHOCK_SENSOR_HI: f32 = {:e};\nconst LOW_MACH_FLOOR: f32 = {:e};\n{}",
-        bowshock_cfd::flux::SHOCK_SENSOR_LO,
-        bowshock_cfd::flux::SHOCK_SENSOR_HI,
-        bowshock_cfd::flux::LOW_MACH_FLOOR,
+        bowshock_core::flux::SHOCK_SENSOR_LO,
+        bowshock_core::flux::SHOCK_SENSOR_HI,
+        bowshock_core::flux::LOW_MACH_FLOOR,
         COMMON_TEMPLATE
     )
 }
 
 /// Conserved state of the two first cells behind the base face (`i = blk_i`, `blk_i + 1`) of every row `blk_s + y`,
 /// `y < blk_j - blk_s`, as `[hi(i), hi(i+1), lo(i), lo(i+1)]` vec4 (`lo` = 0 without the compensated state); the host forms the
-/// pressure in f64 (`bowshock_cfd::subsonic::base_state`). Problem size `[blk_j - blk_s]`.
+/// pressure in f64 (`bowshock_cases::subsonic::base_state`). Problem size `[blk_j - blk_s]`.
 pub fn base_cells(comp: bool) -> String {
     let (bind, out_bind, lo0, lo1) = if comp {
         (
@@ -341,7 +341,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
     )
 }
 
-/// cons -> prim for every interior cell (bowshock-cfd `eval_residual` step 1).
+/// cons -> prim for every interior cell (bowshock-core `eval_residual` step 1).
 /// Problem size `[ni, nj]`.
 pub const PRIM: &str = r#"
 @group(1) @binding(0) var<storage, read> u: array<vec4<f32>>;
@@ -355,7 +355,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-/// Ghost-layer fill (bowshock-cfd `fill_ghosts`). Problem size `[nj + ni]`: thread `t < nj` fills both
+/// Ghost-layer fill (bowshock-core `fill_ghosts`). Problem size `[nj + ni]`: thread `t < nj` fills both
 /// i-sides of row `t`, thread `t >= nj` both j-sides of column `t - nj`. 2 ghost layers per side,
 /// no corner ghosts. Face arrays are `(nx, nr, len, w)` per face.
 pub const GHOST: &str = r#"
@@ -487,7 +487,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 "#;
 
 /// SSP-RK3 stage update with local time step. Problem size `[ni, nj]`. `comp`: compensated (hi + lo) state.
-/// stage 1: `u0 = u; u += dt res`. stages 2, 3: `u = ra (u + dt res) + rb u0` (bowshock-cfd `Solver::stage`).
+/// stage 1: `u0 = u; u += dt res`. stages 2, 3: `u = ra (u + dt res) + rb u0` (bowshock-core `Solver::stage`).
 /// Compensated: `u` / `u0` are `hi + lo` pairs and the stage is evaluated in increment form
 /// `u = u0 + ra ((u - u0) + dt res)` (`ra + rb = 1`), so that only small numbers go through f32 arithmetic and the
 /// sum with `u0` is a double-float addition.
@@ -629,7 +629,7 @@ fn prim_i(i: i32, j: i32) -> vec4<f32> {
 }
 
 // Cell (i, j) with j in [-2, nj + 1] and i interior. Cells below the body / sting surface of a solid block (j < col_start(i),
-// `bowshock_cfd::solver::Solver::fill_block_ghosts`): mirror image of the fluid cells above the surface.
+// `bowshock_core::solver::Solver::fill_block_ghosts`): mirror image of the fluid cells above the surface.
 fn prim_j(i: i32, j: i32) -> vec4<f32> {
     let nj = i32(p.nj);
     let j0 = i32(col_start(u32(i)));

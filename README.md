@@ -34,7 +34,7 @@ cargo run --release --bin transonic                   # transonic Mach sweep M =
 cargo run --release --bin cone_gpu                    # GPU vs CPU vs Taylor-Maccoll
 cargo run --release --bin ogive_gpu                   # ogive-cylinder on the GPU vs CPU
 cargo run --release --bin transonic_gpu               # transonic sweep on the GPU vs CPU
-cargo run --release -p bowshock-cfd --example animate # Mach-number animation of the ogive-cylinder (see the example's docs for flags)
+cargo run --release -p bowshock-cases --example animate # Mach-number animation of the ogive-cylinder (see the example's docs for flags)
 ```
 
 Results are written to `out/` (git-ignored).
@@ -43,8 +43,12 @@ Results are written to `out/` (git-ignored).
 
 | crate | description | docs |
 |---|---|---|
-| `bowshock-cfd` (lib `bowshock_cfd`) | CPU f64 reference solver, characteristic BCs, large-domain body grids, Taylor-Maccoll and shock-expansion theory, validation drivers `cone`, `ogive`, `transonic` | [README](bowshock-cfd/README.md) |
-| `bowshock-gpu` (lib `bowshock_gpu`) | f32/double-float Luma/WGSL port of the solver, validated against the CPU reference; drivers `cone_gpu`, `ogive_gpu`, `transonic_gpu` | [README](bowshock-gpu/README.md) |
+| `bowshock-core` (lib `bowshock_core`) | CPU f64 reference solver: gas model, HLLC/MUSCL face kernels, characteristic BCs, grids, SSP-RK3, line-implicit scheme, multigrid | [README](bowshock-core/README.md) |
+| `bowshock-reference` (lib `bowshock_reference`) | Reference solutions: Taylor-Maccoll cones, tangent-cone and shock-expansion theory, axisymmetric potential flow | [README](bowshock-core/README.md) |
+| `bowshock-cases` (lib `bowshock_cases`) | Large-domain body grids, cone / ogive / transonic / subsonic case runners, post-processing and experimental data | [README](bowshock-core/README.md) |
+| `bowshock-gpu` (lib `bowshock_gpu`) | f32/double-float Luma/WGSL port of the solver, validated against the CPU reference | [README](bowshock-gpu/README.md) |
+| `bowshock-gpu-cases` (lib `bowshock_gpu_cases`) | GPU runners of the validation cases side by side with the CPU runs; GPU-vs-CPU tests | [README](bowshock-gpu/README.md) |
+| `bowshock-cli` | Validation drivers `cone`, `ogive`, `transonic`, `subsonic` (CPU) and `cone_gpu`, `ogive_gpu`, `transonic_gpu`, `subsonic_gpu` | |
 
 `bowshock-gpu` depends on [Luma](https://github.com/flipnoteman/Luma) (`main` branch) via git. To develop against a local Luma checkout, add a `[patch."https://github.com/flipnoteman/Luma.git"]` entry pointing at it.
 

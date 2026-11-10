@@ -1,0 +1,18 @@
+[package]
+name = "bowshock-gpu-cases"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "GPU runners of the bowshock validation cases, compared side by side with the CPU reference runs"
+
+[dependencies]
+bowshock-core.workspace = true
+bowshock-reference.workspace = true
+bowshock-cases.workspace = true
+bowshock-gpu.workspace = true
+luma.workspace = true
+
+[[test]]
+name = "gpu_vs_cpu"
+path = "tests/gpu_vs_cpu.rs"
