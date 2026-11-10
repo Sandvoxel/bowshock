@@ -1,7 +1,7 @@
 //! WGSL of the line-implicit scheme (`bowshock_cfd::implicit`): approximate-factorization pseudo-time stepping
 //!
 //! ```text
-//!   (I - dt J_i) X = dt R      block-tridiagonal along every i line (one thread per line)
+//!   (I - dt J_i) X = dt R      block-tridiagonal along every i line (one workgroup per line)
 //!   (I - dt J_j) dU = X        block-tridiagonal along every j line
 //!   defect correction passes against the unfactored operator, then U += alpha dU (positivity damping)
 //! ```
@@ -9,13 +9,11 @@
 //! `R` is the residual of the *second-order* scheme evaluated by the same flux kernels as the explicit solver (in the
 //! double-float arithmetic of [`crate::Precision::Extended`]); the left-hand side (first-order flux Jacobians with a Roe-type
 //! dissipation matrix) only steers the iteration and is evaluated in plain f32, so the fixed point of the iteration (`R = 0`) is
-//! that of the explicit scheme. All kernels are all-cells-parallel except the line solves, which are parallel over the lines
-//! (`nj` i lines, `ni` j lines) and sequential along each line (4x4 block Thomas algorithm).
+//! that of the explicit scheme. All kernels are all-cells-parallel except the line solves, which use one workgroup per line
+//! (`nj` i lines, `ni` j lines) and a parallel cyclic reduction along it (4x4 blocks, see [`line`]).
 //!
-//! Storage (per direction, `Array<[f32; 4]>` read as `array<mat4x4<f32>>`, one block per cell): `lo`, `d`, `up` of `I - dt J`,
-//! after the first pass the factorisation `minv` (inverse of the pivot block) and `ys = minv up`. The i-direction blocks are
-//! stored transposed (`i * nj + j`) so that neighbouring threads (neighbouring lines) read neighbouring blocks; the vector arrays
-//! `x`, `du`, `res` use the cell index `j * ni + i`.
+//! Storage (per direction, `Array<[f32; 4]>` read as `array<mat4x4<f32>>`, one block per cell): `lo`, `d`, `up` of `I - dt J`. The
+//! i-direction blocks are stored transposed (`i * nj + j`); the vector arrays `x`, `du`, `res` use the cell index `j * ni + i`.
 
 /// Matrix library, flux Jacobians, Roe-type dissipation matrix, ghost-state Jacobians and the per-cell blocks of `I - dt J`.
 /// A 4x4 block is a `mat4x4<f32>` whose element `(row r, column c)` is `m[c][r]` (the CPU `M4` is row-major `m[4 r + c]`).
@@ -479,7 +477,7 @@ fn line(dir_i: bool, n: usize) -> String {
 }
 
 /// Threads per line of a line solve of length `n`: one per row up to 256, a multiple of the warp size.
-pub fn line_threads(n: usize) -> u32 {
+fn line_threads(n: usize) -> u32 {
     let rows = n.div_ceil(256);
     (n.div_ceil(rows).div_ceil(32) * 32) as u32
 }
