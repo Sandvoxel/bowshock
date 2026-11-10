@@ -40,7 +40,7 @@ Run: `cargo test --release -p bowshock-gpu-cases`, `cargo run --release --bin co
 extended, GPU-guarded f32, GPU-guarded compensated}, steady benchmark, Luma launch-overhead + sync-interval studies; ~4 min; `--quick`
 skips 400x200, `--limiter minmod|vanalbada`, `--chunk K`, `--bench [--no-cpu]` only the timing studies),
 `cargo run --release --bin ogive_gpu [-- --quick] [--direct] [--no-bench] [--bench-only] [--limiter ..] [--chunk K]` (ogive-cylinder, M = 1.98, coarse / medium / fine; ~1.5 min),
-`cargo run --release --bin transonic_gpu [-- --quick | --level 0|1|2] [--body cone|karman|lvhaack|sqrt|ogive] [--mach m1,m2,..] [--warm] [--scheme explicit|implicit] [--lowmach on|off] [--no-bench] [--bench-only] ...` (the Mach sweep of the CPU `transonic` bin, same options; minutes),
+`cargo run --release --bin transonic_gpu [-- --quick | --level 0|1|2] [--body cone|karman|lvhaack|sqrt|ogive] [--mach m1,m2,..] [--warm] [--scheme implicit|explicit] [--lowmach on|off] [--no-bench] [--bench-only] ...` (the Mach sweep of the CPU `transonic` bin, same options, line-implicit by default; minutes),
 `cargo run --release --bin subsonic_gpu [-- --quick | --level 0|1|2] [--body ogive|cone|karman|lvhaack|sqrt|parabola] [--mach 0.1,..] [--base on|off|both] [--warm] [--lowmach on|off] [--scheme implicit|explicit] [--no-cpu] [--no-bench] [--bench-only] [--validate]` (the Mach sweep of the CPU `subsonic` bin, same options; ~5 min on level 0, ~30 min on level 1).
 
 ## Design

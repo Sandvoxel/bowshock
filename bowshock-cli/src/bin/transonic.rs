@@ -4,8 +4,8 @@
 //!
 //! Usage: `cargo run --release --bin transonic -- [--body cone|karman|lvhaack|sqrt|parabola|ogive] [--level 0|1|2] [--quick]
 //!   [--mach 0.8,0.9,...] [--warm] [--domain <body lengths>] [--max-iter N] [--drop <orders>] [--cd-tol <abs CD>]
-//!   [--outflow pressure] [--limiter minmod|vanalbada] [--scheme explicit|implicit] [--lowmach on|off] [--tag name]`
-//! `--scheme implicit` = line-implicit convergence acceleration (default limiter then van Albada; explicit SSP-RK3 + minmod stays the default).
+//!   [--outflow pressure] [--limiter minmod|vanalbada] [--scheme implicit|explicit] [--lowmach on|off] [--tag name]`
+//! `--scheme implicit` (default) = line-implicit convergence acceleration, default limiter van Albada; `--scheme explicit` = SSP-RK3 + minmod.
 //! The ogive body is also compared with the NASA TN D-3516 surface-pressure data (M = 0.7, 0.9, 1.0, 1.1, 1.2).
 //!
 //! `--quick` = grid level 0. `--warm` = start every Mach number from the previous converged field (ascending order).
@@ -39,7 +39,7 @@ fn main() {
         Some(l) => l.split(',').map(|v| v.parse().expect("Mach list")).collect(),
         None => DEFAULT_MACH.to_vec(),
     };
-    let implicit = arg(&args, "--scheme") == Some("implicit");
+    let implicit = arg(&args, "--scheme") != Some("explicit");
     let limiter = match arg(&args, "--limiter") {
         Some("vanalbada") => Limiter::VanAlbada,
         Some("minmod") => Limiter::Minmod,
