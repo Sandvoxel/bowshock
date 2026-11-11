@@ -11,4 +11,4 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --release -p bowshock-core -p bowshock-reference -p bowshock-cases
+      - run: cargo test --release -p bowshock-core -p bowshock-reference -p bowshock-cases -p bowshock

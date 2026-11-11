@@ -61,6 +61,7 @@ pub fn wall_cp_at(wall: &[WallPoint], x: f64) -> Option<f64> {
 }
 
 /// Everything a run reports. Drag coefficients are pressure drag referenced to the maximum cross-section `pi R^2`.
+#[derive(Clone, Debug)]
 pub struct PointResult {
     pub mach: f64,
     /// Angle of attack [rad]; always 0.0 (the solver is axisymmetric).
