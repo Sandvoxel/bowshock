@@ -133,7 +133,7 @@ pub struct BaseSampler {
 
 impl BaseSampler {
     pub fn new(s: &Solver, rb2: f64) -> BaseSampler {
-        let b = s.block.expect("a case with a base has a solid block");
+        let b = s.block().expect("a case with a base has a solid block");
         let (g, ni, fs) = (&s.grid, s.grid.ni, s.cfg.freestream);
         let ie = b.i_end;
         let rows: Vec<(f64, f64)> = (b.j_sting..b.j_end)

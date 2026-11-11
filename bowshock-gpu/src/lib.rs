@@ -413,8 +413,8 @@ impl GpuSolver {
     pub fn from_host(ctx: &Context, host: &Solver, mode: Mode, prec: Precision) -> Result<GpuSolver> {
         let mut g = Self::new_with(ctx, &host.grid, &host.cfg, mode, prec)?;
         g.set_low_mach(host.low_mach);
-        g.set_block(host.block)?;
-        g.set_scheme(host.scheme)?;
+        g.set_block(host.block())?;
+        g.set_scheme(host.scheme())?;
         Ok(g)
     }
 

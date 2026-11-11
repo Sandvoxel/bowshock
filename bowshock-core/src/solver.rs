@@ -167,9 +167,9 @@ pub struct Solver {
     /// Low-Mach correction of the reconstructed states (`flux::low_mach_states`), off by default.
     pub low_mach: bool,
     /// Solid body block (base/wake grids), `None` for ordinary grids.
-    pub block: Option<Block>,
+    pub(crate) block: Option<Block>,
     /// Convergence acceleration (set with [`Solver::set_scheme`]).
-    pub scheme: Scheme,
+    pub(crate) scheme: Scheme,
     pub(crate) irs: Irs,
     /// Multigrid: coarse-grid forcing added to the residual (empty on the finest level), the restricted state at the
     /// start of the coarse cycle, and the coarser levels owned by the finest solver.
@@ -242,6 +242,16 @@ impl Solver {
             Some(b) => ni * self.grid.nj - b.i_end * b.j_end - (ni - b.i_end) * b.j_sting,
             None => ni * self.grid.nj,
         };
+    }
+
+    /// Solid body block (base/wake grids), `None` for ordinary grids.
+    pub fn block(&self) -> Option<Block> {
+        self.block
+    }
+
+    /// Convergence acceleration in use (set with [`Solver::set_scheme`]).
+    pub fn scheme(&self) -> Scheme {
+        self.scheme
     }
 
     /// Primitive state of interior cell `(i, j)` as of the last residual evaluation.

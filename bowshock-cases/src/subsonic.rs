@@ -264,7 +264,7 @@ pub fn stop_reason(case: &SubsonicCase, it: usize, r: f64, reference: f64, skip:
 /// Base-face samples and integrals of the current state: `(samples, CD_base, area-mean Cp_b, area-mean first-cell Cp_b)`;
 /// NaN means / empty samples without a base. Wall pressure by linear extrapolation from the two first cells behind the base.
 pub fn base_state(s: &Solver, rb2: f64) -> (Vec<BasePoint>, f64, f64, f64) {
-    let Some(b) = s.block else {
+    let Some(b) = s.block() else {
         return (Vec::new(), 0.0, f64::NAN, f64::NAN);
     };
     let g = &s.grid;
@@ -300,7 +300,7 @@ pub fn finish(case: &SubsonicCase, s: &Solver, residual: Vec<f64>, rmax: f64, hi
     let cp = |p: f64| (p - p_inf) / q_inf;
     let bb = &case.body;
     let rb2 = bb.body.radius().powi(2);
-    let blk = s.block;
+    let blk = s.block();
     let mut wall = Vec::new();
     let (mut cd_nose, mut cd_cyl, mut cd_boat) = (0.0, 0.0, 0.0);
     let i_wall_end = blk.map_or(ni, |b| b.i_end);
@@ -548,7 +548,7 @@ mod tests {
         let (ra, rb) = (sa.step(), sb.step());
         assert!(ra > 0.0 && (ra - rb).abs() <= 1e-14 * ra, "{ra:e} vs {rb:e}");
         // solid cells never change
-        let b = sa.block.unwrap();
+        let b = sa.block().unwrap();
         let q0 = bowshock_core::gas::prim_to_cons(&freestream(0.4));
         for j in 0..b.j_end {
             for i in 0..b.i_end {
