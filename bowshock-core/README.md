@@ -525,7 +525,7 @@ Data: `subsonic_gpu --base both` (grid level 1, GPU guarded extended precision v
 * Body: tangent ogive nose l/d 3 + 6 d cylinder. Base off: the cylinder continues as a sting to the outflow. Base on: flat base plus wake.
 * Grid level 1: 288 × 140 (40 320 cells) base off, 312 × 152 (47 424 cells) base on. Domain: inflow / outer boundary 10 body lengths, outflow 5 body lengths; characteristic far field.
 * Scheme: line-implicit, van Albada limiter, low-Mach correction on.
-* Stop rules: 6-order residual drop, or "base pressure stationary" for base-on cases; iteration limit `10 000 << level` (`SubsonicCase::with_body`), i.e. 20 000 at level 1.
+* Stop rules: 6-order residual drop, or "base pressure stationary" for base-on cases; iteration limit `10 000 << level` (`Numerics::subsonic`), i.e. 20 000 at level 1.
 
 ### Results, ogive + cylinder, level 1, cold starts (GPU values)
 
@@ -556,7 +556,7 @@ GPU vs CPU: max |ΔCp| (wall) ≤ 4.5e-6 on 15 of 16 rows. M 0.8 base-on reaches
 
 * The inviscid (Euler) wake has no viscous mixing layer, so its base pressure is not physical: Cp_b stays slightly negative (-0.0092 at M 0.1 to -0.0450 at M 0.8), and CD base (Euler) is not monotone in M (0.02438 at M 0.3, 0.01981 at M 0.4, 0.05220 at M 0.5, 0.03320 at M 0.6) because the wake does not settle (see the convergence column above).
 * Modelled base drag: `bowshock_reference::base_drag::base_drag_coefficient(M)` = 0.12 + 0.13 M² for M < 1, 0.25 / M for M ≥ 1, referenced to the base area. Source: OpenRocket technical documentation (S. Niskanen; based on his 2009 M.Sc. thesis), eq. 3.94, after Fleeman, *Tactical Missile Design*.
-* It is scaled by (r_b / R)² to the reference area; 0 without base; NaN (printed `-`) for sting-mounted bases (the TM X-2439 configurations below), because it is a free-flight correlation. It is reported next to, not instead of, the Euler values (`SubsonicResult::cd_base_model`, `cd_total_model`). Here the full disc gives r_b = R, so `CD base corr.` = 0.12 + 0.13 M² (M 0.5: 0.15250).
+* It is scaled by (r_b / R)² to the reference area; 0 without base; NaN (printed `-`) for sting-mounted bases (the TM X-2439 configurations below), because it is a free-flight correlation. It is reported next to, not instead of, the Euler values (`PointResult::cd_base_model`, `cd_total_model`). Here the full disc gives r_b = R, so `CD base corr.` = 0.12 + 0.13 M² (M 0.5: 0.15250).
 
 ### Validation: NASA TM X-2439 (Fox 1971), sting-mounted nose-cylinder-boattail bodies, level 1
 

@@ -3,7 +3,7 @@
 use bowshock::body_grid::Body;
 use bowshock::case::Case;
 use bowshock::gpu::{GpuRun, GpuRunner};
-use bowshock::result::PointResult;
+use bowshock::result::{PointResult, StopReason};
 use bowshock::run::run_on;
 use bowshock_cases::cone::{build_solver, ConeCase};
 use bowshock_cases::ogive::OgiveCase;
@@ -478,11 +478,12 @@ fn transonic_run_and_warm_start_match_cpu() {
 // Subsonic components: low-Mach flux correction, solid block (base / wake), line-implicit convergence scheme.
 
 use bowshock::body_grid::Nose;
-use bowshock_cases::subsonic::{self, SubsonicCase};
+use bowshock::gpu::BaseSampler;
+use bowshock::run::base_state;
+use bowshock_cases::subsonic::subsonic_case;
 use bowshock_core::flux::{face_flux_lm, low_mach_states};
 use bowshock_core::solver::Scheme;
 use bowshock_gpu::{eval_faces_ext_lm, eval_faces_lm};
-use bowshock_gpu_cases::subsonic::GpuSubsonic;
 
 /// `samples` with the velocities scaled by 1, 0.3, 0.1, 0.02 (cyclically): Mach numbers from supersonic (`z = 1`, correction off) down to
 /// below the floor `LOW_MACH_FLOOR` of the scaling factor.
@@ -552,9 +553,9 @@ fn low_mach_face_kernels_match_cpu() {
 /// the worst relative state difference of the extended precision.
 fn subsonic_state_check(tag: &str, base: bool, scheme: Scheme, iters: usize, tol_ext: f64, tol_f32: f64) {
     let ctx = luma::default_context().unwrap();
-    let mut case = SubsonicCase::new(0.5, Nose::TangentOgive { fineness: 3.0 }, 0, base);
-    case.first_order_iters = 5;
-    case.scheme = scheme;
+    let mut case = subsonic_case(0.5, Nose::TangentOgive { fineness: 3.0 }, 0, base);
+    case.numerics.first_order_iters = 5;
+    case.numerics.scheme = scheme;
     let mut cpu = case.build_solver();
     let res_cpu: Vec<f64> = (0..iters).map(|_| cpu.step()).collect();
     for (prec, tol) in [(Precision::F32, tol_f32), (Precision::Extended, tol_ext)] {
@@ -584,16 +585,16 @@ fn base_block_explicit_state_matches_cpu() {
 #[test]
 fn gpu_base_cp_matches_base_state() {
     for mach in [0.1, 0.5] {
-        let mut case = SubsonicCase::new(mach, Nose::TangentOgive { fineness: 3.0 }, 0, true);
-        case.first_order_iters = 5;
+        let mut case = subsonic_case(mach, Nose::TangentOgive { fineness: 3.0 }, 0, true);
+        case.numerics.first_order_iters = 5;
         for prec in [Precision::F32, Precision::Extended] {
-            let mut gs = GpuSubsonic::new(&case, Mode::Guarded, prec).unwrap();
+            let mut gs = GpuRunner::new(&case, Mode::Guarded, prec).unwrap();
             gs.gpu.run(100).unwrap();
             let rb2 = case.body.body.radius().powi(2);
-            let sampler = bowshock_gpu_cases::subsonic::BaseSampler::new(&gs.host, rb2);
+            let sampler = BaseSampler::new(&gs.host, rb2);
             let cp_gpu = sampler.cp_base(&gs.gpu.base_cells().unwrap());
             gs.download().unwrap();
-            let cp_cpu = subsonic::base_state(&gs.host, rb2).2;
+            let cp_cpu = base_state(&gs.host, rb2).2;
             println!("base Cp sample M = {mach} {prec:?}: gpu {cp_gpu:.10} host {cp_cpu:.10} diff {:.2e}", (cp_gpu - cp_cpu).abs());
             assert!((cp_gpu - cp_cpu).abs() < 1e-9, "M = {mach} {prec:?}: {cp_gpu} vs {cp_cpu}");
         }
@@ -605,7 +606,7 @@ fn gpu_base_cp_matches_base_state() {
 /// that of two converging iterations with slightly different preconditioners, not round-off.
 #[test]
 fn implicit_scheme_state_matches_cpu() {
-    let scheme = SubsonicCase::new(0.5, Nose::TangentOgive { fineness: 3.0 }, 0, false).scheme;
+    let scheme = subsonic_case(0.5, Nose::TangentOgive { fineness: 3.0 }, 0, false).numerics.scheme;
     assert!(matches!(scheme, Scheme::Implicit(_)));
     subsonic_state_check("sting implicit, 30 it", false, scheme, 30, 1e-4, 1e-3);
     subsonic_state_check("base implicit, 30 it", true, scheme, 30, 1e-4, 1e-3);
@@ -616,11 +617,11 @@ fn implicit_scheme_state_matches_cpu() {
 #[test]
 fn subsonic_run_matches_cpu() {
     for base in [false, true] {
-        let mut case = SubsonicCase::new(0.5, Nose::TangentOgive { fineness: 3.0 }, 0, base);
-        case.max_iter = 300;
+        let mut case = subsonic_case(0.5, Nose::TangentOgive { fineness: 3.0 }, 0, base);
+        case.numerics.max_iter = 300;
         let mut s = case.build_solver();
-        let cpu = subsonic::run_on(&case, &mut s, false, None);
-        let mut gs = GpuSubsonic::new(&case, Mode::Guarded, Precision::Extended).unwrap();
+        let cpu = run_on(&case, &mut s, false, None);
+        let mut gs = GpuRunner::new(&case, Mode::Guarded, Precision::Extended).unwrap();
         let gpu = gs.run_on(&case, false, None).unwrap();
         let g = &gpu.result;
         assert_eq!((g.iters, gpu.iters_exec), (cpu.iters, cpu.iters));
@@ -644,12 +645,12 @@ fn subsonic_run_matches_cpu() {
 #[test]
 fn implicit_scheme_converged_state_matches_cpu() {
     for mach in [0.3, 0.6] {
-        let mut case = SubsonicCase::new(mach, Nose::TangentOgive { fineness: 3.0 }, 0, false);
-        case.drop_orders = 5.0;
-        case.max_iter = 4000;
+        let mut case = subsonic_case(mach, Nose::TangentOgive { fineness: 3.0 }, 0, false);
+        case.numerics.drop_orders = 5.0;
+        case.numerics.max_iter = 4000;
         let mut s = case.build_solver();
-        let cpu = subsonic::run_on(&case, &mut s, false, None);
-        let mut gs = GpuSubsonic::new(&case, Mode::Guarded, Precision::Extended).unwrap();
+        let cpu = run_on(&case, &mut s, false, None);
+        let mut gs = GpuRunner::new(&case, Mode::Guarded, Precision::Extended).unwrap();
         let gpu = gs.run_on(&case, false, None).unwrap();
         let g = &gpu.result;
         let dcp = g.wall.iter().zip(&cpu.wall).fold(0.0f64, |m, (a, b)| m.max((a.cp - b.cp).abs()));
@@ -660,14 +661,14 @@ fn implicit_scheme_converged_state_matches_cpu() {
         );
         // steady-state independence: one explicit SSP-RK3 iteration on the implicit solution (same operator, no first-order phase)
         let mut ex = GpuSolver::new_with(&luma::default_context().unwrap(), &s.grid, &s.cfg, Mode::Guarded, Precision::Extended).unwrap();
-        ex.set_low_mach(case.low_mach);
+        ex.set_low_mach(case.numerics.low_mach);
         ex.set_state(&gs.gpu.state_f64().unwrap()).unwrap();
-        ex.iter = case.first_order_iters;
+        ex.iter = case.numerics.first_order_iters;
         let r_exp = ex.run(1).unwrap()[0];
         println!("   explicit residual of the implicit solution {r_exp:.3e} (implicit final {:.3e}, peak {:.3e})", g.residual.last().unwrap(), g.residual_peak);
         assert!(r_exp < 3.0 * g.residual.last().unwrap() + 1e-3 * g.residual_peak, "explicit residual {r_exp:e} of the implicit solution");
-        assert_eq!(cpu.stop_reason, "residual drop reached");
-        assert_eq!(g.stop_reason, "residual drop reached", "GPU did not reach {} orders", case.drop_orders);
+        assert_eq!(cpu.stop_reason, StopReason::ResidualDrop);
+        assert_eq!(g.stop_reason, StopReason::ResidualDrop, "GPU did not reach {} orders", case.numerics.drop_orders);
         assert!((gpu.iters_stop as f64 - cpu.iters as f64).abs() <= 0.05 * cpu.iters as f64 + 5.0, "iteration counts {} vs {}", gpu.iters_stop, cpu.iters);
         assert!(dcp < 1e-4 && (g.cd_nose - cpu.cd_nose).abs() < 1e-4 && diff.max_dp_over_pinf < 1e-4, "converged fields differ");
     }
@@ -712,9 +713,9 @@ fn implicit_transonic_warm_start_matches_cpu() {
 /// second `run_on` at the same Mach number reproduces the residual history of the first (the ramp was once left at its maximum).
 #[test]
 fn cold_restart_on_a_reused_solver_reproduces_the_run() {
-    let mut case = SubsonicCase::new(0.4, Nose::TangentOgive { fineness: 3.0 }, 0, false);
-    case.max_iter = 200;
-    let mut gs = GpuSubsonic::new(&case, Mode::Guarded, Precision::Extended).unwrap();
+    let mut case = subsonic_case(0.4, Nose::TangentOgive { fineness: 3.0 }, 0, false);
+    case.numerics.max_iter = 200;
+    let mut gs = GpuRunner::new(&case, Mode::Guarded, Precision::Extended).unwrap();
     let first = gs.run_on(&case, false, None).unwrap();
     case.mach = 0.7; // a different run in between
     gs.run_on(&case, false, None).unwrap();

@@ -6,6 +6,7 @@
 //! 8000, max iterations, non-finite), see [`Monitor`]. The CPU loop uses the public `Solver::step` so that the final
 //! state is available for the field comparison.
 
+use bowshock::result::StopReason;
 use bowshock_core::gas::cons_to_prim;
 use bowshock_core::solver::Solver;
 use bowshock_gpu::{GpuSolver, Mode, Precision, Result};
@@ -24,23 +25,23 @@ impl Monitor {
     }
 
     /// Records the residual of the next iteration; `Some(reason)` if the run is converged/stalled/diverged.
-    pub fn push(&mut self, r: f64) -> Option<&'static str> {
+    pub fn push(&mut self, r: f64) -> Option<StopReason> {
         let it = self.residual.len();
         self.residual.push(r);
         if it >= 20 {
             self.rmax = self.rmax.max(r);
         }
         if !r.is_finite() {
-            return Some("non-finite residual");
+            return Some(StopReason::NonFinite);
         }
         if it > 20 && self.rmax / r >= 10f64.powf(self.drop_orders) {
-            return Some("residual drop reached");
+            return Some(StopReason::ResidualDrop);
         }
         if it >= 8000 && it % 1000 == 0 {
             let res = &self.residual;
             let m = |a: usize, b: usize| res[a..b].iter().map(|x| x.log10()).sum::<f64>() / (b - a) as f64;
             if m(it - 2000, it) - m(it - 4000, it - 2000) > -0.05 {
-                return Some("residual plateau");
+                return Some(StopReason::ResidualPlateau);
             }
         }
         None
@@ -63,7 +64,7 @@ pub struct Run {
     pub iters_stop: usize,
     /// Iterations actually executed (GPU: rounded up to a multiple of the sync interval).
     pub iters_exec: usize,
-    pub reason: &'static str,
+    pub reason: StopReason,
     pub drop_orders: f64,
     /// Wall time of the iteration loop (no setup, no post-processing).
     pub loop_seconds: f64,
@@ -83,7 +84,7 @@ impl Run {
 /// CPU f64 reference run (bowshock-core, rayon). The final state is copied to [`Run::u`]; `s` keeps it as well.
 pub fn cpu_loop(s: &mut Solver, max_iter: usize, drop_orders: f64) -> Run {
     let mut mon = Monitor::new(drop_orders);
-    let mut reason = "max iterations";
+    let mut reason = StopReason::MaxIterations;
     let t0 = Instant::now();
     for _ in 0..max_iter {
         let r = s.step();
@@ -122,7 +123,7 @@ pub fn gpu_loop(host: &Solver, max_iter: usize, drop_orders: f64, chunk: usize, 
 
     let mut mon = Monitor::new(drop_orders);
     let mut all = Vec::new();
-    let mut reason = "max iterations";
+    let mut reason = StopReason::MaxIterations;
     let mut iters_stop = None;
     let t0 = Instant::now();
     while all.len() < max_iter {

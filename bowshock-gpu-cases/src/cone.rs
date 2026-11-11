@@ -8,6 +8,7 @@
 
 pub use crate::run::Monitor;
 use crate::run::{cpu_loop, field_diff, gpu_loop, Run};
+use bowshock::result::StopReason;
 use bowshock_cases::cone::{build_solver, ConeCase};
 use bowshock_core::gas::cons_to_prim;
 use bowshock_core::grid::Grid;
@@ -106,7 +107,7 @@ pub struct RunResult {
     pub iters_stop: usize,
     /// Iterations actually executed (GPU: rounded up to a multiple of the sync interval).
     pub iters_exec: usize,
-    pub reason: &'static str,
+    pub reason: StopReason,
     pub drop_orders: f64,
     /// Wall time of the iteration loop (no setup, no post-processing).
     pub loop_seconds: f64,

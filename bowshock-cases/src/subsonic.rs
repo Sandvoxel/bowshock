@@ -1,416 +1,30 @@
-//! Subsonic case runner (M ~ 0.1 - 0.8): nose-cylinder-(boattail) body on the large-domain grid, either with a flat blunt base
-//! and wake (`base_domain_grid`, solid block, base wall) or with the cylinder continuing as a sting to the outflow plane
-//! (`large_domain_grid`, no base); line-implicit convergence acceleration, optional low-Mach flux correction, wall-pressure
-//! post-processing and the forebody / afterbody / base pressure-drag breakdown.
+//! Subsonic validation cases (M ~ 0.1 - 0.8): nose-cylinder-(boattail) bodies, either with a flat blunt base and wake
+//! (`Wake::Base`) or with the cylinder continuing as a sting to the outflow plane (`Wake::Sting`), and the published Fox
+//! TM X-2439 wall-pressure data. The runner, stop rules and post-processing are in `bowshock::run`.
 //!
 //! Lengths are in body diameters (`d = 1`, `R = 0.5`). Drag coefficients are pressure drag only (inviscid), referenced to the
-//! maximum cross-section `pi R^2`; one formula covers every wall part, `CD = integral Cp d(r^2 / R^2)` along the surface from the
-//! nose tip downstream (the base face is traversed from its outer to its inner radius, so `CD_base = -Cp_b A_b / A_ref`).
+//! maximum cross-section `pi R^2`.
 
-use bowshock::body_grid::{base_domain_grid, large_domain_grid, BaseBody, BaseGridParams, Body, LargeGridParams, Nose};
-use bowshock::result::WallPoint;
-use bowshock_core::flux::Limiter;
-use bowshock_core::gas::{cons_to_prim, freestream};
-use bowshock_core::implicit::ImplicitParams;
-use bowshock_core::solver::{Bc, Config, Scheme, Solver};
-use bowshock_reference::base_drag::base_drag_coefficient;
+use bowshock::body_grid::{BaseBody, Body, Nose};
+use bowshock::case::{Case, Wake};
+use bowshock::numerics::Numerics;
 
-#[derive(Clone, Debug)]
-pub struct SubsonicCase {
-    pub mach: f64,
-    pub body: BaseBody,
-    /// `true`: finite body with a flat base and a wake region (`base_domain_grid`); `false`: the cylinder continues as a
-    /// sting to the outflow plane (`large_domain_grid`), no base.
-    pub base: bool,
-    pub grid_base: BaseGridParams,
-    pub grid_sting: LargeGridParams,
-    pub limiter: Limiter,
-    pub low_mach: bool,
-    pub scheme: Scheme,
-    /// First-order start-up iterations (cold start only).
-    pub first_order_iters: usize,
-    pub max_iter: usize,
-    /// Stop rules other than a non-finite residual do not fire before this many iterations; the GPU-vs-CPU comparison sets it to the CPU's iteration count.
-    pub min_iter: usize,
-    /// Stop at this many orders of density-residual drop below the peak (after iteration 20 on a cold start).
-    pub drop_orders: f64,
-    pub outflow: Bc,
-    pub cfl: f64,
-}
-
-impl SubsonicCase {
-    /// Body `nose + cyl_length` cylinder (`+ boat_length` boattail of half-angle `boat_angle_deg`, sting radius `sting_radius`),
-    /// domain `10 L` upstream and radially, `5 L` downstream (`L` = total body length), grid level 0/1/2 (cells per diameter
-    /// doubling each level). Default scheme: line-implicit, van Albada limiter, low-Mach correction on.
-    pub fn new(mach: f64, nose: Nose, level: u32, base: bool) -> Self {
-        let body = BaseBody { body: Body { nose }, cyl_length: 6.0, boat_length: 0.0, boat_angle: 0.0, sting_radius: 0.0 };
-        Self::with_body(mach, body, level, base)
-    }
-
-    pub fn with_body(mach: f64, body: BaseBody, level: u32, base: bool) -> Self {
-        let f = 1usize << level;
-        let l_body = body.x_base();
-        let n_boat = if body.boat_length > 0.0 { 24 * f } else { 0 };
-        let n_sting = if body.sting_radius > 0.0 { 4 * f } else { 0 };
-        let grid_base = BaseGridParams {
-            body,
-            x_up: 10.0 * l_body,
-            x_down: 5.0 * l_body,
-            r_far: 10.0 * l_body,
-            n_up: 28 * f,
-            n_nose: 48 * f,
-            n_cyl: 40 * f,
-            n_boat,
-            n_wake: 40 * f,
-            n_sting,
-            n_gap: 12 * f,
-            nj_out: 64 * f,
-            dx_tip: 0.03 / f as f64,
-            dr_wall: 0.03 / f as f64,
-        };
-        let grid_sting = LargeGridParams {
-            body: body.body,
-            cyl_length: body.cyl_length,
-            x_up: 10.0 * l_body,
-            x_down: 5.0 * l_body,
-            r_far: 10.0 * l_body,
-            n_up: 30 * f,
-            n_nose: 48 * f,
-            n_cyl: 36 * f,
-            n_ext: 30 * f,
-            nj: 70 * f,
-            dx_tip: 0.03 / f as f64,
-            dr_wall: 0.03 / f as f64,
-        };
-        SubsonicCase {
-            mach,
-            body,
-            base,
-            grid_base,
-            grid_sting,
-            limiter: Limiter::VanAlbada,
-            low_mach: true,
-            scheme: Scheme::Implicit(ImplicitParams::DEFAULT),
-            first_order_iters: 100,
-            max_iter: 10_000 << level,
-            min_iter: 0,
-            drop_orders: 6.0,
-            outflow: Bc::Characteristic,
-            cfl: 0.5,
-        }
-    }
-
-    /// Scale the domain: inflow plane / outer boundary at `up` and the outflow plane at `down` total body lengths.
-    pub fn with_domain(mut self, up: f64, down: f64) -> Self {
-        let l = self.body.x_base();
-        self.grid_base.x_up = up * l;
-        self.grid_base.r_far = up * l;
-        self.grid_base.x_down = down * l;
-        self.grid_sting.x_up = up * l;
-        self.grid_sting.r_far = up * l;
-        self.grid_sting.x_down = down * l;
-        self
-    }
-
-    pub fn build_solver(&self) -> Solver {
-        let cfg = Config {
-            cfl: self.cfl,
-            limiter: self.limiter,
-            freestream: freestream(self.mach),
-            bc: [Bc::Characteristic, self.outflow, Bc::SlipWall, Bc::Characteristic],
-            first_order_iters: self.first_order_iters,
-        };
-        let mut s;
-        if self.base {
-            let (grid, block) = base_domain_grid(&self.grid_base);
-            s = Solver::new(grid, cfg);
-            s.set_block(Some(block));
-        } else {
-            s = Solver::new(large_domain_grid(&self.grid_sting), cfg);
-        }
-        s.low_mach = self.low_mach;
-        s.set_scheme(self.scheme);
-        s
-    }
-
-    pub fn cells(&self) -> (usize, usize) {
-        let g = &self.grid_sting;
-        let b = &self.grid_base;
-        if self.base {
-            (b.n_up + b.n_nose + b.n_cyl + b.n_boat + b.n_wake, b.n_sting + b.n_gap + b.nj_out)
-        } else {
-            (g.n_up + g.n_nose + g.n_cyl + g.n_ext, g.nj)
-        }
-    }
-}
-
-/// One base-face sample: radius range, Cp from the wall-extrapolated and the first-cell pressure.
-#[derive(Clone, Copy, Debug)]
-pub struct BasePoint {
-    pub r0: f64,
-    pub r1: f64,
-    pub cp: f64,
-    pub cp_cell: f64,
-}
-
-pub struct SubsonicResult {
-    pub mach: f64,
-    pub iters: usize,
-    pub residual: Vec<f64>,
-    pub residual_peak: f64,
-    pub drop_orders: f64,
-    pub stop_reason: &'static str,
-    /// Wall faces of the nose, cylinder and boattail in axial order (`cp` extrapolated to the wall, `cp_cell` first cell).
-    pub wall: Vec<WallPoint>,
-    /// Base-face samples (empty without base), `r0 < r1`.
-    pub base_wall: Vec<BasePoint>,
-    pub cd_nose: f64,
-    pub cd_cyl: f64,
-    pub cd_boat: f64,
-    pub cd_base: f64,
-    /// Sum of the four (inviscid pressure drag of the closed body; ~0 for attached potential flow, d'Alembert).
-    pub cd_total: f64,
-    /// Base drag of the empirical free-flight correlation (`base_drag_coefficient`) scaled to `pi R^2`; 0 without base,
-    /// NaN for a sting-mounted base (the correlation is for free-flight bases).
-    pub cd_base_model: f64,
-    /// `cd_nose + cd_cyl + cd_boat + cd_base_model`: the inviscid forebody drag plus the modelled base drag.
-    pub cd_total_model: f64,
-    /// Area-averaged base Cp (extrapolated wall values) and the first-cell variant; NaN without base.
-    pub cp_base: f64,
-    pub cp_base_cell: f64,
-    /// Mean and range (max - min) of the area-mean base Cp over the last `UNSTEADY_WINDOW` iterations (history sampled every
-    /// `HIST_EVERY`); the range is the unsteadiness indicator of the inviscid wake (NaN without enough history).
-    pub cp_base_mean: f64,
-    pub cp_base_range: f64,
-    pub cp_base_hist: Vec<(usize, f64)>,
-    pub cp_min: f64,
-    pub x_cp_min: f64,
-    pub m_max: f64,
-    pub farfield_dp: f64,
-    pub min_rho: f64,
-    pub min_p: f64,
-}
-
-/// Cold-start run.
-pub fn run_subsonic(case: &SubsonicCase) -> SubsonicResult {
-    let mut s = case.build_solver();
-    run_on(case, &mut s, false, None)
-}
-
-/// Iterate `s` (built from `case`) to convergence. `warm`: keep the field of the previous run, only the free stream changes
-/// (no first-order start-up; the implicit CFL ramp restarts). `r_ref`: residual reference of the drop criterion (`None` = peak
-/// of this run after iteration 20 / from the start when warm).
-pub fn run_on(case: &SubsonicCase, s: &mut Solver, warm: bool, r_ref: Option<f64>) -> SubsonicResult {
-    s.cfg.freestream = freestream(case.mach);
-    s.cfg.cfl = case.cfl;
-    s.cfg.limiter = case.limiter;
-    s.cfg.first_order_iters = case.first_order_iters;
-    s.low_mach = case.low_mach;
-    s.iter = if warm { case.first_order_iters } else { 0 };
-    s.restart_ramp();
-    let skip = if warm { 0 } else { 20 };
-    let mut residual = Vec::new();
-    let mut hist: Vec<(usize, f64)> = Vec::new();
-    let mut rmax: f64 = 0.0;
-    let mut reason = "max iterations";
-    let rb2 = case.body.body.radius().powi(2);
-    for it in 0..case.max_iter {
-        let r = s.step();
-        residual.push(r);
-        if it >= skip {
-            rmax = rmax.max(r);
-        }
-        if case.base && it % HIST_EVERY == HIST_EVERY - 1 {
-            hist.push((it + 1, base_state(s, rb2).2));
-        }
-        if let Some(rs) = stop_reason(case, it, r, r_ref.unwrap_or(rmax), skip, &hist) {
-            reason = rs;
-            break;
-        }
-    }
-    finish(case, s, residual, rmax, hist, reason)
-}
-
-/// Sampling interval [iterations] of the base-pressure history and length of the statistics window (`UNSTEADY_WINDOW` iterations).
-pub const HIST_EVERY: usize = 50;
-pub const UNSTEADY_WINDOW: usize = 2000;
-/// A base-pressure history whose range over the window is below this (in Cp) counts as stationary.
-pub const CP_BASE_TOL: f64 = 1e-3;
-
-/// Stopping rule after iteration `it` with density residual `r`: non-finite residual (always); then, from `case.min_iter` on, `drop_orders` below `reference`; or, with a
-/// base, every 500 iterations from `2 UNSTEADY_WINDOW` on, the area-mean base Cp (`hist`, one sample per `HIST_EVERY` iterations)
-/// varied by less than `CP_BASE_TOL` over the last `UNSTEADY_WINDOW` iterations once the residual has dropped 2 orders
-/// ("base pressure stationary"; the inviscid wake can be unsteady, the residual then stalls, see the README).
-pub fn stop_reason(case: &SubsonicCase, it: usize, r: f64, reference: f64, skip: usize, hist: &[(usize, f64)]) -> Option<&'static str> {
-    if !r.is_finite() {
-        return Some("non-finite residual");
-    }
-    if it + 1 < case.min_iter {
-        return None;
-    }
-    if it > skip && reference / r >= 10f64.powf(case.drop_orders) {
-        return Some("residual drop reached");
-    }
-    if case.base && it % 500 == 499 && it + 1 >= 2 * UNSTEADY_WINDOW && reference / r >= 100.0 {
-        let n = UNSTEADY_WINDOW / HIST_EVERY;
-        let (lo, hi) = hist[hist.len() - n..].iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), c| (l.min(c.1), h.max(c.1)));
-        if hi - lo < CP_BASE_TOL {
-            return Some("base pressure stationary");
-        }
-    }
-    None
-}
-
-/// Base-face samples and integrals of the current state: `(samples, CD_base, area-mean Cp_b, area-mean first-cell Cp_b)`;
-/// NaN means / empty samples without a base. Wall pressure by linear extrapolation from the two first cells behind the base.
-pub fn base_state(s: &Solver, rb2: f64) -> (Vec<BasePoint>, f64, f64, f64) {
-    let Some(b) = s.block() else {
-        return (Vec::new(), 0.0, f64::NAN, f64::NAN);
-    };
-    let g = &s.grid;
-    let ni = g.ni;
-    let fs = s.cfg.freestream;
-    let (p_inf, q_inf) = (fs[3], 0.5 * fs[0] * fs[1] * fs[1]);
-    let cp = |p: f64| (p - p_inf) / q_inf;
-    let ie = b.i_end;
-    let (mut pts, mut cd, mut mean, mut mean_cell, mut s_sum) = (Vec::new(), 0.0, 0.0, 0.0, 0.0);
-    for j in b.j_sting..b.j_end {
-        let (n0, n1) = (g.node(ie, j), g.node(ie, j + 1));
-        let (xm, rm) = (n0.0, 0.5 * (n0.1 + n1.1));
-        let (p0, p1) = (s.pressure(ie, j), s.pressure(ie + 1, j));
-        let d0 = (g.xc[j * ni + ie] - xm).hypot(g.rc[j * ni + ie] - rm);
-        let d1 = (g.xc[j * ni + ie + 1] - xm).hypot(g.rc[j * ni + ie + 1] - rm);
-        let pw = p0 + (p0 - p1) * d0 / (d1 - d0);
-        let ds = (n1.1 * n1.1 - n0.1 * n0.1) / rb2;
-        cd -= cp(pw) * ds;
-        mean += cp(pw) * ds;
-        mean_cell += cp(p0) * ds;
-        s_sum += ds;
-        pts.push(BasePoint { r0: n0.1, r1: n1.1, cp: cp(pw), cp_cell: cp(p0) });
-    }
-    (pts, cd, mean / s_sum, mean_cell / s_sum)
-}
-
-/// Post-process the state in `s` (works for a host `Solver` whose `u` was overwritten with another solver's state).
-pub fn finish(case: &SubsonicCase, s: &Solver, residual: Vec<f64>, rmax: f64, hist: Vec<(usize, f64)>, reason: &'static str) -> SubsonicResult {
-    let g = &s.grid;
-    let (ni, nj) = (g.ni, g.nj);
-    let fs = s.cfg.freestream;
-    let (p_inf, q_inf) = (fs[3], 0.5 * fs[0] * fs[1] * fs[1]);
-    let cp = |p: f64| (p - p_inf) / q_inf;
-    let bb = &case.body;
-    let rb2 = bb.body.radius().powi(2);
-    let blk = s.block();
-    let mut wall = Vec::new();
-    let (mut cd_nose, mut cd_cyl, mut cd_boat) = (0.0, 0.0, 0.0);
-    let i_wall_end = blk.map_or(ni, |b| b.i_end);
-    for i in 0..i_wall_end {
-        let j0 = blk.map_or(0, |b| b.col_start(i));
-        let (n0, n1) = (g.node(i, j0), g.node(i + 1, j0));
-        let (xm, rm) = (0.5 * (n0.0 + n1.0), 0.5 * (n0.1 + n1.1));
-        if xm <= 0.0 {
-            continue;
-        }
-        let (p0, p1) = (s.pressure(i, j0), s.pressure(i, j0 + 1));
-        let d0 = (g.xc[j0 * ni + i] - xm).hypot(g.rc[j0 * ni + i] - rm);
-        let d1 = (g.xc[(j0 + 1) * ni + i] - xm).hypot(g.rc[(j0 + 1) * ni + i] - rm);
-        let pw = p0 + (p0 - p1) * d0 / (d1 - d0);
-        let (s0, s1) = (n0.1 * n0.1 / rb2, n1.1 * n1.1 / rb2);
-        let dcd = cp(pw) * (s1 - s0);
-        if xm < bb.body.nose_length() {
-            cd_nose += dcd;
-        } else if xm < bb.x_shoulder() {
-            cd_cyl += dcd;
-        } else if xm < bb.x_base() {
-            cd_boat += dcd;
-        } else {
-            // sting continuing to the outflow (no base): zero projected area, not counted
-        }
-        wall.push(WallPoint { x: xm, r: rm, s0, s1, cp: cp(pw), cp_cell: cp(p0) });
-    }
-    let (base_wall, cd_base, cp_base, cp_base_cell) = base_state(s, rb2);
-    let cd_base_model = match (case.base, bb.sting_radius > 0.0) {
-        (false, _) => 0.0,
-        (true, false) => base_drag_coefficient(case.mach) * bb.base_radius().powi(2) / rb2,
-        (true, true) => f64::NAN,
-    };
-
-    let (cp_min, x_cp_min) = wall.iter().fold((f64::INFINITY, 0.0), |(m, xm), w| if w.cp < m { (w.cp, w.x) } else { (m, xm) });
-    let dev = |i: usize, j: usize| (s.pressure(i, j) / p_inf - 1.0).abs();
-    let mut farfield_dp: f64 = 0.0;
-    for i in 0..ni {
-        farfield_dp = farfield_dp.max(dev(i, nj - 1));
-    }
-    for j in 0..nj {
-        farfield_dp = farfield_dp.max(dev(0, j)).max(dev(ni - 1, j));
-    }
-    let (mut min_rho, mut min_p, mut m_max) = (f64::INFINITY, f64::INFINITY, 0.0f64);
-    for (c, q) in s.u.iter().enumerate() {
-        if blk.is_some_and(|b| b.solid(c % ni, c / ni)) {
-            continue;
-        }
-        let w = cons_to_prim(q);
-        min_rho = min_rho.min(w[0]);
-        min_p = min_p.min(w[3]);
-        m_max = m_max.max(w[1].hypot(w[2]) / bowshock_core::gas::sound_speed(&w));
-    }
-    let nwin = (UNSTEADY_WINDOW / HIST_EVERY).min(hist.len());
-    let (cp_base_mean, cp_base_range) = if nwin >= 2 {
-        let w = &hist[hist.len() - nwin..];
-        let (lo, hi) = w.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), c| (l.min(c.1), h.max(c.1)));
-        (w.iter().map(|c| c.1).sum::<f64>() / nwin as f64, hi - lo)
-    } else {
-        (cp_base, f64::NAN)
-    };
-    let last = residual.last().copied().unwrap_or(rmax);
-    let drop_orders = if rmax > 0.0 && last > 0.0 { (rmax / last).log10() } else { 0.0 };
-    SubsonicResult {
-        mach: case.mach,
-        iters: residual.len(),
-        residual,
-        residual_peak: rmax,
-        drop_orders,
-        stop_reason: reason,
-        wall,
-        base_wall,
-        cd_nose,
-        cd_cyl,
-        cd_boat,
-        cd_base,
-        cd_total: cd_nose + cd_cyl + cd_boat + cd_base,
-        cd_base_model,
-        cd_total_model: cd_nose + cd_cyl + cd_boat + cd_base_model,
-        cp_base,
-        cp_base_cell,
-        cp_base_mean,
-        cp_base_range,
-        cp_base_hist: hist,
-        cp_min,
-        x_cp_min,
-        m_max,
-        farfield_dp,
-        min_rho,
-        min_p,
-    }
+/// Body `nose + 6 d` cylinder (no boattail, no sting), domain `10 L` upstream and radially, `5 L` downstream (`L` = total body
+/// length), grid level 0/1/2 (cells per diameter doubling each level). `base`: finite body with a flat base and a wake region
+/// (`Wake::Base`); otherwise the cylinder continues as a sting to the outflow plane (`Wake::Sting`). Numerics:
+/// [`Numerics::subsonic`] (line-implicit, van Albada limiter, low-Mach correction on).
+pub fn subsonic_case(mach: f64, nose: Nose, level: u32, base: bool) -> Case {
+    let body = BaseBody { body: Body { nose }, cyl_length: 6.0, boat_length: 0.0, boat_angle: 0.0, sting_radius: 0.0 };
+    let wake = if base { Wake::Base } else { Wake::Sting };
+    Case::new(mach, body, level, wake, Numerics::subsonic(level, wake))
 }
 
 /// NASA TM X-2439 test body (`cone = false`: configuration 4, 2-caliber tangent ogive; `cone = true`: configuration 2, 10 deg cone)
 /// with cylinder, 10 deg boattail and the flat annular base on a sting (`fox_tm_x2439`), at Mach number `mach`.
-pub fn fox_case(cone: bool, mach: f64, level: u32) -> SubsonicCase {
+pub fn fox_case(cone: bool, mach: f64, level: u32) -> Case {
     let nose = if cone { Nose::Cone { half_angle: 10f64.to_radians() } } else { Nose::TangentOgive { fineness: 2.0 } };
     let body = BaseBody { body: Body { nose }, cyl_length: 2.0, boat_length: 1.0, boat_angle: 10f64.to_radians(), sting_radius: fox_tm_x2439::STING_RADIUS };
-    SubsonicCase::with_body(mach, body, level, true)
-}
-
-/// Linear interpolation of the wall `Cp` (extrapolated values) at axial position `x` (None outside the wall range).
-pub fn wall_cp_at(wall: &[WallPoint], x: f64) -> Option<f64> {
-    for w in wall.windows(2) {
-        if x >= w[0].x && x <= w[1].x {
-            let t = (x - w[0].x) / (w[1].x - w[0].x);
-            return Some(w[0].cp + t * (w[1].cp - w[0].cp));
-        }
-    }
-    None
+    Case::new(mach, body, level, Wake::Base, Numerics::subsonic(level, Wake::Base))
 }
 
 /// Published subsonic wall pressures on axisymmetric nose-cylinder-boattail bodies on a sting, zero angle of attack.
@@ -473,9 +87,15 @@ pub mod fox_tm_x2439 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bowshock::result::StopReason;
+    use bowshock::run::run_cold;
+    use bowshock_core::gas::freestream;
+    use bowshock_core::implicit::ImplicitParams;
+    use bowshock_core::solver::Scheme;
+    use bowshock_reference::base_drag::base_drag_coefficient;
 
-    fn small(base: bool, mach: f64) -> SubsonicCase {
-        let mut c = SubsonicCase::new(mach, Nose::TangentOgive { fineness: 3.0 }, 0, base).with_domain(5.0, 2.5);
+    fn small(base: bool, mach: f64) -> Case {
+        let mut c = subsonic_case(mach, Nose::TangentOgive { fineness: 3.0 }, 0, base).with_domain(5.0, 2.5);
         c.grid_base.n_up = 12;
         c.grid_base.n_nose = 24;
         c.grid_base.n_cyl = 20;
@@ -491,8 +111,8 @@ mod tests {
         c.grid_sting.nj = 32;
         c.grid_sting.dx_tip = 0.08;
         c.grid_sting.dr_wall = 0.08;
-        c.first_order_iters = 100;
-        c.max_iter = 3000;
+        c.numerics.first_order_iters = 100;
+        c.numerics.max_iter = 3000;
         c
     }
 
@@ -500,8 +120,8 @@ mod tests {
     /// pressure signature (stagnation-like Cp > 0 at the tip, suction at the shoulder), and close to d'Alembert (nose CD ~ 0).
     #[test]
     fn subsonic_smoke_no_base() {
-        let r = run_subsonic(&small(false, 0.3));
-        assert_eq!(r.stop_reason, "residual drop reached", "{} iters, drop {:.2}", r.iters, r.drop_orders);
+        let r = run_cold(&small(false, 0.3));
+        assert_eq!(r.stop_reason, StopReason::ResidualDrop, "{} iters, drop {:.2}", r.iters, r.drop_orders);
         assert!(r.iters < 1500, "{} iterations", r.iters);
         assert!(r.min_rho > 0.0 && r.min_p > 0.0 && r.residual.iter().all(|x| x.is_finite()));
         assert!(r.wall[0].cp > 0.1 && r.cp_min < -0.05 && r.cp_min > -0.3, "Cp tip {} min {}", r.wall[0].cp, r.cp_min);
@@ -517,11 +137,11 @@ mod tests {
     #[test]
     fn subsonic_smoke_with_base() {
         // standard level-0 grids (the coarse test grids are too crude for the wake to settle)
-        let mut c = SubsonicCase::new(0.2, Nose::TangentOgive { fineness: 3.0 }, 0, true);
-        c.max_iter = 6000;
-        let r = run_subsonic(&c);
+        let mut c = subsonic_case(0.2, Nose::TangentOgive { fineness: 3.0 }, 0, true);
+        c.numerics.max_iter = 6000;
+        let r = run_cold(&c);
         assert!(
-            matches!(r.stop_reason, "residual drop reached" | "base pressure stationary"),
+            matches!(r.stop_reason, StopReason::ResidualDrop | StopReason::BasePressureStationary),
             "{} after {} iters, drop {:.2}",
             r.stop_reason,
             r.iters,
@@ -543,7 +163,7 @@ mod tests {
     #[test]
     fn blocked_grid_first_residual_is_scheme_independent() {
         let mut a = small(true, 0.4);
-        a.scheme = Scheme::Explicit;
+        a.numerics.scheme = Scheme::Explicit;
         let (mut sa, mut sb) = (a.build_solver(), small(true, 0.4).build_solver());
         let (ra, rb) = (sa.step(), sb.step());
         assert!(ra > 0.0 && (ra - rb).abs() <= 1e-14 * ra, "{ra:e} vs {rb:e}");
@@ -566,12 +186,9 @@ mod tests {
     /// the implicit variants are also compared with each other in the second-order van Albada scheme.
     #[test]
     fn converged_state_is_independent_of_the_acceleration_scheme() {
-        use crate::subsonic::SubsonicCase;
-        use bowshock::body_grid::Nose;
         use bowshock_core::flux::Limiter;
         use bowshock_core::gas::Cons;
-        use bowshock_core::solver::Scheme;
-        let mut case = SubsonicCase::new(0.5, Nose::TangentOgive { fineness: 3.0 }, 0, false);
+        let mut case = subsonic_case(0.5, Nose::TangentOgive { fineness: 3.0 }, 0, false);
         case.grid_sting.n_up = 12;
         case.grid_sting.n_nose = 20;
         case.grid_sting.n_cyl = 12;
@@ -582,12 +199,12 @@ mod tests {
         case.grid_sting.r_far = 10.0;
         case.grid_sting.dx_tip = 0.1;
         case.grid_sting.dr_wall = 0.1;
-        case.first_order_iters = 0;
+        case.numerics.first_order_iters = 0;
         let converge = |limiter: Limiter, scheme: Scheme, iters: usize| -> Vec<Cons> {
             let mut c = case.clone();
-            c.limiter = limiter;
-            c.scheme = scheme;
-            c.cfl = 0.8;
+            c.numerics.limiter = limiter;
+            c.numerics.scheme = scheme;
+            c.numerics.cfl = 0.8;
             let mut s = c.build_solver();
             let mut last = 1.0;
             for _ in 0..iters {

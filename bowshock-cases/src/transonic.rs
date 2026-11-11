@@ -291,7 +291,7 @@ mod tests {
         case.numerics.max_iter = 1500;
         case.numerics.first_order_iters = 150;
         let res = run_cold(&case);
-        assert!(res.residual.iter().all(|r| r.is_finite()), "non-finite residual");
+        assert!(res.residual.iter().all(|r| r.is_finite()), "residual contains a non-finite value");
         assert!(res.min_rho > 0.0 && res.min_p > 0.0);
         assert!(res.drop_orders > 1.0, "residual dropped only {:.2} orders", res.drop_orders);
         // cone-cylinder: Stoney (RM L53K17, digitised) has 0.03 +- 0.01 at M = 0.9, the coarse 1500-iteration run must be within a factor ~3

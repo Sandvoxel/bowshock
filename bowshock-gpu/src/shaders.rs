@@ -303,7 +303,7 @@ pub fn common() -> String {
 
 /// Conserved state of the two first cells behind the base face (`i = blk_i`, `blk_i + 1`) of every row `blk_s + y`,
 /// `y < blk_j - blk_s`, as `[hi(i), hi(i+1), lo(i), lo(i+1)]` vec4 (`lo` = 0 without the compensated state); the host forms the
-/// pressure in f64 (`bowshock_cases::subsonic::base_state`). Problem size `[blk_j - blk_s]`.
+/// pressure in f64 (`bowshock::run::base_state`). Problem size `[blk_j - blk_s]`.
 pub fn base_cells(comp: bool) -> String {
     let (bind, out_bind, lo0, lo1) = if comp {
         (

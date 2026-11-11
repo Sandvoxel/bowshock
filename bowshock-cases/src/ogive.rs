@@ -4,7 +4,7 @@
 //! The geometry (`shock_expansion::Ogive`) is non-dimensionalised with the body diameter `d = 1`
 //! (radius `R = 0.5`); the nose runs over `0 <= x <= L_nose` and the cylinder over `L_nose <= x <= L_nose + cyl_length`.
 
-use bowshock::result::WallPoint;
+use bowshock::result::{StopReason, WallPoint};
 use bowshock_core::flux::Limiter;
 use bowshock_core::gas::freestream;
 use bowshock_core::grid::Grid;
@@ -189,7 +189,7 @@ pub struct OgiveResult {
     pub iters: usize,
     pub residual: Vec<f64>,
     pub drop_orders: f64,
-    pub stop_reason: &'static str,
+    pub stop_reason: StopReason,
     pub wall: Vec<WallPoint>,
     /// Forebody (nose) pressure-drag coefficient, base-area reference, from extrapolated / first-cell Cp.
     pub cd_nose: f64,
@@ -205,7 +205,7 @@ pub fn run_ogive(case: &OgiveCase) -> OgiveResult {
     let mut s = case.build_solver();
     let mut residual = Vec::new();
     let mut rmax: f64 = 0.0;
-    let mut reason = "max iterations";
+    let mut reason = StopReason::MaxIterations;
     for it in 0..case.max_iter {
         let r = s.step();
         residual.push(r);
@@ -213,17 +213,17 @@ pub fn run_ogive(case: &OgiveCase) -> OgiveResult {
             rmax = rmax.max(r);
         }
         if !r.is_finite() {
-            reason = "non-finite residual";
+            reason = StopReason::NonFinite;
             break;
         }
         if it > 20 && rmax / r >= 10f64.powf(case.drop_orders) {
-            reason = "residual drop reached";
+            reason = StopReason::ResidualDrop;
             break;
         }
         if it >= 8000 && it % 1000 == 0 {
             let m = |a: usize, b: usize| residual[a..b].iter().map(|x| x.log10()).sum::<f64>() / (b - a) as f64;
             if m(it - 2000, it) - m(it - 4000, it - 2000) > -0.05 {
-                reason = "residual plateau";
+                reason = StopReason::ResidualPlateau;
                 break;
             }
         }
@@ -233,7 +233,7 @@ pub fn run_ogive(case: &OgiveCase) -> OgiveResult {
     postprocess(case, &s, residual, drop_orders, reason)
 }
 
-fn postprocess(case: &OgiveCase, s: &Solver, residual: Vec<f64>, drop_orders: f64, reason: &'static str) -> OgiveResult {
+fn postprocess(case: &OgiveCase, s: &Solver, residual: Vec<f64>, drop_orders: f64, reason: StopReason) -> OgiveResult {
     let g = &s.grid;
     let (ni, nj) = (g.ni, g.nj);
     let fs = s.cfg.freestream;

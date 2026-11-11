@@ -777,7 +777,7 @@ impl GpuSolver {
 
     /// Conserved state (`hi + lo` in the compensated precision, as f64) of the two first cells behind the base face,
     /// `[(i_end, j), (i_end + 1, j)]`, for every row `j_sting..j_end` (the extrapolation stencil of
-    /// `bowshock_cases::subsonic::base_state`). Reads back only these rows.
+    /// `bowshock::run::base_state`). Reads back only these rows.
     pub fn base_cells(&mut self) -> Result<Vec<[[f64; 4]; 2]>> {
         let b = self.block.ok_or(GpuError::Unsupported("base_cells needs a solid block"))?;
         let rows = b.j_end - b.j_sting;

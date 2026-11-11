@@ -1,7 +1,7 @@
 //! Per-kernel GPU time of the line-implicit scheme on the subsonic sting case (`subsonic_gpu --base off`): `imp_profile [--f32]`.
 //! Best of 20 profiled runs of 20 iterations per kernel (the GPU may be shared).
 use bowshock::body_grid::Nose;
-use bowshock_cases::subsonic::SubsonicCase;
+use bowshock_cases::subsonic::subsonic_case;
 use bowshock_gpu::{GpuSolver, Mode, Precision};
 use std::collections::BTreeMap;
 
@@ -9,8 +9,8 @@ fn main() {
     let prec = if std::env::args().any(|a| a == "--f32") { Precision::F32 } else { Precision::Extended };
     let ctx = luma::default_context().unwrap();
     for level in [0u32, 1] {
-        let mut case = SubsonicCase::new(0.5, Nose::TangentOgive { fineness: 3.0 }, level, false);
-        case.first_order_iters = 0;
+        let mut case = subsonic_case(0.5, Nose::TangentOgive { fineness: 3.0 }, level, false);
+        case.numerics.first_order_iters = 0;
         let host = case.build_solver();
         let mut g = GpuSolver::from_host(&ctx, &host, Mode::Guarded, prec).unwrap();
         g.run(100).unwrap();

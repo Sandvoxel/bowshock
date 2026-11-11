@@ -71,7 +71,7 @@ fn main() {
             c.numerics.drop_orders = v;
         }
         if let Some(v) = arg(&args, "--cd-tol").and_then(|v| v.parse().ok()) {
-            c.numerics.monitor_tol = Some(v); // 0 disables the "CD stationary" stop
+            c.numerics.monitor_tol = Some(v); // 0 disables the CD-stationary stop
         }
         if arg(&args, "--outflow") == Some("pressure") {
             c.numerics.outflow = Bc::PressureOutflow;

@@ -11,7 +11,10 @@
 //! -> `lowmach_<tag>.csv`, `tables_lowmach.md`.
 
 use bowshock::body_grid::{Body, Nose};
-use bowshock_cases::subsonic::{fox_case, fox_tm_x2439 as fox, run_on, run_subsonic, wall_cp_at, SubsonicCase, SubsonicResult};
+use bowshock::case::Case;
+use bowshock::result::{wall_cp_at, PointResult};
+use bowshock::run::{run_cold, run_on};
+use bowshock_cases::subsonic::{fox_case, fox_tm_x2439 as fox, subsonic_case};
 use bowshock_cases::transonic::named_body;
 use bowshock_core::flux::Limiter;
 use bowshock_core::implicit::ImplicitParams;
@@ -56,18 +59,18 @@ impl Opts {
             domain: arg(args, "--domain").and_then(|v| v.parse().ok()),
         }
     }
-    fn apply(&self, mut c: SubsonicCase) -> SubsonicCase {
-        c.limiter = self.limiter;
-        c.low_mach = self.low_mach;
-        c.scheme = self.scheme;
+    fn apply(&self, mut c: Case) -> Case {
+        c.numerics.limiter = self.limiter;
+        c.numerics.low_mach = self.low_mach;
+        c.numerics.scheme = self.scheme;
         if let Some(n) = self.max_iter {
-            c.max_iter = n;
+            c.numerics.max_iter = n;
         } else if self.scheme == Scheme::Explicit {
-            c.max_iter = 60_000;
-            c.first_order_iters = 300;
+            c.numerics.max_iter = 60_000;
+            c.numerics.first_order_iters = 300;
         }
         if let Some(d) = self.drop {
-            c.drop_orders = d;
+            c.numerics.drop_orders = d;
         }
         if let Some(d) = self.domain {
             c = c.with_domain(d, 0.5 * d);
@@ -91,7 +94,7 @@ fn potential(body: &Body, mach: f64) -> Option<Potential> {
 }
 
 /// RMS of `cp - reference` over the wall faces `0.3 < x < 9` (nose + cylinder) for the incompressible and the Goethert reference.
-fn rms_vs_potential(r: &SubsonicResult, p: &Potential) -> (f64, f64) {
+fn rms_vs_potential(r: &PointResult, p: &Potential) -> (f64, f64) {
     let (mut a, mut b, mut n) = (0.0, 0.0, 0usize);
     for w in &r.wall {
         if w.x > 0.3 && w.x < 9.0 {
@@ -105,7 +108,7 @@ fn rms_vs_potential(r: &SubsonicResult, p: &Potential) -> (f64, f64) {
     ((a / n.max(1) as f64).sqrt(), (b / n.max(1) as f64).sqrt())
 }
 
-fn write_case_files(dir: &Path, name: &str, r: &SubsonicResult, pot: Option<&Potential>) {
+fn write_case_files(dir: &Path, name: &str, r: &PointResult, pot: Option<&Potential>) {
     let mut f = fs::File::create(dir.join(format!("cp_{name}.csv"))).unwrap();
     writeln!(f, "x_over_d,r_over_d,cp_wall_extrapolated,cp_first_cell,cp_goethert_potential,cp_incompressible_potential").unwrap();
     for w in &r.wall {
@@ -164,7 +167,7 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
     let cyl: f64 = arg(args, "--cyl").and_then(|v| v.parse().ok()).unwrap_or(6.0);
     let tag = arg(args, "--tag").map(String::from).unwrap_or_else(|| format!("{body_name}_L{}{}", opts.level, if warm { "_warm" } else { "" }));
     let make = |m: f64, base: bool| {
-        let mut bb = SubsonicCase::new(m, body.nose, opts.level, base);
+        let mut bb = subsonic_case(m, body.nose, opts.level, base);
         bb.body.cyl_length = cyl;
         bb.grid_base.body.cyl_length = cyl;
         bb.grid_sting.cyl_length = cyl;
@@ -272,7 +275,7 @@ fn validate(out_dir: &Path, opts: &Opts) {
         for (k, &m) in fox::MACH.iter().enumerate() {
             let case = opts.apply(fox_case(cone, m, opts.level));
             let t0 = Instant::now();
-            let r = run_subsonic(&case);
+            let r = run_cold(&case);
             let dt = t0.elapsed().as_secs_f64();
             let (xs, cps): (&[f64], &[f64]) = match (cone, k) {
                 (false, 0) => (&fox::OGIVE_CYL_X_D, &fox::OGIVE_CYL_CP_M04_MEAN),
@@ -356,10 +359,10 @@ fn lowmach_study(out_dir: &Path, opts: &Opts, args: &[String]) {
     for &m in &machs {
         let pot = potential(&body, m).unwrap();
         for lm in [false, true] {
-            let mut case = opts.apply(SubsonicCase::new(m, body.nose, opts.level, false));
-            case.low_mach = lm;
+            let mut case = opts.apply(subsonic_case(m, body.nose, opts.level, false));
+            case.numerics.low_mach = lm;
             let t0 = Instant::now();
-            let r = run_subsonic(&case);
+            let r = run_cold(&case);
             let dt = t0.elapsed().as_secs_f64();
             let (ri, rg) = rms_vs_potential(&r, &pot);
             let cps: Vec<f64> = stations.iter().map(|&x| wall_cp_at(&r.wall, x).unwrap()).collect();

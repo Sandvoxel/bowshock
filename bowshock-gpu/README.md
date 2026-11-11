@@ -20,7 +20,6 @@ bowshock-gpu-cases/
   src/run.rs            case-independent CPU / GPU iteration loops (`Monitor` = the stopping criteria), GPU-vs-CPU field difference
   src/ogive.rs          ogive-cylinder runners, wall post-processing (CD, Cp), comparison metrics
   (`bowshock::gpu::GpuRunner`, `bowshock/src/gpu.rs`: GPU run of a `bowshock::case::Case`; cold / warm-started Mach sweeps, same stop rules and post-processing as the CPU `bowshock::run::run_on`)
-  src/subsonic.rs       `GpuSubsonic`: GPU run of `bowshock_cases::subsonic::SubsonicCase` (base on/off, drag breakdown, base-pressure history; same stop rules and post-processing as the CPU `run_on`)
 bowshock-cli/
   src/bin/cone_gpu.rs   validation + benchmark driver (writes out/gpu/*.csv)
   src/bin/ogive_gpu.rs  ogive validation + benchmark driver (writes out/gpu_ogive/*.csv)

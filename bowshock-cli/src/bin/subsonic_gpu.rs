@@ -12,13 +12,16 @@
 //! NASA TM X-2439 (Fox 1971) configurations on the GPU and prints the statistics of the CPU bin. Output: `out/gpu_subsonic/`.
 
 use bowshock::body_grid::Body;
-use bowshock_cases::subsonic::{fox_case, fox_tm_x2439 as fox, run_on, wall_cp_at, SubsonicCase, SubsonicResult};
+use bowshock::case::{Case, Wake};
+use bowshock::gpu::{GpuRun, GpuRunner, SYNC};
+use bowshock::result::{wall_cp_at, PointResult, StopReason};
+use bowshock::run::run_on;
+use bowshock_cases::subsonic::{fox_case, fox_tm_x2439 as fox, subsonic_case};
 use bowshock_cases::transonic::named_body;
 use bowshock_core::flux::Limiter;
 use bowshock_core::implicit::ImplicitParams;
 use bowshock_core::solver::Scheme;
 use bowshock_gpu::{Mode, Precision};
-use bowshock_gpu_cases::subsonic::{GpuSubsonic, GpuSubsonicRun, SYNC};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
@@ -58,18 +61,18 @@ impl Opts {
             domain: arg(args, "--domain").and_then(|v| v.parse().ok()),
         }
     }
-    fn apply(&self, mut c: SubsonicCase) -> SubsonicCase {
-        c.limiter = self.limiter;
-        c.low_mach = self.low_mach;
-        c.scheme = self.scheme;
+    fn apply(&self, mut c: Case) -> Case {
+        c.numerics.limiter = self.limiter;
+        c.numerics.low_mach = self.low_mach;
+        c.numerics.scheme = self.scheme;
         if let Some(n) = self.max_iter {
-            c.max_iter = n;
+            c.numerics.max_iter = n;
         } else if self.scheme == Scheme::Explicit {
-            c.max_iter = 60_000;
-            c.first_order_iters = 300;
+            c.numerics.max_iter = 60_000;
+            c.numerics.first_order_iters = 300;
         }
         if let Some(d) = self.drop {
-            c.drop_orders = d;
+            c.numerics.drop_orders = d;
         }
         if let Some(d) = self.domain {
             c = c.with_domain(d, 0.5 * d);
@@ -81,9 +84,9 @@ impl Opts {
 struct Row {
     mach: f64,
     base: bool,
-    cpu: Option<SubsonicResult>,
+    cpu: Option<PointResult>,
     cpu_s: f64,
-    gpu: GpuSubsonicRun,
+    gpu: GpuRun,
     /// max over wall faces of |Cp_gpu - Cp_cpu|.
     max_dcp: f64,
 }
@@ -92,11 +95,11 @@ const DCP_TOL: f64 = 1e-4;
 const CPB_MEAN_RTOL: f64 = 1e-2;
 
 /// GPU-vs-CPU pass/fail: mean base Cp for an unsettled wake (CPU hit `max_iter`), wall Cp max difference otherwise.
-fn check(base: bool, gpu: &SubsonicResult, cpu: Option<&SubsonicResult>, max_dcp: f64) -> String {
+fn check(base: bool, gpu: &PointResult, cpu: Option<&PointResult>, max_dcp: f64) -> String {
     let Some(c) = cpu else {
         return "-".to_string();
     };
-    if base && c.stop_reason == "max iterations" {
+    if base && c.stop_reason == StopReason::MaxIterations {
         let d = (gpu.cp_base_mean - c.cp_base_mean).abs() / c.cp_base_mean.abs();
         let verdict = if d <= CPB_MEAN_RTOL { "ok" } else { "FAIL" };
         format!("{verdict} (Cp_b mean, d={d:.1e})")
@@ -146,10 +149,10 @@ fn write_case_files(dir: &Path, name: &str, r: &Row) {
 /// Steady per-iteration cost on the case grid at `case.mach`: 1000 iterations from the free stream (MUSCL from the first iteration),
 /// best of 3, GPU with history kernels and a sync every `SYNC` iterations. Returns `(cpu_us, gpu_guarded_ext_us, gpu_guarded_f32_us)`
 /// (CPU omitted, NaN, with `cpu = false`). The CPU ramps its CFL during the warm-up as the implicit scheme does at the start of a run.
-fn perf(case: &SubsonicCase, cpu: bool) -> (f64, f64, f64) {
+fn perf(case: &Case, cpu: bool) -> (f64, f64, f64) {
     let n = 1000usize;
     let mut case = case.clone();
-    case.first_order_iters = 0;
+    case.numerics.first_order_iters = 0;
     let mut best_cpu = f64::NAN;
     if cpu {
         best_cpu = f64::INFINITY;
@@ -167,7 +170,7 @@ fn perf(case: &SubsonicCase, cpu: bool) -> (f64, f64, f64) {
     }
     let mut gpu = [0.0f64; 2];
     for (m, prec) in [Precision::Extended, Precision::F32].into_iter().enumerate() {
-        let mut gs = GpuSubsonic::new(&case, Mode::Guarded, prec).unwrap();
+        let mut gs = GpuRunner::new(&case, Mode::Guarded, prec).unwrap();
         gs.gpu.run(1).unwrap();
         let mut best = f64::INFINITY;
         for _ in 0..3 {
@@ -230,7 +233,7 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
         format!("{body_name}_L{}{}{}", opts.level, if matches!(opts.scheme, Scheme::Explicit) { "_exp" } else { "" }, if warm { "_warm" } else { "" })
     });
     let make = |m: f64, base: bool| {
-        let mut bb = SubsonicCase::new(m, body.nose, opts.level, base);
+        let mut bb = subsonic_case(m, body.nose, opts.level, base);
         bb.body.cyl_length = cyl;
         bb.grid_base.body.cyl_length = cyl;
         bb.grid_sting.cyl_length = cyl;
@@ -250,7 +253,7 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
     for &base in &bases {
         let c0 = make(machs[0], base);
         let (ni, nj) = c0.cells();
-        let mut gs = GpuSubsonic::new(&c0, Mode::Guarded, Precision::Extended).expect("GPU solver");
+        let mut gs = GpuRunner::new(&c0, Mode::Guarded, Precision::Extended).expect("GPU solver");
         println!("\nbase = {base}: grid {ni}x{nj} ({} cells), GPU setup (kernel build + upload) {:.3} s", ni * nj, gs.setup_seconds);
         let mut cpu_solver = c0.build_solver();
         let (mut r_ref_cpu, mut r_ref_gpu): (Option<f64>, Option<f64>) = (None, None);
@@ -267,8 +270,8 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
             }
             let mut gcase = case.clone();
             if let Some(c) = &cpu {
-                gcase.min_iter = c.iters;
-                gcase.max_iter = c.iters;
+                gcase.numerics.min_iter = c.iters;
+                gcase.numerics.max_iter = c.iters;
             }
             let gpu = gs.run_on(&gcase, warm && k > 0, if warm { r_ref_gpu } else { None }).expect("GPU run");
             if warm && k == 0 {
@@ -329,7 +332,7 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
             r.mach,
             if r.base { "on" } else { "off" },
             r.cpu.as_ref().map_or("-".into(), |c| c.iters.to_string()),
-            r.cpu.as_ref().map_or("-", |c| c.stop_reason),
+            r.cpu.as_ref().map_or("-".into(), |c| c.stop_reason.to_string()),
             r.cpu.as_ref().map_or("-".into(), |c| format!("{:.1}", c.drop_orders)),
             r.gpu.iters_stop,
             r.gpu.iters_exec,
@@ -415,7 +418,7 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
             g.drop_orders,
             r.gpu.loop_seconds,
             c.map_or(String::new(), |c| c.iters.to_string()),
-            c.map_or("", |c| c.stop_reason),
+            c.map_or(String::new(), |c| c.stop_reason.to_string()),
             c.map_or(String::new(), |c| format!("{:.2}", c.drop_orders)),
             r.cpu_s,
             g.cd_nose,
@@ -465,11 +468,11 @@ fn validate(out_dir: &Path, opts: &Opts, args: &[String]) {
             } else {
                 (None, 0.0)
             };
-            let mut gs = GpuSubsonic::new(&case, Mode::Guarded, Precision::Extended).unwrap();
+            let mut gs = GpuRunner::new(&case, Mode::Guarded, Precision::Extended).unwrap();
             let mut gcase = case.clone();
             if let Some(c) = &cpu {
-                gcase.min_iter = c.iters;
-                gcase.max_iter = c.iters;
+                gcase.numerics.min_iter = c.iters;
+                gcase.numerics.max_iter = c.iters;
             }
             let gpu = gs.run_on(&gcase, false, None).unwrap();
             let (xs, cps): (&[f64], &[f64]) = match (cone, k) {
@@ -481,7 +484,7 @@ fn validate(out_dir: &Path, opts: &Opts, args: &[String]) {
                 (true, _) => (&fox::CONE_CYL_X_D, &fox::CONE_CYL_CP_M08_MEAN),
             };
             let x_fore = if cone { 4.2 } else { 3.4 };
-            let rms = |r: &SubsonicResult| {
+            let rms = |r: &PointResult| {
                 let (mut s, mut n) = (0.0f64, 0usize);
                 for (x, d) in xs.iter().zip(cps.iter()) {
                     if *x <= x_fore {
@@ -497,7 +500,7 @@ fn validate(out_dir: &Path, opts: &Opts, args: &[String]) {
             let data_base = if cone { fox::BASE_CP_CONE[k] } else { fox::BASE_CP_OGIVE[k] };
             let cfg = if cone { "2 (cone)" } else { "4 (ogive)" };
             let dcp = cpu.as_ref().map_or(f64::NAN, |c| g.wall.iter().zip(&c.wall).fold(0.0f64, |mx, (a, b)| mx.max((a.cp - b.cp).abs())));
-            let chk = check(case.base, g, cpu.as_ref(), dcp);
+            let chk = check(case.wake == Wake::Base, g, cpu.as_ref(), dcp);
             let corr = |v: f64| if v.is_nan() { "-".to_string() } else { format!("{v:+.4}") };
             println!(
                 "config {cfg} M={m}: GPU {} it ({:.1} s, {}, {:.1} orders), Cp RMS (x <= {x_fore}) {:.4}, base Cp {:+.4} (data {:+.4}), CD total {:+.4}{}; check {chk}",

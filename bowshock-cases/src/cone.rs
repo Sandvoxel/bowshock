@@ -1,5 +1,6 @@
 //! Cone validation case: set-up, steady-state iteration and post-processing against Taylor-Maccoll.
 
+use bowshock::result::StopReason;
 use bowshock_core::flux::Limiter;
 use bowshock_core::gas::freestream;
 use bowshock_core::grid::{cone_grid, ConeGridParams};
@@ -46,7 +47,7 @@ pub struct ConeResult {
     /// Density residual (L2 of d rho/dt) per iteration.
     pub residual: Vec<f64>,
     pub drop_orders: f64,
-    pub stop_reason: &'static str,
+    pub stop_reason: StopReason,
     /// Cone surface samples: (x/L, p/p_inf, Cp from extrapolated wall value, Cp of the first cell).
     pub surface: Vec<(f64, f64, f64, f64)>,
     pub cp_avg: f64,
@@ -84,7 +85,7 @@ pub fn run_cone(case: &ConeCase, tm: &ConeSolution) -> ConeResult {
     let mut s = build_solver(case, tm.beta);
     let mut residual = Vec::new();
     let mut rmax: f64 = 0.0;
-    let mut reason = "max iterations";
+    let mut reason = StopReason::MaxIterations;
     for it in 0..case.max_iter {
         let r = s.step();
         residual.push(r);
@@ -92,18 +93,18 @@ pub fn run_cone(case: &ConeCase, tm: &ConeSolution) -> ConeResult {
             rmax = rmax.max(r);
         }
         if !r.is_finite() {
-            reason = "non-finite residual";
+            reason = StopReason::NonFinite;
             break;
         }
         if it > 20 && rmax / r >= 10f64.powf(case.drop_orders) {
-            reason = "residual drop reached";
+            reason = StopReason::ResidualDrop;
             break;
         }
         // plateau: mean log10 residual over last 2000 vs previous 2000 iterations
         if it >= 8000 && it % 1000 == 0 {
             let m = |a: usize, b: usize| residual[a..b].iter().map(|x| x.log10()).sum::<f64>() / (b - a) as f64;
             if m(it - 2000, it) - m(it - 4000, it - 2000) > -0.05 {
-                reason = "residual plateau";
+                reason = StopReason::ResidualPlateau;
                 break;
             }
         }
@@ -114,7 +115,7 @@ pub fn run_cone(case: &ConeCase, tm: &ConeSolution) -> ConeResult {
     postprocess(case, &s, residual, drop_orders, reason)
 }
 
-fn postprocess(case: &ConeCase, s: &Solver, residual: Vec<f64>, drop_orders: f64, reason: &'static str) -> ConeResult {
+fn postprocess(case: &ConeCase, s: &Solver, residual: Vec<f64>, drop_orders: f64, reason: StopReason) -> ConeResult {
     let g = &s.grid;
     let (ni, nj) = (g.ni, g.nj);
     let fs = s.cfg.freestream;
@@ -208,7 +209,7 @@ mod tests {
         let mut case = ConeCase::new(2.0, 10.0, 200, 100);
         case.max_iter = 6000;
         let res = run_cone(&case, &tm);
-        assert_eq!(res.stop_reason, "residual drop reached", "only {:.1} orders in {} iters", res.drop_orders, res.iters);
+        assert_eq!(res.stop_reason, StopReason::ResidualDrop, "only {:.1} orders in {} iters", res.drop_orders, res.iters);
         assert!((res.cp_avg - tm.cp_surface).abs() / tm.cp_surface < 0.003, "Cp {} vs TM {}", res.cp_avg, tm.cp_surface);
     }
 }
