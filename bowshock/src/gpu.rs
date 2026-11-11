@@ -121,7 +121,7 @@ impl GpuRunner {
                 if sample && it % SYNC == SYNC - 1 {
                     hist.push((it + 1, value.expect("full chunk")));
                 }
-                if let Some(why) = stop_reason(&n, case.wake, it, r, r_ref.unwrap_or(rmax), skip, &hist) {
+                if let Some(why) = stop_reason(case, it, r, r_ref.unwrap_or(rmax), skip, &hist) {
                     reason = why;
                     iters_stop = Some(it + 1);
                     break;

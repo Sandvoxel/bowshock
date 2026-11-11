@@ -1,6 +1,7 @@
 //! Mach-sweep analysis of a body: zero-lift drag versus Mach number, on the GPU when one is present.
 
-use crate::body_grid::{check_quality, BaseBody};
+use crate::atmosphere::FlightConditions;
+use crate::body_grid::{check_quality, BaseBody, MAX_STRETCHING, MAX_STRETCHING_VISCOUS_J};
 use crate::case::{Case, Wake};
 use crate::error::Error;
 use crate::numerics::Numerics;
@@ -13,6 +14,8 @@ use std::convert::Infallible;
 
 /// Lowest and highest Mach number accepted by [`Analysis::run`].
 const MACH_RANGE: (f64, f64) = (0.1, 3.0);
+/// Sutherland constant of air [K], for the viscosity law of the solver (`sutherland = SUTHERLAND_K / T_inf`).
+const SUTHERLAND_K: f64 = 110.4;
 
 /// Where a sweep runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,6 +87,8 @@ pub enum Warning {
     UnsteadyWake { cp_base_range: f64 },
     /// The pressure at the outer boundaries deviates from the free stream by `dp` (relative): the domain may be too small.
     FarFieldDisturbed { dp: f64 },
+    /// The first cell at the wall is too thick for a wall-resolved boundary layer: `y+` of the first cell reaches `y_plus_max`.
+    WallResolution { y_plus_max: f64 },
 }
 
 /// One Mach number of a sweep.
@@ -118,13 +123,23 @@ pub struct Analysis {
     /// Nose diameter and reference diameter, in the same unit (metres, or internal units).
     d_nose: f64,
     d_ref: f64,
+    /// Built from a dimensional [`BodySpec`] (`d_nose` in metres).
+    dimensional: bool,
     resolution: Resolution,
-    wake: Wake,
+    wake: Option<Wake>,
+    flight: Option<FlightConditions>,
     backend: Backend,
     numerics: Option<Numerics>,
     max_iterations: Option<usize>,
     warm_start: bool,
     estimate_uncertainty: bool,
+}
+
+/// Free stream of a viscous sweep.
+struct Rans {
+    re_c: f64,
+    sutherland: f64,
+    mach_max: f64,
 }
 
 impl Analysis {
@@ -135,8 +150,10 @@ impl Analysis {
             body,
             d_nose: 1.0,
             d_ref: 1.0,
+            dimensional: false,
             resolution: Resolution::Medium,
-            wake: Wake::Sting,
+            wake: None,
+            flight: None,
             backend: Backend::Auto,
             numerics: None,
             max_iterations: None,
@@ -152,6 +169,7 @@ impl Analysis {
         let mut a = Analysis::from_internal(body);
         a.d_nose = scale.d_nose;
         a.d_ref = spec.reference_diameter();
+        a.dimensional = true;
         Ok(a)
     }
 
@@ -166,8 +184,17 @@ impl Analysis {
         self
     }
 
+    /// Wake treatment (default: sting for the Euler equations, base wake for a viscous analysis).
     pub fn wake(mut self, w: Wake) -> Self {
-        self.wake = w;
+        self.wake = Some(w);
+        self
+    }
+
+    /// Solve the Reynolds-averaged Navier-Stokes equations (k-omega SST, wall-resolved grid) at the free stream given by `flight`
+    /// instead of the Euler equations: [`Drag::friction`] is reported and, with a base wake, the base drag comes from the solution.
+    /// Needs an analysis built with [`Analysis::new`].
+    pub fn viscous(mut self, flight: FlightConditions) -> Self {
+        self.flight = Some(flight);
         self
     }
 
@@ -204,6 +231,22 @@ impl Analysis {
         self
     }
 
+    /// Free-stream Reynolds number, Sutherland constant and highest Mach number of a viscous sweep; `None` for the Euler equations.
+    fn rans(&self, machs: &[f64]) -> Result<Option<Rans>, Error> {
+        let Some(flight) = self.flight else {
+            return Ok(None);
+        };
+        if !self.dimensional {
+            return Err(Error::InvalidInput("viscous analysis needs a dimensional BodySpec".into()));
+        }
+        let air = flight.atmosphere.state()?;
+        Ok(Some(Rans {
+            re_c: air.density * air.sound_speed * self.d_nose / air.viscosity,
+            sutherland: SUTHERLAND_K / air.temperature_k,
+            mach_max: machs.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        }))
+    }
+
     /// Zero-lift drag at each Mach number of `machs` (each in `[0.1, 3.0]`).
     pub fn run(&self, machs: &[f64]) -> Result<Polar, Error> {
         if machs.is_empty() {
@@ -221,14 +264,15 @@ impl Analysis {
         // cases in ascending Mach order (stable), results restored to input order below
         let mut order: Vec<usize> = (0..machs.len()).collect();
         order.sort_by(|&a, &b| machs[a].total_cmp(&machs[b]));
+        let rans = self.rans(machs)?;
         let level = self.resolution.level();
-        let cases: Vec<Case> = order.iter().map(|&k| self.case(machs[k], level)).collect();
+        let cases: Vec<Case> = order.iter().map(|&k| self.case(machs[k], level, rans.as_ref())).collect();
         // the grids do not depend on the Mach number: check the first one
         check_grid(&cases[0])?;
 
         let cmp_cases: Option<Vec<Case>> = self.estimate_uncertainty.then(|| {
             let cmp_level = if level >= 1 { level - 1 } else { level + 1 };
-            order.iter().map(|&k| self.case(machs[k], cmp_level)).collect()
+            order.iter().map(|&k| self.case(machs[k], cmp_level, rans.as_ref())).collect()
         });
         if let Some(c) = &cmp_cases {
             check_grid(&c[0])?;
@@ -260,21 +304,37 @@ impl Analysis {
         Ok(Polar { points, backend, fallback })
     }
 
-    fn case(&self, mach: f64, level: u32) -> Case {
-        let mut numerics = self.numerics.unwrap_or_else(|| Numerics::auto(mach, level, self.wake));
-        if let Some(cap) = self.max_iterations {
-            numerics.max_iter = numerics.max_iter.min(cap);
-        }
-        Case::new(mach, self.body.clone(), level, self.wake, numerics)
+    /// Wake treatment in use: the one set with [`Analysis::wake`], else a base wake for a viscous analysis and a sting otherwise.
+    fn wake_used(&self) -> Wake {
+        self.wake.unwrap_or(if self.flight.is_some() { Wake::Base } else { Wake::Sting })
     }
 
-    /// Drag of one solver result, referenced to the reference area.
+    fn case(&self, mach: f64, level: u32, rans: Option<&Rans>) -> Case {
+        let wake = self.wake_used();
+        let mut case = match rans {
+            Some(r) => Case::viscous(mach, self.body.clone(), level, wake, r.re_c, r.sutherland, r.mach_max),
+            None => Case::new(mach, self.body.clone(), level, wake, Numerics::auto(mach, level, wake)),
+        };
+        if let Some(n) = self.numerics {
+            case.numerics = n;
+        }
+        if let Some(cap) = self.max_iterations {
+            case.numerics.max_iter = case.numerics.max_iter.min(cap);
+        }
+        case
+    }
+
+    /// Drag of one solver result, referenced to the reference area. A viscous analysis adds the skin friction and, with a base
+    /// wake, takes the base drag from the solution instead of the correlation.
     fn drag(&self, mach: f64, detail: &PointResult) -> Drag {
         let q = (self.d_nose / self.d_ref).powi(2);
         let forebody_pressure = detail.cd_aft.iter().fold(detail.cd_nose, |a, c| a + c);
-        let base = base_drag_coefficient(mach) * (self.body.base_radius() / self.body.body.radius()).powi(2);
-        let total = forebody_pressure + base;
-        Drag { forebody_pressure: forebody_pressure * q, friction: None, base: base * q, base_modelled: true, total: total * q }
+        let viscous = self.flight.is_some();
+        let friction = viscous.then_some(detail.cd_friction);
+        let base_modelled = !(viscous && self.wake_used() == Wake::Base);
+        let base = if base_modelled { base_drag_coefficient(mach) * (self.body.base_radius() / self.body.body.radius()).powi(2) } else { detail.cd_base };
+        let total = forebody_pressure + friction.unwrap_or(0.0) + base;
+        Drag { forebody_pressure: forebody_pressure * q, friction: friction.map(|f| f * q), base: base * q, base_modelled, total: total * q }
     }
 
     fn point(&self, mach: f64, detail: PointResult, other: Option<&PointResult>) -> PolarPoint {
@@ -293,11 +353,15 @@ impl Analysis {
         if (0.7..1.05).contains(&mach) && self.has_sharp_corner() {
             w.push(Warning::SharpCornerTransonic);
         }
-        if self.wake == Wake::Base && detail.cp_base_range.is_finite() && detail.cp_base_range >= 1e-3 && detail.stop_reason != StopReason::ResidualDrop {
+        if self.wake_used() == Wake::Base && detail.cp_base_range.is_finite() && detail.cp_base_range >= 1e-3 && detail.stop_reason != StopReason::ResidualDrop
+        {
             w.push(Warning::UnsteadyWake { cp_base_range: detail.cp_base_range });
         }
         if detail.farfield_dp > 0.02 {
             w.push(Warning::FarFieldDisturbed { dp: detail.farfield_dp });
+        }
+        if detail.y_plus_max > 5.0 {
+            w.push(Warning::WallResolution { y_plus_max: detail.y_plus_max });
         }
         w
     }
@@ -385,10 +449,11 @@ impl Analysis {
     }
 }
 
-/// Builds the grids of `case` and checks their quality.
+/// Builds the grids of `case` and checks their quality (the wall-resolved grids of a viscous case against the tighter limit in `j`).
 fn check_grid(case: &Case) -> Result<(), Error> {
     let probe = case.try_build_solver()?;
-    check_quality(&probe.grid, probe.block())
+    let max_j = if case.viscous.is_some() { MAX_STRETCHING_VISCOUS_J } else { MAX_STRETCHING };
+    check_quality(&probe.grid, probe.block(), MAX_STRETCHING, max_j)
 }
 
 /// Quality of a solver result, first match wins.

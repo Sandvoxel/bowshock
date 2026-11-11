@@ -343,6 +343,11 @@ impl Solver {
         Walls::new(self.viscous, &self.cfg.bc, self.block)
     }
 
+    /// Is the j-face `(i, j)` (between cells `j - 1` and `j` of column `i`) a no-slip wall? Always `false` for the Euler equations.
+    pub fn noslip_jface(&self, i: usize, j: usize) -> bool {
+        self.walls().noslip_jface(i, j)
+    }
+
     /// Convergence acceleration in use (set with [`Solver::set_scheme`]).
     pub fn scheme(&self) -> Scheme {
         self.scheme

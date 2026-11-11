@@ -7,11 +7,12 @@
 //!
 //! Modes: default = Mach sweep -> `out/subsonic/sweep_<tag>.csv`, `tables_<tag>.md`, `cp_<tag>_M<m>_<base|nobase>.csv`,
 //! `residual_<tag>_M<m>_<base|nobase>.csv`; `--validate` = TM X-2439 configurations 4 (ogive) and 2 (cone) at M = 0.404, 0.608, 0.831
-//! -> `fox_*.csv`, `tables_validate.md`; `--lowmach-study` = low-Mach correction on/off at M = 0.1 ... 0.5 against potential theory
-//! -> `lowmach_<tag>.csv`, `tables_lowmach.md`.
+//! -> `fox_*.csv`, `tables_validate.md`; `--validate --rans` = the same configurations with the Euler equations and with RANS
+//! (k-omega SST) side by side -> `tables_validate_rans.md`; `--lowmach-study` = low-Mach correction on/off at M = 0.1 ... 0.5 against
+//! potential theory -> `lowmach_<tag>.csv`, `tables_lowmach.md`.
 
 use bowshock::body_grid::{Body, Nose};
-use bowshock::case::Case;
+use bowshock::case::{Case, Wake};
 use bowshock::result::{wall_cp_at, PointResult};
 use bowshock::run::{run_cold, run_on};
 use bowshock_cases::subsonic::{fox_case, fox_tm_x2439 as fox, subsonic_case};
@@ -142,7 +143,9 @@ fn main() {
         if matches!(opts.scheme, Scheme::Explicit) { "explicit SSP-RK3" } else { "line-implicit" }
     );
     println!("threads (rayon): {}", rayon::current_num_threads());
-    if args.iter().any(|a| a == "--validate") {
+    if args.iter().any(|a| a == "--validate") && args.iter().any(|a| a == "--rans") {
+        validate_rans(&out_dir, &opts);
+    } else if args.iter().any(|a| a == "--validate") {
         validate(&out_dir, &opts);
     } else if args.iter().any(|a| a == "--lowmach-study") {
         lowmach_study(&out_dir, &opts, &args);
@@ -277,16 +280,9 @@ fn validate(out_dir: &Path, opts: &Opts) {
             let t0 = Instant::now();
             let r = run_cold(&case);
             let dt = t0.elapsed().as_secs_f64();
-            let (xs, cps): (&[f64], &[f64]) = match (cone, k) {
-                (false, 0) => (&fox::OGIVE_CYL_X_D, &fox::OGIVE_CYL_CP_M04_MEAN),
-                (false, 1) => (&fox::OGIVE_CYL_X_D, &fox::OGIVE_CYL_CP_M06_MEAN),
-                (false, _) => (&fox::OGIVE_CYL_X_D, &fox::OGIVE_CYL_CP_M08_MEAN),
-                (true, 0) => (&fox::CONE_CYL_X_D, &fox::CONE_CYL_CP_M04_MEAN),
-                (true, 1) => (&fox::CONE_CYL_X_D, &fox::CONE_CYL_CP_M06_MEAN),
-                (true, _) => (&fox::CONE_CYL_X_D, &fox::CONE_CYL_CP_M08_MEAN),
-            };
+            let (xs, cps) = fox_cp_data(cone, k);
             let cfg = if cone { "2 (cone)" } else { "4 (ogive)" };
-            let x_fore = if cone { 4.2 } else { 3.4 }; // boattail shoulder influence starts upstream of the shoulder
+            let x_fore = fox_x_fore(cone); // boattail shoulder influence starts upstream of the shoulder
             let name = format!("fox_{}_M{m}", if cone { "cone" } else { "ogive" });
             let mut f = fs::File::create(out_dir.join(format!("{name}.csv"))).unwrap();
             writeln!(f, "x_over_d,cp_data_mean,cp_cfd,cfd_minus_data,region").unwrap();
@@ -333,6 +329,98 @@ fn validate(out_dir: &Path, opts: &Opts) {
         }
     }
     fs::write(out_dir.join("tables_validate.md"), &md).unwrap();
+    println!("\n{md}");
+}
+
+/// Free-stream Reynolds number per Fox diameter at the three Mach numbers of `fox::MACH` (interpolation of the range quoted for
+/// the TM X-2439 tests; to be confirmed against the report).
+const FOX_RE_D: [f64; 3] = [0.44e6, 0.56e6, 0.68e6];
+/// Sutherland constant `110.4 K / T_inf` with `T_inf` = 300 K, as specified for the RANS validation.
+const FOX_SUTHERLAND: f64 = 0.368;
+
+/// Mean Cp data of the TM X-2439 configuration 4 (ogive) or 2 (cone) at Mach number `fox::MACH[k]`: stations and values.
+fn fox_cp_data(cone: bool, k: usize) -> (&'static [f64], &'static [f64]) {
+    match (cone, k) {
+        (false, 0) => (&fox::OGIVE_CYL_X_D, &fox::OGIVE_CYL_CP_M04_MEAN),
+        (false, 1) => (&fox::OGIVE_CYL_X_D, &fox::OGIVE_CYL_CP_M06_MEAN),
+        (false, _) => (&fox::OGIVE_CYL_X_D, &fox::OGIVE_CYL_CP_M08_MEAN),
+        (true, 0) => (&fox::CONE_CYL_X_D, &fox::CONE_CYL_CP_M04_MEAN),
+        (true, 1) => (&fox::CONE_CYL_X_D, &fox::CONE_CYL_CP_M06_MEAN),
+        (true, _) => (&fox::CONE_CYL_X_D, &fox::CONE_CYL_CP_M08_MEAN),
+    }
+}
+
+/// Axial position beyond which the stations count as boattail (the shoulder influence starts upstream of the shoulder).
+fn fox_x_fore(cone: bool) -> f64 {
+    if cone {
+        4.2
+    } else {
+        3.4
+    }
+}
+
+/// RMS of `cp - data` over the fore+cylinder stations (`x <= x_fore`) and over the boattail stations.
+fn fox_rms(r: &PointResult, cone: bool, k: usize) -> (f64, f64) {
+    let (xs, cps) = fox_cp_data(cone, k);
+    let x_fore = fox_x_fore(cone);
+    let (mut s1, mut n1, mut s2, mut n2) = (0.0f64, 0usize, 0.0f64, 0usize);
+    for (x, d) in xs.iter().zip(cps.iter()) {
+        if let Some(c) = wall_cp_at(&r.wall, *x) {
+            let e = c - d;
+            if *x <= x_fore {
+                s1 += e * e;
+                n1 += 1;
+            } else {
+                s2 += e * e;
+                n2 += 1;
+            }
+        }
+    }
+    ((s1 / n1 as f64).sqrt(), (s2 / n2.max(1) as f64).sqrt())
+}
+
+/// `--validate --rans`: the Fox configurations with the Euler equations (inviscid wake, as `--validate`) and with RANS
+/// (k-omega SST on a wall-resolved grid, base wake) -> `tables_validate_rans.md`.
+fn validate_rans(out_dir: &Path, opts: &Opts) {
+    let mut md = String::new();
+    writeln!(md, "### NASA TM X-2439 (Fox 1971), Euler vs RANS (k-omega SST), grid level {}\n", opts.level).unwrap();
+    writeln!(
+        md,
+        "| config | M | Re_D | iters Euler | iters RANS | time RANS [s] | RANS stop | RMS fore+cyl Euler | RMS fore+cyl RANS | RMS boattail Euler | RMS boattail RANS | base Cp Euler | base Cp RANS | data base Cp | RANS CD friction | RANS y+ max |"
+    )
+    .unwrap();
+    writeln!(md, "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|").unwrap();
+    for cone in [false, true] {
+        for (k, &m) in fox::MACH.iter().enumerate() {
+            let euler_case = opts.apply(fox_case(cone, m, opts.level));
+            let mut rans_case = Case::viscous(m, fox_case(cone, m, opts.level).body, opts.level, Wake::Base, FOX_RE_D[k] / m, FOX_SUTHERLAND, m);
+            if let Some(n) = opts.max_iter {
+                rans_case.numerics.max_iter = n;
+            }
+            if let Some(d) = opts.drop {
+                rans_case.numerics.drop_orders = d;
+            }
+            let re = run_cold(&euler_case);
+            let t0 = Instant::now();
+            let rr = run_cold(&rans_case);
+            let dt = t0.elapsed().as_secs_f64();
+            let cfg = if cone { "2 (cone)" } else { "4 (ogive)" };
+            let (fe, be) = fox_rms(&re, cone, k);
+            let (fr, br) = fox_rms(&rr, cone, k);
+            let data_base = if cone { fox::BASE_CP_CONE[k] } else { fox::BASE_CP_OGIVE[k] };
+            println!(
+                "config {cfg} M={m}: Euler {} iters, base Cp {:+.4}, RMS {fe:.4} / {be:.4}; RANS {} iters ({dt:.0} s) {} drop {:.1}, base Cp {:+.4}, RMS {fr:.4} / {br:.4}, CD friction {:+.5}, y+ max {:.2}; data base Cp {data_base:+.4}",
+                re.iters, re.cp_base_mean, rr.iters, rr.stop_reason, rr.drop_orders, rr.cp_base, rr.cd_friction, rr.y_plus_max
+            );
+            writeln!(
+                md,
+                "| {cfg} | {m} | {:.2e} | {} | {} | {dt:.0} | {} | {fe:.4} | {fr:.4} | {be:.4} | {br:.4} | {:+.4} | {:+.4} | {data_base:+.4} | {:+.5} | {:.2} |",
+                FOX_RE_D[k], re.iters, rr.iters, rr.stop_reason, re.cp_base_mean, rr.cp_base, rr.cd_friction, rr.y_plus_max
+            )
+            .unwrap();
+        }
+    }
+    fs::write(out_dir.join("tables_validate_rans.md"), &md).unwrap();
     println!("\n{md}");
 }
 

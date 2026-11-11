@@ -2,13 +2,18 @@
 
 use crate::case::Wake;
 use bowshock_core::flux::Limiter;
-use bowshock_core::implicit::ImplicitParams;
+use bowshock_core::implicit::{DtMode, ImplicitParams};
 use bowshock_core::solver::{Bc, Scheme};
 
 /// Sampling interval [iterations] of the monitor history.
 pub const MONITOR_EVERY: usize = 50;
 /// Mach number below which [`Numerics::auto`] uses the subsonic settings.
 pub const REGIME_SPLIT_MACH: f64 = 0.85;
+
+/// Pseudo-time parameters of the wall-resolved RANS runs of the facade: the summed-direction time step with a high CFL limit. The
+/// weaker-direction step of [`ImplicitParams::VISCOUS`] (which the flat-plate gates of the solver use) diverged within a few hundred
+/// iterations on the wall-resolved body grid of an ogive-cylinder at Mach 0.5 (cfl_max 10, also with a start CFL of 0.1).
+const RANS_IMPLICIT: ImplicitParams = ImplicitParams { dt_mode: DtMode::Sum, cfl_max: 50.0, sub_iters: 3, ..ImplicitParams::DEFAULT };
 
 /// Numerical settings of one run.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -78,6 +83,26 @@ impl Numerics {
             Wake::Sting => 2e-4,
         });
         n
+    }
+
+    /// Wall-resolved RANS (viscous terms and k-omega SST): line-implicit with the viscous parameters, van Albada limiter and the
+    /// low-Mach correction below [`REGIME_SPLIT_MACH`], minmod without correction otherwise; stationary tolerance 1e-4 on the
+    /// total CD.
+    pub fn viscous(mach: f64, level: u32) -> Numerics {
+        let subsonic = mach < REGIME_SPLIT_MACH;
+        Numerics {
+            cfl: 0.5,
+            limiter: if subsonic { Limiter::VanAlbada } else { Limiter::Minmod },
+            low_mach: subsonic,
+            scheme: Scheme::Implicit(RANS_IMPLICIT),
+            first_order_iters: 200,
+            max_iter: 80_000 << level,
+            min_iter: 0,
+            drop_orders: 5.0,
+            outflow: Bc::Characteristic,
+            monitor_window: 2000,
+            monitor_tol: Some(1e-4),
+        }
     }
 }
 

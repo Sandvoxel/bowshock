@@ -332,6 +332,9 @@ pub struct BaseGridParams {
     /// End-cell size along x at the tip, shoulder, boattail ends and base, first cell height at walls / base corner.
     pub dx_tip: f64,
     pub dr_wall: f64,
+    /// Cluster the rows of the gap between the sting (or axis) and the base radius at the base corner only (geometric growth
+    /// from `dr_wall` towards the sting) instead of at both ends.
+    pub gap_one_sided: bool,
 }
 
 /// Grid with a solid body block and base (see `solver::Block`): H-grid whose first `j_end = n_sting + n_gap` rows lie
@@ -385,7 +388,12 @@ pub fn base_domain_grid(p: &BaseGridParams) -> Result<(Grid, Block), Error> {
     let (j_sting, j_end) = (p.n_sting, p.n_sting + p.n_gap);
     let nj = j_end + p.nj_out;
     let (re, rs) = (bb.base_radius(), bb.sting_radius);
-    let gap = two_sided_nodes(re - rs, p.n_gap, p.dr_wall);
+    let gap = if p.gap_one_sided {
+        let off = geometric_offsets(p.dr_wall, re - rs, p.n_gap);
+        (0..=p.n_gap).map(|k| (re - rs) - off[p.n_gap - k]).collect()
+    } else {
+        two_sided_nodes(re - rs, p.n_gap, p.dr_wall)
+    };
     let sj = radial_fractions(p.dr_wall, p.r_far - re, p.nj_out);
     let mut x = vec![0.0; (ni + 1) * (nj + 1)];
     let mut r = vec![0.0; (ni + 1) * (nj + 1)];
@@ -413,19 +421,21 @@ pub fn base_domain_grid(p: &BaseGridParams) -> Result<(Grid, Block), Error> {
     Ok((grid, Block { i_end, j_end, j_sting }))
 }
 
-/// Largest allowed ratio of neighbouring cell sizes checked by [`check_quality`].
+/// Largest allowed ratio of neighbouring cell sizes checked by [`check_quality`] for inviscid grids.
 pub const MAX_STRETCHING: f64 = 1.5;
+/// Largest allowed ratio of neighbouring cell heights in `j` for viscous grids (wall-resolved boundary layer).
+pub const MAX_STRETCHING_VISCOUS_J: f64 = 1.3;
 
-/// Reject grids whose neighbouring cell sizes differ by more than a factor of [`MAX_STRETCHING`]: along `i` on the first
-/// fluid wall row (`j = 0`, or `j = block.j_end` with a block) and along `j` in the last cell column over the fluid rows
-/// (from `block.j_sting`, or 0).
-pub fn check_quality(grid: &Grid, block: Option<Block>) -> Result<(), Error> {
+/// Reject grids whose neighbouring cell sizes differ by more than `max_i` along `i` on the first fluid wall row (`j = 0`, or
+/// `j = block.j_end` with a block) or by more than `max_j` along `j` in the last cell column over the fluid rows (from
+/// `block.j_sting`, or 0).
+pub fn check_quality(grid: &Grid, block: Option<Block>, max_i: f64, max_j: f64) -> Result<(), Error> {
     let ratio = |a: f64, b: f64| (a / b).max(b / a);
     let (j_wall, j_start) = block.map_or((0, 0), |b| (b.j_end, b.j_sting));
     for i in 1..grid.ni {
         let (a, b) = (grid.node(i, j_wall).0 - grid.node(i - 1, j_wall).0, grid.node(i + 1, j_wall).0 - grid.node(i, j_wall).0);
         let q = ratio(a, b);
-        if q.is_nan() || q > MAX_STRETCHING {
+        if q.is_nan() || q > max_i {
             return Err(Error::Grid(format!("stretching ratio {q:.2} at i = {i}")));
         }
     }
@@ -433,7 +443,7 @@ pub fn check_quality(grid: &Grid, block: Option<Block>) -> Result<(), Error> {
     for j in j_start + 1..grid.nj {
         let (a, b) = (grid.node(ic, j).1 - grid.node(ic, j - 1).1, grid.node(ic, j + 1).1 - grid.node(ic, j).1);
         let q = ratio(a, b);
-        if q.is_nan() || q > MAX_STRETCHING {
+        if q.is_nan() || q > max_j {
             return Err(Error::Grid(format!("stretching ratio {q:.2} at j = {j}")));
         }
     }
@@ -554,6 +564,7 @@ mod tests {
             nj_out: 20,
             dx_tip: 0.05,
             dr_wall: 0.05,
+            gap_one_sided: false,
         }
     }
 
@@ -592,6 +603,23 @@ mod tests {
             let xs: Vec<f64> = (0..=g.ni).map(|i| g.node(i, g.nj).0).collect();
             let worst = xs.windows(3).map(|w| ((w[2] - w[1]) / (w[1] - w[0])).max((w[1] - w[0]) / (w[2] - w[1]))).fold(1.0, f64::max);
             assert!(worst < 2.5, "neighbouring cell-size ratio {worst}");
+        }
+    }
+
+    #[test]
+    fn one_sided_gap_clusters_at_the_base_corner_only() {
+        for sting in [0.0, 0.13] {
+            let mut p = base_params(sting, 1.0);
+            p.gap_one_sided = true;
+            p.n_gap = 12;
+            p.dr_wall = 0.005; // thin first cells: the gap rows grow away from the base corner
+            let (g, b) = base_domain_grid(&p).expect("grid");
+            let (re, rs) = (p.body.base_radius(), p.body.sting_radius);
+            let col = g.ni - 1;
+            let h: Vec<f64> = (b.j_sting..b.j_end).map(|j| g.node(col, j + 1).1 - g.node(col, j).1).collect();
+            assert!((h[h.len() - 1] - p.dr_wall).abs() < 1e-12, "cell at the base corner {}", h[h.len() - 1]);
+            assert!(h.windows(2).all(|w| w[0] > w[1]), "cells shrink towards the base corner");
+            assert!((g.node(col, b.j_sting).1 - rs).abs() < 1e-12 && (g.node(col, b.j_end).1 - re).abs() < 1e-12);
         }
     }
 
@@ -662,6 +690,7 @@ mod tests {
             nj_out: 20,
             dx_tip: 0.05,
             dr_wall: 0.05,
+            gap_one_sided: false,
         };
         let (g, b) = base_domain_grid(&bp).expect("grid");
         let xs: Vec<f64> = (0..=g.ni).map(|i| g.node(i, g.nj).0).collect();

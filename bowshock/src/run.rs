@@ -7,10 +7,11 @@
 
 use crate::body_grid::BaseBody;
 use crate::case::{Case, Wake};
-use crate::numerics::{Numerics, MONITOR_EVERY};
+use crate::numerics::MONITOR_EVERY;
 use crate::result::{BasePoint, PointResult, StopReason, WallPoint};
 use bowshock_core::gas::{cons_to_prim, freestream, prim_to_cons, sound_speed};
 use bowshock_core::solver::Solver;
+use bowshock_core::viscous::temperature;
 use bowshock_reference::base_drag::base_drag_coefficient;
 
 /// Cold-start run on a fresh solver.
@@ -35,6 +36,10 @@ pub fn run_on(case: &Case, s: &mut Solver, warm: bool, r_ref: Option<f64>) -> Po
     if !warm {
         let q = prim_to_cons(&freestream(case.mach));
         s.u.fill(q);
+        if s.viscous().is_some() {
+            // the turbulence state is not part of `u`: back to the free stream
+            s.set_viscous(s.viscous());
+        }
     }
     s.iter = if warm { n.first_order_iters } else { 0 };
     s.restart_ramp();
@@ -53,7 +58,7 @@ pub fn run_on(case: &Case, s: &mut Solver, warm: bool, r_ref: Option<f64>) -> Po
         if sample && it % MONITOR_EVERY == MONITOR_EVERY - 1 {
             hist.push((it + 1, monitor(case, s)));
         }
-        if let Some(why) = stop_reason(&n, case.wake, it, r, r_ref.unwrap_or(rmax), skip, &hist) {
+        if let Some(why) = stop_reason(case, it, r, r_ref.unwrap_or(rmax), skip, &hist) {
             reason = why;
             break;
         }
@@ -62,11 +67,13 @@ pub fn run_on(case: &Case, s: &mut Solver, warm: bool, r_ref: Option<f64>) -> Po
 }
 
 /// Stopping rule after iteration `it` with density residual `r`, in this order: non-finite residual (always); then, from
-/// `n.min_iter` on, `n.drop_orders` below `reference` ("residual drop reached"); or, with `n.monitor_tol`, every 500 iterations
-/// from `2 n.monitor_window` on and once the residual has dropped 2 orders, a monitor range (`hist`, one sample per `MONITOR_EVERY`
-/// iterations) below the tolerance over the last `n.monitor_window` iterations (`BasePressureStationary` for a base wake,
-/// `CdStationary` for a sting; the inviscid wake can be unsteady, the residual then stalls). `skip` is 20 on a cold start, 0 warm.
-pub fn stop_reason(n: &Numerics, wake: Wake, it: usize, r: f64, reference: f64, skip: usize, hist: &[(usize, f64)]) -> Option<StopReason> {
+/// `min_iter` on, `drop_orders` below `reference` ("residual drop reached"); or, with a `monitor_tol`, every 500 iterations
+/// from `2 monitor_window` on and once the residual has dropped 2 orders, a monitor range (`hist`, one sample per `MONITOR_EVERY`
+/// iterations) below the tolerance over the last `monitor_window` iterations (`BasePressureStationary` for an inviscid base wake,
+/// `CdStationary` for a sting and for every viscous case, whose monitor is the total CD; the inviscid wake can be unsteady, the
+/// residual then stalls). `skip` is 20 on a cold start, 0 warm.
+pub fn stop_reason(case: &Case, it: usize, r: f64, reference: f64, skip: usize, hist: &[(usize, f64)]) -> Option<StopReason> {
+    let n = &case.numerics;
     if !r.is_finite() {
         return Some(StopReason::NonFinite);
     }
@@ -81,9 +88,9 @@ pub fn stop_reason(n: &Numerics, wake: Wake, it: usize, r: f64, reference: f64, 
             let k = n.monitor_window / MONITOR_EVERY;
             let (lo, hi) = hist[hist.len() - k..].iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), c| (l.min(c.1), h.max(c.1)));
             if hi - lo < tol {
-                return Some(match wake {
-                    Wake::Base => StopReason::BasePressureStationary,
-                    Wake::Sting => StopReason::CdStationary,
+                return Some(match (case.viscous.is_some(), case.wake) {
+                    (false, Wake::Base) => StopReason::BasePressureStationary,
+                    (true, _) | (false, Wake::Sting) => StopReason::CdStationary,
                 });
             }
         }
@@ -91,12 +98,79 @@ pub fn stop_reason(n: &Numerics, wake: Wake, it: usize, r: f64, reference: f64, 
     None
 }
 
-/// Convergence monitor of the current state: the nose CD (sting wake) or the area-mean base Cp (base wake).
+/// Convergence monitor of the current state: the total CD of a viscous case, else the nose CD (sting wake) or the area-mean base
+/// Cp (base wake).
 pub fn monitor(case: &Case, s: &Solver) -> f64 {
-    match case.wake {
-        Wake::Sting => wall_distribution(&case.body, s).1,
-        Wake::Base => base_state(s, case.body.body.radius().powi(2)).2,
+    let bb = &case.body;
+    if case.viscous.is_some() {
+        let (wall, cd_nose, _) = wall_distribution(bb, s);
+        let fore = aft_drag(bb, &wall).iter().fold(cd_nose, |a, c| a + c);
+        return fore + friction(case, s).0 + base_state(s, bb.body.radius().powi(2)).1;
     }
+    match case.wake {
+        Wake::Sting => wall_distribution(bb, s).1,
+        Wake::Base => base_state(s, bb.body.radius().powi(2)).2,
+    }
+}
+
+/// Pressure drag of each aft segment (`body.segments` order) from the extrapolated wall Cp of `wall`.
+fn aft_drag(bb: &BaseBody, wall: &[WallPoint]) -> Vec<f64> {
+    let mut cd_aft = vec![0.0; bb.segments.len()];
+    let stations: Vec<f64> = (0..=bb.segments.len()).map(|k| bb.station(k).0).collect();
+    for w in wall {
+        // a face belongs to segment k when stations[k] <= x < stations[k + 1]; the sting extension behind the base has no
+        // projected area and is not counted, nor is the nose
+        if let Some(k) = (0..cd_aft.len()).find(|&k| w.x >= stations[k] && w.x < stations[k + 1]) {
+            cd_aft[k] += w.cp * (w.s1 - w.s0);
+        }
+    }
+    cd_aft
+}
+
+/// Skin-friction drag and the largest `y+` of the first cell over the no-slip body-surface faces ahead of the base plane
+/// (the sting extension of a `Wake::Sting` grid and the surface of a sting behind the base are not part of the body): `(cd_friction, y_plus_max)`,
+/// `(0.0, NaN)` for the Euler equations. With the wall tangent `t = (nr, -nx)` pointing downstream, the first-cell tangential
+/// velocity `u_t`, its wall distance `d_n` and `tau_w = mu(T) u_t / d_n`: `CD = sum 2 tau_w t_x r_m len / (q_inf R^2)`,
+/// `y+ = d_n sqrt(rho tau_w) / mu`. Works on the conserved state `s.u`.
+pub fn friction(case: &Case, s: &Solver) -> (f64, f64) {
+    let Some(v) = s.viscous() else {
+        return (0.0, f64::NAN);
+    };
+    let g = &s.grid;
+    let ni = g.ni;
+    let fs = s.cfg.freestream;
+    let q_inf = 0.5 * fs[0] * fs[1] * fs[1];
+    let r2 = case.body.body.radius().powi(2);
+    let x_base = case.body.x_base();
+    let rows = match s.block() {
+        None => vec![0],
+        Some(b) => vec![b.j_end, b.j_sting],
+    };
+    let (mut cd, mut y_plus_max) = (0.0, 0.0f64);
+    for j in rows {
+        for i in 0..ni {
+            if !s.noslip_jface(i, j) {
+                continue;
+            }
+            let (n0, n1) = (g.node(i, j), g.node(i + 1, j));
+            let xm = 0.5 * (n0.0 + n1.0);
+            if xm >= x_base {
+                continue;
+            }
+            let f = &g.jface[j * ni + i];
+            // the fluid cell above the face
+            let c = j * ni + i;
+            let w = cons_to_prim(&s.u[c]);
+            let (tx, tr) = (f.nr, -f.nx);
+            let u_t = w[1] * tx + w[2] * tr;
+            let d_n = ((g.xc[c] - xm) * f.nx + (g.rc[c] - f.rm) * f.nr).abs();
+            let mu = v.mu(temperature(&w));
+            let tau = mu * u_t / d_n;
+            cd += 2.0 * tau * tx * f.rm * f.len / (q_inf * r2);
+            y_plus_max = y_plus_max.max(d_n * (w[0] * tau.abs()).sqrt() / mu);
+        }
+    }
+    (cd, y_plus_max)
 }
 
 /// Wall points of the body (and of the sting extension) in axial order, and the nose drag from the extrapolated wall Cp and from
@@ -174,15 +248,7 @@ pub fn finish(case: &Case, s: &Solver, residual: Vec<f64>, rmax: f64, hist: Vec<
     let rb2 = bb.body.radius().powi(2);
     let blk = s.block();
     let (wall, cd_nose, cd_nose_cell) = wall_distribution(bb, s);
-    let mut cd_aft = vec![0.0; bb.segments.len()];
-    let stations: Vec<f64> = (0..=bb.segments.len()).map(|k| bb.station(k).0).collect();
-    for w in &wall {
-        // a face belongs to segment k when stations[k] <= x < stations[k + 1]; the sting extension behind the base has no
-        // projected area and is not counted, nor is the nose
-        if let Some(k) = (0..cd_aft.len()).find(|&k| w.x >= stations[k] && w.x < stations[k + 1]) {
-            cd_aft[k] += w.cp * (w.s1 - w.s0);
-        }
-    }
+    let cd_aft = aft_drag(bb, &wall);
     let (base_wall, cd_base, cp_base, cp_base_cell) = base_state(s, rb2);
     let cd_base_model = match (case.wake, bb.sting_radius > 0.0) {
         (Wake::Sting, _) => 0.0,
@@ -220,8 +286,8 @@ pub fn finish(case: &Case, s: &Solver, residual: Vec<f64>, rmax: f64, hist: Vec<
     }
     let nwin = (n.monitor_window / MONITOR_EVERY).min(hist.len());
     let (mut cp_base_mean, mut cp_base_range, mut cd_range) = (cp_base, f64::NAN, f64::NAN);
-    match case.wake {
-        Wake::Base => {
+    match (case.viscous.is_some(), case.wake) {
+        (false, Wake::Base) => {
             if nwin >= 2 {
                 let w = &hist[hist.len() - nwin..];
                 let (lo, hi) = w.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), c| (l.min(c.1), h.max(c.1)));
@@ -229,7 +295,8 @@ pub fn finish(case: &Case, s: &Solver, residual: Vec<f64>, rmax: f64, hist: Vec<
                 cp_base_range = hi - lo;
             }
         }
-        Wake::Sting => {
+        // the monitor is the forebody CD (sting wake) or, for a viscous run, the total CD
+        (true, _) | (false, Wake::Sting) => {
             if nwin >= 2 {
                 let (lo, hi) = hist[hist.len() - nwin..].iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), c| (l.min(c.1), h.max(c.1)));
                 cd_range = hi - lo;
@@ -237,7 +304,8 @@ pub fn finish(case: &Case, s: &Solver, residual: Vec<f64>, rmax: f64, hist: Vec<
         }
     }
     let fore = cd_aft.iter().fold(cd_nose, |a, c| a + c);
-    let (cd_total, cd_total_model) = (fore + cd_base, fore + cd_base_model);
+    let (cd_friction, y_plus_max) = friction(case, s);
+    let (cd_total, cd_total_model) = (fore + cd_friction + cd_base, fore + cd_friction + cd_base_model);
     let last = residual.last().copied().unwrap_or(rmax);
     let drop_orders = if rmax > 0.0 && last > 0.0 { (rmax / last).log10() } else { 0.0 };
     PointResult {
@@ -254,6 +322,7 @@ pub fn finish(case: &Case, s: &Solver, residual: Vec<f64>, rmax: f64, hist: Vec<
         cd_nose_cell,
         cd_aft,
         cd_base,
+        cd_friction,
         cd_total,
         cd_base_model,
         cd_total_model,
@@ -270,18 +339,22 @@ pub fn finish(case: &Case, s: &Solver, residual: Vec<f64>, rmax: f64, hist: Vec<
         farfield_dp,
         min_rho,
         min_p,
+        y_plus_max,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::body_grid::{Body, Nose};
+    use crate::numerics::Numerics;
+    use bowshock_core::solver::{Turbulence, Viscous};
 
-    fn n(tol: Option<f64>) -> Numerics {
+    fn case(tol: Option<f64>, wake: Wake) -> Case {
         let mut n = Numerics::transonic();
         n.monitor_tol = tol;
         n.min_iter = 0;
-        n
+        Case::new(0.5, BaseBody::cylinder(Body { nose: Nose::TangentOgive { fineness: 3.0 } }, 6.0), 0, wake, n)
     }
 
     #[test]
@@ -294,22 +367,26 @@ mod tests {
     #[test]
     fn stop_reason_order_and_gates() {
         let flat: Vec<(usize, f64)> = (1..=40).map(|k| (k * 50, -0.1)).collect();
-        let c = n(Some(1e-3));
+        let (c, cs) = (case(Some(1e-3), Wake::Base), case(Some(1e-3), Wake::Sting));
         // non-finite beats everything, even before min_iter
-        let mut g = c;
-        g.min_iter = 10_000;
-        assert_eq!(stop_reason(&g, Wake::Base, 5, f64::NAN, 1.0, 0, &[]), Some(StopReason::NonFinite));
-        assert_eq!(stop_reason(&g, Wake::Base, 5, 1e-9, 1.0, 0, &[]), None);
+        let mut g = case(Some(1e-3), Wake::Base);
+        g.numerics.min_iter = 10_000;
+        assert_eq!(stop_reason(&g, 5, f64::NAN, 1.0, 0, &[]), Some(StopReason::NonFinite));
+        assert_eq!(stop_reason(&g, 5, 1e-9, 1.0, 0, &[]), None);
         // residual drop before the stationary rule
-        assert_eq!(stop_reason(&c, Wake::Base, 4999, 1e-7, 1.0, 20, &flat), Some(StopReason::ResidualDrop));
+        assert_eq!(stop_reason(&c, 4999, 1e-7, 1.0, 20, &flat), Some(StopReason::ResidualDrop));
         // stationary rule: needs it % 500 == 499, 2 orders of drop and a flat history
-        assert_eq!(stop_reason(&c, Wake::Base, 4999, 1e-3, 1.0, 20, &flat), Some(StopReason::BasePressureStationary));
-        assert_eq!(stop_reason(&c, Wake::Sting, 4999, 1e-3, 1.0, 20, &flat), Some(StopReason::CdStationary));
-        assert_eq!(stop_reason(&c, Wake::Base, 4998, 1e-3, 1.0, 20, &flat), None);
-        assert_eq!(stop_reason(&c, Wake::Base, 4999, 0.5, 1.0, 20, &flat), None);
-        assert_eq!(stop_reason(&n(None), Wake::Base, 4999, 1e-3, 1.0, 20, &flat), None);
+        assert_eq!(stop_reason(&c, 4999, 1e-3, 1.0, 20, &flat), Some(StopReason::BasePressureStationary));
+        assert_eq!(stop_reason(&cs, 4999, 1e-3, 1.0, 20, &flat), Some(StopReason::CdStationary));
+        assert_eq!(stop_reason(&c, 4998, 1e-3, 1.0, 20, &flat), None);
+        assert_eq!(stop_reason(&c, 4999, 0.5, 1.0, 20, &flat), None);
+        assert_eq!(stop_reason(&case(None, Wake::Base), 4999, 1e-3, 1.0, 20, &flat), None);
         let mut moving = flat.clone();
         moving[39].1 = 0.1;
-        assert_eq!(stop_reason(&c, Wake::Base, 4999, 1e-3, 1.0, 20, &moving), None);
+        assert_eq!(stop_reason(&c, 4999, 1e-3, 1.0, 20, &moving), None);
+        // a viscous case stops on a stationary total CD for either wake
+        let mut v = case(Some(1e-3), Wake::Base);
+        v.viscous = Some(Viscous { re_c: 1e6, sutherland: 0.38, turbulence: Turbulence::Sst, wall_i_start: 28 });
+        assert_eq!(stop_reason(&v, 4999, 1e-3, 1.0, 20, &flat), Some(StopReason::CdStationary));
     }
 }

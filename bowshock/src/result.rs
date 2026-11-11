@@ -60,7 +60,8 @@ pub fn wall_cp_at(wall: &[WallPoint], x: f64) -> Option<f64> {
     None
 }
 
-/// Everything a run reports. Drag coefficients are pressure drag referenced to the maximum cross-section `pi R^2`.
+/// Everything a run reports. Drag coefficients are referenced to the maximum cross-section `pi R^2`; the pressure terms of a
+/// viscous run add `cd_friction`.
 #[derive(Clone, Debug)]
 pub struct PointResult {
     pub mach: f64,
@@ -83,19 +84,23 @@ pub struct PointResult {
     /// Pressure drag of each aft segment (`body.segments` order), from the extrapolated wall Cp.
     pub cd_aft: Vec<f64>,
     pub cd_base: f64,
-    /// `cd_nose + cd_aft[0] + cd_aft[1] + .. + cd_base`.
+    /// Skin-friction drag of the body surface (`0.0` for the Euler equations).
+    pub cd_friction: f64,
+    /// `cd_nose + cd_aft[0] + cd_aft[1] + .. + cd_friction + cd_base` (`cd_friction` is 0 for the Euler equations).
     pub cd_total: f64,
     /// Base drag of the empirical free-flight correlation scaled to `pi R^2`; 0 without base, NaN for a sting-mounted base.
     pub cd_base_model: f64,
-    /// `cd_nose + cd_aft[0] + cd_aft[1] + .. + cd_base_model`.
+    /// `cd_nose + cd_aft[0] + cd_aft[1] + .. + cd_friction + cd_base_model`.
     pub cd_total_model: f64,
     /// Area-averaged base Cp (extrapolated wall values) and the first-cell variant; NaN without base.
     pub cp_base: f64,
     pub cp_base_cell: f64,
-    /// Mean and range of the area-mean base Cp over the monitor window (NaN range without enough history or without base).
+    /// Mean and range of the area-mean base Cp over the monitor window (NaN range without enough history or without base, and
+    /// for a viscous run, whose monitor is the total CD).
     pub cp_base_mean: f64,
     pub cp_base_range: f64,
-    /// Max - min of the forebody CD over the monitor window (sting wake; NaN otherwise or without enough history).
+    /// Max - min of the monitor over the monitor window when it is the forebody CD (sting wake) or the total CD (viscous run);
+    /// NaN otherwise or without enough history.
     pub cd_range: f64,
     /// Monitor samples `(iteration, value)` every `MONITOR_EVERY` iterations.
     pub monitor_history: Vec<(usize, f64)>,
@@ -108,4 +113,6 @@ pub struct PointResult {
     pub farfield_dp: f64,
     pub min_rho: f64,
     pub min_p: f64,
+    /// Largest wall distance `y+` of the first cell over the body surface (NaN for the Euler equations).
+    pub y_plus_max: f64,
 }
