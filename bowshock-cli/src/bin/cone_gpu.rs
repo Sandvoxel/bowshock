@@ -246,7 +246,7 @@ fn main() {
     let t0 = Instant::now();
     let ctx = luma::default_context().expect("open GPU");
     let ctx_seconds = t0.elapsed().as_secs_f64();
-    println!("bowshock-gpu cone validation: M = {mach}, gamma = 1.4, CFL = 0.5, MUSCL + HLLC/Rusanov blend + SSP-RK3, f32 on GPU (Luma) vs f64 CPU (bowshock-cfd)");
+    println!("bowshock-gpu cone validation: M = {mach}, gamma = 1.4, CFL = 0.5, MUSCL + HLLC/Rusanov blend + SSP-RK3, f32 on GPU (Luma) vs f64 CPU (bowshock-core)");
     println!("sync interval K = {chunk} iterations; CPU rayon threads = {}", std::thread::available_parallelism().map_or(0, |n| n.get()));
     println!("GPU context creation: {:.2} s", ctx_seconds);
     let _ = ctx;

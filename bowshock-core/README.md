@@ -116,8 +116,7 @@ Reference values, verified against independent sources:
 ## How to run
 
 ```
-cd cfd
-cargo test --release                        # 28 unit tests (incl. a ~5 s convergence regression, BC / grid / transonic smoke tests)
+cargo test --release                        # unit tests (incl. a ~5 s convergence regression, BC / grid / transonic smoke tests)
 cargo run --release --bin cone              # M=2, 10° and 15°, grids 100x50, 200x100, 400x200 (≈2 min per limiter)
 cargo run --release --bin cone -- --quick   # skip the 400x200 grid
 cargo run --release --bin cone -- --limiter vanalbada [--mach 2.5]

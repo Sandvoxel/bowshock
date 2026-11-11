@@ -36,7 +36,7 @@ fn main() {
     let body = Ogive { fineness: pj::FINENESS };
     let mut md = String::new();
     let mut drag_csv = String::from("mach,source,grid,cd_forebody,note\n");
-    println!("bowshock-cfd ogive validation: tangent ogive L/d = {}, limiter = {limiter:?}, CFL = 0.5", pj::FINENESS);
+    println!("bowshock-core ogive validation: tangent ogive L/d = {}, limiter = {limiter:?}, CFL = 0.5", pj::FINENESS);
     println!("threads (rayon): {}", rayon::current_num_threads());
 
     // ---------------- M = 1.98 against the wind-tunnel data ----------------

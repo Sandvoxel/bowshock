@@ -14,7 +14,7 @@ bowshock-reference = { path = "bowshock-reference" }
 bowshock-cases = { path = "bowshock-cases" }
 bowshock-gpu = { path = "bowshock-gpu" }
 bowshock-gpu-cases = { path = "bowshock-gpu-cases" }
-luma = { git = "https://github.com/flipnoteman/Luma.git", branch = "main" }
+luma = { git = "https://github.com/flipnoteman/Luma.git", rev = "f29290fbb7f6032e11f98335b649ed7f5d849ac3" }
 rayon = "1"
 encase = "0.13.0"
 image = { version = "0.25", default-features = false, features = ["png"] }

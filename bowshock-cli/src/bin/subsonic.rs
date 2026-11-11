@@ -131,7 +131,7 @@ fn main() {
     let out_dir: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("out").join("subsonic");
     fs::create_dir_all(&out_dir).expect("create out dir");
     let opts = Opts::parse(&args);
-    println!("bowshock-cfd subsonic: grid level {}, limiter {:?}, low-Mach {}, scheme {}", opts.level, opts.limiter, opts.low_mach, if matches!(opts.scheme, Scheme::Explicit) { "explicit SSP-RK3" } else { "line-implicit" });
+    println!("bowshock-core subsonic: grid level {}, limiter {:?}, low-Mach {}, scheme {}", opts.level, opts.limiter, opts.low_mach, if matches!(opts.scheme, Scheme::Explicit) { "explicit SSP-RK3" } else { "line-implicit" });
     println!("threads (rayon): {}", rayon::current_num_threads());
     if args.iter().any(|a| a == "--validate") {
         validate(&out_dir, &opts);

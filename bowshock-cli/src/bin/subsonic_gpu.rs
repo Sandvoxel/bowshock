@@ -181,7 +181,7 @@ fn main() {
     let t0 = Instant::now();
     let _ctx = luma::default_context().expect("open GPU");
     println!(
-        "bowshock-gpu subsonic: grid level {}, limiter {:?}, low-Mach {}, scheme {}; GPU guarded, extended precision (Luma, f32 storage) vs f64 CPU (bowshock-cfd)",
+        "bowshock-gpu subsonic: grid level {}, limiter {:?}, low-Mach {}, scheme {}; GPU guarded, extended precision (Luma, f32 storage) vs f64 CPU (bowshock-core)",
         opts.level,
         opts.limiter,
         opts.low_mach,

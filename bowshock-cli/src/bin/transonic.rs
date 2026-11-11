@@ -84,7 +84,7 @@ fn main() {
     let (ni, nj) = c0.cells();
     let lb = body.nose_length() + c0.grid.cyl_length;
     println!(
-        "bowshock-cfd transonic: body {body_name} (nose l/d {:.3}, tip half angle {:.2} deg), grid L{level} {ni}x{nj}, upstream {:.0} d / radial {:.0} d / downstream {:.0} d (body length {:.1} d), limiter {limiter:?}, scheme {}, low-Mach {low_mach}, outflow {:?}, {}",
+        "bowshock-core transonic: body {body_name} (nose l/d {:.3}, tip half angle {:.2} deg), grid L{level} {ni}x{nj}, upstream {:.0} d / radial {:.0} d / downstream {:.0} d (body length {:.1} d), limiter {limiter:?}, scheme {}, low-Mach {low_mach}, outflow {:?}, {}",
         body.nose_length(),
         body.tip_half_angle().to_degrees(),
         c0.grid.x_up,

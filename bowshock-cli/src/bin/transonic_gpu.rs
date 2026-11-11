@@ -159,7 +159,7 @@ fn main() {
     let t0 = Instant::now();
     let _ctx = luma::default_context().expect("open GPU");
     println!(
-        "bowshock-gpu transonic: body {body_name} (nose l/d {:.3}), grid L{level} {ni}x{nj} ({} cells), limiter {limiter:?}, outflow {:?}, {}; f32 on GPU (Luma, extended precision) vs f64 CPU (bowshock-cfd)",
+        "bowshock-gpu transonic: body {body_name} (nose l/d {:.3}), grid L{level} {ni}x{nj} ({} cells), limiter {limiter:?}, outflow {:?}, {}; f32 on GPU (Luma, extended precision) vs f64 CPU (bowshock-core)",
         body.nose_length(),
         ni * nj,
         c0.outflow,

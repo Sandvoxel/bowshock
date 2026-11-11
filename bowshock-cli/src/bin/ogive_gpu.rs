@@ -105,7 +105,7 @@ fn main() {
 
     let t0 = Instant::now();
     let _ctx = luma::default_context().expect("open GPU");
-    println!("bowshock-gpu ogive validation: tangent ogive L/d = {}, M = {mach}, limiter = {limiter:?}, CFL = 0.5, f32 on GPU (Luma, extended precision) vs f64 CPU (bowshock-cfd)", pj::FINENESS);
+    println!("bowshock-gpu ogive validation: tangent ogive L/d = {}, M = {mach}, limiter = {limiter:?}, CFL = 0.5, f32 on GPU (Luma, extended precision) vs f64 CPU (bowshock-core)", pj::FINENESS);
     println!("sync interval K = {chunk} iterations; CPU rayon threads = {}; GPU context creation {:.2} s", std::thread::available_parallelism().map_or(0, |n| n.get()), t0.elapsed().as_secs_f64());
 
     if args.iter().any(|a| a == "--bench-only") {

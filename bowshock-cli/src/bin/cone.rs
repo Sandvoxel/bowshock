@@ -28,7 +28,7 @@ fn main() {
         grids.push(("fine", 400, 200));
     }
 
-    println!("bowshock-cfd cone validation: M = {mach}, gamma = 1.4, limiter = {limiter:?}, CFL = 0.5, SSP-RK3 + HLLC/Rusanov shock blend");
+    println!("bowshock-core cone validation: M = {mach}, gamma = 1.4, limiter = {limiter:?}, CFL = 0.5, SSP-RK3 + HLLC/Rusanov shock blend");
     println!("threads (rayon): {}", rayon::current_num_threads());
     let mut rows = Vec::new();
     for &theta in &[10.0f64, 15.0] {
