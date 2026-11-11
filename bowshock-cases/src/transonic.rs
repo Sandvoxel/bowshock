@@ -5,282 +5,14 @@
 //! Boundary set-up: inflow plane and outer boundary `Bc::Characteristic`; outflow plane `Bc::Characteristic` (default)
 //! or `Bc::PressureOutflow`; axis/body `Bc::SlipWall`. Lengths are in body diameters.
 
-use bowshock::body_grid::{large_domain_grid, Body, LargeGridParams, Nose};
-use bowshock::result::WallPoint;
-use bowshock_core::flux::Limiter;
-use bowshock_core::gas::{cons_to_prim, freestream, sound_speed};
-use bowshock_core::solver::{Bc, Config, Scheme, Solver};
+use bowshock::body_grid::{BaseBody, Body, Nose};
+use bowshock::case::{Case, Wake};
+use bowshock::numerics::Numerics;
 
-#[derive(Clone, Debug)]
-pub struct TransonicCase {
-    pub mach: f64,
-    pub body: Body,
-    pub grid: LargeGridParams,
-    pub cfl: f64,
-    pub limiter: Limiter,
-    /// Number of first-order start-up iterations (only on a cold start).
-    pub first_order_iters: usize,
-    pub max_iter: usize,
-    /// Stop when the density residual has dropped this many orders (see `run_on` for the reference).
-    pub drop_orders: f64,
-    /// Alternative stop: the forebody CD varied by less than `cd_tol` (absolute) over the last `cd_window` iterations
-    /// and the residual has dropped at least 2 orders.
-    pub cd_window: usize,
-    pub cd_tol: f64,
-    /// Boundary condition of the outflow plane (`Bc::Characteristic` or `Bc::PressureOutflow`).
-    pub outflow: Bc,
-    /// Convergence scheme (`Scheme::Explicit` = SSP-RK3 as before).
-    pub scheme: Scheme,
-    /// Low-Mach correction of the reconstructed states (`flux::low_mach_states`).
-    pub low_mach: bool,
-}
-
-impl TransonicCase {
-    /// Default body (tangent ogive, fineness 3, cylinder to 6 d behind the nose: body length `L = 9 d`) in a domain
-    /// 10 body lengths upstream and radially, 5 body lengths downstream, grid level 0/1/2 = coarse/medium/fine.
-    pub fn level(mach: f64, level: u32) -> Self {
-        Self::with_body(mach, level, Body { nose: Nose::TangentOgive { fineness: 3.0 } }, 6.0)
-    }
-
-    pub fn with_body(mach: f64, level: u32, body: Body, cyl_length: f64) -> Self {
-        let f = 1usize << level;
-        let l_body = body.nose_length() + cyl_length;
-        let grid = LargeGridParams {
-            body,
-            cyl_length,
-            x_up: 10.0 * l_body,
-            x_down: 5.0 * l_body,
-            r_far: 10.0 * l_body,
-            n_up: 30 * f,
-            n_nose: 48 * f,
-            n_cyl: 36 * f,
-            n_ext: 30 * f,
-            nj: 70 * f,
-            dx_tip: 0.03 / f as f64,
-            dr_wall: 0.03 / f as f64,
-        };
-        TransonicCase {
-            mach,
-            body,
-            grid,
-            cfl: 0.5,
-            limiter: Limiter::Minmod,
-            first_order_iters: 300,
-            max_iter: 60_000,
-            drop_orders: 6.0,
-            cd_window: 2000,
-            cd_tol: 2e-4,
-            outflow: Bc::Characteristic,
-            scheme: Scheme::Explicit,
-            low_mach: false,
-        }
-    }
-
-    pub fn cells(&self) -> (usize, usize) {
-        let g = &self.grid;
-        (g.n_up + g.n_nose + g.n_cyl + g.n_ext, g.nj)
-    }
-
-    pub fn build_solver(&self) -> Solver {
-        let cfg = Config {
-            cfl: self.cfl,
-            limiter: self.limiter,
-            freestream: freestream(self.mach),
-            bc: [Bc::Characteristic, self.outflow, Bc::SlipWall, Bc::Characteristic],
-            first_order_iters: self.first_order_iters,
-        };
-        let mut s = Solver::new(large_domain_grid(&self.grid), cfg);
-        s.low_mach = self.low_mach;
-        s.set_scheme(self.scheme);
-        s
-    }
-}
-
-pub struct TransonicResult {
-    pub mach: f64,
-    pub iters: usize,
-    pub residual: Vec<f64>,
-    /// Largest residual after iteration 20 (cold start) / of the run (warm start).
-    pub residual_peak: f64,
-    /// Orders dropped from `residual_peak` to the last residual.
-    pub drop_orders: f64,
-    pub stop_reason: &'static str,
-    /// Forebody CD (extrapolated wall Cp) every 50 iterations: `(iteration, cd)`.
-    pub cd_history: Vec<(usize, f64)>,
-    pub wall: Vec<WallPoint>,
-    /// Forebody pressure-drag coefficient, base-area reference, extrapolated-wall / first-cell Cp.
-    pub cd_nose: f64,
-    pub cd_nose_cell: f64,
-    /// Max - min of the forebody CD over the last `cd_window` iterations (unsteadiness / convergence of the integral).
-    pub cd_range: f64,
-    /// Minimum wall Cp over the body and its position; maximum wall-cell Mach number.
-    pub cp_min: f64,
-    pub x_cp_min: f64,
-    pub m_wall_max: f64,
-    /// Max `|p/p_inf - 1|` over the boundary cells of the inflow, outer and outflow boundaries (domain-size indicator).
-    pub farfield_dp: f64,
-    pub min_rho: f64,
-    pub min_p: f64,
-}
-
-/// Cold-start run (fresh solver).
-pub fn run_transonic(case: &TransonicCase) -> TransonicResult {
-    let mut s = case.build_solver();
-    run_on(case, &mut s, false, None)
-}
-
-/// Forebody drag coefficient from the current state: `(extrapolated wall Cp, first-cell Cp)` integrals of `Cp d(r^2/R^2)`
-/// over the nose, plus the wall points of the whole body.
-pub fn wall_distribution(body: &Body, s: &Solver) -> (Vec<WallPoint>, f64, f64) {
-    let g = &s.grid;
-    let ni = g.ni;
-    let fs = s.cfg.freestream;
-    let (p_inf, q_inf) = (fs[3], 0.5 * fs[0] * fs[1] * fs[1]);
-    let cp = |p: f64| (p - p_inf) / q_inf;
-    let (ln, rb2) = (body.nose_length(), body.radius().powi(2));
-    let mut wall = Vec::new();
-    let (mut cd, mut cd_cell) = (0.0, 0.0);
-    for i in 0..ni {
-        let (n0, n1) = (g.node(i, 0), g.node(i + 1, 0));
-        let (xm, rm) = (0.5 * (n0.0 + n1.0), 0.5 * (n0.1 + n1.1));
-        if xm <= 0.0 {
-            continue;
-        }
-        let (p0, p1) = (s.pressure(i, 0), s.pressure(i, 1));
-        let d0 = (g.xc[i] - xm).hypot(g.rc[i] - rm);
-        let d1 = (g.xc[ni + i] - xm).hypot(g.rc[ni + i] - rm);
-        let pw = p0 + (p0 - p1) * d0 / (d1 - d0);
-        let (s0, s1) = (n0.1 * n0.1 / rb2, n1.1 * n1.1 / rb2);
-        if n1.0 <= ln + 1e-12 {
-            cd += cp(pw) * (s1 - s0);
-            cd_cell += cp(p0) * (s1 - s0);
-        }
-        wall.push(WallPoint { x: xm, r: rm, s0, s1, cp: cp(pw), cp_cell: cp(p0) });
-    }
-    (wall, cd, cd_cell)
-}
-
-/// Iterate `s` (already built from `case`, or reused from a previous Mach number if `warm`) to convergence.
-///
-/// * `warm`: keep the converged field of the previous run; only the free stream (far-field state) is changed to
-///   `case.mach`. No first-order start-up phase.
-/// * `r_ref`: reference residual for the drop criterion. `None` = peak residual of this run (after iteration 20);
-///   in a warm-started sweep pass the peak of the cold-start run so that every Mach number has to reach the same absolute
-///   residual level (the warm-start residual peak itself is much smaller).
-pub fn run_on(case: &TransonicCase, s: &mut Solver, warm: bool, r_ref: Option<f64>) -> TransonicResult {
-    s.cfg.freestream = freestream(case.mach);
-    s.cfg.cfl = case.cfl;
-    s.cfg.limiter = case.limiter;
-    s.cfg.first_order_iters = case.first_order_iters;
-    s.iter = if warm { case.first_order_iters } else { 0 };
-    s.low_mach = case.low_mach;
-    s.restart_ramp();
-
-    let mut residual = Vec::new();
-    let mut cd_hist: Vec<(usize, f64)> = Vec::new();
-    let mut rmax: f64 = 0.0;
-    let mut reason = "max iterations";
-    let skip = if warm { 0 } else { 20 };
-    for it in 0..case.max_iter {
-        let r = s.step();
-        residual.push(r);
-        if it >= skip {
-            rmax = rmax.max(r);
-        }
-        if it % 50 == 49 {
-            cd_hist.push((it + 1, wall_distribution(&case.body, s).1));
-        }
-        if let Some(rs) = stop_reason(case, it, r, r_ref.unwrap_or(rmax), skip, &cd_hist) {
-            reason = rs;
-            break;
-        }
-    }
-    finish(case, s, residual, rmax, cd_hist, reason)
-}
-
-/// Stopping rule, called after iteration `it` (0-based) with its density residual `r`, the drop reference
-/// `reference` (`r_ref`, or the running peak `rmax` of this run), the peak-tracking offset `skip` (20 cold / 0 warm) and the CD samples taken so far (one per 50
-/// iterations, already including iteration `it` if `it % 50 == 49`). In this order: non-finite residual; residual drop of
-/// `drop_orders` below `reference`; every 500 iterations (once `it + 1 >= 2 cd_window`) a CD range over the last `cd_window`
-/// iterations below `cd_tol` provided the residual has dropped at least 2 orders ("CD stationary").
-pub fn stop_reason(case: &TransonicCase, it: usize, r: f64, reference: f64, skip: usize, cd_hist: &[(usize, f64)]) -> Option<&'static str> {
-    // `reference` is r_ref, or the running peak of this run when no reference was given
-    if !r.is_finite() {
-        return Some("non-finite residual");
-    }
-    if it > skip && reference / r >= 10f64.powf(case.drop_orders) {
-        return Some("residual drop reached");
-    }
-    if it % 500 == 499 && it + 1 >= 2 * case.cd_window && reference / r >= 100.0 {
-        let n = case.cd_window / 50;
-        let tail = &cd_hist[cd_hist.len() - n..];
-        let (lo, hi) = tail.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), c| (l.min(c.1), h.max(c.1)));
-        if hi - lo < case.cd_tol {
-            return Some("CD stationary");
-        }
-    }
-    None
-}
-
-/// Post-process the state held in `s` (`s.u`, `s.grid`, `s.cfg.freestream`) into a [`TransonicResult`]: wall Cp / forebody CD,
-/// Cp minimum, wall Mach number, far-field indicator. `residual` is the full density-residual history, `rmax` its reference
-/// peak, `cd_hist` the CD samples. Usable on a host `Solver` whose `u` was overwritten with another solver's (GPU) state.
-pub fn finish(case: &TransonicCase, s: &Solver, residual: Vec<f64>, rmax: f64, cd_hist: Vec<(usize, f64)>, reason: &'static str) -> TransonicResult {
-    let (wall, cd_nose, cd_nose_cell) = wall_distribution(&case.body, s);
-    let last = residual.last().copied().unwrap_or(rmax);
-    let nwin = (case.cd_window / 50).min(cd_hist.len());
-    let cd_range = if nwin >= 2 {
-        let (lo, hi) = cd_hist[cd_hist.len() - nwin..].iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), c| (l.min(c.1), h.max(c.1)));
-        hi - lo
-    } else {
-        f64::NAN
-    };
-    let drop_orders = if rmax > 0.0 && last > 0.0 { (rmax / last).log10() } else { 0.0 };
-
-    let (cp_min, x_cp_min) = wall.iter().fold((f64::INFINITY, 0.0), |(m, xm), w| if w.cp < m { (w.cp, w.x) } else { (m, xm) });
-    let ni = s.grid.ni;
-    let mut m_wall_max: f64 = 0.0;
-    for i in 0..ni {
-        if s.grid.xc[i] > 0.0 {
-            let w = cons_to_prim(&s.u[i]);
-            m_wall_max = m_wall_max.max(w[1].hypot(w[2]) / sound_speed(&w));
-        }
-    }
-    let nj = s.grid.nj;
-    let p_inf = s.cfg.freestream[3];
-    let dev = |i: usize, j: usize| (s.pressure(i, j) / p_inf - 1.0).abs();
-    let mut farfield_dp: f64 = 0.0;
-    for i in 0..ni {
-        farfield_dp = farfield_dp.max(dev(i, nj - 1));
-    }
-    for j in 0..nj {
-        farfield_dp = farfield_dp.max(dev(0, j)).max(dev(ni - 1, j));
-    }
-    let (mut min_rho, mut min_p) = (f64::INFINITY, f64::INFINITY);
-    for q in &s.u {
-        let w = cons_to_prim(q);
-        min_rho = min_rho.min(w[0]);
-        min_p = min_p.min(w[3]);
-    }
-    TransonicResult {
-        mach: case.mach,
-        iters: residual.len(),
-        residual,
-        residual_peak: rmax,
-        drop_orders,
-        stop_reason: reason,
-        cd_history: cd_hist,
-        wall,
-        cd_nose,
-        cd_nose_cell,
-        cd_range,
-        cp_min,
-        x_cp_min,
-        m_wall_max,
-        farfield_dp,
-        min_rho,
-        min_p,
-    }
+/// Transonic validation case: nose + cylinder `cyl_length` long, sting wake (no base), explicit minmod numerics
+/// ([`Numerics::transonic`]); domain 10 body lengths upstream and radially, 5 downstream.
+pub fn transonic_case(mach: f64, level: u32, body: Body, cyl_length: f64) -> Case {
+    Case::new(mach, BaseBody { body, cyl_length, boat_length: 0.0, boat_angle: 0.0, sting_radius: 0.0 }, level, Wake::Sting, Numerics::transonic())
 }
 
 /// Published free-flight nose pressure-drag data, zero lift, fineness-ratio-3 noses on a cylinder.
@@ -449,8 +181,11 @@ pub mod czarnecki_monta {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bowshock_core::gas::prim_to_cons;
+    use bowshock::run::run_cold;
+    use bowshock_core::flux::Limiter;
+    use bowshock_core::gas::{cons_to_prim, freestream, prim_to_cons};
     use bowshock_core::grid::Grid;
+    use bowshock_core::solver::{Bc, Config, Solver};
 
     /// Smoothly curved, non-uniform grid with the lower boundary on the axis r=0.
     fn curved_grid(ni: usize, nj: usize) -> Grid {
@@ -544,18 +279,18 @@ mod tests {
     #[test]
     fn transonic_smoke_coarse_m09() {
         let cone = Body { nose: Nose::cone_fineness(3.0) };
-        let mut case = TransonicCase::with_body(0.9, 0, cone, 6.0);
+        let mut case = transonic_case(0.9, 0, cone, 6.0);
         // shrink to keep the test quick
-        case.grid.n_up = 16;
-        case.grid.n_nose = 32;
-        case.grid.n_cyl = 16;
-        case.grid.n_ext = 14;
-        case.grid.nj = 40;
-        case.grid.dx_tip = 0.04;
-        case.grid.dr_wall = 0.04;
-        case.max_iter = 1500;
-        case.first_order_iters = 150;
-        let res = run_transonic(&case);
+        case.grid_sting.n_up = 16;
+        case.grid_sting.n_nose = 32;
+        case.grid_sting.n_cyl = 16;
+        case.grid_sting.n_ext = 14;
+        case.grid_sting.nj = 40;
+        case.grid_sting.dx_tip = 0.04;
+        case.grid_sting.dr_wall = 0.04;
+        case.numerics.max_iter = 1500;
+        case.numerics.first_order_iters = 150;
+        let res = run_cold(&case);
         assert!(res.residual.iter().all(|r| r.is_finite()), "non-finite residual");
         assert!(res.min_rho > 0.0 && res.min_p > 0.0);
         assert!(res.drop_orders > 1.0, "residual dropped only {:.2} orders", res.drop_orders);

@@ -4,4 +4,3 @@ pub mod cone;
 pub mod ogive;
 pub mod run;
 pub mod subsonic;
-pub mod transonic;

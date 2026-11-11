@@ -19,7 +19,7 @@ bowshock-gpu-cases/
   src/cone.rs           cone runners (CPU loop, GPU loop with identical stopping criteria), post-processing, comparison metrics
   src/run.rs            case-independent CPU / GPU iteration loops (`Monitor` = the stopping criteria), GPU-vs-CPU field difference
   src/ogive.rs          ogive-cylinder runners, wall post-processing (CD, Cp), comparison metrics
-  src/transonic.rs      `GpuTransonic`: GPU run of `bowshock_cases::transonic::TransonicCase` (cold / warm-started Mach sweeps, same stop rules and post-processing as the CPU `run_on`; scheme + low-Mach from the case)
+  (`bowshock::gpu::GpuRunner`, `bowshock/src/gpu.rs`: GPU run of a `bowshock::case::Case`; cold / warm-started Mach sweeps, same stop rules and post-processing as the CPU `bowshock::run::run_on`)
   src/subsonic.rs       `GpuSubsonic`: GPU run of `bowshock_cases::subsonic::SubsonicCase` (base on/off, drag breakdown, base-pressure history; same stop rules and post-processing as the CPU `run_on`)
 bowshock-cli/
   src/bin/cone_gpu.rs   validation + benchmark driver (writes out/gpu/*.csv)
@@ -370,8 +370,8 @@ GPU-guarded 0.50 / 0.50 / 1.96 s. GPU setup (kernel build + upload) ≤ 18 ms, f
 Case, grid and stopping rules are those of `bowshock_cases::transonic` (nose-cylinder body of the CPU `transonic` bin, default `cone`, nose fineness 3 + 6 d cylinder, domain 10 body lengths upstream / radially and 5 downstream, level 0 / 1 / 2 = 144×70 / 288×140 / 576×280 cells,
 `Bc::Characteristic` on inflow plane, outer boundary and outflow plane, `SlipWall` on axis and body, minmod, CFL 0.5, 300 first-order iterations on a cold start; stop at 6 orders of residual drop or, from iteration 4000 on, when the CD (sampled every 50 iterations) varies by < 2e-4 over 2000 iterations after ≥ 2 orders).
 **GPU side:** the far-field BCs (`Bc::Characteristic`, `Bc::PressureOutflow`) are ghost-state functions of the first interior cell and the outward normal (WGSL `characteristic_ghost`, `pressure_outflow_ghost`, f32 and df); the solver itself is unchanged.
-`transonic::GpuTransonic::run_on` is the counterpart of `bowshock_cases::transonic::run_on` (same arguments, cold start or warm start from the previous Mach number with the cold-start residual peak as reference; the free stream is switched with `GpuSolver::config_mut` without touching the state): it records 50 iterations,
-reads the residual history and the state, evaluates the CD sample with `wall_distribution`, applies `transonic::stop_reason` per iteration and finishes with `transonic::finish`, i.e. the CPU's own stop rules and post-processing. Sweep: M = 0.7, 0.8, 0.85, 0.9, 0.95, 0.98, 1.0, 1.02, 1.05, 1.1, 1.2, 1.5, cold start for each (`--warm` for a warm-started sweep).
+`bowshock::gpu::GpuRunner::run_on` is the counterpart of `bowshock::run::run_on` (same arguments, cold start or warm start from the previous Mach number with the cold-start residual peak as reference; the free stream is switched with `GpuSolver::config_mut` without touching the state): it records 50 iterations,
+reads the residual history and the state, evaluates the CD sample with `run::wall_distribution`, applies `run::stop_reason` per iteration and finishes with `run::finish`, i.e. the CPU's own stop rules and post-processing. Sweep: M = 0.7, 0.8, 0.85, 0.9, 0.95, 0.98, 1.0, 1.02, 1.05, 1.1, 1.2, 1.5, cold start for each (`--warm` for a warm-started sweep).
 Output: `out/gpu_transonic/` (`sweep_<tag>.csv`, `cp_<tag>_M<m>.csv`, `residual_*.csv`, `cd_history_*.csv`, `steady_<tag>.csv`).
 
 ### Accuracy: forebody CD vs Mach, GPU (guarded, extended) vs CPU (f64) — cone-cylinder, level 1 (288×140)
@@ -568,9 +568,9 @@ The product floor × CFL is roughly constant (4 – 6e-5 at 100×50, 1.0 – 1.5
    and M = 1.3: the CPU keeps it to 2e-16; the GPU (both formulations, `F32` and `Extended`) keeps it to 8.6e-8 / 6.6e-8 (extended) and 4.0e-7 / 9.4e-8 (f32) — the f32 geometry rounding, no growth, no spurious waves from the BC.
 8. `characteristic_far_field_matches_cpu_on_a_perturbed_state`: the same box with a smooth density / pressure / transverse-velocity perturbation of the free stream (so that the Riemann, free-stream and extrapolation branches and the pressure outflow
    are all hit), 20 iterations, M = 0.9 and 1.3 × outflow `Characteristic` and `PressureOutflow` × `Direct`/`Guarded` × `F32`/`Extended`: state ≤ 5.2e-8 (extended) / 1.1e-6 (f32), residual history ≤ 6.3e-8 / 8.9e-7 relative.
-9. `transonic_state_after_20_iterations_matches_cpu`: the transonic case (`TransonicCase::level(0.9, 0)`, ogive-cylinder in the large domain, 144×70, characteristic far field), 20 iterations, both formulations, f32 / extended:
+9. `transonic_state_after_20_iterations_matches_cpu`: the transonic case (`transonic_case(0.9, 0, ..)`, ogive-cylinder in the large domain, 144×70, characteristic far field), 20 iterations, both formulations, f32 / extended:
    state ≤ 1.1e-7 (extended, asserted < 3e-7) / 8.0e-7 (f32), residual history ≤ 1.7e-7 (asserted < 5e-7) / 8.6e-7.
-10. `transonic_run_and_warm_start_match_cpu`: `GpuTransonic::run_on` vs `bowshock_cases::transonic::run_on` with the same arguments, 200 iterations at M = 0.9 (cold start) and then 200 iterations at M = 0.95 warm-started from that field
+10. `transonic_run_and_warm_start_match_cpu`: `GpuRunner::run_on` vs `bowshock::run::run_on` with the same arguments, 200 iterations at M = 0.9 (cold start) and then 200 iterations at M = 0.95 warm-started from that field
     (`r_ref` = cold-start peak): residual history ≤ 3.2e-7 / 2.4e-6 relative, forebody CD relative difference −1.2e-7 / +1.6e-7, max |ΔCp| ≤ 2.7e-7, CD-history samples ≤ 6.5e-8 (asserted < 1e-4 / 1e-5 / 1e-5 / 1e-6).
 
 ## Luma friction / feedback
@@ -636,8 +636,8 @@ builtin (renamed `reflect_wall`); `workgroupBarrier()` must be in uniform contro
 * The implicit scheme exists in the guarded formulation only (`set_scheme` / `set_block` return an error for `Mode::Direct`). Its left-hand side is assembled in f32 and the 4x4 blocks are inverted without pivoting (the pivot blocks `I - dt J` are diagonally dominant); the CPU uses f64 and pivoted
   Gauss-Jordan. Both converge to the same fixed point; the iterates differ at the 1e-7 level and a nonlinear transient (shock formation, base-flow unsteadiness) amplifies that, so the GPU / CPU residual histories of the *unsteady* base-flow runs and of long transonic transients agree only until
   the residual has dropped 3 – 4 orders (tests compare the short transients and the converged states).
-* `ogive.rs` / `transonic.rs` / `run.rs`: the CPU runs use the public `Solver::step` / `transonic::run_on` stopping rules (`run::Monitor` = `run_ogive`'s criteria; the transonic GPU loop calls
-  `bowshock_cases::transonic::stop_reason`, the very function `run_on` uses, and `finish` for the post-processing, so both sides stop and post-process identically); the ogive wall post-processing is a copy of the private
-  `bowshock_cases::ogive::postprocess`. The transonic GPU loop samples the forebody CD every 50 iterations and therefore synchronises every `transonic::SYNC` = 50 iterations (the CPU's sampling interval).
+* `ogive.rs` / `run.rs`: the CPU runs use the public `Solver::step` / `bowshock::run::run_on` stopping rules (`run::Monitor` = `run_ogive`'s criteria; the transonic GPU loop calls
+  `bowshock::run::stop_reason`, the very function `run_on` uses, and `finish` for the post-processing, so both sides stop and post-process identically); the ogive wall post-processing is a copy of the private
+  `bowshock_cases::ogive::postprocess`. The transonic GPU loop samples the forebody CD every 50 iterations and therefore synchronises every `bowshock::gpu::SYNC` = 50 iterations (the CPU's sampling interval).
 * The characteristic far-field ghost state is evaluated with the integer power `rho = rho_ref (c_b / c_ref)^5` instead of the CPU's `powf` form (identical mathematically for gamma = 1.4,
   asserted when the shaders are generated: `shaders::characteristic_exponent`); the difference is ~1e-16 relative in the df evaluation.

@@ -11,12 +11,15 @@
 //! the GPU with the same procedure and stopping rules. The GPU synchronises every 50 iterations (the CD sampling interval).
 //! Output: `out/gpu_transonic/`.
 
-use bowshock_cases::transonic::{named_body, run_on, stoney, tangent_cone_cd, TransonicCase, TransonicResult};
+use bowshock::case::Case;
+use bowshock::gpu::{GpuRun, GpuRunner, SYNC};
+use bowshock::result::PointResult;
+use bowshock::run::run_on;
+use bowshock_cases::transonic::{named_body, stoney, tangent_cone_cd, transonic_case};
 use bowshock_core::flux::Limiter;
 use bowshock_core::implicit::ImplicitParams;
 use bowshock_core::solver::{Bc, Scheme};
 use bowshock_gpu::{Mode, Precision};
-use bowshock_gpu_cases::transonic::{GpuTransonic, GpuTransonicRun, SYNC};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -30,9 +33,9 @@ fn arg<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
 
 struct Row {
     mach: f64,
-    cpu: TransonicResult,
+    cpu: PointResult,
     cpu_s: f64,
-    gpu: GpuTransonicRun,
+    gpu: GpuRun,
     /// max over wall faces of |Cp_gpu - Cp_cpu|.
     max_dcp: f64,
     stoney: Option<f64>,
@@ -55,9 +58,9 @@ fn write_case_files(dir: &Path, tag: &str, r: &Row) {
     }
     let mut f = fs::File::create(dir.join(format!("cd_history_{tag}_M{}.csv", r.mach))).unwrap();
     writeln!(f, "iter,cd_gpu,cd_cpu").unwrap();
-    for i in 0..r.gpu.result.cd_history.len().max(r.cpu.cd_history.len()) {
-        let g = r.gpu.result.cd_history.get(i).map_or(String::new(), |v| format!("{:.8}", v.1));
-        let c = r.cpu.cd_history.get(i).map_or(String::new(), |v| format!("{:.8}", v.1));
+    for i in 0..r.gpu.result.monitor_history.len().max(r.cpu.monitor_history.len()) {
+        let g = r.gpu.result.monitor_history.get(i).map_or(String::new(), |v| format!("{:.8}", v.1));
+        let c = r.cpu.monitor_history.get(i).map_or(String::new(), |v| format!("{:.8}", v.1));
         writeln!(f, "{},{g},{c}", 50 * (i + 1)).unwrap();
     }
 }
@@ -65,11 +68,11 @@ fn write_case_files(dir: &Path, tag: &str, r: &Row) {
 /// Steady per-iteration cost on the case grid at `case.mach`: 1000 iterations from the free stream (MUSCL from the first
 /// iteration), best of 3, GPU with history kernels and a sync every `SYNC` iterations.
 /// Returns `(cpu_us, guarded_ext_us, direct_ext_us, guarded_f32_us)`.
-fn perf(case: &TransonicCase) -> (f64, f64, f64, f64) {
+fn perf(case: &Case) -> (f64, f64, f64, f64) {
     let n = 1000usize;
-    let implicit = matches!(case.scheme, Scheme::Implicit(_));
+    let implicit = matches!(case.numerics.scheme, Scheme::Implicit(_));
     let mut case = case.clone();
-    case.first_order_iters = 0;
+    case.numerics.first_order_iters = 0;
     let mut best_cpu = f64::INFINITY;
     for _ in 0..3 {
         let mut s = case.build_solver();
@@ -89,7 +92,7 @@ fn perf(case: &TransonicCase) -> (f64, f64, f64, f64) {
         if implicit && mode == Mode::Direct {
             continue; // the line-implicit scheme exists in the guarded formulation only
         }
-        let mut gt = GpuTransonic::new(&case, mode, prec).unwrap();
+        let mut gt = GpuRunner::new(&case, mode, prec).unwrap();
         gt.gpu.run(1).unwrap();
         let mut best = f64::INFINITY;
         for _ in 0..3 {
@@ -134,26 +137,26 @@ fn main() {
 
     let make_case = |m: f64| {
         let cyl = 6.0;
-        let mut c = TransonicCase::with_body(m, level, body, cyl);
-        c.limiter = limiter;
-        c.low_mach = low_mach;
+        let mut c = transonic_case(m, level, body, cyl);
+        c.numerics.limiter = limiter;
+        c.numerics.low_mach = low_mach;
         if implicit {
-            c.scheme = Scheme::Implicit(ImplicitParams::DEFAULT);
-            c.first_order_iters = 100;
+            c.numerics.scheme = Scheme::Implicit(ImplicitParams::DEFAULT);
+            c.numerics.first_order_iters = 100;
         }
         if let Some(v) = arg(&args, "--max-iter").and_then(|v| v.parse().ok()) {
-            c.max_iter = v;
+            c.numerics.max_iter = v;
         }
         if let Some(v) = arg(&args, "--drop").and_then(|v| v.parse().ok()) {
-            c.drop_orders = v;
+            c.numerics.drop_orders = v;
         }
         if arg(&args, "--outflow") == Some("pressure") {
-            c.outflow = Bc::PressureOutflow;
+            c.numerics.outflow = Bc::PressureOutflow;
         }
         if let Some(d) = arg(&args, "--domain").and_then(|v| v.parse::<f64>().ok()) {
             let lb = body.nose_length() + cyl;
-            c.grid.x_up = d * lb;
-            c.grid.r_far = d * lb;
+            c.grid_sting.x_up = d * lb;
+            c.grid_sting.r_far = d * lb;
         }
         c
     };
@@ -166,7 +169,7 @@ fn main() {
         "bowshock-gpu transonic: body {body_name} (nose l/d {:.3}), grid L{level} {ni}x{nj} ({} cells), limiter {limiter:?}, outflow {:?}, {}; f32 on GPU (Luma, extended precision) vs f64 CPU (bowshock-core)",
         body.nose_length(),
         ni * nj,
-        c0.outflow,
+        c0.numerics.outflow,
         if warm { "warm-start sweep" } else { "cold start for every Mach" }
     );
     println!(
@@ -186,7 +189,7 @@ fn main() {
 
     let mut rows: Vec<Row> = Vec::new();
     let mut cpu_solver = c0.build_solver();
-    let mut gt = GpuTransonic::new(&c0, Mode::Guarded, Precision::Extended).expect("GPU solver");
+    let mut gt = GpuRunner::new(&c0, Mode::Guarded, Precision::Extended).expect("GPU solver");
     println!("GPU setup (kernel build + upload): {:.3} s", gt.setup_seconds);
     let (mut r_ref_cpu, mut r_ref_gpu): (Option<f64>, Option<f64>) = (None, None);
     for (k, &m) in machs.iter().enumerate() {

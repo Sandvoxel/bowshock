@@ -1,16 +1,25 @@
 //! GPU (f32, WGSL via Luma) vs CPU (f64, bowshock-core) on the same inputs.
 
+use bowshock::body_grid::Body;
+use bowshock::case::Case;
+use bowshock::gpu::{GpuRun, GpuRunner};
+use bowshock::result::PointResult;
+use bowshock::run::run_on;
 use bowshock_cases::cone::{build_solver, ConeCase};
 use bowshock_cases::ogive::OgiveCase;
-use bowshock_cases::transonic::{self, TransonicCase};
+use bowshock_cases::transonic::transonic_case;
 use bowshock_core::flux::{face_flux, hllc, reconstruct, Limiter};
 use bowshock_core::gas::{cons_to_prim, freestream, prim_to_cons, Prim};
 use bowshock_core::grid::Grid;
 use bowshock_core::solver::{Bc, Config, Solver};
 use bowshock_gpu::{eval_faces, eval_faces_ext, GpuSolver, Mode, Precision};
 use bowshock_gpu_cases::ogive;
-use bowshock_gpu_cases::transonic::GpuTransonic;
 use bowshock_reference::taylor_maccoll::solve_cone;
+
+/// Default transonic case: tangent ogive of fineness 3 plus a 6 d cylinder, grid level 0.
+fn transonic_level(mach: f64) -> Case {
+    transonic_case(mach, 0, Body { nose: bowshock::body_grid::Nose::TangentOgive { fineness: 3.0 } }, 6.0)
+}
 
 /// xorshift64* uniform in [0, 1).
 struct Rng(u64);
@@ -418,8 +427,8 @@ fn characteristic_far_field_matches_cpu_on_a_perturbed_state() {
 #[test]
 fn transonic_state_after_20_iterations_matches_cpu() {
     let ctx = luma::default_context().unwrap();
-    let mut case = TransonicCase::level(0.9, 0);
-    case.first_order_iters = 5;
+    let mut case = transonic_level(0.9);
+    case.numerics.first_order_iters = 5;
     let mut cpu = case.build_solver();
     let res_cpu: Vec<f64> = (0..20).map(|_| cpu.step()).collect();
     for (mode, prec) in [Mode::Direct, Mode::Guarded].into_iter().flat_map(|m| [Precision::F32, Precision::Extended].into_iter().map(move |p| (m, p))) {
@@ -441,26 +450,26 @@ fn transonic_state_after_20_iterations_matches_cpu() {
 /// arguments, 200 iterations each): residual history, forebody CD and wall Cp vs CPU.
 #[test]
 fn transonic_run_and_warm_start_match_cpu() {
-    let mut case = TransonicCase::level(0.9, 0);
-    case.max_iter = 200;
-    case.first_order_iters = 20;
+    let mut case = transonic_level(0.9);
+    case.numerics.max_iter = 200;
+    case.numerics.first_order_iters = 20;
     let mut s = case.build_solver();
-    let cpu0 = transonic::run_on(&case, &mut s, false, None);
-    let mut gt = GpuTransonic::new(&case, Mode::Guarded, Precision::Extended).unwrap();
+    let cpu0 = run_on(&case, &mut s, false, None);
+    let mut gt = GpuRunner::new(&case, Mode::Guarded, Precision::Extended).unwrap();
     let gpu0 = gt.run_on(&case, false, None).unwrap();
-    let check = |tag: &str, cpu: &transonic::TransonicResult, gpu: &bowshock_gpu_cases::transonic::GpuTransonicRun| {
+    let check = |tag: &str, cpu: &PointResult, gpu: &GpuRun| {
         let g = &gpu.result;
         assert_eq!((g.iters, gpu.iters_exec), (cpu.iters, cpu.iters), "{tag}: iteration counts");
         let res = g.residual.iter().zip(&cpu.residual).fold(0.0f64, |m, (a, b)| m.max((a - b).abs() / b));
         let dcp = g.wall.iter().zip(&cpu.wall).fold(0.0f64, |m, (a, b)| m.max((a.cp - b.cp).abs()));
         let cd_rel = (g.cd_nose - cpu.cd_nose) / cpu.cd_nose;
-        let dcd_hist = g.cd_history.iter().zip(&cpu.cd_history).fold(0.0f64, |m, (a, b)| m.max((a.1 - b.1).abs()));
+        let dcd_hist = g.monitor_history.iter().zip(&cpu.monitor_history).fold(0.0f64, |m, (a, b)| m.max((a.1 - b.1).abs()));
         println!("{tag}: CD gpu {:.6} cpu {:.6} (rel {cd_rel:+.2e}), max |dCp| {dcp:.2e}, max rel residual diff {res:.2e}, max |dCD history| {dcd_hist:.2e}, farfield dp {:.2e} / {:.2e}", g.cd_nose, cpu.cd_nose, g.farfield_dp, cpu.farfield_dp);
         assert!(res < 1e-4 && dcp < 1e-5 && cd_rel.abs() < 1e-5 && dcd_hist < 1e-6, "{tag}: GPU differs from CPU");
     };
     check("M = 0.9 cold start", &cpu0, &gpu0);
     case.mach = 0.95;
-    let cpu1 = transonic::run_on(&case, &mut s, true, Some(cpu0.residual_peak));
+    let cpu1 = run_on(&case, &mut s, true, Some(cpu0.residual_peak));
     let gpu1 = gt.run_on(&case, true, Some(gpu0.result.residual_peak)).unwrap();
     check("M = 0.95 warm start", &cpu1, &gpu1);
 }
@@ -670,18 +679,18 @@ fn implicit_scheme_converged_state_matches_cpu() {
 /// residual that has dropped 4 orders: the converged states, not the transients, are compared in `implicit_scheme_converged_state_matches_cpu`.)
 #[test]
 fn implicit_transonic_warm_start_matches_cpu() {
-    let mut case = TransonicCase::level(0.8, 0);
-    case.limiter = Limiter::VanAlbada;
-    case.scheme = Scheme::Implicit(bowshock_core::implicit::ImplicitParams::DEFAULT);
-    case.first_order_iters = 100;
-    case.max_iter = 150;
+    let mut case = transonic_level(0.8);
+    case.numerics.limiter = Limiter::VanAlbada;
+    case.numerics.scheme = Scheme::Implicit(bowshock_core::implicit::ImplicitParams::DEFAULT);
+    case.numerics.first_order_iters = 100;
+    case.numerics.max_iter = 150;
     let mut s = case.build_solver();
-    let cpu0 = transonic::run_on(&case, &mut s, false, None);
-    let mut gt = GpuTransonic::new(&case, Mode::Guarded, Precision::Extended).unwrap();
+    let cpu0 = run_on(&case, &mut s, false, None);
+    let mut gt = GpuRunner::new(&case, Mode::Guarded, Precision::Extended).unwrap();
     let gpu0 = gt.run_on(&case, false, None).unwrap();
     case.mach = 0.81;
-    case.max_iter = 40; // the warm start from the unconverged field is a violent transient: compare its first iterations only
-    let cpu1 = transonic::run_on(&case, &mut s, true, Some(cpu0.residual_peak));
+    case.numerics.max_iter = 40; // the warm start from the unconverged field is a violent transient: compare its first iterations only
+    let cpu1 = run_on(&case, &mut s, true, Some(cpu0.residual_peak));
     let gpu1 = gt.run_on(&case, true, Some(gpu0.result.residual_peak)).unwrap();
     for (tag, cpu, gpu, tol_res) in [("M = 0.8 cold", &cpu0, &gpu0, 1e-3), ("M = 0.81 warm", &cpu1, &gpu1, 5e-2)] {
         let g = &gpu.result;

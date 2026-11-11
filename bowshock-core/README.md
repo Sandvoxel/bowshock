@@ -20,7 +20,7 @@ bowshock/
   bowshock-cases/src/cone.rs        cone case set-up and post-processing
   bowshock-cases/src/ogive.rs       ogive-cylinder grid, case runner, wall post-processing, Perkins-Jorgensen data
   bowshock-cases/src/body_grid.rs   large-domain stretched grid for nose-cylinder bodies (ogive, cone, power/parabolic/Haack noses)
-  bowshock-cases/src/transonic.rs   transonic case runner, post-processing, Stoney (RM L53K17) and Czarnecki-Monta (TN D-3516) data
+  bowshock-cases/src/transonic.rs   `transonic_case`, Stoney (RM L53K17) and Czarnecki-Monta (TN D-3516) data
   bowshock-cases/src/subsonic.rs    subsonic case runner (sting / flat base + wake), drag breakdown, NASA TM X-2439 data
   bowshock-cases/examples/diag.rs   convergence diagnostics (per-cell residual map -> out/diag/)
   bowshock-cli/src/bin/cone.rs      validation driver
@@ -376,7 +376,7 @@ for 16 normals × 7 Mach numbers, uniform flow preserved to < 1e-12 for 100 RK3 
 ### Large-domain grid (`body_grid::large_domain_grid`)
 
 H-grid like the existing ones (vertical lines, axis for `x < 0`, flat outer boundary `r = r_far`), `d = 1`, tip at the origin. Bodies: `Nose::{TangentOgive, Cone, Power, Parabolic, Haack}` on a cylinder.
-Default domain (`TransonicCase::with_body`, body length `L = L_nose + 6 d = 9 d`): inflow plane and outer boundary **10 L = 90 d** away, outflow plane 5 L = 45 d behind the shoulder
+Default domain (`transonic_case`, body length `L = L_nose + 6 d = 9 d`): inflow plane and outer boundary **10 L = 90 d** away, outflow plane 5 L = 45 d behind the shoulder
 (`--domain n` rescales the 10 L). x spacing: geometric growth upstream of the tip, `tanh` clustering on the nose at the tip **and** the shoulder with end cell `dx_tip`
 (0.03/0.015/0.0075 d for grid level 0/1/2), geometric growth along the cylinder and on the extension. r spacing: geometric from the wall (`dr_wall` = 0.03/0.015/0.0075 d).
 Levels 0/1/2 = 144×70 / 288×140 / 576×280 cells.
@@ -385,7 +385,7 @@ Levels 0/1/2 = 144×70 / 288×140 / 576×280 cells.
 exercised by the characteristic BC. The forebody CD is reported referenced to the base area, `CD = ∫₀¹ Cp d(r²/R²)` over the nose (extrapolated-wall Cp; the first-cell variant is also in the CSV).
 Limitation: MUSCL slopes are limited in index space (they ignore the stretching); growth ratios are 1.08 / 1.04 / 1.02 radially and 1.25 / 1.12 / 1.06 upstream of the tip for levels 0/1/2.
 
-### Case runner and convergence (`transonic::run_on`, `stop_reason`)
+### Case runner and convergence (`bowshock::run::run_on`, `stop_reason`)
 
 Same scheme as before (HLLC/Rusanov blend, minmod, SSP-RK3, local dt, CFL 0.5, 300 first-order iterations on a cold start). Stop rule: density-residual drop of 6 orders (from the peak after iteration 20), **or**
 (every 500 iterations, from iteration 4000) forebody CD varied by < 2e-4 over the last 2000 iterations once the residual has dropped ≥ 2 orders ("CD stationary"). `--warm` starts every Mach number from the
