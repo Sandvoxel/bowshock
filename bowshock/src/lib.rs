@@ -2,6 +2,7 @@
 //! numerics and the CPU runner with its post-processing.
 
 pub mod analysis;
+pub mod atmosphere;
 pub mod body_grid;
 pub mod case;
 pub mod error;
