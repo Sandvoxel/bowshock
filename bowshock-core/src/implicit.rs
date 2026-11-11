@@ -29,11 +29,17 @@
 //! The pseudo-time step `dt = CFL A / (L_i + L_j)` (`DtMode::Sum`) or `CFL A / (2 min(L_i, L_j))` (`DtMode::MinDirection`,
 //! sized by the weaker direction; the factorised solves are unconditionally stable in the stiff direction) with a CFL that grows
 //! geometrically from `cfl0` to `cfl_max` over the iterations since [`Solver::restart_ramp`].
+//!
+//! Viscous runs (`Solver::set_viscous`): the no-slip wall faces use the wall ghost `(rho, -u, -v, p)` (Jacobian
+//! `diag(1, -1, -1, 1)`), the diffusive spectral radius `2 lam I`, `lam = gamma (mu_f / PRANDTL + mu_t,f / PRANDTL_T) / (rho_f |d|)`,
+//! is added to the dissipation matrix of every face, and the pseudo-time step includes the diffusive limit
+//! `L_d + 2 lv len_d^2 / A`.
 
 use crate::flux::shock_weight;
-use crate::gas::{cons_to_prim, prim_to_cons, reflect, sound_speed, Cons, Prim, GAMMA};
+use crate::gas::{cons_to_prim, prim_to_cons, sound_speed, Cons, Prim, GAMMA};
 use crate::grid::Face;
 use crate::solver::{pidx, Bc, Solver};
+use crate::viscous::{self, wall_ghost};
 use rayon::prelude::*;
 
 /// Row-major 4x4 block.
@@ -72,6 +78,9 @@ pub struct ImplicitParams {
 impl ImplicitParams {
     pub const DEFAULT: ImplicitParams =
         ImplicitParams { cfl0: 1.0, cfl_max: 30.0, growth: 1.02, dt_mode: DtMode::Sum, lines: true, implicit_bc: true, sub_iters: 2, roe: true, eps_fix: 0.1 };
+
+    /// Parameters for viscous runs: the weaker-direction pseudo-time step with a lower CFL limit and one more defect-correction pass.
+    pub const VISCOUS: ImplicitParams = ImplicitParams { dt_mode: DtMode::MinDirection, cfl_max: 10.0, sub_iters: 3, ..ImplicitParams::DEFAULT };
 }
 
 impl Solver {
@@ -239,6 +248,9 @@ fn reflection(nx: f64, nr: f64) -> M4 {
     [1.0, 0.0, 0.0, 0.0, 0.0, 1.0 - 2.0 * nx * nx, -2.0 * nx * nr, 0.0, 0.0, -2.0 * nx * nr, 1.0 - 2.0 * nr * nr, 0.0, 0.0, 0.0, 0.0, 1.0]
 }
 
+/// `dU_ghost / dU_interior` of the no-slip wall ghost `(rho, -u, -v, p)`: `diag(1, -1, -1, 1)`.
+const NOSLIP: M4 = [1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+
 /// `T = dU_ghost / dU_interior` of the first ghost layer.
 fn ghost_jacobian(bc: Bc, fs: &Prim, edge: &Prim, f: &Face, outward: f64) -> M4 {
     match bc {
@@ -265,12 +277,27 @@ fn ghost_jacobian(bc: Bc, fs: &Prim, edge: &Prim, f: &Face, outward: f64) -> M4 
 }
 
 /// Blocks `(lo, d, up)` of `I - dt J` for a cell with states `wk` (cell), `wm` / `wp` (lower / upper neighbour or ghost),
-/// lower / upper face `fl`, `fr` (normals towards the upper neighbour), cell volume `vol`.
-fn cell_blocks(wk: &Prim, wm: &Prim, wp: &Prim, fl: &Face, fr: &Face, vol: f64, dt: f64, lines: bool, src: f64, roe: bool, eps_fix: f64) -> (M4, M4, M4) {
+/// lower / upper face `fl`, `fr` (normals towards the upper neighbour), cell volume `vol`. `visc_l`, `visc_r`: diffusive
+/// spectral radii of the two faces (`0.0` when inviscid), which add `2 visc I` to the dissipation matrices.
+fn cell_blocks(
+    wk: &Prim,
+    wm: &Prim,
+    wp: &Prim,
+    fl: &Face,
+    fr: &Face,
+    vol: f64,
+    dt: f64,
+    lines: bool,
+    src: f64,
+    roe: bool,
+    eps_fix: f64,
+    visc_l: f64,
+    visc_r: f64,
+) -> (M4, M4, M4) {
     let s = 0.5 * dt / vol;
     let (wl, wr) = (fl.w(), fr.w());
     // dissipation matrices of the lower / upper face
-    let (dis_l, dis_r) = if roe {
+    let (mut dis_l, mut dis_r) = if roe {
         {
             // same shock sensor as the face flux: Rusanov-like dissipation inside shocks, Roe-type elsewhere
             let (mut dl, mut dr) = (abs_jacobian(wm, wk, fl.nx, fl.nr, eps_fix), abs_jacobian(wk, wp, fr.nx, fr.nr, eps_fix));
@@ -301,6 +328,10 @@ fn cell_blocks(wk: &Prim, wm: &Prim, wp: &Prim, fl: &Face, fr: &Face, vol: f64, 
         }
         (dl, dr)
     };
+    for q in 0..4 {
+        dis_l[5 * q] += 2.0 * visc_l;
+        dis_r[5 * q] += 2.0 * visc_r;
+    }
     let mut d = EYE;
     let ak_r = flux_jacobian(wk, fr.nx, fr.nr);
     let ak_l = flux_jacobian(wk, fl.nx, fl.nr);
@@ -348,13 +379,20 @@ fn assemble(s: &Solver, p: &ImplicitParams, dir_i: bool) -> Factor {
     let fs = s.cfg.freestream;
     let bcs = s.cfg.bc;
     let (grid, w, dt) = (&s.grid, &s.w, &s.dt);
-    let ghost_t = |bc: Bc, edge: &Prim, f: &Face, outward: f64| -> M4 {
+    let ghost_t = |bc: Bc, edge: &Prim, f: &Face, outward: f64, noslip: bool| -> M4 {
         if p.implicit_bc {
-            ghost_jacobian(bc, &fs, edge, f, outward)
+            if noslip && bc == Bc::SlipWall {
+                NOSLIP
+            } else {
+                ghost_jacobian(bc, &fs, edge, f, outward)
+            }
         } else {
             ZERO
         }
     };
+    let walls = s.walls();
+    let viscous_on = s.viscous.is_some();
+    let (mu, mu_t) = (&s.mu, &s.mu_t);
     let n = ni * nj;
     let mut fac = Factor { lo: vec![ZERO; n], d: vec![ZERO; n], up: vec![ZERO; n] };
     let (lo, d, up) = (&mut fac.lo, &mut fac.d, &mut fac.up);
@@ -380,26 +418,31 @@ fn assemble(s: &Solver, p: &ImplicitParams, dir_i: bool) -> Factor {
             let (wm_idx, wp_idx) = if dir_i { (pidx(ni, ii - 1, jj), pidx(ni, ii + 1, jj)) } else { (pidx(ni, ii, jj - 1), pidx(ni, ii, jj + 1)) };
             let wall_lower = k == k0 && k0 > 0;
             let wm = if wall_lower && dir_i {
-                // lower neighbour is the solid body: reflection about the base wall
+                // lower neighbour is the solid body: wall ghost about the base wall
                 let fb = &grid.iface[j * (ni + 1) + k0];
-                reflect(wk, fb.nx, fb.nr)
+                wall_ghost(wk, fb, walls.noslip_iface(k0, j))
             } else {
                 w[wm_idx]
             };
-            let (mut l, mut dd, mut u) = cell_blocks(wk, &wm, &w[wp_idx], fl, fr, grid.vol[c], dt[c], p.lines, src, p.roe, p.eps_fix);
+            let (lam_l, lam_r) = if viscous_on { viscous::face_lambdas(grid, w, &walls, mu, mu_t, dir_i, i, j) } else { (0.0, 0.0) };
+            let (mut l, mut dd, mut u) = cell_blocks(wk, &wm, &w[wp_idx], fl, fr, grid.vol[c], dt[c], p.lines, src, p.roe, p.eps_fix, lam_l, lam_r);
             if k == k0 {
                 let t = if wall_lower {
-                    // solid body below / behind the cell: slip wall with the face normal
-                    reflection(fl.nx, fl.nr)
+                    // solid body below / behind the cell: wall with the face normal (slip: reflection, no-slip: velocity reversed)
+                    if if dir_i { walls.noslip_iface(k0, j) } else { walls.noslip_jface(i, k0) } {
+                        NOSLIP
+                    } else {
+                        reflection(fl.nx, fl.nr)
+                    }
                 } else {
-                    ghost_t(if dir_i { bcs[0] } else { bcs[2] }, wk, fl, -1.0)
+                    ghost_t(if dir_i { bcs[0] } else { bcs[2] }, wk, fl, -1.0, !dir_i && walls.noslip_jface(i, 0))
                 };
                 let lt = mm(&l, &t);
                 axpy(&mut dd, 1.0, &lt);
                 l = ZERO;
             }
             if k == kn - 1 {
-                let t = ghost_t(if dir_i { bcs[1] } else { bcs[3] }, wk, fr, 1.0);
+                let t = ghost_t(if dir_i { bcs[1] } else { bcs[3] }, wk, fr, 1.0, false);
                 let ut = mm(&u, &t);
                 axpy(&mut dd, 1.0, &ut);
                 u = ZERO;
@@ -566,7 +609,8 @@ pub(crate) fn step(s: &mut Solver, p: &ImplicitParams) -> f64 {
 fn compute_dt(s: &mut Solver, cfl: f64, mode: DtMode) {
     let ni = s.grid.ni;
     let blk = s.block;
-    let (grid, w) = (&s.grid, &s.w);
+    let viscous_on = s.viscous.is_some();
+    let (grid, w, mu, mu_t) = (&s.grid, &s.w, &s.mu, &s.mu_t);
     s.dt.par_chunks_mut(ni).enumerate().for_each(|(j, row)| {
         for i in 0..ni {
             if blk.is_some_and(|b| b.solid(i, j)) {
@@ -575,9 +619,16 @@ fn compute_dt(s: &mut Solver, cfl: f64, mode: DtMode) {
             }
             let wc = &w[pidx(ni, i as isize, j as isize)];
             let lam = |f: &Face| spectral(wc, f.nx, f.nr) * f.len;
-            let li = 0.5 * (lam(&grid.iface[j * (ni + 1) + i]) + lam(&grid.iface[j * (ni + 1) + i + 1]));
-            let lj = 0.5 * (lam(&grid.jface[j * ni + i]) + lam(&grid.jface[(j + 1) * ni + i]));
+            let mut li = 0.5 * (lam(&grid.iface[j * (ni + 1) + i]) + lam(&grid.iface[j * (ni + 1) + i + 1]));
+            let mut lj = 0.5 * (lam(&grid.jface[j * ni + i]) + lam(&grid.jface[(j + 1) * ni + i]));
             let a = grid.area[j * ni + i];
+            if viscous_on {
+                let c = j * ni + i;
+                let (fl, fr) = (&grid.iface[j * (ni + 1) + i], &grid.iface[j * (ni + 1) + i + 1]);
+                let (fb, ft) = (&grid.jface[j * ni + i], &grid.jface[(j + 1) * ni + i]);
+                li += viscous::diffusion_rate(mu[c], mu_t[c], wc[0], 0.5 * (fl.len + fr.len), a);
+                lj += viscous::diffusion_rate(mu[c], mu_t[c], wc[0], 0.5 * (fb.len + ft.len), a);
+            }
             row[i] = match mode {
                 DtMode::Sum => cfl * a / (li + lj),
                 DtMode::MinDirection => cfl * a / (2.0 * li.min(lj)),

@@ -22,7 +22,7 @@
 //! the same fractions in every column: `r = r_body(x) + s_j (r_far - r_body(x))`.
 
 use crate::error::Error;
-use bowshock_core::grid::Grid;
+use bowshock_core::grid::{geometric_offsets, Grid};
 use bowshock_core::solver::Block;
 use bowshock_reference::shock_expansion::Ogive;
 
@@ -128,38 +128,6 @@ pub struct LargeGridParams {
     pub dx_tip: f64,
     /// First cell height at the wall (and at the axis upstream of the tip).
     pub dr_wall: f64,
-}
-
-/// Node offsets `0 = s_0 < s_1 < ... < s_n = length` with spacing `first * q^k`, `q` solved so that they sum to `length`.
-pub fn geometric_offsets(first: f64, length: f64, n: usize) -> Vec<f64> {
-    assert!(n >= 1 && first > 0.0 && length > 0.0);
-    let sum = |q: f64| {
-        let (mut s, mut d) = (0.0, first);
-        for _ in 0..n {
-            s += d;
-            d *= q;
-        }
-        s
-    };
-    let (mut lo, mut hi) = (0.2f64, 4.0f64);
-    for _ in 0..200 {
-        let mid = 0.5 * (lo + hi);
-        if sum(mid) < length {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    let q = 0.5 * (lo + hi);
-    let mut v = Vec::with_capacity(n + 1);
-    let (mut s, mut d) = (0.0, first);
-    for _ in 0..n {
-        v.push(s);
-        s += d;
-        d *= q;
-    }
-    v.push(length); // closes any residual of the bisection exactly
-    v
 }
 
 /// Symmetric two-sided clustering of `n` cells on `[0, len]` with end-cell size `dx` (uniform if `dx >= len/n`).

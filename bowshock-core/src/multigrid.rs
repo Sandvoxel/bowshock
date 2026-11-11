@@ -27,6 +27,7 @@ impl Solver {
     /// Select the convergence scheme. For `Scheme::Multigrid` the coarse levels are built from the current grid and block
     /// (call [`Solver::set_block`] first); returns the number of levels (1 for the other schemes).
     pub fn set_scheme(&mut self, scheme: Scheme) -> usize {
+        assert!(self.viscous.is_none() || matches!(scheme, Scheme::Explicit | Scheme::Implicit(_)), "viscous terms need Scheme::Explicit or Scheme::Implicit");
         self.scheme = scheme;
         self.coarse.clear();
         let Scheme::Multigrid(p) = scheme else {

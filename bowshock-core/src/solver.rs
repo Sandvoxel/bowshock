@@ -8,11 +8,14 @@
 //! 2. flux per i-face / j-face (`face_flux`: MUSCL reconstruct + HLLC blended to Rusanov in shocks);
 //! 3. per-cell residual `dU/dt = -(1/V) sum_f w_f F_f + (0,0,pA/V,0)` (+ multigrid forcing) and local `dt`;
 //! 4. optional implicit residual smoothing (Jacobi-iterated, all-cells-parallel).
+//! 5. optional viscous terms (`Solver::set_viscous`, see `viscous.rs`): per-cell gradients and viscosity, viscous face
+//!    fluxes `Fv` that enter the cell residual as `F - Fv`, no-slip wall ghost states.
 
 use crate::bc::{characteristic_ghost, pressure_outflow_ghost};
 use crate::flux::{face_flux_lm, Limiter};
 use crate::gas::{cons_to_prim, prim_to_cons, reflect, sound_speed, Cons, Prim};
 use crate::grid::{Face, Grid};
+use crate::viscous::{self, wall_ghost, Walls};
 use rayon::prelude::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,6 +152,32 @@ pub enum Scheme {
     Implicit(crate::implicit::ImplicitParams),
 }
 
+/// Turbulence model of a viscous run. `Sst` is accepted by the type but the eddy viscosity `mu_t` stays zero until the
+/// model is attached: it behaves like `Laminar`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Turbulence {
+    Laminar,
+    Sst,
+}
+
+/// Viscous-flow parameters (non-dimensionalisation of `viscous.rs`: `rho_inf = c_inf = 1`, lengths in nose diameters).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Viscous {
+    /// Reynolds number `rho_inf c_inf d_nose / mu_inf` of the free stream.
+    pub re_c: f64,
+    /// Sutherland constant `110.4 K / T_inf[K]`.
+    pub sutherland: f64,
+    pub turbulence: Turbulence,
+    /// First `i` index (column) of the no-slip surface: the wall upstream of it (e.g. the axis or the approach to a plate)
+    /// stays a slip wall.
+    pub wall_i_start: usize,
+}
+
+/// Laminar Prandtl number.
+pub const PRANDTL: f64 = 0.72;
+/// Turbulent Prandtl number.
+pub const PRANDTL_T: f64 = 0.9;
+
 const NG: usize = 2;
 
 pub struct Solver {
@@ -185,6 +214,16 @@ pub struct Solver {
     pub(crate) n_active: usize,
     /// Iterations since the start of the implicit CFL ramp.
     pub(crate) ramp_k: usize,
+    /// Viscous-flow parameters, `None` for the Euler equations (set with [`Solver::set_viscous`]).
+    pub(crate) viscous: Option<Viscous>,
+    /// Viscous run: cell gradients `(u_x, u_r, v_x, v_r, T_x, T_r)`, laminar viscosity and eddy viscosity per cell (`ni*nj`)
+    /// as of the last residual evaluation; empty without viscous terms.
+    pub grad: Vec<[f64; 6]>,
+    pub mu: Vec<f64>,
+    pub mu_t: Vec<f64>,
+    /// Viscous run: viscous face fluxes `Fv.n` of the i-faces and j-faces (shapes of `fi`, `fj`).
+    fvi: Vec<Cons>,
+    fvj: Vec<Cons>,
 }
 
 #[inline]
@@ -218,6 +257,12 @@ impl Solver {
             irs_c: Vec::new(),
             n_active: ni * nj,
             ramp_k: 0,
+            viscous: None,
+            grad: Vec::new(),
+            mu: Vec::new(),
+            mu_t: Vec::new(),
+            fvi: Vec::new(),
+            fvj: Vec::new(),
             grid,
             cfg,
         }
@@ -249,6 +294,37 @@ impl Solver {
         self.block
     }
 
+    /// Switch the viscous terms on (`Some`) or off (`None`, the Euler equations). Allocates the per-cell gradient, viscosity
+    /// and face-flux arrays. Viscous runs support `Scheme::Explicit` and `Scheme::Implicit` only.
+    pub fn set_viscous(&mut self, v: Option<Viscous>) {
+        assert!(v.is_none() || matches!(self.scheme, Scheme::Explicit | Scheme::Implicit(_)), "viscous terms need Scheme::Explicit or Scheme::Implicit");
+        self.viscous = v;
+        let (ni, nj) = (self.grid.ni, self.grid.nj);
+        if v.is_some() {
+            self.grad = vec![[0.0; 6]; ni * nj];
+            self.mu = vec![0.0; ni * nj];
+            self.mu_t = vec![0.0; ni * nj];
+            self.fvi = vec![[0.0; 4]; (ni + 1) * nj];
+            self.fvj = vec![[0.0; 4]; ni * (nj + 1)];
+        } else {
+            self.grad = Vec::new();
+            self.mu = Vec::new();
+            self.mu_t = Vec::new();
+            self.fvi = Vec::new();
+            self.fvj = Vec::new();
+        }
+    }
+
+    /// Viscous-flow parameters, `None` for the Euler equations.
+    pub fn viscous(&self) -> Option<Viscous> {
+        self.viscous
+    }
+
+    /// No-slip classification of the walls of this solver (see [`Walls`]).
+    pub(crate) fn walls(&self) -> Walls {
+        Walls::new(self.viscous, &self.cfg.bc, self.block)
+    }
+
     /// Convergence acceleration in use (set with [`Solver::set_scheme`]).
     pub fn scheme(&self) -> Scheme {
         self.scheme
@@ -275,6 +351,7 @@ impl Solver {
         let (ni, nj) = (self.grid.ni, self.grid.nj);
         let fs = self.cfg.freestream;
         let bc = self.cfg.bc;
+        let walls = self.walls();
         let (w, g) = (&mut self.w, &self.grid);
         for j in 0..nj as isize {
             for k in 1..=NG as isize {
@@ -291,7 +368,8 @@ impl Solver {
             for k in 1..=NG as isize {
                 let f = &g.jface[i as usize];
                 let (edge, mir) = (w[pidx(ni, i, 0)], w[pidx(ni, i, k - 1)]);
-                w[pidx(ni, i, -k)] = Self::ghost_state(bc[2], &fs, &edge, &mir, f, -1.0);
+                w[pidx(ni, i, -k)] =
+                    if walls.noslip_jface(i as usize, 0) { wall_ghost(&mir, f, true) } else { Self::ghost_state(bc[2], &fs, &edge, &mir, f, -1.0) };
                 let f = &g.jface[nj * ni + i as usize];
                 let n = nj as isize;
                 let (edge, mir) = (w[pidx(ni, i, n - 1)], w[pidx(ni, i, n - k)]);
@@ -305,6 +383,7 @@ impl Solver {
     /// (i-direction) stencils are handled in the i-face kernel (the corner cells need a different mirror for the two directions).
     fn fill_block_ghosts(&mut self, b: Block) {
         let ni = self.grid.ni;
+        let walls = self.walls();
         for i in 0..ni {
             let j0 = b.col_start(i);
             if j0 == 0 {
@@ -313,7 +392,7 @@ impl Solver {
             let f = self.grid.jface[j0 * ni + i];
             for k in 1..=NG {
                 let src = self.w[pidx(ni, i as isize, (j0 + k - 1) as isize)];
-                self.w[pidx(ni, i as isize, j0 as isize - k as isize)] = reflect(&src, f.nx, f.nr);
+                self.w[pidx(ni, i as isize, j0 as isize - k as isize)] = wall_ghost(&src, &f, walls.noslip_jface(i, j0));
             }
         }
     }
@@ -327,6 +406,8 @@ impl Solver {
         let low_mach = self.low_mach;
         let blk = self.block;
         let irs = self.irs;
+        let visc = self.viscous;
+        let walls = self.walls();
 
         // 1. primitives
         {
@@ -343,7 +424,7 @@ impl Solver {
             self.fill_block_ghosts(b);
         }
 
-        let Solver { grid, w, fi, fj, res, dt, forcing, irs_ei, irs_ej, .. } = self;
+        let Solver { grid, w, fi, fj, res, dt, forcing, irs_ei, irs_ej, grad, mu, mu_t, fvi, fvj, .. } = self;
         let (grid, w) = (&*grid, &*w);
         let forcing: &[Cons] = forcing;
 
@@ -364,8 +445,12 @@ impl Solver {
                             // of the fluid cell across the base about the base-wall normal
                             let fb = &grid.iface[j * (ni + 1) + b.i_end];
                             let (m1, p0, p1) = (w[pidx(ni, ii - 1, jj)], w[pidx(ni, ii, jj)], w[pidx(ni, ii + 1, jj)]);
-                            let (m2, m1) =
-                                if i == b.i_end { (reflect(&p1, fb.nx, fb.nr), reflect(&p0, fb.nx, fb.nr)) } else { (reflect(&m1, fb.nx, fb.nr), m1) };
+                            let (m2, m1) = if i == b.i_end {
+                                let ns = walls.noslip_iface(i, j);
+                                (wall_ghost(&p1, fb, ns), wall_ghost(&p0, fb, ns))
+                            } else {
+                                (wall_ghost(&m1, fb, walls.noslip_iface(b.i_end, j)), m1)
+                            };
                             *out = face_flux_lm(&m2, &m1, &p0, &p1, lim, f.nx, f.nr, low_mach);
                             continue;
                         }
@@ -392,6 +477,14 @@ impl Solver {
             }
         });
 
+        // 2c. viscous: cell gradients and viscosity, viscous face fluxes
+        if let Some(v) = visc {
+            viscous::cell_pass(&v, grid, w, &walls, grad, mu);
+            viscous::face_pass(grid, w, &walls, grad, mu, mu_t, fvi, fvj);
+        }
+        let (grad, mu, mu_t): (&[[f64; 6]], &[f64], &[f64]) = (grad, mu, mu_t);
+        let (fvi, fvj): (&[Cons], &[Cons]) = (fvi, fvj);
+
         // 3. cell residuals
         let (fi, fj) = (&*fi, &*fj);
         res.par_chunks_mut(ni).zip(dt.par_chunks_mut(ni)).zip(irs_ei.par_chunks_mut(ni)).zip(irs_ej.par_chunks_mut(ni)).enumerate().for_each(
@@ -415,10 +508,20 @@ impl Solver {
                     let wc = &w[pidx(ni, i as isize, j as isize)];
                     let inv_v = 1.0 / grid.vol[c];
                     let mut out = [0.0; 4];
-                    for k in 0..4 {
-                        out[k] = -(gr[k] * wr - gl[k] * wl + gt[k] * wt - gb[k] * wb) * inv_v;
+                    if visc.is_some() {
+                        let (hl, hr) = (&fvi[j * (ni + 1) + i], &fvi[j * (ni + 1) + i + 1]);
+                        let (hb, ht) = (&fvj[j * ni + i], &fvj[(j + 1) * ni + i]);
+                        for k in 0..4 {
+                            out[k] = -((gr[k] - hr[k]) * wr - (gl[k] - hl[k]) * wl + (gt[k] - ht[k]) * wt - (gb[k] - hb[k]) * wb) * inv_v;
+                        }
+                        let t_tt = viscous::hoop_stress(mu[c] + mu_t[c], &grad[c], wc[2], grid.rc[c]);
+                        out[2] += (wc[3] - t_tt) * grid.area[c] * inv_v; // axisymmetric pressure source (p - t_tt) A / V
+                    } else {
+                        for k in 0..4 {
+                            out[k] = -(gr[k] * wr - gl[k] * wl + gt[k] * wt - gb[k] * wb) * inv_v;
+                        }
+                        out[2] += wc[3] * grid.area[c] * inv_v; // axisymmetric pressure source p*A/V
                     }
-                    out[2] += wc[3] * grid.area[c] * inv_v; // axisymmetric pressure source p*A/V
                     if !forcing.is_empty() {
                         for k in 0..4 {
                             out[k] += forcing[c][k];
@@ -428,8 +531,21 @@ impl Solver {
                     if compute_dt {
                         let cs = sound_speed(wc);
                         let lam = |f: &Face| ((wc[1] * f.nx + wc[2] * f.nr).abs() + cs) * f.len;
+                        // diffusive limit of the time step (viscous run)
+                        let (xi, xj) = if visc.is_some() {
+                            (
+                                viscous::diffusion_rate(mu[c], mu_t[c], wc[0], 0.5 * (fl.len + fr.len), grid.area[c]),
+                                viscous::diffusion_rate(mu[c], mu_t[c], wc[0], 0.5 * (fb.len + ft.len), grid.area[c]),
+                            )
+                        } else {
+                            (0.0, 0.0)
+                        };
                         if irs.on() {
-                            let (li, lj) = (0.5 * (lam(fl) + lam(fr)), 0.5 * (lam(fb) + lam(ft)));
+                            let (mut li, mut lj) = (0.5 * (lam(fl) + lam(fr)), 0.5 * (lam(fb) + lam(ft)));
+                            if visc.is_some() {
+                                li += xi;
+                                lj += xj;
+                            }
                             let d = cfl * grid.area[c] / (li + lj);
                             drow[i] = d;
                             let coef = |l: f64| {
@@ -440,7 +556,7 @@ impl Solver {
                             erow_j[i] = coef(lj);
                         } else {
                             let sum = lam(fl) + lam(fr) + lam(fb) + lam(ft);
-                            drow[i] = cfl * grid.area[c] / (0.5 * sum);
+                            drow[i] = if visc.is_some() { cfl * grid.area[c] / (0.5 * sum + xi + xj) } else { cfl * grid.area[c] / (0.5 * sum) };
                         }
                     }
                 }
@@ -591,12 +707,12 @@ fn thomas(n: usize, rhs: impl Fn(usize) -> Cons, lo: impl Fn(usize) -> f64, up: 
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::gas::freestream;
 
     /// Smoothly curved, non-uniform grid with the lower boundary on the axis r=0.
-    fn curved_grid(ni: usize, nj: usize) -> Grid {
+    pub(crate) fn curved_grid(ni: usize, nj: usize) -> Grid {
         let (mut x, mut r) = (vec![0.0; (ni + 1) * (nj + 1)], vec![0.0; (ni + 1) * (nj + 1)]);
         for j in 0..=nj {
             for i in 0..=ni {

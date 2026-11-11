@@ -440,6 +440,9 @@ impl GpuSolver {
     /// Builds the solver of a host `bowshock_core` solver: its grid and config, low-Mach flag, solid block and convergence scheme
     /// (`Scheme::Explicit` or `Scheme::Implicit`; the state starts at the free stream, not at `host.u`).
     pub fn from_host(ctx: &Context, host: &Solver, mode: Mode, prec: Precision) -> Result<GpuSolver> {
+        if host.viscous().is_some() {
+            return Err(GpuError::Unsupported("viscous terms are not implemented on the GPU"));
+        }
         let mut g = Self::new_with(ctx, &host.grid, &host.cfg, mode, prec)?;
         g.set_low_mach(host.low_mach);
         g.set_block(host.block())?;
