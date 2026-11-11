@@ -177,14 +177,14 @@ pub(crate) fn jface_sides(grid: &Grid, w: &[Prim], walls: &Walls, i: usize, j: u
 
 /// Centre of i-face `(i, j)` (mean of its end nodes).
 #[inline]
-fn iface_centre(grid: &Grid, i: usize, j: usize) -> (f64, f64) {
+pub(crate) fn iface_centre(grid: &Grid, i: usize, j: usize) -> (f64, f64) {
     let (a, b) = (grid.node(i, j), grid.node(i, j + 1));
     (0.5 * (a.0 + b.0), 0.5 * (a.1 + b.1))
 }
 
 /// Centre of j-face `(i, j)`.
 #[inline]
-fn jface_centre(grid: &Grid, i: usize, j: usize) -> (f64, f64) {
+pub(crate) fn jface_centre(grid: &Grid, i: usize, j: usize) -> (f64, f64) {
     let (a, b) = (grid.node(i, j), grid.node(i + 1, j));
     (0.5 * (a.0 + b.0), 0.5 * (a.1 + b.1))
 }
@@ -202,7 +202,7 @@ fn side_pos(grid: &Grid, s: &Side, xf: f64, rf: f64) -> (f64, f64) {
 
 /// `(|d|, e_x, e_r)`: distance and direction between the two sides.
 #[inline]
-fn stencil(grid: &Grid, sides: &FaceSides, xf: f64, rf: f64) -> (f64, f64, f64) {
+pub(crate) fn stencil(grid: &Grid, sides: &FaceSides, xf: f64, rf: f64) -> (f64, f64, f64) {
     let (xl, rl) = side_pos(grid, &sides.l, xf, rf);
     let (xr, rr) = side_pos(grid, &sides.r, xf, rf);
     let (dx, dr) = (xr - xl, rr - rl);
@@ -213,7 +213,7 @@ fn stencil(grid: &Grid, sides: &FaceSides, xf: f64, rf: f64) -> (f64, f64, f64) 
 /// Face viscosity and eddy viscosity: mean of the two sides, a ghost taking its cell's values (eddy viscosity negated
 /// across a no-slip face).
 #[inline]
-fn face_mu(mu: &[f64], mu_t: &[f64], sides: &FaceSides) -> (f64, f64) {
+pub(crate) fn face_mu(mu: &[f64], mu_t: &[f64], sides: &FaceSides) -> (f64, f64) {
     let mut_side = |s: &Side| if s.ghost && sides.noslip { -mu_t[s.cell] } else { mu_t[s.cell] };
     (0.5 * (mu[sides.l.cell] + mu[sides.r.cell]), 0.5 * (mut_side(&sides.l) + mut_side(&sides.r)))
 }
@@ -354,7 +354,7 @@ pub(crate) fn face_lambdas(grid: &Grid, w: &[Prim], walls: &Walls, mu: &[f64], m
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::flux::Limiter;
     use crate::gas::freestream;
@@ -381,7 +381,7 @@ mod tests {
     }
 
     /// Skin friction coefficient `cf = mu_w u_t / d_n / (0.5 M^2)` of the wall face (j = 0, i >= i0) nearest to `x_target`.
-    fn cf_at(s: &Solver, v: &Viscous, mach: f64, x_target: f64) -> (f64, f64) {
+    pub(crate) fn cf_at(s: &Solver, v: &Viscous, mach: f64, x_target: f64) -> (f64, f64) {
         let g = &s.grid;
         let (i, _) =
             (v.wall_i_start..g.ni).map(|i| (i, (0.5 * (g.node(i, 0).0 + g.node(i + 1, 0).0) - x_target).abs())).min_by(|a, b| a.1.total_cmp(&b.1)).unwrap();

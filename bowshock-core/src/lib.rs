@@ -11,4 +11,5 @@ pub mod grid;
 pub mod implicit;
 pub mod multigrid;
 pub mod solver;
+pub mod turbulence;
 pub mod viscous;

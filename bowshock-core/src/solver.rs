@@ -152,8 +152,7 @@ pub enum Scheme {
     Implicit(crate::implicit::ImplicitParams),
 }
 
-/// Turbulence model of a viscous run. `Sst` is accepted by the type but the eddy viscosity `mu_t` stays zero until the
-/// model is attached: it behaves like `Laminar`.
+/// Turbulence model of a viscous run: `Laminar` (`mu_t = 0`) or the Menter SST k-omega model (`turbulence.rs`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Turbulence {
     Laminar,
@@ -187,8 +186,8 @@ pub struct Solver {
     pub u: Vec<Cons>,
     /// Primitive variables with `NG` ghost layers, `(ni+2NG)*(nj+2NG)`.
     pub w: Vec<Prim>,
-    fi: Vec<Cons>,
-    fj: Vec<Cons>,
+    pub(crate) fi: Vec<Cons>,
+    pub(crate) fj: Vec<Cons>,
     pub res: Vec<Cons>,
     pub dt: Vec<f64>,
     u0: Vec<Cons>,
@@ -224,6 +223,12 @@ pub struct Solver {
     /// Viscous run: viscous face fluxes `Fv.n` of the i-faces and j-faces (shapes of `fi`, `fj`).
     fvi: Vec<Cons>,
     fvj: Vec<Cons>,
+    /// SST run: specific turbulence kinetic energy and specific dissipation rate `[k, omega]` per cell, the distance of every
+    /// cell centroid to the nearest no-slip wall face, and the density residual norm of `k` of the last update; empty / zero
+    /// otherwise.
+    pub turb: Vec<[f64; 2]>,
+    pub(crate) dwall: Vec<f64>,
+    pub(crate) turb_rnorm: f64,
 }
 
 #[inline]
@@ -263,6 +268,9 @@ impl Solver {
             mu_t: Vec::new(),
             fvi: Vec::new(),
             fvj: Vec::new(),
+            turb: Vec::new(),
+            dwall: Vec::new(),
+            turb_rnorm: 0.0,
             grid,
             cfg,
         }
@@ -282,6 +290,9 @@ impl Solver {
             );
         }
         self.block = block;
+        if !self.turb.is_empty() {
+            self.dwall = crate::turbulence::wall_distance(&self.grid, &self.walls());
+        }
         let ni = self.grid.ni;
         self.n_active = match block {
             Some(b) => ni * self.grid.nj - b.i_end * b.j_end - (ni - b.i_end) * b.j_sting,
@@ -295,7 +306,8 @@ impl Solver {
     }
 
     /// Switch the viscous terms on (`Some`) or off (`None`, the Euler equations). Allocates the per-cell gradient, viscosity
-    /// and face-flux arrays. Viscous runs support `Scheme::Explicit` and `Scheme::Implicit` only.
+    /// and face-flux arrays; with `Turbulence::Sst` also the turbulence state (free stream) and the wall distance, so the
+    /// body block must be declared before. Viscous runs support `Scheme::Explicit` and `Scheme::Implicit` only.
     pub fn set_viscous(&mut self, v: Option<Viscous>) {
         assert!(v.is_none() || matches!(self.scheme, Scheme::Explicit | Scheme::Implicit(_)), "viscous terms need Scheme::Explicit or Scheme::Implicit");
         self.viscous = v;
@@ -312,6 +324,12 @@ impl Solver {
             self.mu_t = Vec::new();
             self.fvi = Vec::new();
             self.fvj = Vec::new();
+        }
+        self.turb = Vec::new();
+        self.dwall = Vec::new();
+        self.turb_rnorm = 0.0;
+        if let Some(Viscous { re_c, turbulence: Turbulence::Sst, .. }) = v {
+            crate::turbulence::init(self, re_c);
         }
     }
 
@@ -585,8 +603,21 @@ impl Solver {
             Scheme::Multigrid(p) => crate::multigrid::cycle(self, &p),
             Scheme::Implicit(p) => crate::implicit::step(self, &p),
         };
+        if self.sst() {
+            crate::turbulence::update(self);
+        }
         self.iter += 1;
         rn
+    }
+
+    /// Is the SST turbulence model active?
+    pub(crate) fn sst(&self) -> bool {
+        self.viscous.is_some_and(|v| v.turbulence == Turbulence::Sst)
+    }
+
+    /// L2 norm of `rho dk/dt` of the last turbulence update over the fluid cells, normalised by sqrt(N) (`0.0` without SST).
+    pub fn turb_residual(&self) -> f64 {
+        self.turb_rnorm
     }
 
     /// One SSP-RK3 (Shu-Osher) step with local time stepping (and the implicit residual smoothing `self.irs`, if any).

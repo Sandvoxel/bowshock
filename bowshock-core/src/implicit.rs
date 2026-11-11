@@ -45,8 +45,8 @@ use rayon::prelude::*;
 /// Row-major 4x4 block.
 pub type M4 = [f64; 16];
 
-const ZERO: M4 = [0.0; 16];
-const EYE: M4 = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+pub(crate) const ZERO: M4 = [0.0; 16];
+pub(crate) const EYE: M4 = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DtMode {
@@ -366,10 +366,10 @@ fn cell_blocks(
 
 /// Blocks `(lo, d, up)` of the factor `I - dt J_dir` for every cell, stored per cell index (`c = j ni + i`).
 /// Cells of a solid block have zero blocks and are not part of any line.
-struct Factor {
-    lo: Vec<M4>,
-    d: Vec<M4>,
-    up: Vec<M4>,
+pub(crate) struct Factor {
+    pub(crate) lo: Vec<M4>,
+    pub(crate) d: Vec<M4>,
+    pub(crate) up: Vec<M4>,
 }
 
 /// Assemble the i factor (`dir_i = true`, lines along i) or the j factor.
@@ -466,7 +466,7 @@ fn seg_start(blk: Option<crate::solver::Block>, dir_i: bool, ni: usize, i: usize
 }
 
 /// `x <- (I - dt J_dir)^{-1} x` for every line of the given direction.
-fn solve_lines(s: &Solver, fac: &Factor, dir_i: bool, x: &mut [Cons]) {
+pub(crate) fn solve_lines(s: &Solver, fac: &Factor, dir_i: bool, x: &mut [Cons]) {
     let (ni, nj) = (s.grid.ni, s.grid.nj);
     let blk = s.block;
     if dir_i {
