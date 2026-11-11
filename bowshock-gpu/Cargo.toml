@@ -10,3 +10,6 @@ description = "f32 Luma/WGSL port of the bowshock-core axisymmetric Euler solver
 bowshock-core.workspace = true
 luma.workspace = true
 encase.workspace = true
+
+[lints]
+workspace = true

@@ -46,3 +46,6 @@ bowshock-gpu.workspace = true
 bowshock-gpu-cases.workspace = true
 luma.workspace = true
 rayon.workspace = true
+
+[lints]
+workspace = true

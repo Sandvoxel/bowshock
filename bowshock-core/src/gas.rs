@@ -1,7 +1,7 @@
 //! Ideal-gas helpers. State layouts:
 //! * conservative `Cons = [rho, rho*u, rho*v, E]`, `E = p/(g-1) + rho (u^2+v^2)/2`
 //! * primitive    `Prim = [rho, u, v, p]`
-//! with `u` the axial (x) and `v` the radial (r) velocity.
+//!   with `u` the axial (x) and `v` the radial (r) velocity.
 
 pub const GAMMA: f64 = 1.4;
 

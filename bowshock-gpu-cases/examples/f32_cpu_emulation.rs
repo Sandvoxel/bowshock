@@ -3,9 +3,9 @@
 //!
 //! * `f64`            : reference.
 //! * `store f32`      : the state is rounded to f32 after every RK stage (what an f32 `u` buffer does to the update);
-//!                      the residual is evaluated on the f32 state.
+//!   the residual is evaluated on the f32 state.
 //! * `eval on f32(u)` : the state is kept in f64, only the copy the residual is evaluated on is rounded to f32
-//!                      (state rounding noise in the residual, but updates are not quantised).
+//!   (state rounding noise in the residual, but updates are not quantised).
 //!
 //! `cargo run --release -p bowshock-gpu-cases --example f32_cpu_emulation [-- ni nj]`
 

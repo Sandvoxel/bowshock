@@ -187,7 +187,7 @@ fn state_after_20_iterations_matches_cpu() {
                 for k in 0..4 {
                     worst = worst.max((a[k] - b[k]).abs() / (1.0 + b[k].abs()));
                 }
-                let (pa, pb) = (cons_to_prim(&a.map(|x| x as f64)), cons_to_prim(b));
+                let (pa, pb) = (cons_to_prim(a), cons_to_prim(b));
                 worst_p = worst_p.max((pa[3] - pb[3]).abs() / pb[3]);
             }
             let mut worst_res = 0.0f64;

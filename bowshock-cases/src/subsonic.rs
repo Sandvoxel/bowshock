@@ -346,7 +346,7 @@ pub fn finish(case: &SubsonicCase, s: &Solver, residual: Vec<f64>, rmax: f64, hi
     }
     let (mut min_rho, mut min_p, mut m_max) = (f64::INFINITY, f64::INFINITY, 0.0f64);
     for (c, q) in s.u.iter().enumerate() {
-        if blk.map_or(false, |b| b.solid(c % ni, c / ni)) {
+        if blk.is_some_and(|b| b.solid(c % ni, c / ni)) {
             continue;
         }
         let w = cons_to_prim(q);
@@ -614,7 +614,8 @@ mod tests {
         }
         // second order (van Albada): implicit variants among themselves
         let reference = converge(Limiter::VanAlbada, Scheme::Implicit(ImplicitParams::DEFAULT), 8000);
-        for scheme in [Scheme::Implicit(ImplicitParams { sub_iters: 1, roe: false, ..ImplicitParams::DEFAULT })] {
+        {
+            let scheme = Scheme::Implicit(ImplicitParams { sub_iters: 1, roe: false, ..ImplicitParams::DEFAULT });
             let d = diff(&converge(Limiter::VanAlbada, scheme, 8000), &reference);
             assert!(d < 1e-6, "van Albada, {scheme:?}: state difference {d:e}");
         }

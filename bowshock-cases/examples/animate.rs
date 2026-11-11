@@ -93,7 +93,7 @@ fn tri(img: &mut [u8], p: [(f64, f64); 3], col: [u8; 3]) {
 fn render(s: &Solver, cols: &[[u8; 3]]) -> Vec<u8> {
     let g = &s.grid;
     let mut img = vec![0u8; W * H * 3];
-    for px in img.chunks_exact_mut(3) {
+    for px in img.as_chunks_mut::<3>().0 {
         px.copy_from_slice(&BODY);
     }
     let sc = W as f64 / (X1 - X0);

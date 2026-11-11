@@ -48,7 +48,7 @@ struct Row {
     on_cpu_state_ext: (f64, f64),
 }
 
-fn write_csvs(out: &PathBuf, tag: &str, row: &Row, tm: &ConeSolution) {
+fn write_csvs(out: &std::path::Path, tag: &str, row: &Row, tm: &ConeSolution) {
     let mut f = fs::File::create(out.join(format!("cp_{tag}.csv"))).unwrap();
     writeln!(f, "x_over_L,p_over_pinf_gpu,cp_gpu,cp_cpu,cp_firstcell_gpu,cp_firstcell_cpu,rel_diff_cp,cp_taylor_maccoll").unwrap();
     for (g, c) in row.gpu.post.surface.iter().zip(&row.cpu.post.surface) {

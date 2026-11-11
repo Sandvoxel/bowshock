@@ -24,3 +24,8 @@ gif = "0.13"
 opt-level = 3
 lto = "thin"
 codegen-units = 1
+
+[workspace.lints.clippy]
+too_many_arguments = "allow"
+needless_range_loop = "allow"
+type_complexity = "allow"

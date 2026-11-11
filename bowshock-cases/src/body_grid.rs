@@ -326,7 +326,7 @@ pub fn base_domain_grid(p: &BaseGridParams) -> (Grid, bowshock_core::solver::Blo
             xs.push(bb.x_shoulder() + boat[k]);
         }
     }
-    let i_end = xs.len() - 1 - 0; // node index of the base plane is xs.len() - 1 at this point
+    let i_end = xs.len() - 1; // node index of the base plane is xs.len() - 1 at this point
     let d_base = xs[i_end] - xs[i_end - 1];
     let wake = geometric_offsets(d_base, p.x_down, p.n_wake);
     for k in 1..=p.n_wake {

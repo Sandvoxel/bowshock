@@ -690,7 +690,7 @@ impl GpuSolver {
     /// per-iteration density residual (L2 of the stage-1 `d rho/dt` over sqrt(N), as in bowshock-core). This is the
     /// only synchronisation point.
     pub fn run(&mut self, n: usize) -> Result<Vec<f64>> {
-        assert!(n >= 1 && n <= MAX_CHUNK);
+        assert!((1..=MAX_CHUNK).contains(&n));
         for s in 0..n {
             self.record_step(Some(s as u32))?;
         }

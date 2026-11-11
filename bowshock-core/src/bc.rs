@@ -113,7 +113,7 @@ mod tests {
         let mk = |u: f64, v: f64| [1.0, u, v, 1.0 / GAMMA];
         // normal pointing in +x
         assert_eq!(regime(&mk(-1.5 * c, 0.0), 1.0, 0.0), Regime::SupersonicInflow);
-        assert_eq!(regime(&mk(-1.0 * c, 0.0), 1.0, 0.0), Regime::SupersonicInflow);
+        assert_eq!(regime(&mk(-c, 0.0), 1.0, 0.0), Regime::SupersonicInflow);
         assert_eq!(regime(&mk(-0.5 * c, 0.0), 1.0, 0.0), Regime::SubsonicInflow);
         assert_eq!(regime(&mk(0.5 * c, 0.0), 1.0, 0.0), Regime::SubsonicOutflow);
         assert_eq!(regime(&mk(0.0, 0.0), 1.0, 0.0), Regime::SubsonicOutflow);

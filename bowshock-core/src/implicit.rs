@@ -360,7 +360,7 @@ fn assemble(s: &Solver, p: &ImplicitParams, dir_i: bool) -> Factor {
     let (lo, d, up) = (&mut fac.lo, &mut fac.d, &mut fac.up);
     lo.par_chunks_mut(ni).zip(d.par_chunks_mut(ni)).zip(up.par_chunks_mut(ni)).enumerate().for_each(|(j, ((lo_r, d_r), up_r))| {
         for i in 0..ni {
-            if blk.map_or(false, |b| b.solid(i, j)) {
+            if blk.is_some_and(|b| b.solid(i, j)) {
                 d_r[i] = EYE;
                 continue;
             }
@@ -470,7 +470,7 @@ fn apply_factor(s: &Solver, fac: &Factor, dir_i: bool, x: &[Cons]) -> Vec<Cons> 
     let mut out = vec![[0.0; 4]; ni * nj];
     out.par_chunks_mut(ni).enumerate().for_each(|(j, row)| {
         for i in 0..ni {
-            if blk.map_or(false, |b| b.solid(i, j)) {
+            if blk.is_some_and(|b| b.solid(i, j)) {
                 continue;
             }
             let c = j * ni + i;
@@ -543,7 +543,7 @@ pub(crate) fn step(s: &mut Solver, p: &ImplicitParams) -> f64 {
     // ---- update with positivity damping ----
     s.u.par_chunks_mut(ni).enumerate().for_each(|(j, row)| {
         for i in 0..ni {
-            if blk.map_or(false, |b| b.solid(i, j)) {
+            if blk.is_some_and(|b| b.solid(i, j)) {
                 continue;
             }
             let dq = du[j * ni + i];
@@ -569,7 +569,7 @@ fn compute_dt(s: &mut Solver, cfl: f64, mode: DtMode) {
     let (grid, w) = (&s.grid, &s.w);
     s.dt.par_chunks_mut(ni).enumerate().for_each(|(j, row)| {
         for i in 0..ni {
-            if blk.map_or(false, |b| b.solid(i, j)) {
+            if blk.is_some_and(|b| b.solid(i, j)) {
                 row[i] = 0.0;
                 continue;
             }

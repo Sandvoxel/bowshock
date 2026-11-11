@@ -387,7 +387,7 @@ impl Solver {
         res.par_chunks_mut(ni).zip(dt.par_chunks_mut(ni)).zip(irs_ei.par_chunks_mut(ni)).zip(irs_ej.par_chunks_mut(ni)).enumerate().for_each(
             |(j, (((rrow, drow), erow_i), erow_j))| {
                 for i in 0..ni {
-                    if blk.map_or(false, |b| b.solid(i, j)) {
+                    if blk.is_some_and(|b| b.solid(i, j)) {
                         rrow[i] = [0.0; 4];
                         drow[i] = 0.0;
                         erow_i[i] = 0.0;
@@ -507,7 +507,7 @@ impl Solver {
         }
         let (ni, nj) = (self.grid.ni, self.grid.nj);
         let blk = self.block;
-        let solid = move |i: usize, j: usize| blk.map_or(false, |b| b.solid(i, j));
+        let solid = move |i: usize, j: usize| blk.is_some_and(|b| b.solid(i, j));
         let mut x = std::mem::take(&mut self.irs_x);
         let mut cp = std::mem::take(&mut self.irs_c);
         x.resize(ni * nj, [0.0; 4]);

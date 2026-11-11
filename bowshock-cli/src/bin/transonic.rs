@@ -223,7 +223,7 @@ fn main() {
                 let e = cp_c - cp_d;
                 let valid = x_in <= xmax;
                 writeln!(f, "{x_in},{xd:.4},{cp_d:.4},{cp_c:.5},{e:+.5},{valid}").unwrap();
-                if x_in >= 8.0 && x_in <= 13.0 {
+                if (8.0..=13.0).contains(&x_in) {
                     peak_data = peak_data.min(cp_d);
                 }
                 if xd <= body.nose_length() {

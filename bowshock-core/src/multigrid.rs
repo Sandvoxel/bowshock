@@ -117,7 +117,7 @@ fn restrict(fine: &Solver, coarse: &mut Solver) {
         let c0 = 2 * cj * fni + 2 * ci;
         [c0, c0 + 1, c0 + fni, c0 + fni + 1]
     };
-    let solid = |c: usize| blk.map_or(false, |b| b.solid(c % fni, c / fni));
+    let solid = |c: usize| blk.is_some_and(|b| b.solid(c % fni, c / fni));
     // state
     {
         let (fu, vol) = (&fine.u, &fine.grid.vol);
@@ -179,7 +179,7 @@ fn prolong_correct(coarse: &Solver, fine: &mut Solver) {
     let (cu, c0) = (&coarse.u, &coarse.mg_u0);
     fine.u.par_chunks_mut(fni).enumerate().for_each(|(j, row)| {
         for i in 0..fni {
-            if blk.map_or(false, |b| b.solid(i, j)) {
+            if blk.is_some_and(|b| b.solid(i, j)) {
                 continue;
             }
             let (ci, cj) = (i / 2, j / 2);
@@ -188,7 +188,7 @@ fn prolong_correct(coarse: &Solver, fine: &mut Solver) {
             let cand = [(ci, cj, 9.0), (ci2, cj, 3.0), (ci, cj2, 3.0), (ci2, cj2, 1.0)];
             let (mut d, mut wsum) = ([0.0; 4], 0.0);
             for (a, b, wt) in cand {
-                if cblk.map_or(false, |bk| bk.solid(a, b)) {
+                if cblk.is_some_and(|bk| bk.solid(a, b)) {
                     continue;
                 }
                 let c = b * cni + a;
