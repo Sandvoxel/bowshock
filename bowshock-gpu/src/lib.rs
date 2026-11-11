@@ -32,50 +32,62 @@ const RK3: [(f32, f32); 3] = [(1.0, 0.0), (0.25, 0.75), ((2.0f64 / 3.0) as f32, 
 /// Maximum number of iterations recorded between two residual-history reads.
 pub const MAX_CHUNK: usize = 256;
 
-/// Uniform block of every kernel; must match `Params` in [`shaders::common`] (128 bytes).
-#[derive(encase::ShaderType, Clone, Copy, Debug, Default)]
-pub struct Params {
-    pub ni: u32,
-    pub nj: u32,
-    pub limiter: u32,
-    pub stage: u32,
-    pub cfl: f32,
-    pub fs_rho: f32,
-    pub fs_u: f32,
-    pub fs_v: f32,
-    pub fs_p: f32,
-    pub bc0: u32,
-    pub bc1: u32,
-    pub bc2: u32,
-    pub bc3: u32,
-    pub slot: u32,
-    pub aux: u32,
+/// Declares [`Params`] and its WGSL twin [`PARAMS_WGSL`] from one field list, so the two cannot drift apart.
+macro_rules! params {
+    ($($(#[$m:meta])* $name:ident : $ty:ident),* $(,)?) => {
+        /// Uniform block of every kernel (see `PARAMS_WGSL`, emitted by [`shaders::common`]).
+        #[derive(encase::ShaderType, Clone, Copy, Debug, Default)]
+        pub struct Params {
+            $($(#[$m])* pub $name: $ty,)*
+        }
+
+        /// WGSL declaration of [`Params`].
+        pub const PARAMS_WGSL: &str = concat!("struct Params {\n", $("    ", stringify!($name), ": ", stringify!($ty), ",\n",)* "}\n");
+    };
+}
+
+params! {
+    ni: u32,
+    nj: u32,
+    limiter: u32,
+    stage: u32,
+    cfl: f32,
+    fs_rho: f32,
+    fs_u: f32,
+    fs_v: f32,
+    fs_p: f32,
+    bc0: u32,
+    bc1: u32,
+    bc2: u32,
+    bc3: u32,
+    slot: u32,
+    aux: u32,
     /// Always 0. The WGSL error-free transformations read it (`opq`) so that the driver's compiler cannot
     /// reassociate `(a + b) - a` to `b` (see `shaders::common`).
-    pub zero: u32,
+    zero: u32,
     /// RK stage update `u = ra (u + dt res) + rb u0` (stages 2, 3).
-    pub ra: f32,
-    pub rb: f32,
+    ra: f32,
+    rb: f32,
     /// 1: Thornber low-Mach correction of the reconstructed face states (`bowshock_core::flux::low_mach_states`).
-    pub low_mach: u32,
+    low_mach: u32,
     /// Line-implicit scheme flags: bit 1 block-tridiagonal lines (else point-implicit), 2 implicit BC Jacobians, 4 Roe-type
     /// dissipation matrix (else Rusanov `lambda I`), 8 `DtMode::MinDirection`.
-    pub iflags: u32,
+    iflags: u32,
     /// Low parts of the free stream `(rho, u, v, p)` (f64 minus its f32 rounding), used by the extended precision.
-    pub fs_lo_rho: f32,
-    pub fs_lo_u: f32,
-    pub fs_lo_v: f32,
-    pub fs_lo_p: f32,
+    fs_lo_rho: f32,
+    fs_lo_u: f32,
+    fs_lo_v: f32,
+    fs_lo_p: f32,
     /// Solid body block `(i_end, j_end, j_sting)` of `bowshock_core::solver::Block` (all 0: none).
-    pub blk_i: u32,
-    pub blk_j: u32,
-    pub blk_s: u32,
-    pub ipad0: u32,
+    blk_i: u32,
+    blk_j: u32,
+    blk_s: u32,
+    ipad0: u32,
     /// Pseudo-time CFL of the implicit scheme and the entropy-fix level of its Roe-type dissipation matrix.
-    pub icfl: f32,
-    pub eps_fix: f32,
-    pub ipad1: u32,
-    pub ipad2: u32,
+    icfl: f32,
+    eps_fix: f32,
+    ipad1: u32,
+    ipad2: u32,
 }
 
 pub fn limiter_code(l: Limiter) -> u32 {

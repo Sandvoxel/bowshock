@@ -16,16 +16,6 @@
 /// implicit scheme (pseudo-time CFL, entropy fix of the Roe-type dissipation, bit 1 lines, 2 implicit BCs, 4 Roe-type
 /// dissipation, 8 `DtMode::MinDirection`).
 const COMMON_TEMPLATE: &str = r#"
-struct Params {
-    ni: u32, nj: u32, limiter: u32, stage: u32,
-    cfl: f32, fs_rho: f32, fs_u: f32, fs_v: f32,
-    fs_p: f32, bc0: u32, bc1: u32, bc2: u32,
-    bc3: u32, slot: u32, aux: u32, zero: u32,
-    ra: f32, rb: f32, low_mach: u32, iflags: u32,
-    fs_lo_rho: f32, fs_lo_u: f32, fs_lo_v: f32, fs_lo_p: f32,
-    blk_i: u32, blk_j: u32, blk_s: u32, ipad0: u32,
-    icfl: f32, eps_fix: f32, ipad1: u32, ipad2: u32,
-}
 
 // Solid body block (all-zero parameters: no block). Cell (i, j) is solid if i < blk_i && j < blk_j (body) or
 // i >= blk_i && j < blk_s (sting).
@@ -302,10 +292,11 @@ pub fn characteristic_exponent() -> f64 {
 pub fn common() -> String {
     assert!((characteristic_exponent() - 5.0).abs() < 1e-12, "characteristic_ghost assumes gamma = 1.4 (integer power 5)");
     format!(
-        "const SHOCK_SENSOR_LO: f32 = {:e};\nconst SHOCK_SENSOR_HI: f32 = {:e};\nconst LOW_MACH_FLOOR: f32 = {:e};\n{}",
+        "const SHOCK_SENSOR_LO: f32 = {:e};\nconst SHOCK_SENSOR_HI: f32 = {:e};\nconst LOW_MACH_FLOOR: f32 = {:e};\n{}{}",
         bowshock_core::flux::SHOCK_SENSOR_LO,
         bowshock_core::flux::SHOCK_SENSOR_HI,
         bowshock_core::flux::LOW_MACH_FLOOR,
+        crate::PARAMS_WGSL,
         COMMON_TEMPLATE
     )
 }
