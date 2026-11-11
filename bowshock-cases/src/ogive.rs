@@ -4,6 +4,7 @@
 //! The geometry (`shock_expansion::Ogive`) is non-dimensionalised with the body diameter `d = 1`
 //! (radius `R = 0.5`); the nose runs over `0 <= x <= L_nose` and the cylinder over `L_nose <= x <= L_nose + cyl_length`.
 
+use bowshock::result::WallPoint;
 use bowshock_core::flux::Limiter;
 use bowshock_core::gas::freestream;
 use bowshock_core::grid::Grid;
@@ -182,20 +183,6 @@ impl OgiveCase {
         };
         Solver::new(ogive_grid(&self.grid_params()), cfg)
     }
-}
-
-/// One wall face of the body.
-#[derive(Clone, Copy, Debug)]
-pub struct WallPoint {
-    /// Face centre (x/d, r/d).
-    pub x: f64,
-    pub r: f64,
-    /// `s = (r/R)^2` at the two face end nodes (for the base-area-referenced drag integral).
-    pub s0: f64,
-    pub s1: f64,
-    /// Cp from the wall value extrapolated linearly from cells j=0,1, and from the first cell.
-    pub cp: f64,
-    pub cp_cell: f64,
 }
 
 pub struct OgiveResult {

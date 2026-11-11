@@ -5,8 +5,8 @@
 //! Boundary set-up: inflow plane and outer boundary `Bc::Characteristic`; outflow plane `Bc::Characteristic` (default)
 //! or `Bc::PressureOutflow`; axis/body `Bc::SlipWall`. Lengths are in body diameters.
 
-use crate::body_grid::{large_domain_grid, Body, LargeGridParams, Nose};
-use crate::ogive::WallPoint;
+use bowshock::body_grid::{large_domain_grid, Body, LargeGridParams, Nose};
+use bowshock::result::WallPoint;
 use bowshock_core::flux::Limiter;
 use bowshock_core::gas::{cons_to_prim, freestream, sound_speed};
 use bowshock_core::solver::{Bc, Config, Scheme, Solver};

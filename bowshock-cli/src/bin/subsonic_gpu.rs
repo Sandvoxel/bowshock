@@ -11,7 +11,7 @@
 //! Mach number; implicit scheme, van Albada, low-Mach correction on). `--no-cpu` skips the CPU runs (GPU results only); `--validate` runs the
 //! NASA TM X-2439 (Fox 1971) configurations on the GPU and prints the statistics of the CPU bin. Output: `out/gpu_subsonic/`.
 
-use bowshock_cases::body_grid::Body;
+use bowshock::body_grid::Body;
 use bowshock_cases::subsonic::{fox_case, fox_tm_x2439 as fox, run_on, wall_cp_at, SubsonicCase, SubsonicResult};
 use bowshock_cases::transonic::named_body;
 use bowshock_core::flux::Limiter;

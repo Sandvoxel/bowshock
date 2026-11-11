@@ -10,7 +10,7 @@
 //! -> `fox_*.csv`, `tables_validate.md`; `--lowmach-study` = low-Mach correction on/off at M = 0.1 ... 0.5 against potential theory
 //! -> `lowmach_<tag>.csv`, `tables_lowmach.md`.
 
-use bowshock_cases::body_grid::{Body, Nose};
+use bowshock::body_grid::{Body, Nose};
 use bowshock_cases::subsonic::{fox_case, fox_tm_x2439 as fox, run_on, run_subsonic, wall_cp_at, SubsonicCase, SubsonicResult};
 use bowshock_cases::transonic::named_body;
 use bowshock_core::flux::Limiter;

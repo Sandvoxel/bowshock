@@ -75,9 +75,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bowshock"
+version = "0.1.0"
+dependencies = [
+ "bowshock-core",
+ "bowshock-reference",
+]
+
+[[package]]
 name = "bowshock-cases"
 version = "0.1.0"
 dependencies = [
+ "bowshock",
  "bowshock-core",
  "bowshock-reference",
  "gif",
@@ -88,6 +97,7 @@ dependencies = [
 name = "bowshock-cli"
 version = "0.1.0"
 dependencies = [
+ "bowshock",
  "bowshock-cases",
  "bowshock-core",
  "bowshock-gpu",
@@ -117,6 +127,7 @@ dependencies = [
 name = "bowshock-gpu-cases"
 version = "0.1.0"
 dependencies = [
+ "bowshock",
  "bowshock-cases",
  "bowshock-core",
  "bowshock-gpu",

@@ -3,7 +3,8 @@
 //! `bowshock_cases::ogive` (copied: it is private there) and CPU/GPU comparison metrics.
 
 use crate::run::{cpu_loop, field_diff, gpu_loop, Run};
-use bowshock_cases::ogive::{OgiveCase, WallPoint};
+use bowshock::result::WallPoint;
+use bowshock_cases::ogive::OgiveCase;
 use bowshock_core::gas::cons_to_prim;
 use bowshock_core::grid::Grid;
 use bowshock_gpu::{Mode, Precision, Result};

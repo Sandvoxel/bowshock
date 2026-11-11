@@ -468,7 +468,7 @@ fn transonic_run_and_warm_start_match_cpu() {
 // ---------------------------------------------------------------------------------------------------------------------
 // Subsonic components: low-Mach flux correction, solid block (base / wake), line-implicit convergence scheme.
 
-use bowshock_cases::body_grid::Nose;
+use bowshock::body_grid::Nose;
 use bowshock_cases::subsonic::{self, SubsonicCase};
 use bowshock_core::flux::{face_flux_lm, low_mach_states};
 use bowshock_core::solver::Scheme;

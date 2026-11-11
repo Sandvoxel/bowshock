@@ -1,5 +1,5 @@
 [workspace]
-members = ["bowshock-core", "bowshock-reference", "bowshock-cases", "bowshock-gpu", "bowshock-gpu-cases", "bowshock-cli"]
+members = ["bowshock", "bowshock-core", "bowshock-reference", "bowshock-cases", "bowshock-gpu", "bowshock-gpu-cases", "bowshock-cli"]
 resolver = "2"
 
 [workspace.package]
@@ -9,6 +9,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/Sandvoxel/bowshock"
 
 [workspace.dependencies]
+bowshock = { path = "bowshock", default-features = false }
 bowshock-core = { path = "bowshock-core" }
 bowshock-reference = { path = "bowshock-reference" }
 bowshock-cases = { path = "bowshock-cases" }

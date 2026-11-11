@@ -7,8 +7,8 @@
 //! maximum cross-section `pi R^2`; one formula covers every wall part, `CD = integral Cp d(r^2 / R^2)` along the surface from the
 //! nose tip downstream (the base face is traversed from its outer to its inner radius, so `CD_base = -Cp_b A_b / A_ref`).
 
-use crate::body_grid::{base_domain_grid, large_domain_grid, BaseBody, BaseGridParams, Body, LargeGridParams, Nose};
-use crate::ogive::WallPoint;
+use bowshock::body_grid::{base_domain_grid, large_domain_grid, BaseBody, BaseGridParams, Body, LargeGridParams, Nose};
+use bowshock::result::WallPoint;
 use bowshock_core::flux::Limiter;
 use bowshock_core::gas::{cons_to_prim, freestream};
 use bowshock_core::implicit::ImplicitParams;
@@ -566,8 +566,8 @@ mod tests {
     /// the implicit variants are also compared with each other in the second-order van Albada scheme.
     #[test]
     fn converged_state_is_independent_of_the_acceleration_scheme() {
-        use crate::body_grid::Nose;
         use crate::subsonic::SubsonicCase;
+        use bowshock::body_grid::Nose;
         use bowshock_core::flux::Limiter;
         use bowshock_core::gas::Cons;
         use bowshock_core::solver::Scheme;

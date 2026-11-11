@@ -1,6 +1,6 @@
 //! Per-kernel GPU time of the line-implicit scheme on the subsonic sting case (`subsonic_gpu --base off`): `imp_profile [--f32]`.
 //! Best of 20 profiled runs of 20 iterations per kernel (the GPU may be shared).
-use bowshock_cases::body_grid::Nose;
+use bowshock::body_grid::Nose;
 use bowshock_cases::subsonic::SubsonicCase;
 use bowshock_gpu::{GpuSolver, Mode, Precision};
 use std::collections::BTreeMap;
