@@ -30,37 +30,56 @@ impl Case {
     /// doubling each level).
     pub fn new(mach: f64, body: BaseBody, level: u32, wake: Wake, numerics: Numerics) -> Case {
         let f = 1usize << level;
+        let dx_tip = 0.03 / f as f64;
         let l_body = body.x_base();
-        let n_boat = if body.boat_length > 0.0 { 24 * f } else { 0 };
         let n_sting = if body.sting_radius > 0.0 { 4 * f } else { 0 };
+        let nseg = body.segments.len();
+        // cells per segment: tubes are finer than cones, never finer than the end-cell size `dx_tip` allows
+        let count = |per: usize, length: f64| per.min(even_ceil(length / dx_tip)).max(4);
+        let n_seg_base: Vec<usize> = body.segments.iter().map(|s| count(if s.slope == 0.0 { 40 * f } else { 24 * f }, s.length)).collect();
+        let n_seg_sting: Vec<usize> = body
+            .segments
+            .iter()
+            .enumerate()
+            .map(|(k, s)| {
+                count(
+                    if s.slope != 0.0 {
+                        24 * f
+                    } else if k + 1 == nseg {
+                        36 * f
+                    } else {
+                        40 * f
+                    },
+                    s.length,
+                )
+            })
+            .collect();
         let grid_base = BaseGridParams {
-            body,
+            body: body.clone(),
             x_up: 10.0 * l_body,
             x_down: 5.0 * l_body,
             r_far: 10.0 * l_body,
             n_up: 28 * f,
             n_nose: 48 * f,
-            n_cyl: 40 * f,
-            n_boat,
+            n_seg: n_seg_base,
             n_wake: 40 * f,
             n_sting,
             n_gap: 12 * f,
             nj_out: 64 * f,
-            dx_tip: 0.03 / f as f64,
+            dx_tip,
             dr_wall: 0.03 / f as f64,
         };
         let grid_sting = LargeGridParams {
-            body: body.body,
-            cyl_length: body.cyl_length,
+            body: body.clone(),
             x_up: 10.0 * l_body,
             x_down: 5.0 * l_body,
             r_far: 10.0 * l_body,
             n_up: 30 * f,
             n_nose: 48 * f,
-            n_cyl: 36 * f,
+            n_seg: n_seg_sting,
             n_ext: 30 * f,
             nj: 70 * f,
-            dx_tip: 0.03 / f as f64,
+            dx_tip,
             dr_wall: 0.03 / f as f64,
         };
         Case { mach, body, wake, grid_base, grid_sting, numerics }
@@ -83,8 +102,8 @@ impl Case {
         let g = &self.grid_sting;
         let b = &self.grid_base;
         match self.wake {
-            Wake::Base => (b.n_up + b.n_nose + b.n_cyl + b.n_boat + b.n_wake, b.n_sting + b.n_gap + b.nj_out),
-            Wake::Sting => (g.n_up + g.n_nose + g.n_cyl + g.n_ext, g.nj),
+            Wake::Base => (b.n_up + b.n_nose + b.n_seg.iter().sum::<usize>() + b.n_wake, b.n_sting + b.n_gap + b.nj_out),
+            Wake::Sting => (g.n_up + g.n_nose + g.n_seg.iter().sum::<usize>() + g.n_ext, g.nj),
         }
     }
 
@@ -113,4 +132,10 @@ impl Case {
         s.set_scheme(n.scheme);
         s
     }
+}
+
+/// Smallest even integer `>= x` (`x >= 0`).
+fn even_ceil(x: f64) -> usize {
+    let n = x.ceil() as usize;
+    n + n % 2
 }

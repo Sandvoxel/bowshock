@@ -12,7 +12,7 @@ use bowshock::numerics::Numerics;
 /// Transonic validation case: nose + cylinder `cyl_length` long, sting wake (no base), explicit minmod numerics
 /// ([`Numerics::transonic`]); domain 10 body lengths upstream and radially, 5 downstream.
 pub fn transonic_case(mach: f64, level: u32, body: Body, cyl_length: f64) -> Case {
-    Case::new(mach, BaseBody { body, cyl_length, boat_length: 0.0, boat_angle: 0.0, sting_radius: 0.0 }, level, Wake::Sting, Numerics::transonic())
+    Case::new(mach, BaseBody::cylinder(body, cyl_length), level, Wake::Sting, Numerics::transonic())
 }
 
 /// Published free-flight nose pressure-drag data, zero lift, fineness-ratio-3 noses on a cylinder.
@@ -283,7 +283,7 @@ mod tests {
         // shrink to keep the test quick
         case.grid_sting.n_up = 16;
         case.grid_sting.n_nose = 32;
-        case.grid_sting.n_cyl = 16;
+        case.grid_sting.n_seg[0] = 16;
         case.grid_sting.n_ext = 14;
         case.grid_sting.nj = 40;
         case.grid_sting.dx_tip = 0.04;

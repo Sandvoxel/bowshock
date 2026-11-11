@@ -14,7 +14,7 @@ use bowshock::numerics::Numerics;
 /// (`Wake::Base`); otherwise the cylinder continues as a sting to the outflow plane (`Wake::Sting`). Numerics:
 /// [`Numerics::subsonic`] (line-implicit, van Albada limiter, low-Mach correction on).
 pub fn subsonic_case(mach: f64, nose: Nose, level: u32, base: bool) -> Case {
-    let body = BaseBody { body: Body { nose }, cyl_length: 6.0, boat_length: 0.0, boat_angle: 0.0, sting_radius: 0.0 };
+    let body = BaseBody::cylinder(Body { nose }, 6.0);
     let wake = if base { Wake::Base } else { Wake::Sting };
     Case::new(mach, body, level, wake, Numerics::subsonic(level, wake))
 }
@@ -23,7 +23,7 @@ pub fn subsonic_case(mach: f64, nose: Nose, level: u32, base: bool) -> Case {
 /// with cylinder, 10 deg boattail and the flat annular base on a sting (`fox_tm_x2439`), at Mach number `mach`.
 pub fn fox_case(cone: bool, mach: f64, level: u32) -> Case {
     let nose = if cone { Nose::Cone { half_angle: 10f64.to_radians() } } else { Nose::TangentOgive { fineness: 2.0 } };
-    let body = BaseBody { body: Body { nose }, cyl_length: 2.0, boat_length: 1.0, boat_angle: 10f64.to_radians(), sting_radius: fox_tm_x2439::STING_RADIUS };
+    let body = BaseBody::cylinder(Body { nose }, 2.0).with_boattail(1.0, 10f64.to_radians()).with_sting(fox_tm_x2439::STING_RADIUS);
     Case::new(mach, body, level, Wake::Base, Numerics::subsonic(level, Wake::Base))
 }
 
@@ -98,7 +98,7 @@ mod tests {
         let mut c = subsonic_case(mach, Nose::TangentOgive { fineness: 3.0 }, 0, base).with_domain(5.0, 2.5);
         c.grid_base.n_up = 12;
         c.grid_base.n_nose = 24;
-        c.grid_base.n_cyl = 20;
+        c.grid_base.n_seg[0] = 20;
         c.grid_base.n_wake = 16;
         c.grid_base.n_gap = 8;
         c.grid_base.nj_out = 24;
@@ -106,7 +106,7 @@ mod tests {
         c.grid_base.dr_wall = 0.08;
         c.grid_sting.n_up = 12;
         c.grid_sting.n_nose = 24;
-        c.grid_sting.n_cyl = 20;
+        c.grid_sting.n_seg[0] = 20;
         c.grid_sting.n_ext = 12;
         c.grid_sting.nj = 32;
         c.grid_sting.dx_tip = 0.08;
@@ -150,7 +150,7 @@ mod tests {
         assert!(r.min_rho > 0.0 && r.min_p > 0.0);
         assert!(r.cp_base < -0.01 && r.cp_base > -0.5, "Cp_b {}", r.cp_base);
         assert!((r.cd_base + r.cp_base).abs() < 1e-12, "base CD {} vs -Cp_b {}", r.cd_base, -r.cp_base);
-        assert!((r.cd_total - (r.cd_nose + r.cd_cyl + r.cd_boat + r.cd_base)).abs() < 1e-14);
+        assert!((r.cd_total - (r.cd_nose + r.cd_aft[0] + r.cd_base)).abs() < 1e-14);
         assert!(r.cd_base > 0.0 && r.cd_base > 5.0 * r.cd_nose.abs());
         assert_eq!(r.base_wall.len(), c.grid_base.n_gap);
         assert!((r.cd_base_model - base_drag_coefficient(0.2)).abs() < 1e-15);
@@ -191,7 +191,7 @@ mod tests {
         let mut case = subsonic_case(0.5, Nose::TangentOgive { fineness: 3.0 }, 0, false);
         case.grid_sting.n_up = 12;
         case.grid_sting.n_nose = 20;
-        case.grid_sting.n_cyl = 12;
+        case.grid_sting.n_seg[0] = 12;
         case.grid_sting.n_ext = 12;
         case.grid_sting.nj = 24;
         case.grid_sting.x_up = 10.0;

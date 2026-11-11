@@ -168,9 +168,9 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
     let tag = arg(args, "--tag").map(String::from).unwrap_or_else(|| format!("{body_name}_L{}{}", opts.level, if warm { "_warm" } else { "" }));
     let make = |m: f64, base: bool| {
         let mut bb = subsonic_case(m, body.nose, opts.level, base);
-        bb.body.cyl_length = cyl;
-        bb.grid_base.body.cyl_length = cyl;
-        bb.grid_sting.cyl_length = cyl;
+        bb.body.segments[0].length = cyl;
+        bb.grid_base.body.segments[0].length = cyl;
+        bb.grid_sting.body.segments[0].length = cyl;
         opts.apply(bb)
     };
     let c0 = make(machs[0], true);
@@ -218,7 +218,7 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
             write_case_files(out_dir, &name, &res, pot.as_ref());
             println!(
                 "M={m:<4} base={:<5} {:>6} iters ({dt:6.1} s) {:<22} drop {:.1}: CD nose {:+.4} cyl {:+.4} boat {:+.4} base {:+.4} total {:+.4}; Cp_b {:+.4} (window range {:.1e}); Cp_min {:+.3} @ {:.2}; M_max {:.2}; vs Goethert {:.4} (incomp. {:.4}); far-field |dp/p| {:.1e}",
-                base, res.iters, res.stop_reason, res.drop_orders, res.cd_nose, res.cd_cyl, res.cd_boat, res.cd_base, res.cd_total, res.cp_base_mean, res.cp_base_range, res.cp_min, res.x_cp_min, res.m_max, rg, ri, res.farfield_dp
+                base, res.iters, res.stop_reason, res.drop_orders, res.cd_nose, res.cd_aft[0], res.cd_aft.get(1).copied().unwrap_or(0.0), res.cd_base, res.cd_total, res.cp_base_mean, res.cp_base_range, res.cp_min, res.x_cp_min, res.m_max, rg, ri, res.farfield_dp
             );
             writeln!(
                 sweep_csv,
@@ -227,8 +227,8 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
                 res.stop_reason,
                 res.drop_orders,
                 res.cd_nose,
-                res.cd_cyl,
-                res.cd_boat,
+                res.cd_aft[0],
+                res.cd_aft.get(1).copied().unwrap_or(0.0),
                 res.cd_base,
                 res.cd_total,
                 res.cp_base_mean,
@@ -310,7 +310,7 @@ fn validate(out_dir: &Path, opts: &Opts) {
             let data_base = if cone { fox::BASE_CP_CONE[k] } else { fox::BASE_CP_OGIVE[k] };
             println!(
                 "config {cfg} M={m}: {} iters ({dt:.1} s) {} drop {:.1}; Cp RMS (x <= {x_fore}) {:.4} max {:.4} ({} stations), boattail RMS {:.4}; base Cp CFD {:+.4} vs data {:+.4}; CD fore {:+.4} boat {:+.4} base {:+.4} total {:+.4}; gage unc. {:.4}",
-                r.iters, r.stop_reason, r.drop_orders, (s1 / n1 as f64).sqrt(), m1, n1, (s2 / n2.max(1) as f64).sqrt(), r.cp_base_mean, data_base, r.cd_nose, r.cd_boat, r.cd_base, r.cd_total, fox::CP_UNCERTAINTY[k]
+                r.iters, r.stop_reason, r.drop_orders, (s1 / n1 as f64).sqrt(), m1, n1, (s2 / n2.max(1) as f64).sqrt(), r.cp_base_mean, data_base, r.cd_nose, r.cd_aft.get(1).copied().unwrap_or(0.0), r.cd_base, r.cd_total, fox::CP_UNCERTAINTY[k]
             );
             writeln!(
                 md,
@@ -322,8 +322,8 @@ fn validate(out_dir: &Path, opts: &Opts) {
                 (s2 / n2.max(1) as f64).sqrt(),
                 r.cp_base_mean,
                 data_base,
-                r.cd_nose + r.cd_cyl,
-                r.cd_boat,
+                r.cd_nose + r.cd_aft[0],
+                r.cd_aft.get(1).copied().unwrap_or(0.0),
                 r.cd_base,
                 r.cd_total,
                 fox::CP_UNCERTAINTY[k]

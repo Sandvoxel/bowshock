@@ -80,14 +80,14 @@ pub struct PointResult {
     /// Forebody CD from the extrapolated wall Cp and from the first-cell Cp.
     pub cd_nose: f64,
     pub cd_nose_cell: f64,
-    pub cd_cyl: f64,
-    pub cd_boat: f64,
+    /// Pressure drag of each aft segment (`body.segments` order), from the extrapolated wall Cp.
+    pub cd_aft: Vec<f64>,
     pub cd_base: f64,
-    /// `cd_nose + cd_cyl + cd_boat + cd_base`.
+    /// `cd_nose + cd_aft[0] + cd_aft[1] + .. + cd_base`.
     pub cd_total: f64,
     /// Base drag of the empirical free-flight correlation scaled to `pi R^2`; 0 without base, NaN for a sting-mounted base.
     pub cd_base_model: f64,
-    /// `cd_nose + cd_cyl + cd_boat + cd_base_model`.
+    /// `cd_nose + cd_aft[0] + cd_aft[1] + .. + cd_base_model`.
     pub cd_total_model: f64,
     /// Area-averaged base Cp (extrapolated wall values) and the first-cell variant; NaN without base.
     pub cp_base: f64,

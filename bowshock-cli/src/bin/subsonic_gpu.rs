@@ -234,9 +234,9 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
     });
     let make = |m: f64, base: bool| {
         let mut bb = subsonic_case(m, body.nose, opts.level, base);
-        bb.body.cyl_length = cyl;
-        bb.grid_base.body.cyl_length = cyl;
-        bb.grid_sting.cyl_length = cyl;
+        bb.body.segments[0].length = cyl;
+        bb.grid_base.body.segments[0].length = cyl;
+        bb.grid_sting.body.segments[0].length = cyl;
         opts.apply(bb)
     };
     if args.iter().any(|a| a == "--bench-only") {
@@ -287,7 +287,7 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
                 .map_or(String::new(), |c| format!("CPU {:>6} it ({:6.1} s, {}, {:.1} orders) | ", c.iters, row.cpu_s, c.stop_reason, c.drop_orders));
             println!(
                 "M = {m:<4} {cpu_txt}GPU {:>6} it stop / {} exec ({:6.2} s, {}, {:.1} orders) | CD nose {:+.5} cyl {:+.5} base {:+.5} total {:+.5}, Cp_b {:+.4}; vs CPU: dCD_total {:+.1e}, dCp_b {:+.1e}, max |dCp| {:.1e}",
-                row.gpu.iters_stop, row.gpu.iters_exec, row.gpu.loop_seconds, g.stop_reason, g.drop_orders, g.cd_nose, g.cd_cyl, g.cd_base, g.cd_total, g.cp_base_mean,
+                row.gpu.iters_stop, row.gpu.iters_exec, row.gpu.loop_seconds, g.stop_reason, g.drop_orders, g.cd_nose, g.cd_aft[0], g.cd_base, g.cd_total, g.cp_base_mean,
                 row.cpu.as_ref().map_or(f64::NAN, |c| g.cd_total - c.cd_total), row.cpu.as_ref().map_or(f64::NAN, |c| g.cp_base_mean - c.cp_base_mean), row.max_dcp
             );
             write_case_files(out_dir, &format!("{tag}_M{m}_{}", if base { "base" } else { "nobase" }), &row);
@@ -423,8 +423,8 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
             r.cpu_s,
             g.cd_nose,
             o(c.map(|c| c.cd_nose)),
-            g.cd_cyl,
-            o(c.map(|c| c.cd_cyl)),
+            g.cd_aft[0],
+            o(c.map(|c| c.cd_aft[0])),
             g.cd_base,
             o(c.map(|c| c.cd_base)),
             g.cd_total,

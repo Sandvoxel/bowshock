@@ -140,9 +140,6 @@ impl Analysis {
                 return Err(Error::InvalidInput(format!("Mach number {m} is outside [{}, {}]", MACH_RANGE.0, MACH_RANGE.1)));
             }
         }
-        if self.wake == Wake::Sting && self.body.boat_length > 0.0 {
-            return Err(Error::Unsupported("a sting-mounted body cannot have a boattail yet".into()));
-        }
 
         // cases in ascending Mach order (stable), results restored to input order below
         let mut order: Vec<usize> = (0..machs.len()).collect();
@@ -169,11 +166,11 @@ impl Analysis {
         if let Some(cap) = self.max_iterations {
             numerics.max_iter = numerics.max_iter.min(cap);
         }
-        Case::new(mach, self.body, level, self.wake, numerics)
+        Case::new(mach, self.body.clone(), level, self.wake, numerics)
     }
 
     fn point(&self, mach: f64, detail: PointResult) -> PolarPoint {
-        let forebody_pressure = detail.cd_nose + detail.cd_cyl + detail.cd_boat;
+        let forebody_pressure = detail.cd_aft.iter().fold(detail.cd_nose, |a, c| a + c);
         let base = base_drag_coefficient(mach) * (self.body.base_radius() / self.body.body.radius()).powi(2);
         let drag = Drag { forebody_pressure, friction: None, base, base_modelled: true, total: forebody_pressure + base };
         PolarPoint { mach, alpha: 0.0, drag, detail }

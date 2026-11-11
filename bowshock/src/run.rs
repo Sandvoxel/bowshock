@@ -174,18 +174,13 @@ pub fn finish(case: &Case, s: &Solver, residual: Vec<f64>, rmax: f64, hist: Vec<
     let rb2 = bb.body.radius().powi(2);
     let blk = s.block();
     let (wall, cd_nose, cd_nose_cell) = wall_distribution(bb, s);
-    let (mut cd_cyl, mut cd_boat) = (0.0, 0.0);
+    let mut cd_aft = vec![0.0; bb.segments.len()];
+    let stations: Vec<f64> = (0..=bb.segments.len()).map(|k| bb.station(k).0).collect();
     for w in &wall {
-        if w.x < bb.body.nose_length() {
-            continue;
-        }
-        let dcd = w.cp * (w.s1 - w.s0);
-        if w.x < bb.x_shoulder() {
-            cd_cyl += dcd;
-        } else if w.x < bb.x_base() {
-            cd_boat += dcd;
-        } else {
-            // sting continuing to the outflow (no base): zero projected area, not counted
+        // a face belongs to segment k when stations[k] <= x < stations[k + 1]; the sting extension behind the base has no
+        // projected area and is not counted, nor is the nose
+        if let Some(k) = (0..cd_aft.len()).find(|&k| w.x >= stations[k] && w.x < stations[k + 1]) {
+            cd_aft[k] += w.cp * (w.s1 - w.s0);
         }
     }
     let (base_wall, cd_base, cp_base, cp_base_cell) = base_state(s, rb2);
@@ -241,6 +236,8 @@ pub fn finish(case: &Case, s: &Solver, residual: Vec<f64>, rmax: f64, hist: Vec<
             }
         }
     }
+    let fore = cd_aft.iter().fold(cd_nose, |a, c| a + c);
+    let (cd_total, cd_total_model) = (fore + cd_base, fore + cd_base_model);
     let last = residual.last().copied().unwrap_or(rmax);
     let drop_orders = if rmax > 0.0 && last > 0.0 { (rmax / last).log10() } else { 0.0 };
     PointResult {
@@ -255,12 +252,11 @@ pub fn finish(case: &Case, s: &Solver, residual: Vec<f64>, rmax: f64, hist: Vec<
         base_wall,
         cd_nose,
         cd_nose_cell,
-        cd_cyl,
-        cd_boat,
+        cd_aft,
         cd_base,
-        cd_total: cd_nose + cd_cyl + cd_boat + cd_base,
+        cd_total,
         cd_base_model,
-        cd_total_model: cd_nose + cd_cyl + cd_boat + cd_base_model,
+        cd_total_model,
         cp_base,
         cp_base_cell,
         cp_base_mean,
