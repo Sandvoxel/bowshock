@@ -1,4 +1,4 @@
-use bowshock::analysis::{Analysis, Backend, Resolution};
+use bowshock::analysis::{Analysis, Backend, Quality, Resolution, Warning};
 use bowshock::body_grid::{BaseBody, Body, Nose};
 use bowshock::error::Error;
 use bowshock::spec::{AftSpec, BodySpec, NoseShape, NoseSpec};
@@ -84,4 +84,31 @@ fn drag_is_referenced_to_the_largest_cross_section() {
     let internal_total = p.detail.cd_aft.iter().fold(p.detail.cd_nose, |a, c| a + c) + base;
     let expected = internal_total * 0.64;
     assert!((p.drag.total - expected).abs() <= 1e-12 * expected.abs(), "{} vs {expected}", p.drag.total);
+}
+
+fn cone_body() -> BaseBody {
+    BaseBody::cylinder(Body { nose: Nose::Cone { half_angle: (0.5f64 / 3.0).atan() } }, 6.0)
+}
+
+#[test]
+fn iteration_cap_gives_stalled() {
+    let polar = analysis(body()).max_iterations(60).run(&[0.9]).unwrap();
+    assert_eq!(polar.points[0].quality, Quality::Stalled);
+}
+
+#[test]
+fn sharp_corner_warning_only_for_the_cone() {
+    let cone = analysis(cone_body()).max_iterations(30).run(&[0.9]).unwrap();
+    assert!(cone.points[0].warnings.contains(&Warning::SharpCornerTransonic), "{:?}", cone.points[0].warnings);
+    let ogive = analysis(body()).max_iterations(30).run(&[0.9]).unwrap();
+    assert!(!ogive.points[0].warnings.contains(&Warning::SharpCornerTransonic), "{:?}", ogive.points[0].warnings);
+}
+
+#[test]
+fn uncertainty_is_reported_only_when_asked() {
+    let off = analysis(body()).run(&[0.6]).unwrap();
+    assert_eq!(off.points[0].cd_uncertainty, None);
+    let on = analysis(body()).max_iterations(200).estimate_uncertainty(true).run(&[0.6]).unwrap();
+    let u = on.points[0].cd_uncertainty.expect("both levels finite");
+    assert!(u.is_finite(), "{u}");
 }
