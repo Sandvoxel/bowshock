@@ -90,8 +90,11 @@ impl Block {
         }
     }
     pub fn coarsen(&self) -> Option<Block> {
-        (self.i_end % 2 == 0 && self.j_end % 2 == 0 && self.j_sting % 2 == 0)
-            .then_some(Block { i_end: self.i_end / 2, j_end: self.j_end / 2, j_sting: self.j_sting / 2 })
+        (self.i_end % 2 == 0 && self.j_end % 2 == 0 && self.j_sting % 2 == 0).then_some(Block {
+            i_end: self.i_end / 2,
+            j_end: self.j_end / 2,
+            j_sting: self.j_sting / 2,
+        })
     }
 }
 
@@ -224,7 +227,12 @@ impl Solver {
     pub fn set_block(&mut self, block: Option<Block>) {
         if let Some(b) = block {
             assert!(
-                b.i_end >= 1 && b.i_end + 2 <= self.grid.ni && b.j_end >= 2 && b.j_end + 2 <= self.grid.nj && b.j_end > b.j_sting && (b.j_sting == 0 || b.j_sting >= 2),
+                b.i_end >= 1
+                    && b.i_end + 2 <= self.grid.ni
+                    && b.j_end >= 2
+                    && b.j_end + 2 <= self.grid.nj
+                    && b.j_end > b.j_sting
+                    && (b.j_sting == 0 || b.j_sting >= 2),
                 "block out of range"
             );
         }
@@ -313,16 +321,12 @@ impl Solver {
         // 1. primitives
         {
             let u = &self.u;
-            self.w
-                .par_chunks_mut(nw)
-                .enumerate()
-                .filter(|(jj, _)| *jj >= NG && *jj < nj + NG)
-                .for_each(|(jj, row)| {
-                    let j = jj - NG;
-                    for i in 0..ni {
-                        row[i + NG] = cons_to_prim(&u[j * ni + i]);
-                    }
-                });
+            self.w.par_chunks_mut(nw).enumerate().filter(|(jj, _)| *jj >= NG && *jj < nj + NG).for_each(|(jj, row)| {
+                let j = jj - NG;
+                for i in 0..ni {
+                    row[i + NG] = cons_to_prim(&u[j * ni + i]);
+                }
+            });
         }
         self.fill_ghosts();
         if let Some(b) = blk {
@@ -350,26 +354,15 @@ impl Solver {
                             // of the fluid cell across the base about the base-wall normal
                             let fb = &grid.iface[j * (ni + 1) + b.i_end];
                             let (m1, p0, p1) = (w[pidx(ni, ii - 1, jj)], w[pidx(ni, ii, jj)], w[pidx(ni, ii + 1, jj)]);
-                            let (m2, m1) = if i == b.i_end {
-                                (reflect(&p1, fb.nx, fb.nr), reflect(&p0, fb.nx, fb.nr))
-                            } else {
-                                (reflect(&m1, fb.nx, fb.nr), m1)
-                            };
+                            let (m2, m1) =
+                                if i == b.i_end { (reflect(&p1, fb.nx, fb.nr), reflect(&p0, fb.nx, fb.nr)) } else { (reflect(&m1, fb.nx, fb.nr), m1) };
                             *out = face_flux_lm(&m2, &m1, &p0, &p1, lim, f.nx, f.nr, low_mach);
                             continue;
                         }
                     }
                 }
-                *out = face_flux_lm(
-                    &w[pidx(ni, ii - 2, jj)],
-                    &w[pidx(ni, ii - 1, jj)],
-                    &w[pidx(ni, ii, jj)],
-                    &w[pidx(ni, ii + 1, jj)],
-                    lim,
-                    f.nx,
-                    f.nr,
-                    low_mach,
-                );
+                *out =
+                    face_flux_lm(&w[pidx(ni, ii - 2, jj)], &w[pidx(ni, ii - 1, jj)], &w[pidx(ni, ii, jj)], &w[pidx(ni, ii + 1, jj)], lim, f.nx, f.nr, low_mach);
             }
         });
         // 2b. j-face fluxes
@@ -384,71 +377,65 @@ impl Solver {
                         continue;
                     }
                 }
-                *out = face_flux_lm(
-                    &w[pidx(ni, ii, jj - 2)],
-                    &w[pidx(ni, ii, jj - 1)],
-                    &w[pidx(ni, ii, jj)],
-                    &w[pidx(ni, ii, jj + 1)],
-                    lim,
-                    f.nx,
-                    f.nr,
-                    low_mach,
-                );
+                *out =
+                    face_flux_lm(&w[pidx(ni, ii, jj - 2)], &w[pidx(ni, ii, jj - 1)], &w[pidx(ni, ii, jj)], &w[pidx(ni, ii, jj + 1)], lim, f.nx, f.nr, low_mach);
             }
         });
 
         // 3. cell residuals
         let (fi, fj) = (&*fi, &*fj);
-        res.par_chunks_mut(ni).zip(dt.par_chunks_mut(ni)).zip(irs_ei.par_chunks_mut(ni)).zip(irs_ej.par_chunks_mut(ni)).enumerate().for_each(|(j, (((rrow, drow), erow_i), erow_j))| {
-            for i in 0..ni {
-                if blk.map_or(false, |b| b.solid(i, j)) {
-                    rrow[i] = [0.0; 4];
-                    drow[i] = 0.0;
-                    erow_i[i] = 0.0;
-                    erow_j[i] = 0.0;
-                    continue;
-                }
-                let c = j * ni + i;
-                let fl = &grid.iface[j * (ni + 1) + i];
-                let fr = &grid.iface[j * (ni + 1) + i + 1];
-                let fb = &grid.jface[j * ni + i];
-                let ft = &grid.jface[(j + 1) * ni + i];
-                let (gl, gr) = (&fi[j * (ni + 1) + i], &fi[j * (ni + 1) + i + 1]);
-                let (gb, gt) = (&fj[j * ni + i], &fj[(j + 1) * ni + i]);
-                let (wl, wr, wb, wt) = (fl.w(), fr.w(), fb.w(), ft.w());
-                let wc = &w[pidx(ni, i as isize, j as isize)];
-                let inv_v = 1.0 / grid.vol[c];
-                let mut out = [0.0; 4];
-                for k in 0..4 {
-                    out[k] = -(gr[k] * wr - gl[k] * wl + gt[k] * wt - gb[k] * wb) * inv_v;
-                }
-                out[2] += wc[3] * grid.area[c] * inv_v; // axisymmetric pressure source p*A/V
-                if !forcing.is_empty() {
+        res.par_chunks_mut(ni).zip(dt.par_chunks_mut(ni)).zip(irs_ei.par_chunks_mut(ni)).zip(irs_ej.par_chunks_mut(ni)).enumerate().for_each(
+            |(j, (((rrow, drow), erow_i), erow_j))| {
+                for i in 0..ni {
+                    if blk.map_or(false, |b| b.solid(i, j)) {
+                        rrow[i] = [0.0; 4];
+                        drow[i] = 0.0;
+                        erow_i[i] = 0.0;
+                        erow_j[i] = 0.0;
+                        continue;
+                    }
+                    let c = j * ni + i;
+                    let fl = &grid.iface[j * (ni + 1) + i];
+                    let fr = &grid.iface[j * (ni + 1) + i + 1];
+                    let fb = &grid.jface[j * ni + i];
+                    let ft = &grid.jface[(j + 1) * ni + i];
+                    let (gl, gr) = (&fi[j * (ni + 1) + i], &fi[j * (ni + 1) + i + 1]);
+                    let (gb, gt) = (&fj[j * ni + i], &fj[(j + 1) * ni + i]);
+                    let (wl, wr, wb, wt) = (fl.w(), fr.w(), fb.w(), ft.w());
+                    let wc = &w[pidx(ni, i as isize, j as isize)];
+                    let inv_v = 1.0 / grid.vol[c];
+                    let mut out = [0.0; 4];
                     for k in 0..4 {
-                        out[k] += forcing[c][k];
+                        out[k] = -(gr[k] * wr - gl[k] * wl + gt[k] * wt - gb[k] * wb) * inv_v;
+                    }
+                    out[2] += wc[3] * grid.area[c] * inv_v; // axisymmetric pressure source p*A/V
+                    if !forcing.is_empty() {
+                        for k in 0..4 {
+                            out[k] += forcing[c][k];
+                        }
+                    }
+                    rrow[i] = out;
+                    if compute_dt {
+                        let cs = sound_speed(wc);
+                        let lam = |f: &Face| ((wc[1] * f.nx + wc[2] * f.nr).abs() + cs) * f.len;
+                        if irs.on() {
+                            let (li, lj) = (0.5 * (lam(fl) + lam(fr)), 0.5 * (lam(fb) + lam(ft)));
+                            let d = cfl * grid.area[c] / (li + lj);
+                            drow[i] = d;
+                            let coef = |l: f64| {
+                                let r = d * l / grid.area[c] / irs.cfl_star;
+                                (0.25 * (r * r - 1.0)).max(0.0)
+                            };
+                            erow_i[i] = coef(li);
+                            erow_j[i] = coef(lj);
+                        } else {
+                            let sum = lam(fl) + lam(fr) + lam(fb) + lam(ft);
+                            drow[i] = cfl * grid.area[c] / (0.5 * sum);
+                        }
                     }
                 }
-                rrow[i] = out;
-                if compute_dt {
-                    let cs = sound_speed(wc);
-                    let lam = |f: &Face| ((wc[1] * f.nx + wc[2] * f.nr).abs() + cs) * f.len;
-                    if irs.on() {
-                        let (li, lj) = (0.5 * (lam(fl) + lam(fr)), 0.5 * (lam(fb) + lam(ft)));
-                        let d = cfl * grid.area[c] / (li + lj);
-                        drow[i] = d;
-                        let coef = |l: f64| {
-                            let r = d * l / grid.area[c] / irs.cfl_star;
-                            (0.25 * (r * r - 1.0)).max(0.0)
-                        };
-                        erow_i[i] = coef(li);
-                        erow_j[i] = coef(lj);
-                    } else {
-                        let sum = lam(fl) + lam(fr) + lam(fb) + lam(ft);
-                        drow[i] = cfl * grid.area[c] / (0.5 * sum);
-                    }
-                }
-            }
-        });
+            },
+        );
     }
 
     /// L2 norm of `d rho / dt`, normalised by sqrt(N) (N = number of fluid cells). Includes the multigrid forcing.
@@ -593,7 +580,6 @@ fn thomas(n: usize, rhs: impl Fn(usize) -> Cons, lo: impl Fn(usize) -> f64, up: 
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -677,13 +663,7 @@ mod tests {
                 r[k] = 0.5 + t + 0.1 * (6.0 * s).sin() * (1.0 + t);
             }
         }
-        let cfg = Config {
-            cfl: 0.5,
-            limiter: Limiter::VanAlbada,
-            freestream: fs,
-            bc: [Bc::Freestream; 4],
-            first_order_iters: 0,
-        };
+        let cfg = Config { cfl: 0.5, limiter: Limiter::VanAlbada, freestream: fs, bc: [Bc::Freestream; 4], first_order_iters: 0 };
         let mut s = Solver::new(Grid::from_nodes(ni, nj, x, r), cfg);
         s.eval_residual(true);
         let m = s.res.iter().flat_map(|r| r.iter()).fold(0.0f64, |a, b| a.max(b.abs()));

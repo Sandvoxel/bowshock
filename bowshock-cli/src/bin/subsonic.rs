@@ -11,12 +11,12 @@
 //! -> `lowmach_<tag>.csv`, `tables_lowmach.md`.
 
 use bowshock_cases::body_grid::{Body, Nose};
-use bowshock_core::implicit::ImplicitParams;
-use bowshock_core::flux::Limiter;
-use bowshock_reference::potential::{nose_cylinder_body, solve, solve_compressible, PotentialSolution};
-use bowshock_core::solver::Scheme;
 use bowshock_cases::subsonic::{fox_case, fox_tm_x2439 as fox, run_on, run_subsonic, wall_cp_at, SubsonicCase, SubsonicResult};
 use bowshock_cases::transonic::named_body;
+use bowshock_core::flux::Limiter;
+use bowshock_core::implicit::ImplicitParams;
+use bowshock_core::solver::Scheme;
+use bowshock_reference::potential::{nose_cylinder_body, solve, solve_compressible, PotentialSolution};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
@@ -131,7 +131,13 @@ fn main() {
     let out_dir: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("out").join("subsonic");
     fs::create_dir_all(&out_dir).expect("create out dir");
     let opts = Opts::parse(&args);
-    println!("bowshock-core subsonic: grid level {}, limiter {:?}, low-Mach {}, scheme {}", opts.level, opts.limiter, opts.low_mach, if matches!(opts.scheme, Scheme::Explicit) { "explicit SSP-RK3" } else { "line-implicit" });
+    println!(
+        "bowshock-core subsonic: grid level {}, limiter {:?}, low-Mach {}, scheme {}",
+        opts.level,
+        opts.limiter,
+        opts.low_mach,
+        if matches!(opts.scheme, Scheme::Explicit) { "explicit SSP-RK3" } else { "line-implicit" }
+    );
     println!("threads (rayon): {}", rayon::current_num_threads());
     if args.iter().any(|a| a == "--validate") {
         validate(&out_dir, &opts);
@@ -168,7 +174,21 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
     println!("body {body_name} (nose l/d {:.2}), cylinder {cyl} d, {} sweep", body.nose_length(), if warm { "warm-start" } else { "cold-start" });
     let mut sweep_csv = String::from("mach,base,iters,seconds,stop_reason,drop_orders,cd_nose,cd_cylinder,cd_boattail,cd_base,cd_total,cp_base_mean,cp_base_range,cp_base_last,cp_min,x_cp_min,m_max,rms_vs_incompressible,rms_vs_goethert,farfield_dp_over_p\n");
     let mut md = String::new();
-    writeln!(md, "### {body_name}, grid level {}, {} cells (no base) / {} cells (base), {}\n", opts.level, { let (a, b) = make(machs[0], false).cells(); a * b }, { let (a, b) = c0.cells(); a * b }, if warm { "warm starts" } else { "cold starts" }).unwrap();
+    writeln!(
+        md,
+        "### {body_name}, grid level {}, {} cells (no base) / {} cells (base), {}\n",
+        opts.level,
+        {
+            let (a, b) = make(machs[0], false).cells();
+            a * b
+        },
+        {
+            let (a, b) = c0.cells();
+            a * b
+        },
+        if warm { "warm starts" } else { "cold starts" }
+    )
+    .unwrap();
     writeln!(md, "| M | base | iters | time [s] | residual drop | CD nose | CD base | CD total | CD base corr. | CD total corr. | Cp_base (mean, range) | Cp_min | RMS vs Goethert | RMS vs incompressible |").unwrap();
     writeln!(md, "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|").unwrap();
     for &base in &bases {
@@ -197,8 +217,45 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
                 "M={m:<4} base={:<5} {:>6} iters ({dt:6.1} s) {:<22} drop {:.1}: CD nose {:+.4} cyl {:+.4} boat {:+.4} base {:+.4} total {:+.4}; Cp_b {:+.4} (window range {:.1e}); Cp_min {:+.3} @ {:.2}; M_max {:.2}; vs Goethert {:.4} (incomp. {:.4}); far-field |dp/p| {:.1e}",
                 base, res.iters, res.stop_reason, res.drop_orders, res.cd_nose, res.cd_cyl, res.cd_boat, res.cd_base, res.cd_total, res.cp_base_mean, res.cp_base_range, res.cp_min, res.x_cp_min, res.m_max, rg, ri, res.farfield_dp
             );
-            writeln!(sweep_csv, "{m},{base},{},{dt:.1},{},{:.2},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.5},{:.3},{:.3},{:.5},{:.5},{:e}", res.iters, res.stop_reason, res.drop_orders, res.cd_nose, res.cd_cyl, res.cd_boat, res.cd_base, res.cd_total, res.cp_base_mean, res.cp_base_range, res.cp_base, res.cp_min, res.x_cp_min, res.m_max, ri, rg, res.farfield_dp).unwrap();
-            writeln!(md, "| {m} | {} | {} | {dt:.0} | {:.1} | {:+.4} | {:+.4} | {:+.4} | {:+.4} | {:+.4} | {} | {:.3} | {:.4} | {:.4} |", if base { "on" } else { "off" }, res.iters, res.drop_orders, res.cd_nose, res.cd_base, res.cd_total, res.cd_base_model, res.cd_total_model, if base { format!("{:+.3} ({:.0e})", res.cp_base_mean, res.cp_base_range) } else { "-".into() }, res.cp_min, rg, ri).unwrap();
+            writeln!(
+                sweep_csv,
+                "{m},{base},{},{dt:.1},{},{:.2},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.5},{:.3},{:.3},{:.5},{:.5},{:e}",
+                res.iters,
+                res.stop_reason,
+                res.drop_orders,
+                res.cd_nose,
+                res.cd_cyl,
+                res.cd_boat,
+                res.cd_base,
+                res.cd_total,
+                res.cp_base_mean,
+                res.cp_base_range,
+                res.cp_base,
+                res.cp_min,
+                res.x_cp_min,
+                res.m_max,
+                ri,
+                rg,
+                res.farfield_dp
+            )
+            .unwrap();
+            writeln!(
+                md,
+                "| {m} | {} | {} | {dt:.0} | {:.1} | {:+.4} | {:+.4} | {:+.4} | {:+.4} | {:+.4} | {} | {:.3} | {:.4} | {:.4} |",
+                if base { "on" } else { "off" },
+                res.iters,
+                res.drop_orders,
+                res.cd_nose,
+                res.cd_base,
+                res.cd_total,
+                res.cd_base_model,
+                res.cd_total_model,
+                if base { format!("{:+.3} ({:.0e})", res.cp_base_mean, res.cp_base_range) } else { "-".into() },
+                res.cp_min,
+                rg,
+                ri
+            )
+            .unwrap();
         }
     }
     fs::write(out_dir.join(format!("sweep_{tag}.csv")), sweep_csv).unwrap();
@@ -252,7 +309,23 @@ fn validate(out_dir: &Path, opts: &Opts) {
                 "config {cfg} M={m}: {} iters ({dt:.1} s) {} drop {:.1}; Cp RMS (x <= {x_fore}) {:.4} max {:.4} ({} stations), boattail RMS {:.4}; base Cp CFD {:+.4} vs data {:+.4}; CD fore {:+.4} boat {:+.4} base {:+.4} total {:+.4}; gage unc. {:.4}",
                 r.iters, r.stop_reason, r.drop_orders, (s1 / n1 as f64).sqrt(), m1, n1, (s2 / n2.max(1) as f64).sqrt(), r.cp_base_mean, data_base, r.cd_nose, r.cd_boat, r.cd_base, r.cd_total, fox::CP_UNCERTAINTY[k]
             );
-            writeln!(md, "| {cfg} | {m} | {} | {dt:.0} | {:.1} | {:.4} | {:.4} | {:.4} | {:+.4} | {:+.4} | {:+.4} | {:+.4} | {:+.4} | {:+.4} | {:.4} |", r.iters, r.drop_orders, (s1 / n1 as f64).sqrt(), m1, (s2 / n2.max(1) as f64).sqrt(), r.cp_base_mean, data_base, r.cd_nose + r.cd_cyl, r.cd_boat, r.cd_base, r.cd_total, fox::CP_UNCERTAINTY[k]).unwrap();
+            writeln!(
+                md,
+                "| {cfg} | {m} | {} | {dt:.0} | {:.1} | {:.4} | {:.4} | {:.4} | {:+.4} | {:+.4} | {:+.4} | {:+.4} | {:+.4} | {:+.4} | {:.4} |",
+                r.iters,
+                r.drop_orders,
+                (s1 / n1 as f64).sqrt(),
+                m1,
+                (s2 / n2.max(1) as f64).sqrt(),
+                r.cp_base_mean,
+                data_base,
+                r.cd_nose + r.cd_cyl,
+                r.cd_boat,
+                r.cd_base,
+                r.cd_total,
+                fox::CP_UNCERTAINTY[k]
+            )
+            .unwrap();
             write_case_files(out_dir, &name, &r, None);
         }
     }
@@ -270,10 +343,16 @@ fn lowmach_study(out_dir: &Path, opts: &Opts, args: &[String]) {
     let mut csv = String::from("mach,low_mach,iters,seconds,drop_orders,rms_vs_incompressible,rms_vs_goethert,cp_0.5,cp_1.5,cp_2.5,cp_3.5,cp_6.0,cp_min\n");
     let mut md = String::new();
     writeln!(md, "### Low-Mach correction, tangent ogive (L/d = 3) + cylinder, no base, grid level {}\n", opts.level).unwrap();
-    writeln!(md, "| M | low-Mach | iters | time [s] | RMS Cp vs incompressible | RMS Cp vs Goethert(M) | Cp(0.5) | Cp(1.5) | Cp(2.5) | Cp(3.5) | Cp(6) |").unwrap();
+    writeln!(md, "| M | low-Mach | iters | time [s] | RMS Cp vs incompressible | RMS Cp vs Goethert(M) | Cp(0.5) | Cp(1.5) | Cp(2.5) | Cp(3.5) | Cp(6) |")
+        .unwrap();
     writeln!(md, "|---|---|---|---|---|---|---|---|---|---|---|").unwrap();
     let p0 = potential(&body, 0.0).unwrap();
-    writeln!(md, "| 0 | potential (incompressible) | - | - | 0 | - | {} |", stations.iter().map(|&x| format!("{:.4}", p0.inc.cp_at(x).unwrap())).collect::<Vec<_>>().join(" | ")).unwrap();
+    writeln!(
+        md,
+        "| 0 | potential (incompressible) | - | - | 0 | - | {} |",
+        stations.iter().map(|&x| format!("{:.4}", p0.inc.cp_at(x).unwrap())).collect::<Vec<_>>().join(" | ")
+    )
+    .unwrap();
     for &m in &machs {
         let pot = potential(&body, m).unwrap();
         for lm in [false, true] {
@@ -284,11 +363,36 @@ fn lowmach_study(out_dir: &Path, opts: &Opts, args: &[String]) {
             let dt = t0.elapsed().as_secs_f64();
             let (ri, rg) = rms_vs_potential(&r, &pot);
             let cps: Vec<f64> = stations.iter().map(|&x| wall_cp_at(&r.wall, x).unwrap()).collect();
-            println!("M={m} low-Mach {lm}: {} iters ({dt:.1} s) drop {:.1}; RMS vs incompressible {ri:.4}, vs Goethert {rg:.4}; Cp@stations {:?}", r.iters, r.drop_orders, cps.iter().map(|c| format!("{c:.4}")).collect::<Vec<_>>());
-            writeln!(csv, "{m},{lm},{},{dt:.1},{:.2},{ri:.5},{rg:.5},{},{:.5}", r.iters, r.drop_orders, cps.iter().map(|c| format!("{c:.5}")).collect::<Vec<_>>().join(","), r.cp_min).unwrap();
-            writeln!(md, "| {m} | {} | {} | {dt:.0} | {ri:.4} | {rg:.4} | {} |", if lm { "on" } else { "off" }, r.iters, cps.iter().map(|c| format!("{c:.4}")).collect::<Vec<_>>().join(" | ")).unwrap();
+            println!(
+                "M={m} low-Mach {lm}: {} iters ({dt:.1} s) drop {:.1}; RMS vs incompressible {ri:.4}, vs Goethert {rg:.4}; Cp@stations {:?}",
+                r.iters,
+                r.drop_orders,
+                cps.iter().map(|c| format!("{c:.4}")).collect::<Vec<_>>()
+            );
+            writeln!(
+                csv,
+                "{m},{lm},{},{dt:.1},{:.2},{ri:.5},{rg:.5},{},{:.5}",
+                r.iters,
+                r.drop_orders,
+                cps.iter().map(|c| format!("{c:.5}")).collect::<Vec<_>>().join(","),
+                r.cp_min
+            )
+            .unwrap();
+            writeln!(
+                md,
+                "| {m} | {} | {} | {dt:.0} | {ri:.4} | {rg:.4} | {} |",
+                if lm { "on" } else { "off" },
+                r.iters,
+                cps.iter().map(|c| format!("{c:.4}")).collect::<Vec<_>>().join(" | ")
+            )
+            .unwrap();
         }
-        writeln!(md, "| {m} | Goethert potential | - | - | - | 0 | {} |", stations.iter().map(|&x| format!("{:.4}", pot.comp.cp_at(x).unwrap())).collect::<Vec<_>>().join(" | ")).unwrap();
+        writeln!(
+            md,
+            "| {m} | Goethert potential | - | - | - | 0 | {} |",
+            stations.iter().map(|&x| format!("{:.4}", pot.comp.cp_at(x).unwrap())).collect::<Vec<_>>().join(" | ")
+        )
+        .unwrap();
     }
     fs::write(out_dir.join(format!("lowmach_ogive_L{}.csv", opts.level)), csv).unwrap();
     fs::write(out_dir.join("tables_lowmach.md"), &md).unwrap();

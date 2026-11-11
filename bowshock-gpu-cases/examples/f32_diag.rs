@@ -5,8 +5,8 @@
 //!
 //! `cargo run --release -p bowshock-gpu-cases --example f32_diag [-- ni nj]`
 
-use bowshock_gpu::{GpuSolver, Mode, Precision};
 use bowshock_cases::cone::{build_solver, ConeCase};
+use bowshock_gpu::{GpuSolver, Mode, Precision};
 use bowshock_reference::taylor_maccoll::solve_cone;
 
 fn ulp(x: f32) -> f64 {
@@ -100,4 +100,3 @@ fn main() {
         println!("  largest cells (i,j) share: {}", top.join(", "));
     }
 }
-

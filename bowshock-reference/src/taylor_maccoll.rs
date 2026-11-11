@@ -58,10 +58,7 @@ fn rk4(th: f64, y: [f64; 2], h: f64) -> [f64; 2] {
     let k2 = rhs(th + 0.5 * h, [y[0] + 0.5 * h * k1[0], y[1] + 0.5 * h * k1[1]]);
     let k3 = rhs(th + 0.5 * h, [y[0] + 0.5 * h * k2[0], y[1] + 0.5 * h * k2[1]]);
     let k4 = rhs(th + h, [y[0] + h * k3[0], y[1] + h * k3[1]]);
-    [
-        y[0] + h / 6.0 * (k1[0] + 2.0 * k2[0] + 2.0 * k3[0] + k4[0]),
-        y[1] + h / 6.0 * (k1[1] + 2.0 * k2[1] + 2.0 * k3[1] + k4[1]),
-    ]
+    [y[0] + h / 6.0 * (k1[0] + 2.0 * k2[0] + 2.0 * k3[0] + k4[0]), y[1] + h / 6.0 * (k1[1] + 2.0 * k2[1] + 2.0 * k3[1] + k4[1])]
 }
 
 /// Integrate from the shock; returns `(theta_cone, Vr_surface)` (the angle where `Vt` crosses zero).

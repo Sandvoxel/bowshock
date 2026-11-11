@@ -354,11 +354,7 @@ impl GpuSolver {
         let q: Vec<[f32; 4]> = u.iter().map(|&v| f32x4(v)).collect();
         self.u.write(&q)?;
         if let Some(lo) = &mut self.lo {
-            let r: Vec<[f32; 4]> = u
-                .iter()
-                .zip(&q)
-                .map(|(v, h)| [0, 1, 2, 3].map(|k| (v[k] - h[k] as f64) as f32))
-                .collect();
+            let r: Vec<[f32; 4]> = u.iter().zip(&q).map(|(v, h)| [0, 1, 2, 3].map(|k| (v[k] - h[k] as f64) as f32)).collect();
             lo.u.write(&r)?;
         }
         self.iter = 0;
@@ -525,14 +521,8 @@ impl GpuSolver {
         p.iflags = ip.lines as u32 | (ip.implicit_bc as u32) << 1 | (ip.roe as u32) << 2 | ((ip.dt_mode == DtMode::MinDirection) as u32) << 3;
         let Kernels::Guarded { flux, hist_final, .. } = &self.k else { unreachable!("implicit scheme needs Mode::Guarded") };
         match &self.lo {
-            Some(lo) if ext => flux.launch(
-                [ni + 1, 2 * nj + 1],
-                args![&self.u, &lo.u, &self.iface, &self.jface, &mut self.fi, &mut self.fj, uniform(&p)],
-            )?,
-            _ => flux.launch(
-                [ni + 1, 2 * nj + 1],
-                args![&self.u, &self.iface, &self.jface, &mut self.fi, &mut self.fj, uniform(&p)],
-            )?,
+            Some(lo) if ext => flux.launch([ni + 1, 2 * nj + 1], args![&self.u, &lo.u, &self.iface, &self.jface, &mut self.fi, &mut self.fj, uniform(&p)])?,
+            _ => flux.launch([ni + 1, 2 * nj + 1], args![&self.u, &self.iface, &self.jface, &mut self.fi, &mut self.fj, uniform(&p)])?,
         }
         match &self.lo {
             Some(lo) if ext => imp.residual.launch(
@@ -574,8 +564,10 @@ impl GpuSolver {
             hist_final.launch([256], args![&mut self.hist, &self.partial, uniform(&pp)])?;
         }
         let imp = self.imp.as_mut().expect("implicit scheme");
-        imp.assemble_i.launch([nj, ni], args![&self.u, &self.iface, &self.jface, &self.cell, &self.dt, &mut imp.lo_i, &mut imp.d_i, &mut imp.up_i, uniform(&p)])?;
-        imp.assemble_j.launch([ni, nj], args![&self.u, &self.iface, &self.jface, &self.cell, &self.dt, &mut imp.lo_j, &mut imp.d_j, &mut imp.up_j, uniform(&p)])?;
+        imp.assemble_i
+            .launch([nj, ni], args![&self.u, &self.iface, &self.jface, &self.cell, &self.dt, &mut imp.lo_i, &mut imp.d_i, &mut imp.up_i, uniform(&p)])?;
+        imp.assemble_j
+            .launch([ni, nj], args![&self.u, &self.iface, &self.jface, &self.cell, &self.dt, &mut imp.lo_j, &mut imp.d_j, &mut imp.up_j, uniform(&p)])?;
         for pass in 0..ip.sub_iters.max(1) {
             let pp = Params { aux: pass as u32, ..p };
             if pass > 0 {
@@ -584,14 +576,10 @@ impl GpuSolver {
                     args![&imp.lo_i, &imp.d_i, &imp.up_i, &imp.lo_j, &imp.d_j, &imp.up_j, &imp.du, &self.res, &self.dt, &mut imp.x, uniform(&pp)],
                 )?;
             }
-            imp.line_i.launch_raw(
-                [nj, 1, 1],
-                args![&imp.lo_i, &imp.d_i, &imp.up_i, &mut imp.scr, &mut imp.x, &mut imp.du, &self.res, &self.dt, uniform(&pp)],
-            )?;
-            imp.line_j.launch_raw(
-                [ni, 1, 1],
-                args![&imp.lo_j, &imp.d_j, &imp.up_j, &mut imp.scr, &mut imp.x, &mut imp.du, &self.res, &self.dt, uniform(&pp)],
-            )?;
+            imp.line_i
+                .launch_raw([nj, 1, 1], args![&imp.lo_i, &imp.d_i, &imp.up_i, &mut imp.scr, &mut imp.x, &mut imp.du, &self.res, &self.dt, uniform(&pp)])?;
+            imp.line_j
+                .launch_raw([ni, 1, 1], args![&imp.lo_j, &imp.d_j, &imp.up_j, &mut imp.scr, &mut imp.x, &mut imp.du, &self.res, &self.dt, uniform(&pp)])?;
         }
         match &mut self.lo {
             Some(lo) => imp.update.launch([ni, nj], args![&mut self.u, &imp.du, &mut lo.u, uniform(&p)])?,
@@ -628,18 +616,7 @@ impl GpuSolver {
                     flux_j.launch([ni, nj + 1], args![&self.w, &self.jface, &mut self.fj, uniform(&p)])?;
                     residual.launch(
                         [ni, nj],
-                        args![
-                            &self.w,
-                            &self.fi,
-                            &self.fj,
-                            &self.iface,
-                            &self.jface,
-                            &self.cell,
-                            &mut self.res,
-                            &mut self.dt,
-                            &mut self.rho_res,
-                            uniform(&p)
-                        ],
+                        args![&self.w, &self.fi, &self.fj, &self.iface, &self.jface, &self.cell, &mut self.res, &mut self.dt, &mut self.rho_res, uniform(&p)],
                     )?;
                     if stage == 1 && hist {
                         let pp = Params { aux: 128, ..p };
@@ -647,14 +624,8 @@ impl GpuSolver {
                         hist_final.launch([256], args![&mut self.hist, &self.partial, uniform(&pp)])?;
                     }
                     match &mut self.lo {
-                        None => update.launch(
-                            [ni, nj],
-                            args![&mut self.u, &mut self.u0, &self.res, &self.dt, uniform(&p)],
-                        )?,
-                        Some(lo) => update.launch(
-                            [ni, nj],
-                            args![&mut self.u, &mut self.u0, &self.res, &self.dt, &mut lo.u, &mut lo.u0, uniform(&p)],
-                        )?,
+                        None => update.launch([ni, nj], args![&mut self.u, &mut self.u0, &self.res, &self.dt, uniform(&p)])?,
+                        Some(lo) => update.launch([ni, nj], args![&mut self.u, &mut self.u0, &self.res, &self.dt, &mut lo.u, &mut lo.u0, uniform(&p)])?,
                     }
                 }
             }
@@ -664,14 +635,10 @@ impl GpuSolver {
                     p.stage = stage;
                     (p.ra, p.rb) = (ra, rb);
                     match &self.lo {
-                        Some(lo) if ext => flux.launch(
-                            [ni + 1, 2 * nj + 1],
-                            args![&self.u, &lo.u, &self.iface, &self.jface, &mut self.fi, &mut self.fj, uniform(&p)],
-                        )?,
-                        _ => flux.launch(
-                            [ni + 1, 2 * nj + 1],
-                            args![&self.u, &self.iface, &self.jface, &mut self.fi, &mut self.fj, uniform(&p)],
-                        )?,
+                        Some(lo) if ext => {
+                            flux.launch([ni + 1, 2 * nj + 1], args![&self.u, &lo.u, &self.iface, &self.jface, &mut self.fi, &mut self.fj, uniform(&p)])?
+                        }
+                        _ => flux.launch([ni + 1, 2 * nj + 1], args![&self.u, &self.iface, &self.jface, &mut self.fi, &mut self.fj, uniform(&p)])?,
                     }
                     match &mut self.lo {
                         None => residual_update.launch(
@@ -768,11 +735,7 @@ impl GpuSolver {
             Some(lo) => Some(lo.u.to_vec()?),
             None => None,
         };
-        Ok(hi
-            .iter()
-            .enumerate()
-            .map(|(c, h)| [0, 1, 2, 3].map(|k| h[k] as f64 + lo.as_ref().map_or(0.0, |l| l[c][k] as f64)))
-            .collect())
+        Ok(hi.iter().enumerate().map(|(c, h)| [0, 1, 2, 3].map(|k| h[k] as f64 + lo.as_ref().map_or(0.0, |l| l[c][k] as f64))).collect())
     }
 
     /// Conserved state (`hi + lo` in the compensated precision, as f64) of the two first cells behind the base face,

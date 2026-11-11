@@ -179,11 +179,7 @@ pub fn cone_grid(p: &ConeGridParams) -> Grid {
         let r_out = p.h_start + (p.h_end - p.h_start) * (xi - p.x_up) / (p.length - p.x_up);
         for j in 0..=nj {
             let xi_j = j as f64 / nj as f64;
-            let s = if p.cluster > 0.0 {
-                1.0 + ((p.cluster * (xi_j - 1.0)).tanh()) / p.cluster.tanh()
-            } else {
-                xi_j
-            };
+            let s = if p.cluster > 0.0 { 1.0 + ((p.cluster * (xi_j - 1.0)).tanh()) / p.cluster.tanh() } else { xi_j };
             x[j * (ni + 1) + i] = xi;
             r[j * (ni + 1) + i] = r_in + s * (r_out - r_in);
         }

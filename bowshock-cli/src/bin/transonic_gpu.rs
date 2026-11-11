@@ -11,12 +11,12 @@
 //! the GPU with the same procedure and stopping rules. The GPU synchronises every 50 iterations (the CD sampling interval).
 //! Output: `out/gpu_transonic/`.
 
+use bowshock_cases::transonic::{named_body, run_on, stoney, tangent_cone_cd, TransonicCase, TransonicResult};
 use bowshock_core::flux::Limiter;
 use bowshock_core::implicit::ImplicitParams;
 use bowshock_core::solver::{Bc, Scheme};
-use bowshock_cases::transonic::{named_body, run_on, stoney, tangent_cone_cd, TransonicCase, TransonicResult};
-use bowshock_gpu_cases::transonic::{GpuTransonic, GpuTransonicRun, SYNC};
 use bowshock_gpu::{Mode, Precision};
+use bowshock_gpu_cases::transonic::{GpuTransonic, GpuTransonicRun, SYNC};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -83,7 +83,9 @@ fn perf(case: &TransonicCase) -> (f64, f64, f64, f64) {
         best_cpu = best_cpu.min(1e6 * t0.elapsed().as_secs_f64() / n as f64);
     }
     let mut gpu = [f64::NAN; 3];
-    for (m, (mode, prec)) in [(Mode::Guarded, Precision::Extended), (Mode::Direct, Precision::Extended), (Mode::Guarded, Precision::F32)].into_iter().enumerate() {
+    for (m, (mode, prec)) in
+        [(Mode::Guarded, Precision::Extended), (Mode::Direct, Precision::Extended), (Mode::Guarded, Precision::F32)].into_iter().enumerate()
+    {
         if implicit && mode == Mode::Direct {
             continue; // the line-implicit scheme exists in the guarded formulation only
         }
@@ -124,7 +126,9 @@ fn main() {
         _ => Limiter::Minmod,
     };
     let low_mach = arg(&args, "--lowmach") == Some("on");
-    let tag = arg(&args, "--tag").map(String::from).unwrap_or_else(|| format!("{body_name}_L{level}{}{}", if implicit { "_imp" } else { "" }, if warm { "_warm" } else { "" }));
+    let tag = arg(&args, "--tag")
+        .map(String::from)
+        .unwrap_or_else(|| format!("{body_name}_L{level}{}{}", if implicit { "_imp" } else { "" }, if warm { "_warm" } else { "" }));
     let out_dir: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("out").join("gpu_transonic");
     fs::create_dir_all(&out_dir).expect("create out dir");
 
@@ -165,7 +169,11 @@ fn main() {
         c0.outflow,
         if warm { "warm-start sweep" } else { "cold start for every Mach" }
     );
-    println!("GPU sync interval = {SYNC} iterations; CPU rayon threads = {}; GPU context creation {:.2} s", std::thread::available_parallelism().map_or(0, |n| n.get()), t0.elapsed().as_secs_f64());
+    println!(
+        "GPU sync interval = {SYNC} iterations; CPU rayon threads = {}; GPU context creation {:.2} s",
+        std::thread::available_parallelism().map_or(0, |n| n.get()),
+        t0.elapsed().as_secs_f64()
+    );
 
     if args.iter().any(|a| a == "--bench-only") {
         let (c, g, d, f) = perf(&make_case(0.9));
@@ -195,15 +203,7 @@ fn main() {
             r_ref_gpu = Some(gpu.result.residual_peak);
         }
         let max_dcp = gpu.result.wall.iter().zip(&cpu.wall).fold(0.0f64, |mx, (a, b)| mx.max((a.cp - b.cp).abs()));
-        let row = Row {
-            mach: m,
-            cpu_s,
-            max_dcp,
-            stoney: data.and_then(|d| stoney::interp(d, m)),
-            theory: tangent_cone_cd(&body, m),
-            cpu,
-            gpu,
-        };
+        let row = Row { mach: m, cpu_s, max_dcp, stoney: data.and_then(|d| stoney::interp(d, m)), theory: tangent_cone_cd(&body, m), cpu, gpu };
         println!(
             "M = {m:<5} CPU {:>6} it ({:6.1} s, {}, {:.1} orders) | GPU {:>6} it stop / {} exec ({:6.2} s, {}, {:.1} orders) | CD_nose GPU {:.5} CPU {:.5} (diff {:+.2e}), max |dCp| {:.1e}, Cp_min GPU {:.4} CPU {:.4}, far-field |dp/p| GPU {:.1e} CPU {:.1e}",
             row.cpu.iters, row.cpu_s, row.cpu.stop_reason, row.cpu.drop_orders, row.gpu.iters_stop, row.gpu.iters_exec, row.gpu.loop_seconds,
@@ -215,15 +215,28 @@ fn main() {
     }
 
     // ---- tables ----
-    println!("\n### {body_name}, grid L{level} {ni}x{nj}, {}: forebody CD, GPU (guarded, extended) vs CPU (f64)", if warm { "warm-start sweep" } else { "cold starts" });
+    println!(
+        "\n### {body_name}, grid L{level} {ni}x{nj}, {}: forebody CD, GPU (guarded, extended) vs CPU (f64)",
+        if warm { "warm-start sweep" } else { "cold starts" }
+    );
     println!("| M | CD GPU | CD CPU | GPU - CPU | (GPU - CPU)/CPU % | first-cell CD diff | Cp_min GPU | Cp_min CPU | max abs dCp (wall) | M_wall,max GPU | M_wall,max CPU | Stoney (digitised) | tangent-cone / T-M |");
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     for r in &rows {
         let (g, c) = (&r.gpu.result, &r.cpu);
         println!(
             "| {} | {:.5} | {:.5} | {:+.2e} | {:+.2e} | {:+.2e} | {:.4} | {:.4} | {:.1e} | {:.3} | {:.3} | {} | {} |",
-            r.mach, g.cd_nose, c.cd_nose, g.cd_nose - c.cd_nose, 100.0 * (g.cd_nose - c.cd_nose) / c.cd_nose, g.cd_nose_cell - c.cd_nose_cell, g.cp_min, c.cp_min,
-            r.max_dcp, g.m_wall_max, c.m_wall_max, r.stoney.map_or("-".to_string(), |v| format!("{v:.3}")),
+            r.mach,
+            g.cd_nose,
+            c.cd_nose,
+            g.cd_nose - c.cd_nose,
+            100.0 * (g.cd_nose - c.cd_nose) / c.cd_nose,
+            g.cd_nose_cell - c.cd_nose_cell,
+            g.cp_min,
+            c.cp_min,
+            r.max_dcp,
+            g.m_wall_max,
+            c.m_wall_max,
+            r.stoney.map_or("-".to_string(), |v| format!("{v:.3}")),
             if r.theory.is_nan() { "-".to_string() } else { format!("{:.5}", r.theory) }
         );
     }
@@ -233,8 +246,18 @@ fn main() {
     for r in &rows {
         println!(
             "| {} | {} | {} | {:.1} | {:.2e} | {}/{} | {} | {:.1} | {:.2e} | {:.2e} / {:.2e} |",
-            r.mach, r.cpu.iters, r.cpu.stop_reason, r.cpu.drop_orders, r.cpu.residual.last().unwrap(), r.gpu.iters_stop, r.gpu.iters_exec, r.gpu.result.stop_reason,
-            r.gpu.result.drop_orders, r.gpu.result.residual.last().unwrap(), r.gpu.result.residual_peak, r.cpu.residual_peak
+            r.mach,
+            r.cpu.iters,
+            r.cpu.stop_reason,
+            r.cpu.drop_orders,
+            r.cpu.residual.last().unwrap(),
+            r.gpu.iters_stop,
+            r.gpu.iters_exec,
+            r.gpu.result.stop_reason,
+            r.gpu.result.drop_orders,
+            r.gpu.result.residual.last().unwrap(),
+            r.gpu.result.residual_peak,
+            r.cpu.residual_peak
         );
     }
     println!("\n### Timing (wall time of the runs to their stopping criterion: iteration loop incl. residual/state read-back and CD sampling every {SYNC} iterations, setup excluded)");
@@ -245,7 +268,18 @@ fn main() {
         let (cu, gu) = (1e6 * r.cpu_s / r.cpu.iters as f64, r.gpu.us_per_iter());
         tc += r.cpu_s;
         tg += r.gpu.loop_seconds;
-        println!("| {} | {} | {} | {:.1} | {:.2} | {:.0} | {:.0} | {:.1}x | {:.1}x |", r.mach, r.cpu.iters, r.gpu.iters_exec, r.cpu_s, r.gpu.loop_seconds, cu, gu, r.cpu_s / r.gpu.loop_seconds, cu / gu);
+        println!(
+            "| {} | {} | {} | {:.1} | {:.2} | {:.0} | {:.0} | {:.1}x | {:.1}x |",
+            r.mach,
+            r.cpu.iters,
+            r.gpu.iters_exec,
+            r.cpu_s,
+            r.gpu.loop_seconds,
+            cu,
+            gu,
+            r.cpu_s / r.gpu.loop_seconds,
+            cu / gu
+        );
     }
     println!("| total | | | {tc:.1} | {tg:.2} | | | {:.1}x | |", tc / tg);
     let steady = with_bench.then(|| perf(&make_case(0.9)));
@@ -274,8 +308,25 @@ fn main() {
         writeln!(
             f,
             "{},{:.8},{:.8},{:.4e},{:.8},{:.8},{:.6},{:.6},{:.4e},{},{},{:.2},{},{},{},{:.2},{:.3},{:.3},{},{}",
-            r.mach, g.cd_nose, c.cd_nose, g.cd_nose - c.cd_nose, g.cd_nose_cell, c.cd_nose_cell, g.cp_min, c.cp_min, r.max_dcp, c.iters, c.stop_reason, c.drop_orders,
-            r.gpu.iters_stop, r.gpu.iters_exec, g.stop_reason, g.drop_orders, r.cpu_s, r.gpu.loop_seconds, r.stoney.map_or(String::new(), |v| format!("{v}")),
+            r.mach,
+            g.cd_nose,
+            c.cd_nose,
+            g.cd_nose - c.cd_nose,
+            g.cd_nose_cell,
+            c.cd_nose_cell,
+            g.cp_min,
+            c.cp_min,
+            r.max_dcp,
+            c.iters,
+            c.stop_reason,
+            c.drop_orders,
+            r.gpu.iters_stop,
+            r.gpu.iters_exec,
+            g.stop_reason,
+            g.drop_orders,
+            r.cpu_s,
+            r.gpu.loop_seconds,
+            r.stoney.map_or(String::new(), |v| format!("{v}")),
             if r.theory.is_nan() { String::new() } else { format!("{:.6}", r.theory) }
         )
         .unwrap();

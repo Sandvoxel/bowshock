@@ -70,7 +70,8 @@ pub struct ImplicitParams {
 }
 
 impl ImplicitParams {
-    pub const DEFAULT: ImplicitParams = ImplicitParams { cfl0: 1.0, cfl_max: 30.0, growth: 1.02, dt_mode: DtMode::Sum, lines: true, implicit_bc: true, sub_iters: 2, roe: true, eps_fix: 0.1 };
+    pub const DEFAULT: ImplicitParams =
+        ImplicitParams { cfl0: 1.0, cfl_max: 30.0, growth: 1.02, dt_mode: DtMode::Sum, lines: true, implicit_bc: true, sub_iters: 2, roe: true, eps_fix: 0.1 };
 }
 
 impl Solver {
@@ -78,10 +79,10 @@ impl Solver {
     pub fn restart_ramp(&mut self) {
         self.ramp_k = 0;
     }
-
 }
 
 /// `A = d(F.n)/dU` for the primitive state `w` (conservative variables `(rho, rho u, rho v, E)`).
+#[rustfmt::skip]
 pub fn flux_jacobian(w: &Prim, nx: f64, nr: f64) -> M4 {
     let [rho, u, v, p] = *w;
     let g1 = GAMMA - 1.0;
@@ -357,61 +358,57 @@ fn assemble(s: &Solver, p: &ImplicitParams, dir_i: bool) -> Factor {
     let n = ni * nj;
     let mut fac = Factor { lo: vec![ZERO; n], d: vec![ZERO; n], up: vec![ZERO; n] };
     let (lo, d, up) = (&mut fac.lo, &mut fac.d, &mut fac.up);
-    lo.par_chunks_mut(ni)
-        .zip(d.par_chunks_mut(ni))
-        .zip(up.par_chunks_mut(ni))
-        .enumerate()
-        .for_each(|(j, ((lo_r, d_r), up_r))| {
-            for i in 0..ni {
-                if blk.map_or(false, |b| b.solid(i, j)) {
-                    d_r[i] = EYE;
-                    continue;
-                }
-                let c = j * ni + i;
-                let (ii, jj) = (i as isize, j as isize);
-                let wk = &w[pidx(ni, ii, jj)];
-                let (src, k, kn, k0) = if dir_i {
-                    (0.0, i, ni, blk.map_or(0, |b| b.row_start(j).unwrap_or(ni)))
-                } else {
-                    (grid.area[c] / grid.vol[c], j, nj, blk.map_or(0, |b| b.col_start(i)))
-                };
-                let (fl, fr) = if dir_i {
-                    (&grid.iface[j * (ni + 1) + i], &grid.iface[j * (ni + 1) + i + 1])
-                } else {
-                    (&grid.jface[j * ni + i], &grid.jface[(j + 1) * ni + i])
-                };
-                let (wm_idx, wp_idx) = if dir_i { (pidx(ni, ii - 1, jj), pidx(ni, ii + 1, jj)) } else { (pidx(ni, ii, jj - 1), pidx(ni, ii, jj + 1)) };
-                let wall_lower = k == k0 && k0 > 0;
-                let wm = if wall_lower && dir_i {
-                    // lower neighbour is the solid body: reflection about the base wall
-                    let fb = &grid.iface[j * (ni + 1) + k0];
-                    reflect(wk, fb.nx, fb.nr)
-                } else {
-                    w[wm_idx]
-                };
-                let (mut l, mut dd, mut u) = cell_blocks(wk, &wm, &w[wp_idx], fl, fr, grid.vol[c], dt[c], p.lines, src, p.roe, p.eps_fix);
-                if k == k0 {
-                    let t = if wall_lower {
-                        // solid body below / behind the cell: slip wall with the face normal
-                        reflection(fl.nx, fl.nr)
-                    } else {
-                        ghost_t(if dir_i { bcs[0] } else { bcs[2] }, wk, fl, -1.0)
-                    };
-                    let lt = mm(&l, &t);
-                    axpy(&mut dd, 1.0, &lt);
-                    l = ZERO;
-                }
-                if k == kn - 1 {
-                    let t = ghost_t(if dir_i { bcs[1] } else { bcs[3] }, wk, fr, 1.0);
-                    let ut = mm(&u, &t);
-                    axpy(&mut dd, 1.0, &ut);
-                    u = ZERO;
-                }
-                lo_r[i] = l;
-                d_r[i] = dd;
-                up_r[i] = u;
+    lo.par_chunks_mut(ni).zip(d.par_chunks_mut(ni)).zip(up.par_chunks_mut(ni)).enumerate().for_each(|(j, ((lo_r, d_r), up_r))| {
+        for i in 0..ni {
+            if blk.map_or(false, |b| b.solid(i, j)) {
+                d_r[i] = EYE;
+                continue;
             }
-        });
+            let c = j * ni + i;
+            let (ii, jj) = (i as isize, j as isize);
+            let wk = &w[pidx(ni, ii, jj)];
+            let (src, k, kn, k0) = if dir_i {
+                (0.0, i, ni, blk.map_or(0, |b| b.row_start(j).unwrap_or(ni)))
+            } else {
+                (grid.area[c] / grid.vol[c], j, nj, blk.map_or(0, |b| b.col_start(i)))
+            };
+            let (fl, fr) = if dir_i {
+                (&grid.iface[j * (ni + 1) + i], &grid.iface[j * (ni + 1) + i + 1])
+            } else {
+                (&grid.jface[j * ni + i], &grid.jface[(j + 1) * ni + i])
+            };
+            let (wm_idx, wp_idx) = if dir_i { (pidx(ni, ii - 1, jj), pidx(ni, ii + 1, jj)) } else { (pidx(ni, ii, jj - 1), pidx(ni, ii, jj + 1)) };
+            let wall_lower = k == k0 && k0 > 0;
+            let wm = if wall_lower && dir_i {
+                // lower neighbour is the solid body: reflection about the base wall
+                let fb = &grid.iface[j * (ni + 1) + k0];
+                reflect(wk, fb.nx, fb.nr)
+            } else {
+                w[wm_idx]
+            };
+            let (mut l, mut dd, mut u) = cell_blocks(wk, &wm, &w[wp_idx], fl, fr, grid.vol[c], dt[c], p.lines, src, p.roe, p.eps_fix);
+            if k == k0 {
+                let t = if wall_lower {
+                    // solid body below / behind the cell: slip wall with the face normal
+                    reflection(fl.nx, fl.nr)
+                } else {
+                    ghost_t(if dir_i { bcs[0] } else { bcs[2] }, wk, fl, -1.0)
+                };
+                let lt = mm(&l, &t);
+                axpy(&mut dd, 1.0, &lt);
+                l = ZERO;
+            }
+            if k == kn - 1 {
+                let t = ghost_t(if dir_i { bcs[1] } else { bcs[3] }, wk, fr, 1.0);
+                let ut = mm(&u, &t);
+                axpy(&mut dd, 1.0, &ut);
+                u = ZERO;
+            }
+            lo_r[i] = l;
+            d_r[i] = dd;
+            up_r[i] = u;
+        }
+    });
     fac
 }
 
@@ -696,7 +693,13 @@ mod tests {
         for mach in [0.1, 0.5, 0.9] {
             for outflow in [Bc::Characteristic, Bc::PressureOutflow] {
                 let fs = freestream(mach);
-                let cfg = Config { cfl: 0.5, limiter: Limiter::VanAlbada, freestream: fs, bc: [Bc::Characteristic, outflow, Bc::SlipWall, Bc::Characteristic], first_order_iters: 0 };
+                let cfg = Config {
+                    cfl: 0.5,
+                    limiter: Limiter::VanAlbada,
+                    freestream: fs,
+                    bc: [Bc::Characteristic, outflow, Bc::SlipWall, Bc::Characteristic],
+                    first_order_iters: 0,
+                };
                 let mut s = Solver::new(curved(24, 16), cfg);
                 s.low_mach = true;
                 s.set_scheme(Scheme::Implicit(ImplicitParams { cfl_max: 40.0, growth: 1.2, ..ImplicitParams::DEFAULT }));

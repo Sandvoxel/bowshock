@@ -18,8 +18,8 @@
 //! The converged state of a cycle is the converged state of the fine-grid (second-order) discretisation: the coarse
 //! correction vanishes with the fine-grid defect.
 
-use crate::gas::{cons_to_prim, Cons};
 use crate::flux::Limiter;
+use crate::gas::{cons_to_prim, Cons};
 use crate::solver::{Config, MgParams, Scheme, Solver};
 use rayon::prelude::*;
 
@@ -237,7 +237,13 @@ mod tests {
     #[test]
     fn hierarchy_is_built_and_the_free_stream_is_preserved() {
         let fs = freestream(0.5);
-        let cfg = Config { cfl: 0.5, limiter: Limiter::VanAlbada, freestream: fs, bc: [Bc::Characteristic, Bc::Characteristic, Bc::SlipWall, Bc::Characteristic], first_order_iters: 0 };
+        let cfg = Config {
+            cfl: 0.5,
+            limiter: Limiter::VanAlbada,
+            freestream: fs,
+            bc: [Bc::Characteristic, Bc::Characteristic, Bc::SlipWall, Bc::Characteristic],
+            first_order_iters: 0,
+        };
         let mut s = Solver::new(grid(64, 32), cfg);
         let n = s.set_scheme(Scheme::Multigrid(MgParams::DEFAULT));
         assert_eq!(n, 3, "64x32 -> 32x16 -> 16x8, the next level would have nj < 8");
@@ -254,7 +260,13 @@ mod tests {
         // an outflow pulse on a small domain: both schemes must converge to the free stream
         let fs = freestream(0.4);
         let mk = |scheme: Scheme| {
-            let cfg = Config { cfl: 0.8, limiter: Limiter::FirstOrder, freestream: fs, bc: [Bc::Characteristic, Bc::Characteristic, Bc::SlipWall, Bc::Characteristic], first_order_iters: 0 };
+            let cfg = Config {
+                cfl: 0.8,
+                limiter: Limiter::FirstOrder,
+                freestream: fs,
+                bc: [Bc::Characteristic, Bc::Characteristic, Bc::SlipWall, Bc::Characteristic],
+                first_order_iters: 0,
+            };
             let mut s = Solver::new(grid(32, 16), cfg);
             s.set_scheme(scheme);
             for u in s.u.iter_mut() {

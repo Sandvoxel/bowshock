@@ -647,10 +647,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
 /// Defect `x = dt res - (A_i du + A_j du - du)` with the stored (unfactored) blocks of both directions (bowshock-core `implicit::step`,
 /// `apply_factor`), the right-hand side of a defect-correction pass; 0 in solid cells. Problem size `[ni, nj]`.
 pub fn apply() -> String {
-    APPLY_TEMPLATE.replace(
-        "//@ACC",
-        &acc(&[("lo_i", false), ("d_i", false), ("up_i", false), ("lo_j", false), ("d_j", false), ("up_j", false)]),
-    )
+    APPLY_TEMPLATE.replace("//@ACC", &acc(&[("lo_i", false), ("d_i", false), ("up_i", false), ("lo_j", false), ("d_j", false), ("up_j", false)]))
 }
 
 const APPLY_TEMPLATE: &str = r#"

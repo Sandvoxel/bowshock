@@ -192,18 +192,7 @@ fn postprocess(case: &ConeCase, s: &Solver, residual: Vec<f64>, drop_orders: f64
         min_rho = min_rho.min(w[0]);
         min_p = min_p.min(w[3]);
     }
-    ConeResult {
-        iters: residual.len(),
-        residual,
-        drop_orders,
-        stop_reason: reason,
-        surface,
-        cp_avg,
-        cp_cell_avg,
-        beta_num,
-        min_rho,
-        min_p,
-    }
+    ConeResult { iters: residual.len(), residual, drop_orders, stop_reason: reason, surface, cp_avg, cp_cell_avg, beta_num, min_rho, min_p }
 }
 
 #[cfg(test)]

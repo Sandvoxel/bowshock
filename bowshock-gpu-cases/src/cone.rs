@@ -6,12 +6,12 @@
 //! iterations, non-finite). The CPU loop here uses the public `Solver::step` so that the final
 //! state is available for the field comparison; the criteria are in [`Monitor`].
 
-use crate::run::{cpu_loop, field_diff, gpu_loop, Run};
 pub use crate::run::Monitor;
-use bowshock_gpu::{GpuSolver, Mode, Precision, Result};
+use crate::run::{cpu_loop, field_diff, gpu_loop, Run};
 use bowshock_cases::cone::{build_solver, ConeCase};
 use bowshock_core::gas::cons_to_prim;
 use bowshock_core::grid::Grid;
+use bowshock_gpu::{GpuSolver, Mode, Precision, Result};
 use bowshock_reference::taylor_maccoll::ConeSolution;
 
 /// Surface and integral results of a converged (or stopped) state.

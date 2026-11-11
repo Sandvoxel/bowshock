@@ -7,11 +7,11 @@
 //! `--quick` runs only the coarse and medium grids; `--chunk` is the number of iterations recorded between two
 //! synchronisations (default 50, max 256). Output: `out/gpu_ogive/`.
 
-use bowshock_core::flux::Limiter;
 use bowshock_cases::ogive::{perkins_jorgensen as pj, wall_cp_at, OgiveCase};
-use bowshock_reference::shock_expansion::{Ogive, SurfaceTheory};
-use bowshock_gpu_cases::ogive::{compare, run_cpu, run_gpu, Compare, OgiveRun};
+use bowshock_core::flux::Limiter;
 use bowshock_gpu::{GpuSolver, Mode, Precision};
+use bowshock_gpu_cases::ogive::{compare, run_cpu, run_gpu, Compare, OgiveRun};
+use bowshock_reference::shock_expansion::{Ogive, SurfaceTheory};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -56,7 +56,9 @@ fn perf(case: &OgiveCase, chunk: usize) -> (f64, f64, f64, f64) {
     }
     let ctx = luma::default_context().unwrap();
     let mut gpu = [0.0f64; 3];
-    for (m, (mode, prec)) in [(Mode::Guarded, Precision::Extended), (Mode::Direct, Precision::Extended), (Mode::Guarded, Precision::F32)].into_iter().enumerate() {
+    for (m, (mode, prec)) in
+        [(Mode::Guarded, Precision::Extended), (Mode::Direct, Precision::Extended), (Mode::Guarded, Precision::F32)].into_iter().enumerate()
+    {
         let host = case.build_solver();
         let mut g = GpuSolver::new_with(&ctx, &host.grid, &host.cfg, mode, prec).unwrap();
         g.run(1).unwrap();
@@ -106,7 +108,11 @@ fn main() {
     let t0 = Instant::now();
     let _ctx = luma::default_context().expect("open GPU");
     println!("bowshock-gpu ogive validation: tangent ogive L/d = {}, M = {mach}, limiter = {limiter:?}, CFL = 0.5, f32 on GPU (Luma, extended precision) vs f64 CPU (bowshock-core)", pj::FINENESS);
-    println!("sync interval K = {chunk} iterations; CPU rayon threads = {}; GPU context creation {:.2} s", std::thread::available_parallelism().map_or(0, |n| n.get()), t0.elapsed().as_secs_f64());
+    println!(
+        "sync interval K = {chunk} iterations; CPU rayon threads = {}; GPU context creation {:.2} s",
+        std::thread::available_parallelism().map_or(0, |n| n.get()),
+        t0.elapsed().as_secs_f64()
+    );
 
     if args.iter().any(|a| a == "--bench-only") {
         println!("\n### Steady per-iteration cost (1000 iterations from the free stream, best of 3, sync every K={chunk}; history kernels on)");
@@ -117,7 +123,14 @@ fn main() {
             case.limiter = limiter;
             let (ni, nj) = case.cells();
             let (c, g, d, f) = perf(&case, chunk);
-            println!("| {} {ni}x{nj} | {} | {c:.0} | {g:.1} | {d:.1} | {f:.1} | {:.1}x | {:.1}x | {:.2}x |", GRID_NAMES[lv as usize], ni * nj, c / g, c / d, g / f);
+            println!(
+                "| {} {ni}x{nj} | {} | {c:.0} | {g:.1} | {d:.1} | {f:.1} | {:.1}x | {:.1}x | {:.2}x |",
+                GRID_NAMES[lv as usize],
+                ni * nj,
+                c / g,
+                c / d,
+                g / f
+            );
         }
         return;
     }
@@ -145,7 +158,15 @@ fn main() {
         let cmp_direct = direct.as_ref().map(|d| compare(&case, &fs, d, &cpu));
         println!(
             "  {name:6} {ni}x{nj}: CPU {} it ({:.1} s, {}, {:.1} orders) | GPU {} it stop / {} exec ({:.2} s, {}, {:.1} orders)",
-            cpu.run.iters_stop, cpu.run.loop_seconds, cpu.run.reason, cpu.run.drop_orders, gpu.run.iters_stop, gpu.run.iters_exec, gpu.run.loop_seconds, gpu.run.reason, gpu.run.drop_orders
+            cpu.run.iters_stop,
+            cpu.run.loop_seconds,
+            cpu.run.reason,
+            cpu.run.drop_orders,
+            gpu.run.iters_stop,
+            gpu.run.iters_exec,
+            gpu.run.loop_seconds,
+            gpu.run.reason,
+            gpu.run.drop_orders
         );
         println!(
             "         CD_nose GPU {:.5} CPU {:.5} (diff {:+.1e}%; first-cell {:+.1e}%); nose-mean Cp diff {:+.1e}%, max rel Cp diff (nose, |Cp| >= 0.05) {:.1e}%, max |dCp| (all wall) {:.1e}; field: max dp/pinf {:.2e}, rms {:.2e}, max drho/rho {:.2e}; min rho {:.4} min p {:.4}",
@@ -153,7 +174,13 @@ fn main() {
             cmp.max_abs_dcp_wall, cmp.max_dp_over_pinf, cmp.rms_dp_over_pinf, cmp.max_rel_rho, gpu.post.min_rho, gpu.post.min_p
         );
         if let Some(d) = &direct {
-            println!("         direct-mode GPU: {} it ({:.2} s), CD_nose {:.5} (diff vs CPU {:+.1e}%)", d.run.iters_stop, d.run.loop_seconds, d.post.cd_nose, 100.0 * cmp_direct.unwrap().cd_rel);
+            println!(
+                "         direct-mode GPU: {} it ({:.2} s), CD_nose {:.5} (diff vs CPU {:+.1e}%)",
+                d.run.iters_stop,
+                d.run.loop_seconds,
+                d.post.cd_nose,
+                100.0 * cmp_direct.unwrap().cd_rel
+            );
         }
         write_csvs(&out_dir, &format!("M{mach}_{name}"), &gpu, &cpu, &th);
         let pf = with_bench.then(|| perf(&case, chunk));
@@ -178,14 +205,34 @@ fn main() {
     for r in &rows {
         println!(
             "| {} {}x{} | {} | {:.5} | {:.5} | {:+.1e} | {:+.1e} | {:+.1e} | {:.1e} | {:.1e} | {:.2e} | {:.2e} | {:.2e} |",
-            r.name, r.ni, r.nj, r.ni * r.nj, r.gpu.post.cd_nose, r.cpu.post.cd_nose, 100.0 * r.cmp.cd_rel, 100.0 * r.cmp.cd_cell_rel, 100.0 * r.cmp.avg_cp_nose_rel,
-            100.0 * r.cmp.max_rel_cp_nose, r.cmp.max_abs_dcp_wall, r.cmp.max_dp_over_pinf, r.cmp.rms_dp_over_pinf, r.cmp.max_rel_rho
+            r.name,
+            r.ni,
+            r.nj,
+            r.ni * r.nj,
+            r.gpu.post.cd_nose,
+            r.cpu.post.cd_nose,
+            100.0 * r.cmp.cd_rel,
+            100.0 * r.cmp.cd_cell_rel,
+            100.0 * r.cmp.avg_cp_nose_rel,
+            100.0 * r.cmp.max_rel_cp_nose,
+            r.cmp.max_abs_dcp_wall,
+            r.cmp.max_dp_over_pinf,
+            r.cmp.rms_dp_over_pinf,
+            r.cmp.max_rel_rho
         );
         if let (Some(d), Some(c)) = (&r.direct, &r.cmp_direct) {
             println!(
                 "| {} direct | | {:.5} | | {:+.1e} | {:+.1e} | {:+.1e} | {:.1e} | {:.1e} | {:.2e} | {:.2e} | {:.2e} |",
-                r.name, d.post.cd_nose, 100.0 * c.cd_rel, 100.0 * c.cd_cell_rel, 100.0 * c.avg_cp_nose_rel, 100.0 * c.max_rel_cp_nose, c.max_abs_dcp_wall,
-                c.max_dp_over_pinf, c.rms_dp_over_pinf, c.max_rel_rho
+                r.name,
+                d.post.cd_nose,
+                100.0 * c.cd_rel,
+                100.0 * c.cd_cell_rel,
+                100.0 * c.avg_cp_nose_rel,
+                100.0 * c.max_rel_cp_nose,
+                c.max_abs_dcp_wall,
+                c.max_dp_over_pinf,
+                c.rms_dp_over_pinf,
+                c.max_rel_rho
             );
         }
     }
@@ -227,8 +274,18 @@ fn main() {
     for r in &rows {
         println!(
             "| {} {}x{} | {} | {} | {:.1} | {:.2e} | {}/{} | {} | {:.1} | {:.2e} |",
-            r.name, r.ni, r.nj, r.cpu.run.iters_stop, r.cpu.run.reason, r.cpu.run.drop_orders, r.cpu.run.residual.last().unwrap(), r.gpu.run.iters_stop,
-            r.gpu.run.iters_exec, r.gpu.run.reason, r.gpu.run.drop_orders, r.gpu.run.residual[r.gpu.run.iters_stop - 1]
+            r.name,
+            r.ni,
+            r.nj,
+            r.cpu.run.iters_stop,
+            r.cpu.run.reason,
+            r.cpu.run.drop_orders,
+            r.cpu.run.residual.last().unwrap(),
+            r.gpu.run.iters_stop,
+            r.gpu.run.iters_exec,
+            r.gpu.run.reason,
+            r.gpu.run.drop_orders,
+            r.gpu.run.residual[r.gpu.run.iters_stop - 1]
         );
     }
 
@@ -238,8 +295,17 @@ fn main() {
     for r in &rows {
         println!(
             "| {} {}x{} | {} | {:.0} | {:.0} | {:.2} | {:.2} | {:.1}x | {:.3} | {:.3} |",
-            r.name, r.ni, r.nj, r.cpu.run.iters_exec, r.cpu.run.us_per_iter(), r.gpu.run.us_per_iter(), r.cpu.run.loop_seconds, r.gpu.run.loop_seconds,
-            r.cpu.run.loop_seconds / r.gpu.run.loop_seconds, r.gpu.run.setup_seconds, r.gpu.run.warmup_seconds
+            r.name,
+            r.ni,
+            r.nj,
+            r.cpu.run.iters_exec,
+            r.cpu.run.us_per_iter(),
+            r.gpu.run.us_per_iter(),
+            r.cpu.run.loop_seconds,
+            r.gpu.run.loop_seconds,
+            r.cpu.run.loop_seconds / r.gpu.run.loop_seconds,
+            r.gpu.run.setup_seconds,
+            r.gpu.run.warmup_seconds
         );
     }
     if with_bench {
@@ -248,7 +314,20 @@ fn main() {
         println!("|---|---|---|---|---|---|---|---|---|");
         for r in &rows {
             let (c, g, d, f) = r.perf.unwrap();
-            println!("| {} {}x{} | {} | {:.0} | {:.1} | {:.1} | {:.1} | {:.1}x | {:.1}x | {:.2}x |", r.name, r.ni, r.nj, r.ni * r.nj, c, g, d, f, c / g, c / d, g / f);
+            println!(
+                "| {} {}x{} | {} | {:.0} | {:.1} | {:.1} | {:.1} | {:.1}x | {:.1}x | {:.2}x |",
+                r.name,
+                r.ni,
+                r.nj,
+                r.ni * r.nj,
+                c,
+                g,
+                d,
+                f,
+                c / g,
+                c / d,
+                g / f
+            );
         }
         println!("\n### Time to the stopping criterion (iterations to stop x steady us/iter)");
         println!("| grid | CPU iters | CPU s | GPU iters (stop) | GPU-guarded s | speed-up |");

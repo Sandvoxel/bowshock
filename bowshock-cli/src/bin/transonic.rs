@@ -11,11 +11,11 @@
 //! `--quick` = grid level 0. `--warm` = start every Mach number from the previous converged field (ascending order).
 //! Output: `out/transonic/` (`sweep_<tag>.csv`, `compare_<tag>.csv`, `cp_<tag>_M<m>.csv`, `residual_<tag>_M<m>.csv`, `tables_<tag>.md`).
 
+use bowshock_cases::ogive::wall_cp_at;
+use bowshock_cases::transonic::{named_body, run_on, stoney, tangent_cone_cd, TransonicCase, TransonicResult};
 use bowshock_core::flux::Limiter;
 use bowshock_core::implicit::ImplicitParams;
 use bowshock_core::solver::{Bc, Scheme};
-use bowshock_cases::ogive::wall_cp_at;
-use bowshock_cases::transonic::{named_body, run_on, stoney, tangent_cone_cd, TransonicCase, TransonicResult};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
@@ -47,7 +47,9 @@ fn main() {
         _ => Limiter::Minmod,
     };
     let low_mach = arg(&args, "--lowmach") == Some("on");
-    let tag = arg(&args, "--tag").map(String::from).unwrap_or_else(|| format!("{body_name}_L{level}{}{}", if implicit { "_imp" } else { "" }, if warm { "_warm" } else { "" }));
+    let tag = arg(&args, "--tag")
+        .map(String::from)
+        .unwrap_or_else(|| format!("{body_name}_L{level}{}{}", if implicit { "_imp" } else { "" }, if warm { "_warm" } else { "" }));
     let out_dir: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("out").join("transonic");
     fs::create_dir_all(&out_dir).expect("create out dir");
 
@@ -134,7 +136,9 @@ fn main() {
 
     // ---- summary tables ----
     let mut sweep = String::from("mach,iters,seconds,stop_reason,drop_orders,residual_peak,residual_final,cd_nose,cd_nose_first_cell,cd_range_last_window,cp_min,x_cp_min,m_wall_max,farfield_dp_over_p\n");
-    let mut cmp = String::from("mach,cd_cfd,cd_cfd_first_cell,cd_stoney_digitised,stoney_read_uncertainty,stoney_status,cfd_minus_stoney,cd_tangent_cone_or_taylor_maccoll\n");
+    let mut cmp = String::from(
+        "mach,cd_cfd,cd_cfd_first_cell,cd_stoney_digitised,stoney_read_uncertainty,stoney_status,cfd_minus_stoney,cd_tangent_cone_or_taylor_maccoll\n",
+    );
     let mut md = String::new();
     writeln!(md, "### {body_name}, grid L{level} {ni}x{nj}, {}\n", if warm { "warm-start sweep" } else { "cold starts" }).unwrap();
     writeln!(md, "| M | iters | time [s] | stop | residual drop [orders] | CD_nose CFD | Stoney (digitised) | CFD - Stoney | tangent-cone / T-M | Cp_min (x/d) | M_wall,max |").unwrap();

@@ -313,7 +313,12 @@ pub fn base_cells(comp: bool) -> String {
             "ulo[c0 + 1u]",
         )
     } else {
-        ("", "@group(1) @binding(1) var<storage, read_write> out: array<vec4<f32>>;\n@group(1) @binding(2) var<uniform> p: Params;", "vec4<f32>(0.0)", "vec4<f32>(0.0)")
+        (
+            "",
+            "@group(1) @binding(1) var<storage, read_write> out: array<vec4<f32>>;\n@group(1) @binding(2) var<uniform> p: Params;",
+            "vec4<f32>(0.0)",
+            "vec4<f32>(0.0)",
+        )
     };
     format!(
         "@group(1) @binding(0) var<storage, read> u: array<vec4<f32>>;\n{bind}{out_bind}
@@ -709,11 +714,7 @@ pub fn residual_update(comp: bool) -> String {
              u[c] = r.hi; ulo[c] = r.lo;",
         )
     } else {
-        (
-            "@group(1) @binding(10) var<uniform> p: Params;",
-            "u0[c] = q;\n u[c] = q + dtc * res;",
-            "u[c] = p.ra * (q + dt[c] * res) + p.rb * u0[c];",
-        )
+        ("@group(1) @binding(10) var<uniform> p: Params;", "u0[c] = q;\n u[c] = q + dtc * res;", "u[c] = p.ra * (q + dt[c] * res) + p.rb * u0[c];")
     };
     RESIDUAL_UPDATE_TEMPLATE.replace("//@BINDINGS", bind).replace("//@STAGE1", s1).replace("//@STAGE2", s2)
 }

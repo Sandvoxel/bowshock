@@ -5,8 +5,8 @@
 //!   --schlieren  : grayscale exp(-k |grad rho|), `ogive_schlieren.*`
 //!   --sweep      : warm-started quasi-steady Mach sweep 1.5 -> 4, `sweep_mach.*`
 //! Top half = solution, bottom half = mirror about the axis; body is dark gray.
-use bowshock_core::gas::{cons_to_prim, freestream, sound_speed};
 use bowshock_cases::ogive::OgiveCase;
+use bowshock_core::gas::{cons_to_prim, freestream, sound_speed};
 use bowshock_core::solver::Solver;
 use image::RgbImage;
 use std::fs::{self, File};
@@ -29,10 +29,12 @@ fn turbo(t: f64) -> [u8; 3] {
 }
 
 fn mach_field(s: &Solver) -> Vec<f64> {
-    s.u.iter().map(|q| {
-        let w = cons_to_prim(q);
-        (w[1] * w[1] + w[2] * w[2]).sqrt() / sound_speed(&w)
-    }).collect()
+    s.u.iter()
+        .map(|q| {
+            let w = cons_to_prim(q);
+            (w[1] * w[1] + w[2] * w[2]).sqrt() / sound_speed(&w)
+        })
+        .collect()
 }
 
 /// |grad rho| per cell, from computational-space central differences and the cell-centre metric.
@@ -50,7 +52,9 @@ fn grad_rho(s: &Solver) -> Vec<f64> {
             let (xi_x, xi_r, dr_i) = (g.xc[b] - g.xc[a], g.rc[b] - g.rc[a], rho[b] - rho[a]);
             let (et_x, et_r, dr_j) = (g.xc[d] - g.xc[c], g.rc[d] - g.rc[c], rho[d] - rho[c]);
             let det = xi_x * et_r - xi_r * et_x;
-            if det.abs() < 1e-14 { continue; }
+            if det.abs() < 1e-14 {
+                continue;
+            }
             let gx = (dr_i * et_r - dr_j * xi_r) / det;
             let gr = (xi_x * dr_j - et_x * dr_i) / det;
             out[j * ni + i] = (gx * gx + gr * gr).sqrt();
@@ -64,9 +68,13 @@ fn tri(img: &mut [u8], p: [(f64, f64); 3], col: [u8; 3]) {
     let maxx = p.iter().map(|q| q.0).fold(f64::MIN, f64::max).ceil().min(W as f64 - 1.0);
     let miny = p.iter().map(|q| q.1).fold(f64::MAX, f64::min).floor().max(0.0) as usize;
     let maxy = p.iter().map(|q| q.1).fold(f64::MIN, f64::max).ceil().min(H as f64 - 1.0);
-    if maxx < 0.0 || maxy < 0.0 { return; }
+    if maxx < 0.0 || maxy < 0.0 {
+        return;
+    }
     let area = (p[1].0 - p[0].0) * (p[2].1 - p[0].1) - (p[1].1 - p[0].1) * (p[2].0 - p[0].0);
-    if area.abs() < 1e-12 { return; }
+    if area.abs() < 1e-12 {
+        return;
+    }
     let e = -1e-6;
     for y in miny..=(maxy as usize) {
         for x in minx..=(maxx as usize) {
@@ -85,13 +93,17 @@ fn tri(img: &mut [u8], p: [(f64, f64); 3], col: [u8; 3]) {
 fn render(s: &Solver, cols: &[[u8; 3]]) -> Vec<u8> {
     let g = &s.grid;
     let mut img = vec![0u8; W * H * 3];
-    for px in img.chunks_exact_mut(3) { px.copy_from_slice(&BODY); }
+    for px in img.chunks_exact_mut(3) {
+        px.copy_from_slice(&BODY);
+    }
     let sc = W as f64 / (X1 - X0);
     let pt = |x: f64, r: f64, sign: f64| ((x - X0) * sc, H as f64 / 2.0 - sign * r * sc);
     for j in 0..g.nj {
         for i in 0..g.ni {
             let n = [g.node(i, j), g.node(i + 1, j), g.node(i + 1, j + 1), g.node(i, j + 1)];
-            if n.iter().all(|q| q.0 > X1 + 1.0) || n.iter().all(|q| q.0 < X0 - 1.0) { continue; }
+            if n.iter().all(|q| q.0 > X1 + 1.0) || n.iter().all(|q| q.0 < X0 - 1.0) {
+                continue;
+            }
             let col = cols[j * g.ni + i];
             for sign in [1.0, -1.0] {
                 let q = n.map(|(x, r)| pt(x, r, sign));
@@ -113,7 +125,12 @@ fn mach_cols(s: &Solver, m_inf: f64) -> Vec<[u8; 3]> {
 fn schlieren_cols(s: &Solver) -> Vec<[u8; 3]> {
     let g = grad_rho(s);
     let k = 0.25; // shock gradients ~ 10-30
-    g.iter().map(|&v| { let c = ((-k * v / 1.0).exp() * 255.0) as u8; [c, c, c] }).collect()
+    g.iter()
+        .map(|&v| {
+            let c = ((-k * v / 1.0).exp() * 255.0) as u8;
+            [c, c, c]
+        })
+        .collect()
 }
 
 struct Out {
@@ -130,7 +147,9 @@ impl Out {
         let frames = dir.join("frames");
         fs::create_dir_all(&frames).unwrap();
         for e in fs::read_dir(&frames).unwrap().flatten() {
-            if e.file_name().to_string_lossy().starts_with(name) { fs::remove_file(e.path()).unwrap(); }
+            if e.file_name().to_string_lossy().starts_with(name) {
+                fs::remove_file(e.path()).unwrap();
+            }
         }
         let mut gif = gif::Encoder::new(File::create(dir.join(format!("{name}.gif"))).unwrap(), W as u16, H as u16, &[]).unwrap();
         gif.set_repeat(gif::Repeat::Infinite).unwrap();
@@ -151,18 +170,32 @@ impl Out {
         let seq = dir.join(format!("seq_{name}"));
         let _ = fs::remove_dir_all(&seq);
         fs::create_dir_all(&seq).unwrap();
-        let mut files: Vec<_> = fs::read_dir(&frames).unwrap().flatten().map(|e| e.path())
-            .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with(&format!("{name}_"))).collect();
+        let mut files: Vec<_> = fs::read_dir(&frames)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with(&format!("{name}_")))
+            .collect();
         files.sort();
-        for (k, f) in files.iter().enumerate() { std::os::unix::fs::symlink(fs::canonicalize(f).unwrap(), seq.join(format!("{k:05}.png"))).unwrap(); }
+        for (k, f) in files.iter().enumerate() {
+            std::os::unix::fs::symlink(fs::canonicalize(f).unwrap(), seq.join(format!("{k:05}.png"))).unwrap();
+        }
         let mp4 = dir.join(format!("{name}.mp4"));
-        let ok = Command::new("ffmpeg").args(["-y", "-loglevel", "error", "-framerate", "24", "-i"])
-            .arg(seq.join("%05d.png")).args(["-pix_fmt", "yuv420p", "-crf", "20", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"]).arg(&mp4)
-            .status().map(|s| s.success()).unwrap_or(false);
+        let ok = Command::new("ffmpeg")
+            .args(["-y", "-loglevel", "error", "-framerate", "24", "-i"])
+            .arg(seq.join("%05d.png"))
+            .args(["-pix_fmt", "yuv420p", "-crf", "20", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"])
+            .arg(&mp4)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
         let _ = fs::remove_dir_all(&seq);
-        println!("{name}: {n} frames -> {} ({} B){}", dir.join(format!("{name}.gif")).display(),
+        println!(
+            "{name}: {n} frames -> {} ({} B){}",
+            dir.join(format!("{name}.gif")).display(),
             fs::metadata(dir.join(format!("{name}.gif"))).unwrap().len(),
-            if ok { format!(", {} ({} B)", mp4.display(), fs::metadata(&mp4).unwrap().len()) } else { ", mp4 failed/ffmpeg missing".into() });
+            if ok { format!(", {} ({} B)", mp4.display(), fs::metadata(&mp4).unwrap().len()) } else { ", mp4 failed/ffmpeg missing".into() }
+        );
     }
 }
 
@@ -178,12 +211,16 @@ fn main() {
         let mut case = OgiveCase::level(1.5, 1); // outer radius sized for the lowest Mach (widest shock)
         case.cfl = 0.5;
         let mut s = case.build_solver();
-        for _ in 0..4000 { s.step(); }
+        for _ in 0..4000 {
+            s.step();
+        }
         let mut out = Out::new(&format!("sweep_{field}"));
         for k in 0..nframes {
             let m = 1.5 + 2.5 * k as f64 / (nframes - 1) as f64;
             s.cfg.freestream = freestream(m);
-            for _ in 0..400 { s.step(); }
+            for _ in 0..400 {
+                s.step();
+            }
             let cols = if schl { schlieren_cols(&s) } else { mach_cols(&s, m) };
             out.push(render(&s, &cols), &format!("M{m:.2}"));
         }
@@ -196,7 +233,10 @@ fn main() {
         let mut next_it = 0usize;
         for k in 0..nframes {
             let target = (8.0 * (k as f64 * 120.0 / nframes as f64).powf(1.4)).round() as usize;
-            while next_it < target { s.step(); next_it += 1; }
+            while next_it < target {
+                s.step();
+                next_it += 1;
+            }
             let cols = if schl { schlieren_cols(&s) } else { mach_cols(&s, 1.98) };
             out.push(render(&s, &cols), &format!("it{next_it}"));
         }

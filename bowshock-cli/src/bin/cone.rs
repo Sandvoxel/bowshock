@@ -46,7 +46,10 @@ fn main() {
             let t0 = Instant::now();
             let res = run_cone(&case, &tm);
             let dt = t0.elapsed().as_secs_f64();
-            let lim = match limiter { Limiter::VanAlbada => "vanalbada", _ => "minmod" };
+            let lim = match limiter {
+                Limiter::VanAlbada => "vanalbada",
+                _ => "minmod",
+            };
             let tag = format!("{}deg_{}x{}_{}", theta as i32, ni, nj, lim);
 
             let mut f = fs::File::create(out_dir.join(format!("cp_{tag}.csv"))).unwrap();
@@ -63,11 +66,20 @@ fn main() {
             let hist = |k: usize| res.residual.get(k.min(res.residual.len() - 1)).copied().unwrap_or(f64::NAN);
             println!(
                 "  {name:6} {ni:3}x{nj:3}: {} iters ({:.1}s), stop: {}, residual {:.2e} -> {:.2e} (peak/final = {:.1} orders)",
-                res.iters, dt, res.stop_reason, hist(20), hist(res.iters - 1), res.drop_orders
+                res.iters,
+                dt,
+                res.stop_reason,
+                hist(20),
+                hist(res.iters - 1),
+                res.drop_orders
             );
             println!(
                 "          min rho = {:.4}, min p = {:.4}   Cp(num) = {:.5} (first cell {:.5})   beta(num) = {:.3} deg",
-                res.min_rho, res.min_p, res.cp_avg, res.cp_cell_avg, res.beta_num.to_degrees()
+                res.min_rho,
+                res.min_p,
+                res.cp_avg,
+                res.cp_cell_avg,
+                res.beta_num.to_degrees()
             );
             rows.push((theta, name, ni, nj, res.cp_avg, tm.cp_surface, res.beta_num.to_degrees(), tm.beta.to_degrees(), res.drop_orders, res.iters));
         }

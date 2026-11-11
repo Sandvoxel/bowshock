@@ -9,10 +9,10 @@
 //! end, for the post-processing. The residual-based stopping rules run on the history iteration by iteration, so
 //! the reported stop iteration is the CPU-equivalent one; the GPU may execute up to `SYNC - 1` further iterations (`iters_exec`).
 
-use bowshock_gpu::{GpuSolver, Mode, Precision, Result};
+use bowshock_cases::subsonic::{finish, stop_reason, SubsonicCase, SubsonicResult, HIST_EVERY};
 use bowshock_core::gas::{cons_to_prim, freestream};
 use bowshock_core::solver::Solver;
-use bowshock_cases::subsonic::{finish, stop_reason, SubsonicCase, SubsonicResult, HIST_EVERY};
+use bowshock_gpu::{GpuSolver, Mode, Precision, Result};
 use std::time::Instant;
 
 /// Iterations between two synchronisations; equal to the base-pressure sampling interval of `bowshock_cases::subsonic::run_on`.

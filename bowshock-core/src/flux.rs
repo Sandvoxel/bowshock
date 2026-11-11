@@ -96,41 +96,20 @@ pub fn hllc(wl: &Prim, wr: &Prim, nx: f64, nr: f64) -> Cons {
         return physical_flux(wr, nx, nr);
     }
 
-    let sm = (pr - pl + rl * unl * (sl - unl) - rr * unr * (sr - unr))
-        / (rl * (sl - unl) - rr * (sr - unr));
+    let sm = (pr - pl + rl * unl * (sl - unl) - rr * unr * (sr - unr)) / (rl * (sl - unl) - rr * (sr - unr));
 
     if sm >= 0.0 {
         let f = physical_flux(wl, nx, nr);
         let fac = rl * (sl - unl) / (sl - sm);
-        let ul_star = [
-            fac,
-            fac * (ul + (sm - unl) * nx),
-            fac * (vl + (sm - unl) * nr),
-            fac * (el / rl + (sm - unl) * (sm + pl / (rl * (sl - unl)))),
-        ];
+        let ul_star = [fac, fac * (ul + (sm - unl) * nx), fac * (vl + (sm - unl) * nr), fac * (el / rl + (sm - unl) * (sm + pl / (rl * (sl - unl))))];
         let q = [rl, rl * ul, rl * vl, el];
-        [
-            f[0] + sl * (ul_star[0] - q[0]),
-            f[1] + sl * (ul_star[1] - q[1]),
-            f[2] + sl * (ul_star[2] - q[2]),
-            f[3] + sl * (ul_star[3] - q[3]),
-        ]
+        [f[0] + sl * (ul_star[0] - q[0]), f[1] + sl * (ul_star[1] - q[1]), f[2] + sl * (ul_star[2] - q[2]), f[3] + sl * (ul_star[3] - q[3])]
     } else {
         let f = physical_flux(wr, nx, nr);
         let fac = rr * (sr - unr) / (sr - sm);
-        let ur_star = [
-            fac,
-            fac * (ur + (sm - unr) * nx),
-            fac * (vr + (sm - unr) * nr),
-            fac * (er / rr + (sm - unr) * (sm + pr / (rr * (sr - unr)))),
-        ];
+        let ur_star = [fac, fac * (ur + (sm - unr) * nx), fac * (vr + (sm - unr) * nr), fac * (er / rr + (sm - unr) * (sm + pr / (rr * (sr - unr))))];
         let q = [rr, rr * ur, rr * vr, er];
-        [
-            f[0] + sr * (ur_star[0] - q[0]),
-            f[1] + sr * (ur_star[1] - q[1]),
-            f[2] + sr * (ur_star[2] - q[2]),
-            f[3] + sr * (ur_star[3] - q[3]),
-        ]
+        [f[0] + sr * (ur_star[0] - q[0]), f[1] + sr * (ur_star[1] - q[1]), f[2] + sr * (ur_star[2] - q[2]), f[3] + sr * (ur_star[3] - q[3])]
     }
 }
 
@@ -256,13 +235,7 @@ mod tests {
     #[test]
     fn hllc_consistency() {
         // F(U,U) must equal the physical flux for any state and normal direction.
-        let states: [Prim; 5] = [
-            [1.0, 2.0, 0.0, 1.0 / GAMMA],
-            [0.3, -1.5, 0.7, 0.2],
-            [2.5, 0.0, 0.0, 3.0],
-            [1.2, 0.3, -2.4, 0.9],
-            [0.9, 5.0, 3.0, 1.3],
-        ];
+        let states: [Prim; 5] = [[1.0, 2.0, 0.0, 1.0 / GAMMA], [0.3, -1.5, 0.7, 0.2], [2.5, 0.0, 0.0, 3.0], [1.2, 0.3, -2.4, 0.9], [0.9, 5.0, 3.0, 1.3]];
         for w in &states {
             for k in 0..16 {
                 let a = 0.4 * k as f64;

@@ -9,10 +9,10 @@
 //! per-iteration benchmark, launch overhead, sync-interval sweep) and skips the validation runs.
 //! CSV output: `out/gpu/`.
 
-use bowshock_gpu_cases::cone::{compare, residual_on_state, run_cpu, run_gpu, Compare, RunResult};
-use bowshock_gpu::{GpuSolver, Mode, Precision};
 use bowshock_cases::cone::{build_solver, ConeCase};
 use bowshock_core::flux::Limiter;
+use bowshock_gpu::{GpuSolver, Mode, Precision};
+use bowshock_gpu_cases::cone::{compare, residual_on_state, run_cpu, run_gpu, Compare, RunResult};
 use bowshock_reference::taylor_maccoll::{solve_cone, ConeSolution};
 use std::fs;
 use std::io::Write;
@@ -52,12 +52,7 @@ fn write_csvs(out: &PathBuf, tag: &str, row: &Row, tm: &ConeSolution) {
     let mut f = fs::File::create(out.join(format!("cp_{tag}.csv"))).unwrap();
     writeln!(f, "x_over_L,p_over_pinf_gpu,cp_gpu,cp_cpu,cp_firstcell_gpu,cp_firstcell_cpu,rel_diff_cp,cp_taylor_maccoll").unwrap();
     for (g, c) in row.gpu.post.surface.iter().zip(&row.cpu.post.surface) {
-        writeln!(
-            f,
-            "{:.8},{:.8},{:.8},{:.8},{:.8},{:.8},{:.4e},{:.8}",
-            g.0, g.1, g.2, c.2, g.3, c.3, (g.2 - c.2) / c.2, tm.cp_surface
-        )
-        .unwrap();
+        writeln!(f, "{:.8},{:.8},{:.8},{:.8},{:.8},{:.8},{:.4e},{:.8}", g.0, g.1, g.2, c.2, g.3, c.3, (g.2 - c.2) / c.2, tm.cp_surface).unwrap();
     }
     let mut f = fs::File::create(out.join(format!("residual_{tag}.csv"))).unwrap();
     writeln!(f, "iter,density_residual_gpu,density_residual_cpu").unwrap();
@@ -144,7 +139,13 @@ fn bench() {
             let t_norm = 1e6 * t0.elapsed().as_secs_f64() / total as f64;
             println!(
                 "| {mode:?} | {ni}x{nj} | {:.1} us | {:.1} us | {:.1} us | {:.1} us | {:.1} us | {:.1} us | {:.1} us |",
-                cells[0], cells[1], cells[2], cells[3], t_norm, 1e6 * t_all / total as f64, 1e6 * t_rec / total as f64
+                cells[0],
+                cells[1],
+                cells[2],
+                cells[3],
+                t_norm,
+                1e6 * t_all / total as f64,
+                1e6 * t_rec / total as f64
             );
         }
     }
@@ -212,18 +213,20 @@ fn perf_study(grids: &[(usize, usize)], chunk: usize, with_cpu: bool) -> Vec<((u
         }
         println!(
             "| {ni}x{nj} | {} | {:.0} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1}x | {:.1}x | {:.2}x |",
-            ni * nj, best_cpu, gpu[0], gpu[1], gpu[2], gpu[3], gpu[4], best_cpu / gpu[0], best_cpu / gpu[3], gpu[0] / gpu[2]
+            ni * nj,
+            best_cpu,
+            gpu[0],
+            gpu[1],
+            gpu[2],
+            gpu[3],
+            gpu[4],
+            best_cpu / gpu[0],
+            best_cpu / gpu[3],
+            gpu[0] / gpu[2]
         );
         out.push((
             (ni, nj),
-            Perf {
-                cpu_us: best_cpu,
-                guarded_us: gpu[0],
-                guarded_comp_us: gpu[1],
-                guarded_f32_us: gpu[2],
-                direct_us: gpu[3],
-                direct_f32_us: gpu[4],
-            },
+            Perf { cpu_us: best_cpu, guarded_us: gpu[0], guarded_comp_us: gpu[1], guarded_f32_us: gpu[2], direct_us: gpu[3], direct_f32_us: gpu[4] },
         ));
     }
     out
@@ -246,7 +249,9 @@ fn main() {
     let t0 = Instant::now();
     let ctx = luma::default_context().expect("open GPU");
     let ctx_seconds = t0.elapsed().as_secs_f64();
-    println!("bowshock-gpu cone validation: M = {mach}, gamma = 1.4, CFL = 0.5, MUSCL + HLLC/Rusanov blend + SSP-RK3, f32 on GPU (Luma) vs f64 CPU (bowshock-core)");
+    println!(
+        "bowshock-gpu cone validation: M = {mach}, gamma = 1.4, CFL = 0.5, MUSCL + HLLC/Rusanov blend + SSP-RK3, f32 on GPU (Luma) vs f64 CPU (bowshock-core)"
+    );
     println!("sync interval K = {chunk} iterations; CPU rayon threads = {}", std::thread::available_parallelism().map_or(0, |n| n.get()));
     println!("GPU context creation: {:.2} s", ctx_seconds);
     let _ = ctx;
@@ -266,11 +271,7 @@ fn main() {
     for &(limiter, lname) in &limiters {
         for &theta in &[10.0f64, 15.0] {
             let tm = solve_cone(mach, theta.to_radians()).expect("attached conical shock");
-            println!(
-                "\n=== {theta} deg cone, {lname}: Taylor-Maccoll beta = {:.4} deg, Cp = {:.5}",
-                tm.beta.to_degrees(),
-                tm.cp_surface
-            );
+            println!("\n=== {theta} deg cone, {lname}: Taylor-Maccoll beta = {:.4} deg, Cp = {:.5}", tm.beta.to_degrees(), tm.cp_surface);
             for &(ni, nj) in &grids {
                 let mut case = ConeCase::new(mach, theta, ni, nj);
                 case.limiter = limiter;
@@ -349,13 +350,23 @@ fn main() {
         );
     }
     println!("\n### Field difference GPU (guarded, extended) - CPU at the end of the runs (f32 = original f32 solver)");
-    println!("| cone | grid | limiter | max abs dp/p_inf | rms dp/p_inf | max rel drho/rho | f32: max abs dp/p_inf | f32: rms dp/p_inf | f32: max rel drho/rho |");
+    println!(
+        "| cone | grid | limiter | max abs dp/p_inf | rms dp/p_inf | max rel drho/rho | f32: max abs dp/p_inf | f32: rms dp/p_inf | f32: max rel drho/rho |"
+    );
     println!("|---|---|---|---|---|---|---|---|---|");
     for r in &rows {
         println!(
             "| {:.0} deg | {}x{} | {} | {:.2e} | {:.2e} | {:.2e} | {:.2e} | {:.2e} | {:.2e} |",
-            r.theta, r.ni, r.nj, r.lim, r.cmp.max_dp_over_pinf, r.cmp.rms_dp_over_pinf, r.cmp.max_rel_rho,
-            r.cmp_f32.max_dp_over_pinf, r.cmp_f32.rms_dp_over_pinf, r.cmp_f32.max_rel_rho
+            r.theta,
+            r.ni,
+            r.nj,
+            r.lim,
+            r.cmp.max_dp_over_pinf,
+            r.cmp.rms_dp_over_pinf,
+            r.cmp.max_rel_rho,
+            r.cmp_f32.max_dp_over_pinf,
+            r.cmp_f32.rms_dp_over_pinf,
+            r.cmp_f32.max_rel_rho
         );
     }
     println!("\n### Convergence (density residual drop from its peak after iteration 20; stop = criterion of `run_cone`)");
@@ -378,8 +389,15 @@ fn main() {
     for r in &rows {
         println!(
             "| {:.0} deg | {}x{} | {} | {:.2e} | {:.2e} | {:.2e} | {:.2e} | {:.2e} |",
-            r.theta, r.ni, r.nj, r.lim, r.cpu.residual.last().unwrap(), r.on_cpu_state_f32.0, r.on_cpu_state_f32.1,
-            r.on_cpu_state_ext.0, r.on_cpu_state_ext.1
+            r.theta,
+            r.ni,
+            r.nj,
+            r.lim,
+            r.cpu.residual.last().unwrap(),
+            r.on_cpu_state_f32.0,
+            r.on_cpu_state_f32.1,
+            r.on_cpu_state_ext.0,
+            r.on_cpu_state_ext.1
         );
     }
 
@@ -389,8 +407,20 @@ fn main() {
     for r in &rows {
         println!(
             "| {:.0} deg | {}x{} | {} | {} | {:.0} | {:.0} | {:.0} | {} ({}) | {:.2} | {:.2} | {:.2} | {:.2} |",
-            r.theta, r.ni, r.nj, r.lim, r.cpu.iters_exec, r.cpu.us_per_iter(), r.gpu.us_per_iter(), r.direct.us_per_iter(),
-            r.gpu.iters_exec, r.gpu.iters_stop, r.cpu.loop_seconds, r.gpu.loop_seconds, r.direct.loop_seconds, r.f32run.loop_seconds
+            r.theta,
+            r.ni,
+            r.nj,
+            r.lim,
+            r.cpu.iters_exec,
+            r.cpu.us_per_iter(),
+            r.gpu.us_per_iter(),
+            r.direct.us_per_iter(),
+            r.gpu.iters_exec,
+            r.gpu.iters_stop,
+            r.cpu.loop_seconds,
+            r.gpu.loop_seconds,
+            r.direct.loop_seconds,
+            r.f32run.loop_seconds
         );
     }
     println!("\n### Total time to the stopping criterion of each solver (iterations to stop x steady us/iter; GPU extended and CPU both stop at 6 orders; the f32 solver (before) ends at its plateau test)");
@@ -406,8 +436,20 @@ fn main() {
         );
         println!(
             "| {:.0} deg | {}x{} | {} | {} | {:.2} | {} | {:.2} | {:.2} | {:.1}x | {:.1}x | {} | {:.2} | {:.1} |",
-            r.theta, r.ni, r.nj, r.lim, r.cpu.iters_stop, tc, r.gpu.iters_stop, tg, td, tc / tg, tc / td,
-            r.f32run.iters_stop, tf, r.f32run.drop_orders
+            r.theta,
+            r.ni,
+            r.nj,
+            r.lim,
+            r.cpu.iters_stop,
+            tc,
+            r.gpu.iters_stop,
+            tg,
+            td,
+            tc / tg,
+            tc / td,
+            r.f32run.iters_stop,
+            tf,
+            r.f32run.drop_orders
         );
     }
     println!("\n### One-time GPU setup (kernel build + geometry/state upload) and first-launch warm-up, seconds (context creation {ctx_seconds:.2} s); extended precision");

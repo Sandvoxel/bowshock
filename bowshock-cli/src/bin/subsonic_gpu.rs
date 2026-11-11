@@ -12,13 +12,13 @@
 //! NASA TM X-2439 (Fox 1971) configurations on the GPU and prints the statistics of the CPU bin. Output: `out/gpu_subsonic/`.
 
 use bowshock_cases::body_grid::Body;
+use bowshock_cases::subsonic::{fox_case, fox_tm_x2439 as fox, run_on, wall_cp_at, SubsonicCase, SubsonicResult};
+use bowshock_cases::transonic::named_body;
 use bowshock_core::flux::Limiter;
 use bowshock_core::implicit::ImplicitParams;
 use bowshock_core::solver::Scheme;
-use bowshock_cases::subsonic::{fox_case, fox_tm_x2439 as fox, run_on, wall_cp_at, SubsonicCase, SubsonicResult};
-use bowshock_cases::transonic::named_body;
-use bowshock_gpu_cases::subsonic::{GpuSubsonic, GpuSubsonicRun, SYNC};
 use bowshock_gpu::{Mode, Precision};
+use bowshock_gpu_cases::subsonic::{GpuSubsonic, GpuSubsonicRun, SYNC};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
@@ -113,7 +113,18 @@ fn write_case_files(dir: &Path, name: &str, r: &Row) {
     writeln!(f, "x_over_d,r_over_d,cp_gpu,cp_cpu,cp_firstcell_gpu,cp_firstcell_cpu,diff_cp").unwrap();
     for (k, w) in g.wall.iter().enumerate() {
         let c = r.cpu.as_ref().map(|c| &c.wall[k]);
-        writeln!(f, "{:.8},{:.8},{:.8},{},{:.8},{},{}", w.x, w.r, w.cp, c.map_or(String::new(), |c| format!("{:.8}", c.cp)), w.cp_cell, c.map_or(String::new(), |c| format!("{:.8}", c.cp_cell)), c.map_or(String::new(), |c| format!("{:.4e}", w.cp - c.cp))).unwrap();
+        writeln!(
+            f,
+            "{:.8},{:.8},{:.8},{},{:.8},{},{}",
+            w.x,
+            w.r,
+            w.cp,
+            c.map_or(String::new(), |c| format!("{:.8}", c.cp)),
+            w.cp_cell,
+            c.map_or(String::new(), |c| format!("{:.8}", c.cp_cell)),
+            c.map_or(String::new(), |c| format!("{:.4e}", w.cp - c.cp))
+        )
+        .unwrap();
     }
     if !g.base_wall.is_empty() {
         let mut f = fs::File::create(dir.join(format!("base_{name}.csv"))).unwrap();
@@ -187,7 +198,11 @@ fn main() {
         opts.low_mach,
         if matches!(opts.scheme, Scheme::Explicit) { "explicit SSP-RK3" } else { "line-implicit" }
     );
-    println!("GPU sync interval = {SYNC} iterations; CPU rayon threads = {}; GPU context creation {:.2} s", std::thread::available_parallelism().map_or(0, |n| n.get()), t0.elapsed().as_secs_f64());
+    println!(
+        "GPU sync interval = {SYNC} iterations; CPU rayon threads = {}; GPU context creation {:.2} s",
+        std::thread::available_parallelism().map_or(0, |n| n.get()),
+        t0.elapsed().as_secs_f64()
+    );
     if args.iter().any(|a| a == "--validate") {
         validate(&out_dir, &opts, &args);
     } else {
@@ -211,7 +226,9 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
     };
     let warm = args.iter().any(|a| a == "--warm");
     let cyl: f64 = arg(args, "--cyl").and_then(|v| v.parse().ok()).unwrap_or(6.0);
-    let tag = arg(args, "--tag").map(String::from).unwrap_or_else(|| format!("{body_name}_L{}{}{}", opts.level, if matches!(opts.scheme, Scheme::Explicit) { "_exp" } else { "" }, if warm { "_warm" } else { "" }));
+    let tag = arg(args, "--tag").map(String::from).unwrap_or_else(|| {
+        format!("{body_name}_L{}{}{}", opts.level, if matches!(opts.scheme, Scheme::Explicit) { "_exp" } else { "" }, if warm { "_warm" } else { "" })
+    });
     let make = |m: f64, base: bool| {
         let mut bb = SubsonicCase::new(m, body.nose, opts.level, base);
         bb.body.cyl_length = cyl;
@@ -261,12 +278,10 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
             let max_dcp = cpu.as_ref().map_or(f64::NAN, |c| gpu.result.wall.iter().zip(&c.wall).fold(0.0f64, |mx, (a, b)| mx.max((a.cp - b.cp).abs())));
             let row = Row { mach: m, base, cpu, cpu_s, gpu, max_dcp };
             let g = &row.gpu.result;
-            let cpu_txt = row.cpu.as_ref().map_or(String::new(), |c| {
-                format!(
-                    "CPU {:>6} it ({:6.1} s, {}, {:.1} orders) | ",
-                    c.iters, row.cpu_s, c.stop_reason, c.drop_orders
-                )
-            });
+            let cpu_txt = row
+                .cpu
+                .as_ref()
+                .map_or(String::new(), |c| format!("CPU {:>6} it ({:6.1} s, {}, {:.1} orders) | ", c.iters, row.cpu_s, c.stop_reason, c.drop_orders));
             println!(
                 "M = {m:<4} {cpu_txt}GPU {:>6} it stop / {} exec ({:6.2} s, {}, {:.1} orders) | CD nose {:+.5} cyl {:+.5} base {:+.5} total {:+.5}, Cp_b {:+.4}; vs CPU: dCD_total {:+.1e}, dCp_b {:+.1e}, max |dCp| {:.1e}",
                 row.gpu.iters_stop, row.gpu.iters_exec, row.gpu.loop_seconds, g.stop_reason, g.drop_orders, g.cd_nose, g.cd_cyl, g.cd_base, g.cd_total, g.cp_base_mean,
@@ -286,9 +301,22 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
         let (g, c) = (&r.gpu.result, r.cpu.as_ref());
         println!(
             "| {} | {} | {:+.5} | {} | {:+.5} | {} | {:+.5} | {} | {} | {} | {:.4} | {} | {:.1e} | {} | {} | {} |",
-            r.mach, if r.base { "on" } else { "off" }, g.cd_nose, f(c.map(|c| c.cd_nose), 5), g.cd_base, f(c.map(|c| c.cd_base), 5), g.cd_total, f(c.map(|c| c.cd_total), 5),
-            if r.base { format!("{:+.4}", g.cp_base_mean) } else { "-".into() }, if r.base { f(c.map(|c| c.cp_base_mean), 4) } else { "-".into() }, g.cp_min, c.map_or("-".to_string(), |c| format!("{:.4}", c.cp_min)), r.max_dcp,
-            f(Some(g.cd_base_model).filter(|v| !v.is_nan()), 5), f(Some(g.cd_total_model).filter(|v| !v.is_nan()), 5), check(r.base, g, c, r.max_dcp)
+            r.mach,
+            if r.base { "on" } else { "off" },
+            g.cd_nose,
+            f(c.map(|c| c.cd_nose), 5),
+            g.cd_base,
+            f(c.map(|c| c.cd_base), 5),
+            g.cd_total,
+            f(c.map(|c| c.cd_total), 5),
+            if r.base { format!("{:+.4}", g.cp_base_mean) } else { "-".into() },
+            if r.base { f(c.map(|c| c.cp_base_mean), 4) } else { "-".into() },
+            g.cp_min,
+            c.map_or("-".to_string(), |c| format!("{:.4}", c.cp_min)),
+            r.max_dcp,
+            f(Some(g.cd_base_model).filter(|v| !v.is_nan()), 5),
+            f(Some(g.cd_total_model).filter(|v| !v.is_nan()), 5),
+            check(r.base, g, c, r.max_dcp)
         );
     }
     println!("\n### Convergence");
@@ -298,13 +326,27 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
         let g = &r.gpu.result;
         println!(
             "| {} | {} | {} | {} | {} | {}/{} | {} | {:.1} | {:.2e} | {:.2e} / {} |",
-            r.mach, if r.base { "on" } else { "off" }, r.cpu.as_ref().map_or("-".into(), |c| c.iters.to_string()), r.cpu.as_ref().map_or("-", |c| c.stop_reason),
-            r.cpu.as_ref().map_or("-".into(), |c| format!("{:.1}", c.drop_orders)), r.gpu.iters_stop, r.gpu.iters_exec, g.stop_reason, g.drop_orders, g.residual.last().unwrap(), g.residual_peak,
+            r.mach,
+            if r.base { "on" } else { "off" },
+            r.cpu.as_ref().map_or("-".into(), |c| c.iters.to_string()),
+            r.cpu.as_ref().map_or("-", |c| c.stop_reason),
+            r.cpu.as_ref().map_or("-".into(), |c| format!("{:.1}", c.drop_orders)),
+            r.gpu.iters_stop,
+            r.gpu.iters_exec,
+            g.stop_reason,
+            g.drop_orders,
+            g.residual.last().unwrap(),
+            g.residual_peak,
             r.cpu.as_ref().map_or("-".into(), |c| format!("{:.2e}", c.residual_peak))
         );
     }
-    println!("\n### Timing (wall time of the runs to their stopping criterion: iteration loop incl. residual read-back{}, setup excluded)", if bases.contains(&true) { " and base-pressure sampling every 50 iterations" } else { "" });
-    println!("| M | base | CPU iters | GPU iters (exec) | CPU s | GPU s | CPU us/iter | GPU us/iter | speed-up (time to convergence) | speed-up (per iteration) |");
+    println!(
+        "\n### Timing (wall time of the runs to their stopping criterion: iteration loop incl. residual read-back{}, setup excluded)",
+        if bases.contains(&true) { " and base-pressure sampling every 50 iterations" } else { "" }
+    );
+    println!(
+        "| M | base | CPU iters | GPU iters (exec) | CPU s | GPU s | CPU us/iter | GPU us/iter | speed-up (time to convergence) | speed-up (per iteration) |"
+    );
     println!("|---|---|---|---|---|---|---|---|---|---|");
     let (mut tc, mut tg) = (0.0, 0.0);
     for r in &rows {
@@ -314,16 +356,37 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
             Some(c) => {
                 let cu = 1e6 * r.cpu_s / c.iters as f64;
                 tc += r.cpu_s;
-                println!("| {} | {} | {} | {} | {:.1} | {:.2} | {:.0} | {:.0} | {:.1}x | {:.1}x |", r.mach, if r.base { "on" } else { "off" }, c.iters, r.gpu.iters_exec, r.cpu_s, r.gpu.loop_seconds, cu, gu, r.cpu_s / r.gpu.loop_seconds, cu / gu);
+                println!(
+                    "| {} | {} | {} | {} | {:.1} | {:.2} | {:.0} | {:.0} | {:.1}x | {:.1}x |",
+                    r.mach,
+                    if r.base { "on" } else { "off" },
+                    c.iters,
+                    r.gpu.iters_exec,
+                    r.cpu_s,
+                    r.gpu.loop_seconds,
+                    cu,
+                    gu,
+                    r.cpu_s / r.gpu.loop_seconds,
+                    cu / gu
+                );
             }
-            None => println!("| {} | {} | - | {} | - | {:.2} | - | {:.0} | - | - |", r.mach, if r.base { "on" } else { "off" }, r.gpu.iters_exec, r.gpu.loop_seconds, gu),
+            None => println!(
+                "| {} | {} | - | {} | - | {:.2} | - | {:.0} | - | - |",
+                r.mach,
+                if r.base { "on" } else { "off" },
+                r.gpu.iters_exec,
+                r.gpu.loop_seconds,
+                gu
+            ),
         }
     }
     println!("| total | | | | {tc:.1} | {tg:.2} | | | {:.1}x | |", tc / tg);
     let mut steady = Vec::new();
     if with_bench {
         println!("\n### Steady per-iteration cost (M = 0.5, 1000 iterations from the free stream, best of 3, sync every {SYNC}; history kernels on)");
-        println!("| base | grid | cells | CPU f64 rayon us/iter | GPU-guarded extended us/iter | guarded f32 | extended speed-up vs CPU | extended / f32 cost |");
+        println!(
+            "| base | grid | cells | CPU f64 rayon us/iter | GPU-guarded extended us/iter | guarded f32 | extended speed-up vs CPU | extended / f32 cost |"
+        );
         println!("|---|---|---|---|---|---|---|---|");
         for &base in &bases {
             let c = make(0.5, base);
@@ -344,11 +407,33 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
         writeln!(
             f,
             "{},{},{},{},{},{:.2},{:.3},{},{},{},{:.3},{:.8},{},{:.8},{},{:.8},{},{:.8},{},{:.8},{},{:.6},{},{:.4e},{},{},{}",
-            r.mach, r.base, r.gpu.iters_stop, r.gpu.iters_exec, g.stop_reason, g.drop_orders, r.gpu.loop_seconds,
-            c.map_or(String::new(), |c| c.iters.to_string()), c.map_or("", |c| c.stop_reason), c.map_or(String::new(), |c| format!("{:.2}", c.drop_orders)), r.cpu_s,
-            g.cd_nose, o(c.map(|c| c.cd_nose)), g.cd_cyl, o(c.map(|c| c.cd_cyl)), g.cd_base, o(c.map(|c| c.cd_base)), g.cd_total, o(c.map(|c| c.cd_total)),
-            g.cp_base_mean, o(c.map(|c| c.cp_base_mean)), g.cp_min, o(c.map(|c| c.cp_min)), r.max_dcp,
-            o(Some(g.cd_base_model).filter(|v| !v.is_nan())), o(Some(g.cd_total_model).filter(|v| !v.is_nan())), ck
+            r.mach,
+            r.base,
+            r.gpu.iters_stop,
+            r.gpu.iters_exec,
+            g.stop_reason,
+            g.drop_orders,
+            r.gpu.loop_seconds,
+            c.map_or(String::new(), |c| c.iters.to_string()),
+            c.map_or("", |c| c.stop_reason),
+            c.map_or(String::new(), |c| format!("{:.2}", c.drop_orders)),
+            r.cpu_s,
+            g.cd_nose,
+            o(c.map(|c| c.cd_nose)),
+            g.cd_cyl,
+            o(c.map(|c| c.cd_cyl)),
+            g.cd_base,
+            o(c.map(|c| c.cd_base)),
+            g.cd_total,
+            o(c.map(|c| c.cd_total)),
+            g.cp_base_mean,
+            o(c.map(|c| c.cp_base_mean)),
+            g.cp_min,
+            o(c.map(|c| c.cp_min)),
+            r.max_dcp,
+            o(Some(g.cd_base_model).filter(|v| !v.is_nan())),
+            o(Some(g.cd_total_model).filter(|v| !v.is_nan())),
+            ck
         )
         .unwrap();
     }
@@ -422,9 +507,21 @@ fn validate(out_dir: &Path, opts: &Opts, args: &[String]) {
             writeln!(
                 md,
                 "| {cfg} | {m} | {} | {:.1} | {} | {:.1} | {:.4} | {} | {:+.4} | {} | {:+.4} | {:+.4} | {} | {:.1e} | {} | {} | {} |",
-                gpu.iters_stop, gpu.loop_seconds, cpu.as_ref().map_or("-".into(), |c| c.iters.to_string()), cpu_s, rms(g), cpu.as_ref().map_or("-".into(), |c| format!("{:.4}", rms(c))),
-                g.cp_base_mean, cpu.as_ref().map_or("-".into(), |c| format!("{:+.4}", c.cp_base_mean)), data_base, g.cd_total, cpu.as_ref().map_or("-".into(), |c| format!("{:+.4}", c.cd_total)), dcp,
-                corr(g.cd_base_model), corr(g.cd_total_model), chk
+                gpu.iters_stop,
+                gpu.loop_seconds,
+                cpu.as_ref().map_or("-".into(), |c| c.iters.to_string()),
+                cpu_s,
+                rms(g),
+                cpu.as_ref().map_or("-".into(), |c| format!("{:.4}", rms(c))),
+                g.cp_base_mean,
+                cpu.as_ref().map_or("-".into(), |c| format!("{:+.4}", c.cp_base_mean)),
+                data_base,
+                g.cd_total,
+                cpu.as_ref().map_or("-".into(), |c| format!("{:+.4}", c.cd_total)),
+                dcp,
+                corr(g.cd_base_model),
+                corr(g.cd_total_model),
+                chk
             )
             .unwrap();
         }

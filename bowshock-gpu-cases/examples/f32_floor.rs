@@ -8,8 +8,8 @@
 //!
 //! `cargo run --release -p bowshock-gpu-cases --example f32_floor`
 
-use bowshock_gpu::{GpuSolver, Mode, Precision};
 use bowshock_cases::cone::{build_solver, ConeCase};
+use bowshock_gpu::{GpuSolver, Mode, Precision};
 use bowshock_reference::taylor_maccoll::solve_cone;
 
 fn main() {

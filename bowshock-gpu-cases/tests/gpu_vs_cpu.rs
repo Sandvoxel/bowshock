@@ -1,16 +1,16 @@
 //! GPU (f32, WGSL via Luma) vs CPU (f64, bowshock-core) on the same inputs.
 
-use bowshock_gpu_cases::ogive;
-use bowshock_gpu_cases::transonic::GpuTransonic;
-use bowshock_gpu::{eval_faces, eval_faces_ext, GpuSolver, Mode, Precision};
 use bowshock_cases::cone::{build_solver, ConeCase};
 use bowshock_cases::ogive::OgiveCase;
+use bowshock_cases::transonic::{self, TransonicCase};
 use bowshock_core::flux::{face_flux, hllc, reconstruct, Limiter};
 use bowshock_core::gas::{cons_to_prim, freestream, prim_to_cons, Prim};
 use bowshock_core::grid::Grid;
 use bowshock_core::solver::{Bc, Config, Solver};
+use bowshock_gpu::{eval_faces, eval_faces_ext, GpuSolver, Mode, Precision};
+use bowshock_gpu_cases::ogive;
+use bowshock_gpu_cases::transonic::GpuTransonic;
 use bowshock_reference::taylor_maccoll::solve_cone;
-use bowshock_cases::transonic::{self, TransonicCase};
 
 /// xorshift64* uniform in [0, 1).
 struct Rng(u64);
@@ -27,12 +27,7 @@ impl Rng {
 }
 
 fn random_prim(r: &mut Rng) -> [f32; 4] {
-    [
-        r.range(0.1, 3.0) as f32,
-        r.range(-4.0, 4.0) as f32,
-        r.range(-4.0, 4.0) as f32,
-        r.range(0.1, 4.0) as f32,
-    ]
+    [r.range(0.1, 3.0) as f32, r.range(-4.0, 4.0) as f32, r.range(-4.0, 4.0) as f32, r.range(0.1, 4.0) as f32]
 }
 
 fn to64(w: &[f32; 4]) -> Prim {
@@ -232,9 +227,8 @@ fn large_grid_residual_history_matches_cpu() {
         let mut gpu = GpuSolver::new_on(&ctx, &cpu.grid, &cpu.cfg, mode).unwrap();
         let res_gpu = gpu.run(3).unwrap();
         let worst_res = res_gpu.iter().zip(&res_cpu).fold(0.0f64, |m, (a, b)| m.max((a - b).abs() / b));
-        let worst = gpu.state().unwrap().iter().zip(&cpu.u).fold(0.0f64, |m, (a, b)| {
-            (0..4).fold(m, |m, k| m.max((a[k] as f64 - b[k]).abs() / (1.0 + b[k].abs())))
-        });
+        let worst =
+            gpu.state().unwrap().iter().zip(&cpu.u).fold(0.0f64, |m, (a, b)| (0..4).fold(m, |m, k| m.max((a[k] as f64 - b[k]).abs() / (1.0 + b[k].abs()))));
         println!("{mode:?} 400x200: residual diff {worst_res:.2e}, state diff {worst:.2e}");
         assert!(worst_res < 1e-4 && worst < 1e-5, "{mode:?}: residual diff {worst_res:e}, state diff {worst:e}");
     }
@@ -296,10 +290,7 @@ fn ogive_state_and_wall_cp_match_cpu() {
     case.first_order_iters = 5;
     let mut cpu = case.build_solver();
     let res_cpu: Vec<f64> = (0..20).map(|_| cpu.step()).collect();
-    for (mode, prec) in [Mode::Direct, Mode::Guarded]
-        .into_iter()
-        .flat_map(|m| [Precision::F32, Precision::Extended].into_iter().map(move |p| (m, p)))
-    {
+    for (mode, prec) in [Mode::Direct, Mode::Guarded].into_iter().flat_map(|m| [Precision::F32, Precision::Extended].into_iter().map(move |p| (m, p))) {
         let mut gpu = GpuSolver::new_with(&ctx, &case.build_solver().grid, &cpu.cfg, mode, prec).expect("GPU solver");
         let res_gpu = gpu.run(20).expect("GPU run");
         let ug = gpu.state_f64().unwrap();
@@ -326,7 +317,10 @@ fn ogive_state_and_wall_cp_match_cpu() {
     let post_gpu = ogive::postprocess(&case, &cpu.grid, &cpu.cfg.freestream, &gpu.state_f64().unwrap());
     let max_dcp = post_gpu.wall.iter().zip(&post_cpu.wall).fold(0.0f64, |m, (a, b)| m.max((a.cp - b.cp).abs()));
     let cd_rel = (post_gpu.cd_nose - post_cpu.cd_nose) / post_cpu.cd_nose;
-    println!("ogive after {n} iterations: CD gpu {:.6} cpu {:.6} (rel {cd_rel:+.2e}), max |dCp| over the wall {max_dcp:.2e}", post_gpu.cd_nose, post_cpu.cd_nose);
+    println!(
+        "ogive after {n} iterations: CD gpu {:.6} cpu {:.6} (rel {cd_rel:+.2e}), max |dCp| over the wall {max_dcp:.2e}",
+        post_gpu.cd_nose, post_cpu.cd_nose
+    );
     assert!(cd_rel.abs() < 1e-5, "forebody CD differs by {cd_rel:e}");
     assert!(max_dcp < 1e-5, "wall Cp differs by {max_dcp:e}");
 }
@@ -381,10 +375,7 @@ fn characteristic_far_field_preserves_the_free_stream() {
         let dev_cpu = dev(&cpu.u);
         println!("M = {mach}: CPU max deviation from the free stream after 30 iterations: {dev_cpu:.2e}");
         assert!(dev_cpu < 1e-12, "CPU: free stream not preserved at M = {mach}: {dev_cpu:e}");
-        for (mode, prec) in [Mode::Direct, Mode::Guarded]
-            .into_iter()
-            .flat_map(|m| [Precision::F32, Precision::Extended].into_iter().map(move |p| (m, p)))
-        {
+        for (mode, prec) in [Mode::Direct, Mode::Guarded].into_iter().flat_map(|m| [Precision::F32, Precision::Extended].into_iter().map(move |p| (m, p))) {
             let mut gpu = GpuSolver::new_with(&ctx, &cpu.grid, &cpu.cfg, mode, prec).unwrap();
             gpu.run(30).unwrap();
             let d = dev(&gpu.state_f64().unwrap());
@@ -406,10 +397,7 @@ fn characteristic_far_field_matches_cpu_on_a_perturbed_state() {
         let u0 = perturbed_state(&cpu);
         cpu.u = u0.clone();
         let res_cpu: Vec<f64> = (0..20).map(|_| cpu.step()).collect();
-        for (mode, prec) in [Mode::Direct, Mode::Guarded]
-            .into_iter()
-            .flat_map(|m| [Precision::F32, Precision::Extended].into_iter().map(move |p| (m, p)))
-        {
+        for (mode, prec) in [Mode::Direct, Mode::Guarded].into_iter().flat_map(|m| [Precision::F32, Precision::Extended].into_iter().map(move |p| (m, p))) {
             let mut gpu = GpuSolver::new_with(&ctx, &cpu.grid, &cpu.cfg, mode, prec).unwrap();
             gpu.set_state(&u0).unwrap();
             let res_gpu = gpu.run(20).unwrap();
@@ -434,10 +422,7 @@ fn transonic_state_after_20_iterations_matches_cpu() {
     case.first_order_iters = 5;
     let mut cpu = case.build_solver();
     let res_cpu: Vec<f64> = (0..20).map(|_| cpu.step()).collect();
-    for (mode, prec) in [Mode::Direct, Mode::Guarded]
-        .into_iter()
-        .flat_map(|m| [Precision::F32, Precision::Extended].into_iter().map(move |p| (m, p)))
-    {
+    for (mode, prec) in [Mode::Direct, Mode::Guarded].into_iter().flat_map(|m| [Precision::F32, Precision::Extended].into_iter().map(move |p| (m, p))) {
         let mut gpu = GpuSolver::new_with(&ctx, &cpu.grid, &cpu.cfg, mode, prec).unwrap();
         let res_gpu = gpu.run(20).unwrap();
         let ug = gpu.state_f64().unwrap();
@@ -484,11 +469,11 @@ fn transonic_run_and_warm_start_match_cpu() {
 // Subsonic components: low-Mach flux correction, solid block (base / wake), line-implicit convergence scheme.
 
 use bowshock_cases::body_grid::Nose;
+use bowshock_cases::subsonic::{self, SubsonicCase};
 use bowshock_core::flux::{face_flux_lm, low_mach_states};
 use bowshock_core::solver::Scheme;
-use bowshock_cases::subsonic::{self, SubsonicCase};
-use bowshock_gpu_cases::subsonic::GpuSubsonic;
 use bowshock_gpu::{eval_faces_ext_lm, eval_faces_lm};
+use bowshock_gpu_cases::subsonic::GpuSubsonic;
 
 /// `samples` with the velocities scaled by 1, 0.3, 0.1, 0.02 (cyclically): Mach numbers from supersonic (`z = 1`, correction off) down to
 /// below the floor `LOW_MACH_FLOOR` of the scaling factor.
@@ -569,7 +554,11 @@ fn subsonic_state_check(tag: &str, base: bool, scheme: Scheme, iters: usize, tol
         let ug = gpu.state_f64().unwrap();
         let worst = ug.iter().zip(&cpu.u).fold(0.0f64, |m, (a, b)| (0..4).fold(m, |m, k| m.max((a[k] - b[k]).abs() / (1.0 + b[k].abs()))));
         let worst_res = res_gpu.iter().zip(&res_cpu).fold(0.0f64, |m, (a, b)| m.max((a - b).abs() / b));
-        println!("{tag} {prec:?}: max |dU|/(1+|U|) = {worst:.2e}, max rel residual diff = {worst_res:.2e}, residual {:.3e} -> {:.3e}", res_cpu[0], res_cpu[iters - 1]);
+        println!(
+            "{tag} {prec:?}: max |dU|/(1+|U|) = {worst:.2e}, max rel residual diff = {worst_res:.2e}, residual {:.3e} -> {:.3e}",
+            res_cpu[0],
+            res_cpu[iters - 1]
+        );
         assert!(worst < tol && res_gpu.iter().all(|r| r.is_finite()), "{tag} {prec:?}: state {worst:e}, residual {worst_res:e}");
     }
 }
@@ -699,7 +688,13 @@ fn implicit_transonic_warm_start_matches_cpu() {
         assert_eq!((g.iters, gpu.iters_exec), (cpu.iters, cpu.iters), "{tag}: iteration counts");
         let res = g.residual.iter().zip(&cpu.residual).fold(0.0f64, |m, (a, b)| m.max((a - b).abs() / b));
         let dcp = g.wall.iter().zip(&cpu.wall).fold(0.0f64, |m, (a, b)| m.max((a.cp - b.cp).abs()));
-        println!("{tag}: CD gpu {:.6} cpu {:.6}, max |dCp| {dcp:.2e}, max rel residual diff {res:.2e}, residual {:.2e} -> {:.2e}", g.cd_nose, cpu.cd_nose, cpu.residual[0], cpu.residual.last().unwrap());
+        println!(
+            "{tag}: CD gpu {:.6} cpu {:.6}, max |dCp| {dcp:.2e}, max rel residual diff {res:.2e}, residual {:.2e} -> {:.2e}",
+            g.cd_nose,
+            cpu.cd_nose,
+            cpu.residual[0],
+            cpu.residual.last().unwrap()
+        );
         assert!(res < tol_res && dcp < 1e-5 && (g.cd_nose - cpu.cd_nose).abs() < 1e-5, "{tag}: GPU differs from CPU");
     }
 }

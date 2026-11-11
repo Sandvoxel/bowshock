@@ -6,9 +6,9 @@
 //! or `Bc::PressureOutflow`; axis/body `Bc::SlipWall`. Lengths are in body diameters.
 
 use crate::body_grid::{large_domain_grid, Body, LargeGridParams, Nose};
+use crate::ogive::WallPoint;
 use bowshock_core::flux::Limiter;
 use bowshock_core::gas::{cons_to_prim, freestream, sound_speed};
-use crate::ogive::WallPoint;
 use bowshock_core::solver::{Bc, Config, Scheme, Solver};
 
 #[derive(Clone, Debug)]
@@ -398,7 +398,10 @@ pub mod czarnecki_monta {
         }
     }
     /// Station `x` [in] from the nose tip.
-    pub const X_IN: [f64; 34] = [1.01, 1.95, 2.82, 3.81, 4.78, 5.78, 6.76, 7.76, 8.77, 9.79, 10.78, 11.80, 12.78, 13.77, 14.78, 15.78, 16.78, 17.75, 18.79, 19.78, 20.78, 22.75, 24.74, 26.77, 28.76, 30.77, 32.76, 34.78, 36.79, 42.14, 44.10, 46.08, 48.08, 49.62];
+    pub const X_IN: [f64; 34] = [
+        1.01, 1.95, 2.82, 3.81, 4.78, 5.78, 6.76, 7.76, 8.77, 9.79, 10.78, 11.80, 12.78, 13.77, 14.78, 15.78, 16.78, 17.75, 18.79, 19.78, 20.78, 22.75, 24.74,
+        26.77, 28.76, 30.77, 32.76, 34.78, 36.79, 42.14, 44.10, 46.08, 48.08, 49.62,
+    ];
     /// Cp at M = 0.7, 0.9, 1.0, 1.1, 1.2 for each station.
     pub const CP: [[f64; 5]; 34] = [
         [0.282, 0.312, 0.371, 0.372, 0.353],
@@ -442,7 +445,6 @@ pub mod czarnecki_monta {
         MACH.iter().position(|&x| (x - m).abs() < 1e-9)
     }
 }
-
 
 #[cfg(test)]
 mod tests {

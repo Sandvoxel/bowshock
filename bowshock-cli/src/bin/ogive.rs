@@ -8,8 +8,8 @@
 //! `--quick` runs only the coarse and medium grids. `--stretch s` clusters nose cells towards the tip
 //! (`x = L (k/n)^s`; output then goes to `out/ogive_stretch<s>/`). Output: `out/ogive/`.
 
-use bowshock_core::flux::Limiter;
 use bowshock_cases::ogive::{perkins_jorgensen as pj, run_ogive, theory_for, wall_cp_at, OgiveCase, OgiveResult};
+use bowshock_core::flux::Limiter;
 use bowshock_reference::shock_expansion::{Ogive, SurfaceTheory};
 use std::fmt::Write as _;
 use std::fs;
@@ -136,7 +136,12 @@ fn main() {
     }
     for (name, m) in &models {
         let (nr, nm) = stat(m.as_ref(), 8);
-        let all = if name.starts_with("tangent") { "-".to_string() } else { let (r, mx) = stat(m.as_ref(), 15); format!("{r:.4} | {mx:.4}") };
+        let all = if name.starts_with("tangent") {
+            "-".to_string()
+        } else {
+            let (r, mx) = stat(m.as_ref(), 15);
+            format!("{r:.4} | {mx:.4}")
+        };
         let all = if all == "-" { "- | -".into() } else { all };
         writeln!(md, "| {name} | {nr:.4} | {nm:.4} | {all} |").unwrap();
     }
@@ -154,7 +159,11 @@ fn main() {
     // ---------------- Mach sweep against theory ----------------
     if sweep {
         writeln!(md, "\n### Forebody pressure drag vs Mach (fineness-ratio-3 tangent ogive): CFD vs theory (no experimental data)\n").unwrap();
-        writeln!(md, "| M | tip cone beta [deg] | shock-expansion | tangent-cone | CFD medium | CFD fine | fine vs tangent-cone |\n|---|---|---|---|---|---|---|").unwrap();
+        writeln!(
+            md,
+            "| M | tip cone beta [deg] | shock-expansion | tangent-cone | CFD medium | CFD fine | fine vs tangent-cone |\n|---|---|---|---|---|---|---|"
+        )
+        .unwrap();
         for &m in &[1.5f64, 3.0, 4.0] {
             let mut cds = Vec::new();
             let mut thm_ = None;

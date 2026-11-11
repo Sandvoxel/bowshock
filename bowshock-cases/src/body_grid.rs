@@ -58,9 +58,7 @@ impl Body {
     }
     pub fn nose_length(&self) -> f64 {
         match self.nose {
-            Nose::TangentOgive { fineness } | Nose::Power { fineness, .. } | Nose::Parabolic { fineness, .. } | Nose::Haack { fineness, .. } => {
-                fineness
-            }
+            Nose::TangentOgive { fineness } | Nose::Power { fineness, .. } | Nose::Parabolic { fineness, .. } | Nose::Haack { fineness, .. } => fineness,
             Nose::Cone { half_angle } => self.radius() / half_angle.tan(),
         }
     }
@@ -462,7 +460,13 @@ mod tests {
     }
 
     fn base_params(sting: f64, boat: f64) -> BaseGridParams {
-        let body = BaseBody { body: Body { nose: Nose::TangentOgive { fineness: 3.0 } }, cyl_length: 3.0, boat_length: boat, boat_angle: 10f64.to_radians(), sting_radius: sting };
+        let body = BaseBody {
+            body: Body { nose: Nose::TangentOgive { fineness: 3.0 } },
+            cyl_length: 3.0,
+            boat_length: boat,
+            boat_angle: 10f64.to_radians(),
+            sting_radius: sting,
+        };
         BaseGridParams {
             body,
             x_up: 20.0,

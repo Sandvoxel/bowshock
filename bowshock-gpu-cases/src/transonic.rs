@@ -8,10 +8,10 @@
 //! rules are evaluated on the history iteration by iteration, so the reported stop iteration is the CPU-equivalent one; the GPU
 //! may execute up to `SYNC - 1` further iterations (`iters_exec`) and the final wall state is the one after those.
 
-use bowshock_gpu::{GpuSolver, Mode, Precision, Result};
+use bowshock_cases::transonic::{finish, stop_reason, wall_distribution, TransonicCase, TransonicResult};
 use bowshock_core::gas::freestream;
 use bowshock_core::solver::Solver;
-use bowshock_cases::transonic::{finish, stop_reason, wall_distribution, TransonicCase, TransonicResult};
+use bowshock_gpu::{GpuSolver, Mode, Precision, Result};
 use std::time::Instant;
 
 /// Iterations between two synchronisations; equal to the CD sampling interval of `bowshock_cases::transonic::run_on`.

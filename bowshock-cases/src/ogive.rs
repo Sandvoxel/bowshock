@@ -7,8 +7,8 @@
 use bowshock_core::flux::Limiter;
 use bowshock_core::gas::freestream;
 use bowshock_core::grid::Grid;
-use bowshock_reference::shock_expansion::{Ogive, SurfaceTheory};
 use bowshock_core::solver::{Bc, Config, Solver};
+use bowshock_reference::shock_expansion::{Ogive, SurfaceTheory};
 
 /// Published experimental surface pressures, zero angle of attack.
 ///
@@ -24,11 +24,8 @@ pub mod perkins_jorgensen {
     pub const CP_UNCERTAINTY: f64 = 0.005;
     /// Orifice stations x/d from the vertex (Table I(a), orifices 1..15).
     #[allow(clippy::approx_constant)] // 6.28 is a measured station, not tau
-    pub const X_OVER_D: [f64; 15] =
-        [0.22, 0.56, 0.89, 1.22, 1.61, 2.06, 2.5, 2.95, 3.62, 4.06, 4.50, 5.39, 6.28, 7.17, 8.06];
-    pub const CP: [f64; 15] = [
-        0.260, 0.212, 0.165, 0.115, 0.074, 0.026, -0.014, -0.038, -0.030, -0.017, -0.012, -0.009, -0.001, 0.000, 0.006,
-    ];
+    pub const X_OVER_D: [f64; 15] = [0.22, 0.56, 0.89, 1.22, 1.61, 2.06, 2.5, 2.95, 3.62, 4.06, 4.50, 5.39, 6.28, 7.17, 8.06];
+    pub const CP: [f64; 15] = [0.260, 0.212, 0.165, 0.115, 0.074, 0.026, -0.014, -0.038, -0.030, -0.017, -0.012, -0.009, -0.001, 0.000, 0.006];
 
     /// Forebody pressure-drag coefficient (base-area reference) integrated from the nose orifices,
     /// `CD = integral_0^1 Cp d(s)`, `s = (r/R)^2`, trapezoid in `s`, with the unmeasured ends closed by
@@ -304,18 +301,7 @@ fn postprocess(case: &OgiveCase, s: &Solver, residual: Vec<f64>, drop_orders: f6
         min_rho = min_rho.min(w[0]);
         min_p = min_p.min(w[3]);
     }
-    OgiveResult {
-        iters: residual.len(),
-        residual,
-        drop_orders,
-        stop_reason: reason,
-        wall,
-        cd_nose: cd,
-        cd_nose_cell: cd_cell,
-        shock_margin,
-        min_rho,
-        min_p,
-    }
+    OgiveResult { iters: residual.len(), residual, drop_orders, stop_reason: reason, wall, cd_nose: cd, cd_nose_cell: cd_cell, shock_margin, min_rho, min_p }
 }
 
 /// Linear interpolation of the wall `Cp(x)` (extrapolated-wall value) at `x`; NaN outside the sampled range.
