@@ -14,6 +14,7 @@ bowshock-gpu/
   src/shaders.rs        WGSL kernels (COMMON = translation of bowshock-core gas.rs/flux.rs; one source per kernel), f32 / compensated update
   src/shaders_ext.rs    double-float (df) WGSL: error-free arithmetic + the df translation of the face kernels and the residual (+ low-Mach correction, f32-geometry closure correction)
   src/shaders_impl.rs   WGSL of the line-implicit scheme: 4x4 block library (flux Jacobian, Roe-type |A|, ghost Jacobians), block assembly, block-tridiagonal line solves, defect correction, positivity-damped update
+  src/shaders_visc.rs   WGSL of the viscous terms and the SST model (cell gradients, viscous face fluxes, turbulence gradients / coefficients / update) and the host-side geometry they need
   src/lib.rs            GpuSolver (Mode x Precision): uploads geometry once, records the kernels, residual history, state read-back
 bowshock-gpu-cases/
   src/cone.rs           cone runners (CPU loop, GPU loop with identical stopping criteria), post-processing, comparison metrics
@@ -49,7 +50,7 @@ skips 400x200, `--limiter minmod|vanalbada`, `--chunk K`, `--bench [--no-cpu]` o
   extended precisions add the low words `ulo`, `u0lo` (same layout), and (extended) the fluxes / primitives are stored as `(hi, lo)` pairs of vec4.
   Geometry is uploaded once from the bowshock-core grid (`bowshock_cases::cone::build_solver(...).grid`): `iface`/`jface` =
   `(nx, nr, len, len*r_mid)` per face (weight computed in f64, then rounded), `cell` = `(A, V, Cx, Cr)` where `(Cx, Cr)` is the closure defect of the cell's f32 face data (see "Geometry closure correction").
-* **Uniform block** (`Params`, encase struct of scalars, 128 B) is passed with every launch (Luma copies it into its own
+* **Uniform block** (`Params`, encase struct of scalars, 144 B) is passed with every launch (Luma copies it into its own
   arena slot per launch): sizes, limiter code (0 first order during the start-up, 1 minmod, 2 van Albada),
   RK stage and stage coefficients, CFL, free stream (f32 + its low words), BC codes, residual-history slot, the low-Mach flag, the solid-block extents (`blk_i, blk_j, blk_s` = `Block {i_end, j_end, j_sting}`),
   the implicit-scheme parameters (pseudo-time CFL of this iteration, entropy fix, flags, pass index) and a runtime `zero` (see
@@ -105,6 +106,11 @@ skips 400x200, `--limiter minmod|vanalbada`, `--chunk K`, `--bench [--no-cpu]` o
 * **Geometry closure correction** (`Extended` precision): the f32 face weights / normals of a cell do not satisfy `sum_f w n = (0, A)` exactly (relative error 6e-8), so a perfectly uniform flow has a spurious residual of order `p · 6e-8 · w / V`, large in
   the high-aspect-ratio cells of the large-domain grids near the axis and in the far field (residual `1e-8` in `d rho / dt` units there). The host sums the defect `(Cx, Cr) = sum_f w n - (0, A)` of every cell in f64 from the very f32 numbers the GPU uses and stores it in `cell.zw` (the former `x_c, r_c`, unused by the kernels); the extended residual kernels add `Fx Cx + Fr Cr`
   (`dgeo_corr`: the Euler flux of the cell state for unit normals in x and r) to the flux sum, i.e. they cancel the effect of the rounding on a uniform flow to df accuracy. Effect: the GPU residual floor on the subsonic cases fell from `1.5e-8` to `1.7e-10` (the CPU's own floor, 2e-10), and the GPU–CPU agreement of every extended-precision test improved (below).
+* **Viscous terms and the SST model** (`GpuSolver::set_viscous(Some(Viscous), &grid)`, `from_host` takes it from the host `Solver`; mirrors `bowshock_core::viscous` / `turbulence`, `shaders_visc.rs`; `Mode::Guarded` + `Scheme::Implicit` only, else `GpuError::Unsupported`). `Params::vflags` (bit 1 viscous, bit 2 SST), `wall_i0`, `mu_inf = 1/re_c`, `suth`, `k_inf`, `om_inf` (the struct is 144 B).
+  The no-slip faces are the CPU's (`Walls`): the plate wall from `wall_i0`, the body surface, base wall and sting surface of a block; `wall_ghost` replaces `reflect_wall` at every wall mirror of the flux kernels (f32 and df) and the assembly (state and Jacobian), and is exactly `reflect_wall` for the Euler equations (the kernels of an inviscid run are unchanged).
+  Host uploads, computed in f64 from the `Grid` with the ghost-mirror rule of `viscous::stencil` and stored as f32: per face `(e_x, e_r, 1/|d|, r_m)` (`vgi`, `vgj`), per cell `(1/A, r_c, d_wall, 0)` (`bowshock_core::turbulence::wall_distances`), and the state `turb = (k, omega, mu_t, mu)`; `GpuSolver::reset` returns it to the free stream (as the CPU runner does for a cold start).
+  Per iteration (see the table in `shaders_visc.rs`): `vgrad`, `vflux` after the inviscid flux kernel, the residual kernel (viscous variant) subtracts `fv`, adds `-t_tt A/V` and the diffusive `dt` term, the assembly adds `2 lam I` and the no-slip Jacobians; then, for SST, `turb_grad`, `turb_coef`, the two scalar line solves with the existing cyclic-reduction kernels
+  (4x4 blocks that are diagonal) and `turb_update`, all before the mean-flow update because the CPU turbulence update works from the primitives of the start of the iteration.
 
 ## Kernel list
 
@@ -126,6 +132,13 @@ skips 400x200, `--limiter minmod|vanalbada`, `--chunk K`, `--bench [--no-cpu]` o
 | `line_i`, `line_j` | `[nj]`, `[ni]` | `implicit::solve_lines` (`block_thomas`), pass 0 factorises, later passes reuse the factors | implicit |
 | `apply` | `[ni, nj]` | `implicit::apply_factor` + defect `dt R - (A_i dU + A_j dU - dU)` | implicit |
 | `implicit_update` | `[ni, nj]` | update of `implicit::step` with positivity damping | implicit |
+| `vgrad` | `[ni, nj]` | `viscous::cell_pass` (cell gradients of `u, v, T`, `mu(T)`) | viscous |
+| `vflux` | `[ni+1, 2nj+1]` | `viscous::face_pass` (compact face gradient, stress tensor, heat flux into `fvi`, `fvj`) | viscous |
+| `residual_store(_ext)` viscous variants, `assemble_i/j` viscous variants | as above | `F - Fv`, hoop stress `t_tt`, diffusive `dt`; no-slip ghost + Jacobian `diag(1,-1,-1,1)`, `2 lam I` | viscous |
+| `turb_grad` | `[ni, nj]` | `turbulence::scalar_gradients` + `blends` (`F1`, `X`) | SST |
+| `turb_coef` | `[ni, nj]` | `turbulence::face_pass` + `cell_terms` (residual, `diag0`, the six diagonal blocks, `tres`) | SST |
+| `line_i`, `line_j` on the turbulence blocks | `[nj]`, `[ni]` | `solve_lines` with diagonal blocks (k, omega in entries 0, 5) | SST |
+| `turb_update` | `[ni, nj]` | clipped update of `k`, `omega` and `mu_t` (`turbulence::update`) | SST |
 | `face_test`, `face_test_ext` | `[n]` | test only: reconstruct / HLLC / `face_flux` on arbitrary states (f32 / df) | tests |
 
 WGSL functions (COMMON): `cons_to_prim`, `sound_speed`, `physical_flux`, `reflect_wall`, `ghost_state`, `limited_slope`
@@ -133,6 +146,7 @@ WGSL functions (COMMON): `cons_to_prim`, `sound_speed`, `physical_flux`, `reflec
 state update). `shaders_ext`: df arithmetic `ts/qts/tp/dadd/dsub/dmul/dmulf/ddiv/dsqrt/dmin/dmax/dabs` and the df versions `dcons_to_prim`, `dslope`,
 `dreconstruct`, `dhllc`, `drusanov`, `dshock_weight`, `dface_flux`, `dlow_mach_states`, `dreconstruct_lm`, `dgeo_corr`. `shaders_impl`: `inv4`, `flux_jacobian`, `abs_jacobian`, `reflection`, `ghost_jac`, `cell_blocks`.
 Far-field BCs (COMMON, f32): `characteristic_ghost`, `pressure_outflow_ghost`, `far_ghost` (ghost states of `bowshock_core::bc`; `ghost_state` dispatches on the BC code); df versions in `shaders_ext`: `dcharacteristic_ghost`, `dpressure_outflow_ghost`, `dfar_ghost`.
+Viscous runs: COMMON `wall_ghost` (`reflect_wall` or the no-slip `(rho, -u, -v, p)`), `noslip_jface`, `noslip_iface` (the no-slip classification of `bowshock_core::viscous::Walls`), df `dwall_ghost`; `shaders_visc`: `iface_sides`, `jface_sides` (the two sides of a face with ghosts), `visc_mu`, `iface_kw`, `jface_kw`, `strain2`, `blend_args`, `tface`, `dir_terms`.
 
 ## Results
 
@@ -571,6 +585,12 @@ The product floor × CFL is roughly constant (4 – 6e-5 at 100×50, 1.0 – 1.5
    state ≤ 1.1e-7 (extended, asserted < 3e-7) / 8.0e-7 (f32), residual history ≤ 1.7e-7 (asserted < 5e-7) / 8.6e-7.
 10. `transonic_run_and_warm_start_match_cpu`: `GpuRunner::run_on` vs `bowshock::run::run_on` with the same arguments, 200 iterations at M = 0.9 (cold start) and then 200 iterations at M = 0.95 warm-started from that field
     (`r_ref` = cold-start peak): residual history ≤ 3.2e-7 / 2.4e-6 relative, forebody CD relative difference −1.2e-7 / +1.6e-7, max |ΔCp| ≤ 2.7e-7, CD-history samples ≤ 6.5e-8 (asserted < 1e-4 / 1e-5 / 1e-5 / 1e-6).
+11. `viscous_laminar_plate_state_matches_cpu`: the laminar flat plate of the CPU gate G1 (annulus formulation, Mach 0.2, `re_c = 1e6`, `Scheme::Implicit(ImplicitParams::VISCOUS)`, van Albada, low Mach, 5 first-order iterations), 30 iterations from the free stream: max |ΔU|/(1+|U|) 6.4e-6 (f32) / 1.4e-7 (extended)
+    (asserted ≤ 1e-3). One iteration from a developed state, kernel by kernel (checked while porting): cell gradients 1.6e-6 of the largest value, `mu` 4e-7, `dt` 3e-7, state after the iteration 3e-6 (f32) / 2e-8 (extended).
+12. `viscous_sst_plate_state_matches_cpu`: the SST plate of G2 (`re_c = 2.5e7`, `dr_wall = 4e-6`), 50 iterations: mean |ΔU|/(1+|U|) 1.3e-6 (f32) / 2.0e-8 (extended) (asserted ≤ 1e-3); `k`, `omega` on the 2012 cells with `k > 10 k_inf`: max relative difference 1.6e-3, 4.0e-4 (f32) / 1.2e-5, 4.3e-6 (extended) (asserted ≤ 1e-2).
+    One iteration from a developed state: `k` 3e-6, `omega` 3e-6, `mu_t` 4e-6 of the largest value (f32), i.e. the turbulence coefficients, the two scalar line solves and the clipped update are at f32 round-off.
+13. `viscous_body_total_drag_matches_cpu` (`#[ignore]`, ~30 s, `-- --ignored`): the G3 body (tangent ogive 0.30 x 0.10 m + 0.60 m tube, ISA 0 m, Mach 0.5, coarse grid, flat base, SST) run by the CPU to its own stop (CD stationary after 4000 iterations) and by the GPU (extended) for the same number of
+    iterations: total CD 0.21300 on both (+0.000 %), `cd_friction` 0.09003, `cd_base` 0.12257, `cp_base` -0.1226, `y+_max` 0.648 (asserted within 1 %).
 
 ## Luma friction / feedback
 
@@ -640,3 +660,6 @@ builtin (renamed `reflect_wall`); `workgroupBarrier()` must be in uniform contro
   `bowshock_cases::ogive::postprocess`. The transonic GPU loop samples the forebody CD every 50 iterations and therefore synchronises every `bowshock::gpu::SYNC` = 50 iterations (the CPU's sampling interval).
 * The characteristic far-field ghost state is evaluated with the integer power `rho = rho_ref (c_b / c_ref)^5` instead of the CPU's `powf` form (identical mathematically for gamma = 1.4,
   asserted when the shaders are generated: `shaders::characteristic_exponent`); the difference is ~1e-16 relative in the df evaluation.
+* **Viscous terms and SST** exist for `Mode::Guarded` + `Scheme::Implicit` only (anything else returns `GpuError::Unsupported` from `set_viscous` / `set_scheme`). Only the mean-flow inviscid residual keeps its double-float evaluation; the viscous fluxes, the gradients, the turbulence equations
+  and the implicit left-hand side are plain f32 on the high part of the state. The one-iteration energy residual of the thinnest wall cells therefore differs from the CPU's by up to 1.3e-4 (laminar plate, `dr = 2e-4`) / 8e-3 (SST plate, `dr = 4e-6`) of its largest value: the temperature `T = gamma p / rho` of the f32 state carries ~3e-7 absolute noise,
+  which the heat-conduction term turns into a flux error of about `kappa dT/dr` with `dT/dr` ~ noise / `dr` and divides by the cell height again (an estimate of 2e-3 for the worst SST cell, 2.2e-3 measured). The momentum and continuity residuals, the gradients, the viscosity, `dt`, `k`, `omega` and `mu_t` agree to f32 round-off, and converged fields and drag agree to the printed digits (tests 11 - 13).

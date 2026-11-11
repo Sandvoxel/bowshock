@@ -11,16 +11,21 @@
 //! residual is evaluated: plain f32 (the original port, whose residual stalls 4 - 4.6 orders below its peak because of
 //! f32 rounding), a compensated `hi + lo` state, or (default) the compensated state plus a double-float evaluation of
 //! the residual ([`shaders_ext`]), which converges like the f64 CPU solver. See the README, "The f32 residual floor".
+//!
+//! With [`GpuSolver::set_viscous`] the line-implicit scheme also runs the viscous terms and the Menter SST k-omega model of
+//! `bowshock_core::viscous` / `bowshock_core::turbulence` ([`shaders_visc`]): plain f32 kernels, one per CPU routine, validated against the CPU
+//! reference (README, "Viscous terms and the SST model").
 
 pub mod shaders;
 pub mod shaders_ext;
 pub mod shaders_impl;
+pub mod shaders_visc;
 
 use bowshock_core::flux::Limiter;
 use bowshock_core::gas::prim_to_cons;
 use bowshock_core::grid::Grid;
 use bowshock_core::implicit::{DtMode, ImplicitParams};
-use bowshock_core::solver::{Bc, Block, Config, Scheme, Solver};
+use bowshock_core::solver::{Bc, Block, Config, Scheme, Solver, Turbulence, Viscous};
 use luma::{args, uniform, Array, Context, Kernel};
 
 pub use luma::LumaError;
@@ -111,12 +116,20 @@ params! {
     blk_i: u32,
     blk_j: u32,
     blk_s: u32,
-    ipad0: u32,
+    /// Viscous run: first column `i` of the no-slip surface (`bowshock_core::solver::Viscous::wall_i_start`).
+    wall_i0: u32,
     /// Pseudo-time CFL of the implicit scheme and the entropy-fix level of its Roe-type dissipation matrix.
     icfl: f32,
     eps_fix: f32,
-    ipad1: u32,
+    /// Viscous run flags: bit 1 viscous terms (no-slip walls, `shaders_visc`), bit 2 SST turbulence model.
+    vflags: u32,
     ipad2: u32,
+    /// Viscous run: `1 / re_c` (`bowshock_core::solver::Viscous::re_c`), the Sutherland constant and the free-stream `k` and
+    /// `omega` of the SST model.
+    mu_inf: f32,
+    suth: f32,
+    k_inf: f32,
+    om_inf: f32,
 }
 
 pub fn limiter_code(l: Limiter) -> u32 {
@@ -244,6 +257,8 @@ pub struct GpuSolver {
     n_active: usize,
     /// Line-implicit scheme (kernels, work arrays, parameters); `None` = explicit SSP-RK3.
     imp: Option<Imp>,
+    /// Viscous terms and turbulence model (geometry, state, work arrays); `None` for the Euler equations ([`GpuSolver::set_viscous`]).
+    visc: Option<shaders_visc::ViscState>,
     /// Iterations since the start of the implicit CFL ramp ([`GpuSolver::restart_ramp`]).
     ramp_k: usize,
     /// Kernel and output of [`GpuSolver::base_pressures`], built on first use.
@@ -261,6 +276,8 @@ struct Imp {
     line_j: Kernel,
     apply: Kernel,
     update: Kernel,
+    /// Viscous run: kernels of the viscous terms and the turbulence model (`residual`, `assemble_*` are then their viscous variants).
+    vk: Option<shaders_visc::ViscKernels>,
     /// The solution `dU` and the right-hand side / solution `x` of the line solves.
     x: Array<[f32; 4]>,
     du: Array<[f32; 4]>,
@@ -372,6 +389,7 @@ impl GpuSolver {
             block: None,
             n_active: ni * nj,
             imp: None,
+            visc: None,
             ramp_k: 0,
             base_probe: None,
         })
@@ -392,10 +410,16 @@ impl GpuSolver {
     }
 
     /// Resets to the free stream at iteration 0 (the upload is recorded in order with later work).
-    /// The implicit CFL ramp restarts as well.
+    /// The implicit CFL ramp restarts as well, and a viscous run's turbulence state returns to the free stream (`k_inf`, `omega_inf`,
+    /// `mu_t = rho k_inf / omega_inf`), as `bowshock::run::run_on` does on the CPU for a cold start.
     pub fn reset(&mut self) -> Result<()> {
         let fs = prim_to_cons(&self.cfg.freestream);
-        self.set_state(&vec![fs; self.ni * self.nj])
+        self.set_state(&vec![fs; self.ni * self.nj])?;
+        let rho = self.cfg.freestream[0];
+        if let Some(vs) = &mut self.visc {
+            vs.reset_turbulence(rho)?;
+        }
+        Ok(())
     }
 
     fn params(&self, limiter: u32, stage: u32, slot: u32) -> Params {
@@ -429,24 +453,27 @@ impl GpuSolver {
             blk_i: self.block.map_or(0, |b| b.i_end as u32),
             blk_j: self.block.map_or(0, |b| b.j_end as u32),
             blk_s: self.block.map_or(0, |b| b.j_sting as u32),
-            ipad0: 0,
+            wall_i0: self.visc.as_ref().map_or(0, |v| v.v.wall_i_start as u32),
             icfl: 0.0,
             eps_fix: 0.0,
-            ipad1: 0,
+            vflags: self.visc.as_ref().map_or(0, |v| 1 | ((v.v.turbulence == Turbulence::Sst) as u32) << 1),
             ipad2: 0,
+            mu_inf: self.visc.as_ref().map_or(0.0, |v| (1.0 / v.v.re_c) as f32),
+            suth: self.visc.as_ref().map_or(0.0, |v| v.v.sutherland as f32),
+            k_inf: bowshock_core::turbulence::K_INF as f32,
+            om_inf: self.visc.as_ref().map_or(0.0, |v| bowshock_core::turbulence::omega_inf(v.v.re_c) as f32),
         }
     }
 
-    /// Builds the solver of a host `bowshock_core` solver: its grid and config, low-Mach flag, solid block and convergence scheme
-    /// (`Scheme::Explicit` or `Scheme::Implicit`; the state starts at the free stream, not at `host.u`).
+    /// Builds the solver of a host `bowshock_core` solver: its grid and config, low-Mach flag, solid block, convergence scheme
+    /// (`Scheme::Explicit` or `Scheme::Implicit`) and viscous terms (`Mode::Guarded` + `Scheme::Implicit` only, see
+    /// [`GpuSolver::set_viscous`]); the state starts at the free stream, not at `host.u`.
     pub fn from_host(ctx: &Context, host: &Solver, mode: Mode, prec: Precision) -> Result<GpuSolver> {
-        if host.viscous().is_some() {
-            return Err(GpuError::Unsupported("viscous terms are not implemented on the GPU"));
-        }
         let mut g = Self::new_with(ctx, &host.grid, &host.cfg, mode, prec)?;
         g.set_low_mach(host.low_mach);
         g.set_block(host.block())?;
         g.set_scheme(host.scheme())?;
+        g.set_viscous(host.viscous(), &host.grid)?;
         Ok(g)
     }
 
@@ -464,10 +491,13 @@ impl GpuSolver {
     }
 
     /// Declares the solid body block of a base / wake grid (`bowshock_core::solver::Solver::set_block`); only the guarded formulation
-    /// supports blocks.
+    /// supports blocks. Must precede [`GpuSolver::set_viscous`] (the no-slip walls and the wall distance depend on it).
     pub fn set_block(&mut self, block: Option<Block>) -> Result<()> {
         if block.is_some() && self.mode == Mode::Direct {
             return Err(GpuError::Unsupported("solid blocks need Mode::Guarded"));
+        }
+        if self.visc.is_some() {
+            return Err(GpuError::Unsupported("the solid block must be declared before the viscous terms"));
         }
         self.block = block;
         self.n_active = match block {
@@ -487,6 +517,9 @@ impl GpuSolver {
     pub fn set_scheme(&mut self, scheme: Scheme) -> Result<()> {
         match scheme {
             Scheme::Explicit => {
+                if self.visc.is_some() {
+                    return Err(GpuError::Unsupported("viscous terms need Scheme::Implicit"));
+                }
                 self.imp = None;
                 Ok(())
             }
@@ -512,25 +545,67 @@ impl GpuSolver {
         self.ramp_k = 0;
     }
 
+    /// Switches the viscous terms on (`Some`, with the SST model if `v.turbulence` says so) or off (`None`) for a solver with `Mode::Guarded` and
+    /// `Scheme::Implicit` (declare the block and the scheme first; anything else returns [`GpuError::Unsupported`]). `grid` is the grid the solver was
+    /// built from: the geometry of the compact face gradients, the cell areas and the wall distance are computed from it in f64 and uploaded as f32
+    /// (`shaders_visc`). The turbulence state starts at the free stream; the mean-flow state is not touched.
+    pub fn set_viscous(&mut self, v: Option<Viscous>, grid: &Grid) -> Result<()> {
+        let Some(v) = v else {
+            self.visc = None;
+            if let Some(p) = self.imp.as_ref().map(|i| i.p) {
+                self.imp = Some(self.build_implicit(p)?);
+            }
+            return Ok(());
+        };
+        if self.mode != Mode::Guarded {
+            return Err(GpuError::Unsupported("viscous terms need Mode::Guarded"));
+        }
+        let Some(p) = self.imp.as_ref().map(|i| i.p) else {
+            return Err(GpuError::Unsupported("viscous terms need Scheme::Implicit"));
+        };
+        assert_eq!((grid.ni, grid.nj), (self.ni, self.nj), "set_viscous: the grid of the solver");
+        self.visc = Some(shaders_visc::ViscState::new(&self.ctx, grid, &self.cfg, self.block, v)?);
+        self.imp = Some(self.build_implicit(p)?);
+        Ok(())
+    }
+
+    /// The viscous-flow parameters, `None` for the Euler equations.
+    pub fn viscous(&self) -> Option<Viscous> {
+        self.visc.as_ref().map(|v| v.v)
+    }
+
+    /// Turbulence state `(k, omega, mu_t, mu)` of every cell (`ni * nj`, as `bowshock_core::solver::Solver::turb`, `mu_t`, `mu`): `mu_t` is the eddy
+    /// viscosity entering the next iteration, `mu` the laminar viscosity of the last residual evaluation. All zero for a laminar run.
+    pub fn turb_state(&self) -> Result<Vec<[f32; 4]>> {
+        let vs = self.visc.as_ref().ok_or(GpuError::Unsupported("turb_state needs the viscous terms"))?;
+        Ok(vs.turb.to_vec()?)
+    }
+
     fn build_implicit(&self, p: ImplicitParams) -> Result<Imp> {
         let ctx = &self.ctx;
         let (ni, nj) = (self.ni, self.nj);
         let n = ni * nj;
         let comp = self.prec != Precision::F32;
+        let ext = self.prec == Precision::Extended;
+        let viscous = self.visc.is_some();
         let m = || Array::<[f32; 4]>::zeros_on(ctx, 4 * n);
         Ok(Imp {
             p,
-            residual: if self.prec == Precision::Extended {
-                ctx.kernel(&shaders_impl::residual_store_ext()).label("residual_store_ext").build()?
+            residual: if ext {
+                ctx.kernel(&shaders_impl::residual_store_ext(viscous)).label("residual_store_ext").build()?
             } else {
-                ctx.kernel(&shaders_impl::with_common(shaders_impl::RESIDUAL_STORE)).label("residual_store").build()?
+                ctx.kernel(&shaders_impl::with_common(&shaders_impl::residual_store(viscous))).label("residual_store").build()?
             },
-            assemble_i: ctx.kernel(&shaders_impl::with_common(&shaders_impl::assemble_i())).label("assemble_i").build()?,
-            assemble_j: ctx.kernel(&shaders_impl::with_common(&shaders_impl::assemble_j())).label("assemble_j").build()?,
+            assemble_i: ctx.kernel(&shaders_impl::with_common(&shaders_impl::assemble_i(viscous))).label("assemble_i").build()?,
+            assemble_j: ctx.kernel(&shaders_impl::with_common(&shaders_impl::assemble_j(viscous))).label("assemble_j").build()?,
             line_i: ctx.kernel(&shaders_impl::with_common(&shaders_impl::line_i(ni))).label("line_i").build()?,
             line_j: ctx.kernel(&shaders_impl::with_common(&shaders_impl::line_j(nj))).label("line_j").build()?,
             apply: ctx.kernel(&shaders_impl::with_common(&shaders_impl::apply())).label("apply").build()?,
             update: ctx.kernel(&shaders_impl::with_common(&shaders_impl::update(comp))).label("implicit_update").build()?,
+            vk: match &self.visc {
+                Some(vs) => Some(shaders_visc::ViscKernels::build(ctx, vs.sst.is_some(), ext)?),
+                None => None,
+            },
             x: Array::zeros_on(ctx, n)?,
             du: Array::zeros_on(ctx, n)?,
             lo_i: m()?,
@@ -545,7 +620,10 @@ impl GpuSolver {
 
     /// Records one iteration of the line-implicit scheme (see [`shaders_impl`]): face fluxes and cell residual (as the explicit
     /// stage 1, extended-precision residual kept), pseudo-time step and residual history, assembly of the two block-tridiagonal
-    /// factors, the factored solve, `sub_iters - 1` defect-correction passes and the positivity-damped state update.
+    /// factors, the factored solve, `sub_iters - 1` defect-correction passes and the positivity-damped state update. A viscous run
+    /// adds the cell gradients and the viscous face fluxes after the inviscid fluxes (the residual kernel then subtracts them), and the
+    /// SST turbulence update (gradients and blending functions, line coefficients, the two scalar line solves, the clipped update) from the
+    /// state of the start of the iteration, i.e. before the mean-flow update ([`shaders_visc`]).
     fn record_implicit(&mut self, slot: Option<u32>) -> Result<()> {
         let (ni, nj) = (self.ni as u32, self.nj as u32);
         let lim = if self.iter < self.cfg.first_order_iters { 0 } else { limiter_code(self.cfg.limiter) };
@@ -564,50 +642,89 @@ impl GpuSolver {
             Some(lo) if ext => flux.launch([ni + 1, 2 * nj + 1], args![&self.u, &lo.u, &self.iface, &self.jface, &mut self.fi, &mut self.fj, uniform(&p)])?,
             _ => flux.launch([ni + 1, 2 * nj + 1], args![&self.u, &self.iface, &self.jface, &mut self.fi, &mut self.fj, uniform(&p)])?,
         }
-        match &self.lo {
-            Some(lo) if ext => imp.residual.launch(
-                [ni, nj],
-                args![
-                    &self.u,
-                    &self.fi,
-                    &self.fj,
-                    &self.iface,
-                    &self.jface,
-                    &self.cell,
-                    &mut self.res,
-                    &mut self.dt,
-                    &mut self.rho_res,
-                    &mut self.partial,
-                    &lo.u,
-                    uniform(&p)
-                ],
-            )?,
-            _ => imp.residual.launch(
-                [ni, nj],
-                args![
-                    &self.u,
-                    &self.fi,
-                    &self.fj,
-                    &self.iface,
-                    &self.jface,
-                    &self.cell,
-                    &mut self.res,
-                    &mut self.dt,
-                    &mut self.rho_res,
-                    &mut self.partial,
-                    uniform(&p)
-                ],
-            )?,
+        if let (Some(vs), Some(vk)) = (self.visc.as_mut(), imp.vk.as_ref()) {
+            vk.vgrad.launch([ni, nj], args![&self.u, &self.iface, &self.jface, &vs.vcell, &mut vs.grad, &mut vs.turb, uniform(&p)])?;
+            vk.vflux.launch(
+                [ni + 1, 2 * nj + 1],
+                args![&self.u, &self.iface, &self.jface, &vs.vgi, &vs.vgj, &vs.grad, &vs.turb, &mut vs.fvi, &mut vs.fvj, uniform(&p)],
+            )?;
+        }
+        if let Some(vs) = &self.visc {
+            // the viscous residual kernel: `fvi, fvj, grad, turb, vcell` between the (optional) low state and the uniform block
+            let mut a = Vec::from(args![
+                &self.u,
+                &self.fi,
+                &self.fj,
+                &self.iface,
+                &self.jface,
+                &self.cell,
+                &mut self.res,
+                &mut self.dt,
+                &mut self.rho_res,
+                &mut self.partial
+            ]);
+            if let (Some(lo), true) = (&self.lo, ext) {
+                a.push((&lo.u).into());
+            }
+            a.extend(args![&vs.fvi, &vs.fvj, &vs.grad, &vs.turb, &vs.vcell, uniform(&p)]);
+            imp.residual.launch([ni, nj], a)?;
+        } else {
+            match &self.lo {
+                Some(lo) if ext => imp.residual.launch(
+                    [ni, nj],
+                    args![
+                        &self.u,
+                        &self.fi,
+                        &self.fj,
+                        &self.iface,
+                        &self.jface,
+                        &self.cell,
+                        &mut self.res,
+                        &mut self.dt,
+                        &mut self.rho_res,
+                        &mut self.partial,
+                        &lo.u,
+                        uniform(&p)
+                    ],
+                )?,
+                _ => imp.residual.launch(
+                    [ni, nj],
+                    args![
+                        &self.u,
+                        &self.fi,
+                        &self.fj,
+                        &self.iface,
+                        &self.jface,
+                        &self.cell,
+                        &mut self.res,
+                        &mut self.dt,
+                        &mut self.rho_res,
+                        &mut self.partial,
+                        uniform(&p)
+                    ],
+                )?,
+            }
         }
         if slot.is_some() {
             let pp = Params { aux: nwg, ..p };
             hist_final.launch([256], args![&mut self.hist, &self.partial, uniform(&pp)])?;
         }
         let imp = self.imp.as_mut().expect("implicit scheme");
-        imp.assemble_i
-            .launch([nj, ni], args![&self.u, &self.iface, &self.jface, &self.cell, &self.dt, &mut imp.lo_i, &mut imp.d_i, &mut imp.up_i, uniform(&p)])?;
-        imp.assemble_j
-            .launch([ni, nj], args![&self.u, &self.iface, &self.jface, &self.cell, &self.dt, &mut imp.lo_j, &mut imp.d_j, &mut imp.up_j, uniform(&p)])?;
+        if let Some(vs) = &self.visc {
+            imp.assemble_i.launch(
+                [nj, ni],
+                args![&self.u, &self.iface, &self.jface, &self.cell, &self.dt, &mut imp.lo_i, &mut imp.d_i, &mut imp.up_i, &vs.turb, &vs.vgi, uniform(&p)],
+            )?;
+            imp.assemble_j.launch(
+                [ni, nj],
+                args![&self.u, &self.iface, &self.jface, &self.cell, &self.dt, &mut imp.lo_j, &mut imp.d_j, &mut imp.up_j, &vs.turb, &vs.vgj, uniform(&p)],
+            )?;
+        } else {
+            imp.assemble_i
+                .launch([nj, ni], args![&self.u, &self.iface, &self.jface, &self.cell, &self.dt, &mut imp.lo_i, &mut imp.d_i, &mut imp.up_i, uniform(&p)])?;
+            imp.assemble_j
+                .launch([ni, nj], args![&self.u, &self.iface, &self.jface, &self.cell, &self.dt, &mut imp.lo_j, &mut imp.d_j, &mut imp.up_j, uniform(&p)])?;
+        }
         for pass in 0..ip.sub_iters.max(1) {
             let pp = Params { aux: pass as u32, ..p };
             if pass > 0 {
@@ -620,6 +737,44 @@ impl GpuSolver {
                 .launch_raw([nj, 1, 1], args![&imp.lo_i, &imp.d_i, &imp.up_i, &mut imp.scr, &mut imp.x, &mut imp.du, &self.res, &self.dt, uniform(&pp)])?;
             imp.line_j
                 .launch_raw([ni, 1, 1], args![&imp.lo_j, &imp.d_j, &imp.up_j, &mut imp.scr, &mut imp.x, &mut imp.du, &self.res, &self.dt, uniform(&pp)])?;
+        }
+        if let (Some(vs), Some(vk)) = (self.visc.as_mut(), imp.vk.as_ref()) {
+            if let (Some(ss), Some(sk)) = (vs.sst.as_mut(), vk.sst.as_ref()) {
+                sk.grad.launch([ni, nj], args![&self.u, &self.iface, &self.jface, &vs.vcell, &vs.turb, &mut ss.tgb, uniform(&p)])?;
+                sk.coef.launch(
+                    [ni, nj],
+                    args![
+                        &self.u,
+                        &self.iface,
+                        &self.jface,
+                        &self.cell,
+                        &vs.vcell,
+                        &self.fi,
+                        &self.fj,
+                        &self.dt,
+                        &vs.turb,
+                        &vs.grad,
+                        &ss.tgb,
+                        &vs.vgi,
+                        &vs.vgj,
+                        &mut ss.tres,
+                        &mut ss.lo_i,
+                        &mut ss.d_i,
+                        &mut ss.up_i,
+                        &mut ss.lo_j,
+                        &mut ss.d_j,
+                        &mut ss.up_j,
+                        uniform(&p)
+                    ],
+                )?;
+                // the two scalar systems: the line solves of the mean flow on the diagonal blocks (pass 0)
+                let pp = Params { aux: 0, ..p };
+                imp.line_i
+                    .launch_raw([nj, 1, 1], args![&ss.lo_i, &ss.d_i, &ss.up_i, &mut imp.scr, &mut ss.tx, &mut ss.tdu, &ss.tres, &self.dt, uniform(&pp)])?;
+                imp.line_j
+                    .launch_raw([ni, 1, 1], args![&ss.lo_j, &ss.d_j, &ss.up_j, &mut imp.scr, &mut ss.tx, &mut ss.tdu, &ss.tres, &self.dt, uniform(&pp)])?;
+                sk.update.launch([ni, nj], args![&self.u, &vs.vcell, &vs.grad, &ss.tdu, &mut vs.turb, uniform(&p)])?;
+            }
         }
         match &mut self.lo {
             Some(lo) => imp.update.launch([ni, nj], args![&mut self.u, &imp.du, &mut lo.u, uniform(&p)])?,
@@ -635,6 +790,9 @@ impl GpuSolver {
     fn record_step(&mut self, slot: Option<u32>) -> Result<()> {
         if self.imp.is_some() {
             return self.record_implicit(slot);
+        }
+        if self.visc.is_some() {
+            return Err(GpuError::Unsupported("viscous terms need Scheme::Implicit"));
         }
         let (ni, nj) = (self.ni as u32, self.nj as u32);
         let lim = if self.iter < self.cfg.first_order_iters { 0 } else { limiter_code(self.cfg.limiter) };

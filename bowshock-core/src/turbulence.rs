@@ -50,7 +50,7 @@
 use crate::gas::{Cons, Prim};
 use crate::grid::{Face, Grid};
 use crate::implicit::{solve_lines, Factor, EYE, M4, ZERO};
-use crate::solver::{pidx, Bc, Solver};
+use crate::solver::{pidx, Bc, Block, Solver, Viscous};
 use crate::viscous::{face_mu, iface_centre, iface_sides, jface_centre, jface_sides, stencil, FaceSides, Side, Walls};
 use rayon::prelude::*;
 
@@ -62,16 +62,24 @@ pub fn omega_inf(re_c: f64) -> f64 {
     1e-6 * re_c
 }
 
-const A1: f64 = 0.31;
-const BETA_STAR: f64 = 0.09;
-const SIGMA_K1: f64 = 0.85;
-const SIGMA_K2: f64 = 1.0;
-const SIGMA_W1: f64 = 0.5;
-const SIGMA_W2: f64 = 0.856;
-const BETA1: f64 = 0.075;
-const BETA2: f64 = 0.0828;
-const GAMMA1: f64 = 5.0 / 9.0;
-const GAMMA2: f64 = 0.44;
+/// Model constants of the SST model (see the module documentation); public so that GPU ports can take them from here.
+pub const A1: f64 = 0.31;
+pub const BETA_STAR: f64 = 0.09;
+pub const SIGMA_K1: f64 = 0.85;
+pub const SIGMA_K2: f64 = 1.0;
+pub const SIGMA_W1: f64 = 0.5;
+pub const SIGMA_W2: f64 = 0.856;
+pub const BETA1: f64 = 0.075;
+pub const BETA2: f64 = 0.0828;
+pub const GAMMA1: f64 = 5.0 / 9.0;
+pub const GAMMA2: f64 = 0.44;
+
+/// Distance of every cell centroid to the nearest no-slip wall face segment of the viscous run `v` with boundary conditions `bc` and
+/// body block `blk` (`f64::INFINITY` without a no-slip face and in solid cells): what `Solver::set_viscous` computes for the
+/// turbulence model, for ports that keep their own copy of the field.
+pub fn wall_distances(grid: &Grid, v: Viscous, bc: &[Bc; 4], blk: Option<Block>) -> Vec<f64> {
+    wall_distance(grid, &Walls::new(Some(v), bc, blk))
+}
 
 /// Distance of every cell centroid to the nearest no-slip wall face segment (`f64::INFINITY` without a no-slip face and in
 /// solid cells); brute force over the wall faces.

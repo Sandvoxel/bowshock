@@ -7,14 +7,15 @@
 //! `i-1` and `i`) at `j*(ni+1) + i`, j-face at `j*ni + i`, primitive array with 2 ghost layers at
 //! `(j+2)*(ni+4) + (i+2)`.
 
-/// Uniform block shared by every kernel (128 bytes, matches `crate::Params`). `fs_lo_*`: low (df) parts of the free stream.
+/// Uniform block shared by every kernel (144 bytes, matches `crate::Params`). `fs_lo_*`: low (df) parts of the free stream.
 /// `limiter`: 0 = first order, 1 = minmod, 2 = van Albada. `bc*`: 0 = free stream, 1 = extrapolate,
 /// 2 = slip wall, 3 = characteristic far field, 4 = static-pressure outflow. `stage`: 1..3 (SSP-RK3 stage). `slot`:
 /// residual-history slot. `aux`: number of partial sums read by `HIST_FINAL` (line solves: pass index). `ra`, `rb`: RK stage update
 /// `u = ra (u + dt res) + rb u0`. `low_mach`: 1 = Thornber low-Mach correction of the reconstructed face states.
 /// `blk_i, blk_j, blk_s`: solid body block (`bowshock_core::solver::Block`; all 0 = no block). `icfl`, `eps_fix`, `iflags`:
 /// implicit scheme (pseudo-time CFL, entropy fix of the Roe-type dissipation, bit 1 lines, 2 implicit BCs, 4 Roe-type
-/// dissipation, 8 `DtMode::MinDirection`).
+/// dissipation, 8 `DtMode::MinDirection`). `vflags`, `wall_i0`, `mu_inf`, `suth`, `k_inf`, `om_inf`: viscous run (bit 1 viscous terms,
+/// bit 2 SST; first no-slip column; `1 / re_c`, Sutherland constant, free-stream `k` and `omega`), see `shaders_visc`.
 const COMMON_TEMPLATE: &str = r#"
 
 // Solid body block (all-zero parameters: no block). Cell (i, j) is solid if i < blk_i && j < blk_j (body) or
@@ -23,6 +24,19 @@ fn is_solid(i: u32, j: u32) -> bool {
     if (i < p.blk_i) { return j < p.blk_j; }
     return j < p.blk_s;
 }
+
+// No-slip wall faces of a viscous run (`vflags` bit 1), `bowshock_core::viscous::Walls`: without a block the `jmin` face of a slip-wall
+// boundary condition from column `wall_i0` on; with a block the body surface (`j = blk_j`, `wall_i0 <= i < blk_i`) and the sting surface
+// (`j = blk_s > 0`, `i >= blk_i`) as j-faces, the base wall (`i = blk_i`, `blk_s <= j < blk_j`) as i-faces. Always false for the Euler equations.
+fn noslip_jface(i: u32, j: u32) -> bool {
+    if ((p.vflags & 1u) == 0u) { return false; }
+    if (p.blk_j == 0u) { return j == 0u && p.bc2 == 2u && i >= p.wall_i0; }
+    return (j == p.blk_j && i >= p.wall_i0 && i < p.blk_i) || (j == p.blk_s && p.blk_s > 0u && i >= p.blk_i);
+}
+fn noslip_iface(i: u32, j: u32) -> bool {
+    return (p.vflags & 1u) != 0u && p.blk_j > 0u && i == p.blk_i && j >= p.blk_s && j < p.blk_j;
+}
+
 // First fluid row of column i.
 fn col_start(i: u32) -> u32 {
     if (i < p.blk_i) { return p.blk_j; }
@@ -66,6 +80,13 @@ fn physical_flux(w: vec4<f32>, nx: f32, nr: f32) -> vec4<f32> {
 fn reflect_wall(w: vec4<f32>, nx: f32, nr: f32) -> vec4<f32> {
     let un = w.y * nx + w.z * nr;
     return vec4<f32>(w.x, w.y - 2.0 * un * nx, w.z - 2.0 * un * nr, w.w);
+}
+
+// Ghost state across a wall face with unit normal (nx, nr): (rho, -u, -v, p) on a no-slip face (adiabatic wall, zero normal pressure
+// gradient), else the reflection about the face normal.
+fn wall_ghost(w: vec4<f32>, nx: f32, nr: f32, noslip: bool) -> vec4<f32> {
+    if (noslip) { return vec4<f32>(w.x, -w.y, -w.z, w.w); }
+    return reflect_wall(w, nx, nr);
 }
 
 // Far-field ghost states (bowshock-core `bc.rs`); `w` is the first interior cell, `(nx, nr)` the OUTWARD unit normal.
@@ -631,14 +652,14 @@ fn prim_j(i: i32, j: i32) -> vec4<f32> {
     let j0 = i32(col_start(u32(i)));
     if (j < j0 && j0 > 0) {
         let f = jface[u32(j0) * p.ni + u32(i)];
-        return reflect_wall(cell_prim(i, 2 * j0 - 1 - j), f.x, f.y);
+        return wall_ghost(cell_prim(i, 2 * j0 - 1 - j), f.x, f.y, noslip_jface(u32(i), u32(j0)));
     }
     if (j < 0) {
         let k = -j;
         let f = jface[u32(i)];
         if (p.bc2 == 0u) { return fs_state(); }
         if (p.bc2 == 1u) { return cell_prim(i, 0); }
-        if (p.bc2 == 2u) { return reflect_wall(cell_prim(i, k - 1), f.x, f.y); }
+        if (p.bc2 == 2u) { return wall_ghost(cell_prim(i, k - 1), f.x, f.y, noslip_jface(u32(i), 0u)); }
         return far_ghost(p.bc2, fs_state(), cell_prim(i, 0), f, -1.0);
     }
     if (j >= nj) {
@@ -667,11 +688,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let f = iface[gid.y * (p.ni + 1u) + gid.x];
                 let p0 = prim_i(i, j);
                 let p1 = prim_i(i + 1, j);
+                let ns = noslip_iface(p.blk_i, gid.y);
                 var m1 = prim_i(i - 1, j);
-                var m2 = reflect_wall(m1, fb.x, fb.y);
+                var m2 = wall_ghost(m1, fb.x, fb.y, ns);
                 if (gid.x == p.blk_i) {
-                    m1 = reflect_wall(p0, fb.x, fb.y);
-                    m2 = reflect_wall(p1, fb.x, fb.y);
+                    m1 = wall_ghost(p0, fb.x, fb.y, ns);
+                    m2 = wall_ghost(p1, fb.x, fb.y, ns);
                 }
                 fi[gid.y * (p.ni + 1u) + gid.x] = face_flux(m2, m1, p0, p1, p.limiter, f.x, f.y);
                 return;

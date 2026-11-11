@@ -85,6 +85,12 @@ fn dreflect_wall(w: W, nx: f32, nr: f32) -> W {
     return W(w.r, dsub(w.u, dmulf(un, 2.0 * nx)), dsub(w.v, dmulf(un, 2.0 * nr)), w.p);
 }
 
+// df translation of `wall_ghost` (`COMMON`): (rho, -u, -v, p) on a no-slip face, else the reflection.
+fn dwall_ghost(w: W, nx: f32, nr: f32, noslip: bool) -> W {
+    if (noslip) { return W(w.r, dneg(w.u), dneg(w.v), w.p); }
+    return dreflect_wall(w, nx, nr);
+}
+
 // df translations of `characteristic_ghost`, `pressure_outflow_ghost`, `far_ghost` of `COMMON` (bowshock-core `bc.rs`);
 // `w` is the first interior cell, `(nx, nr)` the outward unit normal. `rho = rho_ref (c_b / c_ref)^5` (see COMMON).
 fn dcharacteristic_ghost(fs: W, w: W, nx: f32, nr: f32) -> W {
@@ -349,14 +355,14 @@ fn prim_j(i: i32, j: i32) -> W {
     let j0 = i32(col_start(u32(i)));
     if (j < j0 && j0 > 0) {
         let f = jface[u32(j0) * p.ni + u32(i)];
-        return dreflect_wall(cell_prim(i, 2 * j0 - 1 - j), f.x, f.y);
+        return dwall_ghost(cell_prim(i, 2 * j0 - 1 - j), f.x, f.y, noslip_jface(u32(i), u32(j0)));
     }
     if (j < 0) {
         let k = -j;
         let f = jface[u32(i)];
         if (p.bc2 == 0u) { return fs_state(); }
         if (p.bc2 == 1u) { return cell_prim(i, 0); }
-        if (p.bc2 == 2u) { return dreflect_wall(cell_prim(i, k - 1), f.x, f.y); }
+        if (p.bc2 == 2u) { return dwall_ghost(cell_prim(i, k - 1), f.x, f.y, noslip_jface(u32(i), 0u)); }
         return dfar_ghost(p.bc2, fs_state(), cell_prim(i, 0), f, -1.0);
     }
     if (j >= nj) {
@@ -390,11 +396,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let f = iface[k];
                 let p0 = prim_i(i, j);
                 let p1 = prim_i(i + 1, j);
+                let ns = noslip_iface(p.blk_i, gid.y);
                 var m1 = prim_i(i - 1, j);
-                var m2 = dreflect_wall(m1, fb.x, fb.y);
+                var m2 = dwall_ghost(m1, fb.x, fb.y, ns);
                 if (gid.x == p.blk_i) {
-                    m1 = dreflect_wall(p0, fb.x, fb.y);
-                    m2 = dreflect_wall(p1, fb.x, fb.y);
+                    m1 = dwall_ghost(p0, fb.x, fb.y, ns);
+                    m2 = dwall_ghost(p1, fb.x, fb.y, ns);
                 }
                 let c = dface_flux(m2, m1, p0, p1, p.limiter, f.x, f.y);
                 fi[2u * k] = c_hi(c);

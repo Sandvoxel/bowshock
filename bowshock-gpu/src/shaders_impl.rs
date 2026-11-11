@@ -14,6 +14,10 @@
 //!
 //! Storage (per direction, `Array<[f32; 4]>` read as `array<mat4x4<f32>>`, one block per cell): `lo`, `d`, `up` of `I - dt J`. The
 //! i-direction blocks are stored transposed (`i * nj + j`); the vector arrays `x`, `du`, `res` use the cell index `j * ni + i`.
+//!
+//! Viscous runs ([`crate::shaders_visc`]): the residual kernel (`residual_store(true)`) works with `F - Fv`, the assembly with the no-slip wall ghost
+//! `diag(1, -1, -1, 1)` and the diffusive spectral radii (`2 lam I` on the dissipation matrices); the line solves are also used, unchanged, for the two
+//! scalar turbulence equations (4x4 blocks that are diagonal).
 
 /// Matrix library, flux Jacobians, Roe-type dissipation matrix, ghost-state Jacobians and the per-cell blocks of `I - dt J`.
 /// A 4x4 block is a `mat4x4<f32>` whose element `(row r, column c)` is `m[c][r]` (the CPU `M4` is row-major `m[4 r + c]`).
@@ -119,6 +123,11 @@ fn reflection(nx: f32, nr: f32) -> M4 {
         vec4<f32>(0.0, 0.0, 0.0, 1.0));
 }
 
+// dU_ghost / dU_interior of the no-slip wall ghost (rho, -u, -v, p): diag(1, -1, -1, 1).
+fn m_noslip() -> M4 {
+    return m_rows(vec4<f32>(1.0, 0.0, 0.0, 0.0), vec4<f32>(0.0, -1.0, 0.0, 0.0), vec4<f32>(0.0, 0.0, -1.0, 0.0), vec4<f32>(0.0, 0.0, 0.0, 1.0));
+}
+
 // T = dU_ghost / dU_interior of the first ghost layer (exact for the free stream, zero gradient and slip wall; central finite
 // difference, relative step 1e-3, for the characteristic and pressure-outflow BCs: only the left-hand side depends on it).
 fn ghost_jac(bc: u32, fs: vec4<f32>, edge: vec4<f32>, f: vec4<f32>, outward: f32) -> M4 {
@@ -143,8 +152,10 @@ fn ghost_jac(bc: u32, fs: vec4<f32>, edge: vec4<f32>, f: vec4<f32>, outward: f32
 struct Blk { lo: M4, d: M4, up: M4 }
 
 // Blocks of `I - dt J` of a cell (bowshock-core `implicit::cell_blocks`): `wk` the cell, `wm` / `wp` the lower / upper neighbour or
-// ghost state, `fl` / `fr` the lower / upper face (nx, nr, len, weight), `src = A / V` for the axisymmetric pressure source (j lines).
-fn cell_blocks(wk: vec4<f32>, wm: vec4<f32>, wp: vec4<f32>, fl: vec4<f32>, fr: vec4<f32>, vol: f32, dt: f32, src: f32) -> Blk {
+// ghost state, `fl` / `fr` the lower / upper face (nx, nr, len, weight), `src = A / V` for the axisymmetric pressure source (j lines),
+// `lam_l` / `lam_r` the diffusive spectral radii of the two faces (0 for the Euler equations), which add `2 lam I` to the dissipation
+// matrices.
+fn cell_blocks(wk: vec4<f32>, wm: vec4<f32>, wp: vec4<f32>, fl: vec4<f32>, fr: vec4<f32>, vol: f32, dt: f32, src: f32, lam_l: f32, lam_r: f32) -> Blk {
     let lines = (p.iflags & 1u) != 0u;
     let roe = (p.iflags & 4u) != 0u;
     let s = 0.5 * dt / vol;
@@ -168,6 +179,8 @@ fn cell_blocks(wk: vec4<f32>, wm: vec4<f32>, wp: vec4<f32>, fl: vec4<f32>, fr: v
         dis_l = m_eye() * max(spectral(wk, fl.x, fl.y), spectral(wm, fl.x, fl.y));
         dis_r = m_eye() * max(spectral(wk, fr.x, fr.y), spectral(wp, fr.x, fr.y));
     }
+    dis_l = dis_l + m_eye() * (2.0 * lam_l);
+    dis_r = dis_r + m_eye() * (2.0 * lam_r);
     var d = m_eye() + flux_jacobian(wk, fr.x, fr.y) * (s * wr) - flux_jacobian(wk, fl.x, fl.y) * (s * wl)
         + dis_r * (s * wr) + dis_l * (s * wl);
     if (src != 0.0) {
@@ -199,7 +212,53 @@ fn common_impl_ext() -> String {
 /// pseudo-time step `dt`, `rho_res` and the per-workgroup partial sums of `rho_res^2` (residual history). Solid cells of a block
 /// get `res = dt = 0`. `dt = icfl A / (L_i + L_j)` (`DtMode::Sum`) or `icfl A / (2 min(L_i, L_j))` (`iflags` bit 8), `L_d` = half
 /// the sum of `(|u.n| + c) len` over the two faces of direction `d`. Problem size `[ni, nj]`.
-pub const RESIDUAL_STORE: &str = r#"
+///
+/// `viscous`: the face flux is `F - Fv` (`fvi`, `fvj` of `shaders_visc::VFLUX`), the radial-momentum source `(p - t_tt) A / V`
+/// (`viscous::hoop_stress` from the cell gradient `grad`, `mu`, `mu_t` of `turb`, `r_c` of `vcell`) and `L_d` gains the diffusive
+/// rate `2 lv len^2 / A` (`viscous::diffusion_rate`); the bindings `fvi, fvj, grad, turb, vcell` precede the uniform block.
+pub fn residual_store(viscous: bool) -> String {
+    let (pbind, flux, diff) = if viscous {
+        (
+            "@group(1) @binding(10) var<storage, read> fvi: array<vec4<f32>>;\n\
+             @group(1) @binding(11) var<storage, read> fvj: array<vec4<f32>>;\n\
+             @group(1) @binding(12) var<storage, read> grad: array<vec4<f32>>;\n\
+             @group(1) @binding(13) var<storage, read> turb: array<vec4<f32>>;\n\
+             @group(1) @binding(14) var<storage, read> vcell: array<vec4<f32>>;\n\
+             @group(1) @binding(15) var<uniform> p: Params;",
+            VISC_FLUX_F32,
+            VISC_DT,
+        )
+    } else {
+        (
+            "@group(1) @binding(10) var<uniform> p: Params;",
+            "var rs = -(gr * fr.w - gl * fl.w + gt * ft.w - gb * fb.w) * inv_v;\n rs.z = rs.z + wc.w * geo.x * inv_v; // axisymmetric pressure source p*A/V",
+            "",
+        )
+    };
+    let src = RESIDUAL_STORE.replace("//@PBIND", pbind).replace("//@FLUX", flux).replace("//@DIFF", diff);
+    let consts = if viscous { crate::shaders_visc::consts() } else { String::new() };
+    format!("{}\n{}", consts, src)
+}
+
+/// Viscous flux sum, hoop stress and source of the f32 residual: `res = -sum_f w (F - Fv) / V + (0, 0, (p - t_tt) A / V, 0)`.
+const VISC_FLUX_F32: &str = "let hl = fvi[j * (p.ni + 1u) + i];
+            let hr = fvi[j * (p.ni + 1u) + i + 1u];
+            let hb = fvj[j * p.ni + i];
+            let ht = fvj[(j + 1u) * p.ni + i];
+            var rs = -((gr - hr) * fr.w - (gl - hl) * fl.w + (gt - ht) * ft.w - (gb - hb) * fb.w) * inv_v;
+            let g0 = grad[2u * c];
+            let t_tt = (turb[c].w + turb[c].z) * (2.0 * wc.z / vcell[c].y - 2.0 / 3.0 * (g0.x + g0.w + wc.z / vcell[c].y));
+            rs.z = rs.z + (wc.w - t_tt) * geo.x * inv_v; // axisymmetric pressure source (p - t_tt) A / V";
+
+/// Diffusive part of the pseudo-time step: `L_d += 2 lv len^2 / A`, `lv = gamma (mu / Pr + mu_t / Pr_t) / rho`, `len` the mean length of the two
+/// faces of the direction (`viscous::diffusion_rate`).
+const VISC_DT: &str = "let lv = GAMMA * (turb[c].w / PRANDTL + turb[c].z / PRANDTL_T) / wc.x;
+            let len_i = 0.5 * (fl.z + fr.z);
+            let len_j = 0.5 * (fb.z + ft.z);
+            l_i = l_i + 2.0 * lv * len_i * len_i / geo.x;
+            l_j = l_j + 2.0 * lv * len_j * len_j / geo.x;";
+
+const RESIDUAL_STORE: &str = r#"
 @group(1) @binding(0) var<storage, read> u: array<vec4<f32>>;
 @group(1) @binding(1) var<storage, read> fi: array<vec4<f32>>;
 @group(1) @binding(2) var<storage, read> fj: array<vec4<f32>>;
@@ -210,7 +269,7 @@ pub const RESIDUAL_STORE: &str = r#"
 @group(1) @binding(7) var<storage, read_write> dt: array<f32>;
 @group(1) @binding(8) var<storage, read_write> rho_res: array<f32>;
 @group(1) @binding(9) var<storage, read_write> partial: array<f32>;
-@group(1) @binding(10) var<uniform> p: Params;
+//@PBIND
 
 var<workgroup> sh: array<f32, 128>;
 
@@ -238,8 +297,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
             let gt = fj[(j + 1u) * p.ni + i];
             let geo = cell[c];
             let inv_v = 1.0 / geo.y;
-            var rs = -(gr * fr.w - gl * fl.w + gt * ft.w - gb * fb.w) * inv_v;
-            rs.z = rs.z + wc.w * geo.x * inv_v; // axisymmetric pressure source p*A/V
+            //@FLUX
             res[c] = rs;
             rho_res[c] = rs.x;
             r2 = rs.x * rs.x;
@@ -248,8 +306,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
             let lam_r = (abs(wc.y * fr.x + wc.z * fr.y) + cs) * fr.z;
             let lam_b = (abs(wc.y * fb.x + wc.z * fb.y) + cs) * fb.z;
             let lam_t = (abs(wc.y * ft.x + wc.z * ft.y) + cs) * ft.z;
-            let l_i = 0.5 * (lam_l + lam_r);
-            let l_j = 0.5 * (lam_b + lam_t);
+            var l_i = 0.5 * (lam_l + lam_r);
+            var l_j = 0.5 * (lam_b + lam_t);
+            //@DIFF
             var dtc = p.icfl * geo.x / (l_i + l_j);
             if ((p.iflags & 8u) != 0u) { dtc = p.icfl * geo.x / (2.0 * min(l_i, l_j)); }
             dt[c] = dtc;
@@ -265,9 +324,43 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
 }
 "#;
 
-/// As [`RESIDUAL_STORE`] with the double-float arithmetic of the extended precision: the fluxes `fi`, `fj` are `(hi, lo)` vec4 pairs,
-/// the state `u` + `ulo`, the cell sum is formed in df and collapsed to the f32 `res`. Appended to `common_ext()`.
-pub const RESIDUAL_STORE_EXT: &str = r#"
+/// As [`residual_store`] with the double-float arithmetic of the extended precision: the fluxes `fi`, `fj` are `(hi, lo)` vec4 pairs,
+/// the state `u` + `ulo`, the cell sum is formed in df and collapsed to the f32 `res`; the viscous fluxes, the hoop stress and the
+/// diffusive rate are added in f32 (`viscous`; bindings `fvi, fvj, grad, turb, vcell` after `ulo`). Includes `common_ext()`.
+pub fn residual_store_ext(viscous: bool) -> String {
+    let (pbind, vsum, diff) = if viscous {
+        (
+            "@group(1) @binding(11) var<storage, read> fvi: array<vec4<f32>>;\n\
+             @group(1) @binding(12) var<storage, read> fvj: array<vec4<f32>>;\n\
+             @group(1) @binding(13) var<storage, read> grad: array<vec4<f32>>;\n\
+             @group(1) @binding(14) var<storage, read> turb: array<vec4<f32>>;\n\
+             @group(1) @binding(15) var<storage, read> vcell: array<vec4<f32>>;\n\
+             @group(1) @binding(16) var<uniform> p: Params;",
+            VISC_SUM_EXT,
+            "let lv = GAMMA * (turb[c].w / PRANDTL + turb[c].z / PRANDTL_T) / wc.r.h;
+            let len_i = 0.5 * (fl.z + fr.z);
+            let len_j = 0.5 * (fb.z + ft.z);
+            l_i = l_i + 2.0 * lv * len_i * len_i / geo.x;
+            l_j = l_j + 2.0 * lv * len_j * len_j / geo.x;",
+        )
+    } else {
+        ("@group(1) @binding(11) var<uniform> p: Params;", "", "")
+    };
+    let src = RESIDUAL_STORE_EXT.replace("//@PBIND", pbind).replace("//@VSUM", vsum).replace("//@DIFF", diff);
+    let consts = if viscous { crate::shaders_visc::consts() } else { String::new() };
+    format!("{}\n{}\n{}", common_impl_ext(), consts, src)
+}
+
+/// Viscous correction of the df flux sum `s = -sum_f w F + (0, 0, p A, 0)`: `+ sum_f w Fv` and the hoop stress `-t_tt A` of the radial momentum.
+const VISC_SUM_EXT: &str = "let hl = fvi[j * (p.ni + 1u) + i];
+            let hr = fvi[j * (p.ni + 1u) + i + 1u];
+            let hb = fvj[j * p.ni + i];
+            let ht = fvj[(j + 1u) * p.ni + i];
+            let g0 = grad[2u * c];
+            let t_tt = (turb[c].w + turb[c].z) * (2.0 * wc.v.h / vcell[c].y - 2.0 / 3.0 * (g0.x + g0.w + wc.v.h / vcell[c].y));
+            s = s + (hr * fr.w - hl * fl.w + ht * ft.w - hb * fb.w) + vec4<f32>(0.0, 0.0, -t_tt * geo.x, 0.0);";
+
+const RESIDUAL_STORE_EXT: &str = r#"
 @group(1) @binding(0) var<storage, read> u: array<vec4<f32>>;
 @group(1) @binding(1) var<storage, read> fi: array<vec4<f32>>;
 @group(1) @binding(2) var<storage, read> fj: array<vec4<f32>>;
@@ -279,7 +372,7 @@ pub const RESIDUAL_STORE_EXT: &str = r#"
 @group(1) @binding(8) var<storage, read_write> rho_res: array<f32>;
 @group(1) @binding(9) var<storage, read_write> partial: array<f32>;
 @group(1) @binding(10) var<storage, read> ulo: array<vec4<f32>>;
-@group(1) @binding(11) var<uniform> p: Params;
+//@PBIND
 
 var<workgroup> sh: array<f32, 128>;
 
@@ -313,11 +406,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
             let geo = cell[c];
             let inv_v = 1.0 / geo.y;
             let gc = dgeo_corr(wc, cell[c].zwxy);
-            let s = vec4<f32>(
+            var s = vec4<f32>(
                 dsum(gl.a, fl.w, gr.a, fr.w, gb.a, fb.w, gt.a, ft.w, gc.a).h,
                 dsum(gl.b, fl.w, gr.b, fr.w, gb.b, fb.w, gt.b, ft.w, gc.b).h,
                 dsum(gl.c, fl.w, gr.c, fr.w, gb.c, fb.w, gt.c, ft.w, dadd(dmulf(wc.p, geo.x), gc.c)).h,
                 dsum(gl.d, fl.w, gr.d, fr.w, gb.d, fb.w, gt.d, ft.w, gc.d).h);
+            //@VSUM
             let rs = s * inv_v;
             res[c] = rs;
             rho_res[c] = rs.x;
@@ -327,8 +421,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
             let lam_r = (abs(wc.u.h * fr.x + wc.v.h * fr.y) + cs) * fr.z;
             let lam_b = (abs(wc.u.h * fb.x + wc.v.h * fb.y) + cs) * fb.z;
             let lam_t = (abs(wc.u.h * ft.x + wc.v.h * ft.y) + cs) * ft.z;
-            let l_i = 0.5 * (lam_l + lam_r);
-            let l_j = 0.5 * (lam_b + lam_t);
+            var l_i = 0.5 * (lam_l + lam_r);
+            var l_j = 0.5 * (lam_b + lam_t);
+            //@DIFF
             var dtc = p.icfl * geo.x / (l_i + l_j);
             if ((p.iflags & 8u) != 0u) { dtc = p.icfl * geo.x / (2.0 * min(l_i, l_j)); }
             dt[c] = dtc;
@@ -350,7 +445,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
 /// mirror image across a wall of the solid block) enters the pivot block through `T = dU_ghost / dU` (`lo`/`up` of that end = 0).
 /// WGSL load (and, if `rw`, store) functions `ld_<name>(i)`, `st_<name>(i, m)` of the 4x4 blocks stored as four consecutive column
 /// vec4 at `4 i ..` of the `array<vec4<f32>>` binding `name` (Luma arrays hold vec4 at most).
-fn acc(names: &[(&str, bool)]) -> String {
+pub(crate) fn acc(names: &[(&str, bool)]) -> String {
     let mut s = String::new();
     for (n, rw) in names {
         s += &format!("fn ld_{n}(i: u32) -> M4 {{ return M4({n}[4u * i], {n}[4u * i + 1u], {n}[4u * i + 2u], {n}[4u * i + 3u]); }}\n");
@@ -361,11 +456,50 @@ fn acc(names: &[(&str, bool)]) -> String {
     s
 }
 
-fn assemble(dir_i: bool) -> String {
-    ASSEMBLE_TEMPLATE
+/// `viscous`: the no-slip wall faces (ghost state `(rho, -u, -v, p)`, Jacobian `diag(1, -1, -1, 1)`) and the diffusive spectral radii
+/// `lam = gamma (mu_f / Pr + mu_t,f / Pr_t) / (rho_f |d|)` of the two faces (`viscous::face_lambdas`) that add `2 lam I` to the dissipation
+/// matrices; the bindings `turb` (`mu`, `mu_t`) and `vg` (the `1/|d|` of the faces of the direction: `vgi` or `vgj`) precede the uniform block.
+fn assemble(dir_i: bool, viscous: bool) -> String {
+    let (pbind, lam) = if viscous {
+        (
+            "@group(1) @binding(8) var<storage, read> turb: array<vec4<f32>>;\n\
+             @group(1) @binding(9) var<storage, read> vg: array<vec4<f32>>;\n\
+             @group(1) @binding(10) var<uniform> p: Params;",
+            ASSEMBLE_LAM,
+        )
+    } else {
+        ("@group(1) @binding(8) var<uniform> p: Params;", "let lam_l = 0.0;\n    let lam_r = 0.0;")
+    };
+    let src = ASSEMBLE_TEMPLATE
         .replace("//@ACC", &acc(&[("blo", true), ("bd", true), ("bup", true)]))
-        .replace("//@DIR", if dir_i { "const DIR_I: bool = true;" } else { "const DIR_I: bool = false;" })
+        .replace("//@PBIND", pbind)
+        .replace("//@LAM", lam)
+        .replace("//@DIR", if dir_i { "const DIR_I: bool = true;" } else { "const DIR_I: bool = false;" });
+    if viscous {
+        format!("{}\n{}", crate::shaders_visc::consts(), src)
+    } else {
+        src
+    }
 }
+
+/// Diffusive spectral radii of the lower / upper face of the cell (`viscous::face_lambdas`): face viscosities are the mean of the two sides
+/// (a ghost side carries the values of this cell, `mu_t` with the sign flipped across a no-slip face), `rho_f` the mean density of the two
+/// states (`wm`, `wp`: the neighbour or ghost state), `1/|d|` from `vg`.
+const ASSEMBLE_LAM: &str = "var il = c;
+    var ir = c + p.ni;
+    var cm = c - p.ni;
+    var cn = c + p.ni;
+    if (DIR_I) { il = j * (p.ni + 1u) + i; ir = il + 1u; cm = c - 1u; cn = c + 1u; }
+    let mu_c = turb[c].w;
+    let mut_c = turb[c].z;
+    var mu_lo = mu_c;
+    var mut_lo = mut_c;
+    var mu_hi = mu_c;
+    var mut_hi = mut_c;
+    if (!at_lo) { mu_lo = 0.5 * (mu_c + turb[cm].w); mut_lo = 0.5 * (mut_c + turb[cm].z); } else if (ns_lo) { mut_lo = 0.0; }
+    if (!at_hi) { mu_hi = 0.5 * (mu_c + turb[cn].w); mut_hi = 0.5 * (mut_c + turb[cn].z); }
+    let lam_l = GAMMA * (mu_lo / PRANDTL + mut_lo / PRANDTL_T) * vg[il].z / (0.5 * (wm.x + wk.x));
+    let lam_r = GAMMA * (mu_hi / PRANDTL + mut_hi / PRANDTL_T) * vg[ir].z / (0.5 * (wk.x + wp.x));";
 
 const ASSEMBLE_TEMPLATE: &str = r#"
 @group(1) @binding(0) var<storage, read> u: array<vec4<f32>>;
@@ -377,7 +511,7 @@ const ASSEMBLE_TEMPLATE: &str = r#"
 @group(1) @binding(6) var<storage, read_write> bd: array<vec4<f32>>;
 @group(1) @binding(7) var<storage, read_write> bup: array<vec4<f32>>;
 //@ACC
-@group(1) @binding(8) var<uniform> p: Params;
+//@PBIND
 
 //@DIR
 
@@ -432,21 +566,31 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let at_hi = (k + 1u == kn);
     var t_lo = m_zero();
     var t_hi = m_zero();
+    var ns_lo = false;
     if (at_lo) {
         if (k0 > 0u) {
-            // solid body below / behind the cell: slip wall with the face normal
-            wm = reflect_wall(wk, fl.x, fl.y);
-            t_lo = reflection(fl.x, fl.y);
+            // solid body below / behind the cell: wall with the face normal (slip: reflection, no-slip: velocity reversed)
+            if (DIR_I) { ns_lo = noslip_iface(k0, j); } else { ns_lo = noslip_jface(i, k0); }
+            wm = wall_ghost(wk, fl.x, fl.y, ns_lo);
+            if (ns_lo) { t_lo = m_noslip(); } else { t_lo = reflection(fl.x, fl.y); }
         } else {
-            wm = ghost_state(bc_lo, fs, wk, wk, fl, -1.0);
-            if (implicit_bc) { t_lo = ghost_jac(bc_lo, fs, wk, fl, -1.0); }
+            if (!DIR_I) { ns_lo = noslip_jface(i, 0u); }
+            if (ns_lo) {
+                // no-slip wall at the start of the j lines (flat plate)
+                wm = wall_ghost(wk, fl.x, fl.y, true);
+                if (implicit_bc) { t_lo = m_noslip(); }
+            } else {
+                wm = ghost_state(bc_lo, fs, wk, wk, fl, -1.0);
+                if (implicit_bc) { t_lo = ghost_jac(bc_lo, fs, wk, fl, -1.0); }
+            }
         }
     }
     if (at_hi) {
         wp = ghost_state(bc_hi, fs, wk, wk, fr, 1.0);
         if (implicit_bc) { t_hi = ghost_jac(bc_hi, fs, wk, fr, 1.0); }
     }
-    var b = cell_blocks(wk, wm, wp, fl, fr, geo.y, dt[c], src);
+    //@LAM
+    var b = cell_blocks(wk, wm, wp, fl, fr, geo.y, dt[c], src, lam_l, lam_r);
     if (at_lo) { b.d = b.d + b.lo * t_lo; b.lo = m_zero(); }
     if (at_hi) { b.d = b.d + b.up * t_hi; b.up = m_zero(); }
     st_blo(mi, b.lo);
@@ -729,11 +873,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-pub fn assemble_i() -> String {
-    assemble(true)
+pub fn assemble_i(viscous: bool) -> String {
+    assemble(true, viscous)
 }
-pub fn assemble_j() -> String {
-    assemble(false)
+pub fn assemble_j(viscous: bool) -> String {
+    assemble(false, viscous)
 }
 
 /// i lines (length `ni`) / j lines (length `nj`).
@@ -744,11 +888,8 @@ pub fn line_j(nj: usize) -> String {
     line(false, nj)
 }
 
-/// Kernel sources with their preludes: `(common + source)` for the f32 kernels and the extended residual.
+/// Kernel sources with their preludes: `(common + source)` for the f32 kernels (the extended residual brings its own,
+/// [`residual_store_ext`]).
 pub fn with_common(src: &str) -> String {
     format!("{}\n{}", common_impl(), src)
-}
-
-pub fn residual_store_ext() -> String {
-    format!("{}\n{}", common_impl_ext(), RESIDUAL_STORE_EXT)
 }
