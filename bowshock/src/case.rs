@@ -1,6 +1,7 @@
 //! A single-Mach-number case: body, grids and numerics, and the solver built from them.
 
 use crate::body_grid::{base_domain_grid, large_domain_grid, BaseBody, BaseGridParams, LargeGridParams};
+use crate::error::Error;
 use crate::numerics::Numerics;
 use bowshock_core::gas::freestream;
 use bowshock_core::solver::{Bc, Config, Solver};
@@ -107,8 +108,13 @@ impl Case {
         }
     }
 
-    /// Solver on the grid selected by `wake`, configured from `numerics`.
+    /// Solver on the grid selected by `wake`, configured from `numerics`; panics on invalid grid parameters.
     pub fn build_solver(&self) -> Solver {
+        self.try_build_solver().expect("valid grid parameters")
+    }
+
+    /// Like [`Case::build_solver`], returning the grid error instead of panicking.
+    pub fn try_build_solver(&self) -> Result<Solver, Error> {
         let n = &self.numerics;
         let cfg = Config {
             cfl: n.cfl,
@@ -120,17 +126,17 @@ impl Case {
         let mut s;
         match self.wake {
             Wake::Base => {
-                let (grid, block) = base_domain_grid(&self.grid_base);
+                let (grid, block) = base_domain_grid(&self.grid_base)?;
                 s = Solver::new(grid, cfg);
                 s.set_block(Some(block));
             }
             Wake::Sting => {
-                s = Solver::new(large_domain_grid(&self.grid_sting), cfg);
+                s = Solver::new(large_domain_grid(&self.grid_sting)?, cfg);
             }
         }
         s.low_mach = n.low_mach;
         s.set_scheme(n.scheme);
-        s
+        Ok(s)
     }
 }
 

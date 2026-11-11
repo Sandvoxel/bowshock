@@ -21,7 +21,9 @@
 //! r distribution: geometric from the wall (`dr_wall` first cell, growth solved so that `nj` cells reach `r_far`),
 //! the same fractions in every column: `r = r_body(x) + s_j (r_far - r_body(x))`.
 
+use crate::error::Error;
 use bowshock_core::grid::Grid;
+use bowshock_core::solver::Block;
 use bowshock_reference::shock_expansion::Ogive;
 
 /// Nose shape of the body (diameter `d = 1`, nose length `L_n`).
@@ -187,13 +189,20 @@ pub fn two_sided_nodes(len: f64, n: usize, dx: f64) -> Vec<f64> {
 }
 
 /// Axial node positions (increasing) of the large-domain grid, `n_up + n_nose + sum(n_seg) + n_ext + 1` entries.
-pub fn axial_nodes(p: &LargeGridParams) -> Vec<f64> {
+pub fn axial_nodes(p: &LargeGridParams) -> Result<Vec<f64>, Error> {
     let bb = &p.body;
     let nseg = bb.segments.len();
-    assert!(p.x_up > 0.0 && p.x_down > bb.aft_length() && nseg >= 1);
-    assert!(p.n_seg.len() == nseg && bb.segments.iter().all(|s| s.length > 0.0));
-    assert!(p.n_up >= 1 && p.n_nose >= 2 && p.n_seg.iter().all(|&n| n >= 1) && p.n_ext >= 1);
     let ln = bb.body.nose_length();
+    let bad = |m: &str| Err(Error::Grid(m.to_string()));
+    if !(p.x_up > 0.0 && p.x_down > bb.aft_length() && nseg >= 1 && ln > 0.0 && p.dx_tip > 0.0) {
+        return bad("x_up and dx_tip must be positive and x_down must exceed the aft length");
+    }
+    if p.n_seg.len() != nseg || !bb.segments.iter().all(|s| s.length > 0.0) {
+        return bad("n_seg needs one entry per body segment and segment lengths must be positive");
+    }
+    if !(p.n_up >= 1 && p.n_nose >= 2 && p.n_seg.iter().all(|&n| n >= 1) && p.n_ext >= 1) {
+        return bad("cell counts need n_up >= 1, n_nose >= 2, n_seg >= 1, n_ext >= 1");
+    }
     let nose = two_sided_nodes(ln, p.n_nose, p.dx_tip);
     let d_tip = nose[1] - nose[0];
     let d_sh = nose[p.n_nose] - nose[p.n_nose - 1];
@@ -218,7 +227,7 @@ pub fn axial_nodes(p: &LargeGridParams) -> Vec<f64> {
     for k in 1..=p.n_ext {
         xs.push(x_base + ext[k]);
     }
-    xs
+    Ok(xs)
 }
 
 /// Radial fractions `0 = s_0 < ... < s_nj = 1` (geometric, first cell `dr_wall / r_far`).
@@ -227,8 +236,11 @@ pub fn radial_fractions(dr_wall: f64, r_far: f64, nj: usize) -> Vec<f64> {
 }
 
 /// Build the large-domain grid.
-pub fn large_domain_grid(p: &LargeGridParams) -> Grid {
-    let xs = axial_nodes(p);
+pub fn large_domain_grid(p: &LargeGridParams) -> Result<Grid, Error> {
+    let xs = axial_nodes(p)?;
+    if !(p.nj >= 1 && p.dr_wall > 0.0 && p.r_far > 0.0) {
+        return Err(Error::Grid("nj >= 1, dr_wall > 0 and r_far > 0 are required".to_string()));
+    }
     let ni = xs.len() - 1;
     let nj = p.nj;
     let sj = radial_fractions(p.dr_wall, p.r_far, nj);
@@ -241,7 +253,7 @@ pub fn large_domain_grid(p: &LargeGridParams) -> Grid {
             r[j * (ni + 1) + i] = r_in + sj[j] * (p.r_far - r_in);
         }
     }
-    Grid::from_nodes(ni, nj, x, r)
+    Grid::try_from_nodes(ni, nj, x, r).map_err(Error::Grid)
 }
 
 /// One conical (or cylindrical) piece of the aft body.
@@ -357,14 +369,28 @@ pub struct BaseGridParams {
 /// Grid with a solid body block and base (see `solver::Block`): H-grid whose first `j_end = n_sting + n_gap` rows lie
 /// inside the body for `x < x_base` (solid cells) and behind the base between the sting / axis and the base radius (wake
 /// cells). Returns the grid and the block to pass to `Solver::set_block`.
-pub fn base_domain_grid(p: &BaseGridParams) -> (Grid, bowshock_core::solver::Block) {
+pub fn base_domain_grid(p: &BaseGridParams) -> Result<(Grid, Block), Error> {
     let bb = &p.body;
     let ln = bb.body.nose_length();
-    assert!(p.n_up >= 1 && p.n_nose >= 2 && p.n_wake >= 2 && p.n_gap >= 2);
-    assert!(!bb.segments.is_empty() && p.n_seg.len() == bb.segments.len() && p.n_seg.iter().all(|&n| n >= 1));
-    assert!(bb.segments.iter().all(|s| s.length > 0.0));
-    assert!(p.n_sting == 0 || p.n_sting >= 2);
-    assert!(bb.sting_radius < bb.base_radius(), "sting thicker than the base");
+    let bad = |m: &str| Err(Error::Grid(m.to_string()));
+    if !(p.n_up >= 1 && p.n_nose >= 2 && p.n_wake >= 2 && p.n_gap >= 2 && p.nj_out >= 1) {
+        return bad("cell counts need n_up >= 1, n_nose >= 2, n_wake >= 2, n_gap >= 2, nj_out >= 1");
+    }
+    if bb.segments.is_empty() || p.n_seg.len() != bb.segments.len() || !p.n_seg.iter().all(|&n| n >= 1) {
+        return bad("n_seg needs one entry >= 1 per body segment");
+    }
+    if !bb.segments.iter().all(|s| s.length > 0.0) {
+        return bad("segment lengths must be positive");
+    }
+    if !(p.n_sting == 0 || p.n_sting >= 2) {
+        return bad("n_sting must be 0 or >= 2");
+    }
+    if bb.sting_radius >= bb.base_radius() {
+        return bad("sting thicker than the base");
+    }
+    if !(ln > 0.0 && p.x_up > 0.0 && p.x_down > 0.0 && p.dx_tip > 0.0 && p.dr_wall > 0.0 && p.r_far > bb.base_radius()) {
+        return bad("x_up, x_down, dx_tip, dr_wall must be positive, r_far must exceed the base radius");
+    }
     let nose = two_sided_nodes(ln, p.n_nose, p.dx_tip);
     let d_tip = nose[1] - nose[0];
     let mut xs: Vec<f64> = Vec::new();
@@ -415,7 +441,35 @@ pub fn base_domain_grid(p: &BaseGridParams) -> (Grid, bowshock_core::solver::Blo
             r[j * (ni + 1) + i] = rad;
         }
     }
-    (Grid::from_nodes(ni, nj, x, r), bowshock_core::solver::Block { i_end, j_end, j_sting })
+    let grid = Grid::try_from_nodes(ni, nj, x, r).map_err(Error::Grid)?;
+    Ok((grid, Block { i_end, j_end, j_sting }))
+}
+
+/// Largest allowed ratio of neighbouring cell sizes checked by [`check_quality`].
+pub const MAX_STRETCHING: f64 = 1.5;
+
+/// Reject grids whose neighbouring cell sizes differ by more than a factor of [`MAX_STRETCHING`]: along `i` on the first
+/// fluid wall row (`j = 0`, or `j = block.j_end` with a block) and along `j` in the last cell column over the fluid rows
+/// (from `block.j_sting`, or 0).
+pub fn check_quality(grid: &Grid, block: Option<Block>) -> Result<(), Error> {
+    let ratio = |a: f64, b: f64| (a / b).max(b / a);
+    let (j_wall, j_start) = block.map_or((0, 0), |b| (b.j_end, b.j_sting));
+    for i in 1..grid.ni {
+        let (a, b) = (grid.node(i, j_wall).0 - grid.node(i - 1, j_wall).0, grid.node(i + 1, j_wall).0 - grid.node(i, j_wall).0);
+        let q = ratio(a, b);
+        if q.is_nan() || q > MAX_STRETCHING {
+            return Err(Error::Grid(format!("stretching ratio {q:.2} at i = {i}")));
+        }
+    }
+    let ic = grid.ni - 1;
+    for j in j_start + 1..grid.nj {
+        let (a, b) = (grid.node(ic, j).1 - grid.node(ic, j - 1).1, grid.node(ic, j + 1).1 - grid.node(ic, j).1);
+        let q = ratio(a, b);
+        if q.is_nan() || q > MAX_STRETCHING {
+            return Err(Error::Grid(format!("stretching ratio {q:.2} at j = {j}")));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -441,7 +495,7 @@ mod tests {
     #[test]
     fn nodes_hit_tip_shoulder_and_extents_with_requested_end_cells() {
         let p = params();
-        let xs = axial_nodes(&p);
+        let xs = axial_nodes(&p).expect("grid");
         assert_eq!(xs.len(), 30 + 40 + 30 + 30 + 1);
         assert!(xs.windows(2).all(|w| w[1] > w[0]));
         assert!((xs[0] + 50.0).abs() < 1e-12);
@@ -461,7 +515,7 @@ mod tests {
     fn grid_is_valid_and_wall_and_far_field_are_where_expected() {
         for nose in [Nose::TangentOgive { fineness: 3.0 }, Nose::Cone { half_angle: 10f64.to_radians() }] {
             let p = LargeGridParams { body: BaseBody::cylinder(Body { nose }, 7.0), ..params() };
-            let g = large_domain_grid(&p); // asserts positive cell areas
+            let g = large_domain_grid(&p).expect("grid");
             let (ni, nj) = (g.ni, g.nj);
             for i in 0..=ni {
                 let (x0, r0) = g.node(i, 0);
@@ -539,7 +593,7 @@ mod tests {
     fn base_grid_wall_lines_block_and_metrics_are_consistent() {
         for (sting, boat) in [(0.0, 0.0), (0.13, 1.0), (0.0, 1.0)] {
             let p = base_params(sting, boat);
-            let (g, b) = base_domain_grid(&p); // asserts positive cell areas
+            let (g, b) = base_domain_grid(&p).expect("grid");
             let bb = &p.body;
             assert_eq!(b.j_end, p.n_sting + p.n_gap);
             assert_eq!(b.j_sting, p.n_sting);
@@ -615,8 +669,8 @@ mod tests {
             dx_tip: 0.05,
             dr_wall: 0.05,
         };
-        let g = large_domain_grid(&lp);
-        let xs = axial_nodes(&lp);
+        let g = large_domain_grid(&lp).expect("grid");
+        let xs = axial_nodes(&lp).expect("grid");
         for (k, &x) in stations.iter().enumerate() {
             assert!(has(&xs, x), "sting grid: no node at station {k} (x = {x})");
         }
@@ -641,7 +695,7 @@ mod tests {
             dx_tip: 0.05,
             dr_wall: 0.05,
         };
-        let (g, b) = base_domain_grid(&bp);
+        let (g, b) = base_domain_grid(&bp).expect("grid");
         let xs: Vec<f64> = (0..=g.ni).map(|i| g.node(i, g.nj).0).collect();
         for (k, &x) in stations.iter().enumerate() {
             assert!(has(&xs, x), "base grid: no node at station {k} (x = {x})");

@@ -10,3 +10,4 @@ pub mod gpu;
 pub mod numerics;
 pub mod result;
 pub mod run;
+pub mod spec;

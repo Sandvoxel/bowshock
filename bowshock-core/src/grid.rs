@@ -56,7 +56,13 @@ pub struct Grid {
 }
 
 impl Grid {
+    /// Build the grid from node coordinates, panicking on a degenerate cell (see [`Grid::try_from_nodes`]).
     pub fn from_nodes(ni: usize, nj: usize, x: Vec<f64>, r: Vec<f64>) -> Grid {
+        Grid::try_from_nodes(ni, nj, x, r).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Build the grid from node coordinates (`(ni + 1) * (nj + 1)`, row `j` major); `Err` if a cell has non-positive area.
+    pub fn try_from_nodes(ni: usize, nj: usize, x: Vec<f64>, r: Vec<f64>) -> Result<Grid, String> {
         assert_eq!(x.len(), (ni + 1) * (nj + 1));
         assert_eq!(r.len(), x.len());
         let nn = |i: usize, j: usize| j * (ni + 1) + i;
@@ -99,7 +105,9 @@ impl Grid {
                     sx += at * cx;
                     sr += at * cr;
                 }
-                assert!(a > 0.0, "non-positive cell area at ({i},{j})");
+                if a <= 0.0 || a.is_nan() {
+                    return Err(format!("non-positive cell area at ({i},{j})"));
+                }
                 let c = j * ni + i;
                 area[c] = a;
                 vol[c] = v;
@@ -107,7 +115,7 @@ impl Grid {
                 rc[c] = sr / a;
             }
         }
-        Grid { ni, nj, x, r, iface, jface, area, vol, xc, rc }
+        Ok(Grid { ni, nj, x, r, iface, jface, area, vol, xc, rc })
     }
 
     #[inline]

@@ -1,11 +1,12 @@
 //! Mach-sweep analysis of a body: zero-lift drag versus Mach number, on the GPU when one is present.
 
-use crate::body_grid::BaseBody;
+use crate::body_grid::{check_quality, BaseBody};
 use crate::case::{Case, Wake};
 use crate::error::Error;
 use crate::numerics::Numerics;
 use crate::result::PointResult;
 use crate::run::{run_cold, run_on};
+use crate::spec::BodySpec;
 use bowshock_reference::base_drag::base_drag_coefficient;
 
 /// Lowest and highest Mach number accepted by [`Analysis::run`].
@@ -45,7 +46,8 @@ impl Resolution {
     }
 }
 
-/// Drag coefficients referenced to the maximum cross-section.
+/// Drag coefficients referenced to the reference area (by default the largest cross-section; `detail` of a point is
+/// referenced to the nose base area).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Drag {
     /// Pressure drag of the nose and the aft body.
@@ -82,6 +84,9 @@ pub struct Polar {
 #[derive(Clone, Debug)]
 pub struct Analysis {
     body: BaseBody,
+    /// Nose diameter and reference diameter, in the same unit (metres, or internal units).
+    d_nose: f64,
+    d_ref: f64,
     resolution: Resolution,
     wake: Wake,
     backend: Backend,
@@ -91,10 +96,36 @@ pub struct Analysis {
 }
 
 impl Analysis {
-    /// Analysis of a body in internal units (nose diameter 1). Defaults: medium resolution, sting wake, automatic backend,
-    /// numerics chosen per Mach number, warm starts.
+    /// Analysis of a body in internal units (nose diameter 1, so drag coefficients refer to the nose base area). Defaults:
+    /// medium resolution, sting wake, automatic backend, numerics chosen per Mach number, warm starts.
     pub fn from_internal(body: BaseBody) -> Analysis {
-        Analysis { body, resolution: Resolution::Medium, wake: Wake::Sting, backend: Backend::Auto, numerics: None, max_iterations: None, warm_start: true }
+        Analysis {
+            body,
+            d_nose: 1.0,
+            d_ref: 1.0,
+            resolution: Resolution::Medium,
+            wake: Wake::Sting,
+            backend: Backend::Auto,
+            numerics: None,
+            max_iterations: None,
+            warm_start: true,
+        }
+    }
+
+    /// Analysis of a dimensional body (same defaults as [`Analysis::from_internal`]); drag coefficients refer to the largest
+    /// cross-section of the body unless [`Analysis::reference_diameter`] says otherwise.
+    pub fn new(spec: &BodySpec) -> Result<Analysis, Error> {
+        let (body, scale) = spec.to_internal()?;
+        let mut a = Analysis::from_internal(body);
+        a.d_nose = scale.d_nose;
+        a.d_ref = spec.reference_diameter();
+        Ok(a)
+    }
+
+    /// Reference diameter [m] of the drag coefficients (internal units for [`Analysis::from_internal`]).
+    pub fn reference_diameter(mut self, d_m: f64) -> Self {
+        self.d_ref = d_m;
+        self
     }
 
     pub fn resolution(mut self, r: Resolution) -> Self {
@@ -140,11 +171,17 @@ impl Analysis {
                 return Err(Error::InvalidInput(format!("Mach number {m} is outside [{}, {}]", MACH_RANGE.0, MACH_RANGE.1)));
             }
         }
+        if !(self.d_ref.is_finite() && self.d_ref > 0.0) {
+            return Err(Error::InvalidInput(format!("reference diameter {} must be finite and > 0", self.d_ref)));
+        }
 
         // cases in ascending Mach order (stable), results restored to input order below
         let mut order: Vec<usize> = (0..machs.len()).collect();
         order.sort_by(|&a, &b| machs[a].total_cmp(&machs[b]));
         let cases: Vec<Case> = order.iter().map(|&k| self.case(machs[k])).collect();
+        // the grids do not depend on the Mach number: check the first one
+        let probe = cases[0].try_build_solver()?;
+        check_quality(&probe.grid, probe.block())?;
 
         let (results, backend, fallback) = match self.backend {
             Backend::Cpu => (self.sweep_cpu(&cases), BackendUsed::Cpu, None),
@@ -170,9 +207,11 @@ impl Analysis {
     }
 
     fn point(&self, mach: f64, detail: PointResult) -> PolarPoint {
+        let q = (self.d_nose / self.d_ref).powi(2);
         let forebody_pressure = detail.cd_aft.iter().fold(detail.cd_nose, |a, c| a + c);
         let base = base_drag_coefficient(mach) * (self.body.base_radius() / self.body.body.radius()).powi(2);
-        let drag = Drag { forebody_pressure, friction: None, base, base_modelled: true, total: forebody_pressure + base };
+        let total = forebody_pressure + base;
+        let drag = Drag { forebody_pressure: forebody_pressure * q, friction: None, base: base * q, base_modelled: true, total: total * q };
         PolarPoint { mach, alpha: 0.0, drag, detail }
     }
 
