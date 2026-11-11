@@ -81,3 +81,26 @@ fn viscous_grids_pass_the_quality_check_and_report_friction() {
         assert!((p.drag.total - (p.drag.forebody_pressure + friction + p.drag.base)).abs() < 1e-12);
     }
 }
+
+/// The G3 body at Mach 0.5 on the CPU and on the GPU: total CD within 1 %, friction within 2 %, base Cp within 0.01.
+#[cfg(feature = "gpu")]
+#[test]
+#[ignore]
+fn g3_gpu_matches_cpu() {
+    let spec = BodySpec { nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 }, aft: vec![AftSpec::Tube { length: 0.60 }] };
+    let run = |backend| {
+        let t0 = Instant::now();
+        let polar = Analysis::new(&spec).unwrap().backend(backend).resolution(Resolution::Coarse).viscous(flight()).run(&[0.5]).unwrap();
+        println!("G3 {backend:?}: {:.1} s, backend used {:?}, fallback {:?}", t0.elapsed().as_secs_f64(), polar.backend, polar.fallback);
+        polar.points.into_iter().next().unwrap()
+    };
+    let (cpu, gpu) = (run(Backend::Cpu), run(Backend::Gpu));
+    let (c, g) = (&cpu.detail, &gpu.detail);
+    println!("G3: cd_total    cpu {:.5}  gpu {:.5}  rel {:.4}", cpu.drag.total, gpu.drag.total, gpu.drag.total / cpu.drag.total - 1.0);
+    println!("G3: cd_friction cpu {:.5}  gpu {:.5}  rel {:.4}", c.cd_friction, g.cd_friction, g.cd_friction / c.cd_friction - 1.0);
+    println!("G3: cp_base     cpu {:.4}  gpu {:.4}  diff {:.4}", c.cp_base, g.cp_base, g.cp_base - c.cp_base);
+    println!("G3: iters cpu {} gpu {}; quality cpu {:?} gpu {:?}", c.iters, g.iters, cpu.quality, gpu.quality);
+    assert!((gpu.drag.total / cpu.drag.total - 1.0).abs() < 0.01);
+    assert!((g.cd_friction / c.cd_friction - 1.0).abs() < 0.02);
+    assert!((g.cp_base - c.cp_base).abs() < 0.01);
+}

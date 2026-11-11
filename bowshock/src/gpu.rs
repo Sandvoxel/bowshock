@@ -3,15 +3,16 @@
 //!
 //! The GPU records [`SYNC`] iterations back to back and reads the residual history. The monitor of the CPU loop (every
 //! [`MONITOR_EVERY`] iterations, which is the synchronisation interval) is sampled once per full chunk: the base-pressure
-//! history of a `Wake::Base` case by a GPU kernel that reads back only the two cells behind the base, the forebody CD of a
-//! `Wake::Sting` case from the state downloaded into the host solver. The residual-based stopping rules run on the history
+//! history of an inviscid `Wake::Base` case by a GPU kernel that reads back only the two cells behind the base, the forebody CD
+//! of an inviscid `Wake::Sting` case and the total CD of a viscous case (friction included, which reads only the mean state) from
+//! the state downloaded into the host solver. The residual-based stopping rules run on the history
 //! iteration by iteration, so the reported stop iteration is the CPU-equivalent one; the GPU may execute up to `SYNC - 1`
 //! further iterations (`iters_exec`) and the final wall state is the one after those.
 
 use crate::case::{Case, Wake};
 use crate::numerics::MONITOR_EVERY;
 use crate::result::{PointResult, StopReason};
-use crate::run::{finish, stop_reason, wall_distribution};
+use crate::run::{finish, monitor, stop_reason, wall_distribution};
 use bowshock_core::gas::{cons_to_prim, freestream};
 use bowshock_core::solver::Solver;
 use bowshock_gpu::{GpuSolver, Mode, Precision, Result};
@@ -87,8 +88,9 @@ impl GpuRunner {
         }
         self.gpu.context().sync()?;
 
-        let sampler = (case.wake == Wake::Base).then(|| BaseSampler::new(&self.host, case.body.body.radius().powi(2)));
-        let sample = case.wake == Wake::Base || n.monitor_tol.is_some();
+        let viscous = case.viscous.is_some();
+        let sampler = (case.wake == Wake::Base && !viscous).then(|| BaseSampler::new(&self.host, case.body.body.radius().powi(2)));
+        let sample = case.wake == Wake::Base || viscous || n.monitor_tol.is_some();
         let mut residual = Vec::new();
         let mut hist: Vec<(usize, f64)> = Vec::new();
         let mut rmax: f64 = 0.0;
@@ -104,6 +106,11 @@ impl GpuRunner {
             let value = if sample && len == SYNC {
                 Some(match &sampler {
                     Some(sampler) => sampler.cp_base(&self.gpu.base_cells()?),
+                    None if viscous => {
+                        // total CD incl. friction: needs only the mean state (`u`) on the host, which `download` provides
+                        self.download()?;
+                        monitor(case, &self.host)
+                    }
                     None => {
                         self.download()?;
                         wall_distribution(&case.body, &self.host).1
