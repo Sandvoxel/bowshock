@@ -7,7 +7,7 @@ repository.workspace = true
 description = "GPU runners of the bowshock validation cases, compared side by side with the CPU reference runs"
 
 [dependencies]
-bowshock.workspace = true
+bowshock = { workspace = true, features = ["gpu"] }
 bowshock-core.workspace = true
 bowshock-reference.workspace = true
 bowshock-cases.workspace = true

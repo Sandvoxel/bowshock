@@ -9,6 +9,12 @@ description = "Rocket aerodynamics: body geometry, grids and the Mach-sweep anal
 [dependencies]
 bowshock-core.workspace = true
 bowshock-reference.workspace = true
+bowshock-gpu = { workspace = true, optional = true }
+luma = { workspace = true, optional = true }
+
+[features]
+default = ["gpu"]
+gpu = ["dep:bowshock-gpu", "dep:luma"]
 
 [lints]
 workspace = true

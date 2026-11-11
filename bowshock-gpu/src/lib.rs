@@ -23,7 +23,36 @@ use bowshock_core::implicit::{DtMode, ImplicitParams};
 use bowshock_core::solver::{Bc, Block, Config, Scheme, Solver};
 use luma::{args, uniform, Array, Context, Kernel};
 
-pub use luma::{LumaError, Result};
+pub use luma::LumaError;
+
+/// Errors of the GPU solver: a Luma/wgpu failure or a configuration the GPU port does not implement.
+#[derive(Debug, Clone)]
+pub enum GpuError {
+    /// Failure reported by Luma (adapter, device, kernel build, buffer transfer).
+    Luma(LumaError),
+    /// The requested mode / scheme / block combination is not implemented on the GPU.
+    Unsupported(&'static str),
+}
+
+impl From<LumaError> for GpuError {
+    fn from(e: LumaError) -> GpuError {
+        GpuError::Luma(e)
+    }
+}
+
+impl std::fmt::Display for GpuError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GpuError::Luma(e) => write!(f, "{e}"),
+            GpuError::Unsupported(m) => f.write_str(m),
+        }
+    }
+}
+
+impl std::error::Error for GpuError {}
+
+/// Result of the GPU solver operations.
+pub type Result<T> = std::result::Result<T, GpuError>;
 
 /// SSP-RK3 (Shu-Osher) stage coefficients `(a, b)` of `u = a (u + dt L(u)) + b u0`, as in
 /// `bowshock_core::solver::Solver::step`.
@@ -119,11 +148,11 @@ fn n_partial(ni: usize, nj: usize) -> usize {
 }
 
 fn build(ctx: &Context, src: &str, label: &str) -> Result<Kernel> {
-    ctx.kernel(&format!("{}\n{}", shaders::common(), src)).label(label).build()
+    Ok(ctx.kernel(&format!("{}\n{}", shaders::common(), src)).label(label).build()?)
 }
 
 fn build_ext(ctx: &Context, src: &str, label: &str) -> Result<Kernel> {
-    ctx.kernel(&format!("{}\n{}", shaders_ext::common_ext(), src)).label(label).build()
+    Ok(ctx.kernel(&format!("{}\n{}", shaders_ext::common_ext(), src)).label(label).build()?)
 }
 
 /// How one iteration is mapped to kernel launches.
@@ -418,6 +447,14 @@ impl GpuSolver {
         Ok(g)
     }
 
+    /// Convergence scheme in use: `Scheme::Explicit` without the line-implicit machinery, else `Scheme::Implicit` with its parameters.
+    pub fn scheme(&self) -> Scheme {
+        match &self.imp {
+            None => Scheme::Explicit,
+            Some(i) => Scheme::Implicit(i.p),
+        }
+    }
+
     /// Switches the low-Mach correction of the reconstructed face states (`bowshock_core::flux::low_mach_states`) on or off.
     pub fn set_low_mach(&mut self, on: bool) {
         self.low_mach = on;
@@ -427,7 +464,7 @@ impl GpuSolver {
     /// supports blocks.
     pub fn set_block(&mut self, block: Option<Block>) -> Result<()> {
         if block.is_some() && self.mode == Mode::Direct {
-            return Err(LumaError::InvalidShape("solid blocks need Mode::Guarded".into()));
+            return Err(GpuError::Unsupported("solid blocks need Mode::Guarded"));
         }
         self.block = block;
         self.n_active = match block {
@@ -452,13 +489,13 @@ impl GpuSolver {
             }
             Scheme::Implicit(p) => {
                 if self.mode != Mode::Guarded {
-                    return Err(LumaError::InvalidShape("the implicit scheme needs Mode::Guarded".into()));
+                    return Err(GpuError::Unsupported("the implicit scheme needs Mode::Guarded"));
                 }
                 self.imp = Some(self.build_implicit(p)?);
                 self.restart_ramp();
                 Ok(())
             }
-            _ => Err(LumaError::InvalidShape("only Scheme::Explicit and Scheme::Implicit are implemented on the GPU".into())),
+            _ => Err(GpuError::Unsupported("only Scheme::Explicit and Scheme::Implicit are implemented on the GPU")),
         }
     }
 
@@ -725,7 +762,7 @@ impl GpuSolver {
     /// Conserved state, `ni*nj`, same layout as `bowshock_core::solver::Solver::u` (the f32 high part in the compensated
     /// precision, which is what the flux kernels see).
     pub fn state(&self) -> Result<Vec<[f32; 4]>> {
-        self.u.to_vec()
+        Ok(self.u.to_vec()?)
     }
 
     /// Conserved state as f64: `hi + lo` in the compensated precision.
@@ -742,7 +779,7 @@ impl GpuSolver {
     /// `[(i_end, j), (i_end + 1, j)]`, for every row `j_sting..j_end` (the extrapolation stencil of
     /// `bowshock_cases::subsonic::base_state`). Reads back only these rows.
     pub fn base_cells(&mut self) -> Result<Vec<[[f64; 4]; 2]>> {
-        let b = self.block.ok_or_else(|| LumaError::InvalidShape("base_cells needs a solid block".into()))?;
+        let b = self.block.ok_or(GpuError::Unsupported("base_cells needs a solid block"))?;
         let rows = b.j_end - b.j_sting;
         if self.base_probe.is_none() {
             let src = format!("{}\n{}", shaders::common(), shaders::base_cells(self.lo.is_some()));
@@ -774,7 +811,7 @@ impl GpuSolver {
 
     /// Stage-1 `d rho / dt` of every cell from the last iteration (diagnostics).
     pub fn rho_residual_field(&self) -> Result<Vec<f32>> {
-        self.rho_res.to_vec()
+        Ok(self.rho_res.to_vec()?)
     }
 
     pub fn mode(&self) -> Mode {

@@ -39,7 +39,7 @@ name = "subsonic_gpu"
 path = "src/bin/subsonic_gpu.rs"
 
 [dependencies]
-bowshock.workspace = true
+bowshock = { workspace = true, features = ["gpu"] }
 bowshock-core.workspace = true
 bowshock-reference.workspace = true
 bowshock-cases.workspace = true

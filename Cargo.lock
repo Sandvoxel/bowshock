@@ -79,7 +79,9 @@ name = "bowshock"
 version = "0.1.0"
 dependencies = [
  "bowshock-core",
+ "bowshock-gpu",
  "bowshock-reference",
+ "luma",
 ]
 
 [[package]]

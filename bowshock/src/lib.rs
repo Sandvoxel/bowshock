@@ -4,6 +4,8 @@
 pub mod body_grid;
 pub mod case;
 pub mod error;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod numerics;
 pub mod result;
 pub mod run;
