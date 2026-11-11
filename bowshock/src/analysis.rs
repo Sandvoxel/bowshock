@@ -1,6 +1,6 @@
 //! Mach-sweep analysis of a body: zero-lift drag versus Mach number, on the GPU when one is present.
 
-use crate::atmosphere::FlightConditions;
+use crate::atmosphere::{FlightConditions, SUTHERLAND_S};
 use crate::body_grid::{check_quality, BaseBody, MAX_STRETCHING, MAX_STRETCHING_VISCOUS_J};
 use crate::case::{Case, Wake};
 use crate::error::Error;
@@ -14,8 +14,6 @@ use std::convert::Infallible;
 
 /// Lowest and highest Mach number accepted by [`Analysis::run`].
 const MACH_RANGE: (f64, f64) = (0.1, 3.0);
-/// Sutherland constant of air [K], for the viscosity law of the solver (`sutherland = SUTHERLAND_K / T_inf`).
-const SUTHERLAND_K: f64 = 110.4;
 
 /// Where a sweep runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -242,7 +240,7 @@ impl Analysis {
         let air = flight.atmosphere.state()?;
         Ok(Some(Rans {
             re_c: air.density * air.sound_speed * self.d_nose / air.viscosity,
-            sutherland: SUTHERLAND_K / air.temperature_k,
+            sutherland: SUTHERLAND_S / air.temperature_k,
             mach_max: machs.iter().copied().fold(f64::NEG_INFINITY, f64::max),
         }))
     }

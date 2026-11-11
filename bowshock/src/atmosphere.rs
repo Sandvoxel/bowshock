@@ -29,7 +29,7 @@ const MU_REF: f64 = 1.716e-5;
 /// Sutherland reference temperature [K].
 const T_REF: f64 = 273.15;
 /// Sutherland constant of air [K].
-const SUTHERLAND_S: f64 = 110.4;
+pub(crate) const SUTHERLAND_S: f64 = 110.4;
 /// Lowest explicit temperature accepted [K].
 const T_MIN: f64 = 150.0;
 /// Highest explicit temperature accepted [K].
