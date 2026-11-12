@@ -235,6 +235,16 @@ fn main() {
                     splits(&p),
                     compact(&p)
                 );
+                // the `iterate_all` replay the steady table measures: 20 iterations, per-iteration numbers
+                let n_replay = 20u64;
+                let p = s.profile_replay(n_replay as usize).unwrap();
+                println!(
+                    "### {} / {} - one SSP-RK3 step of the replay (200x100): {} kernel launches, {} us GPU time\n",
+                    $name,
+                    $sname,
+                    p.launches() as u64 / n_replay,
+                    p.total().as_micros() as u64 / n_replay,
+                );
             }};
         }
         for &(staging, sname) in &stagings {
