@@ -640,6 +640,20 @@ impl LazySolver {
         Ok(profile)
     }
 
+    /// GPU time per kernel of `n` iterations of the `iterate_all` replay (the profile adds up all `n`), after a warm-up call
+    /// that traces and compiles it.
+    pub fn profile_replay(&mut self, n: usize) -> Result<luma::Profile> {
+        self.run_replay(n)?;
+        self.ctx.sync()?;
+        let ctx = self.ctx.clone();
+        let (out, profile) = ctx.profile(|| -> Result<()> {
+            self.run_replay(n)?;
+            self.ctx.sync()
+        })?;
+        out?;
+        Ok(profile)
+    }
+
     /// Host seconds to build the lazy expression of one SSP-RK3 step from the current state, `n` times, without evaluating
     /// anything (the part of an `eval` loop iteration that is Rust code building nodes).
     pub fn trace_seconds(&self, n: usize) -> f64 {
