@@ -1,6 +1,7 @@
 // The explicit solver in array ops. This file is `include!`d twice by `lib.rs`, once per precision, into a module that
 // defines `S` (the element type: `f32` or `Df32`), `c(f64) -> S` (a constant rounded from f64), `up(..)` (host f64 data to
-// an `Array<S>`), `State` with `pack` / `unpack` (how the solver state lives between steps) and `cache(..)`.
+// an `Array<S>`), `to_f64(..)` (an `Array<S>` to host f64 data) and the residual bookkeeping of the loops (`records`,
+// `read_history`, `rn_host`).
 //
 // Every function mirrors the CPU routine of the same name in `bowshock-core` expression by expression; the array code is
 // the equation, the doc comment states it.
@@ -10,29 +11,39 @@ use bowshock_core::gas::GAMMA;
 use bowshock_core::grid::Grid;
 use bowshock_core::solver::{Bc, Config};
 use crate::Staging;
-use luma::{concat, select, Array, Context, PadMode, Result};
-use std::ops::Range;
+use luma::{select, Array, Context, Fields, PadMode, Result};
 
 /// Array of one field (`rho`, `u`, ...) over a block of cells or faces.
 pub type A = Array<S>;
-/// Four fields: primitive `[rho, u, v, p]`, conservative `[rho, rho u, rho v, E]` or a flux.
+/// Four fields: primitive `[rho, u, v, p]`, conservative `[rho, rho u, rho v, E]` or a flux. A record of arrays
+/// (`luma::Fields`): `slice`, `pad`, `assign` and `cache` apply to the four fields at once.
 pub type Rec = [A; 4];
+/// The loop state: the conserved record and the density residual of the step that produced it (one element).
+pub type State = [A; 5];
 
 fn rec(f: impl FnMut(usize) -> A) -> Rec {
     std::array::from_fn(f)
 }
 
-fn cache_rec(r: &Rec) -> Rec {
-    rec(|k| cache(&r[k]))
+/// The conserved record of a loop state.
+fn unpack(s: &State) -> Rec {
+    rec(|k| s[k].clone())
 }
 
-fn slice(r: &Rec, axis: usize, range: Range<usize>) -> Rec {
-    rec(|k| r[k].slice(axis, range.clone()))
+fn pack(u: Rec, rn: A) -> State {
+    let [u0, u1, u2, u3] = u;
+    [u0, u1, u2, u3, rn]
 }
 
-/// Another handle on the same lazy array (arrays are not `Clone`): an identity view.
-fn dup<T: luma::ScalarType>(a: &Array<T>) -> Array<T> {
-    a.slice(0, ..)
+/// The loop state of host data: the conserved state `u` (cell-major, `[rho, rho u, rho v, E]`) and a zero residual.
+fn upload_state(ctx: &Context, u: &[[f64; 4]], shape: [usize; 2]) -> Result<State> {
+    let comp = |k: usize| up(ctx, &u.iter().map(|q| q[k]).collect::<Vec<_>>(), shape);
+    Ok([comp(0)?, comp(1)?, comp(2)?, comp(3)?, up(ctx, &[0.0], 1)?])
+}
+
+fn download_state(s: &State) -> Result<Vec<[f64; 4]>> {
+    let v: Vec<Vec<f64>> = (0..4).map(|k| to_f64(&s[k])).collect::<Result<_>>()?;
+    Ok((0..v[0].len()).map(|c| [v[0][c], v[1][c], v[2][c], v[3][c]]).collect())
 }
 
 const G1: f64 = GAMMA - 1.0;
@@ -55,13 +66,39 @@ pub fn physical_flux(w: &Rec, nx: &A, nr: &A) -> Rec {
     let [rho, u, v, p] = w;
     let un = u * nx + v * nr;
     let e = p / c(G1) + c(0.5) * rho * (u * u + v * v);
-    [rho * &un, rho * u * &un + p * nx, rho * v * &un + p * nr, (&e + p) * &un]
+    flux_from(w, &un, &e, nx, nr)
+}
+
+/// [`physical_flux`] of a state whose normal velocity `u_n` and total energy `E` are known.
+fn flux_from(w: &Rec, un: &A, e: &A, nx: &A, nr: &A) -> Rec {
+    let [rho, u, v, p] = w;
+    [rho * un, rho * u * un + p * nx, rho * v * un + p * nr, (e + p) * un]
+}
+
+/// One side of a face with the quantities both Riemann solvers need, built once: normal velocity `u_n = u n_x + v n_r`,
+/// total energy `E = p / (g - 1) + rho (u^2 + v^2) / 2`, sound speed `c = sqrt(g p / rho)` and the flux `F.n`.
+struct Side<'a> {
+    w: &'a Rec,
+    un: A,
+    e: A,
+    c: A,
+    f: Rec,
+}
+
+impl<'a> Side<'a> {
+    fn new(w: &'a Rec, nx: &A, nr: &A) -> Side<'a> {
+        let [rho, u, v, p] = w;
+        let un = u * nx + v * nr;
+        let e = p / c(G1) + c(0.5) * rho * (u * u + v * v);
+        let f = flux_from(w, &un, &e, nx, nr);
+        Side { w, un, e, c: (c(GAMMA) * p / rho).sqrt(), f }
+    }
 }
 
 /// `w` reflected about a wall of unit normal `(n_x, n_r)`: `v - 2 (v.n) n`.
 fn reflect(w: &Rec, nx: &A, nr: &A) -> Rec {
     let un = &w[1] * nx + &w[2] * nr;
-    [dup(&w[0]), &w[1] - c(2.0) * &un * nx, &w[2] - c(2.0) * &un * nr, dup(&w[3])]
+    [w[0].clone(), &w[1] - c(2.0) * &un * nx, &w[2] - c(2.0) * &un * nr, w[3].clone()]
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -74,7 +111,7 @@ fn limited_slope(a: &A, b: &A, lim: Limiter) -> A {
     let same_sign = (a * b).gt(c(0.0));
     match lim {
         Limiter::FirstOrder => unreachable!("first order reconstruction has no slopes"),
-        Limiter::Minmod => select(&same_sign, select(&alt(&aabs(a), &aabs(b)), a, b), c(0.0)),
+        Limiter::Minmod => select(&same_sign, select(&a.abs().lt(&b.abs()), a, b), c(0.0)),
         Limiter::VanAlbada => {
             let eps = 1e-14;
             let slope = (a * (b * b + c(eps)) + b * (a * a + c(eps))) / (a * a + b * b + c(2.0 * eps));
@@ -88,7 +125,7 @@ fn limited_slope(a: &A, b: &A, lim: Limiter) -> A {
 /// a face whose reconstructed density or pressure is not positive falls back to the cell value.
 fn reconstruct(m2: &Rec, m1: &Rec, p0: &Rec, p1: &Rec, lim: Limiter) -> (Rec, Rec) {
     if lim == Limiter::FirstOrder {
-        return (rec(|k| dup(&m1[k])), rec(|k| dup(&p0[k])));
+        return (m1.clone(), p0.clone());
     }
     let l = rec(|k| &m1[k] + c(0.5) * limited_slope(&(&m1[k] - &m2[k]), &(&p0[k] - &m1[k]), lim));
     let r = rec(|k| &p0[k] - c(0.5) * limited_slope(&(&p0[k] - &m1[k]), &(&p1[k] - &p0[k]), lim));
@@ -100,15 +137,10 @@ fn reconstruct(m2: &Rec, m1: &Rec, p0: &Rec, p1: &Rec, lim: Limiter) -> (Rec, Re
 /// HLLC flux for the 2-D Euler equations projected on the unit normal `(n_x, n_r)` (Toro ch. 10), wave speeds
 /// `S_L = min(u_nL - c_L, u~_n - c~)`, `S_R = max(u_nR + c_R, u~_n + c~)` from Roe averages (`sqrt(rho)` weights):
 /// `F = F_L` for `S_L >= 0`, `F_R` for `S_R <= 0`, else `F_K + S_K (U*_K - U_K)` of the side `K` of the contact speed `S_M`.
-fn hllc_speeds(wl: &Rec, wr: &Rec, nx: &A, nr: &A) -> [A; 3] {
-    let [rl, ul, vl, pl] = wl;
-    let [rr, ur, vr, pr] = wr;
-    let unl = ul * nx + vl * nr;
-    let unr = ur * nx + vr * nr;
-    let cl = (c(GAMMA) * pl / rl).sqrt();
-    let cr = (c(GAMMA) * pr / rr).sqrt();
-    let el = pl / c(G1) + c(0.5) * rl * (ul * ul + vl * vl);
-    let er = pr / c(G1) + c(0.5) * rr * (ur * ur + vr * vr);
+fn hllc_speeds(l: &Side, r: &Side, nx: &A, nr: &A) -> [A; 3] {
+    let [rl, ul, vl, pl] = l.w;
+    let [rr, ur, vr, pr] = r.w;
+    let (unl, unr, cl, cr, el, er) = (&l.un, &r.un, &l.c, &r.c, &l.e, &r.e);
 
     // Roe averages
     let sql = rl.sqrt();
@@ -116,41 +148,33 @@ fn hllc_speeds(wl: &Rec, wr: &Rec, nx: &A, nr: &A) -> [A; 3] {
     let inv = c(1.0) / (&sql + &sqr);
     let uh = (&sql * ul + &sqr * ur) * &inv;
     let vh = (&sql * vl + &sqr * vr) * &inv;
-    let hl = (&el + pl) / rl;
-    let hr = (&er + pr) / rr;
+    let hl = (el + pl) / rl;
+    let hr = (er + pr) / rr;
     let hh = (&sql * &hl + &sqr * &hr) * &inv;
     let ch2 = c(G1) * (&hh - c(0.5) * (&uh * &uh + &vh * &vh));
     let ch = ch2.maximum(c(1e-30)).sqrt();
     let unh = &uh * nx + &vh * nr;
 
-    let sl = amin(&(&unl - &cl), &(&unh - &ch));
-    let sr = amax(&(&unr + &cr), &(&unh + &ch));
-    let sl_un = &sl - &unl;
-    let sr_un = &sr - &unr;
-    let sm = (pr - pl + rl * &unl * &sl_un - rr * &unr * &sr_un) / (rl * &sl_un - rr * &sr_un);
+    let sl = (unl - cl).minimum(&unh - &ch);
+    let sr = (unr + cr).maximum(&unh + &ch);
+    let sl_un = &sl - unl;
+    let sr_un = &sr - unr;
+    let sm = (pr - pl + rl * unl * &sl_un - rr * unr * &sr_un) / (rl * &sl_un - rr * &sr_un);
     [sl, sr, sm]
 }
 
 /// The HLLC flux from the wave speeds `[S_L, S_R, S_M]` of [`hllc_speeds`].
-fn hllc_flux(wl: &Rec, wr: &Rec, nx: &A, nr: &A, speeds: &[A; 3]) -> Rec {
-    let [rl, ul, vl, pl] = wl;
-    let [rr, ur, vr, pr] = wr;
+fn hllc_flux(l: &Side, r: &Side, nx: &A, nr: &A, speeds: &[A; 3]) -> Rec {
     let [sl, sr, sm] = speeds;
-    let unl = ul * nx + vl * nr;
-    let unr = ur * nx + vr * nr;
-    let el = pl / c(G1) + c(0.5) * rl * (ul * ul + vl * vl);
-    let er = pr / c(G1) + c(0.5) * rr * (ur * ur + vr * vr);
-    let sl_un = sl - &unl;
-    let sr_un = sr - &unr;
-
-    let fl = physical_flux(wl, nx, nr);
-    let fr = physical_flux(wr, nx, nr);
+    let sl_un = sl - &l.un;
+    let sr_un = sr - &r.un;
 
     // `F_K + S_K (U*_K - U_K)`, `U*_K = fac [1, u + (S_M - u_n) n_x, v + (S_M - u_n) n_r, E / rho + (S_M - u_n) (S_M + p / (rho (S_K - u_n)))]`
-    let star = |w: &Rec, f: &Rec, un: &A, e: &A, s: &A, s_un: &A| -> Rec {
-        let [r, u, v, p] = w;
+    let star = |k: &Side, s: &A, s_un: &A| -> Rec {
+        let [r, u, v, p] = k.w;
+        let (f, e) = (&k.f, &k.e);
         let fac = r * s_un / (s - sm);
-        let sm_un = sm - un;
+        let sm_un = sm - &k.un;
         [
             &f[0] + s * (&fac - r),
             &f[1] + s * (&fac * (u + &sm_un * nx) - r * u),
@@ -158,33 +182,27 @@ fn hllc_flux(wl: &Rec, wr: &Rec, nx: &A, nr: &A, speeds: &[A; 3]) -> Rec {
             &f[3] + s * (&fac * (e / r + &sm_un * (sm + p / (r * s_un))) - e),
         ]
     };
-    let star_l = star(wl, &fl, &unl, &el, sl, &sl_un);
-    let star_r = star(wr, &fr, &unr, &er, sr, &sr_un);
+    let star_l = star(l, sl, &sl_un);
+    let star_r = star(r, sr, &sr_un);
 
     let left = sl.ge(c(0.0));
     let right = sr.le(c(0.0));
     let contact_left = sm.ge(c(0.0));
-    rec(|k| select(&left, &fl[k], select(&right, &fr[k], select(&contact_left, &star_l[k], &star_r[k]))))
+    rec(|k| select(&left, &l.f[k], select(&right, &r.f[k], select(&contact_left, &star_l[k], &star_r[k]))))
 }
 
 /// Rusanov flux `F = (F_L + F_R) / 2 - s_max (U_R - U_L) / 2`, `s_max = max(|u_nL| + c_L, |u_nR| + c_R)`.
-fn rusanov(wl: &Rec, wr: &Rec, nx: &A, nr: &A) -> Rec {
-    let [rl, ul, vl, pl] = wl;
-    let [rr, ur, vr, pr] = wr;
-    let unl = ul * nx + vl * nr;
-    let unr = ur * nx + vr * nr;
-    let smax = amax(&(aabs(&unl) + (c(GAMMA) * pl / rl).sqrt()), &(aabs(&unr) + (c(GAMMA) * pr / rr).sqrt()));
-    let fl = physical_flux(wl, nx, nr);
-    let fr = physical_flux(wr, nx, nr);
-    let el = pl / c(G1) + c(0.5) * rl * (ul * ul + vl * vl);
-    let er = pr / c(G1) + c(0.5) * rr * (ur * ur + vr * vr);
-    let dq = [rr - rl, rr * ur - rl * ul, rr * vr - rl * vl, &er - &el];
-    rec(|k| c(0.5) * (&fl[k] + &fr[k]) - c(0.5) * &smax * &dq[k])
+fn rusanov(l: &Side, r: &Side) -> Rec {
+    let [rl, ul, vl, _] = l.w;
+    let [rr, ur, vr, _] = r.w;
+    let smax = (l.un.abs() + &l.c).maximum(r.un.abs() + &r.c);
+    let dq = [rr - rl, rr * ur - rl * ul, rr * vr - rl * vl, &r.e - &l.e];
+    rec(|k| c(0.5) * (&l.f[k] + &r.f[k]) - c(0.5) * &smax * &dq[k])
 }
 
 /// Weight of the Rusanov flux: `s = |p_R - p_L| / min(p_L, p_R)`, `t = clamp((s - lo) / (hi - lo), 0, 1)`, `theta = t^2 (3 - 2 t)`.
 fn shock_weight(pl: &A, pr: &A) -> A {
-    let s = aabs(&(pr - pl)) / amin(pl, pr);
+    let s = (pr - pl).abs() / pl.minimum(pr);
     let t = ((s - c(SHOCK_SENSOR_LO)) / c(SHOCK_SENSOR_HI - SHOCK_SENSOR_LO)).maximum(c(0.0)).minimum(c(1.0));
     &t * &t * (c(3.0) - c(2.0) * &t)
 }
@@ -196,7 +214,7 @@ fn low_mach_states(l: Rec, r: Rec, nx: &A, nr: &A) -> (Rec, Rec) {
     let unr = &r[1] * nx + &r[2] * nr;
     let ml = (&l[1] * &l[1] + &l[2] * &l[2]).sqrt() / (c(GAMMA) * &l[3] / &l[0]).sqrt();
     let mr = (&r[1] * &r[1] + &r[2] * &r[2]).sqrt() / (c(GAMMA) * &r[3] / &r[0]).sqrt();
-    let z = amax(&ml, &mr).maximum(c(LOW_MACH_FLOOR)).minimum(c(1.0));
+    let z = ml.maximum(&mr).maximum(c(LOW_MACH_FLOOR)).minimum(c(1.0));
     let active = z.lt(c(1.0));
     let avg = c(0.5) * (&unl + &unr);
     let dl = &avg + &z * (&unl - &avg) - &unl;
@@ -216,9 +234,10 @@ fn face_flux_lm(m2: &Rec, m1: &Rec, p0: &Rec, p1: &Rec, lim: Limiter, nx: &A, nr
     let (l, r) = reconstruct(m2, m1, p0, p1, lim);
     let (l, r) = if low_mach { low_mach_states(l, r, nx, nr) } else { (l, r) };
     let t = shock_weight(&m1[3], &p0[3]);
-    let (l, r, t) = if split { (cache_rec(&l), cache_rec(&r), cache(&t)) } else { (l, r, t) };
-    let hllc = hllc_flux(&l, &r, nx, nr, &hllc_speeds(&l, &r, nx, nr));
-    let rus = rusanov(&l, &r, nx, nr);
+    let (l, r, t) = if split { (l, r, t).cache() } else { (l, r, t) };
+    let (sl, sr) = (Side::new(&l, nx, nr), Side::new(&r, nx, nr));
+    let hllc = hllc_flux(&sl, &sr, nx, nr, &hllc_speeds(&sl, &sr, nx, nr));
+    let rus = rusanov(&sl, &sr);
     rec(|k| (c(1.0) - &t) * &hllc[k] + &t * &rus[k])
 }
 
@@ -253,7 +272,7 @@ fn characteristic_ghost(fs: &[f64; 4], interior: &Rec, nx: &A, nr: &A) -> Rec {
     let q2 = &q * &q;
     let rho = &rf[0] * (&q2 * &q2 * &q);
     let dn = &un_b - &un_ref;
-    let riemann = [dup(&rho), &rf[1] + &dn * nx, &rf[2] + &dn * nr, &rho * &c_b * &c_b / c(GAMMA)];
+    let riemann = [rho.clone(), &rf[1] + &dn * nx, &rf[2] + &dn * nr, &rho * &c_b * &c_b / c(GAMMA)];
     let super_in = m.le(c(-1.0));
     let super_out = m.ge(c(1.0));
     rec(|k| select(&super_in, c(fs[k]), select(&super_out, &interior[k], &riemann[k])))
@@ -263,7 +282,7 @@ fn characteristic_ghost(fs: &[f64; 4], interior: &Rec, nx: &A, nr: &A) -> Rec {
 fn pressure_outflow_ghost(p_back: f64, interior: &Rec, nx: &A, nr: &A) -> Rec {
     let ci = (c(GAMMA) * &interior[3] / &interior[0]).sqrt();
     let m = (&interior[1] * nx + &interior[2] * nr) / &ci;
-    [dup(&interior[0]), dup(&interior[1]), dup(&interior[2]), select(&m.ge(c(1.0)), &interior[3], c(p_back))]
+    [interior[0].clone(), interior[1].clone(), interior[2].clone(), select(&m.ge(c(1.0)), &interior[3], c(p_back))]
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -383,9 +402,12 @@ impl LazySolver {
         download_state(self.state.as_ref().expect("state"))
     }
 
-    /// Ghost layers of boundary `side` (`[imin, imax, jmin, jmax]`) from the primitive state `w`:
-    /// the first interior cell `edge` and the cell `mirror` that a wall reflects (`pad` with `Edge` / `Mirror` read both).
-    fn ghost(&self, side: usize, w: &Rec) -> Rec {
+    /// Writes the two ghost layers of boundary `side` (`[imin, imax, jmin, jmax]`) into the padded primitives `w` with a
+    /// region assign. `p` is the unpadded primitive state: the first interior cell `edge` and the cell `mirror` that a
+    /// wall reflects (`pad` with `Edge` / `Mirror` read both). `Bc::Extrapolate` keeps the `Edge` padding of `w`. Layers
+    /// are outermost first, as the cells they stand for. `w` is a lazy expression, so nothing is launched: `w` becomes the
+    /// padded state with the ghost expressions in place, and fuses into whatever reads it.
+    fn assign_ghosts(&self, side: usize, p: &Rec, w: &Rec) {
         let (ni, nj) = (self.ni, self.nj);
         let view = |a: &A, mode: PadMode| -> A {
             match side {
@@ -395,15 +417,22 @@ impl LazySolver {
                 _ => a.pad([(0, 0), (0, 2)], mode).slice(1, nj..nj + 2),
             }
         };
+        let region = match side {
+            0 => w.slice(0, ..2).slice(1, 2..nj + 2),
+            1 => w.slice(0, ni + 2..).slice(1, 2..nj + 2),
+            2 => w.slice(1, ..2).slice(0, 2..ni + 2),
+            _ => w.slice(1, nj + 2..).slice(0, 2..ni + 2),
+        };
         let b = &self.geo.bnd[side];
         let fs = self.cfg.freestream;
-        match self.cfg.bc[side] {
-            Bc::Freestream => rec(|k| dup(&b.fixed.as_ref().expect("fixed ghost")[k])),
-            Bc::Extrapolate => rec(|k| view(&w[k], PadMode::Edge)),
-            Bc::SlipWall => reflect(&rec(|k| view(&w[k], PadMode::Mirror)), &b.nx, &b.nr),
-            Bc::Characteristic => characteristic_ghost(&fs, &rec(|k| view(&w[k], PadMode::Edge)), &b.onx, &b.onr),
-            Bc::PressureOutflow => pressure_outflow_ghost(fs[3], &rec(|k| view(&w[k], PadMode::Edge)), &b.onx, &b.onr),
-        }
+        let ghost = match self.cfg.bc[side] {
+            Bc::Freestream => b.fixed.clone().expect("fixed ghost"),
+            Bc::Extrapolate => return,
+            Bc::SlipWall => reflect(&rec(|k| view(&p[k], PadMode::Mirror)), &b.nx, &b.nr),
+            Bc::Characteristic => characteristic_ghost(&fs, &rec(|k| view(&p[k], PadMode::Edge)), &b.onx, &b.onr),
+            Bc::PressureOutflow => pressure_outflow_ghost(fs[3], &rec(|k| view(&p[k], PadMode::Edge)), &b.onx, &b.onr),
+        };
+        region.assign(ghost).expect("ghost layer assign");
     }
 
     /// `res = dU/dt` of the conserved state `u` (`[ni, nj]` fields) and, if asked, the local time step.
@@ -415,51 +444,28 @@ impl LazySolver {
         let (ni, nj) = (self.ni, self.nj);
         let g = &self.geo;
 
-        // 1. primitives, then two ghost layers per side
-        let w = cache_rec(&cons_to_prim(rec(|k| dup(&u[k]))));
+        // 1. primitives, padded by two cells on every side; the ghost layers of each boundary are one region assign
+        let p = cons_to_prim(u.clone());
+        let w = p.pad([(2, 2), (2, 2)], PadMode::Edge);
+        for side in 0..4 {
+            self.assign_ghosts(side, &p, &w);
+        }
+        // `Lines` and up: evaluate the padded record once. Without it every reader recomputes the primitives and all four ghost
+        // expressions at each stencil cell (200x100 f32: 67-91 launches per RK3 step without it, 26-30 with it; README "Speed").
+        let w = if self.staging == Staging::Fusion { w } else { w.cache() };
 
         // 2. the cells along each grid line with their ghosts: i lines `[ni + 4, nj]`, j lines `[ni, nj + 4]`
-        let (wi, wj) = if self.staging != Staging::Fusion {
-            // both ghost layers of the two boundaries of a direction are one small array (one kernel); the lines are one more
-            let (gl, gr, gb, gt) = (self.ghost(0, &w), self.ghost(1, &w), self.ghost(2, &w), self.ghost(3, &w));
-            let gi = cache_rec(&rec(|k| concat(0, [&gl[k], &gr[k]])));
-            let gj = cache_rec(&rec(|k| concat(1, [&gb[k], &gt[k]])));
-            (
-                cache_rec(&rec(|k| concat(0, [&gi[k].slice(0, 0..2), &w[k], &gi[k].slice(0, 2..4)]))),
-                cache_rec(&rec(|k| concat(1, [&gj[k].slice(1, 0..2), &w[k], &gj[k].slice(1, 2..4)]))),
-            )
-        } else {
-            // every ghost layer is a small array, evaluated once
-            let ghosts: [Rec; 4] = std::array::from_fn(|side| cache_rec(&self.ghost(side, &w)));
-            (
-                rec(|k| cache(&concat(0, [&ghosts[0][k], &w[k], &ghosts[1][k]]))),
-                rec(|k| cache(&concat(1, [&ghosts[2][k], &w[k], &ghosts[3][k]]))),
-            )
-        };
+        let wi = w.slice(1, 2..nj + 2);
+        let wj = w.slice(0, 2..ni + 2);
 
         // 3. face fluxes: face `f` sees the cells `f - 2 .. f + 1` of its line
-        let fi = cache_rec(&face_flux_lm(
-            &slice(&wi, 0, 0..ni + 1),
-            &slice(&wi, 0, 1..ni + 2),
-            &slice(&wi, 0, 2..ni + 3),
-            &slice(&wi, 0, 3..ni + 4),
-            lim,
-            &g.inx,
-            &g.inr,
-            self.low_mach,
-            self.staging == Staging::Split,
-        ));
-        let fj = cache_rec(&face_flux_lm(
-            &slice(&wj, 1, 0..nj + 1),
-            &slice(&wj, 1, 1..nj + 2),
-            &slice(&wj, 1, 2..nj + 3),
-            &slice(&wj, 1, 3..nj + 4),
-            lim,
-            &g.jnx,
-            &g.jnr,
-            self.low_mach,
-            self.staging == Staging::Split,
-        ));
+        let split = self.staging == Staging::Split;
+        let fi = face_flux_lm(&wi.slice(0, 0..ni + 1), &wi.slice(0, 1..ni + 2), &wi.slice(0, 2..ni + 3), &wi.slice(0, 3..ni + 4), lim, &g.inx, &g.inr, self.low_mach, split);
+        let fj = face_flux_lm(&wj.slice(1, 0..nj + 1), &wj.slice(1, 1..nj + 2), &wj.slice(1, 2..nj + 3), &wj.slice(1, 3..nj + 4), lim, &g.jnx, &g.jnr, self.low_mach, split);
+        // `Fluxes` and up: evaluate the face fluxes. The residual and the stage update then fuse into the next stage's padded
+        // record: three kernels per stage, 14 launches per step instead of 26-30 (the flux kernel read through four stencil
+        // views is cut at the 1024-operation fusion limit otherwise; README "Speed").
+        let (fi, fj) = if matches!(self.staging, Staging::Fluxes | Staging::Split) { (fi.cache(), fj.cache()) } else { (fi, fj) };
 
         // 4. cell residual
         let (wr, wl) = (g.iw.slice(0, 1..ni + 1), g.iw.slice(0, 0..ni));
@@ -469,20 +475,20 @@ impl LazySolver {
             let (gt, gb) = (fj[k].slice(1, 1..nj + 1), fj[k].slice(1, 0..nj));
             -(&gr * &wr - &gl * &wl + &gt * &wt - &gb * &wb) * &g.inv_v
         });
-        res[2] = &res[2] + &w[3] * &g.area * &g.inv_v; // axisymmetric pressure source p A / V
+        res[2] = &res[2] + &p[3] * &g.area * &g.inv_v; // axisymmetric pressure source p A / V
 
         // 5. local time step
         let dt = compute_dt.then(|| {
-            let cs = (c(GAMMA) * &w[3] / &w[0]).sqrt();
-            let lam = |nx: &A, nr: &A, len: &A| (aabs(&(&w[1] * nx + &w[2] * nr)) + &cs) * len;
+            let cs = (c(GAMMA) * &p[3] / &p[0]).sqrt();
+            let lam = |nx: &A, nr: &A, len: &A| ((&p[1] * nx + &p[2] * nr).abs() + &cs) * len;
             let (fl_nx, fl_nr, fl_len) = (g.inx.slice(0, 0..ni), g.inr.slice(0, 0..ni), g.ilen.slice(0, 0..ni));
             let (fr_nx, fr_nr, fr_len) = (g.inx.slice(0, 1..ni + 1), g.inr.slice(0, 1..ni + 1), g.ilen.slice(0, 1..ni + 1));
             let (fb_nx, fb_nr, fb_len) = (g.jnx.slice(1, 0..nj), g.jnr.slice(1, 0..nj), g.jlen.slice(1, 0..nj));
             let (ft_nx, ft_nr, ft_len) = (g.jnx.slice(1, 1..nj + 1), g.jnr.slice(1, 1..nj + 1), g.jlen.slice(1, 1..nj + 1));
             let sum = lam(&fl_nx, &fl_nr, &fl_len) + lam(&fr_nx, &fr_nr, &fr_len) + lam(&fb_nx, &fb_nr, &fb_len) + lam(&ft_nx, &ft_nr, &ft_len);
-            cache(&(c(self.cfg.cfl) * &g.area / (c(0.5) * &sum)))
+            c(self.cfg.cfl) * &g.area / (c(0.5) * &sum)
         });
-        (cache_rec(&res), dt)
+        (res, dt)
     }
 
     /// One SSP-RK3 step with local time stepping; returns the new state and the density residual of the first stage
@@ -492,16 +498,14 @@ impl LazySolver {
     /// u1 = u0 + dt L(u0),   u2 = 3/4 u0 + 1/4 (u1 + dt L(u1)),   u3 = 1/3 u0 + 2/3 (u2 + dt L(u2))
     /// ```
     pub fn rk3(&self, u0: &Rec, lim: Limiter) -> (Rec, A) {
-        let stage = |r: Rec| if self.staging != Staging::Fusion { cache_rec(&r) } else { r };
-        let u0 = stage(rec(|k| dup(&u0[k])));
-        let (r0, dt) = self.eval_residual(&u0, lim, true);
+        let (r0, dt) = self.eval_residual(u0, lim, true);
         let dt = dt.expect("dt");
         let rn = ((&r0[0] * &r0[0]).sum() / c((self.ni * self.nj) as f64)).sqrt();
         // stage 1: u1 = u0 + dt L(u0)
-        let u1 = stage(rec(|k| &u0[k] + &dt * &r0[k]));
+        let u1 = rec(|k| &u0[k] + &dt * &r0[k]);
         let (r1, _) = self.eval_residual(&u1, lim, false);
         // stage 2: u2 = 3/4 u0 + 1/4 (u1 + dt L(u1))
-        let u2 = stage(rec(|k| c(0.25) * (&u1[k] + &dt * &r1[k]) + c(0.75) * &u0[k]));
+        let u2 = rec(|k| c(0.25) * (&u1[k] + &dt * &r1[k]) + c(0.75) * &u0[k]);
         let (r2, _) = self.eval_residual(&u2, lim, false);
         // stage 3: u3 = 1/3 u0 + 2/3 (u2 + dt L(u2))
         let u3 = rec(|k| c(2.0 / 3.0) * (&u2[k] + &dt * &r2[k]) + c(1.0 / 3.0) * &u0[k]);
@@ -554,7 +558,7 @@ impl LazySolver {
             let seg = self.phase_len(left);
             let lim = self.limiter(self.iter);
             let init = self.state.take().expect("state");
-            self.state = Some(replay(init, seg, |s| {
+            self.state = Some(luma::iterate_all(init.each_ref(), seg, |s| {
                 let (u, rn) = self.rk3(&unpack(s), lim);
                 pack(u, rn)
             }));
@@ -573,7 +577,7 @@ impl LazySolver {
             let (u, rn) = self.rk3(&unpack(&s), self.limiter(self.iter));
             s = pack(u, rn);
             luma::eval_all(&s.iter().collect::<Vec<_>>())?;
-            history.push(rn_arrays(&s));
+            history.push(s[4].clone());
             self.iter += 1;
         }
         self.state = Some(s);
@@ -603,9 +607,7 @@ impl LazySolver {
         self.ctx.sync()?;
         let (out, profile) = self.ctx.profile(|| -> Result<()> {
             let (r, dt) = self.eval_residual(&u, lim, true);
-            for a in r.iter().chain(dt.iter()) {
-                a.eval()?;
-            }
+            luma::eval_all(&r.iter().chain(dt.iter()).collect::<Vec<_>>())?;
             self.ctx.sync()
         })?;
         out?;
@@ -614,12 +616,12 @@ impl LazySolver {
 }
 
 /// The density residual scalars of an `eval` loop, one per iteration, as evaluated GPU arrays.
-pub struct Residuals(Vec<Vec<Array<f32>>>);
+pub struct Residuals(Vec<A>);
 
 impl Residuals {
     /// Reads the residual history (waits for the GPU).
     pub fn read(&self) -> Result<Vec<f64>> {
-        self.0.iter().map(|a| rn_host(a)).collect()
+        self.0.iter().map(|a| Ok(to_f64(a)?[0])).collect()
     }
 }
 
@@ -636,5 +638,17 @@ impl LazySolver {
         })?;
         out?;
         Ok(profile)
+    }
+
+    /// Host seconds to build the lazy expression of one SSP-RK3 step from the current state, `n` times, without evaluating
+    /// anything (the part of an `eval` loop iteration that is Rust code building nodes).
+    pub fn trace_seconds(&self, n: usize) -> f64 {
+        let u = unpack(self.state.as_ref().expect("state"));
+        let lim = self.cfg.limiter;
+        let t0 = std::time::Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(self.rk3(&u, lim));
+        }
+        t0.elapsed().as_secs_f64()
     }
 }

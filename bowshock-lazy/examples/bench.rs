@@ -109,7 +109,7 @@ fn main() {
     let tm = solve_cone(2.0, 15f64.to_radians()).unwrap();
     // `--staging Lines` runs one staging only (a fresh process shows its cold compile time)
     let only = args.iter().position(|a| a == "--staging").and_then(|i| args.get(i + 1)).cloned();
-    let stagings: Vec<(Staging, &str)> = [(Staging::Fusion, "Fusion"), (Staging::Lines, "Lines"), (Staging::Split, "Split")]
+    let stagings: Vec<(Staging, &str)> = [(Staging::Fusion, "Fusion"), (Staging::Lines, "Lines"), (Staging::Fluxes, "Fluxes"), (Staging::Split, "Split")]
         .into_iter()
         .filter(|(_, name)| only.as_deref().is_none_or(|o| o == *name))
         .collect();
@@ -225,7 +225,16 @@ fn main() {
                     compact(&p)
                 );
                 let p = s.profile_step().unwrap();
-                println!("### {} / {} - one SSP-RK3 step (200x100): {} kernel launches, {} us GPU time, {} fusion cuts", $name, $sname, p.launches(), p.total().as_micros(), p.splits.len());
+                println!(
+                    "### {} / {} - one SSP-RK3 step (200x100): {} kernel launches, {} us GPU time, {} fusion cuts\n```\n{}{}```",
+                    $name,
+                    $sname,
+                    p.launches(),
+                    p.total().as_micros(),
+                    p.splits.len(),
+                    splits(&p),
+                    compact(&p)
+                );
             }};
         }
         for &(staging, sname) in &stagings {

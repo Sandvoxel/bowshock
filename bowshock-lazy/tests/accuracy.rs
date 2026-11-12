@@ -53,8 +53,8 @@ fn target(precision: &str, res_ext: f64) -> (f64, f64) {
 }
 
 /// Runs the lazy solver of one precision from `u0` for `n` iterations and compares with the CPU solver, which has already
-/// run them (`res_cpu`). Every test uses a context of its own: tests run in parallel threads, and the global default context
-/// of Luma gives wrong results when several threads trace and replay on it at once (README, Luma issues).
+/// run them (`res_cpu`). Every test uses a context of its own for isolation (the shared default context works too: see
+/// `threads_on_the_default_context_agree` in `loops.rs`).
 macro_rules! run_lazy {
     ($module:ident, $ctx:expr, $staging:expr, $grid:expr, $cfg:expr, $low_mach:expr, $u0:expr, $n:expr) => {{
         let mut lazy = bowshock_lazy::$module::LazySolver::new($ctx, $grid, $cfg).unwrap();
@@ -70,7 +70,7 @@ macro_rules! run_lazy {
 fn both(label: &str, cpu: &Solver, u0: &[[f64; 4]], res_cpu: &[f64], rows: &mut Vec<(String, &'static str, Diff, f64)>, res_ext: f64) {
     let n = res_cpu.len();
     let ctx = luma::Context::new().unwrap();
-    for staging in [Staging::Fusion, Staging::Lines, Staging::Split] {
+    for staging in [Staging::Fusion, Staging::Lines, Staging::Fluxes, Staging::Split] {
         let (u, r) = run_lazy!(f32s, &ctx, staging, &cpu.grid, &cpu.cfg, cpu.low_mach, u0, n);
         rows.push((format!("{label} [{staging:?}]"), "f32", diff(&u, &r, cpu, res_cpu), res_ext));
         let (u, r) = run_lazy!(df32s, &ctx, staging, &cpu.grid, &cpu.cfg, cpu.low_mach, u0, n);

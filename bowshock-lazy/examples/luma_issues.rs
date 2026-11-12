@@ -1,75 +1,73 @@
-//! Minimal reproductions of the Luma problems met while writing the solver (see README, "Luma issues").
+//! What still applies of the Luma problems met while writing the solver (see README, "Luma issues"). The four bugs of the first
+//! version of this file (Df32 comparison kernels, the Df32 -> f32 cast, the input-buffer count after an evaluation, threads on
+//! `default_context()`) are fixed in Luma and have their regression tests there. Two observations remain:
+//!
+//! 1. ghost layers written as region assigns into a lazy padded array are computed at every cell that reads them, so the
+//!    operation count of the kernel that reads the array grows with the size of the ghost expressions and the fusion limits cut it;
+//! 2. building a lazy expression costs about half a microsecond per operation, which is what the `eval` loop form spends
+//!    (1.5 of 1.7 ms per iteration) on.
 //!
 //! `cargo run --release --example luma_issues`
 
-use luma::{Array, Df32};
+use luma::{Array, Fields, PadMode};
+use std::time::Instant;
+
+type A = Array<f32>;
+
+/// A chain of `ops` mixed operations over the arrays `xs`, standing in for a ghost-state expression (a Riemann invariant,
+/// a few square roots and selects).
+fn chain(xs: &[&A], seed: usize, ops: usize) -> A {
+    let mut acc = xs[seed % xs.len()] * 1.0;
+    for k in 0..ops {
+        let y = xs[(seed + k + 1) % xs.len()];
+        acc = match k % 4 {
+            0 => &acc * y + 0.1,
+            1 => (&acc - y).abs() + 0.2,
+            2 => &acc / (y + 1.5),
+            _ => &acc + y * 0.5,
+        };
+    }
+    acc
+}
 
 fn main() {
     let ctx = luma::default_context().unwrap();
-    let df = |x: &[f64]| Array::<Df32>::from_slice_on(&ctx, &x.iter().map(|&v| Df32::from(v)).collect::<Vec<_>>(), x.len()).unwrap();
+    let n = 200usize;
+    let data = |k: usize| Array::from_slice_on(&ctx, &(0..n * n).map(|i| 1.0 + 0.1 * ((i + k) as f32 * 0.37).sin()).collect::<Vec<_>>(), [n, n]).unwrap();
+    let u: [A; 4] = std::array::from_fn(data);
 
-    println!("== 1. a Df32 kernel that only compares / abs / min / max and has no scalar operand cannot bind its uniform");
-    let (a, b) = (df(&[1.0, -2.0, 3.0]), df(&[2.0, 1.0, -3.0]));
-    for (name, r) in [
-        ("a.minimum(Df32::from(0.5))  (a scalar operand: works)", a.minimum(Df32::from(0.5)).to_vec().map(|v| v.iter().map(|d| d.hi).collect::<Vec<_>>())),
-        ("(&a - &b).abs()  (also an arithmetic op: works)", (&a - &b).abs().to_vec().map(|v| v.iter().map(|d| d.hi).collect::<Vec<_>>())),
-        ("a.abs()", a.abs().to_vec().map(|v| v.iter().map(|d| d.hi).collect::<Vec<_>>())),
-        ("a.minimum(&b)", a.minimum(&b).to_vec().map(|v| v.iter().map(|d| d.hi).collect::<Vec<_>>())),
-        ("a.lt(&b)", a.lt(&b).to_vec().map(|v| v.iter().map(|&m| m as f32).collect::<Vec<_>>())),
-    ] {
-        match r {
-            Ok(v) => println!("   {name}: {v:?}"),
-            Err(e) => println!("   {name}: ERROR {}", e.to_string().replace('\n', " ")),
-        }
-    }
-    println!("   afterwards, (&a - &b).abs() again: {:?}", (&a - &b).abs().to_vec().map(|v| v.iter().map(|d| d.hi).collect::<Vec<_>>()));
-
-    println!("== 2. x - x.to_f32().to_df32() is zero when fused into one kernel (the cast `x.hi + x.lo` is not guarded)");
-    let x = Array::<Df32>::from_slice_on(&ctx, &[Df32::from(1.0 / 3.0), Df32::from(2.0 / 3.0)], 2).unwrap();
-    let hi = x.to_f32();
-    let lo = (&x - hi.to_df32()).to_f32();
-    println!("   lo alone, fused:      {:?}   (want [{:e}, {:e}])", lo.to_vec().unwrap(), Df32::from(1.0 / 3.0).lo, Df32::from(2.0 / 3.0).lo);
-    let hi = x.to_f32().cache();
-    let lo = (&x - hi.to_df32()).to_f32();
-    println!("   after hi.cache():     {:?}", lo.to_vec().unwrap());
-
-    println!("== 3. an expression that reads 14 distinct buffers is cut for \"21 input buffers > 16\" (one kernel becomes 69)");
-    type A = Array<f32>;
-    // a chain of `depth` mixed operations over `xs`
-    fn mix(xs: &[&A], seed: usize, depth: usize) -> A {
-        let mut acc = xs[seed % xs.len()] * 1.0;
-        for k in 0..depth {
-            let y = xs[(seed + k + 1) % xs.len()];
-            acc = match k % 4 {
-                0 => &acc * y + 0.1,
-                1 => (&acc - y).abs() + 0.2,
-                2 => &acc / (y + 1.5),
-                _ => &acc + y * 0.5,
-            };
-        }
-        acc
-    }
-    let n = 20000usize;
-    let w: Vec<A> = (0..4).map(|k| Array::from_slice_on(&ctx, &(0..n + 4).map(|i| 1.0 + 0.1 * ((i + k) as f32 * 0.37).sin()).collect::<Vec<_>>(), n + 4).unwrap()).collect();
-    let (nx, nr) = (Array::from_slice_on(&ctx, &vec![0.5f32; n], n).unwrap(), Array::from_slice_on(&ctx, &vec![0.7f32; n], n).unwrap());
-    for cache_s in [false, true] {
+    println!("== 1. ghost layers as region assigns into a lazy padded record, read by a four-point stencil");
+    println!("   (a 4-field record on {n}x{n}, `pad` + one `assign` per side whose right-hand side is `ghost_ops` operations of the");
+    println!("   edge cells, then one fused stencil expression reading the padded record at four offsets in each direction)");
+    println!("   expected: one kernel whatever the ghost expressions are (the region is 2 cells wide)");
+    println!("   {:>9} {:>9} {:>10} {:>16}", "ghost_ops", "launches", "fusion cuts", "first cut");
+    for ghost_ops in [0usize, 10, 40, 100] {
         let build = || {
-            let m1: Vec<A> = w.iter().map(|a| a.slice(0, 1..n + 1)).collect();
-            let p0: Vec<A> = w.iter().map(|a| a.slice(0, 2..n + 2)).collect();
-            let views: Vec<&A> = m1.iter().chain(p0.iter()).collect();
-            // l, r: 8 arrays from the 8 views, evaluated together (one kernel)
-            let l: Vec<A> = (0..4).map(|k| mix(&views, k, 12).cache()).collect();
-            let r: Vec<A> = (0..4).map(|k| mix(&views, k + 4, 12).cache()).collect();
-            let lr: Vec<&A> = l.iter().chain(r.iter()).chain([&nx, &nr]).collect();
-            // s: three more arrays from l, r (optionally evaluated)
-            let s: Vec<A> = (0..3).map(|k| if cache_s { mix(&lr, k, 16).cache() } else { mix(&lr, k, 16) }).collect();
-            let lrs: Vec<&A> = lr.iter().copied().chain(s.iter()).collect();
-            // f: four arrays from l, r, nx, nr, s (13 buffers), times t from two of the first views (the 14th buffer)
-            let f: Vec<A> = (0..4).map(|k| mix(&lrs, k, 24)).collect();
-            let t = (&p0[3] - &m1[3]).abs() / m1[3].minimum(&p0[3]);
-            for o in f.iter().map(|f| f * &t) {
-                o.cache();
+            let w = u.clone().pad([(2, 2), (2, 2)], PadMode::Edge);
+            for side in 0..4 {
+                let (region, edge) = match side {
+                    0 => (w.slice(0, ..2).slice(1, 2..n + 2), u.clone().pad([(2, 0)], PadMode::Edge).slice(0, 0..2)),
+                    1 => (w.slice(0, n + 2..).slice(1, 2..n + 2), u.clone().pad([(0, 2)], PadMode::Edge).slice(0, n..n + 2)),
+                    2 => (w.slice(1, ..2).slice(0, 2..n + 2), u.clone().pad([(0, 0), (2, 0)], PadMode::Edge).slice(1, 0..2)),
+                    _ => (w.slice(1, n + 2..).slice(0, 2..n + 2), u.clone().pad([(0, 0), (0, 2)], PadMode::Edge).slice(1, n..n + 2)),
+                };
+                if ghost_ops > 0 {
+                    let rhs: [A; 4] = std::array::from_fn(|k| chain(&[&edge[0], &edge[1], &edge[2], &edge[3]], k, ghost_ops));
+                    region.assign(rhs).unwrap();
+                }
             }
+            // a stencil that reads the padded record at the cells -1 .. +2 of each direction, as a MUSCL face does
+            let wi = w.slice(1, 2..n + 2);
+            let wj = w.slice(0, 2..n + 2);
+            let at = |r: &[A; 4], axis: usize, k: usize, len: usize| r.slice(axis, k..k + len);
+            let out: [A; 4] = std::array::from_fn(|f| {
+                let (a, b, c, d) = (at(&wi, 0, 0, n + 1), at(&wi, 0, 1, n + 1), at(&wi, 0, 2, n + 1), at(&wi, 0, 3, n + 1));
+                let fi = (&a[f] - &b[f]).abs() * &c[f] + (&d[f] - &c[f]) * 0.5;
+                let (a, b, c, d) = (at(&wj, 1, 0, n + 1), at(&wj, 1, 1, n + 1), at(&wj, 1, 2, n + 1), at(&wj, 1, 3, n + 1));
+                let fj = (&a[f] - &b[f]).abs() * &c[f] + (&d[f] - &c[f]) * 0.5;
+                fi.slice(0, 1..n + 1).slice(1, 0..n) + fj.slice(1, 1..n + 1).slice(0, 0..n)
+            });
+            luma::eval_all(&out.iter().collect::<Vec<_>>()).unwrap();
         };
         build();
         ctx.sync().unwrap();
@@ -78,6 +76,20 @@ fn main() {
             ctx.sync().unwrap()
         })
         .unwrap();
-        println!("   s evaluated: {cache_s:5}: {} kernel launches, {} fusion cuts; first: {}", profile.launches(), profile.splits.len(), profile.splits.first().map_or(String::new(), |s| s.to_string()));
+        println!("   {ghost_ops:>9} {:>9} {:>10} {:>16}", profile.launches(), profile.splits.len(), profile.splits.first().map_or(String::new(), |s| s.to_string()));
+    }
+
+    println!("== 2. host cost of building a lazy expression (no evaluation): microseconds per operation, 4 inputs");
+    println!("   {:>6} {:>12} {:>14}", "ops", "us per build", "ns per op");
+    let xs: Vec<A> = (0..4).map(|k| data(k).slice(0, ..64).slice(1, ..64)).collect();
+    let refs: Vec<&A> = xs.iter().collect();
+    for ops in [100usize, 400, 900] {
+        let reps = 200;
+        let t0 = Instant::now();
+        for r in 0..reps {
+            std::hint::black_box(chain(&refs, r, ops));
+        }
+        let us = 1e6 * t0.elapsed().as_secs_f64() / reps as f64;
+        println!("   {ops:>6} {us:>12.1} {:>14.0}", 1e3 * us / ops as f64);
     }
 }
