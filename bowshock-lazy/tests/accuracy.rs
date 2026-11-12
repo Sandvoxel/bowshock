@@ -69,7 +69,9 @@ macro_rules! run_lazy {
 /// Both precisions and every staging on one set-up; adds the rows `(label, precision, diff)`.
 fn both(label: &str, cpu: &Solver, u0: &[[f64; 4]], res_cpu: &[f64], rows: &mut Vec<(String, &'static str, Diff, f64)>, res_ext: f64) {
     let n = res_cpu.len();
-    let ctx = luma::Context::new().unwrap();
+    // `LAZY_SHARED_CONTEXT=1` runs every test on `luma::default_context()` (the tests run in parallel threads), otherwise each
+    // call builds a context of its own.
+    let ctx = if std::env::var_os("LAZY_SHARED_CONTEXT").is_some() { luma::default_context().unwrap() } else { luma::Context::new().unwrap() };
     for staging in [Staging::Fusion, Staging::Lines, Staging::Fluxes, Staging::Split] {
         let (u, r) = run_lazy!(f32s, &ctx, staging, &cpu.grid, &cpu.cfg, cpu.low_mach, u0, n);
         rows.push((format!("{label} [{staging:?}]"), "f32", diff(&u, &r, cpu, res_cpu), res_ext));
