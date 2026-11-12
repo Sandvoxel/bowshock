@@ -53,7 +53,12 @@ impl GpuRunner {
     pub fn new(case: &Case, mode: Mode, prec: Precision) -> Result<GpuRunner> {
         let host = case.build_solver();
         let t0 = Instant::now();
-        let gpu = GpuSolver::from_host(&luma::default_context()?, &host, mode, prec)?;
+        let ctx = luma::default_context()?;
+        // The native CPU solver is faster than the GPU kernels on a software rasterizer, so `Backend::Auto` falls back to it.
+        if ctx.is_cpu() {
+            return Err(bowshock_gpu::GpuError::Unsupported("no GPU: Luma opened a software (CPU) Vulkan device"));
+        }
+        let gpu = GpuSolver::from_host(&ctx, &host, mode, prec)?;
         Ok(GpuRunner { gpu, host, setup_seconds: t0.elapsed().as_secs_f64() })
     }
 

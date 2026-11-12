@@ -18,7 +18,7 @@ const MACH_RANGE: (f64, f64) = (0.1, 3.0);
 /// Where a sweep runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backend {
-    /// The GPU when one is available, otherwise the CPU (reported in [`Polar::fallback`]).
+    /// The GPU when one is available, otherwise the CPU (reported in [`Polar::fallback`]). A software Vulkan device (llvmpipe) counts as no GPU.
     Auto,
     Cpu,
     Gpu,
