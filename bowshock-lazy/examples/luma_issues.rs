@@ -9,7 +9,8 @@
 //! 3. region assigns of the solid block into the lazy residual, flux and ghost expressions of the explicit solver (case 3
 //!    below): launches, fusion cuts and GPU time of one SSP-RK3 step with and without the block on the same grid.
 //!
-//! `cargo run --release --example luma_issues [-- 3]` (`3`: only case 3)
+//! `cargo run --release --example luma_issues [-- 3]` (`3`: only case 3; `LUMA_ISSUES_ONLY=<grid>:<staging>:<prec>:<yes|no>` limits it to
+//! the rows starting so, `LUMA_ISSUES_KERNELS=1` lists the kernels of the `eval` step)
 
 use bowshock::body_grid::Nose;
 use bowshock_cases::subsonic::{fox_case, subsonic_case};
@@ -42,7 +43,9 @@ fn chain(xs: &[&A], seed: usize, ops: usize) -> A {
 fn cuts(p: &luma::Profile) -> String {
     let mut seen: Vec<(String, usize)> = Vec::new();
     for s in &p.splits {
-        let text = s.to_string().replace("split at ", "").replace("/home/sandvoxel/Documents/bowshock-solid/bowshock-lazy/", "");
+        // "split at <path>/src/body.rs:453:20 (`assign`): ..." without the directory
+        let full = s.to_string().replace("split at ", "");
+        let text = full.find("src/").map_or(full.clone(), |at| full[at..].to_string());
         match seen.iter_mut().find(|(t, _)| *t == text) {
             Some((_, n)) => *n += 1,
             None => seen.push((text, 1)),
@@ -84,6 +87,12 @@ fn case3(ctx: &luma::Context) {
             ($module:ident, $prec:expr) => {
                 for staging in [Staging::Fluxes, Staging::Fusion] {
                     for with_block in if host.block().is_some() { vec![true, false] } else { vec![false] } {
+                        if let Ok(only) = std::env::var("LUMA_ISSUES_ONLY") {
+                            let name = format!("{label}:{staging:?}:{}:{}", $prec, if with_block { "yes" } else { "no" });
+                            if !name.starts_with(&only) {
+                                continue;
+                            }
+                        }
                         let mut s = bowshock_lazy::$module::LazySolver::from_host(ctx, &host).unwrap();
                         if !with_block {
                             s.set_block(None).unwrap();
@@ -113,9 +122,10 @@ fn case3(ctx: &luma::Context) {
                         );
                         print!("{}", cuts(&eval));
                         if verbose {
-                            for k in &replay.kernels {
-                                let label: String = k.label.chars().take(110).collect();
-                                println!("      {label} x{:.1} ({:.1} us)", k.launches as f64 / n as f64, k.total.as_secs_f64() * 1e6 / n as f64);
+                            for k in &eval.kernels {
+                                let chars: Vec<char> = k.label.chars().collect();
+                                let label: String = if chars.len() > 130 { chars[..70].iter().chain(['.', '.', '.'].iter()).chain(chars[chars.len() - 55..].iter()).collect() } else { k.label.clone() };
+                                println!("      {label} x{} ({:.1} us)", k.launches, k.total.as_secs_f64() * 1e6);
                             }
                         }
                     }
