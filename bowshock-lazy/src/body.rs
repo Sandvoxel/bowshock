@@ -426,17 +426,13 @@ impl LazySolver {
         ((r0 * r0).sum() / c(self.n_active as f64)).sqrt()
     }
 
-    fn zeros(&self, shape: [usize; 2]) -> A {
-        A::zeros_on(&self.ctx, shape).expect("zeros")
-    }
-
     /// Zeros of `shape` over the region of every field of `r`.
     fn zero_region(&self, r: &Rec, shape: [usize; 2], region: impl Fn(&A) -> A) {
         if shape[0] == 0 || shape[1] == 0 {
             return;
         }
         for k in 0..4 {
-            region(&r[k]).assign(self.zeros(shape)).expect("zero region");
+            region(&r[k]).assign(c(0.0)).expect("zero region");
         }
     }
 
@@ -616,9 +612,9 @@ impl LazySolver {
             self.zero_region(&res, [ni - b.i_end, b.j_sting], |a| a.slice(0, b.i_end..ni).slice(1, 0..b.j_sting));
             if let Some(dt) = &dt {
                 if b.j_sting > 0 {
-                    dt.slice(0, b.i_end..ni).slice(1, 0..b.j_sting).assign(self.zeros([ni - b.i_end, b.j_sting])).expect("dt zero");
+                    dt.slice(0, b.i_end..ni).slice(1, 0..b.j_sting).assign(c(0.0)).expect("dt zero");
                 }
-                dt.slice(0, 0..b.i_end).slice(1, 0..b.j_end).assign(self.zeros([b.i_end, b.j_end])).expect("dt zero");
+                dt.slice(0, 0..b.i_end).slice(1, 0..b.j_end).assign(c(0.0)).expect("dt zero");
             }
         }
         (res, dt)
