@@ -5,10 +5,18 @@
 //! 1. ghost layers written as region assigns into a lazy padded array are computed at every cell that reads them, so the
 //!    operation count of the kernel that reads the array grows with the size of the ghost expressions and the fusion limits cut it;
 //! 2. building a lazy expression costs about half a microsecond per operation, which is what the `eval` loop form spends
-//!    (1.5 of 1.7 ms per iteration) on.
+//!    (1.5 of 1.7 ms per iteration) on;
+//! 3. region assigns of the solid block into the lazy residual, flux and ghost expressions of the explicit solver (case 3
+//!    below): launches, fusion cuts and GPU time of one SSP-RK3 step with and without the block on the same grid.
 //!
-//! `cargo run --release --example luma_issues`
+//! `cargo run --release --example luma_issues [-- 3]` (`3`: only case 3)
 
+use bowshock::body_grid::Nose;
+use bowshock_cases::subsonic::{fox_case, subsonic_case};
+use bowshock_cases::cone::{build_solver, ConeCase};
+use bowshock_core::solver::Scheme;
+use bowshock_reference::taylor_maccoll::solve_cone;
+use bowshock_lazy::Staging;
 use luma::{Array, Fields, PadMode};
 use std::time::Instant;
 
@@ -30,8 +38,101 @@ fn chain(xs: &[&A], seed: usize, ops: usize) -> A {
     acc
 }
 
+/// Distinct split reasons of a profile (location left out) with their counts.
+fn cuts(p: &luma::Profile) -> String {
+    let mut seen: Vec<(String, usize)> = Vec::new();
+    for s in &p.splits {
+        let text = s.to_string().replace("split at ", "").replace("/home/sandvoxel/Documents/bowshock-solid/bowshock-lazy/", "");
+        match seen.iter_mut().find(|(t, _)| *t == text) {
+            Some((_, n)) => *n += 1,
+            None => seen.push((text, 1)),
+        }
+    }
+    seen.iter().map(|(t, n)| format!("      cut x{n}: {t}\n")).collect()
+}
+
+/// One SSP-RK3 step of the explicit solver, per grid (with the solid block and the same grid without it), staging and
+/// precision. `replay`: launches and GPU time per step of the `iterate_all` replay; `eval`: launches, cuts and GPU time of one
+/// step in the `eval` loop form (the cuts are made while the step is built, which the replay does once).
+fn case3(ctx: &luma::Context) {
+    println!("== 3. the explicit solver with a solid block (region assigns for ghosts, fluxes, zero residual / time step) against the same grid without it");
+    println!("   cost model: {:?}", ctx.cost_model());
+    println!("   {:<16} {:<9} {:<6} {:<6} | {:>8} {:>8} | {:>8} {:>8} {:>5}", "grid", "staging", "prec", "block", "replay L", "replay us", "eval L", "eval us", "cuts");
+    // the two block grids, and a block-free cone grid of the base grid's size (the reference of the issue list)
+    let solid = |label: &'static str, mut case: bowshock::case::Case| {
+        case.numerics.scheme = Scheme::Explicit;
+        let mut host = case.build_solver();
+        if host.scheme() != Scheme::Explicit {
+            host.set_scheme(Scheme::Explicit);
+        }
+        (label, host)
+    };
+    let cone = {
+        let mut c = ConeCase::new(2.0, 15.0, 156, 76);
+        c.first_order_iters = 0;
+        build_solver(&c, solve_cone(2.0, 15f64.to_radians()).unwrap().beta)
+    };
+    let cases = [
+        solid("ogive base", subsonic_case(0.5, Nose::TangentOgive { fineness: 3.0 }, 0, true)),
+        solid("fox sting", fox_case(false, 0.6, 0)),
+        ("cone", cone),
+    ];
+    let verbose = std::env::var("LUMA_ISSUES_KERNELS").is_ok();
+    for (label, host) in cases {
+        let grid = format!("{label} {}x{}", host.grid.ni, host.grid.nj);
+        macro_rules! run {
+            ($module:ident, $prec:expr) => {
+                for staging in [Staging::Fluxes, Staging::Fusion] {
+                    for with_block in if host.block().is_some() { vec![true, false] } else { vec![false] } {
+                        let mut s = bowshock_lazy::$module::LazySolver::from_host(ctx, &host).unwrap();
+                        if !with_block {
+                            s.set_block(None).unwrap();
+                        }
+                        s.staging = staging;
+                        let n = 20;
+                        // keep the GPU at its working clock (the first profile after a pause runs on lowered clocks)
+                        let burn = Instant::now();
+                        while burn.elapsed().as_secs_f64() < 0.3 {
+                            s.run_replay(100).unwrap();
+                            s.sync().unwrap();
+                        }
+                        s.set_state(&host.u).unwrap();
+                        // GPU clocks and the first replay's warm-up make single profiles noisy: the fastest of five
+                        let replay = (0..5).map(|_| s.profile_replay(n).unwrap()).min_by_key(|p| p.total()).unwrap();
+                        let eval = s.profile_step().unwrap();
+                        println!(
+                            "   {grid:<16} {:<9} {:<6} {:<6} | {:>8.1} {:>8.1} | {:>8} {:>8} {:>5}",
+                            format!("{staging:?}"),
+                            $prec,
+                            if with_block { "yes" } else { "no" },
+                            replay.launches() as f64 / n as f64,
+                            replay.total().as_secs_f64() * 1e6 / n as f64,
+                            eval.launches(),
+                            eval.total().as_micros(),
+                            eval.splits.len()
+                        );
+                        print!("{}", cuts(&eval));
+                        if verbose {
+                            for k in &replay.kernels {
+                                let label: String = k.label.chars().take(110).collect();
+                                println!("      {label} x{:.1} ({:.1} us)", k.launches as f64 / n as f64, k.total.as_secs_f64() * 1e6 / n as f64);
+                            }
+                        }
+                    }
+                }
+            };
+        }
+        run!(f32s, "f32");
+        run!(df32s, "df32");
+    }
+}
+
 fn main() {
     let ctx = luma::default_context().unwrap();
+    case3(&ctx);
+    if std::env::args().any(|a| a == "3") {
+        return;
+    }
     let n = 200usize;
     let data = |k: usize| Array::from_slice_on(&ctx, &(0..n * n).map(|i| 1.0 + 0.1 * ((i + k) as f32 * 0.37).sin()).collect::<Vec<_>>(), [n, n]).unwrap();
     let u: [A; 4] = std::array::from_fn(data);
