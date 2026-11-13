@@ -18,8 +18,9 @@ pub type A = Array<S>;
 /// Four fields: primitive `[rho, u, v, p]`, conservative `[rho, rho u, rho v, E]` or a flux. A record of arrays
 /// (`luma::Fields`): `slice`, `pad`, `assign` and `cache` apply to the four fields at once.
 pub type Rec = [A; 4];
-/// The loop state: the conserved record and the density residual of the step that produced it (one element).
-pub type State = [A; 5];
+/// The loop state: the conserved record, the density residual of the step that produced it (one element) and the CFL of the next
+/// iteration (one element; the ramp of the implicit scheme is loop state, the explicit scheme passes it through).
+pub type State = [A; 6];
 
 fn rec(f: impl FnMut(usize) -> A) -> Rec {
     std::array::from_fn(f)
@@ -30,15 +31,15 @@ fn unpack(s: &State) -> Rec {
     rec(|k| s[k].clone())
 }
 
-fn pack(u: Rec, rn: A) -> State {
+fn pack(u: Rec, rn: A, cfl: A) -> State {
     let [u0, u1, u2, u3] = u;
-    [u0, u1, u2, u3, rn]
+    [u0, u1, u2, u3, rn, cfl]
 }
 
-/// The loop state of host data: the conserved state `u` (cell-major, `[rho, rho u, rho v, E]`) and a zero residual.
-fn upload_state(ctx: &Context, u: &[[f64; 4]], shape: [usize; 2]) -> Result<State> {
+/// The loop state of host data: the conserved state `u` (cell-major, `[rho, rho u, rho v, E]`), a zero residual and the CFL `cfl`.
+fn upload_state(ctx: &Context, u: &[[f64; 4]], shape: [usize; 2], cfl: f64) -> Result<State> {
     let comp = |k: usize| up(ctx, &u.iter().map(|q| q[k]).collect::<Vec<_>>(), shape);
-    Ok([comp(0)?, comp(1)?, comp(2)?, comp(3)?, up(ctx, &[0.0], 1)?])
+    Ok([comp(0)?, comp(1)?, comp(2)?, comp(3)?, up(ctx, &[0.0], 1)?, up(ctx, &[cfl], 1)?])
 }
 
 fn download_state(s: &State) -> Result<Vec<[f64; 4]>> {
@@ -318,8 +319,8 @@ struct Geo {
     bnd: [Boundary; 4],
 }
 
-/// The explicit solver on a grid without a solid block: state, geometry and the loops that advance it. Mirrors
-/// `bowshock_core::solver::Solver` with `Scheme::Explicit` (`eval_residual` and `rk3_step`).
+/// The solver on a grid without a solid block: state, geometry and the loops that advance it. Mirrors
+/// `bowshock_core::solver::Solver` with `Scheme::Explicit` (`eval_residual` and `rk3_step`) or `Scheme::Implicit` (`implicit.rs`).
 pub struct LazySolver {
     ctx: Context,
     pub ni: usize,
@@ -331,6 +332,10 @@ pub struct LazySolver {
     geo: Geo,
     state: Option<State>,
     pub iter: usize,
+    /// The convergence scheme: explicit SSP-RK3 or the line-implicit scheme (`implicit.rs`).
+    scheme: Scheme,
+    /// The f32 geometry of the implicit left-hand side.
+    lg: LGeo,
 }
 
 impl LazySolver {
@@ -380,19 +385,29 @@ impl LazySolver {
             area: up(ctx, &grid.area, [ni, nj])?,
             bnd: [boundary(0)?, boundary(1)?, boundary(2)?, boundary(3)?],
         };
-        let mut s = LazySolver { ctx: ctx.clone(), ni, nj, cfg: cfg.clone(), low_mach: false, staging: DEFAULT_STAGING, geo, state: None, iter: 0 };
+        let mut s = LazySolver { ctx: ctx.clone(), ni, nj, cfg: cfg.clone(), low_mach: false, staging: DEFAULT_STAGING, geo, state: None, iter: 0, scheme: Scheme::Explicit, lg: LGeo::new(ctx, grid)? };
         let q = bowshock_core::gas::prim_to_cons(&cfg.freestream);
         s.set_state(&vec![q; ni * nj])?;
         Ok(s)
+    }
+
+    /// A lazy solver in the state of a host solver: grid, config, low-Mach flag, conserved state, iteration count and scheme.
+    pub fn from_host(ctx: &Context, s: &bowshock_core::solver::Solver) -> Result<LazySolver> {
+        let mut l = LazySolver::new(ctx, &s.grid, &s.cfg)?;
+        l.set_low_mach(s.low_mach);
+        l.set_state(&s.u)?;
+        l.iter = s.iter;
+        l.set_scheme(s.scheme())?;
+        Ok(l)
     }
 
     pub fn set_low_mach(&mut self, on: bool) {
         self.low_mach = on;
     }
 
-    /// Overwrites the conserved state and restarts the iteration counter.
+    /// Overwrites the conserved state and restarts the iteration counter and the CFL ramp.
     pub fn set_state(&mut self, u: &[[f64; 4]]) -> Result<()> {
-        self.state = Some(upload_state(&self.ctx, u, [self.ni, self.nj])?);
+        self.state = Some(upload_state(&self.ctx, u, [self.ni, self.nj], self.cfl_start())?);
         self.iter = 0;
         Ok(())
     }
@@ -441,9 +456,18 @@ impl LazySolver {
     /// dU/dt = -(1/V) sum_faces (len r_mid) F.n  +  (0, 0, p A / V, 0)        dt = cfl A / (1/2 sum_faces (|u.n| + c) len)
     /// ```
     pub fn eval_residual(&self, u: &Rec, lim: Limiter, compute_dt: bool) -> (Rec, Option<A>) {
-        let (ni, nj) = (self.ni, self.nj);
-        let g = &self.geo;
+        let (p, w) = self.padded(u);
+        self.residual_from(&p, &w, lim, compute_dt)
+    }
 
+    /// `sqrt(sum (d rho / dt)^2 / N)`, `N` the number of fluid cells (`ni nj`: grids without a solid block).
+    fn residual_norm(&self, r0: &A) -> A {
+        ((r0 * r0).sum() / c((self.ni * self.nj) as f64)).sqrt()
+    }
+
+    /// Step 1 of `eval_residual`: the primitives `p = cons_to_prim(u)` and the padded primitives `w` with the domain ghosts, in
+    /// place (the `Staging` cache applied).
+    fn padded(&self, u: &Rec) -> (Rec, Rec) {
         // 1. primitives, padded by two cells on every side; the ghost layers of each boundary are one region assign
         let p = cons_to_prim(u.clone());
         let w = p.pad([(2, 2), (2, 2)], PadMode::Edge);
@@ -453,6 +477,13 @@ impl LazySolver {
         // `Lines` and up: evaluate the padded record once. Without it every reader recomputes the primitives and all four ghost
         // expressions at each stencil cell (200x100 f32: 67-91 launches per RK3 step without it, 26-30 with it; README "Speed").
         let w = if self.staging == Staging::Fusion { w } else { w.cache() };
+        (p, w)
+    }
+
+    /// Steps 2 to 5 of `eval_residual`: face fluxes, cell residual and time step from the primitives `p` and the padded `w`.
+    fn residual_from(&self, p: &Rec, w: &Rec, lim: Limiter, compute_dt: bool) -> (Rec, Option<A>) {
+        let (ni, nj) = (self.ni, self.nj);
+        let g = &self.geo;
 
         // 2. the cells along each grid line with their ghosts: i lines `[ni + 4, nj]`, j lines `[ni, nj + 4]`
         let wi = w.slice(1, 2..nj + 2);
@@ -500,7 +531,7 @@ impl LazySolver {
     pub fn rk3(&self, u0: &Rec, lim: Limiter) -> (Rec, A) {
         let (r0, dt) = self.eval_residual(u0, lim, true);
         let dt = dt.expect("dt");
-        let rn = ((&r0[0] * &r0[0]).sum() / c((self.ni * self.nj) as f64)).sqrt();
+        let rn = self.residual_norm(&r0[0]);
         // stage 1: u1 = u0 + dt L(u0)
         let u1 = rec(|k| &u0[k] + &dt * &r0[k]);
         let (r1, _) = self.eval_residual(&u1, lim, false);
@@ -540,8 +571,7 @@ impl LazySolver {
             let lim = self.limiter(self.iter);
             let init = self.state.take().expect("state");
             let run = luma::iterate_until_all(init, records(luma::Until::new(seg).check_every(sync)), |s, _| {
-                let (u, rn) = self.rk3(&unpack(s), lim);
-                pack(u, rn)
+                self.step(s, lim)
             })?;
             history.extend(read_history(&run));
             self.state = Some(run.state);
@@ -559,8 +589,7 @@ impl LazySolver {
             let lim = self.limiter(self.iter);
             let init = self.state.take().expect("state");
             self.state = Some(luma::iterate_all(init.each_ref(), seg, |s| {
-                let (u, rn) = self.rk3(&unpack(s), lim);
-                pack(u, rn)
+                self.step(s, lim)
             }));
             self.iter += seg;
             left -= seg;
@@ -574,8 +603,7 @@ impl LazySolver {
         let mut history = Vec::with_capacity(n);
         let mut s = self.state.take().expect("state");
         for _ in 0..n {
-            let (u, rn) = self.rk3(&unpack(&s), self.limiter(self.iter));
-            s = pack(u, rn);
+            s = self.step(&s, self.limiter(self.iter));
             luma::eval_all(&s.iter().collect::<Vec<_>>())?;
             history.push(s[4].clone());
             self.iter += 1;

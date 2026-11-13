@@ -8,7 +8,8 @@
 //! * [`df32s`]: the state, the residual and the time step in double-float `Array<Df32>` (compare
 //!   `bowshock_gpu::Precision::Extended`); the state is a `Df32` record through the loops.
 //!
-//! Grids with a solid block, the implicit scheme and viscous terms are not covered.
+//! The line-implicit scheme (`Scheme::Implicit`, `implicit.rs`) is included after the solver in each module; its left-hand side is f32
+//! in both. Grids with a solid block in the implicit scheme and viscous terms are not covered.
 
 /// How much of the order of evaluation is left to Luma's fusion engine (`LazySolver::staging`, see README).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,7 +55,17 @@ pub mod f32s {
         run.history("residual").expect("residual history").iter().map(|&r| f64::from(r)).collect()
     }
 
+    /// The left-hand side of the implicit scheme runs in f32: the f32 view of `a` (here `a` itself) and back.
+    fn lhs(a: &A) -> Array<f32> {
+        a.clone()
+    }
+
+    fn from_lhs(a: &Array<f32>) -> A {
+        a.clone()
+    }
+
     include!("body.rs");
+    include!("implicit.rs");
 }
 
 /// Double-float state, residual and time step.
@@ -92,5 +103,15 @@ pub mod df32s {
         hi.iter().zip(lo).map(|(&h, &l)| f64::from(h) + f64::from(l)).collect()
     }
 
+    /// The left-hand side of the implicit scheme runs in f32: the f32 view of `a` and back.
+    fn lhs(a: &A) -> Array<f32> {
+        a.to_f32()
+    }
+
+    fn from_lhs(a: &Array<f32>) -> A {
+        a.to_df32()
+    }
+
     include!("body.rs");
+    include!("implicit.rs");
 }
