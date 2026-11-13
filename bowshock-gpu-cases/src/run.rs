@@ -37,7 +37,7 @@ impl Monitor {
         if it > 20 && self.rmax / r >= 10f64.powf(self.drop_orders) {
             return Some(StopReason::ResidualDrop);
         }
-        if it >= 8000 && it % 1000 == 0 {
+        if it >= 8000 && it.is_multiple_of(1000) {
             let res = &self.residual;
             let m = |a: usize, b: usize| res[a..b].iter().map(|x| x.log10()).sum::<f64>() / (b - a) as f64;
             if m(it - 2000, it) - m(it - 4000, it - 2000) > -0.05 {

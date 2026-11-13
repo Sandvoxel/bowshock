@@ -93,7 +93,7 @@ impl Block {
         }
     }
     pub fn coarsen(&self) -> Option<Block> {
-        (self.i_end % 2 == 0 && self.j_end % 2 == 0 && self.j_sting % 2 == 0).then_some(Block {
+        (self.i_end.is_multiple_of(2) && self.j_end.is_multiple_of(2) && self.j_sting.is_multiple_of(2)).then_some(Block {
             i_end: self.i_end / 2,
             j_end: self.j_end / 2,
             j_sting: self.j_sting / 2,

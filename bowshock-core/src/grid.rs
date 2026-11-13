@@ -127,7 +127,7 @@ impl Grid {
     /// Grid with every second node line removed in both directions (2x2 cells agglomerated into one). `None` if `ni` or
     /// `nj` is odd. Used for the multigrid hierarchy: coarse cell `(I, J)` is the union of fine cells `(2I..2I+2, 2J..2J+2)`.
     pub fn coarsen(&self) -> Option<Grid> {
-        if self.ni % 2 != 0 || self.nj % 2 != 0 {
+        if !self.ni.is_multiple_of(2) || !self.nj.is_multiple_of(2) {
             return None;
         }
         let (ci, cj) = (self.ni / 2, self.nj / 2);
