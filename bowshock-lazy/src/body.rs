@@ -9,9 +9,9 @@
 use bowshock_core::flux::{Limiter, LOW_MACH_FLOOR, SHOCK_SENSOR_HI, SHOCK_SENSOR_LO};
 use bowshock_core::gas::GAMMA;
 use bowshock_core::grid::Grid;
-use bowshock_core::solver::{Bc, Config};
+use bowshock_core::solver::{Bc, Block, Config};
 use crate::Staging;
-use luma::{select, Array, Context, Fields, PadMode, Result};
+use luma::{concat, select, Array, Context, Fields, PadMode, Result};
 
 /// Array of one field (`rho`, `u`, ...) over a block of cells or faces.
 pub type A = Array<S>;
@@ -318,8 +318,8 @@ struct Geo {
     bnd: [Boundary; 4],
 }
 
-/// The explicit solver on a grid without a solid block: state, geometry and the loops that advance it. Mirrors
-/// `bowshock_core::solver::Solver` with `Scheme::Explicit` (`eval_residual` and `rk3_step`).
+/// The explicit solver: state, geometry and the loops that advance it, with an optional solid block (base / wake grids).
+/// Mirrors `bowshock_core::solver::Solver` with `Scheme::Explicit` (`eval_residual` and `rk3_step`).
 pub struct LazySolver {
     ctx: Context,
     pub ni: usize,
@@ -331,6 +331,9 @@ pub struct LazySolver {
     geo: Geo,
     state: Option<State>,
     pub iter: usize,
+    block: Option<Block>,
+    /// Number of fluid cells (the residual norm divides by it).
+    n_active: usize,
 }
 
 impl LazySolver {
@@ -380,10 +383,112 @@ impl LazySolver {
             area: up(ctx, &grid.area, [ni, nj])?,
             bnd: [boundary(0)?, boundary(1)?, boundary(2)?, boundary(3)?],
         };
-        let mut s = LazySolver { ctx: ctx.clone(), ni, nj, cfg: cfg.clone(), low_mach: false, staging: DEFAULT_STAGING, geo, state: None, iter: 0 };
+        let mut s = LazySolver { ctx: ctx.clone(), ni, nj, cfg: cfg.clone(), low_mach: false, staging: DEFAULT_STAGING, geo, state: None, iter: 0, block: None, n_active: ni * nj };
         let q = bowshock_core::gas::prim_to_cons(&cfg.freestream);
         s.set_state(&vec![q; ni * nj])?;
         Ok(s)
+    }
+
+    /// A lazy solver in the state of a host solver: grid, config, low-Mach flag, block, conserved state and iteration count.
+    pub fn from_host(ctx: &Context, s: &bowshock_core::solver::Solver) -> Result<LazySolver> {
+        let mut l = LazySolver::new(ctx, &s.grid, &s.cfg)?;
+        l.set_low_mach(s.low_mach);
+        l.set_block(s.block())?;
+        l.set_state(&s.u)?;
+        l.iter = s.iter;
+        Ok(l)
+    }
+
+    /// Declares the solid block (`None`: no block). Same range checks as `Solver::set_block`. The block's cells stay at their
+    /// state (residual and time step zero) and are left out of the residual norm.
+    pub fn set_block(&mut self, block: Option<Block>) -> Result<()> {
+        if let Some(b) = block {
+            assert!(
+                b.i_end >= 1
+                    && b.i_end + 2 <= self.ni
+                    && b.j_end >= 2
+                    && b.j_end + 2 <= self.nj
+                    && b.j_end > b.j_sting
+                    && (b.j_sting == 0 || b.j_sting >= 2),
+                "block out of range"
+            );
+        }
+        self.block = block;
+        self.n_active = match block {
+            Some(b) => self.ni * self.nj - b.i_end * b.j_end - (self.ni - b.i_end) * b.j_sting,
+            None => self.ni * self.nj,
+        };
+        Ok(())
+    }
+
+    /// `sqrt(sum (d rho / dt)^2 / N)`, `N` the number of fluid cells.
+    fn residual_norm(&self, r0: &A) -> A {
+        ((r0 * r0).sum() / c(self.n_active as f64)).sqrt()
+    }
+
+    fn zeros(&self, shape: [usize; 2]) -> A {
+        A::zeros_on(&self.ctx, shape).expect("zeros")
+    }
+
+    /// Zeros of `shape` over the region of every field of `r`.
+    fn zero_region(&self, r: &Rec, shape: [usize; 2], region: impl Fn(&A) -> A) {
+        if shape[0] == 0 || shape[1] == 0 {
+            return;
+        }
+        for k in 0..4 {
+            region(&r[k]).assign(self.zeros(shape)).expect("zero region");
+        }
+    }
+
+    /// Solid cells of the two layers below a body or sting surface take the reflection of the fluid cells above it about the
+    /// j-face of the surface (`fill_block_ghosts`): the layers `col_start(i) - 2`, `col_start(i) - 1` get the cells
+    /// `col_start(i) + 1`, `col_start(i)`. Written after the domain ghosts, as on the CPU.
+    fn assign_block_ghosts(&self, b: Block, p: &Rec, w: &Rec) {
+        let g = &self.geo;
+        for (i0, i1, j0) in [(0, b.i_end, b.j_end), (b.i_end, self.ni, b.j_sting)] {
+            if j0 == 0 {
+                continue;
+            }
+            let dup = |a: A| concat(1, [&a, &a]);
+            let nx = dup(g.jnx.slice(0, i0..i1).slice(1, j0..j0 + 1));
+            let nr = dup(g.jnr.slice(0, i0..i1).slice(1, j0..j0 + 1));
+            let src = rec(|k| p[k].slice(0, i0..i1).slice(1, j0..).pad([(0, 0), (2, 0)], PadMode::Mirror).slice(1, 0..2));
+            let region = w.slice(0, i0 + 2..i1 + 2).slice(1, j0..j0 + 2);
+            region.assign(reflect(&src, &nx, &nr)).expect("block ghost assign");
+        }
+    }
+
+    /// The face fluxes next to the solid block, written into the i / j flux records `fi`, `fj`: the solid faces are zero, and
+    /// the base-wall faces `i_end`, `i_end + 1` (rows `j_sting..j_end`) see the solid stencil cells as the reflection of the
+    /// fluid cells about the base face:
+    ///
+    /// ```text
+    /// face i_end:     (m2, m1, p0, p1) = (R c1, R c0, c0, c1)
+    /// face i_end + 1: (m2, m1, p0, p1) = (R c0,  c0, c1, c2)         c_k the cell i_end + k, R the reflection
+    /// ```
+    fn block_fluxes(&self, b: Block, w: &Rec, fi: &Rec, fj: &Rec, lim: Limiter) {
+        let ni = self.ni;
+        let g = &self.geo;
+        let nb = b.j_end - b.j_sting;
+        // base wall faces: both faces use the normal of the base face for the reflection, their own for the flux
+        let rows = |a: &A, i0: usize, i1: usize| a.slice(0, i0..i1).slice(1, b.j_sting..b.j_end);
+        let (bx, br) = (rows(&g.inx, b.i_end, b.i_end + 1), rows(&g.inr, b.i_end, b.i_end + 1));
+        let (fx, fr) = (rows(&g.inx, b.i_end, b.i_end + 2), rows(&g.inr, b.i_end, b.i_end + 2));
+        let cells = |k: usize| rec(|f| w[f].slice(0, b.i_end + 2 + k..b.i_end + 3 + k).slice(1, b.j_sting + 2..b.j_end + 2));
+        let (c0, c1, c2) = (cells(0), cells(1), cells(2));
+        let join = |a: &Rec, bb: &Rec| rec(|f| concat(0, [&a[f], &bb[f]]));
+        let (rc0, rc1) = (reflect(&c0, &bx, &br), reflect(&c1, &bx, &br));
+        let (m2, m1) = (join(&rc1, &rc0), join(&rc0, &c0));
+        let (p0, p1) = (join(&c0, &c1), join(&c1, &c2));
+        let base = face_flux_lm(&m2, &m1, &p0, &p1, lim, &fx, &fr, self.low_mach, self.staging == Staging::Split);
+        // solid faces
+        self.zero_region(fi, [ni + 1, b.j_sting], |a| a.slice(1, 0..b.j_sting));
+        self.zero_region(fi, [b.i_end, nb], |a| a.slice(0, 0..b.i_end).slice(1, b.j_sting..b.j_end));
+        for k in 0..4 {
+            fi[k].slice(0, b.i_end..b.i_end + 2).slice(1, b.j_sting..b.j_end).assign(&base[k]).expect("base wall flux assign");
+        }
+        self.zero_region(fj, [b.i_end, b.j_end], |a| a.slice(0, 0..b.i_end).slice(1, 0..b.j_end));
+        self.zero_region(fj, [ni - b.i_end, b.j_sting], |a| a.slice(0, b.i_end..ni).slice(1, 0..b.j_sting));
     }
 
     pub fn set_low_mach(&mut self, on: bool) {
@@ -441,18 +546,32 @@ impl LazySolver {
     /// dU/dt = -(1/V) sum_faces (len r_mid) F.n  +  (0, 0, p A / V, 0)        dt = cfl A / (1/2 sum_faces (|u.n| + c) len)
     /// ```
     pub fn eval_residual(&self, u: &Rec, lim: Limiter, compute_dt: bool) -> (Rec, Option<A>) {
-        let (ni, nj) = (self.ni, self.nj);
-        let g = &self.geo;
+        let (p, w) = self.padded(u);
+        self.residual_from(&p, &w, lim, compute_dt)
+    }
 
+    /// Steps 1 of `eval_residual`: the primitives `p = cons_to_prim(u)` and the padded primitives `w` with the domain ghosts,
+    /// then the block ghosts, in place (the `Staging` cache applied).
+    fn padded(&self, u: &Rec) -> (Rec, Rec) {
         // 1. primitives, padded by two cells on every side; the ghost layers of each boundary are one region assign
         let p = cons_to_prim(u.clone());
         let w = p.pad([(2, 2), (2, 2)], PadMode::Edge);
         for side in 0..4 {
             self.assign_ghosts(side, &p, &w);
         }
+        if let Some(b) = self.block {
+            self.assign_block_ghosts(b, &p, &w);
+        }
         // `Lines` and up: evaluate the padded record once. Without it every reader recomputes the primitives and all four ghost
         // expressions at each stencil cell (200x100 f32: 67-91 launches per RK3 step without it, 26-30 with it; README "Speed").
         let w = if self.staging == Staging::Fusion { w } else { w.cache() };
+        (p, w)
+    }
+
+    /// Steps 2 to 5 of `eval_residual`: face fluxes, cell residual and time step from the primitives `p` and the padded `w`.
+    fn residual_from(&self, p: &Rec, w: &Rec, lim: Limiter, compute_dt: bool) -> (Rec, Option<A>) {
+        let (ni, nj) = (self.ni, self.nj);
+        let g = &self.geo;
 
         // 2. the cells along each grid line with their ghosts: i lines `[ni + 4, nj]`, j lines `[ni, nj + 4]`
         let wi = w.slice(1, 2..nj + 2);
@@ -462,6 +581,9 @@ impl LazySolver {
         let split = self.staging == Staging::Split;
         let fi = face_flux_lm(&wi.slice(0, 0..ni + 1), &wi.slice(0, 1..ni + 2), &wi.slice(0, 2..ni + 3), &wi.slice(0, 3..ni + 4), lim, &g.inx, &g.inr, self.low_mach, split);
         let fj = face_flux_lm(&wj.slice(1, 0..nj + 1), &wj.slice(1, 1..nj + 2), &wj.slice(1, 2..nj + 3), &wj.slice(1, 3..nj + 4), lim, &g.jnx, &g.jnr, self.low_mach, split);
+        if let Some(b) = self.block {
+            self.block_fluxes(b, w, &fi, &fj, lim);
+        }
         // `Fluxes` and up: evaluate the face fluxes. The residual and the stage update then fuse into the next stage's padded
         // record: three kernels per stage, 14 launches per step instead of 26-30 (the flux kernel read through four stencil
         // views is cut at the 1024-operation fusion limit otherwise; README "Speed").
@@ -488,6 +610,17 @@ impl LazySolver {
             let sum = lam(&fl_nx, &fl_nr, &fl_len) + lam(&fr_nx, &fr_nr, &fr_len) + lam(&fb_nx, &fb_nr, &fb_len) + lam(&ft_nx, &ft_nr, &ft_len);
             c(self.cfg.cfl) * &g.area / (c(0.5) * &sum)
         });
+        // solid cells: residual and time step zero (region assigns, so nothing computed inside the solid reaches the state)
+        if let Some(b) = self.block {
+            self.zero_region(&res, [b.i_end, b.j_end], |a| a.slice(0, 0..b.i_end).slice(1, 0..b.j_end));
+            self.zero_region(&res, [ni - b.i_end, b.j_sting], |a| a.slice(0, b.i_end..ni).slice(1, 0..b.j_sting));
+            if let Some(dt) = &dt {
+                if b.j_sting > 0 {
+                    dt.slice(0, b.i_end..ni).slice(1, 0..b.j_sting).assign(self.zeros([ni - b.i_end, b.j_sting])).expect("dt zero");
+                }
+                dt.slice(0, 0..b.i_end).slice(1, 0..b.j_end).assign(self.zeros([b.i_end, b.j_end])).expect("dt zero");
+            }
+        }
         (res, dt)
     }
 
@@ -500,7 +633,7 @@ impl LazySolver {
     pub fn rk3(&self, u0: &Rec, lim: Limiter) -> (Rec, A) {
         let (r0, dt) = self.eval_residual(u0, lim, true);
         let dt = dt.expect("dt");
-        let rn = ((&r0[0] * &r0[0]).sum() / c((self.ni * self.nj) as f64)).sqrt();
+        let rn = self.residual_norm(&r0[0]);
         // stage 1: u1 = u0 + dt L(u0)
         let u1 = rec(|k| &u0[k] + &dt * &r0[k]);
         let (r1, _) = self.eval_residual(&u1, lim, false);

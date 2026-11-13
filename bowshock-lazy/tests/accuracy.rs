@@ -19,6 +19,8 @@ use bowshock_cases::cone::{build_solver, ConeCase};
 use bowshock_cases::transonic::transonic_case;
 use bowshock_core::flux::Limiter;
 use bowshock_core::gas::{cons_to_prim, freestream, prim_to_cons};
+use bowshock_cases::subsonic::{fox_case, subsonic_case};
+use bowshock_core::solver::Scheme;
 use bowshock_lazy::Staging;
 use bowshock_core::grid::Grid;
 use bowshock_core::solver::{Bc, Config, Solver};
@@ -56,8 +58,9 @@ fn target(precision: &str, res_ext: f64) -> (f64, f64) {
 /// run them (`res_cpu`). Every test uses a context of its own for isolation (the shared default context works too: see
 /// `threads_on_the_default_context_agree` in `loops.rs`).
 macro_rules! run_lazy {
-    ($module:ident, $ctx:expr, $staging:expr, $grid:expr, $cfg:expr, $low_mach:expr, $u0:expr, $n:expr) => {{
+    ($module:ident, $ctx:expr, $staging:expr, $grid:expr, $cfg:expr, $low_mach:expr, $block:expr, $u0:expr, $n:expr) => {{
         let mut lazy = bowshock_lazy::$module::LazySolver::new($ctx, $grid, $cfg).unwrap();
+        lazy.set_block($block).unwrap();
         lazy.staging = $staging;
         lazy.set_low_mach($low_mach);
         lazy.set_state($u0).unwrap();
@@ -73,9 +76,9 @@ fn both(label: &str, cpu: &Solver, u0: &[[f64; 4]], res_cpu: &[f64], rows: &mut 
     // call builds a context of its own.
     let ctx = if std::env::var_os("LAZY_SHARED_CONTEXT").is_some() { luma::default_context().unwrap() } else { luma::Context::new().unwrap() };
     for staging in [Staging::Fusion, Staging::Lines, Staging::Fluxes, Staging::Split] {
-        let (u, r) = run_lazy!(f32s, &ctx, staging, &cpu.grid, &cpu.cfg, cpu.low_mach, u0, n);
+        let (u, r) = run_lazy!(f32s, &ctx, staging, &cpu.grid, &cpu.cfg, cpu.low_mach, cpu.block(), u0, n);
         rows.push((format!("{label} [{staging:?}]"), "f32", diff(&u, &r, cpu, res_cpu), res_ext));
-        let (u, r) = run_lazy!(df32s, &ctx, staging, &cpu.grid, &cpu.cfg, cpu.low_mach, u0, n);
+        let (u, r) = run_lazy!(df32s, &ctx, staging, &cpu.grid, &cpu.cfg, cpu.low_mach, cpu.block(), u0, n);
         rows.push((format!("{label} [{staging:?}]"), "df32", diff(&u, &r, cpu, res_cpu), res_ext));
     }
 }
@@ -186,4 +189,28 @@ fn low_mach_correction_matches_cpu() {
     let mut rows = Vec::new();
     both("box M=0.3 low-Mach van Albada", &cpu, &u0, &res_cpu, &mut rows, 2e-7);
     report("low_mach_correction_matches_cpu", &rows);
+}
+
+/// Base / wake grids with a solid block, explicit scheme, 20 iterations (5 first order): (a) ogive-cylinder with a base and no
+/// sting (`j_sting = 0`), (b) Fox TM X-2439 cone-cylinder-boattail on a sting (`j_sting > 0`).
+#[test]
+fn base_block_explicit_state_matches_cpu() {
+    let mut rows = Vec::new();
+    let cases = [
+        ("ogive base M=0.5", subsonic_case(0.5, Nose::TangentOgive { fineness: 3.0 }, 0, true)),
+        ("fox sting M=0.6", fox_case(false, 0.6, 0)),
+    ];
+    for (label, mut case) in cases {
+        case.numerics.first_order_iters = 5;
+        case.numerics.scheme = Scheme::Explicit;
+        let mut cpu = case.build_solver();
+        if cpu.scheme() != Scheme::Explicit {
+            cpu.set_scheme(Scheme::Explicit);
+        }
+        let u0 = cpu.u.clone();
+        let res_cpu: Vec<f64> = (0..20).map(|_| cpu.step()).collect();
+        let (ni, nj, b) = (cpu.grid.ni, cpu.grid.nj, cpu.block().expect("block"));
+        both(&format!("{label} {ni}x{nj} block {b:?}"), &cpu, &u0, &res_cpu, &mut rows, 2e-7);
+    }
+    report("base_block_explicit_state_matches_cpu", &rows);
 }

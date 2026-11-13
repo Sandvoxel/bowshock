@@ -21,10 +21,11 @@ cargo run --release --example luma_issues             # what still applies of th
 * `src/body.rs`: the solver, written once. `lib.rs` includes it twice: `f32s` (`Array<f32>`) and `df32s` (state, residual and time
   step in double-float `Array<Df32>`, the counterpart of `Precision::Extended`). The state is a record of arrays of the element
   type (`[Array<S>; 5]`: `rho, rho u, rho v, E` and the density residual of the step) that goes through `iterate_all` /
-  `iterate_until_all` as it is, `f32` or `Df32`. Covered: grids without a solid block, `Scheme::Explicit`, `Limiter::{FirstOrder,
+  `iterate_until_all` as it is, `f32` or `Df32`. Covered: `Scheme::Explicit` with or without a solid block (`set_block`: base/wake
+  grids; block ghosts, base-wall face stencils and solid faces/cells are region assigns, no masks), `Limiter::{FirstOrder,
   Minmod, VanAlbada}`, `face_flux_lm` (HLLC blended with Rusanov by the shock sensor, optional low-Mach correction), all `Bc`
   variants (`Freestream`, `Extrapolate`, `SlipWall`, `Characteristic`, `PressureOutflow`), the axisymmetric pressure source, local
-  time step, SSP-RK3 with the first-order switch (one traced loop per limiter phase). Not covered: blocks (base/wake grids),
+  time step, SSP-RK3 with the first-order switch (one traced loop per limiter phase). Not covered:
   implicit and multigrid schemes, viscous terms.
 * `tests/accuracy.rs`, `tests/loops.rs`; `examples/bench.rs`, `examples/eval_loop.rs`, `examples/luma_issues.rs`.
 
@@ -278,6 +279,5 @@ What still applies (`cargo run --release --example luma_issues`):
   recompile), and `StopReason` variety beyond one predicate index per rule.
 * **Speed.** The remaining gap to the hand-written kernels (14 launches per step against ~7, and the traffic of the padded record and
   the fluxes) is small in f32; in double-float it is the arithmetic: the flux kernels are 700-operation `Df32` expressions.
-* **Blocks and viscous terms.** Solid-block grids need the masks of `Block` (`select` on `index(axis)` comparisons) and the base-wall
-  reflections; Green-Gauss gradients and the face-gradient correction are slices and arithmetic; SST needs only `tanh`, `sqrt`, scalar
+* **Viscous terms.** Green-Gauss gradients and the face-gradient correction are slices and arithmetic; SST needs only `tanh`, `sqrt`, scalar
   tridiagonal solves (`solve_tridiagonal`) and a wall-distance array. None of it was tried.
