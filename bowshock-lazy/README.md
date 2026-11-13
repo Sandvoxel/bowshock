@@ -12,6 +12,7 @@ is that same Luma under another name, needed to open its `Context`).
 ```text
 cargo test --release                                  # accuracy vs the CPU solver, loop forms agree, threads on default_context()
 cargo run --release --example bench [-- --quick]      # speed tables (--quick skips 400x200; --profile-only, --staging Fusion|Lines|Fluxes|Split)
+cargo run --release --example bench -- --implicit     # the line-implicit scheme only (--no-implicit skips it in the default run); LUMA_TRIDIAGONAL=thomas|cyclic
 cargo run --release --example eval_loop               # where the time of the `eval` loop form goes
 cargo run --release --example luma_issues             # what still applies of the Luma problems below
 ```
@@ -20,14 +21,19 @@ cargo run --release --example luma_issues             # what still applies of th
 
 * `src/body.rs`: the solver, written once. `lib.rs` includes it twice: `f32s` (`Array<f32>`) and `df32s` (state, residual and time
   step in double-float `Array<Df32>`, the counterpart of `Precision::Extended`). The state is a record of arrays of the element
-  type (`[Array<S>; 5]`: `rho, rho u, rho v, E` and the density residual of the step) that goes through `iterate_all` /
-  `iterate_until_all` as it is, `f32` or `Df32`. Covered: `Scheme::Explicit` with or without a solid block (`set_block`: base/wake
-  grids; block ghosts, base-wall face stencils and solid faces/cells are region assigns, no masks), `Limiter::{FirstOrder,
-  Minmod, VanAlbada}`, `face_flux_lm` (HLLC blended with Rusanov by the shock sensor, optional low-Mach correction), all `Bc`
-  variants (`Freestream`, `Extrapolate`, `SlipWall`, `Characteristic`, `PressureOutflow`), the axisymmetric pressure source, local
-  time step, SSP-RK3 with the first-order switch (one traced loop per limiter phase). Not covered:
-  implicit and multigrid schemes, viscous terms.
-* `tests/accuracy.rs`, `tests/loops.rs`; `examples/bench.rs`, `examples/eval_loop.rs`, `examples/luma_issues.rs`.
+  type (`[Array<S>; 6]`: `rho, rho u, rho v, E`, the density residual of the step and the CFL of the next one) that goes through
+  `iterate_all` / `iterate_until_all` as it is, `f32` or `Df32`. Covered: `Scheme::Explicit` and `Scheme::Implicit`, with or without a solid block (`set_block`:
+  base/wake grids; block ghosts, base-wall face stencils and solid faces/cells are region assigns, no masks), `Limiter::{FirstOrder, Minmod, VanAlbada}`, `face_flux_lm` (HLLC blended with Rusanov by the shock sensor,
+  optional low-Mach correction), all `Bc` variants (`Freestream`, `Extrapolate`, `SlipWall`, `Characteristic`, `PressureOutflow`),
+  the axisymmetric pressure source, local time step, SSP-RK3 with the first-order switch (one traced loop per limiter phase).
+  Not covered: multigrid and smoothed schemes, viscous terms.
+* `src/implicit.rs`: the line-implicit scheme `Scheme::Implicit(ImplicitParams)` (`bowshock_core::implicit`): approximate factorization
+  `(I - dt J_i)(I - dt J_j)`, the second-order residual on the right, the first-order flux Jacobians with the Roe-type dissipation
+  matrix (shock-sensor blend, entropy fix) on the left, ghost-state Jacobians (exact for the free stream, extrapolation and the slip
+  wall, central differences with relative step 1e-3 for the characteristic and pressure-outflow far fields), CFL ramp in the loop
+  state, defect correction, positivity damping. A 4x4 block is sixteen arrays (`Blk`, with exact 0 / 1 entries that cost nothing);
+  the line solves are Luma's `solve_block_tridiagonal` on `[16, ni, nj]` stacks. The left-hand side is f32 in both precisions.
+* `tests/accuracy.rs`, `tests/loops.rs`, `tests/implicit.rs`; `examples/bench.rs`, `examples/eval_loop.rs`, `examples/luma_issues.rs`.
 
 The math reads like the CPU code, expression by expression (`body.rs`, HLLC star state; `c(x)` is the constant `x` rounded to the
 element type, `&` borrows an array):
@@ -98,6 +104,42 @@ reproduce the state of a private-context run (`threads_on_the_default_context_ag
 solver is recorded on the GPU as two `f32` records, `rn.to_f32()` and the low word `(rn - rn.to_f32().to_df32()).to_f32()`, because
 the history of `iterate_until_all` is `f32`; with only the high word the history would carry a 6e-8 relative rounding, which is
 inside the targets (2e-7) but would hide the 1e-14 agreement.
+
+### Implicit scheme
+
+`tests/implicit.rs`: sting case of `subsonic_case` (M = 0.5 ogive-cylinder, grid level 0 = 144x70, van Albada, low-Mach correction,
+`Numerics::subsonic`'s `Scheme::Implicit`: CFL ramp 1 -> 30 at 1.02 per iteration, Roe-type left-hand side, characteristic far field
+with finite-difference ghost Jacobians, two defect-correction passes), first 5 iterations first order, `Staging::Fluxes`, from the same
+state as the CPU solver (`LazySolver::from_host`). The left-hand side is f32 in both precisions, like the hand-written kernels';
+`R` and the update are in the element type, so the fixed point is the element type's.
+
+| 30 iterations (`implicit_scheme_state_matches_cpu`) | state `max abs(dU) / (1 + abs(U))` | residual history `max abs(r - r_cpu) / r_cpu` | target (tolerance of `gpu_vs_cpu.rs`) |
+|---|---|---|---|
+| lazy f32 | 1.0e-6 | 1.8e-6 | 1e-3 |
+| lazy df32 | 3.1e-9 | 4.3e-8 | 1e-4 |
+
+With the solid block (the same test, 30 iterations; state / residual history; `subsonic_case(.., true)` is the base case with `j_sting = 0`, the
+Fox TM X-2439 body `fox_case(false, 0.6, 0)` has a sting and a boattail):
+
+| case | lazy f32 | lazy df32 |
+|---|---|---|
+| base (`j_sting = 0`) | 1.0e-6 / 1.6e-6 | 2.4e-8 / 6.9e-8 |
+| Fox sting + boattail | 1.1e-6 / 4.5e-7 | 3.6e-8 / 5.9e-8 |
+
+The agreement is far inside the targets because the f32 left-hand side only steers the correction `dU = (LHS)^-1 R`: an f32 error in
+the left-hand side scales the update by 1e-7, it does not enter `R`. The options of `ImplicitParams` (`implicit_options_and_loop_forms`,
+df32, 30 iterations): `roe = false` 3.5e-9, `lines = false` 2.5e-8, `implicit_bc = false` 3.4e-9, `sub_iters = 1` 5.5e-9,
+`MinDirection` with growth 1.2 and CFL 20 3.5e-6 (state; the residual history, which has dropped to 2.5e-3 of its start, 5e-4), each
+against the CPU run with the same parameters. The three loop forms (`iterate_until_all`, `iterate_all`, `eval_all`) give identical
+states and histories in both precisions: the line solves are traced and replayed like any other kernel.
+
+Converged states (`implicit_scheme_converged_state_matches_cpu`, df32; both solvers run to 5 orders of density-residual drop with the
+rule of `bowshock::run::run_on`, the lazy one in chunks of 5 iterations):
+
+| M | CPU iterations | lazy df32 iterations | `max abs(p - p_cpu) / p_inf` |
+|---|---|---|---|
+| 0.3 | 484 | 484 | 1.3e-8 |
+| 0.6 | 377 | 377 | 1.6e-7 |
 
 ## Speed
 
@@ -218,6 +260,61 @@ three times changed the build time from 1.55 to 1.50 ms (3 %). Luma's per-operat
 size of the expression (`luma_issues` section 2). `iterate_all` / `iterate_until_all` trace the step once and replay it, which is
 what the 33-45 us per iteration of the tables above are.
 
+### Line-implicit scheme
+
+`cargo run --release --example bench -- --implicit` (RTX 3090, shared with other jobs): sting case of `subsonic_case`, M = 0.5, tangent
+ogive + 6 d cylinder, grid levels 0 (144x70) and 1 (288x140), `Numerics::subsonic` (van Albada, low-Mach, `Scheme::Implicit`: CFL ramp
+1 -> 30, two defect-correction passes), 200 iterations from the free stream (the first 100 first order, so both limiter phases are
+compiled before the clock), best of 3, microseconds per iteration. CPU = f64 `Solver::step` on 32 rayon threads; custom =
+`GpuSolver::from_host`, `Mode::Guarded`, `run(50)` chunks; lazy `until` = `iterate_until_all` with the residual recorded, `replay` =
+`iterate_all`. Luma picks the algorithm of the line solves (default):
+
+| case | level | grid | CPU f64 | custom F32 | custom Extended | lazy f32 until | lazy f32 replay | lazy df32 until | lazy df32 replay |
+|---|---|---|---|---|---|---|---|---|---|
+| sting | 0 | 144x70 | 2361 | 105.8 | 143.7 | 273.1 | 226.6 | 310.0 | 266.9 |
+| sting | 1 | 288x140 | 10868 | 260.6 | 286.4 | 582.5 | 540.5 | 639.4 | 590.5 |
+| base (solid block) | 0 | 156x76 | 2520 | 96.9 | 142.9 | 281.9 | 239.8 | 349.9 | 304.0 |
+| base (solid block) | 1 | 312x152 | 10977 | 274.0 | 302.9 | 683.7 | 598.3 | 768.8 | 712.0 |
+
+(A later run of the sting rows, with the base rows added; the CPU column moves by 2x between runs on the shared machine, the earlier run
+of this table had 3592 / 7711.) The base case is the ogive-cylinder with the flat base and wake block (`j_sting = 0`); its f32 step is
+27 launches, 250 us of GPU time (df32: 28 launches, 333 us), the line solves are the same four `CyclicTridiagonal` launches with
+`starts: true` (44.1 + 38.2 us).
+
+The lazy scheme is 2.1-2.5x (f32) and 1.8-2.4x (df32) the hand-written kernels (replay against custom), 5-30x faster than the CPU.
+`LUMA_TRIDIAGONAL` forces the algorithm of the line solves (the other columns do not depend on it):
+
+| `LUMA_TRIDIAGONAL` | level | lazy f32 until / replay | lazy df32 until / replay |
+|---|---|---|---|
+| unset (Luma chooses) | 0 | 276.6 / 236.4 | 316.3 / 266.3 |
+| `cyclic` | 0 | 263.5 / 225.4 | 306.2 / 262.5 |
+| `thomas` | 0 | 700.6 / 656.6 | 737.8 / 692.3 |
+| unset (Luma chooses) | 1 | 610.6 / 552.9 | 654.9 / 625.7 |
+| `cyclic` | 1 | 591.7 / 544.0 | 649.6 / 596.9 |
+| `thomas` | 1 | 1567.2 / 1514.0 | 1624.0 / 1568.8 |
+
+The default is cyclic reduction at both levels (its timings are the forced-`cyclic` ones within the noise of the shared GPU).
+
+Where the time of one lazy f32 step goes (level 0, `profile_step`: 27 launches, 240 us of GPU time, 0 fusion cuts; the df32 step is 28
+launches, 278 us), summed over the kernels of the profile:
+
+| kernels | launches | GPU us |
+|---|---|---|
+| line solves: `CyclicTridiagonal { block: 4, workgroup: 32, shared_rows: 144 }` (i lines, 42.9) and `shared_rows: 70` (j lines, 38.8) | 4 | 81.7 |
+| the 16-part `concat` that builds the `[16, ni, nj]` stacks of `lo`, `d`, `up` of both directions (issue 11) | 6 | 70.2 |
+| ghost-state Jacobians at the line ends (32 outputs on `[1, nj]` / `[ni, 1]`) | 2 | 16.5 |
+| blocks `lo`, `d`, `up` (48 outputs) | 2 | 13.7 |
+| face matrices `FL`, `FR` (32 outputs) | 2 | 8.3 |
+| 4-part `concat` (the right-hand side stacks) | 2 | 6.5 |
+| 4-output kernels on `[144, 70]` (pseudo-time step, `dt R`) [INFERENCE: from the kernel shapes] | 1 | 9.4 |
+| residual: padded state 5.9, face fluxes 9.5, cell residual 3.5, norm 8.0 | 5 | 26.9 |
+| positivity damping and update, CFL | 2 | 6.8 |
+
+The four line solves of a step are two passes (`sub_iters = 2`) of the i-line solve and the j-line solve. With `LUMA_TRIDIAGONAL=thomas`
+they are `Tridiagonal { block: 4, workgroup: 8 }`, 128.5 us each (514 us of a 679 us step): one invocation per line (70 / 144 lines)
+with a dependent chain of 144 / 70 block eliminations, as expected. `until` is about 40 us above `replay`: the residual history, as for
+the explicit scheme.
+
 ## Luma issues
 
 All four bugs the prototype hit are fixed in Luma (each has a regression test there; `CHANGELOG.md`, `[Unreleased]`), and the
@@ -260,16 +357,27 @@ What still applies (`cargo run --release --example luma_issues`):
    do not appear; the launch count of the step is what shows them.
 10. **First call of a big `Df32` kernel**: 9 s of compile for `Fusion` / 6 s for `Lines` (0.9 s for `Fluxes`) at the first launch,
     `bench --staging Fusion` (fresh process, `__GL_SHADER_DISK_CACHE=0` to see it every time).
+11. **Operands of `solve_block_tridiagonal` must be one `[16, ni, nj]` array, and there is no way to build it from sixteen `[ni, nj]`
+    arrays other than `concat`.** `luma::concat::<f32, 16>(0, parts)` over the evaluated, reshaped parts costs 11.7 us per stack at 144x70
+    (161k elements; a bandwidth-bound copy is 2 us, the launch itself 2-3 us): every output element selects among 16 loads. An implicit
+    step needs six stacks (`lo`, `d`, `up` of two directions): 70 us of the 240 us GPU time of the step (29 %), as much as the four line
+    solves (82 us). The alternative tried, `zeros([16, ni, nj]) + 0.0` as a lazy base and sixteen `slice(0, k..k + 1).assign(part)`,
+    is 20x slower (4200-5100 us per iteration instead of 236-277; `src/implicit.rs::stack`). Expected: a `stack` operation that writes
+    each part once (or the solvers taking the blocks as a record `[Array<f32>; 16]` / a strided view).
+12. **`reshape` evaluates its operand** (it shares the buffer, so the array has to exist): a lazy `slice(0, k..k + 1)` of a `[4, ni, nj]`
+    solve result cannot be reshaped to `[ni, nj]` without a copy kernel. The solution is unstacked with `take` and four precomputed
+    index arrays (`4 (i + ni j) + k`), which stays lazy and fuses into the next kernel. Expected: a lazy `reshape` of a view (or of a
+    unit-extent axis).
+13. **No `is_finite`**: the positivity damping of the implicit step tests `|q| < 1e30` (NaN and infinity compare false), which relies on
+    NaN comparing false in the generated WGSL. Nothing in Luma promises that, and the damped branch (`alpha < 1`) is not checked
+    separately: the tests do not force a step that needs it.
 
 ## Going further
 
-* **Implicit scheme (`solve_block_tridiagonal`).** The primitive fits the line-implicit scheme of `bowshock-core::implicit` (4x4 blocks,
-  `block <= 8`, per-line starts `solve_block_tridiagonal_from` for the solid-block grids), but with three consequences: the arrays
-  must be stacked `[4, ni, nj]` / `[16, ni, nj]` along axis 0 (`axis` is 1 or 2), so the state would live in one array per record and be
-  built with `concat`; the solve is `f32` only (the custom implicit scheme keeps its left-hand side in f32 too, so this is no loss); and it
-  runs **one invocation per line** (block Thomas, 4x4 pivoted blocks): 100-400 invocations for these grids, each a dependent chain of
-  100-400 block eliminations. The custom kernels use cyclic reduction (parallel along the line) for exactly this reason, so I expect the
-  solves, not the assembly, to dominate. Not tried.
+* **Implicit scheme: done** (`src/implicit.rs`, see "Implicit scheme" above). What it showed: `solve_block_tridiagonal` can be traced and
+  replayed by `iterate_all` / `iterate_until_all` like any other kernel; Luma picks cyclic reduction for these lines (block Thomas, one
+  invocation per line, is 6x slower per solve: 128 us against 20 us); the layout (`[16, ni, nj]` stacks of the blocks) costs as much
+  as the solves. The solid-block grids use the per-line starts of `solve_block_tridiagonal_from` (`CyclicTridiagonal { starts: true }`, same cost).
 * **`iterate_until_all` as the run loop.** It already is one here (`LazySolver::run` is one per limiter phase). The convergence rules of
   `bowshock::run::stop_reason` map onto it: `ResidualDrop` = `h["residual"].peak() / h["residual"].last() >= 1e6` (Luma's `peak` is over
   all steps, the CPU rule over steps after 20: use `h.step()` to gate), the monitor "stationary" rules = `window_max(k) - window_min(k) <
