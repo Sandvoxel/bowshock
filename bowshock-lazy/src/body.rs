@@ -435,20 +435,20 @@ impl LazySolver {
         ((r0 * r0).sum() / c(self.n_active as f64)).sqrt()
     }
 
-    /// Zeros of `shape` over the region of every field of `r`.
-    fn zero_region(&self, r: &Rec, shape: [usize; 2], region: impl Fn(&A) -> A) {
-        if shape[0] == 0 || shape[1] == 0 {
+    /// Zeros over the cells `i x j` of every field of `r`.
+    fn zero_region(&self, r: &mut Rec, i: std::ops::Range<usize>, j: std::ops::Range<usize>) {
+        if i.is_empty() || j.is_empty() {
             return;
         }
-        for k in 0..4 {
-            region(&r[k]).assign(c(0.0)).expect("zero region");
+        for a in r.iter_mut() {
+            a.slice_mut(0, i.clone()).slice(1, j.clone()).assign(c(0.0)).expect("zero region");
         }
     }
 
     /// Solid cells of the two layers below a body or sting surface take the reflection of the fluid cells above it about the
     /// j-face of the surface (`fill_block_ghosts`): the layers `col_start(i) - 2`, `col_start(i) - 1` get the cells
     /// `col_start(i) + 1`, `col_start(i)`. Written after the domain ghosts, as on the CPU.
-    fn assign_block_ghosts(&self, b: Block, p: &Rec, w: &Rec) {
+    fn assign_block_ghosts(&self, b: Block, p: &Rec, w: &mut Rec) {
         let g = &self.geo;
         for (i0, i1, j0) in [(0, b.i_end, b.j_end), (b.i_end, self.ni, b.j_sting)] {
             if j0 == 0 {
@@ -458,8 +458,7 @@ impl LazySolver {
             let nx = dup(g.jnx.slice(0, i0..i1).slice(1, j0..j0 + 1));
             let nr = dup(g.jnr.slice(0, i0..i1).slice(1, j0..j0 + 1));
             let src = rec(|k| p[k].slice(0, i0..i1).slice(1, j0..).pad([(0, 0), (2, 0)], PadMode::Mirror).slice(1, 0..2));
-            let region = w.slice(0, i0 + 2..i1 + 2).slice(1, j0..j0 + 2);
-            region.assign(reflect(&src, &nx, &nr)).expect("block ghost assign");
+            w.slice_mut(0, i0 + 2..i1 + 2).slice(1, j0..j0 + 2).assign(reflect(&src, &nx, &nr)).expect("block ghost assign");
         }
     }
 
@@ -471,10 +470,9 @@ impl LazySolver {
     /// face i_end:     (m2, m1, p0, p1) = (R c1, R c0, c0, c1)
     /// face i_end + 1: (m2, m1, p0, p1) = (R c0,  c0, c1, c2)         c_k the cell i_end + k, R the reflection
     /// ```
-    fn block_fluxes(&self, b: Block, w: &Rec, fi: &Rec, fj: &Rec, lim: Limiter) {
+    fn block_fluxes(&self, b: Block, w: &Rec, fi: &mut Rec, fj: &mut Rec, lim: Limiter) {
         let ni = self.ni;
         let g = &self.geo;
-        let nb = b.j_end - b.j_sting;
         // base wall faces: both faces use the normal of the base face for the reflection, their own for the flux
         let rows = |a: &A, i0: usize, i1: usize| a.slice(0, i0..i1).slice(1, b.j_sting..b.j_end);
         let (bx, br) = (rows(&g.inx, b.i_end, b.i_end + 1), rows(&g.inr, b.i_end, b.i_end + 1));
@@ -487,13 +485,11 @@ impl LazySolver {
         let (p0, p1) = (join(&c0, &c1), join(&c1, &c2));
         let base = face_flux_lm(&m2, &m1, &p0, &p1, lim, &fx, &fr, self.low_mach, self.staging == Staging::Split);
         // solid faces
-        self.zero_region(fi, [ni + 1, b.j_sting], |a| a.slice(1, 0..b.j_sting));
-        self.zero_region(fi, [b.i_end, nb], |a| a.slice(0, 0..b.i_end).slice(1, b.j_sting..b.j_end));
-        for k in 0..4 {
-            fi[k].slice(0, b.i_end..b.i_end + 2).slice(1, b.j_sting..b.j_end).assign(&base[k]).expect("base wall flux assign");
-        }
-        self.zero_region(fj, [b.i_end, b.j_end], |a| a.slice(0, 0..b.i_end).slice(1, 0..b.j_end));
-        self.zero_region(fj, [ni - b.i_end, b.j_sting], |a| a.slice(0, b.i_end..ni).slice(1, 0..b.j_sting));
+        self.zero_region(fi, 0..ni + 1, 0..b.j_sting);
+        self.zero_region(fi, 0..b.i_end, b.j_sting..b.j_end);
+        fi.slice_mut(0, b.i_end..b.i_end + 2).slice(1, b.j_sting..b.j_end).assign(&base).expect("base wall flux assign");
+        self.zero_region(fj, 0..b.i_end, 0..b.j_end);
+        self.zero_region(fj, b.i_end..ni, 0..b.j_sting);
     }
 
     pub fn set_low_mach(&mut self, on: bool) {
@@ -517,7 +513,7 @@ impl LazySolver {
     /// wall reflects (`pad` with `Edge` / `Mirror` read both). `Bc::Extrapolate` keeps the `Edge` padding of `w`. Layers
     /// are outermost first, as the cells they stand for. `w` is a lazy expression, so nothing is launched: `w` becomes the
     /// padded state with the ghost expressions in place, and fuses into whatever reads it.
-    fn assign_ghosts(&self, side: usize, p: &Rec, w: &Rec) {
+    fn assign_ghosts(&self, side: usize, p: &Rec, w: &mut Rec) {
         let (ni, nj) = (self.ni, self.nj);
         let view = |a: &A, mode: PadMode| -> A {
             match side {
@@ -527,11 +523,11 @@ impl LazySolver {
                 _ => a.pad([(0, 0), (0, 2)], mode).slice(1, nj..nj + 2),
             }
         };
-        let region = match side {
-            0 => w.slice(0, ..2).slice(1, 2..nj + 2),
-            1 => w.slice(0, ni + 2..).slice(1, 2..nj + 2),
-            2 => w.slice(1, ..2).slice(0, 2..ni + 2),
-            _ => w.slice(1, nj + 2..).slice(0, 2..ni + 2),
+        let mut region = match side {
+            0 => w.slice_mut(0, ..2).slice(1, 2..nj + 2),
+            1 => w.slice_mut(0, ni + 2..).slice(1, 2..nj + 2),
+            2 => w.slice_mut(1, ..2).slice(0, 2..ni + 2),
+            _ => w.slice_mut(1, nj + 2..).slice(0, 2..ni + 2),
         };
         let b = &self.geo.bnd[side];
         let fs = self.cfg.freestream;
@@ -560,12 +556,12 @@ impl LazySolver {
     fn padded(&self, u: &Rec) -> (Rec, Rec) {
         // 1. primitives, padded by two cells on every side; the ghost layers of each boundary are one region assign
         let p = cons_to_prim(u.clone());
-        let w = p.pad([(2, 2), (2, 2)], PadMode::Edge);
+        let mut w = p.pad([(2, 2), (2, 2)], PadMode::Edge);
         for side in 0..4 {
-            self.assign_ghosts(side, &p, &w);
+            self.assign_ghosts(side, &p, &mut w);
         }
         if let Some(b) = self.block {
-            self.assign_block_ghosts(b, &p, &w);
+            self.assign_block_ghosts(b, &p, &mut w);
         }
         // `Lines` and up: evaluate the padded record once. Without it every reader recomputes the primitives and all four ghost
         // expressions at each stencil cell (200x100 f32: 67-91 launches per RK3 step without it, 26-30 with it; README "Speed").
@@ -584,10 +580,10 @@ impl LazySolver {
 
         // 3. face fluxes: face `f` sees the cells `f - 2 .. f + 1` of its line
         let split = self.staging == Staging::Split;
-        let fi = face_flux_lm(&wi.slice(0, 0..ni + 1), &wi.slice(0, 1..ni + 2), &wi.slice(0, 2..ni + 3), &wi.slice(0, 3..ni + 4), lim, &g.inx, &g.inr, self.low_mach, split);
-        let fj = face_flux_lm(&wj.slice(1, 0..nj + 1), &wj.slice(1, 1..nj + 2), &wj.slice(1, 2..nj + 3), &wj.slice(1, 3..nj + 4), lim, &g.jnx, &g.jnr, self.low_mach, split);
+        let mut fi = face_flux_lm(&wi.slice(0, 0..ni + 1), &wi.slice(0, 1..ni + 2), &wi.slice(0, 2..ni + 3), &wi.slice(0, 3..ni + 4), lim, &g.inx, &g.inr, self.low_mach, split);
+        let mut fj = face_flux_lm(&wj.slice(1, 0..nj + 1), &wj.slice(1, 1..nj + 2), &wj.slice(1, 2..nj + 3), &wj.slice(1, 3..nj + 4), lim, &g.jnx, &g.jnr, self.low_mach, split);
         if let Some(b) = self.block {
-            self.block_fluxes(b, w, &fi, &fj, lim);
+            self.block_fluxes(b, w, &mut fi, &mut fj, lim);
         }
         // `Fluxes` and up: evaluate the face fluxes. The residual and the stage update then fuse into the next stage's padded
         // record: three kernels per stage, 14 launches per step instead of 26-30 (the flux kernel read through four stencil
@@ -605,7 +601,7 @@ impl LazySolver {
         res[2] = &res[2] + &p[3] * &g.area * &g.inv_v; // axisymmetric pressure source p A / V
 
         // 5. local time step
-        let dt = compute_dt.then(|| {
+        let mut dt = compute_dt.then(|| {
             let cs = (c(GAMMA) * &p[3] / &p[0]).sqrt();
             let lam = |nx: &A, nr: &A, len: &A| ((&p[1] * nx + &p[2] * nr).abs() + &cs) * len;
             let (fl_nx, fl_nr, fl_len) = (g.inx.slice(0, 0..ni), g.inr.slice(0, 0..ni), g.ilen.slice(0, 0..ni));
@@ -617,13 +613,13 @@ impl LazySolver {
         });
         // solid cells: residual and time step zero (region assigns, so nothing computed inside the solid reaches the state)
         if let Some(b) = self.block {
-            self.zero_region(&res, [b.i_end, b.j_end], |a| a.slice(0, 0..b.i_end).slice(1, 0..b.j_end));
-            self.zero_region(&res, [ni - b.i_end, b.j_sting], |a| a.slice(0, b.i_end..ni).slice(1, 0..b.j_sting));
-            if let Some(dt) = &dt {
+            self.zero_region(&mut res, 0..b.i_end, 0..b.j_end);
+            self.zero_region(&mut res, b.i_end..ni, 0..b.j_sting);
+            if let Some(dt) = &mut dt {
                 if b.j_sting > 0 {
-                    dt.slice(0, b.i_end..ni).slice(1, 0..b.j_sting).assign(c(0.0)).expect("dt zero");
+                    dt.slice_mut(0, b.i_end..ni).slice(1, 0..b.j_sting).assign(c(0.0)).expect("dt zero");
                 }
-                dt.slice(0, 0..b.i_end).slice(1, 0..b.j_end).assign(c(0.0)).expect("dt zero");
+                dt.slice_mut(0, 0..b.i_end).slice(1, 0..b.j_end).assign(c(0.0)).expect("dt zero");
             }
         }
         (res, dt)

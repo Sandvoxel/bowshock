@@ -158,16 +158,22 @@ fn main() {
     for ghost_ops in sizes {
         let build = |keep: bool| {
             let (out, held): ([A; 4], ([A; 4], [A; 4], [A; 4])) = {
-                let w = u.clone().pad([(2, 2), (2, 2)], PadMode::Edge);
+                let mut w = u.clone().pad([(2, 2), (2, 2)], PadMode::Edge);
                 for side in 0..4 {
-                    let (region, edge) = match side {
-                        0 => (w.slice(0, ..2).slice(1, 2..n + 2), u.clone().pad([(2, 0)], PadMode::Edge).slice(0, 0..2)),
-                        1 => (w.slice(0, n + 2..).slice(1, 2..n + 2), u.clone().pad([(0, 2)], PadMode::Edge).slice(0, n..n + 2)),
-                        2 => (w.slice(1, ..2).slice(0, 2..n + 2), u.clone().pad([(0, 0), (2, 0)], PadMode::Edge).slice(1, 0..2)),
-                        _ => (w.slice(1, n + 2..).slice(0, 2..n + 2), u.clone().pad([(0, 0), (0, 2)], PadMode::Edge).slice(1, n..n + 2)),
+                    let edge = match side {
+                        0 => u.clone().pad([(2, 0)], PadMode::Edge).slice(0, 0..2),
+                        1 => u.clone().pad([(0, 2)], PadMode::Edge).slice(0, n..n + 2),
+                        2 => u.clone().pad([(0, 0), (2, 0)], PadMode::Edge).slice(1, 0..2),
+                        _ => u.clone().pad([(0, 0), (0, 2)], PadMode::Edge).slice(1, n..n + 2),
                     };
                     if ghost_ops > 0 {
                         let rhs: [A; 4] = std::array::from_fn(|k| chain(&[&edge[0], &edge[1], &edge[2], &edge[3]], k, ghost_ops));
+                        let mut region = match side {
+                            0 => w.slice_mut(0, ..2).slice(1, 2..n + 2),
+                            1 => w.slice_mut(0, n + 2..).slice(1, 2..n + 2),
+                            2 => w.slice_mut(1, ..2).slice(0, 2..n + 2),
+                            _ => w.slice_mut(1, n + 2..).slice(0, 2..n + 2),
+                        };
                         region.assign(rhs).unwrap();
                     }
                 }
