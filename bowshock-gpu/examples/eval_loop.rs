@@ -5,13 +5,13 @@
 //! `cargo run --release --example eval_loop [-- --n 300]`
 
 use bowshock_cases::cone::{build_solver, ConeCase};
-use bowshock_lazy::Staging;
+use bowshock_gpu::Staging;
 use bowshock_reference::taylor_maccoll::solve_cone;
 use std::time::Instant;
 
 macro_rules! report {
     ($module:ident, $name:expr, $staging:expr, $ctx:expr, $host:expr, $n:expr) => {{
-        let mut s = bowshock_lazy::$module::LazySolver::new($ctx, &$host.grid, &$host.cfg).unwrap();
+        let mut s = bowshock_gpu::$module::LazySolver::new($ctx, &$host.grid, &$host.cfg).unwrap();
         s.staging = $staging;
         // first iteration: construction, tracing, compilation
         let t0 = Instant::now();
@@ -54,7 +54,7 @@ fn main() {
     let ctx = luma::default_context().unwrap();
     if args.iter().any(|a| a == "--trace-only") {
         // for `perf record`: only the Rust side of the loop, no GPU work
-        let mut s = bowshock_lazy::f32s::LazySolver::new(&ctx, &host.grid, &host.cfg).unwrap();
+        let mut s = bowshock_gpu::f32s::LazySolver::new(&ctx, &host.grid, &host.cfg).unwrap();
         s.staging = Staging::Fluxes;
         println!("{:.0} us per step", 1e6 * s.trace_seconds(100) / 100.0);
         return;

@@ -13,7 +13,7 @@ macro_rules! check {
         let host = build_solver(&case, tm.beta);
         let ctx = luma::Context::new().unwrap();
         let run = |form: usize| {
-            let mut s = bowshock_lazy::$module::LazySolver::new(&ctx, &host.grid, &host.cfg).unwrap();
+            let mut s = bowshock_gpu::$module::LazySolver::new(&ctx, &host.grid, &host.cfg).unwrap();
             let history = match form {
                 0 => s.run(20, 7).unwrap(),
                 1 => {
@@ -27,7 +27,8 @@ macro_rules! check {
         let (u_until, h_until) = run(0);
         let (u_replay, _) = run(1);
         let (u_eval, h_eval) = run(2);
-        let worst = |a: &[[f64; 4]], b: &[[f64; 4]]| a.iter().zip(b).fold(0.0f64, |m, (x, y)| (0..4).fold(m, |m, k| m.max((x[k] - y[k]).abs() / (1.0 + y[k].abs()))));
+        let worst =
+            |a: &[[f64; 4]], b: &[[f64; 4]]| a.iter().zip(b).fold(0.0f64, |m, (x, y)| (0..4).fold(m, |m, k| m.max((x[k] - y[k]).abs() / (1.0 + y[k].abs()))));
         let hist = h_until.iter().zip(&h_eval).fold(0.0f64, |m, (a, b)| m.max((a - b).abs() / b));
         println!(
             "{}: until vs eval state {:.2e}, replay vs eval state {:.2e}, residual history until vs eval {:.2e} ({} / {} values)",
@@ -63,12 +64,13 @@ fn threads_on_the_default_context_agree() {
             let mut case = ConeCase::new(2.0, 15.0, 40, 20);
             case.first_order_iters = 5;
             let host = build_solver(&case, tm.beta);
-            let mut s = bowshock_lazy::$module::LazySolver::new($ctx, &host.grid, &host.cfg).unwrap();
+            let mut s = bowshock_gpu::$module::LazySolver::new($ctx, &host.grid, &host.cfg).unwrap();
             let history = s.run(20, 7).unwrap();
             (s.state_f64().unwrap(), history)
         }};
     }
-    let worst = |a: &[[f64; 4]], b: &[[f64; 4]]| a.iter().zip(b).fold(0.0f64, |m, (x, y)| (0..4).fold(m, |m, k| m.max((x[k] - y[k]).abs() / (1.0 + y[k].abs()))));
+    let worst =
+        |a: &[[f64; 4]], b: &[[f64; 4]]| a.iter().zip(b).fold(0.0f64, |m, (x, y)| (0..4).fold(m, |m, k| m.max((x[k] - y[k]).abs() / (1.0 + y[k].abs()))));
     let private = luma::Context::new().unwrap();
     let (want_f32, want_df32) = (run!(f32s, &private), run!(df32s, &private));
     let results: Vec<_> = std::thread::scope(|scope| {

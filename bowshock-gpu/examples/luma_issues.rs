@@ -13,11 +13,11 @@
 //! the rows starting so, `LUMA_ISSUES_KERNELS=1` lists the kernels of the `eval` step)
 
 use bowshock::body_grid::Nose;
-use bowshock_cases::subsonic::{fox_case, subsonic_case};
 use bowshock_cases::cone::{build_solver, ConeCase};
+use bowshock_cases::subsonic::{fox_case, subsonic_case};
 use bowshock_core::solver::Scheme;
+use bowshock_gpu::Staging;
 use bowshock_reference::taylor_maccoll::solve_cone;
-use bowshock_lazy::Staging;
 use luma::{Array, Fields, PadMode};
 use std::time::Instant;
 
@@ -60,7 +60,10 @@ fn cuts(p: &luma::Profile) -> String {
 fn case3(ctx: &luma::Context) {
     println!("== 3. the explicit solver with a solid block (region assigns for ghosts, fluxes, zero residual / time step) against the same grid without it");
     println!("   cost model: {:?}", ctx.cost_model());
-    println!("   {:<16} {:<9} {:<6} {:<6} | {:>8} {:>8} | {:>8} {:>8} {:>5}", "grid", "staging", "prec", "block", "replay L", "replay us", "eval L", "eval us", "cuts");
+    println!(
+        "   {:<16} {:<9} {:<6} {:<6} | {:>8} {:>8} | {:>8} {:>8} {:>5}",
+        "grid", "staging", "prec", "block", "replay L", "replay us", "eval L", "eval us", "cuts"
+    );
     // the two block grids, and a block-free cone grid of the base grid's size (the reference of the issue list)
     let solid = |label: &'static str, mut case: bowshock::case::Case| {
         case.numerics.scheme = Scheme::Explicit;
@@ -75,11 +78,8 @@ fn case3(ctx: &luma::Context) {
         c.first_order_iters = 0;
         build_solver(&c, solve_cone(2.0, 15f64.to_radians()).unwrap().beta)
     };
-    let cases = [
-        solid("ogive base", subsonic_case(0.5, Nose::TangentOgive { fineness: 3.0 }, 0, true)),
-        solid("fox sting", fox_case(false, 0.6, 0)),
-        ("cone", cone),
-    ];
+    let cases =
+        [solid("ogive base", subsonic_case(0.5, Nose::TangentOgive { fineness: 3.0 }, 0, true)), solid("fox sting", fox_case(false, 0.6, 0)), ("cone", cone)];
     let verbose = std::env::var("LUMA_ISSUES_KERNELS").is_ok();
     for (label, host) in cases {
         let grid = format!("{label} {}x{}", host.grid.ni, host.grid.nj);
@@ -93,7 +93,7 @@ fn case3(ctx: &luma::Context) {
                                 continue;
                             }
                         }
-                        let mut s = bowshock_lazy::$module::LazySolver::from_host(ctx, &host).unwrap();
+                        let mut s = bowshock_gpu::$module::LazySolver::from_host(ctx, &host).unwrap();
                         if !with_block {
                             s.set_block(None).unwrap();
                         }
@@ -124,7 +124,11 @@ fn case3(ctx: &luma::Context) {
                         if verbose {
                             for k in &eval.kernels {
                                 let chars: Vec<char> = k.label.chars().collect();
-                                let label: String = if chars.len() > 130 { chars[..70].iter().chain(['.', '.', '.'].iter()).chain(chars[chars.len() - 55..].iter()).collect() } else { k.label.clone() };
+                                let label: String = if chars.len() > 130 {
+                                    chars[..70].iter().chain(['.', '.', '.'].iter()).chain(chars[chars.len() - 55..].iter()).collect()
+                                } else {
+                                    k.label.clone()
+                                };
                                 println!("      {label} x{} ({:.1} us)", k.launches, k.total.as_secs_f64() * 1e6);
                             }
                         }
@@ -154,7 +158,8 @@ fn main() {
     println!("   dropped before the evaluation (as in the solver); `kept`: the program still holds it, so `eval_all` evaluates it first as");
     println!("   a kernel of its own (an array that is alive is work the program asked for)");
     println!("   {:>9} | {:>16} {:>11} | {:>16} {:>11} | {:>16}", "ghost_ops", "launches dropped", "cuts", "launches kept", "cuts", "first cut");
-    let sizes: Vec<usize> = std::env::var("LUMA_ISSUES_GHOST").map_or_else(|_| vec![0, 10, 40, 100], |list| list.split(',').filter_map(|s| s.parse().ok()).collect());
+    let sizes: Vec<usize> =
+        std::env::var("LUMA_ISSUES_GHOST").map_or_else(|_| vec![0, 10, 40, 100], |list| list.split(',').filter_map(|s| s.parse().ok()).collect());
     for ghost_ops in sizes {
         let build = |keep: bool| {
             let (out, held): ([A; 4], ([A; 4], [A; 4], [A; 4])) = {

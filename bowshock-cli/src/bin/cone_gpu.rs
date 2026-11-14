@@ -1,6 +1,5 @@
 //! GPU vs CPU cone validation: M=2 flow over 10 and 15 degree cones, three grids, both limiters. The GPU solver runs in
-//! extended precision (default; guarded and direct formulation) and, for the before/after comparison of the f32 residual
-//! floor, in the original f32 precision and with the compensated state only.
+//! extended precision (default, double-float) and, for the comparison with the f32 residual floor, in f32 precision.
 //!
 //! Usage: `cargo run --release --bin cone_gpu [-- --quick] [--limiter minmod|vanalbada|both]
 //!         [--mach M] [--chunk K] [--bench [--no-cpu]]`
@@ -11,7 +10,7 @@
 
 use bowshock_cases::cone::{build_solver, ConeCase};
 use bowshock_core::flux::Limiter;
-use bowshock_gpu::{GpuSolver, Mode, Precision};
+use bowshock_gpu::{GpuSolver, Precision};
 use bowshock_gpu_cases::cone::{compare, residual_on_state, run_cpu, run_gpu, Compare, RunResult};
 use bowshock_reference::taylor_maccoll::{solve_cone, ConeSolution};
 use std::fs;
@@ -29,20 +28,14 @@ struct Row {
     cp_tm: f64,
     beta_gpu: f64,
     beta_cpu: f64,
-    /// Guarded-mode GPU (extended precision) vs CPU.
+    /// GPU (extended precision) vs CPU.
     cmp: Compare,
-    /// Direct-mode GPU (extended precision) vs CPU.
-    cmp_direct: Compare,
-    /// Guarded GPU in the original f32 precision / with compensated state, vs CPU.
+    /// GPU in f32 precision vs CPU.
     cmp_f32: Compare,
-    cmp_comp: Compare,
-    /// Guarded (optimised) GPU run, direct (bowshock-core mirror) GPU run, both in the default (extended) precision; CPU run;
-    /// guarded runs in the original f32 precision and with the compensated state only.
+    /// GPU run in the default (extended) precision; CPU run; GPU run in f32 precision.
     gpu: RunResult,
-    direct: RunResult,
     cpu: RunResult,
     f32run: RunResult,
-    comp: RunResult,
     /// Residual (first iteration, geo-mean of 20) of the f32 / extended solver evaluated on the converged CPU f64 state.
     on_cpu_state_f32: (f64, f64),
     on_cpu_state_ext: (f64, f64),
@@ -100,54 +93,29 @@ fn launch_overhead() {
 fn bench() {
     launch_overhead();
     println!("\n## GPU per-iteration timing study (15 deg, minmod, from free stream, 1000 iterations, f32; first-order phase off)");
-    println!("Residual history = per-iteration density residual (history kernels), read back every K iterations.");
-    println!("| mode | grid | hist, sync K=1 | K=10 | K=50 | K=250 | Luma norm() every 50 (no hist kernels) | no residual at all, record+sync | host recording time only |");
-    println!("|---|---|---|---|---|---|---|---|---|");
+    println!("Residual history = per-iteration density residual (recorded on the GPU), read back every K iterations.");
+    println!("| grid | hist, sync K=1 | K=10 | K=50 | K=250 |");
+    println!("|---|---|---|---|---|");
     let tm = solve_cone(2.0, 15f64.to_radians()).unwrap();
     let ctx = luma::default_context().unwrap();
-    for mode in [Mode::Direct, Mode::Guarded] {
-        for &(ni, nj) in &[(100usize, 50usize), (200, 100), (400, 200)] {
-            let mut case = ConeCase::new(2.0, 15.0, ni, nj);
-            case.first_order_iters = 0;
-            let host = build_solver(&case, tm.beta);
-            let mut g = GpuSolver::new_with(&ctx, &host.grid, &host.cfg, mode, Precision::F32).unwrap();
-            g.run(1).unwrap();
-            let total = 1000usize;
-            let mut cells = Vec::new();
-            for &k in &[1usize, 10, 50, 250] {
-                g.reset().unwrap();
-                g.context().sync().unwrap();
-                let t0 = Instant::now();
-                for _ in 0..total / k {
-                    g.run(k).unwrap();
-                }
-                cells.push(1e6 * t0.elapsed().as_secs_f64() / ((total / k) * k) as f64);
-            }
+    for &(ni, nj) in &[(100usize, 50usize), (200, 100), (400, 200)] {
+        let mut case = ConeCase::new(2.0, 15.0, ni, nj);
+        case.first_order_iters = 0;
+        let host = build_solver(&case, tm.beta);
+        let mut g = GpuSolver::new(&ctx, &host.grid, &host.cfg, Precision::F32).unwrap();
+        g.run(1).unwrap();
+        let total = 1000usize;
+        let mut cells = Vec::new();
+        for &k in &[1usize, 10, 50, 250] {
             g.reset().unwrap();
             g.context().sync().unwrap();
             let t0 = Instant::now();
-            g.record(total).unwrap();
-            let t_rec = t0.elapsed().as_secs_f64();
-            g.context().sync().unwrap();
-            let t_all = t0.elapsed().as_secs_f64();
-            g.reset().unwrap();
-            g.context().sync().unwrap();
-            let t0 = Instant::now();
-            for _ in 0..total / 50 {
-                g.run_luma_norm(50).unwrap();
+            for _ in 0..total / k {
+                g.run(k).unwrap();
             }
-            let t_norm = 1e6 * t0.elapsed().as_secs_f64() / total as f64;
-            println!(
-                "| {mode:?} | {ni}x{nj} | {:.1} us | {:.1} us | {:.1} us | {:.1} us | {:.1} us | {:.1} us | {:.1} us |",
-                cells[0],
-                cells[1],
-                cells[2],
-                cells[3],
-                t_norm,
-                1e6 * t_all / total as f64,
-                1e6 * t_rec / total as f64
-            );
+            cells.push(1e6 * t0.elapsed().as_secs_f64() / ((total / k) * k) as f64);
         }
+        println!("| {ni}x{nj} | {:.1} us | {:.1} us | {:.1} us | {:.1} us |", cells[0], cells[1], cells[2], cells[3]);
     }
 }
 
@@ -156,12 +124,9 @@ fn bench() {
 /// CPU: all rayon threads. GPU: history kernels on, sync every `chunk` iterations.
 struct Perf {
     cpu_us: f64,
-    /// Guarded mode: extended (default), compensated, original f32; direct mode: extended, original f32.
-    guarded_us: f64,
-    guarded_comp_us: f64,
-    guarded_f32_us: f64,
-    direct_us: f64,
-    direct_f32_us: f64,
+    /// Extended (default) and f32 precision.
+    ext_us: f64,
+    f32_us: f64,
 }
 
 fn perf_study(grids: &[(usize, usize)], chunk: usize, with_cpu: bool) -> Vec<((usize, usize), Perf)> {
@@ -169,8 +134,8 @@ fn perf_study(grids: &[(usize, usize)], chunk: usize, with_cpu: bool) -> Vec<((u
     let tm = solve_cone(2.0, 15f64.to_radians()).unwrap();
     let ctx = luma::default_context().unwrap();
     println!("\n### Steady per-iteration cost (15 deg, minmod, {n} iterations from the free stream, best of 3, sync every K={chunk})");
-    println!("| grid | cells | CPU f64 rayon us/iter | GPU-guarded extended us/iter | guarded compensated | guarded f32 | GPU-direct extended | direct f32 | guarded extended speed-up vs CPU | direct extended speed-up | extended / f32 cost (guarded) |");
-    println!("|---|---|---|---|---|---|---|---|---|---|---|");
+    println!("| grid | cells | CPU f64 rayon us/iter | GPU extended us/iter | GPU f32 us/iter | extended speed-up vs CPU | f32 speed-up vs CPU | extended / f32 cost |");
+    println!("|---|---|---|---|---|---|---|---|");
     let mut out = Vec::new();
     for &(ni, nj) in grids {
         let mut case = ConeCase::new(2.0, 15.0, ni, nj);
@@ -187,17 +152,10 @@ fn perf_study(grids: &[(usize, usize)], chunk: usize, with_cpu: bool) -> Vec<((u
             }
             best_cpu = best_cpu.min(1e6 * t0.elapsed().as_secs_f64() / n as f64);
         }
-        let configs = [
-            (Mode::Guarded, Precision::Extended),
-            (Mode::Guarded, Precision::Compensated),
-            (Mode::Guarded, Precision::F32),
-            (Mode::Direct, Precision::Extended),
-            (Mode::Direct, Precision::F32),
-        ];
-        let mut gpu = [0.0f64; 5];
-        for (m, (mode, prec)) in configs.into_iter().enumerate() {
+        let mut gpu = [0.0f64; 2];
+        for (m, prec) in [Precision::Extended, Precision::F32].into_iter().enumerate() {
             let host = build_solver(&case, tm.beta);
-            let mut g = GpuSolver::new_with(&ctx, &host.grid, &host.cfg, mode, prec).unwrap();
+            let mut g = GpuSolver::new(&ctx, &host.grid, &host.cfg, prec).unwrap();
             g.run(1).unwrap();
             let mut best = f64::INFINITY;
             for _ in 0..3 {
@@ -212,22 +170,16 @@ fn perf_study(grids: &[(usize, usize)], chunk: usize, with_cpu: bool) -> Vec<((u
             gpu[m] = best;
         }
         println!(
-            "| {ni}x{nj} | {} | {:.0} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1}x | {:.1}x | {:.2}x |",
+            "| {ni}x{nj} | {} | {:.0} | {:.1} | {:.1} | {:.1}x | {:.1}x | {:.2}x |",
             ni * nj,
             best_cpu,
             gpu[0],
             gpu[1],
-            gpu[2],
-            gpu[3],
-            gpu[4],
             best_cpu / gpu[0],
-            best_cpu / gpu[3],
-            gpu[0] / gpu[2]
+            best_cpu / gpu[1],
+            gpu[0] / gpu[1]
         );
-        out.push((
-            (ni, nj),
-            Perf { cpu_us: best_cpu, guarded_us: gpu[0], guarded_comp_us: gpu[1], guarded_f32_us: gpu[2], direct_us: gpu[3], direct_f32_us: gpu[4] },
-        ));
+        out.push(((ni, nj), Perf { cpu_us: best_cpu, ext_us: gpu[0], f32_us: gpu[1] }));
     }
     out
 }
@@ -276,33 +228,29 @@ fn main() {
                 let mut case = ConeCase::new(mach, theta, ni, nj);
                 case.limiter = limiter;
                 let cpu = run_cpu(&case, &tm);
-                let gpu = run_gpu(&case, &tm, chunk, Mode::Guarded, Precision::Extended).expect("GPU run (guarded, extended)");
-                let direct = run_gpu(&case, &tm, chunk, Mode::Direct, Precision::Extended).expect("GPU run (direct, extended)");
-                let f32run = run_gpu(&case, &tm, chunk, Mode::Guarded, Precision::F32).expect("GPU run (guarded, f32)");
-                let comp = run_gpu(&case, &tm, chunk, Mode::Guarded, Precision::Compensated).expect("GPU run (guarded, compensated)");
+                let gpu = run_gpu(&case, &tm, chunk, Precision::Extended).expect("GPU run (extended)");
+                let f32run = run_gpu(&case, &tm, chunk, Precision::F32).expect("GPU run (f32)");
                 let fs = bowshock_core::gas::freestream(mach);
                 let cmp = compare(&case, &fs, &gpu, &cpu);
-                let cmp_direct = compare(&case, &fs, &direct, &cpu);
                 let cmp_f32 = compare(&case, &fs, &f32run, &cpu);
-                let cmp_comp = compare(&case, &fs, &comp, &cpu);
                 let on_state = |prec| {
-                    let on = residual_on_state(&case, &tm, &cpu.u, 20, Mode::Guarded, prec).expect("residual on CPU state");
+                    let on = residual_on_state(&case, &tm, &cpu.u, 20, prec).expect("residual on CPU state");
                     (on[0], 10f64.powf(on.iter().map(|x| x.log10()).sum::<f64>() / on.len() as f64))
                 };
                 let (on_cpu_state_f32, on_cpu_state_ext) = (on_state(Precision::F32), on_state(Precision::Extended));
                 let gmin = floor(&gpu.residual).0;
                 println!(
-                    "  {ni}x{nj}: CPU {} it ({:.1} s, {}, {:.1} orders, final res {:.2e}) | GPU {} it stop / {} exec ({:.2} s, {}, {:.1} orders; min res {:.1e}) | f32-solver residual on the CPU state: {:.1e} (first it.), {:.1e} (mean of 20); extended: {:.1e}, {:.1e} | f32 solver {:.1} orders, compensated {:.1} orders",
+                    "  {ni}x{nj}: CPU {} it ({:.1} s, {}, {:.1} orders, final res {:.2e}) | GPU {} it stop / {} exec ({:.2} s, {}, {:.1} orders; min res {:.1e}) | f32-solver residual on the CPU state: {:.1e} (first it.), {:.1e} (mean of 20); extended: {:.1e}, {:.1e} | f32 solver {:.1} orders",
                     cpu.iters_stop, cpu.loop_seconds, cpu.reason, cpu.drop_orders, cpu.residual.last().unwrap(),
                     gpu.iters_stop, gpu.iters_exec, gpu.loop_seconds, gpu.reason, gpu.drop_orders, gmin,
                     on_cpu_state_f32.0, on_cpu_state_f32.1, on_cpu_state_ext.0, on_cpu_state_ext.1,
-                    f32run.drop_orders, comp.drop_orders
+                    f32run.drop_orders
                 );
                 println!(
-                    "         Cp GPU {:.5} CPU {:.5} TM {:.5} (avg diff {:+.1e}%), max rel Cp diff {:.1e}% (window) / {:.1e}% (all), field: max dp/pinf {:.2e}, rms {:.2e}, max drho/rho {:.2e}; min rho {:.4} min p {:.4}; direct-mode Cp {:.5} (avg diff vs CPU {:+.1e}%)",
+                    "         Cp GPU {:.5} CPU {:.5} TM {:.5} (avg diff {:+.1e}%), max rel Cp diff {:.1e}% (window) / {:.1e}% (all), field: max dp/pinf {:.2e}, rms {:.2e}, max drho/rho {:.2e}; min rho {:.4} min p {:.4}",
                     gpu.post.cp_avg, cpu.post.cp_avg, tm.cp_surface, 100.0 * cmp.avg_cp_rel,
                     100.0 * cmp.max_rel_cp_window, 100.0 * cmp.max_rel_cp_all, cmp.max_dp_over_pinf, cmp.rms_dp_over_pinf, cmp.max_rel_rho,
-                    gpu.post.min_rho, gpu.post.min_p, direct.post.cp_avg, 100.0 * cmp_direct.avg_cp_rel
+                    gpu.post.min_rho, gpu.post.min_p
                 );
                 let row = Row {
                     theta,
@@ -315,14 +263,10 @@ fn main() {
                     beta_gpu: gpu.post.beta_num.to_degrees(),
                     beta_cpu: cpu.post.beta_num.to_degrees(),
                     cmp,
-                    cmp_direct,
                     cmp_f32,
-                    cmp_comp,
                     gpu,
-                    direct,
                     cpu,
                     f32run,
-                    comp,
                     on_cpu_state_f32,
                     on_cpu_state_ext,
                 };
@@ -336,20 +280,31 @@ fn main() {
     let perf_of = |r: &Row| perf.iter().find(|(g, _)| *g == (r.ni, r.nj)).map(|(_, p)| p).unwrap();
 
     // ---- tables ----
-    println!("\n### Accuracy: GPU (extended precision, default) vs CPU (f64) and vs Taylor-Maccoll; before = original f32 solver, compensated = compensated state only");
-    println!("| cone | grid | limiter | Cp GPU | Cp CPU | Cp TM | GPU err vs TM % | CPU err vs TM % | avg Cp diff GPU-CPU % | max rel Cp diff (0.4<=x/L<=0.9) % | max rel Cp diff (all stations) % | beta GPU [deg] | beta CPU [deg] | direct-mode avg Cp diff vs CPU % | direct-mode max rel Cp diff (window) % | f32 (before) avg Cp diff % | f32 (before) max rel Cp diff (window) % | compensated avg Cp diff % |");
-    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    println!("\n### Accuracy: GPU (extended precision, default) vs CPU (f64) and vs Taylor-Maccoll; f32 = f32 solver");
+    println!("| cone | grid | limiter | Cp GPU | Cp CPU | Cp TM | GPU err vs TM % | CPU err vs TM % | avg Cp diff GPU-CPU % | max rel Cp diff (0.4<=x/L<=0.9) % | max rel Cp diff (all stations) % | beta GPU [deg] | beta CPU [deg] | f32 avg Cp diff % | f32 max rel Cp diff (window) % |");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     for r in &rows {
         println!(
-            "| {:.0} deg | {}x{} | {} | {:.5} | {:.5} | {:.5} | {:+.3} | {:+.3} | {:+.1e} | {:.1e} | {:.1e} | {:.3} | {:.3} | {:+.1e} | {:.1e} | {:+.1e} | {:.1e} | {:+.1e} |",
-            r.theta, r.ni, r.nj, r.lim, r.cp_gpu, r.cp_cpu, r.cp_tm,
-            100.0 * (r.cp_gpu - r.cp_tm) / r.cp_tm, 100.0 * (r.cp_cpu - r.cp_tm) / r.cp_tm,
-            100.0 * r.cmp.avg_cp_rel, 100.0 * r.cmp.max_rel_cp_window, 100.0 * r.cmp.max_rel_cp_all,
-            r.beta_gpu, r.beta_cpu, 100.0 * r.cmp_direct.avg_cp_rel, 100.0 * r.cmp_direct.max_rel_cp_window,
-            100.0 * r.cmp_f32.avg_cp_rel, 100.0 * r.cmp_f32.max_rel_cp_window, 100.0 * r.cmp_comp.avg_cp_rel
+            "| {:.0} deg | {}x{} | {} | {:.5} | {:.5} | {:.5} | {:+.3} | {:+.3} | {:+.1e} | {:.1e} | {:.1e} | {:.3} | {:.3} | {:+.1e} | {:.1e} |",
+            r.theta,
+            r.ni,
+            r.nj,
+            r.lim,
+            r.cp_gpu,
+            r.cp_cpu,
+            r.cp_tm,
+            100.0 * (r.cp_gpu - r.cp_tm) / r.cp_tm,
+            100.0 * (r.cp_cpu - r.cp_tm) / r.cp_tm,
+            100.0 * r.cmp.avg_cp_rel,
+            100.0 * r.cmp.max_rel_cp_window,
+            100.0 * r.cmp.max_rel_cp_all,
+            r.beta_gpu,
+            r.beta_cpu,
+            100.0 * r.cmp_f32.avg_cp_rel,
+            100.0 * r.cmp_f32.max_rel_cp_window
         );
     }
-    println!("\n### Field difference GPU (guarded, extended) - CPU at the end of the runs (f32 = original f32 solver)");
+    println!("\n### Field difference GPU (extended) - CPU at the end of the runs (f32 = f32 solver)");
     println!(
         "| cone | grid | limiter | max abs dp/p_inf | rms dp/p_inf | max rel drho/rho | f32: max abs dp/p_inf | f32: rms dp/p_inf | f32: max rel drho/rho |"
     );
@@ -370,16 +325,27 @@ fn main() {
         );
     }
     println!("\n### Convergence (density residual drop from its peak after iteration 20; stop = criterion of `run_cone`)");
-    println!("| cone | grid | limiter | CPU iters | CPU stop | CPU drop (orders) | CPU final res | GPU iters (stop/exec) | GPU stop | GPU drop (orders) | GPU final res | GPU-direct iters (stop/exec) | GPU-direct stop | GPU-direct drop | f32 (before): stop | f32 drop | f32 tail geo-mean res | compensated: stop | compensated drop | compensated tail geo-mean res |");
-    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    println!("| cone | grid | limiter | CPU iters | CPU stop | CPU drop (orders) | CPU final res | GPU iters (stop/exec) | GPU stop | GPU drop (orders) | GPU final res | f32: stop | f32 drop | f32 tail geo-mean res |");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     for r in &rows {
         println!(
-            "| {:.0} deg | {}x{} | {} | {} | {} | {:.1} | {:.2e} | {}/{} | {} | {:.1} | {:.2e} | {}/{} | {} | {:.1} | {} | {:.1} | {:.2e} | {} | {:.1} | {:.2e} |",
-            r.theta, r.ni, r.nj, r.lim, r.cpu.iters_stop, r.cpu.reason, r.cpu.drop_orders,
-            r.cpu.residual.last().unwrap(), r.gpu.iters_stop, r.gpu.iters_exec, r.gpu.reason, r.gpu.drop_orders,
-            r.gpu.residual[r.gpu.iters_stop - 1], r.direct.iters_stop, r.direct.iters_exec, r.direct.reason, r.direct.drop_orders,
-            r.f32run.reason, r.f32run.drop_orders, floor(&r.f32run.residual).1,
-            r.comp.reason, r.comp.drop_orders, floor(&r.comp.residual).1
+            "| {:.0} deg | {}x{} | {} | {} | {} | {:.1} | {:.2e} | {}/{} | {} | {:.1} | {:.2e} | {} | {:.1} | {:.2e} |",
+            r.theta,
+            r.ni,
+            r.nj,
+            r.lim,
+            r.cpu.iters_stop,
+            r.cpu.reason,
+            r.cpu.drop_orders,
+            r.cpu.residual.last().unwrap(),
+            r.gpu.iters_stop,
+            r.gpu.iters_exec,
+            r.gpu.reason,
+            r.gpu.drop_orders,
+            r.gpu.residual[r.gpu.iters_stop - 1],
+            r.f32run.reason,
+            r.f32run.drop_orders,
+            floor(&r.f32run.residual).1
         );
     }
     println!("\n### Residual of the converged CPU f64 state evaluated by the GPU solver in f32 (original) and in extended precision");
@@ -402,11 +368,11 @@ fn main() {
     }
 
     println!("\n### Wall time of the convergence runs themselves (iteration loop incl. history readback every K={chunk}; setup excluded; shared desktop, noisy: see the steady benchmark above)");
-    println!("| cone | grid | limiter | CPU iters | CPU us/iter | GPU-guarded ext us/iter | GPU-direct ext us/iter | GPU iters exec (stop) | CPU total s | GPU-guarded ext total s | GPU-direct ext total s | f32 guarded total s (8000+ its) |");
-    println!("|---|---|---|---|---|---|---|---|---|---|---|---|");
+    println!("| cone | grid | limiter | CPU iters | CPU us/iter | GPU ext us/iter | GPU iters exec (stop) | CPU total s | GPU ext total s | GPU f32 total s (8000+ its) |");
+    println!("|---|---|---|---|---|---|---|---|---|");
     for r in &rows {
         println!(
-            "| {:.0} deg | {}x{} | {} | {} | {:.0} | {:.0} | {:.0} | {} ({}) | {:.2} | {:.2} | {:.2} | {:.2} |",
+            "| {:.0} deg | {}x{} | {} | {} | {:.0} | {:.0} | {} ({}) | {:.2} | {:.2} | {:.2} |",
             r.theta,
             r.ni,
             r.nj,
@@ -414,28 +380,22 @@ fn main() {
             r.cpu.iters_exec,
             r.cpu.us_per_iter(),
             r.gpu.us_per_iter(),
-            r.direct.us_per_iter(),
             r.gpu.iters_exec,
             r.gpu.iters_stop,
             r.cpu.loop_seconds,
             r.gpu.loop_seconds,
-            r.direct.loop_seconds,
             r.f32run.loop_seconds
         );
     }
     println!("\n### Total time to the stopping criterion of each solver (iterations to stop x steady us/iter; GPU extended and CPU both stop at 6 orders; the f32 solver (before) ends at its plateau test)");
-    println!("| cone | grid | limiter | CPU iters | CPU s | GPU-guarded ext iters (stop) | GPU-guarded ext s | GPU-direct ext s | guarded speed-up | direct speed-up | f32 guarded iters (stop) | f32 guarded s | f32 orders reached |");
-    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    println!("| cone | grid | limiter | CPU iters | CPU s | GPU ext iters (stop) | GPU ext s | speed-up | f32 iters (stop) | f32 s | f32 orders reached |");
+    println!("|---|---|---|---|---|---|---|---|");
     for r in &rows {
         let pf = perf_of(r);
-        let (tc, tg, td, tf) = (
-            r.cpu.iters_stop as f64 * pf.cpu_us * 1e-6,
-            r.gpu.iters_stop as f64 * pf.guarded_us * 1e-6,
-            r.direct.iters_stop as f64 * pf.direct_us * 1e-6,
-            r.f32run.iters_stop as f64 * pf.guarded_f32_us * 1e-6,
-        );
+        let (tc, tg, tf) =
+            (r.cpu.iters_stop as f64 * pf.cpu_us * 1e-6, r.gpu.iters_stop as f64 * pf.ext_us * 1e-6, r.f32run.iters_stop as f64 * pf.f32_us * 1e-6);
         println!(
-            "| {:.0} deg | {}x{} | {} | {} | {:.2} | {} | {:.2} | {:.2} | {:.1}x | {:.1}x | {} | {:.2} | {:.1} |",
+            "| {:.0} deg | {}x{} | {} | {} | {:.2} | {} | {:.2} | {:.1}x | {} | {:.2} | {:.1} |",
             r.theta,
             r.ni,
             r.nj,
@@ -444,40 +404,33 @@ fn main() {
             tc,
             r.gpu.iters_stop,
             tg,
-            td,
             tc / tg,
-            tc / td,
             r.f32run.iters_stop,
             tf,
             r.f32run.drop_orders
         );
     }
     println!("\n### One-time GPU setup (kernel build + geometry/state upload) and first-launch warm-up, seconds (context creation {ctx_seconds:.2} s); extended precision");
-    println!("| cone | grid | limiter | guarded setup | guarded warm-up | direct setup | direct warm-up |");
-    println!("|---|---|---|---|---|---|---|");
+    println!("| cone | grid | limiter | setup | warm-up |");
+    println!("|---|---|---|---|---|");
     for r in &rows {
-        println!(
-            "| {:.0} deg | {}x{} | {} | {:.3} | {:.3} | {:.3} | {:.3} |",
-            r.theta, r.ni, r.nj, r.lim, r.gpu.setup_seconds, r.gpu.warmup_seconds, r.direct.setup_seconds, r.direct.warmup_seconds
-        );
+        println!("| {:.0} deg | {}x{} | {} | {:.3} | {:.3} |", r.theta, r.ni, r.nj, r.lim, r.gpu.setup_seconds, r.gpu.warmup_seconds);
     }
 
     let mut f = fs::File::create(out_dir.join("summary.csv")).unwrap();
-    writeln!(f, "theta_deg,ni,nj,limiter,cp_gpu,cp_cpu,cp_tm,avg_cp_rel_diff,max_rel_cp_diff_window,max_rel_cp_diff_all,max_dp_over_pinf,rms_dp_over_pinf,max_rel_rho,beta_gpu_deg,beta_cpu_deg,cpu_iters,cpu_reason,cpu_drop_orders,cpu_final_residual,gpu_iters_stop,gpu_iters_exec,gpu_reason,gpu_drop_orders,gpu_final_residual,gpu_min_residual,direct_iters_stop,direct_drop_orders,direct_avg_cp_rel_diff,direct_max_rel_cp_diff_window,f32_drop_orders,f32_tail_residual,f32_avg_cp_rel_diff,comp_drop_orders,comp_tail_residual,comp_avg_cp_rel_diff,f32_residual_on_cpu_state,ext_residual_on_cpu_state,cpu_steady_us_per_iter,gpu_guarded_ext_steady_us_per_iter,gpu_guarded_comp_steady_us_per_iter,gpu_guarded_f32_steady_us_per_iter,gpu_direct_ext_steady_us_per_iter,gpu_direct_f32_steady_us_per_iter,gpu_setup_s,gpu_warmup_s").unwrap();
+    writeln!(f, "theta_deg,ni,nj,limiter,cp_gpu,cp_cpu,cp_tm,avg_cp_rel_diff,max_rel_cp_diff_window,max_rel_cp_diff_all,max_dp_over_pinf,rms_dp_over_pinf,max_rel_rho,beta_gpu_deg,beta_cpu_deg,cpu_iters,cpu_reason,cpu_drop_orders,cpu_final_residual,gpu_iters_stop,gpu_iters_exec,gpu_reason,gpu_drop_orders,gpu_final_residual,gpu_min_residual,f32_drop_orders,f32_tail_residual,f32_avg_cp_rel_diff,f32_residual_on_cpu_state,ext_residual_on_cpu_state,cpu_steady_us_per_iter,gpu_ext_steady_us_per_iter,gpu_f32_steady_us_per_iter,gpu_setup_s,gpu_warmup_s").unwrap();
     for r in &rows {
         let pf = perf_of(r);
         writeln!(
             f,
-            "{},{},{},{},{:.8},{:.8},{:.8},{:.4e},{:.4e},{:.4e},{:.4e},{:.4e},{:.4e},{:.4},{:.4},{},{},{:.2},{:.4e},{},{},{},{:.2},{:.4e},{:.4e},{},{:.2},{:.4e},{:.4e},{:.2},{:.4e},{:.4e},{:.2},{:.4e},{:.4e},{:.4e},{:.4e},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.4},{:.4}",
+            "{},{},{},{},{:.8},{:.8},{:.8},{:.4e},{:.4e},{:.4e},{:.4e},{:.4e},{:.4e},{:.4},{:.4},{},{},{:.2},{:.4e},{},{},{},{:.2},{:.4e},{:.4e},{:.2},{:.4e},{:.4e},{:.4e},{:.4e},{:.1},{:.1},{:.1},{:.4},{:.4}",
             r.theta, r.ni, r.nj, r.lim, r.cp_gpu, r.cp_cpu, r.cp_tm, r.cmp.avg_cp_rel, r.cmp.max_rel_cp_window, r.cmp.max_rel_cp_all,
             r.cmp.max_dp_over_pinf, r.cmp.rms_dp_over_pinf, r.cmp.max_rel_rho, r.beta_gpu, r.beta_cpu,
             r.cpu.iters_stop, r.cpu.reason, r.cpu.drop_orders, r.cpu.residual.last().unwrap(),
             r.gpu.iters_stop, r.gpu.iters_exec, r.gpu.reason, r.gpu.drop_orders, r.gpu.residual[r.gpu.iters_stop - 1], floor(&r.gpu.residual).0,
-            r.direct.iters_stop, r.direct.drop_orders, r.cmp_direct.avg_cp_rel, r.cmp_direct.max_rel_cp_window,
             r.f32run.drop_orders, floor(&r.f32run.residual).1, r.cmp_f32.avg_cp_rel,
-            r.comp.drop_orders, floor(&r.comp.residual).1, r.cmp_comp.avg_cp_rel,
             r.on_cpu_state_f32.0, r.on_cpu_state_ext.0,
-            pf.cpu_us, pf.guarded_us, pf.guarded_comp_us, pf.guarded_f32_us, pf.direct_us, pf.direct_f32_us,
+            pf.cpu_us, pf.ext_us, pf.f32_us,
             r.gpu.setup_seconds, r.gpu.warmup_seconds
         )
         .unwrap();

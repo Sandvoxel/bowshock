@@ -1,5 +1,5 @@
 //! GPU runner of a [`Case`]: the same procedure, stopping rules and post-processing as the CPU [`crate::run::run_on`], with the
-//! iterations executed by `bowshock_gpu::GpuSolver`.
+//! iterations executed by `bowshock_gpu::GpuSolver` (Luma array ops).
 //!
 //! The GPU records [`SYNC`] iterations back to back and reads the residual history. The monitor of the CPU loop (every
 //! [`MONITOR_EVERY`] iterations, which is the synchronisation interval) is sampled once per full chunk: the base-pressure
@@ -15,7 +15,7 @@ use crate::result::{PointResult, StopReason};
 use crate::run::{finish, monitor, stop_reason, wall_distribution};
 use bowshock_core::gas::{cons_to_prim, freestream};
 use bowshock_core::solver::Solver;
-use bowshock_gpu::{GpuSolver, Mode, Precision, Result};
+use bowshock_gpu::{GpuSolver, Precision, Result};
 use std::time::Instant;
 
 /// Iterations between two synchronisations; equal to the monitor sampling interval of the CPU runner.
@@ -50,7 +50,7 @@ impl GpuRun {
 
 impl GpuRunner {
     /// Builds the host solver of `case` and uploads it to the default GPU context.
-    pub fn new(case: &Case, mode: Mode, prec: Precision) -> Result<GpuRunner> {
+    pub fn new(case: &Case, prec: Precision) -> Result<GpuRunner> {
         let host = case.build_solver();
         let t0 = Instant::now();
         let ctx = luma::default_context()?;
@@ -58,7 +58,7 @@ impl GpuRunner {
         if ctx.is_cpu() {
             return Err(bowshock_gpu::GpuError::Unsupported("no GPU: Luma opened a software (CPU) Vulkan device"));
         }
-        let gpu = GpuSolver::from_host(&ctx, &host, mode, prec)?;
+        let gpu = GpuSolver::from_host(&ctx, &host, prec)?;
         Ok(GpuRunner { gpu, host, setup_seconds: t0.elapsed().as_secs_f64() })
     }
 
@@ -73,12 +73,12 @@ impl GpuRunner {
     pub fn run_on(&mut self, case: &Case, warm: bool, r_ref: Option<f64>) -> Result<GpuRun> {
         let n = case.numerics;
         let fs = freestream(case.mach);
-        for cfg in [self.gpu.config_mut(), &mut self.host.cfg] {
-            cfg.freestream = fs;
-            cfg.cfl = n.cfl;
-            cfg.limiter = n.limiter;
-            cfg.first_order_iters = n.first_order_iters;
-        }
+        let cfg = &mut self.host.cfg;
+        cfg.freestream = fs;
+        cfg.cfl = n.cfl;
+        cfg.limiter = n.limiter;
+        cfg.first_order_iters = n.first_order_iters;
+        self.gpu.set_config(&self.host.cfg)?;
         self.host.low_mach = n.low_mach;
         self.gpu.set_low_mach(n.low_mach);
         if self.gpu.scheme() != n.scheme {
@@ -86,7 +86,7 @@ impl GpuRunner {
             self.host.set_scheme(n.scheme);
         }
         if warm {
-            self.gpu.iter = n.first_order_iters;
+            self.gpu.set_iter(n.first_order_iters);
             self.gpu.restart_ramp(); // implicit scheme: CFL ramp restarts at every Mach number
         } else {
             self.gpu.reset()?; // free stream of `case.mach`, iteration 0, ramp restarted

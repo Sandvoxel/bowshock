@@ -1,11 +1,11 @@
 //! GPU vs CPU transonic Mach sweep, mirroring the CPU `transonic` bin: nose-cylinder body on the large-domain grid with
 //! characteristic far-field BCs, forebody pressure drag CD vs Mach compared between the f64 CPU solver and the GPU solver
-//! (extended precision, guarded formulation), plus the Stoney free-flight data (NACA RM L53K17, digitised) for reference.
+//! (extended precision), plus the Stoney free-flight data (NACA RM L53K17, digitised) for reference.
 //!
 //! Usage: `cargo run --release --bin transonic_gpu -- [--body cone|karman|lvhaack|sqrt|ogive] [--level 0|1|2] [--quick]
 //!   [--mach 0.8,0.9,...] [--warm] [--domain <body lengths>] [--max-iter N] [--drop <orders>] [--outflow pressure]
 //!   [--limiter minmod|vanalbada] [--scheme explicit|implicit] [--lowmach on|off] [--tag name] [--no-bench] [--bench-only]`
-//! `--scheme implicit` = the line-implicit convergence scheme of `bowshock-core` (`bowshock_gpu::shaders_impl`; default limiter then van Albada).
+//! `--scheme implicit` = the line-implicit convergence scheme of `bowshock-core` (default limiter then van Albada).
 //! The options and defaults are those of the CPU bin (`--quick` = grid level 0; default level 1; 12 Mach numbers 0.7 ... 1.5;
 //! cold start for every Mach number, `--warm` = start from the previous converged field). Every Mach number is run by the CPU and by
 //! the GPU with the same procedure and stopping rules. The GPU synchronises every 50 iterations (the CD sampling interval).
@@ -19,7 +19,7 @@ use bowshock_cases::transonic::{named_body, stoney, tangent_cone_cd, transonic_c
 use bowshock_core::flux::Limiter;
 use bowshock_core::implicit::ImplicitParams;
 use bowshock_core::solver::{Bc, Scheme};
-use bowshock_gpu::{Mode, Precision};
+use bowshock_gpu::Precision;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -67,10 +67,9 @@ fn write_case_files(dir: &Path, tag: &str, r: &Row) {
 
 /// Steady per-iteration cost on the case grid at `case.mach`: 1000 iterations from the free stream (MUSCL from the first
 /// iteration), best of 3, GPU with history kernels and a sync every `SYNC` iterations.
-/// Returns `(cpu_us, guarded_ext_us, direct_ext_us, guarded_f32_us)`.
-fn perf(case: &Case) -> (f64, f64, f64, f64) {
+/// Returns `(cpu_us, ext_us, f32_us)`.
+fn perf(case: &Case) -> (f64, f64, f64) {
     let n = 1000usize;
-    let implicit = matches!(case.numerics.scheme, Scheme::Implicit(_));
     let mut case = case.clone();
     case.numerics.first_order_iters = 0;
     let mut best_cpu = f64::INFINITY;
@@ -85,14 +84,9 @@ fn perf(case: &Case) -> (f64, f64, f64, f64) {
         }
         best_cpu = best_cpu.min(1e6 * t0.elapsed().as_secs_f64() / n as f64);
     }
-    let mut gpu = [f64::NAN; 3];
-    for (m, (mode, prec)) in
-        [(Mode::Guarded, Precision::Extended), (Mode::Direct, Precision::Extended), (Mode::Guarded, Precision::F32)].into_iter().enumerate()
-    {
-        if implicit && mode == Mode::Direct {
-            continue; // the line-implicit scheme exists in the guarded formulation only
-        }
-        let mut gt = GpuRunner::new(&case, mode, prec).unwrap();
+    let mut gpu = [f64::NAN; 2];
+    for (m, prec) in [Precision::Extended, Precision::F32].into_iter().enumerate() {
+        let mut gt = GpuRunner::new(&case, prec).unwrap();
         gt.gpu.run(1).unwrap();
         let mut best = f64::INFINITY;
         for _ in 0..3 {
@@ -106,7 +100,7 @@ fn perf(case: &Case) -> (f64, f64, f64, f64) {
         }
         gpu[m] = best;
     }
-    (best_cpu, gpu[0], gpu[1], gpu[2])
+    (best_cpu, gpu[0], gpu[1])
 }
 
 fn main() {
@@ -179,17 +173,17 @@ fn main() {
     );
 
     if args.iter().any(|a| a == "--bench-only") {
-        let (c, g, d, f) = perf(&make_case(0.9));
+        let (c, g, f) = perf(&make_case(0.9));
         println!("\n### Steady per-iteration cost (M = 0.9, 1000 iterations from the free stream, best of 3, sync every {SYNC}; history kernels on)");
-        println!("| grid | cells | CPU f64 rayon us/iter | GPU-guarded extended us/iter | GPU-direct extended | guarded f32 | guarded extended speed-up vs CPU | direct extended speed-up | extended / f32 cost |");
-        println!("|---|---|---|---|---|---|---|---|---|");
-        println!("| L{level} {ni}x{nj} | {} | {c:.0} | {g:.1} | {d:.1} | {f:.1} | {:.1}x | {:.1}x | {:.2}x |", ni * nj, c / g, c / d, g / f);
+        println!("| grid | cells | CPU f64 rayon us/iter | GPU extended us/iter | GPU f32 | extended speed-up vs CPU | extended / f32 cost |");
+        println!("|---|---|---|---|---|---|---|");
+        println!("| L{level} {ni}x{nj} | {} | {c:.0} | {g:.1} | {f:.1} | {:.1}x | {:.2}x |", ni * nj, c / g, g / f);
         return;
     }
 
     let mut rows: Vec<Row> = Vec::new();
     let mut cpu_solver = c0.build_solver();
-    let mut gt = GpuRunner::new(&c0, Mode::Guarded, Precision::Extended).expect("GPU solver");
+    let mut gt = GpuRunner::new(&c0, Precision::Extended).expect("GPU solver");
     println!("GPU setup (kernel build + upload): {:.3} s", gt.setup_seconds);
     let (mut r_ref_cpu, mut r_ref_gpu): (Option<f64>, Option<f64>) = (None, None);
     for (k, &m) in machs.iter().enumerate() {
@@ -218,10 +212,7 @@ fn main() {
     }
 
     // ---- tables ----
-    println!(
-        "\n### {body_name}, grid L{level} {ni}x{nj}, {}: forebody CD, GPU (guarded, extended) vs CPU (f64)",
-        if warm { "warm-start sweep" } else { "cold starts" }
-    );
+    println!("\n### {body_name}, grid L{level} {ni}x{nj}, {}: forebody CD, GPU (extended) vs CPU (f64)", if warm { "warm-start sweep" } else { "cold starts" });
     println!("| M | CD GPU | CD CPU | GPU - CPU | (GPU - CPU)/CPU % | first-cell CD diff | Cp_min GPU | Cp_min CPU | max abs dCp (wall) | M_wall,max GPU | M_wall,max CPU | Stoney (digitised) | tangent-cone / T-M |");
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     for r in &rows {
@@ -286,13 +277,13 @@ fn main() {
     }
     println!("| total | | | {tc:.1} | {tg:.2} | | | {:.1}x | |", tc / tg);
     let steady = with_bench.then(|| perf(&make_case(0.9)));
-    if let Some((c, g, d, f)) = steady {
+    if let Some((c, g, f)) = steady {
         println!("\n### Steady per-iteration cost (M = 0.9, 1000 iterations from the free stream, best of 3, sync every {SYNC}; history kernels on)");
-        println!("| grid | cells | CPU f64 rayon us/iter | GPU-guarded extended us/iter | GPU-direct extended | guarded f32 | guarded extended speed-up vs CPU | direct extended speed-up | extended / f32 cost |");
-        println!("|---|---|---|---|---|---|---|---|---|");
-        println!("| L{level} {ni}x{nj} | {} | {c:.0} | {g:.1} | {d:.1} | {f:.1} | {:.1}x | {:.1}x | {:.2}x |", ni * nj, c / g, c / d, g / f);
+        println!("| grid | cells | CPU f64 rayon us/iter | GPU extended us/iter | GPU f32 | extended speed-up vs CPU | extended / f32 cost |");
+        println!("|---|---|---|---|---|---|---|");
+        println!("| L{level} {ni}x{nj} | {} | {c:.0} | {g:.1} | {f:.1} | {:.1}x | {:.2}x |", ni * nj, c / g, g / f);
         println!("\n### Time to the stopping criterion from the steady cost above (iterations x steady us/iter)");
-        println!("| M | CPU iters | CPU s | GPU iters (exec) | GPU-guarded s | speed-up |");
+        println!("| M | CPU iters | CPU s | GPU iters (exec) | GPU s | speed-up |");
         println!("|---|---|---|---|---|---|");
         let (mut tc, mut tg) = (0.0, 0.0);
         for r in &rows {
@@ -334,10 +325,10 @@ fn main() {
         )
         .unwrap();
     }
-    if let Some((c, g, d, f32us)) = steady {
+    if let Some((c, g, f32us)) = steady {
         let mut f = fs::File::create(out_dir.join(format!("steady_{tag}.csv"))).unwrap();
-        writeln!(f, "ni,nj,cpu_us,gpu_guarded_ext_us,gpu_direct_ext_us,gpu_guarded_f32_us").unwrap();
-        writeln!(f, "{ni},{nj},{c:.1},{g:.1},{d:.1},{f32us:.1}").unwrap();
+        writeln!(f, "ni,nj,cpu_us,gpu_ext_us,gpu_f32_us").unwrap();
+        writeln!(f, "{ni},{nj},{c:.1},{g:.1},{f32us:.1}").unwrap();
     }
     println!("\nCSV output written to {}", out_dir.canonicalize().unwrap_or(out_dir).display());
 }

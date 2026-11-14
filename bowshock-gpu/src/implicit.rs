@@ -312,6 +312,7 @@ fn pressure_outflow_ghost_f(p_back: f64, interior: &V4, nx: &F, nr: &F) -> V4 {
 }
 
 /// `T = dU_ghost / dU_interior` of a boundary's first ghost layer.
+#[allow(clippy::large_enum_variant)]
 enum Tj {
     /// Fixed free stream.
     Zero,

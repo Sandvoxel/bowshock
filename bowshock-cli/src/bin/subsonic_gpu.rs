@@ -1,6 +1,6 @@
 //! GPU vs CPU subsonic Mach sweep, mirroring the CPU `subsonic` bin: nose-cylinder body with and without a flat blunt base on the
 //! large-domain grid with characteristic far field; line-implicit convergence scheme, low-Mach flux correction, base block / wake. Each
-//! case is run by the f64 CPU solver and by the GPU solver (guarded formulation, extended precision) with the same procedure and stopping
+//! case is run by the f64 CPU solver and by the GPU solver (extended precision) with the same procedure and stopping
 //! rules; drag breakdown, base pressure, wall Cp and the cost of both are compared.
 //!
 //! Usage: `cargo run --release --bin subsonic_gpu -- [--body ogive|cone|karman|lvhaack|sqrt|parabola] [--level 0|1|2] [--quick]
@@ -21,7 +21,7 @@ use bowshock_cases::transonic::named_body;
 use bowshock_core::flux::Limiter;
 use bowshock_core::implicit::ImplicitParams;
 use bowshock_core::solver::Scheme;
-use bowshock_gpu::{Mode, Precision};
+use bowshock_gpu::Precision;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
@@ -147,7 +147,7 @@ fn write_case_files(dir: &Path, name: &str, r: &Row) {
 }
 
 /// Steady per-iteration cost on the case grid at `case.mach`: 1000 iterations from the free stream (MUSCL from the first iteration),
-/// best of 3, GPU with history kernels and a sync every `SYNC` iterations. Returns `(cpu_us, gpu_guarded_ext_us, gpu_guarded_f32_us)`
+/// best of 3, GPU with history kernels and a sync every `SYNC` iterations. Returns `(cpu_us, gpu_ext_us, gpu_f32_us)`
 /// (CPU omitted, NaN, with `cpu = false`). The CPU ramps its CFL during the warm-up as the implicit scheme does at the start of a run.
 fn perf(case: &Case, cpu: bool) -> (f64, f64, f64) {
     let n = 1000usize;
@@ -170,7 +170,7 @@ fn perf(case: &Case, cpu: bool) -> (f64, f64, f64) {
     }
     let mut gpu = [0.0f64; 2];
     for (m, prec) in [Precision::Extended, Precision::F32].into_iter().enumerate() {
-        let mut gs = GpuRunner::new(&case, Mode::Guarded, prec).unwrap();
+        let mut gs = GpuRunner::new(&case, prec).unwrap();
         gs.gpu.run(1).unwrap();
         let mut best = f64::INFINITY;
         for _ in 0..3 {
@@ -195,7 +195,7 @@ fn main() {
     let t0 = Instant::now();
     let _ctx = luma::default_context().expect("open GPU");
     println!(
-        "bowshock-gpu subsonic: grid level {}, limiter {:?}, low-Mach {}, scheme {}; GPU guarded, extended precision (Luma, f32 storage) vs f64 CPU (bowshock-core)",
+        "bowshock-gpu subsonic: grid level {}, limiter {:?}, low-Mach {}, scheme {}; GPU extended precision (Luma array ops) vs f64 CPU (bowshock-core)",
         opts.level,
         opts.limiter,
         opts.low_mach,
@@ -253,7 +253,7 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
     for &base in &bases {
         let c0 = make(machs[0], base);
         let (ni, nj) = c0.cells();
-        let mut gs = GpuRunner::new(&c0, Mode::Guarded, Precision::Extended).expect("GPU solver");
+        let mut gs = GpuRunner::new(&c0, Precision::Extended).expect("GPU solver");
         println!("\nbase = {base}: grid {ni}x{nj} ({} cells), GPU setup (kernel build + upload) {:.3} s", ni * nj, gs.setup_seconds);
         let mut cpu_solver = c0.build_solver();
         let (mut r_ref_cpu, mut r_ref_gpu): (Option<f64>, Option<f64>) = (None, None);
@@ -296,7 +296,7 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
     }
 
     // ---- tables ----
-    println!("\n### {body_name}, grid level {}, {}: GPU (guarded, extended) vs CPU (f64)", opts.level, if warm { "warm starts" } else { "cold starts" });
+    println!("\n### {body_name}, grid level {}, {}: GPU (extended) vs CPU (f64)", opts.level, if warm { "warm starts" } else { "cold starts" });
     println!("| M | base | CD nose GPU | CD nose CPU | CD base GPU | CD base CPU | CD total GPU | CD total CPU | Cp_b GPU | Cp_b CPU | Cp_min GPU | Cp_min CPU | max abs dCp (wall) | CD base corr. | CD total corr. | check |");
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     let f = |v: Option<f64>, p: usize| v.map_or("-".to_string(), |v| format!("{v:+.p$}"));
@@ -387,9 +387,7 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
     let mut steady = Vec::new();
     if with_bench {
         println!("\n### Steady per-iteration cost (M = 0.5, 1000 iterations from the free stream, best of 3, sync every {SYNC}; history kernels on)");
-        println!(
-            "| base | grid | cells | CPU f64 rayon us/iter | GPU-guarded extended us/iter | guarded f32 | extended speed-up vs CPU | extended / f32 cost |"
-        );
+        println!("| base | grid | cells | CPU f64 rayon us/iter | GPU extended us/iter | GPU f32 | extended speed-up vs CPU | extended / f32 cost |");
         println!("|---|---|---|---|---|---|---|---|");
         for &base in &bases {
             let c = make(0.5, base);
@@ -442,7 +440,7 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
     }
     if !steady.is_empty() {
         let mut f = fs::File::create(out_dir.join(format!("steady_{tag}.csv"))).unwrap();
-        writeln!(f, "base,ni,nj,cpu_us,gpu_guarded_ext_us,gpu_guarded_f32_us").unwrap();
+        writeln!(f, "base,ni,nj,cpu_us,gpu_ext_us,gpu_f32_us").unwrap();
         for (b, ni, nj, c, g, f32us) in steady {
             writeln!(f, "{b},{ni},{nj},{c:.1},{g:.1},{f32us:.1}").unwrap();
         }
@@ -468,7 +466,7 @@ fn validate(out_dir: &Path, opts: &Opts, args: &[String]) {
             } else {
                 (None, 0.0)
             };
-            let mut gs = GpuRunner::new(&case, Mode::Guarded, Precision::Extended).unwrap();
+            let mut gs = GpuRunner::new(&case, Precision::Extended).unwrap();
             let mut gcase = case.clone();
             if let Some(c) = &cpu {
                 gcase.numerics.min_iter = c.iters;

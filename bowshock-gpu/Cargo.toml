@@ -4,12 +4,17 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "f32 Luma/WGSL port of the bowshock-core axisymmetric Euler solver (HLLC + MUSCL, SSP-RK3 / line-implicit), validated against the CPU f64 reference"
+description = "Luma array-op GPU solver for the bowshock-core axisymmetric Euler equations (HLLC + MUSCL, SSP-RK3 / line-implicit; f32 and double-float), validated against the CPU f64 reference"
 
 [dependencies]
 bowshock-core.workspace = true
 luma.workspace = true
-encase.workspace = true
+
+[dev-dependencies]
+# set-ups of the benchmark and the examples (cone, transonic and subsonic cases)
+bowshock.workspace = true
+bowshock-cases.workspace = true
+bowshock-reference.workspace = true
 
 [lints]
 workspace = true

@@ -112,7 +112,7 @@ fn limited_slope(a: &A, b: &A, lim: Limiter) -> A {
     let same_sign = (a * b).gt(c(0.0));
     match lim {
         Limiter::FirstOrder => unreachable!("first order reconstruction has no slopes"),
-        Limiter::Minmod => select(&same_sign, select(&a.abs().lt(&b.abs()), a, b), c(0.0)),
+        Limiter::Minmod => select(&same_sign, select(&a.abs().lt(b.abs()), a, b), c(0.0)),
         Limiter::VanAlbada => {
             let eps = 1e-14;
             let slope = (a * (b * b + c(eps)) + b * (a * a + c(eps))) / (a * a + b * b + c(2.0 * eps));
@@ -364,17 +364,7 @@ impl LazySolver {
                 let v: Vec<f64> = if side < 2 { faces.iter().flat_map(|f| [g(f), g(f)]).collect() } else { [0, 1].iter().flat_map(|_| faces.iter().map(g)).collect() };
                 up(ctx, &v, shape)
             };
-            let fixed = if cfg.bc[side] == Bc::Freestream {
-                let fs = cfg.freestream;
-                let mut v = Vec::new();
-                for k in 0..4 {
-                    v.push(up(ctx, &vec![fs[k]; shape[0] * shape[1]], shape)?);
-                }
-                let mut it = v.into_iter();
-                Some(rec(|_| it.next().unwrap()))
-            } else {
-                None
-            };
+            let fixed = fixed_ghost(ctx, cfg, side, shape)?;
             Ok(Boundary { nx: layered(&|f| f.nx)?, nr: layered(&|f| f.nr)?, onx: layered(&|f| outward * f.nx)?, onr: layered(&|f| outward * f.nr)?, fixed })
         };
         let geo = Geo {

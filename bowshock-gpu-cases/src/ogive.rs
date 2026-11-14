@@ -7,7 +7,7 @@ use bowshock::result::WallPoint;
 use bowshock_cases::ogive::OgiveCase;
 use bowshock_core::gas::cons_to_prim;
 use bowshock_core::grid::Grid;
-use bowshock_gpu::{Mode, Precision, Result};
+use bowshock_gpu::{Precision, Result};
 
 /// Wall and integral results of a converged (or stopped) ogive state.
 pub struct Post {
@@ -72,9 +72,9 @@ pub fn run_cpu(case: &OgiveCase) -> OgiveRun {
 
 /// GPU run on the grid/config of `case.build_solver()`; kernels for `chunk` iterations are recorded back to back and
 /// the stopping criteria are tested on the residual history read back after each chunk.
-pub fn run_gpu(case: &OgiveCase, chunk: usize, mode: Mode, prec: Precision) -> Result<OgiveRun> {
+pub fn run_gpu(case: &OgiveCase, chunk: usize, prec: Precision) -> Result<OgiveRun> {
     let host = case.build_solver();
-    let run = gpu_loop(&host, case.max_iter, case.drop_orders, chunk, mode, prec)?;
+    let run = gpu_loop(&host, case.max_iter, case.drop_orders, chunk, prec)?;
     let post = postprocess(case, &host.grid, &host.cfg.freestream, &run.u);
     Ok(OgiveRun { run, post })
 }

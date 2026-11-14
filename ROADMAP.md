@@ -71,7 +71,7 @@ Status: done on branch `usable-release`. Deviations: the `Params` check is done 
 - [x] Fix stale text: `cd cfd` and "28 unit tests" in `bowshock-core/README.md`; `bowshock-cfd` in the
       banner strings of every binary in `bowshock-cli/src/bin/`.
 - [x] Add a test that the Rust `Params` struct and the WGSL `Params` block in `shaders::common` have the
-      same size and field order. — done differently: both are generated from one `params!` macro in `bowshock-gpu/src/lib.rs`, so there is nothing left to compare.
+      same size and field order. — done differently: both are generated from one `params!` macro in `bowshock-gpu/src/lib.rs`, so there was nothing to compare (the macro and the WGSL are gone with the array-op solver).
 
 Exit: CI is green on a machine without a GPU — not observed: the workflow is in `.github/workflows/ci.yml` but nothing was pushed, so it has never run.
 
@@ -190,18 +190,20 @@ Exit: the command in "Target" works on a fresh checkout following only the READM
 
 Goal: the GPU is a switch, not a second codebase, and the speed claims are measured against a fair baseline.
 
+Status: the GPU solver is now the Luma array-op solver (`bowshock-gpu`, no custom kernels); viscous runs use the CPU until the viscous terms are ported to it.
+
 - [ ] `Backend::{Cpu, Gpu}` on the public analysis; `bowshock-gpu` behind a cargo feature so CPU-only users
       do not compile wgpu.
 - [ ] Record a baseline first: wall time for a standard sweep on CPU and GPU. Set targets from that.
 - [ ] CPU: remove per-iteration allocation in `implicit.rs` (`assemble` allocates the three block arrays
       for both directions every step; the j-line solves gather into per-column vectors) and in
       `Solver::smooth_residual`. Check rayon granularity on small grids.
-- [ ] Generate the f32 and double-float WGSL kernels from one source where possible, so a physics change is
-      made twice (Rust and WGSL), not three times.
+- [x] Generate the f32 and double-float WGSL kernels from one source where possible, so a physics change is
+      made twice (Rust and WGSL), not three times. — superseded: `bowshock-gpu` is plain Luma array ops, one source (`body.rs`, `implicit.rs`) included once per precision; there is no WGSL left.
 - [ ] Re-measure the speed-up after the CPU work and update `bowshock-gpu/README.md`.
 
 Exit: the same sweep runs on either backend through the same API and agrees within the tolerances already
-used in `gpu_vs_cpu.rs`.
+used in `bowshock-gpu-cases/tests`.
 
 ### M7 — Docs and release
 

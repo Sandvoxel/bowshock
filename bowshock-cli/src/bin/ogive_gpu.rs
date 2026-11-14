@@ -1,15 +1,15 @@
 //! GPU vs CPU tangent-ogive-cylinder validation, mirroring the CPU `ogive` bin: M = 1.98, fineness-ratio-3
 //! tangent ogive + cylinder (Perkins & Jorgensen, NACA RM A54H23, Table I(a)), coarse/medium/fine grids. The GPU solver
-//! runs in extended precision (default) in the guarded formulation (`--direct` adds the direct formulation).
+//! runs in extended precision (default, double-float).
 //!
-//! Usage: `cargo run --release --bin ogive_gpu [-- --quick] [--limiter minmod|vanalbada] [--chunk K] [--direct] [--no-bench]
+//! Usage: `cargo run --release --bin ogive_gpu [-- --quick] [--limiter minmod|vanalbada] [--chunk K] [--no-bench]
 //!         [--mach M]`
 //! `--quick` runs only the coarse and medium grids; `--chunk` is the number of iterations recorded between two
 //! synchronisations (default 50, max 256). Output: `out/gpu_ogive/`.
 
 use bowshock_cases::ogive::{perkins_jorgensen as pj, wall_cp_at, OgiveCase};
 use bowshock_core::flux::Limiter;
-use bowshock_gpu::{GpuSolver, Mode, Precision};
+use bowshock_gpu::{GpuSolver, Precision};
 use bowshock_gpu_cases::ogive::{compare, run_cpu, run_gpu, Compare, OgiveRun};
 use bowshock_reference::shock_expansion::{Ogive, SurfaceTheory};
 use std::fs;
@@ -37,8 +37,8 @@ fn write_csvs(dir: &Path, tag: &str, gpu: &OgiveRun, cpu: &OgiveRun, th: &Surfac
 }
 
 /// Steady per-iteration cost on the case grid: 1000 iterations from the free stream (MUSCL from the first iteration),
-/// best of 3, GPU with history kernels and a sync every `chunk` iterations. Returns `(cpu_us, guarded_ext_us, direct_ext_us, guarded_f32_us)`.
-fn perf(case: &OgiveCase, chunk: usize) -> (f64, f64, f64, f64) {
+/// best of 3, GPU with history kernels and a sync every `chunk` iterations. Returns `(cpu_us, ext_us, f32_us)`.
+fn perf(case: &OgiveCase, chunk: usize) -> (f64, f64, f64) {
     let n = 1000usize;
     let mut case = case.clone();
     case.first_order_iters = 0;
@@ -55,12 +55,10 @@ fn perf(case: &OgiveCase, chunk: usize) -> (f64, f64, f64, f64) {
         best_cpu = best_cpu.min(1e6 * t0.elapsed().as_secs_f64() / n as f64);
     }
     let ctx = luma::default_context().unwrap();
-    let mut gpu = [0.0f64; 3];
-    for (m, (mode, prec)) in
-        [(Mode::Guarded, Precision::Extended), (Mode::Direct, Precision::Extended), (Mode::Guarded, Precision::F32)].into_iter().enumerate()
-    {
+    let mut gpu = [0.0f64; 2];
+    for (m, prec) in [Precision::Extended, Precision::F32].into_iter().enumerate() {
         let host = case.build_solver();
-        let mut g = GpuSolver::new_with(&ctx, &host.grid, &host.cfg, mode, prec).unwrap();
+        let mut g = GpuSolver::new(&ctx, &host.grid, &host.cfg, prec).unwrap();
         g.run(1).unwrap();
         let mut best = f64::INFINITY;
         for _ in 0..3 {
@@ -74,7 +72,7 @@ fn perf(case: &OgiveCase, chunk: usize) -> (f64, f64, f64, f64) {
         }
         gpu[m] = best;
     }
-    (best_cpu, gpu[0], gpu[1], gpu[2])
+    (best_cpu, gpu[0], gpu[1])
 }
 
 struct Row {
@@ -82,18 +80,15 @@ struct Row {
     ni: usize,
     nj: usize,
     cmp: Compare,
-    cmp_direct: Option<Compare>,
     gpu: OgiveRun,
     cpu: OgiveRun,
-    direct: Option<OgiveRun>,
-    perf: Option<(f64, f64, f64, f64)>,
+    perf: Option<(f64, f64, f64)>,
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let arg = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let quick = args.iter().any(|a| a == "--quick");
-    let with_direct = args.iter().any(|a| a == "--direct");
     let with_bench = !args.iter().any(|a| a == "--no-bench");
     let limiter = match arg("--limiter").as_deref() {
         Some("vanalbada") => Limiter::VanAlbada,
@@ -116,21 +111,14 @@ fn main() {
 
     if args.iter().any(|a| a == "--bench-only") {
         println!("\n### Steady per-iteration cost (1000 iterations from the free stream, best of 3, sync every K={chunk}; history kernels on)");
-        println!("| grid | cells | CPU f64 rayon us/iter | GPU-guarded extended us/iter | GPU-direct extended | guarded f32 | guarded extended speed-up vs CPU | direct extended speed-up | extended / f32 cost |");
-        println!("|---|---|---|---|---|---|---|---|---|");
+        println!("| grid | cells | CPU f64 rayon us/iter | GPU extended us/iter | GPU f32 | extended speed-up vs CPU | extended / f32 cost |");
+        println!("|---|---|---|---|---|---|---|");
         for lv in 0..n_levels {
             let mut case = OgiveCase::level(mach, lv);
             case.limiter = limiter;
             let (ni, nj) = case.cells();
-            let (c, g, d, f) = perf(&case, chunk);
-            println!(
-                "| {} {ni}x{nj} | {} | {c:.0} | {g:.1} | {d:.1} | {f:.1} | {:.1}x | {:.1}x | {:.2}x |",
-                GRID_NAMES[lv as usize],
-                ni * nj,
-                c / g,
-                c / d,
-                g / f
-            );
+            let (c, g, f) = perf(&case, chunk);
+            println!("| {} {ni}x{nj} | {} | {c:.0} | {g:.1} | {f:.1} | {:.1}x | {:.2}x |", GRID_NAMES[lv as usize], ni * nj, c / g, g / f);
         }
         return;
     }
@@ -151,11 +139,9 @@ fn main() {
         let (ni, nj) = case.cells();
         let name = GRID_NAMES[lv as usize];
         let cpu = run_cpu(&case);
-        let gpu = run_gpu(&case, chunk, Mode::Guarded, Precision::Extended).expect("GPU run (guarded, extended)");
-        let direct = with_direct.then(|| run_gpu(&case, chunk, Mode::Direct, Precision::Extended).expect("GPU run (direct, extended)"));
+        let gpu = run_gpu(&case, chunk, Precision::Extended).expect("GPU run (extended)");
         let fs = bowshock_core::gas::freestream(mach);
         let cmp = compare(&case, &fs, &gpu, &cpu);
-        let cmp_direct = direct.as_ref().map(|d| compare(&case, &fs, d, &cpu));
         println!(
             "  {name:6} {ni}x{nj}: CPU {} it ({:.1} s, {}, {:.1} orders) | GPU {} it stop / {} exec ({:.2} s, {}, {:.1} orders)",
             cpu.run.iters_stop,
@@ -173,18 +159,9 @@ fn main() {
             gpu.post.cd_nose, cpu.post.cd_nose, 100.0 * cmp.cd_rel, 100.0 * cmp.cd_cell_rel, 100.0 * cmp.avg_cp_nose_rel, 100.0 * cmp.max_rel_cp_nose,
             cmp.max_abs_dcp_wall, cmp.max_dp_over_pinf, cmp.rms_dp_over_pinf, cmp.max_rel_rho, gpu.post.min_rho, gpu.post.min_p
         );
-        if let Some(d) = &direct {
-            println!(
-                "         direct-mode GPU: {} it ({:.2} s), CD_nose {:.5} (diff vs CPU {:+.1e}%)",
-                d.run.iters_stop,
-                d.run.loop_seconds,
-                d.post.cd_nose,
-                100.0 * cmp_direct.unwrap().cd_rel
-            );
-        }
         write_csvs(&out_dir, &format!("M{mach}_{name}"), &gpu, &cpu, &th);
         let pf = with_bench.then(|| perf(&case, chunk));
-        rows.push(Row { name, ni, nj, cmp, cmp_direct, gpu, cpu, direct, perf: pf });
+        rows.push(Row { name, ni, nj, cmp, gpu, cpu, perf: pf });
     }
 
     // ---- tables ----
@@ -199,7 +176,7 @@ fn main() {
         println!("| GPU {} {}x{} | {:.5} | {:+.2e} |", r.name, r.ni, r.nj, r.gpu.post.cd_nose, 100.0 * r.cmp.cd_rel);
     }
 
-    println!("\n### Accuracy: GPU (guarded, extended) vs CPU (f64)");
+    println!("\n### Accuracy: GPU (extended) vs CPU (f64)");
     println!("| grid | cells | CD GPU | CD CPU | CD diff % | CD first-cell diff % | nose mean Cp diff % | max rel Cp diff nose (abs(Cp) >= 0.05) % | max abs dCp (wall) | max dp/p_inf | rms dp/p_inf | max drho/rho |");
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|");
     for r in &rows {
@@ -220,21 +197,6 @@ fn main() {
             r.cmp.rms_dp_over_pinf,
             r.cmp.max_rel_rho
         );
-        if let (Some(d), Some(c)) = (&r.direct, &r.cmp_direct) {
-            println!(
-                "| {} direct | | {:.5} | | {:+.1e} | {:+.1e} | {:+.1e} | {:.1e} | {:.1e} | {:.2e} | {:.2e} | {:.2e} |",
-                r.name,
-                d.post.cd_nose,
-                100.0 * c.cd_rel,
-                100.0 * c.cd_cell_rel,
-                100.0 * c.avg_cp_nose_rel,
-                100.0 * c.max_rel_cp_nose,
-                c.max_abs_dcp_wall,
-                c.max_dp_over_pinf,
-                c.rms_dp_over_pinf,
-                c.max_rel_rho
-            );
-        }
     }
 
     if mach == pj::MACH {
@@ -310,30 +272,17 @@ fn main() {
     }
     if with_bench {
         println!("\n### Steady per-iteration cost (1000 iterations from the free stream, best of 3, sync every K={chunk}; history kernels on)");
-        println!("| grid | cells | CPU f64 rayon us/iter | GPU-guarded extended us/iter | GPU-direct extended | guarded f32 | guarded extended speed-up vs CPU | direct extended speed-up | extended / f32 cost |");
-        println!("|---|---|---|---|---|---|---|---|---|");
+        println!("| grid | cells | CPU f64 rayon us/iter | GPU extended us/iter | GPU f32 | extended speed-up vs CPU | extended / f32 cost |");
+        println!("|---|---|---|---|---|---|---|");
         for r in &rows {
-            let (c, g, d, f) = r.perf.unwrap();
-            println!(
-                "| {} {}x{} | {} | {:.0} | {:.1} | {:.1} | {:.1} | {:.1}x | {:.1}x | {:.2}x |",
-                r.name,
-                r.ni,
-                r.nj,
-                r.ni * r.nj,
-                c,
-                g,
-                d,
-                f,
-                c / g,
-                c / d,
-                g / f
-            );
+            let (c, g, f) = r.perf.unwrap();
+            println!("| {} {}x{} | {} | {:.0} | {:.1} | {:.1} | {:.1}x | {:.2}x |", r.name, r.ni, r.nj, r.ni * r.nj, c, g, f, c / g, g / f);
         }
         println!("\n### Time to the stopping criterion (iterations to stop x steady us/iter)");
-        println!("| grid | CPU iters | CPU s | GPU iters (stop) | GPU-guarded s | speed-up |");
+        println!("| grid | CPU iters | CPU s | GPU iters (stop) | GPU s | speed-up |");
         println!("|---|---|---|---|---|---|");
         for r in &rows {
-            let (c, g, _, _) = r.perf.unwrap();
+            let (c, g, _) = r.perf.unwrap();
             let (tc, tg) = (r.cpu.run.iters_stop as f64 * c * 1e-6, r.gpu.run.iters_stop as f64 * g * 1e-6);
             println!("| {} {}x{} | {} | {:.2} | {} | {:.2} | {:.1}x |", r.name, r.ni, r.nj, r.cpu.run.iters_stop, tc, r.gpu.run.iters_stop, tg, tc / tg);
         }
@@ -342,18 +291,39 @@ fn main() {
     let mut f = fs::File::create(out_dir.join("summary.csv")).unwrap();
     writeln!(
         f,
-        "mach,grid,ni,nj,cd_gpu,cd_cpu,cd_rel_diff,cd_cell_rel_diff,nose_mean_cp_rel_diff,max_rel_cp_diff_nose,max_abs_dcp_wall,max_dp_over_pinf,rms_dp_over_pinf,max_rel_rho,cpu_iters,cpu_reason,cpu_drop_orders,gpu_iters_stop,gpu_iters_exec,gpu_reason,gpu_drop_orders,cpu_loop_s,gpu_loop_s,cpu_steady_us,gpu_guarded_ext_steady_us,gpu_direct_ext_steady_us,gpu_guarded_f32_steady_us"
+        "mach,grid,ni,nj,cd_gpu,cd_cpu,cd_rel_diff,cd_cell_rel_diff,nose_mean_cp_rel_diff,max_rel_cp_diff_nose,max_abs_dcp_wall,max_dp_over_pinf,rms_dp_over_pinf,max_rel_rho,cpu_iters,cpu_reason,cpu_drop_orders,gpu_iters_stop,gpu_iters_exec,gpu_reason,gpu_drop_orders,cpu_loop_s,gpu_loop_s,cpu_steady_us,gpu_ext_steady_us,gpu_f32_steady_us"
     )
     .unwrap();
     for r in &rows {
-        let (c, g, d, f32us) = r.perf.unwrap_or((f64::NAN, f64::NAN, f64::NAN, f64::NAN));
+        let (c, g, f32us) = r.perf.unwrap_or((f64::NAN, f64::NAN, f64::NAN));
         writeln!(
             f,
-            "{mach},{},{},{},{:.8},{:.8},{:.4e},{:.4e},{:.4e},{:.4e},{:.4e},{:.4e},{:.4e},{:.4e},{},{},{:.2},{},{},{},{:.2},{:.3},{:.3},{:.1},{:.1},{:.1},{:.1}",
-            r.name, r.ni, r.nj, r.gpu.post.cd_nose, r.cpu.post.cd_nose, r.cmp.cd_rel, r.cmp.cd_cell_rel, r.cmp.avg_cp_nose_rel, r.cmp.max_rel_cp_nose,
-            r.cmp.max_abs_dcp_wall, r.cmp.max_dp_over_pinf, r.cmp.rms_dp_over_pinf, r.cmp.max_rel_rho, r.cpu.run.iters_stop, r.cpu.run.reason,
-            r.cpu.run.drop_orders, r.gpu.run.iters_stop, r.gpu.run.iters_exec, r.gpu.run.reason, r.gpu.run.drop_orders, r.cpu.run.loop_seconds,
-            r.gpu.run.loop_seconds, c, g, d, f32us
+            "{mach},{},{},{},{:.8},{:.8},{:.4e},{:.4e},{:.4e},{:.4e},{:.4e},{:.4e},{:.4e},{:.4e},{},{},{:.2},{},{},{},{:.2},{:.3},{:.3},{:.1},{:.1},{:.1}",
+            r.name,
+            r.ni,
+            r.nj,
+            r.gpu.post.cd_nose,
+            r.cpu.post.cd_nose,
+            r.cmp.cd_rel,
+            r.cmp.cd_cell_rel,
+            r.cmp.avg_cp_nose_rel,
+            r.cmp.max_rel_cp_nose,
+            r.cmp.max_abs_dcp_wall,
+            r.cmp.max_dp_over_pinf,
+            r.cmp.rms_dp_over_pinf,
+            r.cmp.max_rel_rho,
+            r.cpu.run.iters_stop,
+            r.cpu.run.reason,
+            r.cpu.run.drop_orders,
+            r.gpu.run.iters_stop,
+            r.gpu.run.iters_exec,
+            r.gpu.run.reason,
+            r.gpu.run.drop_orders,
+            r.cpu.run.loop_seconds,
+            r.gpu.run.loop_seconds,
+            c,
+            g,
+            f32us
         )
         .unwrap();
     }

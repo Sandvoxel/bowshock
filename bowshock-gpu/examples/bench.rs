@@ -1,15 +1,13 @@
-//! Speed of the array-op solver (f32, double-float) against the hand-written WGSL kernels (`bowshock_gpu::GpuSolver`,
-//! `Mode::Guarded`, `Precision::F32` / `Extended`) and the f64 CPU `Solver` on the cone grids of `cone_gpu --bench`
+//! Speed of the array-op solver (f32, double-float) against the f64 CPU `Solver` on the cone grids of `cone_gpu --bench`
 //! (M = 2, 15 degree cone, minmod, MUSCL from the first iteration, from the free stream, best of 3).
 //!
-//! `cargo run --release --example bench [-- --quick] [--n 2000] [--sync 50] [--no-cpu] [--no-profile] [--profile-only]
+//! `cargo run --release -p bowshock-gpu --example bench [-- --quick] [--n 2000] [--sync 50] [--no-cpu] [--no-profile] [--profile-only]
 //! [--implicit] [--no-implicit]`
 //!
 //! `--implicit` runs only the line-implicit section: us/iteration of `Scheme::Implicit` on the sting case and the base case (solid
 //! block) of `subsonic_case` (M = 0.5, tangent ogive, grid levels 0 and 1; 200 iterations from the free stream, the first 100 first order) for the CPU
-//! `Solver::step`, the hand-written kernels (`Mode::Guarded`, `F32` / `Extended`) and the lazy solver (`iterate_until_all` and
-//! `iterate_all` replay), and the per-kernel profile of one lazy implicit step at level 0. `LUMA_TRIDIAGONAL=thomas|cyclic` forces
-//! the algorithm of the line solves. `--no-implicit` skips the section.
+//! `Solver::step` and the lazy solver (`iterate_until_all` and `iterate_all` replay), and the per-kernel profile of one lazy implicit step at
+//! level 0. `LUMA_TRIDIAGONAL=thomas|cyclic` forces the algorithm of the line solves. `--no-implicit` skips the section.
 //!
 //! `--quick` skips 400x200. Steady-state us/iteration excludes compilation: the first call of every loop form is run (and
 //! timed, reported separately as "first call") before the steady measurement starts.
@@ -17,8 +15,7 @@
 use bowshock::body_grid::Nose;
 use bowshock_cases::cone::{build_solver, ConeCase};
 use bowshock_cases::subsonic::subsonic_case;
-use bowshock_gpu::{GpuSolver, Mode, Precision};
-use bowshock_lazy::Staging;
+use bowshock_gpu::Staging;
 use bowshock_reference::taylor_maccoll::solve_cone;
 use std::time::Instant;
 
@@ -52,7 +49,7 @@ fn splits(p: &luma::Profile) -> String {
 /// One lazy solver of one precision: steady us/iteration of the three loop forms and the first-call time, for every staging.
 macro_rules! bench_lazy {
     ($module:ident, $staging:expr, $ctx:expr, $host:expr, $u0:expr, $n:expr, $n_eval:expr, $sync:expr) => {{
-        use bowshock_lazy::$module::LazySolver;
+        use bowshock_gpu::$module::LazySolver;
         let (n, n_eval, sync) = ($n, $n_eval, $sync);
         let t0 = Instant::now();
         let mut s = LazySolver::new($ctx, &$host.grid, &$host.cfg).unwrap();
@@ -98,11 +95,14 @@ macro_rules! bench_lazy {
 }
 
 /// The line-implicit section: see the module comment.
-fn implicit_section(ctx: &luma::Context, ctx_old: &luma_old::Context, n: usize, sync: usize, no_cpu: bool, profile: bool) {
+fn implicit_section(ctx: &luma::Context, n: usize, sync: usize, no_cpu: bool, profile: bool) {
     println!("\n### Line-implicit scheme (`Scheme::Implicit`), us/iteration: M = 0.5, {n} iterations from the free stream (100 first order), best of 3");
-    println!("`lazy until` = `iterate_until_all` with the residual recorded, `lazy replay` = `iterate_all`; `LUMA_TRIDIAGONAL` = {}", std::env::var("LUMA_TRIDIAGONAL").unwrap_or_else(|_| "(unset: Luma chooses)".into()));
-    println!("| case | level | grid | CPU f64 | custom F32 | custom Extended | lazy f32 until | lazy f32 replay | lazy df32 until | lazy df32 replay |");
-    println!("|---|---|---|---|---|---|---|---|---|---|");
+    println!(
+        "`lazy until` = `iterate_until_all` with the residual recorded, `lazy replay` = `iterate_all`; `LUMA_TRIDIAGONAL` = {}",
+        std::env::var("LUMA_TRIDIAGONAL").unwrap_or_else(|_| "(unset: Luma chooses)".into())
+    );
+    println!("| case | level | grid | CPU f64 | lazy f32 until | lazy f32 replay | lazy df32 until | lazy df32 replay |");
+    println!("|---|---|---|---|---|---|---|---|");
     for (base, level) in [(false, 0u32), (false, 1), (true, 0), (true, 1)] {
         let case = subsonic_case(0.5, Nose::TangentOgive { fineness: 3.0 }, level, base);
         let (ni, nj) = case.cells();
@@ -122,25 +122,9 @@ fn implicit_section(ctx: &luma::Context, ctx_old: &luma_old::Context, n: usize, 
                 1e6 * t0.elapsed().as_secs_f64() / n as f64
             })
         };
-        let mut custom = [0.0f64; 2];
-        for (m, prec) in [Precision::F32, Precision::Extended].into_iter().enumerate() {
-            let mut g = GpuSolver::from_host(ctx_old, &host, Mode::Guarded, prec).unwrap();
-            for _ in 0..n / sync {
-                g.run(sync).unwrap();
-            }
-            custom[m] = best_of(3, || {
-                g.reset().unwrap();
-                g.context().sync().unwrap();
-                let t0 = Instant::now();
-                for _ in 0..n / sync {
-                    g.run(sync).unwrap();
-                }
-                1e6 * t0.elapsed().as_secs_f64() / ((n / sync) * sync) as f64
-            });
-        }
         macro_rules! lazy {
             ($module:ident) => {{
-                let mut s = bowshock_lazy::$module::LazySolver::from_host(ctx, &host).unwrap();
+                let mut s = bowshock_gpu::$module::LazySolver::from_host(ctx, &host).unwrap();
                 let t0 = Instant::now();
                 s.run(n, sync).unwrap();
                 let first = t0.elapsed().as_secs_f64();
@@ -166,7 +150,14 @@ fn implicit_section(ctx: &luma::Context, ctx_old: &luma_old::Context, n: usize, 
             }};
         }
         let (f, d) = (lazy!(f32s), lazy!(df32s));
-        println!("| {} | {level} | {ni}x{nj} | {cpu:.0} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} |", if base { "base (solid block)" } else { "sting" }, custom[0], custom[1], f.0, f.1, d.0, d.1);
+        println!(
+            "| {} | {level} | {ni}x{nj} | {cpu:.0} | {:.1} | {:.1} | {:.1} | {:.1} |",
+            if base { "base (solid block)" } else { "sting" },
+            f.0,
+            f.1,
+            d.0,
+            d.1
+        );
     }
 
     for base in [false, true].into_iter().filter(|_| profile) {
@@ -174,7 +165,7 @@ fn implicit_section(ctx: &luma::Context, ctx_old: &luma_old::Context, n: usize, 
         let host = case.build_solver();
         macro_rules! profile {
             ($module:ident, $name:expr) => {{
-                let mut s = bowshock_lazy::$module::LazySolver::from_host(ctx, &host).unwrap();
+                let mut s = bowshock_gpu::$module::LazySolver::from_host(ctx, &host).unwrap();
                 s.run(n, sync).unwrap(); // past the first-order phase: the profiled step is the MUSCL one
                 let p = s.profile_step().unwrap();
                 println!(
@@ -189,7 +180,13 @@ fn implicit_section(ctx: &luma::Context, ctx_old: &luma_old::Context, n: usize, 
                 );
                 let n_replay = 20u64;
                 let p = s.profile_replay(n_replay as usize).unwrap();
-                println!("{} {} - one implicit step of the `iterate_all` replay: {} kernel launches, {} us GPU time\n", $name, if base { "base" } else { "sting" }, p.launches() as u64 / n_replay, p.total().as_micros() as u64 / n_replay);
+                println!(
+                    "{} {} - one implicit step of the `iterate_all` replay: {} kernel launches, {} us GPU time\n",
+                    $name,
+                    if base { "base" } else { "sting" },
+                    p.launches() as u64 / n_replay,
+                    p.total().as_micros() as u64 / n_replay
+                );
             }};
         }
         profile!(f32s, "lazy f32");
@@ -213,10 +210,9 @@ fn main() {
     }
 
     let ctx = luma::default_context().expect("open GPU (lazy Luma)");
-    let ctx_old = luma_old::default_context().expect("open GPU (Luma 0.2.4 of bowshock-gpu)");
-    println!("RTX 3090 via Vulkan, both Luma versions on the same adapter; {n} iterations (eval loop {n_eval}), sync every {sync}");
+    println!("{n} iterations (eval loop {n_eval}), sync every {sync}");
     if flag("--implicit") {
-        implicit_section(&ctx, &ctx_old, arg("--n").unwrap_or(200), sync, flag("--no-cpu"), !flag("--no-profile"));
+        implicit_section(&ctx, arg("--n").unwrap_or(200), sync, flag("--no-cpu"), !flag("--no-profile"));
         return;
     }
     let tm = solve_cone(2.0, 15f64.to_radians()).unwrap();
@@ -232,10 +228,10 @@ fn main() {
     println!("\n### Steady per-iteration cost, us/iteration (15 deg cone, M = 2, minmod, {n} iterations from the free stream, best of 3)");
     println!("Lazy columns: the fastest of staging x loop form (see the detail table).");
     println!(
-        "| grid | CPU f64 (rayon, {} threads) | custom F32 | custom Extended | lazy f32 | lazy df32 | lazy f32 / custom F32 | lazy df32 / custom Extended |",
+        "| grid | CPU f64 (rayon, {} threads) | lazy f32 | lazy df32 | lazy f32 vs CPU | lazy df32 vs CPU |",
         std::thread::available_parallelism().map_or(0, |n| n.get())
     );
-    println!("|---|---|---|---|---|---|---|---|");
+    println!("|---|---|---|---|---|---|");
     for &(ni, nj) in &grids {
         let mut case = ConeCase::new(2.0, 15.0, ni, nj);
         case.first_order_iters = 0;
@@ -259,25 +255,6 @@ fn main() {
             })
         };
 
-        let mut custom = [0.0f64; 2];
-        let mut custom_first = [0.0f64; 2];
-        for (m, prec) in [Precision::F32, Precision::Extended].into_iter().enumerate() {
-            let t0 = Instant::now();
-            let mut g = GpuSolver::new_with(&ctx_old, &host.grid, &host.cfg, Mode::Guarded, prec).unwrap();
-            g.run(1).unwrap();
-            custom_first[m] = t0.elapsed().as_secs_f64();
-            g.run(sync).unwrap();
-            custom[m] = best_of(3, || {
-                g.reset().unwrap();
-                g.context().sync().unwrap();
-                let t0 = Instant::now();
-                for _ in 0..n / sync {
-                    g.run(sync).unwrap();
-                }
-                1e6 * t0.elapsed().as_secs_f64() / ((n / sync) * sync) as f64
-            });
-        }
-
         let mut best = [f64::INFINITY; 2];
         for &(staging, name) in &stagings {
             let (f_first, f_forms) = bench_lazy!(f32s, staging, &ctx, host, &u0, n, n_eval, sync);
@@ -285,32 +262,26 @@ fn main() {
             best[0] = f_forms.iter().fold(best[0], |a, &b| a.min(b));
             best[1] = d_forms.iter().fold(best[1], |a, &b| a.min(b));
             details.push((ni, nj, name, f_forms, d_forms));
-            firsts.push((ni, nj, name, f_first, d_first, custom_first));
+            firsts.push((ni, nj, name, f_first, d_first));
         }
-        println!(
-            "| {ni}x{nj} | {cpu:.0} | {:.1} | {:.1} | {:.1} | {:.1} | {:.0}x | {:.0}x |",
-            custom[0],
-            custom[1],
-            best[0],
-            best[1],
-            best[0] / custom[0],
-            best[1] / custom[1]
-        );
+        println!("| {ni}x{nj} | {cpu:.0} | {:.1} | {:.1} | {:.0}x | {:.0}x |", best[0], best[1], cpu / best[0], cpu / best[1]);
     }
 
     if !details.is_empty() {
         println!("\n### Lazy solver detail, us/iteration by staging and loop form");
-        println!("`until` = `iterate_until_all` with the density residual recorded every iteration, `replay` = `iterate_all`, `eval` = `eval_all` every iteration");
+        println!(
+            "`until` = `iterate_until_all` with the density residual recorded every iteration, `replay` = `iterate_all`, `eval` = `eval_all` every iteration"
+        );
         println!("| grid | staging | f32 until | f32 replay | f32 eval | df32 until | df32 replay | df32 eval |");
         println!("|---|---|---|---|---|---|---|---|");
         for (ni, nj, name, f, d) in &details {
             println!("| {ni}x{nj} | {name} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} |", f[0], f[1], f[2], d[0], d[1], d[2]);
         }
         println!("\n### First call (construction + compile + trace + first {sync} iterations), seconds");
-        println!("| grid | staging | lazy f32 | lazy df32 | custom F32 | custom Extended |");
-        println!("|---|---|---|---|---|---|");
-        for (ni, nj, name, f, d, c) in &firsts {
-            println!("| {ni}x{nj} | {name} | {f:.2} | {d:.2} | {:.2} | {:.2} |", c[0], c[1]);
+        println!("| grid | staging | lazy f32 | lazy df32 |");
+        println!("|---|---|---|---|");
+        for (ni, nj, name, f, d) in &firsts {
+            println!("| {ni}x{nj} | {name} | {f:.2} | {d:.2} |");
         }
     }
 
@@ -323,7 +294,7 @@ fn main() {
         let host = build_solver(&case, tm.beta);
         macro_rules! profile {
             ($module:ident, $name:expr, $staging:expr, $sname:expr) => {{
-                let mut s = bowshock_lazy::$module::LazySolver::new(&ctx, &host.grid, &host.cfg).unwrap();
+                let mut s = bowshock_gpu::$module::LazySolver::new(&ctx, &host.grid, &host.cfg).unwrap();
                 s.staging = $staging;
                 s.set_state(&host.u).unwrap();
                 let p = s.profile_residual().unwrap();
@@ -367,6 +338,6 @@ fn main() {
     }
 
     if !flag("--no-implicit") && !flag("--profile-only") {
-        implicit_section(&ctx, &ctx_old, arg("--n").map_or(200, |n| n.min(200)), sync, flag("--no-cpu"), !flag("--no-profile"));
+        implicit_section(&ctx, arg("--n").map_or(200, |n| n.min(200)), sync, flag("--no-cpu"), !flag("--no-profile"));
     }
 }

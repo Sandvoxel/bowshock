@@ -14,9 +14,5 @@ bowshock-cases.workspace = true
 bowshock-gpu.workspace = true
 luma.workspace = true
 
-[[test]]
-name = "gpu_vs_cpu"
-path = "tests/gpu_vs_cpu.rs"
-
 [lints]
 workspace = true

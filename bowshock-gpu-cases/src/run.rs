@@ -9,7 +9,7 @@
 use bowshock::result::StopReason;
 use bowshock_core::gas::cons_to_prim;
 use bowshock_core::solver::Solver;
-use bowshock_gpu::{GpuSolver, Mode, Precision, Result};
+use bowshock_gpu::{GpuSolver, Precision, Result};
 use std::time::Instant;
 
 /// Convergence monitor: feed it the density residual of every iteration in order.
@@ -110,9 +110,9 @@ pub fn cpu_loop(s: &mut Solver, max_iter: usize, drop_orders: f64) -> Run {
 
 /// GPU run on the grid and configuration of `host`: kernels for `chunk` iterations are recorded back to back; the host
 /// synchronises only to read the residual history after every chunk and tests the stopping criteria on it.
-pub fn gpu_loop(host: &Solver, max_iter: usize, drop_orders: f64, chunk: usize, mode: Mode, prec: Precision) -> Result<Run> {
+pub fn gpu_loop(host: &Solver, max_iter: usize, drop_orders: f64, chunk: usize, prec: Precision) -> Result<Run> {
     let t0 = Instant::now();
-    let mut g = GpuSolver::new_with(&luma::default_context()?, &host.grid, &host.cfg, mode, prec)?;
+    let mut g = GpuSolver::new(&luma::default_context()?, &host.grid, &host.cfg, prec)?;
     let setup_seconds = t0.elapsed().as_secs_f64();
     // warm-up: first launches (driver-side pipeline work), then back to the free stream
     let t0 = Instant::now();
