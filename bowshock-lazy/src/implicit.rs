@@ -8,7 +8,7 @@
 //
 //     (I - dt J_i) X = dt R,   (I - dt J_j) dU = X,   U <- U + alpha dU,
 //
-// `R` being the residual of the full second-order scheme (`LazySolver::residual_from`, in the precision `S`). The left-hand side
+// `R` being the residual of the full second-order scheme (`LazySolver::stage_from`, in the precision `S`). The left-hand side
 // (Jacobians, dissipation, ghost Jacobians, dt, line solves, defect correction) is plain f32 like the hand-written kernels'
 // (`bowshock-gpu/src/shaders_impl.rs`): it only steers the iteration, the fixed point is that of the `S`-precision `R`.
 //
@@ -536,7 +536,7 @@ impl LazySolver {
         match self.cfg.bc[side] {
             Bc::Freestream => Tj::Zero,
             Bc::Extrapolate => Tj::Eye,
-            Bc::SlipWall => Tj::Mat(reflection_f(&e.nx, &e.nr)),
+            Bc::SlipWall => Tj::Mat(self.wall_jacobian(side, e)),
             Bc::Characteristic | Bc::PressureOutflow => {
                 let u0 = prim_to_cons_f(edge);
                 let mut entries: [E; 16] = std::array::from_fn(|_| E::Z);
@@ -560,7 +560,7 @@ impl LazySolver {
     /// Local pseudo-time step from the cell primitives `wk` (f32): `dt = cfl A / (L_i + L_j)` (`DtMode::Sum`) or
     /// `cfl A / (2 min(L_i, L_j))` (`DtMode::MinDirection`), `L_d` = half the sum of `(|u.n| + c) len` over the two faces of direction `d`.
     /// `cfl` is the one-element array of the loop state.
-    fn pseudo_dt(&self, wk: &V4, cfl: &F, mode: DtMode) -> F {
+    fn pseudo_dt(&self, wk: &V4, cfl: &F, mode: DtMode, xij: Option<(F, F)>) -> F {
         let g = &self.lg;
         let cs = (cf(GAMMA) * &wk[3] / &wk[0]).sqrt();
         let lam = |dir: usize, upper: bool| -> F {
@@ -571,6 +571,11 @@ impl LazySolver {
         };
         let li = 0.5f32 * (lam(0, false) + lam(0, true));
         let lj = 0.5f32 * (lam(1, false) + lam(1, true));
+        // a viscous run adds the diffusive limits of the two directions (`diffusion_rates`)
+        let (li, lj) = match xij {
+            Some((xi, xj)) => (li + xi, lj + xj),
+            None => (li, lj),
+        };
         match mode {
             DtMode::Sum => cfl * &g.area / (&li + &lj),
             DtMode::MinDirection => cfl * &g.area / (2.0f32 * li.minimum(&lj)),
@@ -589,7 +594,7 @@ impl LazySolver {
     /// The source `S = (0, 0, p A / V, 0)` adds `-dt dS/dU` to rows 2 of `d`: with `c = -dt (A / V) (g - 1)`,
     /// `(c q^2 / 2, -c u, -c v, c)` in columns 0..3. The first / last cell of a line folds `lo T` / `up T` into `d` (`T` from
     /// [`LazySolver::ghost_jacobian`]) and drops `lo` / `up`. `lines = false`: point-implicit, `lo = up = 0`.
-    fn factor(&self, wf: &V4, wk: &V4, dt: &F, p: &ImplicitParams, dir: usize) -> Factor {
+    fn factor(&self, wf: &V4, wk: &V4, dt: &F, p: &ImplicitParams, dir: usize, vf: Option<&VFlow>) -> Factor {
         let (ni, nj) = (self.ni, self.nj);
         let g = &self.lg;
         let dg = &g.dir[dir];
@@ -607,7 +612,7 @@ impl LazySolver {
         // (not the padded state there, which is solid or a j-direction block ghost)
         let l: V4 = match (&self.lb, dir) {
             (Some(lb), 0) => {
-                let refl = reflect_f(&r, &dg.nx, &dg.nr);
+                let refl = self.base_wall_ghost_f(&r, &dg.nx, &dg.nr);
                 std::array::from_fn(|k| select(&lb.base, &refl[k], &l[k]))
             }
             _ => l,
@@ -617,6 +622,11 @@ impl LazySolver {
             None => (&dg.first, &dg.first),
         };
         let dis = dissipation_f(&l, &r, &dg.nx, &dg.nr, p);
+        // a viscous run adds the diffusive spectral radius `2 lam I` to the dissipation matrix of every face
+        let dis = match vf {
+            Some(v) => dis.add_diag(&self.two_lambda(v, dir, &l[0], &r[0])),
+            None => dis,
+        };
         let fl = flux_jacobian_f(&l, &dg.nx, &dg.nr).add(&dis);
         let fr = flux_jacobian_f(&r, &dg.nx, &dg.nr).sub(&dis);
         // evaluate the face matrices once: the cell blocks read each of them at two cells
@@ -645,6 +655,8 @@ impl LazySolver {
             let (z, o) = (g.zero.slice(dir, 0..1), g.one.slice(dir, 0..1));
             // the first fluid cell of a line that starts behind the solid (`k0 > 0`) sees the wall: `T` = reflection about its lower face
             let refl_fold = self.lb.as_ref().map(|_| lo.mm(&reflection_f(&dg.nx.slice(dir, 0..n), &dg.nr.slice(dir, 0..n))));
+            // viscous run: the first fluid cell behind a no-slip wall sees `T = diag(1, -1, -1, 1)` instead
+            let noslip_fold = self.visc.as_ref().and_then(|v| v.fold.as_ref()).map(|_| lo.noslip_cols());
             let present: [[bool; 16]; 2] = std::array::from_fn(|s| std::array::from_fn(|k| folds[s].as_ref().is_some_and(|b| !matches!(b.0[k], E::Z))));
             let dense: [[F; 16]; 2] = std::array::from_fn(|s| folds[s].as_ref().map_or_else(|| std::array::from_fn(|_| z.clone()), |b| b.dense(&z, &o)));
             let dense = dense.cache();
@@ -665,7 +677,13 @@ impl LazySolver {
                 }
                 if let (Some(lb), Some(rf)) = (&self.lb, &refl_fold) {
                     if let E::A(x) = &rf.0[k] {
-                        d.0[k] = d.0[k].add(&E::A(select(&lb.first_refl[dir], x, 0.0f32)));
+                        let slip = self.visc.as_ref().and_then(|v| v.fold.as_ref()).map_or(&lb.first_refl[dir], |f| &f[dir][0]);
+                        d.0[k] = d.0[k].add(&E::A(select(slip, x, 0.0f32)));
+                    }
+                }
+                if let (Some(f), Some(nf)) = (self.visc.as_ref().and_then(|v| v.fold.as_ref()), &noslip_fold) {
+                    if let E::A(x) = &nf.0[k] {
+                        d.0[k] = d.0[k].add(&E::A(select(&f[dir][1], x, 0.0f32)));
                     }
                 }
                 if let (E::A(a), E::A(b)) = (&lo.0[k], &up.0[k]) {
@@ -758,20 +776,25 @@ impl LazySolver {
         let (ni, nj) = (self.ni, self.nj);
         let u = unpack(s);
         let (prim, w) = self.padded(&u);
-        let (r0, _) = self.residual_from(&prim, &w, lim, false);
+        let st = self.stage_from(prim, w, self.sst().then(|| &s[8]), lim, false);
+        let (r0, w) = (&st.res, &st.w);
         let rn = self.residual_norm(&r0[0]);
 
         // the f32 left-hand side: primitives with ghosts, pseudo-time step, factors
-        let wf: V4 = Self::lhs_rec(&w).cache();
+        let wf: V4 = Self::lhs_rec(w).cache();
         let wk: V4 = std::array::from_fn(|k| wf[k].slice(0, 2..ni + 2).slice(1, 2..nj + 2));
         let cfl = lhs(&s[5]);
-        let dt = self.pseudo_dt(&wk, &cfl, p.dt_mode);
+        let xij = st.vf.as_ref().map(|v| {
+            let (xi, xj) = self.diffusion_rates(v, &st.p[0]);
+            (lhs(&xi), lhs(&xj))
+        });
+        let dt = self.pseudo_dt(&wk, &cfl, p.dt_mode, xij);
         // solid cells: dt = 0 (as on the CPU), so that `dt R`, the right-hand side of the solves, is zero there
         let dt = match &self.lb {
             Some(lb) => select(&lb.solid, 0.0f32, &dt),
             None => dt,
         };
-        let (fi, fj) = (self.factor(&wf, &wk, &dt, p, 0), self.factor(&wf, &wk, &dt, p, 1));
+        let (fi, fj) = (self.factor(&wf, &wk, &dt, p, 0, st.vf.as_ref()), self.factor(&wf, &wk, &dt, p, 1, st.vf.as_ref()));
 
         // right-hand side and defect correction
         let b: V4 = std::array::from_fn(|k| &lhs(&r0[k]) * &dt);
@@ -795,7 +818,7 @@ impl LazySolver {
         let alpha = from_lhs(&alpha);
         let un: Rec = std::array::from_fn(|k| select(&moved, &u[k] + &alpha * from_lhs(&du[k]), &u[k]));
         let cfl_next = (&s[5] * c(p.growth)).minimum(c(p.cfl_max));
-        pack(un, rn, cfl_next)
+        pack(un, rn, cfl_next, self.turb_next(s, &st, &from_lhs(&dt)))
     }
 
     /// One iteration of the configured scheme from the loop state.
@@ -803,8 +826,8 @@ impl LazySolver {
         match self.scheme {
             Scheme::Implicit(p) => self.implicit_step(s, &p, lim),
             _ => {
-                let (u, rn) = self.rk3(&unpack(s), lim);
-                pack(u, rn, &s[5] * c(1.0))
+                let (u, rn, st) = self.rk3(&unpack(s), self.sst().then(|| &s[8]), lim);
+                pack(u, rn, &s[5] * c(1.0), self.turb_next(s, &st, st.dt.as_ref().expect("dt")))
             }
         }
     }

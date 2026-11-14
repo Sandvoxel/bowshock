@@ -26,14 +26,18 @@ cargo run --release --example luma_issues             # what still applies of th
   base/wake grids; block ghosts, base-wall face stencils and solid faces/cells are region assigns, no masks), `Limiter::{FirstOrder, Minmod, VanAlbada}`, `face_flux_lm` (HLLC blended with Rusanov by the shock sensor,
   optional low-Mach correction), all `Bc` variants (`Freestream`, `Extrapolate`, `SlipWall`, `Characteristic`, `PressureOutflow`),
   the axisymmetric pressure source, local time step, SSP-RK3 with the first-order switch (one traced loop per limiter phase).
-  Not covered: multigrid and smoothed schemes, viscous terms.
+  Viscous runs are in `src/viscous.rs` / `src/turbulence.rs` (below). Not covered: multigrid and smoothed schemes.
 * `src/implicit.rs`: the line-implicit scheme `Scheme::Implicit(ImplicitParams)` (`bowshock_core::implicit`): approximate factorization
   `(I - dt J_i)(I - dt J_j)`, the second-order residual on the right, the first-order flux Jacobians with the Roe-type dissipation
   matrix (shock-sensor blend, entropy fix) on the left, ghost-state Jacobians (exact for the free stream, extrapolation and the slip
   wall, central differences with relative step 1e-3 for the characteristic and pressure-outflow far fields), CFL ramp in the loop
   state, defect correction, positivity damping. A 4x4 block is sixteen arrays (`Blk`, with exact 0 / 1 entries that cost nothing);
   the line solves are Luma's `solve_block_tridiagonal` on `[16, ni, nj]` stacks. The left-hand side is f32 in both precisions.
-* `tests/accuracy.rs`, `tests/loops.rs`, `tests/implicit.rs`; `examples/bench.rs`, `examples/eval_loop.rs`, `examples/luma_issues.rs`.
+* `src/viscous.rs`: `LazySolver::set_viscous` (mirrors `bowshock_core::viscous`: Green-Gauss gradients, Sutherland viscosity, the corrected face gradients with the
+  ghost-mirror geometry, the viscous face fluxes, the hoop stress, the diffusive time step and the `2 lam I` of the implicit operator).
+  `src/turbulence.rs`: the Menter SST (2003) update (`bowshock_core::turbulence`): gradients, blending functions, face data, residual and line
+  coefficients, the two scalar line solves (`solve_tridiagonal`), the clipped update and the eddy viscosity.
+* `tests/accuracy.rs`, `tests/loops.rs`, `tests/implicit.rs`, `tests/viscous.rs`; `examples/bench.rs`, `examples/bench_viscous.rs`, `examples/eval_loop.rs`, `examples/luma_issues.rs`.
 
 The math reads like the CPU code, expression by expression (`body.rs`, HLLC star state; `c(x)` is the constant `x` rounded to the
 element type, `&` borrows an array):
@@ -140,6 +144,37 @@ rule of `bowshock::run::run_on`, the lazy one in chunks of 5 iterations):
 |---|---|---|---|
 | 0.3 | 484 | 484 | 1.3e-8 |
 | 0.6 | 377 | 377 | 1.6e-7 |
+
+### Viscous terms and the SST model
+
+`tests/viscous.rs`: CPU `Solver` and lazy solver start from the same state (`LazySolver::from_host`: grid, block, viscous parameters, wall
+distance and the turbulence state of the host) and run the same iterations (the first 5 first order); `max |dU| / (1 + |U|)` and the
+maximum relative difference of the residual history (from the second iteration):
+
+| case (iterations) | lazy f32 state / residual | lazy df32 state / residual |
+|---|---|---|
+| G1 laminar plate, implicit (30) | 5.4e-6 / 9.9e-4 | 1.2e-7 / 4.7e-7 |
+| G1 laminar plate, explicit (30) | | 4.0e-13 / 2.1e-11 |
+| G2 SST plate, implicit (50) | 3.8e-5 / 3.4e-2 | 1.5e-7 / 8.2e-5 |
+| G2 SST plate, explicit (50) | | 6.8e-12 / 8.3e-10 |
+| G3 body (solid block, no-slip body surface and base wall, SST), implicit (30) | 1.0e-6 / 4.4e-6 | 2.2e-8 / 6.4e-8 |
+| G3 body, explicit (30) | | 1.6e-11 / 1.7e-13 |
+
+`k`, `omega`, `mu_t` of the cells with `k > 10 k_inf` (the plate, 2012 cells): f32 1.3e-3 / 3.8e-4 / 1.2e-3, df32 5.4e-6 / 1.4e-6 / 4.0e-6; the
+G3 body (12422 cells where `k` has moved off the free stream): f32 4.0e-6 / 1.3e-5, df32 2.7e-7 / 4.7e-7; the density residual norm of `k`
+agrees to the printed digits (G2: 6.504e-4 both). The explicit scheme is round-off (all of it in `S`, with the f32 left-hand side only
+in the turbulence line solves: `k`, `omega` 1e-7 over all 9792 cells of the plate). The implicit df32 rows are 1e-7, not 1e-14: the f32 left-hand
+side steers the update, and the viscous wall cells (first cell height 4e-6 on the plate, so very high aspect ratios [INFERENCE: not isolated]) amplify its 1e-7
+error more than the inviscid grids do (3e-9). The converged G3 body (`converged_body_total_drag_matches_cpu`, `#[ignore]`: the CPU's stop rule `CD stationary` after
+4000 iterations, 4.1 orders; the lazy solver runs the same 4000 iterations from the free stream in 2.2 s (f32) / 2.7 s (df32), the CPU
+about 30 s): total CD 0.21300 on all three (f32 +0.001 %, df32 -0.000 %), `cd_friction` 0.09003, `cd_base` 0.12257, `cp_base` -0.1226,
+`y+` max 0.648, each equal to the printed digits.
+
+What is covered: `Scheme::Explicit` and `Scheme::Implicit`, laminar and SST, with and without the solid block. The no-slip walls are those of
+`bowshock_core::viscous::Walls` (the domain `jmin` wall from `wall_i_start`, the body surface from `wall_i_start`, every base-wall face, the sting
+surface), applied at all four mirror sites (`assign_ghosts`, `assign_block_ghosts`, `block_fluxes`, the implicit assembly with its `diag(1, -1,
+-1, 1)` Jacobians). The loop state grows to ten arrays (`k`, `omega`, `mu_t`, the `k` residual; one-element dummies without SST), so the
+traced loops carry the turbulence state like the CFL.
 
 ## Speed
 
@@ -315,6 +350,44 @@ they are `Tridiagonal { block: 4, workgroup: 8 }`, 128.5 us each (514 us of a 67
 with a dependent chain of 144 / 70 block eliminations, as expected. `until` is about 40 us above `replay`: the residual history, as for
 the explicit scheme.
 
+### Viscous terms and the SST model
+
+`cargo run --release --example bench_viscous [-- --laminar] [--staging ..]` (RTX 3090, shared with other jobs): `Case::viscous` on the G3 body
+(tangent ogive 0.30 x 0.10 m + 0.60 m tube, ISA 0 m, Mach 0.5, flat base and wake block, `Scheme::Implicit(ImplicitParams::VISCOUS)`, van
+Albada with the low-Mach correction), grid levels 0 (156x122) and 1 (312x122), 200 iterations from the free stream (the first 100 first
+order), best of 3, microseconds per iteration; CPU = `Solver::step` (rayon), custom = `GpuSolver::from_host` with the viscous terms set
+(`Mode::Guarded`, `run(50)` chunks), lazy `until` / `replay` as above. Default staging `Fluxes`.
+
+| model | level | grid | CPU f64 | custom F32 | custom Extended | lazy f32 until / replay | lazy df32 until / replay | lazy / custom (replay, f32 / df32) |
+|---|---|---|---|---|---|---|---|---|
+| SST | 0 | 156x122 | 6888 | 263 | 319 | 553 / 480 | 684 / 612 | 1.8x / 1.9x |
+| SST | 1 | 312x122 | 18671 | 377 | 428 | 874 / 764 | 1041 / 942 | 2.0x / 2.2x |
+| laminar | 0 | 156x122 | 7260 | 193 | 227 | 482 / 402 | 563 / 488 | 2.1x / 2.1x |
+| laminar | 1 | 312x122 | 11904 | 301 | 330 | 736 / 651 | 852 / 758 | 2.2x / 2.3x |
+
+So the lazy viscous solver is 14-24x (SST) / 18x (laminar) faster than the CPU (replay, f32) and about twice the hand-written kernels' time per iteration, as
+the inviscid implicit scheme. **Double-float is cheap here**: `df32s` costs 1.23-1.28x of `f32s` (SST), against 2.5-3.2x for the explicit
+inviscid kernels, because the left-hand side and the line solves, which are f32 in both, are most of the step. The viscous terms and SST in
+`S` are therefore the default in both precisions (no f32 special case): the arithmetic that sets the fixed point is in the element type, only
+the pseudo-time-step operators (`2 lam I`, the diffusive time step, the two scalar line solves) are f32.
+
+Staging (SST, level 0, `replay`, f32 / df32): `Fluxes` 480 / 612, `Lines` 499 / 621, `Split` 498 / 625, `Fusion` 577 / 958 (first call 2.8 s /
+14 s). `Fluxes` stays the default.
+
+One lazy SST step, level 0 (`profile_step`): 65 kernel launches, 522 us of GPU time (f32; df32 682 us; level 1: 799 / 982 us), 1 fusion cut
+(`1537 inlined operations > 1536` in the dissipation blocks). The biggest kernels, f32 level 0:
+
+| kernels | launches | GPU us |
+|---|---|---|
+| the 16-part `concat` that builds the `[16, ni, nj]` stacks of `lo`, `d`, `up` (issue 11) | 6 | 104.7 |
+| mean-flow line solves: `CyclicTridiagonal { block: 4, shared_rows: 156 }` (i lines) and `shared_rows: 122` (j lines), 3 passes each | 6 | 132.0 |
+| turbulence line solves: `CyclicTridiagonal { block: 1 }`, one per scalar and direction | 4 | 23.9 |
+| 4-output kernels (the `[4, ni, nj]` right-hand side stacks, pseudo-time step) | 2 | 28.0 |
+| assembly blocks (48 outputs, 56 outputs, 32 outputs) | 4 | ~45 |
+| residual norm (`FusedReduce`) | 1 | 9.6 |
+
+The profile of the df32 step differs by the `Df32` flux, gradient and SST kernels (one 58 us kernel, the residual norm 27 us).
+
 ## Luma issues
 
 All four bugs the prototype hit are fixed in Luma (each has a regression test there; `CHANGELOG.md`, `[Unreleased]`), and the
@@ -387,5 +460,6 @@ What still applies (`cargo run --release --example luma_issues`):
   recompile), and `StopReason` variety beyond one predicate index per rule.
 * **Speed.** The remaining gap to the hand-written kernels (14 launches per step against ~7, and the traffic of the padded record and
   the fluxes) is small in f32; in double-float it is the arithmetic: the flux kernels are 700-operation `Df32` expressions.
-* **Viscous terms.** Green-Gauss gradients and the face-gradient correction are slices and arithmetic; SST needs only `tanh`, `sqrt`, scalar
-  tridiagonal solves (`solve_tridiagonal`) and a wall-distance array. None of it was tried.
+* **Viscous terms and SST: done** (`src/viscous.rs`, `src/turbulence.rs`, see "Viscous terms and the SST model" above): Green-Gauss
+  gradients, the face-gradient correction and the viscous fluxes are slices and arithmetic as predicted; SST needed `tanh` (f32 even in
+  `df32s`: `Array<Df32>` has no `tanh`), `sqrt`, Luma's scalar tridiagonal solves and a wall-distance array uploaded from `bowshock_core`.

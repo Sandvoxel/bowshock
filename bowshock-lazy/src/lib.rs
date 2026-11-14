@@ -9,7 +9,9 @@
 //!   `bowshock_gpu::Precision::Extended`); the state is a `Df32` record through the loops.
 //!
 //! The line-implicit scheme (`Scheme::Implicit`, `implicit.rs`) is included after the solver in each module; its left-hand side is f32
-//! in both. Grids with a solid block in the implicit scheme and viscous terms are not covered.
+//! in both. The viscous terms of the compressible Navier-Stokes equations (`viscous.rs`, `LazySolver::set_viscous`) and the Menter SST
+//! k-omega model (`turbulence.rs`) follow, for both schemes and for grids with a solid block; their left-hand sides (the `2 lam I` of the
+//! implicit operator, the line solves of the two turbulence scalars) are f32 like the rest.
 
 /// How much of the order of evaluation is left to Luma's fusion engine (`LazySolver::staging`, see README).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,8 +66,15 @@ pub mod f32s {
         a.clone()
     }
 
+    /// `tanh`: the blending functions of the SST model.
+    fn tanh(a: &A) -> A {
+        a.tanh()
+    }
+
     include!("body.rs");
     include!("implicit.rs");
+    include!("viscous.rs");
+    include!("turbulence.rs");
 }
 
 /// Double-float state, residual and time step.
@@ -112,6 +121,13 @@ pub mod df32s {
         a.to_df32()
     }
 
+    /// `tanh` of the blending functions of the SST model, in f32 (`Df32` arrays have no `tanh`; the blending functions need no more).
+    fn tanh(a: &A) -> A {
+        a.to_f32().tanh().to_df32()
+    }
+
     include!("body.rs");
     include!("implicit.rs");
+    include!("viscous.rs");
+    include!("turbulence.rs");
 }
