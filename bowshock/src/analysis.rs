@@ -375,15 +375,9 @@ impl Analysis {
 
     /// Sweeps `cases` (ascending Mach) on `backend`; returns the backend used and, under `Auto`, why the GPU was not.
     fn sweep_on(&self, cases: &[Case], backend: Backend) -> Result<(Vec<PointResult>, BackendUsed, Option<String>), Error> {
-        // The GPU solver has no viscous terms yet: a viscous sweep runs on the CPU under `Auto` and is refused under `Gpu`.
-        let viscous = cases.first().is_some_and(|c| c.viscous.is_some());
         match backend {
             Backend::Cpu => Ok((self.sweep_cpu(cases), BackendUsed::Cpu, None)),
-            Backend::Gpu if viscous => Err(Error::Unsupported("viscous runs are not supported on the GPU backend yet".into())),
             Backend::Gpu => Ok((self.sweep_gpu_required(cases)?, BackendUsed::Gpu, None)),
-            Backend::Auto if viscous && cfg!(feature = "gpu") => {
-                Ok((self.sweep_cpu(cases), BackendUsed::Cpu, Some("viscous runs use the CPU (GPU viscous port pending)".into())))
-            }
             Backend::Auto => Ok(self.sweep_auto(cases)),
         }
     }

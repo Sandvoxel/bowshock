@@ -18,9 +18,11 @@ pub type A = Array<S>;
 /// Four fields: primitive `[rho, u, v, p]`, conservative `[rho, rho u, rho v, E]` or a flux. A record of arrays
 /// (`luma::Fields`): `slice`, `pad`, `assign` and `cache` apply to the four fields at once.
 pub type Rec = [A; 4];
-/// The loop state: the conserved record, the density residual of the step that produced it (one element) and the CFL of the next
-/// iteration (one element; the ramp of the implicit scheme is loop state, the explicit scheme passes it through).
-pub type State = [A; 6];
+/// The loop state: the conserved record, the density residual of the step that produced it (one element), the CFL of the next
+/// iteration (one element; the ramp of the implicit scheme is loop state, the explicit scheme passes it through) and the turbulence
+/// state of a viscous run: `k`, `omega`, the eddy viscosity (`[ni, nj]` with the SST model, one dummy element otherwise) and the
+/// density residual norm of `k` of the last update (one element).
+pub type State = [A; 10];
 
 fn rec(f: impl FnMut(usize) -> A) -> Rec {
     std::array::from_fn(f)
@@ -31,15 +33,17 @@ fn unpack(s: &State) -> Rec {
     rec(|k| s[k].clone())
 }
 
-fn pack(u: Rec, rn: A, cfl: A) -> State {
+fn pack(u: Rec, rn: A, cfl: A, t: [A; 4]) -> State {
     let [u0, u1, u2, u3] = u;
-    [u0, u1, u2, u3, rn, cfl]
+    let [k, om, mu_t, trn] = t;
+    [u0, u1, u2, u3, rn, cfl, k, om, mu_t, trn]
 }
 
 /// The loop state of host data: the conserved state `u` (cell-major, `[rho, rho u, rho v, E]`), a zero residual and the CFL `cfl`.
 fn upload_state(ctx: &Context, u: &[[f64; 4]], shape: [usize; 2], cfl: f64) -> Result<State> {
     let comp = |k: usize| up(ctx, &u.iter().map(|q| q[k]).collect::<Vec<_>>(), shape);
-    Ok([comp(0)?, comp(1)?, comp(2)?, comp(3)?, up(ctx, &[0.0], 1)?, up(ctx, &[cfl], 1)?])
+    let dummy = || up(ctx, &[0.0], 1);
+    Ok([comp(0)?, comp(1)?, comp(2)?, comp(3)?, up(ctx, &[0.0], 1)?, up(ctx, &[cfl], 1)?, dummy()?, dummy()?, dummy()?, dummy()?])
 }
 
 fn download_state(s: &State) -> Result<Vec<[f64; 4]>> {
@@ -341,6 +345,8 @@ pub struct LazySolver {
     lg: LGeo,
     /// The masks and line starts of the solid block for the implicit left-hand side (`None`: no block).
     lb: Option<LBlockGeo>,
+    /// The viscous terms (`set_viscous`; `None`: the Euler equations).
+    visc: Option<VGeo>,
 }
 
 impl LazySolver {
@@ -380,7 +386,7 @@ impl LazySolver {
             area: up(ctx, &grid.area, [ni, nj])?,
             bnd: [boundary(0)?, boundary(1)?, boundary(2)?, boundary(3)?],
         };
-        let mut s = LazySolver { ctx: ctx.clone(), ni, nj, cfg: cfg.clone(), low_mach: false, staging: DEFAULT_STAGING, geo, state: None, iter: 0, block: None, n_active: ni * nj, scheme: Scheme::Explicit, lg: LGeo::new(ctx, grid)?, lb: None };
+        let mut s = LazySolver { ctx: ctx.clone(), ni, nj, cfg: cfg.clone(), low_mach: false, staging: DEFAULT_STAGING, geo, state: None, iter: 0, block: None, n_active: ni * nj, scheme: Scheme::Explicit, lg: LGeo::new(ctx, grid)?, lb: None, visc: None };
         let q = bowshock_core::gas::prim_to_cons(&cfg.freestream);
         s.set_state(&vec![q; ni * nj])?;
         Ok(s)
@@ -394,6 +400,10 @@ impl LazySolver {
         l.set_state(&s.u)?;
         l.iter = s.iter;
         l.set_scheme(s.scheme())?;
+        l.set_viscous(s.viscous(), &s.grid)?;
+        if s.viscous().is_some_and(|v| v.turbulence == bowshock_core::solver::Turbulence::Sst) {
+            l.set_turb(&s.turb, &s.mu_t)?;
+        }
         Ok(l)
     }
 
@@ -411,6 +421,7 @@ impl LazySolver {
                 "block out of range"
             );
         }
+        assert!(self.visc.is_none(), "declare the block before the viscous terms (`set_viscous`)");
         self.block = block;
         self.lb = block.map(|b| LBlockGeo::new(&self.ctx, self.ni, self.nj, b)).transpose()?;
         self.n_active = match block {
@@ -448,7 +459,7 @@ impl LazySolver {
             let nx = dup(g.jnx.slice(0, i0..i1).slice(1, j0..j0 + 1));
             let nr = dup(g.jnr.slice(0, i0..i1).slice(1, j0..j0 + 1));
             let src = rec(|k| p[k].slice(0, i0..i1).slice(1, j0..).pad([(0, 0), (2, 0)], PadMode::Mirror).slice(1, 0..2));
-            w.slice_mut(0, i0 + 2..i1 + 2).slice(1, j0..j0 + 2).assign(reflect(&src, &nx, &nr)).expect("block ghost assign");
+            w.slice_mut(0, i0 + 2..i1 + 2).slice(1, j0..j0 + 2).assign(self.block_wall_ghost(&src, &nx, &nr, i0)).expect("block ghost assign");
         }
     }
 
@@ -470,7 +481,7 @@ impl LazySolver {
         let cells = |k: usize| rec(|f| w[f].slice(0, b.i_end + 2 + k..b.i_end + 3 + k).slice(1, b.j_sting + 2..b.j_end + 2));
         let (c0, c1, c2) = (cells(0), cells(1), cells(2));
         let join = |a: &Rec, bb: &Rec| rec(|f| concat(0, [&a[f], &bb[f]]));
-        let (rc0, rc1) = (reflect(&c0, &bx, &br), reflect(&c1, &bx, &br));
+        let (rc0, rc1) = (self.base_wall_ghost(&c0, &bx, &br), self.base_wall_ghost(&c1, &bx, &br));
         let (m2, m1) = (join(&rc1, &rc0), join(&rc0, &c0));
         let (p0, p1) = (join(&c0, &c1), join(&c1, &c2));
         let base = face_flux_lm(&m2, &m1, &p0, &p1, lim, &fx, &fr, self.low_mach, self.staging == Staging::Split);
@@ -490,6 +501,7 @@ impl LazySolver {
     pub fn set_state(&mut self, u: &[[f64; 4]]) -> Result<()> {
         self.state = Some(upload_state(&self.ctx, u, [self.ni, self.nj], self.cfl_start())?);
         self.iter = 0;
+        self.init_turb(u)?;
         Ok(())
     }
 
@@ -524,7 +536,7 @@ impl LazySolver {
         let ghost = match self.cfg.bc[side] {
             Bc::Freestream => b.fixed.clone().expect("fixed ghost"),
             Bc::Extrapolate => return,
-            Bc::SlipWall => reflect(&rec(|k| view(&p[k], PadMode::Mirror)), &b.nx, &b.nr),
+            Bc::SlipWall => self.slip_wall_ghost(side, &rec(|k| view(&p[k], PadMode::Mirror)), &b.nx, &b.nr),
             Bc::Characteristic => characteristic_ghost(&fs, &rec(|k| view(&p[k], PadMode::Edge)), &b.onx, &b.onr),
             Bc::PressureOutflow => pressure_outflow_ghost(fs[3], &rec(|k| view(&p[k], PadMode::Edge)), &b.onx, &b.onr),
         };
@@ -537,8 +549,23 @@ impl LazySolver {
     /// dU/dt = -(1/V) sum_faces (len r_mid) F.n  +  (0, 0, p A / V, 0)        dt = cfl A / (1/2 sum_faces (|u.n| + c) len)
     /// ```
     pub fn eval_residual(&self, u: &Rec, lim: Limiter, compute_dt: bool) -> (Rec, Option<A>) {
+        let st = self.eval_stage(u, self.state_mu_t().as_ref(), lim, compute_dt);
+        (st.res, st.dt)
+    }
+
+    /// [`LazySolver::eval_residual`] with the eddy viscosity `mu_t` of an SST run (`None`: zero) and everything the turbulence update needs
+    /// (the viscous quantities, the primitives and the mass flow of the faces).
+    fn eval_stage(&self, u: &Rec, mu_t: Option<&A>, lim: Limiter, compute_dt: bool) -> Stage {
         let (p, w) = self.padded(u);
-        self.residual_from(&p, &w, lim, compute_dt)
+        self.stage_from(p, w, mu_t, lim, compute_dt)
+    }
+
+    /// Steps 2 to 5 of `eval_residual` for the primitives `p` and the padded primitives `w`, with the viscous terms of a viscous run.
+    fn stage_from(&self, p: Rec, w: Rec, mu_t: Option<&A>, lim: Limiter, compute_dt: bool) -> Stage {
+        let (fi, fj) = self.face_fluxes(&w, lim);
+        let vf = self.viscous_flow(&p, &w, mu_t);
+        let (res, dt) = self.cell_residual(&p, &fi, &fj, vf.as_ref(), compute_dt);
+        Stage { res, dt, mass: [fi[0].clone(), fj[0].clone()], p, w, vf }
     }
 
     /// Steps 1 of `eval_residual`: the primitives `p = cons_to_prim(u)` and the padded primitives `w` with the domain ghosts,
@@ -559,8 +586,8 @@ impl LazySolver {
         (p, w)
     }
 
-    /// Steps 2 to 5 of `eval_residual`: face fluxes, cell residual and time step from the primitives `p` and the padded `w`.
-    fn residual_from(&self, p: &Rec, w: &Rec, lim: Limiter, compute_dt: bool) -> (Rec, Option<A>) {
+    /// Steps 2 and 3 of `eval_residual`: the face fluxes of the padded primitives `w`.
+    fn face_fluxes(&self, w: &Rec, lim: Limiter) -> (Rec, Rec) {
         let (ni, nj) = (self.ni, self.nj);
         let g = &self.geo;
 
@@ -579,6 +606,15 @@ impl LazySolver {
         // record: three kernels per stage, 14 launches per step instead of 26-30 (the flux kernel read through four stencil
         // views is cut at the 1024-operation fusion limit otherwise; README "Speed").
         let (fi, fj) = if matches!(self.staging, Staging::Fluxes | Staging::Split) { (fi.cache(), fj.cache()) } else { (fi, fj) };
+        (fi, fj)
+    }
+
+    /// Steps 4 and 5 of `eval_residual`: the cell residual and the time step from the face fluxes `fi`, `fj` and the primitives `p`. A viscous
+    /// run (`vf`) uses the face flux `F - Fv` and the radial-momentum source `(p - t_tt) A / V`, and adds the diffusive limit to the time step.
+    fn cell_residual(&self, p: &Rec, fi: &Rec, fj: &Rec, vf: Option<&VFlow>, compute_dt: bool) -> (Rec, Option<A>) {
+        let (ni, nj) = (self.ni, self.nj);
+        let g = &self.geo;
+        let (fi, fj) = (self.total_flux(fi, vf.map(|v| &v.fvi)), self.total_flux(fj, vf.map(|v| &v.fvj)));
 
         // 4. cell residual
         let (wr, wl) = (g.iw.slice(0, 1..ni + 1), g.iw.slice(0, 0..ni));
@@ -588,7 +624,7 @@ impl LazySolver {
             let (gt, gb) = (fj[k].slice(1, 1..nj + 1), fj[k].slice(1, 0..nj));
             -(&gr * &wr - &gl * &wl + &gt * &wt - &gb * &wb) * &g.inv_v
         });
-        res[2] = &res[2] + &p[3] * &g.area * &g.inv_v; // axisymmetric pressure source p A / V
+        res[2] = &res[2] + self.hoop_source(p, vf); // axisymmetric pressure source p A / V
 
         // 5. local time step
         let mut dt = compute_dt.then(|| {
@@ -599,7 +635,11 @@ impl LazySolver {
             let (fb_nx, fb_nr, fb_len) = (g.jnx.slice(1, 0..nj), g.jnr.slice(1, 0..nj), g.jlen.slice(1, 0..nj));
             let (ft_nx, ft_nr, ft_len) = (g.jnx.slice(1, 1..nj + 1), g.jnr.slice(1, 1..nj + 1), g.jlen.slice(1, 1..nj + 1));
             let sum = lam(&fl_nx, &fl_nr, &fl_len) + lam(&fr_nx, &fr_nr, &fr_len) + lam(&fb_nx, &fb_nr, &fb_len) + lam(&ft_nx, &ft_nr, &ft_len);
-            c(self.cfg.cfl) * &g.area / (c(0.5) * &sum)
+            let half = c(0.5) * &sum;
+            c(self.cfg.cfl) * &g.area / vf.map_or(half.clone(), |v| {
+                let (xi, xj) = self.diffusion_rates(v, &p[0]);
+                &half + xi + xj
+            })
         });
         // solid cells: residual and time step zero (region assigns, so nothing computed inside the solid reaches the state)
         if let Some(b) = self.block {
@@ -621,19 +661,20 @@ impl LazySolver {
     /// ```text
     /// u1 = u0 + dt L(u0),   u2 = 3/4 u0 + 1/4 (u1 + dt L(u1)),   u3 = 1/3 u0 + 2/3 (u2 + dt L(u2))
     /// ```
-    pub fn rk3(&self, u0: &Rec, lim: Limiter) -> (Rec, A) {
-        let (r0, dt) = self.eval_residual(u0, lim, true);
-        let dt = dt.expect("dt");
+    fn rk3(&self, u0: &Rec, mu_t: Option<&A>, lim: Limiter) -> (Rec, A, Stage) {
+        let st0 = self.eval_stage(u0, mu_t, lim, true);
+        let (r0, dt) = (st0.res, st0.dt.expect("dt"));
         let rn = self.residual_norm(&r0[0]);
         // stage 1: u1 = u0 + dt L(u0)
         let u1 = rec(|k| &u0[k] + &dt * &r0[k]);
-        let (r1, _) = self.eval_residual(&u1, lim, false);
+        let r1 = self.eval_stage(&u1, mu_t, lim, false).res;
         // stage 2: u2 = 3/4 u0 + 1/4 (u1 + dt L(u1))
         let u2 = rec(|k| c(0.25) * (&u1[k] + &dt * &r1[k]) + c(0.75) * &u0[k]);
-        let (r2, _) = self.eval_residual(&u2, lim, false);
+        let st2 = self.eval_stage(&u2, mu_t, lim, false);
+        let r2 = &st2.res;
         // stage 3: u3 = 1/3 u0 + 2/3 (u2 + dt L(u2))
         let u3 = rec(|k| c(2.0 / 3.0) * (&u2[k] + &dt * &r2[k]) + c(1.0 / 3.0) * &u0[k]);
-        (u3, rn)
+        (u3, rn, Stage { dt: Some(dt), ..st2 })
     }
 
     fn limiter(&self, iter: usize) -> Limiter {
@@ -782,7 +823,7 @@ impl LazySolver {
         let lim = self.cfg.limiter;
         let t0 = std::time::Instant::now();
         for _ in 0..n {
-            std::hint::black_box(self.rk3(&u, lim));
+            std::hint::black_box(self.rk3(&u, self.state_mu_t().as_ref(), lim));
         }
         t0.elapsed().as_secs_f64()
     }

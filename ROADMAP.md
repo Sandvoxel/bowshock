@@ -190,7 +190,7 @@ Exit: the command in "Target" works on a fresh checkout following only the READM
 
 Goal: the GPU is a switch, not a second codebase, and the speed claims are measured against a fair baseline.
 
-Status: the GPU solver is now the Luma array-op solver (`bowshock-gpu`, no custom kernels); viscous runs use the CPU until the viscous terms are ported to it.
+Status: the GPU solver is now the Luma array-op solver (`bowshock-gpu`, no custom kernels), including the viscous terms and SST.
 
 - [ ] `Backend::{Cpu, Gpu}` on the public analysis; `bowshock-gpu` behind a cargo feature so CPU-only users
       do not compile wgpu.

@@ -10,8 +10,10 @@
 //! * [`df32s`]: the state, the residual and the time step in double-float `Array<Df32>` ([`Precision::Extended`]); the
 //!   state is a `Df32` record through the loops.
 //!
-//! The line-implicit scheme's left-hand side is f32 in both. [`GpuSolver`] is the precision-independent handle the other crates use.
-//! Viscous terms are not ported yet ([`GpuSolver::from_host`] refuses a viscous host solver). See the README.
+//! The line-implicit scheme's left-hand side is f32 in both. The viscous terms of the compressible Navier-Stokes equations (`viscous.rs`) and the
+//! Menter SST k-omega model (`turbulence.rs`) follow, for both schemes and for grids with a solid block; their left-hand sides (the `2 lam I` of
+//! the implicit operator, the line solves of the two turbulence scalars) are f32 like the rest. [`GpuSolver`] is the precision-independent handle
+//! the other crates use. See the README.
 
 use bowshock_core::grid::Grid;
 use bowshock_core::solver::{Block, Config, Scheme, Solver, Viscous};
@@ -113,8 +115,15 @@ pub mod f32s {
         a.clone()
     }
 
+    /// `tanh`: the blending functions of the SST model.
+    fn tanh(a: &A) -> A {
+        a.tanh()
+    }
+
     include!("body.rs");
     include!("implicit.rs");
+    include!("viscous.rs");
+    include!("turbulence.rs");
     include!("control.rs");
 }
 
@@ -160,8 +169,15 @@ pub mod df32s {
         a.to_df32()
     }
 
+    /// `tanh` of the blending functions of the SST model, in f32 (`Df32` arrays have no `tanh`; the blending functions need no more).
+    fn tanh(a: &A) -> A {
+        a.to_f32().tanh().to_df32()
+    }
+
     include!("body.rs");
     include!("implicit.rs");
+    include!("viscous.rs");
+    include!("turbulence.rs");
     include!("control.rs");
 }
 
@@ -190,7 +206,7 @@ macro_rules! on_mut {
 }
 
 /// GPU solver of one grid: [`f32s::LazySolver`] or [`df32s::LazySolver`] behind one type. Mirrors `bowshock_core::solver::Solver` for the
-/// supported options (explicit SSP-RK3 or line-implicit scheme, solid block, low-Mach correction); viscous terms are not supported.
+/// supported options (explicit SSP-RK3 or line-implicit scheme, solid block, low-Mach correction, viscous terms with the SST model).
 pub struct GpuSolver {
     inner: Inner,
     ctx: Context,
@@ -210,11 +226,9 @@ impl GpuSolver {
     }
 
     /// The solver of a host `bowshock_core` solver: its grid and config, low-Mach flag, solid block, scheme (`Scheme::Explicit` or
-    /// `Scheme::Implicit`), conserved state and iteration count. A viscous host solver is refused.
+    /// `Scheme::Implicit`), conserved state, iteration count and, for a viscous host, the viscous parameters with the turbulence state and the
+    /// wall distance (the SST state is copied from `host.turb` / `host.mu_t`).
     pub fn from_host(ctx: &Context, host: &Solver, prec: Precision) -> Result<GpuSolver> {
-        if host.viscous().is_some() {
-            return Err(GpuError::Unsupported("viscous terms are not ported to the GPU solver yet"));
-        }
         if !matches!(host.scheme(), Scheme::Explicit | Scheme::Implicit(_)) {
             return Err(GpuError::Unsupported("only Scheme::Explicit and Scheme::Implicit are implemented on the GPU"));
         }
@@ -240,6 +254,9 @@ impl GpuSolver {
     /// Replaces the configuration: free stream, CFL, limiter, `first_order_iters` and the boundary conditions may change between runs
     /// (a Mach sweep) without touching the state. The next [`GpuSolver::run`] uses it (the fixed ghost states are uploaded again).
     pub fn set_config(&mut self, cfg: &Config) -> Result<()> {
+        if self.viscous().is_some() && cfg.bc != self.config().bc {
+            return Err(GpuError::Unsupported("the boundary conditions of a viscous run (no-slip walls, wall distance) are fixed by set_viscous"));
+        }
         on_mut!(self, s => s.set_config(cfg)?);
         Ok(())
     }
@@ -260,6 +277,9 @@ impl GpuSolver {
 
     /// Declares the solid body block of a base / wake grid (`bowshock_core::solver::Solver::set_block`).
     pub fn set_block(&mut self, block: Option<Block>) -> Result<()> {
+        if self.viscous().is_some() {
+            return Err(GpuError::Unsupported("the solid block must be declared before the viscous terms"));
+        }
         on_mut!(self, s => s.set_block(block)?);
         Ok(())
     }
@@ -287,22 +307,32 @@ impl GpuSolver {
         on_mut!(self, s => s.restart_ramp())
     }
 
-    /// Viscous terms are not supported: only `None` is accepted.
-    pub fn set_viscous(&mut self, v: Option<Viscous>) -> Result<()> {
-        match v {
-            None => Ok(()),
-            Some(_) => Err(GpuError::Unsupported("viscous terms are not ported to the GPU solver yet")),
+    /// Switches the viscous terms on (`Some`, with the SST model if `v.turbulence` says so) or off (`None`, the Euler equations). `grid` is the grid
+    /// of the solver; declare the solid block first. The turbulence state restarts at the free stream, the mean flow is not touched.
+    pub fn set_viscous(&mut self, v: Option<Viscous>, grid: &Grid) -> Result<()> {
+        if (grid.ni, grid.nj) != (self.ni, self.nj) {
+            return Err(GpuError::Unsupported("set_viscous: the grid is not the grid of the solver"));
         }
+        on_mut!(self, s => s.set_viscous(v, grid)?);
+        Ok(())
     }
 
-    /// The viscous-flow parameters: always `None`.
+    /// The viscous-flow parameters, `None` for the Euler equations.
     pub fn viscous(&self) -> Option<Viscous> {
-        None
+        on!(self, s => s.viscous())
     }
 
-    /// Turbulence state `(k, omega, mu_t, mu)` of every cell: needs the viscous terms, which are not supported yet.
-    pub fn turb_state(&self) -> Result<Vec<[f32; 4]>> {
-        Err(GpuError::Unsupported("turb_state needs the viscous terms, which are not ported to the GPU solver yet"))
+    /// `([k, omega], mu_t)` of every cell of an SST run (`Solver::turb`, `Solver::mu_t`), as f64.
+    pub fn turb_state(&self) -> Result<(Vec<[f64; 2]>, Vec<f64>)> {
+        if !self.viscous().is_some_and(|v| v.turbulence == bowshock_core::solver::Turbulence::Sst) {
+            return Err(GpuError::Unsupported("turb_state needs the SST model"));
+        }
+        Ok(on!(self, s => s.turb_state_f64()?))
+    }
+
+    /// The density residual norm of `k` of the last turbulence update (`Solver::turb_residual`; 0 before the first).
+    pub fn turb_residual(&self) -> Result<f64> {
+        Ok(on!(self, s => s.turb_residual()?))
     }
 
     /// Overwrites the conserved state (e.g. with a CPU solution) and restarts the iteration counter and the CFL ramp.

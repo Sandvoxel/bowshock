@@ -85,7 +85,6 @@ fn viscous_grids_pass_the_quality_check_and_report_friction() {
 /// The G3 body at Mach 0.5 on the CPU and on the GPU: total CD within 1 %, friction within 2 %, base Cp within 0.01.
 #[cfg(feature = "gpu")]
 #[test]
-#[ignore = "viscous GPU port pending"]
 fn g3_gpu_matches_cpu() {
     let spec = BodySpec { nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 }, aft: vec![AftSpec::Tube { length: 0.60 }] };
     let run = |backend| {
