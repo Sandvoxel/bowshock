@@ -8,3 +8,6 @@ description = "Reference solutions for bowshock validation: Taylor-Maccoll cones
 
 [dependencies]
 bowshock-core.workspace = true
+
+[lints]
+workspace = true

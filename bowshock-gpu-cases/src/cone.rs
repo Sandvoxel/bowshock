@@ -6,12 +6,13 @@
 //! iterations, non-finite). The CPU loop here uses the public `Solver::step` so that the final
 //! state is available for the field comparison; the criteria are in [`Monitor`].
 
-use crate::run::{cpu_loop, field_diff, gpu_loop, Run};
 pub use crate::run::Monitor;
-use bowshock_gpu::{GpuSolver, Mode, Precision, Result};
+use crate::run::{cpu_loop, field_diff, gpu_loop, Run};
+use bowshock::result::StopReason;
 use bowshock_cases::cone::{build_solver, ConeCase};
 use bowshock_core::gas::cons_to_prim;
 use bowshock_core::grid::Grid;
+use bowshock_gpu::{GpuSolver, Precision, Result};
 use bowshock_reference::taylor_maccoll::ConeSolution;
 
 /// Surface and integral results of a converged (or stopped) state.
@@ -106,7 +107,7 @@ pub struct RunResult {
     pub iters_stop: usize,
     /// Iterations actually executed (GPU: rounded up to a multiple of the sync interval).
     pub iters_exec: usize,
-    pub reason: &'static str,
+    pub reason: StopReason,
     pub drop_orders: f64,
     /// Wall time of the iteration loop (no setup, no post-processing).
     pub loop_seconds: f64,
@@ -148,9 +149,9 @@ pub fn run_cpu(case: &ConeCase, tm: &ConeSolution) -> RunResult {
 
 /// GPU run: kernels for `chunk` iterations are recorded back to back; the host synchronises
 /// only to read the residual history after every chunk and tests the stopping criteria on it.
-pub fn run_gpu(case: &ConeCase, tm: &ConeSolution, chunk: usize, mode: Mode, prec: Precision) -> Result<RunResult> {
+pub fn run_gpu(case: &ConeCase, tm: &ConeSolution, chunk: usize, prec: Precision) -> Result<RunResult> {
     let host = build_solver(case, tm.beta);
-    let run = gpu_loop(&host, case.max_iter, case.drop_orders, chunk, mode, prec)?;
+    let run = gpu_loop(&host, case.max_iter, case.drop_orders, chunk, prec)?;
     let post = postprocess(case, &host.grid, &host.cfg.freestream, &run.u);
     Ok(RunResult::new(run, post))
 }
@@ -195,11 +196,11 @@ pub fn compare(case: &ConeCase, fs: &[f64; 4], gpu: &RunResult, cpu: &RunResult)
 /// without limiter start-up phase and returns the density residuals. For a state that is converged
 /// to 1e-6 the f64 residual is ~1e-6; the f32 evaluation of the very same field is dominated by
 /// rounding noise.
-pub fn residual_on_state(case: &ConeCase, tm: &ConeSolution, u: &[[f64; 4]], n: usize, mode: Mode, prec: Precision) -> Result<Vec<f64>> {
+pub fn residual_on_state(case: &ConeCase, tm: &ConeSolution, u: &[[f64; 4]], n: usize, prec: Precision) -> Result<Vec<f64>> {
     let host = build_solver(case, tm.beta);
-    let mut g = GpuSolver::new_with(&luma::default_context()?, &host.grid, &host.cfg, mode, prec)?;
+    let mut g = GpuSolver::new(&luma::default_context()?, &host.grid, &host.cfg, prec)?;
     g.set_state(u)?;
     // limiter start-up phase (first-order iterations) is over for a converged state
-    g.iter = case.first_order_iters;
+    g.set_iter(case.first_order_iters);
     g.run(n)
 }

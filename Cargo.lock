@@ -75,9 +75,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bowshock"
+version = "0.1.0"
+dependencies = [
+ "bowshock-core",
+ "bowshock-gpu",
+ "bowshock-reference",
+ "luma",
+]
+
+[[package]]
 name = "bowshock-cases"
 version = "0.1.0"
 dependencies = [
+ "bowshock",
  "bowshock-core",
  "bowshock-reference",
  "gif",
@@ -88,6 +99,7 @@ dependencies = [
 name = "bowshock-cli"
 version = "0.1.0"
 dependencies = [
+ "bowshock",
  "bowshock-cases",
  "bowshock-core",
  "bowshock-gpu",
@@ -108,8 +120,10 @@ dependencies = [
 name = "bowshock-gpu"
 version = "0.1.0"
 dependencies = [
+ "bowshock",
+ "bowshock-cases",
  "bowshock-core",
- "encase",
+ "bowshock-reference",
  "luma",
 ]
 
@@ -117,6 +131,7 @@ dependencies = [
 name = "bowshock-gpu-cases"
 version = "0.1.0"
 dependencies = [
+ "bowshock",
  "bowshock-cases",
  "bowshock-core",
  "bowshock-gpu",
@@ -574,11 +589,12 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "luma"
-version = "0.1.3"
-source = "git+https://github.com/flipnoteman/Luma.git?branch=main#f29290fbb7f6032e11f98335b649ed7f5d849ac3"
+version = "0.3.0"
+source = "git+https://github.com/flipnoteman/Luma.git?rev=c7096217b655c23780e33589d23e76689a570d35#c7096217b655c23780e33589d23e76689a570d35"
 dependencies = [
  "bytemuck",
  "encase",
+ "libc",
  "log",
  "naga",
  "pollster",

@@ -1,0 +1,20 @@
+[package]
+name = "bowshock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rocket aerodynamics: body geometry, grids and the Mach-sweep analysis of the bowshock solver"
+
+[dependencies]
+bowshock-core.workspace = true
+bowshock-reference.workspace = true
+bowshock-gpu = { workspace = true, optional = true }
+luma = { workspace = true, optional = true }
+
+[features]
+default = ["gpu"]
+gpu = ["dep:bowshock-gpu", "dep:luma"]
+
+[lints]
+workspace = true

@@ -1,5 +1,5 @@
 [workspace]
-members = ["bowshock-core", "bowshock-reference", "bowshock-cases", "bowshock-gpu", "bowshock-gpu-cases", "bowshock-cli"]
+members = ["bowshock", "bowshock-core", "bowshock-reference", "bowshock-cases", "bowshock-gpu", "bowshock-gpu-cases", "bowshock-cli"]
 resolver = "2"
 
 [workspace.package]
@@ -9,14 +9,14 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/Sandvoxel/bowshock"
 
 [workspace.dependencies]
+bowshock = { path = "bowshock", default-features = false }
 bowshock-core = { path = "bowshock-core" }
 bowshock-reference = { path = "bowshock-reference" }
 bowshock-cases = { path = "bowshock-cases" }
 bowshock-gpu = { path = "bowshock-gpu" }
 bowshock-gpu-cases = { path = "bowshock-gpu-cases" }
-luma = { git = "https://github.com/flipnoteman/Luma.git", branch = "main" }
+luma = { git = "https://github.com/flipnoteman/Luma.git", rev = "c7096217b655c23780e33589d23e76689a570d35" }
 rayon = "1"
-encase = "0.13.0"
 image = { version = "0.25", default-features = false, features = ["png"] }
 gif = "0.13"
 
@@ -24,3 +24,8 @@ gif = "0.13"
 opt-level = 3
 lto = "thin"
 codegen-units = 1
+
+[workspace.lints.clippy]
+too_many_arguments = "allow"
+needless_range_loop = "allow"
+type_complexity = "allow"

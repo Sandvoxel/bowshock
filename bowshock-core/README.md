@@ -20,7 +20,7 @@ bowshock/
   bowshock-cases/src/cone.rs        cone case set-up and post-processing
   bowshock-cases/src/ogive.rs       ogive-cylinder grid, case runner, wall post-processing, Perkins-Jorgensen data
   bowshock-cases/src/body_grid.rs   large-domain stretched grid for nose-cylinder bodies (ogive, cone, power/parabolic/Haack noses)
-  bowshock-cases/src/transonic.rs   transonic case runner, post-processing, Stoney (RM L53K17) and Czarnecki-Monta (TN D-3516) data
+  bowshock-cases/src/transonic.rs   `transonic_case`, Stoney (RM L53K17) and Czarnecki-Monta (TN D-3516) data
   bowshock-cases/src/subsonic.rs    subsonic case runner (sting / flat base + wake), drag breakdown, NASA TM X-2439 data
   bowshock-cases/examples/diag.rs   convergence diagnostics (per-cell residual map -> out/diag/)
   bowshock-cli/src/bin/cone.rs      validation driver
@@ -116,8 +116,7 @@ Reference values, verified against independent sources:
 ## How to run
 
 ```
-cd cfd
-cargo test --release                        # 28 unit tests (incl. a ~5 s convergence regression, BC / grid / transonic smoke tests)
+cargo test --release                        # unit tests (incl. a ~5 s convergence regression, BC / grid / transonic smoke tests)
 cargo run --release --bin cone              # M=2, 10° and 15°, grids 100x50, 200x100, 400x200 (≈2 min per limiter)
 cargo run --release --bin cone -- --quick   # skip the 400x200 grid
 cargo run --release --bin cone -- --limiter vanalbada [--mach 2.5]
@@ -377,7 +376,7 @@ for 16 normals × 7 Mach numbers, uniform flow preserved to < 1e-12 for 100 RK3 
 ### Large-domain grid (`body_grid::large_domain_grid`)
 
 H-grid like the existing ones (vertical lines, axis for `x < 0`, flat outer boundary `r = r_far`), `d = 1`, tip at the origin. Bodies: `Nose::{TangentOgive, Cone, Power, Parabolic, Haack}` on a cylinder.
-Default domain (`TransonicCase::with_body`, body length `L = L_nose + 6 d = 9 d`): inflow plane and outer boundary **10 L = 90 d** away, outflow plane 5 L = 45 d behind the shoulder
+Default domain (`transonic_case`, body length `L = L_nose + 6 d = 9 d`): inflow plane and outer boundary **10 L = 90 d** away, outflow plane 5 L = 45 d behind the shoulder
 (`--domain n` rescales the 10 L). x spacing: geometric growth upstream of the tip, `tanh` clustering on the nose at the tip **and** the shoulder with end cell `dx_tip`
 (0.03/0.015/0.0075 d for grid level 0/1/2), geometric growth along the cylinder and on the extension. r spacing: geometric from the wall (`dr_wall` = 0.03/0.015/0.0075 d).
 Levels 0/1/2 = 144×70 / 288×140 / 576×280 cells.
@@ -386,7 +385,7 @@ Levels 0/1/2 = 144×70 / 288×140 / 576×280 cells.
 exercised by the characteristic BC. The forebody CD is reported referenced to the base area, `CD = ∫₀¹ Cp d(r²/R²)` over the nose (extrapolated-wall Cp; the first-cell variant is also in the CSV).
 Limitation: MUSCL slopes are limited in index space (they ignore the stretching); growth ratios are 1.08 / 1.04 / 1.02 radially and 1.25 / 1.12 / 1.06 upstream of the tip for levels 0/1/2.
 
-### Case runner and convergence (`transonic::run_on`, `stop_reason`)
+### Case runner and convergence (`bowshock::run::run_on`, `stop_reason`)
 
 Same scheme as before (HLLC/Rusanov blend, minmod, SSP-RK3, local dt, CFL 0.5, 300 first-order iterations on a cold start). Stop rule: density-residual drop of 6 orders (from the peak after iteration 20), **or**
 (every 500 iterations, from iteration 4000) forebody CD varied by < 2e-4 over the last 2000 iterations once the residual has dropped ≥ 2 orders ("CD stationary"). `--warm` starts every Mach number from the
@@ -526,7 +525,7 @@ Data: `subsonic_gpu --base both` (grid level 1, GPU guarded extended precision v
 * Body: tangent ogive nose l/d 3 + 6 d cylinder. Base off: the cylinder continues as a sting to the outflow. Base on: flat base plus wake.
 * Grid level 1: 288 × 140 (40 320 cells) base off, 312 × 152 (47 424 cells) base on. Domain: inflow / outer boundary 10 body lengths, outflow 5 body lengths; characteristic far field.
 * Scheme: line-implicit, van Albada limiter, low-Mach correction on.
-* Stop rules: 6-order residual drop, or "base pressure stationary" for base-on cases; iteration limit `10 000 << level` (`SubsonicCase::with_body`), i.e. 20 000 at level 1.
+* Stop rules: 6-order residual drop, or "base pressure stationary" for base-on cases; iteration limit `10 000 << level` (`Numerics::subsonic`), i.e. 20 000 at level 1.
 
 ### Results, ogive + cylinder, level 1, cold starts (GPU values)
 
@@ -557,7 +556,7 @@ GPU vs CPU: max |ΔCp| (wall) ≤ 4.5e-6 on 15 of 16 rows. M 0.8 base-on reaches
 
 * The inviscid (Euler) wake has no viscous mixing layer, so its base pressure is not physical: Cp_b stays slightly negative (-0.0092 at M 0.1 to -0.0450 at M 0.8), and CD base (Euler) is not monotone in M (0.02438 at M 0.3, 0.01981 at M 0.4, 0.05220 at M 0.5, 0.03320 at M 0.6) because the wake does not settle (see the convergence column above).
 * Modelled base drag: `bowshock_reference::base_drag::base_drag_coefficient(M)` = 0.12 + 0.13 M² for M < 1, 0.25 / M for M ≥ 1, referenced to the base area. Source: OpenRocket technical documentation (S. Niskanen; based on his 2009 M.Sc. thesis), eq. 3.94, after Fleeman, *Tactical Missile Design*.
-* It is scaled by (r_b / R)² to the reference area; 0 without base; NaN (printed `-`) for sting-mounted bases (the TM X-2439 configurations below), because it is a free-flight correlation. It is reported next to, not instead of, the Euler values (`SubsonicResult::cd_base_model`, `cd_total_model`). Here the full disc gives r_b = R, so `CD base corr.` = 0.12 + 0.13 M² (M 0.5: 0.15250).
+* It is scaled by (r_b / R)² to the reference area; 0 without base; NaN (printed `-`) for sting-mounted bases (the TM X-2439 configurations below), because it is a free-flight correlation. It is reported next to, not instead of, the Euler values (`PointResult::cd_base_model`, `cd_total_model`). Here the full disc gives r_b = R, so `CD base corr.` = 0.12 + 0.13 M² (M 0.5: 0.15250).
 
 ### Validation: NASA TM X-2439 (Fox 1971), sting-mounted nose-cylinder-boattail bodies, level 1
 

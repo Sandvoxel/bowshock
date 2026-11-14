@@ -56,7 +56,13 @@ pub struct Grid {
 }
 
 impl Grid {
+    /// Build the grid from node coordinates, panicking on a degenerate cell (see [`Grid::try_from_nodes`]).
     pub fn from_nodes(ni: usize, nj: usize, x: Vec<f64>, r: Vec<f64>) -> Grid {
+        Grid::try_from_nodes(ni, nj, x, r).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Build the grid from node coordinates (`(ni + 1) * (nj + 1)`, row `j` major); `Err` if a cell has non-positive area.
+    pub fn try_from_nodes(ni: usize, nj: usize, x: Vec<f64>, r: Vec<f64>) -> Result<Grid, String> {
         assert_eq!(x.len(), (ni + 1) * (nj + 1));
         assert_eq!(r.len(), x.len());
         let nn = |i: usize, j: usize| j * (ni + 1) + i;
@@ -99,7 +105,9 @@ impl Grid {
                     sx += at * cx;
                     sr += at * cr;
                 }
-                assert!(a > 0.0, "non-positive cell area at ({i},{j})");
+                if a <= 0.0 || a.is_nan() {
+                    return Err(format!("non-positive cell area at ({i},{j})"));
+                }
                 let c = j * ni + i;
                 area[c] = a;
                 vol[c] = v;
@@ -107,7 +115,7 @@ impl Grid {
                 rc[c] = sr / a;
             }
         }
-        Grid { ni, nj, x, r, iface, jface, area, vol, xc, rc }
+        Ok(Grid { ni, nj, x, r, iface, jface, area, vol, xc, rc })
     }
 
     #[inline]
@@ -119,7 +127,7 @@ impl Grid {
     /// Grid with every second node line removed in both directions (2x2 cells agglomerated into one). `None` if `ni` or
     /// `nj` is odd. Used for the multigrid hierarchy: coarse cell `(I, J)` is the union of fine cells `(2I..2I+2, 2J..2J+2)`.
     pub fn coarsen(&self) -> Option<Grid> {
-        if self.ni % 2 != 0 || self.nj % 2 != 0 {
+        if !self.ni.is_multiple_of(2) || !self.nj.is_multiple_of(2) {
             return None;
         }
         let (ci, cj) = (self.ni / 2, self.nj / 2);
@@ -179,13 +187,87 @@ pub fn cone_grid(p: &ConeGridParams) -> Grid {
         let r_out = p.h_start + (p.h_end - p.h_start) * (xi - p.x_up) / (p.length - p.x_up);
         for j in 0..=nj {
             let xi_j = j as f64 / nj as f64;
-            let s = if p.cluster > 0.0 {
-                1.0 + ((p.cluster * (xi_j - 1.0)).tanh()) / p.cluster.tanh()
-            } else {
-                xi_j
-            };
+            let s = if p.cluster > 0.0 { 1.0 + ((p.cluster * (xi_j - 1.0)).tanh()) / p.cluster.tanh() } else { xi_j };
             x[j * (ni + 1) + i] = xi;
             r[j * (ni + 1) + i] = r_in + s * (r_out - r_in);
+        }
+    }
+    Grid::from_nodes(ni, nj, x, r)
+}
+
+/// Node offsets `0 = s_0 < s_1 < ... < s_n = length` with spacing `first * q^k`, `q` solved so that they sum to `length`.
+pub fn geometric_offsets(first: f64, length: f64, n: usize) -> Vec<f64> {
+    assert!(n >= 1 && first > 0.0 && length > 0.0);
+    let sum = |q: f64| {
+        let (mut s, mut d) = (0.0, first);
+        for _ in 0..n {
+            s += d;
+            d *= q;
+        }
+        s
+    };
+    let (mut lo, mut hi) = (0.2f64, 4.0f64);
+    for _ in 0..200 {
+        let mid = 0.5 * (lo + hi);
+        if sum(mid) < length {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let q = 0.5 * (lo + hi);
+    let mut v = Vec::with_capacity(n + 1);
+    let (mut s, mut d) = (0.0, first);
+    for _ in 0..n {
+        v.push(s);
+        s += d;
+        d *= q;
+    }
+    v.push(length); // closes any residual of the bisection exactly
+    v
+}
+
+/// Parameters of the flat-plate grid ([`plate_grid`]).
+#[derive(Clone, Debug)]
+pub struct PlateGridParams {
+    /// Radius of the plate surface (a large `r0` makes the axisymmetric annulus a flat plate).
+    pub r0: f64,
+    /// Length of the upstream approach region (`x < 0`).
+    pub x_up: f64,
+    /// Plate length (`x` in `[0, length]`).
+    pub length: f64,
+    /// Height of the domain above the plate surface.
+    pub height: f64,
+    /// Number of cells upstream of the leading edge and along the plate.
+    pub n_up: usize,
+    pub n_plate: usize,
+    /// Number of cells normal to the plate.
+    pub nj: usize,
+    /// Cell size at the leading edge (geometric growth away from it in both directions).
+    pub dx_le: f64,
+    /// First cell height at the plate.
+    pub dr_wall: f64,
+}
+
+/// Flat plate as the inner wall of an annulus: x nodes `-geometric_offsets(dx_le, x_up, n_up)` (reversed) then
+/// `geometric_offsets(dx_le, length, n_plate)`; r nodes `r0 + geometric_offsets(dr_wall, height, nj)` in every column.
+/// The leading edge is the node line `i = n_up`.
+pub fn plate_grid(p: &PlateGridParams) -> Grid {
+    let up = geometric_offsets(p.dx_le, p.x_up, p.n_up);
+    let plate = geometric_offsets(p.dx_le, p.length, p.n_plate);
+    let mut xs = Vec::with_capacity(p.n_up + p.n_plate + 1);
+    for k in (1..=p.n_up).rev() {
+        xs.push(-up[k]);
+    }
+    xs.extend_from_slice(&plate);
+    let (ni, nj) = (p.n_up + p.n_plate, p.nj);
+    let rs = geometric_offsets(p.dr_wall, p.height, nj);
+    let mut x = vec![0.0; (ni + 1) * (nj + 1)];
+    let mut r = vec![0.0; (ni + 1) * (nj + 1)];
+    for j in 0..=nj {
+        for i in 0..=ni {
+            x[j * (ni + 1) + i] = xs[i];
+            r[j * (ni + 1) + i] = p.r0 + rs[j];
         }
     }
     Grid::from_nodes(ni, nj, x, r)

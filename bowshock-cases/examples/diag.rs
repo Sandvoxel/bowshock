@@ -12,14 +12,22 @@ fn main() {
     let theta: f64 = a[0].parse().unwrap();
     let ni: usize = a[1].parse().unwrap();
     let nj: usize = a[2].parse().unwrap();
-    let lim = match a[3].as_str() { "vanalbada" => Limiter::VanAlbada, "first" => Limiter::FirstOrder, _ => Limiter::Minmod };
+    let lim = match a[3].as_str() {
+        "vanalbada" => Limiter::VanAlbada,
+        "first" => Limiter::FirstOrder,
+        _ => Limiter::Minmod,
+    };
     let iters: usize = a[4].parse().unwrap();
     let win: usize = a.get(5).map(|s| s.parse().unwrap()).unwrap_or(400);
     let tm = solve_cone(2.0, theta.to_radians()).unwrap();
     let mut case = ConeCase::new(2.0, theta, ni, nj);
     case.limiter = lim;
-    if let Ok(c) = std::env::var("FO") { case.first_order_iters = c.parse().unwrap(); }
-    if let Ok(c) = std::env::var("CFL") { case.cfl = c.parse().unwrap(); }
+    if let Ok(c) = std::env::var("FO") {
+        case.first_order_iters = c.parse().unwrap();
+    }
+    if let Ok(c) = std::env::var("CFL") {
+        case.cfl = c.parse().unwrap();
+    }
     let mut s = build_solver(&case, tm.beta);
     let n = ni * nj;
     let (mut mean, mut sq, mut mx) = (vec![0.0; n], vec![0.0; n], vec![0.0f64; n]);
@@ -34,7 +42,9 @@ fn main() {
                 println!("P it {it}: {}", line.join(" "));
             }
         }
-        if it % 1000 == 999 { println!("  it {} L2 {:.3e}", it + 1, r); }
+        if it % 1000 == 999 {
+            println!("  it {} L2 {:.3e}", it + 1, r);
+        }
         if it + win >= iters {
             for c in 0..n {
                 let v = s.res[c][0];
@@ -78,13 +88,21 @@ fn main() {
             osc += q * q - m * m;
             let x = s.grid.xc[c];
             let rsh = x.max(0.0) * tm.beta.tan(); // shock radius
-            let key = if x < 0.0 { "axis (x<0)" }
-                else if i + 3 >= ni { "outflow (last 3 cols)" }
-                else if j < 3 { "wall (j<3)" }
-                else if x < 0.1 { "tip (x<0.1)" }
-                else if (s.grid.rc[c] - rsh).abs() < 0.05 { "shock band" }
-                else if s.grid.rc[c] > rsh + 0.05 { "freestream side" }
-                else { "shock layer" };
+            let key = if x < 0.0 {
+                "axis (x<0)"
+            } else if i + 3 >= ni {
+                "outflow (last 3 cols)"
+            } else if j < 3 {
+                "wall (j<3)"
+            } else if x < 0.1 {
+                "tip (x<0.1)"
+            } else if (s.grid.rc[c] - rsh).abs() < 0.05 {
+                "shock band"
+            } else if s.grid.rc[c] > rsh + 0.05 {
+                "freestream side"
+            } else {
+                "shock layer"
+            };
             *regions.entry(key).or_default() += e;
         }
     }

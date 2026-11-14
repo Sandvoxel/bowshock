@@ -18,8 +18,8 @@
 //! The converged state of a cycle is the converged state of the fine-grid (second-order) discretisation: the coarse
 //! correction vanishes with the fine-grid defect.
 
-use crate::gas::{cons_to_prim, Cons};
 use crate::flux::Limiter;
+use crate::gas::{cons_to_prim, Cons};
 use crate::solver::{Config, MgParams, Scheme, Solver};
 use rayon::prelude::*;
 
@@ -27,6 +27,7 @@ impl Solver {
     /// Select the convergence scheme. For `Scheme::Multigrid` the coarse levels are built from the current grid and block
     /// (call [`Solver::set_block`] first); returns the number of levels (1 for the other schemes).
     pub fn set_scheme(&mut self, scheme: Scheme) -> usize {
+        assert!(self.viscous.is_none() || matches!(scheme, Scheme::Explicit | Scheme::Implicit(_)), "viscous terms need Scheme::Explicit or Scheme::Implicit");
         self.scheme = scheme;
         self.coarse.clear();
         let Scheme::Multigrid(p) = scheme else {
@@ -117,7 +118,7 @@ fn restrict(fine: &Solver, coarse: &mut Solver) {
         let c0 = 2 * cj * fni + 2 * ci;
         [c0, c0 + 1, c0 + fni, c0 + fni + 1]
     };
-    let solid = |c: usize| blk.map_or(false, |b| b.solid(c % fni, c / fni));
+    let solid = |c: usize| blk.is_some_and(|b| b.solid(c % fni, c / fni));
     // state
     {
         let (fu, vol) = (&fine.u, &fine.grid.vol);
@@ -179,7 +180,7 @@ fn prolong_correct(coarse: &Solver, fine: &mut Solver) {
     let (cu, c0) = (&coarse.u, &coarse.mg_u0);
     fine.u.par_chunks_mut(fni).enumerate().for_each(|(j, row)| {
         for i in 0..fni {
-            if blk.map_or(false, |b| b.solid(i, j)) {
+            if blk.is_some_and(|b| b.solid(i, j)) {
                 continue;
             }
             let (ci, cj) = (i / 2, j / 2);
@@ -188,7 +189,7 @@ fn prolong_correct(coarse: &Solver, fine: &mut Solver) {
             let cand = [(ci, cj, 9.0), (ci2, cj, 3.0), (ci, cj2, 3.0), (ci2, cj2, 1.0)];
             let (mut d, mut wsum) = ([0.0; 4], 0.0);
             for (a, b, wt) in cand {
-                if cblk.map_or(false, |bk| bk.solid(a, b)) {
+                if cblk.is_some_and(|bk| bk.solid(a, b)) {
                     continue;
                 }
                 let c = b * cni + a;
@@ -237,7 +238,13 @@ mod tests {
     #[test]
     fn hierarchy_is_built_and_the_free_stream_is_preserved() {
         let fs = freestream(0.5);
-        let cfg = Config { cfl: 0.5, limiter: Limiter::VanAlbada, freestream: fs, bc: [Bc::Characteristic, Bc::Characteristic, Bc::SlipWall, Bc::Characteristic], first_order_iters: 0 };
+        let cfg = Config {
+            cfl: 0.5,
+            limiter: Limiter::VanAlbada,
+            freestream: fs,
+            bc: [Bc::Characteristic, Bc::Characteristic, Bc::SlipWall, Bc::Characteristic],
+            first_order_iters: 0,
+        };
         let mut s = Solver::new(grid(64, 32), cfg);
         let n = s.set_scheme(Scheme::Multigrid(MgParams::DEFAULT));
         assert_eq!(n, 3, "64x32 -> 32x16 -> 16x8, the next level would have nj < 8");
@@ -254,7 +261,13 @@ mod tests {
         // an outflow pulse on a small domain: both schemes must converge to the free stream
         let fs = freestream(0.4);
         let mk = |scheme: Scheme| {
-            let cfg = Config { cfl: 0.8, limiter: Limiter::FirstOrder, freestream: fs, bc: [Bc::Characteristic, Bc::Characteristic, Bc::SlipWall, Bc::Characteristic], first_order_iters: 0 };
+            let cfg = Config {
+                cfl: 0.8,
+                limiter: Limiter::FirstOrder,
+                freestream: fs,
+                bc: [Bc::Characteristic, Bc::Characteristic, Bc::SlipWall, Bc::Characteristic],
+                first_order_iters: 0,
+            };
             let mut s = Solver::new(grid(32, 16), cfg);
             s.set_scheme(scheme);
             for u in s.u.iter_mut() {

@@ -7,8 +7,8 @@
 //!
 //! Both are classical first estimates; neither is exact on a curved ogive.
 
-use bowshock_core::gas::GAMMA;
 use crate::taylor_maccoll::{solve_cone, ConeSolution};
+use bowshock_core::gas::GAMMA;
 
 /// Prandtl-Meyer function `nu(M)` [rad].
 pub fn prandtl_meyer(m: f64) -> f64 {

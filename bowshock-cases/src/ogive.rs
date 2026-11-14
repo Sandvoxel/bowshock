@@ -4,11 +4,12 @@
 //! The geometry (`shock_expansion::Ogive`) is non-dimensionalised with the body diameter `d = 1`
 //! (radius `R = 0.5`); the nose runs over `0 <= x <= L_nose` and the cylinder over `L_nose <= x <= L_nose + cyl_length`.
 
+use bowshock::result::{StopReason, WallPoint};
 use bowshock_core::flux::Limiter;
 use bowshock_core::gas::freestream;
 use bowshock_core::grid::Grid;
-use bowshock_reference::shock_expansion::{Ogive, SurfaceTheory};
 use bowshock_core::solver::{Bc, Config, Solver};
+use bowshock_reference::shock_expansion::{Ogive, SurfaceTheory};
 
 /// Published experimental surface pressures, zero angle of attack.
 ///
@@ -24,11 +25,8 @@ pub mod perkins_jorgensen {
     pub const CP_UNCERTAINTY: f64 = 0.005;
     /// Orifice stations x/d from the vertex (Table I(a), orifices 1..15).
     #[allow(clippy::approx_constant)] // 6.28 is a measured station, not tau
-    pub const X_OVER_D: [f64; 15] =
-        [0.22, 0.56, 0.89, 1.22, 1.61, 2.06, 2.5, 2.95, 3.62, 4.06, 4.50, 5.39, 6.28, 7.17, 8.06];
-    pub const CP: [f64; 15] = [
-        0.260, 0.212, 0.165, 0.115, 0.074, 0.026, -0.014, -0.038, -0.030, -0.017, -0.012, -0.009, -0.001, 0.000, 0.006,
-    ];
+    pub const X_OVER_D: [f64; 15] = [0.22, 0.56, 0.89, 1.22, 1.61, 2.06, 2.5, 2.95, 3.62, 4.06, 4.50, 5.39, 6.28, 7.17, 8.06];
+    pub const CP: [f64; 15] = [0.260, 0.212, 0.165, 0.115, 0.074, 0.026, -0.014, -0.038, -0.030, -0.017, -0.012, -0.009, -0.001, 0.000, 0.006];
 
     /// Forebody pressure-drag coefficient (base-area reference) integrated from the nose orifices,
     /// `CD = integral_0^1 Cp d(s)`, `s = (r/R)^2`, trapezoid in `s`, with the unmeasured ends closed by
@@ -187,25 +185,11 @@ impl OgiveCase {
     }
 }
 
-/// One wall face of the body.
-#[derive(Clone, Copy, Debug)]
-pub struct WallPoint {
-    /// Face centre (x/d, r/d).
-    pub x: f64,
-    pub r: f64,
-    /// `s = (r/R)^2` at the two face end nodes (for the base-area-referenced drag integral).
-    pub s0: f64,
-    pub s1: f64,
-    /// Cp from the wall value extrapolated linearly from cells j=0,1, and from the first cell.
-    pub cp: f64,
-    pub cp_cell: f64,
-}
-
 pub struct OgiveResult {
     pub iters: usize,
     pub residual: Vec<f64>,
     pub drop_orders: f64,
-    pub stop_reason: &'static str,
+    pub stop_reason: StopReason,
     pub wall: Vec<WallPoint>,
     /// Forebody (nose) pressure-drag coefficient, base-area reference, from extrapolated / first-cell Cp.
     pub cd_nose: f64,
@@ -221,7 +205,7 @@ pub fn run_ogive(case: &OgiveCase) -> OgiveResult {
     let mut s = case.build_solver();
     let mut residual = Vec::new();
     let mut rmax: f64 = 0.0;
-    let mut reason = "max iterations";
+    let mut reason = StopReason::MaxIterations;
     for it in 0..case.max_iter {
         let r = s.step();
         residual.push(r);
@@ -229,17 +213,17 @@ pub fn run_ogive(case: &OgiveCase) -> OgiveResult {
             rmax = rmax.max(r);
         }
         if !r.is_finite() {
-            reason = "non-finite residual";
+            reason = StopReason::NonFinite;
             break;
         }
         if it > 20 && rmax / r >= 10f64.powf(case.drop_orders) {
-            reason = "residual drop reached";
+            reason = StopReason::ResidualDrop;
             break;
         }
         if it >= 8000 && it % 1000 == 0 {
             let m = |a: usize, b: usize| residual[a..b].iter().map(|x| x.log10()).sum::<f64>() / (b - a) as f64;
             if m(it - 2000, it) - m(it - 4000, it - 2000) > -0.05 {
-                reason = "residual plateau";
+                reason = StopReason::ResidualPlateau;
                 break;
             }
         }
@@ -249,7 +233,7 @@ pub fn run_ogive(case: &OgiveCase) -> OgiveResult {
     postprocess(case, &s, residual, drop_orders, reason)
 }
 
-fn postprocess(case: &OgiveCase, s: &Solver, residual: Vec<f64>, drop_orders: f64, reason: &'static str) -> OgiveResult {
+fn postprocess(case: &OgiveCase, s: &Solver, residual: Vec<f64>, drop_orders: f64, reason: StopReason) -> OgiveResult {
     let g = &s.grid;
     let (ni, nj) = (g.ni, g.nj);
     let fs = s.cfg.freestream;
@@ -304,18 +288,7 @@ fn postprocess(case: &OgiveCase, s: &Solver, residual: Vec<f64>, drop_orders: f6
         min_rho = min_rho.min(w[0]);
         min_p = min_p.min(w[3]);
     }
-    OgiveResult {
-        iters: residual.len(),
-        residual,
-        drop_orders,
-        stop_reason: reason,
-        wall,
-        cd_nose: cd,
-        cd_nose_cell: cd_cell,
-        shock_margin,
-        min_rho,
-        min_p,
-    }
+    OgiveResult { iters: residual.len(), residual, drop_orders, stop_reason: reason, wall, cd_nose: cd, cd_nose_cell: cd_cell, shock_margin, min_rho, min_p }
 }
 
 /// Linear interpolation of the wall `Cp(x)` (extrapolated-wall value) at `x`; NaN outside the sampled range.

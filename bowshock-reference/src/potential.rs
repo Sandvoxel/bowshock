@@ -54,7 +54,7 @@ impl PotentialSolution {
     }
 }
 
-fn solve_dense(a: &mut Vec<f64>, b: &mut Vec<f64>, n: usize) {
+fn solve_dense(a: &mut [f64], b: &mut [f64], n: usize) {
     // Gaussian elimination with partial pivoting (a: n x n row-major)
     for c in 0..n {
         let mut piv = c;

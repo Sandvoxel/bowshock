@@ -11,11 +11,13 @@
 //! `--quick` = grid level 0. `--warm` = start every Mach number from the previous converged field (ascending order).
 //! Output: `out/transonic/` (`sweep_<tag>.csv`, `compare_<tag>.csv`, `cp_<tag>_M<m>.csv`, `residual_<tag>_M<m>.csv`, `tables_<tag>.md`).
 
+use bowshock::result::PointResult;
+use bowshock::run::run_on;
+use bowshock_cases::ogive::wall_cp_at;
+use bowshock_cases::transonic::{named_body, stoney, tangent_cone_cd, transonic_case};
 use bowshock_core::flux::Limiter;
 use bowshock_core::implicit::ImplicitParams;
 use bowshock_core::solver::{Bc, Scheme};
-use bowshock_cases::ogive::wall_cp_at;
-use bowshock_cases::transonic::{named_body, run_on, stoney, tangent_cone_cd, TransonicCase, TransonicResult};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
@@ -47,57 +49,59 @@ fn main() {
         _ => Limiter::Minmod,
     };
     let low_mach = arg(&args, "--lowmach") == Some("on");
-    let tag = arg(&args, "--tag").map(String::from).unwrap_or_else(|| format!("{body_name}_L{level}{}{}", if implicit { "_imp" } else { "" }, if warm { "_warm" } else { "" }));
+    let tag = arg(&args, "--tag")
+        .map(String::from)
+        .unwrap_or_else(|| format!("{body_name}_L{level}{}{}", if implicit { "_imp" } else { "" }, if warm { "_warm" } else { "" }));
     let out_dir: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("out").join("transonic");
     fs::create_dir_all(&out_dir).expect("create out dir");
 
     let make_case = |m: f64| {
         let cyl = 6.0;
-        let mut c = TransonicCase::with_body(m, level, body, cyl);
-        c.limiter = limiter;
-        c.low_mach = low_mach;
+        let mut c = transonic_case(m, level, body, cyl);
+        c.numerics.limiter = limiter;
+        c.numerics.low_mach = low_mach;
         if implicit {
-            c.scheme = Scheme::Implicit(ImplicitParams::DEFAULT);
-            c.first_order_iters = 100;
+            c.numerics.scheme = Scheme::Implicit(ImplicitParams::DEFAULT);
+            c.numerics.first_order_iters = 100;
         }
         if let Some(v) = arg(&args, "--max-iter").and_then(|v| v.parse().ok()) {
-            c.max_iter = v;
+            c.numerics.max_iter = v;
         }
         if let Some(v) = arg(&args, "--drop").and_then(|v| v.parse().ok()) {
-            c.drop_orders = v;
+            c.numerics.drop_orders = v;
         }
         if let Some(v) = arg(&args, "--cd-tol").and_then(|v| v.parse().ok()) {
-            c.cd_tol = v; // 0 disables the "CD stationary" stop
+            c.numerics.monitor_tol = Some(v); // 0 disables the CD-stationary stop
         }
         if arg(&args, "--outflow") == Some("pressure") {
-            c.outflow = Bc::PressureOutflow;
+            c.numerics.outflow = Bc::PressureOutflow;
         }
         if let Some(d) = arg(&args, "--domain").and_then(|v| v.parse::<f64>().ok()) {
             let lb = body.nose_length() + cyl;
-            c.grid.x_up = d * lb;
-            c.grid.r_far = d * lb;
+            c.grid_sting.x_up = d * lb;
+            c.grid_sting.r_far = d * lb;
         }
         c
     };
 
     let c0 = make_case(machs[0]);
     let (ni, nj) = c0.cells();
-    let lb = body.nose_length() + c0.grid.cyl_length;
+    let lb = body.nose_length() + c0.body.aft_length();
     println!(
-        "bowshock-cfd transonic: body {body_name} (nose l/d {:.3}, tip half angle {:.2} deg), grid L{level} {ni}x{nj}, upstream {:.0} d / radial {:.0} d / downstream {:.0} d (body length {:.1} d), limiter {limiter:?}, scheme {}, low-Mach {low_mach}, outflow {:?}, {}",
+        "bowshock-core transonic: body {body_name} (nose l/d {:.3}, tip half angle {:.2} deg), grid L{level} {ni}x{nj}, upstream {:.0} d / radial {:.0} d / downstream {:.0} d (body length {:.1} d), limiter {limiter:?}, scheme {}, low-Mach {low_mach}, outflow {:?}, {}",
         body.nose_length(),
         body.tip_half_angle().to_degrees(),
-        c0.grid.x_up,
-        c0.grid.r_far,
-        c0.grid.x_down,
+        c0.grid_sting.x_up,
+        c0.grid_sting.r_far,
+        c0.grid_sting.x_down,
         lb,
         if implicit { "line-implicit" } else { "explicit SSP-RK3" },
-        c0.outflow,
+        c0.numerics.outflow,
         if warm { "warm-start sweep" } else { "cold start for every Mach" }
     );
     println!("threads (rayon): {}", rayon::current_num_threads());
 
-    let mut results: Vec<(TransonicResult, f64)> = Vec::new();
+    let mut results: Vec<(PointResult, f64)> = Vec::new();
     let mut solver = c0.build_solver();
     let mut r_ref: Option<f64> = None;
     for (k, &m) in machs.iter().enumerate() {
@@ -134,7 +138,9 @@ fn main() {
 
     // ---- summary tables ----
     let mut sweep = String::from("mach,iters,seconds,stop_reason,drop_orders,residual_peak,residual_final,cd_nose,cd_nose_first_cell,cd_range_last_window,cp_min,x_cp_min,m_wall_max,farfield_dp_over_p\n");
-    let mut cmp = String::from("mach,cd_cfd,cd_cfd_first_cell,cd_stoney_digitised,stoney_read_uncertainty,stoney_status,cfd_minus_stoney,cd_tangent_cone_or_taylor_maccoll\n");
+    let mut cmp = String::from(
+        "mach,cd_cfd,cd_cfd_first_cell,cd_stoney_digitised,stoney_read_uncertainty,stoney_status,cfd_minus_stoney,cd_tangent_cone_or_taylor_maccoll\n",
+    );
     let mut md = String::new();
     writeln!(md, "### {body_name}, grid L{level} {ni}x{nj}, {}\n", if warm { "warm-start sweep" } else { "cold starts" }).unwrap();
     writeln!(md, "| M | iters | time [s] | stop | residual drop [orders] | CD_nose CFD | Stoney (digitised) | CFD - Stoney | tangent-cone / T-M | Cp_min (x/d) | M_wall,max |").unwrap();
@@ -219,7 +225,7 @@ fn main() {
                 let e = cp_c - cp_d;
                 let valid = x_in <= xmax;
                 writeln!(f, "{x_in},{xd:.4},{cp_d:.4},{cp_c:.5},{e:+.5},{valid}").unwrap();
-                if x_in >= 8.0 && x_in <= 13.0 {
+                if (8.0..=13.0).contains(&x_in) {
                     peak_data = peak_data.min(cp_d);
                 }
                 if xd <= body.nose_length() {
@@ -256,7 +262,7 @@ fn main() {
     println!("CSV/tables written to {}", out_dir.canonicalize().unwrap_or(out_dir).display());
 }
 
-fn write_case_files(out_dir: &std::path::Path, tag: &str, res: &TransonicResult) {
+fn write_case_files(out_dir: &std::path::Path, tag: &str, res: &PointResult) {
     let name = format!("{tag}_M{}", res.mach);
     let mut f = fs::File::create(out_dir.join(format!("cp_{name}.csv"))).unwrap();
     writeln!(f, "x_over_d,r_over_d,cp_wall_extrapolated,cp_first_cell").unwrap();
@@ -265,7 +271,7 @@ fn write_case_files(out_dir: &std::path::Path, tag: &str, res: &TransonicResult)
     }
     let mut f = fs::File::create(out_dir.join(format!("residual_{name}.csv"))).unwrap();
     writeln!(f, "iter,density_residual_l2,cd_nose").unwrap();
-    let cd: std::collections::HashMap<usize, f64> = res.cd_history.iter().copied().collect();
+    let cd: std::collections::HashMap<usize, f64> = res.monitor_history.iter().copied().collect();
     for (i, r) in res.residual.iter().enumerate() {
         match cd.get(&(i + 1)) {
             Some(c) => writeln!(f, "{},{:e},{:.6}", i + 1, r, c).unwrap(),

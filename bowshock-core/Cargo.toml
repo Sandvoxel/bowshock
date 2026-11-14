@@ -8,3 +8,6 @@ description = "CPU reference 2D axisymmetric Euler solver (HLLC + MUSCL, SSP-RK3
 
 [dependencies]
 rayon.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,14 @@
+//! `bowshock`: rocket aerodynamics on top of the bowshock axisymmetric flow solver: body geometry and grids, cases,
+//! numerics and the CPU runner with its post-processing.
+
+pub mod analysis;
+pub mod atmosphere;
+pub mod body_grid;
+pub mod case;
+pub mod error;
+#[cfg(feature = "gpu")]
+pub mod gpu;
+pub mod numerics;
+pub mod result;
+pub mod run;
+pub mod spec;
