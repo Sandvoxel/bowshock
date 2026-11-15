@@ -861,26 +861,37 @@ impl Lanes<'_> {
                 Over::CgLabel => None,
             };
             if let Some(text) = text {
-                // Over a bar the tag sits just above that bar, so it never covers the bar's own label; below it when the row
-                // above is occupied by another bar (its label), and nearest free of the two otherwise.
+                // The tag never covers a bar (so never a bar's label) nor the ruler: over a bar it tries just above that bar, then
+                // just below it, and each of them first right of the cursor, then left of it; the first free spot wins, else the
+                // one over the least.
                 let w = mono_w(text.chars().count(), TEXT_SMALL) + 8.0;
-                let occupied = |y: f32, own: Option<BarKey>| {
-                    let tag = Rectangle { x: (p.x + 10.0).clamp(0.0, (size.width - w).max(0.0)), y: y - 7.5, width: w, height: 15.0 };
-                    self.scene.bars.iter().filter(|b| Some(b.key) != own).filter_map(|b| geometry::bar_rect(b, rows, axis)).any(|r| r.intersects(&tag))
-                };
-                let above = match over {
-                    Over::Bar(hit) => self.scene.bar(hit.key).and_then(|b| geometry::bar_rect(b, rows, axis)).map(|r| {
-                        let up = r.y - 9.5;
-                        if occupied(up, Some(hit.key)) && !occupied(r.y + r.height + 9.5, Some(hit.key)) {
-                            r.y + r.height + 9.5
-                        } else {
-                            up
-                        }
-                    }),
+                let own = match over {
+                    Over::Bar(hit) => Some(hit.key),
                     _ => None,
                 };
-                let y = above.unwrap_or(p.y - 14.0).max(RULER_H + 8.0);
-                tag(f, p.x + 10.0, y, &text, t.ink, t.bg_300, Some(t.line_200), false);
+                let right = (p.x + 10.0).clamp(LABEL_W, (size.width - w).max(LABEL_W));
+                let left = (p.x - 10.0 - w).clamp(LABEL_W, (size.width - w).max(LABEL_W));
+                let hit_area = |x: f32, y: f32| -> f32 {
+                    let tag = Rectangle { x, y: y - 7.5, width: w, height: 15.0 };
+                    self.scene
+                        .bars
+                        .iter()
+                        .filter(|b| Some(b.key) != own)
+                        .filter_map(|b| geometry::bar_rect(b, rows, axis))
+                        .filter_map(|r| r.intersection(&tag))
+                        .map(|i| i.width * i.height)
+                        .sum()
+                };
+                let ys = match own.and_then(|key| self.scene.bar(key)).and_then(|b| geometry::bar_rect(b, rows, axis)) {
+                    Some(r) => [r.y - 9.5, r.y + r.height + 9.5],
+                    None => [p.y - 14.0, p.y + 14.0],
+                };
+                let (x, y) = ys
+                    .into_iter()
+                    .flat_map(|y| [(right, y.max(RULER_H + 8.0)), (left, y.max(RULER_H + 8.0))])
+                    .min_by(|a, b| hit_area(a.0, a.1).total_cmp(&hit_area(b.0, b.1)))
+                    .unwrap_or((right, p.y - 14.0));
+                tag(f, x, y, &text, t.ink, t.bg_300, Some(t.line_200), false);
             }
         }
 

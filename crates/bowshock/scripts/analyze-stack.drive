@@ -1,0 +1,26 @@
+# The Cd panel is always the active configuration's drag stacked by source (skin friction, pressure, base, fins), in Aerodynamics and
+# in Drag breakdown, with one configuration or several (the others are dashed total lines over it), dark and light.
+# Run with the example, the two-stage example or a design of your own (an OpenRocket .ork is imported; a drive script cannot press Ctrl+O):
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/analyze-stack.drive out/analyze-stack
+#   BOWSHOCK_EXAMPLE=two_stage cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/analyze-stack.drive out/analyze-stack-two
+#   BOWSHOCK_OPEN=/tmp/design.ork cargo run -q -p bowshock -- drive crates/bowshock/scripts/analyze-stack.drive out/analyze-stack-ork
+viewport 1300x800
+click "Analyze"
+move (100, 700)
+move (102, 702)
+screenshot aero-dark.png
+
+click "Drag breakdown"
+move (100, 700)
+move (102, 702)
+screenshot drag-dark.png
+
+click "Light"
+move (100, 700)
+move (102, 702)
+screenshot drag-light.png
+
+click "Aerodynamics"
+move (100, 700)
+move (102, 702)
+screenshot aero-light.png

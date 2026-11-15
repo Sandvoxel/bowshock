@@ -339,13 +339,21 @@ impl App {
         }
     }
 
-    /// The app with the built-in example rocket loaded.
+    /// The app with the built-in example rocket loaded (tests; the binary starts through [`App::launch`]).
+    #[cfg(test)]
     pub fn with_example() -> Self {
+        App::launch(true)
+    }
+
+    /// The app as the binary starts it: empty, or with the built-in example when `example`. `BOWSHOCK_OPEN=<file>` opens that
+    /// document (a `.bowshock`, or an OpenRocket `.ork` that is imported) instead of either; a drive script cannot press Ctrl+O,
+    /// so this is how one starts from a given rocket (from a rocket whose CFD table is already solved and stored, say).
+    pub fn launch(example: bool) -> Self {
         let mut app = App::new();
-        files::example(&mut app.ctx);
-        // `BOWSHOCK_OPEN=<file.bowshock>` opens that document instead (a drive script cannot press Ctrl+O): how a script starts
-        // from a rocket whose CFD table is already solved and stored.
-        if let Some(path) = std::env::var_os("BOWSHOCK_OPEN") {
+        if example {
+            files::example(&mut app.ctx);
+        }
+        if let Some(path) = std::env::var_os("BOWSHOCK_OPEN").filter(|p| !p.is_empty()) {
             files::open(&mut app.ctx, std::path::Path::new(&path));
         }
         app.ctx.recent = files::Recent::load(files::Recent::default_file());

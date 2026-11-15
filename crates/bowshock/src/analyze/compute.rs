@@ -221,7 +221,8 @@ pub fn shear_modulus(material: MaterialId) -> f64 {
     }
 }
 
-/// Every configuration of `rocket` (the active one first among at most [`MAX_CONFIGS`]) as a [`ConfigJob`]. Returns the jobs
+/// Every configuration of `rocket` as a [`ConfigJob`], in the document's order: at most [`MAX_CONFIGS`] of them, the active one
+/// always among them (and not necessarily first; see `readout::active_run`). Returns the jobs
 /// and how many configurations were left out; the error is why nothing could be built (an empty rocket).
 pub fn jobs(rocket: &Rocket, motors: &MotorDb, phase: Phase) -> Result<(Vec<ConfigJob>, usize), String> {
     let active = rocket.active_config_id();

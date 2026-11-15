@@ -75,7 +75,7 @@ pub mod flash;
 /// Logical size of the ViewCube canvas.
 pub const CUBE_SIZE: f32 = 112.0;
 /// Strip left of the ViewCube that holds the axis triad (the canvas is `TRIAD_GUTTER + CUBE_SIZE` wide).
-pub const TRIAD_GUTTER: f32 = 30.0;
+pub const TRIAD_GUTTER: f32 = 56.0;
 
 const SNAP_TIME: Duration = Duration::from_millis(320);
 /// How much of the orthographic blend one orbit step takes away, so a drag off a face view eases into perspective.

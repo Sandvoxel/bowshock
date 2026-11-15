@@ -123,6 +123,8 @@ pub struct Context<'a> {
     pub bounds: Rectangle,
     /// Whether the ViewCube is shown (3D): the inset sits under it, else under the toolbar row.
     pub cube: bool,
+    /// Screen rectangles the inset keeps off (the CG and CP labels of the markers layer).
+    pub avoid: Vec<Rectangle>,
 }
 
 /// The inset for radial part `id`: a panel at one of the viewport's corners, like the kit's AFT VIEW panel. It prefers the top
@@ -141,13 +143,14 @@ pub fn inset(cx: &Context, id: PartId) -> Option<Inset> {
     let right = (w - INSET - 16.0).max(8.0);
     let top = if cx.cube { 16.0 + super::CUBE_SIZE + 8.0 } else { 64.0 };
     let bottom = (h - INSET - BOTTOM_BAR).max(8.0);
-    let keep_clear = Rectangle::new(
+    let mut keep_clear = vec![Rectangle::new(
         Point::new(cx.bounds.x - INSET_MARGIN, cx.bounds.y - INSET_MARGIN),
         Size::new(cx.bounds.width + 2.0 * INSET_MARGIN, cx.bounds.height + 2.0 * INSET_MARGIN),
-    );
+    )];
+    keep_clear.extend(cx.avoid.iter().map(|a| Rectangle::new(Point::new(a.x - 6.0, a.y - 6.0), Size::new(a.width + 12.0, a.height + 12.0))));
     let spots = [(right, top), (right, bottom), (16.0, TOOLBAR_BOTTOM), (16.0, bottom)];
     let rect = |(x, y): (f32, f32)| Rectangle::new(Point::new(x, y), Size::new(INSET, INSET));
-    let (x, y) = spots.into_iter().find(|s| !rect(*s).intersects(&keep_clear)).unwrap_or(spots[0]);
+    let (x, y) = spots.into_iter().find(|s| keep_clear.iter().all(|k| !rect(*s).intersects(k))).unwrap_or(spots[0]);
     let panel = rect((x, y));
     let total = f64::from(place.base) + reach;
     let scale = PICTURE_R / total.max(1e-3) as f32;
@@ -408,7 +411,15 @@ mod tests {
     }
 
     fn cx<'a>(r: &'a Rocket, cam: &'a Camera) -> Context<'a> {
-        Context { rocket: r, camera: cam, size: SIZE, instance: 0, bounds: Rectangle::new(Point::new(300.0, 200.0), Size::new(200.0, 100.0)), cube: false }
+        Context {
+            rocket: r,
+            camera: cam,
+            size: SIZE,
+            instance: 0,
+            bounds: Rectangle::new(Point::new(300.0, 200.0), Size::new(200.0, 100.0)),
+            cube: false,
+            avoid: Vec::new(),
+        }
     }
 
     #[test]

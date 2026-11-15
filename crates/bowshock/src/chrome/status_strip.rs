@@ -10,7 +10,7 @@ use iced::{Center, Element, Fill, Widget};
 use super::{Message as ChromeMessage, State};
 use crate::app::{ui, Ctx, Message, Mode, Selection};
 use crate::theme;
-use crate::tokens::{text as type_scale, SPACE_1, SPACE_2, SPACE_3, TEXT_BODY};
+use crate::tokens::{text as type_scale, SPACE_1, SPACE_2, SPACE_3, STATUSBAR_H, TEXT_BODY};
 use crate::units::Quantity;
 use crate::widgets::chip::{chip, Severity};
 use crate::widgets::glyph::{self, Mark, Tone};
@@ -22,8 +22,12 @@ const STAGE_LABELS: [&str; 6] = ["Stage 1", "Stage 2", "Stage 3", "Stage 4", "St
 
 const DASH: &str = "—";
 
-/// The strip.
+/// The strip. It measures its own width so the live deltas of a drag give way before the selection summary does.
 pub fn status_strip<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
+    iced::widget::responsive(move |size| strip(state, ctx, size.width)).width(Fill).height(STATUSBAR_H).boxed()
+}
+
+fn strip<'a>(state: &'a State, ctx: &'a Ctx, width: f32) -> Element<'a, Message> {
     let rocket = ctx.doc.rocket();
     let units = ctx.units;
     let shown = ctx.shown();
@@ -56,33 +60,58 @@ pub fn status_strip<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> 
             Some(text)
         }
     };
+    // The issues chip and the selection take room the deltas must leave them.
+    let issues = ctx.physics.issues().count();
+    let notes = ctx.import_notes.len();
+    let chip_label = (issues + notes > 0).then(|| {
+        // The issues set the chip's state; import notes alone make it a neutral `info` chip that opens the same list.
+        if issues > 0 {
+            let word = if ctx.physics.worst() == Level::Err { "error" } else { "warning" };
+            let severity = if ctx.physics.worst() == Level::Err { Severity::Err } else { Severity::Warn };
+            (severity, format!("{issues} {word}{}", if issues == 1 { "" } else { "s" }))
+        } else {
+            (Severity::Info, format!("{notes} import note{}", if notes == 1 { "" } else { "s" }))
+        }
+    });
+    let selection = selection_parts(ctx);
+    let live_now = changing.mass || changing.length || changing.diameter || changing.cg || changing.cp || changing.margin;
+    let mut extra = if ctx.physics.is_staged() { 240.0 } else { 0.0 };
+    if let Some((name, mass)) = &selection {
+        let chars = name.chars().count().min(SELECTION_NAME_MAX) + mass.as_ref().map_or(0, |m| m.chars().count() + 3);
+        extra += 70.0 + chars as f32 * CHAR_W + 32.0;
+    }
+    if let Some((_, label)) = &chip_label {
+        extra += 36.0 + label.chars().count() as f32 * 6.8 + 16.0;
+    }
+    let mut deltas = [
+        delta(|b| b.mass, Quantity::Mass),
+        delta(|b| b.length, Quantity::Length),
+        delta(|b| b.reference_diameter, Quantity::Length),
+        delta(|b| b.cg, Quantity::Length),
+        delta(|b| b.cp, Quantity::Length),
+        balance.zip(shown.committed).map(|(b, was)| b.margin_cal - was.margin_cal).filter(|d| d.abs() >= 0.005).map(|d| format!("{d:+.2}")),
+    ];
+    if live_now {
+        let keep = deltas_kept(&deltas, extra, width);
+        for (d, k) in deltas.iter_mut().zip(keep) {
+            if !k {
+                *d = None;
+            }
+        }
+    }
+    let [d_mass, d_length, d_diameter, d_cg, d_cp, d_margin] = deltas;
     let live = |changing: bool, delta: Option<String>| status::Live { changing, delta, color: None };
-    cells.push(status::readout_live("MASS", value(|b| b.mass, Quantity::Mass, true), None, live(changing.mass, delta(|b| b.mass, Quantity::Mass))));
-    cells.push(status::readout_live("LEN", value(|b| b.length, Quantity::Length, true), None, live(changing.length, delta(|b| b.length, Quantity::Length))));
-    cells.push(status::readout_live(
-        "Ø REF",
-        value(|b| b.reference_diameter, Quantity::Length, true),
-        None,
-        live(changing.diameter, delta(|b| b.reference_diameter, Quantity::Length)),
-    ));
-    cells.push(status::cg_live(
-        value(|b| b.cg, Quantity::Length, false),
-        ctx.show_cg,
-        Some(wrap(ChromeMessage::ToggleCg)),
-        live(changing.cg, delta(|b| b.cg, Quantity::Length)),
-    ));
-    cells.push(status::cp_live(
-        value(|b| b.cp, Quantity::Length, false),
-        ctx.show_cp,
-        Some(wrap(ChromeMessage::ToggleCp)),
-        live(changing.cp, delta(|b| b.cp, Quantity::Length)),
-    ));
+    cells.push(status::readout_live("MASS", value(|b| b.mass, Quantity::Mass, true), None, live(changing.mass, d_mass)));
+    cells.push(status::readout_live("LEN", value(|b| b.length, Quantity::Length, true), None, live(changing.length, d_length)));
+    cells.push(status::readout_live("Ø REF", value(|b| b.reference_diameter, Quantity::Length, true), None, live(changing.diameter, d_diameter)));
+    cells.push(status::cg_live(value(|b| b.cg, Quantity::Length, false), ctx.show_cg, Some(wrap(ChromeMessage::ToggleCg)), live(changing.cg, d_cg)));
+    cells.push(status::cp_live(value(|b| b.cp, Quantity::Length, false), ctx.show_cp, Some(wrap(ChromeMessage::ToggleCp)), live(changing.cp, d_cp)));
     if let Some(b) = balance {
         let bands = ctx.doc.rocket().stability_bands();
         // A margin that is changing takes its stability band's colour as well.
         let margin = status::Live {
             changing: changing.margin,
-            delta: shown.committed.map(|was| b.margin_cal - was.margin_cal).filter(|d| d.abs() >= 0.005).map(|d| format!("{d:+.2}")),
+            delta: d_margin,
             color: changing.margin.then(|| super::config_picker::margin_color(ctx.tokens(), bands, b.margin_cal)),
         };
         cells.push(status::stability_live(ctx.physics.gauge(), &bands.into(), Some(Message::Mode(Mode::Analyze)), margin));
@@ -92,28 +121,17 @@ pub fn status_strip<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> 
 
     let mut trailing: Vec<Element<'a, Message>> = Vec::new();
     // Priority: SELECTED never clips, so the transient message gives way while a value is live (its deltas need the room).
-    let live_now = changing.mass || changing.length || changing.diameter || changing.cg || changing.cp || changing.margin;
     if let Some(notice) = ctx.notice.as_ref().filter(|_| !live_now) {
         trailing.push(single_line(&notice.0, NOTICE_MAX, TEXT_BODY, false, theme::colored(|t| t.ok)));
     }
-    if let Some(summary) = selection_summary(ctx) {
-        trailing.push(summary);
+    if let Some((name, mass)) = selection {
+        trailing.push(summary(&name, mass));
     }
-    let issues = ctx.physics.issues().count();
-    let notes = ctx.import_notes.len();
-    if issues + notes > 0 {
-        // The issues set the chip's state; import notes alone make it a neutral `info` chip that opens the same list.
-        let (severity, label) = if issues > 0 {
-            let word = if ctx.physics.worst() == Level::Err { "error" } else { "warning" };
-            let severity = if ctx.physics.worst() == Level::Err { Severity::Err } else { Severity::Warn };
-            (severity, format!("{issues} {word}{}", if issues == 1 { "" } else { "s" }))
-        } else {
-            (Severity::Info, format!("{notes} import note{}", if notes == 1 { "" } else { "s" }))
-        };
+    if let Some((severity, label)) = chip_label {
         // Never wraps: the chip is given the width its words need (icon, gap, text at 12 px, padding).
-        let width = 36.0 + label.chars().count() as f32 * 6.8;
+        let chip_w = 36.0 + label.chars().count() as f32 * 6.8;
         let chip: Element<'a, Message> = chip(severity, label).on_press(wrap(ChromeMessage::ToggleIssues)).into();
-        trailing.push(container(chip).width(width).boxed());
+        trailing.push(container(chip).width(chip_w).boxed());
     }
     status::strip(cells, trailing)
 }
@@ -165,7 +183,8 @@ fn config_cell<'a>(name: String, open: bool) -> Element<'a, Message> {
 
 /// Longest notice / selection line shown before it is cut with an ellipsis (characters).
 const NOTICE_MAX: usize = 44;
-const SELECTION_MAX: usize = 28;
+/// Longest part name in the SELECTED cell before the ellipsis (the mass after it is never cut).
+const SELECTION_NAME_MAX: usize = 22;
 
 /// `full` on one line, cut to `max` characters with an ellipsis; the cut text has a tooltip with all of it. Never wraps, so the
 /// strip keeps its height.
@@ -183,8 +202,8 @@ fn single_line<'a>(full: &str, max: usize, size: f32, mono: bool, style: impl Fn
     tooltip(line, bubble).position(tooltip::Position::Top).gap(SPACE_1).boxed()
 }
 
-/// `Selected: Fin set · 42.6 g` before the warnings, when a part is selected.
-fn selection_summary<'a>(ctx: &'a Ctx) -> Option<Element<'a, Message>> {
+/// The selection as the strip shows it: the part's name (cut with an ellipsis when long) and its mass, which is never cut.
+fn selection_parts(ctx: &Ctx) -> Option<(String, Option<String>)> {
     let Selection::Part(id) = ctx.selection else {
         return None;
     };
@@ -192,7 +211,7 @@ fn selection_summary<'a>(ctx: &'a Ctx) -> Option<Element<'a, Message>> {
     if ctx.is_multi() {
         let parts = ctx.selected_parts();
         let mass: f64 = parts.iter().filter_map(|p| rocket.component_mass(*p)).map(|m| m.mass).sum();
-        return Some(summary(format!("{} parts · {}", parts.len(), ui::with_unit(mass, Quantity::Mass, ctx.units))));
+        return Some((format!("{} parts", parts.len()), Some(ui::with_unit(mass, Quantity::Mass, ctx.units))));
     }
     let name = match (rocket.part(id), rocket.radial(id), rocket.internal(id)) {
         (Some(p), _, _) => p.display_name(),
@@ -201,16 +220,60 @@ fn selection_summary<'a>(ctx: &'a Ctx) -> Option<Element<'a, Message>> {
         _ => return None,
     };
     let mass = rocket.component_mass(id).map(|m| ui::with_unit(m.mass, Quantity::Mass, ctx.units));
-    let line = match mass {
-        Some(mass) => format!("{name} · {mass}"),
-        None => name,
-    };
-    Some(summary(line))
+    Some((name, mass))
 }
 
-/// The `SELECTED  <line>` cell: the strip's label/value pair in its own ruled cell (a hairline each side), like MASS or LEN.
-fn summary<'a>(line: String) -> Element<'a, Message> {
+/// The `SELECTED  <name> · <mass>` cell: the strip's label/value pair in its own ruled cell (a hairline each side), like MASS or
+/// LEN. Only the name is ever ellipsised.
+fn summary<'a>(name: &str, mass: Option<String>) -> Element<'a, Message> {
     let rule = || container(Space::new()).width(1).height(Fill).style(theme::hairline);
-    let content = row![ui::label("SELECTED"), single_line(&line, SELECTION_MAX, type_scale::NUM_BODY.size, true, theme::ink)].spacing(SPACE_2).align_y(Center);
+    let size = type_scale::NUM_BODY.size;
+    let mut content = row![ui::label("SELECTED"), single_line(name, SELECTION_NAME_MAX, size, true, theme::ink)].spacing(SPACE_2).align_y(Center);
+    if let Some(mass) = mass {
+        content = content.push(text(format!("· {mass}")).size(size).font(theme::MONO).wrapping(Wrapping::None).style(theme::ink).boxed());
+    }
     row![rule(), container(content).padding([0.0, SPACE_3]).height(Fill).center_y(Fill), rule()].height(Fill).boxed()
+}
+
+/// Rough width (logical px) of the strip without any live delta, from the cells it always has; the phase cell and the label
+/// of the configuration add to it.
+const BASE_W: f32 = 880.0;
+/// Mono 12–13 px advance, with the gap before a delta.
+const CHAR_W: f32 = 7.8;
+
+/// Which of the six live deltas (mass, length, Ø, CG, CP, margin) stay: the least important go first (margin, Ø, length, then
+/// CP, CG, mass) until what the strip is estimated to need fits `width`, so the SELECTED cell never loses its mass.
+fn deltas_kept(deltas: &[Option<String>; 6], extra: f32, width: f32) -> [bool; 6] {
+    let mut keep = [true; 6];
+    let need = |keep: &[bool; 6]| {
+        extra + deltas.iter().zip(keep).filter(|(_, k)| **k).map(|(d, _)| d.as_ref().map_or(0.0, |d| (d.chars().count() + 3) as f32 * CHAR_W)).sum::<f32>()
+    };
+    for drop in [5, 2, 1, 4, 3, 0] {
+        if need(&keep) + BASE_W <= width {
+            break;
+        }
+        keep[drop] = false;
+    }
+    keep
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn deltas() -> [Option<String>; 6] {
+        ["+18.4", "+72.0", "+0.5", "+36.6", "+55.7", "-0.38"].map(|d| Some(d.to_string()))
+    }
+
+    #[test]
+    fn wide_strips_keep_every_delta_and_narrow_ones_drop_the_least_important_first() {
+        assert_eq!(deltas_kept(&deltas(), 400.0, 2000.0), [true; 6]);
+        // Just too narrow for all six: the margin goes first.
+        let all = BASE_W + 400.0 + deltas().iter().flatten().map(|d| (d.chars().count() + 3) as f32 * CHAR_W).sum::<f32>();
+        assert_eq!(deltas_kept(&deltas(), 400.0, all - 1.0), [true, true, true, true, true, false]);
+        // Out of room: the mass delta is the last to stay, and none is left when nothing fits.
+        assert_eq!(deltas_kept(&deltas(), 400.0, 100.0), [false; 6]);
+        let kept = deltas_kept(&deltas(), 400.0, BASE_W + 400.0 + 4.0 * 8.0 * CHAR_W);
+        assert!(kept[0] && kept[3] && !kept[5] && !kept[2]);
+    }
 }

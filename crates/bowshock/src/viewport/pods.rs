@@ -329,6 +329,7 @@ mod tests {
             instance: 0,
             bounds: Rectangle::new(Point::new(300.0, 200.0), Size::new(300.0, 100.0)),
             cube: false,
+            avoid: Vec::new(),
         };
         let placed = handles::place(&cx, pod);
         let dims: Vec<Dim> = placed.iter().map(|h| h.spec.dim).collect();

@@ -53,7 +53,8 @@ screenshot table.png
 click "Plots"
 screenshot back-to-plots.png
 
-# A second configuration: one series per configuration, labelled, with a colour key above the plots.
+# A second configuration: one margin and CP line per configuration, labelled, with a colour key above the plots; the Cd panel keeps
+# the active configuration's stack by source and adds the other's total as a dashed line.
 click "CONFIG"
 click "New configuration…"
 click "I284W"

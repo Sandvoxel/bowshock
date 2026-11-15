@@ -135,8 +135,11 @@ pub fn monotone_runs(curve: &[(f64, f64, f64)], burnout: f64, apogee: f64) -> Ve
         let descent = (t0 + t1) / 2.0 > apogee;
         // A piece flown almost wholly (90 %) before or after burnout is boost or coast: peak Mach lags burnout by a few samples.
         let span = (t1 - t0).max(f64::MIN_POSITIVE);
+        // Burnout 0 means no burnout event: the ascent is not split.
         let base = if descent {
             "descent"
+        } else if burnout <= 0.0 {
+            "ascent"
         } else if burnout - t0 >= 0.9 * span {
             "boost"
         } else if t1 - burnout >= 0.9 * span {
@@ -181,6 +184,22 @@ fn x_at(samples: &[Sample], x: Option<(&Channel, &crate::units::Unit)>, t: f64) 
 /// How many times the sampled curve `xs` passes `v` (a sample on `v` counts with the stretch that leaves it).
 fn crossings(xs: &[f64], v: f64) -> usize {
     xs.windows(2).filter(|w| w[0].min(w[1]) <= v && v < w[0].max(w[1])).count()
+}
+
+/// The header key of a plot drawn in phase pieces: the solid line is the powered/coasting ascent (named as the curve's pieces
+/// are: `boost`, `coast`, `ascent`), the dashed one the `descent`. `None` when no piece is flown after apogee.
+fn phase_key(panel: &Panel) -> Option<Vec<(LineStyle, String)>> {
+    if !panel.series.iter().any(|s| s.style == LineStyle::Dashed && s.name.contains("· descent")) {
+        return None;
+    }
+    let mut ascent: Vec<&str> = Vec::new();
+    for word in ["boost", "coast", "ascent"] {
+        let tag = format!("· {word}");
+        if panel.series.iter().any(|s| s.name.contains(&tag)) {
+            ascent.push(word);
+        }
+    }
+    Some(vec![(LineStyle::Solid, ascent.join("/")), (LineStyle::Dashed, "descent".into())])
 }
 
 /// The linked plots of `layout` for `entries` in the unit family of `system`. One entry is a lone flight (one framed value tag per
@@ -290,8 +309,10 @@ pub fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &P
                 }
             }
         }
-        if x_of.is_some() && !compare && sources.len() == 1 && panel.series.iter().any(|s| s.style == LineStyle::Dashed && s.name.contains("· descent")) {
-            panel = panel.key(vec![(LineStyle::Solid, "ascent".into()), (LineStyle::Dashed, "descent".into())]);
+        if x_of.is_some() && !compare && sources.len() == 1 {
+            if let Some(key) = phase_key(&panel) {
+                panel = panel.key(key);
+            }
         }
         group = group.panel(panel);
     }
@@ -430,6 +451,24 @@ mod tests {
         let flat = [(0.0, 0.0, 1.0), (1.0, 1.0, 2.0), (2.0, 1.0, 3.0), (3.0, 2.0, 4.0)];
         assert_eq!(monotone_runs(&flat, 0.0, 10.0).len(), 1);
         assert!(monotone_runs(&[], 0.0, 0.0).is_empty());
+    }
+
+    #[test]
+    fn the_key_uses_the_phase_names_of_the_curve_pieces() {
+        // Burnout known: the solid line is boost/coast, as the hover rows and the end labels name it.
+        let curve = [(0.0, 0.0, 0.0), (1.0, 0.5, 1.0), (3.0, 0.2, 2.0), (5.0, 0.01, 3.0), (6.0, 0.1, 4.0)];
+        let panel_of = |burnout: f64| {
+            monotone_runs(&curve, burnout, 5.0).into_iter().fold(Panel::new("Altitude", "m"), |p, r| {
+                let style = if r.descent { LineStyle::Dashed } else { LineStyle::Solid };
+                p.with(Series::new(format!("Altitude · {}", r.phase), r.points).style(style))
+            })
+        };
+        let key = phase_key(&panel_of(1.0)).unwrap();
+        assert_eq!(key.iter().map(|(_, w)| w.as_str()).collect::<Vec<_>>(), ["boost/coast", "descent"]);
+        // No burnout event: the ascent is one piece, named ascent everywhere.
+        assert_eq!(monotone_runs(&curve, 0.0, 5.0)[0].phase, "ascent");
+        let key = phase_key(&panel_of(0.0)).unwrap();
+        assert_eq!(key.iter().map(|(_, w)| w.as_str()).collect::<Vec<_>>(), ["ascent", "descent"]);
     }
 
     #[test]

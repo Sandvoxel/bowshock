@@ -385,7 +385,8 @@ impl Overlay<'_> {
     fn context(&self, size: Size, bounds: Rectangle) -> Context<'_> {
         let (rocket, camera) = self.selected.and_then(|id| self.frame_of(id)).unwrap_or((self.rocket, &self.camera));
         let bounds = self.cut_label(size).map_or(bounds, |c| bounds.union(&c));
-        Context { rocket, camera, size, instance: self.instance(), bounds, cube: !self.profile }
+        let avoid = self.balance.as_ref().map(|marks| markers::balance_label_rects(self.rocket, &self.camera, size, marks, self.units)).unwrap_or_default();
+        Context { rocket, camera, size, instance: self.instance(), bounds, cube: !self.profile, avoid }
     }
 
     /// The tag that selects the pod set while a part inside it is selected: its place (below the pod's copies on screen), the
@@ -659,9 +660,15 @@ fn label_size(content: &str) -> Size {
     Size::new(content.chars().count() as f32 * TEXT_LABEL * GLYPH_EM + 4.0, TEXT_LABEL + 3.0)
 }
 
-/// A label in the rectangle `rect` (as placed by [`labels::layout`]), on a backing so it reads over the model.
-fn label_in(frame: &mut Frame, content: &str, rect: Rectangle, color: Color, back: Color) {
-    frame.fill_rectangle(rect.position(), rect.size(), back.scale_alpha(0.92));
+/// A label in the rectangle `rect` (as placed by [`labels::layout`]) in the kit's tag style (opaque panel, hairline frame), so it
+/// reads over the model.
+fn label_in(frame: &mut Frame, t: &Tokens, content: &str, rect: Rectangle, color: Color) {
+    frame.fill_rectangle(rect.position(), rect.size(), t.bg_200);
+    frame.stroke_rectangle(
+        Point::new(rect.x + 0.5, rect.y + 0.5),
+        Size::new(rect.width - 1.0, rect.height - 1.0),
+        Stroke::default().with_color(t.line_200).with_width(1.0),
+    );
     text(frame, content, Point::new(rect.x + 2.0, rect.y + rect.height - 2.0), color, TEXT_LABEL, alignment::Horizontal::Left, alignment::Vertical::Bottom);
 }
 
@@ -907,7 +914,7 @@ impl canvas::Program<Message> for Overlay<'_> {
         // Where the tag and the handle labels go: placed together so none overprints another or the inset (see `labels`).
         let vis = self.visible(size, state.modifiers);
         let plan = self.plan(id, &tag_text, b, size, &vis, all && state.drag.is_none(), state.modifiers.alt());
-        label_in(&mut frame, &tag_text, plan.tag, t.accent, t.bg_000);
+        label_in(&mut frame, t, &tag_text, plan.tag, t.accent);
         if let Some(ins) = &vis.inset {
             self.draw_inset(&mut frame, t, id, ins, &vis, &plan.inset);
         }
@@ -920,7 +927,7 @@ impl canvas::Program<Message> for Overlay<'_> {
             if let Some((from, to)) = Request::leader(vis.placed[l.handle].at, l.rect) {
                 dashed(&mut frame, from, to, t.line_200, true);
             }
-            label_in(&mut frame, &l.text, l.rect, t.ink_muted, t.bg_000);
+            label_in(&mut frame, t, &l.text, l.rect, t.ink_muted);
         }
         if let Some(note) = plan.note(vis.crowded).filter(|_| state.drag.is_none()) {
             draw_note(&mut frame, t, size, &note);
@@ -1181,7 +1188,7 @@ impl Overlay<'_> {
             if let Some((from, to)) = Request::leader(vis.placed[l.handle].at, l.rect) {
                 dashed(frame, from, to, t.line_200, true);
             }
-            label_in(frame, &l.text, l.rect, t.ink_muted, t.bg_000);
+            label_in(frame, t, &l.text, l.rect, t.ink_muted);
         }
         // The cant lever as a dotted arc from the fin's own direction to its tilt.
         if let Some(cant) = vis.placed.iter().find(|p| p.spec.dim == Dim::Cant) {
@@ -1396,7 +1403,7 @@ mod tests {
                 pick::radial_bounds(&cam, SIZE, &rad.kind, pick::placement(r, rad, 0).unwrap())
             }
         };
-        visible(&Context { rocket: r, camera: &cam, size: SIZE, instance: 0, bounds: b, cube: false }, id, all, inside)
+        visible(&Context { rocket: r, camera: &cam, size: SIZE, instance: 0, bounds: b, cube: false, avoid: Vec::new() }, id, all, inside)
     }
 
     fn dims(v: &Visible) -> Vec<Dim> {
@@ -1432,7 +1439,7 @@ mod tests {
         let (mut r, tube, _, _) = rocket();
         let cam = side();
         let small = Rectangle::new(Point::new(300.0, 200.0), Size::new(10.0, 10.0));
-        let cx = Context { rocket: &r, camera: &cam, size: SIZE, instance: 0, bounds: small, cube: false };
+        let cx = Context { rocket: &r, camera: &cam, size: SIZE, instance: 0, bounds: small, cube: false, avoid: Vec::new() };
         assert!(visible(&cx, tube, true, InsideView::Cutaway).placed.is_empty());
         // A 20 mm long tube is 16 px wide: its wall handle lands within 16 px of its diameter handle and hides, with the hint.
         r.set_dim(tube, Dim::Length, 0.02).unwrap();

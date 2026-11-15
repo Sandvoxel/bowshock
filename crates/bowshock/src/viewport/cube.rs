@@ -275,7 +275,7 @@ fn small_text(content: &str, position: Point, color: Color) -> Text {
         content: content.to_string(),
         position,
         color,
-        size: Pixels(8.0),
+        size: Pixels(crate::tokens::TEXT_LABEL),
         font: MONO,
         align_x: Alignment::Center,
         align_y: alignment::Vertical::Center,
@@ -444,15 +444,15 @@ impl canvas::Program<Message> for ViewCube {
             frame.fill(&tri, Fill::from(color));
         }
 
-        // Axis triad, bottom-left in its own strip so it never overlaps the cube.
-        let origin = Point::new(super::TRIAD_GUTTER / 2.0, bounds.height - 18.0);
-        let triad = View { camera: self.camera, centre: origin, s: 10.0, k: 0.0 };
+        // Axis triad, bottom-left in its own strip so it never overlaps the cube: 14 px axes, letters at the kit's label size.
+        let origin = Point::new(super::TRIAD_GUTTER / 2.0, bounds.height - 30.0);
+        let triad = View { camera: self.camera, centre: origin, s: 14.0, k: 0.0 };
         for (axis, color, name) in [(Vec3::X, tk.axis_x, "X"), (Vec3::Y, tk.axis_y, "Y"), (Vec3::Z, tk.axis_z, "Z")] {
             let d = triad.dir(axis);
             let end = origin + d;
             frame.stroke(&Path::line(origin, end), Stroke::default().with_color(color).with_width(1.5));
             let len = d.x.hypot(d.y).max(1e-3);
-            let label_at = end + d * (5.0 / len);
+            let label_at = end + d * (7.0 / len);
             frame.fill_text(small_text(name, label_at, color));
         }
 

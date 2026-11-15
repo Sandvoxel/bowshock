@@ -778,6 +778,7 @@ impl PlotView<'_> {
 
         // Direct labels: margin labels (de-overlapped) and inside labels.
         let mut margin: Vec<(f32, String, Color)> = Vec::new();
+        let mut ends: Vec<Rectangle> = Vec::new();
         let xs = panel.stack_xs(w0, w1);
         let layers = panel.stack_layers(&xs);
         for (i, s) in panel.series.iter().enumerate() {
@@ -795,8 +796,16 @@ impl PlotView<'_> {
                     let text = s.label_text.as_deref().unwrap_or(&s.name);
                     let w = mono_width(text.chars().count(), FONT_SMALL);
                     let (px, py) = (layout.px(x_end), ymap(y_end));
-                    let (x, ax) = if px + 6.0 + w <= right { (px + 6.0, Alignment::Left) } else { (px - 6.0, Alignment::Right) };
-                    let y = if py - 12.0 < plot.y + 22.0 { (py + 12.0).min(bottom - 4.0) } else { py - 8.0 };
+                    let (x, ax) = if px + 6.0 + w <= right { (px + 6.0, Alignment::Left) } else { ((px - 6.0).max(plot.x + w + 2.0), Alignment::Right) };
+                    let y0 = if py - 12.0 < plot.y + 22.0 { (py + 12.0).min(bottom - 4.0) } else { py - 8.0 };
+                    // Two pieces of a curve end at the same point (the turn of a loop): their labels take the next free spot.
+                    let spot = |y: f32| Rectangle::new(Point::new(if matches!(ax, Alignment::Left) { x } else { x - w }, y - 6.0), Size::new(w, 12.0));
+                    let y = [0.0, 14.0, -14.0, 28.0, -28.0]
+                        .into_iter()
+                        .map(|d| (y0 + d).clamp(plot.y + 8.0, bottom - 8.0))
+                        .find(|&y| ends.iter().all(|r: &Rectangle| !r.intersects(&spot(y))))
+                        .unwrap_or(y0);
+                    ends.push(spot(y));
                     put(f, text, Point::new(x, y), t.ink_muted, FONT_SMALL, ax, alignment::Vertical::Center, MONO);
                 }
                 LabelAt::Inside => {

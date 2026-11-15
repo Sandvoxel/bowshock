@@ -522,7 +522,7 @@ impl State {
                 }
                 None => None,
             };
-            let built = plots::build(&out, ctx.units, self.overlay.as_ref());
+            let built = plots::build(&out, ctx.units, self.overlay.as_ref(), active);
             self.plot.set_full(built.group.x_extent());
             self.table = Some(out.table());
             self.built = Some(built);

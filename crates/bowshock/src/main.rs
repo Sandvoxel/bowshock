@@ -115,9 +115,9 @@ fn import_ork(ork: &std::path::Path, out: &std::path::Path) -> std::process::Exi
     std::process::ExitCode::SUCCESS
 }
 
-/// The application; with `example` the built-in example rocket is loaded at start.
+/// The application; with `example` the built-in example rocket is loaded at start, and `BOWSHOCK_OPEN=<file>` opens a document.
 fn app(example: bool) -> iced::Application<impl iced::Program<State = App, Message = Message, Theme = Theme>> {
-    iced::application(move || if example { App::with_example() } else { App::new() }, App::update, App::view)
+    iced::application(move || App::launch(example), App::update, App::view)
         .title("Bowshock")
         .theme(App::theme)
         .subscription(App::subscription)
