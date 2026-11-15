@@ -1,0 +1,21 @@
+# Widget gallery: `cargo run -q -p bowshock -- gallery crates/bowshock/scripts/gallery.drive out/gallery`
+viewport 1280x900
+screenshot dark.png
+# Scrub the root chord by dragging its grip 40 px right.
+press (140, 131)
+move (160, 131)
+move (180, 131)
+screenshot scrub.png
+release (180, 131)
+# Cycle the unit of the root chord (mm -> cm).
+click (300, 131)
+screenshot unit-cycle.png
+# Focus the tip chord and type an expression.
+click (230, 165)
+type "2in+10"
+screenshot typing.png
+type enter
+screenshot committed.png
+# Light theme.
+click "Light"
+screenshot light.png

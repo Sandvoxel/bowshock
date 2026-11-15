@@ -245,6 +245,7 @@ fn hit_radial(o: DVec3, d: DVec3, kind: &RadialKind, at: Placement, margin: f64)
             let miss = l.length_squared() - along * along;
             (miss <= radius * radius).then(|| along - (radius * radius - miss).sqrt())
         }
+        RadialKind::EllipticalFin { .. } | RadialKind::FreeformFin { .. } => None,
     }
 }
 

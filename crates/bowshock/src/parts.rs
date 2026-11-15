@@ -43,6 +43,7 @@ pub fn radial_size_label(kind: &RadialKind) -> String {
         RadialKind::FinSet { root_chord, tip_chord, span, .. } => format!("{} → {} × {}", mm(*root_chord), mm(*tip_chord), mm(*span)),
         RadialKind::LaunchLug { length, diameter } => format!("Ø{} × {}", mm(*diameter), mm(*length)),
         RadialKind::RailButton { height, diameter } => format!("Ø{} × {}", mm(*diameter), mm(*height)),
+        RadialKind::EllipticalFin { .. } | RadialKind::FreeformFin { .. } => format!("{} × {}", mm(kind.extent()), mm(kind.fin_span().unwrap_or(0.0))),
     }
 }
 
@@ -163,6 +164,10 @@ pub fn radial_outline(kind: &RadialKind) -> Vec<Point> {
         RadialKind::LaunchLug { .. } => fit(&[(0.0, 0.0), (0.0, 0.4), (1.0, 0.4), (1.0, 0.0)], 1.0, 1.0, base - SILHOUETTE_FIT.1 * 0.3),
         RadialKind::RailButton { .. } => {
             fit(&[(0.0, 0.0), (0.0, 0.7), (0.15, 0.7), (0.15, 1.0), (0.85, 1.0), (0.85, 0.7), (1.0, 0.7), (1.0, 0.0)], 1.0, 1.0, base)
+        }
+        RadialKind::EllipticalFin { .. } | RadialKind::FreeformFin { .. } => {
+            let (extent, span) = (kind.extent().max(1e-9), kind.fin_span().unwrap_or(0.0).max(1e-9));
+            fit(&kind.planform().unwrap_or_default(), extent, span, base)
         }
     }
 }

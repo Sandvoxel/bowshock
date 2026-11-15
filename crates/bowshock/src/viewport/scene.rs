@@ -120,7 +120,7 @@ impl Mesh {
         }
         if let Some(g) = marks.ghost_radial {
             let offset = rocket.clamp_offset(g.parent, g.offset, g.kind).unwrap_or(0.0);
-            place(&RadialPart { id: PartId::MAX, kind: g.kind.clone(), parent: g.parent, offset, angle: g.angle, count: g.count }, GHOST);
+            place(&RadialPart::new(PartId::MAX, g.kind.clone(), g.parent, offset, g.angle, g.count), GHOST);
         }
 
         let (mut min, mut max) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));

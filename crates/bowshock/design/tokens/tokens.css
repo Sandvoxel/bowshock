@@ -1,4 +1,4 @@
-/* Bowshock — generated from tokens.json. Dark is the default theme. */
+/* Bowshock design tokens. Generated from tokens.json. Dark is the default theme. */
 :root, [data-theme="dark"] {
   --bg-000: #0a0d11;
   --bg-100: #10141a;
@@ -36,6 +36,10 @@
   --lane-avionics: #2c3a22;
   --cut-face: #8794a5;
   --cut-interior: #141920;
+  --series-1: #199e70;
+  --series-2: #c98500;
+  --series-3: #9085e9;
+  --series-4: #d55181;
 }
 [data-theme="light"] {
   --bg-000: #e9edf2;
@@ -74,6 +78,10 @@
   --lane-avionics: #e1edd2;
   --cut-face: #6b7787;
   --cut-interior: #dfe4ea;
+  --series-1: #1baf7a;
+  --series-2: #eda100;
+  --series-3: #6250d6;
+  --series-4: #e87ba4;
 }
 :root {
   --space-1: 4px;
@@ -91,9 +99,17 @@
   --rail-w: 44px;
   --bin-w: 232px;
   --part-row-h: 44px;
-  --lanes-h: 176px;
+  --lanes-h: 206px;
   --lane-h: 28px;
   --bracket: 8px;
   --font-sans: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", "Cascadia Mono", ui-monospace, monospace;
 }
+.t-ui-title { font-family: var(--font-sans); font-size: 15px; line-height: 20px; font-weight: 600; }
+.t-ui-body { font-family: var(--font-sans); font-size: 13px; line-height: 18px; font-weight: 400; }
+.t-ui-strong { font-family: var(--font-sans); font-size: 13px; line-height: 18px; font-weight: 600; }
+.t-ui-small { font-family: var(--font-sans); font-size: 12px; line-height: 16px; font-weight: 400; }
+.t-ui-section { font-family: var(--font-sans); font-size: 10.5px; line-height: 14px; font-weight: 500; text-transform: uppercase; letter-spacing: .08em; }
+.t-num-body { font-family: var(--font-mono); font-size: 12.5px; line-height: 18px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.t-num-readout { font-family: var(--font-mono); font-size: 20px; line-height: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.t-num-label { font-family: var(--font-mono); font-size: 11px; line-height: 14px; font-weight: 500; font-variant-numeric: tabular-nums; }

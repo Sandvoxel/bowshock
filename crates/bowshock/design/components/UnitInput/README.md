@@ -6,7 +6,7 @@ A numeric field that knows its physical quantity. Every dimension in the inspect
 
 **Typing**
 - A number, a unit-suffixed value (`3in`, `76.2mm`, `1' 2"`), or arithmetic (`50+10`, `2*38`, `(120-50)/2`). Commit with Enter or by clicking away, and Esc reverts.
-- **Scrub**: drag the grip (or Alt-drag the field) sideways. 1 px = one display step, `Shift` ×0.1, `Ctrl` ×10. The model updates live (`is-drag`).
+- **Scrub**: drag the grip (or Alt-drag the field) sideways. 1 px = one display step. `Shift` snaps to the same targets as a handle drag (see Snapping in the brand book), `Ctrl` (`⌘`) ×10. The model updates live (`is-drag`).
 - **Unit chip**: click cycles the display unit (mm → cm → in). Right-click sets it project-wide.
 
 **References: `{`**

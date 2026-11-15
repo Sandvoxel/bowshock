@@ -13,7 +13,7 @@ How you see inside the rocket in 3D. These are four view modes on one control in
 
 **Behaviour**
 - **Auto-reveal (always on, any mode):** selecting an internal part (from the lanes, or `Alt`-click through the shell) ghosts the airframe around it, so you can edit a centering ring without switching modes.
-- **Cutaway section handle:** drag the round handle on the axis to rotate the cut plane. Half cut (180°) is the default, and holding `Shift` gives a quarter cut (90°) like a technical drawing.
+- **Cutaway section handle:** drag the round handle on the axis to rotate the cut plane. Half cut (180°) is the default, and holding `Shift` snaps it to 90° steps, which gives a quarter cut like a technical drawing.
 - Selection, CG/CP markers, gizmos and dimension labels draw the same way in every mode.
 - Exploded view is view-only: dragging is disabled, but click still selects. Leave it with `Esc` or `1`.
 

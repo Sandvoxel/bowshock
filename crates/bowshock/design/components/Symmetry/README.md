@@ -4,7 +4,7 @@ KSP-style symmetry groups for radial parts (fins, rail buttons, lugs, pods). You
 
 **Placing**
 - **Symmetry lives in the Parts bin**, pinned at its foot like KSP's symmetry button: pick 1 / 2 / 3 / 4 / 6 / 8 before you drag. While dragging, `X` / `Shift+X` or the wheel changes N live. Release creates a **linked group**. Angle snap (off / 15° / 45°) sits next to it.
-- Copies are spaced evenly (360°/N) starting from the drop angle. `Alt` while dropping snaps the first instance to the nearest 15°.
+- Copies are spaced evenly (360°/N) starting from the drop angle. Holding `Shift` while dropping snaps the first instance to the angle-snap step set in the Parts bin footer (15° by default) or to a sibling set's angle.
 
 **Three states** (see the preview)
 1. **Linked**: one set of settings drives every instance. Selecting any one selects the group: the clicked instance gets solid `accent` brackets and its siblings dashed ones. The inspector shows a mono `LINKED ×N` tag with *Detach* and *Split all*. Fields look normal: editing one edits the group.

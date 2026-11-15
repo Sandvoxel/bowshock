@@ -57,6 +57,8 @@ pub fn outline_points(kind: &RadialKind, at: Placement) -> Vec<Vec3> {
             let z = at.z0 + r;
             circle(u * (at.base + h) + Vec3::Z * z, u, r).into_iter().chain(circle(u * at.base + Vec3::Z * z, u, r)).collect()
         }
+        // Elliptical and freeform fins are drawn by the new builder UI; the viewport does not mesh them yet.
+        RadialKind::EllipticalFin { .. } | RadialKind::FreeformFin { .. } => Vec::new(),
     }
 }
 
@@ -140,6 +142,7 @@ pub fn emit(out: &mut Vec<Vertex>, kind: &RadialKind, at: Placement, state: f32)
             cylinder(out, u * (at.base - SINK) + z, u, h * STEM + SINK, d * STEM_WIDTH / 2.0, state);
             cylinder(out, u * (at.base + h * STEM) + z, u, h * (1.0 - STEM), d / 2.0, state);
         }
+        RadialKind::EllipticalFin { .. } | RadialKind::FreeformFin { .. } => {}
     }
 }
 

@@ -1,0 +1,402 @@
+{
+  "color": {
+    "bg-000": {
+      "$type": "color",
+      "$value": "#e9edf2",
+      "$description": "3D viewport ground and 2D profile canvas. The deepest surface, so the rocket reads as the brightest object."
+    },
+    "bg-100": {
+      "$type": "color",
+      "$value": "#f3f5f8",
+      "$description": "App window background, top bar, status strip."
+    },
+    "bg-200": {
+      "$type": "color",
+      "$value": "#ffffff",
+      "$description": "Side panels: parts bin, inspector, Station Lanes."
+    },
+    "bg-300": {
+      "$type": "color",
+      "$value": "#f6f8fa",
+      "$description": "Inputs, part tiles, raised rows inside a panel."
+    },
+    "bg-400": {
+      "$type": "color",
+      "$value": "#e8ecf1",
+      "$description": "Hover on rows, tiles and buttons."
+    },
+    "line-100": {
+      "$type": "color",
+      "$value": "#e1e6ec",
+      "$description": "Hairlines: panel frames, section rules, lane separators, minor grid. Decorative only, never a control's only boundary."
+    },
+    "line-200": {
+      "$type": "color",
+      "$value": "#7a8594",
+      "$description": "Control borders and overlay frames (overlays have no shadow, just this 1px frame). 3:1 against bg-200."
+    },
+    "ink": {
+      "$type": "color",
+      "$value": "#151a21",
+      "$description": "Primary text and values on any bg."
+    },
+    "ink-muted": {
+      "$type": "color",
+      "$value": "#4c5664",
+      "$description": "Field labels, secondary text, units suffixes."
+    },
+    "ink-faint": {
+      "$type": "color",
+      "$value": "#5f6a78",
+      "$description": "Section headers (uppercase), placeholders, disabled values. 4.5:1 on bg-300."
+    },
+    "accent": {
+      "$type": "color",
+      "$value": "#b4460c",
+      "$description": "Shock orange. Selection brackets, primary buttons, focus, the active tab underline, live drag values. One meaning: 'this is what you are acting on'."
+    },
+    "accent-ink": {
+      "$type": "color",
+      "$value": "#ffffff",
+      "$description": "Text and icons on an accent fill."
+    },
+    "accent-soft": {
+      "$type": "color",
+      "$value": "rgba(180, 70, 12, 0.10)",
+      "$description": "Drop-zone and snap-target fill ONLY. Selection never uses a wash; it uses accent brackets and outlines."
+    },
+    "cg": {
+      "$type": "color",
+      "$value": "#1d66c2",
+      "$description": "Centre of gravity. Marker, readout and every CG plot line. Always blue, always the quartered-circle glyph."
+    },
+    "cp": {
+      "$type": "color",
+      "$value": "#a81c30",
+      "$description": "Centre of pressure. Marker, readout and every CP plot line. Always red, always the dot-in-ring glyph; never used for errors."
+    },
+    "ok": {
+      "$type": "color",
+      "$value": "#16794c",
+      "$description": "Stable margin band, passing checks, valid attach node."
+    },
+    "warn": {
+      "$type": "color",
+      "$value": "#8a5a00",
+      "$description": "Warnings: marginal stability, diameter mismatch, fin flutter risk."
+    },
+    "err": {
+      "$type": "color",
+      "$value": "#c62828",
+      "$description": "Errors: unstable, invalid geometry, illegal drop. Pair with an icon; never confuse with cp, which is a quantity, not a state."
+    },
+    "axis-x": {
+      "$type": "color",
+      "$value": "#c0392b",
+      "$description": "Gizmo / axis triad X (radial)."
+    },
+    "axis-y": {
+      "$type": "color",
+      "$value": "#2e7d32",
+      "$description": "Gizmo / axis triad Y (radial)."
+    },
+    "axis-z": {
+      "$type": "color",
+      "$value": "#1f5fbf",
+      "$description": "Gizmo / axis triad Z (along the rocket's axis, the one axis most handles move on)."
+    },
+    "grid-minor": {
+      "$type": "color",
+      "$value": "#dde2e8",
+      "$description": "Viewport minor grid on bg-000."
+    },
+    "grid-major": {
+      "$type": "color",
+      "$value": "#cdd4dc",
+      "$description": "Viewport major grid lines and the rocket axis centreline."
+    },
+    "part-body": {
+      "$type": "color",
+      "$value": "#b9c2cd",
+      "$description": "Structure system colour, and the default airframe shading base in the viewport (nose, tubes, rings, bulkheads)."
+    },
+    "part-fin": {
+      "$type": "color",
+      "$value": "#8fa0b4",
+      "$description": "Default fin / flat-plate shading base in Solid view."
+    },
+    "sys-aero": {
+      "$type": "color",
+      "$value": "#11807a",
+      "$description": "Aero system: fins, canards, rail buttons, lugs. The edge of Aero bars in Station Lanes and Aero parts in X-ray / Cutaway."
+    },
+    "sys-propulsion": {
+      "$type": "color",
+      "$value": "#a3348f",
+      "$description": "Propulsion system: motor mount, motor, engine block, thrust ring, retainer. Lanes edge + parts in Cutaway / X-ray."
+    },
+    "sys-recovery": {
+      "$type": "color",
+      "$value": "#5a45d6",
+      "$description": "Recovery system: chutes, drogue, shock cord, harness, charges. Lanes edge + parts in Cutaway / X-ray."
+    },
+    "sys-avionics": {
+      "$type": "color",
+      "$value": "#4d7d16",
+      "$description": "Avionics & payload system: altimeters, batteries, trackers, payload, ballast. Lanes edge + parts in Cutaway / X-ray."
+    },
+    "lane-structure": {
+      "$type": "color",
+      "$value": "#d5dbe2",
+      "$description": "Station Lanes: Structure bar fill. Text on it is ink."
+    },
+    "lane-aero": {
+      "$type": "color",
+      "$value": "#d3ecea",
+      "$description": "Station Lanes: Aero bar fill."
+    },
+    "lane-propulsion": {
+      "$type": "color",
+      "$value": "#f1d8ec",
+      "$description": "Station Lanes: Propulsion bar fill."
+    },
+    "lane-recovery": {
+      "$type": "color",
+      "$value": "#e3defa",
+      "$description": "Station Lanes: Recovery bar fill."
+    },
+    "lane-avionics": {
+      "$type": "color",
+      "$value": "#e1edd2",
+      "$description": "Station Lanes: Avionics & payload bar fill."
+    },
+    "cut-face": {
+      "$type": "color",
+      "$value": "#6b7787",
+      "$description": "Hatching on cut faces in Cutaway view (airframe walls, rings, bulkheads where the section plane passes)."
+    },
+    "cut-interior": {
+      "$type": "color",
+      "$value": "#dfe4ea",
+      "$description": "The inside of the airframe exposed by Cutaway, behind the internals."
+    },
+    "series-1": {
+      "$type": "color",
+      "$value": "#1baf7a",
+      "$description": "Chart categorical slot 1 (aqua). Fixed order, never cycled. Validated with slots 2–4: CVD ΔE ≥ 8.4 dark / 9.1 light."
+    },
+    "series-2": {
+      "$type": "color",
+      "$value": "#eda100",
+      "$description": "Chart categorical slot 2 (yellow). Below 3:1 on light, so ship direct labels or a table."
+    },
+    "series-3": {
+      "$type": "color",
+      "$value": "#6250d6",
+      "$description": "Chart categorical slot 3 (violet)."
+    },
+    "series-4": {
+      "$type": "color",
+      "$value": "#e87ba4",
+      "$description": "Chart categorical slot 4 (magenta). More than 4 series → fold into Other or use small multiples."
+    }
+  },
+  "spacing": {
+    "space-1": {
+      "$type": "dimension",
+      "$value": "4px",
+      "$description": "Icon-to-label gap, unit suffix gap."
+    },
+    "space-2": {
+      "$type": "dimension",
+      "$value": "8px",
+      "$description": "Gap between fields in a row; tile padding."
+    },
+    "space-3": {
+      "$type": "dimension",
+      "$value": "12px",
+      "$description": "Panel inner padding; gap between inspector rows."
+    },
+    "space-4": {
+      "$type": "dimension",
+      "$value": "16px",
+      "$description": "Gap between inspector sections."
+    },
+    "space-6": {
+      "$type": "dimension",
+      "$value": "24px",
+      "$description": "Viewport overlay inset from edges."
+    },
+    "space-8": {
+      "$type": "dimension",
+      "$value": "32px",
+      "$description": "Empty-state padding, dialog padding."
+    }
+  },
+  "radius": {
+    "radius-0": {
+      "$type": "dimension",
+      "$value": "0px",
+      "$description": "Everything: panels, buttons, inputs, overlays, tiles, chips, lane blocks."
+    },
+    "radius-1": {
+      "$type": "dimension",
+      "$value": "1px",
+      "$description": "Only to soften 1px anti-aliasing on tiny marks (badge, unit chip hover). Never visible as a curve."
+    }
+  },
+  "size": {
+    "control-h": {
+      "$type": "dimension",
+      "$value": "26px",
+      "$description": "Height of inputs, buttons, segmented controls. Dense on purpose: the inspector must show a full fin set without scrolling."
+    },
+    "topbar-h": {
+      "$type": "dimension",
+      "$value": "40px",
+      "$description": "Top bar height."
+    },
+    "statusbar-h": {
+      "$type": "dimension",
+      "$value": "36px",
+      "$description": "Bottom status strip height."
+    },
+    "right-panel-w": {
+      "$type": "dimension",
+      "$value": "304px",
+      "$description": "Inspector column default width (resizable 260–440)."
+    },
+    "rail-w": {
+      "$type": "dimension",
+      "$value": "44px",
+      "$description": "Parts bin category rail width (icons only)."
+    },
+    "bin-w": {
+      "$type": "dimension",
+      "$value": "232px",
+      "$description": "Parts bin list width (resizable 200–360)."
+    },
+    "part-row-h": {
+      "$type": "dimension",
+      "$value": "44px",
+      "$description": "Parts bin row: silhouette + name + default size."
+    },
+    "lanes-h": {
+      "$type": "dimension",
+      "$value": "206px",
+      "$description": "Station Lanes default height under the viewport: 24 px ruler, five lanes with one sub-row, 20 px balance footer (grows with sub-rows; collapsible to its ruler)."
+    },
+    "lane-h": {
+      "$type": "dimension",
+      "$value": "28px",
+      "$description": "One lane in Station Lanes. A lane with overlapping parts adds 22 px sub-rows."
+    },
+    "bracket": {
+      "$type": "dimension",
+      "$value": "8px",
+      "$description": "Leg length of selection corner brackets, in the viewport and the Station Lanes."
+    }
+  },
+  "fontFamily": {
+    "sans": {
+      "$type": "fontFamily",
+      "$value": [
+        "IBM Plex Sans",
+        "Segoe UI",
+        "system-ui",
+        "sans-serif"
+      ]
+    },
+    "mono": {
+      "$type": "fontFamily",
+      "$value": [
+        "IBM Plex Mono",
+        "Cascadia Mono",
+        "ui-monospace",
+        "monospace"
+      ]
+    }
+  },
+  "typography": {
+    "ui-title": {
+      "$type": "typography",
+      "$value": {
+        "fontFamily": "{fontFamily.sans}",
+        "fontSize": "15px",
+        "lineHeight": "20px",
+        "fontWeight": 600
+      },
+      "$description": "Inspector title, dialog titles."
+    },
+    "ui-body": {
+      "$type": "typography",
+      "$value": {
+        "fontFamily": "{fontFamily.sans}",
+        "fontSize": "13px",
+        "lineHeight": "18px",
+        "fontWeight": 400
+      },
+      "$description": "Default UI text: labels, list rows, menus."
+    },
+    "ui-strong": {
+      "$type": "typography",
+      "$value": {
+        "fontFamily": "{fontFamily.sans}",
+        "fontSize": "13px",
+        "lineHeight": "18px",
+        "fontWeight": 600
+      },
+      "$description": "Selected list row, button text."
+    },
+    "ui-small": {
+      "$type": "typography",
+      "$value": {
+        "fontFamily": "{fontFamily.sans}",
+        "fontSize": "12px",
+        "lineHeight": "16px",
+        "fontWeight": 400
+      },
+      "$description": "Helper text, tile captions, tooltips."
+    },
+    "ui-section": {
+      "$type": "typography",
+      "$value": {
+        "fontFamily": "{fontFamily.sans}",
+        "fontSize": "10.5px",
+        "lineHeight": "14px",
+        "fontWeight": 500
+      },
+      "$description": "Uppercase mono panel section headers in ink-faint, prefixed with a two-digit index."
+    },
+    "num-body": {
+      "$type": "typography",
+      "$value": {
+        "fontFamily": "{fontFamily.mono}",
+        "fontSize": "12.5px",
+        "lineHeight": "18px",
+        "fontWeight": 500
+      },
+      "$description": "Every editable value and every readout. Tabular, so digits don't shift while dragging."
+    },
+    "num-readout": {
+      "$type": "typography",
+      "$value": {
+        "fontFamily": "{fontFamily.mono}",
+        "fontSize": "20px",
+        "lineHeight": "24px",
+        "fontWeight": 600
+      },
+      "$description": "Headline stability margin in the status strip and gauge."
+    },
+    "num-label": {
+      "$type": "typography",
+      "$value": {
+        "fontFamily": "{fontFamily.mono}",
+        "fontSize": "11px",
+        "lineHeight": "14px",
+        "fontWeight": 500
+      },
+      "$description": "Viewport labels on CG/CP markers and dimension lines."
+    }
+  }
+}

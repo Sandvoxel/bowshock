@@ -136,8 +136,14 @@ html, body { margin: 0; background: var(--bg-200); color: var(--ink); font-famil
 .bs-lanes .blk .edge { position: absolute; top: 0; bottom: 0; width: 5px; cursor: ew-resize; }
 .bs-lanes .blk .wn { width: 6px; height: 6px; background: var(--warn); margin-left: 6px; flex: none; }
 .bs-lanes .mark { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px solid; z-index: 3; pointer-events: none; }
-.bs-lanes .mark.cg { border-color: var(--cg); } .bs-lanes .mark.cp { border-color: var(--cp); border-left-style: dashed; }
-.bs-lanes .mlab { position: absolute; top: 4px; font-family: var(--font-mono); font-size: 10.5px; padding: 0 4px; z-index: 4; background: var(--bg-100); }
+.bs-lanes .mark.cg { border-color: var(--cg); } .bs-lanes .mark.cp { border-color: var(--cp); }
+.bs-lanes .mark { top: 24px; bottom: 12px; border-left-style: dotted; }
+.bs-lanes .foot { height: 20px; background: var(--bg-100); }
+.bs-lanes .margin { position: absolute; bottom: 12px; height: 3px; z-index: 4; }
+.bs-lanes .mbar { position: absolute; bottom: 0; background: var(--ink-muted); opacity: .28; }
+.bs-lanes .wall { position: absolute; top: 24px; bottom: 20px; border-left: 1px dashed var(--ink-muted); z-index: 3; pointer-events: none; }
+.bs-lanes .blk.drag { border: 1px dashed var(--accent); background: linear-gradient(var(--accent-soft), var(--accent-soft)), var(--bg-200); z-index: 2; }
+.bs-lanes .mlab { position: absolute; bottom: 0; line-height: 11px; font-family: var(--font-mono); font-size: 10.5px; padding: 0 4px; z-index: 4; background: var(--bg-100); }
 .bs-lanes .stage { position: absolute; top: 0; bottom: 0; border-left: 1px dashed var(--line-200); z-index: 1; }
 
 /* Viewport svg classes */
@@ -195,3 +201,22 @@ html, body { margin: 0; background: var(--bg-200); color: var(--ink); font-famil
 .bs-pop .row { height: 26px; display: flex; align-items: center; justify-content: space-between; padding: 0 10px; font-size: 12.5px; border-bottom: 1px solid var(--line-100); }
 .bs-pop .row:hover, .bs-pop .row.hot { background: var(--accent-soft); }
 .bs-pop .row span:last-child { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-muted); }
+
+.bs-status > span.cfg { cursor: pointer; min-width: 150px; }
+.bs-status > span.cfg .car { margin-left: auto; color: var(--ink-muted); font-size: 10px; }
+.bs-status > span.cfg.open { background: var(--bg-300); box-shadow: inset 0 2px 0 var(--accent); }
+.bs-pop .row.sep { border-top: 1px solid var(--line-200); }
+.bs-pop .row.act { color: var(--accent); }
+.bs-lanes .blk.alt { background: transparent; border-style: dashed; opacity: .55; }
+.bs-lanes .blk.gone { opacity: .3; }
+.bs-lanes .cgt { position: absolute; bottom: 9px; height: 9px; border-left: 1px solid var(--cg); opacity: .6; z-index: 4; }
+.bs-lanes .stage.sel { border-color: var(--accent); z-index: 4; }
+.bs-mtab .r { display: grid; grid-template-columns: 1.1fr 1fr 1fr 1fr 1.7fr; height: 26px; align-items: center; padding: 0 10px; border-bottom: 1px solid var(--line-100); font-family: var(--font-mono); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.bs-mtab .r.h { color: var(--ink-faint); text-transform: uppercase; font-size: 10px; letter-spacing: .06em; }
+.bs-mtab .r.on { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
+.bs-mtab .r.no { color: var(--ink-faint); }
+.vp-handle.on { fill: var(--accent); }
+.vp-was { fill: none; stroke: var(--ink-muted); stroke-width: 1; stroke-dasharray: 3 3; }
+.vp-seam { stroke: var(--accent); stroke-width: 2; }
+.vp-sepm { fill: var(--bg-000); stroke: var(--accent); stroke-width: 1.5; }
+.vp-sepm.on { fill: var(--accent); }

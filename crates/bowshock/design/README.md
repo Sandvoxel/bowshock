@@ -34,7 +34,7 @@ Bowshock's interface takes the *feel* of a KSP-style vehicle assembly building: 
 │  │                  │ RECOVERY  - - [Chute] - -  │   ┊           │                     │
 │  │ angle snap  15°  │ AVIONICS    ▯              │CG ┊CP         │                     │
 ├──┴──────────────────┴────────────────────────────────────────────┴─────────────────────┤
-│ MASS 1.284 kg │ LEN 1142.0 │ Ø REF 76.2 │ ◐ CG 712.4 │ ◉ CP 858.7 │ STAB ▮▮▮| 1.92 │ … ⚠ 1 │ statusbar-h 36
+│ CONFIG H128W ▴│ MASS 1.284 │ LEN 1142.0 │ ◐ CG 712.4 │ ◉ CP 858.7 │ STAB ▮▮▮| 1.92 │ … ⚠ 1 │ statusbar-h 36
 └──────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -42,7 +42,8 @@ Bowshock's interface takes the *feel* of a KSP-style vehicle assembly building: 
 - **Centre top**: the **Viewport**. Its mode is 3D, Profile (2D side view) or Split. Overlays are the view toolbar (top left: 3D/2D · **Solid / Cutaway / X-ray / Exploded** · snap step), view cube + axis triad (top right), the CG/CP legend + flight condition (bottom left), the key-hint bar (bottom centre) and the scale bar (bottom right). Corner registration marks frame the drawing area.
 - **Centre bottom**: **Station Lanes**, every part drawn as a bar along the rocket's length (measured from the nose tip), **one lane per system** (Structure · Aero · Propulsion · Recovery · Avionics), with CG/CP lines running through. This is Bowshock's structure view; **there is no component tree**. When the camera is side-on, the map shares the viewport's scale, so parts line up with the model above them.
 - **Right**: the **Inspector** for the selection. Numbered sections in a fixed order: *01 Geometry → 02 Position → 03 Material & finish → 04 Mass → 05 Notes*.
-- **Bottom**: the **Status strip**, the always-on vehicle summary in ruled cells. Clicking a readout jumps to the related analysis.
+- **Other modes**: **Simulate** (flights + conditions · event timeline + linked time plots · results · ground track; tick several flights to overlay them, see **SimulateCompare** and **GroundTrack**) and **Analyze** (analysis + method + conditions · margin, CP/CG and stacked Cd vs Mach · values at cursor) keep the same frame. See **SimulateScreen** and **AnalyzeScreen**.
+- **Bottom**: the **Status strip**, the always-on vehicle summary in ruled cells. Its first cell is **Config**, the motor configuration being flown, placed in front of the numbers it changes. A staged rocket adds a **Phase** switch beside it. Clicking a readout jumps to the related analysis.
 - Both side columns and the Station Lanes collapse (`Tab` toggles the columns, `L` the lanes) for a full-screen viewport, KSP-style.
 
 ## 3. Colour
@@ -59,6 +60,7 @@ The dark theme is the default; Light is for daylight work and printing reports. 
 | State | `ok`, `warn`, `err` | Always with an icon or a word. `err` is never used for CP and `cp` is never used for an error. |
 | Viewport | `grid-*`, `part-*`, `axis-*` | Model shading bases and gizmo axes. `axis-z` is the rocket's long axis. |
 | Systems | `part-body` (Structure), `sys-aero`, `sys-propulsion`, `sys-recovery`, `sys-avionics` | **One colour per system, shared by Station Lanes and the Cutaway / X-ray views.** A part is the same colour in both places. Lane bar fills use the matching `lane-*` tint. |
+| Charts | `series-1…4` (aqua, yellow, violet, magenta) | Categorical slots in fixed order for comparisons and stacked breakdowns, validated for colour-blind separation in both themes. Single-series plots use `ink`. CG/CP plots keep `cg`/`cp`. More than 4 series → fold into Other or use small multiples. |
 | Cutaway | `cut-face`, `cut-interior` | Hatching on sliced walls, rings and bulkheads, and the exposed inside of the airframe. |
 
 ## 4. Typography
@@ -95,12 +97,18 @@ KSP's assembly building, adapted for exact engineering:
 | Drop near a node | Snaps into the stack and auto-matches the diameter | Brief `accent-soft` pulse on the new part, a status message "Diameter matched to 76.2 mm" |
 | Radial parts (fins, rail buttons, lugs) | Placed with the **Symmetry** count set in the Parts bin (KSP-style): drop one and get N evenly spaced, **linked** copies. Edit one and all change. Later you can unlink one value, detach one fin, or split all | Symmetry picker at the foot of the Parts bin. `X` / wheel changes N mid-drag. Siblings get dashed brackets, and the inspector shows `LINKED ×N` with Detach / Split all. See **Symmetry** |
 | Drag the axial handle | Slides the part along its parent | `axis-z` arrow handle. A live offset label in `num-label` follows the cursor |
-| Drag the resize handles | Stretches length / diameter / span | Square `accent` handles at part extremities. Snaps to 1 mm (hold `Shift` for free, `Ctrl` for 5 mm) |
+| Click a part, then drag its handles | Resizes it in place. **Every geometric dimension has a handle**: lengths, diameters, thicknesses, angles, positions and shape settings. The common ones show on select, the rest with `Alt` (thickness and angles around the axis in an aft-view inset, internal dimensions in Cutaway) | Square handles for lengths, round handles for angles and shapes, `accent` edge. The active one fills, a framed tag shows the live value and the change, and a dashed line marks the old size. Moves on the view's grid step; **hold `Shift` to snap** to other parts' faces, neighbouring tubes' diameters and stock sizes; `Ctrl` (`⌘`) for coarse steps; type digits for an exact value. See **Snapping**. See **DirectEdit** |
 | Fin vertices (Profile mode) | Reshape the planform freely | Vertex dots, with the planform polygon drawn in `accent` |
 | See inside | **Solid / Cutaway / X-ray / Exploded** in the view toolbar (`1`–`4`). Selecting an internal part auto-ghosts the shell in any mode | Cutaway hatches cut faces and shows internals in system colours. See **InsideViews** |
-| Orbit / pan / zoom | Turntable around the rocket axis; MMB pans along the axis; wheel zooms to the cursor | View cube shows orientation, and clicking a face snaps to it |
+| Orbit / pan / zoom | Turntable around the rocket axis; MMB pans along the axis; wheel or **trackpad pinch** zooms to the cursor | View cube shows orientation, and clicking a face snaps to it. See **Navigation** for the full mouse and Mac trackpad table |
+| **Double-click a part** | Focus: the camera turns square-on in an **orthographic** view and zooms until the part fills the viewport. `Esc` goes back | A `ORTHO · SIDE · FIN SET A` tag in the view toolbar with `Esc · back`. See **Navigation** |
 | Type `{` in any value field | Pick mode: click another field, or a part in the viewport or lanes, to insert a live **reference** (`0.5 × [Body tube · Ø]`) | Targets get dashed `accent` outlines, and the reference appears as a chip. Committed formula fields show an `ƒ` badge. See **UnitInput** |
+| Drag along x in any graph | A full-height band selects an x-range across every linked plot. **Enter** zooms in (y re-fits), and you can repeat to go deeper. **Esc** steps back one level, **Shift+Esc** returns to full | `accent-soft` band with `accent` edges, a breadcrumb of zoom levels, and an overview strip. No box select anywhere. See **PlotZoom** |
+| Click the **Config** cell in the status strip | Switch between motor configurations of the same airframe, or add one through the motor picker, which only offers motors that fit the mount | The menu opens upward and lists each configuration with its stability margin. Station Lanes can show the other configurations' motors dashed and their CGs as ticks. See **ConfigPicker** |
+| Add a second motor mount in line with the first | The rocket becomes two-stage. The separation is found automatically: the first joint at or aft of the upper motor's aft end. Timing is set in the separation's Inspector and stored per configuration | A thin `accent` seam with a diamond marker on the rocket and a dashed line through every lane, stage names either side, and a **Phase** switch in the status strip to view the full stack or an upper stage alone. If no joint exists there, a `warn` chip offers to split the tube. See **Staging** |
 | Edit a field in the inspector | The viewport updates live and the gauge animates the new margin | The edited part flashes the `accent` outline once |
+
+**Snapping and keys.** One rule across the app: a plain drag moves on the grid step, **holding `Shift` snaps to the values that matter** (faces of other parts, the diameters of neighbouring tubes, stock sizes, calibers, flight events in plots), and `Ctrl` gives coarse steps. On Mac, `Ctrl` is `⌘` and `Alt` is `⌥`. `Alt` alone means "show every handle". Dropping a new part always attaches to the nearest node with no key. See **Snapping**.
 
 **States every part can be in**: default · hovered · selected · drag-ghost (60 % opacity) · snap-target · linked sibling (dashed brackets) · invalid (`err` outline) · auto-sized (dimension in `ink-muted` on a dashed field with an `AUTO` badge) · overridden mass (value in `warn`).
 

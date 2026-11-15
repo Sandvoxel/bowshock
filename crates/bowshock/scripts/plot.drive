@@ -1,0 +1,31 @@
+# Linked plots + ground track page of the widget gallery (widgets/plot/demo.rs):
+#   cargo run -q -p bowshock -- gallery crates/bowshock/scripts/plot.drive out/plot
+viewport 1280x900
+click "Plots"
+screenshot simulate.png
+# Hover: synced crosshair, dots and value tags on every panel, dot on the ground track.
+move (330, 300)
+move (340, 300)
+screenshot simulate-hover.png
+# Drag a band along x.
+press (330, 300)
+move (360, 300)
+move (420, 300)
+release (420, 300)
+screenshot simulate-band.png
+# Enter zooms (y re-fits, breadcrumb grows, overview strip appears).
+type enter
+screenshot simulate-zoom.png
+click "Compare"
+move (400, 300)
+move (410, 300)
+screenshot compare.png
+click "Analyze"
+move (500, 300)
+move (510, 300)
+screenshot analyze.png
+click "Dispersion"
+screenshot dispersion.png
+click "Light"
+click "Analyze"
+screenshot analyze-light.png

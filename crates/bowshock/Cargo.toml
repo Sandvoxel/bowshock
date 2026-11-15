@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 # iced master (0.15-dev) is on wgpu 30, the same major as Luma; 0.14 is on wgpu 27. Pinned like Luma.
-iced = { git = "https://github.com/iced-rs/iced.git", rev = "b2fbd3cb6289603f8cbbb2387a5242231f509d13", features = ["canvas", "advanced"] }
+iced = { git = "https://github.com/iced-rs/iced.git", rev = "b2fbd3cb6289603f8cbbb2387a5242231f509d13", features = ["canvas", "advanced", "svg"] }
 # Headless driver for `bowshock drive` (scripted interaction + screenshots); same rev as iced.
 iced_test = { git = "https://github.com/iced-rs/iced.git", rev = "b2fbd3cb6289603f8cbbb2387a5242231f509d13" }
 png = "0.18"

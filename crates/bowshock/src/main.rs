@@ -4,10 +4,14 @@
 
 mod drive;
 mod logo;
+mod gallery;
 mod parts;
 mod theme;
 mod tokens;
+#[allow(dead_code)]
+mod units;
 mod viewport;
+mod widgets;
 
 use bowshock_model::{Part, PartId, PartKind, RadialKind, Rocket};
 use iced::widget::pane_grid::{self, Axis, Configuration, PaneGrid};
@@ -42,6 +46,23 @@ fn main() -> std::process::ExitCode {
                 Ok(()) => std::process::ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("bowshock drive: {e}");
+                    std::process::ExitCode::FAILURE
+                }
+            }
+        }
+        ["gallery"] => match gallery::app().run() {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("bowshock gallery: {e}");
+                std::process::ExitCode::FAILURE
+            }
+        },
+        ["gallery", script, rest @ ..] if rest.len() <= 1 => {
+            let out = std::path::Path::new(rest.first().copied().unwrap_or("out/gallery"));
+            match drive::run(&gallery::app(), std::path::Path::new(script), out) {
+                Ok(()) => std::process::ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("bowshock gallery: {e}");
                     std::process::ExitCode::FAILURE
                 }
             }
@@ -325,7 +346,7 @@ impl App {
             // The radial parts it carried go back on it, wherever it landed.
             (true, Some(origin)) => self.rocket.restore_radials(origin.radials),
             (false, Some(origin)) => {
-                let _ = self.rocket.restore(origin.index, Part { id: origin.id, kind: origin.kind });
+                let _ = self.rocket.restore(origin.index, Part::new(origin.id, origin.kind));
                 self.rocket.restore_radials(origin.radials);
             }
             (_, None) => {}

@@ -2,7 +2,8 @@
 //! and nothing has a shadow (design/README.md, "Hard rules").
 
 use iced::theme::palette::Seed;
-use iced::widget::{button, checkbox, container, pane_grid, text_input};
+use iced::overlay::menu;
+use iced::widget::{button, checkbox, container, pane_grid, pick_list, text, text_input};
 use iced::{font, Background, Border, Color, Font, Theme};
 
 use crate::tokens::{self, Tokens};
@@ -42,7 +43,8 @@ pub fn tokens(theme: &Theme) -> &'static Tokens {
     }
 }
 
-fn frame(color: Color) -> Border {
+/// A 1 px square border.
+pub fn frame(color: Color) -> Border {
     Border { color, width: 1.0, radius: 0.0.into() }
 }
 
@@ -181,3 +183,101 @@ pub fn check(theme: &Theme, status: checkbox::Status) -> checkbox::Style {
 }
 
 pub const PAD_PANEL: f32 = tokens::SPACE_3;
+
+/// Text in a token colour: `text(..).style(theme::colored(|t| t.ink_muted))`.
+pub fn colored(pick: fn(&Tokens) -> Color) -> impl Fn(&Theme) -> text::Style {
+    move |theme| text::Style { color: Some(pick(tokens(theme))), selection: None }
+}
+
+/// `ink-muted` text: field labels, secondary text, units.
+pub fn muted(theme: &Theme) -> text::Style {
+    text::Style { color: Some(tokens(theme).ink_muted), selection: None }
+}
+
+/// `ink-faint` text: section heads, status keys, placeholders.
+pub fn faint(theme: &Theme) -> text::Style {
+    text::Style { color: Some(tokens(theme).ink_faint), selection: None }
+}
+
+/// `ink` text: values.
+pub fn ink(theme: &Theme) -> text::Style {
+    text::Style { color: Some(tokens(theme).ink), selection: None }
+}
+
+/// Default weight: `bg-300` with a `line-200` border; `bg-400` on hover.
+pub fn secondary(theme: &Theme, status: button::Status) -> button::Style {
+    let t = tokens(theme);
+    let style = button::Style { background: Some(Background::Color(t.bg_300)), text_color: t.ink, border: frame(t.line_200), ..button::Style::default() };
+    match status {
+        button::Status::Hovered | button::Status::Pressed => button::Style { background: Some(Background::Color(t.bg_400)), ..style },
+        button::Status::Disabled => disabled(t),
+        button::Status::Active => style,
+    }
+}
+
+/// A rail button (parts bin category): `ink-faint` icon, `ink` on `bg-400` when hovered, `ink` on `bg-200` when active.
+pub fn rail(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let t = tokens(theme);
+        let (bg, fg) = match (active, status) {
+            (_, button::Status::Hovered | button::Status::Pressed) => (Some(t.bg_400), t.ink),
+            (true, _) => (Some(t.bg_200), t.ink),
+            (false, _) => (None, t.ink_faint),
+        };
+        button::Style { background: bg.map(Background::Color), text_color: fg, border: Border::default(), ..button::Style::default() }
+    }
+}
+
+/// A tooltip bubble: an overlay frame (`bg-200`, `line-200`).
+pub fn tooltip(theme: &Theme) -> container::Style {
+    overlay(theme)
+}
+
+/// A 1 px `line-100` rule: give it a width or height of 1.
+pub fn hairline(theme: &Theme) -> container::Style {
+    container::Style { background: Some(Background::Color(tokens(theme).line_100)), ..container::Style::default() }
+}
+
+/// A transparent, outlined label in a token colour (the warning chip).
+pub fn outlined(pick: fn(&Tokens) -> Color) -> impl Fn(&Theme) -> container::Style {
+    move |theme| {
+        let c = pick(tokens(theme));
+        container::Style { text_color: Some(c), border: frame(c), ..container::Style::default() }
+    }
+}
+
+/// The framed mono keycap inside a button or tooltip (`F5`, `Ctrl+Z`).
+pub fn keycap(theme: &Theme) -> container::Style {
+    let t = tokens(theme);
+    container::Style { text_color: Some(t.ink_muted), border: frame(t.line_200), ..container::Style::default() }
+}
+
+/// A select (`pick_list`): the text-field look with an `ink-muted` handle.
+pub fn select(theme: &Theme, status: pick_list::Status) -> pick_list::Style {
+    let t = tokens(theme);
+    let border = match status {
+        pick_list::Status::Active | pick_list::Status::Disabled => t.line_200,
+        pick_list::Status::Hovered => t.ink_muted,
+        pick_list::Status::Opened { .. } => t.accent,
+    };
+    pick_list::Style { text_color: t.ink, placeholder_color: t.ink_faint, handle_color: t.ink_muted, background: Background::Color(t.bg_300), border: frame(border) }
+}
+
+/// The dropdown of a select: `bg-200` in a `line-200` frame, the selected row `bg-400`.
+pub fn select_menu(theme: &Theme) -> menu::Style {
+    let t = tokens(theme);
+    menu::Style {
+        background: Background::Color(t.bg_200),
+        border: frame(t.line_200),
+        text_color: t.ink,
+        selected_text_color: t.ink,
+        selected_background: Background::Color(t.bg_400),
+        shadow: iced::Shadow::default(),
+    }
+}
+
+/// The keycap inside a primary button: `accent-ink` on the accent fill.
+pub fn keycap_on_accent(theme: &Theme) -> container::Style {
+    let t = tokens(theme);
+    container::Style { text_color: Some(t.accent_ink), border: frame(t.accent_ink), ..container::Style::default() }
+}
