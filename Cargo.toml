@@ -32,4 +32,4 @@ type_complexity = "allow"
 
 # Temporary: use the local Luma `bowshock-fixes` branch until it is merged and pushed.
 [patch."https://github.com/flipnoteman/Luma.git"]
-luma = { path = "/home/sandvoxel/Documents/luma-bf" }
+luma = { path = "/home/sandvoxel/Documents/luma" }
