@@ -15,6 +15,8 @@ use crate::tokens::{SPACE_4, TEXT_LABEL};
 
 pub struct Sheet {
     pub camera: Camera,
+    /// The rocket's axial extent (nose tip and tail, metres along `z`); the centreline runs a little past both ends.
+    pub span: Option<(f32, f32)>,
 }
 
 impl<Message> canvas::Program<Message> for Sheet {
@@ -29,19 +31,19 @@ impl<Message> canvas::Program<Message> for Sheet {
 
         self.grid(&mut frame, size, [(0.010, t.grid_minor), (0.100, t.grid_major)]);
 
-        // Centreline: the projected z axis, extended across the viewport. Skipped when looking down the axis.
-        let a = self.camera.project(Vec3::new(0.0, 0.0, -1.0), size);
-        let b = self.camera.project(Vec3::new(0.0, 0.0, 1.0), size);
-        let dir = b - a;
-        let len = (dir.x * dir.x + dir.y * dir.y).sqrt();
-        if len > 1.0 {
-            let reach = (w + h) / len * 2.0;
-            let axis = Path::line(a - dir * reach, b + dir * reach);
-            let dashed = Stroke {
-                line_dash: LineDash { segments: &[8.0, 4.0, 2.0, 4.0], offset: 0 },
-                ..Stroke::default().with_color(t.grid_major.scale_alpha(2.0)).with_width(1.0)
-            };
-            frame.stroke(&axis, dashed);
+        // Centreline: the rocket axis from a tenth of its length ahead of the nose to a tenth behind the tail, fixed in the
+        // world so it reads as part of the drawing rather than a camera-dependent guide. Skipped when looking down the axis.
+        if let Some((z0, z1)) = self.span.filter(|(z0, z1)| z1 > z0) {
+            let pad = (z1 - z0) * 0.1;
+            let a = self.camera.project(Vec3::new(0.0, 0.0, z0 - pad), size);
+            let b = self.camera.project(Vec3::new(0.0, 0.0, z1 + pad), size);
+            if (b.x - a.x).hypot(b.y - a.y) > 1.0 {
+                let dashed = Stroke {
+                    line_dash: LineDash { segments: &[8.0, 4.0, 2.0, 4.0], offset: 0 },
+                    ..Stroke::default().with_color(t.grid_major.scale_alpha(2.0)).with_width(1.0)
+                };
+                frame.stroke(&Path::line(a, b), dashed);
+            }
         }
 
         // Registration marks, 20 px legs.

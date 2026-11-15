@@ -792,7 +792,8 @@ impl View {
         let reveal = ctx.selection.part().is_some_and(|id| matches!(rocket.kind_of(id), Some(PartRef::Internal(_))));
         let phase = ctx.physics.phase();
         let fade_from = ctx.physics.stages().iter().find(|s| s.index == phase.first_stage()).filter(|s| s.index > 1).map(|s| s.fore_station as f32);
-        let sheet: Element<'_, Message> = canvas(sheet::Sheet { camera }).width(Fill).height(Fill).boxed();
+        let span = (!self.mesh.is_empty()).then_some((self.mesh.min.z, self.mesh.max.z));
+        let sheet: Element<'_, Message> = canvas(sheet::Sheet { camera, span }).width(Fill).height(Fill).boxed();
         let sheet = empty::over(sheet, ctx);
         let model: Element<'_, Message> = shader(scene::Scene {
             camera,
