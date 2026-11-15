@@ -791,7 +791,7 @@ impl View {
         };
         let reveal = ctx.selection.part().is_some_and(|id| matches!(rocket.kind_of(id), Some(PartRef::Internal(_))));
         let phase = ctx.physics.phase();
-        let fade_from = ctx.physics.stages().iter().find(|s| s.index == phase.first_stage()).filter(|s| s.index > 1).map(|s| s.fore_station as f32);
+        let fade_from = dropped_from(ctx.physics.stages(), phase);
         let span = (!self.mesh.is_empty()).then_some((self.mesh.min.z, self.mesh.max.z));
         let sheet: Element<'_, Message> = canvas(sheet::Sheet { camera, span }).width(Fill).height(Fill).boxed();
         let sheet = empty::over(sheet, ctx);
@@ -940,6 +940,16 @@ fn ease(t: f32) -> f32 {
     }
 }
 
+/// The station (from the tip, metres) aft of which the body is drawn faint: the aft end of the first stage still flying in `phase`
+/// (everything behind it has dropped away). `None` while the whole stack flies.
+fn dropped_from(stages: &[bowshock_model::Stage], phase: bowshock_sim::from_model::Phase) -> Option<f32> {
+    let first = phase.first_stage();
+    if stages.len() < 2 || first <= 1 {
+        return None;
+    }
+    stages.iter().find(|s| s.index == first).map(|s| s.aft_station as f32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -968,5 +978,47 @@ mod tests {
         run(&mut view, Message::Snap(IVec3::Y));
         run(&mut view, Message::Snap(IVec3::new(1, 1, -1)));
         assert_eq!(view.camera.ortho_blend, 0.0, "a corner leaves the orthographic face view");
+    }
+}
+
+#[cfg(test)]
+mod phase_tests {
+    use super::*;
+    use bowshock_sim::from_model::Phase;
+
+    fn two_stage() -> bowshock_model::Rocket {
+        bowshock_model::Rocket::from_json(include_str!("../../assets/examples/two_stage.bowshock")).unwrap()
+    }
+
+    /// Dropping the booster (Phase "Stage 2") fades only what is aft of the separation: the sustainer's stations (fore of the
+    /// joint) stay solid. It used to fade from the sustainer's fore end (the nose), i.e. the whole rocket.
+    #[test]
+    fn dropping_the_booster_fades_only_the_booster() {
+        let rocket = two_stage();
+        let stages = rocket.stages();
+        let joint = stages[0].fore_station as f32;
+        assert!(joint > 0.1, "the example separates well behind the nose");
+        assert_eq!(dropped_from(&stages, Phase::Full), None);
+        let from = dropped_from(&stages, Phase::UpperFrom(2)).expect("a staged rocket drops the booster");
+        assert!((from - joint).abs() < 1e-6, "fades aft of the separation ({from} vs {joint})");
+        let sustainer = stages[1].fore_station as f32..stages[1].aft_station as f32;
+        assert!(sustainer.end <= from + 1e-6 && sustainer.start < from, "the sustainer is not faded");
+    }
+
+    /// The balance, status-strip numbers and lanes follow the remaining stack: only the sustainer's parts are left.
+    #[test]
+    fn the_phase_recomputes_for_the_remaining_stack_only() {
+        let rocket = two_stage();
+        let mut physics = crate::app::physics::Physics::new();
+        physics.sync(&rocket, 1);
+        let full = *physics.balance().expect("balance");
+        physics.set_phase(Phase::UpperFrom(2));
+        physics.sync(&rocket, 1);
+        let upper = *physics.balance().expect("balance");
+        let joint = physics.stages()[0].fore_station;
+        assert!(upper.mass < full.mass && upper.length < full.length, "only the sustainer remains");
+        assert!((upper.length - joint).abs() < 1e-6, "the remaining stack ends at the separation");
+        assert!(upper.cg < joint && upper.cp < joint, "CG and CP are on the sustainer");
+        assert_eq!(physics.phase(), Phase::UpperFrom(2), "the phase is kept, not reset to the full stack");
     }
 }

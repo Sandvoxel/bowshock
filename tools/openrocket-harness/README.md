@@ -21,10 +21,12 @@ JSON contents, per flight configuration:
   database (so Bowshock flies the identical curve; the file name carries the database digest because two database entries
   can share a designation).
 
-`simulations`: every stored simulation run three ways, `stored` (the file's conditions), `calm` (no wind or turbulence) and
+`simulations`: every stored simulation run four ways, `stored` (the file's conditions), `wind` (the stored mean wind with the random gusts
+switched off: a deterministic reference for flights with wind), `calm` (no wind or turbulence) and
 `calm_fine` (calm, 2 ms step: OpenRocket's 50 ms step overshoots the rail end, which inflates its rail-exit speed by about 2 %).
 Each has apogee, max velocity/Mach/acceleration, time to apogee, rail-exit velocity, stability off the rail, ground-hit velocity,
-descent rate, flight time, events and a decimated time series. `components` lists every component with its effective mass
+descent rate, flight time, the peak angle of attack in the 2 s after the rail (`peak_aoa_2s_after_rail_rad`), the landing distance from the pad,
+events and a decimated time series. `components` lists every component with its effective mass
 (`getMass`, overrides included), CG, absolute position and radii, for checking the importer.
 
 `-Dopenrocket.*` is not needed; `OPENROCKET_JAVA_OPTS` is passed to `java` by `run.sh`.

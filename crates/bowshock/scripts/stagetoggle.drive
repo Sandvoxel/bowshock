@@ -1,0 +1,14 @@
+# Dropping the booster in a two-stage rocket: only the booster fades, the sustainer stays solid, and mass/CG/CP/lanes follow
+# the remaining stack.
+#   BOWSHOCK_EXAMPLE=two_stage cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/stagetoggle.drive out/stagetoggle
+viewport 1280x800
+screenshot stagetoggle-full.png
+click "Stage 2"
+screenshot stagetoggle-stage2.png
+click "Full stack"
+screenshot stagetoggle-back.png
+
+# Light theme, booster dropped.
+click (936, 20)
+click "Stage 2"
+screenshot stagetoggle-stage2-light.png

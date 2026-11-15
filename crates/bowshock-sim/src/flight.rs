@@ -322,7 +322,8 @@ pub struct Summary {
     pub max_acceleration_g: f64,
     /// Speed at rail exit (m/s); 0 if the rocket never left the rail.
     pub rail_exit_velocity: f64,
-    /// Static margin at rail exit (cal).
+    /// Static margin at rail exit (cal), at the angle of attack the rocket has there in the rigid-body model (the CP moves forward
+    /// with it, so wind lowers it) and at zero in the point-mass model.
     pub stability_off_rail_cal: f64,
     /// `(device name, descent rate m/s)`: vertical speed just before the next device deploys or the ground is hit.
     pub descent_rates: Vec<(String, f64)>,
@@ -986,9 +987,13 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
                 rail_exit_velocity = dot(vel, vel).sqrt();
                 let air = atm.at_agl(pos[2]);
                 let rel = [vel[0] - wind[0], vel[1] - wind[1], vel[2]];
-                let mach = dot(rel, rel).sqrt() / air.speed_of_sound;
+                let speed = dot(rel, rel).sqrt();
+                let mach = speed / air.speed_of_sound;
                 let cg = ctx.mass_props(t, nsep).cg;
-                stability_off_rail = aeros[nsep.min(aeros.len() - 1)].margin_cal(mach, 0.0, cg);
+                // The rigid body meets the air at the angle between its axis and the relative wind (the CP moves forward with it);
+                // the point mass weathercocks perfectly.
+                let alpha = if rigid_model && speed > 1e-9 { (dot(axis, rel) / speed).clamp(-1.0, 1.0).acos() } else { 0.0 };
+                stability_off_rail = aeros[nsep.min(aeros.len() - 1)].margin_cal(mach, alpha, cg);
                 last_event_t = t;
                 push_event(&mut events, &mut event_idx, &raws, Event { t, kind: EventKind::RailExit, altitude: pos[2], stage: None });
             }

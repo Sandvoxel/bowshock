@@ -119,7 +119,7 @@ public class Harness {
             }
         }
         for (Simulation sim : toRun) {
-            for (String variant : new String[] {"stored", "calm", "calm_fine"}) {
+            for (String variant : new String[] {"stored", "wind", "calm", "calm_fine"}) {
                 sims.add(runSim(rocket, sim, variant));
             }
         }
@@ -307,11 +307,12 @@ public class Harness {
     }
 
     /**
-     * Runs one simulation. Variants: "stored" (the file's conditions), "calm" (no wind or turbulence) and "calm_fine" (calm with a
+     * Runs one simulation. Variants: "stored" (the file's conditions), "wind" (the stored mean wind without the random gusts),
+     * "calm" (no wind or turbulence) and "calm_fine" (calm with a
      * 2 ms time step instead of OpenRocket's 50 ms, which removes the step-size error from the rail-exit velocity).
      */
     static Map<String, Object> runSim(Rocket rocket, Simulation sim, String variant) {
-        boolean calm = !variant.equals("stored");
+        boolean calm = variant.startsWith("calm");
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("name", sim.getName());
         m.put("variant", variant);
@@ -325,6 +326,9 @@ public class Harness {
             o.setWindSpeedAverage(0);
             o.setWindTurbulenceIntensity(0);
             if (variant.equals("calm_fine")) o.setTimeStep(0.002);
+        } else if (variant.equals("wind")) {
+            // The file's mean wind without its random gusts: a deterministic reference for a flight with wind.
+            o.setWindTurbulenceIntensity(0);
         }
         Map<String, Object> c = new LinkedHashMap<>();
         c.put("rod_length_m", o.getLaunchRodLength());
@@ -395,6 +399,19 @@ public class Harness {
                 if (n > 0) descent = -sum / n;
             }
             r.put("descent_rate_ms", descent);
+            // Peak angle of attack in the first 2 s after the rocket leaves the rail, and the distance of the landing point.
+            List<Double> aoa = b.get(FlightDataType.TYPE_AOA);
+            double peakAoa = Double.NaN;
+            if (tt != null && aoa != null && !Double.isNaN(railT)) {
+                peakAoa = 0;
+                for (int i = 0; i < tt.size(); i++) {
+                    double a = aoa.get(i);
+                    if (tt.get(i) >= railT && tt.get(i) <= railT + 2.0 && !Double.isNaN(a)) peakAoa = Math.max(peakAoa, Math.abs(a));
+                }
+            }
+            r.put("peak_aoa_2s_after_rail_rad", peakAoa);
+            List<Double> lateral = b.get(FlightDataType.TYPE_POSITION_XY);
+            r.put("landing_distance_m", lateral == null || lateral.isEmpty() ? Double.NaN : lateral.get(lateral.size() - 1));
             r.put("warnings", sim.getSimulatedWarnings().toString());
 
             // Decimated time series of the primary branch.

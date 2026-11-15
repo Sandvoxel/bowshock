@@ -15,7 +15,8 @@ tools/compare-openrocket/run.sh [workdir]     # full tables land in <workdir>/co
 * **Same motors.** The harness exports the thrust curve OpenRocket used for every configuration as RASP `.eng` (with propellant and loaded mass);
   Bowshock flies exactly those curves (bundled curves are not used when an exported one exists).
 * **Same conditions.** Static aerodynamics: ISA sea level, alpha 0 and 2 degrees, Mach 0.1-2.0. Flights: each stored OpenRocket simulation's
-  rail length, rail angle and site altitude, ISA, **no wind** (a wind-free variant is run in OpenRocket, because its turbulence is random).
+  rail length, rail angle and site altitude, ISA, **no wind** (a wind-free variant is run in OpenRocket, because its turbulence is random), and again
+  with the simulation's **mean wind and no gusts** (a third OpenRocket variant, "wind"), for both Bowshock flight models.
   OpenRocket's own 50 ms time step overshoots the end of the rail, so its rail-exit speed is taken from a 2 ms run (the step changes it by 2 %;
   apogee and peak speed do not change).
 * **Rockets.** OpenRocket's examples *A simple model rocket* (ogive nose, 1 stage, 3 fins, parachute), *Dual parachute deployment*
@@ -70,22 +71,84 @@ Static aerodynamics, alpha 0 (the rockets above, first configuration; CP in m fr
 | subscale Rev 4 | 0.3 | 1.7074 | 1.7075 | 16.928 | 16.928 | 0.6842 | 0.6867 (+0.4 %) |
 | subscale Rev 4 | 1.2 | 1.7372 | 1.7345 | 18.587 | 18.303 | 0.9348 | 1.0521 (+12.6 %) |
 
-Flights without wind (OpenRocket | Bowshock; every simulation of every rocket is in `docs/openrocket-comparison-tables.md`):
+Flights without wind (OpenRocket | Bowshock; the point-mass and rigid-body models fly identically without wind, apart from the descent rate
+under a parachute; every simulation of every rocket is in `docs/openrocket-comparison-tables.md`):
 
-| rocket / simulation | apogee (m) | max v (m/s) | rail-exit v (m/s) | stability off rail (cal) |
-|---|---|---|---|---|
-| simple, sim 1 (A8) | 51.1 \| 52.3 (+2.3 %) | 29.33 \| 29.84 (+1.7 %) | 15.27 \| 15.36 (+0.6 %) | 2.99 \| 3.03 (+1.2 %) |
-| dual parachute, sim 1 (H669) | 593.5 \| 592.4 (-0.2 %) | 135.5 \| 135.6 (0.0 %) | 52.94 \| 53.31 (+0.7 %) | 4.47 \| 4.43 (-0.8 %) |
-| dual parachute, sim 3 (J570) | 2224.9 \| 2214.5 (-0.5 %) | 388.6 \| 390.6 (+0.5 %) | 53.76 \| 54.01 (+0.5 %) | 3.28 \| 3.25 (-0.7 %) |
-| two-stage, sim 1 | 666.6 \| 675.3 (+1.3 %) | 156.7 \| 159.2 (+1.6 %) | 19.64 \| 19.79 (+0.7 %) | 2.07 \| 2.17 (+4.8 %) |
-| **Spaceport final**, sim 1 (M1939 + O5500) | 9087.9 \| 8960.1 (-1.4 %) | 442.0 \| 442.8 (+0.2 %) | 36.42 \| 36.48 (+0.2 %) | 2.51 \| 2.50 (-0.5 %) |
-| **Spaceport final**, sim 2 (N1000 + O5500) | 10718.5 \| 10776.8 (+0.5 %) | 410.0 \| 412.3 (+0.6 %) | 14.64 \| 14.70 (+0.4 %) | 2.87 \| 2.87 (-0.2 %) |
-| **Spaceport final**, sim 4 (M1800 + O5500) | 8045.3 \| 7905.3 (-1.7 %) | 430.1 \| 430.2 (0.0 %) | 23.17 \| 23.18 (+0.1 %) | 2.64 \| 2.62 (-0.6 %) |
-| **subscale Rev 4**, sim 1 (J425 + K535) | 2219.9 \| 2219.0 (0.0 %) | 197.2 \| 197.8 (+0.3 %) | 16.94 \| 16.91 (-0.2 %) | 4.90 \| 4.85 (-1.1 %) |
-| **subscale Rev 4**, sim 3 (H550 + J425) | 645.6 \| 641.0 (-0.7 %) | 89.5 \| 89.4 (-0.2 %) | 14.21 \| 14.18 (-0.2 %) | 5.74 \| 5.68 (-1.0 %) |
+| rocket / simulation | apogee (m) | max v (m/s) | rail-exit v (m/s) | stability off rail (cal) | flight time (s) |
+|---|---|---|---|---|---|
+| simple, sim 1 (A8) | 51.1 \| 52.3 (+2.3 %) | 29.33 \| 29.84 (+1.7 %) | 15.27 \| 15.36 (+0.6 %) | 2.99 \| 3.03 (+1.2 %) | 16.0 \| 15.9 (-0.9 %) |
+| dual parachute, sim 1 (H669) | 593.5 \| 592.4 (-0.2 %) | 135.5 \| 135.6 (0.0 %) | 52.94 \| 53.31 (+0.7 %) | 4.47 \| 4.43 (-0.8 %) | 61.8 \| 64.8 (+5.0 %) |
+| dual parachute, sim 3 (J570) | 2224.9 \| 2214.5 (-0.5 %) | 388.6 \| 390.6 (+0.5 %) | 53.76 \| 54.01 (+0.5 %) | 3.28 \| 3.25 (-0.7 %) | 129.7 \| 130.3 (+0.5 %) |
+| two-stage, sim 1 | 666.6 \| 675.3 (+1.3 %) | 156.7 \| 159.2 (+1.6 %) | 19.64 \| 19.79 (+0.7 %) | 2.07 \| 2.17 (+4.8 %) | 62.6 \| 64.2 (+2.6 %) |
+| **Spaceport final**, sim 1 (M1939 + O5500) | 9087.9 \| 8960.1 (-1.4 %) | 442.0 \| 442.8 (+0.2 %) | 36.42 \| 36.48 (+0.2 %) | 2.51 \| 2.50 (-0.5 %) | 371.2 \| 368.2 (-0.8 %) |
+| **Spaceport final**, sim 2 (N1000 + O5500) | 10718.5 \| 10776.8 (+0.5 %) | 410.0 \| 412.3 (+0.6 %) | 14.64 \| 14.70 (+0.4 %) | 2.87 \| 2.87 (-0.2 %) | 402.5 \| 403.7 (+0.3 %) |
+| **Spaceport final**, sim 4 (M1800 + O5500) | 8045.3 \| 7905.3 (-1.7 %) | 430.1 \| 430.2 (0.0 %) | 23.17 \| 23.18 (+0.1 %) | 2.64 \| 2.62 (-0.6 %) | 338.2 \| 334.9 (-1.0 %) |
+| **subscale Rev 4**, sim 1 (J425 + K535) | 2219.9 \| 2219.0 (0.0 %) | 197.2 \| 197.8 (+0.3 %) | 16.94 \| 16.91 (-0.2 %) | 4.90 \| 4.85 (-1.1 %) | 176.8 \| 177.4 (+0.3 %) |
+| **subscale Rev 4**, sim 3 (H550 + J425) | 645.6 \| 641.0 (-0.7 %) | 89.5 \| 89.4 (-0.2 %) | 14.21 \| 14.18 (-0.2 %) | 5.74 \| 5.68 (-1.0 %) | 76.5 \| 76.5 (+0.1 %) |
 
 Every apogee and peak speed is within 5 % (largest: simple rocket C6 +3.2 %, user's Spaceport final M1800 configuration -1.7 %). CP and CNα agree
-to 0.003 cal / 0.2 % except near Mach 1-1.4.
+to 0.003 cal / 0.2 % except near Mach 1-1.4. The flight-time differences (up to +5 %, dual parachute sim 1) are in the descent under the
+parachute (canopy opening and descent rate), not in the dynamics.
+
+## Flights with wind: point mass before, rigid body after
+
+Until this change Bowshock flew a 3-DOF point mass whose axis was always on the relative wind: no angle of attack, no weathercocking, no
+moments. It now flies a rigid body by default (`FlightModel::RigidBody`, pitch, yaw and roll with quaternion attitude; the old model stays as
+`FlightModel::PointMass` for regression and costs about the same to run, 5-7 ms per flight in a release build). Equations and their sources are in the module docs of
+`crates/bowshock-sim/src/flight.rs` and in `docs/aero-references.md`: the normal force at the CP about the moving CG, aerodynamic pitch/yaw
+damping `1/2 rho V A_ref sum CNα_i (x_i - x_cg)^2`, body crossflow damping, jet damping, thrust along the body axis, the rail holding the
+attitude, inertias from the parts with the propellant's falling as it burns, fin-cant roll forcing and damping, and the descent under a
+parachute flown as a point mass.
+
+The reference is OpenRocket run with the file's **mean wind and its gusts switched off** (the stored simulations all use 2 m/s except
+subscale sim 3, 6.7 m/s; OpenRocket's own turbulence is random, so the stored runs with gusts are not reproducible); Bowshock flies the same
+wind without gusts, vertical rod. Cells are OpenRocket \| point mass (Δ) \| rigid body (Δ):
+
+| rocket / simulation | apogee (m) | max v (m/s) | flight time (s) |
+|---|---|---|---|
+| simple, sim 1 (A8), 2 m/s | 50.6 \| 51.7 (+2.2 %) \| 51.9 (+2.7 %) | 29.2 \| 29.8 (+1.8 %) \| 29.7 (+1.7 %) | 15.9 \| 16.1 (+1.3 %) \| 16.1 (+1.2 %) |
+| dual parachute, sim 1 (H669), 2 m/s | 592.8 \| 591.8 (-0.2 %) \| 592.3 (-0.1 %) | 135.4 \| 135.5 (+0.1 %) \| 135.5 (+0.1 %) | 63.9 \| 64.8 (+1.5 %) \| 64.9 (+1.6 %) |
+| dual parachute, sim 3 (J570), 2 m/s | 2224.1 \| 2211.9 (-0.5 %) \| 2213.8 (-0.5 %) | 388.7 \| 390.5 (+0.5 %) \| 390.5 (+0.5 %) | 129.4 \| 130.3 (+0.7 %) \| 130.3 (+0.7 %) |
+| two-stage, sim 1, 2 m/s | 663.6 \| 665.6 (+0.3 %) \| 672.7 (+1.4 %) | 156.8 \| 159.0 (+1.4 %) \| 159.1 (+1.4 %) | 62.1 \| 63.7 (+2.6 %) \| 64.1 (+3.3 %) |
+| **Spaceport final**, sim 1 (M1939 + O5500), 2 m/s | 9079.0 \| 8896.4 (-2.0 %) \| 8952.2 (-1.4 %) | 441.9 \| 442.8 (+0.2 %) \| 442.8 (+0.2 %) | 371.7 \| 366.6 (-1.4 %) \| 368.0 (-1.0 %) |
+| **Spaceport final**, sim 2 (N1000 + O5500), 2 m/s | 10702.1 \| 10190.3 (-4.8 %) \| 10762.2 (+0.6 %) | 409.9 \| 412.8 (+0.7 %) \| 412.3 (+0.6 %) | 401.6 \| 389.9 (-2.9 %) \| 403.4 (+0.5 %) |
+| **Spaceport final**, sim 4 (M1800 + O5500), 2 m/s | 8036.6 \| 7783.5 (-3.2 %) \| 7898.0 (-1.7 %) | 430.0 \| 430.2 (+0.1 %) \| 430.2 (+0.0 %) | 338.7 \| 331.6 (-2.1 %) \| 334.8 (-1.2 %) |
+| **subscale Rev 4**, sim 1 (J425 + K535), 2 m/s | 2206.7 \| 2110.3 (-4.4 %) \| 2207.0 (+0.0 %) | 197.2 \| 198.8 (+0.8 %) \| 197.8 (+0.3 %) | 176.3 \| 171.2 (-2.9 %) \| 176.9 (+0.3 %) |
+| **subscale Rev 4**, sim 3 (H550 + J425), 6.7 m/s | 635.6 \| 558.4 (-12.2 %) \| 631.9 (-0.6 %) | 89.5 \| 91.1 (+1.8 %) \| 89.4 (-0.2 %) | 75.8 \| 71.0 (-6.3 %) \| 76.2 (+0.5 %) |
+
+| rocket / simulation | stability off rail (cal) | peak AoA, 2 s after rail exit (°) | landing distance (m) |
+|---|---|---|---|
+| simple, sim 1 (A8), 2 m/s | 2.28 \| 3.03 (+32.5 %) \| 2.28 (-0.2 %) | 7.3 \| 0.0 (-100.0 %) \| 7.4 (+1.0 %) | 19 \| 14 (-25.4 %) \| 19 (-0.9 %) |
+| dual parachute, sim 1 (H669), 2 m/s | 3.92 \| 4.43 (+12.9 %) \| 3.83 (-2.3 %) | 2.1 \| 0.0 (-100.0 %) \| 2.1 (+2.1 %) | 97 \| 78 (-19.4 %) \| 101 (+4.6 %) |
+| dual parachute, sim 3 (J570), 2 m/s | 2.73 \| 3.25 (+18.9 %) \| 2.66 (-2.6 %) | 2.1 \| 0.0 (-100.0 %) \| 2.1 (+1.2 %) | 175 \| 118 (-32.7 %) \| 182 (+3.9 %) |
+| two-stage, sim 1, 2 m/s | 1.72 \| 2.17 (+25.8 %) \| 1.77 (+3.1 %) | 5.6 \| 0.0 (-100.0 %) \| 5.8 (+3.2 %) | 33 \| 30 (-9.4 %) \| 44 (+35.5 %) |
+| **Spaceport final**, sim 1 (M1939 + O5500), 2 m/s | 1.94 \| 2.50 (+29.3 %) \| 1.88 (-2.8 %) | 3.0 \| 0.0 (-100.0 %) \| 3.1 (+2.9 %) | 276 \| 541 (+96.4 %) \| 274 (-0.7 %) |
+| **Spaceport final**, sim 2 (N1000 + O5500), 2 m/s | 1.67 \| 2.87 (+71.9 %) \| 1.56 (-6.7 %) | 7.4 \| 0.0 (-100.0 %) \| 7.7 (+4.1 %) | 117 \| 3208 (+2645.2 %) \| 118 (+1.3 %) |
+| **Spaceport final**, sim 4 (M1800 + O5500), 2 m/s | 1.78 \| 2.62 (+47.0 %) \| 1.71 (-4.4 %) | 4.9 \| 0.0 (-100.0 %) \| 4.9 (+1.4 %) | 237 \| 987 (+316.8 %) \| 244 (+2.9 %) |
+| **subscale Rev 4**, sim 1 (J425 + K535), 2 m/s | 3.63 \| 4.85 (+33.7 %) \| 3.50 (-3.4 %) | 6.6 \| 0.0 (-100.0 %) \| 6.7 (+1.9 %) | 19 \| 574 (+2915.2 %) \| 25 (+28.8 %) |
+| **subscale Rev 4**, sim 3 (H550 + J425), 6.7 m/s | 4.26 \| 5.68 (+33.3 %) \| 4.14 (-2.7 %) | 8.0 \| 0.0 (-100.0 %) \| 8.0 (+0.3 %) | 29 \| 317 (+1002.6 %) \| 26 (-11.3 %) |
+
+What changed and why:
+
+* **Apogee in wind**: the point mass turns the thrust into the relative wind the instant it leaves the rail, so it tips over early; apogee fell
+  by up to 12 % in the rows above (-12.2 % on the subscale sim 3 at 6.7 m/s; -16.8 % on its sim 4; -4.8 % on the Spaceport final N1000). The rigid
+  body has to turn, which takes about a pitch period, and agrees with OpenRocket within 2.7 % in every row (worst: the simple rocket
+  +2.7 %, of which +2.3 % is already there without wind). Peak speed was never affected (it is reached with the axis on the flight path).
+* **Stability off the rail**: OpenRocket evaluates it at the angle of attack the rocket has leaving the rail (the CP moves forward with it: 12-42 % lower than at
+  zero angle in these winds). The point mass has none; the rigid body evaluates the margin at its own angle of attack and agrees within
+  7 % (worst: Spaceport N1000 on its 5.7 m rod, -6.7 %).
+* **Angle of attack** after the rail: within 4.1 % of OpenRocket's peak in all nine rows (the first sample after the rail, `atan(wind / speed)`).
+* **Landing**: with the axis free, the distance from the pad is within 5 % of OpenRocket's on the simple rocket, dual parachute and
+  Spaceport final rows (-1 .. +4.6 %), -11 % on subscale sim 3, +29 % on subscale sim 1 (25 m against 19 m) and +36 % on the two-stage (44 m
+  against 33 m). The point mass was off by up to a factor of 27 (3208 m against 117 m on the Spaceport final's N1000).
+* **Flight time**: differences are descent under the parachute, which both models fly as a point mass; unchanged from the calm table.
+
+Remaining gaps. Tail-first flight after apogee without a parachute uses the same drag as nose-first (OpenRocket's own flip is more
+detailed); the aerodynamics are axisymmetric (no crossflow azimuth, so 1- and 2-fin sets keep the fixed `CROSSFLOW_ROLL` and a spinning rocket does not
+modulate its lift); pod fins and tube fins have no roll damping; staging transients (separation impulse, upper-stage attitude) are not modelled. The
+two-stage and subscale sim 1 landing points (large relative, small absolute: 11 m and 6 m) are the rows to look at first. Ground-hit velocity is not
+compared in wind: OpenRocket's looks like the vertical component (4.18 m/s with and without wind on the simple rocket) while Bowshock's includes
+the drift.
 
 ## Differences above 5 %, and why
 
@@ -118,8 +181,9 @@ Three parts of the fin normal force were added to Bowshock's model (`crates/bows
 §3.2.2), each tested against hand values of its formula:
 
 * **Roll angle.** Each fin's normal-force slope is scaled by `sin²(θ - φ)`, `φ` its roll angle and `θ` the crossflow direction. Bowshock's
-  3-DOF flight has no roll, so the crossflow is fixed along +Y (`aero::CROSSFLOW_ROLL = 0`, the angle a fin at roll 0 points to; this is also
-  the orientation OpenRocket's static analysis uses by default). 3 or more evenly spaced fins give `N/2` at any roll, as before; a 1- or 2-fin
+  flight is axisymmetric in its aerodynamics, so the crossflow is fixed along +Y (`aero::CROSSFLOW_ROLL = 0`, the angle a fin at roll 0 points to; this is also
+  the orientation OpenRocket's static analysis uses by default; the rigid-body flight model rolls under fin cant, but the roll angle does not feed back
+  into the fin lift). 3 or more evenly spaced fins give `N/2` at any roll, as before; a 1- or 2-fin
   set now gives 0 at roll 0 and its full `1 x` / `2 x` one-fin lift at 90 degrees, instead of the old roll average `N/2`. Fins on a pod stand at
   the pod's angle plus their own.
 * **Fin-fin interference.** Fin sets on the same body whose root chords overlap count together; 5, 6, 7, 8 and more fins keep 0.948, 0.913,

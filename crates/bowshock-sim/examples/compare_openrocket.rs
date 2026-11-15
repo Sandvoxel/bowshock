@@ -8,7 +8,8 @@
 //! For each `.ork`: import it ([`bowshock_model::ork`]), read OpenRocket's reference output for it (`<harness-dir>/<stem>.json`,
 //! written by `tools/openrocket-harness`), fly the same configurations with the thrust curves OpenRocket used
 //! (`<harness-dir>/motors/*.eng`), and print Markdown tables: static aerodynamics against Mach at alpha = 0 and 2 degrees, mass
-//! and CG, and the no-wind flights. Differences are Bowshock relative to OpenRocket.
+//! and CG, and the flights without wind and with the stored mean wind (Bowshock's point-mass and rigid-body models side by side).
+//! Differences are Bowshock relative to OpenRocket.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -17,7 +18,7 @@ use bowshock_model::ork;
 use bowshock_motors::MotorDb;
 use bowshock_sim::atmosphere::Atmosphere;
 use bowshock_sim::from_model::{balance, sim_input, vehicle, Phase};
-use bowshock_sim::{simulate, Aero, Launch, Turbulence};
+use bowshock_sim::{simulate, Aero, FlightModel, Launch, Turbulence};
 use serde_json::Value;
 
 const MACHS: [f64; 9] = [0.1, 0.3, 0.5, 0.8, 0.9, 1.0, 1.2, 1.5, 2.0];
@@ -282,65 +283,102 @@ fn compare(label: &str, reference: &Value, imp: &ork::OrkImport, dir: &Path) -> 
     }
 
     // ---- flights ----
-    println!("\n## Flights (no wind, ISA)\n");
-    println!("| simulation | metric | OpenRocket | Bowshock | Δ |");
-    println!("|---|---|---|---|---|");
-    for s in sims.iter().filter(|s| s["variant"] == "calm") {
-        let Some(cid) = model_config(s["config"].as_str().unwrap_or("")) else { continue };
-        rocket.select_configuration(cid);
-        let c = &s["conditions"];
-        let altitude = f(c, "altitude_m");
-        let launch = Launch {
-            rail_length: f(c, "rod_length_m"),
-            angle_from_vertical: f(c, "rod_angle_deg").to_radians(),
-            direction: 0.0,
-            site_altitude: altitude,
-            ground_temperature: Atmosphere::standard().at_msl(altitude).temperature,
-            wind_speed: 0.0,
-            wind_from: 0.0,
-            turbulence: Turbulence::Off,
-            seed: 1,
-        };
-        let name = s["name"].as_str().unwrap_or("?");
-        let db = db_of(s["config"].as_str().unwrap_or(""));
-        let input = match sim_input(&rocket, &db, Phase::Full, launch) {
-            Ok(i) => i,
-            Err(e) => {
-                println!("| {name} | (skipped: {e}) | | | |");
+    // Each stored simulation is flown in OpenRocket without wind ("calm", the reference of the apogee/speed table) and with the
+    // file's mean wind but without its random gusts ("wind"), by both Bowshock flight models: the point mass that always points
+    // into the relative wind and the rigid body (no gusts either).
+    for (variant, title) in [("calm", "Flights (no wind, ISA)"), ("wind", "Flights with the wind stored in the file (mean wind, no gusts in either program)")] {
+        println!("\n## {title}\n");
+        println!("| simulation | metric | OpenRocket | Bowshock point mass | Δ | Bowshock rigid body | Δ |");
+        println!("|---|---|---|---|---|---|---|");
+        for s in sims.iter().filter(|s| s["variant"] == variant) {
+            let Some(cid) = model_config(s["config"].as_str().unwrap_or("")) else { continue };
+            rocket.select_configuration(cid);
+            let c = &s["conditions"];
+            let wind = if variant == "wind" { f(c, "wind_avg_ms") } else { 0.0 };
+            if variant == "wind" && wind <= 0.0 {
                 continue;
             }
-        };
-        let result = simulate(&input);
-        // Bowshock takes the motor-exhaust area out of the base drag while a motor burns; OpenRocket does not. The same flight
-        // without that credit (motor diameter 0) shows how much of the difference it is.
-        let mut no_credit = input.clone();
-        for stage in &mut no_credit.vehicle.stages {
-            if let Some(m) = &mut stage.motor {
-                m.curve.diameter = 0.0;
+            let altitude = f(c, "altitude_m");
+            let wind_from = if variant == "wind" { f(c, "wind_direction_deg").to_radians() } else { 0.0 };
+            // The rod leans into the wind when the simulation says so, otherwise along its own direction.
+            let direction = if c["launch_into_wind"].as_bool().unwrap_or(false) { wind_from } else { f(c, "rod_direction_deg").to_radians() };
+            let launch = Launch {
+                rail_length: f(c, "rod_length_m"),
+                angle_from_vertical: f(c, "rod_angle_deg").to_radians(),
+                direction,
+                site_altitude: altitude,
+                ground_temperature: Atmosphere::standard().at_msl(altitude).temperature,
+                wind_speed: wind,
+                wind_from,
+                turbulence: Turbulence::Off,
+                seed: 1,
+            };
+            let name = s["name"].as_str().unwrap_or("?");
+            let db = db_of(s["config"].as_str().unwrap_or(""));
+            let input = match sim_input(&rocket, &db, Phase::Full, launch) {
+                Ok(i) => i,
+                Err(e) => {
+                    println!("| {name} | (skipped: {e}) | | | | | |");
+                    continue;
+                }
+            };
+            let fly = |model: FlightModel, credit: bool| {
+                let mut input = input.clone();
+                input.model = model;
+                if !credit {
+                    // Bowshock takes the motor-exhaust area out of the base drag while a motor burns; OpenRocket does not. The same
+                    // flight without that credit (motor diameter 0) shows how much of the difference it is.
+                    for stage in &mut input.vehicle.stages {
+                        if let Some(m) = &mut stage.motor {
+                            m.curve.diameter = 0.0;
+                        }
+                    }
+                }
+                simulate(&input)
+            };
+            let (point, rigid) = (fly(FlightModel::PointMass, true), fly(FlightModel::RigidBody, true));
+            let (plain_point, plain_rigid) = (fly(FlightModel::PointMass, false).summary, fly(FlightModel::RigidBody, false).summary);
+            let r = &s["results"];
+            // OpenRocket's own 50 ms step overshoots the rail end; its rail-exit speed is taken from the 2 ms run.
+            let fine = sims.iter().find(|x| x["variant"] == "calm_fine" && x["name"] == s["name"] && x["config"] == s["config"]).map_or(r, |x| &x["results"]);
+            let (pm, rb) = (&point.summary, &rigid.summary);
+            let mut rows: Vec<(String, f64, f64, f64)> = vec![
+                ("apogee (m)".into(), f(r, "apogee_m"), pm.apogee, rb.apogee),
+                ("apogee (m), BS without the exhaust base-drag credit".into(), f(r, "apogee_m"), plain_point.apogee, plain_rigid.apogee),
+                ("max velocity (m/s)".into(), f(r, "max_velocity_ms"), pm.max_velocity, rb.max_velocity),
+                ("max velocity (m/s), BS without the credit".into(), f(r, "max_velocity_ms"), plain_point.max_velocity, plain_rigid.max_velocity),
+                ("max Mach".into(), f(r, "max_mach"), pm.max_mach, rb.max_mach),
+                ("time to apogee (s)".into(), f(r, "time_to_apogee_s"), pm.time_to_apogee, rb.time_to_apogee),
+                ("rail-exit velocity (m/s, OR at 2 ms step)".into(), f(fine, "rail_exit_velocity_ms"), pm.rail_exit_velocity, rb.rail_exit_velocity),
+                ("stability off rail (cal)".into(), f(r, "stability_off_rail_cal"), pm.stability_off_rail_cal, rb.stability_off_rail_cal),
+                ("ground-hit velocity (m/s)".into(), f(r, "ground_hit_velocity_ms"), pm.ground_hit_velocity, rb.ground_hit_velocity),
+                ("flight time (s)".into(), f(r, "flight_time_s"), pm.flight_time, rb.flight_time),
+            ];
+            if variant == "wind" {
+                // Peak angle of attack in the 2 s after rail exit (OpenRocket: the harness's full-resolution maximum).
+                let or_peak = f(r, "peak_aoa_2s_after_rail_rad").to_degrees();
+                let peak = |res: &bowshock_sim::FlightResult| {
+                    let exit = res.trajectory.events.iter().find(|e| e.kind == bowshock_sim::EventKind::RailExit).map_or(f64::NAN, |e| e.t);
+                    res.trajectory.samples.iter().filter(|x| x.t >= exit && x.t <= exit + 2.0).map(|x| x.angle_of_attack.to_degrees()).fold(0.0, f64::max)
+                };
+                rows.push(("peak AoA in the 2 s after rail exit (deg)".into(), or_peak, peak(&point), peak(&rigid)));
+                rows.push(("landing distance from the pad (m)".into(), f(r, "landing_distance_m"), pm.landing.0, rb.landing.0));
+            }
+            for (metric, or, bs_point, bs_rigid) in rows {
+                println!(
+                    "| {name} | {metric} | {} | {} | {} | {} | {} |",
+                    cell(or, 3),
+                    cell(bs_point, 3),
+                    signed(pct(bs_point, or)),
+                    cell(bs_rigid, 3),
+                    signed(pct(bs_rigid, or))
+                );
+            }
+            if variant == "calm" {
+                upd(&mut worst.apogee, pct(rb.apogee, f(r, "apogee_m")));
+                upd(&mut worst.vmax, pct(rb.max_velocity, f(r, "max_velocity_ms")));
             }
         }
-        let plain = simulate(&no_credit).summary;
-        let sm = &result.summary;
-        let r = &s["results"];
-        // OpenRocket's own 50 ms step overshoots the rail end; its rail-exit speed is taken from the 2 ms run.
-        let fine = sims.iter().find(|x| x["variant"] == "calm_fine" && x["name"] == s["name"] && x["config"] == s["config"]).map_or(r, |x| &x["results"]);
-        let rows: [(&str, f64, f64); 10] = [
-            ("apogee (m)", f(r, "apogee_m"), sm.apogee),
-            ("apogee (m), BS without the exhaust base-drag credit", f(r, "apogee_m"), plain.apogee),
-            ("max velocity (m/s)", f(r, "max_velocity_ms"), sm.max_velocity),
-            ("max velocity (m/s), BS without the credit", f(r, "max_velocity_ms"), plain.max_velocity),
-            ("max Mach", f(r, "max_mach"), sm.max_mach),
-            ("time to apogee (s)", f(r, "time_to_apogee_s"), sm.time_to_apogee),
-            ("rail-exit velocity (m/s, OR at 2 ms step)", f(fine, "rail_exit_velocity_ms"), sm.rail_exit_velocity),
-            ("stability off rail (cal)", f(r, "stability_off_rail_cal"), sm.stability_off_rail_cal),
-            ("ground-hit velocity (m/s)", f(r, "ground_hit_velocity_ms"), sm.ground_hit_velocity),
-            ("flight time (s)", f(r, "flight_time_s"), sm.flight_time),
-        ];
-        for (metric, or, bs) in rows {
-            println!("| {name} | {metric} | {} | {} | {} |", cell(or, 3), cell(bs, 3), signed(pct(bs, or)));
-        }
-        upd(&mut worst.apogee, pct(sm.apogee, f(r, "apogee_m")));
-        upd(&mut worst.vmax, pct(sm.max_velocity, f(r, "max_velocity_ms")));
     }
     vec![format!("{:+.3}", worst.cp_cal), signed(worst.cna), signed(worst.cd), signed(worst.apogee), signed(worst.vmax)]
 }
