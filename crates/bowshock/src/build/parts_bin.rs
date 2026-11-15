@@ -313,22 +313,7 @@ impl State {
                 self.press = None;
                 self.dragging = None;
             }
-            Message::CycleSymmetry(forward) => {
-                let step = |n: u8| {
-                    let at = SYMMETRY.iter().position(|(c, _)| *c == n).unwrap_or(0);
-                    SYMMETRY[(at + if forward { 1 } else { SYMMETRY.len() - 1 }) % SYMMETRY.len()].0
-                };
-                match ctx.drag.radial.as_mut() {
-                    Some(drag) => {
-                        drag.count = step(drag.count);
-                        // A group dragged from the bin also sets the count for the next one; a picked-up group keeps its own.
-                        if drag.origin.is_none() {
-                            ctx.drag.symmetry = drag.count;
-                        }
-                    }
-                    None => ctx.drag.symmetry = step(ctx.drag.symmetry),
-                }
-            }
+            Message::CycleSymmetry(forward) => cycle_symmetry(ctx, forward),
             Message::SavePreset => {
                 let captured = ctx.selection.part().and_then(|id| presets::Preset::capture(ctx.doc.rocket(), id));
                 match captured {
@@ -510,6 +495,25 @@ impl State {
         let body = column![header, rule(), controls, rule(), list, rule(), symmetry_footer(ctx)].width(Fill).height(Fill);
         let content = container(row![rail, body]).height(Fill).style(theme::panel);
         mouse_area(content).on_enter(Message::Hover(true)).on_exit(Message::Hover(false)).boxed()
+    }
+}
+
+/// `X` / `Shift+X` / the mouse wheel mid-drag: the next (or previous) symmetry count. A radial group in the air takes it as its
+/// own count (a group from the bin also sets the count for the next one; a picked-up group keeps its own); otherwise it is the
+/// bin's count.
+pub fn cycle_symmetry(ctx: &mut Ctx, forward: bool) {
+    let step = |n: u8| {
+        let at = SYMMETRY.iter().position(|(c, _)| *c == n).unwrap_or(0);
+        SYMMETRY[(at + if forward { 1 } else { SYMMETRY.len() - 1 }) % SYMMETRY.len()].0
+    };
+    match ctx.drag.radial.as_mut() {
+        Some(drag) => {
+            drag.count = step(drag.count);
+            if drag.origin.is_none() {
+                ctx.drag.symmetry = drag.count;
+            }
+        }
+        None => ctx.drag.symmetry = step(ctx.drag.symmetry),
     }
 }
 

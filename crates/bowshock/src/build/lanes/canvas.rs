@@ -68,13 +68,20 @@ enum Mode {
 }
 
 /// The canvas's own interaction state.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Interaction {
     mode: Mode,
     over: Option<Over>,
     cursor: Option<Point>,
     modifiers: keyboard::Modifiers,
     last_click: Option<(Instant, Option<BarKey>)>,
+}
+
+impl Default for Interaction {
+    /// A drive script holds modifiers through `BOWSHOCK_DRIVE_MODIFIERS` (see [`crate::viewport::manipulate::drive_modifiers`]).
+    fn default() -> Self {
+        Interaction { mode: Mode::default(), over: None, cursor: None, modifiers: crate::viewport::manipulate::drive_modifiers(), last_click: None }
+    }
 }
 
 impl Interaction {
@@ -96,8 +103,10 @@ pub struct Lanes<'a> {
     pub lock: Option<Camera>,
     /// The display unit system.
     pub units: UnitSystem,
-    /// What is selected.
+    /// What is selected (a separation, or the primary part).
     pub selection: Selection,
+    /// Every selected part (several in a multi-selection): each bar of one is bracketed.
+    pub parts: Vec<PartId>,
     /// The part just dropped or edited and how strong its flash still is (0 to 1).
     pub flash: Option<(PartId, f32)>,
     /// Whether the CG and the CP are drawn (the status strip's cells toggle them); the margin needs both.
@@ -564,6 +573,11 @@ impl Lanes<'_> {
         }
         match self.over(axis, rows, p, height) {
             Some(Over::Bar(hit)) => {
+                // Shift-click or Cmd/Ctrl-click adds the part to the selection (or removes it): no drag starts.
+                if state.modifiers.shift() || state.modifiers.command() || state.modifiers.control() {
+                    state.last_click = None;
+                    return Some(Action::publish(Message::Toggle(hit.key)).and_capture());
+                }
                 let was = double(Some(hit.key));
                 state.last_click = Some((now, Some(hit.key)));
                 let bar = self.scene.bar(hit.key)?;
@@ -800,10 +814,7 @@ impl Lanes<'_> {
         let Paint { t, axis, rows, moving } = *paint;
         let dim = |c: Color| faded(c, bar.dropped);
         let (fill, edge) = lane_colors(t, bar.system);
-        let selected = match self.selection {
-            Selection::Part(id) => bar.part() == id && !bar.alt,
-            _ => false,
-        };
+        let selected = self.parts.contains(&bar.part()) && !bar.alt;
         let dragging = moving == Some(bar.part()) && !bar.alt;
         let edge_color = dim(if selected {
             t.accent

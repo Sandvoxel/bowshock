@@ -72,6 +72,7 @@ pub fn labeled<'a, M: 'a>(name: &'a str, control: Element<'a, M>) -> Element<'a,
 }
 
 /// A select: the text-field look with the dropdown in an overlay frame. 7+ options belong here instead of a segmented control.
+/// With nothing selected it shows the `—` of a mixed value (a multi-selection whose parts disagree).
 pub fn select<'a, T, L, M>(options: L, selected: Option<T>, on_select: impl Fn(T) -> M + 'a) -> Element<'a, M>
 where
     T: ToString + PartialEq + Clone + 'a,
@@ -79,6 +80,7 @@ where
     M: Clone + 'a,
 {
     pick_list(selected, options, |item: &T| item.to_string())
+        .placeholder("—")
         .on_select(on_select)
         .width(Length::Fill)
         .text_size(TEXT_BODY)

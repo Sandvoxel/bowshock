@@ -1,0 +1,29 @@
+# Multi-select: Shift-click (or Cmd/Ctrl-click) adds and removes parts in the viewport and in Station Lanes.
+# A drive script cannot hold keys, so the whole run holds Shift (BOWSHOCK_DRIVE_MODIFIERS); a plain click and Esc-to-clear are
+# covered by the unit tests (app::multi). Run:
+#   BOWSHOCK_DRIVE_MODIFIERS=shift cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/multiselect.drive out/multiselect
+# Coordinates are for 1280x800 on the example rocket (viewport scene, lanes y 558..764; see lanes.drive).
+viewport 1280x800
+move (640, 400)
+screenshot rest.png
+# Shift-click the nose and the tube in the viewport: brackets on each, one `2 PARTS` tag, no handles; the Inspector shows only
+# what they share (a mixed value as —), the status strip sums the mass.
+click (441, 346)
+click (588, 310)
+screenshot viewport-two.png
+# A third part joins.
+click (770, 278)
+screenshot viewport-three.png
+# Clicking a selected part takes it out.
+click (588, 310)
+screenshot viewport-removed.png
+# A click on empty space clears the selection (so does Esc: a headless run delivers no key events, the unit tests cover it).
+click (600, 500)
+screenshot cleared.png
+# Station Lanes: Shift-click bars add too; every selected bar gets corner brackets.
+click (408, 596)
+click (571, 596)
+click (922, 624)
+screenshot lanes-three.png
+click (922, 624)
+screenshot lanes-two.png

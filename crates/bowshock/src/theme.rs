@@ -10,6 +10,8 @@ use crate::tokens::{self, Tokens};
 
 pub const SANS: Font = Font::new("IBM Plex Sans");
 pub const MONO: Font = Font::new("IBM Plex Mono");
+/// Mono at weight 600: a status-strip value that is changing under a drag.
+pub const MONO_SEMIBOLD: Font = MONO.weight(font::Weight::Semibold);
 pub const SANS_SEMIBOLD: Font = SANS.weight(font::Weight::Semibold);
 pub const SANS_MEDIUM: Font = SANS.weight(font::Weight::Medium);
 

@@ -170,6 +170,8 @@ pub enum Message {
     Select(Option<Pick>),
     /// Select a part by id (a click on a part in the exploded view).
     SelectPart(Option<PartId>),
+    /// Shift-click or Cmd/Ctrl-click on a part: adds it to the selection or, if selected, removes it.
+    Toggle(Pick),
     /// Select the separation of this stage (a click on its diamond).
     SelectSeparation(usize),
     /// A part was pressed and dragged: pick it up.
@@ -221,6 +223,7 @@ struct MeshKey {
     revision: u64,
     hovered: Option<PartId>,
     selected: Option<PartId>,
+    also: Vec<PartId>,
     axial: Option<Option<usize>>,
     radial: Option<(Option<SurfaceTarget>, u8)>,
     cut: Cut,
@@ -306,11 +309,13 @@ impl View {
     /// this after every message.
     pub fn sync(&mut self, ctx: &Ctx) {
         let selected = ctx.selection.part();
+        let also: Vec<PartId> = ctx.selected_parts().into_iter().skip(1).collect();
         let flash = ctx.flash_levels();
         let key = MeshKey {
             revision: ctx.doc.revision(),
             hovered: self.hover.part(),
             selected,
+            also: also.clone(),
             axial: ctx.drag.axial.as_ref().map(|d| d.snap),
             radial: ctx.drag.radial.as_ref().map(|d| (d.target, d.count)),
             cut: self.cut,
@@ -330,6 +335,7 @@ impl View {
             ghost_radial,
             hovered: self.hover.part(),
             selected,
+            also_selected: &also,
             motors: Some(ctx.physics.motors()),
             cut: self.cut,
             flash,
@@ -360,7 +366,7 @@ impl View {
                 let window = if ANIMATE.load(std::sync::atomic::Ordering::Relaxed) { DOUBLE_CLICK } else { HEADLESS_DOUBLE_CLICK };
                 let double = self.last_select.is_some_and(|(at, last)| now.duration_since(at) <= window && last == id);
                 self.last_select = if double { None } else { Some((now, id)) };
-                ctx.selection = id.map_or(Selection::None, Selection::Part);
+                ctx.select_one(id);
                 if double {
                     match id {
                         Some(id) => self.focus_part(id, ctx),
@@ -369,8 +375,14 @@ impl View {
                 }
             }
             Message::SelectPart(id) => {
-                ctx.selection = id.map_or(Selection::None, Selection::Part);
+                ctx.select_one(id);
                 ctx.symmetry.instance = None;
+            }
+            Message::Toggle(pick) => {
+                ctx.toggle_part(pick.id());
+                if let (Pick::Radial { id, instance }, true) = (pick, ctx.selection.part() == Some(pick.id())) {
+                    ctx.symmetry.instance = Some((id, instance));
+                }
             }
             Message::SelectSeparation(stage) => ctx.selection = Selection::Separation(stage),
             Message::Grab(pick) => {
@@ -400,9 +412,7 @@ impl View {
             }
             Message::DropAxial => drag::finish_axial(ctx, true),
             Message::DropRadial => drag::finish_radial(ctx, true),
-            Message::CopiesStep(forward) => {
-                return Task::done(app::Message::PartsBin(crate::build::parts_bin::Message::CycleSymmetry(forward)));
-            }
+            Message::CopiesStep(forward) => crate::build::parts_bin::cycle_symmetry(ctx, forward),
             camera => self.camera_update(camera),
         }
         Task::none()
@@ -653,12 +663,14 @@ impl View {
             (Space::new().boxed(), mouse::Interaction::default())
         } else {
             let selected = ctx.selection.part();
+            let also = ctx.selected_parts().into_iter().skip(1).collect();
             let instance = ctx.symmetry.instance.filter(|(id, _)| Some(*id) == selected).map_or(0, |(_, i)| i);
             (
                 canvas(Manipulator {
                     rocket,
                     camera,
                     selected,
+                    also,
                     instance,
                     hover: self.hover,
                     cursor: ctx.cursor,

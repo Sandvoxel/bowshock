@@ -220,6 +220,12 @@ impl Document {
         self.drag.is_some()
     }
 
+    /// Whether an interaction is changing the rocket live: a drag in progress, or a run of merged edits (a handle, a lane bar, a
+    /// scrubbed field) that has not been sealed by the release yet.
+    pub fn editing_live(&self) -> bool {
+        self.drag.is_some() || self.merging.is_some()
+    }
+
     /// The rocket as it was when the drag began.
     pub fn drag_base(&self) -> Option<&Rocket> {
         self.drag.as_ref().map(|s| &s.rocket)

@@ -3,6 +3,8 @@
 
 pub mod document;
 pub mod drag;
+pub mod live;
+mod multi;
 mod files;
 pub mod physics;
 pub mod refs;
@@ -111,6 +113,10 @@ pub struct Ctx {
     /// The part just dropped or edited and when: the viewport outlines it and the lanes flash its bar (see
     /// [`crate::viewport::flash`]).
     pub flash: Option<(PartId, Instant)>,
+    /// The parts selected along with `selection`'s primary one (see [`multi`]).
+    multi: multi::Extra,
+    /// The baseline of the drag in progress, for the status strip's semibold readouts (see [`live`]).
+    live: live::Live,
 }
 
 impl Ctx {
@@ -134,6 +140,8 @@ impl Ctx {
             symmetry: symmetry::SymmetryUi::default(),
             refs: refs::Ui::default(),
             flash: None,
+            multi: multi::Extra::default(),
+            live: live::Live::default(),
         }
     }
 
@@ -175,6 +183,7 @@ impl Ctx {
     pub(crate) fn loaded(&mut self) {
         self.selection = Selection::None;
         self.flash = None;
+        self.multi.clear();
         self.symmetry = symmetry::SymmetryUi::default();
         self.refs = refs::Ui::default();
         self.drag = Drags { symmetry: self.drag.symmetry, angle_snap: self.drag.angle_snap, ..Drags::default() };
@@ -197,6 +206,7 @@ impl Ctx {
         if !exists {
             self.selection = Selection::None;
         }
+        self.multi.validate(self.selection, self.doc.rocket());
         self.symmetry.validate(self.doc.rocket());
         if self.symmetry.instance.is_some_and(|(id, _)| self.doc.rocket().radial(id).is_none()) {
             self.symmetry.instance = None;
@@ -341,9 +351,11 @@ impl App {
 
     /// Handles `message`, then brings everything derived from the document up to date.
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let before = self.ctx.physics.balance().copied();
         let task = self.route(message);
         self.track_drop();
         self.after_update();
+        self.ctx.track_live(before);
         // The Analyze screen starts its off-thread computations (and rebuilds its plots) after every message while it shows.
         if self.ctx.mode == Mode::Analyze {
             return Task::batch([task, self.analyze.refresh(&self.ctx)]);
@@ -436,6 +448,9 @@ impl App {
                 return task;
             }
             Message::Cancel => {
+                if !ctx.drag.active() {
+                    ctx.clear_multi();
+                }
                 let task = self.parts_bin.update(parts_bin::Message::Cancel, ctx);
                 drag::cancel(ctx);
                 self.chrome.dismiss();
@@ -608,12 +623,12 @@ fn pick_intercept(message: &Message) -> Option<Option<PartId>> {
     use crate::build::lanes::Message as Lanes;
     use crate::viewport::Message as Viewport;
     match message {
-        Message::Viewport(Viewport::Select(Some(pick))) => Some(Some(pick.id())),
+        Message::Viewport(Viewport::Select(Some(pick)) | Viewport::Toggle(pick)) => Some(Some(pick.id())),
         Message::Viewport(Viewport::SelectPart(Some(id))) => Some(Some(*id)),
         Message::Viewport(Viewport::Select(None) | Viewport::SelectPart(None) | Viewport::SelectSeparation(_) | Viewport::Grab(_) | Viewport::Focus(_)) => {
             Some(None)
         }
-        Message::Lanes(Lanes::Select(Some(key))) => Some(Some(key.part())),
+        Message::Lanes(Lanes::Select(Some(key)) | Lanes::Toggle(key)) => Some(Some(key.part())),
         Message::Lanes(
             Lanes::Select(None) | Lanes::SelectSeparation(_) | Lanes::Focus(_) | Lanes::GrabAxial(_) | Lanes::MoveTo { .. } | Lanes::ResizeTo { .. },
         ) => Some(None),
@@ -996,5 +1011,60 @@ mod tests {
         app.update(Message::Chrome(Chrome::DeleteConfig(last)));
         assert_eq!(app.ctx.doc.rocket().configurations().len(), 1);
         assert!(app.ctx.notice.is_some());
+    }
+
+    #[test]
+    fn the_wheel_mid_radial_drag_steps_the_count_and_does_not_zoom() {
+        use iced::widget::canvas::Program;
+        let (mut app, _) = app();
+        app.update(Message::PartsBin(parts_bin::Message::Category(parts_bin::Category::Fins)));
+        app.update(Message::PartsBin(parts_bin::Message::Symmetry(3)));
+        app.update(Message::Cursor(Point::new(100.0, 100.0)));
+        app.update(Message::PartsBin(parts_bin::Message::RowPress(parts_bin::RowId::new(parts_bin::Category::Fins, 3))));
+        app.update(Message::Cursor(Point::new(160.0, 100.0)));
+        assert_eq!(app.ctx.drag.radial.as_ref().map(|d| d.count), Some(3));
+
+        // The overlay that owns the viewport during the drag turns a wheel notch into a count step and captures the event, so
+        // the camera's own wheel handler (zoom) never sees it.
+        let camera = app.viewport.camera();
+        let drag = app.ctx.drag.radial.clone().unwrap();
+        let overlay = crate::viewport::surface::Overlay { rocket: app.ctx.doc.rocket(), drag: &drag, camera, snap: 0, snap_step: 0.001, cursor: None };
+        let bounds = iced::Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
+        let cursor = mouse::Cursor::Available(Point::new(400.0, 300.0));
+        let wheel = |y: f32| iced::Event::Mouse(mouse::Event::WheelScrolled { delta: mouse::ScrollDelta::Lines { x: 0.0, y } });
+        let mut state = crate::viewport::surface::State::default();
+        let (up, _, status) = overlay.update(&mut state, &wheel(1.0), bounds, cursor).expect("the overlay handles the wheel").into_inner();
+        assert!(matches!(up, Some(Vp::CopiesStep(true))), "a notch up is the next count, not a zoom: {up:?}");
+        assert_eq!(status, iced::event::Status::Captured);
+        let (down, _, _) = overlay.update(&mut state, &wheel(-1.0), bounds, cursor).unwrap().into_inner();
+        assert!(matches!(down, Some(Vp::CopiesStep(false))));
+
+        // The viewport applies the step to the group in the air (and to the bin's count) and leaves the camera alone.
+        vp(&mut app, up.unwrap());
+        assert_eq!((app.ctx.drag.radial.as_ref().unwrap().count, app.ctx.drag.symmetry), (4, 4));
+        vp(&mut app, down.unwrap());
+        vp(&mut app, Vp::CopiesStep(false));
+        assert_eq!(app.ctx.drag.radial.as_ref().unwrap().count, 2);
+        assert_eq!(app.viewport.camera(), camera, "the wheel did not zoom");
+    }
+
+    #[test]
+    fn readouts_that_a_handle_drag_changes_are_marked_until_the_release() {
+        let (mut app, [_, tube, _]) = app();
+        assert_eq!(app.ctx.changing(), live::Changed::default());
+        vp(&mut app, Vp::Edit(Edit::Begin(tube, "Drag face")));
+        assert_eq!(app.ctx.changing(), live::Changed::default(), "nothing has changed yet");
+        vp(&mut app, Vp::Edit(Edit::Dim(tube, Dim::Length, 0.7)));
+        let c = app.ctx.changing();
+        assert!(c.mass && c.length && c.cg && c.cp, "a longer tube moves mass, length, CG and CP: {c:?}");
+        assert!(!c.diameter, "the diameter did not move");
+        // Dragged back to the start, the readout is regular again even though the drag goes on.
+        vp(&mut app, Vp::Edit(Edit::Dim(tube, Dim::Length, 0.5)));
+        assert_eq!(app.ctx.changing(), live::Changed::default());
+        vp(&mut app, Vp::Edit(Edit::Dim(tube, Dim::Length, 0.6)));
+        assert!(app.ctx.changing().length);
+        app.update(Message::Released);
+        vp(&mut app, Vp::Edit(Edit::End));
+        assert_eq!(app.ctx.changing(), live::Changed::default(), "back to regular on release");
     }
 }

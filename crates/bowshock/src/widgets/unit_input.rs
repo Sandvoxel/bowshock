@@ -226,6 +226,7 @@ pub struct UnitInput<'a, M> {
     resolve: Option<Box<dyn Fn(&str) -> Option<f64> + 'a>>,
     chips: Option<Box<dyn Fn(&str) -> Option<Chip> + 'a>>,
     formula_in: Option<Box<dyn Fn(&'static Unit) -> String + 'a>>,
+    mixed: bool,
     input: Element<'a, Inner>,
 }
 
@@ -327,7 +328,8 @@ impl<'a, M: Clone + 'a> UnitInput<'a, M> {
             resolve: None,
             chips: None,
             formula_in: None,
-            input: make_input(&units::format_in(value_si, unit), ValueTone::Ink, None),
+            mixed: false,
+            input: make_input(&units::format_in(value_si, unit), ValueTone::Ink, None, false),
         }
     }
 
@@ -418,6 +420,14 @@ impl<'a, M: Clone + 'a> UnitInput<'a, M> {
         self
     }
 
+    /// Several values at once (a multi-selection whose parts disagree): shows the faint `—` placeholder instead of a number,
+    /// does not scrub, and typing a value commits it as usual (the app applies it to every part).
+    pub fn mixed(mut self, mixed: bool) -> Self {
+        self.mixed = mixed;
+        self.input = make_input("", ValueTone::Ink, self.id.clone(), mixed);
+        self
+    }
+
     /// The text to edit when a [`State::Formula`] field is focused (`2 * {body_tube.od}`).
     pub fn formula(mut self, text: &'a str) -> Self {
         self.formula = Some(text);
@@ -447,6 +457,10 @@ impl<'a, M: Clone + 'a> UnitInput<'a, M> {
     }
 
     fn display(&self, m: &Memory) -> String {
+        // A mixed value shows nothing but the `—` placeholder, so focusing the field starts from an empty buffer.
+        if self.mixed {
+            return String::new();
+        }
         units::format_in(self.value_si, self.unit(m))
     }
 
@@ -512,7 +526,7 @@ impl<'a, M: Clone + 'a> UnitInput<'a, M> {
             }
         }
         let shown = if m.editing { m.buffer.clone() } else { self.display(m) };
-        self.input = make_input(&shown, self.tone(m), self.id.clone());
+        self.input = make_input(&shown, self.tone(m), self.id.clone(), self.mixed);
     }
 
     fn geometry(&self, bounds: Rectangle, m: &Memory) -> Geo {
@@ -813,25 +827,29 @@ impl<'a, M: Clone + 'a> UnitInput<'a, M> {
     }
 }
 
-fn make_input<'a>(shown: &str, tone: ValueTone, id: Option<Id>) -> Element<'a, Inner> {
-    let mut input =
-        text_input("", shown.to_owned()).on_input(Inner::Input).on_submit(Inner::Submit).font(MONO).size(type_scale::NUM_BODY.size).padding([3.0, 4.0]).style(
-            move |theme: &Theme, _| {
-                let t = tokens(theme);
-                text_input::Style {
-                    background: Background::Color(Color::TRANSPARENT),
-                    border: Border::default(),
-                    placeholder: t.ink_faint,
-                    value: match tone {
-                        ValueTone::Ink => t.ink,
-                        ValueTone::Muted => t.ink_muted,
-                        ValueTone::Warn => t.warn,
-                        ValueTone::Accent => t.accent,
-                    },
-                    selection: t.accent.scale_alpha(0.35),
-                }
-            },
-        );
+fn make_input<'a>(shown: &str, tone: ValueTone, id: Option<Id>, mixed: bool) -> Element<'a, Inner> {
+    let placeholder = if mixed { "—" } else { "" };
+    let mut input = text_input(placeholder, shown.to_owned())
+        .on_input(Inner::Input)
+        .on_submit(Inner::Submit)
+        .font(MONO)
+        .size(type_scale::NUM_BODY.size)
+        .padding([3.0, 4.0])
+        .style(move |theme: &Theme, _| {
+            let t = tokens(theme);
+            text_input::Style {
+                background: Background::Color(Color::TRANSPARENT),
+                border: Border::default(),
+                placeholder: t.ink_faint,
+                value: match tone {
+                    ValueTone::Ink => t.ink,
+                    ValueTone::Muted => t.ink_muted,
+                    ValueTone::Warn => t.warn,
+                    ValueTone::Accent => t.accent,
+                },
+                selection: t.accent.scale_alpha(0.35),
+            }
+        });
     if let Some(id) = id {
         input = input.id(id);
     }
@@ -1167,7 +1185,7 @@ impl<'a, M: Clone + 'a> Widget<M, Theme, Renderer> for UnitInput<'a, M> {
                 shell.capture_event();
                 return;
             }
-            if scrub_start && self.on_scrub.is_some() | self.on_commit.is_some() {
+            if scrub_start && !self.mixed && self.on_scrub.is_some() | self.on_commit.is_some() {
                 if m.focused {
                     self.commit(m, shell);
                     self.input.operate(child_tree, child_layout, viewport, renderer, &mut Do(Act::Unfocus));
@@ -1421,6 +1439,16 @@ impl<'a, M: Clone + 'a> From<UnitInput<'a, M>> for Element<'a, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mixed_value_shows_no_number_and_focusing_starts_empty() {
+        let m = Memory::default();
+        let plain: UnitInput<'_, ()> = unit_input("Length", 0.1, Quantity::Length, &UnitSystem::MmGS);
+        assert_eq!(plain.display(&m), "100.00");
+        let mixed: UnitInput<'_, ()> = unit_input("Length", 0.1, Quantity::Length, &UnitSystem::MmGS).mixed(true);
+        // The text input shows its `—` placeholder over an empty value; an edit starts from nothing.
+        assert_eq!(mixed.display(&m), "");
+    }
 
     #[test]
     fn scrub_moves_one_display_step_per_pixel() {

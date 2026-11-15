@@ -1,0 +1,14 @@
+# Status strip while dragging (design/components/StatusStrip: values that are changing use ink at weight 600):
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/statusdrag.drive out/statusdrag
+# Drag the ballast bar aft in Station Lanes: MASS, LEN and Ø REF stay regular; CG and the margin move, so they go semibold
+# until the release.
+viewport 1280x800
+move (640, 400)
+screenshot rest.png
+press (505, 730)
+move (520, 730)
+move (560, 730)
+move (610, 730)
+screenshot drag-mid.png
+release (610, 730)
+screenshot drag-done.png

@@ -156,6 +156,8 @@ pub struct Overlay<'a> {
     pub rocket: &'a Rocket,
     pub camera: Camera,
     pub selected: Option<PartId>,
+    /// The parts selected along with `selected` (a multi-selection): every one is bracketed, none has handles.
+    pub also: Vec<PartId>,
     /// Which copy of a selected radial group was clicked.
     pub instance: usize,
     pub hover: Hover,
@@ -215,20 +217,24 @@ pub struct State {
     last_edge: Option<(Instant, PartId, usize)>,
 }
 
+/// A drive script cannot hold keys, so `BOWSHOCK_DRIVE_MODIFIERS` (`shift`, `alt`, `ctrl`, joined by `+`) starts the overlays
+/// (the viewport's and the lanes') with those modifiers held. Unset in normal use.
+pub fn drive_modifiers() -> keyboard::Modifiers {
+    let mut modifiers = keyboard::Modifiers::empty();
+    for name in std::env::var("BOWSHOCK_DRIVE_MODIFIERS").unwrap_or_default().split('+') {
+        modifiers |= match name.trim() {
+            "shift" => keyboard::Modifiers::SHIFT,
+            "alt" => keyboard::Modifiers::ALT,
+            "ctrl" => keyboard::Modifiers::CTRL,
+            _ => keyboard::Modifiers::empty(),
+        };
+    }
+    modifiers
+}
+
 impl Default for State {
-    /// A drive script cannot hold keys, so `BOWSHOCK_DRIVE_MODIFIERS` (`shift`, `alt`, `ctrl`, joined by `+`) starts the overlay
-    /// with those modifiers held. Unset in normal use.
     fn default() -> Self {
-        let mut modifiers = keyboard::Modifiers::empty();
-        for name in std::env::var("BOWSHOCK_DRIVE_MODIFIERS").unwrap_or_default().split('+') {
-            modifiers |= match name.trim() {
-                "shift" => keyboard::Modifiers::SHIFT,
-                "alt" => keyboard::Modifiers::ALT,
-                "ctrl" => keyboard::Modifiers::CTRL,
-                _ => keyboard::Modifiers::empty(),
-            };
-        }
-        State { press: None, drag: None, modifiers, last_handle: None, last_edge: None }
+        State { press: None, drag: None, modifiers: drive_modifiers(), last_handle: None, last_edge: None }
     }
 }
 
@@ -287,12 +293,24 @@ pub fn visible(cx: &Context, id: PartId, all: bool, inside: InsideView) -> Visib
 
 impl Overlay<'_> {
     fn selection(&self) -> Option<Selection<'_>> {
-        let id = self.selected?;
+        self.selection_of(self.selected?)
+    }
+
+    /// The clicked copy of group `id`: the one `instance` names for the primary part, the first for any other.
+    fn copy_of(&self, id: PartId) -> usize {
+        if self.selected == Some(id) {
+            self.instance
+        } else {
+            0
+        }
+    }
+
+    fn selection_of(&self, id: PartId) -> Option<Selection<'_>> {
         if let Some(index) = self.rocket.index_of(id) {
             return Some(Selection::Axial { z0: self.rocket.stations()[index], kind: &self.rocket.parts()[index].kind });
         }
         if let Some(radial) = self.rocket.radial(id) {
-            let instance = self.instance.min(radial.angles().len().saturating_sub(1));
+            let instance = self.copy_of(id).min(radial.angles().len().saturating_sub(1));
             return Some(Selection::Radial { radial, at: pick::placement(self.rocket, radial, instance)? });
         }
         self.rocket.internal(id).map(|_| Selection::Internal)
@@ -304,14 +322,18 @@ impl Overlay<'_> {
 
     /// The screen bounds of the selected part.
     fn bounds_of_selection(&self, size: Size) -> Option<Rectangle> {
-        Some(match self.selection()? {
+        self.bounds_of(self.selected?, size)
+    }
+
+    /// The screen bounds of part `id`.
+    fn bounds_of(&self, id: PartId, size: Size) -> Option<Rectangle> {
+        Some(match self.selection_of(id)? {
             Selection::Axial { z0, kind } => pick::screen_bounds(&self.camera, size, z0, kind),
             Selection::Radial { radial, at } => {
-                let kind = radial.effective(self.instance.min(radial.angles().len().saturating_sub(1))).kind;
+                let kind = radial.effective(self.copy_of(id).min(radial.angles().len().saturating_sub(1))).kind;
                 pick::radial_bounds(&self.camera, size, &kind, at)
             }
             Selection::Internal => {
-                let id = self.selected?;
                 let res = self.rocket.resolved(id)?;
                 let z0 = self.rocket.part_station(id)?;
                 let up = handles::radial_up(&self.camera);
@@ -329,6 +351,10 @@ impl Overlay<'_> {
     }
 
     fn visible(&self, size: Size, modifiers: keyboard::Modifiers) -> Visible {
+        // Handles edit one part's dimension; with several parts selected there is no such part, so none show.
+        if !self.also.is_empty() {
+            return Visible::default();
+        }
         let (Some(id), Some(b)) = (self.selected, self.bounds_of_selection(size)) else {
             return Visible::default();
         };
@@ -680,7 +706,12 @@ impl canvas::Program<Message> for Overlay<'_> {
                     return edit(Edit::End);
                 }
                 let press = state.press.take()?;
-                Some(Action::publish(Message::Select(press.target)).and_capture())
+                // Shift-click or Cmd/Ctrl-click on a part adds it to the selection or takes it out; on empty space it clears.
+                let message = match press.target {
+                    Some(pick) if state.modifiers.shift() || state.modifiers.command() || state.modifiers.control() => Message::Toggle(pick),
+                    target => Message::Select(target),
+                };
+                Some(Action::publish(message).and_capture())
             }
             _ => None,
         }
@@ -700,6 +731,11 @@ impl canvas::Program<Message> for Overlay<'_> {
             self.draw_hover(&mut frame, t, cursor);
             return vec![frame.into_geometry()];
         };
+        if !self.also.is_empty() {
+            self.draw_multi(&mut frame, t, size);
+            self.draw_hover(&mut frame, t, cursor);
+            return vec![frame.into_geometry()];
+        }
         let tag_text = match &selection {
             Some(Selection::Axial { kind, .. }) => kind.name().to_uppercase(),
             Some(Selection::Radial { radial, .. }) => {
@@ -788,6 +824,21 @@ impl canvas::Program<Message> for Overlay<'_> {
 }
 
 impl Overlay<'_> {
+    /// A multi-selection: accent brackets on every selected part and one tag (`3 PARTS`) over the group. No handles.
+    fn draw_multi(&self, frame: &mut Frame, t: &Tokens, size: Size) {
+        let parts = self.selected.iter().chain(&self.also);
+        let mut union: Option<Rectangle> = None;
+        let mut count = 0;
+        for b in parts.filter_map(|id| self.bounds_of(*id, size)) {
+            brackets(frame, b, t.accent, false);
+            union = Some(union.map_or(b, |u| u.union(&b)));
+            count += 1;
+        }
+        let Some(b) = union else { return };
+        let caption_y = if b.y - BRACKET_GAP - 4.0 < TOOLBAR_Y && b.x < TOOLBAR_X { b.y + b.height + BRACKET_GAP + 22.0 } else { b.y - BRACKET_GAP - 4.0 };
+        label(frame, &format!("{count} PARTS"), Point::new(b.x - BRACKET_GAP, caption_y), t.accent, t.bg_000);
+    }
+
     fn draw_hover(&self, frame: &mut Frame, t: &Tokens, cursor: Option<Point>) {
         let (Hover::Part(id), Some(cursor)) = (self.hover, cursor) else {
             return;
@@ -1109,6 +1160,7 @@ mod tests {
             rocket: &r,
             camera: side(),
             selected: None,
+            also: Vec::new(),
             instance: 0,
             hover: Hover::None,
             cursor: None,
@@ -1132,6 +1184,7 @@ mod tests {
             rocket: &r,
             camera: side(),
             selected: Some(tube),
+            also: Vec::new(),
             instance: 0,
             hover: Hover::None,
             cursor: None,

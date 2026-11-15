@@ -15,6 +15,7 @@ mod edit;
 mod form;
 mod formulas;
 mod health;
+mod multi;
 mod part;
 mod reveal;
 mod rocket_view;
@@ -229,6 +230,13 @@ impl State {
     pub fn update(&mut self, message: Message, ctx: &mut Ctx) -> Task<app::Message> {
         if formulas::handles(&message) {
             return formulas::update(message, ctx);
+        }
+        // With several parts selected, edits of what they share go to every one; the single-part messages mean nothing.
+        if ctx.is_multi() && multi::handles(&message) {
+            if !ctx.doc.dragging() && !ctx.drag.active() {
+                multi::update(ctx, message);
+            }
+            return Task::none();
         }
         if !matches!(message, Message::Edit(_, _, true)) {
             self.scrubbing = false;
@@ -547,6 +555,10 @@ impl State {
             other => other,
         };
         let (header, sections, bar) = match selection {
+            Selection::Part(_) if ctx.is_multi() => {
+                let (header, sections) = multi::view(ctx, self.menu == Some(selection));
+                (header, sections, None)
+            }
             Selection::Part(id) => self.part_view(ctx, id),
             Selection::Separation(n) => match separation::view(ctx, n) {
                 Some((title, station, sections)) => (self.simple_header(title, Some(station)), sections, None),
@@ -577,7 +589,7 @@ impl State {
                 let can_copy =
                     matches!(now, Selection::Part(id) if rocket.part(id).is_none_or(|p| !matches!(p.kind, bowshock_model::PartKind::NoseCone { .. })));
                 let mut items: Vec<Element<'a, Message>> = Vec::new();
-                if can_copy {
+                if can_copy && !ctx.is_multi() {
                     items.push(button("Duplicate", Weight::Ghost).width(Fill).on_press(Message::Duplicate).into());
                 }
                 items.push(button("Delete", Weight::Ghost).width(Fill).on_press(Message::Delete).into());

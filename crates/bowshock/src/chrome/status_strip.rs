@@ -39,13 +39,20 @@ pub fn status_strip<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> 
     let value = |f: fn(&Balance) -> f64, q: Quantity, unit: bool| {
         balance.map_or_else(|| DASH.to_string(), |b| if unit { ui::with_unit(f(b), q, units) } else { ui::bare(f(b), q, units) })
     };
-    cells.push(status::readout("MASS", value(|b| b.mass, Quantity::Mass, true), None));
-    cells.push(status::readout("LEN", value(|b| b.length, Quantity::Length, true), None));
-    cells.push(status::readout("Ø REF", value(|b| b.reference_diameter, Quantity::Length, true), None));
-    cells.push(status::cg(value(|b| b.cg, Quantity::Length, false), ctx.show_cg, Some(wrap(ChromeMessage::ToggleCg))));
-    cells.push(status::cp(value(|b| b.cp, Quantity::Length, false), ctx.show_cp, Some(wrap(ChromeMessage::ToggleCp))));
+    // While a drag changes a value, that readout is semibold until the release (StatusStrip).
+    let changing = ctx.changing();
+    cells.push(status::readout_live("MASS", value(|b| b.mass, Quantity::Mass, true), None, changing.mass));
+    cells.push(status::readout_live("LEN", value(|b| b.length, Quantity::Length, true), None, changing.length));
+    cells.push(status::readout_live("Ø REF", value(|b| b.reference_diameter, Quantity::Length, true), None, changing.diameter));
+    cells.push(status::cg_live(value(|b| b.cg, Quantity::Length, false), ctx.show_cg, Some(wrap(ChromeMessage::ToggleCg)), changing.cg));
+    cells.push(status::cp_live(value(|b| b.cp, Quantity::Length, false), ctx.show_cp, Some(wrap(ChromeMessage::ToggleCp)), changing.cp));
     if balance.is_some() {
-        cells.push(status::stability(ctx.physics.gauge(), &ctx.doc.rocket().stability_bands().into(), Some(Message::Mode(Mode::Analyze))));
+        cells.push(status::stability_live(
+            ctx.physics.gauge(),
+            &ctx.doc.rocket().stability_bands().into(),
+            Some(Message::Mode(Mode::Analyze)),
+            changing.margin,
+        ));
     } else {
         cells.push(status::readout("STAB", DASH, None));
     }
@@ -137,6 +144,11 @@ fn selection_summary<'a>(ctx: &'a Ctx) -> Option<Element<'a, Message>> {
         return None;
     };
     let rocket = ctx.doc.rocket();
+    if ctx.is_multi() {
+        let parts = ctx.selected_parts();
+        let mass: f64 = parts.iter().filter_map(|p| rocket.component_mass(*p)).map(|m| m.mass).sum();
+        return Some(summary(format!("{} parts · {}", parts.len(), ui::with_unit(mass, Quantity::Mass, ctx.units))));
+    }
     let name = match (rocket.part(id), rocket.radial(id), rocket.internal(id)) {
         (Some(p), _, _) => p.display_name(),
         (_, Some(r), _) => r.name.clone().unwrap_or_else(|| r.kind.name().to_string()),
@@ -148,11 +160,14 @@ fn selection_summary<'a>(ctx: &'a Ctx) -> Option<Element<'a, Message>> {
         Some(mass) => format!("{name} · {mass}"),
         None => name,
     };
-    Some(
-        container(row![ui::label("SELECTED"), single_line(&line, SELECTION_MAX, TEXT_LABEL + 1.5, true, theme::ink)].spacing(SPACE_2).align_y(Center))
-            .padding([0.0, SPACE_3])
-            .height(Fill)
-            .center_y(STATUSBAR_H)
-            .boxed(),
-    )
+    Some(summary(line))
+}
+
+/// The `SELECTED  <line>` cell.
+fn summary<'a>(line: String) -> Element<'a, Message> {
+    container(row![ui::label("SELECTED"), single_line(&line, SELECTION_MAX, TEXT_LABEL + 1.5, true, theme::ink)].spacing(SPACE_2).align_y(Center))
+        .padding([0.0, SPACE_3])
+        .height(Fill)
+        .center_y(STATUSBAR_H)
+        .boxed()
 }

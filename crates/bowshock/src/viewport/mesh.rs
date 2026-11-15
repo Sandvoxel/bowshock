@@ -70,6 +70,8 @@ pub struct Marks<'a> {
     pub hovered: Option<PartId>,
     /// Axial, radial or internal part selected.
     pub selected: Option<PartId>,
+    /// The other parts of a multi-selection (drawn selected like `selected`).
+    pub also_selected: &'a [PartId],
     /// The motor database: with it the motors of the active configuration are drawn in their mounts.
     pub motors: Option<&'a MotorDb>,
     /// The cutaway wedge.
@@ -241,7 +243,7 @@ impl Mesh {
     /// the motors and cutaway.
     pub fn from_rocket(rocket: &Rocket, marks: Marks) -> Mesh {
         let state_of = |id: PartId| {
-            let selected = marks.selected == Some(id);
+            let selected = marks.selected == Some(id) || marks.also_selected.contains(&id);
             match marks.flash {
                 // The flash: 4 + strength, or 6 + strength on a selected part (which keeps its full outline).
                 Some((flashed, level, _)) if flashed == id => (if selected { 6.0 } else { 4.0 }) + level,

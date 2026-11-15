@@ -300,17 +300,19 @@ pub fn cancel(ctx: &mut Ctx) {
     finish_internal(ctx, false);
 }
 
-/// Deletes the selected part (an axial part takes its radial and internal parts with it; a radial part is a whole group) as
+/// Deletes every selected part (an axial part takes its radial and internal parts with it; a radial part is a whole group) as
 /// one undo step.
 pub fn delete_selection(ctx: &mut Ctx) {
     if ctx.drag.active() {
         return;
     }
-    let Selection::Part(id) = ctx.selection else {
+    let ids = ctx.selected_parts();
+    if ids.is_empty() {
         return;
-    };
-    ctx.doc.edit("Delete part", |r| remove_any(r, id));
-    ctx.selection = Selection::None;
+    }
+    let label = if ids.len() > 1 { format!("Delete {} parts", ids.len()) } else { "Delete part".to_string() };
+    ctx.doc.edit(&label, |r| ids.iter().for_each(|id| remove_any(r, *id)));
+    ctx.select_one(None);
 }
 
 /// Removes the part `id` of whatever class it is.

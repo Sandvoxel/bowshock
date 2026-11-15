@@ -53,6 +53,8 @@ pub fn height(collapsed: bool) -> f32 {
 pub enum Message {
     /// A click: select the part of a bar (a motor selects its mount), or nothing.
     Select(Option<BarKey>),
+    /// A Shift-click or Cmd/Ctrl-click on a bar: add its part to the selection, or take it out.
+    Toggle(BarKey),
     /// A click on a separation line.
     SelectSeparation(usize),
     /// A click on the current configuration's motor bar: open the configuration menu.
@@ -147,7 +149,8 @@ impl State {
             self.menu = None;
         }
         match message {
-            Message::Select(key) => ctx.selection = key.map_or(Selection::None, |k| Selection::Part(k.part())),
+            Message::Select(key) => ctx.select_one(key.map(BarKey::part)),
+            Message::Toggle(key) => ctx.toggle_part(key.part()),
             Message::SelectSeparation(stage) => ctx.selection = Selection::Separation(stage),
             Message::OpenConfigMenu => return Task::done(app::Message::Chrome(chrome::Message::ToggleConfigMenu)),
             // A double click selects the part and turns the viewport square-on to it.
@@ -267,6 +270,7 @@ impl State {
             lock,
             units: ctx.units,
             selection: ctx.selection,
+            parts: ctx.selected_parts(),
             flash: ctx.flash_levels().map(|(id, level, _)| (id, level)),
             show: (ctx.show_cg, ctx.show_cp),
             carry,

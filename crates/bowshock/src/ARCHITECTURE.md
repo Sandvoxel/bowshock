@@ -117,6 +117,24 @@ ctx.doc.seal();                                                      // end the 
 stage `n` from the stage ahead (`Stage::index`, from 2). While a part is being carried by a drag it is out of the rocket but
 stays selected.
 
+**Multi-selection** (`app/multi.rs`): `ctx.selection` stays one value, `Selection::Part(primary)`; the parts selected with it live
+in a private list tied to that primary, read with `ctx.selected_parts()` (primary first) / `ctx.is_multi()`. Shift-click and
+Cmd/Ctrl-click in the viewport (`viewport::Message::Toggle`) and in Station Lanes (`lanes::Message::Toggle`) call
+`ctx.toggle_part(id)`; a plain click calls `ctx.select_one(..)`; Esc (no drag open) or an empty click clears. Anything that sets
+`ctx.selection` directly makes a single selection, because the extras are void unless the selection is still their primary
+(validated after every message, like the rest of the selection). With several parts selected the viewport draws brackets on every
+one and a single `N PARTS` tag and **no handles** (a handle edits one part's dimension; the kit has no multi-handle gesture), the
+lanes bracket every selected bar, the inspector (`build/inspector/multi.rs`) shows only the fields all of them share (the same
+`Dim`, material kind, finish, mass override; a mixed value is empty with a `—` placeholder, `UnitInput::mixed`) and a typed value
+sets every part as one undo step, Delete removes all of them as one step, and the status strip's `SELECTED` sums their mass.
+
+## Status strip while dragging (`app/live.rs`)
+
+A handle drag, a lane move/resize, a carried part or a scrubbed field is *live* while the document's drag or merged-edit run is
+open (`Document::editing_live`, closed by the release). The balance before the first change is the baseline; each readout of the
+strip whose value differs from it (`ctx.changing()`) is drawn `ink` at weight 600 (`status::readout_live` and friends) until the
+release.
+
 ## Symmetry groups (design/components/Symmetry)
 
 A radial group is one `RadialPart` (shared kind, start angle, count). Copies are lettered A, B, C (`bowshock_model::instance_letter`)
