@@ -126,7 +126,8 @@ pub struct FinSet {
     pub thickness: f64,
     /// Edge cross-section.
     pub cross_section: FinCrossSection,
-    /// Cant angle (rad). Not used by the 3-DOF model (no roll), kept for the data model.
+    /// Cant angle (rad): each fin turned about its span axis, positive for a positive (right-handed about the nose direction)
+    /// roll moment. Drives the roll of the rigid-body flight model (see [`crate::flight`]); the point-mass model ignores it.
     pub cant: f64,
     /// Surface roughness height (m).
     pub roughness: f64,
@@ -217,15 +218,19 @@ impl Protuberance {
     }
 }
 
-/// Mass, centre of gravity and longitudinal moment of inertia of a lump.
+/// Mass, centre of gravity and moments of inertia of a lump.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MassProps {
     /// Mass (kg).
     pub mass: f64,
     /// Centre of gravity station from the tip (m).
     pub cg: f64,
-    /// Longitudinal (pitch/yaw) moment of inertia about the CG (kg m^2). Unused by the 3-DOF model.
+    /// Longitudinal (pitch/yaw) moment of inertia about a transverse axis through the lump's own CG (kg m^2). Zero (or an
+    /// unset lump) is replaced by a uniform-rod estimate over the flying stack by the rigid-body flight model.
     pub i_long: f64,
+    /// Rotational (roll) moment of inertia about the long axis (kg m^2). Zero is replaced by a thin-cylinder estimate of the
+    /// reference diameter.
+    pub i_rot: f64,
 }
 
 /// What a staging event (a motor ignition or a stage separation) waits for.

@@ -46,7 +46,8 @@ pub fn status_strip<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> 
     let delta = |f: fn(&Balance) -> f64, q: Quantity, unit: bool| -> Option<String> {
         let (now, was) = (shown.now?, shown.committed?);
         let d = f(&now) - f(&was);
-        let text = if unit { ui::with_unit(d, q, units) } else { ui::bare(d, q, units) };
+        // Deltas drop their unit (the readout beside them carries it), to keep the strip short.
+        let text = ui::bare(d, q, units);
         if !text.chars().any(|c| c.is_ascii_digit() && c != '0') {
             None
         } else if d > 0.0 {
@@ -95,7 +96,9 @@ pub fn status_strip<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> 
     }
 
     let mut trailing: Vec<Element<'a, Message>> = Vec::new();
-    if let Some(notice) = &ctx.notice {
+    // Priority: SELECTED never clips, so the transient message gives way while a value is live (its deltas need the room).
+    let live_now = changing.mass || changing.length || changing.diameter || changing.cg || changing.cp || changing.margin;
+    if let Some(notice) = ctx.notice.as_ref().filter(|_| !live_now) {
         trailing.push(single_line(&notice.0, NOTICE_MAX, TEXT_BODY, false, theme::colored(|t| t.ok)));
     }
     if let Some(summary) = selection_summary(ctx) {

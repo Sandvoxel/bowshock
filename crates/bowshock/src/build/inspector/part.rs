@@ -325,7 +325,10 @@ fn pod_parts<'a>(body: &PodBody) -> Element<'a, Message> {
         .chain(body.radials().iter().map(|r| (r.id, r.display_name())))
         .chain(body.internals().iter().map(|i| (i.id, i.display_name())));
     let links: Vec<Element<'a, Message>> = names
-        .map(|(id, name)| plain_button(text(name).size(TEXT_LABEL)).padding([2.0, SPACE_2]).style(theme::secondary).on_press(Message::SelectPart(id)).boxed())
+        .map(|(id, name)| {
+            // A link to the part (accent text, trailing chevron, no chip frame): clicking selects it.
+            plain_button(text(format!("{name} ›")).size(TEXT_LABEL).style(theme::colored(|t| t.accent))).padding([2.0, SPACE_2]).style(theme::ghost).on_press(Message::SelectPart(id)).boxed()
+        })
         .collect();
     labeled("Inside", row(links).spacing(SPACE_2).wrap().boxed())
 }

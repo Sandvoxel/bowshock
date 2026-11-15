@@ -346,7 +346,8 @@ fn menu_item(current: bool, accent: bool) -> impl Fn(&Theme, button::Status) -> 
 /// The issues list: every warning and error of the active configuration (a line with a part selects it when clicked), then the
 /// notes of an OpenRocket import at the neutral `info` level, one line each.
 fn issues_list<'a>(ctx: &'a Ctx) -> Element<'a, Message> {
-    let header = container(ui::label("ISSUES")).padding([SPACE_2, SPACE_3]);
+    let close = button(text("×").size(TEXT_BODY + 4.0)).padding([0.0, SPACE_2]).style(theme::ghost).on_press(Message::Dismiss);
+    let header = container(row![ui::label("ISSUES"), Space::new().width(Fill), close].align_y(Center)).padding([SPACE_2, SPACE_3]);
     let lines = column(ctx.physics.issues().map(|w| {
         let (mark, tone) = if w.level == Level::Err { (Mark::Error, Tone::Err) } else { (Mark::Warning, Tone::Warn) };
         let line = row![glyph::icon(mark, tone, 13.0), text(w.message.as_str()).size(TEXT_BODY)].spacing(SPACE_2).align_y(Center);

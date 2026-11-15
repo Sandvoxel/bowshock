@@ -140,6 +140,13 @@ pub fn balance_label_rects(rocket: &Rocket, camera: &Camera, size: Size, marks: 
         let w = width(&text);
         let y = a.y.max(b.y) + glyph_row + 22.0;
         out.push(rect(w, (a.x + b.x) / 2.0 - w / 2.0, y + 4.0));
+        out.push(Rectangle::new(Point::new(a.x.min(b.x) - 2.0, y - 5.0), Size::new((a.x - b.x).abs() + 4.0, 6.0)));
+    }
+    // The glyphs hang below the body.
+    for (at, shown) in [(a, marks.show.0), (b, marks.show.1)] {
+        if shown {
+            out.push(Rectangle::new(Point::new(at.x - GLYPH_R, at.y + glyph_row - GLYPH_R), Size::new(2.0 * GLYPH_R, 2.0 * GLYPH_R)));
+        }
     }
     out
 }

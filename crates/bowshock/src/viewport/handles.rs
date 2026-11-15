@@ -51,7 +51,7 @@ pub struct Inset {
 }
 
 /// Size of the inset panel.
-pub const INSET: f32 = 170.0;
+pub const INSET: f32 = 150.0;
 /// Radius of the picture inside the inset (parent surface plus the part's reach), px: the rest of the panel is for labels.
 const PICTURE_R: f32 = 28.0;
 /// Pixels per metre of fin thickness in the inset (thickness is exaggerated so it can be grabbed).

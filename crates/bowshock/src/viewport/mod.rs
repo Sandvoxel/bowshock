@@ -74,12 +74,18 @@ pub mod flash;
 
 /// Logical size of the ViewCube canvas.
 pub const CUBE_SIZE: f32 = 112.0;
+/// Strip left of the ViewCube that holds the axis triad (the canvas is `TRIAD_GUTTER + CUBE_SIZE` wide).
+pub const TRIAD_GUTTER: f32 = 30.0;
 
 const SNAP_TIME: Duration = Duration::from_millis(320);
 /// How much of the orthographic blend one orbit step takes away, so a drag off a face view eases into perspective.
 const ORBIT_TO_PERSPECTIVE: f32 = 0.2;
 /// The focus move and the exploded view animate over this long.
 const FOCUS_TIME: Duration = Duration::from_millis(250);
+/// Fraction of the viewport kept clear on each side of a focused part (the part fills about the middle half).
+const FOCUS_MARGIN: f32 = 0.25;
+/// The most a focus zooms in, relative to fitting the whole rocket.
+const FOCUS_MAX_ZOOM: f32 = 2.0;
 /// Two selections of the same thing this close together are a double-click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// Headless runs (`bowshock drive`, animations off) render between scripted clicks, which can take longer than that.
@@ -531,7 +537,14 @@ impl View {
         let mut to = self.goal();
         (to.yaw, to.pitch, to.roll) = if aft_on { (0.0, 0.0, 0.0) } else { (-FRAC_PI_2, 0.0, 0.0) };
         to.ortho_blend = 1.0;
-        to.fit_in(bounds.min, bounds.max, self.size, Vector::new(SPACE_8, SPACE_8));
+        // Leave room around the part so its neighbours stay in view, and never zoom in more than `FOCUS_MAX_ZOOM`× the
+        // whole-rocket fit: a small part (a rail button, a ring) would otherwise fill the screen with no context.
+        to.fit_in(bounds.min, bounds.max, self.size, Vector::new(self.size.width * FOCUS_MARGIN, self.size.height * FOCUS_MARGIN));
+        if !self.mesh.is_empty() {
+            let mut whole = to;
+            whole.fit(self.mesh.min, self.mesh.max, self.size);
+            to.scale = to.scale.min(whole.scale * FOCUS_MAX_ZOOM);
+        }
         self.animate_for(to, FOCUS_TIME);
         ctx.selection = Selection::Part(id);
     }
@@ -836,7 +849,7 @@ impl View {
         layers = layers.push(overlay).push(markers::bottom_bar(crate::app::physics::BALANCE_MACH, 0.0, hints));
         layers = layers.push(markers(true, motors));
         if !self.profile {
-            let cube = canvas(cube::ViewCube { camera }).width(CUBE_SIZE).height(CUBE_SIZE);
+            let cube = canvas(cube::ViewCube { camera }).width(TRIAD_GUTTER + CUBE_SIZE).height(CUBE_SIZE);
             let cube: Element<'_, Message> = container(cube).align_right(Fill).padding(SPACE_4).boxed();
             layers = layers.push(cube);
         }

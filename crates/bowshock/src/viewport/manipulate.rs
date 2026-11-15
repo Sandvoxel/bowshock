@@ -374,8 +374,17 @@ impl Overlay<'_> {
         })
     }
 
+    /// The cutaway's CUT label and dial, a rectangle the inset and the tags keep off (`None` outside the cutaway).
+    fn cut_label(&self, size: Size) -> Option<Rectangle> {
+        (self.inside == InsideView::Cutaway).then(|| {
+            let p = self.camera.project(Vec3::ZERO, size);
+            Rectangle::new(Point::new(p.x - 72.0, p.y - 32.0), Size::new(84.0, 44.0))
+        })
+    }
+
     fn context(&self, size: Size, bounds: Rectangle) -> Context<'_> {
         let (rocket, camera) = self.selected.and_then(|id| self.frame_of(id)).unwrap_or((self.rocket, &self.camera));
+        let bounds = self.cut_label(size).map_or(bounds, |c| bounds.union(&c));
         Context { rocket, camera, size, instance: self.instance(), bounds, cube: !self.profile }
     }
 
@@ -390,7 +399,18 @@ impl Overlay<'_> {
             .reduce(|a, b| a.union(&b))?;
         let text = if pod.count > 1 { format!("POD ×{}", pod.count) } else { "POD".to_string() };
         let width = text.chars().count() as f32 * TEXT_LABEL * GLYPH_EM + 12.0;
-        Some((pod.id, Rectangle::new(Point::new(union.x, union.y + union.height + 6.0), Size::new(width, TEXT_LABEL + 8.0)), text))
+        let mut chip = Rectangle::new(Point::new(union.x, union.y + union.height + 6.0), Size::new(width, TEXT_LABEL + 8.0));
+        // Keep off the CG/CP glyphs and their labels: step down until clear.
+        if let Some(marks) = &self.balance {
+            let rects = markers::balance_label_rects(self.rocket, &self.camera, size, marks, self.units);
+            for _ in 0..8 {
+                if !rects.iter().any(|r| r.intersects(&chip)) {
+                    break;
+                }
+                chip.y += chip.height + 4.0;
+            }
+        }
+        Some((pod.id, chip, text))
     }
 
     fn visible(&self, size: Size, modifiers: keyboard::Modifiers) -> Visible {
@@ -984,7 +1004,8 @@ impl Overlay<'_> {
             Rectangle::new(Point::new(0.0, (size.height - BOTTOM_STRIP).max(0.0)), Size::new(size.width, BOTTOM_STRIP)),
         ];
         if !self.profile {
-            blocked.push(Rectangle::new(Point::new(size.width - CUBE_MARGIN - super::CUBE_SIZE, CUBE_MARGIN), Size::new(super::CUBE_SIZE, super::CUBE_SIZE)));
+            let w = super::TRIAD_GUTTER + super::CUBE_SIZE;
+            blocked.push(Rectangle::new(Point::new(size.width - CUBE_MARGIN - w, CUBE_MARGIN), Size::new(w, super::CUBE_SIZE)));
         }
         if let Some(ins) = &vis.inset {
             blocked.push(ins.panel);

@@ -77,7 +77,9 @@ impl View {
         let aligned = camera.back().abs().max_element();
         // Ease from orthographic (face-on) to full perspective within a few degrees of a face.
         let t = ((1.0 - aligned) * 20.0).clamp(0.0, 1.0);
-        Self { camera, centre: Point::new(size.width / 2.0, size.height / 2.0), s: CUBE_FRACTION * size.width.min(size.height), k: PERSPECTIVE * t }
+        // The cube fills the square at the right of the canvas; the strip left of it holds the axis triad.
+        let side = size.height.min(size.width);
+        Self { camera, centre: Point::new(size.width - side / 2.0, size.height / 2.0), s: CUBE_FRACTION * side, k: PERSPECTIVE * t }
     }
 
     /// Screen offset of a world direction, in px (y down).
@@ -442,9 +444,9 @@ impl canvas::Program<Message> for ViewCube {
             frame.fill(&tri, Fill::from(color));
         }
 
-        // Axis triad, bottom-left.
-        let origin = Point::new(18.0, bounds.height - 18.0);
-        let triad = View { camera: self.camera, centre: origin, s: 12.0, k: 0.0 };
+        // Axis triad, bottom-left in its own strip so it never overlaps the cube.
+        let origin = Point::new(super::TRIAD_GUTTER / 2.0, bounds.height - 18.0);
+        let triad = View { camera: self.camera, centre: origin, s: 10.0, k: 0.0 };
         for (axis, color, name) in [(Vec3::X, tk.axis_x, "X"), (Vec3::Y, tk.axis_y, "Y"), (Vec3::Z, tk.axis_z, "Z")] {
             let d = triad.dir(axis);
             let end = origin + d;

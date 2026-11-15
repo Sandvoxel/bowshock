@@ -44,7 +44,7 @@ fn rocket() -> Vehicle {
         protuberances: vec![Protuberance::RailButton { station: 0.8, height: 0.008, diameter: 0.009 }],
         stages: vec![StageMass {
             // Airframe without motor: 1.3 kg total at pad with the motor (0.23 kg).
-            dry: MassProps { mass: 1.07, cg: 0.62, i_long: 0.05 },
+            dry: MassProps { mass: 1.07, cg: 0.62, i_long: 0.1, i_rot: 0.0008 },
             fore_station: 0.0,
             aft_station: 1.10,
             motor: Some(StageMotor { curve: h128(), mount_aft_station: 1.10, ignition: Timing::LAUNCH, ejection_delay: Some(9.0) }),
@@ -146,7 +146,7 @@ fn drogue_then_main() {
 fn two_stage(ignition: Timing, separation: Timing) -> Vehicle {
     let mut v = rocket();
     let booster = StageMass {
-        dry: MassProps { mass: 0.4, cg: 1.3, i_long: 0.01 },
+        dry: MassProps { mass: 0.4, cg: 1.3, i_long: 0.01, i_rot: 0.0003 },
         fore_station: 1.10,
         aft_station: 1.50,
         motor: Some(StageMotor { curve: h128(), mount_aft_station: 1.50, ignition: Timing::LAUNCH, ejection_delay: None }),

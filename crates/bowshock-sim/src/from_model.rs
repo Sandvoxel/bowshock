@@ -506,7 +506,7 @@ fn stage_motor(
 }
 
 fn sim_mass(m: model::MassProps) -> MassProps {
-    MassProps { mass: m.mass, cg: m.cg, i_long: m.i_long }
+    MassProps { mass: m.mass, cg: m.cg, i_long: m.i_long, i_rot: m.i_rot }
 }
 
 /// Builds the simulation [`Vehicle`] of `rocket` flying `phase` with the active configuration's motors.

@@ -33,6 +33,44 @@ pub struct Stability {
     pub components: Vec<(String, f64, f64)>,
 }
 
+/// Normal force of the whole vehicle at one flight condition (see [`Aero::normal_force`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct NormalForce {
+    /// Total normal force coefficient slope, `CN/alpha`, per radian (as [`Stability::cn_alpha`]).
+    pub cn_alpha: f64,
+    /// Centre of pressure station from the tip (m).
+    pub cp: f64,
+    /// `sum CN_alpha_i x_i` over the components (m).
+    s1: f64,
+    /// `sum CN_alpha_i x_i^2` over the components (m^2).
+    s2: f64,
+}
+
+impl NormalForce {
+    /// `sum CN_alpha_i (x_i - cg)^2` (m^2): each lifting component, at its own CP station `x_i`, sees the angle of attack
+    /// `w (x_i - cg)/V` from a pitch or yaw rate `w` about the centre of gravity at station `cg`, so the damping moment
+    /// is `-1/2 rho V A_ref (sum CN_alpha_i (x_i - cg)^2) w` (strip theory: Barrowman 1967; Mandell, Caporaso & Bengen,
+    /// *Topics in Advanced Model Rocketry*, 1973, the fin pitch damping term).
+    pub fn damping_sum(&self, cg: f64) -> f64 {
+        (self.s2 - 2.0 * cg * self.s1 + cg * cg * self.cn_alpha).max(0.0)
+    }
+}
+
+/// Roll moment coefficients of the fins at one Mach number (see [`Aero::roll`]): the moment about the nose axis in the sense of
+/// increasing fin roll angle is `q (forcing + damping w / V)` for a roll rate `w` and air speed `V`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RollAero {
+    /// Cant forcing `sum N K CN_alpha_1 A_ref cant arm` (m^3, `q` times it is the moment in N m).
+    pub forcing: f64,
+    /// Roll damping `-sum N K CN_alpha_1 A_ref arm2` (m^4, at most 0): each fin section at distance `r` from the axis meets
+    /// the angle of attack `w r / V` (strip theory, Barrowman 1967).
+    pub damping: f64,
+}
+
+/// Crossflow drag coefficient of the body planform (Hoerner, *Fluid-Dynamic Drag*, 1965): the coefficient of the Galejs body
+/// lift in [`Aero::stability`] and of the crossflow damping in [`Aero::crossflow_damping`].
+pub const BODY_CROSSFLOW_CD: f64 = 1.1;
+
 /// Drag coefficient (reference-area based) broken into the categories the UI stacks.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct DragBreakdown {
@@ -317,6 +355,8 @@ struct BodyCalc {
     /// Backward-facing exposed annulus area (m^2), base drag.
     back_face: f64,
     is_last: bool,
+    /// `(station of strip centre, planform area of strip)` over the segment, for the crossflow damping.
+    strips: Vec<(f64, f64)>,
 }
 
 #[derive(Clone, Debug)]
@@ -342,6 +382,16 @@ struct FinCalc {
     thickness: f64,
     roughness: f64,
     cross: FinCrossSection,
+    /// `K_fb` times the fin-fin factor: the lift multiplier of one fin that sees the flow face-on (the roll moments).
+    unit_lift: f64,
+    /// Cant angle (rad).
+    cant: f64,
+    /// Arm from the body axis of the fin's lift (chord-weighted mean span station, m).
+    roll_arm: f64,
+    /// Chord-weighted mean-square arm from the body axis (m^2).
+    roll_arm2: f64,
+    /// Whether the set stands on the core body (pod fins are not on the rocket's axis).
+    on_core: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -400,7 +450,9 @@ impl Aero {
             })
             .collect();
         for (f, n) in fins.iter_mut().zip(together) {
-            f.lift *= fin_fin_factor(n.round() as u32);
+            let ff = fin_fin_factor(n.round() as u32);
+            f.lift *= ff;
+            f.unit_lift *= ff;
         }
         let prots = v
             .protuberances
@@ -465,6 +517,15 @@ impl Aero {
     /// `cn_alpha * alpha` is the normal force coefficient `CN` there.
     pub fn stability(&self, mach: f64, alpha: f64) -> Stability {
         let mut comps: Vec<(String, f64, f64)> = Vec::new();
+        self.each_component(mach, alpha, |name, cna, cp| comps.push((name(), cna, cp)));
+        let cn_alpha: f64 = comps.iter().map(|c| c.1).sum();
+        let cp = if cn_alpha.abs() > 1e-9 { comps.iter().map(|c| c.1 * c.2).sum::<f64>() / cn_alpha } else { 0.5 * self.length };
+        Stability { cn_alpha, cp, components: comps }
+    }
+
+    /// Calls `f(name, CN_alpha per rad, CP station)` for every component with lift at `mach` and `alpha`; the name is only
+    /// built when `f` asks for it, so the flight code can sum the components without allocating.
+    fn each_component(&self, mach: f64, alpha: f64, mut f: impl FnMut(&dyn Fn() -> String, f64, f64)) {
         let sin_a = alpha.abs().sin();
         let sinc = if alpha.abs() > 1e-9 { sin_a / alpha.abs() } else { 1.0 };
         for b in &self.bodies {
@@ -477,26 +538,56 @@ impl Aero {
                 moment += extra * b.plan_cp;
             }
             if cna.abs() > 1e-12 {
-                comps.push((b.name.clone(), cna, moment / cna));
+                f(&|| b.name.clone(), cna, moment / cna);
             }
         }
-        for f in &self.fins {
-            comps.push((f.name.clone(), f.cna(mach, alpha, self.a_ref), f.cp(mach)));
+        for fin in &self.fins {
+            f(&|| fin.name.clone(), fin.cna(mach, alpha, self.a_ref), fin.cp(mach));
         }
         for (i, t) in self.tube_fins.iter().enumerate() {
             let cna = t.cna(alpha, self.a_ref);
             if cna.abs() > 1e-12 {
-                comps.push((if self.tube_fins.len() > 1 { format!("Tube fins {}", i + 1) } else { "Tube fins".to_string() }, cna, t.cp(mach)));
+                f(&|| if self.tube_fins.len() > 1 { format!("Tube fins {}", i + 1) } else { "Tube fins".to_string() }, cna, t.cp(mach));
             }
         }
-        let cn_alpha: f64 = comps.iter().map(|c| c.1).sum();
-        let cp = if cn_alpha.abs() > 1e-9 { comps.iter().map(|c| c.1 * c.2).sum::<f64>() / cn_alpha } else { 0.5 * self.length };
-        Stability { cn_alpha, cp, components: comps }
+    }
+
+    /// Normal-force slope and CP at `mach` and angle of attack `alpha` (rad) together with the sums behind the pitch damping
+    /// moment ([`NormalForce::damping_sum`]), without the per-component list of [`Aero::stability`] (no allocation): what the
+    /// rigid-body flight model evaluates every step.
+    pub fn normal_force(&self, mach: f64, alpha: f64) -> NormalForce {
+        let (mut s0, mut s1, mut s2) = (0.0, 0.0, 0.0);
+        self.each_component(mach, alpha, |_, cna, cp| {
+            s0 += cna;
+            s1 += cna * cp;
+            s2 += cna * cp * cp;
+        });
+        NormalForce { cn_alpha: s0, cp: if s0.abs() > 1e-9 { s1 / s0 } else { 0.5 * self.length }, s1, s2 }
     }
 
     /// Static margin in calibers (positive = stable) for centre of gravity station `cg`.
     pub fn margin_cal(&self, mach: f64, alpha: f64, cg: f64) -> f64 {
         (self.stability(mach, alpha).cp - cg) / self.d_ref
+    }
+
+    /// Body crossflow damping factor about a centre of gravity at station `cg`: `sum A_strip |x - cg|^3` (m^5) over strips of
+    /// the body planform. A body turning at rate `w` about its CG meets a crossflow `w (x - cg)` at each station and the
+    /// Hoerner crossflow drag (coefficient [`BODY_CROSSFLOW_CD`], the one behind the body lift of [`Aero::stability`]) gives the
+    /// restoring moment `-1/2 rho BODY_CROSSFLOW_CD K w |w|` (Zipfel 2014, *Modeling and Simulation of Aerospace Vehicle
+    /// Dynamics*, the strip-theory damping of slender bodies).
+    pub fn crossflow_damping(&self, cg: f64) -> f64 {
+        self.bodies.iter().flat_map(|b| b.strips.iter()).map(|&(x, area)| area * (x - cg).abs().powi(3)).sum()
+    }
+
+    /// Fin roll forcing and damping at `mach` (see [`RollAero`]): the fins of the core body only.
+    pub fn roll(&self, mach: f64) -> RollAero {
+        let (mut forcing, mut damping) = (0.0, 0.0);
+        for f in self.fins.iter().filter(|f| f.on_core) {
+            let lift = f.n * f.unit_lift * f.cna1(mach, 0.0, self.a_ref) * self.a_ref;
+            forcing += lift * f.cant * f.roll_arm;
+            damping -= lift * f.roll_arm2;
+        }
+        RollAero { forcing, damping }
     }
 
     /// Zero-angle-of-attack drag at `mach` with `re_per_m = v/nu` (Reynolds number per metre).
@@ -633,6 +724,7 @@ fn body_calc(s: &BodySegment, prev_aft: f64, next_fore: Option<f64>, a_ref: f64)
     let l = s.length.max(1e-12);
     let dx = l / N as f64;
     let (mut vol, mut plan, mut plan_m, mut wet) = (0.0, 0.0, 0.0, 0.0);
+    let mut strips: Vec<(f64, f64)> = Vec::with_capacity(N);
     let mut r_prev = s.radius_at(0.0);
     for i in 0..N {
         let x_mid = (i as f64 + 0.5) * dx;
@@ -643,6 +735,7 @@ fn body_calc(s: &BodySegment, prev_aft: f64, next_fore: Option<f64>, a_ref: f64)
         plan += 2.0 * r * dx;
         plan_m += 2.0 * r * dx * x_mid;
         wet += 2.0 * PI * r * (1.0 + slope * slope).sqrt() * dx;
+        strips.push((s.station + x_mid, 2.0 * r * dx));
         r_prev = r_next;
     }
     let (r0, r1) = (s.fore_radius, s.aft_radius);
@@ -698,6 +791,7 @@ fn body_calc(s: &BodySegment, prev_aft: f64, next_fore: Option<f64>, a_ref: f64)
         front_face: PI * (r0 * r0 - prev_aft * prev_aft).max(0.0),
         back_face: PI * (r1 * r1 - next_r * next_r).max(0.0),
         is_last: next_fore.is_none(),
+        strips,
     }
 }
 
@@ -728,6 +822,22 @@ fn fin_calc(f: &FinSet, name: String) -> FinCalc {
             (1.0, c / (DIV - 1) as f64, 0.2878 * f.root_chord, 8.0 / (3.0 * PI) * f.root_chord)
         }
     };
+    // Interference of the body on the fin: `K_fb = 1 + r/(s + r)`.
+    let k_fb = 1.0 + f.body_radius / (span + f.body_radius);
+    // Spanwise strip integrals for the roll moments (chord-weighted strip theory, Barrowman 1967 / Niskanen 2009 section
+    // 3.2.3): the arm of the fin's lift and the chord-weighted mean-square arm, both from the body axis.
+    let chord = |y: f64| match f.planform {
+        FinPlanform::Trapezoidal => f.root_chord + (f.tip_chord - f.root_chord) * y / span,
+        FinPlanform::Elliptical => f.root_chord * (1.0 - (y / span).powi(2)).max(0.0).sqrt(),
+    };
+    const STRIPS: usize = 32;
+    let (mut c0, mut c1, mut c2) = (0.0, 0.0, 0.0);
+    for i in 0..STRIPS {
+        let y = (i as f64 + 0.5) / STRIPS as f64 * span;
+        let (c, r) = (chord(y).max(0.0), f.body_radius + y);
+        (c0, c1, c2) = (c0 + c, c1 + c * r, c2 + c * r * r);
+    }
+    let (roll_arm, roll_arm2) = if c0 > 0.0 { (c1 / c0, c2 / c0) } else { (f.body_radius + 0.5 * span, (f.body_radius + 0.5 * span).powi(2)) };
     FinCalc {
         name,
         n: f64::from(f.count),
@@ -737,7 +847,12 @@ fn fin_calc(f: &FinSet, name: String) -> FinCalc {
         cos_mid,
         cos_lead,
         mac_lead: f.station + x_cp - SUBSONIC_CP_POS * mac,
-        lift: roll_factor(&f.angles, f.count) * (1.0 + f.body_radius / (span + f.body_radius)),
+        lift: roll_factor(&f.angles, f.count) * k_fb,
+        unit_lift: k_fb,
+        cant: f.cant,
+        roll_arm,
+        roll_arm2,
+        on_core: f.bodies <= 1,
         root: f.root_extent.unwrap_or((f.station, f.station + f.root_chord)),
         parent: f.parent,
         per_body: f64::from(f.count) / f64::from(f.bodies.max(1)),
@@ -1103,7 +1218,7 @@ mod tests {
         // Motor exhaust removes base drag.
         let mut v = alpha_like();
         v.stages.push(StageMass {
-            dry: MassProps { mass: 0.05, cg: 0.2, i_long: 0.0 },
+            dry: MassProps { mass: 0.05, cg: 0.2, i_long: 0.0, i_rot: 0.0 },
             fore_station: 0.0,
             aft_station: 0.33,
             motor: Some(StageMotor {
