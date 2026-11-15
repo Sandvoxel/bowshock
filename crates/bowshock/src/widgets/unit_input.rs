@@ -1309,7 +1309,7 @@ impl<'a, M: Clone + 'a> Widget<M, Theme, Renderer> for UnitInput<'a, M> {
             outline(renderer, field, border, fill);
         }
         if picking {
-            outline(renderer, field.shrink(2.0), t.accent.scale_alpha(0.45), Some(t.accent_soft));
+            outline(renderer, field.shrink(1.0), t.accent, None);
         }
         if matches!(self.effective_badge(), Some(Badge::Refs(_))) {
             renderer.fill_quad(Quad { bounds: Rectangle { width: 2.0, ..field }, snap: true, ..Quad::default() }, Background::Color(t.accent));

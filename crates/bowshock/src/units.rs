@@ -136,7 +136,7 @@ const fn unit(symbol: &'static str, to_si: f64, decimals: usize) -> Unit {
 
 static LENGTH: [Unit; 5] = [unit("mm", 0.001, 2), unit("cm", 0.01, 3), unit("m", 1.0, 4), unit("in", INCH, 3), unit("ft", FOOT, 4)];
 static MASS: [Unit; 4] = [unit("g", 0.001, 1), unit("kg", 1.0, 3), unit("oz", OUNCE, 2), unit("lb", POUND, 3)];
-static ANGLE: [Unit; 2] = [unit("deg", std::f64::consts::PI / 180.0, 1), unit("rad", 1.0, 3)];
+static ANGLE: [Unit; 2] = [unit("°", std::f64::consts::PI / 180.0, 1), unit("rad", 1.0, 3)];
 static VELOCITY: [Unit; 4] = [unit("m/s", 1.0, 1), unit("km/h", 1.0 / 3.6, 1), unit("ft/s", FOOT, 1), unit("mph", 1609.344 / 3600.0, 1)];
 static ACCELERATION: [Unit; 2] = [unit("g", G0, 2), unit("m/s²", 1.0, 2)];
 static FORCE: [Unit; 2] = [unit("N", 1.0, 2), unit("lbf", LBF, 2)];
@@ -247,7 +247,7 @@ impl Quantity {
         match self {
             Quantity::Length => &[("\"", 3), ("″", 3), ("inch", 3), ("inches", 3), ("'", 4), ("′", 4), ("foot", 4), ("feet", 4)],
             Quantity::Mass => &[("lbs", 3), ("gram", 0), ("grams", 0)],
-            Quantity::Angle => &[("°", 0), ("degrees", 0), ("radian", 1), ("radians", 1)],
+            Quantity::Angle => &[("°", 0), ("deg", 0), ("degrees", 0), ("radian", 1), ("radians", 1)],
             Quantity::Velocity => &[("kph", 1), ("kmh", 1), ("fps", 2)],
             Quantity::Acceleration => &[("m/s2", 1)],
             Quantity::Force => &[],
@@ -834,7 +834,7 @@ mod tests {
         // 1 g/cm³ = 1000 kg/m³.
         assert!(close(u(Quantity::Density, "g/cm³").to_si(1.0), 1000.0));
         assert!(close(u(Quantity::Area, "in²").to_si(1.0), 0.00064516));
-        assert!(close(u(Quantity::Angle, "deg").to_si(180.0), std::f64::consts::PI));
+        assert!(close(u(Quantity::Angle, "°").to_si(180.0), std::f64::consts::PI));
         assert!(close(u(Quantity::Percentage, "%").to_si(50.0), 0.5));
     }
 
@@ -866,7 +866,7 @@ mod tests {
         assert_eq!(format(0.1524, Quantity::Length, &s), ("152.40".to_string(), "mm"));
         assert_eq!(format_in(0.0762, u(Quantity::Length, "in")), "3.000");
         assert_eq!(format_in(1.284, u(Quantity::Mass, "kg")), "1.284");
-        assert_eq!(format_in(std::f64::consts::FRAC_PI_6, u(Quantity::Angle, "deg")), "30.0");
+        assert_eq!(format_in(std::f64::consts::FRAC_PI_6, u(Quantity::Angle, "°")), "30.0");
         assert_eq!(format(1.92, Quantity::Calibers, &s), ("1.92".to_string(), "cal"));
         assert_eq!(format_in(0.7, u(Quantity::Percentage, "%")), "70.0");
         assert_eq!(format_in(1000.0, u(Quantity::Altitude, "ft")), "3281");
@@ -890,7 +890,7 @@ mod tests {
     fn step_is_power_of_ten() {
         assert!(close(u(Quantity::Length, "mm").step(), 0.01));
         assert!(close(u(Quantity::Length, "in").step(), 0.001));
-        assert!(close(u(Quantity::Angle, "deg").step(), 0.1));
+        assert!(close(u(Quantity::Angle, "°").step(), 0.1));
         assert_eq!(u(Quantity::Density, "kg/m³").step(), 1.0);
         assert_eq!(u(Quantity::Altitude, "m").step(), 1.0);
     }
@@ -961,7 +961,7 @@ mod tests {
                 sym(Temperature, system),
             ];
             assert_eq!(got, want, "{system:?}");
-            assert_eq!(sym(Angle, system), "deg");
+            assert_eq!(sym(Angle, system), "°");
             assert_eq!(sym(Time, system), "s");
             assert_eq!(sym(Percentage, system), "%");
             assert_eq!(sym(Calibers, system), "cal");
@@ -998,9 +998,9 @@ mod tests {
         assert_pq("250g", Mass, "g", 0.25);
         assert_pq("2 lbs", Mass, "g", 2.0 * 0.45359237);
         assert_pq("1lb 4oz", Mass, "kg", 1.25 * 0.45359237);
-        assert_pq("30°", Angle, "deg", 30.0 * std::f64::consts::PI / 180.0);
+        assert_pq("30°", Angle, "°", 30.0 * std::f64::consts::PI / 180.0);
         assert_pq("30 deg", Angle, "rad", 30.0 * std::f64::consts::PI / 180.0);
-        assert_pq("1.5rad", Angle, "deg", 1.5);
+        assert_pq("1.5rad", Angle, "°", 1.5);
         assert_pq("100 km/h", Velocity, "m/s", 100.0 / 3.6);
         assert_pq("10 m/s", Velocity, "ft/s", 10.0);
         assert_pq("60mph", Velocity, "m/s", 26.8224);

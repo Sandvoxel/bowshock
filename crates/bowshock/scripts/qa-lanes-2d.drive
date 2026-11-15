@@ -1,0 +1,8 @@
+# QA: two-stage fins label in 2D. BOWSHOCK_EXAMPLE=two_stage cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/qa-lanes-2d.drive out/qa-lanes
+viewport 1280x800
+scale 1
+click "2D"
+move (640, 300)
+screenshot two-stage-2d.png
+click "Light"
+screenshot two-stage-2d-light.png

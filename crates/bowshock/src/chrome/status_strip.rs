@@ -83,11 +83,11 @@ fn phase_cell<'a>(ctx: &'a Ctx) -> Element<'a, Message> {
 fn config_cell<'a>(name: String, open: bool) -> Element<'a, Message> {
     let tone = if open { Tone::Accent } else { Tone::Muted };
     // The kit's cell is at least 150 px wide with the caret at its right edge; open, it is as wide as the menu above it.
-    let natural = name.chars().count() as f32 * 7.5 + 86.0;
+    let natural = name.chars().count() as f32 * 8.0 + 110.0;
     let width = if open { natural.max(RAIL_W + BIN_W) } else { natural.max(150.0) };
     let content = row![
         ui::label("CONFIG"),
-        text(name).font(theme::MONO).size(type_scale::NUM_BODY.size).style(theme::ink),
+        text(name).font(theme::MONO).size(type_scale::NUM_BODY.size).wrapping(Wrapping::None).style(theme::ink),
         Space::new().width(Fill),
         glyph::icon(Mark::CaretUp, tone, 10.0)
     ]
@@ -114,7 +114,7 @@ fn config_cell<'a>(name: String, open: bool) -> Element<'a, Message> {
 
 /// Longest notice / selection line shown before it is cut with an ellipsis (characters).
 const NOTICE_MAX: usize = 44;
-const SELECTION_MAX: usize = 40;
+const SELECTION_MAX: usize = 28;
 
 /// `full` on one line, cut to `max` characters with an ellipsis; the cut text has a tooltip with all of it. Never wraps, so the
 /// strip keeps its height.

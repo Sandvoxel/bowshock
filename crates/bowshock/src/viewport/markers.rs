@@ -377,6 +377,10 @@ impl canvas::Program<Message> for Markers<'_> {
         let fade = 1.0 - ((axial - AXIAL_FADE_FROM) / (AXIAL_FADE_TO - AXIAL_FADE_FROM)).clamp(0.0, 1.0);
         if let Some((cg, cp, margin)) = self.balance.filter(|_| fade > 0.02) {
             let (zc, zp) = (cg as f32, cp as f32);
+            // The stage brackets hang from the nose's height, which in a tilted view is not the CG's: the glyph row never rises
+            // into them (their labels would collide with the value labels and the margin).
+            let floor = if self.stages.len() > 1 && self.explode < 0.01 { self.axis(0.0, size).y + stage_row + 24.0 + GLYPH_R } else { f32::MIN };
+            let glyph_y = |at: Point| (at.y + glyph_row).max(floor);
             let (a, b) = (self.axis(zc, size), self.axis(zp, size));
             let apart = (b.x - a.x).abs() > 78.0;
             for (z, at, color, name, value, dash, align) in [
@@ -386,7 +390,7 @@ impl canvas::Program<Message> for Markers<'_> {
                 let r = self.radius_px(z, size).max(body * 0.2);
                 let value = bare(value, Quantity::Length, self.units);
                 let top = at.y - r;
-                let g = Point::new(at.x, at.y + glyph_row);
+                let g = Point::new(at.x, glyph_y(at));
                 if self.stages.len() > 1 {
                     // A staged rocket has the separation's tag above the body: the values sit beside the glyphs instead.
                     let (dx, side) = if align == alignment::Horizontal::Right {
@@ -409,7 +413,7 @@ impl canvas::Program<Message> for Markers<'_> {
                     cg_glyph(&mut frame, g, color, t.bg_000.scale_alpha(fade));
                 }
             }
-            let y = a.y + glyph_row + 22.0;
+            let y = glyph_y(a).max(glyph_y(b)) + 22.0;
             let color = margin_color(t, margin).scale_alpha(fade);
             let bracket = Path::new(|p| {
                 p.move_to(Point::new(a.x, y - 5.0));

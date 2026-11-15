@@ -122,8 +122,11 @@ pub fn bar<'a>(state: &'a State, ctx: &'a Ctx, id: PartId) -> Option<Element<'a,
         let (label, color): (String, fn(&crate::tokens::Tokens) -> iced::Color) =
             if overrides > 0 { (format!("LINKED ×{} · {overrides} OVR", r.count), |t| t.warn) } else { (format!("LINKED ×{}", r.count), |t| t.accent) };
         let glyph = silhouette::link(11.0, color);
-        let mut buttons: Vec<Element<'a, Message>> = vec![button("Detach", Weight::Secondary).small().on_press(Message::Detach).into()];
-        if !r.overridden_fields(copy).is_empty() {
+        let mut buttons: Vec<Element<'a, Message>> = Vec::new();
+        if r.overridden_fields(copy).is_empty() {
+            buttons.push(button("Detach", Weight::Secondary).small().on_press(Message::Detach).into());
+        } else {
+            // The kit swaps Detach for Relink while this copy has unlinked fields.
             buttons.push(button("Relink", Weight::Secondary).small().on_press(Message::RelinkAll).into());
         }
         buttons.push(button("Split all", Weight::Secondary).small().on_press(Message::SplitAll).into());
@@ -141,7 +144,7 @@ pub fn bar<'a>(state: &'a State, ctx: &'a Ctx, id: PartId) -> Option<Element<'a,
         let mut rejoin = button("Rejoin group", Weight::Secondary).small();
         rejoin = if candidates.is_empty() { rejoin.disabled("No group of the same kind to rejoin") } else { rejoin.on_press(Message::RejoinStart) };
         rows.push(
-            row(vec![tag("FREE".into(), None, |t| t.ink_muted), Space::new().width(Fill).boxed(), rejoin.into()])
+            row(vec![rejoin.into(), Space::new().width(Fill).boxed(), tag("FREE".into(), None, |t| t.ink_muted)])
                 .spacing(SPACE_2)
                 .align_y(iced::Center)
                 .boxed(),

@@ -446,7 +446,7 @@ impl canvas::Program<Message> for Lanes<'_> {
         }
     }
 
-    fn draw(&self, state: &Interaction, renderer: &Renderer, theme: &Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<Geometry> {
+    fn draw(&self, state: &Interaction, renderer: &Renderer, theme: &Theme, bounds: Rectangle, cursor: mouse::Cursor) -> Vec<Geometry> {
         let t = theme::tokens(theme);
         let size = bounds.size();
         // Text is drawn over all the shapes of its geometry layer, so what must cover text (short bars over a long bar's
@@ -479,7 +479,10 @@ impl canvas::Program<Message> for Lanes<'_> {
             b.line_to(Point::new(cx, cy + tip));
             b.close();
         });
-        column.fill(&caret, t.ink_faint);
+        // The kit's panel has no caret at rest: it appears while the cursor is over the lanes (or the lanes are collapsed).
+        if self.collapsed || cursor.is_over(bounds) {
+            column.fill(&caret, t.ink_faint);
+        }
 
         // The lane-name column sits over everything that scrolled under it.
         column.fill_rectangle(Point::ORIGIN, Size::new(LABEL_W, size.height), t.bg_100);
@@ -832,7 +835,7 @@ impl Lanes<'_> {
         let link_w = if bar.count > 1 { 13.0 } else { 0.0 };
         let need_name = link_w + name_w;
         let dim_w = if bar.dim.is_empty() { 0.0 } else { text_w(&bar.dim, TEXT_SMALL, MONO) + 6.0 };
-        let mut x = rect.x.max(LABEL_W) + 6.0;
+        let mut x = rect.x.max(LABEL_W) + 5.0;
         if !bar.thin {
             for _ in 0..4 {
                 let covering = self
@@ -850,9 +853,9 @@ impl Lanes<'_> {
         }
         let avail = right - x;
         // A group's link glyph is the first thing to go when the bar is too short for it.
-        let link_w = if bar.count > 1 && avail >= link_w + name_w + 2.0 { link_w } else { 0.0 };
+        let link_w = if bar.count > 1 && avail >= link_w + name_w + 4.0 { link_w } else { 0.0 };
         let need_name = link_w + name_w;
-        if !bar.dashed && avail >= need_name + 2.0 {
+        if !bar.dashed && avail >= need_name - 1.0 {
             let mut tx = x;
             if link_w > 0.0 {
                 link(f, Point::new(tx, mid - 3.5), if selected { dim(t.accent) } else { ink });

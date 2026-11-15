@@ -1,0 +1,9 @@
+# Staging QA: BOWSHOCK_EXAMPLE=two_stage cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/qa-staging.drive out/qa-staging
+viewport 1280x800
+click (733, 700)
+screenshot staging-dark.png
+click "Light"
+screenshot staging-light.png
+click "Dark"
+click "2D"
+screenshot staging-2d-dark.png

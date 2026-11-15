@@ -146,9 +146,9 @@ fn block<'a>(index: usize, title: &str, per_config: bool, ruled: bool, rows: Vec
     container(column(body).spacing(SPACE_2)).padding([SPACE_3, SPACE_3]).width(Fill).boxed()
 }
 
-/// The title and the station tag of the header: `Separation · stage 1/2` and `870.0`.
+/// The title and the station tag of the header: `Separation · stage 1 / 2` and `870.0`.
 pub fn title(n: usize, total: usize) -> String {
-    format!("Separation · stage {n}/{total}")
+    format!("Separation · stage {n} / {total}")
 }
 
 /// The rows of one staging event: what it waits for, the altitude when that is the trigger, and the delay after it. `lower` is
@@ -381,6 +381,6 @@ pub(super) mod tests {
             (stage_name(1, 2), stage_name(2, 2), stage_name(2, 3), stage_name(1, 1)),
             ("Booster".into(), "Sustainer".into(), "Stage 2".into(), "Stage 1".into())
         );
-        assert_eq!(title(1, 2), "Separation · stage 1/2");
+        assert_eq!(title(1, 2), "Separation · stage 1 / 2");
     }
 }

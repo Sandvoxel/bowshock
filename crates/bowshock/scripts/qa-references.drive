@@ -1,0 +1,14 @@
+# QA UnitInput reference states vs the kit: cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/qa-references.drive out/qa-references
+viewport 1280x1000
+scale 1
+click (925, 824)
+click (1180, 270)
+type "0.5 * {"
+screenshot pick-dark.png
+click (1180, 202)
+type " + 2"
+screenshot chip-dark.png
+type enter
+screenshot formula-dark.png
+click "Light"
+screenshot formula-light.png

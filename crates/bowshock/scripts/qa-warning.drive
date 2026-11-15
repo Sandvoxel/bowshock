@@ -1,0 +1,11 @@
+# QA warning chip: delete the fins (stability drops) and read the status strip chip. cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/qa-warning.drive out/qa-warning
+viewport 1280x760
+scale 1
+click (925, 583)
+click (1257, 62)
+click "Delete"
+screenshot nofins-dark.png
+click "1 error"
+screenshot issues-dark.png
+click "Light"
+screenshot nofins-light.png
