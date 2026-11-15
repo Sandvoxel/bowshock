@@ -478,7 +478,7 @@ mod tests {
     use bowshock_sim::from_model::Phase;
 
     fn out(analysis: Analysis) -> (Output, ConfigId) {
-        let rocket = Rocket::from_json(include_str!("../../assets/examples/hpr_l1_cert.bowshock")).unwrap();
+        let rocket = Rocket::from_bytes(include_bytes!("../../assets/examples/hpr_l1_cert.bowshock")).unwrap();
         let (jobs, _) = jobs(&rocket, &MotorDb::bundled(), Phase::Full).unwrap();
         (
             compute(&Request {

@@ -40,11 +40,11 @@ mod tests {
         assert!(r.set_note(tube, "Epoxy the coupler"));
         assert_eq!(r.note(tube), "Epoxy the coupler");
         assert!(!r.set_note(999, "nobody home"));
-        let again = Rocket::from_json(&r.to_json()).unwrap();
+        let again = Rocket::from_bytes(&r.to_bytes()).unwrap();
         assert_eq!(again.note(tube), "Epoxy the coupler");
         assert!(r.set_note(tube, ""));
         assert_eq!(r.note(tube), "");
         // A document with no notes serialises as before: no `notes` key.
-        assert!(!r.to_json().contains("notes"));
+        assert!(!crate::format::cbor_text(&r).contains("notes"));
     }
 }

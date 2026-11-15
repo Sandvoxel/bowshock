@@ -701,7 +701,7 @@ mod tests {
     use bowshock_model::{NoseShape, PartKind};
 
     fn example() -> Rocket {
-        Rocket::from_json(include_str!("../../../assets/examples/hpr_l1_cert.bowshock")).expect("the example loads")
+        Rocket::from_bytes(include_bytes!("../../../assets/examples/hpr_l1_cert.bowshock")).expect("the example loads")
     }
 
     fn build(rocket: &Rocket, compare: bool, phase: Phase) -> Scene {

@@ -5,15 +5,18 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "Rocket document model for the Bowshock builder (SI units): geometry, materials, mass, configurations, stages, JSON"
+description = "Rocket document model for the Bowshock builder (SI units): geometry, materials, mass, configurations, stages, the .bowshock file format"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-# float_roundtrip: a saved document must load back bit-for-bit.
-serde_json = { version = "1", features = ["float_roundtrip"] }
-# OpenRocket .ork import: an .ork is XML, usually inside a ZIP (deflate) entry.
+# The .bowshock document is CBOR (self-describing, so serde's skip/default/tagged-enum attributes work), then deflated.
+ciborium = "0.2"
+# OpenRocket .ork import: an .ork is XML, usually inside a ZIP (deflate) entry. Also the .bowshock compression.
 roxmltree = "0.21"
 flate2 = "1"
+
+[dev-dependencies]
+serde_json = "1"
 
 [lints]
 workspace = true

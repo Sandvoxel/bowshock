@@ -359,7 +359,7 @@ mod tests {
 
     /// The example with `configs` configurations named [`NAMES`] (copies of the first), the first active.
     fn example(configs: usize) -> Rocket {
-        let mut rocket = Rocket::from_json(include_str!("../../assets/examples/hpr_l1_cert.bowshock")).unwrap();
+        let mut rocket = Rocket::from_bytes(include_bytes!("../../assets/examples/hpr_l1_cert.bowshock")).unwrap();
         for _ in 1..configs {
             rocket.duplicate_configuration(rocket.active_config_id());
         }

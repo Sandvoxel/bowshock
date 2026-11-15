@@ -180,10 +180,10 @@ mod tests {
         let plain = r.clone();
         r.store_cfd_table(table(1, 9));
         assert_eq!(r, plain, "storing a table is not an edit");
-        let back = Rocket::from_json(&r.to_json()).unwrap();
+        let back = Rocket::from_bytes(&r.to_bytes()).unwrap();
         assert_eq!(back.cfd_table(1), r.cfd_table(1));
         // Nothing is written while there is nothing to write, so old files and readers are untouched.
-        assert!(!plain.to_json().contains("cfd"));
+        assert!(!crate::format::cbor_text(&plain).contains("cfd"));
     }
 
     #[test]

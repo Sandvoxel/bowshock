@@ -987,7 +987,7 @@ mod phase_tests {
     use bowshock_sim::from_model::Phase;
 
     fn two_stage() -> bowshock_model::Rocket {
-        bowshock_model::Rocket::from_json(include_str!("../../assets/examples/two_stage.bowshock")).unwrap()
+        bowshock_model::Rocket::from_bytes(include_bytes!("../../assets/examples/two_stage.bowshock")).unwrap()
     }
 
     /// Dropping the booster (Phase "Stage 2") fades only what is aft of the separation: the sustainer's stations (fore of the

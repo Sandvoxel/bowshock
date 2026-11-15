@@ -816,10 +816,10 @@ impl Output {
 mod tests {
     use super::*;
 
-    const EXAMPLE: &str = include_str!("../../assets/examples/hpr_l1_cert.bowshock");
+    const EXAMPLE: &[u8] = include_bytes!("../../assets/examples/hpr_l1_cert.bowshock");
 
     fn example_jobs() -> Vec<ConfigJob> {
-        let rocket = Rocket::from_json(EXAMPLE).unwrap();
+        let rocket = Rocket::from_bytes(EXAMPLE).unwrap();
         jobs(&rocket, &MotorDb::bundled(), Phase::Full).unwrap().0
     }
 
@@ -829,7 +829,7 @@ mod tests {
 
     #[test]
     fn flutter_covers_each_fin_copy_with_its_overrides() {
-        let mut rocket = Rocket::from_json(EXAMPLE).unwrap();
+        let mut rocket = Rocket::from_bytes(EXAMPLE).unwrap();
         let motors = MotorDb::bundled();
         let n = |r: &Rocket| jobs(r, &motors, Phase::Full).unwrap().0[0].clone();
         let before = n(&rocket);
@@ -852,7 +852,7 @@ mod tests {
         assert!(points.len() >= 120, "dense enough for smooth curves: {}", points.len());
         assert!((points[0].mach - 0.1).abs() < 1e-12 && (points.last().unwrap().mach - 3.0).abs() < 1e-9);
         // The margin at Mach 0.3 equals the status strip's (same CP, same CG).
-        let rocket = Rocket::from_json(EXAMPLE).unwrap();
+        let rocket = Rocket::from_bytes(EXAMPLE).unwrap();
         let balance = from_model::balance(&rocket, &MotorDb::bundled(), Phase::Full, BALANCE_MACH, 0.0, true).unwrap();
         let at = mach_at(points, BALANCE_MACH).unwrap();
         assert!((at.margin_cal - balance.margin_cal).abs() < 0.05, "{} vs {}", at.margin_cal, balance.margin_cal);
@@ -919,7 +919,7 @@ mod tests {
 
     #[test]
     fn every_configuration_is_a_run_and_the_table_matches() {
-        let mut rocket = Rocket::from_json(EXAMPLE).unwrap();
+        let mut rocket = Rocket::from_bytes(EXAMPLE).unwrap();
         let before = rocket.configurations().len();
         let copy = rocket.duplicate_configuration(rocket.active_config_id()).unwrap();
         assert!(rocket.configuration(copy).is_some());
@@ -941,7 +941,7 @@ mod tests {
 
     #[test]
     fn a_configuration_whose_motor_is_unknown_is_skipped_with_a_note() {
-        let mut rocket = Rocket::from_json(EXAMPLE).unwrap();
+        let mut rocket = Rocket::from_bytes(EXAMPLE).unwrap();
         let copy = rocket.duplicate_configuration(rocket.active_config_id()).unwrap();
         let slots: Vec<_> = rocket.configuration(copy).unwrap().motors.clone();
         for slot in slots {
@@ -958,7 +958,7 @@ mod tests {
 
     #[test]
     fn jobs_are_named_like_the_status_strip() {
-        let rocket = Rocket::from_json(EXAMPLE).unwrap();
+        let rocket = Rocket::from_bytes(EXAMPLE).unwrap();
         let (jobs, _) = jobs(&rocket, &MotorDb::bundled(), Phase::Full).unwrap();
         for job in &jobs {
             assert_eq!(Some(&job.name), rocket.configuration_name(job.id).as_ref());

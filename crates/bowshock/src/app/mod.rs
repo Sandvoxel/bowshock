@@ -1529,7 +1529,7 @@ mod tests {
     #[test]
     fn the_preview_costs_a_few_milliseconds_at_most() {
         let mut app = App::new();
-        let rocket = bowshock_model::Rocket::from_json(include_str!("../../assets/examples/two_stage.bowshock")).unwrap();
+        let rocket = bowshock_model::Rocket::from_bytes(include_bytes!("../../assets/examples/two_stage.bowshock")).unwrap();
         app.ctx.doc.replace(rocket, None);
         app.ctx.loaded();
         app.after_update();

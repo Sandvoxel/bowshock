@@ -106,7 +106,8 @@ ctx.doc.seal();                                                      // end the 
   configuration). Add new drag kinds (e.g. an internal part in the lanes) as a field of `Drags` plus a start/finish pair in
   `app/drag.rs`.
 * Undo/redo (Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z, Ctrl+Y), dirty flag, the file name and the dirty square in the top bar,
-  New/Open/Save/Save As (`.bowshock` JSON via `Rocket::to_json` / `from_json`) all live in `app/document.rs` and
+  New/Open/Save/Save As (`.bowshock` is binary: `BOWSHOCK` magic, a `u16` version, then deflated CBOR; `Rocket::to_bytes` /
+  `from_bytes`, layout and evolution rules in `bowshock-model/src/format.rs`) all live in `app/document.rs` and
   `app/files.rs`. `Document::revision()` increases on every change including live drag updates, undo and redo; derived data
   is stale when its revision differs.
 * Configurations are part of the rocket: switching, adding, renaming, deleting a configuration are `ctx.doc.edit(..)` calls

@@ -182,7 +182,7 @@ fn warnings_report_what_is_wrong() {
 fn json_round_trip_gives_identical_balance() {
     let (r, _) = single_stage();
     let db = MotorDb::bundled();
-    let back = Rocket::from_json(&r.to_json()).unwrap();
+    let back = Rocket::from_bytes(&r.to_bytes()).unwrap();
     for with_motor in [true, false] {
         let a = balance(&r, &db, Phase::Full, 0.3, 0.0, with_motor).unwrap();
         let b = balance(&back, &db, Phase::Full, 0.3, 0.0, with_motor).unwrap();

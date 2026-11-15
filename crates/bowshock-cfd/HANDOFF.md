@@ -20,7 +20,7 @@ note covers what exists, what was measured, and what is still open.
 | Mach nodes, cache key, staleness | `analyze/cfd.rs` (`nodes`, `table_key`, `status`) | Done. The key is an FNV-1a hash of geometry, altitude (Reynolds number) and nodes. Status is Fresh, Stale, Missing or Unsupported |
 | Solve | `analyze/cfd.rs` (`solve`), `analyze/mod.rs` (`spawn_solve`) | Done. One Mach at a time on a worker thread, with progress events and cancel between points. Uses the GPU through Luma and falls back to CPU, saying so in the provenance line |
 | Below the first node | `analyze/cfd.rs` (`sweep_cd`) | Done. Uses the first node's drag, part by part, scaled by the Extended method's Mach trend |
-| Storage | `crates/bowshock-model/src/cfd.rs` (`CfdStore`, `CfdTable`, `CfdPoint`, `CfdQuality`) | Done. Saved in the `.bowshock` file (serde default), keyed per stage, and survives undo/redo |
+| Storage | `crates/bowshock-model/src/cfd.rs` (`CfdStore`, `CfdTable`, `CfdPoint`, `CfdQuality`) | Done. Saved inside the binary `.bowshock` document (`BOWSHOCK` magic + u16 version + deflated CBOR, see `bowshock-model/src/format.rs`), keyed per stage, and survives undo/redo |
 | UI | `analyze/view.rs`, `plots.rs`, `readout.rs`, `compute.rs` | Done. Provenance reads `Solving k / n · GPU (Luma)`, then `10 Mach points · zero-lift · solved on GPU (Luma) · 6 min ago · M<0.2 scaled from Extended`. A stale table shows Re-solve. Plot labels read `· Extended (CFD is zero-lift)` or `· CFD` |
 | Tests | `analyze/cfd.rs` | Mapping, unsupported reasons, key stability, nodes, interpolation, blend, stale/fresh, cancel. Two tests are `#[ignore]`d because they solve for real: `a_tiny_grid_solves_and_is_sane` and `the_example_table_solves_and_agrees_with_extended` (prints Mach, margin and Cd for Extended and CFD side by side; `BOWSHOCK_CFD_FIXTURE=<path>` saves the solved example) |
 | Drive script | `crates/bowshock/scripts/cfd.drive` | Written but never run end to end |
@@ -62,8 +62,8 @@ grid resolution is coarse.
 The app is ready to take lift data. `analyze/cfd.rs` already has `alpha_points`, which currently uses Extended's change with
 angle of attack. To use 3D results:
 
-- Give `CfdPoint` CN, CNα, the CP station and Cm per (Mach, α). The model storage is serde-default, so the format can grow
-  without breaking saved files.
+- Give `CfdPoint` CN, CNα, the CP station and Cm per (Mach, α). Add new fields with `#[serde(default)]` so saved files still load;
+  renames or restructures need a `FORMAT_VERSION` bump, a migration step and a new golden file (rules in `format.rs`).
 - Add the α nodes to `nodes` and `table_key`.
 - Switch the margin, CP and CNα panels from `Extended` to `CFD` where the table has the data. The labels are produced in
   `analyze/plots.rs` and `readout.rs`.

@@ -1015,28 +1015,28 @@ mod tests {
     fn formulas_survive_json_and_old_files_load() {
         let (mut r, tube, fins) = rocket();
         r.set_formula(fins, Dim::RootChord, Expr::Bin(Box::new(mul(Expr::Num(2.0), od(tube))), Op::Add, Box::new(Expr::Num(0.002)))).unwrap();
-        let json = r.to_json();
-        assert!(json.contains("2 * {body_tube#0.od} + 0.002"), "{json}");
-        let back = Rocket::from_json(&json).unwrap();
+        let text = crate::format::cbor_text(&r);
+        assert!(text.contains("2 * {body_tube#0.od} + 0.002"), "{text}");
+        let back = Rocket::from_bytes(&r.to_bytes()).unwrap();
         assert_eq!(back.formulas(), r.formulas());
         assert_eq!(back, r);
         // A file without the field (an older document) loads with none.
-        let without = serde_json::to_value(&r).unwrap();
-        let mut value = without;
-        value.as_object_mut().unwrap().remove("formulas");
-        let text = serde_json::json!({ "format_version": crate::FORMAT_VERSION, "rocket": value }).to_string();
-        assert!(Rocket::from_json(&text).unwrap().formulas().is_empty());
+        let mut value = crate::format::to_value(&r);
+        let map = value.as_map_mut().unwrap();
+        map.retain(|(k, _)| k.as_text() != Some("formulas"));
+        assert!(crate::format::from_value(&value).unwrap().formulas().is_empty());
     }
 
     #[test]
     fn a_hand_edited_cycle_is_dropped_on_load() {
         let (mut r, tube, fins) = rocket();
         r.set_formula(fins, Dim::RootChord, mul(Expr::Num(2.0), od(tube))).unwrap();
-        let mut value = serde_json::to_value(&r).unwrap();
+        let mut value = crate::format::to_value(&r);
         // Make the tube's diameter depend on the fin's root chord, which depends on it.
-        value["formulas"].as_array_mut().unwrap().push(serde_json::json!({ "part": tube, "dim": "od", "expr": format!("{{#{fins}.root_chord}} / 2") }));
-        let text = serde_json::json!({ "format_version": crate::FORMAT_VERSION, "rocket": value }).to_string();
-        let loaded = Rocket::from_json(&text).unwrap();
+        use ciborium::cbor;
+        let cycle = cbor!({ "part" => tube, "dim" => "od", "expr" => format!("{{#{fins}.root_chord}} / 2") }).unwrap();
+        crate::format::entry(&mut value, "formulas").unwrap().as_array_mut().unwrap().push(cycle);
+        let loaded = crate::format::from_value(&value).unwrap();
         assert!(loaded.formulas().len() <= 1, "{:?}", loaded.formulas());
     }
 }

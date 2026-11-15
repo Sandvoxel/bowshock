@@ -27,7 +27,8 @@ bowshock-core = { workspace = true, features = ["gpu"] }
 rfd = "0.18"
 # Parts-bin presets are JSON files.
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# float_roundtrip: a preset saved and read back must be bit-identical.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 # Rasterises the application icon (the same version iced's software renderer uses).
 tiny-skia = "0.12"
 

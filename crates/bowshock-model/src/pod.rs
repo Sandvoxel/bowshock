@@ -486,7 +486,7 @@ mod tests {
         let tube = r.radial(pod).unwrap().kind.pod_body().unwrap().parts()[1].id;
         r.attach_radial(tube, 0.3, 0.5, 2, RadialKind::LaunchLug { length: 0.05, diameter: 0.01 }).unwrap();
         r.attach_internal(tube, 0.1, InternalKind::Bulkhead { diameter: None, thickness: 0.003 }).unwrap();
-        let back = Rocket::from_json(&r.to_json()).unwrap();
+        let back = Rocket::from_bytes(&r.to_bytes()).unwrap();
         assert_eq!(back, r);
         assert_eq!(back.dry_mass(), r.dry_mass());
         // The pod as a rocket of its own: stations from its fore face.
@@ -498,7 +498,7 @@ mod tests {
         let mut bad = r.clone();
         let inner = bad.radials[0].kind.pod_body().unwrap().parts[0].id;
         bad.radials[0].parent = inner;
-        assert!(Rocket::from_json(&bad.to_json()).is_err());
+        assert!(Rocket::from_bytes(&bad.to_bytes()).is_err());
     }
 
     #[test]

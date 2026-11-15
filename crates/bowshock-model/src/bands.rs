@@ -77,9 +77,9 @@ mod tests {
     #[test]
     fn bands_are_saved_and_default_documents_stay_unchanged() {
         let mut r = Rocket::default();
-        assert!(!r.to_json().contains("bands"));
+        assert!(!crate::format::cbor_text(&r).contains("bands"));
         r.set_stability_bands(StabilityBands { marginal: 0.8, stable: 1.5, over: 4.0 });
-        let again = Rocket::from_json(&r.to_json()).unwrap();
+        let again = Rocket::from_bytes(&r.to_bytes()).unwrap();
         assert_eq!(again.stability_bands(), StabilityBands { marginal: 0.8, stable: 1.5, over: 4.0 });
     }
 }

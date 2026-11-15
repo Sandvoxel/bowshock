@@ -10,10 +10,10 @@ use super::{Armed, Ctx, Message};
 
 /// The built-in example, a 38 mm high-power rocket (the kit's `hpr_l1_cert`). `tests::example_is_current` keeps it loadable and
 /// in step with the model.
-const EXAMPLE: &str = include_str!("../../assets/examples/hpr_l1_cert.bowshock");
+const EXAMPLE: &[u8] = include_bytes!("../../assets/examples/hpr_l1_cert.bowshock");
 
 /// A two-stage example, selected by `BOWSHOCK_EXAMPLE=two_stage` (for screenshots of staging).
-const TWO_STAGE: &str = include_str!("../../assets/examples/two_stage.bowshock");
+const TWO_STAGE: &[u8] = include_bytes!("../../assets/examples/two_stage.bowshock");
 
 /// Whether the command `what` may replace the document now. With unsaved changes the first press only warns (and arms the
 /// command); pressing the same command again proceeds.
@@ -36,7 +36,7 @@ pub(super) fn new(ctx: &mut Ctx) {
 /// Loads the built-in example as an unsaved document named after it.
 pub(super) fn example(ctx: &mut Ctx) {
     let source = if std::env::var("BOWSHOCK_EXAMPLE").is_ok_and(|v| v == "two_stage") { TWO_STAGE } else { EXAMPLE };
-    match Rocket::from_json(source) {
+    match Rocket::from_bytes(source) {
         Ok(rocket) => {
             ctx.doc.replace(rocket, None);
             ctx.loaded();
@@ -364,15 +364,28 @@ mod tests {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/examples/hpr_l1_cert.bowshock");
         if std::env::var_os("BOWSHOCK_WRITE_EXAMPLE").is_some() {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, built.to_json()).unwrap();
+            std::fs::write(&path, built.to_bytes()).unwrap();
         }
-        let shipped = Rocket::from_json(EXAMPLE).expect("the shipped example loads");
+        let shipped = Rocket::from_bytes(EXAMPLE).expect("the shipped example loads");
         assert_eq!(shipped, built, "assets/examples/hpr_l1_cert.bowshock is stale: regenerate it (see this test's docs)");
+    }
+
+    /// The committed version-1 golden file (`bowshock-model/tests/data/v1_example.bowshock`) loads and is the example. It is
+    /// written once, with `BOWSHOCK_WRITE_GOLDEN=1`, and only when absent; it is never regenerated (see the model's `format`
+    /// module docs).
+    #[test]
+    fn the_v1_golden_file_is_the_example() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bowshock-model/tests/data/v1_example.bowshock");
+        if std::env::var_os("BOWSHOCK_WRITE_GOLDEN").is_some() && !path.exists() {
+            std::fs::write(&path, build_example().to_bytes()).unwrap();
+        }
+        let golden = Rocket::from_bytes(&std::fs::read(&path).unwrap()).expect("the golden file loads");
+        assert_eq!(golden, build_example(), "the golden v1 file no longer matches the example: a format change needs a version bump");
     }
 
     #[test]
     fn the_example_is_the_kits_rocket_and_flies_stable() {
-        let rocket = Rocket::from_json(EXAMPLE).unwrap();
+        let rocket = Rocket::from_bytes(EXAMPLE).unwrap();
         assert!((rocket.length() - 1.142).abs() < 1e-9 && rocket.reference_diameter() == Some(0.0762));
         let db = MotorDb::bundled();
         let balance = from_model::balance(&rocket, &db, Phase::Full, 0.3, 0.0, true).unwrap();
@@ -452,9 +465,9 @@ mod tests {
         let built = build_two_stage();
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/examples/two_stage.bowshock");
         if std::env::var_os("BOWSHOCK_WRITE_EXAMPLE").is_some() {
-            std::fs::write(&path, built.to_json()).unwrap();
+            std::fs::write(&path, built.to_bytes()).unwrap();
         }
-        let shipped = Rocket::from_json(TWO_STAGE).expect("the shipped example loads");
+        let shipped = Rocket::from_bytes(TWO_STAGE).expect("the shipped example loads");
         assert_eq!(shipped, built, "assets/examples/two_stage.bowshock is stale: regenerate it (see example_is_current)");
         let stages = shipped.stages();
         assert_eq!(stages.len(), 2);

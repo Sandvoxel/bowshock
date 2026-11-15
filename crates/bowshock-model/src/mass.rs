@@ -538,15 +538,15 @@ mod shoulder_tests {
         let fin =
             r.attach_radial(tube, 0.3, 0.0, 3, RadialKind::FinSet { root_chord: 0.1, tip_chord: 0.05, span: 0.06, sweep: 0.03, thickness: 0.003 }).unwrap();
         // A document saved without the new keys carries none of them.
-        let json = r.to_json();
-        assert!(!json.contains("shoulder") && !json.contains("fillet"));
-        let back = Rocket::from_json(&json).unwrap();
+        let text = crate::format::cbor_text(&r);
+        assert!(!text.contains("shoulder") && !text.contains("fillet"));
+        let back = Rocket::from_bytes(&r.to_bytes()).unwrap();
         assert_eq!(back.shoulder(nose, true).unwrap().length, 0.0);
         assert_eq!(back.radial(fin).unwrap().fillet_radius, 0.0);
         // With them set they survive a round trip.
         r.set_dim(nose, Dim::ShoulderLength, 0.04).unwrap();
         r.set_dim(fin, Dim::FilletRadius, 0.004).unwrap();
-        let back = Rocket::from_json(&r.to_json()).unwrap();
+        let back = Rocket::from_bytes(&r.to_bytes()).unwrap();
         assert_eq!(back.shoulder(nose, true).unwrap().length, 0.04);
         assert_eq!(back.radial(fin).unwrap().fillet_radius, 0.004);
         assert_eq!(back, r);

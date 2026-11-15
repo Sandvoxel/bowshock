@@ -10,12 +10,13 @@
 //!   and puts them back. The state before the drag is kept whole; cancelling restores it exactly (materials, finishes,
 //!   overrides, internals, motors in every configuration), committing records one step.
 //!
-//! Files are the model's JSON ([`Rocket::to_json`] / [`Rocket::from_json`]) with the `.bowshock` extension.
+//! Files are the model's binary format ([`Rocket::to_bytes`] / [`Rocket::from_bytes`]: a magic header, then deflated CBOR) with
+//! the `.bowshock` extension.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use bowshock_model::{JsonError, Rocket};
+use bowshock_model::{FormatError, Rocket};
 
 /// File extension of a Bowshock document (no dot).
 pub const EXTENSION: &str = "bowshock";
@@ -40,7 +41,7 @@ pub enum DocError {
     /// Reading or writing the file failed.
     Io(std::io::Error),
     /// The file is not a valid document.
-    Json(JsonError),
+    Format(FormatError),
     /// There is no path to save to (use Save As).
     NoPath,
 }
@@ -49,7 +50,7 @@ impl fmt::Display for DocError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             DocError::Io(e) => write!(f, "{e}"),
-            DocError::Json(e) => write!(f, "{e}"),
+            DocError::Format(e) => write!(f, "{e}"),
             DocError::NoPath => f.write_str("the document has no file yet"),
         }
     }
@@ -86,8 +87,8 @@ impl Document {
 
     /// Reads the document at `path`.
     pub fn open(path: &Path) -> Result<Self, DocError> {
-        let text = std::fs::read_to_string(path).map_err(DocError::Io)?;
-        let rocket = Rocket::from_json(&text).map_err(DocError::Json)?;
+        let bytes = std::fs::read(path).map_err(DocError::Io)?;
+        let rocket = Rocket::from_bytes(&bytes).map_err(DocError::Format)?;
         let mut doc = Document::new(rocket);
         doc.path = Some(path.to_path_buf());
         Ok(doc)
@@ -362,7 +363,7 @@ impl Document {
     /// Writes the document to `path` (given the `.bowshock` extension if it has none) and makes that its path.
     pub fn save_as(&mut self, path: &Path) -> Result<(), DocError> {
         let path = if path.extension().is_none() { path.with_extension(EXTENSION) } else { path.to_path_buf() };
-        std::fs::write(&path, self.rocket.to_json()).map_err(DocError::Io)?;
+        std::fs::write(&path, self.rocket.to_bytes()).map_err(DocError::Io)?;
         self.path = Some(path);
         self.dirty = false;
         Ok(())
@@ -433,7 +434,7 @@ mod tests {
         doc.redo();
         assert_eq!(doc.rocket().cfd_table(1), Some(&table));
         // And it is written with the document.
-        let back = Rocket::from_json(&doc.rocket().to_json()).unwrap();
+        let back = Rocket::from_bytes(&doc.rocket().to_bytes()).unwrap();
         assert_eq!(back.cfd_table(1), Some(&table));
         // A document with nothing to save is dirty once a table arrives.
         doc.replace(Rocket::default(), None);
@@ -526,8 +527,11 @@ mod tests {
         assert!(other.is_dirty());
         other.save().unwrap();
         assert!(!other.is_dirty());
-        std::fs::write(dir.join("bad.bowshock"), "not json").unwrap();
-        assert!(matches!(other.load(&dir.join("bad.bowshock")), Err(DocError::Json(_))));
+        // Plain text (including the old JSON format) is refused with the plain message.
+        std::fs::write(dir.join("bad.bowshock"), "{\"format_version\":2}").unwrap();
+        let refused = other.load(&dir.join("bad.bowshock"));
+        assert!(matches!(refused, Err(DocError::Format(FormatError::NotBowshock))));
+        assert_eq!(refused.unwrap_err().to_string(), "Not a Bowshock document");
         assert_eq!(other.rocket().parts()[1].kind.length(), 0.6);
         let _ = std::fs::remove_dir_all(&dir);
     }

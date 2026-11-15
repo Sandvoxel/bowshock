@@ -263,7 +263,7 @@ fn json_round_trip_gives_the_same_vehicle() {
     let (mut r, pod) = with_pods();
     let tube = r.radial(pod).unwrap().kind.pod_body().unwrap().parts()[1].id;
     r.attach_radial(tube, 0.3, 0.0, 3, fins()).unwrap();
-    let back = Rocket::from_json(&r.to_json()).unwrap();
+    let back = Rocket::from_bytes(&r.to_bytes()).unwrap();
     assert_eq!(back.pods().count(), 1);
     let (a, b) = (fly(&r), fly(&back));
     assert_eq!(a, b);
@@ -439,7 +439,7 @@ fn strap_ons_leave_with_their_stage_and_fire_alone_without_a_core_motor() {
 #[test]
 fn json_round_trip_keeps_the_strap_on_flight() {
     let (r, ..) = boosted(true);
-    let back = Rocket::from_json(&r.to_json()).unwrap();
+    let back = Rocket::from_bytes(&r.to_bytes()).unwrap();
     assert_eq!(fly(&r), fly(&back));
     assert_eq!(liftoff_mass(&r), liftoff_mass(&back));
     assert_eq!(apogee(&r), apogee(&back));

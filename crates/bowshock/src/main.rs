@@ -87,7 +87,7 @@ fn import_ork(ork: &std::path::Path, out: &std::path::Path) -> std::process::Exi
             return std::process::ExitCode::FAILURE;
         }
     };
-    if let Err(e) = std::fs::write(out, imp.rocket.to_json()) {
+    if let Err(e) = std::fs::write(out, imp.rocket.to_bytes()) {
         eprintln!("bowshock import: {}: {e}", out.display());
         return std::process::ExitCode::FAILURE;
     }

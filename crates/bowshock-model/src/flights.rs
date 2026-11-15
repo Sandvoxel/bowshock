@@ -254,7 +254,7 @@ impl Rocket {
         &self.flights
     }
 
-    /// Replaces the stored flights. The list is repaired the way loading repairs it (see [`Rocket::from_json`]): duplicate ids
+    /// Replaces the stored flights. The list is repaired the way loading repairs it (see [`Rocket::from_bytes`]): duplicate ids
     /// get fresh ones, empty names are numbered, conditions are brought into range, a configuration that does not exist falls
     /// back to the active one, and an empty list becomes the `Nominal` flight.
     pub fn set_flights(&mut self, flights: Vec<FlightDef>) {
@@ -296,7 +296,6 @@ impl Rocket {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::json::FORMAT_VERSION;
 
     fn windy() -> FlightDef {
         FlightDef {
@@ -318,15 +317,15 @@ mod tests {
     }
 
     #[test]
-    fn flights_round_trip_through_json() {
+    fn flights_round_trip_through_the_file() {
         let mut r = Rocket::default();
         let config = r.active_config_id();
         let mut flights = vec![FlightDef::nominal(1), windy()];
         flights.push(FlightDef { id: 3, name: "On config".to_string(), motor: FlightMotor::Config(config), ..FlightDef::nominal(3) });
         r.set_flights(flights.clone());
-        let json = r.to_json();
-        assert!(json.contains("\"Windy\"") && json.contains("I284W"));
-        let back = Rocket::from_json(&json).unwrap();
+        let text = crate::format::cbor_text(&r);
+        assert!(text.contains("Windy") && text.contains("I284W"));
+        let back = Rocket::from_bytes(&r.to_bytes()).unwrap();
         assert_eq!(back.flights(), flights);
         assert_eq!(back, r);
     }
@@ -334,14 +333,13 @@ mod tests {
     #[test]
     fn a_document_without_flights_loads_with_nominal() {
         // Files written before flights were stored have no `flights` key (the migration is the serde default).
-        let mut json: serde_json::Value = serde_json::from_str(&Rocket::default().to_json()).unwrap();
-        assert!(json["rocket"].as_object_mut().unwrap().remove("flights").is_some());
-        assert!(json["format_version"].as_u64().is_some_and(|v| v >= 1 && v <= FORMAT_VERSION as u64));
-        let back = Rocket::from_json(&json.to_string()).unwrap();
+        let mut value = crate::format::to_value(&Rocket::default());
+        value.as_map_mut().unwrap().retain(|(k, _)| k.as_text() != Some("flights"));
+        let back = crate::format::from_value(&value).unwrap();
         assert_eq!(back.flights(), [FlightDef::nominal(1)]);
         // An empty list repairs to the same.
-        json["rocket"]["flights"] = serde_json::json!([]);
-        assert_eq!(Rocket::from_json(&json.to_string()).unwrap().flights(), [FlightDef::nominal(1)]);
+        value.as_map_mut().unwrap().push((ciborium::Value::Text("flights".to_string()), ciborium::Value::Array(Vec::new())));
+        assert_eq!(crate::format::from_value(&value).unwrap().flights(), [FlightDef::nominal(1)]);
     }
 
     #[test]
@@ -371,24 +369,23 @@ mod tests {
         let r = Rocket::default();
         let sources: Vec<&str> = r.plot_layout().panels.iter().map(|p| p.sources[0].as_str()).collect();
         assert_eq!(sources, ["altitude", "vertical_velocity", "vertical_acceleration"]);
-        assert!(!r.to_json().contains("\"plots\""), "the default layout stays out of the file");
+        assert!(!crate::format::cbor_text(&r).contains("plots"), "the default layout stays out of the file");
         // A file from before the layout existed loads with the default.
-        assert_eq!(Rocket::from_json(&r.to_json()).unwrap().plot_layout(), &PlotLayout::default());
+        assert_eq!(Rocket::from_bytes(&r.to_bytes()).unwrap().plot_layout(), &PlotLayout::default());
     }
 
     #[test]
-    fn a_custom_plot_layout_round_trips_through_json() {
+    fn a_custom_plot_layout_round_trips() {
         let mut r = Rocket::default();
         let layout = PlotLayout {
             panels: vec![PlotPanel::new(&["mach"]), PlotPanel::new(&["thrust", "drag", "weight"]), PlotPanel::new(&["cg_station", "cp_station"])],
             x: PlotX::Mach,
         };
         r.set_plot_layout(layout.clone());
-        let json = r.to_json();
-        assert!(json.contains("\"plots\"") && json.contains("cp_station"));
-        let back = Rocket::from_json(&json).unwrap();
+        let text = crate::format::cbor_text(&r);
+        assert!(text.contains("plots") && text.contains("cp_station"));
+        let back = Rocket::from_bytes(&r.to_bytes()).unwrap();
         assert_eq!(back.plot_layout(), &layout);
-        assert!(json.contains("\"x\": \"mach\"") || json.contains("\"x\":\"mach\""), "the x axis is saved");
         assert_eq!(back, r);
     }
 
@@ -408,8 +405,10 @@ mod tests {
         r.set_plot_layout(PlotLayout { panels: Vec::new(), x: PlotX::Time });
         assert_eq!(r.plot_layout(), &PlotLayout::default());
         // The same repair runs on load.
-        let mut json: serde_json::Value = serde_json::from_str(&Rocket::default().to_json()).unwrap();
-        json["rocket"]["plots"] = serde_json::json!({ "panels": [{ "sources": [] }] });
-        assert_eq!(Rocket::from_json(&json.to_string()).unwrap().plot_layout(), &PlotLayout::default());
+        let mut value = crate::format::to_value(&Rocket::default());
+        use ciborium::cbor;
+        let panels = cbor!({ "panels" => [{ "sources" => [] }] }).unwrap();
+        value.as_map_mut().unwrap().push((ciborium::Value::Text("plots".to_string()), panels));
+        assert_eq!(crate::format::from_value(&value).unwrap().plot_layout(), &PlotLayout::default());
     }
 }

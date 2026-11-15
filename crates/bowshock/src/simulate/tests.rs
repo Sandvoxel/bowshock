@@ -304,8 +304,10 @@ fn flights_are_saved_with_the_file_and_loaded_back_without_results() {
 
     let path = std::env::temp_dir().join(format!("bowshock_flights_{}.bowshock", std::process::id()));
     app.ctx_mut().doc.save_as(&path).expect("saves");
-    let text = std::fs::read_to_string(&path).unwrap();
-    assert!(text.contains("\"flights\"") && text.contains("\"Hot day\"") && !text.contains("\"result\""));
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(bytes.starts_with(bowshock_model::MAGIC));
+    let saved = bowshock_model::Rocket::from_bytes(&bytes).unwrap();
+    assert!(saved.flights().iter().any(|f| f.name == "Hot day"));
 
     let mut fresh = App::new();
     fresh.ctx_mut().doc.load(&path).expect("loads");
@@ -517,8 +519,10 @@ fn the_layout_is_saved_with_the_file_and_loaded_back() {
 
     let path = std::env::temp_dir().join(format!("bowshock_plots_{}.bowshock", std::process::id()));
     app.ctx_mut().doc.save_as(&path).expect("saves");
-    let text = std::fs::read_to_string(&path).unwrap();
-    assert!(text.contains("\"plots\"") && text.contains("cp_station"));
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(bytes.starts_with(bowshock_model::MAGIC));
+    let saved = bowshock_model::Rocket::from_bytes(&bytes).unwrap();
+    assert!(saved.plot_layout().panels.iter().any(|p| p.sources.iter().any(|s| s == "cp_station")));
 
     let mut fresh = App::new();
     fresh.ctx_mut().doc.load(&path).expect("loads");

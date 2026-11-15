@@ -632,7 +632,7 @@ mod tests {
         let (mut r, fins) = finned(4);
         r.detach_radial(fins, 0).unwrap();
         assert_eq!(r.radial(fins).unwrap().letters, vec![1, 2, 3]);
-        assert_eq!(Rocket::from_json(&r.to_json()).unwrap(), r);
+        assert_eq!(Rocket::from_bytes(&r.to_bytes()).unwrap(), r);
         let kind = r.radial(fins).unwrap().kind.clone();
         assert!(r.set_radial(fins, kind, 2));
         assert!(r.radial(fins).unwrap().letters.is_empty());
@@ -645,7 +645,7 @@ mod tests {
         let a = r.radial(fins).unwrap().angles();
         assert!((a[0] - 0.0).abs() < 1e-12 && (a[1] - 2.0 * TAU / 3.0).abs() < 1e-12, "{a:?}");
         // The overrides' copy indices and the JSON round trip survive.
-        assert_eq!(Rocket::from_json(&r.to_json()).unwrap(), r);
+        assert_eq!(Rocket::from_bytes(&r.to_bytes()).unwrap(), r);
         // Rotating the group rotates the remaining copies together.
         let g = r.radial(fins).unwrap().clone();
         r.move_radial(fins, g.parent, g.offset, 0.5).unwrap();
@@ -711,7 +711,7 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), r.ids().len());
-        let again = Rocket::from_json(&r.to_json()).unwrap();
+        let again = Rocket::from_bytes(&r.to_bytes()).unwrap();
         assert_eq!(again, r);
     }
 
@@ -846,11 +846,10 @@ mod tests {
         let (mut r, fins) = finned(3);
         r.unlink_field(fins, 1, RadialField::Cant);
         r.set_instance_dim(fins, 1, Dim::Cant, 0.02).unwrap();
-        let text = r.to_json();
-        assert_eq!(Rocket::from_json(&text).unwrap(), r);
+        assert_eq!(Rocket::from_bytes(&r.to_bytes()).unwrap(), r);
         // A document with no overrides never mentions them (the field defaults), so older files load unchanged.
         let (plain, _) = finned(3);
-        assert!(!plain.to_json().contains("overrides"));
+        assert!(!crate::format::cbor_text(&plain).contains("overrides"));
     }
 
     #[test]

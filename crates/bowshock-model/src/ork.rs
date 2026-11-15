@@ -1729,7 +1729,7 @@ mod tests {
     #[test]
     fn the_imported_document_saves_and_loads() {
         let imp = mini();
-        let back = Rocket::from_json(&imp.rocket.to_json()).expect("a saved import loads");
+        let back = Rocket::from_bytes(&imp.rocket.to_bytes()).expect("a saved import loads");
         assert_eq!(back, imp.rocket);
     }
 

@@ -607,10 +607,10 @@ mod tests {
     use bowshock_motors::MotorDb;
     use bowshock_sim::from_model::{self, Phase};
 
-    const EXAMPLE: &str = include_str!("../../assets/examples/hpr_l1_cert.bowshock");
+    const EXAMPLE: &[u8] = include_bytes!("../../assets/examples/hpr_l1_cert.bowshock");
 
     fn example() -> (Rocket, Vehicle) {
-        let rocket = Rocket::from_json(EXAMPLE).unwrap();
+        let rocket = Rocket::from_bytes(EXAMPLE).unwrap();
         let vehicle = from_model::vehicle(&rocket, &MotorDb::bundled(), Phase::Full).unwrap();
         (rocket, vehicle)
     }
@@ -833,7 +833,7 @@ mod tests {
         println!("{} points on {} in {:.0} s; notes {:?}", table.points.len(), table.backend, table.solve_seconds, table.notes);
         if let Some(path) = std::env::var_os("BOWSHOCK_CFD_FIXTURE") {
             assert!(rocket.store_cfd_table(table));
-            std::fs::write(path, rocket.to_json()).unwrap();
+            std::fs::write(path, rocket.to_bytes()).unwrap();
         }
     }
 
