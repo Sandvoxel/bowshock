@@ -14,7 +14,7 @@ bowshock-cfd = { path = "bowshock-cfd", default-features = false }
 bowshock-reference = { path = "bowshock-reference" }
 bowshock-cases = { path = "bowshock-cases" }
 bowshock-gpu-cases = { path = "bowshock-gpu-cases" }
-luma = { git = "https://github.com/flipnoteman/Luma.git", rev = "c7096217b655c23780e33589d23e76689a570d35" }
+luma = { git = "https://github.com/flipnoteman/Luma.git", rev = "c2d0301d5126050b3abc82d8db7ab655adfa65e7" }
 rayon = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 gif = "0.13"
@@ -28,7 +28,3 @@ codegen-units = 1
 too_many_arguments = "allow"
 needless_range_loop = "allow"
 type_complexity = "allow"
-
-# Temporary: use the local Luma `bowshock-fixes` branch until it is merged and pushed.
-[patch."https://github.com/flipnoteman/Luma.git"]
-luma = { path = "/home/sandvoxel/Documents/luma" }

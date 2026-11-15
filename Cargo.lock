@@ -585,6 +585,7 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 [[package]]
 name = "luma"
 version = "0.4.0"
+source = "git+https://github.com/flipnoteman/Luma.git?rev=c2d0301d5126050b3abc82d8db7ab655adfa65e7#c2d0301d5126050b3abc82d8db7ab655adfa65e7"
 dependencies = [
  "bytemuck",
  "encase",
