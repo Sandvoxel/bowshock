@@ -79,6 +79,12 @@ about 4000 iterations (4-8 s); points whose drag settles into a limit cycle (sub
 M 2.4-2.5) stop by `MeanStationary` after at least 14000 iterations (14-19 s). Before the
 mean-stationary rule the subsonic points ran to the 160000-iteration cap: 142-154 s each.
 
+`Analysis::drag_tolerance(rel)` (viscous only, off by default) replaces the default drag rule with a relative one: a point
+stops once its total drag varies by less than `rel` over the last 500 iterations, after the residual has dropped 2 orders.
+On the example rocket of the app (coarse grid, 10 points) `0.002` ended within 0.4 % of a 12000-iteration solution with
+about 2.8 times fewer iterations (29000 against 82000 in all); a drag that oscillates by about 1 % stops within 0.5 % of
+the mean of the cycle.
+
 The same set-up on the CPU (`-- --cpu`, `Backend::Cpu`, 32 threads):
 
 | M | CPU seconds | GPU seconds | CPU / GPU | CD CPU | CD GPU |

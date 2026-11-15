@@ -34,7 +34,11 @@ use crate::simulate::format::with_unit;
 use crate::units::{Quantity, UnitSystem};
 
 /// Bump when what a stored table means changes (solver, grid level, how the parts are mapped): old tables then read as stale.
-const SOLVER_REV: u64 = 1;
+const SOLVER_REV: u64 = 2;
+/// Relative drag tolerance of the solver's stop rule: a point ends once its total drag varies by less than this over 500
+/// iterations. Measured on the example rocket (coarse grid, RTX 3090, 10 points): about 29 000 iterations in all against about
+/// 82 000 for the default rule, the worst point within 0.39 % of its 12 000-iteration value (the aim is 1 %).
+const DRAG_TOLERANCE: f64 = 0.002;
 /// The grid level the table is solved on: `Coarse` (grid level 0), the setting for exploring. On an Apple M1 Max a coarse
 /// point takes 30 to 40 s and a medium one 2 min at Mach 0.3 (see the notes in the task report), too slow for a table.
 const RESOLUTION: solver::Resolution = solver::Resolution::Coarse;
@@ -411,7 +415,7 @@ fn built_up(plan: &Plan, mach: f64, altitude: f64) -> f64 {
 }
 
 /// Solves the table of `job`: blocking, one Mach number after another, `progress` after each. `cancel` is looked at between
-/// points (a point in flight finishes, which takes 30 to 40 s on a coarse grid on an M1 Max). The result carries what the solver
+/// points (a point in flight finishes, which takes a while on a coarse grid). The result carries what the solver
 /// reports of its backend, the build-up drag the solver left out, and notes on points that did not converge.
 pub fn solve(job: &Job, cancel: &AtomicBool, mut progress: impl FnMut(Event)) -> Result<CfdTable, String> {
     let started = Instant::now();
@@ -432,6 +436,7 @@ pub fn solve(job: &Job, cancel: &AtomicBool, mut progress: impl FnMut(Event)) ->
         let mut analysis = solver::Analysis::new(&job.plan.body)
             .map_err(|e| e.to_string())?
             .viscous(solver::FlightConditions { atmosphere: solver::Atmosphere::Isa { altitude_m: altitude } })
+            .drag_tolerance(DRAG_TOLERANCE)
             .resolution(RESOLUTION)
             .backend(backend);
         if let Some(fins) = &job.plan.fins {

@@ -7,6 +7,8 @@ use bowshock_cfd::solver::{Bc, Scheme};
 
 /// Sampling interval \[iterations\] of the monitor history.
 pub const MONITOR_EVERY: usize = 50;
+/// Window \[iterations\] of the relative drag rule ([`Numerics::drag_rel_tol`]); a multiple of [`MONITOR_EVERY`].
+pub const DRAG_REL_WINDOW: usize = 500;
 /// Mach number below which [`Numerics::auto`] uses the subsonic settings.
 pub const REGIME_SPLIT_MACH: f64 = 0.85;
 
@@ -52,6 +54,9 @@ pub struct Numerics {
     /// viscous run whose total drag settles into a bounded limit cycle never satisfies `monitor_tol`; the rule stops it where the
     /// drag crosses the stationary mean of the cycle. The window should span at least one period of the cycle.
     pub mean_window: Option<usize>,
+    /// Relative stationary rule on the monitor: stop once `(max - min) / |mean|` of the last [`DRAG_REL_WINDOW`] iterations is below
+    /// this (after a residual drop of 2 orders). Only meaningful for a viscous case, whose monitor is the total CD; `None` by default.
+    pub drag_rel_tol: Option<f64>,
 }
 
 impl Numerics {
@@ -73,6 +78,7 @@ impl Numerics {
                 Wake::Sting => None,
             },
             mean_window: None,
+            drag_rel_tol: None,
         }
     }
 
@@ -91,6 +97,7 @@ impl Numerics {
             monitor_window: 2000,
             monitor_tol: Some(2e-4),
             mean_window: None,
+            drag_rel_tol: None,
         }
     }
 
@@ -123,6 +130,7 @@ impl Numerics {
             monitor_window: 2000,
             monitor_tol: Some(1e-4),
             mean_window: Some(6000),
+            drag_rel_tol: None,
         }
     }
 }

@@ -218,3 +218,13 @@ fn motor_run_errors() {
     let err = Analysis::new(&g3_spec()).unwrap().motor(wide).viscous(flight).run(&[0.5]).unwrap_err();
     assert!(err.to_string().contains("motor.exit_diameter"), "{err}");
 }
+
+#[test]
+fn drag_tolerance_needs_viscous_and_a_sane_value() {
+    let base = || Analysis::new(&spec()).unwrap().backend(Backend::Cpu).resolution(Resolution::Coarse);
+    let bad = |a: Analysis| matches!(a.run(&[0.5]), Err(bowshock_core::Error::InvalidInput(m)) if m.contains("drag"));
+    assert!(bad(base().drag_tolerance(0.002)));
+    for rel in [0.0, f64::NAN, -1e-3, 0.5] {
+        assert!(bad(base().viscous(flight()).drag_tolerance(rel)), "{rel}");
+    }
+}

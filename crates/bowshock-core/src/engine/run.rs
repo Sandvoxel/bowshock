@@ -7,7 +7,7 @@
 
 use crate::engine::body_grid::BaseBody;
 use crate::engine::case::{Case, Wake};
-use crate::engine::numerics::MONITOR_EVERY;
+use crate::engine::numerics::{DRAG_REL_WINDOW, MONITOR_EVERY};
 use crate::engine::result::{BasePoint, PointResult, StopReason, WallPoint};
 use bowshock_cfd::gas::{cons_to_prim, freestream, prim_to_cons, sound_speed};
 use bowshock_cfd::solver::Solver;
@@ -44,7 +44,7 @@ pub fn run_on(case: &Case, s: &mut Solver, warm: bool, r_ref: Option<f64>) -> Po
     s.iter = if warm { n.first_order_iters } else { 0 };
     s.restart_ramp();
     let skip = if warm { 0 } else { 20 };
-    let sample = case.wake == Wake::Base || n.monitor_tol.is_some();
+    let sample = case.wake == Wake::Base || n.monitor_tol.is_some() || n.drag_rel_tol.is_some();
     let mut residual = Vec::new();
     let mut hist: Vec<(usize, f64)> = Vec::new();
     let mut rmax: f64 = 0.0;
@@ -72,7 +72,9 @@ pub const MONITOR_LIMIT: f64 = 1e3;
 
 /// Stopping rule after iteration `it` with density residual `r`, in this order: non-finite residual, or a monitor sample taken at
 /// this iteration (the last of `hist`) that is non-finite or larger than [`MONITOR_LIMIT`] in magnitude (always); then, from
-/// `min_iter` on, `drop_orders` below `reference` ("residual drop reached"); or, with a `monitor_tol`, every 500 iterations
+/// `min_iter` on, `drop_orders` below `reference` ("residual drop reached"); or, with a `drag_rel_tol`, a viscous case at a monitor
+/// sample (`it + 1 >= DRAG_REL_WINDOW`, residual dropped 2 orders) whose total-CD range over the last `DRAG_REL_WINDOW` iterations
+/// is below `drag_rel_tol` times the magnitude of its mean (`CdStationary`); or, with a `monitor_tol`, every 500 iterations
 /// from `2 monitor_window` on and once the residual has dropped 2 orders, a monitor range (`hist`, one sample per `MONITOR_EVERY`
 /// iterations) below the tolerance over the last `monitor_window` iterations (`BasePressureStationary` for an inviscid base wake,
 /// `CdStationary` for a sting and for every viscous case, whose monitor is the total CD; the inviscid wake can be unsteady, the
@@ -88,6 +90,22 @@ pub fn stop_reason(case: &Case, it: usize, r: f64, reference: f64, skip: usize, 
     }
     if it > skip && reference / r >= 10f64.powf(n.drop_orders) {
         return Some(StopReason::ResidualDrop);
+    }
+    if let Some(tol) = n.drag_rel_tol {
+        let k = DRAG_REL_WINDOW / MONITOR_EVERY;
+        if case.viscous.is_some()
+            && hist.last().is_some_and(|&(last, _)| last == it + 1)
+            && it + 1 >= DRAG_REL_WINDOW
+            && reference / r >= 100.0
+            && hist.len() >= k
+        {
+            let w = &hist[hist.len() - k..];
+            let (lo, hi) = w.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), c| (l.min(c.1), h.max(c.1)));
+            let mean = w.iter().map(|c| c.1).sum::<f64>() / k as f64;
+            if hi - lo < tol * mean.abs() {
+                return Some(StopReason::CdStationary);
+            }
+        }
     }
     if let Some(tol) = n.monitor_tol {
         if it % 500 == 499 && it + 1 >= 2 * n.monitor_window && reference / r >= 100.0 {
@@ -426,6 +444,26 @@ mod tests {
         let mut v = case(Some(1e-3), Wake::Base);
         v.viscous = Some(Viscous { re_c: 1e6, sutherland: 0.38, turbulence: Turbulence::Sst, wall_i_start: 28 });
         assert_eq!(stop_reason(&v, 4999, 1e-3, 1.0, 20, &flat), Some(StopReason::CdStationary));
+    }
+
+    #[test]
+    fn relative_drag_rule_stops_a_flat_viscous_history() {
+        let hist = |rel: f64| -> Vec<(usize, f64)> { (1..=10).map(|k| (k * 50, 0.4 * (1.0 + if k % 2 == 0 { rel } else { 0.0 }))).collect() };
+        let mut v = case(None, Wake::Base);
+        v.viscous = Some(Viscous { re_c: 1e6, sutherland: 0.38, turbulence: Turbulence::Sst, wall_i_start: 28 });
+        v.numerics.drag_rel_tol = Some(2e-3);
+        // (a) relative range 1e-3, 3 orders of drop: stops at the first sample at iteration 500, not before
+        assert_eq!(stop_reason(&v, 499, 1e-3, 1.0, 20, &hist(1e-3)), Some(StopReason::CdStationary));
+        assert_eq!(stop_reason(&v, 498, 1e-3, 1.0, 20, &hist(1e-3)), None);
+        assert_eq!(stop_reason(&v, 449, 1e-3, 1.0, 20, &hist(1e-3)[..9]), None);
+        // (b) only 1 order of drop
+        assert_eq!(stop_reason(&v, 499, 1e-1, 1.0, 20, &hist(1e-3)), None);
+        // (c) relative range 1e-2
+        assert_eq!(stop_reason(&v, 499, 1e-3, 1.0, 20, &hist(1e-2)), None);
+        // an inviscid case ignores the rule
+        let mut inv = v.clone();
+        inv.viscous = None;
+        assert_eq!(stop_reason(&inv, 499, 1e-3, 1.0, 20, &hist(1e-3)), None);
     }
 
     fn cycle(end: usize, mean: f64, amp: f64, drift_per_1000: f64) -> Vec<(usize, f64)> {

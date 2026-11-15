@@ -98,7 +98,7 @@ impl GpuRunner {
 
         let viscous = case.viscous.is_some();
         let sampler = (case.wake == Wake::Base && !viscous).then(|| BaseSampler::new(&self.host, case.body.body.radius().powi(2)));
-        let sample = case.wake == Wake::Base || viscous || n.monitor_tol.is_some();
+        let sample = case.wake == Wake::Base || viscous || n.monitor_tol.is_some() || n.drag_rel_tol.is_some();
         let mut residual = Vec::new();
         let mut hist: Vec<(usize, f64)> = Vec::new();
         let mut rmax: f64 = 0.0;
