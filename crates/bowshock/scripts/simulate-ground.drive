@@ -1,0 +1,26 @@
+# The ground track on the Simulate screen's right column, on a window tall enough to show all of it, with a dispersion study.
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/simulate-ground.drive out/simulate-ground
+viewport 1280x1100
+
+click (663, 18)
+click "Run"
+screenshot GroundTrack-dark.png
+
+# Windy is the flight that lands farthest out; fly it 100 times with wind, launch angle and thrust varied.
+click "Windy"
+click "Run"
+click "Run dispersion"
+move (1100, 800)
+screenshot GroundTrack-dispersion.png
+
+# Compare: every ticked flight's track, the dots at the crosshair's moment.
+click "Run all"
+click (17, 94)
+click (17, 138)
+click (17, 226)
+move (500, 300)
+move (510, 300)
+screenshot GroundTrack-compare.png
+
+click "Light"
+screenshot GroundTrack-light.png

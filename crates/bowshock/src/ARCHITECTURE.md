@@ -11,12 +11,15 @@ app/document.rs          Document: the rocket + path + dirty + undo/redo (every 
 app/physics.rs           cached balance (mass, CG, CP, margin), warnings, stages, motor db (bowshock-sim / -motors)
 app/drag.rs              shared drags (bin -> viewport, grab, move) + delete, built on Document's drag support
 app/files.rs             New / Open / Save / Save As / the built-in example, unsaved-changes guard
-app/ui.rs                shared UI helpers: `label`, `mm`, unit-system readouts, `three_columns`
+app/ui.rs                shared UI helpers: `label`, `mm`, unit-system readouts
 chrome/                  top bar, status strip, config menu, issues list, motor picker (State + Message)
 build/mod.rs             Build screen composition (pane_grid) only
 build/parts_bin.rs       parts bin
 build/inspector.rs       inspector
-build/lanes.rs           Station Lanes
+build/lanes.rs + lanes/     Station Lanes: `scene` (bars, sub-rows, stages, mass), `geometry` (stations <-> px, ruler, hit tests), `edit`
+                           (move / resize / landing / snap on the Rocket), `canvas` (drawing + mouse), `menu` ("Add here…").
+                           `lanes.view(ctx, camera)` also takes the viewport camera: when it looks side-on the lanes lock to its scale.
+                           The Build screen's centre pane is the viewport over the fixed-height lanes (`lanes::height`), not a pane_grid pane.
 viewport/                3D viewport (View = state, Message) + overlays (assembly, manipulate, surface)
 simulate/mod.rs          Simulate screen
 analyze/mod.rs           Analyze screen
@@ -126,9 +129,15 @@ setting (`Phase::Full` or `Phase::UpperFrom(k)`), set from the status strip.
 
 The viewport pane is `viewport::View::view`; overlays (`assembly` for axial drags, `surface` for radial drags,
 `manipulate` for selection/handles) are canvases that report to `viewport::Message` (`SnapNode`, `Surface`, `DropAxial`,
-`DropRadial`, `Hover`, `Select`, `Grab`, `Resize`, `ResizeRadial`, `EditEnd`); `View::update` turns them into document edits
+`DropRadial`, `Hover`, `Select`, `Grab`, `Edit`); `View::update` turns them into document edits
 and drag calls. Camera messages (`Orbit`, `Pan`, `Zoom`, `Fit`, `Snap`, `Home`, `Roll`, `Tick`) are the same enum. The mesh
 (`View::sync`) rebuilds from `ctx.doc.revision()`, hover, selection and the drag ghosts.
+
+Handle edits (DirectEdit, Snapping): the model lists every part's handles (`Rocket::handle_specs`), reads and writes a dimension
+(`Rocket::dim`, `clamp_dim`, `set_dim`, the same calls the Inspector uses) and offers snap targets (`Rocket::snap_targets`).
+`viewport/handles.rs` places the handles for the camera, `viewport/snap.rs` picks the catching target, and `manipulate`
+drives one drag as `Edit::Begin`, `Dim`/`Vertex`..., `End` (one undo step; `Cancel` restores). `BOWSHOCK_DRIVE_MODIFIERS`
+(`shift`, `alt`, `ctrl`) holds modifiers for drive scripts (`scripts/directedit-snap.drive`).
 
 ## Chrome (top bar, status strip, config menu, motor picker)
 

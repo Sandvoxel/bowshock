@@ -12,6 +12,9 @@ use super::{Armed, Ctx, Message};
 /// in step with the model.
 const EXAMPLE: &str = include_str!("../../assets/examples/hpr_l1_cert.bowshock");
 
+/// A two-stage example, selected by `BOWSHOCK_EXAMPLE=two_stage` (for screenshots of staging).
+const TWO_STAGE: &str = include_str!("../../assets/examples/two_stage.bowshock");
+
 /// Whether the command `what` may replace the document now. With unsaved changes the first press only warns (and arms the
 /// command); pressing the same command again proceeds.
 pub(super) fn guard(ctx: &mut Ctx, what: Armed) -> bool {
@@ -32,7 +35,8 @@ pub(super) fn new(ctx: &mut Ctx) {
 
 /// Loads the built-in example as an unsaved document named after it.
 pub(super) fn example(ctx: &mut Ctx) {
-    match Rocket::from_json(EXAMPLE) {
+    let source = if std::env::var("BOWSHOCK_EXAMPLE").is_ok_and(|v| v == "two_stage") { TWO_STAGE } else { EXAMPLE };
+    match Rocket::from_json(source) {
         Ok(rocket) => {
             ctx.doc.replace(rocket, None);
             ctx.loaded();
@@ -178,5 +182,84 @@ mod tests {
         assert!(balance.margin_cal > 1.0 && balance.margin_cal < 6.0, "margin {}", balance.margin_cal);
         let warnings = from_model::warnings(&rocket, &db, &balance);
         assert!(warnings.iter().all(|w| w.level != Level::Err), "{warnings:?}");
+    }
+
+    /// The two-stage example (the kit's `two_stage`): an I284W booster under an H128W sustainer, separating at the joint behind
+    /// the sustainer's motor.
+    fn build_two_stage() -> Rocket {
+        let mut r = Rocket::default();
+        r.name = "two_stage".to_string();
+        r.designer = "Bowshock".to_string();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762 }).unwrap();
+        let sustainer = r.insert(1, PartKind::BodyTube { length: 0.642, diameter: 0.0762 }).unwrap();
+        let booster = r.insert(2, PartKind::BodyTube { length: 0.530, diameter: 0.0762 }).unwrap();
+        r.set_name(sustainer, Some("Sustainer tube".to_string()));
+        r.set_name(booster, Some("Booster tube".to_string()));
+        r.attach_radial(
+            sustainer,
+            0.642 - 0.120,
+            0.0,
+            3,
+            RadialKind::FinSet { root_chord: 0.120, tip_chord: 0.050, span: 0.0762, sweep: 0.060, thickness: 0.00318 },
+        )
+        .unwrap();
+        r.attach_radial(
+            booster,
+            0.530 - 0.120,
+            0.0,
+            4,
+            RadialKind::FinSet { root_chord: 0.120, tip_chord: 0.050, span: 0.0762, sweep: 0.060, thickness: 0.00318 },
+        )
+        .unwrap();
+        let mount_kind = InternalKind::InnerTube { outer_diameter: 0.042, thickness: 0.002, length: 0.340, motor_mount: true, overhang: 0.0 };
+        let upper = r.attach_internal(sustainer, 0.302, mount_kind.clone()).unwrap();
+        let lower = r.attach_internal(booster, 0.190, mount_kind).unwrap();
+        let ring = InternalKind::CenteringRing { outer_diameter: None, inner_diameter: None, thickness: 0.006 };
+        for (tube, offsets) in [(sustainer, [0.302, 0.636]), (booster, [0.190, 0.524])] {
+            for offset in offsets {
+                r.attach_internal(tube, offset, ring.clone()).unwrap();
+            }
+        }
+        r.attach_internal(
+            sustainer,
+            0.080,
+            InternalKind::Parachute {
+                diameter: 0.762,
+                cd: 0.8,
+                line_count: 6,
+                line_length: 0.762,
+                line_material: MaterialId::BRAIDED_NYLON_2MM,
+                packed_length: 0.180,
+                packed_diameter: None,
+                deploy: Deployment { event: DeployEvent::Ejection, delay: 0.0 },
+            },
+        )
+        .unwrap();
+        r.attach_internal(sustainer, 0.020, InternalKind::MassComponent { mass: 0.045, length: 0.040, diameter: Some(0.030), role: MassRole::Altimeter })
+            .unwrap();
+        let db = MotorDb::bundled();
+        let id = r.active_config_id();
+        for (mount, name) in [(upper, "H128W"), (lower, "I284W")] {
+            let motor = db.find(name).expect("bundled");
+            r.set_motor(id, mount, Some(bowshock_model::MotorRef::new(motor.designation.clone(), motor.manufacturer.clone()))).unwrap();
+        }
+        r
+    }
+
+    /// Keeps `assets/examples/two_stage.bowshock` in step with [`build_two_stage`] (regenerate like the first example) and checks
+    /// the model finds the separation behind the sustainer's motor.
+    #[test]
+    fn two_stage_example_is_current() {
+        let built = build_two_stage();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/examples/two_stage.bowshock");
+        if std::env::var_os("BOWSHOCK_WRITE_EXAMPLE").is_some() {
+            std::fs::write(&path, built.to_json()).unwrap();
+        }
+        let shipped = Rocket::from_json(TWO_STAGE).expect("the shipped example loads");
+        assert_eq!(shipped, built, "assets/examples/two_stage.bowshock is stale: regenerate it (see example_is_current)");
+        let stages = shipped.stages();
+        assert_eq!(stages.len(), 2);
+        let separation = stages[0].separation.expect("a joint behind the sustainer's motor");
+        assert!((separation.station - 0.8706).abs() < 1e-9);
     }
 }

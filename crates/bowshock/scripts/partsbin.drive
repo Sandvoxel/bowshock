@@ -1,0 +1,40 @@
+# Parts bin: `BOWSHOCK_PRESETS_DIR=/tmp/bs-presets cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/partsbin.drive out/partsbin`
+viewport 1280x800
+screenshot airframe.png
+click (22, 106)
+screenshot fins.png
+click (22, 150)
+screenshot internal.png
+click (22, 194)
+screenshot recovery.png
+click (22, 238)
+screenshot mass.png
+click (22, 282)
+screenshot motors.png
+click (22, 326)
+screenshot presets.png
+# Search spans every category.
+click (160, 88)
+type "chute"
+screenshot search.png
+type backspace
+type backspace
+type backspace
+type backspace
+type backspace
+type "ring"
+screenshot search-ring.png
+# Click-add an internal and a recovery part; each selects what it added.
+click "Centering ring"
+screenshot added-ring.png
+click (160, 88)
+type backspace
+type backspace
+type backspace
+type backspace
+click (22, 194)
+click "Parachute"
+screenshot added-chute.png
+click (22, 326)
+click "3-fin can"
+screenshot added-preset.png

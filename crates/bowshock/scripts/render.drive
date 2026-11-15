@@ -1,0 +1,48 @@
+# Viewport render: `cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/render.drive out/render`
+# Inside views (3D perspective and the 2D profile), a focused part (double-click), Esc back.
+viewport 1280x800
+move (640, 400)
+screenshot solid.png
+click "Cutaway"
+screenshot cutaway.png
+click "X-ray"
+screenshot xray.png
+click "Exploded"
+screenshot exploded.png
+click "Solid"
+click "2D"
+screenshot profile.png
+click "Cutaway"
+screenshot profile-cutaway.png
+click "X-ray"
+screenshot profile-xray.png
+click "Exploded"
+screenshot profile-exploded.png
+click "Solid"
+screenshot profile-solid.png
+# Double-click the booster tube: focus (orthographic, square-on, tag under the toolbar), then Esc goes back.
+click (760, 310)
+click (760, 310)
+screenshot focus-tube.png
+click "Esc · back"
+screenshot focus-back.png
+# Double-click the nose cone.
+click (420, 310)
+click (420, 310)
+screenshot focus-nose.png
+click "Esc · back"
+# Double-click empty space: fit.
+click (640, 150)
+click (640, 150)
+screenshot fit.png
+# Light theme parity.
+click "Light"
+click "Cutaway"
+screenshot light-cutaway.png
+click "X-ray"
+screenshot light-xray.png
+click "Solid"
+click "3D"
+screenshot light-solid-3d.png
+click "Exploded"
+screenshot light-exploded.png

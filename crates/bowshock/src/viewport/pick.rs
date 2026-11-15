@@ -1,34 +1,15 @@
-//! Picking and screen-space geometry of airframe parts: a ray from the orthographic camera against each part's surface of
-//! revolution, the part's screen bounds, the positions of its resize handles, and what a handle drag does to its size.
+//! Picking and screen-space geometry of airframe parts: a ray from the camera against each part's surface of revolution and
+//! the part's screen bounds. (Handles live in `handles`.)
 
 use bowshock_model::{PartId, PartKind, RadialKind, RadialPart, Rocket};
 use glam::{DVec3, Vec3};
-use iced::{Point, Rectangle, Size, Vector};
+use iced::{Point, Rectangle, Size};
 
 use super::radial::{self, Placement};
 use super::Camera;
 
 /// Samples around the axis when bounding a part on screen.
 const ROUND: usize = 16;
-
-/// Which dimension a resize handle edits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Handle {
-    /// The length, from a handle at the aft face on the centreline.
-    Length,
-    /// The aft (or only) diameter, from a handle at the top of the aft face.
-    AftDiameter,
-    /// A transition's fore diameter, from a handle at the top of the fore face.
-    ForeDiameter,
-    /// A fin's span, from a handle at the middle of its tip.
-    Span,
-    /// A fin's root chord, from a handle at the aft end of its root.
-    RootChord,
-    /// A fin's tip chord, from a handle at the trailing corner of its tip.
-    TipChord,
-    /// A fin's sweep (how far back the tip is slanted), from a handle at the leading corner of its tip.
-    Sweep,
-}
 
 /// What a click or hover landed on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,21 +40,11 @@ pub struct SurfaceTarget {
     pub angle: f64,
 }
 
-/// Snap step of a drag, set by the modifier keys: 1 mm; Shift locks to a 10 mm grid; Ctrl/Cmd 5 mm; Alt is free.
-pub fn step(modifiers: iced::keyboard::Modifiers) -> Option<f64> {
-    if modifiers.alt() {
-        None
-    } else if modifiers.shift() {
-        Some(GRID)
-    } else if modifiers.control() || modifiers.logo() {
-        Some(0.005)
-    } else {
-        Some(0.001)
-    }
+/// The snap step of a plain or coarse drag of a station: `grid` (the view toolbar's step, metres), or 5 mm with Ctrl/Cmd.
+/// Shift (snap to targets) and Alt (follow the surface) are handled by the overlays.
+pub fn step(modifiers: iced::keyboard::Modifiers, grid: f64) -> Option<f64> {
+    Some(if modifiers.control() || modifiers.logo() { 0.005 } else { grid })
 }
-
-/// The grid Shift locks to, in metres.
-pub const GRID: f64 = 0.010;
 
 /// `offset` on `parent` moved so the station of the part's fore edge is a multiple of `step` (any if `None`), then limited to
 /// where `kind` may sit on the parent.
@@ -83,14 +54,10 @@ fn snapped_offset(rocket: &Rocket, parent: PartId, offset: f64, kind: &RadialKin
     rocket.clamp_offset(parent, offset, kind)
 }
 
-/// Smallest length or diameter a handle can drag a part to.
-pub const MIN_SIZE: f64 = 0.001;
-
-/// The viewing ray through viewport pixel `at`: a point on the target plane and the direction away from the eye.
+/// The viewing ray through viewport pixel `at`: its origin and unit direction (perspective or orthographic).
 fn ray(camera: &Camera, at: Point, size: Size) -> (DVec3, DVec3) {
-    let (dx, dy) = ((at.x - size.width / 2.0) / camera.scale, (at.y - size.height / 2.0) / camera.scale);
-    let origin = camera.target + camera.right() * dx - camera.up() * dy;
-    (origin.as_dvec3(), (-camera.back()).as_dvec3())
+    let (origin, dir) = camera.ray(at, size);
+    (origin.as_dvec3(), dir.as_dvec3())
 }
 
 /// Smallest ray parameter `t` where `o + t d` meets the surface of revolution about Z through `profile` (z, r) from `z0`.
@@ -245,8 +212,37 @@ fn hit_radial(o: DVec3, d: DVec3, kind: &RadialKind, at: Placement, margin: f64)
             let miss = l.length_squared() - along * along;
             (miss <= radius * radius).then(|| along - (radius * radius - miss).sqrt())
         }
-        RadialKind::EllipticalFin { .. } | RadialKind::FreeformFin { .. } => None,
+        RadialKind::EllipticalFin { .. } | RadialKind::FreeformFin { .. } => {
+            let polygon: Vec<(f64, f64)> = kind.planform()?.into_iter().map(|(z, h)| (z0 + z, base + h)).collect();
+            let denom = d.dot(t);
+            if denom.abs() < 1e-9 {
+                return None;
+            }
+            let time = -o.dot(t) / denom;
+            let p = o + d * time;
+            near_polygon(&polygon, (p.z, p.dot(u)), margin).then_some(time)
+        }
     }
+}
+
+/// Whether `p` is inside the polygon (even-odd) or within `margin` of its outline.
+fn near_polygon(poly: &[(f64, f64)], p: (f64, f64), margin: f64) -> bool {
+    let n = poly.len();
+    let mut inside = false;
+    for i in 0..n {
+        let (a, b) = (poly[i], poly[(i + 1) % n]);
+        if (a.1 > p.1) != (b.1 > p.1) && p.0 < (b.0 - a.0) * (p.1 - a.1) / (b.1 - a.1) + a.0 {
+            inside = !inside;
+        }
+        let (ab, ap) = ((b.0 - a.0, b.1 - a.1), (p.0 - a.0, p.1 - a.1));
+        let len2 = (ab.0 * ab.0 + ab.1 * ab.1).max(1e-18);
+        let t = ((ap.0 * ab.0 + ap.1 * ab.1) / len2).clamp(0.0, 1.0);
+        let foot = (a.0 + ab.0 * t, a.1 + ab.1 * t);
+        if ((p.0 - foot.0).powi(2) + (p.1 - foot.1).powi(2)).sqrt() <= margin {
+            return true;
+        }
+    }
+    inside
 }
 
 /// The part under viewport pixel `at` (the one nearest the eye), for a viewport of `size`.
@@ -279,51 +275,6 @@ fn bounds_of(points: impl Iterator<Item = Point>) -> Rectangle {
     Rectangle::new(min, Size::new(max.x - min.x, max.y - min.y))
 }
 
-/// The handles of a fin set: the span (middle of the leading edge), the root chord (aft root corner), and the tip's leading and trailing
-/// corners for its sweep and tip chord. Other radial parts have none.
-pub fn radial_handles(camera: &Camera, size: Size, kind: &RadialKind, at: Placement) -> Vec<(Handle, Point)> {
-    if !matches!(kind, RadialKind::FinSet { .. }) {
-        return Vec::new();
-    }
-    let corners = radial::fin_corners(kind, at).unwrap_or([Vec3::ZERO; 4]);
-    // The span handle is on the middle of the leading edge, clear of the tip's corners.
-    let leading = (corners[0] + corners[1]) / 2.0;
-    vec![
-        (Handle::Span, camera.project(leading, size)),
-        (Handle::RootChord, camera.project(corners[3], size)),
-        (Handle::Sweep, camera.project(corners[1], size)),
-        (Handle::TipChord, camera.project(corners[2], size)),
-    ]
-}
-
-/// A fin set after dragging `handle` from viewport pixel `from` to `to` (the copy at `angle`), snapped like [`resized`].
-pub fn resized_radial(camera: &Camera, size: Size, handle: Handle, base: &RadialKind, angle: f32, from: Point, to: Point, step: Option<f64>) -> RadialKind {
-    let RadialKind::FinSet { root_chord, tip_chord, span, sweep, thickness } = *base else {
-        return base.clone();
-    };
-    let along = |dir: Vec3| {
-        let (a, b) = (camera.project(Vec3::ZERO, size), camera.project(dir, size));
-        let v = Vector::new(b.x - a.x, b.y - a.y);
-        let n = v.x * v.x + v.y * v.y;
-        if n < 1e-6 {
-            0.0
-        } else {
-            f64::from(((to.x - from.x) * v.x + (to.y - from.y) * v.y) / n)
-        }
-    };
-    // Snapped to the step, at least `floor`: a tip can come to a point, but nothing is thinner than a millimetre.
-    let snap = |value: f64, floor: f64| step.map_or(value, |s| (value / s).round() * s).max(floor);
-    let fin = |root_chord, tip_chord, span, sweep| RadialKind::FinSet { root_chord, tip_chord, span, sweep, thickness };
-    match handle {
-        Handle::Span => fin(root_chord, tip_chord, snap(span + along(radial::dirs(angle).0), MIN_SIZE), sweep),
-        Handle::RootChord => fin(snap(root_chord + along(Vec3::Z), MIN_SIZE), tip_chord, span, sweep),
-        // The model limits a forward sweep to the parent's fore face.
-        Handle::Sweep => fin(root_chord, tip_chord, span, snap(sweep + along(Vec3::Z), f64::NEG_INFINITY)),
-        Handle::TipChord => fin(root_chord, snap(tip_chord + along(Vec3::Z), 0.0), span, sweep),
-        _ => base.clone(),
-    }
-}
-
 /// The screen rectangle enclosing a part of `kind` whose fore face is at station `z0`.
 pub fn screen_bounds(camera: &Camera, size: Size, z0: f64, kind: &PartKind) -> Rectangle {
     let points = kind.profile().into_iter().flat_map(|(z, r)| {
@@ -335,59 +286,6 @@ pub fn screen_bounds(camera: &Camera, size: Size, z0: f64, kind: &PartKind) -> R
     bounds_of(points.map(|p| camera.project(p, size)))
 }
 
-/// The world direction, perpendicular to the axis, that points most nearly up the screen: where the diameter handles sit.
-fn radial_up(camera: &Camera) -> Vec3 {
-    let up = camera.up();
-    let flat = up - Vec3::Z * up.z;
-    if flat.length() > 1e-4 {
-        flat.normalize()
-    } else {
-        camera.right()
-    }
-}
-
-/// The handles of a part of `kind` at station `z0`, with their screen positions.
-pub fn handles(camera: &Camera, size: Size, z0: f64, kind: &PartKind) -> Vec<(Handle, Point)> {
-    let (aft, up) = ((z0 + kind.length()) as f32, radial_up(camera));
-    let mut out = vec![
-        (Handle::Length, camera.project(Vec3::new(0.0, 0.0, aft), size)),
-        (Handle::AftDiameter, camera.project(up * (kind.aft_diameter() as f32 / 2.0) + Vec3::Z * aft, size)),
-    ];
-    if matches!(kind, PartKind::Transition { .. }) {
-        out.push((Handle::ForeDiameter, camera.project(up * (kind.fore_diameter() as f32 / 2.0) + Vec3::Z * z0 as f32, size)));
-    }
-    out
-}
-
-/// The part `base` after dragging `handle` from viewport pixel `from` to `to`: the drag is projected on the handle's screen
-/// direction and turned back into metres, rounded to `step` (if any), at least [`MIN_SIZE`].
-pub fn resized(camera: &Camera, size: Size, handle: Handle, base: &PartKind, from: Point, to: Point, step: Option<f64>) -> PartKind {
-    // Screen vector of one metre along the axis, or of one metre of radius towards the handle.
-    let one_metre = |dir: Vec3| -> Vector {
-        let (a, b) = (camera.project(Vec3::ZERO, size), camera.project(dir, size));
-        Vector::new(b.x - a.x, b.y - a.y)
-    };
-    let drag = to - from;
-    let along = |v: Vector| {
-        let n = v.x * v.x + v.y * v.y;
-        if n < 1e-6 {
-            0.0
-        } else {
-            f64::from((drag.x * v.x + drag.y * v.y) / n)
-        }
-    };
-    let snap = |value: f64| {
-        let v = step.map_or(value, |s| (value / s).round() * s);
-        v.max(MIN_SIZE)
-    };
-    match handle {
-        Handle::Length => base.with_length(snap(base.length() + along(one_metre(Vec3::Z)))),
-        Handle::AftDiameter => base.with_aft_diameter(snap(base.aft_diameter() + 2.0 * along(one_metre(radial_up(camera))))),
-        Handle::ForeDiameter => base.with_fore_diameter(snap(base.fore_diameter() + 2.0 * along(one_metre(radial_up(camera))))),
-        Handle::Span | Handle::RootChord | Handle::Sweep | Handle::TipChord => base.clone(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,7 +294,7 @@ mod tests {
 
     /// Side-on: the nose points left and +Z runs to the right.
     fn side() -> Camera {
-        Camera { target: Vec3::new(0.0, 0.0, 0.5), yaw: -FRAC_PI_2, pitch: 0.0, roll: 0.0, scale: 1000.0 }
+        Camera { target: Vec3::new(0.0, 0.0, 0.5), yaw: -FRAC_PI_2, pitch: 0.0, roll: 0.0, scale: 1000.0, ortho_blend: 1.0 }
     }
 
     fn rocket() -> Rocket {
@@ -431,39 +329,6 @@ mod tests {
         cam.pitch = 0.4;
         let tube = r.parts()[1].id;
         assert_eq!(pick(&r, &cam, cam.project(Vec3::new(0.0, 0.0, 0.45), SIZE), SIZE), Some(Pick::Axial(tube)));
-    }
-
-    #[test]
-    fn handles_and_bounds_follow_the_part() {
-        let (r, cam) = (rocket(), side());
-        let tube = &r.parts()[1].kind;
-        let [(_, length), (_, diameter)] = handles(&cam, SIZE, 0.2, tube)[..] else { panic!("two handles") };
-        let end = cam.project(Vec3::new(0.0, 0.0, 0.7), SIZE);
-        assert!((length.x - end.x).abs() < 1e-3 && (length.y - end.y).abs() < 1e-3);
-        // The diameter handle is 50 mm (50 px) above the axis at the aft face.
-        assert!((diameter.x - end.x).abs() < 1e-3 && (end.y - diameter.y - 50.0).abs() < 1e-2);
-        let b = screen_bounds(&cam, SIZE, 0.2, tube);
-        assert!((b.width - 500.0).abs() < 1.0 && (b.height - 100.0).abs() < 1.0);
-        let trans = PartKind::Transition { length: 0.1, fore_diameter: 0.1, aft_diameter: 0.06 };
-        assert_eq!(handles(&cam, SIZE, 0.0, &trans).len(), 3);
-    }
-
-    #[test]
-    fn dragging_a_handle_edits_the_size() {
-        let cam = side();
-        let tube = PartKind::BodyTube { length: 0.5, diameter: 0.1 };
-        let from = cam.project(Vec3::new(0.0, 0.0, 0.7), SIZE);
-        // 100 px along the axis is 100 mm at 1000 px/m, snapped to the millimetre.
-        let longer = resized(&cam, SIZE, Handle::Length, &tube, from, from + Vector::new(100.4, 7.0), Some(0.001));
-        assert!((longer.length() - 0.6).abs() < 1e-9);
-        // Free (Shift) keeps the fraction; 5 mm snap rounds to 5 mm.
-        assert!((resized(&cam, SIZE, Handle::Length, &tube, from, from + Vector::new(100.4, 0.0), None).length() - 0.6004).abs() < 1e-6);
-        assert!((resized(&cam, SIZE, Handle::Length, &tube, from, from + Vector::new(102.0, 0.0), Some(0.005)).length() - 0.6).abs() < 1e-9);
-        // Dragging up by 20 px makes the radius 20 mm larger: the diameter grows by 40 mm.
-        let wider = resized(&cam, SIZE, Handle::AftDiameter, &tube, from, from + Vector::new(0.0, -20.0), Some(0.001));
-        assert!((wider.aft_diameter() - 0.14).abs() < 1e-9);
-        // Never below 1 mm.
-        assert_eq!(resized(&cam, SIZE, Handle::Length, &tube, from, from + Vector::new(-900.0, 0.0), Some(0.001)).length(), MIN_SIZE);
     }
 
     #[test]
@@ -526,43 +391,6 @@ mod tests {
     }
 
     #[test]
-    fn fin_handles_drag_the_span_and_root_chord() {
-        let cam = side();
-        let fins = RadialKind::FinSet { root_chord: 0.1, tip_chord: 0.05, span: 0.05, sweep: 0.03, thickness: 0.003 };
-        let at = Placement { z0: 0.5, base: 0.05, angle: 0.0 };
-        let hs = radial_handles(&cam, SIZE, &fins, at);
-        assert_eq!(hs.iter().map(|h| h.0).collect::<Vec<_>>(), [Handle::Span, Handle::RootChord, Handle::Sweep, Handle::TipChord]);
-        let from = hs[0].1;
-        // Straight up 30 px at 1000 px/m is 30 mm of span.
-        let RadialKind::FinSet { span, .. } = resized_radial(&cam, SIZE, Handle::Span, &fins, 0.0, from, from + Vector::new(0.0, -30.0), Some(0.001)) else {
-            panic!("a fin set");
-        };
-        assert!((span - 0.08).abs() < 1e-9);
-        let RadialKind::FinSet { root_chord, .. } = resized_radial(&cam, SIZE, Handle::RootChord, &fins, 0.0, from, from + Vector::new(20.0, 0.0), Some(0.005))
-        else {
-            panic!("a fin set");
-        };
-        assert!((root_chord - 0.12).abs() < 1e-9);
-        // The tip's corners edit the slant and the tip chord; a tip can come to a point (tip chord 0) but not go negative.
-        let drag = |handle, dx: f32, step| resized_radial(&cam, SIZE, handle, &fins, 0.0, from, from + Vector::new(dx, 0.0), step);
-        let RadialKind::FinSet { sweep, tip_chord, root_chord, .. } = drag(Handle::Sweep, 25.0, Some(0.001)) else {
-            panic!("a fin set");
-        };
-        assert!((sweep - 0.055).abs() < 1e-9 && tip_chord == 0.05 && root_chord == 0.1);
-        let RadialKind::FinSet { sweep, tip_chord, .. } = drag(Handle::TipChord, -80.0, Some(0.001)) else {
-            panic!("a fin set");
-        };
-        assert!(tip_chord == 0.0 && sweep == 0.03);
-        // Sweep goes through zero to a forward sweep (the model limits how far).
-        let RadialKind::FinSet { sweep, .. } = drag(Handle::Sweep, -80.0, Some(0.001)) else {
-            panic!("a fin set");
-        };
-        assert!((sweep + 0.05).abs() < 1e-9);
-        // A lug has no handles.
-        assert!(radial_handles(&cam, SIZE, &RadialKind::LaunchLug { length: 0.05, diameter: 0.01 }, at).is_empty());
-    }
-
-    #[test]
     fn sliding_follows_the_cursor_along_the_whole_rocket_and_keeps_the_angle() {
         let (r, cam) = (rocket(), side());
         let [nose, tube] = [r.parts()[0].id, r.parts()[1].id];
@@ -589,13 +417,19 @@ mod tests {
     }
 
     #[test]
-    fn modifiers_choose_the_snap_step() {
+    fn ctrl_gives_the_coarse_step_and_otherwise_the_grid() {
         use iced::keyboard::Modifiers as M;
-        assert_eq!(step(M::empty()), Some(0.001));
-        assert_eq!(step(M::SHIFT), Some(0.010));
-        assert_eq!(step(M::CTRL), Some(0.005));
-        assert_eq!(step(M::LOGO), Some(0.005));
-        assert_eq!(step(M::ALT), None);
+        assert_eq!(step(M::empty(), 0.001), Some(0.001));
+        assert_eq!(step(M::SHIFT, 0.0005), Some(0.0005));
+        assert_eq!(step(M::CTRL, 0.001), Some(0.005));
+        assert_eq!(step(M::LOGO, 0.001), Some(0.005));
+    }
+
+    #[test]
+    fn handles_bounds_follow_the_part() {
+        let (r, cam) = (rocket(), side());
+        let b = screen_bounds(&cam, SIZE, 0.2, &r.parts()[1].kind);
+        assert!((b.width - 500.0).abs() < 1.0 && (b.height - 100.0).abs() < 1.0);
     }
 
     #[test]
@@ -605,11 +439,11 @@ mod tests {
         // Cursor at station 0.4537: a 0.1 long part centred there starts at 0.4037 (offset 0.2037 into the tube, which starts at
         // 0.2). On a 10 mm grid the fore edge goes to station 0.40 (offset 0.20); on a 1 mm grid, to 0.404.
         let at = cam.project(Vec3::new(0.0, 0.0, 0.4537), SIZE);
-        let grid = slide_target(&r, &cam, at, SIZE, &LUG, 0.0, Some(GRID)).unwrap();
+        let grid = slide_target(&r, &cam, at, SIZE, &LUG, 0.0, Some(0.010)).unwrap();
         assert!((grid.offset - 0.2).abs() < 1e-6 && grid.parent == tube, "{grid:?}");
         let fine = slide_target(&r, &cam, at, SIZE, &LUG, 0.0, Some(0.001)).unwrap();
         assert!((fine.offset - 0.204).abs() < 1e-6, "{fine:?}");
-        let surface = surface_target(&r, &cam, at, SIZE, &LUG, Snapping { angle: 0, station: Some(GRID) }).unwrap();
+        let surface = surface_target(&r, &cam, at, SIZE, &LUG, Snapping { angle: 0, station: Some(0.010) }).unwrap();
         assert!((surface.offset - 0.2).abs() < 1e-6, "{surface:?}");
     }
 }

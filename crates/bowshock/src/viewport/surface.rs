@@ -5,8 +5,8 @@
 //!
 //! A group picked up off the rocket slides along the rocket by default, keeping its angle and following the cursor along the
 //! axis wherever the cursor is (onto other parts as it passes them); holding Alt makes it follow the surface under the
-//! cursor (angle included) like a new part from the bin. The station of the part snaps to 1 mm, or with Shift to a 10 mm grid
-//! (Ctrl/Cmd 5 mm, Alt free).
+//! cursor (angle included) like a new part from the bin. The station of the part snaps to the view toolbar's grid step, or
+//! 5 mm with Ctrl/Cmd.
 
 use bowshock_model::{PartId, RadialKind, RadialPart, Rocket};
 use glam::Vec3;
@@ -44,6 +44,8 @@ pub struct Overlay<'a> {
     pub camera: Camera,
     /// Angle snap in degrees, 0 for none.
     pub snap: u8,
+    /// The view toolbar's grid step, metres (Ctrl/Cmd gives 5 mm).
+    pub snap_step: f64,
     /// The cursor in window coordinates (tracked by the app, so it also draws without a live cursor).
     pub cursor: Option<Point>,
 }
@@ -57,7 +59,7 @@ impl Overlay<'_> {
     /// Where the part would land with the cursor at `at` (viewport px). `free` (Alt) follows the surface under the cursor.
     fn target_at(&self, at: Point, size: Size, modifiers: keyboard::Modifiers) -> Option<SurfaceTarget> {
         let (rocket, camera, kind) = (self.rocket, &self.camera, &self.drag.kind);
-        let (free, step) = (modifiers.alt(), pick::step(modifiers));
+        let (free, step) = (modifiers.alt(), pick::step(modifiers, self.snap_step));
         let surface = || pick::surface_target(rocket, camera, at, size, kind, pick::Snapping { angle: self.snap, station: step });
         let Some(origin) = &self.drag.origin else {
             return surface();

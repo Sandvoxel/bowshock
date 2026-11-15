@@ -1,41 +1,62 @@
-//! The parts bin: the rail of categories, the airframe and fins & guides lists (the catalogue of default parts, their ruled
-//! rows: silhouette, name, default size), the search, "size to selection" and the symmetry footer (design/components/PartsBin,
-//! Symmetry).
+//! The parts bin: the rail of seven categories, the ruled rows of each (silhouette, name, default size), the search across every
+//! category, "size to selection" and the symmetry footer (design/components/PartsBin, Symmetry).
 //!
 //! Module contract (see `ARCHITECTURE.md`): [`State`] is this module's state, [`Message`] its messages; the app calls
-//! [`State::update`], [`State::view`] and [`State::on_key`] with the shared [`Ctx`]. A press on a row that moves past
-//! [`DRAG_SLOP`] starts a drag through `crate::app::drag`; one that does not is a click that attaches the part aft.
+//! [`State::update`], [`State::view`] and [`State::on_key`] with the shared [`Ctx`].
+//!
+//! * A press on a row that moves past [`DRAG_SLOP`] starts a drag (axial, radial and internal rows) through `crate::app::drag`;
+//!   one that does not is a click: it attaches the part aft of the selection or at the best node ([`items`]). A second click on
+//!   the same row within [`DOUBLE_CLICK`] does not add another part: it focuses the inspector's first field
+//!   ([`INSPECTOR_FIRST_FIELD`]).
+//! * Motor rows list the motors that fit the selected (else first) motor mount; a click sets the active configuration's motor.
+//!   Preset rows add a saved assembly ([`presets`]); a right click on a user preset deletes it.
+//! * Keys: `/` focuses search, `X` / `Shift+X` cycle the symmetry count, and `1` to `7` switch category **only while the cursor is
+//!   over the bin**, so the viewport keeps `1` to `4` for its inside views everywhere else.
 
-use bowshock_model::{NoseShape, PartKind, RadialKind};
-use iced::widget::canvas::{self, Frame, Geometry, Path};
-use iced::widget::{button, canvas as canvas_widget, checkbox, column, container, mouse_area, row, text, text_input, tooltip, Space};
-use iced::{keyboard, mouse, Background, Center, Element, Fill, Point, Rectangle, Renderer, Task, Theme, Widget};
+pub mod items;
+pub mod presets;
+mod rows;
+
+use std::time::{Duration, Instant};
+
+use bowshock_model::{InternalKind, PartKind};
+use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
+use iced::widget::{button, canvas as canvas_widget, checkbox, column, container, mouse_area, row, scrollable, stack, text, text_input, Space};
+use iced::{keyboard, mouse, Background, Element, Fill, Point, Rectangle, Renderer, Task, Theme, Widget};
+
+// Re-exported for the surfaces that add parts elsewhere (Station Lanes menus).
+use items::Item;
+#[allow(unused_imports)]
+pub use items::{airframe_items, axial_catalogue, internal_catalogue, mass_catalogue, radial_catalogue, recovery_catalogue, sized, structure_catalogue, RowId};
+use presets::PresetEntry;
+use rows::{RowState, RowView};
 
 use crate::app::ui::{label, mm, radial_size_label, size_label};
 use crate::app::{self, drag, Ctx};
 use crate::theme::{self, MONO};
-use crate::tokens::{PART_ROW_H, RAIL_W, SPACE_1, SPACE_2, TEXT_BODY, TEXT_LABEL};
-use crate::widgets::segmented::segmented;
+use crate::tokens::{RAIL_W, SPACE_1, SPACE_2, TEXT_BODY, TEXT_LABEL};
+use crate::widgets::icons::{rail_button, RailIcon};
+use crate::widgets::segmented::{segmented, segmented_fill};
 
-/// Size of a row's silhouette canvas, in logical px.
-const SILHOUETTE: (f32, f32) = (40.0, 24.0);
-/// Space the drawn profile occupies inside it: full width less a margin, and the largest radius mapped to this height.
-const SILHOUETTE_FIT: (f32, f32) = (36.0, 18.0);
-/// Opacity of an unavailable row.
-const UNAVAILABLE: f32 = 0.45;
 /// Movement in px after pressing a row beyond which the press is a drag rather than a click.
 const DRAG_SLOP: f32 = 4.0;
+/// Two clicks on a row this close together are a double click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+/// The id the inspector gives its first field so a double click on a bin row can focus it (`iced::widget::operation::focus`).
+pub const INSPECTOR_FIRST_FIELD: &str = "inspector-first-field";
+/// The id of the search field.
+const SEARCH_ID: &str = "parts-search";
 
 /// Symmetry counts for radial parts (design/components/Symmetry).
 pub const SYMMETRY: [(u8, &str); 6] = [(1, "1"), (2, "2"), (3, "3"), (4, "4"), (6, "6"), (8, "8")];
 
 /// Angle snap choices for radial parts, in degrees.
-pub const ANGLE_SNAP: [(u8, &str); 3] = [(0, "Off"), (15, "15°"), (45, "45°")];
+pub const ANGLE_SNAP: [(u8, &str); 3] = [(0, "off"), (15, "15°"), (45, "45°")];
 
 /// The rail's categories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Category {
-    /// Nose, tubes, transitions.
+    /// Nose, tubes, transitions, couplers.
     Airframe,
     /// Fin sets, lugs, rail buttons.
     Fins,
@@ -68,6 +89,18 @@ impl Category {
             Category::Presets => "PRESETS",
         }
     }
+
+    fn icon(self) -> RailIcon {
+        match self {
+            Category::Airframe => RailIcon::Airframe,
+            Category::Fins => RailIcon::FinsGuides,
+            Category::Internal => RailIcon::Internal,
+            Category::Recovery => RailIcon::Recovery,
+            Category::Mass => RailIcon::Mass,
+            Category::Motors => RailIcon::Motors,
+            Category::Presets => RailIcon::Presets,
+        }
+    }
 }
 
 /// The parts bin's messages.
@@ -81,12 +114,16 @@ pub enum Message {
     AngleSnap(u8),
     /// The search text changed.
     Search(String),
+    /// `/`: focus the search field.
+    FocusSearch,
     /// "Size to selection" toggled.
     SizeToSelection(bool),
-    /// Left button pressed on a row (index into the category's catalogue).
-    RowPress(usize),
+    /// Left button pressed on a row.
+    RowPress(RowId),
     /// The cursor entered or left a row.
-    RowHover(Option<usize>),
+    RowHover(Option<RowId>),
+    /// The cursor entered or left the bin (the rail keys `1`..`7` only work while it is over).
+    Hover(bool),
     /// The cursor moved (sent by the app for every move, so a press can turn into a drag).
     CursorMoved,
     /// Left button released anywhere nothing took it: a press that never became a drag is a click.
@@ -95,12 +132,16 @@ pub enum Message {
     Cancel,
     /// `X` / `Shift+X`: the next (or previous) symmetry count.
     CycleSymmetry(bool),
+    /// Save the selected part (with what it carries) as a user preset.
+    SavePreset,
+    /// Delete user preset `n` (index into the bin's presets).
+    DeletePreset(usize),
 }
 
 /// A pressed row that has not yet become a click or a drag.
 #[derive(Debug)]
 struct Press {
-    row: usize,
+    row: RowId,
     origin: Option<Point>,
 }
 
@@ -110,14 +151,30 @@ pub struct State {
     search: String,
     size_to_selection: bool,
     /// The row under the cursor.
-    row_hover: Option<usize>,
+    row_hover: Option<RowId>,
     press: Option<Press>,
+    /// The row a drag in progress came from.
+    dragging: Option<RowId>,
+    /// The cursor is over the bin.
+    hovered: bool,
+    last_click: Option<(RowId, Instant)>,
+    presets: Vec<PresetEntry>,
 }
 
 impl State {
-    /// The bin on the airframe list.
+    /// The bin on the airframe list, with the built-in and the user's presets loaded.
     pub fn new() -> Self {
-        State { category: Category::Airframe, search: String::new(), size_to_selection: true, row_hover: None, press: None }
+        State {
+            category: Category::Airframe,
+            search: String::new(),
+            size_to_selection: true,
+            row_hover: None,
+            press: None,
+            dragging: None,
+            hovered: false,
+            last_click: None,
+            presets: presets::load_all(),
+        }
     }
 
     /// The reference diameter new parts are sized to, when "size to selection" is on.
@@ -125,23 +182,94 @@ impl State {
         self.size_to_selection.then(|| ctx.doc.rocket().reference_diameter()).flatten()
     }
 
-    /// The part a catalogue row would add right now.
-    fn row_kind(&self, row: usize, ctx: &Ctx) -> PartKind {
-        sized(&catalogue()[row].1, self.sizing(ctx))
+    /// The rows of `category` (the full list, whatever the search says).
+    fn items(&self, category: Category, ctx: &Ctx) -> Vec<Item> {
+        let from = |list: Vec<(&'static str, InternalKind)>| list.into_iter().map(|(n, k)| Item::Internal(n, k)).collect();
+        match category {
+            Category::Airframe => airframe_items(),
+            Category::Fins => radial_catalogue().into_iter().map(|(n, k)| Item::Radial(n, k)).collect(),
+            Category::Internal => from(structure_catalogue()),
+            Category::Recovery => from(recovery_catalogue()),
+            Category::Mass => from(mass_catalogue()),
+            Category::Motors => items::motor_mount(ctx.doc.rocket(), ctx.selection)
+                .map(|mount| items::fitting_motors(ctx.physics.motors(), &mount).into_iter().map(Item::Motor).collect())
+                .unwrap_or_default(),
+            Category::Presets => (0..self.presets.len()).map(Item::Preset).collect(),
+        }
     }
 
-    /// Starts dragging row `row` of the current category, if the part can be placed.
-    fn start_drag(&mut self, row: usize, ctx: &mut Ctx) {
-        match self.category {
-            Category::Airframe => {
-                let kind = self.row_kind(row, ctx);
-                if !ctx.doc.rocket().nodes_for(&kind).is_empty() {
-                    drag::start_axial(ctx, row, catalogue()[row].0, kind);
-                }
-            }
-            Category::Fins if !ctx.doc.rocket().parts().is_empty() => drag::start_radial(ctx, row, radial_catalogue()[row].1.clone()),
-            _ => {}
+    fn item(&self, id: RowId, ctx: &Ctx) -> Option<Item> {
+        self.items(id.category, ctx).into_iter().nth(id.index)
+    }
+
+    fn name_of(&self, item: &Item, ctx: &Ctx) -> String {
+        match item {
+            Item::Axial(n, _) | Item::Radial(n, _) | Item::Internal(n, _) => (*n).to_string(),
+            Item::Motor(i) => ctx.physics.motors().motors[*i].designation.clone(),
+            Item::Preset(i) => self.presets[*i].preset.name.clone(),
         }
+    }
+
+    /// Why `item` cannot be added right now, if it cannot.
+    fn unavailable(&self, item: &Item, ctx: &Ctx) -> Option<String> {
+        let rocket = ctx.doc.rocket();
+        match item {
+            Item::Axial(name, kind) => {
+                let kind = sized(kind, self.sizing(ctx));
+                if rocket.nodes_for(&kind).is_empty() {
+                    return Some(if matches!(kind, PartKind::NoseCone { .. }) {
+                        "A rocket has one nose cone, at the fore end".into()
+                    } else {
+                        "Nothing in the stack to attach it to".into()
+                    });
+                }
+                (*name == "Payload bay" && !rocket.internals().iter().any(|i| matches!(i.kind, InternalKind::Coupler { .. })))
+                    .then(|| "Payload bay needs a coupler above it".into())
+            }
+            Item::Radial(..) => rocket.parts().is_empty().then(|| "Needs an airframe part to attach to".into()),
+            Item::Internal(_, kind) => items::host_for(rocket, ctx.selection, items::zone_of(kind)).is_none().then(|| "Needs a body tube to go in".into()),
+            Item::Motor(_) => None,
+            Item::Preset(i) => self.presets[*i].preset.unavailable(rocket, ctx.selection).map(Into::into),
+        }
+    }
+
+    /// Starts dragging row `id`, if it can be dragged and placed.
+    fn start_drag(&mut self, id: RowId, ctx: &mut Ctx) {
+        let Some(item) = self.item(id, ctx) else {
+            return;
+        };
+        if self.unavailable(&item, ctx).is_some() {
+            return;
+        }
+        match item {
+            Item::Axial(name, kind) => drag::start_axial(ctx, id.index, name, sized(&kind, self.sizing(ctx))),
+            Item::Radial(_, kind) => drag::start_radial(ctx, id.index, kind),
+            Item::Internal(name, kind) => {
+                let rocket = ctx.doc.rocket();
+                let kind = match items::host_for(rocket, ctx.selection, items::zone_of(&kind)).and_then(|h| items::host_inner(rocket, h)) {
+                    Some(inner) => items::fitted(&kind, inner),
+                    None => kind,
+                };
+                drag::start_internal(ctx, Some(id.index), name, kind);
+            }
+            Item::Motor(_) | Item::Preset(_) => return,
+        }
+        self.dragging = Some(id);
+    }
+
+    /// Adds `item` by a click. Returns whether something was added.
+    fn click(&mut self, item: Item, ctx: &mut Ctx) -> bool {
+        match item {
+            Item::Axial(_, kind) => items::attach_axial(ctx, sized(&kind, self.sizing(ctx))).is_some(),
+            Item::Radial(name, kind) => items::attach_radial(ctx, name, kind).is_some(),
+            Item::Internal(name, kind) => items::attach_internal(ctx, name, kind).is_some(),
+            Item::Motor(i) => items::motor_mount(ctx.doc.rocket(), ctx.selection).is_some_and(|m| items::set_motor(ctx, m.id, i)),
+            Item::Preset(i) => self.presets[i].preset.clone().apply(ctx).is_some(),
+        }
+    }
+
+    fn reload_presets(&mut self) {
+        self.presets = presets::load_all();
     }
 
     /// Handles one of the bin's messages.
@@ -151,9 +279,11 @@ impl State {
             Message::Symmetry(n) => ctx.drag.symmetry = n,
             Message::AngleSnap(degrees) => ctx.drag.angle_snap = degrees,
             Message::Search(s) => self.search = s,
+            Message::FocusSearch => return iced::widget::operation::focus(SEARCH_ID),
             Message::SizeToSelection(on) => self.size_to_selection = on,
             Message::RowPress(row) => self.press = Some(Press { row, origin: ctx.cursor }),
             Message::RowHover(row) => self.row_hover = row,
+            Message::Hover(on) => self.hovered = on,
             Message::CursorMoved => {
                 let at = ctx.cursor;
                 let started = self.press.as_ref().filter(|p| matches!((p.origin, at), (Some(o), Some(at)) if o.distance(at) > DRAG_SLOP)).map(|p| p.row);
@@ -163,21 +293,26 @@ impl State {
                 }
             }
             Message::Released => {
+                self.dragging = None;
                 if let Some(press) = self.press.take() {
-                    // No drag started: a click attaches aft, at the last node the part may take.
-                    match self.category {
-                        Category::Airframe => {
-                            let kind = self.row_kind(press.row, ctx);
-                            if let Some(&(node, _)) = ctx.doc.rocket().nodes_for(&kind).last() {
-                                drag::place(ctx, node, kind);
-                            }
-                        }
-                        Category::Fins => drag::attach_radial_aft(ctx, radial_catalogue()[press.row].1.clone()),
-                        _ => {}
+                    let Some(item) = self.item(press.row, ctx).filter(|i| self.unavailable(i, ctx).is_none()) else {
+                        return Task::none();
+                    };
+                    let now = Instant::now();
+                    if self.last_click.is_some_and(|(row, at)| row == press.row && now.duration_since(at) < DOUBLE_CLICK) {
+                        // The first click already added the part: the second only moves on to editing it.
+                        self.last_click = None;
+                        return iced::widget::operation::focus(INSPECTOR_FIRST_FIELD);
+                    }
+                    if self.click(item, ctx) {
+                        self.last_click = Some((press.row, now));
                     }
                 }
             }
-            Message::Cancel => self.press = None,
+            Message::Cancel => {
+                self.press = None;
+                self.dragging = None;
+            }
             Message::CycleSymmetry(forward) => {
                 let step = |n: u8| {
                     let at = SYMMETRY.iter().position(|(c, _)| *c == n).unwrap_or(0);
@@ -194,90 +329,141 @@ impl State {
                     None => ctx.drag.symmetry = step(ctx.drag.symmetry),
                 }
             }
+            Message::SavePreset => {
+                let captured = ctx.selection.part().and_then(|id| presets::Preset::capture(ctx.doc.rocket(), id));
+                match captured {
+                    Some(preset) => match presets::save(&preset) {
+                        Ok(_) => {
+                            ctx.notify(format!("Saved preset {}", preset.name));
+                            self.reload_presets();
+                        }
+                        Err(e) => ctx.notify(format!("Could not save the preset: {e}")),
+                    },
+                    None => ctx.notify("Select a part to save as a preset"),
+                }
+            }
+            Message::DeletePreset(i) => {
+                if let Some(file) = self.presets.get(i).and_then(|p| p.file.clone()) {
+                    let _ = std::fs::remove_file(file);
+                    self.reload_presets();
+                }
+            }
         }
         Task::none()
     }
 
-    /// `X` / `Shift+X` cycle the symmetry count. Only called for keys no widget handled.
+    /// `/` focuses search, `X` / `Shift+X` cycle the symmetry count, and `1` to `7` pick a category while the cursor is over
+    /// the bin. Only called for keys no widget handled.
     pub fn on_key(&self, key: &keyboard::Key, modifiers: keyboard::Modifiers, _ctx: &Ctx) -> Option<Message> {
-        match key {
-            keyboard::Key::Character(c) if (modifiers.is_empty() || modifiers == keyboard::Modifiers::SHIFT) && c.eq_ignore_ascii_case("x") => {
-                Some(Message::CycleSymmetry(!modifiers.shift()))
+        let keyboard::Key::Character(c) = key else {
+            return None;
+        };
+        let plain = modifiers.is_empty();
+        match c.as_str() {
+            "/" if plain => Some(Message::FocusSearch),
+            c if (plain || modifiers == keyboard::Modifiers::SHIFT) && c.eq_ignore_ascii_case("x") => Some(Message::CycleSymmetry(!modifiers.shift())),
+            digit if plain && self.hovered => {
+                let n: usize = digit.parse().ok()?;
+                (1..=Category::ALL.len()).contains(&n).then(|| Message::Category(Category::ALL[n - 1]))
             }
             _ => None,
         }
     }
 
-    /// The bin: rail, header, the list of the category, symmetry footer.
+    /// The row of `item`.
+    fn row_view(&self, id: RowId, item: &Item, ctx: &Ctx) -> RowView {
+        let rocket = ctx.doc.rocket();
+        let reason = self.unavailable(item, ctx);
+        let mut current = false;
+        let (size, sil, deletable) = match item {
+            Item::Axial(_, kind) => {
+                let kind = sized(kind, self.sizing(ctx));
+                let size = match &kind {
+                    PartKind::NoseCone { shape: bowshock_model::NoseShape::TangentOgive, .. } => format!("Ogive · {}", size_label(&kind)),
+                    _ => size_label(&kind),
+                };
+                (size, rows::Sil::fill(rows::axial_outline(&kind)), None)
+            }
+            Item::Radial(_, kind) => (radial_size_label(kind), rows::Sil::fill(rows::radial_outline(kind)), None),
+            Item::Internal(_, kind) => {
+                let inner = items::host_for(rocket, ctx.selection, items::zone_of(kind)).and_then(|h| items::host_inner(rocket, h));
+                (internal_size(kind, inner), rows::internal_outline(kind), None)
+            }
+            Item::Motor(i) => {
+                let m = &ctx.physics.motors().motors[*i];
+                current = items::motor_mount(rocket, ctx.selection)
+                    .and_then(|mount| rocket.active_configuration().slot(mount.id).and_then(|s| s.motor.as_ref()))
+                    .is_some_and(|r| r.designation == m.designation);
+                (format!("Ø{:.0} × {:.0} · {:.0} Ns", m.diameter * 1000.0, m.length * 1000.0, m.total_impulse()), rows::motor_outline(), None)
+            }
+            Item::Preset(i) => {
+                let entry = &self.presets[*i];
+                (entry.preset.summary(), rows::preset_outline(&entry.preset), (!entry.builtin).then_some(*i))
+            }
+        };
+        let active = ctx.drag.active();
+        let carried = match item {
+            Item::Axial(..) => ctx.drag.axial.as_ref().and_then(|d| d.row),
+            Item::Radial(..) => ctx.drag.radial.as_ref().and_then(|d| d.row),
+            Item::Internal(..) => ctx.drag.internal.as_ref().and_then(|d| d.row),
+            Item::Motor(_) | Item::Preset(_) => None,
+        };
+        let state = if reason.is_some() {
+            RowState::Unavailable
+        } else if carried == Some(id.index) && self.dragging.is_some_and(|d| d.category == id.category) {
+            RowState::Dragging
+        } else if current {
+            RowState::Current
+        } else if !active && self.row_hover == Some(id) {
+            RowState::Hovered
+        } else {
+            RowState::Idle
+        };
+        RowView { id, name: self.name_of(item, ctx), size, sil, state, reason: reason.unwrap_or_default(), deletable }
+    }
+
+    /// The rows to list: the category's, or with a search text every category's rows whose name matches.
+    fn listed(&self, ctx: &Ctx) -> Vec<(RowId, Item)> {
+        let needle = self.search.trim().to_lowercase();
+        let categories: &[Category] = if needle.is_empty() { std::slice::from_ref(&self.category) } else { &Category::ALL };
+        categories
+            .iter()
+            .flat_map(|&c| self.items(c, ctx).into_iter().enumerate().map(move |(i, item)| (RowId::new(c, i), item)))
+            .filter(|(_, item)| needle.is_empty() || self.name_of(item, ctx).to_lowercase().contains(&needle))
+            .collect()
+    }
+
+    /// The bin: rail, header, the list, symmetry footer.
     pub fn view<'a>(&'a self, ctx: &'a Ctx) -> Element<'a, Message> {
         let rocket = ctx.doc.rocket();
-        let rail = column(Category::ALL.iter().map(|&c| {
-            let active = c == self.category;
-            let glyph = text(&c.label()[..1]).font(MONO).size(TEXT_BODY);
-            row![
-                container(Space::new()).width(2).height(RAIL_W).style(theme::underline(active)),
-                button(container(glyph).center(Fill)).width(Fill).height(RAIL_W).style(theme::segment(active)).on_press(Message::Category(c)),
-            ]
-            .boxed()
-        }))
-        .width(RAIL_W);
+        let rail = column(Category::ALL.iter().map(|&c| rail_button(c.icon(), c == self.category && self.search.trim().is_empty(), Message::Category(c))))
+            .width(RAIL_W);
+        let rail = container(rail)
+            .height(Fill)
+            .style(|theme: &Theme| container::Style { background: Some(Background::Color(theme::tokens(theme).bg_100)), ..container::Style::default() });
 
-        let symmetry = column![
-            label("SYMMETRY"),
-            segmented(&SYMMETRY, ctx.drag.symmetry, Message::Symmetry),
-            label("ANGLE SNAP"),
-            segmented(&ANGLE_SNAP, ctx.drag.angle_snap, Message::AngleSnap),
-        ]
-        .spacing(SPACE_2);
+        let listed = self.listed(ctx);
+        let searching = !self.search.trim().is_empty();
+        let title = if searching { "RESULTS" } else { self.category.label() };
+        let header = container(row![label(title), Space::new().width(Fill), label(listed.len().to_string())].align_y(iced::Center))
+            .padding([SPACE_1, theme::PAD_PANEL])
+            .width(Fill);
 
-        let rows: Vec<Element<'_, Message>> = match self.category {
-            Category::Airframe => {
-                let needle = self.search.to_lowercase();
-                catalogue()
-                    .iter()
-                    .enumerate()
-                    .map(|(index, (name, _))| (index, *name, self.row_kind(index, ctx)))
-                    .filter(|(_, name, _)| name.to_lowercase().contains(&needle))
-                    .map(|(index, name, kind)| {
-                        let state = if rocket.nodes_for(&kind).is_empty() {
-                            RowState::Unavailable
-                        } else if ctx.drag.axial.as_ref().is_some_and(|d| d.row == Some(index)) {
-                            RowState::Dragging
-                        } else if self.row_hover == Some(index) && ctx.drag.axial.is_none() {
-                            RowState::Hovered
-                        } else {
-                            RowState::Idle
-                        };
-                        entry(index, name, size_label(&kind), axial_outline(&kind), state, "A rocket has one nose cone, at the fore end")
-                    })
-                    .collect()
-            }
-            Category::Fins => {
-                let needle = self.search.to_lowercase();
-                let attachable = !rocket.parts().is_empty();
-                radial_catalogue()
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, (name, _))| name.to_lowercase().contains(&needle))
-                    .map(|(index, (name, kind))| {
-                        let state = if !attachable {
-                            RowState::Unavailable
-                        } else if ctx.drag.radial.as_ref().is_some_and(|d| d.row == Some(index)) {
-                            RowState::Dragging
-                        } else if self.row_hover == Some(index) && ctx.drag.radial.is_none() {
-                            RowState::Hovered
-                        } else {
-                            RowState::Idle
-                        };
-                        entry(index, name, radial_size_label(kind), radial_outline(kind), state, "Needs an airframe part to attach to")
-                    })
-                    .collect()
-            }
-            // Internals, recovery, mass, motors and presets are not in the bin yet.
-            _ => Vec::new(),
-        };
-
-        let search = text_input("Search parts", &self.search).on_input(Message::Search).size(TEXT_BODY).padding([4.0, SPACE_2]).style(theme::input);
+        let search = stack![
+            text_input("Search parts", &self.search)
+                .id(SEARCH_ID)
+                .on_input(Message::Search)
+                .size(TEXT_BODY)
+                .padding([4.0, SPACE_2])
+                .padding(iced::Padding { left: 26.0, right: 24.0, top: 4.0, bottom: 4.0 })
+                .style(theme::input),
+            container(canvas_widget(Magnifier).width(14).height(14)).padding(iced::Padding { left: 8.0, top: 8.0, ..iced::Padding::ZERO }),
+            container(container(text("/").font(MONO).size(TEXT_LABEL)).padding([0.0, 4.0]).style(theme::keycap)).align_right(Fill).padding(iced::Padding {
+                right: 6.0,
+                top: 6.0,
+                ..iced::Padding::ZERO
+            }),
+        ];
         let sizing = row![
             checkbox(self.size_to_selection)
                 .label("Size to selection")
@@ -290,165 +476,108 @@ impl State {
         ]
         .spacing(SPACE_1)
         .align_y(iced::Center);
+        let controls = container(column![search, sizing].spacing(SPACE_2)).padding([SPACE_1, theme::PAD_PANEL]);
 
-        let header = container(column![label(self.category.label()), search, sizing].spacing(SPACE_2)).padding(theme::PAD_PANEL);
-        let list = column![header, column(rows), Space::new().height(Fill), container(symmetry).padding(theme::PAD_PANEL),].width(Fill);
-
-        container(row![rail, list]).height(Fill).style(theme::panel).boxed()
-    }
-}
-
-/// The airframe parts offered, with their default sizes (metres). The names are the bin's: the model calls any contracting
-/// transition a boattail, but the bin offers a plain Transition that happens to contract too.
-pub fn catalogue() -> [(&'static str, PartKind); 4] {
-    [
-        ("Nose cone", PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762 }),
-        ("Body tube", PartKind::BodyTube { length: 0.600, diameter: 0.0762 }),
-        ("Transition", PartKind::Transition { length: 0.0762, fore_diameter: 0.0762, aft_diameter: 0.054 }),
-        ("Boattail", PartKind::Transition { length: 0.050, fore_diameter: 0.0762, aft_diameter: 0.060 }),
-    ]
-}
-
-/// The radial parts offered ("Fins & guides"), with their default sizes (metres).
-pub fn radial_catalogue() -> [(&'static str, RadialKind); 3] {
-    [
-        ("Fin set", RadialKind::FinSet { root_chord: 0.12, tip_chord: 0.05, span: 0.0762, sweep: 0.06, thickness: 0.00318 }),
-        ("Launch lug", RadialKind::LaunchLug { length: 0.0508, diameter: 0.0095 }),
-        ("Rail button", RadialKind::RailButton { height: 0.008, diameter: 0.011 }),
-    ]
-}
-
-/// `kind` with its diameters scaled so the largest end is `diameter` (lengths and shape unchanged); `None` leaves it alone.
-pub fn sized(kind: &PartKind, diameter: Option<f64>) -> PartKind {
-    let Some(d) = diameter else {
-        return kind.clone();
-    };
-    match *kind {
-        PartKind::NoseCone { shape, length, .. } => PartKind::NoseCone { shape, length, diameter: d },
-        PartKind::BodyTube { length, .. } => PartKind::BodyTube { length, diameter: d },
-        PartKind::Transition { length, fore_diameter, aft_diameter } => {
-            let k = d / fore_diameter.max(aft_diameter);
-            PartKind::Transition { length, fore_diameter: fore_diameter * k, aft_diameter: aft_diameter * k }
+        let mut rows: Vec<Element<'_, Message>> = Vec::new();
+        if self.category == Category::Presets && !searching {
+            let can_save = ctx.selection.part().is_some();
+            rows.push(
+                container(
+                    button(text("Save selection as preset").size(TEXT_LABEL)).style(theme::ghost).on_press_maybe(can_save.then_some(Message::SavePreset)),
+                )
+                .padding([SPACE_1, theme::PAD_PANEL])
+                .boxed(),
+            );
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RowState {
-    Idle,
-    Hovered,
-    /// Being dragged into the viewport.
-    Dragging,
-    /// Nothing may attach it right now: dimmed, and neither draggable nor clickable.
-    Unavailable,
-}
-
-/// One ruled row of the list. `index` is the position in its catalogue, reported by the row's messages. `outline` is the
-/// silhouette (see [`axial_outline`], [`radial_outline`]); an unavailable row shows `reason` in a tooltip.
-pub fn entry<'a>(index: usize, name: &'static str, size: String, outline: Vec<Point>, state: RowState, reason: &'static str) -> Element<'a, Message> {
-    let alpha = if state == RowState::Unavailable { UNAVAILABLE } else { 1.0 };
-    let name = text(name).size(TEXT_BODY).style(move |theme: &Theme| text::Style { color: Some(theme::tokens(theme).ink.scale_alpha(alpha)), selection: None });
-    let size = text(size)
-        .font(MONO)
-        .size(TEXT_LABEL)
-        .style(move |theme: &Theme| text::Style { color: Some(theme::tokens(theme).ink_muted.scale_alpha(alpha)), selection: None });
-    let silhouette = canvas_widget(Silhouette { outline, alpha }).width(SILHOUETTE.0).height(SILHOUETTE.1);
-    let content = row![silhouette, column![name, size].spacing(2)].spacing(SPACE_2).align_y(Center);
-
-    let dragging = state == RowState::Dragging;
-    let edge = container(Space::new()).width(2).height(Fill).style(move |theme: &Theme| container::Style {
-        background: Some(Background::Color(if dragging { theme::tokens(theme).accent } else { iced::Color::TRANSPARENT })),
-        ..container::Style::default()
-    });
-    let body =
-        container(row![edge, container(content).padding([0.0, SPACE_2]).center_y(Fill)]).width(Fill).height(PART_ROW_H - 1.0).style(move |theme: &Theme| {
-            let t = theme::tokens(theme);
-            let bg = match state {
-                RowState::Dragging => Some(t.accent_soft),
-                RowState::Hovered => Some(t.bg_400),
-                RowState::Idle | RowState::Unavailable => None,
-            };
-            container::Style { background: bg.map(Background::Color), ..container::Style::default() }
+        let empty = listed.is_empty().then(|| match self.category {
+            _ if searching => "No part matches".to_string(),
+            Category::Motors => match items::motor_mount(rocket, ctx.selection) {
+                None => "No motor mount. Add one under Internal.".to_string(),
+                Some(m) => format!("No bundled motor fits Ø{} mm.", mm(m.inner_diameter)),
+            },
+            _ => String::new(),
         });
-    let rule = container(Space::new())
-        .width(Fill)
-        .height(1)
-        .style(|theme: &Theme| container::Style { background: Some(Background::Color(theme::tokens(theme).line_100)), ..container::Style::default() });
-    let ruled = column![body, rule];
+        rows.extend(listed.iter().map(|(id, item)| rows::entry(self.row_view(*id, item, ctx))));
+        if let Some(message) = empty.filter(|m| !m.is_empty()) {
+            rows.push(container(text(message).size(TEXT_LABEL).style(theme::faint)).padding(theme::PAD_PANEL).boxed());
+        }
+        let list = scrollable(column(rows).width(Fill))
+            .height(Fill)
+            .direction(scrollable::Direction::Vertical(scrollable::Scrollbar::new().width(4).scroller_width(4)));
 
-    if state == RowState::Unavailable {
-        let reason = container(text(reason).size(TEXT_LABEL)).padding(SPACE_1).style(theme::overlay);
-        return tooltip(ruled, reason).position(tooltip::Position::Right).boxed();
+        let rule = || container(Space::new()).width(Fill).height(1).style(theme::hairline);
+        let body = column![header, rule(), controls, rule(), list, rule(), symmetry_footer(ctx)].width(Fill).height(Fill);
+        let content = container(row![rail, body]).height(Fill).style(theme::panel);
+        mouse_area(content).on_enter(Message::Hover(true)).on_exit(Message::Hover(false)).boxed()
     }
-    mouse_area(ruled)
-        .on_press(Message::RowPress(index))
-        .on_enter(Message::RowHover(Some(index)))
-        .on_exit(Message::RowHover(None))
-        .interaction(mouse::Interaction::Grab)
-        .boxed()
 }
 
-/// Maps points `(x, y)` in a `width` x `height` box (y up) into the silhouette box with `y = 0` on canvas row `baseline`.
-fn fit(points: &[(f64, f64)], width: f64, height: f64, baseline: f32) -> Vec<Point> {
-    let (w, h) = (f64::from(SILHOUETTE_FIT.0), f64::from(SILHOUETTE_FIT.1));
-    let x0 = (SILHOUETTE.0 - SILHOUETTE_FIT.0) / 2.0;
-    points.iter().map(|&(x, y)| Point::new(x0 + (x / width * w) as f32, baseline - (y / height * h) as f32)).collect()
+/// The footer pinned at the bin's foot: the symmetry count (with the `X` key that cycles it) and the angle snap.
+fn symmetry_footer<'a>(ctx: &'a Ctx) -> Element<'a, Message> {
+    let key = button(container(text("X").font(MONO).size(TEXT_LABEL)).padding([0.0, 4.0]).style(theme::keycap))
+        .padding(0)
+        .style(|_, _| button::Style::default())
+        .on_press(Message::CycleSymmetry(true));
+    let head = row![label("SYMMETRY"), Space::new().width(Fill), key].align_y(iced::Center);
+    let count =
+        row![canvas_widget(SymmetryGlyph { count: ctx.drag.symmetry }).width(22).height(22), segmented_fill(&SYMMETRY, ctx.drag.symmetry, Message::Symmetry)]
+            .spacing(SPACE_2)
+            .align_y(iced::Center);
+    let snap =
+        row![text("Angle snap").size(TEXT_BODY).style(theme::muted), Space::new().width(Fill), segmented(&ANGLE_SNAP, ctx.drag.angle_snap, Message::AngleSnap)]
+            .align_y(iced::Center);
+    container(column![head, count, snap].spacing(SPACE_2)).padding(theme::PAD_PANEL).width(Fill).boxed()
 }
 
-/// The silhouette of an axial part: its profile mirrored about the axis. Length fills the width and the largest diameter the
-/// height, so a long tube reads as a bar rather than a hairline.
-pub fn axial_outline(kind: &PartKind) -> Vec<Point> {
-    let profile = kind.profile();
-    let length = profile.last().map_or(0.0, |p| p.0);
-    let radius = profile.iter().fold(0.0f64, |m, p| m.max(p.1));
-    if length <= 0.0 || radius <= 0.0 {
-        return Vec::new();
-    }
-    let top: Vec<(f64, f64)> = profile.iter().map(|&(z, r)| (z, r)).collect();
-    let bottom: Vec<(f64, f64)> = profile.iter().rev().map(|&(z, r)| (z, -r)).collect();
-    // Height spans -radius..radius over the fit height, centred on the canvas.
-    let all: Vec<(f64, f64)> = top.into_iter().chain(bottom).map(|(z, r)| (z, r + radius)).collect();
-    fit(&all, length, 2.0 * radius, (SILHOUETTE.1 + SILHOUETTE_FIT.1) / 2.0)
-}
-
-/// The silhouette of a radial part: a fin in profile, a lug as a tube seen from the side, a rail button as a stem and head.
-pub fn radial_outline(kind: &RadialKind) -> Vec<Point> {
-    let base = (SILHOUETTE.1 + SILHOUETTE_FIT.1) / 2.0;
+/// The size line of an internal part, in mm. Diameters that follow the part it goes in (`inner`, its bore) are shown resolved.
+fn internal_size(kind: &InternalKind, inner: Option<f64>) -> String {
+    let dia = |v: Option<f64>| v.or(inner).map_or("Ø auto".to_string(), |d| format!("Ø{}", mm(d)));
     match *kind {
-        RadialKind::FinSet { tip_chord, span, sweep, root_chord, .. } => {
-            let extent = root_chord.max(sweep + tip_chord);
-            fit(&[(0.0, 0.0), (sweep, span), (sweep + tip_chord, span), (root_chord, 0.0)], extent, span, base)
-        }
-        RadialKind::LaunchLug { .. } => fit(&[(0.0, 0.0), (0.0, 0.4), (1.0, 0.4), (1.0, 0.0)], 1.0, 1.0, base - SILHOUETTE_FIT.1 * 0.3),
-        RadialKind::RailButton { .. } => {
-            fit(&[(0.0, 0.0), (0.0, 0.7), (0.15, 0.7), (0.15, 1.0), (0.85, 1.0), (0.85, 0.7), (1.0, 0.7), (1.0, 0.0)], 1.0, 1.0, base)
-        }
-        RadialKind::EllipticalFin { .. } | RadialKind::FreeformFin { .. } => {
-            let (extent, span) = (kind.extent().max(1e-9), kind.fin_span().unwrap_or(0.0).max(1e-9));
-            fit(&kind.planform().unwrap_or_default(), extent, span, base)
-        }
+        InternalKind::InnerTube { outer_diameter, length, .. } => format!("Ø{} × {}", mm(outer_diameter), mm(length)),
+        InternalKind::CenteringRing { outer_diameter, thickness, .. } => format!("{} × {}", dia(outer_diameter), mm(thickness)),
+        InternalKind::Bulkhead { diameter, thickness } => format!("{} × {}", dia(diameter), mm(thickness)),
+        InternalKind::Coupler { outer_diameter, length, .. } => format!("{} × {}", dia(outer_diameter), mm(length)),
+        InternalKind::EngineBlock { inner: bore, thickness, .. } => format!("Ø{} bore × {}", mm(bore), mm(thickness)),
+        InternalKind::Parachute { diameter, line_count, .. } => format!("Ø{} · {line_count} lines", mm(diameter)),
+        InternalKind::Streamer { length, width, .. } => format!("{} × {}", mm(width), mm(length)),
+        InternalKind::ShockCord { length, .. } => format!("{} long", mm(length)),
+        InternalKind::MassComponent { mass, length, .. } => format!("{:.0} g · {}", mass * 1000.0, mm(length)),
     }
 }
 
-/// A silhouette polygon, filled `part-body`.
-struct Silhouette {
-    outline: Vec<Point>,
-    alpha: f32,
-}
+/// The magnifier in the search field.
+struct Magnifier;
 
-impl<Message> canvas::Program<Message> for Silhouette {
+impl<M> canvas::Program<M> for Magnifier {
     type State = ();
 
     fn draw(&self, _: &(), renderer: &Renderer, theme: &Theme, bounds: Rectangle, _: mouse::Cursor) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
-        if let Some((first, rest)) = self.outline.split_first() {
-            let path = Path::new(|b| {
-                b.move_to(*first);
-                rest.iter().for_each(|p| b.line_to(*p));
-                b.close();
-            });
-            frame.fill(&path, theme::tokens(theme).part_body.scale_alpha(self.alpha));
+        let stroke = Stroke::default().with_color(theme::tokens(theme).ink_faint).with_width(1.25);
+        frame.stroke(&Path::circle(Point::new(5.5, 5.5), 4.0), stroke);
+        frame.stroke(&Path::line(Point::new(8.5, 8.5), Point::new(12.5, 12.5)), stroke);
+        vec![frame.into_geometry()]
+    }
+}
+
+/// The symmetry glyph: `count` spokes around a small ring, in `accent`.
+struct SymmetryGlyph {
+    count: u8,
+}
+
+impl<M> canvas::Program<M> for SymmetryGlyph {
+    type State = ();
+
+    fn draw(&self, _: &(), renderer: &Renderer, theme: &Theme, bounds: Rectangle, _: mouse::Cursor) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        let stroke = Stroke::default().with_color(theme::tokens(theme).accent).with_width(1.5);
+        let c = Point::new(bounds.width / 2.0, bounds.height / 2.0);
+        let r = bounds.width.min(bounds.height) / 2.0 - 1.0;
+        for k in 0..self.count.max(1) {
+            let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU * f32::from(k) / f32::from(self.count.max(1));
+            frame.stroke(&Path::line(Point::new(c.x + a.cos() * r * 0.35, c.y + a.sin() * r * 0.35), Point::new(c.x + a.cos() * r, c.y + a.sin() * r)), stroke);
         }
+        frame.stroke(&Path::circle(c, r * 0.3), stroke);
         vec![frame.into_geometry()]
     }
 }
@@ -456,16 +585,26 @@ impl<Message> canvas::Program<Message> for Silhouette {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::ui::size_label;
 
     #[test]
     fn defaults_follow_the_reference_diameter() {
-        let [(_, nose), (_, tube), (_, transition), _] = catalogue();
-        assert_eq!(size_label(&tube), "Ø76.2 × 600.0");
-        assert_eq!(size_label(&transition), "Ø76.2 → Ø54.0 × 76.2");
-        assert_eq!(sized(&nose, Some(0.1)).fore_diameter().max(sized(&nose, Some(0.1)).aft_diameter()), 0.1);
+        let cat = axial_catalogue();
+        let (nose, tube, transition) = (&cat[0].1, &cat[5].1, &cat[6].1);
+        assert_eq!(size_label(tube), "Ø76.2 × 600.0");
+        assert_eq!(size_label(transition), "Ø76.2 → Ø54.0 × 76.2");
+        assert_eq!(sized(nose, Some(0.1)).fore_diameter().max(sized(nose, Some(0.1)).aft_diameter()), 0.1);
         // A transition keeps its ratio and its length.
-        let big = sized(&transition, Some(0.1524));
+        let big = sized(transition, Some(0.1524));
         assert_eq!(size_label(&big), "Ø152.4 → Ø108.0 × 76.2");
-        assert_eq!(sized(&tube, None), tube);
+        assert_eq!(sized(tube, None), *tube);
+    }
+
+    #[test]
+    fn size_lines_follow_the_kit() {
+        let coupler = &structure_catalogue()[5].1;
+        assert_eq!(internal_size(coupler, Some(0.0737)), "Ø73.7 × 152.4");
+        assert_eq!(internal_size(coupler, None), "Ø auto × 152.4");
+        assert_eq!(internal_size(&mass_catalogue()[4].1, None), "100 g · 30.0");
     }
 }

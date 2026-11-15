@@ -1,0 +1,72 @@
+# The Analyze screen: every analysis, hover, the table view and a second configuration.
+# Run with the example rocket loaded: `cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/analyze.drive out/analyze`
+viewport 1280x800
+click "Analyze"
+# Let the worker thread finish before the first screenshot.
+move (640, 400)
+move (642, 402)
+screenshot aerodynamics.png
+
+# Hover moves the crosshair and the values at the cursor.
+move (700, 300)
+move (702, 302)
+screenshot aerodynamics-hover.png
+
+# CG for margin: burnout.
+click "Burnout"
+move (704, 304)
+screenshot aerodynamics-burnout.png
+click "Liftoff"
+
+# Method tooltip on the unavailable CFD table.
+move (222, 312)
+move (224, 313)
+screenshot cfd-tooltip.png
+
+click "Stability"
+move (500, 300)
+move (502, 302)
+screenshot stability.png
+
+click "Drag breakdown"
+move (500, 300)
+move (502, 302)
+screenshot drag.png
+
+click "Fin flutter"
+move (500, 300)
+move (502, 302)
+screenshot flutter.png
+
+click "Dispersion"
+move (500, 300)
+move (502, 302)
+screenshot dispersion.png
+
+click "Aerodynamics"
+move (500, 300)
+move (502, 302)
+click "Table view"
+screenshot table.png
+click "Plots"
+screenshot back-to-plots.png
+
+# A second configuration: one series per configuration, labelled, with a colour key above the plots.
+click "CONFIG"
+click "New configuration…"
+click "I284W"
+click "Add configuration"
+move (500, 300)
+move (502, 302)
+screenshot compare-aero.png
+click "Dispersion"
+move (500, 300)
+move (502, 302)
+screenshot compare-dispersion.png
+
+# The light theme.
+click "Aerodynamics"
+click "Light"
+move (700, 300)
+move (702, 302)
+screenshot light.png

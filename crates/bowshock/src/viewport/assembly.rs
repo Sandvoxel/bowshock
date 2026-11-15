@@ -12,8 +12,6 @@ use crate::app::ui::mm;
 use crate::theme::{self, MONO};
 use crate::tokens::TEXT_LABEL;
 
-/// A node within this many px of the cursor is the snap target.
-const SNAP_RANGE: f32 = 40.0;
 /// Diameter of a node ring.
 const RING: f32 = 7.0;
 /// Width of one MONO glyph at `TEXT_LABEL`, as a fraction of the font size (IBM Plex Mono advances 0.6 em).
@@ -63,14 +61,9 @@ impl Overlay<'_> {
             .collect()
     }
 
-    /// The node nearest `at` within [`SNAP_RANGE`].
+    /// The node nearest `at`: a part dropped from the bin always attaches to the nearest node, no key needed.
     fn nearest(&self, at: Point, size: Size) -> Option<usize> {
-        self.nodes(size)
-            .into_iter()
-            .map(|(index, _, p)| (index, p.distance(at)))
-            .filter(|&(_, d)| d <= SNAP_RANGE)
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(index, _)| index)
+        self.nodes(size).into_iter().map(|(index, _, p)| (index, p.distance(at))).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(index, _)| index)
     }
 
     /// What releasing here would do, as a tag.
@@ -137,7 +130,7 @@ impl canvas::Program<Message> for Overlay<'_> {
             }
             None => {
                 no_entry(&mut frame, cursor + iced::Vector::new(14.0, 14.0), t.err);
-                "No attach node in range".to_string()
+                "No attach node".to_string()
             }
         };
         // The tag sits down-right of the cursor (after the no-entry glyph when there is one).

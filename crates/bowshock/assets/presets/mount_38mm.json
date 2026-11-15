@@ -1,0 +1,37 @@
+{
+  "name": "38 mm mount assembly",
+  "axial": [],
+  "radials": [],
+  "internals": [
+    {
+      "host": 0,
+      "kind": { "InnerTube": { "outer_diameter": 0.0413, "thickness": 0.0016, "length": 0.2, "motor_mount": true, "overhang": 0.0 } },
+      "offset": 0.0,
+      "from_aft": true,
+      "material": "cardboard"
+    },
+    {
+      "host": 0,
+      "kind": { "CenteringRing": { "outer_diameter": null, "inner_diameter": null, "thickness": 0.00635 } },
+      "offset": 0.0,
+      "from_aft": true,
+      "name": "Aft centering ring",
+      "material": "birch_plywood"
+    },
+    {
+      "host": 0,
+      "kind": { "CenteringRing": { "outer_diameter": null, "inner_diameter": null, "thickness": 0.00635 } },
+      "offset": 0.19365,
+      "from_aft": true,
+      "name": "Fore centering ring",
+      "material": "birch_plywood"
+    },
+    {
+      "host": 0,
+      "kind": { "EngineBlock": { "outer": null, "inner": 0.0381, "thickness": 0.00635 } },
+      "offset": 0.19365,
+      "from_aft": true,
+      "material": "birch_plywood"
+    }
+  ]
+}

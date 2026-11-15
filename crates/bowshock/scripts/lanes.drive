@@ -1,0 +1,58 @@
+# Station Lanes on the example rocket:
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/lanes.drive /tmp/lanes
+# Panel geometry at 1280x800: lanes y 558..764, ruler 558..582, lanes Structure 582, Aero 610, Propulsion 638 (two rows), Recovery 688, Avionics 716.
+viewport 1280x800
+move (640, 400)
+screenshot rest.png
+# Select the fin set: accent corner brackets, never a fill.
+click (923, 624)
+screenshot selected-fin.png
+# Drag the ballast bar aft: both distances in the tag, mass shading, the tube's walls, CG and the margin follow live.
+press (505, 730)
+move (520, 730)
+move (560, 730)
+move (610, 730)
+screenshot drag-mid.png
+release (610, 730)
+screenshot drag-done.png
+# Hover a rail button: it is named with its station.
+move (683, 624)
+screenshot hover.png
+# Hover the CG label: mass shading shows while the cursor is on it.
+move (700, 758)
+screenshot hover-cg.png
+# Right-click empty space in the Recovery lane: only that system's parts, station prefilled.
+click right(780, 702)
+screenshot add-menu.png
+# Choose one: it is added at that station (and selected).
+click "Drogue"
+screenshot added.png
+# Drag a centering ring from the parts bin onto Structure: a dashed ghost in its own lane and the exact station on the ruler.
+click (22, 149)
+press (143, 224)
+move (170, 240)
+move (400, 420)
+move (680, 590)
+move (700, 596)
+screenshot bin-drag.png
+release (700, 596)
+screenshot bin-drop.png
+# The caret at the right end of the ruler (or L) collapses the lanes to the ruler.
+click (964, 570)
+screenshot collapsed.png
+click (964, 752)
+screenshot expanded.png
+# Side-on (2D) view: the lanes lock to the viewport's scale, so every bar sits directly under the part it is.
+click "2D"
+move (640, 300)
+screenshot locked-2d.png
+# Resize: drag the aft end of the parachute bar.
+press (672, 702)
+move (685, 702)
+move (705, 702)
+screenshot resize-mid.png
+release (705, 702)
+screenshot resized.png
+# Light theme.
+click "Light"
+screenshot light.png

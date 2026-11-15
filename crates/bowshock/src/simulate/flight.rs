@@ -1,0 +1,414 @@
+//! A flight of the Simulate screen: a named set of launch conditions plus a motor choice, and the result of its last run.
+//!
+//! Flights live in the screen's [`State`](super::State) (the rocket document has no field for them, so they are not saved with
+//! the file). A flight never owns a copy of the rocket: [`prepare`] builds the simulation input from the document *at run
+//! time*, with the flight's motor and delay swapped into a clone, so a flight always flies the rocket as it is now. A run
+//! remembers the [`Spec`] and the document revision it flew; when either differs from the flight's current one the result is
+//! *stale* (the screen draws its values in `ink-faint` until it is run again).
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use bowshock_model::{ConfigId, MotorMount, MotorRef, Rocket};
+use bowshock_sim::from_model::{self, Phase};
+use bowshock_sim::{EventKind, FlightResult, Launch, SimInput, Turbulence};
+
+use crate::app::Ctx;
+use crate::widgets::chip::Severity;
+
+/// Identifies a flight within the screen.
+pub type FlightId = u64;
+
+/// Rail exit speed (m/s) a flight should have to be stable off the rail (the kit's `ok` chip, "≥ 15").
+pub const MIN_RAIL_EXIT: f64 = 15.0;
+/// Ground-hit speed (m/s) a landing must stay under (20 ft/s, the kit's "< 6.1").
+pub const MAX_GROUND_HIT: f64 = 6.1;
+/// Static margin (calibers) off the rail that counts as stable.
+pub const MIN_OFF_RAIL_CAL: f64 = 1.0;
+/// How far the ejection delay may be from the optimum before the screen warns (s).
+pub const DELAY_TOLERANCE: f64 = 0.5;
+
+/// What the flight burns.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MotorChoice {
+    /// Whatever the document's active configuration holds, now.
+    Active,
+    /// A named configuration of the document.
+    Config(ConfigId),
+    /// This motor in the first mount of the first stage, everything else as the active configuration has it.
+    Motor(MotorRef),
+}
+
+/// A flight's conditions: everything that, when changed, makes its result stale. SI throughout (angles in radians,
+/// temperature in kelvin).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Spec {
+    /// The motor.
+    pub motor: MotorChoice,
+    /// Ejection delay (s); `None` takes the configuration's own.
+    pub delay: Option<f64>,
+    /// Launch rail length (m).
+    pub rail_length: f64,
+    /// Rail tilt from vertical (rad).
+    pub launch_angle: f64,
+    /// Mean wind speed (m/s).
+    pub wind_speed: f64,
+    /// Direction the wind blows from, clockwise from north (rad).
+    pub wind_from: f64,
+    /// Gust intensity.
+    pub turbulence: Turbulence,
+    /// Site altitude above sea level (m).
+    pub site_altitude: f64,
+    /// Ground temperature (K).
+    pub temperature: f64,
+    /// The distance from the pad the rocket has to land within (m).
+    pub field_radius: f64,
+}
+
+impl Default for Spec {
+    /// The kit's nominal flight: 5° rail, 2.2 m/s breeze from 250°, low turbulence, 120 m site at 15 °C, 300 m field.
+    fn default() -> Self {
+        Spec {
+            motor: MotorChoice::Active,
+            delay: None,
+            rail_length: 1.52,
+            launch_angle: 5f64.to_radians(),
+            wind_speed: 2.2,
+            wind_from: 250f64.to_radians(),
+            turbulence: Turbulence::Low,
+            site_altitude: 120.0,
+            temperature: 288.15,
+            field_radius: 300.0,
+        }
+    }
+}
+
+/// The times of the flight a result number points at (clicking the number moves the plot crosshair there).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Times {
+    /// Rail exit.
+    pub rail_exit: f64,
+    /// Last burnout.
+    pub burnout: f64,
+    /// Apogee.
+    pub apogee: f64,
+    /// Peak ground speed on the way up.
+    pub max_speed: f64,
+    /// Peak Mach number on the way up.
+    pub max_mach: f64,
+    /// Peak acceleration on the way up.
+    pub max_accel: f64,
+    /// First recovery deployment, if any.
+    pub deploy: Option<f64>,
+    /// Ground contact.
+    pub landing: f64,
+}
+
+impl Times {
+    /// Reads the event times and the peak instants out of `result`.
+    pub fn of(result: &FlightResult) -> Times {
+        let mut t = Times { landing: result.summary.flight_time, apogee: result.summary.time_to_apogee, ..Times::default() };
+        for e in &result.trajectory.events {
+            match e.kind {
+                EventKind::RailExit => t.rail_exit = e.t,
+                EventKind::Burnout => t.burnout = t.burnout.max(e.t),
+                EventKind::Apogee => t.apogee = e.t,
+                EventKind::Deploy(_) => t.deploy = Some(t.deploy.map_or(e.t, |d: f64| d.min(e.t))),
+                EventKind::Landing => t.landing = e.t,
+                _ => {}
+            }
+        }
+        let up = result.trajectory.samples.iter().take_while(|s| s.t <= t.apogee);
+        let (mut v, mut m, mut a) = (f64::MIN, f64::MIN, f64::MIN);
+        for s in up {
+            if s.speed > v {
+                (v, t.max_speed) = (s.speed, s.t);
+            }
+            if s.mach > m {
+                (m, t.max_mach) = (s.mach, s.t);
+            }
+            if s.acceleration > a {
+                (a, t.max_accel) = (s.acceleration, s.t);
+            }
+        }
+        t
+    }
+}
+
+/// One finished run of a flight.
+#[derive(Debug, Clone)]
+pub struct Run {
+    /// The conditions it flew.
+    pub spec: Spec,
+    /// The document revision it flew.
+    pub revision: u64,
+    /// The trajectory and summary.
+    pub result: Arc<FlightResult>,
+    /// Wall-clock time the simulation took.
+    pub took: Duration,
+    /// The simulation's fine time step (s).
+    pub dt: f64,
+    /// The ejection delay it flew (s); infinite for a plugged motor.
+    pub delay: f64,
+    /// Instants of the headline numbers.
+    pub times: Times,
+}
+
+impl Run {
+    /// The worst thing wrong with this flight, `Ok` when nothing: unstable off the rail is an error; a slow rail exit, a hard
+    /// landing or a landing outside the field is a warning.
+    pub fn severity(&self) -> Severity {
+        let s = &self.result.summary;
+        if s.stability_off_rail_cal < MIN_OFF_RAIL_CAL {
+            Severity::Err
+        } else if s.rail_exit_velocity < MIN_RAIL_EXIT || s.ground_hit_velocity > MAX_GROUND_HIT || !self.in_field() {
+            Severity::Warn
+        } else {
+            Severity::Ok
+        }
+    }
+
+    /// Whether it lands within the field radius it was flown with.
+    pub fn in_field(&self) -> bool {
+        self.result.summary.landing.0 <= self.spec.field_radius
+    }
+}
+
+/// One flight of the list.
+#[derive(Debug, Clone)]
+pub struct Flight {
+    /// Stable id.
+    pub id: FlightId,
+    /// Name in the list.
+    pub name: String,
+    /// What it flies.
+    pub spec: Spec,
+    /// The compare colour slot (1–4, `series-1…4`) while ticked; stays with the flight.
+    pub slot: Option<u8>,
+    /// The last finished run.
+    pub run: Option<Run>,
+    /// A run is in flight on a worker thread.
+    pub running: bool,
+    /// Why the last attempt could not run (the rocket has no motor, ...).
+    pub error: Option<String>,
+    /// Bumped on every launch so a superseded run's result is ignored.
+    pub ticket: u64,
+    /// The last dispersion study.
+    pub dispersion: Option<Dispersed>,
+    /// A dispersion study is in flight on a worker thread.
+    pub dispersing: bool,
+    /// Bumped on every dispersion launch so a superseded study is ignored.
+    pub dispersion_ticket: u64,
+}
+
+/// Landings of a dispersion study (GroundTrack, "Dispersion"): the flight flown many times with its conditions varied within
+/// tolerances.
+#[derive(Debug, Clone)]
+pub struct Dispersed {
+    /// The conditions the study varied around.
+    pub spec: Spec,
+    /// The document revision it flew.
+    pub revision: u64,
+    /// Where each run landed, `(east, north)` metres from the pad.
+    pub landings: Vec<(f64, f64)>,
+}
+
+impl Dispersed {
+    /// How many runs landed farther than `radius` from the pad.
+    pub fn outside(&self, radius: f64) -> usize {
+        self.landings.iter().filter(|(e, n)| e.hypot(*n) > radius).count()
+    }
+}
+
+/// Runs of a dispersion study.
+pub const DISPERSION_RUNS: usize = 100;
+
+/// The tolerances a dispersion study varies `spec` within (1σ): wind speed a quarter of the mean plus 0.3 m/s of gustiness, wind
+/// direction 10°, rail angle 1°, motor impulse 3 %, drag 5 % and dry mass 2 %.
+pub fn tolerances(spec: &Spec) -> bowshock_sim::Dispersion {
+    bowshock_sim::Dispersion {
+        wind_speed: 0.25 * spec.wind_speed + 0.3,
+        wind_dir: 10f64.to_radians(),
+        launch_angle: 1f64.to_radians(),
+        thrust_scale: 0.03,
+        cd_scale: 0.05,
+        mass: 0.02,
+    }
+}
+
+impl Flight {
+    /// A flight that has not run.
+    pub fn new(id: FlightId, name: impl Into<String>, spec: Spec) -> Flight {
+        Flight {
+            id,
+            name: name.into(),
+            spec,
+            slot: None,
+            run: None,
+            running: false,
+            error: None,
+            ticket: 0,
+            dispersion: None,
+            dispersing: false,
+            dispersion_ticket: 0,
+        }
+    }
+
+    /// The dispersion study of the current run, if there is one and it still matches the run.
+    pub fn dispersion_of_run(&self) -> Option<&Dispersed> {
+        let (run, d) = (self.run.as_ref()?, self.dispersion.as_ref()?);
+        (d.spec == run.spec && d.revision == run.revision).then_some(d)
+    }
+
+    /// Whether its result no longer matches its conditions or the document.
+    pub fn is_stale(&self, revision: u64) -> bool {
+        self.run.as_ref().is_some_and(|r| r.spec != self.spec || r.revision != revision)
+    }
+}
+
+/// The kit's four example flights: Nominal, Windy, Hot day and Bigger motor (AeroTech I284W). They are scenarios, not
+/// document data: each follows the document's active configuration except the last, which swaps in the bigger motor.
+pub fn default_flights() -> Vec<Flight> {
+    vec![
+        Flight::new(1, "Nominal", Spec::default()),
+        Flight::new(2, "Windy", Spec { wind_speed: 7.0, ..Spec::default() }),
+        Flight::new(3, "Hot day", Spec { temperature: 273.15 + 35.0, ..Spec::default() }),
+        Flight::new(4, "Bigger motor", Spec { motor: MotorChoice::Motor(MotorRef::new("I284W", "AeroTech")), ..Spec::default() }),
+    ]
+}
+
+/// The first motor mount of the first stage (a cluster flies its first motor), else any mount.
+pub fn first_mount(ctx: &Ctx) -> Option<MotorMount> {
+    let rocket = ctx.doc.rocket();
+    ctx.physics.mounts_of_stage(rocket, 1).into_iter().next().or_else(|| rocket.motor_mounts().into_iter().next())
+}
+
+/// The ejection delay (s) `spec` flies, without building the run: its own, else the one the configuration has in the first
+/// mount (0 with no mount or no slot).
+pub fn effective_delay(ctx: &Ctx, spec: &Spec) -> f64 {
+    if let Some(delay) = spec.delay {
+        return delay;
+    }
+    let rocket = ctx.doc.rocket();
+    let config = match &spec.motor {
+        MotorChoice::Config(id) => rocket.configuration(*id),
+        _ => Some(rocket.active_configuration()),
+    };
+    first_mount(ctx).and_then(|m| config?.slot(m.id)).map_or(0.0, |s| s.delay)
+}
+
+/// The designations the flight burns, in firing order (`H128W`, `I284W → H128W`), or `No motor`.
+pub fn motor_label(ctx: &Ctx, spec: &Spec) -> String {
+    let rocket = ctx.doc.rocket();
+    match &spec.motor {
+        MotorChoice::Motor(m) => m.designation.clone(),
+        MotorChoice::Active => designations(rocket, rocket.active_config_id()),
+        MotorChoice::Config(id) => designations(rocket, *id),
+    }
+}
+
+fn designations(rocket: &Rocket, id: ConfigId) -> String {
+    let Some(config) = rocket.configuration(id) else { return "—".to_string() };
+    let mounts = rocket.motor_mounts();
+    let mut motors: Vec<(f64, &str)> = config
+        .motors
+        .iter()
+        .filter_map(|s| {
+            let d = s.motor.as_ref()?.designation.as_str();
+            Some((mounts.iter().find(|m| m.id == s.mount).map_or(0.0, |m| m.fore_station), d))
+        })
+        .collect();
+    motors.sort_by(|a, b| b.0.total_cmp(&a.0));
+    if motors.is_empty() {
+        "No motor".to_string()
+    } else {
+        motors.iter().map(|m| m.1).collect::<Vec<_>>().join(" → ")
+    }
+}
+
+/// The launch conditions of `spec`. The rail leans into the wind (the usual practice, and why a track hooks back on itself).
+pub fn launch_of(spec: &Spec) -> Launch {
+    Launch {
+        rail_length: spec.rail_length,
+        angle_from_vertical: spec.launch_angle,
+        direction: spec.wind_from,
+        site_altitude: spec.site_altitude,
+        ground_temperature: spec.temperature,
+        wind_speed: spec.wind_speed,
+        wind_from: spec.wind_from,
+        turbulence: spec.turbulence,
+        seed: 1,
+    }
+}
+
+/// Builds the simulation input for `spec` from the document and returns it with the ejection delay it flies. The document is
+/// cloned, never touched: the flight's motor and delay are swapped into the clone.
+pub fn prepare(ctx: &Ctx, spec: &Spec) -> Result<(SimInput, f64), String> {
+    let mut rocket = ctx.doc.rocket().clone();
+    let mount = first_mount(ctx);
+    match &spec.motor {
+        MotorChoice::Active => {}
+        MotorChoice::Config(id) => {
+            if !rocket.select_configuration(*id) {
+                return Err("that configuration no longer exists".to_string());
+            }
+        }
+        MotorChoice::Motor(motor) => {
+            let mount = mount.as_ref().ok_or("the rocket has no motor mount")?;
+            rocket.set_motor(rocket.active_config_id(), mount.id, Some(motor.clone())).map_err(|e| e.to_string())?;
+        }
+    }
+    if let (Some(delay), Some(mount)) = (spec.delay, mount.as_ref()) {
+        rocket.set_motor_delay(rocket.active_config_id(), mount.id, delay).map_err(|e| e.to_string())?;
+    }
+    let delay = mount.and_then(|m| rocket.active_configuration().slot(m.id).map(|s| s.delay)).unwrap_or(0.0);
+    let input = from_model::sim_input(&rocket, ctx.physics.motors(), Phase::Full, launch_of(spec)).map_err(|e| format!("Cannot fly: {e}"))?;
+    if input.vehicle.stages.iter().all(|s| s.motor.is_none()) {
+        return Err("Cannot fly: no motor in the configuration".to_string());
+    }
+    Ok((input, delay))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_kit_flights_are_nominal_windy_hot_and_bigger() {
+        let flights = default_flights();
+        let names: Vec<&str> = flights.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["Nominal", "Windy", "Hot day", "Bigger motor"]);
+        assert_eq!(flights[1].spec.wind_speed, 7.0);
+        assert!((flights[2].spec.temperature - 308.15).abs() < 1e-9);
+        assert_eq!(flights[3].spec.motor, MotorChoice::Motor(MotorRef::new("I284W", "AeroTech")));
+        // Ids are unique.
+        assert!(flights.windows(2).all(|w| w[0].id != w[1].id));
+    }
+
+    #[test]
+    fn launch_leans_into_the_wind_and_carries_the_site() {
+        let launch = launch_of(&Spec::default());
+        assert!((launch.angle_from_vertical - 5f64.to_radians()).abs() < 1e-12);
+        assert_eq!(launch.direction, launch.wind_from);
+        assert_eq!((launch.site_altitude, launch.ground_temperature, launch.wind_speed), (120.0, 288.15, 2.2));
+    }
+
+    #[test]
+    fn a_result_is_stale_when_the_spec_or_the_document_changes() {
+        let mut f = Flight::new(1, "x", Spec::default());
+        assert!(!f.is_stale(0), "no run, nothing to be stale");
+        f.run = Some(Run {
+            spec: f.spec.clone(),
+            revision: 3,
+            result: Arc::new(FlightResult::default()),
+            took: Duration::ZERO,
+            dt: 0.001,
+            delay: 10.0,
+            times: Times::default(),
+        });
+        assert!(!f.is_stale(3));
+        assert!(f.is_stale(4));
+        f.spec.wind_speed = 3.0;
+        assert!(f.is_stale(3));
+    }
+}

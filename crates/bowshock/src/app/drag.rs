@@ -10,7 +10,7 @@
 //! To add another kind of drag (an internal part in the lanes, say) add a field to [`Drags`], a start/finish pair here that
 //! wraps `ctx.doc.begin_drag` / `end_drag`, and include it in [`Drags::active`] and [`cancel`].
 
-use bowshock_model::{Part, PartId, PartKind, RadialKind, Rocket};
+use bowshock_model::{InternalKind, InternalPart, Part, PartId, PartKind, RadialKind, Rocket};
 
 use super::{Ctx, Selection};
 use crate::app::ui;
@@ -25,6 +25,8 @@ pub struct Drags {
     pub axial: Option<Drag>,
     /// A radial part (fins, lug, rail button) being carried.
     pub radial: Option<RadialDrag>,
+    /// An internal part (ring, chute, ballast, ...) being carried.
+    pub internal: Option<InternalDrag>,
     /// Copies a new radial part gets (the parts bin's symmetry footer).
     pub symmetry: u8,
     /// Angle snap for radial parts, degrees (0 for none).
@@ -33,14 +35,14 @@ pub struct Drags {
 
 impl Default for Drags {
     fn default() -> Self {
-        Drags { axial: None, radial: None, symmetry: 3, angle_snap: 0 }
+        Drags { axial: None, radial: None, internal: None, symmetry: 3, angle_snap: 0 }
     }
 }
 
 impl Drags {
     /// Whether any drag is in progress.
     pub fn active(&self) -> bool {
-        self.axial.is_some() || self.radial.is_some()
+        self.axial.is_some() || self.radial.is_some() || self.internal.is_some()
     }
 }
 
@@ -77,19 +79,6 @@ pub fn place(ctx: &mut Ctx, index: usize, kind: PartKind) -> bool {
         ctx.camera_fit = true;
     }
     placed.is_some()
-}
-
-/// Attaches a radial part by a click on its row: to the aftmost body tube (else the aftmost part), flush with its aft end,
-/// with the bin's symmetry count.
-pub fn attach_radial_aft(ctx: &mut Ctx, kind: RadialKind) {
-    let rocket = ctx.doc.rocket();
-    let parts = rocket.parts();
-    let Some(parent) = parts.iter().rev().find(|p| matches!(p.kind, PartKind::BodyTube { .. })).or(parts.last()) else {
-        return;
-    };
-    let (parent, offset, count) = (parent.id, parent.kind.length() - kind.extent(), ctx.drag.symmetry);
-    let label = format!("Add {}", kind.name().to_lowercase());
-    ctx.doc.edit(&label, |r| r.attach_radial(parent, offset, 0.0, count, kind).ok());
 }
 
 /// Starts carrying a new axial part from bin row `row`.
@@ -219,10 +208,92 @@ pub fn finish_radial(ctx: &mut Ctx, drop: bool) {
     ctx.doc.end_drag(placed);
 }
 
+/// Where a carried internal part would land: in axial part `parent`, `offset` metres behind its fore face.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InternalTarget {
+    /// The axial part it goes in.
+    pub parent: PartId,
+    /// Distance from the parent's fore face to the part's fore edge.
+    pub offset: f64,
+}
+
+/// An internal part (ring, chute, ballast, ...) being carried. The surface that shows the targets (viewport, lanes) sets
+/// `target` and ends the drag with [`finish_internal`].
+#[derive(Debug, Clone)]
+pub struct InternalDrag {
+    /// The bin row it came from, if it came from there.
+    pub row: Option<usize>,
+    /// The bin's name for it, for the cursor tag of the surface that shows the targets.
+    #[allow(dead_code)] // Read by the viewport / lanes overlays.
+    pub name: &'static str,
+    /// Its geometry.
+    pub kind: InternalKind,
+    /// The part as it was (material, overrides), when picked up from the rocket.
+    pub origin: Option<InternalPart>,
+    /// Where it would land now.
+    pub target: Option<InternalTarget>,
+}
+
+/// Starts carrying a new internal part from bin row `row`.
+pub fn start_internal(ctx: &mut Ctx, row: Option<usize>, name: &'static str, kind: InternalKind) {
+    ctx.doc.begin_drag(&format!("Add {}", name.to_lowercase()));
+    ctx.drag.internal = Some(InternalDrag { row, name, kind, origin: None, target: None });
+}
+
+#[allow(dead_code)] // Called by the viewport / lanes when an internal part is picked up.
+/// Picks up internal part `id` of the rocket. Nothing happens while another drag is in progress.
+pub fn grab_internal(ctx: &mut Ctx, id: PartId) -> bool {
+    if ctx.drag.active() {
+        return false;
+    }
+    ctx.doc.begin_drag("Move part");
+    match ctx.doc.drag_update(|r| r.remove_internal(id)) {
+        Some(part) => {
+            ctx.selection = Selection::Part(id);
+            ctx.drag.internal = Some(InternalDrag { row: None, name: part.kind.name(), kind: part.kind.clone(), origin: Some(part), target: None });
+            true
+        }
+        None => {
+            ctx.doc.end_drag(false);
+            false
+        }
+    }
+}
+
+/// Ends the internal drag: lands it on its target if `drop`, else abandons it (a part picked up from the rocket goes back as it
+/// was, motors included).
+pub fn finish_internal(ctx: &mut Ctx, drop: bool) {
+    let Some(drag) = ctx.drag.internal.take() else {
+        return;
+    };
+    let base = ctx.doc.drag_base().cloned();
+    let placed = match drag.target {
+        Some(t) if drop => ctx.doc.drag_update(|r| {
+            let ok = match &drag.origin {
+                Some(part) => r.restore_internal(InternalPart { parent: t.parent, offset: t.offset, ..part.clone() }).is_ok(),
+                None => r.attach_internal(t.parent, t.offset, drag.kind.clone()).is_ok(),
+            };
+            if let (true, Some(base)) = (ok, &base) {
+                restore_motors(r, base);
+            }
+            ok
+        }),
+        _ => false,
+    };
+    if placed && drag.origin.is_none() {
+        // Select what was just added.
+        if let Some(id) = ctx.doc.rocket().internals().last().map(|p| p.id) {
+            ctx.selection = Selection::Part(id);
+        }
+    }
+    ctx.doc.end_drag(placed);
+}
+
 /// Abandons whichever drag is in progress.
 pub fn cancel(ctx: &mut Ctx) {
     finish_axial(ctx, false);
     finish_radial(ctx, false);
+    finish_internal(ctx, false);
 }
 
 /// Deletes the selected part (an axial part takes its radial and internal parts with it; a radial part is a whole group) as

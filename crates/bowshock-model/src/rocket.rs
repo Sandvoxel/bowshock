@@ -114,6 +114,9 @@ pub struct Rocket {
     pub(crate) configs: Vec<Configuration>,
     pub(crate) active_config: ConfigId,
     pub(crate) next_config_id: ConfigId,
+    /// Free-text notes by part id (the inspector's Notes section). Empty notes are not stored.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub(crate) notes: std::collections::BTreeMap<PartId, String>,
 }
 
 impl Default for Rocket {
@@ -128,6 +131,7 @@ impl Default for Rocket {
             configs: vec![Configuration::new(0, "")],
             active_config: 0,
             next_config_id: 1,
+            notes: std::collections::BTreeMap::new(),
         }
     }
 }

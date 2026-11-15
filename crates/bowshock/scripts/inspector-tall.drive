@@ -1,0 +1,13 @@
+# Full-height inspector columns (nothing below the fold): `drive --example crates/bowshock/scripts/inspector-tall.drive out/inspector`
+viewport 1280x1100
+scale 1
+click (580, 896)
+screenshot tall-tube.png
+click (922, 924)
+screenshot tall-fins.png
+click (665, 1002)
+screenshot tall-chute.png
+click (824, 951)
+screenshot tall-mount.png
+click (735, 1030)
+screenshot tall-altimeter.png

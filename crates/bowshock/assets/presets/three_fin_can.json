@@ -1,0 +1,18 @@
+{
+  "name": "3-fin can",
+  "axial": [
+    { "kind": { "BodyTube": { "length": 0.3, "diameter": 0.0762 } }, "name": "Fin can", "material": "cardboard", "finish": "RegularPaint", "thickness": 0.0016 }
+  ],
+  "radials": [
+    {
+      "host": 0,
+      "kind": { "FinSet": { "root_chord": 0.12, "tip_chord": 0.05, "span": 0.0762, "sweep": 0.06, "thickness": 0.00318 } },
+      "offset": 0.0,
+      "from_aft": true,
+      "angle": 0.0,
+      "count": 3,
+      "material": "birch_plywood"
+    }
+  ],
+  "internals": []
+}

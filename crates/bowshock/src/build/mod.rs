@@ -1,17 +1,19 @@
-//! The Build screen: a `pane_grid` of the parts bin on the left, the viewport over Station Lanes in the centre and the inspector
+//! The Build screen: a `pane_grid` of the parts bin on the left, the centre (the viewport over Station Lanes) and the inspector
 //! on the right. This module only composes; each pane is its own module with its own state and messages
-//! ([`parts_bin`], [`crate::viewport`], [`lanes`], [`inspector`]).
+//! ([`parts_bin`], [`crate::viewport`], [`lanes`], [`inspector`]). Station Lanes has a fixed height ([`lanes::height`]), so it is
+//! stacked under the viewport rather than being a resizable pane.
 
 pub mod inspector;
 pub mod lanes;
 pub mod parts_bin;
 
+use iced::widget::column;
 use iced::widget::pane_grid::{self, Axis, Configuration, PaneGrid};
 use iced::{Element, Widget};
 
 use crate::app::{Ctx, Message};
 use crate::theme;
-use crate::tokens::{BIN_W, LANES_H, RAIL_W, RIGHT_PANEL_W, STATUSBAR_H, TOPBAR_H};
+use crate::tokens::{BIN_W, RAIL_W, RIGHT_PANEL_W};
 use crate::viewport;
 
 /// The panes of the Build screen.
@@ -19,10 +21,8 @@ use crate::viewport;
 pub enum Pane {
     /// Rail and parts list.
     PartsBin,
-    /// The 3D viewport.
-    Viewport,
-    /// Station Lanes.
-    Lanes,
+    /// The 3D viewport over Station Lanes.
+    Centre,
     /// The inspector.
     Inspector,
 }
@@ -38,12 +38,6 @@ impl Layout {
         let width = 1280.0;
         let bin = (RAIL_W + BIN_W) / width;
         let inspector = RIGHT_PANEL_W / (width * (1.0 - bin));
-        let centre = Configuration::Split {
-            axis: Axis::Horizontal,
-            ratio: 1.0 - LANES_H / (800.0 - TOPBAR_H - STATUSBAR_H),
-            a: Box::new(Configuration::Pane(Pane::Viewport)),
-            b: Box::new(Configuration::Pane(Pane::Lanes)),
-        };
         let layout = Configuration::Split {
             axis: Axis::Vertical,
             ratio: bin,
@@ -51,7 +45,7 @@ impl Layout {
             b: Box::new(Configuration::Split {
                 axis: Axis::Vertical,
                 ratio: 1.0 - inspector,
-                a: Box::new(centre),
+                a: Box::new(Configuration::Pane(Pane::Centre)),
                 b: Box::new(Configuration::Pane(Pane::Inspector)),
             }),
         };
@@ -76,8 +70,7 @@ pub fn view<'a>(
     PaneGrid::new(&layout.panes, |_, pane, _| {
         pane_grid::Content::new(match pane {
             Pane::PartsBin => parts_bin.view(ctx).map(Message::PartsBin).boxed(),
-            Pane::Viewport => viewport.view(ctx).map(Message::Viewport).boxed(),
-            Pane::Lanes => lanes.view(ctx).map(Message::Lanes).boxed(),
+            Pane::Centre => column![viewport.view(ctx).map(Message::Viewport), lanes.view(ctx, Some(viewport.camera())).map(Message::Lanes)].boxed(),
             Pane::Inspector => inspector.view(ctx).map(Message::Inspector).boxed(),
         })
     })

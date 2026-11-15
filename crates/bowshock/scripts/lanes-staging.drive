@@ -1,0 +1,19 @@
+# Station Lanes on the two-stage example (BOWSHOCK_EXAMPLE=two_stage selects it):
+#   BOWSHOCK_EXAMPLE=two_stage cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/lanes-staging.drive /tmp/lanes
+viewport 1280x800
+move (640, 400)
+screenshot staging-rest.png
+# The separation line can be selected (not dragged).
+click (733, 700)
+screenshot staging-selected.png
+# Clicking a motor bar opens the configuration menu.
+click (668, 672)
+screenshot staging-menu.png
+# A second configuration, and Compare all in lanes: its motors are dashed outlines in a row of their own, its CG a tick in the footer.
+click "Duplicate current"
+click (668, 672)
+click "Compare all in lanes"
+click (500, 400)
+screenshot staging-compare.png
+click "Stage 2"
+screenshot staging-phase.png

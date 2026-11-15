@@ -5,7 +5,8 @@ use iced::wgpu::{self, util::DeviceExt};
 use iced::widget::shader::{self, Viewport};
 use iced::Rectangle;
 
-use super::scene::{Mesh, Vertex};
+use super::mesh::Mesh;
+use super::solids::GpuVertex;
 
 const SAMPLES: u32 = 4;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -15,10 +16,26 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 pub struct Uniforms {
     pub view_proj: [[f32; 4]; 4],
     pub light_dir: [f32; 4],
-    pub color: [f32; 4],
-    pub accent: [f32; 4],
-    pub fin: [f32; 4],
+    /// Eye position; `w` is 1 for a perspective view and 0 when orthographic.
+    pub eye: [f32; 4],
     pub view_dir: [f32; 4],
+    /// View mode (0 solid, 1 cutaway, 2 X-ray, 3 exploded), reveal, explosion 0 to 1.
+    pub params: [f32; 4],
+    /// Cut wedge: centre direction xy, cosine of half the span, enabled.
+    pub cut: [f32; 4],
+    /// Logical px per metre (the pipeline multiplies by the device pixel ratio), device pixel ratio.
+    pub screen: [f32; 4],
+    /// Body, fin, accent, structure, aero, propulsion, recovery, avionics, cut-face, cut-interior, bg-000 (linear).
+    pub colors: [[f32; 4]; 11],
+}
+
+/// Which parts of the mesh to draw this frame.
+#[derive(Debug, Clone, Copy)]
+pub struct DrawPlan {
+    /// Draw the cutaway cap faces.
+    pub caps: bool,
+    /// The airframe is translucent (X-ray, auto-reveal): no depth writes.
+    pub translucent: bool,
 }
 
 struct Offscreen {
@@ -32,11 +49,14 @@ struct Offscreen {
 pub struct Pipeline {
     format: wgpu::TextureFormat,
     body: wgpu::RenderPipeline,
+    translucent: wgpu::RenderPipeline,
     blit: wgpu::RenderPipeline,
     uniforms: wgpu::Buffer,
     uniform_group: wgpu::BindGroup,
     blit_layout: wgpu::BindGroupLayout,
-    vertices: Option<(u64, wgpu::Buffer, u32)>,
+    vertices: Option<(u64, wgpu::Buffer)>,
+    ranges: [std::ops::Range<u32>; 3],
+    plan: DrawPlan,
     offscreen: Option<Offscreen>,
     /// Widget bounds in physical pixels: x, y, width, height.
     viewport: [f32; 4],
@@ -100,42 +120,55 @@ impl shader::Pipeline for Pipeline {
             immediate_size: 0,
         });
 
-        let body = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("viewport.body_pipeline"),
-            layout: Some(&body_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &body_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32, 3 => Float32],
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
+        let premultiplied = wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                operation: wgpu::BlendOperation::Add,
             },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
+            alpha: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                operation: wgpu::BlendOperation::Add,
             },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState { count: SAMPLES, mask: !0, alpha_to_coverage_enabled: false },
-            fragment: Some(wgpu::FragmentState {
-                module: &body_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState { format, blend: Some(wgpu::BlendState::REPLACE), write_mask: wgpu::ColorWrites::ALL })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        };
+        // Opaque parts write depth; the translucent airframe (X-ray, auto-reveal) only tests it, so what is behind a pane of
+        // shell is still drawn. Back faces are handled in the shader, so nothing is culled.
+        let make = |label: &str, depth_write: bool| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&body_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &body_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<GpuVertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Float32x2, 4 => Float32, 5 => Float32, 6 => Float32, 7 => Float32],
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, front_face: wgpu::FrontFace::Ccw, cull_mode: None, ..Default::default() },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(depth_write),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState { count: SAMPLES, mask: !0, alpha_to_coverage_enabled: false },
+                fragment: Some(wgpu::FragmentState {
+                    module: &body_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState { format, blend: Some(premultiplied), write_mask: wgpu::ColorWrites::ALL })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let body = make("viewport.body_pipeline", true);
+        let translucent = make("viewport.translucent_pipeline", false);
 
         let blit = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("viewport.blit_pipeline"),
@@ -174,12 +207,34 @@ impl shader::Pipeline for Pipeline {
             cache: None,
         });
 
-        Self { format, body, blit, uniforms, uniform_group, blit_layout, vertices: None, offscreen: None, viewport: [0.0; 4] }
+        Self {
+            format,
+            body,
+            translucent,
+            blit,
+            uniforms,
+            uniform_group,
+            blit_layout,
+            vertices: None,
+            ranges: [0..0, 0..0, 0..0],
+            plan: DrawPlan { caps: false, translucent: false },
+            offscreen: None,
+            viewport: [0.0; 4],
+        }
     }
 }
 
 impl Pipeline {
-    pub fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, uniforms: &Uniforms, mesh: &Mesh, bounds: &Rectangle, viewport: &Viewport) {
+    pub fn prepare(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        uniforms: &Uniforms,
+        plan: DrawPlan,
+        mesh: &Mesh,
+        bounds: &Rectangle,
+        viewport: &Viewport,
+    ) {
         let physical = viewport.physical_size();
         let size = (physical.width.max(1), physical.height.max(1));
         if self.offscreen.as_ref().is_none_or(|o| o.size != size) {
@@ -195,12 +250,15 @@ impl Pipeline {
                 contents: bytemuck::cast_slice(&mesh.vertices),
                 usage: wgpu::BufferUsages::VERTEX,
             });
-            self.vertices = Some((mesh.id, buffer, mesh.vertices.len() as u32));
+            self.vertices = Some((mesh.id, buffer));
         }
 
-        queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(uniforms));
-
         let scale = viewport.scale_factor();
+        let mut uniforms = *uniforms;
+        uniforms.screen = [uniforms.screen[0] * scale, scale, 0.0, 0.0];
+        queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniforms));
+        self.ranges = [mesh.inner.clone(), mesh.caps.clone(), mesh.outer.clone()];
+        self.plan = plan;
         self.viewport = [bounds.x * scale, bounds.y * scale, bounds.width * scale, bounds.height * scale];
     }
 
@@ -232,7 +290,7 @@ impl Pipeline {
     }
 
     pub fn render(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, clip: &Rectangle<u32>) {
-        let (Some(off), Some((_, vertices, count))) = (&self.offscreen, &self.vertices) else {
+        let (Some(off), Some((_, vertices))) = (&self.offscreen, &self.vertices) else {
             return;
         };
         if clip.width == 0 || clip.height == 0 {
@@ -265,10 +323,16 @@ impl Pipeline {
             let [x, y, w, h] = self.viewport;
             pass.set_viewport(x, y, w.max(1.0), h.max(1.0), 0.0, 1.0);
             pass.set_scissor_rect(sx, sy, sw, sh);
-            pass.set_pipeline(&self.body);
             pass.set_bind_group(0, &self.uniform_group, &[]);
             pass.set_vertex_buffer(0, vertices.slice(..));
-            pass.draw(0..*count, 0..1);
+            // Internal solids, then the cutaway faces, then the airframe (blended over the rest when it is translucent).
+            pass.set_pipeline(&self.body);
+            pass.draw(self.ranges[0].clone(), 0..1);
+            if self.plan.caps {
+                pass.draw(self.ranges[1].clone(), 0..1);
+            }
+            pass.set_pipeline(if self.plan.translucent { &self.translucent } else { &self.body });
+            pass.draw(self.ranges[2].clone(), 0..1);
         }
 
         {

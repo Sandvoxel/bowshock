@@ -1,0 +1,70 @@
+# Direct edit (design kit DirectEdit). Run with the example rocket:
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/directedit.drive out/directedit
+# A drive script cannot hold keys: the 2D profile shows every handle (what Alt does in 3D), and the env variable
+# BOWSHOCK_DRIVE_MODIFIERS=shift holds Shift (see directedit-snap.drive).
+viewport 1280x800
+click "2D"
+
+# Body tube selected: primary handles (length at the aft face, diameter at the top edge), labelled in 2D.
+click (571, 314)
+screenshot tube-selected.png
+# Drag the aft face: live tag with the change, dashed old-size line, arrow; the Inspector field follows.
+press (707, 311)
+move (715, 311)
+move (740, 311)
+screenshot tube-drag-length.png
+release (740, 311)
+screenshot tube-resized.png
+# Undo (top bar): the whole drag was one step.
+click (353, 20)
+
+# A limit stops the drag: the tag turns warn and says why.
+press (707, 311)
+move (600, 311)
+move (300, 311)
+screenshot tube-limit.png
+# Esc puts the part back.
+type escape
+screenshot tube-escaped.png
+
+# Typing digits during a drag replaces the tag value with a field; Enter commits that number.
+press (707, 311)
+move (715, 311)
+type "6"
+type "4"
+type "0"
+screenshot tube-typed.png
+type enter
+screenshot tube-committed.png
+click (353, 20)
+
+# The nose cone: tip handle sets the length.
+click (400, 314)
+screenshot nose-selected.png
+press (469, 311)
+move (495, 311)
+screenshot nose-drag-length.png
+release (495, 311)
+click (353, 20)
+
+# Cutaway: internal dimensions get handles too (the motor mount selected from its lane, then the nose cone's wall).
+click (600, 500)
+click "Cutaway"
+click (767, 651)
+screenshot mount-cutaway.png
+click (600, 500)
+click (420, 316)
+screenshot nose-cutaway.png
+click (600, 500)
+click "Solid"
+
+# A fin set, framed (double-click focuses): every handle, the aft-view inset, a root chord drag.
+click (873, 286)
+click (873, 286)
+screenshot fin-selected.png
+press (784, 272)
+move (796, 272)
+move (816, 272)
+screenshot fin-drag-root-chord.png
+release (816, 272)
+click (353, 20)

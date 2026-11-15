@@ -1,0 +1,14 @@
+# Staging in the viewport: `BOWSHOCK_EXAMPLE=two_stage cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/staging.drive out/staging`
+# The two-stage example: separation seam and diamond, stage brackets under the body, the diamond selected.
+viewport 1280x800
+move (640, 400)
+click "2D"
+screenshot staging-profile.png
+# Click the diamond: the separation is selected (filled diamond, accent tag).
+click (690, 300)
+screenshot staging-selected.png
+click "3D"
+screenshot staging-3d.png
+# Phase: only the upper stage flies; the booster is faint.
+click "Stage 2"
+screenshot staging-phase.png

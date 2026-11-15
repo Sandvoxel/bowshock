@@ -1,0 +1,54 @@
+# Inspector: `cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/inspector.drive out/inspector`
+# Tall window so every section of the column is on screen. Parts are picked in Station Lanes.
+viewport 1280x1100
+scale 1
+# Nothing selected: the Rocket inspector.
+screenshot rocket.png
+click (392, 896)
+screenshot nose.png
+click (580, 896)
+screenshot tube.png
+# The linked fin set: LINKED x3, Detach / Split all, AUTO sweep angle, flutter chip.
+click (922, 924)
+screenshot fins.png
+click (665, 1002)
+screenshot chute.png
+click (824, 951)
+screenshot mount.png
+click (735, 1030)
+screenshot altimeter.png
+click (922, 924)
+# Typing into a field commits on Enter: a 130 mm root chord.
+click (1180, 226)
+type "130"
+type enter
+screenshot fins-typed.png
+# Typing the AUTO sweep angle flips the driven value: 45 deg sets the sweep length to the span.
+click (1180, 362)
+type "45"
+type enter
+screenshot fins-sweep.png
+# Detach one copy: it leaves the group as a free fin; the rest stay linked as x2.
+click (1157, 106)
+screenshot fins-detached.png
+# A second motor mount in the recovery bay makes a second stage: the separation appears.
+click (580, 896)
+click (22, 150)
+click (139, 135)
+click (22, 282)
+click (139, 135)
+click (700, 140)
+screenshot rocket-staged.png
+click (1061, 415)
+screenshot separation.png
+# The overflow menu and the light theme on the free fin A.
+click (922, 938)
+click (1257, 62)
+screenshot menu.png
+click (1257, 62)
+click (966, 20)
+screenshot light-fin.png
+# Double-click the name to rename it.
+click (1040, 62)
+click (1040, 62)
+screenshot rename.png

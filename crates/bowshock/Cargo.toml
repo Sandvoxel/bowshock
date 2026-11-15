@@ -23,6 +23,9 @@ bowshock-model = { path = "../bowshock-model" }
 bowshock-sim = { path = "../bowshock-sim" }
 bowshock-motors = { path = "../bowshock-motors" }
 rfd = "0.18"
+# Parts-bin presets are JSON files.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [lints]
 workspace = true

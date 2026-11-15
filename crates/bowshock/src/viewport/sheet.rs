@@ -87,8 +87,12 @@ impl<Message> canvas::Program<Message> for Sheet {
 }
 
 impl Sheet {
-    /// Strokes grid lines at each `(step in metres, colour)` in the world coordinate plane that best faces the camera.
+    /// Strokes grid lines at each `(step in metres, colour)` in the world coordinate plane that best faces the camera. Lines are
+    /// cut into short runs whose opacity falls off with distance from the target, so the grid fades out towards the edges (and
+    /// into the distance in perspective).
     fn grid(&self, frame: &mut Frame, size: Size, levels: [(f32, iced::Color); 2]) {
+        const RUNS: usize = 16;
+        const BUCKETS: usize = 4;
         let cam = &self.camera;
         let back = cam.back();
         // Plane normal = the world axis most aligned with the view direction; (a, b) span the plane.
@@ -96,12 +100,13 @@ impl Sheet {
             .into_iter()
             .max_by(|p, q| p.0.dot(back).abs().total_cmp(&q.0.dot(back).abs()))
             .unwrap_or((Vec3::X, Vec3::Z, Vec3::Y));
-        let facing = n.dot(back);
 
-        // Plane coordinates of the viewport corners: cast each corner along the view direction onto the plane.
+        // Plane coordinates of the viewport corners: cast each corner's ray onto the plane through the target.
         let corner = |sx: f32, sy: f32| {
-            let p0 = cam.target + cam.right() * ((sx - size.width / 2.0) / cam.scale) - cam.up() * ((sy - size.height / 2.0) / cam.scale);
-            let p = p0 - back * (n.dot(p0) / facing);
+            let (o, d) = cam.ray(Point::new(sx, sy), size);
+            let denom = n.dot(d);
+            let t = if denom.abs() > 1e-4 { n.dot(cam.target - o) / denom } else { 0.0 };
+            let p = o + d * t;
             (p.dot(a), p.dot(b))
         };
         let corners = [corner(0.0, 0.0), corner(size.width, 0.0), corner(0.0, size.height), corner(size.width, size.height)];
@@ -109,11 +114,24 @@ impl Sheet {
         for (ca, cb) in corners {
             (a0, a1, b0, b1) = (a0.min(ca), a1.max(ca), b0.min(cb), b1.max(cb));
         }
+        // Keep the extent finite however grazing the view.
+        let reach = 0.5 * size.width.hypot(size.height) / cam.scale * 3.0;
+        let (centre_a, centre_b) = (cam.target.dot(a), cam.target.dot(b));
+        (a0, a1, b0, b1) = (a0.max(centre_a - reach), a1.min(centre_a + reach), b0.max(centre_b - reach), b1.min(centre_b + reach));
+        if a1 <= a0 || b1 <= b0 {
+            return;
+        }
 
         let origin = cam.project(Vec3::ZERO, size);
         let px = |v: Vec3| {
             let q = cam.project(v, size);
             ((q.x - origin.x).powi(2) + (q.y - origin.y).powi(2)).sqrt()
+        };
+        // Distance from the target (in the plane's coordinates) at which the grid is fully faded.
+        let fade_r = 0.5 * size.width.hypot(size.height) / cam.scale;
+        let alpha_at = |pa: f32, pb: f32| {
+            let d = ((pa - centre_a).powi(2) + (pb - centre_b).powi(2)).sqrt() / fade_r;
+            1.0 - 0.85 * ((d - 0.45) / 0.65).clamp(0.0, 1.0)
         };
         for (step, color) in levels {
             // Skip a level whose lines would be closer than 6 px on screen in either direction.
@@ -122,22 +140,30 @@ impl Sheet {
             }
             let (i0, i1) = ((a0 / step).floor() as i64, (a1 / step).ceil() as i64);
             let (j0, j1) = ((b0 / step).floor() as i64, (b1 / step).ceil() as i64);
-            if (i1 - i0) + (j1 - j0) > 2000 {
+            if (i1 - i0) + (j1 - j0) > 400 {
                 continue;
             }
-            let lines = Path::new(|p| {
-                for i in i0..=i1 {
-                    let u = a * (i as f32 * step);
-                    p.move_to(cam.project(u + b * b0, size));
-                    p.line_to(cam.project(u + b * b1, size));
+            let mut builders: [canvas::path::Builder; BUCKETS] = std::array::from_fn(|_| canvas::path::Builder::new());
+            let mut run = |from: (f32, f32), to: (f32, f32)| {
+                let at = |t: f32| (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
+                for k in 0..RUNS {
+                    let (p0, p1) = (at(k as f32 / RUNS as f32), at((k + 1) as f32 / RUNS as f32));
+                    let mid = at((k as f32 + 0.5) / RUNS as f32);
+                    let bucket = ((alpha_at(mid.0, mid.1) * BUCKETS as f32).ceil() as usize).clamp(1, BUCKETS) - 1;
+                    builders[bucket].move_to(cam.project(a * p0.0 + b * p0.1, size));
+                    builders[bucket].line_to(cam.project(a * p1.0 + b * p1.1, size));
                 }
-                for j in j0..=j1 {
-                    let v = b * (j as f32 * step);
-                    p.move_to(cam.project(v + a * a0, size));
-                    p.line_to(cam.project(v + a * a1, size));
-                }
-            });
-            frame.stroke(&lines, Stroke::default().with_color(color).with_width(1.0));
+            };
+            for i in i0..=i1 {
+                run((i as f32 * step, b0), (i as f32 * step, b1));
+            }
+            for j in j0..=j1 {
+                run((a0, j as f32 * step), (a1, j as f32 * step));
+            }
+            for (k, builder) in builders.into_iter().enumerate() {
+                let alpha = (k + 1) as f32 / BUCKETS as f32;
+                frame.stroke(&builder.build(), Stroke::default().with_color(color.scale_alpha(alpha)).with_width(1.0));
+            }
         }
     }
 }

@@ -293,6 +293,10 @@ impl App {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.route(message);
         self.after_update();
+        // The Analyze screen starts its off-thread computations (and rebuilds its plots) after every message while it shows.
+        if self.ctx.mode == Mode::Analyze {
+            return Task::batch([task, self.analyze.refresh(&self.ctx)]);
+        }
         task
     }
 
@@ -348,7 +352,9 @@ impl App {
                 return task;
             }
             Message::Key(press) => return self.key(press),
-            Message::Delete => drag::delete_selection(ctx),
+            // Parts are only deleted where they are shown and selected for editing: the Build screen.
+            Message::Delete if ctx.mode == Mode::Build => drag::delete_selection(ctx),
+            Message::Delete => {}
             Message::Undo => {
                 if let Some(label) = ctx.doc.undo() {
                     ctx.notify(format!("Undid {}", label.to_lowercase()));
@@ -506,9 +512,10 @@ fn shortcut(press: &KeyPress) -> Option<Message> {
 #[allow(unused_must_use)] // The tests drive `update` directly and have no runtime to hand its tasks to.
 mod tests {
     use super::*;
+    use crate::viewport::manipulate::Edit;
     use crate::viewport::pick::{Pick, SurfaceTarget};
     use crate::viewport::Message as Vp;
-    use bowshock_model::{NoseShape, PartKind, RadialKind};
+    use bowshock_model::{Dim, NoseShape, PartKind, RadialKind};
 
     /// An app holding a nose, a tube and a transition (fore to aft).
     fn app() -> (App, [PartId; 3]) {
@@ -597,15 +604,20 @@ mod tests {
     fn resizing_changes_only_that_part_and_a_resize_drag_is_one_undo_step() {
         let (mut app, [_, tube, transition]) = app();
         let before = parts(&app);
+        vp(&mut app, Vp::Edit(Edit::Begin(tube)));
         for length in [0.55, 0.6, 0.7] {
-            vp(&mut app, Vp::Resize(tube, PartKind::BodyTube { length, diameter: 0.12 }));
+            vp(&mut app, Vp::Edit(Edit::Dim(tube, Dim::Length, length)));
         }
-        vp(&mut app, Vp::EditEnd);
+        vp(&mut app, Vp::Edit(Edit::Dim(tube, Dim::Diameter, 0.12)));
+        vp(&mut app, Vp::Edit(Edit::End));
         let kind = PartKind::BodyTube { length: 0.7, diameter: 0.12 };
         assert_eq!(app.ctx.doc.rocket().part(tube).unwrap().kind, kind);
-        assert_eq!(app.ctx.doc.rocket().part(transition).unwrap().kind.fore_diameter(), 0.1);
-        // The kind of part cannot change through a resize.
-        vp(&mut app, Vp::Resize(tube, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.1, diameter: 0.1 }));
+        // The transition behind it follows the tube's new diameter at their joint.
+        assert_eq!(app.ctx.doc.rocket().part(transition).unwrap().kind.fore_diameter(), 0.12);
+        // Cancelled, a drag puts everything back.
+        vp(&mut app, Vp::Edit(Edit::Begin(tube)));
+        vp(&mut app, Vp::Edit(Edit::Dim(tube, Dim::Length, 0.3)));
+        vp(&mut app, Vp::Edit(Edit::Cancel));
         assert_eq!(app.ctx.doc.rocket().part(tube).unwrap().kind, kind);
         app.update(Message::Undo);
         assert_eq!(parts(&app), before);
@@ -620,7 +632,7 @@ mod tests {
         let (mut app, [_, tube, _]) = app();
         app.update(Message::PartsBin(parts_bin::Message::Category(parts_bin::Category::Fins)));
         app.update(Message::PartsBin(parts_bin::Message::Symmetry(4)));
-        app.update(Message::PartsBin(parts_bin::Message::RowPress(0)));
+        app.update(Message::PartsBin(parts_bin::Message::RowPress(parts_bin::RowId::new(parts_bin::Category::Fins, 0))));
         app.update(Message::Released);
         let [fins] = app.ctx.doc.rocket().radials() else { panic!("one radial part") };
         assert_eq!((fins.parent, fins.count, fins.angle), (tube, 4, 0.0));
@@ -629,7 +641,7 @@ mod tests {
         // With nothing to attach to, a click does nothing.
         let mut empty = App::new();
         empty.update(Message::PartsBin(parts_bin::Message::Category(parts_bin::Category::Fins)));
-        empty.update(Message::PartsBin(parts_bin::Message::RowPress(1)));
+        empty.update(Message::PartsBin(parts_bin::Message::RowPress(parts_bin::RowId::new(parts_bin::Category::Fins, 1))));
         empty.update(Message::Released);
         assert!(empty.ctx.doc.rocket().radials().is_empty());
     }
@@ -641,9 +653,9 @@ mod tests {
         app.update(Message::PartsBin(parts_bin::Message::Symmetry(3)));
         // Press the lug row and move beyond the slop: the drag starts with the footer's count.
         app.update(Message::Cursor(Point::new(100.0, 100.0)));
-        app.update(Message::PartsBin(parts_bin::Message::RowPress(1)));
+        app.update(Message::PartsBin(parts_bin::Message::RowPress(parts_bin::RowId::new(parts_bin::Category::Fins, 3))));
         app.update(Message::Cursor(Point::new(160.0, 100.0)));
-        assert!(app.ctx.drag.radial.as_ref().is_some_and(|d| d.count == 3 && d.row == Some(1)));
+        assert!(app.ctx.drag.radial.as_ref().is_some_and(|d| d.count == 3 && d.row == Some(3)));
         // X cycles the count (and the footer's, for the next one); Shift+X goes back.
         app.update(Message::PartsBin(parts_bin::Message::CycleSymmetry(true)));
         assert_eq!((app.ctx.drag.radial.as_ref().unwrap().count, app.ctx.drag.symmetry), (4, 4));
@@ -659,7 +671,7 @@ mod tests {
 
         // No target: cancelled. Escape: cancelled.
         let start = |app: &mut App| {
-            app.update(Message::PartsBin(parts_bin::Message::RowPress(2)));
+            app.update(Message::PartsBin(parts_bin::Message::RowPress(parts_bin::RowId::new(parts_bin::Category::Fins, 4))));
             app.update(Message::Cursor(Point::new(220.0, 100.0)));
         };
         start(&mut app);
@@ -711,7 +723,9 @@ mod tests {
         assert_eq!(app.ctx.doc.rocket().index_of(tube), Some(2));
         assert_eq!(app.ctx.doc.rocket().radial(id).map(|r| r.parent), Some(tube));
         // Resizing the parent keeps the radial part on it.
-        vp(&mut app, Vp::Resize(tube, PartKind::BodyTube { length: 0.2, diameter: 0.1 }));
+        vp(&mut app, Vp::Edit(Edit::Begin(tube)));
+        vp(&mut app, Vp::Edit(Edit::Dim(tube, Dim::Length, 0.2)));
+        vp(&mut app, Vp::Edit(Edit::End));
         assert!((app.ctx.doc.rocket().radial(id).unwrap().offset - 0.15).abs() < 1e-9);
         // Deleting the tube deletes its radial part.
         vp(&mut app, Vp::Select(Some(Pick::Axial(tube))));
@@ -724,10 +738,11 @@ mod tests {
         let (mut app, [_, tube, _]) = app();
         let fins = RadialKind::FinSet { root_chord: 0.1, tip_chord: 0.05, span: 0.05, sweep: 0.03, thickness: 0.003 };
         let id = app.ctx.doc.edit("Fins", |r| r.attach_radial(tube, 0.0, 0.0, 4, fins).unwrap());
-        let longer = RadialKind::FinSet { root_chord: 0.1, tip_chord: 0.05, span: 0.09, sweep: 0.03, thickness: 0.003 };
-        vp(&mut app, Vp::ResizeRadial(id, longer.clone()));
+        vp(&mut app, Vp::Edit(Edit::Begin(id)));
+        vp(&mut app, Vp::Edit(Edit::Dim(id, Dim::Span, 0.09)));
+        vp(&mut app, Vp::Edit(Edit::End));
         let radial = app.ctx.doc.rocket().radial(id).unwrap();
-        assert_eq!((radial.kind.clone(), radial.count), (longer, 4));
+        assert_eq!((radial.kind.fin_span(), radial.count), (Some(0.09), 4));
     }
 
     #[test]

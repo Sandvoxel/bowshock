@@ -1,16 +1,26 @@
-//! The 3D viewport: drawing-sheet ground, the shaded model (wgpu `shader` widget), and the Fusion-style ViewCube.
+//! The 3D viewport: drawing-sheet ground, the shaded model (wgpu `shader` widget), the ViewCube, the view toolbar and the
+//! drawn overlays (CG/CP, staging, section handle, legend, key hints).
 //!
-//! Navigation (Fusion 360 defaults, plus trackpad equivalents):
-//! - middle drag: pan; Shift + middle drag: orbit; mouse wheel: zoom about the cursor; double middle-click or `F`: fit
-//! - trackpad two-finger scroll: pan; with Shift: orbit; with Cmd/Ctrl: zoom about the cursor
-//! - ViewCube: hover highlights a face, edge or corner; click snaps to it; drag orbits; the house returns home; when
-//!   looking straight at a face, the arrows step to the neighbouring faces
+//! Navigation (design/components/Navigation):
+//! - right-drag: orbit; middle-drag: pan; `Alt` + right-drag: roll; mouse wheel: zoom about the cursor; `F` or double-click on
+//!   empty space: fit; double middle-click: fit
+//! - trackpad two-finger scroll: orbit (pan in Profile); with `Shift`: pan; with `Cmd`/`Ctrl`: zoom about the cursor. iced does
+//!   not deliver pinch or rotate gestures to widgets, so `Cmd`/`Ctrl` + scroll is the zoom and `Alt` + right-drag the roll
+//! - double-click a part: focus (the camera turns square-on in an orthographic view and fills the viewport with the part;
+//!   `Esc` goes back)
+//! - ViewCube: hover highlights a face, edge or corner; click snaps to it; drag orbits; the house returns home; when looking
+//!   straight at a face, the arrows step to the neighbouring faces
 //!
 //! The left button is for the model: hover, click to select, press and drag a part to pick it up and move it, drag the
 //! handles of the selected part to resize it (see `manipulate`); while a part is dragged in from the parts bin or picked up
 //! the `assembly` overlay shows attach nodes and the snap target.
 //!
-//! In Profile (2D) mode the camera is locked side-on: pan and zoom only, no ViewCube.
+//! The 3D view is a perspective one; Profile (2D) and a focused part are orthographic (the camera blends between them), and
+//! Profile is locked side-on: pan and zoom only, no ViewCube.
+//!
+//! The shell is shown four ways ([`InsideView`], keys `1` to `4`): Solid, Cutaway (a wedge cut away along the axis, cut faces
+//! hatched, a round handle at the nose end sets the wedge, `Shift` snapping it to quarter turns), X-ray and Exploded.
+//! Selecting an internal part ghosts the airframe around it in Solid.
 //!
 //! # Module contract
 //!
@@ -21,40 +31,52 @@
 pub mod assembly;
 pub mod camera;
 mod cube;
+pub mod handles;
 pub mod manipulate;
+mod markers;
+mod mesh;
 pub mod pick;
 mod pipeline;
 mod radial;
 mod scene;
 mod sheet;
+mod snap;
+mod solids;
 pub mod surface;
 
 use std::f32::consts::FRAC_PI_2;
+use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bowshock_model::{PartId, PartKind, RadialKind, Rocket};
+use bowshock_model::{InternalKind, PartId, PartRef};
 use glam::{IVec3, Vec3};
-use iced::widget::{canvas, container, row, shader, stack};
-use iced::{keyboard, mouse, Element, Fill, Size, Task, Vector, Widget};
-
-pub use camera::Camera;
-pub use scene::{GhostRadial, Marks, Mesh};
+use iced::widget::{canvas, column, container, row, shader, stack, text, Space};
+use iced::{alignment, keyboard, mouse, Element, Fill, Size, Task, Vector, Widget};
 
 use crate::app::{self, drag, Ctx, Selection};
-use crate::theme;
-use crate::tokens::SPACE_1;
-use crate::tokens::SPACE_2;
-use crate::tokens::SPACE_4;
+use crate::theme::{self, MONO};
+use crate::tokens::{SPACE_1, SPACE_2, SPACE_4, SPACE_8, TEXT_LABEL};
 use crate::viewport::manipulate::{Hover, Overlay as Manipulator};
 use crate::viewport::pick::{Pick, SurfaceTarget};
 use crate::viewport::surface::Overlay as SurfaceOverlay;
+use crate::widgets::button::{button, Weight};
+use crate::widgets::field;
 use crate::widgets::segmented::segmented;
+
+pub use camera::Camera;
+pub use mesh::{Cut, GhostRadial, Marks, Mesh};
 
 /// Logical size of the ViewCube canvas.
 pub const CUBE_SIZE: f32 = 112.0;
 
 const SNAP_TIME: Duration = Duration::from_millis(320);
+/// The focus move and the exploded view animate over this long.
+const FOCUS_TIME: Duration = Duration::from_millis(250);
+/// Two selections of the same thing this close together are a double-click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+/// Headless runs (`bowshock drive`, animations off) render between scripted clicks, which can take longer than that.
+const HEADLESS_DOUBLE_CLICK: Duration = Duration::from_secs(10);
 
 static ANIMATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
@@ -85,6 +107,26 @@ pub enum InsideView {
     Exploded,
 }
 
+/// The toolbar's grid step: what a plain handle drag moves by.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GridStep(pub f64);
+
+impl GridStep {
+    /// The choices, metres.
+    pub const ALL: [GridStep; 5] = [GridStep(0.0001), GridStep(0.0005), GridStep(0.001), GridStep(0.005), GridStep(0.01)];
+}
+
+impl fmt::Display for GridStep {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mm = self.0 * 1000.0;
+        if mm < 1.0 {
+            write!(f, "⌖ {mm:.1} mm")
+        } else {
+            write!(f, "⌖ {mm:.0} mm")
+        }
+    }
+}
+
 /// The viewport's messages: camera, toolbar, and what its overlays report.
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -104,22 +146,38 @@ pub enum Message {
     Home,
     /// Turn the picture a quarter turn about the view direction: `1` clockwise, `-1` anticlockwise (ViewCube roll arrows).
     Roll(i8),
+    /// Turn the picture by a drag of this many px (`Alt` + right-drag).
+    RollBy(Vector),
     /// Animation frame.
     Tick(Instant),
     /// The toolbar's 3D / 2D switch.
     Projection(Projection),
     /// The toolbar's Solid / Cutaway / X-ray / Exploded switch (also keys `1`..`4`).
     InsideView(InsideView),
+    /// The toolbar's snap step.
+    Step(GridStep),
     /// What is under the cursor changed.
     Hover(Hover),
-    /// A click on a part (or on empty space, `None`).
+    /// A click on a part (or on empty space, `None`). Two on the same part in quick succession focus it; two on empty space fit.
     Select(Option<Pick>),
+    /// Select a part by id (a click on a part in the exploded view).
+    SelectPart(Option<PartId>),
+    /// Select the separation of this stage (a click on its diamond).
+    SelectSeparation(usize),
     /// A part was pressed and dragged: pick it up.
     Grab(Pick),
-    /// A resize handle moved the part to this size (merged into one undo step until [`Message::EditEnd`]).
-    Resize(PartId, PartKind),
-    /// A resize handle moved the radial part to this size.
-    ResizeRadial(PartId, RadialKind),
+    /// A handle edit (see `manipulate`).
+    Edit(manipulate::Edit),
+    /// The key hints to show at the bottom (pairs of key, what it does); empty clears them.
+    #[allow(dead_code)] // For overlays that want to show keys; direct edits set theirs through `Edit`.
+    Hint(Vec<(&'static str, &'static str)>),
+    /// Focus a part: turn square-on to it in an orthographic view that fills the viewport with it, and select it (also sent by a
+    /// double-click on a Station Lanes bar).
+    Focus(PartId),
+    /// Go back from a focus (`Esc`).
+    ExitFocus,
+    /// The cutaway wedge changed (the section handle).
+    Cut(Cut),
     /// The dragged axial part's nearest attach node changed.
     SnapNode(Option<usize>),
     /// The dragged radial part's surface target changed.
@@ -128,14 +186,23 @@ pub enum Message {
     DropAxial,
     /// Released over the viewport: drop the dragged radial part on its surface target, if any.
     DropRadial,
-    /// A direct edit (handle drag) ended: the document stops merging its steps.
-    EditEnd,
 }
 
 struct Anim {
     from: Camera,
     to: Camera,
     start: Instant,
+    duration: Duration,
+}
+
+/// The camera, projection and view mode to go back to when a focus ends.
+struct Focus {
+    camera: Camera,
+    profile: bool,
+    projection: Projection,
+    inside: InsideView,
+    /// The tag on the toolbar: `ORTHO · SIDE · FIN SET A`.
+    tag: String,
 }
 
 /// What the mesh was last built from; it is rebuilt when this changes.
@@ -146,6 +213,7 @@ struct MeshKey {
     selected: Option<PartId>,
     axial: Option<Option<usize>>,
     radial: Option<(Option<SurfaceTarget>, u8)>,
+    cut: Cut,
 }
 
 /// The viewport's state: camera, toolbar choices, hover and the mesh on show.
@@ -158,6 +226,19 @@ pub struct View {
     size: Size,
     projection: Projection,
     inside: InsideView,
+    /// The cutaway wedge.
+    cut: Cut,
+    /// The exploded view's progress, 0 to 1, and the animation moving it: `(from, to, start)`.
+    explode: f32,
+    explode_anim: Option<(f32, f32, Instant)>,
+    /// The toolbar's grid step, metres.
+    snap_step: f64,
+    /// The key hints a direct edit asked for.
+    hint: Vec<(&'static str, &'static str)>,
+    /// The focused part's way back.
+    focus: Option<Focus>,
+    /// The last selection click: when, and on what.
+    last_select: Option<(Instant, Option<PartId>)>,
     /// What is under the cursor.
     hover: Hover,
     /// Which copy of the selected radial group was clicked (and which part it belongs to).
@@ -168,15 +249,22 @@ pub struct View {
 impl View {
     /// An empty view. The camera looks at about where a rocket of typical size will appear until the first fit.
     pub fn new() -> Self {
-        let camera = home(Camera { target: Vec3::new(0.0, 0.0, 0.4), yaw: 0.0, pitch: 0.0, roll: 0.0, scale: 500.0 });
+        let camera = home(Camera { target: Vec3::new(0.0, 0.0, 0.4), scale: 500.0, ..Camera::default() });
         View {
             camera,
             anim: None,
             profile: false,
-            mesh: Arc::new(Mesh::from_rocket(&Rocket::default(), Marks::default())),
+            mesh: Arc::new(Mesh::from_rocket(&bowshock_model::Rocket::default(), Marks::default())),
             size: Size::new(860.0, 560.0),
             projection: Projection::ThreeD,
             inside: InsideView::Solid,
+            cut: Cut::default(),
+            explode: 0.0,
+            explode_anim: None,
+            snap_step: GridStep::ALL[2].0,
+            hint: Vec::new(),
+            focus: None,
+            last_select: None,
             hover: Hover::None,
             instance: None,
             mesh_key: None,
@@ -195,13 +283,19 @@ impl View {
         self.inside
     }
 
+    /// The toolbar's grid step, metres: what a plain handle drag moves by.
+    #[allow(dead_code)]
+    pub fn snap_step(&self) -> f64 {
+        self.snap_step
+    }
+
     /// Fits the model into the viewport at its last known size.
     pub fn fit(&mut self) {
         self.camera_update(Message::Fit(self.size));
     }
 
-    /// Rebuilds the mesh if the document, selection, hover or a drag ghost changed since it was built. The app calls this
-    /// after every message.
+    /// Rebuilds the mesh if the document, selection, hover, cutaway or a drag ghost changed since it was built. The app calls
+    /// this after every message.
     pub fn sync(&mut self, ctx: &Ctx) {
         let selected = ctx.selection.part();
         let key = MeshKey {
@@ -210,6 +304,7 @@ impl View {
             selected,
             axial: ctx.drag.axial.as_ref().map(|d| d.snap),
             radial: ctx.drag.radial.as_ref().map(|d| (d.target, d.count)),
+            cut: self.cut,
         };
         if self.mesh_key.as_ref() == Some(&key) {
             return;
@@ -220,7 +315,14 @@ impl View {
             let t = d.target?;
             Some(GhostRadial { kind: &d.kind, parent: t.parent, offset: t.offset, angle: t.angle, count: d.count })
         });
-        let marks = Marks { ghost: ghost.as_ref().map(|(node, kind)| (*node, kind)), ghost_radial, hovered: self.hover.part(), selected };
+        let marks = Marks {
+            ghost: ghost.as_ref().map(|(node, kind)| (*node, kind)),
+            ghost_radial,
+            hovered: self.hover.part(),
+            selected,
+            motors: Some(ctx.physics.motors()),
+            cut: self.cut,
+        };
         self.mesh = Arc::new(Mesh::from_rocket(rocket, marks));
         self.mesh_key = Some(key);
     }
@@ -229,30 +331,52 @@ impl View {
     pub fn update(&mut self, message: Message, ctx: &mut Ctx) -> Task<app::Message> {
         match message {
             Message::Projection(p) => {
+                self.focus = None;
                 self.projection = p;
                 self.set_profile(p == Projection::Profile);
             }
-            Message::InsideView(v) => self.inside = v,
+            Message::InsideView(v) => self.set_inside(v),
+            Message::Step(step) => self.snap_step = step.0,
             Message::Hover(hover) => self.hover = hover,
             Message::Select(pick) => {
-                ctx.selection = pick.map_or(Selection::None, |p| Selection::Part(p.id()));
+                let id = pick.map(Pick::id);
                 self.instance = match pick {
                     Some(Pick::Radial { id, instance }) => Some((id, instance)),
                     _ => None,
                 };
+                // Two selections of the same thing in quick succession: focus the part, or fit on empty space.
+                let now = Instant::now();
+                let window = if ANIMATE.load(std::sync::atomic::Ordering::Relaxed) { DOUBLE_CLICK } else { HEADLESS_DOUBLE_CLICK };
+                let double = self.last_select.is_some_and(|(at, last)| now.duration_since(at) <= window && last == id);
+                self.last_select = if double { None } else { Some((now, id)) };
+                ctx.selection = id.map_or(Selection::None, Selection::Part);
+                if double {
+                    match id {
+                        Some(id) => self.focus_part(id, ctx),
+                        None => self.fit(),
+                    }
+                }
             }
+            Message::SelectPart(id) => {
+                ctx.selection = id.map_or(Selection::None, Selection::Part);
+                self.instance = None;
+            }
+            Message::SelectSeparation(stage) => ctx.selection = Selection::Separation(stage),
             Message::Grab(pick) => {
                 drag::grab(ctx, pick);
                 self.hover = Hover::None;
                 self.instance = None;
             }
-            Message::Resize(id, kind) => {
-                ctx.doc.edit_merging("Resize part", &format!("resize:{id}"), |r| r.set_kind(id, kind));
+            Message::Edit(edit) => {
+                if let Some(hint) = edit.hint() {
+                    self.hint = hint;
+                }
+                return manipulate::apply(edit, ctx);
             }
-            Message::ResizeRadial(id, kind) => {
-                let count = ctx.doc.rocket().radial(id).map_or(1, |r| r.count);
-                ctx.doc.edit_merging("Resize part", &format!("resize:{id}"), |r| r.set_radial(id, kind, count));
-            }
+            Message::Hint(hint) => self.hint = hint,
+            Message::Focus(id) => self.focus_part(id, ctx),
+            Message::ExitFocus => self.exit_focus(),
+            Message::Cut(cut) => self.cut = cut,
             Message::SnapNode(node) => {
                 if let Some(drag) = ctx.drag.axial.as_mut() {
                     drag.snap = node;
@@ -265,15 +389,15 @@ impl View {
             }
             Message::DropAxial => drag::finish_axial(ctx, true),
             Message::DropRadial => drag::finish_radial(ctx, true),
-            Message::EditEnd => ctx.doc.seal(),
             camera => self.camera_update(camera),
         }
         Task::none()
     }
 
-    /// The shortcut `key` maps to in the viewport (`1`..`4` choose the inside view), if any.
-    pub fn on_key(&self, key: &keyboard::Key, modifiers: keyboard::Modifiers, _ctx: &Ctx) -> Option<Message> {
-        if !modifiers.is_empty() {
+    /// The shortcut `key` maps to in the viewport (`1`..`4` choose the inside view), if any. Nothing while a handle is being
+    /// dragged: typed digits belong to the drag's tag.
+    pub fn on_key(&self, key: &keyboard::Key, modifiers: keyboard::Modifiers, ctx: &Ctx) -> Option<Message> {
+        if !modifiers.is_empty() || ctx.doc.dragging() {
             return None;
         }
         let keyboard::Key::Character(c) = key else {
@@ -288,9 +412,82 @@ impl View {
         }
     }
 
-    /// Escape: nothing of the viewport's own to abandon beyond what the app does (drags).
+    /// Escape: goes back from a focused part, or leaves the exploded view; also clears the hover and the key hints.
     pub fn cancel(&mut self) {
         self.hover = Hover::None;
+        self.hint.clear();
+        if self.focus.is_some() {
+            self.exit_focus();
+        } else if self.inside == InsideView::Exploded {
+            self.set_inside(InsideView::Solid);
+        }
+    }
+
+    /// Shows the shell as `view`, animating the exploded view in or out.
+    fn set_inside(&mut self, view: InsideView) {
+        self.inside = view;
+        let to = if view == InsideView::Exploded { 1.0 } else { 0.0 };
+        if ANIMATE.load(std::sync::atomic::Ordering::Relaxed) {
+            self.explode_anim = Some((self.explode, to, Instant::now()));
+        } else {
+            self.explode = to;
+            self.explode_anim = None;
+        }
+    }
+
+    /// Focuses a part: turns square-on to it (side-on, or aft-on for rings and bulkheads) in an orthographic view that fills the
+    /// viewport with it, leaving `space-8` around, and selects it. An internal part also opens the shell (Cutaway, or X-ray for
+    /// an aft-on view, where the shell's aft face would hide it). Focusing another part moves the focus without stacking.
+    fn focus_part(&mut self, id: PartId, ctx: &mut Ctx) {
+        let Some(bounds) = self.mesh.part_bounds(id).copied() else {
+            return;
+        };
+        let rocket = ctx.doc.rocket();
+        let part = rocket.kind_of(id);
+        let aft_on = matches!(
+            part,
+            Some(PartRef::Internal(p)) if matches!(p.kind, InternalKind::CenteringRing { .. } | InternalKind::Bulkhead { .. } | InternalKind::EngineBlock { .. })
+        );
+        let internal = matches!(part, Some(PartRef::Internal(_)));
+        let mut tag = format!("ORTHO · {} · {}", if aft_on { "AFT" } else { "SIDE" }, part.map_or_else(String::new, |p| p.name()).to_uppercase());
+        if let (Some(PartRef::Radial(r)), Some((rid, i))) = (part, self.instance) {
+            if r.count > 1 && rid == id {
+                tag.push(' ');
+                tag.push((b'A' + (i % 26) as u8) as char);
+            }
+        }
+        if self.focus.is_none() {
+            self.focus = Some(Focus { camera: self.goal(), profile: self.profile, projection: self.projection, inside: self.inside, tag: String::new() });
+        }
+        if let Some(f) = self.focus.as_mut() {
+            f.tag = tag;
+        }
+        if internal {
+            match (self.inside, aft_on) {
+                (_, true) => self.set_inside(InsideView::XRay),
+                (InsideView::Solid, false) => self.set_inside(InsideView::Cutaway),
+                _ => {}
+            }
+        }
+        let mut to = self.goal();
+        (to.yaw, to.pitch, to.roll) = if aft_on { (0.0, 0.0, 0.0) } else { (-FRAC_PI_2, 0.0, 0.0) };
+        to.ortho_blend = 1.0;
+        to.fit_in(bounds.min, bounds.max, self.size, Vector::new(SPACE_8, SPACE_8));
+        self.animate_for(to, FOCUS_TIME);
+        ctx.selection = Selection::Part(id);
+    }
+
+    /// Back to where the camera, projection and view mode were before the focus.
+    fn exit_focus(&mut self) {
+        let Some(f) = self.focus.take() else {
+            return;
+        };
+        self.profile = f.profile;
+        self.projection = f.projection;
+        if self.inside != f.inside {
+            self.set_inside(f.inside);
+        }
+        self.animate_for(f.camera, FOCUS_TIME);
     }
 
     fn camera_update(&mut self, message: Message) {
@@ -300,6 +497,11 @@ impl View {
                 self.camera.orbit(delta);
             }
             Message::Orbit(_) => {}
+            Message::RollBy(delta) if !self.profile => {
+                self.anim = None;
+                self.camera.roll_by(delta);
+            }
+            Message::RollBy(_) => {}
             Message::Pan(delta) => {
                 self.settle();
                 self.camera.pan(delta);
@@ -336,10 +538,17 @@ impl View {
             Message::Roll(_) => {}
             Message::Tick(now) => {
                 if let Some(anim) = &self.anim {
-                    let t = (now.saturating_duration_since(anim.start).as_secs_f32() / SNAP_TIME.as_secs_f32()).min(1.0);
+                    let t = (now.saturating_duration_since(anim.start).as_secs_f32() / anim.duration.as_secs_f32()).min(1.0);
                     self.camera = anim.from.lerp(&anim.to, ease(t));
                     if t >= 1.0 {
                         self.anim = None;
+                    }
+                }
+                if let Some((from, to, start)) = self.explode_anim {
+                    let t = (now.saturating_duration_since(start).as_secs_f32() / FOCUS_TIME.as_secs_f32()).min(1.0);
+                    self.explode = from + (to - from) * ease(t);
+                    if t >= 1.0 {
+                        self.explode_anim = None;
                     }
                 }
             }
@@ -347,84 +556,178 @@ impl View {
         }
     }
 
-    /// Locks the camera side-on (Profile) or unlocks it (3D).
+    /// Locks the camera side-on and orthographic (Profile) or unlocks it into the perspective home view (3D).
     pub fn set_profile(&mut self, profile: bool) {
         self.profile = profile;
         let mut to = self.goal();
         if profile {
             (to.yaw, to.pitch, to.roll) = (-FRAC_PI_2, 0.0, 0.0);
+            to.ortho_blend = 1.0;
         } else {
             to = home(to);
         }
         self.animate(to);
     }
 
-    /// Advances the camera animation.
+    /// Advances the camera and exploded-view animations.
     pub fn tick(&mut self, now: Instant) {
         self.camera_update(Message::Tick(now));
     }
 
-    /// Whether a camera animation is running (and so wants frame ticks).
+    /// Whether a camera or exploded-view animation is running (and so wants frame ticks).
     pub fn animating(&self) -> bool {
-        self.anim.is_some()
+        self.anim.is_some() || self.explode_anim.is_some()
     }
 
-    /// The viewport pane: sheet, model, the overlay of the interaction in progress, the ViewCube and the view toolbar.
+    /// The key hints on show: what a direct edit asked for, else what the drag or selection in progress allows.
+    fn hints(&self, ctx: &Ctx) -> Vec<(&'static str, &'static str)> {
+        if !self.hint.is_empty() {
+            return self.hint.clone();
+        }
+        if ctx.drag.axial.is_some() {
+            vec![("", "Release over an attach node to snap"), ("Esc", "cancel")]
+        } else if ctx.drag.radial.is_some() {
+            vec![("", "Release on a tube"), ("X", "copies"), ("Alt", "free"), ("Shift", "snap"), ("Esc", "cancel")]
+        } else if matches!(ctx.selection, Selection::Separation(_)) {
+            vec![("", "Found from the motor mounts · set the timing in the inspector")]
+        } else if self.inside == InsideView::Exploded {
+            vec![("", "Exploded view is view-only"), ("Esc", "leave")]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// The view toolbar: 3D / 2D, the inside views, the snap step, and the focus tag with its way back.
+    fn toolbar<'a>(&'a self) -> Element<'a, Message> {
+        let rule = || container(Space::new()).width(1).height(crate::tokens::CONTROL_H).style(theme::hairline).boxed();
+        let items: Vec<Element<'a, Message>> = vec![
+            segmented(&[(Projection::ThreeD, "3D"), (Projection::Profile, "2D")], self.projection, Message::Projection),
+            rule(),
+            segmented(
+                &[(InsideView::Solid, "Solid"), (InsideView::Cutaway, "Cutaway"), (InsideView::XRay, "X-ray"), (InsideView::Exploded, "Exploded")],
+                self.inside,
+                Message::InsideView,
+            ),
+            rule(),
+            container(field::select(GridStep::ALL.as_slice(), Some(GridStep(self.snap_step)), Message::Step)).width(96).boxed(),
+        ];
+        let toolbar = container(row(items).spacing(SPACE_2).align_y(alignment::Vertical::Center)).padding(SPACE_1).style(theme::overlay);
+        let Some(focus) = &self.focus else {
+            return toolbar.boxed();
+        };
+        // The focus tag with its way back, in a second overlay under the toolbar.
+        let tag = row![
+            text(focus.tag.clone()).font(MONO).size(TEXT_LABEL).style(theme::colored(|t| t.accent)).wrapping(text::Wrapping::None),
+            Element::from(button("Esc · back", Weight::Secondary).on_press(Message::ExitFocus)),
+        ]
+        .spacing(SPACE_2)
+        .align_y(alignment::Vertical::Center);
+        column![toolbar, container(tag).padding([SPACE_1, SPACE_2]).style(theme::overlay)].spacing(SPACE_2).boxed()
+    }
+
+    /// The viewport pane: sheet, model, the overlay of the interaction in progress, the markers, the ViewCube and the HUD.
     pub fn view<'a>(&'a self, ctx: &'a Ctx) -> Element<'a, Message> {
         let tokens = ctx.tokens();
         let rocket = ctx.doc.rocket();
         let camera = self.camera;
-        // While a part is dragged an assembly overlay owns the viewport; otherwise the manipulation overlay does.
+        let snap_step = self.snap_step;
+        // While a part is dragged an assembly overlay owns the viewport; otherwise the manipulation overlay does (the exploded
+        // view is view-only: the markers layer selects).
         let (overlay, interaction): (Element<'a, Message>, mouse::Interaction) = if let Some(drag) = &ctx.drag.axial {
             (canvas(assembly::Overlay { rocket, drag, camera, cursor: ctx.cursor }).width(Fill).height(Fill).boxed(), mouse::Interaction::default())
         } else if let Some(drag) = &ctx.drag.radial {
             (
-                canvas(SurfaceOverlay { rocket, drag, camera, snap: ctx.drag.angle_snap, cursor: ctx.cursor }).width(Fill).height(Fill).boxed(),
+                canvas(SurfaceOverlay { rocket, drag, camera, snap: ctx.drag.angle_snap, snap_step, cursor: ctx.cursor }).width(Fill).height(Fill).boxed(),
                 mouse::Interaction::default(),
             )
+        } else if self.inside == InsideView::Exploded {
+            (Space::new().boxed(), mouse::Interaction::default())
         } else {
             let selected = ctx.selection.part();
             let instance = self.instance.filter(|(id, _)| Some(*id) == selected).map_or(0, |(_, i)| i);
             (
-                canvas(Manipulator { rocket, camera, selected, instance, hover: self.hover, cursor: ctx.cursor }).width(Fill).height(Fill).boxed(),
+                canvas(Manipulator {
+                    rocket,
+                    camera,
+                    selected,
+                    instance,
+                    hover: self.hover,
+                    cursor: ctx.cursor,
+                    snap_step,
+                    inside: self.inside,
+                    profile: self.profile,
+                    units: ctx.units,
+                })
+                .width(Fill)
+                .height(Fill)
+                .boxed(),
                 self.hover.interaction(),
             )
         };
+        let reveal = ctx.selection.part().is_some_and(|id| matches!(rocket.kind_of(id), Some(PartRef::Internal(_))));
+        let phase = ctx.physics.phase();
+        let fade_from = ctx.physics.stages().iter().find(|s| s.index == phase.first_stage()).filter(|s| s.index > 1).map(|s| s.fore_station as f32);
         let sheet: Element<'_, Message> = canvas(sheet::Sheet { camera }).width(Fill).height(Fill).boxed();
         let model: Element<'_, Message> = shader(scene::Scene {
             camera,
-            color: tokens.part_body,
-            accent: tokens.accent,
-            fin: tokens.part_fin,
+            tokens: *tokens,
             mesh: self.mesh.clone(),
             interaction,
             orbit: !self.profile,
+            inside: self.inside,
+            reveal,
+            explode: self.explode,
+            cut: self.cut,
+            fade_from,
         })
         .width(Fill)
         .height(Fill)
         .boxed();
-        let mut layers = stack![sheet, model, overlay];
+        let motors = ctx
+            .physics
+            .stages()
+            .iter()
+            .flat_map(|s| {
+                s.mounts.iter().filter_map(move |m| {
+                    let slot = rocket.active_configuration().slot(*m)?;
+                    Some((s.index, slot.motor.as_ref()?.designation.clone()))
+                })
+            })
+            .collect::<Vec<(usize, String)>>();
+        let markers = |hit: bool, motors: Vec<(usize, String)>| -> Element<'a, Message> {
+            canvas(markers::Markers {
+                rocket,
+                camera,
+                mesh: &self.mesh,
+                balance: ctx.physics.balance().map(|b| (b.cg, b.cp, b.margin_cal)),
+                stages: ctx.physics.stages(),
+                motors,
+                selection: ctx.selection,
+                inside: self.inside,
+                explode: self.explode,
+                cut: self.cut,
+                units: ctx.units,
+                interactive: !ctx.drag.active(),
+                hit,
+            })
+            .width(Fill)
+            .height(Fill)
+            .boxed()
+        };
+        // Drawn markers and the HUD panels sit under the manipulation overlay (its drag tag must cover them); a transparent layer
+        // above it takes the clicks on the section handle, the separation diamonds and (exploded) the parts.
+        let hints = self.hints(ctx);
+        let hint_bar = (!hints.is_empty()).then(|| markers::hints(&hints));
+        let mut layers = stack![sheet, model, markers(false, motors.clone())];
+        layers = layers.push(markers::bottom_bar(markers::legend(crate::app::physics::BALANCE_MACH, 0.0), hint_bar));
+        layers = layers.push(overlay).push(markers(true, motors));
         if !self.profile {
             let cube = canvas(cube::ViewCube { camera }).width(CUBE_SIZE).height(CUBE_SIZE);
             let cube: Element<'_, Message> = container(cube).align_right(Fill).padding(SPACE_4).boxed();
             layers = layers.push(cube);
         }
-
-        let toolbar = container(
-            row![
-                segmented(&[(Projection::ThreeD, "3D"), (Projection::Profile, "2D")], self.projection, Message::Projection),
-                segmented(
-                    &[(InsideView::Solid, "Solid"), (InsideView::Cutaway, "Cutaway"), (InsideView::XRay, "X-ray"), (InsideView::Exploded, "Exploded")],
-                    self.inside,
-                    Message::InsideView,
-                ),
-            ]
-            .spacing(SPACE_2),
-        )
-        .padding(SPACE_1)
-        .style(theme::overlay);
         // Overlays float `space-4` from the viewport edges.
-        stack![layers, container(toolbar).padding(SPACE_4)].boxed()
+        stack![layers, container(self.toolbar()).padding(SPACE_4)].boxed()
     }
 
     /// Where the camera is heading: the end of the running animation, or the camera itself.
@@ -440,8 +743,12 @@ impl View {
     }
 
     fn animate(&mut self, to: Camera) {
+        self.animate_for(to, SNAP_TIME);
+    }
+
+    fn animate_for(&mut self, to: Camera, duration: Duration) {
         if ANIMATE.load(std::sync::atomic::Ordering::Relaxed) {
-            self.anim = Some(Anim { from: self.camera, to, start: Instant::now() });
+            self.anim = Some(Anim { from: self.camera, to, start: Instant::now(), duration });
         } else {
             self.anim = None;
             self.camera = to;
@@ -449,10 +756,10 @@ impl View {
     }
 }
 
-/// The home view: three-quarter from above, forward and the left side, like Fusion's home.
+/// The home view: three-quarter from above, forward and the left side, like Fusion's home, in perspective.
 fn home(camera: Camera) -> Camera {
     let (yaw, pitch) = camera.facing(Vec3::new(-1.0, 0.45, -0.55));
-    Camera { yaw, pitch, roll: 0.0, ..camera }
+    Camera { yaw, pitch, roll: 0.0, ortho_blend: 0.0, ..camera }
 }
 
 fn ease(t: f32) -> f32 {

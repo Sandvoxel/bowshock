@@ -10,21 +10,28 @@
 
 mod config;
 mod geometry;
+mod handles;
 mod internal;
 mod json;
 mod mass;
 mod material;
+mod notes;
 mod rocket;
+mod snap;
 mod stage;
+mod symmetry;
 
 /// Stable identifier of a part within a [`Rocket`], whatever class of part it is.
 pub type PartId = u64;
 
 pub use config::{ConfigError, ConfigId, Configuration, Ignition, MotorMount, MotorRef, MotorSlot};
 pub use geometry::{FinPlanform, FinSection, NoseShape, Part, PartKind, RadialKind, RadialPart, MAX_COUNT};
+pub use handles::{Dim, DimEdit, HandleKind, HandleSpec, HandleView};
 pub use internal::{DeployEvent, Deployment, InternalKind, InternalPart, MassRole, PartClass, PartRef, System, AUTO_FILL};
 pub use json::{JsonError, FORMAT_VERSION};
 pub use mass::MassProps;
 pub use material::{materials, materials_of_kind, Finish, Material, MaterialId, MaterialKind};
 pub use rocket::{InsertError, InternalError, RadialError, Resolved, Rocket};
+pub use snap::Target;
 pub use stage::{Separation, SplitError, Stage, StageIssue};
+pub use symmetry::instance_letter;

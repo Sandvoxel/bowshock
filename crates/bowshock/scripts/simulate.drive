@@ -1,0 +1,53 @@
+# The Simulate screen: flights + conditions, events strip and linked plots, results, ground track, compare.
+# Run with the example rocket loaded:
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/simulate.drive out/simulate
+viewport 1280x800
+
+# Simulate mode (the top bar's switch), before anything has run.
+click (663, 18)
+screenshot SimulateScreen-empty.png
+
+# Run the selected flight (Nominal) on a worker thread; the result lands before the next step.
+click "Run"
+screenshot SimulateScreen-dark.png
+
+# Hover: one crosshair across the plots, a dot on the ground track.
+move (560, 300)
+move (570, 300)
+screenshot SimulateScreen-hover.png
+
+# PlotZoom: drag a band along x, Enter zooms, Esc steps back.
+press (500, 300)
+move (560, 300)
+move (640, 300)
+release (640, 300)
+screenshot PlotZoom-band.png
+type enter
+move (600, 300)
+screenshot PlotZoom-dark.png
+type escape
+
+# Clicking a result number moves the crosshair to that moment.
+click "Time to apogee"
+screenshot SimulateScreen-seek.png
+
+# Run all four flights, then tick three of them (colours follow the tick order).
+click "Run all"
+click (17, 94)
+click (17, 138)
+click (17, 226)
+move (640, 300)
+move (650, 300)
+screenshot SimulateCompare-dark.png
+
+# A flight's own conditions: pick Windy and change the wind; its result goes stale (ink-faint) until it is run again.
+click "Windy"
+screenshot SimulateCompare-select.png
+
+# Light theme.
+click "Light"
+screenshot SimulateCompare-light.png
+click (17, 94)
+click (17, 138)
+click (17, 226)
+screenshot SimulateScreen-light.png

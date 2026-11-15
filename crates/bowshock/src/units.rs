@@ -45,6 +45,8 @@ pub enum Quantity {
     Percentage,
     /// Lengths in units of body diameter (dimensionless ratio).
     Calibers,
+    /// A plain number with no physical unit (drag coefficient, counts, exponents).
+    Scalar,
 }
 
 /// A display unit of a quantity: `si = value * to_si + offset`.
@@ -151,6 +153,7 @@ static ROUGHNESS: [Unit; 2] = [unit("µm", 1e-6, 1), unit("mil", 25.4e-6, 2)];
 static ALTITUDE: [Unit; 3] = [unit("m", 1.0, 0), unit("ft", FOOT, 0), unit("km", 1000.0, 3)];
 static PERCENTAGE: [Unit; 1] = [unit("%", 0.01, 1)];
 static CALIBERS: [Unit; 1] = [unit("cal", 1.0, 2)];
+static SCALAR: [Unit; 1] = [unit("·", 1.0, 2)];
 
 impl Quantity {
     /// All selectable units, in click-cycle order; the first is the most common.
@@ -171,6 +174,7 @@ impl Quantity {
             Quantity::Altitude => &ALTITUDE,
             Quantity::Percentage => &PERCENTAGE,
             Quantity::Calibers => &CALIBERS,
+            Quantity::Scalar => &SCALAR,
         }
     }
 
@@ -221,7 +225,7 @@ impl Quantity {
                 MKgS => 2,
                 InOzS | FtLbS => 3,
             },
-            Quantity::Angle | Quantity::Time | Quantity::Percentage | Quantity::Calibers => 0,
+            Quantity::Angle | Quantity::Time | Quantity::Percentage | Quantity::Calibers | Quantity::Scalar => 0,
         };
         let units = self.units();
         &units[index.min(units.len() - 1)]
@@ -256,6 +260,7 @@ impl Quantity {
             Quantity::Altitude => &[("feet", 1), ("foot", 1)],
             Quantity::Percentage => &[("pct", 0)],
             Quantity::Calibers => &[("cals", 0), ("caliber", 0), ("calibers", 0)],
+            Quantity::Scalar => &[],
         }
     }
 }

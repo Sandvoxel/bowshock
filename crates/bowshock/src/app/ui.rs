@@ -1,11 +1,11 @@
 //! Small helpers every screen shares: section labels and number formatting in the app's unit system.
 
 use bowshock_model::{PartKind, RadialKind};
-use iced::widget::{container, row, text};
-use iced::{Element, Fill, Theme, Widget};
+use iced::widget::text;
+use iced::{Element, Theme, Widget};
 
 use crate::theme::{self, MONO};
-use crate::tokens::{BIN_W, RAIL_W, RIGHT_PANEL_W, TEXT_LABEL};
+use crate::tokens::TEXT_LABEL;
 use crate::units::{self, Quantity, Unit, UnitSystem};
 
 /// An uppercase mono section label in `ink-faint`.
@@ -56,15 +56,6 @@ pub fn with_unit(value_si: f64, quantity: Quantity, system: UnitSystem) -> Strin
 /// [`readout`] without the unit symbol, `712.4`.
 pub fn bare(value_si: f64, quantity: Quantity, system: UnitSystem) -> String {
     readout(value_si, quantity, system).0
-}
-
-/// The Simulate and Analyze frame: a left panel (the width of the Build screen's parts bin), a centre of drawing-sheet ground
-/// and a right panel (the width of the inspector), under the same top bar and status strip as Build.
-pub fn three_columns<'a, M: 'a>(left: Element<'a, M>, centre: Element<'a, M>, right: Element<'a, M>) -> Element<'a, M> {
-    let panel = |content: Element<'a, M>, width: f32| container(content).width(width).height(Fill).padding(theme::PAD_PANEL).style(theme::panel);
-    row![panel(left, RAIL_W + BIN_W), container(centre).width(Fill).height(Fill).padding(theme::PAD_PANEL).style(theme::ground), panel(right, RIGHT_PANEL_W)]
-        .height(Fill)
-        .boxed()
 }
 
 #[cfg(test)]

@@ -1,19 +1,23 @@
-//! The shader widget program: mesh data, input handling and the per-frame primitive handed to the GPU pipeline.
+//! The shader widget program: input handling (camera navigation) and the per-frame primitive handed to the GPU pipeline.
+//!
+//! Navigation (design/components/Navigation): right-drag orbits, middle-drag pans, `Alt` + right-drag rolls, the wheel zooms about
+//! the cursor, a trackpad's two-finger scroll orbits (pan in Profile), with `Shift` it pans and with `Cmd`/`Ctrl` it zooms.
+//! Pinch and rotate gestures are not delivered to widgets by iced, so `Cmd`/`Ctrl` + scroll is the zoom fallback on a trackpad
+//! (and `Alt` + right-drag the roll). The left button belongs to the selection and manipulation overlays above.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use bowshock_model::{PartId, PartKind, RadialKind, RadialPart, Rocket};
-use glam::Vec3;
 use iced::time::{Duration, Instant};
 use iced::widget::shader::{self, Action};
-use iced::{keyboard, mouse, Color, Point, Rectangle, Vector};
+use iced::{keyboard, mouse, Point, Rectangle, Vector};
 
 use super::camera::Camera;
-use super::pipeline::{Pipeline, Uniforms};
-use super::radial::{self, Placement};
-use super::Message;
+use super::mesh::{Cut, Mesh};
+use super::pipeline::{DrawPlan, Pipeline, Uniforms};
+use super::{InsideView, Message};
+use crate::tokens::Tokens;
 
+/// A vertex as the radial-part emitters write it; [`super::solids::Sink::adopt`] turns it into a [`super::solids::GpuVertex`].
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
@@ -34,164 +38,11 @@ pub const HOVERED: f32 = 2.0;
 /// Selected: an accent tint on the silhouette edge.
 pub const SELECTED: f32 = 3.0;
 
-/// What to draw besides the rocket as it is.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Marks<'a> {
-    /// A part shown inserted at this node index, later parts shifted aft by its length.
-    pub ghost: Option<(usize, &'a PartKind)>,
-    /// A radial part shown placed on an axial part.
-    pub ghost_radial: Option<GhostRadial<'a>>,
-    /// Axial or radial part under the cursor.
-    pub hovered: Option<PartId>,
-    /// Axial or radial part selected.
-    pub selected: Option<PartId>,
-}
-
-/// A radial part being dragged onto the rocket: every copy is drawn as a ghost.
-#[derive(Debug, Clone, Copy)]
-pub struct GhostRadial<'a> {
-    pub kind: &'a RadialKind,
-    pub parent: PartId,
-    pub offset: f64,
-    pub angle: f64,
-    pub count: u8,
-}
-
-/// Triangle list, counter-clockwise front faces.
-#[derive(Debug)]
-pub struct Mesh {
-    pub id: u64,
-    pub vertices: Vec<Vertex>,
-    pub min: Vec3,
-    pub max: Vec3,
-}
-
-static NEXT_MESH_ID: AtomicU64 = AtomicU64::new(1);
-
-/// Segments around the axis.
-const SEGMENTS: usize = 64;
-
-impl Mesh {
-    /// The airframe as a surface of revolution about Z, each part at its station (world z, metres), with a flat disc on the
-    /// aft face when it has any radius. See [`Marks`] for the ghost and the hovered / selected part.
-    pub fn from_rocket(rocket: &Rocket, marks: Marks) -> Mesh {
-        let state_of = |id: PartId| {
-            if marks.selected == Some(id) {
-                SELECTED
-            } else if marks.hovered == Some(id) {
-                HOVERED
-            } else {
-                NORMAL
-            }
-        };
-        let mut stack: Vec<(Option<PartId>, &PartKind, f32)> = rocket.parts().iter().map(|p| (Some(p.id), &p.kind, state_of(p.id))).collect();
-        if let Some((index, kind)) = marks.ghost {
-            stack.insert(index.min(stack.len()), (None, kind, GHOST));
-        }
-
-        let mut vertices = Vec::new();
-        let mut z = 0.0f64;
-        // Station of each axial part as drawn (a ghost shifts the parts behind it).
-        let mut stations: Vec<(PartId, f64)> = Vec::new();
-        for (id, kind, state) in &stack {
-            revolve(&mut vertices, &kind.profile(), z as f32, *state);
-            stations.extend(id.map(|id| (id, z)));
-            z += kind.length();
-        }
-        if let Some((_, kind, state)) = stack.last() {
-            let radius = kind.aft_diameter() as f32 / 2.0;
-            if radius > 0.0 {
-                disc(&mut vertices, radius, z as f32, *state);
-            }
-        }
-
-        let station_of = |parent: PartId| stations.iter().find(|(id, _)| *id == parent).map(|(_, z)| *z);
-        let mut place = |radial: &RadialPart, state: f32| {
-            let (Some(parent_z), Some(base)) = (station_of(radial.parent), rocket.radial_base_radius(radial)) else {
-                return;
-            };
-            for angle in radial.angles() {
-                let at = Placement { z0: (parent_z + radial.offset) as f32, base: base as f32, angle: angle as f32 };
-                radial::emit(&mut vertices, &radial.kind, at, state);
-            }
-        };
-        for radial in rocket.radials() {
-            place(radial, state_of(radial.id));
-        }
-        if let Some(g) = marks.ghost_radial {
-            let offset = rocket.clamp_offset(g.parent, g.offset, g.kind).unwrap_or(0.0);
-            place(&RadialPart::new(PartId::MAX, g.kind.clone(), g.parent, offset, g.angle, g.count), GHOST);
-        }
-
-        let (mut min, mut max) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
-        for v in &vertices {
-            let p = Vec3::from(v.position);
-            min = min.min(p);
-            max = max.max(p);
-        }
-        if vertices.is_empty() {
-            (min, max) = (Vec3::ZERO, Vec3::ZERO);
-        }
-        Mesh { id: NEXT_MESH_ID.fetch_add(1, Ordering::Relaxed), vertices, min, max }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.vertices.is_empty()
-    }
-}
-
-/// Revolves a fore-to-aft profile `(z, r)` (z from the part's fore face, placed at `z0`) about Z. Normals follow the profile's
-/// slope, taken across neighbouring points, so a smooth profile shades smoothly.
-fn revolve(out: &mut Vec<Vertex>, profile: &[(f64, f64)], z0: f32, state: f32) {
-    let pts: Vec<(f32, f32)> = profile.iter().map(|&(z, r)| (z0 + z as f32, r as f32)).collect();
-    // Outward normal in the (z, r) plane at each profile point.
-    let normals: Vec<(f32, f32)> = (0..pts.len())
-        .map(|i| {
-            let (a, b) = (pts[i.saturating_sub(1)], pts[(i + 1).min(pts.len() - 1)]);
-            let (tz, tr) = (b.0 - a.0, b.1 - a.1);
-            let len = tz.hypot(tr).max(f32::MIN_POSITIVE);
-            (-tr / len, tz / len)
-        })
-        .collect();
-    let at = |i: usize, s: f32, c: f32| {
-        let (z, r) = pts[i];
-        let (nz, nr) = normals[i];
-        Vertex { position: [r * c, r * s, z], normal: [nr * c, nr * s, nz], state, material: 0.0 }
-    };
-    for k in 0..SEGMENTS {
-        let (s0, c0) = (std::f32::consts::TAU * k as f32 / SEGMENTS as f32).sin_cos();
-        let (s1, c1) = (std::f32::consts::TAU * (k + 1) as f32 / SEGMENTS as f32).sin_cos();
-        for i in 0..pts.len().saturating_sub(1) {
-            let (p00, p10, p01, p11) = (at(i, s0, c0), at(i, s1, c1), at(i + 1, s0, c0), at(i + 1, s1, c1));
-            // A zero radius collapses an edge of the quad into a point: skip the degenerate triangle.
-            if pts[i].1 > 0.0 {
-                out.extend([p00, p10, p11]);
-            }
-            if pts[i + 1].1 > 0.0 {
-                out.extend([p00, p11, p01]);
-            }
-        }
-    }
-}
-
-/// A flat disc facing +Z at `z`.
-fn disc(out: &mut Vec<Vertex>, radius: f32, z: f32, state: f32) {
-    let v = |x: f32, y: f32| Vertex { position: [x, y, z], normal: [0.0, 0.0, 1.0], state, material: 0.0 };
-    for k in 0..SEGMENTS {
-        let (s0, c0) = (std::f32::consts::TAU * k as f32 / SEGMENTS as f32).sin_cos();
-        let (s1, c1) = (std::f32::consts::TAU * (k + 1) as f32 / SEGMENTS as f32).sin_cos();
-        out.extend([v(0.0, 0.0), v(radius * c0, radius * s0), v(radius * c1, radius * s1)]);
-    }
-}
-
+/// Everything the shader widget needs for one frame.
 #[derive(Debug)]
 pub struct Scene {
     pub camera: Camera,
-    pub color: Color,
-    /// Tint of the ghost part.
-    pub accent: Color,
-    /// Colour of radial parts (fins, lugs, buttons).
-    pub fin: Color,
+    pub tokens: Tokens,
     pub mesh: Arc<Mesh>,
     /// The cursor to show over the model (a grab hand over a part, a resize arrow over a handle). Reported here rather than by
     /// the overlay above because a stack hides the cursor from the layers below any layer that reports a cursor of its own,
@@ -199,12 +50,29 @@ pub struct Scene {
     pub interaction: mouse::Interaction,
     /// Whether orbiting is allowed (a 3D view rather than a locked side view).
     pub orbit: bool,
+    /// How the model is shown.
+    pub inside: InsideView,
+    /// The airframe is ghosted around a selected internal part.
+    pub reveal: bool,
+    /// Exploded-view animation, 0 (together) to 1 (apart).
+    pub explode: f32,
+    /// The removed wedge in Cutaway.
+    pub cut: Cut,
+    /// Parts aft of this station have dropped away in the phase on show: drawn faint.
+    pub fade_from: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gesture {
+    Pan,
+    Orbit,
+    Roll,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct Drag {
     last: Point,
-    orbit: bool,
+    gesture: Gesture,
 }
 
 #[derive(Debug, Default)]
@@ -250,15 +118,29 @@ impl shader::Program<Message> for Scene {
                     return Some(Action::publish(Message::Fit(bounds.size())).and_capture());
                 }
                 state.last_click = Some((now, position));
-                state.drag = Some(Drag { last: position, orbit: state.modifiers.shift() && self.orbit });
+                let gesture = if state.modifiers.shift() && self.orbit { Gesture::Orbit } else { Gesture::Pan };
+                state.drag = Some(Drag { last: position, gesture });
                 Some(Action::capture())
             }
-            iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Middle)) => state.drag.take().map(|_| Action::capture()),
+            iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
+                if !self.orbit {
+                    return None;
+                }
+                let position = cursor.position_over(bounds)?;
+                let gesture = if state.modifiers.alt() { Gesture::Roll } else { Gesture::Orbit };
+                state.drag = Some(Drag { last: position, gesture });
+                Some(Action::capture())
+            }
+            iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Middle | mouse::Button::Right)) => state.drag.take().map(|_| Action::capture()),
             iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
                 let drag = state.drag.as_mut()?;
                 let delta = *position - drag.last;
                 drag.last = *position;
-                let message = if drag.orbit { Message::Orbit(delta) } else { Message::Pan(delta) };
+                let message = match drag.gesture {
+                    Gesture::Orbit => Message::Orbit(delta),
+                    Gesture::Roll => Message::RollBy(delta),
+                    Gesture::Pan => Message::Pan(delta),
+                };
                 Some(Action::publish(message).and_capture())
             }
             iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
@@ -269,13 +151,10 @@ impl shader::Program<Message> for Scene {
                     mouse::ScrollDelta::Pixels { x, y } => {
                         if state.modifiers.logo() || state.modifiers.control() {
                             Message::Zoom { factor: (y * 0.01).exp(), offset }
-                        } else if state.modifiers.shift() {
-                            if !self.orbit {
-                                return None;
-                            }
-                            Message::Orbit(Vector::new(-x, -y))
-                        } else {
+                        } else if state.modifiers.shift() || !self.orbit {
                             Message::Pan(Vector::new(x, y))
+                        } else {
+                            Message::Orbit(Vector::new(-x, -y))
                         }
                     }
                 };
@@ -289,15 +168,44 @@ impl shader::Program<Message> for Scene {
         let camera = &self.camera;
         let light = (-0.45 * camera.right() + 0.75 * camera.up() + 0.5 * camera.back()).normalize();
         let back = camera.back();
+        let size = bounds.size();
+        let eye = camera.eye(size);
+        let t = &self.tokens;
+        let colors = [
+            t.part_body,
+            t.part_fin,
+            t.accent,
+            t.part_body,
+            t.sys_aero,
+            t.sys_propulsion,
+            t.sys_recovery,
+            t.sys_avionics,
+            t.cut_face,
+            t.cut_interior,
+            t.bg_000,
+        ]
+        // Packed like the rest of the UI's colours: iced's default (web-colors) draws them as written, an sRGB build wants them
+        // linear.
+        .map(|c| iced::advanced::graphics::color::pack(c).components());
+        let (mode, translucent) = match self.inside {
+            InsideView::Solid => (0.0, self.reveal),
+            InsideView::Cutaway => (1.0, false),
+            InsideView::XRay => (2.0, true),
+            InsideView::Exploded => (3.0, false),
+        };
+        let centre = (self.cut.centre.cos(), self.cut.centre.sin());
         Primitive {
             uniforms: Uniforms {
-                view_proj: camera.view_proj(bounds.size()).to_cols_array_2d(),
+                view_proj: camera.view_proj(size).to_cols_array_2d(),
                 light_dir: [light.x, light.y, light.z, 0.0],
-                color: self.color.into_linear(),
-                accent: self.accent.into_linear(),
-                fin: self.fin.into_linear(),
+                eye: [eye.x, eye.y, eye.z, if camera.is_ortho() { 0.0 } else { 1.0 }],
                 view_dir: [back.x, back.y, back.z, 0.0],
+                params: [mode, f32::from(self.reveal), self.explode, self.fade_from.unwrap_or(1.0e9)],
+                cut: [centre.0, centre.1, (self.cut.span / 2.0).cos(), 1.0],
+                screen: [camera.scale, 0.0, 0.0, 0.0],
+                colors,
             },
+            plan: DrawPlan { caps: self.inside == InsideView::Cutaway, translucent },
             mesh: self.mesh.clone(),
         }
     }
@@ -316,6 +224,7 @@ impl shader::Program<Message> for Scene {
 #[derive(Debug)]
 pub struct Primitive {
     uniforms: Uniforms,
+    plan: DrawPlan,
     mesh: Arc<Mesh>,
 }
 
@@ -323,89 +232,10 @@ impl shader::Primitive for Primitive {
     type Pipeline = Pipeline;
 
     fn prepare(&self, pipeline: &mut Pipeline, device: &iced::wgpu::Device, queue: &iced::wgpu::Queue, bounds: &Rectangle, viewport: &shader::Viewport) {
-        pipeline.prepare(device, queue, &self.uniforms, &self.mesh, bounds, viewport);
+        pipeline.prepare(device, queue, &self.uniforms, self.plan, &self.mesh, bounds, viewport);
     }
 
     fn render(&self, pipeline: &Pipeline, encoder: &mut iced::wgpu::CommandEncoder, target: &iced::wgpu::TextureView, clip_bounds: &Rectangle<u32>) {
         pipeline.render(encoder, target, clip_bounds);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use bowshock_model::{NoseShape, RadialKind};
-
-    fn nose() -> PartKind {
-        PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1 }
-    }
-
-    fn tube() -> PartKind {
-        PartKind::BodyTube { length: 0.5, diameter: 0.1 }
-    }
-
-    #[test]
-    fn empty_rocket_is_an_empty_mesh() {
-        assert!(Mesh::from_rocket(&Rocket::default(), Marks::default()).is_empty());
-    }
-
-    #[test]
-    fn mesh_spans_the_rocket_and_the_ghost_shifts_later_parts() {
-        let mut rocket = Rocket::default();
-        rocket.insert(0, nose()).unwrap();
-        let mesh = Mesh::from_rocket(&rocket, Marks::default());
-        assert!((mesh.min.z - 0.0).abs() < 1e-6 && (mesh.max.z - 0.2).abs() < 1e-6);
-        assert!((mesh.max.x - 0.05).abs() < 1e-6);
-        assert!(mesh.vertices.iter().all(|v| v.state == NORMAL));
-
-        // A tube ghosted at the aft node extends the rocket; ghosted at the fore node it shifts the nose aft instead.
-        let aft = Mesh::from_rocket(&rocket, Marks { ghost: Some((1, &tube())), ..Marks::default() });
-        assert!((aft.max.z - 0.7).abs() < 1e-6);
-        assert!(aft.vertices.iter().any(|v| v.state == GHOST));
-        let all_ghost_start = Mesh::from_rocket(&rocket, Marks { ghost: Some((0, &tube())), ..Marks::default() });
-        let ghost_min = all_ghost_start.vertices.iter().filter(|v| v.state == GHOST).map(|v| v.position[2]).fold(f32::MAX, f32::min);
-        let part_min = all_ghost_start.vertices.iter().filter(|v| v.state == NORMAL).map(|v| v.position[2]).fold(f32::MAX, f32::min);
-        assert!(ghost_min.abs() < 1e-6 && (part_min - 0.5).abs() < 1e-6);
-    }
-
-    #[test]
-    fn hovered_and_selected_parts_are_marked() {
-        let mut rocket = Rocket::default();
-        let nose_id = rocket.insert(0, nose()).unwrap();
-        let tube_id = rocket.insert(1, tube()).unwrap();
-        let mesh = Mesh::from_rocket(&rocket, Marks { hovered: Some(tube_id), selected: Some(nose_id), ..Marks::default() });
-        let states = |lo: f32, hi: f32| mesh.vertices.iter().filter(|v| (lo..hi).contains(&v.position[2])).map(|v| v.state).collect::<Vec<_>>();
-        assert!(states(0.0, 0.19).iter().all(|&s| s == SELECTED));
-        assert!(states(0.21, 0.7).iter().all(|&s| s == HOVERED));
-        // Selected wins over hovered.
-        let both = Mesh::from_rocket(&rocket, Marks { hovered: Some(nose_id), selected: Some(nose_id), ..Marks::default() });
-        assert!(both.vertices.iter().any(|v| v.state == SELECTED) && both.vertices.iter().all(|v| v.state != HOVERED));
-    }
-
-    #[test]
-    fn radial_parts_are_part_of_the_mesh_and_follow_a_ghost() {
-        let mut rocket = Rocket::default();
-        rocket.insert(0, nose()).unwrap();
-        let tube_id = rocket.insert(1, tube()).unwrap();
-        let bare = Mesh::from_rocket(&rocket, Marks::default());
-        let fins = RadialKind::FinSet { root_chord: 0.1, tip_chord: 0.05, span: 0.08, sweep: 0.03, thickness: 0.003 };
-        let id = rocket.attach_radial(tube_id, 0.4, 0.0, 4, fins.clone()).unwrap();
-        let mesh = Mesh::from_rocket(&rocket, Marks::default());
-        // The fin vertices use the fin colour; the airframe's own vertices are unchanged.
-        assert_eq!(mesh.vertices.iter().filter(|v| v.material == 0.0).count(), bare.vertices.len());
-        assert!(mesh.vertices.iter().any(|v| v.material == 1.0));
-        // Fins reach `span` beyond the tube's 0.05 radius, at the up/down and sideways angles.
-        assert!((mesh.max.y - 0.13).abs() < 1e-5 && (mesh.min.y + 0.13).abs() < 1e-5 && (mesh.max.x - 0.13).abs() < 1e-5);
-        // Selecting the group marks only its vertices.
-        let marked = Mesh::from_rocket(&rocket, Marks { selected: Some(id), ..Marks::default() });
-        assert!(marked.vertices.iter().all(|v| (v.material == 1.0) == (v.state == SELECTED)));
-        // A ghost axial part ahead of the tube pushes the fins aft with their parent.
-        let shifted = Mesh::from_rocket(&rocket, Marks { ghost: Some((1, &tube())), ..Marks::default() });
-        assert!((shifted.max.z - (mesh.max.z + 0.5)).abs() < 1e-5);
-        // A ghost radial part draws all its copies in the ghost state, without being in the rocket.
-        let lug = RadialKind::LaunchLug { length: 0.05, diameter: 0.01 };
-        let ghost = GhostRadial { kind: &lug, parent: tube_id, offset: 0.1, angle: 0.0, count: 3 };
-        let with = Mesh::from_rocket(&rocket, Marks { ghost_radial: Some(ghost), ..Marks::default() });
-        assert!(with.vertices.iter().filter(|v| v.state == GHOST).count() > 0 && rocket.radials().len() == 1);
     }
 }

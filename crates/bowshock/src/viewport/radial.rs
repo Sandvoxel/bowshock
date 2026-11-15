@@ -57,8 +57,20 @@ pub fn outline_points(kind: &RadialKind, at: Placement) -> Vec<Vec3> {
             let z = at.z0 + r;
             circle(u * (at.base + h) + Vec3::Z * z, u, r).into_iter().chain(circle(u * at.base + Vec3::Z * z, u, r)).collect()
         }
-        // Elliptical and freeform fins are drawn by the new builder UI; the viewport does not mesh them yet.
-        RadialKind::EllipticalFin { .. } | RadialKind::FreeformFin { .. } => Vec::new(),
+        RadialKind::EllipticalFin { thickness, .. } | RadialKind::FreeformFin { thickness, .. } => {
+            let half = t * (thickness as f32 / 2.0);
+            kind.planform()
+                .map(|points| {
+                    points
+                        .into_iter()
+                        .flat_map(|(z, h)| {
+                            let p = u * (at.base + h as f32) + Vec3::Z * (at.z0 + z as f32);
+                            [p + half, p - half]
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
     }
 }
 

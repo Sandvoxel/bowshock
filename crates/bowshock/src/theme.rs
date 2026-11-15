@@ -1,8 +1,8 @@
 //! Bowshock themes and widget styles. Every style reads its colours from [`tokens`] of the active theme; corners are square
 //! and nothing has a shadow (design/README.md, "Hard rules").
 
-use iced::theme::palette::Seed;
 use iced::overlay::menu;
+use iced::theme::palette::Seed;
 use iced::widget::{button, checkbox, container, pane_grid, pick_list, text, text_input};
 use iced::{font, Background, Border, Color, Font, Theme};
 
@@ -254,7 +254,13 @@ pub fn select(theme: &Theme, status: pick_list::Status) -> pick_list::Style {
         pick_list::Status::Hovered => t.ink_muted,
         pick_list::Status::Opened { .. } => t.accent,
     };
-    pick_list::Style { text_color: t.ink, placeholder_color: t.ink_faint, handle_color: t.ink_muted, background: Background::Color(t.bg_300), border: frame(border) }
+    pick_list::Style {
+        text_color: t.ink,
+        placeholder_color: t.ink_faint,
+        handle_color: t.ink_muted,
+        background: Background::Color(t.bg_300),
+        border: frame(border),
+    }
 }
 
 /// The dropdown of a select: `bg-200` in a `line-200` frame, the selected row `bg-400`.
