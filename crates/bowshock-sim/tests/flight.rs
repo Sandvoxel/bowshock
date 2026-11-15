@@ -168,3 +168,22 @@ fn monte_carlo_is_reproducible_and_spreads() {
     assert_eq!(a.runs.len(), 24);
     assert!(a.stats.apogee_std > 1.0 && a.stats.ellipse_major > 1.0, "{:?}", a.stats);
 }
+
+#[test]
+fn canopy_inflation_limits_opening_shock() {
+    let mut inp = input();
+    inp.launch.wind_speed = 0.0;
+    inp.recovery = vec![
+        RecoveryDevice { name: "Drogue".into(), stage: 0, cd_area: 0.1, deploy: Deploy::Apogee, delay: 0.0 },
+        RecoveryDevice { name: "Main".into(), stage: 0, cd_area: 1.2, deploy: Deploy::Altitude(150.0), delay: 0.0 },
+    ];
+    let r = simulate(&inp);
+    let t_first = r.trajectory.events.iter().find(|e| matches!(e.kind, EventKind::Deploy(_))).unwrap().t;
+    let peak_g = r.trajectory.samples.iter().filter(|s| s.t >= t_first).map(|s| s.acceleration).fold(0.0, f64::max) / G0;
+    assert!(peak_g < 20.0, "opening shock {peak_g} g");
+    // The canopy takes a finite time to fill: speed right after the main deploys is still near the drogue rate.
+    let t_main = r.trajectory.events.iter().find(|e| e.kind == EventKind::Deploy("Main".into())).unwrap().t;
+    let v = |t: f64| r.trajectory.samples.iter().min_by(|a, b| (a.t - t).abs().total_cmp(&(b.t - t).abs())).unwrap().vertical_velocity.abs();
+    assert!(v(t_main + 0.1) > 0.9 * v(t_main), "no inflation delay");
+    println!("peak opening shock {peak_g:.2} g");
+}

@@ -316,6 +316,35 @@ struct Raw {
     nsep: usize,
 }
 
+/// A deployed recovery device with a finite canopy-inflation time.
+///
+/// The effective drag area grows as `CdA (tau)^2`, `tau = (t - t_deploy)/t_inflate` clamped to
+/// 0..1, the quadratic opening law used for ballistic inflation in Knacke's *Parachute Recovery
+/// Systems Design Manual* (1992). The fill time follows the same source's "fill distance"
+/// rule of thumb, `t = n D / v` with `n ~ 8` canopy diameters for solid canopies, where `D` is
+/// the equivalent canopy diameter for a nominal canopy drag coefficient of 0.75
+/// (`CdA = 0.75 pi D^2 / 4`) and `v` is the air speed at deployment, clamped to 0.2..1.5 s so
+/// slow deployments at apogee do not take unrealistically long and fast ones are not instant.
+#[derive(Clone, Copy)]
+struct Chute {
+    cd_area: f64,
+    t_deploy: f64,
+    t_inflate: f64,
+}
+
+impl Chute {
+    fn new(cd_area: f64, t_deploy: f64, deploy_speed: f64) -> Self {
+        let diameter = (4.0 * cd_area / (std::f64::consts::PI * 0.75)).sqrt();
+        Self { cd_area, t_deploy, t_inflate: (8.0 * diameter / deploy_speed.max(1.0)).clamp(0.2, 1.5) }
+    }
+
+    /// Effective drag area at time `t`.
+    fn area_at(&self, t: f64) -> f64 {
+        let tau = ((t - self.t_deploy) / self.t_inflate).clamp(0.0, 1.0);
+        self.cd_area * tau * tau
+    }
+}
+
 struct Ctx<'a> {
     input: &'a SimInput,
     launch: &'a Launch,
@@ -368,7 +397,7 @@ impl Ctx<'_> {
     }
 
     /// Equations of motion at `(t, pos, vel)`.
-    fn eval(&self, t: f64, pos: [f64; 3], vel: [f64; 3], gust: [f64; 3], nsep: usize, rail: bool, chute: f64) -> Diag {
+    fn eval(&self, t: f64, pos: [f64; 3], vel: [f64; 3], gust: [f64; 3], nsep: usize, rail: bool, chutes: &[Chute]) -> Diag {
         let (mass, cg, thrust, burning) = self.mass_props(t, nsep);
         let air = self.atm.at_agl(pos[2].max(0.0));
         let rel = [vel[0] - self.wind[0] - gust[0], vel[1] - self.wind[1] - gust[1], vel[2] - gust[2]];
@@ -376,12 +405,16 @@ impl Ctx<'_> {
         let mach = s / air.speed_of_sound;
         let dir = if rail || s < 1.0 { self.axis } else { [rel[0] / s, rel[1] / s, rel[2] / s] };
         let q = 0.5 * air.density * s * s;
-        let drag = if chute > 0.0 {
-            q * chute
-        } else {
+        // Deployed devices: canopy area ramps up (see `Chute`); the airframe's own drag fades out
+        // as the canopies fill.
+        let full: f64 = chutes.iter().map(|c| c.cd_area).sum();
+        let open: f64 = chutes.iter().map(|c| c.area_at(t)).sum();
+        let frac = if full > 0.0 { (open / full).min(1.0) } else { 0.0 };
+        let mut drag = q * open;
+        if frac < 1.0 {
             let re = s * air.density / air.viscosity;
-            q * self.aeros[nsep.min(self.aeros.len() - 1)].drag(mach, re, burning).total * self.tw.cd * self.a_ref
-        };
+            drag += (1.0 - frac) * q * self.aeros[nsep.min(self.aeros.len() - 1)].drag(mach, re, burning).total * self.tw.cd * self.a_ref;
+        }
         let g = G0 * (6_371_000.0 / (6_371_000.0 + pos[2].max(0.0) + self.launch.site_altitude)).powi(2);
         let rd = if s > 1e-9 { [rel[0] / s, rel[1] / s, rel[2] / s] } else { [0.0; 3] };
         let mut acc = [0.0; 3];
@@ -460,7 +493,7 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
     let mut stability_off_rail = 0.0;
     let mut rates: Vec<(String, f64)> = Vec::new();
     let mut label: Option<String> = None;
-    let mut chute_area = 0.0;
+    let mut chutes: Vec<Chute> = Vec::new();
     let mut last_event_t = f64::NEG_INFINITY;
     let mut landed = false;
     let mut ground_hit = 0.0;
@@ -490,7 +523,7 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
                 deployed[i] = true;
             }
         }
-        let d0 = ctx.eval(t, pos, vel, gust, nsep, on_rail, chute_area);
+        let d0 = ctx.eval(t, pos, vel, gust, nsep, on_rail, &chutes);
         let raw = Raw { t, pos, vel, acc: d0.acc, thrust: d0.thrust, drag: d0.drag, mass: d0.mass, cg: d0.cg, mach: d0.mach, nsep };
         raws.push(raw);
 
@@ -507,7 +540,10 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
         let fine = on_rail || burning || t - last_event_t < 0.05;
         let mut dt = if fine {
             input.dt
-        } else if chute_area > 0.0 {
+        } else if chutes.iter().any(|c| t < c.t_deploy + c.t_inflate) {
+            // Step finely through canopy inflation.
+            input.dt.max(0.005)
+        } else if !chutes.is_empty() {
             input.dt.max(0.02)
         } else {
             input.dt.max(0.01)
@@ -540,11 +576,11 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
         // RK4.
         let add = |p: [f64; 3], k: [f64; 3], h: f64| [p[0] + h * k[0], p[1] + h * k[1], p[2] + h * k[2]];
         let (k1v, k1p) = (d0.acc, vel);
-        let d2 = ctx.eval(t + 0.5 * dt, add(pos, k1p, 0.5 * dt), add(vel, k1v, 0.5 * dt), gust, nsep, on_rail, chute_area);
+        let d2 = ctx.eval(t + 0.5 * dt, add(pos, k1p, 0.5 * dt), add(vel, k1v, 0.5 * dt), gust, nsep, on_rail, &chutes);
         let (k2v, k2p) = (d2.acc, add(vel, k1v, 0.5 * dt));
-        let d3 = ctx.eval(t + 0.5 * dt, add(pos, k2p, 0.5 * dt), add(vel, k2v, 0.5 * dt), gust, nsep, on_rail, chute_area);
+        let d3 = ctx.eval(t + 0.5 * dt, add(pos, k2p, 0.5 * dt), add(vel, k2v, 0.5 * dt), gust, nsep, on_rail, &chutes);
         let (k3v, k3p) = (d3.acc, add(vel, k2v, 0.5 * dt));
-        let d4 = ctx.eval(t + dt, add(pos, k3p, dt), add(vel, k3v, dt), gust, nsep, on_rail, chute_area);
+        let d4 = ctx.eval(t + dt, add(pos, k3p, dt), add(vel, k3v, dt), gust, nsep, on_rail, &chutes);
         let (k4v, k4p) = (d4.acc, add(vel, k3v, dt));
         let mut new_pos = pos;
         let mut new_vel = vel;
@@ -609,7 +645,8 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
             if let Some(dt_at) = deploy_at[i] {
                 if !deployed[i] && t >= dt_at - 1e-9 {
                     deployed[i] = true;
-                    chute_area += d.cd_area;
+                    let rel_speed = ((vel[0] - wind[0]).powi(2) + (vel[1] - wind[1]).powi(2) + vel[2].powi(2)).sqrt();
+                    chutes.push(Chute::new(d.cd_area, t, rel_speed));
                     if let Some(l) = label.take() {
                         rates.push((l, vel[2].abs()));
                     }
@@ -640,7 +677,7 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
                 rates.push((l, ground_hit));
             }
             landed = true;
-            let d = ctx.eval(t, pos, vel, gust, nsep, false, chute_area);
+            let d = ctx.eval(t, pos, vel, gust, nsep, false, &chutes);
             final_raw = Some(Raw { t, pos, vel, acc: d.acc, thrust: 0.0, drag: d.drag, mass: d.mass, cg: d.cg, mach: d.mach, nsep });
             push_event(&mut events, &mut event_idx, &raws, Event { t, kind: EventKind::Landing, altitude: 0.0, stage: None });
             break;
@@ -651,7 +688,7 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
     } else if !landed {
         // Hit the time limit mid-flight: record the final state.
         let nsep = (0..n.saturating_sub(1)).filter(|&k| ctx.sched.separation[k] <= t + 1e-9).count();
-        let d = ctx.eval(t, pos, vel, gust, nsep, on_rail, chute_area);
+        let d = ctx.eval(t, pos, vel, gust, nsep, on_rail, &chutes);
         raws.push(Raw { t, pos, vel, acc: d.acc, thrust: d.thrust, drag: d.drag, mass: d.mass, cg: d.cg, mach: d.mach, nsep });
         ground_xy = [pos[0], pos[1]];
         ground_hit = dot(vel, vel).sqrt();
