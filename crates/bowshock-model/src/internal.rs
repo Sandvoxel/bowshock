@@ -272,6 +272,20 @@ impl InternalKind {
     pub fn is_motor_mount(&self) -> bool {
         matches!(self, InternalKind::InnerTube { motor_mount: true, .. })
     }
+
+    /// The outer diameter the part is given, `None` for one that follows its parent's bore (auto) or has no diameter.
+    pub fn given_outer_diameter(&self) -> Option<f64> {
+        match *self {
+            InternalKind::InnerTube { outer_diameter: d, .. } => Some(d),
+            InternalKind::CenteringRing { outer_diameter: d, .. }
+            | InternalKind::Coupler { outer_diameter: d, .. }
+            | InternalKind::EngineBlock { outer: d, .. }
+            | InternalKind::Bulkhead { diameter: d, .. }
+            | InternalKind::MassComponent { diameter: d, .. }
+            | InternalKind::Parachute { packed_diameter: d, .. } => d,
+            _ => None,
+        }
+    }
 }
 
 /// An internal component placed in an axial part.

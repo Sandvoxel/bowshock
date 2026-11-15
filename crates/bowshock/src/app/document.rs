@@ -241,6 +241,13 @@ impl Document {
         }
     }
 
+    /// Gives the drag in progress's undo step another label (what the drag turned out to do).
+    pub fn rename_drag(&mut self, label: &str) {
+        if let Some(step) = self.drag.as_mut() {
+            step.label = label.to_string();
+        }
+    }
+
     /// Whether a drag is in progress.
     #[allow(dead_code)] // For modules that must not edit mid-drag (inspector fields).
     pub fn dragging(&self) -> bool {

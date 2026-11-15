@@ -30,9 +30,11 @@
 
 pub mod assembly;
 pub mod camera;
+mod carry;
 mod cube;
 mod empty;
 pub mod handles;
+mod internal;
 mod labels;
 pub mod manipulate;
 mod markers;
@@ -200,12 +202,16 @@ pub enum Message {
     Cut(Cut),
     /// The dragged axial part's nearest attach node changed.
     SnapNode(Option<usize>),
-    /// The dragged radial part's surface target changed.
-    Surface(Option<SurfaceTarget>),
+    /// The dragged radial part's surface target changed, and whether it has been pulled free of the rocket it came from.
+    Surface(Option<SurfaceTarget>, bool),
     /// Released over the viewport: drop the dragged axial part on the snap node, if any.
     DropAxial,
     /// Released over the viewport: drop the dragged radial part on its surface target, if any.
     DropRadial,
+    /// The dragged internal part's landing changed.
+    InternalTarget(Option<crate::app::drag::InternalTarget>),
+    /// Released over the viewport: drop the dragged internal part on its target, if any.
+    DropInternal,
     /// The mouse wheel turned during a radial drag: one step through the symmetry counts (like `X` / `Shift+X`), no zoom.
     CopiesStep(bool),
     /// The dragged axial part's nearest attach node is on a pod's stack: `(pod, node index)`.
@@ -272,6 +278,8 @@ pub struct View {
     mesh_key: Option<MeshKey>,
     /// How far (metres along the axis) the camera has been moved to keep the aft end of a part still while its fore end is dragged.
     fore_pan: f32,
+    /// The inside view to go back to when the internal part being carried in from the bin is dropped or cancelled.
+    drag_inside: Option<InsideView>,
 }
 
 impl View {
@@ -296,6 +304,7 @@ impl View {
             hover: Hover::None,
             mesh_key: None,
             fore_pan: 0.0,
+            drag_inside: None,
         }
     }
 
@@ -325,6 +334,18 @@ impl View {
     /// Rebuilds the mesh if the document, selection, hover, cutaway or a drag ghost changed since it was built. The app calls
     /// this after every message.
     pub fn sync(&mut self, ctx: &Ctx) {
+        // An internal part carried in from the bin opens the airframe: X-ray while it is carried, the view it was before after.
+        match (ctx.drag.internal.as_ref().is_some_and(|d| d.origin.is_none()), self.drag_inside) {
+            (true, None) => {
+                self.drag_inside = Some(self.inside);
+                self.set_inside(InsideView::XRay);
+            }
+            (false, Some(before)) => {
+                self.drag_inside = None;
+                self.set_inside(before);
+            }
+            _ => {}
+        }
         let selected = ctx.selection.part();
         let also: Vec<PartId> = ctx.selected_parts().into_iter().skip(1).collect();
         let flash = ctx.flash_levels();
@@ -446,13 +467,19 @@ impl View {
                     (drag.snap, drag.pod_snap, drag.surface) = (None, None, target);
                 }
             }
-            Message::Surface(target) => {
+            Message::Surface(target, detached) => {
                 if let Some(drag) = ctx.drag.radial.as_mut() {
-                    drag.target = target;
+                    (drag.target, drag.detached) = (target, detached);
                 }
             }
             Message::DropAxial => drag::finish_axial(ctx, true),
             Message::DropRadial => drag::finish_radial(ctx, true),
+            Message::InternalTarget(target) => {
+                if let Some(drag) = ctx.drag.internal.as_mut() {
+                    drag.target = target;
+                }
+            }
+            Message::DropInternal => drag::finish_internal(ctx, true),
             Message::CopiesStep(forward) => crate::build::parts_bin::cycle_symmetry(ctx, forward),
             camera => self.camera_update(camera),
         }
@@ -669,8 +696,16 @@ impl View {
             } else {
                 vec![("", "Release on a node to stack · on a tube's side to attach radially"), ("X", "copies"), ("Esc", "cancel")]
             }
-        } else if ctx.drag.radial.is_some() {
-            vec![("", "Release on a tube"), ("X", "copies"), ("Alt", "free"), ("Shift", "snap"), ("Esc", "cancel")]
+        } else if ctx.drag.internal.is_some() {
+            vec![("", "Release on a body part to put it inside · ⊘ where it does not fit"), ("Ctrl", "5 mm"), ("Esc", "cancel")]
+        } else if let Some(drag) = &ctx.drag.radial {
+            if drag.detached && drag.target.is_none() {
+                vec![("", "Release to remove · move onto a tube to attach · back to the rocket to slide"), ("X", "copies"), ("Esc", "put back")]
+            } else if drag.origin.is_some() {
+                vec![("", "Slide along the rocket · pull away to detach"), ("X", "copies"), ("Alt", "free"), ("Shift", "snap"), ("Esc", "cancel")]
+            } else {
+                vec![("", "Release on a tube"), ("X", "copies"), ("Alt", "free"), ("Shift", "snap"), ("Esc", "cancel")]
+            }
         } else if matches!(ctx.selection, Selection::Separation(_)) {
             vec![("", "Found from the motor mounts · set the timing in the inspector")]
         } else if self.inside == InsideView::Exploded {
@@ -746,6 +781,21 @@ impl View {
                     drag,
                     camera,
                     snap: ctx.drag.angle_snap,
+                    snap_step,
+                    cursor: ctx.cursor,
+                    margin: ctx.shown().now.map(|b| b.margin_cal).filter(|_| ctx.drag.landing().is_some()),
+                })
+                .width(Fill)
+                .height(Fill)
+                .boxed(),
+                mouse::Interaction::default(),
+            )
+        } else if let Some(drag) = ctx.drag.internal.as_ref().filter(|d| d.origin.is_none()) {
+            (
+                canvas(internal::Overlay {
+                    rocket,
+                    drag,
+                    camera,
                     snap_step,
                     cursor: ctx.cursor,
                     margin: ctx.shown().now.map(|b| b.margin_cal).filter(|_| ctx.drag.landing().is_some()),

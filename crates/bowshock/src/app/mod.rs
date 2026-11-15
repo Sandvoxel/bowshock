@@ -446,7 +446,8 @@ impl App {
             }
         }
         let was_open = self.ctx.file_menu;
-        if !matches!(message, Message::Frame(_) | Message::Cursor(_) | Message::Released | Message::ToggleFileMenu | Message::Chrome(chrome::Message::Nothing)) {
+        if !matches!(message, Message::Frame(_) | Message::Cursor(_) | Message::Released | Message::ToggleFileMenu | Message::Chrome(chrome::Message::Nothing))
+        {
             self.ctx.file_menu = false;
         }
         let ctx = &mut self.ctx;
@@ -941,7 +942,7 @@ mod tests {
         app.update(Message::PartsBin(parts_bin::Message::CycleSymmetry(false)));
         app.update(Message::PartsBin(parts_bin::Message::CycleSymmetry(false)));
         assert_eq!(app.ctx.drag.radial.as_ref().unwrap().count, 2);
-        vp(&mut app, Vp::Surface(Some(target(tube, 0.1, 1.0))));
+        vp(&mut app, Vp::Surface(Some(target(tube, 0.1, 1.0)), false));
         assert!(app.ctx.drag.radial.as_ref().is_some_and(|d| d.target == Some(target(tube, 0.1, 1.0))));
         vp(&mut app, Vp::DropRadial);
         let [lug] = app.ctx.doc.rocket().radials() else { panic!("one radial part") };
@@ -956,7 +957,7 @@ mod tests {
         start(&mut app);
         vp(&mut app, Vp::DropRadial);
         start(&mut app);
-        vp(&mut app, Vp::Surface(Some(target(tube, 0.1, 1.0))));
+        vp(&mut app, Vp::Surface(Some(target(tube, 0.1, 1.0)), false));
         app.update(Message::Cancel);
         assert_eq!(app.ctx.doc.rocket().radials().len(), 1);
     }
@@ -976,7 +977,7 @@ mod tests {
         assert_eq!(app.ctx.doc.rocket().radials(), before.as_slice());
         // Dropped on another part: moved there, same id, same count.
         vp(&mut app, Vp::Grab(Pick::Radial { id, instance: 1 }));
-        vp(&mut app, Vp::Surface(Some(target(transition, 0.0, 2.0))));
+        vp(&mut app, Vp::Surface(Some(target(transition, 0.0, 2.0)), false));
         vp(&mut app, Vp::DropRadial);
         let moved = app.ctx.doc.rocket().radial(id).unwrap();
         assert_eq!((moved.parent, moved.count, moved.angle), (transition, 3, 2.0));
@@ -1180,7 +1181,7 @@ mod tests {
         app.update(Message::PartsBin(parts_bin::Message::RowPress(parts_bin::RowId::new(parts_bin::Category::Airframe, row))));
         app.update(Message::Cursor(Point::new(160.0, 100.0)));
         assert!(app.ctx.drag.radial.as_ref().is_some_and(|d| d.kind.is_pod() && d.count == 2));
-        vp(&mut app, Vp::Surface(Some(target(tube, 0.05, 0.0))));
+        vp(&mut app, Vp::Surface(Some(target(tube, 0.05, 0.0)), false));
         vp(&mut app, Vp::DropRadial);
         let pod = app.ctx.doc.rocket().pods().next().expect("a pod was placed").id;
         let body = app.ctx.doc.rocket().radial(pod).unwrap().kind.pod_body().unwrap().clone();
@@ -1194,6 +1195,7 @@ mod tests {
             count: 3,
             origin: None,
             target: Some(target(pod_tube, 0.05, 0.0)),
+            detached: false,
         });
         vp(&mut app, Vp::DropRadial);
         let fins = app.ctx.doc.rocket().pod_of(pod_tube).and_then(|p| p.kind.pod_body()).unwrap().radials()[0].id;
@@ -1219,7 +1221,7 @@ mod tests {
         assert_eq!(app.ctx.doc.rocket(), &snapshot);
         // Dropped elsewhere it moves with every part, ids unchanged.
         vp(&mut app, Vp::Grab(Pick::Axial(pod_tube)));
-        vp(&mut app, Vp::Surface(Some(target(tube, 0.2, 1.5))));
+        vp(&mut app, Vp::Surface(Some(target(tube, 0.2, 1.5)), false));
         vp(&mut app, Vp::DropRadial);
         let moved = app.ctx.doc.rocket().radial(pod).unwrap();
         assert_eq!((moved.offset, moved.angle), (0.2, 1.5));
@@ -1417,20 +1419,20 @@ mod tests {
         assert_eq!(app.ctx.shown().now, Some(was));
         assert_eq!(app.ctx.shown().committed, None);
         assert_eq!(app.ctx.physics.warnings(), health.as_slice());
-        vp(&mut app, Vp::Surface(Some(target(tube, 0.35, 0.0))));
+        vp(&mut app, Vp::Surface(Some(target(tube, 0.35, 0.0)), false));
         let aft = app.ctx.shown();
         assert_eq!(aft.committed, Some(was));
         let aft_now = aft.now.expect("a preview");
         assert!(aft_now.cp > was.cp, "fins moved aft move the CP aft: {} vs {}", aft_now.cp, was.cp);
         assert!(app.ctx.changing().cp, "the CP readout goes semibold");
         // Further forward than the start: the CP goes the other way.
-        vp(&mut app, Vp::Surface(Some(target(tube, 0.0, 0.0))));
+        vp(&mut app, Vp::Surface(Some(target(tube, 0.0, 0.0)), false));
         assert!(app.ctx.shown().now.unwrap().cp < was.cp);
         // No valid target any more: the committed balance again.
-        vp(&mut app, Vp::Surface(None));
+        vp(&mut app, Vp::Surface(None, false));
         assert_eq!((app.ctx.shown().now, app.ctx.shown().committed), (Some(was), None));
         // The gauge follows what is shown.
-        vp(&mut app, Vp::Surface(Some(target(tube, 0.35, 0.0))));
+        vp(&mut app, Vp::Surface(Some(target(tube, 0.35, 0.0)), false));
         assert!((f64::from(app.ctx.physics.gauge().target()) - aft_now.margin_cal).abs() < 1e-5);
         let previewed_health = app.ctx.physics.warnings().to_vec();
         // Release: the committed balance and health are the previewed ones.
@@ -1449,7 +1451,7 @@ mod tests {
         let fins = finned(&mut app, tube, 0.1);
         let was = committed(&app);
         vp(&mut app, Vp::Grab(Pick::Radial { id: fins, instance: 0 }));
-        vp(&mut app, Vp::Surface(Some(target(tube, 0.35, 0.0))));
+        vp(&mut app, Vp::Surface(Some(target(tube, 0.35, 0.0)), false));
         assert_ne!(app.ctx.shown().now, Some(was));
         app.update(Message::Cancel);
         assert_eq!(committed(&app), was);
@@ -1517,7 +1519,7 @@ mod tests {
         app.after_update();
         let with_pod = committed(&app);
         vp(&mut app, Vp::Grab(Pick::Radial { id: pod, instance: 0 }));
-        vp(&mut app, Vp::Surface(Some(target(tube, 0.3, 0.0))));
+        vp(&mut app, Vp::Surface(Some(target(tube, 0.3, 0.0)), false));
         let shifted = app.ctx.shown().now.expect("a preview");
         assert!((shifted.mass - with_pod.mass).abs() < 1e-9 && shifted.cg > with_pod.cg);
         vp(&mut app, Vp::DropRadial);
@@ -1538,7 +1540,7 @@ mod tests {
         let mut total = std::time::Duration::ZERO;
         let steps = 40;
         for i in 0..steps {
-            vp(&mut app, Vp::Surface(Some(target(fins.parent, 0.002 * f64::from(i), 0.0))));
+            vp(&mut app, Vp::Surface(Some(target(fins.parent, 0.002 * f64::from(i), 0.0)), false));
             total += app.ctx.preview.cost;
             assert!(app.ctx.shown().committed.is_some(), "step {i} has a preview that differs from the committed balance");
         }
@@ -1547,5 +1549,143 @@ mod tests {
         assert!(app.ctx.shown().now.is_some());
         assert!(each < std::time::Duration::from_millis(200), "{each:?}");
         app.update(Message::Cancel);
+    }
+
+    #[test]
+    fn a_fin_set_pulled_off_the_body_is_removed_on_empty_space_or_lands_on_another_tube() {
+        let (mut app, [_, tube, transition]) = app();
+        let fins = finned(&mut app, tube, 0.1);
+        let (before, was) = (app.ctx.doc.rocket().clone(), committed(&app));
+        // Pulled free of the body over empty space: the preview is the rocket without them, released they are removed (one
+        // undo step, with a notice); the status strip gets the CP of the finless rocket while it is carried.
+        vp(&mut app, Vp::Grab(Pick::Radial { id: fins, instance: 0 }));
+        assert_eq!(app.ctx.drag.landing(), None);
+        vp(&mut app, Vp::Surface(None, true));
+        assert_eq!(app.ctx.drag.landing(), Some(drag::Landing::Removed));
+        assert!(app.ctx.shown().now.is_some_and(|b| (b.cp - was.cp).abs() > 1e-6), "the preview is the rocket without its fins");
+        vp(&mut app, Vp::DropRadial);
+        assert!(app.ctx.doc.rocket().radial(fins).is_none() && app.ctx.selection == Selection::None);
+        assert!(app.ctx.notice.as_ref().is_some_and(|(text, _)| text.starts_with("Removed Fin set")), "{:?}", app.ctx.notice);
+        assert_eq!(app.ctx.doc.undo_label(), Some("Remove fin set"));
+        app.update(Message::Undo);
+        assert_eq!(app.ctx.doc.rocket(), &before);
+
+        // Esc after pulling free puts them back exactly, with no notice.
+        app.ctx.notice = None;
+        vp(&mut app, Vp::Grab(Pick::Radial { id: fins, instance: 0 }));
+        vp(&mut app, Vp::Surface(None, true));
+        app.update(Message::Cancel);
+        assert_eq!(app.ctx.doc.rocket(), &before);
+        assert!(app.ctx.notice.is_none());
+
+        // Back within reach of the body (not detached any more) with no target: it goes back as it was, not removed.
+        vp(&mut app, Vp::Grab(Pick::Radial { id: fins, instance: 0 }));
+        vp(&mut app, Vp::Surface(None, true));
+        vp(&mut app, Vp::Surface(Some(target(tube, 0.2, 0.0)), false));
+        vp(&mut app, Vp::DropRadial);
+        assert_eq!(app.ctx.doc.rocket().radial(fins).map(|r| (r.parent, r.offset)), Some((tube, 0.2)));
+        app.update(Message::Undo);
+        assert_eq!(app.ctx.doc.rocket(), &before);
+
+        // Pulled free and dropped on another tube (a part of the core, or of a pod): it lands there, one undo step.
+        vp(&mut app, Vp::Grab(Pick::Radial { id: fins, instance: 0 }));
+        vp(&mut app, Vp::Surface(None, true));
+        vp(&mut app, Vp::Surface(Some(target(transition, 0.0, 2.0)), true));
+        vp(&mut app, Vp::DropRadial);
+        assert_eq!(app.ctx.doc.rocket().radial(fins).map(|r| (r.parent, r.angle, r.count)), Some((transition, 2.0, 3)));
+        app.update(Message::Undo);
+        assert_eq!(app.ctx.doc.rocket(), &before);
+        let (_, pod_tube) = bare_pod(&mut app, tube);
+        let with_pod = app.ctx.doc.rocket().clone();
+        vp(&mut app, Vp::Grab(Pick::Radial { id: fins, instance: 0 }));
+        vp(&mut app, Vp::Surface(None, true));
+        vp(&mut app, Vp::Surface(Some(target(pod_tube, 0.05, 1.0)), true));
+        vp(&mut app, Vp::DropRadial);
+        assert_eq!(app.ctx.doc.rocket().parent_of(fins), Some(pod_tube));
+        app.update(Message::Undo);
+        assert_eq!(app.ctx.doc.rocket(), &with_pod);
+    }
+
+    /// A motor mount that was put in the nose cone by mistake (placed there by the model; the nose's bore is too narrow for it).
+    fn mount_in_the_nose(app: &mut App, [nose, tube, _]: [PartId; 3]) -> PartId {
+        let kind = bowshock_model::InternalKind::InnerTube { outer_diameter: 0.04, thickness: 0.002, length: 0.15, motor_mount: true, overhang: 0.0 };
+        let mount = app.ctx.doc.edit("Mount", |r| {
+            let id = r.attach_internal(tube, 0.0, kind).unwrap();
+            r.move_internal(id, nose, 0.03).unwrap();
+            id
+        });
+        app.after_update();
+        mount
+    }
+
+    #[test]
+    fn a_motor_mount_carried_from_the_nose_into_the_body_keeps_its_station_and_is_one_undo_step() {
+        let (mut app, ids) = app();
+        let [nose, tube, _] = ids;
+        let mount = mount_in_the_nose(&mut app, ids);
+        let (before, was) = (app.ctx.doc.rocket().clone(), committed(&app));
+        assert_eq!(before.internal(mount).map(|p| p.parent), Some(nose));
+        // Pressed on and dragged: the part is selected and one undo step opens; the tube around it is not touched.
+        vp(&mut app, Vp::Edit(Edit::Carry(mount)));
+        assert_eq!(app.ctx.selection, Selection::Part(mount));
+        assert!(app.ctx.drag.axial.is_none() && app.ctx.drag.radial.is_none() && app.ctx.doc.dragging());
+        // Over the tube (station 0.2 to 0.7), 0.35 further aft: the station is kept, the offset is from the tube's fore face.
+        vp(&mut app, Vp::Edit(Edit::Place(mount, tube, 0.18)));
+        let moved = app.ctx.doc.rocket().internal(mount).unwrap().clone();
+        assert_eq!((moved.parent, moved.offset), (tube, 0.18));
+        assert!((app.ctx.doc.rocket().part_station(mount).unwrap() - 0.38).abs() < 1e-12);
+        // A motor mount is placed from the bottom of its body part, wherever it goes.
+        assert_eq!(moved.anchor, Some(bowshock_model::Anchor::Bottom));
+        // The CG moves live, before the release.
+        assert!((committed(&app).cg - was.cg).abs() > 1e-6 && app.ctx.changing().cg);
+        vp(&mut app, Vp::Edit(Edit::End));
+        assert_eq!(app.ctx.doc.undo_label(), Some("Move motor mount"));
+        assert_eq!(app.ctx.doc.rocket().internal(mount).map(|p| p.parent), Some(tube));
+        app.update(Message::Undo);
+        assert_eq!(app.ctx.doc.rocket(), &before);
+        assert!((committed(&app).cg - was.cg).abs() < 1e-12);
+        // Escape puts it back exactly.
+        vp(&mut app, Vp::Edit(Edit::Carry(mount)));
+        vp(&mut app, Vp::Edit(Edit::Place(mount, tube, 0.18)));
+        vp(&mut app, Vp::Edit(Edit::Cancel));
+        assert_eq!(app.ctx.doc.rocket(), &before);
+    }
+
+    #[test]
+    fn an_internal_part_dragged_from_the_bin_over_the_viewport_opens_the_airframe_and_lands_inside_the_body_part() {
+        use crate::viewport::InsideView;
+        let (mut app, [_, tube, _]) = app();
+        let (before, was) = (app.ctx.doc.rocket().clone(), committed(&app));
+        let ring = bowshock_model::InternalKind::CenteringRing { outer_diameter: None, inner_diameter: None, thickness: 0.006 };
+        let mount = bowshock_model::InternalKind::InnerTube { outer_diameter: 0.04, thickness: 0.002, length: 0.15, motor_mount: true, overhang: 0.0 };
+        let target = |offset| crate::app::drag::InternalTarget { parent: tube, offset };
+        assert_eq!(app.viewport.inside(), InsideView::Solid);
+        // A centering ring: the view goes to X-ray, the preview moves the CG, the drop inserts it (anchored to the nearer end).
+        drag::start_internal(&mut app.ctx, Some(0), "Centering ring", ring);
+        app.after_update();
+        assert_eq!(app.viewport.inside(), InsideView::XRay);
+        vp(&mut app, Vp::InternalTarget(Some(target(0.05))));
+        assert!(app.ctx.shown().now.is_some_and(|b| (b.cg - was.cg).abs() > 1e-9 && b.mass > was.mass));
+        vp(&mut app, Vp::DropInternal);
+        let [placed] = app.ctx.doc.rocket().internals() else { panic!("one internal part") };
+        assert_eq!((placed.parent, placed.offset, placed.anchor), (tube, 0.05, Some(bowshock_model::Anchor::Top)));
+        assert_eq!(app.viewport.inside(), InsideView::Solid, "the view it was before");
+        assert_eq!(app.ctx.selection, Selection::Part(placed.id));
+        app.update(Message::Undo);
+        assert_eq!(app.ctx.doc.rocket(), &before);
+        // A motor mount is anchored to the bottom.
+        drag::start_internal(&mut app.ctx, Some(1), "Motor mount", mount);
+        app.after_update();
+        vp(&mut app, Vp::InternalTarget(Some(target(0.3))));
+        vp(&mut app, Vp::DropInternal);
+        assert_eq!(app.ctx.doc.rocket().internals()[0].anchor, Some(bowshock_model::Anchor::Bottom));
+        app.update(Message::Undo);
+        // Esc adds nothing and puts the view back to what it was (here the cutaway).
+        vp(&mut app, Vp::InsideView(InsideView::Cutaway));
+        drag::start_internal(&mut app.ctx, Some(0), "Bulkhead", bowshock_model::InternalKind::Bulkhead { diameter: None, thickness: 0.006 });
+        app.after_update();
+        vp(&mut app, Vp::InternalTarget(Some(target(0.1))));
+        app.update(Message::Cancel);
+        assert!(app.ctx.doc.rocket().internals().is_empty() && app.viewport.inside() == InsideView::Cutaway);
     }
 }

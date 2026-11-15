@@ -1,0 +1,144 @@
+# Drag fixes: pull an attached fin set off the body, grab internal parts in the cutaway, carry them between body parts.
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/dragfixes.drive /tmp/dragfixes
+# 2D profile, so the coordinates below are the same for every run. Each scenario ends with an undo (the top bar's button).
+# The whole sequence runs in the dark theme, then again in the light one.
+viewport 1280x800
+scale 1
+click "2D"
+
+# ---- 1. A fin set slides along the body; pulled ~40 px clear of it, it comes off and follows the cursor as a free ghost.
+press (870, 278)
+move (870, 272)
+move (870, 271)
+move (870, 240)
+screenshot 1a-dark-sliding.png
+move (870, 225)
+screenshot 1b-dark-pulled-free.png
+# Back within reach: it sticks again.
+move (870, 262)
+screenshot 1c-dark-restuck.png
+# Pulled free and released over empty space: removed, with a notice; one undo brings it back.
+move (870, 215)
+release (870, 215)
+screenshot 1d-dark-removed.png
+click (316, 20)
+screenshot 1e-dark-undone.png
+
+# ---- 2. In the cutaway a press on an internal part picks that part (not the tube around it); it slides inside its parent
+# and, dragged past the end, into the next body part (a Ø42 mount does not fit the nose cone: refused).
+click "Cutaway"
+press (800, 308)
+move (790, 308)
+move (780, 308)
+move (600, 308)
+screenshot 2a-dark-carried.png
+move (420, 308)
+screenshot 2b-dark-refused-nose.png
+move (600, 308)
+release (600, 308)
+screenshot 2c-dark-dropped-in-recovery-bay.png
+click (316, 20)
+screenshot 2d-dark-undone.png
+
+# ---- 3. An internal part put in the nose can be pulled back down to the booster.
+press (693, 311)
+move (685, 311)
+move (440, 311)
+screenshot 3a-dark-into-nose.png
+release (440, 311)
+press (440, 311)
+move (448, 311)
+move (800, 311)
+screenshot 3b-dark-nose-to-booster.png
+release (800, 311)
+screenshot 3c-dark-in-booster.png
+click (316, 20)
+click (316, 20)
+screenshot 3d-dark-undone.png
+
+# ---- 4. An internal part dragged in from the parts bin: the view goes to X-ray while it is over the viewport, the ghost sits
+# inside the body part under the cursor (a Ø76 ring fits; a motor mount does not fit the nose cone), and the view comes back.
+click "Solid"
+click (22, 150)
+press "Centering ring"
+move (200, 300)
+move (600, 312)
+screenshot 4a-dark-bin-ring-over-bay.png
+move (820, 312)
+screenshot 4b-dark-bin-ring-over-booster.png
+release (820, 312)
+screenshot 4c-dark-bin-ring-dropped.png
+click (316, 20)
+press "Motor mount"
+move (200, 300)
+move (420, 312)
+screenshot 4d-dark-bin-mount-refused-nose.png
+move (800, 312)
+release (800, 312)
+screenshot 4e-dark-bin-mount-dropped.png
+click (316, 20)
+
+# ================= the same in the light theme =================
+click "Light"
+click "Solid"
+
+press (870, 278)
+move (870, 272)
+move (870, 271)
+move (870, 240)
+screenshot 1a-light-sliding.png
+move (870, 225)
+screenshot 1b-light-pulled-free.png
+move (870, 262)
+screenshot 1c-light-restuck.png
+move (870, 215)
+release (870, 215)
+screenshot 1d-light-removed.png
+click (316, 20)
+screenshot 1e-light-undone.png
+
+click "Cutaway"
+press (800, 308)
+move (790, 308)
+move (780, 308)
+move (600, 308)
+screenshot 2a-light-carried.png
+move (420, 308)
+screenshot 2b-light-refused-nose.png
+move (600, 308)
+release (600, 308)
+screenshot 2c-light-dropped-in-recovery-bay.png
+click (316, 20)
+screenshot 2d-light-undone.png
+
+press (693, 311)
+move (685, 311)
+move (440, 311)
+screenshot 3a-light-into-nose.png
+release (440, 311)
+press (440, 311)
+move (448, 311)
+move (800, 311)
+screenshot 3b-light-nose-to-booster.png
+release (800, 311)
+screenshot 3c-light-in-booster.png
+click (316, 20)
+click (316, 20)
+screenshot 3d-light-undone.png
+
+click "Solid"
+press "Centering ring"
+move (200, 300)
+move (820, 312)
+screenshot 4a-light-bin-ring-over-booster.png
+release (820, 312)
+screenshot 4b-light-bin-ring-dropped.png
+click (316, 20)
+press "Motor mount"
+move (200, 300)
+move (420, 312)
+screenshot 4c-light-bin-mount-refused-nose.png
+move (800, 312)
+release (800, 312)
+screenshot 4d-light-bin-mount-dropped.png
+click (316, 20)

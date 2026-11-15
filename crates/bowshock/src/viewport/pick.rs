@@ -21,12 +21,14 @@ pub enum Pick {
         id: PartId,
         instance: usize,
     },
+    /// An internal part of the core, where the view shows the inside (see [`Inside`]).
+    Internal(PartId),
 }
 
 impl Pick {
     pub fn id(self) -> PartId {
         match self {
-            Pick::Axial(id) | Pick::Radial { id, .. } => id,
+            Pick::Axial(id) | Pick::Internal(id) | Pick::Radial { id, .. } => id,
         }
     }
 }
@@ -152,13 +154,7 @@ pub fn slide_from(
 
 #[allow(clippy::too_many_arguments)]
 fn slide_core(rocket: &Rocket, camera: &Camera, at: Point, size: Size, kind: &RadialKind, angle: f64, step: Option<f64>, copy: usize) -> Option<SurfaceTarget> {
-    let origin = camera.project(Vec3::ZERO, size);
-    let one_metre = camera.project(Vec3::Z, size) - origin;
-    let n = one_metre.x * one_metre.x + one_metre.y * one_metre.y;
-    if n < 1e-6 {
-        return None;
-    }
-    let z = f64::from(((at.x - origin.x) * one_metre.x + (at.y - origin.y) * one_metre.y) / n);
+    let z = axis_station(camera, at, size)?;
     let stations = rocket.stations();
     let index = stations[..stations.len() - 1].iter().rposition(|&s| s <= z).unwrap_or(0);
     let parent = rocket.parts().get(index)?.id;
@@ -308,23 +304,69 @@ fn near_polygon(poly: &[(f64, f64)], p: (f64, f64), margin: f64) -> bool {
     inside
 }
 
-/// The part under viewport pixel `at` (the one nearest the eye), for a viewport of `size`: a part of the core or of a pod (a
-/// pod's parts are found through the pod's own frame).
+/// The part under viewport pixel `at` (the one nearest the eye) of a view that shows no internal parts: a part of the core or
+/// of a pod (a pod's parts are found through the pod's own frame). The shell hides what is inside it.
+#[cfg(test)]
 pub fn pick(rocket: &Rocket, camera: &Camera, at: Point, size: Size) -> Option<Pick> {
-    let core = pick_core(rocket, camera, at, size);
+    pick_inside(rocket, camera, at, size, Inside::Hidden)
+}
+
+/// Which internal parts of the core the view shows, and so which a press can land on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Inside {
+    /// Solid: the shell hides them.
+    Hidden,
+    /// Only this one (the selected internal part: the shell is ghosted around it in any view).
+    Only(PartId),
+    /// Cutaway and X-ray: all of them.
+    All,
+}
+
+impl Inside {
+    /// Whether internal part `id` can be picked.
+    fn shows(self, id: PartId) -> bool {
+        match self {
+            Inside::Hidden => false,
+            Inside::Only(only) => only == id,
+            Inside::All => true,
+        }
+    }
+}
+
+/// [`pick`] where the view shows the `inside`: an internal part under the cursor is picked rather than the shell around it
+/// (a fin standing out in front of it still wins). Internal parts of pods are never picked.
+pub fn pick_inside(rocket: &Rocket, camera: &Camera, at: Point, size: Size, inside: Inside) -> Option<Pick> {
+    let core = pick_core(rocket, camera, at, size, inside);
     let pods = rocket
         .pods()
         .filter_map(|pod| PodView::of_pod(rocket, pod, camera))
-        .flat_map(|view| view.cameras.iter().filter_map(|cam| pick_core(&view.sub, cam, at, size)).collect::<Vec<_>>());
+        .flat_map(|view| view.cameras.iter().filter_map(|cam| pick_core(&view.sub, cam, at, size, Inside::Hidden)).collect::<Vec<_>>());
     core.into_iter().chain(pods).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(p, _)| p)
 }
 
+/// The nearest internal part of `rocket`'s own stack that `inside` shows under the ray, with its ray parameter: each is the
+/// cylinder of its (resolved) outer diameter along its length, with `margin` metres of slack so thin rings can be hit.
+fn hit_internal(rocket: &Rocket, o: DVec3, d: DVec3, inside: Inside, margin: f64) -> Option<(PartId, f64)> {
+    rocket
+        .internals()
+        .iter()
+        .filter(|p| inside.shows(p.id) && !matches!(p.kind, bowshock_model::InternalKind::ShockCord { .. }))
+        .filter_map(|p| {
+            let (z0, res) = (rocket.part_station(p.id)?, rocket.resolved(p.id)?);
+            let r = res.outer_diameter / 2.0 + margin;
+            hit_profile(o, d, z0 - margin, &[(0.0, r), (res.length + 2.0 * margin, r)]).map(|t| (p.id, t))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+}
+
 /// The nearest part of `rocket`'s own stack (and what stands on or in it) under `at`, with its ray parameter.
-fn pick_core(rocket: &Rocket, camera: &Camera, at: Point, size: Size) -> Option<(Pick, f64)> {
+fn pick_core(rocket: &Rocket, camera: &Camera, at: Point, size: Size, inside: Inside) -> Option<(Pick, f64)> {
     let (o, d) = ray(camera, at, size);
     // A few px of slack so a thin fin or small lug can be hit.
     let margin = 4.0 / f64::from(camera.scale);
-    let axial = hit_axial(rocket, camera, at, size).map(|(id, _, t)| (Pick::Axial(id), t));
+    // An internal part that is shown is what the press is on, not the shell around it.
+    let internal = hit_internal(rocket, o, d, inside, margin).map(|(id, t)| (Pick::Internal(id), t));
+    let axial = if internal.is_some() { None } else { hit_axial(rocket, camera, at, size).map(|(id, _, t)| (Pick::Axial(id), t)) };
     let radials = rocket.radials().iter().flat_map(|r| {
         (0..r.angles().len()).filter_map(move |i| {
             let at = placement(rocket, r, i)?;
@@ -333,7 +375,98 @@ fn pick_core(rocket: &Rocket, camera: &Camera, at: Point, size: Size) -> Option<
     });
     // Radial parts are small and sit on the surface: prefer them when within a hair of the body's depth.
     let bias = margin;
-    axial.into_iter().chain(radials.map(|(p, t)| (p, t - bias))).min_by(|a, b| a.1.total_cmp(&b.1))
+    axial.into_iter().chain(internal).chain(radials.map(|(p, t)| (p, t - bias))).min_by(|a, b| a.1.total_cmp(&b.1))
+}
+
+/// The station of the point of the axis nearest viewport pixel `at` on screen; `None` when looking straight down the axis.
+pub fn axis_station(camera: &Camera, at: Point, size: Size) -> Option<f64> {
+    let origin = camera.project(Vec3::ZERO, size);
+    let one_metre = camera.project(Vec3::Z, size) - origin;
+    let n = one_metre.x * one_metre.x + one_metre.y * one_metre.y;
+    (n >= 1e-6).then(|| f64::from(((at.x - origin.x) * one_metre.x + (at.y - origin.y) * one_metre.y) / n))
+}
+
+/// The convex hull of `points` (Andrew's monotone chain), anticlockwise.
+fn hull(mut points: Vec<Point>) -> Vec<Point> {
+    points.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    points.dedup();
+    if points.len() < 3 {
+        return points;
+    }
+    let cross = |o: Point, a: Point, b: Point| (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+    let mut chain: Vec<Point> = Vec::with_capacity(points.len() * 2);
+    for pass in 0..2 {
+        let start = chain.len();
+        for &p in &points {
+            while chain.len() >= start + 2 && cross(chain[chain.len() - 2], chain[chain.len() - 1], p) <= 0.0 {
+                chain.pop();
+            }
+            chain.push(p);
+        }
+        chain.pop();
+        if pass == 0 {
+            points.reverse();
+        }
+    }
+    chain
+}
+
+/// Distance (px) from `p` to the convex polygon `poly`: 0 inside.
+fn distance_to_hull(poly: &[Point], p: Point) -> f32 {
+    let mut inside = poly.len() >= 3;
+    let mut best = f32::MAX;
+    for i in 0..poly.len() {
+        let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+        let ab = b - a;
+        let len2 = ab.x * ab.x + ab.y * ab.y;
+        let t = if len2 > 0.0 { (((p.x - a.x) * ab.x + (p.y - a.y) * ab.y) / len2).clamp(0.0, 1.0) } else { 0.0 };
+        best = best.min(p.distance(Point::new(a.x + ab.x * t, a.y + ab.y * t)));
+        inside &= ab.x * (p.y - a.y) - ab.y * (p.x - a.x) >= 0.0;
+    }
+    if inside {
+        0.0
+    } else {
+        best
+    }
+}
+
+/// How far (px) viewport pixel `at` is from the surface of the stack that part `parent` is in: of the core, or of the pod
+/// copy nearest the cursor for a part of a pod. 0 anywhere over the stack, so a part sliding along the rocket never leaves it.
+/// The silhouette is the convex hull of each part's projected profile.
+pub fn stack_distance(rocket: &Rocket, camera: &Camera, at: Point, size: Size, parent: PartId) -> f32 {
+    let of = |rocket: &Rocket, camera: &Camera| {
+        let stations = rocket.stations();
+        rocket
+            .parts()
+            .iter()
+            .zip(&stations)
+            .map(|(part, &z0)| distance_to_hull(&hull(profile_points(camera, size, z0, &part.kind)), at))
+            .fold(f32::MAX, f32::min)
+    };
+    match PodView::of_part(rocket, parent, camera) {
+        Some(view) => view.cameras.iter().map(|cam| of(&view.sub, cam)).fold(f32::MAX, f32::min),
+        None => of(rocket, camera),
+    }
+}
+
+/// The screen outline of one copy of `kind` standing at the origin on a surface of radius 0 at `angle`: its convex hull, to be
+/// moved wherever the part is drawn (a part carried free of the rocket).
+pub fn radial_silhouette(camera: &Camera, size: Size, kind: &RadialKind, angle: f32) -> Vec<Point> {
+    hull(radial::outline_points(kind, Placement { z0: 0.0, base: 0.0, angle, cant: 0.0 }).into_iter().map(|p| camera.project(p, size)).collect())
+}
+
+/// Screen positions of `kind`'s profile sampled round the axis, its fore face at station `z0`.
+fn profile_points(camera: &Camera, size: Size, z0: f64, kind: &PartKind) -> Vec<Point> {
+    kind.profile()
+        .into_iter()
+        .flat_map(|(z, r)| {
+            (0..ROUND).map(move |i| {
+                let (s, c) = (std::f32::consts::TAU * i as f32 / ROUND as f32).sin_cos();
+                Vec3::new(r as f32 * c, r as f32 * s, (z0 + z) as f32)
+            })
+        })
+        .map(|p| camera.project(p, size))
+        .collect()
 }
 
 /// The screen rectangle enclosing one copy of a radial part.
@@ -351,13 +484,7 @@ fn bounds_of(points: impl Iterator<Item = Point>) -> Rectangle {
 
 /// The screen rectangle enclosing a part of `kind` whose fore face is at station `z0`.
 pub fn screen_bounds(camera: &Camera, size: Size, z0: f64, kind: &PartKind) -> Rectangle {
-    let points = kind.profile().into_iter().flat_map(|(z, r)| {
-        (0..ROUND).map(move |i| {
-            let (s, c) = (std::f32::consts::TAU * i as f32 / ROUND as f32).sin_cos();
-            Vec3::new(r as f32 * c, r as f32 * s, (z0 + z) as f32)
-        })
-    });
-    bounds_of(points.map(|p| camera.project(p, size)))
+    bounds_of(profile_points(camera, size, z0, kind).into_iter())
 }
 
 #[cfg(test)]
@@ -519,5 +646,43 @@ mod tests {
         assert!((fine.offset - 0.204).abs() < 1e-6, "{fine:?}");
         let surface = surface_target(&r, &cam, at, SIZE, &LUG, Snapping { angle: 0, station: Some(0.010) }).unwrap();
         assert!((surface.offset - 0.2).abs() < 1e-6, "{surface:?}");
+    }
+
+    #[test]
+    fn an_internal_part_is_picked_over_the_shell_around_it_where_the_view_shows_it() {
+        let (mut r, cam) = (rocket(), side());
+        let tube = r.parts()[1].id;
+        let kind = bowshock_model::InternalKind::InnerTube { outer_diameter: 0.04, thickness: 0.002, length: 0.2, motor_mount: true, overhang: 0.0 };
+        let mount = r.attach_internal(tube, 0.1, kind).unwrap();
+        let other = r.attach_internal(tube, 0.35, bowshock_model::InternalKind::Bulkhead { diameter: None, thickness: 0.01 }).unwrap();
+        // The mount stands at stations 0.3 to 0.5, 0.02 either side of the axis.
+        let on = cam.project(Vec3::new(0.0, 0.01, 0.4), SIZE);
+        // Solid: the shell hides it, so the press is on the tube (what the old picking did everywhere).
+        assert_eq!(pick_inside(&r, &cam, on, SIZE, Inside::Hidden), Some(Pick::Axial(tube)));
+        // Cutaway and X-ray show every internal part: the press is on the mount, not the tube.
+        assert_eq!(pick_inside(&r, &cam, on, SIZE, Inside::All), Some(Pick::Internal(mount)));
+        // Only the selected internal part shows in Solid.
+        assert_eq!(pick_inside(&r, &cam, on, SIZE, Inside::Only(mount)), Some(Pick::Internal(mount)));
+        assert_eq!(pick_inside(&r, &cam, on, SIZE, Inside::Only(other)), Some(Pick::Axial(tube)));
+        // Beside the mount, inside the tube, or past its end: the tube is what the press is on.
+        assert_eq!(pick_inside(&r, &cam, cam.project(Vec3::new(0.0, 0.04, 0.4), SIZE), SIZE, Inside::All), Some(Pick::Axial(tube)));
+        assert_eq!(pick_inside(&r, &cam, cam.project(Vec3::new(0.0, 0.01, 0.6), SIZE), SIZE, Inside::All), Some(Pick::Axial(tube)));
+        // A thin bulkhead (10 mm at station 0.55, 8 px on screen) is hit too, and a fin standing out in front still wins.
+        assert_eq!(pick_inside(&r, &cam, cam.project(Vec3::new(0.0, 0.03, 0.555), SIZE), SIZE, Inside::All), Some(Pick::Internal(other)));
+        let fins =
+            r.attach_radial(tube, 0.1, 0.0, 3, RadialKind::FinSet { root_chord: 0.1, tip_chord: 0.05, span: 0.06, sweep: 0.04, thickness: 0.003 }).unwrap();
+        let fin = cam.project(Vec3::new(0.0, 0.08, 0.35), SIZE);
+        assert_eq!(pick_inside(&r, &cam, fin, SIZE, Inside::All), Some(Pick::Radial { id: fins, instance: 0 }));
+    }
+
+    #[test]
+    fn the_distance_from_the_rocket_is_zero_over_it_and_grows_off_its_surface() {
+        let (r, cam) = (rocket(), side());
+        let tube = r.parts()[1].id;
+        let d = |z: f32, y: f32| stack_distance(&r, &cam, cam.project(Vec3::new(0.0, y, z), SIZE), SIZE, tube);
+        assert_eq!((d(0.45, 0.0), d(0.45, 0.04), d(0.1, 0.0)), (0.0, 0.0, 0.0));
+        // 0.09 m is 0.04 m (40 px at 1000 px/m) off the tube's surface; 0.1 m past the aft end is 100 px.
+        assert!((d(0.45, 0.09) - 40.0).abs() < 1.0, "{}", d(0.45, 0.09));
+        assert!((d(0.8, 0.0) - 100.0).abs() < 1.0, "{}", d(0.8, 0.0));
     }
 }

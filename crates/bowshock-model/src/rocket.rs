@@ -651,6 +651,26 @@ impl Rocket {
         Some(Resolved { length: extent, outer_diameter: outer, inner_diameter: inner, outer_auto, inner_auto })
     }
 
+    /// Whether an internal part of `kind` fits in axial part `parent` with its fore edge `offset` behind the parent's fore face
+    /// (limited to keep it within the parent): the parent is at least as long as the part, and the shell's bore is at least
+    /// as wide as the part's outer diameter along its whole length. Parts whose diameter is automatic always fit the bore they
+    /// follow. Used to decide whether an internal part dragged from one body part into another may land there.
+    pub fn internal_fits(&self, kind: &InternalKind, parent: PartId, offset: f64) -> bool {
+        const SLACK: f64 = 1e-6;
+        let Some(part) = self.part(parent) else {
+            return false;
+        };
+        let extent = kind.extent();
+        if extent > part.kind.length() + SLACK {
+            return false;
+        }
+        let need = kind.given_outer_diameter().unwrap_or(0.0);
+        let Some(offset) = self.clamp_internal_offset(parent, offset, extent) else {
+            return false;
+        };
+        [0.0, 0.5, 1.0].into_iter().all(|f| part.inner_diameter_at(offset + extent * f) + SLACK >= need)
+    }
+
     // ---- axial parts ----------------------------------------------------------------------------------------------
 
     /// Inserts `matched(index, kind)` at `index` keeping `id` (a part moved within the rocket). Fails if `id` is already
@@ -1382,6 +1402,25 @@ mod tests {
         // Mass overrides cannot go negative.
         r.set_mass_override(ring, Some(-1.0));
         assert_eq!(r.internal(ring).unwrap().mass_override, Some(0.0));
+    }
+
+    #[test]
+    fn an_internal_part_fits_where_the_bore_is_wide_and_long_enough() {
+        let mut r = stack();
+        // `insert` would match the diameter to the neighbour; `restore` keeps the narrow tube as it is.
+        r.restore(2, Part::new(50, tube(0.5, 0.05))).unwrap();
+        let (narrow, wide) = (50, r.parts()[1].id);
+        let mount = InternalKind::InnerTube { outer_diameter: 0.07, thickness: 0.001, length: 0.2, motor_mount: true, overhang: 0.0 };
+        // The wide tube (Ø0.1) takes a Ø0.07 mount anywhere; the Ø0.05 one does not.
+        assert!(r.internal_fits(&mount, wide, 0.3));
+        assert!(!r.internal_fits(&mount, narrow, 0.1));
+        // Too long for the parent; unknown parent; a part with an automatic diameter follows the bore, so it fits.
+        let long = InternalKind::InnerTube { outer_diameter: 0.04, thickness: 0.001, length: 2.0, motor_mount: false, overhang: 0.0 };
+        assert!(!r.internal_fits(&long, wide, 0.0) && !r.internal_fits(&mount, 99, 0.0));
+        assert!(r.internal_fits(&InternalKind::Bulkhead { diameter: None, thickness: 0.006 }, narrow, 0.0));
+        // The nose cone's bore narrows to nothing at the tip: a Ø0.07 tube does not fit there.
+        let nose_id = r.parts()[0].id;
+        assert!(!r.internal_fits(&mount, nose_id, 0.0));
     }
 
     #[test]

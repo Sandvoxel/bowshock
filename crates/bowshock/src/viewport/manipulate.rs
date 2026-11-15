@@ -10,16 +10,17 @@
 
 use std::time::{Duration, Instant};
 
-use bowshock_model::{Dim, HandleView, PartId, PartRef, Rocket, Target};
+use bowshock_model::{Anchor, Dim, HandleView, PartId, PartRef, Rocket, Target};
 use glam::Vec3;
 use iced::widget::canvas::{self, Action, Event, Frame, Geometry, LineDash, Path, Stroke, Text};
 use iced::{alignment, keyboard, mouse, Color, Point, Rectangle, Renderer, Size, Task, Theme, Vector};
 
 use super::assembly::tag;
+use super::carry::{Carry, Landing};
 use super::handles::{self, Axis, Context, Inset, Placed};
 use super::labels::{self, Request};
 use super::markers::{self, BalanceMarks};
-use super::pick::{self, Pick};
+use super::pick::{self, Inside, Pick};
 use super::pods::PodView;
 use super::radial::Placement;
 use super::snap;
@@ -105,6 +106,11 @@ pub enum Edit {
     RemoveVertex(PartId, usize),
     /// Double-click on a handle: focus the Inspector field of the dimension.
     Focus(Dim),
+    /// An internal part was pressed and dragged: the document starts collecting one undo step for carrying it.
+    Carry(PartId),
+    /// The carried internal part (first) is now in body part `parent` (second), its fore edge `offset` behind that part's fore
+    /// face.
+    Place(PartId, PartId, f64),
 }
 
 impl Edit {
@@ -112,6 +118,7 @@ impl Edit {
     pub fn hint(&self) -> Option<Vec<(&'static str, &'static str)>> {
         match self {
             Edit::Begin(_, verb) => Some(vec![("", *verb), ("Shift", "snap"), ("Ctrl", "5 mm"), ("0-9", "type exact"), ("Esc", "cancel")]),
+            Edit::Carry(_) => Some(vec![("", "Slide along the rocket · carry into the next body part"), ("Ctrl", "5 mm"), ("Esc", "cancel")]),
             Edit::End | Edit::Cancel | Edit::Commit(..) => Some(Vec::new()),
             _ => None,
         }
@@ -149,6 +156,21 @@ pub fn apply(edit: Edit, ctx: &mut Ctx) -> Task<app::Message> {
         }
         Edit::RemoveVertex(id, i) => {
             ctx.doc.edit("Remove vertex", |r| r.remove_vertex(id, i));
+        }
+        Edit::Carry(id) => {
+            let name = ctx.doc.rocket().kind_of(id).map(|p| p.name()).unwrap_or_default();
+            ctx.doc.begin_drag(&format!("Move {}", name.to_lowercase()));
+            ctx.selection = app::Selection::Part(id);
+            ctx.symmetry.instance = None;
+        }
+        Edit::Place(id, parent, offset) => {
+            ctx.doc.drag_update(|r| {
+                let reparented = r.internal(id).is_some_and(|p| p.parent != parent);
+                if r.move_internal(id, parent, offset).is_ok() && reparented && r.internal(id).is_some_and(|p| p.kind.is_motor_mount()) {
+                    // A motor mount is placed from the bottom of its body part, wherever it is moved to.
+                    r.set_anchor(id, Anchor::Bottom);
+                }
+            });
         }
         Edit::Focus(dim) => return Task::done(app::Message::Inspector(crate::build::inspector::Message::Focus(dim))),
     }
@@ -215,10 +237,21 @@ struct Drag {
     live: Live,
 }
 
+/// An internal part being carried along the rocket: it is moved in place, live, one undo step.
+#[derive(Debug)]
+struct Carried {
+    carry: Carry,
+    /// Where the cursor would put it now (for the tag).
+    landing: Option<Landing>,
+    /// The last place sent to the document `(part, parent, offset)`, so a move that changes nothing sends nothing.
+    placed: Option<(PartId, PartId, f64)>,
+}
+
 #[derive(Debug)]
 pub struct State {
     press: Option<Press>,
     drag: Option<Drag>,
+    carry: Option<Carried>,
     modifiers: keyboard::Modifiers,
     /// The last handle press (for double-click) and the last press on a freeform edge.
     last_handle: Option<(Instant, PartId, Dim)>,
@@ -242,7 +275,7 @@ pub fn drive_modifiers() -> keyboard::Modifiers {
 
 impl Default for State {
     fn default() -> Self {
-        State { press: None, drag: None, modifiers: drive_modifiers(), last_handle: None, last_edge: None }
+        State { press: None, drag: None, carry: None, modifiers: drive_modifiers(), last_handle: None, last_edge: None }
     }
 }
 
@@ -437,7 +470,7 @@ impl Overlay<'_> {
         if let Some(h) = self.handle_at(at, size, modifiers) {
             return Hover::Handle(h.spec.dim);
         }
-        pick::pick(self.rocket, &self.camera, at, size).map_or(Hover::None, |p| Hover::Part(p.id()))
+        pick::pick_inside(self.rocket, &self.camera, at, size, self.shown_inside()).map_or(Hover::None, |p| Hover::Part(p.id()))
     }
 
     fn quantity(dim: Dim) -> Quantity {
@@ -745,6 +778,10 @@ impl canvas::Program<Message> for Overlay<'_> {
                 }
                 Some(Action::request_redraw())
             }
+            Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::Escape), .. }) if state.carry.is_some() => {
+                state.carry = None;
+                edit(Edit::Cancel)
+            }
             Event::Keyboard(keyboard::Event::KeyPressed { key, text, .. }) if state.drag.is_some() => {
                 use keyboard::key::Named;
                 let drag = state.drag.as_mut()?;
@@ -825,7 +862,7 @@ impl canvas::Program<Message> for Overlay<'_> {
                         return Some(Action::publish(Message::Select(Some(Pick::Radial { id: pod, instance: 0 }))).and_capture());
                     }
                 }
-                state.press = Some(Press { at, target: pick::pick(self.rocket, &self.camera, at, size) });
+                state.press = Some(Press { at, target: pick::pick_inside(self.rocket, &self.camera, at, size, self.shown_inside()) });
                 Some(Action::capture())
             }
             Event::Mouse(mouse::Event::CursorMoved { .. }) => {
@@ -835,20 +872,41 @@ impl canvas::Program<Message> for Overlay<'_> {
                     state.drag = Some(drag);
                     return Some(out.map_or_else(|| Action::request_redraw().and_capture(), |e| Action::publish(Message::Edit(e)).and_capture()));
                 }
+                if let Some(carried) = state.carry.as_mut() {
+                    let step = pick::step(state.modifiers, self.snap_step);
+                    let landing = pick::axis_station(&self.camera, at, size).and_then(|z| carried.carry.landing(self.rocket, z, step));
+                    let place = landing.filter(|l| l.fits).map(|l| (carried.carry.id, l.parent, l.offset)).filter(|p| carried.placed != Some(*p));
+                    carried.landing = landing;
+                    return Some(match place {
+                        Some(p) => {
+                            carried.placed = Some(p);
+                            Action::publish(Message::Edit(Edit::Place(p.0, p.1, p.2)))
+                        }
+                        None => Action::request_redraw(),
+                    });
+                }
                 if let Some(press) = &state.press {
                     if at.distance(press.at) <= SLOP {
                         return None;
                     }
                     // Beyond the slop it is a drag: on a part that picks it up; on empty space it is not a click either.
-                    let target = press.target;
+                    let (target, from) = (press.target, press.at);
                     state.press = None;
-                    return target.map(|pick| Action::publish(Message::Grab(pick)).and_capture());
+                    return match target? {
+                        // An internal part is carried where it stands: along the rocket, into the next body part past the end.
+                        Pick::Internal(id) => {
+                            let carry = Carry::new(self.rocket, id, pick::axis_station(&self.camera, from, size)?)?;
+                            state.carry = Some(Carried { carry, landing: None, placed: None });
+                            Some(Action::publish(Message::Edit(Edit::Carry(id))))
+                        }
+                        pick => Some(Action::publish(Message::Grab(pick)).and_capture()),
+                    };
                 }
                 let hover = cursor.position_in(bounds).map_or(Hover::None, |p| self.hover_at(p, size, state.modifiers));
                 (hover != self.hover).then(|| Action::publish(Message::Hover(hover)))
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                if state.drag.take().is_some() {
+                if state.carry.take().is_some() || state.drag.take().is_some() {
                     // The edit is over: the document records its one undo step.
                     return edit(Edit::End);
                 }
@@ -871,6 +929,9 @@ impl canvas::Program<Message> for Overlay<'_> {
         let cursor =
             self.cursor.map(|c| Point::new(c.x - bounds.x, c.y - bounds.y)).filter(|c| (0.0..=size.width).contains(&c.x) && (0.0..=size.height).contains(&c.y));
         let all = state.modifiers.alt() || self.profile;
+        if let (Some(carried), Some(at)) = (&state.carry, cursor) {
+            self.draw_carry(&mut frame, t, carried, at);
+        }
 
         // The selection: brackets (solid on the part, or on the clicked copy of a group and dashed on its siblings) with a tag.
         let selection = self.selection();
@@ -910,6 +971,10 @@ impl canvas::Program<Message> for Overlay<'_> {
             return vec![frame.into_geometry()];
         };
         brackets(&mut frame, b, t.accent, false);
+        // Carried along the rocket the part has no handles: only its brackets and the tag at the cursor.
+        if state.carry.is_some() {
+            return vec![frame.into_geometry()];
+        }
 
         // Where the tag and the handle labels go: placed together so none overprints another or the inset (see `labels`).
         let vis = self.visible(size, state.modifiers);
@@ -954,6 +1019,46 @@ impl canvas::Program<Message> for Overlay<'_> {
 }
 
 impl Overlay<'_> {
+    /// Which internal parts a press can land on: all of them in Cutaway and X-ray, in Solid only the selected internal part
+    /// (the shell is ghosted around it).
+    fn shown_inside(&self) -> Inside {
+        match self.inside {
+            InsideView::Cutaway | InsideView::XRay => Inside::All,
+            _ => match self.selected {
+                Some(id) if self.rocket.internals().iter().any(|p| p.id == id) => Inside::Only(id),
+                _ => Inside::Hidden,
+            },
+        }
+    }
+
+    /// The tag at the cursor of an internal part being carried: where it would be (`Motor mount → Booster @ 612 mm`), or a ⊘
+    /// with why it cannot go where the cursor is.
+    fn draw_carry(&self, frame: &mut Frame, t: &Tokens, carried: &Carried, cursor: Point) {
+        let name = self.rocket.kind_of(carried.carry.id).map_or_else(|| "Part".to_string(), |p| p.name());
+        let Some(landing) = carried.landing else {
+            return;
+        };
+        let parent = self.rocket.part(landing.parent).map_or_else(String::new, |p| p.display_name());
+        if landing.fits {
+            let station = self.rocket.part_station(landing.parent).unwrap_or(0.0) + landing.offset;
+            let margin = self.balance.as_ref().map(|b| b.margin);
+            let suffix = super::assembly::margin_suffix(self.rocket, t, margin);
+            super::assembly::tag_with(
+                frame,
+                cursor,
+                0.0,
+                &format!("{name} → {parent} @ {} mm", crate::app::ui::mm(station)),
+                suffix,
+                t.ink,
+                t.line_200,
+                t.bg_200,
+            );
+        } else {
+            super::assembly::no_entry(frame, cursor + Vector::new(14.0, 14.0), t.err);
+            tag(frame, cursor, 18.0, &format!("{name} does not fit the {parent}"), t.ink, t.line_200, t.bg_200);
+        }
+    }
+
     /// The tag over the selection: what it is, and for a linked group how many copies and whether they follow.
     fn tag_text(&self, id: PartId, selection: &Option<Selection<'_>>) -> String {
         match selection {
@@ -1661,5 +1766,110 @@ mod label_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod carry_tests {
+    use super::*;
+    use bowshock_model::{InternalKind, NoseShape, PartKind};
+    use iced::widget::canvas::Program;
+    use std::f32::consts::FRAC_PI_2;
+
+    const SIZE: Size = Size::new(900.0, 600.0);
+    const BOUNDS: Rectangle = Rectangle { x: 0.0, y: 0.0, width: 900.0, height: 600.0 };
+
+    fn camera() -> Camera {
+        Camera { target: Vec3::new(0.0, 0.0, 0.55), yaw: -FRAC_PI_2, pitch: 0.0, roll: 0.0, scale: 800.0, ortho_blend: 1.0 }
+    }
+
+    /// Nose (0 to 0.2), a recovery bay (to 0.7), a booster (to 1.1) with a Ø40 mount in it at stations 0.8 to 1.0.
+    fn rocket() -> (Rocket, [PartId; 3], PartId) {
+        let mut r = Rocket::default();
+        let nose = r.insert(0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.2, diameter: 0.1 }).unwrap();
+        let bay = r.insert(1, PartKind::BodyTube { length: 0.5, diameter: 0.1 }).unwrap();
+        let booster = r.insert(2, PartKind::BodyTube { length: 0.4, diameter: 0.1 }).unwrap();
+        let mount = r
+            .attach_internal(booster, 0.1, InternalKind::InnerTube { outer_diameter: 0.04, thickness: 0.002, length: 0.2, motor_mount: true, overhang: 0.0 })
+            .unwrap();
+        (r, [nose, bay, booster], mount)
+    }
+
+    fn overlay(r: &Rocket, inside: InsideView) -> Overlay<'_> {
+        Overlay {
+            rocket: r,
+            camera: camera(),
+            selected: None,
+            also: Vec::new(),
+            instance: 0,
+            hover: Hover::None,
+            cursor: None,
+            snap_step: 0.001,
+            inside,
+            profile: true,
+            units: UnitSystem::default(),
+            pod: None,
+            balance: None,
+        }
+    }
+
+    fn at(z: f32, y: f32) -> Point {
+        camera().project(Vec3::new(0.0, y, z), SIZE)
+    }
+
+    /// What the overlay publishes for `event` with the cursor at `cursor`.
+    fn send(o: &Overlay<'_>, state: &mut State, event: Event, cursor: Point) -> Option<Message> {
+        o.update(state, &event, BOUNDS, mouse::Cursor::Available(cursor)).and_then(|action| action.into_inner().0)
+    }
+
+    fn press(o: &Overlay<'_>, state: &mut State, cursor: Point) {
+        send(o, state, Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)), cursor);
+    }
+
+    fn moved(o: &Overlay<'_>, state: &mut State, cursor: Point) -> Option<Message> {
+        send(o, state, Event::Mouse(mouse::Event::CursorMoved { position: cursor }), cursor)
+    }
+
+    #[test]
+    fn pressing_and_dragging_an_internal_part_in_the_cutaway_carries_it_and_never_picks_the_tube_up() {
+        let (r, [nose, bay, booster], mount) = rocket();
+        // Solid: the shell hides the mount, so the drag picks the booster up (the radial attach flow), as it always did.
+        let (o, mut state) = (overlay(&r, InsideView::Solid), State::default());
+        press(&o, &mut state, at(0.9, 0.01));
+        assert!(matches!(moved(&o, &mut state, at(0.88, 0.01)), Some(Message::Grab(Pick::Axial(id))) if id == booster));
+
+        // Cutaway: the same press is on the mount. Dragging carries it in place; nothing is picked up.
+        let (o, mut state) = (overlay(&r, InsideView::Cutaway), State::default());
+        press(&o, &mut state, at(0.9, 0.01));
+        assert!(matches!(moved(&o, &mut state, at(0.88, 0.01)), Some(Message::Edit(Edit::Carry(id))) if id == mount));
+        assert!(state.carry.is_some());
+        // Dragged 0.4 m fore (past the booster's end) over the recovery bay: it goes into the bay, keeping its station (0.8 to
+        // 0.4 is 0.2 into the bay).
+        let place = moved(&o, &mut state, at(0.5, 0.01));
+        assert!(matches!(place, Some(Message::Edit(Edit::Place(m, p, offset))) if m == mount && p == bay && (offset - 0.2).abs() < 1e-6), "{place:?}");
+        // The same place again sends nothing.
+        assert!(moved(&o, &mut state, at(0.5, 0.01)).is_none());
+        // Over the nose cone a Ø40 mount does not fit: nothing is sent and the tag says so.
+        assert!(moved(&o, &mut state, at(0.1, 0.01)).is_none());
+        assert!(state.carry.as_ref().and_then(|c| c.landing).is_some_and(|l| l.parent == nose && !l.fits));
+        // Back on the bay it is placed again; the release ends the edit (one undo step).
+        assert!(matches!(moved(&o, &mut state, at(0.55, 0.01)), Some(Message::Edit(Edit::Place(_, p, _))) if p == bay));
+        let end = send(&o, &mut state, Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)), at(0.55, 0.01));
+        assert!(matches!(end, Some(Message::Edit(Edit::End))) && state.carry.is_none());
+    }
+
+    #[test]
+    fn a_click_on_an_internal_part_selects_it_and_the_selected_one_can_be_picked_in_solid() {
+        let (r, _, mount) = rocket();
+        let (o, mut state) = (overlay(&r, InsideView::XRay), State::default());
+        press(&o, &mut state, at(0.9, 0.01));
+        let click = send(&o, &mut state, Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)), at(0.9, 0.01));
+        assert!(matches!(click, Some(Message::Select(Some(Pick::Internal(id)))) if id == mount));
+        // Selected in Solid (the shell is ghosted around it): a drag on it carries it.
+        let mut o = overlay(&r, InsideView::Solid);
+        o.selected = Some(mount);
+        let mut state = State::default();
+        press(&o, &mut state, at(0.9, 0.01));
+        assert!(matches!(moved(&o, &mut state, at(0.88, 0.01)), Some(Message::Edit(Edit::Carry(id))) if id == mount));
     }
 }

@@ -10,7 +10,7 @@
 //! To add another kind of drag (an internal part in the lanes, say) add a field to [`Drags`], a start/finish pair here that
 //! wraps `ctx.doc.begin_drag` / `end_drag`, and include it in [`Drags::active`] and [`cancel`].
 
-use bowshock_model::{InternalKind, InternalPart, Part, PartId, PartKind, RadialKind, Rocket};
+use bowshock_model::{Anchor, InternalKind, InternalPart, Part, PartId, PartKind, RadialKind, Rocket};
 
 use super::{Ctx, Selection};
 use crate::app::ui;
@@ -117,7 +117,7 @@ pub fn start_radial(ctx: &mut Ctx, row: usize, kind: RadialKind) {
     // A pod from the bin is sized for this rocket.
     let kind = if kind.is_pod() { ctx.doc.rocket().default_pod() } else { kind };
     let count = ctx.drag.symmetry;
-    ctx.drag.radial = Some(RadialDrag { row: Some(row), kind, count, origin: None, target: None });
+    ctx.drag.radial = Some(RadialDrag { row: Some(row), kind, count, origin: None, target: None, detached: false });
 }
 
 /// Picks up a part of the rocket: an axial part comes out of the rocket with the radial and internal parts it carries; a
@@ -187,12 +187,15 @@ pub fn grab(ctx: &mut Ctx, pick: Pick) {
                 }
             }
         }
+        // An internal part is carried where it stands by the viewport's manipulation overlay (`Edit::Carry`), never picked up.
+        Pick::Internal(_) => {}
         Pick::Radial { id, .. } => {
             ctx.doc.begin_drag("Move part");
             match ctx.doc.drag_update(|r| r.remove_radial(id)) {
                 Some(radial) => {
                     ctx.selection = Selection::Part(id);
-                    ctx.drag.radial = Some(RadialDrag { row: None, kind: radial.kind.clone(), count: radial.count, origin: Some(radial), target: None });
+                    ctx.drag.radial =
+                        Some(RadialDrag { row: None, kind: radial.kind.clone(), count: radial.count, origin: Some(radial), target: None, detached: false });
                 }
                 None => {
                     ctx.doc.end_drag(false);
@@ -255,7 +258,8 @@ pub fn finish_axial(ctx: &mut Ctx, drop: bool) {
 }
 
 /// Ends the radial drag: lands it on its surface target if `drop`, else abandons it. A group picked up from the rocket that is
-/// not landed goes back as it was.
+/// not landed goes back as it was, except one pulled free of the rocket (`detached`) and released over empty space: that is
+/// removed (one undo step, with a notice).
 pub fn finish_radial(ctx: &mut Ctx, drop: bool) {
     let Some(drag) = ctx.drag.radial.take() else {
         return;
@@ -264,6 +268,15 @@ pub fn finish_radial(ctx: &mut Ctx, drop: bool) {
         (true, Some(t)) => ctx.doc.drag_update(|r| land_radial(r, &drag, t)),
         _ => false,
     };
+    if drop && !placed && drag.target.is_none() && drag.detached && drag.origin.is_some() {
+        let name = drag.kind.name();
+        ctx.doc.rename_drag(&format!("Remove {}", name.to_lowercase()));
+        if ctx.doc.end_drag(true) {
+            ctx.select_one(None);
+            ctx.notify(format!("Removed {name} · Undo brings it back"));
+        }
+        return;
+    }
     ctx.doc.end_drag(placed);
 }
 
@@ -393,7 +406,16 @@ fn land_radial(r: &mut Rocket, drag: &RadialDrag, t: SurfaceTarget) -> bool {
 fn land_internal(r: &mut Rocket, drag: &InternalDrag, t: InternalTarget, base: Option<&Rocket>) -> bool {
     let ok = match &drag.origin {
         Some(part) => r.restore_internal(InternalPart { parent: t.parent, offset: t.offset, ..part.clone() }).is_ok(),
-        None => r.attach_internal(t.parent, t.offset, drag.kind.clone()).is_ok(),
+        None => match r.attach_internal(t.parent, t.offset, drag.kind.clone()) {
+            Ok(id) => {
+                // A new part is placed from the end of its body part it is nearer to (a motor mount always from the bottom).
+                let length = r.part(t.parent).map_or(0.0, |p| p.kind.length());
+                let aft = drag.kind.is_motor_mount() || t.offset + drag.kind.extent() / 2.0 > length / 2.0;
+                r.set_anchor(id, if aft { Anchor::Bottom } else { Anchor::Top });
+                true
+            }
+            Err(_) => false,
+        },
     };
     if let (true, Some(base)) = (ok, base) {
         restore_motors(r, base);
@@ -408,6 +430,8 @@ pub enum Landing {
     Axial { snap: Option<usize>, pod_snap: Option<(PartId, usize)>, surface: Option<SurfaceTarget>, count: u8 },
     /// A radial part on a tube's surface.
     Radial { target: SurfaceTarget, count: u8 },
+    /// A radial group pulled free of the rocket and over empty space: released, it is removed.
+    Removed,
     /// An internal part inside an airframe part.
     Internal { target: InternalTarget },
 }
@@ -425,7 +449,7 @@ impl Drags {
             });
         }
         if let Some(d) = &self.radial {
-            return d.target.map(|target| Landing::Radial { target, count: d.count });
+            return d.target.map(|target| Landing::Radial { target, count: d.count }).or((d.detached && d.origin.is_some()).then_some(Landing::Removed));
         }
         self.internal.as_ref().and_then(|d| d.target).map(|target| Landing::Internal { target })
     }
@@ -445,7 +469,8 @@ pub fn landed(ctx: &Ctx) -> Option<Rocket> {
             _ => false,
         }
     } else if let Some(drag) = &ctx.drag.radial {
-        drag.target.is_some_and(|t| land_radial(&mut rocket, drag, t))
+        // A group pulled free and over empty space is removed on release: the rocket as it is, without it.
+        drag.target.map_or(drag.detached && drag.origin.is_some(), |t| land_radial(&mut rocket, drag, t))
     } else if let Some(drag) = &ctx.drag.internal {
         drag.target.is_some_and(|t| land_internal(&mut rocket, drag, t, base))
     } else {
