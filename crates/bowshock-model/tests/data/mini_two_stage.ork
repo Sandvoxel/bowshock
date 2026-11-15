@@ -1,0 +1,299 @@
+<?xml version='1.0' encoding='utf-8'?>
+<!-- A small two-stage rocket written by hand for the importer's tests (not an OpenRocket export). 54 mm airframe. -->
+<openrocket version="1.8" creator="Bowshock test fixture">
+  <rocket>
+    <name>Mini two-stage</name>
+    <designer>Bowshock tests</designer>
+    <motorconfiguration configid="aaaaaaaa-0000-0000-0000-000000000001" default="true">
+      <stage number="0" active="true"/>
+      <stage number="1" active="true"/>
+    </motorconfiguration>
+    <motorconfiguration configid="bbbbbbbb-0000-0000-0000-000000000002">
+      <stage number="0" active="true"/>
+      <stage number="1" active="true"/>
+    </motorconfiguration>
+    <referencetype>maximum</referencetype>
+    <subcomponents>
+      <stage>
+        <name>Sustainer</name>
+        <subcomponents>
+          <nosecone>
+            <name>Nose</name>
+            <finish>smooth</finish>
+            <material type="bulk" density="1050.0">Polystyrene</material>
+            <length>0.2</length>
+            <thickness>0.002</thickness>
+            <shape>ogive</shape>
+            <shapeparameter>1.0</shapeparameter>
+            <aftradius>auto</aftradius>
+            <aftshoulderradius>0.0245</aftshoulderradius>
+            <aftshoulderlength>0.03</aftshoulderlength>
+            <aftshoulderthickness>0.002</aftshoulderthickness>
+            <aftshouldercapped>false</aftshouldercapped>
+            <isflipped>false</isflipped>
+            <subcomponents>
+              <masscomponent>
+                <name>Nose weight</name>
+                <axialoffset method="top">0.05</axialoffset>
+                <packedlength>0.02</packedlength>
+                <packedradius>0.015</packedradius>
+                <mass>0.1</mass>
+                <masscomponenttype>masscomponent</masscomponenttype>
+              </masscomponent>
+            </subcomponents>
+          </nosecone>
+          <bodytube>
+            <name>Upper tube</name>
+            <finish>normal</finish>
+            <material type="bulk" density="1000.0">Odd cardboard</material>
+            <length>0.4</length>
+            <thickness>0.002</thickness>
+            <radius>0.027</radius>
+            <subcomponents>
+              <parachute>
+                <name>Main</name>
+                <axialoffset method="top">0.02</axialoffset>
+                <packedlength>0.1</packedlength>
+                <packedradius>0.02</packedradius>
+                <cd>auto</cd>
+                <material type="surface" density="0.067">Ripstop nylon</material>
+                <deployevent>ejection</deployevent>
+                <deployaltitude>200.0</deployaltitude>
+                <deploydelay>0.0</deploydelay>
+                <deploymentconfiguration configid="bbbbbbbb-0000-0000-0000-000000000002">
+                  <deployevent>altitude</deployevent>
+                  <deployaltitude>150.0</deployaltitude>
+                  <deploydelay>1.0</deploydelay>
+                </deploymentconfiguration>
+                <diameter>0.6</diameter>
+                <linecount>6</linecount>
+                <linelength>0.5</linelength>
+                <linematerial type="line" density="0.001">Thread</linematerial>
+              </parachute>
+              <shockcord>
+                <name>Cord</name>
+                <axialoffset method="top">0.13</axialoffset>
+                <packedlength>0.05</packedlength>
+                <cordlength>1.0</cordlength>
+                <material type="line" density="0.0035">Cord</material>
+              </shockcord>
+              <launchlug>
+                <name>Lug</name>
+                <instancecount>1</instancecount>
+                <angleoffset method="relative">0.0</angleoffset>
+                <axialoffset method="middle">0.0</axialoffset>
+                <finish>normal</finish>
+                <material type="bulk" density="680.0">Cardboard</material>
+                <radius>0.004</radius>
+                <length>0.03</length>
+                <thickness>0.001</thickness>
+              </launchlug>
+              <tubecoupler>
+                <name>Coupler</name>
+                <axialoffset method="bottom">0.05</axialoffset>
+                <material type="bulk" density="680.0">Cardboard</material>
+                <length>0.12</length>
+                <outerradius>auto</outerradius>
+                <thickness>0.002</thickness>
+                <subcomponents>
+                  <bulkhead>
+                    <name>Coupler bulkhead</name>
+                    <axialoffset method="top">0.0</axialoffset>
+                    <material type="bulk" density="630.0">Plywood</material>
+                    <length>0.005</length>
+                    <outerradius>auto</outerradius>
+                  </bulkhead>
+                </subcomponents>
+              </tubecoupler>
+            </subcomponents>
+          </bodytube>
+          <transition>
+            <name>Boattail</name>
+            <finish>normal</finish>
+            <material type="bulk" density="680.0">Cardboard</material>
+            <length>0.05</length>
+            <thickness>0.002</thickness>
+            <shape>conical</shape>
+            <foreradius>auto</foreradius>
+            <aftradius>0.0225</aftradius>
+          </transition>
+          <bodytube>
+            <name>Sustainer motor tube</name>
+            <finish>normal</finish>
+            <material type="bulk" density="680.0">Cardboard</material>
+            <length>0.25</length>
+            <thickness>0.002</thickness>
+            <radius>auto 0.1</radius>
+            <subcomponents>
+              <innertube>
+                <name>Sustainer mount</name>
+                <axialoffset method="bottom">0.0</axialoffset>
+                <material type="bulk" density="680.0">Cardboard</material>
+                <length>0.15</length>
+                <outerradius>0.0185</outerradius>
+                <thickness>0.0015</thickness>
+                <clusterconfiguration>single</clusterconfiguration>
+                <motormount>
+                  <ignitionevent>automatic</ignitionevent>
+                  <ignitiondelay>0.0</ignitiondelay>
+                  <overhang>0.0</overhang>
+                  <motor configid="aaaaaaaa-0000-0000-0000-000000000001">
+                    <type>single</type>
+                    <manufacturer>AeroTech</manufacturer>
+                    <digest>0</digest>
+                    <designation>G64W</designation>
+                    <diameter>0.029</diameter>
+                    <length>0.124</length>
+                    <delay>none</delay>
+                  </motor>
+                  <ignitionconfiguration configid="aaaaaaaa-0000-0000-0000-000000000001">
+                    <ignitionevent>burnout</ignitionevent>
+                    <ignitiondelay>2.0</ignitiondelay>
+                  </ignitionconfiguration>
+                  <motor configid="bbbbbbbb-0000-0000-0000-000000000002">
+                    <type>single</type>
+                    <manufacturer>AeroTech</manufacturer>
+                    <digest>0</digest>
+                    <designation>G80T</designation>
+                    <diameter>0.029</diameter>
+                    <length>0.124</length>
+                    <delay>7.0</delay>
+                  </motor>
+                  <ignitionconfiguration configid="bbbbbbbb-0000-0000-0000-000000000002">
+                    <ignitionevent>burnout</ignitionevent>
+                    <ignitiondelay>0.0</ignitiondelay>
+                  </ignitionconfiguration>
+                </motormount>
+                <subcomponents>
+                  <centeringring>
+                    <name>Retainer</name>
+                    <axialoffset method="bottom">0.0</axialoffset>
+                    <material type="bulk" density="2700.0">Aluminum</material>
+                    <length>0.01</length>
+                    <outerradius>0.0205</outerradius>
+                    <innerradius>auto</innerradius>
+                  </centeringring>
+                </subcomponents>
+              </innertube>
+              <trapezoidfinset>
+                <name>Sustainer fins</name>
+                <fincount>3</fincount>
+                <rotation>10.0</rotation>
+                <axialoffset method="bottom">0.0</axialoffset>
+                <finish>normal</finish>
+                <material type="bulk" density="1850.0">Fiberglass</material>
+                <thickness>0.003</thickness>
+                <crosssection>airfoil</crosssection>
+                <cant>1.5</cant>
+                <rootchord>0.12</rootchord>
+                <tipchord>0.05</tipchord>
+                <sweeplength>0.07</sweeplength>
+                <height>0.08</height>
+                <tabheight>0.01</tabheight>
+                <tablength>0.05</tablength>
+                <overridemass>0.2</overridemass>
+              </trapezoidfinset>
+            </subcomponents>
+          </bodytube>
+        </subcomponents>
+      </stage>
+      <stage>
+        <name>Booster</name>
+        <separationevent>ejection</separationevent>
+        <separationdelay>0.5</separationdelay>
+        <separationconfiguration configid="bbbbbbbb-0000-0000-0000-000000000002">
+          <separationevent>burnout</separationevent>
+          <separationdelay>1.5</separationdelay>
+        </separationconfiguration>
+        <subcomponents>
+          <bodytube>
+            <name>Booster tube</name>
+            <finish>rough</finish>
+            <material type="bulk" density="680.0">Cardboard</material>
+            <length>0.5</length>
+            <thickness>0.002</thickness>
+            <radius>auto</radius>
+            <subcomponents>
+              <innertube>
+                <name>Booster mount</name>
+                <axialoffset method="bottom">0.0</axialoffset>
+                <material type="bulk" density="680.0">Cardboard</material>
+                <length>0.2</length>
+                <outerradius>0.0185</outerradius>
+                <thickness>0.0015</thickness>
+                <motormount>
+                  <ignitionevent>automatic</ignitionevent>
+                  <ignitiondelay>0.0</ignitiondelay>
+                  <overhang>0.01</overhang>
+                  <motor configid="aaaaaaaa-0000-0000-0000-000000000001">
+                    <type>single</type>
+                    <manufacturer>AeroTech</manufacturer>
+                    <digest>0</digest>
+                    <designation>H128W</designation>
+                    <diameter>0.029</diameter>
+                    <length>0.15</length>
+                    <delay>none</delay>
+                  </motor>
+                  <motor configid="bbbbbbbb-0000-0000-0000-000000000002">
+                    <type>single</type>
+                    <manufacturer>AeroTech</manufacturer>
+                    <digest>0</digest>
+                    <designation>H128W</designation>
+                    <diameter>0.029</diameter>
+                    <length>0.15</length>
+                    <delay>none</delay>
+                  </motor>
+                </motormount>
+              </innertube>
+              <railbutton>
+                <name>Buttons</name>
+                <instancecount>2</instancecount>
+                <instanceseparation>0.3</instanceseparation>
+                <angleoffset method="relative">180.0</angleoffset>
+                <axialoffset method="top">0.1</axialoffset>
+                <finish>normal</finish>
+                <material type="bulk" density="1420.0">Delrin</material>
+                <outerdiameter>0.0097</outerdiameter>
+                <innerdiameter>0.008</innerdiameter>
+                <height>0.0097</height>
+                <baseheight>0.002</baseheight>
+                <flangeheight>0.002</flangeheight>
+              </railbutton>
+              <trapezoidfinset>
+                <name>Booster fins</name>
+                <fincount>4</fincount>
+                <axialoffset method="bottom">0.0</axialoffset>
+                <finish>normal</finish>
+                <material type="bulk" density="680.0">Cardboard</material>
+                <thickness>0.003</thickness>
+                <crosssection>square</crosssection>
+                <rootchord>0.15</rootchord>
+                <tipchord>0.08</tipchord>
+                <sweeplength>0.05</sweeplength>
+                <height>0.1</height>
+              </trapezoidfinset>
+            </subcomponents>
+          </bodytube>
+        </subcomponents>
+      </stage>
+    </subcomponents>
+  </rocket>
+  <simulations>
+    <simulation status="uptodate">
+      <name>Windy pad</name>
+      <conditions>
+        <configid>bbbbbbbb-0000-0000-0000-000000000002</configid>
+        <launchrodlength>2.4384</launchrodlength>
+        <launchrodangle>5.0</launchrodangle>
+        <launchroddirection>90.0</launchroddirection>
+        <windaverage>4.0</windaverage>
+        <windturbulence>0.2</windturbulence>
+        <launchaltitude>1400.0</launchaltitude>
+        <launchlatitude>32.9</launchlatitude>
+        <atmosphere model="isa"/>
+        <timestep>0.05</timestep>
+      </conditions>
+      <flightdata maxaltitude="1234.5" maxvelocity="210.0" maxacceleration="150.0" maxmach="0.61" timetoapogee="14.5" flighttime="120.0" groundhitvelocity="6.0" launchrodvelocity="22.0"/>
+    </simulation>
+  </simulations>
+</openrocket>

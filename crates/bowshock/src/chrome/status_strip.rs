@@ -26,7 +26,8 @@ const DASH: &str = "—";
 pub fn status_strip<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
     let rocket = ctx.doc.rocket();
     let units = ctx.units;
-    let balance = ctx.physics.balance();
+    let shown = ctx.shown();
+    let balance = shown.now.as_ref();
     let wrap = Message::Chrome;
 
     let name = rocket.configuration_name(rocket.active_config_id()).unwrap_or_default();
@@ -39,20 +40,56 @@ pub fn status_strip<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> 
     let value = |f: fn(&Balance) -> f64, q: Quantity, unit: bool| {
         balance.map_or_else(|| DASH.to_string(), |b| if unit { ui::with_unit(f(b), q, units) } else { ui::bare(f(b), q, units) })
     };
-    // While a drag changes a value, that readout is semibold until the release (StatusStrip).
+    // While a drag changes a value, that readout is semibold until the release (StatusStrip), with its change from the
+    // committed value after it (`CP 862.3 (+10.6)`).
     let changing = ctx.changing();
-    cells.push(status::readout_live("MASS", value(|b| b.mass, Quantity::Mass, true), None, changing.mass));
-    cells.push(status::readout_live("LEN", value(|b| b.length, Quantity::Length, true), None, changing.length));
-    cells.push(status::readout_live("Ø REF", value(|b| b.reference_diameter, Quantity::Length, true), None, changing.diameter));
-    cells.push(status::cg_live(value(|b| b.cg, Quantity::Length, false), ctx.show_cg, Some(wrap(ChromeMessage::ToggleCg)), changing.cg));
-    cells.push(status::cp_live(value(|b| b.cp, Quantity::Length, false), ctx.show_cp, Some(wrap(ChromeMessage::ToggleCp)), changing.cp));
-    if balance.is_some() {
-        cells.push(status::stability_live(
-            ctx.physics.gauge(),
-            &ctx.doc.rocket().stability_bands().into(),
-            Some(Message::Mode(Mode::Analyze)),
-            changing.margin,
-        ));
+    let delta = |f: fn(&Balance) -> f64, q: Quantity, unit: bool| -> Option<String> {
+        let (now, was) = (shown.now?, shown.committed?);
+        let d = f(&now) - f(&was);
+        let text = if unit { ui::with_unit(d, q, units) } else { ui::bare(d, q, units) };
+        if !text.chars().any(|c| c.is_ascii_digit() && c != '0') {
+            None
+        } else if d > 0.0 {
+            Some(format!("+{text}"))
+        } else {
+            Some(text)
+        }
+    };
+    let live = |changing: bool, delta: Option<String>| status::Live { changing, delta, color: None };
+    cells.push(status::readout_live("MASS", value(|b| b.mass, Quantity::Mass, true), None, live(changing.mass, delta(|b| b.mass, Quantity::Mass, true))));
+    cells.push(status::readout_live(
+        "LEN",
+        value(|b| b.length, Quantity::Length, true),
+        None,
+        live(changing.length, delta(|b| b.length, Quantity::Length, true)),
+    ));
+    cells.push(status::readout_live(
+        "Ø REF",
+        value(|b| b.reference_diameter, Quantity::Length, true),
+        None,
+        live(changing.diameter, delta(|b| b.reference_diameter, Quantity::Length, true)),
+    ));
+    cells.push(status::cg_live(
+        value(|b| b.cg, Quantity::Length, false),
+        ctx.show_cg,
+        Some(wrap(ChromeMessage::ToggleCg)),
+        live(changing.cg, delta(|b| b.cg, Quantity::Length, false)),
+    ));
+    cells.push(status::cp_live(
+        value(|b| b.cp, Quantity::Length, false),
+        ctx.show_cp,
+        Some(wrap(ChromeMessage::ToggleCp)),
+        live(changing.cp, delta(|b| b.cp, Quantity::Length, false)),
+    ));
+    if let Some(b) = balance {
+        let bands = ctx.doc.rocket().stability_bands();
+        // A margin that is changing takes its stability band's colour as well.
+        let margin = status::Live {
+            changing: changing.margin,
+            delta: shown.committed.map(|was| b.margin_cal - was.margin_cal).filter(|d| d.abs() >= 0.005).map(|d| format!("{d:+.2}")),
+            color: changing.margin.then(|| super::config_picker::margin_color(ctx.tokens(), bands, b.margin_cal)),
+        };
+        cells.push(status::stability_live(ctx.physics.gauge(), &bands.into(), Some(Message::Mode(Mode::Analyze)), margin));
     } else {
         cells.push(status::readout("STAB", DASH, None));
     }
@@ -64,11 +101,17 @@ pub fn status_strip<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> 
     if let Some(summary) = selection_summary(ctx) {
         trailing.push(summary);
     }
-    let issues: Vec<_> = ctx.physics.issues().collect();
-    if !issues.is_empty() {
-        let severity = if ctx.physics.worst() == Level::Err { Severity::Err } else { Severity::Warn };
-        let word = if ctx.physics.worst() == Level::Err { "error" } else { "warning" };
-        let label = format!("{} {word}{}", issues.len(), if issues.len() == 1 { "" } else { "s" });
+    let issues = ctx.physics.issues().count();
+    let notes = ctx.import_notes.len();
+    if issues + notes > 0 {
+        // The issues set the chip's state; import notes alone make it a neutral `info` chip that opens the same list.
+        let (severity, label) = if issues > 0 {
+            let word = if ctx.physics.worst() == Level::Err { "error" } else { "warning" };
+            let severity = if ctx.physics.worst() == Level::Err { Severity::Err } else { Severity::Warn };
+            (severity, format!("{issues} {word}{}", if issues == 1 { "" } else { "s" }))
+        } else {
+            (Severity::Info, format!("{notes} import note{}", if notes == 1 { "" } else { "s" }))
+        };
         // Never wraps: the chip is given the width its words need (icon, gap, text at 12 px, padding).
         let width = 36.0 + label.chars().count() as f32 * 6.8;
         let chip: Element<'a, Message> = chip(severity, label).on_press(wrap(ChromeMessage::ToggleIssues)).into();

@@ -30,8 +30,8 @@
 //!     their station in the pod, `count` = fins x pod copies (the Barrowman fin lift is linear in the number of fins);
 //!     lugs and rail buttons on pod parts as one [`Protuberance`] per copy.
 //!   - a pod that is **open** (only body tubes, nothing inside, see `PodBody::is_open_tube`) is not a body: air flows through it.
-//!     It becomes a [`TubeFinSet`] (one per run of butted tubes, one tube per copy) with OpenRocket's `TubeFinSet` aerodynamics
-//!     ([`crate::tube_fins`]): ring-airfoil lift and quarter-chord CP, outer-surface friction, the bore's pressure drop and the
+//!     It becomes a [`TubeFinSet`] (one per run of butted tubes, one tube per copy) with the tube fin aerodynamics of
+//!     [`crate::tube_fins`]: ring-airfoil lift and Mach-dependent fin CP, outer-surface friction, the bore's pressure drop and the
 //!     interstice drag, and no base drag, instead of the three items above. A pod with a nose, a transition or anything inside
 //!     is a body, whatever its aft end.
 //!
@@ -220,14 +220,29 @@ fn equivalent_trapezoid(kind: &RadialKind) -> Option<(f64, f64, f64, f64, f64)> 
 
 /// Adds radial group `r` as fin sets and protuberances. Copies with the same effective values (the group's with the copy's own
 /// overrides on top) fly as one set, so a group with a canted fin B becomes a set of two and a set of one. A group on a pod
-/// stands on every one of the pod's `pod_copies` copies (1 on the core), so each set counts that many times the fins.
-fn add_radial(rocket: &Rocket, r: &model::RadialPart, pod_copies: u32, fins: &mut Vec<FinSet>, prots: &mut Vec<Protuberance>) {
+/// stands on every one of the pod's copies, at the angles `pod_angles` (`[0.0]` on the core), so each set counts that many
+/// times the fins, each at the pod's angle plus its own.
+fn add_radial(rocket: &Rocket, r: &model::RadialPart, pod_angles: &[f64], fins: &mut Vec<FinSet>, prots: &mut Vec<Protuberance>) {
     let (Some(station), Some(base)) = (rocket.radial_station(r), rocket.radial_base_radius(r)) else {
         return;
     };
+    let own = r.angles();
     for (params, copies) in copy_sets(r) {
-        add_copies(r, &params, copies.len() as u32 * pod_copies, station, base, fins, prots);
+        let (own, copies) = (&own, &copies);
+        let angles: Vec<f64> = pod_angles.iter().flat_map(|&pod| copies.iter().map(move |&i| pod + own.get(i).copied().unwrap_or(0.0))).collect();
+        let place = Placement { station, base, angles, parent: r.parent, bodies: pod_angles.len().max(1) as u32 };
+        add_copies(r, &params, place, fins, prots);
     }
+}
+
+/// Where a set of copies stands: `station` on a surface of radius `base` of body `parent`, one copy at each of `angles`
+/// (rad), spread over `bodies` identical bodies (pod copies).
+struct Placement {
+    station: f64,
+    base: f64,
+    angles: Vec<f64>,
+    parent: model::PartId,
+    bodies: u32,
 }
 
 /// The copies of group `r` that fly as one set: those with the same effective values, in order of first appearance.
@@ -268,16 +283,10 @@ pub fn fin_set_sources(rocket: &Rocket) -> Vec<(model::PartId, Vec<usize>)> {
     out
 }
 
-/// `count` copies of the radial part `r` with the values `params`, standing at `station` on a surface of radius `base`.
-fn add_copies(
-    r: &model::RadialPart,
-    params: &model::InstanceParams,
-    count: u32,
-    station: f64,
-    base: f64,
-    fins: &mut Vec<FinSet>,
-    prots: &mut Vec<Protuberance>,
-) {
+/// The copies of the radial part `r` with the values `params`, standing where `place` says.
+fn add_copies(r: &model::RadialPart, params: &model::InstanceParams, place: Placement, fins: &mut Vec<FinSet>, prots: &mut Vec<Protuberance>) {
+    let Placement { station, base, angles, parent, bodies } = place;
+    let count = angles.len() as u32;
     let fin = |station: f64, root_chord: f64, tip_chord: f64, span: f64, sweep: f64, thickness: f64, planform: FinPlanform| FinSet {
         count,
         station,
@@ -291,6 +300,11 @@ fn add_copies(
         cant: params.cant,
         roughness: r.finish.roughness(),
         planform,
+        mid_chord_cos: None,
+        root_extent: None,
+        angles: angles.clone(),
+        parent,
+        bodies,
     };
     match &params.kind {
         RadialKind::FinSet { root_chord, tip_chord, span, sweep, thickness } => {
@@ -299,9 +313,14 @@ fn add_copies(
         RadialKind::EllipticalFin { root_chord, span, thickness } => {
             fins.push(fin(station, *root_chord, 0.0, *span, 0.0, *thickness, FinPlanform::Elliptical));
         }
-        RadialKind::FreeformFin { thickness, .. } => {
+        RadialKind::FreeformFin { thickness, points } => {
             if let Some((le, root, tip, span, sweep)) = equivalent_trapezoid(&params.kind) {
-                fins.push(fin(station + le, root, tip, span, sweep, *thickness, FinPlanform::Trapezoidal));
+                let mut f = fin(station + le, root, tip, span, sweep, *thickness, FinPlanform::Trapezoidal);
+                f.mid_chord_cos = mean_mid_chord_cos(points);
+                if let (Some(a), Some(b)) = (points.first(), points.last()) {
+                    f.root_extent = Some((station + a.0.min(b.0), station + a.0.max(b.0)));
+                }
+                fins.push(f);
             }
         }
         RadialKind::LaunchLug { length, diameter } => {
@@ -316,6 +335,36 @@ fn add_copies(
         // A pod is flown through its parts, not as a radial part (see `vehicle`).
         RadialKind::Pod { .. } => {}
     }
+}
+
+/// Span-averaged cosine of the local mid-chord sweep of a free-form fin outline (`(axial, span)` points from the root
+/// leading edge round to the root trailing edge): the outline is cut into spanwise strips, the mid-chord point of each
+/// strip edge found on the leading- and trailing-edge chains, and the cosine of each strip's mid-chord slope averaged
+/// (the strip treatment of arbitrary fins of Niskanen 2009, §3.2.2). `None` for an outline without span or root.
+fn mean_mid_chord_cos(points: &[(f64, f64)]) -> Option<f64> {
+    const STRIPS: usize = 100;
+    let span = points.iter().map(|p| p.1).fold(0.0, f64::max);
+    let top = points.iter().position(|p| p.1 >= span)?;
+    if span <= 0.0 || points.len() < 3 || top == 0 || top == points.len() - 1 {
+        return None;
+    }
+    let top_last = points.iter().rposition(|p| p.1 >= span)?;
+    let leading: Vec<(f64, f64)> = points[..=top].to_vec();
+    let trailing: Vec<(f64, f64)> = points[top_last..].iter().rev().copied().collect();
+    // Axial position where a chain (rising in span) first reaches span `y`.
+    let at = |chain: &[(f64, f64)], y: f64| -> f64 {
+        for w in chain.windows(2) {
+            let ((x0, y0), (x1, y1)) = (w[0], w[1]);
+            if y <= y1.max(y0) && y >= y0.min(y1) {
+                return if (y1 - y0).abs() < 1e-15 { x1 } else { x0 + (x1 - x0) * (y - y0) / (y1 - y0) };
+            }
+        }
+        chain.last().map_or(0.0, |p| p.0)
+    };
+    let mid = |y: f64| 0.5 * (at(&leading, y) + at(&trailing, y));
+    let dy = span / STRIPS as f64;
+    let sum: f64 = (0..STRIPS).map(|i| dy / (mid((i + 1) as f64 * dy) - mid(i as f64 * dy)).hypot(dy)).sum();
+    Some(sum / STRIPS as f64)
 }
 
 fn find_motor<'a>(motors: &'a MotorDb, reference: &MotorRef) -> Option<&'a Motor> {
@@ -477,7 +526,7 @@ pub fn vehicle(rocket: &Rocket, motors: &MotorDb, phase: Phase) -> Result<Vehicl
     let body: Vec<BodySegment> = rocket.parts().iter().zip(&stations).map(|(p, &z)| body_segment(p, z)).collect();
     let (mut fin_sets, mut protuberances) = (Vec::new(), Vec::new());
     for r in rocket.radials() {
-        add_radial(rocket, r, 1, &mut fin_sets, &mut protuberances);
+        add_radial(rocket, r, &[0.0], &mut fin_sets, &mut protuberances);
     }
 
     let (config, mounts) = (rocket.active_configuration(), rocket.motor_mounts());
@@ -556,7 +605,7 @@ fn add_pods(rocket: &Rocket, first: usize, v: &mut Vehicle) {
             }
         }
         for r in content.radials() {
-            add_radial(rocket, r, copies, &mut v.fin_sets, &mut v.protuberances);
+            add_radial(rocket, r, &frame.angles, &mut v.fin_sets, &mut v.protuberances);
         }
     }
     bodies.append(&mut v.body);

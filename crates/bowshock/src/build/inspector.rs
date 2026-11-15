@@ -27,11 +27,13 @@ mod tests;
 
 use std::mem::discriminant;
 
-use bowshock_model::{Dim, EventKind, FieldRef, FinPlanform, FinSection, Finish, MassRole, MaterialId, NoseShape, PartId, PartRef, RadialField, Rocket};
+use bowshock_model::{
+    Anchor, Dim, EventKind, FieldRef, FinPlanform, FinSection, Finish, MassRole, MaterialId, NoseShape, PartId, PartRef, RadialField, Rocket,
+};
 use iced::widget::{column, container, mouse_area, row, scrollable, stack, text, text_input, Space};
 use iced::{keyboard, mouse, Element, Fill, Length, Task, Widget};
 
-use self::edit::{Anchor, StageOn, Trigger};
+use self::edit::{StageOn, Trigger};
 use self::form::{choose, Form};
 use self::part::Params;
 use crate::app::symmetry::Rejoin;
@@ -199,8 +201,6 @@ pub struct State {
     notes_open: bool,
     /// A fin set's fillet rows the user opened or closed (open by default when the fillet is not 0).
     fillet_open: Option<(PartId, bool)>,
-    /// The anchor the user chose for a part's offset.
-    anchor: Option<(PartId, Anchor)>,
     /// The field whose *Unlink for this fin* / *Relink field* menu is open: the group, the copy and the field.
     field_menu: Option<(PartId, usize, Field)>,
     /// A count change the user must confirm because it would drop the group's per-copy overrides.
@@ -221,14 +221,9 @@ impl State {
         State::default()
     }
 
-    /// The edge the offset of part `id` is measured from: the user's choice, else the bottom for a fin (a fin flush with the end
-    /// of its tube reads 0) and the top for everything else.
+    /// The edge the offset of part `id` is measured from (the part's own anchor; see [`Rocket::anchor_of`]).
     fn anchor(&self, rocket: &Rocket, id: PartId) -> Anchor {
-        match self.anchor {
-            Some((part, anchor)) if part == id => anchor,
-            _ if rocket.radial(id).is_some_and(|r| r.kind.is_fin()) => Anchor::Bottom,
-            _ => Anchor::Top,
-        }
+        rocket.anchor_of(id).unwrap_or(Anchor::Top)
     }
 
     /// The stage (from 1) the motor mount `mount` belongs to.
@@ -320,8 +315,8 @@ impl State {
                 }
             }
             Message::Anchor(anchor) => {
-                if let Selection::Part(id) = ctx.selection {
-                    self.anchor = Some((id, anchor));
+                if let (Selection::Part(id), true) = (ctx.selection, editing) {
+                    ctx.doc.edit("Change anchor", |r| r.set_anchor(id, anchor));
                 }
             }
             Message::SelectPart(id) => {

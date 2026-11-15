@@ -119,8 +119,8 @@ public class Harness {
             }
         }
         for (Simulation sim : toRun) {
-            for (boolean calm : new boolean[] {false, true}) {
-                sims.add(runSim(rocket, sim, calm));
+            for (String variant : new String[] {"stored", "calm", "calm_fine"}) {
+                sims.add(runSim(rocket, sim, variant));
             }
         }
         root.put("simulations", sims);
@@ -149,6 +149,14 @@ public class Harness {
             for (int k = 0; k < Math.min(loc.length, 32); k++) xs.add(loc[k].x);
             m.put("locations_x", xs);
             m.put("length", c.getLength());
+            // Radii of body-like components (also tube fins), to check the importer's reading of `auto` radii.
+            for (String getter : new String[] {"getOuterRadius", "getInnerRadius", "getForeRadius", "getAftRadius"}) {
+                try {
+                    m.put(getter.substring(3, 4).toLowerCase() + getter.substring(4), c.getClass().getMethod(getter).invoke(c));
+                } catch (ReflectiveOperationException e) {
+                    // not a component with that property
+                }
+            }
         } catch (Exception e) {
             m.put("error", e.toString());
         }
@@ -298,18 +306,25 @@ public class Harness {
         return name;
     }
 
-    static Map<String, Object> runSim(Rocket rocket, Simulation sim, boolean calm) {
+    /**
+     * Runs one simulation. Variants: "stored" (the file's conditions), "calm" (no wind or turbulence) and "calm_fine" (calm with a
+     * 2 ms time step instead of OpenRocket's 50 ms, which removes the step-size error from the rail-exit velocity).
+     */
+    static Map<String, Object> runSim(Rocket rocket, Simulation sim, String variant) {
+        boolean calm = !variant.equals("stored");
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("name", sim.getName());
-        m.put("variant", calm ? "calm" : "stored");
+        m.put("variant", variant);
         m.put("config", sim.getFlightConfigurationId().toShortKey());
         SimulationOptions o = sim.getOptions();
         double savedWind = o.getWindSpeedAverage();
         double savedTurb = o.getWindTurbulenceIntensity();
         double savedDev = o.getWindSpeedDeviation();
+        double savedStep = o.getTimeStep();
         if (calm) {
             o.setWindSpeedAverage(0);
             o.setWindTurbulenceIntensity(0);
+            if (variant.equals("calm_fine")) o.setTimeStep(0.002);
         }
         Map<String, Object> c = new LinkedHashMap<>();
         c.put("rod_length_m", o.getLaunchRodLength());
@@ -410,6 +425,7 @@ public class Harness {
         o.setWindSpeedAverage(savedWind);
         o.setWindTurbulenceIntensity(savedTurb);
         o.setWindSpeedDeviation(savedDev);
+        o.setTimeStep(savedStep);
         return m;
     }
 

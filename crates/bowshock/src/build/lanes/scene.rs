@@ -237,6 +237,8 @@ pub struct Scene {
     pub dropped_from: Option<f64>,
     /// CG, CP and margin; set by the caller from the physics cache.
     pub marks: Option<Marks>,
+    /// The committed `(cg, cp)` while a change is previewed: drawn faint where they were.
+    pub was: Option<(f64, f64)>,
     /// Mass per [`MASS_BIN`] from the tip, kg.
     pub mass: Vec<f32>,
     /// The other configurations' CGs.
@@ -522,7 +524,7 @@ impl Scene {
         let mass = mass_profile(rocket, &bars, length);
         // The lanes reach as far aft as anything does: a pod (or its motor) may stand past the core's tail.
         let reach = bars.iter().filter(|b| !b.alt).map(|b| b.end).fold(length, f64::max);
-        Scene { length: reach, lanes, bars, harness, seps, dropped_from, marks: None, mass, other_cgs: Vec::new() }
+        Scene { length: reach, lanes, bars, harness, seps, dropped_from, marks: None, was: None, mass, other_cgs: Vec::new() }
     }
 
     /// The bar `key` stands for.

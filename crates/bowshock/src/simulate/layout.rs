@@ -48,12 +48,15 @@ impl Preset {
             Preset::Stability => vec![&["cg_station", "cp_station"], &["stability_margin"], &["mach"]],
             Preset::Custom => vec![&["altitude"]],
         };
-        PlotLayout { panels: panels.into_iter().map(PlotPanel::new).collect() }
+        PlotLayout { panels: panels.into_iter().map(PlotPanel::new).collect(), ..PlotLayout::default() }
     }
 
-    /// The preset `layout` is, `Custom` when it is none of them.
+    /// The preset `layout`'s panels are (whatever it plots against), `Custom` when they are none of them.
     pub fn of(layout: &PlotLayout) -> Preset {
-        [Preset::FlightProfile, Preset::Aerodynamics, Preset::Forces, Preset::Stability].into_iter().find(|p| p.layout() == *layout).unwrap_or(Preset::Custom)
+        [Preset::FlightProfile, Preset::Aerodynamics, Preset::Forces, Preset::Stability]
+            .into_iter()
+            .find(|p| p.layout().panels == layout.panels)
+            .unwrap_or(Preset::Custom)
     }
 }
 
@@ -160,7 +163,7 @@ mod tests {
     }
 
     fn layout(panels: &[&[&str]]) -> PlotLayout {
-        PlotLayout { panels: panels.iter().map(|p| panel(p)).collect() }
+        PlotLayout { panels: panels.iter().map(|p| panel(p)).collect(), ..PlotLayout::default() }
     }
 
     #[test]

@@ -35,6 +35,11 @@ fn rocket() -> Vehicle {
             cant: 0.0,
             roughness: 30e-6,
             planform: FinPlanform::Trapezoidal,
+            angles: Vec::new(),
+            parent: 0,
+            bodies: 1,
+            mid_chord_cos: None,
+            root_extent: None,
         }],
         protuberances: vec![Protuberance::RailButton { station: 0.8, height: 0.008, diameter: 0.009 }],
         stages: vec![StageMass {

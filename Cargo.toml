@@ -28,3 +28,25 @@ codegen-units = 1
 too_many_arguments = "allow"
 needless_range_loop = "allow"
 type_complexity = "allow"
+
+# The CFD solver behind Analyze's `CFD table` is host-loop heavy (grid, iteration control, GPU graph building): an unoptimised
+# build of it solves about four times slower than release, and a table is minutes of solving.
+[profile.dev.package.bowshock-core]
+opt-level = 3
+[profile.dev.package.bowshock-cfd]
+opt-level = 3
+[profile.dev.package.bowshock-reference]
+opt-level = 3
+[profile.dev.package.luma]
+opt-level = 3
+# The GPU stack under Luma: command encoding and shader translation run on the host for every iteration.
+[profile.dev.package.wgpu]
+opt-level = 3
+[profile.dev.package.wgpu-core]
+opt-level = 3
+[profile.dev.package.wgpu-hal]
+opt-level = 3
+[profile.dev.package.wgpu-types]
+opt-level = 3
+[profile.dev.package.naga]
+opt-level = 3

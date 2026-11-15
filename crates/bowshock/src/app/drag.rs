@@ -15,7 +15,7 @@ use bowshock_model::{InternalKind, InternalPart, Part, PartId, PartKind, RadialK
 use super::{Ctx, Selection};
 use crate::app::ui;
 use crate::viewport::assembly::{body_of, Drag, Origin};
-use crate::viewport::pick::Pick;
+use crate::viewport::pick::{Pick, SurfaceTarget};
 use crate::viewport::surface::RadialDrag;
 
 /// The drags in progress (at most one) and the placement settings the radial ones use.
@@ -231,17 +231,7 @@ pub fn finish_axial(ctx: &mut Ctx, drop: bool) {
     // Over a tube's side the part lands there as a pod (the part, with what stands on and in it, ids kept if it came from the
     // rocket).
     if let (true, None, None, Some(t)) = (drop, drag.snap, drag.pod_snap, drag.surface) {
-        let landed = ctx.doc.drag_update(|r| {
-            let body = body_of(&drag);
-            let pod = match &drag.origin {
-                Some(_) => r.attach_pod_keeping_ids(t.parent, t.offset, t.angle, drag.count, body).ok()?,
-                None => r.attach_radial(t.parent, t.offset, t.angle, drag.count, RadialKind::Pod { gap: 0.0, body }).ok()?,
-            };
-            if let Some(base) = &base {
-                restore_motors(r, base);
-            }
-            r.radial(pod)?.kind.pod_body()?.parts().first().map(|p| p.id)
-        });
+        let landed = ctx.doc.drag_update(|r| land_on_surface(r, &drag, base.as_ref(), t));
         if let Some(part) = landed {
             ctx.selection = Selection::Part(part);
             ctx.camera_fit |= drag.origin.is_none();
@@ -250,26 +240,8 @@ pub fn finish_axial(ctx: &mut Ctx, drop: bool) {
         return;
     }
     let placed = match (drag.snap, drag.pod_snap) {
-        (Some(node), _) if drop => ctx.doc.drag_update(|r| {
-            let matched = insert_part(r, node, &drag.kind, drag.origin.as_ref().map(|o| &o.part));
-            if let (Some(_), Some(origin)) = (&matched, &drag.origin) {
-                // The parts it carried go back on it, wherever it landed.
-                r.restore_radials(origin.radials.clone());
-                r.restore_internals(origin.internals.clone());
-                if let Some(base) = &base {
-                    restore_motors(r, base);
-                }
-            }
-            matched
-        }),
-        (None, Some((pod, node))) if drop => ctx.doc.drag_update(|r| {
-            let matched = insert_in_pod(r, pod, node, &drag.kind, drag.origin.as_ref().map(|o| &o.part));
-            if let (Some(_), Some(origin)) = (&matched, &drag.origin) {
-                r.restore_radials(origin.radials.clone());
-                r.restore_internals(origin.internals.clone());
-            }
-            matched
-        }),
+        (Some(node), _) if drop => ctx.doc.drag_update(|r| land_on_node(r, &drag, node, base.as_ref())),
+        (None, Some((pod, node))) if drop => ctx.doc.drag_update(|r| land_in_pod(r, &drag, pod, node)),
         _ => None,
     };
     if let Some(matched) = &placed {
@@ -289,20 +261,7 @@ pub fn finish_radial(ctx: &mut Ctx, drop: bool) {
         return;
     };
     let placed = match (drop, drag.target) {
-        (true, Some(t)) => ctx.doc.drag_update(|r| match &drag.origin {
-            Some(origin) => {
-                let moved = bowshock_model::RadialPart {
-                    kind: drag.kind.clone(),
-                    parent: t.parent,
-                    offset: t.offset,
-                    angle: t.angle,
-                    count: drag.count,
-                    ..origin.clone()
-                };
-                r.restore_radial(moved).is_ok()
-            }
-            None => r.attach_radial(t.parent, t.offset, t.angle, drag.count, drag.kind.clone()).is_ok(),
-        }),
+        (true, Some(t)) => ctx.doc.drag_update(|r| land_radial(r, &drag, t)),
         _ => false,
     };
     ctx.doc.end_drag(placed);
@@ -368,16 +327,7 @@ pub fn finish_internal(ctx: &mut Ctx, drop: bool) {
     };
     let base = ctx.doc.drag_base().cloned();
     let placed = match drag.target {
-        Some(t) if drop => ctx.doc.drag_update(|r| {
-            let ok = match &drag.origin {
-                Some(part) => r.restore_internal(InternalPart { parent: t.parent, offset: t.offset, ..part.clone() }).is_ok(),
-                None => r.attach_internal(t.parent, t.offset, drag.kind.clone()).is_ok(),
-            };
-            if let (true, Some(base)) = (ok, &base) {
-                restore_motors(r, base);
-            }
-            ok
-        }),
+        Some(t) if drop => ctx.doc.drag_update(|r| land_internal(r, &drag, t, base.as_ref())),
         _ => false,
     };
     if placed && drag.origin.is_none() {
@@ -387,6 +337,124 @@ pub fn finish_internal(ctx: &mut Ctx, drop: bool) {
         }
     }
     ctx.doc.end_drag(placed);
+}
+
+/// Lands the carried axial part over a tube's side as a pod (the part, with what stands on and in it, ids kept if it came from
+/// the rocket); the id of the part inside the pod. `base` is the rocket as it was when the drag began.
+fn land_on_surface(r: &mut Rocket, drag: &Drag, base: Option<&Rocket>, t: SurfaceTarget) -> Option<PartId> {
+    let body = body_of(drag);
+    let pod = match &drag.origin {
+        Some(_) => r.attach_pod_keeping_ids(t.parent, t.offset, t.angle, drag.count, body).ok()?,
+        None => r.attach_radial(t.parent, t.offset, t.angle, drag.count, RadialKind::Pod { gap: 0.0, body }).ok()?,
+    };
+    if let Some(base) = base {
+        restore_motors(r, base);
+    }
+    r.radial(pod)?.kind.pod_body()?.parts().first().map(|p| p.id)
+}
+
+/// Lands the carried axial part on attach node `node`, with what it carried; the matched kind.
+fn land_on_node(r: &mut Rocket, drag: &Drag, node: usize, base: Option<&Rocket>) -> Option<PartKind> {
+    let matched = insert_part(r, node, &drag.kind, drag.origin.as_ref().map(|o| &o.part));
+    if let (Some(_), Some(origin)) = (&matched, &drag.origin) {
+        // The parts it carried go back on it, wherever it landed.
+        r.restore_radials(origin.radials.clone());
+        r.restore_internals(origin.internals.clone());
+        if let Some(base) = base {
+            restore_motors(r, base);
+        }
+    }
+    matched
+}
+
+/// Lands the carried axial part on node `node` of pod `pod`'s stack; the matched kind.
+fn land_in_pod(r: &mut Rocket, drag: &Drag, pod: PartId, node: usize) -> Option<PartKind> {
+    let matched = insert_in_pod(r, pod, node, &drag.kind, drag.origin.as_ref().map(|o| &o.part));
+    if let (Some(_), Some(origin)) = (&matched, &drag.origin) {
+        r.restore_radials(origin.radials.clone());
+        r.restore_internals(origin.internals.clone());
+    }
+    matched
+}
+
+/// Lands the carried radial part on `t`.
+fn land_radial(r: &mut Rocket, drag: &RadialDrag, t: SurfaceTarget) -> bool {
+    match &drag.origin {
+        Some(origin) => {
+            let moved =
+                bowshock_model::RadialPart { kind: drag.kind.clone(), parent: t.parent, offset: t.offset, angle: t.angle, count: drag.count, ..origin.clone() };
+            r.restore_radial(moved).is_ok()
+        }
+        None => r.attach_radial(t.parent, t.offset, t.angle, drag.count, drag.kind.clone()).is_ok(),
+    }
+}
+
+/// Lands the carried internal part on `t`, its motors back with it.
+fn land_internal(r: &mut Rocket, drag: &InternalDrag, t: InternalTarget, base: Option<&Rocket>) -> bool {
+    let ok = match &drag.origin {
+        Some(part) => r.restore_internal(InternalPart { parent: t.parent, offset: t.offset, ..part.clone() }).is_ok(),
+        None => r.attach_internal(t.parent, t.offset, drag.kind.clone()).is_ok(),
+    };
+    if let (true, Some(base)) = (ok, base) {
+        restore_motors(r, base);
+    }
+    ok
+}
+
+/// Where the carried part would land now: compared between frames so the preview is only worked out when it moved.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Landing {
+    /// An axial part: on a node of the stack, in a pod's stack, or on a tube's side.
+    Axial { snap: Option<usize>, pod_snap: Option<(PartId, usize)>, surface: Option<SurfaceTarget>, count: u8 },
+    /// A radial part on a tube's surface.
+    Radial { target: SurfaceTarget, count: u8 },
+    /// An internal part inside an airframe part.
+    Internal { target: InternalTarget },
+}
+
+impl Drags {
+    /// Where the part carried now would land; `None` when nothing is carried or the carried part has no target (it would go
+    /// back, so the rocket would not change).
+    pub fn landing(&self) -> Option<Landing> {
+        if let Some(d) = &self.axial {
+            return (d.snap.is_some() || d.pod_snap.is_some() || d.surface.is_some()).then_some(Landing::Axial {
+                snap: d.snap,
+                pod_snap: d.pod_snap,
+                surface: d.surface,
+                count: d.count,
+            });
+        }
+        if let Some(d) = &self.radial {
+            return d.target.map(|target| Landing::Radial { target, count: d.count });
+        }
+        self.internal.as_ref().and_then(|d| d.target).map(|target| Landing::Internal { target })
+    }
+}
+
+/// The rocket as it would be if the drag in progress were released now: the document's rocket (the carried part is out of it)
+/// with the part landed on its target, exactly as [`finish_axial`], [`finish_radial`] and [`finish_internal`] land it. `None`
+/// when there is no target or the landing is refused.
+pub fn landed(ctx: &Ctx) -> Option<Rocket> {
+    let mut rocket = ctx.doc.rocket().clone();
+    let base = ctx.doc.drag_base();
+    let ok = if let Some(drag) = &ctx.drag.axial {
+        match (drag.snap, drag.pod_snap, drag.surface) {
+            (Some(node), _, _) => land_on_node(&mut rocket, drag, node, base).is_some(),
+            (None, Some((pod, node)), _) => land_in_pod(&mut rocket, drag, pod, node).is_some(),
+            (None, None, Some(t)) => land_on_surface(&mut rocket, drag, base, t).is_some(),
+            _ => false,
+        }
+    } else if let Some(drag) = &ctx.drag.radial {
+        drag.target.is_some_and(|t| land_radial(&mut rocket, drag, t))
+    } else if let Some(drag) = &ctx.drag.internal {
+        drag.target.is_some_and(|t| land_internal(&mut rocket, drag, t, base))
+    } else {
+        false
+    };
+    if ok {
+        rocket.apply_formulas();
+    }
+    ok.then_some(rocket)
 }
 
 /// Abandons whichever drag is in progress.

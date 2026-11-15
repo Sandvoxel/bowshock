@@ -132,6 +132,23 @@ pub struct FinSet {
     pub roughness: f64,
     /// Planform family.
     pub planform: FinPlanform,
+    /// Span-averaged cosine of the mid-chord sweep, when the planform is not the trapezoid itself (a free-form fin flown as
+    /// its equivalent trapezoid): the subsonic lift slope uses it. `None` takes it from the trapezoid.
+    pub mid_chord_cos: Option<f64>,
+    /// Stations (m) of the real root chord's ends when they differ from the trapezoid's (a free-form fin): fin-fin
+    /// interference compares root chords. `None` is `station .. station + root_chord`.
+    pub root_extent: Option<(f64, f64)>,
+    /// Roll angle of each fin about the rocket axis (rad): 0 is +Y, increasing towards +X (plus the pod's angle for fins on
+    /// a pod). Empty means `count` fins evenly spaced from 0. The normal force of 1- and 2-fin sets depends on it (see
+    /// [`crate::aero::CROSSFLOW_ROLL`]).
+    pub angles: Vec<f64>,
+    /// Identifier of the body the fins stand on. Fin sets on the same body whose root chords overlap count together for
+    /// fin-fin interference (5 or more fins lose lift, [`crate::aero::fin_fin_factor`]); sets with different ids never
+    /// interfere.
+    pub parent: u64,
+    /// Number of identical bodies the set is spread over (the copies of a pod; 1 on the core): `count / bodies` fins stand on
+    /// each of them.
+    pub bodies: u32,
 }
 
 impl FinSet {
@@ -144,8 +161,8 @@ impl FinSet {
     }
 }
 
-/// A set of open tubes standing against the body with air flowing through them (OpenRocket's `TubeFinSet`; see
-/// [`crate::tube_fins`]): the aerodynamics of an empty body tube on the outside of a rocket.
+/// A set of open tubes standing against the body with air flowing through them (see [`crate::tube_fins`]): the
+/// aerodynamics of an empty body tube on the outside of a rocket.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TubeFinSet {
     /// Number of tubes (the copies of the pod).
@@ -160,7 +177,7 @@ pub struct TubeFinSet {
     pub inner_radius: f64,
     /// Radius of the body surface the tubes stand against (m).
     pub body_radius: f64,
-    /// Clear distance from that surface to the tubes' outer surface (m); 0 for tubes touching the body, as in OpenRocket.
+    /// Clear distance from that surface to the tubes' outer surface (m); 0 for tubes touching the body.
     pub gap: f64,
     /// Surface roughness height (m).
     pub roughness: f64,

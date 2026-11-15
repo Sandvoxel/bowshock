@@ -6,8 +6,11 @@
 //! each frame a readout whose value differs from it is [`Changed`] and the strip draws it semibold. On release the baseline is
 //! dropped and every readout is regular again.
 
-use bowshock_sim::from_model::Balance;
+use std::time::{Duration, Instant};
 
+use bowshock_sim::from_model::{Balance, Phase};
+
+use super::drag::{self, Landing};
 use super::Ctx;
 
 /// Which readouts of the strip differ from the baseline.
@@ -68,10 +71,94 @@ impl Live {
     }
 }
 
+impl Live {
+    /// The balance the interaction in progress began with: the committed one, which a preview is compared with.
+    pub fn baseline(&self) -> Option<Balance> {
+        self.0.flatten()
+    }
+}
+
+/// The balance every surface shows right now, and the committed one it replaces while a change is being previewed.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Shown {
+    /// What the status strip, the markers and the lanes draw: the rocket as it would be if released now.
+    pub now: Option<Balance>,
+    /// The balance as committed (before the interaction began), when it differs from `now`: drawn faint beside it, and the
+    /// strip's deltas are measured from it.
+    pub committed: Option<Balance>,
+}
+
+/// The preview of a carried part's landing: the balance of the rocket as it would be if the drag ended now.
+///
+/// It is worked out when the landing changes (the part snaps to another node, slides along a tube) and never otherwise, from
+/// the latest state only: the app calls [`Ctx::sync_shown`] once per message, so a burst of cursor moves that lands in the
+/// same place costs nothing and one that lands in many costs one clone, one balance and one health check each. The health list
+/// follows the carry too: of the landed rocket, or of the rocket as it was before the drag while the part has no target (never
+/// of the rocket with the part out of it).
+#[derive(Debug, Clone, Default)]
+pub struct Preview {
+    /// What the preview was worked out for: `Some` while a part is carried, with its landing (`None`: no valid target).
+    key: Option<(u64, Phase, Option<Landing>)>,
+    balance: Option<Balance>,
+    /// How long the last preview took to work out (rocket clone, landing, balance).
+    pub cost: Duration,
+}
+
+impl Ctx {
+    /// The balance on show: while a part is carried the preview of its landing (or the committed balance when it has no valid
+    /// target); while a handle or a bar is dragged the live one with the committed one beside it; else the cached one.
+    pub fn shown(&self) -> Shown {
+        let base = self.live.baseline();
+        let differs = |a: &Balance, b: &Balance| changed(a, b) != Changed::default();
+        if self.drag.active() {
+            return match self.preview.balance {
+                Some(now) => Shown { now: Some(now), committed: base.filter(|b| differs(b, &now)) },
+                None => Shown { now: base, committed: None },
+            };
+        }
+        let now = self.physics.balance().copied();
+        let committed = match (base, &now) {
+            (Some(b), Some(n)) if self.doc.editing_live() && differs(&b, n) => Some(b),
+            _ => None,
+        };
+        Shown { now, committed }
+    }
+
+    /// Works out the preview of the carried part's landing if the landing changed since the last time.
+    fn refresh_preview(&mut self) {
+        let key = self.drag.active().then(|| (self.doc.revision(), self.physics.phase(), self.drag.landing()));
+        if key == self.preview.key {
+            return;
+        }
+        let start = Instant::now();
+        let landed = key.as_ref().and_then(|(_, _, landing)| landing.as_ref()).and_then(|_| drag::landed(self));
+        self.preview.balance = landed.as_ref().and_then(|rocket| self.physics.balance_of(rocket));
+        // No target: the rocket as it was before the drag (a bin ghost has not changed the document; a picked-up part has).
+        let warnings = match &landed {
+            Some(rocket) => Some(self.physics.warnings_for(rocket, self.preview.balance.as_ref())),
+            None => key.as_ref().map(|_| {
+                let before = self.doc.drag_base().unwrap_or(self.doc.rocket());
+                self.physics.warnings_for(before, self.live.baseline().as_ref().or(self.physics.balance()))
+            }),
+        };
+        self.physics.show_warnings(warnings);
+        self.preview.key = key;
+        self.preview.cost = start.elapsed();
+    }
+
+    /// Call after every message, once [`track_live`](Self::track_live) has run: refreshes the preview and points the strip's
+    /// gauge at the margin on show.
+    pub(super) fn sync_shown(&mut self) {
+        self.refresh_preview();
+        let margin = self.shown().now.map(|b| b.margin_cal);
+        self.physics.show_margin(margin);
+    }
+}
+
 impl Ctx {
     /// The status-strip readouts that a drag in progress is changing.
     pub fn changing(&self) -> Changed {
-        self.live.changed(self.physics.balance())
+        self.live.changed(self.shown().now.as_ref())
     }
 
     /// Call after every message with the balance as it was before it.

@@ -449,50 +449,6 @@ pub fn set_planform(r: &mut Rocket, id: PartId, planform: bowshock_model::FinPla
     r.set_radial(id, kind, count)
 }
 
-/// Where a radial or internal part's offset is measured from: the position section's *Relative to*.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Anchor {
-    /// The part's fore edge from the parent's fore face.
-    Top,
-    /// The part's middle from the parent's middle.
-    Middle,
-    /// The part's aft edge from the parent's aft face (a fin flush with the tube's end has offset 0).
-    Bottom,
-}
-
-impl Anchor {
-    /// Every anchor, in menu order.
-    pub const ALL: [Anchor; 3] = [Anchor::Top, Anchor::Middle, Anchor::Bottom];
-
-    /// The menu label for a parent named `parent`.
-    pub fn label(self, parent: &str) -> String {
-        match self {
-            Anchor::Top => format!("Top of {parent}"),
-            Anchor::Middle => format!("Middle of {parent}"),
-            Anchor::Bottom => format!("Bottom of {parent}"),
-        }
-    }
-
-    /// The displayed offset (positive aft, as in OpenRocket) of a part whose fore edge is `offset` from the parent's fore
-    /// face, `extent` long, in a parent `parent_length` long.
-    pub fn shown(self, offset: f64, extent: f64, parent_length: f64) -> f64 {
-        match self {
-            Anchor::Top => offset,
-            Anchor::Middle => offset + extent / 2.0 - parent_length / 2.0,
-            Anchor::Bottom => offset + extent - parent_length,
-        }
-    }
-
-    /// The inverse of [`shown`](Self::shown): the offset from the parent's fore face for a displayed offset.
-    pub fn offset(self, shown: f64, extent: f64, parent_length: f64) -> f64 {
-        match self {
-            Anchor::Top => shown,
-            Anchor::Middle => shown + parent_length / 2.0 - extent / 2.0,
-            Anchor::Bottom => shown + parent_length - extent,
-        }
-    }
-}
-
 /// A copy of part `id`, placed right after it (axial) or in the same place (radial, internal) with the same values, name,
 /// material, finish and overrides. Returns the new part's id. A nose cone cannot be duplicated.
 pub fn duplicate(r: &mut Rocket, id: PartId) -> Option<PartId> {
@@ -569,6 +525,7 @@ pub fn shear_modulus(material: bowshock_model::MaterialId) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bowshock_model::Anchor;
     use bowshock_model::{Deployment, FinPlanform, MaterialId, NoseShape, PartKind, RadialKind};
 
     /// Nose, one 600 mm tube with a 3-fin set at its aft end, a motor mount, a ring, a parachute and a ballast weight.

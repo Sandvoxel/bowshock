@@ -1,9 +1,12 @@
 //! Barrowman / OpenRocket aerodynamics: normal force, centre of pressure and drag.
 //!
 //! * Normal force slope and CP follow Barrowman (1967) for noses, transitions and fins, with
-//!   OpenRocket's additions: body lift `1.1 A_plan/A_ref sin^2(alpha)/alpha` acting at the
+//!   the extensions of Niskanen (2009, *Development of an Open Source model rocket simulation
+//!   software*, ch. 3): body lift `1.1 A_plan/A_ref sin^2(alpha)/alpha` acting at the
 //!   planform centroid (so the CP moves with angle of attack), Diederich fin lift with
-//!   compressibility correction, and the body-fin interference factor `K_fb = 1 + r/(s + r)`.
+//!   compressibility correction, the body-fin interference factor `K_fb = 1 + r/(s + r)`, each
+//!   fin's lift scaled by `sin^2` of its roll angle from the crossflow ([`CROSSFLOW_ROLL`]), and
+//!   the fin-fin interference loss of 5 or more fins on one body ([`fin_fin_factor`]).
 //! * Drag is a port of OpenRocket's `BarrowmanDragCalculator`, `SymmetricComponentCalc`,
 //!   `FinSetCalc`, `TubeCalc` and `RailButtonCalc` (Niskanen 2013, technical documentation
 //!   section 3; source: <https://github.com/openrocket/openrocket>, `core/.../aerodynamics`):
@@ -325,7 +328,14 @@ struct FinCalc {
     cos_mid: f64,
     cos_lead: f64,
     mac_lead: f64,
-    kfb: f64,
+    /// Lift multiplier of the set on top of one fin's slope: `sum sin^2(theta - phi_i)` over the
+    /// fins (`N/2` for 3+ evenly spaced fins) times `K_fb` times the fin-fin factor.
+    lift: f64,
+    /// Root chord span `(leading edge, trailing edge)` stations, for the fin-fin interference count.
+    root: (f64, f64),
+    parent: u64,
+    /// Fins on each body the set stands on.
+    per_body: f64,
     /// Mean aerodynamic chord `∫c² dy / ∫c dy`.
     mac: f64,
     thickness: f64,
@@ -375,12 +385,22 @@ impl Aero {
         let max_r = v.body.iter().map(|s| s.fore_radius.max(s.aft_radius)).fold(0.0, f64::max);
         let min_x = v.body.iter().map(|s| s.station).fold(f64::INFINITY, f64::min);
         let body_length = if v.body.is_empty() { 0.0 } else { length - min_x + 0.0001 };
-        let fins = v
+        let mut fins: Vec<FinCalc> = v
             .fin_sets
             .iter()
             .enumerate()
             .map(|(i, f)| fin_calc(f, if v.fin_sets.len() > 1 { format!("Fin set {}", i + 1) } else { "Fins".to_string() }))
             .collect();
+        // Fin-fin interference: the fins of every set on the same body whose root chords overlap act together.
+        let together: Vec<f64> = fins
+            .iter()
+            .map(|f| {
+                fins.iter().filter(|g| g.parent == f.parent && g.root.0 < f.root.1 && g.root.1 > f.root.0).map(|g| g.per_body).sum::<f64>().max(f.per_body)
+            })
+            .collect();
+        for (f, n) in fins.iter_mut().zip(together) {
+            f.lift *= fin_fin_factor(n.round() as u32);
+        }
         let prots = v
             .protuberances
             .iter()
@@ -687,15 +707,14 @@ fn fin_calc(f: &FinSet, name: String) -> FinCalc {
     let (cos_mid, cos_lead, x_cp, mac) = match f.planform {
         FinPlanform::Trapezoidal => {
             let (cr, ct, m) = (f.root_chord, f.tip_chord, f.sweep);
-            let mid_off = m + 0.5 * (ct - cr);
-            let lm = (span * span + mid_off * mid_off).sqrt();
+            let lm = (span * span + (m + 0.5 * (ct - cr)).powi(2)).sqrt();
             let le = (span * span + m * m).sqrt();
             let sum = (cr + ct).max(1e-12);
             let x = m * (cr + 2.0 * ct) / (3.0 * sum) + (sum - cr * ct / sum) / 6.0;
-            (span / lm, span / le, x, 2.0 / 3.0 * (sum - cr * ct / sum))
+            (f.mid_chord_cos.unwrap_or(span / lm), span / le, x, 2.0 / 3.0 * (sum - cr * ct / sum))
         }
         FinPlanform::Elliptical => {
-            // Straight mid-chord line; leading-edge sweep averaged over 47 spanwise segments as in OpenRocket.
+            // Straight mid-chord line; leading-edge sweep averaged over 47 spanwise segments.
             const DIV: usize = 48;
             let lead = |y: f64| 0.5 * f.root_chord * (1.0 - (1.0 - (y / span).powi(2)).max(0.0).sqrt());
             let dy = span / (DIV - 1) as f64;
@@ -717,7 +736,10 @@ fn fin_calc(f: &FinSet, name: String) -> FinCalc {
         cos_mid,
         cos_lead,
         mac_lead: f.station + x_cp - SUBSONIC_CP_POS * mac,
-        kfb: 1.0 + f.body_radius / (span + f.body_radius),
+        lift: roll_factor(&f.angles, f.count) * (1.0 + f.body_radius / (span + f.body_radius)),
+        root: f.root_extent.unwrap_or((f.station, f.station + f.root_chord)),
+        parent: f.parent,
+        per_body: f64::from(f.count) / f64::from(f.bodies.max(1)),
         mac,
         thickness: f.thickness,
         roughness: f.roughness,
@@ -725,18 +747,51 @@ fn fin_calc(f: &FinSet, name: String) -> FinCalc {
     }
 }
 
-// Fin normal force and CP vs Mach: port of OpenRocket `FinSetCalc.calculateFinCNa1` /
-// `calculateCPPos` and `RocketComponentCalc.{supersonic,transonic}CPPos`.
+/// Roll angle (rad) of the crossflow Bowshock assumes: the lateral wind lies along +Y, the angle
+/// a fin at roll angle 0 points to (a fin's roll angle is measured from +Y towards +X, see
+/// [`FinSet::angles`]). A 1- or 2-fin set at angle 0 therefore sees the flow edge-on and gives no
+/// lift; turn the set by 90 deg for full lift. The 3-DOF model has no roll, so it stays fixed.
+pub const CROSSFLOW_ROLL: f64 = 0.0;
+
+/// `sum sin^2(CROSSFLOW_ROLL - phi_i)` over the fins at roll angles `angles` (`count` fins evenly
+/// spaced from 0 when empty): a fin's normal force is proportional to the square of the sine of the
+/// angle between its plane and the crossflow (Niskanen 2009, §3.2.2). For 3 or more evenly spaced
+/// fins it is `N/2` whatever the roll.
+pub fn roll_factor(angles: &[f64], count: u32) -> f64 {
+    let s = |phi: f64| (CROSSFLOW_ROLL - phi).sin().powi(2);
+    if angles.is_empty() {
+        let n = f64::from(count);
+        (0..count).map(|i| s(2.0 * PI * f64::from(i) / n)).sum()
+    } else {
+        angles.iter().map(|&a| s(a)).sum()
+    }
+}
+
+/// Lift efficiency of `n` fins acting together on one body (fin-fin interference; Niskanen 2009,
+/// §3.2.2): no loss up to 4 fins, then 0.948, 0.913, 0.854 and 0.81 for 5..8 fins, and 0.75 beyond.
+pub fn fin_fin_factor(n: u32) -> f64 {
+    match n {
+        0..=4 => 1.0,
+        5 => 0.948,
+        6 => 0.913,
+        7 => 0.854,
+        8 => 0.81,
+        _ => 0.75,
+    }
+}
+
+// Fin normal force and CP vs Mach: Diederich subsonic lift, second-order supersonic theory, and a
+// transonic polynomial bridge (Niskanen 2009, §3.2.2 and §3.2.4).
 
 const CNA_SUBSONIC: f64 = 0.9;
 const CNA_SUPERSONIC: f64 = 1.5;
 const GAMMA: f64 = 1.4;
-/// Fin stall angle used by OpenRocket (20 deg): the angle terms saturate there.
+/// Fin stall angle (20 deg): the angle-of-attack terms of the fin lift saturate there.
 pub(crate) const FIN_STALL: f64 = 20.0 * PI / 180.0;
 
-/// Supersonic linear-theory coefficients `(K1, K2, K3)` of `CN = A (K1 a + K2 a^2 + K3 a^3)` per
-/// unit angle (second-order shock-expansion theory; Pitts, Nielsen & Kaattari NACA 1307 / OpenRocket
-/// `FinSetCalc` static tables, evaluated analytically instead of tabulated at 0.1 Mach steps).
+/// Supersonic coefficients `(K1, K2, K3)` of `CN = A (K1 a + K2 a^2 + K3 a^3)` per unit angle
+/// (Busemann second-order thin-airfoil theory; Pitts, Nielsen & Kaattari, NACA Report 1307;
+/// Niskanen 2009 §3.2.2), evaluated in closed form.
 fn supersonic_k(mach: f64) -> (f64, f64, f64) {
     let m = mach.clamp(CNA_SUPERSONIC, 4.9);
     let b2 = m * m - 1.0;
@@ -762,8 +817,11 @@ fn source_supersonic_cp_gradient(x: f64) -> f64 {
 }
 
 /// Supersonic CP as a fraction of the MAC from its leading edge, `(x - 0.67)/(2x - 1)` with
-/// `x = AR beta` (Fleeman / NACA 1307 eq. 63), bridged to the quarter chord below `x = 1` with a
-/// cubic Hermite as OpenRocket does.
+/// `x = AR beta` (Fleeman 2001; Niskanen 2009 §3.2.2). The published rule falls to the quarter
+/// chord at `x = 0.84` and runs into a pole at `x = 1/2` below that, so for `x < 1` it is replaced
+/// by a cubic Hermite from the quarter chord at `x = 0.84` to the rule's value and slope at `x = 1`
+/// (an engineering bridge, not a published curve): low-aspect-ratio fins keep a CP between the
+/// subsonic and supersonic limits.
 fn supersonic_cp(x: f64) -> f64 {
     if x <= LOW_AR_CP_BRIDGE_START {
         return SUBSONIC_CP_POS;
@@ -791,8 +849,9 @@ fn supersonic_cp_gradient(x: f64) -> f64 {
     (sb * SUBSONIC_CP_POS - sb * source_supersonic_cp(1.0)) / w + (3.0 * t2 - 2.0 * t) * source_supersonic_cp_gradient(1.0)
 }
 
-/// Fin CP fraction of the MAC: quarter chord up to Mach 0.5, a quintic to Mach 2 matching the
-/// supersonic value and slope there, then the supersonic formula (OpenRocket `transonicCPPos`).
+/// Fin CP fraction of the MAC: quarter chord up to Mach 0.5, a quintic in Mach up to Mach 2 that
+/// meets the supersonic value and slope there (the transonic interpolation of Niskanen 2009
+/// §3.2.2, with a monotone variant when the quintic would overshoot), then the supersonic rule.
 pub(crate) fn fin_cp_fraction(mach: f64, ar: f64) -> f64 {
     if mach <= 0.5 {
         return SUBSONIC_CP_POS;
@@ -824,7 +883,7 @@ pub(crate) fn fin_cp_fraction(mach: f64, ar: f64) -> f64 {
 }
 
 impl FinCalc {
-    /// Normal-force slope of one fin on the reference area (OpenRocket `calculateFinCNa1`):
+    /// Normal-force slope of one fin on the reference area (Niskanen 2009 §3.2.2):
     /// Diederich below Mach 0.9, `A (K1 + K2 a + K3 a^2)/A_ref` above Mach 1.5, and a quartic
     /// through value and slope at both ends (zero curvature at 0.9) in between.
     fn cna1(&self, mach: f64, alpha: f64, a_ref: f64) -> f64 {
@@ -859,10 +918,10 @@ impl FinCalc {
         sub_v + sub_d * t + a3 * t.powi(3) + a4 * t.powi(4)
     }
 
-    /// Total CN slope of the fin set: `N/2` fins' worth of one-fin slope times the body-fin
-    /// interference factor `K_fb = 1 + r/(s + r)`.
+    /// Total CN slope of the fin set: one fin's slope times the set's lift multiplier (roll
+    /// dependence, body-fin interference `K_fb = 1 + r/(s + r)` and fin-fin interference).
     fn cna(&self, mach: f64, alpha: f64, a_ref: f64) -> f64 {
-        self.cna1(mach, alpha, a_ref) * 0.5 * self.n * self.kfb
+        self.cna1(mach, alpha, a_ref) * self.lift
     }
 
     /// CP station of the fin set at `mach`: MAC leading edge plus the Mach-dependent fraction of the MAC.
@@ -929,6 +988,11 @@ mod tests {
                 cant: 0.0,
                 roughness: 20e-6,
                 planform: FinPlanform::Trapezoidal,
+                angles: Vec::new(),
+                parent: 0,
+                bodies: 1,
+                mid_chord_cos: None,
+                root_extent: None,
             }],
             protuberances: vec![Protuberance::LaunchLug { station: 0.15, length: 0.02, outer_diameter: 0.005, inner_diameter: 0.004 }],
             stages: vec![],
@@ -1014,6 +1078,11 @@ mod tests {
             cant: 0.0,
             roughness: 10e-6,
             planform: FinPlanform::Trapezoidal,
+            angles: Vec::new(),
+            parent: 0,
+            bodies: 1,
+            mid_chord_cos: None,
+            root_extent: None,
         }];
         v.protuberances = vec![];
         v
@@ -1061,6 +1130,71 @@ mod tests {
         let st = Aero::new(&v).stability(0.0, 0.0);
         let fins = st.components.iter().find(|c| c.0 == "Fins").unwrap();
         assert!((fins.1 - expect).abs() / expect < 1e-9, "{} vs {expect}", fins.1);
+    }
+
+    fn fin_cna(v: &Vehicle, mach: f64) -> Vec<f64> {
+        Aero::new(v).stability(mach, 0.0).components.iter().filter(|c| c.0.starts_with("Fin")).map(|c| c.1).collect()
+    }
+
+    #[test]
+    fn fin_lift_follows_sin_squared_of_roll() {
+        // Niskanen 2009 §3.2.2: each fin's CNa is scaled by sin^2(theta - phi); theta = 0 (crossflow along +Y).
+        let deg = PI / 180.0;
+        assert!(roll_factor(&[0.0], 1).abs() < 1e-15);
+        assert!((roll_factor(&[90.0 * deg], 1) - 1.0).abs() < 1e-12);
+        assert!((roll_factor(&[150.0 * deg], 1) - 0.25).abs() < 1e-12);
+        assert!((roll_factor(&[90.0 * deg, 270.0 * deg], 2) - 2.0).abs() < 1e-12);
+        assert!(roll_factor(&[], 2).abs() < 1e-12);
+        // 3+ evenly spaced fins: N/2 at any roll.
+        for n in 3..=8 {
+            assert!((roll_factor(&[], n) - f64::from(n) / 2.0).abs() < 1e-12);
+            let turned: Vec<f64> = (0..n).map(|i| 0.3 + 2.0 * PI * f64::from(i) / f64::from(n)).collect();
+            assert!((roll_factor(&turned, n) - f64::from(n) / 2.0).abs() < 1e-12);
+        }
+        // On the vehicle: one fin of the 3-fin set's slope is CNa(set)/1.5; 2 fins across the flow give twice that.
+        let mut v = alpha_like();
+        let three = fin_cna(&v, 0.3)[0];
+        v.fin_sets[0].count = 2;
+        v.fin_sets[0].angles = vec![0.0, PI];
+        assert!(fin_cna(&v, 0.3).first().is_none_or(|c| c.abs() < 1e-12));
+        v.fin_sets[0].angles = vec![PI / 2.0, 1.5 * PI];
+        for m in [0.3, 1.2, 2.0] {
+            v.fin_sets[0].count = 3;
+            v.fin_sets[0].angles = Vec::new();
+            let base = fin_cna(&v, m)[0] / 1.5;
+            v.fin_sets[0].count = 2;
+            v.fin_sets[0].angles = vec![PI / 2.0, 1.5 * PI];
+            assert!((fin_cna(&v, m)[0] - 2.0 * base).abs() < 1e-12 * base.abs().max(1.0));
+        }
+        assert!((fin_cna(&v, 0.3)[0] - three / 1.5 * 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn many_fins_lose_lift_to_fin_fin_interference() {
+        // Niskanen 2009 §3.2.2 table: 5..8 fins 0.948 / 0.913 / 0.854 / 0.81, then 0.75.
+        assert_eq!([1, 2, 3, 4, 5, 6, 7, 8, 9, 12].map(fin_fin_factor), [1.0, 1.0, 1.0, 1.0, 0.948, 0.913, 0.854, 0.81, 0.75, 0.75]);
+        let mut v = alpha_like();
+        let one = fin_cna(&v, 0.5)[0] / 1.5;
+        v.fin_sets[0].count = 6;
+        assert!((fin_cna(&v, 0.5)[0] - 3.0 * 0.913 * one).abs() < 1e-12);
+        // Two overlapping 4-fin sets on one body act as 8 fins; on different bodies (or apart) they do not interfere.
+        v.fin_sets[0].count = 4;
+        let mut second = v.fin_sets[0].clone();
+        second.angles = (0..4).map(|i| PI / 4.0 + PI / 2.0 * f64::from(i)).collect();
+        v.fin_sets.push(second);
+        let both = fin_cna(&v, 0.5);
+        assert!(both.iter().all(|c| (c - 2.0 * 0.81 * one).abs() < 1e-12), "{both:?}");
+        v.fin_sets[1].parent = 7;
+        assert!(fin_cna(&v, 0.5).iter().all(|c| (c - 2.0 * one).abs() < 1e-12));
+        v.fin_sets[1].parent = 0;
+        v.fin_sets[1].station -= v.fin_sets[1].root_chord;
+        assert!(fin_cna(&v, 0.5).iter().all(|c| (c - 2.0 * one).abs() < 1e-12));
+        // A pod set spread over 3 pods with 2 fins each counts 2 fins per body, not 6.
+        let mut v = alpha_like();
+        v.fin_sets[0].count = 6;
+        v.fin_sets[0].bodies = 3;
+        v.fin_sets[0].angles = vec![PI / 2.0, 1.5 * PI, PI / 2.0, 1.5 * PI, PI / 2.0, 1.5 * PI];
+        assert!((fin_cna(&v, 0.5)[0] - 6.0 * one).abs() < 1e-12);
     }
 
     // ---- Values checked against OpenRocket's source (hand-computed from the formulas) ----
@@ -1156,7 +1290,7 @@ mod tests {
 
     #[test]
     fn cna_and_cp_are_c1_continuous_through_transonic() {
-        // OpenRocket blends fin CNa with a quartic over Mach 0.9..1.5 and CP with a quintic over
+        // Fin CNa is blended with a quartic over Mach 0.9..1.5 and CP with a quintic over
         // 0.5..2, both matching value and slope at the ends, so no corners may remain.
         for v in fin_variants() {
             let a = Aero::new(&v);
@@ -1181,16 +1315,38 @@ mod tests {
         }
     }
 
+    /// Regression (results comparison, `docs/openrocket-comparison.md`): the transonic fin CNa is ONE quartic in Mach through
+    /// 0.9..1.5 with the derivative at Mach 0.9 taken at 0.9, as the technical documentation (Niskanen 2013, section 3.3.1)
+    /// describes. A quartic has a vanishing fifth finite difference.
     #[test]
-    fn supersonic_margin_matches_openrocket_trend() {
-        // OpenRocket's supersonic fin lift (K1 = 2/beta, per fin) falls well below the subsonic value, so
+    fn transonic_fin_cna_is_a_single_quartic_with_the_slope_taken_at_mach_0_9() {
+        for v in fin_variants() {
+            let a = Aero::new(&v);
+            let a_ref = v.reference_area();
+            for fin in &a.fins {
+                let step = 0.04;
+                let f: Vec<f64> = (0..6).map(|i| fin.cna1(0.95 + step * i as f64, 0.0, a_ref)).collect();
+                let fifth = f[5] - 5.0 * f[4] + 10.0 * f[3] - 10.0 * f[2] + 5.0 * f[1] - f[0];
+                assert!(fifth.abs() < 1e-9 * f[0].abs().max(1.0), "fifth difference {fifth} of {f:?}");
+                // The slope leaving Mach 0.9 is the Diederich slope there, not the one at the Mach being evaluated.
+                let h = 1e-5;
+                let left = (fin.cna1(0.9, 0.0, a_ref) - fin.cna1(0.9 - h, 0.0, a_ref)) / h;
+                let right = (fin.cna1(0.9 + h, 0.0, a_ref) - fin.cna1(0.9, 0.0, a_ref)) / h;
+                assert!((left - right).abs() < 2e-3 * left.abs().max(1.0), "slope {left} vs {right}");
+            }
+        }
+    }
+
+    #[test]
+    fn supersonic_margin_shrinks_but_stays_positive() {
+        // Supersonic fin lift (K1 = 2/beta, per fin) falls well below the subsonic value, so
         // the CP moves forward and the margin shrinks to a fraction of its subsonic value, but stays positive.
         let a = Aero::new(&typical());
         let cg = 0.42;
         let m03 = a.margin_cal(0.3, 0.0, cg);
         let m3 = a.margin_cal(3.0, 0.0, cg);
         assert!(m3 > 0.2 && m3 < 0.7 * m03, "margin M0.3 {m03} M3 {m3}");
-        // At Mach 1.5 the fin CNa matches OpenRocket's K1 formula exactly: A * 2/beta / A_ref per fin.
+        // At Mach 1.5 the fin CNa is the K1 term exactly: A * 2/beta / A_ref per fin.
         let v = typical();
         let f = &v.fin_sets[0];
         let beta = (1.5f64 * 1.5 - 1.0).sqrt();

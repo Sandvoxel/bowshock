@@ -485,6 +485,28 @@ fn presets_set_the_layout_and_the_row_names_the_one_that_matches() {
 }
 
 #[test]
+fn the_x_axis_is_one_undo_step_kept_by_presets_and_follows_the_units() {
+    let mut app = App::with_example();
+    let mut state = state_for(&app);
+    let id = named(&state, "Nominal").id;
+    fly(&mut state, app.ctx(), id);
+    state.update(Message::Layout(LayoutEdit::X(PlotX::Altitude)), app.ctx_mut());
+    assert_eq!(app.ctx().doc.rocket().plot_layout().x, PlotX::Altitude);
+    let apogee = named(&state, "Nominal").run.as_ref().unwrap().result.summary.apogee;
+    assert!((state.plot.full().1 - apogee).abs() < 1.0, "{:?} vs {apogee}", state.plot.full());
+    // A preset changes the panels, not what they are plotted against.
+    state.update(Message::Layout(LayoutEdit::Preset(Preset::Forces)), app.ctx_mut());
+    assert_eq!((state.layout.x, Preset::of(&state.layout)), (PlotX::Altitude, Preset::Forces));
+    // In feet the zoom's full range is in feet too.
+    app.ctx_mut().units = UnitSystem::FtLbS;
+    state.sync(app.ctx(), false);
+    assert!((state.plot.full().1 - apogee / 0.3048).abs() < 3.0, "{:?}", state.plot.full());
+    let _ = app.update(crate::app::Message::Undo);
+    let _ = app.update(crate::app::Message::Undo);
+    assert_eq!(app.ctx().doc.rocket().plot_layout().x, PlotX::Time);
+}
+
+#[test]
 fn the_layout_is_saved_with_the_file_and_loaded_back() {
     let mut app = App::with_example();
     let mut state = state_for(&app);
@@ -522,6 +544,7 @@ fn a_layout_from_a_newer_version_draws_what_it_knows() {
                 bowshock_model::PlotPanel::new(&["only_the_future"]),
                 bowshock_model::PlotPanel::new(&["thrust", "mach"]),
             ],
+            ..PlotLayout::default()
         })
     });
     let state = state_for(&app);

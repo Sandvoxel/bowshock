@@ -2,8 +2,8 @@
 //! several flights overlaid) with the reference flight's events (SimulateScreen, SimulateCompare) and the ground tracks
 //! (GroundTrack).
 
-use bowshock_model::PlotLayout;
-use bowshock_sim::{EventKind, FlightResult};
+use bowshock_model::{PlotLayout, PlotX};
+use bowshock_sim::{EventKind, FlightResult, Sample};
 
 use super::channels::{self, Channel};
 use super::flight::{Run, Spec};
@@ -72,18 +72,132 @@ pub fn phases(result: &FlightResult) -> Vec<Phase> {
     bars
 }
 
+/// The channel an x choice reads (`None` for time, which is every sample's own `t`).
+pub fn x_channel(x: PlotX) -> Option<&'static Channel> {
+    match x {
+        PlotX::Time => None,
+        PlotX::Altitude => channels::find("altitude"),
+        PlotX::Mach => channels::find("mach"),
+        PlotX::Distance => channels::find("ground_distance"),
+    }
+}
+
+/// The selector's word for an x choice (short: it shares the header row with the zoom readout and the presets).
+pub fn x_label(x: PlotX) -> &'static str {
+    match x {
+        PlotX::Time => "Time",
+        PlotX::Altitude => "Alt",
+        PlotX::Mach => "Mach",
+        PlotX::Distance => "Dist",
+    }
+}
+
+/// The shared x axis for `x` in the unit family `imperial` (time in s, Mach bare, lengths in m or ft).
+fn x_axis(x: PlotX, imperial: bool) -> Axis {
+    match x_channel(x) {
+        None => Axis::time(),
+        Some(_) if x == PlotX::Mach => Axis::mach(),
+        Some(c) => {
+            let label = if x == PlotX::Altitude { "Altitude" } else { "Distance" };
+            Axis { label: label.into(), unit: c.unit(imperial).symbol.to_string(), prefix: String::new(), decimals: 0 }
+        }
+    }
+}
+
+/// One stretch of a curve plotted against something other than time, where x only grows or only shrinks: `points` ascending in
+/// x (a shrinking stretch is reversed), the flight phase it is flown in, and whether that is after apogee.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stretch {
+    /// `(x, y)`, ascending in x.
+    pub points: Vec<(f64, f64)>,
+    /// The phase, unique within the curve: `boost`, `coast`, `ascent` (a piece spanning burnout), `descent`, numbered `coast 2`,
+    /// `descent 3`... when the curve turns back more than once in one phase.
+    pub phase: String,
+    /// Flown after apogee (drawn dashed).
+    pub descent: bool,
+}
+
+/// Cuts the parametric curve `(t, x, y)` (in time order) where x turns back, so each piece is a function of x the plots can
+/// draw, interpolate and hover. Neighbouring pieces share the turning sample, so the curve stays one unbroken path. Each piece is
+/// named by its phase from the event times `burnout` and `apogee` (s): descent when most of it is after apogee, boost or coast
+/// when nearly all of it is before or after burnout, else ascent.
+pub fn monotone_runs(curve: &[(f64, f64, f64)], burnout: f64, apogee: f64) -> Vec<Stretch> {
+    let mut runs: Vec<Stretch> = Vec::new();
+    let mut start = 0;
+    let mut dir = 0.0f64;
+    let close = |from: usize, to: usize, dir: f64, runs: &mut Vec<Stretch>| {
+        let mut points: Vec<(f64, f64)> = curve[from..=to].iter().map(|&(_, x, y)| (x, y)).collect();
+        if dir < 0.0 {
+            points.reverse();
+        }
+        let (t0, t1) = (curve[from].0, curve[to].0);
+        // Judged at its middle, so the piece that turns at the apogee sample is not split on which side the event fell.
+        let descent = (t0 + t1) / 2.0 > apogee;
+        // A piece flown almost wholly (90 %) before or after burnout is boost or coast: peak Mach lags burnout by a few samples.
+        let span = (t1 - t0).max(f64::MIN_POSITIVE);
+        let base = if descent {
+            "descent"
+        } else if burnout - t0 >= 0.9 * span {
+            "boost"
+        } else if t1 - burnout >= 0.9 * span {
+            "coast"
+        } else {
+            "ascent"
+        };
+        let n = runs.iter().filter(|r| r.phase == base || r.phase.strip_prefix(base).is_some_and(|s| s.starts_with(' '))).count();
+        let phase = if n == 0 { base.to_string() } else { format!("{base} {}", n + 1) };
+        runs.push(Stretch { points, phase, descent });
+    };
+    for i in 1..curve.len() {
+        let dx = curve[i].1 - curve[i - 1].1;
+        if dx == 0.0 || !dx.is_finite() {
+            continue;
+        }
+        if dir != 0.0 && dx.signum() != dir {
+            close(start, i - 1, dir, &mut runs);
+            start = i - 1;
+        }
+        dir = dx.signum();
+    }
+    if !curve.is_empty() {
+        close(start, curve.len() - 1, dir, &mut runs);
+    }
+    runs
+}
+
+/// `samples`' value of `x` (display unit) at time `t`, interpolated; time itself for [`PlotX::Time`].
+fn x_at(samples: &[Sample], x: Option<(&Channel, &crate::units::Unit)>, t: f64) -> f64 {
+    let Some((c, unit)) = x else { return t };
+    let i = samples.partition_point(|s| s.t <= t);
+    let value = |s: &Sample| unit.from_si(c.si(s));
+    match (i.checked_sub(1).and_then(|j| samples.get(j)), samples.get(i)) {
+        (Some(a), Some(b)) if b.t > a.t => value(a) + (value(b) - value(a)) * (t - a.t) / (b.t - a.t),
+        (Some(a), _) => value(a),
+        (None, Some(b)) => value(b),
+        (None, None) => 0.0,
+    }
+}
+
 /// The linked plots of `layout` for `entries` in the unit family of `system`. One entry is a lone flight (one framed value tag per
 /// plot); several are a comparison (the flight is the line's colour, altitude-like plots label each flight at the right end, one
 /// tooltip lists every line). A plot with several sources draws each in its own line style and names them in a legend. The
 /// events, phases and timeline belong to the entry at `reference`. A plot with the stability margin gets the document's minimum
 /// margin `min_margin` (calibers) as a dashed reference line. `None` without entries.
+///
+/// Against anything but time ([`PlotLayout::x`]) a curve may double back (altitude rises and falls): it is drawn as the pieces
+/// of [`monotone_runs`], each named by its phase (`· boost`, `· coast`, `· descent`...; no two alike, and the hover lists only
+/// the pieces whose x range holds the cursor), the descent dashed (a solid source), and
+/// the events sit where the reference flight's x was at their time (no phase bars or timeline: they are spans of time).
 pub fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &PlotLayout, min_margin: f64) -> Option<PlotGroup> {
     let reference = entries.get(reference).or(entries.first())?;
     let compare = entries.len() > 1;
     let imperial = super::format::imperial(system);
     let count = layout.panels.len();
+    let x_source = x_channel(layout.x);
+    let x_unit = x_source.map(|c| c.unit(imperial));
+    let x_of = x_source.zip(x_unit.as_ref());
 
-    let mut group = PlotGroup::new(Axis::time());
+    let mut group = PlotGroup::new(x_axis(layout.x, imperial));
     for (index, def) in layout.panels.iter().enumerate() {
         let sources: Vec<&Channel> = def.sources.iter().filter_map(|key| channels::find(key)).collect();
         let Some(primary) = sources.first() else { continue };
@@ -113,6 +227,9 @@ pub fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &P
         }
         for e in entries {
             let samples = &e.run.result.trajectory.samples;
+            let events = &e.run.result.trajectory.events;
+            let apogee = events.iter().find(|ev| ev.kind == EventKind::Apogee).map_or(f64::INFINITY, |ev| ev.t);
+            let burnout = events.iter().filter(|ev| ev.kind == EventKind::Burnout).map(|ev| ev.t).fold(0.0, f64::max);
             for (c, style) in sources.iter().zip(STYLES) {
                 let name = match (compare, multi) {
                     (false, false) => c.label.to_string(),
@@ -121,19 +238,38 @@ pub fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &P
                     (true, true) => format!("{} · {}", e.name, c.label),
                 };
                 let color = if compare { e.color } else { c.color };
-                let series = Series::new(name, c.series(samples, &unit)).color(color).style(style);
                 // A comparison names each flight at the right end of the first plot's first source.
                 let labelled = compare && index == 0 && std::ptr::eq(*c, sources[0]);
-                panel = panel.with(if labelled { series.label_as(e.name.to_string(), LabelAt::Margin) } else { series });
+                let Some((xc, xu)) = x_of else {
+                    let series = Series::new(name, c.series(samples, &unit)).color(color).style(style);
+                    panel = panel.with(if labelled { series.label_as(e.name.to_string(), LabelAt::Margin) } else { series });
+                    continue;
+                };
+                let curve: Vec<(f64, f64, f64)> = samples.iter().map(|s| (s.t, xu.from_si(xc.si(s)), unit.from_si(c.si(s)))).collect();
+                for (i, run) in monotone_runs(&curve, burnout, apogee).into_iter().enumerate() {
+                    let style = if run.descent && style == LineStyle::Solid { LineStyle::Dashed } else { style };
+                    let name = format!("{name} · {}", run.phase);
+                    let series = Series::new(name, run.points).color(color).style(style);
+                    panel = panel.with(if labelled && i == 0 { series.label_as(e.name.to_string(), LabelAt::Margin) } else { series });
+                }
             }
         }
         group = group.panel(panel);
     }
 
+    let samples = &reference.run.result.trajectory.samples;
     group.events = events(&reference.run.result);
-    if compare {
+    if compare || x_of.is_some() {
         group.events.retain(|m| m.label != "Landing");
+    }
+    if compare {
         group.right_margin = LABEL_MARGIN;
+    }
+    if x_of.is_some() {
+        for m in &mut group.events {
+            m.x = x_at(samples, x_of, m.x);
+        }
+        return Some(group);
     }
     group.phases = phases(&reference.run.result);
     group.timeline = true;
@@ -236,6 +372,58 @@ mod tests {
     }
 
     #[test]
+    fn a_curve_that_doubles_back_in_x_is_cut_into_monotone_pieces() {
+        // Altitude up to 300 m at t = 5 and back down: the ascent and the reversed descent, sharing the apogee sample.
+        let curve = [(0.0, 0.0, 0.0), (2.5, 150.0, 40.0), (5.0, 300.0, 0.0), (7.5, 150.0, -20.0), (10.0, 0.0, -20.0)];
+        let runs = monotone_runs(&curve, 1.0, 5.0);
+        assert_eq!(runs.len(), 2);
+        let phase = |s: &str| s.to_string();
+        assert_eq!(runs[0], Stretch { points: vec![(0.0, 0.0), (150.0, 40.0), (300.0, 0.0)], phase: phase("ascent"), descent: false });
+        assert_eq!(runs[1], Stretch { points: vec![(0.0, -20.0), (150.0, -20.0), (300.0, 0.0)], phase: phase("descent"), descent: true });
+        // A monotone x (time-like) is one piece; a held x does not cut.
+        let flat = [(0.0, 0.0, 1.0), (1.0, 1.0, 2.0), (2.0, 1.0, 3.0), (3.0, 2.0, 4.0)];
+        assert_eq!(monotone_runs(&flat, 0.0, 10.0).len(), 1);
+        assert!(monotone_runs(&[], 0.0, 0.0).is_empty());
+    }
+
+    #[test]
+    fn mach_pieces_are_named_by_phase_and_never_twice() {
+        // Mach up in boost, down in coast to apogee, then up, down and up again under the chute: the repeats are numbered.
+        let curve = [(0.0, 0.0, 0.0), (1.0, 0.5, 1.0), (3.0, 0.2, 2.0), (5.0, 0.01, 3.0), (6.0, 0.1, 4.0), (8.0, 0.05, 5.0), (9.0, 0.06, 6.0)];
+        let runs = monotone_runs(&curve, 1.0, 5.0);
+        let names: Vec<&str> = runs.iter().map(|r| r.phase.as_str()).collect();
+        assert_eq!(names, ["boost", "coast", "descent", "descent 2", "descent 3"]);
+        assert!(runs.iter().all(|r| r.descent == r.phase.starts_with("descent")));
+        // Only pieces whose x range holds the cursor have a value there (the hover lists those).
+        let series: Vec<Series> = runs.into_iter().map(|r| Series::new(r.phase, r.points)).collect();
+        let at = |x: f64| series.iter().filter(|s| s.value_at(x).is_some()).map(|s| s.name.as_str()).collect::<Vec<_>>();
+        assert_eq!(at(0.3), ["boost", "coast"]);
+        assert_eq!(at(0.08), ["boost", "coast", "descent", "descent 2"]);
+    }
+
+    #[test]
+    fn against_altitude_the_descent_is_dashed_and_events_sit_at_their_altitude() {
+        let run = run();
+        let entries = [Entry { name: "Nominal", color: SeriesColor::Ink, run: &run, scatter: None }];
+        let layout = PlotLayout { x: PlotX::Altitude, ..layout(&[&["vertical_velocity"]]) };
+        let g = group(&entries, 0, UnitSystem::MKgS, &layout, 1.0).unwrap();
+        assert_eq!(g.x.label, "Altitude");
+        assert_eq!(g.x.unit, "m");
+        let series = &g.panels[0].series;
+        assert_eq!(series.len(), 2);
+        assert_eq!((series[0].style, series[1].style), (LineStyle::Solid, LineStyle::Dashed));
+        assert_eq!(series[1].name, "Vertical velocity · descent");
+        assert_eq!(g.x_extent(), (0.0, 300.0));
+        let apogee = g.events.iter().find(|m| m.label == "Apogee").unwrap();
+        assert!((apogee.x - 300.0).abs() < 1e-9);
+        assert!(g.events.iter().all(|m| m.label != "Landing") && g.phases.is_empty() && !g.timeline);
+        // In imperial the axis is in feet.
+        let g = group(&entries, 0, UnitSystem::FtLbS, &layout, 1.0).unwrap();
+        assert_eq!(g.x.unit, "ft");
+        assert!((g.x_extent().1 - 300.0 / 0.3048).abs() < 1e-6);
+    }
+
+    #[test]
     fn a_lone_flight_is_ink_and_a_comparison_labels_the_first_plot_and_keeps_the_reference_events() {
         let r = run();
         let one = [Entry { name: "Nominal", color: SeriesColor::Ink, run: &r, scatter: None }];
@@ -271,7 +459,7 @@ mod tests {
     }
 
     fn layout(panels: &[&[&str]]) -> PlotLayout {
-        PlotLayout { panels: panels.iter().map(|p| PlotPanel::new(p)).collect() }
+        PlotLayout { panels: panels.iter().map(|p| PlotPanel::new(p)).collect(), ..PlotLayout::default() }
     }
 
     #[test]

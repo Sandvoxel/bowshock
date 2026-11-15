@@ -48,6 +48,9 @@ fn unit(q: Quantity, units: UnitSystem) -> &'static Unit {
     q.unit_for(units)
 }
 
+/// The subtitle note of a panel the CFD table method takes from the Extended method (the solver has no angle of attack).
+const CFD_ELSEWHERE: &str = "Extended (CFD is zero-lift)";
+
 /// Builds the plots of `out` for `units`, with the comparison `overlay` drawn dashed where it has the quantity.
 pub fn build(out: &Output, units: UnitSystem, overlay: Option<&Overlay>) -> Built {
     let legend = if out.runs.len() > 1 { out.runs.iter().enumerate().map(|(i, r)| (config_color(i), r.name.clone())).collect() } else { Vec::new() };
@@ -64,6 +67,20 @@ pub fn build(out: &Output, units: UnitSystem, overlay: Option<&Overlay>) -> Buil
     group.y_ticks = YTicks::Even(5);
     // One right gutter in every analysis, so switching analyses does not change the plot width.
     group.right_margin = MARGIN_PX;
+    // The CFD table is zero-lift drag only: the drag panels are the solver's, every other panel is the Extended method's, and
+    // they say so.
+    if out.cfd.is_some() {
+        for panel in &mut group.panels {
+            if panel.title.starts_with("Drag") || panel.title.starts_with("Share of drag") {
+                panel.unit = format!("{} · CFD", panel.unit);
+                continue;
+            }
+            if panel.value_unit.is_none() && !panel.unit.is_empty() && !panel.unit.contains(' ') {
+                panel.value_unit = Some(panel.unit.clone());
+            }
+            panel.unit = if panel.unit.is_empty() { CFD_ELSEWHERE.to_string() } else { format!("{} · {CFD_ELSEWHERE}", panel.unit) };
+        }
+    }
     // Mach beyond what the nominal flight reaches is shaded (the worst case there is out of the envelope).
     if matches!(out.analysis, Analysis::Aerodynamics | Analysis::Drag) {
         let flown = mach_runs(out).iter().filter_map(|(_, r, _)| r.max_mach).fold(f64::NEG_INFINITY, f64::max);

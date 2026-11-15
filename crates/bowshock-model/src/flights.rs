@@ -164,17 +164,48 @@ impl PlotPanel {
     }
 }
 
+/// What the Simulate plots draw along x. Time is the default; the others make a plot parametric in time (a flight's altitude
+/// rises and falls, so a curve against it doubles back on itself).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlotX {
+    /// Flight time, s.
+    #[default]
+    Time,
+    /// Altitude above the pad, m.
+    Altitude,
+    /// Mach number.
+    Mach,
+    /// Ground distance from the pad, m.
+    Distance,
+}
+
+impl PlotX {
+    /// Every choice, in selector order.
+    pub const ALL: [PlotX; 4] = [PlotX::Time, PlotX::Altitude, PlotX::Mach, PlotX::Distance];
+
+    fn is_time(&self) -> bool {
+        *self == PlotX::Time
+    }
+}
+
 /// The plots of the Simulate screen, top to bottom, saved with the document. The default is the kit's flight profile: altitude,
-/// vertical velocity, vertical acceleration (and is not written to the file).
+/// vertical velocity, vertical acceleration against time (and is not written to the file).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlotLayout {
     /// The panels, top to bottom. Never empty, at most [`MAX_PLOT_PANELS`].
     pub panels: Vec<PlotPanel>,
+    /// What every panel draws along x (absent from files written before the choice existed: time).
+    #[serde(default, skip_serializing_if = "PlotX::is_time")]
+    pub x: PlotX,
 }
 
 impl Default for PlotLayout {
     fn default() -> Self {
-        PlotLayout { panels: vec![PlotPanel::new(&["altitude"]), PlotPanel::new(&["vertical_velocity"]), PlotPanel::new(&["vertical_acceleration"])] }
+        PlotLayout {
+            panels: vec![PlotPanel::new(&["altitude"]), PlotPanel::new(&["vertical_velocity"]), PlotPanel::new(&["vertical_acceleration"])],
+            x: PlotX::Time,
+        }
     }
 }
 
@@ -350,12 +381,14 @@ mod tests {
         let mut r = Rocket::default();
         let layout = PlotLayout {
             panels: vec![PlotPanel::new(&["mach"]), PlotPanel::new(&["thrust", "drag", "weight"]), PlotPanel::new(&["cg_station", "cp_station"])],
+            x: PlotX::Mach,
         };
         r.set_plot_layout(layout.clone());
         let json = r.to_json();
         assert!(json.contains("\"plots\"") && json.contains("cp_station"));
         let back = Rocket::from_json(&json).unwrap();
         assert_eq!(back.plot_layout(), &layout);
+        assert!(json.contains("\"x\": \"mach\"") || json.contains("\"x\":\"mach\""), "the x axis is saved");
         assert_eq!(back, r);
     }
 
@@ -365,13 +398,14 @@ mod tests {
         // Repeats, empty panels and too many sources or panels are cleaned; nothing left means the default.
         r.set_plot_layout(PlotLayout {
             panels: vec![PlotPanel::new(&["a", "a", "b", "c", "d", "e"]), PlotPanel { sources: Vec::new() }, PlotPanel::new(&["f"])],
+            x: PlotX::Time,
         });
         let panels = &r.plot_layout().panels;
         assert_eq!(panels.len(), 2);
         assert_eq!(panels[0].sources, ["a", "b", "c", "d"]);
-        r.set_plot_layout(PlotLayout { panels: (0..20).map(|i| PlotPanel::new(&[format!("s{i}")])).collect() });
+        r.set_plot_layout(PlotLayout { panels: (0..20).map(|i| PlotPanel::new(&[format!("s{i}")])).collect(), x: PlotX::Time });
         assert_eq!(r.plot_layout().panels.len(), MAX_PLOT_PANELS);
-        r.set_plot_layout(PlotLayout { panels: Vec::new() });
+        r.set_plot_layout(PlotLayout { panels: Vec::new(), x: PlotX::Time });
         assert_eq!(r.plot_layout(), &PlotLayout::default());
         // The same repair runs on load.
         let mut json: serde_json::Value = serde_json::from_str(&Rocket::default().to_json()).unwrap();

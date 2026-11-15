@@ -45,8 +45,25 @@ pub(super) fn example(ctx: &mut Ctx) {
     }
 }
 
-/// Opens the file at `path`, reporting failure in the status strip.
+/// Opens the file at `path`, reporting failure in the status strip. An OpenRocket `.ork` is imported as a new untitled document
+/// (see `bowshock_model::ork`); the status strip says how many things could not be carried over.
 pub(super) fn open(ctx: &mut Ctx, path: &Path) {
+    if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("ork")) {
+        match bowshock_model::ork::import_file(path) {
+            Ok(imp) => {
+                ctx.doc.replace(imp.rocket, None);
+                ctx.loaded();
+                ctx.notify(match imp.warnings.len() {
+                    0 => "Imported from OpenRocket".to_string(),
+                    1 => "Imported from OpenRocket · 1 note".to_string(),
+                    n => format!("Imported from OpenRocket · {n} notes"),
+                });
+                ctx.import_notes = imp.warnings.iter().map(ToString::to_string).collect();
+            }
+            Err(e) => ctx.notify(format!("Could not import {}: {e}", path.display())),
+        }
+        return;
+    }
     match ctx.doc.load(path) {
         Ok(()) => ctx.loaded(),
         Err(e) => ctx.notify(format!("Could not open {}: {e}", path.display())),
@@ -77,7 +94,13 @@ pub(super) fn save_to(ctx: &mut Ctx, path: &Path) {
 pub(super) fn pick_open() -> Task<Message> {
     Task::perform(
         async {
-            let file = rfd::AsyncFileDialog::new().set_title("Open rocket").add_filter("Bowshock document", &[EXTENSION]).pick_file().await;
+            let file = rfd::AsyncFileDialog::new()
+                .set_title("Open rocket")
+                .add_filter("Bowshock or OpenRocket", &[EXTENSION, "ork"])
+                .add_filter("Bowshock document", &[EXTENSION])
+                .add_filter("OpenRocket design", &["ork"])
+                .pick_file()
+                .await;
             file.map(|f| f.path().to_path_buf())
         },
         Message::OpenPath,
@@ -99,6 +122,27 @@ pub(super) fn pick_save(ctx: &Ctx) -> Task<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Opening an `.ork` imports it as a new untitled document and says so in the status strip.
+    #[test]
+    fn opening_an_ork_imports_it_as_an_untitled_document() {
+        let ork = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bowshock-model/tests/data/mini_two_stage.ork");
+        let mut ctx = Ctx::new();
+        open(&mut ctx, &ork);
+        assert_eq!(ctx.doc.rocket().name, "Mini two-stage");
+        assert!(ctx.doc.path().is_none(), "an import has no .bowshock path until it is saved");
+        assert!(!ctx.doc.is_dirty());
+        assert_eq!(ctx.doc.rocket().configurations().len(), 2);
+        let notice = ctx.notice.as_ref().map(|n| n.0.clone()).unwrap_or_default();
+        assert!(notice.starts_with("Imported from OpenRocket"), "{notice}");
+        // A file that is not an OpenRocket design is reported, and the document is kept.
+        let bad = std::env::temp_dir().join(format!("bowshock-bad-{}.ork", std::process::id()));
+        std::fs::write(&bad, "nope").unwrap();
+        open(&mut ctx, &bad);
+        std::fs::remove_file(&bad).ok();
+        assert_eq!(ctx.doc.rocket().name, "Mini two-stage");
+        assert!(ctx.notice.as_ref().is_some_and(|n| n.0.starts_with("Could not import")));
+    }
     use bowshock_model::{DeployEvent, Deployment, InternalKind, MassRole, MaterialId, NoseShape, PartKind, RadialKind};
     use bowshock_motors::MotorDb;
     use bowshock_sim::from_model::{self, Level, Phase};

@@ -7,7 +7,7 @@
 use bowshock_model::{PartId, System};
 
 use super::canvas::{mono_w, TEXT_SMALL};
-use super::geometry::{Axis, LABEL_W};
+use super::geometry::{Axis, LaneBox, LABEL_W};
 use super::scene::{Lane, Scene};
 
 /// Height of a tag, px.
@@ -55,6 +55,23 @@ pub struct PodLayout<'a> {
     pub lanes: Vec<Lane>,
     /// Each visible bracket with its tag.
     pub pods: Vec<(PodSpan<'a>, PodTag)>,
+}
+
+impl PodLayout<'_> {
+    /// The pod set whose tag or bracket line is under `p` (the lane boxes are laid out from [`PodLayout::lanes`]): clicking either
+    /// selects the pod set, as its `POD ×2` chip in the viewport does.
+    pub fn hit(&self, rows: &[LaneBox], p: iced::Point) -> Option<PartId> {
+        self.pods.iter().find_map(|(s, tag)| {
+            let lane = rows.iter().find(|l| l.lane.system == s.system)?;
+            let (y, h) = lane.row(tag.row);
+            let mid = y + h / 2.0;
+            let on_tag = p.x >= tag.x && p.x <= tag.x + tag.w && (p.y - mid).abs() <= TAG_H / 2.0;
+            // The bracket is a 1 px line 2 px over its row's top: give it a few px of grip above, none into the bars below.
+            let line = lane.row(s.row).0 - 2.0;
+            let on_line = p.x >= s.x0.max(LABEL_W) - 2.0 && p.x <= s.x1 + 2.0 && p.y >= line - 3.0 && p.y <= line + 1.0;
+            (on_tag || on_line).then_some(s.id)
+        })
+    }
 }
 
 /// The members of each pod in each lane but Structure (the pod's own bar is there): the span they cover and the row on top.
@@ -277,5 +294,25 @@ mod tests {
         let layout = layout(&scene, &axis, 1100.0, &name_w);
         assert_eq!(layout.pods.iter().filter(|(s, _)| s.system == System::Propulsion).count(), 1);
         assert_clear(&scene, &layout, &axis, 1100.0);
+    }
+
+    #[test]
+    fn clicking_a_pod_tag_or_its_bracket_hits_the_pod_set() {
+        let (mut r, _, tube) = core_with_pod();
+        let b = ballast(&mut r, tube, 0.1);
+        let pod = r.pods().next().unwrap().id;
+        let scene = build(&r);
+        let axis = Axis::fit(1100.0, scene.length);
+        let layout = layout(&scene, &axis, 1100.0, &name_w);
+        let rows = geometry::rows(&layout.lanes, 800.0, 28.0);
+        let (span, tag) = layout.pods.iter().find(|(s, _)| s.system == System::Avionics).unwrap();
+        let lane = rows.iter().find(|l| l.lane.system == System::Avionics).unwrap();
+        let (y, h) = lane.row(tag.row);
+        assert_eq!(layout.hit(&rows, iced::Point::new(tag.x + tag.w / 2.0, y + h / 2.0)), Some(pod), "the tag");
+        let line = lane.row(span.row).0 - 2.0;
+        assert_eq!(layout.hit(&rows, iced::Point::new((span.x0 + span.x1) / 2.0, line)), Some(pod), "the bracket");
+        // The middle of the pod's own part is the part's, not the pod's.
+        let bar = bar_rect(scene.part_bar(b).unwrap(), &rows, &axis).unwrap();
+        assert_eq!(layout.hit(&rows, bar.center()), None);
     }
 }

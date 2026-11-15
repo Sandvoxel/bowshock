@@ -56,6 +56,7 @@ pub fn dim_kind(dim: Dim) -> Kind {
 pub fn dim_key(dim: Dim) -> String {
     match dim {
         Dim::Length => "length".into(),
+        Dim::ForeLength => "fore_length".into(),
         Dim::Diameter => "od".into(),
         Dim::ForeDiameter => "fore_od".into(),
         Dim::Wall => "wall".into(),
@@ -88,6 +89,7 @@ pub fn dim_key(dim: Dim) -> String {
 pub fn dim_from_key(key: &str) -> Option<Dim> {
     Some(match key {
         "length" => Dim::Length,
+        "fore_length" => Dim::ForeLength,
         "od" => Dim::Diameter,
         "fore_od" => Dim::ForeDiameter,
         "wall" => Dim::Wall,

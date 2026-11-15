@@ -35,8 +35,10 @@ const SOLVER_REV: u64 = 1;
 /// The grid level the table is solved on: `Coarse` (grid level 0), the setting for exploring. On an Apple M1 Max a coarse
 /// point takes 30 to 40 s and a medium one 2 min at Mach 0.3 (see the notes in the task report), too slow for a table.
 const RESOLUTION: solver::Resolution = solver::Resolution::Coarse;
-/// The Mach range the solver accepts.
-pub const SOLVER_MACH: (f64, f64) = (0.1, 3.0);
+/// The Mach range a table covers: the solver accepts 0.1 to 3, but Mach 0.1 takes about 2 minutes a point on a coarse grid (the
+/// wake settles into a limit cycle, 14 000 iterations; Mach 0.15 takes 25 s), so a table starts at 0.2 and [`mach_points`]
+/// fills below it from the Mach 0.2 drag scaled by the Extended method's trend (labelled so in the provenance notes).
+pub const SOLVER_MACH: (f64, f64) = (0.2, 3.0);
 /// The highest altitude the solver's standard atmosphere has (m).
 const SOLVER_CEILING: f64 = 20_000.0;
 /// Interior Mach numbers of a table: dense through the transonic drag rise, sparse where the drag is smooth. The range's ends
@@ -46,7 +48,7 @@ const INTERIOR: [f64; 8] = [0.5, 0.8, 0.9, 1.0, 1.1, 1.3, 1.7, 2.3];
 const NODE_GAP: f64 = 0.12;
 
 /// Why a Mach range cannot be tabulated.
-pub const OUT_OF_RANGE: &str = "the solver covers Mach 0.1 to 3";
+pub const OUT_OF_RANGE: &str = "the table covers Mach 0.2 to 3";
 
 /// Hash of the bytes of numbers: FNV-1a, stable across runs, platforms and Rust versions (unlike `DefaultHasher`).
 struct Fnv(u64);
@@ -536,17 +538,50 @@ fn blend(c: &CfdPoint, now: &DragBreakdown, zero: Option<&DragBreakdown>) -> Dra
     DragBreakdown { friction, pressure, base, fins, protuberances, total: friction + pressure + base + fins + protuberances }
 }
 
+/// Extended's zero-angle drag coefficient at `mach` from a sweep (linear between its samples, held at its ends).
+fn sweep_cd(sweep: &[MachPoint], mach: f64) -> f64 {
+    let i = sweep.partition_point(|p| p.mach <= mach);
+    match (i.checked_sub(1).and_then(|k| sweep.get(k)), sweep.get(i)) {
+        (Some(a), Some(b)) if b.mach > a.mach => a.drag.total + (b.drag.total - a.drag.total) * (mach - a.mach) / (b.mach - a.mach),
+        (Some(a), _) => a.drag.total,
+        (None, Some(b)) => b.drag.total,
+        (None, None) => f64::NAN,
+    }
+}
+
 /// The Mach sweep with the table's zero-lift drag: stability (margin, CP, `CNα`) from `extended` (the Extended method at the set
 /// angle), drag from the table plus Extended's change of drag from zero angle to that angle (`zero`: the same sweep at zero
-/// angle, point for point; `None` at zero angle). Only the Mach numbers the table covers are kept.
+/// angle, point for point; `None` at zero angle). Mach numbers above the table are dropped. Below its first node (the table
+/// starts at Mach 0.2: lower Mach numbers are too slow to solve, see [`SOLVER_MACH`]) the drag is the first node's, part by
+/// part, scaled by Extended's change of drag from that node down to the Mach number (the subsonic drag barely depends on Mach
+/// there; what changes is the Reynolds number, which the build-up method follows).
 pub fn mach_points(table: &CfdTable, extended: Vec<MachPoint>, zero: Option<&[MachPoint]>) -> Vec<MachPoint> {
     let (lo, hi) = (table.points[0].mach, table.points[table.points.len() - 1].mach);
+    let first = table.points[0];
+    let anchor = sweep_cd(zero.unwrap_or(&extended), lo);
     extended
         .into_iter()
         .enumerate()
-        .filter(|(_, p)| p.mach >= lo - 1e-9 && p.mach <= hi + 1e-9)
+        .filter(|(_, p)| p.mach <= hi + 1e-9)
         .map(|(i, mut p)| {
-            p.drag = blend(&at(table, p.mach), &p.drag, zero.and_then(|z| z.get(i)).map(|z| &z.drag));
+            let z = zero.and_then(|z| z.get(i)).map(|z| z.drag);
+            let c = if p.mach < lo - 1e-9 {
+                let own = z.as_ref().unwrap_or(&p.drag).total;
+                let r = if anchor > 0.0 && own.is_finite() { own / anchor } else { 1.0 };
+                CfdPoint {
+                    mach: p.mach,
+                    cd: first.cd * r,
+                    friction: first.friction * r,
+                    pressure: first.pressure * r,
+                    base: first.base * r,
+                    fins: first.fins * r,
+                    other: first.other * r,
+                    quality: first.quality,
+                }
+            } else {
+                at(table, p.mach)
+            };
+            p.drag = blend(&c, &p.drag, z.as_ref());
             p
         })
         .collect()
@@ -679,7 +714,7 @@ mod tests {
     #[test]
     fn nodes_cover_the_range_and_follow_it() {
         let all = nodes((0.1, 3.0)).unwrap();
-        assert_eq!((all[0], *all.last().unwrap()), (0.1, 3.0));
+        assert_eq!((all[0], *all.last().unwrap()), (0.2, 3.0), "Mach 0.1 costs two minutes a point: the table starts at 0.2");
         assert!(all.windows(2).all(|w| w[0] < w[1]) && all.len() <= 12, "{all:?}");
         assert!(all.contains(&1.0) && all.contains(&0.9) && all.contains(&1.1), "transonic detail: {all:?}");
         assert_eq!(nodes((3.0, 0.1)).unwrap(), all, "the range may be given either way round");
@@ -730,23 +765,26 @@ mod tests {
     #[test]
     fn the_table_drag_replaces_the_extended_drag_and_keeps_its_stability() {
         let t = table();
-        let (rocket, vehicle) = example();
-        let _ = rocket;
+        let (_, vehicle) = example();
         let atm = Atmosphere::standard();
         let sweep = |alpha: f64| -> Vec<MachPoint> {
             [0.4, 0.5, 1.0, 1.5, 2.0, 2.5].iter().flat_map(|&m| vs_mach(&vehicle, 1.0, (m, m), 1, alpha, &atm, 120.0)).collect()
         };
         let (ext, zero) = (sweep(0.0), sweep(0.0));
         let points = mach_points(&t, ext.clone(), Some(&zero));
-        assert_eq!(points.len(), 4, "only the Mach numbers the table covers (0.5 to 2.0)");
-        assert!((points[0].drag.total - 0.4).abs() < 1e-9 && (points[2].drag.total - 0.7).abs() < 1e-9);
-        assert_eq!(points[1].margin_cal, ext[2].margin_cal, "margin, CP and CNα stay Extended's");
+        assert_eq!(points.len(), 5, "Mach numbers above the table (2.5) are dropped");
+        assert!((points[1].drag.total - 0.4).abs() < 1e-9 && (points[3].drag.total - 0.7).abs() < 1e-9);
+        assert_eq!(points[2].margin_cal, ext[2].margin_cal, "margin, CP and CNα stay Extended's");
+        // Below the table: the first node's drag, scaled by Extended's change of drag from that node down.
+        let below = 0.4 * ext[0].drag.total / ext[1].drag.total;
+        assert!((points[0].drag.total - below).abs() < 1e-9, "{} vs {below}", points[0].drag.total);
+        assert!((points[0].drag.fins / points[0].drag.total - 0.3).abs() < 1e-9, "the parts keep the node's shares");
         // At an angle, Extended's change of drag is added on top of the solved zero-lift drag.
         let angled = sweep(8f64.to_radians());
         let with = mach_points(&t, angled.clone(), Some(&zero));
-        assert!(with[1].drag.total > points[1].drag.total);
+        assert!(with[2].drag.total > points[2].drag.total);
         let induced = angled[2].drag.total - zero[2].drag.total;
-        assert!((with[1].drag.total - points[1].drag.total - induced).abs() < 1e-9);
+        assert!((with[2].drag.total - points[2].drag.total - induced).abs() < 1e-9);
     }
 
     /// One real solve on a tiny grid (the example rocket, two Mach numbers, coarse grid). Needs a GPU for speed; ignored in the

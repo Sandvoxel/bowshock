@@ -660,6 +660,52 @@ pub(crate) fn polygon_area_centroid(points: &[(f64, f64)]) -> (f64, f64, f64) {
     (a2.abs() / 2.0, cz / (3.0 * a2), ch / (3.0 * a2))
 }
 
+/// The edge of its parent a radial or internal part is placed from: the position section's *Relative to*. A part keeps its
+/// distance from that reference when the parent is resized, so a fin set `Bottom` +0 stays flush with the tube's aft end
+/// however the tube is lengthened or shortened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Anchor {
+    /// The part's fore edge from the parent's fore face.
+    Top,
+    /// The part's middle from the parent's middle.
+    Middle,
+    /// The part's aft edge from the parent's aft face (a fin flush with the tube's end has offset 0).
+    Bottom,
+}
+
+impl Anchor {
+    /// Every anchor, in menu order.
+    pub const ALL: [Anchor; 3] = [Anchor::Top, Anchor::Middle, Anchor::Bottom];
+
+    /// The menu label for a parent named `parent`.
+    pub fn label(self, parent: &str) -> String {
+        match self {
+            Anchor::Top => format!("Top of {parent}"),
+            Anchor::Middle => format!("Middle of {parent}"),
+            Anchor::Bottom => format!("Bottom of {parent}"),
+        }
+    }
+
+    /// The displayed offset (positive aft, as in OpenRocket) of a part whose fore edge is `offset` from the parent's fore
+    /// face, `extent` long, in a parent `parent_length` long.
+    pub fn shown(self, offset: f64, extent: f64, parent_length: f64) -> f64 {
+        match self {
+            Anchor::Top => offset,
+            Anchor::Middle => offset + extent / 2.0 - parent_length / 2.0,
+            Anchor::Bottom => offset + extent - parent_length,
+        }
+    }
+
+    /// The inverse of [`shown`](Self::shown): the offset from the parent's fore face for a displayed offset.
+    pub fn offset(self, shown: f64, extent: f64, parent_length: f64) -> f64 {
+        match self {
+            Anchor::Top => shown,
+            Anchor::Middle => shown + parent_length / 2.0 - extent / 2.0,
+            Anchor::Bottom => shown + parent_length - extent,
+        }
+    }
+}
+
 /// A radial part placed on an axial part: `count` linked copies spaced evenly around it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RadialPart {
@@ -688,6 +734,9 @@ pub struct RadialPart {
     /// Fin cant: rotation about the fin's own span axis, radians (positive spins the rocket the same way as increasing angle).
     #[serde(default)]
     pub cant: f64,
+    /// What the offset is measured from; `None` is the kind's default (the bottom for a fin, else the top).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<Anchor>,
     /// Mass of the whole group (all `count` copies) that replaces the computed one, kg.
     #[serde(default)]
     pub mass_override: Option<f64>,
@@ -722,6 +771,7 @@ impl RadialPart {
         RadialPart {
             id,
             kind,
+            anchor: None,
             parent,
             offset,
             angle,

@@ -13,7 +13,7 @@ use glam::Vec3;
 use iced::widget::canvas::{self, Action, Event, Frame, Geometry, LineDash, Path, Stroke};
 use iced::{keyboard, mouse, Point, Rectangle, Renderer, Size, Theme};
 
-use super::assembly::{no_entry, tag};
+use super::assembly::{margin_suffix, no_entry, tag, tag_with};
 use super::pick::{self, SurfaceTarget};
 use super::pods::PodView;
 use super::radial;
@@ -49,6 +49,8 @@ pub struct Overlay<'a> {
     pub snap_step: f64,
     /// The cursor in window coordinates (tracked by the app, so it also draws without a live cursor).
     pub cursor: Option<Point>,
+    /// The margin of the rocket as it would be if released now, calibers, for the tag; `None` with no valid target.
+    pub margin: Option<f64>,
 }
 
 #[derive(Debug, Default)]
@@ -153,7 +155,7 @@ impl canvas::Program<Message> for Overlay<'_> {
                     mm(station + target.offset),
                     target.angle.to_degrees().round() % 360.0
                 );
-                tag(&mut frame, cursor, 0.0, &label, t.ink, t.line_200, t.bg_200);
+                tag_with(&mut frame, cursor, 0.0, &label, margin_suffix(self.rocket, t, self.margin), t.ink, t.line_200, t.bg_200);
             }
             None => {
                 no_entry(&mut frame, cursor + iced::Vector::new(14.0, 14.0), t.err);

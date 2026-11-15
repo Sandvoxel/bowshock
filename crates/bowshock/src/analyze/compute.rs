@@ -398,6 +398,8 @@ pub struct CfdInfo {
     pub solved_at: u64,
     /// How long it took (s).
     pub solve_seconds: f64,
+    /// The table's first Mach number when the plots reach below it (the drag there is scaled from it by Extended's trend).
+    pub scaled_below: Option<f64>,
     /// What was not solved as the document has it, and what the plots do not cover.
     pub notes: Vec<String>,
 }
@@ -636,6 +638,7 @@ pub fn compute(request: &Request) -> Output {
 fn cfd_info(table: &CfdTable, analysis: Analysis, cond: &Conditions) -> CfdInfo {
     let (first, last) = (table.points[0].mach, table.points[table.points.len() - 1].mach);
     let mut notes = table.notes.clone();
+    let mut scaled_below = None;
     let nodes = match analysis {
         Analysis::Stability => {
             if cond.mach_fixed < first - 1e-9 || cond.mach_fixed > last + 1e-9 {
@@ -645,13 +648,22 @@ fn cfd_info(table: &CfdTable, analysis: Analysis, cond: &Conditions) -> CfdInfo 
         }
         _ => {
             let (lo, hi) = (cond.mach.0.min(cond.mach.1), cond.mach.0.max(cond.mach.1));
-            if lo < first - 1e-9 || hi > last + 1e-9 {
-                notes.push(format!("The table covers Mach {first:.2} to {last:.2}; the plots stop there."));
+            scaled_below = (lo < first - 1e-9).then_some(first);
+            if hi > last + 1e-9 {
+                notes.push(format!("The table ends at Mach {last:.2}; the plots stop there."));
             }
             table.points.iter().filter(|p| p.mach >= lo - 1e-9 && p.mach <= hi + 1e-9).count()
         }
     };
-    CfdInfo { nodes, backend: table.backend.clone(), fallback: table.fallback.clone(), solved_at: table.solved_at, solve_seconds: table.solve_seconds, notes }
+    CfdInfo {
+        nodes,
+        backend: table.backend.clone(),
+        fallback: table.fallback.clone(),
+        solved_at: table.solved_at,
+        solve_seconds: table.solve_seconds,
+        scaled_below,
+        notes,
+    }
 }
 
 /// A table of the output's numbers: the table view and the CSV share it.

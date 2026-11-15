@@ -11,7 +11,7 @@ use bowshock_model::{
 use iced::widget::{button as plain_button, column, container, mouse_area, row, text, text_input, Space};
 use iced::{mouse, Element, Fill, Widget};
 
-use super::edit::{Anchor, Field, Trigger};
+use super::edit::{Field, Trigger};
 use super::form::{choose, text_row, value_row, Form};
 use super::health::{self, Flight};
 use super::separation;
@@ -26,6 +26,7 @@ use crate::widgets::chip::chip;
 use crate::widgets::field::{labeled, rule, section, section_head, section_picking};
 use crate::widgets::glyph::{self, Mark, Tone};
 use crate::widgets::segmented::segmented_fill;
+use bowshock_model::Anchor;
 
 /// Everything the section builders read.
 pub struct Params<'a> {

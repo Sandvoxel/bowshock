@@ -253,7 +253,9 @@ impl State {
             units: ctx.units,
             compare: ctx.compare_configs,
         });
-        scene.marks = ctx.physics.balance().map(|b| Marks { cg: b.cg, cp: b.cp, margin: b.margin_cal });
+        let shown = ctx.shown();
+        scene.marks = shown.now.map(|b| Marks { cg: b.cg, cp: b.cp, margin: b.margin_cal });
+        scene.was = shown.committed.map(|b| (b.cg, b.cp));
         if ctx.compare_configs {
             scene.other_cgs = self.other_cgs(ctx);
         }
@@ -298,17 +300,19 @@ impl State {
 fn carry_of(ctx: &Ctx) -> Option<Carry> {
     let rocket = ctx.doc.rocket();
     let drag = &ctx.drag;
+    // The margin of the rocket as it would be if the part were released here.
+    let margin = ctx.shown().now.map(|b| b.margin_cal).filter(|_| drag.landing().is_some());
     if let Some(d) = &drag.axial {
         let landing = d.snap.and_then(|n| rocket.stations().get(n).copied());
-        return Some(Carry { name: d.name.to_string(), system: d.kind.system(), extent: d.kind.length(), landing });
+        return Some(Carry { name: d.name.to_string(), system: d.kind.system(), extent: d.kind.length(), landing, margin });
     }
     if let Some(d) = &drag.radial {
         let landing = d.target.and_then(|t| Some(rocket.part_station(t.parent)? + t.offset));
-        return Some(Carry { name: d.kind.name().to_string(), system: d.kind.system(), extent: d.kind.extent(), landing });
+        return Some(Carry { name: d.kind.name().to_string(), system: d.kind.system(), extent: d.kind.extent(), landing, margin });
     }
     if let Some(d) = &drag.internal {
         let landing = d.target.and_then(|t| Some(rocket.part_station(t.parent)? + t.offset));
-        return Some(Carry { name: d.name.to_string(), system: d.kind.system(), extent: d.kind.extent(), landing });
+        return Some(Carry { name: d.name.to_string(), system: d.kind.system(), extent: d.kind.extent(), landing, margin });
     }
     None
 }

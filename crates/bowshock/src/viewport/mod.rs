@@ -53,7 +53,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bowshock_model::{InternalKind, PartId, PartRef, RadialKind};
+use bowshock_model::{Dim, InternalKind, PartId, PartRef, RadialKind};
 use glam::{IVec3, Vec3};
 use iced::widget::{canvas, column, container, row, shader, stack, text, Space};
 use iced::{alignment, keyboard, mouse, Element, Fill, Size, Task, Vector, Widget};
@@ -264,6 +264,8 @@ pub struct View {
     /// What is under the cursor.
     hover: Hover,
     mesh_key: Option<MeshKey>,
+    /// How far (metres along the axis) the camera has been moved to keep the aft end of a part still while its fore end is dragged.
+    fore_pan: f32,
 }
 
 impl View {
@@ -287,6 +289,7 @@ impl View {
             last_select: None,
             hover: Hover::None,
             mesh_key: None,
+            fore_pan: 0.0,
         }
     }
 
@@ -411,7 +414,12 @@ impl View {
                 if let Some(hint) = edit.hint() {
                     self.hint = hint;
                 }
-                return manipulate::apply(edit, ctx);
+                let shift = self.follow_fore_edit(&edit, ctx);
+                let task = manipulate::apply(edit, ctx);
+                if let Some(shift) = shift {
+                    ctx.doc.set_undo_shift(shift);
+                }
+                return task;
             }
             Message::Hint(hint) => self.hint = hint,
             Message::Focus(id) => self.focus_part(id, ctx),
@@ -704,15 +712,34 @@ impl View {
         // view is view-only: the markers layer selects).
         let (overlay, interaction): (Element<'a, Message>, mouse::Interaction) = if let Some(drag) = &ctx.drag.axial {
             (
-                canvas(assembly::Overlay { rocket, drag, camera, cursor: ctx.cursor, snap_angle: ctx.drag.angle_snap, snap_step })
-                    .width(Fill)
-                    .height(Fill)
-                    .boxed(),
+                canvas(assembly::Overlay {
+                    rocket,
+                    drag,
+                    camera,
+                    cursor: ctx.cursor,
+                    snap_angle: ctx.drag.angle_snap,
+                    snap_step,
+                    margin: ctx.shown().now.map(|b| b.margin_cal).filter(|_| ctx.drag.landing().is_some()),
+                })
+                .width(Fill)
+                .height(Fill)
+                .boxed(),
                 mouse::Interaction::default(),
             )
         } else if let Some(drag) = &ctx.drag.radial {
             (
-                canvas(SurfaceOverlay { rocket, drag, camera, snap: ctx.drag.angle_snap, snap_step, cursor: ctx.cursor }).width(Fill).height(Fill).boxed(),
+                canvas(SurfaceOverlay {
+                    rocket,
+                    drag,
+                    camera,
+                    snap: ctx.drag.angle_snap,
+                    snap_step,
+                    cursor: ctx.cursor,
+                    margin: ctx.shown().now.map(|b| b.margin_cal).filter(|_| ctx.drag.landing().is_some()),
+                })
+                .width(Fill)
+                .height(Fill)
+                .boxed(),
                 mouse::Interaction::default(),
             )
         } else if self.inside == InsideView::Exploded {
@@ -735,7 +762,7 @@ impl View {
                     profile: self.profile,
                     units: ctx.units,
                     pod: selected.and_then(|id| pods::PodView::of_part(rocket, id, &camera)),
-                    balance: ctx.physics.balance().map(|b| markers::BalanceMarks {
+                    balance: ctx.shown().now.map(|b| markers::BalanceMarks {
                         cg: b.cg,
                         cp: b.cp,
                         margin: b.margin_cal,
@@ -785,7 +812,8 @@ impl View {
                 rocket,
                 camera,
                 mesh: &self.mesh,
-                balance: ctx.physics.balance().map(|b| (b.cg, b.cp, b.margin_cal)),
+                balance: ctx.shown().now.map(|b| (b.cg, b.cp, b.margin_cal)),
+                ghost: ctx.shown().committed.map(|b| (b.cg, b.cp)),
                 show: (ctx.show_cg, ctx.show_cp),
                 stages: ctx.physics.stages(),
                 motors,
@@ -824,6 +852,42 @@ impl View {
     /// Where the camera is heading: the end of the running animation, or the camera itself.
     fn goal(&self) -> Camera {
         self.anim.as_ref().map_or(self.camera, |a| a.to)
+    }
+
+    /// Dragging the fore end of a stacked part keeps the aft end, and everything behind it, still in space: the stations run from
+    /// the nose tip, so the rocket grows at the nose side and the camera moves with it by the change in length (the part's
+    /// fixed end stays where the cursor left it). A cancel moves the camera back; a release or a typed value keeps it and
+    /// returns the whole shift, for the undo step to carry.
+    fn follow_fore_edit(&mut self, edit: &manipulate::Edit, ctx: &Ctx) -> Option<f32> {
+        use manipulate::Edit;
+        let rocket = ctx.doc.rocket();
+        let delta = match edit {
+            Edit::Dim(id, Dim::ForeLength, value) | Edit::Commit(id, Dim::ForeLength, value) if rocket.parts().iter().any(|p| p.id == *id) => {
+                let now = rocket.dim(*id, Dim::Length).unwrap_or(0.0);
+                rocket.clamp_dim(*id, Dim::ForeLength, *value).map_or(0.0, |(v, _)| v - now) as f32
+            }
+            Edit::Cancel => -self.fore_pan,
+            _ => 0.0,
+        };
+        let total = self.fore_pan + delta;
+        self.fore_pan = match edit {
+            Edit::Cancel | Edit::End | Edit::Commit(..) => 0.0,
+            _ => total,
+        };
+        self.shift_axis(delta);
+        (matches!(edit, Edit::End | Edit::Commit(..)) && total != 0.0).then_some(total)
+    }
+
+    /// Moves the camera (and any animation in flight) `dz` along the rocket's axis. Undo and redo of a fore-end length drag
+    /// use it to keep the part's aft end still on screen.
+    pub fn shift_axis(&mut self, dz: f32) {
+        if dz != 0.0 {
+            self.camera.target.z += dz;
+            if let Some(anim) = self.anim.as_mut() {
+                anim.from.target.z += dz;
+                anim.to.target.z += dz;
+            }
+        }
     }
 
     /// Ends any animation at its goal (so a pan or zoom during a snap does not get overwritten).

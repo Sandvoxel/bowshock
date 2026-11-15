@@ -213,6 +213,8 @@ fn axial(camera: &Camera, size: Size, up: Vec3, z0: f64, kind: &PartKind, wall: 
     let z1 = z0 + l;
     match dim {
         Dim::Length => line(camera, size, at(up, 0.0, z1), Vec3::Z, 1.0),
+        // The fore end: growing the value moves the handle forward (towards the nose), the aft end stays.
+        Dim::ForeLength => line(camera, size, at(up, 0.0, z0), -Vec3::Z, 1.0),
         Dim::Diameter => line(camera, size, at(up, kind.aft_diameter() / 2.0, z1), up, 0.5),
         Dim::ForeDiameter => line(camera, size, at(up, kind.fore_diameter() / 2.0, z0), up, 0.5),
         Dim::Wall => line(camera, size, at(up, kind.radius_at(l / 2.0) - wall, z0 + l / 2.0), -up, 1.0),
@@ -331,6 +333,7 @@ fn internal(cx: &Context, up: Vec3, id: PartId, dim: Dim) -> Option<(Point, Axis
         (Dim::Position, K::Parachute { .. } | K::ShockCord { .. } | K::Streamer { .. }) => line(camera, size, at(up, r / 2.0, zf), Vec3::Z, 1.0),
         (Dim::Position, K::MassComponent { .. }) => line(camera, size, at(up, 0.0, zf), Vec3::Z, 1.0),
         (Dim::Length, K::InnerTube { .. } | K::Coupler { .. }) => line(camera, size, at(up, r, z1), Vec3::Z, 1.0),
+        (Dim::ForeLength, K::InnerTube { .. } | K::Coupler { .. }) => line(camera, size, at(up, -r, zf), -Vec3::Z, 1.0),
         (Dim::Length, K::MassComponent { .. }) => line(camera, size, at(up, 0.0, z1), Vec3::Z, 1.0),
         (Dim::PackedLength, _) => line(camera, size, at(up, r / 2.0, z1), Vec3::Z, 1.0),
         (Dim::Overhang, K::InnerTube { overhang, .. }) => line(camera, size, at(up, 0.0, z1 + overhang), Vec3::Z, 1.0),

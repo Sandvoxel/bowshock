@@ -1,0 +1,53 @@
+# Two-ended length handles on body parts. Run with the example rocket:
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/twoended.drive out/twoended
+# Booster: aft handle grows it aft (top station and everything fore stay); fore handle grows it forward (the aft end,
+# fins and motor stay where they are on screen, the nose side moves forward).
+viewport 1280x800
+click "2D"
+click (850, 314)
+screenshot 2d-selected.png
+
+# Aft end.
+press (887, 311)
+move (895, 311)
+move (930, 311)
+screenshot 2d-aft-drag.png
+release (930, 311)
+screenshot 2d-aft-released.png
+click (353, 20)
+
+# Esc mid fore drag restores exactly (camera included).
+press (707, 311)
+move (699, 311)
+move (660, 311)
+screenshot 2d-fore-drag.png
+type escape
+screenshot 2d-fore-escaped.png
+
+# Fore end, released: the aft end stays on screen.
+press (707, 311)
+move (699, 311)
+move (660, 311)
+release (660, 311)
+screenshot 2d-fore-released.png
+click (353, 20)
+
+# 3D: both handles on select, then each end dragged along the axis.
+click "3D"
+screenshot 3d-selected.png
+press (828, 268)
+move (835, 267)
+move (862, 261)
+screenshot 3d-aft-drag.png
+release (862, 261)
+screenshot 3d-aft-released.png
+click (353, 20)
+press (693, 296)
+move (686, 297)
+move (658, 303)
+screenshot 3d-fore-drag.png
+release (658, 303)
+screenshot 3d-fore-released.png
+# Undo puts the length back and the camera with it: the aft end does not move on screen.
+click (353, 20)
+screenshot 3d-fore-undone.png

@@ -577,7 +577,8 @@ const HANDLE_BLOCK: f32 = 14.0;
 fn drag_verb(dim: Dim, nose: bool) -> &'static str {
     match dim {
         Dim::Length if nose => "Drag tip",
-        Dim::Length => "Drag face",
+        Dim::Length => "Drag aft face",
+        Dim::ForeLength => "Drag fore face",
         Dim::Diameter | Dim::ForeDiameter | Dim::Span | Dim::Height | Dim::TipChord | Dim::RootChord | Dim::Sweep | Dim::Gap => "Drag edge",
         Dim::Wall | Dim::Thickness | Dim::InnerDiameter => "Drag wall",
         Dim::Position => "Drag part",
@@ -908,7 +909,10 @@ impl canvas::Program<Message> for Overlay<'_> {
         if let Some(drag) = &state.drag {
             self.draw_drag(&mut frame, t, drag, &vis, state.modifiers);
         } else if let (Some(Hover::Handle(dim)), Some(c)) = (Some(self.hover), cursor) {
-            if let (Some(v), true) = (self.rocket.instance_dim(id, self.instance, dim), vis.placed.iter().any(|p| p.spec.dim == dim)) {
+            // A handle whose label is already shown needs no second tag at the cursor (it would sit over that label and the
+            // selection tag).
+            let labelled = plan.side.iter().any(|l| vis.placed[l.handle].spec.dim == dim);
+            if let (Some(v), true, false) = (self.rocket.instance_dim(id, self.instance, dim), vis.placed.iter().any(|p| p.spec.dim == dim), labelled) {
                 let name = self.rocket.dim_label(id, dim);
                 tag(&mut frame, c, 0.0, &format!("{name} · {}", self.with_unit(dim, v)), t.ink, t.line_200, t.bg_200);
             }
@@ -949,10 +953,24 @@ impl Overlay<'_> {
 
     /// The text beside handle `dim` of part `id` (`SWEEP 60.0`, `Ø 76.2`); empty for a freeform fin's vertices.
     fn label_text(&self, id: PartId, dim: Dim) -> String {
-        match (dim, self.rocket.instance_dim(id, self.instance, dim)) {
+        let end = self.length_end(id, dim).map(|e| e.trim_end_matches(" end").to_uppercase());
+        let text = match (dim, self.rocket.instance_dim(id, self.instance, dim)) {
             (Dim::Vertex(_), _) => String::new(),
             (_, Some(v)) => self.handle_label(id, dim, v),
             _ => self.rocket.dim_label(id, dim),
+        };
+        match end {
+            Some(end) => format!("{text} · {end}"),
+            None => text,
+        }
+    }
+
+    /// Which end of the part a length handle drags (`fore end`, `aft end`); `None` for a part with a single length handle.
+    fn length_end(&self, id: PartId, dim: Dim) -> Option<&'static str> {
+        match dim {
+            Dim::ForeLength => Some("fore end"),
+            Dim::Length if self.rocket.handle_specs(id).iter().any(|h| h.dim == Dim::ForeLength) => Some("aft end"),
+            _ => None,
         }
     }
 
@@ -1253,8 +1271,10 @@ impl Overlay<'_> {
         }
 
         // The framed tag: title in `ink-muted`, value in the drag colour, the change at the right, then the match or the reason.
-        let title = match dim {
-            Dim::Vertex(_) => dim.label(),
+        let end = self.length_end(drag.id, dim);
+        let title = match (dim, end) {
+            (Dim::Vertex(_), _) => dim.label(),
+            (_, Some(end)) => format!("{} · {end}", self.rocket.dim_label(drag.id, dim)),
             _ => self.rocket.dim_label(drag.id, dim),
         };
         let typing = !drag.typed.is_empty();
@@ -1263,6 +1283,8 @@ impl Overlay<'_> {
         } else if let Dim::Vertex(i) = dim {
             let (z, h) = self.rocket.vertex(drag.id, i).unwrap_or((0.0, 0.0));
             format!("{} , {}", self.num(Dim::Length, z), self.num(Dim::Length, h))
+        } else if end.is_some() && moved.abs() > 1e-9 {
+            format!("{} → {}", self.num(dim, drag.base), self.with_unit(dim, value))
         } else {
             self.with_unit(dim, value)
         };

@@ -107,6 +107,9 @@ pub struct Physics {
     liftoff: Result<Balance, BridgeError>,
     burnout: Result<Balance, BridgeError>,
     warnings: Vec<Warning>,
+    /// The health list of the rocket as a carried part would leave it (see [`show_warnings`](Self::show_warnings)), shown in
+    /// place of `warnings` while the carry lasts.
+    previewed: Option<Vec<Warning>>,
     stages: Vec<Stage>,
     /// Margin of every configuration (whole stack, liftoff), in the document's order.
     config_margins: Vec<(ConfigId, Option<f64>)>,
@@ -131,6 +134,7 @@ impl Physics {
             liftoff: Err(BridgeError::EmptyRocket),
             burnout: Err(BridgeError::EmptyRocket),
             warnings: Vec::new(),
+            previewed: None,
             stages: Vec::new(),
             config_margins: Vec::new(),
             gauge: GaugeState::new(0.0),
@@ -192,14 +196,7 @@ impl Physics {
     fn compute(&mut self, rocket: &Rocket, stages: Vec<Stage>) {
         self.liftoff = from_model::balance(rocket, &self.motors, self.phase, BALANCE_MACH, 0.0, true);
         self.burnout = from_model::balance(rocket, &self.motors, self.phase, BALANCE_MACH, 0.0, false);
-        self.warnings = match &self.liftoff {
-            Ok(balance) => from_model::warnings(rocket, &self.motors, balance),
-            Err(_) => from_model::warnings(
-                rocket,
-                &self.motors,
-                &Balance { mass: 0.0, length: 0.0, reference_diameter: 0.0, cg: 0.0, cp: 0.0, margin_cal: 0.0, cn_alpha: 0.0, motor_mass: 0.0 },
-            ),
-        };
+        self.warnings = self.warnings_for(rocket, self.liftoff.as_ref().ok());
         self.stages = stages;
         self.config_margins = rocket.configurations().iter().map(|c| (c.id, self.margin_of(rocket, c.id))).collect();
         if let Ok(balance) = &self.liftoff {
@@ -219,6 +216,30 @@ impl Physics {
         self.liftoff.as_ref().ok()
     }
 
+    /// The liftoff balance of the phase on show for another rocket (a preview of an edit that has not been made); `None` when it
+    /// has no balance.
+    pub fn balance_of(&self, rocket: &Rocket) -> Option<Balance> {
+        from_model::balance(rocket, &self.motors, self.phase, BALANCE_MACH, 0.0, true).ok()
+    }
+
+    /// Points the gauge at `margin` (a previewed one), or at the committed margin again when it is `None`.
+    pub fn show_margin(&mut self, margin: Option<f64>) {
+        if let Some(margin) = margin.or_else(|| self.balance().map(|b| b.margin_cal)) {
+            self.gauge.set(margin as f32);
+        }
+    }
+
+    /// The health list of `rocket` with its liftoff `balance` (`None`: it has none, judged as weightless).
+    pub fn warnings_for(&self, rocket: &Rocket, balance: Option<&Balance>) -> Vec<Warning> {
+        let none = Balance { mass: 0.0, length: 0.0, reference_diameter: 0.0, cg: 0.0, cp: 0.0, margin_cal: 0.0, cn_alpha: 0.0, motor_mass: 0.0 };
+        from_model::warnings(rocket, &self.motors, balance.unwrap_or(&none))
+    }
+
+    /// Shows `warnings` (the health of a previewed rocket) in place of the document's, or the document's again when `None`.
+    pub fn show_warnings(&mut self, warnings: Option<Vec<Warning>>) {
+        self.previewed = warnings;
+    }
+
     /// The same with the motors burned out (casings only).
     #[allow(dead_code)] // For Analyze and the lanes (CG at burnout).
     pub fn burnout(&self) -> Option<&Balance> {
@@ -234,12 +255,12 @@ impl Physics {
     /// The health list of the active configuration, worst first within each topic, including `Ok` readings.
     #[allow(dead_code)]
     pub fn warnings(&self) -> &[Warning] {
-        &self.warnings
+        self.previewed.as_deref().unwrap_or(&self.warnings)
     }
 
     /// The warnings that are not mere `Ok` readings: what the status strip's chip counts.
     pub fn issues(&self) -> impl Iterator<Item = &Warning> {
-        self.warnings.iter().filter(|w| w.level != Level::Ok)
+        self.warnings().iter().filter(|w| w.level != Level::Ok)
     }
 
     /// The worst level among [`issues`](Self::issues), `Ok` when there are none.

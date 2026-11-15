@@ -7,6 +7,16 @@ use crate::app::{App, Message, Mode, Selection};
 use crate::build::inspector::{Band, Message as Insp};
 
 #[test]
+fn an_openrocket_import_lists_its_notes_until_the_next_load() {
+    let mut app = App::with_example();
+    let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/../bowshock-model/tests/data/mini_two_stage.ork");
+    let _ = app.update(Message::OpenPath(Some(fixture.into())));
+    assert!(!app.ctx().import_notes.is_empty(), "the fixture has notes");
+    let _ = app.update(Message::New);
+    assert!(app.ctx().import_notes.is_empty());
+}
+
+#[test]
 fn cg_and_cp_cells_toggle_their_markers() {
     let mut app = App::with_example();
     assert!(app.ctx().show_cg && app.ctx().show_cp);

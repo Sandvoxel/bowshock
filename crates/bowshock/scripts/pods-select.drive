@@ -1,0 +1,25 @@
+# Clicking a pod's `Pod ×N` tag in Station Lanes selects the pod set (as the viewport's `POD ×N` chip does).
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/pods-select.drive /tmp/pods-select
+viewport 1280x800
+scale 2
+click (160, 88)
+type "pod"
+click "Pod / strap-on"
+move (900, 300)
+click (873, 628)
+click (1175, 167)
+type "60"
+type enter
+click (160, 88)
+type backspace
+type backspace
+type backspace
+type "inner tube"
+click "Inner tube"
+click "Holds a motor"
+move (640, 560)
+screenshot 01-pod-mount.png
+# Click the `Pod ×3` tag in Propulsion: the pod set is selected (inspector shows the pod, the bracket turns accent).
+click (845, 694)
+move (640, 560)
+screenshot 02-pod-tag-clicked.png

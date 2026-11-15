@@ -29,6 +29,9 @@ const MAX_UNDO: usize = 200;
 struct Step {
     rocket: Rocket,
     label: String,
+    /// How far the viewport's camera moved along the axis with this step (a fore-end length drag keeps the part's aft end
+    /// still on screen); undo moves it back by as much, redo forward again. Metres.
+    shift: f32,
 }
 
 /// Why a document could not be opened or saved.
@@ -142,6 +145,29 @@ impl Document {
         self.redo.last().map(|s| s.label.as_str())
     }
 
+    /// Records that the last step moved the viewport's camera `shift` along the axis (see [`Step::shift`]).
+    pub fn set_undo_shift(&mut self, shift: f32) {
+        if let Some(step) = self.undo.last_mut() {
+            step.shift = shift;
+        }
+    }
+
+    /// The camera shift [`undo`](Self::undo) would revert.
+    pub fn undo_shift(&self) -> f32 {
+        if self.drag.is_some() {
+            return 0.0;
+        }
+        self.undo.last().map_or(0.0, |s| s.shift)
+    }
+
+    /// The camera shift [`redo`](Self::redo) would reapply.
+    pub fn redo_shift(&self) -> f32 {
+        if self.drag.is_some() {
+            return 0.0;
+        }
+        self.redo.last().map_or(0.0, |s| s.shift)
+    }
+
     fn push_undo(&mut self, step: Step) {
         self.undo.push(step);
         if self.undo.len() > MAX_UNDO {
@@ -172,7 +198,7 @@ impl Document {
         let out = f(&mut self.rocket);
         self.settle();
         if self.rocket != before {
-            self.push_undo(Step { rocket: before, label: label.to_string() });
+            self.push_undo(Step { rocket: before, label: label.to_string(), shift: 0.0 });
             self.changed();
         }
         out
@@ -210,7 +236,7 @@ impl Document {
     pub fn begin_drag(&mut self, label: &str) {
         self.seal();
         if self.drag.is_none() {
-            self.drag = Some(Step { rocket: self.rocket.clone(), label: label.to_string() });
+            self.drag = Some(Step { rocket: self.rocket.clone(), label: label.to_string(), shift: 0.0 });
         }
     }
 
@@ -275,7 +301,7 @@ impl Document {
         let mut step = self.undo.pop()?;
         step.rocket.carry_cfd_from(&self.rocket);
         let current = std::mem::replace(&mut self.rocket, step.rocket);
-        self.redo.push(Step { rocket: current, label: step.label.clone() });
+        self.redo.push(Step { rocket: current, label: step.label.clone(), shift: step.shift });
         self.changed();
         Some(step.label)
     }
@@ -289,7 +315,7 @@ impl Document {
         let mut step = self.redo.pop()?;
         step.rocket.carry_cfd_from(&self.rocket);
         let current = std::mem::replace(&mut self.rocket, step.rocket);
-        self.undo.push(Step { rocket: current, label: step.label.clone() });
+        self.undo.push(Step { rocket: current, label: step.label.clone(), shift: step.shift });
         self.changed();
         Some(step.label)
     }

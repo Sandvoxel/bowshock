@@ -43,6 +43,8 @@ pub struct Carry {
     pub extent: f64,
     /// Station of its fore edge where it would land, if it would.
     pub landing: Option<f64>,
+    /// The margin of the rocket as it would be if released here, calibers.
+    pub margin: Option<f64>,
 }
 
 /// What the cursor is over.
@@ -599,6 +601,11 @@ impl Lanes<'_> {
         if p.x < LABEL_W {
             return None;
         }
+        // A pod's `Pod ×N` tag or its bracket selects the pod set.
+        if let Some(id) = self.pod_layout(axis, bounds_width).hit(rows, p) {
+            state.last_click = None;
+            return Some(Action::publish(Message::Select(Some(BarKey::Part(id)))).and_capture());
+        }
         match self.over(axis, rows, p, height) {
             Some(Over::Bar(hit)) => {
                 // Shift-click or Cmd/Ctrl-click adds the part to the selection (or removes it): no drag starts.
@@ -757,6 +764,14 @@ impl Lanes<'_> {
             let (cg_x, cp_x) = (axis.px(marks.cg), axis.px(marks.cp));
             let (show_cg, show_cp) = self.show;
             let both = show_cg && show_cp;
+            // Where they were, faint, while a change is previewed.
+            if let Some((was_cg, was_cp)) = self.scene.was {
+                for (station, on, color) in [(was_cg, show_cg, t.cg), (was_cp, show_cp, t.cp)] {
+                    if on {
+                        vline(f, axis.px(station), RULER_H, size.height - 12.0, dotted(color.scale_alpha(0.3)));
+                    }
+                }
+            }
             if show_cg {
                 vline_gapped(f, cg_x, RULER_H, size.height - 12.0, dotted(t.cg), &labels);
             }
@@ -1279,10 +1294,17 @@ impl Lanes<'_> {
         f.fill_rectangle(rect.position(), rect.size(), t.bg_200);
         f.fill_rectangle(rect.position(), rect.size(), t.accent_soft);
         outline(f, rect, dashed(t.accent));
-        put(f, &label, Point::new(rect.x + 6.0, rect.y + rect.height / 2.0), t.ink, TEXT_BAR, SANS, Alignment::Left, alignment::Vertical::Center);
+        // A ghost that starts before the plot (a negative station) keeps its name and its tag clear of the lane-name column and
+        // the ruler's header above it.
+        let x = rect.x.max(LABEL_W);
+        put(f, &label, Point::new(x + 6.0, rect.y + rect.height / 2.0), t.ink, TEXT_BAR, SANS, Alignment::Left, alignment::Vertical::Center);
         let start = carry.landing.unwrap_or_else(|| axis.station(rect.x));
-        let text = ui::bare(start, Quantity::Length, self.units);
+        let station = ui::bare(start, Quantity::Length, self.units);
+        let text = match carry.margin {
+            Some(margin) => format!("{station} · {margin:.2} cal"),
+            None => station,
+        };
         let busy = carry.landing.is_some();
-        tag(f, rect.x, RULER_H / 2.0 - 1.0, &text, if busy { t.accent_ink } else { t.ink_faint }, if busy { t.accent } else { t.bg_300 }, None, false);
+        tag(f, x, RULER_H / 2.0 - 1.0, &text, if busy { t.accent_ink } else { t.ink_faint }, if busy { t.accent } else { t.bg_300 }, None, false);
     }
 }

@@ -343,7 +343,8 @@ fn menu_item(current: bool, accent: bool) -> impl Fn(&Theme, button::Status) -> 
     }
 }
 
-/// The issues list: every warning and error of the active configuration; a line with a part selects it when clicked.
+/// The issues list: every warning and error of the active configuration (a line with a part selects it when clicked), then the
+/// notes of an OpenRocket import at the neutral `info` level, one line each.
 fn issues_list<'a>(ctx: &'a Ctx) -> Element<'a, Message> {
     let header = container(ui::label("ISSUES")).padding([SPACE_2, SPACE_3]);
     let lines = column(ctx.physics.issues().map(|w| {
@@ -353,7 +354,18 @@ fn issues_list<'a>(ctx: &'a Ctx) -> Element<'a, Message> {
         let item: Element<'a, Message> = item.on_press(Message::SelectIssue(w.part, w.field)).boxed();
         item
     }));
-    let panel = container(mouse_area(column![header, lines]).on_press(Message::Nothing)).width(ISSUES_W).style(theme::overlay);
+    let mut list = column![header, lines];
+    if !ctx.import_notes.is_empty() {
+        list = list.push(container(ui::label("IMPORTED FROM OPENROCKET")).padding([SPACE_2, SPACE_3]).boxed());
+        list = list.push(
+            column(ctx.import_notes.iter().map(|note| {
+                let line = text(note.as_str()).size(TEXT_BODY).style(theme::colored(|t| t.ink_muted));
+                container(line).width(Fill).padding([SPACE_1 + 2.0, SPACE_3]).boxed()
+            }))
+            .boxed(),
+        );
+    }
+    let panel = container(mouse_area(list).on_press(Message::Nothing)).width(ISSUES_W).style(theme::overlay);
     floating(panel.boxed(), Anchor::BottomRight)
 }
 

@@ -2,7 +2,7 @@
 //! with [`Rocket::set_dim`] (limited, with the reason when it stops), and listed per part as [`HandleSpec`]s for the
 //! viewport's handles (design kit, DirectEdit). All values SI: metres and radians.
 
-use crate::geometry::{NoseShape, PartKind, RadialKind, Shoulder};
+use crate::geometry::{Anchor, NoseShape, PartKind, RadialKind, Shoulder};
 use crate::internal::{InternalKind, PartRef};
 use crate::{PartId, Rocket};
 
@@ -11,6 +11,9 @@ use crate::{PartId, Rocket};
 pub enum Dim {
     /// Length along the axis (axial part, inner tube, coupler, mass component, launch lug).
     Length,
+    /// Length of an axial part, an inner tube or a coupler dragged from its *fore* end: the aft end stays where it is (the
+    /// part grows or shrinks forward). Reads and clamps as [`Dim::Length`].
+    ForeLength,
     /// The part's (aft) outer diameter: nose base, tube, transition aft, inner tube or coupler outer, lug diameter.
     Diameter,
     /// A transition's fore diameter.
@@ -68,6 +71,7 @@ impl Dim {
     pub fn label(self) -> String {
         match self {
             Dim::Length => "LENGTH".into(),
+            Dim::ForeLength => "LENGTH".into(),
             Dim::Diameter => "DIAMETER".into(),
             Dim::ForeDiameter => "FORE DIAMETER".into(),
             Dim::Wall => "WALL".into(),
@@ -207,11 +211,14 @@ impl Rocket {
                     }
                     v
                 }
-                PartKind::BodyTube { .. } => vec![spec(Dim::Length, true, Side), spec(Dim::Diameter, true, Side), spec(Dim::Wall, false, Inside)],
+                PartKind::BodyTube { .. } => {
+                    vec![spec(Dim::Length, true, Side), spec(Dim::ForeLength, true, Side), spec(Dim::Diameter, true, Side), spec(Dim::Wall, false, Inside)]
+                }
                 PartKind::Transition { .. } => vec![
                     spec(Dim::ForeDiameter, true, Side),
                     spec(Dim::Diameter, true, Side),
                     spec(Dim::Length, true, Side),
+                    spec(Dim::ForeLength, true, Side),
                     spec(Dim::Wall, false, Inside),
                     spec(Dim::ForeShoulderLength, false, Inside),
                     spec(Dim::ForeShoulderDiameter, false, Inside),
@@ -254,14 +261,19 @@ impl Rocket {
             }
             PartRef::Internal(i) => match &i.kind {
                 InternalKind::InnerTube { motor_mount, .. } => {
-                    let mut v = vec![spec(Dim::Length, true, Inside), spec(Dim::Position, true, Inside)];
+                    let mut v = vec![spec(Dim::Length, true, Inside), spec(Dim::ForeLength, true, Inside), spec(Dim::Position, true, Inside)];
                     if *motor_mount {
                         v.push(spec(Dim::Overhang, true, Inside));
                     }
                     v.extend([spec(Dim::Diameter, true, Inside), spec(Dim::Wall, false, Inside)]);
                     v
                 }
-                InternalKind::Coupler { .. } => vec![spec(Dim::Length, true, Inside), spec(Dim::Position, true, Inside), spec(Dim::Wall, false, Inside)],
+                InternalKind::Coupler { .. } => vec![
+                    spec(Dim::Length, true, Inside),
+                    spec(Dim::ForeLength, true, Inside),
+                    spec(Dim::Position, true, Inside),
+                    spec(Dim::Wall, false, Inside),
+                ],
                 InternalKind::CenteringRing { .. } | InternalKind::EngineBlock { .. } => {
                     vec![spec(Dim::Position, true, Inside), spec(Dim::Thickness, true, Inside), spec(Dim::InnerDiameter, false, Inside)]
                 }
@@ -291,7 +303,7 @@ impl Rocket {
         }
         match self.kind_of(id)? {
             PartRef::Axial(p) => match dim {
-                Dim::Length => Some(p.kind.length()),
+                Dim::Length | Dim::ForeLength => Some(p.kind.length()),
                 Dim::Diameter => Some(p.kind.aft_diameter()),
                 Dim::ForeDiameter => matches!(p.kind, PartKind::Transition { .. }).then(|| p.kind.fore_diameter()),
                 Dim::Wall => Some(p.thickness),
@@ -332,7 +344,7 @@ impl Rocket {
                 match (dim, &p.kind) {
                     (Dim::Position, _) => Some(p.offset),
                     (
-                        Dim::Length,
+                        Dim::Length | Dim::ForeLength,
                         InternalKind::InnerTube { length, .. } | InternalKind::Coupler { length, .. } | InternalKind::MassComponent { length, .. },
                     ) => Some(*length),
                     (Dim::Diameter, InternalKind::InnerTube { .. } | InternalKind::Coupler { .. } | InternalKind::Bulkhead { .. }) => Some(res.outer_diameter),
@@ -357,7 +369,7 @@ impl Rocket {
         let part = self.kind_of(id)?;
         let length_of_parent = |parent: PartId| self.part(parent).map_or(MAX_LEN, |p| p.kind.length());
         Some(match (part, dim) {
-            (PartRef::Axial(_), Dim::Length) => (MIN_LEN, MAX_LEN, "MINIMUM LENGTH", "MAXIMUM LENGTH"),
+            (PartRef::Axial(_), Dim::Length | Dim::ForeLength) => (MIN_LEN, MAX_LEN, "MINIMUM LENGTH", "MAXIMUM LENGTH"),
             (PartRef::Axial(p), Dim::Diameter | Dim::ForeDiameter) => (MIN_DIA.max(2.0 * p.thickness), MAX_DIA, "WALL FILLS THE TUBE", "MAXIMUM DIAMETER"),
             (PartRef::Axial(p), Dim::Wall) => (0.0, p.kind.fore_diameter().max(p.kind.aft_diameter()) / 2.0, "NO WALL", "WALL = RADIUS"),
             (PartRef::Axial(p), d) if shoulder_dim(d).is_some() => {
@@ -396,6 +408,7 @@ impl Rocket {
                 let res = self.resolved(id)?;
                 match dim {
                     Dim::Position => (0.0, (length_of_parent(p.parent) - p.kind.extent()).max(0.0), "AT TUBE FORE", "AT TUBE AFT"),
+                    Dim::ForeLength => (0.0005, p.offset + p.kind.extent(), "MINIMUM", "TUBE FORE"),
                     Dim::Length | Dim::PackedLength | Dim::Thickness => (0.0005, room, "MINIMUM", "TUBE END"),
                     Dim::Diameter => {
                         let wall = match p.kind {
@@ -443,7 +456,7 @@ impl Rocket {
             PartRef::Axial(p) => {
                 let (kind, old_fore, old_aft) = (p.kind.clone(), p.kind.fore_diameter(), p.kind.aft_diameter());
                 match dim {
-                    Dim::Length => self.set_kind(id, kind.with_length(v)),
+                    Dim::Length | Dim::ForeLength => self.resize_axial(id, kind.with_length(v)),
                     Dim::Diameter => {
                         let new = kind.with_aft_diameter(v);
                         let new = if matches!(new, PartKind::BodyTube { .. }) { new.with_fore_diameter(v) } else { new };
@@ -513,7 +526,9 @@ impl Rocket {
             }
             PartRef::Internal(p) => {
                 let (parent, mut kind) = (p.parent, p.kind.clone());
-                if dim == Dim::Position {
+                if dim == Dim::ForeLength {
+                    self.set_fore_length(id, kind, v)
+                } else if dim == Dim::Position {
                     self.move_internal(id, parent, v).is_ok()
                 } else {
                     match (&mut kind, dim) {
@@ -544,6 +559,101 @@ impl Rocket {
             }
         };
         ok.then_some(DimEdit { applied: v, limited })
+    }
+
+    /// Replaces the geometry of axial part `id` with `kind`, changing its length, and keeps every radial and internal part on
+    /// it at the same distance from its [`Anchor`] reference: a fin at the bottom stays flush with the aft face, a part at the
+    /// top stays with the fore face, a middle one stays centred. The offsets are limited to the new length.
+    fn resize_axial(&mut self, id: PartId, kind: PartKind) -> bool {
+        let Some(old) = self.part(id).map(|p| p.kind.length()) else {
+            return false;
+        };
+        let new = kind.length();
+        let radials: Vec<(PartId, f64)> = self
+            .radials
+            .iter()
+            .filter(|r| r.parent == id)
+            .filter_map(|r| {
+                let (anchor, extent) = (self.anchor_of(r.id)?, r.kind.extent());
+                Some((r.id, anchor.offset(anchor.shown(r.offset, extent, old), extent, new)))
+            })
+            .collect();
+        let internals: Vec<(PartId, f64)> = self
+            .internals
+            .iter()
+            .filter(|p| p.parent == id)
+            .filter_map(|p| {
+                let (anchor, extent) = (self.anchor_of(p.id)?, p.kind.extent());
+                Some((p.id, anchor.offset(anchor.shown(p.offset, extent, old), extent, new)))
+            })
+            .collect();
+        if !self.set_kind(id, kind) {
+            return false;
+        }
+        for (rid, offset) in radials {
+            let Some(r) = self.radials.iter().find(|r| r.id == rid) else {
+                continue;
+            };
+            let offset = self.clamp_offset(id, offset, &r.kind).unwrap_or(0.0);
+            if let Some(r) = self.radials.iter_mut().find(|r| r.id == rid) {
+                r.offset = offset;
+                r.kind = r.kind.limited_at(offset);
+            }
+        }
+        for (pid, offset) in internals {
+            let Some(p) = self.internals.iter().find(|p| p.id == pid) else {
+                continue;
+            };
+            let offset = self.clamp_internal_offset(id, offset, p.kind.extent()).unwrap_or(0.0);
+            if let Some(p) = self.internals.iter_mut().find(|p| p.id == pid) {
+                p.offset = offset;
+            }
+        }
+        true
+    }
+
+    /// Sets the length of inner tube or coupler `id` to `length` with its aft end where it is (the offset follows).
+    fn set_fore_length(&mut self, id: PartId, mut kind: InternalKind, length: f64) -> bool {
+        let Some(p) = self.internals.iter_mut().find(|p| p.id == id) else {
+            return false;
+        };
+        let aft = p.offset + p.kind.extent();
+        match &mut kind {
+            InternalKind::InnerTube { length: l, .. } | InternalKind::Coupler { length: l, .. } => *l = length,
+            _ => return false,
+        }
+        p.offset = (aft - length).max(0.0);
+        self.set_internal_kind(id, kind)
+    }
+
+    /// What the offset of radial or internal part `id` is measured from: the anchor it was given, else the bottom for a fin
+    /// and a motor mount and the top for everything else. `None` if `id` is neither.
+    pub fn anchor_of(&self, id: PartId) -> Option<Anchor> {
+        if let Some(r) = self.radial(id) {
+            return Some(r.anchor.unwrap_or(if r.kind.is_fin() { Anchor::Bottom } else { Anchor::Top }));
+        }
+        let p = self.internal(id)?;
+        let mount = matches!(p.kind, InternalKind::InnerTube { motor_mount: true, .. });
+        Some(p.anchor.unwrap_or(if mount { Anchor::Bottom } else { Anchor::Top }))
+    }
+
+    /// Sets what the offset of radial or internal part `id` is measured from. The part does not move. Returns whether `id` is
+    /// such a part.
+    pub fn set_anchor(&mut self, id: PartId, anchor: Anchor) -> bool {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.set_anchor(id, anchor)).unwrap_or(false);
+        }
+        if let Some(r) = self.radials.iter_mut().find(|r| r.id == id) {
+            r.anchor = Some(anchor);
+            return true;
+        }
+        match self.internals.iter_mut().find(|p| p.id == id) {
+            Some(p) => {
+                p.anchor = Some(anchor);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Carries a diameter change from part `i` to its neighbour on the aft (`aft`) or fore side: a face equal to `old` takes
@@ -744,6 +854,46 @@ mod tests {
         assert_eq!(e.limited, None);
         assert_eq!(r.dim(nose, Dim::Diameter), Some(0.12));
         assert_eq!(r.dim(tail, Dim::Diameter), Some(0.12));
+    }
+
+    /// Fins at Bottom +0 and a ring at Top +0.02 on the tail tube.
+    fn finned() -> (Rocket, PartId, PartId, PartId, PartId) {
+        let (mut r, nose, _, tail) = rocket();
+        let fin = RadialKind::FinSet { root_chord: 0.12, tip_chord: 0.05, span: 0.07, sweep: 0.06, thickness: 0.003 };
+        let fins = r.attach_radial(tail, 0.3 - 0.12, 0.0, 3, fin).unwrap();
+        let ring = InternalKind::CenteringRing { outer_diameter: None, inner_diameter: None, thickness: 0.006 };
+        let ring = r.attach_internal(tail, 0.02, ring).unwrap();
+        (r, tail, fins, ring, nose)
+    }
+
+    /// Station measured back from the rocket's aft end: the frame a fore-end drag holds still (the camera follows it).
+    fn from_aft(r: &Rocket, id: PartId) -> f64 {
+        r.length() - r.part_station(id).unwrap()
+    }
+
+    #[test]
+    fn aft_drag_keeps_bottom_fins_flush() {
+        let (mut r, tail, fins, ring, _) = finned();
+        let top = r.part_station(tail).unwrap();
+        r.set_dim(tail, Dim::Length, 0.45).unwrap();
+        assert_eq!(r.part_station(tail), Some(top));
+        let (_, aft) = r.part_span(tail).unwrap();
+        let (_, fins_aft) = r.part_span(fins).unwrap();
+        assert!((aft - fins_aft).abs() < 1e-12, "fins flush with the bottom");
+        assert_eq!(r.anchor_of(fins), Some(Anchor::Bottom));
+        assert!((r.part_station(ring).unwrap() - (top + 0.02)).abs() < 1e-12, "top-relative ring stays with the top");
+    }
+
+    #[test]
+    fn fore_drag_keeps_the_aft_end_and_fins_in_place() {
+        let (mut r, tail, fins, ring, nose) = finned();
+        let (tail_aft, fins_at, nose_at) = (from_aft(&r, tail) - 0.3, from_aft(&r, fins), from_aft(&r, nose));
+        let ring_from_top = r.part_station(ring).unwrap() - r.part_station(tail).unwrap();
+        r.set_dim(tail, Dim::ForeLength, 0.45).unwrap();
+        assert!((from_aft(&r, tail) - 0.45 - tail_aft).abs() < 1e-12, "aft end stays");
+        assert!((from_aft(&r, fins) - fins_at).abs() < 1e-12, "fins stay put");
+        assert!((from_aft(&r, nose) - nose_at - 0.15).abs() < 1e-12, "nose moves forward by the change");
+        assert!((r.part_station(ring).unwrap() - r.part_station(tail).unwrap() - ring_from_top).abs() < 1e-12, "ring stays with the top");
     }
 
     #[test]

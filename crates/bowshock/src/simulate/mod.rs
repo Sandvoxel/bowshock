@@ -50,7 +50,7 @@ use crate::widgets::ground_track::{GroundMessage, GroundTrack};
 use crate::widgets::plot::{header_parts, legend, PanelAction, PlotGroup, PlotMessage, PlotState, PlotView, SeriesColor};
 use crate::widgets::segmented::{segmented_dense, Dense};
 
-use bowshock_model::{FlightDef, PlotLayout, Rocket, StabilityBands};
+use bowshock_model::{FlightDef, PlotLayout, PlotX, Rocket, StabilityBands};
 use flight::{Dispersed, Flight, FlightId, MotorChoice, Run, Spec, Times};
 use layout::Preset;
 use picker::{Mode, Picker};
@@ -99,6 +99,8 @@ pub enum LayoutEdit {
     SetPrimary(usize, &'static str),
     /// Add the source to the panel, or remove it from there.
     ToggleSource(usize, &'static str),
+    /// Plot every panel against this (time, altitude, Mach, ground distance).
+    X(PlotX),
 }
 
 /// A finished simulation, as the worker thread reports it.
@@ -215,6 +217,8 @@ pub struct State {
     own_edits: u64,
     /// The flight being renamed and the text typed so far.
     renaming: Option<(FlightId, String)>,
+    /// The plots are shown in imperial units: the zoom's full x range follows that group (lengths along x differ by unit).
+    imperial: bool,
 }
 
 impl Default for State {
@@ -246,6 +250,7 @@ impl State {
             bands,
             own_edits: 0,
             renaming: None,
+            imperial: false,
         };
         state.rebuild();
         state
@@ -259,7 +264,14 @@ impl State {
         let (defs, layout, bands) = (rocket.flights(), rocket.plot_layout(), rocket.stability_bands());
         if reloaded {
             *self = State::of(defs, layout, bands);
+            self.imperial = format::imperial(ctx.units);
+            self.rebuild();
             return;
+        }
+        let imperial = format::imperial(ctx.units);
+        if self.imperial != imperial {
+            self.imperial = imperial;
+            self.rebuild();
         }
         if self.bands != bands {
             self.bands = bands;
@@ -288,8 +300,12 @@ impl State {
         let (label, outcome): (&str, Result<(), String>) = match edit {
             LayoutEdit::Preset(Preset::Custom) if Preset::of(&next) == Preset::Custom => ("Set plots", Ok(())),
             LayoutEdit::Preset(preset) => {
-                next = preset.layout();
+                next = PlotLayout { x: next.x, ..preset.layout() };
                 ("Set plots", Ok(()))
+            }
+            LayoutEdit::X(x) => {
+                next.x = x;
+                ("Plot against", Ok(()))
             }
             LayoutEdit::AddPanel => ("Add plot", if layout::add_panel(&mut next) { Ok(()) } else { Err("The plots hold at most 8 panels".to_string()) }),
             LayoutEdit::RemovePanel(i) => {
@@ -442,7 +458,7 @@ impl State {
         } else {
             plots::ground(&entries, reference)
         };
-        if let Some(g) = groups[0].as_ref() {
+        if let Some(g) = groups[usize::from(self.imperial)].as_ref() {
             self.plot.set_full(g.x_extent());
         }
         // `entries` borrows the flights; end it before assigning.
@@ -788,7 +804,9 @@ impl State {
         } else {
             add = add.on_press(Message::Layout(LayoutEdit::AddPanel));
         }
-        row![strip, Element::from(add)].spacing(SPACE_2).align_y(iced::Center).boxed()
+        let against: Vec<(PlotX, &str)> = PlotX::ALL.iter().map(|x| (*x, plots::x_label(*x))).collect();
+        let x = segmented_dense(&against, self.layout.x, |x| Message::Layout(LayoutEdit::X(x)), Dense { height: 24.0, pad: 6.0, size: 12.0 }, false);
+        row![strip, Element::from(add), crate::app::ui::label("VS"), x].spacing(SPACE_2).align_y(iced::Center).boxed()
     }
 
     /// What the centre shows before the selected flight has run.

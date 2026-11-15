@@ -1,0 +1,12 @@
+# OpenRocket import notes: open an .ork (BOWSHOCK_OPEN) and list what could not be carried over in the warnings chip's list.
+#   BOWSHOCK_OPEN=crates/bowshock-model/tests/data/mini_two_stage.ork cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/import-notes.drive /tmp/import-notes
+viewport 1280x800
+scale 2
+move (640, 400)
+screenshot 01-imported.png
+click "2 errors"
+screenshot 02-issues-and-notes.png
+click (640, 300)
+click "Light"
+click "2 errors"
+screenshot 03-issues-and-notes-light.png

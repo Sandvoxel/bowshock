@@ -1,0 +1,60 @@
+# Live balance preview: every drag that would change the rocket shows CG/CP/margin as if released now (markers, lanes,
+# status strip with deltas, drag tag margin), committed positions faint. Mid-drag shots, dark then light; each drag is dragged
+# back and undone (the bin ghost is dropped off any target).
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/livebalance.drive out/livebalance
+viewport 1280x800
+click "2D"
+press (861, 284)
+move (850, 284)
+move (800, 284)
+move (740, 284)
+screenshot fin-move-2d.png
+move (861, 284)
+release (861, 284)
+click (352, 20)
+click "3D"
+press (816, 247)
+move (805, 250)
+move (800, 260)
+move (760, 272)
+screenshot fin-move-3d.png
+move (816, 247)
+release (816, 247)
+click (352, 20)
+click "2D"
+press "Body tube"
+move (300, 400)
+move (380, 320)
+move (372, 312)
+screenshot bin-drag-in.png
+move (600, 520)
+release (600, 520)
+press (487, 729)
+move (500, 729)
+move (560, 729)
+move (620, 729)
+screenshot lane-bar.png
+move (487, 729)
+release (487, 729)
+click (352, 20)
+click (935, 20)
+press (861, 284)
+move (850, 284)
+move (800, 284)
+move (740, 284)
+screenshot light-fin-move-2d.png
+move (861, 284)
+release (861, 284)
+click (352, 20)
+press "Body tube"
+move (300, 400)
+move (380, 320)
+move (372, 312)
+screenshot light-bin-drag-in.png
+move (600, 520)
+release (600, 520)
+press (487, 729)
+move (500, 729)
+move (620, 729)
+screenshot light-lane-bar.png
+release (620, 729)

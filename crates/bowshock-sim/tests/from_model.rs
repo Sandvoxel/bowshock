@@ -459,3 +459,25 @@ fn stability_warnings_follow_the_documents_thresholds() {
     let long = w.iter().find(|w| w.message.contains("too long")).unwrap();
     assert_eq!((long.part, long.field), (Some(mount_id), Some(bowshock_model::Dim::Length)));
 }
+
+/// Fin roll angles and the free-form fin's mid-chord sweep and root reach the simulation: a 2-fin free-form set turned
+/// 90 deg from +Y carries its two angles, its body, its span-averaged mid-chord cosine and its real root chord.
+#[test]
+fn fin_angles_and_free_form_mid_chord_reach_the_vehicle() {
+    let (mut r, _) = single_stage();
+    let lower = r.parts()[2].id;
+    // Leading edge 0 -> 0.10 and trailing edge 0.16 -> 0.14 over span 0.05: the mid-chord line x = 0.08 + 0.8 y is
+    // straight, so its cosine is 1/sqrt(1 + 0.8^2) everywhere.
+    let points = vec![(0.0, 0.0), (0.10, 0.05), (0.14, 0.05), (0.16, 0.0)];
+    r.attach_radial(lower, 0.0, std::f64::consts::FRAC_PI_2, 2, RadialKind::FreeformFin { points, thickness: 0.003 }).unwrap();
+    let v = vehicle(&r, &MotorDb::bundled(), Phase::Full).unwrap();
+    let free = v.fin_sets.iter().find(|f| f.count == 2).unwrap();
+    assert_eq!(free.angles.len(), 2);
+    assert!((free.angles[0] - std::f64::consts::FRAC_PI_2).abs() < 1e-12 && (free.angles[1] - 1.5 * std::f64::consts::PI).abs() < 1e-12);
+    assert!((free.mid_chord_cos.unwrap() - 1.0 / 1.64f64.sqrt()).abs() < 1e-9);
+    let (a, b) = free.root_extent.unwrap();
+    assert!((b - a - 0.16).abs() < 1e-12 && a <= free.station + 1e-12);
+    assert_eq!(free.bodies, 1);
+    let three = v.fin_sets.iter().find(|f| f.count == 3).unwrap();
+    assert_eq!((three.parent, three.mid_chord_cos, three.root_extent), (free.parent, None, None));
+}

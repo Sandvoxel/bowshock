@@ -311,14 +311,27 @@ fn compare(label: &str, reference: &Value, imp: &ork::OrkImport, dir: &Path) -> 
             }
         };
         let result = simulate(&input);
+        // Bowshock takes the motor-exhaust area out of the base drag while a motor burns; OpenRocket does not. The same flight
+        // without that credit (motor diameter 0) shows how much of the difference it is.
+        let mut no_credit = input.clone();
+        for stage in &mut no_credit.vehicle.stages {
+            if let Some(m) = &mut stage.motor {
+                m.curve.diameter = 0.0;
+            }
+        }
+        let plain = simulate(&no_credit).summary;
         let sm = &result.summary;
         let r = &s["results"];
-        let rows: [(&str, f64, f64); 8] = [
+        // OpenRocket's own 50 ms step overshoots the rail end; its rail-exit speed is taken from the 2 ms run.
+        let fine = sims.iter().find(|x| x["variant"] == "calm_fine" && x["name"] == s["name"] && x["config"] == s["config"]).map_or(r, |x| &x["results"]);
+        let rows: [(&str, f64, f64); 10] = [
             ("apogee (m)", f(r, "apogee_m"), sm.apogee),
+            ("apogee (m), BS without the exhaust base-drag credit", f(r, "apogee_m"), plain.apogee),
             ("max velocity (m/s)", f(r, "max_velocity_ms"), sm.max_velocity),
+            ("max velocity (m/s), BS without the credit", f(r, "max_velocity_ms"), plain.max_velocity),
             ("max Mach", f(r, "max_mach"), sm.max_mach),
             ("time to apogee (s)", f(r, "time_to_apogee_s"), sm.time_to_apogee),
-            ("rail-exit velocity (m/s)", f(r, "rail_exit_velocity_ms"), sm.rail_exit_velocity),
+            ("rail-exit velocity (m/s, OR at 2 ms step)", f(fine, "rail_exit_velocity_ms"), sm.rail_exit_velocity),
             ("stability off rail (cal)", f(r, "stability_off_rail_cal"), sm.stability_off_rail_cal),
             ("ground-hit velocity (m/s)", f(r, "ground_hit_velocity_ms"), sm.ground_hit_velocity),
             ("flight time (s)", f(r, "flight_time_s"), sm.flight_time),

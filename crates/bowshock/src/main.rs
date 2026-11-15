@@ -25,7 +25,8 @@ use theme::SANS;
 
 const USAGE: &str = "usage: bowshock [--example]                         open the app (optionally with the example rocket loaded)
        bowshock drive [--example] <script> [out-dir]  run a UI script headless, saving screenshots (see src/drive.rs)
-       bowshock gallery [script [out-dir]]            the widget gallery";
+       bowshock gallery [script [out-dir]]            the widget gallery
+       bowshock import <file.ork> <out.bowshock>      convert an OpenRocket design (warnings on stderr)";
 
 fn main() -> std::process::ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -51,6 +52,7 @@ fn main() -> std::process::ExitCode {
                 }
             }
         }
+        ["import", ork, out] => import_ork(std::path::Path::new(ork), std::path::Path::new(out)),
         ["gallery"] => match gallery::app().run() {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(e) => {
@@ -73,6 +75,44 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::from(2)
         }
     }
+}
+
+/// `bowshock import`: converts an OpenRocket `.ork` into a `.bowshock` document. What could not be carried over is listed on
+/// stderr, with the motors the design uses and whether the bundled database or `$BOWSHOCK_MOTORS_DIR` holds them.
+fn import_ork(ork: &std::path::Path, out: &std::path::Path) -> std::process::ExitCode {
+    let imp = match bowshock_model::ork::import_file(ork) {
+        Ok(imp) => imp,
+        Err(e) => {
+            eprintln!("bowshock import: {}: {e}", ork.display());
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = std::fs::write(out, imp.rocket.to_json()) {
+        eprintln!("bowshock import: {}: {e}", out.display());
+        return std::process::ExitCode::FAILURE;
+    }
+    for w in &imp.warnings {
+        eprintln!("warning: {w}");
+    }
+    let mut db = bowshock_motors::MotorDb::bundled();
+    if let Some(dir) = app::physics::user_motors_dir() {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            if entry.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("eng")) {
+                let _ = db.load_eng_file(entry.path());
+            }
+        }
+    }
+    for m in &imp.motors {
+        let known = db.motors.iter().any(|k| k.designation.eq_ignore_ascii_case(&m.designation));
+        eprintln!(
+            "motor {} ({}): {}",
+            m.designation,
+            m.manufacturer,
+            if known { "found" } else { "NOT in the motor database; add its .eng to $BOWSHOCK_MOTORS_DIR" }
+        );
+    }
+    println!("{} -> {} ({} warnings)", ork.display(), out.display(), imp.warnings.len());
+    std::process::ExitCode::SUCCESS
 }
 
 /// The application; with `example` the built-in example rocket is loaded at start.

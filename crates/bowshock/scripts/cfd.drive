@@ -1,10 +1,10 @@
-# Analyze > CFD table, from a document that already carries its solved table (reopening a saved file: the provenance reads
-# `… · solved on GPU (Luma) · N min ago`, and nothing is solved again).
-#
-# Make that document once (solves the example's ten Mach numbers on the GPU, minutes; prints the Extended / CFD comparison):
-#   BOWSHOCK_CFD_FIXTURE=/tmp/example-cfd.bowshock cargo test -p bowshock -- --ignored the_example_table --nocapture
-# Then:
-#   BOWSHOCK_OPEN=/tmp/example-cfd.bowshock cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/cfd.drive out/cfd
+# Analyze > CFD table end to end: choosing the method starts a real solve (the example's ten Mach numbers, 0.2 to 3, coarse grid,
+# on the GPU through Luma). The headless driver waits for every running task before the next step, so the click on
+# "CFD table" returns once the solve has finished and the table is stored in the document (minutes; see `cfd.rs`).
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/cfd.drive out/cfd
+# With `BOWSHOCK_OPEN=<file.bowshock>` naming a document that already carries the table (made by the ignored test
+# `the_example_table_solves_and_agrees_with_extended` with `BOWSHOCK_CFD_FIXTURE=<file>`), nothing is solved again and the
+# provenance reads `… · solved on GPU (Luma) · N min ago`.
 viewport 1300x800
 click "Analyze"
 click "CFD table"

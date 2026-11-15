@@ -280,10 +280,19 @@ fn per_run_margin(run: &Run, x: f64) -> Option<f64> {
     }
 }
 
+/// The stability section's title: under the CFD table it says the numbers are Extended's (the solver is zero-lift only).
+fn stability_title(out: &Output) -> String {
+    if out.cfd.is_some() {
+        "Stability · Extended".into()
+    } else {
+        "Stability".into()
+    }
+}
+
 fn mach(out: &Output, run: &Run, points: &[MachPoint], x: f64, units: UnitSystem) -> Readout {
     let Some(at) = mach_at(points, x) else { return Readout { cursor: String::new(), sections: Vec::new() } };
     let like = MachPointLike { x, margin: at.margin_cal, cp: at.cp, cn_alpha: at.cn_alpha };
-    let stability = Section { title: "Stability".into(), rows: stability_rows(run, &like, units, out) };
+    let stability = Section { title: stability_title(out), rows: stability_rows(run, &like, units, out) };
 
     let d = at.drag;
     let show_other = other_visible(points);
@@ -327,7 +336,7 @@ fn mach(out: &Output, run: &Run, points: &[MachPoint], x: f64, units: UnitSystem
         }
         None => format!("Worst case {m0:.1} – {m1:.1}"),
     };
-    let drag = Section { title: "Drag".into(), rows: drag };
+    let drag = Section { title: if out.cfd.is_some() { "Drag · CFD".into() } else { "Drag".into() }, rows: drag };
     let worst = Section { title, rows: worst };
     // The drag breakdown analysis reads drag first; the others read stability first.
     let sections = if out.analysis == Analysis::Drag { vec![drag, stability, worst] } else { vec![stability, drag, worst] };
@@ -338,7 +347,7 @@ fn alpha(out: &Output, run: &Run, alpha_rad: f64, units: UnitSystem) -> Readout 
     let Data::Alpha(points) = &run.data else { unreachable!("called for an angle sweep") };
     let Some(at) = alpha_at(points, alpha_rad) else { return Readout { cursor: String::new(), sections: Vec::new() } };
     let like = MachPointLike { x: alpha_rad, margin: at.margin_cal, cp: at.cp, cn_alpha: at.cn_alpha };
-    let stability = Section { title: "Stability".into(), rows: stability_rows(run, &like, units, out) };
+    let stability = Section { title: stability_title(out), rows: stability_rows(run, &like, units, out) };
     let force = Section {
         title: "Force".into(),
         rows: vec![Row::new("Normal force CN", format!("{:.3}", at.cn), "").big(), Row::new("Total Cd", cd(at.drag.total), "")],

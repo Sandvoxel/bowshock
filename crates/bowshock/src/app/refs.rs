@@ -119,7 +119,7 @@ pub fn dim_short(dim: Dim) -> String {
         Dim::Diameter => "Ø".into(),
         Dim::ForeDiameter => "Fore Ø".into(),
         Dim::InnerDiameter => "Inner Ø".into(),
-        Dim::Length => "L".into(),
+        Dim::Length | Dim::ForeLength => "L".into(),
         Dim::Wall => "Wall".into(),
         Dim::Position => "Offset".into(),
         Dim::Span | Dim::Height => "Height".into(),

@@ -45,6 +45,8 @@ pub struct Markers<'a> {
     pub mesh: &'a Mesh,
     /// `(cg, cp, margin in calibers)` of the phase on show, from the physics cache.
     pub balance: Option<(f64, f64, f64)>,
+    /// The committed `(cg, cp)` while a change is previewed: drawn faint where they were, joined to the previewed ones.
+    pub ghost: Option<(f64, f64)>,
     /// Whether the CG and the CP are drawn (the status strip's cells toggle them); the margin bracket needs both.
     pub show: (bool, bool),
     pub stages: &'a [Stage],
@@ -111,11 +113,10 @@ pub fn balance_label_rects(rocket: &Rocket, camera: &Camera, size: Size, marks: 
     let rect = |w: f32, x: f32, y_top: f32| Rectangle::new(Point::new(x, y_top), Size::new(w, TEXT_LABEL));
     let width = |s: &str| s.chars().count() as f32 * TEXT_LABEL * 0.6;
     let (a, b) = (axis(marks.cg as f32), axis(marks.cp as f32));
-    let apart = (b.x - a.x).abs() > 78.0;
     let mut out = Vec::new();
-    for (zc, at, name, value, right) in
-        [(marks.cg as f32, a, "CG", marks.cg, apart || a.x <= b.x), (marks.cp as f32, b, "CP", marks.cp, !(apart || b.x >= a.x))]
-    {
+    // The labels lean away from each other (see [`label_sides`]).
+    let (cg_right, cp_right) = label_sides(a, b);
+    for (zc, at, name, value, right) in [(marks.cg as f32, a, "CG", marks.cg, cg_right), (marks.cp as f32, b, "CP", marks.cp, cp_right)] {
         if !(if name == "CG" { marks.show.0 } else { marks.show.1 }) {
             continue;
         }
@@ -222,7 +223,15 @@ impl Markers<'_> {
     }
 }
 
-fn margin_color(t: &Tokens, bands: bowshock_model::StabilityBands, margin: f64) -> iced::Color {
+/// Which of the CG (`.0`) and CP (`.1`) value labels lean left of their marker: the marker further left leans left and the
+/// other right, so the two never run into each other however close they are or in which order; together (`a.x == b.x`) the CG
+/// leans left. `a` is the CG's screen point, `b` the CP's.
+fn label_sides(a: Point, b: Point) -> (bool, bool) {
+    let cg_left = a.x <= b.x;
+    (cg_left, !cg_left)
+}
+
+pub(super) fn margin_color(t: &Tokens, bands: bowshock_model::StabilityBands, margin: f64) -> iced::Color {
     if margin >= bands.stable {
         t.ok
     } else if margin >= bands.marginal {
@@ -443,11 +452,32 @@ impl canvas::Program<Message> for Markers<'_> {
             let floor = if self.stages.len() > 1 && self.explode < 0.01 { self.axis(0.0, size).y + stage_row + 24.0 + GLYPH_R } else { f32::MIN };
             let glyph_y = |at: Point| (at.y + glyph_row).max(floor);
             let (a, b) = (self.axis(zc, size), self.axis(zp, size));
-            let apart = (b.x - a.x).abs() > 78.0;
-            for (z, at, color, name, value, dash, align) in [
-                (zc, a, t.cg.scale_alpha(fade), "CG", cg, false, if apart || a.x <= b.x { alignment::Horizontal::Right } else { alignment::Horizontal::Left }),
-                (zp, b, t.cp.scale_alpha(fade), "CP", cp, true, if apart || b.x >= a.x { alignment::Horizontal::Left } else { alignment::Horizontal::Right }),
-            ] {
+            let side = |leans_left: bool| if leans_left { alignment::Horizontal::Right } else { alignment::Horizontal::Left };
+            let (cg_left, cp_left) = label_sides(a, b);
+            if let Some((gcg, gcp)) = self.ghost {
+                for (z, now, color, show, cp) in [(gcg, cg, t.cg, self.show.0, false), (gcp, cp, t.cp, self.show.1, true)] {
+                    if !show || (z - now).abs() < 1e-9 {
+                        continue;
+                    }
+                    let (from, to) = (self.axis(z as f32, size), self.axis(now as f32, size));
+                    let faint = color.scale_alpha(0.45 * fade);
+                    let (g0, g1) = (Point::new(from.x, glyph_y(from)), Point::new(to.x, glyph_y(to)));
+                    let r = self.radius_px(z as f32, size).max(body * 0.2);
+                    let thin = Stroke::default().with_color(faint).with_width(1.0);
+                    frame.stroke(&Path::line(Point::new(from.x, from.y + r), Point::new(from.x, g0.y - GLYPH_R)), thin);
+                    // From where it was to where it would be.
+                    let lead = GLYPH_R.copysign(g1.x - g0.x);
+                    frame.stroke(&Path::line(Point::new(g0.x + lead, g0.y), Point::new(g1.x - lead, g1.y)), thin);
+                    if cp {
+                        cp_glyph(&mut frame, g0, faint, t.bg_000.scale_alpha(fade));
+                    } else {
+                        cg_glyph(&mut frame, g0, faint, t.bg_000.scale_alpha(fade));
+                    }
+                }
+            }
+            for (z, at, color, name, value, dash, align) in
+                [(zc, a, t.cg.scale_alpha(fade), "CG", cg, false, side(cg_left)), (zp, b, t.cp.scale_alpha(fade), "CP", cp, true, side(cp_left))]
+            {
                 if !(if name == "CG" { self.show.0 } else { self.show.1 }) {
                     continue;
                 }
@@ -590,4 +620,20 @@ pub fn bottom_bar<'a, M: 'a>(mach: f64, alpha_deg: f64, pairs: Vec<(&'static str
         container(row(items).align_y(alignment::Vertical::Bottom)).width(Fill).height(Fill).padding(SPACE_4).align_y(alignment::Vertical::Bottom).boxed()
     })
     .boxed()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_cg_and_cp_labels_lean_away_from_each_other_in_either_order() {
+        // CG fore of the CP (a stable rocket): CG label to the left, CP label to the right.
+        assert_eq!(label_sides(Point::new(100.0, 0.0), Point::new(110.0, 0.0)), (true, false));
+        // CP fore of the CG (a preview of an unstable rocket, however far apart): the other way round, never towards each other.
+        assert_eq!(label_sides(Point::new(200.0, 0.0), Point::new(110.0, 0.0)), (false, true));
+        // Together: one each way.
+        let (cg, cp) = label_sides(Point::new(50.0, 0.0), Point::new(50.0, 0.0));
+        assert_ne!(cg, cp);
+    }
 }

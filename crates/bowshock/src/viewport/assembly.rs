@@ -67,6 +67,9 @@ pub struct Overlay<'a> {
     pub snap_angle: u8,
     /// The view toolbar's grid step, metres.
     pub snap_step: f64,
+    /// The margin of the rocket as it would be if released now, calibers: appended to the cursor tag in its stability band's
+    /// colour. `None` shows nothing (no valid target).
+    pub margin: Option<f64>,
 }
 
 /// The pod body the dragged part would be on a tube's side: that one part with what stands on and in it, ids kept for a part
@@ -282,7 +285,7 @@ impl canvas::Program<Message> for Overlay<'_> {
                 mm(station + target.offset),
                 target.angle.to_degrees().round() % 360.0
             );
-            tag(&mut frame, cursor, 0.0, &label, t.ink, t.line_200, t.bg_200);
+            tag_with(&mut frame, cursor, 0.0, &label, margin_suffix(self.rocket, t, self.margin), t.ink, t.line_200, t.bg_200);
             return vec![frame.into_geometry()];
         }
 
@@ -307,7 +310,8 @@ impl canvas::Program<Message> for Overlay<'_> {
         };
         // The tag sits down-right of the cursor (after the no-entry glyph when there is one).
         let glyph = if target.is_some() { 0.0 } else { 18.0 };
-        tag(&mut frame, cursor, glyph, &label, t.ink, t.line_200, t.bg_200);
+        let suffix = margin_suffix(self.rocket, t, self.margin.filter(|_| target.is_some()));
+        tag_with(&mut frame, cursor, glyph, &label, suffix, t.ink, t.line_200, t.bg_200);
         vec![frame.into_geometry()]
     }
 
@@ -322,8 +326,20 @@ impl canvas::Program<Message> for Overlay<'_> {
 
 /// A framed square tag with `label` in MONO, down-right of `cursor` (`indent` px further right), flipped to stay inside the frame.
 pub fn tag(frame: &mut Frame, cursor: Point, indent: f32, label: &str, ink: Color, edge: Color, bg: Color) {
+    tag_with(frame, cursor, indent, label, None, ink, edge, bg);
+}
+
+/// The text the tag appends for the previewed margin: ` · 2.07 cal` in the colour of the margin's stability band.
+pub fn margin_suffix(rocket: &Rocket, t: &crate::tokens::Tokens, margin: Option<f64>) -> Option<(String, Color)> {
+    margin.map(|m| (format!(" · {m:.2} cal"), super::markers::margin_color(t, rocket.stability_bands(), m)))
+}
+
+/// [`tag`] with `suffix` after the label, in its own colour (the previewed margin).
+#[allow(clippy::too_many_arguments)]
+pub fn tag_with(frame: &mut Frame, cursor: Point, indent: f32, label: &str, suffix: Option<(String, Color)>, ink: Color, edge: Color, bg: Color) {
     let size = frame.size();
-    let (w, h) = (label.chars().count() as f32 * TEXT_LABEL * GLYPH_EM + 2.0 * TAG_PAD, TEXT_LABEL + 2.0 * TAG_PAD - 2.0);
+    let chars = label.chars().count() + suffix.as_ref().map_or(0, |(s, _)| s.chars().count());
+    let (w, h) = (chars as f32 * TEXT_LABEL * GLYPH_EM + 2.0 * TAG_PAD, TEXT_LABEL + 2.0 * TAG_PAD - 2.0);
     let mut origin = cursor + iced::Vector::new(14.0 + indent, 14.0);
     if origin.x + w > size.width {
         origin.x = cursor.x - 14.0 - w;
@@ -333,15 +349,19 @@ pub fn tag(frame: &mut Frame, cursor: Point, indent: f32, label: &str, ink: Colo
     }
     frame.fill_rectangle(origin, Size::new(w, h), bg);
     frame.stroke_rectangle(origin, Size::new(w, h), Stroke::default().with_color(edge).with_width(1.0));
-    frame.fill_text(Text {
-        content: label.to_string(),
-        position: Point::new(origin.x + TAG_PAD, origin.y + h / 2.0),
-        color: ink,
+    let text = |content: String, x: f32, color: Color| Text {
+        content,
+        position: Point::new(x, origin.y + h / 2.0),
+        color,
         size: TEXT_LABEL.into(),
         font: MONO,
         align_y: alignment::Vertical::Center,
         ..Text::default()
-    });
+    };
+    frame.fill_text(text(label.to_string(), origin.x + TAG_PAD, ink));
+    if let Some((suffix, color)) = suffix {
+        frame.fill_text(text(suffix, origin.x + TAG_PAD + label.chars().count() as f32 * TEXT_LABEL * GLYPH_EM, color));
+    }
 }
 
 /// A ⊘ glyph with its top-left at `at`: a ring crossed by a slash, in `color`.

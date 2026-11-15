@@ -297,13 +297,16 @@ pub struct InternalPart {
     /// CG that replaces the computed one, metres behind the part's fore face.
     #[serde(default)]
     pub cg_override: Option<f64>,
+    /// What the offset is measured from; `None` is the kind's default (the bottom for a motor mount, else the top).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<crate::geometry::Anchor>,
 }
 
 impl InternalPart {
     /// A part with the default material for its kind and no overrides.
     pub fn new(id: PartId, kind: InternalKind, parent: PartId, offset: f64) -> InternalPart {
         let material = kind.default_material();
-        InternalPart { id, kind, parent, offset, name: None, material, mass_override: None, cg_override: None }
+        InternalPart { id, kind, parent, offset, name: None, material, mass_override: None, cg_override: None, anchor: None }
     }
 
     /// The user's name, or the kind's ("Motor mount").

@@ -2,9 +2,10 @@
 
 use bowshock_model::{DeployEvent, Dim, EventKind, InternalKind, InternalPart, PartId, Rocket, StageTrigger};
 
-use super::edit::{Anchor, Field, StageOn, Trigger};
+use super::edit::{Field, StageOn, Trigger};
 use super::{part, separation, Message, State};
 use crate::app::{App, Message as AppMessage, Selection};
+use bowshock_model::Anchor;
 
 /// An app with the example loaded and an inspector state of its own (the app's is private to it).
 struct Fx {

@@ -119,8 +119,9 @@ pub fn view<'a>(ctx: &'a Ctx) -> (String, Vec<Element<'a, Message>>) {
         config_rows.push(unit_input("Station", b.station, Quantity::Length, &units).on_commit(Message::BallastStation).into());
     }
 
+    // The balance on show: while a part is carried, the rocket as it would be if released now (never the rocket without it).
     let mut balance_rows: Vec<Element<'a, Message>> = Vec::new();
-    match ctx.physics.balance() {
+    match ctx.shown().now {
         Some(b) => {
             balance_rows.push(value_row("Mass", ui::with_unit(b.mass, Quantity::Mass, units), None));
             balance_rows.push(value_row("CG", ui::with_unit(b.cg, Quantity::Length, units), None));

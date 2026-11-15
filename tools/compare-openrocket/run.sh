@@ -23,6 +23,12 @@ EX="$WORK/jar/datafiles/examples"
 cp "$EX/A simple model rocket.ork" "$WORK/rockets/simple_model_rocket.ork"
 cp "$EX/Dual parachute deployment.ork" "$WORK/rockets/dual_parachute.ork"
 cp "$EX/Two-stage rocket.ork" "$WORK/rockets/two_stage.ork"
+# Pods (1-, 2- and 4-fin sets on pods: OpenRocket's roll-angle dependence) and tube fins.
+cp "$EX/Pods--airframes and winglets.ork" "$WORK/rockets/pods_winglets.ork"
+cp "$EX/Pods--powered with recovery deployment.ork" "$WORK/rockets/pods_powered.ork"
+cp "$EX/Tube fin rocket.ork" "$WORK/rockets/tube_fin_rocket.ork"
+# The same small rocket with a conical nose: OpenRocket's ogive wave-drag quirk (see the report) does not apply to it.
+unzip -p "$EX/A simple model rocket.ork" rocket.ork | sed 's|<shape>ogive</shape>|<shape>conical</shape>|' > "$WORK/rockets/simple_conical_nose.ork"
 [ -f "$FINAL" ] && cp "$FINAL" "$WORK/rockets/spaceport_final.ork"
 [ -f "$SUBSCALE" ] && cp "$SUBSCALE" "$WORK/rockets/spaceport_subscale_rev4.ork"
 

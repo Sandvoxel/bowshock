@@ -4,7 +4,7 @@
 //! * [`aero`]: Barrowman centre of pressure / normal force and an OpenRocket-style drag build-up.
 //! * [`flight`]: 3-DOF point-mass flight simulation (rail, thrust, staging, recovery).
 //! * [`analysis`]: sweeps vs Mach and angle of attack, fin flutter, Monte Carlo dispersion.
-//! * [`tube_fins`]: OpenRocket's tube fin aerodynamics (open tubes on the outside of the body).
+//! * [`tube_fins`]: tube fin aerodynamics (open tubes on the outside of the body).
 //!
 //! Everything is SI (metres, kilograms, seconds, radians, pascals). Axial stations are measured
 //! from the nose tip, increasing aft. The core modules do not know about the application's

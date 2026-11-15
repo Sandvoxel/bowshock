@@ -73,9 +73,12 @@ impl Rocket {
         let name_of = |p: PartId| self.kind_of(p).map(|p| p.name()).unwrap_or_default().to_lowercase();
         let reference = self.reference_diameter().unwrap_or(0.0);
         match (dim, part) {
-            (Dim::Length, PartRef::Axial(p)) => {
-                let z0 = self.part_station(id).unwrap_or(0.0);
-                self.faces(id, false, |station, label, src| out.add(station - z0, label, src, 1));
+            (Dim::Length | Dim::ForeLength, PartRef::Axial(p)) => {
+                // Dragging the fore end moves every face ahead of it too, so only the aft end has faces to catch.
+                if dim == Dim::Length {
+                    let z0 = self.part_station(id).unwrap_or(0.0);
+                    self.faces(id, false, |station, label, src| out.add(station - z0, label, src, 1));
+                }
                 for other in self.parts().iter().filter(|o| o.id != id && std::mem::discriminant(&o.kind) == std::mem::discriminant(&p.kind)) {
                     out.add(other.kind.length(), format!("= {} length", other.display_name().to_lowercase()), Some(other.id), 2);
                 }
@@ -90,9 +93,15 @@ impl Rocket {
                     }
                 }
             }
-            (Dim::Length | Dim::PackedLength, PartRef::Internal(_) | PartRef::Radial(_)) => {
+            (Dim::Length | Dim::ForeLength | Dim::PackedLength, PartRef::Internal(_) | PartRef::Radial(_)) => {
                 let fore = self.part_station(id).unwrap_or(0.0);
-                self.faces(id, true, |station, label, src| out.add(station - fore, label, src, 1));
+                let aft = fore + self.part_span(id).map_or(0.0, |(a, b)| b - a);
+                self.faces(id, true, |station, label, src| {
+                    let length = if dim == Dim::ForeLength { aft - station } else { station - fore };
+                    if length > 0.0 {
+                        out.add(length, label, src, 1);
+                    }
+                });
                 if let PartRef::Internal(p) = part {
                     for o in self.internals_of(p.parent).filter(|o| o.id != id && std::mem::discriminant(&o.kind) == std::mem::discriminant(&p.kind)) {
                         out.add(o.kind.extent(), format!("= {} length", o.display_name().to_lowercase()), Some(o.id), 2);
