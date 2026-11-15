@@ -5,7 +5,12 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "Rocket airframe data model for the Bowshock builder (SI metres)"
+description = "Rocket document model for the Bowshock builder (SI units): geometry, materials, mass, configurations, stages, JSON"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# float_roundtrip: a saved document must load back bit-for-bit.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [lints]
 workspace = true
