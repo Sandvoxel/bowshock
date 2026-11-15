@@ -16,6 +16,7 @@ mod form;
 mod formulas;
 mod health;
 mod part;
+mod reveal;
 mod rocket_view;
 mod separation;
 mod silhouette;
@@ -49,6 +50,17 @@ const RENAME_ID: &str = "inspector-rename";
 const HEADER_H: f32 = 44.0;
 /// Width of the sub-type select in the header.
 const SUBTYPE_W: f32 = 118.0;
+
+/// Which stability threshold a settings field edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Band {
+    /// Below it the rocket is unstable.
+    Marginal,
+    /// Above it the rocket is stable.
+    Stable,
+    /// Above it the rocket is over-stable.
+    Over,
+}
 
 /// The inspector's messages.
 #[derive(Debug, Clone)]
@@ -159,6 +171,8 @@ pub enum Message {
     RocketName(String),
     /// The rocket's designer (Rocket inspector).
     RocketDesigner(String),
+    /// One of the stability thresholds (calibers), from the Rocket inspector's settings.
+    Band(Band, f64),
     /// Select the separation of this stage (the stage list of the Rocket inspector).
     SelectSeparation(usize),
     /// Cut this tube at this station (the fix for a stage with no joint).
@@ -241,7 +255,7 @@ impl State {
                     }
                     _ => edit::focus_key(dim),
                 };
-                return iced::widget::operation::focus(iced::widget::Id::from(key));
+                return Task::batch([iced::widget::operation::focus(iced::widget::Id::from(key.clone())), reveal::reveal(key)]);
             }
             Message::StartRename => {
                 let name = match ctx.selection {
@@ -299,6 +313,17 @@ impl State {
             }
             Message::RocketDesigner(designer) => {
                 ctx.doc.edit_merging("Edit designer", "rocket:designer", |r| r.designer = designer);
+            }
+            Message::Band(band, value) => {
+                ctx.doc.edit_merging("Edit stability limit", "rocket:bands", |r| {
+                    let mut bands = r.stability_bands();
+                    match band {
+                        Band::Marginal => bands.marginal = value,
+                        Band::Stable => bands.stable = value,
+                        Band::Over => bands.over = value,
+                    }
+                    r.set_stability_bands(bands);
+                });
             }
             Message::SplitTube(tube, station) => {
                 if ctx.doc.edit("Split tube", |r| r.split_tube(tube, station)).is_err() {
@@ -536,6 +561,7 @@ impl State {
         }
         cells.push(
             scrollable(column(sections))
+                .id(reveal::SCROLL_ID)
                 .direction(scrollable::Direction::Vertical(scrollable::Scrollbar::new().width(4).scroller_width(4).margin(1)))
                 .style(theme::scroll)
                 .width(Fill)

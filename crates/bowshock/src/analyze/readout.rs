@@ -1,10 +1,11 @@
 //! The right panel's "values at cursor" as data: sections of rows built from an [`Output`], the cursor position and the
 //! unit system, so the numbers can be tested without a UI. `view.rs` draws them.
 
-use bowshock_model::ConfigId;
+use bowshock_model::{ConfigId, StabilityBands};
 use bowshock_sim::MachPoint;
 
-use super::compute::{alpha_at, interp, mach_at, Analysis, Data, Output, Run, FLUTTER_MIN_MARGIN, MIN_MARGIN, OVER_STABLE};
+use super::compute::{alpha_at, interp, mach_at, Analysis, Data, Output, Run, FLUTTER_MIN_MARGIN};
+use super::overlay::{Field, Overlay};
 use crate::app::ui;
 use crate::units::{Quantity, UnitSystem};
 use crate::widgets::chip::Severity;
@@ -85,8 +86,8 @@ pub fn config_color(i: usize) -> SeriesColor {
 pub const DRAG_PARTS: [(&str, SeriesColor); 4] =
     [("Skin friction", SeriesColor::Series(1)), ("Pressure", SeriesColor::Series(2)), ("Base", SeriesColor::Series(3)), ("Fins", SeriesColor::Series(4))];
 
-fn severity(margin: f64) -> Severity {
-    match (Bands { marginal: 0.5, stable: MIN_MARGIN as f32, max: OVER_STABLE as f32 }).classify(margin as f32) {
+fn severity(bands: StabilityBands, margin: f64) -> Severity {
+    match Bands::from(bands).classify(margin as f32) {
         Stability::Unstable => Severity::Err,
         Stability::Marginal | Stability::OverStable => Severity::Warn,
         Stability::Stable => Severity::Ok,
@@ -147,6 +148,48 @@ pub fn readout(out: &Output, x_si: Option<f64>, active: ConfigId, units: UnitSys
     }
 }
 
+/// The "Compare" section: the comparison's value of each quantity it has at the cursor, with the difference to ours
+/// (`theirs − ours`) next to it. `None` for analyses without an overlay or when nothing is shared.
+pub fn compare_section(out: &Output, overlay: &Overlay, x_si: Option<f64>, active: ConfigId, units: UnitSystem) -> Option<Section> {
+    let run = active_run(out, active)?;
+    let x = x_si.unwrap_or_else(|| default_cursor(out, active));
+    let (margin, cp, cd_total, cn) = match &run.data {
+        Data::Mach(p) => {
+            let a = mach_at(p, x)?;
+            (a.margin_cal, a.cp, a.drag.total, None)
+        }
+        Data::Alpha(p) => {
+            let a = alpha_at(p, x)?;
+            (a.margin_cal, a.cp, a.drag.total, Some(a.cn))
+        }
+        _ => return None,
+    };
+    let an = out.analysis;
+    let sign = |d: f64| if d < 0.0 { '−' } else { '+' };
+    let color = SeriesColor::Series(2);
+    let mut rows = Vec::new();
+    if let Some(t) = overlay.at(an, Field::Margin, x) {
+        let d = t - margin;
+        rows.push(Row::new("Margin", cal(t), "cal").swatch(color).tag(Tag::Plain(format!("Δ {}{:.2} · ours {}", sign(d), d.abs(), cal(margin)))));
+    }
+    if let Some(t) = overlay.at(an, Field::Cp, x) {
+        let d = t - cp;
+        let (v, u) = length(t, units);
+        let (dv, _) = length(d.abs(), units);
+        let (mine, _) = length(cp, units);
+        rows.push(Row::new("CP", v, u).swatch(color).tag(Tag::Plain(format!("Δ {}{dv} · ours {mine}", sign(d)))));
+    }
+    if let Some(t) = overlay.at(an, Field::Cd, x) {
+        let d = t - cd_total;
+        rows.push(Row::new("Cd", cd(t), "").swatch(color).tag(Tag::Plain(format!("Δ {}{:.3} · ours {}", sign(d), d.abs(), cd(cd_total)))));
+    }
+    if let (Some(t), Some(mine)) = (overlay.at(an, Field::Cn, x), cn) {
+        let d = t - mine;
+        rows.push(Row::new("CN", format!("{t:.3}"), "").swatch(color).tag(Tag::Plain(format!("Δ {}{:.3} · ours {mine:.3}", sign(d), d.abs()))));
+    }
+    (!rows.is_empty()).then(|| Section { title: format!("Compare · {}", overlay.label), rows })
+}
+
 fn stability_rows(run: &Run, p: &MachPointLike, units: UnitSystem, out: &Output) -> Vec<Row> {
     let (cp, u) = length(p.cp, units);
     let (cg_l, _) = length(run.cg_liftoff, units);
@@ -201,10 +244,10 @@ fn mach(out: &Output, run: &Run, points: &[MachPoint], x: f64, units: UnitSystem
     let peak = points.iter().max_by(|a, b| a.drag.total.total_cmp(&b.drag.total));
     let mut worst = Vec::new();
     if let Some(p) = lo {
-        worst.push(Row::new("Min margin", cal(p.margin_cal), "cal").tag(Tag::Chip(severity(p.margin_cal), format!("M {:.1}", p.mach))));
+        worst.push(Row::new("Min margin", cal(p.margin_cal), "cal").tag(Tag::Chip(severity(out.bands, p.margin_cal), format!("M {:.1}", p.mach))));
     }
     if let Some(p) = hi {
-        worst.push(Row::new("Max margin", cal(p.margin_cal), "cal").tag(Tag::Chip(severity(p.margin_cal), format!("M {:.1}", p.mach))));
+        worst.push(Row::new("Max margin", cal(p.margin_cal), "cal").tag(Tag::Chip(severity(out.bands, p.margin_cal), format!("M {:.1}", p.mach))));
     }
     if let Some(p) = peak {
         worst.push(Row::new("Peak Cd", cd(p.drag.total), "").tag(Tag::Plain(format!("M {:.2}", p.mach))));
@@ -229,10 +272,10 @@ fn alpha(out: &Output, run: &Run, alpha_rad: f64, units: UnitSystem) -> Readout 
     let by_margin = |a: &&bowshock_sim::AlphaPoint, b: &&bowshock_sim::AlphaPoint| a.margin_cal.total_cmp(&b.margin_cal);
     let mut worst = Vec::new();
     if let Some(p) = points.iter().min_by(by_margin) {
-        worst.push(Row::new("Min margin", cal(p.margin_cal), "cal").tag(Tag::Chip(severity(p.margin_cal), format!("{:.1}°", p.alpha.to_degrees()))));
+        worst.push(Row::new("Min margin", cal(p.margin_cal), "cal").tag(Tag::Chip(severity(out.bands, p.margin_cal), format!("{:.1}°", p.alpha.to_degrees()))));
     }
     if let Some(p) = points.iter().max_by(by_margin) {
-        worst.push(Row::new("Max margin", cal(p.margin_cal), "cal").tag(Tag::Chip(severity(p.margin_cal), format!("{:.1}°", p.alpha.to_degrees()))));
+        worst.push(Row::new("Max margin", cal(p.margin_cal), "cal").tag(Tag::Chip(severity(out.bands, p.margin_cal), format!("{:.1}°", p.alpha.to_degrees()))));
     }
     if let Some(p) = points.iter().max_by(|a, b| a.cn.total_cmp(&b.cn)) {
         worst.push(Row::new("Peak CN", format!("{:.3}", p.cn), "").tag(Tag::Plain(format!("{:.1}°", p.alpha.to_degrees()))));
@@ -355,7 +398,13 @@ mod tests {
         let rocket = Rocket::from_json(include_str!("../../assets/examples/hpr_l1_cert.bowshock")).unwrap();
         let (jobs, _) = jobs(&rocket, &MotorDb::bundled(), Phase::Full).unwrap();
         (
-            compute(&Request { analysis, method: Method::Extended, conditions: Conditions { runs: 10, ..Conditions::default() }, jobs }),
+            compute(&Request {
+                analysis,
+                method: Method::Extended,
+                conditions: Conditions { runs: 10, ..Conditions::default() },
+                jobs,
+                bands: rocket.stability_bands(),
+            }),
             rocket.active_config_id(),
         )
     }
@@ -383,6 +432,19 @@ mod tests {
         let x = default_cursor(&o, id);
         assert!(x > 0.8 && x < 1.6);
         assert_eq!(readout(&o, None, id, UnitSystem::MmGS).cursor, format!("M {x:.2}"));
+    }
+
+    #[test]
+    fn comparing_a_result_with_itself_has_zero_differences() {
+        let (o, id) = out(Analysis::Aerodynamics);
+        let overlay = Overlay::from_output(&o, id, "Same").unwrap();
+        let s = compare_section(&o, &overlay, Some(1.1), id, UnitSystem::MmGS).unwrap();
+        assert_eq!(s.title, "Compare · Same");
+        let labels: Vec<&str> = s.rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(labels, ["Margin", "CP", "Cd"]);
+        assert!(s.rows.iter().all(|r| matches!(&r.tag, Some(Tag::Plain(t)) if t.starts_with("Δ +0") || t.starts_with("Δ −0"))));
+        // Outside the comparison's data there is nothing to compare.
+        assert!(compare_section(&o, &overlay, Some(9.0), id, UnitSystem::MmGS).is_none());
     }
 
     #[test]

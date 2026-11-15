@@ -123,6 +123,9 @@ pub struct Rocket {
     /// Formulas that compute dimensions of parts from dimensions of other parts (see [`crate::Formula`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) formulas: Vec<crate::expr::Formula>,
+    /// The stability thresholds (gauge, warnings, Analyze lines). Not written while they are the defaults.
+    #[serde(default, skip_serializing_if = "crate::bands::is_default")]
+    pub(crate) bands: crate::bands::StabilityBands,
 }
 
 impl Default for Rocket {
@@ -140,6 +143,7 @@ impl Default for Rocket {
             notes: std::collections::BTreeMap::new(),
             flights: crate::flights::default_flights(),
             formulas: Vec::new(),
+            bands: crate::bands::StabilityBands::default(),
         }
     }
 }

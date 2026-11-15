@@ -7,8 +7,8 @@
 //!     vec![
 //!         status::config("H128W", self.config_open, Some(Message::ToggleConfigMenu)),
 //!         status::readout("MASS", "1.284 kg", Some(Message::OpenMass)),
-//!         status::cg("712.4", Some(Message::ToggleCg)),
-//!         status::cp("858.7", Some(Message::ToggleCp)),
+//!         status::cg("712.4", true, Some(Message::ToggleCg)),
+//!         status::cp("858.7", true, Some(Message::ToggleCp)),
 //!         status::stability(&self.gauge, &Bands::default(), Some(Message::OpenAnalyze)),
 //!     ],
 //!     vec![chip(Severity::Warn, "1 warning").into()],
@@ -46,22 +46,27 @@ pub fn readout<'a, M: Clone + 'a>(label: &'a str, text_value: impl Into<String>,
     cell(row![key(label), value(text_value.into())].spacing(SPACE_2).align_y(iced::Center).boxed(), on_press)
 }
 
-/// The CG readout: the quartered-circle glyph, `CG` in blue and the value.
-pub fn cg<'a, M: Clone + 'a>(text_value: impl Into<String>, on_press: Option<M>) -> Element<'a, M> {
-    marker(Mark::Cg, Tone::Cg, "CG", text_value.into(), on_press)
+/// The CG readout: the quartered-circle glyph, `CG` in blue and the value. `shown` says whether its marker is drawn in the
+/// viewport and lanes; a hidden marker's cell is dimmed (the cell toggles it).
+pub fn cg<'a, M: Clone + 'a>(text_value: impl Into<String>, shown: bool, on_press: Option<M>) -> Element<'a, M> {
+    marker(Mark::Cg, Tone::Cg, "CG", text_value.into(), shown, on_press)
 }
 
-/// The CP readout: the dot-in-ring glyph, `CP` in red and the value.
-pub fn cp<'a, M: Clone + 'a>(text_value: impl Into<String>, on_press: Option<M>) -> Element<'a, M> {
-    marker(Mark::Cp, Tone::Cp, "CP", text_value.into(), on_press)
+/// The CP readout: the dot-in-ring glyph, `CP` in red and the value. See [`cg`] for `shown`.
+pub fn cp<'a, M: Clone + 'a>(text_value: impl Into<String>, shown: bool, on_press: Option<M>) -> Element<'a, M> {
+    marker(Mark::Cp, Tone::Cp, "CP", text_value.into(), shown, on_press)
 }
 
-fn marker<'a, M: Clone + 'a>(mark: Mark, tone: Tone, label: &'a str, text_value: String, on_press: Option<M>) -> Element<'a, M> {
-    let coloured = text(label).font(MONO).size(TEXT_LABEL).style(match tone {
-        Tone::Cg => theme::colored(|t| t.cg),
-        _ => theme::colored(|t| t.cp),
-    });
-    cell(row![glyph::icon(mark, tone, 13.0), coloured, value(text_value)].spacing(SPACE_1 + 2.0).align_y(iced::Center).boxed(), on_press)
+fn marker<'a, M: Clone + 'a>(mark: Mark, tone: Tone, label: &'a str, text_value: String, shown: bool, on_press: Option<M>) -> Element<'a, M> {
+    let pick: fn(&crate::tokens::Tokens) -> iced::Color = match (tone, shown) {
+        (_, false) => |t| t.ink_faint,
+        (Tone::Cg, _) => |t| t.cg,
+        _ => |t| t.cp,
+    };
+    let coloured = text(label).font(MONO).size(TEXT_LABEL).style(theme::colored(pick));
+    let glyph = if shown { glyph::icon(mark, tone, 13.0) } else { glyph::icon(mark, Tone::Muted, 13.0) };
+    let value = if shown { value(text_value) } else { text(text_value).font(MONO).size(type_scale::NUM_BODY.size).style(theme::faint).boxed() };
+    cell(row![glyph, coloured, value].spacing(SPACE_1 + 2.0).align_y(iced::Center).boxed(), on_press)
 }
 
 /// The stability cell: `STAB`, the compact gauge and the margin in the strong weight.

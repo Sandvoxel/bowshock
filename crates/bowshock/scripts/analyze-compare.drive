@@ -1,0 +1,41 @@
+# Analyze > Compare: an imported OpenRocket / RASAero result overlaid on the margin, CP and Cd plots (dashed, labelled), the
+# values at the cursor with the difference, and the other built-in method.
+# Run with a file loaded through the env hook (the same as Compare ▾ > Import …, without the dialog):
+#   BOWSHOCK_COMPARE_FILE=crates/bowshock/assets/test-data/openrocket-sim.csv \
+#     cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/analyze-compare.drive out/analyze-compare
+# A file name containing "rasaero" is read as a RASAero II export (use rasaero-aero.csv to see the angle sweep overlay).
+viewport 1280x800
+click "Analyze"
+move (640, 400)
+move (642, 402)
+move (700, 300)
+move (702, 302)
+screenshot aero-file-dark.png
+
+click "Stability"
+move (700, 300)
+move (702, 302)
+screenshot stability-file-dark.png
+
+click "Drag breakdown"
+move (700, 300)
+move (702, 302)
+screenshot drag-file-dark.png
+
+# The menu, then the other built-in method.
+click "Aerodynamics"
+click "Compare ▾"
+screenshot menu.png
+click "Compare with Barrowman"
+move (700, 300)
+move (702, 302)
+screenshot aero-method-dark.png
+
+# The light theme.
+click "Light"
+move (700, 300)
+move (702, 302)
+screenshot aero-method-light.png
+click "Compare ▾"
+click "Clear comparison"
+screenshot cleared-light.png

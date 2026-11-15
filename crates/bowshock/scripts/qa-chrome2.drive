@@ -1,0 +1,17 @@
+# Chrome QA 2: stability limits section, warning chip -> field, Simulate menu, unit chip cycling.
+#   BOWSHOCK_EXAMPLE=two_stage cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/qa-chrome2.drive out/qa-chrome2
+viewport 1280x640
+move (640, 300)
+screenshot c2-rocket.png
+# The warning chip lists the issues; clicking the marginal-stability line selects the fin set and scrolls to its span.
+click "1 warning"
+screenshot c2-issues.png
+click (975, 589)
+screenshot c2-field.png
+# The Simulate caret opens its menu.
+click (1262, 20)
+screenshot c2-run-menu.png
+click (1262, 20)
+# Unit chip: a click cycles the unit (mm -> cm); right-click (not scriptable) makes it project-wide.
+click (1253, 135)
+screenshot c2-unit-cycle.png

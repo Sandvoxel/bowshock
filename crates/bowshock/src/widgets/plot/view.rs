@@ -157,6 +157,8 @@ pub struct Interaction {
     hovering: bool,
     drag: Option<Drag>,
     last_click: Option<(Instant, Point)>,
+    /// A Cmd/Ctrl + scroll zoom is in progress (its level closes when the modifier is released).
+    pinching: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -291,7 +293,10 @@ impl canvas::Program<PlotMessage> for PlotView<'_> {
         match event {
             Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => {
                 st.modifiers = *m;
-                None
+                (st.pinching && !m.command() && !m.control()).then(|| {
+                    st.pinching = false;
+                    Action::publish(PlotMessage::PinchEnd)
+                })
             }
             Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Named(named), modifiers, .. }) => {
                 st.modifiers = *modifiers;
@@ -301,7 +306,8 @@ impl canvas::Program<PlotMessage> for PlotView<'_> {
                         None
                     }
                     keyboard::key::Named::Enter if over && self.state.can_zoom_in() => Some(Action::publish(PlotMessage::ZoomIn).and_capture()),
-                    keyboard::key::Named::Escape if over && self.state.can_back() => {
+                    // Shift+Esc is the PlotZoom "full range" and works wherever the cursor is; plain Esc steps back under the cursor.
+                    keyboard::key::Named::Escape if (over || modifiers.shift()) && self.state.can_back() => {
                         let message = if modifiers.shift() { PlotMessage::Reset } else { PlotMessage::Back };
                         Some(Action::publish(message).and_capture())
                     }
@@ -351,6 +357,11 @@ impl canvas::Program<PlotMessage> for PlotView<'_> {
                 let frac = f64::from((p.x - layout.x0) / layout.width());
                 let x = layout.x_at(p.x);
                 let lo = x - frac * span;
+                // Cmd/Ctrl + scroll is the pinch stand-in: it adds a level of its own, closed when the modifier is released.
+                if st.modifiers.command() || st.modifiers.control() {
+                    st.pinching = true;
+                    return Some(Action::publish(PlotMessage::Pinch((lo, lo + span))).and_capture());
+                }
                 Some(Action::publish(PlotMessage::Window((lo, lo + span))).and_capture())
             }
             _ => None,

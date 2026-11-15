@@ -68,6 +68,8 @@ use crate::widgets::segmented::segmented;
 pub use camera::Camera;
 pub use mesh::{Cut, GhostRadial, Marks, Mesh};
 
+pub mod flash;
+
 /// Logical size of the ViewCube canvas.
 pub const CUBE_SIZE: f32 = 112.0;
 
@@ -84,6 +86,11 @@ static ANIMATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::n
 /// Turns camera animations on or off. Off for `bowshock drive`: the headless emulator delivers no frame ticks.
 pub fn set_animation(on: bool) {
     ANIMATE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether animations are on (they are not in a headless `bowshock drive` run).
+pub fn animation_on() -> bool {
+    ANIMATE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// 3D or the side-on 2D profile.
@@ -187,6 +194,8 @@ pub enum Message {
     DropAxial,
     /// Released over the viewport: drop the dragged radial part on its surface target, if any.
     DropRadial,
+    /// The mouse wheel turned during a radial drag: one step through the symmetry counts (like `X` / `Shift+X`), no zoom.
+    CopiesStep(bool),
 }
 
 struct Anim {
@@ -215,6 +224,7 @@ struct MeshKey {
     axial: Option<Option<usize>>,
     radial: Option<(Option<SurfaceTarget>, u8)>,
     cut: Cut,
+    flash: Option<(PartId, f32, f32)>,
 }
 
 /// The viewport's state: camera, toolbar choices, hover and the mesh on show.
@@ -296,6 +306,7 @@ impl View {
     /// this after every message.
     pub fn sync(&mut self, ctx: &Ctx) {
         let selected = ctx.selection.part();
+        let flash = ctx.flash_levels();
         let key = MeshKey {
             revision: ctx.doc.revision(),
             hovered: self.hover.part(),
@@ -303,6 +314,7 @@ impl View {
             axial: ctx.drag.axial.as_ref().map(|d| d.snap),
             radial: ctx.drag.radial.as_ref().map(|d| (d.target, d.count)),
             cut: self.cut,
+            flash,
         };
         if self.mesh_key.as_ref() == Some(&key) {
             return;
@@ -320,6 +332,7 @@ impl View {
             selected,
             motors: Some(ctx.physics.motors()),
             cut: self.cut,
+            flash,
         };
         self.mesh = Arc::new(Mesh::from_rocket(rocket, marks));
         self.mesh_key = Some(key);
@@ -387,6 +400,9 @@ impl View {
             }
             Message::DropAxial => drag::finish_axial(ctx, true),
             Message::DropRadial => drag::finish_radial(ctx, true),
+            Message::CopiesStep(forward) => {
+                return Task::done(app::Message::PartsBin(crate::build::parts_bin::Message::CycleSymmetry(forward)));
+            }
             camera => self.camera_update(camera),
         }
         Task::none()
@@ -694,6 +710,7 @@ impl View {
                 camera,
                 mesh: &self.mesh,
                 balance: ctx.physics.balance().map(|b| (b.cg, b.cp, b.margin_cal)),
+                show: (ctx.show_cg, ctx.show_cp),
                 stages: ctx.physics.stages(),
                 motors,
                 selection: ctx.selection,

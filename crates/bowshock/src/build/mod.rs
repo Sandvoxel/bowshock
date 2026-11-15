@@ -30,6 +30,7 @@ pub enum Pane {
 /// The pane arrangement and its dividers.
 pub struct Layout {
     panes: pane_grid::State<Pane>,
+    sides_hidden: bool,
 }
 
 impl Layout {
@@ -49,12 +50,23 @@ impl Layout {
                 b: Box::new(Configuration::Pane(Pane::Inspector)),
             }),
         };
-        Layout { panes: pane_grid::State::with_configuration(layout) }
+        Layout { panes: pane_grid::State::with_configuration(layout), sides_hidden: false }
     }
 
     /// Applies a divider drag.
     pub fn resize(&mut self, event: pane_grid::ResizeEvent) {
         self.panes.resize(event.split, event.ratio);
+    }
+
+    /// Tab: hides (or brings back) the parts bin and the inspector, leaving the viewport and lanes the whole screen.
+    pub fn toggle_sides(&mut self) {
+        self.sides_hidden = !self.sides_hidden;
+    }
+
+    /// Whether the side columns are folded away.
+    #[cfg(test)]
+    pub fn sides_hidden(&self) -> bool {
+        self.sides_hidden
     }
 }
 
@@ -67,14 +79,34 @@ pub fn view<'a>(
     inspector: &'a inspector::State,
     ctx: &'a Ctx,
 ) -> Element<'a, Message> {
+    let centre = || column![viewport.view(ctx).map(Message::Viewport), lanes.view(ctx, Some(viewport.camera())).map(Message::Lanes)];
+    // Tab: the parts bin and the inspector fold away and the centre fills the window.
+    if layout.sides_hidden {
+        return centre().boxed();
+    }
     PaneGrid::new(&layout.panes, |_, pane, _| {
         pane_grid::Content::new(match pane {
             Pane::PartsBin => parts_bin.view(ctx).map(Message::PartsBin).boxed(),
-            Pane::Centre => column![viewport.view(ctx).map(Message::Viewport), lanes.view(ctx, Some(viewport.camera())).map(Message::Lanes)].boxed(),
+            Pane::Centre => centre().boxed(),
             Pane::Inspector => inspector.view(ctx).map(Message::Inspector).boxed(),
         })
     })
     .on_resize(6, Message::Resized)
     .style(theme::panes)
     .boxed()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tab_toggles_the_side_columns() {
+        let mut layout = Layout::new();
+        assert!(!layout.sides_hidden);
+        layout.toggle_sides();
+        assert!(layout.sides_hidden);
+        layout.toggle_sides();
+        assert!(!layout.sides_hidden);
+    }
 }

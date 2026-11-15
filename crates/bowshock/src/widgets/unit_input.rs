@@ -1112,6 +1112,20 @@ impl<'a, M: Clone + 'a> Widget<M, Theme, Renderer> for UnitInput<'a, M> {
             return;
         }
 
+        // Right-click on the unit chip: this unit for the whole project (every field and readout of the quantity).
+        if let (Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)), Some(p)) = (event, cursor.position()) {
+            if geo.unit.contains(p) {
+                units::set_unit_override(self.quantity, self.unit(m));
+                m.unit = None;
+                Self::revert(m);
+                self.sync(m);
+                shell.invalidate_layout();
+                shell.request_redraw();
+                shell.capture_event();
+                return;
+            }
+        }
+
         if let (Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)), Some(p)) = (event, cursor.position()) {
             if geo.unit.contains(p) {
                 let next = self.quantity.next_unit(self.unit(m));

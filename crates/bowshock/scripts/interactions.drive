@@ -1,0 +1,23 @@
+# Interactions (Tab, drop settle + flash, inspector-edit flash):
+#   BOWSHOCK_FREEZE_FLASH=1 cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/interactions.drive out/interactions
+#   BOWSHOCK_DRIVE_TAB=1 cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/interactions.drive out/interactions-tab
+# BOWSHOCK_FREEZE_FLASH holds a flash at its first frame (a headless run delivers no frame ticks), so the screenshot right
+# after a drop or a committed edit shows the accent outline, the lifted part and the flashing lane bar. A headless run also
+# delivers no key subscription events, so BOWSHOCK_DRIVE_TAB=1 presses Tab once at start-up (the key itself is unit-tested).
+viewport 1280x800
+screenshot 1-start.png
+
+# Drag a body tube out of the parts bin onto the rocket: attach nodes show, the ghost follows the nearest one.
+press "Body tube"
+move (200, 200)
+move (400, 300)
+move (600, 330)
+screenshot 2-drag.png
+release (600, 330)
+screenshot 3-dropped-flash.png
+# A committed inspector edit flashes the part it changed: pick the booster's lane bar, type a new length in the Inspector.
+click (872, 596)
+click (1175, 133)
+type "300"
+type enter
+screenshot 4-edit-flash.png

@@ -24,6 +24,8 @@ use crate::widgets::gauge::GaugeState;
 use crate::widgets::plot::{PlotMessage, PlotState};
 
 pub mod compute;
+pub mod import;
+pub mod overlay;
 mod plots;
 pub mod readout;
 mod view;
@@ -80,6 +82,18 @@ pub enum Message {
     Exported(Result<Option<PathBuf>, String>),
     /// The worker finished the computation for this request.
     Done(Key, Option<Arc<compute::Output>>),
+    /// Open or close the `Compare ▾` menu.
+    CompareMenu,
+    /// Compare with the other built-in method.
+    CompareWith(Method),
+    /// Pick a file of another tool to compare with (opens the dialog).
+    ImportCompare(import::Source),
+    /// The open dialog answered: the source, the file's name and its text; `None` if cancelled, or the error.
+    CompareFile(Result<Option<(import::Source, String, String)>, String>),
+    /// Drop the comparison.
+    ClearCompare,
+    /// The worker finished the comparison method's computation for this request.
+    CompareDone(Key, Option<Arc<compute::Output>>),
 }
 
 /// What a computation was for; a result is used only while it is still the one wanted.
@@ -109,7 +123,7 @@ pub struct State {
     pub(crate) done: Option<Arc<compute::Output>>,
     pub(crate) computed_at: Option<Instant>,
     generation: u64,
-    built_for: Option<(u64, UnitSystem)>,
+    built_for: Option<(u64, UnitSystem, u64)>,
     pub(crate) built: Option<plots::Built>,
     pub(crate) table: Option<compute::Table>,
     pub(crate) show_table: bool,
@@ -117,6 +131,17 @@ pub struct State {
     pub(crate) gauge: GaugeState,
     /// The result generation the gauge last jumped to (it springs between hovers, jumps to a new result).
     gauge_generation: u64,
+    /// What the plots are compared with, if anything.
+    pub(crate) compare: Option<Comparison>,
+    /// Whether the `Compare ▾` menu is open.
+    pub(crate) compare_open: bool,
+    /// The other method's result while [`Comparison::Method`] is on.
+    compare_out: Option<Arc<compute::Output>>,
+    wanted_cmp: Option<Key>,
+    /// Bumped whenever the comparison's data changes, so the plots are rebuilt.
+    compare_rev: u64,
+    /// The comparison's curves for the result on screen.
+    pub(crate) overlay: Option<overlay::Overlay>,
 }
 
 impl Default for State {
@@ -153,6 +178,12 @@ impl State {
             plot: PlotState::new((0.0, 1.0)),
             gauge: GaugeState::new(0.0),
             gauge_generation: u64::MAX,
+            compare: compare_from_env(),
+            compare_open: false,
+            compare_out: None,
+            wanted_cmp: None,
+            compare_rev: 0,
+            overlay: None,
         }
     }
 
@@ -173,6 +204,10 @@ impl State {
                     ctx.notify(compute::CFD_REASON);
                 } else {
                     self.method = m;
+                    if self.compare == Some(Comparison::Method(m)) {
+                        self.compare = Some(Comparison::Method(other_method(m)));
+                        self.compare_rev += 1;
+                    }
                 }
             }
             Message::Resolve => self.serial += 1,
@@ -206,6 +241,45 @@ impl State {
                         }
                         None => self.error = Some("the analysis stopped unexpectedly".to_string()),
                     }
+                }
+            }
+            Message::CompareMenu => self.compare_open = !self.compare_open,
+            Message::CompareWith(m) => {
+                self.compare_open = false;
+                self.compare = Some(Comparison::Method(m));
+                self.compare_out = None;
+                self.wanted_cmp = None;
+                self.compare_rev += 1;
+            }
+            Message::ClearCompare => {
+                self.compare_open = false;
+                self.compare = None;
+                self.compare_out = None;
+                self.wanted_cmp = None;
+                self.compare_rev += 1;
+            }
+            Message::ImportCompare(source) => {
+                self.compare_open = false;
+                return pick_compare_file(source);
+            }
+            Message::CompareFile(result) => match result {
+                Ok(Some((source, name, text))) => match import::parse(&text, source) {
+                    Ok(data) => {
+                        ctx.notify(format!("Comparing with {} ({} rows from {name})", source.label(), data.rows.len()));
+                        self.compare = Some(Comparison::File { data: Arc::new(data), name });
+                        self.compare_out = None;
+                        self.wanted_cmp = None;
+                        self.compare_rev += 1;
+                    }
+                    Err(e) => ctx.notify(format!("Cannot read {name}: {e}")),
+                },
+                Ok(None) => {}
+                Err(e) => ctx.notify(format!("Import failed: {e}")),
+            },
+            Message::CompareDone(key, out) => {
+                if self.wanted_cmp.as_ref() == Some(&key) {
+                    self.compare_out = out;
+                    self.compare_rev += 1;
                 }
             }
         }
@@ -262,6 +336,18 @@ impl State {
             serial: self.serial,
         };
         let mut task = Task::none();
+        if let Some(Comparison::Method(m)) = self.compare {
+            let ckey = Key { method: m, ..key.clone() };
+            let wants = matches!(key.analysis, Analysis::Aerodynamics | Analysis::Drag | Analysis::Stability);
+            if wants && self.wanted_cmp.as_ref() != Some(&ckey) {
+                self.wanted_cmp = Some(ckey.clone());
+                if let Ok((jobs, _)) = compute::jobs(ctx.doc.rocket(), ctx.physics.motors(), ckey.phase) {
+                    let request =
+                        compute::Request { analysis: ckey.analysis, method: m, conditions: ckey.conditions, jobs, bands: ctx.doc.rocket().stability_bands() };
+                    task = spawn(request, ckey, true);
+                }
+            }
+        }
         if self.wanted.as_ref() != Some(&key) {
             self.wanted = Some(key.clone());
             match compute::jobs(ctx.doc.rocket(), ctx.physics.motors(), key.phase) {
@@ -269,7 +355,14 @@ impl State {
                     self.error = None;
                     self.omitted = omitted;
                     self.pending = true;
-                    task = spawn(compute::Request { analysis: key.analysis, method: key.method, conditions: key.conditions, jobs }, key);
+                    let request = compute::Request {
+                        analysis: key.analysis,
+                        method: key.method,
+                        conditions: key.conditions,
+                        jobs,
+                        bands: ctx.doc.rocket().stability_bands(),
+                    };
+                    task = Task::batch([task, spawn(request, key, false)]);
                 }
                 Err(e) => {
                     self.error = Some(e);
@@ -288,12 +381,20 @@ impl State {
         let Some(out) = self.done.clone() else {
             return;
         };
-        if self.built_for != Some((self.generation, ctx.units)) {
-            let built = plots::build(&out, ctx.units);
+        if self.built_for != Some((self.generation, ctx.units, self.compare_rev)) {
+            let active = ctx.doc.rocket().active_config_id();
+            self.overlay = match &self.compare {
+                Some(Comparison::File { data, .. }) => Some(data.overlay(out.conditions.alpha, out.conditions.mach_fixed)),
+                Some(Comparison::Method(m)) => {
+                    self.compare_out.as_ref().filter(|c| c.analysis == out.analysis).and_then(|c| overlay::Overlay::from_output(c, active, m.name()))
+                }
+                None => None,
+            };
+            let built = plots::build(&out, ctx.units, self.overlay.as_ref());
             self.plot.set_full(built.group.x_extent());
             self.table = Some(out.table());
             self.built = Some(built);
-            self.built_for = Some((self.generation, ctx.units));
+            self.built_for = Some((self.generation, ctx.units, self.compare_rev));
         }
         let (Some(built), true) = (&self.built, out.analysis == self.analysis) else {
             return;
@@ -332,8 +433,73 @@ impl State {
     }
 }
 
-/// Runs `request` on its own thread and delivers the result as [`Message::Done`] for `key`.
-fn spawn(request: compute::Request, key: Key) -> Task<app::Message> {
+/// What the plots are compared with.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Comparison {
+    /// The other built-in method.
+    Method(Method),
+    /// A file imported from OpenRocket or RASAero.
+    File {
+        /// The parsed rows.
+        data: Arc<import::Imported>,
+        /// The file's name.
+        name: String,
+    },
+}
+
+impl Comparison {
+    /// The source name drawn on the series and in the menu.
+    pub fn label(&self) -> String {
+        match self {
+            Comparison::Method(m) => m.name().to_string(),
+            Comparison::File { data, .. } => data.source.label().to_string(),
+        }
+    }
+}
+
+/// The other built-in method.
+pub fn other_method(m: Method) -> Method {
+    if m == Method::Barrowman {
+        Method::Extended
+    } else {
+        Method::Barrowman
+    }
+}
+
+/// Opens the file dialog for an export of `source` and delivers its text as [`Message::CompareFile`].
+fn pick_compare_file(source: import::Source) -> Task<app::Message> {
+    Task::perform(
+        async move {
+            let Some(file) =
+                rfd::AsyncFileDialog::new().set_title(format!("Import {} CSV", source.label())).add_filter("CSV", &["csv", "txt"]).pick_file().await
+            else {
+                return Ok(None);
+            };
+            let path = file.path().to_path_buf();
+            let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+            Ok(Some((source, name, text)))
+        },
+        |result| app::Message::Analyze(Message::CompareFile(result)),
+    )
+}
+
+/// The file named by `BOWSHOCK_COMPARE_FILE`, as a comparison (a name with `rasaero` in it is read as RASAero II's format).
+fn compare_from_env() -> Option<Comparison> {
+    let path = std::env::var_os("BOWSHOCK_COMPARE_FILE")?;
+    let name = std::path::Path::new(&path).file_name()?.to_string_lossy().into_owned();
+    let source = if name.to_lowercase().contains("rasaero") { import::Source::RasAero } else { import::Source::OpenRocket };
+    match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| import::parse(&t, source)) {
+        Ok(data) => Some(Comparison::File { data: Arc::new(data), name }),
+        Err(e) => {
+            eprintln!("BOWSHOCK_COMPARE_FILE: {e}");
+            None
+        }
+    }
+}
+
+/// Runs `request` on its own thread and delivers the result as [`Message::Done`] (or [`Message::CompareDone`] when `compare`).
+fn spawn(request: compute::Request, key: Key, compare: bool) -> Task<app::Message> {
     Task::perform(
         async move {
             let (tx, rx) = oneshot::channel();
@@ -342,6 +508,9 @@ fn spawn(request: compute::Request, key: Key) -> Task<app::Message> {
             });
             rx.await.ok()
         },
-        move |out| app::Message::Analyze(Message::Done(key.clone(), out)),
+        move |out| {
+            let key = key.clone();
+            app::Message::Analyze(if compare { Message::CompareDone(key, out) } else { Message::Done(key, out) })
+        },
     )
 }

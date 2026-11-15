@@ -74,6 +74,9 @@ pub struct Marks<'a> {
     pub motors: Option<&'a MotorDb>,
     /// The cutaway wedge.
     pub cut: Cut,
+    /// The part that was just dropped or edited: `(part, outline strength 0..1, height above its place in metres)`. See
+    /// [`super::flash`].
+    pub flash: Option<(PartId, f32, f32)>,
 }
 
 /// A radial part being dragged onto the rocket: every copy is drawn as a ghost.
@@ -151,13 +154,21 @@ struct Builder {
     parts: Vec<PartBox>,
     leaders: Vec<Leader>,
     cut: Cut,
+    /// The part that settles into place and how far above it still is (metres, along +Y).
+    lift: Option<(PartId, f32)>,
 }
 
 impl Builder {
-    fn bound(&mut self, id: Option<PartId>, from: (usize, usize), explode: Vec3) {
+    fn bound(&mut self, id: Option<PartId>, from: (usize, usize, usize), explode: Vec3) {
         let Some(id) = id else {
             return;
         };
+        // A part that was just released settles from above its place: lift what it just emitted.
+        if let Some((_, lift)) = self.lift.filter(|&(lifted, _)| lifted == id) {
+            for v in self.inner.vertices[from.0..].iter_mut().chain(&mut self.outer.vertices[from.1..]).chain(&mut self.caps.vertices[from.2..]) {
+                v.position[1] += lift;
+            }
+        }
         let (mut min, mut max) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
         for v in self.inner.vertices[from.0..].iter().chain(&self.outer.vertices[from.1..]) {
             let p = Vec3::from(v.position);
@@ -176,8 +187,8 @@ impl Builder {
         }
     }
 
-    fn marks(&self) -> (usize, usize) {
-        (self.inner.vertices.len(), self.outer.vertices.len())
+    fn marks(&self) -> (usize, usize, usize) {
+        (self.inner.vertices.len(), self.outer.vertices.len(), self.caps.vertices.len())
     }
 
     /// Cap faces of a prism along Z (`z0` to `z1`) with cross-section `section` at both edges of the removed wedge.
@@ -230,12 +241,13 @@ impl Mesh {
     /// the motors and cutaway.
     pub fn from_rocket(rocket: &Rocket, marks: Marks) -> Mesh {
         let state_of = |id: PartId| {
-            if marks.selected == Some(id) {
-                SELECTED
-            } else if marks.hovered == Some(id) {
-                HOVERED
-            } else {
-                NORMAL
+            let selected = marks.selected == Some(id);
+            match marks.flash {
+                // The flash: 4 + strength, or 6 + strength on a selected part (which keeps its full outline).
+                Some((flashed, level, _)) if flashed == id => (if selected { 6.0 } else { 4.0 }) + level,
+                _ if selected => SELECTED,
+                _ if marks.hovered == Some(id) => HOVERED,
+                _ => NORMAL,
             }
         };
         let mut stack: Vec<(Option<PartId>, &PartKind, f32)> = rocket.parts().iter().map(|p| (Some(p.id), &p.kind, state_of(p.id))).collect();
@@ -249,7 +261,15 @@ impl Mesh {
         let gap = (rmax * 0.7).max(0.02);
         let dz = |i: usize| (i as f32 - (n as f32 - 1.0) / 2.0) * gap;
 
-        let mut b = Builder { inner: Sink::default(), caps: Sink::default(), outer: Sink::default(), parts: Vec::new(), leaders: Vec::new(), cut: marks.cut };
+        let mut b = Builder {
+            inner: Sink::default(),
+            caps: Sink::default(),
+            outer: Sink::default(),
+            parts: Vec::new(),
+            leaders: Vec::new(),
+            cut: marks.cut,
+            lift: marks.flash.map(|(id, _, lift)| (id, lift)).filter(|&(_, lift)| lift > 0.0),
+        };
         // (id, station, explode dz, shell thickness) of each axial part as drawn (a ghost shifts the parts behind it).
         let mut axial: Vec<(PartId, f64, f32)> = Vec::new();
         let mut z = 0.0f64;

@@ -616,6 +616,11 @@ pub enum PlotMessage {
     Jump(usize),
     /// Wheel / pan: set the current window without adding a stack level (at the full range this pushes one).
     Window((f64, f64)),
+    /// Cmd/Ctrl + scroll (iced delivers no pinch): zoom x about the cursor. The first event of a gesture pushes a level; the
+    /// rest edit it, and [`PlotMessage::PinchEnd`] (the modifier released) closes it.
+    Pinch((f64, f64)),
+    /// The pinch gesture ended: a level equal to the one below (or the full range) is dropped again.
+    PinchEnd,
 }
 
 /// The PlotZoom state of one linked group: the stack of x ranges (level 0 is the full range), the selection band and
@@ -626,12 +631,14 @@ pub struct PlotState {
     stack: Vec<(f64, f64)>,
     band: Option<(f64, f64)>,
     hover: Option<f64>,
+    /// A Cmd/Ctrl + scroll zoom is in progress: its level is on top of the stack until the modifier is released.
+    pinching: bool,
 }
 
 impl PlotState {
     /// A state showing the whole of `full`.
     pub fn new(full: (f64, f64)) -> Self {
-        PlotState { full, stack: vec![full], band: None, hover: None }
+        PlotState { full, stack: vec![full], band: None, hover: None, pinching: false }
     }
 
     /// A state for `group`, showing all of it.
@@ -730,6 +737,34 @@ impl PlotState {
                     let (a, b) = (a.max(w0), b.min(w1));
                     (b > a).then_some((a, b))
                 });
+            }
+            PlotMessage::Pinch(w) => {
+                let w = self.clamp_window(w);
+                if !self.pinching {
+                    self.pinching = true;
+                    let current = self.window();
+                    self.stack.push(current);
+                }
+                if let Some(top) = self.stack.last_mut() {
+                    *top = w;
+                }
+                self.band = self.band.and_then(|(a, b)| {
+                    let (w0, w1) = self.window();
+                    let (a, b) = (a.max(w0), b.min(w1));
+                    (b > a).then_some((a, b))
+                });
+            }
+            PlotMessage::PinchEnd => {
+                if std::mem::take(&mut self.pinching) {
+                    let eps = self.min_span();
+                    let (top, below) = (self.window(), self.stack.len().checked_sub(2).and_then(|i| self.stack.get(i)).copied());
+                    let full = (top.1 - top.0) >= (self.full.1 - self.full.0) - eps;
+                    if full {
+                        self.stack.truncate(1);
+                    } else if below.is_some_and(|b| (b.0 - top.0).abs() <= eps && (b.1 - top.1).abs() <= eps) {
+                        self.stack.pop();
+                    }
+                }
             }
         }
     }
@@ -1051,6 +1086,39 @@ mod tests {
         // Zooming all the way out returns to level 0.
         s.update(PlotMessage::Window((-10.0, 120.0)));
         assert_eq!(s.depth(), 1);
+    }
+
+    #[test]
+    fn pinch_pushes_one_level_on_release() {
+        let mut s = PlotState::new((0.0, 100.0));
+        s.update(PlotMessage::Window((10.0, 60.0)));
+        // A pinch (Cmd/Ctrl + scroll) edits a fresh level on top of the current one, however many events it takes ...
+        s.update(PlotMessage::Pinch((20.0, 50.0)));
+        s.update(PlotMessage::Pinch((25.0, 45.0)));
+        assert_eq!(s.levels(), &[(0.0, 100.0), (10.0, 60.0), (25.0, 45.0)]);
+        s.update(PlotMessage::PinchEnd);
+        // ... and Esc pops exactly that one.
+        s.update(PlotMessage::Back);
+        assert_eq!(s.levels(), &[(0.0, 100.0), (10.0, 60.0)]);
+        // A pinch that ends where it started adds nothing; one that zooms out to the full range returns to level 0.
+        s.update(PlotMessage::Pinch((10.0, 60.0)));
+        s.update(PlotMessage::PinchEnd);
+        assert_eq!(s.depth(), 2);
+        s.update(PlotMessage::Pinch((0.0, 100.0)));
+        s.update(PlotMessage::PinchEnd);
+        assert_eq!(s.depth(), 1);
+    }
+
+    #[test]
+    fn reset_returns_to_the_full_range_from_any_depth() {
+        let mut s = PlotState::new((0.0, 100.0));
+        s.update(PlotMessage::Band(Some((10.0, 60.0))));
+        s.update(PlotMessage::ZoomIn);
+        s.update(PlotMessage::Band(Some((20.0, 30.0))));
+        s.update(PlotMessage::ZoomIn);
+        s.update(PlotMessage::Band(Some((22.0, 24.0))));
+        s.update(PlotMessage::Reset);
+        assert_eq!((s.depth(), s.band(), s.window()), (1, None, (0.0, 100.0)));
     }
 
     #[test]

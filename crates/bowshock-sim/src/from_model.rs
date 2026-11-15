@@ -50,10 +50,6 @@ use crate::vehicle::{
 };
 use crate::G0;
 
-/// Stability margin (calibers) below which the rocket is flagged.
-pub const MIN_MARGIN_CAL: f64 = 1.0;
-/// Stability margin (calibers) above which the rocket is flagged as overstable.
-pub const MAX_MARGIN_CAL: f64 = 6.0;
 /// Thrust-to-weight ratio at liftoff below which the rocket is flagged (the NAR safety-code rule of thumb is 5:1).
 pub const MIN_THRUST_TO_WEIGHT: f64 = 5.0;
 /// How much larger than a mount's bore a motor may be before it is flagged (m).
@@ -508,11 +504,28 @@ pub struct Warning {
     pub message: String,
     /// The part to select when the line is clicked.
     pub part: Option<PartId>,
+    /// The dimension of that part to scroll to and focus in the inspector, when one field is the fix.
+    pub field: Option<model::Dim>,
 }
 
 impl Warning {
     fn new(level: Level, message: impl Into<String>, part: Option<PartId>) -> Warning {
-        Warning { level, message: message.into(), part }
+        Warning { level, message: message.into(), part, field: None }
+    }
+
+    /// The same warning pointing at `dim` of its part.
+    fn at(mut self, dim: model::Dim) -> Warning {
+        self.field = Some(dim);
+        self
+    }
+
+    /// [`at`](Self::at) when `part` exists.
+    fn at_if(self, part: Option<PartId>, dim: model::Dim) -> Warning {
+        if part.is_some() {
+            self.at(dim)
+        } else {
+            self
+        }
     }
 }
 
@@ -552,17 +565,21 @@ pub fn warnings(rocket: &Rocket, motors: &MotorDb, balance: &Balance) -> Vec<War
         return out;
     }
 
-    // Stability.
+    // Stability, against the document's thresholds. An unstable or marginal rocket points at the first fin set's span, the
+    // quickest way to move the CP back.
     if balance.reference_diameter > 0.0 {
         let m = balance.margin_cal;
-        out.push(if m < 0.0 {
-            Warning::new(Level::Err, format!("Unstable · {} cal (min {MIN_MARGIN_CAL:.1})", signed(m, 2)), None)
-        } else if m < MIN_MARGIN_CAL {
-            Warning::new(Level::Warn, format!("Marginal · {m:.2} cal (min {MIN_MARGIN_CAL:.1})"), None)
-        } else if m > MAX_MARGIN_CAL {
-            Warning::new(Level::Warn, format!("Over-stable · {m:.1} cal (max {MAX_MARGIN_CAL:.1})"), None)
+        let bands = rocket.stability_bands();
+        let (min, max) = (bands.stable, bands.over);
+        let fins = rocket.radials().iter().find(|r| matches!(r.kind, RadialKind::FinSet { .. })).map(|r| r.id);
+        out.push(if m < bands.marginal {
+            Warning::new(Level::Err, format!("Unstable · {} cal (min {min:.1})", signed(m, 2)), fins).at_if(fins, model::Dim::Span)
+        } else if m < bands.stable {
+            Warning::new(Level::Warn, format!("Marginal · {m:.2} cal (min {min:.1})"), fins).at_if(fins, model::Dim::Span)
+        } else if m > bands.over {
+            Warning::new(Level::Warn, format!("Over-stable · {m:.1} cal (max {max:.1})"), None)
         } else {
-            Warning::new(Level::Ok, format!("Stable · {m:.2} cal (min {MIN_MARGIN_CAL:.1})"), None)
+            Warning::new(Level::Ok, format!("Stable · {m:.2} cal (min {min:.1})"), None)
         });
     }
     if !matches!(rocket.parts().first().map(|p| &p.kind), Some(model::PartKind::NoseCone { .. })) {
@@ -606,14 +623,20 @@ pub fn warnings(rocket: &Rocket, motors: &MotorDb, balance: &Balance) -> Vec<War
             continue;
         };
         if motor.diameter > mount.inner_diameter + FIT_TOL {
-            out.push(Warning::new(Level::Err, format!("Motor too wide · {} (bore {:.1})", mm(motor.diameter), mount.inner_diameter * 1000.0), Some(mount.id)));
+            out.push(
+                Warning::new(Level::Err, format!("Motor too wide · {} (bore {:.1})", mm(motor.diameter), mount.inner_diameter * 1000.0), Some(mount.id))
+                    .at(model::Dim::InnerDiameter),
+            );
         }
         if motor.length > mount.length + mount.overhang + FIT_TOL {
-            out.push(Warning::new(
-                Level::Warn,
-                format!("Motor too long · {} (mount {:.1})", mm(motor.length), (mount.length + mount.overhang).max(0.0) * 1000.0),
-                Some(mount.id),
-            ));
+            out.push(
+                Warning::new(
+                    Level::Warn,
+                    format!("Motor too long · {} (mount {:.1})", mm(motor.length), (mount.length + mount.overhang).max(0.0) * 1000.0),
+                    Some(mount.id),
+                )
+                .at(model::Dim::Length),
+            );
         }
     }
 

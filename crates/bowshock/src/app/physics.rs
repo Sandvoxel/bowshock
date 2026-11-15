@@ -5,6 +5,9 @@
 //! The numbers are the static ones of [`from_model::balance`]: Barrowman CP at Mach 0.3 and zero angle of attack, mass and CG
 //! of the dry parts plus the loaded motors at liftoff (and the burned-out casings, [`Physics::burnout`]).
 
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+
 use bowshock_model::{ConfigId, MotorMount, MotorRef, PartId, Rocket, Stage};
 use bowshock_motors::{Motor, MotorDb};
 use bowshock_sim::from_model::{self, Balance, BridgeError, Level, Phase, Warning};
@@ -14,9 +17,89 @@ use crate::widgets::gauge::GaugeState;
 /// Mach number of the builder's balance readout.
 pub const BALANCE_MACH: f64 = 0.3;
 
+/// Where the user's own `.eng` files live: `$BOWSHOCK_MOTORS_DIR`, else `~/.config/bowshock/motors/`.
+pub fn user_motors_dir() -> Option<PathBuf> {
+    user_dir_from(std::env::var_os("BOWSHOCK_MOTORS_DIR"), std::env::var_os("HOME"))
+}
+
+fn user_dir_from(over: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    over.filter(|s| !s.is_empty()).map(PathBuf::from).or_else(|| home.map(|h| PathBuf::from(h).join(".config").join("bowshock").join("motors")))
+}
+
+/// Whether `db` already holds a motor with this designation and manufacturer.
+fn has_motor(db: &MotorDb, m: &Motor) -> bool {
+    db.motors.iter().any(|o| o.designation == m.designation && o.manufacturer == m.manufacturer)
+}
+
+/// Parses `.eng` text and appends the motors `db` does not hold yet; returns `(added, skipped duplicates)`. A parse error comes
+/// back as a notice with the file and line: `Custom.eng · line 12: bad header (expected 7 fields)`.
+pub fn import_eng(db: &mut MotorDb, name: &str, text: &str) -> Result<(usize, usize), String> {
+    let parsed = bowshock_motors::parse_eng(text).map_err(|e| format!("{name} · line {}: {}", e.line, e.message))?;
+    let total = parsed.len();
+    let mut added = 0;
+    for motor in parsed {
+        if !has_motor(db, &motor) {
+            db.motors.push(motor);
+            added += 1;
+        }
+    }
+    Ok((added, total - added))
+}
+
+/// Loads every `.eng` in `dir` (sorted by name) into `db`; files that fail to parse are skipped with a note on stderr.
+fn load_dir(db: &mut MotorDb, dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<PathBuf> =
+        entries.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("eng"))).collect();
+    files.sort();
+    for file in files {
+        let name = file.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        let result = std::fs::read_to_string(&file).map_err(|e| format!("{name}: {e}")).and_then(|text| import_eng(db, &name, &text));
+        if let Err(e) = result {
+            eprintln!("motor file {e}");
+        }
+    }
+}
+
+/// Imports `paths` into `db`, copying each good file into `dir` so it is loaded at the next start; returns the status notice.
+fn import_files(db: &mut MotorDb, dir: Option<&Path>, paths: &[PathBuf]) -> String {
+    let mut notes = Vec::new();
+    for path in paths {
+        let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) => {
+                notes.push(format!("{name}: cannot read ({e})"));
+                continue;
+            }
+        };
+        match import_eng(db, &name, &text) {
+            Err(e) => notes.push(e),
+            Ok((added, skipped)) => {
+                if let Some(dir) = dir {
+                    if let Err(e) = std::fs::create_dir_all(dir).and_then(|()| std::fs::write(dir.join(&name), &text)) {
+                        notes.push(format!("{name}: loaded, but not kept for next time ({e})"));
+                    }
+                }
+                let plural = if added == 1 { "motor" } else { "motors" };
+                notes.push(if skipped == 0 {
+                    format!("Loaded {added} {plural} from {name}")
+                } else {
+                    format!("Loaded {added} {plural} from {name} ({skipped} already known)")
+                });
+            }
+        }
+    }
+    notes.join(" · ")
+}
+
 /// Cached physics of the open document. See the module docs.
 pub struct Physics {
     motors: MotorDb,
+    /// How many of `motors` are bundled; the ones after are the user's.
+    bundled: usize,
     /// What is flying: the whole stack or only the upper stages. A view setting, not part of the document.
     phase: Phase,
     /// The document revision and phase the cache was computed for.
@@ -39,8 +122,10 @@ impl Default for Physics {
 impl Physics {
     /// An empty cache with the bundled motor database.
     pub fn new() -> Self {
+        let (motors, bundled) = Physics::initial_motors();
         Physics {
-            motors: MotorDb::bundled(),
+            motors,
+            bundled,
             phase: Phase::Full,
             computed_for: None,
             liftoff: Err(BridgeError::EmptyRocket),
@@ -50,6 +135,28 @@ impl Physics {
             config_margins: Vec::new(),
             gauge: GaugeState::new(0.0),
         }
+    }
+
+    /// The bundled motors plus the user's directory (not in tests, which must not depend on the machine), and the bundled count.
+    fn initial_motors() -> (MotorDb, usize) {
+        let mut db = MotorDb::bundled();
+        let bundled = db.len();
+        if !cfg!(test) {
+            if let Some(dir) = user_motors_dir() {
+                load_dir(&mut db, &dir);
+            }
+        }
+        (db, bundled)
+    }
+
+    /// Whether motor `index` came from the user's files rather than the bundled set.
+    pub fn is_user_motor(&self, index: usize) -> bool {
+        index >= self.bundled
+    }
+
+    /// Loads the user's `.eng` files (from the file dialog), keeps copies in [`user_motors_dir`], and returns the notice.
+    pub fn load_user_motors(&mut self, paths: &[PathBuf]) -> String {
+        import_files(&mut self.motors, user_motors_dir().as_deref(), paths)
     }
 
     /// The motor database.
@@ -231,10 +338,68 @@ mod tests {
     #[test]
     fn issues_are_the_warnings_that_are_not_ok_readings() {
         let mut physics = Physics::new();
-        physics.sync(&finned(), 1);
+        let mut rocket = finned();
+        // The bare airframe is far over the default 3 cal scale; this test is about Ok readings, so widen the document's band.
+        rocket.set_stability_bands(bowshock_model::StabilityBands { over: 20.0, ..Default::default() });
+        physics.sync(&rocket, 1);
         // No motor and no recovery: warnings, but no errors; the stability reading is Ok and is not counted.
         assert!(physics.warnings().iter().any(|w| w.level == Level::Ok));
         assert!(physics.issues().count() >= 2 && physics.issues().all(|w| w.level != Level::Ok));
         assert_eq!(physics.worst(), Level::Warn);
+    }
+
+    const CUSTOM: &str = "; my own motor\nZ99 54 300 0 0.2 0.35 XX\n   0.1 100\n   1.0 80\n   2.0 0\n";
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("bowshock-motors-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn user_dir_prefers_the_env_override() {
+        assert_eq!(user_dir_from(Some("/x/motors".into()), Some("/home/u".into())), Some(PathBuf::from("/x/motors")));
+        assert_eq!(user_dir_from(None, Some("/home/u".into())), Some(PathBuf::from("/home/u/.config/bowshock/motors")));
+        assert_eq!(user_dir_from(Some("".into()), None), None);
+    }
+
+    #[test]
+    fn imported_files_are_kept_and_reloaded_from_the_user_dir() {
+        let dir = temp_dir("keep");
+        let source = dir.join("Custom.eng");
+        std::fs::write(&source, CUSTOM).unwrap();
+        let store = dir.join("store");
+        let mut db = MotorDb::bundled();
+        let bundled = db.len();
+        let notice = import_files(&mut db, Some(&store), &[source]);
+        assert_eq!(notice, "Loaded 1 motor from Custom.eng");
+        assert_eq!(db.len(), bundled + 1);
+        assert!(store.join("Custom.eng").is_file());
+        let mut next = MotorDb::bundled();
+        load_dir(&mut next, &store);
+        assert_eq!(next.len(), bundled + 1);
+        assert_eq!(next.motors.last().unwrap().designation, "Z99");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn duplicates_are_skipped_and_reported() {
+        let mut db = MotorDb::bundled();
+        let before = db.len();
+        assert_eq!(import_eng(&mut db, "a.eng", CUSTOM), Ok((1, 0)));
+        assert_eq!(import_eng(&mut db, "a.eng", CUSTOM), Ok((0, 1)));
+        let h128w = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../bowshock-motors/data/aerotech_h128w.eng")).unwrap();
+        assert_eq!(import_eng(&mut db, "h.eng", &h128w), Ok((0, 1)));
+        assert_eq!(db.len(), before + 1);
+    }
+
+    #[test]
+    fn a_parse_error_names_the_file_and_line() {
+        let mut db = MotorDb::bundled();
+        let before = db.len();
+        let e = import_eng(&mut db, "Broken.eng", "; c\nZ1 54 300\n 0.1 5\n").unwrap_err();
+        assert!(e.starts_with("Broken.eng · line 2: "), "{e}");
+        assert_eq!(db.len(), before);
     }
 }

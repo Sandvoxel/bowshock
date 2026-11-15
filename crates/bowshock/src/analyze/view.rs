@@ -7,9 +7,10 @@ use iced::widget::{button, column, container, row, scrollable, text, tooltip, Sp
 use iced::{alignment, Element, Fill, Length, Theme, Widget};
 
 use super::compute::{Analysis, FinishChoice, Method};
+use super::import::Source;
 use super::plots::Built;
 use super::readout::{self, Row, Tag};
-use super::{MachField, Message, State};
+use super::{Comparison, MachField, Message, State};
 use crate::app::{ui, Ctx};
 use crate::theme::{self, MONO, SANS_SEMIBOLD};
 use crate::tokens::{BIN_W, CONTROL_H, RAIL_W, RIGHT_PANEL_W, SPACE_1, SPACE_2, SPACE_3, TEXT_BODY, TEXT_LABEL};
@@ -17,7 +18,7 @@ use crate::units::Quantity;
 use crate::widgets::button::{button as push, Weight};
 use crate::widgets::chip::{chip, Severity};
 use crate::widgets::field::{self, rule};
-use crate::widgets::gauge::{self, Bands};
+use crate::widgets::gauge;
 use crate::widgets::ground_track::GroundTrackView;
 use crate::widgets::plot::{self, PlotView, SeriesColor};
 use crate::widgets::unit_input::unit_input;
@@ -32,7 +33,7 @@ const GAUGE_W: f32 = 270.0;
 static FINISHES: [FinishChoice; 6] = FinishChoice::ALL;
 
 const RASAERO_REASON: &str = "RASAero's .CDX1 is a proprietary project format; exporting it is not implemented";
-const COMPARE_REASON: &str = "Overlaying an imported OpenRocket or RASAero result is not available yet";
+const NO_COMPARISON: &str = "No comparison is loaded";
 
 /// The whole screen.
 pub fn screen<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
@@ -144,9 +145,40 @@ fn method(state: &State) -> Element<'_, Message> {
         }
     };
     let resolve: Element<'_, Message> = push("Re-solve", Weight::Secondary).on_press(Message::Resolve).into();
-    let compare: Element<'_, Message> = push("Compare ▾", Weight::Ghost).disabled(COMPARE_REASON).into();
+    let compare: Element<'_, Message> = push("Compare ▾", Weight::Ghost).on_press(Message::CompareMenu).into();
     let actions = row![resolve, compare].spacing(SPACE_2);
-    column![strip, line, actions].spacing(SPACE_2).padding([0.0, 0.0]).boxed()
+    let mut col = column![strip, line, actions].spacing(SPACE_2).padding([0.0, 0.0]);
+    if state.compare_open {
+        let other = super::other_method(state.method);
+        let with = match other {
+            Method::Barrowman => "Compare with Barrowman",
+            _ => "Compare with Extended",
+        };
+        let item = |label: &'static str, message: Message| -> Element<'_, Message> { push(label, Weight::Secondary).on_press(message).small().into() };
+        let clear: Element<'_, Message> = if state.compare.is_some() {
+            item("Clear comparison", Message::ClearCompare)
+        } else {
+            push("Clear comparison", Weight::Secondary).small().disabled(NO_COMPARISON).into()
+        };
+        col = col.push(
+            column![
+                item(with, Message::CompareWith(other)),
+                item("Import OpenRocket CSV…", Message::ImportCompare(Source::OpenRocket)),
+                item("Import RASAero CSV…", Message::ImportCompare(Source::RasAero)),
+                clear,
+            ]
+            .spacing(SPACE_1)
+            .boxed(),
+        );
+    }
+    if let Some(c) = &state.compare {
+        let from = match c {
+            Comparison::Method(_) => String::new(),
+            Comparison::File { name, .. } => format!(" · {name}"),
+        };
+        col = col.push(muted(format!("Comparing with {}{from}", c.label()), 12.0));
+    }
+    col.boxed()
 }
 
 /// A Conditions row: the label column and `control`.
@@ -238,7 +270,8 @@ fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
     let active = ctx.doc.rocket().active_config_id();
     let hover = state.plot.hover_x().map(|x| built.scale.to_si(x));
     let length = readout::margin_at(out, hover, active).map(|(_, m)| ui::with_unit(m, Quantity::Length, ctx.units));
-    let card = container(gauge::full(&state.gauge, &Bands::default(), length)).width(GAUGE_W);
+    let bands: gauge::Bands = ctx.doc.rocket().stability_bands().into();
+    let card = container(gauge::full(&state.gauge, &bands, length)).width(GAUGE_W);
 
     let mut notes: Vec<Element<'a, Message>> = Vec::new();
     if !built.legend.is_empty() {
@@ -329,6 +362,13 @@ fn right<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
         for (i, sec) in readout.sections.into_iter().enumerate() {
             let rows: Vec<Element<'a, Message>> = sec.rows.into_iter().map(row_view).collect();
             sections.push(section(i + 1, &sec.title, i > 0, rows));
+        }
+    }
+    if let (Some((out, _)), Some(overlay)) = (shown, state.overlay.as_ref()) {
+        if let Some(sec) = readout::compare_section(out, overlay, hover, active, ctx.units) {
+            let rows: Vec<Element<'a, Message>> = sec.rows.into_iter().map(row_view).collect();
+            sections.push(section(count + 1, &sec.title, true, rows));
+            count += 1;
         }
     }
     sections.push(export(state, shown.is_some(), count + 1));

@@ -9,6 +9,7 @@
 //!
 //! The model has no UI and no physics dependencies; `bowshock-sim` and the app read it.
 
+mod bands;
 mod config;
 mod expr;
 mod flights;
@@ -27,6 +28,7 @@ mod symmetry;
 /// Stable identifier of a part within a [`Rocket`], whatever class of part it is.
 pub type PartId = u64;
 
+pub use bands::StabilityBands;
 pub use config::{Ballast, ConfigError, ConfigId, Configuration, EventKind, MotorMount, MotorRef, MotorSlot, RecoveryTiming, StageEvent, StageTrigger};
 pub use expr::{dim_from_key, dim_key, dim_kind, EvalError, Expr, ExprError, FieldRef, Formula, FormulaError, FormulaStatus, Kind, Op, Value};
 pub use flights::{example_flights, Conditions, FlightDef, FlightId, FlightMotor, Turbulence, MAX_LAUNCH_ANGLE};

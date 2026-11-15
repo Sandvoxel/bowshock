@@ -53,6 +53,8 @@ pub struct Overlay<'a> {
 #[derive(Debug, Default)]
 pub struct State {
     modifiers: keyboard::Modifiers,
+    /// Trackpad scroll not yet worth a step, in steps.
+    wheel: f32,
 }
 
 impl Overlay<'_> {
@@ -86,6 +88,21 @@ impl canvas::Program<Message> for Overlay<'_> {
         if let Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) = event {
             state.modifiers = *modifiers;
             return None;
+        }
+        if let Event::Mouse(mouse::Event::WheelScrolled { delta }) = event {
+            // Mid-drag the wheel steps the number of copies rather than zooming the camera (one step per notch, or per 40 px of
+            // trackpad scroll).
+            cursor.position_over(bounds)?;
+            let steps = match *delta {
+                mouse::ScrollDelta::Lines { y, .. } => y,
+                mouse::ScrollDelta::Pixels { y, .. } => {
+                    state.wheel += y / 40.0;
+                    let whole = state.wheel.trunc();
+                    state.wheel -= whole;
+                    whole
+                }
+            };
+            return Some(if steps == 0.0 { Action::capture() } else { Action::publish(Message::CopiesStep(steps > 0.0)).and_capture() });
         }
         if let Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) = event {
             // Releasing over the viewport drops (or, with no target, cancels); elsewhere the app cancels.

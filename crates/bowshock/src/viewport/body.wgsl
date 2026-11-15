@@ -92,7 +92,8 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     let rim = mix(0.45, 1.0, smoothstep(0.0, 0.55, facing));
 
     // Part states: 0 normal, 1 ghost (dragged in: pulled towards the accent), 2 hovered (a little brighter), 3 selected
-    // (the silhouette edge tinted accent, like an outline).
+    // (the silhouette edge tinted accent, like an outline), 4..5 flashing (just dropped or edited, strength state - 4), 6..7
+    // flashing and selected (strength state - 6).
     var base = vec3<f32>(0.0);
     var alpha = 1.0;
     var shaded = true;
@@ -153,9 +154,20 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
         c = base * lit * rim;
     }
     if in.state > 2.5 {
-        let k = pow(1.0 - facing, 3.0);
-        c = mix(c, accent, 0.7 * k);
-        alpha = max(alpha, 0.8 * k);
+        // A flashing part (state 4 + strength, or 6 + strength when it is also selected) gets a wider, stronger outline and a
+        // soft accent pulse over its body, both fading with the strength.
+        var pulse = 0.0;
+        var weight = 1.0;
+        if in.state > 5.5 {
+            pulse = in.state - 6.0;
+        } else if in.state > 3.5 {
+            pulse = in.state - 4.0;
+            weight = pulse;
+        }
+        let k = pow(1.0 - facing, 3.0 - 0.8 * pulse);
+        c = mix(c, accent, min(0.7 + 0.3 * pulse, 1.0) * k * weight);
+        c = mix(c, accent, 0.08 * pulse);
+        alpha = max(alpha, 0.8 * k * weight);
     }
 
     // A thin bg-000 line (50 %) where stacked parts meet.

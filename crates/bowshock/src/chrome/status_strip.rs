@@ -13,7 +13,6 @@ use crate::theme;
 use crate::tokens::{text as type_scale, BIN_W, RAIL_W, SPACE_1, SPACE_2, SPACE_3, STATUSBAR_H, TEXT_BODY, TEXT_LABEL};
 use crate::units::Quantity;
 use crate::widgets::chip::{chip, Severity};
-use crate::widgets::gauge::Bands;
 use crate::widgets::glyph::{self, Mark, Tone};
 use crate::widgets::segmented::segmented;
 use crate::widgets::status;
@@ -43,10 +42,10 @@ pub fn status_strip<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> 
     cells.push(status::readout("MASS", value(|b| b.mass, Quantity::Mass, true), None));
     cells.push(status::readout("LEN", value(|b| b.length, Quantity::Length, true), None));
     cells.push(status::readout("Ø REF", value(|b| b.reference_diameter, Quantity::Length, true), None));
-    cells.push(status::cg(value(|b| b.cg, Quantity::Length, false), None));
-    cells.push(status::cp(value(|b| b.cp, Quantity::Length, false), None));
+    cells.push(status::cg(value(|b| b.cg, Quantity::Length, false), ctx.show_cg, Some(wrap(ChromeMessage::ToggleCg))));
+    cells.push(status::cp(value(|b| b.cp, Quantity::Length, false), ctx.show_cp, Some(wrap(ChromeMessage::ToggleCp))));
     if balance.is_some() {
-        cells.push(status::stability(ctx.physics.gauge(), &Bands::default(), Some(Message::Mode(Mode::Analyze))));
+        cells.push(status::stability(ctx.physics.gauge(), &ctx.doc.rocket().stability_bands().into(), Some(Message::Mode(Mode::Analyze))));
     } else {
         cells.push(status::readout("STAB", DASH, None));
     }

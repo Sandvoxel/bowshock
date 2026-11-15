@@ -427,3 +427,35 @@ fn a_canted_fin_of_a_group_flies_as_its_own_fin_set() {
     assert_eq!(spans.len(), 3);
     assert!(spans.contains(&0.12));
 }
+
+#[test]
+fn stability_warnings_follow_the_documents_thresholds() {
+    let (mut r, mount_id) = single_stage();
+    let db = MotorDb::bundled();
+    let b = balance(&r, &db, Phase::Full, 0.3, 0.0, true).unwrap();
+    let at = |margin_cal: f64, r: &bowshock_model::Rocket| {
+        warnings(r, &db, &bowshock_sim::from_model::Balance { margin_cal, ..b }).into_iter().find(|w| w.message.contains("cal ("))
+    };
+
+    // Defaults: unstable below 0.5, marginal below 1.0, over-stable above 3.0 (no longer the old 6.0).
+    assert_eq!(at(0.4, &r).unwrap().level, Level::Err);
+    assert_eq!(at(0.74, &r).unwrap().level, Level::Warn);
+    assert_eq!(at(2.0, &r).unwrap().level, Level::Ok);
+    let over = at(3.5, &r).unwrap();
+    assert_eq!((over.level, over.message.as_str()), (Level::Warn, "Over-stable · 3.5 cal (max 3.0)"));
+
+    // A stricter document: marginal until 1.5 calibers, over-stable above 2.0.
+    r.set_stability_bands(bowshock_model::StabilityBands { marginal: 0.8, stable: 1.5, over: 2.0 });
+    assert_eq!(at(0.7, &r).unwrap().level, Level::Err);
+    assert_eq!(at(1.2, &r).unwrap().message, "Marginal · 1.20 cal (min 1.5)");
+    assert_eq!(at(2.5, &r).unwrap().message, "Over-stable · 2.5 cal (max 2.0)");
+
+    // Unstable and marginal readings point at the fin span; motor misfits at the mount's dimension.
+    let fins = at(1.2, &r).unwrap();
+    assert!(fins.part.is_some() && fins.field == Some(bowshock_model::Dim::Span), "{fins:?}");
+    let cfg = r.active_config_id();
+    r.set_motor(cfg, mount_id, Some(MotorRef::new("J420R", "AeroTech"))).unwrap();
+    let w = warnings(&r, &db, &b);
+    let long = w.iter().find(|w| w.message.contains("too long")).unwrap();
+    assert_eq!((long.part, long.field), (Some(mount_id), Some(bowshock_model::Dim::Length)));
+}

@@ -8,7 +8,7 @@ use iced::{mouse, Element, Fill, Widget};
 
 use super::form::{text_row, value_row, Form};
 use super::separation::stage_name;
-use super::Message;
+use super::{Band, Message};
 use crate::app::{ui, Ctx};
 use crate::theme::{self, MONO};
 use crate::tokens::{SPACE_2, TEXT_BODY, TEXT_LABEL};
@@ -16,6 +16,7 @@ use crate::units::Quantity;
 use crate::widgets::button::{button, Weight};
 use crate::widgets::chip::{chip, Severity};
 use crate::widgets::field::{labeled, section};
+use crate::widgets::unit_input::unit_input;
 
 fn name_field<'a>(placeholder: &'static str, value: &'a str, on_input: fn(String) -> Message) -> Element<'a, Message> {
     text_input(placeholder, value).on_input(on_input).size(TEXT_BODY).padding([4.0, SPACE_2]).style(theme::input).boxed()
@@ -112,11 +113,23 @@ pub fn view<'a>(ctx: &'a Ctx) -> (String, Vec<Element<'a, Message>>) {
         None => balance_rows.push(text("Nothing to weigh yet.").size(TEXT_BODY).style(theme::muted).boxed()),
     }
 
+    // The thresholds the gauge, the status strip, the Analyze lines and the health list judge the margin against.
+    let bands = rocket.stability_bands();
+    let limit = |label: &'static str, value: f64, band: Band| -> Element<'a, Message> {
+        unit_input(label, value, Quantity::Calibers, &units).on_commit(move |v| Message::Band(band, v)).into()
+    };
+    let limit_rows = vec![
+        limit("Marginal from", bands.marginal, Band::Marginal),
+        limit("Stable from", bands.stable, Band::Stable),
+        limit("Over from", bands.over, Band::Over),
+    ];
+
     let sections = vec![
         section(1, "Rocket", false, identity),
         section(2, "Stages", true, stage_rows),
         section(3, "Configuration", true, config_rows),
         section(4, "Balance", true, balance_rows),
+        section(5, "Stability limits", true, limit_rows),
     ];
     (title, sections)
 }

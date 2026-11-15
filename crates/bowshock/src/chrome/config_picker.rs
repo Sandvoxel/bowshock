@@ -4,9 +4,9 @@
 
 use std::collections::BTreeMap;
 
+use bowshock_model::StabilityBands;
 use bowshock_model::{MotorMount, MotorRef, PartId};
 use bowshock_motors::Motor;
-use bowshock_sim::from_model::{MAX_MARGIN_CAL, MIN_MARGIN_CAL};
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input, Space};
 use iced::{Background, Center, Element, Fill, Length, Theme, Widget};
 
@@ -48,6 +48,8 @@ pub enum Message {
     Add,
     /// Close without adding.
     Cancel,
+    /// "Load .eng…": pick motor files of one's own.
+    LoadFiles,
 }
 
 /// What the chrome should do after a picker message.
@@ -57,6 +59,8 @@ pub enum Outcome {
     Stay,
     /// Close it.
     Close,
+    /// Open the file dialog for the user's own `.eng` files.
+    LoadFiles,
 }
 
 /// A motor chosen for a mount, with its ejection delay.
@@ -130,6 +134,12 @@ impl Picker {
         ctx.physics.mounts_of_stage(ctx.doc.rocket(), self.stage).into_iter().next()
     }
 
+    /// Rebuilds the table after the motor database grew, and shows every class so the new motors are visible.
+    pub fn refresh(&mut self, ctx: &Ctx) {
+        self.classes.clear();
+        self.rebuild(ctx);
+    }
+
     /// Recomputes the table for the current stage: fit, and the margin with each fitting motor.
     fn rebuild(&mut self, ctx: &Ctx) {
         self.rows.clear();
@@ -184,6 +194,7 @@ impl Picker {
                     choice.delay = delay;
                 }
             }
+            Message::LoadFiles => return Outcome::LoadFiles,
             Message::Cancel => return Outcome::Close,
             Message::Add => {
                 self.add(ctx);
@@ -296,10 +307,15 @@ impl Picker {
         let picked = mount.as_ref().and_then(|m| self.choices.get(&m.id)).copied();
         let rows = self.visible(ctx);
         let table_h = (rows.len() as f32 * 27.0).clamp(40.0, TABLE_H);
+        let bands = ctx.doc.rocket().stability_bands();
         let table: Element<'a, ChromeMessage> = if rows.is_empty() {
             container(text("No motors match").size(TEXT_BODY).style(theme::faint)).padding(SPACE_3).boxed()
         } else {
-            column(rows.into_iter().map(|r| table_row(r, &motors[r.motor], picked.is_some_and(|c| c.motor == r.motor), units, msg))).boxed()
+            column(
+                rows.into_iter()
+                    .map(|r| table_row(r, &motors[r.motor], ctx.physics.is_user_motor(r.motor), picked.is_some_and(|c| c.motor == r.motor), bands, units, msg)),
+            )
+            .boxed()
         };
 
         let delay: Element<'a, ChromeMessage> = match picked {
@@ -311,7 +327,8 @@ impl Picker {
             Some(_) => action("Add configuration", Weight::Primary).on_press(msg(Message::Add)).into(),
             None => action("Add configuration", Weight::Primary).disabled("Pick a motor").into(),
         };
-        let footer = row![container(delay).width(160), Space::new().width(Fill), cancel, add].spacing(SPACE_2).align_y(Center);
+        let load: Element<'a, ChromeMessage> = action("Load .eng…", Weight::Secondary).on_press(msg(Message::LoadFiles)).into();
+        let footer = row![container(delay).width(160), load, Space::new().width(Fill), cancel, add].spacing(SPACE_2).align_y(Center);
 
         let rule = || container(Space::new()).width(Fill).height(1).style(theme::hairline).boxed();
         let mut body = column![
@@ -345,18 +362,27 @@ fn scrim_style(theme: &Theme) -> container::Style {
     container::Style { background: Some(Background::Color(theme::tokens(theme).bg_000.scale_alpha(0.55))), ..container::Style::default() }
 }
 
-/// The colour a margin is shown in: `ok` inside the recommended band, `warn` outside it, `err` when unstable.
-pub fn margin_color(t: &Tokens, margin: f64) -> iced::Color {
-    if margin < 0.0 {
+/// The colour a margin is shown in against the document's thresholds: `ok` in the stable band, `warn` when marginal or
+/// over-stable, `err` when unstable.
+pub fn margin_color(t: &Tokens, bands: StabilityBands, margin: f64) -> iced::Color {
+    if margin < bands.marginal {
         t.err
-    } else if !(MIN_MARGIN_CAL..=MAX_MARGIN_CAL).contains(&margin) {
+    } else if margin < bands.stable || margin > bands.over {
         t.warn
     } else {
         t.ok
     }
 }
 
-fn table_row<'a>(r: &Row, motor: &Motor, picked: bool, units: crate::units::UnitSystem, msg: fn(Message) -> ChromeMessage) -> Element<'a, ChromeMessage> {
+fn table_row<'a>(
+    r: &Row,
+    motor: &Motor,
+    user: bool,
+    picked: bool,
+    bands: StabilityBands,
+    units: crate::units::UnitSystem,
+    msg: fn(Message) -> ChromeMessage,
+) -> Element<'a, ChromeMessage> {
     let faint = r.problem.is_some();
     let cell = move |s: String, width: Length| {
         container(text(s).font(MONO).size(ROW_SIZE).style(move |t: &Theme| {
@@ -370,12 +396,21 @@ fn table_row<'a>(r: &Row, motor: &Motor, picked: bool, units: crate::units::Unit
         (None, Some(margin)) => text(format!("{margin:.2} cal"))
             .font(MONO)
             .size(ROW_SIZE)
-            .style(move |t: &Theme| text::Style { color: Some(margin_color(theme::tokens(t), margin)), selection: None })
+            .style(move |t: &Theme| text::Style { color: Some(margin_color(theme::tokens(t), bands, margin)), selection: None })
             .boxed(),
         (None, None) => text("—").font(MONO).size(ROW_SIZE).style(theme::faint).boxed(),
     };
+    let mut name = row![text(motor.designation.clone()).font(MONO).size(ROW_SIZE).style(move |t: &Theme| {
+        let tk = theme::tokens(t);
+        text::Style { color: Some(if faint { tk.ink_faint } else { tk.ink }), selection: None }
+    })]
+    .spacing(SPACE_2)
+    .align_y(Center);
+    if user {
+        name = name.push(text("USER").font(MONO).size(HEAD_SIZE).style(theme::faint).boxed());
+    }
     let content = row![
-        cell(motor.designation.clone(), Length::FillPortion(11)),
+        container(name).width(Length::FillPortion(11)),
         cell(ui::with_unit(motor.total_impulse(), Quantity::Impulse, units), Length::FillPortion(10)),
         cell(ui::with_unit(motor.length, Quantity::Length, units), Length::FillPortion(10)),
         cell(ui::with_unit(motor.total_mass, Quantity::Mass, units), Length::FillPortion(10)),

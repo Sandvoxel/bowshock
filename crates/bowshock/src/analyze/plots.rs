@@ -2,9 +2,11 @@
 //! and apogee histogram of the Monte Carlo). All y values are converted to the display unit here, so everything below the
 //! view stays SI; [`Scale`] converts the plots' x back.
 
+use bowshock_model::StabilityBands;
 use bowshock_sim::{AlphaPoint, MachPoint};
 
-use super::compute::{Analysis, Data, Output, Run, FLUTTER_MIN_MARGIN, MIN_MARGIN, OVER_STABLE};
+use super::compute::{Analysis, Data, Output, Run, FLUTTER_MIN_MARGIN};
+use super::overlay::{Field, Overlay};
 use super::readout::{config_color, DRAG_PARTS};
 use crate::units::{Quantity, Unit, UnitSystem};
 use crate::widgets::ground_track::{GroundTrack, Track, TrackPoint, Wind};
@@ -46,13 +48,13 @@ fn unit(q: Quantity, units: UnitSystem) -> &'static Unit {
     q.unit_for(units)
 }
 
-/// Builds the plots of `out` for `units`.
-pub fn build(out: &Output, units: UnitSystem) -> Built {
+/// Builds the plots of `out` for `units`, with the comparison `overlay` drawn dashed where it has the quantity.
+pub fn build(out: &Output, units: UnitSystem, overlay: Option<&Overlay>) -> Built {
     let legend = if out.runs.len() > 1 { out.runs.iter().enumerate().map(|(i, r)| (config_color(i), r.name.clone())).collect() } else { Vec::new() };
     let (group, ground, scale) = match out.analysis {
-        Analysis::Aerodynamics => (aero(out, units), None, Scale { x_si: 1.0 }),
-        Analysis::Drag => (drag(out), None, Scale { x_si: 1.0 }),
-        Analysis::Stability => (stability(out, units), None, Scale { x_si: std::f64::consts::PI / 180.0 }),
+        Analysis::Aerodynamics => (aero(out, units, overlay), None, Scale { x_si: 1.0 }),
+        Analysis::Drag => (drag(out, overlay), None, Scale { x_si: 1.0 }),
+        Analysis::Stability => (stability(out, units, overlay), None, Scale { x_si: std::f64::consts::PI / 180.0 }),
         Analysis::Flutter => (flutter(out, units), None, Scale { x_si: unit(Quantity::Altitude, units).to_si }),
         Analysis::Dispersion => {
             let (hist, ground) = dispersion(out, units);
@@ -70,10 +72,10 @@ fn curve(points: &[MachPoint], f: impl Fn(&MachPoint) -> f64) -> Vec<(f64, f64)>
     points.iter().map(|p| (p.mach, f(p))).collect()
 }
 
-fn margin_panel(series: Vec<Series>) -> Panel {
+fn margin_panel(series: Vec<Series>, bands: StabilityBands) -> Panel {
     let mut panel = Panel::new("Static margin", "cal")
-        .hline(HLine::dashed(OVER_STABLE, format!("Over-stable {OVER_STABLE:.1}"), SeriesColor::Warn))
-        .hline(HLine::dashed(MIN_MARGIN, format!("Min {MIN_MARGIN:.1}"), SeriesColor::Ok));
+        .hline(HLine::dashed(bands.over, format!("Over-stable {:.1}", bands.over), SeriesColor::Warn))
+        .hline(HLine::dashed(bands.stable, format!("Min {:.1}", bands.stable), SeriesColor::Ok));
     panel.series = series;
     panel
 }
@@ -87,6 +89,26 @@ fn stacked(points: &[MachPoint]) -> Vec<Series> {
         layers.push(Series::new("Other", curve(points, |p| p.drag.protuberances)).color(SeriesColor::Muted).filled().label_margin());
     }
     layers
+}
+
+/// Adds the comparison's `field` to `panel` as a dashed series in its own colour, labelled with its source; `fx` / `fy` map
+/// the overlay's SI x and y to the plot's.
+fn overlaid(
+    panel: Panel,
+    overlay: Option<&Overlay>,
+    analysis: Analysis,
+    field: Field,
+    single: bool,
+    fx: impl Fn(f64) -> f64,
+    fy: impl Fn(f64) -> f64,
+) -> Panel {
+    let Some(o) = overlay else { return panel };
+    let points: Vec<(f64, f64)> = o.points(analysis, field).into_iter().map(|(x, y)| (fx(x), fy(y))).collect();
+    if points.is_empty() {
+        return panel;
+    }
+    let color = if single { SeriesColor::Series(2) } else { SeriesColor::Muted };
+    panel.with(Series::new(o.label.clone(), points).color(color).style(LineStyle::Dashed).label_margin())
 }
 
 fn cd_panel(runs: &[(usize, &Run, &[MachPoint])]) -> Panel {
@@ -104,7 +126,7 @@ fn cd_panel(runs: &[(usize, &Run, &[MachPoint])]) -> Panel {
     panel
 }
 
-fn aero(out: &Output, units: UnitSystem) -> PlotGroup {
+fn aero(out: &Output, units: UnitSystem, overlay: Option<&Overlay>) -> PlotGroup {
     let runs = mach_runs(out);
     let len = unit(Quantity::Length, units);
     let to = |m: f64| m / len.to_si;
@@ -132,13 +154,18 @@ fn aero(out: &Output, units: UnitSystem) -> PlotGroup {
         }
     }
 
-    let mut group = PlotGroup::new(Axis::mach()).panel(margin_panel(margin)).panel(cpcg).panel(cd_panel(&runs));
+    let id = |x: f64| x;
+    let a = Analysis::Aerodynamics;
+    let margin_panel = overlaid(margin_panel(margin, out.bands), overlay, a, Field::Margin, single, id, id);
+    let cpcg = overlaid(cpcg, overlay, a, Field::Cp, single, id, to);
+    let cd = overlaid(cd_panel(&runs), overlay, a, Field::Cd, single, id, id);
+    let mut group = PlotGroup::new(Axis::mach()).panel(margin_panel).panel(cpcg).panel(cd);
     group.right_margin = MARGIN_PX;
     group.x_range = Some(out.conditions.mach);
     group
 }
 
-fn drag(out: &Output) -> PlotGroup {
+fn drag(out: &Output, overlay: Option<&Overlay>) -> PlotGroup {
     let runs = mach_runs(out);
     let mut shares = Panel::new("Share of drag", "% of total").value_unit("%");
     if let [(_, _, points)] = runs.as_slice() {
@@ -159,13 +186,15 @@ fn drag(out: &Output) -> PlotGroup {
         }
         shares.title = "Skin friction share".into();
     }
-    let mut group = PlotGroup::new(Axis::mach()).panel(cd_panel(&runs).weight(1.6)).panel(shares);
+    let id = |x: f64| x;
+    let cd = overlaid(cd_panel(&runs).weight(1.6), overlay, Analysis::Drag, Field::Cd, runs.len() == 1, id, id);
+    let mut group = PlotGroup::new(Axis::mach()).panel(cd).panel(shares);
     group.right_margin = MARGIN_PX;
     group.x_range = Some(out.conditions.mach);
     group
 }
 
-fn stability(out: &Output, units: UnitSystem) -> PlotGroup {
+fn stability(out: &Output, units: UnitSystem, overlay: Option<&Overlay>) -> PlotGroup {
     let len = unit(Quantity::Length, units);
     let to = |m: f64| m / len.to_si;
     let single = out.runs.len() == 1;
@@ -195,7 +224,12 @@ fn stability(out: &Output, units: UnitSystem) -> PlotGroup {
         cpcg = cpcg.with(Series::new(name, points.iter().map(|p| deg(p, cg)).collect()).color(if single { SeriesColor::Cg } else { color }).label_inside());
     }
     let axis = Axis { label: "AoA".into(), unit: "°".into(), prefix: "α ".into(), decimals: 1 };
-    let mut group = PlotGroup::new(axis).panel(margin_panel(margin)).panel(cpcg).panel(cn);
+    let a = Analysis::Stability;
+    let (deg, id) = (f64::to_degrees, |y: f64| y);
+    let margin_panel = overlaid(margin_panel(margin, out.bands), overlay, a, Field::Margin, single, deg, id);
+    let cpcg = overlaid(cpcg, overlay, a, Field::Cp, single, deg, to);
+    let cn = overlaid(cn, overlay, a, Field::Cn, single, deg, id);
+    let mut group = PlotGroup::new(axis).panel(margin_panel).panel(cpcg).panel(cn);
     group.right_margin = MARGIN_PX;
     group.x_range = Some((0.0, out.conditions.alpha_max.to_degrees()));
     group
@@ -284,8 +318,9 @@ mod tests {
             rocket.duplicate_configuration(rocket.active_config_id());
         }
         let (jobs, _) = jobs(&rocket, &MotorDb::bundled(), Phase::Full).unwrap();
-        let out = compute(&Request { analysis, method: Method::Extended, conditions: Conditions { runs: 8, ..Conditions::default() }, jobs });
-        build(&out, UnitSystem::MmGS)
+        let bands = rocket.stability_bands();
+        let out = compute(&Request { analysis, method: Method::Extended, conditions: Conditions { runs: 8, ..Conditions::default() }, jobs, bands });
+        build(&out, UnitSystem::MmGS, None)
     }
 
     #[test]

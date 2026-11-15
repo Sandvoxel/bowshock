@@ -41,6 +41,13 @@ impl Default for Bands {
     }
 }
 
+impl From<bowshock_model::StabilityBands> for Bands {
+    /// The document's thresholds as the gauge's (`over` is the end of the scale).
+    fn from(b: bowshock_model::StabilityBands) -> Self {
+        Self { marginal: b.marginal as f32, stable: b.stable as f32, max: b.over as f32 }
+    }
+}
+
 /// How a margin reads against [`Bands`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stability {

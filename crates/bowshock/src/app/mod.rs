@@ -93,6 +93,10 @@ pub struct Ctx {
     pub dark: bool,
     /// "Compare all in lanes": the lanes draw every configuration's motor and CG.
     pub compare_configs: bool,
+    /// Whether the viewport and the lanes draw the CG marker (the status strip's CG cell toggles it).
+    pub show_cg: bool,
+    /// Whether the viewport and the lanes draw the CP marker (the status strip's CP cell toggles it).
+    pub show_cp: bool,
     /// A transient status message and when it expires.
     pub notice: Option<(String, Instant)>,
     /// Ask the viewport to frame the rocket once its mesh is current (set after adding a part or loading a document).
@@ -104,6 +108,9 @@ pub struct Ctx {
     pub symmetry: symmetry::SymmetryUi,
     /// Pick mode and the formula UI's transient state (see [`refs`]).
     pub refs: refs::Ui,
+    /// The part just dropped or edited and when: the viewport outlines it and the lanes flash its bar (see
+    /// [`crate::viewport::flash`]).
+    pub flash: Option<(PartId, Instant)>,
 }
 
 impl Ctx {
@@ -118,12 +125,15 @@ impl Ctx {
             mode: Mode::Build,
             dark: true,
             compare_configs: false,
+            show_cg: true,
+            show_cp: true,
             notice: None,
             camera_fit: false,
             reloaded: false,
             armed: None,
             symmetry: symmetry::SymmetryUi::default(),
             refs: refs::Ui::default(),
+            flash: None,
         }
     }
 
@@ -143,12 +153,28 @@ impl Ctx {
 
     /// Whether anything needs frame ticks because of the context itself.
     fn animating(&self) -> bool {
-        self.notice.is_some() || self.physics.animating()
+        self.notice.is_some() || self.physics.animating() || (self.flash.is_some() && crate::viewport::animation_on())
+    }
+
+    /// Starts the one-time flash and settle of part `id` (it was just dropped or its edit was committed).
+    pub fn flash_part(&mut self, id: PartId) {
+        if crate::viewport::flash::enabled() {
+            self.flash = Some((id, Instant::now()));
+        }
+    }
+
+    /// The flash as the views draw it now: `(part, outline strength 0..1, height above its place in metres)`.
+    pub fn flash_levels(&self) -> Option<(PartId, f32, f32)> {
+        let (id, since) = self.flash?;
+        let age = crate::viewport::flash::age(since, Instant::now());
+        let level = crate::viewport::flash::level(age);
+        (level > 0.0).then(|| (id, level, crate::viewport::flash::lift(age)))
     }
 
     /// Call after replacing the document wholesale (New, Open, the example).
     pub(crate) fn loaded(&mut self) {
         self.selection = Selection::None;
+        self.flash = None;
         self.symmetry = symmetry::SymmetryUi::default();
         self.refs = refs::Ui::default();
         self.drag = Drags { symmetry: self.drag.symmetry, angle_snap: self.drag.angle_snap, ..Drags::default() };
@@ -232,6 +258,8 @@ pub enum Message {
     Example,
     /// The Simulate button (F5): switch to Simulate and run the current configuration's flight.
     Run,
+    /// The Simulate button's menu: switch to Simulate and fly every configuration (one flight each).
+    RunAll,
     /// The parts bin.
     PartsBin(parts_bin::Message),
     /// The viewport.
@@ -252,6 +280,9 @@ pub enum Message {
 pub struct App {
     ctx: Ctx,
     layout: build::Layout,
+    /// The ids in the rocket while the drag in progress carries its part, and the rocket as it was when the drag began (see
+    /// [`App::track_drop`]).
+    drag_start: Option<(Vec<PartId>, bowshock_model::Rocket)>,
     parts_bin: parts_bin::State,
     viewport: viewport::View,
     lanes: lanes::State,
@@ -267,6 +298,7 @@ impl App {
         App {
             ctx: Ctx::new(),
             layout: build::Layout::new(),
+            drag_start: None,
             parts_bin: parts_bin::State::new(),
             viewport: viewport::View::new(),
             lanes: lanes::State::new(),
@@ -282,6 +314,10 @@ impl App {
         let mut app = App::new();
         files::example(&mut app.ctx);
         app.after_update();
+        // A headless `drive` run delivers no key subscription events, so `BOWSHOCK_DRIVE_TAB=1` presses Tab once at start-up.
+        if std::env::var_os("BOWSHOCK_DRIVE_TAB").is_some() {
+            app.layout.toggle_sides();
+        }
         app
     }
 
@@ -306,12 +342,34 @@ impl App {
     /// Handles `message`, then brings everything derived from the document up to date.
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.route(message);
+        self.track_drop();
         self.after_update();
         // The Analyze screen starts its off-thread computations (and rebuilds its plots) after every message while it shows.
         if self.ctx.mode == Mode::Analyze {
             return Task::batch([task, self.analyze.refresh(&self.ctx)]);
         }
         task
+    }
+
+    /// Notices a drag ending in a drop: the part that is in the rocket now but was not while it was carried (a new part from
+    /// the bin, or one that was picked up and put down) is the one to flash and settle.
+    fn track_drop(&mut self) {
+        let ctx = &mut self.ctx;
+        if ctx.drag.active() {
+            if self.drag_start.is_none() {
+                self.drag_start = Some((part_ids(ctx.doc.rocket()), ctx.doc.drag_base().cloned().unwrap_or_else(|| ctx.doc.rocket().clone())));
+            }
+        } else if let Some((carried, base)) = self.drag_start.take() {
+            // A cancelled drag puts the document back exactly as it was: nothing landed, nothing to flash.
+            if ctx.doc.rocket() == &base {
+                return;
+            }
+            let new: Vec<PartId> = part_ids(ctx.doc.rocket()).into_iter().filter(|id| !carried.contains(id)).collect();
+            let pick = ctx.selection.part().filter(|id| new.contains(id)).or_else(|| new.first().copied());
+            if let Some(id) = pick {
+                ctx.flash_part(id);
+            }
+        }
     }
 
     /// Recomputes what depends on the document (physics, the viewport mesh) and applies requests made during the update.
@@ -348,8 +406,16 @@ impl App {
                 self.chrome.dismiss();
             }
             Message::ToggleTheme => ctx.dark = !ctx.dark,
-            Message::Units(units) => ctx.units = units,
+            Message::Units(units) => {
+                crate::units::clear_unit_overrides();
+                ctx.units = units;
+            }
             Message::Frame(now) => {
+                if let Some((_, since)) = ctx.flash {
+                    if crate::viewport::flash::done(crate::viewport::flash::age(since, now)) {
+                        ctx.flash = None;
+                    }
+                }
                 self.viewport.tick(now);
                 ctx.physics.tick(now);
                 self.simulate.tick(now);
@@ -422,10 +488,26 @@ impl App {
                 self.chrome.dismiss();
                 return self.simulate.update(simulate::Message::Run, ctx);
             }
+            Message::RunAll => {
+                ctx.mode = Mode::Simulate;
+                self.chrome.dismiss();
+                return self.simulate.update(simulate::Message::PerConfiguration, ctx);
+            }
             Message::PartsBin(m) => return self.parts_bin.update(m, ctx),
             Message::Viewport(m) => return self.viewport.update(m, ctx),
             Message::Lanes(m) => return self.lanes.update(m, ctx),
-            Message::Inspector(m) => return self.inspector.update(m, ctx),
+            Message::Inspector(m) => {
+                // A committed edit (not every tick of a scrub) flashes the part it changed.
+                let (scrub, commit) = (matches!(m, inspector::Message::Edit(_, _, true)), matches!(m, inspector::Message::Edit(_, _, false)));
+                let revision = ctx.doc.revision();
+                let task = self.inspector.update(m, ctx);
+                if commit || (!scrub && ctx.doc.revision() != revision) {
+                    if let Some(id) = ctx.selection.part() {
+                        ctx.flash_part(id);
+                    }
+                }
+                return task;
+            }
             Message::Simulate(m) => return self.simulate.update(m, ctx),
             Message::Analyze(m) => return self.analyze.update(m, ctx),
             Message::Chrome(m) => return self.chrome.update(m, ctx),
@@ -439,6 +521,11 @@ impl App {
             return self.route(message);
         }
         if press.captured {
+            return Task::none();
+        }
+        // Tab folds both side columns away for a full-screen viewport (and brings them back).
+        if press.key == keyboard::Key::Named(keyboard::key::Named::Tab) && press.modifiers.is_empty() && self.ctx.mode == Mode::Build {
+            self.layout.toggle_sides();
             return Task::none();
         }
         let (key, modifiers) = (&press.key, press.modifiers);
@@ -479,6 +566,8 @@ impl App {
                     Some(Message::Key(KeyPress { key, modifiers, captured: !ignored }))
                 }
                 iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) if ignored => Some(Message::Released),
+                // A right-click on a unit chip changes the units of every field; any message makes the view rebuild.
+                iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => Some(Message::Chrome(chrome::Message::Nothing)),
                 _ => None,
             }
         });
@@ -506,6 +595,11 @@ impl App {
         // parts bin follow the cursor anywhere, and end (or be cancelled) wherever it is released.
         mouse_area(root).on_move(Message::Cursor).on_release(Message::Released).boxed()
     }
+}
+
+/// Every part id in `rocket`: axial parts first, then radial, then internal.
+fn part_ids(rocket: &bowshock_model::Rocket) -> Vec<PartId> {
+    rocket.parts().iter().map(|p| p.id).chain(rocket.radials().iter().map(|p| p.id)).chain(rocket.internals().iter().map(|p| p.id)).collect()
 }
 
 /// What a click means while a field is in pick mode (the viewport and the lanes are pickable): `Some(Some(part))` opens the part's
@@ -625,6 +719,52 @@ mod tests {
         assert_eq!(rocket.part(transition).unwrap().kind.fore_diameter(), 0.1);
         assert_eq!(rocket.part(transition).unwrap().kind.aft_diameter(), 0.1);
         assert!(app.ctx.drag.axial.is_none());
+    }
+
+    #[test]
+    fn a_drop_flashes_the_part_once_and_a_cancel_does_not() {
+        let (mut app, [_, tube, transition]) = app();
+        assert!(app.ctx.flash.is_none());
+        vp(&mut app, Vp::Grab(Pick::Axial(tube)));
+        app.update(Message::Cancel);
+        assert!(app.ctx.flash.is_none());
+        vp(&mut app, Vp::Grab(Pick::Axial(transition)));
+        assert!(app.ctx.flash.is_none(), "nothing flashes while the part is carried");
+        vp(&mut app, Vp::SnapNode(Some(1)));
+        vp(&mut app, Vp::DropAxial);
+        let (id, since) = app.ctx.flash.expect("the dropped part flashes");
+        assert_eq!(id, transition);
+        // The flash outlasts the 120 ms settle, runs out after 400 ms, and is cleared by the frame tick that sees it end.
+        let levels = app.ctx.flash_levels().expect("flash running");
+        assert_eq!(levels.0, transition);
+        app.update(Message::Frame(since + crate::viewport::flash::SETTLE_TIME));
+        assert!(app.ctx.flash.is_some());
+        app.update(Message::Frame(since + crate::viewport::flash::FLASH_TIME));
+        assert!(app.ctx.flash.is_none());
+    }
+
+    #[test]
+    fn only_a_committed_inspector_edit_flashes_the_part() {
+        use crate::build::inspector::{Field, Message as Insp};
+        let (mut app, [_, tube, _]) = app();
+        vp(&mut app, Vp::Select(Some(Pick::Axial(tube))));
+        let field = Field::Dim(bowshock_model::Dim::Length);
+        app.update(Message::Inspector(Insp::Edit(field, 0.4, true)));
+        assert!(app.ctx.flash.is_none(), "a scrub tick does not flash");
+        app.update(Message::Inspector(Insp::Edit(field, 0.42, false)));
+        assert_eq!(app.ctx.flash.map(|(id, _)| id), Some(tube));
+    }
+
+    #[test]
+    fn tab_folds_the_side_columns_in_build_but_not_while_a_field_captures_it() {
+        let (mut app, _) = app();
+        let tab = |captured| KeyPress { key: keyboard::Key::Named(keyboard::key::Named::Tab), modifiers: keyboard::Modifiers::empty(), captured };
+        app.update(Message::Key(tab(true)));
+        assert!(!app.layout.sides_hidden());
+        app.update(Message::Key(tab(false)));
+        assert!(app.layout.sides_hidden());
+        app.update(Message::Key(tab(false)));
+        assert!(!app.layout.sides_hidden());
     }
 
     #[test]

@@ -1,0 +1,5 @@
+# The motor picker with a user motor (USER tag): BOWSHOCK_MOTORS_DIR=<dir with a .eng> cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/qa-user-motor.drive out/user
+viewport 1280x800
+click (78, 782)
+click "New configuration…"
+screenshot user-motor-picker.png

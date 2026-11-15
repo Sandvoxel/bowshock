@@ -98,6 +98,10 @@ pub struct Lanes<'a> {
     pub units: UnitSystem,
     /// What is selected.
     pub selection: Selection,
+    /// The part just dropped or edited and how strong its flash still is (0 to 1).
+    pub flash: Option<(PartId, f32)>,
+    /// Whether the CG and the CP are drawn (the status strip's cells toggle them); the margin needs both.
+    pub show: (bool, bool),
     /// A part carried over the lanes.
     pub carry: Option<Carry>,
     /// Mass shading pinned on with `M`.
@@ -693,17 +697,26 @@ impl Lanes<'_> {
         // CG and CP run through every lane as dotted lines; their stations are labelled in the footer.
         if let Some(marks) = self.scene.marks {
             let (cg_x, cp_x) = (axis.px(marks.cg), axis.px(marks.cp));
-            vline(f, cg_x, RULER_H, size.height - 12.0, dotted(t.cg));
-            vline(f, cp_x, RULER_H, size.height - 12.0, dotted(t.cp));
-            let color = if marks.margin >= 1.0 {
+            let (show_cg, show_cp) = self.show;
+            let both = show_cg && show_cp;
+            if show_cg {
+                vline(f, cg_x, RULER_H, size.height - 12.0, dotted(t.cg));
+            }
+            if show_cp {
+                vline(f, cp_x, RULER_H, size.height - 12.0, dotted(t.cp));
+            }
+            let bands = self.rocket.stability_bands();
+            let color = if marks.margin >= bands.stable {
                 t.ok
-            } else if marks.margin >= 0.5 {
+            } else if marks.margin >= bands.marginal {
                 t.warn
             } else {
                 t.err
             };
             let (left, right) = (cg_x.min(cp_x), cg_x.max(cp_x));
-            f.fill_rectangle(Point::new(left, size.height - 15.0), Size::new((right - left).max(1.0), 3.0), color);
+            if both {
+                f.fill_rectangle(Point::new(left, size.height - 15.0), Size::new((right - left).max(1.0), 3.0), color);
+            }
             let ink = |c: Color, x: f32, text: &str, align: Alignment, f: &mut Frame| {
                 let w = mono_w(text.chars().count(), TEXT_SMALL) + 8.0;
                 let left = match align {
@@ -724,18 +737,24 @@ impl Lanes<'_> {
             let margin_text = format!("{:.2} cal", marks.margin);
             let (cg_side, cp_side) = if cg_x <= cp_x { (Alignment::Right, Alignment::Left) } else { (Alignment::Left, Alignment::Right) };
             let (cg_at, cp_at) = if cg_x <= cp_x { (cg_x - 3.0, cp_x + 3.0) } else { (cg_x + 3.0, cp_x - 3.0) };
-            ink(t.cg, cg_at, &cg_text, cg_side, f);
-            ink(t.cp, cp_at, &cp_text, cp_side, f);
+            if show_cg {
+                ink(t.cg, cg_at, &cg_text, cg_side, f);
+            }
+            if show_cp {
+                ink(t.cp, cp_at, &cp_text, cp_side, f);
+            }
             // The margin sits between the lines; when they are too close for it, it goes beyond the outer label instead.
             let margin_w = mono_w(margin_text.chars().count(), TEXT_SMALL) + 8.0;
-            if right - left >= margin_w + 6.0 {
-                ink(color, (left + right) / 2.0, &margin_text, Alignment::Center, f);
-            } else {
-                let outer_w = mono_w(cp_text.chars().count().max(cg_text.chars().count()), TEXT_SMALL) + 8.0;
-                if cg_x <= cp_x {
-                    ink(color, cp_x + 3.0 + outer_w + 2.0, &margin_text, Alignment::Left, f);
+            if both {
+                if right - left >= margin_w + 6.0 {
+                    ink(color, (left + right) / 2.0, &margin_text, Alignment::Center, f);
                 } else {
-                    ink(color, cg_x + 3.0 + outer_w + 2.0, &margin_text, Alignment::Left, f);
+                    let outer_w = mono_w(cp_text.chars().count().max(cg_text.chars().count()), TEXT_SMALL) + 8.0;
+                    if cg_x <= cp_x {
+                        ink(color, cp_x + 3.0 + outer_w + 2.0, &margin_text, Alignment::Left, f);
+                    } else {
+                        ink(color, cg_x + 3.0 + outer_w + 2.0, &margin_text, Alignment::Left, f);
+                    }
                 }
             }
         }
@@ -842,6 +861,11 @@ impl Lanes<'_> {
                 });
                 f.stroke(&p, s);
             }
+        }
+        if let Some((_, level)) = self.flash.filter(|&(id, _)| bar.part() == id && !bar.alt) {
+            // A part just dropped or edited: its bar flashes once, an accent wash and outline fading with the viewport's.
+            f.fill_rectangle(rect.position(), rect.size(), t.accent_soft.scale_alpha(level));
+            outline(f, rect, Stroke::default().with_color(t.accent.scale_alpha(level)).with_width(2.0));
         }
         if bar.warn {
             f.fill_rectangle(Point::new(rect.x + rect.width + 3.0, rect.y + rect.height / 2.0 - 3.0), Size::new(6.0, 6.0), dim(t.warn));

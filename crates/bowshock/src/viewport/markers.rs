@@ -45,6 +45,8 @@ pub struct Markers<'a> {
     pub mesh: &'a Mesh,
     /// `(cg, cp, margin in calibers)` of the phase on show, from the physics cache.
     pub balance: Option<(f64, f64, f64)>,
+    /// Whether the CG and the CP are drawn (the status strip's cells toggle them); the margin bracket needs both.
+    pub show: (bool, bool),
     pub stages: &'a [Stage],
     /// The motors of each stage in the active configuration, `(stage index, "H128W")`.
     pub motors: Vec<(usize, String)>,
@@ -161,10 +163,10 @@ impl Markers<'_> {
     }
 }
 
-fn margin_color(t: &Tokens, margin: f64) -> iced::Color {
-    if margin >= 1.0 {
+fn margin_color(t: &Tokens, bands: bowshock_model::StabilityBands, margin: f64) -> iced::Color {
+    if margin >= bands.stable {
         t.ok
-    } else if margin >= 0.5 {
+    } else if margin >= bands.marginal {
         t.warn
     } else {
         t.err
@@ -387,6 +389,9 @@ impl canvas::Program<Message> for Markers<'_> {
                 (zc, a, t.cg.scale_alpha(fade), "CG", cg, false, if apart || a.x <= b.x { alignment::Horizontal::Right } else { alignment::Horizontal::Left }),
                 (zp, b, t.cp.scale_alpha(fade), "CP", cp, true, if apart || b.x >= a.x { alignment::Horizontal::Left } else { alignment::Horizontal::Right }),
             ] {
+                if !(if name == "CG" { self.show.0 } else { self.show.1 }) {
+                    continue;
+                }
                 let r = self.radius_px(z, size).max(body * 0.2);
                 let value = bare(value, Quantity::Length, self.units);
                 let top = at.y - r;
@@ -413,23 +418,25 @@ impl canvas::Program<Message> for Markers<'_> {
                     cg_glyph(&mut frame, g, color, t.bg_000.scale_alpha(fade));
                 }
             }
-            let y = glyph_y(a).max(glyph_y(b)) + 22.0;
-            let color = margin_color(t, margin).scale_alpha(fade);
-            let bracket = Path::new(|p| {
-                p.move_to(Point::new(a.x, y - 5.0));
-                p.line_to(Point::new(a.x, y));
-                p.line_to(Point::new(b.x, y));
-                p.line_to(Point::new(b.x, y - 5.0));
-            });
-            frame.stroke(&bracket, Stroke::default().with_color(color).with_width(1.5));
-            label(
-                &mut frame,
-                format!("{margin:.2} cal"),
-                Point::new((a.x + b.x) / 2.0, y + 4.0),
-                color,
-                alignment::Horizontal::Center,
-                alignment::Vertical::Top,
-            );
+            if self.show.0 && self.show.1 {
+                let y = glyph_y(a).max(glyph_y(b)) + 22.0;
+                let color = margin_color(t, self.rocket.stability_bands(), margin).scale_alpha(fade);
+                let bracket = Path::new(|p| {
+                    p.move_to(Point::new(a.x, y - 5.0));
+                    p.line_to(Point::new(a.x, y));
+                    p.line_to(Point::new(b.x, y));
+                    p.line_to(Point::new(b.x, y - 5.0));
+                });
+                frame.stroke(&bracket, Stroke::default().with_color(color).with_width(1.5));
+                label(
+                    &mut frame,
+                    format!("{margin:.2} cal"),
+                    Point::new((a.x + b.x) / 2.0, y + 4.0),
+                    color,
+                    alignment::Horizontal::Center,
+                    alignment::Vertical::Top,
+                );
+            }
         }
 
         // The cutaway's section handle: a round dial at the nose end of the axis.

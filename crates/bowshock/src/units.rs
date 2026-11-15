@@ -155,6 +155,38 @@ static PERCENTAGE: [Unit; 1] = [unit("%", 0.01, 1)];
 static CALIBERS: [Unit; 1] = [unit("cal", 1.0, 2)];
 static SCALAR: [Unit; 1] = [unit("·", 1.0, 2)];
 
+thread_local! {
+    /// The unit the user picked for a quantity across the whole project (right-click on a unit chip), by `Quantity as usize`.
+    static OVERRIDES: std::cell::RefCell<[Option<&'static Unit>; 16]> = const { std::cell::RefCell::new([None; 16]) };
+}
+
+/// Makes `unit` the display unit of `quantity` everywhere ([`Quantity::unit_for`] and so every field, readout and label).
+pub fn set_unit_override(quantity: Quantity, unit: &'static Unit) {
+    OVERRIDES.with(|o| o.borrow_mut()[quantity as usize] = Some(unit));
+}
+
+/// Forgets every project-wide unit choice (the unit system select was changed).
+pub fn clear_unit_overrides() {
+    OVERRIDES.with(|o| *o.borrow_mut() = [None; 16]);
+}
+
+#[cfg(test)]
+mod override_tests {
+    use super::*;
+
+    #[test]
+    fn an_override_wins_over_the_system_until_cleared() {
+        let inch = &Quantity::Length.units()[3];
+        assert_eq!(Quantity::Length.unit_for(UnitSystem::MmGS).symbol, "mm");
+        set_unit_override(Quantity::Length, inch);
+        assert_eq!(Quantity::Length.unit_for(UnitSystem::MmGS).symbol, "in");
+        assert_eq!(format(0.0254, Quantity::Length, &UnitSystem::MmGS), ("1.000".to_string(), "in"));
+        assert_eq!(Quantity::Mass.unit_for(UnitSystem::MmGS).symbol, "g");
+        clear_unit_overrides();
+        assert_eq!(Quantity::Length.unit_for(UnitSystem::MmGS).symbol, "mm");
+    }
+}
+
 impl Quantity {
     /// All selectable units, in click-cycle order; the first is the most common.
     pub fn units(self) -> &'static [Unit] {
@@ -178,10 +210,18 @@ impl Quantity {
         }
     }
 
-    /// The unit this quantity uses in `system`.
+    /// The unit this quantity uses in `system`, unless the user chose one for the whole project ([`set_unit_override`]).
     ///
     /// Angle is always degrees, time always seconds; percentages and calibers have a single unit.
     pub fn unit_for(self, system: UnitSystem) -> &'static Unit {
+        if let Some(unit) = OVERRIDES.with(|o| o.borrow()[self as usize]) {
+            return unit;
+        }
+        self.system_unit(system)
+    }
+
+    /// The unit `system` gives this quantity, ignoring any project-wide choice.
+    pub fn system_unit(self, system: UnitSystem) -> &'static Unit {
         use UnitSystem::*;
         let imperial = system.is_imperial();
         let index = match self {

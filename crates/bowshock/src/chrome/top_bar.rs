@@ -6,6 +6,7 @@ use std::fmt;
 use iced::widget::{canvas, container, row, text, Space};
 use iced::{Background, Center, Element, Fill, Theme, Widget};
 
+use super::Message as ChromeMessage;
 use crate::app::document::EXTENSION;
 use crate::app::{Ctx, Message, Mode};
 use crate::logo;
@@ -67,6 +68,9 @@ pub fn top_bar(ctx: &Ctx) -> Element<'_, Message> {
     let units = container(field::select(systems, Some(SystemLabel(ctx.units)), |s| Message::Units(s.0))).width(UNITS_W);
     let theme_toggle: Element<'_, Message> = button(if ctx.dark { "Light" } else { "Dark" }, Weight::Ghost).on_press(Message::ToggleTheme).into();
     let simulate: Element<'_, Message> = button("Simulate", Weight::Primary).icon(Mark::Play).key("F5").on_press(Message::Run).into();
+    let menu: Element<'_, Message> =
+        button("", Weight::Primary).icon(Mark::CaretDown).tooltip("Run options").on_press(Message::Chrome(ChromeMessage::ToggleRunMenu)).into();
+    let simulate = row![simulate, menu].spacing(1);
 
     container(
         row![logo, rule(), file, rule(), undo, redo, Space::new().width(Fill), modes, Space::new().width(Fill), theme_toggle, units, simulate,]

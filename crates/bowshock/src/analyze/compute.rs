@@ -16,7 +16,7 @@
 
 use std::time::Duration;
 
-use bowshock_model::{ConfigId, Finish, MaterialId, Rocket};
+use bowshock_model::{ConfigId, Finish, MaterialId, Rocket, StabilityBands};
 use bowshock_motors::MotorDb;
 use bowshock_sim::from_model::{self, Phase};
 use bowshock_sim::{
@@ -26,10 +26,6 @@ use bowshock_sim::{
 
 /// The Mach number of the static balance the status strip shows (kept in step with `app::physics`).
 pub const BALANCE_MACH: f64 = crate::app::physics::BALANCE_MACH;
-/// Static margin below which a rocket is called unstable-ish: the kit's `MIN 1.0` line.
-pub const MIN_MARGIN: f64 = from_model::MIN_MARGIN_CAL;
-/// Static margin above which a rocket is over-stable and weathercocks: the kit's `OVER-STABLE 3.0` line.
-pub const OVER_STABLE: f64 = 3.0;
 /// Flutter velocity over maximum velocity below which fin flutter is a risk (the usual 1.5 guideline).
 pub const FLUTTER_MIN_MARGIN: f64 = 1.5;
 /// Most configurations drawn at once: the four categorical series colours (never cycled).
@@ -277,6 +273,8 @@ pub struct Request {
     pub conditions: Conditions,
     /// One job per configuration shown.
     pub jobs: Vec<ConfigJob>,
+    /// The document's stability thresholds, for the margin plots' lines and the severities.
+    pub bands: StabilityBands,
 }
 
 /// A fin-flutter curve of one configuration (worst fin set).
@@ -373,6 +371,8 @@ pub struct Output {
     pub runs: Vec<Run>,
     /// How long the computation took.
     pub elapsed: Duration,
+    /// The stability thresholds the request carried.
+    pub bands: StabilityBands,
 }
 
 /// Spacing of the Mach sweep's samples.
@@ -555,7 +555,7 @@ pub fn compute(request: &Request) -> Output {
             run_of(job, &vehicle, data)
         })
         .collect();
-    Output { analysis: request.analysis, method: request.method, conditions: cond, runs, elapsed: started.elapsed() }
+    Output { analysis: request.analysis, method: request.method, conditions: cond, runs, elapsed: started.elapsed(), bands: request.bands }
 }
 
 /// A table of the output's numbers: the table view and the CSV share it.
@@ -688,7 +688,7 @@ mod tests {
     }
 
     fn run(analysis: Analysis, method: Method, conditions: Conditions) -> Output {
-        compute(&Request { analysis, method, conditions, jobs: example_jobs() })
+        compute(&Request { analysis, method, conditions, jobs: example_jobs(), bands: Default::default() })
     }
 
     #[test]
@@ -788,7 +788,13 @@ mod tests {
         assert!(rocket.configuration(copy).is_some());
         let (jobs, omitted) = jobs(&rocket, &MotorDb::bundled(), Phase::Full).unwrap();
         assert_eq!((jobs.len(), omitted), (before + 1, 0));
-        let out = compute(&Request { analysis: Analysis::Aerodynamics, method: Method::Extended, conditions: Conditions::default(), jobs });
+        let out = compute(&Request {
+            analysis: Analysis::Aerodynamics,
+            method: Method::Extended,
+            conditions: Conditions::default(),
+            jobs,
+            bands: Default::default(),
+        });
         let table = out.table();
         assert_eq!(table.rows.len(), out.runs.len() * mach_samples((0.1, 3.0)));
         assert!(table.rows.iter().all(|r| r.len() == table.headers.len()));

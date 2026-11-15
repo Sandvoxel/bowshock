@@ -267,6 +267,8 @@ impl State {
             lock,
             units: ctx.units,
             selection: ctx.selection,
+            flash: ctx.flash_levels().map(|(id, level, _)| (id, level)),
+            show: (ctx.show_cg, ctx.show_cp),
             carry,
             pinned: self.pinned,
             collapsed: self.collapsed,
