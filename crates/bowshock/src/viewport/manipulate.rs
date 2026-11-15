@@ -13,11 +13,10 @@ use iced::{alignment, keyboard, mouse, Color, Point, Rectangle, Renderer, Size, 
 use super::assembly::tag;
 use super::pick::{self, Handle, Pick};
 use super::radial::Placement;
-use super::Camera;
-use crate::parts::{mm, radial_size_label, size_label};
+use super::{Camera, Message};
+use crate::app::ui::{mm, radial_size_label, size_label};
 use crate::theme::{self, MONO};
 use crate::tokens::TEXT_LABEL;
-use crate::Message;
 
 /// Movement in px after pressing a part beyond which it is picked up rather than clicked.
 const SLOP: f32 = 4.0;
@@ -228,7 +227,8 @@ impl canvas::Program<Message> for Overlay<'_> {
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                 if state.resize.take().is_some() {
-                    return Some(Action::capture());
+                    // The edit is over: the document stops merging the resize's steps into one.
+                    return Some(Action::publish(Message::EditEnd).and_capture());
                 }
                 let press = state.press.take()?;
                 Some(Action::publish(Message::Select(press.target)).and_capture())

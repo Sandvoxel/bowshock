@@ -76,12 +76,6 @@ pub fn overlay(theme: &Theme) -> container::Style {
     container::Style { text_color: Some(t.ink), ..filled(t.bg_200, t.line_200) }
 }
 
-/// One ruled cell of the status strip (a `line-100` rule on its right is drawn by the frame).
-pub fn cell(theme: &Theme) -> container::Style {
-    let t = tokens(theme);
-    container::Style { border: frame(t.line_100), ..container::Style::default() }
-}
-
 pub fn panes(theme: &Theme) -> pane_grid::Style {
     let t = tokens(theme);
     let line = pane_grid::Line { color: t.accent, width: 1.0 };

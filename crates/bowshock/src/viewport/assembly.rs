@@ -2,16 +2,15 @@
 //! centreline, picks the one nearest the cursor as the snap target, and reports snap changes and the drop (design/components/
 //! ViewportOverlay). The ghost part itself is drawn in 3D by the model mesh.
 
-use bowshock_model::{PartId, PartKind, Rocket};
+use bowshock_model::{InternalPart, Part, PartKind, RadialPart, Rocket};
 use glam::Vec3;
 use iced::widget::canvas::{self, Action, Event, Frame, Geometry, LineDash, Path, Stroke, Text};
 use iced::{alignment, mouse, Color, Point, Rectangle, Renderer, Size, Theme};
 
-use super::Camera;
-use crate::parts::mm;
+use super::{Camera, Message};
+use crate::app::ui::mm;
 use crate::theme::{self, MONO};
 use crate::tokens::TEXT_LABEL;
-use crate::Message;
 
 /// A node within this many px of the cursor is the snap target.
 const SNAP_RANGE: f32 = 40.0;
@@ -38,12 +37,12 @@ pub struct Drag {
 /// cancelled or ends with no snap target.
 #[derive(Debug, Clone)]
 pub struct Origin {
-    pub id: PartId,
-    pub index: usize,
-    /// The part as it was, before any diameter matching.
-    pub kind: PartKind,
+    /// The part exactly as it was (material, finish, overrides), before any diameter matching.
+    pub part: Part,
     /// The radial parts it carries: taken off while it is dragged, put back on it where it lands.
-    pub radials: Vec<bowshock_model::RadialPart>,
+    pub radials: Vec<RadialPart>,
+    /// The internal parts it carries, likewise.
+    pub internals: Vec<InternalPart>,
 }
 
 pub struct Overlay<'a> {
@@ -94,10 +93,10 @@ impl canvas::Program<Message> for Overlay<'_> {
     fn update(&self, _: &mut (), event: &Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<Action<Message>> {
         if let Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) = event {
             // Releasing over the viewport drops (or, with no snap target, cancels); elsewhere the app cancels.
-            return cursor.position_over(bounds).map(|_| Action::publish(Message::Drop).and_capture());
+            return cursor.position_over(bounds).map(|_| Action::publish(Message::DropAxial).and_capture());
         }
         let snap = cursor.position_in(bounds).and_then(|p| self.nearest(p, bounds.size()));
-        (snap != self.drag.snap).then(|| Action::publish(Message::Snap(snap)))
+        (snap != self.drag.snap).then(|| Action::publish(Message::SnapNode(snap)))
     }
 
     fn draw(&self, _: &(), renderer: &Renderer, theme: &Theme, bounds: Rectangle, _: mouse::Cursor) -> Vec<Geometry> {

@@ -1,0 +1,266 @@
+{
+  "format_version": 1,
+  "rocket": {
+    "name": "hpr_l1_cert",
+    "designer": "Bowshock",
+    "parts": [
+      {
+        "id": 0,
+        "kind": {
+          "NoseCone": {
+            "shape": "TangentOgive",
+            "length": 0.2286,
+            "diameter": 0.0762
+          }
+        },
+        "name": null,
+        "material": "polystyrene",
+        "finish": "RegularPaint",
+        "thickness": 0.002,
+        "mass_override": null,
+        "cg_override": null
+      },
+      {
+        "id": 1,
+        "kind": {
+          "BodyTube": {
+            "length": 0.52,
+            "diameter": 0.0762
+          }
+        },
+        "name": "Recovery bay",
+        "material": "cardboard",
+        "finish": "RegularPaint",
+        "thickness": 0.0016,
+        "mass_override": null,
+        "cg_override": null
+      },
+      {
+        "id": 2,
+        "kind": {
+          "BodyTube": {
+            "length": 0.3934,
+            "diameter": 0.0762
+          }
+        },
+        "name": "Booster",
+        "material": "cardboard",
+        "finish": "RegularPaint",
+        "thickness": 0.0016,
+        "mass_override": null,
+        "cg_override": null
+      }
+    ],
+    "radials": [
+      {
+        "id": 3,
+        "kind": {
+          "FinSet": {
+            "root_chord": 0.12,
+            "tip_chord": 0.05,
+            "span": 0.0762,
+            "sweep": 0.06,
+            "thickness": 0.00318
+          }
+        },
+        "parent": 2,
+        "offset": 0.27340000000000003,
+        "angle": 0.0,
+        "count": 3,
+        "name": null,
+        "material": "birch_plywood",
+        "finish": "RegularPaint",
+        "cross_section": "Square",
+        "cant": 0.0,
+        "mass_override": null,
+        "cg_override": null
+      },
+      {
+        "id": 4,
+        "kind": {
+          "RailButton": {
+            "height": 0.008,
+            "diameter": 0.011
+          }
+        },
+        "parent": 1,
+        "offset": 0.38,
+        "angle": 0.0,
+        "count": 1,
+        "name": null,
+        "material": "aluminum",
+        "finish": "RegularPaint",
+        "cross_section": "Square",
+        "cant": 0.0,
+        "mass_override": null,
+        "cg_override": null
+      },
+      {
+        "id": 5,
+        "kind": {
+          "RailButton": {
+            "height": 0.008,
+            "diameter": 0.011
+          }
+        },
+        "parent": 2,
+        "offset": 0.1,
+        "angle": 0.0,
+        "count": 1,
+        "name": null,
+        "material": "aluminum",
+        "finish": "RegularPaint",
+        "cross_section": "Square",
+        "cant": 0.0,
+        "mass_override": null,
+        "cg_override": null
+      }
+    ],
+    "internals": [
+      {
+        "id": 6,
+        "kind": {
+          "InnerTube": {
+            "outer_diameter": 0.042,
+            "thickness": 0.002,
+            "length": 0.34,
+            "motor_mount": true,
+            "overhang": 0.0
+          }
+        },
+        "parent": 2,
+        "offset": 0.0534,
+        "name": null,
+        "material": "cardboard",
+        "mass_override": null,
+        "cg_override": null
+      },
+      {
+        "id": 7,
+        "kind": {
+          "CenteringRing": {
+            "outer_diameter": null,
+            "inner_diameter": null,
+            "thickness": 0.006
+          }
+        },
+        "parent": 2,
+        "offset": 0.0534,
+        "name": null,
+        "material": "birch_plywood",
+        "mass_override": null,
+        "cg_override": null
+      },
+      {
+        "id": 8,
+        "kind": {
+          "CenteringRing": {
+            "outer_diameter": null,
+            "inner_diameter": null,
+            "thickness": 0.006
+          }
+        },
+        "parent": 2,
+        "offset": 0.3874,
+        "name": null,
+        "material": "birch_plywood",
+        "mass_override": null,
+        "cg_override": null
+      },
+      {
+        "id": 9,
+        "kind": {
+          "Parachute": {
+            "diameter": 0.9144,
+            "cd": 0.8,
+            "line_count": 6,
+            "line_length": 0.9144,
+            "line_material": "braided_nylon_2mm",
+            "packed_length": 0.2,
+            "packed_diameter": null,
+            "deploy": {
+              "event": "Ejection",
+              "delay": 0.0
+            }
+          }
+        },
+        "parent": 1,
+        "offset": 0.25,
+        "name": null,
+        "material": "ripstop_nylon",
+        "mass_override": null,
+        "cg_override": null
+      },
+      {
+        "id": 10,
+        "kind": {
+          "ShockCord": {
+            "length": 2.0,
+            "packed_length": 0.08
+          }
+        },
+        "parent": 1,
+        "offset": 0.15,
+        "name": null,
+        "material": "braided_nylon_3mm",
+        "mass_override": null,
+        "cg_override": null
+      },
+      {
+        "id": 11,
+        "kind": {
+          "MassComponent": {
+            "mass": 0.045,
+            "length": 0.06,
+            "diameter": 0.03,
+            "role": "Altimeter"
+          }
+        },
+        "parent": 1,
+        "offset": 0.46,
+        "name": null,
+        "material": "aluminum",
+        "mass_override": null,
+        "cg_override": null
+      },
+      {
+        "id": 12,
+        "kind": {
+          "MassComponent": {
+            "mass": 0.12,
+            "length": 0.04,
+            "diameter": null,
+            "role": "Ballast"
+          }
+        },
+        "parent": 1,
+        "offset": 0.02,
+        "name": null,
+        "material": "lead",
+        "mass_override": null,
+        "cg_override": null
+      }
+    ],
+    "next_id": 13,
+    "configs": [
+      {
+        "id": 0,
+        "name": "",
+        "motors": [
+          {
+            "mount": 6,
+            "motor": {
+              "designation": "H128W",
+              "manufacturer": "AeroTech"
+            },
+            "delay": 14.0,
+            "ignition": "Launch"
+          }
+        ],
+        "stage_separation": []
+      }
+    ],
+    "active_config": 0,
+    "next_config_id": 1
+  }
+}

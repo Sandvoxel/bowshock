@@ -1,0 +1,36 @@
+# The shell: top bar, status strip, config menu, motor picker, undo/redo, Simulate and Analyze frames.
+# Run with the example rocket loaded: `cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/shell.drive out/shell`
+viewport 1280x800
+screenshot build.png
+
+# Config menu opens upward over the foot of the parts bin.
+click "CONFIG"
+screenshot config-menu.png
+
+# New configuration... opens the motor picker (mount-filtered, with the margin each motor would give).
+click "New configuration…"
+screenshot picker.png
+click "I284W"
+screenshot picker-selected.png
+click "Add configuration"
+screenshot config-added.png
+
+# Undo and redo (top bar icon buttons) take the new configuration away and bring it back.
+click (353, 20)
+screenshot undone.png
+click (389, 20)
+screenshot redone.png
+
+# A part added from the bin is one undo step too.
+click "Body tube"
+screenshot added-tube.png
+click (353, 20)
+screenshot added-tube-undone.png
+
+# The mode switch: Simulate and Analyze keep the top bar and status strip.
+click (663, 18)
+screenshot simulate.png
+click (737, 18)
+screenshot analyze.png
+click (598, 18)
+screenshot back-to-build.png

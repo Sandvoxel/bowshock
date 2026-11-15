@@ -16,10 +16,9 @@ use iced::{keyboard, mouse, Point, Rectangle, Renderer, Size, Theme};
 use super::assembly::{no_entry, tag};
 use super::pick::{self, SurfaceTarget};
 use super::radial;
-use super::Camera;
-use crate::parts::mm;
+use super::{Camera, Message};
+use crate::app::ui::mm;
 use crate::theme;
-use crate::Message;
 
 /// Diameter of the ring marking the target.
 const RING: f32 = 7.0;

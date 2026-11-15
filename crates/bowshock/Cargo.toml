@@ -20,6 +20,9 @@ png = "0.18"
 glam = { version = "0.33", features = ["bytemuck"] }
 bytemuck = { version = "1", features = ["derive"] }
 bowshock-model = { path = "../bowshock-model" }
+bowshock-sim = { path = "../bowshock-sim" }
+bowshock-motors = { path = "../bowshock-motors" }
+rfd = "0.18"
 
 [lints]
 workspace = true
