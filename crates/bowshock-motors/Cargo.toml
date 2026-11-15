@@ -1,0 +1,14 @@
+[package]
+name = "bowshock-motors"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "RASP .eng motor thrust-curve parser and bundled hobby-rocket motor database for Bowshock (SI units)"
+
+[lib]
+name = "bowshock_motors"
+
+[lints]
+workspace = true
