@@ -9,9 +9,9 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/Sandvoxel/bowshock"
 
 [workspace.dependencies]
-bowshock = { path = "bowshock", default-features = false }
-bowshock-cfd = { path = "bowshock-cfd", default-features = false }
-bowshock-reference = { path = "bowshock-reference" }
+bowshock = { path = "bowshock", version = "0.1.0", default-features = false }
+bowshock-cfd = { path = "bowshock-cfd", version = "0.1.0", default-features = false }
+bowshock-reference = { path = "bowshock-reference", version = "0.1.0" }
 bowshock-cases = { path = "bowshock-cases" }
 bowshock-gpu-cases = { path = "bowshock-gpu-cases" }
 luma = { git = "https://github.com/flipnoteman/Luma.git", rev = "c2d0301d5126050b3abc82d8db7ab655adfa65e7" }

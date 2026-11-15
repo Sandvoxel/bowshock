@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Reference solutions for bowshock validation: Taylor-Maccoll cones, shock-expansion theory, axisymmetric potential flow"
+readme = "README.md"
+keywords = ["cfd", "rocket", "aerodynamics", "drag", "gpu"]
+categories = ["science", "simulation"]
+documentation = "https://sandvoxel.github.io/bowshock/main/api/bowshock_reference/"
 
 [dependencies]
 bowshock-cfd.workspace = true
