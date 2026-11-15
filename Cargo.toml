@@ -1,5 +1,5 @@
 [workspace]
-members = ["bowshock", "bowshock-core", "bowshock-reference", "bowshock-cases", "bowshock-gpu", "bowshock-gpu-cases", "bowshock-cli"]
+members = ["bowshock", "bowshock-core", "bowshock-reference", "bowshock-cases", "bowshock-gpu", "bowshock-gpu-cases", "bowshock-validate"]
 resolver = "2"
 
 [workspace.package]

@@ -69,7 +69,7 @@ Status: done on branch `usable-release`. Deviations: the `Params` check is done 
 - [x] Remove the `WARMRAMP` environment variable read from `bowshock-cases/src/transonic.rs` (make it a
       parameter or delete it).
 - [x] Fix stale text: `cd cfd` and "28 unit tests" in `bowshock-core/README.md`; `bowshock-cfd` in the
-      banner strings of every binary in `bowshock-cli/src/bin/`.
+      banner strings of every binary in `bowshock-validate/src/bin/` (then `bowshock-cli`).
 - [x] Add a test that the Rust `Params` struct and the WGSL `Params` block in `shaders::common` have the
       same size and field order. — done differently: both are generated from one `params!` macro in `bowshock-gpu/src/lib.rs`, so there was nothing to compare (the macro and the WGSL are gone with the array-op solver).
 

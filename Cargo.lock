@@ -96,20 +96,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bowshock-cli"
-version = "0.1.0"
-dependencies = [
- "bowshock",
- "bowshock-cases",
- "bowshock-core",
- "bowshock-gpu",
- "bowshock-gpu-cases",
- "bowshock-reference",
- "luma",
- "rayon",
-]
-
-[[package]]
 name = "bowshock-core"
 version = "0.1.0"
 dependencies = [
@@ -144,6 +130,20 @@ name = "bowshock-reference"
 version = "0.1.0"
 dependencies = [
  "bowshock-core",
+]
+
+[[package]]
+name = "bowshock-validate"
+version = "0.1.0"
+dependencies = [
+ "bowshock",
+ "bowshock-cases",
+ "bowshock-core",
+ "bowshock-gpu",
+ "bowshock-gpu-cases",
+ "bowshock-reference",
+ "luma",
+ "rayon",
 ]
 
 [[package]]

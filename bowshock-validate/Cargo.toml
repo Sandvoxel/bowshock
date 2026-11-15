@@ -1,9 +1,10 @@
 [package]
-name = "bowshock-cli"
+name = "bowshock-validate"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+publish = false
 description = "Validation drivers of bowshock: CPU and GPU cone, ogive, transonic and subsonic sweeps"
 
 [[bin]]

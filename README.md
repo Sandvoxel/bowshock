@@ -63,7 +63,7 @@ Results are written to `out/` (git-ignored).
 | `bowshock-cases` (lib `bowshock_cases`) | Validation cases (cone / ogive / transonic / subsonic), experimental data and their post-processing | [README](bowshock-core/README.md) |
 | `bowshock-gpu` (lib `bowshock_gpu`) | Luma array-op GPU solver (f32 / double-float, explicit and line-implicit), validated against the CPU reference | [README](bowshock-gpu/README.md) |
 | `bowshock-gpu-cases` (lib `bowshock_gpu_cases`) | GPU runners of the validation cases side by side with the CPU runs; GPU-vs-CPU tests | [README](bowshock-gpu/README.md) |
-| `bowshock-cli` | Validation drivers `cone`, `ogive`, `transonic`, `subsonic` (CPU) and `cone_gpu`, `ogive_gpu`, `transonic_gpu`, `subsonic_gpu` | |
+| `bowshock-validate` | Validation drivers `cone`, `ogive`, `transonic`, `subsonic` (CPU) and `cone_gpu`, `ogive_gpu`, `transonic_gpu`, `subsonic_gpu` | |
 
 `bowshock-gpu` depends on [Luma](https://github.com/flipnoteman/Luma) (lazy array API, 0.3) at a pinned git revision. To develop against a local Luma checkout, add a `[patch."https://github.com/flipnoteman/Luma.git"]` entry pointing at it.
 

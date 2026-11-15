@@ -32,7 +32,7 @@ cargo run --release -p bowshock-gpu --example bench_viscous       # the viscous 
 cargo run --release -p bowshock-gpu --example bench -- --implicit # the line-implicit scheme only (--no-implicit skips it in the default run); LUMA_TRIDIAGONAL=thomas|cyclic
 cargo run --release -p bowshock-gpu --example eval_loop           # where the time of the `eval` loop form goes
 cargo run --release -p bowshock-gpu --example luma_issues         # what still applies of the Luma problems below
-cargo run --release --bin cone_gpu | ogive_gpu | transonic_gpu | subsonic_gpu    # validation + benchmark drivers (bowshock-cli; CSV in out/gpu*/)
+cargo run --release --bin cone_gpu | ogive_gpu | transonic_gpu | subsonic_gpu    # validation + benchmark drivers (bowshock-validate; CSV in out/gpu*/)
 ```
 
 ## API

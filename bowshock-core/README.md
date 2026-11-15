@@ -23,10 +23,10 @@ bowshock/
   bowshock-cases/src/transonic.rs   `transonic_case`, Stoney (RM L53K17) and Czarnecki-Monta (TN D-3516) data
   bowshock-cases/src/subsonic.rs    subsonic case runner (sting / flat base + wake), drag breakdown, NASA TM X-2439 data
   bowshock-cases/examples/diag.rs   convergence diagnostics (per-cell residual map -> out/diag/)
-  bowshock-cli/src/bin/cone.rs      validation driver
-  bowshock-cli/src/bin/ogive.rs     ogive validation driver -> out/ogive/
-  bowshock-cli/src/bin/transonic.rs   transonic Mach sweep driver -> out/transonic/
-  bowshock-cli/src/bin/subsonic.rs    subsonic Mach sweep, TM X-2439 validation, low-Mach study -> out/subsonic/
+  bowshock-validate/src/bin/cone.rs      validation driver
+  bowshock-validate/src/bin/ogive.rs     ogive validation driver -> out/ogive/
+  bowshock-validate/src/bin/transonic.rs   transonic Mach sweep driver -> out/transonic/
+  bowshock-validate/src/bin/subsonic.rs    subsonic Mach sweep, TM X-2439 validation, low-Mach study -> out/subsonic/
   out/                       CSV output of `cone`
 ```
 
