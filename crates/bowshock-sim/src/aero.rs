@@ -1,19 +1,22 @@
-//! Barrowman / OpenRocket-style aerodynamics: normal force, centre of pressure and drag.
+//! Barrowman / OpenRocket aerodynamics: normal force, centre of pressure and drag.
 //!
 //! * Normal force slope and CP follow Barrowman (1967) for noses, transitions and fins, with
-//!   OpenRocket's additions: body lift `1.1 A_plan/A_ref sin^2(alpha)` acting at the planform
-//!   centroid (so the CP moves with angle of attack), Diederich fin lift with compressibility
-//!   correction, and a body-fin interference factor `K_fb = 1 + r/(s + r)`.
-//! * Drag follows the OpenRocket technical documentation (Niskanen 2013, section 3): skin
-//!   friction with transition and roughness limits, body pressure/stagnation/base drag, fin
-//!   leading/trailing-edge drag and protuberance drag. The nose/transition wave drag is a
-//!   compact fit (equivalent-cone theory scaled per profile family) rather than OpenRocket's
-//!   tabulated polynomials, and the transonic rise is a smooth window; see the comments.
+//!   OpenRocket's additions: body lift `1.1 A_plan/A_ref sin^2(alpha)/alpha` acting at the
+//!   planform centroid (so the CP moves with angle of attack), Diederich fin lift with
+//!   compressibility correction, and the body-fin interference factor `K_fb = 1 + r/(s + r)`.
+//! * Drag is a port of OpenRocket's `BarrowmanDragCalculator`, `SymmetricComponentCalc`,
+//!   `FinSetCalc`, `TubeCalc` and `RailButtonCalc` (Niskanen 2013, technical documentation
+//!   section 3; source: <https://github.com/openrocket/openrocket>, `core/.../aerodynamics`):
+//!   skin friction with the laminar/turbulent transition rule, roughness limit and
+//!   compressibility corrections; nose/shoulder pressure drag interpolated from the NASA TR R-100
+//!   free-flight tables per profile family and extrapolated to the actual fineness ratio;
+//!   stagnation and base drag; fin leading/trailing-edge drag per cross-section; launch lug and
+//!   rail button drag; and OpenRocket's angle-of-attack multiplier on axial drag.
 //!
 //! Coefficients are referenced to the vehicle reference area; stations are from the nose tip.
 
 use crate::vehicle::{BodyKind, BodySegment, FinCrossSection, FinPlanform, FinSet, NoseShape, Protuberance, Vehicle};
-use std::f64::consts::{FRAC_PI_2, PI};
+use std::f64::consts::PI;
 
 /// Per-component and total normal-force data at a flight condition.
 #[derive(Clone, Debug, PartialEq)]
@@ -33,7 +36,7 @@ pub struct DragBreakdown {
     pub friction: f64,
     /// Body pressure drag (nose/transition wave drag, stagnation on blunt faces).
     pub pressure: f64,
-    /// Base drag.
+    /// Base drag (body bases; fin trailing edges are counted in `fins`).
     pub base: f64,
     /// Fins: skin friction plus leading/trailing-edge pressure drag.
     pub fins: f64,
@@ -41,6 +44,257 @@ pub struct DragBreakdown {
     pub protuberances: f64,
     /// Sum of all of the above.
     pub total: f64,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tabulated data (OpenRocket `SymmetricComponentCalc`, from NASA TR R-100 page 16, fineness 3).
+// ---------------------------------------------------------------------------------------------
+
+type Pts = &'static [(f64, f64)];
+
+const ELLIPSOID: Pts = &[(1.2, 0.110), (1.25, 0.128), (1.3, 0.140), (1.4, 0.148), (1.6, 0.152), (2.0, 0.159), (2.4, 0.162)];
+const VON_KARMAN: Pts =
+    &[(0.9, 0.0), (0.95, 0.010), (1.0, 0.027), (1.05, 0.055), (1.1, 0.070), (1.2, 0.081), (1.4, 0.095), (1.6, 0.097), (2.0, 0.091), (3.0, 0.083)];
+const LV_HAACK: Pts = &[(0.9, 0.0), (0.95, 0.010), (1.0, 0.024), (1.05, 0.066), (1.1, 0.084), (1.2, 0.100), (1.4, 0.114), (1.6, 0.117), (2.0, 0.113)];
+const PARABOLIC_12: Pts = &[(0.8, 0.0), (0.9, 0.016), (0.95, 0.042), (1.0, 0.100), (1.05, 0.126), (1.1, 0.125), (1.3, 0.100), (1.5, 0.090), (1.8, 0.088)];
+
+/// Piecewise-linear table, clamped outside its range (OpenRocket `LinearInterpolator`).
+#[derive(Clone, Debug)]
+struct Table(Vec<(f64, f64)>);
+
+impl Table {
+    fn at(&self, x: f64) -> f64 {
+        let p = &self.0;
+        if x <= p[0].0 {
+            return p[0].1;
+        }
+        let last = p[p.len() - 1];
+        if x >= last.0 {
+            return last.1;
+        }
+        let i = p.partition_point(|q| q.0 <= x);
+        let (x0, y0) = p[i - 1];
+        let (x1, y1) = p[i];
+        y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+    }
+}
+
+fn static_table(p: Pts) -> Table {
+    Table(p.to_vec())
+}
+
+/// OpenRocket stagnation-pressure drag coefficient of a flat face, including the 0.85 factor.
+fn stagnation_cd(m: f64) -> f64 {
+    let pressure = if m <= 1.0 { 1.0 + m * m / 4.0 + m.powi(4) / 40.0 } else { 1.84 - 0.76 / (m * m) + 0.166 / m.powi(4) + 0.035 / m.powi(6) };
+    0.85 * pressure
+}
+
+/// OpenRocket base drag coefficient on the base area.
+fn base_cd(m: f64) -> f64 {
+    if m <= 1.0 {
+        0.12 + 0.13 * m * m
+    } else {
+        0.25 / m
+    }
+}
+
+/// Stagnation drag sampled every 0.05 Mach and linearly interpolated (`bluntInterpolator`).
+fn blunt_cd(m: f64) -> f64 {
+    let m = m.clamp(0.0, 2.95);
+    let i = (m / 0.05).floor();
+    let (m0, m1) = (i * 0.05, (i + 1.0) * 0.05);
+    let (c0, c1) = (stagnation_cd(m0), stagnation_cd(m1.min(2.95)));
+    if m1 > 2.95 {
+        return c0;
+    }
+    c0 + (c1 - c0) * (m - m0) / 0.05
+}
+
+/// Conical/ogive supersonic table (OpenRocket `calculateOgiveNoseInterpolator`): cubic through
+/// Mach 1.0..1.3, then `2.1 sin^2(phi) + 0.5 sin(phi)/sqrt(M^2 - 1)`.
+fn ogive_points(param: f64, sinphi: f64) -> Vec<(f64, f64)> {
+    const GAMMA: f64 = 1.4;
+    let cd1 = sinphi;
+    let cd13 = 2.1 * sinphi * sinphi + 0.6019 * sinphi;
+    let d1 = 4.0 / (GAMMA + 1.0) * (1.0 - 0.5 * cd1);
+    let d13 = -1.1341 * sinphi;
+    let mul = 0.72 * (param - 0.5) * (param - 0.5) + 0.82;
+    let mut pts = Vec::new();
+    // Hermite cubic on [1.0, 1.3] with the given end values and slopes.
+    for i in 0..=15 {
+        let m = 1.0 + 0.02 * f64::from(i);
+        let t = (m - 1.0) / 0.3;
+        let (t2, t3) = (t * t, t * t * t);
+        let v = (2.0 * t3 - 3.0 * t2 + 1.0) * cd1 + (t3 - 2.0 * t2 + t) * 0.3 * d1 + (-2.0 * t3 + 3.0 * t2) * cd13 + (t3 - t2) * 0.3 * d13;
+        pts.push((m, mul * v));
+    }
+    let mut j = 0;
+    loop {
+        let m = 1.32 + 0.02 * f64::from(j);
+        if m >= 4.0 {
+            break;
+        }
+        pts.push((m, mul * (2.1 * sinphi * sinphi + 0.5 * sinphi / (m * m - 1.0).max(0.0).sqrt())));
+        j += 1;
+    }
+    pts
+}
+
+/// Blend of two tables with weight `p` on the second, evaluated at the union of their points.
+fn blend(a: &Table, b: &Table, p: f64) -> Table {
+    let mut xs: Vec<f64> = a.0.iter().chain(&b.0).map(|q| q.0).collect();
+    xs.sort_by(f64::total_cmp);
+    xs.dedup();
+    Table(xs.into_iter().map(|m| (m, p * b.at(m) + (1.0 - p) * a.at(m))).collect())
+}
+
+/// Builds the nose/shoulder pressure-drag table (Cd on the frontal area `|A_aft - A_fore|` vs Mach)
+/// following OpenRocket's `calculateNoseInterpolator`. `shape = None` is a conical transition.
+fn pressure_table(shape: Option<NoseShape>, fineness: f64, sinphi: f64) -> Table {
+    let cone_sin = 1.0 / (1.0 + 4.0 * fineness * fineness).sqrt();
+    let extrapolate = |t: Table| {
+        let log4 = (fineness + 1.0).ln() / 4f64.ln();
+        Table(
+            t.0.iter()
+                .map(|&(m, v)| {
+                    let stag = blunt_cd(m);
+                    (m, stag * (v / stag).powf(log4))
+                })
+                .collect(),
+        )
+    };
+    let mut table = match shape {
+        None | Some(NoseShape::Conical) => Table(ogive_points(0.0, sinphi)),
+        // Ogives follow the wave drag of a cone with the same length and base diameter.
+        Some(NoseShape::TangentOgive) => Table(ogive_points(1.0, cone_sin)),
+        Some(NoseShape::Elliptical) => extrapolate(static_table(ELLIPSOID)),
+        // OpenRocket's PARABOLIC with shape parameter 0.5 (the "1/2 parabola"): weight 1 on that table.
+        Some(NoseShape::Parabolic) => extrapolate(blend(&Table(ogive_points(0.0, cone_sin)), &static_table(PARABOLIC_12), 1.0)),
+        // HAACK with parameter 0 is the von Karman (LD-Haack c = 0) shape.
+        Some(NoseShape::VonKarman) => extrapolate(blend(&static_table(VON_KARMAN), &static_table(LV_HAACK), 0.0)),
+    };
+    // Subsonic region: Cd = a M^b + Cd(0) when the first tabulated value is not ~0.
+    let (min, min_v) = table.0[0];
+    if min_v >= 0.001 {
+        let cd0 = 0.8 * sinphi * sinphi;
+        let min_deriv = (table.at(min + 0.01) - min_v) / 0.01;
+        if cd0 < min_v - 0.01 && min_deriv > 0.01 {
+            let b = min * min_deriv / (min_v - cd0);
+            let a = (min_v - cd0) / min.powf(b);
+            let mut sub = Vec::new();
+            let mut i = 0;
+            while f64::from(i) * 0.05 < min {
+                let m = f64::from(i) * 0.05;
+                sub.push((m, a * m.powf(b) + cd0));
+                i += 1;
+            }
+            sub.extend(table.0);
+            table = Table(sub);
+        }
+    }
+    table
+}
+
+// ---------------------------------------------------------------------------------------------
+// Skin friction (OpenRocket `BarrowmanDragCalculator`).
+// ---------------------------------------------------------------------------------------------
+
+/// Flat-plate skin friction coefficient at length-Reynolds number `re` including OpenRocket's
+/// compressibility correction. With `perfect_finish` the laminar-to-turbulent transition is
+/// modelled (laminar below Re 5.39e5, `1/(1.5 ln Re - 5.6)^2 - 1700/Re` above) and the
+/// compressibility corrections apply only for Re > 1e6; otherwise the fully turbulent formula is used.
+fn skin_cf(re: f64, mach: f64, perfect: bool) -> f64 {
+    let (mut c1, mut c2) = (1.0, 1.0);
+    let mut cf;
+    if perfect {
+        cf = if re < 1e4 {
+            1.33e-2
+        } else if re < 5.39e5 {
+            1.328 / re.sqrt()
+        } else {
+            1.0 / (1.5 * re.ln() - 5.6).powi(2) - 1700.0 / re
+        };
+        if mach < 1.1 && re > 1e6 {
+            c1 = if re < 3e6 { 1.0 - 0.1 * mach * mach * (re - 1e6) / 2e6 } else { 1.0 - 0.1 * mach * mach };
+        }
+        if mach > 0.9 && re > 1e6 {
+            let k = 1.0 / (1.0 + 0.045 * mach * mach).powf(0.25);
+            c2 = if re < 3e6 { 1.0 + (k - 1.0) * (re - 1e6) / 2e6 } else { k };
+        }
+    } else {
+        cf = if re < 1e4 { 1.48e-2 } else { 1.0 / (1.5 * re.ln() - 5.6).powi(2) };
+        if mach < 1.1 {
+            c1 = 1.0 - 0.1 * mach * mach;
+        }
+        if mach > 0.9 {
+            c2 = 1.0 / (1.0 + 0.15 * mach * mach).powf(0.58);
+        }
+    }
+    cf *= if mach < 0.9 {
+        c1
+    } else if mach < 1.1 {
+        c2 * (mach - 0.9) / 0.2 + c1 * (1.1 - mach) / 0.2
+    } else {
+        c2
+    };
+    cf
+}
+
+/// Compressibility factor applied to the roughness-limited skin friction.
+fn roughness_correction(mach: f64) -> f64 {
+    if mach < 0.9 {
+        1.0 - 0.1 * mach * mach
+    } else if mach > 1.1 {
+        1.0 / (1.0 + 0.18 * mach * mach)
+    } else {
+        let c1 = 1.0 - 0.1 * 0.81;
+        let c2 = 1.0 / (1.0 + 0.18 * 1.21);
+        c2 * (mach - 0.9) / 0.2 + c1 * (1.1 - mach) / 0.2
+    }
+}
+
+/// OpenRocket multiplier turning zero-alpha drag into axial drag at angle of attack `alpha`:
+/// a cubic from 1 at 0 to 1.3 at 17 deg, then a quartic falling to 0 at 90 deg.
+fn axial_drag_multiplier(alpha: f64) -> f64 {
+    let a = alpha.abs();
+    let a = if a > PI / 2.0 { PI - a } else { a };
+    let a17 = 17f64.to_radians();
+    if a < a17 {
+        // Hermite cubic: p(0) = 1, p(a17) = 1.3, zero slope at both ends.
+        let t = a / a17;
+        1.0 + 0.3 * t * t * (3.0 - 2.0 * t)
+    } else {
+        // p(x) = c3 t^3 + c4 t^4 with t = x - pi/2: zero value, slope and curvature at 90 deg.
+        let t = a - PI / 2.0;
+        let ta = a17 - PI / 2.0;
+        let c4 = -3.9 / ta.powi(4);
+        let c3 = 5.2 / ta.powi(3);
+        (c3 * t.powi(3) + c4 * t.powi(4)).max(0.0)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Geometry preprocessing.
+// ---------------------------------------------------------------------------------------------
+
+/// Nose/shoulder pressure-drag model of one body segment.
+#[derive(Clone, Debug)]
+enum Pressure {
+    None,
+    /// `stagnation_cd * area / A_ref`.
+    Stagnation {
+        area: f64,
+    },
+    /// `base_cd * area * scale / A_ref` (boat-tails).
+    Base {
+        area: f64,
+        scale: f64,
+    },
+    /// `table(M) * area / A_ref`.
+    Table {
+        table: Table,
+        area: f64,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -52,11 +306,10 @@ struct BodyCalc {
     plan_cp: f64,
     wet_area: f64,
     roughness: f64,
-    /// Hypersonic-limit wave-drag coefficient on the reference area (>= 0).
-    wave: f64,
-    /// Forward-facing exposed annulus area (m^2).
+    pressure: Pressure,
+    /// Forward-facing exposed annulus (step up in radius) area (m^2), stagnation drag.
     front_face: f64,
-    /// Backward-facing exposed annulus area (m^2).
+    /// Backward-facing exposed annulus area (m^2), base drag.
     back_face: f64,
     is_last: bool,
 }
@@ -69,22 +322,24 @@ struct FinCalc {
     span: f64,
     ar: f64,
     cos_mid: f64,
-    cos2_le: f64,
+    cos_lead: f64,
     x_cp: f64,
     kfb: f64,
-    mean_chord: f64,
+    /// Mean aerodynamic chord `∫c² dy / ∫c dy`.
+    mac: f64,
     thickness: f64,
     roughness: f64,
     cross: FinCrossSection,
 }
 
 #[derive(Clone, Debug)]
-struct ProtCalc {
-    lug: bool,
-    frontal: f64,
-    wet: f64,
-    length: f64,
+enum ProtCalc {
+    Lug { inner_diameter: f64, inner_area: f64, frontal: f64, length: f64, roughness: f64 },
+    Button { station: f64, height: f64, diameter: f64 },
 }
+
+/// Surface roughness assumed for launch-lug bores (OpenRocket "regular paint").
+const LUG_ROUGHNESS: f64 = 60e-6;
 
 /// Aerodynamic model of one vehicle configuration.
 #[derive(Clone, Debug)]
@@ -92,8 +347,10 @@ pub struct Aero {
     d_ref: f64,
     a_ref: f64,
     length: f64,
+    body_length: f64,
     max_diameter: f64,
     motor_exit_area: f64,
+    perfect_finish: bool,
     bodies: Vec<BodyCalc>,
     fins: Vec<FinCalc>,
     prots: Vec<ProtCalc>,
@@ -101,40 +358,39 @@ pub struct Aero {
     friction_groups: Vec<(f64, f64)>,
 }
 
-fn smoothstep(t: f64) -> f64 {
-    let t = t.clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
 impl Aero {
-    /// Precomputes geometry-dependent quantities for `v`.
+    /// Precomputes geometry-dependent quantities for `v`. Surface roughness uses the
+    /// imperfect-finish model (OpenRocket default); see [`Aero::perfect_finish`].
     pub fn new(v: &Vehicle) -> Self {
         let a_ref = v.reference_area().max(1e-12);
         let length = v.length();
-        let n_seg = v.body.len();
-        let mut bodies = Vec::with_capacity(n_seg);
+        let mut bodies = Vec::with_capacity(v.body.len());
         for (i, s) in v.body.iter().enumerate() {
             let prev_aft = if i == 0 { 0.0 } else { v.body[i - 1].aft_radius };
             let next_fore = v.body.get(i + 1).map(|n| n.fore_radius);
             bodies.push(body_calc(s, prev_aft, next_fore, a_ref));
         }
         let max_r = v.body.iter().map(|s| s.fore_radius.max(s.aft_radius)).fold(0.0, f64::max);
-        let mut fins = Vec::new();
-        for (i, f) in v.fin_sets.iter().enumerate() {
-            let name = if v.fin_sets.len() > 1 { format!("Fin set {}", i + 1) } else { "Fins".to_string() };
-            fins.push(fin_calc(f, name));
-        }
+        let min_x = v.body.iter().map(|s| s.station).fold(f64::INFINITY, f64::min);
+        let body_length = if v.body.is_empty() { 0.0 } else { length - min_x + 0.0001 };
+        let fins = v
+            .fin_sets
+            .iter()
+            .enumerate()
+            .map(|(i, f)| fin_calc(f, if v.fin_sets.len() > 1 { format!("Fin set {}", i + 1) } else { "Fins".to_string() }))
+            .collect();
         let prots = v
             .protuberances
             .iter()
             .map(|p| match *p {
-                Protuberance::LaunchLug { length, outer_diameter, inner_diameter, .. } => ProtCalc {
-                    lug: true,
+                Protuberance::LaunchLug { length, outer_diameter, inner_diameter, .. } => ProtCalc::Lug {
+                    inner_diameter,
+                    inner_area: 0.25 * PI * inner_diameter * inner_diameter,
                     frontal: 0.25 * PI * (outer_diameter * outer_diameter - inner_diameter * inner_diameter).max(0.0),
-                    wet: PI * outer_diameter * length,
                     length,
+                    roughness: LUG_ROUGHNESS,
                 },
-                Protuberance::RailButton { height, diameter, .. } => ProtCalc { lug: false, frontal: diameter * height, wet: 0.0, length: diameter },
+                Protuberance::RailButton { station, height, diameter } => ProtCalc::Button { station, height, diameter },
             })
             .collect();
         let mut friction_groups: Vec<(f64, f64)> = Vec::new();
@@ -155,13 +411,23 @@ impl Aero {
             d_ref: v.reference_diameter,
             a_ref,
             length,
+            body_length,
             max_diameter: 2.0 * max_r,
             motor_exit_area: 0.25 * PI * motor_d * motor_d,
+            perfect_finish: false,
             bodies,
             fins,
             prots,
             friction_groups,
         }
+    }
+
+    /// Selects OpenRocket's "perfect finish" skin friction (laminar-to-turbulent transition,
+    /// roughness only limiting above Re 1e6) instead of the default fully turbulent,
+    /// roughness-limited model.
+    pub fn perfect_finish(mut self, on: bool) -> Self {
+        self.perfect_finish = on;
+        self
     }
 
     /// Reference diameter (m).
@@ -176,11 +442,12 @@ impl Aero {
     pub fn stability(&self, mach: f64, alpha: f64) -> Stability {
         let mut comps: Vec<(String, f64, f64)> = Vec::new();
         let sin_a = alpha.abs().sin();
+        let sinc = if alpha.abs() > 1e-9 { sin_a / alpha.abs() } else { 1.0 };
         for b in &self.bodies {
-            let mut cna = b.cna;
-            let mut moment = b.cna * b.cp;
+            let mut cna = b.cna * sinc;
+            let mut moment = cna * b.cp;
             if alpha.abs() > 1e-9 {
-                // OpenRocket body lift: CN = 1.1 A_plan / A_ref sin^2(alpha), at the planform centroid.
+                // OpenRocket body lift (Galejs): CN = 1.1 A_plan / A_ref sin^2(alpha), at the planform centroid.
                 let extra = 1.1 * b.plan_area / self.a_ref * sin_a * sin_a / alpha.abs();
                 cna += extra;
                 moment += extra * b.plan_cp;
@@ -190,8 +457,7 @@ impl Aero {
             }
         }
         for f in &self.fins {
-            let cna = f.cna(mach, self.a_ref);
-            comps.push((f.name.clone(), cna, f.x_cp));
+            comps.push((f.name.clone(), f.cna(mach, self.a_ref), f.x_cp));
         }
         let cn_alpha: f64 = comps.iter().map(|c| c.1).sum();
         let cp = if cn_alpha.abs() > 1e-9 { comps.iter().map(|c| c.1 * c.2).sum::<f64>() / cn_alpha } else { 0.5 * self.length };
@@ -208,72 +474,126 @@ impl Aero {
     pub fn drag(&self, mach: f64, re_per_m: f64, motor_on: bool) -> DragBreakdown {
         let m = mach.max(0.0);
         let ar = self.a_ref;
-        let re = re_per_m.max(1.0);
+        let re_per_m = re_per_m.max(0.0);
+        let re_len = (re_per_m * self.length).max(1.0);
+        let stag = stagnation_cd(m);
+        let base = base_cd(m);
 
-        // Body friction (OpenRocket: Cf [1 + 0.5/fB] A_wet / A_ref).
-        let f_b = (self.length / self.max_diameter.max(1e-9)).max(1.0);
-        let re_len = re * self.length;
-        let mut friction = 0.0;
-        for &(rough, wet) in &self.friction_groups {
-            friction += skin_cf(re_len, rough / self.length.max(1e-9), m) * wet;
-        }
-        friction *= (1.0 + 0.5 / f_b) / ar;
+        // Skin friction: one flat-plate Cf from the whole-rocket length, floored per finish by the
+        // roughness-limited value 0.032 (eps/L)^0.2 (OpenRocket `calculateFrictionCD`).
+        let cf = skin_cf(re_len, m, self.perfect_finish);
+        let rough_corr = roughness_correction(m);
+        let comp_cf = |eps: f64| {
+            let limited = 0.032 * (eps / self.length.max(1e-9)).powf(0.2) * rough_corr;
+            if self.perfect_finish {
+                if re_len > 1e6 && limited > cf {
+                    limited
+                } else {
+                    cf
+                }
+            } else {
+                cf.max(limited)
+            }
+        };
+        // Cylindrical-body correction 1 + 1/(2 fB), fB = body length / max diameter (tech doc eq. 3.85).
+        let f_b = self.body_length / self.max_diameter.max(1e-9);
+        let mut friction: f64 = self.friction_groups.iter().map(|&(eps, wet)| comp_cf(eps) * wet).sum();
+        friction *= (1.0 + 1.0 / (2.0 * f_b.max(1e-9))) / ar;
 
-        // Body pressure drag.
-        let wave_f = wave_window(m);
-        let stag = 0.85 * stagnation_cd(m);
+        // Pressure drag of bodies: nose/shoulder tables plus stagnation on forward-facing steps.
         let mut pressure = 0.0;
         for b in &self.bodies {
-            pressure += b.wave * wave_f + stag * b.front_face / ar;
+            pressure += match &b.pressure {
+                Pressure::None => 0.0,
+                Pressure::Stagnation { area } => stag * area / ar,
+                Pressure::Base { area, scale } => base * area * scale / ar,
+                Pressure::Table { table, area } => table.at(m) * area / ar,
+            };
+            pressure += stag * b.front_face / ar;
         }
 
-        // Base drag.
-        let cd_base = base_cd(m);
-        let mut base = 0.0;
+        // Base drag; exhaust covers the motor exit area of the terminal base.
+        let mut base_total = 0.0;
         for b in &self.bodies {
             let mut area = b.back_face;
             if motor_on && b.is_last {
                 area = (area - self.motor_exit_area).max(0.0);
             }
-            base += cd_base * area / ar;
+            base_total += base * area / ar;
         }
 
-        // Fins.
         let mut fins = 0.0;
         for f in &self.fins {
-            fins += f.drag(m, re, ar, cd_base, stag);
+            fins += f.drag(m, comp_cf(f.roughness), stag, base, ar);
         }
 
-        // Protuberances.
         let mut prot = 0.0;
         for p in &self.prots {
-            if p.lug {
-                let cf = skin_cf(re * p.length.max(1e-6), 0.0, m);
-                prot += (stag * p.frontal + cf * p.wet) / ar;
-            } else {
-                prot += 1.2 * stagnation_cd(m) * p.frontal / ar;
-            }
+            prot += match *p {
+                ProtCalc::Lug { inner_diameter, inner_area, frontal, length, roughness } => {
+                    lug_drag(re_per_m, inner_diameter, inner_area, frontal, length, roughness, stag, base, ar)
+                }
+                ProtCalc::Button { station, height, diameter } => button_drag(m, re_per_m, station, height, diameter, stag, ar),
+            };
         }
 
-        let total = friction + pressure + base + fins + prot;
-        DragBreakdown { friction, pressure, base, fins, protuberances: prot, total }
+        let total = friction + pressure + base_total + fins + prot;
+        DragBreakdown { friction, pressure, base: base_total, fins, protuberances: prot, total }
     }
 
-    /// Drag at angle of attack `alpha`: the zero-alpha build-up plus the induced term
-    /// `CN sin(alpha)` (normal force resolved along the flight path) added to pressure drag.
+    /// Drag at angle of attack `alpha`: the zero-alpha build-up scaled by OpenRocket's axial-drag
+    /// multiplier (1 at 0 deg, 1.3 at 17 deg, falling to 0 at 90 deg), which is the drag
+    /// component along the rocket axis.
     pub fn drag_at_alpha(&self, mach: f64, re_per_m: f64, motor_on: bool, alpha: f64) -> DragBreakdown {
-        let mut d = self.drag(mach, re_per_m, motor_on);
-        if alpha.abs() > 1e-9 {
-            let st = self.stability(mach, alpha);
-            let induced = (st.cn_alpha * alpha.abs() * alpha.abs().sin()).max(0.0);
-            d.pressure += induced;
-            d.total += induced;
+        let d = self.drag(mach, re_per_m, motor_on);
+        let k = axial_drag_multiplier(alpha);
+        DragBreakdown {
+            friction: d.friction * k,
+            pressure: d.pressure * k,
+            base: d.base * k,
+            fins: d.fins * k,
+            protuberances: d.protuberances * k,
+            total: d.total * k,
         }
-        d
     }
 }
 
-/// Numerically integrates a body segment's geometry.
+/// OpenRocket `TubeCalc.calculatePressureCD` for a launch lug: Darcy-Weisbach pressure drop
+/// through the bore (Swamee-Jain friction factor) plus `0.7 (stagnation + base)` on the frontal ring.
+fn lug_drag(re_per_m: f64, d_in: f64, inner_area: f64, frontal: f64, length: f64, eps: f64, stag: f64, base: f64, a_ref: f64) -> f64 {
+    if re_per_m < 1e-3 {
+        return 0.0;
+    }
+    let mut tube_cd = 0.0;
+    if inner_area > 1e-12 && d_in > 0.0 {
+        let re = (re_per_m * d_in).max(1.0);
+        let f = 0.25 / (eps / (3.7 * d_in) + 5.74 / re.powf(0.9)).log10().powi(2);
+        tube_cd = f * length / d_in;
+    }
+    (tube_cd * inner_area + 0.7 * (stag + base) * frontal) / a_ref
+}
+
+/// OpenRocket `RailButtonCalc`: cylinder drag (Gowen & Perkins, NACA TN 2960 fig. 7) at the
+/// mean Mach number inside the boundary layer at the button's station.
+fn button_drag(mach: f64, re_per_m: f64, station: f64, height: f64, diameter: f64, stag: f64, a_ref: f64) -> f64 {
+    const DOMAIN: [f64; 12] = [0.0, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 1.0, 1.6, 2.0, 2.8, 100.0];
+    const RANGE: [f64; 12] = [1.2, 1.22, 1.25, 1.3, 1.4, 1.5, 1.6, 2.1, 1.5, 1.45, 1.33, 1.33];
+    let ref_area = height * diameter;
+    let mul = if mach > 1e-9 && re_per_m > 0.0 && station > 0.0 {
+        let rex = re_per_m * station;
+        let del = 0.37 * station / rex.powf(0.2);
+        let m_eff = if height > del { (height - 0.5 * del) * mach / height } else { height / 2.0 / del * mach };
+        let i = DOMAIN.partition_point(|&d| d <= m_eff).clamp(1, DOMAIN.len() - 1);
+        let t = ((m_eff - DOMAIN[i - 1]) / (DOMAIN[i] - DOMAIN[i - 1])).clamp(0.0, 1.0);
+        let cd = RANGE[i - 1] + (RANGE[i] - RANGE[i - 1]) * t;
+        cd * m_eff * m_eff / (mach * mach)
+    } else {
+        8.786_395_072_609_939E-4
+    };
+    mul * stag * ref_area / a_ref
+}
+
+/// Numerically integrates a body segment's geometry and selects its pressure-drag model.
 fn body_calc(s: &BodySegment, prev_aft: f64, next_fore: Option<f64>, a_ref: f64) -> BodyCalc {
     const N: usize = 64;
     let l = s.length.max(1e-12);
@@ -291,44 +611,58 @@ fn body_calc(s: &BodySegment, prev_aft: f64, next_fore: Option<f64>, a_ref: f64)
         wet += 2.0 * PI * r * (1.0 + slope * slope).sqrt() * dx;
         r_prev = r_next;
     }
-    let a_fore = PI * s.fore_radius * s.fore_radius;
-    let a_aft = PI * s.aft_radius * s.aft_radius;
+    let (r0, r1) = (s.fore_radius, s.aft_radius);
+    let a_fore = PI * r0 * r0;
+    let a_aft = PI * r1 * r1;
     let da = a_aft - a_fore;
     let (cna, cp_local) = match s.kind {
         BodyKind::Tube => (0.0, 0.5 * l),
         _ if da.abs() < 1e-12 => (0.0, 0.5 * l),
         _ => (2.0 * da / a_ref, (l * a_aft - vol) / da),
     };
-    let (name, shape_mult) = match s.kind {
-        BodyKind::Nose(sh) => (
-            "Nose cone".to_string(),
-            match sh {
-                NoseShape::Conical => 1.0,
-                NoseShape::TangentOgive => 0.72,
-                NoseShape::VonKarman => 0.55,
-                NoseShape::Elliptical => 0.9,
-                NoseShape::Parabolic => 0.70,
-            },
-        ),
-        BodyKind::Tube => ("Body tube".to_string(), 0.0),
-        BodyKind::Transition => ("Transition".to_string(), 1.0),
+    let (name, shape) = match s.kind {
+        BodyKind::Nose(sh) => ("Nose cone", Some(sh)),
+        BodyKind::Tube => ("Body tube", None),
+        BodyKind::Transition => ("Transition", None),
     };
-    // Equivalent-cone wave drag in the hypersonic limit: Cd = 2 sin^2(theta) (A_aft - A_fore)/A_ref,
-    // scaled by the profile family; only expanding surfaces contribute.
-    let theta = ((s.aft_radius - s.fore_radius) / l).atan();
-    let wave = if da > 0.0 { 2.0 * theta.sin().powi(2) * shape_mult * da / a_ref } else { 0.0 };
+
+    // Pressure drag (OpenRocket `SymmetricComponentCalc.calculatePressureCD`).
+    let frontal = (a_fore - a_aft).abs();
+    let fineness = s.length / (2.0 * (r1 - r0).abs()).max(1e-12);
+    let pressure = if matches!(s.kind, BodyKind::Tube) || (r0 - r1).abs() < 1e-9 {
+        Pressure::None
+    } else if s.length < 0.001 {
+        if r0 < r1 {
+            Pressure::Stagnation { area: frontal }
+        } else {
+            Pressure::Base { area: frontal, scale: 1.0 }
+        }
+    } else if r1 < r0 {
+        // Boat-tail drag derived from base drag.
+        if fineness >= 3.0 {
+            Pressure::None
+        } else {
+            Pressure::Base { area: frontal, scale: if fineness <= 1.0 { 1.0 } else { (3.0 - fineness) / 2.0 } }
+        }
+    } else {
+        let r = s.radius_at(0.99 * s.length);
+        let tangent_ogive = matches!(shape, Some(NoseShape::TangentOgive));
+        let sinphi = if tangent_ogive { 0.0 } else { (r1 - r) / ((r1 - r).hypot(0.01 * s.length)) };
+        Pressure::Table { table: pressure_table(shape, fineness, sinphi), area: frontal }
+    };
+
     let next_r = next_fore.unwrap_or(0.0);
     BodyCalc {
-        name,
+        name: name.to_string(),
         cna,
         cp: s.station + cp_local,
         plan_area: plan,
         plan_cp: s.station + if plan > 0.0 { plan_m / plan } else { 0.5 * l },
         wet_area: wet,
         roughness: s.roughness,
-        wave,
-        front_face: PI * (s.fore_radius * s.fore_radius - prev_aft * prev_aft).max(0.0),
-        back_face: PI * (s.aft_radius * s.aft_radius - next_r * next_r).max(0.0),
+        pressure,
+        front_face: PI * (r0 * r0 - prev_aft * prev_aft).max(0.0),
+        back_face: PI * (r1 * r1 - next_r * next_r).max(0.0),
         is_last: next_fore.is_none(),
     }
 }
@@ -337,7 +671,7 @@ fn fin_calc(f: &FinSet, name: String) -> FinCalc {
     let area = f.fin_area().max(1e-12);
     let span = f.span.max(1e-9);
     let ar = 2.0 * span * span / area;
-    let (cos_mid, cos2_le, x_cp, mean_chord) = match f.planform {
+    let (cos_mid, cos_lead, x_cp, mac) = match f.planform {
         FinPlanform::Trapezoidal => {
             let (cr, ct, m) = (f.root_chord, f.tip_chord, f.sweep);
             let mid_off = m + 0.5 * (ct - cr);
@@ -345,10 +679,21 @@ fn fin_calc(f: &FinSet, name: String) -> FinCalc {
             let le = (span * span + m * m).sqrt();
             let sum = (cr + ct).max(1e-12);
             let x = m * (cr + 2.0 * ct) / (3.0 * sum) + (sum - cr * ct / sum) / 6.0;
-            (span / lm, (span / le).powi(2), x, area / span)
+            (span / lm, span / le, x, 2.0 / 3.0 * (sum - cr * ct / sum))
         }
-        // Semi-elliptical: straight mid-chord line, area-weighted quarter-chord at 0.2878 c_r.
-        FinPlanform::Elliptical => (1.0, 0.5, 0.2878 * f.root_chord, area / span),
+        FinPlanform::Elliptical => {
+            // Straight mid-chord line; leading-edge sweep averaged over 47 spanwise segments as in OpenRocket.
+            const DIV: usize = 48;
+            let lead = |y: f64| 0.5 * f.root_chord * (1.0 - (1.0 - (y / span).powi(2)).max(0.0).sqrt());
+            let dy = span / (DIV - 1) as f64;
+            let mut c = 0.0;
+            for i in 1..DIV {
+                let dx = lead(i as f64 * dy) - lead((i - 1) as f64 * dy);
+                c += dy / dx.hypot(dy);
+            }
+            // Area-weighted quarter-chord at 0.2878 c_r; MAC = 8 c_r / (3 pi).
+            (1.0, c / (DIV - 1) as f64, 0.2878 * f.root_chord, 8.0 / (3.0 * PI) * f.root_chord)
+        }
     };
     FinCalc {
         name,
@@ -357,10 +702,10 @@ fn fin_calc(f: &FinSet, name: String) -> FinCalc {
         span,
         ar,
         cos_mid,
-        cos2_le,
+        cos_lead,
         x_cp: f.station + x_cp,
         kfb: 1.0 + f.body_radius / (span + f.body_radius),
-        mean_chord,
+        mac,
         thickness: f.thickness,
         roughness: f.roughness,
         cross: f.cross_section,
@@ -381,7 +726,7 @@ impl FinCalc {
             if x >= 1.0 {
                 4.0 / beta * (1.0 - 1.0 / (2.0 * x))
             } else {
-                self.ar * (FRAC_PI_2 + (2.0 - FRAC_PI_2) * x)
+                self.ar * (std::f64::consts::FRAC_PI_2 + (2.0 - std::f64::consts::FRAC_PI_2) * x)
             }
         };
         if mach <= 0.9 {
@@ -398,93 +743,35 @@ impl FinCalc {
         self.pair_cl(mach) * self.area / a_ref * 0.5 * self.n * self.kfb
     }
 
-    fn drag(&self, mach: f64, re: f64, a_ref: f64, cd_base: f64, stag: f64) -> f64 {
-        // Skin friction on both faces with a thickness correction (1 + 2 t/c).
-        let re_c = re * self.mean_chord;
-        let cf = skin_cf(re_c, self.roughness / self.mean_chord.max(1e-9), mach);
-        let tc = self.thickness / self.mean_chord.max(1e-9);
-        let friction = cf * (1.0 + 2.0 * tc) * 2.0 * self.area * self.n / a_ref;
-        // Edge pressure drag.
+    /// Fin drag (OpenRocket `FinSetCalc`): friction `Cf (1 + 2 t/MAC) 2 A`, leading-edge pressure
+    /// drag (stagnation for square edges, the rounded-edge fit for rounded/airfoil) scaled by
+    /// `cos^2` of the leading-edge sweep, and trailing-edge base drag (full for square, half for
+    /// rounded, none for airfoil), all times the fin count.
+    fn drag(&self, mach: f64, cf: f64, stag: f64, base: f64, a_ref: f64) -> f64 {
+        let friction = cf * (1.0 + 2.0 * self.thickness / self.mac.max(1e-9)) * 2.0 * self.area * self.n / a_ref;
         let a_edge = self.n * self.span * self.thickness / a_ref;
-        let (le, te) = match self.cross {
-            FinCrossSection::Square => (stag * self.cos2_le * a_edge, cd_base * a_edge),
-            FinCrossSection::Rounded => {
-                let blunt = 0.15 + 0.85 * smoothstep((mach - 0.8) / 0.3);
-                (blunt * stag * self.cos2_le * a_edge, 0.5 * cd_base * a_edge)
-            }
-            FinCrossSection::Airfoil => {
-                // Ackeret biconvex wave drag, cd = 16/3 (t/c)^2 / beta, on planform area.
-                let beta = (mach.max(1.2).powi(2) - 1.0).sqrt();
-                let w = smoothstep((mach - 0.8) / 0.4);
-                (16.0 / 3.0 * tc * tc / beta * w * self.n * self.area / a_ref, 0.0)
-            }
+        let le_cd = match self.cross {
+            FinCrossSection::Square => stag,
+            FinCrossSection::Rounded | FinCrossSection::Airfoil => round_edge_cd(mach),
         };
-        friction + le + te
+        let te_cd = match self.cross {
+            FinCrossSection::Square => base,
+            FinCrossSection::Rounded => 0.5 * base,
+            FinCrossSection::Airfoil => 0.0,
+        };
+        friction + (le_cd * self.cos_lead * self.cos_lead + te_cd) * a_edge
     }
 }
 
-/// Skin friction coefficient of a flat plate of length-Reynolds number `re` (OpenRocket section 3.1).
-///
-/// Laminar below the critical Reynolds number, turbulent (with the transition correction)
-/// above it, floored by the roughness-limited value, then compressibility-corrected.
-fn skin_cf(re: f64, rough_ratio: f64, mach: f64) -> f64 {
-    let re = re.max(1.0);
-    let lam = |r: f64| if r < 1e4 { 1.48e-2 } else { 1.328 / r.sqrt() };
-    let turb = |r: f64| 1.0 / (1.5 * r.ln() - 5.6).powi(2);
-    let mut re_c = 5e5_f64;
-    if rough_ratio > 0.0 {
-        re_c = re_c.min(51.0 * rough_ratio.powf(-1.039));
-    }
-    let re_c = re_c.max(1e4);
-    let mut cf = if re < re_c {
-        lam(re)
+/// OpenRocket leading-edge pressure drag of a rounded/airfoil fin edge.
+fn round_edge_cd(m: f64) -> f64 {
+    if m < 0.9 {
+        (1.0 - m * m).powf(-0.417) - 1.0
+    } else if m < 1.0 {
+        1.0 - 1.785 * (m - 0.9)
     } else {
-        let a = re_c * (turb(re_c) - lam(re_c));
-        (turb(re) - a / re).max(lam(re))
-    };
-    if rough_ratio > 0.0 && re >= re_c {
-        cf = cf.max(0.032 * rough_ratio.powf(0.2));
+        1.214 - 0.502 / (m * m) + 0.1095 / m.powi(4)
     }
-    // Compressibility.
-    let sub = cf * (1.0 - 0.1 * mach * mach);
-    let sup = cf / (1.0 + 0.15 * mach * mach).powf(0.58);
-    if mach < 0.9 {
-        sub
-    } else if mach > 1.1 {
-        sup
-    } else {
-        let t = (mach - 0.9) / 0.2;
-        sub * (1.0 - t) + sup * t
-    }
-}
-
-/// Stagnation-pressure drag coefficient of a flat face (OpenRocket).
-fn stagnation_cd(m: f64) -> f64 {
-    if m < 1.0 {
-        1.0 + m * m / 4.0 + m.powi(4) / 40.0
-    } else {
-        1.84 - 0.76 / m.powi(2) + 0.166 / m.powi(4) + 0.035 / m.powi(6)
-    }
-}
-
-/// OpenRocket base drag coefficient on the base area.
-fn base_cd(m: f64) -> f64 {
-    if m < 1.0 {
-        0.12 + 0.13 * m * m
-    } else {
-        0.25 / m
-    }
-}
-
-/// Mach dependence of body wave drag relative to the hypersonic equivalent-cone value:
-/// zero below Mach 0.8, a smooth rise with a transonic overshoot, then `1 + 0.9/M^2`.
-fn wave_window(m: f64) -> f64 {
-    if m <= 0.8 {
-        return 0.0;
-    }
-    let sup = 1.0 + 0.9 / m.max(1.2).powi(2);
-    let bump = 1.0 + 0.3 * (-((m - 1.0) / 0.12).powi(2)).exp();
-    sup * smoothstep((m - 0.8) / 0.3) * bump
 }
 
 #[cfg(test)]
@@ -516,6 +803,16 @@ mod tests {
                 planform: FinPlanform::Trapezoidal,
             }],
             protuberances: vec![Protuberance::LaunchLug { station: 0.15, length: 0.02, outer_diameter: 0.005, inner_diameter: 0.004 }],
+            stages: vec![],
+        }
+    }
+
+    fn nose_only(shape: NoseShape, r: f64, fineness: f64) -> Vehicle {
+        Vehicle {
+            reference_diameter: 2.0 * r,
+            body: vec![BodySegment { station: 0.0, length: 2.0 * r * fineness, fore_radius: 0.0, aft_radius: r, kind: BodyKind::Nose(shape), roughness: 0.0 }],
+            fin_sets: vec![],
+            protuberances: vec![],
             stages: vec![],
         }
     }
@@ -557,11 +854,9 @@ mod tests {
     fn stock_rocket_is_stable_with_cp_behind_cg() {
         let a = Aero::new(&alpha_like());
         let st = a.stability(0.1, 0.0);
-        // CG roughly 0.8 calibers... place it at 0.21 m (about 55% of length).
         let margin = (st.cp - 0.21) / 0.0186;
         assert!((1.0..3.5).contains(&margin), "margin {margin} cp {}", st.cp);
         assert!(st.cn_alpha > 2.0 && st.cn_alpha < 60.0, "{}", st.cn_alpha);
-        // CP moves forward with angle of attack? Body lift acts ahead of the fins' CP.
         let st15 = a.stability(0.1, 15f64.to_radians());
         assert!(st15.cn_alpha > st.cn_alpha);
     }
@@ -601,10 +896,9 @@ mod tests {
         assert!((0.3..0.7).contains(&d.total), "{d:?}");
         assert!((d.friction + d.pressure + d.base + d.fins + d.protuberances - d.total).abs() < 1e-12);
         let cd = |m: f64| a.drag(m, m * 340.0 / nu, false).total;
-        let peak = (80..=140).map(|i| cd(i as f64 / 100.0)).fold(0.0, f64::max);
-        assert!(peak > cd(0.3) * 1.2 && peak > cd(2.5), "peak {peak} sub {} sup {}", cd(0.3), cd(2.5));
         let peak_m = (50..=300).max_by(|&i, &j| cd(i as f64 / 100.0).total_cmp(&cd(j as f64 / 100.0))).unwrap() as f64 / 100.0;
-        assert!((0.9..1.3).contains(&peak_m), "peak at {peak_m}");
+        assert!((0.95..1.25).contains(&peak_m), "peak at {peak_m}");
+        assert!(cd(peak_m) > cd(0.3) * 1.3 && cd(peak_m) > cd(2.5), "peak {} sub {} sup {}", cd(peak_m), cd(0.3), cd(2.5));
         // Motor exhaust removes base drag.
         let mut v = alpha_like();
         v.stages.push(StageMass {
@@ -635,5 +929,76 @@ mod tests {
         let st = Aero::new(&v).stability(0.0, 0.0);
         let fins = st.components.iter().find(|c| c.0 == "Fins").unwrap();
         assert!((fins.1 - expect).abs() / expect < 1e-9, "{} vs {expect}", fins.1);
+    }
+
+    // ---- Values checked against OpenRocket's source (hand-computed from the formulas) ----
+
+    #[test]
+    fn stagnation_and_base_match_openrocket() {
+        // BarrowmanDragCalculator.calculateStagnationCD / calculateBaseCD.
+        assert!((stagnation_cd(0.0) - 0.85).abs() < 1e-12);
+        assert!((stagnation_cd(1.0) - 0.85 * 1.275).abs() < 1e-12);
+        assert!((stagnation_cd(2.0) - 0.85 * (1.84 - 0.19 + 0.010_375 + 0.000_546_875)).abs() < 1e-9);
+        assert!((base_cd(0.5) - 0.1525).abs() < 1e-12);
+        assert!((base_cd(1.0) - 0.25).abs() < 1e-12 && (base_cd(2.0) - 0.125).abs() < 1e-12);
+    }
+
+    #[test]
+    fn skin_friction_matches_openrocket() {
+        // Fully turbulent: 1/(1.5 ln Re - 5.6)^2, subsonic compressibility (1 - 0.1 M^2).
+        let t = 1.0 / (1.5 * 1e7f64.ln() - 5.6).powi(2);
+        assert!((skin_cf(1e7, 0.0, false) - t).abs() < 1e-12);
+        assert!((skin_cf(1e7, 0.5, false) - t * 0.975).abs() < 1e-12);
+        assert!((skin_cf(1e3, 0.0, false) - 1.48e-2).abs() < 1e-12);
+        // Supersonic: / (1 + 0.15 M^2)^0.58.
+        assert!((skin_cf(1e7, 2.0, false) - t / 1.6f64.powf(0.58)).abs() < 1e-12);
+        // Perfect finish: laminar below Re 5.39e5, turbulent minus 1700/Re above.
+        assert!((skin_cf(1e5, 0.0, true) - 1.328 / 1e5f64.sqrt()).abs() < 1e-12);
+        assert!((skin_cf(1e6, 0.0, true) - (1.0 / (1.5 * 1e6f64.ln() - 5.6).powi(2) - 1.7e-3)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn nose_pressure_drag_matches_openrocket_tables() {
+        let nu = 1.46e-5;
+        let press = |v: &Vehicle, m: f64| Aero::new(v).drag(m, m * 340.0 / nu, false).pressure;
+        // Fineness-3 tangent ogive: Cd = 2.1 sin^2 + 0.5 sin / sqrt(M^2 - 1), sin = 1/sqrt(1 + 4 f^2), on the base area.
+        let s = 1.0 / 37f64.sqrt();
+        let v = nose_only(NoseShape::TangentOgive, 0.03, 3.0);
+        assert!((press(&v, 2.0) - (2.1 * s * s + 0.5 * s / 3f64.sqrt())).abs() < 1e-4, "{}", press(&v, 2.0));
+        // Conical at Mach 1: Cd = sin(phi) = R / sqrt(R^2 + L^2).
+        let v = nose_only(NoseShape::Conical, 0.03, 3.0);
+        assert!((press(&v, 1.0) - s).abs() < 1e-3, "{}", press(&v, 1.0));
+        // Von Karman fineness 3 is the tabulated value (0.091 at Mach 2).
+        let v = nose_only(NoseShape::VonKarman, 0.03, 3.0);
+        assert!((press(&v, 2.0) - 0.091).abs() < 1e-6, "{}", press(&v, 2.0));
+        // The data are extrapolated with stag*(Cd/stag)^(ln(f+1)/ln 4): fineness 7 lowers it.
+        let v7 = nose_only(NoseShape::VonKarman, 0.03, 7.0);
+        assert!(press(&v7, 2.0) < 0.091 * 0.8);
+        // Subsonic nose pressure drag vanishes and rises towards Mach 1.
+        assert!(press(&v, 0.3) < 1e-3 && press(&v, 0.95) >= press(&v, 0.6));
+    }
+
+    #[test]
+    fn rounded_fin_edge_matches_openrocket() {
+        assert!((round_edge_cd(0.5) - ((1.0f64 - 0.25).powf(-0.417) - 1.0)).abs() < 1e-12);
+        assert!((round_edge_cd(0.95) - (1.0 - 1.785 * 0.05)).abs() < 1e-12);
+        assert!((round_edge_cd(2.0) - (1.214 - 0.1255 + 0.1095 / 16.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn axial_drag_multiplier_shape() {
+        assert!((axial_drag_multiplier(0.0) - 1.0).abs() < 1e-12);
+        assert!((axial_drag_multiplier(17f64.to_radians()) - 1.3).abs() < 1e-9);
+        assert!(axial_drag_multiplier(PI / 2.0).abs() < 1e-9);
+        let a = 17f64.to_radians();
+        assert!((axial_drag_multiplier(a - 1e-9) - axial_drag_multiplier(a + 1e-9)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn perfect_finish_reduces_low_speed_drag() {
+        let v = typical();
+        let rough = Aero::new(&v).drag(0.2, 2e6, false).total;
+        let perfect = Aero::new(&v).perfect_finish(true).drag(0.2, 2e6, false).total;
+        assert!(perfect <= rough);
     }
 }
