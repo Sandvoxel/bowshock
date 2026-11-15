@@ -30,7 +30,8 @@ const INSET: f32 = 0.0002;
 const END_SET: f32 = 0.00015;
 
 /// The part of the cutaway that is removed: a wedge about the axis, `span` wide, centred on direction `centre` in the XY plane
-/// (an angle from +X towards +Y). The default is the left half, which faces the home view and the side-on profile.
+/// (an angle from +X towards +Y). The default is the left half, which faces the home view and the side-on profile: the cut
+/// plane shows the internals in section and the far half-shell stands behind them, lit pale like the design kit's InsideViews.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Cut {
     /// Direction of the middle of the removed wedge, radians.

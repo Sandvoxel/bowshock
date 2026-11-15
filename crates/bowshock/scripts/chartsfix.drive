@@ -1,0 +1,65 @@
+# Charts fixes: Analyze ticks / out-of-envelope band, Simulate events, header, ground track, zoom, light fills.
+viewport 1300x800
+click "Analyze"
+move (100, 700)
+move (102, 702)
+screenshot an-dark.png
+click "Light"
+move (100, 700)
+move (102, 702)
+screenshot an-light.png
+click "Dark"
+click "Stability"
+move (100, 700)
+move (102, 702)
+screenshot an-stab.png
+click "Fin flutter"
+move (100, 700)
+move (102, 702)
+screenshot an-flutter.png
+click "Simulate"
+screenshot sim-empty.png
+click "Run"
+move (100, 700)
+move (102, 702)
+screenshot sim-run-idle.png
+move (700, 330)
+move (702, 332)
+screenshot sim-run.png
+move (560, 300)
+move (570, 300)
+screenshot sim-hover.png
+press (500, 300)
+move (560, 300)
+move (640, 300)
+release (640, 300)
+type enter
+move (100, 700)
+move (102, 702)
+screenshot sim-zoom.png
+type escape
+click "Run all"
+click (17, 94)
+click (17, 138)
+click (17, 226)
+move (100, 700)
+move (102, 702)
+screenshot sim-compare.png
+click "Light"
+screenshot sim-compare-light.png
+click "Dark"
+click "Analyze"
+click "Fin flutter"
+move (700, 200)
+move (702, 202)
+screenshot fl-hover.png
+click "Simulate"
+move (462, 190)
+move (464, 192)
+screenshot sim-title-hover.png
+click "Light"
+click "Analyze"
+click "Aerodynamics"
+move (100, 700)
+move (102, 702)
+screenshot an-light2.png

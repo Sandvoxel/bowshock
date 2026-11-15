@@ -1,0 +1,48 @@
+# Viewport fixes: fin handle labels, inset, cutaway, drag ghost, hint bar, cube, toolbar, light theme.
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/viewportfix.drive /tmp/vf
+# Alt (3D handle labels): BOWSHOCK_DRIVE_MODIFIERS=alt, and click the "Fins" lane bar to select the fin set.
+viewport 1280x800
+screenshot home-dark.png
+click "2D"
+click (918, 275)
+screenshot fin-2d-dark.png
+click (600, 500)
+click "Cutaway"
+screenshot cutaway-2d-dark.png
+click "3D"
+screenshot cutaway-3d-dark.png
+click "Solid"
+click "2D"
+click (906, 624)
+screenshot fin-lane-2d-dark.png
+click (600, 500)
+click "Light"
+screenshot side-light.png
+click (918, 275)
+screenshot fin-2d-light.png
+click (600, 500)
+click "Cutaway"
+screenshot cutaway-2d-light.png
+click "Solid"
+click "3D"
+screenshot home-light.png
+# Drag a body tube in from the bin: ghost over a node, over a tube side, and away from both (no node).
+press (130, 356)
+move (300, 400)
+move (600, 520)
+screenshot drag-nonode-light.png
+move (560, 330)
+screenshot drag-side-light.png
+type escape
+release (560, 330)
+# 2D: the ghost on a node (dashed accent outline), then far from any node ("no node").
+click "Dark"
+click "2D"
+press (130, 356)
+move (500, 420)
+move (700, 314)
+screenshot drag-node-2d-dark.png
+move (500, 470)
+screenshot drag-nonode-2d-dark.png
+type escape
+release (500, 470)

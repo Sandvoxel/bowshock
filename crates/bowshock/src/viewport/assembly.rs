@@ -133,7 +133,8 @@ impl Overlay<'_> {
                 return Some(Choice::Surface(target));
             }
         }
-        nearest.map(|(snap, _)| Choice::Node(snap))
+        // Away from every node and any tube's side there is no target ("no node"); an empty rocket has only its first node.
+        nearest.filter(|_| self.rocket.parts().is_empty()).map(|(snap, _)| Choice::Node(snap))
     }
 
     /// Where the drag is snapped now.
@@ -288,6 +289,12 @@ impl canvas::Program<Message> for Overlay<'_> {
         let target = current.and_then(|snap| nodes.iter().find(|n| n.snap == snap));
         let label = match target {
             Some(node) => {
+                // A dashed accent outline round the ghost where the view is square-on (the 3D view shows its edge instead).
+                if let (Snap::Core(index), true) = (node.snap, self.camera.is_ortho()) {
+                    let b = pick::screen_bounds(&self.camera, size, node.station, &self.rocket.matched(index, &self.drag.kind));
+                    let outline = Stroke { line_dash: LineDash { segments: &[4.0, 3.0], offset: 0 }, ..Stroke::default().with_color(t.accent).with_width(1.0) };
+                    frame.stroke_rectangle(b.position(), b.size(), outline);
+                }
                 let leader = Path::line(cursor, node.at);
                 let dashed = Stroke { line_dash: LineDash { segments: &[4.0, 3.0], offset: 0 }, ..Stroke::default().with_color(t.ok).with_width(1.0) };
                 frame.stroke(&leader, dashed);

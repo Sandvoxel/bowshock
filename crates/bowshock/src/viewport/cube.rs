@@ -29,14 +29,13 @@ struct Face {
 }
 
 const FACES: [Face; 6] = [
-    // The rocket is axisymmetric about Z, so the four side faces have no top/bottom meaning: they are labelled by roll
-    // angle about the long axis (0° = +Y, increasing towards +X), the angle fins and rail buttons are placed at.
-    Face { n: IVec3::NEG_X, u: IVec3::Z, v: IVec3::Y, label: "270°" },
-    Face { n: IVec3::X, u: IVec3::NEG_Z, v: IVec3::Y, label: "90°" },
+    // Named views, as a pilot would: the rocket flies nose first (-Z) with +Y up, so -X is its port side and +X its starboard.
+    Face { n: IVec3::NEG_X, u: IVec3::Z, v: IVec3::Y, label: "PORT" },
+    Face { n: IVec3::X, u: IVec3::NEG_Z, v: IVec3::Y, label: "STBD" },
     Face { n: IVec3::NEG_Z, u: IVec3::NEG_X, v: IVec3::Y, label: "NOSE" },
     Face { n: IVec3::Z, u: IVec3::X, v: IVec3::Y, label: "TAIL" },
-    Face { n: IVec3::Y, u: IVec3::Z, v: IVec3::X, label: "0°" },
-    Face { n: IVec3::NEG_Y, u: IVec3::Z, v: IVec3::NEG_X, label: "180°" },
+    Face { n: IVec3::Y, u: IVec3::Z, v: IVec3::X, label: "TOP" },
+    Face { n: IVec3::NEG_Y, u: IVec3::Z, v: IVec3::NEG_X, label: "BOTTOM" },
 ];
 
 /// The region a face's cell `(i, j)` selects.
@@ -475,8 +474,8 @@ mod tests {
 
     #[test]
     fn roll_zero_corner_by_270_and_nose() {
-        let top = FACES.iter().find(|f| f.label == "0°").unwrap();
-        // i runs along +Z (tail), j along +X (90°): the 270°/NOSE corner is (-1, -1).
+        let top = FACES.iter().find(|f| f.label == "TOP").unwrap();
+        // i runs along +Z (tail), j along +X (starboard): the port/nose corner is (-1, -1).
         assert_eq!(region(top, -1, -1), IVec3::new(-1, 1, -1));
         assert_eq!(region(top, 0, 0), IVec3::Y);
         assert_eq!(region(top, 0, 1), IVec3::new(1, 1, 0));

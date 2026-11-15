@@ -168,7 +168,33 @@ fn radial_rows<'a>(p: &Params<'a>, radial: &RadialPart) -> Vec<Element<'a, Messa
     }
     if radial.kind.is_fin() {
         rows.push(labeled("Cross-section", segmented_fill(&SECTIONS, radial.cross_section, Message::CrossSection)));
-        rows.push(f.num("Fillet radius", radial.fillet_radius, Quantity::Length, dim(Dim::FilletRadius)));
+        rows.extend(fillet_rows(p, radial));
+    }
+    rows
+}
+
+/// A fin set's fillet behind a `Fillet` disclosure row: closed (showing its radius) while the fillet is 0 so the page keeps the
+/// kit's density; open, the radius and the fillet's material.
+fn fillet_rows<'a>(p: &Params<'a>, radial: &RadialPart) -> Vec<Element<'a, Message>> {
+    let open = match p.state.fillet_open {
+        Some((id, open)) if id == p.id => open,
+        _ => radial.fillet_radius > 0.0,
+    };
+    let caret = glyph::icon(if open { Mark::CaretDown } else { Mark::CaretUp }, Tone::Faint, 10.0);
+    let summary: Element<'a, Message> = if open {
+        Space::new().boxed()
+    } else {
+        let shown = if radial.fillet_radius > 0.0 { ui::with_unit(radial.fillet_radius, Quantity::Length, p.form.ctx.units) } else { "none".to_string() };
+        text(shown).font(MONO).size(TEXT_LABEL).style(theme::muted).boxed()
+    };
+    let head = mouse_area(row![ui::label("FILLET"), caret, Space::new().width(Fill).boxed(), summary].spacing(SPACE_2).align_y(iced::Center))
+        .on_press(Message::FilletOpen(!open))
+        .interaction(mouse::Interaction::Pointer);
+    let mut rows: Vec<Element<'a, Message>> = vec![container(head).padding([SPACE_2, 0.0]).boxed()];
+    if open {
+        let options: Vec<(bowshock_model::MaterialId, String)> = materials_of_kind(MaterialKind::Bulk).map(|m| (m.id, material_label(m))).collect();
+        rows.push(p.form.num("Fillet radius", radial.fillet_radius, Quantity::Length, dim(Dim::FilletRadius)));
+        rows.push(labeled("Fillet material", choose(options, &radial.fillet_material, Message::FilletMaterial)));
     }
     rows
 }
@@ -373,9 +399,6 @@ fn material_rows<'a>(p: &Params<'a>) -> Option<Vec<Element<'a, Message>>> {
         rows.push(labeled("Lines", choose(options(MaterialKind::Line), line_material, Message::LineMaterial)));
     }
     if let Some(finish) = finish {
-        if let Some(r) = p.rocket.radial(p.id).filter(|r| r.kind.is_fin()) {
-            rows.push(labeled("Fillet", choose(options(MaterialKind::Bulk), &r.fillet_material, Message::FilletMaterial)));
-        }
         let finishes: Vec<(Finish, String)> = Finish::ALL.iter().map(|f| (*f, finish_label(*f))).collect();
         rows.push(labeled("Finish", choose(finishes, &finish, Message::Finish)));
     }

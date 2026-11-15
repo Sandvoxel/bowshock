@@ -43,11 +43,11 @@ use crate::app::{self, Ctx};
 use crate::theme::{self, MONO};
 use crate::tokens::{BIN_W, RAIL_W, RIGHT_PANEL_W, SPACE_2, SPACE_3, TEXT_BODY, TEXT_LABEL};
 use crate::units::UnitSystem;
-use crate::widgets::button::{button as push, Weight};
+use crate::widgets::button::icon_button;
 use crate::widgets::chip::{chip, Severity};
 use crate::widgets::glyph::Mark;
 use crate::widgets::ground_track::{GroundMessage, GroundTrack};
-use crate::widgets::plot::{header, legend, PanelAction, PlotGroup, PlotMessage, PlotState, PlotView, SeriesColor};
+use crate::widgets::plot::{header_parts, legend, PanelAction, PlotGroup, PlotMessage, PlotState, PlotView, SeriesColor};
 use crate::widgets::segmented::{segmented_dense, Dense};
 
 use bowshock_model::{FlightDef, PlotLayout, Rocket, StabilityBands};
@@ -753,7 +753,10 @@ impl State {
         let imperial = format::imperial(ctx.units);
         let Some(group) = self.shown.groups[usize::from(imperial)].as_ref() else { return self.placeholder() };
         let bar = |e: Element<'a, Message>| container(e).padding([SPACE_2, SPACE_3]).boxed();
-        let mut parts: Vec<Element<'a, Message>> = vec![bar(header(group, &self.plot).map(Message::Plot).boxed()), bar(self.presets())];
+        // One row: the zoom breadcrumb, the plot presets, then the hints.
+        let (crumbs, hint) = header_parts(group, &self.plot, true);
+        let head = row![crumbs.map(Message::Plot), self.presets(), Space::new().width(Fill), hint.map(Message::Plot)].spacing(SPACE_2).align_y(iced::Center);
+        let mut parts: Vec<Element<'a, Message>> = vec![bar(head.boxed())];
         if self.shown.compare {
             let items: Vec<(SeriesColor, String)> =
                 self.shown.ids.iter().filter_map(|id| self.flight(*id)).map(|f| (SeriesColor::Series(f.slot.unwrap_or(1)), f.name.clone())).collect();
@@ -761,7 +764,7 @@ impl State {
             let note = text(format!("events and timeline: {reference} (reference)")).font(MONO).size(TEXT_LABEL).style(theme::faint);
             parts.push(bar(row![legend(&items), Space::new().width(Fill), note].align_y(iced::Center).boxed()));
         }
-        let canvas = container(PlotView::new(group, &self.plot).element().map(Message::Plot)).width(Fill).height(Fill);
+        let canvas = container(PlotView::new(group, &self.plot).pinned(self.picker.is_some()).element().map(Message::Plot)).width(Fill).height(Fill);
         parts.push(match &self.picker {
             Some(picker) => stack![canvas, picker.view(&self.layout, imperial)].boxed(),
             None => canvas.boxed(),
@@ -776,16 +779,16 @@ impl State {
             &options,
             Preset::of(&self.layout),
             |p| Message::Layout(LayoutEdit::Preset(p)),
-            Dense { height: 24.0, pad: 8.0, size: 12.0 },
+            Dense { height: 24.0, pad: 6.0, size: 12.0 },
             false,
         );
-        let mut add = push("Add plot", Weight::Ghost).icon(Mark::Plus).small().tooltip("Add a plot below the others");
+        let mut add = icon_button(Mark::Plus, "Add a plot below the others");
         if self.layout.panels.len() >= bowshock_model::MAX_PLOT_PANELS {
             add = add.disabled("The plots hold at most 8 panels");
         } else {
             add = add.on_press(Message::Layout(LayoutEdit::AddPanel));
         }
-        row![crate::app::ui::label("PLOTS"), strip, Space::new().width(Fill), Element::from(add)].spacing(SPACE_2).align_y(iced::Center).boxed()
+        row![strip, Element::from(add)].spacing(SPACE_2).align_y(iced::Center).boxed()
     }
 
     /// What the centre shows before the selected flight has run.

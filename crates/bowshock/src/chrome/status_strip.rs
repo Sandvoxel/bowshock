@@ -10,7 +10,7 @@ use iced::{Center, Element, Fill, Widget};
 use super::{Message as ChromeMessage, State};
 use crate::app::{ui, Ctx, Message, Mode, Selection};
 use crate::theme;
-use crate::tokens::{text as type_scale, BIN_W, RAIL_W, SPACE_1, SPACE_2, SPACE_3, STATUSBAR_H, TEXT_BODY, TEXT_LABEL};
+use crate::tokens::{text as type_scale, BIN_W, RAIL_W, SPACE_1, SPACE_2, SPACE_3, TEXT_BODY};
 use crate::units::Quantity;
 use crate::widgets::chip::{chip, Severity};
 use crate::widgets::glyph::{self, Mark, Tone};
@@ -163,11 +163,9 @@ fn selection_summary<'a>(ctx: &'a Ctx) -> Option<Element<'a, Message>> {
     Some(summary(line))
 }
 
-/// The `SELECTED  <line>` cell.
+/// The `SELECTED  <line>` cell: the strip's label/value pair in its own ruled cell (a hairline each side), like MASS or LEN.
 fn summary<'a>(line: String) -> Element<'a, Message> {
-    container(row![ui::label("SELECTED"), single_line(&line, SELECTION_MAX, TEXT_LABEL + 1.5, true, theme::ink)].spacing(SPACE_2).align_y(Center))
-        .padding([0.0, SPACE_3])
-        .height(Fill)
-        .center_y(STATUSBAR_H)
-        .boxed()
+    let rule = || container(Space::new()).width(1).height(Fill).style(theme::hairline);
+    let content = row![ui::label("SELECTED"), single_line(&line, SELECTION_MAX, type_scale::NUM_BODY.size, true, theme::ink)].spacing(SPACE_2).align_y(Center);
+    row![rule(), container(content).padding([0.0, SPACE_3]).height(Fill).center_y(Fill), rule()].height(Fill).boxed()
 }

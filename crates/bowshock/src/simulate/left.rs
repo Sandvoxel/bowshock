@@ -66,7 +66,7 @@ pub(super) fn view<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
         body.push(container(text(hint).size(TEXT_BODY - 1.0).style(theme::muted)).padding([SPACE_2, SPACE_3]).boxed());
     }
     body.push(rule());
-    body.push(conditions(ctx, flight, state.renaming.as_ref().filter(|(id, _)| *id == flight.id).map(|(_, b)| b.as_str())));
+    body.push(conditions(ctx, flight, state.shown.compare, state.renaming.as_ref().filter(|(id, _)| *id == flight.id).map(|(_, b)| b.as_str())));
 
     let run: Element<'a, Message> = push("Run", Weight::Primary).icon(Mark::Play).width(Fill).on_press(Message::Run).into();
     let run_all: Element<'a, Message> = push("Run all", Weight::Secondary).tooltip("Fly every flight").on_press(Message::RunAll).into();
@@ -89,7 +89,7 @@ fn rename_field<'a>(buffer: &'a str) -> Element<'a, Message> {
 }
 
 /// The CONDITIONS section of `flight`: its fields, with the `F5` keycap and a remove button in the head.
-fn conditions<'a>(ctx: &'a Ctx, flight: &'a Flight, renaming: Option<&'a str>) -> Element<'a, Message> {
+fn conditions<'a>(ctx: &'a Ctx, flight: &'a Flight, compare: bool, renaming: Option<&'a str>) -> Element<'a, Message> {
     let spec = &flight.spec;
     let system = &ctx.units;
     let field = |label: &'a str, value: f64, quantity: Quantity, make: fn(f64) -> Edit| -> Element<'a, Message> {
@@ -114,18 +114,23 @@ fn conditions<'a>(ctx: &'a Ctx, flight: &'a Flight, renaming: Option<&'a str>) -
     };
     let head = row![title, Space::new().width(Fill), remove, keycap].spacing(SPACE_2).align_y(iced::Center);
 
-    let fields: Vec<Element<'a, Message>> = vec![
-        motor,
-        field("Delay", flight::effective_delay(ctx, spec), Quantity::Time, Edit::Delay),
-        field("Rail length", spec.rail_length, Quantity::Length, Edit::RailLength),
-        field("Launch angle", spec.launch_angle, Quantity::Angle, Edit::LaunchAngle),
-        field("Wind", spec.wind_speed, Quantity::Velocity, Edit::Wind),
-        field("Wind from", spec.wind_from, Quantity::Angle, Edit::WindFrom),
-        turbulence,
-        field("Site altitude", spec.site_altitude, Quantity::Altitude, Edit::SiteAltitude),
-        field("Temperature", spec.temperature, Quantity::Temperature, Edit::Temperature),
-        field("Field radius", spec.field_radius, Quantity::Altitude, Edit::FieldRadius),
-    ];
+    // In a comparison the flights differ by motor, delay, turbulence, site and temperature: those fields are not comparable
+    // across a ticked set, so only the four shared launch conditions are listed (SimulateCompare).
+    let mut fields: Vec<Element<'a, Message>> = Vec::new();
+    if !compare {
+        fields.push(motor);
+        fields.push(field("Delay", flight::effective_delay(ctx, spec), Quantity::Time, Edit::Delay));
+    }
+    fields.push(field("Wind", spec.wind_speed, Quantity::Velocity, Edit::Wind));
+    fields.push(field("Wind from", spec.wind_from, Quantity::Angle, Edit::WindFrom));
+    fields.push(field("Launch angle", spec.launch_angle, Quantity::Angle, Edit::LaunchAngle));
+    if !compare {
+        fields.push(field("Rail length", spec.rail_length, Quantity::Length, Edit::RailLength));
+        fields.push(turbulence);
+        fields.push(field("Site altitude", spec.site_altitude, Quantity::Altitude, Edit::SiteAltitude));
+        fields.push(field("Temperature", spec.temperature, Quantity::Temperature, Edit::Temperature));
+    }
+    fields.push(field("Field radius", spec.field_radius, Quantity::Altitude, Edit::FieldRadius));
     container(column![head, column(fields).spacing(SPACE_2)].spacing(SPACE_3)).padding(SPACE_3).boxed()
 }
 
@@ -184,7 +189,7 @@ fn flight_row<'a>(state: &'a State, ctx: &'a Ctx, flight: &'a Flight, revision: 
     let is_ref = state.shown.compare && state.shown.ids.get(state.shown.reference) == Some(&flight.id);
 
     let slot = flight.slot;
-    let box_ = container(Space::new()).width(14).height(14).style(move |theme: &Theme| {
+    let box_ = container(Space::new()).width(12).height(12).style(move |theme: &Theme| {
         let t = theme::tokens(theme);
         match slot {
             Some(s) => {
@@ -241,9 +246,14 @@ fn flight_row<'a>(state: &'a State, ctx: &'a Ctx, flight: &'a Flight, revision: 
                 .boxed()
         }
         None if flight.running => text("running…").font(MONO).size(TEXT_LABEL).style(theme::faint).boxed(),
-        None => text("—").font(MONO).size(13).style(theme::faint).boxed(),
+        None => Space::new().boxed(),
     };
-    let right = column![apogee, square].spacing(SPACE_1).align_x(iced::Right);
+    // Before a run there is nothing to show at the right: no dash and no empty status square.
+    let right: Element<'a, Message> = if flight.run.is_none() && !flight.running && flight.error.is_none() {
+        Space::new().boxed()
+    } else {
+        column![apogee, square].spacing(SPACE_1).align_x(iced::Right).boxed()
+    };
 
     let content = row![left, Space::new().width(Fill), right].align_y(iced::Center);
     let main = button(content)

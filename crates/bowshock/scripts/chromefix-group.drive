@@ -1,0 +1,9 @@
+# Detached group header: cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/chromefix-group.drive /tmp/chromefix3
+viewport 1280x800
+scale 1
+click (923, 624)
+click "Detach"
+click (925, 619)
+screenshot group-dark.png
+click "Light"
+screenshot group-light.png

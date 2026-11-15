@@ -33,6 +33,7 @@ pub mod camera;
 mod cube;
 mod empty;
 pub mod handles;
+mod labels;
 pub mod manipulate;
 mod markers;
 mod mesh;
@@ -45,6 +46,7 @@ mod sheet;
 mod snap;
 mod solids;
 pub mod surface;
+mod toolbar;
 
 use std::f32::consts::FRAC_PI_2;
 use std::fmt;
@@ -62,9 +64,8 @@ use crate::tokens::{SPACE_1, SPACE_2, SPACE_4, SPACE_8, TEXT_LABEL};
 use crate::viewport::manipulate::{Hover, Overlay as Manipulator};
 use crate::viewport::pick::{Pick, SurfaceTarget};
 use crate::viewport::surface::Overlay as SurfaceOverlay;
+use crate::viewport::toolbar::Glyph;
 use crate::widgets::button::{button, Weight};
-use crate::widgets::field;
-use crate::widgets::segmented::segmented;
 
 pub use camera::Camera;
 pub use mesh::{Cut, GhostRadial, Marks, Mesh};
@@ -131,9 +132,9 @@ impl fmt::Display for GridStep {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mm = self.0 * 1000.0;
         if mm < 1.0 {
-            write!(f, "⌖ {mm:.1} mm")
+            write!(f, "{mm:.1} mm")
         } else {
-            write!(f, "⌖ {mm:.0} mm")
+            write!(f, "{mm:.0} mm")
         }
     }
 }
@@ -660,21 +661,33 @@ impl View {
 
     /// The view toolbar: 3D / 2D, the inside views, the snap step, and the focus tag with its way back.
     fn toolbar<'a>(&'a self) -> Element<'a, Message> {
-        let rule = || container(Space::new()).width(1).height(crate::tokens::CONTROL_H).style(theme::hairline).boxed();
-        let items: Vec<Element<'a, Message>> = vec![
-            segmented(&[(Projection::ThreeD, "3D"), (Projection::Profile, "2D")], self.projection, Message::Projection),
-            rule(),
-            segmented(
-                &[(InsideView::Solid, "Solid"), (InsideView::Cutaway, "Cutaway"), (InsideView::XRay, "X-ray"), (InsideView::Exploded, "Exploded")],
-                self.inside,
-                Message::InsideView,
-            ),
-            rule(),
-            container(field::select(GridStep::ALL.as_slice(), Some(GridStep(self.snap_step)), Message::Step)).width(96).boxed(),
-        ];
-        let toolbar = container(row(items).spacing(SPACE_2).align_y(alignment::Vertical::Center)).padding(SPACE_1).style(theme::overlay);
+        let mut cells = toolbar::group(
+            &[(Projection::ThreeD, Some(Glyph::Cube), "3D"), (Projection::Profile, Some(Glyph::Profile), "2D")],
+            self.projection,
+            Message::Projection,
+        );
+        cells.push(toolbar::rule());
+        cells.extend(toolbar::group(
+            &[
+                (InsideView::Solid, None, "Solid"),
+                (InsideView::Cutaway, None, "Cutaway"),
+                (InsideView::XRay, None, "X-ray"),
+                (InsideView::Exploded, None, "Exploded"),
+            ],
+            self.inside,
+            Message::InsideView,
+        ));
+        cells.push(toolbar::rule());
+        // The snap step: a magnet and the flat select, one cell.
+        let step = toolbar::flat_select(GridStep::ALL.as_slice(), GridStep(self.snap_step), Message::Step);
+        cells.push(
+            row![container(toolbar::icon(Glyph::Magnet, false)).padding([0.0, SPACE_2]), container(step).width(70)]
+                .align_y(alignment::Vertical::Center)
+                .boxed(),
+        );
+        let toolbar = toolbar::frame(cells);
         let Some(focus) = &self.focus else {
-            return toolbar.boxed();
+            return toolbar;
         };
         // The focus tag is plain accent mono text under the toolbar; the way back sits at the viewport's top right.
         let tag = text(focus.tag.clone()).font(MONO).size(TEXT_LABEL).style(theme::colored(|t| t.accent)).wrapping(text::Wrapping::None);
@@ -784,9 +797,8 @@ impl View {
         // Drawn markers and the HUD panels sit under the manipulation overlay (its drag tag must cover them); a transparent layer
         // above it takes the clicks on the section handle, the separation diamonds and (exploded) the parts.
         let hints = self.hints(ctx);
-        let hint_bar = (!hints.is_empty()).then(|| markers::hints(&hints));
         let mut layers = stack![sheet, model, markers(false, motors.clone())];
-        layers = layers.push(overlay).push(markers::bottom_bar(markers::legend(crate::app::physics::BALANCE_MACH, 0.0), hint_bar));
+        layers = layers.push(overlay).push(markers::bottom_bar(crate::app::physics::BALANCE_MACH, 0.0, hints));
         layers = layers.push(markers(true, motors));
         if !self.profile {
             let cube = canvas(cube::ViewCube { camera }).width(CUBE_SIZE).height(CUBE_SIZE);

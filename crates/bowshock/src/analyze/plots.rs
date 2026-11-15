@@ -62,6 +62,15 @@ pub fn build(out: &Output, units: UnitSystem, overlay: Option<&Overlay>) -> Buil
         }
     };
     group.y_ticks = YTicks::Even(5);
+    // One right gutter in every analysis, so switching analyses does not change the plot width.
+    group.right_margin = MARGIN_PX;
+    // Mach beyond what the nominal flight reaches is shaded (the worst case there is out of the envelope).
+    if matches!(out.analysis, Analysis::Aerodynamics | Analysis::Drag) {
+        let flown = mach_runs(out).iter().filter_map(|(_, r, _)| r.max_mach).fold(f64::NEG_INFINITY, f64::max);
+        if flown.is_finite() && flown < out.conditions.mach.1 {
+            group.beyond = Some((flown, format!("beyond flight · M {flown:.2}")));
+        }
+    }
     Built { group, ground, legend, scale }
 }
 

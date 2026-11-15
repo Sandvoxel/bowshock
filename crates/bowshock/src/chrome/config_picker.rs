@@ -106,7 +106,8 @@ impl Picker {
         for slot in &rocket.active_configuration().motors {
             let Some(reference) = &slot.motor else { continue };
             if let Some(motor) = motors.iter().position(|m| m.designation == reference.designation && m.manufacturer == reference.manufacturer) {
-                choices.insert(slot.mount, Choice { motor, delay: if slot.delay.is_finite() { slot.delay } else { 0.0 } });
+                let delay = if slot.delay.is_finite() && slot.delay > 0.0 { slot.delay } else { motors[motor].delays.first().copied().unwrap_or(0.0) };
+                choices.insert(slot.mount, Choice { motor, delay });
             }
         }
         let first = ctx.physics.stages().first().map_or(1, |s| s.index);
@@ -352,14 +353,9 @@ impl Picker {
             .push(container(footer).padding([SPACE_2, SPACE_3 - 2.0]).boxed());
         let panel = container(body).width(WIDTH).style(theme::overlay);
 
-        // The scrim closes the picker; the panel swallows presses so that clicking in it does not.
-        let scrim = mouse_area(container(Space::new()).width(Fill).height(Fill).style(scrim_style)).on_press(msg(Message::Cancel));
-        iced::widget::stack![scrim, container(mouse_area(panel).on_press(ChromeMessage::Nothing)).center(Fill)].boxed()
+        // A flat panel on the strip's CONFIG cell, like the menu: no scrim, a click outside closes it, a press inside does not.
+        super::floating(mouse_area(panel).on_press(ChromeMessage::Nothing).boxed(), super::Anchor::BottomLeft)
     }
-}
-
-fn scrim_style(theme: &Theme) -> container::Style {
-    container::Style { background: Some(Background::Color(theme::tokens(theme).bg_000.scale_alpha(0.55))), ..container::Style::default() }
 }
 
 /// The colour a margin is shown in against the document's thresholds: `ok` in the stable band, `warn` when marginal or

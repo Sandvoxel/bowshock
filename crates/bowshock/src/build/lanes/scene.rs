@@ -684,7 +684,7 @@ pub fn describe(bar: &Bar, rocket: &Rocket, units: UnitSystem) -> String {
 /// The letters of the copies left in a group that is not evenly spaced (one was detached), as ` (A, C)`: the smallest even
 /// spacing of `2π/n` that all the angles fall on gives each copy's original index. The model renumbers the copies when one
 /// leaves, so the first remaining copy is always `A`. Empty for an evenly spaced group.
-fn remaining_copies(radial: &bowshock_model::RadialPart) -> String {
+pub(crate) fn remaining_copies(radial: &bowshock_model::RadialPart) -> String {
     use std::f64::consts::TAU;
     if radial.instance_angles.is_none() {
         return String::new();

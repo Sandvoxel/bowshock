@@ -11,15 +11,24 @@ use super::separation::stage_name;
 use super::{Band, Message};
 use crate::app::{ui, Ctx};
 use crate::theme::{self, MONO};
-use crate::tokens::{SPACE_2, TEXT_BODY, TEXT_LABEL};
+use crate::tokens::{CONTROL_H, SPACE_2, TEXT_BODY, TEXT_LABEL};
 use crate::units::Quantity;
 use crate::widgets::button::{button, Weight};
 use crate::widgets::chip::{chip, Severity};
 use crate::widgets::field::{labeled, section};
 use crate::widgets::unit_input::unit_input;
 
+/// A text field with a unit field's ruled look: a `line-200` border at rest (the stock input's is the fainter `line-100`).
+fn ruled(theme: &iced::Theme, status: text_input::Status) -> text_input::Style {
+    let mut style = theme::input(theme, status);
+    if matches!(status, text_input::Status::Active | text_input::Status::Disabled) {
+        style.border = theme::frame(theme::tokens(theme).line_200);
+    }
+    style
+}
+
 fn name_field<'a>(placeholder: &'static str, value: &'a str, on_input: fn(String) -> Message) -> Element<'a, Message> {
-    text_input(placeholder, value).on_input(on_input).size(TEXT_BODY).padding([4.0, SPACE_2]).style(theme::input).boxed()
+    text_input(placeholder, value).on_input(on_input).size(TEXT_BODY).padding([CONTROL_H / 2.0 - 10.0, SPACE_2]).style(ruled).boxed()
 }
 
 /// The designations of the motors the active configuration puts in `stage`, joined by `+` for a cluster, or `No motor`.
@@ -102,6 +111,12 @@ pub fn view<'a>(ctx: &'a Ctx) -> (String, Vec<Element<'a, Message>>) {
         };
         let label = mount_label(rocket, mount.id);
         config_rows.push(value_row(label, format!("{motor}  {delay}").trim_end().to_string(), None));
+    }
+    // Ballast belongs to the configuration: a mass and, once it has one, where it sits.
+    let ballast = config.ballast;
+    config_rows.push(unit_input("Ballast", ballast.map_or(0.0, |b| b.mass), Quantity::Mass, &units).on_commit(Message::BallastMass).into());
+    if let Some(b) = ballast {
+        config_rows.push(unit_input("Station", b.station, Quantity::Length, &units).on_commit(Message::BallastStation).into());
     }
 
     let mut balance_rows: Vec<Element<'a, Message>> = Vec::new();

@@ -35,16 +35,45 @@ pub fn nice_ticks(lo: f64, hi: f64, target: usize) -> Vec<f64> {
     (first..=last).map(|k| k as f64 * step).filter(|v| *v >= lo - eps && *v <= hi + eps).map(|v| if v.abs() < eps { 0.0 } else { v }).collect()
 }
 
-/// `n` evenly spaced ticks from `lo` to `hi` inclusive, with the decimals that tell them apart: two significant digits for
-/// a step that starts with 1 or 2 (`0.19`), otherwise just enough to print it (`0.6`, `67`).
+/// The smallest range containing `[lo, hi]` that is divided into exactly `n - 1` equal intervals of a nice step (1, 2, 2.5 or 5
+/// times a power of ten), with both ends on multiples of the step. A range that crosses 0 therefore has a tick on 0.
+pub fn even_range(lo: f64, hi: f64, n: usize) -> (f64, f64) {
+    if !(lo.is_finite() && hi.is_finite()) || hi <= lo || n < 2 {
+        return (lo, hi);
+    }
+    let intervals = (n - 1) as f64;
+    let k0 = ((hi - lo) / intervals).log10().floor() as i32 - 1;
+    for k in k0..k0 + 6 {
+        for m in [1.0, 2.0, 2.5, 5.0] {
+            let step = m * 10f64.powi(k);
+            let a = (lo / step + 1e-9).floor();
+            let b = (hi / step - 1e-9).ceil();
+            if b - a <= intervals {
+                return (a * step, (a + intervals) * step);
+            }
+        }
+    }
+    (lo, hi)
+}
+
+/// `n` evenly spaced ticks from `lo` to `hi` inclusive (a range from [`even_range`]), with the decimals that print the step
+/// exactly (`0.25`, `2.5`, `20`).
 pub fn even_ticks(lo: f64, hi: f64, n: usize) -> (Vec<f64>, usize) {
     if !(lo.is_finite() && hi.is_finite()) || hi <= lo || n < 2 {
         return (Vec::new(), 0);
     }
     let step = (hi - lo) / (n - 1) as f64;
-    let mantissa = step / 10f64.powf(step.log10().floor());
-    let decimals = decimals_for(step) + usize::from(mantissa < 3.0);
-    ((0..n).map(|i| if i == n - 1 { hi } else { lo + step * i as f64 }).collect(), decimals)
+    let exact = |d: &i32| (step * 10f64.powi(*d) - (step * 10f64.powi(*d)).round()).abs() < 1e-6;
+    let decimals = (0..=6).find(exact).unwrap_or(6) as usize;
+    let tick = |i: usize| {
+        let v = if i == n - 1 { hi } else { lo + step * i as f64 };
+        if v.abs() < step * 1e-9 {
+            0.0
+        } else {
+            v
+        }
+    };
+    ((0..n).map(tick).collect(), decimals)
 }
 
 /// Decimal places needed to print multiples of `step` exactly (0 for 1, 10, 100; 1 for 0.5, 0.2; 2 for 0.05).
@@ -139,5 +168,41 @@ mod tests {
         assert_eq!(range_decimals(96.0), 0);
         assert_eq!(range_decimals(2.7), 2);
         assert_eq!(range_decimals(0.04), 4);
+    }
+}
+
+#[cfg(test)]
+mod even_tests {
+    use super::*;
+
+    fn check(lo: f64, hi: f64) -> (Vec<f64>, usize) {
+        let (a, b) = even_range(lo, hi, 5);
+        assert!(a <= lo + 1e-12 && b >= hi - 1e-12, "[{a}, {b}] must contain [{lo}, {hi}]");
+        let (t, d) = even_ticks(a, b, 5);
+        assert_eq!(t.len(), 5);
+        let step = (b - a) / 4.0;
+        let mag = 10f64.powf(step.log10().floor());
+        let m = step / mag;
+        assert!([1.0, 2.0, 2.5, 5.0, 10.0].iter().any(|n| (m - n).abs() < 1e-6), "step {step} is not 1-2-2.5-5");
+        if lo < 0.0 && hi > 0.0 {
+            assert!(t.contains(&0.0), "{t:?} must include 0");
+        }
+        (t, d)
+    }
+
+    #[test]
+    fn ranges_crossing_zero_have_a_zero_tick() {
+        let (t, _) = check(-1.5, 2.7);
+        assert!(t.contains(&0.0));
+        check(-0.3, 0.9);
+        check(-35.0, 410.0);
+    }
+
+    #[test]
+    fn positive_and_tiny_ranges_get_nice_steps() {
+        let (t, d) = check(0.8, 3.2);
+        assert_eq!((t, d), (vec![0.0, 1.0, 2.0, 3.0, 4.0], 0));
+        let (t, d) = check(0.0, 0.9);
+        assert_eq!((t, d), (vec![0.0, 0.25, 0.5, 0.75, 1.0], 2));
     }
 }

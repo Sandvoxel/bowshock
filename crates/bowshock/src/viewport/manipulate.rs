@@ -17,6 +17,7 @@ use iced::{alignment, keyboard, mouse, Color, Point, Rectangle, Renderer, Size, 
 
 use super::assembly::tag;
 use super::handles::{self, Axis, Context, Inset, Placed};
+use super::labels::{self, Request};
 use super::pick::{self, Pick};
 use super::pods::PodView;
 use super::radial::Placement;
@@ -559,6 +560,15 @@ fn text(frame: &mut Frame, content: impl Into<String>, at: Point, color: Color, 
 /// The floating view toolbar's extent in the viewport (logical px): handle labels stay clear of it.
 const TOOLBAR_X: f32 = 600.0;
 const TOOLBAR_Y: f32 = 76.0;
+/// Height of the viewport's bottom row (legend, key hints, scale bar) that labels stay out of, and the free band of that row:
+/// the legend (and its gap) at the left, the scale bar (and its gap) at the right.
+const BOTTOM_STRIP: f32 = 44.0;
+const BAR_LEFT: f32 = 16.0 + 226.0 + 12.0;
+const BAR_RIGHT: f32 = 16.0 + 120.0 + 12.0;
+/// The ViewCube's distance from the viewport's top-right corner.
+const CUBE_MARGIN: f32 = 16.0;
+/// Side of the square a handle occupies for labels to keep off.
+const HANDLE_BLOCK: f32 = 14.0;
 
 /// What the key-hint bar calls the thing being dragged (`Drag tip`, `Drag face`, `Drag edge`...).
 fn drag_verb(dim: Dim, nose: bool) -> &'static str {
@@ -583,6 +593,68 @@ fn label(frame: &mut Frame, content: &str, at: Point, color: Color, back: Color)
     let y = at.y.clamp(TEXT_LABEL, size.height - 4.0);
     frame.fill_rectangle(Point::new(x - 2.0, y - TEXT_LABEL - 1.0), Size::new(w + 4.0, TEXT_LABEL + 3.0), back.scale_alpha(0.92));
     text(frame, content, Point::new(x, y), color, TEXT_LABEL, alignment::Horizontal::Left, alignment::Vertical::Bottom);
+}
+
+/// Where the selection's text goes (see [`Overlay::plan`]).
+struct Plan {
+    /// The selection tag.
+    tag: Rectangle,
+    /// Labels beside the handles in the picture.
+    side: Vec<Labelled>,
+    /// Labels beside the handles in the aft-view inset (inside its panel).
+    inset: Vec<Labelled>,
+    /// Names of the labels that found no free spot.
+    hidden: Vec<String>,
+}
+
+/// A label placed beside one handle.
+struct Labelled {
+    /// Index into `Visible::placed`.
+    handle: usize,
+    text: String,
+    rect: Rectangle,
+}
+
+impl Plan {
+    /// The note for the key-hint spot when handles were left out: some hidden for crowding (`crowded`) or labels dropped
+    /// for want of room. `None` when nothing was left out.
+    fn note(&self, crowded: bool) -> Option<String> {
+        if !crowded && self.hidden.is_empty() {
+            return None;
+        }
+        let mut note = "Zoom in for more handles".to_string();
+        if !self.hidden.is_empty() {
+            note.push_str(&format!(" · labels hidden: {}", self.hidden.join(", ").to_lowercase()));
+        }
+        Some(note)
+    }
+}
+
+/// The size of the backing rectangle of a label (`label` and `label_in` draw the same one).
+fn label_size(content: &str) -> Size {
+    Size::new(content.chars().count() as f32 * TEXT_LABEL * GLYPH_EM + 4.0, TEXT_LABEL + 3.0)
+}
+
+/// A label in the rectangle `rect` (as placed by [`labels::layout`]), on a backing so it reads over the model.
+fn label_in(frame: &mut Frame, content: &str, rect: Rectangle, color: Color, back: Color) {
+    frame.fill_rectangle(rect.position(), rect.size(), back.scale_alpha(0.92));
+    text(frame, content, Point::new(rect.x + 2.0, rect.y + rect.height - 2.0), color, TEXT_LABEL, alignment::Horizontal::Left, alignment::Vertical::Bottom);
+}
+
+/// The note about handles left out, framed like the key-hint bar and centred in the free band of the viewport's bottom row
+/// (between the CG/CP legend and the scale bar). The hidden-label list is dropped, then the words shortened, until it fits.
+fn draw_note(frame: &mut Frame, t: &Tokens, size: Size, note: &str) {
+    let (left, right) = (BAR_LEFT, size.width - BAR_RIGHT);
+    let short = note.split(" · ").next().unwrap_or(note);
+    let fits = |s: &str| s.chars().count() as f32 * (TEXT_LABEL + 1.0) * 0.55 + 24.0 <= right - left;
+    let Some(shown) = [note, short, "Zoom in for more"].into_iter().find(|s| fits(s)) else {
+        return;
+    };
+    let w = shown.chars().count() as f32 * (TEXT_LABEL + 1.0) * 0.55 + 24.0;
+    let (x, y) = ((left + right - w) / 2.0, size.height - 16.0 - 26.0);
+    frame.fill_rectangle(Point::new(x, y), Size::new(w, 26.0), t.bg_200);
+    frame.stroke_rectangle(Point::new(x, y), Size::new(w, 26.0), Stroke::default().with_color(t.line_200).with_width(1.0));
+    text(frame, shown, Point::new(x + w / 2.0, y + 13.0), t.ink_muted, TEXT_LABEL + 1.0, alignment::Horizontal::Center, alignment::Vertical::Center);
 }
 
 fn dashed(frame: &mut Frame, a: Point, b: Point, color: Color, dotted: bool) {
@@ -780,26 +852,7 @@ impl canvas::Program<Message> for Overlay<'_> {
             self.draw_hover(&mut frame, t, cursor);
             return vec![frame.into_geometry()];
         }
-        let tag_text = match &selection {
-            Some(Selection::Axial { kind, .. }) => kind.name().to_uppercase(),
-            Some(Selection::Radial { radial, .. }) if radial.kind.is_pod() => {
-                if radial.count > 1 {
-                    format!("POD ×{} · LINKED", radial.count)
-                } else {
-                    "POD".to_string()
-                }
-            }
-            Some(Selection::Radial { radial, .. }) => {
-                if radial.count > 1 {
-                    let tag = if radial.has_overrides() { format!("{} OVR", radial.overridden_copies().len()) } else { "ALL FOLLOW".to_string() };
-                    format!("{} ×{} · LINKED · {tag}", radial.kind.name().to_uppercase(), radial.count)
-                } else {
-                    radial.kind.name().to_uppercase()
-                }
-            }
-            Some(Selection::Internal) => self.rocket.kind_of(id).map(|p| p.kind_name().to_uppercase()).unwrap_or_default(),
-            None => String::new(),
-        };
+        let tag_text = self.tag_text(id, &selection);
         if let Some(Selection::Radial { radial, .. }) = &selection {
             let (rocket, camera) = self.selected.and_then(|id| self.frame_of(id)).unwrap_or((self.rocket, &self.camera));
             let own = self.instance.min(radial.angles().len() - 1);
@@ -826,49 +879,27 @@ impl canvas::Program<Message> for Overlay<'_> {
             return vec![frame.into_geometry()];
         };
         brackets(&mut frame, b, t.accent, false);
-        // The caption sits on a backing so it stays readable over the model.
-        let caption_y = if b.y - BRACKET_GAP - 4.0 < TOOLBAR_Y && b.x < TOOLBAR_X { b.y + BRACKET_GAP + 28.0 } else { b.y - BRACKET_GAP - 4.0 };
-        label(&mut frame, &tag_text, Point::new(b.x - BRACKET_GAP, caption_y), t.accent, t.bg_000);
 
-        // Handles (and, with Alt, their labels and the aft-view inset).
+        // Where the tag and the handle labels go: placed together so none overprints another or the inset (see `labels`).
         let vis = self.visible(size, state.modifiers);
+        let plan = self.plan(id, &tag_text, b, size, &vis, all && state.drag.is_none());
+        label_in(&mut frame, &tag_text, plan.tag, t.accent, t.bg_000);
         if let Some(ins) = &vis.inset {
-            self.draw_inset(&mut frame, t, id, ins, &vis);
+            self.draw_inset(&mut frame, t, id, ins, &vis, &plan.inset);
         }
         let active = state.drag.as_ref().map(|d| d.placed.spec.dim);
-        let mut taken: Vec<Rectangle> = Vec::new();
         for p in &vis.placed {
             let live = active == Some(p.spec.dim);
             handle_shape(&mut frame, t, p, live, self.hover == Hover::Handle(p.spec.dim));
-            if all && state.drag.is_none() && !handles::in_inset(&p.spec) {
-                let dim = p.spec.dim;
-                let value = self.rocket.instance_dim(id, self.instance, dim);
-                let content = match (dim, value) {
-                    (Dim::Vertex(_), _) => String::new(),
-                    (_, Some(v)) => self.handle_label(id, dim, v),
-                    _ => self.rocket.dim_label(id, dim),
-                };
-                if !content.is_empty() {
-                    // Slide the label up or down until it clears the ones already placed.
-                    let w = content.chars().count() as f32 * TEXT_LABEL * GLYPH_EM + 4.0;
-                    let mut at = p.at + Vector::new(8.0, -8.0);
-                    if at.y - TEXT_LABEL < TOOLBAR_Y && at.x < TOOLBAR_X {
-                        at.y = p.at.y + 20.0;
-                    }
-                    for step in [0.0_f32, -14.0, 14.0, -28.0, 28.0, -42.0, 42.0] {
-                        let rect = Rectangle::new(Point::new(at.x - 2.0, at.y + step - TEXT_LABEL - 1.0), Size::new(w, TEXT_LABEL + 3.0));
-                        if !taken.iter().any(|r: &Rectangle| r.intersects(&rect)) {
-                            at.y += step;
-                            taken.push(rect);
-                            break;
-                        }
-                    }
-                    label(&mut frame, &content, at, t.ink_muted, t.bg_000);
-                }
-            }
         }
-        if vis.crowded {
-            label(&mut frame, "ZOOM IN FOR MORE HANDLES", Point::new(b.x, b.y + b.height + 22.0), t.ink_muted, t.bg_000);
+        for l in &plan.side {
+            if let Some((from, to)) = Request::leader(vis.placed[l.handle].at, l.rect) {
+                dashed(&mut frame, from, to, t.line_200, true);
+            }
+            label_in(&mut frame, &l.text, l.rect, t.ink_muted, t.bg_000);
+        }
+        if let Some(note) = plan.note(vis.crowded).filter(|_| state.drag.is_none()) {
+            draw_note(&mut frame, t, size, &note);
         }
 
         if let Some(drag) = &state.drag {
@@ -889,6 +920,105 @@ impl canvas::Program<Message> for Overlay<'_> {
 }
 
 impl Overlay<'_> {
+    /// The tag over the selection: what it is, and for a linked group how many copies and whether they follow.
+    fn tag_text(&self, id: PartId, selection: &Option<Selection<'_>>) -> String {
+        match selection {
+            Some(Selection::Axial { kind, .. }) => kind.name().to_uppercase(),
+            Some(Selection::Radial { radial, .. }) if radial.kind.is_pod() => {
+                if radial.count > 1 {
+                    format!("POD ×{} · LINKED", radial.count)
+                } else {
+                    "POD".to_string()
+                }
+            }
+            Some(Selection::Radial { radial, .. }) => {
+                if radial.count > 1 {
+                    let tag = if radial.has_overrides() { format!("{} OVR", radial.overridden_copies().len()) } else { "ALL FOLLOW".to_string() };
+                    format!("{} ×{} · LINKED · {tag}", radial.kind.name().to_uppercase(), radial.count)
+                } else {
+                    radial.kind.name().to_uppercase()
+                }
+            }
+            Some(Selection::Internal) => self.rocket.kind_of(id).map(|p| p.kind_name().to_uppercase()).unwrap_or_default(),
+            None => String::new(),
+        }
+    }
+
+    /// The text beside handle `dim` of part `id` (`SWEEP 60.0`, `Ø 76.2`); empty for a freeform fin's vertices.
+    fn label_text(&self, id: PartId, dim: Dim) -> String {
+        match (dim, self.rocket.instance_dim(id, self.instance, dim)) {
+            (Dim::Vertex(_), _) => String::new(),
+            (_, Some(v)) => self.handle_label(id, dim, v),
+            _ => self.rocket.dim_label(id, dim),
+        }
+    }
+
+    /// Places the selection tag, the handle labels and the inset's labels so that none overprints another, the inset, the
+    /// toolbar, the ViewCube or a handle (see [`labels`]). Labels are most important first: the tag, the primary dimensions,
+    /// the others. A label with no free spot is dropped and named in `Plan::hidden`.
+    fn plan(&self, id: PartId, tag_text: &str, b: Rectangle, size: Size, vis: &Visible, with_labels: bool) -> Plan {
+        let area = Rectangle::new(Point::ORIGIN, size);
+        let mut blocked = vec![
+            Rectangle::new(Point::ORIGIN, Size::new(TOOLBAR_X.min(size.width), TOOLBAR_Y)),
+            Rectangle::new(Point::new(0.0, (size.height - BOTTOM_STRIP).max(0.0)), Size::new(size.width, BOTTOM_STRIP)),
+        ];
+        if !self.profile {
+            blocked.push(Rectangle::new(Point::new(size.width - CUBE_MARGIN - super::CUBE_SIZE, CUBE_MARGIN), Size::new(super::CUBE_SIZE, super::CUBE_SIZE)));
+        }
+        if let Some(ins) = &vis.inset {
+            blocked.push(ins.panel);
+        }
+        blocked.extend(vis.placed.iter().map(|p| labels::around(p.at, Size::new(HANDLE_BLOCK, HANDLE_BLOCK))));
+
+        // The tag: above the part's left corner, else below it, else against the right side.
+        let tag_size = label_size(tag_text);
+        let (g, h) = (BRACKET_GAP, tag_size.height);
+        let (left, right) = (b.x - g, b.x + b.width + g - tag_size.width);
+        let (above, below) = (b.y - g - 4.0 - h, b.y + b.height + g + 4.0);
+        let spots =
+            vec![Point::new(left, above), Point::new(right, above), Point::new(left, below), Point::new(right, below), Point::new(left, above - h - 2.0)];
+        let mut requests = vec![labels::Request { size: tag_size, priority: 0, spots }];
+        let mut wanted = Vec::new();
+        if with_labels {
+            for (i, p) in vis.placed.iter().enumerate().filter(|(_, p)| !handles::in_inset(&p.spec)) {
+                let text = self.label_text(id, p.spec.dim);
+                if !text.is_empty() {
+                    requests.push(Request::at_handle(p.at, label_size(&text), if p.spec.primary { 1 } else { 2 }));
+                    wanted.push((i, text));
+                }
+            }
+        }
+        let rects = labels::layout(&requests, &blocked, area);
+        let tag = rects[0].unwrap_or_else(|| Rectangle::new(requests[0].spots[0], tag_size));
+        let mut side = Vec::new();
+        let mut hidden = Vec::new();
+        for ((handle, text), rect) in wanted.into_iter().zip(&rects[1..]) {
+            match rect {
+                Some(rect) => side.push(Labelled { handle, text, rect: *rect }),
+                None => hidden.push(self.rocket.dim_label(id, vis.placed[handle].spec.dim).to_uppercase()),
+            }
+        }
+
+        // The inset's labels are placed inside its panel, round its title and picture.
+        let mut inset = Vec::new();
+        if let Some(ins) = &vis.inset {
+            let title = Rectangle::new(Point::new(ins.panel.x + 8.0, ins.panel.y + 6.0), Size::new(8.0 * TEXT_LABEL * GLYPH_EM, TEXT_LABEL));
+            let mut blocked = vec![title];
+            let members: Vec<(usize, &Placed)> = vis.placed.iter().enumerate().filter(|(_, p)| handles::in_inset(&p.spec)).collect();
+            blocked.extend(members.iter().map(|(_, p)| labels::around(p.at, Size::new(HANDLE_BLOCK, HANDLE_BLOCK))));
+            let texts: Vec<String> = members.iter().map(|(_, p)| self.label_text(id, p.spec.dim)).collect();
+            let requests: Vec<Request> = members.iter().zip(&texts).map(|((_, p), s)| Request::at_handle(p.at, label_size(s), 1)).collect();
+            let panel = Rectangle::new(ins.panel.position() + Vector::new(2.0, 2.0), ins.panel.size() - Size::new(4.0, 4.0));
+            for (((handle, p), text), rect) in members.iter().zip(texts).zip(labels::layout(&requests, &blocked, panel)) {
+                match rect {
+                    Some(rect) => inset.push(Labelled { handle: *handle, text, rect }),
+                    None => hidden.push(self.rocket.dim_label(id, p.spec.dim).to_uppercase()),
+                }
+            }
+        }
+        Plan { tag, side, inset, hidden }
+    }
+
     /// A multi-selection: accent brackets on every selected part and one tag (`3 PARTS`) over the group. No handles.
     fn draw_multi(&self, frame: &mut Frame, t: &Tokens, size: Size) {
         let parts = self.selected.iter().chain(&self.also);
@@ -922,7 +1052,7 @@ impl Overlay<'_> {
     }
 
     /// The aft-view inset of a radial part: the parent in section, every copy, and the first copy's handles with names.
-    fn draw_inset(&self, frame: &mut Frame, t: &Tokens, id: PartId, ins: &Inset, vis: &Visible) {
+    fn draw_inset(&self, frame: &mut Frame, t: &Tokens, id: PartId, ins: &Inset, vis: &Visible, names: &[Labelled]) {
         let Some(radial) = self.rocket.radial(id) else {
             return;
         };
@@ -960,6 +1090,12 @@ impl Overlay<'_> {
                 frame.fill(&Path::circle(to, 3.0), colour);
             }
         }
+        for l in names {
+            if let Some((from, to)) = Request::leader(vis.placed[l.handle].at, l.rect) {
+                dashed(frame, from, to, t.line_200, true);
+            }
+            label_in(frame, &l.text, l.rect, t.ink_muted, t.bg_000);
+        }
         // The cant lever as a dotted arc from the fin's own direction to its tilt.
         if let Some(cant) = vis.placed.iter().find(|p| p.spec.dim == Dim::Cant) {
             let Axis::Arc { centre } = cant.axis else {
@@ -979,20 +1115,6 @@ impl Overlay<'_> {
                 }
             });
             frame.stroke(&arc, Stroke { line_dash: LineDash { segments: &[1.5, 3.0], offset: 0 }, ..Stroke::default().with_color(t.accent).with_width(1.0) });
-        }
-        for p in vis.placed.iter().filter(|p| handles::in_inset(&p.spec)) {
-            let dim = p.spec.dim;
-            let content = match self.rocket.instance_dim(id, self.instance, dim) {
-                Some(v) => self.handle_label(id, dim, v),
-                None => dim.label(),
-            };
-            let width = content.chars().count() as f32 * TEXT_LABEL * GLYPH_EM;
-            let at = match dim {
-                Dim::Thickness => p.at + Vector::new(10.0, 4.0),
-                Dim::Angle => p.at + Vector::new(-width - 10.0, 4.0),
-                _ => p.at + Vector::new(8.0, -8.0),
-            };
-            label(frame, &content, at, t.ink_muted, t.bg_000);
         }
     }
 
@@ -1299,5 +1421,96 @@ mod tests {
         o.drag_to(&mut drag, near, keyboard::Modifiers::SHIFT);
         assert!(drag.live.caught.is_some());
         assert!((drag.live.value - stock).abs() < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+    use bowshock_model::{NoseShape, PartKind, RadialKind};
+
+    /// The example rocket's airframe (76.2 mm, nose + two tubes) with its three-fin set and a rail button.
+    fn example() -> (Rocket, PartId) {
+        let mut r = Rocket::default();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762 }).unwrap();
+        r.insert(1, PartKind::BodyTube { length: 0.52, diameter: 0.0762 }).unwrap();
+        let booster = r.insert(2, PartKind::BodyTube { length: 0.3934, diameter: 0.0762 }).unwrap();
+        let fins = r
+            .attach_radial(booster, 0.0, 0.0, 3, RadialKind::FinSet { root_chord: 0.12, tip_chord: 0.05, span: 0.0762, sweep: 0.06, thickness: 0.00318 })
+            .unwrap();
+        (r, fins)
+    }
+
+    fn overlay(r: &Rocket, fins: PartId, camera: Camera, profile: bool) -> Overlay<'_> {
+        Overlay {
+            rocket: r,
+            camera,
+            selected: Some(fins),
+            also: Vec::new(),
+            instance: 0,
+            hover: Hover::None,
+            cursor: None,
+            snap_step: 0.001,
+            inside: InsideView::Solid,
+            profile,
+            units: UnitSystem::default(),
+            pod: None,
+        }
+    }
+
+    fn camera(profile: bool, size: Size) -> Camera {
+        let mut camera = if profile {
+            Camera { yaw: -std::f32::consts::FRAC_PI_2, pitch: 0.0, ortho_blend: 1.0, ..Camera::default() }
+        } else {
+            super::super::home(Camera::default())
+        };
+        camera.fit(Vec3::new(-0.04, -0.04, 0.0), Vec3::new(0.04, 0.04, 1.142), size);
+        camera
+    }
+
+    fn disjoint(rects: &[Rectangle]) {
+        for (i, a) in rects.iter().enumerate() {
+            for b in &rects[i + 1..] {
+                assert!(!a.intersects(b), "{a:?} overlaps {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn no_two_labels_of_a_selected_fin_set_overlap_and_the_inset_stays_clear() {
+        let (r, fins) = example();
+        // A viewport at 1280x800 and at 1000x700 (window minus the parts bin and the inspector).
+        for size in [Size::new(704.0, 580.0), Size::new(404.0, 480.0)] {
+            // 2D side (every handle), 3D home with Alt (every handle), 3D home on plain select (primary handles).
+            for (profile, all) in [(true, true), (false, true), (false, false)] {
+                let o = overlay(&r, fins, camera(profile, size), profile);
+                let modifiers = if all && !profile { keyboard::Modifiers::ALT } else { keyboard::Modifiers::empty() };
+                let selection = o.selection();
+                let tag = o.tag_text(fins, &selection);
+                let b = o.bounds_of_selection(size).expect("the fin set is on screen");
+                let vis = o.visible(size, modifiers);
+                let plan = o.plan(fins, &tag, b, size, &vis, all);
+                let case = format!("{size:?} profile={profile} all={all}");
+
+                let mut rects = vec![plan.tag];
+                rects.extend(plan.side.iter().map(|l| l.rect));
+                disjoint(&rects);
+                if all {
+                    assert!(!plan.side.is_empty() || !plan.hidden.is_empty(), "{case}: handle labels were planned");
+                }
+                if let Some(ins) = &vis.inset {
+                    for r in &rects {
+                        assert!(!r.intersects(&ins.panel), "{case}: {r:?} over the inset {:?}", ins.panel);
+                    }
+                    // The inset keeps off the fin set itself.
+                    assert!(!ins.panel.intersects(&b), "{case}: the inset covers the part");
+                    let inner: Vec<Rectangle> = plan.inset.iter().map(|l| l.rect).collect();
+                    disjoint(&inner);
+                    for l in &inner {
+                        assert!(l.x >= ins.panel.x && l.x + l.width <= ins.panel.x + ins.panel.width, "{case}: inset label outside its panel");
+                    }
+                }
+            }
+        }
     }
 }

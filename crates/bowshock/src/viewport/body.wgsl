@@ -88,7 +88,8 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
         view = normalize(u.eye.xyz - in.world);
     }
     let facing = clamp(dot(n, view), 0.0, 1.0);
-    let lit = 0.86 + 0.14 * max(dot(n, u.light_dir.xyz), 0.0);
+    // Faces turned from the light stay at 93 % of the shell colour, so a light-theme shell reads silver (the kit's flat 185/194/205).
+    let lit = 0.93 + 0.07 * max(dot(n, u.light_dir.xyz), 0.0);
     let rim = mix(0.45, 1.0, smoothstep(0.0, 0.55, facing));
 
     // Part states: 0 normal, 1 ghost (dragged in: pulled towards the accent), 2 hovered (a little brighter), 3 selected
@@ -113,9 +114,9 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
         // material 2 marks the bore: the inner surface of a hollow shell, which faces the axis.
         let bore = in.material > 1.5;
         if (!front || bore) && mode == 1 {
-            // The inside of the shell seen through the cut.
-            base = u.colors[CUT_INTERIOR].rgb * (0.6 + 0.4 * lit) + vec3<f32>(0.02) + u.colors[CUT_FACE].rgb * 0.5 * pow(1.0 - facing, 2.0);
-            shaded = false;
+            // The inside of the retained half-shell seen through the cut: the shell colour a little in shade, so the half reads
+            // as a lit pale shell with the internals opened above it (the design kit's InsideViews 02).
+            base = mix(u.colors[BODY].rgb, u.colors[CUT_INTERIOR].rgb, 0.3) * (0.78 + 0.22 * lit);
         } else if ghosted {
             if !front {
                 discard;
@@ -155,7 +156,7 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     } else if in.state > 1.5 {
         base = min(base * 1.1 + vec3<f32>(0.05), vec3<f32>(1.0));
     } else if in.state > 0.5 {
-        base = mix(base, u.colors[ACCENT].rgb, 0.55);
+        base = u.colors[BODY].rgb * 0.62;
     }
 
     var c = base;
@@ -177,6 +178,12 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
         c = mix(c, accent, min(0.7 + 0.3 * pulse, 1.0) * k * weight);
         c = mix(c, accent, 0.08 * pulse);
         alpha = max(alpha, 0.8 * k * weight);
+    }
+    if in.state > 0.5 && in.state < 1.5 {
+        // A part being dragged in: a see-through grey body with an accent edge (design/components/ViewportOverlay).
+        let k = pow(1.0 - facing, 2.0);
+        c = mix(c, accent, k);
+        alpha = max(0.34, k);
     }
 
     // A thin bg-000 line (50 %) where stacked parts meet.

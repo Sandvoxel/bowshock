@@ -49,16 +49,16 @@ pub(super) fn view<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
 
 /// 04 GROUND TRACK: the map, the run-dispersion button and, once a study has flown, its caption.
 fn ground_section<'a>(state: &'a State, ctx: &'a Ctx, flight: &'a Flight) -> Element<'a, Message> {
-    let mut disperse = push("Run dispersion", Weight::Ghost).tooltip("Fly this flight many times with wind, launch angle and thrust varied");
-    disperse = if flight.run.is_none() {
-        disperse.disabled("Run the flight first")
-    } else if flight.dispersing {
-        disperse.disabled("Dispersion is running")
-    } else {
-        disperse.on_press(Message::Disperse)
-    };
-    let disperse: Element<'a, Message> = disperse.into();
-    let head = row![section_head(4, "Ground track"), Space::new().width(Fill), disperse].align_y(iced::Center);
+    // The study needs a result to vary: the button appears with the first run (one style, not a dashed stand-in), and the
+    // numbering follows the sections above (01–03 once there is a result, otherwise this is the first section).
+    let index = if state.shown.compare || flight.run.is_some() { 4 } else { 1 };
+    let mut head: Vec<Element<'a, Message>> = vec![section_head(index, "Ground track"), Space::new().width(Fill).boxed()];
+    if flight.run.is_some() {
+        let mut disperse = push("Run dispersion", Weight::Ghost).tooltip("Fly this flight many times with wind, launch angle and thrust varied");
+        disperse = if flight.dispersing { disperse.disabled("Dispersion is running") } else { disperse.on_press(Message::Disperse) };
+        head.push(disperse.into());
+    }
+    let head = row(head).align_y(iced::Center);
 
     let ground = GroundTrackView::new(&state.shown.ground, state.plot.hover_x()).element().map(Message::Ground);
     let mut body: Vec<Element<'a, Message>> = vec![head.boxed(), container(ground).width(Fill).height(GROUND_H).boxed()];

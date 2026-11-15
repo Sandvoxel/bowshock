@@ -6,7 +6,7 @@ use iced::advanced::text::Alignment;
 use iced::widget::canvas::{self, Action, Event, Frame, Geometry, LineDash, LineJoin, Path, Stroke, Text};
 use iced::{alignment, keyboard, mouse, Color, Element, Fill, Font, Pixels, Point, Rectangle, Renderer, Size, Theme, Widget};
 
-use super::ticks::{decimals_for, even_ticks, fmt_fixed, nice_step, nice_ticks};
+use super::ticks::{decimals_for, even_range, even_ticks, fmt_fixed, nice_step, nice_ticks};
 use super::{window_points, LabelAt, LineStyle, Panel, PanelAction, PlotGroup, PlotMessage, PlotState, Tag, YTicks};
 use crate::theme::{self, MONO, SANS};
 use crate::tokens::{Tokens, TEXT_LABEL};
@@ -41,12 +41,20 @@ const FONT_SMALL: f32 = 10.0;
 pub struct PlotView<'a> {
     group: &'a PlotGroup,
     state: &'a PlotState,
+    pinned: bool,
 }
 
 impl<'a> PlotView<'a> {
     /// A view of `group` in the zoom/hover/band state `state`.
     pub fn new(group: &'a PlotGroup, state: &'a PlotState) -> Self {
-        PlotView { group, state }
+        PlotView { group, state, pinned: false }
+    }
+
+    /// Keeps every editable panel's controls (`+ series`, move, remove) visible, as while a source picker is open; otherwise
+    /// they show only under the pointer.
+    pub fn pinned(mut self, pinned: bool) -> Self {
+        self.pinned = pinned;
+        self
     }
 
     /// The canvas as an element filling its space; `.map` it into the app's message.
@@ -83,10 +91,13 @@ impl Layout {
     fn new(size: Size, group: &PlotGroup, state: &PlotState) -> Layout {
         let x0 = GUTTER;
         let x1 = (size.width - group.right_margin - PAD_R).max(x0 + 1.0);
-        let strip = if group.timeline {
+        // Zoomed in, the overview (ALL: a mini curve with the window boxed) replaces the events strip, in the same height so the
+        // plots do not jump (PlotZoom).
+        let strip = if state.is_zoomed() {
+            let h = if group.timeline { STRIP_TIMELINE_H } else { STRIP_MINI_H };
+            Some((Rectangle::new(Point::new(x0, 0.0), Size::new(x1 - x0, h)), StripKind::Mini))
+        } else if group.timeline {
             Some((Rectangle::new(Point::new(x0, 0.0), Size::new(x1 - x0, STRIP_TIMELINE_H)), StripKind::Timeline))
-        } else if state.is_zoomed() {
-            Some((Rectangle::new(Point::new(x0, 0.0), Size::new(x1 - x0, STRIP_MINI_H)), StripKind::Mini))
         } else {
             None
         };
@@ -155,6 +166,8 @@ pub struct Interaction {
     modifiers: keyboard::Modifiers,
     space: bool,
     hovering: bool,
+    /// The last pointer position over the canvas.
+    pointer: Option<Point>,
     drag: Option<Drag>,
     last_click: Option<(Instant, Point)>,
     /// A Cmd/Ctrl + scroll zoom is in progress (its level closes when the modifier is released).
@@ -336,8 +349,12 @@ impl canvas::Program<PlotMessage> for PlotView<'_> {
                     _ => Some(Action::capture()),
                 }
             }
-            Event::Mouse(mouse::Event::CursorMoved { .. }) => self.moved(st, &layout, local),
+            Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                st.pointer = local;
+                self.moved(st, &layout, local)
+            }
             Event::Mouse(mouse::Event::CursorLeft) => {
+                st.pointer = None;
                 if st.drag.is_none() {
                     std::mem::take(&mut st.hovering).then(|| Action::publish(PlotMessage::Hover(None)))
                 } else {
@@ -404,7 +421,18 @@ impl canvas::Program<PlotMessage> for PlotView<'_> {
         let t = theme::tokens(theme);
         let mut frame = Frame::new(renderer, bounds.size());
         let layout = Layout::new(bounds.size(), self.group, self.state);
-        let ranges: Vec<(f64, f64)> = self.group.panels.iter().map(|p| p.y_range(layout.window.0, layout.window.1)).collect();
+        let ranges: Vec<(f64, f64)> = self
+            .group
+            .panels
+            .iter()
+            .map(|p| {
+                let (lo, hi) = p.y_range(layout.window.0, layout.window.1);
+                match self.group.y_ticks {
+                    YTicks::Even(n) => even_range(lo, hi, n),
+                    YTicks::Nice => (lo, hi),
+                }
+            })
+            .collect();
 
         // The strip sits on `bg-100`, the plots on `bg-200`, flush with the panel: no frame around the group.
         frame.fill_rectangle(Point::ORIGIN, bounds.size(), t.bg_200);
@@ -417,7 +445,8 @@ impl canvas::Program<PlotMessage> for PlotView<'_> {
         for ((panel, plot), range) in self.group.panels.iter().zip(&layout.plots).zip(&ranges) {
             self.draw_panel(&mut frame, t, &layout, panel, *plot, *range);
         }
-        let hot = cursor.position_in(bounds);
+        // The pointer is also tracked from events, so a hosted canvas without a live cursor (the headless driver) still shows hover.
+        let hot = cursor.position_in(bounds).or(st.pointer);
         for (panel, plot) in self.group.panels.iter().zip(&layout.plots) {
             self.draw_chrome(&mut frame, t, panel, *plot, hot);
         }
@@ -458,6 +487,35 @@ fn stroke<'a>(color: Color, width: f32, style: LineStyle) -> Stroke<'a> {
 
 fn line(frame: &mut Frame, a: Point, b: Point, color: Color, width: f32, style: LineStyle) {
     frame.stroke(&Path::line(a, b), stroke(color, width, style));
+}
+
+/// An event label to place on the strip: the x of its tick, its text width, and whether it is the accented (apogee) event.
+#[derive(Clone, Copy)]
+struct LabelWant {
+    px: f32,
+    width: f32,
+    accent: bool,
+}
+
+/// Places each label in row 0 (above the bar) or 1 (below), to the right of its tick or, failing that, to its left: the
+/// accented one first (row 0, always), then the rest in order, alternating rows. `None` for a label with no free spot. Returns
+/// `(start x, row)` per label, within `[x0, x1]` and at least 6 px from its neighbours in the row.
+fn place_event_labels(wants: &[LabelWant], x0: f32, x1: f32) -> Vec<Option<(f32, usize)>> {
+    let mut taken: [Vec<(f32, f32)>; 2] = [Vec::new(), Vec::new()];
+    let mut out = vec![None; wants.len()];
+    let free = |row: &Vec<(f32, f32)>, a: f32, b: f32| a >= x0 && b <= x1 && row.iter().all(|(s, e)| a >= e + 6.0 || b + 6.0 <= *s);
+    let order = (0..wants.len()).filter(|i| wants[*i].accent).chain((0..wants.len()).filter(|i| !wants[*i].accent));
+    for (n, i) in order.enumerate() {
+        let w = wants[i];
+        let rows = if w.accent { [0, 1] } else { [n % 2, (n + 1) % 2] };
+        let sides = [(w.px + 3.0).min(x1 - w.width), (w.px - 3.0 - w.width).max(x0)];
+        let spot = rows.into_iter().flat_map(|r| sides.into_iter().map(move |s| (r, s))).find(|(r, s)| free(&taken[*r], *s, *s + w.width));
+        if let Some((r, s)) = spot {
+            taken[r].push((s, s + w.width));
+            out[i] = Some((s, r));
+        }
+    }
+    out
 }
 
 fn mono_width(chars: usize, size: f32) -> f32 {
@@ -510,22 +568,23 @@ impl PlotView<'_> {
                         f.fill_rectangle(Point::new(a, bar.0), Size::new(b - a, bar.1), ph.color.resolve(t));
                     }
                 }
-                // Event ticks and labels alternate above and below the bar, skipping a label that would collide.
-                let mut row_end = [f32::NEG_INFINITY; 2];
+                // Event ticks; labels sit above and below the bar, the accented event (apogee) always shown and the others
+                // shifted to the other row or the other side of their tick to avoid it.
                 let mut order: Vec<_> = self.group.events.iter().collect();
                 order.sort_by(|a, b| a.x.total_cmp(&b.x));
-                for (n, e) in order.into_iter().enumerate() {
-                    let px = crisp(layout.strip_px(e.x));
+                let labels: Vec<String> = order.iter().map(|e| format!("{} {}", e.label.to_uppercase(), fmt_fixed(e.x, 1))).collect();
+                let wants: Vec<LabelWant> = order
+                    .iter()
+                    .zip(&labels)
+                    .map(|(e, label)| LabelWant { px: crisp(layout.strip_px(e.x)), width: mono_width(label.chars().count(), FONT_SMALL), accent: e.accent })
+                    .collect();
+                let placed = place_event_labels(&wants, rect.x, rect.x + rect.width);
+                for ((e, label), (want, at)) in order.iter().zip(&labels).zip(wants.iter().zip(placed)) {
                     let color = if e.accent { t.accent } else { t.ink_muted };
-                    line(f, Point::new(px, rect.y + 13.0), Point::new(px, rect.y + 27.0), color, 1.0, LineStyle::Solid);
-                    let label = format!("{} {}", e.label.to_uppercase(), fmt_fixed(e.x, 1));
-                    let w = mono_width(label.chars().count(), FONT_SMALL);
-                    let start = (px + 3.0).min(rect.x + rect.width - w);
-                    let row = [n % 2, (n + 1) % 2].into_iter().find(|r| start > row_end[*r] + 6.0);
-                    let Some(row) = row else { continue };
-                    row_end[row] = start + w;
+                    line(f, Point::new(want.px, rect.y + 13.0), Point::new(want.px, rect.y + 27.0), color, 1.0, LineStyle::Solid);
+                    let Some((start, row)) = at else { continue };
                     let (y, ay) = if row == 0 { (rect.y + 11.0, alignment::Vertical::Bottom) } else { (rect.y + 29.0, alignment::Vertical::Top) };
-                    put(f, &label, Point::new(start, y), if e.accent { t.accent } else { ink_faint }, FONT_SMALL, left, ay, MONO);
+                    put(f, label, Point::new(start, y), if e.accent { t.accent } else { ink_faint }, FONT_SMALL, left, ay, MONO);
                 }
             }
             StripKind::Mini => {
@@ -545,7 +604,7 @@ impl PlotView<'_> {
                             }
                         }
                     });
-                    f.stroke(&path, Stroke::default().with_color(t.line_200).with_width(1.0));
+                    f.stroke(&path, Stroke::default().with_color(t.ink_faint).with_width(1.0));
                 }
             }
         }
@@ -606,12 +665,35 @@ impl PlotView<'_> {
             line(f, Point::new(plot.x, y), Point::new(right, y), t.line_200, 1.0, LineStyle::Solid);
         }
 
+        // The range beyond the flown envelope: a subtle muted band, labelled at the top of the first panel.
+        if let Some((from, label)) = &self.group.beyond {
+            if *from < w1 {
+                let xa = layout.px(from.max(w0)).max(plot.x);
+                let band = if t.bg_200.r > 0.5 { 0.07 } else { 0.16 };
+                f.fill_rectangle(Point::new(xa, plot.y), Size::new((right - xa).max(0.0), plot.height), Color { a: band, ..t.ink_muted });
+                if self.group.panels.first().is_some_and(|p| std::ptr::eq(p, panel)) {
+                    put(
+                        f,
+                        &label.to_uppercase(),
+                        Point::new(right - 6.0, plot.y + 3.0),
+                        t.ink_muted,
+                        FONT_SMALL,
+                        Alignment::Right,
+                        alignment::Vertical::Top,
+                        MONO,
+                    );
+                }
+            }
+        }
+
         // Stacked area fills, bottom layer first, each edged so neighbours stay separate.
         if panel.is_stacked() {
             let xs = panel.stack_xs(w0, w1);
             for (i, run) in panel.stack_layers(&xs) {
                 let s = &panel.series[i];
-                let alpha = s.fill.map_or(1.0, |fill| fill.alpha);
+                // On the light surface the fills are pastel (about 80 % over white), as the kit draws them.
+                let pastel = if t.bg_200.r > 0.5 { 0.8 } else { 1.0 };
+                let alpha = s.fill.map_or(1.0, |fill| fill.alpha) * pastel;
                 if run.len() < 2 {
                     continue;
                 }
@@ -656,16 +738,6 @@ impl PlotView<'_> {
             put(f, &l.label.to_uppercase(), Point::new(right - 6.0, y - 3.0), color, FONT_SMALL, Alignment::Right, alignment::Vertical::Bottom, MONO);
         }
 
-        // Title, top left inside the plot, on a clear inset so grid and event lines do not strike through it. An editable panel
-        // draws its title as a button after the lines (`draw_chrome`).
-        if panel.editor.is_none() {
-            let title = panel_title(panel);
-            let inset = Size::new(mono_width(title.chars().count(), FONT_TICK) + 8.0 + 2.0, FONT_TICK + 6.0);
-            // From the plot's edge, so no sliver of a line (a dashed reference line at the title's height) shows left of it.
-            f.fill_rectangle(Point::new(plot.x, plot.y + 1.0), inset, t.bg_200);
-            put(f, &title, Point::new(plot.x + 6.0, plot.y + 3.0), t.ink_faint, FONT_TICK, Alignment::Left, alignment::Vertical::Top, MONO);
-        }
-
         // Lines.
         let columns = plot.width as usize;
         for s in panel.series.iter().filter(|s| s.fill.is_none()) {
@@ -682,7 +754,17 @@ impl PlotView<'_> {
                     }
                 }
             });
-            f.stroke(&path, stroke(s.color.resolve(t), 2.0, s.style));
+            f.stroke(&path, stroke(s.color.resolve(t), 1.5, s.style));
+        }
+
+        // Title, top left inside the plot, on a clear inset (drawn over the curves) so no line or grid strikes through it. An
+        // editable panel draws its title as a button after the lines (`draw_chrome`).
+        if panel.editor.is_none() {
+            let title = panel_title(panel);
+            let inset = Size::new(mono_width(title.chars().count(), FONT_TICK) + 8.0 + 2.0, FONT_TICK + 6.0);
+            // From the plot's edge, so no sliver of a line (a dashed reference line at the title's height) shows left of it.
+            f.fill_rectangle(Point::new(plot.x, plot.y + 1.0), inset, t.bg_200);
+            put(f, &title, Point::new(plot.x + 6.0, plot.y + 3.0), t.ink_faint, FONT_TICK, Alignment::Left, alignment::Vertical::Top, MONO);
         }
 
         // Direct labels: margin labels (de-overlapped) and inside labels.
@@ -755,7 +837,10 @@ impl PlotView<'_> {
         for ((panel, plot), &(ylo, yhi)) in self.group.panels.iter().zip(&layout.plots).zip(ranges) {
             let bottom = plot.y + plot.height;
             let ymap = |y: f64| bottom - ((y - ylo) / (yhi - ylo)) as f32 * plot.height;
-            line(f, Point::new(cx, plot.y), Point::new(cx, bottom), Color { a: 0.75, ..t.ink_muted }, 1.0, LineStyle::Solid);
+            // The crosshair stops short of the panel title when it passes through it.
+            let tr = title_rect(panel, *plot);
+            let top = if cx >= tr.x && cx <= tr.x + tr.width { tr.y + tr.height } else { plot.y };
+            line(f, Point::new(cx, top), Point::new(cx, bottom), Color { a: 0.75, ..t.ink_muted }, 1.0, LineStyle::Solid);
 
             // Value precision follows the plot's own scale.
             let step = nice_step(yhi - ylo, 4);
@@ -974,7 +1059,16 @@ impl PlotView<'_> {
         let all = chips(plot, panel);
         let mid = alignment::Vertical::Center;
         let mut limit = plot.x + plot.width;
+        // The title is always a button; `+ series`, up, down and remove show only while the pointer is over this panel (or a
+        // picker is open).
+        let controls = self.pinned || hot.is_some_and(|p| plot.contains(p));
         for chip in &all {
+            if chip.action == PanelAction::AddSeries {
+                limit = chip.rect.x;
+            }
+            if chip.action != PanelAction::Pick && !controls {
+                continue;
+            }
             let over = chip.enabled && hot.is_some_and(|p| chip.rect.contains(p));
             let r = chip.rect;
             let color = match (chip.enabled, over) {
@@ -1009,6 +1103,28 @@ impl PlotView<'_> {
                 PanelAction::Pick => {
                     put(f, &panel_title(panel), Point::new(r.x + 4.0, cy), color, FONT_TICK, Alignment::Left, mid, MONO);
                     chevron(f, r.x + r.width - CHEVRON_W / 2.0 - 1.0, cy, true);
+                    if over {
+                        // Affordance: an underline under the title and a tooltip below it.
+                        let text_w = mono_width(panel_title(panel).chars().count(), FONT_TICK);
+                        line(
+                            f,
+                            Point::new(r.x + 4.0, r.y + r.height - 2.5),
+                            Point::new(r.x + 4.0 + text_w, r.y + r.height - 2.5),
+                            t.ink,
+                            1.0,
+                            LineStyle::Solid,
+                        );
+                        let tip = "Choose what this plot shows";
+                        let w = mono_width(tip.chars().count(), FONT_SMALL) + 2.0 * TAG_PAD;
+                        let origin = Point::new(r.x.round(), (r.y + r.height + 4.0).round());
+                        f.fill_rectangle(origin, Size::new(w, 20.0), t.bg_200);
+                        f.stroke_rectangle(
+                            Point::new(origin.x + 0.5, origin.y + 0.5),
+                            Size::new(w - 1.0, 19.0),
+                            Stroke::default().with_color(t.line_200).with_width(1.0),
+                        );
+                        put(f, tip, Point::new(origin.x + TAG_PAD, origin.y + 10.0), t.ink, FONT_SMALL, Alignment::Left, mid, MONO);
+                    }
                 }
                 PanelAction::AddSeries => put(f, "+ series", Point::new(cx, cy), color, FONT_TICK, Alignment::Center, mid, MONO),
                 PanelAction::MoveUp => chevron(f, cx, cy, false),
@@ -1017,9 +1133,6 @@ impl PlotView<'_> {
                     f.stroke(&Path::line(Point::new(cx - 3.5, cy - 3.5), Point::new(cx + 3.5, cy + 3.5)), stroke);
                     f.stroke(&Path::line(Point::new(cx - 3.5, cy + 3.5), Point::new(cx + 3.5, cy - 3.5)), stroke);
                 }
-            }
-            if chip.action == PanelAction::AddSeries {
-                limit = r.x;
             }
         }
 
@@ -1053,6 +1166,26 @@ impl PlotView<'_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn apogee_label_is_always_placed_and_labels_never_overlap() {
+        // Rail exit, burnout and apogee within a few pixels of each other, the apogee (accent) in the middle.
+        let wants = [
+            LabelWant { px: 10.0, width: 80.0, accent: false },
+            LabelWant { px: 18.0, width: 70.0, accent: false },
+            LabelWant { px: 26.0, width: 70.0, accent: true },
+            LabelWant { px: 400.0, width: 90.0, accent: false },
+        ];
+        let placed = place_event_labels(&wants, 0.0, 500.0);
+        assert!(placed[2].is_some(), "the apogee label must always be drawn");
+        let rects: Vec<(usize, f32, f32)> = placed.iter().zip(&wants).filter_map(|(p, w)| p.map(|(s, r)| (r, s, s + w.width))).collect();
+        for (i, a) in rects.iter().enumerate() {
+            assert!(a.1 >= 0.0 && a.2 <= 500.0, "{a:?} leaves the strip");
+            for b in &rects[i + 1..] {
+                assert!(a.0 != b.0 || a.2 <= b.1 || b.2 <= a.1, "{a:?} overlaps {b:?}");
+            }
+        }
+    }
+
     use super::*;
     use crate::widgets::plot::{Axis, EventMark, Series};
 

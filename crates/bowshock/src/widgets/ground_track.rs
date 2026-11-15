@@ -435,24 +435,13 @@ impl canvas::Program<GroundMessage> for GroundTrackView<'_> {
             }
         }
 
-        // Field radius.
+        // Field radius: the dashed circle; its name is in the bottom-left corner (`corner_marks`), clear of everything else.
         if let Some(radius) = self.data.field_radius {
             let r = radius as f32 * xf.scale;
             f.stroke(
                 &Path::circle(pad, r),
                 Stroke { line_dash: LineDash { segments: &[6.0, 4.0], offset: 0 }, ..Stroke::default().with_color(t.warn).with_width(1.0) },
             );
-            let label = format!("FIELD {} m", fmt_m(radius));
-            let w = text_w(&label, 10.0);
-            let anchors = [-45.0f32, 45.0, -135.0, 135.0, -90.0, 90.0, 0.0, 180.0];
-            let spot = anchors
-                .iter()
-                .map(|a| a.to_radians())
-                .map(|a| Point::new(pad.x + r * a.cos(), pad.y + r * a.sin()))
-                .find(|p| p.x > 8.0 && p.x + w + 8.0 < size.width && p.y > 20.0 && p.y < size.height - 20.0 && !(p.x < 160.0 && p.y < 70.0));
-            if let Some(p) = spot {
-                put(&mut f, &label, Point::new(p.x + 5.0, p.y - 4.0), t.warn, 10.0, Alignment::Left, alignment::Vertical::Bottom);
-            }
         }
 
         // Dispersion: dots and the 95 % ellipse.
@@ -507,13 +496,13 @@ impl canvas::Program<GroundMessage> for GroundTrackView<'_> {
             });
             f.stroke(&path, Stroke::default().with_color(c).with_width(2.0).with_line_cap(LineCap::Round));
         }
-        // Landing labels go on the first side of their marker that touches no track, no other label and not "PAD".
+        // Landing labels: each on the first free spot around its marker (see `place_landing_labels`), joined to the marker by a
+        // leader line when it had to move away.
         let label_h = TEXT_LABEL + 2.0;
         let pad_w = text_w("PAD", 10.0);
-        let mut taken = vec![
-            Rectangle::new(Point::new(pad.x - 3.0 - pad_w - 2.0, pad.y - 7.0 - 12.0), Size::new(pad_w + 4.0, 14.0)),
-            Rectangle::new(Point::new(pad.x - 7.0, pad.y - 7.0), Size::new(14.0, 14.0)),
-        ];
+        let mut reserved = corner_rects(size, self.data.wind, self.data.field_radius.map(|r| format!("FIELD {} m", fmt_m(r))).as_deref());
+        reserved.push(Rectangle::new(Point::new(pad.x - 3.0 - pad_w - 2.0, pad.y - 7.0 - 12.0), Size::new(pad_w + 4.0, 14.0)));
+        reserved.push(Rectangle::new(Point::new(pad.x - 7.0, pad.y - 7.0), Size::new(14.0, 14.0)));
         let mut samples: Vec<Point> = Vec::new();
         for track in &self.data.tracks {
             let screen: Vec<Point> = track.points.iter().map(|p| xf.to_screen(p.east, p.north)).collect();
@@ -526,41 +515,23 @@ impl canvas::Program<GroundMessage> for GroundTrackView<'_> {
             }
             samples.extend(screen.last().copied());
         }
-        let mut placed: Vec<(String, Rectangle)> = Vec::new();
-        for track in &self.data.tracks {
-            let Some(l) = track.landing() else { continue };
-            let at = xf.to_screen(l.east, l.north);
-            let label = landing_label(l.east, l.north);
-            let w = text_w(&label, TEXT_LABEL);
-            let corners = [
-                (at.x + 9.0, at.y - 9.0 - label_h),
-                (at.x - 9.0 - w, at.y - 9.0 - label_h),
-                (at.x + 9.0, at.y + 9.0),
-                (at.x - 9.0 - w, at.y + 9.0),
-                (at.x + 9.0, at.y - label_h / 2.0),
-                (at.x - 9.0 - w, at.y - label_h / 2.0),
-                (at.x - w / 2.0, at.y + 9.0),
-                (at.x - w / 2.0, at.y - 9.0 - label_h),
-                (at.x - 9.0 - w, at.y - 9.0 - label_h * 2.0 - 2.0),
-                (at.x - w / 2.0, at.y - 9.0 - label_h * 2.0 - 2.0),
-                (at.x - 9.0 - w, at.y + 9.0 + label_h + 2.0),
-            ];
-            let fits = |r: &Rectangle| {
-                let grown = Rectangle::new(Point::new(r.x - 2.0, r.y - 2.0), Size::new(r.width + 4.0, r.height + 4.0));
-                r.x >= 0.0
-                    && r.y >= 0.0
-                    && r.x + r.width <= size.width
-                    && r.y + r.height <= size.height
-                    && !samples.iter().any(|p| grown.contains(*p))
-                    && !taken.iter().any(|o| o.intersects(&grown))
-            };
-            let rects: Vec<Rectangle> =
-                corners.iter().map(|&(x, y)| Rectangle::new(Point::new(x.min(size.width - w - 2.0).max(2.0), y), Size::new(w, label_h))).collect();
-            let rect = rects.iter().find(|r| fits(r)).copied().unwrap_or(rects[0]);
-            taken.push(rect);
-            placed.push((label, rect));
-        }
-        for (label, rect) in &placed {
+        let landings: Vec<(Point, String, Color)> = self
+            .data
+            .tracks
+            .iter()
+            .filter_map(|track| {
+                let l = track.landing()?;
+                Some((xf.to_screen(l.east, l.north), landing_label(l.east, l.north), colour(track.color)))
+            })
+            .collect();
+        let items: Vec<(Point, f32)> = landings.iter().map(|(at, label, _)| (*at, text_w(label, TEXT_LABEL))).collect();
+        // A margin at the right edge, where the results column's scrollbar overlays the map.
+        let rects = place_landing_labels(Size::new(size.width - 10.0, size.height), &items, label_h, &samples, &reserved);
+        for ((at, label, c), rect) in landings.iter().zip(&rects) {
+            let near = Point::new(at.x.clamp(rect.x, rect.x + rect.width), at.y.clamp(rect.y, rect.y + rect.height));
+            if near.distance(*at) > 14.0 {
+                f.stroke(&Path::line(*at, near), Stroke::default().with_color(Color { a: 0.7, ..*c }).with_width(1.0));
+            }
             put(&mut f, label, Point::new(rect.x, rect.y + 1.0), t.ink_muted, TEXT_LABEL, Alignment::Left, alignment::Vertical::Top);
         }
         for track in &self.data.tracks {
@@ -592,7 +563,8 @@ impl canvas::Program<GroundMessage> for GroundTrackView<'_> {
             }
         }
 
-        corner_marks(&mut f, t, size, self.data.wind, xf.scale);
+        let field = self.data.field_radius.map(|r| format!("FIELD {} m", fmt_m(r)));
+        corner_marks(&mut f, t, size, self.data.wind, field.as_deref(), xf.scale);
 
         // Hovering a track: a tooltip with time, altitude and distance from the pad.
         if let Some(p) = cursor.position_in(bounds) {
@@ -636,8 +608,90 @@ fn tooltip(f: &mut Frame, t: &Tokens, size: Size, at: Point, text: &str) {
     put(f, text, Point::new(origin.x + 6.0, origin.y + h / 2.0), t.ink, TEXT_LABEL, Alignment::Left, alignment::Vertical::Center);
 }
 
-/// Wind readout (top left), north arrow (top right) and scale bar (bottom right).
-fn corner_marks(f: &mut Frame, t: &Tokens, size: Size, wind: Option<Wind>, px_per_m: f32) {
+/// The corners the marks of `corner_marks` own: the wind block (top left), the north arrow (top right), the scale bar (bottom
+/// right) and the field-radius key (bottom left). Landing labels keep out of them.
+fn corner_rects(size: Size, wind: Option<Wind>, field: Option<&str>) -> Vec<Rectangle> {
+    let mut out = vec![
+        Rectangle::new(Point::new(size.width - 36.0, 0.0), Size::new(36.0, 52.0)),
+        Rectangle::new(Point::new(size.width - 140.0, size.height - 30.0), Size::new(140.0, 30.0)),
+    ];
+    if wind.is_some() {
+        let w = text_w("0.0 m/s · 000°", TEXT_LABEL).max(60.0) + 20.0;
+        out.push(Rectangle::new(Point::ORIGIN, Size::new(w, 70.0)));
+    }
+    if let Some(label) = field {
+        out.push(Rectangle::new(Point::new(0.0, size.height - 24.0), Size::new(text_w(label, 10.0) + 38.0, 24.0)));
+    }
+    out
+}
+
+/// Places a label `(marker, width)` per landing, `height` tall, as rectangles inside `size`: on the first of the positions around
+/// its marker that touches no track `samples`, no `reserved` rectangle and no earlier label; failing that, in a column of rows
+/// beside the marker where only the reserved rectangles and the other labels are avoided.
+fn place_landing_labels(size: Size, items: &[(Point, f32)], height: f32, samples: &[Point], reserved: &[Rectangle]) -> Vec<Rectangle> {
+    let mut taken: Vec<Rectangle> = reserved.to_vec();
+    let mut out: Vec<Rectangle> = Vec::new();
+    for &(at, w) in items {
+        let clamp =
+            |x: f32, y: f32| Rectangle::new(Point::new(x.min(size.width - w - 2.0).max(2.0), y.min(size.height - height - 2.0).max(2.0)), Size::new(w, height));
+        let near = [
+            (at.x + 9.0, at.y - 9.0 - height),
+            (at.x - 9.0 - w, at.y - 9.0 - height),
+            (at.x + 9.0, at.y + 9.0),
+            (at.x - 9.0 - w, at.y + 9.0),
+            (at.x + 9.0, at.y - height / 2.0),
+            (at.x - 9.0 - w, at.y - height / 2.0),
+            (at.x - w / 2.0, at.y + 9.0),
+            (at.x - w / 2.0, at.y - 9.0 - height),
+            (at.x - 9.0 - w, at.y - 9.0 - height * 2.0 - 2.0),
+            (at.x - w / 2.0, at.y - 9.0 - height * 2.0 - 2.0),
+            (at.x - 9.0 - w, at.y + 9.0 + height + 2.0),
+        ];
+        let rows = (0..10).flat_map(|k| {
+            let dy = k as f32 * (height + 2.0);
+            [
+                (at.x + 14.0, at.y + 9.0 + dy),
+                (at.x - 14.0 - w, at.y + 9.0 + dy),
+                (at.x + 14.0, at.y - 9.0 - height - dy),
+                (at.x - 14.0 - w, at.y - 9.0 - height - dy),
+            ]
+        });
+        let clear = |r: &Rectangle, avoid_tracks: bool| {
+            let grown = Rectangle::new(Point::new(r.x - 2.0, r.y - 2.0), Size::new(r.width + 4.0, r.height + 4.0));
+            r.x >= 0.0
+                && r.y >= 0.0
+                && r.x + r.width <= size.width
+                && r.y + r.height <= size.height
+                && !(avoid_tracks && samples.iter().any(|p| grown.contains(*p)))
+                && !taken.iter().any(|o| o.intersects(&grown))
+        };
+        let rect = near
+            .iter()
+            .map(|&(x, y)| clamp(x, y))
+            .find(|r| clear(r, true))
+            .or_else(|| near.iter().map(|&(x, y)| clamp(x, y)).find(|r| clear(r, false)))
+            .or_else(|| rows.map(|(x, y)| clamp(x, y)).find(|r| clear(r, false)))
+            .unwrap_or_else(|| clamp(near[0].0, near[0].1));
+        taken.push(rect);
+        out.push(rect);
+    }
+    out
+}
+
+/// Wind readout (top left), north arrow (top right), field-radius key (bottom left) and scale bar (bottom right).
+fn corner_marks(f: &mut Frame, t: &Tokens, size: Size, wind: Option<Wind>, field: Option<&str>, px_per_m: f32) {
+    // Only the text corners get a backing, so a ring or the field circle never strikes through them.
+    for r in corner_rects(size, wind, field).into_iter().skip(2) {
+        f.fill_rectangle(r.position(), r.size(), Color { a: 0.85, ..t.bg_200 });
+    }
+    if let Some(label) = field {
+        let y = size.height - 12.0;
+        f.stroke(
+            &Path::line(Point::new(10.0, y), Point::new(30.0, y)),
+            Stroke { line_dash: LineDash { segments: &[6.0, 4.0], offset: 0 }, ..Stroke::default().with_color(t.warn).with_width(1.0) },
+        );
+        put(f, label, Point::new(36.0, y), t.warn, 10.0, Alignment::Left, alignment::Vertical::Center);
+    }
     if let Some(w) = wind {
         put(f, "WIND", Point::new(10.0, 8.0), t.ink_faint, 10.0, Alignment::Left, alignment::Vertical::Top);
         put(
@@ -694,6 +748,32 @@ fn corner_marks(f: &mut Frame, t: &Tokens, size: Size, wind: Option<Wind>, px_pe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn landing_labels_never_intersect_each_other_or_the_corner_marks() {
+        let size = Size::new(340.0, 300.0);
+        let wind = Some(Wind { speed: 2.2, from_deg: 250.0 });
+        let reserved = corner_rects(size, wind, Some("FIELD 300 m"));
+        // Landing points almost on top of each other, one near the north arrow, one near the wind block.
+        let items = [
+            (Point::new(200.0, 140.0), 90.0),
+            (Point::new(204.0, 142.0), 90.0),
+            (Point::new(206.0, 138.0), 90.0),
+            (Point::new(330.0, 30.0), 90.0),
+            (Point::new(20.0, 30.0), 90.0),
+        ];
+        let rects = place_landing_labels(size, &items, 13.0, &[], &reserved);
+        assert_eq!(rects.len(), items.len());
+        for (i, a) in rects.iter().enumerate() {
+            assert!(a.x >= 0.0 && a.y >= 0.0 && a.x + a.width <= size.width && a.y + a.height <= size.height, "{a:?} leaves the plot");
+            for r in &reserved {
+                assert!(!a.intersects(r), "label {a:?} on a corner mark {r:?}");
+            }
+            for b in &rects[i + 1..] {
+                assert!(!a.intersects(b), "labels {a:?} and {b:?} intersect");
+            }
+        }
+    }
 
     fn pt(t: f64, e: f64, n: f64, alt: f64) -> TrackPoint {
         TrackPoint { t, east: e, north: n, alt }

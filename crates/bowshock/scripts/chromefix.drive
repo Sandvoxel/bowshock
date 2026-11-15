@@ -1,0 +1,32 @@
+# ChromeFix QA: cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/chromefix.drive /tmp/cf
+viewport 1280x800
+scale 1
+screenshot topbar-dark.png
+click "CONFIG"
+screenshot menu-dark.png
+click "New configuration…"
+screenshot picker-dark.png
+click "Cancel"
+click (923, 624)
+screenshot fin-selected-dark.png
+click "Detach"
+screenshot detached-dark.png
+click "Light"
+screenshot detached-light.png
+click "CONFIG"
+click "New configuration…"
+screenshot picker-light.png
+click "Cancel"
+# Insertion ghost over a labelled bar: the bar's label under it is hidden.
+press (160, 360)
+move (200, 380)
+move (500, 500)
+move (850, 590)
+move (860, 596)
+screenshot ghost-dark.png
+release (860, 596)
+# Rocket inspector (nothing selected): ruled Name / Designer fields, ballast in the Configuration section.
+click (400, 150)
+screenshot rocket-light.png
+click "Dark"
+screenshot rocket-dark.png

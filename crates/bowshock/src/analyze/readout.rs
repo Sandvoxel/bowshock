@@ -40,17 +40,24 @@ pub struct Row {
     pub help: Option<&'static str>,
     /// The row's share of the section's total (`44%`), muted before the value (drag sources).
     pub share: Option<String>,
+    /// A secondary row: label and value in muted ink (the full-range extreme beside the in-flight worst case).
+    pub muted: bool,
 }
 
 impl Row {
     fn new(label: impl Into<String>, value: impl Into<String>, unit: impl Into<String>) -> Self {
         let label = label.into();
         let help = help(&label);
-        Row { label, value: value.into(), unit: unit.into(), swatch: None, tag: None, big: false, help, share: None }
+        Row { label, value: value.into(), unit: unit.into(), swatch: None, tag: None, big: false, help, share: None, muted: false }
     }
 
     fn share(mut self, of_total: f64) -> Self {
         self.share = Some(format!("{:.0}%", 100.0 * of_total));
+        self
+    }
+
+    fn muted(mut self) -> Self {
+        self.muted = true;
         self
     }
 
@@ -114,7 +121,8 @@ pub fn help(label: &str) -> Option<&'static str> {
         "CG liftoff" => "Centre of gravity from the nose tip with the motors loaded.",
         "CG burnout" => "Centre of gravity from the nose tip once the motors have burned out.",
         "CNα" => "How much side force the rocket makes per radian of angle of attack; higher = stronger restoring push.",
-        "Min margin" => "The least stable point of the sweep, and the Mach (or angle) where it happens.",
+        "Min margin" => "The least stable point of the sweep, and the Mach (or angle) where it happens. The chip's colour is the stability band: green stable, amber marginal, red unstable or over-stable.",
+        "full range" => "The least stable point of the whole sweep. Part of it lies beyond the Mach this configuration actually reaches in flight, so it is shown for reference only.",
         "Max margin" => "The most stable point of the sweep. Above about 3 calibers the rocket may weathercock into the wind.",
         "Peak Cd" => "The highest drag coefficient of the sweep, usually just above Mach 1 where the transonic drag rise peaks.",
         "Normal force CN" => "Side-force coefficient at this angle of attack (CNα times the angle, plus body lift).",
@@ -288,8 +296,13 @@ fn mach(out: &Output, run: &Run, points: &[MachPoint], x: f64, units: UnitSystem
     }
 
     let by_margin = |a: &&MachPoint, b: &&MachPoint| a.margin_cal.total_cmp(&b.margin_cal);
-    let (lo, hi) = (points.iter().min_by(by_margin), points.iter().max_by(by_margin));
-    let peak = points.iter().max_by(|a, b| a.drag.total.total_cmp(&b.drag.total));
+    let (m0, m1) = (points.first().map_or(0.0, |p| p.mach), points.last().map_or(0.0, |p| p.mach));
+    // The worst case is judged where the rocket actually flies: up to the nominal flight's maximum Mach, when it has one inside
+    // the sweep. The full-range extreme follows as a secondary muted row.
+    let envelope = run.max_mach.filter(|m| *m > m0 && *m < m1);
+    let flown: Vec<&MachPoint> = points.iter().filter(|p| envelope.is_none_or(|m| p.mach <= m + 1e-9)).collect();
+    let (lo, hi) = (flown.iter().copied().min_by(by_margin), flown.iter().copied().max_by(by_margin));
+    let peak = flown.iter().copied().max_by(|a, b| a.drag.total.total_cmp(&b.drag.total));
     let mut worst = Vec::new();
     if let Some(p) = lo {
         worst.push(Row::new("Min margin", cal(p.margin_cal), "cal").tag(Tag::Chip(severity(out.bands, p.margin_cal), format!("M {:.1}", p.mach))));
@@ -300,9 +313,22 @@ fn mach(out: &Output, run: &Run, points: &[MachPoint], x: f64, units: UnitSystem
     if let Some(p) = peak {
         worst.push(Row::new("Peak Cd", cd(p.drag.total), "").tag(Tag::Plain(format!("M {:.2}", p.mach))));
     }
-    let (m0, m1) = (points.first().map_or(0.0, |p| p.mach), points.last().map_or(0.0, |p| p.mach));
+    let title = match envelope {
+        Some(m) => {
+            let first = flown.first().map_or(m0, |p| p.mach);
+            if let Some(p) = points.iter().min_by(by_margin) {
+                if lo.is_some_and(|l| (l.mach - p.mach).abs() > 1e-9) {
+                    worst.push(
+                        Row::new("full range", cal(p.margin_cal), "cal").tag(Tag::Chip(severity(out.bands, p.margin_cal), format!("M {:.1}", p.mach))).muted(),
+                    );
+                }
+            }
+            format!("Worst case · in flight {first:.1} – {m:.2}")
+        }
+        None => format!("Worst case {m0:.1} – {m1:.1}"),
+    };
     let drag = Section { title: "Drag".into(), rows: drag };
-    let worst = Section { title: format!("Worst case {m0:.1} – {m1:.1}"), rows: worst };
+    let worst = Section { title, rows: worst };
     // The drag breakdown analysis reads drag first; the others read stability first.
     let sections = if out.analysis == Analysis::Drag { vec![drag, stability, worst] } else { vec![stability, drag, worst] };
     Readout { cursor: format!("M {x:.2}"), sections }
@@ -463,7 +489,8 @@ mod tests {
         let r = readout(&o, Some(1.1), id, UnitSystem::MmGS);
         assert_eq!(r.cursor, "M 1.10");
         let titles: Vec<&str> = r.sections.iter().map(|s| s.title.as_str()).collect();
-        assert_eq!(titles, ["Stability", "Drag", "Worst case 0.1 – 3.0"]);
+        let flight_mach = active_run(&o, id).unwrap().max_mach.expect("the example flies");
+        assert_eq!(titles, ["Stability", "Drag", &format!("Worst case · in flight 0.1 – {flight_mach:.2}")]);
         let margin: f64 = r.sections[0].rows[0].value.parse().unwrap();
         let at = mach_at(
             match &active_run(&o, id).unwrap().data {
@@ -480,6 +507,15 @@ mod tests {
         let total: f64 = rows[0].value.parse().unwrap();
         assert!((sum - total).abs() < 0.0035, "{sum} vs {total}");
         assert!(r.sections[2].rows.iter().any(|row| matches!(&row.tag, Some(Tag::Chip(..)))));
+        // The worst case is judged within the flight envelope; the full-range minimum follows as a secondary muted row.
+        let worst = &r.sections[2];
+        let flight_mach = active_run(&o, id).unwrap().max_mach.expect("the example flies");
+        assert_eq!(worst.title, format!("Worst case · in flight 0.1 – {flight_mach:.2}"));
+        let full = worst.rows.last().unwrap();
+        assert!(full.muted && full.label == "full range");
+        let min_in_flight: f64 = worst.rows[0].value.parse().unwrap();
+        let min_full: f64 = full.value.parse().unwrap();
+        assert!(min_full <= min_in_flight, "{min_full} vs {min_in_flight}");
     }
 
     #[test]

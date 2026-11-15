@@ -1,0 +1,7 @@
+# BOWSHOCK_EXAMPLE=two_stage cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/chromefix-staged.drive /tmp/cf2
+viewport 1280x800
+scale 1
+click (733, 700)
+screenshot staged-dark.png
+click "Light"
+screenshot staged-light.png

@@ -21,6 +21,7 @@ mod geometry;
 mod menu;
 mod pods;
 mod scene;
+pub(crate) use scene::remaining_copies;
 
 use std::cell::RefCell;
 

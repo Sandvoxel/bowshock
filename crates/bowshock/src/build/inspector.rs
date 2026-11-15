@@ -118,6 +118,10 @@ pub enum Message {
     MotorMount(bool),
     /// Plug the motor of this mount (no ejection charge) in the active configuration.
     Plug(bool),
+    /// The active configuration's ballast mass (kg); zero removes it (Rocket inspector, Configuration section).
+    BallastMass(f64),
+    /// The station of the active configuration's ballast, from the nose tip (m).
+    BallastStation(f64),
     /// What a staging event waits for (`(stage, which event, choice)`), in the active configuration.
     StageOn(usize, EventKind, StageOn),
     /// *Override…*: give the mass or CG an explicit value, starting from the computed one.
@@ -126,6 +130,8 @@ pub enum Message {
     ClearOverride(Field),
     /// Open or close the notes section.
     NotesOpen(bool),
+    /// Open or close a fin set's fillet rows (its radius and material).
+    FilletOpen(bool),
     /// The part's note.
     Note(String),
     /// Double-click on the name.
@@ -191,6 +197,8 @@ pub struct State {
     menu: Option<Selection>,
     /// Whether the notes section is open.
     notes_open: bool,
+    /// A fin set's fillet rows the user opened or closed (open by default when the fillet is not 0).
+    fillet_open: Option<(PartId, bool)>,
     /// The anchor the user chose for a part's offset.
     anchor: Option<(PartId, Anchor)>,
     /// The field whose *Unlink for this fin* / *Relink field* menu is open: the group, the copy and the field.
@@ -300,6 +308,11 @@ impl State {
             }
             Message::MenuOpen(open) => self.menu = open.then_some(ctx.selection),
             Message::NotesOpen(open) => self.notes_open = open,
+            Message::FilletOpen(open) => {
+                if let Selection::Part(id) = ctx.selection {
+                    self.fillet_open = Some((id, open));
+                }
+            }
             Message::NextInstance => {
                 if let Selection::Part(id) = ctx.selection {
                     let next = ctx.symmetry.copy_in(ctx.doc.rocket(), id) + 1;
@@ -327,6 +340,22 @@ impl State {
             }
             Message::RocketDesigner(designer) => {
                 ctx.doc.edit_merging("Edit designer", "rocket:designer", |r| r.designer = designer);
+            }
+            Message::BallastMass(mass) => {
+                ctx.doc.edit("Edit ballast", |r| {
+                    // The first ballast goes in the nose, where it helps stability most.
+                    let station = r.active_configuration().ballast.map_or(0.1 * r.length(), |b| b.station);
+                    let config = r.active_config_id();
+                    let _ = r.set_ballast(config, Some(bowshock_model::Ballast { mass, station }));
+                });
+            }
+            Message::BallastStation(station) => {
+                ctx.doc.edit("Move ballast", |r| {
+                    let config = r.active_config_id();
+                    if let Some(b) = r.active_configuration().ballast {
+                        let _ = r.set_ballast(config, Some(bowshock_model::Ballast { station, ..b }));
+                    }
+                });
             }
             Message::Band(band, value) => {
                 ctx.doc.edit_merging("Edit stability limit", "rocket:bands", |r| {
@@ -693,9 +722,14 @@ impl State {
             _ => {
                 let mut cells: Vec<Element<'a, Message>> =
                     vec![text(part.name()).font(SANS_SEMIBOLD).size(type_scale::UI_TITLE.size).style(theme::ink).boxed()];
-                if rocket.radial(id).is_some_and(|r| r.count > 1 && !r.kind.is_pod()) {
-                    let letter = bowshock_model::instance_letter(ctx.symmetry.copy_in(rocket, id));
-                    let tag = text(format!(" · {letter}")).font(SANS_SEMIBOLD).size(type_scale::UI_TITLE.size).style(theme::ink);
+                if let Some(r) = rocket.radial(id).filter(|r| r.count > 1 && !r.kind.is_pod()) {
+                    // A group that lost a copy names the letters it has left (`Fin set ×2 · A, C`); else the copy on show.
+                    let left = crate::build::lanes::remaining_copies(r);
+                    let label = match left.trim().strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
+                        Some(letters) => format!(" ×{} · {letters}", r.count),
+                        None => format!(" · {}", bowshock_model::instance_letter(ctx.symmetry.copy_in(rocket, id))),
+                    };
+                    let tag = text(label).font(SANS_SEMIBOLD).size(type_scale::UI_TITLE.size).style(theme::ink);
                     cells.push(mouse_area(tag).on_press(Message::NextInstance).interaction(mouse::Interaction::Pointer).boxed());
                 }
                 mouse_area(row(cells).align_y(iced::Center)).on_double_click(Message::StartRename).boxed()

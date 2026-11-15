@@ -599,6 +599,9 @@ pub struct PlotGroup {
     pub x_range: Option<(f64, f64)>,
     /// How the y ticks of every panel are chosen.
     pub y_ticks: YTicks,
+    /// Shade the x range from this value to the end of the axis as lying outside the flown envelope, labelled with the text
+    /// (`beyond flight · M 0.53`) at the top of the first panel.
+    pub beyond: Option<(f64, String)>,
 }
 
 impl PlotGroup {
@@ -614,6 +617,7 @@ impl PlotGroup {
             right_margin: 0.0,
             x_range: None,
             y_ticks: YTicks::Nice,
+            beyond: None,
         }
     }
 
@@ -926,6 +930,13 @@ fn crumb<'a>(label: String, level: usize, current: bool) -> Element<'a, PlotMess
 /// and on the right the hover x with the key hints, or, while a band is showing, its range and width in `accent`
 /// (`2.10 – 4.80 s · Δ 2.70 s`).
 pub fn header<'a>(group: &PlotGroup, state: &PlotState) -> Element<'a, PlotMessage> {
+    let (crumbs, hint) = header_parts(group, state, false);
+    row![crumbs, Space::new().width(Length::Fill), hint].spacing(tokens::SPACE_3).align_y(iced::Center).boxed()
+}
+
+/// The two halves of [`header`]: the zoom breadcrumb and the hints, for a screen that puts its own controls between them
+/// (Simulate's plot presets). `compact` shortens the idle hint to its key caps.
+pub fn header_parts<'a>(group: &PlotGroup, state: &PlotState, compact: bool) -> (Element<'a, PlotMessage>, Element<'a, PlotMessage>) {
     let last = state.depth() - 1;
     let mut crumbs: Vec<Element<'a, PlotMessage>> = Vec::new();
     for (i, (lo, hi)) in state.levels().iter().enumerate() {
@@ -944,19 +955,25 @@ pub fn header<'a>(group: &PlotGroup, state: &PlotState) -> Element<'a, PlotMessa
         hint.push(keycap("Esc"));
         hint.push(mono("clear", tokens::TEXT_LABEL, |t| t.ink_muted));
     } else {
-        if let Some(x) = state.hover_x() {
-            hint.push(mono(format!("hover {}", group.x.format(x)), tokens::TEXT_LABEL, |t| t.ink_muted));
+        // Compact (Simulate's shared row): only the key caps; the hover value is in the plots' tags.
+        if !compact {
+            if let Some(x) = state.hover_x() {
+                hint.push(mono(format!("hover {}", group.x.format(x)), tokens::TEXT_LABEL, |t| t.ink_muted));
+            }
+            hint.push(mono("drag x to select ·", tokens::TEXT_LABEL, |t| t.ink_faint));
         }
-        hint.push(mono("drag x to select ·", tokens::TEXT_LABEL, |t| t.ink_faint));
-        hint.push(keycap("Enter"));
-        hint.push(mono("zoom ·", tokens::TEXT_LABEL, |t| t.ink_faint));
+        // Compact and zoomed: the breadcrumb is long, so only the way back.
+        if !(compact && state.depth() > 1) {
+            hint.push(keycap("Enter"));
+            hint.push(mono("zoom ·", tokens::TEXT_LABEL, |t| t.ink_faint));
+        }
         hint.push(keycap("Esc"));
         hint.push(mono("back", tokens::TEXT_LABEL, |t| t.ink_faint));
     }
 
-    let crumbs = row(crumbs).spacing(tokens::SPACE_2).align_y(iced::Center);
-    let hint = row(hint).spacing(tokens::SPACE_2).align_y(iced::Center);
-    row![crumbs, Space::new().width(Length::Fill), hint].spacing(tokens::SPACE_3).align_y(iced::Center).boxed()
+    let crumbs = row(crumbs).spacing(tokens::SPACE_2).align_y(iced::Center).boxed();
+    let hint = row(hint).spacing(tokens::SPACE_2).align_y(iced::Center).boxed();
+    (crumbs, hint)
 }
 
 /// A legend row: a filled colour square and the name, per item, in text colours (never the series colour).

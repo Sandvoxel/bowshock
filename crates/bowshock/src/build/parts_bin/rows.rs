@@ -231,14 +231,43 @@ impl<Message> canvas::Program<Message> for Silhouette {
     }
 }
 
+/// Characters of the size line that fit a row (mono at the label size).
+const SIZE_LINE_CHARS: usize = 25;
+
+/// The reason a row is unavailable in a few words, for the dimmed row itself (empty for a reason that has no short form).
+fn short_reason(reason: &str) -> &'static str {
+    if reason.starts_with("A rocket has one nose cone") {
+        "already has a nose"
+    } else if reason.starts_with("Nothing in the stack") {
+        "nothing to attach to"
+    } else if reason.starts_with("Payload bay needs") {
+        "needs a coupler"
+    } else if reason.starts_with("Needs an airframe") {
+        "needs an airframe"
+    } else if reason.starts_with("Needs a body tube") {
+        "needs a body tube"
+    } else {
+        ""
+    }
+}
+
 /// One ruled row: silhouette, name, size line. A press starts a drag or click; an unavailable row shows its reason in a tooltip.
 pub fn entry<'a>(view: RowView) -> Element<'a, Message> {
     let RowView { id, name, size, sil, state, reason, deletable } = view;
     let alpha = if state == RowState::Unavailable { UNAVAILABLE } else { 1.0 };
     let name = text(name).size(TEXT_BODY).style(move |theme: &Theme| text::Style { color: Some(theme::tokens(theme).ink.scale_alpha(alpha)), selection: None });
-    let size = text(size)
+    // A dimmed row says why in a few words after its size, or in the size's place when both do not fit the row (the full reason
+    // is in the tooltip).
+    let short = if state == RowState::Unavailable { short_reason(&reason) } else { "" };
+    let line = match (short.is_empty(), size.chars().count() + 3 + short.chars().count() <= SIZE_LINE_CHARS) {
+        (true, _) => size,
+        (false, true) => format!("{size} · {short}"),
+        (false, false) => short.to_string(),
+    };
+    let size = text(line)
         .font(MONO)
         .size(TEXT_LABEL)
+        .wrapping(iced::widget::text::Wrapping::None)
         .style(move |theme: &Theme| text::Style { color: Some(theme::tokens(theme).ink_muted.scale_alpha(alpha)), selection: None });
     let silhouette = canvas_widget(Silhouette { sil, alpha }).width(SILHOUETTE.0).height(SILHOUETTE.1);
     let content = row![silhouette, column![name, size].spacing(2)].spacing(SPACE_2).align_y(Center);

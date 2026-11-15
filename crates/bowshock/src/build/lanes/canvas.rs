@@ -129,6 +129,8 @@ struct Paint<'a> {
     rows: &'a [LaneBox],
     /// The part being dragged, if any.
     moving: Option<PartId>,
+    /// The insertion ghost of a part being carried, if any: the bar labels under it are not drawn.
+    ghost: Option<Rectangle>,
 }
 
 /// `c` as it is drawn for a part that has dropped away (30 %).
@@ -212,6 +214,22 @@ fn dotted<'a>(color: Color) -> Stroke<'a> {
 
 fn dashed<'a>(color: Color) -> Stroke<'a> {
     Stroke { line_dash: LineDash { segments: &[3.0, 2.0], offset: 0 }, ..Stroke::default().with_color(color).with_width(1.0) }
+}
+
+/// [`vline`] broken wherever it would cross one of `gaps` (a 2 px margin each side).
+fn vline_gapped(frame: &mut Frame, x: f32, y0: f32, y1: f32, stroke: Stroke, gaps: &[Rectangle]) {
+    let mut cuts: Vec<(f32, f32)> = gaps.iter().filter(|g| x >= g.x && x <= g.x + g.width).map(|g| (g.y - 2.0, g.y + g.height + 2.0)).collect();
+    cuts.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut from = y0;
+    for (a, b) in cuts {
+        if a > from {
+            vline(frame, x, from, a.min(y1), stroke);
+        }
+        from = from.max(b);
+    }
+    if from < y1 {
+        vline(frame, x, from, y1, stroke);
+    }
 }
 
 fn vline(frame: &mut Frame, x: f32, y0: f32, y1: f32, stroke: Stroke) {
@@ -679,12 +697,14 @@ impl Lanes<'_> {
                 f.stroke(&Path::line(Point::new(LABEL_W, y.floor() + 0.5), Point::new(size.width, y.floor() + 0.5)), dotted(t.line_100));
             }
         }
+        // Where bar labels sit: the separation, CG and CP lines are broken there so they never cross text.
+        let labels = self.label_boxes(axis, rows);
 
         // Separation lines run through every lane (and the ruler); one can be selected but not dragged.
         for sep in &self.scene.seps {
             let selected = self.selection == Selection::Separation(sep.stage);
             let color = if selected { t.accent } else { t.line_200 };
-            vline(f, axis.px(sep.station), 0.0, foot, dashed(color));
+            vline_gapped(f, axis.px(sep.station), 0.0, foot, dashed(color), &labels);
         }
 
         // Harness lines, then bars: other configurations' motors, regular bars, then short ones on top.
@@ -697,7 +717,8 @@ impl Lanes<'_> {
             }
         }
         self.draw_pod_lines(f, t, rows, pods);
-        let paint = Paint { t, axis, rows, moving: if let Mode::Moving { id, .. } | Mode::Resizing { id, .. } = state.mode { Some(id) } else { None } };
+        let ghost = self.carry.as_ref().and_then(|c| self.ghost_rect(c, axis, rows, state));
+        let paint = Paint { t, axis, rows, ghost, moving: if let Mode::Moving { id, .. } | Mode::Resizing { id, .. } = state.mode { Some(id) } else { None } };
         for i in geometry::paint_order(&self.scene) {
             let bar = &self.scene.bars[i];
             if let Some(rect) = geometry::bar_rect(bar, rows, axis) {
@@ -737,10 +758,10 @@ impl Lanes<'_> {
             let (show_cg, show_cp) = self.show;
             let both = show_cg && show_cp;
             if show_cg {
-                vline(f, cg_x, RULER_H, size.height - 12.0, dotted(t.cg));
+                vline_gapped(f, cg_x, RULER_H, size.height - 12.0, dotted(t.cg), &labels);
             }
             if show_cp {
-                vline(f, cp_x, RULER_H, size.height - 12.0, dotted(t.cp));
+                vline_gapped(f, cp_x, RULER_H, size.height - 12.0, dotted(t.cp), &labels);
             }
             let bands = self.rocket.stability_bands();
             let color = if marks.margin >= bands.stable {
@@ -834,7 +855,7 @@ impl Lanes<'_> {
     }
 
     fn draw_bar(&self, f: &mut Frame, paint: &Paint, bar: &Bar, rect: Rectangle) {
-        let Paint { t, axis, rows, moving } = *paint;
+        let Paint { t, axis, rows, moving, .. } = *paint;
         let dim = |c: Color| faded(c, bar.dropped);
         let (fill, edge) = lane_colors(t, bar.system);
         let selected = self.parts.contains(&bar.part()) && !bar.alt;
@@ -913,9 +934,22 @@ impl Lanes<'_> {
         let (ink, faint) = (dim(t.ink), dim(t.ink_faint));
         let mid = rect.y + rect.height / 2.0;
         let right = rect.x + rect.width;
-        let name_w = sans_w(&bar.name, TEXT_BAR);
+        // A group that lost a copy is `Fins ×2 (A, C)`: the name and link glyph go in the bar like any group's, and the letters
+        // after them when there is room, else just beyond the bar's aft edge.
+        let (base_name, letters) = match bar.name.rfind(" (") {
+            Some(i) if bar.count > 1 && bar.name.ends_with(')') => (&bar.name[..i], &bar.name[i + 1..]),
+            _ => (bar.name.as_str(), ""),
+        };
+        let name_w = sans_w(base_name, TEXT_BAR);
+        let letters_w = if letters.is_empty() { 0.0 } else { text_w(letters, TEXT_SMALL, MONO) + 6.0 };
         let link_w = if bar.count > 1 { 13.0 } else { 0.0 };
         let need_name = link_w + name_w;
+        // Under the insertion ghost a bar's label would overprint the ghost's own: the ghost hides it.
+        let label_span =
+            (name_w + link_w + 12.0 + if bar.dim.is_empty() { 0.0 } else { text_w(&bar.dim, TEXT_SMALL, MONO) + 6.0 }).min(right - rect.x.max(LABEL_W));
+        if paint.ghost.is_some_and(|g| g.intersects(&Rectangle { x: rect.x.max(LABEL_W), y: rect.y, width: label_span, height: rect.height })) {
+            return;
+        }
         let dim_w = if bar.dim.is_empty() { 0.0 } else { text_w(&bar.dim, TEXT_SMALL, MONO) + 6.0 };
         let mut x = rect.x.max(LABEL_W) + 5.0;
         if !bar.thin {
@@ -938,6 +972,37 @@ impl Lanes<'_> {
         let link_w = if bar.count > 1 && avail >= link_w + name_w + 4.0 { link_w } else { 0.0 };
         let need_name = link_w + name_w;
         if !bar.dashed && avail >= need_name - 1.0 {
+            // A bar that short blocks (rings, couplers) cut into segments names each segment that has room, so none reads as an
+            // unnamed part; a segment too small stays part of the bar by sharing its fill and outline.
+            if !bar.thin {
+                let mut cuts: Vec<(f32, f32)> = self
+                    .scene
+                    .bars
+                    .iter()
+                    .filter(|o| o.thin && !o.alt && o.system == bar.system && o.sub == bar.sub)
+                    .map(|o| axis.span(o.start, o.end))
+                    .filter(|&(a, b)| b > rect.x && a < right)
+                    .collect();
+                cuts.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let mut cursor = rect.x.max(LABEL_W);
+                let mut segments: Vec<(f32, f32)> = Vec::new();
+                for (a, b) in cuts {
+                    if a > cursor {
+                        segments.push((cursor, a));
+                    }
+                    cursor = cursor.max(b);
+                }
+                if right > cursor {
+                    segments.push((cursor, right));
+                }
+                for (a, b) in segments.into_iter().filter(|&(a, _)| a >= x + need_name + letters_w) {
+                    if b - a >= name_w + 12.0 {
+                        f.with_clip(Rectangle { x: a, y: rect.y, width: b - a, height: rect.height }, |f| {
+                            put(f, base_name, Point::new(a + 5.0, mid), ink, TEXT_BAR, SANS, Alignment::Left, alignment::Vertical::Center);
+                        });
+                    }
+                }
+            }
             let mut tx = x;
             if link_w > 0.0 {
                 link(f, Point::new(tx, mid - 3.5), if selected { dim(t.accent) } else { ink });
@@ -945,17 +1010,51 @@ impl Lanes<'_> {
             }
             // A group's per-copy overrides are listed in mono after its name (`B: cant`), in the `warn` colour.
             let ovr_w = if bar.overrides.is_empty() { 0.0 } else { text_w(&bar.overrides, TEXT_SMALL, MONO) + 6.0 };
-            let ovr_w = if avail >= need_name + ovr_w + 2.0 { ovr_w } else { 0.0 };
+            let letters_in = letters_w > 0.0 && avail >= need_name + letters_w + 2.0;
+            let letters_w = if letters_in { letters_w } else { 0.0 };
+            let ovr_w = if avail >= need_name + letters_w + ovr_w + 2.0 { ovr_w } else { 0.0 };
             f.with_clip(Rectangle { x: x - 1.0, y: rect.y, width: avail, height: rect.height }, |f| {
-                put(f, &bar.name, Point::new(tx, mid), ink, TEXT_BAR, SANS, Alignment::Left, alignment::Vertical::Center);
-                if ovr_w > 0.0 {
-                    put(f, &bar.overrides, Point::new(tx + name_w + 6.0, mid), dim(t.warn), TEXT_SMALL, MONO, Alignment::Left, alignment::Vertical::Center);
+                put(f, base_name, Point::new(tx, mid), ink, TEXT_BAR, SANS, Alignment::Left, alignment::Vertical::Center);
+                if letters_in {
+                    put(f, letters, Point::new(tx + name_w + 6.0, mid), dim(t.ink_muted), TEXT_SMALL, MONO, Alignment::Left, alignment::Vertical::Center);
                 }
-                let at = tx + name_w + ovr_w;
-                if dim_w > 0.0 && avail >= need_name + ovr_w + dim_w + 2.0 && !self.thin_over(bar, axis, at + 4.0, at + 6.0 + dim_w) {
+                if ovr_w > 0.0 {
+                    put(
+                        f,
+                        &bar.overrides,
+                        Point::new(tx + name_w + letters_w + 6.0, mid),
+                        dim(t.warn),
+                        TEXT_SMALL,
+                        MONO,
+                        Alignment::Left,
+                        alignment::Vertical::Center,
+                    );
+                }
+                let at = tx + name_w + letters_w + ovr_w;
+                if dim_w > 0.0 && avail >= need_name + letters_w + ovr_w + dim_w + 2.0 && !self.thin_over(bar, axis, at + 4.0, at + 6.0 + dim_w) {
                     put(f, &bar.dim, Point::new(at + 6.0, mid), faint, TEXT_SMALL, MONO, Alignment::Left, alignment::Vertical::Center);
                 }
             });
+            if !letters.is_empty() && !letters_in {
+                if let Some(lane) = rows.iter().find(|l| l.lane.system == bar.system) {
+                    let (row_y, _) = lane.row(bar.sub);
+                    let (lx, w) = (right + 4.0, text_w(letters, TEXT_SMALL, MONO));
+                    if !self.side_blocked(bar, rows, axis, Rectangle { x: lx - 1.0, y: row_y + rect.height / 2.0 - 7.0, width: w + 6.0, height: 14.0 })
+                        && lx + w < f.width()
+                    {
+                        put(
+                            f,
+                            letters,
+                            Point::new(lx, row_y + rect.height / 2.0),
+                            dim(t.ink_muted),
+                            TEXT_SMALL,
+                            MONO,
+                            Alignment::Left,
+                            alignment::Vertical::Center,
+                        );
+                    }
+                }
+            }
             if ovr_w == 0.0 && !bar.overrides.is_empty() {
                 // Too long for the bar: the list goes into the open space ahead of it, ending at its fore edge.
                 let w = mono_w(bar.overrides.chars().count(), TEXT_SMALL) + 8.0;
@@ -972,8 +1071,15 @@ impl Lanes<'_> {
             }
         } else if rect.width < need_name + 8.0 {
             let Some(lane) = rows.iter().find(|l| l.lane.system == bar.system) else { return };
+            // Identical neighbours (two rail buttons) share one label, `rail ×2`, on the first of them.
+            let (twins, first) = self.twin_run(bar);
+            if !first {
+                return;
+            }
             let label = if bar.count > 1 {
                 format!("{} ×{}", bar.name.split(" ×").next().unwrap_or(&bar.name).to_lowercase(), bar.count)
+            } else if twins > 1 {
+                format!("{} ×{twins}", bar.name.to_lowercase())
             } else {
                 bar.name.to_lowercase()
             };
@@ -981,15 +1087,8 @@ impl Lanes<'_> {
             let (lx, w) = (right + 4.0, mono_w(label.chars().count(), TEXT_SMALL));
             // Room: nothing else on this sub-row is under the label, and the block is not itself on top of a longer bar.
             let (row_y, _) = lane.row(bar.sub);
-            // Blocked when the label's box (any sub-row it touches, not just its own) would run into another bar of the lane.
             let label_box = Rectangle { x: lx - 1.0, y: row_y + rect.height / 2.0 - 7.0, width: w + 6.0 + if bar.warn { 9.0 } else { 0.0 }, height: 14.0 };
-            let blocked = self.scene.bars.iter().any(|o| {
-                o.key != bar.key
-                    && !o.alt
-                    && o.system == bar.system
-                    && geometry::bar_rect(o, rows, axis).is_some_and(|r| r.intersects(&label_box) && !(o.thin && r.x < rect.x))
-            });
-            if !blocked && lx + w < f.width() {
+            if !self.side_blocked(bar, rows, axis, label_box) && lx + w < f.width() {
                 put(
                     f,
                     &label,
@@ -1002,6 +1101,78 @@ impl Lanes<'_> {
                 );
             }
         }
+    }
+
+    /// Whether a label in `label_box` beside `bar` would run into another bar of the lane (any sub-row it touches, not just its
+    /// own; a short block that starts before `bar` does not count).
+    fn side_blocked(&self, bar: &Bar, rows: &[LaneBox], axis: &Axis, label_box: Rectangle) -> bool {
+        let own = geometry::bar_rect(bar, rows, axis);
+        self.scene.bars.iter().any(|o| {
+            o.key != bar.key
+                && !o.alt
+                && o.system == bar.system
+                && geometry::bar_rect(o, rows, axis).is_some_and(|r| r.intersects(&label_box) && !(o.thin && own.is_some_and(|b| r.x < b.x)))
+        })
+    }
+
+    /// How many identical short bars (same name and class, one copy each) run unbroken along `bar`'s sub-row, and whether `bar`
+    /// is the first of them.
+    fn twin_run(&self, bar: &Bar) -> (usize, bool) {
+        let mut row: Vec<&Bar> = self.scene.bars.iter().filter(|o| o.system == bar.system && o.sub == bar.sub && !o.alt && !o.shoulder).collect();
+        row.sort_by(|a, b| a.start.total_cmp(&b.start));
+        let same = |o: &Bar| o.thin && o.count == 1 && o.class == bar.class && o.name == bar.name && o.pod == bar.pod;
+        let Some(at) = row.iter().position(|o| o.key == bar.key) else { return (1, true) };
+        if !bar.thin || bar.count != 1 {
+            return (1, true);
+        }
+        let mut from = at;
+        while from > 0 && same(row[from - 1]) {
+            from -= 1;
+        }
+        let mut to = at;
+        while to + 1 < row.len() && same(row[to + 1]) {
+            to += 1;
+        }
+        (to - from + 1, from == at)
+    }
+
+    /// The boxes the names (and dimensions) of the lane bars occupy, one per segment of a bar that short blocks cut up: what the
+    /// separation, CG and CP lines are broken around.
+    fn label_boxes(&self, axis: &Axis, rows: &[LaneBox]) -> Vec<Rectangle> {
+        let mut boxes = Vec::new();
+        for bar in self.scene.bars.iter().filter(|b| !b.thin && !b.alt && !b.dashed) {
+            let Some(rect) = geometry::bar_rect(bar, rows, axis) else { continue };
+            let right = rect.x + rect.width;
+            let mut cuts: Vec<(f32, f32)> = self
+                .scene
+                .bars
+                .iter()
+                .filter(|o| o.thin && !o.alt && o.system == bar.system && o.sub == bar.sub)
+                .map(|o| axis.span(o.start, o.end))
+                .filter(|&(a, b)| b > rect.x && a < right)
+                .collect();
+            cuts.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut cursor = rect.x.max(LABEL_W);
+            let mut segments: Vec<(f32, f32)> = Vec::new();
+            for (a, b) in cuts {
+                if a > cursor {
+                    segments.push((cursor, a));
+                }
+                cursor = cursor.max(b);
+            }
+            if right > cursor {
+                segments.push((cursor, right));
+            }
+            let name_w = sans_w(&bar.name, TEXT_BAR);
+            let dim_w = if bar.dim.is_empty() { 0.0 } else { text_w(&bar.dim, TEXT_SMALL, MONO) + 6.0 };
+            for (i, (a, b)) in segments.into_iter().enumerate() {
+                if b - a >= name_w + 12.0 {
+                    let w = (name_w + if i == 0 { dim_w } else { 0.0 } + 8.0).min(b - a);
+                    boxes.push(Rectangle { x: a + 3.0, y: rect.y, width: w, height: rect.height });
+                }
+            }
+        }
+        boxes
     }
 
     /// The bracket that ties a pod's parts in one lane together: a thin line over the top of their bars with a tick down at each
@@ -1080,26 +1251,32 @@ impl Lanes<'_> {
         tag(f, x, RULER_H / 2.0 - 1.0, &text, t.accent_ink, t.accent, None, false);
     }
 
-    /// The dashed accent ghost of a carried part in its own lane, with its station tag on the ruler.
-    fn draw_ghost(&self, f: &mut Frame, t: &Tokens, carry: &Carry, axis: &Axis, rows: &[LaneBox], state: &Interaction) {
-        let Some(lane) = rows.iter().find(|l| l.lane.system == carry.system) else { return };
+    /// Where the carried part's ghost is drawn: in its own lane's first sub-row, at the landing station (or under the cursor),
+    /// wider than true scale when its name needs it (a ring is 6 mm).
+    fn ghost_rect(&self, carry: &Carry, axis: &Axis, rows: &[LaneBox], state: &Interaction) -> Option<Rectangle> {
+        let lane = rows.iter().find(|l| l.lane.system == carry.system)?;
         let start = match (carry.landing, state.cursor) {
             (Some(s), _) => s,
             (None, Some(p)) => axis.station(p.x) - carry.extent / 2.0,
-            (None, None) => return,
+            (None, None) => return None,
         };
-        let label = format!("+ {}", carry.name);
         let (y, h) = lane.row(0);
         let (x0, x1) = axis.span(start, start + carry.extent);
-        // Wider than true scale when it must be, so its name fits inside (a ring is 6 mm).
-        let x1 = x1.max(x0 + sans_w(&label, TEXT_BAR) + 12.0);
-        let rect = Rectangle { x: x0, y, width: x1 - x0, height: h };
+        let x1 = x1.max(x0 + sans_w(&format!("+ {}", carry.name), TEXT_BAR) + 12.0);
+        Some(Rectangle { x: x0, y, width: x1 - x0, height: h })
+    }
+
+    /// The dashed accent ghost of a carried part in its own lane, with its station tag on the ruler.
+    fn draw_ghost(&self, f: &mut Frame, t: &Tokens, carry: &Carry, axis: &Axis, rows: &[LaneBox], state: &Interaction) {
+        let Some(rect) = self.ghost_rect(carry, axis, rows, state) else { return };
+        let label = format!("+ {}", carry.name);
         f.fill_rectangle(rect.position(), rect.size(), t.bg_200);
         f.fill_rectangle(rect.position(), rect.size(), t.accent_soft);
         outline(f, rect, dashed(t.accent));
         put(f, &label, Point::new(rect.x + 6.0, rect.y + rect.height / 2.0), t.ink, TEXT_BAR, SANS, Alignment::Left, alignment::Vertical::Center);
+        let start = carry.landing.unwrap_or_else(|| axis.station(rect.x));
         let text = ui::bare(start, Quantity::Length, self.units);
         let busy = carry.landing.is_some();
-        tag(f, x0, RULER_H / 2.0 - 1.0, &text, if busy { t.accent_ink } else { t.ink_faint }, if busy { t.accent } else { t.bg_300 }, None, false);
+        tag(f, rect.x, RULER_H / 2.0 - 1.0, &text, if busy { t.accent_ink } else { t.ink_faint }, if busy { t.accent } else { t.bg_300 }, None, false);
     }
 }

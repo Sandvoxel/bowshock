@@ -388,7 +388,7 @@ fn row_view<'a>(r: Row) -> Element<'a, Message> {
     if let Some(color) = r.swatch {
         parts.push(swatch(color));
     }
-    parts.push(text(r.label).size(TEXT_BODY).style(theme::muted).boxed());
+    parts.push(text(r.label).size(TEXT_BODY).style(if r.muted { theme::faint } else { theme::muted }).boxed());
     parts.push(Space::new().width(Fill).boxed());
     match r.tag {
         Some(Tag::Chip(severity, label)) => parts.push(chip(severity, label).into()),
@@ -398,7 +398,7 @@ fn row_view<'a>(r: Row) -> Element<'a, Message> {
     if let Some(share) = r.share {
         parts.push(text(share).font(MONO).size(TEXT_LABEL).style(theme::faint).boxed());
     }
-    let value = text(r.value).font(MONO).style(theme::ink);
+    let value = text(r.value).font(MONO).style(if r.muted { theme::muted } else { theme::ink });
     parts.push(if r.big { value.size(20).boxed() } else { value.size(12.5).boxed() });
     if !r.unit.is_empty() {
         parts.push(text(r.unit).font(MONO).size(TEXT_LABEL).style(theme::muted).boxed());

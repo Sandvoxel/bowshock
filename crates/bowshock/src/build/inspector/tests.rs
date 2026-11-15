@@ -360,3 +360,25 @@ fn a_motor_mount_in_a_pod_belongs_to_the_stage_the_pod_stands_on() {
     let checks = super::health::motor(fx.rocket(), mount, ctx.physics.motors(), ctx.physics.warnings(), ctx);
     assert!(!checks.is_empty());
 }
+
+#[test]
+fn the_rocket_inspector_sets_and_clears_the_active_configurations_ballast() {
+    let mut fx = Fx::new();
+    fx.send(Message::BallastMass(0.05));
+    let ballast = fx.rocket().active_configuration().ballast.expect("a mass makes a ballast");
+    assert_eq!(ballast.mass, 0.05);
+    fx.send(Message::BallastStation(0.4));
+    assert_eq!(fx.rocket().active_configuration().ballast.map(|b| b.station), Some(0.4));
+    fx.send(Message::BallastMass(0.0));
+    assert!(fx.rocket().active_configuration().ballast.is_none(), "zero removes it");
+}
+
+#[test]
+fn a_fillet_stays_closed_until_it_is_opened_and_follows_the_user_after() {
+    let mut fx = Fx::new();
+    let fin = fx.fins();
+    fx.select(fin);
+    assert!(fx.state.fillet_open.is_none());
+    fx.send(Message::FilletOpen(true));
+    assert_eq!(fx.state.fillet_open, Some((fin, true)));
+}

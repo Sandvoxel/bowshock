@@ -11,7 +11,7 @@ use crate::app::document::EXTENSION;
 use crate::app::{Ctx, Message, Mode};
 use crate::logo;
 use crate::theme::{self, MONO, SANS_SEMIBOLD};
-use crate::tokens::{SPACE_1, SPACE_2, SPACE_3, TEXT_BODY, TOPBAR_H};
+use crate::tokens::{CONTROL_H, SPACE_1, SPACE_2, SPACE_3, TEXT_BODY, TEXT_LABEL, TOPBAR_H};
 use crate::units::UnitSystem;
 use crate::widgets::button::{button, icon_button, Weight};
 use crate::widgets::field;
@@ -66,11 +66,16 @@ pub fn top_bar(ctx: &Ctx) -> Element<'_, Message> {
 
     let systems: Vec<SystemLabel> = UnitSystem::ALL.iter().copied().map(SystemLabel).collect();
     let units = container(field::select(systems, Some(SystemLabel(ctx.units)), |s| Message::Units(s.0))).width(UNITS_W);
-    let theme_toggle: Element<'_, Message> = button(if ctx.dark { "Light" } else { "Dark" }, Weight::Ghost).on_press(Message::ToggleTheme).into();
+    let theme_toggle = theme_toggle(ctx.dark);
     let simulate: Element<'_, Message> = button("Simulate", Weight::Primary).icon(Mark::Play).key("F5").on_press(Message::Run).into();
     let menu: Element<'_, Message> =
         button("", Weight::Primary).icon(Mark::CaretDown).tooltip("Run options").on_press(Message::Chrome(ChromeMessage::ToggleRunMenu)).into();
-    let simulate = row![simulate, menu].spacing(1);
+    // The caret is its own cell, divided from Simulate by a hairline of the accent's shadow.
+    let divider = container(Space::new())
+        .width(1)
+        .height(26)
+        .style(|t: &Theme| container::Style { background: Some(Background::Color(theme::tokens(t).bg_000.scale_alpha(0.45))), ..container::Style::default() });
+    let simulate = row![simulate, divider, menu].spacing(0);
 
     container(
         row![logo, rule(), file, rule(), undo, redo, Space::new().width(Fill), modes, Space::new().width(Fill), theme_toggle, units, simulate,]
@@ -87,4 +92,49 @@ pub fn top_bar(ctx: &Ctx) -> Element<'_, Message> {
 /// A vertical hairline between regions of the bar.
 fn rule<'a>() -> Element<'a, Message> {
     container(Space::new()).width(1).height(20).style(theme::hairline).boxed()
+}
+
+/// The theme toggle: a sun on the dark theme (click for light), a moon on the light one. The word it switches to ("Light" /
+/// "Dark") is also in the button, fully transparent, as the tooltip text and so a script can still `click "Light"`.
+fn theme_toggle<'a>(dark: bool) -> Element<'a, Message> {
+    let word = if dark { "Light" } else { "Dark" };
+    let glyph = canvas(ThemeGlyph { to_light: dark }).width(CONTROL_H).height(CONTROL_H);
+    let hidden = container(text(word).size(8).style(|_: &Theme| text::Style { color: Some(iced::Color::TRANSPARENT), selection: None })).center(Fill);
+    let body = iced::widget::stack![glyph, hidden].width(CONTROL_H).height(CONTROL_H);
+    let toggle = iced::widget::button(body).padding(0).style(theme::ghost).on_press(Message::ToggleTheme);
+    iced::widget::tooltip(toggle, container(text(word).size(TEXT_LABEL + 1.0)).padding([SPACE_1, SPACE_2]).style(theme::tooltip))
+        .position(iced::widget::tooltip::Position::Bottom)
+        .boxed()
+}
+
+/// Draws the sun (centre disc and eight rays) or the moon (a crescent), in the button's text colour.
+struct ThemeGlyph {
+    to_light: bool,
+}
+
+impl canvas::Program<Message> for ThemeGlyph {
+    type State = ();
+
+    fn draw(&self, _: &(), renderer: &iced::Renderer, theme: &Theme, bounds: iced::Rectangle, cursor: iced::mouse::Cursor) -> Vec<canvas::Geometry> {
+        let t = theme::tokens(theme);
+        let color = if cursor.is_over(bounds) { t.ink } else { t.ink_muted };
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let c = iced::Point::new(bounds.width / 2.0, bounds.height / 2.0);
+        let stroke = canvas::Stroke::default().with_color(color).with_width(1.4);
+        if self.to_light {
+            frame.fill(&canvas::Path::circle(c, 3.2), color);
+            for i in 0..8 {
+                let a = i as f32 * std::f32::consts::FRAC_PI_4;
+                let (s, k) = a.sin_cos();
+                frame.stroke(&canvas::Path::line(iced::Point::new(c.x + k * 5.4, c.y + s * 5.4), iced::Point::new(c.x + k * 7.2, c.y + s * 7.2)), stroke);
+            }
+        } else {
+            // A disc with a displaced disc cut out of it.
+            let moon = canvas::Path::circle(c, 6.0);
+            frame.fill(&moon, color);
+            let hole = if cursor.is_over(bounds) { t.bg_400 } else { t.bg_100 };
+            frame.fill(&canvas::Path::circle(iced::Point::new(c.x + 3.4, c.y - 2.6), 5.2), hole);
+        }
+        vec![frame.into_geometry()]
+    }
 }

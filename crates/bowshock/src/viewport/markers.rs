@@ -12,7 +12,7 @@ use std::f32::consts::{FRAC_PI_2, PI, TAU};
 use bowshock_model::{PartId, Rocket, Stage};
 use glam::Vec3;
 use iced::widget::canvas::{self, Action, Event, Frame, Geometry, LineDash, Path, Stroke, Text};
-use iced::widget::{container, row, text, Space};
+use iced::widget::{container, responsive, row, text, Space};
 use iced::{alignment, keyboard, mouse, Element, Fill, Point, Rectangle, Renderer, Size, Theme, Vector, Widget};
 
 use super::mesh::{Cut, Mesh};
@@ -20,7 +20,7 @@ use super::{Camera, InsideView, Message};
 use crate::app::ui::bare;
 use crate::app::Selection;
 use crate::theme::{self, MONO};
-use crate::tokens::{Tokens, SPACE_1, SPACE_2, SPACE_3, TEXT_LABEL};
+use crate::tokens::{Tokens, SPACE_1, SPACE_2, SPACE_3, SPACE_4, TEXT_LABEL};
 use crate::units::{Quantity, UnitSystem};
 use crate::widgets::glyph;
 
@@ -493,19 +493,42 @@ pub fn hints<'a, M: 'a>(pairs: &[(&'static str, &'static str)]) -> Element<'a, M
     container(row(items).spacing(SPACE_3).align_y(iced::Center)).padding([SPACE_1 + 2.0, SPACE_3]).style(theme::overlay).boxed()
 }
 
-/// The bottom row of the viewport, `space-4` from the edges: the legend at the left, the key hints in the middle (when there
-/// are any) and room at the right for the scale bar. A narrow viewport squeezes the spaces rather than overlapping panels.
-pub fn bottom_bar<'a, M: 'a>(legend: Element<'a, M>, hints: Option<Element<'a, M>>) -> Element<'a, M> {
-    let mut items: Vec<Element<'a, M>> = vec![legend, Space::new().width(Fill).boxed()];
-    if let Some(h) = hints {
-        items.push(h);
+/// Width the legend takes at the bottom left and the scale bar at the bottom right, px (see `sheet`).
+const LEGEND_W: f32 = 226.0;
+const SCALE_W: f32 = 120.0;
+
+/// The pairs of `pairs` that fit in `room` px: the first always, then each next while the bar stays within `room`. The widths are
+/// estimates from the glyph counts (keycap `TEXT_LABEL - 1` mono, words `TEXT_LABEL + 1` sans), the paddings and the gaps.
+fn fit_hints(pairs: &[(&'static str, &'static str)], room: f32) -> usize {
+    let pair = |(key, what): &(&str, &str)| {
+        let cap = if key.is_empty() { 0.0 } else { key.chars().count() as f32 * (TEXT_LABEL - 1.0) * 0.6 + 10.0 + SPACE_1 };
+        cap + what.chars().count() as f32 * (TEXT_LABEL + 1.0) * 0.52
+    };
+    let mut width = 2.0 * SPACE_3;
+    let mut count = 0;
+    for p in pairs {
+        width += pair(p) + if count > 0 { SPACE_3 } else { 0.0 };
+        if count > 0 && width > room {
+            break;
+        }
+        count += 1;
     }
-    items.push(Space::new().width(Fill).boxed());
-    items.push(Space::new().width(120).boxed());
-    container(row(items).align_y(alignment::Vertical::Bottom))
-        .width(Fill)
-        .height(Fill)
-        .padding(crate::tokens::SPACE_4)
-        .align_y(alignment::Vertical::Bottom)
-        .boxed()
+    count
+}
+
+/// The bottom row of the viewport, `space-4` from the edges: the legend at the left, the key hints in the middle (when there
+/// are any) and room at the right for the scale bar. The hint bar keeps to the room between the legend and the scale bar: pairs
+/// that do not fit are left off (the last ones, `Esc cancel` before the main verb), so it never covers either.
+pub fn bottom_bar<'a, M: 'a>(mach: f64, alpha_deg: f64, pairs: Vec<(&'static str, &'static str)>) -> Element<'a, M> {
+    responsive(move |size| {
+        let room = size.width - 2.0 * SPACE_4 - LEGEND_W - SCALE_W - 2.0 * SPACE_3;
+        let mut items: Vec<Element<'a, M>> = vec![legend(mach, alpha_deg), Space::new().width(Fill).boxed()];
+        if !pairs.is_empty() {
+            items.push(hints(&pairs[..fit_hints(&pairs, room)]));
+        }
+        items.push(Space::new().width(Fill).boxed());
+        items.push(Space::new().width(SCALE_W).boxed());
+        container(row(items).align_y(alignment::Vertical::Bottom)).width(Fill).height(Fill).padding(SPACE_4).align_y(alignment::Vertical::Bottom).boxed()
+    })
+    .boxed()
 }

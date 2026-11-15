@@ -56,6 +56,12 @@ pub const INSET: f32 = 150.0;
 pub const THICKNESS_SCALE: f32 = 6000.0;
 /// Length of the cant lever in the inset, px.
 pub const CANT_LEVER: f32 = 30.0;
+/// Room the inset leaves around the part and its handles, px.
+const INSET_MARGIN: f32 = 48.0;
+/// Height reserved along the viewport's bottom edge (legend, key hints, scale bar), px.
+const BOTTOM_BAR: f32 = 60.0;
+/// Top of the first free row under the view toolbar, px.
+const TOOLBAR_BOTTOM: f32 = 80.0;
 
 /// The world direction perpendicular to the axis that points most nearly up the screen: where the diameter handles sit.
 pub fn radial_up(camera: &Camera) -> Vec3 {
@@ -117,8 +123,9 @@ pub struct Context<'a> {
     pub cube: bool,
 }
 
-/// The inset for radial part `id`: pinned top-right in the viewport (under the ViewCube in 3D, else under the way back), like
-/// the kit's AFT VIEW panel.
+/// The inset for radial part `id`: a panel at one of the viewport's corners, like the kit's AFT VIEW panel. It prefers the top
+/// right (under the ViewCube in 3D, else under the way back) and moves to the next corner (bottom right, top left under the
+/// toolbar, bottom left) when that would sit over the part or its handles.
 pub fn inset(cx: &Context, id: PartId) -> Option<Inset> {
     let r = cx.rocket.radial(id)?;
     let place = pick::placement(cx.rocket, r, cx.instance)?;
@@ -128,9 +135,18 @@ pub fn inset(cx: &Context, id: PartId) -> Option<Inset> {
         RadialKind::Pod { gap, body } => gap + 2.0 * body.radius(),
         k => k.fin_span().unwrap_or(0.0),
     };
-    let x = (cx.size.width - INSET - 16.0).max(8.0);
-    let y = if cx.cube { 16.0 + super::CUBE_SIZE + 8.0 } else { 64.0 };
-    let panel = Rectangle::new(Point::new(x, y), Size::new(INSET, INSET));
+    let (w, h) = (cx.size.width, cx.size.height);
+    let right = (w - INSET - 16.0).max(8.0);
+    let top = if cx.cube { 16.0 + super::CUBE_SIZE + 8.0 } else { 64.0 };
+    let bottom = (h - INSET - BOTTOM_BAR).max(8.0);
+    let keep_clear = Rectangle::new(
+        Point::new(cx.bounds.x - INSET_MARGIN, cx.bounds.y - INSET_MARGIN),
+        Size::new(cx.bounds.width + 2.0 * INSET_MARGIN, cx.bounds.height + 2.0 * INSET_MARGIN),
+    );
+    let spots = [(right, top), (right, bottom), (16.0, TOOLBAR_BOTTOM), (16.0, bottom)];
+    let rect = |(x, y): (f32, f32)| Rectangle::new(Point::new(x, y), Size::new(INSET, INSET));
+    let (x, y) = spots.into_iter().find(|s| !rect(*s).intersects(&keep_clear)).unwrap_or(spots[0]);
+    let panel = rect((x, y));
     let total = f64::from(place.base) + reach;
     let scale = (INSET / 2.0 - 26.0) / total.max(1e-3) as f32;
     Some(Inset { panel, centre: Point::new(x + INSET / 2.0, y + INSET / 2.0 + 8.0), base: place.base * scale, reach: reach as f32 * scale, scale })
