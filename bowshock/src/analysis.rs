@@ -97,7 +97,8 @@ pub enum Quality {
     Stationary,
     /// The iteration cap was reached without a stop criterion.
     Stalled,
-    /// Non-finite or non-physical state, or non-finite drag.
+    /// Non-finite or non-physical state (including a pressure at the outer boundaries more than 100 % off the free stream), or
+    /// non-finite drag.
     Failed,
 }
 
@@ -661,10 +662,16 @@ fn check_grid(case: &Case) -> Result<(), Error> {
     check_quality(&probe.grid, probe.block(), MAX_STRETCHING, max_j)
 }
 
-/// Quality of a solver result, first match wins.
+/// Relative deviation of the outer-boundary pressure from the free stream above which a state is not a meaningful solution.
+const FARFIELD_DP_FAILED: f64 = 1.0;
+
+/// Quality of a solver result, first match wins. A point is [`Quality::Failed`] when the run stopped on a non-finite or blown-up
+/// state, when the density or pressure of a cell is not positive, when the total drag is not finite, or when the pressure at the
+/// outer boundaries deviates from the free stream by more than 100 % (`farfield_dp > 1`): the far field of a body in a flow of
+/// this size is undisturbed at that distance, so such a state is garbage even if it is finite and the run ended `Stalled`.
 fn quality(d: &PointResult, drag: &Drag) -> Quality {
     let positive = |x: f64| x > 0.0; // false for NaN
-    if d.stop_reason == StopReason::NonFinite || !positive(d.min_rho) || !positive(d.min_p) || !drag.total.is_finite() {
+    if d.stop_reason == StopReason::NonFinite || !positive(d.min_rho) || !positive(d.min_p) || !drag.total.is_finite() || d.farfield_dp > FARFIELD_DP_FAILED {
         return Quality::Failed;
     }
     match d.stop_reason {
@@ -716,5 +723,64 @@ impl Runner for GpuBackend {
 
     fn warm(&self, r: &mut crate::engine::gpu::GpuRunner, case: &Case, r_ref: f64) -> Result<PointResult, Error> {
         Ok(r.run_on(case, true, Some(r_ref))?.result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn result(stop_reason: StopReason, farfield_dp: f64) -> PointResult {
+        PointResult {
+            mach: 2.0,
+            alpha: 0.0,
+            iters: 1000,
+            residual: Vec::new(),
+            residual_peak: 1.0,
+            drop_orders: 1.0,
+            stop_reason,
+            wall: Vec::new(),
+            base_wall: Vec::new(),
+            cd_nose: 0.1,
+            cd_nose_cell: 0.1,
+            cd_aft: Vec::new(),
+            cd_base: 0.1,
+            cd_friction: 0.1,
+            cd_total: 0.3,
+            cd_base_model: 0.1,
+            cd_total_model: 0.3,
+            cp_base: -0.1,
+            cp_base_cell: -0.1,
+            cp_base_mean: f64::NAN,
+            cp_base_range: f64::NAN,
+            cd_range: f64::NAN,
+            monitor_history: Vec::new(),
+            cp_min: -0.1,
+            x_cp_min: 1.0,
+            m_max: 2.0,
+            m_wall_max: 1.5,
+            farfield_dp,
+            min_rho: 0.1,
+            min_p: 0.1,
+            y_plus_max: 1.0,
+        }
+    }
+
+    fn drag(total: f64) -> Drag {
+        Drag { forebody_pressure: 0.1, friction: Some(0.1), base: 0.1, base_modelled: false, fins: None, total }
+    }
+
+    #[test]
+    fn quality_fails_on_a_far_field_that_deviates_by_more_than_100_percent() {
+        for stop in [StopReason::ResidualDrop, StopReason::CdStationary, StopReason::MaxIterations] {
+            let expect = if stop == StopReason::MaxIterations { Quality::Stalled } else { Quality::Converged };
+            let expect = if stop == StopReason::CdStationary { Quality::Stationary } else { expect };
+            assert_eq!(quality(&result(stop, 0.0), &drag(0.3)), expect);
+            assert_eq!(quality(&result(stop, 1.0), &drag(0.3)), expect, "exactly 100 % is not beyond the limit");
+            assert_eq!(quality(&result(stop, 1.0 + 1e-9), &drag(0.3)), Quality::Failed);
+            assert_eq!(quality(&result(stop, 1.2e7), &drag(-13905.0)), Quality::Failed);
+        }
+        assert_eq!(quality(&result(StopReason::NonFinite, 0.0), &drag(0.3)), Quality::Failed);
+        assert_eq!(quality(&result(StopReason::ResidualDrop, 0.0), &drag(f64::NAN)), Quality::Failed);
     }
 }

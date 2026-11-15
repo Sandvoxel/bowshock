@@ -66,7 +66,12 @@ pub fn run_on(case: &Case, s: &mut Solver, warm: bool, r_ref: Option<f64>) -> Po
     finish(case, s, residual, rmax, hist, reason)
 }
 
-/// Stopping rule after iteration `it` with density residual `r`, in this order: non-finite residual (always); then, from
+/// Largest magnitude of the convergence monitor (a drag or pressure coefficient) of a meaningful solution; a sample beyond it, or a
+/// non-finite one, means the state has blown up (the residual of such a state can still be finite).
+pub const MONITOR_LIMIT: f64 = 1e3;
+
+/// Stopping rule after iteration `it` with density residual `r`, in this order: non-finite residual, or a monitor sample taken at
+/// this iteration (the last of `hist`) that is non-finite or larger than [`MONITOR_LIMIT`] in magnitude (always); then, from
 /// `min_iter` on, `drop_orders` below `reference` ("residual drop reached"); or, with a `monitor_tol`, every 500 iterations
 /// from `2 monitor_window` on and once the residual has dropped 2 orders, a monitor range (`hist`, one sample per `MONITOR_EVERY`
 /// iterations) below the tolerance over the last `monitor_window` iterations (`BasePressureStationary` for an inviscid base wake,
@@ -75,7 +80,7 @@ pub fn run_on(case: &Case, s: &mut Solver, warm: bool, r_ref: Option<f64>) -> Po
 /// (`MeanStationary`). `skip` is 20 on a cold start, 0 warm.
 pub fn stop_reason(case: &Case, it: usize, r: f64, reference: f64, skip: usize, hist: &[(usize, f64)]) -> Option<StopReason> {
     let n = &case.numerics;
-    if !r.is_finite() {
+    if !r.is_finite() || hist.last().is_some_and(|&(last, m)| last == it + 1 && (!m.is_finite() || m.abs() > MONITOR_LIMIT)) {
         return Some(StopReason::NonFinite);
     }
     if it + 1 < n.min_iter {
@@ -400,6 +405,12 @@ mod tests {
         g.numerics.min_iter = 10_000;
         assert_eq!(stop_reason(&g, 5, f64::NAN, 1.0, 0, &[]), Some(StopReason::NonFinite));
         assert_eq!(stop_reason(&g, 5, 1e-9, 1.0, 0, &[]), None);
+        // so does a blown-up monitor sampled at this iteration, with a finite residual
+        for bad in [f64::NAN, f64::INFINITY, 1.5e3, -1.5e3] {
+            assert_eq!(stop_reason(&g, 49, 1e-9, 1.0, 0, &[(50, bad)]), Some(StopReason::NonFinite), "{bad}");
+        }
+        assert_eq!(stop_reason(&g, 49, 1e-9, 1.0, 0, &[(50, 900.0)]), None);
+        assert_eq!(stop_reason(&g, 48, 1e-9, 1.0, 0, &[(50, 1.5e3)]), None);
         // residual drop before the stationary rule
         assert_eq!(stop_reason(&c, 4999, 1e-7, 1.0, 20, &flat), Some(StopReason::ResidualDrop));
         // stationary rule: needs it % 500 == 499, 2 orders of drop and a flat history

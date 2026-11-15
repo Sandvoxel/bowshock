@@ -15,6 +15,19 @@ pub const REGIME_SPLIT_MACH: f64 = 0.85;
 /// iterations on the wall-resolved body grid of an ogive-cylinder at Mach 0.5 (cfl_max 10, also with a start CFL of 0.1).
 const RANS_IMPLICIT: ImplicitParams = ImplicitParams { dt_mode: DtMode::Sum, cfl_max: 50.0, sub_iters: 3, ..ImplicitParams::DEFAULT };
 
+/// Mach number from which a wall-resolved run uses [`RANS_IMPLICIT_SUPERSONIC`].
+const SUPERSONIC_MACH: f64 = 1.0;
+
+/// [`RANS_IMPLICIT`] with the CFL limit lowered to 20 for supersonic runs. At `cfl_max` 50 the implicit iteration can diverge in the
+/// supersonic wake behind the base once the CFL ramp (`growth` 1.02 per iteration) passes about 40, at iteration 195-240 (during the
+/// first-order phase): a short-wave oscillation of density and pressure on the wake rows next to the axis grows by about 30 % per
+/// iteration and the pressure turns negative within 5 iterations. The inviscid implicit scheme on the same grid does the same, so no
+/// viscous or turbulence term is involved, and it needs the ramp, not the second-order switch. Measured on the GPU solver at Medium:
+/// the polar body at Mach 1.5, 2, 2.5 and 3, the TP-2005 body at Mach 2 and the Arcas body at Mach 2 and 2.5 diverge at 50 (at 40 or 35
+/// the polar body at Mach 3, the TP-2005 body at Mach 3 and the Arcas body at Mach 2; the polar body at Mach 3 even at 30); at 20 every
+/// one of those, at Mach 1.5, 2, 2.5 and 3, reaches a stationary drag.
+const RANS_IMPLICIT_SUPERSONIC: ImplicitParams = ImplicitParams { cfl_max: 20.0, ..RANS_IMPLICIT };
+
 /// Numerical settings of one run.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Numerics {
@@ -91,7 +104,8 @@ impl Numerics {
         n
     }
 
-    /// Wall-resolved RANS (viscous terms and k-omega SST): line-implicit with the viscous parameters, van Albada limiter and the
+    /// Wall-resolved RANS (viscous terms and k-omega SST): line-implicit with the viscous parameters (CFL limit 20 from Mach 1, 50
+    /// below), van Albada limiter and the
     /// low-Mach correction below [`REGIME_SPLIT_MACH`], minmod without correction otherwise; stationary tolerance 1e-4 on the
     /// total CD, and the mean-stationary rule with a window of 6000 iterations (one period of the limit cycle of the subsonic runs).
     pub fn viscous(mach: f64, level: u32) -> Numerics {
@@ -100,7 +114,7 @@ impl Numerics {
             cfl: 0.5,
             limiter: if subsonic { Limiter::VanAlbada } else { Limiter::Minmod },
             low_mach: subsonic,
-            scheme: Scheme::Implicit(RANS_IMPLICIT),
+            scheme: Scheme::Implicit(if mach < SUPERSONIC_MACH { RANS_IMPLICIT } else { RANS_IMPLICIT_SUPERSONIC }),
             first_order_iters: 200,
             max_iter: 80_000 << level,
             min_iter: 0,
@@ -128,5 +142,14 @@ mod tests {
         assert_eq!(hi.max_iter, 60_000);
         assert_eq!(hi.monitor_tol, Some(1e-3));
         assert_eq!(Numerics::subsonic(0, Wake::Sting).monitor_tol, None);
+    }
+
+    #[test]
+    fn viscous_cfl_limit_is_lower_from_mach_one() {
+        let cfl_max = |mach: f64| match Numerics::viscous(mach, 1).scheme {
+            Scheme::Implicit(p) => p.cfl_max,
+            s => panic!("{s:?}"),
+        };
+        assert_eq!([cfl_max(0.5), cfl_max(0.99), cfl_max(1.0), cfl_max(3.0)], [50.0, 50.0, 20.0, 20.0]);
     }
 }
