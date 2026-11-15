@@ -1,10 +1,13 @@
 //! The model -> simulation bridge: a realistic single-stage rocket (H128W on a 3" airframe) and a two-stage one, built through
 //! the `bowshock-model` API.
 
-use bowshock_model::{DeployEvent, Deployment, Ignition as ModelIgnition, InternalKind, MassRole, MotorRef, NoseShape, PartId, PartKind, RadialKind, Rocket};
+use bowshock_model::{
+    Ballast, DeployEvent, Deployment, EventKind as ModelEvent, InternalKind, MassRole, MotorRef, NoseShape, PartId, PartKind, RadialKind, Rocket, StageEvent,
+    StageTrigger,
+};
 use bowshock_motors::MotorDb;
 use bowshock_sim::from_model::{balance, recovery, sim_input, vehicle, warnings, BridgeError, Level, Phase};
-use bowshock_sim::{simulate, BodyKind, Deploy, EventKind, Ignition, Launch, NoseShape as SimNose, Protuberance};
+use bowshock_sim::{simulate, BodyKind, Deploy, EventKind, Launch, NoseShape as SimNose, Protuberance, Timing, Trigger};
 
 const BODY: f64 = 0.0762;
 const NOSE: f64 = 0.2286;
@@ -91,7 +94,7 @@ fn single_stage_vehicle_maps_geometry() {
     // Motor: the mount's aft end is at the aft end of the airframe, the slot's delay is the ejection delay.
     let m = v.stages[0].motor.as_ref().unwrap();
     assert!((m.mount_aft_station - (NOSE + 0.9)).abs() < 1e-9);
-    assert_eq!((m.ignition, m.ejection_delay), (Ignition::Launch, Some(6.0)));
+    assert_eq!((m.ignition, m.ejection_delay), (Timing::LAUNCH, Some(6.0)));
     assert!((m.curve.diameter - 0.029).abs() < 1e-9 && m.curve.points[0] == (0.0, 0.0));
     assert!((m.curve.total_impulse() - 172.9).abs() < 8.0, "{}", m.curve.total_impulse());
 
@@ -220,8 +223,9 @@ fn two_stage() -> TwoStage {
     r.set_motor(cfg, sustainer_mount, Some(MotorRef::new("G40W", "AeroTech"))).unwrap();
     r.set_motor_delay(cfg, booster_mount, f64::INFINITY).unwrap();
     r.set_motor_delay(cfg, sustainer_mount, 9.0).unwrap();
-    r.set_ignition(cfg, sustainer_mount, ModelIgnition::StageSeparation { delay: 0.5 }).unwrap();
-    r.set_stage_separation(cfg, 1, 0.25).unwrap();
+    let event = |stage, kind, trigger, delay| StageEvent { stage, kind, trigger, delay };
+    r.set_stage_event(cfg, event(2, ModelEvent::Ignition, StageTrigger::Separation, 0.5)).unwrap();
+    r.set_stage_event(cfg, event(1, ModelEvent::Separation, StageTrigger::Burnout, 0.25)).unwrap();
     TwoStage { rocket: r, booster_mount, sustainer_mount, booster_tube: booster }
 }
 
@@ -237,8 +241,9 @@ fn two_stage_maps_to_two_sim_stages_with_ignition_and_phases() {
     assert!((booster.fore_station - joint).abs() < 1e-9 && (booster.aft_station - (joint + 0.5)).abs() < 1e-9);
     assert!((sustainer.fore_station, sustainer.aft_station) == (0.0, booster.fore_station));
     let (bm, sm) = (booster.motor.as_ref().unwrap(), sustainer.motor.as_ref().unwrap());
-    assert_eq!((bm.ignition, bm.ejection_delay), (Ignition::Launch, None));
-    assert_eq!(sm.ignition, Ignition::AfterPreviousBurnout { delay: 0.75 });
+    assert_eq!((bm.ignition, bm.ejection_delay), (Timing::LAUNCH, None));
+    assert_eq!(sm.ignition, Timing::new(Trigger::Separation, 0.5));
+    assert_eq!((booster.separation, sustainer.separation.trigger), (Timing::new(Trigger::Burnout, 0.25), Trigger::Burnout));
     assert_eq!(sm.ejection_delay, Some(9.0));
     assert!((bm.curve.total_mass - 0.2016).abs() < 1e-9 && (sm.curve.total_mass - 0.123).abs() < 1e-9);
     assert!((booster.dry.mass + sustainer.dry.mass - r.dry_mass().mass).abs() < 1e-9);
@@ -259,7 +264,7 @@ fn two_stage_maps_to_two_sim_stages_with_ignition_and_phases() {
     assert_eq!(vehicle(&r, &db, Phase::UpperFrom(1)), Ok(v.clone()));
     let up = vehicle(&r, &db, Phase::UpperFrom(2)).unwrap();
     assert_eq!(up.stages.len(), 1);
-    assert_eq!(up.stages[0].motor.as_ref().unwrap().ignition, Ignition::Launch);
+    assert_eq!(up.stages[0].motor.as_ref().unwrap().ignition, Timing::LAUNCH);
     assert!((up.length() - joint).abs() < 1e-9);
     assert!(up.fin_sets.is_empty() && up.protuberances.is_empty());
     assert_eq!(up.body.len(), 2);
@@ -283,10 +288,57 @@ fn two_stage_maps_to_two_sim_stages_with_ignition_and_phases() {
     let t_of =
         |kind: EventKind, stage: usize| ev.iter().find(|e| e.kind == kind && e.stage == Some(stage)).unwrap_or_else(|| panic!("{kind:?} {stage}: {ev:?}")).t;
     let (burnout0, sep0, ignite1) = (t_of(EventKind::Burnout, 0), t_of(EventKind::Separation, 0), t_of(EventKind::Ignition, 1));
-    assert!((sep0 - burnout0 - 0.75).abs() < 1e-6 && (ignite1 - sep0).abs() < 1e-6, "{burnout0} {sep0} {ignite1}");
+    // The separation is 0.25 s after the burnout; the sustainer lights 0.5 s after the separation (not at it).
+    assert!((sep0 - burnout0 - 0.25).abs() < 1e-6 && (ignite1 - sep0 - 0.5).abs() < 1e-6, "{burnout0} {sep0} {ignite1}");
     let single = simulate(&sim_input(&r, &db, Phase::UpperFrom(2), Launch::default()).unwrap());
     assert!(flight.summary.apogee > single.summary.apogee, "{} vs {}", flight.summary.apogee, single.summary.apogee);
     assert!(single.trajectory.events.iter().any(|e| e.kind == EventKind::Landing));
+}
+
+#[test]
+fn every_trigger_kind_maps_to_the_sim_and_flies() {
+    let TwoStage { rocket: mut r, .. } = two_stage();
+    let db = MotorDb::bundled();
+    let cfg = r.active_config_id();
+    let event = |stage, kind, trigger, delay| StageEvent { stage, kind, trigger, delay };
+    let cases =
+        [(StageTrigger::Burnout, Trigger::Burnout), (StageTrigger::TimeFromLaunch, Trigger::Launch), (StageTrigger::Altitude(120.0), Trigger::Altitude(120.0))];
+    for (model, sim) in cases {
+        r.set_stage_event(cfg, event(1, ModelEvent::Separation, model, 0.3)).unwrap();
+        r.set_stage_event(cfg, event(2, ModelEvent::Ignition, model, 0.4)).unwrap();
+        let v = vehicle(&r, &db, Phase::Full).unwrap();
+        assert_eq!(v.stages[0].separation, Timing::new(sim, 0.3), "{model:?}");
+        assert_eq!(v.stages[1].motor.as_ref().unwrap().ignition, Timing::new(sim, 0.4), "{model:?}");
+        let flight = simulate(&sim_input(&r, &db, Phase::Full, Launch::default()).unwrap());
+        let kinds: Vec<_> = flight.trajectory.events.iter().map(|e| e.kind.clone()).collect();
+        assert!(kinds.contains(&EventKind::Separation) && kinds.iter().filter(|k| **k == EventKind::Ignition).count() == 2, "{model:?}: {kinds:?}");
+    }
+}
+
+#[test]
+fn recovery_timing_and_ballast_come_from_the_active_configuration() {
+    let TwoStage { rocket: mut r, .. } = two_stage();
+    let db = MotorDb::bundled();
+    let chute = r.internals().iter().find(|p| matches!(p.kind, InternalKind::Parachute { .. })).unwrap().id;
+    let first = r.active_config_id();
+    let second = r.duplicate_configuration(first).unwrap();
+    r.set_deployment(second, chute, Deployment { event: DeployEvent::TimeFromLaunch, delay: 7.0 }).unwrap();
+    let deploy_of = |r: &Rocket| recovery(r, Phase::Full).into_iter().find(|d| d.name == "Parachute").map(|d| (d.deploy, d.delay)).unwrap();
+    assert_eq!(deploy_of(&r), (Deploy::Ejection, 0.0), "the part's own deployment in the first configuration");
+    r.select_configuration(second);
+    assert_eq!(deploy_of(&r), (Deploy::Launch, 7.0));
+
+    // Ballast is dry mass of the stage holding its station: it moves the CG toward it and counts in the mass.
+    let before = balance(&r, &db, Phase::Full, 0.3, 0.0, true).unwrap();
+    let tail = r.length() - 0.05;
+    r.set_ballast(second, Some(Ballast { mass: 0.1, station: tail })).unwrap();
+    let after = balance(&r, &db, Phase::Full, 0.3, 0.0, true).unwrap();
+    assert!((after.mass - before.mass - 0.1).abs() < 1e-9);
+    assert!(after.cg > before.cg, "ballast at the tail moves the CG aft: {} -> {}", before.cg, after.cg);
+    r.select_configuration(first);
+    let plain = balance(&r, &db, Phase::Full, 0.3, 0.0, true).unwrap();
+    assert!((plain.mass - before.mass).abs() < 1e-9, "the first configuration carries no ballast");
+    assert!((r.dry_mass().mass - plain.mass + plain.motor_mass).abs() < 1e-9);
 }
 
 #[test]
@@ -347,4 +399,31 @@ fn freeform_fin_becomes_the_equivalent_trapezoid() {
     n.insert(0, PartKind::NoseCone { shape: NoseShape::PowerSeries(1.0), length: NOSE, diameter: BODY }).unwrap();
     assert_eq!(vehicle(&n, &db, Phase::Full).unwrap().body[0].kind, BodyKind::Nose(SimNose::Conical));
     assert_eq!(vehicle(&Rocket::default(), &db, Phase::Full), Err(BridgeError::EmptyRocket));
+}
+
+#[test]
+fn a_canted_fin_of_a_group_flies_as_its_own_fin_set() {
+    use bowshock_model::{Dim, RadialField};
+    let (mut r, _) = single_stage();
+    let fins = r.radials()[0].id;
+    let db = MotorDb::bundled();
+    let before = vehicle(&r, &db, Phase::Full).unwrap();
+    assert_eq!((before.fin_sets.len(), before.fin_sets[0].count), (1, 3));
+    // Unlinking changes nothing until the copy's value differs: the three copies still fly as one set.
+    assert!(r.unlink_field(fins, 1, RadialField::Cant));
+    assert_eq!(vehicle(&r, &db, Phase::Full).unwrap().fin_sets, before.fin_sets);
+    r.set_instance_dim(fins, 1, Dim::Cant, 0.035).unwrap();
+    let split = vehicle(&r, &db, Phase::Full).unwrap();
+    let mut sets: Vec<(u32, f64)> = split.fin_sets.iter().map(|f| (f.count, f.cant)).collect();
+    sets.sort_by_key(|s| std::cmp::Reverse(s.0));
+    assert_eq!(sets, [(2, 0.0), (1, 0.035)]);
+    // Geometry and station are the group's: the sets differ only in cant, and the three fins are all still there.
+    assert!(split.fin_sets.iter().all(|f| f.root_chord == before.fin_sets[0].root_chord && f.station == before.fin_sets[0].station));
+    assert_eq!(split.fin_sets.iter().map(|f| f.count).sum::<u32>(), 3);
+    // A taller fin C is its own set too, with its own span.
+    r.unlink_field(fins, 2, RadialField::Span);
+    r.set_instance_dim(fins, 2, Dim::Span, 0.12).unwrap();
+    let spans: Vec<f64> = vehicle(&r, &db, Phase::Full).unwrap().fin_sets.iter().map(|f| f.span).collect();
+    assert_eq!(spans.len(), 3);
+    assert!(spans.contains(&0.12));
 }

@@ -20,10 +20,16 @@
 //!   of a part counts toward its stage even when a malformed stage boundary falls inside it (the app flags that, see
 //!   [`warnings`]). The motor is the one the **active configuration** puts in the stage's mount; in a cluster only the
 //!   *first* (fore-most) mount that holds a motor is flown and [`warnings`] says so.
-//! * **Ignition and separation.** `Ignition::Launch` is [`Ignition::Launch`]; `Ignition::StageSeparation { delay }` of stage
-//!   `n` becomes [`Ignition::AfterPreviousBurnout`] with `delay` plus the configuration's separation delay of stage `n - 1`
-//!   (the sim separates a stage exactly when the next stage ignites, so the two delays add). The motor's ejection delay is
-//!   the slot's delay, `None` for a plugged motor.
+//! * **Staging.** The configuration's stage events become [`Timing`]s: a stage's separation event is [`StageMass::separation`]
+//!   and the ignition event of the stage its motor sits in is [`StageMotor::ignition`] (burnout, separation, time from
+//!   launch, altitude, each with its delay; events the configuration does not set take the defaults of
+//!   [`StageEvent::default_of`](bowshock_model::StageEvent::default_of)). The separation and the ignition are independent
+//!   instants: with the default "ignites on separation, 0 s" the upper stage lights the moment the stage below lets go. The
+//!   motor's ejection delay is the slot's delay, `None` for a plugged motor.
+//! * **Ballast.** The active configuration's ballast (see [`Configuration::ballast`](bowshock_model::Configuration::ballast))
+//!   is dry mass of the stage whose span holds its station, so [`balance`], the flight and the stability margin carry it.
+//! * **Recovery.** A parachute or streamer deploys as the active configuration says
+//!   ([`Rocket::active_deployment`]), which is the part's own value unless the configuration overrides it.
 //! * **Phases.** [`Phase::UpperFrom`] flies the upper stack alone: lower stages, and the geometry aft of their joint, are
 //!   dropped (with [`Vehicle::truncated`]), the first remaining motor ignites at launch, and recovery devices are re-indexed.
 //!
@@ -33,13 +39,14 @@ use std::f64::consts::PI;
 use std::fmt;
 
 use bowshock_model as model;
-use bowshock_model::{DeployEvent, InternalKind, MotorMount, MotorRef, PartId, RadialKind, Rocket, Stage, StageIssue};
+use bowshock_model::{DeployEvent, EventKind, InternalKind, MotorMount, MotorRef, PartId, RadialKind, Rocket, Stage, StageIssue, StageTrigger};
 use bowshock_motors::{Motor, MotorDb};
 
 use crate::aero::Aero;
 use crate::flight::{Deploy, Launch, RecoveryDevice, SimInput};
 use crate::vehicle::{
-    BodyKind, BodySegment, FinCrossSection, FinPlanform, FinSet, Ignition, MassProps, NoseShape, Protuberance, StageMass, StageMotor, ThrustCurve, Vehicle,
+    BodyKind, BodySegment, FinCrossSection, FinPlanform, FinSet, MassProps, NoseShape, Protuberance, StageMass, StageMotor, ThrustCurve, Timing, Trigger,
+    Vehicle,
 };
 use crate::G0;
 
@@ -181,11 +188,35 @@ fn equivalent_trapezoid(kind: &RadialKind) -> Option<(f64, f64, f64, f64, f64)> 
     Some((root_le, root, tip, span, sweep))
 }
 
+/// Adds radial group `r` as fin sets and protuberances. Copies with the same effective values (the group's with the copy's own
+/// overrides on top) fly as one set, so a group with a canted fin B becomes a set of two and a set of one.
 fn add_radial(rocket: &Rocket, r: &model::RadialPart, fins: &mut Vec<FinSet>, prots: &mut Vec<Protuberance>) {
     let (Some(station), Some(base)) = (rocket.radial_station(r), rocket.radial_base_radius(r)) else {
         return;
     };
-    let count = u32::from(r.count.max(1));
+    let mut sets: Vec<(model::InstanceParams, u32)> = Vec::new();
+    for index in 0..usize::from(r.count.max(1)) {
+        let params = r.effective(index);
+        match sets.iter_mut().find(|(known, _)| *known == params) {
+            Some((_, count)) => *count += 1,
+            None => sets.push((params, 1)),
+        }
+    }
+    for (params, count) in sets {
+        add_copies(r, &params, count, station, base, fins, prots);
+    }
+}
+
+/// `count` copies of the radial part `r` with the values `params`, standing at `station` on a surface of radius `base`.
+fn add_copies(
+    r: &model::RadialPart,
+    params: &model::InstanceParams,
+    count: u32,
+    station: f64,
+    base: f64,
+    fins: &mut Vec<FinSet>,
+    prots: &mut Vec<Protuberance>,
+) {
     let fin = |station: f64, root_chord: f64, tip_chord: f64, span: f64, sweep: f64, thickness: f64, planform: FinPlanform| FinSet {
         count,
         station,
@@ -196,11 +227,11 @@ fn add_radial(rocket: &Rocket, r: &model::RadialPart, fins: &mut Vec<FinSet>, pr
         sweep,
         thickness,
         cross_section: cross_section(r.cross_section),
-        cant: r.cant,
+        cant: params.cant,
         roughness: r.finish.roughness(),
         planform,
     };
-    match &r.kind {
+    match &params.kind {
         RadialKind::FinSet { root_chord, tip_chord, span, sweep, thickness } => {
             fins.push(fin(station, *root_chord, *tip_chord, *span, *sweep, *thickness, FinPlanform::Trapezoidal));
         }
@@ -208,7 +239,7 @@ fn add_radial(rocket: &Rocket, r: &model::RadialPart, fins: &mut Vec<FinSet>, pr
             fins.push(fin(station, *root_chord, 0.0, *span, 0.0, *thickness, FinPlanform::Elliptical));
         }
         RadialKind::FreeformFin { thickness, .. } => {
-            if let Some((le, root, tip, span, sweep)) = equivalent_trapezoid(&r.kind) {
+            if let Some((le, root, tip, span, sweep)) = equivalent_trapezoid(&params.kind) {
                 fins.push(fin(station + le, root, tip, span, sweep, *thickness, FinPlanform::Trapezoidal));
             }
         }
@@ -241,6 +272,20 @@ fn thrust_curve(m: &Motor) -> ThrustCurve {
     ThrustCurve { points, propellant_mass: m.propellant_mass, total_mass: m.total_mass, length: m.length, diameter: m.diameter }
 }
 
+/// The sim's [`Timing`] of the model's staging event of `kind` of `stage` in `config`. A separation that waits for a separation
+/// (which the model refuses, but a hand-edited document could say) waits for the burnout instead.
+fn timing(config: &model::Configuration, stage: usize, kind: EventKind) -> Timing {
+    let e = config.event(stage, kind);
+    let trigger = match e.trigger {
+        StageTrigger::Burnout => Trigger::Burnout,
+        StageTrigger::Separation if kind == EventKind::Ignition => Trigger::Separation,
+        StageTrigger::Separation => Trigger::Burnout,
+        StageTrigger::TimeFromLaunch => Trigger::Launch,
+        StageTrigger::Altitude(h) => Trigger::Altitude(h),
+    };
+    Timing::new(trigger, e.delay.max(0.0))
+}
+
 /// The motor the active configuration puts in `stage`: the first mount (fore to aft) that holds one.
 fn stage_motor(
     config: &model::Configuration,
@@ -257,12 +302,8 @@ fn stage_motor(
             continue;
         };
         let motor = find_motor(motors, reference).ok_or_else(|| BridgeError::UnknownMotor(reference.designation.clone()))?;
-        let ignition = match slot.ignition {
-            model::Ignition::StageSeparation { delay } if !first_flown && stage.index > 1 => {
-                Ignition::AfterPreviousBurnout { delay: delay.max(0.0) + config.separation_delay(stage.index - 1).max(0.0) }
-            }
-            _ => Ignition::Launch,
-        };
+        // The stack that flies from the pad lights its first motor at launch, whatever the stage's event says.
+        let ignition = if first_flown && stage.index > 1 { Timing::LAUNCH } else { timing(config, stage.index, EventKind::Ignition) };
         return Ok(Some(StageMotor {
             curve: thrust_curve(motor),
             mount_aft_station: mount.motor_aft_station,
@@ -299,7 +340,12 @@ pub fn vehicle(rocket: &Rocket, motors: &MotorDb, phase: Phase) -> Result<Vehicl
     }
 
     let (config, mounts) = (rocket.active_configuration(), rocket.motor_mounts());
-    let owned: Vec<(usize, model::MassProps)> = rocket.component_masses().into_iter().filter_map(|(id, m)| Some((rocket.stage_of(id)?, m))).collect();
+    let mut owned: Vec<(usize, model::MassProps)> = rocket.component_masses().into_iter().filter_map(|(id, m)| Some((rocket.stage_of(id)?, m))).collect();
+    if let Some(b) = config.ballast {
+        // The stage whose span holds the ballast's station (the nearest end otherwise).
+        let holder = stages.iter().find(|s| b.station >= s.fore_station && b.station <= s.aft_station).or_else(|| stages.last());
+        owned.extend(holder.map(|s| (s.index, model::MassProps::point(b.mass, b.station))));
+    }
     let mut sim_stages = Vec::new();
     for stage in stages.iter().filter(|s| s.index >= first) {
         let mut dry = sim_mass(model::MassProps::combine(owned.iter().filter(|(s, _)| *s == stage.index).map(|(_, m)| *m)));
@@ -311,6 +357,7 @@ pub fn vehicle(rocket: &Rocket, motors: &MotorDb, phase: Phase) -> Result<Vehicl
             fore_station: stage.fore_station,
             aft_station: stage.aft_station,
             motor: stage_motor(config, motors, stage, &mounts, stage.index == first)?,
+            separation: timing(config, stage.index, EventKind::Separation),
         });
     }
 
@@ -325,24 +372,27 @@ pub fn vehicle(rocket: &Rocket, motors: &MotorDb, phase: Phase) -> Result<Vehicl
 // ---- recovery -----------------------------------------------------------------------------------------------------------
 
 /// The recovery devices (parachutes and streamers) that fly in `phase`, with stage indices as in [`vehicle`] for the same
-/// phase (sim stage 0 is the first stage that flies). A parachute's `cd_area` is `cd * pi d^2 / 4`, a streamer's
-/// `cd * length * width`; the name is the part's display name. Empty for a phase the rocket does not have.
+/// phase (sim stage 0 is the first stage that flies), deploying as the active configuration says. A parachute's `cd_area` is
+/// `cd * pi d^2 / 4`, a streamer's `cd * length * width`; the name is the part's display name. Empty for a phase the rocket
+/// does not have.
 pub fn recovery(rocket: &Rocket, phase: Phase) -> Vec<RecoveryDevice> {
     let first = phase.first_stage();
     rocket
         .internals()
         .iter()
         .filter_map(|p| {
-            let (cd_area, deployment) = match p.kind {
-                InternalKind::Parachute { diameter, cd, deploy, .. } => (cd * PI * diameter * diameter / 4.0, deploy),
-                InternalKind::Streamer { length, width, cd, deploy } => (cd * length * width, deploy),
+            let cd_area = match p.kind {
+                InternalKind::Parachute { diameter, cd, .. } => cd * PI * diameter * diameter / 4.0,
+                InternalKind::Streamer { length, width, cd, .. } => cd * length * width,
                 _ => return None,
             };
+            let deployment = rocket.active_deployment(p.id)?;
             let stage = rocket.stage_of(p.id)?;
             let deploy = match deployment.event {
                 DeployEvent::Apogee => Deploy::Apogee,
                 DeployEvent::Altitude(h) => Deploy::Altitude(h),
                 DeployEvent::Ejection => Deploy::Ejection,
+                DeployEvent::TimeFromLaunch => Deploy::Launch,
             };
             (stage >= first).then(|| RecoveryDevice { name: p.display_name(), stage: stage - first, cd_area, deploy, delay: deployment.delay.max(0.0) })
         })
@@ -451,7 +501,7 @@ fn thrust_to_weight(rocket: &Rocket, motors: &MotorDb) -> Option<f64> {
         .stages
         .iter()
         .filter_map(|s| s.motor.as_ref())
-        .filter(|m| m.ignition == Ignition::Launch && m.curve.burn_time() > 0.0)
+        .filter(|m| m.ignition.trigger == Trigger::Launch && m.ignition.delay <= 0.0 && m.curve.burn_time() > 0.0)
         .map(|m| m.curve.total_impulse() / m.curve.burn_time())
         .sum();
     (thrust > 0.0 && mass > 0.0).then(|| thrust / (mass * G0))
@@ -553,10 +603,7 @@ pub fn warnings(rocket: &Rocket, motors: &MotorDb, balance: &Balance) -> Vec<War
         out.push(Warning::new(Level::Warn, "No recovery device", None));
     }
     for p in devices {
-        let (InternalKind::Parachute { deploy, .. } | InternalKind::Streamer { deploy, .. }) = p.kind else {
-            continue;
-        };
-        if deploy.event != DeployEvent::Ejection {
+        if rocket.active_deployment(p.id).map(|d| d.event) != Some(DeployEvent::Ejection) {
             continue;
         }
         let ejects = rocket

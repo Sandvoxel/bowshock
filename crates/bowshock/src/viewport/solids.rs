@@ -8,6 +8,7 @@ use std::f32::consts::TAU;
 
 use glam::{Vec2, Vec3};
 
+use super::radial::{tilt_dir, tilt_point};
 use super::scene::Vertex;
 
 /// Per-vertex data the GPU reads.
@@ -223,17 +224,18 @@ impl Sink {
     }
 
     /// A fin plate: the polygon `outline` of `(z, height)` points (root edge at height 0) standing on a surface of radius `base`
-    /// at `angle` (0 is +Y, increasing towards +X), `thickness` thick, its root sunk slightly into the parent. Any simple
-    /// polygon, convex or not.
-    pub fn plate(&mut self, outline: &[(f32, f32)], z0: f32, base: f32, angle: f32, thickness: f32) {
+    /// at `angle` (0 is +Y, increasing towards +X), `thickness` thick, its root sunk slightly into the parent, canted by `cant`
+    /// radians about its span line through the root's leading edge (see [`tilt_point`]). Any simple polygon, convex or not.
+    pub fn plate(&mut self, outline: &[(f32, f32)], z0: f32, base: f32, angle: f32, cant: f32, thickness: f32) {
         const SINK: f32 = 0.0005;
         if outline.len() < 3 {
             return;
         }
         let (s, c) = angle.sin_cos();
         let (u, t) = (Vec3::new(s, c, 0.0), Vec3::new(c, -s, 0.0));
+        let t = tilt_dir(t, angle, cant);
         let half = t * (thickness / 2.0);
-        let point = |&(z, h): &(f32, f32)| u * (base + h - if h <= 0.0 { SINK } else { 0.0 }) + Vec3::Z * (z0 + z);
+        let point = |&(z, h): &(f32, f32)| tilt_point(u * (base + h - if h <= 0.0 { SINK } else { 0.0 }) + Vec3::Z * (z0 + z), z0, angle, cant);
         let pts: Vec<Vec3> = outline.iter().map(point).collect();
         let flat: Vec<Vec2> = outline.iter().map(|&(z, h)| Vec2::new(z, h)).collect();
         for tri in triangulate(&flat) {
@@ -316,7 +318,7 @@ mod tests {
         let mut s = Sink::default();
         s.tube(0.04, 0.035, 0.0, 0.2, 16);
         s.cuboid(0.02, 0.01, 0.0, 0.05);
-        s.plate(&[(0.0, 0.0), (0.03, 0.06), (0.08, 0.06), (0.1, 0.0)], 0.0, 0.04, 0.5, 0.003);
+        s.plate(&[(0.0, 0.0), (0.03, 0.06), (0.08, 0.06), (0.1, 0.0)], 0.0, 0.04, 0.5, 0.2, 0.003);
         assert!(!s.vertices.is_empty() && s.vertices.len() % 3 == 0);
         for tri in s.vertices.chunks(3) {
             let [a, b, c] = [0, 1, 2].map(|i| Vec3::from(tri[i].position));

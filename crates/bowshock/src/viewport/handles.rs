@@ -119,7 +119,7 @@ pub struct Context<'a> {
 pub fn inset(cx: &Context, id: PartId) -> Option<Inset> {
     let r = cx.rocket.radial(id)?;
     let place = pick::placement(cx.rocket, r, cx.instance)?;
-    let reach = match &r.kind {
+    let reach = match &r.effective(cx.instance).kind {
         RadialKind::LaunchLug { diameter, .. } => *diameter,
         RadialKind::RailButton { height, .. } => *height,
         k => k.fin_span().unwrap_or(0.0),
@@ -206,8 +206,9 @@ fn radial(cx: &Context, up: Vec3, r: &bowshock_model::RadialPart, place: Placeme
     let (u, _) = dirs(place.angle);
     let (z0, base) = (f64::from(place.z0), f64::from(place.base));
     let _ = up;
+    let own = r.effective(cx.instance);
     let world = |radius: f64, z: f64| u * radius as f32 + Vec3::Z * z as f32;
-    match (dim, &r.kind) {
+    match (dim, &own.kind) {
         (Dim::Span, RadialKind::FinSet { span, sweep, tip_chord, .. }) => line(camera, size, world(base + span, z0 + sweep + tip_chord / 2.0), u, 1.0),
         (Dim::Span, RadialKind::EllipticalFin { span, root_chord, .. }) => line(camera, size, world(base + span, z0 + root_chord / 2.0), u, 1.0),
         (Dim::RootChord, RadialKind::FinSet { root_chord, .. } | RadialKind::EllipticalFin { root_chord, .. }) => {
@@ -219,7 +220,7 @@ fn radial(cx: &Context, up: Vec3, r: &bowshock_model::RadialPart, place: Placeme
             line(camera, size, world(base, z0 + root_chord / 2.0), Vec3::Z, 1.0)
         }
         (Dim::Position, RadialKind::FreeformFin { .. }) => {
-            let mid = r.kind.extent() / 2.0;
+            let mid = own.kind.extent() / 2.0;
             line(camera, size, world(base, z0 + mid), Vec3::Z, 1.0)
         }
         (Dim::Position, RadialKind::LaunchLug { diameter, .. }) => line(camera, size, world(base + diameter / 2.0, z0), Vec3::Z, 1.0),
@@ -248,7 +249,7 @@ fn radial(cx: &Context, up: Vec3, r: &bowshock_model::RadialPart, place: Placeme
         (Dim::Cant, _) => {
             let ins = inset?;
             let root = ins.centre + arc_dir(r.angle) * ins.base;
-            Some((root + arc_dir(r.angle + r.cant) * CANT_LEVER.max(ins.reach), Axis::Arc { centre: root }))
+            Some((root + arc_dir(r.angle + own.cant) * CANT_LEVER.max(ins.reach), Axis::Arc { centre: root }))
         }
         (Dim::Angle, _) => {
             let ins = inset?;

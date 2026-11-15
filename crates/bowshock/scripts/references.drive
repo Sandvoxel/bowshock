@@ -1,0 +1,84 @@
+# References between fields (UnitInput: `{` picks, chips, ƒ, → N, cycle error, part menu, broken reference).
+# `cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/references.drive out/references`
+viewport 1280x1100
+scale 1
+
+# Select the fin set in Station Lanes.
+click (922, 924)
+screenshot 01-fins.png
+
+# Height: type `0.5 * {` -- pick mode. The field gets the accent ring, the other numeric fields dashed accent outlines.
+click (1180, 323)
+type "0.5 * {"
+screenshot 02-pick-mode.png
+
+# Click the Root chord field: it lands as a chip. Keep typing maths around it.
+click (1180, 255)
+screenshot 03-chip.png
+type " + 2"
+screenshot 04-chip-maths.png
+
+# Enter commits: the result with the ƒ badge (0.5 x 120 + 2 = 62 mm); Root chord shows → 1.
+type enter
+screenshot 05-committed.png
+
+# Change the source: Height follows (50 mm).
+click (1180, 255)
+type "100"
+type enter
+screenshot 06-source-changed.png
+
+# A cycle: Root chord may not use Height, which uses Root chord.
+click (1180, 255)
+type "{"
+click (1180, 323)
+type enter
+screenshot 07-circular.png
+
+# Click a part in Station Lanes during a pick: its value menu opens (Tip chord = 2 x {Booster, ...}).
+click (1180, 343)
+type "2 * {"
+click (870, 896)
+screenshot 08-part-menu.png
+
+# Pick "Outer Ø" of the Booster from the menu: it lands as a chip with the part's system colour.
+click (910, 947)
+screenshot 09-menu-picked.png
+type enter
+screenshot 10-part-formula.png
+
+# Hovering a formula field shows the formula.
+move (1180, 289)
+screenshot 11-hover-formula.png
+
+# Scrubbing a formula field asks first (grip of Tip chord).
+click (1100, 289)
+screenshot 12-scrub-asks.png
+click "Cancel"
+
+# Source side: Root chord shows → 1; click it to list the dependants.
+click (1224, 255)
+screenshot 13-dependants.png
+click (1224, 255)
+
+
+# Sweep length takes a value of the ballast, picked in Station Lanes (the menu slides back inside the window).
+click (1180, 357)
+type "0.5 * {"
+click (510, 1029)
+screenshot 14-ballast-menu.png
+click (550, 1045)
+type enter
+screenshot 15-ballast-formula.png
+
+# Delete the ballast: the reference breaks. The chip turns red and struck through; the value is kept.
+click (510, 1029)
+click (1257, 62)
+click "Delete"
+click (922, 924)
+screenshot 16-broken.png
+click "Re-pick"
+screenshot 17-broken-chip.png
+type escape
+click "Convert"
+screenshot 18-converted.png

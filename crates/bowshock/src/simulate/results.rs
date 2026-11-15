@@ -32,7 +32,7 @@ fn badge<'a>(severity: Severity, label: impl Into<String>) -> Element<'a, Messag
 
 /// The whole column.
 pub(super) fn view<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
-    let revision = ctx.doc.revision();
+    let revision = state.revision(ctx);
     let flight = state.selected_flight();
     let mut parts: Vec<Element<'a, Message>> = Vec::new();
 

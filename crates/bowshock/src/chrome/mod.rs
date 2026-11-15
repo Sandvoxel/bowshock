@@ -17,7 +17,9 @@ use iced::{Background, Center, Element, Fill, Padding, Task, Theme, Widget};
 use crate::app::{self, ui, Ctx, Selection};
 use crate::theme::{self, MONO};
 use crate::tokens::{BIN_W, RAIL_W, SPACE_1, SPACE_2, SPACE_3, STATUSBAR_H, TEXT_BODY, TEXT_LABEL};
+use crate::units::Quantity;
 use crate::widgets::glyph::{self, Mark, Tone};
+use crate::widgets::unit_input::unit_input;
 pub use status_strip::status_strip;
 pub use top_bar::top_bar;
 
@@ -49,6 +51,10 @@ pub enum Message {
     SelectConfig(ConfigId),
     /// Copy the current configuration (timing and motors) and make the copy current.
     DuplicateConfig,
+    /// The ballast mass of the current configuration (kg); zero removes it.
+    BallastMass(f64),
+    /// The station of the current configuration's ballast, from the nose tip (m).
+    BallastStation(f64),
     /// Delete this configuration (right-click on its row); the last one stays.
     DeleteConfig(ConfigId),
     /// "Compare all in lanes".
@@ -117,6 +123,22 @@ impl State {
                     }
                 });
                 self.dismiss();
+            }
+            Message::BallastMass(mass) => {
+                ctx.doc.edit("Edit ballast", |r| {
+                    // The first ballast goes in the nose, where it helps stability most.
+                    let station = r.active_configuration().ballast.map_or(0.1 * r.length(), |b| b.station);
+                    let config = r.active_config_id();
+                    let _ = r.set_ballast(config, Some(bowshock_model::Ballast { mass, station }));
+                });
+            }
+            Message::BallastStation(station) => {
+                ctx.doc.edit("Move ballast", |r| {
+                    let config = r.active_config_id();
+                    if let Some(b) = r.active_configuration().ballast {
+                        let _ = r.set_ballast(config, Some(bowshock_model::Ballast { station, ..b }));
+                    }
+                });
             }
             Message::DeleteConfig(id) => {
                 if let Err(e) = ctx.doc.edit("Delete configuration", |r| r.remove_configuration(id).map(|_| ())) {
@@ -195,7 +217,11 @@ impl State {
                 None => text("—").font(MONO).size(TEXT_BODY).style(theme::faint).boxed(),
             };
             let current = id == active;
-            let line = row![text(name).size(TEXT_BODY), Space::new().width(Fill), margin].align_y(Center);
+            let ballast: Element<'a, Message> = match config.ballast {
+                Some(b) => text(format!("+{}", ui::with_unit(b.mass, Quantity::Mass, ctx.units))).font(MONO).size(TEXT_LABEL).style(theme::faint).boxed(),
+                None => Space::new().boxed(),
+            };
+            let line = row![text(name).size(TEXT_BODY), Space::new().width(Fill), ballast, Space::new().width(SPACE_3), margin].align_y(Center);
             let item = button(line).width(Fill).height(ROW_H).padding([0.0, SPACE_3]).style(menu_item(current, false)).on_press(Message::SelectConfig(id));
             // Deleting is on the row's right-click menu.
             rows = rows.push(mouse_area(item).on_right_press(Message::DeleteConfig(id)).boxed());
@@ -221,12 +247,24 @@ impl State {
             None => command("Rename…", "F2", false, Message::BeginRename),
         };
         let separator = container(Space::new()).width(Fill).height(1).style(theme::hairline);
+        // Ballast of the current configuration: a mass and, once it has one, where it sits.
+        let units = ctx.units;
+        let ballast = rocket.active_configuration().ballast;
+        let mass_field: Element<'a, Message> =
+            unit_input("Ballast", ballast.map_or(0.0, |b| b.mass), Quantity::Mass, &units).label_width(56.0).on_commit(Message::BallastMass).into();
+        let mut ballast_rows = column![mass_field].spacing(SPACE_1);
+        if let Some(b) = ballast {
+            let station: Element<'a, Message> =
+                unit_input("Station", b.station, Quantity::Length, &units).label_width(56.0).on_commit(Message::BallastStation).into();
+            ballast_rows = ballast_rows.push(station);
+        }
         let menu = column![
             rows,
             separator,
             command("New configuration…", if cfg!(target_os = "macos") { "⌘L" } else { "Ctrl L" }, true, Message::NewConfiguration),
-            command("Duplicate current", "", false, Message::DuplicateConfig),
+            command("Duplicate current", "copies timing, ballast", false, Message::DuplicateConfig),
             renaming,
+            container(ballast_rows).padding([SPACE_1, SPACE_3]),
             command("Compare all in lanes", compare, false, Message::ToggleCompare),
         ];
         let panel = container(mouse_area(menu).on_press(Message::Nothing)).width(RAIL_W + BIN_W).style(theme::overlay);

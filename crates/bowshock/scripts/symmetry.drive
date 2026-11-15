@@ -1,0 +1,46 @@
+# Symmetry (design kit Symmetry): `cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/symmetry.drive out/symmetry`
+# Linked group of three fins -> one canted fin B (right-click Cant -> Unlink for this fin) -> relink -> detach -> rejoin ->
+# split all. The camera is turned to the rear view first (drag the ViewCube round to TAIL, click it) so the fins show end-on.
+viewport 1280x1000
+press (906, 118)
+move (860, 118)
+move (800, 118)
+release (800, 118)
+press (906, 118)
+move (860, 118)
+move (800, 118)
+release (800, 118)
+click (916, 124)
+# Select the fin group in the Station Lanes, then copy B with the letter after the name.
+click (925, 824)
+click (1092, 62)
+screenshot sym-1-linked.png
+# Right-click a field: Unlink for this fin.
+click right(1175, 659)
+screenshot sym-2-menu.png
+click (1205, 693)
+# Give fin B 15 degrees of cant.
+click (1175, 659)
+type "15"
+type enter
+screenshot sym-3-unlinked.png
+# The next copy (C) still follows the group's value.
+click (1092, 62)
+screenshot sym-4-copy-c.png
+# Back to B (C -> A -> B) and relink the field.
+click (1092, 62)
+click (1092, 62)
+click right(1175, 659)
+click (1205, 693)
+screenshot sym-5-relinked.png
+# Unlink again, then detach B: it leaves with its own cant, the other two stay linked.
+click right(1175, 659)
+click (1205, 693)
+click (1175, 659)
+type "15"
+type enter
+click (1020, 136)
+screenshot sym-6-detached.png
+# Rejoin group: the only fin group is offered, then whose settings win.
+click (1218, 106)
+screenshot sym-7-rejoin.png

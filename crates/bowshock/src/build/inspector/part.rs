@@ -5,15 +5,17 @@
 use std::rc::Rc;
 
 use bowshock_model::{
-    materials_of_kind, DeployEvent, Dim, FinSection, Finish, InternalKind, InternalPart, MassRole, Material, MaterialKind, Part, PartKind, PartRef, RadialKind,
-    RadialPart, Rocket,
+    materials_of_kind, DeployEvent, Dim, EventKind, FinSection, Finish, InternalKind, InternalPart, MassRole, Material, MaterialKind, Part, PartId, PartKind,
+    PartRef, RadialKind, RadialPart, Rocket,
 };
 use iced::widget::{column, container, mouse_area, row, text, text_input, Space};
 use iced::{mouse, Element, Fill, Widget};
 
-use super::edit::{self, Anchor, Field, Trigger};
+use super::edit::{Anchor, Field, Trigger};
 use super::form::{choose, text_row, value_row, Form};
 use super::health::{self, Flight};
+use super::separation;
+use super::symmetry::{linked, Link};
 use super::{Message, State};
 use crate::app::ui;
 use crate::theme::{self, MONO};
@@ -37,6 +39,10 @@ pub struct Params<'a> {
     pub id: u64,
     /// The cached flight, if one has been flown for this revision.
     pub flight: Option<Rc<Flight>>,
+    /// The selected radial group and the copy on show, when it has two or more copies.
+    pub link: Option<Link<'a>>,
+    /// The copy of a radial group on show (0 is A); 0 for every other part.
+    pub copy: usize,
 }
 
 /// The fin cross-section options as the kit words them.
@@ -102,34 +108,36 @@ fn radial_rows<'a>(p: &Params<'a>, radial: &RadialPart) -> Vec<Element<'a, Messa
     let mut rows: Vec<Element<'a, Message>> = Vec::new();
     let count_label = if radial.kind.is_fin() { "Fin count" } else { "Count" };
     rows.push(labeled(count_label, segmented_fill(&COUNTS, radial.count, Message::Count)));
-    match &radial.kind {
+    // The fields show the copy on show: the group's values with that copy's own overrides on top.
+    let own = radial.effective(p.copy);
+    match &own.kind {
         RadialKind::FinSet { root_chord, tip_chord, span, sweep, thickness } => {
-            rows.push(f.num("Root chord", *root_chord, Quantity::Length, dim(Dim::RootChord)));
-            rows.push(f.num("Tip chord", *tip_chord, Quantity::Length, dim(Dim::TipChord)));
-            rows.push(f.num("Height", *span, Quantity::Length, dim(Dim::Span)));
-            rows.push(f.num("Sweep length", *sweep, Quantity::Length, dim(Dim::Sweep)));
+            rows.push(linked(p, "Root chord", *root_chord, Quantity::Length, Dim::RootChord));
+            rows.push(linked(p, "Tip chord", *tip_chord, Quantity::Length, Dim::TipChord));
+            rows.push(linked(p, "Height", *span, Quantity::Length, Dim::Span));
+            rows.push(linked(p, "Sweep length", *sweep, Quantity::Length, Dim::Sweep));
             rows.push(f.derived("Sweep angle", sweep.atan2(*span), Quantity::Angle, Field::SweepAngle));
-            rows.push(f.num("Thickness", *thickness, Quantity::Length, dim(Dim::Thickness)));
+            rows.push(linked(p, "Thickness", *thickness, Quantity::Length, Dim::Thickness));
         }
         RadialKind::EllipticalFin { root_chord, span, thickness } => {
-            rows.push(f.num("Root chord", *root_chord, Quantity::Length, dim(Dim::RootChord)));
-            rows.push(f.num("Height", *span, Quantity::Length, dim(Dim::Span)));
-            rows.push(f.num("Thickness", *thickness, Quantity::Length, dim(Dim::Thickness)));
+            rows.push(linked(p, "Root chord", *root_chord, Quantity::Length, Dim::RootChord));
+            rows.push(linked(p, "Height", *span, Quantity::Length, Dim::Span));
+            rows.push(linked(p, "Thickness", *thickness, Quantity::Length, Dim::Thickness));
         }
         RadialKind::FreeformFin { points, thickness } => {
             // The outline is edited by its vertices in the viewport; the extents follow from it.
-            rows.push(f.fixed("Root chord", radial.kind.extent(), Quantity::Length));
-            rows.push(f.fixed("Height", radial.kind.fin_span().unwrap_or(0.0), Quantity::Length));
+            rows.push(f.fixed("Root chord", own.kind.extent(), Quantity::Length));
+            rows.push(f.fixed("Height", own.kind.fin_span().unwrap_or(0.0), Quantity::Length));
             rows.push(text_row("Vertices", format!("{} (drag them in the viewport)", points.len())));
-            rows.push(f.num("Thickness", *thickness, Quantity::Length, dim(Dim::Thickness)));
+            rows.push(linked(p, "Thickness", *thickness, Quantity::Length, Dim::Thickness));
         }
         RadialKind::LaunchLug { length, diameter } => {
-            rows.push(f.num("Length", *length, Quantity::Length, dim(Dim::Length)));
-            rows.push(f.num("Outer Ø", *diameter, Quantity::Length, dim(Dim::Diameter)));
+            rows.push(linked(p, "Length", *length, Quantity::Length, Dim::Length));
+            rows.push(linked(p, "Outer Ø", *diameter, Quantity::Length, Dim::Diameter));
         }
         RadialKind::RailButton { height, diameter } => {
-            rows.push(f.num("Height", *height, Quantity::Length, dim(Dim::Height)));
-            rows.push(f.num("Head Ø", *diameter, Quantity::Length, dim(Dim::Diameter)));
+            rows.push(linked(p, "Height", *height, Quantity::Length, Dim::Height));
+            rows.push(linked(p, "Head Ø", *diameter, Quantity::Length, Dim::Diameter));
         }
     }
     if radial.kind.is_fin() {
@@ -176,20 +184,20 @@ fn internal<'a>(p: &Params<'a>, part: &InternalPart) -> Vec<Element<'a, Message>
             rows.push(f.num("Inner Ø", *hole, Quantity::Length, dim(Dim::InnerDiameter)));
             rows.push(f.num("Thickness", *thickness, Quantity::Length, dim(Dim::Thickness)));
         }
-        InternalKind::Parachute { diameter, cd, line_count, line_length, packed_length, deploy, .. } => {
+        InternalKind::Parachute { diameter, cd, line_count, line_length, packed_length, .. } => {
             rows.push(f.num("Canopy Ø", *diameter, Quantity::Length, Field::CanopyDiameter));
             rows.push(f.num("Drag coeff.", *cd, Quantity::Scalar, Field::Cd));
             rows.push(f.num("Lines", f64::from(*line_count), Quantity::Scalar, Field::LineCount));
             rows.push(f.num("Line length", *line_length, Quantity::Length, Field::LineLength));
             rows.push(f.num("Packed length", *packed_length, Quantity::Length, dim(Dim::PackedLength)));
             rows.push(auto_outer("Packed Ø"));
-            rows.extend(deployment_rows(p, deploy.event, deploy.delay));
+            rows.extend(deployment_rows(p, part.id));
         }
-        InternalKind::Streamer { length, width, cd, deploy } => {
+        InternalKind::Streamer { length, width, cd, .. } => {
             rows.push(f.num("Length", *length, Quantity::Length, Field::StreamerLength));
             rows.push(f.num("Width", *width, Quantity::Length, Field::StreamerWidth));
             rows.push(f.num("Drag coeff.", *cd, Quantity::Scalar, Field::Cd));
-            rows.extend(deployment_rows(p, deploy.event, deploy.delay));
+            rows.extend(deployment_rows(p, part.id));
         }
         InternalKind::ShockCord { length, packed_length } => {
             rows.push(f.num("Length", *length, Quantity::Length, Field::CordLength));
@@ -204,15 +212,19 @@ fn internal<'a>(p: &Params<'a>, part: &InternalPart) -> Vec<Element<'a, Message>
     rows
 }
 
-/// A parachute's or streamer's trigger, altitude and delay: the same event-plus-delay pattern as the staging sections.
-fn deployment_rows<'a>(p: &Params<'a>, event: DeployEvent, delay: f64) -> Vec<Element<'a, Message>> {
+/// A parachute's or streamer's trigger, altitude and delay in the active configuration (the part's own value is what a
+/// configuration without one of its own gets): the same event-plus-delay pattern as the staging sections, under a head that
+/// carries the `PER CONFIG` badge.
+fn deployment_rows<'a>(p: &Params<'a>, id: PartId) -> Vec<Element<'a, Message>> {
     let f = &p.form;
+    let deploy = p.rocket.active_deployment(id).unwrap_or_default();
     let options: Vec<(Trigger, String)> = Trigger::ALL.iter().map(|t| (*t, t.name().to_string())).collect();
-    let mut rows = vec![labeled("Deploys on", choose(options, &Trigger::of(event), Message::Trigger))];
-    if let DeployEvent::Altitude(h) = event {
+    let head = row![text("DEPLOYMENT").font(MONO).size(9.5).style(theme::muted), separation::badge("PER CONFIG")].spacing(SPACE_2).align_y(iced::Center);
+    let mut rows = vec![container(head).padding([SPACE_2, 0.0]).boxed(), labeled("Deploys on", choose(options, &Trigger::of(deploy.event), Message::Trigger))];
+    if let DeployEvent::Altitude(h) = deploy.event {
         rows.push(f.num("Altitude", h, Quantity::Altitude, Field::DeployAltitude));
     }
-    rows.push(f.num("Delay", delay, Quantity::Time, Field::DeployDelay));
+    rows.push(f.num("Delay", deploy.delay, Quantity::Time, Field::DeployDelay));
     rows
 }
 
@@ -230,16 +242,10 @@ fn motor_rows<'a>(p: &Params<'a>) -> Vec<Element<'a, Message>> {
     if !slot.is_plugged() {
         rows.push(f.per_config("Ejection delay", slot.delay, Quantity::Time, Field::EjectionDelay));
     }
-    if p.state.stage_of_mount(p.rocket, p.id) > 1 {
-        let (on, delay) = match slot.ignition {
-            bowshock_model::Ignition::Launch => (edit::Ignite::Launch, 0.0),
-            bowshock_model::Ignition::StageSeparation { delay } => (edit::Ignite::Separation, delay),
-        };
-        let options = vec![(edit::Ignite::Separation, "Separation".to_string()), (edit::Ignite::Launch, "Launch".to_string())];
-        rows.push(labeled("Ignites on", choose(options, &on, Message::IgniteOn)));
-        if on == edit::Ignite::Separation {
-            rows.push(f.per_config("Ignition delay", delay, Quantity::Time, Field::IgnitionDelay));
-        }
+    let stage = p.state.stage_of_mount(p.rocket, p.id);
+    if stage > 1 {
+        let lower = separation::stage_name(stage - 1, p.rocket.stages().len());
+        rows.extend(separation::timing_rows(f, config, stage, EventKind::Ignition, &lower, true));
     }
     rows
 }
@@ -276,7 +282,7 @@ fn position<'a>(p: &Params<'a>) -> Vec<Element<'a, Message>> {
     if let Some(radial) = rocket.radial(p.id) {
         rows.push(f.num("Rotation", radial.angle, Quantity::Angle, dim(Dim::Angle)));
         if radial.kind.is_fin() {
-            rows.push(f.num("Cant", radial.cant, Quantity::Angle, dim(Dim::Cant)));
+            rows.push(linked(p, "Cant", radial.effective(p.copy).cant, Quantity::Angle, Dim::Cant));
         }
     }
     rows

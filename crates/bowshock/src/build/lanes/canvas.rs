@@ -397,7 +397,14 @@ impl canvas::Program<Message> for Lanes<'_> {
                 }
             }
             Event::Mouse(mouse::Event::ButtonReleased(button)) => match (button, state.mode) {
-                (mouse::Button::Left, Mode::Moving { .. } | Mode::Resizing { .. }) => {
+                (mouse::Button::Left, Mode::Moving { id, .. }) => {
+                    state.mode = Mode::Idle;
+                    // A free fin released on a group's bar asks to rejoin it; anywhere else the move just ends.
+                    let group = local.and_then(|p| self.rejoin_target(&axis, &rows, p, id));
+                    let message = group.map_or(Message::EditEnd, |group| Message::DropOnGroup { part: id, group });
+                    Some(Action::publish(message).and_capture())
+                }
+                (mouse::Button::Left, Mode::Resizing { .. }) => {
                     state.mode = Mode::Idle;
                     Some(Action::publish(Message::EditEnd).and_capture())
                 }
@@ -752,6 +759,19 @@ impl Lanes<'_> {
                 tag(f, p.x + 10.0, (p.y - 14.0).max(RULER_H + 8.0), &text, t.ink, t.bg_300, Some(t.line_200), false);
             }
         }
+
+        // A free part carried onto a group's bar: the bar it would rejoin is outlined and named.
+        if let (Mode::Moving { id, .. }, Some(p)) = (state.mode, state.cursor) {
+            let target = self.rejoin_target(axis, rows, p, id).and_then(|g| self.scene.bars.iter().find(|b| b.key == BarKey::Part(g)));
+            if let Some((bar, rect)) = target.and_then(|b| geometry::bar_rect(b, rows, axis).map(|r| (b, r))) {
+                outline(
+                    f,
+                    Rectangle { x: rect.x - 2.0, y: rect.y - 2.0, width: rect.width + 4.0, height: rect.height + 4.0 },
+                    Stroke::default().with_color(t.accent).with_width(2.0),
+                );
+                tag(f, p.x + 10.0, (p.y - 14.0).max(RULER_H + 8.0), &format!("Release to rejoin {}", bar.name), t.ink, t.bg_300, Some(t.accent), false);
+            }
+        }
     }
 
     fn draw_bar(&self, f: &mut Frame, paint: &Paint, bar: &Bar, rect: Rectangle) {
@@ -838,12 +858,33 @@ impl Lanes<'_> {
                 link(f, Point::new(tx, mid - 3.5), if selected { dim(t.accent) } else { ink });
                 tx += link_w;
             }
+            // A group's per-copy overrides are listed in mono after its name (`B: cant`), in the `warn` colour.
+            let ovr_w = if bar.overrides.is_empty() { 0.0 } else { text_w(&bar.overrides, TEXT_SMALL, MONO) + 6.0 };
+            let ovr_w = if avail >= need_name + ovr_w + 2.0 { ovr_w } else { 0.0 };
             f.with_clip(Rectangle { x: x - 1.0, y: rect.y, width: avail, height: rect.height }, |f| {
                 put(f, &bar.name, Point::new(tx, mid), ink, TEXT_BAR, SANS, Alignment::Left, alignment::Vertical::Center);
-                if dim_w > 0.0 && avail >= need_name + dim_w + 2.0 && !self.thin_over(bar, axis, tx + name_w + 4.0, tx + name_w + 6.0 + dim_w) {
-                    put(f, &bar.dim, Point::new(tx + name_w + 6.0, mid), faint, TEXT_SMALL, MONO, Alignment::Left, alignment::Vertical::Center);
+                if ovr_w > 0.0 {
+                    put(f, &bar.overrides, Point::new(tx + name_w + 6.0, mid), dim(t.warn), TEXT_SMALL, MONO, Alignment::Left, alignment::Vertical::Center);
+                }
+                let at = tx + name_w + ovr_w;
+                if dim_w > 0.0 && avail >= need_name + ovr_w + dim_w + 2.0 && !self.thin_over(bar, axis, at + 4.0, at + 6.0 + dim_w) {
+                    put(f, &bar.dim, Point::new(at + 6.0, mid), faint, TEXT_SMALL, MONO, Alignment::Left, alignment::Vertical::Center);
                 }
             });
+            if ovr_w == 0.0 && !bar.overrides.is_empty() {
+                // Too long for the bar: the list goes into the open space ahead of it, ending at its fore edge.
+                let w = mono_w(bar.overrides.chars().count(), TEXT_SMALL) + 8.0;
+                let left = rect.x - 2.0 - w;
+                let blocked = self.scene.bars.iter().any(|o| {
+                    o.key != bar.key && !o.alt && o.system == bar.system && o.sub == bar.sub && {
+                        let (a, b) = axis.span(o.start, o.end);
+                        a < rect.x && b > left - 2.0
+                    }
+                });
+                if !blocked && left > LABEL_W {
+                    tag(f, rect.x - 2.0, mid, &bar.overrides, dim(t.warn), t.bg_200, Some(dim(t.warn)), true);
+                }
+            }
         } else if rect.width < need_name + 8.0 {
             let Some(lane) = rows.iter().find(|l| l.lane.system == bar.system) else { return };
             let label = if bar.count > 1 {
@@ -851,6 +892,7 @@ impl Lanes<'_> {
             } else {
                 bar.name.to_lowercase()
             };
+            let label = if bar.overrides.is_empty() { label } else { format!("{label} {}", bar.overrides) };
             let (lx, w) = (right + 4.0, mono_w(label.chars().count(), TEXT_SMALL));
             // Room: nothing else on this sub-row is under the label, and the block is not itself on top of a longer bar.
             let (row_y, _) = lane.row(bar.sub);
@@ -873,6 +915,16 @@ impl Lanes<'_> {
                 );
             }
         }
+    }
+
+    /// The radial group a free part `part` dragged to `p` would rejoin: the bar of another radial part of the same family under
+    /// the cursor (the dragged bar itself follows the cursor, so it is skipped).
+    fn rejoin_target(&self, axis: &Axis, rows: &[LaneBox], p: Point, part: PartId) -> Option<PartId> {
+        self.scene.bars.iter().filter(|b| !b.alt).find_map(|b| {
+            let BarKey::Part(group) = b.key else { return None };
+            let candidate = group != part && b.class == Some(PartClass::Radial) && self.rocket.can_rejoin(part, group);
+            (candidate && geometry::bar_rect(b, rows, axis)?.contains(p)).then_some(group)
+        })
     }
 
     /// Whether a short block sits over `bar`'s row between pixels `from` and `to` (a label there would be run through).

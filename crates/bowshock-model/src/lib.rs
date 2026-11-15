@@ -4,11 +4,14 @@
 //! buttons) on its outside and [`InternalPart`]s (inner tubes, rings, recovery gear, avionics) inside, all sharing one
 //! [`PartId`] space. Parts have materials ([`MaterialId`]) and finishes ([`Finish`]), mass and CG follow from geometry and material
 //! ([`MassProps`], [`Rocket::dry_mass`]), motor [`Configuration`]s reference motors by name, and [`Stage`]s are derived from the
-//! motor mounts. A document saves to and loads from JSON ([`Rocket::to_json`], [`Rocket::from_json`]).
+//! motor mounts. Flights (stored Simulate scenarios, [`FlightDef`]) are part of the document too. A document saves to and loads
+//! from JSON ([`Rocket::to_json`], [`Rocket::from_json`]).
 //!
 //! The model has no UI and no physics dependencies; `bowshock-sim` and the app read it.
 
 mod config;
+mod expr;
+mod flights;
 mod geometry;
 mod handles;
 mod internal;
@@ -24,7 +27,9 @@ mod symmetry;
 /// Stable identifier of a part within a [`Rocket`], whatever class of part it is.
 pub type PartId = u64;
 
-pub use config::{ConfigError, ConfigId, Configuration, Ignition, MotorMount, MotorRef, MotorSlot};
+pub use config::{Ballast, ConfigError, ConfigId, Configuration, EventKind, MotorMount, MotorRef, MotorSlot, RecoveryTiming, StageEvent, StageTrigger};
+pub use expr::{dim_from_key, dim_key, dim_kind, EvalError, Expr, ExprError, FieldRef, Formula, FormulaError, FormulaStatus, Kind, Op, Value};
+pub use flights::{example_flights, Conditions, FlightDef, FlightId, FlightMotor, Turbulence, MAX_LAUNCH_ANGLE};
 pub use geometry::{FinPlanform, FinSection, NoseShape, Part, PartKind, RadialKind, RadialPart, MAX_COUNT};
 pub use handles::{Dim, DimEdit, HandleKind, HandleSpec, HandleView};
 pub use internal::{DeployEvent, Deployment, InternalKind, InternalPart, MassRole, PartClass, PartRef, System, AUTO_FILL};
@@ -34,4 +39,4 @@ pub use material::{materials, materials_of_kind, Finish, Material, MaterialId, M
 pub use rocket::{InsertError, InternalError, RadialError, Resolved, Rocket};
 pub use snap::Target;
 pub use stage::{Separation, SplitError, Stage, StageIssue};
-pub use symmetry::instance_letter;
+pub use symmetry::{instance_letter, FieldOverride, InstanceParams, RadialField, Winner};

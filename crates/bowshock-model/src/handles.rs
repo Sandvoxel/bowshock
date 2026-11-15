@@ -235,6 +235,7 @@ impl Rocket {
                 Dim::Diameter => Some(p.kind.aft_diameter()),
                 Dim::ForeDiameter => matches!(p.kind, PartKind::Transition { .. }).then(|| p.kind.fore_diameter()),
                 Dim::Wall => Some(p.thickness),
+                Dim::InnerDiameter => Some((p.kind.fore_diameter().max(p.kind.aft_diameter()) - 2.0 * p.thickness).max(0.0)),
                 Dim::Shape => match &p.kind {
                     PartKind::NoseCone { shape, .. } => shape.parameter(),
                     _ => None,
@@ -272,6 +273,9 @@ impl Rocket {
                     (Dim::InnerDiameter, InternalKind::CenteringRing { .. } | InternalKind::EngineBlock { .. }) => Some(res.inner_diameter),
                     (Dim::Overhang, InternalKind::InnerTube { overhang, .. }) => Some(*overhang),
                     (Dim::PackedLength, InternalKind::Parachute { packed_length, .. } | InternalKind::ShockCord { packed_length, .. }) => Some(*packed_length),
+                    (Dim::InnerDiameter, InternalKind::InnerTube { thickness, .. } | InternalKind::Coupler { thickness, .. }) => {
+                        Some((res.outer_diameter - 2.0 * thickness).max(0.0))
+                    }
                     _ => None,
                 }
             }

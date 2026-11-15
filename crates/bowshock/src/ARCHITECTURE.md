@@ -117,6 +117,25 @@ ctx.doc.seal();                                                      // end the 
 stage `n` from the stage ahead (`Stage::index`, from 2). While a part is being carried by a drag it is out of the rocket but
 stays selected.
 
+## Symmetry groups (design/components/Symmetry)
+
+A radial group is one `RadialPart` (shared kind, start angle, count). Copies are lettered A, B, C (`bowshock_model::instance_letter`)
+and a copy can loosen single fields from the group: `RadialPart::overrides` lists `(copy, RadialField, value)`
+(`Rocket::unlink_field`, `relink_field`, `relink_copy`, `set_instance_dim`). **Everything that needs a copy's values reads
+`RadialPart::effective(copy)` / `Rocket::effective_params(id, copy)` (the spec's `effective_params`), never the group's own**:
+the mesh, picking, handles, `Rocket::component_mass` and `bowshock_sim::from_model` (copies with equal effective values fly
+as one `FinSet`, so a canted fin B makes a set of two and a set of one) all do. Changing the count drops the overrides
+(`set_radial`), so the inspector asks first. `Rocket::detach_radial` / `split_all_radial` freeze the effective values into the free
+parts; `rejoin_radial(part, group, Winner)` merges a free part back (group's or part's settings win). Documents without
+overrides serialise exactly as before (the list is skipped when empty), so there is no format-version bump.
+
+`ctx.symmetry` (`app/symmetry.rs`) is the view state the three surfaces share: `instance` (the clicked copy of the selected group,
+set by a viewport click or the header letter; read with `copy_in(rocket, id)`) and `rejoin` (a free part and the group it is about
+to join; set by the inspector's *Rejoin group* or by dropping the part's bar on the group's bar in the lanes, answered in the
+inspector bar). Both are validated after every message. The inspector's symmetry UI is `build/inspector/symmetry.rs`
+(`Link`, `linked`, `bar`): right-click a field of a group for *Unlink for this fin* / *Relink field*, link icons after the fields
+once the group has overrides, the confirmation before a count change, and the rejoin choice.
+
 ## Physics
 
 `ctx.physics` is a cache, current when `view` runs: `balance()` (mass, length, ref diameter, CG, CP, margin, CNα for the phase

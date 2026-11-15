@@ -28,6 +28,7 @@ use iced::{keyboard, Element, Fill, Point, Task, Widget};
 
 use crate::app::drag;
 use crate::app::physics::BALANCE_MACH;
+use crate::app::symmetry::Rejoin;
 use crate::app::{self, Ctx, Selection};
 use crate::chrome;
 use crate::tokens::LANE_H;
@@ -80,6 +81,13 @@ pub enum Message {
     CarryAt(f64),
     /// The button was released: lands a carried part, or ends a move or resize.
     EditEnd,
+    /// A free part was released on a symmetry group's bar: offer to rejoin it (the inspector asks whose settings win).
+    DropOnGroup {
+        /// The free part.
+        part: PartId,
+        /// The group whose bar it was dropped on.
+        group: PartId,
+    },
     /// The user zoomed or panned the lanes (`camera` is the viewport camera they were following, if any).
     SetZoom {
         /// The new zoom of the default fit.
@@ -157,6 +165,15 @@ impl State {
                 drag::finish_radial(ctx, true);
                 drag::finish_internal(ctx, true);
                 ctx.doc.seal();
+            }
+            Message::DropOnGroup { part, group } => {
+                // The move ended on a group's bar: seal it, then ask (in the inspector) whose settings win.
+                ctx.doc.seal();
+                if ctx.doc.rocket().can_rejoin(part, group) {
+                    ctx.selection = Selection::Part(part);
+                    ctx.symmetry.instance = None;
+                    ctx.symmetry.rejoin = Some(Rejoin { part, group });
+                }
             }
             Message::SetZoom { zoom, camera } => {
                 self.zoom = zoom;

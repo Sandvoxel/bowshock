@@ -5,13 +5,15 @@ pub mod document;
 pub mod drag;
 mod files;
 pub mod physics;
+pub mod refs;
+pub mod symmetry;
 pub mod ui;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use bowshock_model::PartId;
-use iced::widget::{column, mouse_area, stack};
+use iced::widget::{column, mouse_area};
 use iced::{keyboard, mouse, Element, Point, Task, Theme, Widget};
 
 use crate::build::{self, inspector, lanes, parts_bin};
@@ -98,6 +100,10 @@ pub struct Ctx {
     /// The document was just replaced: select nothing and let the gauge jump rather than animate.
     reloaded: bool,
     armed: Option<Armed>,
+    /// Which copy of the selected symmetry group is the clicked one, and a pending rejoin (see [`symmetry`]).
+    pub symmetry: symmetry::SymmetryUi,
+    /// Pick mode and the formula UI's transient state (see [`refs`]).
+    pub refs: refs::Ui,
 }
 
 impl Ctx {
@@ -116,6 +122,8 @@ impl Ctx {
             camera_fit: false,
             reloaded: false,
             armed: None,
+            symmetry: symmetry::SymmetryUi::default(),
+            refs: refs::Ui::default(),
         }
     }
 
@@ -141,6 +149,8 @@ impl Ctx {
     /// Call after replacing the document wholesale (New, Open, the example).
     pub(crate) fn loaded(&mut self) {
         self.selection = Selection::None;
+        self.symmetry = symmetry::SymmetryUi::default();
+        self.refs = refs::Ui::default();
         self.drag = Drags { symmetry: self.drag.symmetry, angle_snap: self.drag.angle_snap, ..Drags::default() };
         self.camera_fit = true;
         self.reloaded = true;
@@ -160,6 +170,10 @@ impl Ctx {
         };
         if !exists {
             self.selection = Selection::None;
+        }
+        self.symmetry.validate(self.doc.rocket());
+        if self.symmetry.instance.is_some_and(|(id, _)| self.doc.rocket().radial(id).is_none()) {
+            self.symmetry.instance = None;
         }
     }
 }
@@ -304,10 +318,12 @@ impl App {
     fn after_update(&mut self) {
         let ctx = &mut self.ctx;
         ctx.physics.sync(ctx.doc.rocket(), ctx.doc.revision());
-        if std::mem::take(&mut ctx.reloaded) {
+        let reloaded = std::mem::take(&mut ctx.reloaded);
+        if reloaded {
             ctx.physics.snap_gauge();
         }
         ctx.sanitize_selection();
+        self.simulate.sync(&self.ctx, reloaded);
         self.viewport.sync(&self.ctx);
         if std::mem::take(&mut self.ctx.camera_fit) {
             self.viewport.fit();
@@ -315,6 +331,15 @@ impl App {
     }
 
     fn route(&mut self, message: Message) -> Task<Message> {
+        // While a field is in pick mode a click on a part opens that part's value menu instead of selecting or grabbing it.
+        if self.ctx.refs.is_picking() {
+            if let Some(hit) = pick_intercept(&message) {
+                if let (Some(part), Some(at)) = (hit, self.ctx.cursor) {
+                    self.ctx.refs.open_menu(part, at);
+                }
+                return Task::none();
+            }
+        }
         let ctx = &mut self.ctx;
         match message {
             Message::Resized(e) => self.layout.resize(e),
@@ -471,13 +496,34 @@ impl App {
             Mode::Analyze => self.analyze.view(ctx).map(Message::Analyze).boxed(),
         };
         let page = column![chrome::top_bar(ctx), screen, chrome::status_strip(&self.chrome, ctx)];
-        let root: Element<'_, Message> = match self.chrome.overlay(ctx) {
-            Some(overlay) => stack![page, overlay].boxed(),
-            None => page.boxed(),
-        };
+        // The page is always the first layer of one stack, so its widgets (a field being edited, say) keep their state while
+        // a menu or the part menu of a pick comes and goes above it.
+        let mut layers: Vec<Element<'_, Message>> = vec![page.boxed()];
+        layers.extend(self.chrome.overlay(ctx));
+        layers.extend(refs::menu_view(ctx));
+        let root: Element<'_, Message> = iced::widget::Stack::with_children(layers).boxed();
         // The root sees every cursor move and any release the widgets below leave alone: that is what lets a drag begun in the
         // parts bin follow the cursor anywhere, and end (or be cancelled) wherever it is released.
         mouse_area(root).on_move(Message::Cursor).on_release(Message::Released).boxed()
+    }
+}
+
+/// What a click means while a field is in pick mode (the viewport and the lanes are pickable): `Some(Some(part))` opens the part's
+/// value menu, `Some(None)` is swallowed (a click on nothing, a grab, a drag of a bar), `None` is not a pick at all.
+fn pick_intercept(message: &Message) -> Option<Option<PartId>> {
+    use crate::build::lanes::Message as Lanes;
+    use crate::viewport::Message as Viewport;
+    match message {
+        Message::Viewport(Viewport::Select(Some(pick))) => Some(Some(pick.id())),
+        Message::Viewport(Viewport::SelectPart(Some(id))) => Some(Some(*id)),
+        Message::Viewport(Viewport::Select(None) | Viewport::SelectPart(None) | Viewport::SelectSeparation(_) | Viewport::Grab(_) | Viewport::Focus(_)) => {
+            Some(None)
+        }
+        Message::Lanes(Lanes::Select(Some(key))) => Some(Some(key.part())),
+        Message::Lanes(
+            Lanes::Select(None) | Lanes::SelectSeparation(_) | Lanes::Focus(_) | Lanes::GrabAxial(_) | Lanes::MoveTo { .. } | Lanes::ResizeTo { .. },
+        ) => Some(None),
+        _ => None,
     }
 }
 

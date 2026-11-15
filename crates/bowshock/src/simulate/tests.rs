@@ -13,18 +13,25 @@ fn fly(state: &mut State, ctx: &Ctx, id: FlightId) {
     let (input, delay) = flight::prepare(ctx, &spec).expect("the example flies");
     let started = Instant::now();
     let result = Arc::new(bowshock_sim::simulate(&input));
-    state.finished(Done { flight: id, ticket, spec, revision: ctx.doc.revision(), delay, dt: input.dt, outcome: Ok((result, started.elapsed())) });
+    state.finished(Done { flight: id, ticket, spec, revision: state.revision(ctx), delay, dt: input.dt, outcome: Ok((result, started.elapsed())) });
 }
 
 fn named<'a>(state: &'a State, name: &str) -> &'a Flight {
     state.flights.iter().find(|f| f.name == name).unwrap()
 }
 
+/// A state holding the flights `app`'s document stores (the app's own sync does this after every message).
+fn state_for(app: &App) -> State {
+    let mut state = State::new();
+    state.sync(app.ctx(), true);
+    state
+}
+
 #[test]
 fn the_example_flies_the_kit_flights() {
     let app = App::with_example();
     let ctx = app.ctx();
-    let mut state = State::new();
+    let mut state = state_for(&app);
     assert_eq!(state.flights.len(), 4);
     let (nominal, windy, bigger) = (named(&state, "Nominal").id, named(&state, "Windy").id, named(&state, "Bigger motor").id);
     for id in [nominal, windy, bigger] {
@@ -56,7 +63,7 @@ fn the_example_flies_the_kit_flights() {
 #[test]
 fn ticking_overlays_flights_in_stable_colours_and_refuses_a_fifth() {
     let mut app = App::with_example();
-    let mut state = State::new();
+    let mut state = state_for(&app);
     let ids: Vec<FlightId> = state.flights.iter().map(|f| f.id).collect();
     for id in &ids[..3] {
         fly(&mut state, app.ctx(), *id);
@@ -92,25 +99,26 @@ fn ticking_overlays_flights_in_stable_colours_and_refuses_a_fifth() {
 #[test]
 fn a_result_goes_stale_when_conditions_or_the_rocket_change() {
     let mut app = App::with_example();
-    let mut state = State::new();
+    let mut state = state_for(&app);
     let id = state.selected;
     fly(&mut state, app.ctx(), id);
-    let revision = app.ctx().doc.revision();
+    let revision = state.revision(app.ctx());
     assert!(!state.flight(id).unwrap().is_stale(revision));
 
     state.update(Message::Edit(Edit::Wind(5.0)), app.ctx_mut());
-    assert!(state.flight(id).unwrap().is_stale(revision));
+    assert!(state.flight(id).unwrap().is_stale(state.revision(app.ctx())));
     state.update(Message::Edit(Edit::Wind(2.2)), app.ctx_mut());
-    assert!(!state.flight(id).unwrap().is_stale(revision), "back to the conditions it flew");
+    assert!(!state.flight(id).unwrap().is_stale(state.revision(app.ctx())), "back to the conditions it flew");
+    assert_eq!(state.revision(app.ctx()), revision, "editing a flight is not a change to the rocket");
 
     app.ctx_mut().doc.edit("Rename", |r| r.designer = "someone".to_string());
-    assert!(state.flight(id).unwrap().is_stale(app.ctx().doc.revision()));
+    assert!(state.flight(id).unwrap().is_stale(state.revision(app.ctx())));
 }
 
 #[test]
 fn a_superseded_result_is_ignored_and_a_failed_flight_says_why() {
     let mut app = App::with_example();
-    let mut state = State::new();
+    let mut state = state_for(&app);
     let id = state.selected;
     let _ = state.launch(id, app.ctx());
     let old = state.flight(id).unwrap().ticket;
@@ -133,7 +141,7 @@ fn a_superseded_result_is_ignored_and_a_failed_flight_says_why() {
 #[test]
 fn choosing_a_motor_keeps_a_valid_delay_and_follow_the_configuration_otherwise() {
     let mut app = App::with_example();
-    let mut state = State::new();
+    let mut state = state_for(&app);
     state.update(Message::Edit(Edit::Delay(12.0)), app.ctx_mut());
     assert_eq!(state.selected_flight().spec.delay, Some(12.0));
     let j350 = MotorChoice::Motor(bowshock_model::MotorRef::new("I218R", "AeroTech"));
@@ -148,7 +156,7 @@ fn choosing_a_motor_keeps_a_valid_delay_and_follow_the_configuration_otherwise()
 #[test]
 fn adding_and_removing_flights() {
     let mut app = App::with_example();
-    let mut state = State::new();
+    let mut state = state_for(&app);
     state.update(Message::Edit(Edit::Wind(4.0)), app.ctx_mut());
     state.update(Message::AddFlight, app.ctx_mut());
     assert_eq!(state.flights.len(), 5);
@@ -166,7 +174,7 @@ fn adding_and_removing_flights() {
 #[test]
 fn per_configuration_makes_a_flight_for_each_and_ticks_them() {
     let mut app = App::with_example();
-    let mut state = State::new();
+    let mut state = state_for(&app);
     // One configuration: nothing to compare.
     let _ = state.update(Message::PerConfiguration, app.ctx_mut());
     assert_eq!(state.flights.len(), 4);
@@ -184,7 +192,7 @@ fn per_configuration_makes_a_flight_for_each_and_ticks_them() {
 #[test]
 fn clicking_a_number_moves_the_crosshair() {
     let mut app = App::with_example();
-    let mut state = State::new();
+    let mut state = state_for(&app);
     state.update(Message::Seek(4.2), app.ctx_mut());
     assert_eq!(state.plot.hover_x(), Some(4.2));
     state.update(Message::Ground(GroundMessage::Hover(None)), app.ctx_mut());
@@ -194,7 +202,7 @@ fn clicking_a_number_moves_the_crosshair() {
 #[test]
 fn a_dispersion_study_scatters_landings_around_the_run_and_hides_when_the_run_changes() {
     let mut app = App::with_example();
-    let mut state = State::new();
+    let mut state = state_for(&app);
     let id = state.selected;
     fly(&mut state, app.ctx(), id);
 
@@ -205,7 +213,7 @@ fn a_dispersion_study_scatters_landings_around_the_run_and_hides_when_the_run_ch
     let (input, _) = flight::prepare(app.ctx(), &spec).unwrap();
     let study = bowshock_sim::monte_carlo(&input, flight::DISPERSION_RUNS, &flight::tolerances(&spec));
     let landings: Vec<(f64, f64)> = study.runs.iter().map(|r| (r.landing[0], r.landing[1])).collect();
-    state.dispersed(DispersionDone { flight: id, ticket, spec, revision: app.ctx().doc.revision(), outcome: Ok(landings) });
+    state.dispersed(DispersionDone { flight: id, ticket, spec, revision: state.revision(app.ctx()), outcome: Ok(landings) });
 
     let flight = state.flight(id).unwrap();
     assert!(!flight.dispersing);
@@ -231,7 +239,7 @@ fn a_dispersion_study_scatters_landings_around_the_run_and_hides_when_the_run_ch
 #[test]
 fn enter_zooms_to_the_band_from_anywhere_and_otherwise_does_nothing() {
     let mut app = App::with_example();
-    let mut state = State::new();
+    let mut state = state_for(&app);
     let id = state.selected;
     fly(&mut state, app.ctx(), id);
     let enter = keyboard::Key::Named(keyboard::key::Named::Enter);
@@ -242,4 +250,87 @@ fn enter_zooms_to_the_band_from_anywhere_and_otherwise_does_nothing() {
     state.update(message, app.ctx_mut());
     assert_eq!(state.plot.window(), (1.0, 5.0));
     assert!(state.on_key(&enter, keyboard::Modifiers::empty(), app.ctx()).is_none(), "the band cleared when it zoomed");
+}
+
+#[test]
+fn flights_are_written_to_the_document_and_follow_undo() {
+    let mut app = App::with_example();
+    let mut state = state_for(&app);
+    let (nominal, windy) = (named(&state, "Nominal").id, named(&state, "Windy").id);
+    fly(&mut state, app.ctx(), nominal);
+    assert!(!app.ctx().doc.is_dirty());
+
+    // An edit is a document edit: dirty, stored, one undo step; the other flights' results stay current.
+    state.update(Message::Select(windy), app.ctx_mut());
+    state.update(Message::Edit(Edit::Wind(9.0)), app.ctx_mut());
+    let stored = |app: &App| app.ctx().doc.rocket().flights().iter().find(|f| f.id == windy).unwrap().conditions.wind_speed;
+    assert_eq!(stored(&app), 9.0);
+    assert!(app.ctx().doc.is_dirty() && app.ctx().doc.can_undo());
+    assert!(!state.flight(nominal).unwrap().is_stale(state.revision(app.ctx())), "another flight's result is not stale");
+
+    // Scrubbing one field is one step.
+    state.update(Message::Edit(Edit::Wind(9.5)), app.ctx_mut());
+    state.update(Message::Edit(Edit::Wind(10.0)), app.ctx_mut());
+    app.ctx_mut().doc.seal();
+    assert_eq!(app.ctx_mut().doc.undo().as_deref(), Some("Edit flight"));
+    state.sync(app.ctx(), false);
+    assert_eq!(state.flight(windy).unwrap().spec.wind_speed, 7.0, "undo brings the stored flight back, and the screen follows");
+    assert_eq!(stored(&app), 7.0);
+    assert!(app.ctx_mut().doc.redo().is_some());
+    state.sync(app.ctx(), false);
+    assert_eq!(state.flight(windy).unwrap().spec.wind_speed, 10.0);
+
+    // Adding and removing are steps too.
+    state.update(Message::AddFlight, app.ctx_mut());
+    assert_eq!(app.ctx().doc.rocket().flights().len(), 5);
+    assert!(app.ctx_mut().doc.undo().is_some());
+    state.sync(app.ctx(), false);
+    assert_eq!(state.flights.len(), 4);
+    assert!(state.flight(state.selected).is_some(), "a selection that went away moves to a flight that exists");
+}
+
+#[test]
+fn flights_are_saved_with_the_file_and_loaded_back_without_results() {
+    let mut app = App::with_example();
+    let mut state = state_for(&app);
+    let hot = named(&state, "Hot day").id;
+    fly(&mut state, app.ctx(), hot);
+    state.update(Message::Select(hot), app.ctx_mut());
+    state.update(Message::Edit(Edit::Temperature(300.0)), app.ctx_mut());
+    state.update(Message::Edit(Edit::Motor(MotorChoice::Motor(bowshock_model::MotorRef::new("I218R", "AeroTech")))), app.ctx_mut());
+    state.update(Message::Edit(Edit::Delay(9.0)), app.ctx_mut());
+    state.update(Message::AddFlight, app.ctx_mut());
+    state.update(Message::Edit(Edit::Turbulence(bowshock_sim::Turbulence::High)), app.ctx_mut());
+
+    let path = std::env::temp_dir().join(format!("bowshock_flights_{}.bowshock", std::process::id()));
+    app.ctx_mut().doc.save_as(&path).expect("saves");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("\"flights\"") && text.contains("\"Hot day\"") && !text.contains("\"result\""));
+
+    let mut fresh = App::new();
+    fresh.ctx_mut().doc.load(&path).expect("loads");
+    let _ = std::fs::remove_file(&path);
+    let mut loaded = State::new();
+    loaded.sync(fresh.ctx(), true);
+    let names: Vec<&str> = loaded.flights.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["Nominal", "Windy", "Hot day", "Bigger motor", "Flight 5"]);
+    let spec = &named(&loaded, "Hot day").spec;
+    assert_eq!(spec.temperature, 300.0);
+    assert_eq!(spec.delay, Some(9.0));
+    assert_eq!(spec.motor, MotorChoice::Motor(bowshock_model::MotorRef::new("I218R", "AeroTech")));
+    assert_eq!(named(&loaded, "Flight 5").spec.turbulence, bowshock_sim::Turbulence::High);
+    assert!(loaded.flights.iter().all(|f| f.run.is_none()), "results are not saved: run again");
+    assert_eq!(loaded.selected, loaded.flights[0].id);
+}
+
+#[test]
+fn a_new_document_starts_with_one_nominal_flight() {
+    let mut app = App::with_example();
+    let mut state = state_for(&app);
+    assert_eq!(state.flights.len(), 4);
+    app.ctx_mut().doc.new_document();
+    state.sync(app.ctx(), true);
+    assert_eq!(state.flights.len(), 1);
+    assert_eq!(state.selected_flight().name, "Nominal");
+    assert_eq!(state.selected_flight().spec, Spec::default());
 }

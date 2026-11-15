@@ -124,13 +124,15 @@ pub fn apply(edit: Edit, ctx: &mut Ctx) -> Task<app::Message> {
             ctx.doc.begin_drag(&format!("Resize {}", name.to_lowercase()));
         }
         Edit::Dim(id, dim, value) => {
-            ctx.doc.drag_update(|r| r.set_dim(id, dim, value));
+            let copy = ctx.symmetry.copy_of(id);
+            ctx.doc.drag_update(|r| r.set_instance_dim(id, copy, dim, value));
         }
         Edit::Vertex(id, i, z, h) => {
             ctx.doc.drag_update(|r| r.set_vertex(id, i, z, h));
         }
         Edit::Commit(id, dim, value) => {
-            ctx.doc.drag_update(|r| r.set_dim(id, dim, value));
+            let copy = ctx.symmetry.copy_of(id);
+            ctx.doc.drag_update(|r| r.set_instance_dim(id, copy, dim, value));
             ctx.doc.end_drag(true);
         }
         Edit::End => {
@@ -304,7 +306,10 @@ impl Overlay<'_> {
     fn bounds_of_selection(&self, size: Size) -> Option<Rectangle> {
         Some(match self.selection()? {
             Selection::Axial { z0, kind } => pick::screen_bounds(&self.camera, size, z0, kind),
-            Selection::Radial { radial, at } => pick::radial_bounds(&self.camera, size, &radial.kind, at),
+            Selection::Radial { radial, at } => {
+                let kind = radial.effective(self.instance.min(radial.angles().len().saturating_sub(1))).kind;
+                pick::radial_bounds(&self.camera, size, &kind, at)
+            }
             Selection::Internal => {
                 let id = self.selected?;
                 let res = self.rocket.resolved(id)?;
@@ -603,7 +608,7 @@ impl canvas::Program<Message> for Overlay<'_> {
                         };
                     }
                     state.last_handle = Some((now, id, dim));
-                    let base = self.rocket.dim(id, dim).unwrap_or(0.0);
+                    let base = self.rocket.instance_dim(id, self.instance, dim).unwrap_or(0.0);
                     let base_vertex = if let Dim::Vertex(i) = dim { self.rocket.vertex(id, i).unwrap_or((0.0, 0.0)) } else { (0.0, 0.0) };
                     state.drag = Some(Drag {
                         id,
@@ -679,7 +684,8 @@ impl canvas::Program<Message> for Overlay<'_> {
             Some(Selection::Axial { kind, .. }) => kind.name().to_uppercase(),
             Some(Selection::Radial { radial, .. }) => {
                 if radial.count > 1 {
-                    format!("{} ×{} · LINKED · ALL FOLLOW", radial.kind.name().to_uppercase(), radial.count)
+                    let tag = if radial.has_overrides() { format!("{} OVR", radial.overridden_copies().len()) } else { "ALL FOLLOW".to_string() };
+                    format!("{} ×{} · LINKED · {tag}", radial.kind.name().to_uppercase(), radial.count)
                 } else {
                     radial.kind.name().to_uppercase()
                 }
@@ -691,7 +697,7 @@ impl canvas::Program<Message> for Overlay<'_> {
             let own = self.instance.min(radial.angles().len() - 1);
             for i in (0..radial.angles().len()).filter(|i| *i != own) {
                 if let Some(sibling) = pick::placement(self.rocket, radial, i) {
-                    brackets(&mut frame, pick::radial_bounds(&self.camera, size, &radial.kind, sibling), t.accent.scale_alpha(0.7), true);
+                    brackets(&mut frame, pick::radial_bounds(&self.camera, size, &radial.effective(i).kind, sibling), t.accent.scale_alpha(0.7), true);
                 }
             }
         }
@@ -721,7 +727,7 @@ impl canvas::Program<Message> for Overlay<'_> {
             handle_shape(&mut frame, t, p, live, self.hover == Hover::Handle(p.spec.dim));
             if all && state.drag.is_none() && !handles::in_inset(&p.spec) {
                 let dim = p.spec.dim;
-                let value = self.rocket.dim(id, dim);
+                let value = self.rocket.instance_dim(id, self.instance, dim);
                 let content = match (dim, value) {
                     (Dim::Vertex(_), _) => String::new(),
                     (_, Some(v)) => self.handle_label(id, dim, v),
@@ -750,7 +756,7 @@ impl canvas::Program<Message> for Overlay<'_> {
         if let Some(drag) = &state.drag {
             self.draw_drag(&mut frame, t, drag, &vis, state.modifiers);
         } else if let (Some(Hover::Handle(dim)), Some(c)) = (Some(self.hover), cursor) {
-            if let (Some(v), true) = (self.rocket.dim(id, dim), vis.placed.iter().any(|p| p.spec.dim == dim)) {
+            if let (Some(v), true) = (self.rocket.instance_dim(id, self.instance, dim), vis.placed.iter().any(|p| p.spec.dim == dim)) {
                 let name = self.rocket.dim_label(id, dim);
                 tag(&mut frame, c, 0.0, &format!("{name} · {}", self.with_unit(dim, v)), t.ink, t.line_200, t.bg_200);
             }
@@ -835,7 +841,7 @@ impl Overlay<'_> {
         }
         for p in vis.placed.iter().filter(|p| handles::in_inset(&p.spec)) {
             let dim = p.spec.dim;
-            let content = match self.rocket.dim(id, dim) {
+            let content = match self.rocket.instance_dim(id, self.instance, dim) {
                 Some(v) => self.handle_label(id, dim, v),
                 None => dim.label(),
             };
@@ -856,7 +862,7 @@ impl Overlay<'_> {
             return;
         };
         let size = frame.size();
-        let value = self.rocket.dim(drag.id, dim).unwrap_or(drag.live.value);
+        let value = self.rocket.instance_dim(drag.id, self.instance, dim).unwrap_or(drag.live.value);
         let moved = value - drag.base;
         let warn = drag.live.limit.is_some();
         let tone = if warn { t.warn } else { t.accent };

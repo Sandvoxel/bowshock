@@ -117,6 +117,12 @@ pub struct Rocket {
     /// Free-text notes by part id (the inspector's Notes section). Empty notes are not stored.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub(crate) notes: std::collections::BTreeMap<PartId, String>,
+    /// The stored flights of the Simulate screen (name, motors, launch conditions). Never empty.
+    #[serde(default = "crate::flights::default_flights")]
+    pub(crate) flights: Vec<crate::flights::FlightDef>,
+    /// Formulas that compute dimensions of parts from dimensions of other parts (see [`crate::Formula`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) formulas: Vec<crate::expr::Formula>,
 }
 
 impl Default for Rocket {
@@ -132,6 +138,8 @@ impl Default for Rocket {
             active_config: 0,
             next_config_id: 1,
             notes: std::collections::BTreeMap::new(),
+            flights: crate::flights::default_flights(),
+            formulas: Vec::new(),
         }
     }
 }
@@ -336,7 +344,12 @@ impl Rocket {
         }
         let offset = self.clamp_offset(radial.parent, radial.offset, &kind).unwrap_or(0.0);
         if let Some(radial) = self.radials.iter_mut().find(|r| r.id == id) {
+            // Re-spacing a group (a new count) loses the overrides of its copies; a new planform loses the fields it lacks.
+            if radial.count != count {
+                radial.overrides.clear();
+            }
             (radial.kind, radial.count, radial.offset) = (kind.limited_at(offset), count, offset);
+            radial.prune_overrides();
         }
         true
     }
@@ -347,7 +360,8 @@ impl Rocket {
         Some(self.radials.remove(i))
     }
 
-    /// Puts a removed radial part back as it was, if its parent is still there (its offset is limited to the parent).
+    /// Puts a removed radial part back as it was, if its parent is still there (its offset is limited to the parent). Overrides
+    /// that no longer fit its count or kind are dropped.
     pub fn restore_radial(&mut self, mut radial: RadialPart) -> Result<(), RadialError> {
         self.check_radial(radial.parent, radial.count)?;
         if self.radial(radial.id).is_some() {
@@ -355,6 +369,7 @@ impl Rocket {
         }
         radial.offset = self.clamp_offset(radial.parent, radial.offset, &radial.kind).ok_or(RadialError::NoSuchParent)?;
         radial.kind = radial.kind.limited_at(radial.offset);
+        radial.prune_overrides();
         self.next_id = self.next_id.max(radial.id + 1);
         self.radials.push(radial);
         Ok(())

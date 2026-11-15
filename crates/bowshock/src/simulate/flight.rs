@@ -1,15 +1,16 @@
 //! A flight of the Simulate screen: a named set of launch conditions plus a motor choice, and the result of its last run.
 //!
-//! Flights live in the screen's [`State`](super::State) (the rocket document has no field for them, so they are not saved with
-//! the file). A flight never owns a copy of the rocket: [`prepare`] builds the simulation input from the document *at run
-//! time*, with the flight's motor and delay swapped into a clone, so a flight always flies the rocket as it is now. A run
+//! The definition of a flight (name, [`Spec`]) is stored in the document ([`bowshock_model::FlightDef`], so it saves, loads and
+//! undoes with the rocket); the screen's [`State`](super::State) mirrors it and adds what is never saved: the last run, the compare
+//! slot, a dispersion study. A flight never owns a copy of the rocket: [`prepare`] builds the simulation input from the document
+//! *at run time*, with the flight's motor and delay swapped into a clone, so a flight always flies the rocket as it is now. A run
 //! remembers the [`Spec`] and the document revision it flew; when either differs from the flight's current one the result is
 //! *stale* (the screen draws its values in `ink-faint` until it is run again).
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use bowshock_model::{ConfigId, MotorMount, MotorRef, Rocket};
+use bowshock_model::{Conditions, ConfigId, FlightDef, FlightMotor, MotorMount, MotorRef, Rocket};
 use bowshock_sim::from_model::{self, Phase};
 use bowshock_sim::{EventKind, FlightResult, Launch, SimInput, Turbulence};
 
@@ -39,6 +40,46 @@ pub enum MotorChoice {
     Motor(MotorRef),
 }
 
+impl From<&FlightMotor> for MotorChoice {
+    fn from(motor: &FlightMotor) -> Self {
+        match motor {
+            FlightMotor::Active => MotorChoice::Active,
+            FlightMotor::Config(id) => MotorChoice::Config(*id),
+            FlightMotor::Motor(m) => MotorChoice::Motor(m.clone()),
+        }
+    }
+}
+
+impl From<&MotorChoice> for FlightMotor {
+    fn from(choice: &MotorChoice) -> Self {
+        match choice {
+            MotorChoice::Active => FlightMotor::Active,
+            MotorChoice::Config(id) => FlightMotor::Config(*id),
+            MotorChoice::Motor(m) => FlightMotor::Motor(m.clone()),
+        }
+    }
+}
+
+/// The stored gust setting of `t`.
+fn stored_turbulence(t: Turbulence) -> bowshock_model::Turbulence {
+    match t {
+        Turbulence::Off => bowshock_model::Turbulence::Off,
+        Turbulence::Low => bowshock_model::Turbulence::Low,
+        Turbulence::Med => bowshock_model::Turbulence::Medium,
+        Turbulence::High => bowshock_model::Turbulence::High,
+    }
+}
+
+/// The simulator's gust setting of `t`.
+fn sim_turbulence(t: bowshock_model::Turbulence) -> Turbulence {
+    match t {
+        bowshock_model::Turbulence::Off => Turbulence::Off,
+        bowshock_model::Turbulence::Low => Turbulence::Low,
+        bowshock_model::Turbulence::Medium => Turbulence::Med,
+        bowshock_model::Turbulence::High => Turbulence::High,
+    }
+}
+
 /// A flight's conditions: everything that, when changed, makes its result stale. SI throughout (angles in radians,
 /// temperature in kelvin).
 #[derive(Debug, Clone, PartialEq)]
@@ -66,19 +107,48 @@ pub struct Spec {
 }
 
 impl Default for Spec {
-    /// The kit's nominal flight: 5° rail, 2.2 m/s breeze from 250°, low turbulence, 120 m site at 15 °C, 300 m field.
+    /// The stored default flight's conditions ([`Conditions::default`]): 5° rail, 2.2 m/s breeze from 250°, low turbulence, 120 m
+    /// site at 15 °C, 300 m field.
     fn default() -> Self {
+        Spec::of(&FlightDef::nominal(0))
+    }
+}
+
+impl Spec {
+    /// The conditions stored in `def`.
+    pub fn of(def: &FlightDef) -> Spec {
+        let c = &def.conditions;
         Spec {
-            motor: MotorChoice::Active,
-            delay: None,
-            rail_length: 1.52,
-            launch_angle: 5f64.to_radians(),
-            wind_speed: 2.2,
-            wind_from: 250f64.to_radians(),
-            turbulence: Turbulence::Low,
-            site_altitude: 120.0,
-            temperature: 288.15,
-            field_radius: 300.0,
+            motor: MotorChoice::from(&def.motor),
+            delay: def.delay,
+            rail_length: c.rail_length,
+            launch_angle: c.launch_angle,
+            wind_speed: c.wind_speed,
+            wind_from: c.wind_from,
+            turbulence: sim_turbulence(c.turbulence),
+            site_altitude: c.site_altitude,
+            temperature: c.temperature,
+            field_radius: c.field_radius,
+        }
+    }
+
+    /// The stored form of these conditions for flight `id` called `name`.
+    pub fn stored(&self, id: FlightId, name: &str) -> FlightDef {
+        FlightDef {
+            id,
+            name: name.to_string(),
+            motor: FlightMotor::from(&self.motor),
+            delay: self.delay,
+            conditions: Conditions {
+                rail_length: self.rail_length,
+                launch_angle: self.launch_angle,
+                wind_speed: self.wind_speed,
+                wind_from: self.wind_from,
+                turbulence: stored_turbulence(self.turbulence),
+                site_altitude: self.site_altitude,
+                temperature: self.temperature,
+                field_radius: self.field_radius,
+            },
         }
     }
 }
@@ -264,17 +334,16 @@ impl Flight {
     pub fn is_stale(&self, revision: u64) -> bool {
         self.run.as_ref().is_some_and(|r| r.spec != self.spec || r.revision != revision)
     }
-}
 
-/// The kit's four example flights: Nominal, Windy, Hot day and Bigger motor (AeroTech I284W). They are scenarios, not
-/// document data: each follows the document's active configuration except the last, which swaps in the bigger motor.
-pub fn default_flights() -> Vec<Flight> {
-    vec![
-        Flight::new(1, "Nominal", Spec::default()),
-        Flight::new(2, "Windy", Spec { wind_speed: 7.0, ..Spec::default() }),
-        Flight::new(3, "Hot day", Spec { temperature: 273.15 + 35.0, ..Spec::default() }),
-        Flight::new(4, "Bigger motor", Spec { motor: MotorChoice::Motor(MotorRef::new("I284W", "AeroTech")), ..Spec::default() }),
-    ]
+    /// A flight that has not run, with the conditions stored in `def`.
+    pub fn from_def(def: &FlightDef) -> Flight {
+        Flight::new(def.id, def.name.clone(), Spec::of(def))
+    }
+
+    /// The stored definition of this flight.
+    pub fn def(&self) -> FlightDef {
+        self.spec.stored(self.id, &self.name)
+    }
 }
 
 /// The first motor mount of the first stage (a cluster flies its first motor), else any mount.
@@ -375,7 +444,7 @@ mod tests {
 
     #[test]
     fn the_kit_flights_are_nominal_windy_hot_and_bigger() {
-        let flights = default_flights();
+        let flights: Vec<Flight> = bowshock_model::example_flights().iter().map(Flight::from_def).collect();
         let names: Vec<&str> = flights.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["Nominal", "Windy", "Hot day", "Bigger motor"]);
         assert_eq!(flights[1].spec.wind_speed, 7.0);
@@ -383,6 +452,8 @@ mod tests {
         assert_eq!(flights[3].spec.motor, MotorChoice::Motor(MotorRef::new("I284W", "AeroTech")));
         // Ids are unique.
         assert!(flights.windows(2).all(|w| w[0].id != w[1].id));
+        // A flight survives the trip through its stored form.
+        assert!(flights.iter().all(|f| Flight::from_def(&f.def()).spec == f.spec));
     }
 
     #[test]

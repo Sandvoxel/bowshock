@@ -41,7 +41,8 @@ fn rocket() -> Vehicle {
             dry: MassProps { mass: 1.07, cg: 0.62, i_long: 0.05 },
             fore_station: 0.0,
             aft_station: 1.10,
-            motor: Some(StageMotor { curve: h128(), mount_aft_station: 1.10, ignition: Ignition::Launch, ejection_delay: Some(9.0) }),
+            motor: Some(StageMotor { curve: h128(), mount_aft_station: 1.10, ignition: Timing::LAUNCH, ejection_delay: Some(9.0) }),
+            separation: Timing::BURNOUT,
         }],
     }
 }
@@ -134,28 +135,129 @@ fn drogue_then_main() {
     assert!(names[1].1 <= 150.0 && names[1].1 > 140.0, "{names:?}");
 }
 
-#[test]
-fn two_stage_separates_and_sustainer_flies_higher_than_booster_alone() {
+/// The two-stage example: the H128 booster below the H128 sustainer; `ignition` and `separation` are the sustainer's ignition and
+/// the booster's separation.
+fn two_stage(ignition: Timing, separation: Timing) -> Vehicle {
     let mut v = rocket();
-    // Booster below the sustainer: stage 0 fires at launch, stage 1 (sustainer) after a 1 s coast.
     let booster = StageMass {
         dry: MassProps { mass: 0.4, cg: 1.3, i_long: 0.01 },
         fore_station: 1.10,
         aft_station: 1.50,
-        motor: Some(StageMotor { curve: h128(), mount_aft_station: 1.50, ignition: Ignition::Launch, ejection_delay: None }),
+        motor: Some(StageMotor { curve: h128(), mount_aft_station: 1.50, ignition: Timing::LAUNCH, ejection_delay: None }),
+        separation,
     };
     let mut sustainer = v.stages[0].clone();
-    sustainer.motor.as_mut().unwrap().ignition = Ignition::AfterPreviousBurnout { delay: 1.0 };
+    sustainer.motor.as_mut().unwrap().ignition = ignition;
     sustainer.motor.as_mut().unwrap().ejection_delay = Some(6.0);
     v.stages = vec![booster, sustainer];
     v.body.push(BodySegment { station: 1.10, length: 0.4, fore_radius: 0.038, aft_radius: 0.038, kind: BodyKind::Tube, roughness: 30e-6 });
+    v
+}
+
+fn fly_two_stage(ignition: Timing, separation: Timing) -> FlightResult {
     let launch = Launch { rail_length: 2.0, ..Launch::default() };
     let rec = vec![RecoveryDevice { name: "Main".into(), stage: 1, cd_area: 0.9, deploy: Deploy::Ejection, delay: 0.0 }];
-    let r = simulate(&SimInput::new(v, launch, rec));
+    simulate(&SimInput::new(two_stage(ignition, separation), launch, rec))
+}
+
+/// `(time, altitude)` of the event of `kind` for `stage`.
+fn event_of(r: &FlightResult, kind: EventKind, stage: usize) -> (f64, f64) {
+    let e = r.trajectory.events.iter().find(|e| e.kind == kind && e.stage == Some(stage)).unwrap_or_else(|| panic!("no {kind:?} of stage {stage}"));
+    (e.t, e.altitude)
+}
+
+#[test]
+fn two_stage_separates_and_sustainer_flies_higher_than_booster_alone() {
+    // Booster at launch, sustainer after a 1 s coast.
+    let r = fly_two_stage(Timing::new(Trigger::Burnout, 1.0), Timing::BURNOUT);
     let kinds: Vec<_> = r.trajectory.events.iter().map(|e| e.kind.clone()).collect();
     assert!(kinds.contains(&EventKind::Separation), "{kinds:?}");
     assert_eq!(kinds.iter().filter(|k| **k == EventKind::Ignition).count(), 2);
     assert!(r.summary.apogee > 600.0, "{}", r.summary.apogee);
+}
+
+#[test]
+fn burnout_triggers_separate_at_burnout_and_ignite_a_delay_later() {
+    let r = fly_two_stage(Timing::new(Trigger::Burnout, 1.0), Timing::BURNOUT);
+    let burnout = event_of(&r, EventKind::Burnout, 0).0;
+    assert!((event_of(&r, EventKind::Separation, 0).0 - burnout).abs() < 0.02, "separation at burnout");
+    assert!((event_of(&r, EventKind::Ignition, 1).0 - (burnout + 1.0)).abs() < 0.02, "sustainer lights 1 s after the booster burns out");
+}
+
+#[test]
+fn separation_trigger_lights_the_upper_stage_after_the_separation_not_the_burnout() {
+    // Separation 0.25 s after burnout, then ignition 0.5 s after that: separation and ignition are different instants.
+    let r = fly_two_stage(Timing::new(Trigger::Separation, 0.5), Timing::new(Trigger::Burnout, 0.25));
+    let burnout = event_of(&r, EventKind::Burnout, 0).0;
+    let (sep, ign) = (event_of(&r, EventKind::Separation, 0).0, event_of(&r, EventKind::Ignition, 1).0);
+    assert!((sep - (burnout + 0.25)).abs() < 0.02, "sep {sep} burnout {burnout}");
+    assert!((ign - (sep + 0.5)).abs() < 0.02, "ign {ign} sep {sep}");
+}
+
+#[test]
+fn time_from_launch_triggers_fire_at_those_times() {
+    let r = fly_two_stage(Timing::new(Trigger::Launch, 5.0), Timing::new(Trigger::Launch, 4.0));
+    assert!((event_of(&r, EventKind::Separation, 0).0 - 4.0).abs() < 0.02);
+    assert!((event_of(&r, EventKind::Ignition, 1).0 - 5.0).abs() < 0.02);
+    // The booster burned out before it was separated.
+    assert!(event_of(&r, EventKind::Burnout, 0).0 < 4.0);
+}
+
+#[test]
+fn a_stage_dropped_before_its_burnout_never_burns_out() {
+    let r = fly_two_stage(Timing::new(Trigger::Separation, 0.0), Timing::new(Trigger::Launch, 0.5));
+    assert!(!r.trajectory.events.iter().any(|e| e.kind == EventKind::Burnout && e.stage == Some(0)));
+    assert!((event_of(&r, EventKind::Separation, 0).0 - 0.5).abs() < 0.02);
+}
+
+#[test]
+fn altitude_triggers_fire_climbing_through_the_altitude() {
+    // Separate on the way up through 150 m, light the sustainer 0.5 s after climbing through 200 m.
+    let r = fly_two_stage(Timing::new(Trigger::Altitude(200.0), 0.5), Timing::new(Trigger::Altitude(150.0), 0.0));
+    let (t_sep, h_sep) = event_of(&r, EventKind::Separation, 0);
+    assert!((150.0..160.0).contains(&h_sep), "separated at {h_sep} m");
+    let (t_ign, _) = event_of(&r, EventKind::Ignition, 1);
+    // The ignition is 0.5 s after the rocket crossed 200 m: find that crossing in the samples.
+    let crossing = r.trajectory.samples.iter().find(|s| s.altitude >= 200.0 && s.t > t_sep).expect("the rocket climbs through 200 m").t;
+    assert!(t_ign > crossing && t_ign - crossing < 0.6, "ignition {t_ign}, crossing {crossing}");
+    assert!(r.summary.apogee > 600.0);
+}
+
+#[test]
+fn an_altitude_never_reached_never_fires() {
+    let r = fly_two_stage(Timing::new(Trigger::Separation, 0.0), Timing::new(Trigger::Altitude(50_000.0), 0.0));
+    assert!(!r.trajectory.events.iter().any(|e| matches!(e.kind, EventKind::Separation)));
+    // The sustainer never lights either: it waits for a separation that never comes.
+    assert!(!r.trajectory.events.iter().any(|e| e.kind == EventKind::Ignition && e.stage == Some(1)));
+}
+
+#[test]
+fn the_static_timeline_and_the_flight_agree() {
+    let tl = Timeline::of(&two_stage(Timing::new(Trigger::Separation, 0.5), Timing::new(Trigger::Burnout, 0.25)));
+    let r = fly_two_stage(Timing::new(Trigger::Separation, 0.5), Timing::new(Trigger::Burnout, 0.25));
+    for (kind, stage, time) in [
+        (EventKind::Burnout, 0, tl.burnout[0]),
+        (EventKind::Separation, 0, tl.separation[0]),
+        (EventKind::Ignition, 1, tl.ignition[1]),
+        (EventKind::Burnout, 1, tl.burnout[1]),
+    ] {
+        let flown = event_of(&r, kind.clone(), stage).0;
+        assert!((flown - time.unwrap()).abs() < 0.02, "{kind:?} {stage}: flown {flown}, timeline {time:?}");
+    }
+    // Altitude triggers are unknown to the static timeline and resolved from a flight by `staging_times`.
+    let alt = two_stage(Timing::new(Trigger::Separation, 0.0), Timing::new(Trigger::Altitude(150.0), 0.0));
+    assert_eq!(Timeline::of(&alt).separation[0], None);
+    let resolved = staging_times(&SimInput::new(alt, Launch { rail_length: 2.0, ..Launch::default() }, vec![]));
+    let t_sep = resolved.separation[0].expect("resolved by a flight");
+    assert!(resolved.ignition[1].is_some_and(|t| (t - t_sep).abs() < 1e-9));
+}
+
+#[test]
+fn deployment_after_launch_fires_that_many_seconds_in() {
+    let rec = vec![RecoveryDevice { name: "Drogue".into(), stage: 0, cd_area: 0.1, deploy: Deploy::Launch, delay: 3.0 }];
+    let r = simulate(&SimInput::new(rocket(), Launch { rail_length: 1.5, ..Launch::default() }, rec));
+    let e = r.trajectory.events.iter().find(|e| matches!(e.kind, EventKind::Deploy(_))).expect("deploys");
+    assert!((e.t - 3.0).abs() < 0.02, "deployed at {}", e.t);
 }
 
 #[test]

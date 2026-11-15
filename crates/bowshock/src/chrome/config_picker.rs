@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use bowshock_model::{Ignition, MotorMount, MotorRef, PartId};
+use bowshock_model::{MotorMount, MotorRef, PartId};
 use bowshock_motors::Motor;
 use bowshock_sim::from_model::{MAX_MARGIN_CAL, MIN_MARGIN_CAL};
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input, Space};
@@ -85,8 +85,6 @@ pub struct Picker {
     classes: Vec<char>,
     /// The motor and delay picked for each mount.
     choices: BTreeMap<PartId, Choice>,
-    /// The stage of each motor mount, for the ignition of a new upper-stage motor.
-    mount_stage: BTreeMap<PartId, usize>,
     rows: Vec<Row>,
 }
 
@@ -106,14 +104,8 @@ impl Picker {
                 choices.insert(slot.mount, Choice { motor, delay: if slot.delay.is_finite() { slot.delay } else { 0.0 } });
             }
         }
-        let mut mount_stage = BTreeMap::new();
-        for stage in ctx.physics.stages() {
-            for &mount in &stage.mounts {
-                mount_stage.insert(mount, stage.index);
-            }
-        }
         let first = ctx.physics.stages().first().map_or(1, |s| s.index);
-        let mut picker = Picker { stage: first, search: String::new(), classes: Vec::new(), choices, mount_stage, rows: Vec::new() };
+        let mut picker = Picker { stage: first, search: String::new(), classes: Vec::new(), choices, rows: Vec::new() };
         picker.rebuild(ctx);
         picker.narrow_to_current(ctx);
         Ok(picker)
@@ -200,7 +192,8 @@ impl Picker {
         Outcome::Stay
     }
 
-    /// Adds the configuration and makes it current. Stages with no pick keep what the active configuration has for them.
+    /// Adds the configuration and makes it current. It starts as a copy of the active one (its motors, staging and recovery
+    /// timing), without the ballast, which belongs to the motor it balanced; stages with no pick keep what the copy has.
     fn add(&self, ctx: &mut Ctx) {
         let motors: Vec<(PartId, MotorRef, f64)> = self
             .choices
@@ -210,25 +203,16 @@ impl Picker {
                 (mount, MotorRef::new(m.designation.clone(), m.manufacturer.clone()), c.delay)
             })
             .collect();
-        let mount_stage = &self.mount_stage;
         ctx.doc.edit("Add configuration", |r| {
-            let base = r.active_configuration().clone();
-            let id = r.add_configuration("");
-            for slot in &base.motors {
-                let _ = r.set_motor(id, slot.mount, slot.motor.clone());
-                let _ = r.set_motor_delay(id, slot.mount, slot.delay);
-                let _ = r.set_ignition(id, slot.mount, slot.ignition);
-            }
-            for &(stage, delay) in &base.stage_separation {
-                let _ = r.set_stage_separation(id, stage, delay);
-            }
+            let Some(id) = r.duplicate_configuration(r.active_config_id()) else {
+                return;
+            };
+            // A new configuration is named after its motors until it is renamed.
+            r.rename_configuration(id, "");
+            let _ = r.set_ballast(id, None);
             for (mount, motor, delay) in motors {
                 let _ = r.set_motor(id, mount, Some(motor));
                 let _ = r.set_motor_delay(id, mount, delay);
-                // An upper stage lights after the stage below separates, unless the configuration already says otherwise.
-                if base.slot(mount).is_none() && mount_stage.get(&mount).is_some_and(|s| *s > 1) {
-                    let _ = r.set_ignition(id, mount, Ignition::StageSeparation { delay: 0.0 });
-                }
             }
             r.select_configuration(id);
         });

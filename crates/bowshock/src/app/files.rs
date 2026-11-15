@@ -155,6 +155,8 @@ mod tests {
         let id = r.active_config_id();
         r.set_motor(id, mount, Some(bowshock_model::MotorRef::new(motor.designation.clone(), motor.manufacturer.clone()))).unwrap();
         r.set_motor_delay(id, mount, 14.0).unwrap();
+        // The kit's four flights (Nominal, Windy, Hot day, Bigger motor) ship with the example; a new document has only Nominal.
+        r.set_flights(bowshock_model::example_flights());
         r
     }
 
@@ -243,6 +245,7 @@ mod tests {
             let motor = db.find(name).expect("bundled");
             r.set_motor(id, mount, Some(bowshock_model::MotorRef::new(motor.designation.clone(), motor.manufacturer.clone()))).unwrap();
         }
+        r.set_flights(bowshock_model::example_flights().into_iter().take(3).collect());
         r
     }
 

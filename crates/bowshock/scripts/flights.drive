@@ -1,0 +1,30 @@
+# Stored flights: the flight list is part of the document (conditions + which configuration or motor), edited through the
+# document (dirty dot, undo), saved in the `.bowshock` file and loaded back; results are not saved. The save/load round trip is
+# unit-tested (`simulate::tests::flights_are_saved_with_the_file_and_loaded_back_without_results`).
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/flights.drive out/flights
+viewport 1280x800
+
+# Simulate: the example stores the kit's four flights; the document is clean.
+click (663, 18)
+screenshot FlightsStored-list.png
+
+# Fly Nominal, then edit Windy's wind: the title gets its dirty dot and Nominal's result stays current (not faint).
+click "Run"
+click "Windy"
+click (188, 448)
+type "11"
+type enter
+screenshot FlightsStored-edit.png
+
+# Add a flight: it starts from the selected one's conditions and is stored too.
+click "compare +"
+screenshot FlightsStored-added.png
+
+# Undo the new flight (top bar): the list follows the document.
+click (352, 20)
+screenshot FlightsStored-undo.png
+
+# Build and back: the flights are still there.
+click (597, 18)
+click (663, 18)
+screenshot FlightsStored-back.png

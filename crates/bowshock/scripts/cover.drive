@@ -1,0 +1,15 @@
+# The Cover: what an empty document's viewport shows, and its disappearance when the first part is added.
+#   cargo run -q -p bowshock -- drive crates/bowshock/scripts/cover.drive out/cover
+viewport 1280x800
+
+# Empty start: the mark large on the viewport ground, the label, the quiet hint under it.
+screenshot Cover-empty.png
+
+# Light theme.
+click "Light"
+screenshot Cover-light.png
+click "Dark"
+
+# Adding the first part (click = attach): the Cover is gone and the viewport shows the model on its sheet.
+click "Nose cone"
+screenshot Cover-nose.png

@@ -155,12 +155,22 @@ impl Document {
         self.revision += 1;
     }
 
+    /// After an edit: the formulas (see `bowshock_model::Formula`) are evaluated again so every dependant follows its source, and
+    /// the formulas of parts that are gone are dropped (not while a drag carries parts out of the rocket).
+    fn settle(&mut self) {
+        self.rocket.apply_formulas();
+        if self.drag.is_none() {
+            self.rocket.prune_formulas();
+        }
+    }
+
     /// Applies `f` to the rocket as one undo step called `label` (recorded only if the rocket changed). Ends any
     /// coalescing run first.
     pub fn edit<R>(&mut self, label: &str, f: impl FnOnce(&mut Rocket) -> R) -> R {
         self.seal();
         let before = self.rocket.clone();
         let out = f(&mut self.rocket);
+        self.settle();
         if self.rocket != before {
             self.push_undo(Step { rocket: before, label: label.to_string() });
             self.changed();
@@ -174,6 +184,7 @@ impl Document {
         if self.merging.as_deref() == Some(key) && !self.undo.is_empty() {
             let before = self.rocket.clone();
             let out = f(&mut self.rocket);
+            self.settle();
             if self.rocket != before {
                 self.changed();
             }
@@ -221,6 +232,7 @@ impl Document {
         }
         let before = self.rocket.clone();
         let out = f(&mut self.rocket);
+        self.rocket.apply_formulas();
         if self.rocket != before {
             self.revision += 1;
         }

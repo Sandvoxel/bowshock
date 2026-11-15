@@ -47,7 +47,7 @@ pub(super) fn view<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
     let add: Element<'a, Message> = push("compare +", Weight::Ghost).tooltip("Add a flight to compare").on_press(Message::AddFlight).into();
     let head = container(row![ui::label(title), Space::new().width(Fill), add].align_y(iced::Center)).padding([0.0, SPACE_2]).height(32);
 
-    let revision = ctx.doc.revision();
+    let revision = state.revision(ctx);
     let rows = column(state.flights.iter().map(|f| flight_row(state, ctx, f, revision)));
 
     let mut body: Vec<Element<'a, Message>> = vec![rows.boxed()];

@@ -1,8 +1,8 @@
 //! The inspector's update step against a real app: scrubbing, limits, anchors, detach, overrides, renames, staging timing.
 
-use bowshock_model::{DeployEvent, Dim, Ignition, InternalKind, InternalPart, PartId, Rocket};
+use bowshock_model::{DeployEvent, Dim, EventKind, InternalKind, InternalPart, PartId, Rocket, StageTrigger};
 
-use super::edit::{Anchor, Field, Ignite, Trigger};
+use super::edit::{Anchor, Field, StageOn, Trigger};
 use super::{part, separation, Message, State};
 use crate::app::{App, Message as AppMessage, Selection};
 
@@ -178,8 +178,15 @@ fn recovery_and_motor_controls_edit_the_active_configuration_and_the_part() {
     fx.select(chute);
     fx.send(Message::Trigger(Trigger::Altitude));
     fx.send(Message::Edit(Field::DeployAltitude, 120.0, false));
+    assert_eq!(fx.rocket().active_deployment(chute).unwrap().event, DeployEvent::Altitude(120.0));
+    // The configuration holds it; the part keeps its own value as the default for every other configuration.
     let InternalKind::Parachute { deploy, .. } = fx.rocket().internal(chute).unwrap().kind else { unreachable!() };
-    assert_eq!(deploy.event, DeployEvent::Altitude(120.0));
+    assert_ne!(deploy.event, DeployEvent::Altitude(120.0));
+    let active = fx.rocket().active_config_id();
+    assert_eq!(fx.rocket().active_configuration().deployment(chute).map(|d| d.event), Some(DeployEvent::Altitude(120.0)));
+    let other = fx.app.ctx_mut().doc.edit("Add configuration", |r| r.add_configuration("Other"));
+    assert_eq!(fx.rocket().deployment(other, chute).unwrap().event, deploy.event);
+    assert_ne!(other, active);
     let mount = fx.internal(|p| p.kind.is_motor_mount());
     fx.select(mount);
     fx.send(Message::Edit(Field::EjectionDelay, 10.0, false));
@@ -200,16 +207,27 @@ fn a_selected_separation_edits_the_configuration_timing() {
     fx.app.sync();
     assert_eq!(fx.app.ctx().selection, Selection::Separation(1));
     assert!(separation::view(fx.app.ctx(), 1).is_some() && separation::view(fx.app.ctx(), 2).is_none());
-    fx.send(Message::Edit(Field::SeparationDelay(1), 1.0, false));
-    fx.send(Message::IgniteOn(Ignite::Separation));
-    fx.send(Message::Edit(Field::IgnitionDelay, 2.5, true));
-    assert_eq!(fx.rocket().active_configuration().separation_delay(1), 1.0);
-    let upper = fx.app.ctx().physics.stages()[1].mounts[0];
-    let ignition = |fx: &Fx| fx.rocket().active_configuration().slot(upper).unwrap().ignition;
-    assert_eq!(ignition(&fx), Ignition::StageSeparation { delay: 2.5 });
-    // One scrub, one undo step: back to the ignition `IgniteOn` made.
+    let sep = |fx: &Fx| fx.rocket().active_configuration().event(1, EventKind::Separation);
+    let ign = |fx: &Fx| fx.rocket().active_configuration().event(2, EventKind::Ignition);
+    fx.send(Message::Edit(Field::StageDelay(1, EventKind::Separation), 1.0, false));
+    fx.send(Message::StageOn(2, EventKind::Ignition, StageOn::Burnout));
+    fx.send(Message::Edit(Field::StageDelay(2, EventKind::Ignition), 2.5, true));
+    assert_eq!((sep(&fx).trigger, sep(&fx).delay), (StageTrigger::Burnout, 1.0));
+    assert_eq!((ign(&fx).trigger, ign(&fx).delay), (StageTrigger::Burnout, 2.5));
+    // One scrub, one undo step: back to the ignition `StageOn` made (the fixture's 1.5 s delay is kept by the switch).
     fx.undo();
-    assert_eq!(ignition(&fx), Ignition::StageSeparation { delay: 1.5 });
+    assert_eq!((ign(&fx).trigger, ign(&fx).delay), (StageTrigger::Burnout, 1.5));
+    // Every trigger kind can be chosen for both events and every inspector view builds with it.
+    for on in [StageOn::Launch, StageOn::Altitude, StageOn::Burnout] {
+        fx.send(Message::StageOn(1, EventKind::Separation, on));
+        fx.send(Message::StageOn(2, EventKind::Ignition, on));
+        assert_eq!(StageOn::of(sep(&fx).trigger), on);
+        assert_eq!(StageOn::of(ign(&fx).trigger), on);
+        let _ = separation::view(fx.app.ctx(), 1);
+        let _ = fx.state.view(fx.app.ctx());
+    }
+    fx.send(Message::Edit(Field::StageAltitude(1, EventKind::Separation), 80.0, false));
+    assert_eq!(sep(&fx).trigger, StageTrigger::Altitude(80.0));
 }
 
 #[test]

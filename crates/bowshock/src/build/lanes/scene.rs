@@ -67,6 +67,8 @@ pub struct Bar {
     pub name: String,
     /// The key dimension, in the display unit (`871.4 · Ø76.2`); empty for none.
     pub dim: String,
+    /// The per-copy overrides of a symmetry group, listed in mono on its bar (`B: cant`); empty for any other bar.
+    pub overrides: String,
     /// Sub-row within the lane, from 0.
     pub sub: usize,
     /// Part of a stage that has dropped away in the phase on show.
@@ -258,6 +260,7 @@ impl Scene {
                 name: part.display_name(),
                 dim,
                 sub: 0,
+                overrides: String::new(),
                 dropped: dropped(start),
                 count: 1,
                 class: Some(PartClass::Axial),
@@ -292,6 +295,7 @@ impl Scene {
                 name,
                 dim: String::new(),
                 sub: 0,
+                overrides: radial.override_summary(),
                 dropped: dropped(start),
                 count: radial.count,
                 class: Some(PartClass::Radial),
@@ -339,6 +343,7 @@ impl Scene {
                 name,
                 dim,
                 sub: 0,
+                overrides: String::new(),
                 dropped: dropped(start),
                 count: 1,
                 class: Some(PartClass::Internal),
@@ -374,6 +379,7 @@ impl Scene {
                     name: motor.designation.clone(),
                     dim: len(motor.length),
                     sub: 0,
+                    overrides: String::new(),
                     dropped: dropped(start),
                     count: 1,
                     class: None,

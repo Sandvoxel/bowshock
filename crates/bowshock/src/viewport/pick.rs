@@ -153,7 +153,19 @@ pub fn surface_target(rocket: &Rocket, camera: &Camera, at: Point, size: Size, k
 /// Where copy `instance` of `radial` stands.
 pub fn placement(rocket: &Rocket, radial: &RadialPart, instance: usize) -> Option<Placement> {
     let angle = *radial.angles().get(instance)?;
-    Some(Placement { z0: rocket.radial_station(radial)? as f32, base: rocket.radial_base_radius(radial)? as f32, angle: angle as f32 })
+    let cant = radial.effective(instance).cant as f32;
+    Some(Placement { z0: rocket.radial_station(radial)? as f32, base: rocket.radial_base_radius(radial)? as f32, angle: angle as f32, cant })
+}
+
+/// `v` (a point when `point`, else a direction) turned back by a fin's cant, so a canted plate can be tested as if it were flat.
+fn untilt(v: DVec3, at: Placement, point: bool) -> DVec3 {
+    let (u, t) = radial::dirs(at.angle);
+    let (u, t) = (u.as_dvec3(), t.as_dvec3());
+    let (s, c) = f64::from(at.cant).sin_cos();
+    let pivot = if point { DVec3::Z * f64::from(at.z0) } else { DVec3::ZERO };
+    let rel = v - pivot;
+    let (along, across) = (rel.z, rel.dot(t));
+    pivot + u * rel.dot(u) + DVec3::Z * (along * c - across * s) + t * (across * c + along * s)
 }
 
 /// Distance of `p` inside the convex polygon `poly` (negative outside), as the least signed edge distance.
@@ -171,6 +183,7 @@ fn inside(poly: &[(f64, f64); 4], p: (f64, f64)) -> f64 {
 
 /// Ray parameter where the ray meets one copy of a radial part, with `margin` metres of slack so thin parts can be hit.
 fn hit_radial(o: DVec3, d: DVec3, kind: &RadialKind, at: Placement, margin: f64) -> Option<f64> {
+    let (o, d) = if at.cant != 0.0 && kind.is_fin() { (untilt(o, at, true), untilt(d, at, false)) } else { (o, d) };
     let (u, t) = radial::dirs(at.angle);
     let (u, t) = (u.as_dvec3(), t.as_dvec3());
     let (z0, base) = (f64::from(at.z0), f64::from(at.base));
@@ -254,7 +267,7 @@ pub fn pick(rocket: &Rocket, camera: &Camera, at: Point, size: Size) -> Option<P
     let radials = rocket.radials().iter().flat_map(|r| {
         (0..r.angles().len()).filter_map(move |i| {
             let at = placement(rocket, r, i)?;
-            hit_radial(o, d, &r.kind, at, margin).map(|t| (Pick::Radial { id: r.id, instance: i }, t))
+            hit_radial(o, d, &r.effective(i).kind, at, margin).map(|t| (Pick::Radial { id: r.id, instance: i }, t))
         })
     });
     // Radial parts are small and sit on the surface: prefer them when within a hair of the body's depth.

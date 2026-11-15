@@ -287,16 +287,18 @@ impl Mesh {
                 return;
             };
             let pull = if radial.kind.is_fin() { radial.kind.fin_span().unwrap_or(0.04) as f32 * 0.6 } else { 0.03 };
-            for angle in radial.angles() {
+            for (index, angle) in radial.angles().into_iter().enumerate() {
+                // Each copy stands as it is: the group's values with its own overrides (a canted fin B) on top.
+                let own = radial.effective(index);
                 let (u, _) = radial::dirs(angle as f32);
                 let explode = Vec3::Z * parent_dz + u * pull;
                 b.outer.tag = Some(Tag { state, material: 1.0, system: 1.0, layer: LAYER_RADIAL, explode });
-                let at = Placement { z0: (parent_z + radial.offset) as f32, base: base as f32, angle: angle as f32 };
+                let at = Placement { z0: (parent_z + radial.offset) as f32, base: base as f32, angle: angle as f32, cant: own.cant as f32 };
                 let start = b.marks();
-                match &radial.kind {
+                match &own.kind {
                     RadialKind::EllipticalFin { thickness, .. } | RadialKind::FreeformFin { thickness, .. } => {
-                        let outline: Vec<(f32, f32)> = radial.kind.planform().unwrap_or_default().iter().map(|&(pz, h)| (pz as f32, h as f32)).collect();
-                        b.outer.plate(&outline, at.z0, at.base, at.angle, *thickness as f32);
+                        let outline: Vec<(f32, f32)> = own.kind.planform().unwrap_or_default().iter().map(|&(pz, h)| (pz as f32, h as f32)).collect();
+                        b.outer.plate(&outline, at.z0, at.base, at.angle, at.cant, *thickness as f32);
                     }
                     kind => {
                         let mut tmp = Vec::new();

@@ -46,6 +46,8 @@ pub enum DeployEvent {
     Altitude(f64),
     /// With the motor's ejection charge.
     Ejection,
+    /// After launch: the delay is the time from launch.
+    TimeFromLaunch,
 }
 
 /// When a recovery device deploys: an event and a delay after it.

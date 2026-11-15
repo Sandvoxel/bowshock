@@ -8,17 +8,19 @@
 //! * Drag comes from [`Aero::drag`] at the current Mach/Reynolds number with the motor on/off
 //!   (base drag is reduced while any motor burns). Under a deployed recovery device the drag is
 //!   `0.5 rho v^2 CdA` summed over deployed devices.
-//! * Stages are in firing order (see [`StageMass`]). The lower stage drops at
-//!   `burnout + delay` of the next stage's ignition rule (or at burnout when the upper stage ignites at
-//!   launch). Only the remaining upper stack is flown afterwards; the aerodynamics are
-//!   rebuilt for the truncated vehicle. Recovery devices on dropped stages are ignored.
+//! * Stages are in firing order (see [`StageMass`]). Each stage's ignition and separation are [`Timing`]s (a trigger plus a
+//!   delay: burnout, separation, time from launch, or climbing through an altitude), resolved by [`Timeline`] as the flight
+//!   goes: altitude triggers fire the first step the rocket is at or above the altitude while ascending. A separated stage is
+//!   dropped; only the remaining upper stack is flown afterwards and the aerodynamics are rebuilt for the truncated vehicle.
+//!   Recovery devices on dropped stages are ignored.
 //! * Wind is constant with altitude; turbulence adds an Ornstein-Uhlenbeck gust with standard
 //!   deviation `intensity x wind_speed`.
 
 use crate::aero::Aero;
 use crate::atmosphere::Atmosphere;
 use crate::rng::Rng;
-use crate::vehicle::{Ignition, Vehicle};
+use crate::staging::{Hits, Timeline};
+use crate::vehicle::{Trigger, Vehicle};
 use crate::G0;
 
 /// Gust intensity setting (standard deviation as a fraction of the mean wind speed).
@@ -95,6 +97,8 @@ pub enum Deploy {
     Altitude(f64),
     /// At the ejection charge of the motor in the device's stage.
     Ejection,
+    /// `delay` seconds after launch (the delay field of the device is the time from launch).
+    Launch,
 }
 
 /// Parachute or other recovery device.
@@ -258,44 +262,6 @@ impl Tweaks {
     pub(crate) const NOMINAL: Tweaks = Tweaks { thrust: 1.0, cd: 1.0, mass: 1.0 };
 }
 
-struct Schedule {
-    ignition: Vec<f64>,
-    burnout: Vec<f64>,
-    separation: Vec<f64>,
-    ejection: Vec<Option<f64>>,
-}
-
-fn schedule(v: &Vehicle) -> Schedule {
-    let n = v.stages.len();
-    let (mut ign, mut bo) = (vec![0.0; n], vec![0.0; n]);
-    for k in 0..n {
-        let prev = if k == 0 { 0.0 } else { bo[k - 1] };
-        match &v.stages[k].motor {
-            Some(m) => {
-                ign[k] = match m.ignition {
-                    Ignition::Launch => 0.0,
-                    Ignition::AfterPreviousBurnout { delay } => prev + delay,
-                };
-                bo[k] = ign[k] + m.curve.burn_time();
-            }
-            None => {
-                ign[k] = prev;
-                bo[k] = prev;
-            }
-        }
-    }
-    let mut sep = vec![f64::INFINITY; n];
-    for k in 0..n.saturating_sub(1) {
-        let delay = match v.stages[k + 1].motor.as_ref().map(|m| m.ignition) {
-            Some(Ignition::AfterPreviousBurnout { delay }) => delay,
-            _ => 0.0,
-        };
-        sep[k] = bo[k] + delay;
-    }
-    let ej = (0..n).map(|k| v.stages[k].motor.as_ref().and_then(|m| m.ejection_delay).map(|d| bo[k] + d)).collect();
-    Schedule { ignition: ign, burnout: bo, separation: sep, ejection: ej }
-}
-
 /// One aerodynamic model per separation level (0 = full stack, k = lowest k stages dropped).
 pub(crate) fn build_aeros(v: &Vehicle) -> Vec<Aero> {
     let n = v.stages.len().max(1);
@@ -351,7 +317,7 @@ struct Ctx<'a> {
     tw: Tweaks,
     aeros: &'a [Aero],
     atm: Atmosphere,
-    sched: Schedule,
+    sched: Timeline,
     wind: [f64; 2],
     axis: [f64; 3],
     a_ref: f64,
@@ -379,7 +345,8 @@ impl Ctx<'_> {
             m += dm;
             mx += dm * st.dry.cg;
             if let Some(mo) = &st.motor {
-                let tau = t - self.sched.ignition[k];
+                // A motor that has not lit (yet, or ever) is a full dead weight.
+                let tau = self.sched.ignition[k].map_or(-1.0, |ign| t - ign);
                 let mm = mo.curve.mass(tau);
                 m += mm;
                 mx += mm * mo.cg_station();
@@ -442,41 +409,19 @@ pub fn simulate(input: &SimInput) -> FlightResult {
 pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero]) -> FlightResult {
     let v = &input.vehicle;
     let n = v.stages.len();
-    let sched = schedule(v);
     let atm = Atmosphere::new(launch.site_altitude, launch.ground_temperature);
     let th = launch.angle_from_vertical;
     let axis = [th.sin() * launch.direction.sin(), th.sin() * launch.direction.cos(), th.cos()];
     let wind = [-launch.wind_speed * launch.wind_from.sin(), -launch.wind_speed * launch.wind_from.cos()];
-    let ctx = Ctx { input, launch, tw, aeros, atm, sched, wind, axis, a_ref: v.reference_area().max(1e-12) };
+    let mut ctx = Ctx { input, launch, tw, aeros, atm, sched: Timeline::resolve(v, &Hits::none(n)), wind, axis, a_ref: v.reference_area().max(1e-12) };
 
-    // Scheduled events, sorted by time.
-    let mut sched_events: Vec<Event> = Vec::new();
-    for k in 0..n {
-        if v.stages[k].motor.is_some() {
-            sched_events.push(Event { t: ctx.sched.ignition[k], kind: EventKind::Ignition, altitude: 0.0, stage: Some(k) });
-            sched_events.push(Event { t: ctx.sched.burnout[k], kind: EventKind::Burnout, altitude: 0.0, stage: Some(k) });
-        }
-        if ctx.sched.separation[k].is_finite() {
-            sched_events.push(Event { t: ctx.sched.separation[k], kind: EventKind::Separation, altitude: 0.0, stage: Some(k) });
-        }
-    }
-    sched_events.sort_by(|a, b| a.t.total_cmp(&b.t));
-    let mut pending_events = sched_events.into_iter().peekable();
-    let mut step_times: Vec<f64> = ctx.sched.ignition.iter().chain(&ctx.sched.burnout).copied().filter(|t| t.is_finite()).collect();
-    step_times.extend(ctx.sched.separation.iter().copied().filter(|t| t.is_finite()));
-    step_times.extend(ctx.sched.ejection.iter().flatten().copied());
-
-    let mut deploy_at: Vec<Option<f64>> = input
-        .recovery
-        .iter()
-        .map(|d| match d.deploy {
-            Deploy::Ejection => ctx.sched.ejection.get(d.stage).copied().flatten().map(|t| t + d.delay),
-            _ => None,
-        })
-        .collect();
-    step_times.extend(deploy_at.iter().flatten().copied());
+    // Altitude triggers that have fired (the time they fired, before their delay), and which staging events are on record.
+    let mut hits = Hits::none(n);
+    let (mut done_ignition, mut done_burnout, mut done_separation) = (vec![false; n], vec![false; n], vec![false; n]);
+    // Step boundaries beyond the staging timeline (deployments relative to apogee or altitude).
+    let mut step_times: Vec<f64> = Vec::new();
+    let mut deploy_at: Vec<Option<f64>> = input.recovery.iter().map(|d| (d.deploy == Deploy::Launch).then_some(d.delay)).collect();
     let mut deployed = vec![false; input.recovery.len()];
-    let last_burnout = ctx.sched.burnout.iter().copied().fold(0.0, f64::max);
 
     let mut rng = Rng::new(launch.seed ^ 0xA5A5_5A5A_1234_5678);
     let gust_sigma = launch.turbulence.intensity() * launch.wind_speed;
@@ -506,16 +451,40 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
     };
 
     while t < input.max_time {
-        let nsep = (0..n.saturating_sub(1)).filter(|&k| ctx.sched.separation[k] <= t + 1e-9).count();
-        while let Some(e) = pending_events.peek() {
-            if e.t > t + 1e-9 {
-                break;
+        let nsep = ctx.sched.separated(t);
+        // Staging events that are due; a stage dropped before its burnout never reports one.
+        let mut due: Vec<Event> = Vec::new();
+        for k in 0..n {
+            let separation = ctx.sched.separation[k];
+            if v.stages[k].motor.is_some() {
+                if let Some(ti) = ctx.sched.ignition[k].filter(|ti| !done_ignition[k] && *ti <= t + 1e-9) {
+                    done_ignition[k] = true;
+                    due.push(Event { t: ti, kind: EventKind::Ignition, altitude: 0.0, stage: Some(k) });
+                }
+                if let Some(tb) = ctx.sched.burnout[k].filter(|tb| !done_burnout[k] && *tb <= t + 1e-9) {
+                    done_burnout[k] = true;
+                    if !separation.is_some_and(|s| s < tb - 1e-9) {
+                        due.push(Event { t: tb, kind: EventKind::Burnout, altitude: 0.0, stage: Some(k) });
+                    }
+                }
             }
-            let mut e = pending_events.next().expect("peeked");
+            if let Some(ts) = separation.filter(|ts| !done_separation[k] && *ts <= t + 1e-9) {
+                done_separation[k] = true;
+                due.push(Event { t: ts, kind: EventKind::Separation, altitude: 0.0, stage: Some(k) });
+            }
+        }
+        due.sort_by(|a, b| a.t.total_cmp(&b.t));
+        for mut e in due {
             e.t = t;
             e.altitude = pos[2];
             last_event_t = t;
             push_event(&mut events, &mut event_idx, &raws, e);
+        }
+        // Ejection deployments wait for their stage's charge, whenever the timeline learns of it.
+        for (i, d) in input.recovery.iter().enumerate() {
+            if d.deploy == Deploy::Ejection && deploy_at[i].is_none() {
+                deploy_at[i] = ctx.sched.ejection.get(d.stage).copied().flatten().map(|te| te + d.delay);
+            }
         }
         // Devices whose stage has been dropped never deploy.
         for (i, d) in input.recovery.iter().enumerate() {
@@ -527,6 +496,7 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
         let raw = Raw { t, pos, vel, acc: d0.acc, thrust: d0.thrust, drag: d0.drag, mass: d0.mass, cg: d0.cg, mach: d0.mach, nsep };
         raws.push(raw);
 
+        let last_burnout = ctx.sched.burnout.iter().flatten().copied().fold(0.0, f64::max);
         if on_rail && t > last_burnout + 0.5 && dot(vel, axis) <= 1e-9 {
             // Never left the pad: the thrust cannot lift the rocket.
             landed = true;
@@ -549,7 +519,7 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
             input.dt.max(0.01)
         };
         let mut boundary = f64::INFINITY;
-        for &bt in step_times.iter().chain(deploy_at.iter().flatten()) {
+        for bt in ctx.sched.times().chain(step_times.iter().copied()).chain(deploy_at.iter().flatten().copied()) {
             if bt > t + 1e-9 && bt < boundary {
                 boundary = bt;
             }
@@ -607,6 +577,30 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
                 push_event(&mut events, &mut event_idx, &raws, Event { t, kind: EventKind::RailExit, altitude: pos[2], stage: None });
             }
             continue;
+        }
+
+        // Altitude triggers of the staging fire the first step the rocket is at or above the altitude on the way up.
+        if apogee.is_none() {
+            let mut fired = false;
+            for k in 0..n {
+                if let Some(Trigger::Altitude(h)) = v.stages[k].motor.as_ref().map(|m| m.ignition.trigger) {
+                    let armed = k == 0 || ctx.sched.ignition[k - 1].is_some_and(|i| i <= t);
+                    if armed && hits.ignition[k].is_none() && pos[2] >= h {
+                        hits.ignition[k] = Some(t);
+                        fired = true;
+                    }
+                }
+                if let (true, Trigger::Altitude(h)) = (k + 1 < n, v.stages[k].separation.trigger) {
+                    let armed = ctx.sched.ignition[k].is_some_and(|i| i <= t);
+                    if armed && hits.separation[k].is_none() && pos[2] >= h {
+                        hits.separation[k] = Some(t);
+                        fired = true;
+                    }
+                }
+            }
+            if fired {
+                ctx.sched = Timeline::resolve(v, &hits);
+            }
         }
 
         // Apogee.
@@ -687,7 +681,7 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
         raws.push(r);
     } else if !landed {
         // Hit the time limit mid-flight: record the final state.
-        let nsep = (0..n.saturating_sub(1)).filter(|&k| ctx.sched.separation[k] <= t + 1e-9).count();
+        let nsep = ctx.sched.separated(t);
         let d = ctx.eval(t, pos, vel, gust, nsep, on_rail, &chutes);
         raws.push(Raw { t, pos, vel, acc: d.acc, thrust: d.thrust, drag: d.drag, mass: d.mass, cg: d.cg, mach: d.mach, nsep });
         ground_xy = [pos[0], pos[1]];
@@ -702,7 +696,7 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
         max_m = max_m.max(r.mach);
         max_a = max_a.max(dot(r.acc, r.acc).sqrt());
     }
-    let final_burn = if n > 0 { ctx.sched.burnout[n - 1] } else { 0.0 };
+    let final_burn = n.checked_sub(1).and_then(|k| ctx.sched.burnout[k]).unwrap_or(0.0);
     let flight_time = raws.last().map_or(0.0, |r| r.t);
     let bearing = ground_xy[0].atan2(ground_xy[1]).to_degrees().rem_euclid(360.0);
     let summary = Summary {

@@ -22,12 +22,33 @@ pub fn dirs(angle: f32) -> (Vec3, Vec3) {
     (Vec3::new(s, c, 0.0), Vec3::new(c, -s, 0.0))
 }
 
-/// A copy of `kind` placed with its fore edge at `z0` on a surface of radius `base`, at `angle`.
+/// A copy of `kind` placed with its fore edge at `z0` on a surface of radius `base`, at `angle`, its fin canted by `cant`
+/// (radians; 0 for every part but a canted fin).
 #[derive(Debug, Clone, Copy)]
 pub struct Placement {
     pub z0: f32,
     pub base: f32,
     pub angle: f32,
+    pub cant: f32,
+}
+
+/// `v` (a direction) turned by a fin's `cant` about its span axis: the chord direction `+Z` swings towards the fin's `-tangent`
+/// by `cant`, so a positive cant spins the rocket towards increasing angle, as the model defines it. The span stays put.
+pub fn tilt_dir(v: Vec3, angle: f32, cant: f32) -> Vec3 {
+    if cant == 0.0 {
+        return v;
+    }
+    let (u, t) = dirs(angle);
+    let (s, c) = cant.sin_cos();
+    let (along, across) = (v.z, v.dot(t));
+    u * v.dot(u) + Vec3::Z * (along * c + across * s) + t * (across * c - along * s)
+}
+
+/// `p` turned by a fin's `cant` about the span line through the root's leading edge (the line along the fin's radial direction
+/// at station `z0`).
+pub fn tilt_point(p: Vec3, z0: f32, angle: f32, cant: f32) -> Vec3 {
+    let pivot = Vec3::Z * z0;
+    pivot + tilt_dir(p - pivot, angle, cant)
 }
 
 /// The fin plate's corners (root leading edge, tip leading edge, tip trailing edge, root trailing edge).
@@ -40,8 +61,18 @@ pub fn fin_corners(kind: &RadialKind, at: Placement) -> Option<[Vec3; 4]> {
     }))
 }
 
-/// Points enclosing one copy, for screen bounds.
+/// Points enclosing one copy, for screen bounds (turned by the cant of a canted fin).
 pub fn outline_points(kind: &RadialKind, at: Placement) -> Vec<Vec3> {
+    let mut points = outline_plain(kind, at);
+    if at.cant != 0.0 && kind.is_fin() {
+        for p in &mut points {
+            *p = tilt_point(*p, at.z0, at.angle, at.cant);
+        }
+    }
+    points
+}
+
+fn outline_plain(kind: &RadialKind, at: Placement) -> Vec<Vec3> {
     let (u, t) = dirs(at.angle);
     match *kind {
         RadialKind::FinSet { thickness, .. } => {
@@ -125,8 +156,19 @@ fn cylinder(out: &mut Vec<Vertex>, base: Vec3, axis: Vec3, length: f32, radius: 
     }
 }
 
-/// Appends the surface of one copy of `kind`.
+/// Appends the surface of one copy of `kind`; a canted fin is turned by its cant ([`tilt_point`]).
 pub fn emit(out: &mut Vec<Vertex>, kind: &RadialKind, at: Placement, state: f32) {
+    let start = out.len();
+    emit_plain(out, kind, at, state);
+    if at.cant != 0.0 && kind.is_fin() {
+        for v in &mut out[start..] {
+            v.position = tilt_point(Vec3::from(v.position), at.z0, at.angle, at.cant).to_array();
+            v.normal = tilt_dir(Vec3::from(v.normal), at.angle, at.cant).to_array();
+        }
+    }
+}
+
+fn emit_plain(out: &mut Vec<Vertex>, kind: &RadialKind, at: Placement, state: f32) {
     let (u, t) = dirs(at.angle);
     match *kind {
         RadialKind::FinSet { thickness, .. } => {
@@ -176,18 +218,18 @@ mod tests {
 
     #[test]
     fn fin_corners_stand_on_the_surface_and_reach_the_span() {
-        let c = fin_corners(&fin(), Placement { z0: 1.0, base: 0.04, angle: 0.0 }).unwrap();
+        let c = fin_corners(&fin(), Placement { z0: 1.0, base: 0.04, angle: 0.0, cant: 0.0 }).unwrap();
         // Root edge sunk just under the surface, tip 70 mm out, sweep and chords along z.
         assert!((c[0].y - (0.04 - SINK)).abs() < 1e-6 && (c[0].z - 1.0).abs() < 1e-6);
         assert!((c[1].y - 0.11).abs() < 1e-6 && (c[1].z - 1.06).abs() < 1e-6);
         assert!((c[2].z - 1.11).abs() < 1e-6 && (c[3].z - 1.12).abs() < 1e-6);
-        assert!(fin_corners(&RadialKind::LaunchLug { length: 0.05, diameter: 0.01 }, Placement { z0: 0.0, base: 0.04, angle: 0.0 }).is_none());
+        assert!(fin_corners(&RadialKind::LaunchLug { length: 0.05, diameter: 0.01 }, Placement { z0: 0.0, base: 0.04, angle: 0.0, cant: 0.0 }).is_none());
     }
 
     #[test]
     fn a_forward_swept_fin_has_its_tip_ahead_of_the_root() {
         let kind = RadialKind::FinSet { root_chord: 0.12, tip_chord: 0.05, span: 0.07, sweep: -0.04, thickness: 0.004 };
-        let c = fin_corners(&kind, Placement { z0: 1.0, base: 0.04, angle: 0.0 }).unwrap();
+        let c = fin_corners(&kind, Placement { z0: 1.0, base: 0.04, angle: 0.0, cant: 0.0 }).unwrap();
         assert!((c[1].z - 0.96).abs() < 1e-6 && (c[2].z - 1.01).abs() < 1e-6 && (c[0].z - 1.0).abs() < 1e-6);
     }
 
@@ -197,7 +239,7 @@ mod tests {
         let kinds = [fin(), forward_swept, RadialKind::LaunchLug { length: 0.05, diameter: 0.01 }, RadialKind::RailButton { height: 0.008, diameter: 0.011 }];
         for kind in kinds {
             let mut out = Vec::new();
-            emit(&mut out, &kind, Placement { z0: 0.5, base: 0.04, angle: 0.7 }, 0.0);
+            emit(&mut out, &kind, Placement { z0: 0.5, base: 0.04, angle: 0.7, cant: 0.0 }, 0.0);
             assert!(!out.is_empty() && out.len() % 3 == 0, "{kind:?}");
             // Counter-clockwise as seen from outside: the triangle's geometric normal agrees with its vertex normals.
             for tri in out.chunks(3) {
@@ -206,5 +248,36 @@ mod tests {
                 assert!((b - a).cross(c - a).dot(n) >= 0.0, "{kind:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_canted_fin_turns_about_its_span_line_through_the_root_leading_edge() {
+        let cant = 0.3f32;
+        let at = Placement { z0: 1.0, base: 0.04, angle: 0.0, cant };
+        let plain = Placement { cant: 0.0, ..at };
+        let kind = fin();
+        let (flat, tilted) = (fin_corners(&kind, plain).unwrap(), outline_points(&kind, at));
+        // The root's leading edge is on the pivot line: it does not move; the span (along +Y here) is unchanged.
+        assert!((tilt_point(flat[0], at.z0, at.angle, cant) - flat[0]).length() < 1e-6);
+        // The trailing edge of the root, 0.12 aft of the pivot, swings towards -x (the fin's tangent is +x at angle 0): a fin
+        // with positive cant spins the rocket towards increasing angle.
+        let te = tilt_point(flat[3], at.z0, at.angle, cant);
+        assert!((te.z - (1.0 + 0.12 * cant.cos())).abs() < 1e-6 && (te.x + 0.12 * cant.sin()).abs() < 1e-6 && (te.y - flat[3].y).abs() < 1e-6);
+        // Every outline point moved rigidly: lengths from the pivot are kept.
+        assert_eq!(tilted.len(), 8);
+        let flat_pts = outline_points(&kind, plain);
+        for (a, b) in flat_pts.iter().zip(&tilted) {
+            let pivot = Vec3::Z * at.z0;
+            assert!(((*a - pivot).length() - (*b - pivot).length()).abs() < 1e-5);
+        }
+        // A lug is not a fin: cant does nothing to it.
+        let lug = RadialKind::LaunchLug { length: 0.05, diameter: 0.01 };
+        assert_eq!(outline_points(&lug, at), outline_points(&lug, plain));
+        // The mesh turns with the outline: normals stay unit and perpendicular to the plate's span.
+        let mut out = Vec::new();
+        emit(&mut out, &kind, at, 0.0);
+        assert!(out.iter().all(|v| (Vec3::from(v.normal).length() - 1.0).abs() < 1e-5));
+        let (min_z, max_z) = out.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(v.position[2]), hi.max(v.position[2])));
+        assert!(min_z > 0.99 && max_z > 1.0 + 0.12 * cant.cos() - 1e-3);
     }
 }

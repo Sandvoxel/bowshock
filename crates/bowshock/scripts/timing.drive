@@ -1,0 +1,50 @@
+# Staging and recovery timing per configuration: `BOWSHOCK_EXAMPLE=two_stage cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/timing.drive out/timing`
+# The separation inspector (Separates on / Ignites on with each trigger kind, the sequence and the long-coast chip), the
+# configuration menu with ballast, and a parachute's per-configuration deployment.
+viewport 1280x800
+move (640, 400)
+click "2D"
+# Select the separation: the default timing (burnout, then ignition on separation).
+click (690, 300)
+screenshot timing-1-default.png
+# Open the "Ignites on" select: Separation, burnout, time from launch, altitude.
+click (1175, 447)
+screenshot timing-2-ignites-menu.png
+click "Time from launch"
+screenshot timing-3-ignition-time.png
+# Time from launch: the delay is the time from launch. Make it 6 s: a long coast after the 1.8 s separation.
+click (1175, 481)
+type "6"
+type enter
+screenshot timing-4-long-coast.png
+# "Separates on": burnout, time from launch, altitude.
+click (1175, 315)
+screenshot timing-5-separates-menu.png
+click "Altitude"
+screenshot timing-6-separation-altitude.png
+# Light the sustainer on an altitude too (the sequence then comes from a flight).
+click (1175, 482)
+click (1143, 456)
+screenshot timing-7-both-altitude.png
+# The configuration menu: ballast of the current configuration.
+click (122, 781)
+screenshot timing-8-config-menu.png
+# Ballast: 40 g in the current configuration (it goes in the nose until moved), then a duplicate that carries it.
+click (163, 721)
+type "40"
+type enter
+screenshot timing-9-ballast.png
+click "Duplicate current"
+click (122, 781)
+screenshot timing-10-two-configs.png
+# A parachute's deployment is stored with the configuration (PER CONFIG badge).
+click (700, 560)
+click (502, 702)
+screenshot timing-11-parachute.png
+# Deploy on "Time from launch" in this configuration; the first configuration still deploys on the ejection charge.
+click (1180, 393)
+click "Time from launch"
+screenshot timing-12-parachute-launch.png
+click (122, 781)
+click (100, 556)
+screenshot timing-13-parachute-other-config.png

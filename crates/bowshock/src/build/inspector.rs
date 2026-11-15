@@ -13,23 +13,26 @@
 
 mod edit;
 mod form;
+mod formulas;
 mod health;
 mod part;
 mod rocket_view;
 mod separation;
 mod silhouette;
+mod symmetry;
 #[cfg(test)]
 mod tests;
 
 use std::mem::discriminant;
 
-use bowshock_model::{Dim, FinPlanform, FinSection, Finish, MassRole, MaterialId, NoseShape, PartId, PartRef, Rocket};
+use bowshock_model::{Dim, EventKind, FieldRef, FinPlanform, FinSection, Finish, MassRole, MaterialId, NoseShape, PartId, PartRef, RadialField, Rocket};
 use iced::widget::{column, container, mouse_area, row, scrollable, stack, text, text_input, Space};
 use iced::{keyboard, mouse, Element, Fill, Length, Task, Widget};
 
-use self::edit::{Anchor, Ignite, Trigger};
+use self::edit::{Anchor, StageOn, Trigger};
 use self::form::{choose, Form};
 use self::part::Params;
+use crate::app::symmetry::Rejoin;
 use crate::app::{self, Ctx, Selection};
 use crate::build::parts_bin::INSPECTOR_FIRST_FIELD;
 use crate::theme::{self, MONO, SANS_SEMIBOLD};
@@ -56,6 +59,24 @@ pub enum Message {
     Edit(Field, f64, bool),
     /// Focus the selected part's field for this dimension (a handle's double click).
     Focus(Dim),
+    /// A field entered (`Some`) or left (`None`) pick mode: it typed a `{`, or closed or cancelled the reference.
+    PickMode(Option<FieldRef>),
+    /// A field, or a value in the part menu, was picked: the field in pick mode takes it as a reference chip.
+    PickField(FieldRef),
+    /// The part menu of a pick was dismissed.
+    PickMenuClose,
+    /// A formula was committed in a field: the text typed and the unit it was typed in.
+    Formula(FieldRef, String, &'static crate::units::Unit),
+    /// A scrub was tried on a formula field: ask before it is replaced by a value.
+    ScrubFormula(FieldRef),
+    /// The answer to *Replace formula with a value?*
+    ReplaceFormula(FieldRef, bool),
+    /// A formula becomes the value it has (the fix for a broken reference).
+    ConvertFormula(FieldRef),
+    /// The `→ N` of a source field: list or hide its dependants.
+    Dependants(FieldRef),
+    /// Select a dependant and focus its field.
+    Jump(FieldRef),
     /// Right-click on an explicit value: back to automatic.
     ResetAuto(Field),
     /// The number of copies of a radial group.
@@ -82,8 +103,8 @@ pub enum Message {
     MotorMount(bool),
     /// Plug the motor of this mount (no ejection charge) in the active configuration.
     Plug(bool),
-    /// When the upper stage's motor lights.
-    IgniteOn(Ignite),
+    /// What a staging event waits for (`(stage, which event, choice)`), in the active configuration.
+    StageOn(usize, EventKind, StageOn),
     /// *Override…*: give the mass or CG an explicit value, starting from the computed one.
     StartOverride(Field),
     /// *Clear*: compute the mass or CG again.
@@ -106,12 +127,32 @@ pub enum Message {
     Duplicate,
     /// Overflow menu: delete the part.
     Delete,
-    /// Symmetry bar: the next copy of the group is the one *Detach* acts on.
+    /// Symmetry bar: the next copy of the group is the one the fields and *Detach* act on.
     NextInstance,
     /// Symmetry bar: *Detach*, the chosen copy leaves the group.
     Detach,
     /// Symmetry bar: *Split all*.
     SplitAll,
+    /// Right-click on a field of a group: open its *Unlink for this fin* / *Relink field* menu.
+    FieldMenu(Field),
+    /// *Unlink for this fin*: the copy on show gets its own value of this field.
+    Unlink(Field),
+    /// *Relink field* (or a click on the broken-link icon): the copy follows the group's value of this field again.
+    Relink(Field),
+    /// Symmetry bar: *Relink*, every field the copy on show had unlinked follows the group again.
+    RelinkAll,
+    /// The user confirmed changing the count although it drops the group's per-copy overrides.
+    ConfirmCount,
+    /// The user backed out of that count change.
+    CancelCount,
+    /// *Rejoin group* on a free part: choose the group (or take the only one).
+    RejoinStart,
+    /// The group a free part should rejoin was chosen.
+    RejoinWith(PartId),
+    /// Whose settings win in the pending rejoin.
+    RejoinChoose(bowshock_model::Winner),
+    /// Back out of the pending rejoin.
+    RejoinCancel,
     /// The rocket's name (Rocket inspector).
     RocketName(String),
     /// The rocket's designer (Rocket inspector).
@@ -133,8 +174,12 @@ pub struct State {
     notes_open: bool,
     /// The anchor the user chose for a part's offset.
     anchor: Option<(PartId, Anchor)>,
-    /// The copy of a group *Detach* acts on.
-    instance: Option<(PartId, usize)>,
+    /// The field whose *Unlink for this fin* / *Relink field* menu is open: the group, the copy and the field.
+    field_menu: Option<(PartId, usize, Field)>,
+    /// A count change the user must confirm because it would drop the group's per-copy overrides.
+    confirm_count: Option<(PartId, u8)>,
+    /// A free part choosing which group to rejoin.
+    rejoin_picking: Option<PartId>,
     /// The dimension that was last limited, and why (shown under its field).
     limit: Option<(PartId, Dim, &'static str)>,
     /// A field is being scrubbed: the flight behind the health chips is not reflown until it ends.
@@ -159,15 +204,6 @@ impl State {
         }
     }
 
-    /// The copy of group `id` that *Detach* acts on, `0` (A) unless another was picked.
-    fn instance_of(&self, rocket: &Rocket, id: PartId) -> usize {
-        let count = rocket.radial(id).map_or(1, |r| usize::from(r.count.max(1)));
-        match self.instance {
-            Some((part, i)) if part == id => i % count,
-            _ => 0,
-        }
-    }
-
     /// The stage (from 1) the motor mount `mount` belongs to.
     fn stage_of_mount(&self, rocket: &Rocket, mount: PartId) -> usize {
         rocket.stages().iter().find(|s| s.mounts.contains(&mount)).map_or(1, |s| s.index)
@@ -175,8 +211,21 @@ impl State {
 
     /// Handles one of the inspector's messages. Edits go through `ctx.doc`.
     pub fn update(&mut self, message: Message, ctx: &mut Ctx) -> Task<app::Message> {
+        if formulas::handles(&message) {
+            return formulas::update(message, ctx);
+        }
         if !matches!(message, Message::Edit(_, _, true)) {
             self.scrubbing = false;
+        }
+        // The unlink menu, a pending count change and the rejoin picker belong to the interaction that opened them.
+        if !matches!(message, Message::FieldMenu(_)) {
+            self.field_menu = None;
+        }
+        if !matches!(message, Message::Count(_) | Message::ConfirmCount | Message::NextInstance | Message::Noop) {
+            self.confirm_count = None;
+        }
+        if !matches!(message, Message::RejoinStart | Message::RejoinWith(_) | Message::NextInstance | Message::Noop) {
+            self.rejoin_picking = None;
         }
         // Nothing edits the rocket while a drag has it open.
         let editing = !ctx.doc.dragging() && !ctx.drag.active();
@@ -227,8 +276,8 @@ impl State {
             Message::NotesOpen(open) => self.notes_open = open,
             Message::NextInstance => {
                 if let Selection::Part(id) = ctx.selection {
-                    let next = self.instance_of(ctx.doc.rocket(), id) + 1;
-                    self.instance = Some((id, next));
+                    let next = ctx.symmetry.copy_in(ctx.doc.rocket(), id) + 1;
+                    ctx.symmetry.instance = Some((id, next));
                 }
             }
             Message::Anchor(anchor) => {
@@ -254,15 +303,8 @@ impl State {
                     ctx.notify("Could not split the tube there");
                 }
             }
-            Message::IgniteOn(on) => {
-                let mounts = self.ignition_mounts(ctx);
-                ctx.doc.edit("Set ignition", |r| {
-                    let mut done = false;
-                    for mount in &mounts {
-                        done |= edit::set_ignite(r, *mount, on);
-                    }
-                    done
-                });
+            Message::StageOn(stage, kind, on) => {
+                ctx.doc.edit("Set staging trigger", |r| edit::set_stage_on(r, stage, kind, on));
             }
             Message::Note(note) => {
                 if let Selection::Part(id) = ctx.selection {
@@ -278,15 +320,6 @@ impl State {
         Task::none()
     }
 
-    /// The mounts the ignition controls act on: the selected mount, or the upper stage's mounts of a selected separation.
-    fn ignition_mounts(&self, ctx: &Ctx) -> Vec<PartId> {
-        match ctx.selection {
-            Selection::Part(id) => vec![id],
-            Selection::Separation(n) => ctx.physics.stages().iter().find(|s| s.index == n + 1).map(|s| s.mounts.clone()).unwrap_or_default(),
-            Selection::None => Vec::new(),
-        }
-    }
-
     /// A numeric field changed.
     fn edit_field(&mut self, ctx: &mut Ctx, field: Field, value: f64, live: bool) {
         self.scrubbing = live;
@@ -299,31 +332,26 @@ impl State {
                         value = self.anchor(ctx.doc.rocket(), id).offset(value, extent, parent_length);
                     }
                 }
-                let key = format!("inspect:{id}:{field:?}");
-                let applied = if live {
-                    ctx.doc.edit_merging(&label, &key, |r| edit::apply(r, id, field, value))
-                } else {
-                    ctx.doc.edit(&label, |r| edit::apply(r, id, field, value))
+                let copy = ctx.symmetry.copy_in(ctx.doc.rocket(), id);
+                let key = format!("inspect:{id}:{copy}:{field:?}");
+                // Typing a plain number into a formula field replaces the formula, in the same undo step.
+                let apply = |r: &mut Rocket| {
+                    if let Field::Dim(dim) = field {
+                        r.clear_formula(id, dim);
+                    }
+                    edit::apply_copy(r, id, copy, field, value)
                 };
+                ctx.refs.error = None;
+                let applied = if live { ctx.doc.edit_merging(&label, &key, apply) } else { ctx.doc.edit(&label, apply) };
                 self.limit = match (field, applied.limited) {
                     (Field::Dim(dim), Some(why)) => Some((id, dim, why)),
                     _ => None,
                 };
             }
             Selection::Separation(_) => {
-                // Delays are stored per configuration: the separation's own, and the ignition of the upper stage's mounts.
-                let mounts = self.ignition_mounts(ctx);
+                // Staging timing is stored per configuration; the field names its stage.
                 let key = format!("inspect:separation:{field:?}");
-                let apply = |r: &mut Rocket| match field {
-                    Field::IgnitionDelay => mounts.iter().fold(edit::Applied::default(), |acc, m| {
-                        if edit::apply(r, *m, field, value).done {
-                            edit::Applied { done: true, ..acc }
-                        } else {
-                            acc
-                        }
-                    }),
-                    _ => edit::apply(r, 0, field, value),
-                };
+                let apply = |r: &mut Rocket| edit::apply(r, 0, field, value);
                 if live {
                     ctx.doc.edit_merging(&label, &key, apply);
                 } else {
@@ -337,7 +365,7 @@ impl State {
     /// Everything that edits the selected part with a single call.
     fn edit_part(&mut self, ctx: &mut Ctx, id: PartId, message: Message) {
         let rocket = ctx.doc.rocket();
-        let instance = self.instance_of(rocket, id);
+        let instance = ctx.symmetry.copy_in(rocket, id);
         match message {
             Message::ResetAuto(Field::Dim(Dim::InnerDiameter)) => {
                 ctx.doc.edit("Auto inner diameter", |r| edit::reset_inner_diameter(r, id));
@@ -346,7 +374,12 @@ impl State {
                 ctx.doc.edit("Auto diameter", |r| edit::set_auto_diameter(r, id, None));
             }
             Message::Count(count) => {
-                ctx.doc.edit("Set fin count", |r| edit::set_count(r, id, count));
+                // Re-spacing a group loses its per-copy overrides: ask before throwing them away.
+                if rocket.radial(id).is_some_and(|r| r.count != count && r.has_overrides()) {
+                    self.confirm_count = Some((id, count));
+                } else {
+                    ctx.doc.edit("Set fin count", |r| edit::set_count(r, id, count));
+                }
             }
             Message::CrossSection(section) => {
                 ctx.doc.edit("Set cross-section", |r| r.set_fin_section(id, section));
@@ -401,22 +434,74 @@ impl State {
             Message::Detach => {
                 if let Some(new) = ctx.doc.edit("Detach fin", |r| r.detach_radial(id, instance).ok()) {
                     ctx.selection = Selection::Part(new);
-                    self.instance = None;
+                    ctx.symmetry.instance = None;
                 }
             }
             Message::SplitAll => {
                 ctx.doc.edit("Split all fins", |r| r.split_all_radial(id).ok());
-                self.instance = None;
+                ctx.symmetry.instance = None;
+            }
+            Message::FieldMenu(field) => {
+                let open = (id, instance, field);
+                self.field_menu = if self.field_menu == Some(open) { None } else { Some(open) };
+            }
+            Message::Unlink(Field::Dim(dim)) => {
+                if let Some(field) = RadialField::of_dim(dim) {
+                    let label = format!("Unlink {} of fin {}", field.name(), bowshock_model::instance_letter(instance));
+                    ctx.doc.edit(&label, |r| r.unlink_field(id, instance, field));
+                }
+            }
+            Message::Relink(Field::Dim(dim)) => {
+                if let Some(field) = RadialField::of_dim(dim) {
+                    let label = format!("Relink {} of fin {}", field.name(), bowshock_model::instance_letter(instance));
+                    ctx.doc.edit(&label, |r| r.relink_field(id, instance, field));
+                }
+            }
+            Message::RelinkAll => {
+                let label = format!("Relink fin {}", bowshock_model::instance_letter(instance));
+                ctx.doc.edit(&label, |r| r.relink_copy(id, instance));
+            }
+            Message::ConfirmCount => {
+                if let Some((_, count)) = self.confirm_count.take().filter(|(part, _)| *part == id) {
+                    ctx.doc.edit("Set fin count", |r| edit::set_count(r, id, count));
+                }
+            }
+            Message::CancelCount => self.confirm_count = None,
+            Message::RejoinStart => match rocket.rejoin_candidates(id).as_slice() {
+                [] => ctx.notify("No group of the same kind to rejoin"),
+                [group] => ctx.symmetry.rejoin = Some(Rejoin { part: id, group: *group }),
+                _ => self.rejoin_picking = Some(id),
+            },
+            Message::RejoinWith(group) => {
+                self.rejoin_picking = None;
+                if rocket.can_rejoin(id, group) {
+                    ctx.symmetry.rejoin = Some(Rejoin { part: id, group });
+                }
+            }
+            Message::RejoinCancel => {
+                self.rejoin_picking = None;
+                ctx.symmetry.rejoin = None;
+            }
+            Message::RejoinChoose(winner) => {
+                if let Some(join) = ctx.symmetry.rejoin.take().filter(|j| j.part == id) {
+                    if ctx.doc.edit("Rejoin group", |r| r.rejoin_radial(join.part, join.group, winner).is_ok()) {
+                        ctx.selection = Selection::Part(join.group);
+                        ctx.symmetry.instance = None;
+                    }
+                }
             }
             _ => {}
         }
     }
 
     /// The shortcut `key` maps to while the inspector is on screen, if any. Only called for keys no widget handled.
-    pub fn on_key(&self, key: &keyboard::Key, _modifiers: keyboard::Modifiers, _ctx: &Ctx) -> Option<Message> {
+    pub fn on_key(&self, key: &keyboard::Key, _modifiers: keyboard::Modifiers, ctx: &Ctx) -> Option<Message> {
         match key {
             keyboard::Key::Named(keyboard::key::Named::Escape) if self.renaming.is_some() => Some(Message::RenameCancel),
             keyboard::Key::Named(keyboard::key::Named::Escape) if self.menu.is_some() => Some(Message::MenuOpen(false)),
+            keyboard::Key::Named(keyboard::key::Named::Escape) if self.field_menu.is_some() => Some(Message::Noop),
+            keyboard::Key::Named(keyboard::key::Named::Escape) if self.confirm_count.is_some() => Some(Message::CancelCount),
+            keyboard::Key::Named(keyboard::key::Named::Escape) if self.rejoin_picking.is_some() || ctx.symmetry.rejoin.is_some() => Some(Message::RejoinCancel),
             _ => None,
         }
     }
@@ -519,9 +604,11 @@ impl State {
             _ => None,
         };
         let limit = self.limit.filter(|(part, ..)| *part == id).map(|(_, dim, why)| (dim, why));
-        let params = Params { form: Form { ctx, limit, first: part::first_field(rocket, id) }, state: self, rocket, id, flight };
+        let link = symmetry::Link::of(self, ctx, rocket, id);
+        let copy = ctx.symmetry.copy_in(rocket, id);
+        let params = Params { form: Form { ctx, limit, first: part::first_field(rocket, id) }, state: self, rocket, id, flight, link, copy };
         let sections = part::view(&params);
-        let bar = rocket.radial(id).and_then(|r| symmetry_bar(r.count, r.kind.is_fin()));
+        let bar = symmetry::bar(self, ctx, id);
         (self.part_header(ctx, id), sections, bar)
     }
 
@@ -546,7 +633,7 @@ impl State {
                 let mut cells: Vec<Element<'a, Message>> =
                     vec![text(part.name()).font(SANS_SEMIBOLD).size(type_scale::UI_TITLE.size).style(theme::ink).boxed()];
                 if rocket.radial(id).is_some_and(|r| r.count > 1) {
-                    let letter = bowshock_model::instance_letter(self.instance_of(rocket, id));
+                    let letter = bowshock_model::instance_letter(ctx.symmetry.copy_in(rocket, id));
                     let tag = text(format!("· {letter}")).font(SANS_SEMIBOLD).size(type_scale::UI_TITLE.size).style(theme::muted);
                     cells.push(mouse_area(tag).on_press(Message::NextInstance).interaction(mouse::Interaction::Pointer).boxed());
                 }
@@ -586,29 +673,5 @@ fn subtype<'a>(rocket: &Rocket, id: PartId) -> Option<Element<'a, Message>> {
             bowshock_model::InternalKind::MassComponent { role, .. } => Some(choose(part::role_options(), &role, Message::Role)),
             _ => None,
         },
-    }
-}
-
-/// The symmetry bar of a linked group: the `LINKED ×N` tag with *Detach* and *Split all*; a lone fin is tagged `FREE`.
-fn symmetry_bar<'a>(count: u8, is_fin: bool) -> Option<Element<'a, Message>> {
-    if count > 1 {
-        let label = text(format!("LINKED ×{count}")).font(MONO).size(type_scale::NUM_LABEL.size).style(theme::colored(|t| t.accent));
-        let tag = container(row(vec![silhouette::link(11.0, |t| t.accent), label.boxed()]).spacing(6).align_y(iced::Center))
-            .padding([3.0, SPACE_2])
-            .style(theme::outlined(|t| t.accent));
-        let bar = row(vec![
-            tag.boxed(),
-            Space::new().width(Fill).boxed(),
-            button("Detach", Weight::Secondary).on_press(Message::Detach).into(),
-            button("Split all", Weight::Secondary).on_press(Message::SplitAll).into(),
-        ])
-        .spacing(SPACE_2)
-        .align_y(iced::Center);
-        Some(container(bar).padding([SPACE_2, SPACE_3]).boxed())
-    } else if is_fin {
-        let tag = container(text("FREE").font(MONO).size(type_scale::NUM_LABEL.size).style(theme::muted)).padding([3.0, SPACE_2]).style(theme::keycap);
-        Some(container(tag).padding([SPACE_2, SPACE_3]).boxed())
-    } else {
-        None
     }
 }

@@ -189,16 +189,39 @@ pub struct MassProps {
     pub i_long: f64,
 }
 
-/// Motor ignition rule.
+/// What a staging event (a motor ignition or a stage separation) waits for.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Ignition {
-    /// Ignites at launch.
+pub enum Trigger {
+    /// The burnout of the stage the event belongs to (separation) or of the stage below it (ignition).
+    Burnout,
+    /// The separation of the stage below (ignition only; on a separation it means [`Trigger::Burnout`]).
+    Separation,
+    /// Launch: the delay is the time from launch.
     Launch,
-    /// Ignites `delay` seconds after the previous stage's (`stages[i - 1]`) motor burns out.
-    AfterPreviousBurnout {
-        /// Delay after the previous stage burnout (s).
-        delay: f64,
-    },
+    /// The rocket climbing through this altitude above ground (m). It is armed once the stage (separation) or the stage below
+    /// (ignition) has lit, and it only fires on the way up: a rocket that never reaches the altitude never fires it.
+    Altitude(f64),
+}
+
+/// A [`Trigger`] and a delay after it (s).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Timing {
+    /// What is waited for.
+    pub trigger: Trigger,
+    /// Seconds after the trigger.
+    pub delay: f64,
+}
+
+impl Timing {
+    /// At launch with no delay.
+    pub const LAUNCH: Timing = Timing { trigger: Trigger::Launch, delay: 0.0 };
+    /// At the burnout of the stage in question with no delay: the default separation.
+    pub const BURNOUT: Timing = Timing { trigger: Trigger::Burnout, delay: 0.0 };
+
+    /// `trigger` plus `delay` seconds.
+    pub const fn new(trigger: Trigger, delay: f64) -> Timing {
+        Timing { trigger, delay }
+    }
 }
 
 /// Motor data: a thrust curve plus the masses/dimensions needed for mass and CG.
@@ -282,8 +305,8 @@ pub struct StageMotor {
     pub curve: ThrustCurve,
     /// Station of the motor's aft end (nozzle exit plane) from the tip (m).
     pub mount_aft_station: f64,
-    /// When the motor ignites.
-    pub ignition: Ignition,
+    /// When the motor ignites. For the first stage that flies, `Burnout` and `Separation` mean launch.
+    pub ignition: Timing,
     /// Ejection-charge delay after burnout (s), `None` for no ejection charge.
     pub ejection_delay: Option<f64>,
 }
@@ -307,6 +330,8 @@ pub struct StageMass {
     pub aft_station: f64,
     /// Motor, if any.
     pub motor: Option<StageMotor>,
+    /// When this stage separates from the stage above it (ignored for the top stage).
+    pub separation: Timing,
 }
 
 /// Complete vehicle for simulation.

@@ -5,12 +5,14 @@
 //! the handle in the viewport can never disagree. The fields that are not a plain dimension (sweep angle, an auto diameter, the
 //! parachute's numbers, mass overrides) are the [`Field`] variants beside [`Field::Dim`].
 
-use bowshock_model::{DeployEvent, Dim, InternalKind, MassRole, PartId, Rocket};
+use bowshock_model::{DeployEvent, Deployment, Dim, EventKind, InternalKind, MassRole, PartId, Rocket, StageEvent, StageTrigger};
 
 /// Most a shroud-line count may be.
 const MAX_LINES: f64 = 64.0;
 /// Altitude a parachute is given when its trigger is switched to an altitude (500 ft, a typical main deployment).
 pub const DEFAULT_DEPLOY_ALTITUDE: f64 = 152.4;
+/// Altitude a staging event is given when its trigger is switched to an altitude (100 m).
+pub const DEFAULT_STAGE_ALTITUDE: f64 = 100.0;
 /// Smallest diameter, length or width an edited recovery or mass part may be given, metres.
 const MIN_SIZE: f64 = 0.001;
 /// Largest sweep angle a typed value may give, so `tan` stays finite.
@@ -44,9 +46,9 @@ pub enum Field {
     CordLength,
     /// A mass component's mass (the part's mass itself, not an override).
     MassValue,
-    /// The altitude a recovery device waits for.
+    /// The altitude a recovery device waits for, in the active configuration.
     DeployAltitude,
-    /// The delay after a recovery device's trigger.
+    /// The delay after a recovery device's trigger, in the active configuration.
     DeployDelay,
     /// The mass override.
     MassOverride,
@@ -54,10 +56,11 @@ pub enum Field {
     CgOverride,
     /// The active configuration's ejection delay of a motor mount.
     EjectionDelay,
-    /// The active configuration's ignition delay of a motor mount (stages above the first).
-    IgnitionDelay,
-    /// The active configuration's separation delay of stage `n` (`Stage::index`).
-    SeparationDelay(usize),
+    /// The active configuration's delay after the trigger of a staging event: the separation of stage `n` or the ignition of
+    /// stage `n` (`Stage::index`).
+    StageDelay(usize, EventKind),
+    /// The altitude of the active configuration's altitude trigger for a staging event.
+    StageAltitude(usize, EventKind),
 }
 
 impl Field {
@@ -80,8 +83,10 @@ impl Field {
             Field::DeployDelay => "deploy delay".into(),
             Field::CgOverride => "CG".into(),
             Field::EjectionDelay => "ejection delay".into(),
-            Field::IgnitionDelay => "ignition delay".into(),
-            Field::SeparationDelay(_) => "separation delay".into(),
+            Field::StageDelay(_, EventKind::Separation) => "separation delay".into(),
+            Field::StageDelay(_, EventKind::Ignition) => "ignition delay".into(),
+            Field::StageAltitude(_, EventKind::Separation) => "separation altitude".into(),
+            Field::StageAltitude(_, EventKind::Ignition) => "ignition altitude".into(),
         };
         format!("Edit {what}")
     }
@@ -126,23 +131,29 @@ impl Applied {
     }
 }
 
-/// Applies `value` (SI) to `field` of part `id`.
+/// Applies `value` (SI) to `field` of part `id`, editing the group's own value of a radial part's field.
 pub fn apply(r: &mut Rocket, id: PartId, field: Field, value: f64) -> Applied {
+    apply_copy(r, id, usize::MAX, field, value)
+}
+
+/// Applies `value` (SI) to `field` of part `id` as seen from copy `copy` of a radial group: a field that copy has unlinked
+/// (*Unlink for this fin*) sets the copy's own value, every other field the group's. (`usize::MAX` is no copy.)
+pub fn apply_copy(r: &mut Rocket, id: PartId, copy: usize, field: Field, value: f64) -> Applied {
     if !value.is_finite() {
         return Applied::no();
     }
     match field {
-        Field::Dim(dim) => match r.set_dim(id, dim, value) {
+        Field::Dim(dim) => match r.set_instance_dim(id, copy, dim, value) {
             Some(edit) => Applied::yes(edit.limited),
             None => Applied::no(),
         },
         Field::SweepAngle => {
-            let Some(span) = r.dim(id, Dim::Span) else {
+            let Some(span) = r.instance_dim(id, copy, Dim::Span) else {
                 return Applied::no();
             };
             let angle = value.clamp(-MAX_SWEEP_ANGLE, MAX_SWEEP_ANGLE);
             let limited = (angle != value).then_some("SWEEP ANGLE LIMIT 85°");
-            match r.set_dim(id, Dim::Sweep, span * angle.tan()) {
+            match r.set_instance_dim(id, copy, Dim::Sweep, span * angle.tan()) {
                 Some(edit) => Applied::yes(limited.or(edit.limited)),
                 None => Applied::no(),
             }
@@ -167,14 +178,10 @@ pub fn apply(r: &mut Rocket, id: PartId, field: Field, value: f64) -> Applied {
             let config = r.active_config_id();
             Applied::flag(r.set_motor_delay(config, id, value.max(0.0)).is_ok())
         }
-        Field::IgnitionDelay => {
-            let config = r.active_config_id();
-            Applied::flag(r.set_ignition(config, id, bowshock_model::Ignition::StageSeparation { delay: value.max(0.0) }).is_ok())
-        }
-        Field::SeparationDelay(stage) => {
-            let config = r.active_config_id();
-            Applied::flag(r.set_stage_separation(config, stage, value.max(0.0)).is_ok())
-        }
+        Field::StageDelay(stage, kind) => Applied::flag(edit_stage_event(r, stage, kind, |e| e.delay = value.max(0.0))),
+        Field::StageAltitude(stage, kind) => Applied::flag(edit_stage_event(r, stage, kind, |e| e.trigger = StageTrigger::Altitude(value.max(0.0)))),
+        Field::DeployAltitude => Applied::flag(edit_deployment(r, id, |d| d.event = DeployEvent::Altitude(value.max(0.0)))),
+        Field::DeployDelay => Applied::flag(edit_deployment(r, id, |d| d.delay = value.max(0.0))),
         other => Applied::flag(edit_internal(r, id, other, value)),
     }
 }
@@ -216,14 +223,6 @@ fn edit_internal(r: &mut Rocket, id: PartId, field: Field, value: f64) -> bool {
         }
         (InternalKind::MassComponent { mass, .. }, Field::MassValue) => {
             *mass = value.max(0.0);
-            true
-        }
-        (InternalKind::Parachute { deploy, .. } | InternalKind::Streamer { deploy, .. }, Field::DeployAltitude) => {
-            deploy.event = DeployEvent::Altitude(value.max(0.0));
-            true
-        }
-        (InternalKind::Parachute { deploy, .. } | InternalKind::Streamer { deploy, .. }, Field::DeployDelay) => {
-            deploy.delay = value.max(0.0);
             true
         }
         _ => false,
@@ -271,11 +270,13 @@ pub enum Trigger {
     Altitude,
     /// With the motor's ejection charge.
     Ejection,
+    /// After launch (the delay is the time from launch).
+    Launch,
 }
 
 impl Trigger {
     /// Every trigger, in menu order.
-    pub const ALL: [Trigger; 3] = [Trigger::Ejection, Trigger::Apogee, Trigger::Altitude];
+    pub const ALL: [Trigger; 4] = [Trigger::Ejection, Trigger::Apogee, Trigger::Altitude, Trigger::Launch];
 
     /// Display name.
     pub fn name(self) -> &'static str {
@@ -283,6 +284,7 @@ impl Trigger {
             Trigger::Apogee => "Apogee",
             Trigger::Altitude => "Altitude",
             Trigger::Ejection => "Motor ejection",
+            Trigger::Launch => "Time from launch",
         }
     }
 
@@ -292,37 +294,43 @@ impl Trigger {
             DeployEvent::Apogee => Trigger::Apogee,
             DeployEvent::Altitude(_) => Trigger::Altitude,
             DeployEvent::Ejection => Trigger::Ejection,
+            DeployEvent::TimeFromLaunch => Trigger::Launch,
         }
     }
 }
 
-/// The deployment of a parachute or streamer.
-#[cfg(test)]
-fn deployment(kind: &InternalKind) -> Option<bowshock_model::Deployment> {
-    match kind {
-        InternalKind::Parachute { deploy, .. } | InternalKind::Streamer { deploy, .. } => Some(*deploy),
-        _ => None,
-    }
-}
-
-/// Switches a recovery device's trigger, keeping its delay (an altitude trigger starts at [`DEFAULT_DEPLOY_ALTITUDE`], or the
-/// altitude it already had).
-pub fn set_trigger(r: &mut Rocket, id: PartId, trigger: Trigger) -> bool {
-    let Some(mut kind) = r.internal(id).map(|p| p.kind.clone()) else {
+/// Applies `change` to the deployment of recovery device `id` in the active configuration (starting from what it has now: the
+/// configuration's own, else the part's) and stores the result with the configuration.
+fn edit_deployment(r: &mut Rocket, id: PartId, change: impl FnOnce(&mut Deployment)) -> bool {
+    let Some(mut deploy) = r.active_deployment(id) else {
         return false;
     };
-    match &mut kind {
-        InternalKind::Parachute { deploy, .. } | InternalKind::Streamer { deploy, .. } => {
-            deploy.event = match (trigger, deploy.event) {
-                (Trigger::Apogee, _) => DeployEvent::Apogee,
-                (Trigger::Ejection, _) => DeployEvent::Ejection,
-                (Trigger::Altitude, DeployEvent::Altitude(h)) => DeployEvent::Altitude(h),
-                (Trigger::Altitude, _) => DeployEvent::Altitude(DEFAULT_DEPLOY_ALTITUDE),
-            }
+    change(&mut deploy);
+    let config = r.active_config_id();
+    r.set_deployment(config, id, deploy).is_ok()
+}
+
+/// Applies `change` to the active configuration's staging event `kind` of `stage` (starting from what it has now, the default
+/// when it says nothing) and stores the result.
+fn edit_stage_event(r: &mut Rocket, stage: usize, kind: EventKind, change: impl FnOnce(&mut StageEvent)) -> bool {
+    let config = r.active_config_id();
+    let mut event = r.active_configuration().event(stage, kind);
+    change(&mut event);
+    r.set_stage_event(config, event).is_ok()
+}
+
+/// Switches a recovery device's trigger in the active configuration, keeping its delay (an altitude trigger starts at
+/// [`DEFAULT_DEPLOY_ALTITUDE`], or the altitude it already had).
+pub fn set_trigger(r: &mut Rocket, id: PartId, trigger: Trigger) -> bool {
+    edit_deployment(r, id, |deploy| {
+        deploy.event = match (trigger, deploy.event) {
+            (Trigger::Apogee, _) => DeployEvent::Apogee,
+            (Trigger::Ejection, _) => DeployEvent::Ejection,
+            (Trigger::Launch, _) => DeployEvent::TimeFromLaunch,
+            (Trigger::Altitude, DeployEvent::Altitude(h)) => DeployEvent::Altitude(h),
+            (Trigger::Altitude, _) => DeployEvent::Altitude(DEFAULT_DEPLOY_ALTITUDE),
         }
-        _ => return false,
-    }
-    r.set_internal_kind(id, kind)
+    })
 }
 
 /// Gives a mass component another role; a ballast weight becomes lead and anything else aluminium unless the user picked
@@ -358,24 +366,43 @@ pub fn set_motor_mount(r: &mut Rocket, id: PartId, mount: bool) -> bool {
     r.set_internal_kind(id, kind)
 }
 
-/// When a motor lights, as the ignition select offers it.
+/// What a staging event waits for, as its select offers it (the altitude is a field of its own).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Ignite {
-    /// On the pad.
-    Launch,
-    /// After the stage below separates.
+pub enum StageOn {
+    /// The burnout of the stage (a separation) or of the stage below (an ignition).
+    Burnout,
+    /// The separation of the stage below (an ignition only).
     Separation,
+    /// Launch: the delay is the time from launch.
+    Launch,
+    /// Climbing through an altitude.
+    Altitude,
 }
 
-/// Sets when the motor in `mount` lights in the active configuration. Moving to "Separation" keeps a delay it already had.
-pub fn set_ignite(r: &mut Rocket, mount: PartId, on: Ignite) -> bool {
-    let config = r.active_config_id();
-    let ignition = match (on, r.active_configuration().slot(mount).map(|s| s.ignition)) {
-        (Ignite::Launch, _) => bowshock_model::Ignition::Launch,
-        (Ignite::Separation, Some(existing @ bowshock_model::Ignition::StageSeparation { .. })) => existing,
-        (Ignite::Separation, _) => bowshock_model::Ignition::StageSeparation { delay: 0.0 },
-    };
-    r.set_ignition(config, mount, ignition).is_ok()
+impl StageOn {
+    /// The choice that `trigger` is.
+    pub fn of(trigger: StageTrigger) -> StageOn {
+        match trigger {
+            StageTrigger::Burnout => StageOn::Burnout,
+            StageTrigger::Separation => StageOn::Separation,
+            StageTrigger::TimeFromLaunch => StageOn::Launch,
+            StageTrigger::Altitude(_) => StageOn::Altitude,
+        }
+    }
+}
+
+/// Switches what the active configuration's staging event `kind` of `stage` waits for, keeping its delay (and an altitude it
+/// already had; a new one starts at [`DEFAULT_STAGE_ALTITUDE`]). A separation cannot wait for a separation.
+pub fn set_stage_on(r: &mut Rocket, stage: usize, kind: EventKind, on: StageOn) -> bool {
+    edit_stage_event(r, stage, kind, |e| {
+        e.trigger = match (on, e.trigger) {
+            (StageOn::Burnout, _) => StageTrigger::Burnout,
+            (StageOn::Separation, _) => StageTrigger::Separation,
+            (StageOn::Launch, _) => StageTrigger::TimeFromLaunch,
+            (StageOn::Altitude, StageTrigger::Altitude(h)) => StageTrigger::Altitude(h),
+            (StageOn::Altitude, _) => StageTrigger::Altitude(DEFAULT_STAGE_ALTITUDE),
+        }
+    })
 }
 
 /// Plugs (no ejection charge) or unplugs the motor in `mount` of the active configuration. Unplugging gives it a 0 s delay.
@@ -488,6 +515,7 @@ pub fn duplicate(r: &mut Rocket, id: PartId) -> Option<PartId> {
         r.set_finish(new, radial.finish);
         r.set_fin_section(new, radial.cross_section);
         r.set_cant(new, radial.cant);
+        r.set_overrides(new, radial.overrides.clone());
         r.set_mass_override(new, radial.mass_override);
         r.set_cg_override(new, radial.cg_override);
         return Some(new);
@@ -628,17 +656,45 @@ mod tests {
         assert!(apply(&mut r, chute, Field::DeployDelay, 1.5).done);
         let InternalKind::Parachute { diameter, cd, line_count, deploy, .. } = r.internal(chute).unwrap().kind else { unreachable!() };
         assert_eq!((diameter, cd, line_count), (1.2, 3.0, 8));
-        assert_eq!(deploy, Deployment { event: DeployEvent::Ejection, delay: 1.5 });
+        // The deployment is stored with the active configuration; the part keeps its own value as the default.
+        assert_eq!(deploy, Deployment { event: DeployEvent::Ejection, delay: 0.0 });
+        assert_eq!(r.active_deployment(chute), Some(Deployment { event: DeployEvent::Ejection, delay: 1.5 }));
+        let other = r.add_configuration("Other");
+        assert_eq!(r.deployment(other, chute), Some(Deployment { event: DeployEvent::Ejection, delay: 0.0 }), "other configurations keep the default");
+        let active = |r: &Rocket| r.active_deployment(chute).unwrap().event;
         assert!(set_trigger(&mut r, chute, Trigger::Altitude));
-        assert_eq!(deployment(&r.internal(chute).unwrap().kind).unwrap().event, DeployEvent::Altitude(DEFAULT_DEPLOY_ALTITUDE));
+        assert_eq!(active(&r), DeployEvent::Altitude(DEFAULT_DEPLOY_ALTITUDE));
         assert!(apply(&mut r, chute, Field::DeployAltitude, 300.0).done);
-        // Switching away and back keeps nothing but the delay; switching to the same trigger keeps the altitude.
+        // Switching to the same trigger keeps the altitude.
         assert!(set_trigger(&mut r, chute, Trigger::Altitude));
-        assert_eq!(deployment(&r.internal(chute).unwrap().kind).unwrap().event, DeployEvent::Altitude(300.0));
+        assert_eq!(active(&r), DeployEvent::Altitude(300.0));
+        assert!(set_trigger(&mut r, chute, Trigger::Launch));
+        assert_eq!(Trigger::of(active(&r)), Trigger::Launch);
         assert!(set_trigger(&mut r, chute, Trigger::Apogee));
-        assert_eq!(Trigger::of(deployment(&r.internal(chute).unwrap().kind).unwrap().event), Trigger::Apogee);
+        assert_eq!(Trigger::of(active(&r)), Trigger::Apogee);
         // The parachute's fields do nothing on other parts.
         assert!(!apply(&mut r, ballast, Field::CanopyDiameter, 1.0).done && !set_trigger(&mut r, ballast, Trigger::Apogee));
+    }
+
+    #[test]
+    fn stage_events_edit_the_active_configuration() {
+        let (mut r, _, _, _) = rocket();
+        let first = r.active_config_id();
+        let second = r.add_configuration("Other");
+        assert!(apply(&mut r, 0, Field::StageDelay(1, EventKind::Separation), 0.75).done);
+        assert!(set_stage_on(&mut r, 1, EventKind::Separation, StageOn::Altitude));
+        assert!(apply(&mut r, 0, Field::StageAltitude(1, EventKind::Separation), 250.0).done);
+        let e = r.configuration(first).unwrap().event(1, EventKind::Separation);
+        assert_eq!((e.trigger, e.delay), (StageTrigger::Altitude(250.0), 0.75));
+        assert_eq!(r.configuration(second).unwrap().event(1, EventKind::Separation), StageEvent::default_of(1, EventKind::Separation));
+        // Same choice again keeps the altitude; a separation cannot wait for a separation, an ignition can.
+        assert!(set_stage_on(&mut r, 1, EventKind::Separation, StageOn::Altitude));
+        assert_eq!(r.active_configuration().event(1, EventKind::Separation).trigger, StageTrigger::Altitude(250.0));
+        assert!(!set_stage_on(&mut r, 1, EventKind::Separation, StageOn::Separation));
+        assert!(set_stage_on(&mut r, 2, EventKind::Ignition, StageOn::Launch));
+        assert_eq!(r.active_configuration().event(2, EventKind::Ignition).trigger, StageTrigger::TimeFromLaunch);
+        assert!(apply(&mut r, 0, Field::StageDelay(2, EventKind::Ignition), -3.0).done);
+        assert_eq!(r.active_configuration().event(2, EventKind::Ignition).delay, 0.0, "a negative delay is 0");
     }
 
     #[test]

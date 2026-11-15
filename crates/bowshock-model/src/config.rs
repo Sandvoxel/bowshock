@@ -6,7 +6,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::internal::InternalKind;
+use crate::internal::{DeployEvent, Deployment, InternalKind};
 use crate::rocket::Rocket;
 use crate::PartId;
 
@@ -29,16 +29,77 @@ impl MotorRef {
     }
 }
 
-/// When a motor lights.
+/// What a staging event waits for.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub enum Ignition {
-    /// At launch.
-    Launch,
-    /// After the stage below separates, plus `delay` seconds.
-    StageSeparation {
-        /// Seconds after separation.
-        delay: f64,
-    },
+pub enum StageTrigger {
+    /// The burnout of the stage the event belongs to (a separation), or of the stage below it (an ignition).
+    Burnout,
+    /// The separation of the stage below (an ignition only).
+    Separation,
+    /// Launch: the event's delay is the time from launch.
+    TimeFromLaunch,
+    /// The rocket climbing through this altitude above the launch site, metres, on the way up.
+    Altitude(f64),
+}
+
+impl StageTrigger {
+    /// Whether the trigger can be used for an event of `kind`: a separation cannot wait for itself.
+    pub fn valid_for(self, kind: EventKind) -> bool {
+        !(self == StageTrigger::Separation && kind == EventKind::Separation)
+    }
+}
+
+/// Which staging event of a stage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EventKind {
+    /// The stage separates from the one above it.
+    Separation,
+    /// The stage's motor ignites.
+    Ignition,
+}
+
+/// A timed staging event of one stage: a trigger and a delay after it.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StageEvent {
+    /// The stage (`Stage::index`, from 1, the aft-most first to fire); a separation is the stage's separation from the one above.
+    pub stage: usize,
+    /// Which event.
+    pub kind: EventKind,
+    /// What it waits for.
+    pub trigger: StageTrigger,
+    /// Seconds after the trigger.
+    pub delay: f64,
+}
+
+impl StageEvent {
+    /// What an event does when the configuration does not say: a stage separates at its burnout; the first stage lights at
+    /// launch and every upper stage when the stage below separates.
+    pub fn default_of(stage: usize, kind: EventKind) -> StageEvent {
+        let trigger = match (kind, stage) {
+            (EventKind::Separation, _) => StageTrigger::Burnout,
+            (EventKind::Ignition, 0 | 1) => StageTrigger::TimeFromLaunch,
+            (EventKind::Ignition, _) => StageTrigger::Separation,
+        };
+        StageEvent { stage, kind, trigger, delay: 0.0 }
+    }
+}
+
+/// Ballast a configuration adds to rebalance for its motor: a point mass at a station.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Ballast {
+    /// Mass in kg.
+    pub mass: f64,
+    /// Station from the rocket's tip, metres.
+    pub station: f64,
+}
+
+/// The deployment of one recovery device in one configuration, which replaces the part's own.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RecoveryTiming {
+    /// The parachute or streamer.
+    pub part: PartId,
+    /// When it deploys in this configuration.
+    pub deploy: Deployment,
 }
 
 /// What goes in one motor mount in one configuration.
@@ -51,14 +112,12 @@ pub struct MotorSlot {
     /// Ejection charge delay in seconds after burnout; `f64::INFINITY` is a plugged motor (no ejection charge).
     #[serde(with = "plugged_delay")]
     pub delay: f64,
-    /// When it lights.
-    pub ignition: Ignition,
 }
 
 impl MotorSlot {
-    /// An empty slot on `mount`, lit at launch, with no delay.
+    /// An empty slot on `mount` with no delay.
     pub fn empty(mount: PartId) -> MotorSlot {
-        MotorSlot { mount, motor: None, delay: 0.0, ignition: Ignition::Launch }
+        MotorSlot { mount, motor: None, delay: 0.0 }
     }
 
     /// Whether the ejection charge is blocked.
@@ -76,15 +135,22 @@ pub struct Configuration {
     pub name: String,
     /// One entry per motor mount that has been given a motor or timing.
     pub motors: Vec<MotorSlot>,
-    /// `(stage index, seconds after the stage's burnout)` at which the stage separates, for stages that have an entry
-    /// (see [`Rocket::stages`](crate::Rocket::stages); a missing entry separates at burnout).
-    pub stage_separation: Vec<(usize, f64)>,
+    /// Staging events that differ from the defaults (see [`StageEvent::default_of`]): when each stage separates and when each
+    /// upper stage lights. Keyed by stage and kind.
+    #[serde(default)]
+    pub events: Vec<StageEvent>,
+    /// Recovery devices whose deployment differs from the part's own in this configuration.
+    #[serde(default)]
+    pub recovery: Vec<RecoveryTiming>,
+    /// Ballast this configuration carries, if any.
+    #[serde(default)]
+    pub ballast: Option<Ballast>,
 }
 
 impl Configuration {
     /// An empty configuration.
     pub fn new(id: ConfigId, name: impl Into<String>) -> Configuration {
-        Configuration { id, name: name.into(), motors: Vec::new(), stage_separation: Vec::new() }
+        Configuration { id, name: name.into(), motors: Vec::new(), events: Vec::new(), recovery: Vec::new(), ballast: None }
     }
 
     /// The slot for `mount`.
@@ -106,9 +172,15 @@ impl Configuration {
         }
     }
 
-    /// Delay after burnout at which stage `stage` separates (0 when not set).
-    pub fn separation_delay(&self, stage: usize) -> f64 {
-        self.stage_separation.iter().find(|(s, _)| *s == stage).map_or(0.0, |(_, d)| *d)
+    /// The staging event `kind` of `stage` as this configuration has it (the default when it says nothing).
+    pub fn event(&self, stage: usize, kind: EventKind) -> StageEvent {
+        self.events.iter().find(|e| e.stage == stage && e.kind == kind).copied().unwrap_or_else(|| StageEvent::default_of(stage, kind))
+    }
+
+    /// The deployment this configuration gives recovery device `part`, if it overrides the part's own (see
+    /// [`Rocket::deployment`]).
+    pub fn deployment(&self, part: PartId) -> Option<Deployment> {
+        self.recovery.iter().find(|r| r.part == part).map(|r| r.deploy)
     }
 }
 
@@ -142,6 +214,10 @@ pub enum ConfigError {
     NotAMotorMount,
     /// The last configuration cannot be removed.
     LastConfiguration,
+    /// The trigger cannot be used for that event.
+    InvalidTrigger,
+    /// The part is not a parachute or streamer.
+    NotARecoveryDevice,
 }
 
 impl fmt::Display for ConfigError {
@@ -150,6 +226,8 @@ impl fmt::Display for ConfigError {
             ConfigError::NoSuchConfig => "no such configuration",
             ConfigError::NotAMotorMount => "the part is not a motor mount",
             ConfigError::LastConfiguration => "the last configuration cannot be removed",
+            ConfigError::InvalidTrigger => "that trigger cannot be used for this event",
+            ConfigError::NotARecoveryDevice => "the part is not a recovery device",
         })
     }
 }
@@ -186,7 +264,7 @@ impl Rocket {
         id
     }
 
-    /// Copies configuration `id` (motors, delays, ignition and separation timing) and returns the copy's id; a named
+    /// Copies configuration `id` (motors, delays, staging and recovery timing, ballast) and returns the copy's id; a named
     /// configuration gets `" copy"` appended to its name. The copy does not become active.
     pub fn duplicate_configuration(&mut self, id: ConfigId) -> Option<ConfigId> {
         let mut copy = self.configuration(id)?.clone();
@@ -262,19 +340,75 @@ impl Rocket {
         Ok(())
     }
 
-    /// Sets when the motor in `mount` lights.
-    pub fn set_ignition(&mut self, config: ConfigId, mount: PartId, ignition: Ignition) -> Result<(), ConfigError> {
-        self.slot_mut(config, mount)?.ignition = ignition;
+    /// Sets a staging event of configuration `config`: the trigger and delay of the separation or ignition of `event.stage`. A
+    /// negative or non-finite delay (or altitude) becomes 0. Refused with [`ConfigError::InvalidTrigger`] for a separation that
+    /// waits for a separation.
+    pub fn set_stage_event(&mut self, config: ConfigId, event: StageEvent) -> Result<(), ConfigError> {
+        if !event.trigger.valid_for(event.kind) {
+            return Err(ConfigError::InvalidTrigger);
+        }
+        let clean = |x: f64| if x.is_finite() { x.max(0.0) } else { 0.0 };
+        let event = StageEvent {
+            delay: clean(event.delay),
+            trigger: match event.trigger {
+                StageTrigger::Altitude(h) => StageTrigger::Altitude(clean(h)),
+                other => other,
+            },
+            ..event
+        };
+        let c = self.configs.iter_mut().find(|c| c.id == config).ok_or(ConfigError::NoSuchConfig)?;
+        match c.events.iter_mut().find(|e| e.stage == event.stage && e.kind == event.kind) {
+            Some(entry) => *entry = event,
+            None => c.events.push(event),
+        }
         Ok(())
     }
 
-    /// Sets the delay after burnout at which stage `stage` separates in configuration `config`.
-    pub fn set_stage_separation(&mut self, config: ConfigId, stage: usize, delay: f64) -> Result<(), ConfigError> {
-        let c = self.configs.iter_mut().find(|c| c.id == config).ok_or(ConfigError::NoSuchConfig)?;
-        match c.stage_separation.iter_mut().find(|(s, _)| *s == stage) {
-            Some(entry) => entry.1 = delay,
-            None => c.stage_separation.push((stage, delay)),
+    /// The deployment of recovery device `part` in configuration `config`: the configuration's own if it has one, else the
+    /// part's. `None` if either does not exist or the part is not a parachute or streamer.
+    pub fn deployment(&self, config: ConfigId, part: PartId) -> Option<Deployment> {
+        let own = match self.internal(part)?.kind {
+            InternalKind::Parachute { deploy, .. } | InternalKind::Streamer { deploy, .. } => deploy,
+            _ => return None,
+        };
+        Some(self.configuration(config)?.deployment(part).unwrap_or(own))
+    }
+
+    /// [`deployment`](Self::deployment) in the active configuration.
+    pub fn active_deployment(&self, part: PartId) -> Option<Deployment> {
+        self.deployment(self.active_config, part)
+    }
+
+    /// Gives recovery device `part` the deployment `deploy` in configuration `config` only (the part's own value is the default
+    /// of the others). A negative or non-finite delay (or altitude) becomes 0.
+    pub fn set_deployment(&mut self, config: ConfigId, part: PartId, deploy: Deployment) -> Result<(), ConfigError> {
+        if !matches!(self.internal(part).map(|p| &p.kind), Some(InternalKind::Parachute { .. } | InternalKind::Streamer { .. })) {
+            return Err(ConfigError::NotARecoveryDevice);
         }
+        let clean = |x: f64| if x.is_finite() { x.max(0.0) } else { 0.0 };
+        let deploy = Deployment {
+            delay: clean(deploy.delay),
+            event: match deploy.event {
+                DeployEvent::Altitude(h) => DeployEvent::Altitude(clean(h)),
+                other => other,
+            },
+        };
+        let c = self.configs.iter_mut().find(|c| c.id == config).ok_or(ConfigError::NoSuchConfig)?;
+        match c.recovery.iter_mut().find(|r| r.part == part) {
+            Some(entry) => entry.deploy = deploy,
+            None => c.recovery.push(RecoveryTiming { part, deploy }),
+        }
+        Ok(())
+    }
+
+    /// Sets (or with `None` removes) the ballast of configuration `config`. A mass that is not positive removes it; the
+    /// station is kept within the rocket.
+    pub fn set_ballast(&mut self, config: ConfigId, ballast: Option<Ballast>) -> Result<(), ConfigError> {
+        let length = self.length();
+        let c = self.configs.iter_mut().find(|c| c.id == config).ok_or(ConfigError::NoSuchConfig)?;
+        c.ballast = ballast
+            .filter(|b| b.mass.is_finite() && b.mass > 0.0)
+            .map(|b| Ballast { mass: b.mass, station: if b.station.is_finite() { b.station.clamp(0.0, length) } else { 0.0 } });
         Ok(())
     }
 
@@ -330,6 +464,11 @@ impl Rocket {
         let mounts: Vec<PartId> = self.internals.iter().filter(|p| p.kind.is_motor_mount()).map(|p| p.id).collect();
         for c in &mut self.configs {
             c.motors.retain(|s| mounts.contains(&s.mount));
+        }
+        let devices: Vec<PartId> =
+            self.internals.iter().filter(|p| matches!(p.kind, InternalKind::Parachute { .. } | InternalKind::Streamer { .. })).map(|p| p.id).collect();
+        for c in &mut self.configs {
+            c.recovery.retain(|r| devices.contains(&r.part));
         }
     }
 }
@@ -427,11 +566,68 @@ mod tests {
         assert_eq!(r.set_motor(77, mount, None), Err(ConfigError::NoSuchConfig));
         r.set_motor_delay(id, mount, f64::INFINITY).unwrap();
         assert!(r.active_configuration().slot(mount).unwrap().is_plugged());
-        r.set_ignition(id, mount, Ignition::StageSeparation { delay: 0.5 }).unwrap();
-        r.set_stage_separation(id, 1, 0.25).unwrap();
-        r.set_stage_separation(id, 1, 0.5).unwrap();
-        assert_eq!(r.active_configuration().separation_delay(1), 0.5);
-        assert_eq!(r.active_configuration().separation_delay(2), 0.0);
+        r.set_stage_event(id, StageEvent { stage: 2, kind: EventKind::Ignition, trigger: StageTrigger::Separation, delay: 0.5 }).unwrap();
+        let sep = |delay| StageEvent { stage: 1, kind: EventKind::Separation, trigger: StageTrigger::Burnout, delay };
+        r.set_stage_event(id, sep(0.25)).unwrap();
+        r.set_stage_event(id, sep(0.5)).unwrap();
+        assert_eq!(r.active_configuration().events.len(), 2, "one entry per stage and kind");
+        assert_eq!(r.active_configuration().event(1, EventKind::Separation).delay, 0.5);
+        assert_eq!(r.active_configuration().event(2, EventKind::Ignition).delay, 0.5);
+        // Defaults: separate at burnout; the first stage lights at launch, upper stages on separation.
+        assert_eq!(r.active_configuration().event(2, EventKind::Separation), StageEvent::default_of(2, EventKind::Separation));
+        assert_eq!(StageEvent::default_of(1, EventKind::Ignition).trigger, StageTrigger::TimeFromLaunch);
+        assert_eq!(StageEvent::default_of(3, EventKind::Ignition).trigger, StageTrigger::Separation);
+        // A separation cannot wait for a separation; bad numbers become 0.
+        let bad = StageEvent { trigger: StageTrigger::Separation, ..sep(0.0) };
+        assert_eq!(r.set_stage_event(id, bad), Err(ConfigError::InvalidTrigger));
+        r.set_stage_event(id, StageEvent { trigger: StageTrigger::Altitude(-5.0), ..sep(f64::NAN) }).unwrap();
+        let e = r.active_configuration().event(1, EventKind::Separation);
+        assert_eq!((e.trigger, e.delay), (StageTrigger::Altitude(0.0), 0.0));
+        assert_eq!(r.set_stage_event(77, sep(0.0)), Err(ConfigError::NoSuchConfig));
+    }
+
+    #[test]
+    fn recovery_timing_and_ballast_are_per_configuration_and_copied_by_duplicate() {
+        let (mut r, _) = rocket_with_mount();
+        let tube = r.parts()[0].id;
+        let chute = r
+            .attach_internal(
+                tube,
+                0.1,
+                InternalKind::Parachute {
+                    diameter: 0.5,
+                    cd: 0.8,
+                    line_count: 6,
+                    line_length: 0.5,
+                    line_material: crate::material::MaterialId::KEVLAR_LINE,
+                    packed_length: 0.1,
+                    packed_diameter: None,
+                    deploy: Deployment { event: DeployEvent::Apogee, delay: 0.0 },
+                },
+            )
+            .unwrap();
+        let first = r.active_config_id();
+        let second = r.add_configuration("Windy");
+        // The part's own deployment is the default of every configuration.
+        assert_eq!(r.deployment(second, chute), Some(Deployment { event: DeployEvent::Apogee, delay: 0.0 }));
+        r.set_deployment(second, chute, Deployment { event: DeployEvent::Altitude(120.0), delay: 1.0 }).unwrap();
+        assert_eq!(r.deployment(first, chute).unwrap().event, DeployEvent::Apogee);
+        assert_eq!(r.deployment(second, chute).unwrap().event, DeployEvent::Altitude(120.0));
+        assert_eq!(r.set_deployment(second, 4242, Deployment::default()), Err(ConfigError::NotARecoveryDevice));
+
+        r.set_ballast(second, Some(Ballast { mass: 0.05, station: 99.0 })).unwrap();
+        assert!(r.configuration(second).unwrap().ballast.unwrap().station <= r.length(), "kept within the rocket");
+        assert!(r.configuration(first).unwrap().ballast.is_none());
+        let copy = r.duplicate_configuration(second).unwrap();
+        assert_eq!(r.configuration(copy).unwrap().recovery, r.configuration(second).unwrap().recovery);
+        assert_eq!(r.configuration(copy).unwrap().ballast, r.configuration(second).unwrap().ballast);
+        r.set_ballast(second, Some(Ballast { mass: 0.0, station: 0.1 })).unwrap();
+        assert!(r.configuration(second).unwrap().ballast.is_none(), "no mass, no ballast");
+
+        // Removing the part drops the overrides.
+        r.remove_internal(chute).unwrap();
+        assert!(r.configuration(copy).unwrap().recovery.is_empty());
+        assert_eq!(r.deployment(copy, chute), None);
     }
 
     #[test]

@@ -4,9 +4,10 @@
 //! Module contract (see `ARCHITECTURE.md`): [`State`] is this module's state, [`Message`] its messages; the app calls
 //! [`State::update`], [`State::view`], [`State::on_key`], [`State::tick`] and [`State::animating`] with the shared [`Ctx`].
 //!
-//! * **Flights** ([`flight`]) are scenarios kept in this state (the rocket document has no field for them, so they are not saved
-//!   with the file): a motor choice plus launch conditions, flown against the rocket *as it is when you press Run*. The kit's four
-//!   (Nominal, Windy, Hot day, Bigger motor) are there from the start.
+//! * **Flights** ([`flight`]) are stored in the document (`Rocket::flights`: name, motor choice, launch conditions), so they are
+//!   saved in the `.bowshock` file, loaded back, edited through `ctx.doc` (dirty dot, undo) and a new document has one, `Nominal`.
+//!   Results are never saved: they are re-run. A flight is flown against the rocket *as it is when you press Run*. [`State::sync`]
+//!   (called by the app after every message) mirrors the document's list; [`State::commit`] writes edits back.
 //! * **Run** ([`Message::Run`], the top bar's Simulate button and `F5`) flies the selected flight with
 //!   [`bowshock_sim::from_model::sim_input`] on a worker thread and shows the result when it lands; **Run all** flies every flight.
 //!   A result whose conditions or document have changed since is *stale* and is drawn in `ink-faint` until it is run again.
@@ -37,7 +38,8 @@ use crate::widgets::chip::{chip, Severity};
 use crate::widgets::ground_track::{GroundMessage, GroundTrack};
 use crate::widgets::plot::{header, legend, PlotGroup, PlotMessage, PlotState, PlotView, SeriesColor};
 
-use flight::{default_flights, Dispersed, Flight, FlightId, MotorChoice, Run, Spec, Times};
+use bowshock_model::{FlightDef, Rocket};
+use flight::{Dispersed, Flight, FlightId, MotorChoice, Run, Spec, Times};
 use plots::Entry;
 
 /// Most flights that can be overlaid.
@@ -139,6 +141,11 @@ struct Shown {
 }
 
 /// The Simulate screen's state.
+///
+/// The flight list is stored in the document (`Rocket::flights`), so it saves with the file, loads back and undoes. This state
+/// mirrors it (and adds the never-saved runtime: results, compare ticks): every change to the list is written to the document by
+/// [`State::commit`], and [`State::sync`] (the app calls it after every message) adopts what the document holds when it changed
+/// from outside (open, New, undo, redo).
 #[derive(Debug)]
 pub struct State {
     flights: Vec<Flight>,
@@ -146,6 +153,11 @@ pub struct State {
     next_id: FlightId,
     plot: PlotState,
     shown: Shown,
+    /// The flight list as the document stores it, as of the last time this state and the document agreed.
+    stored: Vec<FlightDef>,
+    /// How many document revisions this screen's own flight edits made. Results are stale when the *rocket* changed, not when a
+    /// flight was edited (that only stales the flight itself), so [`State::revision`] discounts these.
+    own_edits: u64,
 }
 
 impl Default for State {
@@ -155,13 +167,83 @@ impl Default for State {
 }
 
 impl State {
-    /// The kit's four flights, the first selected, nothing run yet.
+    /// The flights of a new document (`Nominal`), selected, nothing run yet.
     pub fn new() -> Self {
-        let flights = default_flights();
-        let mut state =
-            State { selected: flights[0].id, next_id: flights.len() as FlightId + 1, flights, plot: PlotState::new((0.0, 1.0)), shown: Shown::default() };
+        State::of(Rocket::default().flights())
+    }
+
+    /// A state holding `defs` (never empty), the first selected, nothing run yet.
+    fn of(defs: &[FlightDef]) -> Self {
+        let flights: Vec<Flight> = defs.iter().map(Flight::from_def).collect();
+        let mut state = State {
+            selected: flights[0].id,
+            next_id: defs.iter().map(|d| d.id).max().map_or(1, |m| m + 1),
+            flights,
+            plot: PlotState::new((0.0, 1.0)),
+            shown: Shown::default(),
+            stored: defs.to_vec(),
+            own_edits: 0,
+        };
         state.rebuild();
         state
+    }
+
+    /// Brings the screen in step with the document after a message: a document that was just opened or created replaces
+    /// everything (`reloaded`); otherwise a flight list that changed under us (undo, redo) is adopted, keeping the results of
+    /// the flights that are still there.
+    pub fn sync(&mut self, ctx: &Ctx, reloaded: bool) {
+        let defs = ctx.doc.rocket().flights();
+        if reloaded {
+            *self = State::of(defs);
+        } else if self.stored != defs {
+            self.adopt(defs);
+        }
+    }
+
+    /// Takes `defs` as the flight list. A flight with the same id keeps its results, compare slot and tickets.
+    fn adopt(&mut self, defs: &[FlightDef]) {
+        let mut old = std::mem::take(&mut self.flights);
+        self.flights = defs
+            .iter()
+            .map(|d| match old.iter().position(|f| f.id == d.id) {
+                Some(i) => {
+                    let mut f = old.swap_remove(i);
+                    f.name = d.name.clone();
+                    f.spec = Spec::of(d);
+                    f
+                }
+                None => Flight::from_def(d),
+            })
+            .collect();
+        self.next_id = self.next_id.max(defs.iter().map(|d| d.id).max().map_or(1, |m| m + 1));
+        if self.flight(self.selected).is_none() {
+            self.selected = self.flights[0].id;
+        }
+        self.stored = defs.to_vec();
+        self.rebuild();
+    }
+
+    /// Writes the flight list to the document as one undo step (`key` merges a run of edits, e.g. scrubbing one field, into one),
+    /// then adopts what the document kept (it repairs out-of-range values). Does nothing when nothing changed.
+    fn commit(&mut self, ctx: &mut Ctx, label: &str, key: Option<&str>) {
+        let defs: Vec<FlightDef> = self.flights.iter().map(Flight::def).collect();
+        if defs == self.stored {
+            return;
+        }
+        let before = ctx.doc.revision();
+        let write = |rocket: &mut Rocket| rocket.set_flights(defs);
+        match key {
+            Some(key) => ctx.doc.edit_merging(label, key, write),
+            None => ctx.doc.edit(label, write),
+        }
+        self.own_edits += ctx.doc.revision() - before;
+        let kept = ctx.doc.rocket().flights().to_vec();
+        self.adopt(&kept);
+    }
+
+    /// The revision of the rocket a result is compared with: the document's, leaving out this screen's own flight edits.
+    fn revision(&self, ctx: &Ctx) -> u64 {
+        ctx.doc.revision().saturating_sub(self.own_edits)
     }
 
     fn flight(&self, id: FlightId) -> Option<&Flight> {
@@ -220,6 +302,7 @@ impl State {
 
     /// Starts the simulation of flight `id` on a worker thread.
     fn launch(&mut self, id: FlightId, ctx: &Ctx) -> Task<app::Message> {
+        let revision = self.revision(ctx);
         let Some(flight) = self.flights.iter_mut().find(|f| f.id == id) else { return Task::none() };
         let spec = flight.spec.clone();
         let (input, delay) = match flight::prepare(ctx, &spec) {
@@ -233,7 +316,7 @@ impl State {
         flight.ticket += 1;
         flight.running = true;
         flight.error = None;
-        let (ticket, revision, dt) = (flight.ticket, ctx.doc.revision(), input.dt);
+        let (ticket, dt) = (flight.ticket, input.dt);
         Task::perform(compute(input), move |outcome| {
             app::Message::Simulate(Message::Done(Box::new(Done { flight: id, ticket, spec: spec.clone(), revision, delay, dt, outcome })))
         })
@@ -278,13 +361,13 @@ impl State {
                 self.next_id += 1;
                 self.flights.push(Flight::new(id, format!("Flight {}", self.flights.len() + 1), spec));
                 self.selected = id;
-                self.rebuild();
+                self.commit(ctx, "Add flight", None);
             }
             Message::RemoveFlight => {
                 if self.flights.len() > 1 {
                     self.flights.retain(|f| f.id != self.selected);
                     self.selected = self.flights[0].id;
-                    self.rebuild();
+                    self.commit(ctx, "Remove flight", None);
                 } else {
                     ctx.notify("The last flight cannot be removed");
                 }
@@ -297,7 +380,13 @@ impl State {
                 return task;
             }
             Message::Dispersed(done) => self.dispersed(*done),
-            Message::Edit(edit) => self.edit(edit, ctx.physics.motors()),
+            Message::Edit(edit) => {
+                // One undo step per field: scrubbing the wind is one step, changing the motor afterwards another.
+                let field = format!("{edit:?}");
+                let key = format!("flight:{}:{}", self.selected, field.split('(').next().unwrap_or_default());
+                self.edit(edit, ctx.physics.motors());
+                self.commit(ctx, "Edit flight", Some(&key));
+            }
             Message::Plot(m) => self.plot.update(m),
             Message::Ground(GroundMessage::Hover(t)) => self.plot.set_hover(t),
             Message::Ground(GroundMessage::Select(i)) => {
@@ -329,6 +418,7 @@ impl State {
 
     /// Starts a dispersion study of flight `id`: the flight flown [`flight::DISPERSION_RUNS`] times with its conditions varied.
     fn launch_dispersion(&mut self, id: FlightId, ctx: &Ctx) -> Task<app::Message> {
+        let revision = self.revision(ctx);
         let Some(flight) = self.flights.iter_mut().find(|f| f.id == id) else { return Task::none() };
         let spec = flight.spec.clone();
         let input = match flight::prepare(ctx, &spec) {
@@ -340,7 +430,7 @@ impl State {
         };
         flight.dispersion_ticket += 1;
         flight.dispersing = true;
-        let (ticket, revision) = (flight.dispersion_ticket, ctx.doc.revision());
+        let ticket = flight.dispersion_ticket;
         let sent = spec.clone();
         Task::perform(disperse(input, spec), move |outcome| {
             app::Message::Simulate(Message::Dispersed(Box::new(DispersionDone { flight: id, ticket, spec: sent.clone(), revision, outcome })))
@@ -411,6 +501,7 @@ impl State {
             }
         }
         self.selected = chosen[0];
+        self.commit(ctx, "Add flights", None);
         let task = self.launch_all(chosen, ctx);
         self.rebuild();
         task

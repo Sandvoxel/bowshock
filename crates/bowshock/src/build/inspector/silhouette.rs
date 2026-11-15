@@ -165,11 +165,17 @@ pub fn rocket_silhouette<'a, M: 'a>(rocket: &Rocket) -> Element<'a, M> {
 
 /// A chain-link glyph, `size` px, in the `LINKED` tag's colour.
 pub fn link<'a, M: 'a>(size: f32, color: fn(&Tokens) -> Color) -> Element<'a, M> {
-    canvas::Canvas::new(Link { color }).width(size).height(size).boxed()
+    canvas::Canvas::new(Link { color, broken: false }).width(size).height(size).boxed()
+}
+
+/// A broken chain-link glyph (the two links pulled apart), `size` px: a field one copy has unlinked from its group.
+pub fn unlink<'a, M: 'a>(size: f32, color: fn(&Tokens) -> Color) -> Element<'a, M> {
+    canvas::Canvas::new(Link { color, broken: true }).width(size).height(size).boxed()
 }
 
 struct Link {
     color: fn(&Tokens) -> Color,
+    broken: bool,
 }
 
 impl<M> canvas::Program<M> for Link {
@@ -179,7 +185,7 @@ impl<M> canvas::Program<M> for Link {
         let mut frame = Frame::new(renderer, bounds.size());
         let u = bounds.width.min(bounds.height) / 14.0;
         let stroke = Stroke::default().with_color((self.color)(tokens(theme))).with_width((1.4 * u).max(1.0)).with_line_cap(LineCap::Round);
-        // Two rounded links, tilted 45 degrees, overlapping in the middle.
+        // Two rounded links, tilted 45 degrees, overlapping in the middle (pulled apart when broken).
         let link = |cx: f32, cy: f32| {
             Path::new(|b| {
                 let (rx, ry) = (3.6 * u, 2.2 * u);
@@ -192,8 +198,9 @@ impl<M> canvas::Program<M> for Link {
                 b.close();
             })
         };
-        frame.stroke(&link(4.8, 9.2), stroke);
-        frame.stroke(&link(9.2, 4.8), stroke);
+        let gap = if self.broken { 1.9 } else { 0.0 };
+        frame.stroke(&link(4.8 - gap, 9.2 + gap), stroke);
+        frame.stroke(&link(9.2 + gap, 4.8 - gap), stroke);
         vec![frame.into_geometry()]
     }
 }

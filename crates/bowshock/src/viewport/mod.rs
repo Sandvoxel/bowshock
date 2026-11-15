@@ -31,6 +31,7 @@
 pub mod assembly;
 pub mod camera;
 mod cube;
+mod empty;
 pub mod handles;
 pub mod manipulate;
 mod markers;
@@ -241,8 +242,6 @@ pub struct View {
     last_select: Option<(Instant, Option<PartId>)>,
     /// What is under the cursor.
     hover: Hover,
-    /// Which copy of the selected radial group was clicked (and which part it belongs to).
-    instance: Option<(PartId, usize)>,
     mesh_key: Option<MeshKey>,
 }
 
@@ -266,7 +265,6 @@ impl View {
             focus: None,
             last_select: None,
             hover: Hover::None,
-            instance: None,
             mesh_key: None,
         }
     }
@@ -340,7 +338,7 @@ impl View {
             Message::Hover(hover) => self.hover = hover,
             Message::Select(pick) => {
                 let id = pick.map(Pick::id);
-                self.instance = match pick {
+                ctx.symmetry.instance = match pick {
                     Some(Pick::Radial { id, instance }) => Some((id, instance)),
                     _ => None,
                 };
@@ -359,13 +357,13 @@ impl View {
             }
             Message::SelectPart(id) => {
                 ctx.selection = id.map_or(Selection::None, Selection::Part);
-                self.instance = None;
+                ctx.symmetry.instance = None;
             }
             Message::SelectSeparation(stage) => ctx.selection = Selection::Separation(stage),
             Message::Grab(pick) => {
                 drag::grab(ctx, pick);
                 self.hover = Hover::None;
-                self.instance = None;
+                ctx.symmetry.instance = None;
             }
             Message::Edit(edit) => {
                 if let Some(hint) = edit.hint() {
@@ -450,7 +448,7 @@ impl View {
         );
         let internal = matches!(part, Some(PartRef::Internal(_)));
         let mut tag = format!("ORTHO · {} · {}", if aft_on { "AFT" } else { "SIDE" }, part.map_or_else(String::new, |p| p.name()).to_uppercase());
-        if let (Some(PartRef::Radial(r)), Some((rid, i))) = (part, self.instance) {
+        if let (Some(PartRef::Radial(r)), Some((rid, i))) = (part, ctx.symmetry.instance) {
             if r.count > 1 && rid == id {
                 tag.push(' ');
                 tag.push((b'A' + (i % 26) as u8) as char);
@@ -644,7 +642,7 @@ impl View {
             (Space::new().boxed(), mouse::Interaction::default())
         } else {
             let selected = ctx.selection.part();
-            let instance = self.instance.filter(|(id, _)| Some(*id) == selected).map_or(0, |(_, i)| i);
+            let instance = ctx.symmetry.instance.filter(|(id, _)| Some(*id) == selected).map_or(0, |(_, i)| i);
             (
                 canvas(Manipulator {
                     rocket,
@@ -668,6 +666,7 @@ impl View {
         let phase = ctx.physics.phase();
         let fade_from = ctx.physics.stages().iter().find(|s| s.index == phase.first_stage()).filter(|s| s.index > 1).map(|s| s.fore_station as f32);
         let sheet: Element<'_, Message> = canvas(sheet::Sheet { camera }).width(Fill).height(Fill).boxed();
+        let sheet = empty::over(sheet, ctx);
         let model: Element<'_, Message> = shader(scene::Scene {
             camera,
             tokens: *tokens,

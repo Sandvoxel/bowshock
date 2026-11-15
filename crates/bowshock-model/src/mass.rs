@@ -124,24 +124,34 @@ impl Rocket {
         self.ids().into_iter().filter_map(|id| self.component_mass(id).map(|m| (id, m))).collect()
     }
 
-    /// The whole rocket without a motor: every part combined (see [`MassProps::combine`]). Station of the CG is from the
-    /// nose tip.
+    /// The whole rocket without a motor: every part combined (see [`MassProps::combine`]) with the active configuration's
+    /// ballast, a point mass at its station. Station of the CG is from the nose tip.
     pub fn dry_mass(&self) -> MassProps {
-        MassProps::combine(self.component_masses().into_iter().map(|(_, m)| m))
+        let ballast = self.active_configuration().ballast.map(|b| MassProps::point(b.mass, b.station));
+        MassProps::combine(self.component_masses().into_iter().map(|(_, m)| m).chain(ballast))
     }
 
-    /// A radial group (all copies), CG relative to the group's fore edge.
+    /// A radial group (all copies), CG relative to the group's fore edge. Copies that have unlinked a field (see
+    /// [`crate::symmetry`]) weigh by their own values.
     fn radial_props(&self, r: &RadialPart) -> MassProps {
-        let n = f64::from(r.count.max(1));
-        let base = self.radial_base_radius(r).unwrap_or(0.0);
+        if !r.has_overrides() {
+            return self.radial_props_of(r, &r.kind, r.count.max(1));
+        }
+        MassProps::combine((0..usize::from(r.count.max(1))).map(|i| self.radial_props_of(r, &r.effective(i).kind, 1)))
+    }
+
+    /// `copies` identical copies of `kind` standing as radial part `r` stands (its position, material and section).
+    fn radial_props_of(&self, r: &RadialPart, kind: &RadialKind, copies: u8) -> MassProps {
+        let n = f64::from(copies);
+        let base = self.surface_radius(r.parent, r.offset).zip(self.surface_radius(r.parent, r.offset + kind.extent())).map_or(0.0, |(a, b)| a.min(b));
         let bulk = |m: MaterialId| m.density_as(crate::material::MaterialKind::Bulk, MaterialId::BIRCH_PLYWOOD);
-        match &r.kind {
+        match kind {
             RadialKind::FinSet { .. } | RadialKind::EllipticalFin { .. } | RadialKind::FreeformFin { .. } => {
-                let (area, thickness) = (r.kind.fin_area().unwrap_or(0.0), r.kind.thickness().unwrap_or(0.0));
-                let (cz, ch) = r.kind.fin_centroid().unwrap_or((0.0, 0.0));
+                let (area, thickness) = (kind.fin_area().unwrap_or(0.0), kind.thickness().unwrap_or(0.0));
+                let (cz, ch) = kind.fin_centroid().unwrap_or((0.0, 0.0));
                 let mass = bulk(r.material) * area * thickness * r.cross_section.volume_factor();
                 let radius = base + ch;
-                let chord = r.kind.extent();
+                let chord = kind.extent();
                 // Each plate is a point at the centroid for the long axis' spin; across the axis it averages r^2/2 about the
                 // diameter it lies on plus its own chord-wise spread, treated as a thin rod.
                 MassProps { mass: n * mass, cg: cz, i_long: n * mass * (radius * radius / 2.0 + chord * chord / 12.0), i_rot: n * mass * radius * radius }

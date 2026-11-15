@@ -135,8 +135,8 @@ pub fn grab(ctx: &mut Ctx, pick: Pick) {
     }
 }
 
-/// Puts back the motors that removing and re-adding a motor mount dropped from the configurations: every slot of `from` whose
-/// mount exists again in `rocket` but has lost its slot.
+/// Puts back what removing and re-adding a part dropped from the configurations: every motor slot of `from` whose mount exists
+/// again in `rocket` but has lost its slot, and every recovery deployment of a device that exists again.
 fn restore_motors(rocket: &mut Rocket, from: &Rocket) {
     for config in from.configurations() {
         for slot in &config.motors {
@@ -144,7 +144,11 @@ fn restore_motors(rocket: &mut Rocket, from: &Rocket) {
             if !present && rocket.internal(slot.mount).is_some() {
                 let _ = rocket.set_motor(config.id, slot.mount, slot.motor.clone());
                 let _ = rocket.set_motor_delay(config.id, slot.mount, slot.delay);
-                let _ = rocket.set_ignition(config.id, slot.mount, slot.ignition);
+            }
+        }
+        for timing in &config.recovery {
+            if rocket.configuration(config.id).is_some_and(|c| c.deployment(timing.part).is_none()) {
+                let _ = rocket.set_deployment(config.id, timing.part, timing.deploy);
             }
         }
     }

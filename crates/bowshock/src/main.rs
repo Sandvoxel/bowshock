@@ -83,5 +83,5 @@ fn app(example: bool) -> iced::Application<impl iced::Program<State = App, Messa
         .subscription(App::subscription)
         .fonts(theme::FONTS)
         .font(SANS)
-        .window_size(Size::new(1280.0, 800.0))
+        .window(iced::window::Settings { size: Size::new(1280.0, 800.0), icon: logo::window_icon(), ..iced::window::Settings::default() })
 }

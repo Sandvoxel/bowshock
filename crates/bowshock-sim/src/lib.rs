@@ -20,14 +20,17 @@ pub mod atmosphere;
 pub mod flight;
 pub mod from_model;
 pub mod rng;
+pub mod staging;
 pub mod vehicle;
 
 pub use aero::{Aero, DragBreakdown, Stability};
 pub use analysis::{fin_flutter, monte_carlo, vs_alpha, vs_mach, AlphaPoint, Dispersion, FlutterResult, MachPoint, MonteCarlo, MonteCarloRun, MonteCarloStats};
 pub use atmosphere::{AirState, Atmosphere};
 pub use flight::{simulate, Deploy, Event, EventKind, FlightResult, Launch, RecoveryDevice, Sample, SimInput, Summary, Trajectory, Turbulence};
+pub use staging::{has_altitude_trigger, staging_times, Timeline};
 pub use vehicle::{
-    BodyKind, BodySegment, FinCrossSection, FinPlanform, FinSet, Ignition, MassProps, NoseShape, Protuberance, StageMass, StageMotor, ThrustCurve, Vehicle,
+    BodyKind, BodySegment, FinCrossSection, FinPlanform, FinSet, MassProps, NoseShape, Protuberance, StageMass, StageMotor, ThrustCurve, Timing, Trigger,
+    Vehicle,
 };
 
 /// Standard gravity (m/s^2).

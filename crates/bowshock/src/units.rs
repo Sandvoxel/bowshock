@@ -709,6 +709,49 @@ pub fn parse_quantity(text: &str, quantity: Quantity, unit: &Unit, resolve_si: &
     Ok(unit.to_si(shown))
 }
 
+/// The kind of value a formula can compute for a field showing `quantity` (`None` for the quantities no dimension has).
+pub fn formula_kind(quantity: Quantity) -> Option<bowshock_model::Kind> {
+    match quantity {
+        Quantity::Length => Some(bowshock_model::Kind::Length),
+        Quantity::Angle => Some(bowshock_model::Kind::Angle),
+        Quantity::Scalar => Some(bowshock_model::Kind::Scalar),
+        _ => None,
+    }
+}
+
+/// Parses `text` typed in a field showing `quantity` in `unit` as a document formula: references `{name#id.key}` bind to part
+/// ids and the numbers are converted to SI (a factor stays a factor, a length added to a reference becomes metres).
+/// Errors are user-presentable.
+pub fn parse_formula(text: &str, quantity: Quantity, unit: &Unit) -> Result<bowshock_model::Expr, String> {
+    use bowshock_model::{Expr as Model, FieldRef, Op as ModelOp};
+    fn convert(e: &Expr) -> Result<Model, String> {
+        Ok(match e {
+            Expr::Num(v) => Model::Num(*v),
+            Expr::Ref(token) => Model::Ref(FieldRef::from_token(token).ok_or_else(|| format!("Unknown reference '{token}'"))?.0),
+            Expr::Neg(inner) => Model::Neg(Box::new(convert(inner)?)),
+            Expr::BinOp(l, op, r) => {
+                let op = match op {
+                    Op::Add => ModelOp::Add,
+                    Op::Sub => ModelOp::Sub,
+                    Op::Mul => ModelOp::Mul,
+                    Op::Div => ModelOp::Div,
+                };
+                Model::Bin(Box::new(convert(l)?), op, Box::new(convert(r)?))
+            }
+        })
+    }
+    let kind = formula_kind(quantity).ok_or_else(|| "This value cannot be a formula".to_string())?;
+    let parsed = parse_expr(text, quantity, unit).map_err(|e| e.to_string())?;
+    convert(&parsed)?.scaled(kind, unit.to_si).map_err(|e| e.to_string())
+}
+
+/// The text of a stored formula as it is edited in a field showing `quantity` in `unit`: references as tokens with the name
+/// `name(part)` gives, numbers in `unit`. `None` if the formula does not fit the quantity.
+pub fn formula_text(expr: &bowshock_model::Expr, quantity: Quantity, unit: &Unit, name: &dyn Fn(bowshock_model::PartId) -> Option<String>) -> Option<String> {
+    let kind = formula_kind(quantity)?;
+    Some(expr.scaled(kind, 1.0 / unit.to_si).ok()?.to_text(name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1118,5 +1161,43 @@ mod tests {
         assert_eq!(parse_expr("-{x}", Quantity::Length, mm).expect("parses"), Expr::Neg(Box::new(Expr::Ref("x".to_string()))));
         // Same-unit suffix is a no-op.
         assert_eq!(parse_expr("5mm", Quantity::Length, mm).expect("parses"), Expr::Num(5.0));
+    }
+
+    #[test]
+    fn a_typed_formula_is_stored_in_si_and_reads_back_in_the_field_unit() {
+        use bowshock_model::{Expr as Model, FieldRef, Op as ModelOp};
+        let mm = u(Quantity::Length, "mm");
+        let od = FieldRef::new(3, bowshock_model::Dim::Diameter);
+        let model = parse_formula("0.5 * {body_tube#3.od} + 2", Quantity::Length, mm).expect("parses");
+        // The factor stays a factor; the 2 mm added to a length is metres.
+        let expected =
+            Model::Bin(Box::new(Model::Bin(Box::new(Model::Num(0.5)), ModelOp::Mul, Box::new(Model::Ref(od)))), ModelOp::Add, Box::new(Model::Num(0.002)));
+        assert_eq!(model, expected);
+        let name = |_| Some("Body tube".to_string());
+        let text = formula_text(&model, Quantity::Length, mm, &name).expect("fits a length");
+        assert_eq!(text, "0.5 * {body_tube#3.od} + 2");
+        // The same formula in inches: the 2 mm shows as 0.0787… in, and typing it back gives the same metres.
+        let inch = u(Quantity::Length, "in");
+        let in_text = formula_text(&model, Quantity::Length, inch, &name).expect("fits a length");
+        let back = parse_formula(&in_text, Quantity::Length, inch).expect("parses");
+        match back {
+            Model::Bin(_, ModelOp::Add, r) => assert!(matches!(*r, Model::Num(v) if (v - 0.002).abs() < 1e-12), "{in_text}"),
+            other => panic!("{other:?}"),
+        }
+        // A unit on a number beside a reference counts: `{od} + 1in` is 25.4 mm more.
+        let model = parse_formula("{body_tube#3.od} + 1in", Quantity::Length, mm).expect("parses");
+        assert!(matches!(&model, Model::Bin(_, ModelOp::Add, r) if matches!(**r, Model::Num(v) if (v - 0.0254).abs() < 1e-12)), "{model:?}");
+    }
+
+    #[test]
+    fn formulas_reject_what_does_not_add_up() {
+        let mm = u(Quantity::Length, "mm");
+        assert!(parse_formula("{x}", Quantity::Length, mm).is_err(), "not a reference token");
+        assert!(parse_formula("{body_tube#3.cant} + 2", Quantity::Length, mm).is_err(), "an angle is not a length");
+        assert!(parse_formula("{body_tube#3.od} * {body_tube#3.length}", Quantity::Length, mm).is_err());
+        assert!(parse_formula("{body_tube#3.od} / {body_tube#3.length}", Quantity::Length, mm).is_err(), "a ratio is not a length");
+        let scalar = Quantity::Scalar.unit_for(UnitSystem::MmGS);
+        assert!(parse_formula("{body_tube#3.od} / {body_tube#3.length}", Quantity::Scalar, scalar).is_ok());
+        assert!(formula_text(&bowshock_model::Expr::Num(1.0), Quantity::Mass, mm, &|_| None).is_none());
     }
 }

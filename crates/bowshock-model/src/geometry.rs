@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::material::{Finish, MaterialId};
+use crate::symmetry::FieldOverride;
 use crate::PartId;
 
 /// Nose cone profile family.
@@ -594,6 +595,10 @@ pub struct RadialPart {
     /// CG that replaces the computed one, metres behind the group's fore edge.
     #[serde(default)]
     pub cg_override: Option<f64>,
+    /// Per-copy overrides: single fields a copy has loosened from the group (see [`crate::symmetry`]). Empty for a plain
+    /// linked group; every entry names a copy (`index < count`) and a field that applies to `kind`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<FieldOverride>,
 }
 
 impl RadialPart {
@@ -614,6 +619,7 @@ impl RadialPart {
             cant: 0.0,
             mass_override: None,
             cg_override: None,
+            overrides: Vec::new(),
         }
     }
 

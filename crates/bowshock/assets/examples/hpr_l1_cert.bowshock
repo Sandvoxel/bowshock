@@ -1,5 +1,5 @@
 {
-  "format_version": 1,
+  "format_version": 2,
   "rocket": {
     "name": "hpr_l1_cert",
     "designer": "Bowshock",
@@ -253,14 +253,86 @@
               "designation": "H128W",
               "manufacturer": "AeroTech"
             },
-            "delay": 14.0,
-            "ignition": "Launch"
+            "delay": 14.0
           }
         ],
-        "stage_separation": []
+        "events": [],
+        "recovery": [],
+        "ballast": null
       }
     ],
     "active_config": 0,
-    "next_config_id": 1
+    "next_config_id": 1,
+    "flights": [
+      {
+        "id": 1,
+        "name": "Nominal",
+        "motor": "Active",
+        "delay": null,
+        "conditions": {
+          "rail_length": 1.52,
+          "launch_angle": 0.08726646259971647,
+          "wind_speed": 2.2,
+          "wind_from": 4.363323129985823,
+          "turbulence": "Low",
+          "site_altitude": 120.0,
+          "temperature": 288.15,
+          "field_radius": 300.0
+        }
+      },
+      {
+        "id": 2,
+        "name": "Windy",
+        "motor": "Active",
+        "delay": null,
+        "conditions": {
+          "rail_length": 1.52,
+          "launch_angle": 0.08726646259971647,
+          "wind_speed": 7.0,
+          "wind_from": 4.363323129985823,
+          "turbulence": "Low",
+          "site_altitude": 120.0,
+          "temperature": 288.15,
+          "field_radius": 300.0
+        }
+      },
+      {
+        "id": 3,
+        "name": "Hot day",
+        "motor": "Active",
+        "delay": null,
+        "conditions": {
+          "rail_length": 1.52,
+          "launch_angle": 0.08726646259971647,
+          "wind_speed": 2.2,
+          "wind_from": 4.363323129985823,
+          "turbulence": "Low",
+          "site_altitude": 120.0,
+          "temperature": 308.15,
+          "field_radius": 300.0
+        }
+      },
+      {
+        "id": 4,
+        "name": "Bigger motor",
+        "motor": {
+          "Motor": {
+            "designation": "I284W",
+            "manufacturer": "AeroTech"
+          }
+        },
+        "delay": null,
+        "conditions": {
+          "rail_length": 1.52,
+          "launch_angle": 0.08726646259971647,
+          "wind_speed": 2.2,
+          "wind_from": 4.363323129985823,
+          "turbulence": "Low",
+          "site_altitude": 120.0,
+          "temperature": 288.15,
+          "field_radius": 300.0
+        }
+      }
+    ]
   }
 }

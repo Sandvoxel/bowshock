@@ -6,16 +6,18 @@ use std::fmt;
 
 use super::edit::Field;
 use super::Message;
-use crate::app::Ctx;
+use crate::app::refs;
+use crate::app::{Ctx, Selection};
 use crate::build::parts_bin::INSPECTOR_FIRST_FIELD;
 use crate::theme::{self, MONO};
 use crate::tokens::{CONTROL_H, SPACE_2, TEXT_BODY};
-use crate::units::Quantity;
-use crate::widgets::field::{labeled, select};
-use crate::widgets::unit_input::{unit_input, Badge, State};
-use bowshock_model::Dim;
+use crate::units::{self, Quantity};
+use crate::widgets::button::{button, Weight};
+use crate::widgets::field::{labeled, select, LABEL_W};
+use crate::widgets::unit_input::{unit_input, Badge, State, UnitInput};
+use bowshock_model::{Dim, FieldRef};
 use iced::widget::Id;
-use iced::widget::{container, mouse_area, row, text, Space};
+use iced::widget::{column, container, mouse_area, row, text, tooltip, Space};
 use iced::{Element, Fill, Widget};
 
 /// An option of a select: the value and what the menu shows.
@@ -54,7 +56,7 @@ pub struct Form<'a> {
 }
 
 impl<'a> Form<'a> {
-    fn base(&self, label: &'static str, value: f64, quantity: Quantity, field: Field) -> crate::widgets::unit_input::UnitInput<'a, Message> {
+    pub(super) fn base(&self, label: &'static str, value: f64, quantity: Quantity, field: Field) -> UnitInput<'a, Message> {
         let id = if Some(field) == self.first { Id::from(INSPECTOR_FIRST_FIELD) } else { Id::from(field.key()) };
         let mut input = unit_input(label, value, quantity, &self.ctx.units)
             .id(id)
@@ -65,12 +67,125 @@ impl<'a> Form<'a> {
                 input = input.hint(reason);
             }
         }
+        self.wire(input, field)
+    }
+
+    /// The reference a field of the selected part is: its part and dimension (`None` for a field that is not one).
+    fn reference(&self, field: Field) -> Option<FieldRef> {
+        let (Selection::Part(id), Field::Dim(dim)) = (self.ctx.selection, field) else { return None };
+        self.ctx.doc.rocket().dim(id, dim)?;
+        Some(FieldRef::new(id, dim))
+    }
+
+    /// Whether a field is another field's pick target right now (the dashed accent outline).
+    fn is_pick_target(&self, field: Field) -> bool {
+        self.reference(field).is_some_and(|r| self.ctx.refs.is_picking() && !self.ctx.refs.is_target(r))
+    }
+
+    /// The reference states of a field (design/components/UnitInput, *References*): typing `{` picks, other fields are pick
+    /// targets meanwhile, a committed formula shows `ƒ` and its result, a source shows `→ N`, a refused formula shows why.
+    fn wire(&self, mut input: UnitInput<'a, Message>, field: Field) -> UnitInput<'a, Message> {
+        let Some(r) = self.reference(field) else { return input };
+        let ctx = self.ctx;
+        let (rocket, refs, tokens) = (ctx.doc.rocket(), &ctx.refs, ctx.tokens());
+        input = input.resolver(move |token| refs::resolve(rocket, token)).chips(move |token| refs::chip(rocket, tokens, token));
+        // A position is edited relative to an anchor the formula would not know about: it can be referenced, not computed.
+        let computable = !matches!(field, Field::Dim(Dim::Position)) && rocket.dim(r.part, r.dim).is_some_and(|v| rocket.clamp_dim(r.part, r.dim, v).is_some());
+        let formula = rocket.formula(r.part, r.dim).filter(|_| computable);
+        if computable {
+            input = input.on_pick_mode(move |on| Message::PickMode(on.then_some(r))).on_formula(move |text, unit| Message::Formula(r, text, unit));
+            if let Some(insert) = refs.insert.as_ref().filter(|i| i.target == r) {
+                input = input.insert(insert.token, &insert.text);
+            }
+        }
+        let dependants = rocket.dependants(r.part, r.dim).len();
+        if dependants > 0 {
+            input = input.badge(Badge::Refs(dependants)).on_badge(Message::Dependants(r));
+        }
+        if let Some(formula) = formula {
+            let quantity = refs::dim_quantity(r.dim);
+            input = input
+                .state(State::Formula)
+                .formula_in(move |unit| units::formula_text(&formula.expr, quantity, unit, &|p| rocket.formula_name(formula, p)).unwrap_or_default())
+                .on_scrub_attempt(Message::ScrubFormula(r));
+            if let Some(name) = refs::broken_name(rocket, r.part, r.dim) {
+                input = input.state(State::Error(format!("Broken reference: {name} was deleted. Re-pick or convert to a value."))).badge(Badge::Formula);
+            }
+        }
+        if let Some((target, message)) = &refs.error {
+            if *target == r {
+                input = input.state(State::Error(message.clone()));
+                if formula.is_some() && dependants == 0 {
+                    input = input.badge(Badge::Formula);
+                }
+            }
+        }
+        if self.is_pick_target(field) {
+            input = input.state(State::PickTarget).on_pick(Message::PickField(r));
+        }
         input
+    }
+
+    /// A field as an element with what hangs under it: the formula in a tooltip, the *Replace formula with a value?* question,
+    /// the *Re-pick* / *Convert to value* choices of a broken reference, the list of dependants of a source.
+    pub(super) fn finish(&self, input: UnitInput<'a, Message>, field: Field) -> Element<'a, Message> {
+        let element: Element<'a, Message> = input.into();
+        let Some(r) = self.reference(field) else { return element };
+        let ctx = self.ctx;
+        let (rocket, refs) = (ctx.doc.rocket(), &ctx.refs);
+        let indent = || Space::new().width(LABEL_W + SPACE_2).boxed();
+        let note = |what: String, actions: Vec<Element<'a, Message>>| -> Element<'a, Message> {
+            let body = column![text(what).size(12).style(theme::colored(|t| t.warn)), row(actions).spacing(SPACE_2)].spacing(SPACE_2);
+            row![indent(), body.boxed()].boxed()
+        };
+        let mut cells: Vec<Element<'a, Message>> = Vec::new();
+        match rocket.formula(r.part, r.dim) {
+            Some(formula) => {
+                let quantity = refs::dim_quantity(r.dim);
+                let unit = quantity.unit_for(ctx.units);
+                let shown = units::formula_text(&formula.expr, quantity, unit, &|p| rocket.formula_name(formula, p)).unwrap_or_default();
+                let tip = container(text(format!("= {}", refs::pretty(rocket, ctx.tokens(), &shown))).font(MONO).size(12).style(theme::ink))
+                    .padding([4.0, SPACE_2])
+                    .style(theme::tooltip);
+                cells.push(tooltip(element, tip).position(tooltip::Position::Top).gap(4).boxed());
+            }
+            None => cells.push(element),
+        }
+        if refs.confirm == Some(r) {
+            cells.push(note(
+                "Replace formula with a value?".into(),
+                vec![
+                    button("Replace", Weight::Secondary).on_press(Message::ReplaceFormula(r, true)).into(),
+                    button("Cancel", Weight::Ghost).on_press(Message::ReplaceFormula(r, false)).into(),
+                ],
+            ));
+        }
+        if refs::broken_name(rocket, r.part, r.dim).is_some() {
+            let actions: Vec<Element<'a, Message>> = vec![
+                indent(),
+                button("Re-pick", Weight::Secondary).on_press(Message::Focus(r.dim)).into(),
+                button("Convert", Weight::Ghost).on_press(Message::ConvertFormula(r)).into(),
+            ];
+            cells.push(row(actions).spacing(SPACE_2).boxed());
+        }
+        if refs.dependants == Some(r) {
+            let mut jumps: Vec<Element<'a, Message>> = vec![text("USED BY").font(MONO).size(10.5).style(theme::faint).boxed()];
+            for dep in rocket.dependants(r.part, r.dim) {
+                let name = rocket.kind_of(dep.part).map(|p| p.name()).unwrap_or_default();
+                let label = format!("{name} · {}", refs::dim_name(rocket, dep.part, dep.dim));
+                jumps.push(iced::widget::button(text(label).size(12)).padding([3.0, SPACE_2]).style(theme::secondary).on_press(Message::Jump(dep)).boxed());
+            }
+            cells.push(row![indent(), column(jumps).spacing(4).boxed()].boxed());
+        }
+        if cells.len() == 1 {
+            return cells.remove(0);
+        }
+        column(cells).spacing(SPACE_2).boxed()
     }
 
     /// A plain numeric field: scrubbed live, committed on Enter.
     pub fn num(&self, label: &'static str, value: f64, quantity: Quantity, field: Field) -> Element<'a, Message> {
-        self.base(label, value, quantity, field).into()
+        self.finish(self.base(label, value, quantity, field), field)
     }
 
     /// A derived value (`AUTO`, dashed): typing into it flips which of the pair is driven.
@@ -88,9 +203,11 @@ impl<'a> Form<'a> {
     pub fn auto_or(&self, label: &'static str, value: f64, quantity: Quantity, field: Field, auto: bool, reset: Message) -> Element<'a, Message> {
         let input = self.base(label, value, quantity, field);
         if auto {
-            input.state(State::Auto).into()
+            // An automatic field that is another's pick target keeps the target look and click.
+            let input = if self.is_pick_target(field) { input } else { input.state(State::Auto) };
+            self.finish(input, field)
         } else {
-            let element: Element<'a, Message> = input.hint("Right-click for auto").into();
+            let element: Element<'a, Message> = self.finish(input.hint("Right-click for auto"), field);
             mouse_area(element).on_right_press(reset).boxed()
         }
     }

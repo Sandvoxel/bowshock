@@ -908,9 +908,10 @@ mod tests {
             motor: Some(StageMotor {
                 curve: ThrustCurve { points: vec![(0.0, 5.0), (1.0, 5.0)], propellant_mass: 0.01, total_mass: 0.02, length: 0.07, diameter: 0.018 },
                 mount_aft_station: 0.33,
-                ignition: Ignition::Launch,
+                ignition: Timing::LAUNCH,
                 ejection_delay: None,
             }),
+            separation: Timing::BURNOUT,
         });
         let a2 = Aero::new(&v);
         assert!(a2.drag(0.3, 1e6, true).base < a2.drag(0.3, 1e6, false).base);
