@@ -1,0 +1,17 @@
+; Cesaroni 163H133-14A - bundled with bowshock-motors
+; Source: ThrustCurve.org simfile 5f4294d20002e90000000624 (cert data), https://www.thrustcurve.org/simfiles/5f4294d20002e90000000624/
+; Retrieved 2026-11-15 via the ThrustCurve.org API. Original file contents follow.
+;
+H133-BS 29 187 5-7-9-11-14 0.085 0.19 CTI
+0.01 10
+0.017 100
+0.023 190
+0.028 200
+0.042 140
+0.05 135
+0.12 152
+0.35 154
+1 135
+1.065 110
+1.2 25
+1.28 0
