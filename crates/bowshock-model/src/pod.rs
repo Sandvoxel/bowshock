@@ -1,5 +1,5 @@
-//! Pods: radial bodies standing parallel to the core, like the boosters, pods and strap-ons of a multi-body rocket (OpenRocket's
-//! *pod set*, Niskanen 2013 section 2.1; KSP's radially attached parts).
+//! Pods: radial bodies standing parallel to the core, like the boosters, pods and strap-ons of a multi-body rocket (Niskanen 2009
+//! section 2.3 on clustering; KSP's radially attached parts).
 //!
 //! A pod set is a [`RadialPart`] of kind [`RadialKind::Pod`]: it has the symmetry group of every radial part (count, start
 //! angle, per-copy angles), sits on a core part at an offset along it and stands `gap` clear of the parent's surface. Its own
@@ -90,7 +90,7 @@ impl PodBody {
 
     /// Whether air flows through the body: it has axial parts, every one a body tube (no nose cone, no transition, so no
     /// closed fore or aft end), and nothing inside the tubes (no bulkhead, ring, motor mount or recovery gear to block or fill
-    /// the bore). Such a pod is aerodynamically a tube fin set (OpenRocket's `TubeFinSet`), not a body: the simulation gives
+    /// the bore). Such a pod is aerodynamically a tube fin set, not a body: the simulation gives
     /// it the ring-airfoil lift, the through-flow pressure drag and no base drag (see `bowshock_sim::tube_fins`). A pod with a
     /// nose but an open aft end is still a body.
     pub fn is_open_tube(&self) -> bool {

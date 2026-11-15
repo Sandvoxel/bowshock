@@ -73,7 +73,7 @@ Without `viscous`, the analysis solves the **Euler equations** (inviscid):
 - drag = forebody pressure drag (nose and aft sections) + base drag;
 - `drag.friction` is `None`;
 - the base drag is a correlation, `0.12 + 0.13 M^2` for `M < 1` and `0.25 / M` for `M >= 1`
-  (OpenRocket technical documentation, eq. 3.94, after Fleeman), scaled by the base-to-nose
+  (Niskanen 2009, eq. 3.94, after Fleeman), scaled by the base-to-nose
   area ratio; `drag.base_modelled` is `true`. The inviscid wake has no viscous mixing layer, so
   its own base pressure is not physical;
 - the default wake treatment is a sting: the body's last tube continues to the outflow, no base.

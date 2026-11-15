@@ -1,10 +1,10 @@
 # Fins
 
-Fin drag is an empirical add-on, not part of the flow solution. The method is the one of the
-OpenRocket technical documentation (S. Niskanen, *OpenRocket technical documentation*, 2013,
+Fin drag is an empirical add-on, not part of the flow solution. The method is that of
+S. Niskanen, *Development of an Open Source model rocket simulation software* (M.Sc. thesis, 2009,
 eqs. 3.78-3.85, 3.89-3.94, B.1-B.2), plus the Ackeret wave drag of a double-wedge section above
 Mach 1. The fins are not in the grid, so the body's pressure and base drag are those of the body
-alone. **Fin-body interference drag is neglected**, as in OpenRocket.
+alone. **Fin-body interference drag is neglected**.
 
 ## FinSpec
 
@@ -163,7 +163,7 @@ LE_round = 1.214 - 0.502/M^2 + 0.1095/M^4       for M >= 1
 ```
 
 `CD_base` is the base-drag correlation `0.12 + 0.13 M^2` for `M < 1` and `0.25 / M` for `M >= 1`
-(OpenRocket eq. 3.94). Per profile, the leading-edge term `LE_perp` (on the plane normal to the
+(Niskanen 2009 eq. 3.94). Per profile, the leading-edge term `LE_perp` (on the plane normal to the
 leading edge) and the trailing-edge term `TE`:
 
 | Profile | `LE_perp` | `TE` |

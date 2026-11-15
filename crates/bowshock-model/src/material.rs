@@ -1,8 +1,8 @@
 //! Materials and surface finishes.
 //!
-//! The densities follow OpenRocket's default material database (Niskanen, *OpenRocket technical documentation*, 2013, and the
-//! stock `materials` data file): bulk materials in kg/m^3, surface materials (fabric, film) in kg/m^2 and lines (cord,
-//! shroud line) in kg/m. Finish roughness is OpenRocket's `Finish` table.
+//! The densities are typical handbook values for the common model-rocketry materials: bulk materials in kg/m^3, surface
+//! materials (fabric, film) in kg/m^2 and lines (cord, shroud line) in kg/m. Finish roughness heights are those tabulated in
+//! Niskanen 2009, table 3.2 (after Hoerner, *Fluid-Dynamic Drag*, p. 5-3).
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -197,7 +197,7 @@ impl<'de> Deserialize<'de> for MaterialId {
     }
 }
 
-/// Surface finish of a part's outside, which sets its skin-friction roughness (OpenRocket's table).
+/// Surface finish of a part's outside, which sets its skin-friction roughness (Niskanen 2009, table 3.2).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Finish {
     /// 500 µm.
@@ -245,7 +245,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn database_matches_openrocket_defaults() {
+    fn database_matches_reference_densities() {
         let d = |id: MaterialId| id.density();
         assert_eq!(d(MaterialId::CARDBOARD), 680.0);
         assert_eq!(d(MaterialId::FIBERGLASS), 1850.0);

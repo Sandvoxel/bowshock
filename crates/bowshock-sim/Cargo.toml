@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "OpenRocket-style rocket aerodynamics and flight simulation (SI units)"
+description = "Barrowman rocket aerodynamics and 3-DOF flight simulation (SI units)"
 
 [dependencies]
 bowshock-model = { path = "../bowshock-model" }

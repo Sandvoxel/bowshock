@@ -696,7 +696,7 @@ mod tests {
         }
         // Centred: 136.7 from the fore face puts the middle of the fin at the middle of the tube.
         assert!(Anchor::Middle.shown((length - extent) / 2.0, extent, length).abs() < 1e-12);
-        // Positive is aft (OpenRocket): moving the part aft raises every anchor's value.
+        // Positive is aft (the .ork convention): moving the part aft raises every anchor's value.
         assert!(Anchor::Bottom.shown(offset + 0.01, extent, length) > 0.0);
         assert_eq!(Anchor::Bottom.label("Booster"), "Bottom of Booster");
     }

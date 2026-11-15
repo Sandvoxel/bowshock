@@ -39,7 +39,7 @@ fn main() -> Result<(), bowshock_core::Error> {
 
 `crates/bowshock` is the Bowshock rocket builder (iced): build a rocket from a parts bin with KSP-style drag and drop,
 edit every dimension with handles or the inspector, and fly it in **Simulate** or sweep it in **Analyze**. Its physics are
-the OpenRocket-style models in `bowshock-sim` (Barrowman CP with body lift, OpenRocket's drag build-up, 3-DOF RK4 flight),
+the engineering models in `bowshock-sim` (Barrowman CP with body lift, component drag build-up, 3-DOF RK4 flight),
 fed by the rocket document in `bowshock-model` and the thrust curves in `bowshock-motors`. The UI follows the design kit in
 `crates/bowshock/design/` (start at its `README.md`); module layout is in `crates/bowshock/src/ARCHITECTURE.md`.
 
@@ -53,7 +53,7 @@ cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/shell.drive 
 |---|---|
 | `bowshock` | the desktop app |
 | `bowshock-model` | the rocket document: parts, materials, mass/CG, configurations, stages, `.bowshock` JSON |
-| `bowshock-sim` | OpenRocket-style aerodynamics, flight simulation and analyses; `from_model` maps a document onto it |
+| `bowshock-sim` | Barrowman aerodynamics, flight simulation and analyses; `from_model` maps a document onto it |
 | `bowshock-motors` | RASP `.eng` parser and bundled ThrustCurve.org motors |
 | `bowshock-core`, `bowshock-cfd`, `bowshock-reference` | CFD drag library (not yet wired into the app) |
 

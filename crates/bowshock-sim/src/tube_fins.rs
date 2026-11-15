@@ -3,13 +3,13 @@
 //!
 //! Each tube is computed alone and the results are multiplied by the tube count; the interference between tubes and with
 //! the body is not modelled except for the interstice area below. Coefficients are on the rocket's reference area (Niskanen
-//! 2013, *OpenRocket technical documentation*, section 3.1.1).
+//! 2009, *Development of an Open Source model rocket simulation software*, section 3.1.1).
 //!
 //! * **Normal force.** The tube is a ring airfoil: Ribner (1947), "The ring airfoil in nonaxial flow", J. Aeronautical
 //!   Sciences 14(9), eq. (5), with the aspect ratio `AR = 2 r_in / L` and `AR' = 2 AR / pi`:
 //!   `CN_alpha A_ref = 2 AR'/(1 + AR') pi^2 r_in L` per tube. There is no Mach dependence and no body-fin interference
 //!   factor. The angle of attack is limited to a 20 degree stall angle (`CN = CN_alpha min(alpha, 20 deg)`).
-//! * **Centre of pressure.** The fin CP rule of Niskanen (2013, section 3.2.2) applied to the tube's chord `L` from its fore
+//! * **Centre of pressure.** The fin CP rule of Niskanen (2009, section 3.2.2) applied to the tube's chord `L` from its fore
 //!   end ([`fin_cp_fraction`]): the quarter chord up to Mach 0.5; above Mach 2 Fleeman's empirical
 //!   `(x - 0.67)/(2x - 1)` of `x = AR beta` (eq. 3.35; Fleeman 2006, *Tactical Missile Design*, 2nd ed., p. 33); between
 //!   them the fifth-order polynomial of eq. 3.36 that meets the Mach 2 value and slope. The empirical formula is a fit for
@@ -29,10 +29,10 @@
 //!   `Re = V D / nu` (Swamee & Jain 1976, "Explicit equations for pipe-flow problems", J. Hydraulics Division ASCE
 //!   102(HY5)), with no compressibility factor. The annular front face carries `0.7 (C_stag + C_base)` and the interstice
 //!   between the tube and the body (the area the tube, its neighbour and the body enclose) `(C_stag + C_base)`, with the
-//!   blunt-cylinder stagnation coefficient `C_stag = 0.85 q_stag/q` (Niskanen 2013, eqs. B.1-B.2, after Hoerner 1965,
+//!   blunt-cylinder stagnation coefficient `C_stag = 0.85 q_stag/q` (Niskanen 2009, eqs. B.1-B.2, after Hoerner 1965,
 //!   *Fluid-Dynamic Drag*, pp. 15-2, 16-3) and the base coefficient of eq. 3.94 (Fleeman p. 23).
 //!   - *Annulus.* The tube wall is a square-edged fin bent into a ring, and the published square-edge fin rule (Niskanen
-//!     2013 eqs. 3.90, 3.92-3.93) charges `C_stag + C_base` on its edge area; that is the upper bound. The wall (0.3-1 mm) is
+//!     2009 eqs. 3.90, 3.92-3.93) charges `C_stag + C_base` on its edge area; that is the upper bound. The wall (0.3-1 mm) is
 //!     much thinner than the boundary layer at its trailing edge (about 2 mm on a 76 mm tube at 100 m/s), so the trailing
 //!     edge does not see a full body-base suction, and the leading edge stagnates only the air that does not turn into the
 //!     bore. The factor 0.7 is our estimate of that relief; it is not a published value. With 1.0 instead, the *Tube fin
@@ -41,8 +41,8 @@
 //!     the two walls' boundary layers, so it is treated as dead air: a blunt face in front (`C_stag`) and a base behind
 //!     (`C_base`), the same blunt-body estimate as for a square edge.
 //!
-//!   The Mach number enters only through `Re`, `C_stag` and `C_base`, so the drag stays bounded through Mach 1. Results are
-//!   checked against whole-rocket reference runs in `docs/openrocket-comparison.md` (tube fin section).
+//!   The Mach number enters only through `Re`, `C_stag` and `C_base`, so the drag stays bounded through Mach 1. The whole-rocket
+//!   results are compared with independent reference runs in the comparison report under `docs/` (tube fin section).
 //! * **Base drag.** None: an open tube has no base.
 //!
 //! Interstice, tangent to the body: the tube axis is `D = R + r` from the body axis (`R` the body radius, `r` the tube's outer
@@ -187,7 +187,7 @@ mod tests {
         assert!((cn(0.5) - 2.058_789 * FIN_STALL).abs() < 1e-5);
     }
 
-    /// The CP is the quarter chord at low Mach (Niskanen 2013, section 3.2.2): 1.0 + 0.25 (0.15) = 1.0375 m.
+    /// The CP is the quarter chord at low Mach (Niskanen 2009, section 3.2.2): 1.0 + 0.25 (0.15) = 1.0375 m.
     #[test]
     fn centre_of_pressure_is_the_quarter_chord_at_low_mach() {
         let calc = TubeFinCalc::new(&set());
@@ -201,7 +201,7 @@ mod tests {
         (TubeFinCalc::new(t).cp(mach) - t.station) / t.length
     }
 
-    /// Hand values of the CP rule (Niskanen 2013 eqs. 3.35-3.36 with Bowshock's low-aspect-ratio bridge). A short tube,
+    /// Hand values of the CP rule (Niskanen 2009 eqs. 3.35-3.36 with Bowshock's low-aspect-ratio bridge). A short tube,
     /// `AR = 2 (0.0117)/0.03 = 0.78`: `x2 = AR sqrt(3) = 1.351000`, past the formula's `AR beta >= 1` bound, so at Mach 2 the CP
     /// is `(x2 - 0.67)/(2 x2 - 1) = 0.400117`. Mach 1.2 is `t = 0.7/1.5` along the quintic with `delta = 0.150117` and the
     /// endpoint slope `x2 0.34/(2 x2 - 1)^2 = 0.158568` (ratio 1.056, under 5/3): `0.25 + (10 delta - 6 s) t^2 +

@@ -14,8 +14,8 @@
 //!   (`A = (c_r + c_t) span / 2`; a polygon fuller than a triangle on its root gets its root chord shrunk instead, tip chord
 //!   0) and its sweep from the polygon's chordwise centroid. So area, span and centroid carry over exactly and the Barrowman
 //!   fin lift and CP stay close. Launch lugs and rail buttons become one [`Protuberance`] per copy.
-//! * **Pods.** A pod set ([`RadialKind::Pod`], the strap-ons and radial tubes of a multi-body rocket) flies the way OpenRocket's
-//!   `PodSet` does (Niskanen 2013, section 3: the normal force and drag of the components of a pod are added to the rocket's,
+//! * **Pods.** A pod set ([`RadialKind::Pod`], the strap-ons and radial tubes of a multi-body rocket) flies as parallel bodies
+//!   (Barrowman 1967; Niskanen 2009, section 3.2: the normal force and drag of the components of a pod are added to the rocket's,
 //!   all on the rocket's reference area): **each copy is a body of its own.** The aerodynamics of this crate are built around
 //!   one axisymmetric stack, so the segments of every pod copy are put ahead of the core's in [`Vehicle::body`], each copy at
 //!   the pod's station (`PodFrame::station`) plus the segment's local station and closed by a zero-size tube (the "separator")
@@ -23,7 +23,8 @@
 //!   - Barrowman (1967) normal force and CP of the pod's nose and transitions, `CN_alpha = 2 (A_aft - A_fore) / A_ref` at the
 //!     segment's own CP station, summed over the copies; a pod tube has none (its cross-flow body lift is the sim's usual
 //!     `1.1 A_plan sin^2 alpha` term);
-//!   - skin friction on the pod's wetted area (the rocket's flat-plate `C_f`, as OpenRocket applies one to every component),
+//!   - skin friction on the pod's wetted area (the rocket's flat-plate `C_f`, one `C_f` for the whole rocket length applied to every
+//!     component's wetted area, Niskanen 2009 section 3.4.2),
 //!     nose pressure drag from the same tables as the core's nose, and the base drag of its own aft face (the core's base and
 //!     motor-exhaust handling stay with the core's last segment, so nothing is counted twice);
 //!   - the fins of pod parts as [`FinSet`]s with `body_radius` the radius of the pod part under them, at the pod's station plus
@@ -37,10 +38,10 @@
 //!
 //!   The reference diameter stays the core's. Not modelled: the interference between a pod and the core or the other pods
 //!   (wake, junction shock, the fin-body factor of the core fins) and the pod's off-axis moment arm; each pod's lift acts at its
-//!   own CP, as in OpenRocket. A pod flies with the stage of the core part it stands on, so it leaves with that stage and in
+//!   own CP. A pod flies with the stage of the core part it stands on, so it leaves with that stage and in
 //!   [`Phase::UpperFrom`] the pods of lower stages are dropped; the flight's separation cuts the body list by station, so a pod
 //!   that straddles a stage joint is cut there. A parachute in a pod is one per copy. A pod's **motor mount** is a strap-on
-//!   booster (OpenRocket flies strap-ons as a parallel stage, or a pod set with its own motor; here they share the ignition of
+//!   booster (here a strap-on shares the ignition of
 //!   the stage they stand on): it holds one motor per pod copy, and those motors are lit with, and fly with, the stage of the
 //!   core part the pod stands on ([`Rocket::stage_of`]), on the stage's own ignition [`Timing`]. The sim carries one motor
 //!   per stage, so the stage's own motor and the pod motors fly as one *equivalent* motor: the thrust curve is the pointwise
@@ -67,7 +68,7 @@
 //! * **Phases.** [`Phase::UpperFrom`] flies the upper stack alone: lower stages, and the geometry aft of their joint, are
 //!   dropped (with [`Vehicle::truncated`]), the first remaining motor ignites at launch, and recovery devices are re-indexed.
 //!
-//! References: Barrowman (1967); Niskanen, *OpenRocket technical documentation* (2013), sections 3.1 and 3.2.
+//! References: Barrowman (1967); Niskanen (2009) thesis, sections 3.2 and 3.4.
 
 use std::f64::consts::PI;
 use std::fmt;
@@ -848,7 +849,7 @@ pub fn warnings(rocket: &Rocket, motors: &MotorDb, balance: &Balance) -> Vec<War
             Warning::new(Level::Ok, format!("Stable · {m:.2} cal (min {min:.1})"), None)
         });
     }
-    // Barrowman (and OpenRocket) give a tube no normal force of its own, so the blunt front face's lift is missing and the CP
+    // Barrowman (1967) gives a tube no normal force of its own, so the blunt front face's lift is missing and the CP
     // comes out further aft than it is: the margin is optimistic.
     if !matches!(rocket.parts().first().map(|p| &p.kind), Some(model::PartKind::NoseCone { .. })) {
         out.push(Warning::new(Level::Warn, "No nose cone · blunt front, margin optimistic", None));

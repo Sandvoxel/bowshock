@@ -27,8 +27,8 @@ Read these before trusting a number:
 - **Fully turbulent, smooth walls.** Viscous analyses solve the Reynolds-averaged Navier-Stokes
   equations with the k-omega SST model; there is no transition model and no wall roughness.
 - **Mach 0.1 to 3.** Other values are an `InvalidInput` error.
-- **Fins are an empirical model.** Fin drag follows the OpenRocket technical documentation
-  (Niskanen, 2013). Fin-body interference drag is neglected, and the fins do not enter the flow
+- **Fins are an empirical model.** Fin drag follows Niskanen (2009, M.Sc. thesis).
+  Fin-body interference drag is neglected, and the fins do not enter the flow
   solution. On the Arcas wind-tunnel model the fin drag increment is under-predicted by 16-65 %
   (Mach 0.6-3.0); the fins-on total is 16-25 % low at Mach 0.9-1.8 (see
   [Validation](validation.md#arcas-sounding-rocket-d1)).

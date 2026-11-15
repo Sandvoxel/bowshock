@@ -102,7 +102,7 @@ pub struct FlutterResult {
     pub margin: f64,
 }
 
-/// Fin flutter velocity from NACA TN 4197 (Martin 1958), as used by OpenRocket:
+/// Fin flutter velocity from NACA TN 4197 (Martin 1958):
 ///
 /// `V_f = a sqrt( G / ( 1.337 AR^3 P (lambda + 1) / (2 (AR + 2) (t/c)^3) ) )`
 ///

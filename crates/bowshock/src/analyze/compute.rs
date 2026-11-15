@@ -5,15 +5,15 @@
 //!
 //! * **Barrowman** is the linear theory of Barrowman (1967): normal force slope and centre of pressure at zero angle of
 //!   attack, whatever angle is set (the angle field is ignored; drag is the zero-angle build-up).
-//! * **Extended** is Barrowman plus the body lift and induced drag `bowshock-sim` adds at an angle of attack (the
-//!   OpenRocket / RASAero style): the margin, CP, `CNα` and drag follow the angle the Conditions set.
+//! * **Extended** is Barrowman plus the body lift and induced drag `bowshock-sim` adds at an angle of attack: the
+//!   margin, CP, `CNα` and drag follow the angle the Conditions set.
 //! * **CFD table** is the zero-lift drag solved by `bowshock-core` (see [`super::cfd`]) on a table of Mach numbers, with the
 //!   margin, CP and `CNα` of Extended and Extended's change of drag with the angle of attack added to the solved drag. The
 //!   solver is axisymmetric at zero angle, so it gives drag only.
 //!
 //! # References
 //!
-//! Barrowman (1967); Niskanen, *OpenRocket technical documentation* (2013); NACA TN 4197 (Martin, 1958) for the fin flutter
+//! Barrowman (1967); Niskanen, *Development of an Open Source model rocket simulation software* (2009); NACA TN 4197 (Martin, 1958) for the fin flutter
 //! velocity.
 
 use std::sync::Arc;
@@ -101,7 +101,7 @@ impl Method {
     pub fn tip(self) -> &'static str {
         match self {
             Method::Barrowman => "Barrowman (1967): linear normal force and CP at zero angle of attack; the angle of attack is ignored",
-            Method::Extended => "Barrowman plus body lift and induced drag at the set angle of attack (OpenRocket / RASAero style)",
+            Method::Extended => "Barrowman plus body lift and induced drag at the set angle of attack",
             Method::CfdTable => {
                 "Zero-lift drag solved by CFD (axisymmetric RANS on the GPU) on a Mach table, with the fins' empirical drag; margin, CP and CNα from Extended, which also adds the drag change with angle"
             }
@@ -828,7 +828,7 @@ mod tests {
         let balance = from_model::balance(&rocket, &MotorDb::bundled(), Phase::Full, BALANCE_MACH, 0.0, true).unwrap();
         let at = mach_at(points, BALANCE_MACH).unwrap();
         assert!((at.margin_cal - balance.margin_cal).abs() < 0.05, "{} vs {}", at.margin_cal, balance.margin_cal);
-        // Drag rises through the transonic range (Niskanen 2013, section 3.4) and the parts sum to the total.
+        // Drag rises through the transonic range (Niskanen 2009, section 3.4) and the parts sum to the total.
         let peak = points.iter().max_by(|a, b| a.drag.total.total_cmp(&b.drag.total)).unwrap();
         assert!(peak.mach > 0.8 && peak.mach < 1.6, "peak Cd at Mach {}", peak.mach);
         assert!(peak.drag.total > 1.3 * points[0].drag.total);

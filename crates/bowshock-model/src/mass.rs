@@ -1,6 +1,6 @@
 //! Mass, centre of gravity and moments of inertia of the parts and of the dry rocket (no motor).
 //!
-//! Method (after OpenRocket, Niskanen 2013, section 3.2 "Mass and centre of gravity", and the standard solid-body formulas):
+//! Method (standard solid-body mass, centre-of-gravity and inertia formulas; Niskanen 2009, section 4.2.3 "Mass and moment of inertia calculations"):
 //! shells of revolution (body tubes, transitions, nose cones) are integrated as a stack of thin annular discs whose outer radius
 //! follows the profile and whose wall is the part's thickness; tubes, rings, bulkheads and couplers are annular cylinders; fins
 //! are planform area x thickness x section factor x density; a parachute is canopy area x surface density plus lines x line
@@ -187,7 +187,7 @@ impl Rocket {
                 // diameter it lies on plus its own chord-wise spread, treated as a thin rod.
                 let fin =
                     MassProps { mass: n * mass, cg: cz, i_long: n * mass * (radius * radius / 2.0 + chord * chord / 12.0), i_rot: n * mass * radius * radius };
-                // The fillet: two concave strips of cross-section r^2 (1 - pi/4) along the root (OpenRocket's fillet), each a
+                // The fillet: two concave strips of cross-section r^2 (1 - pi/4) along the root, each a
                 // point-like mass at the root with the fin's centroid station and the surface radius.
                 if r.fillet_radius > 0.0 {
                     let m = n * 2.0 * r.fillet_radius * r.fillet_radius * (1.0 - PI / 4.0) * chord * bulk(r.fillet_material);

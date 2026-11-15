@@ -1,7 +1,7 @@
-//! Rocket aerodynamics and flight simulation in the style of OpenRocket / RASAero.
+//! Rocket aerodynamics (Barrowman build-up) and 3-DOF flight simulation.
 //!
 //! * [`atmosphere`]: ISA 1976 with site altitude and ground-temperature offset.
-//! * [`aero`]: Barrowman centre of pressure / normal force and an OpenRocket-style drag build-up.
+//! * [`aero`]: Barrowman centre of pressure / normal force and a component drag build-up (Niskanen 2009, section 3.4).
 //! * [`flight`]: 3-DOF point-mass flight simulation (rail, thrust, staging, recovery).
 //! * [`analysis`]: sweeps vs Mach and angle of attack, fin flutter, Monte Carlo dispersion.
 //! * [`tube_fins`]: tube fin aerodynamics (open tubes on the outside of the body).
@@ -12,8 +12,8 @@
 //! `bowshock-motors` database into [`Vehicle`] and [`SimInput`].
 //!
 //! References: Barrowman, J. S. (1967) "The Practical Calculation of the Aerodynamic
-//! Characteristics of Slender Finned Vehicles"; Niskanen, S. (2013) "OpenRocket technical
-//! documentation"; NACA TN 4197 (Martin, 1958) for fin flutter.
+//! Characteristics of Slender Finned Vehicles"; Niskanen, S. (2009) "Development of an Open Source
+//! model rocket simulation software", Helsinki University of Technology; NACA TN 4197 (Martin, 1958) for fin flutter.
 
 pub mod aero;
 pub mod analysis;

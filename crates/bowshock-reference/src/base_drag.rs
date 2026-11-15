@@ -2,7 +2,7 @@
 
 /// Base drag coefficient of a blunt base in free flight, referenced to the base area: 0.12 + 0.13 M^2 for M < 1 and
 /// 0.25 / M for M >= 1 (S. Niskanen, "Development of an Open Source model rocket simulation software", M.Sc. thesis,
-/// Helsinki University of Technology, 2009, OpenRocket technical documentation, base drag, eq. 3.94).
+/// Helsinki University of Technology, 2009, base drag, eq. 3.94, after Fleeman, *Tactical Missile Design*).
 pub fn base_drag_coefficient(mach: f64) -> f64 {
     if mach < 1.0 {
         0.12 + 0.13 * mach * mach

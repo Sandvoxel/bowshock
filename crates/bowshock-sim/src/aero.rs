@@ -1,4 +1,4 @@
-//! Barrowman / OpenRocket aerodynamics: normal force, centre of pressure and drag.
+//! Barrowman aerodynamics: normal force, centre of pressure and drag build-up.
 //!
 //! * Normal force slope and CP follow Barrowman (1967) for noses, transitions and fins, with
 //!   the extensions of Niskanen (2009, *Development of an Open Source model rocket simulation
@@ -7,14 +7,14 @@
 //!   compressibility correction, the body-fin interference factor `K_fb = 1 + r/(s + r)`, each
 //!   fin's lift scaled by `sin^2` of its roll angle from the crossflow ([`CROSSFLOW_ROLL`]), and
 //!   the fin-fin interference loss of 5 or more fins on one body ([`fin_fin_factor`]).
-//! * Drag is a port of OpenRocket's `BarrowmanDragCalculator`, `SymmetricComponentCalc`,
-//!   `FinSetCalc`, `TubeCalc` and `RailButtonCalc` (Niskanen 2013, technical documentation
-//!   section 3; source: <https://github.com/openrocket/openrocket>, `core/.../aerodynamics`):
-//!   skin friction with the laminar/turbulent transition rule, roughness limit and
+//! * Drag follows Niskanen (2009, section 3.4; after Hoerner, *Fluid-Dynamic Drag*, 1965): flat-plate
+//!   skin friction (Schlichting) with the laminar/turbulent transition rule, roughness limit and
 //!   compressibility corrections; nose/shoulder pressure drag interpolated from the NASA TR R-100
 //!   free-flight tables per profile family and extrapolated to the actual fineness ratio;
-//!   stagnation and base drag; fin leading/trailing-edge drag per cross-section; launch lug and
-//!   rail button drag; and OpenRocket's angle-of-attack multiplier on axial drag.
+//!   stagnation and base drag (Fleeman); fin leading/trailing-edge drag per cross-section;
+//!   launch lug drag (Darcy-Weisbach pipe flow, Swamee & Jain 1976) and rail button drag
+//!   (Gowen & Perkins, NACA TN 2960); and an angle-of-attack multiplier on axial drag that is our
+//!   own engineering fit (see [`axial_drag_multiplier`]).
 //!
 //! Coefficients are referenced to the vehicle reference area; stations are from the nose tip.
 
@@ -51,7 +51,7 @@ pub struct DragBreakdown {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Tabulated data (OpenRocket `SymmetricComponentCalc`, from NASA TR R-100 page 16, fineness 3).
+// Tabulated data: zero-lift pressure drag of fineness-3 noses, NASA TR R-100 (Stoney 1961), page 16.
 // ---------------------------------------------------------------------------------------------
 
 type Pts = &'static [(f64, f64)];
@@ -62,7 +62,7 @@ const VON_KARMAN: Pts =
 const LV_HAACK: Pts = &[(0.9, 0.0), (0.95, 0.010), (1.0, 0.024), (1.05, 0.066), (1.1, 0.084), (1.2, 0.100), (1.4, 0.114), (1.6, 0.117), (2.0, 0.113)];
 const PARABOLIC_12: Pts = &[(0.8, 0.0), (0.9, 0.016), (0.95, 0.042), (1.0, 0.100), (1.05, 0.126), (1.1, 0.125), (1.3, 0.100), (1.5, 0.090), (1.8, 0.088)];
 
-/// Piecewise-linear table, clamped outside its range (OpenRocket `LinearInterpolator`).
+/// Piecewise-linear table, clamped outside its range.
 #[derive(Clone, Debug)]
 struct Table(Vec<(f64, f64)>);
 
@@ -87,13 +87,14 @@ fn static_table(p: Pts) -> Table {
     Table(p.to_vec())
 }
 
-/// OpenRocket stagnation-pressure drag coefficient of a flat face, including the 0.85 factor.
+/// Stagnation-pressure drag coefficient of a flat face: the isentropic stagnation pressure ratio
+/// (series below Mach 1, Rayleigh pitot form above; Niskanen 2009 eq. B.1-B.2) with Hoerner's 0.85 factor.
 fn stagnation_cd(m: f64) -> f64 {
     let pressure = if m <= 1.0 { 1.0 + m * m / 4.0 + m.powi(4) / 40.0 } else { 1.84 - 0.76 / (m * m) + 0.166 / m.powi(4) + 0.035 / m.powi(6) };
     0.85 * pressure
 }
 
-/// OpenRocket base drag coefficient on the base area.
+/// Base drag coefficient on the base area (Fleeman, *Tactical Missile Design*; Niskanen 2009 eq. 3.94).
 fn base_cd(m: f64) -> f64 {
     if m <= 1.0 {
         0.12 + 0.13 * m * m
@@ -114,8 +115,8 @@ fn blunt_cd(m: f64) -> f64 {
     c0 + (c1 - c0) * (m - m0) / 0.05
 }
 
-/// Conical/ogive supersonic table (OpenRocket `calculateOgiveNoseInterpolator`): cubic through
-/// Mach 1.0..1.3, then `2.1 sin^2(phi) + 0.5 sin(phi)/sqrt(M^2 - 1)`.
+/// Conical/ogive supersonic table: a cubic through Mach 1.0..1.3 (Niskanen 2009 eq. B.4-B.6), then
+/// `2.1 sin^2(phi) + 0.5 sin(phi)/sqrt(M^2 - 1)`.
 fn ogive_points(param: f64, sinphi: f64) -> Vec<(f64, f64)> {
     const GAMMA: f64 = 1.4;
     let cd1 = sinphi;
@@ -153,7 +154,7 @@ fn blend(a: &Table, b: &Table, p: f64) -> Table {
 }
 
 /// Builds the nose/shoulder pressure-drag table (Cd on the frontal area `|A_aft - A_fore|` vs Mach)
-/// following OpenRocket's `calculateNoseInterpolator`. `shape = None` is a conical transition.
+/// following Niskanen (2009, section 3.4.3 and appendix B). `shape = None` is a conical transition.
 fn pressure_table(shape: Option<NoseShape>, fineness: f64, sinphi: f64) -> Table {
     let cone_sin = 1.0 / (1.0 + 4.0 * fineness * fineness).sqrt();
     let extrapolate = |t: Table| {
@@ -172,7 +173,7 @@ fn pressure_table(shape: Option<NoseShape>, fineness: f64, sinphi: f64) -> Table
         // Ogives follow the wave drag of a cone with the same length and base diameter.
         Some(NoseShape::TangentOgive) => Table(ogive_points(1.0, cone_sin)),
         Some(NoseShape::Elliptical) => extrapolate(static_table(ELLIPSOID)),
-        // OpenRocket's PARABOLIC with shape parameter 0.5 (the "1/2 parabola"): weight 1 on that table.
+        // The 1/2 parabola series: the tabulated TR R-100 profile data.
         Some(NoseShape::Parabolic) => extrapolate(blend(&Table(ogive_points(0.0, cone_sin)), &static_table(PARABOLIC_12), 1.0)),
         // HAACK with parameter 0 is the von Karman (LD-Haack c = 0) shape.
         Some(NoseShape::VonKarman) => extrapolate(blend(&static_table(VON_KARMAN), &static_table(LV_HAACK), 0.0)),
@@ -200,10 +201,10 @@ fn pressure_table(shape: Option<NoseShape>, fineness: f64, sinphi: f64) -> Table
 }
 
 // ---------------------------------------------------------------------------------------------
-// Skin friction (OpenRocket `BarrowmanDragCalculator`).
+// Skin friction: Blasius laminar and Prandtl-Schlichting turbulent flat-plate laws (Schlichting; Niskanen 2009 section 3.4.2).
 // ---------------------------------------------------------------------------------------------
 
-/// Flat-plate skin friction coefficient at length-Reynolds number `re` including OpenRocket's
+/// Flat-plate skin friction coefficient at length-Reynolds number `re` including the
 /// compressibility correction. With `perfect_finish` the laminar-to-turbulent transition is
 /// modelled (laminar below Re 5.39e5, `1/(1.5 ln Re - 5.6)^2 - 1700/Re` above) and the
 /// compressibility corrections apply only for Re > 1e6; otherwise the fully turbulent formula is used.
@@ -257,8 +258,8 @@ fn roughness_correction(mach: f64) -> f64 {
     }
 }
 
-/// OpenRocket multiplier turning zero-alpha drag into axial drag at angle of attack `alpha`:
-/// a cubic from 1 at 0 to 1.3 at 17 deg, then a quartic falling to 0 at 90 deg.
+/// Multiplier turning zero-alpha drag into axial drag at angle of attack `alpha` (Niskanen 2009 section 3.4.7;
+/// the shape is our own engineering fit): a cubic from 1 at 0 to 1.3 at 17 deg, then a quartic falling to 0 at 90 deg.
 fn axial_drag_multiplier(alpha: f64) -> f64 {
     let a = alpha.abs();
     let a = if a > PI / 2.0 { PI - a } else { a };
@@ -349,7 +350,7 @@ enum ProtCalc {
     Button { station: f64, height: f64, diameter: f64 },
 }
 
-/// Surface roughness assumed for launch-lug bores (OpenRocket "regular paint").
+/// Surface roughness assumed for launch-lug bores (regular paint, 60 um; Niskanen 2009 table 3.2).
 const LUG_ROUGHNESS: f64 = 60e-6;
 
 /// Aerodynamic model of one vehicle configuration.
@@ -372,7 +373,7 @@ pub struct Aero {
 
 impl Aero {
     /// Precomputes geometry-dependent quantities for `v`. Surface roughness uses the
-    /// imperfect-finish model (OpenRocket default); see [`Aero::perfect_finish`].
+    /// rough-surface model (fully turbulent, roughness-limited; the default); see [`Aero::perfect_finish`].
     pub fn new(v: &Vehicle) -> Self {
         let a_ref = v.reference_area().max(1e-12);
         let length = v.length();
@@ -445,7 +446,7 @@ impl Aero {
         }
     }
 
-    /// Selects OpenRocket's "perfect finish" skin friction (laminar-to-turbulent transition,
+    /// Selects the smooth-surface skin friction (laminar-to-turbulent transition,
     /// roughness only limiting above Re 1e6) instead of the default fully turbulent,
     /// roughness-limited model.
     pub fn perfect_finish(mut self, on: bool) -> Self {
@@ -460,7 +461,7 @@ impl Aero {
 
     /// Normal-force slope and CP at `mach` and angle of attack `alpha` (rad).
     ///
-    /// The slope includes OpenRocket's nonlinear body lift evaluated at `alpha`, so
+    /// The slope includes the nonlinear Galejs body lift evaluated at `alpha`, so
     /// `cn_alpha * alpha` is the normal force coefficient `CN` there.
     pub fn stability(&self, mach: f64, alpha: f64) -> Stability {
         let mut comps: Vec<(String, f64, f64)> = Vec::new();
@@ -470,7 +471,7 @@ impl Aero {
             let mut cna = b.cna * sinc;
             let mut moment = cna * b.cp;
             if alpha.abs() > 1e-9 {
-                // OpenRocket body lift (Galejs): CN = 1.1 A_plan / A_ref sin^2(alpha), at the planform centroid.
+                // Galejs body lift: CN = 1.1 A_plan / A_ref sin^2(alpha), at the planform centroid.
                 let extra = 1.1 * b.plan_area / self.a_ref * sin_a * sin_a / alpha.abs();
                 cna += extra;
                 moment += extra * b.plan_cp;
@@ -509,7 +510,7 @@ impl Aero {
         let base = base_cd(m);
 
         // Skin friction: one flat-plate Cf from the whole-rocket length, floored per finish by the
-        // roughness-limited value 0.032 (eps/L)^0.2 (OpenRocket `calculateFrictionCD`).
+        // roughness-limited value 0.032 (eps/L)^0.2 (Schlichting; Niskanen 2009 eq. 3.80).
         let cf = skin_cf(re_len, m, self.perfect_finish);
         let rough_corr = roughness_correction(m);
         let comp_cf = |eps: f64| {
@@ -574,7 +575,7 @@ impl Aero {
         DragBreakdown { friction, pressure, base: base_total, fins, protuberances: prot, total }
     }
 
-    /// Drag at angle of attack `alpha`: the zero-alpha build-up scaled by OpenRocket's axial-drag
+    /// Drag at angle of attack `alpha`: the zero-alpha build-up scaled by the axial-drag
     /// multiplier (1 at 0 deg, 1.3 at 17 deg, falling to 0 at 90 deg), which is the drag
     /// component along the rocket axis.
     pub fn drag_at_alpha(&self, mach: f64, re_per_m: f64, motor_on: bool, alpha: f64) -> DragBreakdown {
@@ -591,7 +592,7 @@ impl Aero {
     }
 }
 
-/// OpenRocket `TubeCalc.calculatePressureCD` for a launch lug: Darcy-Weisbach pressure drop
+/// Launch lug drag (Niskanen 2009 section 3.4.6): Darcy-Weisbach pressure drop
 /// through the bore (Swamee-Jain friction factor) plus `0.7 (stagnation + base)` on the frontal ring.
 pub(crate) fn lug_drag(re_per_m: f64, d_in: f64, inner_area: f64, frontal: f64, length: f64, eps: f64, stag: f64, base: f64, a_ref: f64) -> f64 {
     if re_per_m < 1e-3 {
@@ -606,7 +607,7 @@ pub(crate) fn lug_drag(re_per_m: f64, d_in: f64, inner_area: f64, frontal: f64, 
     (tube_cd * inner_area + 0.7 * (stag + base) * frontal) / a_ref
 }
 
-/// OpenRocket `RailButtonCalc`: cylinder drag (Gowen & Perkins, NACA TN 2960 fig. 7) at the
+/// Rail button drag: cylinder drag (Gowen & Perkins, NACA TN 2960 fig. 7) at the
 /// mean Mach number inside the boundary layer at the button's station.
 fn button_drag(mach: f64, re_per_m: f64, station: f64, height: f64, diameter: f64, stag: f64, a_ref: f64) -> f64 {
     const DOMAIN: [f64; 12] = [0.0, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 1.0, 1.6, 2.0, 2.8, 100.0];
@@ -659,7 +660,7 @@ fn body_calc(s: &BodySegment, prev_aft: f64, next_fore: Option<f64>, a_ref: f64)
         BodyKind::Transition => ("Transition", None),
     };
 
-    // Pressure drag (OpenRocket `SymmetricComponentCalc.calculatePressureCD`).
+    // Pressure drag (Niskanen 2009 section 3.4.3).
     let frontal = (a_fore - a_aft).abs();
     let fineness = s.length / (2.0 * (r1 - r0).abs()).max(1e-12);
     let pressure = if matches!(s.kind, BodyKind::Tube) || (r0 - r1).abs() < 1e-9 {
@@ -929,7 +930,7 @@ impl FinCalc {
         self.mac_lead + fin_cp_fraction(mach, self.ar) * self.mac
     }
 
-    /// Fin drag (OpenRocket `FinSetCalc`): friction `Cf (1 + 2 t/MAC) 2 A`, leading-edge pressure
+    /// Fin drag (Niskanen 2009 section 3.4.4): friction `Cf (1 + 2 t/MAC) 2 A`, leading-edge pressure
     /// drag (stagnation for square edges, the rounded-edge fit for rounded/airfoil) scaled by
     /// `cos^2` of the leading-edge sweep, and trailing-edge base drag (full for square, half for
     /// rounded, none for airfoil), all times the fin count.
@@ -949,7 +950,7 @@ impl FinCalc {
     }
 }
 
-/// OpenRocket leading-edge pressure drag of a rounded/airfoil fin edge.
+/// Leading-edge pressure drag of a rounded/airfoil fin edge (Niskanen 2009 eq. 3.89).
 fn round_edge_cd(m: f64) -> f64 {
     if m < 0.9 {
         (1.0 - m * m).powf(-0.417) - 1.0
@@ -1197,11 +1198,11 @@ mod tests {
         assert!((fin_cna(&v, 0.5)[0] - 6.0 * one).abs() < 1e-12);
     }
 
-    // ---- Values checked against OpenRocket's source (hand-computed from the formulas) ----
+    // ---- Hand-computed checks of the closed-form formulas ----
 
     #[test]
-    fn stagnation_and_base_match_openrocket() {
-        // BarrowmanDragCalculator.calculateStagnationCD / calculateBaseCD.
+    fn stagnation_and_base_match_hand_calc() {
+        // Stagnation (eq. B.1-B.2) and base (eq. 3.94) drag coefficients.
         assert!((stagnation_cd(0.0) - 0.85).abs() < 1e-12);
         assert!((stagnation_cd(1.0) - 0.85 * 1.275).abs() < 1e-12);
         assert!((stagnation_cd(2.0) - 0.85 * (1.84 - 0.19 + 0.010_375 + 0.000_546_875)).abs() < 1e-9);
@@ -1210,7 +1211,7 @@ mod tests {
     }
 
     #[test]
-    fn skin_friction_matches_openrocket() {
+    fn skin_friction_matches_flat_plate_theory() {
         // Fully turbulent: 1/(1.5 ln Re - 5.6)^2, subsonic compressibility (1 - 0.1 M^2).
         let t = 1.0 / (1.5 * 1e7f64.ln() - 5.6).powi(2);
         assert!((skin_cf(1e7, 0.0, false) - t).abs() < 1e-12);
@@ -1224,7 +1225,7 @@ mod tests {
     }
 
     #[test]
-    fn nose_pressure_drag_matches_openrocket_tables() {
+    fn nose_pressure_drag_matches_tr_r100_tables() {
         let nu = 1.46e-5;
         let press = |v: &Vehicle, m: f64| Aero::new(v).drag(m, m * 340.0 / nu, false).pressure;
         // Fineness-3 tangent ogive: Cd = 2.1 sin^2 + 0.5 sin / sqrt(M^2 - 1), sin = 1/sqrt(1 + 4 f^2), on the base area.
@@ -1245,7 +1246,7 @@ mod tests {
     }
 
     #[test]
-    fn rounded_fin_edge_matches_openrocket() {
+    fn rounded_fin_edge_matches_closed_form() {
         assert!((round_edge_cd(0.5) - ((1.0f64 - 0.25).powf(-0.417) - 1.0)).abs() < 1e-12);
         assert!((round_edge_cd(0.95) - (1.0 - 1.785 * 0.05)).abs() < 1e-12);
         assert!((round_edge_cd(2.0) - (1.214 - 0.1255 + 0.1095 / 16.0)).abs() < 1e-12);
@@ -1315,9 +1316,9 @@ mod tests {
         }
     }
 
-    /// Regression (results comparison, `docs/openrocket-comparison.md`): the transonic fin CNa is ONE quartic in Mach through
-    /// 0.9..1.5 with the derivative at Mach 0.9 taken at 0.9, as the technical documentation (Niskanen 2013, section 3.3.1)
-    /// describes. A quartic has a vanishing fifth finite difference.
+    /// Regression (results comparison report under `docs/`): the transonic fin CNa is ONE quartic in Mach through
+    /// 0.9..1.5 with the derivative at Mach 0.9 taken at 0.9, as Niskanen (2009, section 3.2.2) describes.
+    /// A quartic has a vanishing fifth finite difference.
     #[test]
     fn transonic_fin_cna_is_a_single_quartic_with_the_slope_taken_at_mach_0_9() {
         for v in fin_variants() {

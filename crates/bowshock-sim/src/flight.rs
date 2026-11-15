@@ -1,5 +1,5 @@
-//! 3-DOF point-mass flight simulation (x east, y north, z up) in the style of OpenRocket's
-//! "simple" 3-DOF stepper, integrated with RK4.
+//! 3-DOF point-mass flight simulation (x east, y north, z up): translational equations of motion
+//! (Niskanen 2009, section 4.2) integrated with RK4.
 //!
 //! Model summary:
 //! * On the rail the rocket is constrained to the rail axis. Off the rail the thrust acts along
@@ -172,7 +172,7 @@ pub struct Event {
 
 /// One recorded instant of the flight. All values are SI (m, s, kg, N, Pa, K, rad); stations are from the nose tip.
 ///
-/// The set follows OpenRocket's flight data types: position and velocity, aerodynamics (Mach, dynamic pressure, Reynolds
+/// The flight data set: position and velocity, aerodynamics (Mach, dynamic pressure, Reynolds
 /// number, the drag-coefficient build-up), forces, mass and balance, the atmosphere and the recovery device state.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Sample {

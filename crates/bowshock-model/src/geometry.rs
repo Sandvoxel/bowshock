@@ -1,7 +1,7 @@
 //! Airframe geometry: nose cone profiles, axial parts (nose, tube, transition) and radial parts (fins, lugs, rail buttons).
 //!
-//! Nose profiles follow Crowell's families as tabulated in *OpenRocket technical documentation* (Niskanen 2013, section 3.1.1)
-//! and Gary Crowell, "The Descriptive Geometry of Nose Cones" (1996).
+//! Nose profiles follow Crowell's families (Gary Crowell, "The Descriptive Geometry of Nose Cones", 1996; tabulated in
+//! Niskanen 2009, appendix A).
 
 use serde::{Deserialize, Serialize};
 
@@ -239,8 +239,8 @@ fn haack(r: f64, t: f64, c: f64) -> f64 {
     r * ((theta - (2.0 * theta).sin() / 2.0 + c * theta.sin().powi(3)) / std::f64::consts::PI).max(0.0).sqrt()
 }
 
-/// A shoulder: the short tube a nose cone or transition inserts into the airframe tube beside it (OpenRocket's "shoulder"
-/// of a nose cone or transition; Niskanen 2013, section 2.1). It is made of the part's material and overlaps the neighbouring
+/// A shoulder: the short tube a nose cone or transition inserts into the airframe tube beside it
+/// (Niskanen 2009, appendix A.7). It is made of the part's material and overlaps the neighbouring
 /// tube, so it adds mass and takes no length of the stack.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Shoulder {
@@ -253,7 +253,7 @@ pub struct Shoulder {
 }
 
 impl Shoulder {
-    /// No shoulder, with OpenRocket's default 2 mm wall ready for when one is added.
+    /// No shoulder, with a default 2 mm wall ready for when one is added.
     pub const NONE: Shoulder = Shoulder { length: 0.0, diameter: 0.0, thickness: 0.002 };
 
     /// Whether there is a shoulder.
@@ -457,7 +457,7 @@ pub enum RadialKind {
     },
     /// A pod: a small rocket of its own (its [`PodBody`] stack) standing parallel to the core, `gap` off its surface (0 touches
     /// it). Its `offset` is where the pod's fore face lies along the parent, its angle and count place the copies around the core
-    /// (OpenRocket's *pod set*; KSP's radially attached parts). Parts inside the pod have the pod's id space and are edited
+    /// (a pod set: boosters, strap-ons, radial tubes). Parts inside the pod have the pod's id space and are edited
     /// through the [`Rocket`](crate::Rocket) like any other.
     Pod {
         /// Clear distance from the parent's surface to the pod's outermost surface, metres (negative never; 0 touches).
@@ -686,7 +686,7 @@ impl Anchor {
         }
     }
 
-    /// The displayed offset (positive aft, as in OpenRocket) of a part whose fore edge is `offset` from the parent's fore
+    /// The displayed offset (positive aft, the convention of `.ork` files) of a part whose fore edge is `offset` from the parent's fore
     /// face, `extent` long, in a parent `parent_length` long.
     pub fn shown(self, offset: f64, extent: f64, parent_length: f64) -> f64 {
         match self {
@@ -755,8 +755,8 @@ pub struct RadialPart {
     /// had when the group was whole, so a group that lost `A` reads `B, C`. Empty means the natural `A, B, ...`; set by a detach.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub letters: Vec<u8>,
-    /// Radius of the concave epoxy fillet along both sides of each fin's root, metres; 0 means none (OpenRocket's fin fillet).
-    /// Mass only: like OpenRocket the flight model ignores its aerodynamics, and the sim bridge sees it through the part's mass.
+    /// Radius of the concave epoxy fillet along both sides of each fin's root, metres; 0 means none.
+    /// Mass only: the flight model ignores its aerodynamics (as Barrowman's does), and the sim bridge sees it through the part's mass.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub fillet_radius: f64,
     /// What the fillet is made of.

@@ -1,5 +1,5 @@
-//! Open pods flown as tube fins (OpenRocket `TubeFinSetCalc` / `TubeCalc`; Ribner 1947; Niskanen 2013 section 3.1.1): the model
-//! -> simulation classification and the numbers against a hand calculation of OpenRocket's formulas.
+//! Open pods flown as tube fins (Ribner 1947; Niskanen 2009 section 3.1.1): the model
+//! -> simulation classification and the numbers against a hand calculation of the tube fin formulas.
 
 use bowshock_model::{InternalKind, NoseShape, Part, PartId, PartKind, PodBody, RadialKind, Rocket};
 use bowshock_motors::MotorDb;
@@ -85,11 +85,11 @@ fn a_pod_with_a_nose_a_bulkhead_or_a_transition_is_a_body() {
     assert!(!nosed.is_open_tube(), "an empty body is not a tube");
 }
 
-/// Hand calculation of OpenRocket's `TubeFinSetCalc` for three tubes of 0.15 m, r_out 12.7 mm, r_in 11.7 mm: AR = 0.156,
+/// Hand calculation of the tube fin normal force for three tubes of 0.15 m, r_out 12.7 mm, r_in 11.7 mm: AR = 0.156,
 /// AR' = 0.0993127, per tube `CN_alpha A_ref` = 2 (AR'/(1+AR')) pi^2 r_in L = 3.12961e-3 m^2; A_ref = pi 0.0381^2 = 4.5604e-3,
 /// so 0.686263 per tube and 2.058789 for three (no Mach dependence, no body interference factor). CP at the quarter chord.
 #[test]
-fn normal_force_and_cp_match_openrocket_by_hand() {
+fn normal_force_and_cp_match_hand_calc() {
     let (r, _) = with_tubes(3);
     let aero = Aero::new(&fly(&r));
     let s = aero.stability(0.3, 0.0);
@@ -120,7 +120,7 @@ fn open_tubes_move_the_cp_aft() {
 /// 4.5281e-5 m^2 at (stag + base): 0.037528 per tube, 0.112583 for three, over A_ref. Friction: the roughness-limited C_f of the
 /// rocket (0.032 (eps/L)^0.2 (1 - 0.1 M^2), eps = 60 um, L = rocket length) times the outer wetted 4.0593e-3 m^2 per tube.
 #[test]
-fn drag_matches_openrocket_by_hand_and_an_open_tube_has_no_base() {
+fn drag_matches_hand_calc_and_an_open_tube_has_no_base() {
     let (plain, _) = core();
     let (tubes, _) = with_tubes(3);
     let (a, b) = (Aero::new(&fly(&plain)).drag(0.3, RE_PER_M, false), Aero::new(&fly(&tubes)).drag(0.3, RE_PER_M, false));

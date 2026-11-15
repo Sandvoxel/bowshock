@@ -1,5 +1,5 @@
 //! Pods (radial strap-on bodies) in the model -> simulation bridge: each pod copy is an off-axis body whose normal force and drag
-//! are added to the rocket's (OpenRocket `PodSet`, Niskanen 2013 section 3; Barrowman 1967).
+//! are added to the rocket's (Barrowman 1967: component contributions add; Niskanen 2009 section 3.2).
 
 use bowshock_model::{DeployEvent, Deployment, InternalKind, MotorRef, NoseShape, PartId, PartKind, PodBody, RadialKind, Rocket};
 use bowshock_motors::MotorDb;

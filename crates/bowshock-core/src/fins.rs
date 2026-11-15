@@ -1,6 +1,6 @@
 //! Empirical drag of a set of trapezoidal fins: skin friction and leading-edge / trailing-edge pressure drag after S. Niskanen,
-//! *OpenRocket technical documentation* (2013), eqs. 3.78-3.85, 3.89-3.94 and B.1-B.2, plus the Ackeret wave drag of a double
-//! wedge above Mach 1. Fin-body interference drag is neglected, as in OpenRocket.
+//! *Development of an Open Source model rocket simulation software* (M.Sc. thesis, 2009), eqs. 3.78-3.85, 3.89-3.94 and B.1-B.2 (after
+//! Hoerner, *Fluid-Dynamic Drag*), plus the Ackeret wave drag of a double wedge above Mach 1. Fin-body interference drag is neglected.
 
 use crate::analysis::FinDrag;
 use crate::atmosphere::AirState;
@@ -13,7 +13,7 @@ pub(crate) fn mean_aerodynamic_chord(root: f64, tip: f64) -> f64 {
     2.0 / 3.0 * (root + tip - root * tip / (root + tip))
 }
 
-/// Stagnation pressure over free-stream dynamic pressure `q_stag / q` (OpenRocket eq. 3.85 with B.1-B.2).
+/// Stagnation pressure over free-stream dynamic pressure `q_stag / q` (Niskanen 2009 eq. 3.85 with B.1-B.2).
 fn stagnation_pressure_ratio(mach: f64) -> f64 {
     let m2 = mach * mach;
     if mach < 1.0 {
@@ -23,7 +23,7 @@ fn stagnation_pressure_ratio(mach: f64) -> f64 {
     }
 }
 
-/// Pressure drag coefficient of a rounded leading edge, referenced to its frontal area (OpenRocket eq. 3.89).
+/// Pressure drag coefficient of a rounded leading edge, referenced to its frontal area (Niskanen 2009 eq. 3.89).
 fn rounded_leading_edge(mach: f64) -> f64 {
     if mach < 0.9 {
         (1.0 - mach * mach).powf(-0.417) - 1.0
