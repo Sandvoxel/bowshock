@@ -442,7 +442,7 @@ impl LazySolver {
             return;
         }
         for a in r.iter_mut() {
-            a.slice_mut(0, i.clone()).slice(1, j.clone()).assign(c(0.0)).expect("zero region");
+            a.slice_mut(0, i.clone()).slice(1, j.clone()).assign(c(0.0)).expect("zero region assign: the region lies inside the record, shapes fixed by set_block");
         }
     }
 
@@ -459,7 +459,7 @@ impl LazySolver {
             let nx = dup(g.jnx.slice(0, i0..i1).slice(1, j0..j0 + 1));
             let nr = dup(g.jnr.slice(0, i0..i1).slice(1, j0..j0 + 1));
             let src = rec(|k| p[k].slice(0, i0..i1).slice(1, j0..).pad([(0, 0), (2, 0)], PadMode::Mirror).slice(1, 0..2));
-            w.slice_mut(0, i0 + 2..i1 + 2).slice(1, j0..j0 + 2).assign(self.block_wall_ghost(&src, &nx, &nr, i0)).expect("block ghost assign");
+            w.slice_mut(0, i0 + 2..i1 + 2).slice(1, j0..j0 + 2).assign(self.block_wall_ghost(&src, &nx, &nr, i0)).expect("block ghost assign: shapes fixed by set_block");
         }
     }
 
@@ -488,7 +488,7 @@ impl LazySolver {
         // solid faces
         self.zero_region(fi, 0..ni + 1, 0..b.j_sting);
         self.zero_region(fi, 0..b.i_end, b.j_sting..b.j_end);
-        fi.slice_mut(0, b.i_end..b.i_end + 2).slice(1, b.j_sting..b.j_end).assign(&base).expect("base wall flux assign");
+        fi.slice_mut(0, b.i_end..b.i_end + 2).slice(1, b.j_sting..b.j_end).assign(&base).expect("base wall flux assign: shapes fixed by set_block");
         self.zero_region(fj, 0..b.i_end, 0..b.j_end);
         self.zero_region(fj, b.i_end..ni, 0..b.j_sting);
     }
@@ -507,7 +507,7 @@ impl LazySolver {
 
     /// The conserved state on the host.
     pub fn state_f64(&self) -> Result<Vec<[f64; 4]>> {
-        download_state(self.state.as_ref().expect("state"))
+        download_state(self.state.as_ref().ok_or_else(no_state)?)
     }
 
     /// Writes the two ghost layers of boundary `side` (`[imin, imax, jmin, jmax]`) into the padded primitives `w` with a
@@ -534,13 +534,13 @@ impl LazySolver {
         let b = &self.geo.bnd[side];
         let fs = self.cfg.freestream;
         let ghost = match self.cfg.bc[side] {
-            Bc::Freestream => b.fixed.clone().expect("fixed ghost"),
+            Bc::Freestream => b.fixed.clone().expect("a free-stream boundary carries its fixed ghost, set in the constructor"),
             Bc::Extrapolate => return,
             Bc::SlipWall => self.slip_wall_ghost(side, &rec(|k| view(&p[k], PadMode::Mirror)), &b.nx, &b.nr),
             Bc::Characteristic => characteristic_ghost(&fs, &rec(|k| view(&p[k], PadMode::Edge)), &b.onx, &b.onr),
             Bc::PressureOutflow => pressure_outflow_ghost(fs[3], &rec(|k| view(&p[k], PadMode::Edge)), &b.onx, &b.onr),
         };
-        region.assign(ghost).expect("ghost layer assign");
+        region.assign(ghost).expect("ghost layer assign: ghost shapes fixed by the boundary");
     }
 
     /// `res = dU/dt` of the conserved state `u` (`[ni, nj]` fields) and, if asked, the local time step.
@@ -647,9 +647,9 @@ impl LazySolver {
             self.zero_region(&mut res, b.i_end..ni, 0..b.j_sting);
             if let Some(dt) = &mut dt {
                 if b.j_sting > 0 {
-                    dt.slice_mut(0, b.i_end..ni).slice(1, 0..b.j_sting).assign(c(0.0)).expect("dt zero");
+                    dt.slice_mut(0, b.i_end..ni).slice(1, 0..b.j_sting).assign(c(0.0)).expect("dt zero: block rows inside the grid");
                 }
-                dt.slice_mut(0, 0..b.i_end).slice(1, 0..b.j_end).assign(c(0.0)).expect("dt zero");
+                dt.slice_mut(0, 0..b.i_end).slice(1, 0..b.j_end).assign(c(0.0)).expect("dt zero: block rows inside the grid");
             }
         }
         (res, dt)
@@ -663,7 +663,7 @@ impl LazySolver {
     /// ```
     fn rk3(&self, u0: &Rec, mu_t: Option<&A>, lim: Limiter) -> (Rec, A, Stage) {
         let st0 = self.eval_stage(u0, mu_t, lim, true);
-        let (r0, dt) = (st0.res, st0.dt.expect("dt"));
+        let (r0, dt) = (st0.res, st0.dt.expect("the residual stage was called with compute_dt = true"));
         let rn = self.residual_norm(&r0[0]);
         // stage 1: u1 = u0 + dt L(u0)
         let u1 = rec(|k| &u0[k] + &dt * &r0[k]);
@@ -703,11 +703,11 @@ impl LazySolver {
         while left > 0 {
             let seg = self.phase_len(left);
             let lim = self.limiter(self.iter);
-            let init = self.state.take().expect("state");
+            let init = self.state.take().ok_or_else(no_state)?;
             let run = luma::iterate_until_all(init, records(luma::Until::new(seg).check_every(sync)), |s, _| {
                 self.step(s, lim)
             })?;
-            history.extend(read_history(&run));
+            history.extend(read_history(&run)?);
             self.state = Some(run.state);
             self.iter += seg;
             left -= seg;
@@ -721,7 +721,7 @@ impl LazySolver {
         while left > 0 {
             let seg = self.phase_len(left);
             let lim = self.limiter(self.iter);
-            let init = self.state.take().expect("state");
+            let init = self.state.take().ok_or_else(no_state)?;
             self.state = Some(luma::iterate_all(init.each_ref(), seg, |s| {
                 self.step(s, lim)
             }));
@@ -735,7 +735,7 @@ impl LazySolver {
     /// evaluated residual scalars (read them with [`Residuals::read`]).
     pub fn run_eval(&mut self, n: usize) -> Result<Residuals> {
         let mut history = Vec::with_capacity(n);
-        let mut s = self.state.take().expect("state");
+        let mut s = self.state.take().ok_or_else(no_state)?;
         for _ in 0..n {
             s = self.step(&s, self.limiter(self.iter));
             luma::eval_all(&s.iter().collect::<Vec<_>>())?;
@@ -753,16 +753,16 @@ impl LazySolver {
 
     /// The residual `dU/dt` and time step of the current state, on the host (`[res; 4]` of `ni * nj`, `dt`).
     pub fn residual_f64(&self, lim: Limiter) -> Result<(Vec<[f64; 4]>, Vec<f64>)> {
-        let u = unpack(self.state.as_ref().expect("state"));
+        let u = unpack(self.state.as_ref().ok_or_else(no_state)?);
         let (r, dt) = self.eval_residual(&u, lim, true);
         let r: Vec<Vec<f64>> = r.iter().map(to_f64).collect::<Result<_>>()?;
-        let dt = to_f64(&dt.unwrap())?;
+        let dt = to_f64(&dt.ok_or_else(|| luma::LumaError::Unsupported("residual stage returned no time step".into()))?)?;
         Ok(((0..self.ni * self.nj).map(|c| [r[0][c], r[1][c], r[2][c], r[3][c]]).collect(), dt))
     }
 
     /// GPU time per kernel of one residual evaluation (profile) and where fusion cut the expressions.
     pub fn profile_residual(&self) -> Result<luma::Profile> {
-        let u = unpack(self.state.as_ref().expect("state"));
+        let u = unpack(self.state.as_ref().ok_or_else(no_state)?);
         let lim = self.cfg.limiter;
         // warm up (compile) first, so that the profile shows launches only
         let _ = self.eval_residual(&u, lim, true);
@@ -819,7 +819,7 @@ impl LazySolver {
     /// Host seconds to build the lazy expression of one SSP-RK3 step from the current state, `n` times, without evaluating
     /// anything (the part of an `eval` loop iteration that is Rust code building nodes).
     pub fn trace_seconds(&self, n: usize) -> f64 {
-        let u = unpack(self.state.as_ref().expect("state"));
+        let u = unpack(self.state.as_ref().expect("trace_seconds needs a state: GpuSolver::from_host sets it"));
         let lim = self.cfg.limiter;
         let t0 = std::time::Instant::now();
         for _ in 0..n {
@@ -827,4 +827,9 @@ impl LazySolver {
         }
         t0.elapsed().as_secs_f64()
     }
+}
+
+/// Error of an operation that needs the loop state before one was set.
+fn no_state() -> luma::LumaError {
+    luma::LumaError::Unsupported("the solver has no state: it is set by from_host or set_state".into())
 }

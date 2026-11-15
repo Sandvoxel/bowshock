@@ -184,7 +184,13 @@ pub fn axial_nodes(p: &LargeGridParams) -> Result<Vec<f64>, Error> {
     for (k, seg) in bb.segments.iter().enumerate() {
         let n = p.n_seg[k];
         let x0 = bb.station(k).0;
-        let offs = if k == nseg - 1 && seg.slope == 0.0 { geometric_offsets(d_prev, seg.length, n) } else { two_sided_nodes(seg.length, n, p.dx_tip) };
+        // a geometric ramp from the shoulder cell exists only if even its steepest contraction (q = 0.2) fits in the segment
+        let geometric_fits = d_prev * (1.0 - 0.2f64.powi(n as i32)) / 0.8 < seg.length;
+        let offs = if k == nseg - 1 && seg.slope == 0.0 && geometric_fits {
+            geometric_offsets(d_prev, seg.length, n)
+        } else {
+            two_sided_nodes(seg.length, n, p.dx_tip)
+        };
         for i in 1..=n {
             xs.push(x0 + offs[i]);
         }

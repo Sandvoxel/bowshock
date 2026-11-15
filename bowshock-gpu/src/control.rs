@@ -44,7 +44,7 @@ impl LazySolver {
     /// `j_sting..j_end` of the solid block; only these cells are read back.
     pub fn base_cells(&self) -> Result<Vec<[[f64; 4]; 2]>> {
         let b = self.block.ok_or_else(|| luma::LumaError::Unsupported("base_cells needs a solid block".into()))?;
-        let s = self.state.as_ref().expect("state");
+        let s = self.state.as_ref().ok_or_else(no_state)?;
         let cols: Vec<Vec<f64>> = (0..4).map(|k| to_f64(&s[k].slice(0, b.i_end..b.i_end + 2).slice(1, b.j_sting..b.j_end))).collect::<Result<_>>()?;
         Ok((0..b.j_end - b.j_sting).map(|r| [0, 1].map(|n| [0, 1, 2, 3].map(|k| cols[k][2 * r + n]))).collect())
     }

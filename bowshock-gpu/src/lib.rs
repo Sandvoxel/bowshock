@@ -102,8 +102,9 @@ pub mod f32s {
         until.record("residual", |s: &State| s[4].clone())
     }
 
-    fn read_history(run: &luma::Run<State>) -> Vec<f64> {
-        run.history("residual").expect("residual history").iter().map(|&r| f64::from(r)).collect()
+    fn read_history(run: &luma::Run<State>) -> Result<Vec<f64>> {
+        let h = run.history("residual").ok_or_else(|| luma::LumaError::Unsupported("the run recorded no residual history".into()))?;
+        Ok(h.iter().map(|&r| f64::from(r)).collect())
     }
 
     /// The left-hand side of the implicit scheme runs in f32: the f32 view of `a` (here `a` itself) and back.
@@ -150,9 +151,10 @@ pub mod df32s {
         until.record("residual", |s: &State| s[4].to_f32()).record("residual_lo", |s: &State| (&s[4] - s[4].to_f32().to_df32()).to_f32())
     }
 
-    fn read_history(run: &luma::Run<State>) -> Vec<f64> {
-        let (hi, lo) = (run.history("residual").expect("residual history"), run.history("residual_lo").expect("residual history"));
-        hi.iter().zip(lo).map(|(&h, &l)| f64::from(h) + f64::from(l)).collect()
+    fn read_history(run: &luma::Run<State>) -> Result<Vec<f64>> {
+        let missing = || luma::LumaError::Unsupported("the run recorded no residual history".into());
+        let (hi, lo) = (run.history("residual").ok_or_else(missing)?, run.history("residual_lo").ok_or_else(missing)?);
+        Ok(hi.iter().zip(lo).map(|(&h, &l)| f64::from(h) + f64::from(l)).collect())
     }
 
     /// The left-hand side of the implicit scheme runs in f32: the f32 view of `a` and back.
@@ -293,8 +295,9 @@ impl GpuSolver {
     }
 
     /// Restarts the CFL ramp of the implicit scheme (at the start of a run and after a change of the free stream).
-    pub fn restart_ramp(&mut self) {
-        on_mut!(self, s => s.restart_ramp())
+    pub fn restart_ramp(&mut self) -> Result<()> {
+        on_mut!(self, s => s.restart_ramp()?);
+        Ok(())
     }
 
     /// Switches the viscous terms on (`Some`, with the SST model if `v.turbulence` says so) or off (`None`, the Euler equations). `grid` is the grid

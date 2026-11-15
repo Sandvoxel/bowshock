@@ -10,7 +10,6 @@ use crate::error::Error;
 use crate::spec::BodySpec;
 use bowshock_core::solver::Solver;
 use bowshock_reference::base_drag::base_drag_coefficient;
-use std::convert::Infallible;
 
 /// Lowest and highest Mach number accepted by [`Analysis::run`].
 const MACH_RANGE: (f64, f64) = (0.1, 3.0);
@@ -462,9 +461,9 @@ impl Analysis {
     /// Sweeps `cases` (ascending Mach) on `backend`; returns the backend used and, under `Auto`, why the GPU was not.
     fn sweep_on(&self, cases: &[Case], backend: Backend) -> Result<(Vec<PointResult>, BackendUsed, Option<String>), Error> {
         match backend {
-            Backend::Cpu => Ok((self.sweep_cpu(cases), BackendUsed::Cpu, None)),
-            Backend::Gpu => Ok((self.sweep_gpu_required(cases)?, BackendUsed::Gpu, None)),
-            Backend::Auto => Ok(self.sweep_auto(cases)),
+            Backend::Cpu => Ok((guard(|| self.sweep_cpu(cases))?, BackendUsed::Cpu, None)),
+            Backend::Gpu => Ok((guard(|| self.sweep_gpu_required(cases))?, BackendUsed::Gpu, None)),
+            Backend::Auto => self.sweep_auto(cases),
         }
     }
 
@@ -500,18 +499,13 @@ impl Analysis {
         Ok(out)
     }
 
-    fn sweep_cpu(&self, cases: &[Case]) -> Vec<PointResult> {
-        self.sweep(&CpuBackend, cases).unwrap_or_else(|e| match e {})
-    }
-
-    #[cfg(feature = "gpu")]
-    fn sweep_gpu(&self, cases: &[Case]) -> bowshock_gpu::Result<Vec<PointResult>> {
-        self.sweep(&GpuBackend, cases)
+    fn sweep_cpu(&self, cases: &[Case]) -> Result<Vec<PointResult>, Error> {
+        self.sweep(&CpuBackend, cases)
     }
 
     #[cfg(feature = "gpu")]
     fn sweep_gpu_required(&self, cases: &[Case]) -> Result<Vec<PointResult>, Error> {
-        self.sweep_gpu(cases).map_err(Error::from)
+        self.sweep(&GpuBackend, cases)
     }
 
     #[cfg(not(feature = "gpu"))]
@@ -520,17 +514,27 @@ impl Analysis {
     }
 
     #[cfg(feature = "gpu")]
-    fn sweep_auto(&self, cases: &[Case]) -> (Vec<PointResult>, BackendUsed, Option<String>) {
-        match self.sweep_gpu(cases) {
-            Ok(results) => (results, BackendUsed::Gpu, None),
-            Err(e) => (self.sweep_cpu(cases), BackendUsed::Cpu, Some(format!("GPU unavailable: {e}"))),
-        }
+    fn sweep_auto(&self, cases: &[Case]) -> Result<(Vec<PointResult>, BackendUsed, Option<String>), Error> {
+        let why = match guard(|| self.sweep_gpu_required(cases)) {
+            Ok(results) => return Ok((results, BackendUsed::Gpu, None)),
+            Err(Error::Internal(m)) => m.replacen("solver panicked", "GPU solver panicked", 1),
+            Err(e) => format!("GPU unavailable: {e}"),
+        };
+        Ok((guard(|| self.sweep_cpu(cases))?, BackendUsed::Cpu, Some(why)))
     }
 
     #[cfg(not(feature = "gpu"))]
-    fn sweep_auto(&self, cases: &[Case]) -> (Vec<PointResult>, BackendUsed, Option<String>) {
-        (self.sweep_cpu(cases), BackendUsed::Cpu, None)
+    fn sweep_auto(&self, cases: &[Case]) -> Result<(Vec<PointResult>, BackendUsed, Option<String>), Error> {
+        Ok((guard(|| self.sweep_cpu(cases))?, BackendUsed::Cpu, None))
     }
+}
+
+/// Runs `f`, turning a panic into `Error::Internal("solver panicked: ...")`.
+fn guard<T>(f: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|payload| {
+        let msg = payload.downcast_ref::<&str>().map(|s| (*s).to_string()).or_else(|| payload.downcast_ref::<String>().cloned());
+        Err(Error::Internal(format!("solver panicked: {}", msg.as_deref().unwrap_or("unknown"))))
+    })
 }
 
 /// Builds the grids of `case` and checks their quality (the wall-resolved grids of a viscous case against the tighter limit in `j`).
@@ -566,15 +570,15 @@ struct CpuBackend;
 
 impl Runner for CpuBackend {
     type State = Solver;
-    type Error = Infallible;
+    type Error = Error;
 
-    fn cold(&self, case: &Case) -> Result<(PointResult, Solver), Infallible> {
-        let mut s = case.build_solver();
+    fn cold(&self, case: &Case) -> Result<(PointResult, Solver), Error> {
+        let mut s = case.try_build_solver()?;
         let r = run_on(case, &mut s, false, None);
         Ok((r, s))
     }
 
-    fn warm(&self, s: &mut Solver, case: &Case, r_ref: f64) -> Result<PointResult, Infallible> {
+    fn warm(&self, s: &mut Solver, case: &Case, r_ref: f64) -> Result<PointResult, Error> {
         Ok(run_on(case, s, true, Some(r_ref)))
     }
 }
@@ -585,15 +589,15 @@ struct GpuBackend;
 #[cfg(feature = "gpu")]
 impl Runner for GpuBackend {
     type State = crate::engine::gpu::GpuRunner;
-    type Error = bowshock_gpu::GpuError;
+    type Error = Error;
 
-    fn cold(&self, case: &Case) -> bowshock_gpu::Result<(PointResult, crate::engine::gpu::GpuRunner)> {
+    fn cold(&self, case: &Case) -> Result<(PointResult, crate::engine::gpu::GpuRunner), Error> {
         let mut r = crate::engine::gpu::GpuRunner::new(case, bowshock_gpu::Precision::Extended)?;
         let run = r.run_on(case, false, None)?;
         Ok((run.result, r))
     }
 
-    fn warm(&self, r: &mut crate::engine::gpu::GpuRunner, case: &Case, r_ref: f64) -> bowshock_gpu::Result<PointResult> {
+    fn warm(&self, r: &mut crate::engine::gpu::GpuRunner, case: &Case, r_ref: f64) -> Result<PointResult, Error> {
         Ok(r.run_on(case, true, Some(r_ref))?.result)
     }
 }

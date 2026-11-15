@@ -288,7 +288,7 @@ impl LazySolver {
 
     /// The eddy viscosity of the loop state (`Some` for the SST model).
     fn state_mu_t(&self) -> Option<A> {
-        self.sst().then(|| self.state.as_ref().expect("state")[8].clone())
+        self.sst().then(|| self.state.as_ref().expect("an SST run has a state: from_host sets it")[8].clone())
     }
 
     /// The turbulence slots of the loop state at the free stream of the conserved state `u`: `k_inf`, `omega_inf`, the eddy viscosity
@@ -319,7 +319,7 @@ impl LazySolver {
         let (k, om) =
             (up(&self.ctx, &turb.iter().map(|t| t[0]).collect::<Vec<_>>(), shape)?, up(&self.ctx, &turb.iter().map(|t| t[1]).collect::<Vec<_>>(), shape)?);
         let mt = up(&self.ctx, mu_t, shape)?;
-        let s = self.state.as_mut().expect("state");
+        let s = self.state.as_mut().ok_or_else(no_state)?;
         (s[6], s[7], s[8]) = (k, om, mt);
         Ok(())
     }
@@ -327,14 +327,14 @@ impl LazySolver {
     /// `([k, omega], mu_t)` of every cell on the host (SST runs; `Solver::turb`, `Solver::mu_t`).
     pub fn turb_state_f64(&self) -> Result<(Vec<[f64; 2]>, Vec<f64>)> {
         assert!(self.sst(), "turb_state_f64 needs the SST model");
-        let s = self.state.as_ref().expect("state");
+        let s = self.state.as_ref().ok_or_else(no_state)?;
         let (k, om, mt) = (to_f64(&s[6])?, to_f64(&s[7])?, to_f64(&s[8])?);
         Ok((k.iter().zip(&om).map(|(&k, &o)| [k, o]).collect(), mt))
     }
 
     /// The density residual norm of `k` of the last turbulence update (`Solver::turb_residual`; 0 before the first).
     pub fn turb_residual(&self) -> Result<f64> {
-        Ok(to_f64(&self.state.as_ref().expect("state")[9])?[0])
+        Ok(to_f64(&self.state.as_ref().ok_or_else(no_state)?[9])?[0])
     }
 
     /// The ghost state below / behind a slip-wall boundary: the reflection, or on the no-slip columns of the viscous `jmin` wall
@@ -406,7 +406,7 @@ impl LazySolver {
             }
             for (ri, rj) in walls {
                 let src = r.slice(0, ri.clone()).slice(1, rj.clone());
-                l.slice_mut(0, ri).slice(1, rj).assign(src).expect("wall side assign");
+                l.slice_mut(0, ri).slice(1, rj).assign(src).expect("wall side assign: shapes fixed by set_block");
             }
         }
         (l, r)
@@ -456,7 +456,7 @@ impl LazySolver {
                     (Some(a), false) => a - term,
                 });
             }
-            acc.expect("four faces") * &vg.inv_a
+            acc.expect("a cell has four faces") * &vg.inv_a
         });
         let [g0, g1, g2, g3, g4, g5] = grad;
         let mu_t = mu_t.cloned().unwrap_or_else(|| vg.zero.clone());
@@ -535,7 +535,7 @@ impl LazySolver {
     /// `rho_f` the mean of the densities `rho_l`, `rho_r` of the two sides: the diffusive spectral radius that the implicit operator adds to
     /// the dissipation matrix of the face (`2 lam I`).
     fn two_lambda(&self, vf: &VFlow, dir: usize, rho_l: &F, rho_r: &F) -> F {
-        let vg = self.visc.as_ref().expect("viscous run");
+        let vg = self.visc.as_ref().expect("viscous terms are on: two_lambda is called from a viscous step");
         let (cl, cr) = self.cell_sides(&[vf.cell[6].clone(), vf.cell[7].clone()], dir);
         let mu_f = lhs(&(c(0.5) * (&cl[0] + &cr[0])));
         let mut_f = lhs(&(c(0.5) * (&cl[1] + &cr[1])));

@@ -55,7 +55,7 @@ impl LazySolver {
     fn green_gauss<const M: usize>(&self, pc: &[A; M], nb: &[[A; M]; 4]) -> Vec<A> {
         let (ni, nj) = (self.ni, self.nj);
         let g = &self.geo;
-        let inv_a = &self.visc.as_ref().expect("viscous run").inv_a;
+        let inv_a = &self.visc.as_ref().expect("viscous terms are on: green_gauss is called from a viscous step").inv_a;
         let faces = [
             (g.inx.slice(0, 1..ni + 1), g.inr.slice(0, 1..ni + 1), g.ilen.slice(0, 1..ni + 1), true),
             (g.inx.slice(0, 0..ni), g.inr.slice(0, 0..ni), g.ilen.slice(0, 0..ni), false),
@@ -77,7 +77,7 @@ impl LazySolver {
                         (Some(a), false) => a - term,
                     });
                 }
-                out.push(acc.expect("four faces") * inv_a);
+                out.push(acc.expect("the loop visits four faces") * inv_a);
             }
         }
         out
@@ -88,24 +88,24 @@ impl LazySolver {
     /// of the cell, `omega_w = 60 nu / (beta1 d^2)`).
     fn kw_sides(&self, t: &[A; 2], wall: &[A; 2], dir: usize) -> ([A; 2], [A; 2]) {
         let (ni, nj) = (self.ni, self.nj);
-        let vg = self.visc.as_ref().expect("viscous run");
+        let vg = self.visc.as_ref().expect("viscous terms are on: kw_sides is called from an SST step");
         let inf = [K_INF, omega_inf(vg.v.re_c)];
         let bc = self.cfg.bc;
         let (mut l, mut r) = self.cell_sides(t, dir);
         for e in 0..2 {
             if dir == 0 {
                 if bc_inf(bc[0]) {
-                    l[e].slice_mut(0, 0..1).assign(c(inf[e])).expect("free-stream side");
+                    l[e].slice_mut(0, 0..1).assign(c(inf[e])).expect("free-stream side assign: one-cell slice inside the sides array");
                 }
                 if bc_inf(bc[1]) {
-                    r[e].slice_mut(0, ni..ni + 1).assign(c(inf[e])).expect("free-stream side");
+                    r[e].slice_mut(0, ni..ni + 1).assign(c(inf[e])).expect("free-stream side assign: one-cell slice inside the sides array");
                 }
             } else {
                 if bc_inf(bc[2]) {
-                    l[e].slice_mut(1, 0..1).assign(c(inf[e])).expect("free-stream side");
+                    l[e].slice_mut(1, 0..1).assign(c(inf[e])).expect("free-stream side assign: one-cell slice inside the sides array");
                 }
                 if bc_inf(bc[3]) {
-                    r[e].slice_mut(1, nj..nj + 1).assign(c(inf[e])).expect("free-stream side");
+                    r[e].slice_mut(1, nj..nj + 1).assign(c(inf[e])).expect("free-stream side assign: one-cell slice inside the sides array");
                 }
             }
         }
@@ -126,7 +126,7 @@ impl LazySolver {
         for (ri, rj) in walls.into_iter().filter(|(ri, rj)| !ri.is_empty() && !rj.is_empty()) {
             for e in 0..2 {
                 let src = wall[e].slice(0, ri.clone()).slice(1, rj.clone());
-                l[e].slice_mut(0, ri.clone()).slice(1, rj.clone()).assign(src).expect("no-slip side assign");
+                l[e].slice_mut(0, ri.clone()).slice(1, rj.clone()).assign(src).expect("no-slip side assign: shapes fixed by set_block");
             }
         }
         (l, r)
@@ -135,12 +135,12 @@ impl LazySolver {
     /// The SST update of the iteration of the state `s` (`turbulence::update`): `[k, omega, mu_t, rn]` of the next loop state, from the
     /// evaluation `st` of the start of the iteration and the time step `dt`; `rn = sqrt(sum (R_k)^2 / N)` with `R_k = rho dk/dt`.
     fn sst_update(&self, s: &State, st: &Stage, dt: &A) -> [A; 4] {
-        let vg = self.visc.as_ref().expect("viscous run");
-        let vf = st.vf.as_ref().expect("viscous quantities");
+        let vg = self.visc.as_ref().expect("viscous terms are on: sst_update runs in an SST step");
+        let vf = st.vf.as_ref().expect("an SST step evaluates the viscous quantities");
         let v = vg.v;
         let (ni, nj) = (self.ni, self.nj);
         let g = &self.geo;
-        let d = vg.dwall.as_ref().expect("wall distance");
+        let d = vg.dwall.as_ref().expect("an SST run computes the wall distance in set_viscous");
         let (k, om) = (&s[6], &s[7]);
         let rho = &st.p[0];
         let (mu, mu_t) = (&vf.cell[6], &vf.cell[7]);
@@ -233,7 +233,7 @@ impl LazySolver {
                 dd[dir][e] = Some(&a_lo + &a_up + &g_lo + &g_up);
             }
         }
-        let r: [A; 2] = std::array::from_fn(|e| rate[e].take().expect("both directions") * &g.inv_v + &sources[e]);
+        let r: [A; 2] = std::array::from_fn(|e| rate[e].take().expect("the direction loop sets both rates") * &g.inv_v + &sources[e]);
         let d0: [A; 2] = std::array::from_fn(|e| &rho_vol / &dt + &rho_vol * &dest[e]);
 
         // the two line solves, both scalars in one launch per direction, in f32 (the left-hand side): i lines, then j lines
@@ -245,9 +245,9 @@ impl LazySolver {
         let rhs: [F; 2] = std::array::from_fn(|e| lhs(&(&vg.vol * &r[e])));
         let sys: [[F; 3]; 2] = std::array::from_fn(|e| {
             [
-                select(first, 0.0f32, lhs(lo[0][e].as_ref().expect("coefficient"))),
-                lhs(&(&d0[e] + dd[0][e].as_ref().expect("coefficient"))),
-                select(last, 0.0f32, lhs(up[0][e].as_ref().expect("coefficient"))),
+                select(first, 0.0f32, lhs(lo[0][e].as_ref().expect("the direction loop sets every coefficient"))),
+                lhs(&(&d0[e] + dd[0][e].as_ref().expect("the direction loop sets every coefficient"))),
+                select(last, 0.0f32, lhs(up[0][e].as_ref().expect("the direction loop sets every coefficient"))),
             ]
         });
         let systems = std::array::from_fn(|e| (&sys[e][0], &sys[e][1], &sys[e][2], &rhs[e]));
@@ -258,9 +258,9 @@ impl LazySolver {
         let (first, last) = ends(1);
         let sys: [[F; 3]; 2] = std::array::from_fn(|e| {
             [
-                select(first, 0.0f32, lhs(&(lo[1][e].as_ref().expect("coefficient") / &d0[e]))),
-                lhs(&(c(1.0) + dd[1][e].as_ref().expect("coefficient") / &d0[e])),
-                select(last, 0.0f32, lhs(&(up[1][e].as_ref().expect("coefficient") / &d0[e]))),
+                select(first, 0.0f32, lhs(&(lo[1][e].as_ref().expect("the direction loop sets every coefficient") / &d0[e]))),
+                lhs(&(c(1.0) + dd[1][e].as_ref().expect("the direction loop sets every coefficient") / &d0[e])),
+                select(last, 0.0f32, lhs(&(up[1][e].as_ref().expect("the direction loop sets every coefficient") / &d0[e]))),
             ]
         });
         let systems = std::array::from_fn(|e| (&sys[e][0], &sys[e][1], &sys[e][2], &x[e]));

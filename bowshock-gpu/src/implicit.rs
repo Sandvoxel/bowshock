@@ -738,7 +738,7 @@ impl LazySolver {
         let ok = |a: f32| -> Array<bool> {
             let q: V4 = std::array::from_fn(|k| &u[k] + a * &du[k]);
             let w = cons_to_prim_f(&q);
-            let finite = q.iter().map(|x| x.is_finite()).reduce(|a, b| a & b).expect("four components");
+            let finite = q.iter().map(|x| x.is_finite()).reduce(|a, b| a & b).expect("the conserved state has four components");
             w[0].gt(0.0f32) & w[3].gt(0.0f32) & finite
         };
         let last = 1.0f32 / 128.0;
@@ -812,7 +812,7 @@ impl LazySolver {
             Scheme::Implicit(p) => self.implicit_step(s, &p, lim),
             _ => {
                 let (u, rn, st) = self.rk3(&unpack(s), self.sst().then(|| &s[8]), lim);
-                pack(u, rn, &s[5] * c(1.0), self.turb_next(s, &st, st.dt.as_ref().expect("dt")))
+                pack(u, rn, &s[5] * c(1.0), self.turb_next(s, &st, st.dt.as_ref().expect("rk3 computes dt")))
             }
         }
     }
@@ -833,15 +833,16 @@ impl LazySolver {
             return Err(luma::LumaError::Unsupported("the lazy solver covers Scheme::Explicit and Scheme::Implicit only".into()));
         }
         self.scheme = scheme;
-        self.restart_ramp();
+        self.restart_ramp()?;
         Ok(())
     }
 
     /// Restarts the CFL ramp of the implicit scheme at `cfl0` (call at the start of a run and after a change of the free stream).
-    pub fn restart_ramp(&mut self) {
-        let cfl = up(&self.ctx, &[self.cfl_start()], 1).expect("upload of the CFL");
+    pub fn restart_ramp(&mut self) -> Result<()> {
+        let cfl = up(&self.ctx, &[self.cfl_start()], 1)?;
         if let Some(s) = &mut self.state {
             s[5] = cfl;
         }
+        Ok(())
     }
 }

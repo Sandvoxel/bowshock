@@ -107,7 +107,7 @@ impl BodySpec {
         positive("nose.length", n.length)?;
         positive("nose.diameter", n.diameter)?;
         let fineness = n.length / n.diameter;
-        if !(0.5..=12.0).contains(&fineness) {
+        if !(0.5 * (1.0 - 1e-9)..=12.0 * (1.0 + 1e-9)).contains(&fineness) {
             return invalid("nose.length", &format!("fineness length / diameter = {fineness:.3} must be in [0.5, 12]"));
         }
         let nose = match n.shape {

@@ -13,10 +13,13 @@ use crate::engine::case::{Case, Wake};
 use crate::engine::numerics::MONITOR_EVERY;
 use crate::engine::result::{PointResult, StopReason};
 use crate::engine::run::{finish, monitor, stop_reason, wall_distribution};
+use crate::error::Error;
 use bowshock_core::gas::{cons_to_prim, freestream};
 use bowshock_core::solver::Solver;
-use bowshock_gpu::{GpuSolver, Precision, Result};
+use bowshock_gpu::{GpuSolver, Precision};
 use std::time::Instant;
+
+type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Iterations between two synchronisations; equal to the monitor sampling interval of the CPU runner.
 pub const SYNC: usize = MONITOR_EVERY;
@@ -51,12 +54,12 @@ impl GpuRun {
 impl GpuRunner {
     /// Builds the host solver of `case` and uploads it to the default GPU context.
     pub fn new(case: &Case, prec: Precision) -> Result<GpuRunner> {
-        let host = case.build_solver();
+        let host = case.try_build_solver()?;
         let t0 = Instant::now();
         let ctx = luma::default_context()?;
         // The native CPU solver is faster than the GPU kernels on a software rasterizer, so `Backend::Auto` falls back to it.
         if ctx.is_cpu() {
-            return Err(bowshock_gpu::GpuError::Unsupported("no GPU: Luma opened a software (CPU) Vulkan device"));
+            return Err(Error::Gpu("no GPU: Luma opened a software (CPU) Vulkan device".into()));
         }
         let gpu = GpuSolver::from_host(&ctx, &host, prec)?;
         Ok(GpuRunner { gpu, host, setup_seconds: t0.elapsed().as_secs_f64() })
@@ -87,7 +90,7 @@ impl GpuRunner {
         }
         if warm {
             self.gpu.set_iter(n.first_order_iters);
-            self.gpu.restart_ramp(); // implicit scheme: CFL ramp restarts at every Mach number
+            self.gpu.restart_ramp()?; // implicit scheme: CFL ramp restarts at every Mach number
         } else {
             self.gpu.reset()?; // free stream of `case.mach`, iteration 0, ramp restarted
         }

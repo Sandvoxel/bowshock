@@ -33,3 +33,10 @@ impl From<bowshock_gpu::GpuError> for Error {
         Error::Gpu(e.to_string())
     }
 }
+
+#[cfg(feature = "gpu")]
+impl From<bowshock_gpu::LumaError> for Error {
+    fn from(e: bowshock_gpu::LumaError) -> Self {
+        Error::Gpu(e.to_string())
+    }
+}
