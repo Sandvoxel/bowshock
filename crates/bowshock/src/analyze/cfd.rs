@@ -545,50 +545,69 @@ fn blend(c: &CfdPoint, now: &DragBreakdown, zero: Option<&DragBreakdown>) -> Dra
     DragBreakdown { friction, pressure, base, fins, protuberances, total: friction + pressure + base + fins + protuberances }
 }
 
-/// Extended's zero-angle drag coefficient at `mach` from a sweep (linear between its samples, held at its ends).
-fn sweep_cd(sweep: &[MachPoint], mach: f64) -> f64 {
+/// The drag parts at `mach`, linearly interpolated over a sweep of Mach points and held at its ends; `None` for an empty sweep.
+fn drag_at(sweep: &[MachPoint], mach: f64) -> Option<DragBreakdown> {
     let i = sweep.partition_point(|p| p.mach <= mach);
-    match (i.checked_sub(1).and_then(|k| sweep.get(k)), sweep.get(i)) {
-        (Some(a), Some(b)) if b.mach > a.mach => a.drag.total + (b.drag.total - a.drag.total) * (mach - a.mach) / (b.mach - a.mach),
-        (Some(a), _) => a.drag.total,
-        (None, Some(b)) => b.drag.total,
-        (None, None) => f64::NAN,
-    }
+    let a = sweep.get(i.saturating_sub(1))?;
+    let b = match sweep.get(i) {
+        Some(b) if i > 0 && b.mach > a.mach => b,
+        _ => return Some(a.drag),
+    };
+    let t = (mach - a.mach) / (b.mach - a.mach);
+    let l = |x: f64, y: f64| x + (y - x) * t;
+    let (x, y) = (&a.drag, &b.drag);
+    Some(DragBreakdown {
+        friction: l(x.friction, y.friction),
+        pressure: l(x.pressure, y.pressure),
+        base: l(x.base, y.base),
+        fins: l(x.fins, y.fins),
+        protuberances: l(x.protuberances, y.protuberances),
+        total: l(x.total, y.total),
+    })
+}
+
+/// The first node's point `first` carried down to `mach` by Extended's zero-angle trend, part by part: each part is scaled by
+/// its Extended drag at `mach` (`ext0_m`) over that at the first node (`ext0_lo`). A part Extended has no drag for there is held.
+fn below(first: &CfdPoint, ext0_m: &DragBreakdown, ext0_lo: &DragBreakdown, mach: f64) -> CfdPoint {
+    let scale = |part: f64, m: f64, lo: f64| {
+        let s = part * m / lo;
+        if lo.abs() < 1e-12 || !s.is_finite() {
+            part
+        } else {
+            s
+        }
+    };
+    let friction = scale(first.friction, ext0_m.friction, ext0_lo.friction);
+    let pressure = scale(first.pressure, ext0_m.pressure, ext0_lo.pressure);
+    let base = scale(first.base, ext0_m.base, ext0_lo.base);
+    let fins = scale(first.fins, ext0_m.fins, ext0_lo.fins);
+    let other = scale(first.other, ext0_m.protuberances, ext0_lo.protuberances);
+    CfdPoint { mach, cd: friction + pressure + base + fins + other, friction, pressure, base, fins, other, quality: first.quality }
 }
 
 /// The Mach sweep with the table's zero-lift drag: stability (margin, CP, `CNα`) from `extended` (the Extended method at the set
 /// angle), drag from the table plus Extended's change of drag from zero angle to that angle (`zero`: the same sweep at zero
-/// angle, point for point; `None` at zero angle). Mach numbers above the table are dropped. Below its first node (the table
-/// starts at Mach 0.2: lower Mach numbers are too slow to solve, see [`SOLVER_MACH`]) the drag is the first node's, part by
-/// part, scaled by Extended's change of drag from that node down to the Mach number (the subsonic drag barely depends on Mach
-/// there; what changes is the Reynolds number, which the build-up method follows).
+/// angle, point for point; `None` at zero angle). Below the table's first node the drag is the first node's scaled part by part
+/// by Extended's zero-angle Mach trend (see [`below`]); above the last node nothing is kept.
 pub fn mach_points(table: &CfdTable, extended: Vec<MachPoint>, zero: Option<&[MachPoint]>) -> Vec<MachPoint> {
-    let (lo, hi) = (table.points[0].mach, table.points[table.points.len() - 1].mach);
-    let first = table.points[0];
-    let anchor = sweep_cd(zero.unwrap_or(&extended), lo);
+    let (first, hi) = (table.points[0], table.points[table.points.len() - 1].mach);
+    let ext0 = zero.unwrap_or(&extended);
+    let ext0_lo = drag_at(ext0, first.mach);
+    let table_drag: Vec<CfdPoint> = ext0
+        .iter()
+        .zip(&extended)
+        .map(|(z, p)| match &ext0_lo {
+            Some(l) if p.mach < first.mach - 1e-9 => below(&first, &z.drag, l, p.mach),
+            _ => at(table, p.mach),
+        })
+        .collect();
     extended
         .into_iter()
+        .zip(table_drag)
         .enumerate()
-        .filter(|(_, p)| p.mach <= hi + 1e-9)
-        .map(|(i, mut p)| {
-            let z = zero.and_then(|z| z.get(i)).map(|z| z.drag);
-            let c = if p.mach < lo - 1e-9 {
-                let own = z.as_ref().unwrap_or(&p.drag).total;
-                let r = if anchor > 0.0 && own.is_finite() { own / anchor } else { 1.0 };
-                CfdPoint {
-                    mach: p.mach,
-                    cd: first.cd * r,
-                    friction: first.friction * r,
-                    pressure: first.pressure * r,
-                    base: first.base * r,
-                    fins: first.fins * r,
-                    other: first.other * r,
-                    quality: first.quality,
-                }
-            } else {
-                at(table, p.mach)
-            };
-            p.drag = blend(&c, &p.drag, z.as_ref());
+        .filter(|(_, (p, _))| p.mach <= hi + 1e-9)
+        .map(|(i, (mut p, c))| {
+            p.drag = blend(&c, &p.drag, zero.and_then(|z| z.get(i)).map(|z| &z.drag));
             p
         })
         .collect()
@@ -779,19 +798,72 @@ mod tests {
         };
         let (ext, zero) = (sweep(0.0), sweep(0.0));
         let points = mach_points(&t, ext.clone(), Some(&zero));
-        assert_eq!(points.len(), 5, "Mach numbers above the table (2.5) are dropped");
+        assert_eq!(points.len(), 5, "the table's Mach numbers (0.5 to 2.0) and the one below its first node");
         assert!((points[1].drag.total - 0.4).abs() < 1e-9 && (points[3].drag.total - 0.7).abs() < 1e-9);
         assert_eq!(points[2].margin_cal, ext[2].margin_cal, "margin, CP and CNα stay Extended's");
-        // Below the table: the first node's drag, scaled by Extended's change of drag from that node down.
-        let below = 0.4 * ext[0].drag.total / ext[1].drag.total;
-        assert!((points[0].drag.total - below).abs() < 1e-9, "{} vs {below}", points[0].drag.total);
-        assert!((points[0].drag.fins / points[0].drag.total - 0.3).abs() < 1e-9, "the parts keep the node's shares");
         // At an angle, Extended's change of drag is added on top of the solved zero-lift drag.
         let angled = sweep(8f64.to_radians());
         let with = mach_points(&t, angled.clone(), Some(&zero));
         assert!(with[2].drag.total > points[2].drag.total);
         let induced = angled[2].drag.total - zero[2].drag.total;
         assert!((with[2].drag.total - points[2].drag.total - induced).abs() < 1e-9);
+    }
+
+    /// An Extended-like sweep at zero angle over `machs` with parts that grow with Mach (`other` is zero when `no_other`).
+    fn synthetic(machs: &[f64], no_other: bool) -> Vec<MachPoint> {
+        let (_, vehicle) = example();
+        let atm = Atmosphere::standard();
+        machs
+            .iter()
+            .flat_map(|&m| vs_mach(&vehicle, 1.0, (m, m), 1, 0.0, &atm, 120.0))
+            .map(|mut p| {
+                let m = p.mach;
+                p.drag = DragBreakdown {
+                    friction: 0.02 * (1.0 + m),
+                    pressure: 0.05 * (1.0 + 2.0 * m),
+                    base: 0.03 * (1.0 + 3.0 * m),
+                    fins: 0.04 * (1.0 + 4.0 * m),
+                    protuberances: if no_other { 0.0 } else { 0.01 * (1.0 + 5.0 * m) },
+                    total: 0.0,
+                };
+                p
+            })
+            .collect()
+    }
+
+    fn table_from(first: f64) -> CfdTable {
+        let mut t = table();
+        t.points[0].mach = first;
+        t
+    }
+
+    #[test]
+    fn below_the_first_node_the_first_point_is_scaled_by_extendeds_trend() {
+        let t = table_from(0.3);
+        let ext = synthetic(&[0.1, 0.2, 0.3, 0.5, 1.0, 2.0, 2.5], false);
+        let points = mach_points(&t, ext.clone(), None);
+        assert_eq!(points.len(), 6, "below the first node is kept, above the last is not");
+        let first = t.points[0];
+        let at_lo = points.iter().find(|p| (p.mach - 0.3).abs() < 1e-9).unwrap();
+        assert!((at_lo.drag.friction - first.friction).abs() < 1e-12 && (at_lo.drag.total - first.cd).abs() < 1e-12);
+        let (m, lo) = (&ext[0].drag, &ext[2].drag);
+        let p = &points[0].drag;
+        assert!((p.friction - first.friction * m.friction / lo.friction).abs() < 1e-12);
+        assert!((p.pressure - first.pressure * m.pressure / lo.pressure).abs() < 1e-12);
+        assert!((p.base - first.base * m.base / lo.base).abs() < 1e-12);
+        assert!((p.fins - first.fins * m.fins / lo.fins).abs() < 1e-12);
+        assert!((p.protuberances - first.other * m.protuberances / lo.protuberances).abs() < 1e-12);
+        assert!((p.total - (p.friction + p.pressure + p.base + p.fins + p.protuberances)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_part_without_extended_drag_at_the_first_node_is_held() {
+        let t = table_from(0.3);
+        let ext = synthetic(&[0.1, 0.3, 0.5], true);
+        let points = mach_points(&t, ext, None);
+        let p = &points[0].drag;
+        assert!(p.total.is_finite() && p.protuberances.is_finite());
+        assert_eq!(p.protuberances, t.points[0].other);
     }
 
     /// One real solve on a tiny grid (the example rocket, two Mach numbers, coarse grid). Needs a GPU for speed; ignored in the

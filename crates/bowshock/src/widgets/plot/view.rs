@@ -919,24 +919,29 @@ impl PlotView<'_> {
             line(f, Point::new(plot.x, y), Point::new(right, y), t.line_200, 1.0, LineStyle::Solid);
         }
 
-        // The range beyond the flown envelope: a subtle muted band, labelled at the top of the first panel.
+        // Shaded x ranges: a subtle muted band each. `before` runs from the left end of the axis to its value, `beyond` from its
+        // value to the right end. Labels sit at the bottom-left of the band: `beyond`'s in the first panel, `before`'s in the last
+        // (so the two never meet). Each band is (left, right, edge, label, labelled here).
+        let is_first = self.group.panels.first().is_some_and(|p| std::ptr::eq(p, panel));
+        let is_last = self.group.panels.last().is_some_and(|p| std::ptr::eq(p, panel));
+        let mut bands: Vec<(f32, f32, f32, &String, bool)> = Vec::new();
+        if let Some((to, label)) = &self.group.before {
+            if *to > w0 {
+                let xb = layout.px(to.min(w1)).min(right);
+                bands.push((plot.x, xb, xb, label, is_last));
+            }
+        }
         if let Some((from, label)) = &self.group.beyond {
             if *from < w1 {
                 let xa = layout.px(from.max(w0)).max(plot.x);
-                let band = if t.bg_200.r > 0.5 { 0.07 } else { 0.16 };
-                f.fill_rectangle(Point::new(xa, plot.y), Size::new((right - xa).max(0.0), plot.height), Color { a: band, ..t.ink_muted });
-                if self.group.panels.first().is_some_and(|p| std::ptr::eq(p, panel)) {
-                    put(
-                        f,
-                        &label.to_uppercase(),
-                        Point::new(xa + 6.0, bottom - 3.0),
-                        t.ink_muted,
-                        FONT_SMALL,
-                        Alignment::Left,
-                        alignment::Vertical::Bottom,
-                        MONO,
-                    );
-                }
+                bands.push((xa, right, xa, label, is_first));
+            }
+        }
+        for &(x0, x1, _, label, labelled) in &bands {
+            let band = if t.bg_200.r > 0.5 { 0.07 } else { 0.16 };
+            f.fill_rectangle(Point::new(x0, plot.y), Size::new((x1 - x0).max(0.0), plot.height), Color { a: band, ..t.ink_muted });
+            if labelled {
+                put(f, &label.to_uppercase(), Point::new(x0 + 6.0, bottom - 3.0), t.ink_muted, FONT_SMALL, Alignment::Left, alignment::Vertical::Bottom, MONO);
             }
         }
 
@@ -975,12 +980,11 @@ impl PlotView<'_> {
             }
         }
 
-        // The beyond-flight band over stacked fills (which would hide a band drawn under them): the fills fade there.
-        if let (Some((from, _)), true) = (&self.group.beyond, panel.is_stacked()) {
-            if *from < w1 {
-                let xa = layout.px(from.max(w0)).max(plot.x);
-                f.fill_rectangle(Point::new(xa, plot.y), Size::new((right - xa).max(0.0), plot.height), Color { a: 0.28, ..t.bg_200 });
-                line(f, Point::new(crisp(xa), plot.y), Point::new(crisp(xa), bottom), t.ink_faint, 1.0, LineStyle::Dotted);
+        // The bands over stacked fills (which would hide a band drawn under them): the fills fade there.
+        if panel.is_stacked() {
+            for &(x0, x1, edge, _, _) in &bands {
+                f.fill_rectangle(Point::new(x0, plot.y), Size::new((x1 - x0).max(0.0), plot.height), Color { a: 0.28, ..t.bg_200 });
+                line(f, Point::new(crisp(edge), plot.y), Point::new(crisp(edge), bottom), t.ink_faint, 1.0, LineStyle::Dotted);
             }
         }
 

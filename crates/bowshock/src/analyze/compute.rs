@@ -380,6 +380,8 @@ pub struct CfdInfo {
     pub solve_seconds: f64,
     /// The grid it was solved on.
     pub grid: CfdGrid,
+    /// The table's first Mach node when the plotted range starts below it (the drag there is the first point scaled by Extended's trend).
+    pub scaled_below: Option<f64>,
     /// What was not solved as the document has it, and what the plots do not cover.
     pub notes: Vec<String>,
 }
@@ -583,9 +585,13 @@ fn cfd_info(table: &CfdTable, analysis: Analysis, cond: &Conditions) -> CfdInfo 
         }
         _ => {
             let (lo, hi) = (cond.mach.0.min(cond.mach.1), cond.mach.0.max(cond.mach.1));
-            scaled_below = (lo < first - 1e-9).then_some(first);
-            if hi > last + 1e-9 {
-                notes.push(format!("The table ends at Mach {last:.2}; the plots stop there."));
+            let (low, high) = (lo < first - 1e-9, hi > last + 1e-9);
+            if low {
+                scaled_below = Some(first);
+                notes.push(format!("Below Mach {first:.2} the drag is the table's first point scaled by Extended's Mach trend (shaded)."));
+            }
+            if high {
+                notes.push(format!("The table covers up to Mach {last:.2}; the plots stop there."));
             }
             table.points.iter().filter(|p| p.mach >= lo - 1e-9 && p.mach <= hi + 1e-9).count()
         }
@@ -597,6 +603,7 @@ fn cfd_info(table: &CfdTable, analysis: Analysis, cond: &Conditions) -> CfdInfo 
         solved_at: table.solved_at,
         solve_seconds: table.solve_seconds,
         grid: table.grid,
+        scaled_below,
         notes,
     }
 }
@@ -808,6 +815,32 @@ mod tests {
         assert_eq!(after.stocks.len(), after.vehicle.fin_sets.len());
         let worst = |j: &ConfigJob| flutter(j).unwrap().min_margin();
         assert!(worst(&after) < worst(&before), "{} vs {}", worst(&after), worst(&before));
+    }
+
+    #[test]
+    fn the_cfd_info_says_when_the_range_starts_below_the_first_node() {
+        use bowshock_model::{CfdPoint, CfdQuality};
+        let point = |mach: f64| CfdPoint { mach, cd: 0.5, friction: 0.1, pressure: 0.1, base: 0.1, fins: 0.1, other: 0.1, quality: CfdQuality::Converged };
+        let table = CfdTable {
+            key: 1,
+            geometry: 1,
+            stage: 1,
+            solved_at: 0,
+            solve_seconds: 1.0,
+            backend: "CPU".into(),
+            fallback: None,
+            altitude: 0.0,
+            notes: Vec::new(),
+            points: vec![point(0.3), point(1.0), point(2.0)],
+            grid: CfdGrid::Coarse,
+        };
+        let info = |mach: (f64, f64)| cfd_info(&table, Analysis::Drag, &Conditions { mach, ..Conditions::default() });
+        let low = info((0.1, 2.0));
+        assert_eq!(low.scaled_below, Some(0.3));
+        assert!(low.notes.iter().any(|n| n.starts_with("Below Mach 0.30")) && !low.notes.iter().any(|n| n.contains("plots stop")));
+        assert_eq!(info((0.3, 2.0)).scaled_below, None);
+        let both = info((0.1, 3.0));
+        assert_eq!(both.notes.len(), 2);
     }
 
     #[test]

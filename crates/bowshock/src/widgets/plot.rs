@@ -677,6 +677,9 @@ pub struct PlotGroup {
     /// Shade the x range from this value to the end of the axis as lying outside the flown envelope, labelled with the text
     /// (`beyond flight · M 0.53`) at the bottom-left of the band in the first panel.
     pub beyond: Option<(f64, String)>,
+    /// Shade the x range from the start of the axis to this value, labelled with the text at the bottom-left of the band in the
+    /// last panel (so it does not meet `beyond`'s label in the first); the drag there is scaled from another method.
+    pub before: Option<(f64, String)>,
 }
 
 impl PlotGroup {
@@ -693,6 +696,7 @@ impl PlotGroup {
             x_range: None,
             y_ticks: YTicks::Nice,
             beyond: None,
+            before: None,
         }
     }
 

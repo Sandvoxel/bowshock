@@ -88,6 +88,12 @@ pub fn build(out: &Output, units: UnitSystem, overlay: Option<&Overlay>, active:
         if flown.is_finite() && flown < out.conditions.mach.1 {
             group.beyond = Some((flown, format!("beyond flight · M {flown:.2}")));
         }
+        // Below the CFD table's first node the drag is scaled from Extended: shaded too.
+        if let Some(lo) = out.cfd.as_ref().and_then(|c| c.scaled_below) {
+            if group.x_range.is_some_and(|(a, _)| a < lo) {
+                group.before = Some((lo, format!("scaled from Extended · M < {lo:.2}")));
+            }
+        }
     }
     Built { group, ground, legend, scale }
 }
