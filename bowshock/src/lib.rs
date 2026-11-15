@@ -16,4 +16,4 @@ pub use atmosphere::{AirState, Atmosphere, FlightConditions};
 pub use engine::case::Wake;
 pub use engine::result::StopReason;
 pub use error::Error;
-pub use spec::{AftSpec, BodySpec, FinProfile, FinSpec, NoseShape, NoseSpec};
+pub use spec::{AftSpec, BodySpec, FinProfile, FinSpec, MotorSpec, NoseShape, NoseSpec};

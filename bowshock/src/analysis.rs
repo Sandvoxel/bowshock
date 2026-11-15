@@ -2,13 +2,14 @@
 
 use crate::atmosphere::{FlightConditions, SUTHERLAND_S};
 use crate::engine::body_grid::{check_quality, BaseBody, MAX_STRETCHING, MAX_STRETCHING_VISCOUS_J};
-use crate::engine::case::{Case, Wake};
+use crate::engine::case::{Case, Jet, Wake};
 use crate::engine::numerics::Numerics;
 use crate::engine::result::{PointResult, StopReason};
 use crate::engine::run::run_on;
 use crate::error::Error;
-use crate::spec::{BodySpec, FinSpec};
-use bowshock_core::solver::Solver;
+use crate::spec::{BodySpec, FinSpec, MotorSpec};
+use bowshock_core::gas::GAMMA;
+use bowshock_core::solver::{Solver, Turbulence, Viscous};
 use bowshock_reference::base_drag::base_drag_coefficient;
 
 /// Lowest and highest Mach number accepted by [`Analysis::run`].
@@ -74,7 +75,8 @@ pub struct Drag {
     pub forebody_pressure: f64,
     /// Skin friction, if it was computed.
     pub friction: Option<f64>,
-    /// Base drag: from a correlation when `base_modelled`, otherwise from the solver.
+    /// Base drag: from a correlation when `base_modelled`, otherwise from the solver. With a motor it is the base drag of the annulus
+    /// around the nozzle exit only; the jet's thrust is not a drag term.
     pub base: f64,
     /// `base` comes from a correlation (the inviscid wake gives no physical base pressure).
     pub base_modelled: bool,
@@ -169,7 +171,7 @@ pub struct PointDetail {
     /// Base drag computed by the solver; NaN without a base wake.
     #[cfg_attr(feature = "serde", serde(deserialize_with = "nan_or_f64"))]
     pub cd_base_solver: f64,
-    /// Area-mean base pressure coefficient; NaN without a base wake.
+    /// Area-mean base pressure coefficient (over the annulus around the nozzle exit with a motor); NaN without a base wake.
     #[cfg_attr(feature = "serde", serde(deserialize_with = "nan_or_f64"))]
     pub cp_base: f64,
     /// Body-surface faces in axial order (no sting extension).
@@ -203,6 +205,8 @@ pub struct Polar {
     pub backend: BackendUsed,
     /// Why the GPU was not used under [`Backend::Auto`].
     pub fallback: Option<String>,
+    /// The analysis had a motor: the base flow contains the jet.
+    pub motor_on: bool,
 }
 
 /// Configuration of a sweep over Mach number for one body.
@@ -218,6 +222,7 @@ pub struct Analysis {
     wake: Option<Wake>,
     flight: Option<FlightConditions>,
     fins: Option<FinSpec>,
+    motor: Option<MotorSpec>,
     backend: Backend,
     numerics: Option<Numerics>,
     max_iterations: Option<usize>,
@@ -230,6 +235,7 @@ struct Rans {
     re_c: f64,
     sutherland: f64,
     mach_max: f64,
+    jet: Option<Jet>,
 }
 
 impl Analysis {
@@ -246,6 +252,7 @@ impl Analysis {
             wake: None,
             flight: None,
             fins: None,
+            motor: None,
             backend: Backend::Auto,
             numerics: None,
             max_iterations: None,
@@ -332,6 +339,14 @@ impl Analysis {
         self
     }
 
+    /// Add a rocket motor exhausting through the centre of the base: a motor-on analysis, where the base flow contains the jet
+    /// (an air jet at the nozzle exit, see [`MotorSpec`]). Needs [`Analysis::viscous`] and the base wake. The jet's thrust is not
+    /// drag: [`Drag::base`] covers only the annulus of the base around the nozzle exit.
+    pub fn motor(mut self, m: MotorSpec) -> Self {
+        self.motor = Some(m);
+        self
+    }
+
     /// Free-stream Reynolds number, Sutherland constant and highest Mach number of a viscous sweep; `None` for the Euler equations.
     fn rans(&self, machs: &[f64]) -> Result<Option<Rans>, Error> {
         let Some(flight) = self.flight else {
@@ -341,11 +356,19 @@ impl Analysis {
             return Err(Error::InvalidInput("viscous analysis needs a dimensional BodySpec".into()));
         }
         let air = flight.atmosphere.state()?;
-        Ok(Some(Rans {
-            re_c: air.density * air.sound_speed * self.d_nose / air.viscosity,
-            sutherland: SUTHERLAND_S / air.temperature_k,
-            mach_max: machs.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-        }))
+        let re_c = air.density * air.sound_speed * self.d_nose / air.viscosity;
+        let sutherland = SUTHERLAND_S / air.temperature_k;
+        // jet at the nozzle exit in solver units (rho = 1, c = 1, p = 1/gamma, T = 1 of the free stream)
+        let jet = self.motor.map(|m| {
+            let t = m.total_temperature_k / (1.0 + 0.2 * m.exit_mach * m.exit_mach) / air.temperature_k;
+            let p = m.exit_pressure_pa / air.pressure_pa;
+            let rho = p / t;
+            let u = m.exit_mach * t.sqrt();
+            let k = 1.5 * (0.01 * u).powi(2);
+            let mu = Viscous { re_c, sutherland, turbulence: Turbulence::Sst, wall_i_start: 0 }.mu(t);
+            Jet { r_exit: 0.5 * m.exit_diameter / self.d_nose, state: [rho, u, 0.0, p / GAMMA], turb: [k, rho * k / (10.0 * mu)] }
+        });
+        Ok(Some(Rans { re_c, sutherland, mach_max: machs.iter().copied().fold(f64::NEG_INFINITY, f64::max), jet }))
     }
 
     /// Zero-lift drag at each Mach number of `machs` (each in `[0.1, 3.0]`).
@@ -370,6 +393,19 @@ impl Analysis {
             if !self.dimensional {
                 return Err(Error::InvalidInput("fins need a dimensional BodySpec".into()));
             }
+        }
+
+        if let Some(m) = &self.motor {
+            if self.flight.is_none() {
+                return Err(Error::InvalidInput("motor-on analysis needs Analysis::viscous".into()));
+            }
+            if self.wake == Some(Wake::Sting) {
+                return Err(Error::InvalidInput("motor-on analysis needs the base wake".into()));
+            }
+            if !self.dimensional {
+                return Err(Error::InvalidInput("motor-on analysis needs a dimensional BodySpec".into()));
+            }
+            m.validate(self.body.base_radius() * 2.0 * self.d_nose)?;
         }
 
         // cases in ascending Mach order (stable), results restored to input order below
@@ -412,7 +448,7 @@ impl Analysis {
             slots[k] = Some(self.point(machs[k], detail, other.as_ref()));
         }
         let points = slots.into_iter().map(|p| p.expect("every Mach number has a result")).collect();
-        Ok(Polar { points, backend, fallback })
+        Ok(Polar { points, backend, fallback, motor_on: self.motor.is_some() })
     }
 
     /// Wake treatment in use: the one set with [`Analysis::wake`], else a base wake for a viscous analysis and a sting otherwise.
@@ -432,7 +468,10 @@ impl Analysis {
         if let Some(cap) = self.max_iterations {
             case.numerics.max_iter = case.numerics.max_iter.min(cap);
         }
-        case
+        match rans.and_then(|r| r.jet) {
+            Some(jet) => case.with_motor(jet),
+            None => case,
+        }
     }
 
     /// Drag of one solver result, referenced to the reference area. A viscous analysis adds the skin friction and, with a base

@@ -220,7 +220,8 @@ pub fn base_state(s: &Solver, rb2: f64) -> (Vec<BasePoint>, f64, f64, f64) {
     let cp = |p: f64| (p - p_inf) / q_inf;
     let ie = b.i_end;
     let (mut pts, mut cd, mut mean, mut mean_cell, mut s_sum) = (Vec::new(), 0.0, 0.0, 0.0, 0.0);
-    for j in b.j_sting..b.j_end {
+    let j0 = s.nozzle().map_or(b.j_sting, |n| n.j_end);
+    for j in j0..b.j_end {
         let (n0, n1) = (g.node(ie, j), g.node(ie, j + 1));
         let (xm, rm) = (n0.0, 0.5 * (n0.1 + n1.1));
         let (p0, p1) = (s.pressure(ie, j), s.pressure(ie + 1, j));

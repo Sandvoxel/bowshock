@@ -1,6 +1,8 @@
 //! Viscous (RANS, k-omega SST) analysis gate G3: skin friction, wall resolution and base pressure of a body at subsonic speed.
 
-use bowshock::{AftSpec, Analysis, Atmosphere, Backend, BodySpec, FinProfile, FinSpec, FlightConditions, NoseShape, NoseSpec, Quality, Resolution};
+use bowshock::{
+    AftSpec, Analysis, Atmosphere, Backend, BodySpec, FinProfile, FinSpec, FlightConditions, MotorSpec, NoseShape, NoseSpec, Quality, Resolution, Wake,
+};
 use std::time::Instant;
 
 /// Tangent ogive 0.30 x 0.10 m and a 0.60 m tube at Mach 0.5 in the ISA at sea level: the friction drag is within 15 % of the
@@ -140,4 +142,51 @@ fn fins_add_friction_and_pressure_drag() {
 fn fins_without_flight_conditions_are_rejected() {
     let err = Analysis::new(&g3_spec()).unwrap().fins(fin_set()).run(&[0.5]).unwrap_err();
     assert_eq!(err.to_string(), "fins need flight conditions: call Analysis::viscous");
+}
+
+fn motor() -> MotorSpec {
+    MotorSpec { exit_diameter: 0.06, exit_mach: 2.5, exit_pressure_pa: 101325.0, total_temperature_k: 1500.0 }
+}
+
+/// The G3 body with a Mach 2.5 jet from a 60 mm exit in a 100 mm base: the point is flagged motor-on, the base drag is the solver's
+/// (annulus only) and the base pressure is finite.
+#[test]
+fn motor_on_analysis_reports_annulus_base_drag() {
+    let t0 = Instant::now();
+    let polar = Analysis::new(&g3_spec())
+        .unwrap()
+        .motor(motor())
+        .backend(Backend::Cpu)
+        .resolution(Resolution::Coarse)
+        .viscous(FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 0.0 } })
+        .max_iterations(100)
+        .run(&[0.8])
+        .unwrap();
+    let p = &polar.points[0];
+    let (d, r) = (&p.drag, &p.detail);
+    println!("motor: forebody {:.5}  friction {:.5}  base {:.5}  total {:.5}", d.forebody_pressure, d.friction.unwrap(), d.base, d.total);
+    println!(
+        "motor: cp_base {:.4}  quality {:?}  iterations {}  stop {}  wall {:.1} s",
+        r.cp_base,
+        p.quality,
+        r.iterations,
+        r.stop_reason,
+        t0.elapsed().as_secs_f64()
+    );
+    assert!(polar.motor_on);
+    assert!(!d.base_modelled);
+    assert_ne!(p.quality, Quality::Failed);
+    assert!(r.cp_base.is_finite(), "cp_base {}", r.cp_base);
+}
+
+#[test]
+fn motor_run_errors() {
+    let flight = FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 0.0 } };
+    let err = Analysis::new(&g3_spec()).unwrap().motor(motor()).run(&[0.5]).unwrap_err();
+    assert_eq!(err.to_string(), "motor-on analysis needs Analysis::viscous");
+    let err = Analysis::new(&g3_spec()).unwrap().motor(motor()).viscous(flight).wake(Wake::Sting).run(&[0.5]).unwrap_err();
+    assert_eq!(err.to_string(), "motor-on analysis needs the base wake");
+    let wide = MotorSpec { exit_diameter: 0.0951, ..motor() };
+    let err = Analysis::new(&g3_spec()).unwrap().motor(wide).viscous(flight).run(&[0.5]).unwrap_err();
+    assert!(err.to_string().contains("motor.exit_diameter"), "{err}");
 }

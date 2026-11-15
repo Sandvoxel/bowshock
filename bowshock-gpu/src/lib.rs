@@ -224,6 +224,9 @@ impl GpuSolver {
         if !matches!(host.scheme(), Scheme::Explicit | Scheme::Implicit(_)) {
             return Err(GpuError::Unsupported("only Scheme::Explicit and Scheme::Implicit are implemented on the GPU"));
         }
+        if host.nozzle().is_some() {
+            return Err(GpuError::Unsupported("nozzle (motor-on) cases are not supported on the GPU yet"));
+        }
         let inner = match prec {
             Precision::F32 => Inner::F32(f32s::LazySolver::from_host(ctx, host)?),
             Precision::Extended => Inner::Ext(df32s::LazySolver::from_host(ctx, host)?),

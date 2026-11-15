@@ -1,10 +1,11 @@
 //! A single-Mach-number case: body, grids and numerics, and the solver built from them.
 
-use crate::engine::body_grid::{base_domain_grid, large_domain_grid, BaseBody, BaseGridParams, LargeGridParams};
+use crate::engine::body_grid::{base_domain_grid, large_domain_grid, BaseBody, BaseGridParams, LargeGridParams, NozzleRows};
 use crate::engine::numerics::Numerics;
 use crate::error::Error;
 use bowshock_core::gas::freestream;
-use bowshock_core::solver::{Bc, Config, Solver, Turbulence, Viscous};
+use bowshock_core::gas::Prim;
+use bowshock_core::solver::{Bc, Config, Nozzle, Solver, Turbulence, Viscous};
 
 /// Treatment of the region behind the body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13,6 +14,17 @@ pub enum Wake {
     Sting,
     /// Finite body with a flat base and a wake region (`base_domain_grid`).
     Base,
+}
+
+/// Motor jet at the nozzle exit, internal units.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Jet {
+    /// Exit radius.
+    pub r_exit: f64,
+    /// Primitive state at the exit (supersonic, axial).
+    pub state: Prim,
+    /// `[k, omega]` of the jet.
+    pub turb: [f64; 2],
 }
 
 /// One Mach number on one body.
@@ -26,6 +38,8 @@ pub struct Case {
     pub numerics: Numerics,
     /// Viscous flow parameters (RANS with the SST model); `None`: Euler equations.
     pub viscous: Option<Viscous>,
+    /// Motor jet from the base; `None`: power-off.
+    pub motor: Option<Jet>,
 }
 
 impl Case {
@@ -72,6 +86,7 @@ impl Case {
             dx_tip,
             dr_wall: 0.03 / f as f64,
             gap_one_sided: false,
+            nozzle: None,
         };
         let grid_sting = LargeGridParams {
             body: body.clone(),
@@ -86,7 +101,7 @@ impl Case {
             dx_tip,
             dr_wall: 0.03 / f as f64,
         };
-        Case { mach, body, wake, grid_base, grid_sting, numerics, viscous: None }
+        Case { mach, body, wake, grid_base, grid_sting, numerics, viscous: None, motor: None }
     }
 
     /// Wall-resolved RANS case: [`Case::new`] with [`Numerics::viscous`], first cell height at the wall for `y+ ~ 1` at the highest
@@ -97,7 +112,7 @@ impl Case {
         let mut c = Case::new(mach, body, level, wake, Numerics::viscous(mach, level));
         let cf = 0.027 * (re_c * mach_max * c.body.x_base()).powf(-1.0 / 7.0);
         let y1 = 1.0 / (re_c * mach_max * (0.5 * cf).sqrt());
-        let count = |h: f64| even_ceil((1.0 + 0.2 * h / y1).ln() / 1.2f64.ln());
+        let count = |h: f64| layer_count(h, y1);
         let (re, rs) = (c.body.base_radius(), c.body.sting_radius);
         c.grid_base.dr_wall = y1;
         c.grid_base.nj_out = count(c.grid_base.r_far - re);
@@ -111,6 +126,21 @@ impl Case {
         };
         c.viscous = Some(Viscous { re_c, sutherland, turbulence: Turbulence::Sst, wall_i_start });
         c
+    }
+
+    /// Add a motor jet from the centre of the base to a case built by [`Case::viscous`] (panics otherwise, or without the
+    /// base wake): splits the gap behind the base into the nozzle exit (rows clustered at the lip, `n_jet` rows) and the annulus
+    /// around it (`n_ann` rows, at least 4), `n_gap = n_jet + n_ann`.
+    pub fn with_motor(mut self, jet: Jet) -> Case {
+        assert!(self.viscous.is_some() && self.wake == Wake::Base, "a motor needs a viscous case with the base wake");
+        let y1 = self.grid_base.dr_wall;
+        let re = self.body.base_radius();
+        let n_jet = layer_count(jet.r_exit, y1);
+        let n_ann = (2 * layer_count(0.5 * (re - jet.r_exit), y1)).max(4);
+        self.grid_base.n_gap = n_jet + n_ann;
+        self.grid_base.nozzle = Some(NozzleRows { r_exit: jet.r_exit, n_jet });
+        self.motor = Some(jet);
+        self
     }
 
     /// Scale the domain: inflow plane / outer boundary at `up` and the outflow plane at `down` total body lengths.
@@ -156,6 +186,10 @@ impl Case {
                 let (grid, block) = base_domain_grid(&self.grid_base)?;
                 s = Solver::new(grid, cfg);
                 s.set_block(Some(block));
+                if let Some(jet) = &self.motor {
+                    let n_jet = self.grid_base.nozzle.map_or(0, |z| z.n_jet);
+                    s.set_nozzle(Some(Nozzle { j_end: n_jet, state: jet.state, turb: jet.turb }));
+                }
             }
             Wake::Sting => {
                 s = Solver::new(large_domain_grid(&self.grid_sting)?, cfg);
@@ -172,4 +206,9 @@ impl Case {
 fn even_ceil(x: f64) -> usize {
     let n = x.ceil() as usize;
     n + n % 2
+}
+
+/// Number of rows of a wall-clustered layer of height `h` with first cell height `y1` and growth ratio 1.2 (even).
+fn layer_count(h: f64, y1: f64) -> usize {
+    even_ceil((1.0 + 0.2 * h / y1).ln() / 1.2f64.ln())
 }

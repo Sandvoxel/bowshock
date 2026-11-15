@@ -155,6 +155,8 @@ impl GpuRunner {
 /// factor `d0 / (d1 - d0)` and area weight), applied in f64 to the two cells per row of [`GpuSolver::base_cells`].
 pub struct BaseSampler {
     rows: Vec<(f64, f64)>,
+    /// Leading entries of `base_cells()` that belong to the nozzle exit (not part of the base drag).
+    skip: usize,
     p_inf: f64,
     q_inf: f64,
     s_sum: f64,
@@ -166,7 +168,8 @@ impl BaseSampler {
         let b = s.block().expect("a case with a base has a solid block");
         let (g, ni, fs) = (&s.grid, s.grid.ni, s.cfg.freestream);
         let ie = b.i_end;
-        let rows: Vec<(f64, f64)> = (b.j_sting..b.j_end)
+        let j0 = s.nozzle().map_or(b.j_sting, |n| n.j_end);
+        let rows: Vec<(f64, f64)> = (j0..b.j_end)
             .map(|j| {
                 let (n0, n1) = (g.node(ie, j), g.node(ie, j + 1));
                 let (xm, rm) = (n0.0, 0.5 * (n0.1 + n1.1));
@@ -176,7 +179,7 @@ impl BaseSampler {
             })
             .collect();
         let s_sum = rows.iter().map(|r| r.1).sum();
-        BaseSampler { rows, p_inf: fs[3], q_inf: 0.5 * fs[0] * fs[1] * fs[1], s_sum }
+        BaseSampler { rows, skip: j0 - b.j_sting, p_inf: fs[3], q_inf: 0.5 * fs[0] * fs[1] * fs[1], s_sum }
     }
 
     /// Area-mean Cp of the extrapolated base-wall pressure (`base_state(..).2`).
@@ -184,7 +187,7 @@ impl BaseSampler {
         let mean: f64 = self
             .rows
             .iter()
-            .zip(cells)
+            .zip(cells.iter().skip(self.skip))
             .map(|(&(k, ds), c)| {
                 let (p0, p1) = (cons_to_prim(&c[0])[3], cons_to_prim(&c[1])[3]);
                 (p0 + (p0 - p1) * k - self.p_inf) / self.q_inf * ds

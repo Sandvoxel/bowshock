@@ -1,6 +1,8 @@
 //! The public API never panics: awkward but valid bodies return `Ok` with every point finite or `Failed`.
 
-use bowshock::{AftSpec, Analysis, Backend, BodySpec, Error, NoseShape, NoseSpec, Quality, Resolution};
+use bowshock::{
+    AftSpec, Analysis, Atmosphere, Backend, BodySpec, Error, FinProfile, FinSpec, FlightConditions, MotorSpec, NoseShape, NoseSpec, Quality, Resolution,
+};
 
 const D: f64 = 0.1;
 
@@ -45,6 +47,31 @@ fn awkward_bodies_return_ok_with_finite_or_failed_points() {
             other => other.unwrap_or_else(|e| panic!("{name}: run failed: {e}")),
         };
         assert_eq!(polar.points.len(), machs.len(), "{name}");
+        for p in &polar.points {
+            println!("{name}: M = {:.2}, quality = {:?}, total = {:.5}", p.mach, p.quality, p.drag.total);
+            assert!(p.quality == Quality::Failed || p.drag.total.is_finite(), "{name} M = {}: {:?} with total {}", p.mach, p.quality, p.drag.total);
+        }
+    }
+}
+
+/// The ogive body with fins in a viscous analysis, power-off and with a motor: `Ok`, every point finite or `Failed`.
+#[test]
+fn fins_and_motor_return_ok_with_finite_or_failed_points() {
+    let body = spec(NoseShape::TangentOgive, 3.0, vec![tube(5.0)]);
+    let fins = FinSpec { count: 4, root_chord: 0.12, tip_chord: 0.06, span: 0.08, sweep: 0.06, thickness: 0.003, profile: FinProfile::Rounded };
+    let motor = MotorSpec { exit_diameter: 0.06, exit_mach: 2.5, exit_pressure_pa: 101_325.0, total_temperature_k: 1500.0 };
+    let analysis = || {
+        Analysis::new(&body)
+            .unwrap()
+            .fins(fins)
+            .viscous(FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 0.0 } })
+            .backend(Backend::Cpu)
+            .resolution(Resolution::Coarse)
+            .max_iterations(30)
+    };
+    for (name, a) in [("fins, viscous", analysis()), ("fins, viscous, motor", analysis().motor(motor))] {
+        let polar = a.run(&[0.5, 2.0]).unwrap_or_else(|e| panic!("{name}: run failed: {e}"));
+        assert_eq!(polar.points.len(), 2, "{name}");
         for p in &polar.points {
             println!("{name}: M = {:.2}, quality = {:?}, total = {:.5}", p.mach, p.quality, p.drag.total);
             assert!(p.quality == Quality::Failed || p.drag.total.is_finite(), "{name} M = {}: {:?} with total {}", p.mach, p.quality, p.drag.total);

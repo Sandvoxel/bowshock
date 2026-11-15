@@ -152,11 +152,51 @@ impl FinSpec {
     }
 }
 
+/// Rocket motor exhausting through the centre of the base, modelled as an air jet (gamma = 1.4) at the nozzle exit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct MotorSpec {
+    /// Diameter of the nozzle exit [m]; at most 0.95 of the base diameter.
+    pub exit_diameter: f64,
+    /// Mach number of the jet at the exit [-], in `[1, 5]`.
+    pub exit_mach: f64,
+    /// Static pressure at the exit [Pa].
+    pub exit_pressure_pa: f64,
+    /// Total temperature of the jet [K], in `[200, 4000]`.
+    pub total_temperature_k: f64,
+}
+
+impl MotorSpec {
+    /// Check the motor against the base diameter [m] of the body; `InvalidInput` names the offending field.
+    pub fn validate(&self, base_diameter: f64) -> Result<(), Error> {
+        positive("motor.exit_diameter", self.exit_diameter)?;
+        if self.exit_diameter > 0.95 * base_diameter {
+            return invalid("motor.exit_diameter", &format!("must be <= 0.95 of the base diameter {base_diameter}, got {}", self.exit_diameter));
+        }
+        if !(1.0..=5.0).contains(&self.exit_mach) {
+            return invalid("motor.exit_mach", &format!("must be in [1, 5], got {}", self.exit_mach));
+        }
+        positive("motor.exit_pressure_pa", self.exit_pressure_pa)?;
+        if !(200.0..=4000.0).contains(&self.total_temperature_k) {
+            return invalid("motor.total_temperature_k", &format!("must be in [200, 4000] K, got {}", self.total_temperature_k));
+        }
+        Ok(())
+    }
+}
+
 impl BodySpec {
     /// Largest diameter of the body [m].
     pub fn reference_diameter(&self) -> f64 {
         self.aft.iter().fold(self.nose.diameter, |d, a| match *a {
             AftSpec::Transition { aft_diameter, .. } => d.max(aft_diameter),
+            AftSpec::Tube { .. } => d,
+        })
+    }
+
+    /// Diameter of the flat base [m]: the diameter after the last aft section (the nose diameter when only tubes follow the nose).
+    pub fn base_diameter(&self) -> f64 {
+        self.aft.iter().fold(self.nose.diameter, |d, a| match *a {
+            AftSpec::Transition { aft_diameter, .. } => aft_diameter,
             AftSpec::Tube { .. } => d,
         })
     }

@@ -318,6 +318,15 @@ impl BaseBody {
     }
 }
 
+/// Rows of the gap behind the base that form the nozzle exit (motor-on grids).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NozzleRows {
+    /// Exit radius (also the radial position of the lip).
+    pub r_exit: f64,
+    /// Number of gap rows inside the exit (rows `0..n_jet` of the base block).
+    pub n_jet: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct BaseGridParams {
     pub body: BaseBody,
@@ -341,6 +350,8 @@ pub struct BaseGridParams {
     /// Cluster the rows of the gap between the sting (or axis) and the base radius at the base corner only (geometric growth
     /// from `dr_wall` towards the sting) instead of at both ends.
     pub gap_one_sided: bool,
+    /// Motor-on grids: the rows of the gap behind the base that form the nozzle exit (needs `n_sting == 0`).
+    pub nozzle: Option<NozzleRows>,
 }
 
 /// Grid with a solid body block and base (see `solver::Block`): H-grid whose first `j_end = n_sting + n_gap` rows lie
@@ -394,7 +405,20 @@ pub fn base_domain_grid(p: &BaseGridParams) -> Result<(Grid, Block), Error> {
     let (j_sting, j_end) = (p.n_sting, p.n_sting + p.n_gap);
     let nj = j_end + p.nj_out;
     let (re, rs) = (bb.base_radius(), bb.sting_radius);
-    let gap = if p.gap_one_sided {
+    let gap = if let Some(nz) = p.nozzle {
+        if bb.sting_radius != 0.0 {
+            return bad("a nozzle needs a base without a sting");
+        }
+        if !(nz.r_exit > 0.0 && nz.r_exit < re) {
+            return bad("nozzle exit radius must be inside the base");
+        }
+        if !(nz.n_jet >= 2 && nz.n_jet + 2 <= p.n_gap) {
+            return bad("nozzle needs 2 <= n_jet and n_jet + 2 <= n_gap");
+        }
+        let off = geometric_offsets(p.dr_wall, nz.r_exit, nz.n_jet);
+        let outer = two_sided_nodes(re - nz.r_exit, p.n_gap - nz.n_jet, p.dr_wall);
+        (0..=p.n_gap).map(|k| if k <= nz.n_jet { nz.r_exit - off[nz.n_jet - k] } else { nz.r_exit + outer[k - nz.n_jet] }).collect()
+    } else if p.gap_one_sided {
         let off = geometric_offsets(p.dr_wall, re - rs, p.n_gap);
         (0..=p.n_gap).map(|k| (re - rs) - off[p.n_gap - k]).collect()
     } else {
@@ -571,6 +595,7 @@ mod tests {
             dx_tip: 0.05,
             dr_wall: 0.05,
             gap_one_sided: false,
+            nozzle: None,
         }
     }
 
@@ -697,6 +722,7 @@ mod tests {
             dx_tip: 0.05,
             dr_wall: 0.05,
             gap_one_sided: false,
+            nozzle: None,
         };
         let (g, b) = base_domain_grid(&bp).expect("grid");
         let xs: Vec<f64> = (0..=g.ni).map(|i| g.node(i, g.nj).0).collect();
