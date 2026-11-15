@@ -1,8 +1,8 @@
 //! The Cover (design/components/Cover): what the viewport shows while the document has no parts. The brand mark drawn large on
 //! the viewport ground — the 16 px grid (160 px major), the dashed axis, registration marks, a longer Von Kármán nose, the
 //! detached shock with two faint outer standoff lines — labelled `VON KÁRMÁN NOSE · DETACHED SHOCK · M 2.4`, with a quiet hint
-//! under it. There are no colour blocks. It sits between the sheet and the model, so a part carried in from the bin is drawn
-//! over it, and it is gone as soon as the first part is in the rocket.
+//! under it. There are no colour blocks. It hides as soon as a part is picked up from the bin, so the carried part lands on a
+//! clean drawing sheet, and stays gone once the rocket has a part.
 
 use iced::widget::canvas::{Frame, Geometry, LineDash, Path, Stroke, Text};
 use iced::widget::{canvas, stack};
@@ -29,21 +29,17 @@ const TRACKING: f32 = 0.08;
 /// Advance of one glyph of IBM Plex Mono (em).
 const MONO_ADVANCE: f32 = 0.6;
 
-/// `sheet`, with the Cover over it when the document has no parts.
+/// `sheet`, with the Cover over it when the document has no parts and nothing is being carried in: once a drag starts the
+/// figure gets out of the way so the first part's ghost lands on a clean drawing sheet.
 pub fn over<'a, M: 'a>(sheet: Element<'a, M>, ctx: &Ctx) -> Element<'a, M> {
-    if !ctx.doc.rocket().parts().is_empty() {
+    if !ctx.doc.rocket().parts().is_empty() || ctx.drag.active() {
         return sheet;
     }
-    // While a part is being carried the hint (which says to drag one) is not needed.
-    let cover = canvas(Cover { hint: !ctx.drag.active() }).width(Fill).height(Fill);
-    stack![sheet, cover].boxed()
+    stack![sheet, canvas(Cover).width(Fill).height(Fill)].boxed()
 }
 
 /// The Cover canvas.
-struct Cover {
-    /// Show the hint under the figure.
-    hint: bool,
-}
+struct Cover;
 
 impl<M> canvas::Program<M> for Cover {
     type State = ();
@@ -136,18 +132,16 @@ impl<M> canvas::Program<M> for Cover {
             align_y: alignment::Vertical::Top,
             ..Text::default()
         });
-        if self.hint {
-            frame.fill_text(Text {
-                content: HINT.into(),
-                position: Point::new(cx, below + 70.0),
-                color: t.ink_muted,
-                size: TEXT_BODY.into(),
-                font: SANS,
-                align_x: alignment::Horizontal::Center.into(),
-                align_y: alignment::Vertical::Top,
-                ..Text::default()
-            });
-        }
+        frame.fill_text(Text {
+            content: HINT.into(),
+            position: Point::new(cx, below + 70.0),
+            color: t.ink_muted,
+            size: TEXT_BODY.into(),
+            font: SANS,
+            align_x: alignment::Horizontal::Center.into(),
+            align_y: alignment::Vertical::Top,
+            ..Text::default()
+        });
         vec![frame.into_geometry()]
     }
 }
