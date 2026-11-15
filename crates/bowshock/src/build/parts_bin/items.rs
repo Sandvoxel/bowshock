@@ -277,11 +277,48 @@ pub fn click_node(rocket: &Rocket, selection: Selection, kind: &PartKind) -> Opt
     after.filter(|n| nodes.iter().any(|(i, _)| i == n)).or_else(|| nodes.last().map(|(i, _)| *i))
 }
 
+/// Where a click on an axial row puts a part: a node of the core's stack or of a pod's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClickTarget {
+    /// Attach node of the core.
+    Core(usize),
+    /// Attach node of the stack of pod `.0`.
+    Pod(PartId, usize),
+}
+
+/// The pod the selection is in or is: a selected pod part (or its fins or internals) or a selected pod set.
+fn selected_pod(rocket: &Rocket, selection: Selection) -> Option<PartId> {
+    let id = selection.part()?;
+    rocket.pod_of(id).map(|p| p.id).or_else(|| rocket.is_pod(id).then_some(id))
+}
+
+/// The target of a click on an axial row. With a part of a pod selected it is that pod (right behind the selected part when
+/// valid, else the pod's last valid node); otherwise it is the core ([`click_node`]); when the core cannot take the part (a
+/// second nose cone) the first pod that can.
+pub fn click_target(rocket: &Rocket, selection: Selection, kind: &PartKind) -> Option<ClickTarget> {
+    if let Some(pod) = selected_pod(rocket, selection) {
+        let nodes = rocket.nodes_for_pod(pod, kind);
+        let after = selection.part().and_then(|id| rocket.pod_part_index(id)).map(|(_, i)| i + 1);
+        let node = after.filter(|n| nodes.iter().any(|(i, _)| i == n)).or_else(|| nodes.last().map(|(i, _)| *i));
+        if let Some(node) = node {
+            return Some(ClickTarget::Pod(pod, node));
+        }
+    }
+    click_node(rocket, selection, kind).map(ClickTarget::Core).or_else(|| {
+        let (pod, nodes) = rocket.pod_targets(kind).into_iter().next()?;
+        Some(ClickTarget::Pod(pod, nodes.last()?.0))
+    })
+}
+
 /// Adds axial part `kind` by a click and selects it. Returns its id.
 pub fn attach_axial(ctx: &mut Ctx, kind: PartKind) -> Option<PartId> {
-    let node = click_node(ctx.doc.rocket(), ctx.selection, &kind)?;
+    let target = click_target(ctx.doc.rocket(), ctx.selection, &kind)?;
     let before = ctx.doc.rocket().ids();
-    if !drag::place(ctx, node, kind) {
+    let placed = match target {
+        ClickTarget::Core(node) => drag::place(ctx, node, kind),
+        ClickTarget::Pod(pod, node) => drag::place_in_pod(ctx, pod, node, kind),
+    };
+    if !placed {
         return None;
     }
     let id = ctx.doc.rocket().ids().into_iter().find(|id| !before.contains(id))?;

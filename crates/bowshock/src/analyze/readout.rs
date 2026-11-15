@@ -478,6 +478,7 @@ mod tests {
                 conditions: Conditions { runs: 10, ..Conditions::default() },
                 jobs,
                 bands: rocket.stability_bands(),
+                cfd: None,
             }),
             rocket.active_config_id(),
         )

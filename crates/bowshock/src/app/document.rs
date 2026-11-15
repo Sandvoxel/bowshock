@@ -257,7 +257,9 @@ impl Document {
             true
         } else {
             if self.rocket != base.rocket {
-                self.rocket = base.rocket;
+                let mut restored = base.rocket;
+                restored.carry_cfd_from(&self.rocket);
+                self.rocket = restored;
                 self.revision += 1;
             }
             false
@@ -270,7 +272,8 @@ impl Document {
             return None;
         }
         self.seal();
-        let step = self.undo.pop()?;
+        let mut step = self.undo.pop()?;
+        step.rocket.carry_cfd_from(&self.rocket);
         let current = std::mem::replace(&mut self.rocket, step.rocket);
         self.redo.push(Step { rocket: current, label: step.label.clone() });
         self.changed();
@@ -283,11 +286,21 @@ impl Document {
             return None;
         }
         self.seal();
-        let step = self.redo.pop()?;
+        let mut step = self.redo.pop()?;
+        step.rocket.carry_cfd_from(&self.rocket);
         let current = std::mem::replace(&mut self.rocket, step.rocket);
         self.undo.push(Step { rocket: current, label: step.label.clone() });
         self.changed();
         Some(step.label)
+    }
+
+    /// Stores a solved CFD table with the document (see `bowshock_model::CfdTable`). Not an edit: no undo step and no revision
+    /// bump (nothing derived from the rocket changes), but the file differs from what is on disk, so it is marked unsaved.
+    /// Returns whether the table was accepted.
+    pub fn store_cfd_table(&mut self, table: bowshock_model::CfdTable) -> bool {
+        let stored = self.rocket.store_cfd_table(table);
+        self.dirty |= stored;
+        stored
     }
 
     /// Replaces the whole document (New, Open, the example): clears history and the dirty flag.
@@ -363,6 +376,44 @@ mod tests {
         let steps = doc.undo.len();
         doc.edit("Nothing", |_| ());
         assert_eq!(doc.undo.len(), steps);
+    }
+
+    #[test]
+    fn a_stored_cfd_table_is_not_an_edit_and_survives_undo_and_the_file() {
+        use bowshock_model::{CfdPoint, CfdQuality, CfdTable};
+        let mut doc = Document::default();
+        doc.edit("Add nose", |r| r.insert(0, nose()).unwrap());
+        doc.edit("Add tube", |r| r.insert(1, tube(0.5)).unwrap());
+        let point = |mach: f64| CfdPoint { mach, cd: 0.4, friction: 0.1, pressure: 0.1, base: 0.1, fins: 0.1, other: 0.0, quality: CfdQuality::Converged };
+        let table = CfdTable {
+            key: 1,
+            geometry: 2,
+            stage: 1,
+            solved_at: 1_700_000_000,
+            solve_seconds: 30.0,
+            backend: "GPU (Luma)".into(),
+            fallback: None,
+            altitude: 120.0,
+            notes: Vec::new(),
+            points: vec![point(0.5), point(1.0)],
+        };
+        let (revision, steps) = (doc.revision(), doc.undo.len());
+        assert!(doc.store_cfd_table(table.clone()));
+        assert_eq!((doc.revision(), doc.undo.len()), (revision, steps), "a table is a cache: no revision bump, no undo step");
+        // Undo and redo swap whole rockets; the table stays.
+        doc.undo();
+        assert_eq!(doc.rocket().parts().len(), 1);
+        assert_eq!(doc.rocket().cfd_table(1), Some(&table));
+        doc.redo();
+        assert_eq!(doc.rocket().cfd_table(1), Some(&table));
+        // And it is written with the document.
+        let back = Rocket::from_json(&doc.rocket().to_json()).unwrap();
+        assert_eq!(back.cfd_table(1), Some(&table));
+        // A document with nothing to save is dirty once a table arrives.
+        doc.replace(Rocket::default(), None);
+        assert!(!doc.is_dirty());
+        assert!(doc.store_cfd_table(table));
+        assert!(doc.is_dirty());
     }
 
     #[test]

@@ -323,6 +323,11 @@ impl App {
     pub fn with_example() -> Self {
         let mut app = App::new();
         files::example(&mut app.ctx);
+        // `BOWSHOCK_OPEN=<file.bowshock>` opens that document instead (a drive script cannot press Ctrl+O): how a script starts
+        // from a rocket whose CFD table is already solved and stored.
+        if let Some(path) = std::env::var_os("BOWSHOCK_OPEN") {
+            files::open(&mut app.ctx, std::path::Path::new(&path));
+        }
         app.after_update();
         // A headless `drive` run delivers no key subscription events, so `BOWSHOCK_DRIVE_TAB=1` presses Tab once at start-up.
         if std::env::var_os("BOWSHOCK_DRIVE_TAB").is_some() {
@@ -1013,6 +1018,83 @@ mod tests {
         assert!(app.ctx.doc.rocket().active_configuration().slot(mount).is_some_and(|s| s.motor.is_some()));
         // Pod mounts are not stages.
         assert!(app.ctx.doc.rocket().stages().iter().all(|s| !s.mounts.contains(&mount)));
+    }
+
+    /// A pod of one bare tube (Ø30 × 300 mm), three copies, on core part `tube`. Returns the pod set and its tube.
+    fn bare_pod(app: &mut App, tube: PartId) -> (PartId, PartId) {
+        let body = bowshock_model::PodBody::single(bowshock_model::Part::new(0, PartKind::BodyTube { length: 0.3, diameter: 0.03 }), vec![], vec![]);
+        let pod = app.ctx.doc.edit("Pod", |r| r.attach_radial(tube, 0.1, 0.0, 3, RadialKind::Pod { gap: 0.0, body }).unwrap());
+        let part = app.ctx.doc.rocket().radial(pod).unwrap().kind.pod_body().unwrap().parts()[0].id;
+        (pod, part)
+    }
+
+    fn pod_kinds(app: &App, pod: PartId) -> Vec<PartKind> {
+        app.ctx.doc.rocket().radial(pod).unwrap().kind.pod_body().unwrap().parts().iter().map(|p| p.kind.clone()).collect()
+    }
+
+    /// Why each of the bin's nose rows (every nose variant) is unavailable, `None` for an available one.
+    fn nose_reasons(app: &App) -> Vec<Option<String>> {
+        (0..5).map(|i| app.parts_bin.row_unavailable(parts_bin::RowId::new(parts_bin::Category::Airframe, i), &app.ctx)).collect()
+    }
+
+    #[test]
+    fn the_nose_rows_stay_enabled_while_any_body_has_a_free_fore_end() {
+        let (mut app, [_, tube, _]) = app();
+        // The core has its nose and there is no other body: every nose row says why it is dim.
+        assert!(nose_reasons(&app).iter().all(|r| r.as_deref().is_some_and(|r| r.starts_with("Every body has a nose"))), "{:?}", nose_reasons(&app));
+        // A bare tube on the outside has a free fore end: every nose variant is available again.
+        let (pod, _) = bare_pod(&mut app, tube);
+        assert!(nose_reasons(&app).iter().all(Option::is_none), "{:?}", nose_reasons(&app));
+        // Once that pod has a nose too, no body has a free fore end.
+        assert!(app.ctx.doc.edit("Nose", |r| r.insert_in_pod(pod, 0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.05, diameter: 0.03 }).is_ok()));
+        assert!(nose_reasons(&app).iter().all(Option::is_some));
+        // The tail cone goes to the aft node of any body, the pod's included.
+        let boattail = parts_bin::RowId::new(parts_bin::Category::Airframe, 7);
+        assert!(app.parts_bin.row_unavailable(boattail, &app.ctx).is_none());
+    }
+
+    #[test]
+    fn a_nose_dragged_onto_a_pod_tubes_fore_node_goes_on_it_and_the_core_keeps_its_own() {
+        let (mut app, [_, tube, _]) = app();
+        let (pod, pod_tube) = bare_pod(&mut app, tube);
+        let before = app.ctx.doc.rocket().clone();
+        app.update(Message::Cursor(Point::new(100.0, 100.0)));
+        app.update(Message::PartsBin(parts_bin::Message::RowPress(parts_bin::RowId::new(parts_bin::Category::Airframe, 0))));
+        app.update(Message::Cursor(Point::new(160.0, 100.0)));
+        assert!(app.ctx.drag.axial.as_ref().is_some_and(|d| matches!(d.kind, PartKind::NoseCone { shape: NoseShape::TangentOgive, .. })), "the nose row drags");
+        vp(&mut app, Vp::SnapPodNode(Some((pod, 0))));
+        vp(&mut app, Vp::DropAxial);
+        let kinds = pod_kinds(&app, pod);
+        assert_eq!(kinds.len(), 2);
+        // It is the pod's first part, sized to the tube behind it (Ø30), and the core is unchanged.
+        assert!(matches!(kinds[0], PartKind::NoseCone { shape: NoseShape::TangentOgive, diameter, .. } if (diameter - 0.03).abs() < 1e-9), "{kinds:?}");
+        assert_eq!(app.ctx.doc.rocket().parts(), before.parts());
+        assert_eq!(app.ctx.doc.rocket().pod_part_index(pod_tube), Some((pod, 1)));
+        // One undo step takes it off again.
+        app.update(Message::Undo);
+        assert_eq!(app.ctx.doc.rocket(), &before);
+    }
+
+    #[test]
+    fn a_clicked_nose_goes_on_the_selected_pod_and_else_on_the_first_pod_with_a_free_fore_end() {
+        let (mut app, [_, tube, _]) = app();
+        let (pod, pod_tube) = bare_pod(&mut app, tube);
+        // (Different rows, so the second click is not taken for a double click on the first.)
+        let click = |app: &mut App, row: usize| {
+            app.update(Message::PartsBin(parts_bin::Message::RowPress(parts_bin::RowId::new(parts_bin::Category::Airframe, row))));
+            app.update(Message::Released);
+        };
+        // A pod's tube selected: the nose goes on that pod.
+        app.ctx.selection = Selection::Part(pod_tube);
+        click(&mut app, 0);
+        assert!(matches!(pod_kinds(&app, pod)[0], PartKind::NoseCone { .. }));
+        assert_eq!(app.ctx.doc.rocket().parts().len(), 3, "the core is unchanged");
+        // A second pod, with the core's tube selected: the core has its nose, so it goes to the pod.
+        let (pod2, _) = bare_pod(&mut app, tube);
+        app.ctx.selection = Selection::Part(tube);
+        click(&mut app, 1);
+        assert!(matches!(pod_kinds(&app, pod2)[0], PartKind::NoseCone { shape: NoseShape::Conical, .. }), "{:?}", pod_kinds(&app, pod2));
+        assert_eq!(app.ctx.doc.rocket().parts().len(), 3);
     }
 
     #[test]

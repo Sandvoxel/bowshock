@@ -1,0 +1,26 @@
+# An empty body tube on the outside is aerodynamically a tube fin set (air flows through it): three Body tubes dragged onto the
+# booster's side are open, the pod's Inspector says `Aero  Tube fins (open)` and Analyze counts a "Tube fins" component in the CP.
+# Adding a nose cone to one of the pod bodies (a nose may go on the fore node of any body whose fore end is free) closes it: the
+# pod becomes a `Body`.
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/tubefins.drive out/tubefins
+viewport 1280x800
+click (142, 705)
+press "Body tube"
+move (300, 560)
+move (500, 400)
+move (700, 300)
+move (767, 276)
+release (767, 276)
+screenshot build-open-tubes.png
+click "Analyze"
+move (100, 700)
+move (102, 702)
+screenshot analyze-open-tubes.png
+click "Build"
+# The pod's tube is selected: a click on the Nose cone row puts the nose on that pod (the core already has its own).
+click "Nose cone"
+screenshot build-pod-nosed.png
+click "Analyze"
+move (100, 700)
+move (102, 702)
+screenshot analyze-pod-nosed.png

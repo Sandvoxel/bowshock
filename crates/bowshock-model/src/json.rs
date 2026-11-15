@@ -221,6 +221,7 @@ impl Rocket {
         self.prune_configs();
         self.repair_flights();
         self.repair_plots();
+        self.repair_cfd();
         self.repair_formulas();
         Ok(())
     }

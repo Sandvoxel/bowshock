@@ -4,6 +4,7 @@
 //! * [`aero`]: Barrowman centre of pressure / normal force and an OpenRocket-style drag build-up.
 //! * [`flight`]: 3-DOF point-mass flight simulation (rail, thrust, staging, recovery).
 //! * [`analysis`]: sweeps vs Mach and angle of attack, fin flutter, Monte Carlo dispersion.
+//! * [`tube_fins`]: OpenRocket's tube fin aerodynamics (open tubes on the outside of the body).
 //!
 //! Everything is SI (metres, kilograms, seconds, radians, pascals). Axial stations are measured
 //! from the nose tip, increasing aft. The core modules do not know about the application's
@@ -21,6 +22,7 @@ pub mod flight;
 pub mod from_model;
 pub mod rng;
 pub mod staging;
+pub mod tube_fins;
 pub mod vehicle;
 
 pub use aero::{Aero, DragBreakdown, Stability};
@@ -30,7 +32,7 @@ pub use flight::{simulate, Deploy, Event, EventKind, FlightResult, Launch, Recov
 pub use staging::{has_altitude_trigger, staging_times, Timeline};
 pub use vehicle::{
     BodyKind, BodySegment, FinCrossSection, FinPlanform, FinSet, MassProps, NoseShape, Protuberance, StageMass, StageMotor, ThrustCurve, Timing, Trigger,
-    Vehicle,
+    TubeFinSet, Vehicle,
 };
 
 /// Standard gravity (m/s^2).

@@ -11,17 +11,20 @@
 //! Plot zoom keys (`Enter`, `Esc`) are handled by the plots themselves while the pointer is over them.
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
 
+use bowshock_model::CfdTable;
 use bowshock_sim::from_model::Phase;
-use iced::futures::channel::oneshot;
+use iced::futures::channel::{mpsc, oneshot};
 use iced::{keyboard, Element, Task};
 
 use crate::app::{self, Ctx};
 use crate::units::UnitSystem;
 use crate::widgets::plot::{PlotMessage, PlotState};
 
+pub mod cfd;
 pub mod compute;
 pub mod import;
 pub mod overlay;
@@ -93,6 +96,10 @@ pub enum Message {
     ClearCompare,
     /// The worker finished the comparison method's computation for this request.
     CompareDone(Key, Option<Arc<compute::Output>>),
+    /// A message from the running CFD solve (with the solve's serial: a cancelled solve's last words are ignored).
+    Cfd(u64, cfd::Event),
+    /// Cancel the running CFD solve.
+    CfdCancel,
 }
 
 /// What a computation was for; a result is used only while it is still the one wanted.
@@ -104,6 +111,8 @@ pub struct Key {
     method: Method,
     conditions: Conditions,
     serial: u64,
+    /// The CFD table the drag comes from (its key and when it was solved), for the CFD table method.
+    cfd: Option<(u64, u64)>,
 }
 
 /// The Analyze screen's state.
@@ -140,6 +149,10 @@ pub struct State {
     compare_rev: u64,
     /// The comparison's curves for the result on screen.
     pub(crate) overlay: Option<overlay::Overlay>,
+    /// The method the CFD table falls back to while it has no table to draw: the last one chosen before it.
+    pub(crate) base_method: Method,
+    /// The CFD table method's state.
+    pub(crate) cfd: Cfd,
 }
 
 impl Default for State {
@@ -181,12 +194,19 @@ impl State {
             wanted_cmp: None,
             compare_rev: 0,
             overlay: None,
+            base_method: Method::Extended,
+            cfd: Cfd::default(),
         }
     }
 
     /// The result to show: the latest one for the analysis on screen.
     pub(crate) fn output(&self) -> Option<&Arc<compute::Output>> {
         self.done.as_ref().filter(|o| o.analysis == self.analysis)
+    }
+
+    /// Whether there is a CFD table to draw or compare with (fresh or stale).
+    pub(crate) fn cfd_ready(&self) -> bool {
+        self.cfd.table.is_some() && matches!(self.cfd.status, cfd::Status::Fresh | cfd::Status::Stale)
     }
 
     /// Handles one of the screen's messages.
@@ -198,17 +218,19 @@ impl State {
                 self.plot.set_hover(None);
             }
             Message::Method(m) => {
-                if m == Method::CfdTable {
-                    ctx.notify(compute::CFD_REASON);
-                } else {
-                    self.method = m;
-                    if self.compare == Some(Comparison::Method(m)) {
-                        self.compare = Some(Comparison::Method(other_method(m)));
-                        self.compare_rev += 1;
-                    }
+                self.method = m;
+                if m != Method::CfdTable {
+                    self.base_method = m;
+                }
+                if self.compare == Some(Comparison::Method(m)) {
+                    self.compare = Some(Comparison::Method(other_method(m)));
+                    self.compare_rev += 1;
                 }
             }
-            Message::Resolve => self.serial += 1,
+            Message::Resolve => {
+                self.serial += 1;
+                self.cfd.force = self.method == Method::CfdTable && uses_cfd(self.analysis) && self.cfd.solving.is_none();
+            }
             Message::MachText(field, text) => self.mach_text[field as usize] = text,
             Message::MachCommit => self.commit_mach(ctx),
             Message::Alpha(a) => self.cond.alpha = a.clamp(-30f64.to_radians(), 30f64.to_radians()),
@@ -281,6 +303,15 @@ impl State {
                     self.compare_rev += 1;
                 }
             }
+            Message::Cfd(serial, event) => self.cfd_event(serial, event, ctx),
+            Message::CfdCancel => {
+                if let Some(s) = self.cfd.solving.take() {
+                    s.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    s.handle.abort();
+                    self.cfd.failed = Some((s.key, "solve cancelled".to_string()));
+                    ctx.notify("CFD solve cancelled");
+                }
+            }
         }
         Task::none()
     }
@@ -326,25 +357,43 @@ impl State {
     /// Called by the app after every message while Analyze is showing: starts a computation when what is wanted changed and
     /// brings the plots and table up to date. The returned task carries the result back as [`Message::Done`].
     pub fn refresh(&mut self, ctx: &Ctx) -> Task<app::Message> {
+        let phase = ctx.physics.phase();
+        let solve = self.refresh_cfd(ctx, phase);
+        let table = self.cfd_table_for(self.analysis);
+        // The CFD table method with no table to draw (not solved yet, a geometry the solver cannot take) shows the method before it.
+        let method = if self.method == Method::CfdTable && table.is_none() { self.base_method } else { self.method };
+        let stamp = |t: &Option<Arc<CfdTable>>| t.as_ref().map(|t| (t.key, t.solved_at));
         let key = Key {
             revision: ctx.doc.revision(),
-            phase: ctx.physics.phase(),
+            phase,
             analysis: self.analysis,
-            method: self.method,
+            method,
             conditions: self.cond,
             serial: self.serial,
+            cfd: if method == Method::CfdTable { stamp(&table) } else { None },
         };
-        let mut task = Task::none();
+        let mut task = solve;
         if let Some(Comparison::Method(m)) = self.compare {
-            let ckey = Key { method: m, ..key.clone() };
-            let wants = matches!(key.analysis, Analysis::Aerodynamics | Analysis::Drag | Analysis::Stability);
-            if wants && self.wanted_cmp.as_ref() != Some(&ckey) {
+            let wants = uses_cfd(key.analysis);
+            // Comparing with the CFD table needs one to compare with.
+            let ready = m != Method::CfdTable || table.is_some();
+            let ckey = Key { method: m, cfd: if m == Method::CfdTable { stamp(&table) } else { None }, ..key.clone() };
+            if wants && ready && self.wanted_cmp.as_ref() != Some(&ckey) {
                 self.wanted_cmp = Some(ckey.clone());
                 if let Ok((jobs, _)) = compute::jobs(ctx.doc.rocket(), ctx.physics.motors(), ckey.phase) {
-                    let request =
-                        compute::Request { analysis: ckey.analysis, method: m, conditions: ckey.conditions, jobs, bands: ctx.doc.rocket().stability_bands() };
-                    task = spawn(request, ckey, true);
+                    let request = compute::Request {
+                        analysis: ckey.analysis,
+                        method: m,
+                        conditions: ckey.conditions,
+                        jobs,
+                        bands: ctx.doc.rocket().stability_bands(),
+                        cfd: if m == Method::CfdTable { table.clone() } else { None },
+                    };
+                    task = Task::batch([task, spawn(request, ckey, true)]);
                 }
+            } else if wants && !ready && self.wanted_cmp.take().is_some() {
+                self.compare_out = None;
+                self.compare_rev += 1;
             }
         }
         if self.wanted.as_ref() != Some(&key) {
@@ -360,6 +409,7 @@ impl State {
                         conditions: key.conditions,
                         jobs,
                         bands: ctx.doc.rocket().stability_bands(),
+                        cfd: if key.method == Method::CfdTable { table } else { None },
                     };
                     task = Task::batch([task, spawn(request, key, false)]);
                 }
@@ -374,6 +424,89 @@ impl State {
         }
         self.sync_view(ctx);
         task
+    }
+
+    /// Keeps what the CFD table method knows about the document current (the mapped geometry, the stored table, whether it is
+    /// stale) and starts a solve when the method is on and there is no table for what is on screen.
+    fn refresh_cfd(&mut self, ctx: &Ctx, phase: Phase) -> Task<app::Message> {
+        if !uses_cfd(self.analysis) {
+            return Task::none();
+        }
+        let rocket = ctx.doc.rocket();
+        if self.cfd.plan_at != Some((ctx.doc.revision(), phase)) {
+            let plan = bowshock_sim::from_model::vehicle(rocket, ctx.physics.motors(), phase).map_err(|e| e.to_string()).and_then(|v| cfd::plan(rocket, &v));
+            self.cfd.plan = Arc::new(plan);
+            self.cfd.plan_at = Some((ctx.doc.revision(), phase));
+        }
+        let stage = phase.first_stage() as u32;
+        let stored = rocket.cfd_table(stage);
+        self.cfd.status = cfd::status(&self.cfd.plan, stored, self.cond.altitude, self.cond.mach);
+        match stored {
+            Some(t) if self.cfd.table.as_ref().is_some_and(|a| (a.key, a.solved_at) == (t.key, t.solved_at)) => {}
+            Some(t) => self.cfd.table = Some(Arc::new(t.clone())),
+            None => self.cfd.table = None,
+        }
+        let force = std::mem::take(&mut self.cfd.force);
+        let (Ok(plan), Some(nodes)) = (self.cfd.plan.as_ref(), cfd::nodes(self.cond.mach)) else {
+            return Task::none();
+        };
+        let key = Some(cfd::table_key(plan.geometry, self.cond.altitude, &nodes));
+        if force {
+            self.cfd.failed = None;
+        }
+        let wanted = force || (self.cfd.status == cfd::Status::Missing && self.cfd.failed.as_ref().map(|f| f.0) != Some(key));
+        if self.method != Method::CfdTable || self.cfd.solving.is_some() || !wanted {
+            return Task::none();
+        }
+        self.cfd.serial += 1;
+        let serial = self.cfd.serial;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let job = cfd::Job { plan: plan.clone(), altitude: self.cond.altitude, nodes: nodes.clone(), stage };
+        let (task, handle) = spawn_solve(job, cancel.clone(), serial);
+        self.cfd.solving = Some(Solving { serial, done: 0, total: nodes.len(), backend: None, key, cancel, handle });
+        task
+    }
+
+    /// The table the CFD method draws for `analysis`: the stored one, fresh or stale (a stale one is labelled so), if it covers
+    /// what is plotted.
+    fn cfd_table_for(&self, analysis: Analysis) -> Option<Arc<CfdTable>> {
+        if !uses_cfd(analysis) || !matches!(self.cfd.status, cfd::Status::Fresh | cfd::Status::Stale) {
+            return None;
+        }
+        self.cfd.table.clone().filter(|t| analysis == Analysis::Stability || cfd::covers(t, self.cond.mach))
+    }
+
+    /// A message from the running solve: progress, then the table (stored with the document) or the reason there is none.
+    fn cfd_event(&mut self, serial: u64, event: cfd::Event, ctx: &mut Ctx) {
+        let Some(solving) = self.cfd.solving.as_mut().filter(|s| s.serial == serial) else {
+            return;
+        };
+        match event {
+            cfd::Event::Progress { done, total, backend } => {
+                solving.done = done;
+                solving.total = total;
+                solving.backend = backend.or_else(|| solving.backend.take());
+            }
+            cfd::Event::Finished(result) => {
+                let key = solving.key;
+                self.cfd.solving = None;
+                match result {
+                    Ok(table) => {
+                        let summary =
+                            format!("CFD table solved: {} Mach points on {} in {}", table.points.len(), table.backend, duration_text(table.solve_seconds));
+                        if ctx.doc.store_cfd_table(table) {
+                            ctx.notify(summary);
+                        } else {
+                            self.cfd.failed = Some((key, "the solver returned no usable table".to_string()));
+                        }
+                    }
+                    Err(e) => {
+                        ctx.notify(format!("CFD solve stopped: {e}"));
+                        self.cfd.failed = Some((key, e));
+                    }
+                }
+            }
+        }
     }
 
     fn sync_view(&mut self, ctx: &Ctx) {
@@ -450,12 +583,90 @@ impl Comparison {
     }
 }
 
-/// The other built-in method.
+/// The other built-in method a comparison starts with: Extended for Barrowman and the CFD table, Barrowman for Extended.
 pub fn other_method(m: Method) -> Method {
-    if m == Method::Barrowman {
-        Method::Extended
-    } else {
+    if m == Method::Extended {
         Method::Barrowman
+    } else {
+        Method::Extended
+    }
+}
+
+/// The CFD table method's state: the document mapped for the solver, the table stored for it, and the solve in progress.
+pub(crate) struct Cfd {
+    /// The revision and phase `plan` was made for.
+    plan_at: Option<(u64, Phase)>,
+    /// The geometry as the solver takes it, or why it cannot.
+    pub(crate) plan: Arc<Result<cfd::Plan, String>>,
+    /// How the stored table relates to the rocket and the conditions on screen.
+    pub(crate) status: cfd::Status,
+    /// The table stored with the document for the stack on show.
+    pub(crate) table: Option<Arc<CfdTable>>,
+    /// The solve in progress.
+    pub(crate) solving: Option<Solving>,
+    /// The key a solve was last wanted for and why it ended without a table (a failure or a cancel): no solve starts by itself
+    /// again until the key changes or Re-solve is pressed.
+    pub(crate) failed: Option<(Option<u64>, String)>,
+    /// Re-solve was pressed: solve whether or not a table exists.
+    force: bool,
+    serial: u64,
+}
+
+impl Default for Cfd {
+    fn default() -> Self {
+        Cfd {
+            plan_at: None,
+            plan: Arc::new(Err("the geometry has not been mapped yet".to_string())),
+            status: cfd::Status::Missing,
+            table: None,
+            solving: None,
+            failed: None,
+            force: false,
+            serial: 0,
+        }
+    }
+}
+
+/// A CFD solve in progress.
+pub(crate) struct Solving {
+    serial: u64,
+    /// Mach numbers solved.
+    pub(crate) done: usize,
+    /// Mach numbers to solve.
+    pub(crate) total: usize,
+    /// Where it runs, once the first point says so.
+    pub(crate) backend: Option<String>,
+    /// The key of the table it will produce.
+    key: Option<u64>,
+    cancel: Arc<AtomicBool>,
+    handle: iced::task::Handle,
+}
+
+/// Whether the analysis uses the CFD table when the method is `CFD table` (the others do not use the method).
+fn uses_cfd(analysis: Analysis) -> bool {
+    matches!(analysis, Analysis::Aerodynamics | Analysis::Drag | Analysis::Stability)
+}
+
+/// Runs `job` on its own thread and delivers its progress and its end as [`Message::Cfd`]; the handle drops the stream (a
+/// point in flight still finishes on the thread, then it sees `cancel` and stops).
+fn spawn_solve(job: cfd::Job, cancel: Arc<AtomicBool>, serial: u64) -> (Task<app::Message>, iced::task::Handle) {
+    let (tx, rx) = mpsc::unbounded();
+    std::thread::spawn(move || {
+        let result = cfd::solve(&job, &cancel, |event| {
+            let _ = tx.unbounded_send(event);
+        });
+        let _ = tx.unbounded_send(cfd::Event::Finished(result));
+    });
+    Task::run(rx, move |event| app::Message::Analyze(Message::Cfd(serial, event))).abortable()
+}
+
+/// `42 s`, `5 min 8 s`: how long a solve took.
+fn duration_text(seconds: f64) -> String {
+    let s = seconds.round() as u64;
+    if s < 60 {
+        format!("{s} s")
+    } else {
+        format!("{} min {} s", s / 60, s % 60)
     }
 }
 

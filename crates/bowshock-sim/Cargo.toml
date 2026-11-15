@@ -11,5 +11,9 @@ description = "OpenRocket-style rocket aerodynamics and flight simulation (SI un
 bowshock-model = { path = "../bowshock-model" }
 bowshock-motors = { path = "../bowshock-motors" }
 
+[dev-dependencies]
+# The OpenRocket comparison example reads the reference harness's JSON.
+serde_json = "1"
+
 [lints]
 workspace = true

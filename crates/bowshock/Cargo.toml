@@ -22,6 +22,8 @@ bytemuck = { version = "1", features = ["derive"] }
 bowshock-model = { path = "../bowshock-model" }
 bowshock-sim = { path = "../bowshock-sim" }
 bowshock-motors = { path = "../bowshock-motors" }
+# The CFD solver behind the Analyze screen's `CFD table` method (GPU through Luma, CPU fallback).
+bowshock-core = { workspace = true, features = ["gpu"] }
 rfd = "0.18"
 # Parts-bin presets are JSON files.
 serde = { version = "1", features = ["derive"] }

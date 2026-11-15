@@ -340,6 +340,7 @@ dependencies = [
 name = "bowshock"
 version = "0.1.0"
 dependencies = [
+ "bowshock-core",
  "bowshock-model",
  "bowshock-motors",
  "bowshock-sim",
@@ -399,6 +400,8 @@ dependencies = [
 name = "bowshock-model"
 version = "0.1.0"
 dependencies = [
+ "flate2",
+ "roxmltree 0.21.2",
  "serde",
  "serde_json",
 ]
@@ -420,6 +423,7 @@ version = "0.1.0"
 dependencies = [
  "bowshock-model",
  "bowshock-motors",
+ "serde_json",
 ]
 
 [[package]]

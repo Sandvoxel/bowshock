@@ -223,9 +223,9 @@ impl State {
         match item {
             Item::Axial(name, kind) => {
                 let kind = sized(kind, self.sizing(ctx));
-                if rocket.nodes_for(&kind).is_empty() {
+                if rocket.nodes_for(&kind).is_empty() && rocket.pod_targets(&kind).is_empty() {
                     return Some(if matches!(kind, PartKind::NoseCone { .. }) {
-                        "A rocket has one nose cone, at the fore end".into()
+                        "Every body has a nose cone, at its fore end".into()
                     } else {
                         "Nothing in the stack to attach it to".into()
                     });
@@ -238,6 +238,12 @@ impl State {
             Item::Motor(_) => None,
             Item::Preset(i) => self.presets[*i].preset.unavailable(rocket, ctx.selection).map(Into::into),
         }
+    }
+
+    /// Why row `id` is unavailable, `None` when it can be added (for the app's tests).
+    #[cfg(test)]
+    pub(crate) fn row_unavailable(&self, id: RowId, ctx: &Ctx) -> Option<String> {
+        self.item(id, ctx).and_then(|item| self.unavailable(&item, ctx))
     }
 
     /// Starts dragging row `id`, if it can be dragged and placed.

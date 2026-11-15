@@ -293,6 +293,7 @@ mod tests {
                 BodySegment { station: 0.0, length: 0.2, fore_radius: 0.0, aft_radius: r, kind: BodyKind::Nose(NoseShape::VonKarman), roughness: 0.0 },
                 BodySegment { station: 0.2, length: 0.6, fore_radius: r, aft_radius: r, kind: BodyKind::Tube, roughness: 0.0 },
             ],
+            tube_fins: vec![],
             fin_sets: vec![FinSet {
                 count: 4,
                 station: 0.65,

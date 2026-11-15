@@ -144,6 +144,28 @@ impl FinSet {
     }
 }
 
+/// A set of open tubes standing against the body with air flowing through them (OpenRocket's `TubeFinSet`; see
+/// [`crate::tube_fins`]): the aerodynamics of an empty body tube on the outside of a rocket.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TubeFinSet {
+    /// Number of tubes (the copies of the pod).
+    pub count: u32,
+    /// Station of the tubes' fore ends from the tip (m).
+    pub station: f64,
+    /// Tube length, the "chord" of the ring airfoil (m).
+    pub length: f64,
+    /// Outer radius of a tube (m).
+    pub outer_radius: f64,
+    /// Inner radius of a tube (m); the wall is `outer_radius - inner_radius`.
+    pub inner_radius: f64,
+    /// Radius of the body surface the tubes stand against (m).
+    pub body_radius: f64,
+    /// Clear distance from that surface to the tubes' outer surface (m); 0 for tubes touching the body, as in OpenRocket.
+    pub gap: f64,
+    /// Surface roughness height (m).
+    pub roughness: f64,
+}
+
 /// Surface protuberance that adds drag but no lift.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Protuberance {
@@ -343,6 +365,8 @@ pub struct Vehicle {
     pub body: Vec<BodySegment>,
     /// Fin sets.
     pub fin_sets: Vec<FinSet>,
+    /// Tube fin sets (open tubes standing beside the body, see [`TubeFinSet`]).
+    pub tube_fins: Vec<TubeFinSet>,
     /// Lugs and rail buttons.
     pub protuberances: Vec<Protuberance>,
     /// Stages in firing order (see [`StageMass`]). Empty means a massless, motorless vehicle.
@@ -375,6 +399,7 @@ impl Vehicle {
             }
         }
         v.fin_sets.retain(|f| f.station < station - 1e-9);
+        v.tube_fins.retain(|t| t.station < station - 1e-9);
         v.protuberances.retain(|p| p.station() < station - 1e-9);
         v
     }

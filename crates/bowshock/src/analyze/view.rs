@@ -6,6 +6,7 @@ use std::time::Instant;
 use iced::widget::{button, column, container, row, scrollable, text, tooltip, Space};
 use iced::{alignment, Element, Fill, Length, Theme, Widget};
 
+use super::cfd;
 use super::compute::{Analysis, FinishChoice, Method};
 use super::import::Source;
 use super::plots::Built;
@@ -31,6 +32,7 @@ static FINISHES: [FinishChoice; 6] = FinishChoice::ALL;
 
 const RASAERO_REASON: &str = "RASAero's .CDX1 is a proprietary project format; exporting it is not implemented";
 const NO_COMPARISON: &str = "No comparison is loaded";
+const NO_CFD_TABLE: &str = "Solve the CFD table first: choose CFD table";
 
 /// The whole screen.
 pub fn screen<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
@@ -115,67 +117,112 @@ fn method(state: &State) -> Element<'_, Message> {
             cells.push(container(Space::new()).width(1).height(CONTROL_H - 2.0).style(theme::hairline).boxed());
         }
         let active = m == state.method;
-        let enabled = m != Method::CfdTable;
-        let mut b = button(text(m.name()).size(TEXT_BODY)).height(CONTROL_H - 4.0).padding([0.0, SPACE_3]).style(move |theme: &Theme, status| {
-            let mut s = theme::segment(active)(theme, status);
-            if !enabled {
-                s.text_color = theme::tokens(theme).ink_faint;
-            }
-            s
-        });
-        if enabled {
-            b = b.on_press(Message::Method(m));
-        }
+        let b = button(text(m.name()).size(TEXT_BODY))
+            .height(CONTROL_H - 4.0)
+            .padding([0.0, SPACE_3])
+            .style(move |theme: &Theme, status| theme::segment(active)(theme, status))
+            .on_press(Message::Method(m));
         let cell = column![b, container(Space::new()).width(Fill).height(2).style(theme::underline(active))];
         cells.push(tooltip(cell, bubble(m.tip())).position(tooltip::Position::Bottom).gap(SPACE_1).boxed());
     }
     let strip = container(row(cells)).padding(1).style(|theme: &Theme| theme::segmented_frame(theme));
 
-    let line: Element<'_, Message> = match (state.output(), &state.error) {
-        (_, Some(e)) => muted(format!("Cannot analyse: {e}"), 12.0),
-        (None, None) => muted("Solving…", 12.0),
+    let cfd_line = state.method == Method::CfdTable && super::uses_cfd(state.analysis);
+    let mut lines: Vec<Element<'_, Message>> = Vec::new();
+    match (state.output(), &state.error) {
+        (_, Some(e)) => lines.push(muted(format!("Cannot analyse: {e}"), 12.0)),
+        _ if cfd_line => lines.extend(cfd_lines(state).into_iter().map(|l| muted(l, 12.0))),
+        (None, None) => lines.push(muted("Solving…", 12.0)),
         (Some(out), None) => {
             let busy = if state.pending { "solving…".to_string() } else { state.computed_at.map_or_else(String::new, ago) };
             let took =
                 if out.elapsed.as_millis() < 1000 { format!("{} ms", out.elapsed.as_millis().max(1)) } else { format!("{:.1} s", out.elapsed.as_secs_f64()) };
-            muted(format!("{} · computed on CPU in {took} · {busy}", out.points_text()), 12.0)
+            lines.push(muted(format!("{} · computed on CPU in {took} · {busy}", out.points_text()), 12.0));
         }
+    }
+    let solving = cfd_line && state.cfd.solving.is_some();
+    let stale = cfd_line && state.cfd.status == cfd::Status::Stale;
+    let resolve: Element<'_, Message> = if solving {
+        push("Cancel", Weight::Secondary).on_press(Message::CfdCancel).into()
+    } else {
+        push("Re-solve", if stale { Weight::Primary } else { Weight::Secondary }).on_press(Message::Resolve).into()
     };
-    let resolve: Element<'_, Message> = push("Re-solve", Weight::Secondary).on_press(Message::Resolve).into();
     let compare: Element<'_, Message> = push("Compare ▾", Weight::Ghost).on_press(Message::CompareMenu).into();
     let actions = row![resolve, compare].spacing(SPACE_2);
-    let mut col = column![strip, line, actions].spacing(SPACE_2).padding([0.0, 0.0]);
+    let mut col = column![strip, column(lines).spacing(SPACE_1), actions].spacing(SPACE_2).padding([0.0, 0.0]);
     if state.compare_open {
-        let other = super::other_method(state.method);
-        let with = match other {
-            Method::Barrowman => "Compare with Barrowman",
-            _ => "Compare with Extended",
-        };
         let item = |label: &'static str, message: Message| -> Element<'_, Message> { push(label, Weight::Secondary).on_press(message).small().into() };
-        let clear: Element<'_, Message> = if state.compare.is_some() {
+        let mut items: Vec<Element<'_, Message>> = Vec::new();
+        for m in [Method::Barrowman, Method::Extended, Method::CfdTable].into_iter().filter(|m| *m != state.method) {
+            let label = match m {
+                Method::Barrowman => "Compare with Barrowman",
+                Method::Extended => "Compare with Extended",
+                Method::CfdTable => "Compare with CFD table",
+            };
+            items.push(if m == Method::CfdTable && !state.cfd_ready() {
+                push(label, Weight::Secondary).small().disabled(NO_CFD_TABLE).into()
+            } else {
+                item(label, Message::CompareWith(m))
+            });
+        }
+        items.push(item("Import OpenRocket CSV…", Message::ImportCompare(Source::OpenRocket)));
+        items.push(item("Import RASAero CSV…", Message::ImportCompare(Source::RasAero)));
+        items.push(if state.compare.is_some() {
             item("Clear comparison", Message::ClearCompare)
         } else {
             push("Clear comparison", Weight::Secondary).small().disabled(NO_COMPARISON).into()
-        };
-        col = col.push(
-            column![
-                item(with, Message::CompareWith(other)),
-                item("Import OpenRocket CSV…", Message::ImportCompare(Source::OpenRocket)),
-                item("Import RASAero CSV…", Message::ImportCompare(Source::RasAero)),
-                clear,
-            ]
-            .spacing(SPACE_1)
-            .boxed(),
-        );
+        });
+        col = col.push(column(items).spacing(SPACE_1).boxed());
     }
     if let Some(c) = &state.compare {
         let from = match c {
+            Comparison::Method(Method::CfdTable) if !state.cfd_ready() => " · not solved yet".to_string(),
             Comparison::Method(_) => String::new(),
             Comparison::File { name, .. } => format!(" · {name}"),
         };
         col = col.push(muted(format!("Comparing with {}{from}", c.label()), 12.0));
     }
     col.boxed()
+}
+
+/// The provenance of the CFD table method, line by line: the solve in progress, or what the table is and was not (the kit's
+/// `42 Mach × 9 AoA points · solved on GPU (Luma) · 6 min ago`, here Mach points only: the solver has no angle of attack), then why
+/// the plots show another method if they do.
+fn cfd_lines(state: &State) -> Vec<String> {
+    let cfd = &state.cfd;
+    let base = state.base_method.name();
+    let mut lines = Vec::new();
+    if let Some(s) = &cfd.solving {
+        lines.push(format!("Solving {} / {} · {}", s.done, s.total, s.backend.as_deref().unwrap_or("starting the solver")));
+    } else {
+        match &cfd.status {
+            cfd::Status::Unsupported(why) => {
+                lines.push(format!("CFD table unavailable: {why}."));
+                lines.push(format!("Showing {base} instead."));
+            }
+            cfd::Status::Missing => {
+                lines.push(match &cfd.failed {
+                    Some((_, why)) => format!("No CFD table: {why}."),
+                    None => "No CFD table yet.".to_string(),
+                });
+                lines.push(format!("Showing {base} until one is solved; Re-solve starts a solve."));
+            }
+            cfd::Status::Fresh | cfd::Status::Stale => {}
+        }
+    }
+    if let Some((out, info)) = state.output().and_then(|o| o.cfd.as_ref().map(|i| (o, i))) {
+        let stale = if cfd.status == cfd::Status::Stale { "stale · " } else { "" };
+        lines.push(format!("{stale}{} · solved on {} · {}", out.points_text(), info.backend, cfd::ago(info.solved_at)));
+        if !stale.is_empty() {
+            lines.push("The geometry or the conditions changed since; Re-solve for a table that matches.".to_string());
+        }
+        lines.push("Drag from the solver; margin, CP and CNα from Extended.".to_string());
+        lines.extend(info.fallback.iter().map(|why| format!("The GPU was not used: {why}.")));
+        lines.extend(info.notes.iter().cloned());
+    } else if matches!(cfd.status, cfd::Status::Fresh | cfd::Status::Stale) && cfd.solving.is_none() {
+        lines.push(format!("The stored table does not cover this Mach range. Showing {base} instead; Re-solve for this range."));
+    }
+    lines
 }
 
 /// A Conditions row: the label column and `control`.
@@ -215,7 +262,11 @@ fn conditions<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
                     .boxed(),
             ));
             let alpha = unit_input("Angle of attack", c.alpha, Quantity::Angle, units).label_width(LABEL_W).on_commit(Message::Alpha).on_scrub(Message::Alpha);
-            rows.push(if state.method == Method::Barrowman { alpha.hint("Barrowman ignores the angle (α = 0)").into() } else { alpha.into() });
+            rows.push(match state.method {
+                Method::Barrowman => alpha.hint("Barrowman ignores the angle (α = 0)").into(),
+                Method::CfdTable => alpha.hint("Solved at α = 0; Extended adds the change with angle").into(),
+                Method::Extended => alpha.into(),
+            });
             rows.push(input("Altitude", c.altitude, Quantity::Altitude, Message::Altitude));
             rows.push(burnout);
             rows.push(finish);

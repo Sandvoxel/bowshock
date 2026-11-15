@@ -236,8 +236,8 @@ const SIZE_LINE_CHARS: usize = 25;
 
 /// The reason a row is unavailable in a few words, for the dimmed row itself (empty for a reason that has no short form).
 fn short_reason(reason: &str) -> &'static str {
-    if reason.starts_with("A rocket has one nose cone") {
-        "already has a nose"
+    if reason.starts_with("Every body has a nose") {
+        "every body has a nose"
     } else if reason.starts_with("Nothing in the stack") {
         "nothing to attach to"
     } else if reason.starts_with("Payload bay needs") {

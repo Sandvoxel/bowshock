@@ -337,7 +337,7 @@ mod tests {
         }
         let (jobs, _) = jobs(&rocket, &MotorDb::bundled(), Phase::Full).unwrap();
         let bands = rocket.stability_bands();
-        let out = compute(&Request { analysis, method: Method::Extended, conditions: Conditions { runs: 8, ..Conditions::default() }, jobs, bands });
+        let out = compute(&Request { analysis, method: Method::Extended, conditions: Conditions { runs: 8, ..Conditions::default() }, jobs, bands, cfd: None });
         build(&out, UnitSystem::MmGS, None)
     }
 

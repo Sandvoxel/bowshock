@@ -129,6 +129,9 @@ pub struct Rocket {
     /// The Simulate screen's plots (which data sources each panel draws). Not written while they are the defaults.
     #[serde(default, skip_serializing_if = "crate::flights::plots_are_default")]
     pub(crate) plots: crate::flights::PlotLayout,
+    /// Solved CFD drag tables of the Analyze screen (a cache: not part of the rocket's equality, see [`crate::cfd`]).
+    #[serde(default, skip_serializing_if = "crate::cfd::CfdStore::is_empty")]
+    pub(crate) cfd: crate::cfd::CfdStore,
 }
 
 impl Default for Rocket {
@@ -148,6 +151,7 @@ impl Default for Rocket {
             formulas: Vec::new(),
             bands: crate::bands::StabilityBands::default(),
             plots: crate::flights::PlotLayout::default(),
+            cfd: crate::cfd::CfdStore::default(),
         }
     }
 }

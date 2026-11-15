@@ -163,6 +163,7 @@ fn radial_rows<'a>(p: &Params<'a>, radial: &RadialPart) -> Vec<Element<'a, Messa
                 rows.push(f.fixed("Axis from core", frame.axis_radius, Quantity::Length));
             }
             rows.push(text_row("Parts", format!("{}", body.ids().count())));
+            rows.push(aero_row(radial));
             rows.push(pod_parts(body));
         }
     }
@@ -358,7 +359,7 @@ fn position<'a>(p: &Params<'a>) -> Vec<Element<'a, Message>> {
         // An axial part sits in the stack: its station follows from what is ahead of it (in the pod's stack for a pod's part).
         let mut rows = vec![f.fixed("Station", station, Quantity::Length), text_row("Order", order_label(rocket, p.id))];
         if let Some(pod) = rocket.pod_of(p.id) {
-            rows.push(pod_row(rocket, pod));
+            rows.extend(pod_rows(rocket, pod));
         }
         return rows;
     };
@@ -377,14 +378,20 @@ fn position<'a>(p: &Params<'a>) -> Vec<Element<'a, Message>> {
     }
     if let Some(pod) = rocket.pod_of(p.id) {
         // A part's parent may be another part of the pod; say what the pod it stands in is mounted on.
-        rows.push(pod_row(rocket, pod));
+        rows.extend(pod_rows(rocket, pod));
     }
     rows
 }
 
-/// `Pod on  Booster tube`: where the pod a part stands in is mounted (not the pod's own name, which the header already says).
-fn pod_row<'a>(rocket: &Rocket, pod: &RadialPart) -> Element<'a, Message> {
-    text_row("Pod on", rocket.part(pod.parent).map_or_else(|| pod.display_name(), |p| p.display_name()))
+/// `Pod on  Booster tube` (where the pod a part stands in is mounted, not the pod's own name, which the header already says) and
+/// `Aero  Tube fins (open)` / `Body`: how the simulation flies the pod (see [`PodBody::is_open_tube`]).
+fn pod_rows<'a>(rocket: &Rocket, pod: &RadialPart) -> Vec<Element<'a, Message>> {
+    vec![text_row("Pod on", rocket.part(pod.parent).map_or_else(|| pod.display_name(), |p| p.display_name())), aero_row(pod)]
+}
+
+/// `Aero  Tube fins (open)` for a pod of only open tubes, `Body` for any other pod.
+fn aero_row<'a>(pod: &RadialPart) -> Element<'a, Message> {
+    text_row("Aero", if pod.kind.pod_body().is_some_and(PodBody::is_open_tube) { "Tube fins (open)" } else { "Body" }.to_string())
 }
 
 /// The material and finish selects: bulk stock for tubes, fins and discs, fabric for a canopy, cord for the lines. A mass

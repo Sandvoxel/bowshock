@@ -91,6 +91,19 @@ pub fn place(ctx: &mut Ctx, index: usize, kind: PartKind) -> bool {
     placed.is_some()
 }
 
+/// [`place`] into the stack of pod `pod` (a click on a bin row with a part of that pod selected).
+pub fn place_in_pod(ctx: &mut Ctx, pod: PartId, index: usize, kind: PartKind) -> bool {
+    let name = kind.name();
+    let placed = ctx.doc.edit(&format!("Add {}", name.to_lowercase()), |r| insert_in_pod(r, pod, index, &kind, None));
+    if let Some(matched) = &placed {
+        if let Some(message) = matched_notice(&kind, matched) {
+            ctx.notify(message);
+        }
+        ctx.camera_fit = true;
+    }
+    placed.is_some()
+}
+
 /// Starts carrying a new axial part from bin row `row`.
 pub fn start_axial(ctx: &mut Ctx, row: usize, name: &'static str, kind: PartKind) {
     ctx.doc.begin_drag(&format!("Add {}", name.to_lowercase()));

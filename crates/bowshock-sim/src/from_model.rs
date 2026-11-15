@@ -29,6 +29,11 @@
 //!   - the fins of pod parts as [`FinSet`]s with `body_radius` the radius of the pod part under them, at the pod's station plus
 //!     their station in the pod, `count` = fins x pod copies (the Barrowman fin lift is linear in the number of fins);
 //!     lugs and rail buttons on pod parts as one [`Protuberance`] per copy.
+//!   - a pod that is **open** (only body tubes, nothing inside, see `PodBody::is_open_tube`) is not a body: air flows through it.
+//!     It becomes a [`TubeFinSet`] (one per run of butted tubes, one tube per copy) with OpenRocket's `TubeFinSet` aerodynamics
+//!     ([`crate::tube_fins`]): ring-airfoil lift and quarter-chord CP, outer-surface friction, the bore's pressure drop and the
+//!     interstice drag, and no base drag, instead of the three items above. A pod with a nose, a transition or anything inside
+//!     is a body, whatever its aft end.
 //!
 //!   The reference diameter stays the core's. Not modelled: the interference between a pod and the core or the other pods
 //!   (wake, junction shock, the fin-body factor of the core fins) and the pod's off-axis moment arm; each pod's lift acts at its
@@ -75,7 +80,7 @@ use crate::aero::Aero;
 use crate::flight::{Deploy, Launch, RecoveryDevice, SimInput};
 use crate::vehicle::{
     BodyKind, BodySegment, FinCrossSection, FinPlanform, FinSet, MassProps, NoseShape, Protuberance, StageMass, StageMotor, ThrustCurve, Timing, Trigger,
-    Vehicle,
+    TubeFinSet, Vehicle,
 };
 use crate::G0;
 
@@ -497,7 +502,7 @@ pub fn vehicle(rocket: &Rocket, motors: &MotorDb, phase: Phase) -> Result<Vehicl
         });
     }
 
-    let mut v = Vehicle { reference_diameter: 0.0, body, fin_sets, protuberances, stages: sim_stages };
+    let mut v = Vehicle { reference_diameter: 0.0, body, fin_sets, tube_fins: Vec::new(), protuberances, stages: sim_stages };
     if first > 1 {
         v = v.truncated(stages[first - 1].aft_station);
     }
@@ -536,12 +541,18 @@ fn add_pods(rocket: &Rocket, first: usize, v: &mut Vehicle) {
         let (Some(frame), Some(sub), Some(content)) = (rocket.pod_frame(pod), rocket.pod_rocket(pod.id), pod.kind.pod_body()) else {
             continue;
         };
-        let segments: Vec<BodySegment> = sub.parts().iter().zip(sub.stations()).map(|(p, z)| body_segment(p, frame.station + z)).collect();
         let copies = u32::from(pod.count.max(1));
-        if !segments.is_empty() {
-            for _ in 0..copies {
-                bodies.extend(segments.iter().cloned());
-                bodies.push(separator(frame.station));
+        if content.is_open_tube() {
+            let RadialKind::Pod { gap, .. } = pod.kind else { continue };
+            let body_radius = rocket.radial_base_radius(pod).unwrap_or(0.0);
+            tube_fin_sets(&sub, frame.station, copies, body_radius, gap, &mut v.tube_fins);
+        } else {
+            let segments: Vec<BodySegment> = sub.parts().iter().zip(sub.stations()).map(|(p, z)| body_segment(p, frame.station + z)).collect();
+            if !segments.is_empty() {
+                for _ in 0..copies {
+                    bodies.extend(segments.iter().cloned());
+                    bodies.push(separator(frame.station));
+                }
             }
         }
         for r in content.radials() {
@@ -550,6 +561,37 @@ fn add_pods(rocket: &Rocket, first: usize, v: &mut Vehicle) {
     }
     bodies.append(&mut v.body);
     v.body = bodies;
+}
+
+/// The tube fin sets of an open pod (see [`model::PodBody::is_open_tube`]), `copies` tubes each: one set per run of butted
+/// tubes of the same outer diameter (a run is one longer tube), at `station` plus the run's station in the pod, standing against
+/// a body of radius `body_radius` with `gap` between. The wall and finish are those of the run's first tube.
+fn tube_fin_sets(pod: &Rocket, station: f64, copies: u32, body_radius: f64, gap: f64, out: &mut Vec<TubeFinSet>) {
+    let stations = pod.stations();
+    let end = *stations.last().unwrap_or(&0.0);
+    let mut runs: Vec<(f64, &model::Part)> = Vec::new(); // (fore station in the pod, first part)
+    let mut last_diameter = f64::NAN;
+    for (part, &z) in pod.parts().iter().zip(&stations) {
+        let diameter = part.kind.aft_diameter();
+        if runs.is_empty() || (diameter - last_diameter).abs() > 1e-6 {
+            runs.push((z, part));
+        }
+        last_diameter = diameter;
+    }
+    for (i, &(z, part)) in runs.iter().enumerate() {
+        let aft = runs.get(i + 1).map_or(end, |next| next.0);
+        let outer = part.kind.aft_diameter() / 2.0;
+        out.push(TubeFinSet {
+            count: copies,
+            station: station + z,
+            length: aft - z,
+            outer_radius: outer,
+            inner_radius: (outer - part.thickness).max(0.0),
+            body_radius,
+            gap,
+            roughness: part.finish.roughness(),
+        });
+    }
 }
 
 // ---- recovery -----------------------------------------------------------------------------------------------------------

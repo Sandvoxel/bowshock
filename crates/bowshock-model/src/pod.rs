@@ -87,6 +87,15 @@ impl PodBody {
     pub fn single(part: Part, radials: Vec<RadialPart>, internals: Vec<InternalPart>) -> PodBody {
         PodBody { parts: vec![part], radials, internals }
     }
+
+    /// Whether air flows through the body: it has axial parts, every one a body tube (no nose cone, no transition, so no
+    /// closed fore or aft end), and nothing inside the tubes (no bulkhead, ring, motor mount or recovery gear to block or fill
+    /// the bore). Such a pod is aerodynamically a tube fin set (OpenRocket's `TubeFinSet`), not a body: the simulation gives
+    /// it the ring-airfoil lift, the through-flow pressure drag and no base drag (see `bowshock_sim::tube_fins`). A pod with a
+    /// nose but an open aft end is still a body.
+    pub fn is_open_tube(&self) -> bool {
+        !self.parts.is_empty() && self.internals.is_empty() && self.parts.iter().all(|p| matches!(p.kind, PartKind::BodyTube { .. }))
+    }
 }
 
 impl Rocket {
@@ -132,6 +141,7 @@ impl Rocket {
             formulas: Vec::new(),
             bands: crate::bands::StabilityBands::default(),
             plots: crate::flights::PlotLayout::default(),
+            cfd: crate::cfd::CfdStore::default(),
         }
     }
 
@@ -250,6 +260,13 @@ impl Rocket {
         };
         let z0 = self.radial_station(set).unwrap_or(0.0);
         sub.nodes_for(kind).into_iter().map(|(i, z)| (i, z + z0)).collect()
+    }
+
+    /// The pods where `kind` may be inserted, each with its valid nodes (see [`Rocket::nodes_for_pod`]). A nose cone is valid at
+    /// the fore node of every pod body that has none, a tail cone at the aft node of any body: the rule of the core, applied to
+    /// each body stack of the rocket.
+    pub fn pod_targets(&self, kind: &PartKind) -> Vec<(PartId, Vec<(usize, f64)>)> {
+        self.pods().map(|p| (p.id, self.nodes_for_pod(p.id, kind))).filter(|(_, nodes)| !nodes.is_empty()).collect()
     }
 
     /// `kind` as it would be inserted at `index` of pod `pod`'s stack, diameters matched to its neighbours.
@@ -519,5 +536,50 @@ mod tests {
         // Removing the mount drops its slot.
         r.remove_internal(mount);
         assert!(r.active_configuration().slot(mount).is_none());
+    }
+
+    fn bare_tube_pod() -> PodBody {
+        PodBody::single(Part::new(0, PartKind::BodyTube { length: 0.4, diameter: 0.04 }), vec![], vec![])
+    }
+
+    #[test]
+    fn every_body_stack_takes_one_nose_and_one_tail_cone() {
+        let (mut r, tube, _) = core();
+        let nose = PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.1, diameter: 0.04 };
+        let pod = r.attach_radial(tube, 0.3, 0.0, 3, RadialKind::Pod { gap: 0.0, body: bare_tube_pod() }).unwrap();
+        // The core has its nose, so only the pod's fore node takes one (the core's nodes for a nose are none).
+        assert!(r.nodes_for(&nose).is_empty());
+        let targets = r.pod_targets(&nose);
+        assert_eq!(targets.iter().map(|(p, n)| (*p, n.iter().map(|x| x.0).collect::<Vec<_>>())).collect::<Vec<_>>(), vec![(pod, vec![0])]);
+        // It goes on, sized to the tube behind it; a second nose on the same pod is refused, as is a part ahead of the nose.
+        let id = r.insert_in_pod(pod, 0, nose.clone()).unwrap();
+        assert_eq!(r.pod_part_index(id), Some((pod, 0)));
+        assert!((r.pod_rocket(pod).unwrap().parts()[0].kind.aft_diameter() - 0.04).abs() < 1e-12);
+        assert_eq!(r.insert_in_pod(pod, 0, nose.clone()), Err(InsertError::SecondNose));
+        assert_eq!(r.insert_in_pod(pod, 0, PartKind::BodyTube { length: 0.1, diameter: 0.04 }), Err(InsertError::SecondNose));
+        assert!(r.pod_targets(&nose).is_empty());
+        assert!(r.check_pods().is_ok());
+        // A tail cone goes on the aft node of any body: the pod's, behind its tube.
+        let boattail = PartKind::Transition { length: 0.05, fore_diameter: 0.04, aft_diameter: 0.03 };
+        let aft = r.pod_rocket(pod).unwrap().parts().len();
+        assert!(r.nodes_for_pod(pod, &boattail).iter().any(|(i, _)| *i == aft));
+    }
+
+    #[test]
+    fn only_a_pod_of_bare_tubes_is_open() {
+        assert!(bare_tube_pod().is_open_tube());
+        assert!(!PodBody::default().is_open_tube());
+        assert!(!PodBody::standard(0.04, 0.4).is_open_tube(), "a nose closes the front");
+        let (mut r, tube, _) = core();
+        let pod = r.attach_radial(tube, 0.3, 0.0, 2, RadialKind::Pod { gap: 0.0, body: bare_tube_pod() }).unwrap();
+        let part = r.pod_rocket(pod).unwrap().parts()[0].id;
+        r.insert_in_pod(pod, 1, PartKind::BodyTube { length: 0.2, diameter: 0.04 }).unwrap();
+        assert!(r.radial(pod).unwrap().kind.pod_body().unwrap().is_open_tube(), "butted tubes stay open");
+        r.insert_in_pod(pod, 2, PartKind::Transition { length: 0.05, fore_diameter: 0.04, aft_diameter: 0.03 }).unwrap();
+        assert!(!r.radial(pod).unwrap().kind.pod_body().unwrap().is_open_tube(), "a tail cone closes the aft end");
+        let transition = r.pod_rocket(pod).unwrap().parts()[2].id;
+        r.remove(transition);
+        r.attach_internal(part, 0.0, InternalKind::Bulkhead { diameter: None, thickness: 0.003 }).unwrap();
+        assert!(!r.radial(pod).unwrap().kind.pod_body().unwrap().is_open_tube(), "a bulkhead in the bore closes it");
     }
 }

@@ -15,6 +15,7 @@
 //!
 //! Coefficients are referenced to the vehicle reference area; stations are from the nose tip.
 
+use crate::tube_fins::TubeFinCalc;
 use crate::vehicle::{BodyKind, BodySegment, FinCrossSection, FinPlanform, FinSet, NoseShape, Protuberance, Vehicle};
 use std::f64::consts::PI;
 
@@ -353,6 +354,7 @@ pub struct Aero {
     perfect_finish: bool,
     bodies: Vec<BodyCalc>,
     fins: Vec<FinCalc>,
+    tube_fins: Vec<TubeFinCalc>,
     prots: Vec<ProtCalc>,
     /// `(roughness m, wetted area m^2)` of the body, grouped so each skin-friction value is evaluated once.
     friction_groups: Vec<(f64, f64)>,
@@ -417,6 +419,7 @@ impl Aero {
             perfect_finish: false,
             bodies,
             fins,
+            tube_fins: v.tube_fins.iter().map(TubeFinCalc::new).collect(),
             prots,
             friction_groups,
         }
@@ -458,6 +461,12 @@ impl Aero {
         }
         for f in &self.fins {
             comps.push((f.name.clone(), f.cna(mach, alpha, self.a_ref), f.cp(mach)));
+        }
+        for (i, t) in self.tube_fins.iter().enumerate() {
+            let cna = t.cna(alpha, self.a_ref);
+            if cna.abs() > 1e-12 {
+                comps.push((if self.tube_fins.len() > 1 { format!("Tube fins {}", i + 1) } else { "Tube fins".to_string() }, cna, t.cp(mach)));
+            }
         }
         let cn_alpha: f64 = comps.iter().map(|c| c.1).sum();
         let cp = if cn_alpha.abs() > 1e-9 { comps.iter().map(|c| c.1 * c.2).sum::<f64>() / cn_alpha } else { 0.5 * self.length };
@@ -526,6 +535,10 @@ impl Aero {
         for f in &self.fins {
             fins += f.drag(m, comp_cf(f.roughness), stag, base, ar);
         }
+        // Tube fins: friction on the outer surface and the through-flow pressure drag, no base drag (`crate::tube_fins`).
+        for t in &self.tube_fins {
+            fins += t.friction_cd(comp_cf(t.roughness()), ar) + t.pressure_cd(re_per_m, stag, base, ar);
+        }
 
         let mut prot = 0.0;
         for p in &self.prots {
@@ -560,7 +573,7 @@ impl Aero {
 
 /// OpenRocket `TubeCalc.calculatePressureCD` for a launch lug: Darcy-Weisbach pressure drop
 /// through the bore (Swamee-Jain friction factor) plus `0.7 (stagnation + base)` on the frontal ring.
-fn lug_drag(re_per_m: f64, d_in: f64, inner_area: f64, frontal: f64, length: f64, eps: f64, stag: f64, base: f64, a_ref: f64) -> f64 {
+pub(crate) fn lug_drag(re_per_m: f64, d_in: f64, inner_area: f64, frontal: f64, length: f64, eps: f64, stag: f64, base: f64, a_ref: f64) -> f64 {
     if re_per_m < 1e-3 {
         return 0.0;
     }
@@ -719,7 +732,7 @@ const CNA_SUBSONIC: f64 = 0.9;
 const CNA_SUPERSONIC: f64 = 1.5;
 const GAMMA: f64 = 1.4;
 /// Fin stall angle used by OpenRocket (20 deg): the angle terms saturate there.
-const FIN_STALL: f64 = 20.0 * PI / 180.0;
+pub(crate) const FIN_STALL: f64 = 20.0 * PI / 180.0;
 
 /// Supersonic linear-theory coefficients `(K1, K2, K3)` of `CN = A (K1 a + K2 a^2 + K3 a^3)` per
 /// unit angle (second-order shock-expansion theory; Pitts, Nielsen & Kaattari NACA 1307 / OpenRocket
@@ -780,7 +793,7 @@ fn supersonic_cp_gradient(x: f64) -> f64 {
 
 /// Fin CP fraction of the MAC: quarter chord up to Mach 0.5, a quintic to Mach 2 matching the
 /// supersonic value and slope there, then the supersonic formula (OpenRocket `transonicCPPos`).
-fn fin_cp_fraction(mach: f64, ar: f64) -> f64 {
+pub(crate) fn fin_cp_fraction(mach: f64, ar: f64) -> f64 {
     if mach <= 0.5 {
         return SUBSONIC_CP_POS;
     }
@@ -902,6 +915,7 @@ mod tests {
                 BodySegment { station: 0.0, length: 0.07, fore_radius: 0.0, aft_radius: r, kind: BodyKind::Nose(NoseShape::TangentOgive), roughness: 20e-6 },
                 BodySegment { station: 0.07, length: 0.26, fore_radius: r, aft_radius: r, kind: BodyKind::Tube, roughness: 20e-6 },
             ],
+            tube_fins: vec![],
             fin_sets: vec![FinSet {
                 count: 3,
                 station: 0.26,
@@ -925,6 +939,7 @@ mod tests {
         Vehicle {
             reference_diameter: 2.0 * r,
             body: vec![BodySegment { station: 0.0, length: 2.0 * r * fineness, fore_radius: 0.0, aft_radius: r, kind: BodyKind::Nose(shape), roughness: 0.0 }],
+            tube_fins: vec![],
             fin_sets: vec![],
             protuberances: vec![],
             stages: vec![],
@@ -938,6 +953,7 @@ mod tests {
             let v = Vehicle {
                 reference_diameter: 2.0 * r,
                 body: vec![BodySegment { station: 0.0, length: 0.18, fore_radius: 0.0, aft_radius: r, kind: BodyKind::Nose(shape), roughness: 0.0 }],
+                tube_fins: vec![],
                 fin_sets: vec![],
                 protuberances: vec![],
                 stages: vec![],
@@ -954,6 +970,7 @@ mod tests {
         let v = Vehicle {
             reference_diameter: 0.06,
             body: vec![BodySegment { station: 0.0, length: 0.1, fore_radius: 0.015, aft_radius: 0.03, kind: BodyKind::Transition, roughness: 0.0 }],
+            tube_fins: vec![],
             fin_sets: vec![],
             protuberances: vec![],
             stages: vec![],

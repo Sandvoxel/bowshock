@@ -21,6 +21,7 @@ fn rocket() -> Vehicle {
             BodySegment { station: 0.0, length: 0.30, fore_radius: 0.0, aft_radius: r, kind: BodyKind::Nose(NoseShape::TangentOgive), roughness: 30e-6 },
             BodySegment { station: 0.30, length: 0.80, fore_radius: r, aft_radius: r, kind: BodyKind::Tube, roughness: 30e-6 },
         ],
+        tube_fins: vec![],
         fin_sets: vec![FinSet {
             count: 4,
             station: 0.93,

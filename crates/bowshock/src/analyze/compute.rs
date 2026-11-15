@@ -7,16 +7,20 @@
 //!   attack, whatever angle is set (the angle field is ignored; drag is the zero-angle build-up).
 //! * **Extended** is Barrowman plus the body lift and induced drag `bowshock-sim` adds at an angle of attack (the
 //!   OpenRocket / RASAero style): the margin, CP, `CNα` and drag follow the angle the Conditions set.
-//! * **CFD table** (a table of solved coefficients) is a later milestone and cannot be selected.
+//! * **CFD table** is the zero-lift drag solved by `bowshock-core` (see [`super::cfd`]) on a table of Mach numbers, with the
+//!   margin, CP and `CNα` of Extended and Extended's change of drag with the angle of attack added to the solved drag. The
+//!   solver is axisymmetric at zero angle, so it gives drag only.
 //!
 //! # References
 //!
 //! Barrowman (1967); Niskanen, *OpenRocket technical documentation* (2013); NACA TN 4197 (Martin, 1958) for the fin flutter
 //! velocity.
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use bowshock_model::{ConfigId, Finish, MaterialId, Rocket, StabilityBands};
+use super::cfd;
+use bowshock_model::{CfdTable, ConfigId, Finish, MaterialId, Rocket, StabilityBands};
 use bowshock_motors::MotorDb;
 use bowshock_sim::from_model::{self, Phase};
 use bowshock_sim::{
@@ -30,8 +34,6 @@ pub const BALANCE_MACH: f64 = crate::app::physics::BALANCE_MACH;
 pub const FLUTTER_MIN_MARGIN: f64 = 1.5;
 /// Most configurations drawn at once: the four categorical series colours (never cycled).
 pub const MAX_CONFIGS: usize = 4;
-/// Why the CFD table method cannot be chosen.
-pub const CFD_REASON: &str = "CFD solver integration is a later milestone";
 
 /// One of the five analyses of the left list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,7 +83,7 @@ pub enum Method {
     Barrowman,
     /// Barrowman plus body lift and induced drag at the set angle.
     Extended,
-    /// A solved CFD table (not available yet).
+    /// A solved CFD drag table (zero-lift drag from `bowshock-core`; stability from Extended).
     CfdTable,
 }
 
@@ -95,12 +97,14 @@ impl Method {
         }
     }
 
-    /// What the method means, for its tooltip (or why it is unavailable).
+    /// What the method means, for its tooltip.
     pub fn tip(self) -> &'static str {
         match self {
             Method::Barrowman => "Barrowman (1967): linear normal force and CP at zero angle of attack; the angle of attack is ignored",
             Method::Extended => "Barrowman plus body lift and induced drag at the set angle of attack (OpenRocket / RASAero style)",
-            Method::CfdTable => CFD_REASON,
+            Method::CfdTable => {
+                "Zero-lift drag solved by CFD (axisymmetric RANS on the GPU) on a Mach table, with the fins' empirical drag; margin, CP and CNα from Extended, which also adds the drag change with angle"
+            }
         }
     }
 }
@@ -275,6 +279,8 @@ pub struct Request {
     pub jobs: Vec<ConfigJob>,
     /// The document's stability thresholds, for the margin plots' lines and the severities.
     pub bands: StabilityBands,
+    /// The solved CFD table the [`Method::CfdTable`] drag comes from. Without one that method is computed as Extended.
+    pub cfd: Option<Arc<CfdTable>>,
 }
 
 /// A fin-flutter curve of one configuration (worst fin set).
@@ -375,6 +381,25 @@ pub struct Output {
     pub elapsed: Duration,
     /// The stability thresholds the request carried.
     pub bands: StabilityBands,
+    /// The CFD table the drag comes from, when the method is [`Method::CfdTable`].
+    pub cfd: Option<CfdInfo>,
+}
+
+/// Where a CFD table came from and what it left out: the provenance line's content.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CfdInfo {
+    /// Solved Mach numbers inside the plotted range.
+    pub nodes: usize,
+    /// `GPU (Luma)` or `CPU`.
+    pub backend: String,
+    /// Why the GPU was not used, when it was not.
+    pub fallback: Option<String>,
+    /// When the solve finished (seconds since the Unix epoch).
+    pub solved_at: u64,
+    /// How long it took (s).
+    pub solve_seconds: f64,
+    /// What was not solved as the document has it, and what the plots do not cover.
+    pub notes: Vec<String>,
 }
 
 /// Spacing of the Mach sweep's samples, and the finer spacing through the transonic range where the drag and CP change fastest.
@@ -559,6 +584,8 @@ fn scatter(job: &ConfigJob, vehicle: &Vehicle, cond: &Conditions) -> Option<Scat
 pub fn compute(request: &Request) -> Output {
     let started = std::time::Instant::now();
     let cond = request.conditions;
+    // The CFD table method needs a table; without one the request is the Extended method (the caller says which it wanted).
+    let table = request.cfd.as_deref().filter(|_| request.method == Method::CfdTable);
     let runs = request
         .jobs
         .iter()
@@ -569,16 +596,26 @@ pub fn compute(request: &Request) -> Output {
                 Analysis::Aerodynamics | Analysis::Drag => {
                     let alpha = if request.method == Method::Barrowman { 0.0 } else { cond.alpha };
                     let cg = if cond.burnout { job.cg_burnout } else { job.cg_liftoff };
-                    let points: Vec<MachPoint> = mach_grid(cond.mach)
-                        .into_iter()
-                        .flat_map(|m| vs_mach(&vehicle, cg, (m, m), 1, alpha, &Atmosphere::standard(), cond.altitude))
-                        .collect();
-                    Data::Mach(points)
+                    let sweep = |alpha: f64| -> Vec<MachPoint> {
+                        mach_grid(cond.mach).into_iter().flat_map(|m| vs_mach(&vehicle, cg, (m, m), 1, alpha, &Atmosphere::standard(), cond.altitude)).collect()
+                    };
+                    Data::Mach(match table {
+                        // Stability from the build-up method, drag from the table plus the build-up's change with the angle.
+                        Some(t) => {
+                            let zero = (alpha != 0.0).then(|| sweep(0.0));
+                            cfd::mach_points(t, sweep(alpha), zero.as_deref())
+                        }
+                        None => sweep(alpha),
+                    })
                 }
                 Analysis::Stability => {
                     let cg = if cond.burnout { job.cg_burnout } else { job.cg_liftoff };
                     let points = vs_alpha(&vehicle, cg, cond.mach_fixed, (0.0, cond.alpha_max), ALPHA_POINTS);
-                    Data::Alpha(if request.method == Method::Barrowman { linearise(points) } else { points })
+                    Data::Alpha(match table {
+                        Some(t) => cfd::alpha_points(t, cond.mach_fixed, points),
+                        None if request.method == Method::Barrowman => linearise(points),
+                        None => points,
+                    })
                 }
                 Analysis::Flutter => Data::Flutter(flutter(job, &vehicle)),
                 Analysis::Dispersion => Data::Dispersion(scatter(job, &vehicle, &cond)),
@@ -591,7 +628,30 @@ pub fn compute(request: &Request) -> Output {
             run
         })
         .collect();
-    Output { analysis: request.analysis, method: request.method, conditions: cond, runs, elapsed: started.elapsed(), bands: request.bands }
+    let cfd = table.map(|t| cfd_info(t, request.analysis, &cond));
+    Output { analysis: request.analysis, method: request.method, conditions: cond, runs, elapsed: started.elapsed(), bands: request.bands, cfd }
+}
+
+/// What the screen says about the table an output was made with.
+fn cfd_info(table: &CfdTable, analysis: Analysis, cond: &Conditions) -> CfdInfo {
+    let (first, last) = (table.points[0].mach, table.points[table.points.len() - 1].mach);
+    let mut notes = table.notes.clone();
+    let nodes = match analysis {
+        Analysis::Stability => {
+            if cond.mach_fixed < first - 1e-9 || cond.mach_fixed > last + 1e-9 {
+                notes.push(format!("Mach {:.2} is outside the solved range ({first:.2} to {last:.2}); the drag is held at the nearest end.", cond.mach_fixed));
+            }
+            table.points.len()
+        }
+        _ => {
+            let (lo, hi) = (cond.mach.0.min(cond.mach.1), cond.mach.0.max(cond.mach.1));
+            if lo < first - 1e-9 || hi > last + 1e-9 {
+                notes.push(format!("The table covers Mach {first:.2} to {last:.2}; the plots stop there."));
+            }
+            table.points.iter().filter(|p| p.mach >= lo - 1e-9 && p.mach <= hi + 1e-9).count()
+        }
+    };
+    CfdInfo { nodes, backend: table.backend.clone(), fallback: table.fallback.clone(), solved_at: table.solved_at, solve_seconds: table.solve_seconds, notes }
 }
 
 /// A table of the output's numbers: the table view and the CSV share it.
@@ -626,7 +686,7 @@ impl Output {
     /// What the output has to say in the method line: the samples it holds.
     pub fn points_text(&self) -> String {
         let n = self.runs.first().map_or(0, |r| match &r.data {
-            Data::Mach(p) => p.len(),
+            Data::Mach(p) => self.cfd.as_ref().map_or(p.len(), |c| c.nodes),
             Data::Alpha(p) => p.len(),
             Data::Flutter(c) => c.as_ref().map_or(0, |c| c.velocity.len()),
             Data::Dispersion(d) => d.as_ref().map_or(0, |d| d.landings.len()),
@@ -724,7 +784,7 @@ mod tests {
     }
 
     fn run(analysis: Analysis, method: Method, conditions: Conditions) -> Output {
-        compute(&Request { analysis, method, conditions, jobs: example_jobs(), bands: Default::default() })
+        compute(&Request { analysis, method, conditions, jobs: example_jobs(), bands: Default::default(), cfd: None })
     }
 
     #[test]
@@ -831,6 +891,7 @@ mod tests {
             conditions: Conditions::default(),
             jobs,
             bands: Default::default(),
+            cfd: None,
         });
         let table = out.table();
         assert_eq!(table.rows.len(), out.runs.len() * mach_grid((0.1, 3.0)).len());

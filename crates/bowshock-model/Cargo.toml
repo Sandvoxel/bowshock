@@ -11,6 +11,9 @@ description = "Rocket document model for the Bowshock builder (SI units): geomet
 serde = { version = "1", features = ["derive"] }
 # float_roundtrip: a saved document must load back bit-for-bit.
 serde_json = { version = "1", features = ["float_roundtrip"] }
+# OpenRocket .ork import: an .ork is XML, usually inside a ZIP (deflate) entry.
+roxmltree = "0.21"
+flate2 = "1"
 
 [lints]
 workspace = true

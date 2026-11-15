@@ -1,0 +1,41 @@
+# Analyze > CFD table, from a document that already carries its solved table (reopening a saved file: the provenance reads
+# `… · solved on GPU (Luma) · N min ago`, and nothing is solved again).
+#
+# Make that document once (solves the example's ten Mach numbers on the GPU, minutes; prints the Extended / CFD comparison):
+#   BOWSHOCK_CFD_FIXTURE=/tmp/example-cfd.bowshock cargo test -p bowshock -- --ignored the_example_table --nocapture
+# Then:
+#   BOWSHOCK_OPEN=/tmp/example-cfd.bowshock cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/cfd.drive out/cfd
+viewport 1300x800
+click "Analyze"
+click "CFD table"
+move (100, 700)
+move (102, 702)
+screenshot cfd-dark.png
+
+# The drag stack and the table view.
+click "Drag breakdown"
+move (500, 300)
+move (502, 302)
+screenshot cfd-drag-dark.png
+click "Aerodynamics"
+click "Table view"
+screenshot cfd-table-dark.png
+click "Plots"
+
+# CFD against Extended on the same plots.
+click "Compare ▾"
+click "Compare with Extended"
+move (700, 300)
+move (702, 302)
+screenshot cfd-vs-extended-dark.png
+
+# The light theme.
+click "Light"
+move (700, 300)
+move (702, 302)
+screenshot cfd-vs-extended-light.png
+click "Compare ▾"
+click "Clear comparison"
+move (100, 700)
+move (102, 702)
+screenshot cfd-light.png
