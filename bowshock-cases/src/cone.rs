@@ -1,10 +1,10 @@
 //! Cone validation case: set-up, steady-state iteration and post-processing against Taylor-Maccoll.
 
 use bowshock::engine::result::StopReason;
-use bowshock_core::flux::Limiter;
-use bowshock_core::gas::freestream;
-use bowshock_core::grid::{cone_grid, ConeGridParams};
-use bowshock_core::solver::{Bc, Config, Solver};
+use bowshock_cfd::flux::Limiter;
+use bowshock_cfd::gas::freestream;
+use bowshock_cfd::grid::{cone_grid, ConeGridParams};
+use bowshock_cfd::solver::{Bc, Config, Solver};
 use bowshock_reference::taylor_maccoll::ConeSolution;
 
 #[derive(Clone, Debug)]
@@ -189,7 +189,7 @@ fn postprocess(case: &ConeCase, s: &Solver, residual: Vec<f64>, drop_orders: f64
     let mut min_rho = f64::INFINITY;
     let mut min_p = f64::INFINITY;
     for q in &s.u {
-        let w = bowshock_core::gas::cons_to_prim(q);
+        let w = bowshock_cfd::gas::cons_to_prim(q);
         min_rho = min_rho.min(w[0]);
         min_p = min_p.min(w[3]);
     }

@@ -4,7 +4,7 @@
 //! `--quick` runs only the coarse and medium grids.
 
 use bowshock_cases::cone::{run_cone, ConeCase};
-use bowshock_core::flux::Limiter;
+use bowshock_cfd::flux::Limiter;
 use bowshock_reference::taylor_maccoll::solve_cone;
 use std::fs;
 use std::io::Write;
@@ -28,7 +28,7 @@ fn main() {
         grids.push(("fine", 400, 200));
     }
 
-    println!("bowshock-core cone validation: M = {mach}, gamma = 1.4, limiter = {limiter:?}, CFL = 0.5, SSP-RK3 + HLLC/Rusanov shock blend");
+    println!("bowshock-cfd cone validation: M = {mach}, gamma = 1.4, limiter = {limiter:?}, CFL = 0.5, SSP-RK3 + HLLC/Rusanov shock blend");
     println!("threads (rayon): {}", rayon::current_num_threads());
     let mut rows = Vec::new();
     for &theta in &[10.0f64, 15.0] {

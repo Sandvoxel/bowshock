@@ -15,8 +15,8 @@
 use bowshock::engine::body_grid::Nose;
 use bowshock_cases::cone::{build_solver, ConeCase};
 use bowshock_cases::subsonic::{fox_case, subsonic_case};
-use bowshock_core::solver::Scheme;
-use bowshock_gpu::Staging;
+use bowshock_cfd::gpu::Staging;
+use bowshock_cfd::solver::Scheme;
 use bowshock_reference::taylor_maccoll::solve_cone;
 use luma::{Array, Fields, PadMode};
 use std::time::Instant;
@@ -93,7 +93,7 @@ fn case3(ctx: &luma::Context) {
                                 continue;
                             }
                         }
-                        let mut s = bowshock_gpu::$module::LazySolver::from_host(ctx, &host).unwrap();
+                        let mut s = bowshock_cfd::gpu::$module::LazySolver::from_host(ctx, &host).unwrap();
                         if !with_block {
                             s.set_block(None).unwrap();
                         }

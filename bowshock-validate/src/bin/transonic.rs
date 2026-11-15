@@ -15,9 +15,9 @@ use bowshock::engine::result::PointResult;
 use bowshock::engine::run::run_on;
 use bowshock_cases::ogive::wall_cp_at;
 use bowshock_cases::transonic::{named_body, stoney, tangent_cone_cd, transonic_case};
-use bowshock_core::flux::Limiter;
-use bowshock_core::implicit::ImplicitParams;
-use bowshock_core::solver::{Bc, Scheme};
+use bowshock_cfd::flux::Limiter;
+use bowshock_cfd::implicit::ImplicitParams;
+use bowshock_cfd::solver::{Bc, Scheme};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
@@ -88,7 +88,7 @@ fn main() {
     let (ni, nj) = c0.cells();
     let lb = body.nose_length() + c0.body.aft_length();
     println!(
-        "bowshock-core transonic: body {body_name} (nose l/d {:.3}, tip half angle {:.2} deg), grid L{level} {ni}x{nj}, upstream {:.0} d / radial {:.0} d / downstream {:.0} d (body length {:.1} d), limiter {limiter:?}, scheme {}, low-Mach {low_mach}, outflow {:?}, {}",
+        "bowshock-cfd transonic: body {body_name} (nose l/d {:.3}, tip half angle {:.2} deg), grid L{level} {ni}x{nj}, upstream {:.0} d / radial {:.0} d / downstream {:.0} d (body length {:.1} d), limiter {limiter:?}, scheme {}, low-Mach {low_mach}, outflow {:?}, {}",
         body.nose_length(),
         body.tip_half_angle().to_degrees(),
         c0.grid_sting.x_up,

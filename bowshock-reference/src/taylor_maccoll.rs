@@ -12,7 +12,7 @@
 //! shock relations) the ODE is integrated with RK4 towards smaller `theta` until `Vt = 0`, the
 //! cone surface. `beta` is found by bisection such that that angle equals the cone half-angle.
 
-use bowshock_core::gas::GAMMA;
+use bowshock_cfd::gas::GAMMA;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ConeSolution {

@@ -3,9 +3,9 @@
 use crate::engine::body_grid::{base_domain_grid, large_domain_grid, BaseBody, BaseGridParams, LargeGridParams, NozzleRows};
 use crate::engine::numerics::Numerics;
 use crate::error::Error;
-use bowshock_core::gas::freestream;
-use bowshock_core::gas::Prim;
-use bowshock_core::solver::{Bc, Config, Nozzle, Solver, Turbulence, Viscous};
+use bowshock_cfd::gas::freestream;
+use bowshock_cfd::gas::Prim;
+use bowshock_cfd::solver::{Bc, Config, Nozzle, Solver, Turbulence, Viscous};
 
 /// Treatment of the region behind the body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

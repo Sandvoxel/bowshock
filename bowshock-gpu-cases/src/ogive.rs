@@ -5,9 +5,9 @@
 use crate::run::{cpu_loop, field_diff, gpu_loop, Run};
 use bowshock::engine::result::WallPoint;
 use bowshock_cases::ogive::OgiveCase;
-use bowshock_core::gas::cons_to_prim;
-use bowshock_core::grid::Grid;
-use bowshock_gpu::{Precision, Result};
+use bowshock_cfd::gas::cons_to_prim;
+use bowshock_cfd::gpu::{Precision, Result};
+use bowshock_cfd::grid::Grid;
 
 /// Wall and integral results of a converged (or stopped) ogive state.
 pub struct Post {
@@ -62,7 +62,7 @@ pub struct OgiveRun {
     pub post: Post,
 }
 
-/// CPU f64 reference run (bowshock-core, rayon) with the stopping criteria of `bowshock_cases::ogive::run_ogive`.
+/// CPU f64 reference run (bowshock-cfd, rayon) with the stopping criteria of `bowshock_cases::ogive::run_ogive`.
 pub fn run_cpu(case: &OgiveCase) -> OgiveRun {
     let mut s = case.build_solver();
     let run = cpu_loop(&mut s, case.max_iter, case.drop_orders);

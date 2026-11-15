@@ -1,4 +1,4 @@
-# bowshock-gpu: issue list
+# bowshock-cfd (GPU solver): issue list
 
 Problems met while porting the solver to Luma array ops. `Luma` = needs a Luma change (reported in
 `~/Documents/luma/Temp.md`), `lazy` = this crate, `core` = the CPU reference.

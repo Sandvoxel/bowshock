@@ -1,5 +1,5 @@
-// The Menter SST k-omega model (2003) in array ops. This file is `include!`d by `lib.rs` after `viscous.rs` into the same per-precision
-// module. It mirrors `bowshock_core::turbulence` (`scalar_gradients`, `blends`, `face_pass`, `cell_terms`, `update`) kernel for kernel:
+// The Menter SST k-omega model (2003) in array ops. This file is `include!`d by `gpu/mod.rs` after `viscous.rs` into the same per-precision
+// module. It mirrors `crate::turbulence` (`scalar_gradients`, `blends`, `face_pass`, `cell_terms`, `update`) kernel for kernel:
 //
 //     F1  = tanh(a^4),  a = min( max( sqrt(k) / (beta* omega d), 500 nu / (d^2 omega) ), 4 rho sigma_w2 k / (CD d^2) )
 //     F2  = tanh(b^2),  b = max( 2 sqrt(k) / (beta* omega d), 500 nu / (d^2 omega) )
@@ -16,7 +16,7 @@
 // `Stage::mass` is `F[0]` of the face fluxes, `dt` the time step of the iteration (the pseudo time step of the implicit scheme, in the
 // element type).
 
-use bowshock_core::turbulence::{A1, BETA1, BETA2, BETA_STAR, GAMMA1, GAMMA2, SIGMA_K1, SIGMA_K2, SIGMA_W1, SIGMA_W2};
+use crate::turbulence::{A1, BETA1, BETA2, BETA_STAR, GAMMA1, GAMMA2, SIGMA_K1, SIGMA_K2, SIGMA_W1, SIGMA_W2};
 
 /// `S^2 = 2 (u_x^2 + v_r^2 + (v/r)^2) + (u_r + v_x)^2 - 2/3 div^2` of a cell from its gradient `g = (u_x, u_r, v_x, v_r, ..)`, radial
 /// velocity `v` and radius `r`.

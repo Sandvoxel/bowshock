@@ -1,10 +1,10 @@
-//! `bowshock-gpu`: the axisymmetric Euler solver of `bowshock-core` (MUSCL + HLLC / Rusanov shock blend + optional low-Mach
+//! The GPU solver (feature `gpu`): the axisymmetric Euler solver of the CPU modules (MUSCL + HLLC / Rusanov shock blend + optional low-Mach
 //! correction, characteristic and pressure-outflow far fields, SSP-RK3 with local time stepping or the line-implicit scheme, optional
 //! solid body block) written in plain Luma array ops: no custom kernels. Luma's lazy arrays fuse the expressions; `iterate_until_all`
 //! traces one step and replays its kernels, recording the density residual on the GPU.
 //!
 //! The solver is in `body.rs` (explicit scheme) and `implicit.rs` (line-implicit scheme), each function the mirror of the CPU routine of the
-//! same name in `bowshock-core`, included once per precision:
+//! same name in the CPU modules of this crate, included once per precision:
 //!
 //! * [`f32s`]: `Array<f32>` everywhere ([`Precision::F32`]).
 //! * [`df32s`]: the state, the residual and the time step in double-float `Array<Df32>` ([`Precision::Extended`]); the
@@ -15,8 +15,8 @@
 //! the implicit operator, the line solves of the two turbulence scalars) are f32 like the rest. [`GpuSolver`] is the precision-independent handle
 //! the other crates use. See the README.
 
-use bowshock_core::grid::Grid;
-use bowshock_core::solver::{Block, Config, Nozzle, Scheme, Solver, Viscous};
+use crate::grid::Grid;
+use crate::solver::{Block, Config, Nozzle, Scheme, Solver, Viscous};
 use luma::Context;
 pub use luma::LumaError;
 
@@ -197,7 +197,7 @@ macro_rules! on_mut {
     };
 }
 
-/// GPU solver of one grid: [`f32s::LazySolver`] or [`df32s::LazySolver`] behind one type. Mirrors `bowshock_core::solver::Solver` for the
+/// GPU solver of one grid: [`f32s::LazySolver`] or [`df32s::LazySolver`] behind one type. Mirrors `crate::solver::Solver` for the
 /// supported options (explicit SSP-RK3 or line-implicit scheme, solid block, low-Mach correction, viscous terms with the SST model).
 pub struct GpuSolver {
     inner: Inner,
@@ -217,7 +217,7 @@ impl GpuSolver {
         Ok(GpuSolver { inner, ctx: ctx.clone(), prec, ni: grid.ni, nj: grid.nj })
     }
 
-    /// The solver of a host `bowshock_core` solver: its grid and config, low-Mach flag, solid block, scheme (`Scheme::Explicit` or
+    /// The solver of a host `crate::solver::Solver`: its grid and config, low-Mach flag, solid block, scheme (`Scheme::Explicit` or
     /// `Scheme::Implicit`), conserved state, iteration count and, for a viscous host, the viscous parameters with the turbulence state and the
     /// wall distance (the SST state is copied from `host.turb` / `host.mu_t`).
     pub fn from_host(ctx: &Context, host: &Solver, prec: Precision) -> Result<GpuSolver> {
@@ -262,12 +262,12 @@ impl GpuSolver {
         on_mut!(self, s => s.iter = iter)
     }
 
-    /// Switches the low-Mach correction of the reconstructed face states (`bowshock_core::flux::low_mach_states`).
+    /// Switches the low-Mach correction of the reconstructed face states (`crate::flux::low_mach_states`).
     pub fn set_low_mach(&mut self, on: bool) {
         on_mut!(self, s => s.set_low_mach(on))
     }
 
-    /// Declares the solid body block of a base / wake grid (`bowshock_core::solver::Solver::set_block`).
+    /// Declares the solid body block of a base / wake grid (`crate::solver::Solver::set_block`).
     pub fn set_block(&mut self, block: Option<Block>) -> Result<()> {
         if self.viscous().is_some() {
             return Err(GpuError::Unsupported("the solid block must be declared before the viscous terms"));
@@ -280,7 +280,7 @@ impl GpuSolver {
         on!(self, s => s.block())
     }
 
-    /// Declares the nozzle exit on the base face (`bowshock_core::solver::Solver::set_nozzle`): rows `0..j_end` of the face `i_end` are a fixed
+    /// Declares the nozzle exit on the base face (`crate::solver::Solver::set_nozzle`): rows `0..j_end` of the face `i_end` are a fixed
     /// inflow state. Must follow [`GpuSolver::set_block`] and precede [`GpuSolver::set_viscous`].
     pub fn set_nozzle(&mut self, nozzle: Option<Nozzle>) -> Result<()> {
         if self.viscous().is_some() || (nozzle.is_some() && self.block().is_none()) {
@@ -332,7 +332,7 @@ impl GpuSolver {
 
     /// `([k, omega], mu_t)` of every cell of an SST run (`Solver::turb`, `Solver::mu_t`), as f64.
     pub fn turb_state(&self) -> Result<(Vec<[f64; 2]>, Vec<f64>)> {
-        if !self.viscous().is_some_and(|v| v.turbulence == bowshock_core::solver::Turbulence::Sst) {
+        if !self.viscous().is_some_and(|v| v.turbulence == crate::solver::Turbulence::Sst) {
             return Err(GpuError::Unsupported("turb_state needs the SST model"));
         }
         Ok(on!(self, s => s.turb_state_f64()?))
@@ -351,17 +351,17 @@ impl GpuSolver {
 
     /// Resets to the free stream of the current configuration at iteration 0, the implicit CFL ramp restarted.
     pub fn reset(&mut self) -> Result<()> {
-        let fs = bowshock_core::gas::prim_to_cons(&self.config().freestream);
+        let fs = crate::gas::prim_to_cons(&self.config().freestream);
         self.set_state(&vec![fs; self.ni * self.nj])
     }
 
-    /// Conserved state, `ni * nj`, same layout as `bowshock_core::solver::Solver::u`.
+    /// Conserved state, `ni * nj`, same layout as `crate::solver::Solver::u`.
     pub fn state_f64(&self) -> Result<Vec<[f64; 4]>> {
         Ok(on!(self, s => s.state_f64()?))
     }
 
     /// Runs `n` iterations and returns the density residual of every one (L2 of `d rho / dt` over `sqrt(N)` of the fluid cells, as in
-    /// `bowshock-core`). The residual is recorded on the GPU, the host waits once per [`RUN_SYNC`] iterations and at the end.
+    /// the CPU solver). The residual is recorded on the GPU, the host waits once per [`RUN_SYNC`] iterations and at the end.
     pub fn run(&mut self, n: usize) -> Result<Vec<f64>> {
         Ok(on_mut!(self, s => s.run(n, RUN_SYNC.min(n.max(1)))?))
     }

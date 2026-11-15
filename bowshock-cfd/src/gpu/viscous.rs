@@ -1,8 +1,8 @@
-// The viscous terms of the axisymmetric compressible Navier-Stokes equations in array ops. This file is `include!`d by `lib.rs` after
+// The viscous terms of the axisymmetric compressible Navier-Stokes equations in array ops. This file is `include!`d by `gpu/mod.rs` after
 // `body.rs` and `implicit.rs` into the same per-precision module (see `body.rs` for what that module defines).
 //
-// It mirrors `bowshock_core::viscous` (`cell_pass`, `face_pass`, `hoop_stress`, `diffusion_rate`, `face_lambdas`, `Walls`) and the viscous
-// parts of `bowshock_core::solver` (`Viscous`, `wall_ghost`, the residual `F - Fv` with the hoop stress, the diffusive time step). Units:
+// It mirrors `crate::viscous` (`cell_pass`, `face_pass`, `hoop_stress`, `diffusion_rate`, `face_lambdas`, `Walls`) and the viscous
+// parts of `crate::solver` (`Viscous`, `wall_ghost`, the residual `F - Fv` with the hoop stress, the diffusive time step). Units:
 // `rho_inf = c_inf = 1`, `p_inf = 1 / gamma`, `T = gamma p / rho`, lengths in nose diameters,
 //
 //     mu(T)  = (1 / re_c) T^1.5 (1 + S) / (T + S)                       S = sutherland
@@ -15,8 +15,8 @@
 // base wall of the block it is the wall ghost of the first fluid cell. A ghost carries the gradient, viscosity and eddy viscosity of its
 // fluid cell (`cell_sides`) and sits at the mirror image of that cell's centre in the face centre (the geometry arrays `VDir`).
 
-use bowshock_core::solver::{Turbulence, Viscous, PRANDTL, PRANDTL_T};
-use bowshock_core::turbulence::{omega_inf, wall_distances, K_INF};
+use crate::solver::{Turbulence, Viscous, PRANDTL, PRANDTL_T};
+use crate::turbulence::{omega_inf, wall_distances, K_INF};
 
 /// One residual evaluation: the residual, the time step, the primitives and padded primitives of the evaluated state, the mass flow
 /// density `F[0]` of the faces (what the turbulence transport convects with) and the viscous quantities.
@@ -88,7 +88,7 @@ fn mask_array(ctx: &Context, shape: [usize; 2], f: &dyn Fn(usize, usize) -> bool
     Array::from_slice_on(ctx, &v, shape)
 }
 
-/// `(e_x, e_r, 1 / |d|, r_m)` of every face of direction `dir` as `bowshock_core::viscous::stencil` computes them (`iface_sides`,
+/// `(e_x, e_r, 1 / |d|, r_m)` of every face of direction `dir` as `crate::viscous::stencil` computes them (`iface_sides`,
 /// `jface_sides`, `side_pos`): the two sides of a face are the adjacent cells, a ghost side is the mirror image of its cell centre in the
 /// face centre. Faces inside the solid block get `(1, 0, 1, 1)`. `r_m` is 1 where the face radius is 0 (the viscous face flux then
 /// carries the weight 0 anyway; it avoids `v / 0`).
@@ -234,7 +234,7 @@ impl VGeo {
     }
 }
 
-/// The wall ghost `(rho, -u, -v, p)` of a no-slip wall (`bowshock_core::viscous::wall_ghost` with `noslip = true`).
+/// The wall ghost `(rho, -u, -v, p)` of a no-slip wall (`crate::viscous::wall_ghost` with `noslip = true`).
 fn noslip_ghost(w: &Rec) -> Rec {
     [w[0].clone(), -&w[1], -&w[2], w[3].clone()]
 }

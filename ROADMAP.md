@@ -190,9 +190,9 @@ Exit: the command in "Target" works on a fresh checkout following only the READM
 
 Goal: the GPU is a switch, not a second codebase, and the speed claims are measured against a fair baseline.
 
-Status: the GPU solver is now the Luma array-op solver (`bowshock-gpu`, no custom kernels), including the viscous terms and SST.
+Status: the GPU solver is now the Luma array-op solver (`bowshock-cfd`'s `gpu` module, formerly the `bowshock-gpu` crate, no custom kernels), including the viscous terms and SST.
 
-- [ ] `Backend::{Cpu, Gpu}` on the public analysis; `bowshock-gpu` behind a cargo feature so CPU-only users
+- [ ] `Backend::{Cpu, Gpu}` on the public analysis; the GPU solver (`bowshock-cfd`'s `gpu` feature) behind a cargo feature so CPU-only users
       do not compile wgpu.
 - [ ] Record a baseline first: wall time for a standard sweep on CPU and GPU. Set targets from that.
 - [ ] CPU: remove per-iteration allocation in `implicit.rs` (`assemble` allocates the three block arrays
@@ -200,7 +200,7 @@ Status: the GPU solver is now the Luma array-op solver (`bowshock-gpu`, no custo
       `Solver::smooth_residual`. Check rayon granularity on small grids.
 - [x] Generate the f32 and double-float WGSL kernels from one source where possible, so a physics change is
       made twice (Rust and WGSL), not three times. — superseded: `bowshock-gpu` is plain Luma array ops, one source (`body.rs`, `implicit.rs`) included once per precision; there is no WGSL left.
-- [ ] Re-measure the speed-up after the CPU work and update `bowshock-gpu/README.md`.
+- [ ] Re-measure the speed-up after the CPU work and update `bowshock-cfd/README.md`.
 
 Exit: the same sweep runs on either backend through the same API and agrees within the tolerances already
 used in `bowshock-gpu-cases/tests`.

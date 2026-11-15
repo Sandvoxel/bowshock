@@ -1,8 +1,8 @@
-// The line-implicit scheme `Scheme::Implicit` in array ops. This file is `include!`d by `lib.rs` after `body.rs` into the same
+// The line-implicit scheme `Scheme::Implicit` in array ops. This file is `include!`d by `gpu/mod.rs` after `body.rs` into the same
 // per-precision module, so it sees `S`, `A`, `Rec`, `State`, `LazySolver`, `lhs` / `from_lhs` (the f32 view of an `A` and back)
 // and everything `body.rs` imports.
 //
-// It mirrors `bowshock_core::implicit` (`flux_jacobian`, `abs_jacobian`, `cell_blocks`, `assemble`, `solve_lines`,
+// It mirrors `crate::implicit` (`flux_jacobian`, `abs_jacobian`, `cell_blocks`, `assemble`, `solve_lines`,
 // `apply_factor`, `step`, `compute_dt`), inviscid case, grids without a solid block. One iteration solves the backward-Euler
 // pseudo-time step with the first-order flux Jacobians on the left,
 //
@@ -16,8 +16,8 @@
 // constants 0 / 1 (`E::Z`, `E::O`), so that the structurally zero entries of the flux Jacobian cost nothing. The line solves are
 // Luma's `solve_block_tridiagonal_parts` on the sixteen entries of each block (no stacking); a vector field is four `[ni, nj]` arrays.
 
-use bowshock_core::implicit::{DtMode, ImplicitParams};
-use bowshock_core::solver::Scheme;
+use crate::implicit::{DtMode, ImplicitParams};
+use crate::solver::Scheme;
 
 /// Array of the f32 left-hand side.
 type F = Array<f32>;
@@ -393,7 +393,7 @@ struct LGeo {
 impl LGeo {
     fn new(ctx: &Context, grid: &Grid) -> Result<LGeo> {
         let (ni, nj) = (grid.ni, grid.nj);
-        let face = |f: &[bowshock_core::grid::Face], shape: [usize; 2], g: &dyn Fn(&bowshock_core::grid::Face) -> f64| up_lhs(ctx, &f.iter().map(g).collect::<Vec<_>>(), shape);
+        let face = |f: &[crate::grid::Face], shape: [usize; 2], g: &dyn Fn(&crate::grid::Face) -> f64| up_lhs(ctx, &f.iter().map(g).collect::<Vec<_>>(), shape);
         let mask = |shape: [usize; 2], f: &dyn Fn(usize, usize) -> bool| {
             let v: Vec<bool> = (0..shape[1]).flat_map(|j| (0..shape[0]).map(move |i| (i, j))).map(|(i, j)| f(i, j)).collect();
             Array::from_slice_on(ctx, &v, shape)
@@ -419,13 +419,13 @@ impl LGeo {
             one: up_lhs(ctx, &vec![1.0; ni * (nj + 1)], [ni, nj + 1])?,
         };
         let edge = |side: usize| -> Result<EdgeGeo> {
-            let (faces, shape, outward): (Vec<bowshock_core::grid::Face>, [usize; 2], f64) = match side {
+            let (faces, shape, outward): (Vec<crate::grid::Face>, [usize; 2], f64) = match side {
                 0 => ((0..nj).map(|j| grid.iface[j * (ni + 1)]).collect(), [1, nj], -1.0),
                 1 => ((0..nj).map(|j| grid.iface[j * (ni + 1) + ni]).collect(), [1, nj], 1.0),
                 2 => ((0..ni).map(|i| grid.jface[i]).collect(), [ni, 1], -1.0),
                 _ => ((0..ni).map(|i| grid.jface[nj * ni + i]).collect(), [ni, 1], 1.0),
             };
-            let get = |g: &dyn Fn(&bowshock_core::grid::Face) -> f64| up_lhs(ctx, &faces.iter().map(g).collect::<Vec<_>>(), shape);
+            let get = |g: &dyn Fn(&crate::grid::Face) -> f64| up_lhs(ctx, &faces.iter().map(g).collect::<Vec<_>>(), shape);
             Ok(EdgeGeo { nx: get(&|f| f.nx)?, nr: get(&|f| f.nr)?, onx: get(&|f| outward * f.nx)?, onr: get(&|f| outward * f.nr)? })
         };
         Ok(LGeo {
@@ -468,7 +468,7 @@ struct LBlockGeo {
 }
 
 impl LBlockGeo {
-    fn new(ctx: &Context, ni: usize, nj: usize, b: bowshock_core::solver::Block, nozzle: Option<bowshock_core::solver::Nozzle>) -> Result<LBlockGeo> {
+    fn new(ctx: &Context, ni: usize, nj: usize, b: crate::solver::Block, nozzle: Option<crate::solver::Nozzle>) -> Result<LBlockGeo> {
         let mask = |shape: [usize; 2], f: &dyn Fn(usize, usize) -> bool| {
             let v: Vec<bool> = (0..shape[1]).flat_map(|j| (0..shape[0]).map(move |i| (i, j))).map(|(i, j)| f(i, j)).collect();
             Array::from_slice_on(ctx, &v, shape)

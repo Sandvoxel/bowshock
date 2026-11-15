@@ -1,5 +1,5 @@
 //! GPU runner of a [`Case`]: the same procedure, stopping rules and post-processing as the CPU [`crate::engine::run::run_on`], with the
-//! iterations executed by `bowshock_gpu::GpuSolver` (Luma array ops).
+//! iterations executed by `bowshock_cfd::gpu::GpuSolver` (Luma array ops).
 //!
 //! The GPU records [`SYNC`] iterations back to back and reads the residual history. The monitor of the CPU loop (every
 //! [`MONITOR_EVERY`] iterations, which is the synchronisation interval) is sampled once per full chunk: the base-pressure
@@ -14,9 +14,9 @@ use crate::engine::numerics::MONITOR_EVERY;
 use crate::engine::result::{PointResult, StopReason};
 use crate::engine::run::{finish, monitor, stop_reason, wall_distribution};
 use crate::error::Error;
-use bowshock_core::gas::{cons_to_prim, freestream};
-use bowshock_core::solver::Solver;
-use bowshock_gpu::{GpuSolver, Precision};
+use bowshock_cfd::gas::{cons_to_prim, freestream};
+use bowshock_cfd::gpu::{GpuSolver, Precision};
+use bowshock_cfd::solver::Solver;
 use std::time::Instant;
 
 type Result<T, E = Error> = std::result::Result<T, E>;

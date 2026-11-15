@@ -8,8 +8,8 @@
 //! synchronisations (default 50, max 256). Output: `out/gpu_ogive/`.
 
 use bowshock_cases::ogive::{perkins_jorgensen as pj, wall_cp_at, OgiveCase};
-use bowshock_core::flux::Limiter;
-use bowshock_gpu::{GpuSolver, Precision};
+use bowshock_cfd::flux::Limiter;
+use bowshock_cfd::gpu::{GpuSolver, Precision};
 use bowshock_gpu_cases::ogive::{compare, run_cpu, run_gpu, Compare, OgiveRun};
 use bowshock_reference::shock_expansion::{Ogive, SurfaceTheory};
 use std::fs;
@@ -102,7 +102,7 @@ fn main() {
 
     let t0 = Instant::now();
     let _ctx = luma::default_context().expect("open GPU");
-    println!("bowshock-gpu ogive validation: tangent ogive L/d = {}, M = {mach}, limiter = {limiter:?}, CFL = 0.5, f32 on GPU (Luma, extended precision) vs f64 CPU (bowshock-core)", pj::FINENESS);
+    println!("bowshock-cfd gpu ogive validation: tangent ogive L/d = {}, M = {mach}, limiter = {limiter:?}, CFL = 0.5, f32 on GPU (Luma, extended precision) vs f64 CPU (bowshock-cfd)", pj::FINENESS);
     println!(
         "sync interval K = {chunk} iterations; CPU rayon threads = {}; GPU context creation {:.2} s",
         std::thread::available_parallelism().map_or(0, |n| n.get()),
@@ -140,7 +140,7 @@ fn main() {
         let name = GRID_NAMES[lv as usize];
         let cpu = run_cpu(&case);
         let gpu = run_gpu(&case, chunk, Precision::Extended).expect("GPU run (extended)");
-        let fs = bowshock_core::gas::freestream(mach);
+        let fs = bowshock_cfd::gas::freestream(mach);
         let cmp = compare(&case, &fs, &gpu, &cpu);
         println!(
             "  {name:6} {ni}x{nj}: CPU {} it ({:.1} s, {}, {:.1} orders) | GPU {} it stop / {} exec ({:.2} s, {}, {:.1} orders)",

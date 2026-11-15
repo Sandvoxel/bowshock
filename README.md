@@ -19,7 +19,7 @@ Current:
 - Subsonic bodies with a sting or a flat blunt base and wake (line-implicit convergence scheme). Inviscid base drag comes from an empirical free-flight correlation (OpenRocket technical documentation, eq. 3.94), because the inviscid wake gives no physical base pressure.
 - Viscous analysis `Analysis::viscous(FlightConditions)`: wall-resolved, steady, fully turbulent RANS (k-omega SST) on the same grids, with an ISA atmosphere from 0 to 20 km (or an explicit temperature and pressure). Friction drag and base pressure come from the solution.
 - Checks of the viscous terms, measured: laminar flat-plate skin friction within +0.64 % (x = 0.5) and +1.63 % (x = 0.9) of Blasius; SST flat-plate skin friction -4.25 % against `0.37 / log10(Re_x)^2.584` at Re_x = 4.8e6, first-cell y+ = 0.36.
-- GPU solver written in plain Luma array ops (no custom WGSL kernels; f32 or double-float) that matches the f64 CPU solver on the cone, ogive, transonic, subsonic and viscous cases and runs ~3–20× faster per iteration in double-float (see `bowshock-gpu/README.md`). The viscous terms and SST run on it too (`Analysis::viscous` sweeps use the GPU by default). The GPU is the default backend of the facade (`gpu` cargo feature, on by default), with an automatic CPU fallback when the GPU cannot be used (`Polar::fallback` says why; a software Vulkan device such as llvmpipe is treated as no GPU); `--no-default-features` builds CPU-only.
+- GPU solver written in plain Luma array ops (no custom WGSL kernels; f32 or double-float) that matches the f64 CPU solver on the cone, ogive, transonic, subsonic and viscous cases and runs ~3–20× faster per iteration in double-float (see `bowshock-cfd/README.md`). The viscous terms and SST run on it too (`Analysis::viscous` sweeps use the GPU by default). The GPU is the default backend of the facade (`gpu` cargo feature, on by default), with an automatic CPU fallback when the GPU cannot be used (`Polar::fallback` says why; a software Vulkan device such as llvmpipe is treated as no GPU); `--no-default-features` builds CPU-only.
 - Inviscid robustness matrix (3 bodies x 10 Mach numbers from 0.3 to 2.5, Coarse, GPU): 30 of 30 points Converged or Stationary, about 20 s in total.
 
 Known limits:
@@ -58,14 +58,13 @@ Results are written to `out/` (git-ignored).
 | crate | description | docs |
 |---|---|---|
 | `bowshock` (lib `bowshock`) | User API: body specification, grids, Mach-sweep `Analysis` (Euler or RANS), CPU and GPU runners | |
-| `bowshock-core` (lib `bowshock_core`) | CPU f64 reference solver: gas model, HLLC/MUSCL face kernels, characteristic BCs, grids, SSP-RK3, line-implicit scheme, multigrid | [README](bowshock-core/README.md) |
-| `bowshock-reference` (lib `bowshock_reference`) | Reference solutions: Taylor-Maccoll cones, tangent-cone and shock-expansion theory, axisymmetric potential flow | [README](bowshock-core/README.md) |
-| `bowshock-cases` (lib `bowshock_cases`) | Validation cases (cone / ogive / transonic / subsonic), experimental data and their post-processing | [README](bowshock-core/README.md) |
-| `bowshock-gpu` (lib `bowshock_gpu`) | Luma array-op GPU solver (f32 / double-float, explicit and line-implicit), validated against the CPU reference | [README](bowshock-gpu/README.md) |
-| `bowshock-gpu-cases` (lib `bowshock_gpu_cases`) | GPU runners of the validation cases side by side with the CPU runs; GPU-vs-CPU tests | [README](bowshock-gpu/README.md) |
-| `bowshock-validate` | Validation drivers `cone`, `ogive`, `transonic`, `subsonic` (CPU) and `cone_gpu`, `ogive_gpu`, `transonic_gpu`, `subsonic_gpu` | |
+| `bowshock-cfd` (lib `bowshock_cfd`) | The CFD library: axisymmetric Euler / RANS (k-omega SST) solver. CPU f64 solver always built (gas model, HLLC/MUSCL face kernels, characteristic BCs, grids, SSP-RK3, line-implicit scheme, multigrid); Luma array-op GPU solver (f32 / double-float, explicit and line-implicit) behind the `gpu` feature (default) | [README](bowshock-cfd/README.md) |
+| `bowshock-reference` (lib `bowshock_reference`) | Reference solutions: Taylor-Maccoll cones, tangent-cone and shock-expansion theory, axisymmetric potential flow | [README](bowshock-cfd/README.md) |
+| `bowshock-cases` (lib `bowshock_cases`) | Validation cases (cone / ogive / transonic / subsonic), experimental data and their post-processing | [README](bowshock-cfd/README.md) |
+| `bowshock-gpu-cases` (lib `bowshock_gpu_cases`) | GPU runners of the validation cases side by side with the CPU runs; GPU-vs-CPU tests | [README](bowshock-cfd/README.md) |
+| `bowshock-validate` | Validation drivers `cone`, `ogive`, `transonic`, `subsonic` (CPU) and `cone_gpu`, `ogive_gpu`, `transonic_gpu`, `subsonic_gpu`; GPU benchmarks (`examples/`) | |
 
-`bowshock-gpu` depends on [Luma](https://github.com/flipnoteman/Luma) (lazy array API, 0.3) at a pinned git revision. To develop against a local Luma checkout, add a `[patch."https://github.com/flipnoteman/Luma.git"]` entry pointing at it.
+`bowshock-cfd` (feature `gpu`) depends on [Luma](https://github.com/flipnoteman/Luma) (lazy array API, 0.3) at a pinned git revision. To develop against a local Luma checkout, add a `[patch."https://github.com/flipnoteman/Luma.git"]` entry pointing at it.
 
 ## License
 

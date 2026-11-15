@@ -5,7 +5,7 @@
 //! Usage: `cargo run --release --bin transonic_gpu -- [--body cone|karman|lvhaack|sqrt|ogive] [--level 0|1|2] [--quick]
 //!   [--mach 0.8,0.9,...] [--warm] [--domain <body lengths>] [--max-iter N] [--drop <orders>] [--outflow pressure]
 //!   [--limiter minmod|vanalbada] [--scheme explicit|implicit] [--lowmach on|off] [--tag name] [--no-bench] [--bench-only]`
-//! `--scheme implicit` = the line-implicit convergence scheme of `bowshock-core` (default limiter then van Albada).
+//! `--scheme implicit` = the line-implicit convergence scheme of `bowshock-cfd` (default limiter then van Albada).
 //! The options and defaults are those of the CPU bin (`--quick` = grid level 0; default level 1; 12 Mach numbers 0.7 ... 1.5;
 //! cold start for every Mach number, `--warm` = start from the previous converged field). Every Mach number is run by the CPU and by
 //! the GPU with the same procedure and stopping rules. The GPU synchronises every 50 iterations (the CD sampling interval).
@@ -16,10 +16,10 @@ use bowshock::engine::gpu::{GpuRun, GpuRunner, SYNC};
 use bowshock::engine::result::PointResult;
 use bowshock::engine::run::run_on;
 use bowshock_cases::transonic::{named_body, stoney, tangent_cone_cd, transonic_case};
-use bowshock_core::flux::Limiter;
-use bowshock_core::implicit::ImplicitParams;
-use bowshock_core::solver::{Bc, Scheme};
-use bowshock_gpu::Precision;
+use bowshock_cfd::flux::Limiter;
+use bowshock_cfd::gpu::Precision;
+use bowshock_cfd::implicit::ImplicitParams;
+use bowshock_cfd::solver::{Bc, Scheme};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -160,7 +160,7 @@ fn main() {
     let t0 = Instant::now();
     let _ctx = luma::default_context().expect("open GPU");
     println!(
-        "bowshock-gpu transonic: body {body_name} (nose l/d {:.3}), grid L{level} {ni}x{nj} ({} cells), limiter {limiter:?}, outflow {:?}, {}; f32 on GPU (Luma, extended precision) vs f64 CPU (bowshock-core)",
+        "bowshock-cfd gpu transonic: body {body_name} (nose l/d {:.3}), grid L{level} {ni}x{nj} ({} cells), limiter {limiter:?}, outflow {:?}, {}; f32 on GPU (Luma, extended precision) vs f64 CPU (bowshock-cfd)",
         body.nose_length(),
         ni * nj,
         c0.numerics.outflow,

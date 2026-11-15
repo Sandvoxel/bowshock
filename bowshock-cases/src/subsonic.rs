@@ -89,9 +89,9 @@ mod tests {
     use super::*;
     use bowshock::engine::result::StopReason;
     use bowshock::engine::run::run_cold;
-    use bowshock_core::gas::freestream;
-    use bowshock_core::implicit::ImplicitParams;
-    use bowshock_core::solver::Scheme;
+    use bowshock_cfd::gas::freestream;
+    use bowshock_cfd::implicit::ImplicitParams;
+    use bowshock_cfd::solver::Scheme;
     use bowshock_reference::base_drag::base_drag_coefficient;
 
     fn small(base: bool, mach: f64) -> Case {
@@ -169,7 +169,7 @@ mod tests {
         assert!(ra > 0.0 && (ra - rb).abs() <= 1e-14 * ra, "{ra:e} vs {rb:e}");
         // solid cells never change
         let b = sa.block().unwrap();
-        let q0 = bowshock_core::gas::prim_to_cons(&freestream(0.4));
+        let q0 = bowshock_cfd::gas::prim_to_cons(&freestream(0.4));
         for j in 0..b.j_end {
             for i in 0..b.i_end {
                 for k in 0..4 {
@@ -186,8 +186,8 @@ mod tests {
     /// the implicit variants are also compared with each other in the second-order van Albada scheme.
     #[test]
     fn converged_state_is_independent_of_the_acceleration_scheme() {
-        use bowshock_core::flux::Limiter;
-        use bowshock_core::gas::Cons;
+        use bowshock_cfd::flux::Limiter;
+        use bowshock_cfd::gas::Cons;
         let mut case = subsonic_case(0.5, Nose::TangentOgive { fineness: 3.0 }, 0, false);
         case.grid_sting.n_up = 12;
         case.grid_sting.n_nose = 20;

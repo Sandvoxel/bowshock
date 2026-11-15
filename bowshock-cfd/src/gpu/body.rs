@@ -1,16 +1,16 @@
-// The explicit solver in array ops. This file is `include!`d twice by `lib.rs`, once per precision, into a module that
+// The explicit solver in array ops. This file is `include!`d twice by `gpu/mod.rs`, once per precision, into a module that
 // defines `S` (the element type: `f32` or `Df32`), `c(f64) -> S` (a constant rounded from f64), `up(..)` (host f64 data to
 // an `Array<S>`), `to_f64(..)` (an `Array<S>` to host f64 data) and the residual bookkeeping of the loops (`records`,
 // `read_history`, `rn_host`).
 //
-// Every function mirrors the CPU routine of the same name in `bowshock-core` expression by expression; the array code is
+// Every function mirrors the CPU routine of the same name in the CPU modules of this crate expression by expression; the array code is
 // the equation, the doc comment states it.
 
-use bowshock_core::flux::{Limiter, LOW_MACH_FLOOR, SHOCK_SENSOR_HI, SHOCK_SENSOR_LO};
-use bowshock_core::gas::GAMMA;
-use bowshock_core::grid::Grid;
-use bowshock_core::solver::{Bc, Block, Config, Nozzle};
-use crate::Staging;
+use crate::flux::{Limiter, LOW_MACH_FLOOR, SHOCK_SENSOR_HI, SHOCK_SENSOR_LO};
+use crate::gas::GAMMA;
+use crate::grid::Grid;
+use crate::solver::{Bc, Block, Config, Nozzle};
+use crate::gpu::Staging;
 use luma::{concat, select, Array, Context, Fields, PadMode, Result};
 
 /// Array of one field (`rho`, `u`, ...) over a block of cells or faces.
@@ -324,7 +324,7 @@ struct Geo {
 }
 
 /// The solver: state, geometry and the loops that advance it, with an optional solid block (base / wake grids). Mirrors
-/// `bowshock_core::solver::Solver` with `Scheme::Explicit` (`eval_residual` and `rk3_step`) or `Scheme::Implicit` (`implicit.rs`).
+/// `crate::solver::Solver` with `Scheme::Explicit` (`eval_residual` and `rk3_step`) or `Scheme::Implicit` (`implicit.rs`).
 pub struct LazySolver {
     ctx: Context,
     pub ni: usize,
@@ -355,20 +355,20 @@ impl LazySolver {
     /// Uploads the geometry (rounded from the grid's f64 metrics to `S`) and starts from the free stream.
     pub fn new(ctx: &Context, grid: &Grid, cfg: &Config) -> Result<LazySolver> {
         let (ni, nj) = (grid.ni, grid.nj);
-        let face = |f: &[bowshock_core::grid::Face], shape: [usize; 2], g: &dyn Fn(&bowshock_core::grid::Face) -> f64| {
+        let face = |f: &[crate::grid::Face], shape: [usize; 2], g: &dyn Fn(&crate::grid::Face) -> f64| {
             let v: Vec<f64> = f.iter().map(g).collect();
             up(ctx, &v, shape)
         };
         let boundary = |side: usize| -> Result<Boundary> {
             // faces of the boundary, and the shape of the two ghost layers
-            let (faces, shape, outward): (Vec<bowshock_core::grid::Face>, [usize; 2], f64) = match side {
+            let (faces, shape, outward): (Vec<crate::grid::Face>, [usize; 2], f64) = match side {
                 0 => ((0..nj).map(|j| grid.iface[j * (ni + 1)]).collect(), [2, nj], -1.0),
                 1 => ((0..nj).map(|j| grid.iface[j * (ni + 1) + ni]).collect(), [2, nj], 1.0),
                 2 => ((0..ni).map(|i| grid.jface[i]).collect(), [ni, 2], -1.0),
                 _ => ((0..ni).map(|i| grid.jface[nj * ni + i]).collect(), [ni, 2], 1.0),
             };
             // the layers are laid out `[layer, cell]` for i boundaries and `[cell, layer]` for j boundaries
-            let layered = |g: &dyn Fn(&bowshock_core::grid::Face) -> f64| -> Result<A> {
+            let layered = |g: &dyn Fn(&crate::grid::Face) -> f64| -> Result<A> {
                 let v: Vec<f64> = if side < 2 { faces.iter().flat_map(|f| [g(f), g(f)]).collect() } else { [0, 1].iter().flat_map(|_| faces.iter().map(g)).collect() };
                 up(ctx, &v, shape)
             };
@@ -389,13 +389,13 @@ impl LazySolver {
             bnd: [boundary(0)?, boundary(1)?, boundary(2)?, boundary(3)?],
         };
         let mut s = LazySolver { ctx: ctx.clone(), ni, nj, cfg: cfg.clone(), low_mach: false, staging: DEFAULT_STAGING, geo, state: None, iter: 0, block: None, nozzle: None, n_active: ni * nj, scheme: Scheme::Explicit, lg: LGeo::new(ctx, grid)?, lb: None, visc: None };
-        let q = bowshock_core::gas::prim_to_cons(&cfg.freestream);
+        let q = crate::gas::prim_to_cons(&cfg.freestream);
         s.set_state(&vec![q; ni * nj])?;
         Ok(s)
     }
 
     /// A lazy solver in the state of a host solver: grid, config, low-Mach flag, block, conserved state, iteration count and scheme.
-    pub fn from_host(ctx: &Context, s: &bowshock_core::solver::Solver) -> Result<LazySolver> {
+    pub fn from_host(ctx: &Context, s: &crate::solver::Solver) -> Result<LazySolver> {
         let mut l = LazySolver::new(ctx, &s.grid, &s.cfg)?;
         l.set_low_mach(s.low_mach);
         l.set_block(s.block())?;
@@ -404,7 +404,7 @@ impl LazySolver {
         l.iter = s.iter;
         l.set_scheme(s.scheme())?;
         l.set_viscous(s.viscous(), &s.grid)?;
-        if s.viscous().is_some_and(|v| v.turbulence == bowshock_core::solver::Turbulence::Sst) {
+        if s.viscous().is_some_and(|v| v.turbulence == crate::solver::Turbulence::Sst) {
             l.set_turb(&s.turb, &s.mu_t)?;
         }
         Ok(l)

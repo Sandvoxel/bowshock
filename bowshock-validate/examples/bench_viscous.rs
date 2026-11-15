@@ -2,7 +2,7 @@
 //! 0.30 x 0.10 m + 0.60 m tube, ISA 0 m, Mach 0.5, flat base and wake block; `Case::viscous` at the grid levels 0 = coarse and 1 = medium)
 //! against the f64 CPU `Solver`.
 //!
-//! `cargo run --release -p bowshock-gpu --example bench_viscous [-- --n 200] [--sync 50] [--no-cpu] [--no-profile] [--levels 0,1] [--laminar]
+//! `cargo run --release -p bowshock-validate --example bench_viscous [-- --n 200] [--sync 50] [--no-cpu] [--no-profile] [--levels 0,1] [--laminar]
 //! [--staging Fusion|Lines|Fluxes|Split]`
 //!
 //! us/iteration of `n` iterations from the free stream (the first half first order, so both limiter phases are compiled before the clock),
@@ -14,8 +14,8 @@ use bowshock::atmosphere::Atmosphere;
 use bowshock::engine::body_grid::BaseBody;
 use bowshock::engine::case::{Case, Wake};
 use bowshock::spec::{AftSpec, BodySpec, NoseShape, NoseSpec};
-use bowshock_core::solver::Turbulence;
-use bowshock_gpu::Staging;
+use bowshock_cfd::gpu::Staging;
+use bowshock_cfd::solver::Turbulence;
 use std::time::Instant;
 
 fn best_of<F: FnMut() -> f64>(reps: usize, mut f: F) -> f64 {
@@ -103,7 +103,7 @@ fn main() {
         macro_rules! lazy {
             ($module:ident) => {{
                 let t0 = Instant::now();
-                let mut s = bowshock_gpu::$module::LazySolver::from_host(&ctx, &host).unwrap();
+                let mut s = bowshock_cfd::gpu::$module::LazySolver::from_host(&ctx, &host).unwrap();
                 s.staging = staging;
                 s.run(n, sync).unwrap();
                 let first = t0.elapsed().as_secs_f64();
@@ -140,7 +140,7 @@ fn main() {
         let host = case.build_solver();
         macro_rules! profile {
             ($module:ident, $name:expr) => {{
-                let mut s = bowshock_gpu::$module::LazySolver::from_host(&ctx, &host).unwrap();
+                let mut s = bowshock_cfd::gpu::$module::LazySolver::from_host(&ctx, &host).unwrap();
                 s.staging = staging;
                 s.run(n, sync).unwrap(); // past the first-order phase: the profiled step is the MUSCL one
                 let p = s.profile_step().unwrap();

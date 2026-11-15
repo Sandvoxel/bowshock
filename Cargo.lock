@@ -78,8 +78,7 @@ dependencies = [
 name = "bowshock"
 version = "0.1.0"
 dependencies = [
- "bowshock-core",
- "bowshock-gpu",
+ "bowshock-cfd",
  "bowshock-reference",
  "luma",
  "serde",
@@ -91,28 +90,18 @@ name = "bowshock-cases"
 version = "0.1.0"
 dependencies = [
  "bowshock",
- "bowshock-core",
+ "bowshock-cfd",
  "bowshock-reference",
  "gif",
  "image",
 ]
 
 [[package]]
-name = "bowshock-core"
+name = "bowshock-cfd"
 version = "0.1.0"
 dependencies = [
- "rayon",
-]
-
-[[package]]
-name = "bowshock-gpu"
-version = "0.1.0"
-dependencies = [
- "bowshock",
- "bowshock-cases",
- "bowshock-core",
- "bowshock-reference",
  "luma",
+ "rayon",
 ]
 
 [[package]]
@@ -121,8 +110,7 @@ version = "0.1.0"
 dependencies = [
  "bowshock",
  "bowshock-cases",
- "bowshock-core",
- "bowshock-gpu",
+ "bowshock-cfd",
  "bowshock-reference",
  "luma",
 ]
@@ -131,7 +119,7 @@ dependencies = [
 name = "bowshock-reference"
 version = "0.1.0"
 dependencies = [
- "bowshock-core",
+ "bowshock-cfd",
 ]
 
 [[package]]
@@ -140,8 +128,7 @@ version = "0.1.0"
 dependencies = [
  "bowshock",
  "bowshock-cases",
- "bowshock-core",
- "bowshock-gpu",
+ "bowshock-cfd",
  "bowshock-gpu-cases",
  "bowshock-reference",
  "luma",
@@ -597,7 +584,7 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "luma"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bytemuck",
  "encase",

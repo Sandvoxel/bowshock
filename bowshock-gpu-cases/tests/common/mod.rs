@@ -1,10 +1,10 @@
 //! Set-ups shared by the GPU-vs-CPU test files.
 #![allow(dead_code)]
 
-use bowshock_core::flux::Limiter;
-use bowshock_core::gas::{freestream, prim_to_cons};
-use bowshock_core::grid::Grid;
-use bowshock_core::solver::{Bc, Config, Solver};
+use bowshock_cfd::flux::Limiter;
+use bowshock_cfd::gas::{freestream, prim_to_cons};
+use bowshock_cfd::grid::Grid;
+use bowshock_cfd::solver::{Bc, Config, Solver};
 
 /// Rectangular axisymmetric box `x in [0, 4]`, `r in [0, 2]` (axis at `j = 0`, slightly stretched in both directions so that
 /// the geometry is not uniform) with the characteristic far field on the three outer boundaries (`outflow` on `imax`).

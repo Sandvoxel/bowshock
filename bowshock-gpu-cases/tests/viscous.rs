@@ -13,13 +13,13 @@ use bowshock::engine::result::StopReason;
 use bowshock::engine::run::{finish, run_on};
 use bowshock::spec::{AftSpec, BodySpec, MotorSpec, NoseShape, NoseSpec};
 use bowshock::{Analysis, Resolution};
-use bowshock_core::flux::Limiter;
-use bowshock_core::gas::freestream;
-use bowshock_core::grid::{plate_grid, PlateGridParams};
-use bowshock_core::implicit::ImplicitParams;
-use bowshock_core::solver::{Bc, Config, Scheme, Solver, Turbulence, Viscous};
-use bowshock_core::turbulence::K_INF;
-use bowshock_gpu::{GpuSolver, Precision};
+use bowshock_cfd::flux::Limiter;
+use bowshock_cfd::gas::freestream;
+use bowshock_cfd::gpu::{GpuSolver, Precision};
+use bowshock_cfd::grid::{plate_grid, PlateGridParams};
+use bowshock_cfd::implicit::ImplicitParams;
+use bowshock_cfd::solver::{Bc, Config, Scheme, Solver, Turbulence, Viscous};
+use bowshock_cfd::turbulence::K_INF;
 
 /// The flat plates of the CPU gates, with only 5 first-order iterations: G1 (laminar, `re_c = 1e6`) or G2 (SST, `re_c = 2.5e7`).
 fn plate_solver(sst: bool, scheme: Scheme) -> Solver {
@@ -353,13 +353,13 @@ fn converged_body_total_drag_matches_cpu() {
 /// 10 iterations in f32.
 #[test]
 fn stagings_agree_on_the_sst_plate() {
-    use bowshock_gpu::Staging;
+    use bowshock_cfd::gpu::Staging;
     let ctx = luma::default_context().unwrap();
     let mut cpu = plate_solver(true, Scheme::Implicit(ImplicitParams::VISCOUS));
     let hosts: Vec<_> = [Staging::Fusion, Staging::Lines, Staging::Fluxes, Staging::Split]
         .into_iter()
         .map(|staging| {
-            let mut lazy = bowshock_gpu::f32s::LazySolver::from_host(&ctx, &cpu).unwrap();
+            let mut lazy = bowshock_cfd::gpu::f32s::LazySolver::from_host(&ctx, &cpu).unwrap();
             lazy.staging = staging;
             (staging, lazy)
         })

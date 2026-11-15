@@ -17,9 +17,9 @@ use bowshock::engine::result::{wall_cp_at, PointResult};
 use bowshock::engine::run::{run_cold, run_on};
 use bowshock_cases::subsonic::{fox_case, fox_tm_x2439 as fox, subsonic_case};
 use bowshock_cases::transonic::named_body;
-use bowshock_core::flux::Limiter;
-use bowshock_core::implicit::ImplicitParams;
-use bowshock_core::solver::Scheme;
+use bowshock_cfd::flux::Limiter;
+use bowshock_cfd::implicit::ImplicitParams;
+use bowshock_cfd::solver::Scheme;
 use bowshock_reference::potential::{nose_cylinder_body, solve, solve_compressible, PotentialSolution};
 use std::fmt::Write as _;
 use std::fs;
@@ -136,7 +136,7 @@ fn main() {
     fs::create_dir_all(&out_dir).expect("create out dir");
     let opts = Opts::parse(&args);
     println!(
-        "bowshock-core subsonic: grid level {}, limiter {:?}, low-Mach {}, scheme {}",
+        "bowshock-cfd subsonic: grid level {}, limiter {:?}, low-Mach {}, scheme {}",
         opts.level,
         opts.limiter,
         opts.low_mach,

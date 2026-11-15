@@ -182,10 +182,10 @@ pub mod czarnecki_monta {
 mod tests {
     use super::*;
     use bowshock::engine::run::run_cold;
-    use bowshock_core::flux::Limiter;
-    use bowshock_core::gas::{cons_to_prim, freestream, prim_to_cons};
-    use bowshock_core::grid::Grid;
-    use bowshock_core::solver::{Bc, Config, Solver};
+    use bowshock_cfd::flux::Limiter;
+    use bowshock_cfd::gas::{cons_to_prim, freestream, prim_to_cons};
+    use bowshock_cfd::grid::Grid;
+    use bowshock_cfd::solver::{Bc, Config, Solver};
 
     /// Smoothly curved, non-uniform grid with the lower boundary on the axis r=0.
     fn curved_grid(ni: usize, nj: usize) -> Grid {

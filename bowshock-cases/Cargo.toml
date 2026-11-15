@@ -9,7 +9,7 @@ description = "Body grids, case runners and post-processing of the bowshock cone
 
 [dependencies]
 bowshock.workspace = true
-bowshock-core.workspace = true
+bowshock-cfd.workspace = true
 bowshock-reference.workspace = true
 
 [dev-dependencies]

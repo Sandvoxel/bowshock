@@ -1,7 +1,7 @@
 //! Speed of the array-op solver (f32, double-float) against the f64 CPU `Solver` on the cone grids of `cone_gpu --bench`
 //! (M = 2, 15 degree cone, minmod, MUSCL from the first iteration, from the free stream, best of 3).
 //!
-//! `cargo run --release -p bowshock-gpu --example bench [-- --quick] [--n 2000] [--sync 50] [--no-cpu] [--no-profile] [--profile-only]
+//! `cargo run --release -p bowshock-validate --example bench [-- --quick] [--n 2000] [--sync 50] [--no-cpu] [--no-profile] [--profile-only]
 //! [--implicit] [--no-implicit]`
 //!
 //! `--implicit` runs only the line-implicit section: us/iteration of `Scheme::Implicit` on the sting case and the base case (solid
@@ -15,7 +15,7 @@
 use bowshock::engine::body_grid::Nose;
 use bowshock_cases::cone::{build_solver, ConeCase};
 use bowshock_cases::subsonic::subsonic_case;
-use bowshock_gpu::Staging;
+use bowshock_cfd::gpu::Staging;
 use bowshock_reference::taylor_maccoll::solve_cone;
 use std::time::Instant;
 
@@ -49,7 +49,7 @@ fn splits(p: &luma::Profile) -> String {
 /// One lazy solver of one precision: steady us/iteration of the three loop forms and the first-call time, for every staging.
 macro_rules! bench_lazy {
     ($module:ident, $staging:expr, $ctx:expr, $host:expr, $u0:expr, $n:expr, $n_eval:expr, $sync:expr) => {{
-        use bowshock_gpu::$module::LazySolver;
+        use bowshock_cfd::gpu::$module::LazySolver;
         let (n, n_eval, sync) = ($n, $n_eval, $sync);
         let t0 = Instant::now();
         let mut s = LazySolver::new($ctx, &$host.grid, &$host.cfg).unwrap();
@@ -124,7 +124,7 @@ fn implicit_section(ctx: &luma::Context, n: usize, sync: usize, no_cpu: bool, pr
         };
         macro_rules! lazy {
             ($module:ident) => {{
-                let mut s = bowshock_gpu::$module::LazySolver::from_host(ctx, &host).unwrap();
+                let mut s = bowshock_cfd::gpu::$module::LazySolver::from_host(ctx, &host).unwrap();
                 let t0 = Instant::now();
                 s.run(n, sync).unwrap();
                 let first = t0.elapsed().as_secs_f64();
@@ -165,7 +165,7 @@ fn implicit_section(ctx: &luma::Context, n: usize, sync: usize, no_cpu: bool, pr
         let host = case.build_solver();
         macro_rules! profile {
             ($module:ident, $name:expr) => {{
-                let mut s = bowshock_gpu::$module::LazySolver::from_host(ctx, &host).unwrap();
+                let mut s = bowshock_cfd::gpu::$module::LazySolver::from_host(ctx, &host).unwrap();
                 s.run(n, sync).unwrap(); // past the first-order phase: the profiled step is the MUSCL one
                 let p = s.profile_step().unwrap();
                 println!(
@@ -294,7 +294,7 @@ fn main() {
         let host = build_solver(&case, tm.beta);
         macro_rules! profile {
             ($module:ident, $name:expr, $staging:expr, $sname:expr) => {{
-                let mut s = bowshock_gpu::$module::LazySolver::new(&ctx, &host.grid, &host.cfg).unwrap();
+                let mut s = bowshock_cfd::gpu::$module::LazySolver::new(&ctx, &host.grid, &host.cfg).unwrap();
                 s.staging = $staging;
                 s.set_state(&host.u).unwrap();
                 let p = s.profile_residual().unwrap();

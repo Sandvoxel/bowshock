@@ -1,9 +1,9 @@
 //! Solver settings of a run: scheme, limiter, iteration limits and stop-rule tolerances.
 
 use crate::engine::case::Wake;
-use bowshock_core::flux::Limiter;
-use bowshock_core::implicit::{DtMode, ImplicitParams};
-use bowshock_core::solver::{Bc, Scheme};
+use bowshock_cfd::flux::Limiter;
+use bowshock_cfd::implicit::{DtMode, ImplicitParams};
+use bowshock_cfd::solver::{Bc, Scheme};
 
 /// Sampling interval [iterations] of the monitor history.
 pub const MONITOR_EVERY: usize = 50;

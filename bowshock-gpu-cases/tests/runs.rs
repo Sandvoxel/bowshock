@@ -11,9 +11,9 @@ use bowshock::engine::result::{PointResult, StopReason};
 use bowshock::engine::run::{base_state, run_on};
 use bowshock_cases::subsonic::subsonic_case;
 use bowshock_cases::transonic::transonic_case;
-use bowshock_core::flux::Limiter;
-use bowshock_core::solver::{Bc, Scheme};
-use bowshock_gpu::{GpuSolver, Precision};
+use bowshock_cfd::flux::Limiter;
+use bowshock_cfd::gpu::{GpuSolver, Precision};
+use bowshock_cfd::solver::{Bc, Scheme};
 use common::{far_field_box, perturbed_state, residual_diff, state_diff};
 
 /// Default transonic case: tangent ogive of fineness 3 plus a 6 d cylinder, grid level 0.
@@ -140,7 +140,7 @@ fn implicit_scheme_converged_state_matches_cpu() {
 fn implicit_transonic_warm_start_matches_cpu() {
     let mut case = transonic_level(0.8);
     case.numerics.limiter = Limiter::VanAlbada;
-    case.numerics.scheme = Scheme::Implicit(bowshock_core::implicit::ImplicitParams::DEFAULT);
+    case.numerics.scheme = Scheme::Implicit(bowshock_cfd::implicit::ImplicitParams::DEFAULT);
     case.numerics.first_order_iters = 100;
     case.numerics.max_iter = 150;
     let mut s = case.build_solver();
@@ -210,7 +210,7 @@ fn set_config_moves_the_free_stream() {
         println!("set_config {prec:?}: state {worst:.2e}, residual {worst_res:.2e}");
         assert!(worst < tol && worst_res < 1e-4, "{prec:?}: state {worst:e}, residual {worst_res:e}");
         gpu.reset().unwrap();
-        let fs = bowshock_core::gas::prim_to_cons(&second.cfg.freestream);
+        let fs = bowshock_cfd::gas::prim_to_cons(&second.cfg.freestream);
         let d = state_diff(&gpu.state_f64().unwrap(), &vec![fs; gpu.ni * gpu.nj]);
         assert!(d < 1e-6 && gpu.iter() == 0, "reset: state differs from the free stream by {d:e}");
     }

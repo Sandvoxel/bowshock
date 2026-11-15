@@ -9,10 +9,9 @@ description = "GPU runners of the bowshock validation cases, compared side by si
 
 [dependencies]
 bowshock = { workspace = true, features = ["gpu"] }
-bowshock-core.workspace = true
+bowshock-cfd = { workspace = true, features = ["gpu"] }
 bowshock-reference.workspace = true
 bowshock-cases.workspace = true
-bowshock-gpu.workspace = true
 luma.workspace = true
 
 [lints]

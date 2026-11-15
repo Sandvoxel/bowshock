@@ -1,4 +1,4 @@
-// Run control of the solver: the configuration of a sweep point, the reads `GpuSolver` forwards. This file is `include!`d by `lib.rs`
+// Run control of the solver: the configuration of a sweep point, the reads `GpuSolver` forwards. This file is `include!`d by `gpu/mod.rs`
 // after `body.rs` and `implicit.rs` into the same per-precision module, so it sees `LazySolver` with its private fields.
 
 /// The constant ghost layers of boundary `side` (`[imin, imax, jmin, jmax]`, `shape` the two layers) for `Bc::Freestream`, else `None`.

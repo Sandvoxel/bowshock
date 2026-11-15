@@ -9,9 +9,9 @@ use crate::engine::body_grid::BaseBody;
 use crate::engine::case::{Case, Wake};
 use crate::engine::numerics::MONITOR_EVERY;
 use crate::engine::result::{BasePoint, PointResult, StopReason, WallPoint};
-use bowshock_core::gas::{cons_to_prim, freestream, prim_to_cons, sound_speed};
-use bowshock_core::solver::Solver;
-use bowshock_core::viscous::temperature;
+use bowshock_cfd::gas::{cons_to_prim, freestream, prim_to_cons, sound_speed};
+use bowshock_cfd::solver::Solver;
+use bowshock_cfd::viscous::temperature;
 use bowshock_reference::base_drag::base_drag_coefficient;
 
 /// Cold-start run on a fresh solver.
@@ -349,7 +349,7 @@ mod tests {
     use super::*;
     use crate::engine::body_grid::{Body, Nose};
     use crate::engine::numerics::Numerics;
-    use bowshock_core::solver::{Turbulence, Viscous};
+    use bowshock_cfd::solver::{Turbulence, Viscous};
 
     fn case(tol: Option<f64>, wake: Wake) -> Case {
         let mut n = Numerics::transonic();

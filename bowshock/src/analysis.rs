@@ -8,8 +8,8 @@ use crate::engine::result::{PointResult, StopReason};
 use crate::engine::run::run_on;
 use crate::error::Error;
 use crate::spec::{BodySpec, FinSpec, MotorSpec};
-use bowshock_core::gas::GAMMA;
-use bowshock_core::solver::{Solver, Turbulence, Viscous};
+use bowshock_cfd::gas::GAMMA;
+use bowshock_cfd::solver::{Solver, Turbulence, Viscous};
 use bowshock_reference::base_drag::base_drag_coefficient;
 
 /// Lowest and highest Mach number accepted by [`Analysis::run`].
@@ -696,7 +696,7 @@ impl Runner for GpuBackend {
     type Error = Error;
 
     fn cold(&self, case: &Case) -> Result<(PointResult, crate::engine::gpu::GpuRunner), Error> {
-        let mut r = crate::engine::gpu::GpuRunner::new(case, bowshock_gpu::Precision::Extended)?;
+        let mut r = crate::engine::gpu::GpuRunner::new(case, bowshock_cfd::gpu::Precision::Extended)?;
         let run = r.run_on(case, false, None)?;
         Ok((run.result, r))
     }

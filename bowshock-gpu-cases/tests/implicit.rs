@@ -15,11 +15,11 @@ macro_rules! state_check {
     ($module:ident, $tol:expr, $label:expr, $case:expr) => {{
         let mut case = $case;
         case.numerics.first_order_iters = 5;
-        assert!(matches!(case.numerics.scheme, bowshock_core::solver::Scheme::Implicit(_)));
+        assert!(matches!(case.numerics.scheme, bowshock_cfd::solver::Scheme::Implicit(_)));
         let mut cpu = case.build_solver();
         let ctx = luma::Context::new().unwrap();
-        let mut lazy = bowshock_gpu::$module::LazySolver::from_host(&ctx, &cpu).unwrap();
-        assert_eq!(lazy.staging, bowshock_gpu::Staging::Fluxes);
+        let mut lazy = bowshock_cfd::gpu::$module::LazySolver::from_host(&ctx, &cpu).unwrap();
+        assert_eq!(lazy.staging, bowshock_cfd::gpu::Staging::Fluxes);
         let res_cpu: Vec<f64> = (0..30).map(|_| cpu.step()).collect();
         let res_lazy = lazy.run(30, 10).unwrap();
         let ul = lazy.state_f64().unwrap();
@@ -54,8 +54,8 @@ fn implicit_scheme_state_matches_cpu() {
 /// replay, `eval_all` loop) against each other: the line solves are traced and replayed like any other kernel.
 #[test]
 fn implicit_options_and_loop_forms() {
-    use bowshock_core::implicit::{DtMode, ImplicitParams};
-    use bowshock_core::solver::Scheme;
+    use bowshock_cfd::implicit::{DtMode, ImplicitParams};
+    use bowshock_cfd::solver::Scheme;
     let base = match subsonic_case(0.5, Nose::TangentOgive { fineness: 3.0 }, 0, false).numerics.scheme {
         Scheme::Implicit(p) => p,
         s => panic!("{s:?}"),
@@ -73,7 +73,7 @@ fn implicit_options_and_loop_forms() {
         case.numerics.first_order_iters = 5;
         case.numerics.scheme = Scheme::Implicit(params);
         let mut cpu = case.build_solver();
-        let mut lazy = bowshock_gpu::df32s::LazySolver::from_host(&ctx, &cpu).unwrap();
+        let mut lazy = bowshock_cfd::gpu::df32s::LazySolver::from_host(&ctx, &cpu).unwrap();
         let res_cpu: Vec<f64> = (0..30).map(|_| cpu.step()).collect();
         let res_lazy = lazy.run(30, 10).unwrap();
         let worst =
@@ -88,7 +88,7 @@ fn implicit_options_and_loop_forms() {
     macro_rules! forms {
         ($module:ident) => {{
             let run = |form: usize| {
-                let mut s = bowshock_gpu::$module::LazySolver::from_host(&ctx, &host).unwrap();
+                let mut s = bowshock_cfd::gpu::$module::LazySolver::from_host(&ctx, &host).unwrap();
                 let hist = match form {
                     0 => s.run(20, 7).unwrap(),
                     1 => {

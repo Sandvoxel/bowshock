@@ -28,15 +28,15 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 #[cfg(feature = "gpu")]
-impl From<bowshock_gpu::GpuError> for Error {
-    fn from(e: bowshock_gpu::GpuError) -> Self {
+impl From<bowshock_cfd::gpu::GpuError> for Error {
+    fn from(e: bowshock_cfd::gpu::GpuError) -> Self {
         Error::Gpu(e.to_string())
     }
 }
 
 #[cfg(feature = "gpu")]
-impl From<bowshock_gpu::LumaError> for Error {
-    fn from(e: bowshock_gpu::LumaError) -> Self {
+impl From<bowshock_cfd::gpu::LumaError> for Error {
+    fn from(e: bowshock_cfd::gpu::LumaError) -> Self {
         Error::Gpu(e.to_string())
     }
 }

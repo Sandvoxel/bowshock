@@ -9,8 +9,8 @@
 //! CSV output: `out/gpu/`.
 
 use bowshock_cases::cone::{build_solver, ConeCase};
-use bowshock_core::flux::Limiter;
-use bowshock_gpu::{GpuSolver, Precision};
+use bowshock_cfd::flux::Limiter;
+use bowshock_cfd::gpu::{GpuSolver, Precision};
 use bowshock_gpu_cases::cone::{compare, residual_on_state, run_cpu, run_gpu, Compare, RunResult};
 use bowshock_reference::taylor_maccoll::{solve_cone, ConeSolution};
 use std::fs;
@@ -202,7 +202,7 @@ fn main() {
     let ctx = luma::default_context().expect("open GPU");
     let ctx_seconds = t0.elapsed().as_secs_f64();
     println!(
-        "bowshock-gpu cone validation: M = {mach}, gamma = 1.4, CFL = 0.5, MUSCL + HLLC/Rusanov blend + SSP-RK3, f32 on GPU (Luma) vs f64 CPU (bowshock-core)"
+        "bowshock-cfd gpu cone validation: M = {mach}, gamma = 1.4, CFL = 0.5, MUSCL + HLLC/Rusanov blend + SSP-RK3, f32 on GPU (Luma) vs f64 CPU (bowshock-cfd)"
     );
     println!("sync interval K = {chunk} iterations; CPU rayon threads = {}", std::thread::available_parallelism().map_or(0, |n| n.get()));
     println!("GPU context creation: {:.2} s", ctx_seconds);
@@ -230,7 +230,7 @@ fn main() {
                 let cpu = run_cpu(&case, &tm);
                 let gpu = run_gpu(&case, &tm, chunk, Precision::Extended).expect("GPU run (extended)");
                 let f32run = run_gpu(&case, &tm, chunk, Precision::F32).expect("GPU run (f32)");
-                let fs = bowshock_core::gas::freestream(mach);
+                let fs = bowshock_cfd::gas::freestream(mach);
                 let cmp = compare(&case, &fs, &gpu, &cpu);
                 let cmp_f32 = compare(&case, &fs, &f32run, &cpu);
                 let on_state = |prec| {
