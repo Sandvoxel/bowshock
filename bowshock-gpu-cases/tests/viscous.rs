@@ -6,19 +6,20 @@
 //! `max |dU| / (1 + |U|)`, the residual histories by `max |r - r_cpu| / r_cpu` (from the second iteration: the first is round-off of the
 //! uniform start on both sides).
 
-use bowshock::atmosphere::Atmosphere;
-use bowshock::body_grid::BaseBody;
-use bowshock::case::{Case, Wake};
-use bowshock::result::StopReason;
-use bowshock::run::{finish, run_on};
-use bowshock::spec::{AftSpec, BodySpec, NoseShape, NoseSpec};
-use bowshock_core::flux::Limiter;
-use bowshock_core::gas::freestream;
-use bowshock_core::grid::{plate_grid, PlateGridParams};
-use bowshock_core::implicit::ImplicitParams;
-use bowshock_core::solver::{Bc, Config, Scheme, Solver, Turbulence, Viscous};
-use bowshock_core::turbulence::K_INF;
-use bowshock_gpu::{GpuSolver, Precision};
+use bowshock::atmosphere::{Atmosphere, FlightConditions};
+use bowshock::engine::body_grid::BaseBody;
+use bowshock::engine::case::{Case, Wake};
+use bowshock::engine::result::StopReason;
+use bowshock::engine::run::{finish, run_on};
+use bowshock::spec::{AftSpec, BodySpec, MotorSpec, NoseShape, NoseSpec};
+use bowshock::{Analysis, Resolution};
+use bowshock_cfd::flux::Limiter;
+use bowshock_cfd::gas::freestream;
+use bowshock_cfd::gpu::{GpuSolver, Precision};
+use bowshock_cfd::grid::{plate_grid, PlateGridParams};
+use bowshock_cfd::implicit::ImplicitParams;
+use bowshock_cfd::solver::{Bc, Config, Scheme, Solver, Turbulence, Viscous};
+use bowshock_cfd::turbulence::K_INF;
 
 /// The flat plates of the CPU gates, with only 5 first-order iterations: G1 (laminar, `re_c = 1e6`) or G2 (SST, `re_c = 2.5e7`).
 fn plate_solver(sst: bool, scheme: Scheme) -> Solver {
@@ -168,6 +169,78 @@ fn g3_case() -> Case {
     Case::viscous(mach, body, 0, Wake::Base, re_c, 110.4 / air.temperature_k, mach)
 }
 
+/// The C2 motor case on the G3 body (Mach 0.8, coarse grid): a Mach 2.5 jet from a 60 mm exit in the 100 mm base, built by the facade
+/// (`Analysis::engine_cases`) so that the jet state is derived in one place.
+fn motor_case() -> Case {
+    let spec = BodySpec { nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 }, aft: vec![AftSpec::Tube { length: 0.60 }] };
+    let motor = MotorSpec { exit_diameter: 0.06, exit_mach: 2.5, exit_pressure_pa: 101325.0, total_temperature_k: 1500.0 };
+    let flight = FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 0.0 } };
+    let analysis = Analysis::new(&spec).unwrap().resolution(Resolution::Coarse).viscous(flight).motor(motor);
+    analysis.engine_cases(&[0.8]).unwrap().remove(0)
+}
+
+/// The motor case: 30 iterations from the free stream (5 first order) vs CPU; the jet rows of the base face (Euler flux, viscous ghost, implicit
+/// left-hand side, turbulence ghost) are all exercised.
+macro_rules! motor_check {
+    ($prec:expr, $scheme:expr, $tol:expr) => {{
+        let ctx = luma::default_context().unwrap();
+        let mut case = motor_case();
+        case.numerics.first_order_iters = 5;
+        if let Some(scheme) = $scheme {
+            case.numerics.scheme = scheme;
+        }
+        let mut cpu = case.build_solver();
+        let nozzle = cpu.nozzle().expect("a motor case has a nozzle");
+        let mut lazy = GpuSolver::from_host(&ctx, &cpu, $prec).unwrap();
+        assert_eq!(lazy.nozzle(), Some(nozzle));
+        let res_cpu: Vec<f64> = (0..30).map(|_| cpu.step()).collect();
+        let res = lazy.run(30).unwrap();
+        let (max, mean) = state_diff(&lazy.state_f64().unwrap(), &cpu.u);
+        println!(
+            "motor {} {}: jet rows {}, max |dU|/(1+|U|) = {max:.2e}, mean {mean:.2e}, max rel residual diff {:.2e}, residual {:.3e} -> {:.3e}",
+            format!("{:?}", $prec),
+            stringify!($scheme),
+            nozzle.j_end,
+            residual_diff(&res, &res_cpu),
+            res_cpu[1],
+            res_cpu[29]
+        );
+        assert!(max <= $tol && res.iter().all(|r| r.is_finite()), "motor {}: state difference {max:e}", format!("{:?}", $prec));
+    }};
+}
+
+#[test]
+fn motor_state_matches_cpu_f32() {
+    motor_check!(Precision::F32, None::<Scheme>, 1e-3);
+}
+
+#[test]
+fn motor_state_matches_cpu_df32() {
+    motor_check!(Precision::Extended, None::<Scheme>, 1e-4);
+}
+
+/// The explicit scheme (SSP-RK3, SST update after the step).
+#[test]
+fn motor_explicit_state_matches_cpu_df32() {
+    motor_check!(Precision::Extended, Some(Scheme::Explicit), 1e-6);
+}
+
+/// `set_nozzle` outside the order block, nozzle, viscous is refused.
+#[test]
+fn set_nozzle_order_is_checked() {
+    let ctx = luma::default_context().unwrap();
+    let case = motor_case();
+    let host = case.build_solver();
+    let nozzle = host.nozzle().unwrap();
+    let mut s = GpuSolver::new(&ctx, &host.grid, &host.cfg, Precision::F32).unwrap();
+    let err = s.set_nozzle(Some(nozzle)).unwrap_err();
+    assert_eq!(err.to_string(), "set_nozzle must follow set_block and precede set_viscous");
+    s.set_block(host.block()).unwrap();
+    s.set_nozzle(Some(nozzle)).unwrap();
+    s.set_viscous(host.viscous(), &host.grid).unwrap();
+    assert!(s.set_nozzle(None).is_err());
+}
+
 /// Viscous body with the solid block (no-slip body surface, base wall and the axis behind the base as a slip wall): 30 iterations vs CPU.
 macro_rules! body_check {
     ($prec:expr, $tol:expr) => {{
@@ -227,7 +300,7 @@ fn body_explicit_state_matches_cpu_df32() {
     assert!(max <= 1e-6, "state difference {max:e}");
 }
 
-/// The G3 body iterated to the stop rule of the CPU run (`bowshock::run::run_on`), the lazy solver for the same number of iterations from the free
+/// The G3 body iterated to the stop rule of the CPU run (`bowshock::engine::run::run_on`), the lazy solver for the same number of iterations from the free
 /// stream: the total drag within 1 %. (The CPU run takes about half a minute.)
 #[test]
 #[ignore = "runs the CPU solver to convergence (about half a minute)"]
@@ -280,13 +353,13 @@ fn converged_body_total_drag_matches_cpu() {
 /// 10 iterations in f32.
 #[test]
 fn stagings_agree_on_the_sst_plate() {
-    use bowshock_gpu::Staging;
+    use bowshock_cfd::gpu::Staging;
     let ctx = luma::default_context().unwrap();
     let mut cpu = plate_solver(true, Scheme::Implicit(ImplicitParams::VISCOUS));
     let hosts: Vec<_> = [Staging::Fusion, Staging::Lines, Staging::Fluxes, Staging::Split]
         .into_iter()
         .map(|staging| {
-            let mut lazy = bowshock_gpu::f32s::LazySolver::from_host(&ctx, &cpu).unwrap();
+            let mut lazy = bowshock_cfd::gpu::f32s::LazySolver::from_host(&ctx, &cpu).unwrap();
             lazy.staging = staging;
             (staging, lazy)
         })

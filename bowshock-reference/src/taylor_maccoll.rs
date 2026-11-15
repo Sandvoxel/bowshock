@@ -12,7 +12,7 @@
 //! shock relations) the ODE is integrated with RK4 towards smaller `theta` until `Vt = 0`, the
 //! cone surface. `beta` is found by bisection such that that angle equals the cone half-angle.
 
-use bowshock_core::gas::GAMMA;
+use bowshock_cfd::gas::GAMMA;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ConeSolution {
@@ -84,7 +84,7 @@ fn integrate_from_shock(m1: f64, beta: f64) -> (f64, f64) {
     (0.0, y[0])
 }
 
-/// Solve the weak-shock Taylor-Maccoll cone flow for Mach `m1` and cone half-angle `theta_c` [rad].
+/// Solve the weak-shock Taylor-Maccoll cone flow for Mach `m1` and cone half-angle `theta_c` \[rad\].
 /// Returns `None` if no attached conical shock exists.
 pub fn solve_cone(m1: f64, theta_c: f64) -> Option<ConeSolution> {
     let mu = (1.0 / m1).asin();

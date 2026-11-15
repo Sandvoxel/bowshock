@@ -4,11 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+publish = false
 description = "Body grids, case runners and post-processing of the bowshock cone, ogive, transonic and subsonic validation cases"
 
 [dependencies]
 bowshock.workspace = true
-bowshock-core.workspace = true
+bowshock-cfd.workspace = true
 bowshock-reference.workspace = true
 
 [dev-dependencies]

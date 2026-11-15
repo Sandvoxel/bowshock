@@ -4,11 +4,11 @@
 //! The geometry (`shock_expansion::Ogive`) is non-dimensionalised with the body diameter `d = 1`
 //! (radius `R = 0.5`); the nose runs over `0 <= x <= L_nose` and the cylinder over `L_nose <= x <= L_nose + cyl_length`.
 
-use bowshock::result::{StopReason, WallPoint};
-use bowshock_core::flux::Limiter;
-use bowshock_core::gas::freestream;
-use bowshock_core::grid::Grid;
-use bowshock_core::solver::{Bc, Config, Solver};
+use bowshock::engine::result::{StopReason, WallPoint};
+use bowshock_cfd::flux::Limiter;
+use bowshock_cfd::gas::freestream;
+use bowshock_cfd::grid::Grid;
+use bowshock_cfd::solver::{Bc, Config, Solver};
 use bowshock_reference::shock_expansion::{Ogive, SurfaceTheory};
 
 /// Published experimental surface pressures, zero angle of attack.
@@ -284,7 +284,7 @@ fn postprocess(case: &OgiveCase, s: &Solver, residual: Vec<f64>, drop_orders: f6
     let mut min_rho = f64::INFINITY;
     let mut min_p = f64::INFINITY;
     for q in &s.u {
-        let w = bowshock_core::gas::cons_to_prim(q);
+        let w = bowshock_cfd::gas::cons_to_prim(q);
         min_rho = min_rho.min(w[0]);
         min_p = min_p.min(w[3]);
     }

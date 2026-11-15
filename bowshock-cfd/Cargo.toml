@@ -1,0 +1,23 @@
+[package]
+name = "bowshock-cfd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Axisymmetric Euler / RANS (k-omega SST) finite-volume solver: f64 CPU reference and a Luma GPU port (f32 / double-float), explicit and line-implicit"
+readme = "README.md"
+keywords = ["cfd", "rocket", "aerodynamics", "drag", "gpu"]
+categories = ["science", "simulation"]
+documentation = "https://sandvoxel.github.io/bowshock/main/api/bowshock_cfd/"
+
+[dependencies]
+rayon.workspace = true
+luma = { workspace = true, optional = true }
+
+[features]
+default = ["gpu"]
+# The Luma array-op GPU solver (`bowshock_cfd::gpu`).
+gpu = ["dep:luma"]
+
+[lints]
+workspace = true

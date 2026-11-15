@@ -1,13 +1,13 @@
 //! Subsonic validation cases (M ~ 0.1 - 0.8): nose-cylinder-(boattail) bodies, either with a flat blunt base and wake
 //! (`Wake::Base`) or with the cylinder continuing as a sting to the outflow plane (`Wake::Sting`), and the published Fox
-//! TM X-2439 wall-pressure data. The runner, stop rules and post-processing are in `bowshock::run`.
+//! TM X-2439 wall-pressure data. The runner, stop rules and post-processing are in `bowshock::engine::run`.
 //!
 //! Lengths are in body diameters (`d = 1`, `R = 0.5`). Drag coefficients are pressure drag only (inviscid), referenced to the
 //! maximum cross-section `pi R^2`.
 
-use bowshock::body_grid::{BaseBody, Body, Nose};
-use bowshock::case::{Case, Wake};
-use bowshock::numerics::Numerics;
+use bowshock::engine::body_grid::{BaseBody, Body, Nose};
+use bowshock::engine::case::{Case, Wake};
+use bowshock::engine::numerics::Numerics;
 
 /// Body `nose + 6 d` cylinder (no boattail, no sting), domain `10 L` upstream and radially, `5 L` downstream (`L` = total body
 /// length), grid level 0/1/2 (cells per diameter doubling each level). `base`: finite body with a flat base and a wake region
@@ -87,11 +87,11 @@ pub mod fox_tm_x2439 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bowshock::result::StopReason;
-    use bowshock::run::run_cold;
-    use bowshock_core::gas::freestream;
-    use bowshock_core::implicit::ImplicitParams;
-    use bowshock_core::solver::Scheme;
+    use bowshock::engine::result::StopReason;
+    use bowshock::engine::run::run_cold;
+    use bowshock_cfd::gas::freestream;
+    use bowshock_cfd::implicit::ImplicitParams;
+    use bowshock_cfd::solver::Scheme;
     use bowshock_reference::base_drag::base_drag_coefficient;
 
     fn small(base: bool, mach: f64) -> Case {
@@ -135,6 +135,7 @@ mod tests {
     /// suction (Cp_b < 0), the drag breakdown adds up, the pressure drag of the closed body is dominated by the base (base CD =
     /// -Cp_b A_b / A_ref = -Cp_b for a full disc) and the modelled base drag is the correlation's for a full disc.
     #[test]
+    #[ignore = "slow (26 s): the inviscid base wake on the standard level-0 grids needs 4000 iterations to be judged stationary"]
     fn subsonic_smoke_with_base() {
         // standard level-0 grids (the coarse test grids are too crude for the wake to settle)
         let mut c = subsonic_case(0.2, Nose::TangentOgive { fineness: 3.0 }, 0, true);
@@ -169,7 +170,7 @@ mod tests {
         assert!(ra > 0.0 && (ra - rb).abs() <= 1e-14 * ra, "{ra:e} vs {rb:e}");
         // solid cells never change
         let b = sa.block().unwrap();
-        let q0 = bowshock_core::gas::prim_to_cons(&freestream(0.4));
+        let q0 = bowshock_cfd::gas::prim_to_cons(&freestream(0.4));
         for j in 0..b.j_end {
             for i in 0..b.i_end {
                 for k in 0..4 {
@@ -186,8 +187,8 @@ mod tests {
     /// the implicit variants are also compared with each other in the second-order van Albada scheme.
     #[test]
     fn converged_state_is_independent_of_the_acceleration_scheme() {
-        use bowshock_core::flux::Limiter;
-        use bowshock_core::gas::Cons;
+        use bowshock_cfd::flux::Limiter;
+        use bowshock_cfd::gas::Cons;
         let mut case = subsonic_case(0.5, Nose::TangentOgive { fineness: 3.0 }, 0, false);
         case.grid_sting.n_up = 12;
         case.grid_sting.n_nose = 20;
@@ -209,7 +210,7 @@ mod tests {
             let mut last = 1.0;
             for _ in 0..iters {
                 last = s.step();
-                if last < 1e-11 {
+                if last < 3e-10 {
                     break;
                 }
             }

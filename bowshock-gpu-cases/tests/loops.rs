@@ -13,7 +13,7 @@ macro_rules! check {
         let host = build_solver(&case, tm.beta);
         let ctx = luma::Context::new().unwrap();
         let run = |form: usize| {
-            let mut s = bowshock_gpu::$module::LazySolver::new(&ctx, &host.grid, &host.cfg).unwrap();
+            let mut s = bowshock_cfd::gpu::$module::LazySolver::new(&ctx, &host.grid, &host.cfg).unwrap();
             let history = match form {
                 0 => s.run(20, 7).unwrap(),
                 1 => {
@@ -64,7 +64,7 @@ fn threads_on_the_default_context_agree() {
             let mut case = ConeCase::new(2.0, 15.0, 40, 20);
             case.first_order_iters = 5;
             let host = build_solver(&case, tm.beta);
-            let mut s = bowshock_gpu::$module::LazySolver::new($ctx, &host.grid, &host.cfg).unwrap();
+            let mut s = bowshock_cfd::gpu::$module::LazySolver::new($ctx, &host.grid, &host.cfg).unwrap();
             let history = s.run(20, 7).unwrap();
             (s.state_f64().unwrap(), history)
         }};

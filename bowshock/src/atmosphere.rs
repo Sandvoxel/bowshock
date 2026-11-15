@@ -31,23 +31,24 @@ const T_REF: f64 = 273.15;
 /// Sutherland constant of air [K].
 pub(crate) const SUTHERLAND_S: f64 = 110.4;
 /// Lowest explicit temperature accepted [K].
-const T_MIN: f64 = 150.0;
+const T_MIN: f64 = 100.0;
 /// Highest explicit temperature accepted [K].
 const T_MAX: f64 = 400.0;
 
 /// Source of the static state of the air.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Atmosphere {
     /// International Standard Atmosphere at a geometric altitude in metres (0 to 20 000 m).
     Isa {
-        /// Geometric altitude [m].
+        /// Geometric altitude \[m\].
         altitude_m: f64,
     },
     /// Static temperature and pressure given directly.
     Explicit {
-        /// Static temperature [K], within 150 to 400 K.
+        /// Static temperature \[K\], within 100 to 400 K.
         temperature_k: f64,
-        /// Static pressure [Pa], finite and positive.
+        /// Static pressure \[Pa\], finite and positive.
         pressure_pa: f64,
     },
 }
@@ -55,9 +56,9 @@ pub enum Atmosphere {
 /// Static state of the air.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AirState {
-    /// Static temperature [K].
+    /// Static temperature \[K\].
     pub temperature_k: f64,
-    /// Static pressure [Pa].
+    /// Static pressure \[Pa\].
     pub pressure_pa: f64,
     /// Density [kg/m^3].
     pub density: f64,
@@ -69,6 +70,7 @@ pub struct AirState {
 
 /// Flight conditions of a viscous analysis.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FlightConditions {
     /// Static state of the air the vehicle flies through.
     pub atmosphere: Atmosphere,
@@ -143,7 +145,7 @@ mod tests {
 
     #[test]
     fn explicit_state_and_validation() {
-        assert!(matches!(Atmosphere::Explicit { temperature_k: 100.0, pressure_pa: 1e5 }.state(), Err(Error::InvalidInput(_))));
+        assert!(matches!(Atmosphere::Explicit { temperature_k: 99.0, pressure_pa: 1e5 }.state(), Err(Error::InvalidInput(_))));
         assert!(matches!(Atmosphere::Explicit { temperature_k: 300.0, pressure_pa: 0.0 }.state(), Err(Error::InvalidInput(_))));
         let s = Atmosphere::Explicit { temperature_k: 300.0, pressure_pa: 101_325.0 }.state().expect("300 K is valid");
         assert!((s.density - 1.1766).abs() < 1e-3, "density {}", s.density);

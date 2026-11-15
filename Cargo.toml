@@ -1,5 +1,5 @@
 [workspace]
-members = ["bowshock", "bowshock-core", "bowshock-reference", "bowshock-cases", "bowshock-gpu", "bowshock-gpu-cases", "bowshock-cli"]
+members = ["bowshock", "bowshock-cfd", "bowshock-reference", "bowshock-cases", "bowshock-gpu-cases", "bowshock-validate"]
 resolver = "2"
 
 [workspace.package]
@@ -9,13 +9,12 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/Sandvoxel/bowshock"
 
 [workspace.dependencies]
-bowshock = { path = "bowshock", default-features = false }
-bowshock-core = { path = "bowshock-core" }
-bowshock-reference = { path = "bowshock-reference" }
+bowshock = { path = "bowshock", version = "0.1.0", default-features = false }
+bowshock-cfd = { path = "bowshock-cfd", version = "0.1.0", default-features = false }
+bowshock-reference = { path = "bowshock-reference", version = "0.1.0" }
 bowshock-cases = { path = "bowshock-cases" }
-bowshock-gpu = { path = "bowshock-gpu" }
 bowshock-gpu-cases = { path = "bowshock-gpu-cases" }
-luma = { git = "https://github.com/flipnoteman/Luma.git", rev = "c7096217b655c23780e33589d23e76689a570d35" }
+luma = { git = "https://github.com/flipnoteman/Luma.git", rev = "c2d0301d5126050b3abc82d8db7ab655adfa65e7" }
 rayon = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 gif = "0.13"

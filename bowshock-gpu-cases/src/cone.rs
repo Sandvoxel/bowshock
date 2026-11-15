@@ -8,11 +8,11 @@
 
 pub use crate::run::Monitor;
 use crate::run::{cpu_loop, field_diff, gpu_loop, Run};
-use bowshock::result::StopReason;
+use bowshock::engine::result::StopReason;
 use bowshock_cases::cone::{build_solver, ConeCase};
-use bowshock_core::gas::cons_to_prim;
-use bowshock_core::grid::Grid;
-use bowshock_gpu::{GpuSolver, Precision, Result};
+use bowshock_cfd::gas::cons_to_prim;
+use bowshock_cfd::gpu::{GpuSolver, Precision, Result};
+use bowshock_cfd::grid::Grid;
 use bowshock_reference::taylor_maccoll::ConeSolution;
 
 /// Surface and integral results of a converged (or stopped) state.
@@ -139,7 +139,7 @@ impl RunResult {
     }
 }
 
-/// CPU f64 reference run (bowshock-core, rayon).
+/// CPU f64 reference run (bowshock-cfd, rayon).
 pub fn run_cpu(case: &ConeCase, tm: &ConeSolution) -> RunResult {
     let mut s = build_solver(case, tm.beta);
     let run = cpu_loop(&mut s, case.max_iter, case.drop_orders);

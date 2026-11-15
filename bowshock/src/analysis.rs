@@ -1,16 +1,16 @@
 //! Mach-sweep analysis of a body: zero-lift drag versus Mach number, on the GPU when one is present.
 
 use crate::atmosphere::{FlightConditions, SUTHERLAND_S};
-use crate::body_grid::{check_quality, BaseBody, MAX_STRETCHING, MAX_STRETCHING_VISCOUS_J};
-use crate::case::{Case, Wake};
+use crate::engine::body_grid::{check_quality, BaseBody, MAX_STRETCHING, MAX_STRETCHING_VISCOUS_J};
+use crate::engine::case::{Case, Jet, Wake};
+use crate::engine::numerics::Numerics;
+use crate::engine::result::{PointResult, StopReason};
+use crate::engine::run::run_on;
 use crate::error::Error;
-use crate::numerics::Numerics;
-use crate::result::{PointResult, StopReason};
-use crate::run::run_on;
-use crate::spec::BodySpec;
-use bowshock_core::solver::Solver;
+use crate::spec::{BodySpec, FinSpec, MotorSpec};
+use bowshock_cfd::gas::GAMMA;
+use bowshock_cfd::solver::{Solver, Turbulence, Viscous};
 use bowshock_reference::base_drag::base_drag_coefficient;
-use std::convert::Infallible;
 
 /// Lowest and highest Mach number accepted by [`Analysis::run`].
 const MACH_RANGE: (f64, f64) = (0.1, 3.0);
@@ -20,22 +20,30 @@ const MACH_RANGE: (f64, f64) = (0.1, 3.0);
 pub enum Backend {
     /// The GPU when one is available, otherwise the CPU (reported in [`Polar::fallback`]). A software Vulkan device (llvmpipe) counts as no GPU.
     Auto,
+    /// The CPU solver.
     Cpu,
+    /// The GPU solver; an error if none is available.
     Gpu,
 }
 
 /// Backend that produced a [`Polar`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum BackendUsed {
+    /// The CPU solver.
     Cpu,
+    /// The GPU solver.
     Gpu,
 }
 
 /// Grid resolution (grid level 0, 1, 2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Resolution {
+    /// Grid level 0.
     Coarse,
+    /// Grid level 1.
     Medium,
+    /// Grid level 2.
     Fine,
 }
 
@@ -49,22 +57,39 @@ impl Resolution {
     }
 }
 
-/// Drag coefficients referenced to the reference area (by default the largest cross-section; `detail` of a point is
-/// referenced to the nose base area).
+/// Drag of the fin set, both parts on the reference area. Fin-body interference drag is neglected.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct FinDrag {
+    /// Skin friction of the fins.
+    pub friction: f64,
+    /// Pressure drag of the fins: leading and trailing edges, plus wave drag of a double-wedge section.
+    pub pressure: f64,
+}
+
+/// Drag coefficients referenced to the reference area (by default the largest cross-section).
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Drag {
     /// Pressure drag of the nose and the aft body.
     pub forebody_pressure: f64,
     /// Skin friction, if it was computed.
     pub friction: Option<f64>,
+    /// Base drag: from a correlation when `base_modelled`, otherwise from the solver. With a motor it is the base drag of the annulus
+    /// around the nozzle exit only; the jet's thrust is not a drag term.
     pub base: f64,
     /// `base` comes from a correlation (the inviscid wake gives no physical base pressure).
     pub base_modelled: bool,
+    /// Fin drag; `Some` when fins were given.
+    pub fins: Option<FinDrag>,
+    /// Total drag: forebody pressure + friction + base + fins (non-finite only for a [`Quality::Failed`] point).
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "nan_or_f64"))]
     pub total: f64,
 }
 
 /// Overall trust in a point, derived from how its run stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Quality {
     /// The residual dropped by the requested number of orders.
     Converged,
@@ -72,46 +97,123 @@ pub enum Quality {
     Stationary,
     /// The iteration cap was reached without a stop criterion.
     Stalled,
-    /// Non-finite or non-physical state, or non-finite drag.
+    /// Non-finite or non-physical state (including a pressure at the outer boundaries more than 100 % off the free stream), or
+    /// non-finite drag.
     Failed,
 }
 
 /// A condition under which a point is less reliable than its [`Quality`] suggests.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Warning {
     /// Transonic Mach number and a convex profile corner sharper than 2 degrees (shock position and drag are sensitive).
     SharpCornerTransonic,
     /// The base pressure still oscillates by `cp_base_range` over the monitor window although the residual did not drop.
-    UnsteadyWake { cp_base_range: f64 },
+    UnsteadyWake {
+        /// Range of the area-mean base Cp over the monitor window.
+        cp_base_range: f64,
+    },
     /// The pressure at the outer boundaries deviates from the free stream by `dp` (relative): the domain may be too small.
-    FarFieldDisturbed { dp: f64 },
+    FarFieldDisturbed {
+        /// Relative pressure deviation.
+        dp: f64,
+    },
     /// The first cell at the wall is too thick for a wall-resolved boundary layer: `y+` of the first cell reaches `y_plus_max`.
-    WallResolution { y_plus_max: f64 },
+    WallResolution {
+        /// Largest `y+` of the first wall cell.
+        y_plus_max: f64,
+    },
+    /// The total drag oscillated by `cd_range` (on the reference area) over the last two averaging windows, a bounded limit cycle
+    /// with a stationary mean; the point is reported at the crossing of that mean.
+    OscillatingDrag {
+        /// Max - min of the total drag over the averaging windows.
+        cd_range: f64,
+    },
 }
 
 /// One Mach number of a sweep.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PolarPoint {
+    /// Mach number of the point.
     pub mach: f64,
-    /// Angle of attack [rad]; always 0.0.
+    /// Angle of attack \[rad\]; always 0.0.
     pub alpha: f64,
+    /// Drag coefficients.
     pub drag: Drag,
-    /// Full solver result.
-    pub detail: PointResult,
+    /// Solver summary of the point.
+    pub detail: PointDetail,
+    /// Trust in the point.
     pub quality: Quality,
+    /// Conditions that make the point less reliable.
     pub warnings: Vec<Warning>,
     /// Absolute difference of the total drag to the run at the neighbouring grid level, if [`Analysis::estimate_uncertainty`] was on and
     /// neither point failed.
     pub cd_uncertainty: Option<f64>,
 }
 
+/// Reads an `f64` that a format without NaN (JSON) wrote as `null` back as NaN.
+#[cfg(feature = "serde")]
+fn nan_or_f64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    use serde::Deserialize;
+    Ok(Option::<f64>::deserialize(d)?.unwrap_or(f64::NAN))
+}
+
+/// Solver summary of one point; lengths in metres (internal units for `from_internal`), coefficients referenced to the reference area.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PointDetail {
+    /// Iterations run.
+    pub iterations: usize,
+    /// Orders of magnitude the residual dropped from its peak to the last iteration.
+    pub residual_drop_orders: f64,
+    /// Why the iteration stopped.
+    pub stop_reason: StopReason,
+    /// Pressure drag of the nose.
+    pub cd_nose: f64,
+    /// Pressure drag of each aft section, one per [`AftSpec`](crate::AftSpec).
+    pub cd_aft: Vec<f64>,
+    /// Skin-friction drag; 0 for the Euler equations.
+    pub cd_friction: f64,
+    /// Base drag computed by the solver; NaN without a base wake.
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "nan_or_f64"))]
+    pub cd_base_solver: f64,
+    /// Area-mean base pressure coefficient (over the annulus around the nozzle exit with a motor); NaN without a base wake.
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "nan_or_f64"))]
+    pub cp_base: f64,
+    /// Body-surface faces in axial order (no sting extension).
+    pub wall: Vec<WallCp>,
+    /// Largest `y+` of the first wall cell; NaN for the Euler equations.
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "nan_or_f64"))]
+    pub y_plus_max: f64,
+    /// Largest relative pressure deviation from the free stream at the outer boundaries.
+    pub farfield_dp: f64,
+}
+
+/// Pressure coefficient at one body-surface face.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct WallCp {
+    /// Axial position of the face centre.
+    pub x: f64,
+    /// Radius of the face centre.
+    pub r: f64,
+    /// Pressure coefficient.
+    pub cp: f64,
+}
+
 /// Result of a Mach sweep, in the order of the requested Mach numbers.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Polar {
+    /// One point per requested Mach number.
     pub points: Vec<PolarPoint>,
+    /// Backend that ran the sweep.
     pub backend: BackendUsed,
     /// Why the GPU was not used under [`Backend::Auto`].
     pub fallback: Option<String>,
+    /// The analysis had a motor: the base flow contains the jet.
+    pub motor_on: bool,
 }
 
 /// Configuration of a sweep over Mach number for one body.
@@ -126,6 +228,8 @@ pub struct Analysis {
     resolution: Resolution,
     wake: Option<Wake>,
     flight: Option<FlightConditions>,
+    fins: Option<FinSpec>,
+    motor: Option<MotorSpec>,
     backend: Backend,
     numerics: Option<Numerics>,
     max_iterations: Option<usize>,
@@ -138,11 +242,13 @@ struct Rans {
     re_c: f64,
     sutherland: f64,
     mach_max: f64,
+    jet: Option<Jet>,
 }
 
 impl Analysis {
     /// Analysis of a body in internal units (nose diameter 1, so drag coefficients refer to the nose base area). Defaults:
     /// medium resolution, sting wake, automatic backend, numerics chosen per Mach number, no warm starts, no uncertainty estimate.
+    #[doc(hidden)]
     pub fn from_internal(body: BaseBody) -> Analysis {
         Analysis {
             body,
@@ -152,6 +258,8 @@ impl Analysis {
             resolution: Resolution::Medium,
             wake: None,
             flight: None,
+            fins: None,
+            motor: None,
             backend: Backend::Auto,
             numerics: None,
             max_iterations: None,
@@ -171,12 +279,13 @@ impl Analysis {
         Ok(a)
     }
 
-    /// Reference diameter [m] of the drag coefficients (internal units for [`Analysis::from_internal`]).
+    /// Reference diameter \[m\] of the drag coefficients (internal units for [`Analysis::from_internal`]).
     pub fn reference_diameter(mut self, d_m: f64) -> Self {
         self.d_ref = d_m;
         self
     }
 
+    /// Grid resolution (default [`Resolution::Medium`]).
     pub fn resolution(mut self, r: Resolution) -> Self {
         self.resolution = r;
         self
@@ -196,12 +305,14 @@ impl Analysis {
         self
     }
 
+    /// Backend to run on (default [`Backend::Auto`]).
     pub fn backend(mut self, b: Backend) -> Self {
         self.backend = b;
         self
     }
 
     /// Fixed numerics for every Mach number instead of [`Numerics::auto`].
+    #[doc(hidden)]
     pub fn numerics(mut self, n: Numerics) -> Self {
         self.numerics = Some(n);
         self
@@ -229,6 +340,20 @@ impl Analysis {
         self
     }
 
+    /// Add a set of fins to the drag. Needs [`Analysis::viscous`] flight conditions, which give the Reynolds number.
+    pub fn fins(mut self, f: FinSpec) -> Self {
+        self.fins = Some(f);
+        self
+    }
+
+    /// Add a rocket motor exhausting through the centre of the base: a motor-on analysis, where the base flow contains the jet
+    /// (an air jet at the nozzle exit, see [`MotorSpec`]). Needs [`Analysis::viscous`] and the base wake. The jet's thrust is not
+    /// drag: [`Drag::base`] covers only the annulus of the base around the nozzle exit.
+    pub fn motor(mut self, m: MotorSpec) -> Self {
+        self.motor = Some(m);
+        self
+    }
+
     /// Free-stream Reynolds number, Sutherland constant and highest Mach number of a viscous sweep; `None` for the Euler equations.
     fn rans(&self, machs: &[f64]) -> Result<Option<Rans>, Error> {
         let Some(flight) = self.flight else {
@@ -238,15 +363,24 @@ impl Analysis {
             return Err(Error::InvalidInput("viscous analysis needs a dimensional BodySpec".into()));
         }
         let air = flight.atmosphere.state()?;
-        Ok(Some(Rans {
-            re_c: air.density * air.sound_speed * self.d_nose / air.viscosity,
-            sutherland: SUTHERLAND_S / air.temperature_k,
-            mach_max: machs.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-        }))
+        let re_c = air.density * air.sound_speed * self.d_nose / air.viscosity;
+        let sutherland = SUTHERLAND_S / air.temperature_k;
+        // jet at the nozzle exit in solver units (rho = 1, c = 1, p = 1/gamma, T = 1 of the free stream)
+        let jet = self.motor.map(|m| {
+            let t = m.total_temperature_k / (1.0 + 0.2 * m.exit_mach * m.exit_mach) / air.temperature_k;
+            let p = m.exit_pressure_pa / air.pressure_pa;
+            let rho = p / t;
+            let u = m.exit_mach * t.sqrt();
+            let k = 1.5 * (0.01 * u).powi(2);
+            let mu = Viscous { re_c, sutherland, turbulence: Turbulence::Sst, wall_i_start: 0 }.mu(t);
+            Jet { r_exit: 0.5 * m.exit_diameter / self.d_nose, state: [rho, u, 0.0, p / GAMMA], turb: [k, rho * k / (10.0 * mu)] }
+        });
+        Ok(Some(Rans { re_c, sutherland, mach_max: machs.iter().copied().fold(f64::NEG_INFINITY, f64::max), jet }))
     }
 
-    /// Zero-lift drag at each Mach number of `machs` (each in `[0.1, 3.0]`).
-    pub fn run(&self, machs: &[f64]) -> Result<Polar, Error> {
+    /// The solver cases of a sweep in ascending Mach order, after the input checks of [`Analysis::run`]; with the Mach numbers' original
+    /// positions and the Rans parameters.
+    fn prepare(&self, machs: &[f64]) -> Result<(Vec<usize>, Option<Rans>, Vec<Case>), Error> {
         if machs.is_empty() {
             return Err(Error::InvalidInput("no Mach numbers requested".into()));
         }
@@ -259,7 +393,29 @@ impl Analysis {
             return Err(Error::InvalidInput(format!("reference diameter {} must be finite and > 0", self.d_ref)));
         }
 
-        // cases in ascending Mach order (stable), results restored to input order below
+        if let Some(f) = &self.fins {
+            f.validate()?;
+            if self.flight.is_none() {
+                return Err(Error::InvalidInput("fins need flight conditions: call Analysis::viscous".into()));
+            }
+            if !self.dimensional {
+                return Err(Error::InvalidInput("fins need a dimensional BodySpec".into()));
+            }
+        }
+
+        if let Some(m) = &self.motor {
+            if self.flight.is_none() {
+                return Err(Error::InvalidInput("motor-on analysis needs Analysis::viscous".into()));
+            }
+            if self.wake == Some(Wake::Sting) {
+                return Err(Error::InvalidInput("motor-on analysis needs the base wake".into()));
+            }
+            if !self.dimensional {
+                return Err(Error::InvalidInput("motor-on analysis needs a dimensional BodySpec".into()));
+            }
+            m.validate(self.body.base_radius() * 2.0 * self.d_nose)?;
+        }
+        // cases in ascending Mach order (stable), results restored to input order by the caller
         let mut order: Vec<usize> = (0..machs.len()).collect();
         order.sort_by(|&a, &b| machs[a].total_cmp(&machs[b]));
         let rans = self.rans(machs)?;
@@ -267,7 +423,19 @@ impl Analysis {
         let cases: Vec<Case> = order.iter().map(|&k| self.case(machs[k], level, rans.as_ref())).collect();
         // the grids do not depend on the Mach number: check the first one
         check_grid(&cases[0])?;
+        Ok((order, rans, cases))
+    }
 
+    /// The solver cases of a sweep (ascending Mach order) for the validation crates, which drive the solvers themselves.
+    #[doc(hidden)]
+    pub fn engine_cases(&self, machs: &[f64]) -> Result<Vec<Case>, Error> {
+        Ok(self.prepare(machs)?.2)
+    }
+
+    /// Zero-lift drag at each Mach number of `machs` (each in `[0.1, 3.0]`).
+    pub fn run(&self, machs: &[f64]) -> Result<Polar, Error> {
+        let (order, rans, cases) = self.prepare(machs)?;
+        let level = self.resolution.level();
         let cmp_cases: Option<Vec<Case>> = self.estimate_uncertainty.then(|| {
             let cmp_level = if level >= 1 { level - 1 } else { level + 1 };
             order.iter().map(|&k| self.case(machs[k], cmp_level, rans.as_ref())).collect()
@@ -299,7 +467,7 @@ impl Analysis {
             slots[k] = Some(self.point(machs[k], detail, other.as_ref()));
         }
         let points = slots.into_iter().map(|p| p.expect("every Mach number has a result")).collect();
-        Ok(Polar { points, backend, fallback })
+        Ok(Polar { points, backend, fallback, motor_on: self.motor.is_some() })
     }
 
     /// Wake treatment in use: the one set with [`Analysis::wake`], else a base wake for a viscous analysis and a sting otherwise.
@@ -319,7 +487,10 @@ impl Analysis {
         if let Some(cap) = self.max_iterations {
             case.numerics.max_iter = case.numerics.max_iter.min(cap);
         }
-        case
+        match rans.and_then(|r| r.jet) {
+            Some(jet) => case.with_motor(jet),
+            None => case,
+        }
     }
 
     /// Drag of one solver result, referenced to the reference area. A viscous analysis adds the skin friction and, with a base
@@ -331,8 +502,12 @@ impl Analysis {
         let friction = viscous.then_some(detail.cd_friction);
         let base_modelled = !(viscous && self.wake_used() == Wake::Base);
         let base = if base_modelled { base_drag_coefficient(mach) * (self.body.base_radius() / self.body.body.radius()).powi(2) } else { detail.cd_base };
-        let total = forebody_pressure + friction.unwrap_or(0.0) + base;
-        Drag { forebody_pressure: forebody_pressure * q, friction: friction.map(|f| f * q), base: base * q, base_modelled, total: total * q }
+        let mut total = (forebody_pressure + friction.unwrap_or(0.0) + base) * q;
+        let fins = self.fins.as_ref().zip(self.flight.and_then(|f| f.atmosphere.state().ok())).map(|(f, air)| crate::fins::fin_drag(f, mach, &air, self.d_ref));
+        if let Some(fd) = fins {
+            total += fd.friction + fd.pressure;
+        }
+        Drag { forebody_pressure: forebody_pressure * q, friction: friction.map(|f| f * q), base: base * q, base_modelled, fins, total }
     }
 
     fn point(&self, mach: f64, detail: PointResult, other: Option<&PointResult>) -> PolarPoint {
@@ -343,7 +518,28 @@ impl Analysis {
             let od = self.drag(mach, o);
             (quality != Quality::Failed && self::quality(o, &od) != Quality::Failed).then(|| (drag.total - od.total).abs())
         });
+        let detail = self.detail(&detail);
         PolarPoint { mach, alpha: 0.0, drag, quality, warnings, cd_uncertainty, detail }
+    }
+
+    /// Public summary of a solver result: coefficients on the reference area, wall points in metres.
+    fn detail(&self, d: &PointResult) -> PointDetail {
+        let q = (self.d_nose / self.d_ref).powi(2);
+        let base = self.wake_used() == Wake::Base;
+        let x_base = self.body.x_base();
+        PointDetail {
+            iterations: d.iters,
+            residual_drop_orders: d.drop_orders,
+            stop_reason: d.stop_reason,
+            cd_nose: d.cd_nose * q,
+            cd_aft: d.cd_aft.iter().map(|c| c * q).collect(),
+            cd_friction: d.cd_friction * q,
+            cd_base_solver: if base { d.cd_base * q } else { f64::NAN },
+            cp_base: if base { d.cp_base } else { f64::NAN },
+            wall: d.wall.iter().filter(|w| w.x < x_base).map(|w| WallCp { x: w.x * self.d_nose, r: w.r * self.d_nose, cp: w.cp }).collect(),
+            y_plus_max: d.y_plus_max,
+            farfield_dp: d.farfield_dp,
+        }
     }
 
     fn warnings(&self, mach: f64, detail: &PointResult) -> Vec<Warning> {
@@ -361,6 +557,13 @@ impl Analysis {
         if detail.y_plus_max > 5.0 {
             w.push(Warning::WallResolution { y_plus_max: detail.y_plus_max });
         }
+        if detail.stop_reason == StopReason::MeanStationary {
+            let window = self.numerics.and_then(|n| n.mean_window).or(Numerics::viscous(mach, 0).mean_window).unwrap_or(0);
+            let k = (window / crate::engine::numerics::MONITOR_EVERY).max(1);
+            let h = &detail.monitor_history;
+            let (lo, hi) = h[h.len().saturating_sub(2 * k)..].iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), c| (l.min(c.1), h.max(c.1)));
+            w.push(Warning::OscillatingDrag { cd_range: (hi - lo) * (self.d_nose / self.d_ref).powi(2) });
+        }
         w
     }
 
@@ -376,9 +579,9 @@ impl Analysis {
     /// Sweeps `cases` (ascending Mach) on `backend`; returns the backend used and, under `Auto`, why the GPU was not.
     fn sweep_on(&self, cases: &[Case], backend: Backend) -> Result<(Vec<PointResult>, BackendUsed, Option<String>), Error> {
         match backend {
-            Backend::Cpu => Ok((self.sweep_cpu(cases), BackendUsed::Cpu, None)),
-            Backend::Gpu => Ok((self.sweep_gpu_required(cases)?, BackendUsed::Gpu, None)),
-            Backend::Auto => Ok(self.sweep_auto(cases)),
+            Backend::Cpu => Ok((guard(|| self.sweep_cpu(cases))?, BackendUsed::Cpu, None)),
+            Backend::Gpu => Ok((guard(|| self.sweep_gpu_required(cases))?, BackendUsed::Gpu, None)),
+            Backend::Auto => self.sweep_auto(cases),
         }
     }
 
@@ -414,18 +617,13 @@ impl Analysis {
         Ok(out)
     }
 
-    fn sweep_cpu(&self, cases: &[Case]) -> Vec<PointResult> {
-        self.sweep(&CpuBackend, cases).unwrap_or_else(|e| match e {})
-    }
-
-    #[cfg(feature = "gpu")]
-    fn sweep_gpu(&self, cases: &[Case]) -> bowshock_gpu::Result<Vec<PointResult>> {
-        self.sweep(&GpuBackend, cases)
+    fn sweep_cpu(&self, cases: &[Case]) -> Result<Vec<PointResult>, Error> {
+        self.sweep(&CpuBackend, cases)
     }
 
     #[cfg(feature = "gpu")]
     fn sweep_gpu_required(&self, cases: &[Case]) -> Result<Vec<PointResult>, Error> {
-        self.sweep_gpu(cases).map_err(|e| Error::Gpu(e.to_string()))
+        self.sweep(&GpuBackend, cases)
     }
 
     #[cfg(not(feature = "gpu"))]
@@ -434,17 +632,27 @@ impl Analysis {
     }
 
     #[cfg(feature = "gpu")]
-    fn sweep_auto(&self, cases: &[Case]) -> (Vec<PointResult>, BackendUsed, Option<String>) {
-        match self.sweep_gpu(cases) {
-            Ok(results) => (results, BackendUsed::Gpu, None),
-            Err(e) => (self.sweep_cpu(cases), BackendUsed::Cpu, Some(format!("GPU unavailable: {e}"))),
-        }
+    fn sweep_auto(&self, cases: &[Case]) -> Result<(Vec<PointResult>, BackendUsed, Option<String>), Error> {
+        let why = match guard(|| self.sweep_gpu_required(cases)) {
+            Ok(results) => return Ok((results, BackendUsed::Gpu, None)),
+            Err(Error::Internal(m)) => m.replacen("solver panicked", "GPU solver panicked", 1),
+            Err(e) => format!("GPU unavailable: {e}"),
+        };
+        Ok((guard(|| self.sweep_cpu(cases))?, BackendUsed::Cpu, Some(why)))
     }
 
     #[cfg(not(feature = "gpu"))]
-    fn sweep_auto(&self, cases: &[Case]) -> (Vec<PointResult>, BackendUsed, Option<String>) {
-        (self.sweep_cpu(cases), BackendUsed::Cpu, None)
+    fn sweep_auto(&self, cases: &[Case]) -> Result<(Vec<PointResult>, BackendUsed, Option<String>), Error> {
+        Ok((guard(|| self.sweep_cpu(cases))?, BackendUsed::Cpu, None))
     }
+}
+
+/// Runs `f`, turning a panic into `Error::Internal("solver panicked: ...")`.
+fn guard<T>(f: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|payload| {
+        let msg = payload.downcast_ref::<&str>().map(|s| (*s).to_string()).or_else(|| payload.downcast_ref::<String>().cloned());
+        Err(Error::Internal(format!("solver panicked: {}", msg.as_deref().unwrap_or("unknown"))))
+    })
 }
 
 /// Builds the grids of `case` and checks their quality (the wall-resolved grids of a viscous case against the tighter limit in `j`).
@@ -454,15 +662,21 @@ fn check_grid(case: &Case) -> Result<(), Error> {
     check_quality(&probe.grid, probe.block(), MAX_STRETCHING, max_j)
 }
 
-/// Quality of a solver result, first match wins.
+/// Relative deviation of the outer-boundary pressure from the free stream above which a state is not a meaningful solution.
+const FARFIELD_DP_FAILED: f64 = 1.0;
+
+/// Quality of a solver result, first match wins. A point is [`Quality::Failed`] when the run stopped on a non-finite or blown-up
+/// state, when the density or pressure of a cell is not positive, when the total drag is not finite, or when the pressure at the
+/// outer boundaries deviates from the free stream by more than 100 % (`farfield_dp > 1`): the far field of a body in a flow of
+/// this size is undisturbed at that distance, so such a state is garbage even if it is finite and the run ended `Stalled`.
 fn quality(d: &PointResult, drag: &Drag) -> Quality {
     let positive = |x: f64| x > 0.0; // false for NaN
-    if d.stop_reason == StopReason::NonFinite || !positive(d.min_rho) || !positive(d.min_p) || !drag.total.is_finite() {
+    if d.stop_reason == StopReason::NonFinite || !positive(d.min_rho) || !positive(d.min_p) || !drag.total.is_finite() || d.farfield_dp > FARFIELD_DP_FAILED {
         return Quality::Failed;
     }
     match d.stop_reason {
         StopReason::ResidualDrop => Quality::Converged,
-        StopReason::CdStationary | StopReason::BasePressureStationary | StopReason::ResidualPlateau => Quality::Stationary,
+        StopReason::CdStationary | StopReason::MeanStationary | StopReason::BasePressureStationary | StopReason::ResidualPlateau => Quality::Stationary,
         StopReason::MaxIterations => Quality::Stalled,
         StopReason::NonFinite => Quality::Failed,
     }
@@ -480,15 +694,15 @@ struct CpuBackend;
 
 impl Runner for CpuBackend {
     type State = Solver;
-    type Error = Infallible;
+    type Error = Error;
 
-    fn cold(&self, case: &Case) -> Result<(PointResult, Solver), Infallible> {
-        let mut s = case.build_solver();
+    fn cold(&self, case: &Case) -> Result<(PointResult, Solver), Error> {
+        let mut s = case.try_build_solver()?;
         let r = run_on(case, &mut s, false, None);
         Ok((r, s))
     }
 
-    fn warm(&self, s: &mut Solver, case: &Case, r_ref: f64) -> Result<PointResult, Infallible> {
+    fn warm(&self, s: &mut Solver, case: &Case, r_ref: f64) -> Result<PointResult, Error> {
         Ok(run_on(case, s, true, Some(r_ref)))
     }
 }
@@ -498,16 +712,75 @@ struct GpuBackend;
 
 #[cfg(feature = "gpu")]
 impl Runner for GpuBackend {
-    type State = crate::gpu::GpuRunner;
-    type Error = bowshock_gpu::GpuError;
+    type State = crate::engine::gpu::GpuRunner;
+    type Error = Error;
 
-    fn cold(&self, case: &Case) -> bowshock_gpu::Result<(PointResult, crate::gpu::GpuRunner)> {
-        let mut r = crate::gpu::GpuRunner::new(case, bowshock_gpu::Precision::Extended)?;
+    fn cold(&self, case: &Case) -> Result<(PointResult, crate::engine::gpu::GpuRunner), Error> {
+        let mut r = crate::engine::gpu::GpuRunner::new(case, bowshock_cfd::gpu::Precision::Extended)?;
         let run = r.run_on(case, false, None)?;
         Ok((run.result, r))
     }
 
-    fn warm(&self, r: &mut crate::gpu::GpuRunner, case: &Case, r_ref: f64) -> bowshock_gpu::Result<PointResult> {
+    fn warm(&self, r: &mut crate::engine::gpu::GpuRunner, case: &Case, r_ref: f64) -> Result<PointResult, Error> {
         Ok(r.run_on(case, true, Some(r_ref))?.result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn result(stop_reason: StopReason, farfield_dp: f64) -> PointResult {
+        PointResult {
+            mach: 2.0,
+            alpha: 0.0,
+            iters: 1000,
+            residual: Vec::new(),
+            residual_peak: 1.0,
+            drop_orders: 1.0,
+            stop_reason,
+            wall: Vec::new(),
+            base_wall: Vec::new(),
+            cd_nose: 0.1,
+            cd_nose_cell: 0.1,
+            cd_aft: Vec::new(),
+            cd_base: 0.1,
+            cd_friction: 0.1,
+            cd_total: 0.3,
+            cd_base_model: 0.1,
+            cd_total_model: 0.3,
+            cp_base: -0.1,
+            cp_base_cell: -0.1,
+            cp_base_mean: f64::NAN,
+            cp_base_range: f64::NAN,
+            cd_range: f64::NAN,
+            monitor_history: Vec::new(),
+            cp_min: -0.1,
+            x_cp_min: 1.0,
+            m_max: 2.0,
+            m_wall_max: 1.5,
+            farfield_dp,
+            min_rho: 0.1,
+            min_p: 0.1,
+            y_plus_max: 1.0,
+        }
+    }
+
+    fn drag(total: f64) -> Drag {
+        Drag { forebody_pressure: 0.1, friction: Some(0.1), base: 0.1, base_modelled: false, fins: None, total }
+    }
+
+    #[test]
+    fn quality_fails_on_a_far_field_that_deviates_by_more_than_100_percent() {
+        for stop in [StopReason::ResidualDrop, StopReason::CdStationary, StopReason::MaxIterations] {
+            let expect = if stop == StopReason::MaxIterations { Quality::Stalled } else { Quality::Converged };
+            let expect = if stop == StopReason::CdStationary { Quality::Stationary } else { expect };
+            assert_eq!(quality(&result(stop, 0.0), &drag(0.3)), expect);
+            assert_eq!(quality(&result(stop, 1.0), &drag(0.3)), expect, "exactly 100 % is not beyond the limit");
+            assert_eq!(quality(&result(stop, 1.0 + 1e-9), &drag(0.3)), Quality::Failed);
+            assert_eq!(quality(&result(stop, 1.2e7), &drag(-13905.0)), Quality::Failed);
+        }
+        assert_eq!(quality(&result(StopReason::NonFinite, 0.0), &drag(0.3)), Quality::Failed);
+        assert_eq!(quality(&result(StopReason::ResidualDrop, 0.0), &drag(f64::NAN)), Quality::Failed);
     }
 }

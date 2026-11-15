@@ -4,14 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+publish = false
 description = "GPU runners of the bowshock validation cases, compared side by side with the CPU reference runs"
 
 [dependencies]
 bowshock = { workspace = true, features = ["gpu"] }
-bowshock-core.workspace = true
+bowshock-cfd = { workspace = true, features = ["gpu"] }
 bowshock-reference.workspace = true
 bowshock-cases.workspace = true
-bowshock-gpu.workspace = true
 luma.workspace = true
 
 [lints]

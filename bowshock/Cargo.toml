@@ -4,17 +4,25 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Rocket aerodynamics: body geometry, grids and the Mach-sweep analysis of the bowshock solver"
+description = "Rocket drag from CFD: zero-lift drag versus Mach of axisymmetric rockets with fins and a motor-on base flow, on the GPU or the CPU"
+readme = "../README.md"
+keywords = ["cfd", "rocket", "aerodynamics", "drag", "gpu"]
+categories = ["science", "simulation"]
+documentation = "https://sandvoxel.github.io/bowshock/main/api/bowshock/"
 
 [dependencies]
-bowshock-core.workspace = true
+bowshock-cfd.workspace = true
 bowshock-reference.workspace = true
-bowshock-gpu = { workspace = true, optional = true }
 luma = { workspace = true, optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+
+[dev-dependencies]
+serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [features]
 default = ["gpu"]
-gpu = ["dep:bowshock-gpu", "dep:luma"]
+gpu = ["bowshock-cfd/gpu", "dep:luma"]
+serde = ["dep:serde"]
 
 [lints]
 workspace = true

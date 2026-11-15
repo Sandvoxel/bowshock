@@ -1,4 +1,4 @@
-//! Accuracy of the explicit scheme of the array-op solver (`bowshock_gpu::{f32s, df32s}::LazySolver`, every `Staging`) against the f64 CPU
+//! Accuracy of the explicit scheme of the array-op solver (`bowshock_cfd::gpu::{f32s, df32s}::LazySolver`, every `Staging`) against the f64 CPU
 //! `Solver`, and of the `GpuSolver` handle on the same set-ups: the CPU and the GPU solver start from the same state, run the same
 //! iterations, and the conserved state and the density residual history are compared,
 //!
@@ -13,16 +13,16 @@
 
 mod common;
 
-use bowshock::body_grid::{Body, Nose};
+use bowshock::engine::body_grid::{Body, Nose};
 use bowshock_cases::cone::{build_solver, ConeCase};
 use bowshock_cases::ogive::OgiveCase;
 use bowshock_cases::subsonic::{fox_case, subsonic_case};
 use bowshock_cases::transonic::transonic_case;
-use bowshock_core::flux::Limiter;
-use bowshock_core::gas::cons_to_prim;
-use bowshock_core::solver::Scheme;
-use bowshock_core::solver::{Bc, Solver};
-use bowshock_gpu::{GpuSolver, Precision, Staging};
+use bowshock_cfd::flux::Limiter;
+use bowshock_cfd::gas::cons_to_prim;
+use bowshock_cfd::gpu::{GpuSolver, Precision, Staging};
+use bowshock_cfd::solver::Scheme;
+use bowshock_cfd::solver::{Bc, Solver};
 use bowshock_reference::taylor_maccoll::solve_cone;
 use common::{far_field_box, perturbed_state};
 
@@ -59,7 +59,7 @@ fn target(precision: &str, res_ext: f64) -> (f64, f64) {
 /// `threads_on_the_default_context_agree` in `loops.rs`).
 macro_rules! run_lazy {
     ($module:ident, $ctx:expr, $staging:expr, $grid:expr, $cfg:expr, $low_mach:expr, $block:expr, $u0:expr, $n:expr) => {{
-        let mut lazy = bowshock_gpu::$module::LazySolver::new($ctx, $grid, $cfg).unwrap();
+        let mut lazy = bowshock_cfd::gpu::$module::LazySolver::new($ctx, $grid, $cfg).unwrap();
         lazy.set_block($block).unwrap();
         lazy.staging = $staging;
         lazy.set_low_mach($low_mach);
@@ -186,7 +186,7 @@ fn characteristic_far_field_preserves_the_free_stream() {
     let ctx = luma::default_context().unwrap();
     for mach in [0.9, 1.3] {
         let mut cpu = far_field_box(mach, Bc::Characteristic);
-        let fs = bowshock_core::gas::prim_to_cons(&cpu.cfg.freestream);
+        let fs = bowshock_cfd::gas::prim_to_cons(&cpu.cfg.freestream);
         let dev = |u: &[[f64; 4]]| u.iter().fold(0.0f64, |m, q| (0..4).fold(m, |m, k| m.max((q[k] - fs[k]).abs() / (1.0 + fs[k].abs()))));
         for _ in 0..30 {
             cpu.step();

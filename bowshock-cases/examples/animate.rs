@@ -6,8 +6,8 @@
 //!   --sweep      : warm-started quasi-steady Mach sweep 1.5 -> 4, `sweep_mach.*`
 //! Top half = solution, bottom half = mirror about the axis; body is dark gray.
 use bowshock_cases::ogive::OgiveCase;
-use bowshock_core::gas::{cons_to_prim, freestream, sound_speed};
-use bowshock_core::solver::Solver;
+use bowshock_cfd::gas::{cons_to_prim, freestream, sound_speed};
+use bowshock_cfd::solver::Solver;
 use image::RgbImage;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};

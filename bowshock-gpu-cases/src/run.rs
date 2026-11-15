@@ -6,10 +6,10 @@
 //! 8000, max iterations, non-finite), see [`Monitor`]. The CPU loop uses the public `Solver::step` so that the final
 //! state is available for the field comparison.
 
-use bowshock::result::StopReason;
-use bowshock_core::gas::cons_to_prim;
-use bowshock_core::solver::Solver;
-use bowshock_gpu::{GpuSolver, Precision, Result};
+use bowshock::engine::result::StopReason;
+use bowshock_cfd::gas::cons_to_prim;
+use bowshock_cfd::gpu::{GpuSolver, Precision, Result};
+use bowshock_cfd::solver::Solver;
 use std::time::Instant;
 
 /// Convergence monitor: feed it the density residual of every iteration in order.
@@ -81,7 +81,7 @@ impl Run {
     }
 }
 
-/// CPU f64 reference run (bowshock-core, rayon). The final state is copied to [`Run::u`]; `s` keeps it as well.
+/// CPU f64 reference run (bowshock-cfd, rayon). The final state is copied to [`Run::u`]; `s` keeps it as well.
 pub fn cpu_loop(s: &mut Solver, max_iter: usize, drop_orders: f64) -> Run {
     let mut mon = Monitor::new(drop_orders);
     let mut reason = StopReason::MaxIterations;
