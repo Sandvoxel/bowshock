@@ -4,6 +4,7 @@ use std::fmt;
 
 /// Why an iteration loop stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum StopReason {
     /// The residual dropped by the requested number of orders.
     ResidualDrop,

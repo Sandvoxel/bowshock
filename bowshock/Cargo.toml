@@ -11,10 +11,15 @@ bowshock-core.workspace = true
 bowshock-reference.workspace = true
 bowshock-gpu = { workspace = true, optional = true }
 luma = { workspace = true, optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+
+[dev-dependencies]
+serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [features]
 default = ["gpu"]
 gpu = ["dep:bowshock-gpu", "dep:luma"]
+serde = ["dep:serde"]
 
 [lints]
 workspace = true

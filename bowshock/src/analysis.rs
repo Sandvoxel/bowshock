@@ -27,6 +27,7 @@ pub enum Backend {
 
 /// Backend that produced a [`Polar`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum BackendUsed {
     /// The CPU solver.
     Cpu,
@@ -57,6 +58,7 @@ impl Resolution {
 
 /// Drag coefficients referenced to the reference area (by default the largest cross-section).
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Drag {
     /// Pressure drag of the nose and the aft body.
     pub forebody_pressure: f64,
@@ -66,12 +68,14 @@ pub struct Drag {
     pub base: f64,
     /// `base` comes from a correlation (the inviscid wake gives no physical base pressure).
     pub base_modelled: bool,
-    /// Total drag: forebody pressure + friction + base.
+    /// Total drag: forebody pressure + friction + base (non-finite only for a [`Quality::Failed`] point).
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "nan_or_f64"))]
     pub total: f64,
 }
 
 /// Overall trust in a point, derived from how its run stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Quality {
     /// The residual dropped by the requested number of orders.
     Converged,
@@ -85,6 +89,7 @@ pub enum Quality {
 
 /// A condition under which a point is less reliable than its [`Quality`] suggests.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Warning {
     /// Transonic Mach number and a convex profile corner sharper than 2 degrees (shock position and drag are sensitive).
     SharpCornerTransonic,
@@ -107,6 +112,7 @@ pub enum Warning {
 
 /// One Mach number of a sweep.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PolarPoint {
     /// Mach number of the point.
     pub mach: f64,
@@ -125,8 +131,16 @@ pub struct PolarPoint {
     pub cd_uncertainty: Option<f64>,
 }
 
+/// Reads an `f64` that a format without NaN (JSON) wrote as `null` back as NaN.
+#[cfg(feature = "serde")]
+fn nan_or_f64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    use serde::Deserialize;
+    Ok(Option::<f64>::deserialize(d)?.unwrap_or(f64::NAN))
+}
+
 /// Solver summary of one point; lengths in metres (internal units for `from_internal`), coefficients referenced to the reference area.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PointDetail {
     /// Iterations run.
     pub iterations: usize,
@@ -141,12 +155,15 @@ pub struct PointDetail {
     /// Skin-friction drag; 0 for the Euler equations.
     pub cd_friction: f64,
     /// Base drag computed by the solver; NaN without a base wake.
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "nan_or_f64"))]
     pub cd_base_solver: f64,
     /// Area-mean base pressure coefficient; NaN without a base wake.
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "nan_or_f64"))]
     pub cp_base: f64,
     /// Body-surface faces in axial order (no sting extension).
     pub wall: Vec<WallCp>,
     /// Largest `y+` of the first wall cell; NaN for the Euler equations.
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "nan_or_f64"))]
     pub y_plus_max: f64,
     /// Largest relative pressure deviation from the free stream at the outer boundaries.
     pub farfield_dp: f64,
@@ -154,6 +171,7 @@ pub struct PointDetail {
 
 /// Pressure coefficient at one body-surface face.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WallCp {
     /// Axial position of the face centre.
     pub x: f64,
@@ -165,6 +183,7 @@ pub struct WallCp {
 
 /// Result of a Mach sweep, in the order of the requested Mach numbers.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Polar {
     /// One point per requested Mach number.
     pub points: Vec<PolarPoint>,

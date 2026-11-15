@@ -37,6 +37,7 @@ const T_MAX: f64 = 400.0;
 
 /// Source of the static state of the air.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Atmosphere {
     /// International Standard Atmosphere at a geometric altitude in metres (0 to 20 000 m).
     Isa {
@@ -69,6 +70,7 @@ pub struct AirState {
 
 /// Flight conditions of a viscous analysis.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FlightConditions {
     /// Static state of the air the vehicle flies through.
     pub atmosphere: Atmosphere,

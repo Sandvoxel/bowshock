@@ -10,6 +10,7 @@ const MAX_HALF_ANGLE: f64 = 30.0 * std::f64::consts::PI / 180.0;
 
 /// Nose profile family.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum NoseShape {
     /// Cone (half-angle at most 30 deg).
     Cone,
@@ -34,6 +35,7 @@ pub enum NoseShape {
 
 /// Nose of the body, in metres.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct NoseSpec {
     /// Profile family.
     pub shape: NoseShape,
@@ -45,6 +47,7 @@ pub struct NoseSpec {
 
 /// One section behind the nose, in metres.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum AftSpec {
     /// Constant-diameter tube.
     Tube {
@@ -62,6 +65,7 @@ pub enum AftSpec {
 
 /// Axisymmetric body: a nose followed by tubes and transitions, ending in a flat base.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BodySpec {
     /// The nose.
     pub nose: NoseSpec,
