@@ -520,7 +520,9 @@ impl Scene {
         };
 
         let mass = mass_profile(rocket, &bars, length);
-        Scene { length, lanes, bars, harness, seps, dropped_from, marks: None, mass, other_cgs: Vec::new() }
+        // The lanes reach as far aft as anything does: a pod (or its motor) may stand past the core's tail.
+        let reach = bars.iter().filter(|b| !b.alt).map(|b| b.end).fold(length, f64::max);
+        Scene { length: reach, lanes, bars, harness, seps, dropped_from, marks: None, mass, other_cgs: Vec::new() }
     }
 
     /// The bar `key` stands for.
@@ -681,29 +683,14 @@ pub fn describe(bar: &Bar, rocket: &Rocket, units: UnitSystem) -> String {
     }
 }
 
-/// The letters of the copies left in a group that is not evenly spaced (one was detached), as ` (A, C)`: the smallest even
-/// spacing of `2π/n` that all the angles fall on gives each copy's original index. The model renumbers the copies when one
-/// leaves, so the first remaining copy is always `A`. Empty for an evenly spaced group.
+/// The letters of the copies left in a group that lost one, as ` (B, C)`: each copy keeps the letter it had when the group was
+/// whole ([`bowshock_model::RadialPart::letters`]). Empty for a group that never lost a copy.
 pub(crate) fn remaining_copies(radial: &bowshock_model::RadialPart) -> String {
-    use std::f64::consts::TAU;
-    if radial.instance_angles.is_none() {
+    if radial.letters.is_empty() || radial.letters.len() != usize::from(radial.count) {
         return String::new();
     }
-    let angles = radial.angles();
-    let Some(&first) = angles.first() else { return String::new() };
-    for n in (usize::from(radial.count)..=16).filter(|n| *n > 1) {
-        let step = TAU / n as f64;
-        let indices: Vec<usize> = angles.iter().map(|a| ((a - first).rem_euclid(TAU) / step).round() as usize % n).collect();
-        let on_grid = angles
-            .iter()
-            .zip(&indices)
-            .all(|(a, i)| ((a - first).rem_euclid(TAU) - *i as f64 * step).abs() < 1e-6 || ((a - first).rem_euclid(TAU) - *i as f64 * step - TAU).abs() < 1e-6);
-        if on_grid {
-            let letters: Vec<String> = indices.iter().map(|&i| bowshock_model::instance_letter(i)).collect();
-            return format!(" ({})", letters.join(", "));
-        }
-    }
-    String::new()
+    let letters: Vec<String> = (0..usize::from(radial.count)).map(|i| bowshock_model::instance_letter(radial.copy_index(i))).collect();
+    format!(" ({})", letters.join(", "))
 }
 
 #[cfg(test)]

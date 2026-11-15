@@ -675,11 +675,11 @@ impl PlotView<'_> {
                     put(
                         f,
                         &label.to_uppercase(),
-                        Point::new(right - 6.0, plot.y + 3.0),
+                        Point::new(xa + 6.0, bottom - 3.0),
                         t.ink_muted,
                         FONT_SMALL,
-                        Alignment::Right,
-                        alignment::Vertical::Top,
+                        Alignment::Left,
+                        alignment::Vertical::Bottom,
                         MONO,
                     );
                 }
@@ -691,8 +691,8 @@ impl PlotView<'_> {
             let xs = panel.stack_xs(w0, w1);
             for (i, run) in panel.stack_layers(&xs) {
                 let s = &panel.series[i];
-                // On the light surface the fills are pastel (about 80 % over white), as the kit draws them.
-                let pastel = if t.bg_200.r > 0.5 { 0.8 } else { 1.0 };
+                // On the light surface the fills are pastel (about 90 % over white), as the kit draws them.
+                let pastel = if t.bg_200.r > 0.5 { 0.9 } else { 1.0 };
                 let alpha = s.fill.map_or(1.0, |fill| fill.alpha) * pastel;
                 if run.len() < 2 {
                     continue;
@@ -718,6 +718,15 @@ impl PlotView<'_> {
                     }
                 });
                 f.stroke(&edge, Stroke::default().with_color(t.bg_200).with_width(1.0));
+            }
+        }
+
+        // The beyond-flight band over stacked fills (which would hide a band drawn under them): the fills fade there.
+        if let (Some((from, _)), true) = (&self.group.beyond, panel.is_stacked()) {
+            if *from < w1 {
+                let xa = layout.px(from.max(w0)).max(plot.x);
+                f.fill_rectangle(Point::new(xa, plot.y), Size::new((right - xa).max(0.0), plot.height), Color { a: 0.28, ..t.bg_200 });
+                line(f, Point::new(crisp(xa), plot.y), Point::new(crisp(xa), bottom), t.ink_faint, 1.0, LineStyle::Dotted);
             }
         }
 

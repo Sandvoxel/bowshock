@@ -21,10 +21,10 @@ use crate::widgets::unit_input::unit_input;
 
 /// Tolerance for a motor wider or longer than its mount (the bridge's own).
 const FIT_TOL: f64 = 0.5e-3;
-/// Width of the picker panel.
-const WIDTH: f32 = 560.0;
-/// Height of the scrolling table.
-const TABLE_H: f32 = 260.0;
+/// Width of the picker panel: the kit's ConfigPicker, which leaves most of the viewport and the model in sight.
+const WIDTH: f32 = 520.0;
+/// Height cap of the scrolling table (about seven rows; the rest scrolls inside it).
+const TABLE_H: f32 = 190.0;
 /// Table text: the kit's 11.5 px mono; column heads are 10 px.
 const ROW_SIZE: f32 = 11.5;
 const HEAD_SIZE: f32 = 10.0;

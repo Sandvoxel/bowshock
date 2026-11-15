@@ -10,7 +10,7 @@ use iced::{Center, Element, Fill, Widget};
 use super::{Message as ChromeMessage, State};
 use crate::app::{ui, Ctx, Message, Mode, Selection};
 use crate::theme;
-use crate::tokens::{text as type_scale, BIN_W, RAIL_W, SPACE_1, SPACE_2, SPACE_3, TEXT_BODY};
+use crate::tokens::{text as type_scale, SPACE_1, SPACE_2, SPACE_3, TEXT_BODY};
 use crate::units::Quantity;
 use crate::widgets::chip::{chip, Severity};
 use crate::widgets::glyph::{self, Mark, Tone};
@@ -69,7 +69,10 @@ pub fn status_strip<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> 
         let severity = if ctx.physics.worst() == Level::Err { Severity::Err } else { Severity::Warn };
         let word = if ctx.physics.worst() == Level::Err { "error" } else { "warning" };
         let label = format!("{} {word}{}", issues.len(), if issues.len() == 1 { "" } else { "s" });
-        trailing.push(chip(severity, label).on_press(wrap(ChromeMessage::ToggleIssues)).into());
+        // Never wraps: the chip is given the width its words need (icon, gap, text at 12 px, padding).
+        let width = 36.0 + label.chars().count() as f32 * 6.8;
+        let chip: Element<'a, Message> = chip(severity, label).on_press(wrap(ChromeMessage::ToggleIssues)).into();
+        trailing.push(container(chip).width(width).boxed());
     }
     status::strip(cells, trailing)
 }
@@ -88,9 +91,10 @@ fn phase_cell<'a>(ctx: &'a Ctx) -> Element<'a, Message> {
 /// points up because the menu opens upward.
 fn config_cell<'a>(name: String, open: bool) -> Element<'a, Message> {
     let tone = if open { Tone::Accent } else { Tone::Muted };
-    // The kit's cell is at least 150 px wide with the caret at its right edge; open, it is as wide as the menu above it.
+    // The kit's cell is at least 150 px wide with the caret at its right edge. It keeps that width while its menu is open (the
+    // menu is as wide as the bin on its own) so that opening it never squeezes the cells and the warnings chip beside it.
     let natural = name.chars().count() as f32 * 8.0 + 110.0;
-    let width = if open { natural.max(RAIL_W + BIN_W) } else { natural.max(150.0) };
+    let width = natural.max(150.0);
     let content = row![
         ui::label("CONFIG"),
         text(name).font(theme::MONO).size(type_scale::NUM_BODY.size).wrapping(Wrapping::None).style(theme::ink),

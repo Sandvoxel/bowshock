@@ -44,6 +44,19 @@ impl Request {
         Request { size, priority, spots }
     }
 
+    /// Adds spots in the bands above and below the picture inside `area` (a panel), under the handle's x where the label fits.
+    pub fn with_bands(mut self, at: Point, area: Rectangle, top: f32) -> Request {
+        let (w, h) = (self.size.width, self.size.height);
+        let x = (at.x - w / 2.0).clamp(area.x, (area.x + area.width - w).max(area.x));
+        let rows = [area.y + top, area.y + area.height - h - 2.0, area.y + area.height - 2.0 * h - 4.0, area.y + area.height - 3.0 * h - 6.0];
+        for y in rows {
+            self.spots.push(Point::new(x, y));
+            self.spots.push(Point::new(area.x + 2.0, y));
+            self.spots.push(Point::new(area.x + area.width - w - 2.0, y));
+        }
+        self
+    }
+
     /// The leader from the handle at `at` to the label placed at `rect`, when the label had to move away from the handle.
     pub fn leader(at: Point, rect: Rectangle) -> Option<(Point, Point)> {
         let near = Point::new(at.x.clamp(rect.x, rect.x + rect.width), at.y.clamp(rect.y, rect.y + rect.height));
@@ -60,10 +73,11 @@ fn inside(rect: Rectangle, area: Rectangle) -> bool {
     rect.x >= area.x && rect.y >= area.y && rect.x + rect.width <= area.x + area.width && rect.y + rect.height <= area.y + area.height
 }
 
-/// Places `requests` inside `area`, clear of `blocked` and of each other. Returns the rectangle chosen for every request
-/// (`None`: no free spot, the label is dropped), in the order of `requests`. Priority 0 requests always get a spot: when none
-/// is free the first one is used, so the selection tag never disappears.
-pub fn layout(requests: &[Request], blocked: &[Rectangle], area: Rectangle) -> Vec<Option<Rectangle>> {
+/// Places `requests` inside `area`, clear of `blocked` and of each other. `soft` are things to prefer not to cover (other parts'
+/// silhouettes): a spot clear of them wins, else one that only keeps clear of `blocked`. Returns the rectangle chosen for every
+/// request (`None`: no free spot, the label is dropped), in the order of `requests`. Priority 0 requests always get a spot: when
+/// none is free the one inside `area` covering the least of `blocked` is used, so the selection tag never disappears.
+pub fn layout(requests: &[Request], blocked: &[Rectangle], soft: &[Rectangle], area: Rectangle) -> Vec<Option<Rectangle>> {
     let mut order: Vec<usize> = (0..requests.len()).collect();
     order.sort_by_key(|i| requests[*i].priority);
     let mut taken: Vec<Rectangle> = blocked.to_vec();
@@ -71,14 +85,24 @@ pub fn layout(requests: &[Request], blocked: &[Rectangle], area: Rectangle) -> V
     for i in order {
         let r = &requests[i];
         let rect_at = |p: Point| Rectangle::new(p, r.size);
-        let found = r.spots.iter().map(|p| rect_at(*p)).find(|rect| inside(*rect, area) && clear(*rect, &taken));
-        let found = found.or_else(|| (r.priority == 0).then(|| r.spots.first().map(|p| rect_at(*p))).flatten());
+        let fits = || r.spots.iter().map(|p| rect_at(*p)).filter(|rect| inside(*rect, area));
+        let found = fits().find(|rect| clear(*rect, &taken) && clear(*rect, soft)).or_else(|| fits().find(|rect| clear(*rect, &taken)));
+        let found = found.or_else(|| {
+            (r.priority == 0)
+                .then(|| fits().min_by(|a, b| covered(*a, &taken).total_cmp(&covered(*b, &taken))).or_else(|| r.spots.first().map(|p| rect_at(*p))))
+                .flatten()
+        });
         if let Some(rect) = found {
             taken.push(rect);
             out[i] = Some(rect);
         }
     }
     out
+}
+
+/// Area of `rect` covered by `others`.
+fn covered(rect: Rectangle, others: &[Rectangle]) -> f32 {
+    others.iter().filter_map(|o| rect.intersection(o)).map(|i| i.width * i.height).sum()
 }
 
 /// A rectangle of `size` centred on `p`, for obstacles such as handle shapes.
@@ -97,7 +121,7 @@ mod tests {
         let size = Size::new(60.0, 12.0);
         // Two handles on top of each other: the first label takes the best corner, the second the next.
         let reqs = [Request::at_handle(Point::new(100.0, 100.0), size, 2), Request::at_handle(Point::new(100.0, 100.0), size, 1)];
-        let out = layout(&reqs, &[], AREA);
+        let out = layout(&reqs, &[], &[], AREA);
         let (a, b) = (out[0].unwrap(), out[1].unwrap());
         assert!(!a.intersects(&b));
         // The more important one (priority 1) has the preferred spot.
@@ -108,21 +132,35 @@ mod tests {
     fn a_label_with_no_free_spot_is_dropped_but_the_tag_never_is() {
         let size = Size::new(60.0, 12.0);
         let wall = [Rectangle::new(Point::new(0.0, 0.0), Size::new(400.0, 300.0))];
-        let out = layout(&[Request::at_handle(Point::new(100.0, 100.0), size, 1)], &wall, AREA);
+        let out = layout(&[Request::at_handle(Point::new(100.0, 100.0), size, 1)], &wall, &[], AREA);
         assert!(out[0].is_none());
         let tag = Request { size, priority: 0, spots: vec![Point::new(10.0, 10.0)] };
-        assert_eq!(layout(&[tag], &wall, AREA)[0].map(|r| r.position()), Some(Point::new(10.0, 10.0)));
+        assert_eq!(layout(&[tag], &wall, &[], AREA)[0].map(|r| r.position()), Some(Point::new(10.0, 10.0)));
+    }
+
+    #[test]
+    fn soft_obstacles_are_avoided_when_there_is_a_free_spot_and_given_up_when_not() {
+        let size = Size::new(60.0, 12.0);
+        let at = Point::new(100.0, 100.0);
+        let req = Request::at_handle(at, size, 1);
+        let first = Rectangle::new(req.spots[0], size);
+        // The preferred spot is soft-blocked: another one is taken.
+        let out = layout(std::slice::from_ref(&req), &[], &[first], AREA);
+        assert!(!out[0].unwrap().intersects(&first));
+        // Everything soft-blocked: the preferred spot is used anyway.
+        let all = [Rectangle::new(Point::new(0.0, 0.0), Size::new(400.0, 300.0))];
+        assert_eq!(layout(&[req], &[], &all, AREA)[0].unwrap().position(), first.position());
     }
 
     #[test]
     fn a_label_stays_inside_the_area_and_off_obstacles() {
         let size = Size::new(60.0, 12.0);
         let obstacle = Rectangle::new(Point::new(104.0, 80.0), Size::new(80.0, 20.0));
-        let out = layout(&[Request::at_handle(Point::new(100.0, 100.0), size, 1)], &[obstacle], AREA);
+        let out = layout(&[Request::at_handle(Point::new(100.0, 100.0), size, 1)], &[obstacle], &[], AREA);
         let rect = out[0].unwrap();
         assert!(!rect.intersects(&obstacle) && inside(rect, AREA));
         // At the very corner of the area the label flips inward.
-        let out = layout(&[Request::at_handle(Point::new(2.0, 2.0), size, 1)], &[], AREA);
+        let out = layout(&[Request::at_handle(Point::new(2.0, 2.0), size, 1)], &[], &[], AREA);
         assert!(inside(out[0].unwrap(), AREA));
     }
 }

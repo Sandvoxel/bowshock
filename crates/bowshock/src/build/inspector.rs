@@ -525,18 +525,21 @@ impl State {
             }
             Message::Unlink(Field::Dim(dim)) => {
                 if let Some(field) = RadialField::of_dim(dim) {
-                    let label = format!("Unlink {} of fin {}", field.name(), bowshock_model::instance_letter(instance));
+                    let letter = bowshock_model::instance_letter(ctx.doc.rocket().radial(id).map_or(instance, |r| r.copy_index(instance)));
+                    let label = format!("Unlink {} of fin {letter}", field.name());
                     ctx.doc.edit(&label, |r| r.unlink_field(id, instance, field));
                 }
             }
             Message::Relink(Field::Dim(dim)) => {
                 if let Some(field) = RadialField::of_dim(dim) {
-                    let label = format!("Relink {} of fin {}", field.name(), bowshock_model::instance_letter(instance));
+                    let letter = bowshock_model::instance_letter(ctx.doc.rocket().radial(id).map_or(instance, |r| r.copy_index(instance)));
+                    let label = format!("Relink {} of fin {letter}", field.name());
                     ctx.doc.edit(&label, |r| r.relink_field(id, instance, field));
                 }
             }
             Message::RelinkAll => {
-                let label = format!("Relink fin {}", bowshock_model::instance_letter(instance));
+                let letter = bowshock_model::instance_letter(ctx.doc.rocket().radial(id).map_or(instance, |r| r.copy_index(instance)));
+                let label = format!("Relink fin {letter}");
                 ctx.doc.edit(&label, |r| r.relink_copy(id, instance));
             }
             Message::ConfirmCount => {
@@ -727,7 +730,7 @@ impl State {
                     let left = crate::build::lanes::remaining_copies(r);
                     let label = match left.trim().strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
                         Some(letters) => format!(" ×{} · {letters}", r.count),
-                        None => format!(" · {}", bowshock_model::instance_letter(ctx.symmetry.copy_in(rocket, id))),
+                        None => format!(" · {}", bowshock_model::instance_letter(r.copy_index(ctx.symmetry.copy_in(rocket, id)))),
                     };
                     let tag = text(label).font(SANS_SEMIBOLD).size(type_scale::UI_TITLE.size).style(theme::ink);
                     cells.push(mouse_area(tag).on_press(Message::NextInstance).interaction(mouse::Interaction::Pointer).boxed());

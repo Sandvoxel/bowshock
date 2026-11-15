@@ -338,7 +338,7 @@ impl State {
                 return Task::none();
             }
         };
-        self.picker = Some(Picker { panel, mode, at: Point::new(chip.x, chip.y + chip.height + 2.0), query: String::new() });
+        self.picker = Some(Picker { panel, mode, at: Point::new(chip.x, chip.y + chip.height + 6.0), query: String::new() });
         iced::widget::operation::focus(picker::SEARCH_ID)
     }
 

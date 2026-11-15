@@ -702,6 +702,10 @@ pub struct RadialPart {
     /// from [`RadialPart::angle`]. When set it has `count` entries and `angle` is the first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance_angles: Option<Vec<f64>>,
+    /// The original lettering of the copies after some left the group (index `0` is `A`): `letters[i]` is the copy index copy `i`
+    /// had when the group was whole, so a group that lost `A` reads `B, C`. Empty means the natural `A, B, ...`; set by a detach.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub letters: Vec<u8>,
     /// Radius of the concave epoxy fillet along both sides of each fin's root, metres; 0 means none (OpenRocket's fin fillet).
     /// Mass only: like OpenRocket the flight model ignores its aerodynamics, and the sim bridge sees it through the part's mass.
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -731,6 +735,7 @@ impl RadialPart {
             cg_override: None,
             overrides: Vec::new(),
             instance_angles: None,
+            letters: Vec::new(),
             fillet_radius: 0.0,
             fillet_material: MaterialId::EPOXY,
         }
@@ -758,6 +763,16 @@ impl RadialPart {
         }
         let n = f64::from(self.count.max(1));
         (0..self.count.max(1)).map(|i| (self.angle + tau * f64::from(i) / n).rem_euclid(tau)).collect()
+    }
+
+    /// The index copy `i` had when the group was whole: its place in the lettering (`A` is 0). Equals `i` for a group that never
+    /// lost a copy.
+    pub fn copy_index(&self, i: usize) -> usize {
+        if self.letters.len() == usize::from(self.count) {
+            self.letters.get(i).map_or(i, |&l| usize::from(l))
+        } else {
+            i
+        }
     }
 }
 

@@ -529,9 +529,11 @@ impl canvas::Program<GroundMessage> for GroundTrackView<'_> {
         let rects = place_landing_labels(Size::new(size.width - 10.0, size.height), &items, label_h, &samples, &reserved);
         for ((at, label, c), rect) in landings.iter().zip(&rects) {
             let near = Point::new(at.x.clamp(rect.x, rect.x + rect.width), at.y.clamp(rect.y, rect.y + rect.height));
-            if near.distance(*at) > 14.0 {
+            if near.distance(*at) > 11.0 {
                 f.stroke(&Path::line(*at, near), Stroke::default().with_color(Color { a: 0.7, ..*c }).with_width(1.0));
             }
+            // On a backing, so a ring or the field circle never strikes through the text.
+            f.fill_rectangle(rect.position(), rect.size(), Color { a: 0.85, ..t.bg_200 });
             put(&mut f, label, Point::new(rect.x, rect.y + 1.0), t.ink_muted, TEXT_LABEL, Alignment::Left, alignment::Vertical::Top);
         }
         for track in &self.data.tracks {
@@ -630,6 +632,8 @@ fn corner_rects(size: Size, wind: Option<Wind>, field: Option<&str>) -> Vec<Rect
 /// beside the marker where only the reserved rectangles and the other labels are avoided.
 fn place_landing_labels(size: Size, items: &[(Point, f32)], height: f32, samples: &[Point], reserved: &[Rectangle]) -> Vec<Rectangle> {
     let mut taken: Vec<Rectangle> = reserved.to_vec();
+    // Every landing marker is an obstacle too, so no label covers another flight's square.
+    taken.extend(items.iter().map(|(at, _)| Rectangle::new(Point::new(at.x - 6.0, at.y - 6.0), Size::new(12.0, 12.0))));
     let mut out: Vec<Rectangle> = Vec::new();
     for &(at, w) in items {
         let clamp =
@@ -665,11 +669,16 @@ fn place_landing_labels(size: Size, items: &[(Point, f32)], height: f32, samples
                 && !(avoid_tracks && samples.iter().any(|p| grown.contains(*p)))
                 && !taken.iter().any(|o| o.intersects(&grown))
         };
+        let exact = |x: f32, y: f32| Rectangle::new(Point::new(x, y), Size::new(w, height));
+        // Positions that fit as they are come first; a clamped position (pushed in from an edge, so over its own marker's side)
+        // is the fallback.
         let rect = near
             .iter()
-            .map(|&(x, y)| clamp(x, y))
+            .map(|&(x, y)| exact(x, y))
             .find(|r| clear(r, true))
-            .or_else(|| near.iter().map(|&(x, y)| clamp(x, y)).find(|r| clear(r, false)))
+            .or_else(|| near.iter().map(|&(x, y)| clamp(x, y)).find(|r| clear(r, true)))
+            .or_else(|| near.iter().map(|&(x, y)| exact(x, y)).find(|r| clear(r, false)))
+            .or_else(|| rows.clone().map(|(x, y)| exact(x, y)).find(|r| clear(r, false)))
             .or_else(|| rows.map(|(x, y)| clamp(x, y)).find(|r| clear(r, false)))
             .unwrap_or_else(|| clamp(near[0].0, near[0].1));
         taken.push(rect);
@@ -772,6 +781,21 @@ mod tests {
             for b in &rects[i + 1..] {
                 assert!(!a.intersects(b), "labels {a:?} and {b:?} intersect");
             }
+        }
+    }
+
+    #[test]
+    fn two_near_identical_landings_at_the_right_edge_get_separate_labels_clear_of_the_north_arrow() {
+        // Nominal (190 m) and Windy (195 m) land almost on the same spot, close to the right edge and below the north arrow.
+        let size = Size::new(340.0, 232.0);
+        let reserved = corner_rects(size, Some(Wind { speed: 2.2, from_deg: 250.0 }), Some("FIELD 300 m"));
+        let markers = [Point::new(300.0, 100.0), Point::new(303.0, 98.0)];
+        let items: Vec<(Point, f32)> = markers.iter().map(|m| (*m, 90.0)).collect();
+        let rects = place_landing_labels(Size::new(size.width - 10.0, size.height), &items, 13.0, &[], &reserved);
+        assert!(!rects[0].intersects(&rects[1]));
+        for r in &rects {
+            assert!(reserved.iter().all(|c| !r.intersects(c)), "{r:?} on a corner mark");
+            assert!(markers.iter().all(|m| !r.contains(*m)), "{r:?} covers a marker");
         }
     }
 

@@ -275,7 +275,7 @@ fn free_name(group: &RadialPart, index: usize) -> String {
         (None, kind) if kind.is_fin() => "Fin".to_string(),
         (None, kind) => kind.name().to_string(),
     };
-    format!("{base} {}", instance_letter(index))
+    format!("{base} {}", instance_letter(group.copy_index(index)))
 }
 
 /// Whether a part may join a group: fins with fins, lugs with lugs, buttons with buttons.
@@ -305,6 +305,7 @@ impl Rocket {
             cg_override: group.cg_override,
             overrides: Vec::new(),
             instance_angles: None,
+            letters: Vec::new(),
             ..group.clone()
         }
     }
@@ -435,7 +436,11 @@ impl Rocket {
         rest.set_angles(left);
         debug_assert_eq!(rest.angle, angles[first_left]);
         rest.mass_override = group.mass_override.map(|m| m * (count - 1.0) / count);
-        // The copies after the one that left move up a letter.
+        // The copies keep the letters they had: a group that lost `A` reads `B, C`.
+        let mut letters: Vec<u8> = (0..usize::from(group.count)).map(|i| group.copy_index(i) as u8).collect();
+        letters.remove(index);
+        rest.letters = letters;
+        // The overrides' copy indices follow the copies' places in the group, so the ones after the one that left move up.
         rest.overrides.retain(|o| usize::from(o.index) != index);
         for o in rest.overrides.iter_mut().filter(|o| usize::from(o.index) > index) {
             o.index -= 1;
@@ -477,6 +482,7 @@ impl Rocket {
         first.overrides.clear();
         first.angle = group.angles()[0];
         first.instance_angles = None;
+        first.letters.clear();
         first.name = Some(free_name(&group, 0));
         first.mass_override = group.mass_override.map(|m| m / count);
         for (offset, copy) in copies.into_iter().enumerate() {
@@ -545,6 +551,7 @@ impl Rocket {
             target.set_angles(list);
         }
         target.count = count;
+        target.letters.clear();
         target.mass_override = per_copy.map(|m| m * f64::from(count));
         if winner == Winner::Part {
             let own = p.effective(0);
@@ -609,6 +616,26 @@ mod tests {
         let (mut r, fins) = finned(4);
         r.detach_radial(fins, 0).unwrap();
         assert!((r.radial(fins).unwrap().angle - TAU / 4.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_remaining_copies_keep_their_original_letters() {
+        let (mut r, fins) = finned(3);
+        let a = r.detach_radial(fins, 0).unwrap();
+        assert_eq!(r.radial(a).unwrap().name.as_deref(), Some("Fin A"));
+        let g = r.radial(fins).unwrap();
+        assert_eq!((g.copy_index(0), g.copy_index(1)), (1, 2), "the group reads B, C");
+        // The next copy to leave is named by its own letter, not its place in the shrunken group.
+        let b = r.detach_radial(fins, 0).unwrap();
+        assert_eq!(r.radial(b).unwrap().name.as_deref(), Some("Fin B"));
+        // The lettering survives a save, and a new count starts over.
+        let (mut r, fins) = finned(4);
+        r.detach_radial(fins, 0).unwrap();
+        assert_eq!(r.radial(fins).unwrap().letters, vec![1, 2, 3]);
+        assert_eq!(Rocket::from_json(&r.to_json()).unwrap(), r);
+        let kind = r.radial(fins).unwrap().kind.clone();
+        assert!(r.set_radial(fins, kind, 2));
+        assert!(r.radial(fins).unwrap().letters.is_empty());
     }
 
     #[test]

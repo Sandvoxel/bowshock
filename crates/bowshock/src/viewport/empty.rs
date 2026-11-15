@@ -10,7 +10,7 @@ use iced::{alignment, mouse, Element, Fill, Point, Rectangle, Renderer, Size, Th
 
 use crate::app::Ctx;
 use crate::logo::{self, AXIS};
-use crate::theme::{self, MONO, SANS};
+use crate::theme::{self, MONO, SANS, SANS_MEDIUM};
 use crate::tokens::{SPACE_4, TEXT_BODY, TEXT_LABEL};
 
 /// The label under the registration marks.
@@ -124,12 +124,22 @@ impl<M> canvas::Program<M> for Cover {
             });
         }
 
-        // The hint, centred under the figure.
+        // The title (the kit Cover's wordmark) and under it the hint, centred under the figure.
+        let below = origin.y + (AXIS + 10.6) * u;
+        frame.fill_text(Text {
+            content: "Bowshock".into(),
+            position: Point::new(cx, below + 22.0),
+            color: t.ink,
+            size: 34.0.into(),
+            font: SANS_MEDIUM,
+            align_x: alignment::Horizontal::Center.into(),
+            align_y: alignment::Vertical::Top,
+            ..Text::default()
+        });
         if self.hint {
-            let below = origin.y + (AXIS + 10.6) * u;
             frame.fill_text(Text {
                 content: HINT.into(),
-                position: Point::new(cx, below + 32.0),
+                position: Point::new(cx, below + 70.0),
                 color: t.ink_muted,
                 size: TEXT_BODY.into(),
                 font: SANS,

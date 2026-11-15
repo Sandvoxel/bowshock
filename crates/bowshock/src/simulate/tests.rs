@@ -387,7 +387,7 @@ fn choosing_a_source_in_the_picker_replaces_the_panels_source_as_one_undo_step()
     click(&mut state, &mut app, 1, PanelAction::Pick);
     let picker = state.picker.as_ref().unwrap();
     assert_eq!((picker.panel, picker.mode, picker.query.as_str()), (1, Mode::Primary, ""));
-    assert_eq!(picker.at, Point::new(100.0, 40.0));
+    assert_eq!(picker.at, Point::new(100.0, 44.0));
     state.update(Message::PickerQuery("mach".into()), app.ctx_mut());
     assert_eq!(state.picker.as_ref().unwrap().query, "mach");
 

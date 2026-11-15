@@ -836,7 +836,13 @@ impl Lanes<'_> {
                 Over::CgLabel => None,
             };
             if let Some(text) = text {
-                tag(f, p.x + 10.0, (p.y - 14.0).max(RULER_H + 8.0), &text, t.ink, t.bg_300, Some(t.line_200), false);
+                // Over a bar the tag sits just above that bar, so it never covers the bar's own label.
+                let above = match over {
+                    Over::Bar(hit) => self.scene.bar(hit.key).and_then(|b| geometry::bar_rect(b, rows, axis)).map(|r| r.y - 9.5),
+                    _ => None,
+                };
+                let y = above.unwrap_or(p.y - 14.0).max(RULER_H + 8.0);
+                tag(f, p.x + 10.0, y, &text, t.ink, t.bg_300, Some(t.line_200), false);
             }
         }
 

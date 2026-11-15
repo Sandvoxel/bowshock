@@ -600,7 +600,7 @@ pub struct PlotGroup {
     /// How the y ticks of every panel are chosen.
     pub y_ticks: YTicks,
     /// Shade the x range from this value to the end of the axis as lying outside the flown envelope, labelled with the text
-    /// (`beyond flight · M 0.53`) at the top of the first panel.
+    /// (`beyond flight · M 0.53`) at the bottom-left of the band in the first panel.
     pub beyond: Option<(f64, String)>,
 }
 

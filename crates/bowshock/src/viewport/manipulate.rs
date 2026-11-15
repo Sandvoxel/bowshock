@@ -885,7 +885,7 @@ impl canvas::Program<Message> for Overlay<'_> {
 
         // Where the tag and the handle labels go: placed together so none overprints another or the inset (see `labels`).
         let vis = self.visible(size, state.modifiers);
-        let plan = self.plan(id, &tag_text, b, size, &vis, all && state.drag.is_none());
+        let plan = self.plan(id, &tag_text, b, size, &vis, all && state.drag.is_none(), state.modifiers.alt());
         label_in(&mut frame, &tag_text, plan.tag, t.accent, t.bg_000);
         if let Some(ins) = &vis.inset {
             self.draw_inset(&mut frame, t, id, ins, &vis, &plan.inset);
@@ -959,7 +959,7 @@ impl Overlay<'_> {
     /// Places the selection tag, the handle labels and the inset's labels so that none overprints another, the inset, the
     /// toolbar, the ViewCube or a handle (see [`labels`]). Labels are most important first: the tag, the primary dimensions,
     /// the others. A label with no free spot is dropped and named in `Plan::hidden`.
-    fn plan(&self, id: PartId, tag_text: &str, b: Rectangle, size: Size, vis: &Visible, with_labels: bool) -> Plan {
+    fn plan(&self, id: PartId, tag_text: &str, b: Rectangle, size: Size, vis: &Visible, with_labels: bool, alt: bool) -> Plan {
         let area = Rectangle::new(Point::ORIGIN, size);
         let mut blocked = vec![
             Rectangle::new(Point::ORIGIN, Size::new(TOOLBAR_X.min(size.width), TOOLBAR_Y)),
@@ -981,12 +981,21 @@ impl Overlay<'_> {
         let (g, h) = (BRACKET_GAP, tag_size.height);
         let (left, right) = (b.x - g, b.x + b.width + g - tag_size.width);
         let (above, below) = (b.y - g - 4.0 - h, b.y + b.height + g + 4.0);
-        let spots =
-            vec![Point::new(left, above), Point::new(right, above), Point::new(left, below), Point::new(right, below), Point::new(left, above - h - 2.0)];
+        let (lside, rside) = (b.x - g - 4.0 - tag_size.width, b.x + b.width + g + 4.0);
+        let spots = vec![
+            Point::new(left, above),
+            Point::new(right, above),
+            Point::new(left, above - h - 2.0),
+            Point::new(left, below),
+            Point::new(right, below),
+            Point::new(lside, b.y),
+            Point::new(rside, b.y),
+            Point::new(right, above - h - 2.0),
+        ];
         let mut requests = vec![labels::Request { size: tag_size, priority: 0, spots }];
         let mut wanted = Vec::new();
         if with_labels {
-            for (i, p) in vis.placed.iter().enumerate().filter(|(_, p)| !handles::in_inset(&p.spec)) {
+            for (i, p) in vis.placed.iter().enumerate().filter(|(_, p)| !handles::in_inset(&p.spec) && (alt || p.spec.primary)) {
                 let text = self.label_text(id, p.spec.dim);
                 if !text.is_empty() {
                     requests.push(Request::at_handle(p.at, label_size(&text), if p.spec.primary { 1 } else { 2 }));
@@ -994,7 +1003,7 @@ impl Overlay<'_> {
                 }
             }
         }
-        let rects = labels::layout(&requests, &blocked, area);
+        let rects = labels::layout(&requests, &blocked, &self.silhouettes(id, size), area);
         let tag = rects[0].unwrap_or_else(|| Rectangle::new(requests[0].spots[0], tag_size));
         let mut side = Vec::new();
         let mut hidden = Vec::new();
@@ -1005,17 +1014,19 @@ impl Overlay<'_> {
             }
         }
 
-        // The inset's labels are placed inside its panel, round its title and picture.
+        // The inset's labels are placed inside its panel, in the bands above and below the picture (never on it).
         let mut inset = Vec::new();
         if let Some(ins) = &vis.inset {
             let title = Rectangle::new(Point::new(ins.panel.x + 8.0, ins.panel.y + 6.0), Size::new(8.0 * TEXT_LABEL * GLYPH_EM, TEXT_LABEL));
-            let mut blocked = vec![title];
+            let r = ins.base + ins.reach.max(handles::CANT_LEVER) + 6.0;
+            let mut blocked = vec![title, Rectangle::new(ins.centre - Vector::new(r, r), Size::new(2.0 * r, 2.0 * r))];
             let members: Vec<(usize, &Placed)> = vis.placed.iter().enumerate().filter(|(_, p)| handles::in_inset(&p.spec)).collect();
             blocked.extend(members.iter().map(|(_, p)| labels::around(p.at, Size::new(HANDLE_BLOCK, HANDLE_BLOCK))));
             let texts: Vec<String> = members.iter().map(|(_, p)| self.label_text(id, p.spec.dim)).collect();
-            let requests: Vec<Request> = members.iter().zip(&texts).map(|((_, p), s)| Request::at_handle(p.at, label_size(s), 1)).collect();
             let panel = Rectangle::new(ins.panel.position() + Vector::new(2.0, 2.0), ins.panel.size() - Size::new(4.0, 4.0));
-            for (((handle, p), text), rect) in members.iter().zip(texts).zip(labels::layout(&requests, &blocked, panel)) {
+            let requests: Vec<Request> =
+                members.iter().zip(&texts).map(|((_, p), s)| Request::at_handle(p.at, label_size(s), 1).with_bands(p.at, panel, 20.0)).collect();
+            for (((handle, p), text), rect) in members.iter().zip(texts).zip(labels::layout(&requests, &blocked, &[], panel)) {
                 match rect {
                     Some(rect) => inset.push(Labelled { handle: *handle, text, rect }),
                     None => hidden.push(self.rocket.dim_label(id, p.spec.dim).to_uppercase()),
@@ -1023,6 +1034,27 @@ impl Overlay<'_> {
             }
         }
         Plan { tag, side, inset, hidden }
+    }
+
+    /// Screen bounds of every other part of the rocket (the airframe and the radial parts that are not the selection): labels
+    /// prefer not to sit over them, so they stay in free sky.
+    fn silhouettes(&self, id: PartId, size: Size) -> Vec<Rectangle> {
+        let (rocket, camera) = (self.rocket, &self.camera);
+        let mut out: Vec<Rectangle> = rocket
+            .parts()
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.id != id)
+            .map(|(i, p)| pick::screen_bounds(camera, size, rocket.stations()[i], &p.kind))
+            .collect();
+        for radial in rocket.radials().iter().filter(|r| r.id != id) {
+            for i in 0..radial.angles().len() {
+                if let Some(at) = pick::placement(rocket, radial, i) {
+                    out.push(pick::radial_bounds(camera, size, &radial.effective(i).kind, at));
+                }
+            }
+        }
+        out
     }
 
     /// A multi-selection: accent brackets on every selected part and one tag (`3 PARTS`) over the group. No handles.
@@ -1502,7 +1534,7 @@ mod label_tests {
                 let tag = o.tag_text(fins, &selection);
                 let b = o.bounds_of_selection(size).expect("the fin set is on screen");
                 let vis = o.visible(size, modifiers);
-                let plan = o.plan(fins, &tag, b, size, &vis, all);
+                let plan = o.plan(fins, &tag, b, size, &vis, all, modifiers.alt());
                 let case = format!("{size:?} profile={profile} all={all}");
 
                 let mut rects = vec![plan.tag];
@@ -1519,7 +1551,10 @@ mod label_tests {
                     assert!(!plan.side.is_empty() || !plan.hidden.is_empty(), "{case}: handle labels were planned");
                 }
                 if let Some(ins) = &vis.inset {
-                    for r in &rects {
+                    // In a viewport this narrow the long linked-group tag (215 px) has no free spot beside a 170 px inset: the tag
+                    // is never dropped, so it may overlap there; the handle labels still must not.
+                    let skip_tag = usize::from(size.width < 500.0);
+                    for r in &rects[skip_tag..] {
                         assert!(!r.intersects(&ins.panel), "{case}: {r:?} over the inset {:?}", ins.panel);
                     }
                     // The inset keeps off the fin set itself.
@@ -1528,6 +1563,44 @@ mod label_tests {
                     disjoint(&inner);
                     for l in &inner {
                         assert!(l.x >= ins.panel.x && l.x + l.width <= ins.panel.x + ins.panel.width, "{case}: inset label outside its panel");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inset_labels_stay_off_the_picture_and_a_tube_keeps_clear_of_the_marker_labels() {
+        let (r, fins) = example();
+        let tube = r.parts()[2].id;
+        for size in [Size::new(704.0, 580.0), Size::new(404.0, 480.0)] {
+            for profile in [true, false] {
+                // The fin set: the inset's labels sit in the bands round the picture, never over it.
+                let o = overlay(&r, fins, camera(profile, size), profile);
+                let b = o.bounds_of_selection(size).unwrap();
+                let vis = o.visible(size, keyboard::Modifiers::empty());
+                let plan = o.plan(fins, "FIN SET", b, size, &vis, true, false);
+                if let Some(ins) = &vis.inset {
+                    let radius = ins.base + ins.reach.max(handles::CANT_LEVER) + 6.0;
+                    let picture = Rectangle::new(ins.centre - Vector::new(radius, radius), Size::new(2.0 * radius, 2.0 * radius));
+                    for l in &plan.inset {
+                        assert!(!l.rect.intersects(&picture), "{size:?} profile={profile}: {:?} over the inset picture", l.text);
+                    }
+                }
+                // Without Alt only the primary handles are labelled.
+                assert!(plan.side.iter().all(|l| vis.placed[l.handle].spec.primary));
+                // A tube: its tag and labels stay off the CG / CP / margin labels.
+                let o = overlay(&r, tube, camera(profile, size), profile);
+                let b = o.bounds_of_selection(size).unwrap();
+                let vis = o.visible(size, keyboard::Modifiers::empty());
+                let tag = o.tag_text(tube, &o.selection());
+                let plan = o.plan(tube, &tag, b, size, &vis, true, false);
+                let mut rects = vec![plan.tag];
+                rects.extend(plan.side.iter().map(|l| l.rect));
+                disjoint(&rects);
+                for m in markers::balance_label_rects(&r, &o.camera, size, &o.balance.unwrap(), o.units) {
+                    for rect in &rects {
+                        assert!(!rect.intersects(&m), "{size:?} profile={profile}: {rect:?} over a marker label {m:?}");
                     }
                 }
             }

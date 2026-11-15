@@ -35,45 +35,66 @@ pub fn nice_ticks(lo: f64, hi: f64, target: usize) -> Vec<f64> {
     (first..=last).map(|k| k as f64 * step).filter(|v| *v >= lo - eps && *v <= hi + eps).map(|v| if v.abs() < eps { 0.0 } else { v }).collect()
 }
 
-/// The smallest range containing `[lo, hi]` that is divided into exactly `n - 1` equal intervals of a nice step (1, 2, 2.5 or 5
-/// times a power of ten), with both ends on multiples of the step. A range that crosses 0 therefore has a tick on 0.
+/// The tightest range containing `[lo, hi]` whose ends are multiples of a nice step (1, 2, 2.5 or 5 times a power of ten) and
+/// that holds at most `n + 1` intervals of it, so about `n` ticks. A larger step wins a tie. A range that crosses 0 has a tick
+/// on 0; one that does not is not stretched to reach it.
 pub fn even_range(lo: f64, hi: f64, n: usize) -> (f64, f64) {
     if !(lo.is_finite() && hi.is_finite()) || hi <= lo || n < 2 {
         return (lo, hi);
     }
-    let intervals = (n - 1) as f64;
-    let k0 = ((hi - lo) / intervals).log10().floor() as i32 - 1;
+    let max_intervals = (n + 1) as f64;
+    let k0 = ((hi - lo) / max_intervals).log10().floor() as i32 - 1;
+    let mut best: Option<(f64, f64, f64)> = None; // (span, step, a * step)
     for k in k0..k0 + 6 {
         for m in [1.0, 2.0, 2.5, 5.0] {
             let step = m * 10f64.powi(k);
             let a = (lo / step + 1e-9).floor();
             let b = (hi / step - 1e-9).ceil();
-            if b - a <= intervals {
-                return (a * step, (a + intervals) * step);
+            // At least three intervals, so a ruled scale never collapses to two ticks.
+            let b = b.max(a + 3.0);
+            if b - a > max_intervals {
+                continue;
+            }
+            let span = (b - a) * step;
+            if best.is_none_or(|(s, st, _)| span < s - 1e-12 * s.abs() || (span <= s + 1e-12 * s.abs() && step > st)) {
+                best = Some((span, step, a * step));
             }
         }
     }
-    (lo, hi)
+    best.map_or((lo, hi), |(span, _, start)| (start, start + span))
 }
 
-/// `n` evenly spaced ticks from `lo` to `hi` inclusive (a range from [`even_range`]), with the decimals that print the step
-/// exactly (`0.25`, `2.5`, `20`).
+/// Evenly spaced ticks from `lo` to `hi` inclusive and the decimals that print them exactly (`0.25`, `2.5`, `20`). For a range
+/// from [`even_range`] the step is its nice step (the largest that gives 3 to `n + 1` intervals); any other range is divided
+/// into `n` ticks.
 pub fn even_ticks(lo: f64, hi: f64, n: usize) -> (Vec<f64>, usize) {
     if !(lo.is_finite() && hi.is_finite()) || hi <= lo || n < 2 {
         return (Vec::new(), 0);
     }
-    let step = (hi - lo) / (n - 1) as f64;
+    let span = hi - lo;
+    let k0 = (span / (n + 1) as f64).log10().floor() as i32 - 1;
+    let nice = (k0..k0 + 6)
+        .flat_map(|k| [5.0, 2.5, 2.0, 1.0].map(|m| m * 10f64.powi(k)))
+        .filter(|step| {
+            let iv = span / step;
+            (iv - iv.round()).abs() < 1e-6 && (3.0..=(n + 1) as f64).contains(&iv.round()) && ((lo / step) - (lo / step).round()).abs() < 1e-6
+        })
+        .fold(None, |best: Option<f64>, s| Some(best.map_or(s, |b| b.max(s))));
+    let (count, step) = match nice {
+        Some(step) => ((span / step).round() as usize + 1, step),
+        None => (n, span / (n - 1) as f64),
+    };
     let exact = |d: &i32| (step * 10f64.powi(*d) - (step * 10f64.powi(*d)).round()).abs() < 1e-6;
     let decimals = (0..=6).find(exact).unwrap_or(6) as usize;
     let tick = |i: usize| {
-        let v = if i == n - 1 { hi } else { lo + step * i as f64 };
+        let v = if i == count - 1 { hi } else { lo + step * i as f64 };
         if v.abs() < step * 1e-9 {
             0.0
         } else {
             v
         }
     };
-    ((0..n).map(tick).collect(), decimals)
+    ((0..count).map(tick).collect(), decimals)
 }
 
 /// Decimal places needed to print multiples of `step` exactly (0 for 1, 10, 100; 1 for 0.5, 0.2; 2 for 0.05).
@@ -179,8 +200,8 @@ mod even_tests {
         let (a, b) = even_range(lo, hi, 5);
         assert!(a <= lo + 1e-12 && b >= hi - 1e-12, "[{a}, {b}] must contain [{lo}, {hi}]");
         let (t, d) = even_ticks(a, b, 5);
-        assert_eq!(t.len(), 5);
-        let step = (b - a) / 4.0;
+        assert!((4..=7).contains(&t.len()), "{t:?}");
+        let step = t[1] - t[0];
         let mag = 10f64.powf(step.log10().floor());
         let m = step / mag;
         assert!([1.0, 2.0, 2.5, 5.0, 10.0].iter().any(|n| (m - n).abs() < 1e-6), "step {step} is not 1-2-2.5-5");
@@ -193,15 +214,24 @@ mod even_tests {
     #[test]
     fn ranges_crossing_zero_have_a_zero_tick() {
         let (t, _) = check(-1.5, 2.7);
-        assert!(t.contains(&0.0));
+        assert_eq!(t, vec![-2.0, -1.0, 0.0, 1.0, 2.0, 3.0]);
         check(-0.3, 0.9);
         check(-35.0, 410.0);
     }
 
     #[test]
+    fn the_range_fits_the_data_and_is_not_stretched_to_zero() {
+        // The static margin of the example: a curve from -1.36 to 2.54 with thresholds at 1 and 3 gets -2…4, not -2…6.
+        assert_eq!(even_range(-1.4, 3.1, 5), (-2.0, 4.0));
+        // All-positive data stays away from 0 (no range 0…4 for a curve between 1.9 and 2.5 and thresholds 1 and 3).
+        let (lo, hi) = even_range(0.95, 3.1, 5);
+        assert!(lo > 0.0 && hi <= 3.5, "{lo}…{hi}");
+    }
+
+    #[test]
     fn positive_and_tiny_ranges_get_nice_steps() {
         let (t, d) = check(0.8, 3.2);
-        assert_eq!((t, d), (vec![0.0, 1.0, 2.0, 3.0, 4.0], 0));
+        assert_eq!((t, d), (vec![0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5], 1));
         let (t, d) = check(0.0, 0.9);
         assert_eq!((t, d), (vec![0.0, 0.25, 0.5, 0.75, 1.0], 2));
     }

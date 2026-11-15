@@ -389,6 +389,7 @@ impl Rocket {
             if radial.count != count {
                 radial.overrides.clear();
                 radial.instance_angles = None;
+                radial.letters.clear();
             }
             (radial.kind, radial.count, radial.offset) = (kind.limited_at(offset), count, offset);
             radial.prune_overrides();

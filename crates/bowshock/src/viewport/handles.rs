@@ -51,7 +51,9 @@ pub struct Inset {
 }
 
 /// Size of the inset panel.
-pub const INSET: f32 = 150.0;
+pub const INSET: f32 = 170.0;
+/// Radius of the picture inside the inset (parent surface plus the part's reach), px: the rest of the panel is for labels.
+const PICTURE_R: f32 = 28.0;
 /// Pixels per metre of fin thickness in the inset (thickness is exaggerated so it can be grabbed).
 pub const THICKNESS_SCALE: f32 = 6000.0;
 /// Length of the cant lever in the inset, px.
@@ -148,8 +150,8 @@ pub fn inset(cx: &Context, id: PartId) -> Option<Inset> {
     let (x, y) = spots.into_iter().find(|s| !rect(*s).intersects(&keep_clear)).unwrap_or(spots[0]);
     let panel = rect((x, y));
     let total = f64::from(place.base) + reach;
-    let scale = (INSET / 2.0 - 26.0) / total.max(1e-3) as f32;
-    Some(Inset { panel, centre: Point::new(x + INSET / 2.0, y + INSET / 2.0 + 8.0), base: place.base * scale, reach: reach as f32 * scale, scale })
+    let scale = PICTURE_R / total.max(1e-3) as f32;
+    Some(Inset { panel, centre: Point::new(x + INSET / 2.0, y + INSET / 2.0 + 6.0), base: place.base * scale, reach: reach as f32 * scale, scale })
 }
 
 /// Every handle of part `id` for the current camera, in the model's order (`handle_specs`). Handles that cannot be placed

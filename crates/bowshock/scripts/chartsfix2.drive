@@ -1,0 +1,20 @@
+viewport 1300x800
+click "Analyze"
+move (100, 700)
+move (102, 702)
+screenshot an-dark.png
+click "Light"
+move (100, 700)
+move (102, 702)
+screenshot an-light.png
+click "Dark"
+click "Simulate"
+click "Run all"
+click (17, 94)
+click (17, 138)
+click (17, 226)
+move (100, 700)
+move (102, 702)
+screenshot compare-dark.png
+click "Light"
+screenshot compare-light.png

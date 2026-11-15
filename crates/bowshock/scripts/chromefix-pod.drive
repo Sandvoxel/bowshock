@@ -1,0 +1,14 @@
+# Pod in the lanes and its inspector: cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/chromefix-pod.drive /tmp/chromefix5
+viewport 1280x800
+scale 1
+click (119, 705)
+press "Pod / strap-on"
+move (300, 560)
+move (500, 400)
+move (700, 300)
+move (816, 282)
+release (816, 282)
+click (816, 282)
+screenshot pod-part-dark.png
+click "Light"
+screenshot pod-part-light.png
