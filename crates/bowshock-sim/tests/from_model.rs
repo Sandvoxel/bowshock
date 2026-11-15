@@ -1,0 +1,350 @@
+//! The model -> simulation bridge: a realistic single-stage rocket (H128W on a 3" airframe) and a two-stage one, built through
+//! the `bowshock-model` API.
+
+use bowshock_model::{DeployEvent, Deployment, Ignition as ModelIgnition, InternalKind, MassRole, MotorRef, NoseShape, PartId, PartKind, RadialKind, Rocket};
+use bowshock_motors::MotorDb;
+use bowshock_sim::from_model::{balance, recovery, sim_input, vehicle, warnings, BridgeError, Level, Phase};
+use bowshock_sim::{simulate, BodyKind, Deploy, EventKind, Ignition, Launch, NoseShape as SimNose, Protuberance};
+
+const BODY: f64 = 0.0762;
+const NOSE: f64 = 0.2286;
+
+fn mount(motor_od: f64, length: f64) -> InternalKind {
+    InternalKind::InnerTube { outer_diameter: motor_od, thickness: 0.0015, length, motor_mount: true, overhang: 0.0 }
+}
+
+fn parachute(diameter: f64, event: DeployEvent, delay: f64) -> InternalKind {
+    InternalKind::Parachute {
+        diameter,
+        cd: 0.75,
+        line_count: 8,
+        line_length: diameter,
+        line_material: bowshock_model::MaterialId::BRAIDED_NYLON_2MM,
+        packed_length: 0.15,
+        packed_diameter: None,
+        deploy: Deployment { event, delay },
+    }
+}
+
+/// Nose 228.6 mm, 600 mm payload/recovery tube, 300 mm motor tube with a 38 mm mount, three fins, a 36" parachute on apogee
+/// plus 1 s and an altimeter, H128W loaded.
+fn single_stage() -> (Rocket, PartId) {
+    let mut r = Rocket::default();
+    r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: NOSE, diameter: BODY }).unwrap();
+    let upper = r.insert(1, PartKind::BodyTube { length: 0.6, diameter: BODY }).unwrap();
+    let lower = r.insert(2, PartKind::BodyTube { length: 0.3, diameter: BODY }).unwrap();
+    let motor_mount = r.attach_internal(lower, 0.05, mount(0.041, 0.25)).unwrap();
+    let ring = InternalKind::CenteringRing { outer_diameter: None, inner_diameter: None, thickness: 0.006 };
+    r.attach_internal(lower, 0.05, ring.clone()).unwrap();
+    r.attach_internal(lower, 0.294, ring).unwrap();
+    r.attach_internal(upper, 0.12, parachute(0.9144, DeployEvent::Apogee, 1.0)).unwrap();
+    r.attach_internal(upper, 0.35, InternalKind::MassComponent { mass: 0.06, length: 0.08, diameter: None, role: MassRole::Altimeter }).unwrap();
+    r.attach_internal(upper, 0.25, InternalKind::MassComponent { mass: 0.15, length: 0.06, diameter: None, role: MassRole::Battery }).unwrap();
+    r.attach_internal(upper, 0.45, InternalKind::MassComponent { mass: 0.10, length: 0.06, diameter: None, role: MassRole::Tracker }).unwrap();
+    r.attach_internal(upper, 0.52, InternalKind::MassComponent { mass: 0.15, length: 0.04, diameter: None, role: MassRole::Ballast }).unwrap();
+    r.attach_radial(lower, 0.12, 0.0, 3, RadialKind::FinSet { root_chord: 0.15, tip_chord: 0.07, span: 0.09, sweep: 0.07, thickness: 0.003 }).unwrap();
+    let cfg = r.active_config_id();
+    r.set_motor(cfg, motor_mount, Some(MotorRef::new("H128W", "AeroTech"))).unwrap();
+    r.set_motor_delay(cfg, motor_mount, 6.0).unwrap();
+    (r, motor_mount)
+}
+
+#[test]
+fn single_stage_balance_is_stable_and_light() {
+    let (r, _) = single_stage();
+    let db = MotorDb::bundled();
+    let lift = balance(&r, &db, Phase::Full, 0.3, 0.0, true).unwrap();
+    let burn = balance(&r, &db, Phase::Full, 0.3, 0.0, false).unwrap();
+    assert!((1.0..1.5).contains(&lift.mass), "mass {}", lift.mass);
+    assert!(lift.margin_cal > 1.0 && lift.margin_cal < 6.0, "margin {}", lift.margin_cal);
+    assert!(lift.cn_alpha > 5.0 && lift.cn_alpha < 20.0, "CNa {}", lift.cn_alpha);
+    assert!((lift.length - (NOSE + 0.9)).abs() < 1e-9 && (lift.reference_diameter - BODY).abs() < 1e-12);
+    // H128W: 201.6 g loaded, 94.1 g of propellant.
+    assert!((lift.motor_mass - 0.2016).abs() < 1e-9);
+    assert!((burn.motor_mass - (0.2016 - 0.09408)).abs() < 1e-9);
+    assert!(lift.cg > burn.cg, "burning propellant moves the CG forward: {} vs {}", lift.cg, burn.cg);
+    assert!((lift.mass - burn.mass - 0.09408).abs() < 1e-9);
+    // The CP is a property of the airframe alone.
+    assert_eq!(lift.cp, burn.cp);
+    assert!(lift.cp > lift.cg && lift.cg > 0.4 && lift.cp < lift.length);
+    // The dry mass of the model is what the stage carries.
+    let v = vehicle(&r, &db, Phase::Full).unwrap();
+    assert_eq!(v.stages.len(), 1);
+    assert!((v.stages[0].dry.mass - r.dry_mass().mass).abs() < 1e-9);
+    assert!((v.stages[0].dry.cg - r.dry_mass().cg).abs() < 1e-9);
+}
+
+#[test]
+fn single_stage_vehicle_maps_geometry() {
+    let (r, mount_id) = single_stage();
+    let db = MotorDb::bundled();
+    let v = vehicle(&r, &db, Phase::Full).unwrap();
+    assert_eq!(v.body.len(), 3);
+    assert_eq!(v.body[0].kind, BodyKind::Nose(SimNose::TangentOgive));
+    assert_eq!((v.body[0].station, v.body[0].length), (0.0, NOSE));
+    assert!((v.body[2].station - (NOSE + 0.6)).abs() < 1e-12 && v.body[2].kind == BodyKind::Tube);
+    assert_eq!(v.body[1].roughness, 60e-6, "regular paint");
+    let f = &v.fin_sets[0];
+    assert_eq!(f.count, 3);
+    assert!((f.station - (NOSE + 0.6 + 0.12)).abs() < 1e-12 && (f.body_radius - BODY / 2.0).abs() < 1e-12);
+    assert_eq!((f.root_chord, f.tip_chord, f.span, f.sweep), (0.15, 0.07, 0.09, 0.07));
+    // Motor: the mount's aft end is at the aft end of the airframe, the slot's delay is the ejection delay.
+    let m = v.stages[0].motor.as_ref().unwrap();
+    assert!((m.mount_aft_station - (NOSE + 0.9)).abs() < 1e-9);
+    assert_eq!((m.ignition, m.ejection_delay), (Ignition::Launch, Some(6.0)));
+    assert!((m.curve.diameter - 0.029).abs() < 1e-9 && m.curve.points[0] == (0.0, 0.0));
+    assert!((m.curve.total_impulse() - 172.9).abs() < 8.0, "{}", m.curve.total_impulse());
+
+    // Recovery: 36" at Cd 0.75, apogee + 1 s, named after the part.
+    let rec = recovery(&r, Phase::Full);
+    assert_eq!(rec.len(), 1);
+    assert_eq!((rec[0].name.as_str(), rec[0].stage, rec[0].deploy, rec[0].delay), ("Parachute", 0, Deploy::Apogee, 1.0));
+    assert!((rec[0].cd_area - 0.75 * std::f64::consts::PI * 0.9144 * 0.9144 / 4.0).abs() < 1e-12);
+
+    // Plugged motor: no ejection charge.
+    let mut plugged = r.clone();
+    let cfg = plugged.active_config_id();
+    plugged.set_motor_delay(cfg, mount_id, f64::INFINITY).unwrap();
+    assert_eq!(vehicle(&plugged, &db, Phase::Full).unwrap().stages[0].motor.as_ref().unwrap().ejection_delay, None);
+}
+
+#[test]
+fn single_stage_flies_to_a_plausible_apogee() {
+    let (r, _) = single_stage();
+    let db = MotorDb::bundled();
+    let input = sim_input(&r, &db, Phase::Full, Launch::default()).unwrap();
+    let result = simulate(&input);
+    let s = &result.summary;
+    // ~1.2 kg on an H128W (173 N s) reaches roughly 300-700 m.
+    assert!((250.0..800.0).contains(&s.apogee), "apogee {}", s.apogee);
+    assert!(s.rail_exit_velocity > 12.0, "rail exit {}", s.rail_exit_velocity);
+    assert!(s.stability_off_rail_cal > 1.0, "margin {}", s.stability_off_rail_cal);
+    assert!(s.ground_hit_velocity < 8.0, "hit {}", s.ground_hit_velocity);
+    let kinds: Vec<&EventKind> = result.trajectory.events.iter().map(|e| &e.kind).collect();
+    assert!(kinds.contains(&&EventKind::Deploy("Parachute".into())) && kinds.contains(&&EventKind::Landing));
+}
+
+#[test]
+fn single_stage_has_no_blocking_warnings() {
+    let (r, _) = single_stage();
+    let db = MotorDb::bundled();
+    let b = balance(&r, &db, Phase::Full, 0.3, 0.0, true).unwrap();
+    let w = warnings(&r, &db, &b);
+    assert!(w.iter().all(|w| w.level != Level::Err), "{w:?}");
+    assert!(w.iter().any(|w| w.level == Level::Ok && w.message.starts_with("Stability ")), "{w:?}");
+}
+
+#[test]
+fn warnings_report_what_is_wrong() {
+    let (mut r, mount_id) = single_stage();
+    let db = MotorDb::bundled();
+    let cfg = r.active_config_id();
+    let b = balance(&r, &db, Phase::Full, 0.3, 0.0, true).unwrap();
+
+    // Unstable and under-stable readings use the design voice.
+    let low = bowshock_sim::from_model::Balance { margin_cal: 0.74, ..b };
+    assert!(warnings(&r, &db, &low).iter().any(|w| w.level == Level::Warn && w.message == "Stability 0.74 cal, below 1.0 minimum"));
+    let neg = bowshock_sim::from_model::Balance { margin_cal: -0.3, ..b };
+    assert!(warnings(&r, &db, &neg).iter().any(|w| w.level == Level::Err && w.message.starts_with("Stability -0.30 cal")));
+
+    // A motor longer than its mount, then wider than it, then an unknown one.
+    r.set_motor(cfg, mount_id, Some(MotorRef::new("J420R", "AeroTech"))).unwrap();
+    let w = warnings(&r, &db, &b);
+    let long = w.iter().find(|w| w.message.contains("long")).unwrap_or_else(|| panic!("{w:?}"));
+    assert_eq!((long.level, long.part, long.message.as_str()), (Level::Warn, Some(mount_id), "Motor J420R is 337.0 mm long, mount holds 250.0 mm"));
+    r.set_internal_kind(mount_id, mount(0.0301, 0.25));
+    let w = warnings(&r, &db, &b);
+    let wide = w.iter().find(|w| w.message.contains("wide")).unwrap_or_else(|| panic!("{w:?}"));
+    assert_eq!((wide.level, wide.part), (Level::Err, Some(mount_id)));
+    r.set_motor(cfg, mount_id, Some(MotorRef::new("Z999", "Nobody"))).unwrap();
+    assert!(warnings(&r, &db, &b).iter().any(|w| w.level == Level::Err && w.message.contains("Z999")));
+    assert_eq!(vehicle(&r, &db, Phase::Full), Err(BridgeError::UnknownMotor("Z999".into())));
+
+    // No motor at all.
+    r.set_motor(cfg, mount_id, None).unwrap();
+    let w = warnings(&r, &db, &b);
+    assert!(w.iter().any(|w| w.level == Level::Warn && w.message == "No motor in the current configuration"));
+    assert_eq!(vehicle(&r, &db, Phase::Full).unwrap().stages[0].motor, None);
+
+    // A parachute that waits for an ejection charge the plugged motor lacks.
+    r.set_motor(cfg, mount_id, Some(MotorRef::new("H128W", "AeroTech"))).unwrap();
+    let upper = r.parts()[1].id;
+    let chute = r.attach_internal(upper, 0.5, parachute(0.3, DeployEvent::Ejection, 0.0)).unwrap();
+    r.set_motor_delay(cfg, mount_id, f64::INFINITY).unwrap();
+    let w = warnings(&r, &db, &b);
+    assert!(w.iter().any(|w| w.part == Some(chute) && w.message.contains("ejection")), "{w:?}");
+}
+
+#[test]
+fn json_round_trip_gives_identical_balance() {
+    let (r, _) = single_stage();
+    let db = MotorDb::bundled();
+    let back = Rocket::from_json(&r.to_json()).unwrap();
+    for with_motor in [true, false] {
+        let a = balance(&r, &db, Phase::Full, 0.3, 0.0, with_motor).unwrap();
+        let b = balance(&back, &db, Phase::Full, 0.3, 0.0, with_motor).unwrap();
+        assert_eq!(a, b);
+    }
+    assert_eq!(vehicle(&r, &db, Phase::Full), vehicle(&back, &db, Phase::Full));
+    assert_eq!(recovery(&r, Phase::Full), recovery(&back, Phase::Full));
+}
+
+struct TwoStage {
+    rocket: Rocket,
+    booster_mount: PartId,
+    sustainer_mount: PartId,
+    booster_tube: PartId,
+}
+
+/// Nose + 600 mm sustainer tube (G40W) + 500 mm booster (H128W, fins), 29 mm mounts; the sustainer lights 0.5 s after the
+/// booster separates, which itself happens 0.25 s after the booster's burnout. A streamer rides in the booster, a parachute in
+/// the sustainer.
+fn two_stage() -> TwoStage {
+    let mut r = Rocket::default();
+    r.insert(0, PartKind::NoseCone { shape: NoseShape::VonKarman, length: NOSE, diameter: BODY }).unwrap();
+    let sustainer = r.insert(1, PartKind::BodyTube { length: 0.6, diameter: BODY }).unwrap();
+    let booster = r.insert(2, PartKind::BodyTube { length: 0.5, diameter: BODY }).unwrap();
+    let sustainer_mount = r.attach_internal(sustainer, 0.3, mount(0.032, 0.25)).unwrap();
+    let booster_mount = r.attach_internal(booster, 0.2, mount(0.032, 0.25)).unwrap();
+    r.attach_internal(sustainer, 0.05, parachute(0.6, DeployEvent::Ejection, 0.0)).unwrap();
+    r.attach_internal(
+        booster,
+        0.02,
+        InternalKind::Streamer { length: 0.6, width: 0.05, cd: 0.6, deploy: Deployment { event: DeployEvent::Altitude(100.0), delay: 0.5 } },
+    )
+    .unwrap();
+    r.attach_radial(booster, 0.3, 0.0, 4, RadialKind::FinSet { root_chord: 0.15, tip_chord: 0.06, span: 0.08, sweep: 0.08, thickness: 0.003 }).unwrap();
+    r.attach_radial(booster, 0.1, 0.5, 1, RadialKind::RailButton { height: 0.01, diameter: 0.01 }).unwrap();
+    let cfg = r.active_config_id();
+    r.set_motor(cfg, booster_mount, Some(MotorRef::new("H128W", "AeroTech"))).unwrap();
+    r.set_motor(cfg, sustainer_mount, Some(MotorRef::new("G40W", "AeroTech"))).unwrap();
+    r.set_motor_delay(cfg, booster_mount, f64::INFINITY).unwrap();
+    r.set_motor_delay(cfg, sustainer_mount, 9.0).unwrap();
+    r.set_ignition(cfg, sustainer_mount, ModelIgnition::StageSeparation { delay: 0.5 }).unwrap();
+    r.set_stage_separation(cfg, 1, 0.25).unwrap();
+    TwoStage { rocket: r, booster_mount, sustainer_mount, booster_tube: booster }
+}
+
+#[test]
+fn two_stage_maps_to_two_sim_stages_with_ignition_and_phases() {
+    let TwoStage { rocket: r, .. } = two_stage();
+    let db = MotorDb::bundled();
+    assert!(r.stage_issues().is_empty());
+    let v = vehicle(&r, &db, Phase::Full).unwrap();
+    assert_eq!(v.stages.len(), 2);
+    let (booster, sustainer) = (&v.stages[0], &v.stages[1]);
+    let joint = NOSE + 0.6;
+    assert!((booster.fore_station - joint).abs() < 1e-9 && (booster.aft_station - (joint + 0.5)).abs() < 1e-9);
+    assert!((sustainer.fore_station, sustainer.aft_station) == (0.0, booster.fore_station));
+    let (bm, sm) = (booster.motor.as_ref().unwrap(), sustainer.motor.as_ref().unwrap());
+    assert_eq!((bm.ignition, bm.ejection_delay), (Ignition::Launch, None));
+    assert_eq!(sm.ignition, Ignition::AfterPreviousBurnout { delay: 0.75 });
+    assert_eq!(sm.ejection_delay, Some(9.0));
+    assert!((bm.curve.total_mass - 0.2016).abs() < 1e-9 && (sm.curve.total_mass - 0.123).abs() < 1e-9);
+    assert!((booster.dry.mass + sustainer.dry.mass - r.dry_mass().mass).abs() < 1e-9);
+    assert!(booster.dry.cg > joint && sustainer.dry.cg < joint);
+    assert_eq!(v.fin_sets.len(), 1);
+    assert_eq!(v.protuberances.len(), 1);
+    assert!(matches!(v.protuberances[0], Protuberance::RailButton { .. }));
+
+    // Recovery stage indices: the streamer is in the booster (0), the parachute in the sustainer (1).
+    let rec = recovery(&r, Phase::Full);
+    let by_name = |n: &str| rec.iter().find(|d| d.name == n).unwrap_or_else(|| panic!("{n} in {rec:?}"));
+    assert_eq!((by_name("Streamer").stage, by_name("Streamer").deploy, by_name("Streamer").delay), (0, Deploy::Altitude(100.0), 0.5));
+    assert_eq!((by_name("Parachute").stage, by_name("Parachute").deploy), (1, Deploy::Ejection));
+    assert!((by_name("Streamer").cd_area - 0.6 * 0.6 * 0.05).abs() < 1e-12);
+
+    // Sustainer alone: the lower stage and everything aft of the joint is gone, the motor lights on the pad.
+    assert_eq!(Phase::UpperFrom(1).first_stage(), 1);
+    assert_eq!(vehicle(&r, &db, Phase::UpperFrom(1)), Ok(v.clone()));
+    let up = vehicle(&r, &db, Phase::UpperFrom(2)).unwrap();
+    assert_eq!(up.stages.len(), 1);
+    assert_eq!(up.stages[0].motor.as_ref().unwrap().ignition, Ignition::Launch);
+    assert!((up.length() - joint).abs() < 1e-9);
+    assert!(up.fin_sets.is_empty() && up.protuberances.is_empty());
+    assert_eq!(up.body.len(), 2);
+    assert_eq!(up.stages[0].dry, sustainer.dry);
+    let rec_up = recovery(&r, Phase::UpperFrom(2));
+    assert_eq!(rec_up.len(), 1);
+    assert_eq!((rec_up[0].name.as_str(), rec_up[0].stage), ("Parachute", 0));
+    assert_eq!(vehicle(&r, &db, Phase::UpperFrom(3)), Err(BridgeError::NoSuchStage(3)));
+    assert!(recovery(&r, Phase::UpperFrom(3)).is_empty());
+
+    // Balance of the upper stack is lighter and shorter than the whole.
+    let full = balance(&r, &db, Phase::Full, 0.3, 0.0, true).unwrap();
+    let upper = balance(&r, &db, Phase::UpperFrom(2), 0.3, 0.0, true).unwrap();
+    assert!(upper.mass < full.mass && upper.length < full.length);
+    assert!((upper.motor_mass - 0.123).abs() < 1e-9 && (full.motor_mass - (0.123 + 0.2016)).abs() < 1e-9);
+    assert!(full.margin_cal > 1.0, "full margin {}", full.margin_cal);
+
+    // Flights: the sim stages the rocket (booster, then sustainer, two ignitions and a separation in order).
+    let flight = simulate(&sim_input(&r, &db, Phase::Full, Launch::default()).unwrap());
+    let ev = &flight.trajectory.events;
+    let t_of =
+        |kind: EventKind, stage: usize| ev.iter().find(|e| e.kind == kind && e.stage == Some(stage)).unwrap_or_else(|| panic!("{kind:?} {stage}: {ev:?}")).t;
+    let (burnout0, sep0, ignite1) = (t_of(EventKind::Burnout, 0), t_of(EventKind::Separation, 0), t_of(EventKind::Ignition, 1));
+    assert!((sep0 - burnout0 - 0.75).abs() < 1e-6 && (ignite1 - sep0).abs() < 1e-6, "{burnout0} {sep0} {ignite1}");
+    let single = simulate(&sim_input(&r, &db, Phase::UpperFrom(2), Launch::default()).unwrap());
+    assert!(flight.summary.apogee > single.summary.apogee, "{} vs {}", flight.summary.apogee, single.summary.apogee);
+    assert!(single.trajectory.events.iter().any(|e| e.kind == EventKind::Landing));
+}
+
+#[test]
+fn staging_problems_and_clusters_are_warned_about() {
+    let TwoStage { rocket: mut r, booster_tube, sustainer_mount, booster_mount } = two_stage();
+    let db = MotorDb::bundled();
+    let b = balance(&r, &db, Phase::Full, 0.3, 0.0, true).unwrap();
+    assert!(warnings(&r, &db, &b).iter().all(|w| w.level != Level::Err));
+
+    // The upper motor sticks out past the joint: no joint aft of it.
+    r.set_internal_kind(sustainer_mount, InternalKind::InnerTube { outer_diameter: 0.032, thickness: 0.0015, length: 0.25, motor_mount: true, overhang: 0.1 });
+    let issues = r.stage_issues();
+    assert_eq!(issues.len(), 1);
+    let w = warnings(&r, &db, &b);
+    let staging = w.iter().find(|w| w.message.starts_with("No joint aft of the upper motor: split Body tube at ")).unwrap_or_else(|| panic!("{w:?}"));
+    assert_eq!((staging.level, staging.part), (Level::Err, Some(booster_tube)));
+    assert!(staging.message.ends_with(" mm"));
+    // The sim still builds (the part boundary is wrong, the maths is fine).
+    assert!(vehicle(&r, &db, Phase::Full).is_ok());
+
+    // A stage with no motor.
+    let cfg = r.active_config_id();
+    r.set_motor(cfg, booster_mount, None).unwrap();
+    assert!(warnings(&r, &db, &b).iter().any(|w| w.message == "No motor in Stage 1" && w.part == Some(booster_mount)));
+}
+
+#[test]
+fn freeform_fin_becomes_the_equivalent_trapezoid() {
+    let mut r = Rocket::default();
+    r.insert(0, PartKind::NoseCone { shape: NoseShape::Haack(0.0), length: NOSE, diameter: BODY }).unwrap();
+    let tube = r.insert(1, PartKind::BodyTube { length: 0.5, diameter: BODY }).unwrap();
+    // A trapezoid written as a polygon: root 0.15, tip 0.07 swept 0.06, span 0.09.
+    let outline = vec![(0.0, 0.0), (0.06, 0.09), (0.13, 0.09), (0.15, 0.0)];
+    r.attach_radial(tube, 0.3, 0.0, 3, RadialKind::FreeformFin { points: outline, thickness: 0.003 }).unwrap();
+    r.attach_radial(tube, 0.3, 0.0, 3, RadialKind::EllipticalFin { root_chord: 0.15, span: 0.09, thickness: 0.003 }).unwrap();
+    r.attach_radial(tube, 0.05, 0.0, 2, RadialKind::LaunchLug { length: 0.05, diameter: 0.008 }).unwrap();
+    let db = MotorDb::bundled();
+    let v = vehicle(&r, &db, Phase::Full).unwrap();
+    // Haack(0) is the Von Karman shape.
+    assert_eq!(v.body[0].kind, BodyKind::Nose(SimNose::VonKarman));
+    assert_eq!(v.fin_sets.len(), 2);
+    let f = &v.fin_sets[0];
+    assert!((f.root_chord - 0.15).abs() < 1e-9 && (f.tip_chord - 0.07).abs() < 1e-9 && (f.span - 0.09).abs() < 1e-9 && (f.sweep - 0.06).abs() < 1e-9, "{f:?}");
+    assert!((f.station - (NOSE + 0.3)).abs() < 1e-12);
+    assert_eq!(v.fin_sets[1].planform, bowshock_sim::FinPlanform::Elliptical);
+    assert_eq!(v.protuberances.len(), 2);
+    // A polygon that cannot be a trapezoid on its root (a big triangle on a small root) keeps area and span.
+    let mut q = Rocket::default();
+    let t = q.insert(0, PartKind::BodyTube { length: 0.5, diameter: BODY }).unwrap();
+    let kite = vec![(0.05, 0.0), (0.0, 0.06), (0.08, 0.12), (0.1, 0.06), (0.1, 0.0)];
+    let kind = RadialKind::FreeformFin { points: kite, thickness: 0.003 };
+    let area = kind.fin_area().unwrap();
+    q.attach_radial(t, 0.1, 0.0, 3, kind).unwrap();
+    let f = &vehicle(&q, &db, Phase::Full).unwrap().fin_sets[0];
+    assert!((f.fin_area() - area).abs() < 1e-9 && (f.span - 0.12).abs() < 1e-9, "{f:?}");
+    // Parametric noses fall back to the closest of the sim's shapes.
+    let mut n = Rocket::default();
+    n.insert(0, PartKind::NoseCone { shape: NoseShape::PowerSeries(1.0), length: NOSE, diameter: BODY }).unwrap();
+    assert_eq!(vehicle(&n, &db, Phase::Full).unwrap().body[0].kind, BodyKind::Nose(SimNose::Conical));
+    assert_eq!(vehicle(&Rocket::default(), &db, Phase::Full), Err(BridgeError::EmptyRocket));
+}

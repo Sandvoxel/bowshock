@@ -6,8 +6,9 @@
 //! * [`analysis`]: sweeps vs Mach and angle of attack, fin flutter, Monte Carlo dispersion.
 //!
 //! Everything is SI (metres, kilograms, seconds, radians, pascals). Axial stations are measured
-//! from the nose tip, increasing aft. The crate has no dependencies and does not know about the
-//! application's document model; the app maps its model into [`Vehicle`] and [`SimInput`].
+//! from the nose tip, increasing aft. The core modules do not know about the application's
+//! document model; [`from_model`] is the one bridge that maps a `bowshock-model` rocket and a
+//! `bowshock-motors` database into [`Vehicle`] and [`SimInput`].
 //!
 //! References: Barrowman, J. S. (1967) "The Practical Calculation of the Aerodynamic
 //! Characteristics of Slender Finned Vehicles"; Niskanen, S. (2013) "OpenRocket technical
@@ -17,6 +18,7 @@ pub mod aero;
 pub mod analysis;
 pub mod atmosphere;
 pub mod flight;
+pub mod from_model;
 pub mod rng;
 pub mod vehicle;
 

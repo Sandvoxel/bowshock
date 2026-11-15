@@ -7,5 +7,9 @@ repository.workspace = true
 publish = false
 description = "OpenRocket-style rocket aerodynamics and flight simulation (SI units)"
 
+[dependencies]
+bowshock-model = { path = "../bowshock-model" }
+bowshock-motors = { path = "../bowshock-motors" }
+
 [lints]
 workspace = true
