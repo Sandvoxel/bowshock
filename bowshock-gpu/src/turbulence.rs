@@ -11,7 +11,7 @@
 // mean-flow update, from the quantities of the start of the iteration: a loosely coupled pseudo-time step with the line-implicit solves
 // `(diag0 + dd_i) x + lo_i x_- + up_i x_+ = V R` (i lines) and `(1 + dd_j / diag0) dphi + (lo_j / diag0) dphi_- + (up_j / diag0) dphi_+ = x`
 // (j lines), each scalar with Luma's scalar tridiagonal solver in f32 (the CPU solves both with a 4x4 block solver whose blocks are diagonal:
-// the same systems). `tanh` of the blending functions is evaluated in f32 in both precisions.
+// the same systems). `tanh` of the blending functions is evaluated in the element type (Df32 in the extended precision).
 //
 // `Stage::mass` is `F[0]` of the face fluxes, `dt` the time step of the iteration (the pseudo time step of the implicit scheme, in the
 // element type).
@@ -36,7 +36,7 @@ fn blend_args(nu: &A, k: &A, om: &A, d: &A) -> (A, A) {
 fn f2_of(nu: &A, k: &A, om: &A, d: &A) -> A {
     let (t1, t2) = blend_args(nu, k, om, d);
     let b = (c(2.0) * t1).maximum(t2);
-    tanh(&(&b * &b))
+    (&b * &b).tanh()
 }
 
 /// Eddy viscosity `min(rho a1 k / max(a1 omega, S F2), 1e5 / re_c)`.
@@ -167,7 +167,7 @@ impl LazySolver {
         // (`a` is bounded by `1e3` only to keep `a^4` finite in f32: `tanh` is 1 there)
         let a = t1.maximum(t2).minimum(t3).minimum(c(1e3));
         let a2 = &a * &a;
-        let f1 = tanh(&(&a2 * &a2));
+        let f1 = (&a2 * &a2).tanh();
         let [tg0, tg1, tg2, tg3, f1, x] = staged(self.staging, [tg[0].clone(), tg[1].clone(), tg[2].clone(), tg[3].clone(), f1, x]);
         let cells = [tg0, tg1, tg2, tg3, f1.clone(), mu.clone(), mu_t.clone()];
 
@@ -236,37 +236,39 @@ impl LazySolver {
         let r: [A; 2] = std::array::from_fn(|e| rate[e].take().expect("both directions") * &g.inv_v + &sources[e]);
         let d0: [A; 2] = std::array::from_fn(|e| &rho_vol / &dt + &rho_vol * &dest[e]);
 
-        // the two line solves, per scalar, in f32 (the left-hand side): i lines, then j lines
-        let solve = |dir: usize, lo: &F, diag: &F, up: &F, rhs: &F| -> F {
-            match &self.lb {
-                Some(lb) => luma::solve_tridiagonal_from(dir, lo, diag, up, rhs, &lb.start[dir]),
-                None => luma::solve_tridiagonal(dir, lo, diag, up, rhs),
-            }
-        };
+        // the two line solves, both scalars in one launch per direction, in f32 (the left-hand side): i lines, then j lines
         let ends = |dir: usize| match &self.lb {
             Some(lb) => (&lb.first[dir], &self.lg.dir[dir].last),
             None => (&self.lg.dir[dir].first, &self.lg.dir[dir].last),
         };
-        let dphi: [A; 2] = std::array::from_fn(|e| {
-            let (first, last) = ends(0);
-            let rhs = lhs(&(&vg.vol * &r[e]));
-            let x = solve(
-                0,
-                &select(first, 0.0f32, lhs(lo[0][e].as_ref().expect("coefficient"))),
-                &lhs(&(&d0[e] + dd[0][e].as_ref().expect("coefficient"))),
-                &select(last, 0.0f32, lhs(up[0][e].as_ref().expect("coefficient"))),
-                &rhs,
-            );
-            let (first, last) = ends(1);
-            let dphi = solve(
-                1,
-                &select(first, 0.0f32, lhs(&(lo[1][e].as_ref().expect("coefficient") / &d0[e]))),
-                &lhs(&(c(1.0) + dd[1][e].as_ref().expect("coefficient") / &d0[e])),
-                &select(last, 0.0f32, lhs(&(up[1][e].as_ref().expect("coefficient") / &d0[e]))),
-                &x,
-            );
-            from_lhs(&dphi)
+        let (first, last) = ends(0);
+        let rhs: [F; 2] = std::array::from_fn(|e| lhs(&(&vg.vol * &r[e])));
+        let sys: [[F; 3]; 2] = std::array::from_fn(|e| {
+            [
+                select(first, 0.0f32, lhs(lo[0][e].as_ref().expect("coefficient"))),
+                lhs(&(&d0[e] + dd[0][e].as_ref().expect("coefficient"))),
+                select(last, 0.0f32, lhs(up[0][e].as_ref().expect("coefficient"))),
+            ]
         });
+        let systems = std::array::from_fn(|e| (&sys[e][0], &sys[e][1], &sys[e][2], &rhs[e]));
+        let x: [F; 2] = match &self.lb {
+            Some(lb) => luma::solve_tridiagonal_parts_from(0, systems, &lb.start[0]),
+            None => luma::solve_tridiagonal_parts(0, systems),
+        };
+        let (first, last) = ends(1);
+        let sys: [[F; 3]; 2] = std::array::from_fn(|e| {
+            [
+                select(first, 0.0f32, lhs(&(lo[1][e].as_ref().expect("coefficient") / &d0[e]))),
+                lhs(&(c(1.0) + dd[1][e].as_ref().expect("coefficient") / &d0[e])),
+                select(last, 0.0f32, lhs(&(up[1][e].as_ref().expect("coefficient") / &d0[e]))),
+            ]
+        });
+        let systems = std::array::from_fn(|e| (&sys[e][0], &sys[e][1], &sys[e][2], &x[e]));
+        let dphi: [F; 2] = match &self.lb {
+            Some(lb) => luma::solve_tridiagonal_parts_from(1, systems, &lb.start[1]),
+            None => luma::solve_tridiagonal_parts(1, systems),
+        };
+        let dphi: [A; 2] = std::array::from_fn(|e| from_lhs(&dphi[e]));
 
         // clipped update and eddy viscosity
         let k_new = (k + &dphi[0]).maximum(c(0.1) * k).maximum(c(1e-3 * inf[0]));

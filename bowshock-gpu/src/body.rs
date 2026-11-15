@@ -11,7 +11,7 @@ use bowshock_core::gas::GAMMA;
 use bowshock_core::grid::Grid;
 use bowshock_core::solver::{Bc, Block, Config};
 use crate::Staging;
-use luma::{concat, select, Array, Context, Fields, PadMode, Result};
+use luma::{concat, select, Array, Context, Fields, Mask, PadMode, Result};
 
 /// Array of one field (`rho`, `u`, ...) over a block of cells or faces.
 pub type A = Array<S>;
@@ -134,8 +134,8 @@ fn reconstruct(m2: &Rec, m1: &Rec, p0: &Rec, p1: &Rec, lim: Limiter) -> (Rec, Re
     }
     let l = rec(|k| &m1[k] + c(0.5) * limited_slope(&(&m1[k] - &m2[k]), &(&p0[k] - &m1[k]), lim));
     let r = rec(|k| &p0[k] - c(0.5) * limited_slope(&(&p0[k] - &m1[k]), &(&p1[k] - &p0[k]), lim));
-    let ok_l = l[0].gt(c(0.0)) * l[3].gt(c(0.0));
-    let ok_r = r[0].gt(c(0.0)) * r[3].gt(c(0.0));
+    let ok_l = l[0].gt(c(0.0)) & l[3].gt(c(0.0));
+    let ok_r = r[0].gt(c(0.0)) & r[3].gt(c(0.0));
     (rec(|k| select(&ok_l, &l[k], &m1[k])), rec(|k| select(&ok_r, &r[k], &p0[k])))
 }
 

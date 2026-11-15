@@ -14,8 +14,7 @@
 //
 // A 4x4 block is `Blk`: sixteen entries, row-major like the CPU `M4`, each an array over the cells or faces (`E::A`) or the
 // constants 0 / 1 (`E::Z`, `E::O`), so that the structurally zero entries of the flux Jacobian cost nothing. The line solves are
-// Luma's `solve_block_tridiagonal` on `[16, ni, nj]` stacks of the blocks (the block index is the fastest dimension); a vector
-// field is a `[4, ni, nj]` stack, and `take` reads one of its components back as an `[ni, nj]` array.
+// Luma's `solve_block_tridiagonal_parts` on the sixteen entries of each block (no stacking); a vector field is four `[ni, nj]` arrays.
 
 use bowshock_core::implicit::{DtMode, ImplicitParams};
 use bowshock_core::solver::Scheme;
@@ -369,8 +368,8 @@ struct LDir {
     nr: F,
     len: F,
     w: F,
-    first: Array<u32>,
-    last: Array<u32>,
+    first: Array<Mask>,
+    last: Array<Mask>,
     /// Zeros and ones of the face shape.
     zero: F,
     one: F,
@@ -387,8 +386,6 @@ struct LGeo {
     /// Zeros and ones `[ni, nj]`.
     zero: F,
     one: F,
-    /// `4 (i + ni j) + k`: the flat index of component `k` of cell `(i, j)` in a `[4, ni, nj]` stack.
-    cell4: [Array<u32>; 4],
     /// `[imin, imax, jmin, jmax]`: `[1, nj]` or `[ni, 1]` arrays.
     edge: [EdgeGeo; 4],
 }
@@ -398,7 +395,7 @@ impl LGeo {
         let (ni, nj) = (grid.ni, grid.nj);
         let face = |f: &[bowshock_core::grid::Face], shape: [usize; 2], g: &dyn Fn(&bowshock_core::grid::Face) -> f64| up_lhs(ctx, &f.iter().map(g).collect::<Vec<_>>(), shape);
         let mask = |shape: [usize; 2], f: &dyn Fn(usize, usize) -> bool| {
-            let v: Vec<u32> = (0..shape[1]).flat_map(|j| (0..shape[0]).map(move |i| (i, j))).map(|(i, j)| u32::from(f(i, j))).collect();
+            let v: Vec<Mask> = (0..shape[1]).flat_map(|j| (0..shape[0]).map(move |i| (i, j))).map(|(i, j)| Mask::from(f(i, j))).collect();
             Array::from_slice_on(ctx, &v, shape)
         };
         let dir_i = LDir {
@@ -431,7 +428,6 @@ impl LGeo {
             let get = |g: &dyn Fn(&bowshock_core::grid::Face) -> f64| up_lhs(ctx, &faces.iter().map(g).collect::<Vec<_>>(), shape);
             Ok(EdgeGeo { nx: get(&|f| f.nx)?, nr: get(&|f| f.nr)?, onx: get(&|f| outward * f.nx)?, onr: get(&|f| outward * f.nr)? })
         };
-        let cell4 = |k: usize| Array::from_slice_on(ctx, &(0..ni * nj).map(|c| (4 * c + k) as u32).collect::<Vec<_>>(), [ni, nj]);
         Ok(LGeo {
             dir: [dir_i, dir_j],
             vol: up_lhs(ctx, &grid.vol, [ni, nj])?,
@@ -439,7 +435,6 @@ impl LGeo {
             src: up_lhs(ctx, &grid.area.iter().zip(&grid.vol).map(|(a, v)| a / v).collect::<Vec<_>>(), [ni, nj])?,
             zero: up_lhs(ctx, &vec![0.0; ni * nj], [ni, nj])?,
             one: up_lhs(ctx, &vec![1.0; ni * nj], [ni, nj])?,
-            cell4: [cell4(0)?, cell4(1)?, cell4(2)?, cell4(3)?],
             edge: [edge(0)?, edge(1)?, edge(2)?, edge(3)?],
         })
     }
@@ -454,24 +449,24 @@ fn reflect_f(w: &V4, nx: &F, nr: &F) -> V4 {
 /// The solid block seen by the implicit left-hand side (`set_block`): masks (`u32`, 1 = true) and the start of every line.
 struct LBlockGeo {
     /// Solid cells `[ni, nj]`.
-    solid: Array<u32>,
-    /// Fluid cells (`1 - solid`).
-    fluid: Array<u32>,
+    solid: Array<Mask>,
+    /// Fluid cells (`!solid`).
+    fluid: Array<Mask>,
     /// First fluid cell of every i line (`row_start(j)`, `ni` for a solid row; `nj` elements) and j line (`col_start(i)`; `ni` elements).
     start: [Array<u32>; 2],
     /// First fluid cell of a line, at the domain boundary (`k0 = 0`: ghost-state Jacobian), behind the solid (`k0 > 0`: wall, reflection),
     /// and either.
-    first_bc: [Array<u32>; 2],
-    first_refl: [Array<u32>; 2],
-    first: [Array<u32>; 2],
+    first_bc: [Array<Mask>; 2],
+    first_refl: [Array<Mask>; 2],
+    first: [Array<Mask>; 2],
     /// Base-wall faces `[ni + 1, nj]`: `i = i_end`, rows `j_sting..j_end`.
-    base: Array<u32>,
+    base: Array<Mask>,
 }
 
 impl LBlockGeo {
     fn new(ctx: &Context, ni: usize, nj: usize, b: bowshock_core::solver::Block) -> Result<LBlockGeo> {
         let mask = |shape: [usize; 2], f: &dyn Fn(usize, usize) -> bool| {
-            let v: Vec<u32> = (0..shape[1]).flat_map(|j| (0..shape[0]).map(move |i| (i, j))).map(|(i, j)| u32::from(f(i, j))).collect();
+            let v: Vec<Mask> = (0..shape[1]).flat_map(|j| (0..shape[0]).map(move |i| (i, j))).map(|(i, j)| Mask::from(f(i, j))).collect();
             Array::from_slice_on(ctx, &v, shape)
         };
         // first fluid cell of the line through (i, j) of direction `dir`, if the line has one
@@ -494,12 +489,11 @@ impl LBlockGeo {
     }
 }
 
-/// The blocks `lo`, `d`, `up` of `I - dt J_dir` of every cell (`[ni, nj]` arrays, evaluated) and their `[16, ni, nj]` stacks.
+/// The blocks `lo`, `d`, `up` of `I - dt J_dir` of every cell (`[ni, nj]` arrays, evaluated).
 struct Factor {
     lo: [F; 16],
     d: [F; 16],
     up: [F; 16],
-    stack: [F; 3],
 }
 
 impl LazySolver {
@@ -706,32 +700,25 @@ impl LazySolver {
         }
         let (z, o) = (&g.zero, &g.one);
         let [lo, d, up] = [lo.dense(z, o), d.dense(z, o), up.dense(z, o)].cache();
-        let stack = [self.stack(&lo), self.stack(&d), self.stack(&up)];
-        Factor { lo, d, up, stack }
+        Factor { lo, d, up }
     }
 
-    /// The sixteen (or four) `[ni, nj]` arrays `parts` (evaluated) as one `[N, ni, nj]` array, the part index being the fastest
-    /// dimension: the layout `solve_block_tridiagonal` reads.
-    fn stack<const N: usize>(&self, parts: &[F; N]) -> F {
-        luma::stack_slice(0, parts)
-    }
-
-    /// The components of a `[4, ni, nj]` stack as `[ni, nj]` arrays (lazy gathers).
-    fn unstack(&self, x: &F) -> V4 {
-        std::array::from_fn(|k| x.take(&self.lg.cell4[k]))
-    }
-
-    /// `x <- (I - dt J_dir)^{-1} x` for every line of direction `dir` (block-tridiagonal solve, `solve_lines`).
-    fn solve_lines(&self, fac: &Factor, dir: usize, x: &F) -> F {
+    /// `x <- (I - dt J_dir)^{-1} x` for every line of direction `dir` (block-tridiagonal solve, `solve_lines`); the sixteen block entries
+    /// and the four components are passed as parts (no stacking).
+    fn solve_lines(&self, fac: &Factor, dir: usize, x: &V4) -> V4 {
+        let lo: [&F; 16] = std::array::from_fn(|k| &fac.lo[k]);
+        let d: [&F; 16] = std::array::from_fn(|k| &fac.d[k]);
+        let up: [&F; 16] = std::array::from_fn(|k| &fac.up[k]);
+        let rhs: [&F; 4] = std::array::from_fn(|k| &x[k]);
         match &self.lb {
             // lines start at their first fluid cell; the cells before it (and whole solid lines) get 0
-            Some(lb) => luma::solve_block_tridiagonal_from(4, dir + 1, &fac.stack[0], &fac.stack[1], &fac.stack[2], x, &lb.start[dir]),
-            None => luma::solve_block_tridiagonal(4, dir + 1, &fac.stack[0], &fac.stack[1], &fac.stack[2], x),
+            Some(lb) => luma::solve_block_tridiagonal_parts_from(dir, lo, d, up, rhs, &lb.start[dir]),
+            None => luma::solve_block_tridiagonal_parts(dir, lo, d, up, rhs),
         }
     }
 
-    /// The approximate factorization `(I - dt J_j)^{-1} (I - dt J_i)^{-1} rhs` of a `[4, ni, nj]` stack.
-    fn approx_factor(&self, fi: &Factor, fj: &Factor, rhs: &F) -> F {
+    /// The approximate factorization `(I - dt J_j)^{-1} (I - dt J_i)^{-1} rhs`.
+    fn approx_factor(&self, fi: &Factor, fj: &Factor, rhs: &V4) -> V4 {
         self.solve_lines(fj, 1, &self.solve_lines(fi, 0, rhs))
     }
 
@@ -746,13 +733,13 @@ impl LazySolver {
     }
 
     /// Positivity damping: `alpha` is the first of `1, 1/2, .., 1/128` for which `U + alpha dU` has `rho > 0`, `p > 0` and four
-    /// finite components (finite: `|q| < 1e30`), `0` if there is none. Decided in f32 from the f32 view of `U`.
+    /// finite components (`is_finite`), `0` if there is none. Decided in f32 from the f32 view of `U`.
     fn damping(&self, u: &V4, du: &V4) -> F {
-        let ok = |a: f32| -> Array<u32> {
+        let ok = |a: f32| -> Array<Mask> {
             let q: V4 = std::array::from_fn(|k| &u[k] + a * &du[k]);
             let w = cons_to_prim_f(&q);
-            let finite = q.iter().map(|x| x.abs().lt(1e30f32)).reduce(|a, b| a * b).expect("four components");
-            w[0].gt(0.0f32) * w[3].gt(0.0f32) * finite
+            let finite = q.iter().map(|x| x.is_finite()).reduce(|a, b| a & b).expect("four components");
+            w[0].gt(0.0f32) & w[3].gt(0.0f32) & finite
         };
         let last = 1.0f32 / 128.0;
         let mut alpha = select(&ok(last), last, 0.0f32);
@@ -799,20 +786,18 @@ impl LazySolver {
         // right-hand side and defect correction
         let b: V4 = std::array::from_fn(|k| &lhs(&r0[k]) * &dt);
         let b = b.cache();
-        let mut du = self.approx_factor(&fi, &fj, &self.stack(&b));
+        let mut du = self.approx_factor(&fi, &fj, &b);
         for _ in 1..p.sub_iters.max(1) {
-            let x = self.unstack(&du);
-            let (ai, aj) = (self.apply_factor(&fi, 0, &x), self.apply_factor(&fj, 1, &x));
-            let r: V4 = std::array::from_fn(|k| &b[k] - (&ai[k] + &aj[k] - &x[k]));
-            let corr = self.approx_factor(&fi, &fj, &self.stack(&r.cache()));
-            du = &du + &corr;
+            let (ai, aj) = (self.apply_factor(&fi, 0, &du), self.apply_factor(&fj, 1, &du));
+            let r: V4 = std::array::from_fn(|k| &b[k] - (&ai[k] + &aj[k] - &du[k]));
+            let corr = self.approx_factor(&fi, &fj, &r.cache());
+            du = std::array::from_fn(|k| &du[k] + &corr[k]);
         }
-        let du = self.unstack(&du);
 
         // update with positivity damping
         let alpha = self.damping(&Self::lhs_rec(&u), &du);
         let moved = match &self.lb {
-            Some(lb) => alpha.gt(0.0f32) * &lb.fluid,
+            Some(lb) => alpha.gt(0.0f32) & &lb.fluid,
             None => alpha.gt(0.0f32),
         };
         let alpha = from_lhs(&alpha);

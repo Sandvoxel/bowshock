@@ -115,11 +115,6 @@ pub mod f32s {
         a.clone()
     }
 
-    /// `tanh`: the blending functions of the SST model.
-    fn tanh(a: &A) -> A {
-        a.tanh()
-    }
-
     include!("body.rs");
     include!("implicit.rs");
     include!("viscous.rs");
@@ -167,11 +162,6 @@ pub mod df32s {
 
     fn from_lhs(a: &Array<f32>) -> A {
         a.to_df32()
-    }
-
-    /// `tanh` of the blending functions of the SST model, in f32 (`Df32` arrays have no `tanh`; the blending functions need no more).
-    fn tanh(a: &A) -> A {
-        a.to_f32().tanh().to_df32()
     }
 
     include!("body.rs");

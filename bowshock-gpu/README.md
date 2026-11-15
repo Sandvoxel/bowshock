@@ -307,10 +307,12 @@ compiled before the clock), best of 3, microseconds per iteration. CPU = f64 `So
 
 | case | level | grid | CPU f64 | lazy f32 until | lazy f32 replay | lazy df32 until | lazy df32 replay |
 |---|---|---|---|---|---|---|---|
-| sting | 0 | 144x70 | 2361 | 227.1 | 180.6 | 259.8 | 217.6 |
-| sting | 1 | 288x140 | 10868 | 447.0 | 405.9 | 516.4 | 466.9 |
-| base (solid block) | 0 | 156x76 | 2520 | 302.9 | 194.7 | 313.5 | 264.0 |
-| base (solid block) | 1 | 312x152 | 10977 | 493.6 | 446.0 | 618.5 | 565.9 |
+| sting | 0 | 144x70 | 2292 | 189.3 | 145.1 | 229.6 | 184.0 |
+| sting | 1 | 288x140 | 10348 | 378.7 | 325.5 | 426.1 | 382.9 |
+| base (solid block) | 0 | 156x76 | 2505 | 216.0 | 163.6 | 281.4 | 230.7 |
+| base (solid block) | 1 | 312x152 | 10891 | 415.4 | 358.1 | 540.0 | 487.2 |
+
+After the Luma `bowshock-fixes` port (Mask arrays, `solve_block_tridiagonal_parts`, one `solve_tridiagonal_parts` for k and omega, `is_finite`, Df32 `tanh`); the table above is that run, best of two. Before it (Luma c709621 with `stack_slice`, same session) the rows were 237.7 / 194.8 / 273.7 / 224.9, 464.6 / 414.5 / 524.9 / 472.7, 253.7 / 201.4 / 325.9 / 270.3 and 507.0 / 449.4 / 652.8 / 577.6. One implicit step as the eval loop launches it (level 0): sting f32 19 launches / 149 us (before 27 / 198), sting df32 20 / 196 (28 / 238), base f32 19 / 168 (27 / 210), base df32 20 / 375 (28 / 294: the Df32 flux and residual kernels of the block case got slower, see ISSUES 11). The six `FusedStack` launches and the two right-hand-side stacks are gone; the four line solves are `SolveParts` launches (base f32: 22.9 + 18.2 us per direction pair, as the `CyclicTridiagonal` launches before).
 
 (GPU columns measured with the line-solve stacks built by `luma::stack_slice` (see "Luma issues", 11); with the 16-part `concat` they were 273.1 / 226.6 / 310.0 / 266.9, 582.5 /
 540.5 / 639.4 / 590.5, 281.9 / 239.8 / 349.9 / 304.0 and 683.7 / 598.3 / 768.8 / 712.0. The CPU column is the earlier measurement.)
@@ -362,18 +364,18 @@ the explicit scheme.
 
 | model | level | grid | CPU f64 | lazy f32 until / replay | lazy df32 until / replay | CPU / lazy f32 replay |
 |---|---|---|---|---|---|---|
-| SST | 0 | 156x122 | 6744 | 438 / 387 | 574 / 519 | 17x |
-| SST | 1 | 312x122 | 12411 | 678 / 626 | 854 / 797 | 20x |
+| SST | 0 | 156x122 | 6724 | 378 / 319 | 508 / 447 | 21x |
+| SST | 1 | 312x122 | 12454 | 554 / 487 | 713 / 645 | 26x |
 | laminar | 0 | 156x122 | 4351 | 354 / 304 | 442 / 386 | 14x |
 | laminar | 1 | 312x122 | 7683 | 570 / 513 | 701 / 616 | 15x |
 
-(The CPU column moves by 2x between runs on the shared machine.) **Double-float is cheap here**: `df32s` costs 1.3x of `f32s` (SST replay), against 2.5-3.2x for the explicit inviscid
+(The CPU column moves by 2x between runs on the shared machine; the Luma `bowshock-fixes` run is the table above, before it the SST rows were 460 / 398 | 589 / 526 at level 0 and 700 / 637 | 866 / 808 at level 1.) **Double-float is cheap here**: `df32s` costs 1.3x of `f32s` (SST replay), against 2.5-3.2x for the explicit inviscid
 kernels, because the left-hand side and the line solves, which are f32 in both, are most of the step. The viscous terms and SST in `S` are therefore the default in both precisions (no
 f32 special case): the arithmetic that sets the fixed point is in the element type, only the pseudo-time-step operators (`2 lam I`, the diffusive time step, the two scalar line
 solves) are f32. Staging (SST, level 0, `replay`, f32 / df32, measured with `concat` stacks): `Fluxes` 480 / 612, `Lines` 499 / 621, `Split` 498 / 625, `Fusion` 577 / 958 (first call 2.8 s /
 14 s). `Fluxes` stays the default.
 
-One SST step, level 0 (`profile_step`): 65 kernel launches, 440 us of GPU time (f32; df32 580 us; level 1: 687 us f32), 1 fusion cut (`1537 inlined operations > 1536` in the
+One SST step, level 0 (`profile_step`): after the Luma `bowshock-fixes` port (block line solves on parts, scalar solves of both turbulence equations in one launch, no stacking) 34 kernel launches, 337 us of GPU time (f32; df32 478 us; level 1: 497 us f32), before it 65 launches / 445 us (f32; df32 595 us; level 1 689 us), 1 fusion cut (`1537 inlined operations > 1536` in the
 dissipation blocks). The biggest kernels, f32 level 0:
 
 | kernels | launches | GPU us |

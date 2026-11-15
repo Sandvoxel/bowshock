@@ -29,3 +29,7 @@ codegen-units = 1
 too_many_arguments = "allow"
 needless_range_loop = "allow"
 type_complexity = "allow"
+
+# Temporary: use the local Luma `bowshock-fixes` branch until it is merged and pushed.
+[patch."https://github.com/flipnoteman/Luma.git"]
+luma = { path = "/home/sandvoxel/Documents/luma-bf" }

@@ -45,7 +45,7 @@ struct VDir {
     er: A,
     inv_d: A,
     rm: A,
-    noslip: Array<u32>,
+    noslip: Array<Mask>,
     /// `1 / |d|` in f32 (left-hand side).
     inv_d_f: F,
 }
@@ -60,12 +60,12 @@ struct VGeo {
     rc: A,
     zero: A,
     /// Domain `jmin` wall (no block): the no-slip columns as a mask of the two ghost layers `[ni, 2]` and of an edge row `[ni, 1]`.
-    jmin_ghost: Option<Array<u32>>,
-    jmin_cols: Option<Array<u32>>,
+    jmin_ghost: Option<Array<Mask>>,
+    jmin_cols: Option<Array<Mask>>,
     /// With a block: the no-slip columns of the two block-ghost groups (body surface, sting surface), masks `[i1 - i0, 2]`.
-    block_ghost: Option<[Array<u32>; 2]>,
+    block_ghost: Option<[Array<Mask>; 2]>,
     /// With a block: the first fluid cell of a line behind the solid sees a slip wall (`[0]`) or a no-slip wall (`[1]`); per direction.
-    fold: Option<[[Array<u32>; 2]; 2]>,
+    fold: Option<[[Array<Mask>; 2]; 2]>,
     /// The wall distance of every cell centroid (`f64::INFINITY` capped to `1e10`) of the SST model.
     dwall: Option<A>,
 }
@@ -83,8 +83,8 @@ fn noslip_iface(blk: Option<Block>, i: usize, j: usize) -> bool {
     blk.is_some_and(|b| i == b.i_end && j >= b.j_sting && j < b.j_end)
 }
 
-fn mask_array(ctx: &Context, shape: [usize; 2], f: &dyn Fn(usize, usize) -> bool) -> Result<Array<u32>> {
-    let v: Vec<u32> = (0..shape[1]).flat_map(|j| (0..shape[0]).map(move |i| (i, j))).map(|(i, j)| u32::from(f(i, j))).collect();
+fn mask_array(ctx: &Context, shape: [usize; 2], f: &dyn Fn(usize, usize) -> bool) -> Result<Array<Mask>> {
+    let v: Vec<Mask> = (0..shape[1]).flat_map(|j| (0..shape[0]).map(move |i| (i, j))).map(|(i, j)| Mask::from(f(i, j))).collect();
     Array::from_slice_on(ctx, &v, shape)
 }
 
@@ -240,7 +240,7 @@ fn noslip_ghost(w: &Rec) -> Rec {
 
 /// `wall_ghost`: the no-slip ghost where `noslip` is 1, else the reflection about the face normal `(n_x, n_r)`; `None`: the reflection
 /// everywhere.
-fn wall_ghost(w: &Rec, nx: &A, nr: &A, noslip: Option<&Array<u32>>) -> Rec {
+fn wall_ghost(w: &Rec, nx: &A, nr: &A, noslip: Option<&Array<Mask>>) -> Rec {
     match noslip {
         None => reflect(w, nx, nr),
         Some(m) => {
