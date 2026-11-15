@@ -11,6 +11,7 @@ use iced::{alignment, keyboard, mouse, Color, Pixels, Point, Rectangle, Renderer
 
 use super::edit::{self, End, SNAP_PX};
 use super::geometry::{self, Axis, Hit, LaneBox, Zone, Zoom, FOOTER_H, LABEL_W, RULER_H};
+use super::pods::{self, PodLayout};
 use super::scene::{describe, Bar, BarKey, Scene, MASS_BIN};
 use super::Message;
 use crate::app::{ui, Selection};
@@ -20,7 +21,7 @@ use crate::units::{Quantity, UnitSystem};
 use crate::viewport::Camera;
 
 const TEXT_BAR: f32 = 11.5;
-const TEXT_SMALL: f32 = 10.5;
+pub(super) const TEXT_SMALL: f32 = 10.5;
 const MONO_EM: f32 = 0.6;
 /// Movement before a press becomes a drag, px.
 const DRAG_SLOP: f32 = 3.0;
@@ -122,7 +123,6 @@ pub struct Lanes<'a> {
 }
 
 /// What drawing one bar needs besides the bar.
-#[derive(Clone, Copy)]
 struct Paint<'a> {
     t: &'a Tokens,
     axis: &'a Axis,
@@ -160,7 +160,7 @@ fn lane_label(system: System) -> &'static str {
     }
 }
 
-fn mono_w(chars: usize, size: f32) -> f32 {
+pub(super) fn mono_w(chars: usize, size: f32) -> f32 {
     chars as f32 * size * MONO_EM
 }
 
@@ -238,11 +238,19 @@ impl Lanes<'_> {
         self.lock.and_then(|c| Axis::locked(&c, width)).unwrap_or_else(|| self.zoom.apply(Axis::fit(width, self.scene.length)))
     }
 
-    fn rows(&self, height: f32) -> Vec<LaneBox> {
+    /// The pod brackets and their tags for this axis (which may add a row to a lane for a tag with nowhere else to go).
+    fn pod_layout(&self, axis: &Axis, width: f32) -> PodLayout<'_> {
+        if self.collapsed {
+            return PodLayout { lanes: Vec::new(), pods: Vec::new() };
+        }
+        pods::layout(&self.scene, axis, width, &|name| sans_w(name, TEXT_BAR))
+    }
+
+    fn rows(&self, pods: &PodLayout, height: f32) -> Vec<LaneBox> {
         if self.collapsed {
             Vec::new()
         } else {
-            geometry::rows(&self.scene, height, self.lane_h)
+            geometry::rows(&pods.lanes, height, self.lane_h)
         }
     }
 
@@ -311,7 +319,8 @@ impl canvas::Program<Message> for Lanes<'_> {
 
     fn update(&self, state: &mut Interaction, event: &Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<Action<Message>> {
         let axis = self.axis(bounds.width);
-        let rows = self.rows(bounds.height);
+        let pods = self.pod_layout(&axis, bounds.width);
+        let rows = self.rows(&pods, bounds.height);
         let local = Self::local(cursor, bounds);
         match event {
             Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => {
@@ -349,7 +358,7 @@ impl canvas::Program<Message> for Lanes<'_> {
                         match hit.zone {
                             Zone::Body if bar.edit.movable => {
                                 state.mode = Mode::Moving { id, grab };
-                                if bar.class == Some(PartClass::Axial) {
+                                if bar.class == Some(PartClass::Axial) && bar.pod.is_none() {
                                     return Some(Action::publish(Message::GrabAxial(id)));
                                 }
                                 let start = self.start_for(Some(hit.key), axis.station(p.x), grab, &axis, shift);
@@ -467,7 +476,8 @@ impl canvas::Program<Message> for Lanes<'_> {
         let (mut base, mut thin, mut over, mut column) =
             (Frame::new(renderer, size), Frame::new(renderer, size), Frame::new(renderer, size), Frame::new(renderer, size));
         let axis = self.axis(size.width);
-        let rows = self.rows(size.height);
+        let pods = self.pod_layout(&axis, size.width);
+        let rows = self.rows(&pods, size.height);
         let unit = *Quantity::Length.unit_for(self.units);
         let busy = self.shading(state);
 
@@ -480,7 +490,7 @@ impl canvas::Program<Message> for Lanes<'_> {
 
         self.draw_ruler(&mut base, t, &axis, &unit, size, busy);
         if !self.collapsed {
-            self.draw_lanes(&mut base, &mut thin, &mut over, t, &axis, &rows, state, size);
+            self.draw_lanes(&mut base, &mut thin, &mut over, t, &axis, &rows, &pods, state, size);
         }
 
         // The collapse caret at the right end of the ruler: down while the lanes are open, up when only the ruler shows.
@@ -647,7 +657,18 @@ impl Lanes<'_> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn draw_lanes(&self, base: &mut Frame, thin: &mut Frame, over: &mut Frame, t: &Tokens, axis: &Axis, rows: &[LaneBox], state: &Interaction, size: Size) {
+    fn draw_lanes(
+        &self,
+        base: &mut Frame,
+        thin: &mut Frame,
+        over: &mut Frame,
+        t: &Tokens,
+        axis: &Axis,
+        rows: &[LaneBox],
+        pods: &PodLayout,
+        state: &Interaction,
+        size: Size,
+    ) {
         let foot = size.height - FOOTER_H;
         let f = &mut *base;
 
@@ -675,6 +696,7 @@ impl Lanes<'_> {
                 f.stroke(&Path::line(Point::new(a, y), Point::new(b, y)), dotted(t.sys_recovery));
             }
         }
+        self.draw_pod_lines(f, t, rows, pods);
         let paint = Paint { t, axis, rows, moving: if let Mode::Moving { id, .. } | Mode::Resizing { id, .. } = state.mode { Some(id) } else { None } };
         for i in geometry::paint_order(&self.scene) {
             let bar = &self.scene.bars[i];
@@ -686,6 +708,7 @@ impl Lanes<'_> {
 
         // Drag feedback.
         let f = over;
+        self.draw_pod_labels(f, t, rows, pods);
         let moving = match state.mode {
             Mode::Moving { id, .. } | Mode::Resizing { id, .. } => self.scene.part_bar(id),
             _ => None,
@@ -978,6 +1001,40 @@ impl Lanes<'_> {
                     alignment::Vertical::Center,
                 );
             }
+        }
+    }
+
+    /// The bracket that ties a pod's parts in one lane together: a thin line over the top of their bars with a tick down at each
+    /// end, `accent` while the pod is selected.
+    fn draw_pod_lines(&self, f: &mut Frame, t: &Tokens, rows: &[LaneBox], pods: &PodLayout) {
+        for (s, _) in &pods.pods {
+            let Some(lane) = rows.iter().find(|l| l.lane.system == s.system) else { continue };
+            let row_y = lane.row(s.row).0;
+            let color = faded(if self.parts.contains(&s.id) { t.accent } else { t.ink_muted }, s.dropped);
+            let y = (row_y - 2.0).floor() + 0.5;
+            let stroke = Stroke::default().with_color(color).with_width(1.0);
+            f.stroke(&Path::line(Point::new(s.x0.max(LABEL_W), y), Point::new(s.x1, y)), stroke);
+            for x in [s.x0, s.x1] {
+                if x >= LABEL_W {
+                    vline(f, x - 0.5, y, row_y + 2.0, stroke);
+                }
+            }
+        }
+    }
+
+    /// The group tag of each pod bracket (the link glyph and `Pod ×2`), where [`pods::layout`] put it: beside the bracket's ends,
+    /// or along it, or in another row of the lane; never left out. Hovering a part names its pod as well.
+    fn draw_pod_labels(&self, f: &mut Frame, t: &Tokens, rows: &[LaneBox], pods: &PodLayout) {
+        for (s, tag) in &pods.pods {
+            let Some(lane) = rows.iter().find(|l| l.lane.system == s.system) else { continue };
+            let (row_y, row_h) = lane.row(tag.row);
+            let mid = row_y + row_h / 2.0;
+            let ink = faded(if self.parts.contains(&s.id) { t.accent } else { t.ink_muted }, s.dropped);
+            let rect = Rectangle { x: tag.x, y: mid - pods::TAG_H / 2.0, width: tag.w, height: pods::TAG_H };
+            f.fill_rectangle(rect.position(), rect.size(), t.bg_200);
+            outline(f, rect, Stroke::default().with_color(faded(t.line_200, s.dropped)).with_width(1.0));
+            link(f, Point::new(tag.x + 4.0, mid - 3.5), ink);
+            put(f, s.label, Point::new(tag.x + 17.0, mid), ink, TEXT_SMALL, MONO, Alignment::Left, alignment::Vertical::Center);
         }
     }
 

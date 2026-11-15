@@ -110,7 +110,9 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
         base = u.colors[STRUCTURE + sys].rgb;
         shaded = false;
     } else if layer == 0 {
-        if !front && mode == 1 {
+        // material 2 marks the bore: the inner surface of a hollow shell, which faces the axis.
+        let bore = in.material > 1.5;
+        if (!front || bore) && mode == 1 {
             // The inside of the shell seen through the cut.
             base = u.colors[CUT_INTERIOR].rgb * (0.6 + 0.4 * lit) + vec3<f32>(0.02) + u.colors[CUT_FACE].rgb * 0.5 * pow(1.0 - facing, 2.0);
             shaded = false;
@@ -120,6 +122,12 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
             }
             base = u.colors[BODY].rgb;
             alpha = 0.10 + 0.75 * pow(1.0 - facing, 2.0);
+            if bore {
+                alpha = alpha * 0.5;
+            }
+        } else if bore {
+            // Looking into an open end: the bore is the body colour in shade.
+            base = mix(u.colors[BODY].rgb, u.colors[CUT_INTERIOR].rgb, 0.45);
         } else {
             base = u.colors[BODY].rgb;
         }
@@ -133,9 +141,10 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
             base = mix(u.colors[BODY].rgb, u.colors[FIN].rgb, in.material);
         }
     } else {
-        // Internal solids (2) and cord (5): system colours; plain grey from outside in Solid (the motor's nozzle end).
+        // Internal solids (2) and cord (5): system colours; plain grey from outside in Solid (the motor's nozzle end), a little
+        // in shade as it sits down a bore.
         if mode == 0 && !reveal {
-            base = u.colors[FIN].rgb;
+            base = u.colors[FIN].rgb * 0.8;
         } else {
             base = u.colors[STRUCTURE + sys].rgb;
         }

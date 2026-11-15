@@ -2,7 +2,9 @@
 //!
 //! Everything here is a function of the rocket and the selection, so it is unit tested without a window.
 
-use bowshock_model::{DeployEvent, Deployment, InternalKind, MassRole, MaterialId, MotorMount, NoseShape, Part, PartId, PartKind, RadialKind, Rocket, System};
+use bowshock_model::{
+    DeployEvent, Deployment, InternalKind, MassRole, MaterialId, MotorMount, NoseShape, Part, PartId, PartKind, PodBody, RadialKind, Rocket, System,
+};
 
 use super::Category;
 use crate::app::{drag, Ctx, Selection};
@@ -55,13 +57,19 @@ pub fn axial_catalogue() -> Vec<(&'static str, PartKind)> {
     ]
 }
 
-/// The airframe list in the bin's order: the axial catalogue with the tube coupler (an internal part) after the transition.
+/// The airframe list in the bin's order: the axial catalogue with the tube coupler (an internal part) after the transition, and
+/// the radial pod / strap-on last (it is a body, so it lives with the airframe; its body is sized for the rocket when it is
+/// carried, see [`Rocket::default_pod`]).
 pub fn airframe_items() -> Vec<Item> {
     let mut items: Vec<Item> = axial_catalogue().into_iter().map(|(n, k)| Item::Axial(n, k)).collect();
     let at = items.iter().position(|i| matches!(i, Item::Axial("Boattail", _))).unwrap_or(items.len());
     items.insert(at, Item::Internal("Tube coupler", coupler()));
+    items.push(Item::Radial(POD_NAME, RadialKind::Pod { gap: 0.0, body: PodBody::standard(0.0762, 0.6) }));
     items
 }
+
+/// The pod row's name in the bin.
+pub const POD_NAME: &str = "Pod / strap-on";
 
 /// The radial parts offered ("Fins & guides"), with their default sizes (metres).
 pub fn radial_catalogue() -> Vec<(&'static str, RadialKind)> {
@@ -250,8 +258,12 @@ pub fn attach_internal(ctx: &mut Ctx, name: &str, kind: InternalKind) -> Option<
 pub fn attach_radial(ctx: &mut Ctx, name: &str, kind: RadialKind) -> Option<PartId> {
     let rocket = ctx.doc.rocket();
     let host = host_for(rocket, ctx.selection, Zone::Aft).or_else(|| rocket.parts().last().map(|p| p.id))?;
+    // A pod is only ever placed on the core (not on the pod part that is selected); everything else goes on the selected part,
+    // a pod's tube included.
+    let host = if kind.is_pod() && rocket.index_of(host).is_none() { rocket.parts().last()?.id } else { host };
+    let kind = if kind.is_pod() { rocket.default_pod() } else { kind };
     let len = rocket.part(host)?.kind.length();
-    let offset = if kind.is_fin() { len - kind.extent() } else { (len - kind.extent()) / 2.0 };
+    let offset = if kind.is_fin() || kind.is_pod() { (len - kind.extent()).max(0.0) } else { (len - kind.extent()) / 2.0 };
     let count = ctx.drag.symmetry;
     let id = ctx.doc.edit(&format!("Add {}", name.to_lowercase()), |r| r.attach_radial(host, offset, 0.0, count, kind).ok())?;
     ctx.selection = Selection::Part(id);
@@ -281,7 +293,7 @@ pub fn attach_axial(ctx: &mut Ctx, kind: PartKind) -> Option<PartId> {
 pub fn motor_mount(rocket: &Rocket, selection: Selection) -> Option<MotorMount> {
     let mounts = rocket.motor_mounts();
     let chosen = selection.part().and_then(|id| mounts.iter().find(|m| m.id == id || m.parent == id));
-    chosen.or_else(|| mounts.first()).copied()
+    chosen.or_else(|| mounts.iter().find(|m| m.pod.is_none()).or(mounts.first())).copied()
 }
 
 /// Indices into `motors` of the motors that fit `mount`, smallest total impulse first.
@@ -402,12 +414,13 @@ mod tests {
         let names: Vec<&str> = items
             .iter()
             .map(|i| match i {
-                Item::Axial(n, _) | Item::Internal(n, _) => *n,
+                Item::Axial(n, _) | Item::Internal(n, _) | Item::Radial(n, _) => *n,
                 _ => "",
             })
             .collect();
         let coupler = names.iter().position(|n| *n == "Tube coupler").unwrap();
         assert_eq!(names[coupler + 1], "Boattail");
-        assert_eq!(names.last(), Some(&"Payload bay"));
+        assert_eq!(names[names.len() - 2], "Payload bay");
+        assert_eq!(names.last(), Some(&POD_NAME));
     }
 }

@@ -35,6 +35,8 @@ pub enum Dim {
     Cant,
     /// Angle of the first copy around the axis.
     Angle,
+    /// Clear distance from the parent's surface to a pod.
+    Gap,
     /// Rail button height.
     Height,
     /// Hole diameter of a ring or engine block.
@@ -78,6 +80,7 @@ impl Dim {
             Dim::Thickness => "THICKNESS".into(),
             Dim::Cant => "CANT".into(),
             Dim::Angle => "ANGLE".into(),
+            Dim::Gap => "GAP".into(),
             Dim::Height => "HEIGHT".into(),
             Dim::InnerDiameter => "INNER DIAMETER".into(),
             Dim::Overhang => "OVERHANG".into(),
@@ -183,6 +186,9 @@ impl Rocket {
     /// fin's fillet radius are secondary: shown in Cutaway or with `Alt`.
     pub fn handle_specs(&self, id: PartId) -> Vec<HandleSpec> {
         use HandleView::{Aft, Inside, Side};
+        if let Some((_, sub)) = self.scratch_of(id) {
+            return sub.handle_specs(id);
+        }
         let Some(part) = self.kind_of(id) else {
             return Vec::new();
         };
@@ -243,6 +249,7 @@ impl Rocket {
                     }
                     RadialKind::LaunchLug { .. } => vec![spec(Dim::Position, true, Side), spec(Dim::Length, true, Side), spec(Dim::Angle, false, Aft)],
                     RadialKind::RailButton { .. } => vec![spec(Dim::Position, true, Side), spec(Dim::Height, false, Side), spec(Dim::Angle, false, Aft)],
+                    RadialKind::Pod { .. } => vec![spec(Dim::Position, true, Side), spec(Dim::Gap, true, Side), spec(Dim::Angle, true, Aft)],
                 }
             }
             PartRef::Internal(i) => match &i.kind {
@@ -279,6 +286,9 @@ impl Rocket {
 
     /// The current value of `dim` on part `id`; `None` if the part has no such dimension. Auto internal diameters resolve.
     pub fn dim(&self, id: PartId, dim: Dim) -> Option<f64> {
+        if let Some((_, sub)) = self.scratch_of(id) {
+            return sub.dim(id, dim);
+        }
         match self.kind_of(id)? {
             PartRef::Axial(p) => match dim {
                 Dim::Length => Some(p.kind.length()),
@@ -303,6 +313,7 @@ impl Rocket {
             },
             PartRef::Radial(r) => match (dim, &r.kind) {
                 (Dim::Position, _) => Some(r.offset),
+                (Dim::Gap, RadialKind::Pod { gap, .. }) => Some(*gap),
                 (Dim::Angle, _) => Some(r.angle),
                 (Dim::Cant, k) if k.is_fin() => Some(r.cant),
                 (Dim::Span, k) => k.fin_span(),
@@ -368,6 +379,7 @@ impl Rocket {
             },
             (PartRef::Radial(r), Dim::Position) => (0.0, (length_of_parent(r.parent) - r.kind.min_attached()).max(0.0), "AT TUBE FORE", "AT TUBE AFT"),
             (PartRef::Radial(_), Dim::Angle) => open(),
+            (PartRef::Radial(_), Dim::Gap) => (0.0, 0.5, "TOUCHING THE SURFACE", "MAXIMUM GAP"),
             (PartRef::Radial(_), Dim::Cant) => (-MAX_CANT, MAX_CANT, "CANT LIMIT 30°", "CANT LIMIT 30°"),
             (PartRef::Radial(_), Dim::Span) => (0.005, 1.0, "MINIMUM HEIGHT", "MAXIMUM HEIGHT"),
             (PartRef::Radial(r), Dim::RootChord) => (0.005, length_of_parent(r.parent).max(0.005), "MINIMUM CHORD", "LONGER THAN THE TUBE"),
@@ -405,6 +417,9 @@ impl Rocket {
     /// `value` limited to what `dim` of part `id` may be, with the reason when it was limited. `None` if the part has no
     /// such dimension.
     pub fn clamp_dim(&self, id: PartId, dim: Dim, value: f64) -> Option<(f64, Option<&'static str>)> {
+        if let Some((_, sub)) = self.scratch_of(id) {
+            return sub.clamp_dim(id, dim, value);
+        }
         self.dim(id, dim)?;
         let (lo, hi, rlo, rhi) = self.dim_limits(id, dim)?;
         Some(if value < lo - 1e-12 {
@@ -420,6 +435,9 @@ impl Rocket {
     /// neighbouring faces that were equal to it (a nose's base follows its tube, a transition's face follows the tube it
     /// joins); parts aft of a length change move with the stack. `None` if the part has no such dimension.
     pub fn set_dim(&mut self, id: PartId, dim: Dim, value: f64) -> Option<DimEdit> {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.set_dim(id, dim, value)).flatten();
+        }
         let (v, limited) = self.clamp_dim(id, dim, value)?;
         let ok = match self.kind_of(id)? {
             PartRef::Axial(p) => {
@@ -486,6 +504,7 @@ impl Rocket {
                             (RadialKind::LaunchLug { length, .. }, Dim::Length) => *length = v,
                             (RadialKind::LaunchLug { diameter, .. } | RadialKind::RailButton { diameter, .. }, Dim::Diameter) => *diameter = v,
                             (RadialKind::RailButton { height, .. }, Dim::Height) => *height = v,
+                            (RadialKind::Pod { gap, .. }, Dim::Gap) => *gap = v,
                             _ => return None,
                         }
                         self.set_radial(id, kind, count)
@@ -575,6 +594,9 @@ impl Rocket {
     /// The outer diameter of a shoulder with `AUTO` resolved: the inner diameter of the tube it enters (the neighbour on that
     /// side), or the part's own inner diameter at that face with no neighbour.
     pub fn shoulder_diameter(&self, id: PartId, aft: bool) -> Option<f64> {
+        if let Some((_, sub)) = self.scratch_of(id) {
+            return sub.shoulder_diameter(id, aft);
+        }
         let s = self.shoulder(id, aft)?;
         if s.diameter > 0.0 {
             return Some(s.diameter);
@@ -598,6 +620,9 @@ impl Rocket {
 
     /// Sets a shoulder field (`field`: 0 length, 1 outer diameter, 2 wall).
     fn set_shoulder_field(&mut self, id: PartId, aft: bool, field: u8, v: f64) -> bool {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.set_shoulder_field(id, aft, field, v)).unwrap_or(false);
+        }
         if self.shoulder(id, aft).is_none() {
             return false;
         }
@@ -615,6 +640,9 @@ impl Rocket {
 
     /// Sets the fillet radius of fin group `id` (0 removes the fillet). Returns whether `id` is a fin.
     pub fn set_fillet_radius(&mut self, id: PartId, radius: f64) -> bool {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.set_fillet_radius(id, radius)).unwrap_or(false);
+        }
         match self.radials.iter_mut().find(|r| r.id == id && r.kind.is_fin()) {
             Some(r) => {
                 r.fillet_radius = radius.max(0.0);
@@ -626,6 +654,9 @@ impl Rocket {
 
     /// Sets what the fillet of fin group `id` is made of (a bulk material). Returns whether it was applied.
     pub fn set_fillet_material(&mut self, id: PartId, material: crate::MaterialId) -> bool {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.set_fillet_material(id, material)).unwrap_or(false);
+        }
         if material.kind() != crate::MaterialKind::Bulk {
             return false;
         }

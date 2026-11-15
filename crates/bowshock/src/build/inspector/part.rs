@@ -6,9 +6,9 @@ use std::rc::Rc;
 
 use bowshock_model::{
     materials_of_kind, DeployEvent, Dim, EventKind, FinSection, Finish, InternalKind, InternalPart, MassRole, Material, MaterialKind, Part, PartId, PartKind,
-    PartRef, RadialKind, RadialPart, Rocket,
+    PartRef, PodBody, RadialKind, RadialPart, Rocket,
 };
-use iced::widget::{column, container, mouse_area, row, text, text_input, Space};
+use iced::widget::{button as plain_button, column, container, mouse_area, row, text, text_input, Space};
 use iced::{mouse, Element, Fill, Widget};
 
 use super::edit::{Anchor, Field, Trigger};
@@ -155,6 +155,16 @@ fn radial_rows<'a>(p: &Params<'a>, radial: &RadialPart) -> Vec<Element<'a, Messa
             rows.push(linked(p, "Height", *height, Quantity::Length, Dim::Height));
             rows.push(linked(p, "Head Ø", *diameter, Quantity::Length, Dim::Diameter));
         }
+        RadialKind::Pod { gap, body } => {
+            rows.push(f.num("Gap to core", *gap, Quantity::Length, dim(Dim::Gap)));
+            rows.push(f.fixed("Pod Ø", body.radius() * 2.0, Quantity::Length));
+            rows.push(f.fixed("Pod length", body.length(), Quantity::Length));
+            if let Some(frame) = p.rocket.pod_frame(radial) {
+                rows.push(f.fixed("Axis from core", frame.axis_radius, Quantity::Length));
+            }
+            rows.push(text_row("Parts", format!("{}", body.ids().count())));
+            rows.push(pod_parts(body));
+        }
     }
     if radial.kind.is_fin() {
         rows.push(labeled("Cross-section", segmented_fill(&SECTIONS, radial.cross_section, Message::CrossSection)));
@@ -251,8 +261,17 @@ fn motor_rows<'a>(p: &Params<'a>) -> Vec<Element<'a, Message>> {
     let config = p.rocket.active_configuration();
     let slot = config.slot(p.id);
     let designation = slot.and_then(|s| s.motor.as_ref()).map_or_else(|| "None".to_string(), |m| m.designation.clone());
-    let mut rows = vec![text_row("Motor", designation.clone())];
+    let mount = p.rocket.motor_mounts().into_iter().find(|m| m.id == p.id);
+    let pod_copies = mount.as_ref().filter(|m| m.pod.is_some()).map(|m| m.copies);
+    let shown = match pod_copies {
+        Some(n) if slot.is_some_and(|s| s.motor.is_some()) => format!("{designation} ×{n}"),
+        _ => designation.clone(),
+    };
+    let mut rows = vec![text_row("Motor", shown)];
     let Some(slot) = slot.filter(|s| s.motor.is_some()) else {
+        if pod_copies.is_some() {
+            rows.push(text("Pick the motor in the parts bin (Motors)").size(TEXT_LABEL).style(theme::muted).boxed());
+        }
         return rows;
     };
     rows.push(labeled("Ejection", crate::widgets::field::checkbox("Plugged (no charge)", slot.is_plugged(), Message::Plug)));
@@ -260,11 +279,27 @@ fn motor_rows<'a>(p: &Params<'a>) -> Vec<Element<'a, Message>> {
         rows.push(f.per_config("Ejection delay", slot.delay, Quantity::Time, Field::EjectionDelay));
     }
     let stage = p.state.stage_of_mount(p.rocket, p.id);
-    if stage > 1 {
+    if pod_copies.is_some() {
+        rows.push(text_row("Ignition", format!("Lit with stage {stage}")));
+    } else if stage > 1 {
         let lower = separation::stage_name(stage - 1, p.rocket.stages().len());
         rows.extend(separation::timing_rows(f, config, stage, EventKind::Ignition, &lower, true));
     }
     rows
+}
+
+/// The parts inside a pod, each a link that selects it.
+fn pod_parts<'a>(body: &PodBody) -> Element<'a, Message> {
+    let names = body
+        .parts()
+        .iter()
+        .map(|part| (part.id, part.display_name()))
+        .chain(body.radials().iter().map(|r| (r.id, r.display_name())))
+        .chain(body.internals().iter().map(|i| (i.id, i.display_name())));
+    let links: Vec<Element<'a, Message>> = names
+        .map(|(id, name)| plain_button(text(name).size(TEXT_LABEL)).padding([2.0, SPACE_2]).style(theme::secondary).on_press(Message::SelectPart(id)).boxed())
+        .collect();
+    labeled("Inside", row(links).spacing(SPACE_2).wrap().boxed())
 }
 
 /// The parent's name and length, the part's extent and its offset from the parent's fore face.
@@ -278,23 +313,35 @@ pub(super) fn placement(rocket: &Rocket, id: u64) -> Option<(String, f64, f64, f
     Some((parent.display_name(), parent.kind.length(), extent, offset))
 }
 
+/// Where an axial part sits in its stack: `After <previous part>`, or `First (nose)` / `First in the pod` for the first.
+pub(super) fn order_label(rocket: &Rocket, id: PartId) -> String {
+    let (stack, index, first): (Vec<&Part>, Option<usize>, &str) = match rocket.pod_part_index(id) {
+        Some((pod, index)) => {
+            (rocket.radial(pod).and_then(|r| r.kind.pod_body()).map_or_else(Vec::new, |b| b.parts().iter().collect()), Some(index), "First in the pod")
+        }
+        None => (rocket.parts().iter().collect(), rocket.index_of(id), "First (nose)"),
+    };
+    index.and_then(|i| i.checked_sub(1)).and_then(|i| stack.get(i)).map_or_else(|| first.to_string(), |part| format!("After {}", part.display_name()))
+}
+
 fn position<'a>(p: &Params<'a>) -> Vec<Element<'a, Message>> {
     let f = &p.form;
     let rocket = p.rocket;
     let station = rocket.part_station(p.id).unwrap_or(0.0);
     let Some((parent, parent_length, extent, offset)) = placement(rocket, p.id) else {
-        // An axial part sits in the stack: its station follows from what is ahead of it.
-        let after = rocket.index_of(p.id).and_then(|i| i.checked_sub(1)).and_then(|i| rocket.parts().get(i)).map(|part| part.display_name());
-        return vec![
-            f.fixed("Station", station, Quantity::Length),
-            text_row("Order", after.map_or_else(|| "First (nose)".to_string(), |name| format!("After {name}"))),
-        ];
+        // An axial part sits in the stack: its station follows from what is ahead of it (in the pod's stack for a pod's part).
+        let mut rows = vec![f.fixed("Station", station, Quantity::Length), text_row("Order", order_label(rocket, p.id))];
+        if let Some(pod) = rocket.pod_of(p.id) {
+            rows.push(text_row("Pod", pod.display_name()));
+        }
+        return rows;
     };
     let anchor = p.state.anchor(rocket, p.id);
     let options: Vec<(Anchor, String)> = Anchor::ALL.iter().map(|a| (*a, a.label(&parent))).collect();
+    let is_pod = rocket.is_pod(p.id);
     let mut rows = vec![
         labeled("Relative to", choose(options, &anchor, Message::Anchor)),
-        f.num("Offset", anchor.shown(offset, extent, parent_length), Quantity::Length, dim(Dim::Position)),
+        f.num(if is_pod { "Along parent" } else { "Offset" }, anchor.shown(offset, extent, parent_length), Quantity::Length, dim(Dim::Position)),
     ];
     if let Some(radial) = rocket.radial(p.id) {
         rows.push(f.num("Rotation", radial.angle, Quantity::Angle, dim(Dim::Angle)));
@@ -302,12 +349,19 @@ fn position<'a>(p: &Params<'a>) -> Vec<Element<'a, Message>> {
             rows.push(linked(p, "Cant", radial.effective(p.copy).cant, Quantity::Angle, Dim::Cant));
         }
     }
+    if let Some(pod) = rocket.pod_of(p.id) {
+        // A part's parent may be another part of the pod; say which pod it stands in.
+        rows.push(text_row("Pod", pod.display_name()));
+    }
     rows
 }
 
 /// The material and finish selects: bulk stock for tubes, fins and discs, fabric for a canopy, cord for the lines. A mass
 /// component has no material of its own (its mass is the number), so it has no section.
 fn material_rows<'a>(p: &Params<'a>) -> Option<Vec<Element<'a, Message>>> {
+    if p.rocket.is_pod(p.id) {
+        return None;
+    }
     let (material, kind, finish, canopy) = match p.rocket.kind_of(p.id)? {
         PartRef::Axial(part) => (part.material, MaterialKind::Bulk, Some(part.finish), false),
         PartRef::Radial(r) => (r.material, MaterialKind::Bulk, Some(r.finish), false),
@@ -354,17 +408,29 @@ fn mass<'a>(p: &Params<'a>) -> Vec<Element<'a, Message>> {
     let mut rows: Vec<Element<'a, Message>> = Vec::new();
 
     let computed = props.map_or(0.0, |m| m.mass);
+    // A pod set has no override of its own: its mass is its parts' (every copy), read only.
+    if rocket.is_pod(p.id) {
+        rows.push(value_row("Total", ui::with_unit(computed, Quantity::Mass, units), None));
+        rows.push(value_row("CG", ui::with_unit(props.map_or(0.0, |m| m.cg), Quantity::Length, units), None));
+        return rows;
+    }
     let group = rocket.radial(p.id).filter(|r| r.count > 1).map(|r| r.count);
-    let computed_text = match group {
+    let mut computed_text = match group {
         Some(n) => format!("{} ×{n}", ui::with_unit(computed, Quantity::Mass, units)),
         None => ui::with_unit(computed, Quantity::Mass, units),
     };
+    // The mass of a pod's part is that of every copy of the pod; overrides are per copy.
+    let in_pod = rocket.pod_of(p.id).map(|pod| pod.count);
+    if let Some(copies) = in_pod.filter(|n| *n > 1) {
+        computed_text = format!("{computed_text} ×{copies}");
+    }
+    let override_label = if in_pod.is_some() { "Mass / copy" } else { "Mass" };
     match (is_mass_component, mass_override) {
         // A mass component's mass is its own number in 01 Geometry; here it is only read.
         (true, _) => rows.push(value_row("Mass", computed_text, None)),
         (false, None) => rows.push(value_row("Computed", computed_text, Some(ghost("Override…", Message::StartOverride(Field::MassOverride))))),
         (false, Some(m)) => {
-            rows.push(f.overridden("Mass", m, Quantity::Mass, Field::MassOverride));
+            rows.push(f.overridden(override_label, m, Quantity::Mass, Field::MassOverride));
             rows.push(value_row(
                 "Computed",
                 ui::with_unit(computed_unset(p), Quantity::Mass, units),
@@ -407,6 +473,7 @@ pub fn first_field(rocket: &Rocket, id: u64) -> Option<Field> {
             RadialKind::FreeformFin { .. } => dim(Dim::Thickness),
             RadialKind::LaunchLug { .. } => dim(Dim::Length),
             RadialKind::RailButton { .. } => dim(Dim::Height),
+            RadialKind::Pod { .. } => dim(Dim::Gap),
         },
         PartRef::Internal(i) => match &i.kind {
             InternalKind::InnerTube { .. } | InternalKind::Coupler { .. } => dim(Dim::Length),

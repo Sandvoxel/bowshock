@@ -114,6 +114,10 @@ fn name_of(r: &RadialPart) -> String {
 pub fn bar<'a>(state: &'a State, ctx: &'a Ctx, id: PartId) -> Option<Element<'a, Message>> {
     let rocket = ctx.doc.rocket();
     let r = rocket.radial(id)?;
+    // A pod's copies cannot be detached, split or unlinked: the count in the geometry section is all there is to a pod set.
+    if r.kind.is_pod() {
+        return None;
+    }
     let mut rows: Vec<Element<'a, Message>> = Vec::new();
     let candidates = rocket.rejoin_candidates(id);
     if r.count > 1 {

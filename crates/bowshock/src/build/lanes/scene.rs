@@ -1,7 +1,7 @@
 //! The lanes' data: the rocket turned into bars in stations (metres from the tip), sub-rows, stage marks and the mass profile.
 //! Pure: no widgets and no pixels (those are `geometry` and `canvas`), so the packing and the numbers are unit-tested.
 
-use bowshock_model::{ConfigId, InternalKind, PartClass, PartId, PartKind, PartRef, RadialKind, Rocket, Stage, System};
+use bowshock_model::{ConfigId, InternalKind, PartClass, PartId, PartKind, PartRef, RadialKind, RadialPart, Rocket, Stage, System};
 use bowshock_motors::{Motor, MotorDb};
 use bowshock_sim::from_model::Phase;
 
@@ -52,6 +52,28 @@ pub struct Edit {
     pub resize_fore: bool,
 }
 
+/// The pod set a bar belongs to: every part standing inside a pod is drawn in its own system's lane, bracketed with the others
+/// of the same pod (the link glyph and `Pod ×2` of a symmetry group).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PodMark {
+    /// The pod set (what the bracket selects).
+    pub id: PartId,
+    /// The group label: `Pod ×2` (the pod's name and its count; just the name for a single pod).
+    pub label: String,
+    /// Copies of the pod.
+    pub count: u8,
+}
+
+/// The group label of a pod set, as its bar and the brackets of its parts show it.
+pub fn pod_label(pod: &RadialPart) -> String {
+    let base = pod.name.clone().unwrap_or_else(|| "Pod".to_string());
+    if pod.count > 1 {
+        format!("{base} ×{}", pod.count)
+    } else {
+        base
+    }
+}
+
 /// One bar: a part (or a motor) at its real station in its system's lane.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Bar {
@@ -95,6 +117,10 @@ pub struct Bar {
     pub fin: bool,
     /// A part's shoulder inside the neighbouring tube: drawn as a short block, not something to snap to.
     pub shoulder: bool,
+    /// The pod set the part stands in (`None` for a part of the core, and for the pod set itself).
+    pub pod: Option<PodMark>,
+    /// A pod set itself (its bar is in the Structure lane; its parts carry the [`PodMark`]).
+    pub pod_set: bool,
     /// Drag abilities.
     pub edit: Edit,
 }
@@ -111,6 +137,15 @@ impl Bar {
     /// Length in metres.
     pub fn extent(&self) -> f64 {
         self.end - self.start
+    }
+
+    /// Packing order: the core (0), then pod sets (1), then the parts inside pods (2).
+    fn tier(&self) -> u8 {
+        match (self.pod_set, self.pod.is_some()) {
+            (_, true) => 2,
+            (true, _) => 1,
+            _ => 0,
+        }
     }
 }
 
@@ -244,12 +279,28 @@ impl Scene {
         let first = phase.first_stage();
         let dropped_from = if stages.len() > 1 && first > 1 { stages.iter().find(|s| s.index == first).map(|s| s.aft_station) } else { None };
         let dropped = |start: f64| dropped_from.is_some_and(|from| start >= from - EPS);
+        // A pod, and everything in it, goes with the stage of the core part the pod stands on (it may overhang that stage's joint).
+        let dropped_in = |id: PartId, start: f64, in_pod: bool| {
+            if in_pod && dropped_from.is_some() {
+                rocket.stage_of(id).is_some_and(|s| s < first)
+            } else {
+                dropped(start)
+            }
+        };
         let stations = rocket.stations();
         let mut bars: Vec<Bar> = Vec::new();
 
         // Airframe.
-        for (i, part) in rocket.parts().iter().enumerate() {
-            let (start, end) = (stations[i], stations[i + 1]);
+        let pod_mark = |pod: &RadialPart| PodMark { id: pod.id, label: pod_label(pod), count: pod.count };
+        let parts_in_pods = rocket.pods().flat_map(|pod| {
+            let mark = pod_mark(pod);
+            pod.kind.pod_body().into_iter().flat_map(|b| b.parts()).filter_map(move |p| {
+                let (start, end) = rocket.part_span(p.id)?;
+                Some((p, start, end, Some(mark.clone())))
+            })
+        });
+        let core_parts = rocket.parts().iter().enumerate().map(|(i, p)| (p, stations[i], stations[i + 1], None));
+        for (part, start, end, pod) in core_parts.chain(parts_in_pods) {
             let dim = match part.kind {
                 PartKind::BodyTube { diameter, .. } => format!("{} · Ø{}", len(end - start), len(diameter)),
                 _ => len(end - start),
@@ -263,7 +314,7 @@ impl Scene {
                 dim,
                 sub: 0,
                 overrides: String::new(),
-                dropped: dropped(start),
+                dropped: dropped_in(part.id, start, pod.is_some()),
                 count: 1,
                 class: Some(PartClass::Axial),
                 parent: None,
@@ -275,6 +326,8 @@ impl Scene {
                 alt: false,
                 fin: false,
                 shoulder: false,
+                pod: pod.clone(),
+                pod_set: false,
                 edit: Edit { movable: true, resize_aft: true, resize_fore: false },
             });
             // A shoulder inside the neighbouring tube: a short dashed block of the part's own bar, in the lane's structure row.
@@ -290,7 +343,7 @@ impl Scene {
                     dim: len(s.length),
                     sub: 0,
                     overrides: String::new(),
-                    dropped: dropped(start),
+                    dropped: dropped_in(part.id, start, pod.is_some()),
                     count: 1,
                     class: Some(PartClass::Axial),
                     parent: None,
@@ -302,19 +355,26 @@ impl Scene {
                     alt: false,
                     fin: false,
                     shoulder: true,
+                    pod: pod.clone(),
+                    pod_set: false,
                     edit: Edit::default(),
                 });
             }
         }
 
         // Radial groups.
-        for radial in rocket.radials() {
+        let radials_in_pods = rocket.pods().flat_map(|pod| {
+            let mark = pod_mark(pod);
+            pod.kind.pod_body().into_iter().flat_map(|b| b.radials()).map(move |r| (r, Some(mark.clone())))
+        });
+        for (radial, pod) in rocket.radials().iter().map(|r| (r, None)).chain(radials_in_pods) {
             let Some(start) = rocket.radial_station(radial) else { continue };
             let end = start + radial.kind.extent();
             let parent = rocket.part(radial.parent);
             let base = radial.name.clone().unwrap_or_else(|| match &radial.kind {
                 k if k.is_fin() => "Fins".to_string(),
                 RadialKind::LaunchLug { .. } => "Lug".to_string(),
+                RadialKind::Pod { .. } => "Pod".to_string(),
                 _ => "Rail".to_string(),
             });
             let name = if radial.count > 1 { format!("{base} ×{}{}", radial.count, remaining_copies(radial)) } else { base };
@@ -327,7 +387,7 @@ impl Scene {
                 dim: String::new(),
                 sub: 0,
                 overrides: radial.override_summary(),
-                dropped: dropped(start),
+                dropped: dropped_in(radial.id, start, pod.is_some() || radial.kind.is_pod()),
                 count: radial.count,
                 class: Some(PartClass::Radial),
                 parent: Some(radial.parent),
@@ -339,6 +399,8 @@ impl Scene {
                 alt: false,
                 fin: radial.kind.is_fin(),
                 shoulder: false,
+                pod,
+                pod_set: radial.kind.is_pod(),
                 edit: Edit {
                     movable: true,
                     resize_aft: matches!(radial.kind, RadialKind::FinSet { .. } | RadialKind::EllipticalFin { .. } | RadialKind::LaunchLug { .. }),
@@ -348,7 +410,11 @@ impl Scene {
         }
 
         // Internal parts.
-        for part in rocket.internals() {
+        let internals_in_pods = rocket.pods().flat_map(|pod| {
+            let mark = pod_mark(pod);
+            pod.kind.pod_body().into_iter().flat_map(|b| b.internals()).map(move |p| (p, Some(mark.clone())))
+        });
+        for (part, pod) in rocket.internals().iter().map(|p| (p, None)).chain(internals_in_pods) {
             let Some(start) = rocket.part_station(part.id) else { continue };
             let extent = part.kind.extent();
             let end = start + extent;
@@ -376,7 +442,7 @@ impl Scene {
                 dim,
                 sub: 0,
                 overrides: String::new(),
-                dropped: dropped(start),
+                dropped: dropped_in(part.id, start, pod.is_some()),
                 count: 1,
                 class: Some(PartClass::Internal),
                 parent: Some(part.parent),
@@ -388,6 +454,8 @@ impl Scene {
                 alt: false,
                 fin: false,
                 shoulder: false,
+                pod,
+                pod_set: false,
                 edit: Edit { movable: true, resize_aft: internal_resizable(&part.kind), resize_fore: internal_resizable(&part.kind) },
             });
         }
@@ -404,17 +472,19 @@ impl Scene {
                     continue;
                 };
                 let (end, start) = (mount.motor_aft_station, mount.motor_aft_station - motor.length);
+                // A pod's mount holds one motor per copy of the pod: one bar, `×N`, in the pod's bracket.
+                let name = if mount.copies > 1 { format!("{} ×{}", motor.designation, mount.copies) } else { motor.designation.clone() };
                 bars.push(Bar {
                     key: BarKey::Motor { mount: mount.id, config: config.id },
                     system: System::Propulsion,
                     start,
                     end,
-                    name: motor.designation.clone(),
+                    name,
                     dim: len(motor.length),
                     sub: 0,
                     overrides: String::new(),
-                    dropped: dropped(start),
-                    count: 1,
+                    dropped: dropped_in(mount.id, start, mount.pod.is_some()),
+                    count: mount.copies.max(1),
                     class: None,
                     parent: None,
                     container: Some((mount.fore_station, mount.aft_station)),
@@ -425,6 +495,8 @@ impl Scene {
                     alt: config.id != active,
                     fin: false,
                     shoulder: false,
+                    pod: mount.pod.and_then(|id| rocket.pods().find(|p| p.id == id)).map(pod_mark),
+                    pod_set: false,
                     edit: Edit::default(),
                 });
             }
@@ -507,10 +579,11 @@ fn pack(bars: &mut [Bar]) -> Vec<Lane> {
         if idx.is_empty() {
             continue;
         }
-        // Current parts before the other configurations' motors, then fore to aft, longer first.
+        // Current parts before the other configurations' motors; the core before the pod sets, those before the parts inside
+        // them (so a pod never pushes the core's own bars down a row); then fore to aft, longer first.
         idx.sort_by(|&a, &b| {
             let (x, y) = (&bars[a], &bars[b]);
-            x.alt.cmp(&y.alt).then(x.start.total_cmp(&y.start)).then(y.end.total_cmp(&x.end))
+            x.alt.cmp(&y.alt).then(x.tier().cmp(&y.tier())).then(x.start.total_cmp(&y.start)).then(y.end.total_cmp(&x.end))
         });
         let mut rows: Vec<f64> = Vec::new();
         let mut placed: Vec<(usize, usize)> = Vec::new(); // (bar, row) of the regular bars
@@ -600,10 +673,11 @@ pub fn describe(bar: &Bar, rocket: &Rocket, units: UnitSystem) -> String {
         BarKey::Part(id) => rocket.kind_of(id).map_or("", |p: PartRef<'_>| p.kind_name()),
         BarKey::Motor { .. } => "Motor",
     };
+    let pod = bar.pod.as_ref().map_or(String::new(), |p| format!(" · in {}", p.label));
     if bar.name.eq_ignore_ascii_case(kind) || kind.is_empty() {
-        format!("{} · {at}", bar.name)
+        format!("{} · {at}{pod}", bar.name)
     } else {
-        format!("{} ({}) · {at}", bar.name, kind.to_lowercase())
+        format!("{} ({}) · {at}{pod}", bar.name, kind.to_lowercase())
     }
 }
 
@@ -771,5 +845,191 @@ mod tests {
         assert!(b.dropped && !upper.part_bar(sustainer).unwrap().dropped);
         assert!((upper.dropped_from.unwrap() - 0.8).abs() < 1e-9);
         assert!(upper.seps[0].lower_dropped);
+    }
+}
+
+#[cfg(test)]
+mod pod_tests {
+    use super::*;
+    use bowshock_model::{MassRole, NoseShape};
+
+    /// A 0.2 m nose and a 0.8 m tube carrying a pod set of two standard pods at 0.2 m of the tube, with three fins on the pod's
+    /// tube and a ballast in it. Returns the rocket, the pod set, the pod's tube, its fins and the ballast.
+    fn with_pods() -> (Rocket, PartId, PartId, PartId, PartId) {
+        let mut r = Rocket::default();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1 }).unwrap();
+        let core = r.insert(1, PartKind::BodyTube { length: 0.8, diameter: 0.1 }).unwrap();
+        let kind = r.default_pod();
+        let pod = r.attach_radial(core, 0.2, 0.0, 2, kind).unwrap();
+        let tube = r.pods().next().and_then(|p| p.kind.pod_body()).unwrap().parts().last().unwrap().id;
+        let fins =
+            r.attach_radial(tube, 0.1, 0.0, 3, RadialKind::FinSet { root_chord: 0.1, tip_chord: 0.05, span: 0.04, sweep: 0.03, thickness: 0.003 }).unwrap();
+        let ballast = r.attach_internal(tube, 0.05, InternalKind::MassComponent { mass: 0.1, length: 0.05, diameter: None, role: MassRole::Ballast }).unwrap();
+        (r, pod, tube, fins, ballast)
+    }
+
+    fn build(rocket: &Rocket) -> Scene {
+        let db = MotorDb::bundled();
+        let stages = rocket.stages();
+        Scene::build(&Inputs { rocket, stages: &stages, phase: Phase::Full, motors: &db, units: UnitSystem::MmGS, compare: false })
+    }
+
+    #[test]
+    fn a_pod_set_is_a_structure_bar_labelled_with_its_count_and_selects_the_pod() {
+        let (rocket, pod, ..) = with_pods();
+        let scene = build(&rocket);
+        let bar = scene.part_bar(pod).expect("the pod has a bar");
+        assert_eq!((bar.system, bar.name.as_str(), bar.count, bar.class), (System::Structure, "Pod ×2", 2, Some(PartClass::Radial)));
+        assert_eq!(bar.part(), pod);
+        // It spans the pod's stations, and is on no pod itself.
+        let (fore, aft) = rocket.part_span(pod).unwrap();
+        assert!((bar.start - fore).abs() < 1e-9 && (bar.end - aft).abs() < 1e-9 && (fore - 0.4).abs() < 1e-9);
+        assert!(bar.pod.is_none() && bar.edit.movable && !bar.edit.resize_aft);
+        assert!(scene.lanes.iter().any(|l| l.system == System::Structure));
+    }
+
+    #[test]
+    fn the_parts_of_a_pod_sit_in_their_own_lanes_at_their_stations_grouped_as_the_pod() {
+        let (rocket, pod, tube, fins, ballast) = with_pods();
+        let scene = build(&rocket);
+        let body = rocket.pods().next().and_then(|p| p.kind.pod_body()).unwrap();
+        // Every part of the pod has a bar in its system's lane, bracketed `Pod ×2`.
+        for id in body.ids() {
+            let bar = scene.part_bar(id).unwrap_or_else(|| panic!("no bar for {id}"));
+            let mark = bar.pod.as_ref().expect("a member of the pod");
+            assert_eq!((mark.id, mark.label.as_str(), mark.count), (pod, "Pod ×2", 2));
+            assert_eq!(bar.system, rocket.kind_of(id).unwrap().system());
+            let (fore, aft) = rocket.part_span(id).unwrap();
+            assert!((bar.start - fore).abs() < 1e-9 && (bar.end - aft).abs() < 1e-9, "{}", bar.name);
+            assert!(scene.lanes.iter().any(|l| l.system == bar.system && bar.sub < l.subs));
+        }
+        // The fins are in Aero with their own count, the ballast in Avionics, the tube in Structure.
+        let fin_bar = scene.part_bar(fins).unwrap();
+        assert_eq!((fin_bar.system, fin_bar.name.as_str(), fin_bar.count, fin_bar.fin), (System::Aero, "Fins ×3", 3, true));
+        assert_eq!(scene.part_bar(ballast).unwrap().system, System::Avionics);
+        let tube_bar = scene.part_bar(tube).unwrap();
+        assert_eq!(tube_bar.system, System::Structure);
+        // The pod tube is where the model puts it: behind the pod's nose, which starts at the pod's station.
+        assert!((tube_bar.start - (0.4 + body.parts()[0].kind.length())).abs() < 1e-9);
+        // A bar is only grouped with its own pod: the core has no marks, and each id has exactly one bar.
+        assert!(scene.bars.iter().filter(|b| b.pod.is_none()).all(|b| rocket.pod_of(b.part()).is_none()));
+        let n = rocket.ids().len();
+        assert_eq!(scene.bars.iter().filter(|b| matches!(b.key, BarKey::Part(_)) && !b.shoulder).count(), n);
+        // Hovering names the pod.
+        assert!(describe(fin_bar, &rocket, UnitSystem::MmGS).ends_with("in Pod ×2"));
+        // The pod's mass is on the mass shading.
+        assert!(scene.mass.iter().sum::<f32>() > 0.0);
+    }
+
+    #[test]
+    fn a_single_pod_is_just_called_pod_and_a_second_set_is_grouped_apart() {
+        let (mut rocket, pod, ..) = with_pods();
+        assert!(rocket.set_radial(pod, rocket.radial(pod).unwrap().kind.clone(), 1));
+        let core = rocket.parts().last().unwrap().id;
+        let other_kind = rocket.default_pod();
+        let other = rocket.attach_radial(core, 0.5, 1.0, 3, other_kind).unwrap();
+        let scene = build(&rocket);
+        assert_eq!(scene.part_bar(pod).unwrap().name, "Pod");
+        assert!(scene.part_bar(pod).unwrap().count == 1);
+        assert_eq!(scene.part_bar(other).unwrap().name, "Pod ×3");
+        let first_nose = rocket.pods().find(|p| p.id == pod).and_then(|p| p.kind.pod_body()).unwrap().parts()[0].id;
+        let second_nose = rocket.pods().find(|p| p.id == other).and_then(|p| p.kind.pod_body()).unwrap().parts()[0].id;
+        assert_eq!(scene.part_bar(first_nose).unwrap().pod.as_ref().map(|m| m.id), Some(pod));
+        assert_eq!(scene.part_bar(second_nose).unwrap().pod.as_ref().map(|m| (m.id, m.label.as_str())), Some((other, "Pod ×3")));
+    }
+
+    /// An inner tube that is a motor mount, `length` long, 0.05 m down the tube `parent`.
+    fn mount(r: &mut Rocket, parent: PartId, length: f64) -> PartId {
+        r.attach_internal(parent, 0.05, InternalKind::InnerTube { outer_diameter: 0.03, thickness: 0.002, length, motor_mount: true, overhang: 0.0 }).unwrap()
+    }
+
+    fn pod_tube(r: &Rocket, pod: PartId) -> PartId {
+        r.pods().find(|p| p.id == pod).and_then(|p| p.kind.pod_body()).unwrap().parts().last().unwrap().id
+    }
+
+    #[test]
+    fn a_pod_mounts_motor_is_one_bar_in_the_propulsion_lane_labelled_with_its_copies_and_grouped_with_the_pod() {
+        let (mut rocket, pod, tube, ..) = with_pods();
+        let in_pod = mount(&mut rocket, tube, 0.4);
+        let config = rocket.active_config_id();
+        rocket.set_motor(config, in_pod, Some(bowshock_model::MotorRef::new("H128W", "Aerotech"))).unwrap();
+        // The core has a mount and a motor of its own, so the scene mixes both kinds.
+        let core = rocket.parts().last().unwrap().id;
+        let core_mount = mount(&mut rocket, core, 0.7);
+        rocket.set_motor(config, core_mount, Some(bowshock_model::MotorRef::new("I284W", "Aerotech"))).unwrap();
+
+        let mounts = rocket.motor_mounts();
+        assert_eq!(mounts.len(), 2);
+        let m = mounts.iter().find(|m| m.id == in_pod).unwrap();
+        assert_eq!((m.pod, m.copies), (Some(pod), 2));
+
+        let scene = build(&rocket);
+        // One bar for the pod's mount, however many copies; one for the core's.
+        let motors: Vec<&Bar> = scene.bars.iter().filter(|b| matches!(b.key, BarKey::Motor { .. })).collect();
+        assert_eq!(motors.len(), 2);
+        let bar = motors.iter().find(|b| b.part() == in_pod).expect("the pod's motor has a bar");
+        let motor = MotorDb::bundled().find("H128W").unwrap().length;
+        assert_eq!((bar.system, bar.name.as_str(), bar.count), (System::Propulsion, "H128W ×2", 2));
+        // At the mount's own station (its aft end is the motor's), inside the pod's bracket, under the pod's inner tube.
+        assert!((bar.end - m.motor_aft_station).abs() < 1e-9 && (bar.start - (m.motor_aft_station - motor)).abs() < 1e-9);
+        assert_eq!(bar.container, Some((m.fore_station, m.aft_station)));
+        let mark = bar.pod.as_ref().expect("grouped with its pod");
+        assert_eq!((mark.id, mark.label.as_str(), mark.count), (pod, "Pod ×2", 2));
+        assert!(scene.part_bar(in_pod).unwrap().sub < bar.sub, "the motor sits in a row under its mount");
+        assert!((scene.part_bar(in_pod).unwrap().start - m.fore_station).abs() < 1e-9);
+        // The core's motor is a plain bar.
+        let plain = motors.iter().find(|b| b.part() == core_mount).unwrap();
+        assert_eq!((plain.name.as_str(), plain.count, plain.pod.is_none()), ("I284W", 1, true));
+        // Hovering names the motor and its pod.
+        assert!(describe(bar, &rocket, UnitSystem::MmGS).ends_with("in Pod ×2"));
+        // The pod's mount is not a stage: the core's one mount is the only one the stage lists.
+        let stages = rocket.stages();
+        assert_eq!(stages.len(), 1);
+        assert_eq!(stages[0].mounts, vec![core_mount]);
+        assert_eq!(rocket.stage_of(in_pod), Some(stages[0].index));
+    }
+
+    #[test]
+    fn a_pods_motor_drops_away_with_the_stage_the_pod_stands_on() {
+        let mut rocket = Rocket::default();
+        rocket.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1 }).unwrap();
+        let sustainer = rocket.insert(1, PartKind::BodyTube { length: 0.6, diameter: 0.1 }).unwrap();
+        let booster = rocket.insert(2, PartKind::BodyTube { length: 0.5, diameter: 0.1 }).unwrap();
+        let (s_mount, b_mount) = (mount(&mut rocket, sustainer, 0.25), mount(&mut rocket, booster, 0.25));
+        assert_eq!(rocket.stages().len(), 2, "two mounts in line are two stages");
+        // A strap-on on each stage, each with a motor of its own.
+        let kind = rocket.default_pod();
+        let on_booster = rocket.attach_radial(booster, 0.02, 0.0, 2, kind.clone()).unwrap();
+        let on_sustainer = rocket.attach_radial(sustainer, 0.02, 0.0, 3, kind).unwrap();
+        let config = rocket.active_config_id();
+        let strap = |r: &mut Rocket, pod: PartId| {
+            let m = mount(r, pod_tube(r, pod), 0.2);
+            r.set_motor(config, m, Some(bowshock_model::MotorRef::new("I284W", "Aerotech"))).unwrap();
+            m
+        };
+        let (booster_strap, sustainer_strap) = (strap(&mut rocket, on_booster), strap(&mut rocket, on_sustainer));
+
+        // Only the two core mounts are stages; each strap-on's mount belongs to the stage of the part its pod stands on.
+        let stages = rocket.stages();
+        assert_eq!(stages.iter().map(|s| s.mounts.clone()).collect::<Vec<_>>(), vec![vec![b_mount], vec![s_mount]]);
+        assert_eq!((rocket.stage_of(booster_strap), rocket.stage_of(sustainer_strap)), (Some(1), Some(2)));
+
+        let build_phase = |phase| {
+            let db = MotorDb::bundled();
+            Scene::build(&Inputs { rocket: &rocket, stages: &stages, phase, motors: &db, units: UnitSystem::MmGS, compare: false })
+        };
+        let full = build_phase(Phase::Full);
+        assert!(full.bars.iter().all(|b| !b.dropped));
+        let upper = build_phase(Phase::UpperFrom(2));
+        let bar = |scene: &Scene, mount: PartId| scene.bars.iter().find(|b| b.key.part() == mount && matches!(b.key, BarKey::Motor { .. })).unwrap().dropped;
+        assert!(bar(&upper, booster_strap), "the booster's strap-on is gone with the booster");
+        assert!(!bar(&upper, sustainer_strap), "the sustainer's strap-on flies on");
+        // So is everything else in each pod, and the pod set itself.
+        for (pod, gone) in [(on_booster, true), (on_sustainer, false)] {
+            assert_eq!(upper.part_bar(pod).unwrap().dropped, gone);
+            for id in rocket.pods().find(|p| p.id == pod).and_then(|p| p.kind.pod_body()).unwrap().ids() {
+                assert_eq!(upper.part_bar(id).unwrap().dropped, gone, "part {id}");
+            }
+        }
     }
 }

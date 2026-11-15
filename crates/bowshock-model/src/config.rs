@@ -203,6 +203,11 @@ pub struct MotorMount {
     pub inner_diameter: f64,
     /// Length of the tube.
     pub length: f64,
+    /// The pod set the mount is in; `None` for a mount of the core. A pod's mount holds one motor per copy of the pod: the
+    /// motors fly with the stage of the core part the pod stands on, lit with it (strap-on boosters).
+    pub pod: Option<PartId>,
+    /// How many motors the mount stands for: the copies of its pod, 1 for the core.
+    pub copies: u8,
 }
 
 /// Why a configuration change was refused.
@@ -432,17 +437,19 @@ impl Rocket {
         Some(if motors.is_empty() { "No motor".to_string() } else { motors.iter().map(|m| m.1).collect::<Vec<_>>().join(" → ") })
     }
 
-    /// The motor mounts (inner tubes with `motor_mount`), fore to aft by their fore end.
+    /// The motor mounts (inner tubes with `motor_mount`) of the core and of pods, fore to aft by their fore end. A mount in a pod
+    /// stands for one motor per copy of the pod ([`MotorMount::copies`]) and is left out of the stages.
     pub fn motor_mounts(&self) -> Vec<MotorMount> {
-        let stations = self.stations();
         let mut mounts: Vec<MotorMount> = self
             .internals
             .iter()
+            .chain(self.pod_internals())
             .filter_map(|p| {
                 let InternalKind::InnerTube { outer_diameter, thickness, length, motor_mount: true, overhang } = p.kind else {
                     return None;
                 };
-                let fore = stations[self.index_of(p.parent)?] + p.offset;
+                let fore = self.part_station(p.parent)? + p.offset;
+                let pod = self.pod_of(p.parent);
                 Some(MotorMount {
                     id: p.id,
                     parent: p.parent,
@@ -452,6 +459,8 @@ impl Rocket {
                     motor_aft_station: fore + length + overhang,
                     inner_diameter: (outer_diameter - 2.0 * thickness).max(0.0),
                     length,
+                    pod: pod.map(|p| p.id),
+                    copies: pod.map_or(1, |p| p.count.max(1)),
                 })
             })
             .collect();
@@ -461,12 +470,17 @@ impl Rocket {
 
     /// Drops motor slots whose mount is no longer a motor mount.
     pub(crate) fn prune_configs(&mut self) {
-        let mounts: Vec<PartId> = self.internals.iter().filter(|p| p.kind.is_motor_mount()).map(|p| p.id).collect();
+        let mounts: Vec<PartId> = self.internals.iter().chain(self.pod_internals()).filter(|p| p.kind.is_motor_mount()).map(|p| p.id).collect();
         for c in &mut self.configs {
             c.motors.retain(|s| mounts.contains(&s.mount));
         }
-        let devices: Vec<PartId> =
-            self.internals.iter().filter(|p| matches!(p.kind, InternalKind::Parachute { .. } | InternalKind::Streamer { .. })).map(|p| p.id).collect();
+        let devices: Vec<PartId> = self
+            .internals
+            .iter()
+            .chain(self.pod_internals())
+            .filter(|p| matches!(p.kind, InternalKind::Parachute { .. } | InternalKind::Streamer { .. }))
+            .map(|p| p.id)
+            .collect();
         for c in &mut self.configs {
             c.recovery.retain(|r| devices.contains(&r.part));
         }

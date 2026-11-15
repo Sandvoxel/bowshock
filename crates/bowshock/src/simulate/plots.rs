@@ -1,12 +1,18 @@
-//! Turns finished runs into what the centre and right columns draw: the linked altitude / vertical velocity / acceleration
-//! plots with the reference flight's events (SimulateScreen, SimulateCompare) and the ground tracks (GroundTrack).
+//! Turns finished runs into what the centre and right columns draw: the linked plots of the layout (any data sources, one or
+//! several flights overlaid) with the reference flight's events (SimulateScreen, SimulateCompare) and the ground tracks
+//! (GroundTrack).
 
-use bowshock_sim::{EventKind, FlightResult, G0};
+use bowshock_model::PlotLayout;
+use bowshock_sim::{EventKind, FlightResult};
 
+use super::channels::{self, Channel};
 use super::flight::{Run, Spec};
-use crate::units::{Quantity, UnitSystem};
+use crate::units::UnitSystem;
 use crate::widgets::ground_track::{GroundTrack, Track, TrackPoint, Wind};
-use crate::widgets::plot::{Axis, EventMark, Panel, Phase, PlotGroup, Series, SeriesColor, Tag};
+use crate::widgets::plot::{Axis, EventMark, HLine, LabelAt, LegendItem, LineStyle, Panel, PanelEditor, Phase, PlotGroup, Series, SeriesColor};
+
+/// The line style of the first, second, third and fourth source of a plot: the flight is the colour, the source is the style.
+pub const STYLES: [LineStyle; 4] = [LineStyle::Solid, LineStyle::Dashed, LineStyle::Dotted, LineStyle::DashDot];
 
 /// Width kept clear at the right of every plot for the direct labels of a comparison (SimulateCompare).
 const LABEL_MARGIN: f32 = 96.0;
@@ -66,32 +72,64 @@ pub fn phases(result: &FlightResult) -> Vec<Phase> {
     bars
 }
 
-/// The linked plots for `entries` in the unit family of `system`. One entry is a lone flight (`ink`, one framed value tag per
-/// plot); several are a comparison (series colours, altitude labelled at the right end, one tooltip listing every flight).
-/// The events, phases and timeline belong to the entry at `reference`. `None` without entries.
-pub fn group(entries: &[Entry], reference: usize, system: UnitSystem) -> Option<PlotGroup> {
+/// The linked plots of `layout` for `entries` in the unit family of `system`. One entry is a lone flight (one framed value tag per
+/// plot); several are a comparison (the flight is the line's colour, altitude-like plots label each flight at the right end, one
+/// tooltip lists every line). A plot with several sources draws each in its own line style and names them in a legend. The
+/// events, phases and timeline belong to the entry at `reference`. A plot with the stability margin gets the document's minimum
+/// margin `min_margin` (calibers) as a dashed reference line. `None` without entries.
+pub fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &PlotLayout, min_margin: f64) -> Option<PlotGroup> {
     let reference = entries.get(reference).or(entries.first())?;
     let compare = entries.len() > 1;
-    let alt = system_unit(Quantity::Altitude, system);
-    let vel = system_unit(Quantity::Velocity, system);
+    let imperial = super::format::imperial(system);
+    let count = layout.panels.len();
 
-    let mut altitude = Panel::new("Altitude", alt.symbol).weight(1.2).zero_based();
-    let mut velocity = Panel::new("Vertical velocity", vel.symbol);
-    let mut accel = Panel::new("Acceleration", "g");
-    if compare {
-        velocity = velocity.tag(Tag::Off);
-        accel = accel.tag(Tag::Off);
-    }
-    for e in entries {
-        let samples = &e.run.result.trajectory.samples;
-        let series = |name: &str, f: &dyn Fn(&bowshock_sim::Sample) -> f64| Series::new(name, samples.iter().map(|s| (s.t, f(s))).collect()).color(e.color);
-        let a = series(e.name, &|s| alt.from_si(s.altitude));
-        altitude = altitude.with(if compare { a.label_margin() } else { a });
-        velocity = velocity.with(series(e.name, &|s| vel.from_si(s.vertical_velocity)));
-        accel = accel.with(series(e.name, &|s| s.vertical_acceleration / G0));
+    let mut group = PlotGroup::new(Axis::time());
+    for (index, def) in layout.panels.iter().enumerate() {
+        let sources: Vec<&Channel> = def.sources.iter().filter_map(|key| channels::find(key)).collect();
+        let Some(primary) = sources.first() else { continue };
+        let multi = sources.len() > 1;
+        let unit = primary.unit(imperial);
+        let title = if multi { primary.dim.title() } else { primary.label };
+        let mut panel = Panel::new(title, unit.symbol).editable(PanelEditor {
+            can_add: sources.len() < bowshock_model::MAX_PANEL_SOURCES,
+            can_up: index > 0,
+            can_down: index + 1 < count,
+            can_remove: count > 1,
+            legend: sources
+                .iter()
+                .zip(STYLES)
+                .map(|(c, style)| LegendItem { style, color: if compare { SeriesColor::Muted } else { c.color }, text: c.label.to_string() })
+                .collect(),
+        });
+        if primary.key == "altitude" {
+            panel = panel.weight(1.2);
+        }
+        if sources.iter().all(|c| c.zero_based) {
+            panel = panel.zero_based();
+        }
+        // The document's minimum static margin, dashed `ok` like Analyze's `MIN 1.0`.
+        if sources.iter().any(|c| c.key == "stability_margin") {
+            panel = panel.hline(HLine::dashed(min_margin, format!("Min {min_margin:.1}"), SeriesColor::Ok));
+        }
+        for e in entries {
+            let samples = &e.run.result.trajectory.samples;
+            for (c, style) in sources.iter().zip(STYLES) {
+                let name = match (compare, multi) {
+                    (false, false) => c.label.to_string(),
+                    (true, false) => e.name.to_string(),
+                    (false, true) => c.label.to_string(),
+                    (true, true) => format!("{} · {}", e.name, c.label),
+                };
+                let color = if compare { e.color } else { c.color };
+                let series = Series::new(name, c.series(samples, &unit)).color(color).style(style);
+                // A comparison names each flight at the right end of the first plot's first source.
+                let labelled = compare && index == 0 && std::ptr::eq(*c, sources[0]);
+                panel = panel.with(if labelled { series.label_as(e.name.to_string(), LabelAt::Margin) } else { series });
+            }
+        }
+        group = group.panel(panel);
     }
 
-    let mut group = PlotGroup::new(Axis::time()).panel(altitude).panel(velocity).panel(accel);
     group.events = events(&reference.run.result);
     if compare {
         group.events.retain(|m| m.label != "Landing");
@@ -102,10 +140,6 @@ pub fn group(entries: &[Entry], reference: usize, system: UnitSystem) -> Option<
     let end = entries.iter().map(|e| e.run.result.trajectory.samples.last().map_or(0.0, |s| s.t)).fold(0.0, f64::max);
     group.x_range = (end > 0.0).then_some((0.0, end));
     Some(group)
-}
-
-fn system_unit(quantity: Quantity, system: UnitSystem) -> crate::units::Unit {
-    *quantity.unit_for(super::format::plot_system(system))
 }
 
 /// The wind of `spec` as the ground track draws it.
@@ -134,9 +168,12 @@ pub fn ground(entries: &[Entry], reference: usize) -> GroundTrack {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bowshock_sim::{Event, Sample, Summary, Trajectory};
+    use bowshock_model::PlotPanel;
+    use bowshock_sim::{Event, Sample, Summary, Trajectory, G0};
     use std::sync::Arc;
     use std::time::Duration;
+
+    use crate::widgets::plot::Tag;
 
     fn sample(t: f64, alt: f64, vz: f64) -> Sample {
         Sample {
@@ -149,10 +186,13 @@ mod tests {
             mach: 0.1,
             acceleration: 1.0,
             vertical_acceleration: -G0,
-            thrust: 0.0,
-            drag: 0.0,
             mass: 1.0,
             stability_margin: 2.0,
+            cg: 0.7,
+            cp: 0.85,
+            thrust: 50.0 * t,
+            drag: 2.0 * t,
+            ..Sample::default()
         }
     }
 
@@ -196,21 +236,27 @@ mod tests {
     }
 
     #[test]
-    fn a_lone_flight_is_ink_and_a_comparison_labels_altitude_and_keeps_the_reference_events() {
+    fn a_lone_flight_is_ink_and_a_comparison_labels_the_first_plot_and_keeps_the_reference_events() {
         let r = run();
         let one = [Entry { name: "Nominal", color: SeriesColor::Ink, run: &r, scatter: None }];
-        let g = group(&one, 0, UnitSystem::MmGS).unwrap();
+        let g = group(&one, 0, UnitSystem::MmGS, &PlotLayout::default(), 1.0).unwrap();
         assert_eq!(g.panels.len(), 3);
         assert_eq!(g.panels[0].unit, "m");
         assert!(g.panels[0].series[0].label.is_none() && g.right_margin == 0.0);
+        assert!(g.panels[0].series[0].color == SeriesColor::Ink && g.panels[0].zero_base);
         assert_eq!(g.x_extent(), (0.0, 10.0));
         // Acceleration is in g: -g reads -1.
         assert!((g.panels[2].series[0].points[1].1 + 1.0).abs() < 1e-12);
+        // Every panel is editable: its title picks, and only the ends cannot move further.
+        let editors: Vec<_> = g.panels.iter().map(|p| p.editor.clone().unwrap()).collect();
+        assert!(!editors[0].can_up && editors[0].can_down && editors[1].can_up && editors[1].can_down && editors[2].can_up && !editors[2].can_down);
+        assert!(editors.iter().all(|e| e.can_add && e.can_remove));
 
         let two = [one[0], Entry { name: "Windy", color: SeriesColor::Series(2), run: &r, scatter: None }];
-        let g = group(&two, 1, UnitSystem::MmGS).unwrap();
+        let g = group(&two, 1, UnitSystem::MmGS, &PlotLayout::default(), 1.0).unwrap();
         assert!(g.panels[0].series.iter().all(|s| s.label.is_some()));
-        assert!(g.right_margin > 0.0 && g.panels[1].tag == Tag::Off);
+        assert!(g.panels[1].series.iter().all(|s| s.label.is_none()));
+        assert!(g.right_margin > 0.0 && g.panels[1].tag == Tag::Auto);
         assert!(g.events.iter().all(|m| m.label != "Landing"));
         assert_eq!(g.panels[0].series[1].color, SeriesColor::Series(2));
     }
@@ -219,9 +265,65 @@ mod tests {
     fn imperial_systems_plot_feet() {
         let r = run();
         let e = [Entry { name: "n", color: SeriesColor::Ink, run: &r, scatter: None }];
-        let g = group(&e, 0, UnitSystem::FtLbS).unwrap();
+        let g = group(&e, 0, UnitSystem::FtLbS, &PlotLayout::default(), 1.0).unwrap();
         assert_eq!((g.panels[0].unit.as_str(), g.panels[1].unit.as_str()), ("ft", "ft/s"));
         assert!((g.panels[0].series[0].points[1].1 - 300.0 / 0.3048).abs() < 1e-9);
+    }
+
+    fn layout(panels: &[&[&str]]) -> PlotLayout {
+        PlotLayout { panels: panels.iter().map(|p| PlotPanel::new(p)).collect() }
+    }
+
+    #[test]
+    fn a_panel_draws_any_source_in_its_unit_with_one_line_style_per_source() {
+        let r = run();
+        let e = [Entry { name: "Nominal", color: SeriesColor::Ink, run: &r, scatter: None }];
+        let g = group(&e, 0, UnitSystem::MmGS, &layout(&[&["thrust", "drag"], &["cg_station", "cp_station"], &["mach"]]), 1.0).unwrap();
+        // Force: both lines in N, the first solid and the second dashed, named by source and listed in the legend.
+        let force = &g.panels[0];
+        assert_eq!((force.title.as_str(), force.unit.as_str()), ("Force", "N"));
+        assert_eq!(
+            force.series.iter().map(|s| (s.name.as_str(), s.style)).collect::<Vec<_>>(),
+            [("Thrust", LineStyle::Solid), ("Drag force", LineStyle::Dashed)]
+        );
+        assert_eq!(force.series[0].points[2], (10.0, 500.0));
+        assert_eq!(force.series[1].points[2], (10.0, 20.0));
+        assert_eq!(force.editor.as_ref().unwrap().legend.len(), 2);
+        // Stations are millimetres and keep the CG and CP colours of the kit; the panel is anchored at zero.
+        let balance = &g.panels[1];
+        assert_eq!(balance.unit, "mm");
+        assert!((balance.series[0].points[0].1 - 700.0).abs() < 1e-9 && (balance.series[1].points[0].1 - 850.0).abs() < 1e-9);
+        assert_eq!((balance.series[0].color, balance.series[1].color), (SeriesColor::Cg, SeriesColor::Cp));
+        // Mach has no unit text.
+        assert_eq!((g.panels[2].title.as_str(), g.panels[2].unit.as_str()), ("Mach number", ""));
+        // The same layout in imperial: stations in inches, forces in lbf.
+        let g = group(&e, 0, UnitSystem::InOzS, &layout(&[&["thrust"], &["cg_station"]]), 1.0).unwrap();
+        assert_eq!((g.panels[0].unit.as_str(), g.panels[1].unit.as_str()), ("lbf", "in"));
+        assert!((g.panels[1].series[0].points[0].1 - 0.7 / 0.0254).abs() < 1e-9);
+    }
+
+    #[test]
+    fn overlaid_flights_and_several_sources_combine_colour_by_flight_and_style_by_source() {
+        let r = run();
+        let a = Entry { name: "Nominal", color: SeriesColor::Series(1), run: &r, scatter: None };
+        let b = Entry { name: "Windy", color: SeriesColor::Series(2), run: &r, scatter: None };
+        let g = group(&[a, b], 0, UnitSystem::MmGS, &layout(&[&["thrust", "drag"]]), 1.0).unwrap();
+        let lines: Vec<_> = g.panels[0].series.iter().map(|s| (s.name.as_str(), s.color, s.style)).collect();
+        assert_eq!(
+            lines,
+            [
+                ("Nominal · Thrust", SeriesColor::Series(1), LineStyle::Solid),
+                ("Nominal · Drag force", SeriesColor::Series(1), LineStyle::Dashed),
+                ("Windy · Thrust", SeriesColor::Series(2), LineStyle::Solid),
+                ("Windy · Drag force", SeriesColor::Series(2), LineStyle::Dashed),
+            ]
+        );
+        // Only the first source of each flight is labelled at the right end; the legend of the sources is neutral.
+        assert_eq!(g.panels[0].series.iter().filter(|s| s.label.is_some()).count(), 2);
+        assert!(g.panels[0].editor.as_ref().unwrap().legend.iter().all(|l| l.color == SeriesColor::Muted));
+        // One source per panel and two flights: the lines are named by flight.
+        let g = group(&[a, b], 0, UnitSystem::MmGS, &layout(&[&["mach"]]), 1.0).unwrap();
+        assert_eq!(g.panels[0].series.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["Nominal", "Windy"]);
     }
 
     #[test]
@@ -233,7 +335,7 @@ mod tests {
         assert_eq!((g.tracks[0].points[0].east, g.tracks[0].points[0].north), (0.0, 0.0));
         assert_eq!(g.field_radius, Some(300.0));
         assert!((g.wind.unwrap().from_deg - 250.0).abs() < 1e-9);
-        assert!(group(&[], 0, UnitSystem::MmGS).is_none());
+        assert!(group(&[], 0, UnitSystem::MmGS, &PlotLayout::default(), 1.0).is_none());
         assert!(ground(&[], 0).tracks.is_empty());
     }
 }

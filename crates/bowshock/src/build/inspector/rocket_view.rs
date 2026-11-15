@@ -74,7 +74,7 @@ pub fn view<'a>(ctx: &'a Ctx) -> (String, Vec<Element<'a, Message>>) {
         labeled("Designer", name_field("Who built it", &rocket.designer, Message::RocketDesigner)),
         form.fixed("Reference Ø", reference, Quantity::Length),
         form.fixed("Length", rocket.length(), Quantity::Length),
-        text_row("Parts", format!("{}", rocket.parts().len() + rocket.radials().len() + rocket.internals().len())),
+        text_row("Parts", format!("{}", rocket.ids().len())),
     ];
 
     let stages = ctx.physics.stages();
@@ -92,13 +92,15 @@ pub fn view<'a>(ctx: &'a Ctx) -> (String, Vec<Element<'a, Message>>) {
     config_rows.push(text_row("Configurations", format!("{}", rocket.configurations().len())));
     for mount in rocket.motor_mounts() {
         let slot = config.slot(mount.id);
-        let motor = slot.and_then(|s| s.motor.as_ref()).map_or_else(|| "empty".to_string(), |m| m.designation.clone());
+        let motor = slot
+            .and_then(|s| s.motor.as_ref())
+            .map_or_else(|| "empty".to_string(), |m| if mount.pod.is_some() { format!("{} ×{}", m.designation, mount.copies) } else { m.designation.clone() });
         let delay = match slot {
             Some(s) if s.motor.is_some() && s.is_plugged() => "plugged".to_string(),
             Some(s) if s.motor.is_some() => format!("{:.0} s delay", s.delay),
             _ => String::new(),
         };
-        let label = mount_label(ctx.physics.stages(), mount.id);
+        let label = mount_label(rocket, mount.id);
         config_rows.push(value_row(label, format!("{motor}  {delay}").trim_end().to_string(), None));
     }
 
@@ -135,8 +137,8 @@ pub fn view<'a>(ctx: &'a Ctx) -> (String, Vec<Element<'a, Message>>) {
 }
 
 /// The row label of a motor mount: the stage it fires in (labels are `'static` in the field column).
-fn mount_label(stages: &[Stage], id: PartId) -> &'static str {
-    let stage = stages.iter().find(|s| s.mounts.contains(&id)).map_or(1, |s| s.index);
+fn mount_label(rocket: &Rocket, id: PartId) -> &'static str {
+    let stage = rocket.stage_of(id).unwrap_or(1);
     match stage {
         1 => "Stage 1 motor",
         2 => "Stage 2 motor",

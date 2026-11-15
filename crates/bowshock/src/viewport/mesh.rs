@@ -22,9 +22,12 @@ use super::solids::{GpuVertex, Sink, Tag, LAYER_CAP, LAYER_CORD, LAYER_FILL, LAY
 const SEGMENTS: usize = 64;
 /// Segments around the axis of internal parts.
 const INNER_SEGMENTS: usize = 32;
-/// The least thickness a cut wall is drawn with (metres): a 1.5 mm cardboard wall would be a hairline in the cutaway, so the
-/// cap faces (only) are drawn at least this thick to keep the hatching legible.
-const MIN_CAP_WALL: f32 = 0.005;
+/// How far (metres) an internal part is held inside the surface it sits against (the bore it fills, the ring it passes
+/// through), so no two surfaces share a cylinder and z-fight.
+const INSET: f32 = 0.0002;
+/// How far (metres) a part's end faces are set inside its ends, so the faces of stacked parts and of whatever sits flush
+/// with an end never share a plane.
+const END_SET: f32 = 0.00015;
 
 /// The part of the cutaway that is removed: a wedge about the axis, `span` wide, centred on direction `centre` in the XY plane
 /// (an angle from +X towards +Y). The default is the left half, which faces the home view and the side-on profile.
@@ -66,6 +69,8 @@ pub struct Marks<'a> {
     pub ghost: Option<(usize, &'a PartKind)>,
     /// A radial part shown placed on an axial part.
     pub ghost_radial: Option<GhostRadial<'a>>,
+    /// A part shown inserted at this node of a pod's stack: `(pod, node index, kind)`.
+    pub ghost_pod: Option<(PartId, usize, &'a PartKind)>,
     /// Axial, radial or internal part under the cursor.
     pub hovered: Option<PartId>,
     /// Axial, radial or internal part selected.
@@ -141,7 +146,7 @@ impl Section {
     /// Radial extent `(from, to)` of the section along the unit direction `e` in the cut plane.
     fn range(self, e: Vec2) -> (f32, f32) {
         match self {
-            Section::Tube { outer, inner } => (inner.min(outer - MIN_CAP_WALL).max(0.0), outer),
+            Section::Tube { outer, inner } => (inner.min(outer).max(0.0), outer),
             Section::Cylinder(r) => (0.0, r),
             Section::Box { half_w, half_h } => (0.0, (half_w / e.x.abs().max(1e-6)).min(half_h / e.y.abs().max(1e-6))),
         }
@@ -223,7 +228,7 @@ impl Builder {
                 if ra <= 0.0 && rb <= 0.0 {
                     continue;
                 }
-                let (ia, ib) = (inner[i].min(ra - MIN_CAP_WALL).max(0.0), inner[i + 1].min(rb - MIN_CAP_WALL).max(0.0));
+                let (ia, ib) = (inner[i].min(ra).max(0.0), inner[i + 1].min(rb).max(0.0));
                 self.caps.fan(&[p(za, ia), p(zb, ib), p(zb, rb), p(za, ra)], n.extend(0.0));
             }
         }
@@ -284,16 +289,30 @@ impl Mesh {
             b.caps.tag = Some(tag);
             let start = b.marks();
             let profile: Vec<(f32, f32)> = kind.profile().iter().map(|&(pz, r)| (z0 + pz as f32, r as f32)).collect();
+            // The wall as built (a ghost has the default wall of its stock): hollow unless the wall reaches the axis.
+            let wall = id.and_then(|id| rocket.part(id)).map_or_else(|| kind.default_material().material().default_wall, |p| p.thickness) as f32;
+            let inner: Vec<f32> = profile.iter().map(|&(_, r)| (r - wall).max(0.0)).collect();
+            let hollow = inner.iter().any(|&r| r > 0.0);
             b.outer.revolve(&profile, SEGMENTS, Some((z0, z1)));
-            if i + 1 == n {
-                let radius = kind.aft_diameter() as f32 / 2.0;
-                if radius > 0.0 {
-                    b.outer.annulus(0.0, radius, z1, true, SEGMENTS, Some((z0, z1)));
-                }
+            if hollow {
+                // The bore: the inner surface faces the axis (material 2 marks it for the shader).
+                let bore: Vec<(f32, f32)> = profile.iter().zip(&inner).map(|(&(z, _), &r)| (z, r)).rev().collect();
+                b.outer.tag = Some(Tag { material: 2.0, ..tag });
+                b.outer.revolve(&bore, SEGMENTS, None);
+                b.outer.tag = Some(tag);
+            }
+            // End faces are annuli of the real wall (discs only for solid parts), set a hair inside the part so the stacked
+            // parts' faces and whatever sits flush with an end (rings, mount, motor) never share a plane.
+            let (first, last) = (profile[0], profile[profile.len() - 1]);
+            let (fore_in, aft_in) = (inner[0], inner[inner.len() - 1]);
+            if first.1 > 0.0 {
+                b.outer.annulus(fore_in, first.1, z0 + END_SET, false, SEGMENTS, None);
+            }
+            if last.1 > 0.0 {
+                b.outer.annulus(aft_in, last.1, z1 - END_SET, true, SEGMENTS, None);
             }
             if let Some(id) = id {
-                if let Some(part) = rocket.part(*id) {
-                    let inner: Vec<f32> = kind.profile().iter().map(|&(pz, _)| part.inner_diameter_at(pz) as f32 / 2.0).collect();
+                if rocket.part(*id).is_some() {
                     b.cap_shell(&profile, &inner, *state);
                     // Shoulders: tubes of the part's material reaching into the neighbouring airframe, seen with the shell
                     // cut away or see-through.
@@ -303,6 +322,8 @@ impl Mesh {
                         };
                         let (ro, len) = (d as f32 / 2.0, s.length as f32);
                         let ri = (ro - s.thickness as f32).max(0.0);
+                        // Set a hair inside the tube it enters, whose bore is now drawn.
+                        let ro = ro - INSET;
                         let (za, zb) = if aft { (z1, z1 + len) } else { (z0 - len, z0) };
                         b.inner.tag = Some(Tag { state: *state, material: 0.0, system: 0.0, layer: LAYER_INTERNAL, explode });
                         b.inner.tube(ro, ri, za, zb, INNER_SEGMENTS);
@@ -362,6 +383,8 @@ impl Mesh {
             let offset = rocket.clamp_offset(g.parent, g.offset, g.kind).unwrap_or(0.0);
             place(&mut b, &RadialPart::new(PartId::MAX, g.kind.clone(), g.parent, offset, g.angle, g.count), GHOST);
         }
+        // Pods: each copy of each pod is the pod's own mesh carried to its place (see `pods`).
+        super::pods::append(&mut b.outer.vertices, &mut b.parts, rocket, &marks, &z_of);
 
         // Internal parts.
         let rows = [-(rmax * 2.0 + 0.03), -(rmax * 4.0 + 0.04)];
@@ -410,7 +433,7 @@ impl Mesh {
                         LAYER_INTERNAL,
                         0,
                         ro,
-                        &|s| s.tube(ro, ri, z0, z0 + t, INNER_SEGMENTS),
+                        &|s| s.tube(ro - INSET, ri + INSET, z0, z0 + t, INNER_SEGMENTS),
                         Some((Section::Tube { outer: ro, inner: ri }, z0, z0 + t)),
                     );
                 }
@@ -425,7 +448,7 @@ impl Mesh {
                         LAYER_INTERNAL,
                         0,
                         ro,
-                        &|s| s.tube(ro, ri, z0, z0 + l, INNER_SEGMENTS),
+                        &|s| s.tube(ro - INSET, ri + INSET, z0, z0 + l, INNER_SEGMENTS),
                         Some((Section::Tube { outer: ro, inner: ri }, z0, z0 + l)),
                     );
                 }
@@ -436,7 +459,7 @@ impl Mesh {
                         LAYER_INTERNAL,
                         0,
                         ro,
-                        &|s| s.tube(ro, ri, z0, z0 + t, INNER_SEGMENTS),
+                        &|s| s.tube(ro - INSET, ri + INSET, z0, z0 + t, INNER_SEGMENTS),
                         Some((Section::Tube { outer: ro, inner: ri }, z0, z0 + t)),
                     );
                 }
@@ -498,7 +521,9 @@ impl Mesh {
                 let explode = Vec3::new(0.0, rows[1], parent_dz);
                 b.inner.tag = Some(Tag { state, material: 0.0, system: 2.0, layer: LAYER_INTERNAL, explode });
                 b.caps.tag = Some(Tag { state, material: 0.0, system: 2.0, layer: LAYER_FILL, explode });
-                b.inner.tube(radius, 0.0, fore, aft, INNER_SEGMENTS);
+                // The case sits a hair inside the bore, set back from both ends, so it shares no surface with the mount or the
+                // engine block.
+                b.inner.tube(radius - INSET, 0.0, fore + END_SET, aft - END_SET, INNER_SEGMENTS);
                 b.cap_section(Section::Cylinder(radius), fore, aft, 2.0, state);
                 b.leaders.push(Leader { origin: Vec3::new(0.0, 0.0, (fore + aft) / 2.0), offset: explode, radius });
             }
@@ -616,8 +641,8 @@ mod tests {
         let fins = RadialKind::FinSet { root_chord: 0.1, tip_chord: 0.05, span: 0.08, sweep: 0.03, thickness: 0.003 };
         let id = rocket.attach_radial(tube_id, 0.4, 0.0, 4, fins.clone()).unwrap();
         let mesh = Mesh::from_rocket(&rocket, Marks::default());
-        // The fin vertices use the fin colour; the airframe's own vertices are unchanged.
-        assert_eq!(mesh.vertices.iter().filter(|v| v.material == 0.0).count(), bare.vertices.len());
+        // The fin vertices use the fin colour; the airframe's own vertices (shell material 0, bore material 2) are unchanged.
+        assert_eq!(mesh.vertices.iter().filter(|v| v.material != 1.0).count(), bare.vertices.len());
         assert!(mesh.vertices.iter().any(|v| v.material == 1.0));
         // Fins reach `span` beyond the tube's 0.05 radius, at the up/down and sideways angles.
         assert!((mesh.max.y - 0.13).abs() < 1e-5 && (mesh.min.y + 0.13).abs() < 1e-5 && (mesh.max.x - 0.13).abs() < 1e-5);

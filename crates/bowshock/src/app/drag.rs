@@ -57,6 +57,16 @@ fn insert_part(rocket: &mut Rocket, index: usize, kind: &PartKind, origin: Optio
     placed.then_some(matched)
 }
 
+/// [`insert_part`] into the stack of pod `pod`.
+fn insert_in_pod(rocket: &mut Rocket, pod: PartId, index: usize, kind: &PartKind, origin: Option<&Part>) -> Option<PartKind> {
+    let matched = rocket.matched_in_pod(pod, index, kind);
+    let placed = match origin {
+        Some(part) => rocket.restore_in_pod(pod, index, Part { kind: matched.clone(), ..part.clone() }).is_ok(),
+        None => rocket.insert_in_pod(pod, index, kind.clone()).is_ok(),
+    };
+    placed.then_some(matched)
+}
+
 /// The status message for a part whose diameter was changed to fit its neighbours, if it was.
 fn matched_notice(asked: &PartKind, matched: &PartKind) -> Option<String> {
     let differs = |a: f64, b: f64| (a - b).abs() > 1e-9;
@@ -84,12 +94,14 @@ pub fn place(ctx: &mut Ctx, index: usize, kind: PartKind) -> bool {
 /// Starts carrying a new axial part from bin row `row`.
 pub fn start_axial(ctx: &mut Ctx, row: usize, name: &'static str, kind: PartKind) {
     ctx.doc.begin_drag(&format!("Add {}", name.to_lowercase()));
-    ctx.drag.axial = Some(Drag { row: Some(row), origin: None, name, kind, snap: None });
+    ctx.drag.axial = Some(Drag { row: Some(row), origin: None, name, kind, snap: None, pod_snap: None });
 }
 
 /// Starts carrying a new radial part from bin row `row`.
 pub fn start_radial(ctx: &mut Ctx, row: usize, kind: RadialKind) {
     ctx.doc.begin_drag(&format!("Add {}", kind.name().to_lowercase()));
+    // A pod from the bin is sized for this rocket.
+    let kind = if kind.is_pod() { ctx.doc.rocket().default_pod() } else { kind };
     let count = ctx.drag.symmetry;
     ctx.drag.radial = Some(RadialDrag { row: Some(row), kind, count, origin: None, target: None });
 }
@@ -100,6 +112,14 @@ pub fn grab(ctx: &mut Ctx, pick: Pick) {
     if ctx.drag.active() {
         return;
     }
+    // A part of a pod is carried with its pod: the body is the thing that moves.
+    let pick = match pick {
+        Pick::Axial(id) => match ctx.doc.rocket().pod_of(id) {
+            Some(pod) => Pick::Radial { id: pod.id, instance: 0 },
+            None => pick,
+        },
+        other => other,
+    };
     match pick {
         Pick::Axial(id) => {
             ctx.doc.begin_drag("Move part");
@@ -113,7 +133,14 @@ pub fn grab(ctx: &mut Ctx, pick: Pick) {
             match taken {
                 Some(origin) => {
                     ctx.selection = Selection::Part(id);
-                    ctx.drag.axial = Some(Drag { row: None, name: origin.part.kind.name(), kind: origin.part.kind.clone(), snap: None, origin: Some(origin) });
+                    ctx.drag.axial = Some(Drag {
+                        row: None,
+                        name: origin.part.kind.name(),
+                        kind: origin.part.kind.clone(),
+                        snap: None,
+                        pod_snap: None,
+                        origin: Some(origin),
+                    });
                 }
                 None => {
                     ctx.doc.end_drag(false);
@@ -161,8 +188,8 @@ pub fn finish_axial(ctx: &mut Ctx, drop: bool) {
         return;
     };
     let base = ctx.doc.drag_base().cloned();
-    let placed = match drag.snap {
-        Some(node) if drop => ctx.doc.drag_update(|r| {
+    let placed = match (drag.snap, drag.pod_snap) {
+        (Some(node), _) if drop => ctx.doc.drag_update(|r| {
             let matched = insert_part(r, node, &drag.kind, drag.origin.as_ref().map(|o| &o.part));
             if let (Some(_), Some(origin)) = (&matched, &drag.origin) {
                 // The parts it carried go back on it, wherever it landed.
@@ -171,6 +198,14 @@ pub fn finish_axial(ctx: &mut Ctx, drop: bool) {
                 if let Some(base) = &base {
                     restore_motors(r, base);
                 }
+            }
+            matched
+        }),
+        (None, Some((pod, node))) if drop => ctx.doc.drag_update(|r| {
+            let matched = insert_in_pod(r, pod, node, &drag.kind, drag.origin.as_ref().map(|o| &o.part));
+            if let (Some(_), Some(origin)) = (&matched, &drag.origin) {
+                r.restore_radials(origin.radials.clone());
+                r.restore_internals(origin.internals.clone());
             }
             matched
         }),

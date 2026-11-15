@@ -142,7 +142,82 @@ pub fn example_flights() -> Vec<FlightDef> {
     ]
 }
 
+/// Most panels the Simulate plots hold.
+pub const MAX_PLOT_PANELS: usize = 8;
+
+/// Most data sources (lines) one plot panel overlays.
+pub const MAX_PANEL_SOURCES: usize = 4;
+
+/// One plot of the Simulate screen: the data sources it draws, by stable key (`"altitude"`, `"mach"`, ...). The keys belong to the
+/// app's channel table; the model only stores them. The first source names the panel; every source of a panel has the same unit,
+/// because a plot has one y axis.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlotPanel {
+    /// Source keys, first is the panel's primary source. Never empty, never repeated, at most [`MAX_PANEL_SOURCES`].
+    pub sources: Vec<String>,
+}
+
+impl PlotPanel {
+    /// A panel drawing `sources`.
+    pub fn new<S: AsRef<str>>(sources: &[S]) -> PlotPanel {
+        PlotPanel { sources: sources.iter().map(|s| s.as_ref().to_string()).collect() }
+    }
+}
+
+/// The plots of the Simulate screen, top to bottom, saved with the document. The default is the kit's flight profile: altitude,
+/// vertical velocity, vertical acceleration (and is not written to the file).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlotLayout {
+    /// The panels, top to bottom. Never empty, at most [`MAX_PLOT_PANELS`].
+    pub panels: Vec<PlotPanel>,
+}
+
+impl Default for PlotLayout {
+    fn default() -> Self {
+        PlotLayout { panels: vec![PlotPanel::new(&["altitude"]), PlotPanel::new(&["vertical_velocity"]), PlotPanel::new(&["vertical_acceleration"])] }
+    }
+}
+
+impl PlotLayout {
+    /// Brings the layout into range: repeated sources and empty panels are dropped, panels and sources are capped, and a layout
+    /// with nothing left becomes the default.
+    pub fn sanitized(mut self) -> PlotLayout {
+        for panel in &mut self.panels {
+            let mut seen = std::collections::HashSet::new();
+            panel.sources.retain(|s| seen.insert(s.clone()));
+            panel.sources.truncate(MAX_PANEL_SOURCES);
+        }
+        self.panels.retain(|p| !p.sources.is_empty());
+        self.panels.truncate(MAX_PLOT_PANELS);
+        if self.panels.is_empty() {
+            PlotLayout::default()
+        } else {
+            self
+        }
+    }
+}
+
+/// Whether `layout` is the default, so it need not be written to the file.
+pub(crate) fn plots_are_default(layout: &PlotLayout) -> bool {
+    *layout == PlotLayout::default()
+}
+
 impl Rocket {
+    /// The Simulate plots' layout (which sources each panel draws).
+    pub fn plot_layout(&self) -> &PlotLayout {
+        &self.plots
+    }
+
+    /// Replaces the Simulate plots' layout; it is repaired as [`PlotLayout::sanitized`] does.
+    pub fn set_plot_layout(&mut self, layout: PlotLayout) {
+        self.plots = layout.sanitized();
+    }
+
+    /// Makes the plot layout valid (see [`PlotLayout::sanitized`]).
+    pub(crate) fn repair_plots(&mut self) {
+        self.plots = std::mem::take(&mut self.plots).sanitized();
+    }
+
     /// The stored flights, in list order. Never empty.
     pub fn flights(&self) -> &[FlightDef] {
         &self.flights
@@ -258,5 +333,49 @@ mod tests {
         let c = &fixed[1].conditions;
         assert_eq!((c.wind_speed, c.launch_angle, c.temperature), (0.0, MAX_LAUNCH_ANGLE, 220.0));
         assert!((c.wind_from - 1.5 * std::f64::consts::PI).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_default_plot_layout_is_the_flight_profile_and_is_not_written() {
+        let r = Rocket::default();
+        let sources: Vec<&str> = r.plot_layout().panels.iter().map(|p| p.sources[0].as_str()).collect();
+        assert_eq!(sources, ["altitude", "vertical_velocity", "vertical_acceleration"]);
+        assert!(!r.to_json().contains("\"plots\""), "the default layout stays out of the file");
+        // A file from before the layout existed loads with the default.
+        assert_eq!(Rocket::from_json(&r.to_json()).unwrap().plot_layout(), &PlotLayout::default());
+    }
+
+    #[test]
+    fn a_custom_plot_layout_round_trips_through_json() {
+        let mut r = Rocket::default();
+        let layout = PlotLayout {
+            panels: vec![PlotPanel::new(&["mach"]), PlotPanel::new(&["thrust", "drag", "weight"]), PlotPanel::new(&["cg_station", "cp_station"])],
+        };
+        r.set_plot_layout(layout.clone());
+        let json = r.to_json();
+        assert!(json.contains("\"plots\"") && json.contains("cp_station"));
+        let back = Rocket::from_json(&json).unwrap();
+        assert_eq!(back.plot_layout(), &layout);
+        assert_eq!(back, r);
+    }
+
+    #[test]
+    fn plot_layouts_are_repaired() {
+        let mut r = Rocket::default();
+        // Repeats, empty panels and too many sources or panels are cleaned; nothing left means the default.
+        r.set_plot_layout(PlotLayout {
+            panels: vec![PlotPanel::new(&["a", "a", "b", "c", "d", "e"]), PlotPanel { sources: Vec::new() }, PlotPanel::new(&["f"])],
+        });
+        let panels = &r.plot_layout().panels;
+        assert_eq!(panels.len(), 2);
+        assert_eq!(panels[0].sources, ["a", "b", "c", "d"]);
+        r.set_plot_layout(PlotLayout { panels: (0..20).map(|i| PlotPanel::new(&[format!("s{i}")])).collect() });
+        assert_eq!(r.plot_layout().panels.len(), MAX_PLOT_PANELS);
+        r.set_plot_layout(PlotLayout { panels: Vec::new() });
+        assert_eq!(r.plot_layout(), &PlotLayout::default());
+        // The same repair runs on load.
+        let mut json: serde_json::Value = serde_json::from_str(&Rocket::default().to_json()).unwrap();
+        json["rocket"]["plots"] = serde_json::json!({ "panels": [{ "sources": [] }] });
+        assert_eq!(Rocket::from_json(&json.to_string()).unwrap().plot_layout(), &PlotLayout::default());
     }
 }

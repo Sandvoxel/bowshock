@@ -1,0 +1,33 @@
+# Radial pods / strap-ons (design kit DirectEdit: "Strap-on body"): drag a pod pair from the Airframe bin onto the booster, put
+# fins on a pod, select a pod part and the pod set (its POD x2 tag), the aft view with the pod's handles.
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/pods.drive out/pods
+# The light theme: `click "Light"` first (the top bar's theme toggle).
+viewport 1280x800
+# Two copies; the pod is the last row of the Airframe list.
+click (119, 705)
+press "Pod / strap-on"
+move (300, 560)
+move (500, 400)
+move (700, 300)
+move (816, 282)
+screenshot pod-ghost.png
+release (816, 282)
+screenshot pod-placed.png
+# Fins & guides: three fins on a pod's tube (the surface under the cursor is the pod's).
+click (23, 104)
+press "Trapezoidal fins"
+move (300, 300)
+move (600, 300)
+move (800, 280)
+move (830, 275)
+screenshot pod-fins-drag.png
+release (830, 275)
+screenshot pod-fins.png
+# A part of a pod: brackets on every copy, the POD x2 tag, handles.
+click (816, 282)
+screenshot pod-part.png
+# The tag selects the set: Position / Gap / Angle handles; the aft view shows the copies round the core.
+click "2D"
+screenshot pod-profile.png
+click (800, 343)
+screenshot pod-set.png

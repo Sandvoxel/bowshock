@@ -102,6 +102,12 @@ fn outline_plain(kind: &RadialKind, at: Placement) -> Vec<Vec3> {
                 })
                 .unwrap_or_default()
         }
+        RadialKind::Pod { gap, ref body } => {
+            // Two rings around the pod's body, for the screen bounds of the set.
+            let r = body.radius() as f32;
+            let centre = u * (at.base + gap as f32 + r);
+            circle(centre + Vec3::Z * at.z0, Vec3::Z, r).into_iter().chain(circle(centre + Vec3::Z * (at.z0 + body.length() as f32), Vec3::Z, r)).collect()
+        }
     }
 }
 
@@ -196,7 +202,8 @@ fn emit_plain(out: &mut Vec<Vertex>, kind: &RadialKind, at: Placement, state: f3
             cylinder(out, u * (at.base - SINK) + z, u, h * STEM + SINK, d * STEM_WIDTH / 2.0, state);
             cylinder(out, u * (at.base + h * STEM) + z, u, h * (1.0 - STEM), d / 2.0, state);
         }
-        RadialKind::EllipticalFin { .. } | RadialKind::FreeformFin { .. } => {}
+        // A pod is meshed from its own parts (see `pods`).
+        RadialKind::EllipticalFin { .. } | RadialKind::FreeformFin { .. } | RadialKind::Pod { .. } => {}
     }
 }
 

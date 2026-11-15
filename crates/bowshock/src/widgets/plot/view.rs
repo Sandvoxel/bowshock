@@ -6,8 +6,8 @@ use iced::advanced::text::Alignment;
 use iced::widget::canvas::{self, Action, Event, Frame, Geometry, LineDash, LineJoin, Path, Stroke, Text};
 use iced::{alignment, keyboard, mouse, Color, Element, Fill, Font, Pixels, Point, Rectangle, Renderer, Size, Theme, Widget};
 
-use super::ticks::{decimals_for, fmt_fixed, nice_step, nice_ticks};
-use super::{window_points, LabelAt, LineStyle, Panel, PlotGroup, PlotMessage, PlotState, Tag};
+use super::ticks::{decimals_for, even_ticks, fmt_fixed, nice_step, nice_ticks};
+use super::{window_points, LabelAt, LineStyle, Panel, PanelAction, PlotGroup, PlotMessage, PlotState, Tag, YTicks};
 use crate::theme::{self, MONO, SANS};
 use crate::tokens::{Tokens, TEXT_LABEL};
 
@@ -202,6 +202,10 @@ impl PlotView<'_> {
 
     fn press(&self, st: &mut Interaction, layout: &Layout, p: Point) -> Option<Action<PlotMessage>> {
         let window = layout.window;
+        if let Some((i, chip)) = self.chip_at(layout, p) {
+            st.last_click = None;
+            return Some(if chip.enabled { Action::publish(PlotMessage::Panel(i, chip.action, chip.rect)).and_capture() } else { Action::capture() });
+        }
         if layout.in_strip(p) && self.state.is_zoomed() {
             let x = layout.strip_x_at(p.x);
             if x >= window.0 && x <= window.1 {
@@ -380,6 +384,9 @@ impl canvas::Program<PlotMessage> for PlotView<'_> {
         if layout.in_strip(p) && self.state.is_zoomed() {
             return mouse::Interaction::Grab;
         }
+        if self.chip_at(&layout, p).is_some_and(|(_, chip)| chip.enabled) {
+            return mouse::Interaction::Pointer;
+        }
         if !layout.in_plots(p) {
             return mouse::Interaction::default();
         }
@@ -393,7 +400,7 @@ impl canvas::Program<PlotMessage> for PlotView<'_> {
         }
     }
 
-    fn draw(&self, st: &Interaction, renderer: &Renderer, theme: &Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<Geometry> {
+    fn draw(&self, st: &Interaction, renderer: &Renderer, theme: &Theme, bounds: Rectangle, cursor: mouse::Cursor) -> Vec<Geometry> {
         let t = theme::tokens(theme);
         let mut frame = Frame::new(renderer, bounds.size());
         let layout = Layout::new(bounds.size(), self.group, self.state);
@@ -409,6 +416,10 @@ impl canvas::Program<PlotMessage> for PlotView<'_> {
         }
         for ((panel, plot), range) in self.group.panels.iter().zip(&layout.plots).zip(&ranges) {
             self.draw_panel(&mut frame, t, &layout, panel, *plot, *range);
+        }
+        let hot = cursor.position_in(bounds);
+        for (panel, plot) in self.group.panels.iter().zip(&layout.plots) {
+            self.draw_chrome(&mut frame, t, panel, *plot, hot);
         }
         if let Some(band) = self.state.band() {
             self.draw_band(&mut frame, t, &layout, band);
@@ -441,6 +452,7 @@ fn stroke<'a>(color: Color, width: f32, style: LineStyle) -> Stroke<'a> {
         LineStyle::Solid => s,
         LineStyle::Dashed => Stroke { line_dash: LineDash { segments: &[6.0, 4.0], offset: 0 }, ..s },
         LineStyle::Dotted => Stroke { line_dash: LineDash { segments: &[1.5, 3.0], offset: 0 }, ..s },
+        LineStyle::DashDot => Stroke { line_dash: LineDash { segments: &[6.0, 3.0, 1.5, 3.0], offset: 0 }, ..s },
     }
 }
 
@@ -561,12 +573,26 @@ impl PlotView<'_> {
         let center = Alignment::Center;
 
         // Grid and tick labels.
-        let y_target = ((plot.height / 30.0) as usize).clamp(2, 8);
-        let ydec = decimals_for(nice_step(yhi - ylo, y_target));
-        for v in nice_ticks(ylo, yhi, y_target) {
-            let y = crisp(ymap(v));
-            line(f, Point::new(plot.x, y), Point::new(right, y), t.line_100, 1.0, LineStyle::Solid);
-            put(f, &fmt_fixed(v, ydec), Point::new(plot.x - 6.0, y), t.ink_faint, FONT_TICK, Alignment::Right, alignment::Vertical::Center, MONO);
+        match self.group.y_ticks {
+            YTicks::Nice => {
+                let y_target = ((plot.height / 30.0) as usize).clamp(2, 8);
+                let ydec = decimals_for(nice_step(yhi - ylo, y_target));
+                for v in nice_ticks(ylo, yhi, y_target) {
+                    let y = crisp(ymap(v));
+                    line(f, Point::new(plot.x, y), Point::new(right, y), t.line_100, 1.0, LineStyle::Solid);
+                    put(f, &fmt_fixed(v, ydec), Point::new(plot.x - 6.0, y), t.ink_faint, FONT_TICK, Alignment::Right, alignment::Vertical::Center, MONO);
+                }
+            }
+            YTicks::Even(n) => {
+                let (ticks, ydec) = even_ticks(ylo, yhi, n);
+                for v in ticks {
+                    let y = crisp(ymap(v));
+                    line(f, Point::new(plot.x, y), Point::new(right, y), t.line_100, 1.0, LineStyle::Solid);
+                    // Left-aligned in the gutter, nudged inside the panel at the very top and bottom.
+                    let at = y.clamp(plot.y + 6.0, bottom - 6.0);
+                    put(f, &fmt_fixed(v, ydec), Point::new(6.0, at), t.ink_faint, FONT_TICK, Alignment::Left, alignment::Vertical::Center, MONO);
+                }
+            }
         }
         let x_target = ((plot.width / 80.0) as usize).clamp(2, 12);
         let xdec = decimals_for(nice_step(w1 - w0, x_target));
@@ -630,11 +656,15 @@ impl PlotView<'_> {
             put(f, &l.label.to_uppercase(), Point::new(right - 6.0, y - 3.0), color, FONT_SMALL, Alignment::Right, alignment::Vertical::Bottom, MONO);
         }
 
-        // Title, top left inside the plot, on a clear inset so grid and event lines do not strike through it.
-        let title = if panel.unit.is_empty() { panel.title.to_uppercase() } else { format!("{} · {}", panel.title.to_uppercase(), panel.unit) };
-        let inset = Size::new(mono_width(title.chars().count(), FONT_TICK) + 8.0, FONT_TICK + 6.0);
-        f.fill_rectangle(Point::new(plot.x + 2.0, plot.y + 1.0), inset, t.bg_200);
-        put(f, &title, Point::new(plot.x + 6.0, plot.y + 3.0), t.ink_faint, FONT_TICK, Alignment::Left, alignment::Vertical::Top, MONO);
+        // Title, top left inside the plot, on a clear inset so grid and event lines do not strike through it. An editable panel
+        // draws its title as a button after the lines (`draw_chrome`).
+        if panel.editor.is_none() {
+            let title = panel_title(panel);
+            let inset = Size::new(mono_width(title.chars().count(), FONT_TICK) + 8.0 + 2.0, FONT_TICK + 6.0);
+            // From the plot's edge, so no sliver of a line (a dashed reference line at the title's height) shows left of it.
+            f.fill_rectangle(Point::new(plot.x, plot.y + 1.0), inset, t.bg_200);
+            put(f, &title, Point::new(plot.x + 6.0, plot.y + 3.0), t.ink_faint, FONT_TICK, Alignment::Left, alignment::Vertical::Top, MONO);
+        }
 
         // Lines.
         let columns = plot.width as usize;
@@ -764,18 +794,18 @@ impl PlotView<'_> {
                 Tag::Only(i) => {
                     if let Some(&(_, y)) = rows.iter().find(|(k, _)| *k == i) {
                         let text = format!("{} {}{}", panel.series[i].name, fmt_fixed(y, dec), unit_suffix(panel));
-                        draw_tag(f, t, *plot, Point::new(cx, ymap(y)), &text);
+                        draw_tag(f, t, *plot, title_rect(panel, *plot), Point::new(cx, ymap(y)), &text);
                     }
                 }
                 Tag::Auto => match (rows.len(), total) {
                     (1, None) => {
                         let y = rows[0].1;
                         let text = format!("{}{} @ {xs}", fmt_fixed(y, dec), unit_suffix(panel));
-                        draw_tag(f, t, *plot, Point::new(cx, ymap(y)), &text);
+                        draw_tag(f, t, *plot, title_rect(panel, *plot), Point::new(cx, ymap(y)), &text);
                     }
                     (0, Some(y)) => {
                         let text = format!("{}{} @ {xs}", fmt_fixed(y, dec), unit_suffix(panel));
-                        draw_tag(f, t, *plot, Point::new(cx, ymap(y)), &text);
+                        draw_tag(f, t, *plot, title_rect(panel, *plot), Point::new(cx, ymap(y)), &text);
                     }
                     (n, _) if n > 1 => draw_tooltip(f, t, *plot, cx, &xs, panel, &rows, dec),
                     _ => {}
@@ -800,17 +830,29 @@ fn unit_suffix(panel: &Panel) -> String {
     }
 }
 
-/// A framed value tag above-right of `at` (below when there is no room above, left when it would leave the plot).
-fn draw_tag(f: &mut Frame, t: &Tokens, plot: Rectangle, at: Point, text: &str) {
-    let w = mono_width(text.chars().count(), FONT_TICK) + 2.0 * TAG_PAD;
+/// Where a tag `w` wide goes for a value drawn at `at`: above-right by default; never over `avoid` (the panel's title), so it
+/// tries below, then the other side of the point, then below that.
+fn tag_position(plot: Rectangle, avoid: Rectangle, at: Point, w: f32) -> Point {
     let right = plot.x + plot.width;
-    let x = if at.x + 10.0 + w > right { at.x - 10.0 - w } else { at.x + 10.0 };
-    let mut y = at.y - TAG_H - 8.0;
-    if y < plot.y {
-        y = at.y + 8.0;
-    }
-    let y = y.min(plot.y + plot.height - TAG_H).max(plot.y);
-    let origin = Point::new(x.round(), y.round());
+    let near = at.x + 10.0;
+    let far = at.x - 10.0 - w;
+    let (x_first, x_second) = if near + w > right { (far, near) } else { (near, far) };
+    let above = at.y - TAG_H - 8.0;
+    let below = at.y + 8.0;
+    let (y_first, y_second) = if above < plot.y { (below, above) } else { (above, below) };
+    let place = |x: f32, y: f32| (x, y.min(plot.y + plot.height - TAG_H).max(plot.y));
+    let candidates = [place(x_first, y_first), place(x_first, y_second), place(x_second, y_first), place(x_second, y_second)];
+    let inside = |x: f32| x >= plot.x && x + w <= right;
+    let clear = |x: f32, y: f32| inside(x) && !Rectangle::new(Point::new(x, y), Size::new(w, TAG_H)).intersects(&avoid);
+    // The point itself may sit under the title: then the tag goes just below the title, beside the point.
+    let under = place(x_first.clamp(plot.x, (right - w).max(plot.x)), avoid.y + avoid.height + 2.0);
+    let (x, y) = candidates.iter().copied().find(|&(x, y)| clear(x, y)).unwrap_or(under);
+    Point::new(x.round(), y.round())
+}
+
+fn draw_tag(f: &mut Frame, t: &Tokens, plot: Rectangle, avoid: Rectangle, at: Point, text: &str) {
+    let w = mono_width(text.chars().count(), FONT_TICK) + 2.0 * TAG_PAD;
+    let origin = tag_position(plot, avoid, at, w);
     f.fill_rectangle(origin, Size::new(w, TAG_H), t.bg_200);
     f.stroke_rectangle(Point::new(origin.x + 0.5, origin.y + 0.5), Size::new(w - 1.0, TAG_H - 1.0), Stroke::default().with_color(t.line_200).with_width(1.0));
     put(f, text, Point::new(origin.x + TAG_PAD, origin.y + TAG_H / 2.0), t.ink, FONT_TICK, Alignment::Left, alignment::Vertical::Center, MONO);
@@ -824,9 +866,28 @@ fn draw_tooltip(f: &mut Frame, t: &Tokens, plot: Rectangle, cx: f32, xs: &str, p
     let row_h = 16.0;
     let w = 2.0 * TAG_PAD + 14.0 + mono_width(name_w + 2 + value_w, FONT_TICK).max(mono_width(xs.chars().count(), FONT_SMALL));
     let h = 2.0 * 5.0 + row_h * (rows.len() as f32 + 1.0);
+    // A tooltip taller than its plot would cover the next one: the dots alone say where the lines are.
+    let top = if panel.editor.is_some() { CHIP_H + 4.0 } else { 6.0 };
+    if h + top + 4.0 > plot.height {
+        return;
+    }
     let right = plot.x + plot.width;
-    let x = if cx + 12.0 + w > right { cx - 12.0 - w } else { cx + 12.0 };
-    let origin = Point::new(x.round(), (plot.y + 6.0).round());
+    let mut x = if cx + 12.0 + w > right { cx - 12.0 - w } else { cx + 12.0 };
+    let mut y = plot.y + top;
+    // Never over the panel's title: try the other side of the crosshair, else go below the title.
+    let avoid = title_rect(panel, plot);
+    if Rectangle::new(Point::new(x, y), Size::new(w, h)).intersects(&avoid) {
+        let flipped = if x > cx { cx - 12.0 - w } else { cx + 12.0 };
+        if flipped >= plot.x && flipped + w <= right && !Rectangle::new(Point::new(flipped, y), Size::new(w, h)).intersects(&avoid) {
+            x = flipped;
+        } else {
+            y = avoid.y + avoid.height + 2.0;
+            if y + h + 4.0 > plot.y + plot.height {
+                return;
+            }
+        }
+    }
+    let origin = Point::new(x.round(), y.round());
     f.fill_rectangle(origin, Size::new(w, h), t.bg_200);
     f.stroke_rectangle(Point::new(origin.x + 0.5, origin.y + 0.5), Size::new(w - 1.0, h - 1.0), Stroke::default().with_color(t.line_200).with_width(1.0));
     let left = Alignment::Left;
@@ -838,6 +899,155 @@ fn draw_tooltip(f: &mut Frame, t: &Tokens, plot: Rectangle, cx: f32, xs: &str, p
         f.fill_rectangle(Point::new(origin.x + TAG_PAD, y - 4.0), Size::new(8.0, 8.0), s.color.resolve(t));
         put(f, &s.name, Point::new(origin.x + TAG_PAD + 14.0, y), t.ink, FONT_TICK, left, mid, MONO);
         put(f, value, Point::new(origin.x + w - TAG_PAD, y), t.ink, FONT_TICK, Alignment::Right, mid, MONO);
+    }
+}
+
+/// Height of a panel chip.
+const CHIP_H: f32 = FONT_TICK + 7.0;
+/// Width of a square icon chip.
+const ICON_W: f32 = 20.0;
+/// Width of the chevron after an editable panel's title.
+const CHEVRON_W: f32 = 14.0;
+
+/// Where `panel`'s title sits in `plot` (the inset behind the text, or an editable panel's title chip): the rectangle hover tags
+/// keep clear of.
+fn title_rect(panel: &Panel, plot: Rectangle) -> Rectangle {
+    let text_w = mono_width(panel_title(panel).chars().count(), FONT_TICK);
+    if panel.editor.is_some() {
+        Rectangle::new(Point::new(plot.x + 2.0, plot.y), Size::new(text_w + 8.0 + CHEVRON_W, CHIP_H))
+    } else {
+        Rectangle::new(Point::new(plot.x, plot.y + 1.0), Size::new(text_w + 10.0, FONT_TICK + 6.0))
+    }
+}
+
+/// `ALTITUDE · m`: a panel's title with its unit.
+fn panel_title(panel: &Panel) -> String {
+    if panel.unit.is_empty() {
+        panel.title.to_uppercase()
+    } else {
+        format!("{} · {}", panel.title.to_uppercase(), panel.unit)
+    }
+}
+
+/// One clickable chip of an editable panel.
+#[derive(Clone, Copy)]
+struct Chip {
+    action: PanelAction,
+    rect: Rectangle,
+    enabled: bool,
+}
+
+/// The chips of an editable panel drawn in `plot`: the title (left) and `+ series`, up, down, remove (right, in that order).
+fn chips(plot: Rectangle, panel: &Panel) -> Vec<Chip> {
+    let Some(editor) = &panel.editor else { return Vec::new() };
+    let chip = |action, x: f32, w: f32, enabled| Chip { action, rect: Rectangle::new(Point::new(x, plot.y + 1.0), Size::new(w, CHIP_H)), enabled };
+    let title_w = mono_width(panel_title(panel).chars().count(), FONT_TICK) + 8.0 + CHEVRON_W;
+    let add_w = mono_width("+ series".len(), FONT_TICK) + 14.0;
+    let right = plot.x + plot.width - 4.0;
+    let remove = right - ICON_W;
+    let down = remove - 2.0 - ICON_W;
+    let up = down - 2.0 - ICON_W;
+    let add = up - 6.0 - add_w;
+    vec![
+        chip(PanelAction::Pick, plot.x + 2.0, title_w, true),
+        chip(PanelAction::AddSeries, add, add_w, editor.can_add),
+        chip(PanelAction::MoveUp, up, ICON_W, editor.can_up),
+        chip(PanelAction::MoveDown, down, ICON_W, editor.can_down),
+        chip(PanelAction::Remove, remove, ICON_W, editor.can_remove),
+    ]
+}
+
+impl PlotView<'_> {
+    /// The editable panel chip under `p`, with its panel's index.
+    fn chip_at(&self, layout: &Layout, p: Point) -> Option<(usize, Chip)> {
+        self.group
+            .panels
+            .iter()
+            .zip(&layout.plots)
+            .enumerate()
+            .find_map(|(i, (panel, plot))| chips(*plot, panel).into_iter().find(|c| c.rect.contains(p)).map(|c| (i, c)))
+    }
+
+    /// An editable panel's title button, legend and controls, over the lines.
+    fn draw_chrome(&self, f: &mut Frame, t: &Tokens, panel: &Panel, plot: Rectangle, hot: Option<Point>) {
+        let Some(editor) = &panel.editor else { return };
+        let all = chips(plot, panel);
+        let mid = alignment::Vertical::Center;
+        let mut limit = plot.x + plot.width;
+        for chip in &all {
+            let over = chip.enabled && hot.is_some_and(|p| chip.rect.contains(p));
+            let r = chip.rect;
+            let color = match (chip.enabled, over) {
+                (false, _) => Color { a: 0.45, ..t.ink_faint },
+                (true, true) => t.ink,
+                (true, false) => t.ink_muted,
+            };
+            f.fill_rectangle(r.position(), r.size(), if over { t.bg_300 } else { t.bg_200 });
+            let framed = chip.action != PanelAction::Pick || over;
+            if framed {
+                let edge = if over { t.line_200 } else { t.line_100 };
+                f.stroke_rectangle(
+                    Point::new(r.x + 0.5, r.y + 0.5),
+                    Size::new(r.width - 1.0, r.height - 1.0),
+                    Stroke::default().with_color(edge).with_width(1.0),
+                );
+            }
+            let (cx, cy) = (r.x + r.width / 2.0, r.y + r.height / 2.0);
+            let stroke = Stroke::default().with_color(color).with_width(1.5);
+            let chevron = |f: &mut Frame, x: f32, y: f32, down: bool| {
+                let d = if down { 2.0 } else { -2.0 };
+                f.stroke(
+                    &Path::new(|b| {
+                        b.move_to(Point::new(x - 3.5, y - d));
+                        b.line_to(Point::new(x, y + d));
+                        b.line_to(Point::new(x + 3.5, y - d));
+                    }),
+                    stroke,
+                );
+            };
+            match chip.action {
+                PanelAction::Pick => {
+                    put(f, &panel_title(panel), Point::new(r.x + 4.0, cy), color, FONT_TICK, Alignment::Left, mid, MONO);
+                    chevron(f, r.x + r.width - CHEVRON_W / 2.0 - 1.0, cy, true);
+                }
+                PanelAction::AddSeries => put(f, "+ series", Point::new(cx, cy), color, FONT_TICK, Alignment::Center, mid, MONO),
+                PanelAction::MoveUp => chevron(f, cx, cy, false),
+                PanelAction::MoveDown => chevron(f, cx, cy, true),
+                PanelAction::Remove => {
+                    f.stroke(&Path::line(Point::new(cx - 3.5, cy - 3.5), Point::new(cx + 3.5, cy + 3.5)), stroke);
+                    f.stroke(&Path::line(Point::new(cx - 3.5, cy + 3.5), Point::new(cx + 3.5, cy - 3.5)), stroke);
+                }
+            }
+            if chip.action == PanelAction::AddSeries {
+                limit = r.x;
+            }
+        }
+
+        // The legend: the line style of each source and its name, after the title; what does not fit wraps under the title (as many
+        // rows as the plot has room for), so every source is named.
+        if editor.legend.len() > 1 {
+            let first = all[0].rect.x + all[0].rect.width + 12.0;
+            let start = plot.x + 8.0;
+            let rows = if plot.height >= 4.0 * CHIP_H { 2 } else { 1 };
+            let (mut x, mut row) = (first, 0);
+            for item in &editor.legend {
+                let w = 20.0 + mono_width(item.text.chars().count(), FONT_SMALL);
+                let right = if row == 0 { limit - 8.0 } else { plot.x + plot.width - 8.0 };
+                if x + w > right {
+                    if row + 1 >= rows {
+                        break;
+                    }
+                    row += 1;
+                    x = start;
+                }
+                let top = plot.y + 1.0 + row as f32 * (CHIP_H + 1.0);
+                let y = top + CHIP_H / 2.0;
+                f.fill_rectangle(Point::new(x - 3.0, top), Size::new(w + 6.0, CHIP_H), t.bg_200);
+                line(f, Point::new(x, y), Point::new(x + 16.0, y), item.color.resolve(t), 2.0, item.style);
+                put(f, &item.text, Point::new(x + 20.0, y), t.ink_muted, FONT_SMALL, Alignment::Left, mid, MONO);
+                x += w + 12.0;
+            }
+        }
     }
 }
 
@@ -853,6 +1063,24 @@ mod tests {
             .panel(Panel::new("B", "m").with(Series::new("b", pts)));
         g.events.push(EventMark::new(50.0, "Apogee"));
         g
+    }
+
+    #[test]
+    fn hover_tags_keep_clear_of_the_panel_title() {
+        let plot = Rectangle::new(Point::new(54.0, 100.0), Size::new(600.0, 160.0));
+        let panel = Panel::new("Static margin", "cal");
+        let avoid = title_rect(&panel, plot);
+        let w = 120.0;
+        // A point high in the panel near the left edge: above-right would sit on the title.
+        for at in [Point::new(70.0, 125.0), Point::new(100.0, 118.0), Point::new(200.0, 110.0), Point::new(60.0, 101.0)] {
+            let o = tag_position(plot, avoid, at, w);
+            let tag = Rectangle::new(o, Size::new(w, TAG_H));
+            assert!(!tag.intersects(&avoid), "tag {tag:?} over title {avoid:?} for {at:?}");
+            assert!(o.y >= plot.y && o.y + TAG_H <= plot.y + plot.height && o.x >= plot.x && o.x + w <= plot.x + plot.width);
+        }
+        // Away from the title the tag is above-right of the point, as before.
+        let o = tag_position(plot, avoid, Point::new(300.0, 200.0), w);
+        assert_eq!((o.x, o.y), (310.0, 172.0));
     }
 
     #[test]

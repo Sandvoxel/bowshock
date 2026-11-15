@@ -1,0 +1,60 @@
+# Plot sources: each panel's source is a picker (click the title), `+ series` overlays another source of the same unit, the
+# presets row sets common layouts, panels add/remove/move, and overlaying flights combines with multiple sources.
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/plotsources.drive out/plotsources
+viewport 1280x800
+click (663, 18)
+click "Run"
+screenshot 01-default.png
+
+# Click a panel's title: a searchable menu of every source, grouped. Choosing one replaces the panel's source.
+click (416, 402)
+screenshot 02-picker.png
+type "total"
+screenshot 03-picker-search.png
+click "Total velocity"
+screenshot 04-source-changed.png
+
+# `+ series`: only sources with the same unit can join; the others are listed but disabled (hover says why).
+click (855, 402)
+screenshot 05-add-series-menu.png
+type "thrust"
+move "Thrust"
+move "Thrust"
+screenshot 06-disabled-reason.png
+click (600, 250)
+click (855, 402)
+type "wind"
+click "Wind speed"
+screenshot 07-two-sources.png
+
+# Add a plot: it starts with a source no panel shows yet; the third panel's title picks again.
+click "Add plot"
+screenshot 08-add-panel.png
+
+# Presets.
+click "Aerodynamics"
+screenshot 09-preset-aero.png
+click "Stability"
+screenshot 10-preset-stability.png
+click "Forces"
+screenshot 11-preset-forces.png
+
+# Compare two flights with two sources each: colour by flight, line style by source.
+click "Flight profile"
+click "Run all"
+click (17, 94)
+click (17, 138)
+click (767, 421)
+screenshot 12-compare-add-menu.png
+type "total"
+click "Total velocity"
+screenshot 13-compare-two-sources.png
+move (600, 600)
+move (610, 600)
+screenshot 14-compare-hover.png
+
+# Light theme.
+click "Light"
+screenshot 15-compare-light.png
+click "Stability"
+screenshot 16-stability-light.png

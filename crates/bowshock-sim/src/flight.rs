@@ -16,8 +16,8 @@
 //! * Wind is constant with altitude; turbulence adds an Ornstein-Uhlenbeck gust with standard
 //!   deviation `intensity x wind_speed`.
 
-use crate::aero::Aero;
-use crate::atmosphere::Atmosphere;
+use crate::aero::{Aero, DragBreakdown};
+use crate::atmosphere::{AirState, Atmosphere};
 use crate::rng::Rng;
 use crate::staging::{Hits, Timeline};
 use crate::vehicle::{Trigger, Vehicle};
@@ -170,8 +170,11 @@ pub struct Event {
     pub stage: Option<usize>,
 }
 
-/// One recorded instant of the flight.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// One recorded instant of the flight. All values are SI (m, s, kg, N, Pa, K, rad); stations are from the nose tip.
+///
+/// The set follows OpenRocket's flight data types: position and velocity, aerodynamics (Mach, dynamic pressure, Reynolds
+/// number, the drag-coefficient build-up), forces, mass and balance, the atmosphere and the recovery device state.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Sample {
     /// Time (s).
     pub t: f64,
@@ -181,10 +184,20 @@ pub struct Sample {
     pub velocity: [f64; 3],
     /// Altitude above ground (m).
     pub altitude: f64,
+    /// Altitude above sea level (m): the ground altitude of the site plus [`altitude`](Self::altitude).
+    pub altitude_msl: f64,
     /// Vertical velocity (m/s).
     pub vertical_velocity: f64,
+    /// Horizontal ground speed (m/s).
+    pub horizontal_velocity: f64,
     /// Ground speed magnitude (m/s).
     pub speed: f64,
+    /// Speed relative to the air, wind and gusts included (m/s).
+    pub air_speed: f64,
+    /// Distance from the pad measured along the ground (m).
+    pub ground_distance: f64,
+    /// Flight-path angle above the horizontal (rad): `+pi/2` straight up, `-pi/2` straight down.
+    pub flight_path_angle: f64,
     /// Mach number relative to the air.
     pub mach: f64,
     /// Magnitude of the kinematic acceleration (m/s^2).
@@ -195,10 +208,50 @@ pub struct Sample {
     pub thrust: f64,
     /// Drag force (N).
     pub drag: f64,
+    /// Total airframe drag coefficient (reference-area based): the sum of the parts below, faded out as canopies fill. The
+    /// recovery devices' share is [`cd_recovery`](Self::cd_recovery), kept apart because it is hundreds of times larger.
+    pub cd: f64,
+    /// Airframe skin-friction drag coefficient.
+    pub cd_friction: f64,
+    /// Airframe pressure (wave) drag coefficient.
+    pub cd_pressure: f64,
+    /// Airframe base drag coefficient.
+    pub cd_base: f64,
+    /// Fin drag coefficient.
+    pub cd_fins: f64,
+    /// Launch lug and rail button drag coefficient.
+    pub cd_protuberances: f64,
+    /// Share of the drag coefficient carried by deployed recovery devices (`Cd A / A_ref`).
+    pub cd_recovery: f64,
+    /// Drag area `Cd A` of the deployed recovery devices, canopy inflation included (m^2).
+    pub recovery_cd_area: f64,
     /// Total mass (kg).
     pub mass: f64,
+    /// Propellant mass remaining in the motors of the stages still flying (kg).
+    pub propellant_mass: f64,
+    /// Centre of gravity station (m).
+    pub cg: f64,
+    /// Centre of pressure station at the current Mach and zero angle of attack (m).
+    pub cp: f64,
     /// Static margin in calibers at the current Mach, zero angle of attack and current CG.
     pub stability_margin: f64,
+    /// Angle between the rocket's axis and the air velocity (rad). The 3-DOF model weathercocks perfectly, so this is
+    /// zero in free flight; it is non-zero on the rail (the rail fixes the axis) and below 1 m/s of air speed.
+    pub angle_of_attack: f64,
+    /// Horizontal wind speed at the rocket, gusts included (m/s).
+    pub wind_speed: f64,
+    /// Dynamic pressure `q = 1/2 rho v^2` of the air-relative flow (Pa).
+    pub dynamic_pressure: f64,
+    /// Air density (kg/m^3).
+    pub air_density: f64,
+    /// Air temperature (K).
+    pub air_temperature: f64,
+    /// Static air pressure (Pa).
+    pub air_pressure: f64,
+    /// Speed of sound (m/s).
+    pub speed_of_sound: f64,
+    /// Reynolds number based on the length of the flying stack (`rho v L / mu`).
+    pub reynolds: f64,
 }
 
 /// Recorded flight.
@@ -273,13 +326,8 @@ struct Raw {
     t: f64,
     pos: [f64; 3],
     vel: [f64; 3],
-    acc: [f64; 3],
-    thrust: f64,
-    drag: f64,
-    mass: f64,
-    cg: f64,
-    mach: f64,
     nsep: usize,
+    d: Diag,
 }
 
 /// A deployed recovery device with a finite canopy-inflation time.
@@ -323,6 +371,8 @@ struct Ctx<'a> {
     a_ref: f64,
 }
 
+/// Everything one evaluation of the equations of motion produces: the acceleration and the state it was computed from.
+#[derive(Clone, Copy)]
 struct Diag {
     acc: [f64; 3],
     thrust: f64,
@@ -330,6 +380,21 @@ struct Diag {
     mass: f64,
     cg: f64,
     mach: f64,
+    air: AirState,
+    /// Speed relative to the air (m/s).
+    air_speed: f64,
+    /// Angle between the rocket axis and the air velocity (rad).
+    alpha: f64,
+    /// Airframe drag coefficients as flown: scaled by the Monte Carlo factor and faded out as the canopies fill.
+    cd: DragBreakdown,
+    /// `Cd A` of the deployed devices (m^2).
+    open: f64,
+    /// Horizontal wind (mean plus gust) magnitude (m/s).
+    wind: f64,
+    /// Propellant left (kg).
+    propellant: f64,
+    /// Reynolds number on the stack length.
+    reynolds: f64,
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -363,27 +428,61 @@ impl Ctx<'_> {
         (m, mx / m, thrust, burning)
     }
 
+    /// Propellant left in the motors of the stages still flying at time `t`.
+    fn propellant(&self, t: f64, nsep: usize) -> f64 {
+        let mut left = 0.0;
+        for (k, st) in self.input.vehicle.stages.iter().enumerate().skip(nsep) {
+            if let Some(mo) = &st.motor {
+                let tau = self.sched.ignition[k].map_or(-1.0, |ign| t - ign);
+                left += (mo.curve.mass(tau) - (mo.curve.total_mass - mo.curve.propellant_mass)).max(0.0);
+            }
+        }
+        left
+    }
+
+    /// Length of the stack that is still flying (m): the vehicle, cut at the aft end of stage `nsep` once stages are dropped.
+    fn stack_length(&self, nsep: usize) -> f64 {
+        let v = &self.input.vehicle;
+        match v.stages.get(nsep) {
+            Some(st) if nsep > 0 => v.length().min(st.aft_station),
+            _ => v.length(),
+        }
+    }
+
     /// Equations of motion at `(t, pos, vel)`.
     fn eval(&self, t: f64, pos: [f64; 3], vel: [f64; 3], gust: [f64; 3], nsep: usize, rail: bool, chutes: &[Chute]) -> Diag {
         let (mass, cg, thrust, burning) = self.mass_props(t, nsep);
         let air = self.atm.at_agl(pos[2].max(0.0));
-        let rel = [vel[0] - self.wind[0] - gust[0], vel[1] - self.wind[1] - gust[1], vel[2] - gust[2]];
+        let wind = [self.wind[0] + gust[0], self.wind[1] + gust[1]];
+        let rel = [vel[0] - wind[0], vel[1] - wind[1], vel[2] - gust[2]];
         let s = dot(rel, rel).sqrt();
         let mach = s / air.speed_of_sound;
         let dir = if rail || s < 1.0 { self.axis } else { [rel[0] / s, rel[1] / s, rel[2] / s] };
         let q = 0.5 * air.density * s * s;
+        let re_per_m = s * air.density / air.viscosity;
         // Deployed devices: canopy area ramps up (see `Chute`); the airframe's own drag fades out
         // as the canopies fill.
         let full: f64 = chutes.iter().map(|c| c.cd_area).sum();
         let open: f64 = chutes.iter().map(|c| c.area_at(t)).sum();
         let frac = if full > 0.0 { (open / full).min(1.0) } else { 0.0 };
         let mut drag = q * open;
+        let mut cd = DragBreakdown::default();
         if frac < 1.0 {
-            let re = s * air.density / air.viscosity;
-            drag += (1.0 - frac) * q * self.aeros[nsep.min(self.aeros.len() - 1)].drag(mach, re, burning).total * self.tw.cd * self.a_ref;
+            let b = self.aeros[nsep.min(self.aeros.len() - 1)].drag(mach, re_per_m, burning);
+            let w = (1.0 - frac) * self.tw.cd;
+            cd = DragBreakdown {
+                friction: w * b.friction,
+                pressure: w * b.pressure,
+                base: w * b.base,
+                fins: w * b.fins,
+                protuberances: w * b.protuberances,
+                total: w * b.total,
+            };
+            drag += q * cd.total * self.a_ref;
         }
         let g = G0 * (6_371_000.0 / (6_371_000.0 + pos[2].max(0.0) + self.launch.site_altitude)).powi(2);
         let rd = if s > 1e-9 { [rel[0] / s, rel[1] / s, rel[2] / s] } else { [0.0; 3] };
+        let alpha = if s > 1e-9 { dot(dir, rd).clamp(-1.0, 1.0).acos() } else { 0.0 };
         let mut acc = [0.0; 3];
         for i in 0..3 {
             acc[i] = (thrust * dir[i] - drag * rd[i]) / mass;
@@ -396,7 +495,22 @@ impl Ctx<'_> {
             }
             acc = [au * self.axis[0], au * self.axis[1], au * self.axis[2]];
         }
-        Diag { acc, thrust, drag, mass, cg, mach }
+        Diag {
+            acc,
+            thrust,
+            drag,
+            mass,
+            cg,
+            mach,
+            air,
+            air_speed: s,
+            alpha,
+            cd,
+            open,
+            wind: wind[0].hypot(wind[1]),
+            propellant: self.propellant(t, nsep),
+            reynolds: re_per_m * self.stack_length(nsep),
+        }
     }
 }
 
@@ -493,7 +607,7 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
             }
         }
         let d0 = ctx.eval(t, pos, vel, gust, nsep, on_rail, &chutes);
-        let raw = Raw { t, pos, vel, acc: d0.acc, thrust: d0.thrust, drag: d0.drag, mass: d0.mass, cg: d0.cg, mach: d0.mach, nsep };
+        let raw = Raw { t, pos, vel, nsep, d: d0 };
         raws.push(raw);
 
         let last_burnout = ctx.sched.burnout.iter().flatten().copied().fold(0.0, f64::max);
@@ -672,7 +786,7 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
             }
             landed = true;
             let d = ctx.eval(t, pos, vel, gust, nsep, false, &chutes);
-            final_raw = Some(Raw { t, pos, vel, acc: d.acc, thrust: 0.0, drag: d.drag, mass: d.mass, cg: d.cg, mach: d.mach, nsep });
+            final_raw = Some(Raw { t, pos, vel, nsep, d: Diag { thrust: 0.0, ..d } });
             push_event(&mut events, &mut event_idx, &raws, Event { t, kind: EventKind::Landing, altitude: 0.0, stage: None });
             break;
         }
@@ -683,7 +797,7 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
         // Hit the time limit mid-flight: record the final state.
         let nsep = ctx.sched.separated(t);
         let d = ctx.eval(t, pos, vel, gust, nsep, on_rail, &chutes);
-        raws.push(Raw { t, pos, vel, acc: d.acc, thrust: d.thrust, drag: d.drag, mass: d.mass, cg: d.cg, mach: d.mach, nsep });
+        raws.push(Raw { t, pos, vel, nsep, d });
         ground_xy = [pos[0], pos[1]];
         ground_hit = dot(vel, vel).sqrt();
     }
@@ -693,8 +807,8 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
     let (mut max_v, mut max_m, mut max_a) = (0.0_f64, 0.0_f64, 0.0_f64);
     for r in raws.iter().filter(|r| r.t <= t_end_ascent) {
         max_v = max_v.max(dot(r.vel, r.vel).sqrt());
-        max_m = max_m.max(r.mach);
-        max_a = max_a.max(dot(r.acc, r.acc).sqrt());
+        max_m = max_m.max(r.d.mach);
+        max_a = max_a.max(dot(r.d.acc, r.d.acc).sqrt());
     }
     let final_burn = n.checked_sub(1).and_then(|k| ctx.sched.burnout[k]).unwrap_or(0.0);
     let flight_time = raws.last().map_or(0.0, |r| r.t);
@@ -732,21 +846,50 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
         .zip(&keep)
         .filter(|(_, &k)| k)
         .map(|(r, _)| {
+            let d = &r.d;
             let speed = dot(r.vel, r.vel).sqrt();
+            let horizontal = r.vel[0].hypot(r.vel[1]);
+            let aero = &aeros[r.nsep.min(aeros.len() - 1)];
+            let cp = aero.stability(d.mach, 0.0).cp;
+            let recovery = d.open / ctx.a_ref;
             Sample {
                 t: r.t,
                 position: r.pos,
                 velocity: r.vel,
                 altitude: r.pos[2],
+                altitude_msl: launch.site_altitude + r.pos[2],
                 vertical_velocity: r.vel[2],
+                horizontal_velocity: horizontal,
                 speed,
-                mach: r.mach,
-                acceleration: dot(r.acc, r.acc).sqrt(),
-                vertical_acceleration: r.acc[2],
-                thrust: r.thrust,
-                drag: r.drag,
-                mass: r.mass,
-                stability_margin: aeros[r.nsep.min(aeros.len() - 1)].margin_cal(r.mach, 0.0, r.cg),
+                air_speed: d.air_speed,
+                ground_distance: r.pos[0].hypot(r.pos[1]),
+                flight_path_angle: r.vel[2].atan2(horizontal),
+                mach: d.mach,
+                acceleration: dot(d.acc, d.acc).sqrt(),
+                vertical_acceleration: d.acc[2],
+                thrust: d.thrust,
+                drag: d.drag,
+                cd: d.cd.total,
+                cd_friction: d.cd.friction,
+                cd_pressure: d.cd.pressure,
+                cd_base: d.cd.base,
+                cd_fins: d.cd.fins,
+                cd_protuberances: d.cd.protuberances,
+                cd_recovery: recovery,
+                recovery_cd_area: d.open,
+                mass: d.mass,
+                propellant_mass: d.propellant,
+                cg: d.cg,
+                cp,
+                stability_margin: (cp - d.cg) / aero.reference_diameter(),
+                angle_of_attack: d.alpha,
+                wind_speed: d.wind,
+                dynamic_pressure: 0.5 * d.air.density * d.air_speed * d.air_speed,
+                air_density: d.air.density,
+                air_temperature: d.air.temperature,
+                air_pressure: d.air.pressure,
+                speed_of_sound: d.air.speed_of_sound,
+                reynolds: d.reynolds,
             }
         })
         .collect();

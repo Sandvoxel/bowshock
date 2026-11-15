@@ -354,3 +354,210 @@ fn renaming_a_flight_goes_through_the_document_and_escape_cancels() {
     state.sync(app.ctx(), false);
     assert_eq!(state.flight(id).unwrap().name, "Hot day");
 }
+
+/// The source keys of every panel of `state`'s layout.
+fn sources(state: &State) -> Vec<Vec<&str>> {
+    state.layout.panels.iter().map(|p| p.sources.iter().map(String::as_str).collect()).collect()
+}
+
+/// A click on the chrome of panel `panel`, as the plot canvas reports it.
+fn click(state: &mut State, app: &mut App, panel: usize, action: PanelAction) {
+    let chip = Rectangle::new(Point::new(100.0, 20.0), iced::Size::new(80.0, 18.0));
+    let _ = state.update(Message::Plot(PlotMessage::Panel(panel, action, chip)), app.ctx_mut());
+}
+
+#[test]
+fn a_new_screen_plots_the_flight_profile() {
+    let app = App::with_example();
+    let state = state_for(&app);
+    assert_eq!(sources(&state), [["altitude"], ["vertical_velocity"], ["vertical_acceleration"]]);
+    assert_eq!(Preset::of(&state.layout), Preset::FlightProfile);
+    assert!(state.picker.is_none());
+}
+
+#[test]
+fn choosing_a_source_in_the_picker_replaces_the_panels_source_as_one_undo_step() {
+    let mut app = App::with_example();
+    let mut state = state_for(&app);
+    let nominal = named(&state, "Nominal").id;
+    fly(&mut state, app.ctx(), nominal);
+    assert!(!app.ctx().doc.is_dirty());
+
+    // The title opens the picker under its chip, in "primary" mode, with an empty search.
+    click(&mut state, &mut app, 1, PanelAction::Pick);
+    let picker = state.picker.as_ref().unwrap();
+    assert_eq!((picker.panel, picker.mode, picker.query.as_str()), (1, Mode::Primary, ""));
+    assert_eq!(picker.at, Point::new(100.0, 40.0));
+    state.update(Message::PickerQuery("mach".into()), app.ctx_mut());
+    assert_eq!(state.picker.as_ref().unwrap().query, "mach");
+
+    state.update(Message::Layout(LayoutEdit::SetPrimary(1, "mach")), app.ctx_mut());
+    assert!(state.picker.is_none(), "a choice closes the menu");
+    assert_eq!(sources(&state), [vec!["altitude"], vec!["mach"], vec!["vertical_acceleration"]]);
+    // The plots follow: the second panel is the Mach number of the run, and the document holds the layout.
+    let group = state.shown.groups[0].as_ref().unwrap();
+    assert_eq!((group.panels[1].title.as_str(), group.panels[1].unit.as_str()), ("Mach number", ""));
+    let max = group.panels[1].series[0].points.iter().map(|p| p.1).fold(0.0, f64::max);
+    assert!((max - named(&state, "Nominal").run.as_ref().unwrap().result.summary.max_mach).abs() < 0.02, "{max}");
+    assert_eq!(app.ctx().doc.rocket().plot_layout(), &state.layout);
+    assert!(app.ctx().doc.is_dirty());
+    // Changing the layout is not a change of the rocket: the run is still current.
+    assert!(!state.flight(nominal).unwrap().is_stale(state.revision(app.ctx())));
+
+    assert_eq!(app.ctx_mut().doc.undo().as_deref(), Some("Change plot source"));
+    state.sync(app.ctx(), false);
+    assert_eq!(sources(&state)[1], ["vertical_velocity"]);
+    assert!(app.ctx_mut().doc.redo().is_some());
+    state.sync(app.ctx(), false);
+    assert_eq!(sources(&state)[1], ["mach"]);
+}
+
+#[test]
+fn a_series_joins_only_with_the_same_unit_and_a_refusal_says_why() {
+    let mut app = App::with_example();
+    let mut state = state_for(&app);
+    let nominal = named(&state, "Nominal").id;
+    fly(&mut state, app.ctx(), nominal);
+    click(&mut state, &mut app, 0, PanelAction::AddSeries);
+    assert_eq!(state.picker.as_ref().unwrap().mode, Mode::Add);
+
+    // Ground distance is a length like altitude: it overlays.
+    state.update(Message::Layout(LayoutEdit::ToggleSource(0, "ground_distance")), app.ctx_mut());
+    assert_eq!(sources(&state)[0], ["altitude", "ground_distance"]);
+    let group = state.shown.groups[0].as_ref().unwrap();
+    assert_eq!(group.panels[0].title, "Distance");
+    // A speed does not: nothing changes, nothing is written, and the status strip says why.
+    let revision = app.ctx().doc.revision();
+    state.update(Message::Layout(LayoutEdit::ToggleSource(0, "vertical_velocity")), app.ctx_mut());
+    assert_eq!(sources(&state)[0], ["altitude", "ground_distance"]);
+    assert_eq!(app.ctx().doc.revision(), revision);
+    let notice = app.ctx().notice.as_ref().map(|(text, _)| text.clone()).unwrap_or_default();
+    assert!(notice.contains("Vertical velocity") && notice.contains("one y-axis"), "{notice}");
+    // Toggling a source that is on the plot takes it off again.
+    state.update(Message::Layout(LayoutEdit::ToggleSource(0, "ground_distance")), app.ctx_mut());
+    assert_eq!(sources(&state)[0], ["altitude"]);
+}
+
+#[test]
+fn panels_are_added_moved_and_removed_through_the_document() {
+    let mut app = App::with_example();
+    let mut state = state_for(&app);
+    state.update(Message::Layout(LayoutEdit::AddPanel), app.ctx_mut());
+    assert_eq!(sources(&state).len(), 4);
+    assert_eq!(app.ctx().doc.rocket().plot_layout().panels.len(), 4);
+
+    // The chrome: the arrows move a panel, the cross removes it.
+    click(&mut state, &mut app, 3, PanelAction::MoveUp);
+    assert_eq!(sources(&state)[2], ["mach"]);
+    click(&mut state, &mut app, 2, PanelAction::MoveDown);
+    assert_eq!(sources(&state)[3], ["mach"]);
+    click(&mut state, &mut app, 3, PanelAction::Remove);
+    assert_eq!(sources(&state).len(), 3);
+    assert_eq!(Preset::of(&state.layout), Preset::FlightProfile);
+    assert!(state.picker.is_none());
+
+    // The ends refuse to move, and the last panel stays.
+    let revision = app.ctx().doc.revision();
+    click(&mut state, &mut app, 0, PanelAction::MoveUp);
+    assert_eq!(app.ctx().doc.revision(), revision);
+    state.update(Message::Layout(LayoutEdit::Preset(Preset::Custom)), app.ctx_mut());
+    assert_eq!(sources(&state), [["altitude"]]);
+    click(&mut state, &mut app, 0, PanelAction::Remove);
+    assert_eq!(sources(&state).len(), 1);
+    assert!(app.ctx().notice.as_ref().is_some_and(|(text, _)| text.contains("last plot")));
+}
+
+#[test]
+fn presets_set_the_layout_and_the_row_names_the_one_that_matches() {
+    let mut app = App::with_example();
+    let mut state = state_for(&app);
+    for preset in [Preset::Aerodynamics, Preset::Forces, Preset::Stability, Preset::FlightProfile] {
+        state.update(Message::Layout(LayoutEdit::Preset(preset)), app.ctx_mut());
+        assert_eq!(state.layout, preset.layout());
+        assert_eq!(Preset::of(&state.layout), preset);
+    }
+    // Editing a preset makes it Custom; choosing Custom while already custom changes nothing.
+    state.update(Message::Layout(LayoutEdit::SetPrimary(0, "mach")), app.ctx_mut());
+    assert_eq!(Preset::of(&state.layout), Preset::Custom);
+    let revision = app.ctx().doc.revision();
+    state.update(Message::Layout(LayoutEdit::Preset(Preset::Custom)), app.ctx_mut());
+    assert_eq!(app.ctx().doc.revision(), revision);
+}
+
+#[test]
+fn the_layout_is_saved_with_the_file_and_loaded_back() {
+    let mut app = App::with_example();
+    let mut state = state_for(&app);
+    state.update(Message::Layout(LayoutEdit::Preset(Preset::Stability)), app.ctx_mut());
+    state.update(Message::Layout(LayoutEdit::ToggleSource(1, "stability_margin")), app.ctx_mut());
+    state.update(Message::Layout(LayoutEdit::AddPanel), app.ctx_mut());
+    let layout = state.layout.clone();
+
+    let path = std::env::temp_dir().join(format!("bowshock_plots_{}.bowshock", std::process::id()));
+    app.ctx_mut().doc.save_as(&path).expect("saves");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("\"plots\"") && text.contains("cp_station"));
+
+    let mut fresh = App::new();
+    fresh.ctx_mut().doc.load(&path).expect("loads");
+    let _ = std::fs::remove_file(&path);
+    let mut loaded = State::new();
+    loaded.sync(fresh.ctx(), true);
+    assert_eq!(loaded.layout, layout);
+    assert_eq!(sources(&loaded)[0], ["cg_station", "cp_station"]);
+
+    // A new document goes back to the flight profile.
+    app.ctx_mut().doc.new_document();
+    state.sync(app.ctx(), true);
+    assert_eq!(state.layout, PlotLayout::default());
+}
+
+#[test]
+fn a_layout_from_a_newer_version_draws_what_it_knows() {
+    let mut app = App::with_example();
+    app.ctx_mut().doc.edit("Future plots", |r| {
+        r.set_plot_layout(PlotLayout {
+            panels: vec![
+                bowshock_model::PlotPanel::new(&["future_channel", "mach"]),
+                bowshock_model::PlotPanel::new(&["only_the_future"]),
+                bowshock_model::PlotPanel::new(&["thrust", "mach"]),
+            ],
+        })
+    });
+    let state = state_for(&app);
+    assert_eq!(sources(&state), [vec!["mach"], vec!["thrust"]]);
+}
+
+#[test]
+fn undoing_closes_the_picker_and_a_flight_can_be_overlaid_with_several_sources() {
+    let mut app = App::with_example();
+    let mut state = state_for(&app);
+    let (nominal, windy) = (named(&state, "Nominal").id, named(&state, "Windy").id);
+    fly(&mut state, app.ctx(), nominal);
+    fly(&mut state, app.ctx(), windy);
+    for id in [nominal, windy] {
+        state.update(Message::Tick(id), app.ctx_mut());
+    }
+    state.update(Message::Layout(LayoutEdit::ToggleSource(1, "air_speed")), app.ctx_mut());
+    assert_eq!(sources(&state)[1], ["vertical_velocity", "air_speed"]);
+    // Two flights and two sources: four lines, colour by flight, style by source.
+    let group = state.shown.groups[0].as_ref().unwrap();
+    assert_eq!(group.panels[1].series.len(), 4);
+    let styles: Vec<_> = group.panels[1].series.iter().map(|s| (s.color, s.style)).collect();
+    assert_eq!(styles[0].0, styles[1].0);
+    assert_ne!(styles[0].0, styles[2].0);
+    assert_ne!(styles[0].1, styles[1].1);
+    assert_eq!(styles[0].1, styles[2].1);
+    // Hover, zoom and the events of the reference are untouched by the layout.
+    assert!(!group.events.is_empty() && group.right_margin > 0.0);
+
+    click(&mut state, &mut app, 1, PanelAction::AddSeries);
+    assert!(state.picker.is_some());
+    assert!(app.ctx_mut().doc.undo().is_some());
+    state.sync(app.ctx(), false);
+    assert!(state.picker.is_none());
+    assert_eq!(sources(&state)[1], ["vertical_velocity"]);
+    // Esc closes it too.
+    click(&mut state, &mut app, 0, PanelAction::Pick);
+    assert!(state.dismiss_picker() && state.picker.is_none() && !state.dismiss_picker());
+}

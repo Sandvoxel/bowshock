@@ -2,7 +2,7 @@
 //! part would land on, snapping to faces, and adding a part at a station. Pure functions on [`Rocket`], applied by the lanes'
 //! `update` through `ctx.doc` (so they undo like every other edit), and unit-tested here.
 
-use bowshock_model::{InternalKind, PartId, PartKind, RadialKind, Rocket};
+use bowshock_model::{Dim, InternalKind, PartId, PartKind, RadialKind, Rocket};
 
 /// Shortest length a drag may give a part, metres.
 pub const MIN_EXTENT: f64 = 0.002;
@@ -34,10 +34,34 @@ fn fore_of(rocket: &Rocket, id: PartId) -> Option<f64> {
     rocket.part_station(id)
 }
 
+/// Why dragging part `id` to a fore edge at `start` is refused (and does nothing), if it is: a part of a pod keeps its place in
+/// the pod's stack (the airframe reorders by dragging in the viewport or the parts bin, not in the lanes), and a radial or
+/// internal part of a pod cannot be carried out of the pod. `None` for every other drag.
+pub fn refusal(rocket: &Rocket, id: PartId, start: f64) -> Option<&'static str> {
+    let pod = rocket.pod_of(id)?;
+    if rocket.part(id).is_some() {
+        return Some("A pod's body parts keep their order: drag them inside the pod in the 3D view");
+    }
+    let fore = rocket.radial_station(pod)?;
+    let aft = fore + pod.kind.extent();
+    (start < fore - 1e-9 || start > aft + 1e-9).then_some("A part cannot be dragged out of its pod")
+}
+
 /// Moves part `id` (radial or internal; axial parts reorder through the viewport's drag path) so its fore edge is at `start`.
-/// An internal part stops at the walls of the tube it is in; a radial one may go on to the next tube. Returns whether
-/// anything was applied.
+/// An internal part stops at the walls of the tube it is in; a radial one may go on to the next tube. A pod set moves along its
+/// parent; a part of a pod moves along the pod's parts and stays in the pod (see [`refusal`]: an axial part of a pod does not
+/// move). Returns whether anything was applied.
 pub fn move_part(rocket: &mut Rocket, id: PartId, start: f64) -> bool {
+    if refusal(rocket, id, start).is_some() {
+        return false;
+    }
+    if let Some(pod) = rocket.radial(id).filter(|r| r.kind.is_pod()) {
+        let Some(fore) = fore_of(rocket, pod.parent) else { return false };
+        return rocket.set_dim(id, Dim::Position, start - fore).is_some();
+    }
+    if rocket.pod_of(id).is_some() {
+        return move_in_pod(rocket, id, start);
+    }
     if let Some(radial) = rocket.radial(id) {
         let (parent_now, angle) = (radial.parent, radial.angle);
         let stations = rocket.stations();
@@ -52,6 +76,29 @@ pub fn move_part(rocket: &mut Rocket, id: PartId, start: f64) -> bool {
         let parent = part.parent;
         let Some(fore) = fore_of(rocket, parent) else { return false };
         return rocket.move_internal(id, parent, start - fore).is_ok();
+    }
+    false
+}
+
+/// Moves a radial or internal part of a pod so its fore edge is at `start` (a station of the rocket): along its parent in the
+/// pod, or for a radial part on to the pod part under `start`.
+fn move_in_pod(rocket: &mut Rocket, id: PartId, start: f64) -> bool {
+    if let Some(radial) = rocket.radial(id) {
+        let (parent_now, angle) = (radial.parent, radial.angle);
+        let (Some(fore_now), Some((_, aft_now))) = (fore_of(rocket, parent_now), rocket.part_span(parent_now)) else { return false };
+        if start >= fore_now - 1e-9 && start < aft_now {
+            return rocket.set_dim(id, Dim::Position, start - fore_now).is_some();
+        }
+        let Some(body) = rocket.pod_of(id).and_then(|pod| pod.kind.pod_body()) else { return false };
+        let under =
+            body.parts().iter().find(|p| rocket.part_span(p.id).is_some_and(|(a, b)| start >= a - 1e-9 && start < b)).or(body.parts().last()).map(|p| p.id);
+        let Some(parent) = under else { return false };
+        let Some(fore) = fore_of(rocket, parent) else { return false };
+        return rocket.move_radial(id, parent, start - fore, angle).is_ok();
+    }
+    if let Some(part) = rocket.internal(id) {
+        let Some(fore) = fore_of(rocket, part.parent) else { return false };
+        return rocket.set_dim(id, Dim::Position, start - fore).is_some();
     }
     false
 }
@@ -74,7 +121,7 @@ fn radial_with_extent(kind: &RadialKind, extent: f64) -> Option<RadialKind> {
     match &mut out {
         RadialKind::FinSet { root_chord, .. } | RadialKind::EllipticalFin { root_chord, .. } => *root_chord = extent,
         RadialKind::LaunchLug { length, .. } => *length = extent,
-        RadialKind::FreeformFin { .. } | RadialKind::RailButton { .. } => return None,
+        RadialKind::FreeformFin { .. } | RadialKind::RailButton { .. } | RadialKind::Pod { .. } => return None,
     }
     Some(out)
 }
@@ -274,5 +321,106 @@ mod tests {
         let (p, offset) = internal_landing(&r, 0.1, 0.25).unwrap();
         assert_eq!((p, (offset * 1000.0).round()), (a, 50.0));
         assert_eq!(nearest_node(&r, &PartKind::BodyTube { length: 0.1, diameter: 0.1 }, 0.68).map(|n| n.0), Some(2));
+    }
+}
+
+#[cfg(test)]
+mod pod_tests {
+    use super::*;
+    use bowshock_model::{MassRole, NoseShape};
+
+    /// A 0.2 m nose and a 0.8 m tube with a pod set of two standard pods at 0.2 m along the tube (station 0.4), 3 fins and a
+    /// ballast on the pod's tube. Returns the rocket, the core tube, the pod set, the pod's nose and tube, its fins and ballast.
+    fn rocket() -> (Rocket, PartId, PartId, PartId, PartId, PartId, PartId) {
+        let mut r = Rocket::default();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1 }).unwrap();
+        let core = r.insert(1, PartKind::BodyTube { length: 0.8, diameter: 0.1 }).unwrap();
+        let kind = r.default_pod();
+        let pod = r.attach_radial(core, 0.2, 0.0, 2, kind).unwrap();
+        let parts: Vec<PartId> = r.pods().next().and_then(|p| p.kind.pod_body()).unwrap().parts().iter().map(|p| p.id).collect();
+        let (nose, tube) = (parts[0], parts[1]);
+        let fins =
+            r.attach_radial(tube, 0.1, 0.0, 3, RadialKind::FinSet { root_chord: 0.1, tip_chord: 0.05, span: 0.04, sweep: 0.03, thickness: 0.003 }).unwrap();
+        let ballast = r.attach_internal(tube, 0.05, InternalKind::MassComponent { mass: 0.1, length: 0.05, diameter: None, role: MassRole::Ballast }).unwrap();
+        (r, core, pod, nose, tube, fins, ballast)
+    }
+
+    #[test]
+    fn the_pod_set_moves_along_its_parent_and_stops_at_its_ends() {
+        let (mut r, core, pod, ..) = rocket();
+        assert!(move_part(&mut r, pod, 0.5));
+        assert!((r.part_station(pod).unwrap() - 0.5).abs() < 1e-9 && r.radial(pod).unwrap().parent == core);
+        assert_eq!(r.radial(pod).unwrap().count, 2);
+        // Far behind: it stays on its tube, with enough of it still on the parent (the pod is clamped like a fin).
+        assert!(move_part(&mut r, pod, 5.0));
+        let station = r.part_station(pod).unwrap();
+        assert!(station > 0.5 && station <= 1.2 + 1e-9, "{station}");
+        assert_eq!(r.radial(pod).unwrap().parent, core);
+        // Ahead of the tube it stops at the tube's fore face.
+        assert!(move_part(&mut r, pod, -1.0));
+        assert!((r.part_station(pod).unwrap() - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_pods_body_parts_keep_their_order_and_nothing_leaves_the_pod() {
+        let (mut r, _, pod, nose, tube, fins, ballast) = rocket();
+        let before = r.clone();
+        // An axial part of a pod does not move along the axis, and says why.
+        assert!(refusal(&r, tube, 0.9).is_some());
+        assert!(!move_part(&mut r, tube, 0.9) && !move_part(&mut r, nose, 0.0));
+        assert_eq!(r, before);
+        // A fin or an internal part dragged out of the pod is refused too.
+        let (fore, aft) = r.part_span(pod).unwrap();
+        for id in [fins, ballast] {
+            assert!(refusal(&r, id, fore - 0.1).is_some() && refusal(&r, id, aft + 0.1).is_some(), "{id}");
+            assert!(!move_part(&mut r, id, aft + 0.1) && !move_part(&mut r, id, fore - 0.1));
+        }
+        assert_eq!(r, before);
+        // Nothing is refused for the pod set itself or for the core.
+        assert!(refusal(&r, pod, 5.0).is_none());
+    }
+
+    #[test]
+    fn fins_and_internals_of_a_pod_move_along_its_parts() {
+        let (mut r, _, pod, nose, tube, fins, ballast) = rocket();
+        let tube_fore = r.part_station(tube).unwrap();
+        // Within the tube: the offset follows, the parent stays.
+        assert!(move_part(&mut r, fins, tube_fore + 0.15));
+        assert!((r.part_station(fins).unwrap() - (tube_fore + 0.15)).abs() < 1e-9 && r.radial(fins).unwrap().parent == tube);
+        assert_eq!(r.radial(fins).unwrap().count, 3);
+        // Ahead of the tube it goes on to the pod's nose, as a fin goes on to the next tube of the core.
+        let nose_fore = r.part_station(nose).unwrap();
+        assert!(move_part(&mut r, fins, nose_fore + 0.01));
+        assert_eq!(r.radial(fins).unwrap().parent, nose);
+        // An internal part moves and stops at its tube's walls, never leaving the pod.
+        assert!(move_part(&mut r, ballast, tube_fore + 0.2));
+        assert!((r.part_station(ballast).unwrap() - (tube_fore + 0.2)).abs() < 1e-9);
+        let (_, aft) = r.part_span(pod).unwrap();
+        assert!(move_part(&mut r, ballast, aft));
+        assert!((r.part_span(ballast).unwrap().1 - aft).abs() < 1e-9);
+        assert_eq!(r.internal(ballast).unwrap().parent, tube);
+    }
+
+    #[test]
+    fn resizing_a_pods_parts_changes_the_pod_and_shifts_what_is_behind() {
+        let (mut r, _, pod, nose, tube, fins, ballast) = rocket();
+        let (nose_fore, nose_aft) = r.part_span(nose).unwrap();
+        let (tube_fore, _) = r.part_span(tube).unwrap();
+        let length = r.radial(pod).unwrap().kind.extent();
+        assert!((tube_fore - nose_aft).abs() < 1e-9);
+        // The nose's aft end drags back: the tube behind it follows and the pod grows by the same.
+        assert!(resize_part(&mut r, nose, End::Aft, nose_aft + 0.05));
+        assert!((r.part_station(tube).unwrap() - (tube_fore + 0.05)).abs() < 1e-9);
+        assert!((r.radial(pod).unwrap().kind.extent() - (length + 0.05)).abs() < 1e-9);
+        assert!((r.part_station(nose).unwrap() - nose_fore).abs() < 1e-9);
+        // The fin's root chord and the ballast's length resize like the core's, in the pod.
+        let fin_fore = r.part_station(fins).unwrap();
+        assert!(resize_part(&mut r, fins, End::Aft, fin_fore + 0.12));
+        assert!((r.radial(fins).unwrap().kind.extent() - 0.12).abs() < 1e-9 && r.radial(fins).unwrap().count == 3);
+        let fore = r.part_station(ballast).unwrap();
+        assert!(resize_part(&mut r, ballast, End::Aft, fore + 0.08));
+        assert!((r.internal(ballast).unwrap().kind.extent() - 0.08).abs() < 1e-9);
+        // A pod set has no length to drag.
+        assert!(!resize_part(&mut r, pod, End::Aft, 1.5));
     }
 }

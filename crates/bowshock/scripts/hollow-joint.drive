@@ -1,0 +1,19 @@
+# Hollow tubes at the stage joint and in light theme. Run:
+#   BOWSHOCK_EXAMPLE=two_stage cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/hollow-joint.drive out/hollow
+viewport 1280x1000
+scale 3
+click "Light"
+click "Cutaway"
+screenshot hollowj-1-cutaway-light.png
+click "X-ray"
+screenshot hollowj-2-xray-light.png
+click "Solid"
+press (906, 118)
+move (856, 118)
+move (806, 125)
+move (756, 135)
+move (706, 150)
+release (706, 150)
+screenshot hollowj-3-aft-light.png
+click "Exploded"
+screenshot hollowj-4-exploded-light.png

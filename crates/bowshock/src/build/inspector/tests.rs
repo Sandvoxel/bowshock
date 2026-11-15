@@ -256,3 +256,107 @@ fn edits_are_ignored_while_a_drag_has_the_rocket_open() {
     assert_ne!(fx.rocket().dim(fin, Dim::RootChord), Some(0.2));
     fx.app.ctx_mut().doc.end_drag(false);
 }
+
+/// The example with a two-copy pod standing on its first body tube, selected.
+fn with_pod() -> (Fx, PartId) {
+    let mut fx = Fx::new();
+    let tube = fx.rocket().parts().iter().find(|p| matches!(p.kind, bowshock_model::PartKind::BodyTube { .. })).map(|p| p.id).unwrap();
+    let pod = fx
+        .app
+        .ctx_mut()
+        .doc
+        .edit("Add pod", |r| {
+            let kind = r.default_pod();
+            r.attach_radial(tube, 0.02, 0.0, 2, kind).ok()
+        })
+        .unwrap();
+    fx.app.sync();
+    fx.select(pod);
+    (fx, pod)
+}
+
+#[test]
+fn a_pod_set_edits_its_count_gap_and_position_and_has_no_symmetry_actions() {
+    let (mut fx, pod) = with_pod();
+    assert_eq!(part::first_field(fx.rocket(), pod), Some(Field::Dim(Dim::Gap)));
+    fx.send(Message::Count(3));
+    assert_eq!(fx.rocket().radial(pod).unwrap().count, 3);
+    fx.send(Message::Edit(Field::Dim(Dim::Gap), 0.01, false));
+    assert_eq!(fx.rocket().dim(pod, Dim::Gap), Some(0.01));
+    fx.send(Message::Edit(Field::Dim(Dim::Angle), 0.5, false));
+    assert!((fx.rocket().radial(pod).unwrap().angle - 0.5).abs() < 1e-9);
+    // Its copies cannot be detached or split: the bar has nothing to show, and the messages change nothing.
+    assert!(super::symmetry::bar(&fx.state, fx.app.ctx(), pod).is_none());
+    let before = fx.rocket().clone();
+    fx.send(Message::Detach);
+    fx.send(Message::SplitAll);
+    assert_eq!(fx.rocket().radials().len(), before.radials().len());
+    // The parts list selects a part of the pod.
+    let inside = fx.rocket().radial(pod).and_then(|r| r.kind.pod_body()).map(|b| b.parts()[1].id).unwrap();
+    fx.send(Message::SelectPart(inside));
+    assert_eq!(fx.app.ctx().selection, Selection::Part(inside));
+    // The mass of the set is the total of its parts, every copy.
+    assert!(fx.rocket().component_mass(pod).unwrap().mass > 0.0);
+}
+
+#[test]
+fn the_parts_of_a_pod_label_their_station_order_and_pod() {
+    let (mut fx, pod) = with_pod();
+    let parts: Vec<PartId> = fx.rocket().radial(pod).and_then(|r| r.kind.pod_body()).map(|b| b.parts().iter().map(|p| p.id).collect()).unwrap();
+    assert_eq!(part::order_label(fx.rocket(), parts[0]), "First in the pod");
+    let nose_name = fx.rocket().part(parts[0]).unwrap().display_name();
+    assert_eq!(part::order_label(fx.rocket(), parts[1]), format!("After {nose_name}"));
+    // Core parts keep their own labels.
+    let core = fx.rocket().parts()[0].id;
+    assert_eq!(part::order_label(fx.rocket(), core), "First (nose)");
+    // Every part inside the pod (and the pod) builds a view without panicking, with an anchor and an override.
+    for id in fx.rocket().ids() {
+        fx.select(id);
+        let _ = fx.state.view(fx.app.ctx());
+    }
+    fx.select(parts[1]);
+    fx.send(Message::StartOverride(Field::MassOverride));
+    let one = fx.rocket().part(parts[1]).unwrap().mass_override.unwrap();
+    let all = fx.rocket().component_mass(parts[1]).unwrap().mass;
+    assert!((all - 2.0 * one).abs() < 1e-9 * all.max(1.0), "the override is per copy: {all} vs 2 x {one}");
+    // Duplicating a tube of the pod puts the copy in the pod's stack.
+    fx.send(Message::Duplicate);
+    assert_eq!(fx.rocket().radial(pod).and_then(|r| r.kind.pod_body()).map(|b| b.parts().len()), Some(3));
+}
+
+#[test]
+fn a_pod_count_change_reads_set_pod_count_and_a_fin_count_set_fin_count() {
+    let (mut fx, pod) = with_pod();
+    fx.send(Message::Count(3));
+    assert_eq!(fx.app.ctx().doc.undo_label(), Some("Set pod count"));
+    let fin = fx.fins();
+    fx.select(fin);
+    let count = fx.rocket().radial(fin).unwrap().count;
+    fx.send(Message::Count(if count == 4 { 3 } else { 4 }));
+    assert_eq!(fx.app.ctx().doc.undo_label(), Some("Set fin count"));
+    assert_ne!(fin, pod);
+}
+
+#[test]
+fn a_motor_mount_in_a_pod_belongs_to_the_stage_the_pod_stands_on() {
+    let (mut fx, pod) = with_pod();
+    let tube = fx.rocket().radial(pod).and_then(|r| r.kind.pod_body()).map(|b| b.parts()[1].id).unwrap();
+    let kind = InternalKind::InnerTube { outer_diameter: 0.03, thickness: 0.002, length: 0.2, motor_mount: true, overhang: 0.0 };
+    let mount = fx.app.ctx_mut().doc.edit("Add mount", |r| r.attach_internal(tube, 0.02, kind).ok()).unwrap();
+    fx.app.sync();
+    let found = fx.rocket().motor_mounts().into_iter().find(|m| m.id == mount).unwrap();
+    assert_eq!((found.pod, found.copies), (Some(pod), 2));
+    assert!(fx.rocket().stages().iter().all(|s| !s.mounts.contains(&mount)), "a pod's mount is not a stage's");
+    assert_eq!(fx.state.stage_of_mount(fx.rocket(), mount), fx.rocket().stage_of(mount).unwrap());
+    // Without and with a motor the inspector builds, and the check names the empty mount / the fit.
+    fx.select(mount);
+    let _ = fx.state.view(fx.app.ctx());
+    let config = fx.rocket().active_config_id();
+    let motor = bowshock_model::MotorRef::new("H128W", "Aerotech");
+    fx.app.ctx_mut().doc.edit("Set motor", |r| r.set_motor(config, mount, Some(motor)).ok());
+    fx.app.sync();
+    let _ = fx.state.view(fx.app.ctx());
+    let ctx = fx.app.ctx();
+    let checks = super::health::motor(fx.rocket(), mount, ctx.physics.motors(), ctx.physics.warnings(), ctx);
+    assert!(!checks.is_empty());
+}

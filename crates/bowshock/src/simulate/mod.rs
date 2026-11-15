@@ -15,10 +15,19 @@
 //!   plot and turns the results into a comparison against the reference (the selected flight when ticked).
 //! * The plots are [`widgets::plot`](crate::widgets::plot) groups with PlotZoom (drag a band, `Enter` zooms, `Esc` steps back); the
 //!   ground track shares the plots' crosshair; every result number moves it to the moment it happened.
+//! * **Plot sources** ([`channels`], [`layout`], [`picker`]): every quantity a flight records is a data source (position, velocity,
+//!   acceleration, aerodynamics, forces, mass and balance, atmosphere, recovery). Each panel's title is a button that opens a
+//!   searchable menu of them; `+ series` overlays another source *of the same unit* (one y-axis per plot, never two: the others are
+//!   listed disabled, with the reason); panels add, remove and move; the presets row (Flight profile, Aerodynamics, Forces,
+//!   Stability, Custom) sets whole layouts. With several flights overlaid the colour is the flight and the line style is the source.
+//!   The layout is stored in the document (`Rocket::plot_layout`), so it saves, loads and undoes; [`State::edit_layout`] writes it.
 
+mod channels;
 mod flight;
 mod format;
+mod layout;
 mod left;
+mod picker;
 mod plots;
 mod results;
 
@@ -27,19 +36,24 @@ use std::time::{Duration, Instant};
 
 use bowshock_motors::MotorDb;
 use bowshock_sim::{FlightResult, Turbulence};
-use iced::widget::{column, container, row, text, Space};
-use iced::{keyboard, Element, Fill, Task, Widget};
+use iced::widget::{column, container, row, stack, text, Space};
+use iced::{keyboard, Element, Fill, Point, Rectangle, Task, Widget};
 
 use crate::app::{self, Ctx};
 use crate::theme::{self, MONO};
 use crate::tokens::{BIN_W, RAIL_W, RIGHT_PANEL_W, SPACE_2, SPACE_3, TEXT_BODY, TEXT_LABEL};
 use crate::units::UnitSystem;
+use crate::widgets::button::{button as push, Weight};
 use crate::widgets::chip::{chip, Severity};
+use crate::widgets::glyph::Mark;
 use crate::widgets::ground_track::{GroundMessage, GroundTrack};
-use crate::widgets::plot::{header, legend, PlotGroup, PlotMessage, PlotState, PlotView, SeriesColor};
+use crate::widgets::plot::{header, legend, PanelAction, PlotGroup, PlotMessage, PlotState, PlotView, SeriesColor};
+use crate::widgets::segmented::{segmented_dense, Dense};
 
-use bowshock_model::{FlightDef, Rocket};
+use bowshock_model::{FlightDef, PlotLayout, Rocket, StabilityBands};
 use flight::{Dispersed, Flight, FlightId, MotorChoice, Run, Spec, Times};
+use layout::Preset;
+use picker::{Mode, Picker};
 use plots::Entry;
 
 /// Most flights that can be overlaid.
@@ -68,6 +82,23 @@ pub enum Edit {
     Temperature(f64),
     /// Field radius (m).
     FieldRadius(f64),
+}
+
+/// An edit of the plots' layout: the presets row, the panel chrome and the source picker all send these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LayoutEdit {
+    /// Replace the layout with a preset (`Custom` starts a one-panel layout to build on).
+    Preset(Preset),
+    /// Add a panel at the bottom.
+    AddPanel,
+    /// Remove a panel.
+    RemovePanel(usize),
+    /// Move a panel up (`true`) or down.
+    Move(usize, bool),
+    /// Make the source (by key) the panel's primary one.
+    SetPrimary(usize, &'static str),
+    /// Add the source to the panel, or remove it from there.
+    ToggleSource(usize, &'static str),
 }
 
 /// A finished simulation, as the worker thread reports it.
@@ -131,6 +162,14 @@ pub enum Message {
     CommitRename,
     /// Escape in the rename field.
     CancelRename,
+    /// An edit of the plots' layout.
+    Layout(LayoutEdit),
+    /// The source picker's search text.
+    PickerQuery(String),
+    /// Close the source picker (a click outside it).
+    ClosePicker,
+    /// A click inside the source picker that no row took: it stays open.
+    KeepPicker,
 }
 
 /// What the plots and the ground track show: derived from the flights whenever a run lands or the ticks change.
@@ -163,6 +202,14 @@ pub struct State {
     shown: Shown,
     /// The flight list as the document stores it, as of the last time this state and the document agreed.
     stored: Vec<FlightDef>,
+    /// Which sources each plot draws: the document's layout, repaired for drawing (unknown sources dropped).
+    layout: PlotLayout,
+    /// The layout as the document stores it, as of the last time this state and the document agreed.
+    stored_layout: PlotLayout,
+    /// The source picker, while it is open.
+    picker: Option<Picker>,
+    /// The document's stability thresholds: the stability plot's `Min` line.
+    bands: StabilityBands,
     /// How many document revisions this screen's own flight edits made. Results are stale when the *rocket* changed, not when a
     /// flight was edited (that only stales the flight itself), so [`State::revision`] discounts these.
     own_edits: u64,
@@ -179,11 +226,12 @@ impl Default for State {
 impl State {
     /// The flights of a new document (`Nominal`), selected, nothing run yet.
     pub fn new() -> Self {
-        State::of(Rocket::default().flights())
+        let new = Rocket::default();
+        State::of(new.flights(), new.plot_layout(), new.stability_bands())
     }
 
-    /// A state holding `defs` (never empty), the first selected, nothing run yet.
-    fn of(defs: &[FlightDef]) -> Self {
+    /// A state holding `defs` (never empty) and the plots `layout`, the first flight selected, nothing run yet.
+    fn of(defs: &[FlightDef], layout: &PlotLayout, bands: StabilityBands) -> Self {
         let flights: Vec<Flight> = defs.iter().map(Flight::from_def).collect();
         let mut state = State {
             selected: flights[0].id,
@@ -192,6 +240,10 @@ impl State {
             plot: PlotState::new((0.0, 1.0)),
             shown: Shown::default(),
             stored: defs.to_vec(),
+            layout: repaired(layout),
+            stored_layout: layout.clone(),
+            picker: None,
+            bands,
             own_edits: 0,
             renaming: None,
         };
@@ -203,12 +255,96 @@ impl State {
     /// everything (`reloaded`); otherwise a flight list that changed under us (undo, redo) is adopted, keeping the results of
     /// the flights that are still there.
     pub fn sync(&mut self, ctx: &Ctx, reloaded: bool) {
-        let defs = ctx.doc.rocket().flights();
+        let rocket = ctx.doc.rocket();
+        let (defs, layout, bands) = (rocket.flights(), rocket.plot_layout(), rocket.stability_bands());
         if reloaded {
-            *self = State::of(defs);
-        } else if self.stored != defs {
+            *self = State::of(defs, layout, bands);
+            return;
+        }
+        if self.bands != bands {
+            self.bands = bands;
+            self.rebuild();
+        }
+        if self.stored != defs {
             self.adopt(defs);
         }
+        if self.stored_layout != *layout {
+            self.adopt_layout(layout);
+        }
+    }
+
+    /// Takes `layout` as the plots' layout (undo, redo): the picker, whose panel may be gone, closes.
+    fn adopt_layout(&mut self, layout: &PlotLayout) {
+        self.stored_layout = layout.clone();
+        self.layout = repaired(layout);
+        self.picker = None;
+        self.rebuild();
+    }
+
+    /// Applies `edit` to the plots' layout as one undo step. A refused edit says why in the status strip and changes nothing.
+    fn edit_layout(&mut self, edit: LayoutEdit, ctx: &mut Ctx) {
+        let imperial = format::imperial(ctx.units);
+        let mut next = self.layout.clone();
+        let (label, outcome): (&str, Result<(), String>) = match edit {
+            LayoutEdit::Preset(Preset::Custom) if Preset::of(&next) == Preset::Custom => ("Set plots", Ok(())),
+            LayoutEdit::Preset(preset) => {
+                next = preset.layout();
+                ("Set plots", Ok(()))
+            }
+            LayoutEdit::AddPanel => ("Add plot", if layout::add_panel(&mut next) { Ok(()) } else { Err("The plots hold at most 8 panels".to_string()) }),
+            LayoutEdit::RemovePanel(i) => {
+                ("Remove plot", if layout::remove_panel(&mut next, i) { Ok(()) } else { Err("The last plot cannot be removed".to_string()) })
+            }
+            LayoutEdit::Move(i, up) => {
+                ("Move plot", if layout::move_panel(&mut next, i, up) { Ok(()) } else { Err("The plot is already at the end".to_string()) })
+            }
+            LayoutEdit::SetPrimary(i, key) => {
+                layout::set_primary(&mut next, i, key);
+                ("Change plot source", Ok(()))
+            }
+            LayoutEdit::ToggleSource(i, key) => ("Edit plot sources", layout::toggle_source(&mut next, i, key, imperial)),
+        };
+        self.picker = None;
+        if let Err(reason) = outcome {
+            ctx.notify(reason);
+            return;
+        }
+        layout::repair(&mut next);
+        if next == self.layout {
+            return;
+        }
+        let before = ctx.doc.revision();
+        ctx.doc.edit(label, |rocket| rocket.set_plot_layout(next));
+        self.own_edits += ctx.doc.revision() - before;
+        let kept = ctx.doc.rocket().plot_layout().clone();
+        self.adopt_layout(&kept);
+    }
+
+    /// A click on an editable panel's chrome: the title and `+ series` open the source picker at the chip, the rest edit the layout.
+    fn panel_action(&mut self, panel: usize, action: PanelAction, chip: Rectangle, ctx: &mut Ctx) -> Task<app::Message> {
+        let mode = match action {
+            PanelAction::Pick => Mode::Primary,
+            PanelAction::AddSeries => Mode::Add,
+            PanelAction::MoveUp => {
+                self.edit_layout(LayoutEdit::Move(panel, true), ctx);
+                return Task::none();
+            }
+            PanelAction::MoveDown => {
+                self.edit_layout(LayoutEdit::Move(panel, false), ctx);
+                return Task::none();
+            }
+            PanelAction::Remove => {
+                self.edit_layout(LayoutEdit::RemovePanel(panel), ctx);
+                return Task::none();
+            }
+        };
+        self.picker = Some(Picker { panel, mode, at: Point::new(chip.x, chip.y + chip.height + 2.0), query: String::new() });
+        iced::widget::operation::focus(picker::SEARCH_ID)
+    }
+
+    /// Closes the source picker if it is open (Esc). Whether there was one to close.
+    pub fn dismiss_picker(&mut self) -> bool {
+        self.picker.take().is_some()
     }
 
     /// Takes `defs` as the flight list. A flight with the same id keeps its results, compare slot and tickets.
@@ -293,7 +429,10 @@ impl State {
         // The reference is the selected flight when it is on show, else the first.
         let reference = ids.iter().position(|id| *id == self.selected).unwrap_or(0);
 
-        let groups = [plots::group(&entries, reference, UnitSystem::MKgS), plots::group(&entries, reference, UnitSystem::FtLbS)];
+        let groups = [
+            plots::group(&entries, reference, UnitSystem::MKgS, &self.layout, self.bands.stable),
+            plots::group(&entries, reference, UnitSystem::FtLbS, &self.layout, self.bands.stable),
+        ];
         let ground = if entries.is_empty() {
             GroundTrack {
                 tracks: Vec::new(),
@@ -398,7 +537,16 @@ impl State {
                 self.edit(edit, ctx.physics.motors());
                 self.commit(ctx, "Edit flight", Some(&key));
             }
+            Message::Plot(PlotMessage::Panel(panel, action, chip)) => return self.panel_action(panel, action, chip, ctx),
             Message::Plot(m) => self.plot.update(m),
+            Message::Layout(edit) => self.edit_layout(edit, ctx),
+            Message::PickerQuery(query) => {
+                if let Some(picker) = &mut self.picker {
+                    picker.query = query;
+                }
+            }
+            Message::ClosePicker => self.picker = None,
+            Message::KeepPicker => {}
             Message::Ground(GroundMessage::Hover(t)) => self.plot.set_hover(t),
             Message::Ground(GroundMessage::Select(i)) => {
                 if let Some(id) = self.shown.ids.get(i).copied() {
@@ -599,12 +747,13 @@ impl State {
         .boxed()
     }
 
-    /// The centre column: the PlotZoom header, the legend of a comparison, the plots.
+    /// The centre column: the PlotZoom header, the presets row, the legend of a comparison, the plots (with the source picker over
+    /// them while it is open).
     fn centre<'a>(&'a self, ctx: &'a Ctx) -> Element<'a, Message> {
-        let index = usize::from(format::imperial(ctx.units));
-        let Some(group) = self.shown.groups[index].as_ref() else { return self.placeholder() };
+        let imperial = format::imperial(ctx.units);
+        let Some(group) = self.shown.groups[usize::from(imperial)].as_ref() else { return self.placeholder() };
         let bar = |e: Element<'a, Message>| container(e).padding([SPACE_2, SPACE_3]).boxed();
-        let mut parts: Vec<Element<'a, Message>> = vec![bar(header(group, &self.plot).map(Message::Plot).boxed())];
+        let mut parts: Vec<Element<'a, Message>> = vec![bar(header(group, &self.plot).map(Message::Plot).boxed()), bar(self.presets())];
         if self.shown.compare {
             let items: Vec<(SeriesColor, String)> =
                 self.shown.ids.iter().filter_map(|id| self.flight(*id)).map(|f| (SeriesColor::Series(f.slot.unwrap_or(1)), f.name.clone())).collect();
@@ -612,8 +761,31 @@ impl State {
             let note = text(format!("events and timeline: {reference} (reference)")).font(MONO).size(TEXT_LABEL).style(theme::faint);
             parts.push(bar(row![legend(&items), Space::new().width(Fill), note].align_y(iced::Center).boxed()));
         }
-        parts.push(container(PlotView::new(group, &self.plot).element().map(Message::Plot)).width(Fill).height(Fill).boxed());
+        let canvas = container(PlotView::new(group, &self.plot).element().map(Message::Plot)).width(Fill).height(Fill);
+        parts.push(match &self.picker {
+            Some(picker) => stack![canvas, picker.view(&self.layout, imperial)].boxed(),
+            None => canvas.boxed(),
+        });
         column(parts).boxed()
+    }
+
+    /// The presets row: which layout the plots follow, and a button to add a plot.
+    fn presets(&self) -> Element<'_, Message> {
+        let options: Vec<(Preset, &str)> = Preset::ALL.iter().map(|p| (*p, p.label())).collect();
+        let strip = segmented_dense(
+            &options,
+            Preset::of(&self.layout),
+            |p| Message::Layout(LayoutEdit::Preset(p)),
+            Dense { height: 24.0, pad: 8.0, size: 12.0 },
+            false,
+        );
+        let mut add = push("Add plot", Weight::Ghost).icon(Mark::Plus).small().tooltip("Add a plot below the others");
+        if self.layout.panels.len() >= bowshock_model::MAX_PLOT_PANELS {
+            add = add.disabled("The plots hold at most 8 panels");
+        } else {
+            add = add.on_press(Message::Layout(LayoutEdit::AddPanel));
+        }
+        row![crate::app::ui::label("PLOTS"), strip, Space::new().width(Fill), Element::from(add)].spacing(SPACE_2).align_y(iced::Center).boxed()
     }
 
     /// What the centre shows before the selected flight has run.
@@ -628,6 +800,13 @@ impl State {
         };
         container(column![crate::app::ui::label("NO RESULT YET"), status].spacing(SPACE_3).align_x(iced::Center)).center(Fill).boxed()
     }
+}
+
+/// `layout` as the plots draw it: sources this version does not know, or that cannot share their plot's axis, are left out.
+fn repaired(layout: &PlotLayout) -> PlotLayout {
+    let mut layout = layout.clone();
+    layout::repair(&mut layout);
+    layout
 }
 
 /// A thin vertical scrollbar, so the panels' content is not narrowed.

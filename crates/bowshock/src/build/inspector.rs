@@ -178,6 +178,8 @@ pub enum Message {
     SelectSeparation(usize),
     /// Cut this tube at this station (the fix for a stage with no joint).
     SplitTube(PartId, f64),
+    /// Select this part (a link of the parts list of a pod).
+    SelectPart(PartId),
 }
 
 /// The inspector's state: what is being typed or open, not the rocket.
@@ -223,7 +225,7 @@ impl State {
 
     /// The stage (from 1) the motor mount `mount` belongs to.
     fn stage_of_mount(&self, rocket: &Rocket, mount: PartId) -> usize {
-        rocket.stages().iter().find(|s| s.mounts.contains(&mount)).map_or(1, |s| s.index)
+        rocket.stage_of(mount).unwrap_or(1)
     }
 
     /// Handles one of the inspector's messages. Edits go through `ctx.doc`.
@@ -308,6 +310,10 @@ impl State {
                 if let Selection::Part(id) = ctx.selection {
                     self.anchor = Some((id, anchor));
                 }
+            }
+            Message::SelectPart(id) => {
+                ctx.select_one(Some(id));
+                ctx.symmetry.instance = None;
             }
             Message::SelectSeparation(n) => ctx.selection = Selection::Separation(n),
             Message::Delete => {
@@ -416,7 +422,7 @@ impl State {
                 if rocket.radial(id).is_some_and(|r| r.count != count && r.has_overrides()) {
                     self.confirm_count = Some((id, count));
                 } else {
-                    ctx.doc.edit("Set fin count", |r| edit::set_count(r, id, count));
+                    ctx.doc.edit(count_label(rocket, id), |r| edit::set_count(r, id, count));
                 }
             }
             Message::CrossSection(section) => {
@@ -453,7 +459,9 @@ impl State {
                 ctx.doc.edit("Set ejection charge", |r| edit::set_plugged(r, id, plugged));
             }
             Message::StartOverride(Field::MassOverride) => {
-                let computed = rocket.component_mass(id).map_or(0.0, |m| m.mass);
+                // A pod part's mass is every copy's; its override is per copy.
+                let copies = f64::from(rocket.pod_of(id).map_or(1, |pod| pod.count.max(1)));
+                let computed = rocket.component_mass(id).map_or(0.0, |m| m.mass) / copies;
                 ctx.doc.edit("Override mass", |r| r.set_mass_override(id, Some(computed)));
             }
             Message::StartOverride(_) => {
@@ -504,7 +512,7 @@ impl State {
             }
             Message::ConfirmCount => {
                 if let Some((_, count)) = self.confirm_count.take().filter(|(part, _)| *part == id) {
-                    ctx.doc.edit("Set fin count", |r| edit::set_count(r, id, count));
+                    ctx.doc.edit(count_label(rocket, id), |r| edit::set_count(r, id, count));
                 }
             }
             Message::CancelCount => self.confirm_count = None,
@@ -685,7 +693,7 @@ impl State {
             _ => {
                 let mut cells: Vec<Element<'a, Message>> =
                     vec![text(part.name()).font(SANS_SEMIBOLD).size(type_scale::UI_TITLE.size).style(theme::ink).boxed()];
-                if rocket.radial(id).is_some_and(|r| r.count > 1) {
+                if rocket.radial(id).is_some_and(|r| r.count > 1 && !r.kind.is_pod()) {
                     let letter = bowshock_model::instance_letter(ctx.symmetry.copy_in(rocket, id));
                     let tag = text(format!(" · {letter}")).font(SANS_SEMIBOLD).size(type_scale::UI_TITLE.size).style(theme::ink);
                     cells.push(mouse_area(tag).on_press(Message::NextInstance).interaction(mouse::Interaction::Pointer).boxed());
@@ -707,6 +715,15 @@ impl State {
 }
 
 /// The header's sub-type select: a nose's shape family, a fin's planform, a mass component's role.
+/// The undo label of a count change: what the part is, so the history reads it.
+fn count_label(rocket: &Rocket, id: PartId) -> &'static str {
+    if rocket.is_pod(id) {
+        "Set pod count"
+    } else {
+        "Set fin count"
+    }
+}
+
 fn subtype<'a>(rocket: &Rocket, id: PartId) -> Option<Element<'a, Message>> {
     match rocket.kind_of(id)? {
         PartRef::Axial(p) => match p.kind {

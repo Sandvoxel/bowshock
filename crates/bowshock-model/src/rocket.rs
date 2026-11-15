@@ -126,6 +126,9 @@ pub struct Rocket {
     /// The stability thresholds (gauge, warnings, Analyze lines). Not written while they are the defaults.
     #[serde(default, skip_serializing_if = "crate::bands::is_default")]
     pub(crate) bands: crate::bands::StabilityBands,
+    /// The Simulate screen's plots (which data sources each panel draws). Not written while they are the defaults.
+    #[serde(default, skip_serializing_if = "crate::flights::plots_are_default")]
+    pub(crate) plots: crate::flights::PlotLayout,
 }
 
 impl Default for Rocket {
@@ -144,6 +147,7 @@ impl Default for Rocket {
             flights: crate::flights::default_flights(),
             formulas: Vec::new(),
             bands: crate::bands::StabilityBands::default(),
+            plots: crate::flights::PlotLayout::default(),
         }
     }
 }
@@ -259,7 +263,7 @@ impl Rocket {
 
     /// The radial part with `id`.
     pub fn radial(&self, id: PartId) -> Option<&RadialPart> {
-        self.radials.iter().find(|r| r.id == id)
+        self.radials.iter().find(|r| r.id == id).or_else(|| self.pod_radials().find(|r| r.id == id))
     }
 
     /// Where a radial part of `kind` may start on `parent`: `offset` limited so enough of it
@@ -288,8 +292,12 @@ impl Rocket {
 
     /// Station of the fore edge of a radial part.
     pub fn radial_station(&self, radial: &RadialPart) -> Option<f64> {
-        let index = self.index_of(radial.parent)?;
-        Some(self.stations()[index] + radial.offset)
+        if let Some(index) = self.index_of(radial.parent) {
+            return Some(self.stations()[index] + radial.offset);
+        }
+        // On a part of a pod: its station within the pod, on the pod's.
+        let (z0, sub) = self.scratch_of(radial.id)?;
+        Some(z0 + sub.radial_station(radial)?)
     }
 
     /// Surface radius a radial part stands on: the smallest over its footprint, so it meets the surface along its whole
@@ -312,17 +320,38 @@ impl Rocket {
     /// Places `count` copies of a radial part on axial part `parent`, the first at `angle`. The offset is limited so it lies
     /// within the parent (a fin may trail past its aft end). The group gets the default material of its kind
     /// ([`RadialPart::new`]).
-    pub fn attach_radial(&mut self, parent: PartId, offset: f64, angle: f64, count: u8, kind: RadialKind) -> Result<PartId, RadialError> {
+    pub fn attach_radial(&mut self, parent: PartId, offset: f64, angle: f64, count: u8, mut kind: RadialKind) -> Result<PartId, RadialError> {
+        if self.pod_index(parent).is_some() {
+            // A part of a pod: the pod holds it. (Pods do not nest.)
+            if kind.is_pod() {
+                return Err(RadialError::NoSuchParent);
+            }
+            return self.in_pod(parent, |s| s.attach_radial(parent, offset, angle, count, kind)).ok_or(RadialError::NoSuchParent)?;
+        }
         self.check_radial(parent, count)?;
         let offset = self.clamp_offset(parent, offset, &kind).ok_or(RadialError::NoSuchParent)?;
-        let kind = kind.limited_at(offset);
         let id = self.fresh_id();
+        if let RadialKind::Pod { body, .. } = &mut kind {
+            // The pod's parts get ids of this rocket.
+            self.next_id = body.reid(self.next_id);
+        }
+        let kind = kind.limited_at(offset);
         self.radials.push(RadialPart::new(id, kind, parent, offset, angle.rem_euclid(std::f64::consts::TAU), count));
         Ok(id)
     }
 
     /// Moves radial part `id` onto `parent` at `offset` and `angle`.
     pub fn move_radial(&mut self, id: PartId, parent: PartId, offset: f64, angle: f64) -> Result<(), RadialError> {
+        if self.pod_index(id).is_some() {
+            // A part of a pod stays in its pod: it can move along the pod's parts only.
+            if self.pod_index(parent) != self.pod_index(id) {
+                return Err(RadialError::NoSuchParent);
+            }
+            return self.in_pod(id, |s| s.move_radial(id, parent, offset, angle)).ok_or(RadialError::NoSuchRadial)?;
+        }
+        if self.radial(id).is_some_and(|r| r.kind.is_pod()) && self.index_of(parent).is_none() {
+            return Err(RadialError::NoSuchParent);
+        }
         let existing = self.radial(id).ok_or(RadialError::NoSuchRadial)?;
         let count = existing.count;
         self.check_radial(parent, count)?;
@@ -343,6 +372,9 @@ impl Rocket {
     /// sweep to keep the tip behind the parent's fore face (see [`RadialKind::limited_at`]). A freeform fin needs at least
     /// three points. Returns whether it was applied.
     pub fn set_radial(&mut self, id: PartId, kind: RadialKind, count: u8) -> bool {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.set_radial(id, kind, count)).unwrap_or(false);
+        }
         let Some(radial) = self.radial(id) else {
             return false;
         };
@@ -366,6 +398,9 @@ impl Rocket {
 
     /// Removes radial part `id`, returning it.
     pub fn remove_radial(&mut self, id: PartId) -> Option<RadialPart> {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.remove_radial(id)).flatten();
+        }
         let i = self.radials.iter().position(|r| r.id == id)?;
         Some(self.radials.remove(i))
     }
@@ -373,6 +408,22 @@ impl Rocket {
     /// Puts a removed radial part back as it was, if its parent is still there (its offset is limited to the parent). Overrides
     /// that no longer fit its count or kind are dropped.
     pub fn restore_radial(&mut self, mut radial: RadialPart) -> Result<(), RadialError> {
+        if self.pod_index(radial.parent).is_some() {
+            if radial.kind.is_pod() {
+                return Err(RadialError::NoSuchParent);
+            }
+            let parent = radial.parent;
+            return self.in_pod(parent, |s| s.restore_radial(radial)).ok_or(RadialError::NoSuchParent)?;
+        }
+        if radial.kind.is_pod() && self.index_of(radial.parent).is_none() {
+            return Err(RadialError::NoSuchParent);
+        }
+        if let Some(body) = radial.kind.pod_body() {
+            if body.ids().any(|id| self.part(id).is_some() || self.radial(id).is_some() || self.internal(id).is_some()) {
+                return Err(RadialError::NoSuchRadial);
+            }
+            self.next_id = self.next_id.max(body.ids().max().map_or(0, |m| m + 1));
+        }
         self.check_radial(radial.parent, radial.count)?;
         if self.radial(radial.id).is_some() {
             return Err(RadialError::NoSuchRadial);
@@ -387,6 +438,9 @@ impl Rocket {
 
     /// Takes every radial part off axial part `parent` (to carry them while it is moved) and returns them.
     pub fn take_radials(&mut self, parent: PartId) -> Vec<RadialPart> {
+        if self.pod_index(parent).is_some() {
+            return self.in_pod(parent, |s| s.take_radials(parent)).unwrap_or_default();
+        }
         let (taken, kept) = std::mem::take(&mut self.radials).into_iter().partition(|r| r.parent == parent);
         self.radials = kept;
         taken
@@ -421,12 +475,12 @@ impl Rocket {
 
     /// The internal part with `id`.
     pub fn internal(&self, id: PartId) -> Option<&InternalPart> {
-        self.internals.iter().find(|p| p.id == id)
+        self.internals.iter().find(|p| p.id == id).or_else(|| self.pod_internals().find(|p| p.id == id))
     }
 
     /// The internal parts inside axial part `parent`.
     pub fn internals_of(&self, parent: PartId) -> impl Iterator<Item = &InternalPart> {
-        self.internals.iter().filter(move |p| p.parent == parent)
+        self.internals.iter().chain(self.pod_internals()).filter(move |p| p.parent == parent)
     }
 
     /// Where an internal part `extent` long may start in `parent`: `offset` limited so it lies wholly within the parent's
@@ -439,6 +493,9 @@ impl Rocket {
     /// Places an internal part in axial part `parent` with its fore edge `offset` behind the parent's fore face (limited so
     /// the part lies within the parent). It gets the default material of its kind ([`InternalPart::new`]).
     pub fn attach_internal(&mut self, parent: PartId, offset: f64, kind: InternalKind) -> Result<PartId, InternalError> {
+        if self.pod_index(parent).is_some() {
+            return self.in_pod(parent, |s| s.attach_internal(parent, offset, kind)).ok_or(InternalError::NoSuchParent)?;
+        }
         let offset = self.clamp_internal_offset(parent, offset, kind.extent()).ok_or(InternalError::NoSuchParent)?;
         let id = self.fresh_id();
         self.internals.push(InternalPart::new(id, kind, parent, offset));
@@ -447,6 +504,15 @@ impl Rocket {
 
     /// Moves internal part `id` into `parent` at `offset` (limited to keep it within the parent).
     pub fn move_internal(&mut self, id: PartId, parent: PartId, offset: f64) -> Result<(), InternalError> {
+        if self.pod_index(id).is_some() {
+            if self.pod_index(parent) != self.pod_index(id) {
+                return Err(InternalError::NoSuchParent);
+            }
+            return self.in_pod(id, |s| s.move_internal(id, parent, offset)).ok_or(InternalError::NoSuchInternal)?;
+        }
+        if self.pod_index(parent).is_some() {
+            return Err(InternalError::NoSuchParent);
+        }
         let extent = self.internal(id).ok_or(InternalError::NoSuchInternal)?.kind.extent();
         let offset = self.clamp_internal_offset(parent, offset, extent).ok_or(InternalError::NoSuchParent)?;
         let part = self.internals.iter_mut().find(|p| p.id == id).ok_or(InternalError::NoSuchInternal)?;
@@ -458,6 +524,9 @@ impl Rocket {
     /// within the parent. Turning a motor mount into a plain tube drops the motors configured for it. Returns whether it
     /// was applied.
     pub fn set_internal_kind(&mut self, id: PartId, kind: InternalKind) -> bool {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.set_internal_kind(id, kind)).unwrap_or(false);
+        }
         let Some(part) = self.internal(id) else {
             return false;
         };
@@ -474,6 +543,9 @@ impl Rocket {
 
     /// Removes internal part `id`, returning it. Motors configured for it are dropped from every configuration.
     pub fn remove_internal(&mut self, id: PartId) -> Option<InternalPart> {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.remove_internal(id)).flatten();
+        }
         let i = self.internals.iter().position(|p| p.id == id)?;
         let part = self.internals.remove(i);
         self.prune_configs();
@@ -482,6 +554,10 @@ impl Rocket {
 
     /// Puts a removed internal part back as it was, if its parent is still there (its offset is limited to the parent).
     pub fn restore_internal(&mut self, mut part: InternalPart) -> Result<(), InternalError> {
+        if self.pod_index(part.parent).is_some() {
+            let parent = part.parent;
+            return self.in_pod(parent, |s| s.restore_internal(part)).ok_or(InternalError::NoSuchParent)?;
+        }
         if self.internal(part.id).is_some() {
             return Err(InternalError::NoSuchInternal);
         }
@@ -494,6 +570,9 @@ impl Rocket {
     /// Takes every internal part out of axial part `parent` (to carry them while it is moved) and returns them. Configurations
     /// keep their motors, so [`restore_internals`](Self::restore_internals) brings everything back.
     pub fn take_internals(&mut self, parent: PartId) -> Vec<InternalPart> {
+        if self.pod_index(parent).is_some() {
+            return self.in_pod(parent, |s| s.take_internals(parent)).unwrap_or_default();
+        }
         let (taken, kept) = std::mem::take(&mut self.internals).into_iter().partition(|p| p.parent == parent);
         self.internals = kept;
         taken
@@ -587,9 +666,9 @@ impl Rocket {
         Ok(())
     }
 
-    /// The axial part with `id`.
+    /// The axial part with `id`: of the core, or of a pod's stack.
     pub fn part(&self, id: PartId) -> Option<&Part> {
-        self.parts.iter().find(|p| p.id == id)
+        self.parts.iter().find(|p| p.id == id).or_else(|| self.pod_parts().find(|p| p.id == id))
     }
 
     /// Position (fore to aft) of the part with `id`; it is the node index of that part's fore face.
@@ -601,6 +680,9 @@ impl Rocket {
     /// the stack's ordering rules intact); returns whether it was applied. Radial and internal parts on it are limited to
     /// its new length.
     pub fn set_kind(&mut self, id: PartId, kind: PartKind) -> bool {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.set_kind(id, kind)).unwrap_or(false);
+        }
         match self.parts.iter_mut().find(|p| p.id == id) {
             Some(part) if std::mem::discriminant(&part.kind) == std::mem::discriminant(&kind) => {
                 part.kind = kind;
@@ -615,6 +697,15 @@ impl Rocket {
     /// Removes the axial part with `id` (and the radial and internal parts on it), returning it. Motors configured for
     /// removed motor mounts are dropped from every configuration.
     pub fn remove(&mut self, id: PartId) -> Option<Part> {
+        if let Some(i) = self.pod_index(id) {
+            let pod = self.radials[i].id;
+            let part = self.in_pod(id, |s| s.remove(id)).flatten();
+            // A pod with nothing left goes too.
+            if self.radials[i].kind.pod_body().is_some_and(|b| b.parts.is_empty()) {
+                self.remove_radial(pod);
+            }
+            return part;
+        }
         let i = self.parts.iter().position(|p| p.id == id)?;
         self.radials.retain(|r| r.parent != id);
         self.internals.retain(|p| p.parent != id);
@@ -637,11 +728,15 @@ impl Rocket {
 
     /// Every part id: the axial stack fore to aft, then radial parts, then internal parts.
     pub fn ids(&self) -> Vec<PartId> {
-        self.parts.iter().map(|p| p.id).chain(self.radials.iter().map(|r| r.id)).chain(self.internals.iter().map(|i| i.id)).collect()
+        let core = self.parts.iter().map(|p| p.id).chain(self.radials.iter().map(|r| r.id)).chain(self.internals.iter().map(|i| i.id));
+        core.chain(self.radials.iter().filter_map(|r| r.kind.pod_body()).flat_map(|b| b.ids())).collect()
     }
 
     /// Station of the fore edge of any part, from the fore end of the rocket.
     pub fn part_station(&self, id: PartId) -> Option<f64> {
+        if let Some((z0, sub)) = self.scratch_of(id) {
+            return Some(z0 + sub.part_station(id)?);
+        }
         match self.kind_of(id)? {
             PartRef::Axial(p) => Some(self.stations()[self.index_of(p.id)?]),
             PartRef::Radial(r) => self.radial_station(r),
@@ -667,6 +762,9 @@ impl Rocket {
 
     /// Sets the user's name of any part (`None` for the kind's name). Returns whether `id` exists.
     pub fn set_name(&mut self, id: PartId, name: Option<String>) -> bool {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.set_name(id, name)).unwrap_or(false);
+        }
         if let Some(p) = self.parts.iter_mut().find(|p| p.id == id) {
             p.name = name;
         } else if let Some(p) = self.radials.iter_mut().find(|p| p.id == id) {
@@ -682,6 +780,9 @@ impl Rocket {
     /// Sets the material of any part. Refused (false) when the stock is of the wrong sort for the part: bulk for tubes, fins
     /// and discs, surface for a parachute canopy or streamer, line for shock cord. Mass components take any.
     pub fn set_material(&mut self, id: PartId, material: MaterialId) -> bool {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.set_material(id, material)).unwrap_or(false);
+        }
         if let Some(p) = self.parts.iter_mut().find(|p| p.id == id) {
             let ok = material.kind() == MaterialKind::Bulk;
             ok && {
@@ -707,6 +808,9 @@ impl Rocket {
 
     /// Sets the outside finish of an axial or radial part. Returns whether it was applied (internal parts have no finish).
     pub fn set_finish(&mut self, id: PartId, finish: Finish) -> bool {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.set_finish(id, finish)).unwrap_or(false);
+        }
         if let Some(p) = self.parts.iter_mut().find(|p| p.id == id) {
             p.finish = finish;
         } else if let Some(p) = self.radials.iter_mut().find(|p| p.id == id) {
@@ -720,6 +824,9 @@ impl Rocket {
     /// Sets the shell wall thickness of an axial part, limited to `0..=` its largest radius (a thickness of the radius makes
     /// it solid). Returns whether it was applied.
     pub fn set_thickness(&mut self, id: PartId, thickness: f64) -> bool {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.set_thickness(id, thickness)).unwrap_or(false);
+        }
         let Some(p) = self.parts.iter_mut().find(|p| p.id == id) else {
             return false;
         };
@@ -730,6 +837,13 @@ impl Rocket {
 
     /// Sets the mass that replaces the computed one for any part (`None` to compute it). A radial group's is for all copies.
     pub fn set_mass_override(&mut self, id: PartId, mass: Option<f64>) -> bool {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.set_mass_override(id, mass)).unwrap_or(false);
+        }
+        // A pod weighs what its parts weigh.
+        if self.is_pod(id) {
+            return false;
+        }
         let mass = mass.map(|m| m.max(0.0));
         if let Some(p) = self.parts.iter_mut().find(|p| p.id == id) {
             p.mass_override = mass;
@@ -745,6 +859,12 @@ impl Rocket {
 
     /// Sets the CG that replaces the computed one for any part, metres behind the part's fore edge (`None` to compute it).
     pub fn set_cg_override(&mut self, id: PartId, cg: Option<f64>) -> bool {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.set_cg_override(id, cg)).unwrap_or(false);
+        }
+        if self.is_pod(id) {
+            return false;
+        }
         if let Some(p) = self.parts.iter_mut().find(|p| p.id == id) {
             p.cg_override = cg;
         } else if let Some(p) = self.radials.iter_mut().find(|p| p.id == id) {
@@ -759,6 +879,9 @@ impl Rocket {
 
     /// Sets the plate section of a fin group. Returns whether `id` is a radial part.
     pub fn set_fin_section(&mut self, id: PartId, section: FinSection) -> bool {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.set_fin_section(id, section)).unwrap_or(false);
+        }
         match self.radials.iter_mut().find(|p| p.id == id) {
             Some(p) => {
                 p.cross_section = section;
@@ -770,6 +893,9 @@ impl Rocket {
 
     /// Sets the cant of a fin group, radians. Returns whether `id` is a radial part.
     pub fn set_cant(&mut self, id: PartId, cant: f64) -> bool {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.set_cant(id, cant)).unwrap_or(false);
+        }
         match self.radials.iter_mut().find(|p| p.id == id) {
             Some(p) => {
                 p.cant = cant;

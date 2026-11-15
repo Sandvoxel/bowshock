@@ -1,0 +1,24 @@
+# Hollow tubes and aft-end z-fighting. Run with the example rocket, then crop the tail (scale 3):
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/hollow.drive out/hollow
+viewport 1280x1000
+scale 3
+# Aft 3/4 view from above, the cut side (-X) towards us: orbit by dragging the view cube.
+press (906, 118)
+move (856, 118)
+move (806, 125)
+move (756, 135)
+move (706, 150)
+release (706, 150)
+screenshot hollow-1-solid.png
+click "Cutaway"
+screenshot hollow-2-cutaway.png
+click "X-ray"
+screenshot hollow-3-xray.png
+click "Solid"
+# Looking straight at the tail face (TAIL on the view cube).
+click (920, 130)
+screenshot hollow-4-tail.png
+click "Cutaway"
+screenshot hollow-5-tail-cutaway.png
+click "X-ray"
+screenshot hollow-6-tail-xray.png

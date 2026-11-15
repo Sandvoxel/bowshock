@@ -35,6 +35,18 @@ pub fn nice_ticks(lo: f64, hi: f64, target: usize) -> Vec<f64> {
     (first..=last).map(|k| k as f64 * step).filter(|v| *v >= lo - eps && *v <= hi + eps).map(|v| if v.abs() < eps { 0.0 } else { v }).collect()
 }
 
+/// `n` evenly spaced ticks from `lo` to `hi` inclusive, with the decimals that tell them apart: two significant digits for
+/// a step that starts with 1 or 2 (`0.19`), otherwise just enough to print it (`0.6`, `67`).
+pub fn even_ticks(lo: f64, hi: f64, n: usize) -> (Vec<f64>, usize) {
+    if !(lo.is_finite() && hi.is_finite()) || hi <= lo || n < 2 {
+        return (Vec::new(), 0);
+    }
+    let step = (hi - lo) / (n - 1) as f64;
+    let mantissa = step / 10f64.powf(step.log10().floor());
+    let decimals = decimals_for(step) + usize::from(mantissa < 3.0);
+    ((0..n).map(|i| if i == n - 1 { hi } else { lo + step * i as f64 }).collect(), decimals)
+}
+
 /// Decimal places needed to print multiples of `step` exactly (0 for 1, 10, 100; 1 for 0.5, 0.2; 2 for 0.05).
 pub fn decimals_for(step: f64) -> usize {
     if !(step.is_finite() && step > 0.0) {

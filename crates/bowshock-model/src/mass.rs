@@ -106,6 +106,24 @@ impl Rocket {
     /// Mass, CG station and inertias of one part, including every copy of a radial group, with any overrides applied. `None`
     /// if `id` is not in the rocket. Motors are not part of the model.
     pub fn component_mass(&self, id: PartId) -> Option<MassProps> {
+        if let Some(i) = self.pod_index(id) {
+            // A part of a pod: every copy, each standing `axis_radius` off the core axis. Each copy's own inertias come from the
+            // pod's rocket; moving it off the axis adds m r^2 about the long axis and, averaged over the copies' directions,
+            // m r^2 / 2 about a transverse axis (the parallel-axis theorem).
+            let pod = &self.radials[i];
+            let (z0, sub) = self.scratch_of(id)?;
+            let one = sub.component_mass(id)?;
+            let (n, r) = (f64::from(pod.count.max(1)), self.pod_frame(pod)?.axis_radius);
+            return Some(MassProps {
+                mass: n * one.mass,
+                cg: z0 + one.cg,
+                i_long: n * (one.i_long + one.mass * r * r / 2.0),
+                i_rot: n * (one.i_rot + one.mass * r * r),
+            });
+        }
+        if let Some(body) = self.radial(id).and_then(|r| r.kind.pod_body()) {
+            return Some(MassProps::combine(body.ids().filter_map(|child| self.component_mass(child))));
+        }
         if let Some(index) = self.index_of(id) {
             let p = &self.parts[index];
             let rho = p.material.density_as(crate::material::MaterialKind::Bulk, MaterialId::CARDBOARD);
@@ -133,7 +151,8 @@ impl Rocket {
 
     /// Every part's [`component_mass`](Self::component_mass), in [`ids`](Self::ids) order.
     pub fn component_masses(&self) -> Vec<(PartId, MassProps)> {
-        self.ids().into_iter().filter_map(|id| self.component_mass(id).map(|m| (id, m))).collect()
+        // A pod set is its parts: counting both would weigh it twice.
+        self.ids().into_iter().filter(|&id| !self.is_pod(id)).filter_map(|id| self.component_mass(id).map(|m| (id, m))).collect()
     }
 
     /// The whole rocket without a motor: every part combined (see [`MassProps::combine`]) with the active configuration's
@@ -195,6 +214,8 @@ impl Rocket {
                 let radius = base + height / 2.0;
                 MassProps { mass: n * mass, cg: diameter / 2.0, i_long: n * mass * radius * radius / 2.0, i_rot: n * mass * radius * radius }
             }
+            // A pod weighs its parts ([`Rocket::component_mass`]); the set itself has no plate or tube of its own.
+            RadialKind::Pod { .. } => MassProps::ZERO,
         }
     }
 

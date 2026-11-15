@@ -1,0 +1,41 @@
+viewport 1280x800
+click (119, 705)
+press "Pod / strap-on"
+move (300, 560)
+move (500, 400)
+move (700, 300)
+move (816, 282)
+screenshot pod-ghost.png
+release (816, 282)
+screenshot pod-placed.png
+click (23, 104)
+press "Trapezoidal fins"
+move (300, 300)
+move (600, 300)
+move (800, 280)
+move (830, 275)
+screenshot pod-fins-drag.png
+release (830, 275)
+screenshot pod-fins.png
+click (816, 282)
+screenshot pod-part.png
+click "2D"
+screenshot pod-profile.png
+screenshot pod-set.png
+screenshot ip-pod-part.png
+# The pod set's own inspector: Count, Gap, Inside links.
+click "Body tube"
+screenshot ip-pod-body.png
+# An inner tube dragged into the pod's body tube.
+click (23, 149)
+# A wider pod tube so the 41 mm tube fits.
+click (1175, 167)
+type "50"
+type enter
+click (23, 149)
+# Clicking a bin row adds it to the selected part (here the pod's tube).
+click "Inner tube"
+screenshot ip-pod-tube.png
+# Holds a motor: the Motor row, with the hint to pick one in the parts bin.
+click (1098, 269)
+screenshot ip-pod-mount.png

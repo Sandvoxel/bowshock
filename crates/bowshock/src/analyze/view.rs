@@ -13,12 +13,11 @@ use super::readout::{self, Row, Tag};
 use super::{Comparison, MachField, Message, State};
 use crate::app::{ui, Ctx};
 use crate::theme::{self, MONO, SANS_SEMIBOLD};
-use crate::tokens::{BIN_W, CONTROL_H, RAIL_W, RIGHT_PANEL_W, SPACE_1, SPACE_2, SPACE_3, TEXT_BODY, TEXT_LABEL};
+use crate::tokens::{BIN_W, CONTROL_H, RAIL_W, RIGHT_PANEL_W, SPACE_1, SPACE_2, SPACE_3, SPACE_4, TEXT_BODY, TEXT_LABEL};
 use crate::units::Quantity;
 use crate::widgets::button::{button as push, Weight};
 use crate::widgets::chip::{chip, Severity};
 use crate::widgets::field::{self, rule};
-use crate::widgets::gauge;
 use crate::widgets::ground_track::GroundTrackView;
 use crate::widgets::plot::{self, PlotView, SeriesColor};
 use crate::widgets::unit_input::unit_input;
@@ -27,8 +26,6 @@ use crate::widgets::unit_input::unit_input;
 const LABEL_W: f32 = 112.0;
 /// Height of an analyses list row.
 const ROW_H: f32 = 36.0;
-/// Width of the gauge card.
-const GAUGE_W: f32 = 270.0;
 
 static FINISHES: [FinishChoice; 6] = FinishChoice::ALL;
 
@@ -40,7 +37,7 @@ pub fn screen<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
     let panel = |content: Element<'a, Message>, width: f32| container(content).width(width).height(Fill).style(theme::panel);
     row![
         panel(left(state, ctx), RAIL_W + BIN_W),
-        container(centre(state, ctx)).width(Fill).height(Fill).style(plot::surface),
+        container(centre(state)).width(Fill).height(Fill).style(plot::surface),
         panel(right(state, ctx), RIGHT_PANEL_W),
     ]
     .height(Fill)
@@ -263,16 +260,10 @@ fn centred<'a>(message: String) -> Element<'a, Message> {
     container(text(message).size(TEXT_BODY).style(theme::muted)).center(Fill).boxed()
 }
 
-fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
+fn centre<'a>(state: &'a State) -> Element<'a, Message> {
     let (Some(out), Some(built)) = (state.output(), state.built.as_ref()) else {
         return centred(state.error.as_ref().map_or_else(|| "Solving…".to_string(), |e| format!("Nothing to analyse: {e}")));
     };
-    let active = ctx.doc.rocket().active_config_id();
-    let hover = state.plot.hover_x().map(|x| built.scale.to_si(x));
-    let length = readout::margin_at(out, hover, active).map(|(_, m)| ui::with_unit(m, Quantity::Length, ctx.units));
-    let bands: gauge::Bands = ctx.doc.rocket().stability_bands().into();
-    let card = container(gauge::full(&state.gauge, &bands, length)).width(GAUGE_W);
-
     let mut notes: Vec<Element<'a, Message>> = Vec::new();
     if !built.legend.is_empty() {
         notes.push(plot::legend(&built.legend));
@@ -280,9 +271,6 @@ fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
     if state.omitted > 0 {
         notes.push(chip(Severity::Info, format!("Showing {} of {} configurations", built.legend.len(), built.legend.len() + state.omitted)).into());
     }
-    let top =
-        container(row![card, Space::new().width(Fill), column(notes).spacing(SPACE_2).align_x(alignment::Horizontal::Right)].align_y(alignment::Vertical::Top))
-            .padding([SPACE_3, SPACE_3]);
     let bar = |e: Element<'a, Message>| container(e).padding([SPACE_2, SPACE_3]).boxed();
 
     let body: Element<'a, Message> = if state.show_table {
@@ -290,14 +278,21 @@ fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
     } else if out.analysis == Analysis::Dispersion {
         dispersion(state, built)
     } else {
-        column![
+        // The kit's centre column: the zoom breadcrumb and hover hint on one row at the top, then the plots down to the strip.
+        let mut plots: Vec<Element<'a, Message>> = vec![
             bar(plot::header(&built.group, &state.plot).map(Message::Plot).boxed()),
-            container(PlotView::new(&built.group, &state.plot).element().map(Message::Plot).boxed()).width(Fill).height(Fill)
-        ]
-        .height(Fill)
-        .boxed()
+            container(PlotView::new(&built.group, &state.plot).element().map(Message::Plot).boxed()).width(Fill).height(Fill).boxed(),
+        ];
+        if out.analysis == Analysis::Drag {
+            plots.extend(drag_key(built));
+        }
+        column(plots).height(Fill).boxed()
     };
-    column![top, body].boxed()
+    if notes.is_empty() {
+        body
+    } else {
+        column![container(row(notes).spacing(SPACE_3).align_y(alignment::Vertical::Center)).padding([SPACE_2, SPACE_3]), body].height(Fill).boxed()
+    }
 }
 
 fn dispersion<'a>(state: &'a State, built: &'a Built) -> Element<'a, Message> {
@@ -383,6 +378,11 @@ fn swatch<'a>(color: SeriesColor) -> Element<'a, Message> {
         .boxed()
 }
 
+/// A tooltip in the kit's style: a raised surface, 1 px border, 11 px text, at most about 260 px wide.
+fn help_bubble<'a>(tip: &'static str) -> Element<'a, Message> {
+    container(text(tip).size(TEXT_LABEL)).width(260).padding([SPACE_1, SPACE_2]).style(|t: &Theme| theme::tooltip(t)).boxed()
+}
+
 fn row_view<'a>(r: Row) -> Element<'a, Message> {
     let mut parts: Vec<Element<'a, Message>> = Vec::new();
     if let Some(color) = r.swatch {
@@ -395,12 +395,42 @@ fn row_view<'a>(r: Row) -> Element<'a, Message> {
         Some(Tag::Plain(label)) => parts.push(text(label).font(MONO).size(TEXT_LABEL).style(theme::muted).boxed()),
         None => {}
     }
+    if let Some(share) = r.share {
+        parts.push(text(share).font(MONO).size(TEXT_LABEL).style(theme::faint).boxed());
+    }
     let value = text(r.value).font(MONO).style(theme::ink);
     parts.push(if r.big { value.size(20).boxed() } else { value.size(12.5).boxed() });
     if !r.unit.is_empty() {
         parts.push(text(r.unit).font(MONO).size(TEXT_LABEL).style(theme::muted).boxed());
     }
-    container(row(parts).spacing(SPACE_2).align_y(iced::Center)).height(if r.big { 30.0 } else { 26.0 }).boxed()
+    let line = container(row(parts).spacing(SPACE_2).align_y(iced::Center)).height(if r.big { 30.0 } else { 26.0 }).width(Fill).boxed();
+    match r.help {
+        Some(tip) => tooltip(line, help_bubble(tip)).position(tooltip::Position::Bottom).gap(SPACE_1).boxed(),
+        None => line,
+    }
+}
+
+/// The Drag breakdown's key under the plot: each stacked source with a one-sentence explanation (kit muted 11 px).
+fn drag_key<'a>(built: &'a Built) -> Option<Element<'a, Message>> {
+    let entries: Vec<(SeriesColor, &str)> =
+        built.group.panels.first()?.series.iter().filter(|s| s.fill.is_some()).map(|s| (s.color, s.name.as_str())).collect();
+    if entries.is_empty() {
+        return None;
+    }
+    let entry = |(color, name): (SeriesColor, &'a str)| -> Element<'a, Message> {
+        let body =
+            column![text(name).size(TEXT_LABEL).style(theme::ink), text(readout::help(name).unwrap_or("")).size(TEXT_LABEL).style(theme::muted)].spacing(2);
+        row![container(swatch(color)).padding([3.0, 0.0]), body.width(Fill)].spacing(SPACE_2).width(Length::FillPortion(1)).boxed()
+    };
+    let mut grid: Vec<Element<'a, Message>> = Vec::new();
+    for pair in entries.chunks(2) {
+        let mut cells: Vec<Element<'a, Message>> = pair.iter().map(|e| entry(*e)).collect();
+        if cells.len() == 1 {
+            cells.push(Space::new().width(Length::FillPortion(1)).boxed());
+        }
+        grid.push(row(cells).spacing(SPACE_4).boxed());
+    }
+    Some(container(column(grid).spacing(SPACE_2)).padding([SPACE_2, SPACE_3]).width(Fill).style(theme::panel).boxed())
 }
 
 fn export<'a>(state: &'a State, ready: bool, index: usize) -> Element<'a, Message> {

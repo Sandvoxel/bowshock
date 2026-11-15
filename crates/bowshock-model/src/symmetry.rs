@@ -280,7 +280,7 @@ fn free_name(group: &RadialPart, index: usize) -> String {
 
 /// Whether a part may join a group: fins with fins, lugs with lugs, buttons with buttons.
 fn same_family(a: &RadialKind, b: &RadialKind) -> bool {
-    std::mem::discriminant(a) == std::mem::discriminant(b) || (a.is_fin() && b.is_fin())
+    !a.is_pod() && !b.is_pod() && (std::mem::discriminant(a) == std::mem::discriminant(b) || (a.is_fin() && b.is_fin()))
 }
 
 impl Rocket {
@@ -328,6 +328,9 @@ impl Rocket {
     /// Sets `dim` for copy `index` of radial group `id`: if the copy has unlinked that field its own value is set (limited as
     /// [`Rocket::set_dim`] limits it), otherwise the group's value is. `None` if the part has no such dimension.
     pub fn set_instance_dim(&mut self, id: PartId, index: usize, dim: Dim, value: f64) -> Option<DimEdit> {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.set_instance_dim(id, index, dim, value)).flatten();
+        }
         let field = RadialField::of_dim(dim).filter(|f| self.radial(id).is_some_and(|r| r.is_overridden(index, *f)));
         let Some(field) = field else {
             return self.set_dim(id, dim, value);
@@ -344,6 +347,9 @@ impl Rocket {
     /// edits to the group no longer reach it. Returns whether it was applied: the group has two or more copies, `index` is
     /// one of them, the field applies to the kind and is not already unlinked.
     pub fn unlink_field(&mut self, id: PartId, index: usize, field: RadialField) -> bool {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.unlink_field(id, index, field)).unwrap_or(false);
+        }
         let Some(radial) = self.radials.iter_mut().find(|r| r.id == id) else {
             return false;
         };
@@ -360,6 +366,9 @@ impl Rocket {
 
     /// *Relink field*: copy `index` follows the group's value of `field` again. Returns whether it had been unlinked.
     pub fn relink_field(&mut self, id: PartId, index: usize, field: RadialField) -> bool {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.relink_field(id, index, field)).unwrap_or(false);
+        }
         let Some(radial) = self.radials.iter_mut().find(|r| r.id == id) else {
             return false;
         };
@@ -370,6 +379,9 @@ impl Rocket {
 
     /// Relinks every field copy `index` of radial group `id` had unlinked. Returns whether it had any.
     pub fn relink_copy(&mut self, id: PartId, index: usize) -> bool {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.relink_copy(id, index)).unwrap_or(false);
+        }
         let Some(radial) = self.radials.iter_mut().find(|r| r.id == id) else {
             return false;
         };
@@ -381,6 +393,9 @@ impl Rocket {
     /// Gives radial part `id` the per-copy `overrides` (those that do not fit its count or kind are dropped), as when a part is
     /// duplicated. Returns whether `id` is a radial part.
     pub fn set_overrides(&mut self, id: PartId, overrides: Vec<FieldOverride>) -> bool {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.set_overrides(id, overrides)).unwrap_or(false);
+        }
         let Some(radial) = self.radials.iter_mut().find(|r| r.id == id) else {
             return false;
         };
@@ -397,6 +412,13 @@ impl Rocket {
     /// Errors: [`RadialError::NoSuchRadial`] if `id` is not a radial group, `index` is out of range or the group has a single
     /// copy (there is nothing to detach from).
     pub fn detach_radial(&mut self, id: PartId, index: usize) -> Result<PartId, RadialError> {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.detach_radial(id, index)).ok_or(RadialError::NoSuchRadial)?;
+        }
+        // The copies of a pod share one body of parts with ids; they cannot leave the group.
+        if self.is_pod(id) {
+            return Err(RadialError::NoSuchRadial);
+        }
         let group = self.radial(id).ok_or(RadialError::NoSuchRadial)?.clone();
         if group.count < 2 || index >= usize::from(group.count) {
             return Err(RadialError::NoSuchRadial);
@@ -428,6 +450,12 @@ impl Rocket {
     ///
     /// Errors: [`RadialError::NoSuchRadial`] if `id` is not a radial group.
     pub fn split_all_radial(&mut self, id: PartId) -> Result<Vec<PartId>, RadialError> {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.split_all_radial(id)).ok_or(RadialError::NoSuchRadial)?;
+        }
+        if self.is_pod(id) {
+            return Err(RadialError::NoSuchRadial);
+        }
         let group = self.radial(id).ok_or(RadialError::NoSuchRadial)?.clone();
         if group.count < 2 {
             return Ok(vec![id]);
@@ -466,14 +494,16 @@ impl Rocket {
     /// they are the same family (fin with fin, lug with lug, button with button) and the group has room for another copy.
     pub fn can_rejoin(&self, part: PartId, group: PartId) -> bool {
         match (self.radial(part), self.radial(group)) {
-            (Some(p), Some(g)) => part != group && p.count == 1 && same_family(&p.kind, &g.kind) && g.count < MAX_COUNT,
+            (Some(p), Some(g)) => {
+                part != group && p.count == 1 && same_family(&p.kind, &g.kind) && g.count < MAX_COUNT && self.pod_index(part) == self.pod_index(group)
+            }
             _ => false,
         }
     }
 
     /// The radial parts a free part could rejoin, groups of two or more first.
     pub fn rejoin_candidates(&self, part: PartId) -> Vec<PartId> {
-        let mut ids: Vec<PartId> = self.radials.iter().map(|r| r.id).filter(|g| self.can_rejoin(part, *g)).collect();
+        let mut ids: Vec<PartId> = self.ids().into_iter().filter(|g| self.radial(*g).is_some() && self.can_rejoin(part, *g)).collect();
         ids.sort_by_key(|g| std::cmp::Reverse(self.radial(*g).map_or(1, |r| r.count)));
         ids
     }
@@ -486,6 +516,12 @@ impl Rocket {
     /// Errors: [`RadialError::NoSuchRadial`] if either id is not a radial part, they are the same, the part has several copies
     /// or the two are not the same family; [`RadialError::BadCount`] if the group is full.
     pub fn rejoin_radial(&mut self, part: PartId, group: PartId, winner: Winner) -> Result<u8, RadialError> {
+        if self.pod_index(part).is_some() || self.pod_index(group).is_some() {
+            if self.pod_index(part) != self.pod_index(group) {
+                return Err(RadialError::NoSuchRadial);
+            }
+            return self.in_pod(part, |s| s.rejoin_radial(part, group, winner)).ok_or(RadialError::NoSuchRadial)?;
+        }
         let (p, g) = (self.radial(part).ok_or(RadialError::NoSuchRadial)?.clone(), self.radial(group).ok_or(RadialError::NoSuchRadial)?.clone());
         if part == group || p.count != 1 || !same_family(&p.kind, &g.kind) {
             return Err(RadialError::NoSuchRadial);

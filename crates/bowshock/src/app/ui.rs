@@ -25,6 +25,7 @@ pub fn radial_size_label(kind: &RadialKind) -> String {
         RadialKind::LaunchLug { length, diameter } => format!("Ø{} × {}", mm(*diameter), mm(*length)),
         RadialKind::RailButton { height, diameter } => format!("Ø{} × {}", mm(*diameter), mm(*height)),
         RadialKind::EllipticalFin { .. } | RadialKind::FreeformFin { .. } => format!("{} × {}", mm(kind.extent()), mm(kind.fin_span().unwrap_or(0.0))),
+        RadialKind::Pod { gap, body } => format!("Ø{} × {} · gap {}", mm(body.radius() * 2.0), mm(body.length()), mm(*gap)),
     }
 }
 

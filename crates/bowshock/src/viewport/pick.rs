@@ -5,6 +5,7 @@ use bowshock_model::{PartId, PartKind, RadialKind, RadialPart, Rocket};
 use glam::{DVec3, Vec3};
 use iced::{Point, Rectangle, Size};
 
+use super::pods::PodView;
 use super::radial::{self, Placement};
 use super::Camera;
 
@@ -38,6 +39,9 @@ pub struct SurfaceTarget {
     pub offset: f64,
     /// Angle of the first copy: 0 is +Y, increasing towards +X.
     pub angle: f64,
+    /// Which copy of the pod the parent is in, for a parent that is a part of a pod (0 for a part of the core): the copy the
+    /// cursor is on, which is where the overlay marks the target.
+    pub copy: usize,
 }
 
 /// The snap step of a plain or coarse drag of a station: `grid` (the view toolbar's step, metres), or 5 mm with Ctrl/Cmd.
@@ -113,6 +117,41 @@ fn hit_axial(rocket: &Rocket, camera: &Camera, at: Point, size: Size) -> Option<
 /// point of the axis nearest the cursor on screen, on whichever axial part is there (the nearest end part beyond the ends).
 /// `None` when looking straight down the axis or with no parts.
 pub fn slide_target(rocket: &Rocket, camera: &Camera, at: Point, size: Size, kind: &RadialKind, angle: f64, step: Option<f64>) -> Option<SurfaceTarget> {
+    slide_core(rocket, camera, at, size, kind, angle, step, 0)
+}
+
+/// [`slide_target`] for a group picked up from part `from`: one that came off a part of a pod slides along the pod copy nearest
+/// the cursor instead.
+#[allow(clippy::too_many_arguments)]
+pub fn slide_from(
+    rocket: &Rocket,
+    camera: &Camera,
+    at: Point,
+    size: Size,
+    kind: &RadialKind,
+    angle: f64,
+    step: Option<f64>,
+    from: PartId,
+) -> Option<SurfaceTarget> {
+    let Some(view) = PodView::of_part(rocket, from, camera) else {
+        return slide_target(rocket, camera, at, size, kind, angle, step);
+    };
+    // The copy whose axis is nearest the cursor.
+    let length = view.sub.parts().iter().map(|p| p.kind.length()).sum::<f64>();
+    let copy = view
+        .cameras
+        .iter()
+        .enumerate()
+        .min_by(|a, b| {
+            let d = |c: &Camera| c.project(Vec3::Z * (length / 2.0) as f32, size).distance(at);
+            d(a.1).total_cmp(&d(b.1))
+        })
+        .map_or(0, |(i, _)| i);
+    slide_core(&view.sub, &view.cameras[copy], at, size, kind, angle, step, copy)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn slide_core(rocket: &Rocket, camera: &Camera, at: Point, size: Size, kind: &RadialKind, angle: f64, step: Option<f64>, copy: usize) -> Option<SurfaceTarget> {
     let origin = camera.project(Vec3::ZERO, size);
     let one_metre = camera.project(Vec3::Z, size) - origin;
     let n = one_metre.x * one_metre.x + one_metre.y * one_metre.y;
@@ -124,7 +163,7 @@ pub fn slide_target(rocket: &Rocket, camera: &Camera, at: Point, size: Size, kin
     let index = stations[..stations.len() - 1].iter().rposition(|&s| s <= z).unwrap_or(0);
     let parent = rocket.parts().get(index)?.id;
     let offset = snapped_offset(rocket, parent, z - stations[index] - kind.extent() / 2.0, kind, step)?;
-    Some(SurfaceTarget { parent, offset, angle })
+    Some(SurfaceTarget { parent, offset, angle, copy })
 }
 
 /// How a radial part's position is rounded: the first copy's angle to a multiple of `angle` degrees (none if 0), and the
@@ -135,9 +174,18 @@ pub struct Snapping {
     pub station: Option<f64>,
 }
 
-/// Where a radial part of `kind` would go on the surface under `at`, with its centre under the cursor along the axis.
+/// Where a radial part of `kind` would go on the surface under `at`, with its centre under the cursor along the axis: on the
+/// core, or (for anything but a pod) on a part of a pod, whichever is nearer the eye.
 pub fn surface_target(rocket: &Rocket, camera: &Camera, at: Point, size: Size, kind: &RadialKind, snap: Snapping) -> Option<SurfaceTarget> {
-    let (parent, point, _) = hit_axial(rocket, camera, at, size)?;
+    let core = surface_core(rocket, camera, at, size, kind, snap, 0);
+    let pods = rocket.pods().filter(|_| !kind.is_pod()).filter_map(|pod| PodView::of_pod(rocket, pod, camera)).flat_map(|view| {
+        view.cameras.iter().enumerate().filter_map(|(copy, cam)| surface_core(&view.sub, cam, at, size, kind, snap, copy)).collect::<Vec<_>>()
+    });
+    core.into_iter().chain(pods).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(target, _)| target)
+}
+
+fn surface_core(rocket: &Rocket, camera: &Camera, at: Point, size: Size, kind: &RadialKind, snap: Snapping, copy: usize) -> Option<(SurfaceTarget, f64)> {
+    let (parent, point, t) = hit_axial(rocket, camera, at, size)?;
     let station = rocket.stations()[rocket.index_of(parent)?];
     let offset = snapped_offset(rocket, parent, point.z - station - kind.extent() / 2.0, kind, snap.station)?;
     let angle = point.x.atan2(point.y).rem_euclid(std::f64::consts::TAU);
@@ -147,7 +195,7 @@ pub fn surface_target(rocket: &Rocket, camera: &Camera, at: Point, size: Size, k
         let step = f64::from(snap.angle).to_radians();
         ((angle / step).round() * step).rem_euclid(std::f64::consts::TAU)
     };
-    Some(SurfaceTarget { parent, offset, angle })
+    Some((SurfaceTarget { parent, offset, angle, copy }, t))
 }
 
 /// Where copy `instance` of `radial` stands.
@@ -235,6 +283,8 @@ fn hit_radial(o: DVec3, d: DVec3, kind: &RadialKind, at: Placement, margin: f64)
             let p = o + d * time;
             near_polygon(&polygon, (p.z, p.dot(u)), margin).then_some(time)
         }
+        // A pod is picked through its parts (see `pick`).
+        RadialKind::Pod { .. } => None,
     }
 }
 
@@ -258,8 +308,19 @@ fn near_polygon(poly: &[(f64, f64)], p: (f64, f64), margin: f64) -> bool {
     inside
 }
 
-/// The part under viewport pixel `at` (the one nearest the eye), for a viewport of `size`.
+/// The part under viewport pixel `at` (the one nearest the eye), for a viewport of `size`: a part of the core or of a pod (a
+/// pod's parts are found through the pod's own frame).
 pub fn pick(rocket: &Rocket, camera: &Camera, at: Point, size: Size) -> Option<Pick> {
+    let core = pick_core(rocket, camera, at, size);
+    let pods = rocket
+        .pods()
+        .filter_map(|pod| PodView::of_pod(rocket, pod, camera))
+        .flat_map(|view| view.cameras.iter().filter_map(|cam| pick_core(&view.sub, cam, at, size)).collect::<Vec<_>>());
+    core.into_iter().chain(pods).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(p, _)| p)
+}
+
+/// The nearest part of `rocket`'s own stack (and what stands on or in it) under `at`, with its ray parameter.
+fn pick_core(rocket: &Rocket, camera: &Camera, at: Point, size: Size) -> Option<(Pick, f64)> {
     let (o, d) = ray(camera, at, size);
     // A few px of slack so a thin fin or small lug can be hit.
     let margin = 4.0 / f64::from(camera.scale);
@@ -272,7 +333,7 @@ pub fn pick(rocket: &Rocket, camera: &Camera, at: Point, size: Size) -> Option<P
     });
     // Radial parts are small and sit on the surface: prefer them when within a hair of the body's depth.
     let bias = margin;
-    axial.into_iter().chain(radials.map(|(p, t)| (p, t - bias))).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(p, _)| p)
+    axial.into_iter().chain(radials.map(|(p, t)| (p, t - bias))).min_by(|a, b| a.1.total_cmp(&b.1))
 }
 
 /// The screen rectangle enclosing one copy of a radial part.

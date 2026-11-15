@@ -154,6 +154,18 @@ inspector bar). Both are validated after every message. The inspector's symmetry
 (`Link`, `linked`, `bar`): right-click a field of a group for *Unlink for this fin* / *Relink field*, link icons after the fields
 once the group has overrides, the confirmation before a count change, and the rejoin choice.
 
+## Pods / strap-ons (model `pod.rs`, viewport `pods.rs`)
+
+A pod set is a `RadialPart` of kind `RadialKind::Pod { gap, body }` (count, angle, offset like fins; always on a core part, pods do not
+nest). Its `PodBody` holds its own axial stack and the radial / internal parts on and in it, all in the one id space, so every id-taking
+`Rocket` method works for a part inside a pod (it runs on `Rocket::pod_rocket`, the pod as a small rocket, and writes back).
+`Rocket::parts()/radials()/internals()/stations()/index_of()` are **core only**; use `ids()`, `pods()`, `pod_of(id)`, `pod_frame(pod)`.
+Mass includes every copy (parallel axis about the core axis); `bowshock-sim` flies each copy as an extra body (see `from_model.rs`).
+The viewport looks at a pod copy through `Camera::in_frame(Pose)`, a camera in the pod's own coordinates, so picking, handles,
+brackets and the fin-landing surface reuse the core's code on the pod's small rocket; the mesh carries the pod's own mesh by the pose.
+Grabbing any part of a pod carries the whole pod; the `POD ×N` tag under a selected pod part selects the set. Not supported: detaching
+copies, nested pods, motors in pods.
+
 ## Physics
 
 `ctx.physics` is a cache, current when `view` runs: `balance()` (mass, length, ref diameter, CG, CP, margin, CNα for the phase

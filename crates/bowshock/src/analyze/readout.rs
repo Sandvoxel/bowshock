@@ -36,11 +36,22 @@ pub struct Row {
     pub tag: Option<Tag>,
     /// The headline row of a section (20 px readout).
     pub big: bool,
+    /// A one-sentence explanation, shown as the row's tooltip.
+    pub help: Option<&'static str>,
+    /// The row's share of the section's total (`44%`), muted before the value (drag sources).
+    pub share: Option<String>,
 }
 
 impl Row {
     fn new(label: impl Into<String>, value: impl Into<String>, unit: impl Into<String>) -> Self {
-        Row { label: label.into(), value: value.into(), unit: unit.into(), swatch: None, tag: None, big: false }
+        let label = label.into();
+        let help = help(&label);
+        Row { label, value: value.into(), unit: unit.into(), swatch: None, tag: None, big: false, help, share: None }
+    }
+
+    fn share(mut self, of_total: f64) -> Self {
+        self.share = Some(format!("{:.0}%", 100.0 * of_total));
+        self
     }
 
     fn big(mut self) -> Self {
@@ -86,6 +97,38 @@ pub fn config_color(i: usize) -> SeriesColor {
 pub const DRAG_PARTS: [(&str, SeriesColor); 4] =
     [("Skin friction", SeriesColor::Series(1)), ("Pressure", SeriesColor::Series(2)), ("Base", SeriesColor::Series(3)), ("Fins", SeriesColor::Series(4))];
 
+/// One plain sentence for a row label: what the quantity is and what moves it. Shown as the row's tooltip and, for the drag
+/// sources, under the Drag breakdown plot. `None` for labels that need no explanation (names of configurations, units).
+pub fn help(label: &str) -> Option<&'static str> {
+    Some(match label {
+        "Skin friction" => "Air rubbing along every outer surface. Grows with wetted area and a rougher finish.",
+        "Pressure" => "Drag from the nose and transitions pushing air aside; rises sharply near Mach 1 as shocks form. Includes lugs and rail buttons.",
+        "Base" => "Low-pressure wake behind the blunt aft end. Smaller while the motor burns (the exhaust fills the wake).",
+        "Fins" => "The fins' own skin friction plus leading- and trailing-edge pressure drag.",
+        "Other" => "Launch lugs and rail buttons sticking out into the airflow.",
+        "Total Cd" => "Total drag coefficient: drag force divided by dynamic pressure and reference area. Lower is better.",
+        "Static margin" => {
+            "Distance from the centre of gravity back to the centre of pressure, in body diameters (calibers). Above about 1 the rocket flies straight."
+        }
+        "CP" => "Centre of pressure: where the air's side force acts, measured from the nose tip. It must sit behind the CG.",
+        "CG liftoff" => "Centre of gravity from the nose tip with the motors loaded.",
+        "CG burnout" => "Centre of gravity from the nose tip once the motors have burned out.",
+        "CNα" => "How much side force the rocket makes per radian of angle of attack; higher = stronger restoring push.",
+        "Min margin" => "The least stable point of the sweep, and the Mach (or angle) where it happens.",
+        "Max margin" => "The most stable point of the sweep. Above about 3 calibers the rocket may weathercock into the wind.",
+        "Peak Cd" => "The highest drag coefficient of the sweep, usually just above Mach 1 where the transonic drag rise peaks.",
+        "Normal force CN" => "Side-force coefficient at this angle of attack (CNα times the angle, plus body lift).",
+        "Peak CN" => "The largest side-force coefficient of the sweep, at the largest angle.",
+        "Flutter velocity" => "Speed at which the fins would start to flutter at this altitude (NACA TN 4197).",
+        "Margin here" | "Margin at Vmax" => "Flutter velocity divided by the rocket's speed. Keep it above 1.5.",
+        "Max velocity" => "The highest speed of the configuration's nominal flight.",
+        "CEP 50 %" => "Radius of the circle around the mean landing point that holds half of the landings.",
+        "Ellipse major" => "Long axis of the ellipse that holds 95 % of the landings.",
+        "Ellipse minor" => "Short axis of the ellipse that holds 95 % of the landings.",
+        _ => return None,
+    })
+}
+
 fn severity(bands: StabilityBands, margin: f64) -> Severity {
     match Bands::from(bands).classify(margin as f32) {
         Stability::Unstable => Severity::Err,
@@ -112,27 +155,32 @@ pub fn active_run(out: &Output, active: ConfigId) -> Option<&Run> {
     out.runs.iter().find(|r| r.id == active).or_else(|| out.runs.first())
 }
 
-/// The default cursor when nothing is hovered: where the drag peaks (Mach), zero angle, the altitude of maximum velocity.
+/// The Mach number the cursor starts at: the maximum Mach of the configuration's nominal flight when it has one inside the
+/// sweep, else Mach 0.3; zero angle of attack; the altitude of maximum velocity.
 pub fn default_cursor(out: &Output, active: ConfigId) -> f64 {
     let Some(run) = active_run(out, active) else { return 0.0 };
     match &run.data {
-        Data::Mach(p) => p.iter().max_by(|a, b| a.drag.total.total_cmp(&b.drag.total)).map_or(0.0, |p| p.mach),
+        Data::Mach(p) => {
+            let (lo, hi) = (p.first().map_or(0.0, |p| p.mach), p.last().map_or(0.0, |p| p.mach));
+            run.max_mach.unwrap_or(super::compute::BALANCE_MACH).clamp(lo, hi.max(lo))
+        }
         Data::Alpha(_) => 0.0,
         Data::Flutter(c) => c.as_ref().map_or(0.0, |c| c.max_velocity_altitude),
         Data::Dispersion(_) => 0.0,
     }
 }
 
-/// The static margin (cal) and its length (m) at the cursor of the active run, for the gauge; `None` for analyses without one.
-pub fn margin_at(out: &Output, x_si: Option<f64>, active: ConfigId) -> Option<(f64, f64)> {
-    let run = active_run(out, active)?;
-    let x = x_si.unwrap_or_else(|| default_cursor(out, active));
-    let cal = match &run.data {
-        Data::Mach(p) => mach_at(p, x)?.margin_cal,
-        Data::Alpha(p) => alpha_at(p, x)?.margin_cal,
-        _ => return None,
-    };
-    Some((cal, cal * run.reference_diameter))
+/// Whether the drag breakdown shows protuberances (launch lugs, rail buttons) as their own `Other` layer: only when they are
+/// more than 5 % of the drag summed over the sweep. Below that they are folded into Pressure, as the kit's four-part
+/// breakdown has it.
+pub fn other_visible(points: &[MachPoint]) -> bool {
+    let (other, total) = points.iter().fold((0.0, 0.0), |(o, t), p| (o + p.drag.protuberances, t + p.drag.total));
+    other > 0.05 * total
+}
+
+/// Skin friction, pressure, base and fins of `d`, with the protuberances added to pressure unless `show_other`.
+pub fn drag_parts(d: &bowshock_sim::DragBreakdown, show_other: bool) -> [f64; 4] {
+    [d.friction, if show_other { d.pressure } else { d.pressure + d.protuberances }, d.base, d.fins]
 }
 
 /// Builds the right panel for `out` at `x_si` (Mach, radians of angle of attack, or metres of altitude by analysis; `None` =
@@ -192,19 +240,19 @@ pub fn compare_section(out: &Output, overlay: &Overlay, x_si: Option<f64>, activ
 
 fn stability_rows(run: &Run, p: &MachPointLike, units: UnitSystem, out: &Output) -> Vec<Row> {
     let (cp, u) = length(p.cp, units);
-    let (cg_l, _) = length(run.cg_liftoff, units);
-    let (cg_b, _) = length(run.cg_burnout, units);
+    let burnout = out.conditions.burnout;
+    let (cg, _) = length(run.cg(burnout), units);
     let mut rows = vec![Row::new("Static margin", cal(p.margin), "cal").big()];
     if out.runs.len() > 1 {
         for (i, r) in out.runs.iter().enumerate() {
-            if let Some(v) = per_run_margin(out, r, p.x) {
+            if let Some(v) = per_run_margin(r, p.x) {
                 rows.push(Row::new(r.name.clone(), cal(v), "cal").swatch(config_color(i)));
             }
         }
     }
     rows.push(Row::new("CP", cp, u.clone()));
-    rows.push(Row::new("CG liftoff", cg_l, u.clone()));
-    rows.push(Row::new("CG burnout", cg_b, u));
+    // The kit shows one CG: the one the margin uses (the Conditions' "CG for margin").
+    rows.push(Row::new(if burnout { "CG burnout" } else { "CG liftoff" }, cg, u));
     rows.push(Row::new("CNα", format!("{:.2}", p.cn_alpha), "/rad"));
     rows
 }
@@ -216,8 +264,7 @@ struct MachPointLike {
     cn_alpha: f64,
 }
 
-fn per_run_margin(out: &Output, run: &Run, x: f64) -> Option<f64> {
-    let _ = out;
+fn per_run_margin(run: &Run, x: f64) -> Option<f64> {
     match &run.data {
         Data::Mach(p) => Some(mach_at(p, x)?.margin_cal),
         Data::Alpha(p) => Some(alpha_at(p, x)?.margin_cal),
@@ -231,12 +278,13 @@ fn mach(out: &Output, run: &Run, points: &[MachPoint], x: f64, units: UnitSystem
     let stability = Section { title: "Stability".into(), rows: stability_rows(run, &like, units, out) };
 
     let d = at.drag;
+    let show_other = other_visible(points);
     let mut drag = vec![Row::new("Total Cd", cd(d.total), "").big()];
-    for ((name, color), v) in DRAG_PARTS.iter().zip([d.friction, d.pressure, d.base, d.fins]) {
-        drag.push(Row::new(*name, cd(v), "").swatch(*color));
+    for ((name, color), v) in DRAG_PARTS.iter().zip(drag_parts(&d, show_other)) {
+        drag.push(Row::new(*name, cd(v), "").swatch(*color).share(v / d.total.max(1e-12)));
     }
-    if points.iter().any(|p| p.drag.protuberances > 1e-9) {
-        drag.push(Row::new("Other", cd(d.protuberances), "").swatch(SeriesColor::Muted));
+    if show_other {
+        drag.push(Row::new("Other", cd(d.protuberances), "").swatch(SeriesColor::Muted).share(d.protuberances / d.total.max(1e-12)));
     }
 
     let by_margin = |a: &&MachPoint, b: &&MachPoint| a.margin_cal.total_cmp(&b.margin_cal);
@@ -417,7 +465,15 @@ mod tests {
         let titles: Vec<&str> = r.sections.iter().map(|s| s.title.as_str()).collect();
         assert_eq!(titles, ["Stability", "Drag", "Worst case 0.1 – 3.0"]);
         let margin: f64 = r.sections[0].rows[0].value.parse().unwrap();
-        assert_eq!(Some(margin), margin_at(&o, Some(1.1), id).map(|m| (m.0 * 100.0).round() / 100.0));
+        let at = mach_at(
+            match &active_run(&o, id).unwrap().data {
+                Data::Mach(p) => p,
+                _ => unreachable!(),
+            },
+            1.1,
+        )
+        .unwrap();
+        assert_eq!(margin, (at.margin_cal * 100.0).round() / 100.0);
         // The four drag parts sum to the total (to the displayed precision).
         let rows = &r.sections[1].rows;
         let sum: f64 = rows[1..].iter().map(|r| r.value.parse::<f64>().unwrap()).sum();
@@ -427,11 +483,56 @@ mod tests {
     }
 
     #[test]
-    fn default_cursor_is_the_drag_peak() {
+    fn the_cursor_starts_at_the_flights_maximum_mach() {
         let (o, id) = out(Analysis::Aerodynamics);
+        let run = active_run(&o, id).unwrap();
+        let flight_mach = run.max_mach.expect("the example flies");
+        assert!(flight_mach > 0.2 && flight_mach < 1.0, "{flight_mach}");
         let x = default_cursor(&o, id);
-        assert!(x > 0.8 && x < 1.6);
+        assert_eq!(x, flight_mach);
         assert_eq!(readout(&o, None, id, UnitSystem::MmGS).cursor, format!("M {x:.2}"));
+    }
+
+    #[test]
+    fn protuberances_fold_into_pressure_unless_they_are_a_twentieth_of_the_drag() {
+        let p = |prot: f64| bowshock_sim::MachPoint {
+            mach: 1.0,
+            margin_cal: 1.0,
+            cp: 0.5,
+            cn_alpha: 10.0,
+            drag: bowshock_sim::DragBreakdown { friction: 0.2, pressure: 0.2, base: 0.1, fins: 0.1, protuberances: prot, total: 0.6 + prot },
+        };
+        assert!(!other_visible(&[p(0.02)]) && other_visible(&[p(0.06)]));
+        let d = p(0.02).drag;
+        assert_eq!(drag_parts(&d, false), [0.2, 0.22, 0.1, 0.1]);
+        assert_eq!(drag_parts(&d, true), [0.2, 0.2, 0.1, 0.1]);
+    }
+
+    #[test]
+    fn every_readout_row_explains_itself() {
+        for analysis in [Analysis::Aerodynamics, Analysis::Drag, Analysis::Stability, Analysis::Flutter, Analysis::Dispersion] {
+            let (o, id) = out(analysis);
+            for section in readout(&o, None, id, UnitSystem::MmGS).sections {
+                for row in section.rows {
+                    // Rows that are plain measurements (altitude, apogee, spreads, means) need no sentence; the rest do.
+                    let plain = ["Apogee", "at altitude", "Mean distance", "Bearing", "σ east / north", "Mean", "σ", "Min", "Max"];
+                    assert!(row.help.is_some() || plain.contains(&row.label.as_str()), "{analysis:?}: `{}` has no explanation", row.label);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn drag_rows_carry_their_share_and_the_four_sources_have_the_kit_sentences() {
+        let (o, id) = out(Analysis::Aerodynamics);
+        let r = readout(&o, Some(1.1), id, UnitSystem::MmGS);
+        let drag = &r.sections[1];
+        let shares: f64 = drag.rows[1..].iter().map(|row| row.share.as_ref().unwrap().trim_end_matches('%').parse::<f64>().unwrap()).sum();
+        assert!((shares - 100.0).abs() <= 2.0, "shares of the four sources sum to the total: {shares}");
+        for (name, _) in DRAG_PARTS {
+            assert!(help(name).unwrap().len() > 30, "{name}");
+        }
+        assert!(help("Pressure").unwrap().contains("Mach 1") && help("Base").unwrap().contains("exhaust"));
     }
 
     #[test]

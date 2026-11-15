@@ -18,6 +18,7 @@ use iced::{alignment, keyboard, mouse, Color, Point, Rectangle, Renderer, Size, 
 use super::assembly::tag;
 use super::handles::{self, Axis, Context, Inset, Placed};
 use super::pick::{self, Pick};
+use super::pods::PodView;
 use super::radial::Placement;
 use super::snap;
 use super::{Camera, InsideView, Message};
@@ -171,6 +172,9 @@ pub struct Overlay<'a> {
     pub profile: bool,
     /// The display unit system, for tags, labels and typed values.
     pub units: UnitSystem,
+    /// The pod holding the selected part, seen through its own frame, when the selection is inside a pod: handles and brackets
+    /// of its parts are worked out there (`PodView::of_part`).
+    pub pod: Option<PodView>,
 }
 
 /// A press on a part (or on empty space) that has not yet become a click or a pick-up.
@@ -305,15 +309,29 @@ impl Overlay<'_> {
         }
     }
 
+    /// The rocket and camera part `id` is seen through: the document's, or for a part inside the selected part's pod, that
+    /// pod's own (its first copy; the others are bracketed in dashes). `None` for a part of some other pod.
+    fn frame_of(&self, id: PartId) -> Option<(&Rocket, &Camera)> {
+        match self.rocket.pod_of(id) {
+            None => Some((self.rocket, &self.camera)),
+            Some(pod) => self.pod.as_ref().filter(|v| v.pod == pod.id).map(|v| (&v.sub, &v.cameras[0])),
+        }
+    }
+
     fn selection_of(&self, id: PartId) -> Option<Selection<'_>> {
-        if let Some(index) = self.rocket.index_of(id) {
-            return Some(Selection::Axial { z0: self.rocket.stations()[index], kind: &self.rocket.parts()[index].kind });
+        let (rocket, _) = self.frame_of(id)?;
+        self.selection_in(rocket, id)
+    }
+
+    fn selection_in<'r>(&self, rocket: &'r Rocket, id: PartId) -> Option<Selection<'r>> {
+        if let Some(index) = rocket.index_of(id) {
+            return Some(Selection::Axial { z0: rocket.stations()[index], kind: &rocket.parts()[index].kind });
         }
-        if let Some(radial) = self.rocket.radial(id) {
+        if let Some(radial) = rocket.radial(id) {
             let instance = self.copy_of(id).min(radial.angles().len().saturating_sub(1));
-            return Some(Selection::Radial { radial, at: pick::placement(self.rocket, radial, instance)? });
+            return Some(Selection::Radial { radial, at: pick::placement(rocket, radial, instance)? });
         }
-        self.rocket.internal(id).map(|_| Selection::Internal)
+        rocket.internal(id).map(|_| Selection::Internal)
     }
 
     fn instance(&self) -> usize {
@@ -327,27 +345,48 @@ impl Overlay<'_> {
 
     /// The screen bounds of part `id`.
     fn bounds_of(&self, id: PartId, size: Size) -> Option<Rectangle> {
-        Some(match self.selection_of(id)? {
-            Selection::Axial { z0, kind } => pick::screen_bounds(&self.camera, size, z0, kind),
+        let (rocket, camera) = self.frame_of(id)?;
+        self.bounds_in(rocket, camera, id, size)
+    }
+
+    /// The screen bounds of part `id` of `rocket` seen through `camera` (a pod's part through one copy's camera).
+    fn bounds_in(&self, rocket: &Rocket, camera: &Camera, id: PartId, size: Size) -> Option<Rectangle> {
+        Some(match self.selection_in(rocket, id)? {
+            Selection::Axial { z0, kind } => pick::screen_bounds(camera, size, z0, kind),
             Selection::Radial { radial, at } => {
                 let kind = radial.effective(self.copy_of(id).min(radial.angles().len().saturating_sub(1))).kind;
-                pick::radial_bounds(&self.camera, size, &kind, at)
+                pick::radial_bounds(camera, size, &kind, at)
             }
             Selection::Internal => {
-                let res = self.rocket.resolved(id)?;
-                let z0 = self.rocket.part_station(id)?;
-                let up = handles::radial_up(&self.camera);
+                let res = rocket.resolved(id)?;
+                let z0 = rocket.part_station(id)?;
+                let up = handles::radial_up(camera);
                 let r = (res.outer_diameter / 2.0) as f32;
                 let zs = [z0 as f32, (z0 + res.length) as f32];
                 let pts = zs.into_iter().flat_map(|z| [Vec3::Z * z + up * r, Vec3::Z * z - up * r]);
-                let pts: Vec<Point> = pts.map(|p| self.camera.project(p, size)).collect();
+                let pts: Vec<Point> = pts.map(|p| camera.project(p, size)).collect();
                 bounds(&pts)
             }
         })
     }
 
     fn context(&self, size: Size, bounds: Rectangle) -> Context<'_> {
-        Context { rocket: self.rocket, camera: &self.camera, size, instance: self.instance(), bounds }
+        let (rocket, camera) = self.selected.and_then(|id| self.frame_of(id)).unwrap_or((self.rocket, &self.camera));
+        Context { rocket, camera, size, instance: self.instance(), bounds, cube: !self.profile }
+    }
+
+    /// The tag that selects the pod set while a part inside it is selected: its place (below the pod's copies on screen), the
+    /// pod and its text (`POD ×2`).
+    fn pod_chip(&self, size: Size) -> Option<(PartId, Rectangle, String)> {
+        let view = self.pod.as_ref().filter(|v| self.selected.is_some_and(|id| self.rocket.pod_of(id).is_some_and(|p| p.id == v.pod)))?;
+        let pod = self.rocket.radial(view.pod)?;
+        let union = (0..pod.angles().len())
+            .filter_map(|i| pick::placement(self.rocket, pod, i))
+            .map(|at| pick::radial_bounds(&self.camera, size, &pod.kind, at))
+            .reduce(|a, b| a.union(&b))?;
+        let text = if pod.count > 1 { format!("POD ×{}", pod.count) } else { "POD".to_string() };
+        let width = text.chars().count() as f32 * TEXT_LABEL * GLYPH_EM + 12.0;
+        Some((pod.id, Rectangle::new(Point::new(union.x, union.y + union.height + 6.0), Size::new(width, TEXT_LABEL + 8.0)), text))
     }
 
     fn visible(&self, size: Size, modifiers: keyboard::Modifiers) -> Visible {
@@ -526,7 +565,7 @@ fn drag_verb(dim: Dim, nose: bool) -> &'static str {
     match dim {
         Dim::Length if nose => "Drag tip",
         Dim::Length => "Drag face",
-        Dim::Diameter | Dim::ForeDiameter | Dim::Span | Dim::Height | Dim::TipChord | Dim::RootChord | Dim::Sweep => "Drag edge",
+        Dim::Diameter | Dim::ForeDiameter | Dim::Span | Dim::Height | Dim::TipChord | Dim::RootChord | Dim::Sweep | Dim::Gap => "Drag edge",
         Dim::Wall | Dim::Thickness | Dim::InnerDiameter => "Drag wall",
         Dim::Position => "Drag part",
         Dim::Cant | Dim::Angle => "Drag angle",
@@ -678,6 +717,11 @@ impl canvas::Program<Message> for Overlay<'_> {
                     }
                     state.last_edge = Some((now, id, after));
                 }
+                if let Some((pod, chip, _)) = self.pod_chip(size) {
+                    if chip.contains(at) {
+                        return Some(Action::publish(Message::Select(Some(Pick::Radial { id: pod, instance: 0 }))).and_capture());
+                    }
+                }
                 state.press = Some(Press { at, target: pick::pick(self.rocket, &self.camera, at, size) });
                 Some(Action::capture())
             }
@@ -738,6 +782,13 @@ impl canvas::Program<Message> for Overlay<'_> {
         }
         let tag_text = match &selection {
             Some(Selection::Axial { kind, .. }) => kind.name().to_uppercase(),
+            Some(Selection::Radial { radial, .. }) if radial.kind.is_pod() => {
+                if radial.count > 1 {
+                    format!("POD ×{} · LINKED", radial.count)
+                } else {
+                    "POD".to_string()
+                }
+            }
             Some(Selection::Radial { radial, .. }) => {
                 if radial.count > 1 {
                     let tag = if radial.has_overrides() { format!("{} OVR", radial.overridden_copies().len()) } else { "ALL FOLLOW".to_string() };
@@ -750,11 +801,25 @@ impl canvas::Program<Message> for Overlay<'_> {
             None => String::new(),
         };
         if let Some(Selection::Radial { radial, .. }) = &selection {
+            let (rocket, camera) = self.selected.and_then(|id| self.frame_of(id)).unwrap_or((self.rocket, &self.camera));
             let own = self.instance.min(radial.angles().len() - 1);
             for i in (0..radial.angles().len()).filter(|i| *i != own) {
-                if let Some(sibling) = pick::placement(self.rocket, radial, i) {
-                    brackets(&mut frame, pick::radial_bounds(&self.camera, size, &radial.effective(i).kind, sibling), t.accent.scale_alpha(0.7), true);
+                if let Some(sibling) = pick::placement(rocket, radial, i) {
+                    brackets(&mut frame, pick::radial_bounds(camera, size, &radial.effective(i).kind, sibling), t.accent.scale_alpha(0.7), true);
                 }
+            }
+        }
+        // A part of a pod stands in every copy of the pod: dashed brackets on the others, and the tag that selects the set.
+        if let Some(view) = self.pod.as_ref().filter(|v| self.rocket.pod_of(id).is_some_and(|p| p.id == v.pod)) {
+            for k in 1..view.cameras.len() {
+                if let Some(b) = self.bounds_in(&view.sub, &view.cameras[k], id, size) {
+                    brackets(&mut frame, b, t.accent.scale_alpha(0.7), true);
+                }
+            }
+            if let Some((_, chip, text)) = self.pod_chip(size) {
+                frame.fill_rectangle(chip.position(), chip.size(), t.bg_000);
+                frame.stroke_rectangle(chip.position(), chip.size(), Stroke::default().with_color(t.accent).with_width(1.0));
+                label(&mut frame, &text, Point::new(chip.x + 6.0, chip.y + 4.0 + TEXT_LABEL), t.accent, t.bg_000);
             }
         }
         let Some(b) = self.bounds_of_selection(size) else {
@@ -876,6 +941,14 @@ impl Overlay<'_> {
         let thickness = radial.kind.thickness().unwrap_or(0.002);
         let width = (thickness as f32 * handles::THICKNESS_SCALE).clamp(2.0, 12.0);
         for (k, a) in radial.angles().into_iter().enumerate() {
+            if let bowshock_model::RadialKind::Pod { gap, body } = &radial.kind {
+                // A pod copy is a circle of its own radius, `gap` out from the core's surface.
+                let (g, r) = (*gap as f32 * ins.scale, body.radius() as f32 * ins.scale);
+                let c = ins.centre + handles::arc_dir(a) * (ins.base + g + r);
+                frame.fill(&Path::circle(c, r), t.part_fin);
+                frame.stroke(&Path::circle(c, r), Stroke::default().with_color(if k == 0 { t.accent } else { t.line_200 }).with_width(1.0));
+                continue;
+            }
             let (from, to) = (ins.centre + handles::arc_dir(a) * ins.base, ins.centre + handles::arc_dir(a) * (ins.base + ins.reach.max(4.0)));
             let colour = if k == 0 { t.accent } else { t.part_fin };
             if radial.kind.is_fin() {
@@ -1068,14 +1141,15 @@ impl Overlay<'_> {
 
     /// A point on screen that stands for part `id` (the middle of its top edge), where a snap guide runs to.
     fn anchor(&self, id: PartId, size: Size) -> Option<Point> {
-        let (a, b) = self.rocket.part_span(id)?;
-        let up = handles::radial_up(&self.camera);
-        let r = match self.rocket.kind_of(id)? {
+        let (rocket, camera) = self.frame_of(id)?;
+        let (a, b) = rocket.part_span(id)?;
+        let up = handles::radial_up(camera);
+        let r = match rocket.kind_of(id)? {
             PartRef::Axial(p) => p.kind.fore_diameter().max(p.kind.aft_diameter()) / 2.0,
-            PartRef::Internal(_) => self.rocket.resolved(id)?.outer_diameter / 2.0,
+            PartRef::Internal(_) => rocket.resolved(id)?.outer_diameter / 2.0,
             PartRef::Radial(_) => 0.0,
         };
-        Some(self.camera.project(up * r as f32 + Vec3::Z * ((a + b) / 2.0) as f32, size))
+        Some(camera.project(up * r as f32 + Vec3::Z * ((a + b) / 2.0) as f32, size))
     }
 }
 
@@ -1109,7 +1183,7 @@ mod tests {
                 pick::radial_bounds(&cam, SIZE, &rad.kind, pick::placement(r, rad, 0).unwrap())
             }
         };
-        visible(&Context { rocket: r, camera: &cam, size: SIZE, instance: 0, bounds: b }, id, all, inside)
+        visible(&Context { rocket: r, camera: &cam, size: SIZE, instance: 0, bounds: b, cube: false }, id, all, inside)
     }
 
     fn dims(v: &Visible) -> Vec<Dim> {
@@ -1145,7 +1219,7 @@ mod tests {
         let (mut r, tube, _, _) = rocket();
         let cam = side();
         let small = Rectangle::new(Point::new(300.0, 200.0), Size::new(10.0, 10.0));
-        let cx = Context { rocket: &r, camera: &cam, size: SIZE, instance: 0, bounds: small };
+        let cx = Context { rocket: &r, camera: &cam, size: SIZE, instance: 0, bounds: small, cube: false };
         assert!(visible(&cx, tube, true, InsideView::Cutaway).placed.is_empty());
         // A 20 mm long tube is 16 px wide: its wall handle lands within 16 px of its diameter handle and hides, with the hint.
         r.set_dim(tube, Dim::Length, 0.02).unwrap();
@@ -1168,6 +1242,7 @@ mod tests {
             inside: InsideView::Solid,
             profile: false,
             units: UnitSystem::default(),
+            pod: None,
         };
         let v = o.parse(Dim::Length, "50").unwrap();
         assert!((v - 0.05).abs() < 1e-12);
@@ -1192,6 +1267,7 @@ mod tests {
             inside: InsideView::Solid,
             profile: false,
             units: UnitSystem::default(),
+            pod: None,
         };
         let v = vis(&r, tube, false, InsideView::Solid);
         let h = v.placed.iter().find(|p| p.spec.dim == Dim::Length).copied().unwrap();

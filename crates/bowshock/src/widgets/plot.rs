@@ -18,7 +18,7 @@
 #![allow(dead_code)] // The screens that compose these widgets arrive after the widgets do.
 
 use iced::widget::{button, container, row, text, Space};
-use iced::{Border, Color, Element, Length, Theme, Widget};
+use iced::{Border, Color, Element, Length, Rectangle, Theme, Widget};
 
 use crate::theme::{self, MONO};
 use crate::tokens::{self, Tokens};
@@ -31,8 +31,8 @@ pub use view::PlotView;
 
 /// Smallest window or band, as a fraction of the full range. Narrower selections are ignored.
 const MIN_SPAN_FRAC: f64 = 1e-6;
-/// Headroom added above (and below) the data when y re-fits to the window (PlotZoom: 8 %).
-const HEADROOM: f64 = 0.08;
+/// Headroom added above (and below) the data when y re-fits to the window, before the range is pushed out to a nice tick.
+const HEADROOM: f64 = 0.04;
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Data
@@ -103,6 +103,8 @@ pub enum LineStyle {
     Dashed,
     /// Dots: event lines.
     Dotted,
+    /// Alternating dashes and dots: a fourth line in one plot.
+    DashDot,
 }
 
 /// Marks a series as one layer of a stacked area. Fill series of a panel stack in order, bottom first, sharing the x
@@ -242,6 +244,49 @@ pub enum Tag {
     Off,
 }
 
+/// What a click on a panel's chrome asks for (see [`PanelEditor`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelAction {
+    /// The title was clicked: pick the panel's primary data source.
+    Pick,
+    /// `+ series`: overlay another source.
+    AddSeries,
+    /// Move the panel up one place.
+    MoveUp,
+    /// Move the panel down one place.
+    MoveDown,
+    /// Remove the panel.
+    Remove,
+}
+
+/// One legend entry of an editable panel: a short stroke in the line's style and the source's name.
+#[derive(Debug, Clone)]
+pub struct LegendItem {
+    /// Stroke style of the line.
+    pub style: LineStyle,
+    /// Colour role of the stroke.
+    pub color: SeriesColor,
+    /// Source name.
+    pub text: String,
+}
+
+/// Makes a panel editable: its title becomes a picker button (a chevron after it), a row of small controls (`+ series`, move
+/// up, move down, remove) sits at the top right inside the plot, and a legend of its sources follows the title. Clicks arrive
+/// as [`PlotMessage::Panel`] with the clicked chip's rectangle in the canvas, so the app can open a menu there.
+#[derive(Debug, Clone, Default)]
+pub struct PanelEditor {
+    /// `+ series` is available.
+    pub can_add: bool,
+    /// The panel can move up.
+    pub can_up: bool,
+    /// The panel can move down.
+    pub can_down: bool,
+    /// The panel can be removed.
+    pub can_remove: bool,
+    /// Names of the panel's sources with their line styles (drawn only when there are two or more).
+    pub legend: Vec<LegendItem>,
+}
+
 /// One plot of a [`PlotGroup`]: a title, its series and its reference lines. y is never shared between panels.
 #[derive(Debug, Clone)]
 pub struct Panel {
@@ -262,6 +307,8 @@ pub struct Panel {
     /// Unit written after values in hover tags, when `unit` is a description (`mm from tip` → `mm`). Defaults to `unit`
     /// when that is a single word.
     pub value_unit: Option<String>,
+    /// Editing chrome (picker title, controls, legend), for panels the user composes.
+    pub editor: Option<PanelEditor>,
 }
 
 impl Panel {
@@ -276,6 +323,7 @@ impl Panel {
             tag: Tag::Auto,
             zero_base: false,
             value_unit: None,
+            editor: None,
         }
     }
 
@@ -312,6 +360,12 @@ impl Panel {
     /// Sets the unit written after hover-tag values.
     pub fn value_unit(mut self, unit: impl Into<String>) -> Self {
         self.value_unit = Some(unit.into());
+        self
+    }
+
+    /// Makes the panel editable (see [`PanelEditor`]).
+    pub fn editable(mut self, editor: PanelEditor) -> Self {
+        self.editor = Some(editor);
         self
     }
 
@@ -384,8 +438,9 @@ impl Panel {
         (lo <= hi).then_some((lo, hi))
     }
 
-    /// The y range to draw for the window `[w0, w1]`: the data in view with 8 % headroom (PlotZoom), so y re-fits when x
-    /// zooms. Zero-based panels keep y = 0 at the bottom.
+    /// The y range to draw for the window `[w0, w1]`: the data in view plus 4 % headroom, then pushed out to the next "nice" tick
+    /// above the top (and below the bottom), so the range always contains the data, the peak never sits on the edge and the top
+    /// tick label is at or above the highest value. y re-fits when x zooms (PlotZoom). Zero-based panels keep y = 0 at the bottom.
     pub fn y_range(&self, w0: f64, w1: f64) -> (f64, f64) {
         let Some((mut lo, mut hi)) = self.y_extent(w0, w1) else { return (0.0, 1.0) };
         let anchored = self.zero_base || self.is_stacked();
@@ -399,10 +454,16 @@ impl Panel {
                 lo -= e;
             }
         }
+        let floor_at_zero = anchored && lo == 0.0;
         let pad = HEADROOM * (hi - lo);
         hi += pad;
-        if !(anchored && lo == 0.0) {
+        if !floor_at_zero {
             lo -= pad;
+        }
+        let step = ticks::nice_step(hi - lo, 5);
+        hi = (hi / step - 1e-9).ceil() * step;
+        if !floor_at_zero {
+            lo = (lo / step + 1e-9).floor() * step;
         }
         (lo, hi)
     }
@@ -506,6 +567,17 @@ impl Axis {
     }
 }
 
+/// How a group chooses its y ticks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum YTicks {
+    /// 1-2-5 multiples inside the range, labels right-aligned against the plot (the time plots).
+    #[default]
+    Nice,
+    /// This many evenly spaced ticks from the bottom to the top of each panel, labels left-aligned in the gutter (the
+    /// AnalyzeScreen's: `0.8 1.4 2.0 2.6 3.2`).
+    Even(usize),
+}
+
 /// Panels that share one x axis, with the events drawn across them.
 #[derive(Debug, Clone)]
 pub struct PlotGroup {
@@ -525,12 +597,24 @@ pub struct PlotGroup {
     pub right_margin: f32,
     /// The full x range; `None` takes the extent of the data.
     pub x_range: Option<(f64, f64)>,
+    /// How the y ticks of every panel are chosen.
+    pub y_ticks: YTicks,
 }
 
 impl PlotGroup {
     /// An empty group on `x`.
     pub fn new(x: Axis) -> Self {
-        PlotGroup { x, panels: Vec::new(), events: Vec::new(), phases: Vec::new(), timeline: false, event_tags: false, right_margin: 0.0, x_range: None }
+        PlotGroup {
+            x,
+            panels: Vec::new(),
+            events: Vec::new(),
+            phases: Vec::new(),
+            timeline: false,
+            event_tags: false,
+            right_margin: 0.0,
+            x_range: None,
+            y_ticks: YTicks::Nice,
+        }
     }
 
     /// Adds a panel below the others.
@@ -621,6 +705,8 @@ pub enum PlotMessage {
     Pinch((f64, f64)),
     /// The pinch gesture ended: a level equal to the one below (or the full range) is dropped again.
     PinchEnd,
+    /// A click on an editable panel's chrome: the panel's index, what was clicked and the chip's rectangle in the plot canvas.
+    Panel(usize, PanelAction, Rectangle),
 }
 
 /// The PlotZoom state of one linked group: the stack of x ranges (level 0 is the full range), the selection band and
@@ -766,6 +852,8 @@ impl PlotState {
                     }
                 }
             }
+            // Panel chrome edits the layout, not the view.
+            PlotMessage::Panel(..) => {}
         }
     }
 
@@ -944,14 +1032,45 @@ mod tests {
     #[test]
     fn y_refits_to_the_window_with_headroom() {
         let p = Panel::new("Alt", "m").with(ramp());
+        // 0 – 100 plus 4 % headroom, pushed out to the next 20 above and below: -20 – 120.
         let (lo, hi) = p.y_range(0.0, 10.0);
-        assert!((hi - 108.0).abs() < 1e-9 && (lo + 8.0).abs() < 1e-9, "{lo} {hi}");
+        assert_eq!((lo, hi), (-20.0, 120.0));
+        // Zoomed to 20 – 40 the range re-fits to it (15 – 45), still containing the data with room to spare.
         let (lo, hi) = p.y_range(2.0, 4.0);
-        assert!((lo - (20.0 - 1.6)).abs() < 1e-9 && (hi - (40.0 + 1.6)).abs() < 1e-9, "{lo} {hi}");
+        assert_eq!((lo, hi), (15.0, 45.0));
         // Zero-based panels have no headroom below zero.
         let (lo, hi) = Panel::new("Alt", "m").with(ramp()).zero_based().y_range(0.0, 10.0);
-        assert_eq!(lo, 0.0);
-        assert!((hi - 108.0).abs() < 1e-9);
+        assert_eq!((lo, hi), (0.0, 120.0));
+    }
+
+    #[test]
+    fn the_y_range_always_contains_the_data_and_ends_on_a_nice_tick() {
+        // Awkward maxima: the peak of a 619 m flight, a Mach-sized 0.871, a 1236 m flight, a top just under a tick, and one on it.
+        for max in [619.0, 0.871, 1236.0, 599.0, 600.0, 7.3e-4, 98_765.0] {
+            let line = Series::new("s", (0..=20).map(|i| (f64::from(i), max * (1.0 - ((f64::from(i) - 10.0) / 10.0).powi(2)))).collect());
+            for zero_based in [true, false] {
+                let mut p = Panel::new("P", "u").with(line.clone());
+                p.zero_base = zero_based;
+                let (lo, hi) = p.y_range(0.0, 20.0);
+                let (dmin, dmax) = p.y_extent(0.0, 20.0).unwrap();
+                assert!(lo <= dmin && hi >= dmax * 1.04 - 1e-12, "{max}: [{lo}, {hi}] vs data [{dmin}, {dmax}]");
+                if zero_based {
+                    assert_eq!(lo, 0.0, "{max}");
+                }
+                // The top has at most two significant digits (a 1-2-5 step multiple), and is not far above the data.
+                let digits = hi / 10f64.powf(hi.log10().floor() - 1.0);
+                assert!((digits - digits.round()).abs() < 1e-6, "{max}: {hi} is not a round number");
+                assert!(hi - dmax * 1.04 < 0.3 * (hi - lo), "{max}: {hi} leaves too much room above {dmax}");
+                // The evenly spaced ticks of the Analyze plots span the data too (first at the bottom, last at the top).
+                let (even, _) = ticks::even_ticks(lo, hi, 5);
+                assert!(even.first().is_some_and(|v| *v <= dmin) && even.last().is_some_and(|v| *v >= dmax), "{max}: {even:?}");
+                // So do the 1-2-5 ticks: one at or above the maximum would need the range to reach a tick, and the range does.
+                assert!(ticks::nice_ticks(lo, hi, 5).last().is_some_and(|v| *v >= dmax * 0.7), "{max}");
+            }
+        }
+        // The 619 m case of the Simulate altitude plot: 0 – 700, the peak well inside.
+        let alt = Series::new("alt", vec![(0.0, 0.0), (10.0, 619.0), (20.0, 0.0)]);
+        assert_eq!(Panel::new("Altitude", "m").with(alt).zero_based().y_range(0.0, 20.0), (0.0, 700.0));
     }
 
     #[test]
@@ -993,7 +1112,7 @@ mod tests {
         // Stacked panels are zero-based with headroom only above the total.
         let (lo, hi) = p.y_range(0.0, 2.0);
         assert_eq!(lo, 0.0);
-        assert!((hi - 0.5 * 1.08).abs() < 1e-12);
+        assert!((0.5 * 1.04..=0.6 + 1e-9).contains(&hi), "{hi}");
     }
 
     #[test]

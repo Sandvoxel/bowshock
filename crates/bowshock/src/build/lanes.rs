@@ -8,6 +8,8 @@
 //! * `geometry`: stations to pixels (fit, zoom/pan, lock to the viewport), ruler ticks, hit-testing;
 //! * `edit`: the document edits (move, resize, landing targets, snapping);
 //! * `canvas`: drawing and mouse input;
+//! * `pods`: the `Pod ×N` brackets of a pod's parts and their tags (never dropped: beside the ends, along the bracket, in another
+//!   row, or in a row the lane gains);
 //! * `menu`: the "Add here…" menu.
 //!
 //! Edits go through `ctx.doc` like every other surface's: moves and resizes merge into one undo step per drag, a part from the
@@ -17,6 +19,7 @@ mod canvas;
 mod edit;
 mod geometry;
 mod menu;
+mod pods;
 mod scene;
 
 use std::cell::RefCell;
@@ -155,9 +158,12 @@ impl State {
             Message::OpenConfigMenu => return Task::done(app::Message::Chrome(chrome::Message::ToggleConfigMenu)),
             // A double click selects the part and turns the viewport square-on to it.
             Message::Focus(id) => return Task::done(app::Message::Viewport(viewport::Message::Focus(id))),
-            Message::MoveTo { id, start } => {
-                ctx.doc.edit_merging("Move part", &format!("move:{id}"), |r| edit::move_part(r, id, start));
-            }
+            Message::MoveTo { id, start } => match edit::refusal(ctx.doc.rocket(), id, start) {
+                Some(reason) => ctx.notify(reason),
+                None => {
+                    ctx.doc.edit_merging("Move part", &format!("move:{id}"), |r| edit::move_part(r, id, start));
+                }
+            },
             Message::ResizeTo { id, end, station } => {
                 ctx.doc.edit_merging("Resize part", &format!("resize:{id}"), |r| edit::resize_part(r, id, end, station));
             }
@@ -316,7 +322,7 @@ fn carry_at(ctx: &mut Ctx, start: f64) {
         }
     } else if let Some(d) = &ctx.drag.radial {
         let angle = d.origin.as_ref().map(|o| o.angle).or(d.target.map(|t| t.angle)).unwrap_or(0.0);
-        let target = edit::radial_landing(rocket, &d.kind, start).map(|(parent, offset)| SurfaceTarget { parent, offset, angle });
+        let target = edit::radial_landing(rocket, &d.kind, start).map(|(parent, offset)| SurfaceTarget { parent, offset, angle, copy: 0 });
         if let Some(d) = ctx.drag.radial.as_mut() {
             d.target = target;
         }
@@ -497,5 +503,63 @@ mod tests {
         assert!(state.collapsed && height(true) < height(false));
         state.update(Message::TogglePinned, app.ctx_mut());
         assert!(state.pinned);
+    }
+
+    /// The example with a pod set of two on its first body tube, 0.1 m along it: the app, the pod, its tube and its fins.
+    fn example_with_pod() -> (App, PartId, PartId, PartId) {
+        let mut app = App::with_example();
+        let (pod, tube, fins) = {
+            let doc = &mut app.ctx_mut().doc;
+            let host = doc.rocket().parts().iter().find(|p| matches!(p.kind, PartKind::BodyTube { .. })).expect("the example has a tube").id;
+            let kind = doc.rocket().default_pod();
+            let pod = doc.edit("Add pod", |r| r.attach_radial(host, 0.1, 0.0, 2, kind).ok()).expect("a pod");
+            let tube = doc.rocket().pods().find(|p| p.id == pod).and_then(|p| p.kind.pod_body()).and_then(|b| b.parts().last()).map(|p| p.id).unwrap();
+            let fin = bowshock_model::RadialKind::FinSet { root_chord: 0.06, tip_chord: 0.03, span: 0.03, sweep: 0.02, thickness: 0.002 };
+            let fins = doc.edit("Add fins", |r| r.attach_radial(tube, 0.05, 0.0, 3, fin).ok()).expect("fins on the pod");
+            (pod, tube, fins)
+        };
+        (app, pod, tube, fins)
+    }
+
+    #[test]
+    fn pod_parts_are_selected_and_edited_from_their_bars_and_a_drag_out_of_the_pod_is_refused() {
+        let (mut app, pod, tube, fins) = example_with_pod();
+        app.sync();
+        // A click on the pod set's bar, or on a member's, selects that id.
+        for id in [pod, tube, fins] {
+            lanes(&mut app, Message::Select(Some(BarKey::Part(id))));
+            assert_eq!(app.ctx().selection, Selection::Part(id));
+        }
+        // The pod set's bar moves it along its parent in one undo step.
+        let before = app.ctx().doc.rocket().clone();
+        let station = app.ctx().doc.rocket().part_station(pod).unwrap();
+        for start in [station + 0.02, station + 0.04] {
+            lanes(&mut app, Message::MoveTo { id: pod, start });
+        }
+        lanes(&mut app, Message::EditEnd);
+        assert!((app.ctx().doc.rocket().part_station(pod).unwrap() - (station + 0.04)).abs() < 1e-9);
+        app.update(App_::Undo);
+        assert_eq!(app.ctx().doc.rocket(), &before);
+        // A fin of the pod moves along the pod, and the pod's tube cannot be moved along the axis: refused with a notice.
+        lanes(&mut app, Message::MoveTo { id: fins, start: station + 0.3 });
+        assert!((app.ctx().doc.rocket().part_station(fins).unwrap() - (station + 0.3)).abs() < 1e-9);
+        lanes(&mut app, Message::EditEnd);
+        let before = app.ctx().doc.rocket().clone();
+        app.ctx_mut().notice = None;
+        lanes(&mut app, Message::MoveTo { id: tube, start: 0.0 });
+        assert_eq!(app.ctx().doc.rocket(), &before);
+        assert!(app.ctx().notice.is_some(), "the refusal is said in the status strip");
+        // So is carrying a fin out of the pod.
+        app.ctx_mut().notice = None;
+        let aft = app.ctx().doc.rocket().part_span(pod).unwrap().1;
+        lanes(&mut app, Message::MoveTo { id: fins, start: aft + 0.2 });
+        assert_eq!(app.ctx().doc.rocket(), &before);
+        assert!(app.ctx().notice.is_some());
+        // The pod's tube resizes by its aft end.
+        let (fore, tube_aft) = app.ctx().doc.rocket().part_span(tube).unwrap();
+        lanes(&mut app, Message::ResizeTo { id: tube, end: End::Aft, station: tube_aft + 0.05 });
+        lanes(&mut app, Message::EditEnd);
+        let (f, a) = app.ctx().doc.rocket().part_span(tube).unwrap();
+        assert!((f - fore).abs() < 1e-9 && (a - (tube_aft + 0.05)).abs() < 1e-9);
     }
 }

@@ -289,3 +289,82 @@ fn canopy_inflation_limits_opening_shock() {
     assert!(v(t_main + 0.1) > 0.9 * v(t_main), "no inflation delay");
     println!("peak opening shock {peak_g:.2} g");
 }
+
+/// A calm flight (no wind, no gusts) of the H128W-class rocket, so air-relative and ground-relative values coincide.
+fn calm() -> FlightResult {
+    let mut inp = input();
+    inp.launch.wind_speed = 0.0;
+    inp.launch.turbulence = Turbulence::Off;
+    simulate(&inp)
+}
+
+#[test]
+fn samples_carry_consistent_kinematic_and_atmosphere_channels() {
+    let inp = input();
+    let site = inp.launch.site_altitude;
+    let r = calm();
+    let samples = &r.trajectory.samples;
+    for s in samples {
+        assert!((s.altitude_msl - (site + s.altitude)).abs() < 1e-9);
+        assert!((s.ground_distance - s.position[0].hypot(s.position[1])).abs() < 1e-9);
+        assert!((s.horizontal_velocity - s.velocity[0].hypot(s.velocity[1])).abs() < 1e-9);
+        // Calm air: the air-relative speed is the ground speed and the wind is zero.
+        assert!((s.air_speed - s.speed).abs() < 1e-9 && s.wind_speed == 0.0);
+        assert!((s.mach - s.air_speed / s.speed_of_sound).abs() < 1e-9);
+        assert!((s.dynamic_pressure - 0.5 * s.air_density * s.air_speed * s.air_speed).abs() < 1e-6 * s.dynamic_pressure.max(1.0));
+        // Ideal gas: p = rho R T for dry air.
+        assert!((s.air_pressure - s.air_density * 287.05 * s.air_temperature).abs() < 0.01 * s.air_pressure);
+        assert!((-std::f64::consts::FRAC_PI_2 - 1e-9..=std::f64::consts::FRAC_PI_2 + 1e-9).contains(&s.flight_path_angle));
+    }
+    // ISA at a 120 m site on a 15 degC day: a = sqrt(1.4 R T) ~ 340 m/s, rho ~ 1.2 kg/m^3.
+    let first = samples.first().unwrap();
+    assert!((first.speed_of_sound - 340.3).abs() < 1.0, "{}", first.speed_of_sound);
+    assert!((first.air_density - 1.21).abs() < 0.03, "{}", first.air_density);
+    // Climbing at the start, descending at the end, and the angle always has the sign of the vertical velocity.
+    assert!(samples[20].flight_path_angle > 1.4 && samples.last().unwrap().flight_path_angle < -1.4);
+    assert!(samples.iter().filter(|s| s.vertical_velocity.abs() > 1e-6).all(|s| s.flight_path_angle.signum() == s.vertical_velocity.signum()));
+}
+
+#[test]
+fn samples_carry_consistent_drag_mass_and_balance_channels() {
+    let inp = input();
+    let r = calm();
+    let samples = &r.trajectory.samples;
+    let d_ref = inp.vehicle.reference_diameter;
+    for s in samples {
+        let parts = s.cd_friction + s.cd_pressure + s.cd_base + s.cd_fins + s.cd_protuberances;
+        assert!((s.cd - parts).abs() < 1e-9, "Cd build-up does not add up at t = {}", s.t);
+        assert!((s.stability_margin - (s.cp - s.cg) / d_ref).abs() < 1e-9);
+        assert!((s.cd_recovery - s.recovery_cd_area / inp.vehicle.reference_area()).abs() < 1e-12);
+        // F = q Cd A (the deployed devices and the airframe share one reference area in this model).
+        if s.dynamic_pressure > 1.0 {
+            assert!((s.drag - s.dynamic_pressure * (s.cd + s.cd_recovery) * inp.vehicle.reference_area()).abs() < 1e-6 * s.drag.max(1.0), "t = {}", s.t);
+        }
+    }
+    // A slender rocket at low Mach: Cd of order 0.3 to 0.9 with the motor lit.
+    let cruise = samples.iter().find(|s| s.t > 1.0 && s.mach > 0.2).unwrap();
+    assert!((0.3..1.0).contains(&cruise.cd), "Cd {}", cruise.cd);
+    // The propellant burns out and the mass drops by exactly that much; nothing else leaves the rocket.
+    let (start, end) = (samples.first().unwrap(), samples.last().unwrap());
+    assert!((start.propellant_mass - 0.105).abs() < 1e-9 && end.propellant_mass < 1e-9);
+    assert!(((start.mass - end.mass) - 0.105).abs() < 1e-6, "{} -> {}", start.mass, end.mass);
+    // Stable at the pad (CP aft of CG), and the CG moves forward as the propellant burns.
+    assert!(start.stability_margin > 1.0 && end.cg < start.cg);
+    // Thrust only while burning; the recovery drag area is zero until the canopy opens and full at the end.
+    assert!(start.thrust < 1.0 && end.thrust == 0.0 && samples.iter().any(|s| s.thrust > 100.0));
+    assert_eq!(start.recovery_cd_area, 0.0);
+    assert!((end.recovery_cd_area - 0.9).abs() < 1e-9, "{}", end.recovery_cd_area);
+    // Reynolds number of a 1.1 m rocket at ~100 m/s: rho v L / mu ~ 7e6 (sanity range).
+    let fast = samples.iter().max_by(|a, b| a.air_speed.total_cmp(&b.air_speed)).unwrap();
+    assert!((1e6..2e7).contains(&fast.reynolds), "Re {}", fast.reynolds);
+}
+
+#[test]
+fn wind_and_angle_of_attack_channels_follow_the_launch_conditions() {
+    let r = simulate(&input());
+    // Mean wind 2 m/s plus Low-turbulence gusts (5 %): always near 2.
+    assert!(r.trajectory.samples.iter().all(|s| (1.0..3.0).contains(&s.wind_speed)));
+    // Perfect weathercocking: no angle of attack once off the rail.
+    let exit = r.trajectory.events.iter().find(|e| e.kind == EventKind::RailExit).unwrap().t;
+    assert!(r.trajectory.samples.iter().filter(|s| s.t > exit + 0.1 && s.air_speed > 1.0).all(|s| s.angle_of_attack < 1e-6));
+}

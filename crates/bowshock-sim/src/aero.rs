@@ -323,7 +323,7 @@ struct FinCalc {
     ar: f64,
     cos_mid: f64,
     cos_lead: f64,
-    x_cp: f64,
+    mac_lead: f64,
     kfb: f64,
     /// Mean aerodynamic chord `∫c² dy / ∫c dy`.
     mac: f64,
@@ -457,7 +457,7 @@ impl Aero {
             }
         }
         for f in &self.fins {
-            comps.push((f.name.clone(), f.cna(mach, self.a_ref), f.x_cp));
+            comps.push((f.name.clone(), f.cna(mach, alpha, self.a_ref), f.cp(mach)));
         }
         let cn_alpha: f64 = comps.iter().map(|c| c.1).sum();
         let cp = if cn_alpha.abs() > 1e-9 { comps.iter().map(|c| c.1 * c.2).sum::<f64>() / cn_alpha } else { 0.5 * self.length };
@@ -703,7 +703,7 @@ fn fin_calc(f: &FinSet, name: String) -> FinCalc {
         ar,
         cos_mid,
         cos_lead,
-        x_cp: f.station + x_cp,
+        mac_lead: f.station + x_cp - SUBSONIC_CP_POS * mac,
         kfb: 1.0 + f.body_radius / (span + f.body_radius),
         mac,
         thickness: f.thickness,
@@ -712,35 +712,149 @@ fn fin_calc(f: &FinSet, name: String) -> FinCalc {
     }
 }
 
+// Fin normal force and CP vs Mach: port of OpenRocket `FinSetCalc.calculateFinCNa1` /
+// `calculateCPPos` and `RocketComponentCalc.{supersonic,transonic}CPPos`.
+
+const CNA_SUBSONIC: f64 = 0.9;
+const CNA_SUPERSONIC: f64 = 1.5;
+const GAMMA: f64 = 1.4;
+/// Fin stall angle used by OpenRocket (20 deg): the angle terms saturate there.
+const FIN_STALL: f64 = 20.0 * PI / 180.0;
+
+/// Supersonic linear-theory coefficients `(K1, K2, K3)` of `CN = A (K1 a + K2 a^2 + K3 a^3)` per
+/// unit angle (second-order shock-expansion theory; Pitts, Nielsen & Kaattari NACA 1307 / OpenRocket
+/// `FinSetCalc` static tables, evaluated analytically instead of tabulated at 0.1 Mach steps).
+fn supersonic_k(mach: f64) -> (f64, f64, f64) {
+    let m = mach.clamp(CNA_SUPERSONIC, 4.9);
+    let b2 = m * m - 1.0;
+    let beta = b2.sqrt();
+    let k1 = 2.0 / beta;
+    let k2 = ((GAMMA + 1.0) * m.powi(4) - 4.0 * b2) / (4.0 * b2 * b2);
+    let k3 =
+        ((GAMMA + 1.0) * m.powi(8) + (2.0 * GAMMA * GAMMA - 7.0 * GAMMA - 5.0) * m.powi(6) + 10.0 * (GAMMA + 1.0) * m.powi(4) + 8.0) / (6.0 * beta.powi(7));
+    (k1, k2, k3)
+}
+
+const SUBSONIC_CP_POS: f64 = 0.25;
+const SUPERSONIC_CP_OFFSET: f64 = 0.67;
+const LOW_AR_CP_BRIDGE_START: f64 = (SUPERSONIC_CP_OFFSET - SUBSONIC_CP_POS) / (1.0 - 2.0 * SUBSONIC_CP_POS);
+
+fn source_supersonic_cp(x: f64) -> f64 {
+    (x - SUPERSONIC_CP_OFFSET) / (2.0 * x - 1.0)
+}
+
+fn source_supersonic_cp_gradient(x: f64) -> f64 {
+    let d = 2.0 * x - 1.0;
+    (2.0 * SUPERSONIC_CP_OFFSET - 1.0) / (d * d)
+}
+
+/// Supersonic CP as a fraction of the MAC from its leading edge, `(x - 0.67)/(2x - 1)` with
+/// `x = AR beta` (Fleeman / NACA 1307 eq. 63), bridged to the quarter chord below `x = 1` with a
+/// cubic Hermite as OpenRocket does.
+fn supersonic_cp(x: f64) -> f64 {
+    if x <= LOW_AR_CP_BRIDGE_START {
+        return SUBSONIC_CP_POS;
+    }
+    if x >= 1.0 {
+        return source_supersonic_cp(x);
+    }
+    let w = 1.0 - LOW_AR_CP_BRIDGE_START;
+    let t = (x - LOW_AR_CP_BRIDGE_START) / w;
+    let (t2, t3) = (t * t, t * t * t);
+    (2.0 * t3 - 3.0 * t2 + 1.0) * SUBSONIC_CP_POS + (-2.0 * t3 + 3.0 * t2) * source_supersonic_cp(1.0) + (t3 - t2) * w * source_supersonic_cp_gradient(1.0)
+}
+
+fn supersonic_cp_gradient(x: f64) -> f64 {
+    if x <= LOW_AR_CP_BRIDGE_START {
+        return 0.0;
+    }
+    if x >= 1.0 {
+        return source_supersonic_cp_gradient(x);
+    }
+    let w = 1.0 - LOW_AR_CP_BRIDGE_START;
+    let t = (x - LOW_AR_CP_BRIDGE_START) / w;
+    let t2 = t * t;
+    let sb = 6.0 * t2 - 6.0 * t;
+    (sb * SUBSONIC_CP_POS - sb * source_supersonic_cp(1.0)) / w + (3.0 * t2 - 2.0 * t) * source_supersonic_cp_gradient(1.0)
+}
+
+/// Fin CP fraction of the MAC: quarter chord up to Mach 0.5, a quintic to Mach 2 matching the
+/// supersonic value and slope there, then the supersonic formula (OpenRocket `transonicCPPos`).
+fn fin_cp_fraction(mach: f64, ar: f64) -> f64 {
+    if mach <= 0.5 {
+        return SUBSONIC_CP_POS;
+    }
+    if mach >= 2.0 {
+        return supersonic_cp(ar * (mach * mach - 1.0).sqrt());
+    }
+    let t = (mach - 0.5) / 1.5;
+    let x2 = ar * 3f64.sqrt();
+    let delta = supersonic_cp(x2) - SUBSONIC_CP_POS;
+    if delta <= 0.0 {
+        return SUBSONIC_CP_POS;
+    }
+    let slope = x2 * supersonic_cp_gradient(x2);
+    let ratio = slope / delta;
+    let (t2, t3) = (t * t, t * t * t);
+    if ratio <= 5.0 / 3.0 {
+        let (t4, t5) = (t3 * t, t3 * t * t);
+        SUBSONIC_CP_POS
+            + (10.0 * delta - 6.0 * slope) * t2
+            + (-20.0 * delta + 14.0 * slope) * t3
+            + (15.0 * delta - 11.0 * slope) * t4
+            + (3.0 * slope - 4.0 * delta) * t5
+    } else {
+        // Monotone continuation of the limiting quintic (slope ratio 5/3), raised to ratio/(5/3).
+        let limiting = t3 * (10.0 / 3.0 - 10.0 / 3.0 * t + t2);
+        SUBSONIC_CP_POS + delta * limiting.powf(ratio / (5.0 / 3.0))
+    }
+}
+
 impl FinCalc {
-    /// Lift slope of one fin pair on the fin-area basis (Diederich subsonic, linearised supersonic).
-    fn pair_cl(&self, mach: f64) -> f64 {
-        let sub = |m: f64| {
-            let beta = (1.0 - m * m).max(0.0).sqrt();
-            let x = beta * self.ar / self.cos_mid;
-            2.0 * PI * self.ar / (2.0 + (4.0 + x * x).sqrt())
-        };
-        let sup = |m: f64| {
-            let beta = (m * m - 1.0).max(1e-6).sqrt();
-            let x = beta * self.ar;
-            if x >= 1.0 {
-                4.0 / beta * (1.0 - 1.0 / (2.0 * x))
-            } else {
-                self.ar * (std::f64::consts::FRAC_PI_2 + (2.0 - std::f64::consts::FRAC_PI_2) * x)
-            }
-        };
-        if mach <= 0.9 {
-            sub(mach)
-        } else if mach >= 1.4 {
-            sup(mach)
-        } else {
-            let t = (mach - 0.9) / 0.5;
-            sub(0.9) * (1.0 - t) + sup(1.4) * t
+    /// Normal-force slope of one fin on the reference area (OpenRocket `calculateFinCNa1`):
+    /// Diederich below Mach 0.9, `A (K1 + K2 a + K3 a^2)/A_ref` above Mach 1.5, and a quartic
+    /// through value and slope at both ends (zero curvature at 0.9) in between.
+    fn cna1(&self, mach: f64, alpha: f64, a_ref: f64) -> f64 {
+        if self.area < 1e-12 || self.span < 1e-9 || self.cos_mid < 1e-9 {
+            return 0.0;
         }
+        let alpha = alpha.abs().min(PI - alpha.abs()).min(FIN_STALL);
+        let q = self.span * self.span / (self.area * self.cos_mid);
+        let sub = |m: f64| 2.0 * PI * self.span * self.span / (1.0 + (1.0 + (1.0 - m * m) * q * q).sqrt()) / a_ref;
+        let sup = |m: f64, a: f64| {
+            let (k1, k2, k3) = supersonic_k(m);
+            self.area * (k1 + k2 * a + k3 * a * a) / a_ref
+        };
+        if mach <= CNA_SUBSONIC {
+            return sub(mach);
+        }
+        if mach >= CNA_SUPERSONIC {
+            return sup(mach, alpha);
+        }
+        let sq = (1.0 + (1.0 - CNA_SUBSONIC * CNA_SUBSONIC) * q * q).sqrt();
+        let sub_v = sub(CNA_SUBSONIC);
+        let sub_d = 2.0 * CNA_SUBSONIC * PI * self.span.powi(6) / ((self.area * self.cos_mid).powi(2) * a_ref * sq * (1.0 + sq).powi(2));
+        let sup_v = sup(CNA_SUPERSONIC, alpha);
+        let sup_d = -self.area / a_ref * 2.0 * CNA_SUPERSONIC / (CNA_SUPERSONIC * CNA_SUPERSONIC - 1.0).powf(1.5);
+        // Quartic p(t), t = M - 0.9: p(0) = sub_v, p'(0) = sub_d, p''(0) = 0, p(h) = sup_v, p'(h) = sup_d.
+        let h = CNA_SUPERSONIC - CNA_SUBSONIC;
+        let t = mach - CNA_SUBSONIC;
+        let r1 = sup_v - sub_v - sub_d * h;
+        let r2 = sup_d - sub_d;
+        let a4 = (r2 - 3.0 * r1 / h) / h.powi(3);
+        let a3 = (r1 - a4 * h.powi(4)) / h.powi(3);
+        sub_v + sub_d * t + a3 * t.powi(3) + a4 * t.powi(4)
     }
 
-    fn cna(&self, mach: f64, a_ref: f64) -> f64 {
-        self.pair_cl(mach) * self.area / a_ref * 0.5 * self.n * self.kfb
+    /// Total CN slope of the fin set: `N/2` fins' worth of one-fin slope times the body-fin
+    /// interference factor `K_fb = 1 + r/(s + r)`.
+    fn cna(&self, mach: f64, alpha: f64, a_ref: f64) -> f64 {
+        self.cna1(mach, alpha, a_ref) * 0.5 * self.n * self.kfb
+    }
+
+    /// CP station of the fin set at `mach`: MAC leading edge plus the Mach-dependent fraction of the MAC.
+    fn cp(&self, mach: f64) -> f64 {
+        self.mac_lead + fin_cp_fraction(mach, self.ar) * self.mac
     }
 
     /// Fin drag (OpenRocket `FinSetCalc`): friction `Cf (1 + 2 t/MAC) 2 A`, leading-edge pressure
@@ -1001,5 +1115,84 @@ mod tests {
         let rough = Aero::new(&v).drag(0.2, 2e6, false).total;
         let perfect = Aero::new(&v).perfect_finish(true).drag(0.2, 2e6, false).total;
         assert!(perfect <= rough);
+    }
+
+    /// Vehicles with different fin shapes/aspect ratios for the transonic continuity checks.
+    fn fin_variants() -> Vec<Vehicle> {
+        let mut out = vec![alpha_like(), typical()];
+        let mut elliptical = typical();
+        elliptical.fin_sets[0].planform = FinPlanform::Elliptical;
+        out.push(elliptical);
+        let mut low_ar = typical();
+        low_ar.fin_sets[0].span = 0.03;
+        low_ar.fin_sets[0].root_chord = 0.14;
+        low_ar.fin_sets[0].tip_chord = 0.1;
+        out.push(low_ar);
+        let mut high_ar = typical();
+        high_ar.fin_sets[0].span = 0.15;
+        high_ar.fin_sets[0].root_chord = 0.06;
+        high_ar.fin_sets[0].tip_chord = 0.03;
+        high_ar.fin_sets[0].sweep = 0.05;
+        out.push(high_ar);
+        out
+    }
+
+    #[test]
+    fn cna_and_cp_are_c1_continuous_through_transonic() {
+        // OpenRocket blends fin CNa with a quartic over Mach 0.9..1.5 and CP with a quintic over
+        // 0.5..2, both matching value and slope at the ends, so no corners may remain.
+        for v in fin_variants() {
+            let a = Aero::new(&v);
+            let len = v.length();
+            let step = 0.005;
+            let n = ((3.0 - 0.5) / step) as usize;
+            let samples: Vec<(f64, f64)> = (0..=n)
+                .map(|i| {
+                    let st = a.stability(0.5 + step * i as f64, 0.0);
+                    (st.cn_alpha, st.cp)
+                })
+                .collect();
+            for w in samples.windows(3) {
+                // First differences (jumps) and second differences (slope corners).
+                assert!((w[1].0 - w[0].0).abs() < 0.06 * w[0].0.abs().max(1.0), "CNa jump {w:?}");
+                assert!((w[1].1 - w[0].1).abs() < 8e-3 * len, "CP jump {w:?}");
+                let d2n = w[2].0 - 2.0 * w[1].0 + w[0].0;
+                let d2p = w[2].1 - 2.0 * w[1].1 + w[0].1;
+                assert!(d2n.abs() < 4e-3 * w[1].0.abs().max(1.0), "CNa corner {w:?} d2 {d2n}");
+                assert!(d2p.abs() < 4e-4 * len, "CP corner {w:?} d2 {d2p}");
+            }
+        }
+    }
+
+    #[test]
+    fn supersonic_margin_matches_openrocket_trend() {
+        // OpenRocket's supersonic fin lift (K1 = 2/beta, per fin) falls well below the subsonic value, so
+        // the CP moves forward and the margin shrinks to a fraction of its subsonic value, but stays positive.
+        let a = Aero::new(&typical());
+        let cg = 0.42;
+        let m03 = a.margin_cal(0.3, 0.0, cg);
+        let m3 = a.margin_cal(3.0, 0.0, cg);
+        assert!(m3 > 0.2 && m3 < 0.7 * m03, "margin M0.3 {m03} M3 {m3}");
+        // At Mach 1.5 the fin CNa matches OpenRocket's K1 formula exactly: A * 2/beta / A_ref per fin.
+        let v = typical();
+        let f = &v.fin_sets[0];
+        let beta = (1.5f64 * 1.5 - 1.0).sqrt();
+        let (_, k2, k3) = supersonic_k(1.5);
+        assert!(k2 > 0.0 && k3 > 0.0);
+        let expect = 0.5 * 4.0 * f.fin_area() * 2.0 / beta / v.reference_area() * (1.0 + f.body_radius / (f.span + f.body_radius));
+        let st = a.stability(1.5, 0.0);
+        let fins = st.components.iter().find(|c| c.0 == "Fins").unwrap();
+        assert!((fins.1 - expect).abs() / expect < 1e-9, "{} vs {expect}", fins.1);
+    }
+
+    #[test]
+    fn fin_cp_fraction_limits() {
+        assert_eq!(fin_cp_fraction(0.3, 1.5), 0.25);
+        // Supersonic CP at high AR*beta tends to mid-chord from ahead of it.
+        let hi = fin_cp_fraction(3.0, 4.0);
+        assert!(hi > 0.25 && hi < 0.5, "{hi}");
+        // Value and slope agree on both sides of Mach 2.
+        let (a, b) = (fin_cp_fraction(2.0 - 1e-6, 1.5), fin_cp_fraction(2.0 + 1e-6, 1.5));
+        assert!((a - b).abs() < 1e-5);
     }
 }

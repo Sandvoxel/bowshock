@@ -61,6 +61,7 @@ pub fn shapes(rocket: &Rocket, id: PartId) -> (Vec<Shape>, System) {
             vec![poly(&fit(&outline, width, 2.0 * radius), true)]
         }
         PartRef::Radial(r) => match &r.kind {
+            RadialKind::Pod { .. } => vec![poly(&[(0.92, 0.28), (0.36, 0.28), (0.08, 0.5), (0.36, 0.72), (0.92, 0.72)], true)],
             RadialKind::LaunchLug { .. } => vec![rect(0.15, 0.4, 0.85, 0.6, true)],
             RadialKind::RailButton { .. } => {
                 vec![poly(&[(0.35, 0.8), (0.35, 0.5), (0.2, 0.5), (0.2, 0.2), (0.8, 0.2), (0.8, 0.5), (0.65, 0.5), (0.65, 0.8)], true)]

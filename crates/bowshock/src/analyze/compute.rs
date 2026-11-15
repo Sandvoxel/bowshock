@@ -343,6 +343,8 @@ pub struct Run {
     pub cg_burnout: f64,
     /// Reference diameter (m): the length of a caliber.
     pub reference_diameter: f64,
+    /// The maximum Mach number of the configuration's nominal flight, for the Mach analyses (where the cursor starts).
+    pub max_mach: Option<f64>,
     /// The data.
     pub data: Data,
 }
@@ -375,16 +377,33 @@ pub struct Output {
     pub bands: StabilityBands,
 }
 
-/// Spacing of the Mach sweep's samples.
-const MACH_STEP: f64 = 0.05;
+/// Spacing of the Mach sweep's samples, and the finer spacing through the transonic range where the drag and CP change fastest.
+const MACH_STEP: f64 = 0.025;
+const MACH_STEP_TRANSONIC: f64 = 0.01;
+/// The transonic range sampled finely.
+const TRANSONIC: (f64, f64) = (0.8, 1.3);
 /// Samples of the angle-of-attack sweep.
 const ALPHA_POINTS: usize = 31;
 /// Samples of the flutter curve.
 const FLUTTER_POINTS: usize = 41;
 
-/// How many Mach samples cover `range`.
-pub fn mach_samples(range: (f64, f64)) -> usize {
-    (((range.1 - range.0) / MACH_STEP).round() as usize + 1).clamp(2, 400)
+/// The Mach numbers of a sweep over `range`: every 0.025, and every 0.01 between 0.8 and 1.3 (about 150 for 0.1 to 3.0), in
+/// ascending order with the end points included.
+pub fn mach_grid(range: (f64, f64)) -> Vec<f64> {
+    let (lo, hi) = (range.0.min(range.1), range.0.max(range.1));
+    let steps = |from: f64, to: f64, step: f64| -> Vec<f64> {
+        let n = ((to - from) / step + 1e-9).floor() as usize;
+        (0..=n).map(|k| from + step * k as f64).collect()
+    };
+    let mut grid = steps(lo, hi, MACH_STEP);
+    grid.push(hi);
+    let (a, b) = (TRANSONIC.0.max(lo), TRANSONIC.1.min(hi));
+    if b > a {
+        grid.extend(steps(a, b, MACH_STEP_TRANSONIC));
+    }
+    grid.sort_by(f64::total_cmp);
+    grid.dedup_by(|x, y| (*x - *y).abs() < 1e-6);
+    grid
 }
 
 /// Linear interpolation of `(x, y)` samples at `x`, clamped to the ends.
@@ -471,7 +490,15 @@ fn apply_finish(vehicle: &mut Vehicle, finish: FinishChoice) {
 }
 
 fn run_of(job: &ConfigJob, vehicle: &Vehicle, data: Data) -> Run {
-    Run { id: job.id, name: job.name.clone(), cg_liftoff: job.cg_liftoff, cg_burnout: job.cg_burnout, reference_diameter: vehicle.reference_diameter, data }
+    Run {
+        id: job.id,
+        name: job.name.clone(),
+        cg_liftoff: job.cg_liftoff,
+        cg_burnout: job.cg_burnout,
+        reference_diameter: vehicle.reference_diameter,
+        max_mach: None,
+        data,
+    }
 }
 
 /// The Barrowman method drops everything that depends on the angle: the sweep keeps its first (zero-angle) values' slopes.
@@ -542,7 +569,11 @@ pub fn compute(request: &Request) -> Output {
                 Analysis::Aerodynamics | Analysis::Drag => {
                     let alpha = if request.method == Method::Barrowman { 0.0 } else { cond.alpha };
                     let cg = if cond.burnout { job.cg_burnout } else { job.cg_liftoff };
-                    Data::Mach(vs_mach(&vehicle, cg, cond.mach, mach_samples(cond.mach), alpha, &Atmosphere::standard(), cond.altitude))
+                    let points: Vec<MachPoint> = mach_grid(cond.mach)
+                        .into_iter()
+                        .flat_map(|m| vs_mach(&vehicle, cg, (m, m), 1, alpha, &Atmosphere::standard(), cond.altitude))
+                        .collect();
+                    Data::Mach(points)
                 }
                 Analysis::Stability => {
                     let cg = if cond.burnout { job.cg_burnout } else { job.cg_liftoff };
@@ -552,7 +583,12 @@ pub fn compute(request: &Request) -> Output {
                 Analysis::Flutter => Data::Flutter(flutter(job, &vehicle)),
                 Analysis::Dispersion => Data::Dispersion(scatter(job, &vehicle, &cond)),
             };
-            run_of(job, &vehicle, data)
+            let mut run = run_of(job, &vehicle, data);
+            if matches!(request.analysis, Analysis::Aerodynamics | Analysis::Drag) {
+                run.max_mach =
+                    job.input.as_ref().map(|input| simulate(&SimInput { vehicle: vehicle.clone(), ..input.clone() }).summary.max_mach).filter(|m| *m > 0.0);
+            }
+            run
         })
         .collect();
     Output { analysis: request.analysis, method: request.method, conditions: cond, runs, elapsed: started.elapsed(), bands: request.bands }
@@ -712,7 +748,8 @@ mod tests {
     fn mach_sweep_matches_the_balance_and_has_a_transonic_drag_rise() {
         let out = run(Analysis::Aerodynamics, Method::Extended, Conditions::default());
         let Data::Mach(points) = &out.runs[0].data else { panic!() };
-        assert_eq!(points.len(), mach_samples((0.1, 3.0)));
+        assert_eq!(points.len(), mach_grid((0.1, 3.0)).len());
+        assert!(points.len() >= 120, "dense enough for smooth curves: {}", points.len());
         assert!((points[0].mach - 0.1).abs() < 1e-12 && (points.last().unwrap().mach - 3.0).abs() < 1e-9);
         // The margin at Mach 0.3 equals the status strip's (same CP, same CG).
         let rocket = Rocket::from_json(EXAMPLE).unwrap();
@@ -796,7 +833,7 @@ mod tests {
             bands: Default::default(),
         });
         let table = out.table();
-        assert_eq!(table.rows.len(), out.runs.len() * mach_samples((0.1, 3.0)));
+        assert_eq!(table.rows.len(), out.runs.len() * mach_grid((0.1, 3.0)).len());
         assert!(table.rows.iter().all(|r| r.len() == table.headers.len()));
         assert!(table.csv().lines().count() == table.rows.len() + 1);
     }

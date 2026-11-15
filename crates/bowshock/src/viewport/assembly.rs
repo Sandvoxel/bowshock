@@ -2,11 +2,12 @@
 //! centreline, picks the one nearest the cursor as the snap target, and reports snap changes and the drop (design/components/
 //! ViewportOverlay). The ghost part itself is drawn in 3D by the model mesh.
 
-use bowshock_model::{InternalPart, Part, PartKind, RadialPart, Rocket};
+use bowshock_model::{InternalPart, Part, PartId, PartKind, RadialPart, Rocket};
 use glam::Vec3;
 use iced::widget::canvas::{self, Action, Event, Frame, Geometry, LineDash, Path, Stroke, Text};
 use iced::{alignment, mouse, Color, Point, Rectangle, Renderer, Size, Theme};
 
+use super::pods::PodView;
 use super::{Camera, Message};
 use crate::app::ui::mm;
 use crate::theme::{self, MONO};
@@ -29,6 +30,8 @@ pub struct Drag {
     pub name: &'static str,
     pub kind: PartKind,
     pub snap: Option<usize>,
+    /// The node of a pod's stack it would drop onto instead: `(pod, node index)`. At most one of `snap` and `pod_snap` is set.
+    pub pod_snap: Option<(PartId, usize)>,
 }
 
 /// A part of the rocket picked up for moving: it is out of the rocket while dragged, and goes back as it was if the drag is
@@ -52,32 +55,88 @@ pub struct Overlay<'a> {
 }
 
 impl Overlay<'_> {
-    /// Valid nodes: index, station (m) and screen position.
-    fn nodes(&self, size: Size) -> Vec<(usize, f64, Point)> {
-        self.rocket
-            .nodes_for(&self.drag.kind)
-            .into_iter()
-            .map(|(index, station)| (index, station, self.camera.project(Vec3::new(0.0, 0.0, station as f32), size)))
-            .collect()
+    /// Whether the part carries a pod (a part of the core that has pods on it cannot go into a pod: pods do not nest).
+    fn carries_pod(&self) -> bool {
+        self.drag.origin.as_ref().is_some_and(|o| o.radials.iter().any(|r| r.kind.is_pod()))
+    }
+
+    /// Valid nodes of the core and of every pod's stack, with their screen positions (a pod's on each of its copies).
+    fn nodes(&self, size: Size) -> Vec<Node> {
+        let core = self.rocket.nodes_for(&self.drag.kind).into_iter().map(|(index, station)| Node {
+            snap: Snap::Core(index),
+            station,
+            at: self.camera.project(Vec3::new(0.0, 0.0, station as f32), size),
+        });
+        let mut nodes: Vec<Node> = core.collect();
+        if !self.carries_pod() {
+            for pod in self.rocket.pods() {
+                let Some(view) = PodView::of_pod(self.rocket, pod, &self.camera) else { continue };
+                for (index, station) in self.rocket.nodes_for_pod(pod.id, &self.drag.kind) {
+                    for (pose, camera) in view.poses.iter().zip(&view.cameras) {
+                        let at = camera.project(Vec3::Z * (station as f32 - pose.z0), size);
+                        nodes.push(Node { snap: Snap::Pod(pod.id, index), station, at });
+                    }
+                }
+            }
+        }
+        nodes
     }
 
     /// The node nearest `at`: a part dropped from the bin always attaches to the nearest node, no key needed.
-    fn nearest(&self, at: Point, size: Size) -> Option<usize> {
-        self.nodes(size).into_iter().map(|(index, _, p)| (index, p.distance(at))).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(index, _)| index)
+    fn nearest(&self, at: Point, size: Size) -> Option<Snap> {
+        self.nodes(size).into_iter().map(|n| (n.snap, n.at.distance(at))).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(snap, _)| snap)
+    }
+
+    /// Where the drag is snapped now.
+    fn current(&self) -> Option<Snap> {
+        self.drag.snap.map(Snap::Core).or_else(|| self.drag.pod_snap.map(|(pod, index)| Snap::Pod(pod, index)))
     }
 
     /// What releasing here would do, as a tag.
-    fn tag(&self, snap: usize, station: f64) -> String {
+    fn tag(&self, snap: Snap, station: f64) -> String {
         let name = self.drag.name;
-        let parts = self.rocket.parts().len();
-        if snap == 0 {
-            format!("{name} → snap fore")
-        } else if snap == parts {
-            format!("{name} → snap aft")
-        } else {
-            format!("{name} → insert at {} mm", mm(station))
+        match snap {
+            Snap::Core(snap) => {
+                let parts = self.rocket.parts().len();
+                if snap == 0 {
+                    format!("{name} → snap fore")
+                } else if snap == parts {
+                    format!("{name} → snap aft")
+                } else {
+                    format!("{name} → insert at {} mm", mm(station))
+                }
+            }
+            Snap::Pod(pod, index) => {
+                let copies = self.rocket.radial(pod).map_or(1, |p| p.count);
+                let times = if copies > 1 { format!(" ×{copies}") } else { String::new() };
+                let parts = self.rocket.radial(pod).and_then(|p| p.kind.pod_body()).map_or(0, |b| b.parts().len());
+                let place = if index == 0 {
+                    "fore".to_string()
+                } else if index == parts {
+                    "aft".to_string()
+                } else {
+                    format!("at {} mm", mm(station))
+                };
+                format!("{name} → pod{times}, {place}")
+            }
         }
     }
+}
+
+/// Where a carried part would attach: a node of the core's stack or of a pod's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Snap {
+    /// Node `index` of the core.
+    Core(usize),
+    /// Node `index` of pod `pod`'s stack.
+    Pod(PartId, usize),
+}
+
+/// An attach node on screen.
+struct Node {
+    snap: Snap,
+    station: f64,
+    at: Point,
 }
 
 impl canvas::Program<Message> for Overlay<'_> {
@@ -89,7 +148,13 @@ impl canvas::Program<Message> for Overlay<'_> {
             return cursor.position_over(bounds).map(|_| Action::publish(Message::DropAxial).and_capture());
         }
         let snap = cursor.position_in(bounds).and_then(|p| self.nearest(p, bounds.size()));
-        (snap != self.drag.snap).then(|| Action::publish(Message::SnapNode(snap)))
+        (snap != self.current()).then(|| {
+            Action::publish(match snap {
+                Some(Snap::Pod(pod, index)) => Message::SnapPodNode(Some((pod, index))),
+                Some(Snap::Core(index)) => Message::SnapNode(Some(index)),
+                None => Message::SnapNode(None),
+            })
+        })
     }
 
     fn draw(&self, _: &(), renderer: &Renderer, theme: &Theme, bounds: Rectangle, _: mouse::Cursor) -> Vec<Geometry> {
@@ -101,12 +166,13 @@ impl canvas::Program<Message> for Overlay<'_> {
         // Parts after the ghost have moved aft by its length: draw their nodes where those parts now are. Snapping keeps
         // to the settled positions, so the target does not slide under the cursor.
         let ghost = self.drag.snap.map(|snap| (snap, self.rocket.matched(snap, &self.drag.kind).length()));
-        for &(index, station, at) in &nodes {
-            let at = match ghost {
-                Some((snap, len)) if index > snap => self.camera.project(Vec3::new(0.0, 0.0, (station + len) as f32), size),
-                _ => at,
+        let current = self.current();
+        for node in &nodes {
+            let at = match (ghost, node.snap) {
+                (Some((snap, len)), Snap::Core(index)) if index > snap => self.camera.project(Vec3::new(0.0, 0.0, (node.station + len) as f32), size),
+                _ => node.at,
             };
-            let target = self.drag.snap == Some(index);
+            let target = current == Some(node.snap);
             if target {
                 frame.fill(&Path::circle(at, RING * 1.5), t.ok.scale_alpha(0.18));
             }
@@ -120,13 +186,13 @@ impl canvas::Program<Message> for Overlay<'_> {
             return vec![frame.into_geometry()];
         };
 
-        let target = self.drag.snap.and_then(|snap| nodes.iter().find(|n| n.0 == snap));
+        let target = current.and_then(|snap| nodes.iter().find(|n| n.snap == snap));
         let label = match target {
-            Some(&(index, station, at)) => {
-                let leader = Path::line(cursor, at);
+            Some(node) => {
+                let leader = Path::line(cursor, node.at);
                 let dashed = Stroke { line_dash: LineDash { segments: &[4.0, 3.0], offset: 0 }, ..Stroke::default().with_color(t.ok).with_width(1.0) };
                 frame.stroke(&leader, dashed);
-                self.tag(index, station)
+                self.tag(node.snap, node.station)
             }
             None => {
                 no_entry(&mut frame, cursor + iced::Vector::new(14.0, 14.0), t.err);
@@ -140,7 +206,7 @@ impl canvas::Program<Message> for Overlay<'_> {
     }
 
     fn mouse_interaction(&self, _: &(), bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
-        match (cursor.is_over(bounds), self.drag.snap) {
+        match (cursor.is_over(bounds), self.current()) {
             (false, _) => mouse::Interaction::default(),
             (true, Some(_)) => mouse::Interaction::Grabbing,
             (true, None) => mouse::Interaction::NotAllowed,

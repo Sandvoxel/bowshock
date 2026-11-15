@@ -50,6 +50,7 @@ pub struct Pipeline {
     format: wgpu::TextureFormat,
     body: wgpu::RenderPipeline,
     translucent: wgpu::RenderPipeline,
+    caps: wgpu::RenderPipeline,
     blit: wgpu::RenderPipeline,
     uniforms: wgpu::Buffer,
     uniform_group: wgpu::BindGroup,
@@ -134,7 +135,7 @@ impl shader::Pipeline for Pipeline {
         };
         // Opaque parts write depth; the translucent airframe (X-ray, auto-reveal) only tests it, so what is behind a pane of
         // shell is still drawn. Back faces are handled in the shader, so nothing is culled.
-        let make = |label: &str, depth_write: bool| {
+        let make = |label: &str, depth_write: bool, bias: wgpu::DepthBiasState| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&body_pipeline_layout),
@@ -154,7 +155,7 @@ impl shader::Pipeline for Pipeline {
                     depth_write_enabled: Some(depth_write),
                     depth_compare: Some(wgpu::CompareFunction::Less),
                     stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
+                    bias,
                 }),
                 multisample: wgpu::MultisampleState { count: SAMPLES, mask: !0, alpha_to_coverage_enabled: false },
                 fragment: Some(wgpu::FragmentState {
@@ -167,8 +168,11 @@ impl shader::Pipeline for Pipeline {
                 cache: None,
             })
         };
-        let body = make("viewport.body_pipeline", true);
-        let translucent = make("viewport.translucent_pipeline", false);
+        let body = make("viewport.body_pipeline", true, wgpu::DepthBiasState::default());
+        let translucent = make("viewport.translucent_pipeline", false, wgpu::DepthBiasState::default());
+        // The cutaway faces lie in the cut planes, where the edges of the cut shells and solids end: a polygon offset towards
+        // the eye keeps those coplanar edges from fighting the faces.
+        let caps = make("viewport.caps_pipeline", true, wgpu::DepthBiasState { constant: -2, slope_scale: -1.0, clamp: 0.0 });
 
         let blit = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("viewport.blit_pipeline"),
@@ -211,6 +215,7 @@ impl shader::Pipeline for Pipeline {
             format,
             body,
             translucent,
+            caps,
             blit,
             uniforms,
             uniform_group,
@@ -329,6 +334,7 @@ impl Pipeline {
             pass.set_pipeline(&self.body);
             pass.draw(self.ranges[0].clone(), 0..1);
             if self.plan.caps {
+                pass.set_pipeline(&self.caps);
                 pass.draw(self.ranges[1].clone(), 0..1);
             }
             pass.set_pipeline(if self.plan.translucent { &self.translucent } else { &self.body });

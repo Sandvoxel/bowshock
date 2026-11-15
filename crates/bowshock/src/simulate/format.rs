@@ -7,15 +7,6 @@ pub fn imperial(system: UnitSystem) -> bool {
     matches!(system, UnitSystem::InOzS | UnitSystem::FtLbS)
 }
 
-/// The unit system the flight plots use for `system`: altitude in m or ft, speed in m/s or ft/s (never mm).
-pub fn plot_system(system: UnitSystem) -> UnitSystem {
-    if imperial(system) {
-        UnitSystem::FtLbS
-    } else {
-        UnitSystem::MKgS
-    }
-}
-
 /// `value_si` of `quantity` in `system` with `decimals` decimals: the number and its unit symbol.
 pub fn num(value_si: f64, quantity: Quantity, system: UnitSystem, decimals: usize) -> (String, &'static str) {
     let unit = Unit { decimals, ..*quantity.unit_for(system) };
@@ -66,8 +57,8 @@ mod tests {
 
     #[test]
     fn plot_units_never_use_millimetres() {
-        assert_eq!(plot_system(UnitSystem::MmGS), UnitSystem::MKgS);
-        assert_eq!(plot_system(UnitSystem::InOzS), UnitSystem::FtLbS);
+        assert!(!imperial(UnitSystem::MmGS));
+        assert!(imperial(UnitSystem::InOzS));
         assert_eq!(with_unit(616.0, Quantity::Altitude, UnitSystem::MmGS, 0), "616 m");
         assert_eq!(with_unit(304.8, Quantity::Altitude, UnitSystem::FtLbS, 0), "1000 ft");
     }

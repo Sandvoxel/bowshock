@@ -3,9 +3,9 @@
 
 pub mod document;
 pub mod drag;
+mod files;
 pub mod live;
 mod multi;
-mod files;
 pub mod physics;
 pub mod refs;
 pub mod symmetry;
@@ -455,6 +455,7 @@ impl App {
                 drag::cancel(ctx);
                 self.chrome.dismiss();
                 self.viewport.cancel();
+                self.simulate.dismiss_picker();
                 return task;
             }
             Message::Key(press) => return self.key(press),
@@ -825,7 +826,7 @@ mod tests {
     }
 
     fn target(parent: PartId, offset: f64, angle: f64) -> SurfaceTarget {
-        SurfaceTarget { parent, offset, angle }
+        SurfaceTarget { parent, offset, angle, copy: 0 }
     }
 
     #[test]
@@ -906,6 +907,98 @@ mod tests {
         app.update(Message::Delete);
         assert!(app.ctx.doc.rocket().radials().is_empty() && app.ctx.selection == Selection::None);
         assert_eq!(app.ctx.doc.rocket().parts().len(), 3);
+    }
+
+    #[test]
+    fn a_click_add_lands_on_the_selected_pod_tube_and_a_pod_mount_takes_a_motor() {
+        let (mut app, [_, tube, _]) = app();
+        let kind = app.ctx.doc.rocket().default_pod();
+        let pod = app.ctx.doc.edit("Pod", |r| r.attach_radial(tube, 0.0, 0.0, 2, kind).unwrap());
+        let pod_tube = app.ctx.doc.rocket().radial(pod).unwrap().kind.pod_body().unwrap().parts()[1].id;
+        app.ctx.selection = Selection::Part(pod_tube);
+        app.update(Message::PartsBin(parts_bin::Message::Category(parts_bin::Category::Fins)));
+        app.update(Message::PartsBin(parts_bin::Message::RowPress(parts_bin::RowId::new(parts_bin::Category::Fins, 0))));
+        app.update(Message::Released);
+        let fins = app.ctx.doc.rocket().pod_of(pod_tube).and_then(|p| p.kind.pod_body()).unwrap().radials()[0].id;
+        assert_eq!(app.ctx.doc.rocket().parent_of(fins), Some(pod_tube));
+        // A motor mount in the pod is a mount of the rocket (one motor per copy) and takes a motor from the bin.
+        let mount = app.ctx.doc.edit("Mount", |r| {
+            r.attach_internal(
+                pod_tube,
+                0.05,
+                bowshock_model::InternalKind::InnerTube { outer_diameter: 0.0229, thickness: 0.0005, length: 0.12, motor_mount: true, overhang: 0.0 },
+            )
+            .unwrap()
+        });
+        let m = app.ctx.doc.rocket().motor_mounts().into_iter().find(|m| m.id == mount).expect("the pod's mount is a mount of the rocket");
+        assert_eq!((m.pod, m.copies), (Some(pod), 2));
+        let config = app.ctx.doc.rocket().active_config_id();
+        app.ctx.doc.edit("Motor", |r| {
+            r.set_motor(config, mount, Some(bowshock_model::MotorRef::new("x", "y"))).unwrap();
+        });
+        assert!(app.ctx.doc.rocket().active_configuration().slot(mount).is_some_and(|s| s.motor.is_some()));
+        // Pod mounts are not stages.
+        assert!(app.ctx.doc.rocket().stages().iter().all(|s| !s.mounts.contains(&mount)));
+    }
+
+    #[test]
+    fn a_pod_is_dragged_in_filled_with_fins_extended_moved_and_undone_as_one_body() {
+        let (mut app, [_, tube, _]) = app();
+        let before = app.ctx.doc.rocket().clone();
+        app.update(Message::PartsBin(parts_bin::Message::Symmetry(2)));
+        app.update(Message::Cursor(Point::new(100.0, 100.0)));
+        // The pod row is the last of the Airframe list.
+        let row = parts_bin::airframe_items().len() - 1;
+        app.update(Message::PartsBin(parts_bin::Message::RowPress(parts_bin::RowId::new(parts_bin::Category::Airframe, row))));
+        app.update(Message::Cursor(Point::new(160.0, 100.0)));
+        assert!(app.ctx.drag.radial.as_ref().is_some_and(|d| d.kind.is_pod() && d.count == 2));
+        vp(&mut app, Vp::Surface(Some(target(tube, 0.05, 0.0))));
+        vp(&mut app, Vp::DropRadial);
+        let pod = app.ctx.doc.rocket().pods().next().expect("a pod was placed").id;
+        let body = app.ctx.doc.rocket().radial(pod).unwrap().kind.pod_body().unwrap().clone();
+        assert_eq!((app.ctx.doc.rocket().radial(pod).unwrap().count, body.parts().len()), (2, 2));
+        let pod_tube = body.parts()[1].id;
+        // Fins land on the pod's tube; a part of the pod joins at a node of its stack.
+        app.ctx.doc.begin_drag("Add fins");
+        app.ctx.drag.radial = Some(crate::viewport::surface::RadialDrag {
+            row: None,
+            kind: RadialKind::FinSet { root_chord: 0.05, tip_chord: 0.02, span: 0.03, sweep: 0.02, thickness: 0.002 },
+            count: 3,
+            origin: None,
+            target: Some(target(pod_tube, 0.05, 0.0)),
+        });
+        vp(&mut app, Vp::DropRadial);
+        let fins = app.ctx.doc.rocket().pod_of(pod_tube).and_then(|p| p.kind.pod_body()).unwrap().radials()[0].id;
+        assert_eq!(app.ctx.doc.rocket().parent_of(fins), Some(pod_tube));
+        app.ctx.doc.begin_drag("Add tube");
+        app.ctx.drag.axial = Some(crate::viewport::assembly::Drag {
+            row: None,
+            origin: None,
+            name: "Body tube",
+            kind: bowshock_model::PartKind::BodyTube { length: 0.1, diameter: 0.0381 },
+            snap: None,
+            pod_snap: Some((pod, 2)),
+        });
+        vp(&mut app, Vp::DropAxial);
+        assert_eq!(app.ctx.doc.rocket().radial(pod).unwrap().kind.pod_body().unwrap().parts().len(), 3);
+        // Picking up any part of the pod carries the whole body, fins and all; cancelled, everything is back.
+        let snapshot = app.ctx.doc.rocket().clone();
+        vp(&mut app, Vp::Grab(Pick::Axial(pod_tube)));
+        assert!(app.ctx.doc.rocket().pods().next().is_none() && app.ctx.drag.radial.as_ref().is_some_and(|d| d.origin.is_some()));
+        app.update(Message::Cancel);
+        assert_eq!(app.ctx.doc.rocket(), &snapshot);
+        // Dropped elsewhere it moves with every part, ids unchanged.
+        vp(&mut app, Vp::Grab(Pick::Axial(pod_tube)));
+        vp(&mut app, Vp::Surface(Some(target(tube, 0.2, 1.5))));
+        vp(&mut app, Vp::DropRadial);
+        let moved = app.ctx.doc.rocket().radial(pod).unwrap();
+        assert_eq!((moved.offset, moved.angle), (0.2, 1.5));
+        assert!(app.ctx.doc.rocket().radial(fins).is_some() && app.ctx.doc.rocket().part(pod_tube).is_some());
+        // Four steps above (the pod, its fins, the tube, the move) undo back to the rocket we started with.
+        for _ in 0..4 {
+            app.update(Message::Undo);
+        }
+        assert_eq!(app.ctx.doc.rocket().ids(), before.ids());
     }
 
     #[test]

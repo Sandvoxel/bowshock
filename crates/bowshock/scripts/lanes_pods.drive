@@ -1,0 +1,36 @@
+# Station Lanes with a pod set (strap-ons): the pod is added from the parts bin and shows in Structure as `Pod ×3` (a link
+# glyph, like a symmetry group) with its own nose and tube under it; parts placed on the pod appear in their own lanes
+# bracketed `Pod ×N`. Run with the example rocket:
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/lanes_pods.drive /tmp/lanes-pods
+viewport 1280x800
+scale 3
+click (160, 88)
+type "pod"
+click "Pod / strap-on"
+move (900, 300)
+screenshot pod-added.png
+# Hover the pod's body tube: it is named with its station and its pod.
+move (873, 628)
+screenshot pod-hover.png
+# Select the pod's body tube from its bar (the 3D view and the inspector follow).
+click (873, 628)
+screenshot pod-member-selected.png
+# A strap-on needs a tube wide enough for a motor: widen the pod's tube (the pod set carries every copy), then the bin's Inner tube
+# lands in it (the search spans every category, so it is typed over).
+click (1175, 167)
+type "60"
+type enter
+click (160, 88)
+type backspace
+type backspace
+type backspace
+type "inner tube"
+click "Inner tube"
+screenshot pod-inner-tube.png
+# Make it a motor mount: its bar moves to Propulsion, bracketed `Pod ×3` with the other parts of the pod there, the tag on the
+# row that is free.
+click "Holds a motor"
+move (640, 560)
+screenshot pod-mount.png
+# (The motor bar of a strap-on's mount, `H128W ×3`, is covered by the unit tests in lanes/scene.rs and lanes/pods.rs: the bin
+# lists only motors that fit the pod tube's bore and length, which the drive script cannot size from here.)

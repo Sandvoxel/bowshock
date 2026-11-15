@@ -113,9 +113,11 @@ pub struct Context<'a> {
     pub instance: usize,
     /// The screen bounds of the part (for the inset's place).
     pub bounds: Rectangle,
+    /// Whether the ViewCube is shown (3D): the inset sits under it, else under the toolbar row.
+    pub cube: bool,
 }
 
-/// The inset for radial part `id`: pinned top-right in the viewport (under the way back, or the ViewCube in perspective), like
+/// The inset for radial part `id`: pinned top-right in the viewport (under the ViewCube in 3D, else under the way back), like
 /// the kit's AFT VIEW panel.
 pub fn inset(cx: &Context, id: PartId) -> Option<Inset> {
     let r = cx.rocket.radial(id)?;
@@ -123,10 +125,11 @@ pub fn inset(cx: &Context, id: PartId) -> Option<Inset> {
     let reach = match &r.effective(cx.instance).kind {
         RadialKind::LaunchLug { diameter, .. } => *diameter,
         RadialKind::RailButton { height, .. } => *height,
+        RadialKind::Pod { gap, body } => gap + 2.0 * body.radius(),
         k => k.fin_span().unwrap_or(0.0),
     };
     let x = (cx.size.width - INSET - 16.0).max(8.0);
-    let y = if cx.camera.ortho_blend > 0.5 { 64.0 } else { 16.0 + super::CUBE_SIZE + 8.0 };
+    let y = if cx.cube { 16.0 + super::CUBE_SIZE + 8.0 } else { 64.0 };
     let panel = Rectangle::new(Point::new(x, y), Size::new(INSET, INSET));
     let total = f64::from(place.base) + reach;
     let scale = (INSET / 2.0 - 26.0) / total.max(1e-3) as f32;
@@ -231,6 +234,13 @@ fn radial(cx: &Context, up: Vec3, r: &bowshock_model::RadialPart, place: Placeme
     let own = r.effective(cx.instance);
     let world = |radius: f64, z: f64| u * radius as f32 + Vec3::Z * z as f32;
     match (dim, &own.kind) {
+        // A pod: its position by the nose tip (along the core), its gap by the inner side at the middle (out from the core).
+        (Dim::Position, RadialKind::Pod { gap, body }) => line(camera, size, world(base + gap + body.radius(), z0), Vec3::Z, 1.0),
+        (Dim::Gap, RadialKind::Pod { gap, body }) => line(camera, size, world(base + gap, z0 + body.length() * 0.6), u, 1.0),
+        (Dim::Angle, RadialKind::Pod { .. }) => {
+            let ins = inset?;
+            Some((ins.centre + arc_dir(r.angle) * (ins.base + ins.reach + 9.0), Axis::Arc { centre: ins.centre }))
+        }
         // The fillet radius sits on the fillet's outer edge a quarter of the way along the root, a circle handle.
         (Dim::FilletRadius, k) if k.is_fin() => {
             let rf = r.fillet_radius;
@@ -377,7 +387,7 @@ mod tests {
     }
 
     fn cx<'a>(r: &'a Rocket, cam: &'a Camera) -> Context<'a> {
-        Context { rocket: r, camera: cam, size: SIZE, instance: 0, bounds: Rectangle::new(Point::new(300.0, 200.0), Size::new(200.0, 100.0)) }
+        Context { rocket: r, camera: cam, size: SIZE, instance: 0, bounds: Rectangle::new(Point::new(300.0, 200.0), Size::new(200.0, 100.0)), cube: false }
     }
 
     #[test]

@@ -38,6 +38,7 @@ mod markers;
 mod mesh;
 pub mod pick;
 mod pipeline;
+pub mod pods;
 mod radial;
 mod scene;
 mod sheet;
@@ -74,6 +75,8 @@ pub mod flash;
 pub const CUBE_SIZE: f32 = 112.0;
 
 const SNAP_TIME: Duration = Duration::from_millis(320);
+/// How much of the orthographic blend one orbit step takes away, so a drag off a face view eases into perspective.
+const ORBIT_TO_PERSPECTIVE: f32 = 0.2;
 /// The focus move and the exploded view animate over this long.
 const FOCUS_TIME: Duration = Duration::from_millis(250);
 /// Two selections of the same thing this close together are a double-click.
@@ -198,6 +201,8 @@ pub enum Message {
     DropRadial,
     /// The mouse wheel turned during a radial drag: one step through the symmetry counts (like `X` / `Shift+X`), no zoom.
     CopiesStep(bool),
+    /// The dragged axial part's nearest attach node is on a pod's stack: `(pod, node index)`.
+    SnapPodNode(Option<(PartId, usize)>),
 }
 
 struct Anim {
@@ -224,7 +229,7 @@ struct MeshKey {
     hovered: Option<PartId>,
     selected: Option<PartId>,
     also: Vec<PartId>,
-    axial: Option<Option<usize>>,
+    axial: Option<(Option<usize>, Option<(PartId, usize)>)>,
     radial: Option<(Option<SurfaceTarget>, u8)>,
     cut: Cut,
     flash: Option<(PartId, f32, f32)>,
@@ -316,7 +321,7 @@ impl View {
             hovered: self.hover.part(),
             selected,
             also: also.clone(),
-            axial: ctx.drag.axial.as_ref().map(|d| d.snap),
+            axial: ctx.drag.axial.as_ref().map(|d| (d.snap, d.pod_snap)),
             radial: ctx.drag.radial.as_ref().map(|d| (d.target, d.count)),
             cut: self.cut,
             flash,
@@ -326,6 +331,7 @@ impl View {
         }
         let rocket = ctx.doc.rocket();
         let ghost = ctx.drag.axial.as_ref().and_then(|d| d.snap.map(|node| (node, rocket.matched(node, &d.kind))));
+        let ghost_pod = ctx.drag.axial.as_ref().and_then(|d| d.pod_snap.map(|(pod, node)| (pod, node, rocket.matched_in_pod(pod, node, &d.kind))));
         let ghost_radial = ctx.drag.radial.as_ref().and_then(|d| {
             let t = d.target?;
             Some(GhostRadial { kind: &d.kind, parent: t.parent, offset: t.offset, angle: t.angle, count: d.count })
@@ -333,6 +339,7 @@ impl View {
         let marks = Marks {
             ghost: ghost.as_ref().map(|(node, kind)| (*node, kind)),
             ghost_radial,
+            ghost_pod: ghost_pod.as_ref().map(|(pod, node, kind)| (*pod, *node, kind)),
             hovered: self.hover.part(),
             selected,
             also_selected: &also,
@@ -402,7 +409,12 @@ impl View {
             Message::Cut(cut) => self.cut = cut,
             Message::SnapNode(node) => {
                 if let Some(drag) = ctx.drag.axial.as_mut() {
-                    drag.snap = node;
+                    (drag.snap, drag.pod_snap) = (node, None);
+                }
+            }
+            Message::SnapPodNode(node) => {
+                if let Some(drag) = ctx.drag.axial.as_mut() {
+                    (drag.snap, drag.pod_snap) = (None, node);
                 }
             }
             Message::Surface(target) => {
@@ -519,6 +531,10 @@ impl View {
             Message::Orbit(delta) if !self.profile => {
                 self.anim = None;
                 self.camera.orbit(delta);
+                // Turning away from a face view eases back into perspective (a focus stays orthographic until `Esc`).
+                if self.focus.is_none() {
+                    self.camera.ortho_blend = (self.camera.ortho_blend - ORBIT_TO_PERSPECTIVE).max(0.0);
+                }
             }
             Message::Orbit(_) => {}
             Message::RollBy(delta) if !self.profile => {
@@ -547,6 +563,9 @@ impl View {
             Message::Snap(dir) if !self.profile => {
                 let mut to = self.goal();
                 (to.yaw, to.pitch) = to.facing(dir.as_vec3());
+                // A face is seen square-on, so orthographic like a drawing view; an edge or corner keeps perspective.
+                let face = dir.abs().element_sum() == 1;
+                to.ortho_blend = if face { 1.0 } else { 0.0 };
                 self.animate(to);
             }
             Message::Snap(_) => {}
@@ -678,6 +697,7 @@ impl View {
                     inside: self.inside,
                     profile: self.profile,
                     units: ctx.units,
+                    pod: selected.and_then(|id| pods::PodView::of_part(rocket, id, &camera)),
                 })
                 .width(Fill)
                 .height(Fill)
@@ -796,5 +816,36 @@ fn ease(t: f32) -> f32 {
         4.0 * t * t * t
     } else {
         1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs `message` and lands any animation at its goal.
+    fn run(view: &mut View, message: Message) {
+        view.camera_update(message);
+        view.settle();
+    }
+
+    #[test]
+    fn a_cube_face_is_orthographic_and_orbiting_off_it_eases_back_into_perspective() {
+        let mut view = View::new();
+        run(&mut view, Message::Snap(IVec3::NEG_X));
+        assert!(view.camera.is_ortho(), "a face is seen square-on in an orthographic view");
+
+        run(&mut view, Message::Orbit(Vector::new(4.0, 0.0)));
+        assert!(!view.camera.is_ortho() && view.camera.ortho_blend > 0.0, "one small orbit step only starts the blend");
+        for _ in 0..10 {
+            run(&mut view, Message::Orbit(Vector::new(4.0, 0.0)));
+        }
+        assert_eq!(view.camera.ortho_blend, 0.0, "a drag off the face ends in perspective");
+
+        run(&mut view, Message::Snap(IVec3::new(-1, 1, 0)));
+        assert_eq!(view.camera.ortho_blend, 0.0, "an edge keeps perspective");
+        run(&mut view, Message::Snap(IVec3::Y));
+        run(&mut view, Message::Snap(IVec3::new(1, 1, -1)));
+        assert_eq!(view.camera.ortho_blend, 0.0, "a corner leaves the orthographic face view");
     }
 }

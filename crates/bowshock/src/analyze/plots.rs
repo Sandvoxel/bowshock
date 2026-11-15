@@ -7,10 +7,10 @@ use bowshock_sim::{AlphaPoint, MachPoint};
 
 use super::compute::{Analysis, Data, Output, Run, FLUTTER_MIN_MARGIN};
 use super::overlay::{Field, Overlay};
-use super::readout::{config_color, DRAG_PARTS};
+use super::readout::{config_color, drag_parts, other_visible, DRAG_PARTS};
 use crate::units::{Quantity, Unit, UnitSystem};
 use crate::widgets::ground_track::{GroundTrack, Track, TrackPoint, Wind};
-use crate::widgets::plot::{Axis, HLine, LabelAt, LineStyle, Panel, PlotGroup, Series, SeriesColor, Tag};
+use crate::widgets::plot::{Axis, HLine, LabelAt, LineStyle, Panel, PlotGroup, Series, SeriesColor, Tag, YTicks};
 
 /// Width kept free at the right of the plots for direct labels.
 const MARGIN_PX: f32 = 100.0;
@@ -51,7 +51,7 @@ fn unit(q: Quantity, units: UnitSystem) -> &'static Unit {
 /// Builds the plots of `out` for `units`, with the comparison `overlay` drawn dashed where it has the quantity.
 pub fn build(out: &Output, units: UnitSystem, overlay: Option<&Overlay>) -> Built {
     let legend = if out.runs.len() > 1 { out.runs.iter().enumerate().map(|(i, r)| (config_color(i), r.name.clone())).collect() } else { Vec::new() };
-    let (group, ground, scale) = match out.analysis {
+    let (mut group, ground, scale) = match out.analysis {
         Analysis::Aerodynamics => (aero(out, units, overlay), None, Scale { x_si: 1.0 }),
         Analysis::Drag => (drag(out, overlay), None, Scale { x_si: 1.0 }),
         Analysis::Stability => (stability(out, units, overlay), None, Scale { x_si: std::f64::consts::PI / 180.0 }),
@@ -61,6 +61,7 @@ pub fn build(out: &Output, units: UnitSystem, overlay: Option<&Overlay>) -> Buil
             (hist, Some(ground), Scale { x_si: unit(Quantity::Altitude, units).to_si })
         }
     };
+    group.y_ticks = YTicks::Even(5);
     Built { group, ground, legend, scale }
 }
 
@@ -80,12 +81,18 @@ fn margin_panel(series: Vec<Series>, bands: StabilityBands) -> Panel {
     panel
 }
 
-/// The stacked Cd layers of one run: skin friction, pressure, base, fins, and "Other" when there are protuberances.
+/// The stacked Cd layers of one run: skin friction, pressure, base, fins, and "Other" only when launch lugs and rail buttons
+/// are over 5 % of the drag (otherwise they are part of Pressure; see [`other_visible`]).
 fn stacked(points: &[MachPoint]) -> Vec<Series> {
-    let parts: [fn(&MachPoint) -> f64; 4] = [|p| p.drag.friction, |p| p.drag.pressure, |p| p.drag.base, |p| p.drag.fins];
-    let mut layers: Vec<Series> =
-        DRAG_PARTS.iter().zip(parts).map(|((name, color), f)| Series::new(*name, curve(points, f)).color(*color).filled().label_margin()).collect();
-    if points.iter().any(|p| p.drag.protuberances > 1e-9) {
+    let show_other = other_visible(points);
+    let mut layers: Vec<Series> = DRAG_PARTS
+        .iter()
+        .enumerate()
+        .map(|(i, (name, color))| {
+            Series::new(*name, points.iter().map(|p| (p.mach, drag_parts(&p.drag, show_other)[i])).collect()).color(*color).filled().label_margin()
+        })
+        .collect();
+    if show_other {
         layers.push(Series::new("Other", curve(points, |p| p.drag.protuberances)).color(SeriesColor::Muted).filled().label_margin());
     }
     layers
@@ -167,15 +174,17 @@ fn aero(out: &Output, units: UnitSystem, overlay: Option<&Overlay>) -> PlotGroup
 
 fn drag(out: &Output, overlay: Option<&Overlay>) -> PlotGroup {
     let runs = mach_runs(out);
-    let mut shares = Panel::new("Share of drag", "% of total").value_unit("%");
+    let mut shares = Panel::new("Share of drag", "% of total").value_unit("%").zero_based();
     if let [(_, _, points)] = runs.as_slice() {
-        let parts: [fn(&MachPoint) -> f64; 5] = [|p| p.drag.friction, |p| p.drag.pressure, |p| p.drag.base, |p| p.drag.fins, |p| p.drag.protuberances];
-        let names = DRAG_PARTS.iter().copied().chain([("Other", SeriesColor::Muted)]);
-        for ((name, color), f) in names.zip(parts) {
-            if name == "Other" && points.iter().all(|p| p.drag.protuberances <= 1e-9) {
-                continue;
-            }
-            shares.series.push(Series::new(name, curve(points, |p| 100.0 * f(p) / p.drag.total.max(1e-12))).color(color).label_margin());
+        let show_other = other_visible(points);
+        let part = |i: usize| move |p: &MachPoint| 100.0 * drag_parts(&p.drag, show_other)[i] / p.drag.total.max(1e-12);
+        for (i, (name, color)) in DRAG_PARTS.iter().enumerate() {
+            shares.series.push(Series::new(*name, curve(points, part(i))).color(*color).label_margin());
+        }
+        if show_other {
+            shares
+                .series
+                .push(Series::new("Other", curve(points, |p| 100.0 * p.drag.protuberances / p.drag.total.max(1e-12))).color(SeriesColor::Muted).label_margin());
         }
     } else {
         // Several configurations: the fins' and body's shares are the same shape; compare the totals' skin-friction share instead.

@@ -497,8 +497,13 @@ impl Anchor {
 /// material, finish and overrides. Returns the new part's id. A nose cone cannot be duplicated.
 pub fn duplicate(r: &mut Rocket, id: PartId) -> Option<PartId> {
     if let Some(part) = r.part(id).cloned() {
-        let index = r.index_of(id)?;
-        let new = r.insert(index + 1, part.kind.clone()).ok()?;
+        let new = match r.pod_part_index(id) {
+            Some((pod, index)) => r.insert_in_pod(pod, index + 1, part.kind.clone()).ok()?,
+            None => {
+                let index = r.index_of(id)?;
+                r.insert(index + 1, part.kind.clone()).ok()?
+            }
+        };
         r.set_name(new, part.name.clone());
         r.set_material(new, part.material);
         r.set_finish(new, part.finish);

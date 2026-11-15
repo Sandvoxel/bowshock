@@ -186,7 +186,14 @@ impl State {
     fn items(&self, category: Category, ctx: &Ctx) -> Vec<Item> {
         let from = |list: Vec<(&'static str, InternalKind)>| list.into_iter().map(|(n, k)| Item::Internal(n, k)).collect();
         match category {
-            Category::Airframe => airframe_items(),
+            // The pod row shows the body it would carry for this rocket.
+            Category::Airframe => airframe_items()
+                .into_iter()
+                .map(|item| match item {
+                    Item::Radial(name, kind) if kind.is_pod() => Item::Radial(name, ctx.doc.rocket().default_pod()),
+                    other => other,
+                })
+                .collect(),
             Category::Fins => radial_catalogue().into_iter().map(|(n, k)| Item::Radial(n, k)).collect(),
             Category::Internal => from(structure_catalogue()),
             Category::Recovery => from(recovery_catalogue()),

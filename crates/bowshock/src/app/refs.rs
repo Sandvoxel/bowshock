@@ -129,6 +129,7 @@ pub fn dim_short(dim: Dim) -> String {
         Dim::Thickness => "Thickness".into(),
         Dim::Cant => "Cant".into(),
         Dim::Angle => "Rotation".into(),
+        Dim::Gap => "Gap".into(),
         Dim::Shape => "Shape".into(),
         Dim::Overhang => "Overhang".into(),
         Dim::PackedLength => "Packed".into(),

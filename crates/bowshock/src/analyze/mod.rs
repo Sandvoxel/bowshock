@@ -20,7 +20,6 @@ use iced::{keyboard, Element, Task};
 
 use crate::app::{self, Ctx};
 use crate::units::UnitSystem;
-use crate::widgets::gauge::GaugeState;
 use crate::widgets::plot::{PlotMessage, PlotState};
 
 pub mod compute;
@@ -128,9 +127,8 @@ pub struct State {
     pub(crate) table: Option<compute::Table>,
     pub(crate) show_table: bool,
     pub(crate) plot: PlotState,
-    pub(crate) gauge: GaugeState,
-    /// The result generation the gauge last jumped to (it springs between hovers, jumps to a new result).
-    gauge_generation: u64,
+    /// Where the crosshair rests when the pointer is not over the plots, in the plots' x units.
+    default_x: Option<f64>,
     /// What the plots are compared with, if anything.
     pub(crate) compare: Option<Comparison>,
     /// Whether the `Compare ▾` menu is open.
@@ -176,8 +174,7 @@ impl State {
             table: None,
             show_table: false,
             plot: PlotState::new((0.0, 1.0)),
-            gauge: GaugeState::new(0.0),
-            gauge_generation: u64::MAX,
+            default_x: None,
             compare: compare_from_env(),
             compare_open: false,
             compare_out: None,
@@ -198,6 +195,7 @@ impl State {
             Message::Select(a) => {
                 self.analysis = a;
                 self.show_table = false;
+                self.plot.set_hover(None);
             }
             Message::Method(m) => {
                 if m == Method::CfdTable {
@@ -220,6 +218,7 @@ impl State {
             Message::Finish(f) => self.cond.finish = f,
             Message::Runs(n) => self.cond.runs = n,
             Message::Wind(w) => self.cond.wind = w.clamp(0.0, 25.0),
+            Message::Plot(PlotMessage::Hover(None)) => self.plot.set_hover(self.default_x),
             Message::Plot(m) => self.plot.update(m),
             Message::Ignore => {}
             Message::Table(on) => self.show_table = on,
@@ -325,7 +324,7 @@ impl State {
     }
 
     /// Called by the app after every message while Analyze is showing: starts a computation when what is wanted changed and
-    /// brings the plots, table and gauge up to date. The returned task carries the result back as [`Message::Done`].
+    /// brings the plots and table up to date. The returned task carries the result back as [`Message::Done`].
     pub fn refresh(&mut self, ctx: &Ctx) -> Task<app::Message> {
         let key = Key {
             revision: ctx.doc.revision(),
@@ -399,16 +398,12 @@ impl State {
         let (Some(built), true) = (&self.built, out.analysis == self.analysis) else {
             return;
         };
+        // The crosshair starts at the cursor's default (the flight's maximum Mach) and returns there when the pointer leaves.
         let active = ctx.doc.rocket().active_config_id();
-        let hover = self.plot.hover_x().map(|x| built.scale.to_si(x));
-        let margin = readout::margin_at(&out, hover, active).map(|m| m.0).or_else(|| ctx.physics.balance().map(|b| b.margin_cal));
-        if let Some(margin) = margin {
-            if self.gauge_generation == self.generation {
-                self.gauge.set(margin as f32);
-            } else {
-                self.gauge.snap(margin as f32);
-                self.gauge_generation = self.generation;
-            }
+        let previous = self.default_x;
+        self.default_x = (out.analysis != Analysis::Dispersion).then(|| readout::default_cursor(&out, active) / built.scale.x_si);
+        if self.plot.hover_x().is_none() || self.plot.hover_x() == previous {
+            self.plot.set_hover(self.default_x);
         }
     }
 
@@ -418,13 +413,11 @@ impl State {
     }
 
     /// Advances animations (called on frame ticks while [`animating`](Self::animating)).
-    pub fn tick(&mut self, now: Instant) {
-        self.gauge.tick(now);
-    }
+    pub fn tick(&mut self, _now: Instant) {}
 
     /// Whether the screen needs frame ticks.
     pub fn animating(&self) -> bool {
-        self.gauge.moving()
+        false
     }
 
     /// The screen: the analyses, method and conditions; the linked plots; the values at the cursor.

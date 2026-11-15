@@ -198,6 +198,9 @@ impl Rocket {
                 }
                 out.add(0.0, "0° TOP", None, 2);
             }
+            (Dim::Gap, PartRef::Radial(_)) => {
+                out.add(0.0, "TOUCHING", None, 1);
+            }
             (Dim::Cant, PartRef::Radial(_)) => {
                 out.add(0.0, "0° CANT", None, 1);
             }

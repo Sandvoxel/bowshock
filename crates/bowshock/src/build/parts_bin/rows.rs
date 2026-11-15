@@ -117,6 +117,7 @@ pub fn radial_outline(kind: &RadialKind) -> Vec<Point> {
             let (extent, span) = (kind.extent().max(1e-9), kind.fin_span().unwrap_or(0.0).max(1e-9));
             fit(&kind.planform().unwrap_or_default(), extent, span, base)
         }
+        RadialKind::Pod { .. } => unit(&[(0.0, 0.5), (0.1, 0.72), (0.25, 0.86), (1.0, 0.86), (1.0, 0.14), (0.25, 0.14), (0.1, 0.28)]),
     }
 }
 

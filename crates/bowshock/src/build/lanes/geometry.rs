@@ -141,14 +141,13 @@ impl LaneBox {
 
 /// The lanes' vertical layout for a panel `height` high: natural lane heights (28 px + 22 per extra sub-row) squeezed
 /// uniformly when they would not fit between the ruler and the footer.
-pub fn rows(scene: &Scene, height: f32, lane_h: f32) -> Vec<LaneBox> {
+pub fn rows(lanes: &[Lane], height: f32, lane_h: f32) -> Vec<LaneBox> {
     let natural = |l: &Lane| lane_h + SUB_PITCH * (l.subs as f32 - 1.0);
-    let total: f32 = scene.lanes.iter().map(natural).sum();
+    let total: f32 = lanes.iter().map(natural).sum();
     let room = (height - RULER_H - FOOTER_H).max(1.0);
     let k = if total > room { room / total } else { 1.0 };
     let mut y = RULER_H;
-    scene
-        .lanes
+    lanes
         .iter()
         .map(|lane| {
             let h = natural(lane) * k;
@@ -392,13 +391,13 @@ mod tests {
     fn rows_use_natural_heights_and_squeeze_to_fit() {
         // The kit's panel: 5 lanes, one of them two rows tall, in 206 px: 24 + 4 * 28 + 50 + 20.
         let scene = scene_with(&[(System::Structure, 1), (System::Aero, 1), (System::Propulsion, 2), (System::Recovery, 1), (System::Avionics, 1)]);
-        let rows = rows(&scene, 206.0, 28.0);
+        let rows = rows(&scene.lanes, 206.0, 28.0);
         assert_eq!(rows[0].y, RULER_H);
         assert!((rows[2].h - 50.0).abs() < 1e-4 && (rows.last().unwrap().y + rows.last().unwrap().h - 186.0).abs() < 1e-3);
         assert!(rows.iter().all(|r| r.k == 1.0));
         // One more row does not fit: everything shrinks to keep the footer.
         let tall = scene_with(&[(System::Structure, 2), (System::Aero, 1), (System::Propulsion, 3), (System::Recovery, 1), (System::Avionics, 1)]);
-        let squeezed = self::rows(&tall, 206.0, 28.0);
+        let squeezed = self::rows(&tall.lanes, 206.0, 28.0);
         let bottom = squeezed.last().map(|l| l.y + l.h).unwrap();
         assert!((bottom - (206.0 - FOOTER_H)).abs() < 1e-3 && squeezed[0].k < 1.0);
     }

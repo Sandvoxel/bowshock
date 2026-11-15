@@ -163,7 +163,7 @@ impl Rocket {
 
     fn repair_and_check(&mut self) -> Result<(), String> {
         let mut seen: HashSet<PartId> = HashSet::new();
-        let ids = self.parts.iter().map(|p| p.id).chain(self.radials.iter().map(|r| r.id)).chain(self.internals.iter().map(|i| i.id));
+        let ids = self.ids();
         for id in ids {
             if !seen.insert(id) {
                 return Err(format!("part id {id} is used twice"));
@@ -187,7 +187,7 @@ impl Rocket {
             return Err("more than one nose cone".to_string());
         }
         for r in &self.radials {
-            if self.part(r.parent).is_none() {
+            if self.index_of(r.parent).is_none() {
                 return Err(format!("radial part {} is on {}, which is not an airframe part", r.id, r.parent));
             }
             if r.count == 0 || r.count > MAX_COUNT {
@@ -195,11 +195,12 @@ impl Rocket {
             }
         }
         // Per-copy overrides that name a copy or field that does not exist are dropped.
+        self.check_pods()?;
         for r in &mut self.radials {
             r.prune_overrides();
         }
         for i in &self.internals {
-            if self.part(i.parent).is_none() {
+            if self.index_of(i.parent).is_none() {
                 return Err(format!("internal part {} is in {}, which is not an airframe part", i.id, i.parent));
             }
         }
@@ -219,6 +220,7 @@ impl Rocket {
         }
         self.prune_configs();
         self.repair_flights();
+        self.repair_plots();
         self.repair_formulas();
         Ok(())
     }

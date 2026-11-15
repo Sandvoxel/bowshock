@@ -398,8 +398,13 @@ impl PartKind {
 }
 
 impl RadialKind {
-    /// The lane: fins, lugs and rail buttons are all [`System::Aero`].
+    /// The lane: fins, lugs and rail buttons are [`System::Aero`]; a pod set is a body of its own, [`System::Structure`] (its
+    /// parts are in their own lanes).
     pub fn system(&self) -> System {
-        System::Aero
+        if self.is_pod() {
+            System::Structure
+        } else {
+            System::Aero
+        }
     }
 }

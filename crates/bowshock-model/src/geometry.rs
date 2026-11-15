@@ -455,6 +455,16 @@ pub enum RadialKind {
         /// Head diameter.
         diameter: f64,
     },
+    /// A pod: a small rocket of its own (its [`PodBody`] stack) standing parallel to the core, `gap` off its surface (0 touches
+    /// it). Its `offset` is where the pod's fore face lies along the parent, its angle and count place the copies around the core
+    /// (OpenRocket's *pod set*; KSP's radially attached parts). Parts inside the pod have the pod's id space and are edited
+    /// through the [`Rocket`](crate::Rocket) like any other.
+    Pod {
+        /// Clear distance from the parent's surface to the pod's outermost surface, metres (negative never; 0 touches).
+        gap: f64,
+        /// The pod's own parts.
+        body: PodBody,
+    },
 }
 
 impl RadialKind {
@@ -464,6 +474,7 @@ impl RadialKind {
             RadialKind::FinSet { .. } | RadialKind::EllipticalFin { .. } | RadialKind::FreeformFin { .. } => "Fin set",
             RadialKind::LaunchLug { .. } => "Launch lug",
             RadialKind::RailButton { .. } => "Rail button",
+            RadialKind::Pod { .. } => "Pod",
         }
     }
 
@@ -497,6 +508,7 @@ impl RadialKind {
             RadialKind::FreeformFin { points, .. } => points.iter().map(|p| p.0).fold(0.0, f64::max),
             RadialKind::LaunchLug { length, .. } => *length,
             RadialKind::RailButton { diameter, .. } => *diameter,
+            RadialKind::Pod { body, .. } => body.length(),
         }
     }
 
@@ -515,12 +527,36 @@ impl RadialKind {
     }
 
     /// The least length of the part that must lie on its parent. A fin may trail past the parent's aft end as long as a
-    /// quarter of its root chord stays on it; lugs and buttons must lie wholly on the parent.
+    /// quarter of its root chord stays on it, a pod as long as half its length does; lugs and buttons must lie wholly on the
+    /// parent.
     pub fn min_attached(&self) -> f64 {
         if self.is_fin() {
             self.extent() / 4.0
+        } else if self.is_pod() {
+            self.extent() / 2.0
         } else {
             self.extent()
+        }
+    }
+
+    /// Whether this is a pod set.
+    pub fn is_pod(&self) -> bool {
+        matches!(self, RadialKind::Pod { .. })
+    }
+
+    /// The pod's body.
+    pub fn pod_body(&self) -> Option<&PodBody> {
+        match self {
+            RadialKind::Pod { body, .. } => Some(body),
+            _ => None,
+        }
+    }
+
+    /// Clear distance of a pod from its parent's surface.
+    pub fn pod_gap(&self) -> Option<f64> {
+        match self {
+            RadialKind::Pod { gap, .. } => Some(*gap),
+            _ => None,
         }
     }
 
@@ -727,3 +763,65 @@ impl RadialPart {
 
 /// Most copies a radial part may have.
 pub const MAX_COUNT: u8 = 16;
+
+/// The contents of a pod: its own axial stack (nose, tubes, transitions, fore to aft) and the radial and internal parts that sit
+/// on or in those parts. Every id comes from the rocket's one id space. The pod's axis is parallel to the core's, and its own
+/// axial coordinate starts at the fore face of its first part. A body is plain data; the [`Rocket`](crate::Rocket) edits and
+/// queries it as a small rocket of its own (see [`Rocket::pod_rocket`](crate::Rocket::pod_rocket)).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PodBody {
+    pub(crate) parts: Vec<Part>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) radials: Vec<RadialPart>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) internals: Vec<crate::internal::InternalPart>,
+}
+
+impl PodBody {
+    /// The pod's axial parts, fore to aft.
+    pub fn parts(&self) -> &[Part] {
+        &self.parts
+    }
+
+    /// Radial parts (fins, lugs, buttons) on the pod's parts, in the order they were placed.
+    pub fn radials(&self) -> &[RadialPart] {
+        &self.radials
+    }
+
+    /// Internal parts inside the pod's parts, in the order they were placed.
+    pub fn internals(&self) -> &[crate::internal::InternalPart] {
+        &self.internals
+    }
+
+    /// Length of the stack along the pod's axis.
+    pub fn length(&self) -> f64 {
+        self.parts.iter().map(|p| p.kind.length()).sum()
+    }
+
+    /// Largest outer radius of the stack (the pod's body radius); 0 when empty.
+    pub fn radius(&self) -> f64 {
+        self.parts.iter().map(|p| p.kind.fore_diameter().max(p.kind.aft_diameter()) / 2.0).fold(0.0, f64::max)
+    }
+
+    /// Station of each part's fore face from the pod's fore end, with the length last (`len = parts + 1`).
+    pub fn stations(&self) -> Vec<f64> {
+        let mut out = Vec::with_capacity(self.parts.len() + 1);
+        let mut z = 0.0;
+        for p in &self.parts {
+            out.push(z);
+            z += p.kind.length();
+        }
+        out.push(z);
+        out
+    }
+
+    /// Whether `id` is one of the ids in the body (any class).
+    pub fn contains(&self, id: PartId) -> bool {
+        self.parts.iter().any(|p| p.id == id) || self.radials.iter().any(|p| p.id == id) || self.internals.iter().any(|p| p.id == id)
+    }
+
+    /// Every id in the body: axial parts fore to aft, then radial parts, then internal parts.
+    pub fn ids(&self) -> impl Iterator<Item = PartId> + '_ {
+        self.parts.iter().map(|p| p.id).chain(self.radials.iter().map(|r| r.id)).chain(self.internals.iter().map(|i| i.id))
+    }
+}

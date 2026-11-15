@@ -146,7 +146,7 @@ impl Rocket {
     fn mount_clusters(&self) -> Vec<Vec<MotorMount>> {
         let mut clusters: Vec<Vec<MotorMount>> = Vec::new();
         let mut reach = f64::NEG_INFINITY;
-        for mount in self.motor_mounts() {
+        for mount in self.motor_mounts().into_iter().filter(|m| m.pod.is_none()) {
             match clusters.last_mut() {
                 Some(last) if mount.fore_station < reach - TOL => {
                     reach = reach.max(mount.aft_station);

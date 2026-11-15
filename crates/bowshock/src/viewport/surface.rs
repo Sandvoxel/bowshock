@@ -15,6 +15,7 @@ use iced::{keyboard, mouse, Point, Rectangle, Renderer, Size, Theme};
 
 use super::assembly::{no_entry, tag};
 use super::pick::{self, SurfaceTarget};
+use super::pods::PodView;
 use super::radial;
 use super::{Camera, Message};
 use crate::app::ui::mm;
@@ -68,7 +69,7 @@ impl Overlay<'_> {
         };
         // Picked up off the rocket: slide along it, keeping the angle (the one it had, or the last target's).
         let angle = self.drag.target.map_or(origin.angle, |t| t.angle);
-        let slide = || pick::slide_target(rocket, camera, at, size, kind, angle, step);
+        let slide = || pick::slide_from(rocket, camera, at, size, kind, angle, step, origin.parent);
         if free {
             surface().or_else(slide)
         } else {
@@ -125,10 +126,21 @@ impl canvas::Program<Message> for Overlay<'_> {
         match self.drag.target {
             Some(target) => {
                 let extent = self.drag.kind.extent();
-                let station = self.rocket.index_of(target.parent).map_or(0.0, |i| self.rocket.stations()[i]);
                 let radius = self.rocket.surface_radius(target.parent, target.offset + extent / 2.0).unwrap_or(0.0);
                 let (u, _) = radial::dirs(target.angle as f32);
-                let at = self.camera.project(u * radius as f32 + Vec3::Z * (station + target.offset + extent / 2.0) as f32, size);
+                // On a part of a pod: marked on the copy the cursor is on, through that copy's own frame.
+                let (station, at) = match PodView::of_part(self.rocket, target.parent, &self.camera) {
+                    Some(view) => {
+                        let copy = target.copy.min(view.cameras.len().saturating_sub(1));
+                        let local = view.sub.index_of(target.parent).map_or(0.0, |i| view.sub.stations()[i]);
+                        let z = local + target.offset + extent / 2.0;
+                        (f64::from(view.poses[copy].z0) + local, view.cameras[copy].project(u * radius as f32 + Vec3::Z * z as f32, size))
+                    }
+                    None => {
+                        let station = self.rocket.index_of(target.parent).map_or(0.0, |i| self.rocket.stations()[i]);
+                        (station, self.camera.project(u * radius as f32 + Vec3::Z * (station + target.offset + extent / 2.0) as f32, size))
+                    }
+                };
                 frame.fill(&Path::circle(at, RING * 1.5), t.ok.scale_alpha(0.18));
                 frame.stroke(&Path::circle(at, RING / 2.0), Stroke::default().with_color(t.ok).with_width(1.5));
                 let dashed = Stroke { line_dash: LineDash { segments: &[4.0, 3.0], offset: 0 }, ..Stroke::default().with_color(t.ok).with_width(1.0) };
