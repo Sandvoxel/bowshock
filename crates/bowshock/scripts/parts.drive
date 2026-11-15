@@ -1,0 +1,26 @@
+# Parts bin and assembly: `cargo run -q -p bowshock -- drive crates/bowshock/scripts/parts.drive out/parts`
+viewport 1280x800
+screenshot empty.png
+# Click = attach aft.
+click "Nose cone"
+click "Body tube"
+click "Transition"
+screenshot clicked.png
+# Drag Body tube from its row into the viewport, towards the nose/tube node.
+press "Body tube"
+move (170, 160)
+move (230, 220)
+move (330, 300)
+move (420, 330)
+move (480, 372)
+screenshot drag.png
+# Far from every node: no snap target.
+move (520, 480)
+screenshot no-snap.png
+move (466, 346)
+release (466, 346)
+screenshot dropped.png
+# Attach a boattail (76.2 -> 60.0) then a tube: the tube is matched to the boattail's aft end.
+click "Boattail"
+click "Body tube"
+screenshot matched.png

@@ -11,7 +11,7 @@ alone. **Fin-body interference drag is neglected**, as in OpenRocket.
 One set of identical trapezoidal fins, equally spaced around the body:
 
 ```rust
-use bowshock::{FinProfile, FinSpec};
+use bowshock_core::{FinProfile, FinSpec};
 
 let fins = FinSpec {
     count: 4,
@@ -55,7 +55,7 @@ fins.validate().unwrap();
 | `thickness / mean aerodynamic chord <= 0.2` | `fins.thickness` |
 
 ```rust
-use bowshock::{FinProfile, FinSpec};
+use bowshock_core::{FinProfile, FinSpec};
 
 let bad = FinSpec {
     count: 2,
@@ -73,11 +73,11 @@ assert!(err.to_string().starts_with("fins.count"));
 ## Using fins in an analysis
 
 ```rust,no_run
-use bowshock::{
+use bowshock_core::{
     AftSpec, Analysis, Atmosphere, BodySpec, FinProfile, FinSpec, FlightConditions, NoseShape, NoseSpec,
 };
 
-fn main() -> Result<(), bowshock::Error> {
+fn main() -> Result<(), bowshock_core::Error> {
     let spec = BodySpec {
         nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
         aft: vec![AftSpec::Tube { length: 0.60 }],
@@ -210,7 +210,7 @@ reproduces `FinProfile::Square`. The section only enters through `b`, `e`, the l
 subsonic profile drag of a real airfoil beyond that is outside the empirical method.
 
 ```rust
-use bowshock::{FinProfile, FinSpec};
+use bowshock_core::{FinProfile, FinSpec};
 
 // NACA 0012 upper surface, generated from the standard thickness formula (any scale of z works)
 let xs = [0.0, 0.0025, 0.005, 0.0125, 0.025, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];

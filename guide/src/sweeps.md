@@ -5,11 +5,11 @@
 [`Polar`](results.md). `run` takes `&self`; clone an `Analysis` to run variants.
 
 ```rust,no_run
-use bowshock::{
+use bowshock_core::{
     AftSpec, Analysis, Atmosphere, Backend, BodySpec, FlightConditions, NoseShape, NoseSpec, Resolution,
 };
 
-fn main() -> Result<(), bowshock::Error> {
+fn main() -> Result<(), bowshock_core::Error> {
     let spec = BodySpec {
         nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
         aft: vec![AftSpec::Tube { length: 0.60 }],

@@ -4,7 +4,7 @@ A `BodySpec` is a nose followed by one or more aft sections. All lengths are in 
 ends in a flat base.
 
 ```rust
-use bowshock::{AftSpec, BodySpec, NoseShape, NoseSpec};
+use bowshock_core::{AftSpec, BodySpec, NoseShape, NoseSpec};
 
 let spec = BodySpec {
     nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
@@ -57,7 +57,7 @@ with the offending field:
 | total length (nose + sections) <= 40 nose diameters | `aft` |
 
 ```rust
-use bowshock::{AftSpec, Analysis, BodySpec, Error, NoseShape, NoseSpec};
+use bowshock_core::{AftSpec, Analysis, BodySpec, Error, NoseShape, NoseSpec};
 
 // fineness 15 is outside [0.5, 12]
 let spec = BodySpec {
@@ -80,8 +80,8 @@ nose diameter and every `aft_diameter`. Override it with `Analysis::reference_di
 [m], for example to quote coefficients on the body-tube area when a flare is larger:
 
 ```rust,no_run
-# use bowshock::{AftSpec, Analysis, BodySpec, NoseShape, NoseSpec};
-# fn main() -> Result<(), bowshock::Error> {
+# use bowshock_core::{AftSpec, Analysis, BodySpec, NoseShape, NoseSpec};
+# fn main() -> Result<(), bowshock_core::Error> {
 # let spec = BodySpec {
 #     nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
 #     aft: vec![AftSpec::Tube { length: 0.60 }],

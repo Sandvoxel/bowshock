@@ -6,7 +6,7 @@ bowshock is used from git:
 
 ```toml
 [dependencies]
-bowshock = { git = "https://github.com/Sandvoxel/bowshock" }
+bowshock-core = { git = "https://github.com/Sandvoxel/bowshock" }
 ```
 
 You need a recent stable Rust toolchain. Cargo features:
@@ -20,14 +20,14 @@ For a CPU-only build, with no Luma or wgpu dependency:
 
 ```toml
 [dependencies]
-bowshock = { git = "https://github.com/Sandvoxel/bowshock", default-features = false }
+bowshock-core = { git = "https://github.com/Sandvoxel/bowshock", default-features = false }
 ```
 
 With `serde`:
 
 ```toml
 [dependencies]
-bowshock = { git = "https://github.com/Sandvoxel/bowshock", features = ["serde"] }
+bowshock-core = { git = "https://github.com/Sandvoxel/bowshock", features = ["serde"] }
 ```
 
 ## GPU and CPU
@@ -45,11 +45,11 @@ A 0.10 m tangent-ogive body: 0.30 m nose, 0.60 m tube, then a 0.10 m boattail to
 in sea-level standard air, with the RANS equations (friction and base drag from the solution):
 
 ```rust,no_run
-use bowshock::{
+use bowshock_core::{
     AftSpec, Analysis, Atmosphere, BodySpec, FlightConditions, NoseShape, NoseSpec, Resolution,
 };
 
-fn main() -> Result<(), bowshock::Error> {
+fn main() -> Result<(), bowshock_core::Error> {
     let spec = BodySpec {
         nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
         aft: vec![AftSpec::Tube { length: 0.60 }, AftSpec::Transition { length: 0.10, aft_diameter: 0.08 }],
@@ -89,4 +89,4 @@ dimensionless. The same example without `.viscous(flight)` solves the Euler equa
 The points come back in the order you gave the Mach numbers. Check `quality` on every point before
 using `drag.total`; see [Results](results.md#quality).
 
-The repository has the same flow as a runnable program: `cargo run --release -p bowshock --example polar`.
+The repository has the same flow as a runnable program: `cargo run --release -p bowshock-core --example polar`.

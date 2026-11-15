@@ -1,0 +1,62 @@
+# Radial parts: `cargo run -q -p bowshock -- drive crates/bowshock/scripts/radial.drive out/radial`
+viewport 1280x800
+click "Nose cone"
+click "Body tube"
+click "Body tube"
+# Fins & guides, four-fold symmetry.
+click "F"
+click "4"
+screenshot bin.png
+# Click = attach to the aftmost tube, flush with its aft end.
+click "Fin set"
+screenshot fins.png
+# Drag a launch lug onto the forward tube: no nodes, it snaps to the surface under the cursor.
+press "Launch lug"
+move (170, 160)
+move (300, 250)
+move (450, 300)
+move (556, 322)
+screenshot lug-drag.png
+release (556, 322)
+screenshot lug.png
+# Select the fin group by clicking one fin: solid brackets on it, dashed on the others.
+click (875, 238)
+screenshot fins-selected.png
+# Press a fin and drag it along the rocket: the whole group slides up and down the tube, keeping its angle.
+press (877, 242)
+move (860, 246)
+move (800, 262)
+move (700, 290)
+move (640, 304)
+screenshot fins-slide.png
+release (640, 304)
+screenshot fins-slid.png
+click (600, 520)
+screenshot fins-deselected.png
+# Pick the group up again and take it all the way aft: fins may trail past the end of the tube.
+press (649, 282)
+move (665, 280)
+move (740, 268)
+move (830, 252)
+move (900, 240)
+move (940, 232)
+screenshot fins-trail.png
+release (940, 232)
+screenshot fins-trailed.png
+# Slant the fins: drag the leading corner of the tip aft (sweep).
+press (909, 211)
+move (916, 210)
+move (926, 208)
+move (934, 206)
+screenshot sweep-live.png
+release (934, 206)
+screenshot swept.png
+# Forward-swept: drag the same corner forward again, through zero sweep to a negative one.
+press (934, 205)
+move (925, 207)
+move (905, 211)
+move (890, 214)
+move (877, 216)
+screenshot sweep-negative-live.png
+release (877, 216)
+screenshot sweep-negative.png

@@ -1,0 +1,25 @@
+[package]
+name = "bowshock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Bowshock desktop app: the rocket builder UI (iced)"
+
+[[bin]]
+name = "bowshock"
+path = "src/main.rs"
+
+[dependencies]
+# iced master (0.15-dev) is on wgpu 30, the same major as Luma; 0.14 is on wgpu 27. Pinned like Luma.
+iced = { git = "https://github.com/iced-rs/iced.git", rev = "b2fbd3cb6289603f8cbbb2387a5242231f509d13", features = ["canvas", "advanced"] }
+# Headless driver for `bowshock drive` (scripted interaction + screenshots); same rev as iced.
+iced_test = { git = "https://github.com/iced-rs/iced.git", rev = "b2fbd3cb6289603f8cbbb2387a5242231f509d13" }
+png = "0.18"
+glam = { version = "0.33", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+bowshock-model = { path = "../bowshock-model" }
+
+[lints]
+workspace = true

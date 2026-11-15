@@ -8,7 +8,7 @@ analyses of the same body.
 ## MotorSpec
 
 ```rust
-use bowshock::MotorSpec;
+use bowshock_core::MotorSpec;
 
 let motor = MotorSpec {
     exit_diameter: 0.06,
@@ -31,7 +31,7 @@ returns `InvalidInput` with the field named (`motor.exit_diameter`, `motor.exit_
 `motor.exit_pressure_pa`, `motor.total_temperature_k`); `Analysis::run` calls it.
 
 ```rust
-use bowshock::MotorSpec;
+use bowshock_core::MotorSpec;
 
 let motor = MotorSpec { exit_diameter: 0.08, exit_mach: 2.5, exit_pressure_pa: 101_325.0, total_temperature_k: 1500.0 };
 let err = motor.validate(0.08).unwrap_err();
@@ -86,11 +86,11 @@ The power-off curve is the same body without `.motor(..)` and with the viscous b
 and compare:
 
 ```rust,no_run
-use bowshock::{
+use bowshock_core::{
     AftSpec, Analysis, Atmosphere, BodySpec, FlightConditions, MotorSpec, NoseShape, NoseSpec, Resolution,
 };
 
-fn main() -> Result<(), bowshock::Error> {
+fn main() -> Result<(), bowshock_core::Error> {
     let spec = BodySpec {
         nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
         aft: vec![AftSpec::Tube { length: 0.60 }, AftSpec::Transition { length: 0.10, aft_diameter: 0.08 }],

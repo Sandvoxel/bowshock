@@ -1,0 +1,13 @@
+# Viewport navigation: `cargo run -p bowshock -- drive crates/bowshock/scripts/viewport.drive`
+viewport 1280x800
+# Any event triggers the initial fit to the real viewport size.
+move (640, 400)
+screenshot home.png
+# ViewCube region: the PORT face (front-right face of the cube in the home view).
+click (918, 122)
+screenshot port.png
+# Home button (house, top-left of the cube canvas).
+click (859, 67)
+screenshot back-home.png
+click "2D"
+screenshot profile.png

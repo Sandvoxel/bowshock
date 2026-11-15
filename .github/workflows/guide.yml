@@ -1,4 +1,4 @@
-# Builds the user guide (guide/, an mdBook) and the API reference (rustdoc of the `bowshock` crate, under `api/`) and
+# Builds the user guide (guide/, an mdBook) and the API reference (rustdoc of the `bowshock-core` crate, under `api/`) and
 # publishes them to the `gh-pages` branch, one directory per version: /main/ for the tip of `main`, /vX.Y.Z/ for every
 # release. GitHub Pages serves that branch at https://sandvoxel.github.io/bowshock/.
 #
@@ -16,7 +16,7 @@ on:
     branches: [main]
     paths:
       - "guide/**"
-      - "bowshock/src/**"
+      - "crates/bowshock-core/src/**"
       - ".github/workflows/guide.yml"
   release:
     types: [published]
@@ -92,7 +92,7 @@ jobs:
 
       - name: Build the API reference
         run: |
-          cargo doc --no-deps -p bowshock -p bowshock-cfd -p bowshock-reference --features bowshock/serde,bowshock-cfd/gpu && mkdir -p "$RUNNER_TEMP/site/api" && cp -r target/doc/. "$RUNNER_TEMP/site/api/"
+          cargo doc --no-deps -p bowshock-core -p bowshock-cfd -p bowshock-reference --features bowshock-core/serde,bowshock-cfd/gpu && mkdir -p "$RUNNER_TEMP/site/api" && cp -r target/doc/. "$RUNNER_TEMP/site/api/"
 
       - name: Check out gh-pages (an orphan branch on the first run)
         run: |

@@ -15,7 +15,7 @@ available. All of it is reached through a small Rust API: [`BodySpec`](body.md) 
 [`Analysis`](sweeps.md) is a builder that you configure and run, and [`Polar`](results.md) is the
 result. There is no command-line tool and no file format; the guide is written for Rust
 programmers who call the crate from their own code. The
-[API reference](api/bowshock/index.html) lists every item.
+[API reference](api/bowshock_core/index.html) lists every item.
 
 ## Limits
 

@@ -4,9 +4,9 @@
 area of the [reference diameter](body.md#reference-diameter-and-reference-area).
 
 ```rust,no_run
-use bowshock::{AftSpec, Analysis, BodySpec, NoseShape, NoseSpec, Quality, Resolution};
+use bowshock_core::{AftSpec, Analysis, BodySpec, NoseShape, NoseSpec, Quality, Resolution};
 
-fn main() -> Result<(), bowshock::Error> {
+fn main() -> Result<(), bowshock_core::Error> {
     let spec = BodySpec {
         nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
         aft: vec![AftSpec::Tube { length: 0.60 }],
@@ -130,7 +130,7 @@ With the `serde` feature, the inputs (`BodySpec`, `NoseSpec`, `NoseShape`, `AftS
 ```rust
 # #[cfg(feature = "serde")]
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
-use bowshock::{AftSpec, BodySpec, NoseShape, NoseSpec};
+use bowshock_core::{AftSpec, BodySpec, NoseShape, NoseSpec};
 
 let spec = BodySpec {
     nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },

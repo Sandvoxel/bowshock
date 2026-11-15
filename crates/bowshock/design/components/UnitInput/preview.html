@@ -1,0 +1,41 @@
+<!-- @dsCard group="Controls" height=640 width=960 subtitle="Exact values, scrub to drag, unit cycling, and expressions that reference other fields with {" -->
+<div class="bs-pad" style="display:flex;gap:24px;align-items:flex-start">
+ <div class="bs-col" style="gap:10px;width:330px">
+  <div class="bs-section">Basic states</div>
+  <div class="bs-field"><label>Root chord</label><div class="bs-input "><span class="grip"></span><span class="val">120.00</span><span class="unit">mm</span></div></div>
+  <div class="bs-field"><label>Height</label><div class="bs-input is-drag"><span class="grip"></span><span class="val">76.20</span><span class="unit">mm</span></div></div>
+  <div class="bs-field"><label>Tip chord</label><div class="bs-input is-focus"><span class="grip"></span><span class="val">2in+|</span><span class="unit">mm</span></div><div class="bs-hint ">Units and maths: 2in, 50+10, 1' 2"</div></div>
+  <div class="bs-field"><label>Diameter</label><div class="bs-input is-auto"><span class="grip"></span><span class="val">76.20</span><span class="bs-badge" style="margin-right:4px">auto</span><span class="unit">mm</span></div><div class="bs-hint ">Matched to Body tube. Type to override.</div></div>
+  <div class="bs-field"><label>Mass</label><div class="bs-input is-override"><span class="grip"></span><span class="val">48.20</span><span class="bs-badge" style="margin-right:4px">ovr</span><span class="unit">g</span></div></div>
+  <div class="bs-section" style="margin-top:8px">Typing { starts a pick</div>
+  <div class="bs-panel" style="width:330px">
+ <div class="bs-panel-h"><span class="bs-section"><b>01</b>Geometry · Fin set</span><span class="bs-section" style="color:var(--accent)">Picking…</span></div>
+ <div class="bs-sec" style="border-bottom:0">
+  <div class="bs-field pickable hot"><label>Root chord</label><div class="bs-input "><span class="grip"></span><span class="val">120.00</span><span class="unit">mm</span></div></div>
+  <div class="bs-field pickable"><label>Tip chord</label><div class="bs-input "><span class="grip"></span><span class="val">50.00</span><span class="unit">mm</span></div></div>
+  <div class="bs-field "><label>Height</label><div class="bs-input is-pick"><span class="grip"></span><span class="expr">0.5 × {<span class="bs-caret"></span></span><span class="unit">mm</span></div><div class="bs-hint ">Click any value (here, in the viewport, or in Station Lanes). Esc cancels.</div></div>
+  <div class="bs-field pickable"><label>Sweep length</label><div class="bs-input "><span class="grip"></span><span class="val">60.00</span><span class="unit">mm</span></div></div>
+  <div class="bs-field pickable"><label>Thickness</label><div class="bs-input "><span class="grip"></span><span class="val">3.18</span><span class="unit">mm</span></div></div>
+ </div></div>
+ </div>
+ <div class="bs-col" style="gap:10px">
+  <div class="bs-section">Picking a part's value</div>
+  <div class="bs-pop">
+ <div class="bs-panel-h"><span class="bs-section" style="display:flex;align-items:center;gap:6px"><i style="width:6px;height:6px;background:var(--part-body);display:inline-block"></i>Body tube</span><span class="bs-kbd">click part</span></div>
+ <div class="row hot"><span>Outer diameter</span><span>76.20</span></div>
+ <div class="row"><span>Inner diameter</span><span>73.66</span></div>
+ <div class="row"><span>Length</span><span>871.40</span></div>
+ <div class="row"><span>Station (front)</span><span>228.60</span></div>
+ <div class="row" style="border-bottom:0"><span>Wall</span><span>1.27</span></div></div>
+  <div class="bs-small bs-muted" style="width:240px">Clicking a part (viewport or Station Lanes) during a pick opens its values. Clicking a field inserts it directly.</div>
+ </div>
+ <div class="bs-col" style="gap:10px;width:340px">
+ <div class="bs-section">States</div>
+ <div class="bs-field "><label>Height</label><div class="bs-input is-focus"><span class="grip"></span><span class="expr"><span class="bs-ref hot"><i style="background:var(--part-body)"></i>Body tube · Ø</span> × 1.0</span><span class="unit">mm</span></div><div class="bs-hint ">Editing: references are chips. Click a chip to re-pick, Backspace removes it.</div></div>
+ <div class="bs-field "><label>Height</label><div class="bs-input is-formula"><span class="grip"></span><span class="bs-fx">ƒ</span><span class="val">76.20</span><span class="unit">mm</span></div><div class="bs-hint ">Committed: shows the result. Hover shows the formula, and it updates when Body tube changes.</div></div>
+ <div class="bs-field "><label>Root chord</label><div class="bs-input is-formula"><span class="grip"></span><span class="bs-fx">ƒ</span><span class="val">152.40</span><span class="unit">mm</span></div><div class="bs-hint ">= 2 × {Body tube · Ø}. Drag-scrubbing a formula field asks to replace the formula with a plain value.</div></div>
+ <div class="bs-field "><label>Tip chord</label><div class="bs-input is-err"><span class="grip"></span><span class="expr"><span class="bs-ref "><i style="background:var(--sys-aero)"></i>Fin set · Root</span> × 0.4</span><span class="unit">mm</span></div><div class="bs-hint err">Circular: Root chord already uses Tip chord. The last valid value (50.00) is kept.</div></div>
+ <div class="bs-field "><label>Offset</label><div class="bs-input is-err"><span class="grip"></span><span class="expr"><span class="bs-ref broken"><i style="background:var(--part-body)"></i>Payload bay · L</span> + 10</span><span class="unit">mm</span></div><div class="bs-hint err">Broken reference: Payload bay was deleted. Re-pick or convert to a value.</div></div>
+ <div class="bs-field src"><label>Outer Ø</label><div class="bs-input"><span class="grip"></span><span class="val">76.20</span><span class="bs-badge" style="margin-right:4px">→ 2</span><span class="unit">mm</span></div><div class="bs-hint">Source side: "→ 2" means two fields use this value. Click it to list and jump to them.</div></div>
+</div>
+</div>

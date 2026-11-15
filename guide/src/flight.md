@@ -4,7 +4,7 @@ A viscous analysis (and fin drag, and a motor) needs the static state of the air
 through. `FlightConditions` carries an `Atmosphere`:
 
 ```rust
-use bowshock::{Atmosphere, FlightConditions};
+use bowshock_core::{Atmosphere, FlightConditions};
 
 let flight = FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 3000.0 } };
 let air = flight.atmosphere.state().unwrap();
@@ -23,7 +23,7 @@ assert!((air.temperature_k - 268.65).abs() < 1e-9);
 `Atmosphere::state()` returns `Error::InvalidInput` outside these ranges:
 
 ```rust
-use bowshock::Atmosphere;
+use bowshock_core::Atmosphere;
 
 assert!(Atmosphere::Isa { altitude_m: 25_000.0 }.state().is_err());
 assert!(Atmosphere::Explicit { temperature_k: 300.0, pressure_pa: 0.0 }.state().is_err());
@@ -56,7 +56,7 @@ so the Reynolds number grows linearly with Mach at fixed altitude. The Sutherlan
 the temperature enter the solver's viscosity law the same way as in `AirState`.
 
 ```rust
-use bowshock::{Atmosphere, FlightConditions};
+use bowshock_core::{Atmosphere, FlightConditions};
 
 let air = FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 0.0 } }.atmosphere.state().unwrap();
 let (mach, length) = (0.8, 1.0);

@@ -1,0 +1,33 @@
+# Direct manipulation: `cargo run -q -p bowshock -- drive crates/bowshock/scripts/manipulate.drive out/manipulate`
+viewport 1280x800
+click "Nose cone"
+click "Body tube"
+click "Transition"
+# Hover the tube: it brightens and a label gives its name and size.
+move (689, 302)
+screenshot hover.png
+# Click it: corner brackets, a tag and resize handles.
+click (689, 302)
+screenshot selected.png
+# Drag the length handle (aft face centre) aft along the axis.
+press (848, 269)
+move (858, 267)
+move (878, 263)
+move (898, 259)
+screenshot resize-live.png
+release (898, 259)
+screenshot resized.png
+# Pick up the transition and drop it between the nose and the tube.
+press (928, 251)
+move (900, 262)
+move (800, 285)
+move (650, 315)
+move (520, 345)
+move (500, 352)
+screenshot move-live.png
+move (492, 342)
+release (492, 342)
+screenshot moved.png
+# Click empty space: deselect.
+click (600, 500)
+screenshot deselected.png

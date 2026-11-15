@@ -1,0 +1,9 @@
+# Walk the builder shell and screenshot each state: `cargo run -p bowshock -- drive crates/bowshock/scripts/tour.drive`
+viewport 1280x800
+screenshot builder.png
+click "Cutaway"
+click "6"
+screenshot cutaway.png
+click "Light"
+expect "Dark"
+screenshot light.png

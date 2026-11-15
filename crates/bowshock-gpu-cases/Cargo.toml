@@ -1,0 +1,18 @@
+[package]
+name = "bowshock-gpu-cases"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "GPU runners of the bowshock validation cases, compared side by side with the CPU reference runs"
+
+[dependencies]
+bowshock-core = { workspace = true, features = ["gpu"] }
+bowshock-cfd = { workspace = true, features = ["gpu"] }
+bowshock-reference.workspace = true
+bowshock-cases.workspace = true
+luma.workspace = true
+
+[lints]
+workspace = true

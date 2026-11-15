@@ -66,10 +66,10 @@ Status: done on branch `usable-release`. Deviations: the `Params` check is done 
       `bowshock-reference`, `bowshock-cases` (47 tests, about 30 s locally). Exclude `bowshock-gpu-cases`,
       which needs a Vulkan device.
 - [x] Add `rustfmt.toml` with the line width the code actually uses, then format once.
-- [x] Remove the `WARMRAMP` environment variable read from `bowshock-cases/src/transonic.rs` (make it a
+- [x] Remove the `WARMRAMP` environment variable read from `crates/bowshock-cases/src/transonic.rs` (make it a
       parameter or delete it).
-- [x] Fix stale text: `cd cfd` and "28 unit tests" in `bowshock-core/README.md`; `bowshock-cfd` in the
-      banner strings of every binary in `bowshock-validate/src/bin/` (then `bowshock-cli`).
+- [x] Fix stale text: `cd cfd` and "28 unit tests" in `crates/bowshock-core/README.md`; `bowshock-cfd` in the
+      banner strings of every binary in `crates/bowshock-validate/src/bin/` (then `bowshock-cli`).
 - [x] Add a test that the Rust `Params` struct and the WGSL `Params` block in `shaders::common` have the
       same size and field order. — done differently: both are generated from one `params!` macro in `bowshock-gpu/src/lib.rs`, so there was nothing to compare (the macro and the WGSL are gone with the array-op solver).
 
@@ -81,7 +81,7 @@ Goal: one crate a user depends on, with a small typed surface. This is the miles
 
 Status: done on branch `usable-release`. Deviations: the supersonic `cone` and `ogive` validation cases keep their own runners; no separate `Convergence` struct; the API is `Analysis::new(&BodySpec)` / `Analysis::from_internal(BaseBody)`.
 
-- [x] New facade crate `bowshock` re-exporting only the user surface.
+- [x] New facade crate `bowshock-core` re-exporting only the user surface.
 - [x] Move `Nose`, `Body`, `BaseBody` and the grid generators out of `bowshock-cases` into a geometry module
       with no dependency on experiment data.
 - [x] One runner for every Mach number. Today `ConeCase`, `OgiveCase`, `TransonicCase` and `SubsonicCase`
@@ -93,7 +93,7 @@ Status: done on branch `usable-release`. Deviations: the supersonic `cone` and `
       `LumaError::InvalidShape` and `panic!`. — the `Convergence` struct is not a separate struct: iterations, `drop_orders`, `cd_range` and `stop_reason` are fields of `PointResult`.
 - [x] Make `Solver` fields private where a setter maintains an invariant (`block` / `n_active`, `scheme` /
       multigrid hierarchy).
-- [ ] Rebuild the validation cases on top of the new runner so they exercise the same code users run. — not done: the supersonic `cone` and `ogive` validation cases keep their own runners (typed `StopReason` only); the transonic and subsonic families run on `bowshock::run` / `bowshock::gpu`, numbers unchanged to 1e-9.
+- [ ] Rebuild the validation cases on top of the new runner so they exercise the same code users run. — not done: the supersonic `cone` and `ogive` validation cases keep their own runners (typed `StopReason` only); the transonic and subsonic families run on `bowshock_core::run` / `bowshock_core::gpu`, numbers unchanged to 1e-9.
 
 Sketch (names open):
 
@@ -141,7 +141,7 @@ Goal: every point either converges or says why not, and carries an error estimat
 Status: done on branch `usable-release`. Deviations: warm starts are not the default; cold starts are, with warm starts opt-in and a cold re-run on failure, because measurements reversed the plan.
 
 - [x] Sweep test: a matrix of bodies and Mach numbers must finish with finite output. Run the small version
-      in CI and the full one before a release. — the small matrix runs in `cargo test -p bowshock` (CI line); the full one is `#[ignore]`.
+      in CI and the full one before a release. — the small matrix runs in `cargo test -p bowshock-core` (CI line); the full one is `#[ignore]`.
 - [x] Per-point quality flag derived from `Convergence` (converged / `CD` stationary / stalled / failed).
       The README already documents residual stall at 3 to 4 orders in subsonic and transonic runs; make
       that visible in the result instead of in prose.
@@ -200,10 +200,10 @@ Status: the GPU solver is now the Luma array-op solver (`bowshock-cfd`'s `gpu` m
       `Solver::smooth_residual`. Check rayon granularity on small grids.
 - [x] Generate the f32 and double-float WGSL kernels from one source where possible, so a physics change is
       made twice (Rust and WGSL), not three times. — superseded: `bowshock-gpu` is plain Luma array ops, one source (`body.rs`, `implicit.rs`) included once per precision; there is no WGSL left.
-- [ ] Re-measure the speed-up after the CPU work and update `bowshock-cfd/README.md`.
+- [ ] Re-measure the speed-up after the CPU work and update `crates/bowshock-cfd/README.md`.
 
 Exit: the same sweep runs on either backend through the same API and agrees within the tolerances already
-used in `bowshock-gpu-cases/tests`.
+used in `crates/bowshock-gpu-cases/tests`.
 
 ### M7 — Docs and release
 

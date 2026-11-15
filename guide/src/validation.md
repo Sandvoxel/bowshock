@@ -1,7 +1,7 @@
 # Validation
 
 What has been compared with data and with analytical results, and how far. The numbers below are
-copied from the repository's READMEs (`bowshock-validate/README.md`, `bowshock-cfd/README.md`)
+copied from the repository's READMEs (`crates/bowshock-validate/README.md`, `crates/bowshock-cfd/README.md`)
 as of this writing; they come from the validation programs in
 `bowshock-validate` and the tests of the workspace. Where bowshock and the data differ, the table
 shows the difference.
@@ -13,13 +13,13 @@ tests):
 
 | Check | Case | Result |
 | --- | --- | --- |
-| G1 | laminar flat plate | skin friction +0.64 % (x = 0.5) and +1.63 % (x = 0.9) of Blasius (`bowshock-validate/README.md`, "Checks of the viscous terms") |
-| G2 | SST flat plate, Re_x = 4.8e6, first-cell y+ = 0.36 | skin friction -4.25 % against the turbulent correlation `0.37 / log10(Re_x)^2.584` (`bowshock-validate/README.md`) |
-| G3 | tangent ogive 0.30 x 0.10 m + 0.60 m tube, ISA sea level, Mach 0.5, Coarse | friction drag 0.0900, 0.964 of the flat-plate estimate over the wetted area; base Cp -0.123; total CD 0.213; y+ max 0.65; about 27 s on the CPU (`bowshock-validate/README.md`, "Known limits") |
+| G1 | laminar flat plate | skin friction +0.64 % (x = 0.5) and +1.63 % (x = 0.9) of Blasius (`crates/bowshock-validate/README.md`, "Checks of the viscous terms") |
+| G2 | SST flat plate, Re_x = 4.8e6, first-cell y+ = 0.36 | skin friction -4.25 % against the turbulent correlation `0.37 / log10(Re_x)^2.584` (`crates/bowshock-validate/README.md`) |
+| G3 | tangent ogive 0.30 x 0.10 m + 0.60 m tube, ISA sea level, Mach 0.5, Coarse | friction drag 0.0900, 0.964 of the flat-plate estimate over the wetted area; base Cp -0.123; total CD 0.213; y+ max 0.65; about 27 s on the CPU (`crates/bowshock-validate/README.md`, "Known limits") |
 
 On the GPU, G3 gives total CD 0.21300 in f32 and in double-float (+0.001 % and -0.000 % against
 the CPU), `cd_friction` 0.09003, `cd_base` 0.12257, `cp_base` -0.1226, y+ max 0.648
-(`bowshock-cfd/README.md`, "Viscous terms and the SST model").
+(`crates/bowshock-cfd/README.md`, "Viscous terms and the SST model").
 
 G3 is a consistency check of friction against a flat-plate estimate, not a comparison with measured
 total drag. The Arcas comparison [below](#arcas-sounding-rocket-d1) is.
@@ -27,7 +27,7 @@ total drag. The Arcas comparison [below](#arcas-sounding-rocket-d1) is.
 ## Fox base pressures
 
 NASA TM X-2439 (Fox, 1971): sting-mounted nose-cylinder-boattail bodies, subsonic. From
-`bowshock-cfd/README.md`, "Validation: NASA TM X-2439", level 1, ogive (config 4):
+`crates/bowshock-cfd/README.md`, "Validation: NASA TM X-2439", level 1, ogive (config 4):
 
 | M | base Cp CFD (Euler) | data base Cp |
 | --- | --- | --- |
@@ -47,14 +47,14 @@ The wall Cp over the forebody and cylinder agrees with the data to an RMS of 0.0
 With the RANS equations (`cargo run --release --bin subsonic -- --quick --validate --rans`, quick grids)
 the base Cp of the six configurations is +0.049 to +0.072 against measured +0.069 to +0.132 (Euler:
 -0.037 to +0.066); the Reynolds numbers per Mach number are interpolated from the range quoted in the
-report (`bowshock-validate/README.md`, "Known limits").
+report (`crates/bowshock-validate/README.md`, "Known limits").
 
 ## Stoney forebody
 
 Stoney, NACA RM L53K17 (1954), Fig. 5: nose pressure drag of fineness-3 noses at Mach 0.8 to
 1.25, free flight. The data were digitised from a poor scan (about +-0.01 in CD) and carry a tare
 uncertainty of about +-0.01; the Euler solver at level 1 reproduces the drag rise
-(`bowshock-cfd/README.md`, "2. Nose pressure drag vs Mach number"). Von Karman nose:
+(`crates/bowshock-cfd/README.md`, "2. Nose pressure drag vs Mach number"). Von Karman nose:
 
 | M | CD CFD (level 1) | Stoney | CFD - Stoney |
 | --- | --- | --- | --- |
@@ -111,8 +111,8 @@ Gates: fins off `|delta| <= max(0.12 data, 0.03)` at M 0.60, 0.80, 0.90, 1.20; f
 2.96 (-9.7 % at M 1.8), but 14 % low at M 1.2 (`Resolution::Fine` gives 0.3765, -13.6 %: not a grid effect; the
 report attributes part of the short model's higher axial force at M 1.0-1.2 to fin anchors that
 were not flush). With fins the totals are low because the empirical fin drag is low (see
-[Fins](fins.md#accuracy)). The test is `bowshock/tests/validation.rs::arcas_axial_force`
-(`cargo test --release -p bowshock --test validation arcas -- --ignored --nocapture`); it fails
+[Fins](fins.md#accuracy)). The test is `crates/bowshock-core/tests/validation.rs::arcas_axial_force`
+(`cargo test --release -p bowshock-core --test validation arcas -- --ignored --nocapture`); it fails
 on these gates.
 
 ## Motor-on base pressure, NASA TP-2005 (D2)
@@ -144,7 +144,7 @@ viscous CFL limit of 50 diverged at 8 of 11 points; the limit is now 20 above Ma
 **Every gate fails.** The measured base pressures above p_inf come from plume-induced separation
 of the afterbody boundary layer ahead of the strongly under-expanded plumes; the model's base
 pressure stays near or below p_inf and falls with exit Mach where the data rise. Open issue:
-`bowshock-cfd/ISSUES.md` row 13. The test is `bowshock/tests/validation.rs::tp2005_base_pressure_with_jet`.
+`crates/bowshock-cfd/ISSUES.md` row 13. The test is `crates/bowshock-core/tests/validation.rs::tp2005_base_pressure_with_jet`.
 
 The Arcas table above was re-run with the same change: every value is unchanged to the printed digits
 (largest change 0.0001).

@@ -1,0 +1,28 @@
+[package]
+name = "bowshock-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rocket drag from CFD: zero-lift drag versus Mach of axisymmetric rockets with fins and a motor-on base flow, on the GPU or the CPU"
+readme = "../../README.md"
+keywords = ["cfd", "rocket", "aerodynamics", "drag", "gpu"]
+categories = ["science", "simulation"]
+documentation = "https://sandvoxel.github.io/bowshock/main/api/bowshock_core/"
+
+[dependencies]
+bowshock-cfd.workspace = true
+bowshock-reference.workspace = true
+luma = { workspace = true, optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+
+[dev-dependencies]
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[features]
+default = ["gpu"]
+gpu = ["bowshock-cfd/gpu", "dep:luma"]
+serde = ["dep:serde"]
+
+[lints]
+workspace = true

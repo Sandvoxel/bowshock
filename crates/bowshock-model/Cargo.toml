@@ -1,0 +1,11 @@
+[package]
+name = "bowshock-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Rocket airframe data model for the Bowshock builder (SI metres)"
+
+[lints]
+workspace = true

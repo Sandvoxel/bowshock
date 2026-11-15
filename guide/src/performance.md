@@ -4,7 +4,7 @@
 
 The GPU solver is written in plain Luma array ops and runs the same scheme as the f64 CPU solver
 (f32 or double-float arithmetic on the GPU). Measured per iteration on an RTX 3090 against the
-f64 CPU solver on 32 rayon threads (`bowshock-cfd/README.md`, "Speed"; microseconds per iteration,
+f64 CPU solver on 32 rayon threads (`crates/bowshock-cfd/README.md`, "Speed"; microseconds per iteration,
 15 deg cone at Mach 2, 2000 iterations from the free stream, best of 3):
 
 | grid | CPU f64 | GPU f32 | GPU double-float |
@@ -12,7 +12,7 @@ f64 CPU solver on 32 rayon threads (`bowshock-cfd/README.md`, "Speed"; microseco
 | 100x50 | 602 | 33.2 | 190.6 |
 | 200x100 | 1304 | 44.7 | 260.2 |
 
-Viscous implicit step on the G3 body (`bowshock-cfd/README.md`, "Viscous terms and the SST
+Viscous implicit step on the G3 body (`crates/bowshock-cfd/README.md`, "Viscous terms and the SST
 model"; SST, Mach 0.5, flat base and wake, microseconds per iteration, replay):
 
 | level | grid | CPU f64 | GPU f32 | GPU double-float |
@@ -23,11 +23,11 @@ model"; SST, Mach 0.5, flat base and wake, microseconds per iteration, replay):
 That is 21 to 26 times faster per iteration than the CPU in f32 (the CPU column moves by a factor
 of 2 between runs on a shared machine). Over the Fox TM X-2439 sweep (16 inviscid runs, level 1) the
 whole sweep took 1555.7 s on the CPU and 60.13 s on the GPU, 25.9 times faster, and 12.2 to 29.2
-times per run (`bowshock-cfd/README.md`, "Timing"). Double-float costs 1.2 to 1.4 times the f32 time
+times per run (`crates/bowshock-cfd/README.md`, "Timing"). Double-float costs 1.2 to 1.4 times the f32 time
 in the viscous step.
 
 The first call of a sweep also compiles and traces the GPU kernels: about 1 s for the default
-inviscid staging on the cone case, and longer for viscous cases (`bowshock-cfd/README.md`, "Speed",
+inviscid staging on the cone case, and longer for viscous cases (`crates/bowshock-cfd/README.md`, "Speed",
 "First call").
 
 ## Resolution
@@ -43,7 +43,7 @@ The sweep is sequential over Mach numbers (cold starts by default, see
 
 ## Timed realistic sweep
 
-`cargo run --release -p bowshock --example sweep_timing`: the body of the examples (tangent-ogive nose
+`cargo run --release -p bowshock-core --example sweep_timing`: the body of the examples (tangent-ogive nose
 0.30 x 0.10 m, 0.60 m tube, 0.10 m boattail to 0.08 m) with four rounded fins, viscous at ISA 0 m,
 `Resolution::Medium`, `Backend::Auto` (here: GPU, RTX 3090, double-float), every Mach number run on
 its own (cold start, including the kernel build of each run):

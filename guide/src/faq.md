@@ -5,7 +5,7 @@
 On NVIDIA's Linux driver (seen on 615.71.09) a process that used the GPU can hang at exit (100 %
 CPU in `libnvidia-gpucomp`) or abort with `free(): chunks in smallbin corrupted`, while the
 driver's shader compiler thread is still running at `exit()`. It is intermittent (1 in 3 runs of one
-benchmark) and a driver bug, not a bowshock or Luma bug (`bowshock-cfd/ISSUES.md`, row 1). It can
+benchmark) and a driver bug, not a bowshock or Luma bug (`crates/bowshock-cfd/ISSUES.md`, row 1). It can
 hit a program that calls `Analysis::run` on the GPU. The results are already printed by then. If it
 bites you, update the driver, or run on `Backend::Cpu`.
 
@@ -25,7 +25,7 @@ have the CPU.
 ## How long does a run take?
 
 A robustness matrix of inviscid `Coarse` sweeps (3 bodies, 10 Mach numbers, GPU) took about 20 s
-in total (`bowshock-validate/README.md`). A viscous (RANS) point at `Medium` with fins takes 4 to
+in total (`crates/bowshock-validate/README.md`). A viscous (RANS) point at `Medium` with fins takes 4 to
 19 s on an RTX 3090 and 60 to 213 s on the CPU; a 23-point sweep from Mach 0.3 to 2.5 took 178 s on
 the GPU (the table in [Performance](performance.md)). Each Mach number is a separate solve, so the cost is proportional
 to the number of points. To iterate on a design: `Coarse`, a few Mach numbers, `max_iterations`
