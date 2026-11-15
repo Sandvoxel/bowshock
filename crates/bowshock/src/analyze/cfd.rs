@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bowshock_core as solver;
-use bowshock_model::{CfdPoint, CfdQuality, CfdTable, PartKind, RadialKind, Rocket};
+use bowshock_model::{CfdGrid, CfdPoint, CfdQuality, CfdTable, PartKind, RadialKind, Rocket};
 use bowshock_sim::{vs_mach, AlphaPoint, Atmosphere, BodyKind, DragBreakdown, FinCrossSection, FinPlanform, FinSet, MachPoint, NoseShape, Vehicle};
 
 use crate::simulate::format::with_unit;
@@ -39,13 +39,8 @@ const SOLVER_REV: u64 = 2;
 /// iterations. Measured on the example rocket (coarse grid, RTX 3090, 10 points): about 29 000 iterations in all against about
 /// 82 000 for the default rule, the worst point within 0.39 % of its 12 000-iteration value (the aim is 1 %).
 const DRAG_TOLERANCE: f64 = 0.002;
-/// The grid level the table is solved on: `Coarse` (grid level 0), the setting for exploring. On an Apple M1 Max a coarse
-/// point takes 30 to 40 s and a medium one 2 min at Mach 0.3 (see the notes in the task report), too slow for a table.
-const RESOLUTION: solver::Resolution = solver::Resolution::Coarse;
-/// The Mach range a table covers: the solver accepts 0.1 to 3, but Mach 0.1 takes about 2 minutes a point on a coarse grid (the
-/// wake settles into a limit cycle, 14 000 iterations; Mach 0.15 takes 25 s), so a table starts at 0.2 and [`mach_points`]
-/// fills below it from the Mach 0.2 drag scaled by the Extended method's trend (labelled so in the provenance notes).
-pub const SOLVER_MACH: (f64, f64) = (0.2, 3.0);
+/// The Mach range the solver accepts.
+pub const SOLVER_MACH: (f64, f64) = (0.1, 3.0);
 /// The highest altitude the solver's standard atmosphere has (m).
 const SOLVER_CEILING: f64 = 20_000.0;
 /// Interior Mach numbers of a table: dense through the transonic drag rise, sparse where the drag is smooth. The range's ends
@@ -238,7 +233,7 @@ impl Plan {
     /// Hash of the geometry the table depends on: the body, the solved fins and what the build-up adds.
     fn hash(&self) -> u64 {
         let mut h = Fnv::new();
-        h.u64(SOLVER_REV).u64(RESOLUTION as u64);
+        h.u64(SOLVER_REV);
         let n = &self.body.nose;
         match n.shape {
             solver::NoseShape::Cone => h.u64(0),
@@ -375,6 +370,8 @@ pub struct Job {
     pub nodes: Vec<f64>,
     /// The stack the table is for (first flying stage).
     pub stage: u32,
+    /// The grid to solve on.
+    pub grid: CfdGrid,
 }
 
 /// A message from a running solve.
@@ -437,7 +434,11 @@ pub fn solve(job: &Job, cancel: &AtomicBool, mut progress: impl FnMut(Event)) ->
             .map_err(|e| e.to_string())?
             .viscous(solver::FlightConditions { atmosphere: solver::Atmosphere::Isa { altitude_m: altitude } })
             .drag_tolerance(DRAG_TOLERANCE)
-            .resolution(RESOLUTION)
+            .resolution(match job.grid {
+                // Coarse is the default, for exploring; Medium (Refine) is about 3.5x slower per point and its Cd about 1 % different.
+                CfdGrid::Coarse => solver::Resolution::Coarse,
+                CfdGrid::Medium => solver::Resolution::Medium,
+            })
             .backend(backend);
         if let Some(fins) = &job.plan.fins {
             analysis = analysis.fins(fins.clone());
@@ -497,6 +498,7 @@ pub fn solve(job: &Job, cancel: &AtomicBool, mut progress: impl FnMut(Event)) ->
         altitude,
         notes,
         points,
+        grid: job.grid,
     })
 }
 
@@ -751,6 +753,7 @@ mod tests {
             altitude: 120.0,
             notes: Vec::new(),
             points: vec![p(0.5, 0.4), p(1.0, 0.8), p(2.0, 0.6)],
+            grid: CfdGrid::Coarse,
         }
     }
 
@@ -797,8 +800,8 @@ mod tests {
     #[ignore = "solves on the GPU: about a minute"]
     fn a_tiny_grid_solves_and_is_sane() {
         let (rocket, vehicle) = example();
-        let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
-        let job = Job { plan, altitude: 120.0, nodes: vec![0.6, 2.0], stage: 1 };
+        let plan = plan(&rocket, &vehicle).unwrap();
+        let job = Job { plan, altitude: 120.0, nodes: vec![0.6, 2.0], stage: 1, grid: CfdGrid::Coarse };
         let mut events = 0;
         let cancel = AtomicBool::new(false);
         let t = solve(&job, &cancel, |_| events += 1).expect("the example solves");
@@ -821,7 +824,7 @@ mod tests {
         let (mut rocket, vehicle) = example();
         let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
         let nodes = nodes((0.1, 3.0)).unwrap();
-        let job = Job { plan, altitude: 120.0, nodes, stage: 1 };
+        let job = Job { plan, altitude: 120.0, nodes, stage: 1, grid: CfdGrid::Coarse };
         let t0 = Instant::now();
         let table = solve(&job, &AtomicBool::new(false), |e| println!("{:.0} s {e:?}", t0.elapsed().as_secs_f64())).expect("the example solves");
         let atm = Atmosphere::standard();
@@ -865,9 +868,21 @@ mod tests {
     }
 
     #[test]
+    fn a_medium_table_of_the_same_geometry_and_conditions_is_fresh() {
+        let (rocket, vehicle) = example();
+        let mapped = plan(&rocket, &vehicle);
+        let full = (0.1, 3.0);
+        let mut t = table();
+        t.geometry = mapped.as_ref().unwrap().geometry;
+        t.key = table_key(t.geometry, 120.0, &nodes(full).unwrap());
+        t.grid = CfdGrid::Medium;
+        assert_eq!(status(&mapped, Some(&t), 120.0, full), Status::Fresh);
+    }
+
+    #[test]
     fn a_cancel_stops_before_the_next_point() {
         let (rocket, vehicle) = example();
-        let job = Job { plan: plan(&rocket, &vehicle, UnitSystem::default()).unwrap(), altitude: 120.0, nodes: vec![0.6, 2.0], stage: 1 };
+        let job = Job { plan: plan(&rocket, &vehicle).unwrap(), altitude: 120.0, nodes: vec![0.6, 2.0], stage: 1, grid: CfdGrid::Coarse };
         let cancel = AtomicBool::new(true);
         assert_eq!(solve(&job, &cancel, |_| ()).unwrap_err(), CANCELLED);
     }

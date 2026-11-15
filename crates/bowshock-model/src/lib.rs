@@ -33,7 +33,7 @@ mod symmetry;
 pub type PartId = u64;
 
 pub use bands::StabilityBands;
-pub use cfd::{CfdPoint, CfdQuality, CfdStore, CfdTable, MAX_CFD_TABLES};
+pub use cfd::{CfdGrid, CfdPoint, CfdQuality, CfdStore, CfdTable, MAX_CFD_TABLES};
 pub use config::{Ballast, ConfigError, ConfigId, Configuration, EventKind, MotorMount, MotorRef, MotorSlot, RecoveryTiming, StageEvent, StageTrigger};
 pub use expr::{dim_from_key, dim_key, dim_kind, EvalError, Expr, ExprError, FieldRef, Formula, FormulaError, FormulaStatus, Kind, Op, Value};
 pub use fin_tab::{TabIssue, TabTarget};

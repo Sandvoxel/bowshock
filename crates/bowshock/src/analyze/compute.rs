@@ -20,9 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::cfd;
-use super::flutter::{FinStock, FlutterAnalysis};
-use crate::units::{Quantity, UnitSystem};
-use bowshock_model::{CfdTable, ConfigId, Finish, Rocket, StabilityBands};
+use bowshock_model::{CfdGrid, CfdTable, ConfigId, Finish, MaterialId, Rocket, StabilityBands};
 use bowshock_motors::MotorDb;
 use bowshock_sim::from_model::{self, Phase};
 use bowshock_sim::{
@@ -380,8 +378,8 @@ pub struct CfdInfo {
     pub solved_at: u64,
     /// How long it took (s).
     pub solve_seconds: f64,
-    /// The table's first Mach number when the plots reach below it (the drag there is scaled from it by Extended's trend).
-    pub scaled_below: Option<f64>,
+    /// The grid it was solved on.
+    pub grid: CfdGrid,
     /// What was not solved as the document has it, and what the plots do not cover.
     pub notes: Vec<String>,
 }
@@ -598,7 +596,7 @@ fn cfd_info(table: &CfdTable, analysis: Analysis, cond: &Conditions) -> CfdInfo 
         fallback: table.fallback.clone(),
         solved_at: table.solved_at,
         solve_seconds: table.solve_seconds,
-        scaled_below,
+        grid: table.grid,
         notes,
     }
 }

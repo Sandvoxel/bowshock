@@ -22,6 +22,7 @@ use crate::widgets::field::{self, rule};
 use crate::widgets::ground_track::GroundTrackView;
 use crate::widgets::plot::{self, PlotView, SeriesColor};
 use crate::widgets::unit_input::unit_input;
+use bowshock_model::CfdGrid;
 
 /// Width of the label column of the Conditions rows (wider than the inspector's: "Angle of attack" must fit).
 const LABEL_W: f32 = 112.0;
@@ -151,7 +152,19 @@ fn method(state: &State) -> Element<'_, Message> {
         push("Re-solve", if stale { Weight::Primary } else { Weight::Secondary }).on_press(Message::Resolve).into()
     };
     let compare: Element<'_, Message> = push("Compare ▾", Weight::Ghost).on_press(Message::CompareMenu).into();
-    let actions = row![resolve, compare].spacing(SPACE_2);
+    let mut buttons: Vec<Element<'_, Message>> = vec![resolve];
+    let shown = matches!(state.cfd.status, cfd::Status::Fresh | cfd::Status::Stale);
+    if cfd_line && !solving && shown && state.cfd.table.as_ref().is_some_and(|t| t.grid == CfdGrid::Coarse) {
+        let refine: Element<'_, Message> = push("Refine", Weight::Secondary).on_press(Message::Refine).into();
+        buttons.push(
+            tooltip(refine, bubble("Re-solve on the medium grid: about 3.5x slower, Cd about 1 % different"))
+                .position(tooltip::Position::Bottom)
+                .gap(SPACE_1)
+                .boxed(),
+        );
+    }
+    buttons.push(compare);
+    let actions = row(buttons).spacing(SPACE_2);
     let mut col = column![strip, column(lines).spacing(SPACE_1), actions].spacing(SPACE_2).padding([0.0, 0.0]);
     if state.compare_open {
         let item = |label: &'static str, message: Message| -> Element<'_, Message> { push(label, Weight::Secondary).on_press(message).small().into() };
@@ -215,12 +228,11 @@ fn cfd_lines(state: &State) -> Vec<String> {
     }
     if let Some((out, info)) = state.output().and_then(|o| o.cfd.as_ref().map(|i| (o, i))) {
         let stale = if cfd.status == cfd::Status::Stale { "stale · " } else { "" };
-        let points = match out.analysis {
-            super::Analysis::Stability => format!("{} Mach points · zero-lift, at Mach {:.2}", info.nodes, out.conditions.mach_fixed),
-            _ => format!("{} Mach points · zero-lift", info.nodes),
+        let grid = match info.grid {
+            CfdGrid::Coarse => "coarse",
+            CfdGrid::Medium => "medium",
         };
-        let below = info.scaled_below.map_or_else(String::new, |m| format!(" · M<{m:.1} scaled from Extended"));
-        lines.push(format!("{stale}{points} · solved on {} · {}{below}", info.backend, cfd::ago(info.solved_at)));
+        lines.push(format!("{stale}{} · solved on {} · {grid} grid · {}", out.points_text(), info.backend, cfd::ago(info.solved_at)));
         if !stale.is_empty() {
             lines.push("The geometry or the conditions changed since; Re-solve for a table that matches.".to_string());
         }

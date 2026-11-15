@@ -23,7 +23,7 @@ build/lanes.rs + lanes/     Station Lanes: `scene` (bars, sub-rows, stages, mass
 viewport/                3D viewport (View = state, Message) + overlays (assembly, manipulate, surface)
 simulate/mod.rs          Simulate screen
 analyze/mod.rs           Analyze screen
-analyze/cfd.rs           CFD table method: document -> `bowshock-core` mapping, the off-thread solve, table keys, table -> plot points.
+analyze/cfd.rs           CFD table method: document -> `bowshock-core` mapping, the off-thread solve, table keys, the coarse (default) or medium (Refine) grid, table -> plot points.
                          Tables are stored in the document (`bowshock_model::CfdTable`, a cache: not an edit, not in undo).
 widgets/                 shared widgets (read-only for screens; do not edit from a screen task)
 units.rs                 unit set (UnitSystem: one unit per Family, named presets), formatting, expression parsing

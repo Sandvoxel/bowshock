@@ -45,6 +45,16 @@ pub struct CfdPoint {
     pub quality: CfdQuality,
 }
 
+/// The solver grid a table was solved on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CfdGrid {
+    /// The default: quick enough to explore with.
+    #[default]
+    Coarse,
+    /// Finer, reached by Refine.
+    Medium,
+}
+
 /// A solved table of one flying stack: a drag coefficient per Mach number at zero angle of attack.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CfdTable {
@@ -70,6 +80,9 @@ pub struct CfdTable {
     pub notes: Vec<String>,
     /// The solved Mach numbers, ascending.
     pub points: Vec<CfdPoint>,
+    /// The grid the points were solved on.
+    #[serde(default)]
+    pub grid: CfdGrid,
 }
 
 impl CfdTable {
@@ -153,6 +166,7 @@ mod tests {
             altitude: 120.0,
             notes: vec!["note".into()],
             points: vec![point(0.3), point(0.9), point(2.0)],
+            grid: CfdGrid::Coarse,
         }
     }
 
@@ -172,6 +186,14 @@ mod tests {
         assert!(!r.store_cfd_table(nan));
         assert!(!r.store_cfd_table(CfdTable { points: Vec::new(), ..table(1, 6) }));
         assert_eq!(r.cfd_table(1).unwrap().key, 2);
+    }
+
+    #[test]
+    fn a_table_stored_without_a_grid_reads_as_coarse() {
+        let mut v = serde_json::to_value(table(1, 1)).unwrap();
+        v.as_object_mut().unwrap().remove("grid");
+        let t: CfdTable = serde_json::from_value(v).unwrap();
+        assert_eq!(t.grid, CfdGrid::Coarse);
     }
 
     #[test]

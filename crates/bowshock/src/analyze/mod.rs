@@ -15,7 +15,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
 
-use bowshock_model::CfdTable;
+use bowshock_model::{CfdGrid, CfdTable};
 use bowshock_sim::from_model::Phase;
 use iced::futures::channel::{mpsc, oneshot};
 use iced::{keyboard, Element, Task};
@@ -55,6 +55,8 @@ pub enum Message {
     Method(Method),
     /// Run again (the physics is deterministic; this is mostly a way to see the timing).
     Resolve,
+    /// Re-solve the table on the medium grid.
+    Refine,
     /// A Mach field was typed in.
     MachText(MachField, String),
     /// Enter in a Mach field: parse and apply.
@@ -231,10 +233,8 @@ impl State {
                     self.compare_rev += 1;
                 }
             }
-            Message::Resolve => {
-                self.serial += 1;
-                self.cfd.force = self.method == Method::CfdTable && uses_cfd(self.analysis) && self.cfd.solving.is_none();
-            }
+            Message::Resolve => self.request_solve(CfdGrid::Coarse),
+            Message::Refine => self.request_solve(CfdGrid::Medium),
             Message::MachText(field, text) => self.mach_text[field as usize] = text,
             Message::MachCommit => self.commit_mach(ctx),
             Message::Alpha(a) => self.cond.alpha = a.clamp(-30f64.to_radians(), 30f64.to_radians()),
@@ -431,6 +431,12 @@ impl State {
         task
     }
 
+    /// Re-solve (coarse) or Refine (medium) was pressed: the next refresh solves on `grid`.
+    fn request_solve(&mut self, grid: CfdGrid) {
+        self.serial += 1;
+        self.cfd.force = (self.method == Method::CfdTable && uses_cfd(self.analysis) && self.cfd.solving.is_none()).then_some(grid);
+    }
+
     /// Keeps what the CFD table method knows about the document current (the mapped geometry, the stored table, whether it is
     /// stale) and starts a solve when the method is on and there is no table for what is on screen.
     fn refresh_cfd(&mut self, ctx: &Ctx, phase: Phase) -> Task<app::Message> {
@@ -458,17 +464,18 @@ impl State {
             return Task::none();
         };
         let key = Some(cfd::table_key(plan.geometry, self.cond.altitude, &nodes));
-        if force {
+        if force.is_some() {
             self.cfd.failed = None;
         }
-        let wanted = force || (self.cfd.status == cfd::Status::Missing && self.cfd.failed.as_ref().map(|f| f.0) != Some(key));
+        let wanted = force.is_some() || (self.cfd.status == cfd::Status::Missing && self.cfd.failed.as_ref().map(|f| f.0) != Some(key));
         if self.method != Method::CfdTable || self.cfd.solving.is_some() || !wanted {
             return Task::none();
         }
         self.cfd.serial += 1;
         let serial = self.cfd.serial;
         let cancel = Arc::new(AtomicBool::new(false));
-        let job = cfd::Job { plan: plan.clone(), altitude: self.cond.altitude, nodes: nodes.clone(), stage };
+        let grid = force.unwrap_or(CfdGrid::Coarse);
+        let job = cfd::Job { plan: plan.clone(), altitude: self.cond.altitude, nodes: nodes.clone(), stage, grid };
         let (task, handle) = spawn_solve(job, cancel.clone(), serial);
         self.cfd.solving = Some(Solving { serial, done: 0, total: nodes.len(), backend: None, key, cancel, handle });
         task
@@ -614,8 +621,8 @@ pub(crate) struct Cfd {
     /// The key a solve was last wanted for and why it ended without a table (a failure or a cancel): no solve starts by itself
     /// again until the key changes or Re-solve is pressed.
     pub(crate) failed: Option<(Option<u64>, String)>,
-    /// Re-solve was pressed: solve whether or not a table exists.
-    force: bool,
+    /// Re-solve or Refine was pressed: solve on this grid whether or not a table exists.
+    force: Option<CfdGrid>,
     serial: u64,
 }
 
@@ -628,7 +635,7 @@ impl Default for Cfd {
             table: None,
             solving: None,
             failed: None,
-            force: false,
+            force: None,
             serial: 0,
         }
     }

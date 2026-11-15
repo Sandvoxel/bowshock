@@ -4,7 +4,7 @@ Analyze mode: the vehicle's aerodynamics across the speed range. This is where B
 
 **Left: what and how**
 - **Analyses** list: Aerodynamics (vs Mach), Stability (vs angle of attack), Drag breakdown, Fin flutter, Dispersion (Monte Carlo). The selected one has `bg-300` with an `accent` inside edge.
-- **Method**: Barrowman · Extended (RASAero-style) · **CFD table**, with a provenance line ("42 Mach × 9 AoA points · solved on GPU (Luma) · 6 min ago"), **Re-solve**, and **Compare** to overlay another method or an imported OpenRocket / RASAero result.
+- **Method**: Barrowman · Extended (RASAero-style) · **CFD table**, with a provenance line ("42 Mach × 9 AoA points · solved on GPU (Luma) · coarse grid · 6 min ago"), **Re-solve**, **Refine** (re-solves on the medium grid, shown while the table is coarse), and **Compare** to overlay another method or an imported OpenRocket / RASAero result.
 - **Conditions**: Mach range, angle of attack, altitude (sets Reynolds number), which CG the margin uses (liftoff / burnout), surface finish.
 
 **Centre: linked plots vs Mach** (shared x, so PlotZoom works across all three; the transonic region is the usual place to drag in on)
