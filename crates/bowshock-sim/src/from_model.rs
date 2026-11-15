@@ -757,8 +757,10 @@ pub fn warnings(rocket: &Rocket, motors: &MotorDb, balance: &Balance) -> Vec<War
             Warning::new(Level::Ok, format!("Stable · {m:.2} cal (min {min:.1})"), None)
         });
     }
+    // Barrowman (and OpenRocket) give a tube no normal force of its own, so the blunt front face's lift is missing and the CP
+    // comes out further aft than it is: the margin is optimistic.
     if !matches!(rocket.parts().first().map(|p| &p.kind), Some(model::PartKind::NoseCone { .. })) {
-        out.push(Warning::new(Level::Warn, "No nose cone", None));
+        out.push(Warning::new(Level::Warn, "No nose cone · blunt front, margin optimistic", None));
     }
 
     // Motors.

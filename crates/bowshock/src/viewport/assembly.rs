@@ -1,18 +1,24 @@
-//! The drag overlay: while a part is dragged in from the parts bin this canvas shows the valid attach nodes on the rocket's
-//! centreline, picks the one nearest the cursor as the snap target, and reports snap changes and the drop (design/components/
-//! ViewportOverlay). The ghost part itself is drawn in 3D by the model mesh.
+//! The drag overlay: while a part is dragged in from the parts bin or picked up it shows the valid attach nodes on the
+//! rocket's centreline and, over a tube's side, the radial surface target (design/components/ViewportOverlay). A node within
+//! [`NODE_PX`] of the cursor wins (the part stacks); otherwise the tube under the cursor does: the part becomes a pod, `count`
+//! copies standing on the tube's surface (KSP-style radial attachment of an ordinary part); else the nearest node. The ghost part
+//! itself is drawn in 3D by the model mesh.
 
-use bowshock_model::{InternalPart, Part, PartId, PartKind, RadialPart, Rocket};
+use bowshock_model::{InternalPart, Part, PartId, PartKind, PodBody, RadialKind, RadialPart, Rocket};
 use glam::Vec3;
 use iced::widget::canvas::{self, Action, Event, Frame, Geometry, LineDash, Path, Stroke, Text};
 use iced::{alignment, mouse, Color, Point, Rectangle, Renderer, Size, Theme};
 
+use super::pick::{self, SurfaceTarget};
 use super::pods::PodView;
+use super::radial;
 use super::{Camera, Message};
 use crate::app::ui::mm;
 use crate::theme::{self, MONO};
 use crate::tokens::TEXT_LABEL;
 
+/// How close (px) the cursor must be to an attach node for the part to stack there rather than attach to the tube's side.
+pub const NODE_PX: f32 = 26.0;
 /// Diameter of a node ring.
 const RING: f32 = 7.0;
 /// Width of one MONO glyph at `TEXT_LABEL`, as a fraction of the font size (IBM Plex Mono advances 0.6 em).
@@ -30,6 +36,11 @@ pub struct Drag {
     pub name: &'static str,
     pub kind: PartKind,
     pub snap: Option<usize>,
+    /// The tube side it would attach to radially instead (the part becomes a pod): at most one of `snap`, `pod_snap` and
+    /// `surface` is set.
+    pub surface: Option<SurfaceTarget>,
+    /// Copies of the pod it would become on a tube's side (the bin's symmetry count, or the old pod's).
+    pub count: u8,
     /// The node of a pod's stack it would drop onto instead: `(pod, node index)`. At most one of `snap` and `pod_snap` is set.
     pub pod_snap: Option<(PartId, usize)>,
 }
@@ -52,6 +63,32 @@ pub struct Overlay<'a> {
     pub camera: Camera,
     /// The cursor in window coordinates (tracked by the app, so it also draws without a live cursor).
     pub cursor: Option<Point>,
+    /// Angle snap for the radial target, degrees (0 for none).
+    pub snap_angle: u8,
+    /// The view toolbar's grid step, metres.
+    pub snap_step: f64,
+}
+
+/// The pod body the dragged part would be on a tube's side: that one part with what stands on and in it, ids kept for a part
+/// of the rocket, placeholder ids for a new one.
+pub fn body_of(drag: &Drag) -> PodBody {
+    match &drag.origin {
+        Some(o) => PodBody::single(Part { kind: drag.kind.clone(), ..o.part.clone() }, o.radials.clone(), o.internals.clone()),
+        None => PodBody::single(Part::new(0, drag.kind.clone()), Vec::new(), Vec::new()),
+    }
+}
+
+/// What the cursor chooses.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Choice {
+    Node(Snap),
+    Surface(SurfaceTarget),
+}
+
+/// Interaction state: trackpad scroll not yet worth a step.
+#[derive(Debug, Default)]
+pub struct State {
+    wheel: f32,
 }
 
 impl Overlay<'_> {
@@ -82,14 +119,38 @@ impl Overlay<'_> {
         nodes
     }
 
-    /// The node nearest `at`: a part dropped from the bin always attaches to the nearest node, no key needed.
-    fn nearest(&self, at: Point, size: Size) -> Option<Snap> {
-        self.nodes(size).into_iter().map(|n| (n.snap, n.at.distance(at))).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(snap, _)| snap)
+    /// What the cursor at `at` chooses: a node within [`NODE_PX`], else the tube side under it (a part that carries a pod cannot
+    /// become one), else the nearest node.
+    fn choice(&self, at: Point, size: Size) -> Option<Choice> {
+        let nearest = self.nodes(size).into_iter().map(|n| (n.snap, n.at.distance(at))).min_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((snap, _)) = nearest.filter(|n| n.1 <= NODE_PX) {
+            return Some(Choice::Node(snap));
+        }
+        if !self.carries_pod() {
+            let kind = RadialKind::Pod { gap: 0.0, body: body_of(self.drag) };
+            let snapping = pick::Snapping { angle: self.snap_angle, station: Some(self.snap_step) };
+            if let Some(target) = pick::surface_target(self.rocket, &self.camera, at, size, &kind, snapping) {
+                return Some(Choice::Surface(target));
+            }
+        }
+        nearest.map(|(snap, _)| Choice::Node(snap))
     }
 
     /// Where the drag is snapped now.
-    fn current(&self) -> Option<Snap> {
-        self.drag.snap.map(Snap::Core).or_else(|| self.drag.pod_snap.map(|(pod, index)| Snap::Pod(pod, index)))
+    fn current(&self) -> Option<Choice> {
+        self.drag
+            .surface
+            .map(Choice::Surface)
+            .or_else(|| self.drag.snap.map(|i| Choice::Node(Snap::Core(i))))
+            .or_else(|| self.drag.pod_snap.map(|(pod, index)| Choice::Node(Snap::Pod(pod, index))))
+    }
+
+    /// The node the drag is snapped to, if it stacks.
+    fn current_node(&self) -> Option<Snap> {
+        match self.current() {
+            Some(Choice::Node(snap)) => Some(snap),
+            _ => None,
+        }
     }
 
     /// What releasing here would do, as a tag.
@@ -140,24 +201,39 @@ struct Node {
 }
 
 impl canvas::Program<Message> for Overlay<'_> {
-    type State = ();
+    type State = State;
 
-    fn update(&self, _: &mut (), event: &Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<Action<Message>> {
+    fn update(&self, state: &mut State, event: &Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<Action<Message>> {
         if let Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) = event {
             // Releasing over the viewport drops (or, with no snap target, cancels); elsewhere the app cancels.
             return cursor.position_over(bounds).map(|_| Action::publish(Message::DropAxial).and_capture());
         }
-        let snap = cursor.position_in(bounds).and_then(|p| self.nearest(p, bounds.size()));
-        (snap != self.current()).then(|| {
-            Action::publish(match snap {
-                Some(Snap::Pod(pod, index)) => Message::SnapPodNode(Some((pod, index))),
-                Some(Snap::Core(index)) => Message::SnapNode(Some(index)),
+        if let (Event::Mouse(mouse::Event::WheelScrolled { delta }), true) = (event, self.drag.surface.is_some()) {
+            // Over a tube's side the wheel steps the number of copies rather than zooming.
+            cursor.position_over(bounds)?;
+            let steps = match *delta {
+                mouse::ScrollDelta::Lines { y, .. } => y,
+                mouse::ScrollDelta::Pixels { y, .. } => {
+                    state.wheel += y / 40.0;
+                    let whole = state.wheel.trunc();
+                    state.wheel -= whole;
+                    whole
+                }
+            };
+            return Some(if steps == 0.0 { Action::capture() } else { Action::publish(Message::CopiesStep(steps > 0.0)).and_capture() });
+        }
+        let choice = cursor.position_in(bounds).and_then(|p| self.choice(p, bounds.size()));
+        (choice != self.current()).then(|| {
+            Action::publish(match choice {
+                Some(Choice::Node(Snap::Pod(pod, index))) => Message::SnapPodNode(Some((pod, index))),
+                Some(Choice::Node(Snap::Core(index))) => Message::SnapNode(Some(index)),
+                Some(Choice::Surface(target)) => Message::AxialSurface(Some(target)),
                 None => Message::SnapNode(None),
             })
         })
     }
 
-    fn draw(&self, _: &(), renderer: &Renderer, theme: &Theme, bounds: Rectangle, _: mouse::Cursor) -> Vec<Geometry> {
+    fn draw(&self, _: &State, renderer: &Renderer, theme: &Theme, bounds: Rectangle, _: mouse::Cursor) -> Vec<Geometry> {
         let t = theme::tokens(theme);
         let size = bounds.size();
         let mut frame = Frame::new(renderer, size);
@@ -166,7 +242,7 @@ impl canvas::Program<Message> for Overlay<'_> {
         // Parts after the ghost have moved aft by its length: draw their nodes where those parts now are. Snapping keeps
         // to the settled positions, so the target does not slide under the cursor.
         let ghost = self.drag.snap.map(|snap| (snap, self.rocket.matched(snap, &self.drag.kind).length()));
-        let current = self.current();
+        let current = self.current_node();
         for node in &nodes {
             let at = match (ghost, node.snap) {
                 (Some((snap, len)), Snap::Core(index)) if index > snap => self.camera.project(Vec3::new(0.0, 0.0, (node.station + len) as f32), size),
@@ -185,6 +261,29 @@ impl canvas::Program<Message> for Overlay<'_> {
         let Some(cursor) = local.filter(|c| (0.0..=size.width).contains(&c.x) && (0.0..=size.height).contains(&c.y)) else {
             return vec![frame.into_geometry()];
         };
+
+        if let Some(target) = self.drag.surface {
+            // Radial: a ring where the part would stand on the tube, a leader to it and what releasing does.
+            let extent = self.drag.kind.length();
+            let station = self.rocket.index_of(target.parent).map_or(0.0, |i| self.rocket.stations()[i]);
+            let radius = self.rocket.surface_radius(target.parent, target.offset + extent / 2.0).unwrap_or(0.0);
+            let (u, _) = radial::dirs(target.angle as f32);
+            let at = self.camera.project(u * radius as f32 + Vec3::Z * (station + target.offset + extent / 2.0) as f32, size);
+            frame.fill(&Path::circle(at, RING * 1.5), t.ok.scale_alpha(0.18));
+            frame.stroke(&Path::circle(at, RING / 2.0), Stroke::default().with_color(t.ok).with_width(1.5));
+            let dashed = Stroke { line_dash: LineDash { segments: &[4.0, 3.0], offset: 0 }, ..Stroke::default().with_color(t.ok).with_width(1.0) };
+            frame.stroke(&Path::line(cursor, at), dashed);
+            let times = if self.drag.count > 1 { format!(" ×{}", self.drag.count) } else { String::new() };
+            let parent = self.rocket.part(target.parent).map_or("", |p| p.kind.name());
+            let label = format!(
+                "{}{times} → {parent} @ {} mm, {:.0}° · radial",
+                self.drag.name,
+                mm(station + target.offset),
+                target.angle.to_degrees().round() % 360.0
+            );
+            tag(&mut frame, cursor, 0.0, &label, t.ink, t.line_200, t.bg_200);
+            return vec![frame.into_geometry()];
+        }
 
         let target = current.and_then(|snap| nodes.iter().find(|n| n.snap == snap));
         let label = match target {
@@ -205,7 +304,7 @@ impl canvas::Program<Message> for Overlay<'_> {
         vec![frame.into_geometry()]
     }
 
-    fn mouse_interaction(&self, _: &(), bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
+    fn mouse_interaction(&self, _: &State, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
         match (cursor.is_over(bounds), self.current()) {
             (false, _) => mouse::Interaction::default(),
             (true, Some(_)) => mouse::Interaction::Grabbing,

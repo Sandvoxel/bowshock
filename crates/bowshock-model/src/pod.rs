@@ -81,9 +81,40 @@ impl PodBody {
     pub fn to_rocket(&self) -> Rocket {
         Rocket::from_body(self.clone(), self.ids().max().map_or(0, |m| m + 1))
     }
+
+    /// A body of one axial part with the radial and internal parts that stand on and in it, ids kept: what a single tube dragged
+    /// onto the side of another becomes ([`Rocket::attach_pod_keeping_ids`]).
+    pub fn single(part: Part, radials: Vec<RadialPart>, internals: Vec<InternalPart>) -> PodBody {
+        PodBody { parts: vec![part], radials, internals }
+    }
 }
 
 impl Rocket {
+    /// Places a pod of `count` copies of `body` on core part `parent`, the first at `angle`, keeping the ids of everything in the
+    /// body (a part moved out of the stack or out of another pod). Refused if an id is in use, if a radial part of the body is a
+    /// pod, or if `parent` is not a part of the core. Returns the pod set's id.
+    pub fn attach_pod_keeping_ids(&mut self, parent: PartId, offset: f64, angle: f64, count: u8, body: PodBody) -> Result<PartId, crate::rocket::RadialError> {
+        use crate::rocket::RadialError;
+        if self.index_of(parent).is_none() {
+            return Err(RadialError::NoSuchParent);
+        }
+        if count == 0 || count > crate::MAX_COUNT {
+            return Err(RadialError::BadCount);
+        }
+        if body.radials.iter().any(|r| r.kind.is_pod())
+            || body.ids().any(|id| self.part(id).is_some() || self.radial(id).is_some() || self.internal(id).is_some())
+        {
+            return Err(RadialError::NoSuchRadial);
+        }
+        self.next_id = self.next_id.max(body.ids().max().map_or(0, |m| m + 1));
+        let kind = RadialKind::Pod { gap: 0.0, body };
+        let offset = self.clamp_offset(parent, offset, &kind).ok_or(RadialError::NoSuchParent)?;
+        let id = self.next_id;
+        self.next_id += 1;
+        self.radials.push(RadialPart::new(id, kind, parent, offset, angle.rem_euclid(std::f64::consts::TAU), count));
+        Ok(id)
+    }
+
     /// A small rocket made of a pod body, ids kept, for running the ordinary rules on it.
     pub(crate) fn from_body(body: PodBody, next_id: PartId) -> Rocket {
         Rocket {

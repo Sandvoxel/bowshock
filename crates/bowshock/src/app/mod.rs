@@ -910,6 +910,80 @@ mod tests {
     }
 
     #[test]
+    fn an_ordinary_tube_dragged_onto_a_tubes_side_becomes_a_pod_and_a_node_still_stacks() {
+        let (mut app, [_, tube, _]) = app();
+        let before = app.ctx.doc.rocket().clone();
+        let row = parts_bin::axial_catalogue().iter().position(|(n, _)| *n == "Body tube").unwrap();
+        let start = |app: &mut App| {
+            app.update(Message::PartsBin(parts_bin::Message::Category(parts_bin::Category::Airframe)));
+            app.update(Message::Cursor(Point::new(100.0, 100.0)));
+            app.update(Message::PartsBin(parts_bin::Message::RowPress(parts_bin::RowId::new(parts_bin::Category::Airframe, row))));
+            app.update(Message::Cursor(Point::new(160.0, 100.0)));
+        };
+        // On a tube's side: a pod set of the bin's symmetry count whose body is exactly the part dropped.
+        app.update(Message::PartsBin(parts_bin::Message::Symmetry(3)));
+        start(&mut app);
+        assert!(app.ctx.drag.axial.as_ref().is_some_and(|d| d.count == 3 && d.surface.is_none()));
+        vp(&mut app, Vp::AxialSurface(Some(target(tube, 0.1, 1.0))));
+        assert!(app.ctx.drag.axial.as_ref().is_some_and(|d| d.surface.is_some() && d.snap.is_none()));
+        // X cycles the copies while it hovers there.
+        app.update(Message::PartsBin(parts_bin::Message::CycleSymmetry(false)));
+        assert_eq!(app.ctx.drag.axial.as_ref().unwrap().count, 2);
+        vp(&mut app, Vp::DropAxial);
+        let pod = app.ctx.doc.rocket().pods().next().expect("a pod set").clone();
+        let body = pod.kind.pod_body().unwrap();
+        assert_eq!((pod.count, pod.parent, pod.offset, pod.angle), (2, tube, 0.1, 1.0));
+        assert_eq!(body.parts().len(), 1);
+        assert!(matches!(body.parts()[0].kind, bowshock_model::PartKind::BodyTube { .. }));
+        assert_eq!(app.ctx.doc.rocket().parts().len(), 3, "the core is unchanged");
+        assert_eq!(app.ctx.selection, Selection::Part(body.parts()[0].id));
+        // Undo is one step.
+        app.update(Message::Undo);
+        assert_eq!(app.ctx.doc.rocket().ids(), before.ids());
+        // A node still stacks, and moving to a node leaves the surface mode.
+        start(&mut app);
+        vp(&mut app, Vp::AxialSurface(Some(target(tube, 0.1, 1.0))));
+        vp(&mut app, Vp::SnapNode(Some(1)));
+        assert!(app.ctx.drag.axial.as_ref().is_some_and(|d| d.surface.is_none() && d.snap == Some(1)));
+        vp(&mut app, Vp::DropAxial);
+        assert_eq!((app.ctx.doc.rocket().parts().len(), app.ctx.doc.rocket().pods().count()), (4, 0));
+    }
+
+    #[test]
+    fn moving_an_existing_tube_onto_a_tubes_side_makes_a_pod_and_back_onto_a_node_stacks_it() {
+        let (mut app, [_, tube, transition]) = app();
+        let fins = app.ctx.doc.edit("Fins", |r| {
+            r.attach_radial(transition, 0.0, 0.0, 3, RadialKind::FinSet { root_chord: 0.03, tip_chord: 0.01, span: 0.02, sweep: 0.01, thickness: 0.002 })
+                .unwrap()
+        });
+        let before = app.ctx.doc.rocket().clone();
+        // Esc cancels exactly.
+        vp(&mut app, Vp::Grab(Pick::Axial(transition)));
+        vp(&mut app, Vp::AxialSurface(Some(target(tube, 0.1, 2.0))));
+        app.update(Message::Cancel);
+        assert_eq!(app.ctx.doc.rocket(), &before);
+        // Dropped on a tube's side: a pod of that one part (ids and the fins on it kept), as one undo step.
+        vp(&mut app, Vp::Grab(Pick::Axial(transition)));
+        vp(&mut app, Vp::AxialSurface(Some(target(tube, 0.1, 2.0))));
+        vp(&mut app, Vp::DropAxial);
+        let rocket = app.ctx.doc.rocket();
+        let pod = rocket.pod_of(transition).expect("the transition is a pod's part now");
+        assert_eq!((rocket.parts().len(), pod.kind.pod_body().unwrap().parts().len(), pod.angle), (2, 1, 2.0));
+        assert_eq!(rocket.parent_of(fins), Some(transition));
+        app.update(Message::Undo);
+        assert_eq!(app.ctx.doc.rocket(), &before);
+        app.update(Message::Redo);
+        // Back onto a node: the part stacks into the core again and the pod is gone.
+        vp(&mut app, Vp::Grab(Pick::Axial(transition)));
+        assert!(app.ctx.drag.axial.as_ref().is_some_and(|d| d.origin.is_some()) && app.ctx.doc.rocket().pods().next().is_none());
+        vp(&mut app, Vp::SnapNode(Some(2)));
+        vp(&mut app, Vp::DropAxial);
+        let rocket = app.ctx.doc.rocket();
+        assert_eq!((rocket.parts().len(), rocket.pods().count(), rocket.index_of(transition)), (3, 0, Some(2)));
+        assert_eq!(rocket.parent_of(fins), Some(transition));
+    }
+
+    #[test]
     fn a_click_add_lands_on_the_selected_pod_tube_and_a_pod_mount_takes_a_motor() {
         let (mut app, [_, tube, _]) = app();
         let kind = app.ctx.doc.rocket().default_pod();
@@ -978,6 +1052,8 @@ mod tests {
             kind: bowshock_model::PartKind::BodyTube { length: 0.1, diameter: 0.0381 },
             snap: None,
             pod_snap: Some((pod, 2)),
+            surface: None,
+            count: 2,
         });
         vp(&mut app, Vp::DropAxial);
         assert_eq!(app.ctx.doc.rocket().radial(pod).unwrap().kind.pod_body().unwrap().parts().len(), 3);

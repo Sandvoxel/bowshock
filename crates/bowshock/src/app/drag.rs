@@ -14,7 +14,7 @@ use bowshock_model::{InternalKind, InternalPart, Part, PartId, PartKind, RadialK
 
 use super::{Ctx, Selection};
 use crate::app::ui;
-use crate::viewport::assembly::{Drag, Origin};
+use crate::viewport::assembly::{body_of, Drag, Origin};
 use crate::viewport::pick::Pick;
 use crate::viewport::surface::RadialDrag;
 
@@ -94,7 +94,8 @@ pub fn place(ctx: &mut Ctx, index: usize, kind: PartKind) -> bool {
 /// Starts carrying a new axial part from bin row `row`.
 pub fn start_axial(ctx: &mut Ctx, row: usize, name: &'static str, kind: PartKind) {
     ctx.doc.begin_drag(&format!("Add {}", name.to_lowercase()));
-    ctx.drag.axial = Some(Drag { row: Some(row), origin: None, name, kind, snap: None, pod_snap: None });
+    let count = ctx.drag.symmetry;
+    ctx.drag.axial = Some(Drag { row: Some(row), origin: None, name, kind, snap: None, pod_snap: None, surface: None, count });
 }
 
 /// Starts carrying a new radial part from bin row `row`.
@@ -112,7 +113,31 @@ pub fn grab(ctx: &mut Ctx, pick: Pick) {
     if ctx.drag.active() {
         return;
     }
-    // A part of a pod is carried with its pod: the body is the thing that moves.
+    // A single-part pod is that part with copies: picking its part up moves the part (it leaves the pod, which goes with it).
+    let single = match pick {
+        Pick::Axial(id) => ctx.doc.rocket().pod_of(id).filter(|p| p.kind.pod_body().is_some_and(|b| b.parts().len() == 1)).map(|p| (id, p.id, p.count)),
+        _ => None,
+    };
+    if let Some((id, pod, count)) = single {
+        ctx.doc.begin_drag("Move part");
+        let taken = ctx.doc.drag_update(|r| {
+            let radial = r.remove_radial(pod)?;
+            let body = radial.kind.pod_body()?;
+            Some(Origin { part: body.parts().first()?.clone(), radials: body.radials().to_vec(), internals: body.internals().to_vec() })
+        });
+        match taken {
+            Some(origin) => {
+                ctx.selection = Selection::Part(id);
+                let (name, kind) = (origin.part.kind.name(), origin.part.kind.clone());
+                ctx.drag.axial = Some(Drag { row: None, name, kind, snap: None, pod_snap: None, surface: None, count, origin: Some(origin) });
+            }
+            None => {
+                ctx.doc.end_drag(false);
+            }
+        }
+        return;
+    }
+    // A part of a bigger pod is carried with its pod: the body is the thing that moves.
     let pick = match pick {
         Pick::Axial(id) => match ctx.doc.rocket().pod_of(id) {
             Some(pod) => Pick::Radial { id: pod.id, instance: 0 },
@@ -139,6 +164,8 @@ pub fn grab(ctx: &mut Ctx, pick: Pick) {
                         kind: origin.part.kind.clone(),
                         snap: None,
                         pod_snap: None,
+                        surface: None,
+                        count: ctx.drag.symmetry,
                         origin: Some(origin),
                     });
                 }
@@ -188,6 +215,27 @@ pub fn finish_axial(ctx: &mut Ctx, drop: bool) {
         return;
     };
     let base = ctx.doc.drag_base().cloned();
+    // Over a tube's side the part lands there as a pod (the part, with what stands on and in it, ids kept if it came from the
+    // rocket).
+    if let (true, None, None, Some(t)) = (drop, drag.snap, drag.pod_snap, drag.surface) {
+        let landed = ctx.doc.drag_update(|r| {
+            let body = body_of(&drag);
+            let pod = match &drag.origin {
+                Some(_) => r.attach_pod_keeping_ids(t.parent, t.offset, t.angle, drag.count, body).ok()?,
+                None => r.attach_radial(t.parent, t.offset, t.angle, drag.count, RadialKind::Pod { gap: 0.0, body }).ok()?,
+            };
+            if let Some(base) = &base {
+                restore_motors(r, base);
+            }
+            r.radial(pod)?.kind.pod_body()?.parts().first().map(|p| p.id)
+        });
+        if let Some(part) = landed {
+            ctx.selection = Selection::Part(part);
+            ctx.camera_fit |= drag.origin.is_none();
+        }
+        ctx.doc.end_drag(landed.is_some());
+        return;
+    }
     let placed = match (drag.snap, drag.pod_snap) {
         (Some(node), _) if drop => ctx.doc.drag_update(|r| {
             let matched = insert_part(r, node, &drag.kind, drag.origin.as_ref().map(|o| &o.part));

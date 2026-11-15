@@ -51,7 +51,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bowshock_model::{InternalKind, PartId, PartRef};
+use bowshock_model::{InternalKind, PartId, PartRef, RadialKind};
 use glam::{IVec3, Vec3};
 use iced::widget::{canvas, column, container, row, shader, stack, text, Space};
 use iced::{alignment, keyboard, mouse, Element, Fill, Size, Task, Vector, Widget};
@@ -203,6 +203,8 @@ pub enum Message {
     CopiesStep(bool),
     /// The dragged axial part's nearest attach node is on a pod's stack: `(pod, node index)`.
     SnapPodNode(Option<(PartId, usize)>),
+    /// The dragged axial part is over a tube's side: it would attach radially there (it becomes a pod).
+    AxialSurface(Option<SurfaceTarget>),
 }
 
 struct Anim {
@@ -229,7 +231,7 @@ struct MeshKey {
     hovered: Option<PartId>,
     selected: Option<PartId>,
     also: Vec<PartId>,
-    axial: Option<(Option<usize>, Option<(PartId, usize)>)>,
+    axial: Option<(Option<usize>, Option<(PartId, usize)>, Option<SurfaceTarget>, u8)>,
     radial: Option<(Option<SurfaceTarget>, u8)>,
     cut: Cut,
     flash: Option<(PartId, f32, f32)>,
@@ -321,7 +323,7 @@ impl View {
             hovered: self.hover.part(),
             selected,
             also: also.clone(),
-            axial: ctx.drag.axial.as_ref().map(|d| (d.snap, d.pod_snap)),
+            axial: ctx.drag.axial.as_ref().map(|d| (d.snap, d.pod_snap, d.surface, d.count)),
             radial: ctx.drag.radial.as_ref().map(|d| (d.target, d.count)),
             cut: self.cut,
             flash,
@@ -332,10 +334,17 @@ impl View {
         let rocket = ctx.doc.rocket();
         let ghost = ctx.drag.axial.as_ref().and_then(|d| d.snap.map(|node| (node, rocket.matched(node, &d.kind))));
         let ghost_pod = ctx.drag.axial.as_ref().and_then(|d| d.pod_snap.map(|(pod, node)| (pod, node, rocket.matched_in_pod(pod, node, &d.kind))));
-        let ghost_radial = ctx.drag.radial.as_ref().and_then(|d| {
-            let t = d.target?;
-            Some(GhostRadial { kind: &d.kind, parent: t.parent, offset: t.offset, angle: t.angle, count: d.count })
-        });
+        // A part dragged over a tube's side stands there as a pod of its own: the ghost is that pod.
+        let axial_pod = ctx.drag.axial.as_ref().and_then(|d| Some((RadialKind::Pod { gap: 0.0, body: assembly::body_of(d) }, d.surface?, d.count)));
+        let ghost_radial = ctx
+            .drag
+            .radial
+            .as_ref()
+            .and_then(|d| {
+                let t = d.target?;
+                Some(GhostRadial { kind: &d.kind, parent: t.parent, offset: t.offset, angle: t.angle, count: d.count })
+            })
+            .or_else(|| axial_pod.as_ref().map(|(kind, t, count)| GhostRadial { kind, parent: t.parent, offset: t.offset, angle: t.angle, count: *count }));
         let marks = Marks {
             ghost: ghost.as_ref().map(|(node, kind)| (*node, kind)),
             ghost_radial,
@@ -409,12 +418,17 @@ impl View {
             Message::Cut(cut) => self.cut = cut,
             Message::SnapNode(node) => {
                 if let Some(drag) = ctx.drag.axial.as_mut() {
-                    (drag.snap, drag.pod_snap) = (node, None);
+                    (drag.snap, drag.pod_snap, drag.surface) = (node, None, None);
                 }
             }
             Message::SnapPodNode(node) => {
                 if let Some(drag) = ctx.drag.axial.as_mut() {
-                    (drag.snap, drag.pod_snap) = (None, node);
+                    (drag.snap, drag.pod_snap, drag.surface) = (None, node, None);
+                }
+            }
+            Message::AxialSurface(target) => {
+                if let Some(drag) = ctx.drag.axial.as_mut() {
+                    (drag.snap, drag.pod_snap, drag.surface) = (None, None, target);
                 }
             }
             Message::Surface(target) => {
@@ -628,7 +642,11 @@ impl View {
             return self.hint.clone();
         }
         if ctx.drag.axial.is_some() {
-            vec![("", "Release over an attach node to snap"), ("Esc", "cancel")]
+            if ctx.drag.axial.as_ref().is_some_and(|d| d.surface.is_some()) {
+                vec![("", "Release to attach radially · move to a node to stack"), ("X", "copies"), ("Esc", "cancel")]
+            } else {
+                vec![("", "Release on a node to stack · on a tube's side to attach radially"), ("X", "copies"), ("Esc", "cancel")]
+            }
         } else if ctx.drag.radial.is_some() {
             vec![("", "Release on a tube"), ("X", "copies"), ("Alt", "free"), ("Shift", "snap"), ("Esc", "cancel")]
         } else if matches!(ctx.selection, Selection::Separation(_)) {
@@ -672,7 +690,13 @@ impl View {
         // While a part is dragged an assembly overlay owns the viewport; otherwise the manipulation overlay does (the exploded
         // view is view-only: the markers layer selects).
         let (overlay, interaction): (Element<'a, Message>, mouse::Interaction) = if let Some(drag) = &ctx.drag.axial {
-            (canvas(assembly::Overlay { rocket, drag, camera, cursor: ctx.cursor }).width(Fill).height(Fill).boxed(), mouse::Interaction::default())
+            (
+                canvas(assembly::Overlay { rocket, drag, camera, cursor: ctx.cursor, snap_angle: ctx.drag.angle_snap, snap_step })
+                    .width(Fill)
+                    .height(Fill)
+                    .boxed(),
+                mouse::Interaction::default(),
+            )
         } else if let Some(drag) = &ctx.drag.radial {
             (
                 canvas(SurfaceOverlay { rocket, drag, camera, snap: ctx.drag.angle_snap, snap_step, cursor: ctx.cursor }).width(Fill).height(Fill).boxed(),

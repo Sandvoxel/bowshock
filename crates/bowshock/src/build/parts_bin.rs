@@ -513,6 +513,14 @@ pub fn cycle_symmetry(ctx: &mut Ctx, forward: bool) {
         let at = SYMMETRY.iter().position(|(c, _)| *c == n).unwrap_or(0);
         SYMMETRY[(at + if forward { 1 } else { SYMMETRY.len() - 1 }) % SYMMETRY.len()].0
     };
+    // A part carried over a tube's side (it would become a pod) takes the count as its copies.
+    if let Some(drag) = ctx.drag.axial.as_mut() {
+        drag.count = step(drag.count);
+        if drag.origin.is_none() {
+            ctx.drag.symmetry = drag.count;
+        }
+        return;
+    }
     match ctx.drag.radial.as_mut() {
         Some(drag) => {
             drag.count = step(drag.count);

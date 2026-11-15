@@ -1,0 +1,16 @@
+# Any body part can attach radially (KSP-style): drag a Body tube from the Airframe bin over the booster's SIDE, away from an
+# attach node, and it stands on the surface as a pod of the bin's symmetry count; over a node it stacks as before.
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/radial_tube.drive out/radial-tube
+# The light theme: put `click (921, 20)` (the top bar's Light) after the viewport line.
+viewport 1280x800
+click (119, 705)
+press "Body tube"
+move (300, 560)
+move (500, 400)
+move (700, 300)
+move (767, 276)
+screenshot tube-ghost.png
+release (767, 276)
+screenshot tube-placed.png
+click "2D"
+screenshot tube-placed-2d.png
