@@ -1,12 +1,12 @@
 //! Mach-sweep analysis of a body: zero-lift drag versus Mach number, on the GPU when one is present.
 
 use crate::atmosphere::{FlightConditions, SUTHERLAND_S};
-use crate::body_grid::{check_quality, BaseBody, MAX_STRETCHING, MAX_STRETCHING_VISCOUS_J};
-use crate::case::{Case, Wake};
+use crate::engine::body_grid::{check_quality, BaseBody, MAX_STRETCHING, MAX_STRETCHING_VISCOUS_J};
+use crate::engine::case::{Case, Wake};
+use crate::engine::numerics::Numerics;
+use crate::engine::result::{PointResult, StopReason};
+use crate::engine::run::run_on;
 use crate::error::Error;
-use crate::numerics::Numerics;
-use crate::result::{PointResult, StopReason};
-use crate::run::run_on;
 use crate::spec::BodySpec;
 use bowshock_core::solver::Solver;
 use bowshock_reference::base_drag::base_drag_coefficient;
@@ -20,22 +20,29 @@ const MACH_RANGE: (f64, f64) = (0.1, 3.0);
 pub enum Backend {
     /// The GPU when one is available, otherwise the CPU (reported in [`Polar::fallback`]). A software Vulkan device (llvmpipe) counts as no GPU.
     Auto,
+    /// The CPU solver.
     Cpu,
+    /// The GPU solver; an error if none is available.
     Gpu,
 }
 
 /// Backend that produced a [`Polar`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackendUsed {
+    /// The CPU solver.
     Cpu,
+    /// The GPU solver.
     Gpu,
 }
 
 /// Grid resolution (grid level 0, 1, 2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Resolution {
+    /// Grid level 0.
     Coarse,
+    /// Grid level 1.
     Medium,
+    /// Grid level 2.
     Fine,
 }
 
@@ -49,17 +56,18 @@ impl Resolution {
     }
 }
 
-/// Drag coefficients referenced to the reference area (by default the largest cross-section; `detail` of a point is
-/// referenced to the nose base area).
+/// Drag coefficients referenced to the reference area (by default the largest cross-section).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Drag {
     /// Pressure drag of the nose and the aft body.
     pub forebody_pressure: f64,
     /// Skin friction, if it was computed.
     pub friction: Option<f64>,
+    /// Base drag: from a correlation when `base_modelled`, otherwise from the solver.
     pub base: f64,
     /// `base` comes from a correlation (the inviscid wake gives no physical base pressure).
     pub base_modelled: bool,
+    /// Total drag: forebody pressure + friction + base.
     pub total: f64,
 }
 
@@ -82,33 +90,86 @@ pub enum Warning {
     /// Transonic Mach number and a convex profile corner sharper than 2 degrees (shock position and drag are sensitive).
     SharpCornerTransonic,
     /// The base pressure still oscillates by `cp_base_range` over the monitor window although the residual did not drop.
-    UnsteadyWake { cp_base_range: f64 },
+    UnsteadyWake {
+        /// Range of the area-mean base Cp over the monitor window.
+        cp_base_range: f64,
+    },
     /// The pressure at the outer boundaries deviates from the free stream by `dp` (relative): the domain may be too small.
-    FarFieldDisturbed { dp: f64 },
+    FarFieldDisturbed {
+        /// Relative pressure deviation.
+        dp: f64,
+    },
     /// The first cell at the wall is too thick for a wall-resolved boundary layer: `y+` of the first cell reaches `y_plus_max`.
-    WallResolution { y_plus_max: f64 },
+    WallResolution {
+        /// Largest `y+` of the first wall cell.
+        y_plus_max: f64,
+    },
 }
 
 /// One Mach number of a sweep.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PolarPoint {
+    /// Mach number of the point.
     pub mach: f64,
     /// Angle of attack [rad]; always 0.0.
     pub alpha: f64,
+    /// Drag coefficients.
     pub drag: Drag,
-    /// Full solver result.
-    pub detail: PointResult,
+    /// Solver summary of the point.
+    pub detail: PointDetail,
+    /// Trust in the point.
     pub quality: Quality,
+    /// Conditions that make the point less reliable.
     pub warnings: Vec<Warning>,
     /// Absolute difference of the total drag to the run at the neighbouring grid level, if [`Analysis::estimate_uncertainty`] was on and
     /// neither point failed.
     pub cd_uncertainty: Option<f64>,
 }
 
+/// Solver summary of one point; lengths in metres (internal units for `from_internal`), coefficients referenced to the reference area.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PointDetail {
+    /// Iterations run.
+    pub iterations: usize,
+    /// Orders of magnitude the residual dropped from its peak to the last iteration.
+    pub residual_drop_orders: f64,
+    /// Why the iteration stopped.
+    pub stop_reason: StopReason,
+    /// Pressure drag of the nose.
+    pub cd_nose: f64,
+    /// Pressure drag of each aft section, one per [`AftSpec`](crate::AftSpec).
+    pub cd_aft: Vec<f64>,
+    /// Skin-friction drag; 0 for the Euler equations.
+    pub cd_friction: f64,
+    /// Base drag computed by the solver; NaN without a base wake.
+    pub cd_base_solver: f64,
+    /// Area-mean base pressure coefficient; NaN without a base wake.
+    pub cp_base: f64,
+    /// Body-surface faces in axial order (no sting extension).
+    pub wall: Vec<WallCp>,
+    /// Largest `y+` of the first wall cell; NaN for the Euler equations.
+    pub y_plus_max: f64,
+    /// Largest relative pressure deviation from the free stream at the outer boundaries.
+    pub farfield_dp: f64,
+}
+
+/// Pressure coefficient at one body-surface face.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WallCp {
+    /// Axial position of the face centre.
+    pub x: f64,
+    /// Radius of the face centre.
+    pub r: f64,
+    /// Pressure coefficient.
+    pub cp: f64,
+}
+
 /// Result of a Mach sweep, in the order of the requested Mach numbers.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Polar {
+    /// One point per requested Mach number.
     pub points: Vec<PolarPoint>,
+    /// Backend that ran the sweep.
     pub backend: BackendUsed,
     /// Why the GPU was not used under [`Backend::Auto`].
     pub fallback: Option<String>,
@@ -143,6 +204,7 @@ struct Rans {
 impl Analysis {
     /// Analysis of a body in internal units (nose diameter 1, so drag coefficients refer to the nose base area). Defaults:
     /// medium resolution, sting wake, automatic backend, numerics chosen per Mach number, no warm starts, no uncertainty estimate.
+    #[doc(hidden)]
     pub fn from_internal(body: BaseBody) -> Analysis {
         Analysis {
             body,
@@ -177,6 +239,7 @@ impl Analysis {
         self
     }
 
+    /// Grid resolution (default [`Resolution::Medium`]).
     pub fn resolution(mut self, r: Resolution) -> Self {
         self.resolution = r;
         self
@@ -196,12 +259,14 @@ impl Analysis {
         self
     }
 
+    /// Backend to run on (default [`Backend::Auto`]).
     pub fn backend(mut self, b: Backend) -> Self {
         self.backend = b;
         self
     }
 
     /// Fixed numerics for every Mach number instead of [`Numerics::auto`].
+    #[doc(hidden)]
     pub fn numerics(mut self, n: Numerics) -> Self {
         self.numerics = Some(n);
         self
@@ -343,7 +408,28 @@ impl Analysis {
             let od = self.drag(mach, o);
             (quality != Quality::Failed && self::quality(o, &od) != Quality::Failed).then(|| (drag.total - od.total).abs())
         });
+        let detail = self.detail(&detail);
         PolarPoint { mach, alpha: 0.0, drag, quality, warnings, cd_uncertainty, detail }
+    }
+
+    /// Public summary of a solver result: coefficients on the reference area, wall points in metres.
+    fn detail(&self, d: &PointResult) -> PointDetail {
+        let q = (self.d_nose / self.d_ref).powi(2);
+        let base = self.wake_used() == Wake::Base;
+        let x_base = self.body.x_base();
+        PointDetail {
+            iterations: d.iters,
+            residual_drop_orders: d.drop_orders,
+            stop_reason: d.stop_reason,
+            cd_nose: d.cd_nose * q,
+            cd_aft: d.cd_aft.iter().map(|c| c * q).collect(),
+            cd_friction: d.cd_friction * q,
+            cd_base_solver: if base { d.cd_base * q } else { f64::NAN },
+            cp_base: if base { d.cp_base } else { f64::NAN },
+            wall: d.wall.iter().filter(|w| w.x < x_base).map(|w| WallCp { x: w.x * self.d_nose, r: w.r * self.d_nose, cp: w.cp }).collect(),
+            y_plus_max: d.y_plus_max,
+            farfield_dp: d.farfield_dp,
+        }
     }
 
     fn warnings(&self, mach: f64, detail: &PointResult) -> Vec<Warning> {
@@ -425,7 +511,7 @@ impl Analysis {
 
     #[cfg(feature = "gpu")]
     fn sweep_gpu_required(&self, cases: &[Case]) -> Result<Vec<PointResult>, Error> {
-        self.sweep_gpu(cases).map_err(|e| Error::Gpu(e.to_string()))
+        self.sweep_gpu(cases).map_err(Error::from)
     }
 
     #[cfg(not(feature = "gpu"))]
@@ -498,16 +584,16 @@ struct GpuBackend;
 
 #[cfg(feature = "gpu")]
 impl Runner for GpuBackend {
-    type State = crate::gpu::GpuRunner;
+    type State = crate::engine::gpu::GpuRunner;
     type Error = bowshock_gpu::GpuError;
 
-    fn cold(&self, case: &Case) -> bowshock_gpu::Result<(PointResult, crate::gpu::GpuRunner)> {
-        let mut r = crate::gpu::GpuRunner::new(case, bowshock_gpu::Precision::Extended)?;
+    fn cold(&self, case: &Case) -> bowshock_gpu::Result<(PointResult, crate::engine::gpu::GpuRunner)> {
+        let mut r = crate::engine::gpu::GpuRunner::new(case, bowshock_gpu::Precision::Extended)?;
         let run = r.run_on(case, false, None)?;
         Ok((run.result, r))
     }
 
-    fn warm(&self, r: &mut crate::gpu::GpuRunner, case: &Case, r_ref: f64) -> bowshock_gpu::Result<PointResult> {
+    fn warm(&self, r: &mut crate::engine::gpu::GpuRunner, case: &Case, r_ref: f64) -> bowshock_gpu::Result<PointResult> {
         Ok(r.run_on(case, true, Some(r_ref))?.result)
     }
 }

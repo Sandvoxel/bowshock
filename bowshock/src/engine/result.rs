@@ -5,11 +5,17 @@ use std::fmt;
 /// Why an iteration loop stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StopReason {
+    /// The residual dropped by the requested number of orders.
     ResidualDrop,
+    /// The forebody or total drag is stationary over the monitor window.
     CdStationary,
+    /// The base pressure is stationary over the monitor window.
     BasePressureStationary,
+    /// The residual stopped decreasing.
     ResidualPlateau,
+    /// The iteration cap was reached.
     MaxIterations,
+    /// The state became non-finite or non-physical.
     NonFinite,
 }
 

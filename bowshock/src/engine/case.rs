@@ -1,8 +1,8 @@
 //! A single-Mach-number case: body, grids and numerics, and the solver built from them.
 
-use crate::body_grid::{base_domain_grid, large_domain_grid, BaseBody, BaseGridParams, LargeGridParams};
+use crate::engine::body_grid::{base_domain_grid, large_domain_grid, BaseBody, BaseGridParams, LargeGridParams};
+use crate::engine::numerics::Numerics;
 use crate::error::Error;
-use crate::numerics::Numerics;
 use bowshock_core::gas::freestream;
 use bowshock_core::solver::{Bc, Config, Solver, Turbulence, Viscous};
 

@@ -1,14 +1,14 @@
-//! GPU runs of whole cases through the facade runner (`bowshock::gpu::GpuRunner`, the GPU counterpart of `bowshock::run::run_on`) against
+//! GPU runs of whole cases through the facade runner (`bowshock::engine::gpu::GpuRunner`, the GPU counterpart of `bowshock::engine::run::run_on`) against
 //! the CPU runner with the same stopping rules: transonic runs and warm starts, subsonic sting / base runs, the base-pressure sample, a
 //! cold restart on a reused solver, converged implicit states, and `GpuSolver::set_config` (a Mach sweep point).
 
 mod common;
 
-use bowshock::body_grid::{Body, Nose};
-use bowshock::case::Case;
-use bowshock::gpu::{BaseSampler, GpuRun, GpuRunner};
-use bowshock::result::{PointResult, StopReason};
-use bowshock::run::{base_state, run_on};
+use bowshock::engine::body_grid::{Body, Nose};
+use bowshock::engine::case::Case;
+use bowshock::engine::gpu::{BaseSampler, GpuRun, GpuRunner};
+use bowshock::engine::result::{PointResult, StopReason};
+use bowshock::engine::run::{base_state, run_on};
 use bowshock_cases::subsonic::subsonic_case;
 use bowshock_cases::transonic::transonic_case;
 use bowshock_core::flux::Limiter;
@@ -18,7 +18,7 @@ use common::{far_field_box, perturbed_state, residual_diff, state_diff};
 
 /// Default transonic case: tangent ogive of fineness 3 plus a 6 d cylinder, grid level 0.
 fn transonic_level(mach: f64) -> Case {
-    transonic_case(mach, 0, Body { nose: bowshock::body_grid::Nose::TangentOgive { fineness: 3.0 } }, 6.0)
+    transonic_case(mach, 0, Body { nose: bowshock::engine::body_grid::Nose::TangentOgive { fineness: 3.0 } }, 6.0)
 }
 
 /// Short cold-start run at M = 0.9 followed by a warm-started run at M = 0.95 (`run_on` of both solvers with the same

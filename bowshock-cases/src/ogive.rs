@@ -4,7 +4,7 @@
 //! The geometry (`shock_expansion::Ogive`) is non-dimensionalised with the body diameter `d = 1`
 //! (radius `R = 0.5`); the nose runs over `0 <= x <= L_nose` and the cylinder over `L_nose <= x <= L_nose + cyl_length`.
 
-use bowshock::result::{StopReason, WallPoint};
+use bowshock::engine::result::{StopReason, WallPoint};
 use bowshock_core::flux::Limiter;
 use bowshock_core::gas::freestream;
 use bowshock_core::grid::Grid;

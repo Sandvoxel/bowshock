@@ -6,7 +6,7 @@
 //! 8000, max iterations, non-finite), see [`Monitor`]. The CPU loop uses the public `Solver::step` so that the final
 //! state is available for the field comparison.
 
-use bowshock::result::StopReason;
+use bowshock::engine::result::StopReason;
 use bowshock_core::gas::cons_to_prim;
 use bowshock_core::solver::Solver;
 use bowshock_gpu::{GpuSolver, Precision, Result};

@@ -11,8 +11,8 @@
 //! `--quick` = grid level 0. `--warm` = start every Mach number from the previous converged field (ascending order).
 //! Output: `out/transonic/` (`sweep_<tag>.csv`, `compare_<tag>.csv`, `cp_<tag>_M<m>.csv`, `residual_<tag>_M<m>.csv`, `tables_<tag>.md`).
 
-use bowshock::result::PointResult;
-use bowshock::run::run_on;
+use bowshock::engine::result::PointResult;
+use bowshock::engine::run::run_on;
 use bowshock_cases::ogive::wall_cp_at;
 use bowshock_cases::transonic::{named_body, stoney, tangent_cone_cd, transonic_case};
 use bowshock_core::flux::Limiter;

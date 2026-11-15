@@ -349,7 +349,7 @@ impl GpuSolver {
     }
 
     /// Conserved state of the two first cells behind the base face, `[(i_end, j), (i_end + 1, j)]`, for every row `j_sting..j_end` (the
-    /// extrapolation stencil of `bowshock::run::base_state`). Reads back only these rows.
+    /// extrapolation stencil of `bowshock::engine::run::base_state`). Reads back only these rows.
     pub fn base_cells(&self) -> Result<Vec<[[f64; 4]; 2]>> {
         if self.block().is_none() {
             return Err(GpuError::Unsupported("base_cells needs a solid block"));

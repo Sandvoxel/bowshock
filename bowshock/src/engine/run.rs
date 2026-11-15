@@ -5,10 +5,10 @@
 //! maximum cross-section `pi R^2`; one formula covers every wall part, `CD = integral Cp d(r^2 / R^2)` along the surface from the
 //! nose tip downstream (the base face is traversed from its outer to its inner radius, so `CD_base = -Cp_b A_b / A_ref`).
 
-use crate::body_grid::BaseBody;
-use crate::case::{Case, Wake};
-use crate::numerics::MONITOR_EVERY;
-use crate::result::{BasePoint, PointResult, StopReason, WallPoint};
+use crate::engine::body_grid::BaseBody;
+use crate::engine::case::{Case, Wake};
+use crate::engine::numerics::MONITOR_EVERY;
+use crate::engine::result::{BasePoint, PointResult, StopReason, WallPoint};
 use bowshock_core::gas::{cons_to_prim, freestream, prim_to_cons, sound_speed};
 use bowshock_core::solver::Solver;
 use bowshock_core::viscous::temperature;
@@ -346,8 +346,8 @@ pub fn finish(case: &Case, s: &Solver, residual: Vec<f64>, rmax: f64, hist: Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::body_grid::{Body, Nose};
-    use crate::numerics::Numerics;
+    use crate::engine::body_grid::{Body, Nose};
+    use crate::engine::numerics::Numerics;
     use bowshock_core::solver::{Turbulence, Viscous};
 
     fn case(tol: Option<f64>, wake: Wake) -> Case {

@@ -7,10 +7,10 @@
 //! uniform start on both sides).
 
 use bowshock::atmosphere::Atmosphere;
-use bowshock::body_grid::BaseBody;
-use bowshock::case::{Case, Wake};
-use bowshock::result::StopReason;
-use bowshock::run::{finish, run_on};
+use bowshock::engine::body_grid::BaseBody;
+use bowshock::engine::case::{Case, Wake};
+use bowshock::engine::result::StopReason;
+use bowshock::engine::run::{finish, run_on};
 use bowshock::spec::{AftSpec, BodySpec, NoseShape, NoseSpec};
 use bowshock_core::flux::Limiter;
 use bowshock_core::gas::freestream;
@@ -227,7 +227,7 @@ fn body_explicit_state_matches_cpu_df32() {
     assert!(max <= 1e-6, "state difference {max:e}");
 }
 
-/// The G3 body iterated to the stop rule of the CPU run (`bowshock::run::run_on`), the lazy solver for the same number of iterations from the free
+/// The G3 body iterated to the stop rule of the CPU run (`bowshock::engine::run::run_on`), the lazy solver for the same number of iterations from the free
 /// stream: the total drag within 1 %. (The CPU run takes about half a minute.)
 #[test]
 #[ignore = "runs the CPU solver to convergence (about half a minute)"]

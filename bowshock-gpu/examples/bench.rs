@@ -12,7 +12,7 @@
 //! `--quick` skips 400x200. Steady-state us/iteration excludes compilation: the first call of every loop form is run (and
 //! timed, reported separately as "first call") before the steady measurement starts.
 
-use bowshock::body_grid::Nose;
+use bowshock::engine::body_grid::Nose;
 use bowshock_cases::cone::{build_solver, ConeCase};
 use bowshock_cases::subsonic::subsonic_case;
 use bowshock_gpu::Staging;

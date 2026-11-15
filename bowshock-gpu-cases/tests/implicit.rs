@@ -7,7 +7,7 @@
 //! different preconditioners, not round-off: the state after 30 iterations (`max |dU| / (1 + |U|)`) is compared with tolerances of
 //! 1e-3 (f32) and 1e-4 (double-float).
 
-use bowshock::body_grid::Nose;
+use bowshock::engine::body_grid::Nose;
 use bowshock_cases::subsonic::{fox_case, subsonic_case};
 
 /// State after 30 implicit iterations (the first 5 first order) vs CPU, `Staging::Fluxes`.
@@ -38,7 +38,7 @@ macro_rules! state_check {
 
 #[test]
 fn implicit_scheme_state_matches_cpu() {
-    let cases: [(&str, fn() -> bowshock::case::Case); 3] = [
+    let cases: [(&str, fn() -> bowshock::engine::case::Case); 3] = [
         ("sting implicit", || subsonic_case(0.5, Nose::TangentOgive { fineness: 3.0 }, 0, false)),
         ("base implicit (j_sting = 0)", || subsonic_case(0.5, Nose::TangentOgive { fineness: 3.0 }, 0, true)),
         ("Fox sting + boattail implicit", || fox_case(false, 0.6, 0)),

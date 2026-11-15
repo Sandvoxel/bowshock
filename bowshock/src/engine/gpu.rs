@@ -1,4 +1,4 @@
-//! GPU runner of a [`Case`]: the same procedure, stopping rules and post-processing as the CPU [`crate::run::run_on`], with the
+//! GPU runner of a [`Case`]: the same procedure, stopping rules and post-processing as the CPU [`crate::engine::run::run_on`], with the
 //! iterations executed by `bowshock_gpu::GpuSolver` (Luma array ops).
 //!
 //! The GPU records [`SYNC`] iterations back to back and reads the residual history. The monitor of the CPU loop (every
@@ -9,10 +9,10 @@
 //! iteration by iteration, so the reported stop iteration is the CPU-equivalent one; the GPU may execute up to `SYNC - 1`
 //! further iterations (`iters_exec`) and the final wall state is the one after those.
 
-use crate::case::{Case, Wake};
-use crate::numerics::MONITOR_EVERY;
-use crate::result::{PointResult, StopReason};
-use crate::run::{finish, monitor, stop_reason, wall_distribution};
+use crate::engine::case::{Case, Wake};
+use crate::engine::numerics::MONITOR_EVERY;
+use crate::engine::result::{PointResult, StopReason};
+use crate::engine::run::{finish, monitor, stop_reason, wall_distribution};
 use bowshock_core::gas::{cons_to_prim, freestream};
 use bowshock_core::solver::Solver;
 use bowshock_gpu::{GpuSolver, Precision, Result};
@@ -68,7 +68,7 @@ impl GpuRunner {
         Ok(())
     }
 
-    /// Iterate to convergence on the GPU: the same procedure and arguments as [`crate::run::run_on`]
+    /// Iterate to convergence on the GPU: the same procedure and arguments as [`crate::engine::run::run_on`]
     /// (`warm`: keep the field, only change the free stream; `r_ref`: reference residual of the drop criterion).
     pub fn run_on(&mut self, case: &Case, warm: bool, r_ref: Option<f64>) -> Result<GpuRun> {
         let n = case.numerics;
@@ -148,7 +148,7 @@ impl GpuRunner {
     }
 }
 
-/// Host side of the GPU base-pressure sample: the geometric weights of [`crate::run::base_state`] per base row (extrapolation
+/// Host side of the GPU base-pressure sample: the geometric weights of [`crate::engine::run::base_state`] per base row (extrapolation
 /// factor `d0 / (d1 - d0)` and area weight), applied in f64 to the two cells per row of [`GpuSolver::base_cells`].
 pub struct BaseSampler {
     rows: Vec<(f64, f64)>,

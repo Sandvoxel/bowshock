@@ -1,13 +1,13 @@
 //! Subsonic validation cases (M ~ 0.1 - 0.8): nose-cylinder-(boattail) bodies, either with a flat blunt base and wake
 //! (`Wake::Base`) or with the cylinder continuing as a sting to the outflow plane (`Wake::Sting`), and the published Fox
-//! TM X-2439 wall-pressure data. The runner, stop rules and post-processing are in `bowshock::run`.
+//! TM X-2439 wall-pressure data. The runner, stop rules and post-processing are in `bowshock::engine::run`.
 //!
 //! Lengths are in body diameters (`d = 1`, `R = 0.5`). Drag coefficients are pressure drag only (inviscid), referenced to the
 //! maximum cross-section `pi R^2`.
 
-use bowshock::body_grid::{BaseBody, Body, Nose};
-use bowshock::case::{Case, Wake};
-use bowshock::numerics::Numerics;
+use bowshock::engine::body_grid::{BaseBody, Body, Nose};
+use bowshock::engine::case::{Case, Wake};
+use bowshock::engine::numerics::Numerics;
 
 /// Body `nose + 6 d` cylinder (no boattail, no sting), domain `10 L` upstream and radially, `5 L` downstream (`L` = total body
 /// length), grid level 0/1/2 (cells per diameter doubling each level). `base`: finite body with a flat base and a wake region
@@ -87,8 +87,8 @@ pub mod fox_tm_x2439 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bowshock::result::StopReason;
-    use bowshock::run::run_cold;
+    use bowshock::engine::result::StopReason;
+    use bowshock::engine::run::run_cold;
     use bowshock_core::gas::freestream;
     use bowshock_core::implicit::ImplicitParams;
     use bowshock_core::solver::Scheme;

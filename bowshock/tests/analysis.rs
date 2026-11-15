@@ -1,7 +1,5 @@
-use bowshock::analysis::{Analysis, Backend, Quality, Resolution, Warning};
-use bowshock::body_grid::{BaseBody, Body, Nose};
-use bowshock::error::Error;
-use bowshock::spec::{AftSpec, BodySpec, NoseShape, NoseSpec};
+use bowshock::engine::body_grid::{BaseBody, Body, Nose};
+use bowshock::{AftSpec, Analysis, Backend, BodySpec, Error, NoseShape, NoseSpec, Quality, Resolution, Warning};
 use bowshock_reference::base_drag::base_drag_coefficient;
 
 fn body() -> BaseBody {
@@ -17,8 +15,8 @@ fn points_come_back_in_input_order() {
     let polar = analysis(body()).run(&[0.9, 0.5]).unwrap();
     let machs: Vec<f64> = polar.points.iter().map(|p| p.mach).collect();
     assert_eq!(machs, [0.9, 0.5]);
-    assert_eq!(polar.points[0].detail.mach, 0.9);
-    assert_eq!(polar.points[1].detail.mach, 0.5);
+    assert_eq!(polar.points[0].mach, 0.9);
+    assert_eq!(polar.points[1].mach, 0.5);
 }
 
 #[test]
@@ -81,8 +79,11 @@ fn drag_is_referenced_to_the_largest_cross_section() {
     let polar = Analysis::new(&spec).unwrap().backend(Backend::Cpu).resolution(Resolution::Coarse).max_iterations(100).run(&[mach]).unwrap();
     let p = &polar.points[0];
     let base = base_drag_coefficient(mach) * (internal.base_radius() / internal.body.radius()).powi(2);
-    let internal_total = p.detail.cd_aft.iter().fold(p.detail.cd_nose, |a, c| a + c) + base;
+    let raw = p.detail.cd_aft.iter().fold(p.detail.cd_nose, |a, c| a + c) / 0.64;
+    let internal_total = raw + base;
     let expected = internal_total * 0.64;
+    let from_detail = p.detail.cd_nose + p.detail.cd_aft.iter().sum::<f64>() + p.drag.base;
+    assert!((p.drag.total - from_detail).abs() <= 1e-12 * from_detail.abs(), "{} vs {from_detail}", p.drag.total);
     assert!((p.drag.total - expected).abs() <= 1e-12 * expected.abs(), "{} vs {expected}", p.drag.total);
 }
 

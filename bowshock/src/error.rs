@@ -13,14 +13,23 @@ pub enum Error {
     Grid(String),
     /// The GPU backend failed.
     Gpu(String),
+    /// A solver invariant failed (a bug); the message names it.
+    Internal(String),
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::InvalidInput(m) | Error::Unsupported(m) | Error::Grid(m) | Error::Gpu(m) => f.write_str(m),
+            Error::InvalidInput(m) | Error::Unsupported(m) | Error::Grid(m) | Error::Gpu(m) | Error::Internal(m) => f.write_str(m),
         }
     }
 }
 
 impl std::error::Error for Error {}
+
+#[cfg(feature = "gpu")]
+impl From<bowshock_gpu::GpuError> for Error {
+    fn from(e: bowshock_gpu::GpuError) -> Self {
+        Error::Gpu(e.to_string())
+    }
+}

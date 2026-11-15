@@ -11,10 +11,10 @@
 //! the GPU with the same procedure and stopping rules. The GPU synchronises every 50 iterations (the CD sampling interval).
 //! Output: `out/gpu_transonic/`.
 
-use bowshock::case::Case;
-use bowshock::gpu::{GpuRun, GpuRunner, SYNC};
-use bowshock::result::PointResult;
-use bowshock::run::run_on;
+use bowshock::engine::case::Case;
+use bowshock::engine::gpu::{GpuRun, GpuRunner, SYNC};
+use bowshock::engine::result::PointResult;
+use bowshock::engine::run::run_on;
 use bowshock_cases::transonic::{named_body, stoney, tangent_cone_cd, transonic_case};
 use bowshock_core::flux::Limiter;
 use bowshock_core::implicit::ImplicitParams;

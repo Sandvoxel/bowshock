@@ -11,10 +11,10 @@
 //! (k-omega SST) side by side -> `tables_validate_rans.md`; `--lowmach-study` = low-Mach correction on/off at M = 0.1 ... 0.5 against
 //! potential theory -> `lowmach_<tag>.csv`, `tables_lowmach.md`.
 
-use bowshock::body_grid::{Body, Nose};
-use bowshock::case::{Case, Wake};
-use bowshock::result::{wall_cp_at, PointResult};
-use bowshock::run::{run_cold, run_on};
+use bowshock::engine::body_grid::{Body, Nose};
+use bowshock::engine::case::{Case, Wake};
+use bowshock::engine::result::{wall_cp_at, PointResult};
+use bowshock::engine::run::{run_cold, run_on};
 use bowshock_cases::subsonic::{fox_case, fox_tm_x2439 as fox, subsonic_case};
 use bowshock_cases::transonic::named_body;
 use bowshock_core::flux::Limiter;

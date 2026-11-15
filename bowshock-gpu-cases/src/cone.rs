@@ -8,7 +8,7 @@
 
 pub use crate::run::Monitor;
 use crate::run::{cpu_loop, field_diff, gpu_loop, Run};
-use bowshock::result::StopReason;
+use bowshock::engine::result::StopReason;
 use bowshock_cases::cone::{build_solver, ConeCase};
 use bowshock_core::gas::cons_to_prim;
 use bowshock_core::grid::Grid;

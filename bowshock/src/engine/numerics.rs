@@ -1,6 +1,6 @@
 //! Solver settings of a run: scheme, limiter, iteration limits and stop-rule tolerances.
 
-use crate::case::Wake;
+use crate::engine::case::Wake;
 use bowshock_core::flux::Limiter;
 use bowshock_core::implicit::{DtMode, ImplicitParams};
 use bowshock_core::solver::{Bc, Scheme};

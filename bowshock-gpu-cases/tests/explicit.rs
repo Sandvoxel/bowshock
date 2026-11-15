@@ -13,7 +13,7 @@
 
 mod common;
 
-use bowshock::body_grid::{Body, Nose};
+use bowshock::engine::body_grid::{Body, Nose};
 use bowshock_cases::cone::{build_solver, ConeCase};
 use bowshock_cases::ogive::OgiveCase;
 use bowshock_cases::subsonic::{fox_case, subsonic_case};

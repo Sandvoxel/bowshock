@@ -65,7 +65,7 @@ fn full_matrix() {
                 p.mach,
                 p.quality,
                 p.detail.stop_reason.to_string(),
-                p.detail.iters,
+                p.detail.iterations,
                 p.drag.forebody_pressure,
                 p.drag.base,
                 p.drag.total,

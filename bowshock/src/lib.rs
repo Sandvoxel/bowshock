@@ -1,14 +1,18 @@
-//! `bowshock`: rocket aerodynamics on top of the bowshock axisymmetric flow solver: body geometry and grids, cases,
-//! numerics and the CPU runner with its post-processing.
+//! `bowshock`: zero-lift drag of axisymmetric rocket bodies versus Mach number. Describe the body with [`BodySpec`], configure
+//! an [`Analysis`] (resolution, backend, viscous flight conditions) and run it to get a [`Polar`].
+
+#![warn(missing_docs)]
 
 pub mod analysis;
 pub mod atmosphere;
-pub mod body_grid;
-pub mod case;
+#[doc(hidden)]
+pub mod engine;
 pub mod error;
-#[cfg(feature = "gpu")]
-pub mod gpu;
-pub mod numerics;
-pub mod result;
-pub mod run;
 pub mod spec;
+
+pub use analysis::{Analysis, Backend, BackendUsed, Drag, PointDetail, Polar, PolarPoint, Quality, Resolution, WallCp, Warning};
+pub use atmosphere::{AirState, Atmosphere, FlightConditions};
+pub use engine::case::Wake;
+pub use engine::result::StopReason;
+pub use error::Error;
+pub use spec::{AftSpec, BodySpec, NoseShape, NoseSpec};

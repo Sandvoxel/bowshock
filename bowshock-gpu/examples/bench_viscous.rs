@@ -11,8 +11,8 @@
 //! one lazy step.
 
 use bowshock::atmosphere::Atmosphere;
-use bowshock::body_grid::BaseBody;
-use bowshock::case::{Case, Wake};
+use bowshock::engine::body_grid::BaseBody;
+use bowshock::engine::case::{Case, Wake};
 use bowshock::spec::{AftSpec, BodySpec, NoseShape, NoseSpec};
 use bowshock_core::solver::Turbulence;
 use bowshock_gpu::Staging;

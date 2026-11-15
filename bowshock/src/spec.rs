@@ -1,6 +1,6 @@
 //! Dimensional body description (metres) and its conversion to the internal body (lengths in nose diameters).
 
-use crate::body_grid::{BaseBody, Body, Nose, Segment};
+use crate::engine::body_grid::{BaseBody, Body, Nose, Segment};
 use crate::error::Error;
 
 /// Longest accepted body, in nose diameters.
@@ -16,16 +16,26 @@ pub enum NoseShape {
     /// Circular-arc tangent ogive.
     TangentOgive,
     /// Power series `r/R = (x/L)^n`, `n` in `[0.5, 1]`.
-    Power { n: f64 },
+    Power {
+        /// Exponent.
+        n: f64,
+    },
     /// Parabolic series with parameter `k` in `[0, 1]` (`0` cone, `1` tangent parabola).
-    Parabolic { k: f64 },
+    Parabolic {
+        /// Series parameter.
+        k: f64,
+    },
     /// Haack series with parameter `c` in `[0, 1/3]` (`0` Von Karman, `1/3` LV-Haack).
-    Haack { c: f64 },
+    Haack {
+        /// Series parameter.
+        c: f64,
+    },
 }
 
 /// Nose of the body, in metres.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NoseSpec {
+    /// Profile family.
     pub shape: NoseShape,
     /// Axial length of the nose.
     pub length: f64,
@@ -37,19 +47,30 @@ pub struct NoseSpec {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AftSpec {
     /// Constant-diameter tube.
-    Tube { length: f64 },
+    Tube {
+        /// Axial length.
+        length: f64,
+    },
     /// Cone frustum (flare or boattail) from the current diameter to `aft_diameter`.
-    Transition { length: f64, aft_diameter: f64 },
+    Transition {
+        /// Axial length.
+        length: f64,
+        /// Diameter at the aft end.
+        aft_diameter: f64,
+    },
 }
 
 /// Axisymmetric body: a nose followed by tubes and transitions, ending in a flat base.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BodySpec {
+    /// The nose.
     pub nose: NoseSpec,
+    /// Sections behind the nose, in order, ending in the flat base.
     pub aft: Vec<AftSpec>,
 }
 
 /// Conversion between the internal units and the dimensional body.
+#[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Scale {
     /// Metres per internal length unit (the nose diameter).
@@ -80,6 +101,7 @@ impl BodySpec {
     }
 
     /// Validate the body and convert it to the internal body (lengths divided by the nose diameter) and its [`Scale`].
+    #[doc(hidden)]
     pub fn to_internal(&self) -> Result<(BaseBody, Scale), Error> {
         let n = &self.nose;
         positive("nose.length", n.length)?;

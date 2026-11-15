@@ -1,8 +1,6 @@
 //! Viscous (RANS, k-omega SST) analysis gate G3: skin friction, wall resolution and base pressure of a body at subsonic speed.
 
-use bowshock::analysis::{Analysis, Backend, Quality, Resolution};
-use bowshock::atmosphere::{Atmosphere, FlightConditions};
-use bowshock::spec::{AftSpec, BodySpec, NoseShape, NoseSpec};
+use bowshock::{AftSpec, Analysis, Atmosphere, Backend, BodySpec, FlightConditions, NoseShape, NoseSpec, Quality, Resolution};
 use std::time::Instant;
 
 /// Tangent ogive 0.30 x 0.10 m and a 0.60 m tube at Mach 0.5 in the ISA at sea level: the friction drag is within 15 % of the
@@ -27,16 +25,19 @@ fn g3_ogive_cylinder_friction_and_base_pressure() {
     // flat-plate friction over the wetted area, in units of the nose base area
     let re_l = re_c * mach * (nose_len + tube_len) / d;
     let cf = 0.455 / re_l.log10().powf(2.58) / (1.0 + 0.144 * mach * mach).powf(0.65);
-    let radius = 0.5;
+    let radius = 0.5 * d;
     let wetted: f64 = r.wall.windows(2).map(|w| 2.0 * 0.5 * (w[0].r + w[1].r) * (w[1].x - w[0].x).hypot(w[1].r - w[0].r) / (radius * radius)).sum();
     let cd_f_est = cf * wetted;
 
-    println!("G3: {} after {} iterations ({:.0} s), quality {:?}, drop {:.1} orders", r.stop_reason, r.iters, wall_seconds, p.quality, r.drop_orders);
+    println!(
+        "G3: {} after {} iterations ({:.0} s), quality {:?}, drop {:.1} orders",
+        r.stop_reason, r.iterations, wall_seconds, p.quality, r.residual_drop_orders
+    );
     println!("G3: re_c {re_c:.4e}  Re_L {re_l:.4e}  Cf {cf:.5}  S_wet/A_ref {wetted:.3}");
     println!("G3: cd_friction {:.5}  flat-plate estimate {cd_f_est:.5}  ratio {:.3}", r.cd_friction, r.cd_friction / cd_f_est);
     println!(
         "G3: y_plus_max {:.3}  cp_base {:.4}  cd_base {:.5}  cd_pressure {:.5}  cd_total {:.5}",
-        r.y_plus_max, r.cp_base, r.cd_base, p.drag.forebody_pressure, p.drag.total
+        r.y_plus_max, r.cp_base, r.cd_base_solver, p.drag.forebody_pressure, p.drag.total
     );
     println!("G3: warnings {:?}  backend {:?}  fallback {:?}", p.warnings, polar.backend, polar.fallback);
 
@@ -59,14 +60,17 @@ fn flight() -> FlightConditions {
 
 #[test]
 fn viscous_analysis_needs_a_dimensional_spec() {
-    let body = bowshock::body_grid::BaseBody::cylinder(bowshock::body_grid::Body { nose: bowshock::body_grid::Nose::TangentOgive { fineness: 3.0 } }, 6.0);
+    let body = bowshock::engine::body_grid::BaseBody::cylinder(
+        bowshock::engine::body_grid::Body { nose: bowshock::engine::body_grid::Nose::TangentOgive { fineness: 3.0 } },
+        6.0,
+    );
     let err = Analysis::from_internal(body).backend(Backend::Cpu).viscous(flight()).run(&[0.5]).unwrap_err();
-    assert!(matches!(err, bowshock::error::Error::InvalidInput(m) if m.contains("dimensional BodySpec")));
+    assert!(matches!(err, bowshock::Error::InvalidInput(m) if m.contains("dimensional BodySpec")));
 }
 
 #[test]
 fn viscous_grids_pass_the_quality_check_and_report_friction() {
-    use bowshock::case::Wake;
+    use bowshock::Wake;
     for (wake, base_modelled) in [(None, false), (Some(Wake::Sting), true)] {
         let mut a = Analysis::new(&spec()).unwrap().backend(Backend::Cpu).resolution(Resolution::Coarse).viscous(flight()).max_iterations(5);
         if let Some(w) = wake {
@@ -99,7 +103,7 @@ fn g3_gpu_matches_cpu() {
     println!("G3: cd_total    cpu {:.5}  gpu {:.5}  rel {:.4}", cpu.drag.total, gpu.drag.total, gpu.drag.total / cpu.drag.total - 1.0);
     println!("G3: cd_friction cpu {:.5}  gpu {:.5}  rel {:.4}", c.cd_friction, g.cd_friction, g.cd_friction / c.cd_friction - 1.0);
     println!("G3: cp_base     cpu {:.4}  gpu {:.4}  diff {:.4}", c.cp_base, g.cp_base, g.cp_base - c.cp_base);
-    println!("G3: iters cpu {} gpu {}; quality cpu {:?} gpu {:?}", c.iters, g.iters, cpu.quality, gpu.quality);
+    println!("G3: iters cpu {} gpu {}; quality cpu {:?} gpu {:?}", c.iterations, g.iterations, cpu.quality, gpu.quality);
     assert!((gpu.drag.total / cpu.drag.total - 1.0).abs() < 0.01);
     assert!((g.cd_friction / c.cd_friction - 1.0).abs() < 0.02);
     assert!((g.cp_base - c.cp_base).abs() < 0.01);

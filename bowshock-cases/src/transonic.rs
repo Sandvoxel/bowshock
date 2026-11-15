@@ -5,9 +5,9 @@
 //! Boundary set-up: inflow plane and outer boundary `Bc::Characteristic`; outflow plane `Bc::Characteristic` (default)
 //! or `Bc::PressureOutflow`; axis/body `Bc::SlipWall`. Lengths are in body diameters.
 
-use bowshock::body_grid::{BaseBody, Body, Nose};
-use bowshock::case::{Case, Wake};
-use bowshock::numerics::Numerics;
+use bowshock::engine::body_grid::{BaseBody, Body, Nose};
+use bowshock::engine::case::{Case, Wake};
+use bowshock::engine::numerics::Numerics;
 
 /// Transonic validation case: nose + cylinder `cyl_length` long, sting wake (no base), explicit minmod numerics
 /// ([`Numerics::transonic`]); domain 10 body lengths upstream and radially, 5 downstream.
@@ -181,7 +181,7 @@ pub mod czarnecki_monta {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bowshock::run::run_cold;
+    use bowshock::engine::run::run_cold;
     use bowshock_core::flux::Limiter;
     use bowshock_core::gas::{cons_to_prim, freestream, prim_to_cons};
     use bowshock_core::grid::Grid;

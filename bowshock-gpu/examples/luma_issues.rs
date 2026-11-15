@@ -12,7 +12,7 @@
 //! `cargo run --release --example luma_issues [-- 3]` (`3`: only case 3; `LUMA_ISSUES_ONLY=<grid>:<staging>:<prec>:<yes|no>` limits it to
 //! the rows starting so, `LUMA_ISSUES_KERNELS=1` lists the kernels of the `eval` step)
 
-use bowshock::body_grid::Nose;
+use bowshock::engine::body_grid::Nose;
 use bowshock_cases::cone::{build_solver, ConeCase};
 use bowshock_cases::subsonic::{fox_case, subsonic_case};
 use bowshock_core::solver::Scheme;
@@ -65,7 +65,7 @@ fn case3(ctx: &luma::Context) {
         "grid", "staging", "prec", "block", "replay L", "replay us", "eval L", "eval us", "cuts"
     );
     // the two block grids, and a block-free cone grid of the base grid's size (the reference of the issue list)
-    let solid = |label: &'static str, mut case: bowshock::case::Case| {
+    let solid = |label: &'static str, mut case: bowshock::engine::case::Case| {
         case.numerics.scheme = Scheme::Explicit;
         let mut host = case.build_solver();
         if host.scheme() != Scheme::Explicit {
