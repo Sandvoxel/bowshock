@@ -426,7 +426,8 @@ pub(crate) mod tests {
     /// and the measured `cf / Blasius - 1` is +1.4 % (x = 0.50) / +3.2 % (x = 0.89), independent of the wall-normal and
     /// streamwise resolution (n_plate 120, nj 72, dr_wall 1e-4: +1.5 % / +3.5 %); with 0.6 it is +0.64 % / +1.63 %, with 1.2 it
     /// is +0.26 % / +0.76 %. The density residual plateaus about 4.4 orders below its peak (limiter chatter) while `cf` is
-    /// stationary to three digits, so the run ends at the 6000-iteration limit (about 25 s in release).
+    /// stationary to three digits, so the run ends when both checked `cf` values changed by less than 1e-5 in 250 iterations
+    /// (about 1000 iterations, 4 s in release; the 6000-iteration limit took about 25 s).
     #[test]
     fn g1_laminar_flat_plate_matches_blasius() {
         let (mach, re_c) = (0.2, 1e6);
@@ -444,6 +445,7 @@ pub(crate) mod tests {
         let v = Viscous { re_c, sutherland: 0.368, turbulence: Turbulence::Laminar, wall_i_start: 20 };
         s.set_viscous(Some(v));
         let (mut peak, mut last, mut iters) = (0.0f64, f64::INFINITY, 0);
+        let mut cf_prev = [f64::NAN; 2];
         for it in 0..6000 {
             let r = s.step();
             iters = it + 1;
@@ -451,6 +453,15 @@ pub(crate) mod tests {
             if it > 20 {
                 peak = peak.max(r);
                 if peak / r >= 1e5 {
+                    break;
+                }
+            }
+            // the residual plateaus; the quantity under test is stationary once both checked cf values change by < 1e-5 in 250 iterations
+            if it % 250 == 249 {
+                let cf = [cf_at(&s, &v, mach, 0.5).1, cf_at(&s, &v, mach, 0.9).1];
+                let settled = cf.iter().zip(&cf_prev).all(|(c, p)| (c / p - 1.0).abs() < 1e-5);
+                cf_prev = cf;
+                if settled {
                     break;
                 }
             }

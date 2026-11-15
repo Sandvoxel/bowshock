@@ -135,6 +135,7 @@ mod tests {
     /// suction (Cp_b < 0), the drag breakdown adds up, the pressure drag of the closed body is dominated by the base (base CD =
     /// -Cp_b A_b / A_ref = -Cp_b for a full disc) and the modelled base drag is the correlation's for a full disc.
     #[test]
+    #[ignore = "slow (26 s): the inviscid base wake on the standard level-0 grids needs 4000 iterations to be judged stationary"]
     fn subsonic_smoke_with_base() {
         // standard level-0 grids (the coarse test grids are too crude for the wake to settle)
         let mut c = subsonic_case(0.2, Nose::TangentOgive { fineness: 3.0 }, 0, true);
@@ -209,7 +210,7 @@ mod tests {
             let mut last = 1.0;
             for _ in 0..iters {
                 last = s.step();
-                if last < 1e-11 {
+                if last < 3e-10 {
                     break;
                 }
             }

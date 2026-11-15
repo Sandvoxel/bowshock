@@ -29,24 +29,32 @@ fn body_c() -> BodySpec {
     }
 }
 
-#[test]
-fn small_matrix_never_fails() {
+fn small_matrix_never_fails(name: &str, spec: &BodySpec) {
     let machs = [0.5, 0.95, 1.6];
-    for (name, spec) in [("A", body_a()), ("B", body_b())] {
-        let polar = Analysis::new(&spec)
-            .unwrap()
-            .backend(Backend::Cpu)
-            .resolution(Resolution::Coarse)
-            .max_iterations(1500)
-            .run(&machs)
-            .unwrap_or_else(|e| panic!("body {name}: {e}"));
-        assert_eq!(polar.points.len(), machs.len());
-        for (k, p) in polar.points.iter().enumerate() {
-            assert_eq!(p.mach, machs[k], "body {name}: order");
-            assert_ne!(p.quality, Quality::Failed, "body {name} M{}: {:?}", p.mach, p.detail.stop_reason);
-            assert!(p.drag.total.is_finite() && p.drag.total > 0.0, "body {name} M{}: total {}", p.mach, p.drag.total);
-        }
+    let polar = Analysis::new(spec)
+        .unwrap()
+        .backend(Backend::Cpu)
+        .resolution(Resolution::Coarse)
+        .max_iterations(1500)
+        .run(&machs)
+        .unwrap_or_else(|e| panic!("body {name}: {e}"));
+    assert_eq!(polar.points.len(), machs.len());
+    for (k, p) in polar.points.iter().enumerate() {
+        assert_eq!(p.mach, machs[k], "body {name}: order");
+        assert_ne!(p.quality, Quality::Failed, "body {name} M{}: {:?}", p.mach, p.detail.stop_reason);
+        assert!(p.drag.total.is_finite() && p.drag.total > 0.0, "body {name} M{}: total {}", p.mach, p.drag.total);
     }
+}
+
+// one test per body so that the two sweeps run in parallel
+#[test]
+fn small_matrix_never_fails_body_a() {
+    small_matrix_never_fails("A", &body_a());
+}
+
+#[test]
+fn small_matrix_never_fails_body_b() {
+    small_matrix_never_fails("B", &body_b());
 }
 
 #[test]

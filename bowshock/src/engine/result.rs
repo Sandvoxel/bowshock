@@ -12,6 +12,9 @@ pub enum StopReason {
     CdStationary,
     /// The base pressure is stationary over the monitor window.
     BasePressureStationary,
+    /// The monitored total drag oscillates in a bounded limit cycle whose mean is stationary; the run stopped where the drag
+    /// crosses that mean.
+    MeanStationary,
     /// The residual stopped decreasing.
     ResidualPlateau,
     /// The iteration cap was reached.
@@ -26,6 +29,7 @@ impl fmt::Display for StopReason {
             StopReason::ResidualDrop => "residual drop reached",
             StopReason::CdStationary => "CD stationary",
             StopReason::BasePressureStationary => "base pressure stationary",
+            StopReason::MeanStationary => "mean stationary",
             StopReason::ResidualPlateau => "residual plateau",
             StopReason::MaxIterations => "max iterations",
             StopReason::NonFinite => "non-finite residual",

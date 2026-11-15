@@ -122,6 +122,12 @@ pub enum Warning {
         /// Largest `y+` of the first wall cell.
         y_plus_max: f64,
     },
+    /// The total drag oscillated by `cd_range` (on the reference area) over the last two averaging windows, a bounded limit cycle
+    /// with a stationary mean; the point is reported at the crossing of that mean.
+    OscillatingDrag {
+        /// Max - min of the total drag over the averaging windows.
+        cd_range: f64,
+    },
 }
 
 /// One Mach number of a sweep.
@@ -550,6 +556,13 @@ impl Analysis {
         if detail.y_plus_max > 5.0 {
             w.push(Warning::WallResolution { y_plus_max: detail.y_plus_max });
         }
+        if detail.stop_reason == StopReason::MeanStationary {
+            let window = self.numerics.and_then(|n| n.mean_window).or(Numerics::viscous(mach, 0).mean_window).unwrap_or(0);
+            let k = (window / crate::engine::numerics::MONITOR_EVERY).max(1);
+            let h = &detail.monitor_history;
+            let (lo, hi) = h[h.len().saturating_sub(2 * k)..].iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), c| (l.min(c.1), h.max(c.1)));
+            w.push(Warning::OscillatingDrag { cd_range: (hi - lo) * (self.d_nose / self.d_ref).powi(2) });
+        }
         w
     }
 
@@ -656,7 +669,7 @@ fn quality(d: &PointResult, drag: &Drag) -> Quality {
     }
     match d.stop_reason {
         StopReason::ResidualDrop => Quality::Converged,
-        StopReason::CdStationary | StopReason::BasePressureStationary | StopReason::ResidualPlateau => Quality::Stationary,
+        StopReason::CdStationary | StopReason::MeanStationary | StopReason::BasePressureStationary | StopReason::ResidualPlateau => Quality::Stationary,
         StopReason::MaxIterations => Quality::Stalled,
         StopReason::NonFinite => Quality::Failed,
     }

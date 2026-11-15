@@ -71,7 +71,8 @@ pub fn run_on(case: &Case, s: &mut Solver, warm: bool, r_ref: Option<f64>) -> Po
 /// from `2 monitor_window` on and once the residual has dropped 2 orders, a monitor range (`hist`, one sample per `MONITOR_EVERY`
 /// iterations) below the tolerance over the last `monitor_window` iterations (`BasePressureStationary` for an inviscid base wake,
 /// `CdStationary` for a sting and for every viscous case, whose monitor is the total CD; the inviscid wake can be unsteady, the
-/// residual then stalls). `skip` is 20 on a cold start, 0 warm.
+/// residual then stalls); then, for a viscous case with a `mean_window` and at every monitor sample, [`mean_stationary`]
+/// (`MeanStationary`). `skip` is 20 on a cold start, 0 warm.
 pub fn stop_reason(case: &Case, it: usize, r: f64, reference: f64, skip: usize, hist: &[(usize, f64)]) -> Option<StopReason> {
     let n = &case.numerics;
     if !r.is_finite() {
@@ -95,7 +96,32 @@ pub fn stop_reason(case: &Case, it: usize, r: f64, reference: f64, skip: usize, 
             }
         }
     }
+    if let (true, Some(window), Some(&(last, _))) = (case.viscous.is_some(), n.mean_window, hist.last()) {
+        if last == it + 1 && mean_stationary(hist, window / MONITOR_EVERY) {
+            return Some(StopReason::MeanStationary);
+        }
+    }
     None
+}
+
+/// Mean-stationary test of a monitor history on the samples with iteration `> 2000` (the start-up transient is not judged), with
+/// `k` samples per averaging window: `m1` is the mean of the last `k` samples, `m0` the mean of the `k` before them and
+/// `m = (m0 + m1) / 2`. True when there are `2k` such samples, `|m1 - m0| <= 2e-3 |m|` (the mean of the oscillation is stationary),
+/// `max - min <= 0.05 |m|` over the last `2k` samples (the oscillation is bounded) and the last two samples lie on opposite sides
+/// of `m` (the state is at the mean of the cycle). `k = 0` never holds.
+pub fn mean_stationary(hist: &[(usize, f64)], k: usize) -> bool {
+    let from = hist.partition_point(|&(it, _)| it <= 2000);
+    let h = &hist[from..];
+    if k == 0 || h.len() < 2 * k {
+        return false;
+    }
+    let w = &h[h.len() - 2 * k..];
+    let mean = |s: &[(usize, f64)]| s.iter().map(|c| c.1).sum::<f64>() / k as f64;
+    let (m0, m1) = (mean(&w[..k]), mean(&w[k..]));
+    let m = 0.5 * (m0 + m1);
+    let (lo, hi) = w.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), c| (l.min(c.1), h.max(c.1)));
+    let (a, b) = (w[2 * k - 2].1 - m, w[2 * k - 1].1 - m);
+    (m1 - m0).abs() <= 2e-3 * m.abs() && hi - lo <= 0.05 * m.abs() && a * b < 0.0
 }
 
 /// Convergence monitor of the current state: the total CD of a viscous case, else the nose CD (sting wake) or the area-mean base
@@ -389,5 +415,48 @@ mod tests {
         let mut v = case(Some(1e-3), Wake::Base);
         v.viscous = Some(Viscous { re_c: 1e6, sutherland: 0.38, turbulence: Turbulence::Sst, wall_i_start: 28 });
         assert_eq!(stop_reason(&v, 4999, 1e-3, 1.0, 20, &flat), Some(StopReason::CdStationary));
+    }
+
+    fn cycle(end: usize, mean: f64, amp: f64, drift_per_1000: f64) -> Vec<(usize, f64)> {
+        (1..=end / 50)
+            .map(|k| {
+                let it = k * 50;
+                (it, mean + amp * (std::f64::consts::TAU * it as f64 / 6000.0).sin() + drift_per_1000 * it as f64 / 1000.0)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn mean_stationary_stops_at_a_mean_crossing_of_a_limit_cycle() {
+        let mut v = case(Some(1e-4), Wake::Base);
+        v.viscous = Some(Viscous { re_c: 1e6, sutherland: 0.38, turbulence: Turbulence::Sst, wall_i_start: 28 });
+        v.numerics.mean_window = Some(6000);
+        let full = cycle(40_000, 0.1475, 0.0015, 0.0);
+        // first monitor sample that stops: not before 2 windows after the start-up, and with the last two samples across the mean
+        let stop = (1..=full.len()).find(|&n| stop_reason(&v, full[n - 1].0 - 1, 1e-3, 1.0, 20, &full[..n]).is_some()).expect("a stop");
+        let it = full[stop - 1].0;
+        assert!(it >= 2000 + 2 * 6000, "stopped at {it}");
+        assert_eq!(stop_reason(&v, it - 1, 1e-3, 1.0, 20, &full[..stop]), Some(StopReason::MeanStationary));
+        let (a, b) = (full[stop - 2].1 - 0.1475, full[stop - 1].1 - 0.1475);
+        assert!(a * b <= 0.0, "not at a mean crossing: {a} {b}");
+        // a call between two monitor samples never stops
+        assert_eq!(stop_reason(&v, it, 1e-3, 1.0, 20, &full[..stop]), None);
+        // Euler (no viscous model) and a case without a mean window never use the rule
+        let e = case(Some(1e-4), Wake::Base);
+        assert_eq!(stop_reason(&e, it - 1, 1e-3, 1.0, 20, &full[..stop]), None);
+        v.numerics.mean_window = None;
+        assert_eq!(stop_reason(&v, it - 1, 1e-3, 1.0, 20, &full[..stop]), None);
+    }
+
+    #[test]
+    fn mean_stationary_rejects_a_drifting_mean_and_a_large_oscillation() {
+        let any = |h: &[(usize, f64)]| (240..=h.len()).any(|n| mean_stationary(&h[..n], 120));
+        assert!(any(&cycle(40_000, 0.1475, 0.0015, 0.0)));
+        // mean drift of 1.2e-3 per window (0.8 %) > 0.2 %
+        assert!(!any(&cycle(40_000, 0.1475, 0.0015, 2e-4)));
+        // peak-to-peak 8 % > 5 %
+        assert!(!any(&cycle(40_000, 0.1475, 0.006, 0.0)));
+        // too short a history: fewer than 2 windows after the start-up
+        assert!(!mean_stationary(&cycle(13_000, 0.1475, 0.0015, 0.0), 120));
     }
 }

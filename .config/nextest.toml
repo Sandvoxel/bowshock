@@ -1,0 +1,4 @@
+# cargo-nextest: report every test that runs longer than 10 s as SLOW (default tests are meant to stay under that; longer ones
+# are `#[ignore]`d with their measured time). `cargo test` keeps working; doctests need `cargo test --doc`.
+[profile.default]
+slow-timeout = { period = "10s" }

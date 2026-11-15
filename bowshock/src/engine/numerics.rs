@@ -35,6 +35,10 @@ pub struct Numerics {
     pub monitor_window: usize,
     /// Monitor range below which a run counts as stationary; `None`: no "stationary" stop rule.
     pub monitor_tol: Option<f64>,
+    /// Averaging window [iterations] of the mean-stationary stop rule (`None`: no such rule; only [`Numerics::viscous`] sets it). A
+    /// viscous run whose total drag settles into a bounded limit cycle never satisfies `monitor_tol`; the rule stops it where the
+    /// drag crosses the stationary mean of the cycle. The window should span at least one period of the cycle.
+    pub mean_window: Option<usize>,
 }
 
 impl Numerics {
@@ -55,6 +59,7 @@ impl Numerics {
                 Wake::Base => Some(1e-3),
                 Wake::Sting => None,
             },
+            mean_window: None,
         }
     }
 
@@ -72,6 +77,7 @@ impl Numerics {
             outflow: Bc::Characteristic,
             monitor_window: 2000,
             monitor_tol: Some(2e-4),
+            mean_window: None,
         }
     }
 
@@ -87,7 +93,7 @@ impl Numerics {
 
     /// Wall-resolved RANS (viscous terms and k-omega SST): line-implicit with the viscous parameters, van Albada limiter and the
     /// low-Mach correction below [`REGIME_SPLIT_MACH`], minmod without correction otherwise; stationary tolerance 1e-4 on the
-    /// total CD.
+    /// total CD, and the mean-stationary rule with a window of 6000 iterations (one period of the limit cycle of the subsonic runs).
     pub fn viscous(mach: f64, level: u32) -> Numerics {
         let subsonic = mach < REGIME_SPLIT_MACH;
         Numerics {
@@ -102,6 +108,7 @@ impl Numerics {
             outflow: Bc::Characteristic,
             monitor_window: 2000,
             monitor_tol: Some(1e-4),
+            mean_window: Some(6000),
         }
     }
 }
