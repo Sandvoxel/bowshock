@@ -518,6 +518,48 @@ fn place_event_labels(wants: &[LabelWant], x0: f32, x1: f32) -> Vec<Option<(f32,
     out
 }
 
+/// Vertical room of a margin label (a tick-sized line plus air).
+const MARGIN_LABEL_GAP: f32 = 14.0;
+/// Vertical room of an inside label (a small-text line).
+const INSIDE_LABEL_GAP: f32 = 13.0;
+/// Average advance of the proportional label font, in ems (a generous mean, so a fitted label never overruns).
+const SANS_EM: f32 = 0.56;
+
+/// Moves the label positions `ys` (px, y down) the least that leaves `gap` between neighbours and keeps them in `lo..=hi`.
+/// Returns, for each place in the sorted order now held by `ys`, the index the label had on entry, so `ys[j]` belongs to the
+/// label `order[j]`.
+pub(crate) fn spread(ys: &mut [f32], gap: f32, lo: f32, hi: f32) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..ys.len()).collect();
+    order.sort_by(|&a, &b| ys[a].total_cmp(&ys[b]));
+    let sorted: Vec<f32> = order.iter().map(|&k| ys[k]).collect();
+    ys.copy_from_slice(&sorted);
+    for k in 0..ys.len() {
+        ys[k] = ys[k].max(lo);
+        if k > 0 && ys[k] < ys[k - 1] + gap {
+            ys[k] = ys[k - 1] + gap;
+        }
+    }
+    // Past the bottom: push the run back up so the last one sits on `hi`.
+    for k in (0..ys.len()).rev() {
+        let limit = if k + 1 < ys.len() { ys[k + 1] - gap } else { hi };
+        if ys[k] > limit {
+            ys[k] = limit;
+        }
+    }
+    order
+}
+
+/// `text` cut with an ellipsis so that it fits `room` px in a proportional font of `size`.
+pub(crate) fn ellipsize(text: &str, room: f32, size: f32) -> String {
+    let fit = (room / (size * SANS_EM)).floor().max(1.0) as usize;
+    if text.chars().count() <= fit {
+        return text.to_string();
+    }
+    let mut cut: String = text.chars().take(fit.saturating_sub(1)).collect();
+    cut.push('…');
+    cut
+}
+
 fn mono_width(chars: usize, size: f32) -> f32 {
     chars as f32 * size * GLYPH_EM
 }
@@ -778,6 +820,7 @@ impl PlotView<'_> {
 
         // Direct labels: margin labels (de-overlapped) and inside labels.
         let mut margin: Vec<(f32, String, Color)> = Vec::new();
+        let mut inside: Vec<(f32, String)> = Vec::new();
         let mut ends: Vec<Rectangle> = Vec::new();
         let xs = panel.stack_xs(w0, w1);
         let layers = panel.stack_layers(&xs);
@@ -811,29 +854,23 @@ impl PlotView<'_> {
                 LabelAt::Inside => {
                     let x_label = (w1 - (w1 - w0) * 40.0 / f64::from(plot.width)).max(w0);
                     let y = s.value_at(x_label.min(x_end)).unwrap_or(y_end);
-                    put(
-                        f,
-                        s.label_text.as_deref().unwrap_or(&s.name),
-                        Point::new(right - 6.0, ymap(y) - 5.0),
-                        t.ink_muted,
-                        FONT_SMALL,
-                        Alignment::Right,
-                        alignment::Vertical::Bottom,
-                        MONO,
-                    );
+                    inside.push((ymap(y) - 5.0, s.label_text.clone().unwrap_or_else(|| s.name.clone())));
                 }
             }
         }
-        margin.sort_by(|a, b| a.0.total_cmp(&b.0));
-        for k in 1..margin.len() {
-            let floor = margin[k - 1].0 + 14.0;
-            if margin[k].0 < floor {
-                margin[k].0 = floor;
-            }
+        // Lines that end at about one height stack their labels instead of printing over each other.
+        let mut ys: Vec<f32> = inside.iter().map(|l| l.0).collect();
+        let order = spread(&mut ys, INSIDE_LABEL_GAP, plot.y + INSIDE_LABEL_GAP, bottom);
+        for (&k, y) in order.iter().zip(&ys) {
+            put(f, &inside[k].1, Point::new(right - 6.0, *y), t.ink_muted, FONT_SMALL, Alignment::Right, alignment::Vertical::Bottom, MONO);
         }
-        for (y, name, color) in margin {
-            f.fill_rectangle(Point::new(right + 6.0, y - 4.0), Size::new(8.0, 8.0), color);
-            put(f, &name, Point::new(right + 18.0, y), t.ink_muted, FONT_TICK, Alignment::Left, alignment::Vertical::Center, SANS);
+        let mut ys: Vec<f32> = margin.iter().map(|l| l.0).collect();
+        let order = spread(&mut ys, MARGIN_LABEL_GAP, plot.y + 4.0, bottom - 4.0);
+        let room = self.group.right_margin + PAD_R - 18.0 - 2.0;
+        for (&k, y) in order.iter().zip(&ys) {
+            let (_, name, color) = &margin[k];
+            f.fill_rectangle(Point::new(right + 6.0, y - 4.0), Size::new(8.0, 8.0), *color);
+            put(f, &ellipsize(name, room, FONT_TICK), Point::new(right + 18.0, *y), t.ink_muted, FONT_TICK, Alignment::Left, alignment::Vertical::Center, SANS);
         }
 
         // Key of the line styles, in the title row after the title, on a backing so no line strikes through it.
@@ -1256,6 +1293,31 @@ mod tests {
         // Away from the title the tag is above-right of the point, as before.
         let o = tag_position(plot, avoid, Point::new(300.0, 200.0), w);
         assert_eq!((o.x, o.y), (310.0, 172.0));
+    }
+
+    #[test]
+    fn stacked_labels_never_overlap_and_stay_inside() {
+        // Three lines ending at (nearly) one height, one of them near the bottom edge.
+        let mut ys = vec![100.0, 101.0, 100.5, 199.0];
+        let order = spread(&mut ys, 14.0, 10.0, 200.0);
+        assert_eq!(order.len(), 4);
+        for w in ys.windows(2) {
+            assert!(w[1] - w[0] >= 14.0 - 1e-4, "{ys:?}");
+        }
+        assert!(ys[0] >= 10.0 && ys[3] <= 200.0, "{ys:?}");
+        // Order of entry is kept for equal-ish heights (sorted by height).
+        assert_eq!(order[0], 0);
+        // A pile at the very bottom is pushed up, not out.
+        let mut ys = vec![199.0; 5];
+        spread(&mut ys, 14.0, 10.0, 200.0);
+        assert!(ys[4] <= 200.0 && ys.windows(2).all(|w| w[1] - w[0] >= 14.0 - 1e-4), "{ys:?}");
+    }
+
+    #[test]
+    fn long_margin_labels_are_cut_with_an_ellipsis() {
+        assert_eq!(ellipsize("M1939W", 100.0, 11.0), "M1939W");
+        let cut = ellipsize("N1000W → O5500X-PS", 60.0, 11.0);
+        assert!(cut.ends_with('…') && cut.chars().count() < 18, "{cut}");
     }
 
     #[test]

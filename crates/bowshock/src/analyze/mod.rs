@@ -128,6 +128,8 @@ pub struct State {
     pub(crate) error: Option<String>,
     /// Configurations left out because only four colours exist.
     pub(crate) omitted: usize,
+    /// The note for configurations that could not be built (`1 configuration skipped: …`).
+    pub(crate) skipped_note: Option<String>,
     pub(crate) done: Option<Arc<compute::Output>>,
     pub(crate) computed_at: Option<Instant>,
     generation: u64,
@@ -179,6 +181,7 @@ impl State {
             pending: false,
             error: None,
             omitted: 0,
+            skipped_note: None,
             done: None,
             computed_at: None,
             generation: 0,
@@ -399,9 +402,10 @@ impl State {
         if self.wanted.as_ref() != Some(&key) {
             self.wanted = Some(key.clone());
             match compute::jobs(ctx.doc.rocket(), ctx.physics.motors(), key.phase) {
-                Ok((jobs, omitted)) => {
+                Ok((jobs, left)) => {
                     self.error = None;
-                    self.omitted = omitted;
+                    self.omitted = left.over_limit;
+                    self.skipped_note = left.skipped_note();
                     self.pending = true;
                     let request = compute::Request {
                         analysis: key.analysis,

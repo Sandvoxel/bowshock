@@ -221,13 +221,35 @@ pub fn shear_modulus(material: MaterialId) -> f64 {
     }
 }
 
+/// The configurations [`jobs`] did not turn into jobs.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Left {
+    /// Configurations past [`MAX_CONFIGS`].
+    pub over_limit: usize,
+    /// Configurations that could not be built, as `(name, why)` (`("G64W → H128W", "motor not found")`).
+    pub skipped: Vec<(String, String)>,
+}
+
+impl Left {
+    /// The muted note for the Analyze method area, `1 configuration skipped: G64W → H128W (motor not found)`; `None` when
+    /// nothing was skipped.
+    pub fn skipped_note(&self) -> Option<String> {
+        if self.skipped.is_empty() {
+            return None;
+        }
+        let list = self.skipped.iter().map(|(n, why)| format!("{n} ({why})")).collect::<Vec<_>>().join(", ");
+        let n = self.skipped.len();
+        Some(format!("{n} configuration{} skipped: {list}", if n == 1 { "" } else { "s" }))
+    }
+}
+
 /// Every configuration of `rocket` as a [`ConfigJob`], in the document's order: at most [`MAX_CONFIGS`] of them, the active one
 /// always among them (and not necessarily first; see `readout::active_run`). Returns the jobs
 /// and how many configurations were left out; the error is why nothing could be built (an empty rocket).
-pub fn jobs(rocket: &Rocket, motors: &MotorDb, phase: Phase) -> Result<(Vec<ConfigJob>, usize), String> {
+pub fn jobs(rocket: &Rocket, motors: &MotorDb, phase: Phase) -> Result<(Vec<ConfigJob>, Left), String> {
     let active = rocket.active_config_id();
     let mut ids: Vec<ConfigId> = rocket.configurations().iter().map(|c| c.id).collect();
-    let omitted = ids.len().saturating_sub(MAX_CONFIGS);
+    let mut left = Left { over_limit: ids.len().saturating_sub(MAX_CONFIGS), skipped: Vec::new() };
     if ids.len() > MAX_CONFIGS {
         if let Some(at) = ids.iter().position(|&i| i == active).filter(|&at| at >= MAX_CONFIGS) {
             ids.swap(MAX_CONFIGS - 1, at);
@@ -243,7 +265,7 @@ pub fn jobs(rocket: &Rocket, motors: &MotorDb, phase: Phase) -> Result<(Vec<Conf
     for id in ids {
         let mut copy = rocket.clone();
         copy.select_configuration(id);
-        let name = copy.active_configuration().display_name();
+        let name = rocket.configuration_name(id).unwrap_or_default();
         let built = from_model::vehicle(&copy, motors, phase).and_then(|vehicle| {
             let cg = |with_motor| from_model::balance(&copy, motors, phase, BALANCE_MACH, 0.0, with_motor).map(|b| b.cg);
             Ok((vehicle, cg(true)?, cg(false)?))
@@ -257,13 +279,18 @@ pub fn jobs(rocket: &Rocket, motors: &MotorDb, phase: Phase) -> Result<(Vec<Conf
             }
             Err(e) => {
                 first_error.get_or_insert(format!("{name}: {e}"));
+                let why = match e {
+                    bowshock_sim::from_model::BridgeError::UnknownMotor(_) => "motor not found".to_string(),
+                    other => other.to_string(),
+                };
+                left.skipped.push((name, why));
             }
         }
     }
     if out.is_empty() {
         Err(first_error.unwrap_or_else(|| "the rocket has no parts".to_string()))
     } else {
-        Ok((out, omitted))
+        Ok((out, left))
     }
 }
 
@@ -896,8 +923,8 @@ mod tests {
         let before = rocket.configurations().len();
         let copy = rocket.duplicate_configuration(rocket.active_config_id()).unwrap();
         assert!(rocket.configuration(copy).is_some());
-        let (jobs, omitted) = jobs(&rocket, &MotorDb::bundled(), Phase::Full).unwrap();
-        assert_eq!((jobs.len(), omitted), (before + 1, 0));
+        let (jobs, left) = jobs(&rocket, &MotorDb::bundled(), Phase::Full).unwrap();
+        assert_eq!((jobs.len(), left), (before + 1, Left::default()));
         let out = compute(&Request {
             analysis: Analysis::Aerodynamics,
             method: Method::Extended,
@@ -910,6 +937,32 @@ mod tests {
         assert_eq!(table.rows.len(), out.runs.len() * mach_grid((0.1, 3.0)).len());
         assert!(table.rows.iter().all(|r| r.len() == table.headers.len()));
         assert!(table.csv().lines().count() == table.rows.len() + 1);
+    }
+
+    #[test]
+    fn a_configuration_whose_motor_is_unknown_is_skipped_with_a_note() {
+        let mut rocket = Rocket::from_json(EXAMPLE).unwrap();
+        let copy = rocket.duplicate_configuration(rocket.active_config_id()).unwrap();
+        let slots: Vec<_> = rocket.configuration(copy).unwrap().motors.clone();
+        for slot in slots {
+            if let Some(mut m) = slot.motor {
+                m.designation = "ZZZ999".to_string();
+                rocket.set_motor(copy, slot.mount, Some(m)).unwrap();
+            }
+        }
+        let (_, left) = jobs(&rocket, &MotorDb::bundled(), Phase::Full).unwrap();
+        assert_eq!(left.skipped.len(), 1);
+        let note = left.skipped_note().unwrap();
+        assert!(note.starts_with("1 configuration skipped: ") && note.ends_with("(motor not found)"), "{note}");
+    }
+
+    #[test]
+    fn jobs_are_named_like_the_status_strip() {
+        let rocket = Rocket::from_json(EXAMPLE).unwrap();
+        let (jobs, _) = jobs(&rocket, &MotorDb::bundled(), Phase::Full).unwrap();
+        for job in &jobs {
+            assert_eq!(Some(&job.name), rocket.configuration_name(job.id).as_ref());
+        }
     }
 
     #[test]

@@ -140,6 +140,9 @@ fn method(state: &State) -> Element<'_, Message> {
             lines.push(muted(format!("{} · computed on CPU in {took} · {busy}", out.points_text()), 12.0));
         }
     }
+    if let Some(note) = &state.skipped_note {
+        lines.push(muted(note.clone(), 12.0));
+    }
     let solving = cfd_line && state.cfd.solving.is_some();
     let stale = cfd_line && state.cfd.status == cfd::Status::Stale;
     let resolve: Element<'_, Message> = if solving {

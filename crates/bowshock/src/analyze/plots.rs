@@ -13,7 +13,7 @@ use crate::widgets::ground_track::{GroundTrack, Track, TrackPoint, Wind};
 use crate::widgets::plot::{Axis, HLine, LabelAt, LineStyle, Panel, PlotGroup, Series, SeriesColor, Tag, YTicks};
 
 /// Width kept free at the right of the plots for direct labels.
-const MARGIN_PX: f32 = 100.0;
+const MARGIN_PX: f32 = 130.0;
 /// Bins of the apogee histogram.
 const BINS: usize = 12;
 
@@ -125,24 +125,25 @@ fn stacked(points: &[MachPoint]) -> Vec<Series> {
     layers
 }
 
+/// Short line labels for configuration names: the last stage's motor of `O5500X-PS → M1939W` (`M1939W`), or the whole name
+/// when that would make two labels equal.
+pub(crate) fn short_names(names: &[&str]) -> Vec<String> {
+    let last = |n: &str| n.rsplit(" → ").next().unwrap_or(n).to_string();
+    let short: Vec<String> = names.iter().map(|n| last(n)).collect();
+    names.iter().zip(&short).map(|(n, s)| if short.iter().filter(|o| *o == s).count() > 1 { (*n).to_string() } else { s.clone() }).collect()
+}
+
 /// Adds the comparison's `field` to `panel` as a dashed series in its own colour, labelled with its source; `fx` / `fy` map
 /// the overlay's SI x and y to the plot's.
-fn overlaid(
-    panel: Panel,
-    overlay: Option<&Overlay>,
-    analysis: Analysis,
-    field: Field,
-    single: bool,
-    fx: impl Fn(f64) -> f64,
-    fy: impl Fn(f64) -> f64,
-) -> Panel {
+fn overlaid(panel: Panel, overlay: Option<&Overlay>, analysis: Analysis, field: Field, fx: impl Fn(f64) -> f64, fy: impl Fn(f64) -> f64) -> Panel {
     let Some(o) = overlay else { return panel };
     let points: Vec<(f64, f64)> = o.points(analysis, field).into_iter().map(|(x, y)| (fx(x), fy(y))).collect();
     if points.is_empty() {
         return panel;
     }
-    let color = if single { SeriesColor::Series(2) } else { SeriesColor::Muted };
-    panel.with(Series::new(o.label.clone(), points).color(color).style(LineStyle::Dashed).label_margin())
+    // Ink-muted: a colour the stack (series 0..3) and the configuration lines never use, so a comparison is never mistaken for
+    // the pressure layer or another configuration.
+    panel.with(Series::new(o.label.clone(), points).color(SeriesColor::Muted).style(LineStyle::Dashed).label_margin())
 }
 
 /// The Cd panel of the Mach analyses: always the stacked areas by source of the active configuration `active` (an index into
@@ -190,18 +191,19 @@ fn aero(out: &Output, units: UnitSystem, overlay: Option<&Overlay>, active: Conf
             cpcg.series.push(Series::new("CG burnout", flat(first.cg_burnout)).color(SeriesColor::Cg).style(LineStyle::Dashed).label_inside());
         } else {
             let burnout = out.conditions.burnout;
-            for (i, run, q) in &runs {
+            let short = short_names(&runs.iter().map(|(_, r, _)| r.name.as_str()).collect::<Vec<_>>());
+            for ((i, run, q), short) in runs.iter().zip(&short) {
                 let pts = q.iter().map(|m| (m.mach, to(run.cg(burnout)))).collect::<Vec<_>>();
-                cpcg.series.push(Series::new(format!("CG {}", run.name), pts).color(config_color(*i)).label_inside());
+                cpcg.series.push(Series::new(format!("CG · {short}"), pts).color(config_color(*i)).label_inside());
             }
         }
     }
 
     let id = |x: f64| x;
     let a = Analysis::Aerodynamics;
-    let margin_panel = overlaid(margin_panel(margin, out.bands), overlay, a, Field::Margin, single, id, id);
-    let cpcg = overlaid(cpcg, overlay, a, Field::Cp, single, id, to);
-    let cd = overlaid(cd_panel(&runs, active), overlay, a, Field::Cd, single, id, id);
+    let margin_panel = overlaid(margin_panel(margin, out.bands), overlay, a, Field::Margin, id, id);
+    let cpcg = overlaid(cpcg, overlay, a, Field::Cp, id, to);
+    let cd = overlaid(cd_panel(&runs, active), overlay, a, Field::Cd, id, id);
     let mut group = PlotGroup::new(Axis::mach()).panel(margin_panel).panel(cpcg).panel(cd);
     group.right_margin = MARGIN_PX;
     group.x_range = Some(out.conditions.mach);
@@ -226,7 +228,7 @@ fn drag(out: &Output, overlay: Option<&Overlay>, active: ConfigId) -> PlotGroup 
         }
     }
     let id = |x: f64| x;
-    let cd = overlaid(cd_panel(&runs, active).weight(1.6), overlay, Analysis::Drag, Field::Cd, runs.len() == 1, id, id);
+    let cd = overlaid(cd_panel(&runs, active).weight(1.6), overlay, Analysis::Drag, Field::Cd, id, id);
     let mut group = PlotGroup::new(Axis::mach()).panel(cd).panel(shares);
     group.right_margin = MARGIN_PX;
     group.x_range = Some(out.conditions.mach);
@@ -244,7 +246,8 @@ fn stability(out: &Output, units: UnitSystem, overlay: Option<&Overlay>) -> Plot
     let mut margin = Vec::new();
     let mut cn = Panel::new("Normal force CN", "");
     let mut cpcg = Panel::new("CP and CG", format!("{} from tip", len.symbol)).value_unit(len.symbol).tag(Tag::Only(0));
-    for (i, run, points) in &alpha_runs {
+    let short = short_names(&alpha_runs.iter().map(|(_, r, _)| r.name.as_str()).collect::<Vec<_>>());
+    for ((i, run, points), short) in alpha_runs.iter().zip(&short) {
         let color = config_color(*i);
         let cg = to(run.cg(out.conditions.burnout));
         let m: Vec<_> = points.iter().map(|p| deg(p, p.margin_cal)).collect();
@@ -259,15 +262,15 @@ fn stability(out: &Output, units: UnitSystem, overlay: Option<&Overlay>) -> Plot
         if *i == 0 {
             cpcg = cpcg.with(Series::new("CP", points.iter().map(|p| deg(p, to(p.cp))).collect()).color(SeriesColor::Cp).label_inside());
         }
-        let name = if single { "CG".to_string() } else { format!("CG {}", run.name) };
+        let name = if single { "CG".to_string() } else { format!("CG · {short}") };
         cpcg = cpcg.with(Series::new(name, points.iter().map(|p| deg(p, cg)).collect()).color(if single { SeriesColor::Cg } else { color }).label_inside());
     }
     let axis = Axis { label: "AoA".into(), unit: "°".into(), prefix: "α ".into(), decimals: 1 };
     let a = Analysis::Stability;
     let (deg, id) = (f64::to_degrees, |y: f64| y);
-    let margin_panel = overlaid(margin_panel(margin, out.bands), overlay, a, Field::Margin, single, deg, id);
-    let cpcg = overlaid(cpcg, overlay, a, Field::Cp, single, deg, to);
-    let cn = overlaid(cn, overlay, a, Field::Cn, single, deg, id);
+    let margin_panel = overlaid(margin_panel(margin, out.bands), overlay, a, Field::Margin, deg, id);
+    let cpcg = overlaid(cpcg, overlay, a, Field::Cp, deg, to);
+    let cn = overlaid(cn, overlay, a, Field::Cn, deg, id);
     let mut group = PlotGroup::new(axis).panel(margin_panel).panel(cpcg).panel(cn);
     group.right_margin = MARGIN_PX;
     group.x_range = Some((0.0, out.conditions.alpha_max.to_degrees()));
@@ -413,6 +416,13 @@ mod tests {
     }
 
     #[test]
+    fn short_names_use_the_last_stage_unless_that_is_ambiguous() {
+        assert_eq!(short_names(&["O5500X-PS → M1939W", "O5500X-PS → M1800FJ"]), ["M1939W", "M1800FJ"]);
+        assert_eq!(short_names(&["A → M1", "B → M1"]), ["A → M1", "B → M1"]);
+        assert_eq!(short_names(&["Windy day"]), ["Windy day"]);
+    }
+
+    #[test]
     fn aerodynamics_has_the_three_kit_panels_with_threshold_lines() {
         let b = built(Analysis::Aerodynamics, 1);
         let titles: Vec<&str> = b.group.panels.iter().map(|p| p.title.as_str()).collect();
@@ -481,6 +491,7 @@ mod tests {
                 .find(|s| s.name == "OpenRocket")
                 .unwrap_or_else(|| panic!("{configs} configurations, {analysis:?}: the comparison is drawn"));
             assert_eq!(theirs.style, LineStyle::Dashed);
+            assert!(matches!(theirs.color, SeriesColor::Muted), "never a colour of the stack");
             assert_eq!(theirs.points.len(), 3);
             assert_eq!(lines_over(cd).len(), configs, "the other configurations' totals and the comparison");
         }
@@ -506,6 +517,13 @@ mod tests {
             rocket.duplicate_configuration(flyable);
         }
         check(&rocket, 3);
+    }
+
+    #[test]
+    fn cg_line_labels_are_short_and_distinct() {
+        let b = plots_of(&example(3), Analysis::Aerodynamics, None);
+        let cg: Vec<&str> = b.group.panels[1].series.iter().filter(|s| s.name.starts_with("CG")).map(|s| s.name.as_str()).collect();
+        assert_eq!(cg, ["CG · Alpha", "CG · Bravo", "CG · Charlie"]);
     }
 
     #[test]
