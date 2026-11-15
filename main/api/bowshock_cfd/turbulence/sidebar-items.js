@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["A1","BETA1","BETA2","BETA_STAR","GAMMA1","GAMMA2","K_INF","SIGMA_K1","SIGMA_K2","SIGMA_W1","SIGMA_W2"],"fn":["omega_inf","wall_distances"]};

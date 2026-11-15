@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["nose_cylinder_body","solve","solve_compressible"],"struct":["Meridian","PotentialSolution"]};

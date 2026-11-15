@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["GpuError","LumaError","Precision","Staging"],"mod":["df32s","f32s"],"struct":["GpuSolver"],"type":["Result"]};

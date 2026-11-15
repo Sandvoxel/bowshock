@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["cone_grid","geometric_offsets","plate_grid"],"struct":["ConeGridParams","Face","Grid","PlateGridParams"]};

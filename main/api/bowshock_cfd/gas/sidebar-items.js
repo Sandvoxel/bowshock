@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["GAMMA"],"fn":["cons_to_prim","freestream","physical_flux","prim_to_cons","reflect","sound_speed"],"type":["Cons","Prim"]};

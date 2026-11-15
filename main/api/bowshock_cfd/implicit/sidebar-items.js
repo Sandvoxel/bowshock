@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["DtMode"],"fn":["abs_jacobian","flux_jacobian","inv4"],"struct":["ImplicitParams"],"type":["M4"]};

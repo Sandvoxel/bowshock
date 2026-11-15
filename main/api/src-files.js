@@ -1,0 +1,2 @@
+createSrcSidebar('[["bowshock",["",[["engine",[],["body_grid.rs","case.rs","gpu.rs","mod.rs","numerics.rs","result.rs","run.rs"]]],["analysis.rs","atmosphere.rs","error.rs","fins.rs","lib.rs","spec.rs"]]],["bowshock_cfd",["",[["gpu",[],["body.rs","mod.rs"]]],["bc.rs","flux.rs","gas.rs","grid.rs","implicit.rs","lib.rs","multigrid.rs","solver.rs","turbulence.rs","viscous.rs"]]],["bowshock_reference",["",[],["arcas.rs","base_drag.rs","lib.rs","potential.rs","shock_expansion.rs","taylor_maccoll.rs","tp2005.rs"]]]]');
+//{"start":19,"fragment_lengths":[185,174,136]}

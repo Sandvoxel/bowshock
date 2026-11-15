@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AftSpec","FinProfile","NoseShape"],"struct":["BodySpec","FinSpec","MotorSpec","NoseSpec"]};

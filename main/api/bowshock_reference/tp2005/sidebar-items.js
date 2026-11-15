@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BASE_STATION","BODY_DIAMETER","JET_TOTAL_TEMPERATURE_K","NOSE_LENGTH","NOZZLE_EXIT_DIAMETER","RE_PER_M","T0_K","TABLE_II"],"fn":["base_pressure_ratio"]};

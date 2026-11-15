@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["base_drag_coefficient"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PRANDTL","PRANDTL_T"],"enum":["Bc","Scheme","Turbulence"],"struct":["Block","Config","Irs","MgParams","Nozzle","Solver","Viscous"]};

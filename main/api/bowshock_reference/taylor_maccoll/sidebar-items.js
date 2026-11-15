@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["oblique_deflection","oblique_post_shock","solve_cone"],"struct":["ConeSolution"]};

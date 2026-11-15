@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["cp_from_ratio","mach_from_pm","prandtl_meyer"],"struct":["Ogive","SurfaceTheory"]};

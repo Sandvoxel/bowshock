@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Regime"],"fn":["characteristic_ghost","normal_mach","pressure_outflow_ghost","regime"]};
