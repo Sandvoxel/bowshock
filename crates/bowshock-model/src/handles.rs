@@ -2,7 +2,7 @@
 //! with [`Rocket::set_dim`] (limited, with the reason when it stops), and listed per part as [`HandleSpec`]s for the
 //! viewport's handles (design kit, DirectEdit). All values SI: metres and radians.
 
-use crate::geometry::{NoseShape, PartKind, RadialKind};
+use crate::geometry::{NoseShape, PartKind, RadialKind, Shoulder};
 use crate::internal::{InternalKind, PartRef};
 use crate::{PartId, Rocket};
 
@@ -43,6 +43,20 @@ pub enum Dim {
     Overhang,
     /// Packed length of recovery gear.
     PackedLength,
+    /// Length of the aft shoulder (nose cones and transitions).
+    ShoulderLength,
+    /// Outer diameter of the aft shoulder (follows the tube it enters until set).
+    ShoulderDiameter,
+    /// Wall thickness of the aft shoulder.
+    ShoulderThickness,
+    /// Length of a transition's fore shoulder.
+    ForeShoulderLength,
+    /// Outer diameter of a transition's fore shoulder.
+    ForeShoulderDiameter,
+    /// Wall thickness of a transition's fore shoulder.
+    ForeShoulderThickness,
+    /// Radius of the fillet along a fin's root.
+    FilletRadius,
     /// A freeform fin's vertex (moved with [`Rocket::set_vertex`], not [`Rocket::set_dim`]).
     Vertex(usize),
 }
@@ -68,6 +82,13 @@ impl Dim {
             Dim::InnerDiameter => "INNER DIAMETER".into(),
             Dim::Overhang => "OVERHANG".into(),
             Dim::PackedLength => "PACKED LENGTH".into(),
+            Dim::ShoulderLength => "SHOULDER LENGTH".into(),
+            Dim::ShoulderDiameter => "SHOULDER DIAMETER".into(),
+            Dim::ShoulderThickness => "SHOULDER THICKNESS".into(),
+            Dim::ForeShoulderLength => "FORE SHOULDER LENGTH".into(),
+            Dim::ForeShoulderDiameter => "FORE SHOULDER DIAMETER".into(),
+            Dim::ForeShoulderThickness => "FORE SHOULDER THICKNESS".into(),
+            Dim::FilletRadius => "FILLET RADIUS".into(),
             Dim::Vertex(i) => format!("VERTEX {}", i + 1),
         }
     }
@@ -116,10 +137,23 @@ pub struct HandleSpec {
 const fn spec(dim: Dim, primary: bool, view: HandleView) -> HandleSpec {
     let kind = match dim {
         Dim::Cant | Dim::Angle => HandleKind::Angular,
-        Dim::Shape => HandleKind::Curve,
+        Dim::Shape | Dim::FilletRadius => HandleKind::Curve,
         _ => HandleKind::Linear,
     };
     HandleSpec { dim, kind, primary, view }
+}
+
+/// The shoulder a dimension belongs to: `(aft, field)` with field 0 length, 1 outer diameter, 2 wall.
+fn shoulder_dim(dim: Dim) -> Option<(bool, u8)> {
+    Some(match dim {
+        Dim::ShoulderLength => (true, 0),
+        Dim::ShoulderDiameter => (true, 1),
+        Dim::ShoulderThickness => (true, 2),
+        Dim::ForeShoulderLength => (false, 0),
+        Dim::ForeShoulderDiameter => (false, 1),
+        Dim::ForeShoulderThickness => (false, 2),
+        _ => return None,
+    })
 }
 
 /// The result of an applied edit.
@@ -145,8 +179,8 @@ fn open() -> Limits {
 }
 
 impl Rocket {
-    /// The handles of part `id`, primary ones first as listed in the DirectEdit table. A shoulder is not modelled, so none
-    /// is offered; a fin's fillet radius likewise.
+    /// The handles of part `id`, primary ones first as listed in the DirectEdit table. Shoulder length and diameter and a
+    /// fin's fillet radius are secondary: shown in Cutaway or with `Alt`.
     pub fn handle_specs(&self, id: PartId) -> Vec<HandleSpec> {
         use HandleView::{Aft, Inside, Side};
         let Some(part) = self.kind_of(id) else {
@@ -155,16 +189,29 @@ impl Rocket {
         match part {
             PartRef::Axial(p) => match &p.kind {
                 PartKind::NoseCone { shape, .. } => {
-                    let mut v = vec![spec(Dim::Length, true, Side), spec(Dim::Diameter, true, Side), spec(Dim::Wall, false, Inside)];
+                    let mut v = vec![
+                        spec(Dim::Length, true, Side),
+                        spec(Dim::Diameter, true, Side),
+                        spec(Dim::Wall, false, Inside),
+                        spec(Dim::ShoulderLength, false, Inside),
+                        spec(Dim::ShoulderDiameter, false, Inside),
+                    ];
                     if shape.parameter().is_some() {
                         v.push(spec(Dim::Shape, false, Side));
                     }
                     v
                 }
                 PartKind::BodyTube { .. } => vec![spec(Dim::Length, true, Side), spec(Dim::Diameter, true, Side), spec(Dim::Wall, false, Inside)],
-                PartKind::Transition { .. } => {
-                    vec![spec(Dim::ForeDiameter, true, Side), spec(Dim::Diameter, true, Side), spec(Dim::Length, true, Side), spec(Dim::Wall, false, Inside)]
-                }
+                PartKind::Transition { .. } => vec![
+                    spec(Dim::ForeDiameter, true, Side),
+                    spec(Dim::Diameter, true, Side),
+                    spec(Dim::Length, true, Side),
+                    spec(Dim::Wall, false, Inside),
+                    spec(Dim::ForeShoulderLength, false, Inside),
+                    spec(Dim::ForeShoulderDiameter, false, Inside),
+                    spec(Dim::ShoulderLength, false, Inside),
+                    spec(Dim::ShoulderDiameter, false, Inside),
+                ],
             },
             PartRef::Radial(r) => {
                 let aft = [spec(Dim::Thickness, false, Aft), spec(Dim::Cant, false, Aft), spec(Dim::Angle, false, Aft)];
@@ -178,17 +225,20 @@ impl Rocket {
                             spec(Dim::Position, true, Side),
                         ];
                         v.extend(aft);
+                        v.push(spec(Dim::FilletRadius, false, Side));
                         v
                     }
                     RadialKind::EllipticalFin { .. } => {
                         let mut v = vec![spec(Dim::Span, true, Side), spec(Dim::RootChord, true, Side), spec(Dim::Position, true, Side)];
                         v.extend(aft);
+                        v.push(spec(Dim::FilletRadius, false, Side));
                         v
                     }
                     RadialKind::FreeformFin { points, .. } => {
                         let mut v: Vec<HandleSpec> = (0..points.len()).map(|i| spec(Dim::Vertex(i), true, Side)).collect();
                         v.push(spec(Dim::Position, true, Side));
                         v.extend(aft);
+                        v.push(spec(Dim::FilletRadius, false, Side));
                         v
                     }
                     RadialKind::LaunchLug { .. } => vec![spec(Dim::Position, true, Side), spec(Dim::Length, true, Side), spec(Dim::Angle, false, Aft)],
@@ -240,6 +290,15 @@ impl Rocket {
                     PartKind::NoseCone { shape, .. } => shape.parameter(),
                     _ => None,
                 },
+                d if shoulder_dim(d).is_some() => {
+                    let (aft, field) = shoulder_dim(d)?;
+                    let s = self.shoulder(id, aft)?;
+                    match field {
+                        0 => Some(s.length),
+                        1 => self.shoulder_diameter(id, aft),
+                        _ => Some(s.thickness),
+                    }
+                }
                 _ => None,
             },
             PartRef::Radial(r) => match (dim, &r.kind) {
@@ -251,6 +310,7 @@ impl Rocket {
                 (Dim::TipChord, RadialKind::FinSet { tip_chord, .. }) => Some(*tip_chord),
                 (Dim::Sweep, RadialKind::FinSet { sweep, .. }) => Some(*sweep),
                 (Dim::Thickness, k) => k.thickness(),
+                (Dim::FilletRadius, k) if k.is_fin() => Some(r.fillet_radius),
                 (Dim::Length, RadialKind::LaunchLug { length, .. }) => Some(*length),
                 (Dim::Diameter, RadialKind::LaunchLug { diameter, .. } | RadialKind::RailButton { diameter, .. }) => Some(*diameter),
                 (Dim::Height, RadialKind::RailButton { height, .. }) => Some(*height),
@@ -289,6 +349,19 @@ impl Rocket {
             (PartRef::Axial(_), Dim::Length) => (MIN_LEN, MAX_LEN, "MINIMUM LENGTH", "MAXIMUM LENGTH"),
             (PartRef::Axial(p), Dim::Diameter | Dim::ForeDiameter) => (MIN_DIA.max(2.0 * p.thickness), MAX_DIA, "WALL FILLS THE TUBE", "MAXIMUM DIAMETER"),
             (PartRef::Axial(p), Dim::Wall) => (0.0, p.kind.fore_diameter().max(p.kind.aft_diameter()) / 2.0, "NO WALL", "WALL = RADIUS"),
+            (PartRef::Axial(p), d) if shoulder_dim(d).is_some() => {
+                let (aft, field) = shoulder_dim(d).unwrap_or((true, 0));
+                let i = self.index_of(id)?;
+                let neighbour = if aft { self.parts.get(i + 1) } else { i.checked_sub(1).and_then(|j| self.parts.get(j)) };
+                match field {
+                    0 => (0.0, neighbour.map_or(0.5, |n| n.kind.length()).max(MIN_LEN), "NO SHOULDER", "TUBE LENGTH"),
+                    1 => (MIN_DIA, p.kind.fore_diameter().max(p.kind.aft_diameter()).max(MIN_DIA), "MINIMUM DIAMETER", "PART DIAMETER"),
+                    _ => {
+                        let d = self.shoulder_diameter(id, aft).unwrap_or(0.0);
+                        (0.0003, (d / 2.0).max(0.0003), "MINIMUM WALL", "SOLID")
+                    }
+                }
+            }
             (PartRef::Axial(p), Dim::Shape) => match &p.kind {
                 PartKind::NoseCone { shape: NoseShape::PowerSeries(_), .. } => (0.01, 1.0, "n AT MINIMUM", "n = 1 IS A CONE"),
                 _ => (0.0, 1.0, "C AT MINIMUM", "C AT MAXIMUM"),
@@ -302,6 +375,7 @@ impl Rocket {
             (PartRef::Radial(r), Dim::Sweep) => (-r.offset, 1.0, "TIP AT TUBE FORE", "MAXIMUM SWEEP"),
             (PartRef::Radial(_), Dim::Thickness) => (0.0003, 0.02, "MINIMUM THICKNESS", "MAXIMUM THICKNESS"),
             (PartRef::Radial(_), Dim::Height) => (0.002, 0.1, "MINIMUM HEIGHT", "MAXIMUM HEIGHT"),
+            (PartRef::Radial(r), Dim::FilletRadius) if r.kind.is_fin() => (0.0, 0.05, "NO FILLET", "MAXIMUM FILLET"),
             (PartRef::Radial(_), Dim::Length) => (0.005, 1.0, "MINIMUM LENGTH", "MAXIMUM LENGTH"),
             (PartRef::Radial(_), Dim::Diameter) => (0.002, 0.1, "MINIMUM DIAMETER", "MAXIMUM DIAMETER"),
             (PartRef::Internal(p), _) => {
@@ -374,6 +448,10 @@ impl Rocket {
                         done
                     }
                     Dim::Wall => self.set_thickness(id, v),
+                    d if shoulder_dim(d).is_some() => {
+                        let (aft, field) = shoulder_dim(d).unwrap_or((true, 0));
+                        self.set_shoulder_field(id, aft, field, v)
+                    }
                     Dim::Shape => match kind {
                         PartKind::NoseCone { shape, length, diameter } => {
                             let shape = match shape {
@@ -394,6 +472,7 @@ impl Rocket {
                     Dim::Position => self.move_radial(id, parent, v, angle).is_ok(),
                     Dim::Angle => self.move_radial(id, parent, offset, v).is_ok(),
                     Dim::Cant => self.set_cant(id, v),
+                    Dim::FilletRadius => self.set_fillet_radius(id, v),
                     _ => {
                         match (&mut kind, dim) {
                             (RadialKind::FinSet { span, .. } | RadialKind::EllipticalFin { span, .. }, Dim::Span) => *span = v,
@@ -479,6 +558,83 @@ impl Rocket {
                 return;
             }
             i = j;
+        }
+    }
+
+    /// The shoulder of axial part `id` at its aft face (`aft`) or fore face; `None` for parts that have none (body tubes, and
+    /// a nose cone's fore end).
+    pub fn shoulder(&self, id: PartId, aft: bool) -> Option<Shoulder> {
+        let p = self.part(id)?;
+        match (&p.kind, aft) {
+            (PartKind::NoseCone { .. } | PartKind::Transition { .. }, true) => Some(p.shoulder_aft),
+            (PartKind::Transition { .. }, false) => Some(p.shoulder_fore),
+            _ => None,
+        }
+    }
+
+    /// The outer diameter of a shoulder with `AUTO` resolved: the inner diameter of the tube it enters (the neighbour on that
+    /// side), or the part's own inner diameter at that face with no neighbour.
+    pub fn shoulder_diameter(&self, id: PartId, aft: bool) -> Option<f64> {
+        let s = self.shoulder(id, aft)?;
+        if s.diameter > 0.0 {
+            return Some(s.diameter);
+        }
+        let i = self.index_of(id)?;
+        let neighbour = if aft { self.parts.get(i + 1) } else { i.checked_sub(1).and_then(|j| self.parts.get(j)) };
+        Some(match neighbour {
+            Some(n) => n.inner_diameter_at(if aft { 0.0 } else { n.kind.length() }),
+            None => {
+                let p = &self.parts[i];
+                p.inner_diameter_at(if aft { p.kind.length() } else { 0.0 })
+            }
+        })
+    }
+
+    /// Puts a shoulder's outer diameter back on `AUTO` (following the tube it enters). Returns whether the part has that
+    /// shoulder.
+    pub fn reset_shoulder_diameter(&mut self, id: PartId, aft: bool) -> bool {
+        self.set_shoulder_field(id, aft, 1, 0.0)
+    }
+
+    /// Sets a shoulder field (`field`: 0 length, 1 outer diameter, 2 wall).
+    fn set_shoulder_field(&mut self, id: PartId, aft: bool, field: u8, v: f64) -> bool {
+        if self.shoulder(id, aft).is_none() {
+            return false;
+        }
+        let Some(p) = self.parts.iter_mut().find(|p| p.id == id) else {
+            return false;
+        };
+        let s = if aft { &mut p.shoulder_aft } else { &mut p.shoulder_fore };
+        match field {
+            0 => s.length = v,
+            1 => s.diameter = v,
+            _ => s.thickness = v,
+        }
+        true
+    }
+
+    /// Sets the fillet radius of fin group `id` (0 removes the fillet). Returns whether `id` is a fin.
+    pub fn set_fillet_radius(&mut self, id: PartId, radius: f64) -> bool {
+        match self.radials.iter_mut().find(|r| r.id == id && r.kind.is_fin()) {
+            Some(r) => {
+                r.fillet_radius = radius.max(0.0);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Sets what the fillet of fin group `id` is made of (a bulk material). Returns whether it was applied.
+    pub fn set_fillet_material(&mut self, id: PartId, material: crate::MaterialId) -> bool {
+        if material.kind() != crate::MaterialKind::Bulk {
+            return false;
+        }
+        match self.radials.iter_mut().find(|r| r.id == id && r.kind.is_fin()) {
+            Some(r) => {
+                r.fillet_material = material;
+                true
+            }
+            None => false,
         }
     }
 

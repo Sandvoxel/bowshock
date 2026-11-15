@@ -252,6 +252,51 @@ impl Sink {
             self.face(&[pts[i] + half, pts[j] + half, pts[j] - half, pts[i] - half], centre);
         }
     }
+
+    /// A fin's fillet: two concave strips of quarter-circle section `radius` along the root from `z0` for `length`, one each
+    /// side of a plate `thickness` thick, on a surface of radius `base` at `angle` and canted like the plate (see [`plate`](Self::plate)).
+    pub fn fillet(&mut self, z0: f32, length: f32, base: f32, angle: f32, cant: f32, thickness: f32, radius: f32) {
+        const SINK: f32 = 0.0005;
+        const STEPS: usize = 6;
+        if radius <= 0.0 || length <= 0.0 {
+            return;
+        }
+        let (s, c) = angle.sin_cos();
+        let (u, t) = (Vec3::new(s, c, 0.0), Vec3::new(c, -s, 0.0));
+        let half = thickness / 2.0;
+        // The section in (sideways, height): from the plate's face up at `radius` round to the surface `radius` away.
+        let section: Vec<(f32, f32)> = (0..=STEPS)
+            .map(|k| {
+                let phi = std::f32::consts::PI + k as f32 / STEPS as f32 * std::f32::consts::FRAC_PI_2;
+                (half + radius + radius * phi.cos(), radius + radius * phi.sin())
+            })
+            .collect();
+        let at = |side: f32, z: f32, (lat, h): (f32, f32)| {
+            tilt_point(u * (base + h - if h <= 0.0 { SINK } else { 0.0 }) + t * (side * lat) + Vec3::Z * z, z0, angle, cant)
+        };
+        for side in [1.0f32, -1.0] {
+            let normal = |(lat, h): (f32, f32)| {
+                // Towards the centre of the circle the section is cut from.
+                let n = Vec2::new(half + radius - lat, radius - h).normalize_or_zero();
+                tilt_dir(t * (side * n.x) + u * n.y, angle, cant)
+            };
+            for k in 0..STEPS {
+                let (a, b) = (section[k], section[k + 1]);
+                let (p00, p01) = (at(side, z0, a), at(side, z0, b));
+                let (p10, p11) = (at(side, z0 + length, a), at(side, z0 + length, b));
+                let (na, nb) = (normal(a), normal(b));
+                self.tri([p00, p10, p11], [na, na, nb]);
+                self.tri([p00, p11, p01], [na, nb, nb]);
+            }
+            // The ends close the strip.
+            let mid = at(side, z0 + length / 2.0, (half + radius / 3.0, radius / 3.0));
+            for z in [z0, z0 + length] {
+                let mut ring: Vec<Vec3> = section.iter().map(|&q| at(side, z, q)).collect();
+                ring.push(at(side, z, (half, 0.0)));
+                self.face(&ring, mid);
+            }
+        }
+    }
 }
 
 /// Ear-clipping triangulation of a simple polygon (either winding): triples of indices.

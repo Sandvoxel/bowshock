@@ -123,6 +123,14 @@ pub enum Message {
     Ground(GroundMessage),
     /// A result number was clicked: move the crosshair to that moment.
     Seek(f64),
+    /// Double-click on a flight's name: edit it in place.
+    StartRename(FlightId),
+    /// The rename field's text.
+    RenameInput(String),
+    /// Enter in the rename field: the name goes through the document (one undo step).
+    CommitRename,
+    /// Escape in the rename field.
+    CancelRename,
 }
 
 /// What the plots and the ground track show: derived from the flights whenever a run lands or the ticks change.
@@ -158,6 +166,8 @@ pub struct State {
     /// How many document revisions this screen's own flight edits made. Results are stale when the *rocket* changed, not when a
     /// flight was edited (that only stales the flight itself), so [`State::revision`] discounts these.
     own_edits: u64,
+    /// The flight being renamed and the text typed so far.
+    renaming: Option<(FlightId, String)>,
 }
 
 impl Default for State {
@@ -183,6 +193,7 @@ impl State {
             shown: Shown::default(),
             stored: defs.to_vec(),
             own_edits: 0,
+            renaming: None,
         };
         state.rebuild();
         state
@@ -396,6 +407,29 @@ impl State {
                 }
             }
             Message::Seek(t) => self.plot.set_hover(Some(t)),
+            Message::StartRename(id) => {
+                if let Some(flight) = self.flight(id) {
+                    self.renaming = Some((id, flight.name.clone()));
+                    self.selected = id;
+                    self.rebuild();
+                    return iced::widget::operation::focus(left::RENAME_ID).chain(iced::widget::operation::text_input::select_all(left::RENAME_ID));
+                }
+            }
+            Message::RenameInput(text) => {
+                if let Some((_, buffer)) = &mut self.renaming {
+                    *buffer = text;
+                }
+            }
+            Message::CancelRename => self.renaming = None,
+            Message::CommitRename => {
+                if let Some((id, name)) = self.renaming.take() {
+                    let name = name.trim().to_string();
+                    if let Some(flight) = self.flights.iter_mut().find(|f| f.id == id).filter(|f| !name.is_empty() && f.name != name) {
+                        flight.name = name;
+                        self.commit(ctx, "Rename flight", None);
+                    }
+                }
+            }
         }
         Task::none()
     }
@@ -537,6 +571,9 @@ impl State {
     /// The shortcut `key` maps to on this screen, if any. Only called for keys no widget handled. `F5` and `Esc` are global; the
     /// plots take `Enter` and `Esc` themselves while the cursor is over them, and `Enter` zooms to the band from anywhere else.
     pub fn on_key(&self, key: &keyboard::Key, modifiers: keyboard::Modifiers, _ctx: &Ctx) -> Option<Message> {
+        if self.renaming.is_some() && matches!(key, keyboard::Key::Named(keyboard::key::Named::Escape)) {
+            return Some(Message::CancelRename);
+        }
         let enter = matches!(key, keyboard::Key::Named(keyboard::key::Named::Enter));
         (enter && modifiers.is_empty() && self.plot.can_zoom_in()).then_some(Message::Plot(PlotMessage::ZoomIn))
     }

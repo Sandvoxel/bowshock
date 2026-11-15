@@ -1,0 +1,35 @@
+# Polish wave: status strip single line, lanes labels, flight rename, detach keeps angles, light theme pass.
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/polish.drive out/polish
+viewport 1280x1000
+# Select the fin group in the lanes, detach copy B (lanes keep the remaining fins at their angles).
+click (925, 824)
+screenshot polish-1-fins-selected.png
+click (1092, 62)
+click (1020, 136)
+screenshot polish-2-detached.png
+# Light theme: build screen with a long selection summary in the status strip.
+click "Light"
+screenshot polish-3-build-light.png
+# Axial view (TAIL): CG/CP labels fade out.
+press (906, 118)
+move (860, 118)
+move (800, 118)
+release (800, 118)
+press (906, 118)
+move (860, 118)
+move (800, 118)
+release (800, 118)
+click (916, 124)
+screenshot polish-4-tail-light.png
+# Simulate: rename a flight by double-clicking its name.
+click (663, 18)
+click "Nominal"
+click "Nominal"
+type "Windy run"
+type enter
+screenshot polish-5-simulate-renamed.png
+click "Run"
+screenshot polish-6-simulate-light.png
+# Analyze in light.
+click (722, 18)
+screenshot polish-7-analyze-light.png

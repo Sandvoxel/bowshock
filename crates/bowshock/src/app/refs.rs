@@ -132,6 +132,13 @@ pub fn dim_short(dim: Dim) -> String {
         Dim::Shape => "Shape".into(),
         Dim::Overhang => "Overhang".into(),
         Dim::PackedLength => "Packed".into(),
+        Dim::ShoulderLength => "Shoulder L".into(),
+        Dim::ShoulderDiameter => "Shoulder Ø".into(),
+        Dim::ShoulderThickness => "Shoulder wall".into(),
+        Dim::ForeShoulderLength => "Fore shoulder L".into(),
+        Dim::ForeShoulderDiameter => "Fore shoulder Ø".into(),
+        Dim::ForeShoulderThickness => "Fore shoulder wall".into(),
+        Dim::FilletRadius => "Fillet".into(),
         Dim::Vertex(i) => format!("Vertex {}", i + 1),
     }
 }

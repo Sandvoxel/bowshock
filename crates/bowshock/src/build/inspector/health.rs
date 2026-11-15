@@ -48,16 +48,19 @@ pub struct Flight {
     pub descent_rates: Vec<(String, f64)>,
     /// The sim's fin sets, in the order of the fins of the rocket.
     pub fin_sets: Vec<FinSet>,
+    /// The group each of `fin_sets` belongs to (copies with their own overrides fly as separate sets).
+    pub fin_sources: Vec<PartId>,
 }
 
 /// Flies `rocket` with its active configuration (whole stack, default launch). `None` if it cannot fly (no parts, no motor).
 pub fn fly(rocket: &Rocket, motors: &MotorDb) -> Option<Flight> {
     let input = from_model::sim_input(rocket, motors, Phase::Full, Launch::default()).ok()?;
     let fin_sets = input.vehicle.fin_sets.clone();
+    let fin_sources = from_model::fin_set_sources(rocket).into_iter().map(|(id, _)| id).collect();
     let flight = simulate(&input);
     let (altitude_at_max, _) =
         flight.trajectory.samples.iter().fold((0.0, f64::NEG_INFINITY), |best, s| if s.speed > best.1 { (s.altitude, s.speed) } else { best });
-    Some(Flight { max_velocity: flight.summary.max_velocity, altitude_at_max, descent_rates: flight.summary.descent_rates.clone(), fin_sets })
+    Some(Flight { max_velocity: flight.summary.max_velocity, altitude_at_max, descent_rates: flight.summary.descent_rates.clone(), fin_sets, fin_sources })
 }
 
 /// The flight of the document at a revision, flown on demand.
@@ -89,8 +92,17 @@ impl FlightCache {
 /// The flutter check of fin group `id`: `None` for anything that is not a fin or when there is no flight to judge against.
 pub fn flutter(rocket: &Rocket, id: PartId, flight: &Flight) -> Option<Check> {
     let radial = rocket.radial(id).filter(|r| r.kind.is_fin())?;
-    let sim_fin = fin_for(rocket, id, flight)?;
-    let result = fin_flutter(&sim_fin, shear_modulus(radial.material), &Atmosphere::standard(), flight.altitude_at_max, flight.max_velocity);
+    if flight.fin_sources.len() != flight.fin_sets.len() {
+        return None;
+    }
+    // Every copy flies with its own effective values (symmetry overrides); the worst of them is the group's margin.
+    let result = flight
+        .fin_sources
+        .iter()
+        .zip(&flight.fin_sets)
+        .filter(|(source, _)| **source == id)
+        .map(|(_, fin)| fin_flutter(fin, shear_modulus(radial.material), &Atmosphere::standard(), flight.altitude_at_max, flight.max_velocity))
+        .min_by(|a, b| a.margin.total_cmp(&b.margin))?;
     let margin = result.margin;
     let (severity, text) = if !margin.is_finite() {
         (Severity::Ok, "No flutter".to_string())
@@ -102,15 +114,6 @@ pub fn flutter(rocket: &Rocket, id: PartId, flight: &Flight) -> Option<Check> {
         (Severity::Err, format!("Flutters at {:.0} m/s", result.velocity))
     };
     Some(Check { severity, text, row: "Flutter" })
-}
-
-/// The sim's fin set that is fin group `id`: the n-th fin of the rocket is the n-th fin set of the vehicle.
-fn fin_for(rocket: &Rocket, id: PartId, flight: &Flight) -> Option<FinSet> {
-    let fins: Vec<PartId> = rocket.radials().iter().filter(|r| r.kind.is_fin()).map(|r| r.id).collect();
-    if fins.len() != flight.fin_sets.len() {
-        return None;
-    }
-    fins.iter().position(|f| *f == id).map(|i| flight.fin_sets[i].clone())
 }
 
 /// The descent-rate check of recovery device `id`.
@@ -227,6 +230,25 @@ mod tests {
         assert!(descent(rocket, id_of(rocket, |p| matches!(p.kind, InternalKind::Parachute { .. })), &flight, ctx).is_some());
         // Nothing to say about a body tube.
         assert!(flutter(rocket, rocket.parts()[0].id, &flight).is_none());
+    }
+
+    #[test]
+    fn one_long_override_fin_decides_the_groups_flutter_margin() {
+        use bowshock_model::{Dim, RadialField};
+        let app = app();
+        let ctx = app.ctx();
+        let mut rocket = ctx.doc.rocket().clone();
+        let fins = rocket.radials().iter().find(|r| r.kind.is_fin() && r.count > 1).unwrap().id;
+        let motors = ctx.physics.motors();
+        let base = flutter(&rocket, fins, &fly(&rocket, motors).unwrap()).unwrap();
+        assert!(rocket.unlink_field(fins, 1, RadialField::Span));
+        let longer = rocket.instance_dim(fins, 1, Dim::Span).unwrap() * 3.0;
+        rocket.set_instance_dim(fins, 1, Dim::Span, longer).unwrap();
+        let flight = fly(&rocket, motors).unwrap();
+        assert_eq!(flight.fin_sets.len(), 2, "the loose fin flies as its own set");
+        let margin = |c: &Check| c.text.split('×').next().unwrap().parse::<f64>().unwrap_or(0.0);
+        let worst = flutter(&rocket, fins, &flight).unwrap();
+        assert!(margin(&worst) < margin(&base) || worst.severity != Severity::Ok, "{} vs {}", worst.text, base.text);
     }
 
     #[test]

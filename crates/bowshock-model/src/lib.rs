@@ -30,7 +30,7 @@ pub type PartId = u64;
 pub use config::{Ballast, ConfigError, ConfigId, Configuration, EventKind, MotorMount, MotorRef, MotorSlot, RecoveryTiming, StageEvent, StageTrigger};
 pub use expr::{dim_from_key, dim_key, dim_kind, EvalError, Expr, ExprError, FieldRef, Formula, FormulaError, FormulaStatus, Kind, Op, Value};
 pub use flights::{example_flights, Conditions, FlightDef, FlightId, FlightMotor, Turbulence, MAX_LAUNCH_ANGLE};
-pub use geometry::{FinPlanform, FinSection, NoseShape, Part, PartKind, RadialKind, RadialPart, MAX_COUNT};
+pub use geometry::{FinPlanform, FinSection, NoseShape, Part, PartKind, RadialKind, RadialPart, Shoulder, MAX_COUNT};
 pub use handles::{Dim, DimEdit, HandleKind, HandleSpec, HandleView};
 pub use internal::{DeployEvent, Deployment, InternalKind, InternalPart, MassRole, PartClass, PartRef, System, AUTO_FILL};
 pub use json::{JsonError, FORMAT_VERSION};

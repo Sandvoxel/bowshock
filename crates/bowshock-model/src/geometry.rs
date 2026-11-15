@@ -239,6 +239,52 @@ fn haack(r: f64, t: f64, c: f64) -> f64 {
     r * ((theta - (2.0 * theta).sin() / 2.0 + c * theta.sin().powi(3)) / std::f64::consts::PI).max(0.0).sqrt()
 }
 
+/// A shoulder: the short tube a nose cone or transition inserts into the airframe tube beside it (OpenRocket's "shoulder"
+/// of a nose cone or transition; Niskanen 2013, section 2.1). It is made of the part's material and overlaps the neighbouring
+/// tube, so it adds mass and takes no length of the stack.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Shoulder {
+    /// Length of the shoulder along the axis, metres. 0 means no shoulder.
+    pub length: f64,
+    /// Outer diameter, metres; 0 follows the inner diameter of the tube it enters (`AUTO`).
+    pub diameter: f64,
+    /// Wall thickness, metres. A thickness of at least the radius makes the shoulder solid.
+    pub thickness: f64,
+}
+
+impl Shoulder {
+    /// No shoulder, with OpenRocket's default 2 mm wall ready for when one is added.
+    pub const NONE: Shoulder = Shoulder { length: 0.0, diameter: 0.0, thickness: 0.002 };
+
+    /// Whether there is a shoulder.
+    pub fn is_some(&self) -> bool {
+        self.length > 0.0
+    }
+
+    /// Whether this is [`Shoulder::NONE`] untouched (so it need not be saved).
+    pub fn is_default(&self) -> bool {
+        *self == Shoulder::NONE
+    }
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
+}
+
+fn epoxy() -> MaterialId {
+    MaterialId::EPOXY
+}
+
+fn is_epoxy(m: &MaterialId) -> bool {
+    *m == MaterialId::EPOXY
+}
+
+impl Default for Shoulder {
+    fn default() -> Self {
+        Shoulder::NONE
+    }
+}
+
 /// One placed airframe part.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Part {
@@ -261,13 +307,30 @@ pub struct Part {
     /// CG that replaces the computed one, metres behind the part's fore face.
     #[serde(default)]
     pub cg_override: Option<f64>,
+    /// The shoulder at the fore face (transitions only: a nose cone has no fore shoulder).
+    #[serde(default, skip_serializing_if = "Shoulder::is_default")]
+    pub shoulder_fore: Shoulder,
+    /// The shoulder at the aft face (nose cones and transitions).
+    #[serde(default, skip_serializing_if = "Shoulder::is_default")]
+    pub shoulder_aft: Shoulder,
 }
 
 impl Part {
     /// A part of `kind` with the default material (and its usual wall), regular paint and no overrides.
     pub fn new(id: PartId, kind: PartKind) -> Part {
         let material = kind.default_material();
-        Part { id, kind, name: None, material, finish: Finish::default(), thickness: material.material().default_wall, mass_override: None, cg_override: None }
+        Part {
+            id,
+            kind,
+            name: None,
+            material,
+            finish: Finish::default(),
+            thickness: material.material().default_wall,
+            mass_override: None,
+            cg_override: None,
+            shoulder_fore: Shoulder::NONE,
+            shoulder_aft: Shoulder::NONE,
+        }
     }
 
     /// The user's name, or the kind's ("Body tube").
@@ -599,6 +662,17 @@ pub struct RadialPart {
     /// linked group; every entry names a copy (`index < count`) and a field that applies to `kind`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overrides: Vec<FieldOverride>,
+    /// Per-copy angles when the copies are not evenly spaced (e.g. one of three fins was detached): `None` means evenly spaced
+    /// from [`RadialPart::angle`]. When set it has `count` entries and `angle` is the first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_angles: Option<Vec<f64>>,
+    /// Radius of the concave epoxy fillet along both sides of each fin's root, metres; 0 means none (OpenRocket's fin fillet).
+    /// Mass only: like OpenRocket the flight model ignores its aerodynamics, and the sim bridge sees it through the part's mass.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub fillet_radius: f64,
+    /// What the fillet is made of.
+    #[serde(default = "epoxy", skip_serializing_if = "is_epoxy")]
+    pub fillet_material: MaterialId,
 }
 
 impl RadialPart {
@@ -620,6 +694,9 @@ impl RadialPart {
             mass_override: None,
             cg_override: None,
             overrides: Vec::new(),
+            instance_angles: None,
+            fillet_radius: 0.0,
+            fillet_material: MaterialId::EPOXY,
         }
     }
 
@@ -637,10 +714,14 @@ impl RadialPart {
         self.name.clone().unwrap_or_else(|| self.kind.name().to_string())
     }
 
-    /// The angle of each copy.
+    /// The angle of each copy: the stored per-copy angles if the group is not evenly spaced, else evenly from `angle`.
     pub fn angles(&self) -> Vec<f64> {
+        let tau = std::f64::consts::TAU;
+        if let Some(list) = self.instance_angles.as_ref().filter(|l| l.len() == usize::from(self.count.max(1))) {
+            return list.iter().map(|a| a.rem_euclid(tau)).collect();
+        }
         let n = f64::from(self.count.max(1));
-        (0..self.count.max(1)).map(|i| (self.angle + std::f64::consts::TAU * f64::from(i) / n).rem_euclid(std::f64::consts::TAU)).collect()
+        (0..self.count.max(1)).map(|i| (self.angle + tau * f64::from(i) / n).rem_euclid(tau)).collect()
     }
 }
 

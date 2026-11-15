@@ -93,6 +93,8 @@ pub struct Bar {
     pub alt: bool,
     /// A fin (fins read `from aft` in the drag tag).
     pub fin: bool,
+    /// A part's shoulder inside the neighbouring tube: drawn as a short block, not something to snap to.
+    pub shoulder: bool,
     /// Drag abilities.
     pub edit: Edit,
 }
@@ -272,8 +274,37 @@ impl Scene {
                 dashed: false,
                 alt: false,
                 fin: false,
+                shoulder: false,
                 edit: Edit { movable: true, resize_aft: true, resize_fore: false },
             });
+            // A shoulder inside the neighbouring tube: a short dashed block of the part's own bar, in the lane's structure row.
+            for aft in [false, true] {
+                let Some(s) = rocket.shoulder(part.id, aft).filter(|s| s.is_some()) else { continue };
+                let (from, to) = if aft { (end, end + s.length) } else { (start - s.length, start) };
+                bars.push(Bar {
+                    key: BarKey::Part(part.id),
+                    system: part.kind.system(),
+                    start: from,
+                    end: to,
+                    name: "Shoulder".to_string(),
+                    dim: len(s.length),
+                    sub: 0,
+                    overrides: String::new(),
+                    dropped: dropped(start),
+                    count: 1,
+                    class: Some(PartClass::Axial),
+                    parent: None,
+                    container: None,
+                    container_word: "",
+                    thin: true,
+                    warn: false,
+                    dashed: true,
+                    alt: false,
+                    fin: false,
+                    shoulder: true,
+                    edit: Edit::default(),
+                });
+            }
         }
 
         // Radial groups.
@@ -307,6 +338,7 @@ impl Scene {
                 dashed: false,
                 alt: false,
                 fin: radial.kind.is_fin(),
+                shoulder: false,
                 edit: Edit {
                     movable: true,
                     resize_aft: matches!(radial.kind, RadialKind::FinSet { .. } | RadialKind::EllipticalFin { .. } | RadialKind::LaunchLug { .. }),
@@ -355,6 +387,7 @@ impl Scene {
                 dashed: matches!(part.kind, InternalKind::ShockCord { .. }),
                 alt: false,
                 fin: false,
+                shoulder: false,
                 edit: Edit { movable: true, resize_aft: internal_resizable(&part.kind), resize_fore: internal_resizable(&part.kind) },
             });
         }
@@ -391,6 +424,7 @@ impl Scene {
                     dashed: config.id != active,
                     alt: config.id != active,
                     fin: false,
+                    shoulder: false,
                     edit: Edit::default(),
                 });
             }
@@ -437,7 +471,7 @@ impl Scene {
 
     /// Station of every part face: what Shift snaps to.
     pub fn faces(&self, except: Option<BarKey>) -> Vec<f64> {
-        let mut faces: Vec<f64> = self.bars.iter().filter(|b| Some(b.key) != except && !b.alt).flat_map(|b| [b.start, b.end]).collect();
+        let mut faces: Vec<f64> = self.bars.iter().filter(|b| Some(b.key) != except && !b.alt && !b.shoulder).flat_map(|b| [b.start, b.end]).collect();
         faces.sort_by(f64::total_cmp);
         faces.dedup_by(|a, b| (*a - *b).abs() < EPS);
         faces

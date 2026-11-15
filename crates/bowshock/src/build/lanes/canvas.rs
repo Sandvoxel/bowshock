@@ -896,11 +896,13 @@ impl Lanes<'_> {
             let (lx, w) = (right + 4.0, mono_w(label.chars().count(), TEXT_SMALL));
             // Room: nothing else on this sub-row is under the label, and the block is not itself on top of a longer bar.
             let (row_y, _) = lane.row(bar.sub);
+            // Blocked when the label's box (any sub-row it touches, not just its own) would run into another bar of the lane.
+            let label_box = Rectangle { x: lx - 1.0, y: row_y + rect.height / 2.0 - 7.0, width: w + 6.0 + if bar.warn { 9.0 } else { 0.0 }, height: 14.0 };
             let blocked = self.scene.bars.iter().any(|o| {
-                o.key != bar.key && !o.alt && o.system == bar.system && o.sub == bar.sub && {
-                    let (a, b) = axis.span(o.start, o.end);
-                    (a > right && a < lx + w + 4.0) || (!o.thin && a < right && b > rect.x)
-                }
+                o.key != bar.key
+                    && !o.alt
+                    && o.system == bar.system
+                    && geometry::bar_rect(o, rows, axis).is_some_and(|r| r.intersects(&label_box) && !(o.thin && r.x < rect.x))
             });
             if !blocked && lx + w < f.width() {
                 put(

@@ -34,6 +34,9 @@ const DIAMOND: f32 = 5.5;
 const HANDLE_R: f32 = 8.0;
 /// Distance from the nose tip to the section handle, px.
 const HANDLE_GAP: f32 = 26.0;
+/// |view direction . rocket axis| where the CG / CP labels start to fade, and where they are gone.
+const AXIAL_FADE_FROM: f32 = 0.7;
+const AXIAL_FADE_TO: f32 = 0.9;
 
 /// What the markers draw, and the state they read.
 pub struct Markers<'a> {
@@ -369,13 +372,16 @@ impl canvas::Program<Message> for Markers<'_> {
         }
 
         // CG and CP: value labels above the body with a stem, glyphs below it, and the margin bracket between them.
-        if let Some((cg, cp, margin)) = self.balance {
+        // They are meaningless looking down the axis (everything stacks at the centre): fade out as the view turns axial.
+        let axial = self.camera.back().z.abs();
+        let fade = 1.0 - ((axial - AXIAL_FADE_FROM) / (AXIAL_FADE_TO - AXIAL_FADE_FROM)).clamp(0.0, 1.0);
+        if let Some((cg, cp, margin)) = self.balance.filter(|_| fade > 0.02) {
             let (zc, zp) = (cg as f32, cp as f32);
             let (a, b) = (self.axis(zc, size), self.axis(zp, size));
             let apart = (b.x - a.x).abs() > 78.0;
             for (z, at, color, name, value, dash, align) in [
-                (zc, a, t.cg, "CG", cg, false, if apart || a.x <= b.x { alignment::Horizontal::Right } else { alignment::Horizontal::Left }),
-                (zp, b, t.cp, "CP", cp, true, if apart || b.x >= a.x { alignment::Horizontal::Left } else { alignment::Horizontal::Right }),
+                (zc, a, t.cg.scale_alpha(fade), "CG", cg, false, if apart || a.x <= b.x { alignment::Horizontal::Right } else { alignment::Horizontal::Left }),
+                (zp, b, t.cp.scale_alpha(fade), "CP", cp, true, if apart || b.x >= a.x { alignment::Horizontal::Left } else { alignment::Horizontal::Right }),
             ] {
                 let r = self.radius_px(z, size).max(body * 0.2);
                 let value = bare(value, Quantity::Length, self.units);
@@ -398,13 +404,13 @@ impl canvas::Program<Message> for Markers<'_> {
                 // The glyph hangs below the body on a thin stem.
                 frame.stroke(&Path::line(Point::new(at.x, at.y + r), Point::new(at.x, g.y - GLYPH_R)), dotted(color.scale_alpha(0.7)));
                 if dash {
-                    cp_glyph(&mut frame, g, color, t.bg_000);
+                    cp_glyph(&mut frame, g, color, t.bg_000.scale_alpha(fade));
                 } else {
-                    cg_glyph(&mut frame, g, color, t.bg_000);
+                    cg_glyph(&mut frame, g, color, t.bg_000.scale_alpha(fade));
                 }
             }
             let y = a.y + glyph_row + 22.0;
-            let color = margin_color(t, margin);
+            let color = margin_color(t, margin).scale_alpha(fade);
             let bracket = Path::new(|p| {
                 p.move_to(Point::new(a.x, y - 5.0));
                 p.line_to(Point::new(a.x, y));

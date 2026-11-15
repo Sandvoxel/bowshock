@@ -194,17 +194,44 @@ fn add_radial(rocket: &Rocket, r: &model::RadialPart, fins: &mut Vec<FinSet>, pr
     let (Some(station), Some(base)) = (rocket.radial_station(r), rocket.radial_base_radius(r)) else {
         return;
     };
-    let mut sets: Vec<(model::InstanceParams, u32)> = Vec::new();
+    for (params, copies) in copy_sets(r) {
+        add_copies(r, &params, copies.len() as u32, station, base, fins, prots);
+    }
+}
+
+/// The copies of group `r` that fly as one set: those with the same effective values, in order of first appearance.
+fn copy_sets(r: &model::RadialPart) -> Vec<(model::InstanceParams, Vec<usize>)> {
+    let mut sets: Vec<(model::InstanceParams, Vec<usize>)> = Vec::new();
     for index in 0..usize::from(r.count.max(1)) {
         let params = r.effective(index);
         match sets.iter_mut().find(|(known, _)| *known == params) {
-            Some((_, count)) => *count += 1,
-            None => sets.push((params, 1)),
+            Some((_, copies)) => copies.push(index),
+            None => sets.push((params, vec![index])),
         }
     }
-    for (params, count) in sets {
-        add_copies(r, &params, count, station, base, fins, prots);
+    sets
+}
+
+/// Which copies of which fin group each entry of [`vehicle`]'s `fin_sets` is, in the same order: `(group id, copy indices)`.
+/// Lets a caller give a fin set its own material or report on it by part (every copy with its overrides applied).
+pub fn fin_set_sources(rocket: &Rocket) -> Vec<(model::PartId, Vec<usize>)> {
+    let mut out = Vec::new();
+    for r in rocket.radials() {
+        if rocket.radial_station(r).is_none() || rocket.radial_base_radius(r).is_none() {
+            continue;
+        }
+        for (params, copies) in copy_sets(r) {
+            let flies = match &params.kind {
+                RadialKind::FinSet { .. } | RadialKind::EllipticalFin { .. } => true,
+                RadialKind::FreeformFin { .. } => equivalent_trapezoid(&params.kind).is_some(),
+                _ => false,
+            };
+            if flies {
+                out.push((r.id, copies));
+            }
+        }
     }
+    out
 }
 
 /// `count` copies of the radial part `r` with the values `params`, standing at `station` on a surface of radius `base`.

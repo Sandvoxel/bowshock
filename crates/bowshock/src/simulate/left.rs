@@ -4,7 +4,7 @@
 use std::fmt;
 
 use bowshock_sim::Turbulence;
-use iced::widget::{button, column, container, row, scrollable, text, tooltip, Space};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input, tooltip, Space};
 use iced::{Background, Border, Element, Fill, Length, Theme, Widget};
 
 use super::flight::{self, Flight, MotorChoice, Spec};
@@ -23,6 +23,8 @@ use crate::widgets::unit_input::unit_input;
 
 /// Height of a flight row (the kit's 44 px list rows).
 const ROW_H: f32 = 44.0;
+/// The widget id of the rename field.
+pub(super) const RENAME_ID: &str = "flight-rename";
 /// Width of the accent edge of the selected row.
 const EDGE_W: f32 = 2.0;
 
@@ -64,7 +66,7 @@ pub(super) fn view<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
         body.push(container(text(hint).size(TEXT_BODY - 1.0).style(theme::muted)).padding([SPACE_2, SPACE_3]).boxed());
     }
     body.push(rule());
-    body.push(conditions(ctx, flight));
+    body.push(conditions(ctx, flight, state.renaming.as_ref().filter(|(id, _)| *id == flight.id).map(|(_, b)| b.as_str())));
 
     let run: Element<'a, Message> = push("Run", Weight::Primary).icon(Mark::Play).width(Fill).on_press(Message::Run).into();
     let run_all: Element<'a, Message> = push("Run all", Weight::Secondary).tooltip("Fly every flight").on_press(Message::RunAll).into();
@@ -73,8 +75,21 @@ pub(super) fn view<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
     column![head, scrollable(column(body)).direction(super::thin_scrollbar()).style(super::scroll_style).height(Fill), rule(), footer].height(Fill).boxed()
 }
 
+/// The inline text field that renames a flight (Enter commits, Esc cancels).
+fn rename_field<'a>(buffer: &'a str) -> Element<'a, Message> {
+    text_input("Flight name", buffer)
+        .id(RENAME_ID)
+        .on_input(Message::RenameInput)
+        .on_submit(Message::CommitRename)
+        .size(TEXT_BODY)
+        .padding([1.0, SPACE_1])
+        .style(theme::input)
+        .width(Fill)
+        .boxed()
+}
+
 /// The CONDITIONS section of `flight`: its fields, with the `F5` keycap and a remove button in the head.
-fn conditions<'a>(ctx: &'a Ctx, flight: &'a Flight) -> Element<'a, Message> {
+fn conditions<'a>(ctx: &'a Ctx, flight: &'a Flight, renaming: Option<&'a str>) -> Element<'a, Message> {
     let spec = &flight.spec;
     let system = &ctx.units;
     let field = |label: &'a str, value: f64, quantity: Quantity, make: fn(f64) -> Edit| -> Element<'a, Message> {
@@ -93,9 +108,11 @@ fn conditions<'a>(ctx: &'a Ctx, flight: &'a Flight) -> Element<'a, Message> {
 
     let keycap = container(text("F5").font(MONO).size(10)).padding([1.0, SPACE_1]).style(theme::keycap);
     let remove: Element<'a, Message> = icon_button(Mark::Close, "Remove this flight").on_press(Message::RemoveFlight).width(22).into();
-    let head = row![ui::label(format!("CONDITIONS · {}", flight.name.to_uppercase())), Space::new().width(Fill), remove, keycap]
-        .spacing(SPACE_2)
-        .align_y(iced::Center);
+    let title: Element<'a, Message> = match renaming {
+        Some(buffer) => rename_field(buffer),
+        None => mouse_area(ui::label(format!("CONDITIONS · {}", flight.name.to_uppercase()))).on_double_click(Message::StartRename(flight.id)).boxed(),
+    };
+    let head = row![title, Space::new().width(Fill), remove, keycap].spacing(SPACE_2).align_y(iced::Center);
 
     let fields: Vec<Element<'a, Message>> = vec![
         motor,
@@ -193,7 +210,11 @@ fn flight_row<'a>(state: &'a State, ctx: &'a Ctx, flight: &'a Flight, revision: 
         tick.boxed()
     };
 
-    let mut name: Vec<Element<'a, Message>> = vec![text(flight.name.as_str()).size(TEXT_BODY).boxed()];
+    let title: Element<'a, Message> = match state.renaming.as_ref().filter(|(id, _)| *id == flight.id) {
+        Some((_, buffer)) => rename_field(buffer),
+        None => mouse_area(text(flight.name.as_str()).size(TEXT_BODY)).on_double_click(Message::StartRename(flight.id)).boxed(),
+    };
+    let mut name: Vec<Element<'a, Message>> = vec![title];
     if is_ref {
         name.push(container(text("REF").font(MONO).size(9)).padding([0.0, 3.0]).style(theme::keycap).boxed());
     }

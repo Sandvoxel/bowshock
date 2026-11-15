@@ -149,7 +149,10 @@ pub fn place(cx: &Context, id: PartId) -> Vec<Placed> {
         let placed = match rocket.kind_of(id) {
             Some(PartRef::Axial(p)) => {
                 let z0 = rocket.part_station(id).unwrap_or(0.0);
-                axial(camera, size, up, z0, &p.kind, p.thickness, spec.dim)
+                match shoulder_end(spec.dim) {
+                    Some(aft) => shoulder(cx, up, id, z0, &p.kind, aft, spec.dim),
+                    None => axial(camera, size, up, z0, &p.kind, p.thickness, spec.dim),
+                }
             }
             Some(PartRef::Radial(r)) => match pick::placement(rocket, r, cx.instance) {
                 Some(place) => radial(cx, up, r, place, inset.as_ref(), spec.dim),
@@ -163,6 +166,29 @@ pub fn place(cx: &Context, id: PartId) -> Vec<Placed> {
         }
     }
     out
+}
+
+/// Whether a dimension is of the aft (`Some(true)`) or fore (`Some(false)`) shoulder; `None` for any other.
+fn shoulder_end(dim: Dim) -> Option<bool> {
+    match dim {
+        Dim::ShoulderLength | Dim::ShoulderDiameter | Dim::ShoulderThickness => Some(true),
+        Dim::ForeShoulderLength | Dim::ForeShoulderDiameter | Dim::ForeShoulderThickness => Some(false),
+        _ => None,
+    }
+}
+
+/// The handles of a shoulder, inside the neighbouring tube: the length at its free end on the axis, the diameter on its wall
+/// half way along. A shoulder of no length offers only the length handle.
+fn shoulder(cx: &Context, up: Vec3, id: PartId, z0: f64, kind: &PartKind, aft: bool, dim: Dim) -> Option<(Point, Axis)> {
+    let (camera, size) = (cx.camera, cx.size);
+    let (s, d) = (cx.rocket.shoulder(id, aft)?, cx.rocket.shoulder_diameter(id, aft)?);
+    let face = if aft { z0 + kind.length() } else { z0 };
+    let sign = if aft { 1.0 } else { -1.0 };
+    match dim {
+        Dim::ShoulderLength | Dim::ForeShoulderLength => line(camera, size, at(up, 0.0, face + sign * s.length), Vec3::Z * sign as f32, 1.0),
+        Dim::ShoulderDiameter | Dim::ForeShoulderDiameter if s.length > 0.0 => line(camera, size, at(up, d / 2.0, face + sign * s.length / 2.0), up, 0.5),
+        _ => None,
+    }
 }
 
 fn axial(camera: &Camera, size: Size, up: Vec3, z0: f64, kind: &PartKind, wall: f64, dim: Dim) -> Option<(Point, Axis)> {
@@ -209,6 +235,11 @@ fn radial(cx: &Context, up: Vec3, r: &bowshock_model::RadialPart, place: Placeme
     let own = r.effective(cx.instance);
     let world = |radius: f64, z: f64| u * radius as f32 + Vec3::Z * z as f32;
     match (dim, &own.kind) {
+        // The fillet radius sits on the fillet's outer edge a quarter of the way along the root, a circle handle.
+        (Dim::FilletRadius, k) if k.is_fin() => {
+            let rf = r.fillet_radius;
+            line(camera, size, world(base + rf, z0 + k.extent() * 0.25), u, 1.0)
+        }
         (Dim::Span, RadialKind::FinSet { span, sweep, tip_chord, .. }) => line(camera, size, world(base + span, z0 + sweep + tip_chord / 2.0), u, 1.0),
         (Dim::Span, RadialKind::EllipticalFin { span, root_chord, .. }) => line(camera, size, world(base + span, z0 + root_chord / 2.0), u, 1.0),
         (Dim::RootChord, RadialKind::FinSet { root_chord, .. } | RadialKind::EllipticalFin { root_chord, .. }) => {

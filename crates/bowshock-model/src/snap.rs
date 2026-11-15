@@ -244,6 +244,30 @@ impl Rocket {
                 }
                 _ => {}
             },
+            (Dim::ShoulderDiameter | Dim::ForeShoulderDiameter, PartRef::Axial(_)) => {
+                // A shoulder slides into the tube beside it: its outer diameter catches that tube's inner diameter.
+                let aft = dim == Dim::ShoulderDiameter;
+                let i = self.index_of(id).unwrap_or(0);
+                let neighbour = if aft { self.parts().get(i + 1) } else { i.checked_sub(1).and_then(|j| self.parts().get(j)) };
+                if let Some(n) = neighbour {
+                    let d = n.inner_diameter_at(if aft { 0.0 } else { n.kind.length() });
+                    if d > 0.0 {
+                        out.add(d, format!("Ø{} · {} inner", mm(d), n.display_name().to_lowercase()), Some(n.id), 1);
+                    }
+                }
+            }
+            (Dim::ShoulderLength | Dim::ForeShoulderLength, PartRef::Axial(_)) => {
+                let aft = dim == Dim::ShoulderLength;
+                let i = self.index_of(id).unwrap_or(0);
+                let neighbour = if aft { self.parts().get(i + 1) } else { i.checked_sub(1).and_then(|j| self.parts().get(j)) };
+                let own = self.shoulder_diameter(id, aft).unwrap_or(0.0);
+                if own > 0.0 {
+                    out.add(own, "1 CAL", None, 4);
+                }
+                if let Some(n) = neighbour {
+                    out.add(n.kind.length(), format!("= {} length", n.display_name().to_lowercase()), Some(n.id), 2);
+                }
+            }
             (Dim::Overhang, PartRef::Internal(_)) => {
                 out.add(0.0, "flush with mount aft", None, 1);
             }

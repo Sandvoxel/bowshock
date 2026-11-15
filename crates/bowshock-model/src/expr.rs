@@ -72,6 +72,13 @@ pub fn dim_key(dim: Dim) -> String {
         Dim::InnerDiameter => "id".into(),
         Dim::Overhang => "overhang".into(),
         Dim::PackedLength => "packed_length".into(),
+        Dim::ShoulderLength => "shoulder_length".into(),
+        Dim::ShoulderDiameter => "shoulder_od".into(),
+        Dim::ShoulderThickness => "shoulder_thickness".into(),
+        Dim::ForeShoulderLength => "fore_shoulder_length".into(),
+        Dim::ForeShoulderDiameter => "fore_shoulder_od".into(),
+        Dim::ForeShoulderThickness => "fore_shoulder_thickness".into(),
+        Dim::FilletRadius => "fillet".into(),
         Dim::Vertex(i) => format!("vertex{i}"),
     }
 }
@@ -96,6 +103,13 @@ pub fn dim_from_key(key: &str) -> Option<Dim> {
         "id" => Dim::InnerDiameter,
         "overhang" => Dim::Overhang,
         "packed_length" => Dim::PackedLength,
+        "shoulder_length" => Dim::ShoulderLength,
+        "shoulder_od" => Dim::ShoulderDiameter,
+        "shoulder_thickness" => Dim::ShoulderThickness,
+        "fore_shoulder_length" => Dim::ForeShoulderLength,
+        "fore_shoulder_od" => Dim::ForeShoulderDiameter,
+        "fore_shoulder_thickness" => Dim::ForeShoulderThickness,
+        "fillet" => Dim::FilletRadius,
         other => Dim::Vertex(other.strip_prefix("vertex")?.parse().ok()?),
     })
 }

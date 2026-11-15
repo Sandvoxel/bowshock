@@ -3,13 +3,14 @@
 //! warnings chip pinned right. Every value comes from the physics cache and is formatted in the app's unit system.
 
 use bowshock_sim::from_model::{Balance, Level, Phase};
-use iced::widget::{container, row, text, Space};
+use iced::widget::text::Wrapping;
+use iced::widget::{container, row, text, tooltip, Space};
 use iced::{Center, Element, Fill, Widget};
 
 use super::{Message as ChromeMessage, State};
 use crate::app::{ui, Ctx, Message, Mode, Selection};
 use crate::theme;
-use crate::tokens::{text as type_scale, SPACE_2, SPACE_3, STATUSBAR_H, TEXT_BODY, TEXT_LABEL};
+use crate::tokens::{text as type_scale, SPACE_1, SPACE_2, SPACE_3, STATUSBAR_H, TEXT_BODY, TEXT_LABEL};
 use crate::units::Quantity;
 use crate::widgets::chip::{chip, Severity};
 use crate::widgets::gauge::Bands;
@@ -52,7 +53,7 @@ pub fn status_strip<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> 
 
     let mut trailing: Vec<Element<'a, Message>> = Vec::new();
     if let Some(notice) = &ctx.notice {
-        trailing.push(text(notice.0.as_str()).size(TEXT_BODY).style(theme::colored(|t| t.ok)).boxed());
+        trailing.push(single_line(&notice.0, NOTICE_MAX, TEXT_BODY, false, theme::colored(|t| t.ok)));
     }
     if let Some(summary) = selection_summary(ctx) {
         trailing.push(summary);
@@ -92,6 +93,26 @@ fn config_cell<'a>(name: String, open: bool) -> Element<'a, Message> {
     status::cell(content.boxed(), Some(Message::Chrome(ChromeMessage::ToggleConfigMenu)))
 }
 
+/// Longest notice / selection line shown before it is cut with an ellipsis (characters).
+const NOTICE_MAX: usize = 44;
+const SELECTION_MAX: usize = 40;
+
+/// `full` on one line, cut to `max` characters with an ellipsis; the cut text has a tooltip with all of it. Never wraps, so the
+/// strip keeps its height.
+fn single_line<'a>(full: &str, max: usize, size: f32, mono: bool, style: impl Fn(&iced::Theme) -> text::Style + 'a) -> Element<'a, Message> {
+    let cut = full.chars().count() > max;
+    let shown: String = if cut { full.chars().take(max.saturating_sub(1)).collect::<String>().trim_end().to_string() + "…" } else { full.to_string() };
+    let mut line = text(shown).size(size).wrapping(Wrapping::None).style(style);
+    if mono {
+        line = line.font(theme::MONO);
+    }
+    if !cut {
+        return line.boxed();
+    }
+    let bubble = container(text(full.to_string()).size(TEXT_BODY)).padding([SPACE_1, SPACE_2]).style(|t: &iced::Theme| theme::tooltip(t));
+    tooltip(line, bubble).position(tooltip::Position::Top).gap(SPACE_1).boxed()
+}
+
 /// `Selected: Fin set · 42.6 g` before the warnings, when a part is selected.
 fn selection_summary<'a>(ctx: &'a Ctx) -> Option<Element<'a, Message>> {
     let Selection::Part(id) = ctx.selection else {
@@ -110,7 +131,7 @@ fn selection_summary<'a>(ctx: &'a Ctx) -> Option<Element<'a, Message>> {
         None => name,
     };
     Some(
-        container(row![ui::label("SELECTED"), text(line).font(theme::MONO).size(TEXT_LABEL + 1.5).style(theme::ink)].spacing(SPACE_2).align_y(Center))
+        container(row![ui::label("SELECTED"), single_line(&line, SELECTION_MAX, TEXT_LABEL + 1.5, true, theme::ink)].spacing(SPACE_2).align_y(Center))
             .padding([0.0, SPACE_3])
             .height(Fill)
             .center_y(STATUSBAR_H)

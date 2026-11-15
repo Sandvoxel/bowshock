@@ -233,8 +233,9 @@ pub fn jobs(rocket: &Rocket, motors: &MotorDb, phase: Phase) -> Result<(Vec<Conf
         }
         ids.truncate(MAX_CONFIGS);
     }
+    // One shear modulus per fin set the bridge builds (copies with symmetry overrides are separate sets).
     let fin_materials: Vec<f64> =
-        rocket.radials().iter().filter(|r| r.kind.fin_span().is_some() && rocket.radial_station(r).is_some()).map(|r| shear_modulus(r.material)).collect();
+        from_model::fin_set_sources(rocket).iter().map(|(id, _)| rocket.radial(*id).map_or(0.3e9, |r| shear_modulus(r.material))).collect();
 
     let mut out = Vec::new();
     let mut first_error = None;
@@ -688,6 +689,23 @@ mod tests {
 
     fn run(analysis: Analysis, method: Method, conditions: Conditions) -> Output {
         compute(&Request { analysis, method, conditions, jobs: example_jobs() })
+    }
+
+    #[test]
+    fn flutter_covers_each_fin_copy_with_its_overrides() {
+        let mut rocket = Rocket::from_json(EXAMPLE).unwrap();
+        let motors = MotorDb::bundled();
+        let n = |r: &Rocket| jobs(r, &motors, Phase::Full).unwrap().0[0].clone();
+        let before = n(&rocket);
+        let fins = rocket.radials().iter().find(|r| r.kind.is_fin() && r.count > 1).unwrap().id;
+        assert!(rocket.unlink_field(fins, 1, bowshock_model::RadialField::Span));
+        let span = rocket.instance_dim(fins, 1, bowshock_model::Dim::Span).unwrap();
+        rocket.set_instance_dim(fins, 1, bowshock_model::Dim::Span, span * 2.0).unwrap();
+        let after = n(&rocket);
+        assert_eq!(after.vehicle.fin_sets.len(), before.vehicle.fin_sets.len() + 1);
+        assert_eq!(after.shear.len(), after.vehicle.fin_sets.len());
+        let worst = |j: &ConfigJob| flutter(j, &j.vehicle).unwrap().velocity.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
+        assert!(worst(&after) < worst(&before), "{} vs {}", worst(&after), worst(&before));
     }
 
     #[test]

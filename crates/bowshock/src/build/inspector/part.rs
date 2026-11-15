@@ -100,6 +100,20 @@ fn axial<'a>(p: &Params<'a>, part: &Part) -> Vec<Element<'a, Message>> {
     rows.push(f.num("Wall", part.thickness, Quantity::Length, dim(Dim::Wall)));
     let outer = part.kind.fore_diameter().max(part.kind.aft_diameter());
     rows.push(f.derived("Inner Ø", (outer - 2.0 * part.thickness).max(0.0), Quantity::Length, Field::BoreDiameter));
+    for aft in [false, true] {
+        let Some(s) = p.rocket.shoulder(part.id, aft) else { continue };
+        let (length, diameter, wall) =
+            if aft { ("Shoulder length", "Shoulder Ø", "Shoulder wall") } else { ("Fore shoulder length", "Fore shoulder Ø", "Fore shoulder wall") };
+        let dims = if aft {
+            (Dim::ShoulderLength, Dim::ShoulderDiameter, Dim::ShoulderThickness)
+        } else {
+            (Dim::ForeShoulderLength, Dim::ForeShoulderDiameter, Dim::ForeShoulderThickness)
+        };
+        rows.push(f.num(length, s.length, Quantity::Length, dim(dims.0)));
+        let resolved = p.rocket.shoulder_diameter(part.id, aft).unwrap_or(0.0);
+        rows.push(f.auto_or(diameter, resolved, Quantity::Length, dim(dims.1), s.diameter <= 0.0, Message::ResetAuto(dim(dims.1))));
+        rows.push(f.num(wall, s.thickness, Quantity::Length, dim(dims.2)));
+    }
     rows
 }
 
@@ -142,6 +156,7 @@ fn radial_rows<'a>(p: &Params<'a>, radial: &RadialPart) -> Vec<Element<'a, Messa
     }
     if radial.kind.is_fin() {
         rows.push(labeled("Cross-section", segmented_fill(&SECTIONS, radial.cross_section, Message::CrossSection)));
+        rows.push(f.num("Fillet radius", radial.fillet_radius, Quantity::Length, dim(Dim::FilletRadius)));
     }
     rows
 }
@@ -302,6 +317,9 @@ fn material_rows<'a>(p: &Params<'a>) -> Option<Vec<Element<'a, Message>>> {
         rows.push(labeled("Lines", choose(options(MaterialKind::Line), line_material, Message::LineMaterial)));
     }
     if let Some(finish) = finish {
+        if let Some(r) = p.rocket.radial(p.id).filter(|r| r.kind.is_fin()) {
+            rows.push(labeled("Fillet", choose(options(MaterialKind::Bulk), &r.fillet_material, Message::FilletMaterial)));
+        }
         let finishes: Vec<(Finish, String)> = Finish::ALL.iter().map(|f| (*f, finish_label(*f))).collect();
         rows.push(labeled("Finish", choose(finishes, &finish, Message::Finish)));
     }

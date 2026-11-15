@@ -273,6 +273,19 @@ impl Mesh {
                 if let Some(part) = rocket.part(*id) {
                     let inner: Vec<f32> = kind.profile().iter().map(|&(pz, _)| part.inner_diameter_at(pz) as f32 / 2.0).collect();
                     b.cap_shell(&profile, &inner, *state);
+                    // Shoulders: tubes of the part's material reaching into the neighbouring airframe, seen with the shell
+                    // cut away or see-through.
+                    for aft in [false, true] {
+                        let (Some(s), Some(d)) = (rocket.shoulder(*id, aft).filter(|s| s.is_some()), rocket.shoulder_diameter(*id, aft)) else {
+                            continue;
+                        };
+                        let (ro, len) = (d as f32 / 2.0, s.length as f32);
+                        let ri = (ro - s.thickness as f32).max(0.0);
+                        let (za, zb) = if aft { (z1, z1 + len) } else { (z0 - len, z0) };
+                        b.inner.tag = Some(Tag { state: *state, material: 0.0, system: 0.0, layer: LAYER_INTERNAL, explode });
+                        b.inner.tube(ro, ri, za, zb, INNER_SEGMENTS);
+                        b.cap_section(Section::Tube { outer: ro, inner: ri }, za, zb, 0.0, *state);
+                    }
                 }
                 axial.push((*id, z, explode.z));
             }
@@ -305,6 +318,17 @@ impl Mesh {
                         radial::emit(&mut tmp, kind, at, state);
                         b.outer.adopt(&tmp);
                     }
+                }
+                if radial.fillet_radius > 0.0 && own.kind.is_fin() {
+                    b.outer.fillet(
+                        at.z0,
+                        own.kind.extent() as f32,
+                        at.base,
+                        at.angle,
+                        at.cant,
+                        own.kind.thickness().unwrap_or(0.0) as f32,
+                        radial.fillet_radius as f32,
+                    );
                 }
                 b.bound(Some(radial.id), start, explode);
             }

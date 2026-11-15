@@ -91,6 +91,8 @@ pub enum Message {
     Role(MassRole),
     /// The part's material.
     Material(MaterialId),
+    /// The material of a fin group's fillet.
+    FilletMaterial(MaterialId),
     /// A parachute's shroud-line material.
     LineMaterial(MaterialId),
     /// The part's surface finish.
@@ -370,6 +372,9 @@ impl State {
             Message::ResetAuto(Field::Dim(Dim::InnerDiameter)) => {
                 ctx.doc.edit("Auto inner diameter", |r| edit::reset_inner_diameter(r, id));
             }
+            Message::ResetAuto(Field::Dim(d @ (Dim::ShoulderDiameter | Dim::ForeShoulderDiameter))) => {
+                ctx.doc.edit("Auto shoulder diameter", |r| r.reset_shoulder_diameter(id, d == Dim::ShoulderDiameter));
+            }
             Message::ResetAuto(_) => {
                 ctx.doc.edit("Auto diameter", |r| edit::set_auto_diameter(r, id, None));
             }
@@ -395,6 +400,9 @@ impl State {
             }
             Message::Material(material) => {
                 ctx.doc.edit("Set material", |r| r.set_material(id, material));
+            }
+            Message::FilletMaterial(material) => {
+                ctx.doc.edit("Set fillet material", |r| r.set_fillet_material(id, material));
             }
             Message::LineMaterial(material) => {
                 ctx.doc.edit("Set line material", |r| edit::set_line_material(r, id, material));

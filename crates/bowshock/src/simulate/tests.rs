@@ -334,3 +334,23 @@ fn a_new_document_starts_with_one_nominal_flight() {
     assert_eq!(state.selected_flight().name, "Nominal");
     assert_eq!(state.selected_flight().spec, Spec::default());
 }
+
+#[test]
+fn renaming_a_flight_goes_through_the_document_and_escape_cancels() {
+    let mut app = App::with_example();
+    let mut state = state_for(&app);
+    let id = named(&state, "Hot day").id;
+    let _ = state.update(Message::StartRename(id), app.ctx_mut());
+    state.update(Message::RenameInput("Cold day".into()), app.ctx_mut());
+    state.update(Message::CancelRename, app.ctx_mut());
+    assert_eq!(state.flight(id).unwrap().name, "Hot day");
+    assert!(state.renaming.is_none());
+    let _ = state.update(Message::StartRename(id), app.ctx_mut());
+    state.update(Message::RenameInput("Cold day".into()), app.ctx_mut());
+    state.update(Message::CommitRename, app.ctx_mut());
+    assert_eq!(state.flight(id).unwrap().name, "Cold day");
+    assert!(app.ctx().doc.rocket().flights().iter().any(|f| f.name == "Cold day"));
+    assert_eq!(app.ctx_mut().doc.undo().as_deref(), Some("Rename flight"));
+    state.sync(app.ctx(), false);
+    assert_eq!(state.flight(id).unwrap().name, "Hot day");
+}

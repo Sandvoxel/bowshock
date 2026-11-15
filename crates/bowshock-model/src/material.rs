@@ -62,6 +62,7 @@ material_ids! {
     ABS = "abs",
     POLYCARBONATE = "polycarbonate",
     POLYSTYRENE = "polystyrene",
+    EPOXY = "epoxy",
     RIPSTOP_NYLON = "ripstop_nylon",
     MYLAR = "mylar",
     KEVLAR_LINE = "kevlar_line",
@@ -101,7 +102,7 @@ const fn line(id: MaterialId, name: &'static str, density: f64) -> Material {
 }
 
 /// The built-in database, bulk materials first, then surface, then line.
-static MATERIALS: [Material; 25] = [
+static MATERIALS: [Material; 26] = [
     bulk(MaterialId::CARDBOARD, "Cardboard", 680.0, 0.0016),
     bulk(MaterialId::KRAFT_PHENOLIC, "Kraft phenolic", 950.0, 0.0016),
     bulk(MaterialId::BLUE_TUBE, "Blue tube", 1300.0, 0.0016),
@@ -119,6 +120,7 @@ static MATERIALS: [Material; 25] = [
     bulk(MaterialId::ABS, "ABS", 1050.0, 0.002),
     bulk(MaterialId::POLYCARBONATE, "Polycarbonate", 1200.0, 0.002),
     bulk(MaterialId::POLYSTYRENE, "Polystyrene", 1050.0, 0.002),
+    bulk(MaterialId::EPOXY, "Epoxy", 1100.0, 0.002),
     surface(MaterialId::RIPSTOP_NYLON, "Ripstop nylon", 0.067),
     surface(MaterialId::MYLAR, "Mylar", 0.021),
     line(MaterialId::KEVLAR_LINE, "Kevlar line (1/8 in)", 0.0035),

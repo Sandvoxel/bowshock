@@ -109,7 +109,9 @@ impl Rocket {
         if let Some(index) = self.index_of(id) {
             let p = &self.parts[index];
             let rho = p.material.density_as(crate::material::MaterialKind::Bulk, MaterialId::CARDBOARD);
-            return Some(finish(shell(&p.kind, p.thickness, rho), p.mass_override, p.cg_override, self.stations()[index]));
+            let shoulders = [false, true].into_iter().filter_map(|aft| self.shoulder_props(p.id, aft, rho));
+            let body = MassProps::combine(std::iter::once(shell(&p.kind, p.thickness, rho)).chain(shoulders));
+            return Some(finish(body, p.mass_override, p.cg_override, self.stations()[index]));
         }
         if let Some(r) = self.radial(id) {
             return Some(finish(self.radial_props(r), r.mass_override, r.cg_override, self.radial_station(r)?));
@@ -117,6 +119,16 @@ impl Rocket {
         let p = self.internal(id)?;
         let station = self.part_station(id)?;
         Some(finish(self.internal_props(p)?, p.mass_override, p.cg_override, station))
+    }
+
+    /// A shoulder as a tube of the part's material, CG relative to the part's fore face (a fore shoulder lies ahead of it, an
+    /// aft shoulder behind the aft face). Solid when its wall reaches the axis. `None` without a shoulder.
+    fn shoulder_props(&self, id: PartId, aft: bool, rho: f64) -> Option<MassProps> {
+        let s = self.shoulder(id, aft).filter(|s| s.is_some())?;
+        let ro = self.shoulder_diameter(id, aft)? / 2.0;
+        let body = annulus(rho, ro, (ro - s.thickness).max(0.0), s.length);
+        let z0 = if aft { self.part(id)?.kind.length() } else { -s.length };
+        Some(body.shifted(z0))
     }
 
     /// Every part's [`component_mass`](Self::component_mass), in [`ids`](Self::ids) order.
@@ -154,7 +166,16 @@ impl Rocket {
                 let chord = kind.extent();
                 // Each plate is a point at the centroid for the long axis' spin; across the axis it averages r^2/2 about the
                 // diameter it lies on plus its own chord-wise spread, treated as a thin rod.
-                MassProps { mass: n * mass, cg: cz, i_long: n * mass * (radius * radius / 2.0 + chord * chord / 12.0), i_rot: n * mass * radius * radius }
+                let fin =
+                    MassProps { mass: n * mass, cg: cz, i_long: n * mass * (radius * radius / 2.0 + chord * chord / 12.0), i_rot: n * mass * radius * radius };
+                // The fillet: two concave strips of cross-section r^2 (1 - pi/4) along the root (OpenRocket's fillet), each a
+                // point-like mass at the root with the fin's centroid station and the surface radius.
+                if r.fillet_radius > 0.0 {
+                    let m = n * 2.0 * r.fillet_radius * r.fillet_radius * (1.0 - PI / 4.0) * chord * bulk(r.fillet_material);
+                    let strip = MassProps { mass: m, cg: chord / 2.0, i_long: m * (base * base / 2.0 + chord * chord / 12.0), i_rot: m * base * base };
+                    return MassProps::combine([fin, strip]);
+                }
+                fin
             }
             RadialKind::LaunchLug { length, diameter } => {
                 let (ro, wall) = (diameter / 2.0, (diameter / 10.0).min(LUG_WALL_MAX));
@@ -410,5 +431,103 @@ mod tests {
         assert!(close(dry.cg, weighted, 1e-12));
         assert!((0.0..r.length()).contains(&dry.cg));
         assert!(Rocket::default().dry_mass() == MassProps::ZERO);
+    }
+}
+
+#[cfg(test)]
+mod shoulder_tests {
+    use super::*;
+    use crate::geometry::NoseShape;
+    use crate::handles::Dim;
+
+    fn close(a: f64, b: f64, rel: f64) -> bool {
+        (a - b).abs() <= rel * b.abs().max(1e-12)
+    }
+
+    #[test]
+    fn nose_shoulder_adds_a_tube_into_the_airframe() {
+        let mut r = Rocket::default();
+        let nose = r.insert(0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.2, diameter: 0.0762 }).unwrap();
+        r.insert(1, PartKind::BodyTube { length: 0.5, diameter: 0.0762 }).unwrap();
+        let before = r.component_mass(nose).unwrap();
+        assert!(r.set_dim(nose, Dim::ShoulderLength, 0.05).is_some());
+        // AUTO follows the tube's inner diameter: 76.2 mm less two 1.6 mm cardboard walls.
+        let d_in = 0.0762 - 2.0 * 0.0016;
+        assert!(close(r.dim(nose, Dim::ShoulderDiameter).unwrap(), d_in, 1e-12));
+        let after = r.component_mass(nose).unwrap();
+        // rho pi/4 (D^2 - (D - 2 t)^2) L, polystyrene 1050 kg/m^3, 2 mm wall, 50 mm long.
+        let hand = 1050.0 * PI / 4.0 * (d_in * d_in - (d_in - 0.004).powi(2)) * 0.05;
+        assert!(close(after.mass - before.mass, hand, 1e-9), "{} vs {hand}", after.mass - before.mass);
+        // The shoulder's own CG is 25 mm behind the nose base (station 0.2).
+        let added = (after.mass * after.cg - before.mass * before.cg) / (after.mass - before.mass);
+        assert!(close(added, 0.225, 1e-9), "{added}");
+        // Setting the diameter fixes it; resetting puts it back on AUTO.
+        r.set_dim(nose, Dim::ShoulderDiameter, 0.06).unwrap();
+        assert!(close(r.dim(nose, Dim::ShoulderDiameter).unwrap(), 0.06, 1e-12));
+        assert!(r.reset_shoulder_diameter(nose, true));
+        assert!(close(r.dim(nose, Dim::ShoulderDiameter).unwrap(), d_in, 1e-12));
+        // A nose cone has no fore shoulder.
+        assert!(r.dim(nose, Dim::ForeShoulderLength).is_none());
+    }
+
+    #[test]
+    fn transition_has_both_shoulders_ahead_and_behind() {
+        let mut r = Rocket::default();
+        r.insert(0, PartKind::BodyTube { length: 0.3, diameter: 0.0762 }).unwrap();
+        let t = r.insert(1, PartKind::Transition { length: 0.1, fore_diameter: 0.0762, aft_diameter: 0.054 }).unwrap();
+        r.insert(2, PartKind::BodyTube { length: 0.3, diameter: 0.054 }).unwrap();
+        let before = r.component_mass(t).unwrap();
+        r.set_dim(t, Dim::ForeShoulderLength, 0.04).unwrap();
+        r.set_dim(t, Dim::ShoulderLength, 0.03).unwrap();
+        let after = r.component_mass(t).unwrap();
+        assert!(after.mass > before.mass);
+        let fore_in = 0.0762 - 2.0 * 0.0016;
+        let aft_in = 0.054 - 2.0 * 0.0016;
+        assert!(close(r.dim(t, Dim::ForeShoulderDiameter).unwrap(), fore_in, 1e-12));
+        assert!(close(r.dim(t, Dim::ShoulderDiameter).unwrap(), aft_in, 1e-12));
+        let rho = 680.0;
+        let hand = rho * PI / 4.0 * ((fore_in.powi(2) - (fore_in - 0.004).powi(2)) * 0.04 + (aft_in.powi(2) - (aft_in - 0.004).powi(2)) * 0.03);
+        assert!(close(after.mass - before.mass, hand, 1e-9));
+        // Both shoulders are clamped to the tube beside them.
+        assert_eq!(r.set_dim(t, Dim::ShoulderLength, 5.0).unwrap().applied, 0.3);
+    }
+
+    #[test]
+    fn fin_fillet_mass_matches_hand_calculation() {
+        let mut r = Rocket::default();
+        let tube = r.insert(0, PartKind::BodyTube { length: 0.6, diameter: 0.0762 }).unwrap();
+        let fin =
+            r.attach_radial(tube, 0.45, 0.0, 4, RadialKind::FinSet { root_chord: 0.12, tip_chord: 0.05, span: 0.07, sweep: 0.06, thickness: 0.003 }).unwrap();
+        let before = r.component_mass(fin).unwrap();
+        assert!(r.set_dim(fin, Dim::FilletRadius, 0.005).is_some());
+        let after = r.component_mass(fin).unwrap();
+        // Two strips per fin of cross-section r^2 (1 - pi/4) along the 120 mm root, epoxy 1100 kg/m^3, four fins.
+        let hand = 4.0 * 2.0 * 0.005_f64.powi(2) * (1.0 - PI / 4.0) * 0.12 * 1100.0;
+        assert!(close(after.mass - before.mass, hand, 1e-9), "{} vs {hand}", after.mass - before.mass);
+        assert!(r.set_fillet_radius(fin, 0.0));
+        assert_eq!(r.component_mass(fin).unwrap(), before);
+        assert!(!r.set_fillet_radius(tube, 0.01));
+    }
+
+    #[test]
+    fn old_documents_load_without_shoulders_or_fillets() {
+        let mut r = Rocket::default();
+        let nose = r.insert(0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.2, diameter: 0.0762 }).unwrap();
+        let tube = r.insert(1, PartKind::BodyTube { length: 0.5, diameter: 0.0762 }).unwrap();
+        let fin =
+            r.attach_radial(tube, 0.3, 0.0, 3, RadialKind::FinSet { root_chord: 0.1, tip_chord: 0.05, span: 0.06, sweep: 0.03, thickness: 0.003 }).unwrap();
+        // A document saved without the new keys carries none of them.
+        let json = r.to_json();
+        assert!(!json.contains("shoulder") && !json.contains("fillet"));
+        let back = Rocket::from_json(&json).unwrap();
+        assert_eq!(back.shoulder(nose, true).unwrap().length, 0.0);
+        assert_eq!(back.radial(fin).unwrap().fillet_radius, 0.0);
+        // With them set they survive a round trip.
+        r.set_dim(nose, Dim::ShoulderLength, 0.04).unwrap();
+        r.set_dim(fin, Dim::FilletRadius, 0.004).unwrap();
+        let back = Rocket::from_json(&r.to_json()).unwrap();
+        assert_eq!(back.shoulder(nose, true).unwrap().length, 0.04);
+        assert_eq!(back.radial(fin).unwrap().fillet_radius, 0.004);
+        assert_eq!(back, r);
     }
 }

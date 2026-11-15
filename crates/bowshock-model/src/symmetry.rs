@@ -10,10 +10,11 @@
 //!    copy ([`Rocket::split_all_radial`]); a free part can *Rejoin* a group ([`Rocket::rejoin_radial`]) with the group's or its
 //!    own settings winning.
 //!
-//! The model stores a group as one [`RadialPart`] (shared geometry, a start angle and a count), so a group's copies are always
-//! evenly spaced: the angular position is never shared per copy, only the start angle and the count are stored. Each free part
-//! keeps the angle its copy had; the copies left behind are re-spaced as a smaller group starting at the first of them
-//! (changing the count of a linked group re-spaces it, as the Symmetry spec says, and drops its overrides). Detach, split and
+//! The model stores a group as one [`RadialPart`] (shared geometry, a start angle and a count). A fresh group's copies are evenly
+//! spaced; the angular position is never shared, so once a copy leaves, the copies left behind keep their own angles
+//! ([`RadialPart::instance_angles`], read through [`RadialPart::angles`]). Each free part keeps the angle its copy had. Changing
+//! the count of a linked group re-spaces it evenly and drops its overrides (the Symmetry spec). Rejoining a copy to a group
+//! that has its own angles adds the part's angle; to an evenly spaced group it re-spaces. Detach, split and
 //! rejoin keep the total mass: a mass override of the whole group is shared out by copy.
 //!
 //! The spec's `SymmetryGroup { members, shared, overrides: HashMap<ComponentId, FieldMask> }` maps onto the group part itself:
@@ -235,6 +236,21 @@ impl RadialPart {
             .join(" · ")
     }
 
+    /// Stores explicit per-copy angles (one per copy, the first becomes `angle`); evenly spaced lists are stored as `None`.
+    pub(crate) fn set_angles(&mut self, list: Vec<f64>) {
+        let tau = std::f64::consts::TAU;
+        let n = list.len().max(1);
+        self.angle = list.first().copied().unwrap_or(self.angle).rem_euclid(tau);
+        // Evenly spaced as a set (the order a rejoined copy was appended in does not matter).
+        let mut rel: Vec<f64> = list.iter().map(|a| (a - self.angle).rem_euclid(tau)).collect();
+        rel.sort_by(f64::total_cmp);
+        let even = rel.iter().enumerate().all(|(i, a)| {
+            let d = (a - tau * i as f64 / n as f64).abs();
+            d < 1e-9 || tau - d < 1e-9
+        });
+        self.instance_angles = if even { None } else { Some(list) };
+    }
+
     /// Drops overrides that name a copy that no longer exists or a field the kind does not have.
     pub(crate) fn prune_overrides(&mut self) {
         let (count, kind) = (self.count, &self.kind);
@@ -288,6 +304,7 @@ impl Rocket {
             mass_override: group.mass_override.map(|m| m / count),
             cg_override: group.cg_override,
             overrides: Vec::new(),
+            instance_angles: None,
             ..group.clone()
         }
     }
@@ -392,7 +409,9 @@ impl Rocket {
         let position = self.radials.iter().position(|r| r.id == id).ok_or(RadialError::NoSuchRadial)?;
         let rest = &mut self.radials[position];
         rest.count -= 1;
-        rest.angle = angles[first_left];
+        let left: Vec<f64> = angles.iter().enumerate().filter(|(i, _)| *i != index).map(|(_, a)| *a).collect();
+        rest.set_angles(left);
+        debug_assert_eq!(rest.angle, angles[first_left]);
         rest.mass_override = group.mass_override.map(|m| m * (count - 1.0) / count);
         // The copies after the one that left move up a letter.
         rest.overrides.retain(|o| usize::from(o.index) != index);
@@ -428,6 +447,8 @@ impl Rocket {
         first.kind = own.kind;
         first.cant = own.cant;
         first.overrides.clear();
+        first.angle = group.angles()[0];
+        first.instance_angles = None;
         first.name = Some(free_name(&group, 0));
         first.mass_override = group.mass_override.map(|m| m / count);
         for (offset, copy) in copies.into_iter().enumerate() {
@@ -482,6 +503,11 @@ impl Rocket {
             Winner::Group => None,
         };
         let target = self.radials.iter_mut().find(|r| r.id == group).ok_or(RadialError::NoSuchRadial)?;
+        if target.instance_angles.is_some() {
+            let mut list = target.angles();
+            list.push(p.angles()[0]);
+            target.set_angles(list);
+        }
         target.count = count;
         target.mass_override = per_copy.map(|m| m * f64::from(count));
         if winner == Winner::Part {
@@ -547,6 +573,33 @@ mod tests {
         let (mut r, fins) = finned(4);
         r.detach_radial(fins, 0).unwrap();
         assert!((r.radial(fins).unwrap().angle - TAU / 4.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn detaching_keeps_the_remaining_copies_at_their_original_angles() {
+        let (mut r, fins) = finned(3);
+        let free = r.detach_radial(fins, 1).unwrap();
+        let a = r.radial(fins).unwrap().angles();
+        assert!((a[0] - 0.0).abs() < 1e-12 && (a[1] - 2.0 * TAU / 3.0).abs() < 1e-12, "{a:?}");
+        // The overrides' copy indices and the JSON round trip survive.
+        assert_eq!(Rocket::from_json(&r.to_json()).unwrap(), r);
+        // Rotating the group rotates the remaining copies together.
+        let g = r.radial(fins).unwrap().clone();
+        r.move_radial(fins, g.parent, g.offset, 0.5).unwrap();
+        let a = r.radial(fins).unwrap().angles();
+        assert!((a[1] - a[0] - 2.0 * TAU / 3.0).abs() < 1e-9 && (a[0] - 0.5).abs() < 1e-9);
+        r.move_radial(fins, g.parent, g.offset, 0.0).unwrap();
+        // Rejoining the fin restores an evenly spaced group; a new count re-spaces.
+        r.rejoin_radial(free, fins, Winner::Group).unwrap();
+        let g = r.radial(fins).unwrap();
+        assert!(g.instance_angles.is_none() && g.count == 3);
+        let a = g.angles();
+        assert!((a[1] - a[0] - TAU / 3.0).abs() < 1e-9 || (a[1] - a[0] + 2.0 * TAU / 3.0).abs() < 1e-9, "{a:?}");
+        let (mut r, fins) = finned(4);
+        r.detach_radial(fins, 3).unwrap();
+        let kind = r.radial(fins).unwrap().kind.clone();
+        assert!(r.set_radial(fins, kind, 2));
+        assert!(r.radial(fins).unwrap().instance_angles.is_none());
     }
 
     #[test]

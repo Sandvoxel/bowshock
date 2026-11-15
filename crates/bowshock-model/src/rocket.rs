@@ -324,7 +324,12 @@ impl Rocket {
         self.check_radial(parent, count)?;
         let offset = self.clamp_offset(parent, offset, &existing.kind).ok_or(RadialError::NoSuchParent)?;
         let radial = self.radials.iter_mut().find(|r| r.id == id).ok_or(RadialError::NoSuchRadial)?;
-        (radial.parent, radial.offset, radial.angle) = (parent, offset, angle.rem_euclid(std::f64::consts::TAU));
+        let tau = std::f64::consts::TAU;
+        let delta = angle - radial.angles().first().copied().unwrap_or(radial.angle);
+        if let Some(list) = radial.instance_angles.as_mut() {
+            list.iter_mut().for_each(|a| *a = (*a + delta).rem_euclid(tau));
+        }
+        (radial.parent, radial.offset, radial.angle) = (parent, offset, angle.rem_euclid(tau));
         radial.kind = radial.kind.limited_at(offset);
         Ok(())
     }
@@ -347,6 +352,7 @@ impl Rocket {
             // Re-spacing a group (a new count) loses the overrides of its copies; a new planform loses the fields it lacks.
             if radial.count != count {
                 radial.overrides.clear();
+                radial.instance_angles = None;
             }
             (radial.kind, radial.count, radial.offset) = (kind.limited_at(offset), count, offset);
             radial.prune_overrides();

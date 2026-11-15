@@ -1,0 +1,39 @@
+# Shoulders and fin fillets. Run with the example rocket:
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/shoulders.drive out/shoulders
+viewport 1280x1100
+scale 1
+click "2D"
+click (410, 462)
+screenshot nose.png
+# A 50 mm shoulder: the Shoulder Ø follows the tube's inner diameter (AUTO).
+click (1180, 285)
+type "50"
+type enter
+screenshot nose-shoulder.png
+# Cutaway in the 2D profile shows the shoulder inside the airframe with its handles; Station Lanes show a short dashed block.
+click "Cutaway"
+screenshot nose-cutaway.png
+click "X-ray"
+screenshot nose-xray.png
+# Fins: fillet radius (01 Geometry) and fillet material (03).
+click "Solid"
+click (865, 924)
+screenshot fins.png
+click (1180, 493)
+type "6"
+type enter
+screenshot fins-fillet.png
+# 3D: the fillets along the fin roots, then the shoulder behind the nose cut open.
+click "3D"
+screenshot fins-fillet-3d.png
+# Focus (double click) the nose cone and cut the shell open: the shoulder reaches into the recovery bay.
+click (430, 497)
+click (430, 497)
+click "Cutaway"
+screenshot nose-focus-cutaway.png
+# The booster close up: the fillets stand along the fin roots.
+type escape
+click "Solid"
+click (835, 420)
+click (835, 420)
+screenshot fin-focus.png
