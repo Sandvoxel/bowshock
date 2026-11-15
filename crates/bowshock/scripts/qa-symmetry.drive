@@ -1,0 +1,17 @@
+# QA Symmetry states vs the kit: cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/qa-symmetry.drive out/qa-symmetry
+viewport 1280x1000
+scale 1
+click (925, 824)
+screenshot sym-1-linked.png
+click right(1180, 616)
+screenshot sym-2-menu.png
+click (1205, 650)
+click (1180, 616)
+type "2"
+type enter
+click (1079, 62)
+screenshot sym-3-unlinked.png
+click (1170, 102)
+screenshot sym-4-detached.png
+click "Light"
+screenshot sym-4-detached-light.png

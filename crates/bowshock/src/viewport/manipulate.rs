@@ -85,7 +85,7 @@ impl Hover {
 #[derive(Debug, Clone)]
 pub enum Edit {
     /// A handle was grabbed: the document starts collecting one undo step.
-    Begin(PartId),
+    Begin(PartId, &'static str),
     /// Dimension `Dim` of the part is now this value (limited by the model).
     Dim(PartId, Dim, f64),
     /// Freeform fin vertex moved to `(z, height)`.
@@ -108,7 +108,7 @@ impl Edit {
     /// The key-hint bar to show for this edit: the drag's keys on `Begin`, none (empty) when it ends.
     pub fn hint(&self) -> Option<Vec<(&'static str, &'static str)>> {
         match self {
-            Edit::Begin(_) => Some(vec![("", "Drag handle"), ("Shift", "snap"), ("Ctrl", "5 mm"), ("0-9", "type exact"), ("Esc", "cancel")]),
+            Edit::Begin(_, verb) => Some(vec![("", *verb), ("Shift", "snap"), ("Ctrl", "5 mm"), ("0-9", "type exact"), ("Esc", "cancel")]),
             Edit::End | Edit::Cancel | Edit::Commit(..) => Some(Vec::new()),
             _ => None,
         }
@@ -119,7 +119,7 @@ impl Edit {
 /// undo step, and `End` records one (`Cancel` restores the whole rocket).
 pub fn apply(edit: Edit, ctx: &mut Ctx) -> Task<app::Message> {
     match edit {
-        Edit::Begin(id) => {
+        Edit::Begin(id, _) => {
             let name = ctx.doc.rocket().kind_of(id).map(|p| p.name()).unwrap_or_default();
             ctx.doc.begin_drag(&format!("Resize {}", name.to_lowercase()));
         }
@@ -491,13 +491,32 @@ fn text(frame: &mut Frame, content: impl Into<String>, at: Point, color: Color, 
     frame.fill_text(Text { content: content.into(), position: at, color, size: size.into(), font: MONO, align_x: ax.into(), align_y: ay, ..Text::default() });
 }
 
+/// The floating view toolbar's extent in the viewport (logical px): handle labels stay clear of it.
+const TOOLBAR_X: f32 = 600.0;
+const TOOLBAR_Y: f32 = 76.0;
+
+/// What the key-hint bar calls the thing being dragged (`Drag tip`, `Drag face`, `Drag edge`...).
+fn drag_verb(dim: Dim, nose: bool) -> &'static str {
+    match dim {
+        Dim::Length if nose => "Drag tip",
+        Dim::Length => "Drag face",
+        Dim::Diameter | Dim::ForeDiameter | Dim::Span | Dim::Height | Dim::TipChord | Dim::RootChord | Dim::Sweep => "Drag edge",
+        Dim::Wall | Dim::Thickness | Dim::InnerDiameter => "Drag wall",
+        Dim::Position => "Drag part",
+        Dim::Cant | Dim::Angle => "Drag angle",
+        Dim::Shape => "Drag shape",
+        Dim::Vertex(_) => "Drag vertex",
+        _ => "Drag handle",
+    }
+}
+
 /// A label with a backing fill so it reads over the model.
 fn label(frame: &mut Frame, content: &str, at: Point, color: Color, back: Color) {
     let w = content.chars().count() as f32 * TEXT_LABEL * GLYPH_EM;
     let size = frame.size();
     let x = at.x.min(size.width - w - 4.0).max(4.0);
     let y = at.y.clamp(TEXT_LABEL, size.height - 4.0);
-    frame.fill_rectangle(Point::new(x - 2.0, y - TEXT_LABEL - 1.0), Size::new(w + 4.0, TEXT_LABEL + 3.0), back.scale_alpha(0.7));
+    frame.fill_rectangle(Point::new(x - 2.0, y - TEXT_LABEL - 1.0), Size::new(w + 4.0, TEXT_LABEL + 3.0), back.scale_alpha(0.92));
     text(frame, content, Point::new(x, y), color, TEXT_LABEL, alignment::Horizontal::Left, alignment::Vertical::Bottom);
 }
 
@@ -621,7 +640,8 @@ impl canvas::Program<Message> for Overlay<'_> {
                         last: None,
                         live: Live { value: base, caught: None, limit: None },
                     });
-                    return edit(Edit::Begin(id));
+                    let nose = self.rocket.part(id).is_some_and(|p| p.kind.name() == "Nose cone");
+                    return edit(Edit::Begin(id, drag_verb(dim, nose)));
                 }
                 // A double-click on an edge of the selected freeform fin adds a vertex there.
                 if let Some((id, after, (z, h))) = self.edge_at(at, &vis) {
@@ -705,15 +725,9 @@ impl canvas::Program<Message> for Overlay<'_> {
             return vec![frame.into_geometry()];
         };
         brackets(&mut frame, b, t.accent, false);
-        text(
-            &mut frame,
-            tag_text,
-            Point::new(b.x - BRACKET_GAP, b.y - BRACKET_GAP - 4.0),
-            t.accent,
-            TEXT_LABEL,
-            alignment::Horizontal::Left,
-            alignment::Vertical::Bottom,
-        );
+        // The caption sits on a backing so it stays readable over the model.
+        let caption_y = if b.y - BRACKET_GAP - 4.0 < TOOLBAR_Y && b.x < TOOLBAR_X { b.y + BRACKET_GAP + 28.0 } else { b.y - BRACKET_GAP - 4.0 };
+        label(&mut frame, &tag_text, Point::new(b.x - BRACKET_GAP, caption_y), t.accent, t.bg_000);
 
         // Handles (and, with Alt, their labels and the aft-view inset).
         let vis = self.visible(size, state.modifiers);
@@ -737,6 +751,9 @@ impl canvas::Program<Message> for Overlay<'_> {
                     // Slide the label up or down until it clears the ones already placed.
                     let w = content.chars().count() as f32 * TEXT_LABEL * GLYPH_EM + 4.0;
                     let mut at = p.at + Vector::new(8.0, -8.0);
+                    if at.y - TEXT_LABEL < TOOLBAR_Y && at.x < TOOLBAR_X {
+                        at.y = p.at.y + 20.0;
+                    }
                     for step in [0.0_f32, -14.0, 14.0, -28.0, 28.0, -42.0, 42.0] {
                         let rect = Rectangle::new(Point::new(at.x - 2.0, at.y + step - TEXT_LABEL - 1.0), Size::new(w, TEXT_LABEL + 3.0));
                         if !taken.iter().any(|r: &Rectangle| r.intersects(&rect)) {
@@ -881,7 +898,10 @@ impl Overlay<'_> {
                     } else {
                         Point::new(start.x - 40.0 - was.chars().count() as f32 * TEXT_LABEL * GLYPH_EM, start.y)
                     };
-                    label(frame, &was, at, t.ink_muted, t.bg_000);
+                    // While the snap ticks are out their labels own the space under the path (the kit shows no `WAS` then).
+                    if !modifiers.shift() {
+                        label(frame, &was, at, t.ink_muted, t.bg_000);
+                    }
                     let towards = (now.at - start).x * dir.x + (now.at - start).y * dir.y;
                     let heading = if towards >= 0.0 { dir } else { dir * -1.0 };
                     arrow(frame, now.at + heading * 8.0, heading, 18.0, t.accent);
@@ -892,14 +912,24 @@ impl Overlay<'_> {
                     let mut order = snap::ticks(&drag.targets, value, per_unit, 8);
                     order.sort_by_key(|&i| drag.live.caught != Some(i));
                     let mut drawn: Vec<f32> = Vec::new();
+                    let mut rows: Vec<(usize, f32, f32)> = Vec::new();
                     for i in order {
                         let target = &drag.targets[i];
                         let along = (target.value - value) as f32 * per_unit;
                         if drawn.iter().any(|d| (d - along).abs() < 14.0) {
                             continue;
                         }
-                        // Along a horizontal path the labels would overprint each other: stagger them on stems of growing length.
-                        let row = if dir.x.abs() > dir.y.abs() { (drawn.len() + 1) as f32 } else { 1.0 };
+                        // Along a horizontal path labels share one row beside their ticks; one that would overprint a neighbour
+                        // drops to the next row, on a longer stem.
+                        let x0 = now.at.x + dir.x * along + 2.0;
+                        let span = (x0, x0 + 6.0 + target.label.chars().count() as f32 * TEXT_LABEL * GLYPH_EM);
+                        let row = if dir.x.abs() > dir.y.abs() {
+                            let free = (0..).find(|r| !rows.iter().any(|(rr, a, b)| rr == r && span.0 < *b && *a < span.1)).unwrap_or(0);
+                            rows.push((free, span.0, span.1));
+                            free as f32 + 1.0
+                        } else {
+                            1.0
+                        };
                         drawn.push(along);
                         let at = now.at + dir * along;
                         let caught = drag.live.caught == Some(i);
@@ -960,7 +990,8 @@ impl Overlay<'_> {
             .max(second.as_ref().map_or(0.0, |s| chars(&s.1) * TEXT_LABEL * GLYPH_EM + 14.0))
             .max(96.0);
         let (w, h) = (inner_w + 16.0, if second.is_some() { 62.0 } else { 46.0 });
-        let anchor = now.at + Vector::new(20.0, -(h + 16.0));
+        let tag_left = modifiers.shift() && matches!(drag.placed.axis, Axis::Line { dir, .. } if dir.x.abs() <= dir.y.abs());
+        let anchor = now.at + Vector::new(if tag_left { -(w + 20.0) } else { 20.0 }, -(h + 16.0));
         let origin = Point::new(anchor.x.clamp(6.0, (size.width - w - 6.0).max(6.0)), anchor.y.clamp(48.0, (size.height - h - 6.0).max(48.0)));
         frame.fill_rectangle(origin, Size::new(w, h), t.bg_200);
         frame.stroke_rectangle(origin, Size::new(w, h), Stroke::default().with_color(tone).with_width(1.0));

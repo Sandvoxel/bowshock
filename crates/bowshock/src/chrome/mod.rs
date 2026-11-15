@@ -16,7 +16,7 @@ use iced::{Background, Center, Element, Fill, Padding, Task, Theme, Widget};
 
 use crate::app::{self, ui, Ctx, Selection};
 use crate::theme::{self, MONO};
-use crate::tokens::{BIN_W, RAIL_W, SPACE_1, SPACE_2, SPACE_3, STATUSBAR_H, TEXT_BODY, TEXT_LABEL};
+use crate::tokens::{BIN_W, RAIL_W, SPACE_1, SPACE_2, SPACE_3, STATUSBAR_H, TEXT_BODY};
 use crate::units::Quantity;
 use crate::widgets::glyph::{self, Mark, Tone};
 use crate::widgets::unit_input::unit_input;
@@ -27,6 +27,10 @@ pub use top_bar::top_bar;
 const RENAME_ID: iced::widget::Id = iced::widget::Id::new("rename-configuration");
 /// Height of a menu row.
 const ROW_H: f32 = 26.0;
+/// Menu text: the kit's 12.5 px rows with 11.5 px mono hints, 10 px side padding.
+const MENU_SIZE: f32 = 12.5;
+const MENU_HINT: f32 = 11.5;
+const MENU_PAD: f32 = 10.0;
 /// Width of the issues list.
 const ISSUES_W: f32 = 420.0;
 
@@ -211,25 +215,27 @@ impl State {
             let margin: Element<'a, Message> = match ctx.physics.config_margin(id) {
                 Some(m) => text(format!("{m:.2} cal"))
                     .font(MONO)
-                    .size(TEXT_BODY)
+                    .size(MENU_HINT)
                     .style(move |t: &Theme| text::Style { color: Some(config_picker::margin_color(theme::tokens(t), m)), selection: None })
                     .boxed(),
-                None => text("—").font(MONO).size(TEXT_BODY).style(theme::faint).boxed(),
+                None => text("—").font(MONO).size(MENU_HINT).style(theme::faint).boxed(),
             };
             let current = id == active;
             let ballast: Element<'a, Message> = match config.ballast {
-                Some(b) => text(format!("+{}", ui::with_unit(b.mass, Quantity::Mass, ctx.units))).font(MONO).size(TEXT_LABEL).style(theme::faint).boxed(),
+                Some(b) => text(format!("+{}", ui::with_unit(b.mass, Quantity::Mass, ctx.units))).font(MONO).size(MENU_HINT).style(theme::faint).boxed(),
                 None => Space::new().boxed(),
             };
-            let line = row![text(name).size(TEXT_BODY), Space::new().width(Fill), ballast, Space::new().width(SPACE_3), margin].align_y(Center);
-            let item = button(line).width(Fill).height(ROW_H).padding([0.0, SPACE_3]).style(menu_item(current, false)).on_press(Message::SelectConfig(id));
+            let line = row![text(name).size(MENU_SIZE), Space::new().width(Fill), ballast, Space::new().width(SPACE_3), margin].align_y(Center);
+            let item = button(line).width(Fill).height(ROW_H).padding([0.0, MENU_PAD]).style(menu_item(current, false)).on_press(Message::SelectConfig(id));
             // Deleting is on the row's right-click menu.
             rows = rows.push(mouse_area(item).on_right_press(Message::DeleteConfig(id)).boxed());
+            rows = rows.push(container(Space::new()).width(Fill).height(1).style(theme::hairline).boxed());
         }
 
         let command = |label: &'static str, hint: &'static str, accent: bool, message: Message| -> Element<'a, Message> {
-            let line = row![text(label).size(TEXT_BODY), Space::new().width(Fill), text(hint).font(MONO).size(TEXT_LABEL).style(theme::faint)].align_y(Center);
-            button(line).width(Fill).height(ROW_H).padding([0.0, SPACE_3]).style(menu_item(false, accent)).on_press(message).boxed()
+            let line = row![text(label).size(MENU_SIZE), Space::new().width(Fill), text(hint).font(MONO).size(MENU_HINT).style(theme::muted)].align_y(Center);
+            let item = button(line).width(Fill).height(ROW_H).padding([0.0, MENU_PAD]).style(menu_item(false, accent)).on_press(message);
+            column![item, container(Space::new()).width(Fill).height(1).style(theme::hairline)].boxed()
         };
         let compare = if ctx.compare_configs { "on" } else { "off" };
         let renaming: Element<'a, Message> = match &self.rename {
@@ -246,7 +252,6 @@ impl State {
             .boxed(),
             None => command("Rename…", "F2", false, Message::BeginRename),
         };
-        let separator = container(Space::new()).width(Fill).height(1).style(theme::hairline);
         // Ballast of the current configuration: a mass and, once it has one, where it sits.
         let units = ctx.units;
         let ballast = rocket.active_configuration().ballast;
@@ -260,9 +265,8 @@ impl State {
         }
         let menu = column![
             rows,
-            separator,
             command("New configuration…", if cfg!(target_os = "macos") { "⌘L" } else { "Ctrl L" }, true, Message::NewConfiguration),
-            command("Duplicate current", "copies timing, ballast", false, Message::DuplicateConfig),
+            command("Duplicate current", "", false, Message::DuplicateConfig),
             renaming,
             container(ballast_rows).padding([SPACE_1, SPACE_3]),
             command("Compare all in lanes", compare, false, Message::ToggleCompare),

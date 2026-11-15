@@ -486,12 +486,12 @@ impl canvas::Program<Message> for Lanes<'_> {
         column.fill_rectangle(Point::new(LABEL_W - 1.0, 0.0), Size::new(1.0, size.height), t.line_100);
         column.fill_rectangle(Point::new(0.0, RULER_H - 1.0), Size::new(size.width, 1.0), t.line_100);
         let heading = if busy { "TIP · MASS".to_string() } else { format!("{} FROM TIP", unit.symbol.to_uppercase()) };
-        put(&mut column, &heading, Point::new(8.0, RULER_H / 2.0), t.ink_faint, 10.0, MONO, Alignment::Left, alignment::Vertical::Center);
+        put(&mut column, &heading, Point::new(8.0, RULER_H / 2.0), t.ink_faint, 11.0, MONO, Alignment::Left, alignment::Vertical::Center);
         for lane in &rows {
             let (_, edge) = lane_colors(t, lane.lane.system);
             let mid = lane.y + lane.h / 2.0;
             column.fill_rectangle(Point::new(8.0, mid - 3.0), Size::new(6.0, 6.0), edge);
-            put(&mut column, lane_label(lane.lane.system), Point::new(20.0, mid), t.ink_faint, 10.0, MONO, Alignment::Left, alignment::Vertical::Center);
+            put(&mut column, lane_label(lane.lane.system), Point::new(20.0, mid), t.ink_faint, 11.0, MONO, Alignment::Left, alignment::Vertical::Center);
             column.fill_rectangle(Point::new(0.0, lane.y + lane.h - 1.0), Size::new(size.width, 1.0), t.line_100);
         }
         vec![base.into_geometry(), thin.into_geometry(), over.into_geometry(), column.into_geometry()]

@@ -17,7 +17,7 @@ use super::silhouette;
 use super::{Message, State};
 use crate::app::Ctx;
 use crate::theme::{self, MONO};
-use crate::tokens::{text as type_scale, SPACE_2, SPACE_3, TEXT_BODY, TEXT_LABEL};
+use crate::tokens::{text as type_scale, SPACE_1, SPACE_2, SPACE_3, TEXT_BODY, TEXT_LABEL};
 use crate::units::Quantity;
 use crate::widgets::button::{button, Weight};
 use crate::widgets::unit_input::State as InputState;
@@ -96,7 +96,7 @@ fn tag<'a>(label: String, glyph: Option<Element<'a, Message>>, color: fn(&crate:
     let mut cells: Vec<Element<'a, Message>> = Vec::new();
     cells.extend(glyph);
     cells.push(label.boxed());
-    container(row(cells).spacing(6).align_y(iced::Center)).padding([3.0, SPACE_2]).style(theme::outlined(color)).boxed()
+    container(row(cells).spacing(6).align_y(iced::Center)).padding([2.0, SPACE_2]).style(theme::outlined(color)).boxed()
 }
 
 /// The name a part goes by in a sentence: `Fins ×3`, `Fin B`.
@@ -122,15 +122,23 @@ pub fn bar<'a>(state: &'a State, ctx: &'a Ctx, id: PartId) -> Option<Element<'a,
         let (label, color): (String, fn(&crate::tokens::Tokens) -> iced::Color) =
             if overrides > 0 { (format!("LINKED ×{} · {overrides} OVR", r.count), |t| t.warn) } else { (format!("LINKED ×{}", r.count), |t| t.accent) };
         let glyph = silhouette::link(11.0, color);
-        let mut buttons: Vec<Element<'a, Message>> = vec![button("Detach", Weight::Secondary).on_press(Message::Detach).into()];
+        let mut buttons: Vec<Element<'a, Message>> = vec![button("Detach", Weight::Secondary).small().on_press(Message::Detach).into()];
         if !r.overridden_fields(copy).is_empty() {
-            buttons.push(button("Relink", Weight::Secondary).on_press(Message::RelinkAll).into());
+            buttons.push(button("Relink", Weight::Secondary).small().on_press(Message::RelinkAll).into());
         }
-        buttons.push(button("Split all", Weight::Secondary).on_press(Message::SplitAll).into());
-        rows.push(tag(label, Some(glyph), color));
-        rows.push(row(buttons).spacing(SPACE_2).boxed());
+        buttons.push(button("Split all", Weight::Secondary).small().on_press(Message::SplitAll).into());
+        let buttons = row(buttons).spacing(SPACE_1 + 2.0);
+        if overrides > 0 {
+            // The longer tag leaves no room beside the actions: they drop to their own line.
+            rows.push(tag(label, Some(glyph), color));
+            rows.push(buttons.boxed());
+        } else {
+            rows.push(
+                row(vec![tag(label, Some(glyph), color), Space::new().width(Fill).boxed(), buttons.boxed()]).spacing(SPACE_2).align_y(iced::Center).boxed(),
+            );
+        }
     } else if r.kind.is_fin() || !candidates.is_empty() {
-        let mut rejoin = button("Rejoin group", Weight::Secondary);
+        let mut rejoin = button("Rejoin group", Weight::Secondary).small();
         rejoin = if candidates.is_empty() { rejoin.disabled("No group of the same kind to rejoin") } else { rejoin.on_press(Message::RejoinStart) };
         rows.push(
             row(vec![tag("FREE".into(), None, |t| t.ink_muted), Space::new().width(Fill).boxed(), rejoin.into()])
@@ -178,7 +186,7 @@ pub fn bar<'a>(state: &'a State, ctx: &'a Ctx, id: PartId) -> Option<Element<'a,
     if rows.is_empty() {
         return None;
     }
-    Some(container(column(rows).spacing(SPACE_2)).padding([SPACE_2, SPACE_3]).width(Fill).boxed())
+    Some(container(column(rows).spacing(SPACE_2)).padding([SPACE_2 - 2.0, SPACE_3]).width(Fill).boxed())
 }
 
 #[cfg(test)]

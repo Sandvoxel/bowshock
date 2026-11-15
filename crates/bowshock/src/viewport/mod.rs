@@ -613,14 +613,9 @@ impl View {
         let Some(focus) = &self.focus else {
             return toolbar.boxed();
         };
-        // The focus tag with its way back, in a second overlay under the toolbar.
-        let tag = row![
-            text(focus.tag.clone()).font(MONO).size(TEXT_LABEL).style(theme::colored(|t| t.accent)).wrapping(text::Wrapping::None),
-            Element::from(button("Esc · back", Weight::Secondary).on_press(Message::ExitFocus)),
-        ]
-        .spacing(SPACE_2)
-        .align_y(alignment::Vertical::Center);
-        column![toolbar, container(tag).padding([SPACE_1, SPACE_2]).style(theme::overlay)].spacing(SPACE_2).boxed()
+        // The focus tag is plain accent mono text under the toolbar; the way back sits at the viewport's top right.
+        let tag = text(focus.tag.clone()).font(MONO).size(TEXT_LABEL).style(theme::colored(|t| t.accent)).wrapping(text::Wrapping::None);
+        column![toolbar, container(tag).padding([SPACE_1, SPACE_2])].spacing(SPACE_2).boxed()
     }
 
     /// The viewport pane: sheet, model, the overlay of the interaction in progress, the markers, the ViewCube and the HUD.
@@ -718,15 +713,20 @@ impl View {
         let hints = self.hints(ctx);
         let hint_bar = (!hints.is_empty()).then(|| markers::hints(&hints));
         let mut layers = stack![sheet, model, markers(false, motors.clone())];
-        layers = layers.push(markers::bottom_bar(markers::legend(crate::app::physics::BALANCE_MACH, 0.0), hint_bar));
-        layers = layers.push(overlay).push(markers(true, motors));
+        layers = layers.push(overlay).push(markers::bottom_bar(markers::legend(crate::app::physics::BALANCE_MACH, 0.0), hint_bar));
+        layers = layers.push(markers(true, motors));
         if !self.profile {
             let cube = canvas(cube::ViewCube { camera }).width(CUBE_SIZE).height(CUBE_SIZE);
             let cube: Element<'_, Message> = container(cube).align_right(Fill).padding(SPACE_4).boxed();
             layers = layers.push(cube);
         }
         // Overlays float `space-4` from the viewport edges.
-        stack![layers, container(self.toolbar()).padding(SPACE_4)].boxed()
+        let mut top: Vec<Element<'a, Message>> = vec![container(self.toolbar()).padding(SPACE_4).boxed()];
+        if self.focus.is_some() {
+            let back = Element::from(button("Esc · back", Weight::Secondary).on_press(Message::ExitFocus));
+            top.push(container(back).align_right(Fill).padding(SPACE_4).boxed());
+        }
+        stack![layers].extend(top).boxed()
     }
 
     /// Where the camera is heading: the end of the running animation, or the camera itself.

@@ -1,0 +1,9 @@
+# QA: Build screen at the kit's 1280x760 (1x), the BuilderScreen state (Cutaway, fin set selected), dark then light.
+# cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/qa-build.drive out/qa-build
+viewport 1280x760
+scale 1
+click "Cutaway"
+click (925, 583)
+screenshot builder-dark.png
+click "Light"
+screenshot builder-light.png

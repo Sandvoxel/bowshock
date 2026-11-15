@@ -115,7 +115,8 @@ pub struct Context<'a> {
     pub bounds: Rectangle,
 }
 
-/// The inset for radial part `id`: beside the part, kept inside the viewport.
+/// The inset for radial part `id`: pinned top-right in the viewport (under the way back, or the ViewCube in perspective), like
+/// the kit's AFT VIEW panel.
 pub fn inset(cx: &Context, id: PartId) -> Option<Inset> {
     let r = cx.rocket.radial(id)?;
     let place = pick::placement(cx.rocket, r, cx.instance)?;
@@ -124,13 +125,8 @@ pub fn inset(cx: &Context, id: PartId) -> Option<Inset> {
         RadialKind::RailButton { height, .. } => *height,
         k => k.fin_span().unwrap_or(0.0),
     };
-    let b = cx.bounds;
-    let mut x = b.x + b.width + 16.0;
-    if x + INSET > cx.size.width - 8.0 {
-        x = b.x - 16.0 - INSET;
-    }
-    let x = x.clamp(8.0, (cx.size.width - INSET - 8.0).max(8.0));
-    let y = (b.y + b.height / 2.0 - INSET / 2.0).clamp(48.0, (cx.size.height - INSET - 8.0).max(48.0));
+    let x = (cx.size.width - INSET - 16.0).max(8.0);
+    let y = if cx.camera.ortho_blend > 0.5 { 64.0 } else { 16.0 + super::CUBE_SIZE + 8.0 };
     let panel = Rectangle::new(Point::new(x, y), Size::new(INSET, INSET));
     let total = f64::from(place.base) + reach;
     let scale = (INSET / 2.0 - 26.0) / total.max(1e-3) as f32;

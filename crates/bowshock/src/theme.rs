@@ -132,6 +132,19 @@ pub fn segment(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style
     }
 }
 
+/// The scrollbar in token colours: no rail, a square `line-200` scroller that brightens under the cursor.
+pub fn scroll(theme: &Theme, status: iced::widget::scrollable::Status) -> iced::widget::scrollable::Style {
+    use iced::widget::scrollable::{default, Rail, Scroller, Status};
+    let t = tokens(theme);
+    let hot = matches!(status, Status::Hovered { .. } | Status::Dragged { .. });
+    let rail = Rail {
+        background: None,
+        border: Border::default(),
+        scroller: Scroller { background: Background::Color(if hot { t.ink_faint } else { t.line_200 }), border: Border::default() },
+    };
+    iced::widget::scrollable::Style { vertical_rail: rail, horizontal_rail: rail, ..default(theme, status) }
+}
+
 /// A segmented control's strip: `bg-100` inside a 1 px `line-200` frame.
 pub fn segmented_frame(theme: &Theme) -> container::Style {
     let t = tokens(theme);

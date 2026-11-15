@@ -4,13 +4,13 @@
 
 use bowshock_sim::from_model::{Balance, Level, Phase};
 use iced::widget::text::Wrapping;
-use iced::widget::{container, row, text, tooltip, Space};
+use iced::widget::{button, container, row, stack, text, tooltip, Space};
 use iced::{Center, Element, Fill, Widget};
 
 use super::{Message as ChromeMessage, State};
 use crate::app::{ui, Ctx, Message, Mode, Selection};
 use crate::theme;
-use crate::tokens::{text as type_scale, SPACE_1, SPACE_2, SPACE_3, STATUSBAR_H, TEXT_BODY, TEXT_LABEL};
+use crate::tokens::{text as type_scale, BIN_W, RAIL_W, SPACE_1, SPACE_2, SPACE_3, STATUSBAR_H, TEXT_BODY, TEXT_LABEL};
 use crate::units::Quantity;
 use crate::widgets::chip::{chip, Severity};
 use crate::widgets::gauge::Bands;
@@ -82,15 +82,34 @@ fn phase_cell<'a>(ctx: &'a Ctx) -> Element<'a, Message> {
 /// points up because the menu opens upward.
 fn config_cell<'a>(name: String, open: bool) -> Element<'a, Message> {
     let tone = if open { Tone::Accent } else { Tone::Muted };
+    // The kit's cell is at least 150 px wide with the caret at its right edge; open, it is as wide as the menu above it.
+    let natural = name.chars().count() as f32 * 7.5 + 86.0;
+    let width = if open { natural.max(RAIL_W + BIN_W) } else { natural.max(150.0) };
     let content = row![
         ui::label("CONFIG"),
         text(name).font(theme::MONO).size(type_scale::NUM_BODY.size).style(theme::ink),
-        Space::new().width(SPACE_2),
+        Space::new().width(Fill),
         glyph::icon(Mark::CaretUp, tone, 10.0)
     ]
     .spacing(SPACE_2)
     .align_y(Center);
-    status::cell(content.boxed(), Some(Message::Chrome(ChromeMessage::ToggleConfigMenu)))
+    let body = container(content).padding([0.0, SPACE_3]).width(width).height(Fill).center_y(Fill);
+    let press = Message::Chrome(ChromeMessage::ToggleConfigMenu);
+    let cell: Element<'a, Message> = if open {
+        let held = button(body).padding(0).height(Fill).on_press(press).style(|t: &iced::Theme, _| button::Style {
+            background: Some(iced::Background::Color(theme::tokens(t).bg_300)),
+            text_color: theme::tokens(t).ink,
+            ..button::Style::default()
+        });
+        let edge = container(Space::new())
+            .width(Fill)
+            .height(2)
+            .style(|t: &iced::Theme| container::Style { background: Some(iced::Background::Color(theme::tokens(t).accent)), ..container::Style::default() });
+        stack![held, edge].boxed()
+    } else {
+        button(body).padding(0).height(Fill).style(theme::ghost).on_press(press).boxed()
+    };
+    row![cell, container(Space::new()).width(1).height(Fill).style(theme::hairline)].height(Fill).boxed()
 }
 
 /// Longest notice / selection line shown before it is cut with an ellipsis (characters).

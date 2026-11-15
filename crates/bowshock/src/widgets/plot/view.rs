@@ -388,6 +388,11 @@ impl canvas::Program<PlotMessage> for PlotView<'_> {
         let layout = Layout::new(bounds.size(), self.group, self.state);
         let ranges: Vec<(f64, f64)> = self.group.panels.iter().map(|p| p.y_range(layout.window.0, layout.window.1)).collect();
 
+        // The strip sits on `bg-100`, the plots on `bg-200`, flush with the panel: no frame around the group.
+        frame.fill_rectangle(Point::ORIGIN, bounds.size(), t.bg_200);
+        if layout.top > 0.0 {
+            frame.fill_rectangle(Point::ORIGIN, Size::new(bounds.width, layout.top), t.bg_100);
+        }
         if let Some((rect, kind)) = layout.strip {
             self.draw_strip(&mut frame, t, &layout, rect, kind);
         }
@@ -502,7 +507,7 @@ impl PlotView<'_> {
             }
             StripKind::Mini => {
                 put(f, "ALL", Point::new(6.0, rect.y + rect.height / 2.0), ink_faint, FONT_SMALL, left, alignment::Vertical::Center, MONO);
-                f.fill_rectangle(rect.position(), rect.size(), t.bg_000);
+                f.fill_rectangle(rect.position(), rect.size(), t.bg_100);
                 if let Some(s) = self.group.panels.iter().flat_map(|p| &p.series).find(|s| s.fill.is_none() && s.points.len() > 1) {
                     let (lo, hi) = s.points.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| (lo.min(p.1), hi.max(p.1)));
                     let span = (hi - lo).max(1e-12);
@@ -524,7 +529,7 @@ impl PlotView<'_> {
         if zoomed {
             // The window framed in accent, the rest dimmed.
             let (a, b) = (layout.strip_px(layout.window.0).max(rect.x), layout.strip_px(layout.window.1).min(rect.x + rect.width));
-            let dim = Color { a: 0.55, ..t.bg_000 };
+            let dim = Color { a: 0.55, ..t.bg_100 };
             if a > rect.x {
                 f.fill_rectangle(rect.position(), Size::new(a - rect.x, rect.height), dim);
             }
@@ -556,7 +561,6 @@ impl PlotView<'_> {
         let xdec = decimals_for(nice_step(w1 - w0, x_target));
         for v in nice_ticks(w0, w1, x_target) {
             let x = crisp(layout.px(v));
-            line(f, Point::new(x, plot.y), Point::new(x, bottom), t.line_100, 1.0, LineStyle::Solid);
             line(f, Point::new(x, bottom), Point::new(x, bottom + 3.0), t.line_200, 1.0, LineStyle::Solid);
             put(f, &fmt_fixed(v, xdec), Point::new(x, bottom + 4.0), t.ink_faint, FONT_TICK, center, alignment::Vertical::Top, MONO);
         }
@@ -564,10 +568,6 @@ impl PlotView<'_> {
             let y = crisp(ymap(0.0));
             line(f, Point::new(plot.x, y), Point::new(right, y), t.line_200, 1.0, LineStyle::Solid);
         }
-
-        // Title, top left inside the plot.
-        let title = if panel.unit.is_empty() { panel.title.to_uppercase() } else { format!("{} · {}", panel.title.to_uppercase(), panel.unit) };
-        put(f, &title, Point::new(plot.x + 6.0, plot.y + 3.0), t.ink_faint, FONT_TICK, Alignment::Left, alignment::Vertical::Top, MONO);
 
         // Stacked area fills, bottom layer first, each edged so neighbours stay separate.
         if panel.is_stacked() {
@@ -598,7 +598,7 @@ impl PlotView<'_> {
                         }
                     }
                 });
-                f.stroke(&edge, Stroke::default().with_color(t.bg_000).with_width(1.0));
+                f.stroke(&edge, Stroke::default().with_color(t.bg_200).with_width(1.0));
             }
         }
 
@@ -618,6 +618,12 @@ impl PlotView<'_> {
             line(f, Point::new(plot.x, y), Point::new(right, y), color, 1.0, l.style);
             put(f, &l.label.to_uppercase(), Point::new(right - 6.0, y - 3.0), color, FONT_SMALL, Alignment::Right, alignment::Vertical::Bottom, MONO);
         }
+
+        // Title, top left inside the plot, on a clear inset so grid and event lines do not strike through it.
+        let title = if panel.unit.is_empty() { panel.title.to_uppercase() } else { format!("{} · {}", panel.title.to_uppercase(), panel.unit) };
+        let inset = Size::new(mono_width(title.chars().count(), FONT_TICK) + 8.0, FONT_TICK + 6.0);
+        f.fill_rectangle(Point::new(plot.x + 2.0, plot.y + 1.0), inset, t.bg_200);
+        put(f, &title, Point::new(plot.x + 6.0, plot.y + 3.0), t.ink_faint, FONT_TICK, Alignment::Left, alignment::Vertical::Top, MONO);
 
         // Lines.
         let columns = plot.width as usize;
@@ -732,12 +738,12 @@ impl PlotView<'_> {
             let total = panel.stack_total_at(hx);
             for &(i, y) in &rows {
                 let at = Point::new(cx, ymap(y));
-                f.fill(&Path::circle(at, 5.0), t.bg_000);
+                f.fill(&Path::circle(at, 5.0), t.bg_200);
                 f.fill(&Path::circle(at, 3.5), panel.series[i].color.resolve(t));
             }
             if let Some(y) = total {
                 let at = Point::new(cx, ymap(y));
-                f.fill(&Path::circle(at, 5.0), t.bg_000);
+                f.fill(&Path::circle(at, 5.0), t.bg_200);
                 f.fill(&Path::circle(at, 3.5), t.ink);
             }
 

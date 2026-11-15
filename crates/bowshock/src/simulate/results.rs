@@ -61,7 +61,7 @@ fn ground_section<'a>(state: &'a State, ctx: &'a Ctx, flight: &'a Flight) -> Ele
     let head = row![section_head(4, "Ground track"), Space::new().width(Fill), disperse].align_y(iced::Center);
 
     let ground = GroundTrackView::new(&state.shown.ground, state.plot.hover_x()).element().map(Message::Ground);
-    let mut body: Vec<Element<'a, Message>> = vec![head.boxed(), container(ground).width(Fill).height(GROUND_H).style(theme::ground).boxed()];
+    let mut body: Vec<Element<'a, Message>> = vec![head.boxed(), container(ground).width(Fill).height(GROUND_H).boxed()];
     if let Some(caption) = dispersion_caption(state, ctx, flight) {
         body.push(caption);
     }
@@ -113,7 +113,7 @@ fn line<'a>(
     let phrase = unit.is_empty() && value.chars().count() > 6;
     let value = text(value).font(MONO).size(scale::NUM_BODY.size).style(if stale { theme::faint } else { theme::ink });
     if phrase {
-        cells.push(value.boxed());
+        cells.push(container(value).width(VALUE_W + SPACE_2 + UNIT_W).align_right(VALUE_W + SPACE_2 + UNIT_W).boxed());
     } else {
         cells.push(container(value).width(VALUE_W).align_right(VALUE_W).boxed());
         cells.push(container(text(unit).font(MONO).size(TEXT_LABEL).style(theme::faint)).width(UNIT_W).boxed());

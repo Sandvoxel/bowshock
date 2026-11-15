@@ -411,7 +411,7 @@ impl canvas::Program<GroundMessage> for GroundTrackView<'_> {
         let t = theme::tokens(theme);
         let size = bounds.size();
         let mut f = Frame::new(renderer, size);
-        f.fill_rectangle(Point::ORIGIN, size, t.bg_000);
+        f.fill_rectangle(Point::ORIGIN, size, t.bg_200);
         let xf = Xf::new(self.data, size, st);
         let pad = xf.pad();
         let colour = |c: SeriesColor| c.resolve(t);
@@ -449,7 +449,7 @@ impl canvas::Program<GroundMessage> for GroundTrackView<'_> {
                 .iter()
                 .map(|a| a.to_radians())
                 .map(|a| Point::new(pad.x + r * a.cos(), pad.y + r * a.sin()))
-                .find(|p| p.x > 8.0 && p.x + w + 8.0 < size.width && p.y > 20.0 && p.y < size.height - 20.0);
+                .find(|p| p.x > 8.0 && p.x + w + 8.0 < size.width && p.y > 20.0 && p.y < size.height - 20.0 && !(p.x < 160.0 && p.y < 70.0));
             if let Some(p) = spot {
                 put(&mut f, &label, Point::new(p.x + 5.0, p.y - 4.0), t.warn, 10.0, Alignment::Left, alignment::Vertical::Bottom);
             }
@@ -507,25 +507,77 @@ impl canvas::Program<GroundMessage> for GroundTrackView<'_> {
             });
             f.stroke(&path, Stroke::default().with_color(c).with_width(2.0).with_line_cap(LineCap::Round));
         }
+        // Landing labels go on the first side of their marker that touches no track, no other label and not "PAD".
+        let label_h = TEXT_LABEL + 2.0;
+        let pad_w = text_w("PAD", 10.0);
+        let mut taken = vec![
+            Rectangle::new(Point::new(pad.x - 3.0 - pad_w - 2.0, pad.y - 7.0 - 12.0), Size::new(pad_w + 4.0, 14.0)),
+            Rectangle::new(Point::new(pad.x - 7.0, pad.y - 7.0), Size::new(14.0, 14.0)),
+        ];
+        let mut samples: Vec<Point> = Vec::new();
+        for track in &self.data.tracks {
+            let screen: Vec<Point> = track.points.iter().map(|p| xf.to_screen(p.east, p.north)).collect();
+            for pair in screen.windows(2) {
+                let n = (pair[0].distance(pair[1]) / 2.0).ceil().max(1.0) as usize;
+                samples.extend((0..n).map(|k| {
+                    let u = k as f32 / n as f32;
+                    Point::new(pair[0].x + (pair[1].x - pair[0].x) * u, pair[0].y + (pair[1].y - pair[0].y) * u)
+                }));
+            }
+            samples.extend(screen.last().copied());
+        }
+        let mut placed: Vec<(String, Rectangle)> = Vec::new();
+        for track in &self.data.tracks {
+            let Some(l) = track.landing() else { continue };
+            let at = xf.to_screen(l.east, l.north);
+            let label = landing_label(l.east, l.north);
+            let w = text_w(&label, TEXT_LABEL);
+            let corners = [
+                (at.x + 9.0, at.y - 9.0 - label_h),
+                (at.x - 9.0 - w, at.y - 9.0 - label_h),
+                (at.x + 9.0, at.y + 9.0),
+                (at.x - 9.0 - w, at.y + 9.0),
+                (at.x + 9.0, at.y - label_h / 2.0),
+                (at.x - 9.0 - w, at.y - label_h / 2.0),
+                (at.x - w / 2.0, at.y + 9.0),
+                (at.x - w / 2.0, at.y - 9.0 - label_h),
+                (at.x - 9.0 - w, at.y - 9.0 - label_h * 2.0 - 2.0),
+                (at.x - w / 2.0, at.y - 9.0 - label_h * 2.0 - 2.0),
+                (at.x - 9.0 - w, at.y + 9.0 + label_h + 2.0),
+            ];
+            let fits = |r: &Rectangle| {
+                let grown = Rectangle::new(Point::new(r.x - 2.0, r.y - 2.0), Size::new(r.width + 4.0, r.height + 4.0));
+                r.x >= 0.0
+                    && r.y >= 0.0
+                    && r.x + r.width <= size.width
+                    && r.y + r.height <= size.height
+                    && !samples.iter().any(|p| grown.contains(*p))
+                    && !taken.iter().any(|o| o.intersects(&grown))
+            };
+            let rects: Vec<Rectangle> =
+                corners.iter().map(|&(x, y)| Rectangle::new(Point::new(x.min(size.width - w - 2.0).max(2.0), y), Size::new(w, label_h))).collect();
+            let rect = rects.iter().find(|r| fits(r)).copied().unwrap_or(rects[0]);
+            taken.push(rect);
+            placed.push((label, rect));
+        }
+        for (label, rect) in &placed {
+            put(&mut f, label, Point::new(rect.x, rect.y + 1.0), t.ink_muted, TEXT_LABEL, Alignment::Left, alignment::Vertical::Top);
+        }
         for track in &self.data.tracks {
             let c = colour(track.color);
             // Apogee: a hollow ring with a 2 px surface ring around it.
             if let Some(a) = track.apogee.and_then(|i| track.points.get(i)) {
                 let at = xf.to_screen(a.east, a.north);
                 let ring = if track.color == SeriesColor::Ink { t.accent } else { c };
-                f.fill(&Path::circle(at, 6.0), t.bg_000);
+                f.fill(&Path::circle(at, 6.0), t.bg_200);
                 f.fill(&Path::circle(at, 4.0), ring);
-                f.fill(&Path::circle(at, 2.0), t.bg_000);
+                f.fill(&Path::circle(at, 2.0), t.bg_200);
             }
             // Landing: a filled square with a surface ring, and the label.
             if let Some(l) = track.landing() {
                 let at = xf.to_screen(l.east, l.north);
-                f.fill_rectangle(Point::new(at.x - 5.5, at.y - 5.5), Size::new(11.0, 11.0), t.bg_000);
+                f.fill_rectangle(Point::new(at.x - 5.5, at.y - 5.5), Size::new(11.0, 11.0), t.bg_200);
                 f.fill_rectangle(Point::new(at.x - 3.5, at.y - 3.5), Size::new(7.0, 7.0), c);
-                let label = landing_label(l.east, l.north);
-                let w = text_w(&label, TEXT_LABEL);
-                let (x, ax) = if at.x + 9.0 + w > size.width { (at.x - 9.0, Alignment::Right) } else { (at.x + 9.0, Alignment::Left) };
-                put(&mut f, &label, Point::new(x, at.y - 9.0), t.ink_muted, TEXT_LABEL, ax, alignment::Vertical::Bottom);
             }
         }
 
@@ -534,7 +586,7 @@ impl canvas::Program<GroundMessage> for GroundTrackView<'_> {
             for track in &self.data.tracks {
                 if let Some(p) = track.at_time(time) {
                     let at = xf.to_screen(p.east, p.north);
-                    f.fill(&Path::circle(at, 5.5), t.bg_000);
+                    f.fill(&Path::circle(at, 5.5), t.bg_200);
                     f.fill(&Path::circle(at, 3.5), colour(track.color));
                 }
             }

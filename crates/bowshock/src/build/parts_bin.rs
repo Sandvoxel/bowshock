@@ -36,7 +36,7 @@ use crate::app::{self, drag, Ctx};
 use crate::theme::{self, MONO};
 use crate::tokens::{RAIL_W, SPACE_1, SPACE_2, TEXT_BODY, TEXT_LABEL};
 use crate::widgets::icons::{rail_button, RailIcon};
-use crate::widgets::segmented::{segmented, segmented_fill};
+use crate::widgets::segmented::{segmented_dense, Dense};
 
 /// Movement in px after pressing a row beyond which the press is a drag rather than a click.
 const DRAG_SLOP: f32 = 4.0;
@@ -503,7 +503,8 @@ impl State {
         }
         let list = scrollable(column(rows).width(Fill))
             .height(Fill)
-            .direction(scrollable::Direction::Vertical(scrollable::Scrollbar::new().width(4).scroller_width(4)));
+            .direction(scrollable::Direction::Vertical(scrollable::Scrollbar::new().width(4).scroller_width(4).margin(1)))
+            .style(theme::scroll);
 
         let rule = || container(Space::new()).width(Fill).height(1).style(theme::hairline);
         let body = column![header, rule(), controls, rule(), list, rule(), symmetry_footer(ctx)].width(Fill).height(Fill);
@@ -519,13 +520,18 @@ fn symmetry_footer<'a>(ctx: &'a Ctx) -> Element<'a, Message> {
         .style(|_, _| button::Style::default())
         .on_press(Message::CycleSymmetry(true));
     let head = row![label("SYMMETRY"), Space::new().width(Fill), key].align_y(iced::Center);
-    let count =
-        row![canvas_widget(SymmetryGlyph { count: ctx.drag.symmetry }).width(22).height(22), segmented_fill(&SYMMETRY, ctx.drag.symmetry, Message::Symmetry)]
-            .spacing(SPACE_2)
-            .align_y(iced::Center);
-    let snap =
-        row![text("Angle snap").size(TEXT_BODY).style(theme::muted), Space::new().width(Fill), segmented(&ANGLE_SNAP, ctx.drag.angle_snap, Message::AngleSnap)]
-            .align_y(iced::Center);
+    let count = row![
+        canvas_widget(SymmetryGlyph { count: ctx.drag.symmetry }).width(22).height(22),
+        segmented_dense(&SYMMETRY, ctx.drag.symmetry, Message::Symmetry, Dense { height: 26.0, pad: 7.0, size: 12.0 }, true)
+    ]
+    .spacing(SPACE_2)
+    .align_y(iced::Center);
+    let snap = row![
+        text("Angle snap").size(TEXT_BODY).style(theme::muted),
+        Space::new().width(Fill),
+        segmented_dense(&ANGLE_SNAP, ctx.drag.angle_snap, Message::AngleSnap, Dense { height: 22.0, pad: 6.0, size: 11.0 }, false)
+    ]
+    .align_y(iced::Center);
     container(column![head, count, snap].spacing(SPACE_2)).padding(theme::PAD_PANEL).width(Fill).boxed()
 }
 

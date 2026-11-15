@@ -650,7 +650,7 @@ mod tests {
     fn resizing_changes_only_that_part_and_a_resize_drag_is_one_undo_step() {
         let (mut app, [_, tube, transition]) = app();
         let before = parts(&app);
-        vp(&mut app, Vp::Edit(Edit::Begin(tube)));
+        vp(&mut app, Vp::Edit(Edit::Begin(tube, "Drag face")));
         for length in [0.55, 0.6, 0.7] {
             vp(&mut app, Vp::Edit(Edit::Dim(tube, Dim::Length, length)));
         }
@@ -661,7 +661,7 @@ mod tests {
         // The transition behind it follows the tube's new diameter at their joint.
         assert_eq!(app.ctx.doc.rocket().part(transition).unwrap().kind.fore_diameter(), 0.12);
         // Cancelled, a drag puts everything back.
-        vp(&mut app, Vp::Edit(Edit::Begin(tube)));
+        vp(&mut app, Vp::Edit(Edit::Begin(tube, "Drag face")));
         vp(&mut app, Vp::Edit(Edit::Dim(tube, Dim::Length, 0.3)));
         vp(&mut app, Vp::Edit(Edit::Cancel));
         assert_eq!(app.ctx.doc.rocket().part(tube).unwrap().kind, kind);
@@ -769,7 +769,7 @@ mod tests {
         assert_eq!(app.ctx.doc.rocket().index_of(tube), Some(2));
         assert_eq!(app.ctx.doc.rocket().radial(id).map(|r| r.parent), Some(tube));
         // Resizing the parent keeps the radial part on it.
-        vp(&mut app, Vp::Edit(Edit::Begin(tube)));
+        vp(&mut app, Vp::Edit(Edit::Begin(tube, "Drag face")));
         vp(&mut app, Vp::Edit(Edit::Dim(tube, Dim::Length, 0.2)));
         vp(&mut app, Vp::Edit(Edit::End));
         assert!((app.ctx.doc.rocket().radial(id).unwrap().offset - 0.15).abs() < 1e-9);
@@ -784,7 +784,7 @@ mod tests {
         let (mut app, [_, tube, _]) = app();
         let fins = RadialKind::FinSet { root_chord: 0.1, tip_chord: 0.05, span: 0.05, sweep: 0.03, thickness: 0.003 };
         let id = app.ctx.doc.edit("Fins", |r| r.attach_radial(tube, 0.0, 0.0, 4, fins).unwrap());
-        vp(&mut app, Vp::Edit(Edit::Begin(id)));
+        vp(&mut app, Vp::Edit(Edit::Begin(id, "Drag face")));
         vp(&mut app, Vp::Edit(Edit::Dim(id, Dim::Span, 0.09)));
         vp(&mut app, Vp::Edit(Edit::End));
         let radial = app.ctx.doc.rocket().radial(id).unwrap();

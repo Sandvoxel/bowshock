@@ -39,7 +39,7 @@ pub fn screen<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
     let panel = |content: Element<'a, Message>, width: f32| container(content).width(width).height(Fill).style(theme::panel);
     row![
         panel(left(state, ctx), RAIL_W + BIN_W),
-        container(centre(state, ctx)).width(Fill).height(Fill).padding(theme::PAD_PANEL).style(theme::ground),
+        container(centre(state, ctx)).width(Fill).height(Fill).style(plot::surface),
         panel(right(state, ctx), RIGHT_PANEL_W),
     ]
     .height(Fill)
@@ -247,22 +247,24 @@ fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
     if state.omitted > 0 {
         notes.push(chip(Severity::Info, format!("Showing {} of {} configurations", built.legend.len(), built.legend.len() + state.omitted)).into());
     }
-    let top = row![card, Space::new().width(Fill), column(notes).spacing(SPACE_2).align_x(alignment::Horizontal::Right)].align_y(alignment::Vertical::Top);
+    let top =
+        container(row![card, Space::new().width(Fill), column(notes).spacing(SPACE_2).align_x(alignment::Horizontal::Right)].align_y(alignment::Vertical::Top))
+            .padding([SPACE_3, SPACE_3]);
+    let bar = |e: Element<'a, Message>| container(e).padding([SPACE_2, SPACE_3]).boxed();
 
     let body: Element<'a, Message> = if state.show_table {
-        framed(table(state))
+        container(framed(table(state))).padding([0.0, SPACE_3]).height(Fill).boxed()
     } else if out.analysis == Analysis::Dispersion {
         dispersion(state, built)
     } else {
         column![
-            plot::header(&built.group, &state.plot).map(Message::Plot).boxed(),
-            framed(PlotView::new(&built.group, &state.plot).element().map(Message::Plot).boxed())
+            bar(plot::header(&built.group, &state.plot).map(Message::Plot).boxed()),
+            container(PlotView::new(&built.group, &state.plot).element().map(Message::Plot).boxed()).width(Fill).height(Fill)
         ]
-        .spacing(SPACE_2)
         .height(Fill)
         .boxed()
     };
-    column![top, body].spacing(SPACE_2).boxed()
+    column![top, body].boxed()
 }
 
 fn dispersion<'a>(state: &'a State, built: &'a Built) -> Element<'a, Message> {
@@ -270,15 +272,14 @@ fn dispersion<'a>(state: &'a State, built: &'a Built) -> Element<'a, Message> {
         Some(ground) => framed(GroundTrackView::new(ground, None).element().map(|_| Message::Ignore).boxed()),
         None => Space::new().boxed(),
     };
-    let caption = |s: &'static str| -> Element<'a, Message> { ui::label(s) };
+    let caption = |s: &'static str| -> Element<'a, Message> { container(ui::label(s)).padding([SPACE_2, SPACE_3]).boxed() };
     column![
         caption("LANDING SCATTER · 95 % ELLIPSE · PAD AT CENTRE"),
-        container(map).height(Length::FillPortion(3)),
+        container(map).padding([0.0, SPACE_3]).height(Length::FillPortion(3)),
         caption("APOGEE SPREAD"),
-        plot::header(&built.group, &state.plot).map(Message::Plot).boxed(),
-        container(framed(PlotView::new(&built.group, &state.plot).element().map(Message::Plot).boxed())).height(Length::FillPortion(2)).boxed(),
+        container(plot::header(&built.group, &state.plot).map(Message::Plot)).padding([SPACE_2, SPACE_3]),
+        container(PlotView::new(&built.group, &state.plot).element().map(Message::Plot)).width(Fill).height(Length::FillPortion(2)),
     ]
-    .spacing(SPACE_2)
     .height(Fill)
     .boxed()
 }
@@ -350,7 +351,7 @@ fn row_view<'a>(r: Row) -> Element<'a, Message> {
     parts.push(text(r.label).size(TEXT_BODY).style(theme::muted).boxed());
     parts.push(Space::new().width(Fill).boxed());
     match r.tag {
-        Some(Tag::Chip(severity, label)) => parts.push(chip(severity, label).mono().into()),
+        Some(Tag::Chip(severity, label)) => parts.push(chip(severity, label).into()),
         Some(Tag::Plain(label)) => parts.push(text(label).font(MONO).size(TEXT_LABEL).style(theme::muted).boxed()),
         None => {}
     }

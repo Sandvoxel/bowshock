@@ -757,6 +757,12 @@ impl PlotState {
 // Header: breadcrumb + hints
 // ---------------------------------------------------------------------------------------------------------------------
 
+/// The centre column behind a plot group: `bg-100`, no frame (the plots sit flush on it, as in the kit).
+pub fn surface(theme: &Theme) -> container::Style {
+    let t = theme::tokens(theme);
+    container::Style { background: Some(t.bg_100.into()), text_color: Some(t.ink), ..container::Style::default() }
+}
+
 fn mono<'a, M: 'a>(content: impl text::IntoFragment<'a>, size: f32, color: impl Fn(&Tokens) -> Color + 'a) -> Element<'a, M> {
     text(content).font(MONO).size(size).style(move |theme: &Theme| text::Style { color: Some(color(theme::tokens(theme))), ..text::Style::default() }).boxed()
 }

@@ -31,16 +31,18 @@ pub fn section_head<'a, M: 'a>(index: usize, title: &str) -> Element<'a, M> {
     text(format!("{index:02} {}", title.to_uppercase())).font(MONO).size(TEXT_LABEL).style(theme::faint).boxed()
 }
 
-/// An inspector section: an optional hairline above (`ruled`, false for the first), the head, then the `fields` `space-2`
-/// apart, all with `space-3` around.
+/// An inspector section: an optional full-bleed hairline above (`ruled`, false for the first), then the head and the
+/// `fields` `space-2` apart, all with `space-3` around.
 pub fn section<'a, M: 'a>(index: usize, title: &str, ruled: bool, fields: Vec<Element<'a, M>>) -> Element<'a, M> {
-    let mut body: Vec<Element<'a, M>> = Vec::with_capacity(fields.len() + 2);
-    if ruled {
-        body.push(rule());
-    }
-    body.push(container(section_head(index, title)).padding([SPACE_2, 0.0]).boxed());
+    let mut body: Vec<Element<'a, M>> = Vec::with_capacity(fields.len() + 1);
+    body.push(section_head(index, title));
     body.extend(fields);
-    container(column(body).spacing(SPACE_2)).padding([SPACE_3, SPACE_3]).width(Fill).boxed()
+    let padded = container(column(body).spacing(SPACE_2)).padding([SPACE_3, SPACE_3]).width(Fill);
+    if ruled {
+        column![rule(), padded].width(Fill).boxed()
+    } else {
+        padded.boxed()
+    }
 }
 
 /// The label column: `ink-muted`, never wraps, truncates with an ellipsis (hover shows nothing yet; keep labels short).

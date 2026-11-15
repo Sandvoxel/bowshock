@@ -1,0 +1,16 @@
+# Chrome QA: status strip, config menu, motor picker, staging strip, long notice truncation (see chrome/status_strip.rs).
+#   BOWSHOCK_EXAMPLE=two_stage cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/qa-chrome.drive out/qa-chrome
+# (tooltips cannot be captured: the headless screenshot redraws with the cursor unavailable.)
+viewport 1280x800
+click (78, 782)
+screenshot chrome-menu.png
+click "New configuration…"
+screenshot chrome-picker.png
+click "Cancel"
+click "Stage 2"
+screenshot chrome-phase.png
+click "Light"
+screenshot chrome-light.png
+click (78, 782)
+click "New configuration…"
+screenshot chrome-picker-light.png

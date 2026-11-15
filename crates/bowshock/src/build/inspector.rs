@@ -534,7 +534,14 @@ impl State {
             cells.push(bar);
             cells.push(rule());
         }
-        cells.push(scrollable(column(sections)).width(Fill).height(Fill).boxed());
+        cells.push(
+            scrollable(column(sections))
+                .direction(scrollable::Direction::Vertical(scrollable::Scrollbar::new().width(4).scroller_width(4).margin(1)))
+                .style(theme::scroll)
+                .width(Fill)
+                .height(Fill)
+                .boxed(),
+        );
         let body = column(cells);
         let panel = container(body).width(Fill).height(Fill).style(theme::panel);
 
@@ -642,10 +649,10 @@ impl State {
                     vec![text(part.name()).font(SANS_SEMIBOLD).size(type_scale::UI_TITLE.size).style(theme::ink).boxed()];
                 if rocket.radial(id).is_some_and(|r| r.count > 1) {
                     let letter = bowshock_model::instance_letter(ctx.symmetry.copy_in(rocket, id));
-                    let tag = text(format!("· {letter}")).font(SANS_SEMIBOLD).size(type_scale::UI_TITLE.size).style(theme::muted);
+                    let tag = text(format!(" · {letter}")).font(SANS_SEMIBOLD).size(type_scale::UI_TITLE.size).style(theme::ink);
                     cells.push(mouse_area(tag).on_press(Message::NextInstance).interaction(mouse::Interaction::Pointer).boxed());
                 }
-                mouse_area(row(cells).spacing(SPACE_2).align_y(iced::Center)).on_double_click(Message::StartRename).boxed()
+                mouse_area(row(cells).align_y(iced::Center)).on_double_click(Message::StartRename).boxed()
             }
         };
         let renaming = matches!(&self.renaming, Some((Selection::Part(p), _)) if *p == id);

@@ -592,7 +592,7 @@ impl State {
         let right = results::view(self, ctx);
         row![
             container(left).width(RAIL_W + BIN_W).height(Fill).style(theme::panel),
-            container(self.centre(ctx)).width(Fill).height(Fill).padding(theme::PAD_PANEL).style(theme::ground),
+            container(self.centre(ctx)).width(Fill).height(Fill).style(crate::widgets::plot::surface),
             container(right).width(RIGHT_PANEL_W).height(Fill).style(theme::panel),
         ]
         .height(Fill)
@@ -603,16 +603,17 @@ impl State {
     fn centre<'a>(&'a self, ctx: &'a Ctx) -> Element<'a, Message> {
         let index = usize::from(format::imperial(ctx.units));
         let Some(group) = self.shown.groups[index].as_ref() else { return self.placeholder() };
-        let mut parts: Vec<Element<'a, Message>> = vec![header(group, &self.plot).map(Message::Plot).boxed()];
+        let bar = |e: Element<'a, Message>| container(e).padding([SPACE_2, SPACE_3]).boxed();
+        let mut parts: Vec<Element<'a, Message>> = vec![bar(header(group, &self.plot).map(Message::Plot).boxed())];
         if self.shown.compare {
             let items: Vec<(SeriesColor, String)> =
                 self.shown.ids.iter().filter_map(|id| self.flight(*id)).map(|f| (SeriesColor::Series(f.slot.unwrap_or(1)), f.name.clone())).collect();
             let reference = self.shown.ids.get(self.shown.reference).and_then(|id| self.flight(*id)).map_or("", |f| f.name.as_str());
             let note = text(format!("events and timeline: {reference} (reference)")).font(MONO).size(TEXT_LABEL).style(theme::faint);
-            parts.push(row![legend(&items), Space::new().width(Fill), note].align_y(iced::Center).boxed());
+            parts.push(bar(row![legend(&items), Space::new().width(Fill), note].align_y(iced::Center).boxed()));
         }
-        parts.push(container(PlotView::new(group, &self.plot).element().map(Message::Plot)).width(Fill).height(Fill).style(theme::ground).boxed());
-        column(parts).spacing(SPACE_2).boxed()
+        parts.push(container(PlotView::new(group, &self.plot).element().map(Message::Plot)).width(Fill).height(Fill).boxed());
+        column(parts).boxed()
     }
 
     /// What the centre shows before the selected flight has run.

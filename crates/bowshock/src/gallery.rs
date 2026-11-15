@@ -241,7 +241,7 @@ impl Gallery {
             chip(Severity::Ok, "Stable · 1.92 cal").into(),
             chip(Severity::Warn, "Diameter mismatch · 1.6 mm").into(),
             chip(Severity::Err, "Unstable · 0.31 cal (min 1.0)").into(),
-            chip(Severity::Info, "Mach 0.3 · AoA 0°").mono().into(),
+            chip(Severity::Info, "Mach 0.3 · AoA 0°").into(),
         ];
         let glyphs = row![
             glyph::cg(14.0),

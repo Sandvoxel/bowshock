@@ -178,27 +178,28 @@ impl<M> canvas::Program<M> for Drawing {
                 frame.fill(&tri, color);
             }
             Mark::Undo | Mark::Redo => {
-                let sign = if self.mark == Mark::Undo { 1.0 } else { -1.0 };
-                let x = |v: f32| if sign > 0.0 { v } else { 14.0 - v };
-                // An open hook ending in an arrow head.
-                let hook = Path::new(|b| {
-                    b.move_to(at(x(4.0), 6.2));
-                    b.line_to(at(x(9.0), 6.2));
-                    b.arc(Arc {
-                        center: at(x(9.0), 8.7),
-                        radius: 2.5 * u,
-                        start_angle: Radians(if sign > 0.0 { -FRAC_PI_2 } else { PI + FRAC_PI_2 }),
-                        end_angle: Radians(FRAC_PI_2),
-                    });
-                    b.line_to(at(x(5.0), 11.2));
-                });
-                frame.stroke(&hook, stroke);
+                // The kit's 16-unit SVG (`M5 4 L2 7 L5 10`, `M2 7 H10 a4 4 0 0 1 0 8 H7`), mirrored for redo.
+                let undo = self.mark == Mark::Undo;
+                let k = 14.0 / 16.0;
+                let p = |x: f32, y: f32| at(k * if undo { x } else { 16.0 - x }, k * y);
                 let head = Path::new(|b| {
-                    b.move_to(at(x(6.6), 3.8));
-                    b.line_to(at(x(4.0), 6.2));
-                    b.line_to(at(x(6.6), 8.6));
+                    b.move_to(p(5.0, 4.0));
+                    b.line_to(p(2.0, 7.0));
+                    b.line_to(p(5.0, 10.0));
                 });
-                frame.stroke(&head, stroke);
+                frame.stroke(&head, thin);
+                let body = Path::new(|b| {
+                    b.move_to(p(2.0, 7.0));
+                    b.line_to(p(10.0, 7.0));
+                    b.arc(Arc {
+                        center: p(10.0, 11.0),
+                        radius: 4.0 * k * u,
+                        start_angle: Radians(-FRAC_PI_2),
+                        end_angle: Radians(if undo { FRAC_PI_2 } else { -PI - FRAC_PI_2 }),
+                    });
+                    b.line_to(p(7.0, 15.0));
+                });
+                frame.stroke(&body, thin);
             }
             Mark::Plus => {
                 frame.stroke(&Path::line(at(7.0, 2.5), at(7.0, 11.5)), stroke);

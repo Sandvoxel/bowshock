@@ -476,7 +476,7 @@ pub fn hints<'a, M: 'a>(pairs: &[(&'static str, &'static str)]) -> Element<'a, M
         if !key.is_empty() {
             part.push(container(text(key).font(MONO).size(TEXT_LABEL - 1.0)).padding([0.0, 4.0]).style(theme::keycap).boxed());
         }
-        part.push(text(what).size(TEXT_LABEL + 1.0).style(theme::muted).boxed());
+        part.push(text(what).size(TEXT_LABEL + 1.0).boxed());
         items.push(row(part).spacing(SPACE_1).align_y(iced::Center).boxed());
     }
     container(row(items).spacing(SPACE_3).align_y(iced::Center)).padding([SPACE_1 + 2.0, SPACE_3]).style(theme::overlay).boxed()

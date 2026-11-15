@@ -9,7 +9,7 @@ use crate::theme::tokens;
 use crate::tokens::Tokens;
 
 /// Size of the header silhouette, logical px.
-pub const SIZE: (f32, f32) = (30.0, 20.0);
+pub const SIZE: (f32, f32) = (24.0, 16.0);
 
 /// A shape in the unit square `0..1` (y down): a closed outline, optionally filled, or an open line.
 #[derive(Clone, Debug, PartialEq)]
@@ -143,8 +143,9 @@ impl<M> canvas::Program<M> for Drawing {
 
 /// The silhouette of part `id`, `SIZE` px.
 pub fn silhouette<'a, M: 'a>(rocket: &Rocket, id: PartId) -> Element<'a, M> {
-    let (shapes, system) = shapes(rocket, id);
-    canvas::Canvas::new(Drawing { shapes, system }).width(SIZE.0).height(SIZE.1).boxed()
+    // The kit draws the header icon in the neutral part colour whatever the part's system.
+    let (shapes, _) = shapes(rocket, id);
+    canvas::Canvas::new(Drawing { shapes, system: System::Structure }).width(SIZE.0).height(SIZE.1).boxed()
 }
 
 /// The silhouette of the whole rocket's profile (the Rocket inspector's header): the body stack mirrored about the axis.
@@ -185,22 +186,16 @@ impl<M> canvas::Program<M> for Link {
         let mut frame = Frame::new(renderer, bounds.size());
         let u = bounds.width.min(bounds.height) / 14.0;
         let stroke = Stroke::default().with_color((self.color)(tokens(theme))).with_width((1.4 * u).max(1.0)).with_line_cap(LineCap::Round);
-        // Two rounded links, tilted 45 degrees, overlapping in the middle (pulled apart when broken).
-        let link = |cx: f32, cy: f32| {
-            Path::new(|b| {
-                let (rx, ry) = (3.6 * u, 2.2 * u);
-                let c = std::f32::consts::FRAC_1_SQRT_2;
-                let p = |x: f32, y: f32| Point::new(cx * u + (x - y) * c, cy * u + (x + y) * c);
-                b.move_to(p(-rx, -ry));
-                b.line_to(p(rx, -ry));
-                b.line_to(p(rx, ry));
-                b.line_to(p(-rx, ry));
-                b.close();
-            })
-        };
+        // Two stadium links, tilted 45 degrees, overlapping in the middle (pulled apart when broken).
+        let (rx, ry) = (3.7 * u, 2.1 * u);
         let gap = if self.broken { 1.9 } else { 0.0 };
-        frame.stroke(&link(4.8 - gap, 9.2 + gap), stroke);
-        frame.stroke(&link(9.2 + gap, 4.8 - gap), stroke);
+        for (cx, cy) in [(4.8 - gap, 9.2 + gap), (9.2 + gap, 4.8 - gap)] {
+            frame.with_save(|f| {
+                f.translate(iced::Vector::new(cx * u, cy * u));
+                f.rotate(-std::f32::consts::FRAC_PI_4);
+                f.stroke(&Path::rounded_rectangle(Point::new(-rx, -ry), iced::Size::new(2.0 * rx, 2.0 * ry), ry.into()), stroke);
+            });
+        }
         vec![frame.into_geometry()]
     }
 }

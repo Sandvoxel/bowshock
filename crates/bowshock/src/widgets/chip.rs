@@ -9,7 +9,7 @@ use iced::widget::{container, mouse_area, row, text};
 use iced::{mouse, Element, Widget};
 
 use super::glyph::{self, Mark, Tone};
-use crate::theme::{self, MONO};
+use crate::theme;
 use crate::tokens::{SPACE_1, SPACE_2};
 
 /// The state a [`Chip`] reports.
@@ -33,25 +33,18 @@ pub struct Chip<'a, M> {
     severity: Severity,
     label: String,
     on_press: Option<M>,
-    mono: bool,
     _marker: std::marker::PhantomData<&'a ()>,
 }
 
 /// A chip of `severity` reading `label`.
 pub fn chip<'a, M>(severity: Severity, label: impl Into<String>) -> Chip<'a, M> {
-    Chip { severity, label: label.into(), on_press: None, mono: false, _marker: std::marker::PhantomData }
+    Chip { severity, label: label.into(), on_press: None, _marker: std::marker::PhantomData }
 }
 
 impl<'a, M> Chip<'a, M> {
     /// Makes the chip clickable (a warning selects the offending part and scrolls the inspector to the field).
     pub fn on_press(mut self, message: M) -> Self {
         self.on_press = Some(message);
-        self
-    }
-
-    /// Sets the label in the mono face, for chips that are mostly numbers (`Mach 0.3 · AoA 0°`).
-    pub fn mono(mut self) -> Self {
-        self.mono = true;
         self
     }
 }
@@ -65,9 +58,6 @@ impl<'a, M: Clone + 'a> From<Chip<'a, M>> for Element<'a, M> {
             Severity::Info => (None, Tone::Muted, |t| t.line_200),
         };
         let mut label = text(c.label).size(12);
-        if c.mono {
-            label = label.font(MONO);
-        }
         // Info chips read as context, so their text is muted while the outline stays a neutral rule.
         label = label.style(theme::colored(if c.severity == Severity::Info { |t| t.ink_muted } else { pick }));
 
@@ -76,8 +66,8 @@ impl<'a, M: Clone + 'a> From<Chip<'a, M>> for Element<'a, M> {
             parts.push(glyph::icon(mark, tone, 12.0));
         }
         parts.push(label.boxed());
-        let body = container(row(parts).spacing(SPACE_1 + 1.0).align_y(iced::Center))
-            .padding([0.0, SPACE_2 - 1.0])
+        let body = container(row(parts).spacing(SPACE_1 + 2.0).align_y(iced::Center))
+            .padding(iced::Padding { top: 0.0, right: SPACE_2 + 1.0, bottom: 0.0, left: SPACE_2 })
             .height(CHIP_H)
             .center_y(CHIP_H)
             .style(theme::outlined(pick))

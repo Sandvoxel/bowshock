@@ -1,0 +1,21 @@
+# Snapping (design kit Snapping): Shift snaps to targets. A drive script cannot hold keys, so run with Shift held by the overlay:
+#   BOWSHOCK_DRIVE_MODIFIERS=shift cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/directedit-snap.drive out/snap
+# (BOWSHOCK_DRIVE_MODIFIERS=ctrl gives the coarse step.)
+viewport 1280x800
+click "Light"
+click "2D"
+click (571, 314)
+# Length: candidate ticks along the path (stock lengths, sibling parts), the nearest catches within 8 px.
+press (707, 311)
+move (720, 311)
+move (737, 311)
+screenshot snap-length.png
+release (737, 311)
+click (353, 20)
+# Diameter: neighbouring tubes, stock sizes.
+press (707, 294)
+move (707, 290)
+move (707, 286)
+screenshot snap-diameter.png
+release (707, 286)
+click (353, 20)

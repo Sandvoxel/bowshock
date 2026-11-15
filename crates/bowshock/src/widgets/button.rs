@@ -39,11 +39,12 @@ pub struct Button<'a, M> {
     weight: Weight,
     on_press: Option<M>,
     width: Length,
+    small: bool,
 }
 
 /// A labelled button of the given `weight`.
 pub fn button<'a, M>(label: &'a str, weight: Weight) -> Button<'a, M> {
-    Button { label: Some(label), mark: None, key: None, shortcut: None, tip: None, reason: None, weight, on_press: None, width: Length::Shrink }
+    Button { label: Some(label), mark: None, key: None, shortcut: None, tip: None, reason: None, weight, on_press: None, width: Length::Shrink, small: false }
 }
 
 /// A square icon-only ghost button; `tooltip` names the command (add `.shortcut(..)`).
@@ -58,6 +59,7 @@ pub fn icon_button<'a, M>(mark: Mark, tooltip: &'a str) -> Button<'a, M> {
         weight: Weight::Ghost,
         on_press: None,
         width: Length::Fixed(CONTROL_H),
+        small: false,
     }
 }
 
@@ -98,6 +100,12 @@ impl<'a, M> Button<'a, M> {
         self
     }
 
+    /// A compact 22 px button with a 12 px label, for in-panel actions (`Detach`, `Split all`).
+    pub fn small(mut self) -> Self {
+        self.small = true;
+        self
+    }
+
     /// The button's width (default: shrink to its content; icon buttons are `control-h` square).
     pub fn width(mut self, width: impl Into<Length>) -> Self {
         self.width = width.into();
@@ -120,18 +128,19 @@ impl<'a, M: Clone + 'a> From<Button<'a, M>> for Element<'a, M> {
             content.push(glyph::icon(mark, tone, if b.label.is_some() { 12.0 } else { 14.0 }));
         }
         if let Some(label) = b.label {
-            content.push(text(label).font(SANS_MEDIUM).size(TEXT_BODY).boxed());
+            content.push(text(label).font(SANS_MEDIUM).size(if b.small { 12.0 } else { TEXT_BODY }).boxed());
         }
         if let Some(key) = b.key {
             let style: fn(&Theme) -> iced::widget::container::Style =
                 if b.weight == Weight::Primary && !disabled { theme::keycap_on_accent } else { theme::keycap };
             content.push(container(text(key).font(MONO).size(TEXT_LABEL)).padding([0.0, SPACE_1]).style(style).boxed());
         }
-        let inner = container(row(content).spacing(SPACE_2).align_y(iced::Center)).center_y(CONTROL_H);
-        let padding = if b.label.is_some() { [0.0, SPACE_3] } else { [0.0, 0.0] };
+        let height = if b.small { 22.0 } else { CONTROL_H };
+        let inner = container(row(content).spacing(SPACE_2).align_y(iced::Center)).center_y(height);
+        let padding = if b.label.is_some() { [0.0, if b.small { SPACE_3 - 2.0 } else { SPACE_3 }] } else { [0.0, 0.0] };
         let inner = if b.label.is_none() { container(inner).center_x(Length::Fill).boxed() } else { inner.boxed() };
 
-        let mut press = widget::button(inner).width(b.width).height(CONTROL_H).padding(padding);
+        let mut press = widget::button(inner).width(b.width).height(height).padding(padding);
         press = match b.weight {
             Weight::Primary => press.style(theme::primary),
             Weight::Secondary => press.style(theme::secondary),
@@ -141,7 +150,7 @@ impl<'a, M: Clone + 'a> From<Button<'a, M>> for Element<'a, M> {
             press = press.on_press_maybe(b.on_press);
         }
 
-        let mut body: Element<'a, M> = if disabled { stack![press, dashed::frame(|t| t.line_200)].boxed() } else { press.boxed() };
+        let mut body: Element<'a, M> = if disabled && b.label.is_some() { stack![press, dashed::frame(|t| t.line_200)].boxed() } else { press.boxed() };
 
         let tip = if let Some(reason) = b.reason { Some((reason, None)) } else { b.tip.map(|tip| (tip, b.shortcut)) };
         if let Some((tip, shortcut)) = tip {

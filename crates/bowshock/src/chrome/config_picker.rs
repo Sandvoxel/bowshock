@@ -13,7 +13,7 @@ use iced::{Background, Center, Element, Fill, Length, Theme, Widget};
 use super::Message as ChromeMessage;
 use crate::app::{ui, Ctx};
 use crate::theme::{self, MONO};
-use crate::tokens::{Tokens, SPACE_2, SPACE_3, TEXT_BODY, TEXT_LABEL};
+use crate::tokens::{Tokens, SPACE_2, SPACE_3, TEXT_BODY};
 use crate::units::Quantity;
 use crate::widgets::button::{button as action, Weight};
 use crate::widgets::segmented::segmented;
@@ -22,11 +22,12 @@ use crate::widgets::unit_input::unit_input;
 /// Tolerance for a motor wider or longer than its mount (the bridge's own).
 const FIT_TOL: f64 = 0.5e-3;
 /// Width of the picker panel.
-const WIDTH: f32 = 580.0;
+const WIDTH: f32 = 560.0;
 /// Height of the scrolling table.
 const TABLE_H: f32 = 260.0;
-/// Column widths: motor, impulse, length, mass (the margin column takes the rest).
-const COLUMNS: [f32; 4] = [96.0, 96.0, 84.0, 84.0];
+/// Table text: the kit's 11.5 px mono; column heads are 10 px.
+const ROW_SIZE: f32 = 11.5;
+const HEAD_SIZE: f32 = 10.0;
 /// Labels of the stage tabs (a rocket with more stages than this does not exist in practice).
 const STAGE_LABELS: [&str; 6] = ["Stage 1", "Stage 2", "Stage 3", "Stage 4", "Stage 5", "Stage 6"];
 
@@ -246,7 +247,7 @@ impl Picker {
             ),
             None => String::new(),
         };
-        let header = row![ui::label("NEW CONFIGURATION · MOTOR"), Space::new().width(Fill), text(constraint).font(MONO).size(TEXT_LABEL).style(theme::muted)]
+        let header = row![ui::label("NEW CONFIGURATION · MOTOR"), Space::new().width(Fill), text(constraint).font(MONO).size(ROW_SIZE).style(theme::muted)]
             .align_y(Center);
 
         let stages = ctx.physics.stages();
@@ -280,18 +281,21 @@ impl Picker {
         .spacing(1);
         let filters = row![container(search).width(Fill), container(class_buttons).padding(1).style(theme::segmented_frame)].spacing(SPACE_2).align_y(Center);
 
-        let column_head = |name: &'static str, width: Length| container(ui::label(name)).width(width);
+        let column_head = |name: &'static str, width: Length| container(text(name).font(MONO).size(HEAD_SIZE).style(theme::faint)).width(width);
         let head = row![
-            column_head("MOTOR", COLUMNS[0].into()),
-            column_head("IMPULSE", COLUMNS[1].into()),
-            column_head("LENGTH", COLUMNS[2].into()),
-            column_head("MASS", COLUMNS[3].into()),
-            column_head("WITH THIS MOTOR", Fill),
+            column_head("MOTOR", Length::FillPortion(11)),
+            column_head("IMPULSE", Length::FillPortion(10)),
+            column_head("LENGTH", Length::FillPortion(10)),
+            column_head("MASS", Length::FillPortion(10)),
+            column_head("WITH THIS MOTOR", Length::FillPortion(17)),
         ]
-        .padding([SPACE_2, SPACE_3]);
+        .padding([0.0, SPACE_3 - 2.0])
+        .align_y(Center);
+        let head = container(head).height(26).center_y(26);
 
         let picked = mount.as_ref().and_then(|m| self.choices.get(&m.id)).copied();
         let rows = self.visible(ctx);
+        let table_h = (rows.len() as f32 * 27.0).clamp(40.0, TABLE_H);
         let table: Element<'a, ChromeMessage> = if rows.is_empty() {
             container(text("No motors match").size(TEXT_BODY).style(theme::faint)).padding(SPACE_3).boxed()
         } else {
@@ -309,15 +313,26 @@ impl Picker {
         };
         let footer = row![container(delay).width(160), Space::new().width(Fill), cancel, add].spacing(SPACE_2).align_y(Center);
 
-        let mut body = column![container(header).padding([SPACE_2, SPACE_3]).boxed()];
+        let rule = || container(Space::new()).width(Fill).height(1).style(theme::hairline).boxed();
+        let mut body = column![
+            container(header)
+                .padding([0.0, SPACE_3])
+                .height(30)
+                .center_y(30)
+                .style(|t: &Theme| container::Style { background: Some(Background::Color(theme::tokens(t).bg_100)), ..container::Style::default() })
+                .boxed(),
+            rule()
+        ];
         if let Some(tabs) = tabs {
-            body = body.push(container(tabs).padding([0.0, SPACE_3]).boxed());
+            body = body.push(container(tabs).padding([SPACE_2, SPACE_3]).boxed()).push(rule());
         }
         let body = body
-            .push(container(filters).padding([SPACE_2, SPACE_3]).boxed())
+            .push(container(filters).padding([SPACE_2, SPACE_3 - 2.0]).boxed())
+            .push(rule())
             .push(head.boxed())
-            .push(scrollable(table).height(TABLE_H).boxed())
-            .push(container(footer).padding(SPACE_3).boxed());
+            .push(rule())
+            .push(scrollable(table).height(table_h).boxed())
+            .push(container(footer).padding([SPACE_2, SPACE_3 - 2.0]).boxed());
         let panel = container(body).width(WIDTH).style(theme::overlay);
 
         // The scrim closes the picker; the panel swallows presses so that clicking in it does not.
@@ -344,27 +359,27 @@ pub fn margin_color(t: &Tokens, margin: f64) -> iced::Color {
 fn table_row<'a>(r: &Row, motor: &Motor, picked: bool, units: crate::units::UnitSystem, msg: fn(Message) -> ChromeMessage) -> Element<'a, ChromeMessage> {
     let faint = r.problem.is_some();
     let cell = move |s: String, width: Length| {
-        container(text(s).font(MONO).size(TEXT_BODY).style(move |t: &Theme| {
+        container(text(s).font(MONO).size(ROW_SIZE).style(move |t: &Theme| {
             let tk = theme::tokens(t);
             text::Style { color: Some(if faint { tk.ink_faint } else { tk.ink }), selection: None }
         }))
         .width(width)
     };
     let last: Element<'a, ChromeMessage> = match (r.problem, r.margin) {
-        (Some(reason), _) => text(reason).font(MONO).size(TEXT_BODY).style(theme::faint).boxed(),
+        (Some(reason), _) => text(reason).font(MONO).size(ROW_SIZE).style(theme::faint).boxed(),
         (None, Some(margin)) => text(format!("{margin:.2} cal"))
             .font(MONO)
-            .size(TEXT_BODY)
+            .size(ROW_SIZE)
             .style(move |t: &Theme| text::Style { color: Some(margin_color(theme::tokens(t), margin)), selection: None })
             .boxed(),
-        (None, None) => text("—").font(MONO).size(TEXT_BODY).style(theme::faint).boxed(),
+        (None, None) => text("—").font(MONO).size(ROW_SIZE).style(theme::faint).boxed(),
     };
     let content = row![
-        cell(motor.designation.clone(), COLUMNS[0].into()),
-        cell(ui::with_unit(motor.total_impulse(), Quantity::Impulse, units), COLUMNS[1].into()),
-        cell(ui::with_unit(motor.length, Quantity::Length, units), COLUMNS[2].into()),
-        cell(ui::with_unit(motor.total_mass, Quantity::Mass, units), COLUMNS[3].into()),
-        container(last).width(Fill),
+        cell(motor.designation.clone(), Length::FillPortion(11)),
+        cell(ui::with_unit(motor.total_impulse(), Quantity::Impulse, units), Length::FillPortion(10)),
+        cell(ui::with_unit(motor.length, Quantity::Length, units), Length::FillPortion(10)),
+        cell(ui::with_unit(motor.total_mass, Quantity::Mass, units), Length::FillPortion(10)),
+        container(last).width(Length::FillPortion(17)),
     ]
     .align_y(Center);
     let edge = container(Space::new()).width(2).height(Fill).style(move |t: &Theme| container::Style {
