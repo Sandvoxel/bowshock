@@ -317,7 +317,7 @@ impl Scene {
                 RadialKind::LaunchLug { .. } => "Lug".to_string(),
                 _ => "Rail".to_string(),
             });
-            let name = if radial.count > 1 { format!("{base} ×{}", radial.count) } else { base };
+            let name = if radial.count > 1 { format!("{base} ×{}{}", radial.count, remaining_copies(radial)) } else { base };
             bars.push(Bar {
                 key: BarKey::Part(radial.id),
                 system: radial.kind.system(),
@@ -607,6 +607,31 @@ pub fn describe(bar: &Bar, rocket: &Rocket, units: UnitSystem) -> String {
     }
 }
 
+/// The letters of the copies left in a group that is not evenly spaced (one was detached), as ` (A, C)`: the smallest even
+/// spacing of `2π/n` that all the angles fall on gives each copy's original index. The model renumbers the copies when one
+/// leaves, so the first remaining copy is always `A`. Empty for an evenly spaced group.
+fn remaining_copies(radial: &bowshock_model::RadialPart) -> String {
+    use std::f64::consts::TAU;
+    if radial.instance_angles.is_none() {
+        return String::new();
+    }
+    let angles = radial.angles();
+    let Some(&first) = angles.first() else { return String::new() };
+    for n in (usize::from(radial.count)..=16).filter(|n| *n > 1) {
+        let step = TAU / n as f64;
+        let indices: Vec<usize> = angles.iter().map(|a| ((a - first).rem_euclid(TAU) / step).round() as usize % n).collect();
+        let on_grid = angles
+            .iter()
+            .zip(&indices)
+            .all(|(a, i)| ((a - first).rem_euclid(TAU) - *i as f64 * step).abs() < 1e-6 || ((a - first).rem_euclid(TAU) - *i as f64 * step - TAU).abs() < 1e-6);
+        if on_grid {
+            let letters: Vec<String> = indices.iter().map(|&i| bowshock_model::instance_letter(i)).collect();
+            return format!(" ({})", letters.join(", "));
+        }
+    }
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -637,6 +662,17 @@ mod tests {
         sorted.sort();
         assert_eq!(order, sorted);
         assert!(scene.mass.iter().sum::<f32>() > 0.0);
+    }
+
+    #[test]
+    fn a_detached_group_lists_the_letters_of_its_remaining_copies() {
+        let mut rocket = example();
+        let fins = rocket.radials().iter().find(|r| r.kind.is_fin()).map(|r| r.id).unwrap();
+        assert_eq!(remaining_copies(rocket.radial(fins).unwrap()), "");
+        rocket.detach_radial(fins, 1).unwrap();
+        assert_eq!(remaining_copies(rocket.radial(fins).unwrap()), " (A, C)");
+        let scene = build(&rocket, false, Phase::Full);
+        assert!(scene.part_bar(fins).unwrap().name.ends_with("×2 (A, C)"));
     }
 
     #[test]

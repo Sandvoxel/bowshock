@@ -88,8 +88,8 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
         view = normalize(u.eye.xyz - in.world);
     }
     let facing = clamp(dot(n, view), 0.0, 1.0);
-    let lit = 0.38 + 0.62 * max(dot(n, u.light_dir.xyz), 0.0);
-    let rim = mix(0.72, 1.0, smoothstep(0.0, 0.35, facing));
+    let lit = 0.86 + 0.14 * max(dot(n, u.light_dir.xyz), 0.0);
+    let rim = mix(0.45, 1.0, smoothstep(0.0, 0.55, facing));
 
     // Part states: 0 normal, 1 ghost (dragged in: pulled towards the accent), 2 hovered (a little brighter), 3 selected
     // (the silhouette edge tinted accent, like an outline).

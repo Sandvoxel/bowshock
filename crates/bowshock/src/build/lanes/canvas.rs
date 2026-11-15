@@ -798,8 +798,32 @@ impl Lanes<'_> {
             f.fill_rectangle(rect.position(), rect.size(), t.bg_200);
             f.fill_rectangle(rect.position(), rect.size(), t.accent_soft);
             outline(f, rect, dashed(t.accent));
+        } else if bar.alt {
+            // Another configuration's motor: a dashed outline with no fill. Where a vertical edge would cross the label of a
+            // bar of the active configuration, that stretch of the edge is left out so the text stays legible.
+            let mut cuts: Vec<(f32, f32)> = Vec::new();
+            for o in self.scene.bars.iter().filter(|o| !o.alt && o.system == bar.system && o.sub == bar.sub) {
+                if let Some(r) = geometry::bar_rect(o, rows, axis) {
+                    let dim_w = if o.dim.is_empty() { 0.0 } else { text_w(&o.dim, TEXT_SMALL, MONO) + 6.0 };
+                    let x0 = r.x.max(LABEL_W) + 5.0;
+                    cuts.push((x0 - 2.0, (x0 + sans_w(&o.name, TEXT_BAR) + dim_w + 2.0).min(r.x + r.width)));
+                }
+            }
+            let stroke = dashed(edge_color);
+            let mid = rect.y + rect.height / 2.0;
+            let (top, bottom) = (rect.y + 0.5, rect.y + rect.height - 0.5);
+            f.stroke(&Path::line(Point::new(rect.x, top), Point::new(rect.x + rect.width, top)), stroke);
+            f.stroke(&Path::line(Point::new(rect.x, bottom), Point::new(rect.x + rect.width, bottom)), stroke);
+            for x in [rect.x + 0.5, rect.x + rect.width - 0.5] {
+                if cuts.iter().any(|&(a, b)| x >= a && x <= b) {
+                    f.stroke(&Path::line(Point::new(x, top), Point::new(x, mid - 8.0)), stroke);
+                    f.stroke(&Path::line(Point::new(x, mid + 8.0), Point::new(x, bottom)), stroke);
+                } else {
+                    f.stroke(&Path::line(Point::new(x, top), Point::new(x, bottom)), stroke);
+                }
+            }
         } else if bar.dashed {
-            // A shock cord or another configuration's motor: a dashed outline with no fill.
+            // A shock cord: a dashed outline with no fill.
             outline(f, rect, dashed(edge_color));
         } else {
             f.fill_rectangle(rect.position(), rect.size(), dim(fill));

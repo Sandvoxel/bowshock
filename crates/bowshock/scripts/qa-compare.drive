@@ -1,0 +1,11 @@
+# QA compare-configs in lanes. cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/qa-compare.drive out/qa-lanes
+viewport 1280x760
+scale 1
+click "CONFIG"
+click "New configuration…"
+click "I284W"
+click "Add configuration"
+click "CONFIG"
+click "Compare all in lanes"
+click (500, 300)
+screenshot compare.png
