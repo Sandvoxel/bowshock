@@ -35,11 +35,11 @@ pub const FIN_THICKNESS: f64 = 0.123 * IN;
 
 /// Reynolds number per metre of D-4013 (Fig. 1 text; carborundum transition strips, turbulent flow).
 pub const TRANSONIC_RE_PER_M: f64 = 9.8e6;
-/// Stagnation temperature of D-4013 [K].
+/// Stagnation temperature of D-4013 \[K\].
 pub const TRANSONIC_T0_K: f64 = 322.0;
 /// Reynolds number per metre of D-4014 (transition strips, turbulent flow).
 pub const SUPERSONIC_RE_PER_M: f64 = 9.84e6;
-/// Stagnation temperature of D-4014 at Mach 1.50 to 2.96 [K].
+/// Stagnation temperature of D-4014 at Mach 1.50 to 2.96 \[K\].
 pub const SUPERSONIC_T0_K: f64 = 339.0;
 
 /// `(M, C_A,corr fins off, C_A,corr fins on with fin deflection 0)` from D-4013 Fig. 11 (short model, alpha = 0): the axial force

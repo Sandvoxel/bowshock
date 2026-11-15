@@ -41,14 +41,14 @@ const T_MAX: f64 = 400.0;
 pub enum Atmosphere {
     /// International Standard Atmosphere at a geometric altitude in metres (0 to 20 000 m).
     Isa {
-        /// Geometric altitude [m].
+        /// Geometric altitude \[m\].
         altitude_m: f64,
     },
     /// Static temperature and pressure given directly.
     Explicit {
-        /// Static temperature [K], within 100 to 400 K.
+        /// Static temperature \[K\], within 100 to 400 K.
         temperature_k: f64,
-        /// Static pressure [Pa], finite and positive.
+        /// Static pressure \[Pa\], finite and positive.
         pressure_pa: f64,
     },
 }
@@ -56,9 +56,9 @@ pub enum Atmosphere {
 /// Static state of the air.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AirState {
-    /// Static temperature [K].
+    /// Static temperature \[K\].
     pub temperature_k: f64,
-    /// Static pressure [Pa].
+    /// Static pressure \[Pa\].
     pub pressure_pa: f64,
     /// Density [kg/m^3].
     pub density: f64,

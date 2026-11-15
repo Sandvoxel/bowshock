@@ -31,7 +31,7 @@ use bowshock_reference::shock_expansion::Ogive;
 pub enum Nose {
     /// Circular-arc tangent ogive of the given fineness `L_n/d`.
     TangentOgive { fineness: f64 },
-    /// Cone of half angle `theta` [rad], nose length `R/tan(theta)`.
+    /// Cone of half angle `theta` \[rad\], nose length `R/tan(theta)`.
     Cone { half_angle: f64 },
     /// Power series `r/R = (x/L_n)^n` (`n = 1` cone, `n = 1/2` parabola with its vertex at the tip).
     Power { fineness: f64, n: f64 },

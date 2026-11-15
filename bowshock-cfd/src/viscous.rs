@@ -20,20 +20,20 @@
 //!
 //! Three data-parallel passes, called from `Solver::eval_residual` after the inviscid face fluxes:
 //!
-//! 1. [`cell_pass`]: `mu(T)` and the Green-Gauss gradient `(u_x, u_r, v_x, v_r, T_x, T_r)` of every fluid cell in the meridian
+//! 1. `cell_pass`: `mu(T)` and the Green-Gauss gradient `(u_x, u_r, v_x, v_r, T_x, T_r)` of every fluid cell in the meridian
 //!    plane, `g = (1/A) sum_faces phi_f n_f len_f` with `phi_f = (phi_c + phi_neighbour) / 2`;
-//! 2. [`face_pass`]: the face gradient `g_f = gbar + ((phi_R - phi_L) / |d| - gbar.e) e` (`d` = distance vector of the two
+//! 2. `face_pass`: the face gradient `g_f = gbar + ((phi_R - phi_L) / |d| - gbar.e) e` (`d` = distance vector of the two
 //!    adjacent cell centres, `e = d / |d|`, `gbar` the mean of the two cell gradients: a compact normal derivative with the
 //!    averaged tangential part) and the viscous flux of every face into `fvi`, `fvj`; faces on the axis (`r_m = 0`) and inside
 //!    the solid block carry no flux;
-//! 3. the cell residual in `solver.rs` (with [`hoop_stress`] and the diffusive time-step limit [`diffusion_rate`]).
+//! 3. the cell residual in `solver.rs` (with `hoop_stress` and the diffusive time-step limit `diffusion_rate`).
 //!
 //! A state across a boundary is the ghost cell of `Solver::w`; the solid cell across a wall of a body block is its ghost as
 //! well (block ghost in the j direction, [`wall_ghost`] across the base wall). A ghost sits at the mirror image of the centre
 //! of its cell in the face centre and carries the gradient, viscosity and eddy viscosity of that cell (the eddy viscosity with
 //! the sign flipped across a no-slip face, so it vanishes at the wall).
 //!
-//! No-slip walls ([`Walls`]): the face where the viscous flow starts (`Viscous::wall_i_start`) and the body surface, base wall
+//! No-slip walls (`Walls`): the face where the viscous flow starts (`Viscous::wall_i_start`) and the body surface, base wall
 //! and sting surface of a block. The wall ghost of a no-slip face is `(rho, -u, -v, p)` (adiabatic wall, zero normal pressure
 //! gradient), that of a slip face the reflection about the face normal.
 

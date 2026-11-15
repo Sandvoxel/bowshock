@@ -122,15 +122,15 @@ pub enum FinProfile {
 pub struct FinSpec {
     /// Number of fins, equally spaced around the body (3 to 8).
     pub count: u32,
-    /// Chord at the body surface [m].
+    /// Chord at the body surface \[m\].
     pub root_chord: f64,
-    /// Chord at the tip [m] (0 for a triangular fin).
+    /// Chord at the tip \[m\] (0 for a triangular fin).
     pub tip_chord: f64,
-    /// Distance from the body surface to the tip [m].
+    /// Distance from the body surface to the tip \[m\].
     pub span: f64,
-    /// Axial distance from the root leading edge to the tip leading edge [m], positive aft.
+    /// Axial distance from the root leading edge to the tip leading edge \[m\], positive aft.
     pub sweep: f64,
-    /// Maximum thickness [m].
+    /// Maximum thickness \[m\].
     pub thickness: f64,
     /// Edge profile.
     pub profile: FinProfile,
@@ -192,18 +192,18 @@ fn validate_section(s: &[[f64; 2]]) -> Result<(), Error> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MotorSpec {
-    /// Diameter of the nozzle exit [m]; at most 0.95 of the base diameter.
+    /// Diameter of the nozzle exit \[m\]; at most 0.95 of the base diameter.
     pub exit_diameter: f64,
     /// Mach number of the jet at the exit [-], in `[1, 5]`.
     pub exit_mach: f64,
-    /// Static pressure at the exit [Pa].
+    /// Static pressure at the exit \[Pa\].
     pub exit_pressure_pa: f64,
-    /// Total temperature of the jet [K], in `[200, 4000]`.
+    /// Total temperature of the jet \[K\], in `[200, 4000]`.
     pub total_temperature_k: f64,
 }
 
 impl MotorSpec {
-    /// Check the motor against the base diameter [m] of the body; `InvalidInput` names the offending field.
+    /// Check the motor against the base diameter \[m\] of the body; `InvalidInput` names the offending field.
     pub fn validate(&self, base_diameter: f64) -> Result<(), Error> {
         positive("motor.exit_diameter", self.exit_diameter)?;
         if self.exit_diameter > 0.95 * base_diameter {
@@ -221,7 +221,7 @@ impl MotorSpec {
 }
 
 impl BodySpec {
-    /// Largest diameter of the body [m].
+    /// Largest diameter of the body \[m\].
     pub fn reference_diameter(&self) -> f64 {
         self.aft.iter().fold(self.nose.diameter, |d, a| match *a {
             AftSpec::Transition { aft_diameter, .. } => d.max(aft_diameter),
@@ -229,7 +229,7 @@ impl BodySpec {
         })
     }
 
-    /// Diameter of the flat base [m]: the diameter after the last aft section (the nose diameter when only tubes follow the nose).
+    /// Diameter of the flat base \[m\]: the diameter after the last aft section (the nose diameter when only tubes follow the nose).
     pub fn base_diameter(&self) -> f64 {
         self.aft.iter().fold(self.nose.diameter, |d, a| match *a {
             AftSpec::Transition { aft_diameter, .. } => aft_diameter,

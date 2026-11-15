@@ -361,7 +361,7 @@ impl GpuSolver {
     }
 
     /// Runs `n` iterations and returns the density residual of every one (L2 of `d rho / dt` over `sqrt(N)` of the fluid cells, as in
-    /// the CPU solver). The residual is recorded on the GPU, the host waits once per [`RUN_SYNC`] iterations and at the end.
+    /// the CPU solver). The residual is recorded on the GPU, the host waits once per `RUN_SYNC` iterations and at the end.
     pub fn run(&mut self, n: usize) -> Result<Vec<f64>> {
         Ok(on_mut!(self, s => s.run(n, RUN_SYNC.min(n.max(1)))?))
     }

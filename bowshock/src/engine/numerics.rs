@@ -5,7 +5,7 @@ use bowshock_cfd::flux::Limiter;
 use bowshock_cfd::implicit::{DtMode, ImplicitParams};
 use bowshock_cfd::solver::{Bc, Scheme};
 
-/// Sampling interval [iterations] of the monitor history.
+/// Sampling interval \[iterations\] of the monitor history.
 pub const MONITOR_EVERY: usize = 50;
 /// Mach number below which [`Numerics::auto`] uses the subsonic settings.
 pub const REGIME_SPLIT_MACH: f64 = 0.85;
@@ -44,11 +44,11 @@ pub struct Numerics {
     pub drop_orders: f64,
     /// Boundary condition of the outflow plane.
     pub outflow: Bc,
-    /// Length of the statistics window of the monitor [iterations].
+    /// Length of the statistics window of the monitor \[iterations\].
     pub monitor_window: usize,
     /// Monitor range below which a run counts as stationary; `None`: no "stationary" stop rule.
     pub monitor_tol: Option<f64>,
-    /// Averaging window [iterations] of the mean-stationary stop rule (`None`: no such rule; only [`Numerics::viscous`] sets it). A
+    /// Averaging window \[iterations\] of the mean-stationary stop rule (`None`: no such rule; only [`Numerics::viscous`] sets it). A
     /// viscous run whose total drag settles into a bounded limit cycle never satisfies `monitor_tol`; the rule stops it where the
     /// drag crosses the stationary mean of the cycle. The window should span at least one period of the cycle.
     pub mean_window: Option<usize>,

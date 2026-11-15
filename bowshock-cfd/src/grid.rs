@@ -149,7 +149,7 @@ impl Grid {
 pub struct ConeGridParams {
     pub ni: usize,
     pub nj: usize,
-    /// Cone half angle [rad]; nose at the origin, surface `r = x tan(theta)`.
+    /// Cone half angle \[rad\]; nose at the origin, surface `r = x tan(theta)`.
     pub theta: f64,
     /// Downstream end of the domain (cone length).
     pub length: f64,

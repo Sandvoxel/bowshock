@@ -10,7 +10,7 @@
 use crate::taylor_maccoll::{solve_cone, ConeSolution};
 use bowshock_cfd::gas::GAMMA;
 
-/// Prandtl-Meyer function `nu(M)` [rad].
+/// Prandtl-Meyer function `nu(M)` \[rad\].
 pub fn prandtl_meyer(m: f64) -> f64 {
     let g = GAMMA;
     let k = ((g + 1.0) / (g - 1.0)).sqrt();
@@ -76,7 +76,7 @@ impl Ogive {
         let rho = self.rho();
         (l - x) / (rho * rho - (l - x).powi(2)).max(1e-300).sqrt()
     }
-    /// Half angle of the cone tangent to the nose tip [rad].
+    /// Half angle of the cone tangent to the nose tip \[rad\].
     pub fn tip_half_angle(&self) -> f64 {
         self.slope(0.0).atan()
     }

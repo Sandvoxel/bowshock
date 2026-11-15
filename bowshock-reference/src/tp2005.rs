@@ -1,19 +1,19 @@
 //! NASA TP-2005 (Covell, 1982): afterbody pressures with axisymmetric cold air jets at Mach 1.65 to 2.50 on a strut-mounted
 //! ogive-cylinder, <https://ntrs.nasa.gov/api/citations/19820014341/downloads/19820014341.pdf>.
 
-/// Body diameter [m] (Fig. 2).
+/// Body diameter \[m\] (Fig. 2).
 pub const BODY_DIAMETER: f64 = 0.0635;
-/// Model station of the base [m] (Figs. 1 and 2).
+/// Model station of the base \[m\] (Figs. 1 and 2).
 pub const BASE_STATION: f64 = 0.8255;
-/// Nozzle exit diameter [m] (Fig. 2, all four nozzles).
+/// Nozzle exit diameter \[m\] (Fig. 2, all four nozzles).
 pub const NOZZLE_EXIT_DIAMETER: f64 = 0.0508;
-/// Free-stream stagnation temperature [K].
+/// Free-stream stagnation temperature \[K\].
 pub const T0_K: f64 = 325.0;
 /// Free-stream Reynolds number per metre.
 pub const RE_PER_M: f64 = 6.56e6;
-/// Jet total temperature [K]; the report gives 300 to 311 K.
+/// Jet total temperature \[K\]; the report gives 300 to 311 K.
 pub const JET_TOTAL_TEMPERATURE_K: f64 = 305.0;
-/// Nose length [m]: not given in the report; fineness 3 is assumed (the Fig. 1 sketch suggests about 19 cm).
+/// Nose length \[m\]: not given in the report; fineness 3 is assumed (the Fig. 1 sketch suggests about 19 cm).
 pub const NOSE_LENGTH: f64 = 0.1905;
 
 /// Table II: `(M_inf, Me, pt_j/pb, pt_j/p_inf)` at the selected plume design conditions.

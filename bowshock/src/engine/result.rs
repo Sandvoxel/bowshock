@@ -76,7 +76,7 @@ pub fn wall_cp_at(wall: &[WallPoint], x: f64) -> Option<f64> {
 #[derive(Clone, Debug)]
 pub struct PointResult {
     pub mach: f64,
-    /// Angle of attack [rad]; always 0.0 (the solver is axisymmetric).
+    /// Angle of attack \[rad\]; always 0.0 (the solver is axisymmetric).
     pub alpha: f64,
     pub iters: usize,
     pub residual: Vec<f64>,

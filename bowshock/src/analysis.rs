@@ -137,7 +137,7 @@ pub enum Warning {
 pub struct PolarPoint {
     /// Mach number of the point.
     pub mach: f64,
-    /// Angle of attack [rad]; always 0.0.
+    /// Angle of attack \[rad\]; always 0.0.
     pub alpha: f64,
     /// Drag coefficients.
     pub drag: Drag,
@@ -279,7 +279,7 @@ impl Analysis {
         Ok(a)
     }
 
-    /// Reference diameter [m] of the drag coefficients (internal units for [`Analysis::from_internal`]).
+    /// Reference diameter \[m\] of the drag coefficients (internal units for [`Analysis::from_internal`]).
     pub fn reference_diameter(mut self, d_m: f64) -> Self {
         self.d_ref = d_m;
         self

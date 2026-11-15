@@ -14,3 +14,4 @@ jobs:
       - run: cargo test --release -p bowshock-cfd -p bowshock-reference -p bowshock-cases -p bowshock
       - run: cargo test --release -p bowshock --features serde --test serde_roundtrip
       - run: cargo test --release -p bowshock-cases -- --ignored subsonic_smoke_with_base
+      - run: cargo test --release -p bowshock --doc

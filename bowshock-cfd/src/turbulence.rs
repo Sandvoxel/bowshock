@@ -30,7 +30,7 @@
 //! cell values; a no-slip wall `k_ghost = -k_c`, `omega_ghost = 2 omega_w - omega_c`, `omega_w = 60 nu_c / (0.075 d_c^2)`
 //! (the face values are then `k = 0`, `omega = omega_w`).
 //!
-//! The update is a sequence of data-parallel kernels ([`update`]): cell gradients of `k`, `omega`; the blending functions; the
+//! The update is a sequence of data-parallel kernels (`update`): cell gradients of `k`, `omega`; the blending functions; the
 //! face coefficients; the per-cell residual and the coefficients of the two linear systems; the line solves; the clipped
 //! update with the new eddy viscosity. Per equation, with `D_k = beta* omega`, `D_w = 2 beta omega`, `M-` / `M+` the mass flow
 //! in the positive direction through the lower / upper face of a line direction and `G = (mu_f + sigma_f mu_t,f) w_f / |d|`:
