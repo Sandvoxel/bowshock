@@ -6,12 +6,13 @@
 //! `max |dU| / (1 + |U|)`, the residual histories by `max |r - r_cpu| / r_cpu` (from the second iteration: the first is round-off of the
 //! uniform start on both sides).
 
-use bowshock::atmosphere::Atmosphere;
+use bowshock::atmosphere::{Atmosphere, FlightConditions};
 use bowshock::engine::body_grid::BaseBody;
 use bowshock::engine::case::{Case, Wake};
 use bowshock::engine::result::StopReason;
 use bowshock::engine::run::{finish, run_on};
-use bowshock::spec::{AftSpec, BodySpec, NoseShape, NoseSpec};
+use bowshock::spec::{AftSpec, BodySpec, MotorSpec, NoseShape, NoseSpec};
+use bowshock::{Analysis, Resolution};
 use bowshock_core::flux::Limiter;
 use bowshock_core::gas::freestream;
 use bowshock_core::grid::{plate_grid, PlateGridParams};
@@ -166,6 +167,78 @@ fn g3_case() -> Case {
     let air = Atmosphere::Isa { altitude_m: 0.0 }.state().unwrap();
     let re_c = air.density * air.sound_speed * d / air.viscosity;
     Case::viscous(mach, body, 0, Wake::Base, re_c, 110.4 / air.temperature_k, mach)
+}
+
+/// The C2 motor case on the G3 body (Mach 0.8, coarse grid): a Mach 2.5 jet from a 60 mm exit in the 100 mm base, built by the facade
+/// (`Analysis::engine_cases`) so that the jet state is derived in one place.
+fn motor_case() -> Case {
+    let spec = BodySpec { nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 }, aft: vec![AftSpec::Tube { length: 0.60 }] };
+    let motor = MotorSpec { exit_diameter: 0.06, exit_mach: 2.5, exit_pressure_pa: 101325.0, total_temperature_k: 1500.0 };
+    let flight = FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 0.0 } };
+    let analysis = Analysis::new(&spec).unwrap().resolution(Resolution::Coarse).viscous(flight).motor(motor);
+    analysis.engine_cases(&[0.8]).unwrap().remove(0)
+}
+
+/// The motor case: 30 iterations from the free stream (5 first order) vs CPU; the jet rows of the base face (Euler flux, viscous ghost, implicit
+/// left-hand side, turbulence ghost) are all exercised.
+macro_rules! motor_check {
+    ($prec:expr, $scheme:expr, $tol:expr) => {{
+        let ctx = luma::default_context().unwrap();
+        let mut case = motor_case();
+        case.numerics.first_order_iters = 5;
+        if let Some(scheme) = $scheme {
+            case.numerics.scheme = scheme;
+        }
+        let mut cpu = case.build_solver();
+        let nozzle = cpu.nozzle().expect("a motor case has a nozzle");
+        let mut lazy = GpuSolver::from_host(&ctx, &cpu, $prec).unwrap();
+        assert_eq!(lazy.nozzle(), Some(nozzle));
+        let res_cpu: Vec<f64> = (0..30).map(|_| cpu.step()).collect();
+        let res = lazy.run(30).unwrap();
+        let (max, mean) = state_diff(&lazy.state_f64().unwrap(), &cpu.u);
+        println!(
+            "motor {} {}: jet rows {}, max |dU|/(1+|U|) = {max:.2e}, mean {mean:.2e}, max rel residual diff {:.2e}, residual {:.3e} -> {:.3e}",
+            format!("{:?}", $prec),
+            stringify!($scheme),
+            nozzle.j_end,
+            residual_diff(&res, &res_cpu),
+            res_cpu[1],
+            res_cpu[29]
+        );
+        assert!(max <= $tol && res.iter().all(|r| r.is_finite()), "motor {}: state difference {max:e}", format!("{:?}", $prec));
+    }};
+}
+
+#[test]
+fn motor_state_matches_cpu_f32() {
+    motor_check!(Precision::F32, None::<Scheme>, 1e-3);
+}
+
+#[test]
+fn motor_state_matches_cpu_df32() {
+    motor_check!(Precision::Extended, None::<Scheme>, 1e-4);
+}
+
+/// The explicit scheme (SSP-RK3, SST update after the step).
+#[test]
+fn motor_explicit_state_matches_cpu_df32() {
+    motor_check!(Precision::Extended, Some(Scheme::Explicit), 1e-6);
+}
+
+/// `set_nozzle` outside the order block, nozzle, viscous is refused.
+#[test]
+fn set_nozzle_order_is_checked() {
+    let ctx = luma::default_context().unwrap();
+    let case = motor_case();
+    let host = case.build_solver();
+    let nozzle = host.nozzle().unwrap();
+    let mut s = GpuSolver::new(&ctx, &host.grid, &host.cfg, Precision::F32).unwrap();
+    let err = s.set_nozzle(Some(nozzle)).unwrap_err();
+    assert_eq!(err.to_string(), "set_nozzle must follow set_block and precede set_viscous");
+    s.set_block(host.block()).unwrap();
+    s.set_nozzle(Some(nozzle)).unwrap();
+    s.set_viscous(host.viscous(), &host.grid).unwrap();
+    assert!(s.set_nozzle(None).is_err());
 }
 
 /// Viscous body with the solid block (no-slip body surface, base wall and the axis behind the base as a slip wall): 30 iterations vs CPU.

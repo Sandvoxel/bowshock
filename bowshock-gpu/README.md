@@ -66,6 +66,9 @@ run after `set_config` with another free stream traces (and, if Luma's program c
   base/wake grids; block ghosts, base-wall face stencils and solid faces/cells are region assigns, no masks), `Limiter::{FirstOrder, Minmod, VanAlbada}`, `face_flux_lm` (HLLC blended with Rusanov by the shock sensor,
   optional low-Mach correction), all `Bc` variants (`Freestream`, `Extrapolate`, `SlipWall`, `Characteristic`, `PressureOutflow`),
   the axisymmetric pressure source, local time step, SSP-RK3 with the first-order switch (one traced loop per limiter phase).
+  A nozzle exit on the base face (`set_nozzle`, after `set_block` and before `set_viscous`; `Solver::set_nozzle`) replaces the first base rows by a
+  fixed supersonic inflow state: the flux stencils, the viscous ghost, the implicit left-hand side and the `k`, `omega` ghost select the jet
+  state on those rows with `Array<bool>` masks, and the wall distance leaves the jet faces out; without a nozzle no mask is built.
   Viscous runs are in `src/viscous.rs` / `src/turbulence.rs` (below). Not covered: multigrid and smoothed schemes.
 * `src/implicit.rs`: the line-implicit scheme `Scheme::Implicit(ImplicitParams)` (`bowshock_core::implicit`): approximate factorization
   `(I - dt J_i)(I - dt J_j)`, the second-order residual on the right, the first-order flux Jacobians with the Roe-type dissipation

@@ -179,6 +179,34 @@ fn motor_on_analysis_reports_annulus_base_drag() {
     assert!(r.cp_base.is_finite(), "cp_base {}", r.cp_base);
 }
 
+/// The motor case at Mach 0.8 on the GPU and on the CPU: total drag within 1 %, base pressure within 0.01.
+#[test]
+#[ignore = "needs a GPU"]
+fn motor_gpu_matches_cpu() {
+    let run = |backend| {
+        let t0 = Instant::now();
+        let polar = Analysis::new(&g3_spec())
+            .unwrap()
+            .motor(motor())
+            .backend(backend)
+            .resolution(Resolution::Coarse)
+            .viscous(FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 0.0 } })
+            .run(&[0.8])
+            .unwrap();
+        println!("motor {backend:?}: {:.1} s, backend used {:?}, fallback {:?}", t0.elapsed().as_secs_f64(), polar.backend, polar.fallback);
+        polar.points.into_iter().next().unwrap()
+    };
+    let (cpu, gpu) = (run(Backend::Cpu), run(Backend::Gpu));
+    let (c, g) = (&cpu.detail, &gpu.detail);
+    println!("motor: cd_total    cpu {:.5}  gpu {:.5}  rel {:.4}", cpu.drag.total, gpu.drag.total, gpu.drag.total / cpu.drag.total - 1.0);
+    println!("motor: cd_friction cpu {:.5}  gpu {:.5}  rel {:.4}", c.cd_friction, g.cd_friction, g.cd_friction / c.cd_friction - 1.0);
+    println!("motor: cd_base     cpu {:.5}  gpu {:.5}", cpu.drag.base, gpu.drag.base);
+    println!("motor: cp_base     cpu {:.4}  gpu {:.4}  diff {:.4}", c.cp_base, g.cp_base, g.cp_base - c.cp_base);
+    println!("motor: iters cpu {} gpu {}; quality cpu {:?} gpu {:?}", c.iterations, g.iterations, cpu.quality, gpu.quality);
+    assert!((gpu.drag.total / cpu.drag.total - 1.0).abs() < 0.01);
+    assert!((g.cp_base - c.cp_base).abs() < 0.01);
+}
+
 #[test]
 fn motor_run_errors() {
     let flight = FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 0.0 } };

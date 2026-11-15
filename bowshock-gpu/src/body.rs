@@ -9,7 +9,7 @@
 use bowshock_core::flux::{Limiter, LOW_MACH_FLOOR, SHOCK_SENSOR_HI, SHOCK_SENSOR_LO};
 use bowshock_core::gas::GAMMA;
 use bowshock_core::grid::Grid;
-use bowshock_core::solver::{Bc, Block, Config};
+use bowshock_core::solver::{Bc, Block, Config, Nozzle};
 use crate::Staging;
 use luma::{concat, select, Array, Context, Fields, PadMode, Result};
 
@@ -337,6 +337,8 @@ pub struct LazySolver {
     state: Option<State>,
     pub iter: usize,
     block: Option<Block>,
+    /// The nozzle exit on the base face (`set_nozzle`; `None`: every base row is wall).
+    nozzle: Option<Nozzle>,
     /// Number of fluid cells (the residual norm divides by it).
     n_active: usize,
     /// The convergence scheme: explicit SSP-RK3 or the line-implicit scheme (`implicit.rs`).
@@ -386,7 +388,7 @@ impl LazySolver {
             area: up(ctx, &grid.area, [ni, nj])?,
             bnd: [boundary(0)?, boundary(1)?, boundary(2)?, boundary(3)?],
         };
-        let mut s = LazySolver { ctx: ctx.clone(), ni, nj, cfg: cfg.clone(), low_mach: false, staging: DEFAULT_STAGING, geo, state: None, iter: 0, block: None, n_active: ni * nj, scheme: Scheme::Explicit, lg: LGeo::new(ctx, grid)?, lb: None, visc: None };
+        let mut s = LazySolver { ctx: ctx.clone(), ni, nj, cfg: cfg.clone(), low_mach: false, staging: DEFAULT_STAGING, geo, state: None, iter: 0, block: None, nozzle: None, n_active: ni * nj, scheme: Scheme::Explicit, lg: LGeo::new(ctx, grid)?, lb: None, visc: None };
         let q = bowshock_core::gas::prim_to_cons(&cfg.freestream);
         s.set_state(&vec![q; ni * nj])?;
         Ok(s)
@@ -397,6 +399,7 @@ impl LazySolver {
         let mut l = LazySolver::new(ctx, &s.grid, &s.cfg)?;
         l.set_low_mach(s.low_mach);
         l.set_block(s.block())?;
+        l.set_nozzle(s.nozzle())?;
         l.set_state(&s.u)?;
         l.iter = s.iter;
         l.set_scheme(s.scheme())?;
@@ -423,12 +426,31 @@ impl LazySolver {
         }
         assert!(self.visc.is_none(), "declare the block before the viscous terms (`set_viscous`)");
         self.block = block;
-        self.lb = block.map(|b| LBlockGeo::new(&self.ctx, self.ni, self.nj, b)).transpose()?;
+        self.nozzle = None;
+        self.lb = block.map(|b| LBlockGeo::new(&self.ctx, self.ni, self.nj, b, None)).transpose()?;
         self.n_active = match block {
             Some(b) => self.ni * self.nj - b.i_end * b.j_end - (self.ni - b.i_end) * b.j_sting,
             None => self.ni * self.nj,
         };
         Ok(())
+    }
+
+    /// Declares the nozzle exit on the base face (`None`: all base rows are wall; `Solver::set_nozzle`): rows `0..j_end` of the face
+    /// `i_end` are a fixed inflow state. Declare the block first and the viscous terms after; `set_block` clears the nozzle.
+    pub fn set_nozzle(&mut self, nozzle: Option<Nozzle>) -> Result<()> {
+        assert!(self.visc.is_none(), "declare the nozzle before the viscous terms (`set_viscous`)");
+        if let Some(n) = nozzle {
+            let b = self.block.expect("a nozzle needs a block");
+            assert!(b.j_sting == 0 && n.j_end >= 2 && n.j_end + 2 <= b.j_end && n.j_end % 2 == 0, "nozzle out of range");
+        }
+        self.nozzle = nozzle;
+        self.lb = self.block.map(|b| LBlockGeo::new(&self.ctx, self.ni, self.nj, b, nozzle)).transpose()?;
+        Ok(())
+    }
+
+    /// The nozzle exit on the base face.
+    pub fn nozzle(&self) -> Option<Nozzle> {
+        self.nozzle
     }
 
     /// `sqrt(sum (d rho / dt)^2 / N)`, `N` the number of fluid cells.
@@ -483,6 +505,16 @@ impl LazySolver {
         let join = |a: &Rec, bb: &Rec| rec(|f| concat(0, [&a[f], &bb[f]]));
         let (rc0, rc1) = (self.base_wall_ghost(&c0, &bx, &br), self.base_wall_ghost(&c1, &bx, &br));
         let (m2, m1) = (join(&rc1, &rc0), join(&rc0, &c0));
+        // nozzle rows: the exit state replaces the ghosts: face `i_end` sees (jet, jet), face `i_end + 1` sees (jet, c0)
+        let (m2, m1) = match (&self.nozzle, self.lb.as_ref().and_then(|lb| lb.jet_rows.as_ref())) {
+            (Some(n), Some([both, face0])) => {
+                let jw = n.state;
+                let m2 = rec(|k| select(both, c(jw[k]), &m2[k]));
+                let m1 = join(&rec(|k| select(face0, c(jw[k]), &rc0[k])), &c0);
+                (m2, m1)
+            }
+            _ => (m2, m1),
+        };
         let (p0, p1) = (join(&c0, &c1), join(&c1, &c2));
         let base = face_flux_lm(&m2, &m1, &p0, &p1, lim, &fx, &fr, self.low_mach, self.staging == Staging::Split);
         // solid faces

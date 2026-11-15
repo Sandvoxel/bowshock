@@ -371,8 +371,9 @@ impl Analysis {
         Ok(Some(Rans { re_c, sutherland, mach_max: machs.iter().copied().fold(f64::NEG_INFINITY, f64::max), jet }))
     }
 
-    /// Zero-lift drag at each Mach number of `machs` (each in `[0.1, 3.0]`).
-    pub fn run(&self, machs: &[f64]) -> Result<Polar, Error> {
+    /// The solver cases of a sweep in ascending Mach order, after the input checks of [`Analysis::run`]; with the Mach numbers' original
+    /// positions and the Rans parameters.
+    fn prepare(&self, machs: &[f64]) -> Result<(Vec<usize>, Option<Rans>, Vec<Case>), Error> {
         if machs.is_empty() {
             return Err(Error::InvalidInput("no Mach numbers requested".into()));
         }
@@ -407,8 +408,7 @@ impl Analysis {
             }
             m.validate(self.body.base_radius() * 2.0 * self.d_nose)?;
         }
-
-        // cases in ascending Mach order (stable), results restored to input order below
+        // cases in ascending Mach order (stable), results restored to input order by the caller
         let mut order: Vec<usize> = (0..machs.len()).collect();
         order.sort_by(|&a, &b| machs[a].total_cmp(&machs[b]));
         let rans = self.rans(machs)?;
@@ -416,7 +416,19 @@ impl Analysis {
         let cases: Vec<Case> = order.iter().map(|&k| self.case(machs[k], level, rans.as_ref())).collect();
         // the grids do not depend on the Mach number: check the first one
         check_grid(&cases[0])?;
+        Ok((order, rans, cases))
+    }
 
+    /// The solver cases of a sweep (ascending Mach order) for the validation crates, which drive the solvers themselves.
+    #[doc(hidden)]
+    pub fn engine_cases(&self, machs: &[f64]) -> Result<Vec<Case>, Error> {
+        Ok(self.prepare(machs)?.2)
+    }
+
+    /// Zero-lift drag at each Mach number of `machs` (each in `[0.1, 3.0]`).
+    pub fn run(&self, machs: &[f64]) -> Result<Polar, Error> {
+        let (order, rans, cases) = self.prepare(machs)?;
+        let level = self.resolution.level();
         let cmp_cases: Option<Vec<Case>> = self.estimate_uncertainty.then(|| {
             let cmp_level = if level >= 1 { level - 1 } else { level + 1 };
             order.iter().map(|&k| self.case(machs[k], cmp_level, rans.as_ref())).collect()

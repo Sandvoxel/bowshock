@@ -16,7 +16,7 @@
 //! the other crates use. See the README.
 
 use bowshock_core::grid::Grid;
-use bowshock_core::solver::{Block, Config, Scheme, Solver, Viscous};
+use bowshock_core::solver::{Block, Config, Nozzle, Scheme, Solver, Viscous};
 use luma::Context;
 pub use luma::LumaError;
 
@@ -224,9 +224,6 @@ impl GpuSolver {
         if !matches!(host.scheme(), Scheme::Explicit | Scheme::Implicit(_)) {
             return Err(GpuError::Unsupported("only Scheme::Explicit and Scheme::Implicit are implemented on the GPU"));
         }
-        if host.nozzle().is_some() {
-            return Err(GpuError::Unsupported("nozzle (motor-on) cases are not supported on the GPU yet"));
-        }
         let inner = match prec {
             Precision::F32 => Inner::F32(f32s::LazySolver::from_host(ctx, host)?),
             Precision::Extended => Inner::Ext(df32s::LazySolver::from_host(ctx, host)?),
@@ -281,6 +278,21 @@ impl GpuSolver {
 
     pub fn block(&self) -> Option<Block> {
         on!(self, s => s.block())
+    }
+
+    /// Declares the nozzle exit on the base face (`bowshock_core::solver::Solver::set_nozzle`): rows `0..j_end` of the face `i_end` are a fixed
+    /// inflow state. Must follow [`GpuSolver::set_block`] and precede [`GpuSolver::set_viscous`].
+    pub fn set_nozzle(&mut self, nozzle: Option<Nozzle>) -> Result<()> {
+        if self.viscous().is_some() || (nozzle.is_some() && self.block().is_none()) {
+            return Err(GpuError::Unsupported("set_nozzle must follow set_block and precede set_viscous"));
+        }
+        on_mut!(self, s => s.set_nozzle(nozzle)?);
+        Ok(())
+    }
+
+    /// The nozzle exit on the base face.
+    pub fn nozzle(&self) -> Option<Nozzle> {
+        on!(self, s => s.nozzle())
     }
 
     /// Selects the convergence scheme: `Scheme::Explicit` or `Scheme::Implicit` (the CFL ramp restarts); multigrid and residual

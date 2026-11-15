@@ -78,9 +78,9 @@ fn noslip_jface(v: &Viscous, jmin_slip: bool, blk: Option<Block>, i: usize, j: u
     }
 }
 
-/// `Walls::noslip_iface`: is the i-face `(i, j)` the no-slip base wall?
-fn noslip_iface(blk: Option<Block>, i: usize, j: usize) -> bool {
-    blk.is_some_and(|b| i == b.i_end && j >= b.j_sting && j < b.j_end)
+/// `Walls::noslip_iface`: is the i-face `(i, j)` the no-slip base wall (the nozzle exit rows `j < j_end` are not)?
+fn noslip_iface(blk: Option<Block>, nozzle: Option<Nozzle>, i: usize, j: usize) -> bool {
+    blk.is_some_and(|b| i == b.i_end && j >= b.j_sting && j < b.j_end) && !nozzle.is_some_and(|n| j < n.j_end)
 }
 
 fn mask_array(ctx: &Context, shape: [usize; 2], f: &dyn Fn(usize, usize) -> bool) -> Result<Array<bool>> {
@@ -173,7 +173,7 @@ fn face_stencils(grid: &Grid, blk: Option<Block>, dir: usize) -> Vec<[f64; 4]> {
 }
 
 impl VGeo {
-    fn new(ctx: &Context, grid: &Grid, cfg: &Config, blk: Option<Block>, v: Viscous) -> Result<VGeo> {
+    fn new(ctx: &Context, grid: &Grid, cfg: &Config, blk: Option<Block>, nozzle: Option<Nozzle>, v: Viscous) -> Result<VGeo> {
         let (ni, nj) = (grid.ni, grid.nj);
         let jmin_slip = cfg.bc[2] == Bc::SlipWall;
         let dir = |d: usize| -> Result<VDir> {
@@ -185,19 +185,20 @@ impl VGeo {
                 er: up(ctx, &col(1), shape)?,
                 inv_d: up(ctx, &col(2), shape)?,
                 rm: up(ctx, &col(3), shape)?,
-                noslip: mask_array(ctx, shape, &|i, j| if d == 0 { noslip_iface(blk, i, j) } else { noslip_jface(&v, jmin_slip, blk, i, j) })?,
+                noslip: mask_array(ctx, shape, &|i, j| if d == 0 { noslip_iface(blk, nozzle, i, j) } else { noslip_jface(&v, jmin_slip, blk, i, j) })?,
                 inv_d_f: up_lhs(ctx, &col(2), shape)?,
             })
         };
+        // the first fluid cell of a line behind the solid sees a wall; a nozzle exit (fixed ghost) is neither slip nor no-slip
         let first_refl = |d: usize, i: usize, j: usize| match (blk, d) {
-            (Some(b), 0) => b.row_start(j) == Some(i) && i > 0,
+            (Some(b), 0) => b.row_start(j) == Some(i) && i > 0 && !nozzle.is_some_and(|n| i == b.i_end && j < n.j_end),
             (Some(b), _) => b.col_start(i) == j && j > 0,
             (None, _) => false,
         };
         let noslip_fold =
-            |d: usize, i: usize, j: usize| first_refl(d, i, j) && if d == 0 { noslip_iface(blk, i, j) } else { noslip_jface(&v, jmin_slip, blk, i, j) };
+            |d: usize, i: usize, j: usize| first_refl(d, i, j) && if d == 0 { noslip_iface(blk, nozzle, i, j) } else { noslip_jface(&v, jmin_slip, blk, i, j) };
         let dwall = (v.turbulence == Turbulence::Sst)
-            .then(|| -> Result<A> { up(ctx, &wall_distances(grid, v, &cfg.bc, blk, None).iter().map(|d| d.min(1e10)).collect::<Vec<_>>(), [ni, nj]) })
+            .then(|| -> Result<A> { up(ctx, &wall_distances(grid, v, &cfg.bc, blk, nozzle).iter().map(|d| d.min(1e10)).collect::<Vec<_>>(), [ni, nj]) })
             .transpose()?;
         Ok(VGeo {
             v,
@@ -271,7 +272,7 @@ impl LazySolver {
     /// touched).
     pub fn set_viscous(&mut self, v: Option<Viscous>, grid: &Grid) -> Result<()> {
         assert_eq!((grid.ni, grid.nj), (self.ni, self.nj), "set_viscous: the grid of the solver");
-        self.visc = v.map(|v| VGeo::new(&self.ctx, grid, &self.cfg, self.block, v)).transpose()?;
+        self.visc = v.map(|v| VGeo::new(&self.ctx, grid, &self.cfg, self.block, self.nozzle, v)).transpose()?;
         let u = self.state_f64()?;
         self.init_turb(&u)
     }
@@ -375,7 +376,14 @@ impl LazySolver {
             let (l, r) = (wi.slice(0, 1..ni + 2), wi.slice(0, 2..ni + 3));
             // across the base wall: the wall ghost of the first fluid cell (the padded state there is solid)
             let l = match &self.lb {
-                Some(lb) => Rec::select(&lb.base, &noslip_ghost(&r), &l),
+                Some(lb) => {
+                    let l = Rec::select(&lb.base, &noslip_ghost(&r), &l);
+                    // the nozzle exit: the fixed jet state below the faces of the jet rows
+                    match (&lb.jet, self.nozzle) {
+                        (Some(jet), Some(n)) => rec(|k| select(jet, c(n.state[k]), &l[k])),
+                        _ => l,
+                    }
+                }
                 None => l,
             };
             (l, r)
@@ -386,8 +394,9 @@ impl LazySolver {
     }
 
     /// Cell data `a` (`[ni, nj]` fields) on the two sides of every face of direction `dir`: the cell below and above, and a ghost side carries
-    /// the data of its fluid cell (the edge cell at the domain boundary; across a wall of the block the cell on the fluid side).
-    fn cell_sides<const N: usize>(&self, a: &[A; N], dir: usize) -> ([A; N], [A; N]) {
+    /// the data of its fluid cell (the edge cell at the domain boundary; across a wall of the block the cell on the fluid side). `fixed` lists
+    /// `(component, value)` of the data a nozzle exit ghost takes instead of its cell's (the faces `i_end`, rows `j < j_end`).
+    fn cell_sides<const N: usize>(&self, a: &[A; N], dir: usize, fixed: &[(usize, f64)]) -> ([A; N], [A; N]) {
         let ni = self.ni;
         let (mut l, r): ([A; N], [A; N]) = if dir == 0 {
             (a.pad([(1, 0)], PadMode::Edge), a.pad([(0, 1)], PadMode::Edge))
@@ -409,7 +418,24 @@ impl LazySolver {
                 l.slice_mut(0, ri).slice(1, rj).assign(src).expect("wall side assign: shapes fixed by set_block");
             }
         }
+        if let (Some(b), Some(n), 0) = (self.block, self.nozzle, dir) {
+            for &(e, v) in fixed {
+                l[e].slice_mut(0, b.i_end..b.i_end + 1).slice(1, 0..n.j_end).assign(c(v)).expect("jet side assign: the nozzle rows lie inside the base faces");
+            }
+        }
         (l, r)
+    }
+
+    /// `(component, value)` of the viscosity and eddy viscosity of the jet ghost (`Side::fixed`), at the components `mu_at`, `mu_t_at` of a cell
+    /// record; empty without a nozzle.
+    fn jet_values(&self, mu_at: usize, mu_t_at: usize) -> Vec<(usize, f64)> {
+        match (self.nozzle, &self.visc) {
+            (Some(n), Some(vg)) => {
+                let mu_t = if vg.v.turbulence == Turbulence::Sst { n.state[0] * n.turb[0] / n.turb[1] } else { 0.0 };
+                vec![(mu_at, vg.v.mu(GAMMA * n.state[3] / n.state[0])), (mu_t_at, mu_t)]
+            }
+            _ => Vec::new(),
+        }
     }
 
     /// The viscous quantities of the state with primitives `p` and padded primitives `w` (`None` for the Euler equations); `mu_t` is the eddy
@@ -473,7 +499,7 @@ impl LazySolver {
         let g = &self.geo;
         let d = &vg.dir[dir];
         let (nx, nr) = if dir == 0 { (&g.inx, &g.inr) } else { (&g.jnx, &g.jnr) };
-        let (cl, cr) = self.cell_sides(cell, dir);
+        let (cl, cr) = self.cell_sides(cell, dir, &self.jet_values(6, 7));
         let phi = |w: &Rec| [w[1].clone(), w[2].clone(), temperature(w)];
         let (pl, pr) = (phi(wl), phi(wr));
         // the corrected face gradient of (u, v, T)
@@ -536,7 +562,7 @@ impl LazySolver {
     /// the dissipation matrix of the face (`2 lam I`).
     fn two_lambda(&self, vf: &VFlow, dir: usize, rho_l: &F, rho_r: &F) -> F {
         let vg = self.visc.as_ref().expect("viscous terms are on: two_lambda is called from a viscous step");
-        let (cl, cr) = self.cell_sides(&[vf.cell[6].clone(), vf.cell[7].clone()], dir);
+        let (cl, cr) = self.cell_sides(&[vf.cell[6].clone(), vf.cell[7].clone()], dir, &self.jet_values(0, 1));
         let mu_f = lhs(&(c(0.5) * (&cl[0] + &cr[0])));
         let mut_f = lhs(&(c(0.5) * (&cl[1] + &cr[1])));
         let mut_f = if vg.v.turbulence == Turbulence::Sst { select(&vg.dir[dir].noslip, 0.0f32, &mut_f) } else { mut_f };

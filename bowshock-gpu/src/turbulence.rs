@@ -91,7 +91,9 @@ impl LazySolver {
         let vg = self.visc.as_ref().expect("viscous terms are on: kw_sides is called from an SST step");
         let inf = [K_INF, omega_inf(vg.v.re_c)];
         let bc = self.cfg.bc;
-        let (mut l, mut r) = self.cell_sides(t, dir);
+        // a nozzle exit ghost holds the fixed jet `[k, omega]`
+        let jet: Vec<(usize, f64)> = self.nozzle.map_or_else(Vec::new, |n| vec![(0, n.turb[0]), (1, n.turb[1])]);
+        let (mut l, mut r) = self.cell_sides(t, dir, &jet);
         for e in 0..2 {
             if dir == 0 {
                 if bc_inf(bc[0]) {
@@ -113,7 +115,7 @@ impl LazySolver {
         let mut walls: Vec<(std::ops::Range<usize>, std::ops::Range<usize>)> = vec![];
         let wis = vg.v.wall_i_start;
         match (self.block, dir) {
-            (Some(b), 0) => walls.push((b.i_end..b.i_end + 1, b.j_sting..b.j_end)),
+            (Some(b), 0) => walls.push((b.i_end..b.i_end + 1, self.nozzle.map_or(b.j_sting, |n| n.j_end)..b.j_end)),
             (Some(b), _) => {
                 walls.push((wis.min(b.i_end)..b.i_end, b.j_end..b.j_end + 1));
                 if b.j_sting > 0 {
@@ -175,7 +177,7 @@ impl LazySolver {
         let faces: [[A; 9]; 2] = std::array::from_fn(|dir| {
             let dg = &vg.dir[dir];
             let (nx, nr, w) = if dir == 0 { (&g.inx, &g.inr, &g.iw) } else { (&g.jnx, &g.jnr, &g.jw) };
-            let (cl, cr) = self.cell_sides(&cells, dir);
+            let (cl, cr) = self.cell_sides(&cells, dir, &self.jet_values(5, 6));
             let (kw_l, kw_r) = if dir == 0 { (&kw_i.0, &kw_i.1) } else { (&kw_j.0, &kw_j.1) };
             let mu_f = c(0.5) * (&cl[5] + &cr[5]);
             let mut_f = select(&dg.noslip, c(0.0), c(0.5) * (&cl[6] + &cr[6]));

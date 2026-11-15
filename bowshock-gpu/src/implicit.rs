@@ -461,10 +461,14 @@ struct LBlockGeo {
     first: [Array<bool>; 2],
     /// Base-wall faces `[ni + 1, nj]`: `i = i_end`, rows `j_sting..j_end`.
     base: Array<bool>,
+    /// Nozzle exit faces `[ni + 1, nj]` (`i = i_end`, rows `j < nozzle.j_end`); `None` without a nozzle.
+    jet: Option<Array<bool>>,
+    /// The jet rows of the base-face flux stencils: `[2, j_end - j_sting]` (faces `i_end`, `i_end + 1`) and `[1, j_end - j_sting]` (face `i_end`).
+    jet_rows: Option<[Array<bool>; 2]>,
 }
 
 impl LBlockGeo {
-    fn new(ctx: &Context, ni: usize, nj: usize, b: bowshock_core::solver::Block) -> Result<LBlockGeo> {
+    fn new(ctx: &Context, ni: usize, nj: usize, b: bowshock_core::solver::Block, nozzle: Option<bowshock_core::solver::Nozzle>) -> Result<LBlockGeo> {
         let mask = |shape: [usize; 2], f: &dyn Fn(usize, usize) -> bool| {
             let v: Vec<bool> = (0..shape[1]).flat_map(|j| (0..shape[0]).map(move |i| (i, j))).map(|(i, j)| f(i, j)).collect();
             Array::from_slice_on(ctx, &v, shape)
@@ -482,9 +486,16 @@ impl LBlockGeo {
             fluid: mask([ni, nj], &|i, j| !b.solid(i, j))?,
             start: [start(0)?, start(1)?],
             first_bc: [mask([ni, nj], &|i, j| first_k0(0, i, j) == Some(0))?, mask([ni, nj], &|i, j| first_k0(1, i, j) == Some(0))?],
-            first_refl: [mask([ni, nj], &|i, j| first_k0(0, i, j).is_some_and(|k| k > 0))?, mask([ni, nj], &|i, j| first_k0(1, i, j).is_some_and(|k| k > 0))?],
+            first_refl: [
+                mask([ni, nj], &|i, j| first_k0(0, i, j).is_some_and(|k| k > 0) && !nozzle.is_some_and(|n| i == b.i_end && j < n.j_end))?,
+                mask([ni, nj], &|i, j| first_k0(1, i, j).is_some_and(|k| k > 0))?,
+            ],
             first: [mask([ni, nj], &|i, j| at(0, i, j))?, mask([ni, nj], &|i, j| at(1, i, j))?],
             base: mask([ni + 1, nj], &|f, j| f == b.i_end && j >= b.j_sting && j < b.j_end)?,
+            jet: nozzle.map(|n| mask([ni + 1, nj], &|f, j| f == b.i_end && j < n.j_end)).transpose()?,
+            jet_rows: nozzle
+                .map(|n| -> Result<[Array<bool>; 2]> { Ok([mask([2, b.j_end - b.j_sting], &|_, j| j < n.j_end)?, mask([1, b.j_end - b.j_sting], &|_, j| j < n.j_end)?]) })
+                .transpose()?,
         })
     }
 }
@@ -608,7 +619,12 @@ impl LazySolver {
         let l: V4 = match (&self.lb, dir) {
             (Some(lb), 0) => {
                 let refl = self.base_wall_ghost_f(&r, &dg.nx, &dg.nr);
-                std::array::from_fn(|k| select(&lb.base, &refl[k], &l[k]))
+                let l: V4 = std::array::from_fn(|k| select(&lb.base, &refl[k], &l[k]));
+                // the nozzle exit: the fixed jet state below the faces of the jet rows
+                match (&lb.jet, self.nozzle) {
+                    (Some(jet), Some(n)) => std::array::from_fn(|k| select(jet, cf(n.state[k]), &l[k])),
+                    _ => l,
+                }
             }
             _ => l,
         };
