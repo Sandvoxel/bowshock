@@ -289,7 +289,12 @@ impl State {
     pub fn update(&mut self, message: Message, ctx: &mut Ctx) -> Task<app::Message> {
         match message {
             Message::Category(c) => self.category = c,
-            Message::Symmetry(n) => ctx.drag.symmetry = n,
+            Message::Symmetry(n) => {
+                ctx.drag.symmetry = n;
+                if let Some(drag) = ctx.drag.radial.as_mut().filter(|d| d.detached) {
+                    drag.count = n;
+                }
+            }
             Message::AngleSnap(degrees) => ctx.drag.angle_snap = degrees,
             Message::Search(s) => self.search = s,
             Message::FocusSearch => return iced::widget::operation::focus(SEARCH_ID),
@@ -530,7 +535,8 @@ pub fn cycle_symmetry(ctx: &mut Ctx, forward: bool) {
     match ctx.drag.radial.as_mut() {
         Some(drag) => {
             drag.count = step(drag.count);
-            if drag.origin.is_none() {
+            // A group from the bin, or one pulled free of the rocket, makes the count the Symmetry selection too.
+            if drag.origin.is_none() || drag.detached {
                 ctx.drag.symmetry = drag.count;
             }
         }

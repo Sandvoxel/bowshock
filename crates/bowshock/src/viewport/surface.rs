@@ -188,28 +188,34 @@ impl canvas::Program<Message> for Overlay<'_> {
             }
             // Pulled free of the rocket over empty space: the group follows the cursor as a ghost, and releasing removes it.
             None if self.drag.detached => {
-                let angle = self.drag.origin.as_ref().map_or(0.0, |o| o.angle) as f32;
-                let outline = pick::radial_silhouette(&self.camera, size, &self.drag.kind, angle);
-                let (min, max) = outline.iter().fold((Point::new(f32::MAX, f32::MAX), Point::new(f32::MIN, f32::MIN)), |(lo, hi), p| {
+                let first = self.drag.origin.as_ref().map_or(0.0, |o| o.angle);
+                let n = usize::from(self.drag.count.max(1));
+                // One outline per copy, spaced evenly round the axis; the set is centred on the cursor as a whole.
+                let outlines: Vec<Vec<Point>> = (0..n)
+                    .map(|k| pick::radial_silhouette(&self.camera, size, &self.drag.kind, (first + std::f64::consts::TAU * k as f64 / n as f64) as f32))
+                    .collect();
+                let (min, max) = outlines.iter().flatten().fold((Point::new(f32::MAX, f32::MAX), Point::new(f32::MIN, f32::MIN)), |(lo, hi), p| {
                     (Point::new(lo.x.min(p.x), lo.y.min(p.y)), Point::new(hi.x.max(p.x), hi.y.max(p.y)))
                 });
                 let shift = cursor - Point::new((min.x + max.x) / 2.0, (min.y + max.y) / 2.0);
-                let ghost = Path::new(|p| {
-                    for (i, point) in outline.iter().enumerate() {
-                        let at = *point + shift;
-                        if i == 0 {
-                            p.move_to(at);
-                        } else {
-                            p.line_to(at);
+                for outline in &outlines {
+                    let ghost = Path::new(|p| {
+                        for (i, point) in outline.iter().enumerate() {
+                            let at = *point + shift;
+                            if i == 0 {
+                                p.move_to(at);
+                            } else {
+                                p.line_to(at);
+                            }
                         }
-                    }
-                    p.close();
-                });
-                frame.fill(&ghost, t.accent.scale_alpha(0.18));
-                frame.stroke(
-                    &ghost,
-                    Stroke { line_dash: LineDash { segments: &[4.0, 3.0], offset: 0 }, ..Stroke::default().with_color(t.accent).with_width(1.0) },
-                );
+                        p.close();
+                    });
+                    frame.fill(&ghost, t.accent.scale_alpha(0.18));
+                    frame.stroke(
+                        &ghost,
+                        Stroke { line_dash: LineDash { segments: &[4.0, 3.0], offset: 0 }, ..Stroke::default().with_color(t.accent).with_width(1.0) },
+                    );
+                }
                 let times = if self.drag.count > 1 { format!(" ×{}", self.drag.count) } else { String::new() };
                 no_entry(&mut frame, cursor + iced::Vector::new(14.0, 14.0), t.err);
                 tag(&mut frame, cursor, 18.0, &format!("{}{times} · release to remove", self.drag.kind.name()), t.ink, t.line_200, t.bg_200);

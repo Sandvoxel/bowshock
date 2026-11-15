@@ -1688,4 +1688,33 @@ mod tests {
         app.update(Message::Cancel);
         assert!(app.ctx.doc.rocket().internals().is_empty() && app.viewport.inside() == InsideView::Cutaway);
     }
+
+    #[test]
+    fn a_fin_set_pulled_free_takes_the_symmetry_selection_as_its_count_when_it_lands_again() {
+        let (mut app, [_, tube, _]) = app();
+        let fins = finned(&mut app, tube, 0.1);
+        let before = app.ctx.doc.rocket().clone();
+        assert_eq!(before.radial(fins).unwrap().count, 3);
+        vp(&mut app, Vp::Grab(Pick::Radial { id: fins, instance: 0 }));
+        vp(&mut app, Vp::Surface(None, true));
+        // X (or the wheel) steps the count and makes it the Symmetry selection; so does the footer.
+        app.update(Message::PartsBin(parts_bin::Message::CycleSymmetry(true)));
+        assert_eq!((app.ctx.drag.radial.as_ref().unwrap().count, app.ctx.drag.symmetry), (4, 4));
+        app.update(Message::PartsBin(parts_bin::Message::Symmetry(6)));
+        assert_eq!(app.ctx.drag.radial.as_ref().unwrap().count, 6);
+        app.update(Message::PartsBin(parts_bin::Message::Symmetry(4)));
+        // Back onto the tube: the group lands with ×4, in one undo step.
+        vp(&mut app, Vp::Surface(Some(target(tube, 0.2, 0.0)), true));
+        vp(&mut app, Vp::DropRadial);
+        let landed = app.ctx.doc.rocket().radial(fins).unwrap();
+        assert_eq!((landed.count, landed.offset, landed.parent), (4, 0.2, tube));
+        app.update(Message::Undo);
+        assert_eq!(app.ctx.doc.rocket(), &before);
+        assert_eq!(app.ctx.doc.rocket().radial(fins).unwrap().count, 3);
+        // Still stuck (sliding): the footer does not recount a picked-up group.
+        vp(&mut app, Vp::Grab(Pick::Radial { id: fins, instance: 0 }));
+        app.update(Message::PartsBin(parts_bin::Message::Symmetry(8)));
+        assert_eq!(app.ctx.drag.radial.as_ref().unwrap().count, 3);
+        app.update(Message::Cancel);
+    }
 }

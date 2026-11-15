@@ -394,9 +394,9 @@ fn land_in_pod(r: &mut Rocket, drag: &Drag, pod: PartId, node: usize) -> Option<
 fn land_radial(r: &mut Rocket, drag: &RadialDrag, t: SurfaceTarget) -> bool {
     match &drag.origin {
         Some(origin) => {
-            let moved =
-                bowshock_model::RadialPart { kind: drag.kind.clone(), parent: t.parent, offset: t.offset, angle: t.angle, count: drag.count, ..origin.clone() };
-            r.restore_radial(moved).is_ok()
+            let moved = bowshock_model::RadialPart { kind: drag.kind.clone(), parent: t.parent, offset: t.offset, angle: t.angle, ..origin.clone() };
+            // A new count re-spaces the group: the overrides and letters of its copies are dropped, as by any count change.
+            r.restore_radial(moved).is_ok() && (drag.count == origin.count || r.set_radial(origin.id, drag.kind.clone(), drag.count))
         }
         None => r.attach_radial(t.parent, t.offset, t.angle, drag.count, drag.kind.clone()).is_ok(),
     }
