@@ -18,6 +18,7 @@ use iced::{alignment, keyboard, mouse, Color, Point, Rectangle, Renderer, Size, 
 use super::assembly::tag;
 use super::handles::{self, Axis, Context, Inset, Placed};
 use super::labels::{self, Request};
+use super::markers::{self, BalanceMarks};
 use super::pick::{self, Pick};
 use super::pods::PodView;
 use super::radial::Placement;
@@ -176,6 +177,8 @@ pub struct Overlay<'a> {
     /// The pod holding the selected part, seen through its own frame, when the selection is inside a pod: handles and brackets
     /// of its parts are worked out there (`PodView::of_part`).
     pub pod: Option<PodView>,
+    /// The CG / CP markers' values, so labels keep off the marker labels.
+    pub balance: Option<BalanceMarks>,
 }
 
 /// A press on a part (or on empty space) that has not yet become a click or a pick-up.
@@ -969,6 +972,9 @@ impl Overlay<'_> {
             blocked.push(ins.panel);
         }
         blocked.extend(vis.placed.iter().map(|p| labels::around(p.at, Size::new(HANDLE_BLOCK, HANDLE_BLOCK))));
+        if let Some(marks) = &self.balance {
+            blocked.extend(markers::balance_label_rects(self.rocket, &self.camera, size, marks, self.units));
+        }
 
         // The tag: above the part's left corner, else below it, else against the right side.
         let tag_size = label_size(tag_text);
@@ -1038,6 +1044,10 @@ impl Overlay<'_> {
         let (Hover::Part(id), Some(cursor)) = (self.hover, cursor) else {
             return;
         };
+        // The selected part already carries its own tag over the brackets (the kit shows one, not two).
+        if self.selected == Some(id) {
+            return;
+        }
         let label = match (self.rocket.part(id), self.rocket.radial(id)) {
             (Some(part), _) => Some(format!("{} · {}", part.kind.name(), size_label(&part.kind))),
             (_, Some(radial)) => {
@@ -1365,6 +1375,7 @@ mod tests {
             profile: false,
             units: UnitSystem::default(),
             pod: None,
+            balance: None,
         };
         let v = o.parse(Dim::Length, "50").unwrap();
         assert!((v - 0.05).abs() < 1e-12);
@@ -1390,6 +1401,7 @@ mod tests {
             profile: false,
             units: UnitSystem::default(),
             pod: None,
+            balance: None,
         };
         let v = vis(&r, tube, false, InsideView::Solid);
         let h = v.placed.iter().find(|p| p.spec.dim == Dim::Length).copied().unwrap();
@@ -1455,6 +1467,7 @@ mod label_tests {
             profile,
             units: UnitSystem::default(),
             pod: None,
+            balance: Some(BalanceMarks { cg: 0.7035, cp: 0.8517, margin: 1.94, show: (true, true), staged: false }),
         }
     }
 
@@ -1495,6 +1508,13 @@ mod label_tests {
                 let mut rects = vec![plan.tag];
                 rects.extend(plan.side.iter().map(|l| l.rect));
                 disjoint(&rects);
+                // The CG / CP value labels and the margin label (the CP label sits over the fins here) are kept clear too.
+                let marks = o.balance.expect("the fixture has balance markers");
+                for m in markers::balance_label_rects(&r, &o.camera, size, &marks, o.units) {
+                    for r in &rects {
+                        assert!(!r.intersects(&m), "{case}: {r:?} over a marker label {m:?}");
+                    }
+                }
                 if all {
                     assert!(!plan.side.is_empty() || !plan.hidden.is_empty(), "{case}: handle labels were planned");
                 }

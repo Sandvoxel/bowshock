@@ -78,21 +78,80 @@ struct Seam {
     issue: bool,
 }
 
+/// Largest outer radius of the airframe, metres.
+fn rmax_of(rocket: &Rocket) -> f32 {
+    rocket.parts().iter().map(|p| p.kind.fore_diameter().max(p.kind.aft_diameter()) as f32 / 2.0).fold(0.0, f32::max)
+}
+
+/// Outer radius of the airframe at station `z`.
+fn radius_at_of(rocket: &Rocket, z: f32) -> f32 {
+    let stations = rocket.stations();
+    rocket.parts().iter().enumerate().find(|(i, _)| z as f64 <= stations[i + 1] + 1e-9).map_or(0.0, |(i, p)| p.kind.radius_at(z as f64 - stations[i]) as f32)
+}
+
+/// What the CG / CP markers show, for working out where their labels fall.
+#[derive(Debug, Clone, Copy)]
+pub struct BalanceMarks {
+    pub cg: f64,
+    pub cp: f64,
+    pub margin: f64,
+    /// Whether the CG and the CP are drawn.
+    pub show: (bool, bool),
+    /// A staged rocket puts the values beside the glyphs instead of above the body.
+    pub staged: bool,
+}
+
+/// Screen rectangles of the CG and CP value labels and of the margin label, as [`Markers`] draws them (px in the viewport), so
+/// other overlays can keep their text off them.
+pub fn balance_label_rects(rocket: &Rocket, camera: &Camera, size: Size, marks: &BalanceMarks, units: UnitSystem) -> Vec<Rectangle> {
+    let axis = |z: f32| camera.project(Vec3::new(0.0, 0.0, z), size);
+    let z = rocket.length() as f32 / 2.0;
+    let body = axis(z).distance(camera.project(Vec3::new(0.0, 0.0, z) + camera.up() * rmax_of(rocket).max(0.005), size));
+    let glyph_row = body + if marks.staged { 78.0 } else { 40.0 };
+    let rect = |w: f32, x: f32, y_top: f32| Rectangle::new(Point::new(x, y_top), Size::new(w, TEXT_LABEL));
+    let width = |s: &str| s.chars().count() as f32 * TEXT_LABEL * 0.6;
+    let (a, b) = (axis(marks.cg as f32), axis(marks.cp as f32));
+    let apart = (b.x - a.x).abs() > 78.0;
+    let mut out = Vec::new();
+    for (zc, at, name, value, right) in
+        [(marks.cg as f32, a, "CG", marks.cg, apart || a.x <= b.x), (marks.cp as f32, b, "CP", marks.cp, !(apart || b.x >= a.x))]
+    {
+        if !(if name == "CG" { marks.show.0 } else { marks.show.1 }) {
+            continue;
+        }
+        let text = format!("{name} {}", bare(value, Quantity::Length, units));
+        let w = width(&text);
+        if marks.staged {
+            let (x, y) = if right { (at.x - GLYPH_R - 5.0 - w, at.y + glyph_row) } else { (at.x + GLYPH_R + 5.0, at.y + glyph_row) };
+            out.push(rect(w, x, y - TEXT_LABEL / 2.0));
+        } else {
+            let r = radius_at_of(rocket, zc).max(0.005);
+            let r_px = axis(zc).distance(camera.project(Vec3::new(0.0, 0.0, zc) + camera.up() * r, size)).max(body * 0.2);
+            let y = at.y - r_px - 24.0 - TEXT_LABEL;
+            let x = if right { at.x - 4.0 - w } else { at.x + 4.0 };
+            out.push(rect(w, x, y));
+            // The stem up to the label.
+            out.push(Rectangle::new(Point::new(at.x - 1.0, at.y - r_px - 22.0), Size::new(2.0, 22.0)));
+        }
+    }
+    if marks.show.0 && marks.show.1 {
+        let text = format!("{:.2} cal", marks.margin);
+        let w = width(&text);
+        let y = a.y.max(b.y) + glyph_row + 22.0;
+        out.push(rect(w, (a.x + b.x) / 2.0 - w / 2.0, y + 4.0));
+    }
+    out
+}
+
 impl Markers<'_> {
     /// Largest outer radius of the airframe, metres.
     fn rmax(&self) -> f32 {
-        self.rocket.parts().iter().map(|p| p.kind.fore_diameter().max(p.kind.aft_diameter()) as f32 / 2.0).fold(0.0, f32::max)
+        rmax_of(self.rocket)
     }
 
     /// Outer radius of the airframe at station `z`.
     fn radius_at(&self, z: f32) -> f32 {
-        let stations = self.rocket.stations();
-        self.rocket
-            .parts()
-            .iter()
-            .enumerate()
-            .find(|(i, _)| z as f64 <= stations[i + 1] + 1e-9)
-            .map_or(0.0, |(i, p)| p.kind.radius_at(z as f64 - stations[i]) as f32)
+        radius_at_of(self.rocket, z)
     }
 
     fn axis(&self, z: f32, size: Size) -> Point {

@@ -735,6 +735,13 @@ impl View {
                     profile: self.profile,
                     units: ctx.units,
                     pod: selected.and_then(|id| pods::PodView::of_part(rocket, id, &camera)),
+                    balance: ctx.physics.balance().map(|b| markers::BalanceMarks {
+                        cg: b.cg,
+                        cp: b.cp,
+                        margin: b.margin_cal,
+                        show: (ctx.show_cg, ctx.show_cp),
+                        staged: ctx.physics.stages().len() > 1,
+                    }),
                 })
                 .width(Fill)
                 .height(Fill)
