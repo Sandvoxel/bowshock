@@ -11,7 +11,7 @@ use bowshock_core::gas::GAMMA;
 use bowshock_core::grid::Grid;
 use bowshock_core::solver::{Bc, Block, Config};
 use crate::Staging;
-use luma::{concat, select, Array, Context, Fields, Mask, PadMode, Result};
+use luma::{concat, select, Array, Context, Fields, PadMode, Result};
 
 /// Array of one field (`rho`, `u`, ...) over a block of cells or faces.
 pub type A = Array<S>;

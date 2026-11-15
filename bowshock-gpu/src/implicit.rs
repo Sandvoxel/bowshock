@@ -368,8 +368,8 @@ struct LDir {
     nr: F,
     len: F,
     w: F,
-    first: Array<Mask>,
-    last: Array<Mask>,
+    first: Array<bool>,
+    last: Array<bool>,
     /// Zeros and ones of the face shape.
     zero: F,
     one: F,
@@ -395,7 +395,7 @@ impl LGeo {
         let (ni, nj) = (grid.ni, grid.nj);
         let face = |f: &[bowshock_core::grid::Face], shape: [usize; 2], g: &dyn Fn(&bowshock_core::grid::Face) -> f64| up_lhs(ctx, &f.iter().map(g).collect::<Vec<_>>(), shape);
         let mask = |shape: [usize; 2], f: &dyn Fn(usize, usize) -> bool| {
-            let v: Vec<Mask> = (0..shape[1]).flat_map(|j| (0..shape[0]).map(move |i| (i, j))).map(|(i, j)| Mask::from(f(i, j))).collect();
+            let v: Vec<bool> = (0..shape[1]).flat_map(|j| (0..shape[0]).map(move |i| (i, j))).map(|(i, j)| f(i, j)).collect();
             Array::from_slice_on(ctx, &v, shape)
         };
         let dir_i = LDir {
@@ -449,24 +449,24 @@ fn reflect_f(w: &V4, nx: &F, nr: &F) -> V4 {
 /// The solid block seen by the implicit left-hand side (`set_block`): masks (`u32`, 1 = true) and the start of every line.
 struct LBlockGeo {
     /// Solid cells `[ni, nj]`.
-    solid: Array<Mask>,
+    solid: Array<bool>,
     /// Fluid cells (`!solid`).
-    fluid: Array<Mask>,
+    fluid: Array<bool>,
     /// First fluid cell of every i line (`row_start(j)`, `ni` for a solid row; `nj` elements) and j line (`col_start(i)`; `ni` elements).
     start: [Array<u32>; 2],
     /// First fluid cell of a line, at the domain boundary (`k0 = 0`: ghost-state Jacobian), behind the solid (`k0 > 0`: wall, reflection),
     /// and either.
-    first_bc: [Array<Mask>; 2],
-    first_refl: [Array<Mask>; 2],
-    first: [Array<Mask>; 2],
+    first_bc: [Array<bool>; 2],
+    first_refl: [Array<bool>; 2],
+    first: [Array<bool>; 2],
     /// Base-wall faces `[ni + 1, nj]`: `i = i_end`, rows `j_sting..j_end`.
-    base: Array<Mask>,
+    base: Array<bool>,
 }
 
 impl LBlockGeo {
     fn new(ctx: &Context, ni: usize, nj: usize, b: bowshock_core::solver::Block) -> Result<LBlockGeo> {
         let mask = |shape: [usize; 2], f: &dyn Fn(usize, usize) -> bool| {
-            let v: Vec<Mask> = (0..shape[1]).flat_map(|j| (0..shape[0]).map(move |i| (i, j))).map(|(i, j)| Mask::from(f(i, j))).collect();
+            let v: Vec<bool> = (0..shape[1]).flat_map(|j| (0..shape[0]).map(move |i| (i, j))).map(|(i, j)| f(i, j)).collect();
             Array::from_slice_on(ctx, &v, shape)
         };
         // first fluid cell of the line through (i, j) of direction `dir`, if the line has one
@@ -735,7 +735,7 @@ impl LazySolver {
     /// Positivity damping: `alpha` is the first of `1, 1/2, .., 1/128` for which `U + alpha dU` has `rho > 0`, `p > 0` and four
     /// finite components (`is_finite`), `0` if there is none. Decided in f32 from the f32 view of `U`.
     fn damping(&self, u: &V4, du: &V4) -> F {
-        let ok = |a: f32| -> Array<Mask> {
+        let ok = |a: f32| -> Array<bool> {
             let q: V4 = std::array::from_fn(|k| &u[k] + a * &du[k]);
             let w = cons_to_prim_f(&q);
             let finite = q.iter().map(|x| x.is_finite()).reduce(|a, b| a & b).expect("four components");
