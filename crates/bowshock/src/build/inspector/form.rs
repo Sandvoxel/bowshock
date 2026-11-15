@@ -77,6 +77,12 @@ impl<'a> Form<'a> {
         Some(FieldRef::new(id, dim))
     }
 
+    /// The dimension of the selected part that is being edited in pick mode, if any.
+    pub(super) fn picking_dim(&self) -> Option<Dim> {
+        let (Selection::Part(id), Some(p)) = (self.ctx.selection, self.ctx.refs.picking.as_ref()) else { return None };
+        (p.target.part == id).then_some(p.target.dim)
+    }
+
     /// Whether a field is another field's pick target right now (the dashed accent outline).
     fn is_pick_target(&self, field: Field) -> bool {
         self.reference(field).is_some_and(|r| self.ctx.refs.is_picking() && !self.ctx.refs.is_target(r))
@@ -119,6 +125,9 @@ impl<'a> Form<'a> {
                     input = input.badge(Badge::Formula);
                 }
             }
+        }
+        if refs.is_target(r) {
+            input = input.hint("Click any value (here, in the viewport, or in Station Lanes). Esc cancels.");
         }
         if self.is_pick_target(field) {
             input = input.state(State::PickTarget).on_pick(Message::PickField(r));

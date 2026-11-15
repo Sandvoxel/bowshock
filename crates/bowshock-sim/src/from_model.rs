@@ -516,6 +516,11 @@ impl Warning {
     }
 }
 
+/// `x` with `decimals` places and a typographic minus (U+2212) for negatives.
+fn signed(x: f64, decimals: usize) -> String {
+    format!("{x:.decimals$}").replace('-', "\u{2212}")
+}
+
 fn mm(x: f64) -> String {
     format!("{:.1} mm", x * 1000.0)
 }
@@ -551,13 +556,13 @@ pub fn warnings(rocket: &Rocket, motors: &MotorDb, balance: &Balance) -> Vec<War
     if balance.reference_diameter > 0.0 {
         let m = balance.margin_cal;
         out.push(if m < 0.0 {
-            Warning::new(Level::Err, format!("Stability {m:.2} cal, unstable (minimum {MIN_MARGIN_CAL:.1})"), None)
+            Warning::new(Level::Err, format!("Unstable · {} cal (min {MIN_MARGIN_CAL:.1})", signed(m, 2)), None)
         } else if m < MIN_MARGIN_CAL {
-            Warning::new(Level::Warn, format!("Stability {m:.2} cal, below {MIN_MARGIN_CAL:.1} minimum"), None)
+            Warning::new(Level::Warn, format!("Marginal · {m:.2} cal (min {MIN_MARGIN_CAL:.1})"), None)
         } else if m > MAX_MARGIN_CAL {
-            Warning::new(Level::Warn, format!("Stability {m:.2} cal, above {MAX_MARGIN_CAL:.1} maximum (overstable)"), None)
+            Warning::new(Level::Warn, format!("Over-stable · {m:.1} cal (max {MAX_MARGIN_CAL:.1})"), None)
         } else {
-            Warning::new(Level::Ok, format!("Stability {m:.2} cal"), None)
+            Warning::new(Level::Ok, format!("Stable · {m:.2} cal (min {MIN_MARGIN_CAL:.1})"), None)
         });
     }
     if !matches!(rocket.parts().first().map(|p| &p.kind), Some(model::PartKind::NoseCone { .. })) {
@@ -601,16 +606,12 @@ pub fn warnings(rocket: &Rocket, motors: &MotorDb, balance: &Balance) -> Vec<War
             continue;
         };
         if motor.diameter > mount.inner_diameter + FIT_TOL {
-            out.push(Warning::new(
-                Level::Err,
-                format!("Motor {} is {} wide, mount bore is {}", motor.designation, mm(motor.diameter), mm(mount.inner_diameter)),
-                Some(mount.id),
-            ));
+            out.push(Warning::new(Level::Err, format!("Motor too wide · {} (bore {:.1})", mm(motor.diameter), mount.inner_diameter * 1000.0), Some(mount.id)));
         }
         if motor.length > mount.length + mount.overhang + FIT_TOL {
             out.push(Warning::new(
                 Level::Warn,
-                format!("Motor {} is {} long, mount holds {}", motor.designation, mm(motor.length), mm((mount.length + mount.overhang).max(0.0))),
+                format!("Motor too long · {} (mount {:.1})", mm(motor.length), (mount.length + mount.overhang).max(0.0) * 1000.0),
                 Some(mount.id),
             ));
         }
@@ -645,7 +646,7 @@ pub fn warnings(rocket: &Rocket, motors: &MotorDb, balance: &Balance) -> Vec<War
     // Thrust to weight.
     if let Some(twr) = thrust_to_weight(rocket, motors) {
         if twr < MIN_THRUST_TO_WEIGHT {
-            out.push(Warning::new(Level::Warn, format!("Thrust to weight {twr:.1}, below {MIN_THRUST_TO_WEIGHT:.1}:1 recommended"), None));
+            out.push(Warning::new(Level::Warn, format!("Thrust/weight · {twr:.1} (min {MIN_THRUST_TO_WEIGHT:.1})"), None));
         }
     }
     out

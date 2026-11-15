@@ -97,13 +97,13 @@ pub fn primary(theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
-/// Toolbar and in-panel actions: no border until hovered.
+/// Toolbar and in-panel actions: no border, a `bg-400` slab when hovered (design/components/Button).
 pub fn ghost(theme: &Theme, status: button::Status) -> button::Style {
     let t = tokens(theme);
     match status {
         button::Status::Active => button::Style { text_color: t.ink_muted, ..button::Style::default() },
         button::Status::Hovered | button::Status::Pressed => {
-            button::Style { background: Some(Background::Color(t.bg_400)), text_color: t.ink, border: frame(t.line_200), ..button::Style::default() }
+            button::Style { background: Some(Background::Color(t.bg_400)), text_color: t.ink, ..button::Style::default() }
         }
         button::Status::Disabled => disabled(t),
     }

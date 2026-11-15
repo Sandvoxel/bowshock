@@ -23,7 +23,7 @@ use crate::tokens::{SPACE_2, SPACE_3, TEXT_BODY, TEXT_LABEL};
 use crate::units::Quantity;
 use crate::widgets::button::{button, Weight};
 use crate::widgets::chip::chip;
-use crate::widgets::field::{labeled, rule, section, section_head};
+use crate::widgets::field::{labeled, rule, section, section_head, section_picking};
 use crate::widgets::glyph::{self, Mark, Tone};
 use crate::widgets::segmented::segmented_fill;
 
@@ -52,8 +52,10 @@ const COUNTS: [(u8, &str); 6] = [(1, "1"), (2, "2"), (3, "3"), (4, "4"), (6, "6"
 
 /// All sections of part `p.id`, numbered as the kit does (a part without one skips its number).
 pub fn view<'a>(p: &Params<'a>) -> Vec<Element<'a, Message>> {
-    let mut out = vec![section(1, "Geometry", false, geometry(p))];
-    out.push(section(2, "Position", true, position(p)));
+    let picking = p.form.picking_dim();
+    let in_position = matches!(picking, Some(Dim::Position | Dim::Angle | Dim::Cant));
+    let mut out = vec![section_picking(1, "Geometry", false, picking.is_some() && !in_position, geometry(p))];
+    out.push(section_picking(2, "Position", true, in_position, position(p)));
     if let Some(rows) = material_rows(p) {
         out.push(section(3, "Material & finish", true, rows));
     }

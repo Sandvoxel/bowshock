@@ -134,7 +134,7 @@ fn single_stage_has_no_blocking_warnings() {
     let b = balance(&r, &db, Phase::Full, 0.3, 0.0, true).unwrap();
     let w = warnings(&r, &db, &b);
     assert!(w.iter().all(|w| w.level != Level::Err), "{w:?}");
-    assert!(w.iter().any(|w| w.level == Level::Ok && w.message.starts_with("Stability ")), "{w:?}");
+    assert!(w.iter().any(|w| w.level == Level::Ok && w.message.starts_with("Stable · ")), "{w:?}");
 }
 
 #[test]
@@ -146,15 +146,15 @@ fn warnings_report_what_is_wrong() {
 
     // Unstable and under-stable readings use the design voice.
     let low = bowshock_sim::from_model::Balance { margin_cal: 0.74, ..b };
-    assert!(warnings(&r, &db, &low).iter().any(|w| w.level == Level::Warn && w.message == "Stability 0.74 cal, below 1.0 minimum"));
+    assert!(warnings(&r, &db, &low).iter().any(|w| w.level == Level::Warn && w.message == "Marginal · 0.74 cal (min 1.0)"));
     let neg = bowshock_sim::from_model::Balance { margin_cal: -0.3, ..b };
-    assert!(warnings(&r, &db, &neg).iter().any(|w| w.level == Level::Err && w.message.starts_with("Stability -0.30 cal")));
+    assert!(warnings(&r, &db, &neg).iter().any(|w| w.level == Level::Err && w.message == "Unstable · \u{2212}0.30 cal (min 1.0)"));
 
     // A motor longer than its mount, then wider than it, then an unknown one.
     r.set_motor(cfg, mount_id, Some(MotorRef::new("J420R", "AeroTech"))).unwrap();
     let w = warnings(&r, &db, &b);
     let long = w.iter().find(|w| w.message.contains("long")).unwrap_or_else(|| panic!("{w:?}"));
-    assert_eq!((long.level, long.part, long.message.as_str()), (Level::Warn, Some(mount_id), "Motor J420R is 337.0 mm long, mount holds 250.0 mm"));
+    assert_eq!((long.level, long.part, long.message.as_str()), (Level::Warn, Some(mount_id), "Motor too long · 337.0 mm (mount 250.0)"));
     r.set_internal_kind(mount_id, mount(0.0301, 0.25));
     let w = warnings(&r, &db, &b);
     let wide = w.iter().find(|w| w.message.contains("wide")).unwrap_or_else(|| panic!("{w:?}"));

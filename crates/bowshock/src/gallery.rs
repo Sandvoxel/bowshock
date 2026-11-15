@@ -229,12 +229,13 @@ impl Gallery {
         let main_buttons: Vec<Element<'_, Message>> = vec![
             button("Simulate", Weight::Primary).icon(Mark::Play).key("F5").on_press(Message::Noop).into(),
             button("Export…", Weight::Secondary).on_press(Message::Noop).into(),
+            button("Hover", Weight::Secondary).preview(iced::widget::button::Status::Hovered).on_press(Message::Noop).into(),
             button("Disabled", Weight::Secondary).disabled("Run a simulation first").into(),
         ];
         let ghosts: Vec<Element<'_, Message>> = vec![
             icon_button(Mark::Undo, "Undo").shortcut("Ctrl+Z").on_press(Message::Noop).into(),
             icon_button(Mark::Redo, "Redo").shortcut("Ctrl+Shift+Z").on_press(Message::Noop).into(),
-            icon_button(Mark::Ellipsis, "More").on_press(Message::Noop).into(),
+            icon_button(Mark::Ellipsis, "More").preview(iced::widget::button::Status::Hovered).on_press(Message::Noop).into(),
             button("Add stage", Weight::Ghost).icon(Mark::Plus).on_press(Message::Noop).into(),
         ];
         let chips: Vec<Element<'_, Message>> = vec![

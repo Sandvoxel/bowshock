@@ -40,11 +40,24 @@ pub struct Button<'a, M> {
     on_press: Option<M>,
     width: Length,
     small: bool,
+    preview: Option<widget::button::Status>,
 }
 
 /// A labelled button of the given `weight`.
 pub fn button<'a, M>(label: &'a str, weight: Weight) -> Button<'a, M> {
-    Button { label: Some(label), mark: None, key: None, shortcut: None, tip: None, reason: None, weight, on_press: None, width: Length::Shrink, small: false }
+    Button {
+        label: Some(label),
+        mark: None,
+        key: None,
+        shortcut: None,
+        tip: None,
+        reason: None,
+        weight,
+        on_press: None,
+        width: Length::Shrink,
+        small: false,
+        preview: None,
+    }
 }
 
 /// A square icon-only ghost button; `tooltip` names the command (add `.shortcut(..)`).
@@ -60,6 +73,7 @@ pub fn icon_button<'a, M>(mark: Mark, tooltip: &'a str) -> Button<'a, M> {
         on_press: None,
         width: Length::Fixed(CONTROL_H),
         small: false,
+        preview: None,
     }
 }
 
@@ -106,6 +120,13 @@ impl<'a, M> Button<'a, M> {
         self
     }
 
+    /// Draws the button in a fixed interaction state whatever the cursor does: the kit's static *Hover* sample, and what a
+    /// headless screenshot (which has no cursor) can show.
+    pub fn preview(mut self, status: widget::button::Status) -> Self {
+        self.preview = Some(status);
+        self
+    }
+
     /// The button's width (default: shrink to its content; icon buttons are `control-h` square).
     pub fn width(mut self, width: impl Into<Length>) -> Self {
         self.width = width.into();
@@ -141,10 +162,11 @@ impl<'a, M: Clone + 'a> From<Button<'a, M>> for Element<'a, M> {
         let inner = if b.label.is_none() { container(inner).center_x(Length::Fill).boxed() } else { inner.boxed() };
 
         let mut press = widget::button(inner).width(b.width).height(height).padding(padding);
+        let preview = b.preview;
         press = match b.weight {
-            Weight::Primary => press.style(theme::primary),
-            Weight::Secondary => press.style(theme::secondary),
-            Weight::Ghost => press.style(theme::ghost),
+            Weight::Primary => press.style(move |t, s| theme::primary(t, preview.unwrap_or(s))),
+            Weight::Secondary => press.style(move |t, s| theme::secondary(t, preview.unwrap_or(s))),
+            Weight::Ghost => press.style(move |t, s| theme::ghost(t, preview.unwrap_or(s))),
         };
         if !disabled {
             press = press.on_press_maybe(b.on_press);

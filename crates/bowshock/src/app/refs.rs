@@ -216,7 +216,7 @@ pub fn pretty(rocket: &Rocket, t: &crate::tokens::Tokens, text: &str) -> String 
         rest = &rest[open + len + 1..];
     }
     out.push_str(rest);
-    out.replace(" * ", " × ").replace(" / ", " ÷ ")
+    out.replace(" * ", " × ").replace(" / ", " ÷ ").replace(" - ", " − ")
 }
 
 /// The values of `part` a formula can use, in menu order: the dimension, its name and value.

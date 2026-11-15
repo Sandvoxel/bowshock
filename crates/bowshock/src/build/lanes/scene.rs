@@ -517,6 +517,16 @@ fn pack(bars: &mut [Bar]) -> Vec<Lane> {
         let (short, regular): (Vec<usize>, Vec<usize>) = idx.iter().copied().partition(|&i| bars[i].thin);
         for i in regular {
             let start = bars[i].start;
+            // Another configuration's motor sits in the sub-row of the current one of its mount, so comparing never changes
+            // the panel's height (design/components/StationLanes, *Configurations*).
+            if let (true, BarKey::Motor { mount, .. }) = (bars[i].alt, bars[i].key) {
+                let twin = placed.iter().find(|&&(j, _)| !bars[j].alt && matches!(bars[j].key, BarKey::Motor { mount: m, .. } if m == mount));
+                if let Some(&(_, row)) = twin {
+                    bars[i].sub = row;
+                    placed.push((i, row));
+                    continue;
+                }
+            }
             let row = rows.iter().position(|&end| end <= start + EPS).unwrap_or_else(|| {
                 rows.push(f64::NEG_INFINITY);
                 rows.len() - 1

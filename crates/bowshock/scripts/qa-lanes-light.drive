@@ -1,0 +1,23 @@
+# QA Station Lanes in light, panels 1-4 of the kit: cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/qa-lanes-light.drive out/qa-lanes-light
+viewport 1280x800
+scale 2
+click "Light"
+move (640, 400)
+click (923, 624)
+screenshot selected-fin.png
+click (22, 149)
+press (143, 224)
+move (170, 240)
+move (400, 420)
+move (680, 590)
+move (700, 596)
+screenshot bin-drag.png
+release (700, 596)
+press (505, 730)
+move (520, 730)
+move (560, 730)
+move (610, 730)
+screenshot drag-mid.png
+release (610, 730)
+move (700, 758)
+screenshot hover-cg.png

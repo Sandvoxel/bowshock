@@ -34,8 +34,19 @@ pub fn section_head<'a, M: 'a>(index: usize, title: &str) -> Element<'a, M> {
 /// An inspector section: an optional full-bleed hairline above (`ruled`, false for the first), then the head and the
 /// `fields` `space-2` apart, all with `space-3` around.
 pub fn section<'a, M: 'a>(index: usize, title: &str, ruled: bool, fields: Vec<Element<'a, M>>) -> Element<'a, M> {
+    section_picking(index, title, ruled, false, fields)
+}
+
+/// [`section`] that shows the accent `PICKING…` tag at the right of its head while a field inside it is in pick mode
+/// (design/components/UnitInput, *Typing { starts a pick*).
+pub fn section_picking<'a, M: 'a>(index: usize, title: &str, ruled: bool, picking: bool, fields: Vec<Element<'a, M>>) -> Element<'a, M> {
     let mut body: Vec<Element<'a, M>> = Vec::with_capacity(fields.len() + 1);
-    body.push(section_head(index, title));
+    if picking {
+        let tag = text("PICKING\u{2026}").font(MONO).size(TEXT_LABEL).style(theme::colored(|t| t.accent));
+        body.push(row![section_head(index, title), Space::new().width(Fill), tag].align_y(iced::Center).boxed());
+    } else {
+        body.push(section_head(index, title));
+    }
     body.extend(fields);
     let padded = container(column(body).spacing(SPACE_2)).padding([SPACE_3, SPACE_3]).width(Fill);
     if ruled {

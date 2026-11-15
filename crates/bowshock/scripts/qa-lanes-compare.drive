@@ -1,0 +1,20 @@
+# QA Station Lanes: single-stage rocket with a second configuration (another motor) and "Compare all in lanes" (kit panel 5).
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/qa-lanes-compare.drive out/qa-lanes-compare
+viewport 1280x800
+scale 1
+move (640, 400)
+click (897, 672)
+click "Duplicate current"
+click (500, 400)
+click (820, 652)
+click (22, 281)
+screenshot bin.png
+click (120, 231)
+click (897, 672)
+screenshot menu.png
+click "Compare all in lanes"
+screenshot menu2.png
+click (500, 400)
+screenshot compare-dark.png
+click "Light"
+screenshot compare-light.png

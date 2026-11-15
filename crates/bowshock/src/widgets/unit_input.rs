@@ -134,6 +134,26 @@ enum Cell {
     Slot(Option<String>),
 }
 
+/// The typographic form of an operator character for display: `*` → `×`, `/` → `÷`, `-` → `−`. Text is stored as ASCII.
+fn display_char(c: char) -> char {
+    match c {
+        '*' => '\u{d7}',
+        '/' => '\u{f7}',
+        '-' => '\u{2212}',
+        c => c,
+    }
+}
+
+/// The ASCII operator for a typed `×`, `÷` or `−` (everything else unchanged), so both spellings are accepted.
+fn ascii_operator(c: char) -> char {
+    match c {
+        '\u{d7}' => '*',
+        '\u{f7}' => '/',
+        '\u{2212}' => '-',
+        c => c,
+    }
+}
+
 /// Turns text with `{token}`s into cells: each complete `{..}` is a chip, an unclosed `{` stays a character.
 fn cells_from(text: &str) -> Vec<Cell> {
     let mut cells = Vec::new();
@@ -145,7 +165,7 @@ fn cells_from(text: &str) -> Vec<Cell> {
                 rest = &rest[end + 1..];
             }
             _ => {
-                cells.push(Cell::Char(c));
+                cells.push(Cell::Char(ascii_operator(c)));
                 rest = &rest[c.len_utf8()..];
             }
         }
@@ -658,7 +678,7 @@ impl<'a, M: Clone + 'a> UnitInput<'a, M> {
                     _ => {
                         let Some(text) = text else { return false };
                         for c in text.chars().filter(|c| !c.is_control()) {
-                            m.cells.insert(m.caret, Cell::Char(c));
+                            m.cells.insert(m.caret, Cell::Char(ascii_operator(c)));
                             m.caret += 1;
                             if c == '}' {
                                 self.close_brace(m);
@@ -776,9 +796,10 @@ impl<'a, M: Clone + 'a> UnitInput<'a, M> {
                     }
                     continue;
                 };
+                let shown = display_char(*c);
                 match &mut run {
-                    Some((_, s)) => s.push(*c),
-                    None => run = Some((*x0, c.to_string())),
+                    Some((_, s)) => s.push(shown),
+                    None => run = Some((*x0, shown.to_string())),
                 }
             }
             flush(r, &mut run);

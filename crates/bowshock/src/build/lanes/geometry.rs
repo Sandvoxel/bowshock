@@ -189,12 +189,12 @@ pub struct Hit {
     pub zone: Zone,
 }
 
-/// Indices of the scene's bars in the order they are painted: other configurations' motors, regular bars, then short ones on top.
+/// Indices of the scene's bars in the order they are painted: other configurations' motors, short bars, then (as dashed outlines) other configurations' motors on top.
 pub fn paint_order(scene: &Scene) -> Vec<usize> {
     let mut order: Vec<usize> = (0..scene.bars.len()).collect();
     order.sort_by_key(|&i| {
         let b = &scene.bars[i];
-        (!b.alt, b.thin)
+        (b.thin, b.alt)
     });
     order
 }
@@ -211,7 +211,7 @@ pub fn hit(scene: &Scene, lanes: &[LaneBox], axis: &Axis, p: Point) -> Option<Hi
         let Some(rect) = bar_rect(bar, lanes, axis) else { continue };
         // A little slack so a 6 px ring can be hit.
         let grab = Rectangle { x: rect.x - 1.0, y: rect.y - 1.0, width: rect.width + 2.0, height: rect.height + 2.0 };
-        if grab.contains(p) {
+        if grab.contains(p) && !(bar.alt && best.is_some_and(|(b, _)| !b.alt)) {
             best = Some((bar, rect));
         }
     }

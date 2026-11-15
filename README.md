@@ -35,6 +35,28 @@ fn main() -> Result<(), bowshock_core::Error> {
   against wind-tunnel data; motor-on base pressure is not validated. Details and measured errors are in the guide's validation chapter.
 - Working on bowshock itself: [developer notes and validation drivers](crates/bowshock-validate/README.md).
 
+## Desktop app
+
+`crates/bowshock` is the Bowshock rocket builder (iced): build a rocket from a parts bin with KSP-style drag and drop,
+edit every dimension with handles or the inspector, and fly it in **Simulate** or sweep it in **Analyze**. Its physics are
+the OpenRocket-style models in `bowshock-sim` (Barrowman CP with body lift, OpenRocket's drag build-up, 3-DOF RK4 flight),
+fed by the rocket document in `bowshock-model` and the thrust curves in `bowshock-motors`. The UI follows the design kit in
+`crates/bowshock/design/` (start at its `README.md`); module layout is in `crates/bowshock/src/ARCHITECTURE.md`.
+
+```sh
+cargo run --release -p bowshock               # open the app (Ctrl/Cmd+E loads the example rocket)
+cargo run --release -p bowshock -- --example  # start with the example rocket
+cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/shell.drive out/shell   # scripted run + screenshots
+```
+
+| Crate | What it is |
+|---|---|
+| `bowshock` | the desktop app |
+| `bowshock-model` | the rocket document: parts, materials, mass/CG, configurations, stages, `.bowshock` JSON |
+| `bowshock-sim` | OpenRocket-style aerodynamics, flight simulation and analyses; `from_model` maps a document onto it |
+| `bowshock-motors` | RASP `.eng` parser and bundled ThrustCurve.org motors |
+| `bowshock-core`, `bowshock-cfd`, `bowshock-reference` | CFD drag library (not yet wired into the app) |
+
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
