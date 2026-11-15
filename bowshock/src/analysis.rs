@@ -7,7 +7,7 @@ use crate::engine::numerics::Numerics;
 use crate::engine::result::{PointResult, StopReason};
 use crate::engine::run::run_on;
 use crate::error::Error;
-use crate::spec::BodySpec;
+use crate::spec::{BodySpec, FinSpec};
 use bowshock_core::solver::Solver;
 use bowshock_reference::base_drag::base_drag_coefficient;
 
@@ -56,6 +56,16 @@ impl Resolution {
     }
 }
 
+/// Drag of the fin set, both parts on the reference area. Fin-body interference drag is neglected.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct FinDrag {
+    /// Skin friction of the fins.
+    pub friction: f64,
+    /// Pressure drag of the fins: leading and trailing edges, plus wave drag of a double-wedge section.
+    pub pressure: f64,
+}
+
 /// Drag coefficients referenced to the reference area (by default the largest cross-section).
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -68,7 +78,9 @@ pub struct Drag {
     pub base: f64,
     /// `base` comes from a correlation (the inviscid wake gives no physical base pressure).
     pub base_modelled: bool,
-    /// Total drag: forebody pressure + friction + base (non-finite only for a [`Quality::Failed`] point).
+    /// Fin drag; `Some` when fins were given.
+    pub fins: Option<FinDrag>,
+    /// Total drag: forebody pressure + friction + base + fins (non-finite only for a [`Quality::Failed`] point).
     #[cfg_attr(feature = "serde", serde(deserialize_with = "nan_or_f64"))]
     pub total: f64,
 }
@@ -205,6 +217,7 @@ pub struct Analysis {
     resolution: Resolution,
     wake: Option<Wake>,
     flight: Option<FlightConditions>,
+    fins: Option<FinSpec>,
     backend: Backend,
     numerics: Option<Numerics>,
     max_iterations: Option<usize>,
@@ -232,6 +245,7 @@ impl Analysis {
             resolution: Resolution::Medium,
             wake: None,
             flight: None,
+            fins: None,
             backend: Backend::Auto,
             numerics: None,
             max_iterations: None,
@@ -312,6 +326,12 @@ impl Analysis {
         self
     }
 
+    /// Add a set of fins to the drag. Needs [`Analysis::viscous`] flight conditions, which give the Reynolds number.
+    pub fn fins(mut self, f: FinSpec) -> Self {
+        self.fins = Some(f);
+        self
+    }
+
     /// Free-stream Reynolds number, Sutherland constant and highest Mach number of a viscous sweep; `None` for the Euler equations.
     fn rans(&self, machs: &[f64]) -> Result<Option<Rans>, Error> {
         let Some(flight) = self.flight else {
@@ -340,6 +360,16 @@ impl Analysis {
         }
         if !(self.d_ref.is_finite() && self.d_ref > 0.0) {
             return Err(Error::InvalidInput(format!("reference diameter {} must be finite and > 0", self.d_ref)));
+        }
+
+        if let Some(f) = &self.fins {
+            f.validate()?;
+            if self.flight.is_none() {
+                return Err(Error::InvalidInput("fins need flight conditions: call Analysis::viscous".into()));
+            }
+            if !self.dimensional {
+                return Err(Error::InvalidInput("fins need a dimensional BodySpec".into()));
+            }
         }
 
         // cases in ascending Mach order (stable), results restored to input order below
@@ -414,8 +444,12 @@ impl Analysis {
         let friction = viscous.then_some(detail.cd_friction);
         let base_modelled = !(viscous && self.wake_used() == Wake::Base);
         let base = if base_modelled { base_drag_coefficient(mach) * (self.body.base_radius() / self.body.body.radius()).powi(2) } else { detail.cd_base };
-        let total = forebody_pressure + friction.unwrap_or(0.0) + base;
-        Drag { forebody_pressure: forebody_pressure * q, friction: friction.map(|f| f * q), base: base * q, base_modelled, total: total * q }
+        let mut total = (forebody_pressure + friction.unwrap_or(0.0) + base) * q;
+        let fins = self.fins.as_ref().zip(self.flight.and_then(|f| f.atmosphere.state().ok())).map(|(f, air)| crate::fins::fin_drag(f, mach, &air, self.d_ref));
+        if let Some(fd) = fins {
+            total += fd.friction + fd.pressure;
+        }
+        Drag { forebody_pressure: forebody_pressure * q, friction: friction.map(|f| f * q), base: base * q, base_modelled, fins, total }
     }
 
     fn point(&self, mach: f64, detail: PointResult, other: Option<&PointResult>) -> PolarPoint {

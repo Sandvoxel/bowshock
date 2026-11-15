@@ -1,6 +1,6 @@
 //! Viscous (RANS, k-omega SST) analysis gate G3: skin friction, wall resolution and base pressure of a body at subsonic speed.
 
-use bowshock::{AftSpec, Analysis, Atmosphere, Backend, BodySpec, FlightConditions, NoseShape, NoseSpec, Quality, Resolution};
+use bowshock::{AftSpec, Analysis, Atmosphere, Backend, BodySpec, FinProfile, FinSpec, FlightConditions, NoseShape, NoseSpec, Quality, Resolution};
 use std::time::Instant;
 
 /// Tangent ogive 0.30 x 0.10 m and a 0.60 m tube at Mach 0.5 in the ISA at sea level: the friction drag is within 15 % of the
@@ -107,4 +107,37 @@ fn g3_gpu_matches_cpu() {
     assert!((gpu.drag.total / cpu.drag.total - 1.0).abs() < 0.01);
     assert!((g.cd_friction / c.cd_friction - 1.0).abs() < 0.02);
     assert!((g.cp_base - c.cp_base).abs() < 0.01);
+}
+
+fn fin_set() -> FinSpec {
+    FinSpec { count: 4, root_chord: 0.12, tip_chord: 0.06, span: 0.08, sweep: 0.06, thickness: 0.003, profile: FinProfile::Rounded }
+}
+
+fn g3_spec() -> BodySpec {
+    BodySpec { nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 }, aft: vec![AftSpec::Tube { length: 0.60 }] }
+}
+
+/// The G3 body with fins: both fin parts are positive and the total is the sum of all parts.
+#[test]
+fn fins_add_friction_and_pressure_drag() {
+    let polar = Analysis::new(&g3_spec())
+        .unwrap()
+        .fins(fin_set())
+        .backend(Backend::Cpu)
+        .resolution(Resolution::Coarse)
+        .viscous(FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 0.0 } })
+        .max_iterations(50)
+        .run(&[0.5])
+        .unwrap();
+    let d = polar.points[0].drag;
+    let f = d.fins.expect("fin drag");
+    assert!(f.friction > 0.0 && f.pressure > 0.0, "{f:?}");
+    let sum = d.forebody_pressure + d.friction.unwrap() + d.base + f.friction + f.pressure;
+    assert!((d.total - sum).abs() < 1e-12, "{} vs {sum}", d.total);
+}
+
+#[test]
+fn fins_without_flight_conditions_are_rejected() {
+    let err = Analysis::new(&g3_spec()).unwrap().fins(fin_set()).run(&[0.5]).unwrap_err();
+    assert_eq!(err.to_string(), "fins need flight conditions: call Analysis::viscous");
 }

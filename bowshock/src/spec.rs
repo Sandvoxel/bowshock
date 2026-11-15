@@ -95,6 +95,63 @@ fn positive(field: &str, v: f64) -> Result<(), Error> {
     }
 }
 
+/// Edge profile of the fins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum FinProfile {
+    /// Flat leading and trailing edges.
+    Square,
+    /// Rounded leading edge, flat trailing edge.
+    Rounded,
+    /// Rounded leading edge, tapered trailing edge.
+    Airfoil,
+    /// Sharp edges, double-wedge section (supersonic wave drag).
+    DoubleWedge,
+}
+
+/// One set of identical trapezoidal fins, in metres. `sweep` is the axial distance from the root leading edge to the tip leading edge (positive aft).
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct FinSpec {
+    /// Number of fins, equally spaced around the body (3 to 8).
+    pub count: u32,
+    /// Chord at the body surface [m].
+    pub root_chord: f64,
+    /// Chord at the tip [m] (0 for a triangular fin).
+    pub tip_chord: f64,
+    /// Distance from the body surface to the tip [m].
+    pub span: f64,
+    /// Axial distance from the root leading edge to the tip leading edge [m], positive aft.
+    pub sweep: f64,
+    /// Maximum thickness [m].
+    pub thickness: f64,
+    /// Edge profile.
+    pub profile: FinProfile,
+}
+
+impl FinSpec {
+    /// Check the fin set; the error names the offending field as `fins.<field>`.
+    pub fn validate(&self) -> Result<(), Error> {
+        if !(3..=8).contains(&self.count) {
+            return invalid("fins.count", &format!("must be in 3..=8, got {}", self.count));
+        }
+        positive("fins.root_chord", self.root_chord)?;
+        positive("fins.span", self.span)?;
+        positive("fins.thickness", self.thickness)?;
+        if !(self.tip_chord.is_finite() && self.tip_chord >= 0.0) {
+            return invalid("fins.tip_chord", &format!("must be finite and >= 0, got {}", self.tip_chord));
+        }
+        if !(self.sweep.is_finite() && (self.sweep / self.span).atan().abs() <= 75f64.to_radians()) {
+            return invalid("fins.sweep", &format!("must be finite with a leading-edge sweep angle of at most 75 degrees, got {}", self.sweep));
+        }
+        let mac = crate::fins::mean_aerodynamic_chord(self.root_chord, self.tip_chord);
+        if self.thickness / mac > 0.2 {
+            return invalid("fins.thickness", &format!("thickness/mean chord must be <= 0.2, got {}", self.thickness / mac));
+        }
+        Ok(())
+    }
+}
+
 impl BodySpec {
     /// Largest diameter of the body [m].
     pub fn reference_diameter(&self) -> f64 {

@@ -1,7 +1,7 @@
 //! With the `serde` feature, inputs and results round-trip through JSON.
 #![cfg(feature = "serde")]
 
-use bowshock::{AftSpec, Analysis, Atmosphere, Backend, BodySpec, FlightConditions, NoseShape, NoseSpec, Polar, Resolution};
+use bowshock::{AftSpec, Analysis, Atmosphere, Backend, BodySpec, FinProfile, FinSpec, FlightConditions, NoseShape, NoseSpec, Polar, Resolution};
 
 fn spec() -> BodySpec {
     BodySpec {
@@ -20,6 +20,8 @@ fn inputs_round_trip() {
     assert_eq!(roundtrip(&s), s);
     let f = FlightConditions { atmosphere: Atmosphere::Explicit { temperature_k: 250.0, pressure_pa: 80_000.0 } };
     assert_eq!(roundtrip(&f), f);
+    let fins = FinSpec { count: 4, root_chord: 0.12, tip_chord: 0.06, span: 0.08, sweep: 0.06, thickness: 0.003, profile: FinProfile::DoubleWedge };
+    assert_eq!(roundtrip(&fins), fins);
 }
 
 #[test]
