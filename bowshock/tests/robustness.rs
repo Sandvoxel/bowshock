@@ -63,7 +63,7 @@ fn fins_and_motor_return_ok_with_finite_or_failed_points() {
     let analysis = || {
         Analysis::new(&body)
             .unwrap()
-            .fins(fins)
+            .fins(fins.clone())
             .viscous(FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 0.0 } })
             .backend(Backend::Cpu)
             .resolution(Resolution::Coarse)

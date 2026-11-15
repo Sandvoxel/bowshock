@@ -55,19 +55,58 @@ pub(crate) fn fin_drag(f: &FinSpec, mach: f64, air: &AirState, d_ref: f64) -> Fi
     let cd_stag = 0.85 * stagnation_pressure_ratio(mach);
     let le_round = rounded_leading_edge(mach);
     let cd_base = base_drag_coefficient(mach);
-    let (le_perp, te) = match f.profile {
+    let (le_perp, te) = match &f.profile {
         FinProfile::Square => (cd_stag, cd_base),
         FinProfile::Rounded => (le_round, 0.5 * cd_base),
         FinProfile::Airfoil => (le_round, 0.0),
         FinProfile::DoubleWedge => (0.0, 0.0),
+        FinProfile::Custom { section } => {
+            let (b, e, rounded) = section_edges(section);
+            (b * cd_stag + (1.0 - b) * if rounded { le_round } else { 0.0 }, e * cd_base)
+        }
     };
     let mut pressure = (le_perp * sweep.cos().powi(2) + te) * a_front / a_ref;
-    if f.profile == FinProfile::DoubleWedge && mach >= 1.0 {
-        // Ackeret wave drag of a double wedge, beta floored at M = 1.15
+    let wave = match &f.profile {
+        FinProfile::DoubleWedge => Some(4.0 * (t / mac).powi(2)),
+        FinProfile::Custom { section } => Some(4.0 * section_slope_integral(section) * (t / mac / 2.0).powi(2)),
+        _ => None,
+    };
+    if let (Some(w), true) = (wave, mach >= 1.0) {
+        // Ackeret wave drag, beta floored at M = 1.15
         let beta = (mach * mach - 1.0).max(0.3225).sqrt();
-        pressure += 4.0 * (t / mac).powi(2) / beta * n * a_fin / a_ref;
+        pressure += w / beta * n * a_fin / a_ref;
     }
     FinDrag { friction, pressure }
+}
+
+/// Normalised section `zeta = z / z_max` at the given points.
+fn normalised(section: &[[f64; 2]]) -> impl Iterator<Item = [f64; 2]> + '_ {
+    let zmax = section.iter().fold(0.0f64, |m, p| m.max(p[1]));
+    section.iter().map(move |p| [p[0], p[1] / zmax])
+}
+
+/// Blunt leading-edge fraction `zeta(0)`, trailing-edge fraction `zeta(1)` and the leading-edge class of a custom section.
+/// The edge is `rounded` when the slope of the first segment is at least 1.5 times that of the second (a sqrt-like nose;
+/// a wedge gives 1), or when the second slope is zero while the first is positive. A negative second slope (thickness peaking at
+/// the first interior point, as for a double wedge) is a sharp edge. Heuristic.
+fn section_edges(section: &[[f64; 2]]) -> (f64, f64, bool) {
+    let z: Vec<[f64; 2]> = normalised(section).collect();
+    let slope = |k: usize| (z[k][1] - z[k - 1][1]) / (z[k][0] - z[k - 1][0]);
+    let (s1, s2) = (slope(1), slope(2));
+    let rounded = if s2 < 0.0 {
+        false
+    } else if s2 == 0.0 {
+        s1 > 0.0
+    } else {
+        s1 / s2 >= 1.5
+    };
+    (z[0][1], z[z.len() - 1][1], rounded)
+}
+
+/// Integral over `0..1` of the squared slope of the normalised section, exact over the linear segments (the blunt leading-edge step is excluded).
+fn section_slope_integral(section: &[[f64; 2]]) -> f64 {
+    let z: Vec<[f64; 2]> = normalised(section).collect();
+    z.windows(2).map(|w| (w[1][1] - w[0][1]).powi(2) / (w[1][0] - w[0][0])).sum()
 }
 
 #[cfg(test)]
@@ -146,5 +185,72 @@ mod tests {
             }
         }
         assert!(fin(FinProfile::Rounded).validate().is_ok());
+    }
+
+    fn custom(section: &[[f64; 2]]) -> FinSpec {
+        fin(FinProfile::Custom { section: section.to_vec() })
+    }
+
+    fn close(a: f64, b: f64, what: &str) {
+        assert!((a - b).abs() <= 1e-12 * a.abs().max(b.abs()) + 1e-15, "{what}: {a} vs {b}");
+    }
+
+    #[test]
+    fn custom_double_wedge_matches_double_wedge() {
+        let air = Atmosphere::Isa { altitude_m: 0.0 }.state().unwrap();
+        let c = custom(&[[0.0, 0.0], [0.5, 1.0], [1.0, 0.0]]);
+        let d = fin(FinProfile::DoubleWedge);
+        for m in [0.8, 2.0] {
+            let (a, b) = (fin_drag(&c, m, &air, 0.1), fin_drag(&d, m, &air, 0.1));
+            close(a.friction, b.friction, "friction");
+            close(a.pressure, b.pressure, "pressure");
+        }
+    }
+
+    #[test]
+    fn custom_flat_plate_matches_square() {
+        let air = Atmosphere::Isa { altitude_m: 0.0 }.state().unwrap();
+        let c = custom(&[[0.0, 1.0], [0.5, 1.0], [1.0, 1.0]]);
+        let s = fin(FinProfile::Square);
+        for m in [0.5, 1.5] {
+            let (a, b) = (fin_drag(&c, m, &air, 0.1), fin_drag(&s, m, &air, 0.1));
+            close(a.friction, b.friction, "friction");
+            close(a.pressure, b.pressure, "pressure");
+        }
+    }
+
+    #[test]
+    fn naca0012_has_a_rounded_leading_edge() {
+        let xs = [0.0, 0.0025, 0.005, 0.0125, 0.025, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+        let section: Vec<[f64; 2]> =
+            xs.iter().map(|&x: &f64| [x, 0.6 * (0.2969 * x.sqrt() - 0.1260 * x - 0.3516 * x * x + 0.2843 * x.powi(3) - 0.1015 * x.powi(4))]).collect();
+        let (b, e, rounded) = section_edges(&section);
+        assert!(rounded && b == 0.0 && e > 0.0 && e < 0.05, "b {b} e {e} rounded {rounded}");
+        let air = Atmosphere::Isa { altitude_m: 0.0 }.state().unwrap();
+        let (n, a) = (fin(FinProfile::Custom { section }), fin(FinProfile::Airfoil));
+        // the thin trailing edge (about 2 % of the thickness) adds TE * CD_base on top of the Airfoil leading edge
+        let (pn, pa) = (fin_drag(&n, 0.9, &air, 0.1).pressure, fin_drag(&a, 0.9, &air, 0.1).pressure);
+        assert!((pn - pa).abs() < 0.01 * pa, "{pn} vs {pa}");
+        let p2 = fin_drag(&n, 2.0, &air, 0.1).pressure;
+        assert!(p2 > 0.0 && p2.is_finite());
+    }
+
+    #[test]
+    fn invalid_custom_sections_are_rejected() {
+        let bad: [&[[f64; 2]]; 6] = [
+            &[[0.0, 0.0], [1.0, 0.0]],
+            &[[0.1, 0.0], [0.5, 1.0], [1.0, 0.0]],
+            &[[0.0, 0.0], [0.5, 1.0], [0.9, 0.0]],
+            &[[0.0, 0.0], [0.5, 1.0], [0.5, 1.0], [1.0, 0.0]],
+            &[[0.0, 0.0], [0.5, -1.0], [1.0, 0.0]],
+            &[[0.0, 0.0], [0.5, 0.0], [1.0, 0.0]],
+        ];
+        for s in bad {
+            match custom(s).validate() {
+                Err(Error::InvalidInput(msg)) => assert!(msg.starts_with("fins.profile.section"), "{msg}"),
+                other => panic!("expected InvalidInput for {s:?}, got {other:?}"),
+            }
+        }
+        assert!(custom(&[[0.0, 0.0], [0.5, 1.0], [1.0, 0.0]]).validate().is_ok());
     }
 }

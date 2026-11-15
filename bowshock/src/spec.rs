@@ -96,7 +96,7 @@ fn positive(field: &str, v: f64) -> Result<(), Error> {
 }
 
 /// Edge profile of the fins.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum FinProfile {
     /// Flat leading and trailing edges.
@@ -107,10 +107,17 @@ pub enum FinProfile {
     Airfoil,
     /// Sharp edges, double-wedge section (supersonic wave drag).
     DoubleWedge,
+    /// User-defined symmetric section: upper-surface coordinates `[x/c, z]` from the leading edge (`x = 0`) to the trailing edge
+    /// (`x = 1`). Only the shape matters: `z` is normalised by its maximum and the maximum thickness is [`FinSpec::thickness`], so
+    /// the scale of `z` is irrelevant (a NACA `.dat` upper surface can be pasted as is).
+    Custom {
+        /// Upper-surface points `[x/c, z]`: at least 3, `x` strictly increasing from 0 to 1, `z >= 0` with a positive maximum.
+        section: Vec<[f64; 2]>,
+    },
 }
 
 /// One set of identical trapezoidal fins, in metres. `sweep` is the axial distance from the root leading edge to the tip leading edge (positive aft).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FinSpec {
     /// Number of fins, equally spaced around the body (3 to 8).
@@ -144,12 +151,41 @@ impl FinSpec {
         if !(self.sweep.is_finite() && (self.sweep / self.span).atan().abs() <= 75f64.to_radians()) {
             return invalid("fins.sweep", &format!("must be finite with a leading-edge sweep angle of at most 75 degrees, got {}", self.sweep));
         }
+        if let FinProfile::Custom { section } = &self.profile {
+            validate_section(section)?;
+        }
         let mac = crate::fins::mean_aerodynamic_chord(self.root_chord, self.tip_chord);
         if self.thickness / mac > 0.2 {
             return invalid("fins.thickness", &format!("thickness/mean chord must be <= 0.2, got {}", self.thickness / mac));
         }
         Ok(())
     }
+}
+
+fn validate_section(s: &[[f64; 2]]) -> Result<(), Error> {
+    const F: &str = "fins.profile.section";
+    if s.len() < 3 {
+        return invalid(F, &format!("needs at least 3 points, got {}", s.len()));
+    }
+    if s.iter().any(|p| !(p[0].is_finite() && p[1].is_finite())) {
+        return invalid(F, "all coordinates must be finite");
+    }
+    if s[0][0].abs() > 1e-9 {
+        return invalid(F, &format!("first x must be 0, got {}", s[0][0]));
+    }
+    if (s[s.len() - 1][0] - 1.0).abs() > 1e-9 {
+        return invalid(F, &format!("last x must be 1, got {}", s[s.len() - 1][0]));
+    }
+    if s.windows(2).any(|w| w[1][0] <= w[0][0]) {
+        return invalid(F, "x must be strictly increasing");
+    }
+    if s.iter().any(|p| p[1] < 0.0) {
+        return invalid(F, "z must be >= 0");
+    }
+    if s.iter().all(|p| p[1] <= 0.0) {
+        return invalid(F, "the maximum z must be > 0");
+    }
+    Ok(())
 }
 
 /// Rocket motor exhausting through the centre of the base, modelled as an air jet (gamma = 1.4) at the nozzle exit.

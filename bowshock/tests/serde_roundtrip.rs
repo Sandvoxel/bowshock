@@ -22,6 +22,8 @@ fn inputs_round_trip() {
     assert_eq!(roundtrip(&f), f);
     let fins = FinSpec { count: 4, root_chord: 0.12, tip_chord: 0.06, span: 0.08, sweep: 0.06, thickness: 0.003, profile: FinProfile::DoubleWedge };
     assert_eq!(roundtrip(&fins), fins);
+    let custom = FinSpec { profile: FinProfile::Custom { section: vec![[0.0, 0.0], [0.1, 0.8], [1.0, 0.05]] }, ..fins.clone() };
+    assert_eq!(roundtrip(&custom), custom);
     let motor = MotorSpec { exit_diameter: 0.06, exit_mach: 2.5, exit_pressure_pa: 101_325.0, total_temperature_k: 1500.0 };
     assert_eq!(roundtrip(&motor), motor);
 }
