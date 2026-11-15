@@ -417,7 +417,11 @@ fn assemble(s: &Solver, p: &ImplicitParams, dir_i: bool) -> Factor {
             };
             let (wm_idx, wp_idx) = if dir_i { (pidx(ni, ii - 1, jj), pidx(ni, ii + 1, jj)) } else { (pidx(ni, ii, jj - 1), pidx(ni, ii, jj + 1)) };
             let wall_lower = k == k0 && k0 > 0;
-            let wm = if wall_lower && dir_i {
+            let jet = wall_lower && dir_i && walls.jet_iface(k0, j);
+            let wm = if jet {
+                // lower neighbour is the jet: fixed exit state
+                walls.nozzle.expect("jet row").state
+            } else if wall_lower && dir_i {
                 // lower neighbour is the solid body: wall ghost about the base wall
                 let fb = &grid.iface[j * (ni + 1) + k0];
                 wall_ghost(wk, fb, walls.noslip_iface(k0, j))
@@ -427,7 +431,10 @@ fn assemble(s: &Solver, p: &ImplicitParams, dir_i: bool) -> Factor {
             let (lam_l, lam_r) = if viscous_on { viscous::face_lambdas(grid, w, &walls, mu, mu_t, dir_i, i, j) } else { (0.0, 0.0) };
             let (mut l, mut dd, mut u) = cell_blocks(wk, &wm, &w[wp_idx], fl, fr, grid.vol[c], dt[c], p.lines, src, p.roe, p.eps_fix, lam_l, lam_r);
             if k == k0 {
-                let t = if wall_lower {
+                let t = if jet {
+                    // fixed ghost: no dependence on the interior
+                    ZERO
+                } else if wall_lower {
                     // solid body below / behind the cell: wall with the face normal (slip: reflection, no-slip: velocity reversed)
                     if if dir_i { walls.noslip_iface(k0, j) } else { walls.noslip_jface(i, k0) } {
                         NOSLIP

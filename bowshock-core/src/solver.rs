@@ -177,6 +177,18 @@ pub const PRANDTL: f64 = 0.72;
 /// Turbulent Prandtl number.
 pub const PRANDTL_T: f64 = 0.9;
 
+/// Nozzle exit on the base face: rows `0..j_end` of `i = i_end` are a fixed inflow state instead of a wall (needs a block with
+/// `j_sting == 0`); rows `j_end..block.j_end` stay wall (the annulus).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Nozzle {
+    /// Number of base rows (counted from the axis) that are the nozzle exit; even, `2 <= j_end` and `j_end + 2 <= block.j_end`.
+    pub j_end: usize,
+    /// Primitive state of the jet at the exit (supersonic, axial flow).
+    pub state: Prim,
+    /// `[k, omega]` of the jet (SST runs).
+    pub turb: [f64; 2],
+}
+
 const NG: usize = 2;
 
 pub struct Solver {
@@ -196,6 +208,8 @@ pub struct Solver {
     pub low_mach: bool,
     /// Solid body block (base/wake grids), `None` for ordinary grids.
     pub(crate) block: Option<Block>,
+    /// Nozzle exit on the base face (see [`Solver::set_nozzle`]).
+    pub(crate) nozzle: Option<Nozzle>,
     /// Convergence acceleration (set with [`Solver::set_scheme`]).
     pub(crate) scheme: Scheme,
     pub(crate) irs: Irs,
@@ -251,6 +265,7 @@ impl Solver {
             iter: 0,
             low_mach: false,
             block: None,
+            nozzle: None,
             scheme: Scheme::Explicit,
             irs: Irs::OFF,
             forcing: Vec::new(),
@@ -300,6 +315,27 @@ impl Solver {
         };
     }
 
+    /// Declare the nozzle exit on the base face (`None`: all base rows are wall). The block must be declared before
+    /// ([`Solver::set_block`]) and the viscous terms after ([`Solver::set_viscous`]); an already allocated SST wall distance
+    /// is recomputed. Needs `Scheme::Explicit`, `Scheme::Smoothed` or `Scheme::Implicit`.
+    pub fn set_nozzle(&mut self, n: Option<Nozzle>) {
+        if let Some(n) = n {
+            let b = self.block.expect("a nozzle needs a block");
+            assert!(b.j_sting == 0 && n.j_end >= 2 && n.j_end + 2 <= b.j_end && n.j_end % 2 == 0, "nozzle out of range");
+            assert!(n.state[0] > 0.0 && n.state[3] > 0.0 && n.state[1] >= sound_speed(&n.state), "nozzle exit must be supersonic");
+            assert!(!matches!(self.scheme, Scheme::Multigrid(_)), "nozzle needs Scheme::Explicit or Scheme::Implicit");
+        }
+        self.nozzle = n;
+        if !self.turb.is_empty() {
+            self.dwall = crate::turbulence::wall_distance(&self.grid, &self.walls());
+        }
+    }
+
+    /// Nozzle exit on the base face, `None` if the whole base is wall.
+    pub fn nozzle(&self) -> Option<Nozzle> {
+        self.nozzle
+    }
+
     /// Solid body block (base/wake grids), `None` for ordinary grids.
     pub fn block(&self) -> Option<Block> {
         self.block
@@ -340,7 +376,7 @@ impl Solver {
 
     /// No-slip classification of the walls of this solver (see [`Walls`]).
     pub(crate) fn walls(&self) -> Walls {
-        Walls::new(self.viscous, &self.cfg.bc, self.block)
+        Walls::new(self.viscous, &self.cfg.bc, self.block, self.nozzle)
     }
 
     /// Is the j-face `(i, j)` (between cells `j - 1` and `j` of column `i`) a no-slip wall? Always `false` for the Euler equations.
@@ -468,7 +504,14 @@ impl Solver {
                             // of the fluid cell across the base about the base-wall normal
                             let fb = &grid.iface[j * (ni + 1) + b.i_end];
                             let (m1, p0, p1) = (w[pidx(ni, ii - 1, jj)], w[pidx(ni, ii, jj)], w[pidx(ni, ii + 1, jj)]);
-                            let (m2, m1) = if i == b.i_end {
+                            let jet = walls.jet_iface(b.i_end, j).then(|| walls.nozzle.expect("jet row").state);
+                            let (m2, m1) = if let Some(jw) = jet {
+                                if i == b.i_end {
+                                    (jw, jw)
+                                } else {
+                                    (jw, m1)
+                                }
+                            } else if i == b.i_end {
                                 let ns = walls.noslip_iface(i, j);
                                 (wall_ghost(&p1, fb, ns), wall_ghost(&p0, fb, ns))
                             } else {
@@ -830,5 +873,86 @@ pub(crate) mod tests {
         s.eval_residual(true);
         let m = s.res.iter().flat_map(|r| r.iter()).fold(0.0f64, |a, b| a.max(b.abs()));
         assert!(m < 1e-12, "max |dU/dt| = {m:e}");
+    }
+}
+
+#[cfg(test)]
+mod nozzle_tests {
+    use super::*;
+    use crate::gas::freestream;
+
+    const BLOCK: Block = Block { i_end: 12, j_end: 8, j_sting: 0 };
+
+    fn jet() -> Nozzle {
+        let p = 1.0 / crate::gas::GAMMA;
+        let c = sound_speed(&[0.5, 0.0, 0.0, p]);
+        Nozzle { j_end: 4, state: [0.5, 2.5 * c, 0.0, p], turb: [1e-4, 50.0] }
+    }
+
+    fn config() -> Config {
+        Config {
+            cfl: 0.5,
+            limiter: Limiter::VanAlbada,
+            freestream: freestream(2.0),
+            bc: [Bc::Freestream, Bc::Extrapolate, Bc::SlipWall, Bc::Freestream],
+            first_order_iters: 0,
+        }
+    }
+
+    #[test]
+    fn nozzle_jet_flux_is_the_jet_flux() {
+        let (ni, nj) = (24, 16);
+        let mut s = Solver::new(tests::curved_grid(ni, nj), config());
+        s.set_block(Some(BLOCK));
+        s.set_nozzle(Some(jet()));
+        s.eval_residual(false);
+        let n = jet();
+        for j in 0..BLOCK.j_end {
+            let f = &s.grid.iface[j * (ni + 1) + BLOCK.i_end];
+            let mass = s.fi[j * (ni + 1) + BLOCK.i_end][0];
+            if j < n.j_end {
+                let want = n.state[0] * (n.state[1] * f.nx + n.state[2] * f.nr);
+                assert!((mass - want).abs() <= 1e-12 * want.abs(), "jet row {j}: {mass} vs {want}");
+            } else {
+                assert!(mass.abs() < 1e-12, "wall row {j}: {mass}");
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "nozzle needs Scheme::Explicit or Scheme::Implicit")]
+    fn nozzle_rejects_multigrid() {
+        let mut s = Solver::new(tests::curved_grid(24, 16), config());
+        s.set_block(Some(BLOCK));
+        s.set_nozzle(Some(jet()));
+        s.set_scheme(Scheme::Multigrid(MgParams::DEFAULT));
+    }
+
+    #[test]
+    fn nozzle_faces_are_not_walls_for_the_wall_distance() {
+        let (ni, nj) = (24, 16);
+        let mut s = Solver::new(tests::curved_grid(ni, nj), config());
+        s.set_block(Some(BLOCK));
+        s.set_nozzle(Some(jet()));
+        s.set_viscous(Some(Viscous { re_c: 1e5, sutherland: 0.38, turbulence: Turbulence::Sst, wall_i_start: 0 }));
+        let g = &s.grid;
+        let dist = |p: (f64, f64), a: (f64, f64), b: (f64, f64)| {
+            let (ex, er) = (b.0 - a.0, b.1 - a.1);
+            let t = (((p.0 - a.0) * ex + (p.1 - a.1) * er) / (ex * ex + er * er)).clamp(0.0, 1.0);
+            (p.0 - (a.0 + t * ex)).hypot(p.1 - (a.1 + t * er))
+        };
+        let c = BLOCK.i_end;
+        let p = (g.xc[c], g.rc[c]);
+        let mut want = f64::INFINITY;
+        for j in 4..BLOCK.j_end {
+            want = want.min(dist(p, g.node(BLOCK.i_end, j), g.node(BLOCK.i_end, j + 1)));
+        }
+        for i in 0..BLOCK.i_end {
+            want = want.min(dist(p, g.node(i, BLOCK.j_end), g.node(i + 1, BLOCK.j_end)));
+        }
+        let to_jet = dist(p, g.node(BLOCK.i_end, 0), g.node(BLOCK.i_end, 1));
+        let got = s.dwall[c];
+        assert!((got - want).abs() <= 1e-12 * want, "dwall {got} vs brute force {want}");
+        assert!(got > to_jet, "dwall {got} must exceed the distance {to_jet} to the jet face");
     }
 }

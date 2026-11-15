@@ -50,7 +50,7 @@
 use crate::gas::{Cons, Prim};
 use crate::grid::{Face, Grid};
 use crate::implicit::{solve_lines, Factor, EYE, M4, ZERO};
-use crate::solver::{pidx, Bc, Block, Solver, Viscous};
+use crate::solver::{pidx, Bc, Block, Nozzle, Solver, Viscous};
 use crate::viscous::{face_mu, iface_centre, iface_sides, jface_centre, jface_sides, stencil, FaceSides, Side, Walls};
 use rayon::prelude::*;
 
@@ -75,10 +75,10 @@ pub const GAMMA1: f64 = 5.0 / 9.0;
 pub const GAMMA2: f64 = 0.44;
 
 /// Distance of every cell centroid to the nearest no-slip wall face segment of the viscous run `v` with boundary conditions `bc` and
-/// body block `blk` (`f64::INFINITY` without a no-slip face and in solid cells): what `Solver::set_viscous` computes for the
+/// body block `blk` and nozzle exit `nozzle` (jet faces are not walls; `f64::INFINITY` without a no-slip face and in solid cells): what `Solver::set_viscous` computes for the
 /// turbulence model, for ports that keep their own copy of the field.
-pub fn wall_distances(grid: &Grid, v: Viscous, bc: &[Bc; 4], blk: Option<Block>) -> Vec<f64> {
-    wall_distance(grid, &Walls::new(Some(v), bc, blk))
+pub fn wall_distances(grid: &Grid, v: Viscous, bc: &[Bc; 4], blk: Option<Block>, nozzle: Option<Nozzle>) -> Vec<f64> {
+    wall_distance(grid, &Walls::new(Some(v), bc, blk, nozzle))
 }
 
 /// Distance of every cell centroid to the nearest no-slip wall face segment (`f64::INFINITY` without a no-slip face and in
@@ -133,12 +133,14 @@ pub(crate) fn init(s: &mut Solver, re_c: f64) {
 }
 
 /// Where a ghost state of a face comes from.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq)]
 enum Kind {
     /// The values of the adjacent cell (extrapolation, slip wall, axis).
     Cell,
     /// The free-stream values.
     Inf,
+    /// The fixed `[k, omega]` of a nozzle exit.
+    Fixed([f64; 2]),
     /// A no-slip wall.
     Wall,
 }
@@ -182,6 +184,8 @@ impl Ctx<'_> {
             bc_kind(self.bc[0])
         } else if i == self.grid.ni {
             bc_kind(self.bc[1])
+        } else if let (true, Some(n)) = (sides.l.ghost && sides.l.fixed.is_some(), self.walls.nozzle) {
+            Kind::Fixed(n.turb)
         } else if sides.l.ghost && sides.noslip {
             Kind::Wall
         } else {
@@ -218,6 +222,7 @@ impl Ctx<'_> {
         match kind {
             Kind::Cell => self.turb[c],
             Kind::Inf => self.inf,
+            Kind::Fixed(v) => v,
             Kind::Wall => {
                 let [k, om] = self.turb[c];
                 let nu = self.mu[c] / self.rho(c);

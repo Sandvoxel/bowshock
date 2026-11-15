@@ -39,7 +39,7 @@
 
 use crate::gas::{reflect, Cons, Prim, GAMMA};
 use crate::grid::{Face, Grid};
-use crate::solver::{pidx, Bc, Block, Viscous, PRANDTL, PRANDTL_T};
+use crate::solver::{pidx, Bc, Block, Nozzle, Turbulence, Viscous, PRANDTL, PRANDTL_T};
 use rayon::prelude::*;
 
 impl Viscous {
@@ -67,7 +67,8 @@ pub fn wall_ghost(w: &Prim, f: &Face, noslip: bool) -> Prim {
 }
 
 /// Which wall faces are no-slip (only with viscous terms on). The single classification used by the ghost fills, the flux
-/// kernels and the implicit operator.
+/// kernels and the implicit operator. A nozzle ([`Nozzle`]) turns the first base rows (`j < j_end`) into a fixed inflow
+/// state: those faces are never no-slip walls ([`Walls::jet_iface`]).
 ///
 /// * Without a block: a `jmin` face with a slip-wall boundary condition and `i >= wall_i_start`.
 /// * With a block: the body-surface faces (`j = j_end`, `wall_i_start <= i < i_end`), every base-wall face (`i = i_end`,
@@ -77,11 +78,12 @@ pub(crate) struct Walls {
     pub visc: Option<Viscous>,
     pub jmin_slip: bool,
     pub blk: Option<Block>,
+    pub nozzle: Option<Nozzle>,
 }
 
 impl Walls {
-    pub(crate) fn new(visc: Option<Viscous>, bc: &[Bc; 4], blk: Option<Block>) -> Walls {
-        Walls { visc, jmin_slip: bc[2] == Bc::SlipWall, blk }
+    pub(crate) fn new(visc: Option<Viscous>, bc: &[Bc; 4], blk: Option<Block>, nozzle: Option<Nozzle>) -> Walls {
+        Walls { visc, jmin_slip: bc[2] == Bc::SlipWall, blk, nozzle }
     }
 
     /// Is the j-face `(i, j)` (between cells `j - 1` and `j` of column `i`) a no-slip wall?
@@ -97,7 +99,13 @@ impl Walls {
     /// Is the i-face `(i, j)` (between cells `i - 1` and `i` of row `j`) the no-slip base wall?
     #[inline]
     pub(crate) fn noslip_iface(&self, i: usize, j: usize) -> bool {
-        self.visc.is_some() && self.blk.is_some_and(|b| i == b.i_end && j >= b.j_sting && j < b.j_end)
+        self.visc.is_some() && self.blk.is_some_and(|b| i == b.i_end && j >= b.j_sting && j < b.j_end) && !self.nozzle.is_some_and(|n| j < n.j_end)
+    }
+
+    /// Is the i-face `(i, j)` a nozzle exit face (fixed inflow state)?
+    #[inline]
+    pub(crate) fn jet_iface(&self, i: usize, j: usize) -> bool {
+        self.blk.is_some_and(|b| i == b.i_end) && self.nozzle.is_some_and(|n| j < n.j_end)
     }
 }
 
@@ -108,6 +116,8 @@ pub(crate) struct Side {
     pub w: Prim,
     pub cell: usize,
     pub ghost: bool,
+    /// Fixed `(mu, mu_t)` of a jet ghost (otherwise the values of its cell).
+    pub fixed: Option<(f64, f64)>,
 }
 
 /// The two sides of a face (`l`: lower index, `r`: upper index) and whether the face is a no-slip wall.
@@ -130,13 +140,24 @@ pub(crate) fn iface_sides(grid: &Grid, w: &[Prim], walls: &Walls, i: usize, j: u
             if i == b.i_end {
                 let c = j * ni + i;
                 let wr = w[pidx(ni, ii, jj)];
+                if let Some(n) = walls.nozzle.filter(|n| j < n.j_end) {
+                    let fixed = walls.visc.map(|v| {
+                        let mu_t = if v.turbulence == Turbulence::Sst { n.state[0] * n.turb[0] / n.turb[1] } else { 0.0 };
+                        (v.mu(temperature(&n.state)), mu_t)
+                    });
+                    return Some(FaceSides {
+                        l: Side { w: n.state, cell: c, ghost: true, fixed },
+                        r: Side { w: wr, cell: c, ghost: false, fixed: None },
+                        noslip: false,
+                    });
+                }
                 let noslip = walls.noslip_iface(i, j);
                 let wl = wall_ghost(&wr, &grid.iface[j * (ni + 1) + i], noslip);
-                return Some(FaceSides { l: Side { w: wl, cell: c, ghost: true }, r: Side { w: wr, cell: c, ghost: false }, noslip });
+                return Some(FaceSides { l: Side { w: wl, cell: c, ghost: true, fixed: None }, r: Side { w: wr, cell: c, ghost: false, fixed: None }, noslip });
             }
         }
     }
-    let side = |w: Prim, cell: usize, ghost: bool| Side { w, cell, ghost };
+    let side = |w: Prim, cell: usize, ghost: bool| Side { w, cell, ghost, fixed: None };
     Some(if i == 0 {
         let c = j * ni;
         FaceSides { l: side(w[pidx(ni, -1, jj)], c, true), r: side(w[pidx(ni, 0, jj)], c, false), noslip: false }
@@ -152,7 +173,7 @@ pub(crate) fn iface_sides(grid: &Grid, w: &[Prim], walls: &Walls, i: usize, j: u
 pub(crate) fn jface_sides(grid: &Grid, w: &[Prim], walls: &Walls, i: usize, j: usize) -> Option<FaceSides> {
     let (ni, nj) = (grid.ni, grid.nj);
     let (ii, jj) = (i as isize, j as isize);
-    let side = |w: Prim, cell: usize, ghost: bool| Side { w, cell, ghost };
+    let side = |w: Prim, cell: usize, ghost: bool| Side { w, cell, ghost, fixed: None };
     if let Some(b) = walls.blk {
         let j0 = b.col_start(i);
         if j < j0 {
@@ -211,11 +232,16 @@ pub(crate) fn stencil(grid: &Grid, sides: &FaceSides, xf: f64, rf: f64) -> (f64,
 }
 
 /// Face viscosity and eddy viscosity: mean of the two sides, a ghost taking its cell's values (eddy viscosity negated
-/// across a no-slip face).
+/// across a no-slip face; a jet ghost has the fixed jet values).
 #[inline]
 pub(crate) fn face_mu(mu: &[f64], mu_t: &[f64], sides: &FaceSides) -> (f64, f64) {
-    let mut_side = |s: &Side| if s.ghost && sides.noslip { -mu_t[s.cell] } else { mu_t[s.cell] };
-    (0.5 * (mu[sides.l.cell] + mu[sides.r.cell]), 0.5 * (mut_side(&sides.l) + mut_side(&sides.r)))
+    let mu_side = |s: &Side| s.fixed.map_or(mu[s.cell], |f| f.0);
+    let mut_side = |s: &Side| match s.fixed {
+        Some(f) => f.1,
+        None if s.ghost && sides.noslip => -mu_t[s.cell],
+        None => mu_t[s.cell],
+    };
+    (0.5 * (mu_side(&sides.l) + mu_side(&sides.r)), 0.5 * (mut_side(&sides.l) + mut_side(&sides.r)))
 }
 
 /// `(u, v, T)` of a primitive state.

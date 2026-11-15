@@ -197,7 +197,7 @@ impl VGeo {
         let noslip_fold =
             |d: usize, i: usize, j: usize| first_refl(d, i, j) && if d == 0 { noslip_iface(blk, i, j) } else { noslip_jface(&v, jmin_slip, blk, i, j) };
         let dwall = (v.turbulence == Turbulence::Sst)
-            .then(|| -> Result<A> { up(ctx, &wall_distances(grid, v, &cfg.bc, blk).iter().map(|d| d.min(1e10)).collect::<Vec<_>>(), [ni, nj]) })
+            .then(|| -> Result<A> { up(ctx, &wall_distances(grid, v, &cfg.bc, blk, None).iter().map(|d| d.min(1e10)).collect::<Vec<_>>(), [ni, nj]) })
             .transpose()?;
         Ok(VGeo {
             v,
