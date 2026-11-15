@@ -529,7 +529,7 @@ impl canvas::Program<GroundMessage> for GroundTrackView<'_> {
         let rects = place_landing_labels(Size::new(size.width - 10.0, size.height), &items, label_h, &samples, &reserved);
         for ((at, label, c), rect) in landings.iter().zip(&rects) {
             let near = Point::new(at.x.clamp(rect.x, rect.x + rect.width), at.y.clamp(rect.y, rect.y + rect.height));
-            if near.distance(*at) > 11.0 {
+            if near.distance(*at) > 14.0 {
                 f.stroke(&Path::line(*at, near), Stroke::default().with_color(Color { a: 0.7, ..*c }).with_width(1.0));
             }
             // On a backing, so a ring or the field circle never strikes through the text.
@@ -639,29 +639,29 @@ fn place_landing_labels(size: Size, items: &[(Point, f32)], height: f32, samples
         let clamp =
             |x: f32, y: f32| Rectangle::new(Point::new(x.min(size.width - w - 2.0).max(2.0), y.min(size.height - height - 2.0).max(2.0)), Size::new(w, height));
         let near = [
-            (at.x + 9.0, at.y - 9.0 - height),
-            (at.x - 9.0 - w, at.y - 9.0 - height),
-            (at.x + 9.0, at.y + 9.0),
-            (at.x - 9.0 - w, at.y + 9.0),
-            (at.x + 9.0, at.y - height / 2.0),
-            (at.x - 9.0 - w, at.y - height / 2.0),
-            (at.x - w / 2.0, at.y + 9.0),
-            (at.x - w / 2.0, at.y - 9.0 - height),
-            (at.x - 9.0 - w, at.y - 9.0 - height * 2.0 - 2.0),
-            (at.x - w / 2.0, at.y - 9.0 - height * 2.0 - 2.0),
-            (at.x - 9.0 - w, at.y + 9.0 + height + 2.0),
+            (at.x + 12.0, at.y - 12.0 - height),
+            (at.x - 12.0 - w, at.y - 12.0 - height),
+            (at.x + 12.0, at.y + 12.0),
+            (at.x - 12.0 - w, at.y + 12.0),
+            (at.x + 12.0, at.y - height / 2.0),
+            (at.x - 12.0 - w, at.y - height / 2.0),
+            (at.x - w / 2.0, at.y + 12.0),
+            (at.x - w / 2.0, at.y - 12.0 - height),
+            (at.x - 12.0 - w, at.y - 12.0 - height * 2.0 - 6.0),
+            (at.x - w / 2.0, at.y - 12.0 - height * 2.0 - 6.0),
+            (at.x - 12.0 - w, at.y + 12.0 + height + 6.0),
         ];
         let rows = (0..10).flat_map(|k| {
-            let dy = k as f32 * (height + 2.0);
+            let dy = k as f32 * (height + 6.0);
             [
-                (at.x + 14.0, at.y + 9.0 + dy),
-                (at.x - 14.0 - w, at.y + 9.0 + dy),
-                (at.x + 14.0, at.y - 9.0 - height - dy),
-                (at.x - 14.0 - w, at.y - 9.0 - height - dy),
+                (at.x + 16.0, at.y + 12.0 + dy),
+                (at.x - 16.0 - w, at.y + 12.0 + dy),
+                (at.x + 16.0, at.y - 12.0 - height - dy),
+                (at.x - 16.0 - w, at.y - 12.0 - height - dy),
             ]
         });
         let clear = |r: &Rectangle, avoid_tracks: bool| {
-            let grown = Rectangle::new(Point::new(r.x - 2.0, r.y - 2.0), Size::new(r.width + 4.0, r.height + 4.0));
+            let grown = Rectangle::new(Point::new(r.x - 5.0, r.y - 5.0), Size::new(r.width + 10.0, r.height + 10.0));
             r.x >= 0.0
                 && r.y >= 0.0
                 && r.x + r.width <= size.width

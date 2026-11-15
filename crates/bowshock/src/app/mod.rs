@@ -72,6 +72,7 @@ pub(crate) enum Armed {
     New,
     Open,
     Example,
+    Import,
 }
 
 /// Everything the areas share: the document and its physics, the selection, drags in progress, the unit system and the
@@ -103,6 +104,10 @@ pub struct Ctx {
     pub notice: Option<(String, Instant)>,
     /// What an OpenRocket import could not carry over exactly, one line each (the warnings chip lists them); cleared on every load.
     pub import_notes: Vec<String>,
+    /// The File menu is open (the top bar's file name toggles it).
+    pub file_menu: bool,
+    /// The recently opened or saved documents (File menu).
+    pub recent: files::Recent,
     /// Ask the viewport to frame the rocket once its mesh is current (set after adding a part or loading a document).
     pub camera_fit: bool,
     /// The document was just replaced: select nothing and let the gauge jump rather than animate.
@@ -139,6 +144,8 @@ impl Ctx {
             show_cp: true,
             notice: None,
             import_notes: Vec::new(),
+            recent: files::Recent::default(),
+            file_menu: false,
             camera_fit: false,
             reloaded: false,
             armed: None,
@@ -273,6 +280,12 @@ pub enum Message {
     SavePath(Option<PathBuf>),
     /// Load the built-in example rocket.
     Example,
+    /// The top bar's file name: open or close the File menu.
+    ToggleFileMenu,
+    /// File menu > Import OpenRocket (.ork)…: shows the import dialog.
+    ImportOrk,
+    /// File menu > a recent file.
+    OpenRecent(PathBuf),
     /// The Simulate button (F5): switch to Simulate and run the current configuration's flight.
     Run,
     /// The Simulate button's menu: switch to Simulate and fly every configuration (one flight each).
@@ -335,6 +348,7 @@ impl App {
         if let Some(path) = std::env::var_os("BOWSHOCK_OPEN") {
             files::open(&mut app.ctx, std::path::Path::new(&path));
         }
+        app.ctx.recent = files::Recent::load(files::Recent::default_file());
         app.after_update();
         // A headless `drive` run delivers no key subscription events, so `BOWSHOCK_DRIVE_TAB=1` presses Tab once at start-up.
         if std::env::var_os("BOWSHOCK_DRIVE_TAB").is_some() {
@@ -422,6 +436,10 @@ impl App {
                 }
                 return Task::none();
             }
+        }
+        let was_open = self.ctx.file_menu;
+        if !matches!(message, Message::Frame(_) | Message::Cursor(_) | Message::Released | Message::ToggleFileMenu | Message::Chrome(chrome::Message::Nothing)) {
+            self.ctx.file_menu = false;
         }
         let ctx = &mut self.ctx;
         match message {
@@ -514,6 +532,20 @@ impl App {
             Message::Example => {
                 if files::guard(ctx, Armed::Example) {
                     files::example(ctx);
+                }
+            }
+            Message::ToggleFileMenu => {
+                self.chrome.dismiss();
+                ctx.file_menu = !was_open;
+            }
+            Message::ImportOrk => {
+                if files::guard(ctx, Armed::Import) {
+                    return files::pick_import();
+                }
+            }
+            Message::OpenRecent(path) => {
+                if files::guard(ctx, Armed::Open) {
+                    files::open(ctx, &path);
                 }
             }
             Message::Run => {
@@ -622,6 +654,7 @@ impl App {
         // a menu or the part menu of a pick comes and goes above it.
         let mut layers: Vec<Element<'_, Message>> = vec![page.boxed()];
         layers.extend(self.chrome.overlay(ctx));
+        layers.extend(files::menu(ctx));
         layers.extend(refs::menu_view(ctx));
         let root: Element<'_, Message> = iced::widget::Stack::with_children(layers).boxed();
         // The root sees every cursor move and any release the widgets below leave alone: that is what lets a drag begun in the

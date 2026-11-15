@@ -43,7 +43,7 @@ pub fn status_strip<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> 
     // While a drag changes a value, that readout is semibold until the release (StatusStrip), with its change from the
     // committed value after it (`CP 862.3 (+10.6)`).
     let changing = ctx.changing();
-    let delta = |f: fn(&Balance) -> f64, q: Quantity, unit: bool| -> Option<String> {
+    let delta = |f: fn(&Balance) -> f64, q: Quantity| -> Option<String> {
         let (now, was) = (shown.now?, shown.committed?);
         let d = f(&now) - f(&was);
         // Deltas drop their unit (the readout beside them carries it), to keep the strip short.
@@ -57,30 +57,25 @@ pub fn status_strip<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> 
         }
     };
     let live = |changing: bool, delta: Option<String>| status::Live { changing, delta, color: None };
-    cells.push(status::readout_live("MASS", value(|b| b.mass, Quantity::Mass, true), None, live(changing.mass, delta(|b| b.mass, Quantity::Mass, true))));
-    cells.push(status::readout_live(
-        "LEN",
-        value(|b| b.length, Quantity::Length, true),
-        None,
-        live(changing.length, delta(|b| b.length, Quantity::Length, true)),
-    ));
+    cells.push(status::readout_live("MASS", value(|b| b.mass, Quantity::Mass, true), None, live(changing.mass, delta(|b| b.mass, Quantity::Mass))));
+    cells.push(status::readout_live("LEN", value(|b| b.length, Quantity::Length, true), None, live(changing.length, delta(|b| b.length, Quantity::Length))));
     cells.push(status::readout_live(
         "Ø REF",
         value(|b| b.reference_diameter, Quantity::Length, true),
         None,
-        live(changing.diameter, delta(|b| b.reference_diameter, Quantity::Length, true)),
+        live(changing.diameter, delta(|b| b.reference_diameter, Quantity::Length)),
     ));
     cells.push(status::cg_live(
         value(|b| b.cg, Quantity::Length, false),
         ctx.show_cg,
         Some(wrap(ChromeMessage::ToggleCg)),
-        live(changing.cg, delta(|b| b.cg, Quantity::Length, false)),
+        live(changing.cg, delta(|b| b.cg, Quantity::Length)),
     ));
     cells.push(status::cp_live(
         value(|b| b.cp, Quantity::Length, false),
         ctx.show_cp,
         Some(wrap(ChromeMessage::ToggleCp)),
-        live(changing.cp, delta(|b| b.cp, Quantity::Length, false)),
+        live(changing.cp, delta(|b| b.cp, Quantity::Length)),
     ));
     if let Some(b) = balance {
         let bands = ctx.doc.rocket().stability_bands();

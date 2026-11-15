@@ -1014,6 +1014,10 @@ impl Overlay<'_> {
         if let Some(marks) = &self.balance {
             blocked.extend(markers::balance_label_rects(self.rocket, &self.camera, size, marks, self.units));
         }
+        blocked.extend(self.cut_label(size));
+        if let Some((_, chip, _)) = self.pod_chip(size) {
+            blocked.push(chip);
+        }
 
         // The tag: above the part's left corner, else below it, else against the right side.
         let tag_size = label_size(tag_text);
@@ -1034,7 +1038,9 @@ impl Overlay<'_> {
         let mut requests = vec![labels::Request { size: tag_size, priority: 0, spots }];
         let mut wanted = Vec::new();
         if with_labels {
-            for (i, p) in vis.placed.iter().enumerate().filter(|(_, p)| !handles::in_inset(&p.spec) && (alt || p.spec.primary)) {
+            // Without Alt the 2D profile labels at most two primary dimensions (the selection tag and a couple of names).
+            let cap = if self.profile && !alt { 2 } else { usize::MAX };
+            for (i, p) in vis.placed.iter().enumerate().filter(|(_, p)| !handles::in_inset(&p.spec) && (alt || p.spec.primary)).take(cap) {
                 let text = self.label_text(id, p.spec.dim);
                 if !text.is_empty() {
                     requests.push(Request::at_handle(p.at, label_size(&text), if p.spec.primary { 1 } else { 2 }));

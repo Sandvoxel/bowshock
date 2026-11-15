@@ -370,7 +370,14 @@ fn wind_and_angle_of_attack_channels_follow_the_launch_conditions() {
     let r = simulate(&input());
     // Mean wind 2 m/s plus Low-turbulence gusts (5 %): always near 2.
     assert!(r.trajectory.samples.iter().all(|s| (1.0..3.0).contains(&s.wind_speed)));
-    // Perfect weathercocking: no angle of attack once off the rail.
+    // The rigid-body model flies a real angle of attack: the crosswind and the gusts push it off the relative wind, but the
+    // rocket is stable, so once it has weathercocked it stays within a few degrees under thrust (the point-mass model weathercocks
+    // perfectly and has none).
     let exit = r.trajectory.events.iter().find(|e| e.kind == EventKind::RailExit).unwrap().t;
-    assert!(r.trajectory.samples.iter().filter(|s| s.t > exit + 0.1 && s.air_speed > 1.0).all(|s| s.angle_of_attack < 1e-6));
+    let boost: Vec<&Sample> = r.trajectory.samples.iter().filter(|s| s.t > exit + 1.0 && s.t < 1.4 && s.air_speed > 1.0).collect();
+    assert!(!boost.is_empty() && boost.iter().all(|s| s.angle_of_attack < 3f64.to_radians()));
+    let mut point = input();
+    point.model = FlightModel::PointMass;
+    let p = simulate(&point);
+    assert!(p.trajectory.samples.iter().filter(|s| s.t > exit + 0.1 && s.air_speed > 1.0).all(|s| s.angle_of_attack < 1e-6));
 }

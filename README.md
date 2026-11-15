@@ -39,7 +39,7 @@ fn main() -> Result<(), bowshock_core::Error> {
 
 `crates/bowshock` is the Bowshock rocket builder (iced): build a rocket from a parts bin with KSP-style drag and drop,
 edit every dimension with handles or the inspector, and fly it in **Simulate** or sweep it in **Analyze**. Its physics are
-the engineering models in `bowshock-sim` (Barrowman CP with body lift, component drag build-up, 3-DOF RK4 flight),
+the engineering models in `bowshock-sim` (Barrowman CP with body lift, component drag build-up, RK4 rigid-body flight with pitch/yaw/roll dynamics),
 fed by the rocket document in `bowshock-model` and the thrust curves in `bowshock-motors`. The UI follows the design kit in
 `crates/bowshock/design/` (start at its `README.md`); module layout is in `crates/bowshock/src/ARCHITECTURE.md`.
 

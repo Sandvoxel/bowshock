@@ -178,6 +178,11 @@ fn x_at(samples: &[Sample], x: Option<(&Channel, &crate::units::Unit)>, t: f64) 
     }
 }
 
+/// How many times the sampled curve `xs` passes `v` (a sample on `v` counts with the stretch that leaves it).
+fn crossings(xs: &[f64], v: f64) -> usize {
+    xs.windows(2).filter(|w| w[0].min(w[1]) <= v && v < w[0].max(w[1])).count()
+}
+
 /// The linked plots of `layout` for `entries` in the unit family of `system`. One entry is a lone flight (one framed value tag per
 /// plot); several are a comparison (the flight is the line's colour, altitude-like plots label each flight at the right end, one
 /// tooltip lists every line). A plot with several sources draws each in its own line style and names them in a legend. The
@@ -199,7 +204,15 @@ pub fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &P
 
     let mut group = PlotGroup::new(x_axis(layout.x, imperial));
     for (index, def) in layout.panels.iter().enumerate() {
-        let sources: Vec<&Channel> = def.sources.iter().filter_map(|key| channels::find(key)).collect();
+        let mut sources: Vec<&Channel> = def.sources.iter().filter_map(|key| channels::find(key)).collect();
+        // A source equal to the x quantity is a straight line against itself: it is dropped, and a panel left empty by that shows
+        // the other natural view of the x quantity.
+        if let Some(xc) = x_source {
+            sources.retain(|c| c.key != xc.key);
+            if sources.is_empty() {
+                sources.extend(channels::find(if layout.x == PlotX::Altitude { "mach" } else { "altitude" }));
+            }
+        }
         let Some(primary) = sources.first() else { continue };
         let multi = sources.len() > 1;
         let unit = primary.unit(imperial);
@@ -246,13 +259,39 @@ pub fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &P
                     continue;
                 };
                 let curve: Vec<(f64, f64, f64)> = samples.iter().map(|s| (s.t, xu.from_si(xc.si(s)), unit.from_si(c.si(s)))).collect();
-                for (i, run) in monotone_runs(&curve, burnout, apogee).into_iter().enumerate() {
+                let runs = monotone_runs(&curve, burnout, apogee);
+                let first_source = std::ptr::eq(*c, sources[0]);
+                // Each phase is named once, on its widest piece (a parachute's wobble in Mach makes many short ones).
+                let base = |p: &str| p.split(' ').next().unwrap_or("").to_string();
+                let span = |pts: &[(f64, f64)]| pts.last().map_or(0.0, |l| (l.0 - pts[0].0).abs());
+                let widest: Vec<Option<usize>> = runs
+                    .iter()
+                    .map(|r| {
+                        let b = base(&r.phase);
+                        runs.iter()
+                            .enumerate()
+                            .filter(|(_, o)| base(&o.phase) == b)
+                            .max_by(|x, y| span(&x.1.points).total_cmp(&span(&y.1.points)))
+                            .map(|(k, _)| k)
+                    })
+                    .collect();
+                for (i, run) in runs.into_iter().enumerate() {
                     let style = if run.descent && style == LineStyle::Solid { LineStyle::Dashed } else { style };
                     let name = format!("{name} · {}", run.phase);
+                    let label = (widest[i] == Some(i)).then(|| base(&run.phase));
                     let series = Series::new(name, run.points).color(color).style(style);
-                    panel = panel.with(if labelled && i == 0 { series.label_as(e.name.to_string(), LabelAt::Margin) } else { series });
+                    panel = panel.with(if labelled && i == 0 {
+                        series.label_as(e.name.to_string(), LabelAt::Margin)
+                    } else if let (false, true, Some(text)) = (compare, first_source, label) {
+                        series.label_as(text, LabelAt::End)
+                    } else {
+                        series
+                    });
                 }
             }
+        }
+        if x_of.is_some() && !compare && sources.len() == 1 && panel.series.iter().any(|s| s.style == LineStyle::Dashed && s.name.contains("· descent")) {
+            panel = panel.key(vec![(LineStyle::Solid, "ascent".into()), (LineStyle::Dashed, "descent".into())]);
         }
         group = group.panel(panel);
     }
@@ -266,9 +305,16 @@ pub fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &P
         group.right_margin = LABEL_MARGIN;
     }
     if x_of.is_some() {
-        for m in &mut group.events {
-            m.x = x_at(samples, x_of, m.x);
-        }
+        // An event is only marked where its x is reached once: a value the curve passes on the way up and again on the way down
+        // (or twice in one coast) has no single place on the axis.
+        let xs: Vec<f64> = samples.iter().map(|s| x_at(samples, x_of, s.t)).collect();
+        group.events = std::mem::take(&mut group.events)
+            .into_iter()
+            .filter_map(|mut m| {
+                m.x = x_at(samples, x_of, m.x);
+                (crossings(&xs, m.x) <= 1).then_some(m)
+            })
+            .collect();
         return Some(group);
     }
     group.phases = phases(&reference.run.result);
@@ -415,12 +461,33 @@ mod tests {
         assert_eq!(series[1].name, "Vertical velocity · descent");
         assert_eq!(g.x_extent(), (0.0, 300.0));
         let apogee = g.events.iter().find(|m| m.label == "Apogee").unwrap();
+        // The pieces are named in place at their ends and a compact key names the line styles.
+        assert_eq!(
+            series.iter().map(|s| (s.label, s.label_text.as_deref())).collect::<Vec<_>>(),
+            [(Some(LabelAt::End), Some("ascent")), (Some(LabelAt::End), Some("descent"))]
+        );
+        assert_eq!(g.panels[0].key.len(), 2);
         assert!((apogee.x - 300.0).abs() < 1e-9);
         assert!(g.events.iter().all(|m| m.label != "Landing") && g.phases.is_empty() && !g.timeline);
         // In imperial the axis is in feet.
         let g = group(&entries, 0, UnitSystem::FtLbS, &layout, 1.0).unwrap();
         assert_eq!(g.x.unit, "ft");
         assert!((g.x_extent().1 - 300.0 / 0.3048).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_panel_whose_source_is_the_x_quantity_shows_another_view_and_ambiguous_events_are_not_marked() {
+        let run = run();
+        let entries = [Entry { name: "Nominal", color: SeriesColor::Ink, run: &run, scatter: None }];
+        let layout = PlotLayout { x: PlotX::Altitude, ..layout(&[&["altitude"], &["vertical_velocity"]]) };
+        let g = group(&entries, 0, UnitSystem::MKgS, &layout, 1.0).unwrap();
+        assert_eq!(g.panels.len(), 2);
+        assert_eq!(g.panels[0].title, "Mach number");
+        // Burnout (t = 1.6, 96 m on the way up) is passed again on the way down: no single place on the axis.
+        assert!(g.events.iter().all(|m| m.label != "Burnout"));
+        assert!(g.events.iter().any(|m| m.label == "Apogee"));
+        assert_eq!(crossings(&[0.0, 300.0, 0.0], 100.0), 2);
+        assert_eq!(crossings(&[0.0, 1.0, 2.0], 1.0), 1);
     }
 
     #[test]

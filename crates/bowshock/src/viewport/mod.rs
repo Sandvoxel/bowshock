@@ -60,7 +60,7 @@ use iced::{alignment, keyboard, mouse, Element, Fill, Size, Task, Vector, Widget
 
 use crate::app::{self, drag, Ctx, Selection};
 use crate::theme::{self, MONO};
-use crate::tokens::{SPACE_1, SPACE_2, SPACE_4, SPACE_8, TEXT_LABEL};
+use crate::tokens::{SPACE_1, SPACE_2, SPACE_4, TEXT_LABEL};
 use crate::viewport::manipulate::{Hover, Overlay as Manipulator};
 use crate::viewport::pick::{Pick, SurfaceTarget};
 use crate::viewport::surface::Overlay as SurfaceOverlay;

@@ -1,6 +1,6 @@
 //! File commands: New, Open, Save, Save As and the built-in example, with the unsaved-changes guard.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use bowshock_model::Rocket;
 use iced::Task;
@@ -51,7 +51,11 @@ pub(super) fn open(ctx: &mut Ctx, path: &Path) {
     if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("ork")) {
         match bowshock_model::ork::import_file(path) {
             Ok(imp) => {
-                ctx.doc.replace(imp.rocket, None);
+                let mut rocket = imp.rocket;
+                if !rocket.name.ends_with(IMPORTED) {
+                    rocket.name = if rocket.name.is_empty() { format!("untitled{IMPORTED}") } else { format!("{}{IMPORTED}", rocket.name) };
+                }
+                ctx.doc.replace(rocket, None);
                 ctx.loaded();
                 ctx.notify(match imp.warnings.len() {
                     0 => "Imported from OpenRocket".to_string(),
@@ -65,7 +69,10 @@ pub(super) fn open(ctx: &mut Ctx, path: &Path) {
         return;
     }
     match ctx.doc.load(path) {
-        Ok(()) => ctx.loaded(),
+        Ok(()) => {
+            ctx.loaded();
+            ctx.recent.push(path);
+        }
         Err(e) => ctx.notify(format!("Could not open {}: {e}", path.display())),
     }
 }
@@ -85,8 +92,70 @@ pub(super) fn save(ctx: &mut Ctx) -> Task<Message> {
 /// Saves to `path` and makes it the document's path.
 pub(super) fn save_to(ctx: &mut Ctx, path: &Path) {
     match ctx.doc.save_as(path) {
-        Ok(()) => ctx.notify(format!("Saved {}.{EXTENSION}", ctx.doc.title())),
+        Ok(()) => {
+            ctx.notify(format!("Saved {}.{EXTENSION}", ctx.doc.title()));
+            ctx.recent.push(path);
+        }
         Err(e) => ctx.notify(format!("Could not save: {e}")),
+    }
+}
+
+/// The import dialog (OpenRocket `.ork` only); the answer arrives as [`Message::OpenPath`], which imports by extension.
+pub(super) fn pick_import() -> Task<Message> {
+    Task::perform(
+        async {
+            let file = rfd::AsyncFileDialog::new().set_title("Import OpenRocket design").add_filter("OpenRocket design", &["ork"]).pick_file().await;
+            file.map(|f| f.path().to_path_buf())
+        },
+        Message::OpenPath,
+    )
+}
+
+/// The suffix an imported design's name gets, so the top bar says where the untitled document came from.
+const IMPORTED: &str = " (imported)";
+
+/// How many recent files the File menu keeps.
+pub const RECENT_MAX: usize = 5;
+
+/// The most recently opened or saved documents, newest first, persisted one path per line.
+#[derive(Debug, Clone, Default)]
+pub struct Recent {
+    list: Vec<PathBuf>,
+    file: Option<PathBuf>,
+}
+
+impl Recent {
+    /// Where the list lives: `$BOWSHOCK_RECENT_FILE`, else `~/.config/bowshock/recent.txt` (next to the user motors directory).
+    pub fn default_file() -> Option<PathBuf> {
+        let over = std::env::var_os("BOWSHOCK_RECENT_FILE").filter(|s| !s.is_empty()).map(PathBuf::from);
+        over.or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config").join("bowshock").join("recent.txt")))
+    }
+
+    /// The list stored at `file` (empty when it is missing); later changes are written back to it.
+    pub fn load(file: Option<PathBuf>) -> Self {
+        let text = file.as_ref().and_then(|f| std::fs::read_to_string(f).ok()).unwrap_or_default();
+        let list = text.lines().filter(|l| !l.is_empty()).map(PathBuf::from).take(RECENT_MAX).collect();
+        Recent { list, file }
+    }
+
+    /// The paths, newest first.
+    pub fn paths(&self) -> &[PathBuf] {
+        &self.list
+    }
+
+    /// Moves `path` to the front (dropping an earlier entry for it), keeps [`RECENT_MAX`] and persists.
+    pub fn push(&mut self, path: &Path) {
+        let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        self.list.retain(|p| *p != path);
+        self.list.insert(0, path);
+        self.list.truncate(RECENT_MAX);
+        if let Some(file) = &self.file {
+            if let Some(dir) = file.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let text: String = self.list.iter().map(|p| format!("{}\n", p.display())).collect();
+            let _ = std::fs::write(file, text);
+        }
     }
 }
 
@@ -119,6 +188,88 @@ pub(super) fn pick_save(ctx: &Ctx) -> Task<Message> {
     )
 }
 
+/// Width of the File menu panel.
+const MENU_W: f32 = 300.0;
+/// Where the panel's left edge sits: under the file name in the top bar.
+const MENU_X: f32 = 148.0;
+
+/// The modifier a shortcut hint is written with.
+const MOD: &str = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl+" };
+/// Shift's glyph in a hint.
+const SHIFT: &str = if cfg!(target_os = "macos") { "⇧" } else { "Shift+" };
+
+/// One File menu row, as `(label, shortcut hint, what it sends)`; `None` is a greyed row.
+type Row = (String, String, Option<Message>);
+
+/// The rows of the File menu: the commands, then the recent files.
+fn menu_rows(recent: &Recent) -> (Vec<Row>, Vec<Row>) {
+    let m = |label: &str, hint: String, message: Message| (label.to_string(), hint, Some(message));
+    let commands = vec![
+        m("New", format!("{MOD}N"), Message::New),
+        m("Open…", format!("{MOD}O"), Message::Open),
+        m("Import OpenRocket (.ork)…", String::new(), Message::ImportOrk),
+        m("Save", format!("{MOD}S"), Message::Save),
+        m("Save as…", format!("{SHIFT}{MOD}S"), Message::SaveAs),
+        m("Open example", format!("{MOD}E"), Message::Example),
+    ];
+    let recents = recent
+        .paths()
+        .iter()
+        .map(|p| {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string());
+            let dir = p.parent().and_then(|d| d.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            (name, dir, p.exists().then(|| Message::OpenRecent(p.clone())))
+        })
+        .collect();
+    (commands, recents)
+}
+
+/// The File menu, hung from the file name in the top bar; `None` while it is closed. A click anywhere else closes it.
+pub(super) fn menu(ctx: &Ctx) -> Option<iced::Element<'_, Message>> {
+    use iced::widget::{button, column, container, mouse_area, row, text, Space, Stack};
+    use iced::{Background, Center, Element, Fill, Padding, Theme, Widget};
+
+    use crate::theme::{self, MONO};
+    use crate::tokens::TOPBAR_H;
+
+    if !ctx.file_menu {
+        return None;
+    }
+    let item_style = |theme: &Theme, status: button::Status| {
+        let t = theme::tokens(theme);
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        let background = hovered.then_some(Background::Color(t.bg_400));
+        let text_color = if matches!(status, button::Status::Disabled) { t.ink_faint } else { t.ink };
+        button::Style { background, text_color, border: iced::Border::default(), ..button::Style::default() }
+    };
+    let rule = || container(Space::new()).width(Fill).height(1).style(theme::hairline);
+    let row_view = |(label, hint, message): Row| -> Element<'_, Message> {
+        let line = row![text(label).size(12.5), Space::new().width(Fill), text(hint).font(MONO).size(11.5).style(theme::muted)].align_y(Center);
+        let mut b = button(line).width(Fill).height(26).padding([0.0, 10.0]).style(item_style);
+        if let Some(message) = message {
+            b = b.on_press(message);
+        }
+        b.boxed()
+    };
+    let (commands, recents) = menu_rows(&ctx.recent);
+    let mut col = column![];
+    for r in commands {
+        col = col.push(row_view(r));
+    }
+    col = col.push(rule().boxed());
+    col = col.push(container(super::ui::label("RECENT")).padding([6.0, 10.0]).boxed());
+    if recents.is_empty() {
+        col = col.push(container(text("No recent files").size(12.5).style(theme::faint)).padding([4.0, 10.0]).boxed());
+    }
+    for r in recents {
+        col = col.push(row_view(r));
+    }
+    let panel = container(mouse_area(col).on_press(Message::Chrome(crate::chrome::Message::Nothing))).width(MENU_W).style(theme::overlay);
+    let scrim = mouse_area(Space::new().width(Fill).height(Fill)).on_press(Message::ToggleFileMenu);
+    let placed = container(panel).width(Fill).height(Fill).padding(Padding { top: TOPBAR_H, left: MENU_X, ..Padding::ZERO });
+    Some(Stack::with_children([scrim.boxed(), placed.boxed()]).boxed())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,7 +280,8 @@ mod tests {
         let ork = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bowshock-model/tests/data/mini_two_stage.ork");
         let mut ctx = Ctx::new();
         open(&mut ctx, &ork);
-        assert_eq!(ctx.doc.rocket().name, "Mini two-stage");
+        assert_eq!(ctx.doc.rocket().name, "Mini two-stage (imported)");
+        assert_eq!(ctx.doc.title(), "Mini two-stage (imported)");
         assert!(ctx.doc.path().is_none(), "an import has no .bowshock path until it is saved");
         assert!(!ctx.doc.is_dirty());
         assert_eq!(ctx.doc.rocket().configurations().len(), 2);
@@ -140,7 +292,7 @@ mod tests {
         std::fs::write(&bad, "nope").unwrap();
         open(&mut ctx, &bad);
         std::fs::remove_file(&bad).ok();
-        assert_eq!(ctx.doc.rocket().name, "Mini two-stage");
+        assert_eq!(ctx.doc.rocket().name, "Mini two-stage (imported)");
         assert!(ctx.notice.as_ref().is_some_and(|n| n.0.starts_with("Could not import")));
     }
     use bowshock_model::{DeployEvent, Deployment, InternalKind, MassRole, MaterialId, NoseShape, PartKind, RadialKind};
@@ -308,5 +460,79 @@ mod tests {
         assert_eq!(stages.len(), 2);
         let separation = stages[0].separation.expect("a joint behind the sustainer's motor");
         assert!((separation.station - 0.8706).abs() < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod menu_tests {
+    use super::*;
+
+    fn temp(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("bowshock-{}-{name}", std::process::id()))
+    }
+
+    /// The File menu's rows route to the right commands, in order.
+    #[test]
+    fn menu_rows_route_to_commands() {
+        let (commands, _) = menu_rows(&Recent::default());
+        let labels: Vec<&str> = commands.iter().map(|r| r.0.as_str()).collect();
+        assert_eq!(labels, ["New", "Open…", "Import OpenRocket (.ork)…", "Save", "Save as…", "Open example"]);
+        let routes: Vec<bool> = vec![
+            matches!(commands[0].2, Some(Message::New)),
+            matches!(commands[1].2, Some(Message::Open)),
+            matches!(commands[2].2, Some(Message::ImportOrk)),
+            matches!(commands[3].2, Some(Message::Save)),
+            matches!(commands[4].2, Some(Message::SaveAs)),
+            matches!(commands[5].2, Some(Message::Example)),
+        ];
+        assert!(routes.iter().all(|&ok| ok), "{routes:?}");
+        assert_eq!(commands[3].1, format!("{MOD}S"));
+    }
+
+    /// A recent file that is gone is greyed (no message); one that exists opens.
+    #[test]
+    fn missing_recent_files_are_greyed() {
+        let real = temp("real.bowshock");
+        std::fs::write(&real, "{}").unwrap();
+        let mut recent = Recent::default();
+        recent.push(&temp("gone.bowshock"));
+        recent.push(&real);
+        let (_, rows) = menu_rows(&recent);
+        std::fs::remove_file(&real).ok();
+        assert!(matches!(rows[0].2, Some(Message::OpenRecent(_))));
+        assert!(rows[1].2.is_none(), "a missing file is greyed");
+    }
+
+    /// Newest first, no duplicates, at most five, and it survives a reload.
+    #[test]
+    fn recent_files_order_dedupe_and_persist() {
+        let file = temp("recent.txt");
+        std::fs::remove_file(&file).ok();
+        let mut recent = Recent::load(Some(file.clone()));
+        assert!(recent.paths().is_empty());
+        for n in 0..7 {
+            recent.push(Path::new(&format!("/tmp/r{n}.bowshock")));
+        }
+        recent.push(Path::new("/tmp/r4.bowshock"));
+        let names: Vec<String> = recent.paths().iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["r4.bowshock", "r6.bowshock", "r5.bowshock", "r3.bowshock", "r2.bowshock"]);
+        let again = Recent::load(Some(file.clone()));
+        std::fs::remove_file(&file).ok();
+        assert_eq!(again.paths(), recent.paths());
+    }
+
+    /// Saving clears the dirty dot and says what was saved; the saved file enters the recent list.
+    #[test]
+    fn save_clears_dirty_and_reports() {
+        let path = temp("hpr_l1_cert.bowshock");
+        let mut ctx = Ctx::new();
+        example(&mut ctx);
+        ctx.doc.edit("Rename", |r| r.name = "x".to_string());
+        assert!(ctx.doc.is_dirty());
+        save_to(&mut ctx, &path);
+        std::fs::remove_file(&path).ok();
+        assert!(!ctx.doc.is_dirty());
+        assert_eq!(ctx.notice.as_ref().map(|n| n.0.clone()), Some(format!("Saved {}.{EXTENSION}", ctx.doc.title())));
+        assert_eq!(ctx.recent.paths().len(), 1);
     }
 }

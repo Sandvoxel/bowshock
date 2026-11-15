@@ -298,7 +298,7 @@ fn roughness_correction(mach: f64) -> f64 {
 
 /// Multiplier turning zero-alpha drag into axial drag at angle of attack `alpha` (Niskanen 2009 section 3.4.7;
 /// the shape is our own engineering fit): a cubic from 1 at 0 to 1.3 at 17 deg, then a quartic falling to 0 at 90 deg.
-fn axial_drag_multiplier(alpha: f64) -> f64 {
+pub fn axial_drag_multiplier(alpha: f64) -> f64 {
     let a = alpha.abs();
     let a = if a > PI / 2.0 { PI - a } else { a };
     let a17 = 17f64.to_radians();
@@ -866,7 +866,8 @@ fn fin_calc(f: &FinSet, name: String) -> FinCalc {
 /// Roll angle (rad) of the crossflow Bowshock assumes: the lateral wind lies along +Y, the angle
 /// a fin at roll angle 0 points to (a fin's roll angle is measured from +Y towards +X, see
 /// [`FinSet::angles`]). A 1- or 2-fin set at angle 0 therefore sees the flow edge-on and gives no
-/// lift; turn the set by 90 deg for full lift. The 3-DOF model has no roll, so it stays fixed.
+/// lift; turn the set by 90 deg for full lift. The aerodynamic model is axisymmetric: the rigid-body flight model rolls (fin
+/// cant) but the crossflow azimuth of the fin lift stays fixed here, so the roll angle only enters through this constant.
 pub const CROSSFLOW_ROLL: f64 = 0.0;
 
 /// `sum sin^2(CROSSFLOW_ROLL - phi_i)` over the fins at roll angles `angles` (`count` fins evenly
@@ -1365,6 +1366,63 @@ mod tests {
         assert!((round_edge_cd(0.5) - ((1.0f64 - 0.25).powf(-0.417) - 1.0)).abs() < 1e-12);
         assert!((round_edge_cd(0.95) - (1.0 - 1.785 * 0.05)).abs() < 1e-12);
         assert!((round_edge_cd(2.0) - (1.214 - 0.1255 + 0.1095 / 16.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn normal_force_is_the_component_sum_and_damping_sum_the_barrowman_strip_sum() {
+        let a = Aero::new(&typical());
+        for (mach, alpha) in [(0.1, 0.0), (0.3, 0.05), (0.8, 0.2), (2.0, 0.1)] {
+            let st = a.stability(mach, alpha);
+            let nf = a.normal_force(mach, alpha);
+            assert!((nf.cn_alpha - st.cn_alpha).abs() < 1e-12 && (nf.cp - st.cp).abs() < 1e-12);
+            for cg in [0.3, 0.55, 0.8] {
+                let hand: f64 = st.components.iter().map(|(_, cna, x)| cna * (x - cg) * (x - cg)).sum();
+                assert!((nf.damping_sum(cg) - hand).abs() < 1e-9 * hand.max(1.0), "M {mach} cg {cg}: {} vs {hand}", nf.damping_sum(cg));
+            }
+        }
+        // Damping about the CG is smallest when the lifting components cluster at the CG and grows with the lever arm.
+        let nf = a.normal_force(0.3, 0.0);
+        assert!(nf.damping_sum(nf.cp) < nf.damping_sum(nf.cp - 0.3));
+    }
+
+    #[test]
+    fn body_crossflow_damping_is_the_planform_third_moment() {
+        // A uniform tube of length L and radius r about its own mid-point: sum A |x - cg|^3 = 2 r * 2 (L/2)^4 / 4 = r L^4 / 16.
+        let (r, l) = (0.02, 0.5);
+        let v = Vehicle {
+            reference_diameter: 2.0 * r,
+            body: vec![BodySegment { station: 0.0, length: l, fore_radius: r, aft_radius: r, kind: BodyKind::Tube, roughness: 0.0 }],
+            fin_sets: vec![],
+            tube_fins: vec![],
+            protuberances: vec![],
+            stages: vec![],
+        };
+        let k = Aero::new(&v).crossflow_damping(0.5 * l);
+        assert!((k - r * l.powi(4) / 16.0).abs() < 1e-3 * r * l.powi(4) / 16.0, "{k}");
+    }
+
+    #[test]
+    fn fin_roll_forcing_follows_cant_and_damping_is_the_strip_sum() {
+        let mut v = alpha_like();
+        let a0 = Aero::new(&v);
+        assert_eq!(a0.roll(0.3).forcing, 0.0, "no cant, no roll forcing");
+        let f = v.fin_sets[0].clone();
+        v.fin_sets[0].cant = 0.02;
+        let a = Aero::new(&v);
+        let r = a.roll(0.3);
+        assert!(r.forcing > 0.0 && r.damping < 0.0);
+        // 3 fins at 120 degrees: the crossflow lift multiplier is N/2 = 1.5, so each fin's face-on lift is the set's / 1.5.
+        let set = a.stability(0.3, 0.0).components.iter().find(|c| c.0 == "Fins").unwrap().1;
+        let (a_ref, one_fin_lift_times_n) = (std::f64::consts::FRAC_PI_4 * v.reference_diameter.powi(2), set / 1.5 * 3.0);
+        // The arms are chord-weighted averages of r = R + y over the span, so they lie between R and R + span.
+        let arm2 = -r.damping / (one_fin_lift_times_n * a_ref);
+        let arm = r.forcing / (one_fin_lift_times_n * a_ref * 0.02);
+        assert!((f.body_radius..f.body_radius + f.span).contains(&arm), "arm {arm}");
+        assert!(arm2 >= arm * arm * 0.999 && arm2 <= (f.body_radius + f.span).powi(2), "arm2 {arm2} arm {arm}");
+        // Doubling the cant doubles the forcing and leaves the damping alone.
+        v.fin_sets[0].cant = 0.04;
+        let r2 = Aero::new(&v).roll(0.3);
+        assert!((r2.forcing / r.forcing - 2.0).abs() < 1e-9 && (r2.damping / r.damping - 1.0).abs() < 1e-9);
     }
 
     #[test]

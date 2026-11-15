@@ -1,0 +1,10 @@
+# The File menu: click the file name in the top bar. Headless runs cannot show OS dialogs, so the import path is
+# BOWSHOCK_OPEN=crates/bowshock-model/tests/data/mini_two_stage.ork (the title then reads "<name> (imported)", untitled).
+#   BOWSHOCK_RECENT_FILE=/tmp/bowshock-recent.txt cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/filemenu.drive out/filemenu
+viewport 1280x800
+click "hpr_l1_cert"
+screenshot filemenu-dark.png
+press escape
+click "Light"
+click "hpr_l1_cert"
+screenshot filemenu-light.png

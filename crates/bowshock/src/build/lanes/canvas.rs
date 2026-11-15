@@ -210,6 +210,15 @@ fn tag(frame: &mut Frame, x: f32, y: f32, text: &str, fg: Color, bg: Color, edge
     rect
 }
 
+/// A [`tag`] in the ruler strip, on a band of the ruler's own colour a few px wider than the tag, so the tick marks and numbers
+/// beside it are cleanly cut rather than half-hidden under its edge.
+fn ruler_tag(frame: &mut Frame, t: &Tokens, x: f32, text: &str, fg: Color, bg: Color) {
+    let w = mono_w(text.chars().count(), TEXT_SMALL) + 8.0;
+    let left = x.clamp(0.0, (frame.width() - w).max(0.0));
+    frame.fill_rectangle(Point::new((left - 8.0).max(0.0), 0.0), Size::new(w + 16.0, RULER_H - 1.0), t.bg_100);
+    tag(frame, left, RULER_H / 2.0 - 1.0, text, fg, bg, None, false);
+}
+
 fn dotted<'a>(color: Color) -> Stroke<'a> {
     Stroke { line_dash: LineDash { segments: &[1.0, 2.0], offset: 0 }, ..Stroke::default().with_color(color).with_width(1.0) }
 }
@@ -508,7 +517,7 @@ impl canvas::Program<Message> for Lanes<'_> {
             base.fill_rectangle(Point::new(0.0, size.height - FOOTER_H), Size::new(size.width, FOOTER_H), t.bg_100);
         }
 
-        self.draw_ruler(&mut base, t, &axis, &unit, size, busy);
+        self.draw_ruler(&mut base, t, &axis, &unit, size, busy, self.ruler_tag_span(&axis, &rows, state));
         if !self.collapsed {
             self.draw_lanes(&mut base, &mut thin, &mut over, t, &axis, &rows, &pods, state, size);
         }
@@ -632,7 +641,7 @@ impl Lanes<'_> {
         }
     }
 
-    fn draw_ruler(&self, f: &mut Frame, t: &Tokens, axis: &Axis, unit: &crate::units::Unit, size: Size, busy: bool) {
+    fn draw_ruler(&self, f: &mut Frame, t: &Tokens, axis: &Axis, unit: &crate::units::Unit, size: Size, busy: bool, tag: Option<(f32, f32)>) {
         // Mass shading: a faint bar chart per 50 mm behind the ticks.
         if busy && !self.scene.mass.is_empty() {
             let max = self.scene.mass.iter().copied().fold(0.0f32, f32::max).max(1e-6);
@@ -661,6 +670,7 @@ impl Lanes<'_> {
             .collect();
         let covered = |from: f32, to: f32| {
             to > size.width - CARET_W
+                || tag.is_some_and(|(a, b)| from < b && to > a)
                 || stage_names.iter().any(|(at, w, side, _, _)| {
                     let (a, b) = if matches!(side, Alignment::Right) { (at - w, *at) } else { (*at, at + w) };
                     from < b + 4.0 && to > a - 4.0
@@ -752,7 +762,7 @@ impl Lanes<'_> {
             if let Some(rect) = geometry::bar_rect(bar, rows, axis) {
                 let x = rect.x;
                 vline(f, x, RULER_H, rect.y, Stroke::default().with_color(t.accent).with_width(1.0));
-                self.draw_move_tag(f, t, bar, axis, x);
+                self.draw_move_tag(f, t, bar, x);
             }
         }
         if let Some(carry) = &self.carry {
@@ -851,9 +861,22 @@ impl Lanes<'_> {
                 Over::CgLabel => None,
             };
             if let Some(text) = text {
-                // Over a bar the tag sits just above that bar, so it never covers the bar's own label.
+                // Over a bar the tag sits just above that bar, so it never covers the bar's own label; below it when the row
+                // above is occupied by another bar (its label), and nearest free of the two otherwise.
+                let w = mono_w(text.chars().count(), TEXT_SMALL) + 8.0;
+                let occupied = |y: f32, own: Option<BarKey>| {
+                    let tag = Rectangle { x: (p.x + 10.0).clamp(0.0, (size.width - w).max(0.0)), y: y - 7.5, width: w, height: 15.0 };
+                    self.scene.bars.iter().filter(|b| Some(b.key) != own).filter_map(|b| geometry::bar_rect(b, rows, axis)).any(|r| r.intersects(&tag))
+                };
                 let above = match over {
-                    Over::Bar(hit) => self.scene.bar(hit.key).and_then(|b| geometry::bar_rect(b, rows, axis)).map(|r| r.y - 9.5),
+                    Over::Bar(hit) => self.scene.bar(hit.key).and_then(|b| geometry::bar_rect(b, rows, axis)).map(|r| {
+                        let up = r.y - 9.5;
+                        if occupied(up, Some(hit.key)) && !occupied(r.y + r.height + 9.5, Some(hit.key)) {
+                            r.y + r.height + 9.5
+                        } else {
+                            up
+                        }
+                    }),
                     _ => None,
                 };
                 let y = above.unwrap_or(p.y - 14.0).max(RULER_H + 8.0);
@@ -1255,7 +1278,11 @@ impl Lanes<'_> {
     }
 
     /// The accent tag of a part being moved, on the ruler: where it is from the tip, and from the nearest face of what it sits in.
-    fn draw_move_tag(&self, f: &mut Frame, t: &Tokens, bar: &Bar, axis: &Axis, x: f32) {
+    fn draw_move_tag(&self, f: &mut Frame, t: &Tokens, bar: &Bar, x: f32) {
+        ruler_tag(f, t, x, &self.move_tag_text(bar), t.accent_ink, t.accent);
+    }
+
+    fn move_tag_text(&self, bar: &Bar) -> String {
         let len = |m: f64| ui::bare(m, Quantity::Length, self.units);
         let mut text = format!("{} from tip", len(bar.start));
         if let Some((fore, aft)) = bar.container {
@@ -1268,8 +1295,7 @@ impl Lanes<'_> {
                 text = format!("{text} · {} from {} aft", len(to_aft), bar.container_word);
             }
         }
-        let _ = axis;
-        tag(f, x, RULER_H / 2.0 - 1.0, &text, t.accent_ink, t.accent, None, false);
+        text
     }
 
     /// Where the carried part's ghost is drawn: in its own lane's first sub-row, at the landing station (or under the cursor),
@@ -1298,13 +1324,33 @@ impl Lanes<'_> {
         // the ruler's header above it.
         let x = rect.x.max(LABEL_W);
         put(f, &label, Point::new(x + 6.0, rect.y + rect.height / 2.0), t.ink, TEXT_BAR, SANS, Alignment::Left, alignment::Vertical::Center);
+        let busy = carry.landing.is_some();
+        ruler_tag(f, t, x, &self.ghost_tag_text(carry, axis, rect), if busy { t.accent_ink } else { t.ink_faint }, if busy { t.accent } else { t.bg_300 });
+    }
+
+    /// The ghost's station tag: its station and, where the landing is known, the margin it would give.
+    fn ghost_tag_text(&self, carry: &Carry, axis: &Axis, rect: Rectangle) -> String {
         let start = carry.landing.unwrap_or_else(|| axis.station(rect.x));
         let station = ui::bare(start, Quantity::Length, self.units);
-        let text = match carry.margin {
+        match carry.margin {
             Some(margin) => format!("{station} · {margin:.2} cal"),
             None => station,
+        }
+    }
+
+    /// The horizontal extent of the live tag on the ruler (the move tag or the ghost's), so the ruler leaves its numbers out
+    /// beneath it.
+    fn ruler_tag_span(&self, axis: &Axis, rows: &[LaneBox], state: &Interaction) -> Option<(f32, f32)> {
+        let (x, text) = if let Some(carry) = &self.carry {
+            let rect = self.ghost_rect(carry, axis, rows, state)?;
+            (rect.x.max(LABEL_W), self.ghost_tag_text(carry, axis, rect))
+        } else {
+            let bar = match state.mode {
+                Mode::Moving { id, .. } | Mode::Resizing { id, .. } => self.scene.part_bar(id)?,
+                _ => return None,
+            };
+            (geometry::bar_rect(bar, rows, axis)?.x, self.move_tag_text(bar))
         };
-        let busy = carry.landing.is_some();
-        tag(f, x, RULER_H / 2.0 - 1.0, &text, if busy { t.accent_ink } else { t.ink_faint }, if busy { t.accent } else { t.bg_300 }, None, false);
+        Some((x - 8.0, x + mono_w(text.chars().count(), TEXT_SMALL) + 16.0))
     }
 }

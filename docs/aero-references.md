@@ -63,7 +63,14 @@ Reference values from other programs are kept apart, in [openrocket-comparison.m
 | Model | Source |
 |---|---|
 | Atmosphere | ISA 1976 |
-| 3-DOF translational equations of motion, RK4 | Niskanen 2009 section 4.2.4 |
+| 3-DOF translational equations of motion, RK4 (`FlightModel::PointMass`) | Niskanen 2009 section 4.2.4 |
+| Rigid-body attitude and rotational equations (`FlightModel::RigidBody`): quaternion kinematics, Euler's equations for an axisymmetric body | Zipfel, *Modeling and Simulation of Aerospace Vehicle Dynamics* (2014); Diebel 2006 |
+| Normal force at the CP about the moving CG | Barrowman 1967; Niskanen 2009 ch. 3 |
+| Pitch/yaw damping `1/2 rho V A_ref sum CNalpha_i (x_i - x_cg)^2` | strip theory of Barrowman 1967; Mandell, Caporaso & Bengen, *Topics in Advanced Model Rocketry* (1973) |
+| Body crossflow damping `1/2 rho 1.1 w abs(w) sum A abs(x - x_cg)^3` | Hoerner, *Fluid-Dynamic Drag* (1965) crossflow drag; Zipfel 2014 strip theory |
+| Jet damping `mdot (x_exit - x_cg)^2` | Zipfel 2014 (propulsive damping); Mandell et al. 1973 |
+| Roll forcing and damping of canted fins (chord-weighted strip theory) | Barrowman 1967; Niskanen 2009 section 3.2.3 |
+| Step limit `0.3 / (fastest rotational rate)` for RK4 stability | engineering choice (RK4 real-axis stability limit 2.78) |
 | Fin flutter velocity | Martin, NACA TN 4197 (1958) |
 | Mass, CG and moments of inertia of the parts (`bowshock-model/src/mass.rs`) | Niskanen 2009 section 4.2.3; standard solid-body formulas |
 | Nose profile families (`bowshock-model/src/geometry.rs`) | Crowell, *The Descriptive Geometry of Nose Cones*, 1996; Niskanen 2009 appendix A |

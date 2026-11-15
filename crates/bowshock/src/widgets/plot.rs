@@ -33,6 +33,8 @@ pub use view::PlotView;
 const MIN_SPAN_FRAC: f64 = 1e-6;
 /// Headroom added above (and below) the data when y re-fits to the window, before the range is pushed out to a nice tick.
 const HEADROOM: f64 = 0.04;
+/// Headroom above a stacked area: the panel title sits on an inset over the top left, so a peak must clear it.
+const STACKED_HEADROOM: f64 = 0.12;
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Data
@@ -128,6 +130,8 @@ pub enum LabelAt {
     Margin,
     /// Inside the plot, right-aligned above the line.
     Inside,
+    /// A small muted label at the series' last point (`boost`, `coast`, `descent` on a parametric curve), kept inside the plot.
+    End,
 }
 
 /// One line (or one stacked layer) of a panel. `points` are `(x, y)` in SI units, sorted by ascending x.
@@ -309,6 +313,8 @@ pub struct Panel {
     pub value_unit: Option<String>,
     /// Editing chrome (picker title, controls, legend), for panels the user composes.
     pub editor: Option<PanelEditor>,
+    /// A compact key of the line styles in the panel (stroke sample and word), drawn muted at the bottom right inside the plot.
+    pub key: Vec<(LineStyle, String)>,
 }
 
 impl Panel {
@@ -324,6 +330,7 @@ impl Panel {
             zero_base: false,
             value_unit: None,
             editor: None,
+            key: Vec::new(),
         }
     }
 
@@ -366,6 +373,12 @@ impl Panel {
     /// Makes the panel editable (see [`PanelEditor`]).
     pub fn editable(mut self, editor: PanelEditor) -> Self {
         self.editor = Some(editor);
+        self
+    }
+
+    /// Sets the line-style key (see [`Panel::key`]).
+    pub fn key(mut self, key: Vec<(LineStyle, String)>) -> Self {
+        self.key = key;
         self
     }
 
@@ -455,7 +468,7 @@ impl Panel {
             }
         }
         let floor_at_zero = anchored && lo == 0.0;
-        let pad = HEADROOM * (hi - lo);
+        let pad = if self.is_stacked() { STACKED_HEADROOM } else { HEADROOM } * (hi - lo);
         hi += pad;
         if !floor_at_zero {
             lo -= pad;

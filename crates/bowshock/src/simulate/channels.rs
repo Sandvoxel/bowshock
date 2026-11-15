@@ -45,6 +45,8 @@ pub enum Dim {
     Reynolds,
     /// Static margin in calibers.
     Calibers,
+    /// Rotation rates (°/s).
+    AngularRate,
 }
 
 /// Pressures: kPa and psi (`units.rs` has no pressure quantity; flight plots are the only place one is shown).
@@ -54,6 +56,8 @@ static PRESSURE: [Unit; 2] =
 static REYNOLDS: Unit = Unit { symbol: "×10⁶", to_si: 1e6, offset: 0.0, decimals: 2 };
 /// Dimensionless: no unit text.
 static PLAIN: Unit = Unit { symbol: "", to_si: 1.0, offset: 0.0, decimals: 2 };
+/// Rotation rates: degrees per second.
+static ANGULAR_RATE: Unit = Unit { symbol: "°/s", to_si: std::f64::consts::PI / 180.0, offset: 0.0, decimals: 1 };
 
 impl Dim {
     /// The display unit in the metric (`imperial = false`) or imperial family: lengths in m or ft, never mm (except stations,
@@ -75,6 +79,7 @@ impl Dim {
             Dim::Area => *Quantity::Area.unit_for(plot),
             Dim::Reynolds => REYNOLDS,
             Dim::Calibers => *Quantity::Calibers.unit_for(plot),
+            Dim::AngularRate => ANGULAR_RATE,
         }
     }
 
@@ -96,6 +101,7 @@ impl Dim {
             Dim::DragCoefficient => "Drag coefficient",
             Dim::Reynolds => "Reynolds number",
             Dim::Calibers => "Static margin",
+            Dim::AngularRate => "Angular rate",
         }
     }
 
@@ -117,6 +123,7 @@ impl Dim {
             Dim::DragCoefficient => "drag coefficient",
             Dim::Reynolds => "Reynolds number",
             Dim::Calibers => "margin in calibers",
+            Dim::AngularRate => "angular rate",
         }
     }
 }
@@ -132,6 +139,8 @@ pub enum Group {
     Acceleration,
     /// Mach, dynamic pressure, drag coefficients.
     Aerodynamics,
+    /// Where the nose points and how fast it turns.
+    Attitude,
     /// Thrust and drag.
     Forces,
     /// Mass, CG, CP, margin.
@@ -144,8 +153,17 @@ pub enum Group {
 
 impl Group {
     /// Every group, in menu order.
-    pub const ALL: [Group; 8] =
-        [Group::Position, Group::Velocity, Group::Acceleration, Group::Aerodynamics, Group::Forces, Group::MassBalance, Group::Atmosphere, Group::Recovery];
+    pub const ALL: [Group; 9] = [
+        Group::Position,
+        Group::Velocity,
+        Group::Acceleration,
+        Group::Attitude,
+        Group::Aerodynamics,
+        Group::Forces,
+        Group::MassBalance,
+        Group::Atmosphere,
+        Group::Recovery,
+    ];
 
     /// The section heading.
     pub fn title(self) -> &'static str {
@@ -154,6 +172,7 @@ impl Group {
             Group::Velocity => "Velocity",
             Group::Acceleration => "Acceleration",
             Group::Aerodynamics => "Aerodynamics",
+            Group::Attitude => "Attitude",
             Group::Forces => "Forces",
             Group::MassBalance => "Mass & balance",
             Group::Atmosphere => "Atmosphere",
@@ -234,7 +253,7 @@ const fn described(mut c: Channel, hint: &'static str) -> Channel {
 }
 
 /// Every source the plots offer, in picker order.
-pub static CHANNELS: [Channel; 35] = [
+pub static CHANNELS: [Channel; 38] = [
     // Position.
     ch("altitude", "Altitude (AGL)", Group::Position, Dim::Length, true, |s| s.altitude),
     ch("altitude_msl", "Altitude (MSL)", Group::Position, Dim::Length, false, |s| s.altitude_msl),
@@ -250,6 +269,19 @@ pub static CHANNELS: [Channel; 35] = [
     // Acceleration (in g, the kit's unit).
     ch("vertical_acceleration", "Vertical acceleration", Group::Acceleration, Dim::Acceleration, false, |s| s.vertical_acceleration),
     ch("total_acceleration", "Total acceleration", Group::Acceleration, Dim::Acceleration, true, |s| s.acceleration),
+    // Attitude and rotation.
+    described(
+        ch("attitude_angle", "Attitude angle", Group::Attitude, Dim::Angle, false, |s| s.attitude_angle),
+        "How high the nose points above the horizon: 90° straight up, 0° level, negative nose down. It differs from the flight-path angle by the angle of attack.",
+    ),
+    described(
+        ch("pitch_rate", "Pitch rate", Group::Attitude, Dim::AngularRate, true, |s| s.pitch_rate),
+        "How fast the nose swings (pitch and yaw together). Zero under a parachute, where the descent is flown as a point mass.",
+    ),
+    described(
+        ch("roll_rate", "Roll rate", Group::Attitude, Dim::AngularRate, false, |s| s.roll_rate),
+        "How fast the rocket spins about its axis. Only canted fins drive it; positive turns the way increasing fin angle does.",
+    ),
     // Aerodynamics.
     ch("mach", "Mach number", Group::Aerodynamics, Dim::Mach, true, |s| s.mach),
     ch("dynamic_pressure", "Dynamic pressure", Group::Aerodynamics, Dim::Pressure, true, |s| s.dynamic_pressure),
@@ -280,7 +312,7 @@ pub static CHANNELS: [Channel; 35] = [
     ),
     described(
         ch("angle_of_attack", "Angle of attack", Group::Aerodynamics, Dim::Angle, true, |s| s.angle_of_attack),
-        "Angle between the rocket's axis and the oncoming air. The flight model weathercocks perfectly, so it is zero except on the rail.",
+        "Angle between the rocket's axis and the oncoming air. Wind, gusts and the turn of the flight path push the rocket off the air velocity and the fins swing it back (weathercocking); 180° is tail first.",
     ),
     // Forces.
     ch("thrust", "Thrust", Group::Forces, Dim::Force, true, |s| s.thrust),
@@ -336,6 +368,9 @@ mod tests {
             air_temperature: 288.15,
             reynolds: 2.5e6,
             recovery_cd_area: 0.9,
+            attitude_angle: std::f64::consts::FRAC_PI_3,
+            pitch_rate: 0.5,
+            roll_rate: -2.0,
             ..Sample::default()
         }
     }
@@ -393,6 +428,10 @@ mod tests {
         assert!((value("reynolds", false) - 2.5).abs() < 1e-12);
         assert!((value("recovery_cd_area", false) - 0.9).abs() < 1e-12);
         assert!((value("recovery_cd_area", true) - 0.9 / (0.0254 * 0.0254)).abs() < 1e-6);
+        // Attitude angle in degrees; rotation rates in degrees per second (0.5 rad/s is 28.65 deg/s, roll the other way).
+        assert!((value("attitude_angle", false) - 60.0).abs() < 1e-9);
+        assert!((value("pitch_rate", false) - 0.5f64.to_degrees()).abs() < 1e-9 && (value("roll_rate", true) + 2.0f64.to_degrees()).abs() < 1e-9);
+        assert_eq!(find("pitch_rate").unwrap().unit(false).symbol, "°/s");
         // The unit text matches.
         assert_eq!(find("altitude").unwrap().unit(false).symbol, "m");
         assert_eq!(find("altitude").unwrap().unit(true).symbol, "ft");
@@ -459,6 +498,8 @@ mod tests {
             "position_north",
             "vertical_velocity",
             "flight_path_angle",
+            "attitude_angle",
+            "roll_rate",
             "vertical_acceleration",
             "stability_margin",
             "air_temperature",

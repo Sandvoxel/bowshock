@@ -1,13 +1,24 @@
-//! 3-DOF point-mass flight simulation (x east, y north, z up): translational equations of motion
-//! (Niskanen 2009, section 4.2) integrated with RK4.
+//! Flight simulation (x east, y north, z up) with two equations of motion ([`FlightModel`]): a 3-DOF point mass and, by default,
+//! a rigid body. Both integrate with RK4 (Niskanen 2009, section 4.2).
 //!
 //! Model summary:
-//! * On the rail the rocket is constrained to the rail axis. Off the rail the thrust acts along
-//!   the velocity relative to the air (perfect weathercocking), drag opposes it, and gravity
-//!   varies with altitude.
+//! * On the rail the rocket is constrained to the rail axis and does not rotate. Off the rail the point-mass model points the
+//!   thrust along the velocity relative to the air (perfect weathercocking); the rigid-body model flies the attitude (below).
+//!   Gravity varies with altitude in both.
+//! * **Rigid body.** State: position, velocity, attitude quaternion and body angular rate. Forces in the body frame: thrust along
+//!   the axis, the axial drag `q A_ref Cd` (zero-lift build-up times the axial multiplier of [`crate::aero::axial_drag_multiplier`])
+//!   and the normal force `q A_ref CNalpha alpha` from [`Aero::normal_force`] against the lateral velocity. The normal force
+//!   acts at the centre of pressure, whose lever arm about the current centre of gravity (it moves forward as propellant
+//!   burns) gives the pitch/yaw moment. Euler's equations for an axisymmetric body (`I_x` roll, `I_y = I_z` pitch/yaw;
+//!   Zipfel 2014, *Modeling and Simulation of Aerospace Vehicle Dynamics*) with damping from the fins and bodies at their
+//!   centres of pressure (`1/2 rho V A_ref sum CNalpha_i (x_i - x_cg)^2`, Barrowman 1967; Mandell, Caporaso & Bengen 1973),
+//!   the body crossflow drag on the turning body, and the jet damping of the exhaust leaving at the nozzle
+//!   (`mdot (x_exit - x_cg)^2`). Fin cant drives a roll moment against the roll damping of the fins. The step is shortened to
+//!   keep the fastest pitch dynamics well inside the RK4 stability limit. Inertias come from the parts, with the propellant
+//!   inertia falling as it burns.
 //! * Drag comes from [`Aero::drag`] at the current Mach/Reynolds number with the motor on/off
-//!   (base drag is reduced while any motor burns). Under a deployed recovery device the drag is
-//!   `0.5 rho v^2 CdA` summed over deployed devices.
+//!   (base drag is reduced while any motor burns). Under a deployed recovery device the descent is flown as a point mass and the
+//!   drag is `0.5 rho v^2 CdA` summed over deployed devices.
 //! * Stages are in firing order (see [`StageMass`]). Each stage's ignition and separation are [`Timing`]s (a trigger plus a
 //!   delay: burnout, separation, time from launch, or climbing through an altitude), resolved by [`Timeline`] as the flight
 //!   goes: altitude triggers fire the first step the rocket is at or above the altitude while ascending. A separated stage is
@@ -16,12 +27,14 @@
 //! * Wind is constant with altitude; turbulence adds an Ornstein-Uhlenbeck gust with standard
 //!   deviation `intensity x wind_speed`.
 
-use crate::aero::{Aero, DragBreakdown};
+use crate::aero::{axial_drag_multiplier, Aero, DragBreakdown, BODY_CROSSFLOW_CD};
 use crate::atmosphere::{AirState, Atmosphere};
+use crate::attitude::{dot, from_axis, normalize, rate, rotate, rotate_inv, Quat, Vec3};
 use crate::rng::Rng;
 use crate::staging::{Hits, Timeline};
 use crate::vehicle::{Trigger, Vehicle};
 use crate::G0;
+use std::f64::consts::{FRAC_PI_2, PI};
 
 /// Gust intensity setting (standard deviation as a fraction of the mean wind speed).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -116,6 +129,21 @@ pub struct RecoveryDevice {
     pub delay: f64,
 }
 
+/// Which equations of motion fly the rocket.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FlightModel {
+    /// Three degrees of freedom: a point mass whose axis always points into the relative wind (perfect weathercocking, no angle
+    /// of attack), Niskanen (2009) section 4.2. Kept for regression and fast sweeps.
+    PointMass,
+    /// Rigid body with quaternion attitude: pitch, yaw and roll dynamics under the normal force at the centre of pressure
+    /// about the moving centre of gravity, aerodynamic, body-crossflow and jet damping, thrust along the body axis, and the
+    /// moments of inertia of the parts and of the burning propellant. Wind and gusts produce angle of attack and the rocket
+    /// weathercocks, oscillating about the relative wind with the damping of the design. Under a deployed parachute the descent
+    /// reverts to the point-mass model.
+    #[default]
+    RigidBody,
+}
+
 /// Everything needed to fly a vehicle.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SimInput {
@@ -125,16 +153,19 @@ pub struct SimInput {
     pub launch: Launch,
     /// Recovery devices.
     pub recovery: Vec<RecoveryDevice>,
-    /// Fine time step used on the rail and under thrust (s); default 0.001.
+    /// Fine time step used on the rail and under thrust (s); default 0.001. The rigid-body model shortens it whenever the
+    /// pitch dynamics need it.
     pub dt: f64,
     /// Hard stop (s); default 600.
     pub max_time: f64,
+    /// Equations of motion; default [`FlightModel::RigidBody`].
+    pub model: FlightModel,
 }
 
 impl SimInput {
-    /// Input with default step (1 ms) and `max_time` (600 s).
+    /// Input with default step (1 ms), `max_time` (600 s) and the rigid-body model.
     pub fn new(vehicle: Vehicle, launch: Launch, recovery: Vec<RecoveryDevice>) -> Self {
-        Self { vehicle, launch, recovery, dt: 0.001, max_time: 600.0 }
+        Self { vehicle, launch, recovery, dt: 0.001, max_time: 600.0, model: FlightModel::default() }
     }
 }
 
@@ -235,8 +266,10 @@ pub struct Sample {
     pub cp: f64,
     /// Static margin in calibers at the current Mach, zero angle of attack and current CG.
     pub stability_margin: f64,
-    /// Angle between the rocket's axis and the air velocity (rad). The 3-DOF model weathercocks perfectly, so this is
-    /// zero in free flight; it is non-zero on the rail (the rail fixes the axis) and below 1 m/s of air speed.
+    /// Angle between the rocket's axis and the air velocity (rad), 0 flying nose first, `pi` tail first. In the rigid-body model it
+    /// is the real angle of attack (wind, gusts and the turn of the flight path make it non-zero). In the point-mass model the
+    /// rocket weathercocks perfectly, so it is zero in free flight and non-zero only on the rail (the rail fixes the axis) and
+    /// below 1 m/s of air speed.
     pub angle_of_attack: f64,
     /// Horizontal wind speed at the rocket, gusts included (m/s).
     pub wind_speed: f64,
@@ -252,6 +285,15 @@ pub struct Sample {
     pub speed_of_sound: f64,
     /// Reynolds number based on the length of the flying stack (`rho v L / mu`).
     pub reynolds: f64,
+    /// Rate of turn of the rocket's axis, the magnitude of the pitch and yaw rates (rad/s). Zero in the point-mass model, on the
+    /// rail and under a parachute.
+    pub pitch_rate: f64,
+    /// Roll rate about the axis (rad/s), positive in the sense of increasing fin roll angle, the way positive fin cant spins the
+    /// rocket. Zero without cant, in the point-mass model, on the rail and under a parachute.
+    pub roll_rate: f64,
+    /// Elevation of the rocket's axis above the horizontal (rad): `+pi/2` nose straight up, `-pi/2` nose straight down. It lags the
+    /// flight-path angle by the angle of attack.
+    pub attitude_angle: f64,
 }
 
 /// Recorded flight.
@@ -371,10 +413,113 @@ struct Ctx<'a> {
     a_ref: f64,
 }
 
-/// Everything one evaluation of the equations of motion produces: the acceleration and the state it was computed from.
+/// How a step's equations of motion treat the attitude.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// On the rail: the rocket slides along the axis and does not rotate.
+    Rail,
+    /// Point mass: the axis follows the relative wind.
+    Point,
+    /// Rigid body: the attitude is part of the state.
+    Rigid,
+}
+
+/// The integrated state: position, ground-relative velocity, attitude (body to inertial) and body angular rate.
+#[derive(Clone, Copy)]
+struct State {
+    pos: Vec3,
+    vel: Vec3,
+    q: Quat,
+    w: Vec3,
+}
+
+/// Time derivatives of a [`State`].
+#[derive(Clone, Copy)]
+struct Slope {
+    dp: Vec3,
+    dv: Vec3,
+    dq: Quat,
+    dw: Vec3,
+}
+
+impl Slope {
+    fn of(st: &State, d: &Diag) -> Slope {
+        Slope { dp: st.vel, dv: d.acc, dq: rate(st.q, st.w), dw: d.ang_acc }
+    }
+
+    /// The RK4 weighted mean `(k1 + 2 k2 + 2 k3 + k4) / 6`.
+    fn rk4(k: [&Slope; 4]) -> Slope {
+        let mut s = Slope { dp: [0.0; 3], dv: [0.0; 3], dq: [0.0; 4], dw: [0.0; 3] };
+        for (j, kj) in k.iter().enumerate() {
+            let c = if j == 0 || j == 3 { 1.0 / 6.0 } else { 1.0 / 3.0 };
+            for i in 0..3 {
+                s.dp[i] += c * kj.dp[i];
+                s.dv[i] += c * kj.dv[i];
+                s.dw[i] += c * kj.dw[i];
+            }
+            for i in 0..4 {
+                s.dq[i] += c * kj.dq[i];
+            }
+        }
+        s
+    }
+}
+
+impl State {
+    /// The state after `h` seconds at the rates `k`, with the attitude renormalised.
+    fn advanced(&self, k: &Slope, h: f64) -> State {
+        let mut s = *self;
+        for i in 0..3 {
+            s.pos[i] += h * k.dp[i];
+            s.vel[i] += h * k.dv[i];
+            s.w[i] += h * k.dw[i];
+        }
+        for i in 0..4 {
+            s.q[i] += h * k.dq[i];
+        }
+        s.q = normalize(s.q);
+        s
+    }
+}
+
+/// Mass, balance, inertia and thrust of the flying stack at one instant.
+#[derive(Clone, Copy)]
+struct Props {
+    mass: f64,
+    /// Centre of gravity station (m).
+    cg: f64,
+    thrust: f64,
+    burning: bool,
+    /// Pitch/yaw moment of inertia about the CG (kg m^2).
+    i_long: f64,
+    /// Roll moment of inertia (kg m^2).
+    i_rot: f64,
+    /// Jet damping coefficient `sum mdot (x_exit - x_cg)^2` (kg m^2/s).
+    jet: f64,
+}
+
+/// The air-relative flow and the mass state at one evaluation.
+struct Flow {
+    p: Props,
+    air: AirState,
+    /// Horizontal wind magnitude, gusts included (m/s).
+    wind: f64,
+    /// Velocity relative to the air (m/s).
+    rel: Vec3,
+    /// Air speed (m/s).
+    s: f64,
+    mach: f64,
+    re_per_m: f64,
+    /// Gravity (m/s^2).
+    g: f64,
+}
+
+/// Everything one evaluation of the equations of motion produces: the accelerations and the state they were computed from.
 #[derive(Clone, Copy)]
 struct Diag {
     acc: [f64; 3],
+    /// Body-frame angular acceleration (rad/s^2).
+    ang_acc: [f64; 3],
     thrust: f64,
     drag: f64,
     mass: f64,
@@ -395,37 +540,79 @@ struct Diag {
     propellant: f64,
     /// Reynolds number on the stack length.
     reynolds: f64,
-}
-
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    /// Unit vector along the nose direction.
+    axis: [f64; 3],
+    /// Body angular rate (rad/s); zero unless the rigid body is flying.
+    omega: [f64; 3],
+    /// Fastest rate of the rotational dynamics (1/s), which limits the RK4 step; zero outside the rigid-body mode.
+    stiff: f64,
 }
 
 impl Ctx<'_> {
-    /// Mass, CG station, thrust and whether a motor is burning at time `t` with `nsep` stages dropped.
-    fn mass_props(&self, t: f64, nsep: usize) -> (f64, f64, f64, bool) {
-        let (mut m, mut mx, mut thrust, mut burning) = (0.0, 0.0, 0.0, false);
+    /// Mass, CG station, inertias, thrust and jet damping of the stages still flying at time `t` with `nsep` stages dropped.
+    ///
+    /// Dry parts carry the inertias of the model (about their own CG). A motor is a thin-walled casing plus the propellant still
+    /// in it as a solid cylinder, both as long as the motor and as wide as its diameter, so the propellant's inertia falls
+    /// as it burns. Everything is moved to the common CG with the parallel-axis theorem.
+    fn mass_props(&self, t: f64, nsep: usize) -> Props {
+        let (mut m, mut mx, mut mx2, mut i_long, mut i_rot) = (0.0, 0.0, 0.0, 0.0, 0.0);
+        let (mut thrust, mut burning) = (0.0, false);
+        // Propellant flow `mdot` and its moments about the nozzle exit stations: sums of mdot, mdot x, mdot x^2.
+        let (mut d0, mut d1, mut d2) = (0.0, 0.0, 0.0);
         for (k, st) in self.input.vehicle.stages.iter().enumerate().skip(nsep) {
             let dm = st.dry.mass * self.tw.mass;
             m += dm;
             mx += dm * st.dry.cg;
+            mx2 += dm * st.dry.cg * st.dry.cg;
+            i_long += st.dry.i_long * self.tw.mass;
+            i_rot += st.dry.i_rot * self.tw.mass;
             if let Some(mo) = &st.motor {
                 // A motor that has not lit (yet, or ever) is a full dead weight.
                 let tau = self.sched.ignition[k].map_or(-1.0, |ign| t - ign);
-                let mm = mo.curve.mass(tau);
+                let c = &mo.curve;
+                let mm = c.mass(tau);
+                let xm = mo.cg_station();
                 m += mm;
-                mx += mm * mo.cg_station();
-                let th = mo.curve.thrust(tau) * self.tw.thrust;
-                if th > 0.0 {
+                mx += mm * xm;
+                mx2 += mm * xm * xm;
+                let (r, l) = (0.5 * c.diameter, c.length);
+                let casing = (c.total_mass - c.propellant_mass).max(0.0);
+                let propellant = (mm - casing).max(0.0);
+                i_long += casing * (0.5 * r * r + l * l / 12.0) + propellant * (0.25 * r * r + l * l / 12.0);
+                i_rot += casing * r * r + 0.5 * propellant * r * r;
+                let raw = c.thrust(tau);
+                if raw * self.tw.thrust > 0.0 {
                     burning = true;
-                    thrust += th;
+                    thrust += raw * self.tw.thrust;
+                }
+                let impulse = c.total_impulse();
+                if raw > 0.0 && impulse > 0.0 {
+                    // Propellant burns in proportion to the impulse delivered (see `ThrustCurve::mass`).
+                    let mdot = c.propellant_mass * raw / impulse;
+                    let xe = mo.mount_aft_station;
+                    d0 += mdot;
+                    d1 += mdot * xe;
+                    d2 += mdot * xe * xe;
                 }
             }
         }
         if m < 1e-3 {
-            return (1e-3, 0.0, thrust, burning);
+            return Props { mass: 1e-3, cg: 0.0, thrust, burning, i_long: 1e-9, i_rot: 1e-12, jet: 0.0 };
         }
-        (m, mx / m, thrust, burning)
+        let cg = mx / m;
+        // Parts that carry no inertia data fall back to a uniform rod over the flying stack and a solid cylinder of the reference
+        // diameter, so the rotational dynamics are never singular.
+        let i_long = {
+            let about_cg = i_long + mx2 - m * cg * cg;
+            if about_cg > 1e-9 {
+                about_cg
+            } else {
+                let l = self.stack_length(nsep).max(1e-3);
+                m * l * l / 12.0
+            }
+        };
+        let i_rot = if i_rot > 1e-12 { i_rot } else { 0.5 * m * (0.5 * self.input.vehicle.reference_diameter).powi(2) }.max(1e-12);
+        Props { mass: m, cg, thrust, burning, i_long, i_rot, jet: (d2 - 2.0 * cg * d1 + cg * cg * d0).max(0.0) }
     }
 
     /// Propellant left in the motors of the stages still flying at time `t`.
@@ -449,17 +636,32 @@ impl Ctx<'_> {
         }
     }
 
-    /// Equations of motion at `(t, pos, vel)`.
-    fn eval(&self, t: f64, pos: [f64; 3], vel: [f64; 3], gust: [f64; 3], nsep: usize, rail: bool, chutes: &[Chute]) -> Diag {
-        let (mass, cg, thrust, burning) = self.mass_props(t, nsep);
-        let air = self.atm.at_agl(pos[2].max(0.0));
+    /// Equations of motion at `(t, st)`.
+    fn eval(&self, t: f64, st: &State, gust: [f64; 3], nsep: usize, mode: Mode, chutes: &[Chute]) -> Diag {
+        let p = self.mass_props(t, nsep);
+        let air = self.atm.at_agl(st.pos[2].max(0.0));
         let wind = [self.wind[0] + gust[0], self.wind[1] + gust[1]];
-        let rel = [vel[0] - wind[0], vel[1] - wind[1], vel[2] - gust[2]];
+        let rel = [st.vel[0] - wind[0], st.vel[1] - wind[1], st.vel[2] - gust[2]];
         let s = dot(rel, rel).sqrt();
-        let mach = s / air.speed_of_sound;
+        let flow = Flow {
+            p,
+            air,
+            wind: wind[0].hypot(wind[1]),
+            rel,
+            s,
+            mach: s / air.speed_of_sound,
+            re_per_m: s * air.density / air.viscosity,
+            g: G0 * (6_371_000.0 / (6_371_000.0 + st.pos[2].max(0.0) + self.launch.site_altitude)).powi(2),
+        };
+        let d = if mode == Mode::Rigid { self.rigid_eval(st, &flow, nsep) } else { self.point_eval(t, st, &flow, nsep, mode == Mode::Rail, chutes) };
+        Diag { propellant: self.propellant(t, nsep), reynolds: flow.re_per_m * self.stack_length(nsep), ..d }
+    }
+
+    /// Point mass: the axis follows the relative wind (or the rail), drag opposes the relative velocity.
+    fn point_eval(&self, t: f64, st: &State, f: &Flow, nsep: usize, rail: bool, chutes: &[Chute]) -> Diag {
+        let (p, s, rel) = (&f.p, f.s, f.rel);
         let dir = if rail || s < 1.0 { self.axis } else { [rel[0] / s, rel[1] / s, rel[2] / s] };
-        let q = 0.5 * air.density * s * s;
-        let re_per_m = s * air.density / air.viscosity;
+        let q = 0.5 * f.air.density * s * s;
         // Deployed devices: canopy area ramps up (see `Chute`); the airframe's own drag fades out
         // as the canopies fill.
         let full: f64 = chutes.iter().map(|c| c.cd_area).sum();
@@ -468,7 +670,7 @@ impl Ctx<'_> {
         let mut drag = q * open;
         let mut cd = DragBreakdown::default();
         if frac < 1.0 {
-            let b = self.aeros[nsep.min(self.aeros.len() - 1)].drag(mach, re_per_m, burning);
+            let b = self.aeros[nsep.min(self.aeros.len() - 1)].drag(f.mach, f.re_per_m, p.burning);
             let w = (1.0 - frac) * self.tw.cd;
             cd = DragBreakdown {
                 friction: w * b.friction,
@@ -480,36 +682,125 @@ impl Ctx<'_> {
             };
             drag += q * cd.total * self.a_ref;
         }
-        let g = G0 * (6_371_000.0 / (6_371_000.0 + pos[2].max(0.0) + self.launch.site_altitude)).powi(2);
         let rd = if s > 1e-9 { [rel[0] / s, rel[1] / s, rel[2] / s] } else { [0.0; 3] };
         let alpha = if s > 1e-9 { dot(dir, rd).clamp(-1.0, 1.0).acos() } else { 0.0 };
         let mut acc = [0.0; 3];
         for i in 0..3 {
-            acc[i] = (thrust * dir[i] - drag * rd[i]) / mass;
+            acc[i] = (p.thrust * dir[i] - drag * rd[i]) / p.mass;
         }
-        acc[2] -= g;
+        acc[2] -= f.g;
         if rail {
             let mut au = dot(acc, self.axis);
-            if dot(vel, self.axis) <= 0.0 && au < 0.0 {
+            if dot(st.vel, self.axis) <= 0.0 && au < 0.0 {
                 au = 0.0;
             }
             acc = [au * self.axis[0], au * self.axis[1], au * self.axis[2]];
         }
         Diag {
             acc,
-            thrust,
+            ang_acc: [0.0; 3],
+            thrust: p.thrust,
             drag,
-            mass,
-            cg,
-            mach,
-            air,
+            mass: p.mass,
+            cg: p.cg,
+            mach: f.mach,
+            air: f.air,
             air_speed: s,
             alpha,
             cd,
             open,
-            wind: wind[0].hypot(wind[1]),
-            propellant: self.propellant(t, nsep),
-            reynolds: re_per_m * self.stack_length(nsep),
+            wind: f.wind,
+            propellant: 0.0,
+            reynolds: 0.0,
+            axis: dir,
+            omega: [0.0; 3],
+            stiff: 0.0,
+        }
+    }
+
+    /// Rigid body: forces and moments in the body frame (x along the nose, y and z transverse).
+    ///
+    /// With the lateral air velocity `v_l` and the axial one `u` the angle of attack is `alpha = atan2(|v_l|, u)`; flying tail
+    /// first (`alpha > pi/2`) the coefficients are those of the mirror angle `pi - alpha`. The axial force is
+    /// `-sign(u) q A_ref Cd k(alpha)` and the normal force `q A_ref CNalpha alpha` opposes `v_l`, acting at the centre of pressure
+    /// `x_cp`, which is `x_cg - x_cp` ahead of the centre of gravity (aft when negative): the moment is that lever arm times the
+    /// normal force, stabilising when the CP is aft of the CG.
+    fn rigid_eval(&self, st: &State, f: &Flow, nsep: usize) -> Diag {
+        let aero = &self.aeros[nsep.min(self.aeros.len() - 1)];
+        let (p, s) = (&f.p, f.s);
+        let vb = rotate_inv(st.q, f.rel);
+        let lateral = vb[1].hypot(vb[2]);
+        let (alpha, alpha_eff) = if s > 1e-9 {
+            let a = lateral.atan2(vb[0]);
+            (a, if a > FRAC_PI_2 { PI - a } else { a })
+        } else {
+            (0.0, 0.0)
+        };
+        let rho = f.air.density;
+        let q = 0.5 * rho * s * s;
+
+        // Axial drag.
+        let b = aero.drag(f.mach, f.re_per_m, p.burning);
+        let w = self.tw.cd;
+        let cd = DragBreakdown {
+            friction: w * b.friction,
+            pressure: w * b.pressure,
+            base: w * b.base,
+            fins: w * b.fins,
+            protuberances: w * b.protuberances,
+            total: w * b.total,
+        };
+        let axial = -vb[0].signum() * q * cd.total * axial_drag_multiplier(alpha_eff) * self.a_ref;
+
+        // Normal force against the lateral velocity.
+        let nf = aero.normal_force(f.mach, alpha_eff);
+        let normal = q * self.a_ref * nf.cn_alpha * alpha_eff;
+        let (fy, fz) = if lateral > 1e-9 { (-normal * vb[1] / lateral, -normal * vb[2] / lateral) } else { (0.0, 0.0) };
+
+        // Moments about the CG: the normal force at the CP, then damping (fins and bodies at their CPs, crossflow drag on the
+        // turning body, the exhaust leaving at the nozzle) and the roll of the canted fins.
+        let arm = p.cg - nf.cp;
+        let wl = st.w[1].hypot(st.w[2]);
+        let linear = 0.5 * rho * s * self.a_ref * nf.damping_sum(p.cg) + p.jet;
+        let crossflow = 0.5 * rho * BODY_CROSSFLOW_CD * aero.crossflow_damping(p.cg);
+        let damp = linear + crossflow * wl;
+        let roll = aero.roll(f.mach);
+        // Roll moment in the sense of increasing fin angle (the right-handed body roll rate is its negative).
+        let roll_moment = if s > 1e-9 { q * (roll.forcing - roll.damping * st.w[0] / s) } else { 0.0 };
+        let (mx, my, mz) = (-roll_moment, -arm * fz - damp * st.w[1], arm * fy - damp * st.w[2]);
+
+        // Euler's equations of an axisymmetric body (I_y = I_z = i_long, I_x = i_rot).
+        let (i, ix) = (p.i_long, p.i_rot);
+        let ang_acc = [mx / ix, (my + (i - ix) * st.w[2] * st.w[0]) / i, (mz + (ix - i) * st.w[0] * st.w[1]) / i];
+
+        // Translation: body forces into the inertial frame.
+        let force = rotate(st.q, [p.thrust + axial, fy, fz]);
+        let aero_force = rotate(st.q, [axial, fy, fz]);
+        let acc = [force[0] / p.mass, force[1] / p.mass, force[2] / p.mass - f.g];
+        let rd = if s > 1e-9 { [f.rel[0] / s, f.rel[1] / s, f.rel[2] / s] } else { [0.0; 3] };
+
+        // The fastest rotational rates (pitch frequency, damping, roll damping) bound the RK4 step.
+        let wn = (q * self.a_ref * nf.cn_alpha.abs() * (nf.cp - p.cg).abs() / i).sqrt();
+        let stiff = wn.max(damp / i).max(0.5 * rho * s.max(1.0) * roll.damping.abs() / ix);
+        Diag {
+            acc,
+            ang_acc,
+            thrust: p.thrust,
+            drag: -dot(aero_force, rd),
+            mass: p.mass,
+            cg: p.cg,
+            mach: f.mach,
+            air: f.air,
+            air_speed: s,
+            alpha,
+            cd,
+            open: 0.0,
+            wind: f.wind,
+            propellant: 0.0,
+            reynolds: 0.0,
+            axis: rotate(st.q, [1.0, 0.0, 0.0]),
+            omega: st.w,
+            stiff,
         }
     }
 }
@@ -546,6 +837,18 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
     let mut events: Vec<Event> = Vec::new();
     let mut event_idx: Vec<usize> = Vec::new();
     let (mut t, mut pos, mut vel) = (0.0_f64, [0.0; 3], [0.0; 3]);
+    // Attitude (body to inertial) and body angular rate: the rail axis at rest to begin with.
+    let (mut att, mut spin) = (from_axis(axis), [0.0; 3]);
+    let rigid_model = input.model == FlightModel::RigidBody;
+    let mode_of = |rail: bool, chutes: &[Chute]| {
+        if rail {
+            Mode::Rail
+        } else if rigid_model && chutes.is_empty() {
+            Mode::Rigid
+        } else {
+            Mode::Point
+        }
+    };
     let mut on_rail = true;
     let mut apogee: Option<(f64, f64)> = None;
     let mut rail_exit_velocity = 0.0;
@@ -606,7 +909,8 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
                 deployed[i] = true;
             }
         }
-        let d0 = ctx.eval(t, pos, vel, gust, nsep, on_rail, &chutes);
+        let mode = mode_of(on_rail, &chutes);
+        let d0 = ctx.eval(t, &State { pos, vel, q: att, w: spin }, gust, nsep, mode, &chutes);
         let raw = Raw { t, pos, vel, nsep, d: d0 };
         raws.push(raw);
 
@@ -632,6 +936,10 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
         } else {
             input.dt.max(0.01)
         };
+        if mode == Mode::Rigid && d0.stiff > 0.0 {
+            // Keep the fastest pitch/roll dynamics well inside the RK4 stability limit (about 2.8 / rate).
+            dt = dt.min((0.3 / d0.stiff).max(1e-4));
+        }
         let mut boundary = f64::INFINITY;
         for bt in ctx.sched.times().chain(step_times.iter().copied()).chain(deploy_at.iter().flatten().copied()) {
             if bt > t + 1e-9 && bt < boundary {
@@ -657,25 +965,19 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
             }
         }
 
-        // RK4.
-        let add = |p: [f64; 3], k: [f64; 3], h: f64| [p[0] + h * k[0], p[1] + h * k[1], p[2] + h * k[2]];
-        let (k1v, k1p) = (d0.acc, vel);
-        let d2 = ctx.eval(t + 0.5 * dt, add(pos, k1p, 0.5 * dt), add(vel, k1v, 0.5 * dt), gust, nsep, on_rail, &chutes);
-        let (k2v, k2p) = (d2.acc, add(vel, k1v, 0.5 * dt));
-        let d3 = ctx.eval(t + 0.5 * dt, add(pos, k2p, 0.5 * dt), add(vel, k2v, 0.5 * dt), gust, nsep, on_rail, &chutes);
-        let (k3v, k3p) = (d3.acc, add(vel, k2v, 0.5 * dt));
-        let d4 = ctx.eval(t + dt, add(pos, k3p, dt), add(vel, k3v, dt), gust, nsep, on_rail, &chutes);
-        let (k4v, k4p) = (d4.acc, add(vel, k3v, dt));
-        let mut new_pos = pos;
-        let mut new_vel = vel;
-        for i in 0..3 {
-            new_pos[i] += dt / 6.0 * (k1p[i] + 2.0 * k2p[i] + 2.0 * k3p[i] + k4p[i]);
-            new_vel[i] += dt / 6.0 * (k1v[i] + 2.0 * k2v[i] + 2.0 * k3v[i] + k4v[i]);
-        }
+        // RK4 on position, velocity, attitude and body rate.
+        let s0 = State { pos, vel, q: att, w: spin };
+        let k1 = Slope::of(&s0, &d0);
+        let s2 = s0.advanced(&k1, 0.5 * dt);
+        let k2 = Slope::of(&s2, &ctx.eval(t + 0.5 * dt, &s2, gust, nsep, mode, &chutes));
+        let s3 = s0.advanced(&k2, 0.5 * dt);
+        let k3 = Slope::of(&s3, &ctx.eval(t + 0.5 * dt, &s3, gust, nsep, mode, &chutes));
+        let s4 = s0.advanced(&k3, dt);
+        let k4 = Slope::of(&s4, &ctx.eval(t + dt, &s4, gust, nsep, mode, &chutes));
+        let next = s0.advanced(&Slope::rk4([&k1, &k2, &k3, &k4]), dt);
         let (t0, pos0, vel0) = (t, pos, vel);
         t += dt;
-        pos = new_pos;
-        vel = new_vel;
+        (pos, vel, att, spin) = (next.pos, next.vel, next.q, next.w);
 
         // Rail exit.
         if on_rail {
@@ -685,7 +987,7 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
                 let air = atm.at_agl(pos[2]);
                 let rel = [vel[0] - wind[0], vel[1] - wind[1], vel[2]];
                 let mach = dot(rel, rel).sqrt() / air.speed_of_sound;
-                let (_, cg, _, _) = ctx.mass_props(t, nsep);
+                let cg = ctx.mass_props(t, nsep).cg;
                 stability_off_rail = aeros[nsep.min(aeros.len() - 1)].margin_cal(mach, 0.0, cg);
                 last_event_t = t;
                 push_event(&mut events, &mut event_idx, &raws, Event { t, kind: EventKind::RailExit, altitude: pos[2], stage: None });
@@ -755,6 +1057,8 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
                     deployed[i] = true;
                     let rel_speed = ((vel[0] - wind[0]).powi(2) + (vel[1] - wind[1]).powi(2) + vel[2].powi(2)).sqrt();
                     chutes.push(Chute::new(d.cd_area, t, rel_speed));
+                    // Under a canopy the descent is a point mass: the attitude follows the relative wind from here on.
+                    spin = [0.0; 3];
                     if let Some(l) = label.take() {
                         rates.push((l, vel[2].abs()));
                     }
@@ -785,7 +1089,7 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
                 rates.push((l, ground_hit));
             }
             landed = true;
-            let d = ctx.eval(t, pos, vel, gust, nsep, false, &chutes);
+            let d = ctx.eval(t, &State { pos, vel, q: att, w: spin }, gust, nsep, mode_of(false, &chutes), &chutes);
             final_raw = Some(Raw { t, pos, vel, nsep, d: Diag { thrust: 0.0, ..d } });
             push_event(&mut events, &mut event_idx, &raws, Event { t, kind: EventKind::Landing, altitude: 0.0, stage: None });
             break;
@@ -796,7 +1100,7 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
     } else if !landed {
         // Hit the time limit mid-flight: record the final state.
         let nsep = ctx.sched.separated(t);
-        let d = ctx.eval(t, pos, vel, gust, nsep, on_rail, &chutes);
+        let d = ctx.eval(t, &State { pos, vel, q: att, w: spin }, gust, nsep, mode_of(on_rail, &chutes), &chutes);
         raws.push(Raw { t, pos, vel, nsep, d });
         ground_xy = [pos[0], pos[1]];
         ground_hit = dot(vel, vel).sqrt();
@@ -890,8 +1194,191 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
                 air_pressure: d.air.pressure,
                 speed_of_sound: d.air.speed_of_sound,
                 reynolds: d.reynolds,
+                pitch_rate: d.omega[1].hypot(d.omega[2]),
+                roll_rate: -d.omega[0],
+                attitude_angle: d.axis[2].atan2(d.axis[0].hypot(d.axis[1])),
             }
         })
         .collect();
     FlightResult { trajectory: Trajectory { samples, events }, summary }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vehicle::*;
+
+    /// A 38 mm rocket with four fins and a 0.23 kg motor holding 0.105 kg of propellant.
+    fn vehicle() -> Vehicle {
+        let r = 0.038;
+        Vehicle {
+            reference_diameter: 2.0 * r,
+            body: vec![
+                BodySegment { station: 0.0, length: 0.30, fore_radius: 0.0, aft_radius: r, kind: BodyKind::Nose(NoseShape::TangentOgive), roughness: 30e-6 },
+                BodySegment { station: 0.30, length: 0.80, fore_radius: r, aft_radius: r, kind: BodyKind::Tube, roughness: 30e-6 },
+            ],
+            tube_fins: vec![],
+            fin_sets: vec![FinSet {
+                count: 4,
+                station: 0.93,
+                body_radius: r,
+                root_chord: 0.17,
+                tip_chord: 0.07,
+                span: 0.10,
+                sweep: 0.09,
+                thickness: 0.003,
+                cross_section: FinCrossSection::Rounded,
+                cant: 0.0,
+                roughness: 30e-6,
+                planform: FinPlanform::Trapezoidal,
+                angles: Vec::new(),
+                parent: 0,
+                bodies: 1,
+                mid_chord_cos: None,
+                root_extent: None,
+            }],
+            protuberances: vec![],
+            stages: vec![StageMass {
+                dry: MassProps { mass: 1.07, cg: 0.62, i_long: 0.1, i_rot: 0.0008 },
+                fore_station: 0.0,
+                aft_station: 1.10,
+                motor: Some(StageMotor {
+                    curve: ThrustCurve {
+                        points: vec![(0.0, 0.0), (0.05, 150.0), (1.0, 120.0), (1.2, 0.0)],
+                        propellant_mass: 0.105,
+                        total_mass: 0.230,
+                        length: 0.205,
+                        diameter: 0.038,
+                    },
+                    mount_aft_station: 1.10,
+                    ignition: Timing::LAUNCH,
+                    ejection_delay: None,
+                }),
+                separation: Timing::BURNOUT,
+            }],
+        }
+    }
+
+    fn with_ctx<R>(v: Vehicle, f: impl FnOnce(&Ctx<'_>) -> R) -> R {
+        let input = SimInput::new(v, Launch::default(), vec![]);
+        let aeros = build_aeros(&input.vehicle);
+        let n = input.vehicle.stages.len();
+        let ctx = Ctx {
+            input: &input,
+            launch: &input.launch,
+            tw: Tweaks::NOMINAL,
+            aeros: &aeros,
+            atm: Atmosphere::new(0.0, 288.15),
+            sched: Timeline::resolve(&input.vehicle, &Hits::none(n)),
+            wind: [0.0; 2],
+            axis: [0.0, 0.0, 1.0],
+            a_ref: input.vehicle.reference_area(),
+        };
+        f(&ctx)
+    }
+
+    #[test]
+    fn inertia_is_the_parallel_axis_sum_and_the_propellant_part_falls_as_it_burns() {
+        with_ctx(vehicle(), |ctx| {
+            let st = &ctx.input.vehicle.stages[0];
+            let (dry, mo) = (st.dry, st.motor.as_ref().unwrap());
+            let (r, l, xm) = (0.019, 0.205, mo.cg_station());
+            let (casing, prop) = (0.230 - 0.105, 0.105);
+            // Before ignition: the full motor is a dead weight.
+            let p0 = ctx.mass_props(-5.0, 0);
+            let m = dry.mass + 0.230;
+            let cg = (dry.mass * dry.cg + 0.230 * xm) / m;
+            assert!((p0.mass - m).abs() < 1e-12 && (p0.cg - cg).abs() < 1e-12 && p0.thrust == 0.0 && p0.jet == 0.0);
+            let motor_long = casing * (0.5 * r * r + l * l / 12.0) + prop * (0.25 * r * r + l * l / 12.0);
+            let hand = dry.i_long + dry.mass * (dry.cg - cg).powi(2) + motor_long + 0.230 * (xm - cg).powi(2);
+            assert!((p0.i_long - hand).abs() < 1e-9, "{} vs {hand}", p0.i_long);
+            assert!((p0.i_rot - (dry.i_rot + casing * r * r + 0.5 * prop * r * r)).abs() < 1e-12);
+            // After burnout: only the casing's roll inertia is left, the propellant's half m r^2 is gone.
+            let p1 = ctx.mass_props(10.0, 0);
+            assert!((p0.i_rot - p1.i_rot - 0.5 * prop * r * r).abs() < 1e-12, "{} {}", p0.i_rot, p1.i_rot);
+            assert!((p0.mass - p1.mass - prop).abs() < 1e-12 && p1.cg < p0.cg && p1.thrust == 0.0);
+            // During the burn the jet damping is mdot (x_exit - x_cg)^2 with mdot = thrust x propellant / impulse.
+            let (tau, c) = (0.5, &mo.curve);
+            let pm = ctx.mass_props(tau, 0);
+            let mdot = c.propellant_mass * c.thrust(tau) / c.total_impulse();
+            assert!((pm.jet - mdot * (mo.mount_aft_station - pm.cg).powi(2)).abs() < 1e-12, "{} {}", pm.jet, mdot);
+            assert!(pm.thrust > 100.0 && pm.i_long < p0.i_long + 1e-3);
+        });
+    }
+
+    #[test]
+    fn a_vehicle_without_inertia_data_gets_a_rod_and_a_cylinder() {
+        let mut v = vehicle();
+        v.stages[0].dry = MassProps { mass: 1.0, cg: 0.55, i_long: 0.0, i_rot: 0.0 };
+        v.stages[0].motor = None;
+        with_ctx(v, |ctx| {
+            let p = ctx.mass_props(0.0, 0);
+            assert!((p.i_long - 1.0 * 1.1 * 1.1 / 12.0).abs() < 1e-12, "{}", p.i_long);
+            assert!((p.i_rot - 0.5 * 1.0 * 0.038 * 0.038).abs() < 1e-12);
+        });
+    }
+
+    /// State of the vehicle flying straight up at `v` m/s with body rate `w`.
+    fn flying(v: f64, w: Vec3) -> State {
+        State { pos: [0.0, 0.0, 100.0], vel: [0.0, 0.0, v], q: from_axis([0.0, 0.0, 1.0]), w }
+    }
+
+    #[test]
+    fn pitch_rate_is_damped_by_the_strip_sum_of_the_lifting_components() {
+        with_ctx(vehicle(), |ctx| {
+            let (v, wy) = (60.0, 0.4);
+            let d = ctx.eval(100.0, &flying(v, [0.0, wy, 0.0]), [0.0; 3], 0, Mode::Rigid, &[]);
+            let p = ctx.mass_props(100.0, 0);
+            // Coasting after burnout, no angle of attack: the only moment is the damping.
+            assert_eq!(d.thrust, 0.0);
+            let rho = d.air.density;
+            let aero = &ctx.aeros[0];
+            let st = aero.stability(v / d.air.speed_of_sound, 0.0);
+            let strip: f64 = st.components.iter().map(|(_, cna, x)| cna * (x - p.cg).powi(2)).sum();
+            let linear = 0.5 * rho * v * ctx.a_ref * strip;
+            let crossflow = 0.5 * rho * BODY_CROSSFLOW_CD * aero.crossflow_damping(p.cg) * wy;
+            let moment = d.ang_acc[1] * p.i_long;
+            assert!((moment + (linear + crossflow) * wy).abs() < 1e-9 * moment.abs(), "{moment} vs {}", -(linear + crossflow) * wy);
+            // It opposes the rate, in either sense, and does not couple into the other axes.
+            let flipped = ctx.eval(100.0, &flying(v, [0.0, -wy, 0.0]), [0.0; 3], 0, Mode::Rigid, &[]);
+            assert!((flipped.ang_acc[1] + d.ang_acc[1]).abs() < 1e-12 && d.ang_acc[1] < 0.0);
+            assert!(d.ang_acc[0].abs() < 1e-12 && d.ang_acc[2].abs() < 1e-12);
+            // The damping grows with the air speed (a viscous-like term plus the quadratic crossflow).
+            let fast = ctx.eval(100.0, &flying(2.0 * v, [0.0, wy, 0.0]), [0.0; 3], 0, Mode::Rigid, &[]);
+            assert!(fast.ang_acc[1] < 1.9 * d.ang_acc[1]);
+        });
+    }
+
+    #[test]
+    fn a_stable_rocket_is_pushed_back_towards_the_relative_wind_and_an_unstable_one_away() {
+        // Moving up through a 5 m/s crosswind blowing towards -x: the air velocity relative to the rocket is (+5, 0, 50), so the
+        // nose (+z) should turn towards +x if the rocket is stable.
+        for (cg, stable) in [(0.62, true), (0.98, false)] {
+            let mut v = vehicle();
+            v.stages[0].dry.cg = cg;
+            with_ctx(v, |ctx| {
+                let st = State { pos: [0.0, 0.0, 100.0], vel: [0.0, 0.0, 50.0], q: from_axis([0.0, 0.0, 1.0]), w: [0.0; 3] };
+                let d = ctx.eval(100.0, &st, [-5.0, 0.0, 0.0], 0, Mode::Rigid, &[]);
+                // The body frame of `from_axis` is x_b = +z, y_b = +y, z_b = -x: turning the nose towards +x is a rotation about +y_b.
+                let toward_wind = d.ang_acc[1];
+                assert_eq!(toward_wind > 0.0, stable, "cg {cg}: {:?}", d.ang_acc);
+                // Both feel the same side force towards -x (the normal force opposes the lateral motion).
+                assert!(d.acc[0] < 0.0 && d.alpha > 0.05);
+            });
+        }
+    }
+
+    #[test]
+    fn the_step_limit_tracks_the_pitch_frequency() {
+        with_ctx(vehicle(), |ctx| {
+            let d = ctx.eval(100.0, &flying(100.0, [0.0; 3]), [0.0; 3], 0, Mode::Rigid, &[]);
+            let p = ctx.mass_props(100.0, 0);
+            let nf = ctx.aeros[0].normal_force(d.mach, 0.0);
+            let q = 0.5 * d.air.density * 100.0 * 100.0;
+            let wn = (q * ctx.a_ref * nf.cn_alpha * (nf.cp - p.cg) / p.i_long).sqrt();
+            assert!(d.stiff >= wn - 1e-9 && d.stiff < 4.0 * wn, "{} vs {wn}", d.stiff);
+            // wn^2 = q A CNalpha (x_cp - x_cg) / I: tens of rad/s for this rocket at 100 m/s.
+            assert!((5.0..100.0).contains(&wn), "{wn}");
+        });
+    }
 }

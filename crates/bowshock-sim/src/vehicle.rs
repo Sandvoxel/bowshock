@@ -225,11 +225,11 @@ pub struct MassProps {
     pub mass: f64,
     /// Centre of gravity station from the tip (m).
     pub cg: f64,
-    /// Longitudinal (pitch/yaw) moment of inertia about a transverse axis through the lump's own CG (kg m^2). Zero (or an
-    /// unset lump) is replaced by a uniform-rod estimate over the flying stack by the rigid-body flight model.
+    /// Longitudinal (pitch/yaw) moment of inertia about a transverse axis through the lump's own CG (kg m^2). If the whole
+    /// flying stack has none (every lump zero) the rigid-body flight model assumes a uniform rod over the stack's length.
     pub i_long: f64,
-    /// Rotational (roll) moment of inertia about the long axis (kg m^2). Zero is replaced by a thin-cylinder estimate of the
-    /// reference diameter.
+    /// Rotational (roll) moment of inertia about the long axis (kg m^2). If the whole flying stack has none the rigid-body flight
+    /// model assumes a solid cylinder of the reference diameter.
     pub i_rot: f64,
 }
 

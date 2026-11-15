@@ -15,7 +15,7 @@ use crate::tokens::{CONTROL_H, SPACE_1, SPACE_2, SPACE_3, TEXT_BODY, TEXT_LABEL,
 use crate::units::UnitSystem;
 use crate::widgets::button::{button, icon_button, Weight};
 use crate::widgets::field;
-use crate::widgets::glyph::Mark;
+use crate::widgets::glyph::{icon, Mark, Tone};
 use crate::widgets::segmented::segmented;
 
 /// Width of the unit system select.
@@ -49,13 +49,11 @@ pub fn top_bar(ctx: &Ctx) -> Element<'_, Message> {
     } else {
         Space::new().width(7).boxed()
     };
-    let file = row![
-        text(ctx.doc.title()).font(MONO).size(TEXT_BODY).style(theme::ink),
-        text(format!(".{EXTENSION}")).font(MONO).size(TEXT_BODY).style(theme::faint),
-        dirty,
-    ]
-    .spacing(SPACE_1 + 2.0)
-    .align_y(Center);
+    let ext: Element<'_, Message> =
+        if ctx.doc.path().is_some() { text(format!(".{EXTENSION}")).font(MONO).size(TEXT_BODY).style(theme::faint).boxed() } else { Space::new().boxed() };
+    let caret: Element<'_, Message> = icon(Mark::CaretDown, if ctx.file_menu { Tone::Accent } else { Tone::Faint }, 11.0);
+    let name = row![text(ctx.doc.title()).font(MONO).size(TEXT_BODY).style(theme::ink), ext, dirty, caret].spacing(SPACE_1 + 2.0).align_y(Center);
+    let file = iced::widget::button(name).padding([4.0, SPACE_2]).style(theme::ghost).on_press(Message::ToggleFileMenu);
 
     let undo = icon_button(Mark::Undo, "Undo").shortcut(UNDO_TIP);
     let redo = icon_button(Mark::Redo, "Redo").shortcut(REDO_TIP);

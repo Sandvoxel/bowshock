@@ -791,6 +791,14 @@ impl PlotView<'_> {
             let Some(y_end) = y_end else { continue };
             match at {
                 LabelAt::Margin => margin.push((ymap(y_end), s.label_text.clone().unwrap_or_else(|| s.name.clone()), s.color.resolve(t))),
+                LabelAt::End => {
+                    let text = s.label_text.as_deref().unwrap_or(&s.name);
+                    let w = mono_width(text.chars().count(), FONT_SMALL);
+                    let (px, py) = (layout.px(x_end), ymap(y_end));
+                    let (x, ax) = if px + 6.0 + w <= right { (px + 6.0, Alignment::Left) } else { (px - 6.0, Alignment::Right) };
+                    let y = if py - 12.0 < plot.y + 22.0 { (py + 12.0).min(bottom - 4.0) } else { py - 8.0 };
+                    put(f, text, Point::new(x, y), t.ink_muted, FONT_SMALL, ax, alignment::Vertical::Center, MONO);
+                }
                 LabelAt::Inside => {
                     let x_label = (w1 - (w1 - w0) * 40.0 / f64::from(plot.width)).max(w0);
                     let y = s.value_at(x_label.min(x_end)).unwrap_or(y_end);
@@ -817,6 +825,22 @@ impl PlotView<'_> {
         for (y, name, color) in margin {
             f.fill_rectangle(Point::new(right + 6.0, y - 4.0), Size::new(8.0, 8.0), color);
             put(f, &name, Point::new(right + 18.0, y), t.ink_muted, FONT_TICK, Alignment::Left, alignment::Vertical::Center, SANS);
+        }
+
+        // Key of the line styles, in the title row after the title, on a backing so no line strikes through it.
+        if !panel.key.is_empty() {
+            let tr = title_rect(panel, plot);
+            let y = tr.y + tr.height / 2.0;
+            let total: f32 = panel.key.iter().map(|(_, w)| 16.0 + 4.0 + mono_width(w.chars().count(), FONT_SMALL) + 12.0).sum();
+            let mut kx = tr.x + tr.width + 14.0;
+            if kx + total <= right {
+                f.fill_rectangle(Point::new(kx - 4.0, y - 8.0), Size::new(total, 16.0), t.bg_200);
+                for (style, word) in &panel.key {
+                    line(f, Point::new(kx, y), Point::new(kx + 16.0, y), t.ink_muted, 1.5, *style);
+                    put(f, word, Point::new(kx + 20.0, y), t.ink_muted, FONT_SMALL, Alignment::Left, alignment::Vertical::Center, MONO);
+                    kx += 16.0 + 4.0 + mono_width(word.chars().count(), FONT_SMALL) + 12.0;
+                }
+            }
         }
     }
 
@@ -990,7 +1014,7 @@ fn draw_tooltip(f: &mut Frame, t: &Tokens, plot: Rectangle, cx: f32, xs: &str, p
     for (k, ((i, _), value)) in rows.iter().zip(&values).enumerate() {
         let y = origin.y + 5.0 + row_h * (k as f32 + 1.5);
         let s = &panel.series[*i];
-        f.fill_rectangle(Point::new(origin.x + TAG_PAD, y - 4.0), Size::new(8.0, 8.0), s.color.resolve(t));
+        line(f, Point::new(origin.x + TAG_PAD, y), Point::new(origin.x + TAG_PAD + 10.0, y), s.color.resolve(t), 2.0, s.style);
         put(f, &s.name, Point::new(origin.x + TAG_PAD + 14.0, y), t.ink, FONT_TICK, left, mid, MONO);
         put(f, value, Point::new(origin.x + w - TAG_PAD, y), t.ink, FONT_TICK, Alignment::Right, mid, MONO);
     }
