@@ -686,12 +686,20 @@ fn check_grid(case: &Case) -> Result<(), Error> {
 const FARFIELD_DP_FAILED: f64 = 1.0;
 
 /// Quality of a solver result, first match wins. A point is [`Quality::Failed`] when the run stopped on a non-finite or blown-up
-/// state, when the density or pressure of a cell is not positive, when the total drag is not finite, or when the pressure at the
+/// state, when the density or pressure of a cell is not positive, when the total drag is not finite, when the pressure at the
 /// outer boundaries deviates from the free stream by more than 100 % (`farfield_dp > 1`): the far field of a body in a flow of
-/// this size is undisturbed at that distance, so such a state is garbage even if it is finite and the run ended `Stalled`.
+/// this size is undisturbed at that distance, so such a state is garbage even if it is finite and the run ended `Stalled`; or
+/// when the area-mean base Cp is below the vacuum limit `-2 / (GAMMA M^2)` (the extrapolated base pressure is not positive).
 fn quality(d: &PointResult, drag: &Drag) -> Quality {
+    let below_vacuum = d.cp_base < -2.0 / (GAMMA * d.mach * d.mach); // false for NaN
     let positive = |x: f64| x > 0.0; // false for NaN
-    if d.stop_reason == StopReason::NonFinite || !positive(d.min_rho) || !positive(d.min_p) || !drag.total.is_finite() || d.farfield_dp > FARFIELD_DP_FAILED {
+    if d.stop_reason == StopReason::NonFinite
+        || !positive(d.min_rho)
+        || !positive(d.min_p)
+        || !drag.total.is_finite()
+        || d.farfield_dp > FARFIELD_DP_FAILED
+        || below_vacuum
+    {
         return Quality::Failed;
     }
     match d.stop_reason {
@@ -802,5 +810,25 @@ mod tests {
         }
         assert_eq!(quality(&result(StopReason::NonFinite, 0.0), &drag(0.3)), Quality::Failed);
         assert_eq!(quality(&result(StopReason::ResidualDrop, 0.0), &drag(f64::NAN)), Quality::Failed);
+    }
+
+    #[test]
+    fn quality_fails_on_a_base_cp_below_the_vacuum_limit() {
+        let mut r = result(StopReason::ResidualDrop, 0.0);
+        r.mach = 1.65;
+        let limit = -2.0 / (GAMMA * 1.65 * 1.65);
+        for (stop, expect) in
+            [(StopReason::ResidualDrop, Quality::Converged), (StopReason::CdStationary, Quality::Stationary), (StopReason::MaxIterations, Quality::Stalled)]
+        {
+            r.stop_reason = stop;
+            r.cp_base = -1473.0;
+            assert_eq!(quality(&r, &drag(0.3)), Quality::Failed);
+            r.cp_base = limit * (1.0 - 1e-9);
+            assert_eq!(quality(&r, &drag(0.3)), expect);
+            r.cp_base = limit * (1.0 + 1e-9);
+            assert_eq!(quality(&r, &drag(0.3)), Quality::Failed);
+            r.cp_base = f64::NAN;
+            assert_eq!(quality(&r, &drag(0.3)), expect);
+        }
     }
 }
