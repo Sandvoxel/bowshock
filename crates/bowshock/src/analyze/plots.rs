@@ -10,7 +10,7 @@ use super::overlay::{Field, Overlay};
 use super::readout::{config_color, drag_parts, other_visible, DRAG_PARTS};
 use crate::units::{Quantity, Unit, UnitSystem};
 use crate::widgets::ground_track::{GroundTrack, Track, TrackPoint, Wind};
-use crate::widgets::plot::{Axis, EventMark, HLine, LabelAt, LineStyle, Panel, PlotGroup, Series, SeriesColor, StackedFill, Tag, YTicks};
+use crate::widgets::plot::{Axis, EventMark, EventRole, HLine, LabelAt, LineStyle, Panel, PlotGroup, Series, SeriesColor, StackedFill, Tag, YTicks};
 
 /// Width kept free at the right of the plots for direct labels.
 const MARGIN_PX: f32 = 130.0;
@@ -322,7 +322,7 @@ fn flutter(out: &Output, units: UnitSystem) -> PlotGroup {
             let mach: Vec<(f64, f64)> = points.iter().map(|p| (p.t, 1.5 * f.trace.atmosphere.at_agl(p.altitude).speed_of_sound / vel.to_si)).collect();
             speed = speed.with(Series::new("Mach 1.5", mach).color(SeriesColor::Warn).style(LineStyle::Dashed).label_as("Mach 1.5 limit", LabelAt::End));
             let worst = f.trace.worst();
-            group_events.push(EventMark::new(worst.t, format!("Min {:.2}×", worst.margin())).accent());
+            group_events.push(EventMark::new(worst.t, format!("Min {:.2}×", worst.margin())).role(EventRole::Highlight));
         } else {
             speed = speed.with(Series::new(format!("{} flutter", run.name), vf).color(color).label_margin());
             speed = speed.with(Series::new(format!("{} speed", run.name), v).color(color).style(LineStyle::Dashed));
@@ -334,7 +334,6 @@ fn flutter(out: &Output, units: UnitSystem) -> PlotGroup {
     let axis = Axis { label: "Time".into(), unit: "s".into(), prefix: String::new(), decimals: 1 };
     let mut group = PlotGroup::new(axis).panel(speed).panel(margin);
     group.events = group_events;
-    group.event_tags = true;
     group.right_margin = if single { 0.0 } else { MARGIN_PX };
     if end > 0.0 {
         group.x_range = Some((0.0, end));

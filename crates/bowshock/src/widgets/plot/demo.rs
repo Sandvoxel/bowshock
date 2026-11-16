@@ -17,7 +17,9 @@
 use iced::widget::{column, container, row, text};
 use iced::{Element, Length, Widget};
 
-use super::{header, legend, Axis, EventMark, HLine, LabelAt, LineStyle, Panel, Phase, PlotGroup, PlotMessage, PlotState, PlotView, Series, SeriesColor, Tag};
+use super::{
+    header, legend, Axis, EventMark, EventRole, HLine, LabelAt, LineStyle, Panel, Phase, PlotGroup, PlotMessage, PlotState, PlotView, Series, SeriesColor, Tag,
+};
 use crate::theme::{self, MONO};
 use crate::tokens;
 use crate::widgets::ground_track::{GroundMessage, GroundTrack, GroundTrackView, Track, TrackPoint, Wind};
@@ -107,12 +109,12 @@ impl Flight {
 
     fn events(&self) -> Vec<EventMark> {
         vec![
-            EventMark::new(self.rail_exit, "Rail exit"),
-            EventMark::new(self.burnout, "Burnout"),
-            EventMark::new(self.apogee, "Apogee").accent(),
-            EventMark::new(self.drogue, "Drogue"),
-            EventMark::new(self.main, "Main"),
-            EventMark::new(self.landing, "Landing"),
+            EventMark::new(self.rail_exit, "Rail exit").role(EventRole::RailExit),
+            EventMark::new(self.burnout, "Burnout").role(EventRole::Burnout),
+            EventMark::new(self.apogee, "Apogee").role(EventRole::Apogee),
+            EventMark::new(self.drogue, "Drogue").role(EventRole::Deploy),
+            EventMark::new(self.main, "Main").role(EventRole::Deploy),
+            EventMark::new(self.landing, "Landing").role(EventRole::Landing),
         ]
     }
 

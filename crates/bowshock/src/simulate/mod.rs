@@ -784,7 +784,9 @@ impl State {
             let note = text(format!("events and timeline: {reference} (reference)")).font(MONO).size(TEXT_LABEL).style(theme::faint);
             parts.push(bar(row![legend(&items), Space::new().width(Fill), note].align_y(iced::Center).boxed()));
         }
-        let canvas = container(PlotView::new(group, &self.plot).pinned(self.picker.is_some()).element().map(Message::Plot)).width(Fill).height(Fill);
+        let canvas = container(PlotView::new(group, &self.plot).pinned(self.picker.is_some()).selection_chip(true).element().map(Message::Plot))
+            .width(Fill)
+            .height(Fill);
         parts.push(match &self.picker {
             Some(picker) => stack![canvas, picker.view(&self.layout, imperial)].boxed(),
             None => canvas.boxed(),

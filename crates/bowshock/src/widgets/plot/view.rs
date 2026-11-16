@@ -32,6 +32,18 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(350);
 /// Advance of a MONO glyph, in em (IBM Plex Mono is 600/1000).
 const GLYPH_EM: f32 = 0.6;
 const TAG_H: f32 = 20.0;
+/// Distance between the staggered rows of event tags above the first plot.
+const TAG_ROW_PITCH: f32 = 14.0;
+/// Height of one event tag.
+const EVENT_TAG_H: f32 = 13.0;
+/// Width of a chip that stands for several events.
+const COUNT_CHIP_W: f32 = 20.0;
+/// Space kept between neighbouring event tags.
+const TAG_GAP: f32 = 3.0;
+/// Longest event name on a tag, in characters.
+const TAG_CHARS: usize = 10;
+/// How near (px) the pointer must be to an event line to light it.
+const EVENT_REACH: f32 = 4.0;
 const TAG_PAD: f32 = 6.0;
 const FONT_TICK: f32 = TEXT_LABEL;
 const FONT_SMALL: f32 = 10.0;
@@ -42,12 +54,13 @@ pub struct PlotView<'a> {
     group: &'a PlotGroup,
     state: &'a PlotState,
     pinned: bool,
+    selection_chip: bool,
 }
 
 impl<'a> PlotView<'a> {
     /// A view of `group` in the zoom/hover/band state `state`.
     pub fn new(group: &'a PlotGroup, state: &'a PlotState) -> Self {
-        PlotView { group, state, pinned: false }
+        PlotView { group, state, pinned: false, selection_chip: false }
     }
 
     /// Keeps every editable panel's controls (`+ series`, move, remove) visible, as while a source picker is open; otherwise
@@ -57,10 +70,31 @@ impl<'a> PlotView<'a> {
         self
     }
 
+    /// Draws the selection's range, width and key hints as a chip on the band, for a screen whose header carries no hint row
+    /// ([`header_parts`](super::header_parts) with `compact`), so a drag costs no layout space.
+    pub fn selection_chip(mut self, on: bool) -> Self {
+        self.selection_chip = on;
+        self
+    }
+
     /// The canvas as an element filling its space; `.map` it into the app's message.
     pub fn element(self) -> Element<'a, PlotMessage> {
         canvas::Canvas::new(self).width(Fill).height(Fill).boxed()
     }
+}
+
+/// The selection chip: `31.1 – 67.6 s · Δ 36.54 s   Enter zoom · Esc clear` in `accent` on a framed backing, centred on the band
+/// (kept inside the plots) just under the first panel's header row.
+fn draw_selection_chip(f: &mut Frame, t: &Tokens, group: &PlotGroup, layout: &Layout, (a, b): (f64, f64)) {
+    let Some(first) = layout.plots.first() else { return };
+    let text = format!("{} · Δ {}   Enter zoom · Esc clear", group.x.format_range(a, b), group.x.format_width(b - a));
+    let w = mono_width(text.chars().count(), FONT_SMALL) + 2.0 * TAG_PAD;
+    let mid = (layout.px(a).max(layout.x0) + layout.px(b).min(layout.x1)) / 2.0;
+    let x = (mid - w / 2.0).clamp(layout.x0, (layout.x1 - w).max(layout.x0)).round();
+    let y = (first.y + CHIP_H + 8.0).round();
+    f.fill_rectangle(Point::new(x, y), Size::new(w, 16.0), t.bg_200);
+    f.stroke_rectangle(Point::new(x + 0.5, y + 0.5), Size::new(w - 1.0, 15.0), Stroke::default().with_color(t.accent).with_width(1.0));
+    put(f, &text, Point::new(x + TAG_PAD, y + 8.0), t.accent, FONT_SMALL, Alignment::Left, alignment::Vertical::Center, MONO);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -85,6 +119,10 @@ struct Layout {
     plots: Vec<Rectangle>,
     top: f32,
     bottom: f32,
+    /// Rows of event tags above the first plot (0 without events, 1 for a lone event, else 2).
+    tag_rows: usize,
+    /// Height of that tag block.
+    tags_h: f32,
 }
 
 impl Layout {
@@ -103,19 +141,34 @@ impl Layout {
         };
         let top = strip.map_or(0.0, |(r, _)| r.y + r.height + STRIP_GAP);
         let bottom = (size.height - 2.0).max(top);
+        // The staggered rows of event tags above the first plot.
+        let tag_rows = match group.events.len() {
+            0 => 0,
+            1 => 1,
+            _ => 2,
+        };
+        let tags_h = if tag_rows == 0 { 0.0 } else { 2.0 + TAG_ROW_PITCH * tag_rows as f32 };
         let total: f32 = group.panels.iter().map(|p| p.weight.max(0.01)).sum();
         let mut y = top;
         let plots = group
             .panels
             .iter()
-            .map(|p| {
+            .enumerate()
+            .map(|(i, p)| {
                 let slot = (bottom - top) * p.weight.max(0.01) / total.max(0.01);
-                let plot = Rectangle::new(Point::new(x0, y + PANEL_TOP), Size::new(x1 - x0, (slot - PANEL_TOP - TICK_H).max(8.0)));
+                let lead = if i == 0 && tag_rows > 0 { tags_h + 2.0 } else { PANEL_TOP };
+                let plot = Rectangle::new(Point::new(x0, y + lead), Size::new(x1 - x0, (slot - lead - TICK_H).max(8.0)));
                 y += slot;
                 plot
             })
             .collect();
-        Layout { x0, x1, window: state.window(), full: state.full(), strip, plots, top, bottom }
+        Layout { x0, x1, window: state.window(), full: state.full(), strip, plots, top, bottom, tag_rows, tags_h }
+    }
+
+    /// The block of event tag rows above the first plot, when there are events.
+    fn tag_row(&self) -> Option<Rectangle> {
+        let first = self.plots.first()?;
+        (self.tags_h > 0.0).then(|| Rectangle::new(Point::new(self.x0, first.y - self.tags_h - 2.0), Size::new(self.x1 - self.x0, self.tags_h)))
     }
 
     fn width(&self) -> f32 {
@@ -168,6 +221,8 @@ pub struct Interaction {
     hovering: bool,
     /// The last pointer position over the canvas.
     pointer: Option<Point>,
+    /// The events under the pointer (what is highlighted), to redraw when they change.
+    hot: Vec<usize>,
     drag: Option<Drag>,
     last_click: Option<(Instant, Point)>,
     /// A Cmd/Ctrl + scroll zoom is in progress (its level closes when the modifier is released).
@@ -191,6 +246,133 @@ enum Drag {
 impl Interaction {
     fn shaping_band(&self) -> bool {
         matches!(self.drag, Some(Drag::Band { moved: true, .. } | Drag::Edge { .. } | Drag::Slide { .. }))
+    }
+}
+
+/// An event of the strip: its tick, text and where the text was placed (`None` when no free spot).
+struct StripLabel {
+    event: usize,
+    px: f32,
+    text: String,
+    width: f32,
+    at: Option<(f32, usize)>,
+}
+
+impl PlotView<'_> {
+    /// The strip's events in x order, each with its label spot (see [`place_event_labels`]).
+    fn strip_labels(&self, layout: &Layout, rect: Rectangle) -> Vec<StripLabel> {
+        let mut order: Vec<usize> = (0..self.group.events.len()).collect();
+        order.sort_by(|&a, &b| self.group.events[a].x.total_cmp(&self.group.events[b].x));
+        let texts: Vec<String> =
+            order.iter().map(|&i| format!("{} {}", self.group.events[i].label.to_uppercase(), fmt_fixed(self.group.events[i].x, 1))).collect();
+        let wants: Vec<LabelWant> = order
+            .iter()
+            .zip(&texts)
+            .map(|(&i, text)| LabelWant {
+                px: crisp(layout.strip_px(self.group.events[i].x)),
+                width: mono_width(text.chars().count(), FONT_SMALL),
+                accent: self.group.events[i].is_key(),
+            })
+            .collect();
+        let placed = place_event_labels(&wants, rect.x, rect.x + rect.width);
+        order
+            .into_iter()
+            .zip(texts)
+            .zip(wants.iter().zip(placed))
+            .map(|((event, text), (want, at))| StripLabel { event, px: want.px, text, width: want.width, at })
+            .collect()
+    }
+
+    /// The events inside the window, in x order.
+    fn visible_events(&self, layout: &Layout) -> Vec<usize> {
+        let mut v: Vec<usize> =
+            (0..self.group.events.len()).filter(|&i| self.group.events[i].x >= layout.window.0 && self.group.events[i].x <= layout.window.1).collect();
+        v.sort_by(|&a, &b| self.group.events[a].x.total_cmp(&self.group.events[b].x));
+        v
+    }
+
+    /// The tags over the first panel: the events each stands for and its rectangle. Empty without events or panels.
+    fn tag_boxes(&self, layout: &Layout) -> Vec<(Vec<usize>, Rectangle)> {
+        let Some(row) = layout.tag_row() else { return Vec::new() };
+        let visible = self.visible_events(layout);
+        let wants: Vec<TagWant> = visible
+            .iter()
+            .map(|&i| {
+                let e = &self.group.events[i];
+                (crisp(layout.px(e.x)), mono_width(tag_text(&e.label).chars().count(), FONT_SMALL) + 8.0, e.is_key())
+            })
+            .collect();
+        layout_event_tags(&wants, row.x, row.x + row.width, layout.tag_rows)
+            .into_iter()
+            .map(|tag| {
+                let origin = Point::new(tag.x, row.y + 1.0 + TAG_ROW_PITCH * tag.row as f32);
+                (tag.members.iter().map(|&k| visible[k]).collect(), Rectangle::new(origin, Size::new(tag.w, EVENT_TAG_H)))
+            })
+            .collect()
+    }
+
+    /// The events under `p`: a tag's (all of a count chip's), a line's within [`EVENT_REACH`] in any panel, or a strip label's
+    /// or tick's. Empty over a panel chip.
+    fn hot_events(&self, layout: &Layout, p: Point) -> Vec<usize> {
+        if self.group.events.is_empty() || self.chip_at(layout, p).is_some() {
+            return Vec::new();
+        }
+        if let Some((rect, StripKind::Timeline)) = layout.strip {
+            if !rect.contains(p) {
+                return self.plots_hot(layout, p);
+            }
+            let labels = self.strip_labels(layout, rect);
+            let on_label = |l: &&StripLabel| {
+                l.at.is_some_and(|(start, row)| {
+                    Rectangle::new(Point::new(start, if row == 0 { rect.y } else { rect.y + 28.0 }), Size::new(l.width, 12.0)).contains(p)
+                })
+            };
+            if let Some(l) = labels.iter().find(on_label) {
+                return vec![l.event];
+            }
+            let on_tick = |l: &&StripLabel| (l.px - p.x).abs() <= EVENT_REACH && p.y >= rect.y + 10.0 && p.y <= rect.y + 30.0;
+            return labels.iter().filter(on_tick).min_by(|a, b| (a.px - p.x).abs().total_cmp(&(b.px - p.x).abs())).map(|l| vec![l.event]).unwrap_or_default();
+        }
+        self.plots_hot(layout, p)
+    }
+
+    /// [`PlotView::hot_events`] over the plots and the tag row above them.
+    fn plots_hot(&self, layout: &Layout, p: Point) -> Vec<usize> {
+        let Some((first, last)) = layout.plots_span() else { return Vec::new() };
+        if p.x < layout.x0 || p.x > layout.x1 || p.y < first - layout.tags_h - 2.0 || p.y > last {
+            return Vec::new();
+        }
+        if let Some((events, _)) = self.tag_boxes(layout).into_iter().find(|(_, r)| r.contains(p)) {
+            return events;
+        }
+        let visible = self.visible_events(layout);
+        let pxs: Vec<f32> = visible.iter().map(|&i| crisp(layout.px(self.group.events[i].x))).collect();
+        nearest_line(&pxs, p.x, EVENT_REACH).map(|k| vec![visible[k]]).unwrap_or_default()
+    }
+
+    /// The tags over the first panel, each outlined in its event's colour (a count chip in `ink-muted`); highlighted ones filled.
+    fn draw_event_tags(&self, f: &mut Frame, t: &Tokens, layout: &Layout, lit: &[usize]) {
+        for (events, rect) in self.tag_boxes(layout) {
+            let single = events.len() == 1;
+            let color = if single { self.group.events[events[0]].role.color().resolve(t) } else { t.ink_muted };
+            let is_lit = events.iter().any(|e| lit.contains(e));
+            f.fill_rectangle(rect.position(), rect.size(), if is_lit { color } else { t.bg_200 });
+            f.stroke_rectangle(
+                Point::new(rect.x + 0.5, rect.y + 0.5),
+                Size::new(rect.width - 1.0, rect.height - 1.0),
+                Stroke::default().with_color(color).with_width(1.0),
+            );
+            let text = if single { tag_text(&self.group.events[events[0]].label) } else { events.len().to_string() };
+            let ink = if is_lit {
+                t.bg_200
+            } else if single {
+                color
+            } else {
+                t.ink
+            };
+            let (at, ax) = if single { (rect.x + 4.0, Alignment::Left) } else { (rect.x + rect.width / 2.0, Alignment::Center) };
+            put(f, &text, Point::new(at, rect.y + rect.height / 2.0), ink, FONT_SMALL, ax, alignment::Vertical::Center, MONO);
+        }
     }
 }
 
@@ -288,7 +470,11 @@ impl PlotView<'_> {
                 }
             };
         }
-        match p.filter(|p| layout.in_plots(*p)) {
+        // The events under the pointer change as it moves over lines, tags and the strip, which may not move the crosshair.
+        let hot = p.map(|p| self.hot_events(layout, p)).unwrap_or_default();
+        let relit = hot != st.hot;
+        st.hot = hot;
+        let action = match p.filter(|p| layout.in_plots(*p)) {
             Some(p) => {
                 st.hovering = true;
                 let x = layout.x_at(p.x);
@@ -296,7 +482,8 @@ impl PlotView<'_> {
                 (!unchanged).then(|| Action::publish(PlotMessage::Hover(Some(x))))
             }
             None => std::mem::take(&mut st.hovering).then(|| Action::publish(PlotMessage::Hover(None))),
-        }
+        };
+        action.or_else(|| relit.then(Action::request_redraw))
     }
 }
 
@@ -355,8 +542,12 @@ impl canvas::Program<PlotMessage> for PlotView<'_> {
             }
             Event::Mouse(mouse::Event::CursorLeft) => {
                 st.pointer = None;
+                let unlit = !std::mem::take(&mut st.hot).is_empty();
                 if st.drag.is_none() {
-                    std::mem::take(&mut st.hovering).then(|| Action::publish(PlotMessage::Hover(None)))
+                    match std::mem::take(&mut st.hovering) {
+                        true => Some(Action::publish(PlotMessage::Hover(None))),
+                        false => unlit.then(Action::request_redraw),
+                    }
                 } else {
                     None
                 }
@@ -453,24 +644,36 @@ impl canvas::Program<PlotMessage> for PlotView<'_> {
         if layout.top > 0.0 {
             frame.fill_rectangle(Point::ORIGIN, Size::new(bounds.width, layout.top), t.bg_100);
         }
+        // The pointer is also tracked from events, so a hosted canvas without a live cursor (the headless driver) still shows hover.
+        // `lit` is the events under it: their lines, tags and strip ticks highlight together.
+        let hot = cursor.position_in(bounds).or(st.pointer);
+        let lit = match (hot, &st.drag) {
+            (Some(p), None) => self.hot_events(&layout, p),
+            _ => Vec::new(),
+        };
         if let Some((rect, kind)) = layout.strip {
-            self.draw_strip(&mut frame, t, &layout, rect, kind);
+            self.draw_strip(&mut frame, t, &layout, rect, kind, &lit);
         }
         for ((panel, plot), range) in self.group.panels.iter().zip(&layout.plots).zip(&ranges) {
-            self.draw_panel(&mut frame, t, &layout, panel, *plot, *range);
+            self.draw_panel(&mut frame, t, &layout, panel, *plot, *range, &lit);
         }
-        // The pointer is also tracked from events, so a hosted canvas without a live cursor (the headless driver) still shows hover.
-        let hot = cursor.position_in(bounds).or(st.pointer);
         for (panel, plot) in self.group.panels.iter().zip(&layout.plots) {
             self.draw_chrome(&mut frame, t, panel, *plot, hot);
         }
+        self.draw_event_tags(&mut frame, t, &layout, &lit);
         if let Some(band) = self.state.band() {
             self.draw_band(&mut frame, t, &layout, band);
+            if self.selection_chip {
+                draw_selection_chip(&mut frame, t, self.group, &layout, band);
+            }
         }
-        if let (Some(x), false) = (self.state.hover_x(), st.shaping_band()) {
+        if let (Some(x), false, true) = (self.state.hover_x(), st.shaping_band(), lit.is_empty()) {
             if x >= layout.window.0 && x <= layout.window.1 {
                 self.draw_hover(&mut frame, t, &layout, &ranges, x);
             }
+        }
+        if let (Some(p), false) = (hot, lit.is_empty()) {
+            draw_event_tooltip(&mut frame, t, self.group, bounds.size(), p, &lit);
         }
         vec![frame.into_geometry()]
     }
@@ -610,7 +813,7 @@ fn decimate(points: Vec<(f64, f64)>, w0: f64, w1: f64, columns: usize) -> Vec<(f
 }
 
 impl PlotView<'_> {
-    fn draw_strip(&self, f: &mut Frame, t: &Tokens, layout: &Layout, rect: Rectangle, kind: StripKind) {
+    fn draw_strip(&self, f: &mut Frame, t: &Tokens, layout: &Layout, rect: Rectangle, kind: StripKind, lit: &[usize]) {
         let (ink_faint, left) = (t.ink_faint, Alignment::Left);
         let zoomed = self.state.is_zoomed();
         match kind {
@@ -624,23 +827,18 @@ impl PlotView<'_> {
                         f.fill_rectangle(Point::new(a, bar.0), Size::new(b - a, bar.1), ph.color.resolve(t));
                     }
                 }
-                // Event ticks; labels sit above and below the bar, the accented event (apogee) always shown and the others
-                // shifted to the other row or the other side of their tick to avoid it.
-                let mut order: Vec<_> = self.group.events.iter().collect();
-                order.sort_by(|a, b| a.x.total_cmp(&b.x));
-                let labels: Vec<String> = order.iter().map(|e| format!("{} {}", e.label.to_uppercase(), fmt_fixed(e.x, 1))).collect();
-                let wants: Vec<LabelWant> = order
-                    .iter()
-                    .zip(&labels)
-                    .map(|(e, label)| LabelWant { px: crisp(layout.strip_px(e.x)), width: mono_width(label.chars().count(), FONT_SMALL), accent: e.accent })
-                    .collect();
-                let placed = place_event_labels(&wants, rect.x, rect.x + rect.width);
-                for ((e, label), (want, at)) in order.iter().zip(&labels).zip(wants.iter().zip(placed)) {
-                    let color = if e.accent { t.accent } else { t.ink_muted };
-                    line(f, Point::new(want.px, rect.y + 13.0), Point::new(want.px, rect.y + 27.0), color, 1.0, LineStyle::Solid);
-                    let Some((start, row)) = at else { continue };
+                // Event ticks in each event's colour; labels sit above and below the bar, the key event (apogee) always shown and
+                // the others shifted to the other row or the other side of their tick to avoid it.
+                for l in self.strip_labels(layout, rect) {
+                    let color = self.group.events[l.event].role.color().resolve(t);
+                    let is_lit = lit.contains(&l.event);
+                    line(f, Point::new(l.px, rect.y + 13.0), Point::new(l.px, rect.y + 27.0), color, if is_lit { 2.0 } else { 1.0 }, LineStyle::Solid);
+                    let Some((start, row)) = l.at else { continue };
                     let (y, ay) = if row == 0 { (rect.y + 11.0, alignment::Vertical::Bottom) } else { (rect.y + 29.0, alignment::Vertical::Top) };
-                    put(f, label, Point::new(start, y), if e.accent { t.accent } else { ink_faint }, FONT_SMALL, left, ay, MONO);
+                    if is_lit {
+                        f.fill_rectangle(Point::new(start - 3.0, if row == 0 { rect.y } else { rect.y + 28.0 }), Size::new(l.width + 6.0, 12.0), t.bg_400);
+                    }
+                    put(f, &l.text, Point::new(start, y), color, FONT_SMALL, left, ay, MONO);
                 }
             }
             StripKind::Mini => {
@@ -679,7 +877,7 @@ impl PlotView<'_> {
         }
     }
 
-    fn draw_panel(&self, f: &mut Frame, t: &Tokens, layout: &Layout, panel: &Panel, plot: Rectangle, (ylo, yhi): (f64, f64)) {
+    fn draw_panel(&self, f: &mut Frame, t: &Tokens, layout: &Layout, panel: &Panel, plot: Rectangle, (ylo, yhi): (f64, f64), lit: &[usize]) {
         let (w0, w1) = layout.window;
         let bottom = plot.y + plot.height;
         let right = plot.x + plot.width;
@@ -786,12 +984,15 @@ impl PlotView<'_> {
             }
         }
 
-        // Event lines, dotted, across every panel.
-        for e in self.group.events.iter().filter(|e| e.x >= w0 && e.x <= w1) {
+        // Event lines in each event's colour and stroke (the hot ones solid and heavier); the first panel's reach up to the tags.
+        let top = if layout.tags_h > 0.0 && self.group.panels.first().is_some_and(|p| std::ptr::eq(p, panel)) { plot.y - layout.tags_h - 1.0 } else { plot.y };
+        for (i, e) in self.group.events.iter().enumerate().filter(|(_, e)| e.x >= w0 && e.x <= w1) {
             let x = crisp(layout.px(e.x));
-            line(f, Point::new(x, plot.y), Point::new(x, bottom), t.ink_faint, 1.0, LineStyle::Dotted);
-            if self.group.event_tags {
-                put(f, &e.label.to_uppercase(), Point::new(x + 4.0, bottom - 3.0), t.ink_faint, FONT_SMALL, Alignment::Left, alignment::Vertical::Bottom, MONO);
+            let color = e.role.color().resolve(t);
+            if lit.contains(&i) {
+                line(f, Point::new(x, top), Point::new(x, bottom), color, 2.0, LineStyle::Solid);
+            } else {
+                line(f, Point::new(x, top), Point::new(x, bottom), Color { a: 0.9, ..color }, 1.0, e.role.style());
             }
         }
 
@@ -1077,6 +1278,121 @@ fn draw_tooltip(f: &mut Frame, t: &Tokens, plot: Rectangle, cx: f32, xs: &str, p
         line(f, Point::new(origin.x + TAG_PAD, y), Point::new(origin.x + TAG_PAD + 10.0, y), s.color.resolve(t), 2.0, s.style);
         put(f, &s.name, Point::new(origin.x + TAG_PAD + 14.0, y), t.ink, FONT_TICK, left, mid, MONO);
         put(f, value, Point::new(origin.x + w - TAG_PAD, y), t.ink, FONT_TICK, Alignment::Right, mid, MONO);
+    }
+}
+
+/// Where one tag sits in a row `x0..x1`: the line's x, the tag's width and whether the event is a key one (apogee), whose
+/// tag is never folded into a count chip.
+type TagWant = (f32, f32, bool);
+
+/// One tag over the first panel: a single event's short name, or a count chip for several that would not fit side by side.
+/// `members` index the `wants` given to [`layout_event_tags`]; `x` is the left edge and `row` the stagger row (0 is the top).
+#[derive(Debug, Clone, PartialEq)]
+struct EventTag {
+    members: Vec<usize>,
+    x: f32,
+    w: f32,
+    row: usize,
+    /// Sits left of its line.
+    flipped: bool,
+    key: bool,
+}
+
+/// Lays out the tags of `wants` (`(line x, tag width, key)` in ascending line order) in `rows` staggered rows spanning
+/// `x0..x1`. Key events are placed first, then the others left to right. A tag starts at its line (a flag to its right) in the
+/// top row, else in the next row down, else, flipped to the line's left (as at the end of the row), in the same order. A tag
+/// that fits nowhere folds into the nearest other tag that is not a key one, which becomes a count chip at the place its first
+/// tag held: the chip's hover lists every event it holds. Tags in one row never overlap (a [`TAG_GAP`] apart) and stay inside
+/// `x0..x1`.
+fn layout_event_tags(wants: &[TagWant], x0: f32, x1: f32, rows: usize) -> Vec<EventTag> {
+    let mut tags: Vec<EventTag> = Vec::new();
+    // A line on the last pixel column sits half a pixel past the row's end (lines are drawn on pixel centres): still inside.
+    let free = |tags: &[EventTag], x: f32, w: f32, row: usize| {
+        x >= x0 - 1.0 && x + w <= x1 + 1.0 && tags.iter().filter(|t| t.row == row).all(|t| x >= t.x + t.w + TAG_GAP || x + w + TAG_GAP <= t.x)
+    };
+    let mut order: Vec<usize> = (0..wants.len()).collect();
+    order.sort_by_key(|&i| !wants[i].2);
+    for i in order {
+        let (px, w, key) = wants[i];
+        let spot = [false, true].into_iter().flat_map(|flipped| (0..rows).map(move |row| (flipped, row))).find_map(|(flipped, row)| {
+            let x = if flipped { px - w } else { px };
+            free(&tags, x, w, row).then_some((x, row, flipped))
+        });
+        if let Some((x, row, flipped)) = spot {
+            tags.push(EventTag { members: vec![i], x, w, row, flipped, key });
+            continue;
+        }
+        let centre = |t: &EventTag| (t.x + t.w / 2.0 - px).abs();
+        let nearest = |only_plain: bool| {
+            tags.iter().enumerate().filter(|(_, t)| !(only_plain && t.key)).min_by(|a, b| centre(a.1).total_cmp(&centre(b.1))).map(|(k, _)| k)
+        };
+        match nearest(true).or_else(|| nearest(false)) {
+            Some(k) => {
+                let t = &mut tags[k];
+                if t.members.len() == 1 {
+                    // The chip keeps the side of its line the single tag was on.
+                    t.x = if t.flipped { t.x + t.w - COUNT_CHIP_W } else { t.x };
+                    t.w = COUNT_CHIP_W;
+                }
+                t.members.push(i);
+                t.members.sort_unstable();
+            }
+            None => tags.push(EventTag { members: vec![i], x: px.clamp(x0, (x1 - w).max(x0)), w, row: 0, flipped: false, key }),
+        }
+    }
+    tags.sort_by(|a, b| a.x.total_cmp(&b.x));
+    tags
+}
+
+/// The index in `pxs` of the line nearest to `x` within `reach` px.
+fn nearest_line(pxs: &[f32], x: f32, reach: f32) -> Option<usize> {
+    pxs.iter().enumerate().map(|(i, p)| (i, (p - x).abs())).filter(|&(_, d)| d <= reach).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(i, _)| i)
+}
+
+/// An event's short name for its tag: at most [`TAG_CHARS`] characters.
+fn tag_text(label: &str) -> String {
+    if label.chars().count() <= TAG_CHARS {
+        return label.to_string();
+    }
+    let mut s: String = label.chars().take(TAG_CHARS - 1).collect();
+    s.push('…');
+    s
+}
+
+/// `Apogee · 9.90 s · 629 m`: an event's tooltip row.
+fn event_tip(group: &PlotGroup, i: usize) -> String {
+    let e = &group.events[i];
+    let mut s = format!("{} · {}", e.label, group.x.format(e.x));
+    if let Some(detail) = &e.detail {
+        s.push_str(" · ");
+        s.push_str(detail);
+    }
+    s
+}
+
+/// The tooltip of the events under the pointer: one row per event (a swatch in its line colour and stroke, then name, x and the
+/// other quantities), and the group's note (`Reference flight · Nominal`) under them. It follows the pointer, kept inside `size`.
+fn draw_event_tooltip(f: &mut Frame, t: &Tokens, group: &PlotGroup, size: Size, at: Point, lit: &[usize]) {
+    let rows: Vec<String> = lit.iter().map(|&i| event_tip(group, i)).collect();
+    let note = group.events_note.as_deref();
+    let chars = rows.iter().map(|r| r.chars().count()).max().unwrap_or(0);
+    let w = 2.0 * TAG_PAD + 14.0 + mono_width(chars, FONT_TICK).max(note.map_or(0.0, |n| mono_width(n.chars().count(), FONT_SMALL)));
+    let h = 10.0 + 16.0 * rows.len() as f32 + note.map_or(0.0, |_| 16.0);
+    let x = if at.x + 12.0 + w > size.width - 2.0 { at.x - 12.0 - w } else { at.x + 12.0 }.max(2.0);
+    let y = if at.y + 18.0 + h > size.height - 2.0 { at.y - 12.0 - h } else { at.y + 18.0 }.max(2.0);
+    let origin = Point::new(x.round(), y.round());
+    f.fill_rectangle(origin, Size::new(w, h), t.bg_200);
+    f.stroke_rectangle(Point::new(origin.x + 0.5, origin.y + 0.5), Size::new(w - 1.0, h - 1.0), Stroke::default().with_color(t.line_200).with_width(1.0));
+    let mid = alignment::Vertical::Center;
+    for (k, (&i, row)) in lit.iter().zip(&rows).enumerate() {
+        let e = &group.events[i];
+        let cy = origin.y + 5.0 + 16.0 * (k as f32 + 0.5);
+        line(f, Point::new(origin.x + TAG_PAD, cy), Point::new(origin.x + TAG_PAD + 10.0, cy), e.role.color().resolve(t), 2.0, e.role.style());
+        put(f, row, Point::new(origin.x + TAG_PAD + 14.0, cy), t.ink, FONT_TICK, Alignment::Left, mid, MONO);
+    }
+    if let Some(note) = note {
+        let cy = origin.y + 5.0 + 16.0 * (rows.len() as f32 + 0.5);
+        put(f, note, Point::new(origin.x + TAG_PAD, cy), t.ink_faint, FONT_SMALL, Alignment::Left, mid, MONO);
     }
 }
 
@@ -1465,5 +1781,130 @@ mod tests {
         assert_eq!(unit_suffix(&Panel::new("A", "")), "");
         assert_eq!(unit_suffix(&Panel::new("A", "mm from tip")), "");
         assert_eq!(unit_suffix(&Panel::new("A", "mm from tip").value_unit("mm")), " mm");
+    }
+
+    fn tag_wants(pxs: &[f32]) -> Vec<TagWant> {
+        pxs.iter().map(|&p| (p, 60.0, false)).collect()
+    }
+
+    #[test]
+    fn a_key_event_keeps_its_own_tag_and_the_others_fold_around_it() {
+        // The apogee (key) is the last of three crowded lines: it still gets the top row; the two before it share a chip.
+        let wants = [(2.0, 60.0, false), (14.0, 60.0, false), (40.0, 60.0, true)];
+        let tags = layout_event_tags(&wants, 0.0, 800.0, 2);
+        let key = tags.iter().find(|t| t.members == vec![2]).expect("the key event has a tag of its own");
+        assert_eq!((key.row, key.x, key.w), (0, 40.0, 60.0));
+        let chip = tags.iter().find(|t| t.members.len() > 1).expect("the other two fold");
+        assert_eq!((chip.members.clone(), chip.w), (vec![0, 1], COUNT_CHIP_W));
+        assert_eq!(tags.len(), 2);
+    }
+
+    #[test]
+    fn event_tags_never_overlap_and_every_event_is_in_exactly_one() {
+        // Rail exit, burnout and apogee a few pixels apart at the start of the row; three more far right, one at the very edge.
+        let wants = tag_wants(&[2.0, 14.0, 40.0, 300.0, 700.0, 799.0]);
+        let tags = layout_event_tags(&wants, 0.0, 800.0, 1);
+        let mut seen: Vec<usize> = tags.iter().flat_map(|t| t.members.clone()).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..wants.len()).collect::<Vec<_>>());
+        for (i, a) in tags.iter().enumerate() {
+            assert!(a.x >= 0.0 && a.x + a.w <= 800.0, "{a:?} leaves the row");
+            for b in &tags[i + 1..] {
+                assert!(a.x + a.w + TAG_GAP <= b.x || b.x + b.w + TAG_GAP <= a.x, "{a:?} overlaps {b:?}");
+            }
+        }
+        // In one row the second event cannot sit beside the first: the two become a count chip at the first line, which is narrow
+        // enough for the third to fit after it; at the edge the last folds into its neighbour.
+        assert_eq!(tags[0].members, vec![0, 1]);
+        assert_eq!((tags[0].x, tags[0].w), (2.0, COUNT_CHIP_W));
+        assert_eq!(tags[1].members, vec![2]);
+        assert_eq!(tags.last().map(|t| t.members.clone()), Some(vec![4, 5]));
+        assert_eq!(tags.len(), 4);
+    }
+
+    #[test]
+    fn a_second_row_staggers_close_tags_before_any_collapse() {
+        let wants = tag_wants(&[2.0, 14.0, 40.0, 300.0, 700.0, 799.0]);
+        let tags = layout_event_tags(&wants, 0.0, 800.0, 2);
+        let mut seen: Vec<usize> = tags.iter().flat_map(|t| t.members.clone()).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..wants.len()).collect::<Vec<_>>());
+        for (i, a) in tags.iter().enumerate() {
+            assert!(a.x >= 0.0 && a.x + a.w <= 800.0, "{a:?} leaves the row");
+            for b in tags[i + 1..].iter().filter(|b| b.row == a.row) {
+                assert!(a.x + a.w + TAG_GAP <= b.x || b.x + b.w + TAG_GAP <= a.x, "{a:?} overlaps {b:?}");
+            }
+        }
+        // The second event drops to row 1; the third fits neither row and folds into it; the last one flips to row 1 at the edge.
+        assert_eq!((tags[0].members.clone(), tags[0].row), (vec![0], 0));
+        assert_eq!((tags[1].members.clone(), tags[1].row), (vec![1, 2], 1));
+        assert_eq!(tags.len(), 5);
+        assert_eq!((tags[4].members.clone(), tags[4].row, tags[4].x), (vec![5], 1, 739.0));
+    }
+
+    #[test]
+    fn spread_out_tags_stay_single_and_the_last_flips_left_at_the_edge() {
+        let tags = layout_event_tags(&tag_wants(&[100.0, 400.0, 790.0]), 0.0, 800.0, 2);
+        assert!(tags.iter().all(|t| t.members.len() == 1));
+        assert_eq!(tags[0].x, 100.0);
+        // 790 + 60 would leave the row: the tag sits left of its line.
+        assert_eq!(tags[2].x, 730.0);
+    }
+
+    #[test]
+    fn nearest_line_picks_the_closest_within_reach() {
+        let pxs = [100.0, 104.0, 300.0];
+        assert_eq!(nearest_line(&pxs, 102.5, 4.0), Some(1));
+        assert_eq!(nearest_line(&pxs, 99.0, 4.0), Some(0));
+        assert_eq!(nearest_line(&pxs, 200.0, 4.0), None);
+        assert_eq!(nearest_line(&[], 1.0, 4.0), None);
+    }
+
+    #[test]
+    fn hovering_a_line_a_tag_or_a_strip_tick_finds_the_event() {
+        let mut g = group();
+        g.events.push(EventMark::new(20.0, "Burnout").role(crate::widgets::plot::EventRole::Burnout));
+        g.phases.push(crate::widgets::plot::Phase { from: 0.0, to: 20.0, color: crate::widgets::plot::SeriesColor::Propulsion });
+        g.timeline = true;
+        let s = PlotState::new((0.0, 100.0));
+        let v = PlotView::new(&g, &s);
+        let l = Layout::new(Size::new(800.0, 500.0), &g, &s);
+        let (first, last) = l.plots_span().unwrap();
+        // On a line in the lowest panel (the apogee, index 0), and 3 px off it; 9 px off finds nothing.
+        let x = crisp(l.px(50.0));
+        let y = last - 10.0;
+        assert_eq!(v.hot_events(&l, Point::new(x, y)), vec![0]);
+        assert_eq!(v.hot_events(&l, Point::new(x + 3.0, y)), vec![0]);
+        assert!(v.hot_events(&l, Point::new(x + 9.0, y)).is_empty());
+        // On the tag over the first panel, a few px right of the line.
+        let tag = v.tag_boxes(&l).into_iter().find(|(e, _)| e == &vec![0]).unwrap().1;
+        assert!(tag.y + tag.height <= first && tag.y >= l.top);
+        assert_eq!(v.hot_events(&l, Point::new(tag.x + tag.width - 2.0, tag.y + 3.0)), vec![0]);
+        // On the strip's tick for the burnout, and over its label.
+        let (strip, _) = l.strip.unwrap();
+        let tick = Point::new(crisp(l.strip_px(20.0)), strip.y + 20.0);
+        assert_eq!(v.hot_events(&l, tick), vec![1]);
+        let label = v.strip_labels(&l, strip).into_iter().find(|s| s.event == 1).unwrap();
+        let (start, row) = label.at.unwrap();
+        let over = Point::new(start + 2.0, if row == 0 { strip.y + 5.0 } else { strip.y + 34.0 });
+        assert_eq!(v.hot_events(&l, over), vec![1]);
+        // Elsewhere on the strip, nothing.
+        assert!(v.hot_events(&l, Point::new(l.x0 + 600.0, strip.y + 20.0)).is_empty());
+    }
+
+    #[test]
+    fn the_tag_row_exists_only_with_events_and_the_tooltip_names_the_event() {
+        let mut g = group();
+        let s = PlotState::new((0.0, 100.0));
+        let with = Layout::new(Size::new(800.0, 400.0), &g, &s);
+        assert_eq!(with.tag_row().map(|r| r.height), Some(2.0 + TAG_ROW_PITCH));
+        g.events[0] = EventMark::new(50.0, "Apogee").role(crate::widgets::plot::EventRole::Apogee).detail("629 m");
+        assert_eq!(event_tip(&g, 0), "Apogee · 50.00 s · 629 m");
+        g.events.clear();
+        let without = Layout::new(Size::new(800.0, 400.0), &g, &s);
+        assert!(without.tag_row().is_none());
+        assert_eq!(without.plots[0].y, PANEL_TOP);
+        assert_eq!(tag_text("Drogue parachute"), "Drogue pa…");
+        assert_eq!(tag_text("Apogee"), "Apogee");
     }
 }

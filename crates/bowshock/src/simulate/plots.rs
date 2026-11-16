@@ -9,7 +9,7 @@ use super::channels::{self, Channel};
 use super::flight::{Run, Spec};
 use crate::units::UnitSystem;
 use crate::widgets::ground_track::{GroundTrack, Track, TrackPoint, Wind};
-use crate::widgets::plot::{Axis, EventMark, HLine, LabelAt, LegendItem, LineStyle, Panel, PanelEditor, Phase, PlotGroup, Series, SeriesColor};
+use crate::widgets::plot::{Axis, EventMark, EventRole, HLine, LabelAt, LegendItem, LineStyle, Panel, PanelEditor, Phase, PlotGroup, Series, SeriesColor};
 
 /// The line style of the first, second, third and fourth source of a plot: the flight is the colour, the source is the style.
 pub const STYLES: [LineStyle; 4] = [LineStyle::Solid, LineStyle::Dashed, LineStyle::Dotted, LineStyle::DashDot];
@@ -39,13 +39,13 @@ pub fn events(result: &FlightResult) -> Vec<EventMark> {
         };
         let mark = match &e.kind {
             EventKind::Ignition if e.t <= 1e-9 => continue,
-            EventKind::Ignition => EventMark::new(e.t, numbered("Ignition")),
-            EventKind::RailExit => EventMark::new(e.t, "Rail exit"),
-            EventKind::Burnout => EventMark::new(e.t, numbered("Burnout")),
-            EventKind::Separation => EventMark::new(e.t, numbered("Separation")),
-            EventKind::Apogee => EventMark::new(e.t, "Apogee").accent(),
-            EventKind::Deploy(name) => EventMark::new(e.t, name.clone()),
-            EventKind::Landing => EventMark::new(e.t, "Landing"),
+            EventKind::Ignition => EventMark::new(e.t, numbered("Ignition")).role(EventRole::Ignition),
+            EventKind::RailExit => EventMark::new(e.t, "Rail exit").role(EventRole::RailExit),
+            EventKind::Burnout => EventMark::new(e.t, numbered("Burnout")).role(EventRole::Burnout),
+            EventKind::Separation => EventMark::new(e.t, numbered("Separation")).role(EventRole::Separation),
+            EventKind::Apogee => EventMark::new(e.t, "Apogee").role(EventRole::Apogee),
+            EventKind::Deploy(name) => EventMark::new(e.t, name.clone()).role(EventRole::Deploy),
+            EventKind::Landing => EventMark::new(e.t, "Landing").role(EventRole::Landing),
         };
         marks.push(mark);
     }
@@ -308,6 +308,23 @@ pub fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &P
     if compare || x_of.is_some() {
         group.events.retain(|m| m.label != "Landing");
     }
+    if compare {
+        group.events_note = Some(format!("Reference flight · {}", reference.name));
+    }
+    // What else is true at each event, for its hover tooltip: the altitude on a time-like axis, the time on every other, and both
+    // against Mach or distance.
+    if let Some(altitude) = channels::find("altitude") {
+        let alt_unit = altitude.unit(imperial);
+        for m in &mut group.events {
+            let height = format!("{:.0} {}", x_at(samples, Some((altitude, &alt_unit)), m.x).max(0.0), alt_unit.symbol);
+            let time = format!("{:.1} s", m.x);
+            m.detail = Some(match layout.x {
+                PlotX::Time => height,
+                PlotX::Altitude => time,
+                PlotX::Mach | PlotX::Distance => format!("{time} · {height}"),
+            });
+        }
+    }
     if x_of.is_some() {
         // An event is only marked where its x is reached once: a value the curve passes on the way up and again on the way down
         // (or twice in one coast) has no single place on the axis.
@@ -415,7 +432,7 @@ mod tests {
         let marks = events(&run.result);
         let names: Vec<&str> = marks.iter().map(|m| m.label.as_str()).collect();
         assert_eq!(names, ["Rail exit", "Burnout", "Apogee", "Parachute", "Landing"]);
-        assert!(marks.iter().all(|m| m.accent == (m.label == "Apogee")));
+        assert!(marks.iter().all(|m| m.is_key() == (m.label == "Apogee")));
         let bars = phases(&run.result);
         assert_eq!((bars[0].from, bars[0].to), (0.0, 1.6));
         assert_eq!((bars[1].from, bars[1].to), (6.0, 10.0));

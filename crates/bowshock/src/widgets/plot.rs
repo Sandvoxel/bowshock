@@ -482,27 +482,89 @@ impl Panel {
     }
 }
 
-/// An event on the x axis: a dotted vertical line across every panel and a tag on the events strip.
+/// What an event is, which decides the colour and stroke of its line, its tag on the plots and its tick on the events strip
+/// (PlotZoom: events are dotted verticals with short tags; SimulateScreen: the timeline names them in the same colours).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EventRole {
+    /// A motor ignited (later stages): `sys-propulsion`.
+    Ignition,
+    /// The rocket left the rail: `sys-aero`.
+    RailExit,
+    /// A motor burned out: `warn`.
+    Burnout,
+    /// A stage separated: `ink`, dash-dot.
+    Separation,
+    /// Apogee: `accent`, dashed.
+    Apogee,
+    /// A recovery device deployed: `sys-recovery`.
+    Deploy,
+    /// Ground contact: `ink-muted`.
+    Landing,
+    /// The thing an analysis points at (its worst margin): `accent`.
+    Highlight,
+    /// Any other event: `ink-muted`.
+    #[default]
+    Other,
+}
+
+impl EventRole {
+    /// The colour role of the event's line, tag and strip tick.
+    pub fn color(self) -> SeriesColor {
+        match self {
+            EventRole::Ignition => SeriesColor::Propulsion,
+            EventRole::RailExit => SeriesColor::Aero,
+            EventRole::Burnout => SeriesColor::Warn,
+            EventRole::Separation => SeriesColor::Ink,
+            EventRole::Apogee | EventRole::Highlight => SeriesColor::Accent,
+            EventRole::Deploy => SeriesColor::Recovery,
+            EventRole::Landing | EventRole::Other => SeriesColor::Muted,
+        }
+    }
+
+    /// How the event's line is stroked: dotted, except the apogee (dashed) and a separation (dash-dot).
+    pub fn style(self) -> LineStyle {
+        match self {
+            EventRole::Apogee | EventRole::Highlight => LineStyle::Dashed,
+            EventRole::Separation => LineStyle::DashDot,
+            _ => LineStyle::Dotted,
+        }
+    }
+}
+
+/// An event on the x axis: a coloured vertical line across every panel, a tag over the first panel and a tick on the events strip.
 #[derive(Debug, Clone)]
 pub struct EventMark {
     /// Position on the x axis.
     pub x: f64,
-    /// Name (`Burnout`); drawn upper-case.
+    /// Name (`Burnout`); the tag shortens it, the strip draws it upper-case, the hover tooltip spells it out.
     pub label: String,
-    /// Highlight in `accent` on the strip (apogee).
-    pub accent: bool,
+    /// What kind of event it is (its colour and stroke).
+    pub role: EventRole,
+    /// Other quantities at the event, already formatted (`629 m`), written after the name and x in the hover tooltip.
+    pub detail: Option<String>,
 }
 
 impl EventMark {
     /// An event at `x`.
     pub fn new(x: f64, label: impl Into<String>) -> Self {
-        EventMark { x, label: label.into(), accent: false }
+        EventMark { x, label: label.into(), role: EventRole::Other, detail: None }
     }
 
-    /// Highlights the event in `accent`.
-    pub fn accent(mut self) -> Self {
-        self.accent = true;
+    /// Sets the kind of event.
+    pub fn role(mut self, role: EventRole) -> Self {
+        self.role = role;
         self
+    }
+
+    /// Sets the text the tooltip adds after the name and x.
+    pub fn detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
+
+    /// Whether the event is drawn in `accent` and always labelled on the strip (apogee, an analysis' worst point).
+    pub fn is_key(&self) -> bool {
+        matches!(self.role, EventRole::Apogee | EventRole::Highlight)
     }
 }
 
@@ -598,14 +660,14 @@ pub struct PlotGroup {
     pub x: Axis,
     /// Plots, top to bottom.
     pub panels: Vec<Panel>,
-    /// Vertical event lines (the reference flight's only).
+    /// Vertical event lines (the reference flight's only), tagged above the first panel.
     pub events: Vec<EventMark>,
     /// Phase bars of the events strip.
     pub phases: Vec<Phase>,
     /// Show the events strip (Simulate) above the plots, always. Otherwise a minimap appears only while zoomed.
     pub timeline: bool,
-    /// Draw each event's name next to its line on the plots.
-    pub event_tags: bool,
+    /// A line the event tooltip ends with (`Reference flight · Nominal` in a comparison, whose lines are the reference's only).
+    pub events_note: Option<String>,
     /// Pixels kept clear at the right of every plot for direct labels, so the x axes stay aligned.
     pub right_margin: f32,
     /// The full x range; `None` takes the extent of the data.
@@ -626,7 +688,7 @@ impl PlotGroup {
             events: Vec::new(),
             phases: Vec::new(),
             timeline: false,
-            event_tags: false,
+            events_note: None,
             right_margin: 0.0,
             x_range: None,
             y_ticks: YTicks::Nice,
@@ -948,7 +1010,8 @@ pub fn header<'a>(group: &PlotGroup, state: &PlotState) -> Element<'a, PlotMessa
 }
 
 /// The two halves of [`header`]: the zoom breadcrumb and the hints, for a screen that puts its own controls between them
-/// (Simulate's plot presets). `compact` shortens the idle hint to its key caps.
+/// (Simulate's plot presets). `compact` leaves the hint empty: the screen draws the selection's range and keys on the band with
+/// [`PlotView::selection_chip`], so neither idle hints nor a selection take any header space.
 pub fn header_parts<'a>(group: &PlotGroup, state: &PlotState, compact: bool) -> (Element<'a, PlotMessage>, Element<'a, PlotMessage>) {
     let last = state.depth() - 1;
     let mut crumbs: Vec<Element<'a, PlotMessage>> = Vec::new();
@@ -960,7 +1023,9 @@ pub fn header_parts<'a>(group: &PlotGroup, state: &PlotState, compact: bool) -> 
     }
 
     let mut hint: Vec<Element<'a, PlotMessage>> = Vec::new();
-    if let Some((a, b)) = state.band() {
+    if compact {
+        // Nothing: a compact header reserves no hint space (the view draws a selection chip on the band instead).
+    } else if let Some((a, b)) = state.band() {
         let range = format!("{} · Δ {}", group.x.format_range(a, b), group.x.format_width(b - a));
         hint.push(mono(range, tokens::TEXT_LABEL, |t| t.accent));
         hint.push(keycap("Enter"));
@@ -968,18 +1033,12 @@ pub fn header_parts<'a>(group: &PlotGroup, state: &PlotState, compact: bool) -> 
         hint.push(keycap("Esc"));
         hint.push(mono("clear", tokens::TEXT_LABEL, |t| t.ink_muted));
     } else {
-        // Compact (Simulate's shared row): only the key caps; the hover value is in the plots' tags.
-        if !compact {
-            if let Some(x) = state.hover_x() {
-                hint.push(mono(format!("hover {}", group.x.format(x)), tokens::TEXT_LABEL, |t| t.ink_muted));
-            }
-            hint.push(mono("drag x to select ·", tokens::TEXT_LABEL, |t| t.ink_faint));
+        if let Some(x) = state.hover_x() {
+            hint.push(mono(format!("hover {}", group.x.format(x)), tokens::TEXT_LABEL, |t| t.ink_muted));
         }
-        // Compact and zoomed: the breadcrumb is long, so only the way back.
-        if !(compact && state.depth() > 1) {
-            hint.push(keycap("Enter"));
-            hint.push(mono("zoom ·", tokens::TEXT_LABEL, |t| t.ink_faint));
-        }
+        hint.push(mono("drag x to select ·", tokens::TEXT_LABEL, |t| t.ink_faint));
+        hint.push(keycap("Enter"));
+        hint.push(mono("zoom ·", tokens::TEXT_LABEL, |t| t.ink_faint));
         hint.push(keycap("Esc"));
         hint.push(mono("back", tokens::TEXT_LABEL, |t| t.ink_faint));
     }
