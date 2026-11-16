@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-5fa84c0d.js";
+            window.path_to_searchindex_js = "searchindex-1a9cac13.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-98b8035d.js"></script>
@@ -185,11 +185,11 @@
 <p><code>Analysis</code> is a builder. <code>Analysis::new(&amp;spec)?</code> starts from defaults, each method returns the
 <code>Analysis</code> (so calls chain), and <code>run(&amp;machs)</code> solves one flow per Mach number and returns a
 <a href="results.html"><code>Polar</code></a>. <code>run</code> takes <code>&amp;self</code>; clone an <code>Analysis</code> to run variants.</p>
-<pre><code class="language-rust no_run">use bowshock::{
+<pre><code class="language-rust no_run">use bowshock_core::{
     AftSpec, Analysis, Atmosphere, Backend, BodySpec, FlightConditions, NoseShape, NoseSpec, Resolution,
 };
 
-fn main() -&gt; Result&lt;(), bowshock::Error&gt; {
+fn main() -&gt; Result&lt;(), bowshock_core::Error&gt; {
     let spec = BodySpec {
         nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
         aft: vec![AftSpec::Tube { length: 0.60 }],
@@ -249,7 +249,7 @@ to the tolerances the repository tests (<a href="validation.html">Validation</a>
 <li>drag = forebody pressure drag (nose and aft sections) + base drag;</li>
 <li><code>drag.friction</code> is <code>None</code>;</li>
 <li>the base drag is a correlation, <code>0.12 + 0.13 M^2</code> for <code>M &lt; 1</code> and <code>0.25 / M</code> for <code>M &gt;= 1</code>
-(OpenRocket technical documentation, eq. 3.94, after Fleeman), scaled by the base-to-nose
+(Niskanen 2009, eq. 3.94, after Fleeman), scaled by the base-to-nose
 area ratio; <code>drag.base_modelled</code> is <code>true</code>. The inviscid wake has no viscous mixing layer, so
 its own base pressure is not physical;</li>
 <li>the default wake treatment is a sting: the body’s last tube continues to the outflow, no base.</li>
@@ -273,6 +273,47 @@ it only to override the default. A <a href="motor.html">motor</a> needs <code>Wa
 <p><code>max_iterations(n)</code> lowers the per-point iteration cap of whichever numerics is chosen for that
 Mach number and level (it never raises it). Use a small cap for smoke tests; capped points that
 do not converge report <code>Quality::Stalled</code>.</p>
+<h3 id="progress-and-cancelling"><a class="header" href="#progress-and-cancelling">Progress and cancelling</a></h3>
+<p>A point takes seconds to minutes. <code>on_progress(f)</code> calls <code>f</code> with a <code>Progress</code> about every 50 solver
+iterations (the sampling interval of the stop rules, <code>progress::SAMPLE_INTERVAL</code>), from the thread
+that runs the analysis: the Mach number (and angle of attack of a 3D run), the iteration and its
+cap, the orders the density residual has dropped, and the quantity the stop rule watches (the total
+drag coefficient of a viscous run, the normal force coefficient of a 3D run) with its range over the
+rule’s window and the tolerance it has to get under. Reporting reads numbers the solver already has:
+it does not change the iteration or the result. Keep the callback short (send the snapshot to a
+channel and throttle there). Returning <code>ControlFlow::Break(())</code> ends the run at once and the
+analysis returns <code>Error::Cancelled</code>; no point of a cancelled analysis is returned.</p>
+<pre><code class="language-rust no_run">use std::ops::ControlFlow;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use bowshock_core::{AftSpec, Analysis, BodySpec, Error, NoseShape, NoseSpec};
+
+fn main() -&gt; Result&lt;(), Error&gt; {
+    let spec = BodySpec {
+        nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
+        aft: vec![AftSpec::Tube { length: 0.60 }],
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    let analysis = Analysis::new(&amp;spec)?.on_progress(move |p| {
+        println!("Mach {:.2}: iteration {} of at most {}", p.mach, p.iteration, p.max_iterations);
+        if flag.load(Ordering::Relaxed) {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    match analysis.run(&amp;[0.9]) {
+        Err(Error::Cancelled) =&gt; println!("cancelled"),
+        other =&gt; {
+            other?;
+        }
+    }
+    // The GPU the solver runs on, if there is one: `Some("Apple M1 Max")`.
+    println!("{:?}", bowshock_core::gpu_name());
+    Ok(())
+}</code></pre>
 <h3 id="warm-start"><a class="header" href="#warm-start">Warm start</a></h3>
 <p><code>warm_start(true)</code> starts each Mach number from the converged field of the previous one. It is
 <strong>off by default</strong>: measured on the solver, warm-started points needed 2 to 5 times more

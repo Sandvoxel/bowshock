@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-5fa84c0d.js";
+            window.path_to_searchindex_js = "searchindex-1a9cac13.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-98b8035d.js"></script>
@@ -184,7 +184,7 @@
                         <h1 id="flight-conditions"><a class="header" href="#flight-conditions">Flight conditions</a></h1>
 <p>A viscous analysis (and fin drag, and a motor) needs the static state of the air the rocket flies
 through. <code>FlightConditions</code> carries an <code>Atmosphere</code>:</p>
-<pre><code class="language-rust">use bowshock::{Atmosphere, FlightConditions};
+<pre><code class="language-rust">use bowshock_core::{Atmosphere, FlightConditions};
 
 let flight = FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 3000.0 } };
 let air = flight.atmosphere.state().unwrap();
@@ -204,7 +204,7 @@ assert!((air.temperature_k - 268.65).abs() &lt; 1e-9);</code></pre>
 </table>
 </div>
 <p><code>Atmosphere::state()</code> returns <code>Error::InvalidInput</code> outside these ranges:</p>
-<pre><code class="language-rust">use bowshock::Atmosphere;
+<pre><code class="language-rust">use bowshock_core::Atmosphere;
 
 assert!(Atmosphere::Isa { altitude_m: 25_000.0 }.state().is_err());
 assert!(Atmosphere::Explicit { temperature_k: 300.0, pressure_pa: 0.0 }.state().is_err());</code></pre>
@@ -233,7 +233,7 @@ Re_L = rho M a L / mu             (length-based Reynolds number at Mach M, e.g. 
 </code></pre>
 <p>so the Reynolds number grows linearly with Mach at fixed altitude. The Sutherland constant and
 the temperature enter the solver’s viscosity law the same way as in <code>AirState</code>.</p>
-<pre><code class="language-rust">use bowshock::{Atmosphere, FlightConditions};
+<pre><code class="language-rust">use bowshock_core::{Atmosphere, FlightConditions};
 
 let air = FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 0.0 } }.atmosphere.state().unwrap();
 let (mach, length) = (0.8, 1.0);

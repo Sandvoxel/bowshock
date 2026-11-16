@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-5fa84c0d.js";
+            window.path_to_searchindex_js = "searchindex-1a9cac13.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-98b8035d.js"></script>
@@ -185,7 +185,7 @@
 <h2 id="gpu-or-cpu"><a class="header" href="#gpu-or-cpu">GPU or CPU</a></h2>
 <p>The GPU solver is written in plain Luma array ops and runs the same scheme as the f64 CPU solver
 (f32 or double-float arithmetic on the GPU). Measured per iteration on an RTX 3090 against the
-f64 CPU solver on 32 rayon threads (<code>bowshock-cfd/README.md</code>, “Speed”; microseconds per iteration,
+f64 CPU solver on 32 rayon threads (<code>crates/bowshock-cfd/README.md</code>, “Speed”; microseconds per iteration,
 15 deg cone at Mach 2, 2000 iterations from the free stream, best of 3):</p>
 <div class="table-wrapper">
 <table>
@@ -198,7 +198,7 @@ f64 CPU solver on 32 rayon threads (<code>bowshock-cfd/README.md</code>, “Spee
 </tbody>
 </table>
 </div>
-<p>Viscous implicit step on the G3 body (<code>bowshock-cfd/README.md</code>, “Viscous terms and the SST
+<p>Viscous implicit step on the G3 body (<code>crates/bowshock-cfd/README.md</code>, “Viscous terms and the SST
 model”; SST, Mach 0.5, flat base and wake, microseconds per iteration, replay):</p>
 <div class="table-wrapper">
 <table>
@@ -214,10 +214,10 @@ model”; SST, Mach 0.5, flat base and wake, microseconds per iteration, replay)
 <p>That is 21 to 26 times faster per iteration than the CPU in f32 (the CPU column moves by a factor
 of 2 between runs on a shared machine). Over the Fox TM X-2439 sweep (16 inviscid runs, level 1) the
 whole sweep took 1555.7 s on the CPU and 60.13 s on the GPU, 25.9 times faster, and 12.2 to 29.2
-times per run (<code>bowshock-cfd/README.md</code>, “Timing”). Double-float costs 1.2 to 1.4 times the f32 time
+times per run (<code>crates/bowshock-cfd/README.md</code>, “Timing”). Double-float costs 1.2 to 1.4 times the f32 time
 in the viscous step.</p>
 <p>The first call of a sweep also compiles and traces the GPU kernels: about 1 s for the default
-inviscid staging on the cone case, and longer for viscous cases (<code>bowshock-cfd/README.md</code>, “Speed”,
+inviscid staging on the cone case, and longer for viscous cases (<code>crates/bowshock-cfd/README.md</code>, “Speed”,
 “First call”).</p>
 <h2 id="resolution"><a class="header" href="#resolution">Resolution</a></h2>
 <p>Each <code>Resolution</code> level roughly doubles the grid along the body (156x122 at level 0, 312x122 at
@@ -228,7 +228,7 @@ for exploring, <code>Medium</code> for results and <code>Fine</code> for confirm
 <p>The sweep is sequential over Mach numbers (cold starts by default, see
 <a href="sweeps.html#warm-start">warm start</a>): cost is proportional to the number of points.</p>
 <h2 id="timed-realistic-sweep"><a class="header" href="#timed-realistic-sweep">Timed realistic sweep</a></h2>
-<p><code>cargo run --release -p bowshock --example sweep_timing</code>: the body of the examples (tangent-ogive nose
+<p><code>cargo run --release -p bowshock-core --example sweep_timing</code>: the body of the examples (tangent-ogive nose
 0.30 x 0.10 m, 0.60 m tube, 0.10 m boattail to 0.08 m) with four rounded fins, viscous at ISA 0 m,
 <code>Resolution::Medium</code>, <code>Backend::Auto</code> (here: GPU, RTX 3090, double-float), every Mach number run on
 its own (cold start, including the kernel build of each run):</p>
@@ -268,6 +268,11 @@ its own (cold start, including the kernel build of each run):</p>
 about 4000 iterations (4-8 s); points whose drag settles into a limit cycle (subsonic, and here
 M 2.4-2.5) stop by <code>MeanStationary</code> after at least 14000 iterations (14-19 s). Before the
 mean-stationary rule the subsonic points ran to the 160000-iteration cap: 142-154 s each.</p>
+<p><code>Analysis::drag_tolerance(rel)</code> (viscous only, off by default) replaces the default drag rule with a relative one: a point
+stops once its total drag varies by less than <code>rel</code> over the last 500 iterations, after the residual has dropped 2 orders.
+On the example rocket of the app (coarse grid, 10 points) <code>0.002</code> ended within 0.4 % of a 12000-iteration solution with
+about 2.8 times fewer iterations (29000 against 82000 in all); a drag that oscillates by about 1 % stops within 0.5 % of
+the mean of the cycle.</p>
 <p>The same set-up on the CPU (<code>-- --cpu</code>, <code>Backend::Cpu</code>, 32 threads):</p>
 <div class="table-wrapper">
 <table>

@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["bc","flux","gas","gpu","grid","implicit","multigrid","solver","turbulence","viscous"]};
+window.SIDEBAR_ITEMS = {"mod":["bc","bc3","flux","flux3","gas","gas3","gpu","grid","grid3","implicit","implicit3","multigrid","solver","solver3","turbulence","viscous"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["abs_jacobian3","flux_jacobian3","inv5","reflection3"],"type":["M5"]};

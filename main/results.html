@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-5fa84c0d.js";
+            window.path_to_searchindex_js = "searchindex-1a9cac13.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-98b8035d.js"></script>
@@ -184,9 +184,9 @@
                         <h1 id="results"><a class="header" href="#results">Results</a></h1>
 <p><code>Analysis::run</code> returns a <code>Polar</code>. All drag coefficients are dimensionless and referenced to the
 area of the <a href="body.html#reference-diameter-and-reference-area">reference diameter</a>.</p>
-<pre><code class="language-rust no_run">use bowshock::{AftSpec, Analysis, BodySpec, NoseShape, NoseSpec, Quality, Resolution};
+<pre><code class="language-rust no_run">use bowshock_core::{AftSpec, Analysis, BodySpec, NoseShape, NoseSpec, Quality, Resolution};
 
-fn main() -&gt; Result&lt;(), bowshock::Error&gt; {
+fn main() -&gt; Result&lt;(), bowshock_core::Error&gt; {
     let spec = BodySpec {
         nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
         aft: vec![AftSpec::Tube { length: 0.60 }],
@@ -334,7 +334,7 @@ body surface. <code>x</code> and <code>r</code> are at the face centre. Use it t
 <code>StopReason</code>) implement <code>Serialize</code> and <code>Deserialize</code>.</p>
 <pre><code class="language-rust"><span class="boring">#[cfg(feature = "serde")]
 </span><span class="boring">fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
-</span>use bowshock::{AftSpec, BodySpec, NoseShape, NoseSpec};
+</span>use bowshock_core::{AftSpec, BodySpec, NoseShape, NoseSpec};
 
 let spec = BodySpec {
     nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },

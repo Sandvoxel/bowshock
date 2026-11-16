@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["cons_to_prim3","freestream3","physical_flux3","prim_to_cons3","reflect3","sound_speed3"],"type":["Cons3","Prim3"]};

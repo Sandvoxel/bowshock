@@ -37,7 +37,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-5fa84c0d.js";
+            window.path_to_searchindex_js = "searchindex-1a9cac13.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-98b8035d.js"></script>
@@ -195,7 +195,7 @@ available. All of it is reached through a small Rust API: <a href="#the-body"><c
 <a href="#mach-sweeps"><code>Analysis</code></a> is a builder that you configure and run, and <a href="#results"><code>Polar</code></a> is the
 result. There is no command-line tool and no file format; the guide is written for Rust
 programmers who call the crate from their own code. The
-<a href="api/bowshock/index.html">API reference</a> lists every item.</p>
+<a href="api/bowshock_core/index.html">API reference</a> lists every item.</p>
 <h2 id="limits"><a class="header" href="#limits">Limits</a></h2>
 <p>Read these before trusting a number:</p>
 <ul>
@@ -205,8 +205,8 @@ ending in a flat base.</li>
 <li><strong>Fully turbulent, smooth walls.</strong> Viscous analyses solve the Reynolds-averaged Navier-Stokes
 equations with the k-omega SST model; there is no transition model and no wall roughness.</li>
 <li><strong>Mach 0.1 to 3.</strong> Other values are an <code>InvalidInput</code> error.</li>
-<li><strong>Fins are an empirical model.</strong> Fin drag follows the OpenRocket technical documentation
-(Niskanen, 2013). Fin-body interference drag is neglected, and the fins do not enter the flow
+<li><strong>Fins are an empirical model.</strong> Fin drag follows Niskanen (2009, M.Sc. thesis).
+Fin-body interference drag is neglected, and the fins do not enter the flow
 solution. On the Arcas wind-tunnel model the fin drag increment is under-predicted by 16-65 %
 (Mach 0.6-3.0); the fins-on total is 16-25 % low at Mach 0.9-1.8 (see
 <a href="#arcas-sounding-rocket-d1">Validation</a>).</li>
@@ -243,7 +243,7 @@ so Euler analyses add a Mach-only free-flight correlation.</li>
 <h2 id="add-the-crate"><a class="header" href="#add-the-crate">Add the crate</a></h2>
 <p>bowshock is used from git:</p>
 <pre><code class="language-toml">[dependencies]
-bowshock = { git = "https://github.com/Sandvoxel/bowshock" }
+bowshock-core = { git = "https://github.com/Sandvoxel/bowshock" }
 </code></pre>
 <p>You need a recent stable Rust toolchain. Cargo features:</p>
 <div class="table-wrapper">
@@ -259,11 +259,11 @@ bowshock = { git = "https://github.com/Sandvoxel/bowshock" }
 </div>
 <p>For a CPU-only build, with no Luma or wgpu dependency:</p>
 <pre><code class="language-toml">[dependencies]
-bowshock = { git = "https://github.com/Sandvoxel/bowshock", default-features = false }
+bowshock-core = { git = "https://github.com/Sandvoxel/bowshock", default-features = false }
 </code></pre>
 <p>With <code>serde</code>:</p>
 <pre><code class="language-toml">[dependencies]
-bowshock = { git = "https://github.com/Sandvoxel/bowshock", features = ["serde"] }
+bowshock-core = { git = "https://github.com/Sandvoxel/bowshock", features = ["serde"] }
 </code></pre>
 <h2 id="gpu-and-cpu"><a class="header" href="#gpu-and-cpu">GPU and CPU</a></h2>
 <p>By default (<code>Backend::Auto</code>) a sweep runs on the GPU when one is available and on the CPU
@@ -275,11 +275,11 @@ and <code>Backend::Gpu</code> returns <code>Error::Unsupported</code>. See <a hr
 <h2 id="a-first-analysis"><a class="header" href="#a-first-analysis">A first analysis</a></h2>
 <p>A 0.10 m tangent-ogive body: 0.30 m nose, 0.60 m tube, then a 0.10 m boattail to 0.08 m diameter,
 in sea-level standard air, with the RANS equations (friction and base drag from the solution):</p>
-<pre><code class="language-rust no_run">use bowshock::{
+<pre><code class="language-rust no_run">use bowshock_core::{
     AftSpec, Analysis, Atmosphere, BodySpec, FlightConditions, NoseShape, NoseSpec, Resolution,
 };
 
-fn main() -&gt; Result&lt;(), bowshock::Error&gt; {
+fn main() -&gt; Result&lt;(), bowshock_core::Error&gt; {
     let spec = BodySpec {
         nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
         aft: vec![AftSpec::Tube { length: 0.60 }, AftSpec::Transition { length: 0.10, aft_diameter: 0.08 }],
@@ -315,12 +315,12 @@ dimensionless. The same example without <code>.viscous(flight)</code> solves the
 <code>true</code>).</p>
 <p>The points come back in the order you gave the Mach numbers. Check <code>quality</code> on every point before
 using <code>drag.total</code>; see <a href="#quality">Results</a>.</p>
-<p>The repository has the same flow as a runnable program: <code>cargo run --release -p bowshock --example polar</code>.</p>
+<p>The repository has the same flow as a runnable program: <code>cargo run --release -p bowshock-core --example polar</code>.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="the-body"><a class="header" href="#the-body">The body</a></h1>
 <p>A <code>BodySpec</code> is a nose followed by one or more aft sections. All lengths are in metres. The body
 ends in a flat base.</p>
-<pre><code class="language-rust">use bowshock::{AftSpec, BodySpec, NoseShape, NoseSpec};
+<pre><code class="language-rust">use bowshock_core::{AftSpec, BodySpec, NoseShape, NoseSpec};
 
 let spec = BodySpec {
     nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
@@ -377,7 +377,7 @@ with the offending field:</p>
 </tbody>
 </table>
 </div>
-<pre><code class="language-rust">use bowshock::{AftSpec, Analysis, BodySpec, Error, NoseShape, NoseSpec};
+<pre><code class="language-rust">use bowshock_core::{AftSpec, Analysis, BodySpec, Error, NoseShape, NoseSpec};
 
 // fineness 15 is outside [0.5, 12]
 let spec = BodySpec {
@@ -394,8 +394,8 @@ println!("{err}");</code></pre>
 that is the largest diameter of the body (<code>BodySpec::reference_diameter</code>): the maximum of the
 nose diameter and every <code>aft_diameter</code>. Override it with <code>Analysis::reference_diameter(d_m)</code>
 [m], for example to quote coefficients on the body-tube area when a flare is larger:</p>
-<pre><code class="language-rust no_run"><span class="boring">use bowshock::{AftSpec, Analysis, BodySpec, NoseShape, NoseSpec};
-</span><span class="boring">fn main() -&gt; Result&lt;(), bowshock::Error&gt; {
+<pre><code class="language-rust no_run"><span class="boring">use bowshock_core::{AftSpec, Analysis, BodySpec, NoseShape, NoseSpec};
+</span><span class="boring">fn main() -&gt; Result&lt;(), bowshock_core::Error&gt; {
 </span><span class="boring">let spec = BodySpec {
 </span><span class="boring">    nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
 </span><span class="boring">    aft: vec![AftSpec::Tube { length: 0.60 }],
@@ -411,14 +411,16 @@ transition, or the nose diameter when only tubes follow the nose. A <a href="#mo
 must fit inside it.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="fins"><a class="header" href="#fins">Fins</a></h1>
-<p>Fin drag is an empirical add-on, not part of the flow solution. The method is the one of the
-OpenRocket technical documentation (S. Niskanen, <em>OpenRocket technical documentation</em>, 2013,
+<p>Fin drag is an empirical add-on, not part of the flow solution. The method is that of
+S. Niskanen, <em>Development of an Open Source model rocket simulation software</em> (M.Sc. thesis, 2009,
 eqs. 3.78-3.85, 3.89-3.94, B.1-B.2), plus the Ackeret wave drag of a double-wedge section above
 Mach 1. The fins are not in the grid, so the body’s pressure and base drag are those of the body
-alone. <strong>Fin-body interference drag is neglected</strong>, as in OpenRocket.</p>
+alone. <strong>Fin-body interference drag is neglected</strong>.</p>
 <h2 id="finspec"><a class="header" href="#finspec">FinSpec</a></h2>
-<p>One set of identical trapezoidal fins, equally spaced around the body:</p>
-<pre><code class="language-rust">use bowshock::{FinProfile, FinSpec};
+<p>One set of identical trapezoidal fins, equally spaced around the body. <code>roughness</code> is the equivalent sand-grain roughness of the fin
+surface in metres (0 = smooth; <code>60e-6</code> is OpenRocket’s regular paint): the skin friction is floored at OpenRocket’s roughness-limited
+value <code>0.032 (roughness / L)^0.2</code>, with <code>L</code> the length of the body.</p>
+<pre><code class="language-rust">use bowshock_core::{FinProfile, FinSpec};
 
 let fins = FinSpec {
     count: 4,
@@ -427,6 +429,8 @@ let fins = FinSpec {
     span: 0.08,
     sweep: 0.06,
     thickness: 0.003,
+    roughness: 0.0,
+    root_te_to_base: 0.0,
     profile: FinProfile::Rounded,
 };
 fins.validate().unwrap();</code></pre>
@@ -470,12 +474,14 @@ fins.validate().unwrap();</code></pre>
 <tr><td><code>count</code> in 3..=8</td><td><code>fins.count</code></td></tr>
 <tr><td><code>root_chord</code>, <code>span</code>, <code>thickness</code> finite and &gt; 0</td><td><code>fins.root_chord</code>, <code>fins.span</code>, <code>fins.thickness</code></td></tr>
 <tr><td><code>tip_chord</code> finite and &gt;= 0</td><td><code>fins.tip_chord</code></td></tr>
+<tr><td><code>roughness</code> finite and &gt;= 0</td><td><code>fins.roughness</code></td></tr>
+<tr><td><code>root_te_to_base</code> finite and &gt;= 0</td><td><code>fins.root_te_to_base</code></td></tr>
 <tr><td><code>sweep</code> finite and the leading-edge sweep angle <code>atan(sweep / span)</code> at most 75 deg in magnitude</td><td><code>fins.sweep</code></td></tr>
 <tr><td><code>thickness / mean aerodynamic chord &lt;= 0.2</code></td><td><code>fins.thickness</code></td></tr>
 </tbody>
 </table>
 </div>
-<pre><code class="language-rust">use bowshock::{FinProfile, FinSpec};
+<pre><code class="language-rust">use bowshock_core::{FinProfile, FinSpec};
 
 let bad = FinSpec {
     count: 2,
@@ -484,16 +490,18 @@ let bad = FinSpec {
     span: 0.08,
     sweep: 0.06,
     thickness: 0.003,
+    roughness: 0.0,
+    root_te_to_base: 0.0,
     profile: FinProfile::Square,
 };
 let err = bad.validate().unwrap_err();
 assert!(err.to_string().starts_with("fins.count"));</code></pre>
 <h2 id="using-fins-in-an-analysis"><a class="header" href="#using-fins-in-an-analysis">Using fins in an analysis</a></h2>
-<pre><code class="language-rust no_run">use bowshock::{
+<pre><code class="language-rust no_run">use bowshock_core::{
     AftSpec, Analysis, Atmosphere, BodySpec, FinProfile, FinSpec, FlightConditions, NoseShape, NoseSpec,
 };
 
-fn main() -&gt; Result&lt;(), bowshock::Error&gt; {
+fn main() -&gt; Result&lt;(), bowshock_core::Error&gt; {
     let spec = BodySpec {
         nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
         aft: vec![AftSpec::Tube { length: 0.60 }],
@@ -505,6 +513,8 @@ fn main() -&gt; Result&lt;(), bowshock::Error&gt; {
         span: 0.08,
         sweep: 0.06,
         thickness: 0.003,
+        roughness: 0.0,
+        root_te_to_base: 0.0,
         profile: FinProfile::Rounded,
     };
     let flight = FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 0.0 } };
@@ -557,7 +567,7 @@ LE_round = 1 - 1.785 (M - 0.9)                  for 0.9 &lt;= M &lt; 1
 LE_round = 1.214 - 0.502/M^2 + 0.1095/M^4       for M &gt;= 1
 </code></pre>
 <p><code>CD_base</code> is the base-drag correlation <code>0.12 + 0.13 M^2</code> for <code>M &lt; 1</code> and <code>0.25 / M</code> for <code>M &gt;= 1</code>
-(OpenRocket eq. 3.94). Per profile, the leading-edge term <code>LE_perp</code> (on the plane normal to the
+(Niskanen 2009 eq. 3.94). Per profile, the leading-edge term <code>LE_perp</code> (on the plane normal to the
 leading edge) and the trailing-edge term <code>TE</code>:</p>
 <div class="table-wrapper">
 <table>
@@ -601,7 +611,7 @@ chord), integrated exactly over the linear segments (a blunt leading-edge step i
 <p>A custom double wedge <code>[[0, 0], [0.5, 1], [1, 0]]</code> reproduces <code>FinProfile::DoubleWedge</code>, and a flat plate <code>[[0, 1], [0.5, 1], [1, 1]]</code>
 reproduces <code>FinProfile::Square</code>. The section only enters through <code>b</code>, <code>e</code>, the leading-edge class and the wave-drag integral: the
 subsonic profile drag of a real airfoil beyond that is outside the empirical method.</p>
-<pre><code class="language-rust">use bowshock::{FinProfile, FinSpec};
+<pre><code class="language-rust">use bowshock_core::{FinProfile, FinSpec};
 
 // NACA 0012 upper surface, generated from the standard thickness formula (any scale of z works)
 let xs = [0.0, 0.0025, 0.005, 0.0125, 0.025, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
@@ -617,6 +627,8 @@ let fins = FinSpec {
     span: 0.08,
     sweep: 0.06,
     thickness: 0.003, // the real maximum thickness in metres
+    roughness: 0.0,
+    root_te_to_base: 0.0,
     profile: FinProfile::Custom { section },
 };
 fins.validate().unwrap();</code></pre>
@@ -658,7 +670,7 @@ not flush on this model). Fin drag above Mach 1 is under-predicted by 16-45 % on
 <h1 id="flight-conditions"><a class="header" href="#flight-conditions">Flight conditions</a></h1>
 <p>A viscous analysis (and fin drag, and a motor) needs the static state of the air the rocket flies
 through. <code>FlightConditions</code> carries an <code>Atmosphere</code>:</p>
-<pre><code class="language-rust">use bowshock::{Atmosphere, FlightConditions};
+<pre><code class="language-rust">use bowshock_core::{Atmosphere, FlightConditions};
 
 let flight = FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 3000.0 } };
 let air = flight.atmosphere.state().unwrap();
@@ -678,7 +690,7 @@ assert!((air.temperature_k - 268.65).abs() &lt; 1e-9);</code></pre>
 </table>
 </div>
 <p><code>Atmosphere::state()</code> returns <code>Error::InvalidInput</code> outside these ranges:</p>
-<pre><code class="language-rust">use bowshock::Atmosphere;
+<pre><code class="language-rust">use bowshock_core::Atmosphere;
 
 assert!(Atmosphere::Isa { altitude_m: 25_000.0 }.state().is_err());
 assert!(Atmosphere::Explicit { temperature_k: 300.0, pressure_pa: 0.0 }.state().is_err());</code></pre>
@@ -707,7 +719,7 @@ Re_L = rho M a L / mu             (length-based Reynolds number at Mach M, e.g. 
 </code></pre>
 <p>so the Reynolds number grows linearly with Mach at fixed altitude. The Sutherland constant and
 the temperature enter the solver’s viscosity law the same way as in <code>AirState</code>.</p>
-<pre><code class="language-rust">use bowshock::{Atmosphere, FlightConditions};
+<pre><code class="language-rust">use bowshock_core::{Atmosphere, FlightConditions};
 
 let air = FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 0.0 } }.atmosphere.state().unwrap();
 let (mach, length) = (0.8, 1.0);
@@ -724,11 +736,11 @@ Each Mach number then needs its own <code>Analysis</code>, since the conditions 
 <p><code>Analysis</code> is a builder. <code>Analysis::new(&amp;spec)?</code> starts from defaults, each method returns the
 <code>Analysis</code> (so calls chain), and <code>run(&amp;machs)</code> solves one flow per Mach number and returns a
 <a href="#results"><code>Polar</code></a>. <code>run</code> takes <code>&amp;self</code>; clone an <code>Analysis</code> to run variants.</p>
-<pre><code class="language-rust no_run">use bowshock::{
+<pre><code class="language-rust no_run">use bowshock_core::{
     AftSpec, Analysis, Atmosphere, Backend, BodySpec, FlightConditions, NoseShape, NoseSpec, Resolution,
 };
 
-fn main() -&gt; Result&lt;(), bowshock::Error&gt; {
+fn main() -&gt; Result&lt;(), bowshock_core::Error&gt; {
     let spec = BodySpec {
         nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
         aft: vec![AftSpec::Tube { length: 0.60 }],
@@ -788,7 +800,7 @@ to the tolerances the repository tests (<a href="#validation-1">Validation</a>).
 <li>drag = forebody pressure drag (nose and aft sections) + base drag;</li>
 <li><code>drag.friction</code> is <code>None</code>;</li>
 <li>the base drag is a correlation, <code>0.12 + 0.13 M^2</code> for <code>M &lt; 1</code> and <code>0.25 / M</code> for <code>M &gt;= 1</code>
-(OpenRocket technical documentation, eq. 3.94, after Fleeman), scaled by the base-to-nose
+(Niskanen 2009, eq. 3.94, after Fleeman), scaled by the base-to-nose
 area ratio; <code>drag.base_modelled</code> is <code>true</code>. The inviscid wake has no viscous mixing layer, so
 its own base pressure is not physical;</li>
 <li>the default wake treatment is a sting: the body’s last tube continues to the outflow, no base.</li>
@@ -812,6 +824,47 @@ it only to override the default. A <a href="#motor-on-base-flow">motor</a> needs
 <p><code>max_iterations(n)</code> lowers the per-point iteration cap of whichever numerics is chosen for that
 Mach number and level (it never raises it). Use a small cap for smoke tests; capped points that
 do not converge report <code>Quality::Stalled</code>.</p>
+<h3 id="progress-and-cancelling"><a class="header" href="#progress-and-cancelling">Progress and cancelling</a></h3>
+<p>A point takes seconds to minutes. <code>on_progress(f)</code> calls <code>f</code> with a <code>Progress</code> about every 50 solver
+iterations (the sampling interval of the stop rules, <code>progress::SAMPLE_INTERVAL</code>), from the thread
+that runs the analysis: the Mach number (and angle of attack of a 3D run), the iteration and its
+cap, the orders the density residual has dropped, and the quantity the stop rule watches (the total
+drag coefficient of a viscous run, the normal force coefficient of a 3D run) with its range over the
+rule’s window and the tolerance it has to get under. Reporting reads numbers the solver already has:
+it does not change the iteration or the result. Keep the callback short (send the snapshot to a
+channel and throttle there). Returning <code>ControlFlow::Break(())</code> ends the run at once and the
+analysis returns <code>Error::Cancelled</code>; no point of a cancelled analysis is returned.</p>
+<pre><code class="language-rust no_run">use std::ops::ControlFlow;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use bowshock_core::{AftSpec, Analysis, BodySpec, Error, NoseShape, NoseSpec};
+
+fn main() -&gt; Result&lt;(), Error&gt; {
+    let spec = BodySpec {
+        nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
+        aft: vec![AftSpec::Tube { length: 0.60 }],
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    let analysis = Analysis::new(&amp;spec)?.on_progress(move |p| {
+        println!("Mach {:.2}: iteration {} of at most {}", p.mach, p.iteration, p.max_iterations);
+        if flag.load(Ordering::Relaxed) {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    match analysis.run(&amp;[0.9]) {
+        Err(Error::Cancelled) =&gt; println!("cancelled"),
+        other =&gt; {
+            other?;
+        }
+    }
+    // The GPU the solver runs on, if there is one: `Some("Apple M1 Max")`.
+    println!("{:?}", bowshock_core::gpu_name());
+    Ok(())
+}</code></pre>
 <h3 id="warm-start"><a class="header" href="#warm-start">Warm start</a></h3>
 <p><code>warm_start(true)</code> starts each Mach number from the converged field of the previous one. It is
 <strong>off by default</strong>: measured on the solver, warm-started points needed 2 to 5 times more
@@ -851,7 +904,7 @@ nozzle exit in the centre of the base and the annulus around it sees the jet’s
 models this by solving the jet as part of the base flow. Power-off and power-on drag are two
 analyses of the same body.</p>
 <h2 id="motorspec"><a class="header" href="#motorspec">MotorSpec</a></h2>
-<pre><code class="language-rust">use bowshock::MotorSpec;
+<pre><code class="language-rust">use bowshock_core::MotorSpec;
 
 let motor = MotorSpec {
     exit_diameter: 0.06,
@@ -876,7 +929,7 @@ motor.validate(0.08).unwrap(); // base diameter 0.08 m</code></pre>
 <p><code>MotorSpec::validate(base_diameter)</code> takes the <a href="#base-diameter">base diameter</a> [m] and
 returns <code>InvalidInput</code> with the field named (<code>motor.exit_diameter</code>, <code>motor.exit_mach</code>,
 <code>motor.exit_pressure_pa</code>, <code>motor.total_temperature_k</code>); <code>Analysis::run</code> calls it.</p>
-<pre><code class="language-rust">use bowshock::MotorSpec;
+<pre><code class="language-rust">use bowshock_core::MotorSpec;
 
 let motor = MotorSpec { exit_diameter: 0.08, exit_mach: 2.5, exit_pressure_pa: 101_325.0, total_temperature_k: 1500.0 };
 let err = motor.validate(0.08).unwrap_err();
@@ -918,11 +971,11 @@ term and is not in <code>total</code>; account for thrust separately.</li>
 <h2 id="power-off-and-power-on"><a class="header" href="#power-off-and-power-on">Power-off and power-on</a></h2>
 <p>The power-off curve is the same body without <code>.motor(..)</code> and with the viscous base wake. Run both
 and compare:</p>
-<pre><code class="language-rust no_run">use bowshock::{
+<pre><code class="language-rust no_run">use bowshock_core::{
     AftSpec, Analysis, Atmosphere, BodySpec, FlightConditions, MotorSpec, NoseShape, NoseSpec, Resolution,
 };
 
-fn main() -&gt; Result&lt;(), bowshock::Error&gt; {
+fn main() -&gt; Result&lt;(), bowshock_core::Error&gt; {
     let spec = BodySpec {
         nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
         aft: vec![AftSpec::Tube { length: 0.60 }, AftSpec::Transition { length: 0.10, aft_diameter: 0.08 }],
@@ -978,9 +1031,9 @@ and the base Cp for plausibility.</p>
 <h1 id="results"><a class="header" href="#results">Results</a></h1>
 <p><code>Analysis::run</code> returns a <code>Polar</code>. All drag coefficients are dimensionless and referenced to the
 area of the <a href="#reference-diameter-and-reference-area">reference diameter</a>.</p>
-<pre><code class="language-rust no_run">use bowshock::{AftSpec, Analysis, BodySpec, NoseShape, NoseSpec, Quality, Resolution};
+<pre><code class="language-rust no_run">use bowshock_core::{AftSpec, Analysis, BodySpec, NoseShape, NoseSpec, Quality, Resolution};
 
-fn main() -&gt; Result&lt;(), bowshock::Error&gt; {
+fn main() -&gt; Result&lt;(), bowshock_core::Error&gt; {
     let spec = BodySpec {
         nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
         aft: vec![AftSpec::Tube { length: 0.60 }],
@@ -1128,7 +1181,7 @@ body surface. <code>x</code> and <code>r</code> are at the face centre. Use it t
 <code>StopReason</code>) implement <code>Serialize</code> and <code>Deserialize</code>.</p>
 <pre><code class="language-rust"><span class="boring">#[cfg(feature = "serde")]
 </span><span class="boring">fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
-</span>use bowshock::{AftSpec, BodySpec, NoseShape, NoseSpec};
+</span>use bowshock_core::{AftSpec, BodySpec, NoseShape, NoseSpec};
 
 let spec = BodySpec {
     nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
@@ -1148,7 +1201,7 @@ Other <code>f64</code> fields are not NaN-tolerant.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="validation-1"><a class="header" href="#validation-1">Validation</a></h1>
 <p>What has been compared with data and with analytical results, and how far. The numbers below are
-copied from the repository’s READMEs (<code>bowshock-validate/README.md</code>, <code>bowshock-cfd/README.md</code>)
+copied from the repository’s READMEs (<code>crates/bowshock-validate/README.md</code>, <code>crates/bowshock-cfd/README.md</code>)
 as of this writing; they come from the validation programs in
 <code>bowshock-validate</code> and the tests of the workspace. Where bowshock and the data differ, the table
 shows the difference.</p>
@@ -1161,20 +1214,20 @@ tests):</p>
 <tr><th>Check</th><th>Case</th><th>Result</th></tr>
 </thead>
 <tbody>
-<tr><td>G1</td><td>laminar flat plate</td><td>skin friction +0.64 % (x = 0.5) and +1.63 % (x = 0.9) of Blasius (<code>bowshock-validate/README.md</code>, “Checks of the viscous terms”)</td></tr>
-<tr><td>G2</td><td>SST flat plate, Re_x = 4.8e6, first-cell y+ = 0.36</td><td>skin friction -4.25 % against the turbulent correlation <code>0.37 / log10(Re_x)^2.584</code> (<code>bowshock-validate/README.md</code>)</td></tr>
-<tr><td>G3</td><td>tangent ogive 0.30 x 0.10 m + 0.60 m tube, ISA sea level, Mach 0.5, Coarse</td><td>friction drag 0.0900, 0.964 of the flat-plate estimate over the wetted area; base Cp -0.123; total CD 0.213; y+ max 0.65; about 27 s on the CPU (<code>bowshock-validate/README.md</code>, “Known limits”)</td></tr>
+<tr><td>G1</td><td>laminar flat plate</td><td>skin friction +0.64 % (x = 0.5) and +1.63 % (x = 0.9) of Blasius (<code>crates/bowshock-validate/README.md</code>, “Checks of the viscous terms”)</td></tr>
+<tr><td>G2</td><td>SST flat plate, Re_x = 4.8e6, first-cell y+ = 0.36</td><td>skin friction -4.25 % against the turbulent correlation <code>0.37 / log10(Re_x)^2.584</code> (<code>crates/bowshock-validate/README.md</code>)</td></tr>
+<tr><td>G3</td><td>tangent ogive 0.30 x 0.10 m + 0.60 m tube, ISA sea level, Mach 0.5, Coarse</td><td>friction drag 0.0900, 0.964 of the flat-plate estimate over the wetted area; base Cp -0.123; total CD 0.213; y+ max 0.65; about 27 s on the CPU (<code>crates/bowshock-validate/README.md</code>, “Known limits”)</td></tr>
 </tbody>
 </table>
 </div>
 <p>On the GPU, G3 gives total CD 0.21300 in f32 and in double-float (+0.001 % and -0.000 % against
 the CPU), <code>cd_friction</code> 0.09003, <code>cd_base</code> 0.12257, <code>cp_base</code> -0.1226, y+ max 0.648
-(<code>bowshock-cfd/README.md</code>, “Viscous terms and the SST model”).</p>
+(<code>crates/bowshock-cfd/README.md</code>, “Viscous terms and the SST model”).</p>
 <p>G3 is a consistency check of friction against a flat-plate estimate, not a comparison with measured
 total drag. The Arcas comparison <a href="#arcas-sounding-rocket-d1">below</a> is.</p>
 <h2 id="fox-base-pressures"><a class="header" href="#fox-base-pressures">Fox base pressures</a></h2>
 <p>NASA TM X-2439 (Fox, 1971): sting-mounted nose-cylinder-boattail bodies, subsonic. From
-<code>bowshock-cfd/README.md</code>, “Validation: NASA TM X-2439”, level 1, ogive (config 4):</p>
+<code>crates/bowshock-cfd/README.md</code>, “Validation: NASA TM X-2439”, level 1, ogive (config 4):</p>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -1197,12 +1250,12 @@ verified.</p>
 <p>With the RANS equations (<code>cargo run --release --bin subsonic -- --quick --validate --rans</code>, quick grids)
 the base Cp of the six configurations is +0.049 to +0.072 against measured +0.069 to +0.132 (Euler:
 -0.037 to +0.066); the Reynolds numbers per Mach number are interpolated from the range quoted in the
-report (<code>bowshock-validate/README.md</code>, “Known limits”).</p>
+report (<code>crates/bowshock-validate/README.md</code>, “Known limits”).</p>
 <h2 id="stoney-forebody"><a class="header" href="#stoney-forebody">Stoney forebody</a></h2>
 <p>Stoney, NACA RM L53K17 (1954), Fig. 5: nose pressure drag of fineness-3 noses at Mach 0.8 to
 1.25, free flight. The data were digitised from a poor scan (about +-0.01 in CD) and carry a tare
 uncertainty of about +-0.01; the Euler solver at level 1 reproduces the drag rise
-(<code>bowshock-cfd/README.md</code>, “2. Nose pressure drag vs Mach number”). Von Karman nose:</p>
+(<code>crates/bowshock-cfd/README.md</code>, “2. Nose pressure drag vs Mach number”). Von Karman nose:</p>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -1267,8 +1320,8 @@ thickness; no fin anchors, no sting. <code>Resolution::Medium</code>, viscous at
 2.96 (-9.7 % at M 1.8), but 14 % low at M 1.2 (<code>Resolution::Fine</code> gives 0.3765, -13.6 %: not a grid effect; the
 report attributes part of the short model’s higher axial force at M 1.0-1.2 to fin anchors that
 were not flush). With fins the totals are low because the empirical fin drag is low (see
-<a href="#accuracy">Fins</a>). The test is <code>bowshock/tests/validation.rs::arcas_axial_force</code>
-(<code>cargo test --release -p bowshock --test validation arcas -- --ignored --nocapture</code>); it fails
+<a href="#accuracy">Fins</a>). The test is <code>crates/bowshock-core/tests/validation.rs::arcas_axial_force</code>
+(<code>cargo test --release -p bowshock-core --test validation arcas -- --ignored --nocapture</code>); it fails
 on these gates.</p>
 <h2 id="motor-on-base-pressure-nasa-tp-2005-d2"><a class="header" href="#motor-on-base-pressure-nasa-tp-2005-d2">Motor-on base pressure, NASA TP-2005 (D2)</a></h2>
 <p>NASA TP-2005 (1982): strut-mounted ogive-cylinder, D = 6.35 cm, base at 82.55 cm (13 D, flat base),
@@ -1302,7 +1355,7 @@ viscous CFL limit of 50 diverged at 8 of 11 points; the limit is now 20 above Ma
 <p><strong>Every gate fails.</strong> The measured base pressures above p_inf come from plume-induced separation
 of the afterbody boundary layer ahead of the strongly under-expanded plumes; the model’s base
 pressure stays near or below p_inf and falls with exit Mach where the data rise. Open issue:
-<code>bowshock-cfd/ISSUES.md</code> row 13. The test is <code>bowshock/tests/validation.rs::tp2005_base_pressure_with_jet</code>.</p>
+<code>crates/bowshock-cfd/ISSUES.md</code> row 13. The test is <code>crates/bowshock-core/tests/validation.rs::tp2005_base_pressure_with_jet</code>.</p>
 <p>The Arcas table above was re-run with the same change: every value is unchanged to the printed digits
 (largest change 0.0001).</p>
 <div style="break-before: page; page-break-before: always;"></div>
@@ -1310,7 +1363,7 @@ pressure stays near or below p_inf and falls with exit Mach where the data rise.
 <h2 id="gpu-or-cpu"><a class="header" href="#gpu-or-cpu">GPU or CPU</a></h2>
 <p>The GPU solver is written in plain Luma array ops and runs the same scheme as the f64 CPU solver
 (f32 or double-float arithmetic on the GPU). Measured per iteration on an RTX 3090 against the
-f64 CPU solver on 32 rayon threads (<code>bowshock-cfd/README.md</code>, “Speed”; microseconds per iteration,
+f64 CPU solver on 32 rayon threads (<code>crates/bowshock-cfd/README.md</code>, “Speed”; microseconds per iteration,
 15 deg cone at Mach 2, 2000 iterations from the free stream, best of 3):</p>
 <div class="table-wrapper">
 <table>
@@ -1323,7 +1376,7 @@ f64 CPU solver on 32 rayon threads (<code>bowshock-cfd/README.md</code>, “Spee
 </tbody>
 </table>
 </div>
-<p>Viscous implicit step on the G3 body (<code>bowshock-cfd/README.md</code>, “Viscous terms and the SST
+<p>Viscous implicit step on the G3 body (<code>crates/bowshock-cfd/README.md</code>, “Viscous terms and the SST
 model”; SST, Mach 0.5, flat base and wake, microseconds per iteration, replay):</p>
 <div class="table-wrapper">
 <table>
@@ -1339,10 +1392,10 @@ model”; SST, Mach 0.5, flat base and wake, microseconds per iteration, replay)
 <p>That is 21 to 26 times faster per iteration than the CPU in f32 (the CPU column moves by a factor
 of 2 between runs on a shared machine). Over the Fox TM X-2439 sweep (16 inviscid runs, level 1) the
 whole sweep took 1555.7 s on the CPU and 60.13 s on the GPU, 25.9 times faster, and 12.2 to 29.2
-times per run (<code>bowshock-cfd/README.md</code>, “Timing”). Double-float costs 1.2 to 1.4 times the f32 time
+times per run (<code>crates/bowshock-cfd/README.md</code>, “Timing”). Double-float costs 1.2 to 1.4 times the f32 time
 in the viscous step.</p>
 <p>The first call of a sweep also compiles and traces the GPU kernels: about 1 s for the default
-inviscid staging on the cone case, and longer for viscous cases (<code>bowshock-cfd/README.md</code>, “Speed”,
+inviscid staging on the cone case, and longer for viscous cases (<code>crates/bowshock-cfd/README.md</code>, “Speed”,
 “First call”).</p>
 <h2 id="resolution-1"><a class="header" href="#resolution-1">Resolution</a></h2>
 <p>Each <code>Resolution</code> level roughly doubles the grid along the body (156x122 at level 0, 312x122 at
@@ -1353,7 +1406,7 @@ for exploring, <code>Medium</code> for results and <code>Fine</code> for confirm
 <p>The sweep is sequential over Mach numbers (cold starts by default, see
 <a href="#warm-start">warm start</a>): cost is proportional to the number of points.</p>
 <h2 id="timed-realistic-sweep"><a class="header" href="#timed-realistic-sweep">Timed realistic sweep</a></h2>
-<p><code>cargo run --release -p bowshock --example sweep_timing</code>: the body of the examples (tangent-ogive nose
+<p><code>cargo run --release -p bowshock-core --example sweep_timing</code>: the body of the examples (tangent-ogive nose
 0.30 x 0.10 m, 0.60 m tube, 0.10 m boattail to 0.08 m) with four rounded fins, viscous at ISA 0 m,
 <code>Resolution::Medium</code>, <code>Backend::Auto</code> (here: GPU, RTX 3090, double-float), every Mach number run on
 its own (cold start, including the kernel build of each run):</p>
@@ -1393,6 +1446,11 @@ its own (cold start, including the kernel build of each run):</p>
 about 4000 iterations (4-8 s); points whose drag settles into a limit cycle (subsonic, and here
 M 2.4-2.5) stop by <code>MeanStationary</code> after at least 14000 iterations (14-19 s). Before the
 mean-stationary rule the subsonic points ran to the 160000-iteration cap: 142-154 s each.</p>
+<p><code>Analysis::drag_tolerance(rel)</code> (viscous only, off by default) replaces the default drag rule with a relative one: a point
+stops once its total drag varies by less than <code>rel</code> over the last 500 iterations, after the residual has dropped 2 orders.
+On the example rocket of the app (coarse grid, 10 points) <code>0.002</code> ended within 0.4 % of a 12000-iteration solution with
+about 2.8 times fewer iterations (29000 against 82000 in all); a drag that oscillates by about 1 % stops within 0.5 % of
+the mean of the cycle.</p>
 <p>The same set-up on the CPU (<code>-- --cpu</code>, <code>Backend::Cpu</code>, 32 threads):</p>
 <div class="table-wrapper">
 <table>
@@ -1414,7 +1472,7 @@ within 1e-5.</p>
 <p>On NVIDIA’s Linux driver (seen on 615.71.09) a process that used the GPU can hang at exit (100 %
 CPU in <code>libnvidia-gpucomp</code>) or abort with <code>free(): chunks in smallbin corrupted</code>, while the
 driver’s shader compiler thread is still running at <code>exit()</code>. It is intermittent (1 in 3 runs of one
-benchmark) and a driver bug, not a bowshock or Luma bug (<code>bowshock-cfd/ISSUES.md</code>, row 1). It can
+benchmark) and a driver bug, not a bowshock or Luma bug (<code>crates/bowshock-cfd/ISSUES.md</code>, row 1). It can
 hit a program that calls <code>Analysis::run</code> on the GPU. The results are already printed by then. If it
 bites you, update the driver, or run on <code>Backend::Cpu</code>.</p>
 <h2 id="polarbackend-is-cpu-but-i-have-a-gpu"><a class="header" href="#polarbackend-is-cpu-but-i-have-a-gpu"><code>Polar::backend</code> is <code>Cpu</code> but I have a GPU</a></h2>
@@ -1430,7 +1488,7 @@ sweep.</li>
 have the CPU.</p>
 <h2 id="how-long-does-a-run-take"><a class="header" href="#how-long-does-a-run-take">How long does a run take?</a></h2>
 <p>A robustness matrix of inviscid <code>Coarse</code> sweeps (3 bodies, 10 Mach numbers, GPU) took about 20 s
-in total (<code>bowshock-validate/README.md</code>). A viscous (RANS) point at <code>Medium</code> with fins takes 4 to
+in total (<code>crates/bowshock-validate/README.md</code>). A viscous (RANS) point at <code>Medium</code> with fins takes 4 to
 19 s on an RTX 3090 and 60 to 213 s on the CPU; a 23-point sweep from Mach 0.3 to 2.5 took 178 s on
 the GPU (the table in <a href="#performance">Performance</a>). Each Mach number is a separate solve, so the cost is proportional
 to the number of points. To iterate on a design: <code>Coarse</code>, a few Mach numbers, <code>max_iterations</code>

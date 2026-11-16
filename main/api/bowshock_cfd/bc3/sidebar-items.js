@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["characteristic_ghost3","normal_mach3","pressure_outflow_ghost3","regime3"]};

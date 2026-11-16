@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["A1","BETA1","BETA2","BETA_STAR","GAMMA1","GAMMA2","K_INF","SIGMA_K1","SIGMA_K2","SIGMA_W1","SIGMA_W2"],"fn":["omega_inf","wall_distances"]};
+window.SIDEBAR_ITEMS = {"constant":["A1","AUPOIX_ITERATIONS","BETA1","BETA2","BETA_STAR","GAMMA1","GAMMA2","K_INF","NU_T_WALL_MAX","ROUGH_RAMP_CELLS","SIGMA_K1","SIGMA_K2","SIGMA_W1","SIGMA_W2"],"fn":["aupoix_wall","omega_inf","rough_ramp","wall_distances"]};

@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-5fa84c0d.js";
+            window.path_to_searchindex_js = "searchindex-1a9cac13.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-98b8035d.js"></script>
@@ -182,14 +182,16 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="fins"><a class="header" href="#fins">Fins</a></h1>
-<p>Fin drag is an empirical add-on, not part of the flow solution. The method is the one of the
-OpenRocket technical documentation (S. Niskanen, <em>OpenRocket technical documentation</em>, 2013,
+<p>Fin drag is an empirical add-on, not part of the flow solution. The method is that of
+S. Niskanen, <em>Development of an Open Source model rocket simulation software</em> (M.Sc. thesis, 2009,
 eqs. 3.78-3.85, 3.89-3.94, B.1-B.2), plus the Ackeret wave drag of a double-wedge section above
 Mach 1. The fins are not in the grid, so the body’s pressure and base drag are those of the body
-alone. <strong>Fin-body interference drag is neglected</strong>, as in OpenRocket.</p>
+alone. <strong>Fin-body interference drag is neglected</strong>.</p>
 <h2 id="finspec"><a class="header" href="#finspec">FinSpec</a></h2>
-<p>One set of identical trapezoidal fins, equally spaced around the body:</p>
-<pre><code class="language-rust">use bowshock::{FinProfile, FinSpec};
+<p>One set of identical trapezoidal fins, equally spaced around the body. <code>roughness</code> is the equivalent sand-grain roughness of the fin
+surface in metres (0 = smooth; <code>60e-6</code> is OpenRocket’s regular paint): the skin friction is floored at OpenRocket’s roughness-limited
+value <code>0.032 (roughness / L)^0.2</code>, with <code>L</code> the length of the body.</p>
+<pre><code class="language-rust">use bowshock_core::{FinProfile, FinSpec};
 
 let fins = FinSpec {
     count: 4,
@@ -198,6 +200,8 @@ let fins = FinSpec {
     span: 0.08,
     sweep: 0.06,
     thickness: 0.003,
+    roughness: 0.0,
+    root_te_to_base: 0.0,
     profile: FinProfile::Rounded,
 };
 fins.validate().unwrap();</code></pre>
@@ -241,12 +245,14 @@ fins.validate().unwrap();</code></pre>
 <tr><td><code>count</code> in 3..=8</td><td><code>fins.count</code></td></tr>
 <tr><td><code>root_chord</code>, <code>span</code>, <code>thickness</code> finite and &gt; 0</td><td><code>fins.root_chord</code>, <code>fins.span</code>, <code>fins.thickness</code></td></tr>
 <tr><td><code>tip_chord</code> finite and &gt;= 0</td><td><code>fins.tip_chord</code></td></tr>
+<tr><td><code>roughness</code> finite and &gt;= 0</td><td><code>fins.roughness</code></td></tr>
+<tr><td><code>root_te_to_base</code> finite and &gt;= 0</td><td><code>fins.root_te_to_base</code></td></tr>
 <tr><td><code>sweep</code> finite and the leading-edge sweep angle <code>atan(sweep / span)</code> at most 75 deg in magnitude</td><td><code>fins.sweep</code></td></tr>
 <tr><td><code>thickness / mean aerodynamic chord &lt;= 0.2</code></td><td><code>fins.thickness</code></td></tr>
 </tbody>
 </table>
 </div>
-<pre><code class="language-rust">use bowshock::{FinProfile, FinSpec};
+<pre><code class="language-rust">use bowshock_core::{FinProfile, FinSpec};
 
 let bad = FinSpec {
     count: 2,
@@ -255,16 +261,18 @@ let bad = FinSpec {
     span: 0.08,
     sweep: 0.06,
     thickness: 0.003,
+    roughness: 0.0,
+    root_te_to_base: 0.0,
     profile: FinProfile::Square,
 };
 let err = bad.validate().unwrap_err();
 assert!(err.to_string().starts_with("fins.count"));</code></pre>
 <h2 id="using-fins-in-an-analysis"><a class="header" href="#using-fins-in-an-analysis">Using fins in an analysis</a></h2>
-<pre><code class="language-rust no_run">use bowshock::{
+<pre><code class="language-rust no_run">use bowshock_core::{
     AftSpec, Analysis, Atmosphere, BodySpec, FinProfile, FinSpec, FlightConditions, NoseShape, NoseSpec,
 };
 
-fn main() -&gt; Result&lt;(), bowshock::Error&gt; {
+fn main() -&gt; Result&lt;(), bowshock_core::Error&gt; {
     let spec = BodySpec {
         nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
         aft: vec![AftSpec::Tube { length: 0.60 }],
@@ -276,6 +284,8 @@ fn main() -&gt; Result&lt;(), bowshock::Error&gt; {
         span: 0.08,
         sweep: 0.06,
         thickness: 0.003,
+        roughness: 0.0,
+        root_te_to_base: 0.0,
         profile: FinProfile::Rounded,
     };
     let flight = FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 0.0 } };
@@ -328,7 +338,7 @@ LE_round = 1 - 1.785 (M - 0.9)                  for 0.9 &lt;= M &lt; 1
 LE_round = 1.214 - 0.502/M^2 + 0.1095/M^4       for M &gt;= 1
 </code></pre>
 <p><code>CD_base</code> is the base-drag correlation <code>0.12 + 0.13 M^2</code> for <code>M &lt; 1</code> and <code>0.25 / M</code> for <code>M &gt;= 1</code>
-(OpenRocket eq. 3.94). Per profile, the leading-edge term <code>LE_perp</code> (on the plane normal to the
+(Niskanen 2009 eq. 3.94). Per profile, the leading-edge term <code>LE_perp</code> (on the plane normal to the
 leading edge) and the trailing-edge term <code>TE</code>:</p>
 <div class="table-wrapper">
 <table>
@@ -372,7 +382,7 @@ chord), integrated exactly over the linear segments (a blunt leading-edge step i
 <p>A custom double wedge <code>[[0, 0], [0.5, 1], [1, 0]]</code> reproduces <code>FinProfile::DoubleWedge</code>, and a flat plate <code>[[0, 1], [0.5, 1], [1, 1]]</code>
 reproduces <code>FinProfile::Square</code>. The section only enters through <code>b</code>, <code>e</code>, the leading-edge class and the wave-drag integral: the
 subsonic profile drag of a real airfoil beyond that is outside the empirical method.</p>
-<pre><code class="language-rust">use bowshock::{FinProfile, FinSpec};
+<pre><code class="language-rust">use bowshock_core::{FinProfile, FinSpec};
 
 // NACA 0012 upper surface, generated from the standard thickness formula (any scale of z works)
 let xs = [0.0, 0.0025, 0.005, 0.0125, 0.025, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
@@ -388,6 +398,8 @@ let fins = FinSpec {
     span: 0.08,
     sweep: 0.06,
     thickness: 0.003, // the real maximum thickness in metres
+    roughness: 0.0,
+    root_te_to_base: 0.0,
     profile: FinProfile::Custom { section },
 };
 fins.validate().unwrap();</code></pre>

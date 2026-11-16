@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-5fa84c0d.js";
+            window.path_to_searchindex_js = "searchindex-1a9cac13.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-98b8035d.js"></script>
@@ -197,7 +197,7 @@ available. All of it is reached through a small Rust API: <a href="body.html"><c
 <a href="sweeps.html"><code>Analysis</code></a> is a builder that you configure and run, and <a href="results.html"><code>Polar</code></a> is the
 result. There is no command-line tool and no file format; the guide is written for Rust
 programmers who call the crate from their own code. The
-<a href="api/bowshock/index.html">API reference</a> lists every item.</p>
+<a href="api/bowshock_core/index.html">API reference</a> lists every item.</p>
 <h2 id="limits"><a class="header" href="#limits">Limits</a></h2>
 <p>Read these before trusting a number:</p>
 <ul>
@@ -207,8 +207,8 @@ ending in a flat base.</li>
 <li><strong>Fully turbulent, smooth walls.</strong> Viscous analyses solve the Reynolds-averaged Navier-Stokes
 equations with the k-omega SST model; there is no transition model and no wall roughness.</li>
 <li><strong>Mach 0.1 to 3.</strong> Other values are an <code>InvalidInput</code> error.</li>
-<li><strong>Fins are an empirical model.</strong> Fin drag follows the OpenRocket technical documentation
-(Niskanen, 2013). Fin-body interference drag is neglected, and the fins do not enter the flow
+<li><strong>Fins are an empirical model.</strong> Fin drag follows Niskanen (2009, M.Sc. thesis).
+Fin-body interference drag is neglected, and the fins do not enter the flow
 solution. On the Arcas wind-tunnel model the fin drag increment is under-predicted by 16-65 %
 (Mach 0.6-3.0); the fins-on total is 16-25 % low at Mach 0.9-1.8 (see
 <a href="validation.html#arcas-sounding-rocket-d1">Validation</a>).</li>

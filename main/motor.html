@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-5fa84c0d.js";
+            window.path_to_searchindex_js = "searchindex-1a9cac13.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-98b8035d.js"></script>
@@ -187,7 +187,7 @@ nozzle exit in the centre of the base and the annulus around it sees the jet’s
 models this by solving the jet as part of the base flow. Power-off and power-on drag are two
 analyses of the same body.</p>
 <h2 id="motorspec"><a class="header" href="#motorspec">MotorSpec</a></h2>
-<pre><code class="language-rust">use bowshock::MotorSpec;
+<pre><code class="language-rust">use bowshock_core::MotorSpec;
 
 let motor = MotorSpec {
     exit_diameter: 0.06,
@@ -212,7 +212,7 @@ motor.validate(0.08).unwrap(); // base diameter 0.08 m</code></pre>
 <p><code>MotorSpec::validate(base_diameter)</code> takes the <a href="body.html#base-diameter">base diameter</a> [m] and
 returns <code>InvalidInput</code> with the field named (<code>motor.exit_diameter</code>, <code>motor.exit_mach</code>,
 <code>motor.exit_pressure_pa</code>, <code>motor.total_temperature_k</code>); <code>Analysis::run</code> calls it.</p>
-<pre><code class="language-rust">use bowshock::MotorSpec;
+<pre><code class="language-rust">use bowshock_core::MotorSpec;
 
 let motor = MotorSpec { exit_diameter: 0.08, exit_mach: 2.5, exit_pressure_pa: 101_325.0, total_temperature_k: 1500.0 };
 let err = motor.validate(0.08).unwrap_err();
@@ -254,11 +254,11 @@ term and is not in <code>total</code>; account for thrust separately.</li>
 <h2 id="power-off-and-power-on"><a class="header" href="#power-off-and-power-on">Power-off and power-on</a></h2>
 <p>The power-off curve is the same body without <code>.motor(..)</code> and with the viscous base wake. Run both
 and compare:</p>
-<pre><code class="language-rust no_run">use bowshock::{
+<pre><code class="language-rust no_run">use bowshock_core::{
     AftSpec, Analysis, Atmosphere, BodySpec, FlightConditions, MotorSpec, NoseShape, NoseSpec, Resolution,
 };
 
-fn main() -&gt; Result&lt;(), bowshock::Error&gt; {
+fn main() -&gt; Result&lt;(), bowshock_core::Error&gt; {
     let spec = BodySpec {
         nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
         aft: vec![AftSpec::Tube { length: 0.60 }, AftSpec::Transition { length: 0.10, aft_diameter: 0.08 }],

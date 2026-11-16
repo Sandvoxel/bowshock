@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-5fa84c0d.js";
+            window.path_to_searchindex_js = "searchindex-1a9cac13.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-98b8035d.js"></script>
@@ -185,7 +185,7 @@
 <h2 id="add-the-crate"><a class="header" href="#add-the-crate">Add the crate</a></h2>
 <p>bowshock is used from git:</p>
 <pre><code class="language-toml">[dependencies]
-bowshock = { git = "https://github.com/Sandvoxel/bowshock" }
+bowshock-core = { git = "https://github.com/Sandvoxel/bowshock" }
 </code></pre>
 <p>You need a recent stable Rust toolchain. Cargo features:</p>
 <div class="table-wrapper">
@@ -201,11 +201,11 @@ bowshock = { git = "https://github.com/Sandvoxel/bowshock" }
 </div>
 <p>For a CPU-only build, with no Luma or wgpu dependency:</p>
 <pre><code class="language-toml">[dependencies]
-bowshock = { git = "https://github.com/Sandvoxel/bowshock", default-features = false }
+bowshock-core = { git = "https://github.com/Sandvoxel/bowshock", default-features = false }
 </code></pre>
 <p>With <code>serde</code>:</p>
 <pre><code class="language-toml">[dependencies]
-bowshock = { git = "https://github.com/Sandvoxel/bowshock", features = ["serde"] }
+bowshock-core = { git = "https://github.com/Sandvoxel/bowshock", features = ["serde"] }
 </code></pre>
 <h2 id="gpu-and-cpu"><a class="header" href="#gpu-and-cpu">GPU and CPU</a></h2>
 <p>By default (<code>Backend::Auto</code>) a sweep runs on the GPU when one is available and on the CPU
@@ -217,11 +217,11 @@ and <code>Backend::Gpu</code> returns <code>Error::Unsupported</code>. See <a hr
 <h2 id="a-first-analysis"><a class="header" href="#a-first-analysis">A first analysis</a></h2>
 <p>A 0.10 m tangent-ogive body: 0.30 m nose, 0.60 m tube, then a 0.10 m boattail to 0.08 m diameter,
 in sea-level standard air, with the RANS equations (friction and base drag from the solution):</p>
-<pre><code class="language-rust no_run">use bowshock::{
+<pre><code class="language-rust no_run">use bowshock_core::{
     AftSpec, Analysis, Atmosphere, BodySpec, FlightConditions, NoseShape, NoseSpec, Resolution,
 };
 
-fn main() -&gt; Result&lt;(), bowshock::Error&gt; {
+fn main() -&gt; Result&lt;(), bowshock_core::Error&gt; {
     let spec = BodySpec {
         nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
         aft: vec![AftSpec::Tube { length: 0.60 }, AftSpec::Transition { length: 0.10, aft_diameter: 0.08 }],
@@ -257,7 +257,7 @@ dimensionless. The same example without <code>.viscous(flight)</code> solves the
 <code>true</code>).</p>
 <p>The points come back in the order you gave the Mach numbers. Check <code>quality</code> on every point before
 using <code>drag.total</code>; see <a href="results.html#quality">Results</a>.</p>
-<p>The repository has the same flow as a runnable program: <code>cargo run --release -p bowshock --example polar</code>.</p>
+<p>The repository has the same flow as a runnable program: <code>cargo run --release -p bowshock-core --example polar</code>.</p>
 
                     </main>
 

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["revolve"],"struct":["Face3","Grid3","SolidBox"]};

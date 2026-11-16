@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["StopReason","Wake"],"mod":["analysis","atmosphere","error","spec"]};

@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-5fa84c0d.js";
+            window.path_to_searchindex_js = "searchindex-1a9cac13.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-98b8035d.js"></script>
@@ -186,7 +186,7 @@
 <p>On NVIDIA’s Linux driver (seen on 615.71.09) a process that used the GPU can hang at exit (100 %
 CPU in <code>libnvidia-gpucomp</code>) or abort with <code>free(): chunks in smallbin corrupted</code>, while the
 driver’s shader compiler thread is still running at <code>exit()</code>. It is intermittent (1 in 3 runs of one
-benchmark) and a driver bug, not a bowshock or Luma bug (<code>bowshock-cfd/ISSUES.md</code>, row 1). It can
+benchmark) and a driver bug, not a bowshock or Luma bug (<code>crates/bowshock-cfd/ISSUES.md</code>, row 1). It can
 hit a program that calls <code>Analysis::run</code> on the GPU. The results are already printed by then. If it
 bites you, update the driver, or run on <code>Backend::Cpu</code>.</p>
 <h2 id="polarbackend-is-cpu-but-i-have-a-gpu"><a class="header" href="#polarbackend-is-cpu-but-i-have-a-gpu"><code>Polar::backend</code> is <code>Cpu</code> but I have a GPU</a></h2>
@@ -202,7 +202,7 @@ sweep.</li>
 have the CPU.</p>
 <h2 id="how-long-does-a-run-take"><a class="header" href="#how-long-does-a-run-take">How long does a run take?</a></h2>
 <p>A robustness matrix of inviscid <code>Coarse</code> sweeps (3 bodies, 10 Mach numbers, GPU) took about 20 s
-in total (<code>bowshock-validate/README.md</code>). A viscous (RANS) point at <code>Medium</code> with fins takes 4 to
+in total (<code>crates/bowshock-validate/README.md</code>). A viscous (RANS) point at <code>Medium</code> with fins takes 4 to
 19 s on an RTX 3090 and 60 to 213 s on the CPU; a 23-point sweep from Mach 0.3 to 2.5 took 178 s on
 the GPU (the table in <a href="performance.html">Performance</a>). Each Mach number is a separate solve, so the cost is proportional
 to the number of points. To iterate on a design: <code>Coarse</code>, a few Mach numbers, <code>max_iterations</code>

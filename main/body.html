@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-5fa84c0d.js";
+            window.path_to_searchindex_js = "searchindex-1a9cac13.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-98b8035d.js"></script>
@@ -184,7 +184,7 @@
                         <h1 id="the-body"><a class="header" href="#the-body">The body</a></h1>
 <p>A <code>BodySpec</code> is a nose followed by one or more aft sections. All lengths are in metres. The body
 ends in a flat base.</p>
-<pre><code class="language-rust">use bowshock::{AftSpec, BodySpec, NoseShape, NoseSpec};
+<pre><code class="language-rust">use bowshock_core::{AftSpec, BodySpec, NoseShape, NoseSpec};
 
 let spec = BodySpec {
     nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
@@ -241,7 +241,7 @@ with the offending field:</p>
 </tbody>
 </table>
 </div>
-<pre><code class="language-rust">use bowshock::{AftSpec, Analysis, BodySpec, Error, NoseShape, NoseSpec};
+<pre><code class="language-rust">use bowshock_core::{AftSpec, Analysis, BodySpec, Error, NoseShape, NoseSpec};
 
 // fineness 15 is outside [0.5, 12]
 let spec = BodySpec {
@@ -258,8 +258,8 @@ println!("{err}");</code></pre>
 that is the largest diameter of the body (<code>BodySpec::reference_diameter</code>): the maximum of the
 nose diameter and every <code>aft_diameter</code>. Override it with <code>Analysis::reference_diameter(d_m)</code>
 [m], for example to quote coefficients on the body-tube area when a flare is larger:</p>
-<pre><code class="language-rust no_run"><span class="boring">use bowshock::{AftSpec, Analysis, BodySpec, NoseShape, NoseSpec};
-</span><span class="boring">fn main() -&gt; Result&lt;(), bowshock::Error&gt; {
+<pre><code class="language-rust no_run"><span class="boring">use bowshock_core::{AftSpec, Analysis, BodySpec, NoseShape, NoseSpec};
+</span><span class="boring">fn main() -&gt; Result&lt;(), bowshock_core::Error&gt; {
 </span><span class="boring">let spec = BodySpec {
 </span><span class="boring">    nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
 </span><span class="boring">    aft: vec![AftSpec::Tube { length: 0.60 }],

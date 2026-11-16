@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["Backend","BackendUsed","Quality","Resolution","Warning"],"struct":["Analysis","Drag","FinDrag","PointDetail","Polar","PolarPoint","WallCp"]};

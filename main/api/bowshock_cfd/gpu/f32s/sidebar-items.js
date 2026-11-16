@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["cons_to_prim","physical_flux"],"struct":["LazySolver","Residuals"],"type":["A","Rec","S","State"]};
+window.SIDEBAR_ITEMS = {"fn":["cons_to_prim","cons_to_prim3","physical_flux"],"struct":["LazySolver","LazySolver3","Residuals"],"type":["A","Rec","Rec3","S","State","State3","Vec3"]};
