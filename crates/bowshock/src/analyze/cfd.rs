@@ -49,7 +49,7 @@ const INTERIOR: [f64; 8] = [0.5, 0.8, 0.9, 1.0, 1.1, 1.3, 1.7, 2.3];
 /// An interior node this close to an end of the range is left out (the end stands for it).
 const NODE_GAP: f64 = 0.12;
 /// Bump when what a stored 3D stability solve means changes (solver, grid, how the forces are reduced).
-const LIFT_REV: u64 = 1;
+const LIFT_REV: u64 = 2;
 /// The Mach nodes of a 3D stability solve (sparse: each costs two 3D Euler runs); the solve takes those inside the plotted range.
 pub const LIFT_INTERIOR: [f64; 8] = [0.5, 0.8, 0.95, 1.1, 1.3, 1.7, 2.3, 3.0];
 /// The angles of attack (degrees) every node is solved at.
