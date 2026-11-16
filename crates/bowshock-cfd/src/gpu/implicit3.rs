@@ -310,20 +310,15 @@ fn pad_dir(a: &F, dir: usize, before: usize, after: usize) -> F {
 // ---------------------------------------------------------------------------------------------------------------------
 
 /// The geometry of one line end (the boundary faces of one side of direction `dir`) on its edge cells (f32): the unit normal of the boundary face
-/// (`raw`, for the wall reflections) and the outward normal (`out`, for the characteristic far field); arrays of the edge slice of the solve layout.
+/// (`raw`, for the wall reflections) and the outward normal (`out`, for the characteristic far field); arrays of the edge slice (`[1, nj, nk]`
+/// for the i ends, `[ni, 1, nk]`, `[ni, nj, 1]`).
 struct EdgeGeo3 {
     raw: N3,
     out: N3,
 }
 
-/// Unit normal and area of the faces of one direction in the natural layout (`[ni + 1, nj, nk]`, ...): the pseudo-time step reads them.
-struct NatDir {
-    n: N3,
-    area: F,
-}
-
-/// Uploaded f32 geometry of one direction in its solve layout: unit normal and area of its faces, zeros and ones of the face shape, and the masks of the
-/// cells that decide how the line ends and the solid cells fold into the blocks.
+/// Uploaded f32 geometry of one direction: unit normal and area of its faces, zeros and ones of the face shape, and the masks of the cells
+/// `[ni, nj, nk]` that decide how the line ends and the solid cells fold into the blocks.
 struct LDir3 {
     n: N3,
     area: F,
@@ -344,33 +339,18 @@ struct LDir3 {
     wall_r: Option<Array<bool>>,
 }
 
-/// One line direction in its **solve layout**. The line solve of Luma (one invocation per line, `solve_block_tridiagonal_parts`) reads a line
-/// contiguously and the neighbouring lines `n` elements apart when the line axis is 0: its loads do not coalesce (ANF level 0, 187-cell i lines of
-/// 5x5 blocks: 3.3 ms against 0.45 ms along axis 1 or 2). The i factor is therefore assembled and solved on the transposed arrays `[nj, ni, nk]` (line
-/// axis 1; the geometry arrays are uploaded in that layout, the state arrays are read through transposed views, only the five-component right-hand
-/// side and solution are transposed as buffers); the j and k factors keep the natural layout.
-struct Lay3 {
-    /// Axis of the lines, extents of the layout, and whether it is the transposed one (axes 0 and 1 swapped).
-    la: usize,
-    dims: [usize; 3],
-    tr: bool,
-    dir: LDir3,
-    /// Cell volume `V`, zeros and ones, solid cells (`None` without solid boxes), in the layout.
-    vol: F,
-    zero: F,
-    one: F,
-    solid: Option<Array<bool>>,
-    /// `edge[side]`, side 0 = lower end (`m = 0`), 1 = upper end.
-    edge: [EdgeGeo3; 2],
-}
-
 /// The f32 geometry of the left-hand side, uploaded once from the grid (the arrays of `Geo3` are of the precision `S`).
 struct LGeo3 {
-    nat: [NatDir; 3],
-    /// Cell volume `V` and solid cells in the natural layout (the pseudo-time step).
+    dir: [LDir3; 3],
+    /// Cell volume `V`.
     vol: F,
+    /// Zeros and ones `[ni, nj, nk]`.
+    zero: F,
+    one: F,
+    /// Solid cells (`None` without solid boxes).
     solid: Option<Array<bool>>,
-    lay: [Lay3; 3],
+    /// `edge[dir][side]`, side 0 = lower end (`m = 0`), 1 = upper end.
+    edge: [[EdgeGeo3; 2]; 3],
 }
 
 impl LGeo3 {
@@ -387,35 +367,21 @@ impl LGeo3 {
                 && (c[2] as usize) < nk
                 && solid[(c[2] as usize * nj + c[1] as usize) * ni + c[0] as usize]
         };
-        // the solve layout of direction 0 is the transposed one: `[nj, ni, nk]`
-        let layout_dims = |tr: bool| if tr { [nj, ni, nk] } else { dims };
-        // natural indices of the cells / faces (`nf` natural extents) in the order of the layout (`i` and `j` swapped for the transposed one)
-        let order = |nf: [usize; 3], tr: bool| -> Vec<usize> {
-            if tr {
-                (0..nf[2]).flat_map(|k| (0..nf[0]).flat_map(move |i| (0..nf[1]).map(move |j| (k * nf[1] + j) * nf[0] + i))).collect()
-            } else {
-                (0..nf[0] * nf[1] * nf[2]).collect()
-            }
-        };
-        // `f(i, j, k)` of the natural indices, over the layout `shape`
-        let mask = |shape: [usize; 3], tr: bool, f: &dyn Fn(usize, usize, usize) -> bool| -> Result<Array<bool>> {
+        let mask = |shape: [usize; 3], f: &dyn Fn(usize, usize, usize) -> bool| -> Result<Array<bool>> {
             let mut v = Vec::with_capacity(shape[0] * shape[1] * shape[2]);
             for k in 0..shape[2] {
                 for j in 0..shape[1] {
                     for i in 0..shape[0] {
-                        v.push(if tr { f(j, i, k) } else { f(i, j, k) });
+                        v.push(f(i, j, k));
                     }
                 }
             }
             Array::from_slice_on(ctx, &v, shape)
         };
         let ones = |shape: [usize; 3], x: f64| up_lhs(ctx, &vec![x; shape[0] * shape[1] * shape[2]], shape);
-        let face_extents = |dir: usize| [ni + (dir == 0) as usize, nj + (dir == 1) as usize, nk + (dir == 2) as usize];
-        let direction = |dir: usize, faces: &[Face3], tr: bool| -> Result<LDir3> {
-            let nf = face_extents(dir);
-            let nf_layout = if tr { [nf[1], nf[0], nf[2]] } else { nf };
-            let face_order = order(nf, tr);
-            let get = |g: &dyn Fn(&Face3) -> f64| up_lhs(ctx, &face_order.iter().map(|&q| g(&faces[q])).collect::<Vec<_>>(), nf_layout);
+        let direction = |dir: usize, faces: &[Face3]| -> Result<LDir3> {
+            let nf = [ni + (dir == 0) as usize, nj + (dir == 1) as usize, nk + (dir == 2) as usize];
+            let get = |g: &dyn Fn(&Face3) -> f64| up_lhs(ctx, &faces.iter().map(g).collect::<Vec<_>>(), nf);
             let mut e = [0isize; 3];
             e[dir] = 1;
             let at = |i: usize, j: usize, k: usize| [i, j, k][dir];
@@ -423,73 +389,46 @@ impl LGeo3 {
             let cell = |i: usize, j: usize, k: usize, s: isize| [i as isize + s * e[0], j as isize + s * e[1], k as isize + s * e[2]];
             let lower = |i, j, k| is_solid(cell(i, j, k, -1));
             let upper = |i, j, k| is_solid(cell(i, j, k, 1));
-            let cells = layout_dims(tr);
             // a neighbour that does not exist is not solid (the ghost state stands there): `is_solid` is false out of range
             Ok(LDir3 {
                 n: [get(&|f| f.n[0])?, get(&|f| f.n[1])?, get(&|f| f.n[2])?],
                 area: get(&|f| f.area)?,
-                zero: ones(nf_layout, 0.0)?,
-                one: ones(nf_layout, 1.0)?,
-                first: mask(cells, tr, &|i, j, k| at(i, j, k) == 0)?,
-                last: mask(cells, tr, &|i, j, k| at(i, j, k) + 1 == nl)?,
-                lower_solid: if has_solid { Some(mask(cells, tr, &|i, j, k| lower(i, j, k))?) } else { None },
-                upper_solid: if has_solid { Some(mask(cells, tr, &|i, j, k| upper(i, j, k))?) } else { None },
-                cut_lo: mask(cells, tr, &|i, j, k| at(i, j, k) == 0 || lower(i, j, k))?,
-                cut_up: mask(cells, tr, &|i, j, k| at(i, j, k) + 1 == nl || upper(i, j, k))?,
-                wall_l: if has_solid { Some(mask(nf_layout, tr, &|i, j, k| lower(i, j, k) && !is_solid(cell(i, j, k, 0)))?) } else { None },
-                wall_r: if has_solid { Some(mask(nf_layout, tr, &|i, j, k| is_solid(cell(i, j, k, 0)) && !lower(i, j, k))?) } else { None },
+                zero: ones(nf, 0.0)?,
+                one: ones(nf, 1.0)?,
+                first: mask(dims, &|i, j, k| at(i, j, k) == 0)?,
+                last: mask(dims, &|i, j, k| at(i, j, k) + 1 == nl)?,
+                lower_solid: if has_solid { Some(mask(dims, &|i, j, k| lower(i, j, k))?) } else { None },
+                upper_solid: if has_solid { Some(mask(dims, &|i, j, k| upper(i, j, k))?) } else { None },
+                cut_lo: mask(dims, &|i, j, k| at(i, j, k) == 0 || lower(i, j, k))?,
+                cut_up: mask(dims, &|i, j, k| at(i, j, k) + 1 == nl || upper(i, j, k))?,
+                wall_l: if has_solid { Some(mask(nf, &|i, j, k| lower(i, j, k) && !is_solid(cell(i, j, k, 0)))?) } else { None },
+                wall_r: if has_solid { Some(mask(nf, &|i, j, k| is_solid(cell(i, j, k, 0)) && !lower(i, j, k))?) } else { None },
             })
-        };
-        let natural = |dir: usize, faces: &[Face3]| -> Result<NatDir> {
-            let nf = face_extents(dir);
-            let get = |g: &dyn Fn(&Face3) -> f64| up_lhs(ctx, &faces.iter().map(g).collect::<Vec<_>>(), nf);
-            Ok(NatDir { n: [get(&|f| f.n[0])?, get(&|f| f.n[1])?, get(&|f| f.n[2])?], area: get(&|f| f.area)? })
         };
         let edge = |faces: Vec<&Face3>, sign: f64, shape: [usize; 3]| -> Result<EdgeGeo3> {
             let get = |q: usize, s: f64| up_lhs(ctx, &faces.iter().map(|f| s * f.n[q]).collect::<Vec<_>>(), shape);
             Ok(EdgeGeo3 { raw: [get(0, 1.0)?, get(1, 1.0)?, get(2, 1.0)?], out: [get(0, sign)?, get(1, sign)?, get(2, sign)?] })
         };
-        // line ends in the layout: i ends `[1, nj, nk]` (`[nj, 1, nk]` transposed; the singleton axis does not change the order), j ends `[ni, 1, nk]`,
-        // k ends `[ni, nj, 1]`
+        // i ends `[1, nj, nk]`, j ends `[ni, 1, nk]`, k ends `[ni, nj, 1]`
         let iend = |i: usize| -> Vec<&Face3> { (0..nk * nj).map(|q| &grid.iface[q * (ni + 1) + i]).collect() };
         let jend = |j: usize| -> Vec<&Face3> { (0..nk).flat_map(|k| (0..ni).map(move |i| (k * (nj + 1) + j) * ni + i)).map(|q| &grid.jface[q]).collect() };
         let kend = |k: usize| -> Vec<&Face3> { (0..nj * ni).map(|q| &grid.kface[k * nj * ni + q]).collect() };
-        let layout = |dir: usize, faces: &[Face3]| -> Result<Lay3> {
-            let tr = false;
-            let wd = layout_dims(tr);
-            let cells = order(dims, tr);
-            let (lo_faces, hi_faces) = match dir {
-                0 => (iend(0), iend(ni)),
-                1 => (jend(0), jend(nj)),
-                _ => (kend(0), kend(nk)),
-            };
-            let eshape = {
-                let mut s = wd;
-                s[if tr { 1 } else { dir }] = 1;
-                s
-            };
-            Ok(Lay3 {
-                la: if tr { 1 } else { dir },
-                dims: wd,
-                tr,
-                dir: direction(dir, faces, tr)?,
-                vol: up_lhs(ctx, &cells.iter().map(|&c| grid.vol[c]).collect::<Vec<_>>(), wd)?,
-                zero: ones(wd, 0.0)?,
-                one: ones(wd, 1.0)?,
-                solid: if has_solid { Some(Array::from_slice_on(ctx, &cells.iter().map(|&c| solid[c]).collect::<Vec<_>>(), wd)?) } else { None },
-                edge: [edge(lo_faces, -1.0, eshape)?, edge(hi_faces, 1.0, eshape)?],
-            })
-        };
         Ok(LGeo3 {
-            nat: [natural(0, &grid.iface)?, natural(1, &grid.jface)?, natural(2, &grid.kface)?],
+            dir: [direction(0, &grid.iface)?, direction(1, &grid.jface)?, direction(2, &grid.kface)?],
             vol: up_lhs(ctx, &grid.vol, dims)?,
+            zero: ones(dims, 0.0)?,
+            one: ones(dims, 1.0)?,
             solid: if has_solid { Some(Array::from_slice_on(ctx, solid, dims)?) } else { None },
-            lay: [layout(0, &grid.iface)?, layout(1, &grid.jface)?, layout(2, &grid.kface)?],
+            edge: [
+                [edge(iend(0), -1.0, [1, nj, nk])?, edge(iend(ni), 1.0, [1, nj, nk])?],
+                [edge(jend(0), -1.0, [ni, 1, nk])?, edge(jend(nj), 1.0, [ni, 1, nk])?],
+                [edge(kend(0), -1.0, [ni, nj, 1])?, edge(kend(nk), 1.0, [ni, nj, 1])?],
+            ],
         })
     }
 }
 
-/// The blocks `lo`, `d`, `up` of `I - dt J_dir` of every cell (arrays of the solve layout of the direction, evaluated).
+/// The blocks `lo`, `d`, `up` of `I - dt J_dir` of every cell (`[ni, nj, nk]` arrays, evaluated).
 struct Factor3 {
     lo: [F; 25],
     d: [F; 25],
@@ -515,7 +454,7 @@ impl LazySolver3 {
         if !p.implicit_bc {
             return Tj5::Zero;
         }
-        let e = &self.lg.lay[dir].edge[!lower as usize];
+        let e = &self.lg.edge[dir][!lower as usize];
         if (dir == 1 && lower) || dir == 2 {
             return Tj5::Mat(reflection_f3(&e.raw));
         }
@@ -545,7 +484,7 @@ impl LazySolver3 {
         let dims = self.dims3();
         let cs = (cf(GAMMA) * &wk[4] / &wk[0]).sqrt();
         let lam = |dir: usize, upper: bool| -> F {
-            let d = &g.nat[dir];
+            let d = &g.dir[dir];
             let r = if upper { 1..dims[dir] + 1 } else { 0..dims[dir] };
             let s = |a: &F| a.slice(dir, r.clone());
             ((&wk[1] * s(&d.n[0]) + &wk[2] * s(&d.n[1]) + &wk[3] * s(&d.n[2])).abs() + &cs) * s(&d.area)
@@ -561,10 +500,10 @@ impl LazySolver3 {
         }
     }
 
-    /// Blocks `(lo, d, up)` of `I - dt J_dir` for every cell (`assemble3`, `cell_blocks3`), in the solve layout of the direction (see [`Lay3`]). With the face
-    /// matrices `FL = A(U_L) + D`, `FR = A(U_R) - D` of every face (`D` the dissipation matrix of the face, `L` / `R` its lower / upper state, ghost states at
-    /// the ends of a line, the solid side of a wall face the reflection of its fluid side, `A` evaluated with the face normal) and the cell coefficients
-    /// `s_l = dt S_l / (2 V)`, `s_u = dt S_u / (2 V)` (`S` the areas of the lower / upper face):
+    /// Blocks `(lo, d, up)` of `I - dt J_dir` for every cell (`assemble3`, `cell_blocks3`). With the face matrices `FL = A(U_L) + D`, `FR = A(U_R) - D` of
+    /// every face (`D` the dissipation matrix of the face, `L` / `R` its lower / upper state, ghost states at the ends of a line, the solid side of a wall
+    /// face the reflection of its fluid side, `A` evaluated with the face normal) and the cell coefficients `s_l = dt S_l / (2 V)`, `s_u = dt S_u / (2 V)`
+    /// (`S` the areas of the lower / upper face):
     ///
     /// ```text
     /// lo = -s_l FL_lower,   d = I + s_u FL_upper - s_l FR_lower,   up = s_u FR_upper
@@ -573,23 +512,14 @@ impl LazySolver3 {
     /// The first / last cell of a line folds `lo T` / `up T` into `d` (`T` from [`LazySolver3::ghost_jacobian3`]), a fluid cell next to a solid cell folds
     /// `lo R` / `up R` (`R` the reflection about that face), and both drop `lo` / `up`. Solid cells: `d = I`, `lo = up = 0`. `lines = false`: point-implicit.
     fn factor3(&self, wf: &V5, wk: &V5, dt: &F, p: &ImplicitParams, dir: usize) -> Factor3 {
-        let lay = &self.lg.lay[dir];
-        let (dg, la, wd) = (&lay.dir, lay.la, lay.dims);
-        let n = wd[la];
-        // the inputs in the solve layout (views: they fuse into the kernels that read them)
-        let into_layout = |v: &V5| -> V5 {
-            if lay.tr {
-                v5(|k| v[k].transpose())
-            } else {
-                v.clone()
-            }
-        };
-        let (wf, wk) = (into_layout(wf), into_layout(wk));
-        let dt = if lay.tr { dt.transpose() } else { dt.clone() };
+        let g = &self.lg;
+        let dg = &g.dir[dir];
+        let dims = self.dims3();
+        let n = dims[dir];
 
         // face matrices: the states below / above every face of the direction, from the padded primitives (two ghost layers)
-        let line: V5 = v5(|k| (0..3).filter(|&a| a != la).fold(wf[k].clone(), |a, ax| a.slice(ax, 2..wd[ax] + 2)));
-        let (l, r): (V5, V5) = (v5(|k| line[k].slice(la, 1..n + 2)), v5(|k| line[k].slice(la, 2..n + 3)));
+        let line: V5 = v5(|k| (0..3).filter(|&a| a != dir).fold(wf[k].clone(), |a, ax| a.slice(ax, 2..dims[ax] + 2)));
+        let (l, r): (V5, V5) = (v5(|k| line[k].slice(dir, 1..n + 2)), v5(|k| line[k].slice(dir, 2..n + 3)));
         // a face of a solid box: the solid side is the reflection of the fluid side about the face
         let (l, r) = match (&dg.wall_l, &dg.wall_r) {
             (Some(wl), Some(wr)) => {
@@ -606,30 +536,30 @@ impl LazySolver3 {
         let (fl, fr) = (Blk5::of(&fl), Blk5::of(&fr));
 
         // cell blocks
-        let s = 0.5f32 * &dt / &lay.vol;
-        let (s_l, s_u) = (&s * dg.area.slice(la, 0..n), &s * dg.area.slice(la, 1..n + 1));
-        let mut d = Blk5::eye().add(&fl.slice(la, 1..n + 1).scale(&s_u)).sub(&fr.slice(la, 0..n).scale(&s_l));
-        let (mut lo, mut up) = if p.lines { (fl.slice(la, 0..n).scale(&(-&s_l)), fr.slice(la, 1..n + 1).scale(&s_u)) } else { (Blk5::zero(), Blk5::zero()) };
+        let s = 0.5f32 * dt / &g.vol;
+        let (s_l, s_u) = (&s * dg.area.slice(dir, 0..n), &s * dg.area.slice(dir, 1..n + 1));
+        let mut d = Blk5::eye().add(&fl.slice(dir, 1..n + 1).scale(&s_u)).sub(&fr.slice(dir, 0..n).scale(&s_l));
+        let (mut lo, mut up) = if p.lines { (fl.slice(dir, 0..n).scale(&(-&s_l)), fr.slice(dir, 1..n + 1).scale(&s_u)) } else { (Blk5::zero(), Blk5::zero()) };
 
         if p.lines {
             // ends of the lines: fold `lo T` / `up T` into `d`
-            let edge = |at: std::ops::Range<usize>| -> V5 { v5(|k| wk[k].slice(la, at.clone())) };
+            let edge = |at: std::ops::Range<usize>| -> V5 { v5(|k| wk[k].slice(dir, at.clone())) };
             let (t_lo, t_hi) = (self.ghost_jacobian3(dir, true, &edge(0..1), p), self.ghost_jacobian3(dir, false, &edge(n - 1..n), p));
-            let folds = [times_t5(&lo.slice(la, 0..1), &t_lo), times_t5(&up.slice(la, n - 1..n), &t_hi)];
-            let (z, o) = (lay.zero.slice(la, 0..1), lay.one.slice(la, 0..1));
+            let folds = [times_t5(&lo.slice(dir, 0..1), &t_lo), times_t5(&up.slice(dir, n - 1..n), &t_hi)];
+            let (z, o) = (g.zero.slice(dir, 0..1), g.one.slice(dir, 0..1));
             // a fluid cell next to a solid cell sees the wall: `T` = the reflection about the face towards the solid cell
             let walls = [
-                dg.lower_solid.as_ref().map(|m| (m, lo.mm(&reflection_f3(&std::array::from_fn(|q| dg.n[q].slice(la, 0..n)))))),
-                dg.upper_solid.as_ref().map(|m| (m, up.mm(&reflection_f3(&std::array::from_fn(|q| dg.n[q].slice(la, 1..n + 1)))))),
+                dg.lower_solid.as_ref().map(|m| (m, lo.mm(&reflection_f3(&std::array::from_fn(|q| dg.n[q].slice(dir, 0..n)))))),
+                dg.upper_solid.as_ref().map(|m| (m, up.mm(&reflection_f3(&std::array::from_fn(|q| dg.n[q].slice(dir, 1..n + 1)))))),
             ];
             let present: [[bool; 25]; 2] = std::array::from_fn(|s| std::array::from_fn(|k| folds[s].as_ref().is_some_and(|b| !matches!(b.0[k], E::Z))));
             let dense: [[F; 25]; 2] = std::array::from_fn(|s| folds[s].as_ref().map_or_else(|| std::array::from_fn(|_| z.clone()), |b| b.dense(&z, &o)));
             let dense = dense.cache();
             let spread = |a: &F, low: bool| -> F {
                 if low {
-                    pad_dir(a, la, 0, n - 1)
+                    pad_dir(a, dir, 0, n - 1)
                 } else {
-                    pad_dir(a, la, n - 1, 0)
+                    pad_dir(a, dir, n - 1, 0)
                 }
             };
             for k in 0..25 {
@@ -652,7 +582,7 @@ impl LazySolver3 {
         }
 
         // solid cells: `d = I`, `lo = up = 0` (selects, not multiplies: nothing computed inside the solid reaches the blocks)
-        if let Some(solid) = &lay.solid {
+        if let Some(solid) = &g.solid {
             let mask = |b: &Blk5, diag: bool| -> Blk5 {
                 Blk5(std::array::from_fn(|k| match &b.0[k] {
                     E::A(a) => E::A(select(solid, if diag && k % 6 == 0 { 1.0f32 } else { 0.0f32 }, a)),
@@ -661,28 +591,19 @@ impl LazySolver3 {
             };
             (lo, d, up) = (mask(&lo, false), mask(&d, true), mask(&up, false));
         }
-        let (z, o) = (&lay.zero, &lay.one);
+        let (z, o) = (&g.zero, &g.one);
         let [lo, d, up] = [lo.dense(z, o), d.dense(z, o), up.dense(z, o)].cache();
         Factor3 { lo, d, up }
     }
 
     /// `x <- (I - dt J_dir)^{-1} x` for every line of direction `dir` (block-tridiagonal solve, `solve_lines3`); the twenty-five block entries and the
-    /// five components are passed as parts (no stacking). Direction 0 solves in its transposed layout: `x` is transposed (and evaluated: the solve
-    /// reads buffers) on the way in and the solution on the way out.
+    /// five components are passed as parts (no stacking).
     fn solve_lines3(&self, fac: &Factor3, dir: usize, x: &V5) -> V5 {
-        let lay = &self.lg.lay[dir];
         let lo: [&F; 25] = std::array::from_fn(|k| &fac.lo[k]);
         let d: [&F; 25] = std::array::from_fn(|k| &fac.d[k]);
         let up: [&F; 25] = std::array::from_fn(|k| &fac.up[k]);
-        if lay.tr {
-            let xt: V5 = v5(|k| x[k].transpose()).cache();
-            let rhs: [&F; 5] = std::array::from_fn(|k| &xt[k]);
-            let y: V5 = luma::solve_block_tridiagonal_parts(lay.la, lo, d, up, rhs);
-            v5(|k| y[k].transpose()).cache()
-        } else {
-            let rhs: [&F; 5] = std::array::from_fn(|k| &x[k]);
-            luma::solve_block_tridiagonal_parts(lay.la, lo, d, up, rhs)
-        }
+        let rhs: [&F; 5] = std::array::from_fn(|k| &x[k]);
+        luma::solve_block_tridiagonal_parts(dir, lo, d, up, rhs)
     }
 
     /// The approximate factorization `(I - dt J_k)^{-1} (I - dt J_j)^{-1} (I - dt J_i)^{-1} rhs`.
@@ -693,24 +614,15 @@ impl LazySolver3 {
     }
 
     /// `(I - dt J_dir) x` (`apply_factor3`): `d x + lo x_{m-1} + up x_{m+1}`, the missing neighbours at the ends of a line being 0 (their blocks are
-    /// zero there). Computed in the solve layout of the direction (views of `x` and of the result).
+    /// zero there).
     fn apply_factor3(&self, fac: &Factor3, dir: usize, x: &V5) -> V5 {
-        let lay = &self.lg.lay[dir];
-        let x: V5 = if lay.tr { v5(|k| x[k].transpose()) } else { x.clone() };
         let mut lower = [0isize; 3];
-        lower[lay.la] = 1;
+        lower[dir] = 1;
         let upper = lower.map(|s| -s);
         let xm: V5 = v5(|k| x[k].shift_fill(lower, 0.0));
         let xp: V5 = v5(|k| x[k].shift_fill(upper, 0.0));
-        let (dx, lx, ux) = (mv5(&fac.d, &x), mv5(&fac.lo, &xm), mv5(&fac.up, &xp));
-        let y: V5 = v5(|q| &dx[q] + &lx[q] + &ux[q]);
-        if lay.tr {
-            // evaluated in the solve layout (the factor arrays are read along the thread index), then transposed back as a view
-            let y = y.cache();
-            v5(|q| y[q].transpose())
-        } else {
-            y
-        }
+        let (dx, lx, ux) = (mv5(&fac.d, x), mv5(&fac.lo, &xm), mv5(&fac.up, &xp));
+        v5(|q| &dx[q] + &lx[q] + &ux[q])
     }
 
     /// Positivity damping: `alpha` is the first of `1, 1/2, .., 1/128` for which `U + alpha dU` has `rho > 0`, `p > 0` and five finite components, `0` if

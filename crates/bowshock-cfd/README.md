@@ -1185,18 +1185,18 @@ Implicit step, M 2, 2 degrees, second-order from the first iteration, replay of 
 
 |case|cells|f32 3090|df32 3090|
 |---|---|---|---|
-|ANF level 0 (187 x 70 x 24, 2 solid boxes), E2 (as committed)|314 160|10.26 ms|10.94 ms|
-|ANF level 0, P1 (transposed i factor)|314 160|4.62 ms|5.36 ms|
+|ANF level 0 (187 x 70 x 24, 2 solid boxes), E2, luma before 152c127|314 160|10.26 ms|10.94 ms|
+|ANF level 0, transposed i factor (P1 workaround), luma before 152c127|314 160|4.62 ms|5.36 ms|
+|ANF level 0, luma 152c127, solved in place (current)|314 160|4.22 ms|4.97 ms|
 |fin-less ogive level 0 (144 x 70 x 24), E2|241 920|-|6.85 ms|
 
-**Layout of the line solves.** Luma's parts solve runs one invocation per line, and along axis 0 the neighbouring lines are `n` elements apart: the 80 loads per
-step do not coalesce (the 1680 i lines of 187 cells: 3.3 ms per solve, against 0.45 ms along axis 1 or 2 on the same data; forced `LUMA_TRIDIAGONAL=cyclic`:
-0.35 ms for i but 1.7 ms for the 13 090 k lines). The i factor is therefore assembled and solved on transposed arrays `[nj, ni, nk]` (`Lay3` in `implicit3.rs`:
-geometry uploaded in that layout, state read through transposed views, only the right-hand side and the solution are transposed as buffers, the `A_i du` of the
-defect correction is evaluated in the solve layout): i solve 3.3 -> 0.45 ms. Profile of one step (df32, 3090, 5.36 ms, 66 launches): `SolveParts` i / j 1.80 ms
-(4 launches), k 0.51 ms (2), factor assembly 1.0 ms, three flux kernels 0.53 ms, the rest below 1 ms. Time to the stop rule on ANF level 0, M 2, 2 degrees
-(`converge3d`, df32): 345 iterations, 2.2 s; `sub_iters` 1 needs 398 iterations and the same 2.2 s, so it stays 2. Launches per step: tiny case explicit 33 (f32) /
-30 (df32).
+**Layout of the line solves.** Luma's parts solve ran one invocation per line, and along axis 0 the neighbouring lines are `n` elements apart: the 80 loads per
+step did not coalesce (the 1680 i lines of 187 cells: 3.3 ms per solve, against 0.45 ms along axis 1 or 2 on the same data). The P1 workaround assembled and solved
+the i factor on transposed arrays (i solve 0.45 ms, step 10.9 -> 5.4 ms). Luma 152c127 ("contiguous lines always cyclic") solves those lines in place in 0.32 ms
+(`SolveParts` Cyclic, workgroup 128), and the step is faster without the transposes (4.97 against 5.36 ms): the workaround was removed. Profile of one step (df32,
+3090, 4.97 ms, 61 launches): `SolveParts` j 0.81 ms (2 launches), i 0.63 ms (2), k 0.51 ms (2), factor assembly 1.0 ms, three flux kernels 0.53 ms, the rest below
+1 ms. Time to the stop rule on ANF level 0, M 2, 2 degrees (`converge3d`, df32): 345 iterations, 2.2 s; `sub_iters` 1 needs 398 iterations and the same 2.2 s, so it
+stays 2. Launches per step: tiny case explicit 33 (f32) / 30 (df32).
 
 ### Run
 
