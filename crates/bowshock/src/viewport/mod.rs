@@ -642,7 +642,8 @@ impl View {
 
     fn camera_update(&mut self, message: Message) {
         match message {
-            Message::Orbit(delta) if !self.profile => {
+            // An empty rocket has nothing to turn round: the camera stays put so the empty-state view keeps its framing.
+            Message::Orbit(delta) if !self.profile && !self.mesh.is_empty() => {
                 self.anim = None;
                 self.camera.orbit(delta);
                 // Turning away from a face view eases back into perspective (a focus stays orthographic until `Esc`).
@@ -651,7 +652,7 @@ impl View {
                 }
             }
             Message::Orbit(_) => {}
-            Message::RollBy(delta) if !self.profile => {
+            Message::RollBy(delta) if !self.profile && !self.mesh.is_empty() => {
                 self.anim = None;
                 self.camera.roll_by(delta);
             }
@@ -1067,9 +1068,30 @@ mod tests {
         view.settle();
     }
 
+    /// A view showing a one-tube rocket.
+    fn with_rocket() -> View {
+        let mut view = View::new();
+        let mut rocket = bowshock_model::Rocket::default();
+        rocket.insert(0, bowshock_model::PartKind::BodyTube { length: 0.5, diameter: 0.1 }).unwrap();
+        view.mesh = Arc::new(Mesh::from_rocket(&rocket, mesh::Marks::default()));
+        view
+    }
+
+    #[test]
+    fn an_empty_rocket_cannot_be_orbited_or_rolled() {
+        let mut view = View::new();
+        let before = view.camera;
+        run(&mut view, Message::Orbit(Vector::new(40.0, 10.0)));
+        run(&mut view, Message::RollBy(Vector::new(30.0, 0.0)));
+        assert_eq!((view.camera.yaw, view.camera.pitch, view.camera.roll), (before.yaw, before.pitch, before.roll));
+        let mut view = with_rocket();
+        run(&mut view, Message::Orbit(Vector::new(40.0, 10.0)));
+        assert_ne!(view.camera.yaw, before.yaw);
+    }
+
     #[test]
     fn a_cube_face_is_orthographic_and_orbiting_off_it_eases_back_into_perspective() {
-        let mut view = View::new();
+        let mut view = with_rocket();
         run(&mut view, Message::Snap(IVec3::NEG_X));
         assert!(view.camera.is_ortho(), "a face is seen square-on in an orthographic view");
 
