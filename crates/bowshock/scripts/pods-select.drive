@@ -14,9 +14,8 @@ click (160, 88)
 type backspace
 type backspace
 type backspace
-type "inner tube"
-click "Inner tube"
-click "Holds a motor"
+type "motor mount"
+click "Motor mount"
 move (640, 560)
 screenshot 01-pod-mount.png
 # Click the `Pod ×3` tag in Propulsion: the pod set is selected (inspector shows the pod, the bracket turns accent).

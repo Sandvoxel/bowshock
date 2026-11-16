@@ -224,13 +224,10 @@ pub fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &P
     let mut group = PlotGroup::new(x_axis(layout.x, imperial));
     for (index, def) in layout.panels.iter().enumerate() {
         let mut sources: Vec<&Channel> = def.sources.iter().filter_map(|key| channels::find(key)).collect();
-        // A source equal to the x quantity is a straight line against itself: it is dropped, and a panel left empty by that shows
-        // the other natural view of the x quantity.
+        // A source equal to the x quantity is a straight line against itself: it is dropped, and a panel left empty by that is
+        // not drawn rather than standing in some other quantity.
         if let Some(xc) = x_source {
             sources.retain(|c| c.key != xc.key);
-            if sources.is_empty() {
-                sources.extend(channels::find(if layout.x == PlotX::Altitude { "mach" } else { "altitude" }));
-            }
         }
         let Some(primary) = sources.first() else { continue };
         let multi = sources.len() > 1;
@@ -515,13 +512,13 @@ mod tests {
     }
 
     #[test]
-    fn a_panel_whose_source_is_the_x_quantity_shows_another_view_and_ambiguous_events_are_not_marked() {
+    fn a_panel_whose_source_is_the_x_quantity_is_not_drawn_and_ambiguous_events_are_not_marked() {
         let run = run();
         let entries = [Entry { name: "Nominal", color: SeriesColor::Ink, run: &run, scatter: None }];
         let layout = PlotLayout { x: PlotX::Altitude, ..layout(&[&["altitude"], &["vertical_velocity"]]) };
         let g = group(&entries, 0, UnitSystem::MKgS, &layout, 1.0).unwrap();
-        assert_eq!(g.panels.len(), 2);
-        assert_eq!(g.panels[0].title, "Mach number");
+        assert_eq!(g.panels.len(), 1);
+        assert_eq!(g.panels[0].title, "Vertical velocity");
         // Burnout (t = 1.6, 96 m on the way up) is passed again on the way down: no single place on the axis.
         assert!(g.events.iter().all(|m| m.label != "Burnout"));
         assert!(g.events.iter().any(|m| m.label == "Apogee"));

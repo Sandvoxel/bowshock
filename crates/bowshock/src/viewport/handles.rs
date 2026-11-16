@@ -330,7 +330,7 @@ fn internal(cx: &Context, up: Vec3, id: PartId, dim: Dim) -> Option<(Point, Axis
     let z1 = zf + len;
     use bowshock_model::InternalKind as K;
     match (dim, &part.kind) {
-        (Dim::Position, K::InnerTube { .. } | K::Coupler { .. } | K::CenteringRing { .. } | K::EngineBlock { .. } | K::Bulkhead { .. }) => {
+        (Dim::Position, K::InnerTube { .. } | K::Coupler { .. } | K::CenteringRing { .. } | K::Bulkhead { .. }) => {
             line(camera, size, at(up, r, zf), Vec3::Z, 1.0)
         }
         (Dim::Position, K::Parachute { .. } | K::ShockCord { .. } | K::Streamer { .. }) => line(camera, size, at(up, r / 2.0, zf), Vec3::Z, 1.0),

@@ -227,9 +227,7 @@ impl Rocket {
         let bulk = p.material.density_as(Bulk, p.kind.default_material());
         Some(match &p.kind {
             InternalKind::InnerTube { length, .. } | InternalKind::Coupler { length, .. } => annulus(bulk, ro, ri, *length),
-            InternalKind::CenteringRing { thickness, .. } | InternalKind::Bulkhead { thickness, .. } | InternalKind::EngineBlock { thickness, .. } => {
-                annulus(bulk, ro, ri, *thickness)
-            }
+            InternalKind::CenteringRing { thickness, .. } | InternalKind::Bulkhead { thickness, .. } => annulus(bulk, ro, ri, *thickness),
             InternalKind::Parachute { diameter, line_count, line_length, line_material, packed_length, .. } => {
                 let canopy = PI / 4.0 * diameter * diameter * p.material.density_as(Surface, MaterialId::RIPSTOP_NYLON);
                 let lines = f64::from(*line_count) * line_length * line_material.density_as(Line, MaterialId::BRAIDED_NYLON_2MM);

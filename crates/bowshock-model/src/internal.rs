@@ -13,7 +13,7 @@ pub enum System {
     Structure,
     /// Fins, launch lugs, rail buttons.
     Aero,
-    /// Motor mount tube, engine block (and the motor).
+    /// Motor mount tube (and the motor).
     Propulsion,
     /// Parachutes, streamers, shock cord.
     Recovery,
@@ -143,15 +143,6 @@ pub enum InternalKind {
         /// Length along the axis.
         length: f64,
     },
-    /// A ring that stops the motor sliding forward.
-    EngineBlock {
-        /// Outer diameter; auto is the inner diameter of the inner tube it sits in, else of the parent.
-        outer: Option<f64>,
-        /// Inner (hole) diameter.
-        inner: f64,
-        /// Thickness along the axis.
-        thickness: f64,
-    },
     /// A parachute: canopy and shroud lines, packed.
     Parachute {
         /// Canopy diameter (flat).
@@ -214,7 +205,6 @@ impl InternalKind {
             InternalKind::CenteringRing { .. } => "Centering ring",
             InternalKind::Bulkhead { .. } => "Bulkhead",
             InternalKind::Coupler { .. } => "Coupler",
-            InternalKind::EngineBlock { .. } => "Engine block",
             InternalKind::Parachute { .. } => "Parachute",
             InternalKind::Streamer { .. } => "Streamer",
             InternalKind::ShockCord { .. } => "Shock cord",
@@ -225,7 +215,7 @@ impl InternalKind {
     /// The lane this part is drawn in and the colour it takes (see the Station Lanes table).
     pub fn system(&self) -> System {
         match self {
-            InternalKind::InnerTube { motor_mount: true, .. } | InternalKind::EngineBlock { .. } => System::Propulsion,
+            InternalKind::InnerTube { motor_mount: true, .. } => System::Propulsion,
             InternalKind::InnerTube { .. } | InternalKind::CenteringRing { .. } | InternalKind::Bulkhead { .. } | InternalKind::Coupler { .. } => {
                 System::Structure
             }
@@ -249,7 +239,7 @@ impl InternalKind {
     pub fn extent(&self) -> f64 {
         match *self {
             InternalKind::InnerTube { length, .. } | InternalKind::Coupler { length, .. } | InternalKind::MassComponent { length, .. } => length,
-            InternalKind::CenteringRing { thickness, .. } | InternalKind::Bulkhead { thickness, .. } | InternalKind::EngineBlock { thickness, .. } => thickness,
+            InternalKind::CenteringRing { thickness, .. } | InternalKind::Bulkhead { thickness, .. } => thickness,
             InternalKind::Parachute { packed_length, .. } | InternalKind::ShockCord { packed_length, .. } => packed_length,
             InternalKind::Streamer { width, .. } => width,
         }
@@ -259,7 +249,7 @@ impl InternalKind {
     pub fn default_material(&self) -> MaterialId {
         match self {
             InternalKind::InnerTube { .. } | InternalKind::Coupler { .. } => MaterialId::CARDBOARD,
-            InternalKind::CenteringRing { .. } | InternalKind::Bulkhead { .. } | InternalKind::EngineBlock { .. } => MaterialId::BIRCH_PLYWOOD,
+            InternalKind::CenteringRing { .. } | InternalKind::Bulkhead { .. } => MaterialId::BIRCH_PLYWOOD,
             InternalKind::Parachute { .. } => MaterialId::RIPSTOP_NYLON,
             InternalKind::Streamer { .. } => MaterialId::MYLAR,
             InternalKind::ShockCord { .. } => MaterialId::BRAIDED_NYLON_3MM,
@@ -279,7 +269,6 @@ impl InternalKind {
             InternalKind::InnerTube { outer_diameter: d, .. } => Some(d),
             InternalKind::CenteringRing { outer_diameter: d, .. }
             | InternalKind::Coupler { outer_diameter: d, .. }
-            | InternalKind::EngineBlock { outer: d, .. }
             | InternalKind::Bulkhead { diameter: d, .. }
             | InternalKind::MassComponent { diameter: d, .. }
             | InternalKind::Parachute { packed_diameter: d, .. } => d,

@@ -42,7 +42,7 @@ pub enum Dim {
     Gap,
     /// Rail button height.
     Height,
-    /// Hole diameter of a ring or engine block.
+    /// Hole diameter of a ring.
     InnerDiameter,
     /// How far a motor mount's motor sticks out behind it.
     Overhang,
@@ -274,7 +274,7 @@ impl Rocket {
                     spec(Dim::Position, true, Inside),
                     spec(Dim::Wall, false, Inside),
                 ],
-                InternalKind::CenteringRing { .. } | InternalKind::EngineBlock { .. } => {
+                InternalKind::CenteringRing { .. } => {
                     vec![spec(Dim::Position, true, Inside), spec(Dim::Thickness, true, Inside), spec(Dim::InnerDiameter, false, Inside)]
                 }
                 InternalKind::Bulkhead { .. } => vec![spec(Dim::Position, true, Inside), spec(Dim::Thickness, true, Inside)],
@@ -349,11 +349,8 @@ impl Rocket {
                     ) => Some(*length),
                     (Dim::Diameter, InternalKind::InnerTube { .. } | InternalKind::Coupler { .. } | InternalKind::Bulkhead { .. }) => Some(res.outer_diameter),
                     (Dim::Wall, InternalKind::InnerTube { thickness, .. } | InternalKind::Coupler { thickness, .. }) => Some(*thickness),
-                    (
-                        Dim::Thickness,
-                        InternalKind::CenteringRing { thickness, .. } | InternalKind::Bulkhead { thickness, .. } | InternalKind::EngineBlock { thickness, .. },
-                    ) => Some(*thickness),
-                    (Dim::InnerDiameter, InternalKind::CenteringRing { .. } | InternalKind::EngineBlock { .. }) => Some(res.inner_diameter),
+                    (Dim::Thickness, InternalKind::CenteringRing { thickness, .. } | InternalKind::Bulkhead { thickness, .. }) => Some(*thickness),
+                    (Dim::InnerDiameter, InternalKind::CenteringRing { .. }) => Some(res.inner_diameter),
                     (Dim::Overhang, InternalKind::InnerTube { overhang, .. }) => Some(*overhang),
                     (Dim::PackedLength, InternalKind::Parachute { packed_length, .. } | InternalKind::ShockCord { packed_length, .. }) => Some(*packed_length),
                     (Dim::InnerDiameter, InternalKind::InnerTube { thickness, .. } | InternalKind::Coupler { thickness, .. }) => {
@@ -540,14 +537,8 @@ impl Rocket {
                         (InternalKind::Coupler { outer_diameter, .. }, Dim::Diameter) => *outer_diameter = Some(v),
                         (InternalKind::Bulkhead { diameter, .. }, Dim::Diameter) => *diameter = Some(v),
                         (InternalKind::InnerTube { thickness, .. } | InternalKind::Coupler { thickness, .. }, Dim::Wall) => *thickness = v,
-                        (
-                            InternalKind::CenteringRing { thickness, .. }
-                            | InternalKind::Bulkhead { thickness, .. }
-                            | InternalKind::EngineBlock { thickness, .. },
-                            Dim::Thickness,
-                        ) => *thickness = v,
+                        (InternalKind::CenteringRing { thickness, .. } | InternalKind::Bulkhead { thickness, .. }, Dim::Thickness) => *thickness = v,
                         (InternalKind::CenteringRing { inner_diameter, .. }, Dim::InnerDiameter) => *inner_diameter = Some(v),
-                        (InternalKind::EngineBlock { inner, .. }, Dim::InnerDiameter) => *inner = v,
                         (InternalKind::InnerTube { overhang, .. }, Dim::Overhang) => *overhang = v,
                         (InternalKind::Parachute { packed_length, .. } | InternalKind::ShockCord { packed_length, .. }, Dim::PackedLength) => {
                             *packed_length = v

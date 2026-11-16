@@ -256,7 +256,7 @@ fn container_word(kind: &PartKind) -> &'static str {
 
 /// Whether an internal kind is a flat disc (rings, bulkheads, blocks): two of them at one station are a mistake.
 fn is_disc(kind: &InternalKind) -> bool {
-    matches!(kind, InternalKind::CenteringRing { .. } | InternalKind::Bulkhead { .. } | InternalKind::EngineBlock { .. })
+    matches!(kind, InternalKind::CenteringRing { .. } | InternalKind::Bulkhead { .. })
 }
 
 /// Whether an internal kind has a length to drag.

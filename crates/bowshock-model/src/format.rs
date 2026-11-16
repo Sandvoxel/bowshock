@@ -282,7 +282,7 @@ mod tests {
         r.attach_internal(upper, 0.45, InternalKind::CenteringRing { outer_diameter: None, inner_diameter: None, thickness: 0.006 }).unwrap();
         r.attach_internal(upper, 0.0, InternalKind::Bulkhead { diameter: Some(0.07), thickness: 0.006 }).unwrap();
         r.attach_internal(upper, 0.05, InternalKind::Coupler { outer_diameter: None, thickness: 0.002, length: 0.1 }).unwrap();
-        r.attach_internal(booster, 0.0, InternalKind::EngineBlock { outer: None, inner: 0.02, thickness: 0.006 }).unwrap();
+        r.attach_internal(booster, 0.0, InternalKind::CenteringRing { outer_diameter: None, inner_diameter: Some(0.02), thickness: 0.006 }).unwrap();
         r.attach_internal(
             upper,
             0.1,

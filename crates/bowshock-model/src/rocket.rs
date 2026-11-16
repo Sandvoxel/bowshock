@@ -608,7 +608,7 @@ impl Rocket {
     }
 
     /// The size of internal part `id` with its auto dimensions resolved: against the parent's inner diameter where it sits,
-    /// and for rings and engine blocks against the inner tube they sit on. Recovery gear, streamers and mass components with
+    /// and for rings against the inner tube they sit on. Recovery gear, streamers and mass components with
     /// no diameter fill [`AUTO_FILL`] of the parent's bore. `None` if `id` is not an internal part.
     pub fn resolved(&self, id: PartId) -> Option<Resolved> {
         let part = self.internal(id)?;
@@ -633,10 +633,6 @@ impl Rocket {
             InternalKind::Coupler { outer_diameter, thickness, .. } => {
                 let (o, oa) = pick(outer_diameter, bore);
                 (o, oa, (o - 2.0 * thickness).max(0.0), false)
-            }
-            InternalKind::EngineBlock { outer, inner, .. } => {
-                let (o, oa) = pick(outer, tube.map_or(bore, |t| t.1));
-                (o, oa, inner, false)
             }
             InternalKind::Parachute { packed_diameter, .. } => {
                 let (o, oa) = pick(packed_diameter, AUTO_FILL * bore);

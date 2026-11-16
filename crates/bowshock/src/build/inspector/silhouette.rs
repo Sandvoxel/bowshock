@@ -75,7 +75,7 @@ pub fn shapes(rocket: &Rocket, id: PartId) -> (Vec<Shape>, System) {
         },
         PartRef::Internal(p) => match &p.kind {
             InternalKind::InnerTube { .. } | InternalKind::Coupler { .. } => vec![rect(0.08, 0.3, 0.92, 0.7, false)],
-            InternalKind::CenteringRing { .. } | InternalKind::EngineBlock { .. } => vec![rect(0.38, 0.1, 0.62, 0.35, true), rect(0.38, 0.65, 0.62, 0.9, true)],
+            InternalKind::CenteringRing { .. } => vec![rect(0.38, 0.1, 0.62, 0.35, true), rect(0.38, 0.65, 0.62, 0.9, true)],
             InternalKind::Bulkhead { .. } => vec![rect(0.42, 0.1, 0.58, 0.9, true)],
             InternalKind::Parachute { .. } => {
                 let dome: Vec<(f32, f32)> = (0..=10)

@@ -27,7 +27,7 @@ pub enum Field {
     SweepAngle,
     /// An axial part's inner diameter: derived from the diameter and the wall, and typing it sets the wall.
     BoreDiameter,
-    /// An internal part's diameter that may follow its parent (`AUTO`): a ring's outer, an engine block's outer, a bulkhead's,
+    /// An internal part's diameter that may follow its parent (`AUTO`): a ring's outer, a bulkhead's,
     /// a coupler's, a packed bundle's or a mass component's. Typing makes it explicit.
     AutoDiameter,
     /// A parachute's canopy diameter.
@@ -234,7 +234,7 @@ fn edit_internal(r: &mut Rocket, id: PartId, field: Field, value: f64) -> bool {
     changed && r.set_internal_kind(id, kind)
 }
 
-/// Sets (or with `None` resets to automatic) the diameter that may follow the parent: a ring's or engine block's outer, a
+/// Sets (or with `None` resets to automatic) the diameter that may follow the parent: a ring's outer, a
 /// bulkhead's, a coupler's, a parachute's packed bundle's, a mass component's. Returns whether the part has one.
 pub fn set_auto_diameter(r: &mut Rocket, id: PartId, value: Option<f64>) -> bool {
     let Some(mut kind) = r.internal(id).map(|p| p.kind.clone()) else {
@@ -245,7 +245,6 @@ pub fn set_auto_diameter(r: &mut Rocket, id: PartId, value: Option<f64>) -> bool
         InternalKind::CenteringRing { outer_diameter: d, .. }
         | InternalKind::Bulkhead { diameter: d, .. }
         | InternalKind::Coupler { outer_diameter: d, .. }
-        | InternalKind::EngineBlock { outer: d, .. }
         | InternalKind::Parachute { packed_diameter: d, .. }
         | InternalKind::MassComponent { diameter: d, .. } => *d = value,
         _ => return false,

@@ -145,9 +145,6 @@ pub fn internal_outline(kind: &InternalKind) -> Sil {
             lines: vec![],
             dashed: vec![unit(&[(0.0, 0.1), (1.0, 0.1), (1.0, 0.9), (0.0, 0.9), (0.0, 0.1)])],
         },
-        InternalKind::EngineBlock { .. } => {
-            Sil { fills: vec![unit(&rect(0.4, 0.0, 0.6, 0.3)), unit(&rect(0.4, 0.7, 0.6, 1.0))], lines: vec![unit(&[(0.0, 0.5), (1.0, 0.5)])], dashed: vec![] }
-        }
         InternalKind::Parachute { diameter, .. } => canopy(if *diameter < 0.35 { 0.6 } else { 1.0 }),
         InternalKind::Streamer { .. } => {
             Sil::fill(unit(&[(0.0, 0.55), (0.25, 0.7), (0.5, 0.55), (0.75, 0.7), (1.0, 0.55), (1.0, 0.3), (0.75, 0.45), (0.5, 0.3), (0.25, 0.45), (0.0, 0.3)]))

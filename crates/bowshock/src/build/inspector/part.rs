@@ -234,11 +234,6 @@ fn internal<'a>(p: &Params<'a>, part: &InternalPart) -> Vec<Element<'a, Message>
             rows.push(f.num("Wall", *thickness, Quantity::Length, dim(Dim::Wall)));
             rows.push(f.derived("Inner Ø", inner, Quantity::Length, Field::BoreDiameter));
         }
-        InternalKind::EngineBlock { inner: hole, thickness, .. } => {
-            rows.push(auto_outer("Outer Ø"));
-            rows.push(f.num("Inner Ø", *hole, Quantity::Length, dim(Dim::InnerDiameter)));
-            rows.push(f.num("Thickness", *thickness, Quantity::Length, dim(Dim::Thickness)));
-        }
         InternalKind::Parachute { diameter, cd, line_count, line_length, packed_length, .. } => {
             rows.push(f.num("Canopy Ø", *diameter, Quantity::Length, Field::CanopyDiameter));
             rows.push(f.num("Drag coeff.", *cd, Quantity::Scalar, Field::Cd));
@@ -547,7 +542,7 @@ pub fn first_field(rocket: &Rocket, id: u64) -> Option<Field> {
         },
         PartRef::Internal(i) => match &i.kind {
             InternalKind::InnerTube { .. } | InternalKind::Coupler { .. } => dim(Dim::Length),
-            InternalKind::CenteringRing { .. } | InternalKind::Bulkhead { .. } | InternalKind::EngineBlock { .. } => Field::AutoDiameter,
+            InternalKind::CenteringRing { .. } | InternalKind::Bulkhead { .. } => Field::AutoDiameter,
             InternalKind::Parachute { .. } => Field::CanopyDiameter,
             InternalKind::Streamer { .. } => Field::StreamerLength,
             InternalKind::ShockCord { .. } => Field::CordLength,

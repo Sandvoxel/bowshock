@@ -921,7 +921,8 @@ impl<'w> Builder<'w> {
         let outer = dim(n, "outerradius").and_then(Dim::value).map(|r| 2.0 * r);
         let inner = (outer.unwrap_or(p.bore) - 2.0 * thickness).max(0.0);
         let (material, scale) = self.material(n, "material", MaterialKind::Bulk, MaterialId::BIRCH_PLYWOOD);
-        let kind = InternalKind::EngineBlock { outer, inner, thickness: len };
+        // An engine block is only a ring of mass in the simulation: import it as a centering ring.
+        let kind = InternalKind::CenteringRing { outer_diameter: outer, inner_diameter: Some(inner), thickness: len };
         let id = self.push_internal(n, p, top, kind, material);
         self.settle_mass(id, n, scale, None);
         top + len

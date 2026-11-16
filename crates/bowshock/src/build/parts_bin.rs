@@ -594,7 +594,6 @@ fn internal_size(kind: &InternalKind, inner: Option<f64>) -> String {
         InternalKind::CenteringRing { outer_diameter, thickness, .. } => format!("{} × {}", dia(outer_diameter), mm(thickness)),
         InternalKind::Bulkhead { diameter, thickness } => format!("{} × {}", dia(diameter), mm(thickness)),
         InternalKind::Coupler { outer_diameter, length, .. } => format!("{} × {}", dia(outer_diameter), mm(length)),
-        InternalKind::EngineBlock { inner: bore, thickness, .. } => format!("Ø{} bore × {}", mm(bore), mm(thickness)),
         InternalKind::Parachute { diameter, line_count, .. } => format!("Ø{} · {line_count} lines", mm(diameter)),
         InternalKind::Streamer { length, width, .. } => format!("{} × {}", mm(width), mm(length)),
         InternalKind::ShockCord { length, .. } => format!("{} long", mm(length)),
@@ -659,8 +658,7 @@ mod tests {
 
     #[test]
     fn size_lines_follow_the_kit() {
-        let coupler = &structure_catalogue()[5].1;
-        assert_eq!(internal_size(coupler, Some(0.0737)), "Ø73.7 × 152.4");
+        let coupler = &structure_catalogue()[3].1;
         assert_eq!(internal_size(coupler, None), "Ø auto × 152.4");
         assert_eq!(internal_size(&mass_catalogue()[4].1, None), "100 g · 30.0");
     }

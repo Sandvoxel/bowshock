@@ -90,10 +90,8 @@ fn coupler() -> InternalKind {
 pub fn structure_catalogue() -> Vec<(&'static str, InternalKind)> {
     vec![
         ("Motor mount", InternalKind::InnerTube { outer_diameter: 0.0413, thickness: 0.0016, length: 0.2, motor_mount: true, overhang: 0.0 }),
-        ("Inner tube", InternalKind::InnerTube { outer_diameter: 0.0413, thickness: 0.0016, length: 0.15, motor_mount: false, overhang: 0.0 }),
         ("Centering ring", InternalKind::CenteringRing { outer_diameter: None, inner_diameter: None, thickness: 0.00635 }),
         ("Bulkhead", InternalKind::Bulkhead { diameter: None, thickness: 0.00635 }),
-        ("Engine block", InternalKind::EngineBlock { outer: None, inner: 0.0381, thickness: 0.00635 }),
         ("Coupler", coupler()),
     ]
 }
@@ -158,9 +156,6 @@ pub fn fitted(kind: &InternalKind, host_inner: f64) -> InternalKind {
         InternalKind::InnerTube { outer_diameter, thickness, length, motor_mount, overhang } if outer_diameter > host_inner * 0.95 && host_inner > 0.0 => {
             InternalKind::InnerTube { outer_diameter: host_inner * 0.8, thickness, length, motor_mount, overhang }
         }
-        InternalKind::EngineBlock { outer, inner, thickness } if inner > host_inner * 0.8 && host_inner > 0.0 => {
-            InternalKind::EngineBlock { outer, inner: host_inner * 0.6, thickness }
-        }
         _ => kind.clone(),
     }
 }
@@ -210,7 +205,7 @@ pub fn host_inner(rocket: &Rocket, host: PartId) -> Option<f64> {
     Some(part.inner_diameter_at(part.kind.length() / 2.0))
 }
 
-/// Where a click puts an internal part of `kind` in `host`: aft flush for tubes, rings and blocks (rings stack fore of each
+/// Where a click puts an internal part of `kind` in `host`: aft flush for tubes and rings (rings stack fore of each
 /// other, around a motor mount if there is one), the fore end for bulkheads and couplers, and recovery gear and avionics stacked
 /// aft of whatever recovery gear and avionics are already in the tube.
 pub fn default_offset(rocket: &Rocket, host: PartId, kind: &InternalKind) -> f64 {
@@ -228,7 +223,6 @@ pub fn default_offset(rocket: &Rocket, host: PartId, kind: &InternalKind) -> f64
     let first_free = |candidates: &[f64]| candidates.iter().copied().find(|&c| !taken(c));
     match kind {
         InternalKind::InnerTube { .. } => aft,
-        InternalKind::EngineBlock { .. } => first_free(&[mount.map_or(aft, |m| m.offset), aft]).unwrap_or(aft),
         InternalKind::CenteringRing { .. } => {
             let around = mount.map(|m| vec![m.offset + m.kind.extent() - ext, m.offset]).unwrap_or_else(|| vec![aft]);
             first_free(&around).unwrap_or_else(|| {
@@ -396,8 +390,7 @@ mod tests {
     fn default_offsets_are_aft_flush_stacked_rings_and_forward_stacked_recovery() {
         let (mut r, tube, _) = rocket();
         let mount = structure_catalogue()[0].1.clone();
-        let ring = structure_catalogue()[2].1.clone();
-        let block = structure_catalogue()[4].1.clone();
+        let ring = structure_catalogue()[1].1.clone();
         assert!((default_offset(&r, tube, &mount) - 0.4).abs() < 1e-9);
         r.attach_internal(tube, 0.4, mount).unwrap();
         // Rings sit at the mount's aft end, then its fore end, then stack fore of that.
@@ -405,8 +398,6 @@ mod tests {
         assert!((aft_ring - (0.6 - 0.00635)).abs() < 1e-9);
         r.attach_internal(tube, aft_ring, ring.clone()).unwrap();
         assert!((default_offset(&r, tube, &ring) - 0.4).abs() < 1e-9);
-        // An engine block sits at the mount's fore end.
-        assert!((default_offset(&r, tube, &block) - 0.4).abs() < 1e-9);
         // Recovery gear stacks from the fore end.
         let chute = recovery_catalogue()[0].1.clone();
         let cord = recovery_catalogue()[3].1.clone();

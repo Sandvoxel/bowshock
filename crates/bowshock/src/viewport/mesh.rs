@@ -1,6 +1,6 @@
 //! The model mesh: everything the viewport draws of a [`Rocket`] as one triangle list, grouped into draw ranges.
 //!
-//! The airframe is a surface of revolution per part; internal parts (inner tubes, rings, bulkheads, couplers, engine blocks,
+//! The airframe is a surface of revolution per part; internal parts (inner tubes, rings, bulkheads, couplers,
 //! packed recovery gear, shock cord, avionics) and the loaded motors of the active configuration are tubes, cylinders and boxes
 //! inside it; fins of every planform, lugs and buttons stand on the outside. Each vertex carries its part's system, layer and
 //! its offset in the exploded view, so the view modes (solid, cutaway, X-ray, exploded) are decided in the shader and a mode
@@ -453,17 +453,6 @@ impl Mesh {
                         Some((Section::Tube { outer: ro, inner: ri }, z0, z0 + l)),
                     );
                 }
-                InternalKind::EngineBlock { thickness, .. } => {
-                    let t = *thickness as f32;
-                    put(
-                        &mut b,
-                        LAYER_INTERNAL,
-                        0,
-                        ro,
-                        &|s| s.tube(ro - INSET, ri + INSET, z0, z0 + t, INNER_SEGMENTS),
-                        Some((Section::Tube { outer: ro, inner: ri }, z0, z0 + t)),
-                    );
-                }
                 InternalKind::Parachute { packed_length, .. } => {
                     let l = *packed_length as f32;
                     put(&mut b, LAYER_INTERNAL, 0, ro, &|s| s.tube(ro, 0.0, z0, z0 + l, INNER_SEGMENTS), Some((Section::Cylinder(ro), z0, z0 + l)));
@@ -522,8 +511,8 @@ impl Mesh {
                 let explode = Vec3::new(0.0, rows[1], parent_dz);
                 b.inner.tag = Some(Tag { state, material: 0.0, system: 2.0, layer: LAYER_INTERNAL, explode });
                 b.caps.tag = Some(Tag { state, material: 0.0, system: 2.0, layer: LAYER_FILL, explode });
-                // The case sits a hair inside the bore, set back from both ends, so it shares no surface with the mount or the
-                // engine block.
+                // The case sits a hair inside the bore, set back from both ends, so it shares no surface with the mount or its
+                // rings.
                 b.inner.tube(radius - INSET, 0.0, fore + END_SET, aft - END_SET, INNER_SEGMENTS);
                 b.cap_section(Section::Cylinder(radius), fore, aft, 2.0, state);
                 b.leaders.push(Leader { origin: Vec3::new(0.0, 0.0, (fore + aft) / 2.0), offset: explode, radius });

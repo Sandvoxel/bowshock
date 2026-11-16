@@ -589,7 +589,7 @@ impl View {
         let part = rocket.kind_of(id);
         let aft_on = matches!(
             part,
-            Some(PartRef::Internal(p)) if matches!(p.kind, InternalKind::CenteringRing { .. } | InternalKind::Bulkhead { .. } | InternalKind::EngineBlock { .. })
+            Some(PartRef::Internal(p)) if matches!(p.kind, InternalKind::CenteringRing { .. } | InternalKind::Bulkhead { .. })
         );
         let internal = matches!(part, Some(PartRef::Internal(_)));
         let mut tag = format!("ORTHO · {} · {}", if aft_on { "AFT" } else { "SIDE" }, part.map_or_else(String::new, |p| p.name()).to_uppercase());

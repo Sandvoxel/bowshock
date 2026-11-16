@@ -25,13 +25,6 @@
       "from_aft": true,
       "name": "Fore centering ring",
       "material": "birch_plywood"
-    },
-    {
-      "host": 0,
-      "kind": { "EngineBlock": { "outer": null, "inner": 0.0381, "thickness": 0.00635 } },
-      "offset": 0.19365,
-      "from_aft": true,
-      "material": "birch_plywood"
     }
   ]
 }

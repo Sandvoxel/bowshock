@@ -15,7 +15,7 @@ screenshot pod-hover.png
 # Select the pod's body tube from its bar (the 3D view and the inspector follow).
 click (873, 628)
 screenshot pod-member-selected.png
-# A strap-on needs a tube wide enough for a motor: widen the pod's tube (the pod set carries every copy), then the bin's Inner tube
+# A strap-on needs a tube wide enough for a motor: widen the pod's tube (the pod set carries every copy), then the bin's Motor mount
 # lands in it (the search spans every category, so it is typed over).
 click (1175, 167)
 type "60"
@@ -24,8 +24,10 @@ click (160, 88)
 type backspace
 type backspace
 type backspace
-type "inner tube"
-click "Inner tube"
+type "motor mount"
+click "Motor mount"
+# Untick "Holds a motor": a plain inner tube, which stays in Structure.
+click "Holds a motor"
 screenshot pod-inner-tube.png
 # Make it a motor mount: its bar moves to Propulsion, bracketed `Pod ×3` with the other parts of the pod there, the tag on the
 # row that is free.

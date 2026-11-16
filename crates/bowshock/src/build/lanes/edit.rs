@@ -110,7 +110,7 @@ fn internal_with_extent(kind: &InternalKind, extent: f64) -> Option<InternalKind
         InternalKind::InnerTube { length, .. } | InternalKind::Coupler { length, .. } | InternalKind::MassComponent { length, .. } => *length = extent,
         InternalKind::Parachute { packed_length, .. } | InternalKind::ShockCord { packed_length, .. } => *packed_length = extent,
         InternalKind::Streamer { width, .. } => *width = extent,
-        InternalKind::CenteringRing { .. } | InternalKind::Bulkhead { .. } | InternalKind::EngineBlock { .. } => return None,
+        InternalKind::CenteringRing { .. } | InternalKind::Bulkhead { .. } => return None,
     }
     Some(out)
 }

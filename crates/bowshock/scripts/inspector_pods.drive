@@ -34,7 +34,9 @@ type "50"
 type enter
 click (23, 149)
 # Clicking a bin row adds it to the selected part (here the pod's tube).
-click "Inner tube"
+click "Motor mount"
+# Untick "Holds a motor": a plain inner tube.
+click "Holds a motor"
 screenshot ip-pod-tube.png
 # Holds a motor: the Motor row, with the hint to pick one in the parts bin.
 click (1098, 269)
