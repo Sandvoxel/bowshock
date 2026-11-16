@@ -576,7 +576,7 @@ fn undoing_closes_the_picker_and_a_flight_can_be_overlaid_with_several_sources()
     assert_ne!(styles[0].1, styles[1].1);
     assert_eq!(styles[0].1, styles[2].1);
     // Hover, zoom and the events of the reference are untouched by the layout.
-    assert!(!group.events.is_empty() && group.right_margin > 0.0);
+    assert!(!group.events.is_empty() && group.right_margin == 0.0);
 
     click(&mut state, &mut app, 1, PanelAction::AddSeries);
     assert!(state.picker.is_some());

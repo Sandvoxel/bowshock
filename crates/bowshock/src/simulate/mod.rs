@@ -769,9 +769,13 @@ impl State {
         let imperial = format::imperial(ctx.units);
         let Some(group) = self.shown.groups[usize::from(imperial)].as_ref() else { return self.placeholder() };
         let bar = |e: Element<'a, Message>| container(e).padding([SPACE_2, SPACE_3]).boxed();
-        // One row: the zoom breadcrumb, the plot presets, then the hints.
         let (crumbs, hint) = header_parts(group, &self.plot, true);
-        let head = row![crumbs.map(Message::Plot), self.presets(), Space::new().width(Fill), hint.map(Message::Plot)].spacing(SPACE_2).align_y(iced::Center);
+        // One row: the zoom breadcrumb, the plot presets, then the hints; it wraps onto a second line in a narrow window instead of
+        // running off the pane.
+        let mut items: Vec<Element<'a, Message>> = vec![crumbs.map(Message::Plot).boxed()];
+        items.extend(self.presets());
+        items.push(hint.map(Message::Plot).boxed());
+        let head = iced::widget::Row::with_children(items).spacing(SPACE_2).align_y(iced::Center).wrap().vertical_spacing(SPACE_2);
         let mut parts: Vec<Element<'a, Message>> = vec![bar(head.boxed())];
         if self.shown.compare {
             let items: Vec<(SeriesColor, String)> =
@@ -789,7 +793,7 @@ impl State {
     }
 
     /// The presets row: which layout the plots follow, and a button to add a plot.
-    fn presets(&self) -> Element<'_, Message> {
+    fn presets(&self) -> Vec<Element<'_, Message>> {
         let options: Vec<(Preset, &str)> = Preset::ALL.iter().map(|p| (*p, p.label())).collect();
         let strip = segmented_dense(
             &options,
@@ -806,7 +810,7 @@ impl State {
         }
         let against: Vec<(PlotX, &str)> = PlotX::ALL.iter().map(|x| (*x, plots::x_label(*x))).collect();
         let x = segmented_dense(&against, self.layout.x, |x| Message::Layout(LayoutEdit::X(x)), Dense { height: 24.0, pad: 6.0, size: 12.0 }, false);
-        row![strip, Element::from(add), crate::app::ui::label("VS"), x].spacing(SPACE_2).align_y(iced::Center).boxed()
+        vec![strip, add.into(), crate::app::ui::label("VS"), x]
     }
 
     /// What the centre shows before the selected flight has run.

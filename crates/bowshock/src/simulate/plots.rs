@@ -14,9 +14,6 @@ use crate::widgets::plot::{Axis, EventMark, HLine, LabelAt, LegendItem, LineStyl
 /// The line style of the first, second, third and fourth source of a plot: the flight is the colour, the source is the style.
 pub const STYLES: [LineStyle; 4] = [LineStyle::Solid, LineStyle::Dashed, LineStyle::Dotted, LineStyle::DashDot];
 
-/// Width kept clear at the right of every plot for the direct labels of a comparison (SimulateCompare).
-const LABEL_MARGIN: f32 = 96.0;
-
 /// A flight on show: its name, colour role and run.
 #[derive(Debug, Clone, Copy)]
 pub struct Entry<'a> {
@@ -203,7 +200,7 @@ fn phase_key(panel: &Panel) -> Option<Vec<(LineStyle, String)>> {
 }
 
 /// The linked plots of `layout` for `entries` in the unit family of `system`. One entry is a lone flight (one framed value tag per
-/// plot); several are a comparison (the flight is the line's colour, altitude-like plots label each flight at the right end, one
+/// plot); several are a comparison (the flight is the line's colour, named once in the legend row above the plots, one
 /// tooltip lists every line). A plot with several sources draws each in its own line style and names them in a legend. The
 /// events, phases and timeline belong to the entry at `reference`. A plot with the stability margin gets the document's minimum
 /// margin `min_margin` (calibers) as a dashed reference line. `None` without entries.
@@ -267,11 +264,8 @@ pub fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &P
                     (true, true) => format!("{} · {}", e.name, c.label),
                 };
                 let color = if compare { e.color } else { c.color };
-                // A comparison names each flight at the right end of the first plot's first source.
-                let labelled = compare && index == 0 && std::ptr::eq(*c, sources[0]);
                 let Some((xc, xu)) = x_of else {
-                    let series = Series::new(name, c.series(samples, &unit)).color(color).style(style);
-                    panel = panel.with(if labelled { series.label_as(e.name.to_string(), LabelAt::Margin) } else { series });
+                    panel = panel.with(Series::new(name, c.series(samples, &unit)).color(color).style(style));
                     continue;
                 };
                 let curve: Vec<(f64, f64, f64)> = samples.iter().map(|s| (s.t, xu.from_si(xc.si(s)), unit.from_si(c.si(s)))).collect();
@@ -296,13 +290,8 @@ pub fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &P
                     let name = format!("{name} · {}", run.phase);
                     let label = (widest[i] == Some(i)).then(|| base(&run.phase));
                     let series = Series::new(name, run.points).color(color).style(style);
-                    panel = panel.with(if labelled && i == 0 {
-                        series.label_as(e.name.to_string(), LabelAt::Margin)
-                    } else if let (false, true, Some(text)) = (compare, first_source, label) {
-                        series.label_as(text, LabelAt::End)
-                    } else {
-                        series
-                    });
+                    panel =
+                        panel.with(if let (false, true, Some(text)) = (compare, first_source, label) { series.label_as(text, LabelAt::End) } else { series });
                 }
             }
         }
@@ -318,9 +307,6 @@ pub fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &P
     group.events = events(&reference.run.result);
     if compare || x_of.is_some() {
         group.events.retain(|m| m.label != "Landing");
-    }
-    if compare {
-        group.right_margin = LABEL_MARGIN;
     }
     if x_of.is_some() {
         // An event is only marked where its x is reached once: a value the curve passes on the way up and again on the way down
@@ -545,9 +531,8 @@ mod tests {
 
         let two = [one[0], Entry { name: "Windy", color: SeriesColor::Series(2), run: &r, scatter: None }];
         let g = group(&two, 1, UnitSystem::MmGS, &PlotLayout::default(), 1.0).unwrap();
-        assert!(g.panels[0].series.iter().all(|s| s.label.is_some()));
-        assert!(g.panels[1].series.iter().all(|s| s.label.is_none()));
-        assert!(g.right_margin > 0.0 && g.panels[1].tag == Tag::Auto);
+        assert!(g.panels.iter().all(|p| p.series.iter().all(|s| s.label.is_none())));
+        assert!(g.right_margin == 0.0 && g.panels[1].tag == Tag::Auto);
         assert!(g.events.iter().all(|m| m.label != "Landing"));
         assert_eq!(g.panels[0].series[1].color, SeriesColor::Series(2));
     }
@@ -609,8 +594,8 @@ mod tests {
                 ("Windy · Drag force", SeriesColor::Series(2), LineStyle::Dashed),
             ]
         );
-        // Only the first source of each flight is labelled at the right end; the legend of the sources is neutral.
-        assert_eq!(g.panels[0].series.iter().filter(|s| s.label.is_some()).count(), 2);
+        // The legend of the sources is neutral; a comparison draws no per-line labels.
+        assert!(g.panels[0].series.iter().all(|s| s.label.is_none()));
         assert!(g.panels[0].editor.as_ref().unwrap().legend.iter().all(|l| l.color == SeriesColor::Muted));
         // One source per panel and two flights: the lines are named by flight.
         let g = group(&[a, b], 0, UnitSystem::MmGS, &layout(&[&["mach"]]), 1.0).unwrap();

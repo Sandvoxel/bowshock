@@ -438,8 +438,9 @@ impl canvas::Program<PlotMessage> for PlotView<'_> {
             .group
             .panels
             .iter()
-            .map(|p| {
-                let (lo, hi) = p.y_range(layout.window.0, layout.window.1);
+            .zip(&layout.plots)
+            .map(|(p, plot)| {
+                let (lo, hi) = below_header(p.y_range(layout.window.0, layout.window.1), plot.height, p.editor.is_some());
                 match self.group.y_ticks {
                     YTicks::Even(n) => even_range(lo, hi, n),
                     YTicks::Nice => (lo, hi),
@@ -1228,32 +1229,70 @@ impl PlotView<'_> {
             }
         }
 
-        // The legend: the line style of each source and its name, after the title; what does not fit wraps under the title (as many
-        // rows as the plot has room for), so every source is named.
+        // The legend: the line style of each source and its name, inline after the title on the header line. What does not fit is
+        // folded into `+N`; hovering the legend lists every source.
         if editor.legend.len() > 1 {
             let first = all[0].rect.x + all[0].rect.width + 12.0;
-            let start = plot.x + 8.0;
-            let rows = if plot.height >= 4.0 * CHIP_H { 2 } else { 1 };
-            let (mut x, mut row) = (first, 0);
-            for item in &editor.legend {
-                let w = 20.0 + mono_width(item.text.chars().count(), FONT_SMALL);
-                let right = if row == 0 { limit - 8.0 } else { plot.x + plot.width - 8.0 };
-                if x + w > right {
-                    if row + 1 >= rows {
-                        break;
-                    }
-                    row += 1;
-                    x = start;
-                }
-                let top = plot.y + 1.0 + row as f32 * (CHIP_H + 1.0);
-                let y = top + CHIP_H / 2.0;
+            let widths: Vec<f32> = editor.legend.iter().map(|i| legend_item_w(&i.text)).collect();
+            let shown = legend_fit(&widths, limit - 8.0 - first, mono_width(4, FONT_SMALL));
+            let top = plot.y + 1.0;
+            let y = top + CHIP_H / 2.0;
+            let mut x = first;
+            for (item, &w) in editor.legend.iter().zip(&widths).take(shown) {
                 f.fill_rectangle(Point::new(x - 3.0, top), Size::new(w + 6.0, CHIP_H), t.bg_200);
                 line(f, Point::new(x, y), Point::new(x + 16.0, y), item.color.resolve(t), 2.0, item.style);
                 put(f, &item.text, Point::new(x + 20.0, y), t.ink_muted, FONT_SMALL, Alignment::Left, mid, MONO);
                 x += w + 12.0;
             }
+            let hidden = editor.legend.len() - shown;
+            if hidden > 0 {
+                put(f, &format!("+{hidden}"), Point::new(x, y), t.ink_muted, FONT_SMALL, Alignment::Left, mid, MONO);
+            }
+            let strip = Rectangle::new(
+                Point::new(first - 3.0, top),
+                Size::new((x - first + 6.0 + if hidden > 0 { mono_width(4, FONT_SMALL) } else { 0.0 }).max(1.0), CHIP_H),
+            );
+            if hidden > 0 && hot.is_some_and(|p| strip.contains(p)) {
+                let w = 12.0 + editor.legend.iter().map(|i| 24.0 + mono_width(i.text.chars().count(), FONT_SMALL)).fold(0.0, f32::max);
+                let h = 8.0 + 16.0 * editor.legend.len() as f32;
+                let origin = Point::new(first.round(), (top + CHIP_H + 2.0).round());
+                f.fill_rectangle(origin, Size::new(w, h), t.bg_200);
+                f.stroke_rectangle(
+                    Point::new(origin.x + 0.5, origin.y + 0.5),
+                    Size::new(w - 1.0, h - 1.0),
+                    Stroke::default().with_color(t.line_200).with_width(1.0),
+                );
+                for (k, item) in editor.legend.iter().enumerate() {
+                    let ly = origin.y + 4.0 + 16.0 * (k as f32 + 0.5);
+                    line(f, Point::new(origin.x + 6.0, ly), Point::new(origin.x + 22.0, ly), item.color.resolve(t), 2.0, item.style);
+                    put(f, &item.text, Point::new(origin.x + 26.0, ly), t.ink, FONT_SMALL, Alignment::Left, mid, MONO);
+                }
+            }
         }
     }
+}
+
+/// Width of one legend entry: a 16 px stroke, a gap and the name.
+fn legend_item_w(text: &str) -> f32 {
+    20.0 + mono_width(text.chars().count(), FONT_SMALL)
+}
+
+/// How many legend entries of `widths` (12 px apart) fit in `room`; when not all do, room for a `+N` of `more` px is kept.
+fn legend_fit(widths: &[f32], room: f32, more: f32) -> usize {
+    let used = |n: usize| widths.iter().take(n).map(|w| w + 12.0).sum::<f32>();
+    if used(widths.len()) <= room + 12.0 {
+        return widths.len();
+    }
+    (0..widths.len()).rev().find(|&n| used(n) + more <= room).unwrap_or(0)
+}
+
+/// Headroom: `range` widened at the top so a panel's data never reaches its header strip (title, legend and controls).
+fn below_header(range: (f64, f64), plot_h: f32, editable: bool) -> (f64, f64) {
+    let head = CHIP_H + 4.0;
+    if !editable || plot_h < 3.0 * head {
+        return range;
+    }
+    (range.0, range.0 + (range.1 - range.0) * f64::from(plot_h / (plot_h - head)))
 }
 
 #[cfg(test)]
@@ -1324,6 +1363,22 @@ mod tests {
         let mut ys = vec![199.0; 5];
         spread(&mut ys, 14.0, 10.0, 200.0);
         assert!(ys[4] <= 200.0 && ys.windows(2).all(|w| w[1] - w[0] >= 14.0 - 1e-4), "{ys:?}");
+    }
+
+    #[test]
+    fn legend_folds_what_does_not_fit_into_a_count_and_headroom_clears_the_header() {
+        let widths = [60.0, 60.0, 60.0];
+        assert_eq!(legend_fit(&widths, 500.0, 30.0), 3);
+        // Two fit with room for `+N`; all three do not.
+        assert_eq!(legend_fit(&widths, 180.0, 30.0), 2);
+        assert_eq!(legend_fit(&widths, 20.0, 30.0), 0);
+        // A tall plot is widened so its top data value falls below the header strip; a short one is left alone.
+        let (lo, hi) = below_header((0.0, 100.0), 200.0, true);
+        let head_frac = f64::from(CHIP_H + 4.0) / 200.0;
+        assert_eq!(lo, 0.0);
+        assert!((100.0 / hi - (1.0 - head_frac)).abs() < 1e-6, "{hi}");
+        assert_eq!(below_header((0.0, 100.0), 60.0, true), (0.0, 100.0));
+        assert_eq!(below_header((0.0, 100.0), 200.0, false), (0.0, 100.0));
     }
 
     #[test]

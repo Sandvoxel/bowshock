@@ -1,0 +1,9 @@
+# Analyze plots share the plot widget: Fin flutter and Drag breakdown must not regress.
+viewport 1280x800
+click "Analyze"
+click "Fin flutter"
+move (500, 400)
+screenshot analyze-flutter.png
+click "Drag breakdown"
+move (500, 400)
+screenshot analyze-drag.png

@@ -1,0 +1,11 @@
+# Narrow window (1100x700), compare mode: legends stay on one header line (+N for the rest).
+viewport 1100x700
+click "Simulate"
+click (231,639)
+click (16,94)
+click (16,138)
+click (16,182)
+click "Forces"
+screenshot narrow-forces.png
+click "Stability"
+screenshot narrow-stab.png

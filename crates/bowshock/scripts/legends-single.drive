@@ -1,0 +1,7 @@
+viewport 1280x800
+click "Simulate"
+click (100,739)
+click "Forces"
+screenshot forces.png
+click "Stability"
+screenshot stab.png

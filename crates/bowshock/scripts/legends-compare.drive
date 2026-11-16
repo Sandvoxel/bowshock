@@ -1,0 +1,8 @@
+viewport 1280x800
+click "Simulate"
+click (231,739)
+click (16,94)
+click (16,138)
+click (16,182)
+click "Forces"
+screenshot cmp.png
