@@ -79,7 +79,7 @@ pub fn view<'a>(
     inspector: &'a inspector::State,
     ctx: &'a Ctx,
 ) -> Element<'a, Message> {
-    let centre = || column![viewport.view(ctx).map(Message::Viewport), lanes.view(ctx, Some(viewport.camera())).map(Message::Lanes)];
+    let centre = || column![viewport.view(ctx).map(Message::Viewport), lanes.view(ctx).map(Message::Lanes)];
     // Tab: the parts bin and the inspector fold away and the centre fills the window.
     if layout.sides_hidden {
         return centre().boxed();

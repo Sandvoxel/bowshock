@@ -35,13 +35,13 @@ click (1180, 323)
 type enter
 screenshot 07-circular.png
 
-# Click a part in Station Lanes during a pick: its value menu opens (Tip chord = 2 x {Booster, ...}).
+# Click a part in Station Lanes during a pick: its value menu opens (Tip chord = 2 x {Body tube, ...}).
 click (1180, 343)
 type "2 * {"
 click (870, 896)
 screenshot 08-part-menu.png
 
-# Pick "Outer Ø" of the Booster from the menu: it lands as a chip with the part's system colour.
+# Pick "Outer Ø" of the Body tube from the menu: it lands as a chip with the part's system colour.
 click (910, 947)
 screenshot 09-menu-picked.png
 type enter

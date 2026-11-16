@@ -6,7 +6,7 @@ use bowshock_model::Rocket;
 use iced::Task;
 
 use super::document::EXTENSION;
-use super::{Armed, Ctx, Message};
+use super::{Ctx, Message, Pending};
 
 /// The built-in example, a 38 mm high-power rocket (the kit's `hpr_l1_cert`). `tests::example_is_current` keeps it loadable and
 /// in step with the model.
@@ -15,16 +15,52 @@ const EXAMPLE: &[u8] = include_bytes!("../../assets/examples/hpr_l1_cert.bowshoc
 /// A two-stage example, selected by `BOWSHOCK_EXAMPLE=two_stage` (for screenshots of staging).
 const TWO_STAGE: &[u8] = include_bytes!("../../assets/examples/two_stage.bowshock");
 
-/// Whether the command `what` may replace the document now. With unsaved changes the first press only warns (and arms the
-/// command); pressing the same command again proceeds.
-pub(super) fn guard(ctx: &mut Ctx, what: Armed) -> bool {
-    if !ctx.doc.is_dirty() || ctx.armed == Some(what) {
-        ctx.armed = None;
+/// Whether the command `what` may replace the document now. With unsaved changes it does not: the command is parked in
+/// [`Ctx::unsaved`] and the "Save changes?" modal opens; its three answers are [`proceed`] (after saving, or without).
+pub(super) fn guard(ctx: &mut Ctx, what: Pending) -> bool {
+    if !ctx.doc.is_dirty() {
         return true;
     }
-    ctx.armed = Some(what);
-    ctx.notify("Unsaved changes: press again to discard them, or save first");
+    ctx.unsaved = Some(what);
     false
+}
+
+/// Runs a command the unsaved-changes modal was holding back.
+pub(super) fn proceed(ctx: &mut Ctx, what: Pending) -> Task<Message> {
+    match what {
+        Pending::New => new(ctx),
+        Pending::Open => return pick_open(),
+        Pending::Example => example(ctx),
+        Pending::Import => return pick_import(),
+        Pending::Recent(path) => open(ctx, &path),
+        Pending::Exit => return iced::exit(),
+    }
+    Task::none()
+}
+
+/// The modal's *Save*: saves to the document's path (or opens Save As) and then runs the held command. A failed save, or a
+/// Save As that is cancelled, abandons the command and keeps the document.
+pub(super) fn save_then(ctx: &mut Ctx, what: Pending) -> Task<Message> {
+    if ctx.doc.path().is_none() {
+        ctx.saving_for = Some(what);
+        return pick_save(ctx);
+    }
+    let task = save(ctx);
+    if ctx.doc.is_dirty() {
+        return task;
+    }
+    proceed(ctx, what)
+}
+
+/// The save dialog answered while the modal's *Save* waited for it.
+pub(super) fn saved_as(ctx: &mut Ctx, path: Option<PathBuf>) -> Task<Message> {
+    let pending = ctx.saving_for.take();
+    let Some(path) = path else { return Task::none() };
+    save_to(ctx, &path);
+    match pending {
+        Some(what) if !ctx.doc.is_dirty() => proceed(ctx, what),
+        _ => Task::none(),
+    }
 }
 
 /// Starts an empty document.
@@ -270,6 +306,32 @@ pub(super) fn menu(ctx: &Ctx) -> Option<iced::Element<'_, Message>> {
     Some(Stack::with_children([scrim.boxed(), placed.boxed()]).boxed())
 }
 
+/// The "Save changes to <name>?" modal, centred over a dimmed backdrop that takes every click; `None` while no command waits on
+/// an answer. Save (Enter) is the one primary action, Don't save is destructive, Cancel (Esc) goes back to the document.
+pub(super) fn unsaved_modal(ctx: &Ctx) -> Option<iced::Element<'_, Message>> {
+    use iced::widget::{column, container, mouse_area, row, text, Space, Stack};
+    use iced::{Background, Color, Fill, Widget};
+
+    use crate::theme::{self, SANS_MEDIUM};
+    use crate::tokens::{SPACE_2, SPACE_3, TEXT_BODY};
+    use crate::widgets::button::{button, Weight};
+
+    ctx.unsaved.as_ref()?;
+    let nothing = || Message::Chrome(crate::chrome::Message::Nothing);
+    let backdrop = container(Space::new().width(Fill).height(Fill))
+        .style(|_| container::Style { background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.55))), ..container::Style::default() });
+    let title = text(format!("Save changes to {}?", ctx.doc.title())).font(SANS_MEDIUM).size(15);
+    let body = text("Your changes will be lost if you don't save them.").size(TEXT_BODY).style(theme::muted);
+    let discard: iced::Element<'_, Message> = button("Don't save", Weight::Destructive).on_press(Message::UnsavedDiscard).into();
+    let cancel: iced::Element<'_, Message> = button("Cancel", Weight::Secondary).key("Esc").on_press(Message::UnsavedCancel).into();
+    let save: iced::Element<'_, Message> = button("Save", Weight::Primary).key("↵").on_press(Message::UnsavedSave).into();
+    let buttons = row![discard, Space::new().width(Fill), cancel, save].spacing(SPACE_2).align_y(iced::Center);
+    let card =
+        container(mouse_area(column![title, body, buttons].spacing(SPACE_3 + 2.0)).on_press(nothing())).width(420).padding(SPACE_3 + 8.0).style(theme::overlay);
+    let placed = container(card).center(Fill);
+    Some(Stack::with_children([mouse_area(backdrop).on_press(nothing()).boxed(), placed.boxed()]).boxed())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,29 +367,23 @@ mod tests {
         r.name = "hpr_l1_cert".to_string();
         r.designer = "Bowshock".to_string();
         r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762 }).unwrap();
-        let upper = r.insert(1, PartKind::BodyTube { length: 0.520, diameter: 0.0762 }).unwrap();
-        let lower = r.insert(2, PartKind::BodyTube { length: 0.3934, diameter: 0.0762 }).unwrap();
-        r.set_name(upper, Some("Recovery bay".to_string()));
-        r.set_name(lower, Some("Booster".to_string()));
+        let tube = r.insert(1, PartKind::BodyTube { length: 0.9134, diameter: 0.0762 }).unwrap();
+        r.set_name(tube, Some("Body tube".to_string()));
 
-        // Three trapezoidal fins flush with the aft end of the booster, a pair of rail buttons, a second pair further aft.
+        // Three trapezoidal fins flush with the aft end of the airframe, a pair of rail buttons.
         let fins = RadialKind::FinSet { root_chord: 0.120, tip_chord: 0.050, span: 0.0762, sweep: 0.060, thickness: 0.00318 };
-        r.attach_radial(lower, 0.3934 - 0.120, 0.0, 3, fins).unwrap();
+        r.attach_radial(tube, 0.9134 - 0.120, 0.0, 3, fins).unwrap();
         let button = RadialKind::RailButton { height: 0.008, diameter: 0.011 };
-        r.attach_radial(upper, 0.380, 0.0, 1, button.clone()).unwrap();
-        r.attach_radial(lower, 0.100, 0.0, 1, button).unwrap();
+        r.attach_radial(tube, 0.380, 0.0, 1, button.clone()).unwrap();
+        r.attach_radial(tube, 0.620, 0.0, 1, button).unwrap();
 
         // The 38 mm motor mount with a centering ring at each end.
         let mount = r
-            .attach_internal(
-                lower,
-                0.0534,
-                InternalKind::InnerTube { outer_diameter: 0.042, thickness: 0.002, length: 0.340, motor_mount: true, overhang: 0.0 },
-            )
+            .attach_internal(tube, 0.5734, InternalKind::InnerTube { outer_diameter: 0.042, thickness: 0.002, length: 0.340, motor_mount: true, overhang: 0.0 })
             .unwrap();
         let ring = InternalKind::CenteringRing { outer_diameter: None, inner_diameter: None, thickness: 0.006 };
-        r.attach_internal(lower, 0.0534, ring.clone()).unwrap();
-        r.attach_internal(lower, 0.3934 - 0.006, ring).unwrap();
+        r.attach_internal(tube, 0.5734, ring.clone()).unwrap();
+        r.attach_internal(tube, 0.9134 - 0.006, ring).unwrap();
 
         // Recovery: a 36 in chute on the ejection charge, shock cord, an altimeter and ballast in the bay.
         let chute = InternalKind::Parachute {
@@ -340,10 +396,10 @@ mod tests {
             packed_diameter: None,
             deploy: Deployment { event: DeployEvent::Ejection, delay: 0.0 },
         };
-        r.attach_internal(upper, 0.250, chute).unwrap();
-        r.attach_internal(upper, 0.150, InternalKind::ShockCord { length: 2.0, packed_length: 0.080 }).unwrap();
-        r.attach_internal(upper, 0.470, InternalKind::MassComponent { mass: 0.045, length: 0.060, diameter: Some(0.030), role: MassRole::Altimeter }).unwrap();
-        r.attach_internal(upper, 0.020, InternalKind::MassComponent { mass: 0.120, length: 0.040, diameter: None, role: MassRole::Ballast }).unwrap();
+        r.attach_internal(tube, 0.250, chute).unwrap();
+        r.attach_internal(tube, 0.150, InternalKind::ShockCord { length: 2.0, packed_length: 0.080 }).unwrap();
+        r.attach_internal(tube, 0.470, InternalKind::MassComponent { mass: 0.045, length: 0.060, diameter: Some(0.030), role: MassRole::Altimeter }).unwrap();
+        r.attach_internal(tube, 0.020, InternalKind::MassComponent { mass: 0.120, length: 0.040, diameter: None, role: MassRole::Ballast }).unwrap();
 
         // Configuration H128W (named after its motor).
         let db = MotorDb::bundled();
@@ -370,17 +426,16 @@ mod tests {
         assert_eq!(shipped, built, "assets/examples/hpr_l1_cert.bowshock is stale: regenerate it (see this test's docs)");
     }
 
-    /// The committed version-1 golden file (`bowshock-model/tests/data/v1_example.bowshock`) loads and is the example. It is
-    /// written once, with `BOWSHOCK_WRITE_GOLDEN=1`, and only when absent; it is never regenerated (see the model's `format`
-    /// module docs).
+    /// The committed version-1 golden file (`bowshock-model/tests/data/v1_example.bowshock`) is the example as first written
+    /// (nose + two tubes); it is frozen and never regenerated (see the model's `format` module docs), so it loads and
+    /// round-trips but no longer equals the current example.
     #[test]
-    fn the_v1_golden_file_is_the_example() {
+    fn the_v1_golden_file_loads_and_round_trips() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bowshock-model/tests/data/v1_example.bowshock");
-        if std::env::var_os("BOWSHOCK_WRITE_GOLDEN").is_some() && !path.exists() {
-            std::fs::write(&path, build_example().to_bytes()).unwrap();
-        }
         let golden = Rocket::from_bytes(&std::fs::read(&path).unwrap()).expect("the golden file loads");
-        assert_eq!(golden, build_example(), "the golden v1 file no longer matches the example: a format change needs a version bump");
+        assert_eq!(golden.name, "hpr_l1_cert");
+        assert_eq!(golden.parts().len(), 3);
+        assert_eq!(Rocket::from_bytes(&golden.to_bytes()).unwrap(), golden);
     }
 
     #[test]

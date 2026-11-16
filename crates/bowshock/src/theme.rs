@@ -224,6 +224,17 @@ pub fn secondary(theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// Destructive weight: the secondary slab with an `err` label and border.
+pub fn destructive(theme: &Theme, status: button::Status) -> button::Style {
+    let t = tokens(theme);
+    let style = button::Style { background: Some(Background::Color(t.bg_300)), text_color: t.err, border: frame(t.err), ..button::Style::default() };
+    match status {
+        button::Status::Hovered | button::Status::Pressed => button::Style { background: Some(Background::Color(t.bg_400)), ..style },
+        button::Status::Disabled => disabled(t),
+        button::Status::Active => style,
+    }
+}
+
 /// A rail button (parts bin category): `ink-faint` icon, `ink` on `bg-400` when hovered, `ink` on `bg-200` when active.
 pub fn rail(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |theme, status| {

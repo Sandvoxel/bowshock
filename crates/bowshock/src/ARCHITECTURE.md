@@ -18,7 +18,7 @@ build/parts_bin.rs       parts bin
 build/inspector.rs       inspector
 build/lanes.rs + lanes/     Station Lanes: `scene` (bars, sub-rows, stages, mass), `geometry` (stations <-> px, ruler, hit tests), `edit`
                            (move / resize / landing / snap on the Rocket), `canvas` (drawing + mouse), `menu` ("Add here…").
-                           `lanes.view(ctx, camera)` also takes the viewport camera: when it looks side-on the lanes lock to its scale.
+                           The lanes always fit the whole rocket (zoom/pan by hand, reset returns); they do not follow the viewport camera.
                            The Build screen's centre pane is the viewport over the fixed-height lanes (`lanes::height`), not a pane_grid pane.
 viewport/                3D viewport (View = state, Message) + overlays (assembly, manipulate, surface)
 simulate/mod.rs          Simulate screen

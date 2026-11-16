@@ -26,6 +26,8 @@ pub enum Weight {
     Secondary,
     /// No border until hovered: toolbars, undo/redo, in-panel actions.
     Ghost,
+    /// `bg-300` with an `err` label and border: a command that throws work away.
+    Destructive,
 }
 
 /// A push button. Build it with [`button`] or [`icon_button`], then convert it with `Element::from` / `.into()`.
@@ -142,6 +144,7 @@ impl<'a, M: Clone + 'a> From<Button<'a, M>> for Element<'a, M> {
             (false, Weight::Primary) => Tone::AccentInk,
             (false, Weight::Secondary) => Tone::Ink,
             (false, Weight::Ghost) => Tone::Muted,
+            (false, Weight::Destructive) => Tone::Err,
         };
 
         let mut content: Vec<Element<'a, M>> = Vec::new();
@@ -167,6 +170,7 @@ impl<'a, M: Clone + 'a> From<Button<'a, M>> for Element<'a, M> {
             Weight::Primary => press.style(move |t, s| theme::primary(t, preview.unwrap_or(s))),
             Weight::Secondary => press.style(move |t, s| theme::secondary(t, preview.unwrap_or(s))),
             Weight::Ghost => press.style(move |t, s| theme::ghost(t, preview.unwrap_or(s))),
+            Weight::Destructive => press.style(move |t, s| theme::destructive(t, preview.unwrap_or(s))),
         };
         if !disabled {
             press = press.on_press_maybe(b.on_press);

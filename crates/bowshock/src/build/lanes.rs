@@ -5,7 +5,7 @@
 //! [`State::update`], [`State::view`] and [`State::on_key`] with the shared [`Ctx`]. Layout of the module:
 //!
 //! * `scene`: the rocket as bars in stations (sub-rows, stages, mass profile, drag-free data, unit-tested);
-//! * `geometry`: stations to pixels (fit, zoom/pan, lock to the viewport), ruler ticks, hit-testing;
+//! * `geometry`: stations to pixels (fit, zoom/pan), ruler ticks, hit-testing;
 //! * `edit`: the document edits (move, resize, landing targets, snapping);
 //! * `canvas`: drawing and mouse input;
 //! * `pods`: the `Pod ×N` brackets of a pod's parts and their tags (never dropped: beside the ends, along the bracket, in another
@@ -36,11 +36,11 @@ use crate::app::symmetry::Rejoin;
 use crate::app::{self, Ctx, Selection};
 use crate::chrome;
 use crate::tokens::LANE_H;
+use crate::viewport;
 use crate::viewport::pick::{Pick, SurfaceTarget};
-use crate::viewport::{self, Camera};
 use canvas::{Carry, Lanes};
 use edit::End;
-use geometry::{Axis, Zoom, RULER_H};
+use geometry::{Zoom, RULER_H};
 use scene::{BarKey, Inputs, Marks, OtherCg, Scene};
 
 /// Height of the lanes pane: fixed, whatever is in it ([`LANES_H`](crate::tokens::LANES_H)), or just the ruler when collapsed.
@@ -94,14 +94,9 @@ pub enum Message {
         /// The group whose bar it was dropped on.
         group: PartId,
     },
-    /// The user zoomed or panned the lanes (`camera` is the viewport camera they were following, if any).
-    SetZoom {
-        /// The new zoom of the default fit.
-        zoom: Zoom,
-        /// The camera the lanes were following.
-        camera: Option<Camera>,
-    },
-    /// Back to the whole rocket, following the viewport again.
+    /// The user zoomed or panned the lanes (the new zoom of the whole-rocket fit).
+    SetZoom(Zoom),
+    /// Back to the whole rocket.
     ResetView,
     /// Right click on empty lane space: open the add menu there.
     Menu {
@@ -134,9 +129,8 @@ struct OtherCache {
 pub struct State {
     collapsed: bool,
     pinned: bool,
+    /// The user's zoom and pan of the whole-rocket fit.
     zoom: Zoom,
-    /// The camera at which the user zoomed or panned the lanes by hand: the lanes stay where they were put until it changes.
-    detached: Option<Camera>,
     menu: Option<menu::Open>,
     others: RefCell<OtherCache>,
 }
@@ -185,16 +179,8 @@ impl State {
                     ctx.symmetry.rejoin = Some(Rejoin { part, group });
                 }
             }
-            Message::SetZoom { zoom, camera } => {
-                self.zoom = zoom;
-                if camera.is_some() {
-                    self.detached = camera;
-                }
-            }
-            Message::ResetView => {
-                self.zoom = Zoom::default();
-                self.detached = None;
-            }
+            Message::SetZoom(zoom) => self.zoom = zoom,
+            Message::ResetView => self.zoom = Zoom::default(),
             Message::Menu { at, system, station, width } => self.menu = Some(menu::Open { at, system, station, width }),
             Message::Add(index) => {
                 if let Some(open) = self.menu.take() {
@@ -265,18 +251,15 @@ impl State {
         scene
     }
 
-    /// The lanes pane, [`height`] high. `camera` is the viewport's (the lanes follow it when it looks along the side of the
-    /// rocket, so parts sit under the model).
-    pub fn view<'a>(&'a self, ctx: &'a Ctx, camera: Option<Camera>) -> Element<'a, Message> {
+    /// The lanes pane, [`height`] high. It always shows the whole rocket (nose tip to aft end) until the user zooms or pans it.
+    pub fn view<'a>(&'a self, ctx: &'a Ctx) -> Element<'a, Message> {
         let carry = carry_of(ctx);
         let scene = self.scene(ctx, carry.as_ref());
-        let lock = camera.filter(|c| Axis::locked(c, 1000.0).is_some() && self.detached != Some(*c));
         let h = height(self.collapsed);
         let lanes = Lanes {
             scene,
             rocket: ctx.doc.rocket(),
             zoom: self.zoom,
-            lock,
             units: ctx.units,
             selection: ctx.selection,
             parts: ctx.selected_parts(),
@@ -493,17 +476,22 @@ mod tests {
     }
 
     #[test]
-    fn the_view_follows_the_camera_until_the_user_zooms_and_a_reset_follows_it_again() {
+    fn the_lanes_show_the_whole_rocket_whatever_the_viewport_does_and_a_reset_returns_to_it() {
         let mut state = State::new();
         let mut app = App::with_example();
-        let camera = Camera { yaw: -std::f32::consts::FRAC_PI_2, ortho_blend: 1.0, ..Camera::default() };
-        assert!(Axis::locked(&camera, 700.0).is_some());
-        let fit = Axis::fit(700.0, 1.0);
+        // Whatever the viewport camera is doing, the lanes' axis is the whole rocket's fit.
+        let scene = state.scene(app.ctx(), None);
+        let fit = Axis::fit(700.0, scene.length);
+        assert!(scene.length >= app.ctx().doc.rocket().length());
+        let axis_of = |state: &State| state.zoom.apply(fit);
+        assert_eq!(axis_of(&state), fit);
         let zoomed = Zoom::between(fit, fit.zoomed(2.0, 300.0, fit.ppm, fit.ppm * 40.0));
-        state.update(Message::SetZoom { zoom: zoomed, camera: Some(camera) }, app.ctx_mut());
-        assert_eq!((state.zoom, state.detached), (zoomed, Some(camera)));
+        state.update(Message::SetZoom(zoomed), app.ctx_mut());
+        assert_eq!(state.zoom, zoomed);
+        assert!(axis_of(&state).ppm > fit.ppm);
         state.update(Message::ResetView, app.ctx_mut());
-        assert_eq!((state.zoom, state.detached), (Zoom::default(), None));
+        assert_eq!(state.zoom, Zoom::default());
+        assert_eq!(axis_of(&state), fit);
         state.update(Message::ToggleCollapsed, app.ctx_mut());
         assert!(state.collapsed && height(true) < height(false));
         state.update(Message::TogglePinned, app.ctx_mut());

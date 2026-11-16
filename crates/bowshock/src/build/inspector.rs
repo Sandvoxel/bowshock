@@ -280,7 +280,7 @@ impl State {
                 };
                 if let Some(name) = name {
                     self.renaming = Some((ctx.selection, name));
-                    return iced::widget::operation::focus(RENAME_ID);
+                    return Task::batch([iced::widget::operation::focus(RENAME_ID), iced::widget::operation::text_input::select_all(RENAME_ID)]);
                 }
             }
             Message::RenameInput(text) => {

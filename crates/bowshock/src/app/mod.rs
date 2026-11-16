@@ -66,13 +66,21 @@ impl Selection {
     }
 }
 
-/// An unsaved-changes guard: the first press of a destructive file command only warns, the second proceeds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Armed {
+/// A file command held back by the "Save changes?" modal until the user answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Pending {
+    /// File > New.
     New,
+    /// Open (the file dialog comes after the answer).
     Open,
+    /// Open the built-in example.
     Example,
+    /// Import an OpenRocket design (the file dialog comes after the answer).
     Import,
+    /// Open recent file (the path is already known).
+    Recent(std::path::PathBuf),
+    /// Quit the application (the window was asked to close).
+    Exit,
 }
 
 /// Everything the areas share: the document and its physics, the selection, drags in progress, the unit system and the
@@ -112,7 +120,10 @@ pub struct Ctx {
     pub camera_fit: bool,
     /// The document was just replaced: select nothing and let the gauge jump rather than animate.
     reloaded: bool,
-    armed: Option<Armed>,
+    /// A file command that would discard unsaved changes, waiting on the "Save changes?" modal (which is open while this is set).
+    unsaved: Option<Pending>,
+    /// The same command while the Save As dialog the modal's Save opened is up; cancelling the dialog abandons it.
+    saving_for: Option<Pending>,
     /// Which copy of the selected symmetry group is the clicked one, and a pending rejoin (see [`symmetry`]).
     pub symmetry: symmetry::SymmetryUi,
     /// Pick mode and the formula UI's transient state (see [`refs`]).
@@ -148,7 +159,8 @@ impl Ctx {
             file_menu: false,
             camera_fit: false,
             reloaded: false,
-            armed: None,
+            unsaved: None,
+            saving_for: None,
             symmetry: symmetry::SymmetryUi::default(),
             refs: refs::Ui::default(),
             flash: None,
@@ -258,6 +270,8 @@ pub enum Message {
     Released,
     /// Escape: abandon the drag or press in progress and close menus.
     Cancel,
+    /// F2: rename the selected part in the Inspector, else the active configuration.
+    Rename,
     /// Any key press (the app maps global shortcuts and forwards the rest to the active area).
     Key(KeyPress),
     /// Delete / Backspace: remove the selected part.
@@ -286,6 +300,12 @@ pub enum Message {
     ImportOrk,
     /// File menu > a recent file.
     OpenRecent(PathBuf),
+    /// The "Save changes?" modal's *Save* (Enter): save, then run the held command.
+    UnsavedSave,
+    /// The modal's *Don't save*: run the held command and lose the changes.
+    UnsavedDiscard,
+    /// The modal's *Cancel* (Escape): keep the document.
+    UnsavedCancel,
     /// The Simulate button (F5): switch to Simulate and run the current configuration's flight.
     Run,
     /// The Simulate button's menu: switch to Simulate and fly every configuration (one flight each).
@@ -304,6 +324,8 @@ pub enum Message {
     Analyze(analyze::Message),
     /// The top bar and status strip: configuration menu, phase, issues, motor picker.
     Chrome(chrome::Message),
+    /// The window's close button, Cmd+Q or Alt+F4: exits at once when nothing is unsaved, else asks first.
+    CloseRequested,
 }
 
 /// The application state.
@@ -435,7 +457,28 @@ impl App {
         }
     }
 
-    fn route(&mut self, message: Message) -> Task<Message> {
+    fn route(&mut self, mut message: Message) -> Task<Message> {
+        // The "Save changes?" modal takes everything: Escape cancels, Enter saves, and only the clock, the cursor, the layout and
+        // the file dialogs' answers get through.
+        if self.ctx.unsaved.is_some() {
+            use keyboard::key::Named;
+            match &message {
+                Message::Cancel => message = Message::UnsavedCancel,
+                Message::Key(KeyPress { key: keyboard::Key::Named(Named::Enter), modifiers, .. }) if modifiers.is_empty() => message = Message::UnsavedSave,
+                Message::Frame(_)
+                | Message::Cursor(_)
+                | Message::Resized(_)
+                | Message::Released
+                | Message::Key(_)
+                | Message::UnsavedSave
+                | Message::UnsavedDiscard
+                | Message::UnsavedCancel
+                | Message::SavePath(_)
+                | Message::OpenPath(_)
+                | Message::Chrome(chrome::Message::Nothing) => {}
+                _ => return Task::none(),
+            }
+        }
         // While a field is in pick mode a click on a part opens that part's value menu instead of selecting or grabbing it.
         if self.ctx.refs.is_picking() {
             if let Some(hit) = pick_intercept(&message) {
@@ -474,7 +517,6 @@ impl App {
                 self.analyze.tick(now);
                 if ctx.notice.as_ref().is_some_and(|(_, until)| now >= *until) {
                     ctx.notice = None;
-                    ctx.armed = None;
                 }
             }
             Message::Cursor(at) => {
@@ -517,12 +559,12 @@ impl App {
                 }
             }
             Message::New => {
-                if files::guard(ctx, Armed::New) {
+                if files::guard(ctx, Pending::New) {
                     files::new(ctx);
                 }
             }
             Message::Open => {
-                if files::guard(ctx, Armed::Open) {
+                if files::guard(ctx, Pending::Open) {
                     return files::pick_open();
                 }
             }
@@ -533,13 +575,9 @@ impl App {
             }
             Message::Save => return files::save(ctx),
             Message::SaveAs => return files::pick_save(ctx),
-            Message::SavePath(path) => {
-                if let Some(path) = path {
-                    files::save_to(ctx, &path);
-                }
-            }
+            Message::SavePath(path) => return files::saved_as(ctx, path),
             Message::Example => {
-                if files::guard(ctx, Armed::Example) {
+                if files::guard(ctx, Pending::Example) {
                     files::example(ctx);
                 }
             }
@@ -548,14 +586,35 @@ impl App {
                 ctx.file_menu = !was_open;
             }
             Message::ImportOrk => {
-                if files::guard(ctx, Armed::Import) {
+                if files::guard(ctx, Pending::Import) {
                     return files::pick_import();
                 }
             }
             Message::OpenRecent(path) => {
-                if files::guard(ctx, Armed::Open) {
+                if files::guard(ctx, Pending::Recent(path.clone())) {
                     files::open(ctx, &path);
                 }
+            }
+            Message::UnsavedSave => {
+                if let Some(what) = ctx.unsaved.take() {
+                    return files::save_then(ctx, what);
+                }
+            }
+            Message::UnsavedDiscard => {
+                if let Some(what) = ctx.unsaved.take() {
+                    return files::proceed(ctx, what);
+                }
+            }
+            Message::UnsavedCancel => ctx.unsaved = None,
+            Message::CloseRequested => {
+                if files::guard(ctx, Pending::Exit) {
+                    return iced::exit();
+                }
+            }
+            Message::Rename => {
+                let part_selected = ctx.mode == Mode::Build && matches!(ctx.selection, Selection::Part(_));
+                let message = if part_selected { Message::Inspector(inspector::Message::StartRename) } else { Message::Chrome(chrome::Message::BeginRename) };
+                return self.update(message);
             }
             Message::Run => {
                 ctx.mode = Mode::Simulate;
@@ -647,7 +706,8 @@ impl App {
         });
         let animating = self.viewport.animating() || self.ctx.animating() || self.simulate.animating() || self.analyze.animating() || self.chrome.animating();
         let frames = animating.then(|| iced::window::frames().map(Message::Frame));
-        iced::Subscription::batch([events].into_iter().chain(frames))
+        let closes = iced::window::close_requests().map(|_| Message::CloseRequested);
+        iced::Subscription::batch([events, closes].into_iter().chain(frames))
     }
 
     /// The whole window: top bar, the screen of the current mode, status strip, and the chrome's overlays.
@@ -664,6 +724,7 @@ impl App {
         let mut layers: Vec<Element<'_, Message>> = vec![page.boxed()];
         layers.extend(self.chrome.overlay(ctx));
         layers.extend(files::menu(ctx));
+        layers.extend(files::unsaved_modal(ctx));
         layers.extend(refs::menu_view(ctx));
         let root: Element<'_, Message> = iced::widget::Stack::with_children(layers).boxed();
         // The root sees every cursor move and any release the widgets below leave alone: that is what lets a drag begun in the
@@ -703,7 +764,7 @@ fn shortcut(press: &KeyPress) -> Option<Message> {
     match &press.key {
         keyboard::Key::Named(Named::Escape) => Some(Message::Cancel),
         keyboard::Key::Named(Named::F5) => Some(Message::Run),
-        keyboard::Key::Named(Named::F2) => Some(Message::Chrome(chrome::Message::BeginRename)),
+        keyboard::Key::Named(Named::F2) => Some(Message::Rename),
         keyboard::Key::Named(Named::Delete | Named::Backspace) if !press.captured && !mods.command() => Some(Message::Delete),
         keyboard::Key::Character(c) if mods.command() => {
             let c = c.as_str().to_lowercase();
@@ -1380,18 +1441,119 @@ mod tests {
     }
 
     #[test]
-    fn the_example_loads_and_unsaved_work_is_guarded() {
+    fn the_example_loads_and_a_clean_document_is_replaced_without_asking() {
         let mut app = App::new();
         app.update(Message::Example);
         assert!(!app.ctx.doc.rocket().parts().is_empty() && !app.ctx.doc.is_dirty());
         assert!(app.ctx.physics.balance().is_some());
-        // A change makes New ask twice.
-        app.update(Message::Delete);
+        app.update(Message::New);
+        assert!(app.ctx.unsaved.is_none(), "no modal when nothing is unsaved");
+        assert!(app.ctx.doc.rocket().parts().is_empty());
+    }
+
+    #[test]
+    fn f2_renames_the_selected_part_and_otherwise_the_configuration() {
+        let mut app = App::new();
+        app.update(Message::Example);
+        let id = app.ctx.doc.rocket().parts()[0].id;
+        app.ctx.selection = Selection::Part(id);
+        let f2 = KeyPress { key: keyboard::Key::Named(keyboard::key::Named::F2), modifiers: keyboard::Modifiers::empty(), captured: false };
+        assert!(matches!(shortcut(&f2), Some(Message::Rename)));
+        app.update(Message::Rename);
+        app.update(Message::Inspector(inspector::Message::RenameInput("Cone".to_string())));
+        app.update(Message::Inspector(inspector::Message::RenameCommit));
+        assert_eq!(app.ctx.doc.rocket().part(id).unwrap().display_name(), "Cone");
+        // Nothing selected: the configuration's name is edited instead, the part keeps its own.
+        app.ctx.selection = Selection::None;
+        app.update(Message::Rename);
+        app.update(Message::Chrome(chrome::Message::RenameInput("Windy".to_string())));
+        app.update(Message::Chrome(chrome::Message::CommitRename));
+        assert_eq!(app.ctx.doc.rocket().part(id).unwrap().display_name(), "Cone");
+        let rocket = app.ctx.doc.rocket();
+        assert_eq!(rocket.configuration_name(rocket.active_config_id()).as_deref(), Some("Windy"));
+    }
+
+    /// An example with an unsaved edit, New pressed: the modal is up holding New.
+    fn dirty_app() -> App {
+        let mut app = App::new();
+        app.update(Message::Example);
         app.ctx.doc.edit("Rename", |r| r.name = "changed".to_string());
         app.update(Message::New);
-        assert!(!app.ctx.doc.rocket().parts().is_empty());
+        app
+    }
+
+    #[test]
+    fn new_with_unsaved_edits_opens_the_modal_and_blocks_other_commands() {
+        let mut app = dirty_app();
+        assert_eq!(app.ctx.unsaved, Some(Pending::New));
+        assert!(!app.ctx.doc.rocket().parts().is_empty(), "nothing is replaced yet");
+        app.update(Message::Delete);
+        app.update(Message::Example);
+        assert_eq!(app.ctx.unsaved, Some(Pending::New), "other commands are swallowed while it is open");
+        assert!(app.ctx.doc.is_dirty());
+    }
+
+    #[test]
+    fn dont_save_proceeds_and_cancel_keeps_the_document() {
+        let mut app = dirty_app();
+        app.update(Message::UnsavedCancel);
+        assert!(app.ctx.unsaved.is_none() && app.ctx.doc.is_dirty() && !app.ctx.doc.rocket().parts().is_empty());
         app.update(Message::New);
-        assert!(app.ctx.doc.rocket().parts().is_empty() && !app.ctx.doc.is_dirty());
+        app.update(Message::Cancel);
+        assert!(app.ctx.unsaved.is_none() && app.ctx.doc.is_dirty(), "Escape cancels");
+        app.update(Message::New);
+        app.update(Message::UnsavedDiscard);
+        assert!(app.ctx.unsaved.is_none() && !app.ctx.doc.is_dirty() && app.ctx.doc.rocket().parts().is_empty());
+    }
+
+    #[test]
+    fn save_writes_the_file_then_proceeds() {
+        let path = std::env::temp_dir().join(format!("bowshock-{}-unsaved-modal.bowshock", std::process::id()));
+        let mut app = App::new();
+        app.update(Message::Example);
+        app.ctx.doc.save_as(&path).unwrap();
+        app.ctx.doc.edit("Rename", |r| r.name = "changed".to_string());
+        app.update(Message::New);
+        assert!(app.ctx.unsaved.is_some());
+        app.update(Message::Key(KeyPress { key: keyboard::Key::Named(keyboard::key::Named::Enter), modifiers: keyboard::Modifiers::empty(), captured: false }));
+        let saved = bowshock_model::Rocket::from_bytes(&std::fs::read(&path).unwrap()).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(saved.name, "changed", "Enter saves");
+        assert!(app.ctx.unsaved.is_none() && app.ctx.doc.rocket().parts().is_empty() && !app.ctx.doc.is_dirty());
+    }
+
+    #[test]
+    fn closing_the_window_with_unsaved_edits_asks_first() {
+        let mut app = App::new();
+        app.update(Message::Example);
+        app.update(Message::CloseRequested);
+        assert!(app.ctx.unsaved.is_none(), "a clean document closes without asking");
+        app.ctx.doc.edit("Rename", |r| r.name = "changed".to_string());
+        app.update(Message::CloseRequested);
+        assert_eq!(app.ctx.unsaved, Some(Pending::Exit));
+        app.update(Message::UnsavedCancel);
+        assert!(app.ctx.unsaved.is_none() && app.ctx.doc.is_dirty(), "Cancel stays");
+        app.update(Message::CloseRequested);
+        app.update(Message::UnsavedSave);
+        assert_eq!(app.ctx.saving_for, Some(Pending::Exit), "an untitled document asks where to save, then exits");
+        app.update(Message::SavePath(None));
+        assert!(app.ctx.saving_for.is_none() && app.ctx.doc.is_dirty(), "a cancelled Save As keeps the window open");
+    }
+
+    #[test]
+    fn save_as_from_the_modal_proceeds_when_answered_and_aborts_when_cancelled() {
+        let path = std::env::temp_dir().join(format!("bowshock-{}-unsaved-as.bowshock", std::process::id()));
+        let mut app = dirty_app();
+        app.update(Message::UnsavedSave);
+        assert!(app.ctx.unsaved.is_none() && app.ctx.saving_for == Some(Pending::New), "an untitled document asks where to save");
+        app.update(Message::SavePath(None));
+        assert!(app.ctx.saving_for.is_none() && app.ctx.doc.is_dirty() && !app.ctx.doc.rocket().parts().is_empty(), "cancelled: nothing happens");
+        app.update(Message::New);
+        app.update(Message::UnsavedSave);
+        app.update(Message::SavePath(Some(path.clone())));
+        let written = path.exists();
+        std::fs::remove_file(&path).ok();
+        assert!(written && app.ctx.doc.rocket().parts().is_empty() && !app.ctx.doc.is_dirty());
     }
 
     #[test]

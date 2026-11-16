@@ -656,7 +656,7 @@ mod tests {
     fn geometry_the_solver_cannot_take_is_refused_with_a_reason() {
         let (rocket, mut vehicle) = example();
         // A step in diameter.
-        vehicle.body[2].fore_radius += 0.01;
+        vehicle.body[1].fore_radius += 0.01;
         let why = plan(&rocket, &vehicle).unwrap_err();
         assert!(why.contains("step in diameter"), "{why}");
         // A pod: a zero-size separator ahead of the core.
@@ -707,7 +707,6 @@ mod tests {
         v.body[1].length += 1e-12;
         assert_eq!(plan(&rocket, &v).unwrap().geometry, a.geometry);
         v.body[1].length += 1e-3;
-        v.body[2].station += 1e-3;
         assert_ne!(plan(&rocket, &v).unwrap().geometry, a.geometry);
     }
 

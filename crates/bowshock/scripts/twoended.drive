@@ -1,6 +1,6 @@
 # Two-ended length handles on body parts. Run with the example rocket:
 #   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/twoended.drive out/twoended
-# Booster: aft handle grows it aft (top station and everything fore stay); fore handle grows it forward (the aft end,
+# Body tube: aft handle grows it aft (top station and everything fore stay); fore handle grows it forward (the aft end,
 # fins and motor stay where they are on screen, the nose side moves forward).
 viewport 1280x800
 click "2D"

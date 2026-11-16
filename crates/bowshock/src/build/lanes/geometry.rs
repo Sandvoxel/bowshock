@@ -1,13 +1,11 @@
-//! Stations to pixels: the horizontal [`Axis`] (fit, user zoom/pan, lock to the viewport), the rows the lanes occupy for a given
+//! Stations to pixels: the horizontal [`Axis`] (fit, user zoom/pan), the rows the lanes occupy for a given
 //! height, the ruler's ticks and hit-testing. Pure, so it is unit-tested.
 
-use glam::Vec3;
-use iced::{Point, Rectangle, Size};
+use iced::{Point, Rectangle};
 
 use super::scene::{Bar, BarKey, Lane, Scene};
 
 use crate::units::Unit;
-use crate::viewport::Camera;
 
 /// Width of the lane-name column on the left.
 pub const LABEL_W: f32 = 84.0;
@@ -18,8 +16,6 @@ pub const FOOTER_H: f32 = 20.0;
 /// Padding either side of the rocket at the default fit.
 const PAD_L: f32 = 8.0;
 const PAD_R: f32 = 20.0;
-/// Height of the viewport assumed when the lanes follow its camera (see [`Axis::locked`]).
-const NOMINAL_HEIGHT: f32 = 560.0;
 /// Pitch of sub-rows and the extra height each one adds to a lane.
 pub const SUB_PITCH: f32 = 22.0;
 /// Height of a bar in a full-size row, and the gap above it.
@@ -44,20 +40,6 @@ impl Axis {
     pub fn fit(width: f32, length: f64) -> Axis {
         let usable = (width - LABEL_W - PAD_L - PAD_R).max(40.0);
         Axis { x0: LABEL_W + PAD_L, ppm: usable / length.max(0.05) as f32 }
-    }
-
-    /// The axis the viewport's camera draws the rocket's axis with, when it looks at it side-on (the long axis horizontal on
-    /// screen): lanes and model then line up, orthographic or perspective (the axis of a side view is at one depth, so one
-    /// scale). `width` is the width both panes share.
-    pub fn locked(camera: &Camera, width: f32) -> Option<Axis> {
-        let (right, up) = (camera.right(), camera.up());
-        if right.z.abs() < 0.995 || up.z.abs() > 0.08 {
-            return None;
-        }
-        // The height only matters to a perspective camera whose target is off the axis.
-        let size = Size::new(width, NOMINAL_HEIGHT);
-        let (a, b) = (camera.project(Vec3::ZERO, size).x, camera.project(Vec3::Z, size).x);
-        Some(Axis { x0: a, ppm: b - a })
     }
 
     /// Pixel of `station`.
@@ -299,7 +281,6 @@ mod tests {
     use super::*;
     use crate::units::{Quantity, UnitSystem};
     use bowshock_model::System;
-    use glam::Vec3;
 
     fn mm() -> Unit {
         *Quantity::Length.unit_for(UnitSystem::MmGS)
@@ -329,35 +310,6 @@ mod tests {
         let again = z.apply(fit);
         assert!((again.x0 - panned.x0).abs() < 1e-3 && (again.ppm - panned.ppm).abs() < 1e-3);
         assert_eq!(Zoom::between(fit, fit), Zoom::default());
-    }
-
-    #[test]
-    fn side_on_cameras_lock_the_axis_and_others_do_not() {
-        // Looking along -X: screen right is +Z. Orthographic: a point on the axis at station s lands at width/2 + (s - target.z)
-        // * scale. Perspective agrees on the axis (it is at the depth of the target).
-        let side = Camera { target: Vec3::new(0.0, 0.0, 0.5), yaw: -std::f32::consts::FRAC_PI_2, scale: 400.0, ortho_blend: 1.0, ..Camera::default() };
-        let axis = Axis::locked(&side, 800.0).expect("side-on locks");
-        assert!((axis.px(0.5) - 400.0).abs() < 1e-2 && (axis.ppm - 400.0).abs() < 1e-2);
-        let perspective = Camera { ortho_blend: 0.0, ..side };
-        let axis_p = Axis::locked(&perspective, 800.0).expect("side-on locks");
-        assert!((axis_p.px(0.5) - 400.0).abs() < 1e-2 && (axis_p.ppm - 400.0).abs() < 1e-2);
-        let size = iced::Size::new(800.0, 500.0);
-        for s in [0.0f32, 0.3, 1.1] {
-            for camera in [side, perspective] {
-                let projected = camera.project(Vec3::new(0.0, 0.0, s), size).x;
-                assert!((axis.px(f64::from(s)) - projected).abs() < 1e-2, "{s}");
-            }
-        }
-        // Looking down on the rocket from above and aside still shows its axis horizontal at one scale: it stays locked. A
-        // turned or rolled view does not.
-        assert!(Axis::locked(&Camera { pitch: 0.4, ..side }, 800.0).is_some_and(|a| (a.ppm - 400.0).abs() < 1e-2));
-        assert!(Axis::locked(&Camera { yaw: -1.0, ..side }, 800.0).is_none());
-        assert!(Axis::locked(&Camera { roll: 0.3, ..side }, 800.0).is_none());
-        let end_on = Camera { yaw: 0.0, ..side };
-        assert!(Axis::locked(&end_on, 800.0).is_none());
-        // From the other side the axis is mirrored.
-        let other = Camera { yaw: std::f32::consts::FRAC_PI_2, ..side };
-        assert!(Axis::locked(&other, 800.0).is_some_and(|a| a.ppm < 0.0));
     }
 
     #[test]

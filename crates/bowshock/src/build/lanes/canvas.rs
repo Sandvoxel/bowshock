@@ -18,7 +18,6 @@ use crate::app::{ui, Selection};
 use crate::theme::{self, MONO, SANS};
 use crate::tokens::Tokens;
 use crate::units::{Quantity, UnitSystem};
-use crate::viewport::Camera;
 
 const TEXT_BAR: f32 = 11.5;
 pub(super) const TEXT_SMALL: f32 = 10.5;
@@ -102,8 +101,6 @@ pub struct Lanes<'a> {
     pub rocket: &'a Rocket,
     /// The user's zoom and pan.
     pub zoom: Zoom,
-    /// The viewport's camera when the lanes follow it.
-    pub lock: Option<Camera>,
     /// The display unit system.
     pub units: UnitSystem,
     /// What is selected (a separation, or the primary part).
@@ -264,7 +261,7 @@ fn link(frame: &mut Frame, at: Point, color: Color) {
 impl Lanes<'_> {
     /// The axis in force for a canvas `width` px wide.
     pub fn axis(&self, width: f32) -> Axis {
-        self.lock.and_then(|c| Axis::locked(&c, width)).unwrap_or_else(|| self.zoom.apply(Axis::fit(width, self.scene.length)))
+        self.zoom.apply(Axis::fit(width, self.scene.length))
     }
 
     /// The pod brackets and their tags for this axis (which may add a row to a lane for a tag with nowhere else to go).
@@ -339,7 +336,7 @@ impl Lanes<'_> {
 
     fn zoom_message(&self, bounds: Rectangle, next: Axis) -> Message {
         let fit = Axis::fit(bounds.width, self.scene.length);
-        Message::SetZoom { zoom: Zoom::between(fit, next), camera: self.lock }
+        Message::SetZoom(Zoom::between(fit, next))
     }
 }
 
@@ -494,9 +491,8 @@ impl canvas::Program<Message> for Lanes<'_> {
                     _ => return None,
                 };
                 let fit = Axis::fit(bounds.width, self.scene.length);
-                // Zoom the axis in force about the cursor; the lanes do not zoom out past the whole rocket unless they are
-                // following a camera that has.
-                let min = fit.ppm.abs() * if self.lock.is_some() { 0.05 } else { 1.0 };
+                // Zoom the axis in force about the cursor; the lanes do not zoom out past the whole rocket.
+                let min = fit.ppm.abs();
                 let next = axis.zoomed(k, p.x, min, fit.ppm.abs() * 400.0);
                 Some(Action::publish(self.zoom_message(bounds, next)).and_capture())
             }

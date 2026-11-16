@@ -173,6 +173,34 @@ fn notes_and_renames_go_through_the_document() {
 }
 
 #[test]
+fn renaming_a_part_is_one_undo_step_and_survives_a_save() {
+    let mut fx = Fx::new();
+    let chute = fx.internal(|p| matches!(p.kind, InternalKind::Parachute { .. }));
+    fx.select(chute);
+    fx.send(Message::StartRename);
+    fx.send(Message::RenameInput("Main chute".into()));
+    fx.send(Message::RenameCommit);
+    assert_eq!(fx.app.ctx().doc.undo_label(), Some("Rename part"));
+    let back = Rocket::from_bytes(&fx.rocket().to_bytes()).unwrap();
+    assert_eq!(back.internal(chute).unwrap().display_name(), "Main chute");
+    // Empty resets to the kind's name.
+    fx.send(Message::StartRename);
+    fx.send(Message::RenameInput("  ".into()));
+    fx.send(Message::RenameCommit);
+    assert_eq!(fx.rocket().internal(chute).unwrap().name, None);
+    fx.undo();
+    assert_eq!(fx.rocket().internal(chute).unwrap().name.as_deref(), Some("Main chute"));
+    fx.undo();
+    assert_eq!(fx.rocket().internal(chute).unwrap().name, None);
+    // Escape abandons an open rename.
+    fx.send(Message::StartRename);
+    fx.send(Message::RenameInput("Nope".into()));
+    fx.send(Message::RenameCancel);
+    fx.send(Message::RenameCommit);
+    assert_eq!(fx.rocket().internal(chute).unwrap().name, None);
+}
+
+#[test]
 fn recovery_and_motor_controls_edit_the_active_configuration_and_the_part() {
     let mut fx = Fx::new();
     let chute = fx.internal(|p| matches!(p.kind, InternalKind::Parachute { .. }));

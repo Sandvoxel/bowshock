@@ -1,0 +1,11 @@
+# The "Save changes?" modal: drop a body tube (an unsaved edit), then File > New.
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/unsaved-modal.drive out/unsaved
+viewport 1280x800
+press "Body tube"
+move (200, 200)
+move (400, 300)
+move (600, 330)
+release (600, 330)
+click "hpr_l1_cert"
+click "New"
+screenshot unsaved-modal-dark.png

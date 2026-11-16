@@ -126,5 +126,11 @@ fn app(example: bool) -> iced::Application<impl iced::Program<State = App, Messa
         .subscription(App::subscription)
         .fonts(theme::FONTS)
         .font(SANS)
-        .window(iced::window::Settings { size: Size::new(1280.0, 800.0), icon: logo::window_icon(), ..iced::window::Settings::default() })
+        .window(iced::window::Settings {
+            size: Size::new(1280.0, 800.0),
+            icon: logo::window_icon(),
+            // A close request goes through the app, which asks about unsaved changes before exiting.
+            exit_on_close_request: false,
+            ..iced::window::Settings::default()
+        })
 }

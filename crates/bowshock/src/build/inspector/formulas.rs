@@ -195,7 +195,7 @@ mod tests {
         assert!(!ctx.refs.is_picking());
         let insert = ctx.refs.insert.as_ref().expect("an insert for the target");
         assert_eq!(insert.target, target);
-        assert_eq!(insert.text, format!("{{booster#{tube}.od}}"));
+        assert_eq!(insert.text, format!("{{body_tube#{tube}.od}}"));
         // A second pick is a new insert.
         let first = insert.token;
         fx.send(Message::PickMode(Some(target)));
