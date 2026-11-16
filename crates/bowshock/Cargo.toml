@@ -30,6 +30,8 @@ rfd = "0.18"
 serde = { version = "1", features = ["derive"] }
 # float_roundtrip: a preset saved and read back must be bit-identical.
 serde_json = { version = "1", features = ["float_roundtrip"] }
+# The Simulate wind forecast is fetched from Open-Meteo (same major as bowshock-motors' client).
+ureq = "3"
 # Rasterises the application icon (the same version iced's software renderer uses).
 tiny-skia = "0.12"
 

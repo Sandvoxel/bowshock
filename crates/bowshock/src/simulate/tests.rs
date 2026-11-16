@@ -783,6 +783,25 @@ fn a_launch_site_is_one_step_and_the_location_and_wind_profile_fly() {
 }
 
 #[test]
+fn a_forecast_sets_the_wind_and_temperature_in_one_step() {
+    let mut app = App::with_example();
+    let mut state = state_for(&app);
+    let [nominal, ..] = ids_of(&state);
+    click_flight(&mut state, &mut app, nominal, keyboard::Modifiers::empty());
+    state.update(Message::ForecastOpen(true), app.ctx_mut());
+    // No location: the fetch says what is missing instead of asking.
+    state.update(Message::ForecastFetch, app.ctx_mut());
+    assert_eq!(state.forecast.as_ref().unwrap().error.as_deref(), Some("Set the launch latitude and longitude first"));
+    let f = forecast::parse(include_str!("../../tests/data/openmeteo.json"), 622.0).unwrap();
+    state.update(Message::ForecastDone(Ok(f.clone())), app.ctx_mut());
+    assert_eq!(app.ctx().doc.undo_label(), Some("Wind from forecast"));
+    let spec = &state.flight(nominal).unwrap().spec;
+    assert_eq!((spec.wind_speed, spec.wind_levels.len()), (f.ground.speed, f.levels.len()));
+    assert!((spec.temperature - f.temperature_k.unwrap()).abs() < 1e-9);
+    assert!(state.forecast.is_none(), "the row closes once applied");
+}
+
+#[test]
 fn run_flies_the_selected_flights_and_removing_takes_them_all() {
     let mut app = App::with_example();
     let mut state = state_for(&app);

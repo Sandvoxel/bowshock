@@ -27,6 +27,7 @@
 
 mod channels;
 mod flight;
+mod forecast;
 pub(crate) mod format;
 mod keys;
 mod layout;
@@ -100,6 +101,8 @@ pub enum Edit {
     /// Built-in launch site `i` of [`sites::SITES`]: its altitude and location, and the standard temperature there when the
     /// temperature is still the standard sea-level one.
     Site(usize),
+    /// A forecast wind: the ground wind, the levels above it and, when asked for, the forecast temperature (K).
+    Forecast { speed: f64, from: f64, levels: Vec<bowshock_model::WindLevel>, temperature: Option<f64> },
 }
 
 impl Edit {
@@ -121,12 +124,21 @@ impl Edit {
             Edit::Latitude(_) | Edit::Longitude(_) => "launch location",
             Edit::AirStart(_) => "air start",
             Edit::Site(_) => "launch site",
+            Edit::Forecast { .. } => "forecast wind",
         }
     }
 
     /// Whether a single flight's undo step names the edit (`Set wind profile`) instead of the generic `Edit flight`.
     fn named(&self) -> bool {
-        matches!(self, Edit::WindLevels(_) | Edit::Latitude(_) | Edit::Longitude(_) | Edit::AirStart(_) | Edit::Site(_))
+        matches!(self, Edit::WindLevels(_) | Edit::Latitude(_) | Edit::Longitude(_) | Edit::AirStart(_) | Edit::Site(_) | Edit::Forecast { .. })
+    }
+
+    /// The undo step of a single flight's edit that [`Edit::named`] names.
+    fn title(&self) -> String {
+        match self {
+            Edit::Forecast { .. } => "Wind from forecast".to_string(),
+            other => format!("Set {}", other.label()),
+        }
     }
 }
 
@@ -254,6 +266,16 @@ pub enum Message {
     CoordCommit,
     /// A control that needs no action (the `Custom` launch site).
     Ignore,
+    /// Open (`true`) or close the forecast row of the wind profile.
+    ForecastOpen(bool),
+    /// The launch time typed in the forecast row (`YYYY-MM-DDTHH:00`, UTC).
+    ForecastTime(String),
+    /// Whether the forecast also sets the temperature.
+    ForecastTemperature(bool),
+    /// Fetch the forecast for the selected flight's location and the typed time.
+    ForecastFetch,
+    /// The forecast arrived (or why it did not).
+    ForecastDone(Result<forecast::Forecast, String>),
 }
 
 /// What the plots and the ground track show: derived from the flights whenever a run lands or the ticks change.
@@ -315,6 +337,8 @@ pub struct State {
     coord_text: [String; 2],
     /// The coordinate field being typed in (`true` for longitude) and the flight selected when typing began.
     coord_editing: Option<(bool, FlightId)>,
+    /// The forecast row of the wind profile, while open.
+    forecast: Option<ForecastRow>,
 }
 
 impl Default for State {
@@ -353,6 +377,7 @@ impl State {
             wind_open: false,
             coord_text: [String::new(), String::new()],
             coord_editing: None,
+            forecast: None,
         };
         state.rebuild();
         state.refresh_coords();
@@ -769,7 +794,7 @@ impl State {
                 // With several flights selected the edit sets the field on every one of them.
                 let ids = self.edit_ids();
                 let (label, key) = match ids.as_slice() {
-                    [id] if edit.named() => (format!("Set {}", edit.label()), format!("flight:{id}:{}", edit.label())),
+                    [id] if edit.named() => (edit.title(), format!("flight:{id}:{}", edit.label())),
                     [id] => ("Edit flight".to_string(), format!("flight:{id}:{}", edit.label())),
                     _ => {
                         let joined: Vec<String> = ids.iter().map(ToString::to_string).collect();
@@ -805,6 +830,33 @@ impl State {
                 }
             }
             Message::Ignore => {}
+            Message::ForecastOpen(open) => {
+                self.forecast = open.then(|| ForecastRow { time: forecast::next_hour_utc(), temperature: true, busy: false, error: None });
+            }
+            Message::ForecastTime(time) => {
+                if let Some(row) = &mut self.forecast {
+                    row.time = time;
+                }
+            }
+            Message::ForecastTemperature(on) => {
+                if let Some(row) = &mut self.forecast {
+                    row.temperature = on;
+                }
+            }
+            Message::ForecastFetch => return self.fetch_forecast(),
+            Message::ForecastDone(result) => {
+                let Some(row) = &mut self.forecast else { return Task::none() };
+                row.busy = false;
+                match result {
+                    Ok(f) => {
+                        let temperature = row.temperature.then_some(f.temperature_k).flatten();
+                        self.forecast = None;
+                        let edit = Edit::Forecast { speed: f.ground.speed, from: f.ground.from, levels: f.levels, temperature };
+                        return self.update(Message::Edit(edit), ctx);
+                    }
+                    Err(e) => row.error = Some(e),
+                }
+            }
             Message::Ground(GroundMessage::Hover(t)) => self.plot.set_hover(t),
             Message::Ground(GroundMessage::Select(i)) => {
                 if let Some(id) = self.shown.ids.get(i).copied() {
@@ -998,6 +1050,14 @@ impl State {
                         }
                     }
                 }
+                Edit::Forecast { speed, from, levels, temperature } => {
+                    spec.wind_speed = speed.max(0.0);
+                    spec.wind_from = from.rem_euclid(std::f64::consts::TAU);
+                    spec.wind_levels = bowshock_model::sanitized_levels(levels);
+                    if let Some(t) = temperature {
+                        spec.temperature = t.clamp(220.0, 330.0);
+                    }
+                }
             }
         }
     }
@@ -1160,6 +1220,38 @@ async fn offload<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -
         let _ = tx.send(work());
     });
     rx.await.map_err(|_| "the simulation stopped unexpectedly".to_string())
+}
+
+/// The forecast row of the wind profile: the launch time, whether the forecast sets the temperature, a fetch in flight and the
+/// last error.
+#[derive(Debug, Clone, PartialEq)]
+struct ForecastRow {
+    /// The launch hour, `YYYY-MM-DDTHH:00` UTC.
+    time: String,
+    /// Use the forecast temperature.
+    temperature: bool,
+    /// A fetch is running.
+    busy: bool,
+    /// Why the last fetch failed.
+    error: Option<String>,
+}
+
+impl State {
+    /// Starts fetching the forecast for the selected flight's location and the typed hour (see [`forecast::fetch`]).
+    fn fetch_forecast(&mut self) -> Task<app::Message> {
+        let spec = self.selected_flight().spec.clone();
+        let Some(row) = &mut self.forecast else { return Task::none() };
+        let Some(at) = spec.location else {
+            row.error = Some("Set the launch latitude and longitude first".to_string());
+            return Task::none();
+        };
+        row.busy = true;
+        row.error = None;
+        let (time, altitude) = (row.time.clone(), spec.site_altitude);
+        Task::perform(offload(move || forecast::fetch(at.latitude, at.longitude, altitude, &time)), |result| {
+            app::Message::Simulate(Message::ForecastDone(result.and_then(|r| r)))
+        })
+    }
 }
 
 #[cfg(test)]

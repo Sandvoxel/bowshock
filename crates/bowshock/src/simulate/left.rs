@@ -17,10 +17,11 @@ use crate::tokens::{Tokens, SPACE_1, SPACE_2, SPACE_3, TEXT_BODY, TEXT_LABEL};
 use crate::units::{Quantity, UnitSystem};
 use crate::widgets::button::{button as push, icon_button, Weight};
 use crate::widgets::chip::Severity;
-use crate::widgets::field::{labeled, rule, select};
+use crate::widgets::field::{checkbox, labeled, rule, select};
 use crate::widgets::glyph::Mark;
 use crate::widgets::plot::SeriesColor;
 use crate::widgets::segmented::segmented_fill;
+use crate::widgets::spinner::spinner;
 use crate::widgets::unit_input::unit_input;
 
 /// Height of a flight row (the kit's 44 px list rows).
@@ -319,6 +320,43 @@ fn wind_profile<'a>(state: &'a State, spec: &'a Spec, shared: &Shared, count: us
     }
     let clear: Element<'a, Message> = clear.into();
     out.push(row![add, power, clear].spacing(SPACE_1).boxed());
+    out.extend(forecast_rows(state));
+    out.push(text("Weather data by Open-Meteo.com").size(TEXT_LABEL).style(theme::faint).boxed());
+    out
+}
+
+/// `Fetch forecast…`, or while it is open the forecast row: the launch hour (UTC), whether the forecast also sets the
+/// temperature, Fetch (a spinner while it runs) and why the last fetch failed.
+fn forecast_rows<'a>(state: &'a State) -> Vec<Element<'a, Message>> {
+    let Some(row) = &state.forecast else {
+        let open: Element<'a, Message> = push("Fetch forecast…", Weight::Ghost)
+            .tooltip("Ground and upper winds forecast at the launch location")
+            .on_press(Message::ForecastOpen(true))
+            .into();
+        return vec![open];
+    };
+    let time = text_input("YYYY-MM-DDTHH:00", &row.time)
+        .on_input(Message::ForecastTime)
+        .on_submit(Message::ForecastFetch)
+        .size(TEXT_BODY)
+        .padding([4.0, SPACE_2])
+        .style(theme::input)
+        .width(Fill);
+    let mut fetch = push("Fetch", Weight::Secondary);
+    if !row.busy {
+        fetch = fetch.on_press(Message::ForecastFetch);
+    }
+    let fetch: Element<'a, Message> = fetch.into();
+    let close: Element<'a, Message> = icon_button(Mark::Close, "Close the forecast").on_press(Message::ForecastOpen(false)).width(22).into();
+    let busy: Element<'a, Message> = if row.busy { spinner(14.0) } else { Space::new().width(14).boxed() };
+    let mut out = vec![
+        labeled("Launch (UTC)", time.boxed()),
+        checkbox("Use forecast temperature", row.temperature, Message::ForecastTemperature),
+        row![fetch, busy, Space::new().width(Fill), close].spacing(SPACE_2).align_y(iced::Center).boxed(),
+    ];
+    if let Some(e) = &row.error {
+        out.push(text(e.as_str()).size(TEXT_LABEL).style(theme::colored(|t| t.warn)).boxed());
+    }
     out
 }
 
