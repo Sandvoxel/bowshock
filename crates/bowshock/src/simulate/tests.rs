@@ -793,7 +793,7 @@ fn cfd_table(geometry: u64) -> bowshock_model::CfdTable {
 fn current_geometry(app: &App) -> u64 {
     let rocket = app.ctx().doc.rocket();
     let v = bowshock_sim::from_model::vehicle(rocket, app.ctx().physics.motors(), bowshock_sim::from_model::Phase::Full).unwrap();
-    crate::analyze::cfd::plan(rocket, &v).unwrap().geometry
+    crate::analyze::cfd::plan(rocket, &v, app.ctx().units).unwrap().geometry
 }
 
 #[test]

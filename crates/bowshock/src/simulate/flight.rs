@@ -492,20 +492,20 @@ pub fn prepare(ctx: &Ctx, spec: &Spec) -> Result<(SimInput, f64), String> {
     }
     let mut input = input;
     if spec.drag == DragSource::CfdTable {
-        input.drag_tables = (0..input.vehicle.stages.len()).map(|k| drag_table(&rocket, ctx.physics.motors(), k + 1).ok()).collect();
+        input.drag_tables = (0..input.vehicle.stages.len()).map(|k| drag_table(&rocket, ctx, k + 1).ok()).collect();
     }
     Ok((input, delay))
 }
 
 /// The CFD drag table stack from model stage `stage` (1 is the whole rocket) flies on: the stored one when its geometry is the
-/// rocket's now. `Err` says why the stack flies on the build-up instead. The table's altitude does not matter, the flight corrects
-/// for the Reynolds number.
-pub fn drag_table(rocket: &Rocket, motors: &bowshock_motors::MotorDb, stage: usize) -> Result<DragTable, String> {
+/// rocket's now. `Err` says why the stack flies on the build-up instead (lengths in the session's units). The table's altitude does
+/// not matter, the flight corrects for the Reynolds number.
+pub fn drag_table(rocket: &Rocket, ctx: &Ctx, stage: usize) -> Result<DragTable, String> {
     let Some(table) = rocket.cfd_table(stage as u32) else {
         return Err("No CFD table for this rocket yet: solve one in Analyze > CFD table. Flying on Extended.".to_string());
     };
     let phase = if stage <= 1 { Phase::Full } else { Phase::UpperFrom(stage) };
-    let plan = from_model::vehicle(rocket, motors, phase).map_err(|e| e.to_string()).and_then(|v| crate::analyze::cfd::plan(rocket, &v));
+    let plan = from_model::vehicle(rocket, ctx.physics.motors(), phase).map_err(|e| e.to_string()).and_then(|v| crate::analyze::cfd::plan(rocket, &v, ctx.units));
     match plan {
         Ok(plan) if plan.geometry == table.geometry => Ok(DragTable::from_cfd(table)),
         Ok(_) => Err("CFD table is stale (the rocket changed): flying on Extended.".to_string()),
@@ -519,7 +519,7 @@ pub fn drag_note(ctx: &Ctx, spec: &Spec) -> Option<String> {
         return None;
     }
     let rocket = ctx.doc.rocket();
-    (1..=rocket.stages().len().max(1)).find_map(|stage| drag_table(rocket, ctx.physics.motors(), stage).err())
+    (1..=rocket.stages().len().max(1)).find_map(|stage| drag_table(rocket, ctx, stage).err())
 }
 
 #[cfg(test)]

@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use super::cfd;
 use super::flutter::{FinStock, FlutterAnalysis};
+use crate::units::{Quantity, UnitSystem};
 use bowshock_model::{CfdGrid, CfdTable, ConfigId, Finish, Rocket, StabilityBands};
 use bowshock_motors::MotorDb;
 use bowshock_sim::from_model::{self, Phase};

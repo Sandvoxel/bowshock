@@ -150,10 +150,6 @@ fn fin_spec(set: &FinSet, x_base: f64) -> Result<solver::FinSpec, String> {
     Ok(spec)
 }
 
-fn mm(m: f64) -> String {
-    format!("{:.0} mm", m * 1e3)
-}
-
 /// Wetted (lateral) area of a body segment (m^2), integrated along its profile.
 fn wetted_area(s: &bowshock_sim::BodySegment) -> f64 {
     const N: usize = 256;
@@ -180,7 +176,6 @@ fn wetted_mean_roughness(segments: &[bowshock_sim::BodySegment]) -> f64 {
         0.0
     }
 }
-
 /// Maps the vehicle of one flying stack of `rocket` (the document supplies the nose family the vehicle rounds to its five) to
 /// what the solver takes. The error says why the geometry cannot be solved at all, with lengths in `units`.
 pub fn plan(rocket: &Rocket, vehicle: &Vehicle, units: UnitSystem) -> Result<Plan, String> {
@@ -1000,7 +995,7 @@ mod tests {
     #[test]
     fn the_lift_key_ignores_the_altitude_and_follows_geometry_and_nodes() {
         let (rocket, vehicle) = example();
-        let plan = plan(&rocket, &vehicle).unwrap();
+        let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
         let nodes = lift_nodes((0.1, 3.0)).unwrap();
         assert_ne!(table_key(plan.geometry, 0.0, &nodes), table_key(plan.geometry, 3000.0, &nodes));
         let key = lift_key(plan.geometry, &nodes);
@@ -1130,7 +1125,7 @@ mod tests {
                 .sum::<f64>()
         };
         let (rocket, mut vehicle) = example();
-        let all = plan(&rocket, &vehicle).unwrap();
+        let all = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
         let expected = {
             let (sum, a) = vehicle.body.iter().fold((0.0, 0.0), |(s, a), seg| (s + seg.roughness * area(seg), a + area(seg)));
             sum / a
@@ -1145,7 +1140,7 @@ mod tests {
         for s in &mut vehicle.body[1..] {
             s.roughness = 100e-6;
         }
-        let split = plan(&rocket, &vehicle).unwrap();
+        let split = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
         let (nose, rest) = (area(&vehicle.body[0]), vehicle.body[1..].iter().map(area).sum::<f64>());
         let expected = 100e-6 * rest / (nose + rest);
         assert!((split.body_roughness - expected).abs() < 1e-3 * expected, "{} vs {expected}", split.body_roughness);
@@ -1156,7 +1151,7 @@ mod tests {
         for s in &mut vehicle.body {
             s.roughness = 0.0;
         }
-        let smooth = plan(&rocket, &vehicle).unwrap();
+        let smooth = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
         assert_eq!(smooth.body_roughness, 0.0);
         assert!(smooth.notes.iter().any(|n| n.contains("solved smooth")), "{:?}", smooth.notes);
     }
@@ -1371,7 +1366,7 @@ mod tests {
     #[ignore = "solves on the GPU: about a minute"]
     fn a_tiny_grid_solves_and_is_sane() {
         let (rocket, vehicle) = example();
-        let plan = plan(&rocket, &vehicle).unwrap();
+        let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
         let job = Job { plan, altitude: 120.0, nodes: vec![0.6, 2.0], stage: 1, grid: CfdGrid::Coarse };
         let mut events = 0;
         let cancel = AtomicBool::new(false);
@@ -1441,7 +1436,7 @@ mod tests {
     #[test]
     fn a_medium_table_of_the_same_geometry_and_conditions_is_fresh() {
         let (rocket, vehicle) = example();
-        let mapped = plan(&rocket, &vehicle);
+        let mapped = plan(&rocket, &vehicle, UnitSystem::default());
         let full = (0.1, 3.0);
         let mut t = table();
         t.geometry = mapped.as_ref().unwrap().geometry;
@@ -1453,7 +1448,7 @@ mod tests {
     #[test]
     fn a_cancel_stops_before_the_next_point() {
         let (rocket, vehicle) = example();
-        let job = Job { plan: plan(&rocket, &vehicle).unwrap(), altitude: 120.0, nodes: vec![0.6, 2.0], stage: 1, grid: CfdGrid::Coarse };
+        let job = Job { plan: plan(&rocket, &vehicle, UnitSystem::default()).unwrap(), altitude: 120.0, nodes: vec![0.6, 2.0], stage: 1, grid: CfdGrid::Coarse };
         let cancel = AtomicBool::new(true);
         assert_eq!(solve(&job, &cancel, |_| ()).unwrap_err(), CANCELLED);
     }
@@ -1527,7 +1522,7 @@ mod tests {
                     continue;
                 }
             };
-            let plan = match plan(&rocket, &vehicle) {
+            let plan = match plan(&rocket, &vehicle, UnitSystem::default()) {
                 Ok(p) => p,
                 Err(why) => {
                     println!("SKIPPED: {why}");
