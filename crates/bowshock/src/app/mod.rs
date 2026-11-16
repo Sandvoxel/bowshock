@@ -417,6 +417,18 @@ impl App {
         &mut self.ctx
     }
 
+    /// The Analyze screen's state (tests).
+    #[cfg(test)]
+    pub fn analyze(&self) -> &analyze::State {
+        &self.analyze
+    }
+
+    /// The Analyze screen's state, mutably (tests).
+    #[cfg(test)]
+    pub fn analyze_mut(&mut self) -> &mut analyze::State {
+        &mut self.analyze
+    }
+
     /// Brings derived state up to date after a test changed the context directly.
     #[cfg(test)]
     pub fn sync(&mut self) {

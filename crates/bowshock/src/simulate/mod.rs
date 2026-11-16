@@ -22,7 +22,7 @@
 //!   acceleration, aerodynamics, forces, mass and balance, atmosphere, recovery). Each panel's title is a button that opens a
 //!   searchable menu of them; `+ series` overlays another source *of the same unit* (one y-axis per plot, never two: the others are
 //!   listed disabled, with the reason); panels add, remove and move; the presets row (Flight profile, Aerodynamics, Forces,
-//!   Stability, Custom) sets whole layouts. With several flights overlaid the colour is the flight and the line style is the source.
+//!   Stability, Roll, Custom) sets whole layouts. With several flights overlaid the colour is the flight and the line style is the source.
 //!   The layout is stored in the document (`Rocket::plot_layout`), so it saves, loads and undoes; [`State::edit_layout`] writes it.
 
 mod channels;

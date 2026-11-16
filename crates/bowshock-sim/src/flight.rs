@@ -32,6 +32,7 @@ use crate::atmosphere::{AirState, Atmosphere};
 use crate::attitude::{dot, from_axis, normalize, rate, rotate, rotate_inv, Quat, Vec3};
 use crate::drag_table::DragTable;
 use crate::rng::Rng;
+use crate::roll::{pitch_frequency, roll_resonance, RollResonance};
 use crate::staging::{Hits, Timeline};
 use crate::vehicle::{Trigger, Vehicle};
 use crate::G0;
@@ -291,12 +292,18 @@ pub struct Sample {
     /// Rate of turn of the rocket's axis, the magnitude of the pitch and yaw rates (rad/s). Zero in the point-mass model, on the
     /// rail and under a parachute.
     pub pitch_rate: f64,
-    /// Roll rate about the axis (rad/s), positive in the sense of increasing fin roll angle, the way positive fin cant spins the
-    /// rocket. Zero without cant, in the point-mass model, on the rail and under a parachute.
+    /// Roll rate about the axis (rad/s), right-handed about the nose direction: positive is clockwise seen from behind, the way a
+    /// fin's roll angle increases and positive fin cant turns the rocket. Zero without cant, in the point-mass model, on the rail
+    /// and under a parachute.
     pub roll_rate: f64,
     /// Elevation of the rocket's axis above the horizontal (rad): `+pi/2` nose straight up, `-pi/2` nose straight down. It lags the
     /// flight-path angle by the angle of attack.
     pub attitude_angle: f64,
+    /// Natural frequency of the pitch oscillation at this instant (rad/s), `sqrt(q A_ref CNalpha (x_cp - x_cg) / I)` (see
+    /// [`crate::roll::pitch_frequency`]); zero where the rocket does not oscillate: in the point-mass model, on the rail, under a
+    /// parachute, or when the CP is not aft of the CG. The spin rate [`roll_rate`](Self::roll_rate) is compared against it
+    /// (roll-pitch resonance, [`Summary::roll_resonance`]).
+    pub pitch_frequency: f64,
 }
 
 /// Recorded flight.
@@ -338,6 +345,15 @@ pub struct Summary {
     pub landing: (f64, f64),
     /// Landing point `[east, north]` (m).
     pub landing_position: [f64; 2],
+    /// Roll rate of the largest magnitude over the flight (rad/s), positive clockwise seen from behind, the way positive fin cant
+    /// turns the rocket; 0 for a rocket without canted fins or in the point-mass model.
+    pub max_roll_rate: f64,
+    /// Roll rate at the last burnout (rad/s, same sense).
+    pub roll_rate_at_burnout: f64,
+    /// Roll rate at apogee (rad/s, same sense).
+    pub roll_rate_at_apogee: f64,
+    /// Where the spin rate meets the pitch natural frequency, if it does (see [`crate::roll`]); `None` when it keeps clear.
+    pub roll_resonance: Option<RollResonance>,
 }
 
 /// Result of [`simulate`].
@@ -559,6 +575,8 @@ struct Diag {
     omega: [f64; 3],
     /// Fastest rate of the rotational dynamics (1/s), which limits the RK4 step; zero outside the rigid-body mode.
     stiff: f64,
+    /// Natural frequency of the pitch oscillation (rad/s); zero outside the rigid-body mode or without a restoring moment.
+    pitch_freq: f64,
 }
 
 impl Ctx<'_> {
@@ -728,6 +746,7 @@ impl Ctx<'_> {
             axis: dir,
             omega: [0.0; 3],
             stiff: 0.0,
+            pitch_freq: 0.0,
         }
     }
 
@@ -778,9 +797,9 @@ impl Ctx<'_> {
         let crossflow = 0.5 * rho * BODY_CROSSFLOW_CD * aero.crossflow_damping(p.cg);
         let damp = linear + crossflow * wl;
         let roll = aero.roll(f.mach);
-        // Roll moment in the sense of increasing fin angle (the right-handed body roll rate is its negative).
-        let roll_moment = if s > 1e-9 { q * (roll.forcing - roll.damping * st.w[0] / s) } else { 0.0 };
-        let (mx, my, mz) = (-roll_moment, -arm * fz - damp * st.w[1], arm * fy - damp * st.w[2]);
+        // Roll moment about the nose direction (right-handed, so clockwise seen from behind, the way a fin's angle increases).
+        let roll_moment = if s > 1e-9 { q * (roll.forcing + roll.damping * st.w[0] / s) } else { 0.0 };
+        let (mx, my, mz) = (roll_moment, -arm * fz - damp * st.w[1], arm * fy - damp * st.w[2]);
 
         // Euler's equations of an axisymmetric body (I_y = I_z = i_long, I_x = i_rot).
         let (i, ix) = (p.i_long, p.i_rot);
@@ -795,6 +814,7 @@ impl Ctx<'_> {
         // The fastest rotational rates (pitch frequency, damping, roll damping) bound the RK4 step.
         let wn = (q * self.a_ref * nf.cn_alpha.abs() * (nf.cp - p.cg).abs() / i).sqrt();
         let stiff = wn.max(damp / i).max(0.5 * rho * s.max(1.0) * roll.damping.abs() / ix);
+        let pitch_freq = pitch_frequency(q, self.a_ref, nf.cn_alpha, nf.cp - p.cg, i);
         Diag {
             acc,
             ang_acc,
@@ -814,6 +834,7 @@ impl Ctx<'_> {
             axis: rotate(st.q, [1.0, 0.0, 0.0]),
             omega: st.w,
             stiff,
+            pitch_freq,
         }
     }
 }
@@ -1132,6 +1153,13 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
         max_a = max_a.max(dot(r.d.acc, r.d.acc).sqrt());
     }
     let final_burn = n.checked_sub(1).and_then(|k| ctx.sched.burnout[k]).unwrap_or(0.0);
+
+    // Spin: the roll rate at its peak, at the last burnout and at apogee (the last state at or before the event: a parachute
+    // deployed at apogee stops the roll), and where it meets the pitch frequency.
+    let roll = |r: &Raw| r.d.omega[0];
+    let max_roll_rate = raws.iter().map(roll).fold(0.0, |m: f64, p| if p.abs() > m.abs() { p } else { m });
+    let roll_at = |t: f64| raws.iter().rev().find(|r| r.t <= t + 1e-9).or(raws.first()).map_or(0.0, roll);
+    let resonance = roll_resonance(raws.iter().map(|r| (r.t, roll(r), r.d.pitch_freq)));
     let flight_time = raws.last().map_or(0.0, |r| r.t);
     let bearing = ground_xy[0].atan2(ground_xy[1]).to_degrees().rem_euclid(360.0);
     let summary = Summary {
@@ -1148,6 +1176,10 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
         flight_time,
         landing: (ground_xy[0].hypot(ground_xy[1]), bearing),
         landing_position: ground_xy,
+        max_roll_rate,
+        roll_rate_at_burnout: roll_at(final_burn),
+        roll_rate_at_apogee: apogee.map_or(0.0, |a| roll_at(a.0)),
+        roll_resonance: resonance,
     };
 
     // Decimate.
@@ -1212,7 +1244,8 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
                 speed_of_sound: d.air.speed_of_sound,
                 reynolds: d.reynolds,
                 pitch_rate: d.omega[1].hypot(d.omega[2]),
-                roll_rate: -d.omega[0],
+                roll_rate: d.omega[0],
+                pitch_frequency: d.pitch_freq,
                 attitude_angle: d.axis[2].atan2(d.axis[0].hypot(d.axis[1])),
             }
         })
@@ -1394,8 +1427,36 @@ mod tests {
             let q = 0.5 * d.air.density * 100.0 * 100.0;
             let wn = (q * ctx.a_ref * nf.cn_alpha * (nf.cp - p.cg) / p.i_long).sqrt();
             assert!(d.stiff >= wn - 1e-9 && d.stiff < 4.0 * wn, "{} vs {wn}", d.stiff);
+            // The recorded pitch frequency is that formula for a stable rocket, and zero for an unstable one.
+            assert!((d.pitch_freq - wn).abs() < 1e-9 * wn, "{} vs {wn}", d.pitch_freq);
+            let mut tail_heavy = vehicle();
+            tail_heavy.stages[0].dry.cg = 0.98;
+            with_ctx(tail_heavy, |ctx| {
+                let d = ctx.eval(100.0, &flying(100.0, [0.0; 3]), [0.0; 3], 0, Mode::Rigid, &[]);
+                assert_eq!(d.pitch_freq, 0.0);
+            });
             // wn^2 = q A CNalpha (x_cp - x_cg) / I: tens of rad/s for this rocket at 100 m/s.
             assert!((5.0..100.0).contains(&wn), "{wn}");
         });
+    }
+
+    #[test]
+    fn positive_cant_turns_the_body_right_handed_about_the_nose_clockwise_seen_from_behind() {
+        // Fin roll angle 0 is +Y and increases towards +X seen from behind (clockwise). A positive cant swings each fin's chord
+        // towards -tangent, so the air streaming along +Z (nose to tail) pushes the fin towards +tangent, the way its angle
+        // increases: a moment about the nose direction in the right-handed sense (thumb to the nose, fingers clockwise seen from
+        // behind). The body angular acceleration about its x axis (along the nose) is therefore positive.
+        let cant_eval = |cant: f64, w: f64| {
+            let mut v = vehicle();
+            v.fin_sets[0].cant = cant;
+            with_ctx(v, |ctx| ctx.eval(100.0, &flying(100.0, [w, 0.0, 0.0]), [0.0; 3], 0, Mode::Rigid, &[]))
+        };
+        assert_eq!(cant_eval(0.0, 0.0).ang_acc[0], 0.0, "no cant, no roll moment");
+        let (plus, minus) = (cant_eval(0.02, 0.0), cant_eval(-0.02, 0.0));
+        assert!(plus.ang_acc[0] > 0.0 && minus.ang_acc[0] < 0.0, "{} {}", plus.ang_acc[0], minus.ang_acc[0]);
+        assert!((plus.ang_acc[0] + minus.ang_acc[0]).abs() < 1e-9 * plus.ang_acc[0], "odd in the cant");
+        // Already spinning the way the cant turns it, the fins' own roll damping brakes the spin: the acceleration falls.
+        let spun = cant_eval(0.02, 20.0);
+        assert!(spun.ang_acc[0] < plus.ang_acc[0], "damped: {} vs {}", spun.ang_acc[0], plus.ang_acc[0]);
     }
 }

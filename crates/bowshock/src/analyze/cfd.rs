@@ -1,6 +1,8 @@
 //! The `CFD table` method: the bridge from the document to `bowshock-core`'s solver, the solve itself (off the UI thread, one
-//! Mach number at a time so progress can be shown and a solve cancelled), the hashes that say whether a stored table still
-//! describes the rocket, and the table's interpolation onto the Mach grid the plots use.
+//! Mach number at a time; the solver's progress callback gives an [`Event::Iteration`] about ten times a second and a set cancel
+//! flag ends the point in flight within one report, see [`solve`]), the hashes that say whether a stored table still describes the
+//! rocket, and the table's interpolation onto the Mach grid the plots use. What the screen makes of the events is in [`super::solve`]
+//! (the state) and `solve_view` (the drawing).
 //!
 //! # What the solver gives
 //!
@@ -23,13 +25,16 @@
 //!
 //! `bowshock-core` and its guide (`guide/src/performance.md` for timings); Menter (1994) for the k-omega SST model it solves.
 
+use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bowshock_core as solver;
 use bowshock_model::{CfdGrid, CfdLiftPoint, CfdLiftTable, CfdPoint, CfdQuality, CfdTable, PartKind, RadialKind, Rocket};
 use bowshock_sim::{vs_mach, AlphaPoint, Atmosphere, BodyKind, DragBreakdown, FinCrossSection, FinPlanform, FinSet, MachPoint, NoseShape, Vehicle};
 
+use super::solve::{Iteration, Outcome, PointDone, Slot, Tracker};
 use crate::simulate::format::with_unit;
 use crate::units::{Quantity, UnitSystem};
 
@@ -475,30 +480,21 @@ pub struct Job {
     pub grid: CfdGrid,
 }
 
-/// A message from a running solve.
+/// A message from a running solve (the drag table's or the 3D stability solve's).
 #[derive(Debug, Clone)]
 pub enum Event {
-    /// `done` of `total` Mach numbers are solved; `backend` once the first point says where it ran.
-    Progress {
-        /// Points finished.
-        done: usize,
-        /// Points in all.
-        total: usize,
-        /// `GPU (Luma)` or `CPU`.
-        backend: Option<String>,
-    },
-    /// The solve is over: the table, or why there is none (`Cancelled` for a cancel).
+    /// Where the solve runs, sent first (the GPU's name, or `CPU`).
+    Device(String),
+    /// The running Mach number (and angle) reports, about ten times a second.
+    Iteration(Iteration),
+    /// A Mach number (and angle) ended.
+    Point(PointDone),
+    /// A beat every quarter second from the worker's side, so the clock on screen keeps moving between reports (the grid and
+    /// the GPU kernels of a point take seconds to build).
+    Tick,
+    /// The drag solve is over: the table, or why there is none ([`CANCELLED`] for a cancel).
     Finished(Result<CfdTable, String>),
-    /// `done` of `total` Mach numbers of a 3D stability solve are solved.
-    LiftProgress {
-        /// Mach numbers finished.
-        done: usize,
-        /// Mach numbers in all.
-        total: usize,
-        /// `GPU (Luma)` or `CPU`.
-        backend: Option<String>,
-    },
-    /// The 3D stability solve is over: the lift table, or why there is none.
+    /// The 3D stability solve is over: the lift table, or why there is none ([`CANCELLED`] for a cancel).
     LiftFinished(Result<CfdLiftTable, String>),
 }
 
@@ -533,33 +529,64 @@ pub fn reduce_lift(raw: &[solver::LiftPoint], requested: usize, notes: &mut Vec<
     Ok(points)
 }
 
-/// Solves the 3D stability table of `job`: blocking, one Mach number (at both angles) after another, `progress` after each.
-/// `cancel` is looked at between Mach numbers. The Euler solve ignores altitude, viscosity and roughness.
-pub fn solve_lift(job: &LiftJob, cancel: &AtomicBool, mut progress: impl FnMut(Event)) -> Result<CfdLiftTable, String> {
+/// Solves the 3D stability table of `job`: blocking, one Mach number (at both angles) after another. `progress` is given
+/// [`Event::Device`] first, then the running run's [`Event::Iteration`]s (with its angle) and, when a Mach number's runs are in,
+/// an [`Event::Point`] for each of its angles. A set `cancel` ends the run in flight within one report and the solve with
+/// [`CANCELLED`]. The Euler solve ignores altitude, viscosity and roughness.
+pub fn solve_lift(job: &LiftJob, cancel: &Arc<AtomicBool>, progress: impl Fn(Event) + Send + Sync + 'static) -> Result<CfdLiftTable, String> {
     let started = Instant::now();
+    let send: Outbox = Arc::new(progress);
     let total = job.nodes.len();
     let mut raw: Vec<solver::LiftPoint> = Vec::new();
     let (mut gpu, mut cpu) = (0usize, 0usize);
     let mut backend = solver::Backend::Auto;
-    for (k, &mach) in job.nodes.iter().enumerate() {
+    send(Event::Device(device_label()));
+    for &mach in &job.nodes {
         if cancel.load(Ordering::Relaxed) {
             return Err(CANCELLED.to_string());
         }
-        let mut analysis = solver::Analysis::new(&job.plan.body).map_err(|e| e.to_string())?.resolution(solver::Resolution::Coarse).backend(backend);
+        let mut analysis = solver::Analysis::new(&job.plan.body)
+            .map_err(|e| e.to_string())?
+            .resolution(solver::Resolution::Coarse)
+            .backend(backend)
+            .on_progress(sink(started, cancel.clone(), send.clone(), true));
         if let Some(fins) = &job.plan.fins {
             analysis = analysis.fins(fins.clone());
         }
-        let polar = analysis.run_lift(&[mach], &LIFT_ALPHAS).map_err(|e| format!("Mach {mach:.2}: {e}"))?;
-        match polar.backend {
-            solver::BackendUsed::Gpu => gpu += 1,
-            solver::BackendUsed::Cpu => {
-                cpu += 1;
-                backend = solver::Backend::Cpu;
-            }
+        let polar = match analysis.run_lift(&[mach], &LIFT_ALPHAS) {
+            Ok(polar) => polar,
+            Err(solver::Error::Cancelled) => return Err(CANCELLED.to_string()),
+            Err(e) => return Err(format!("Mach {mach:.2}: {e}")),
+        };
+        let on_cpu = polar.backend == solver::BackendUsed::Cpu;
+        if on_cpu {
+            cpu += 1;
+            backend = solver::Backend::Cpu;
+        } else {
+            gpu += 1;
+        }
+        for p in &polar.points {
+            let alpha_deg = p.alpha.to_degrees();
+            let lift = quality(p.quality).filter(|_| p.cn.is_finite() && p.x_cp.is_finite()).map(|q| CfdLiftPoint {
+                mach: p.mach,
+                alpha_deg,
+                cn: p.cn,
+                x_cp: p.x_cp,
+                quality: q,
+            });
+            send(Event::Point(PointDone {
+                at: started.elapsed().as_secs_f64(),
+                mach: p.mach,
+                alpha_deg: Some(alpha_deg),
+                outcome: Outcome::from_quality(lift.map(|l| l.quality)),
+                point: None,
+                lift,
+                iterations: p.iterations,
+                cpu: on_cpu,
+                fallback: polar.fallback.clone(),
+            }));
         }
         raw.extend(polar.points);
-        let used = if cpu == 0 { "GPU (Luma)" } else { "CPU" };
-        progress(Event::LiftProgress { done: k + 1, total, backend: Some(used.to_string()) });
     }
     let mut notes = Vec::new();
     let points = reduce_lift(&raw, total, &mut notes)?;
@@ -599,22 +626,148 @@ fn built_up(plan: &Plan, mach: f64, altitude: f64) -> f64 {
     d.fins + d.protuberances
 }
 
-/// Solves the table of `job`: blocking, one Mach number after another, `progress` after each. `cancel` is looked at between
-/// points (a point in flight finishes, which takes a while on a coarse grid). The result carries what the solver
-/// reports of its backend, the build-up drag the solver left out, and notes on points that did not converge.
-pub fn solve(job: &Job, cancel: &AtomicBool, mut progress: impl FnMut(Event)) -> Result<CfdTable, String> {
+/// Seconds between two [`Event::Iteration`]s (about 10 Hz): the solver reports every 50 iterations, which on a fast GPU is
+/// several times a second more than a screen needs.
+pub const REPORT_INTERVAL: f64 = 0.1;
+
+/// Whether an iteration report goes on: the first of a run (its iteration did not increase) and one `REPORT_INTERVAL` after the
+/// last that went.
+pub fn report_due(last_at: f64, last_iteration: usize, now: f64, iteration: usize) -> bool {
+    iteration <= last_iteration || now - last_at >= REPORT_INTERVAL - 1e-9
+}
+
+/// What a solve sends to the screen.
+type Outbox = Arc<dyn Fn(Event) + Send + Sync>;
+
+/// The solver's progress callback for a solve: ends the run in flight when `cancel` is set (the solver sees it within 50
+/// iterations) and forwards the reports as [`Event::Iteration`]s at most every [`REPORT_INTERVAL`]. `lift`: the run is a 3D one, so
+/// its angle is reported.
+fn sink(started: Instant, cancel: Arc<AtomicBool>, send: Outbox, lift: bool) -> impl Fn(&solver::Progress) -> ControlFlow<()> + Send + Sync + 'static {
+    let last = Mutex::new((f64::NEG_INFINITY, 0usize));
+    move |p| {
+        if cancel.load(Ordering::Relaxed) {
+            return ControlFlow::Break(());
+        }
+        let at = started.elapsed().as_secs_f64();
+        let mut last = last.lock().unwrap_or_else(PoisonError::into_inner);
+        if report_due(last.0, last.1, at, p.iteration) {
+            *last = (at, p.iteration);
+            send(Event::Iteration(Iteration {
+                at,
+                mach: p.mach,
+                alpha_deg: lift.then(|| p.alpha.to_degrees()),
+                iteration: p.iteration,
+                max_iterations: p.max_iterations,
+                residual_orders: p.residual_drop_orders,
+                monitor: p.monitor,
+                spread: p.spread,
+                tolerance: p.tolerance,
+            }));
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+/// Where the solve runs, for the screen: the GPU's name, or `CPU` when there is no GPU the solver can use.
+fn device_label() -> String {
+    solver::gpu_name().unwrap_or_else(|| "CPU".to_string())
+}
+
+/// What a table of `job` is made of when its solve ends, whole or early.
+pub(super) struct Tally {
+    /// The solved points.
+    pub(super) points: Vec<CfdPoint>,
+    /// Notes on the table, the plan's first.
+    pub(super) notes: Vec<String>,
+    /// Points solved on the GPU and on the CPU.
+    pub(super) gpu: usize,
+    pub(super) cpu: usize,
+    /// Why the GPU was not used.
+    pub(super) fallback: Option<String>,
+}
+
+/// The table of `job` from `tally`. `attempted` is how many of the job's Mach numbers were tried (all of them for a whole solve):
+/// the key is the one of those nodes, so a table that stopped early reads as not the table of the whole range (see [`partial_of`]).
+pub(super) fn table_from(job: &Job, tally: Tally, attempted: usize, seconds: f64) -> CfdTable {
+    let Tally { points, mut notes, gpu, cpu, fallback } = tally;
+    let stalled = points.iter().filter(|p| p.quality == CfdQuality::Stalled).count();
+    if stalled > 0 {
+        notes.push(format!("{stalled} point{} stopped at the iteration cap before the drag settled.", if stalled == 1 { "" } else { "s" }));
+    }
+    let backend = match (gpu, cpu) {
+        (_, 0) => "GPU (Luma)",
+        (0, _) => "CPU",
+        _ => "GPU (Luma) and CPU",
+    };
+    let altitude = job.altitude.clamp(0.0, SOLVER_CEILING);
+    CfdTable {
+        key: table_key(job.plan.geometry, altitude, &job.nodes[..attempted.min(job.nodes.len())]),
+        geometry: job.plan.geometry,
+        stage: job.stage,
+        solved_at: now(),
+        solve_seconds: seconds,
+        backend: backend.to_string(),
+        fallback,
+        altitude,
+        notes,
+        points,
+        grid: job.grid,
+        lift: None,
+    }
+}
+
+/// The note for a Mach number the solver gave no point at.
+fn fallback_note(mach: f64) -> String {
+    format!("Mach {mach:.2} did not converge and is interpolated from its neighbours.")
+}
+
+/// The table of a solve that was stopped after some points, from what `tracker` saw finish: `None` with fewer than two points
+/// (a table needs a curve). `seconds` is how long the solve ran. Its key is that of the Mach numbers tried, so it reads as a
+/// stale table for the whole range, and [`partial_of`] says how much of the range it covers.
+pub fn partial_table(job: &Job, tracker: &Tracker, seconds: f64) -> Option<CfdTable> {
+    let points = tracker.points();
+    if points.len() < 2 {
+        return None;
+    }
+    let attempted = tracker.done_count();
+    let mut notes = job.plan.notes.clone();
+    notes.extend(
+        tracker
+            .units()
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| matches!(tracker.slot(*i), Slot::Done(d) if d.outcome == Outcome::Fallback))
+            .map(|(_, u)| fallback_note(u.mach)),
+    );
+    notes.push(format!("Stopped early: {attempted} of {} Mach points solved.", job.nodes.len()));
+    let (cpu, gpu) = tracker.units_by_device();
+    Some(table_from(job, Tally { points, notes, gpu, cpu, fallback: tracker.fallback.clone() }, attempted, seconds))
+}
+
+/// How much of the table of the current range `table` is, when it is a table that stopped early: `(solved, of)` Mach numbers,
+/// the first `solved` of the `of` that `mach` (the range on screen) asks for. `None` for any other table.
+pub fn partial_of(plan: &Result<Plan, String>, table: &CfdTable, altitude: f64, mach: (f64, f64)) -> Option<(usize, usize)> {
+    let (plan, nodes) = (plan.as_ref().ok()?, nodes(mach)?);
+    (1..nodes.len()).find(|&n| table.key == table_key(plan.geometry, altitude, &nodes[..n])).map(|n| (n, nodes.len()))
+}
+
+/// Solves the table of `job`: blocking, one Mach number after another. `progress` is given [`Event::Device`] first, then for each
+/// point its [`Event::Iteration`]s (about ten a second; the solver reports every 50 iterations) and an [`Event::Point`] when it
+/// ends. A set `cancel` ends the point in flight within one report (a few tens of milliseconds on a GPU) and the solve with
+/// [`CANCELLED`]; the points finished by then were all sent. The result carries what the solver reports of its backend, the
+/// build-up drag the solver left out, and notes on points that did not converge.
+pub fn solve(job: &Job, cancel: &Arc<AtomicBool>, progress: impl Fn(Event) + Send + Sync + 'static) -> Result<CfdTable, String> {
     let started = Instant::now();
+    let send: Outbox = Arc::new(progress);
     let altitude = job.altitude.clamp(0.0, SOLVER_CEILING);
     let total = job.nodes.len();
-    let mut points: Vec<CfdPoint> = Vec::with_capacity(total);
-    let mut notes = job.plan.notes.clone();
-    let (mut gpu, mut cpu) = (0usize, 0usize);
-    let mut fallback: Option<String> = None;
+    let mut tally = Tally { points: Vec::with_capacity(total), notes: job.plan.notes.clone(), gpu: 0, cpu: 0, fallback: None };
     let mut backend = solver::Backend::Auto;
     if job.altitude > SOLVER_CEILING {
-        notes.push("The solver's atmosphere ends at 20 km; solved there.".to_string());
+        tally.notes.push("The solver's atmosphere ends at 20 km; solved there.".to_string());
     }
-    for (k, &mach) in job.nodes.iter().enumerate() {
+    send(Event::Device(device_label()));
+    for &mach in &job.nodes {
         if cancel.load(Ordering::Relaxed) {
             return Err(CANCELLED.to_string());
         }
@@ -628,68 +781,61 @@ pub fn solve(job: &Job, cancel: &AtomicBool, mut progress: impl FnMut(Event)) ->
                 CfdGrid::Medium => solver::Resolution::Medium,
             })
             .roughness(job.plan.body_roughness)
-            .backend(backend);
+            .backend(backend)
+            .on_progress(sink(started, cancel.clone(), send.clone(), false));
         if let Some(fins) = &job.plan.fins {
             analysis = analysis.fins(fins.clone());
         }
-        let polar = analysis.run(&[mach]).map_err(|e| format!("Mach {mach:.2}: {e}"))?;
-        match polar.backend {
-            solver::BackendUsed::Gpu => gpu += 1,
-            solver::BackendUsed::Cpu => {
-                cpu += 1;
-                // The GPU did not start: do not try it again for every point.
-                backend = solver::Backend::Cpu;
-            }
+        let polar = match analysis.run(&[mach]) {
+            Ok(polar) => polar,
+            Err(solver::Error::Cancelled) => return Err(CANCELLED.to_string()),
+            Err(e) => return Err(format!("Mach {mach:.2}: {e}")),
+        };
+        let cpu = polar.backend == solver::BackendUsed::Cpu;
+        if cpu {
+            tally.cpu += 1;
+            // The GPU did not start: do not try it again for every point.
+            backend = solver::Backend::Cpu;
+        } else {
+            tally.gpu += 1;
         }
-        fallback = fallback.or(polar.fallback.clone());
+        tally.fallback = tally.fallback.or(polar.fallback.clone());
         let p = &polar.points[0];
-        match quality(p.quality).filter(|_| p.drag.total.is_finite()) {
-            Some(q) => {
-                let fins = p.drag.fins.map_or(0.0, |f| f.friction + f.pressure);
-                let other = built_up(&job.plan, mach, altitude);
-                let (friction, base) = (p.drag.friction.unwrap_or(0.0), p.drag.base);
-                points.push(CfdPoint {
-                    mach,
-                    cd: p.drag.forebody_pressure + friction + base + fins + other,
-                    friction,
-                    pressure: p.drag.forebody_pressure,
-                    base,
-                    fins,
-                    other,
-                    quality: q,
-                });
+        let stored = quality(p.quality).filter(|_| p.drag.total.is_finite()).map(|q| {
+            let fins = p.drag.fins.map_or(0.0, |f| f.friction + f.pressure);
+            let other = built_up(&job.plan, mach, altitude);
+            let (friction, base) = (p.drag.friction.unwrap_or(0.0), p.drag.base);
+            CfdPoint {
+                mach,
+                cd: p.drag.forebody_pressure + friction + base + fins + other,
+                friction,
+                pressure: p.drag.forebody_pressure,
+                base,
+                fins,
+                other,
+                quality: q,
             }
-            None => notes.push(format!("Mach {mach:.2} did not converge and is interpolated from its neighbours.")),
+        });
+        match stored {
+            Some(point) => tally.points.push(point),
+            None => tally.notes.push(fallback_note(mach)),
         }
-        let used = if cpu == 0 { "GPU (Luma)" } else { "CPU" };
-        progress(Event::Progress { done: k + 1, total, backend: Some(used.to_string()) });
+        send(Event::Point(PointDone {
+            at: started.elapsed().as_secs_f64(),
+            mach,
+            alpha_deg: None,
+            outcome: Outcome::from_quality(stored.map(|s| s.quality)),
+            point: stored,
+            lift: None,
+            iterations: p.detail.iterations,
+            cpu,
+            fallback: polar.fallback.clone(),
+        }));
     }
-    if points.len() < 2 && total >= 2 {
+    if tally.points.len() < 2 && total >= 2 {
         return Err("the solver did not converge at enough Mach numbers".to_string());
     }
-    let stalled = points.iter().filter(|p| p.quality == CfdQuality::Stalled).count();
-    if stalled > 0 {
-        notes.push(format!("{stalled} point{} stopped at the iteration cap before the drag settled.", if stalled == 1 { "" } else { "s" }));
-    }
-    let backend_name = match (gpu, cpu) {
-        (_, 0) => "GPU (Luma)",
-        (0, _) => "CPU",
-        _ => "GPU (Luma) and CPU",
-    };
-    Ok(CfdTable {
-        key: table_key(job.plan.geometry, altitude, &job.nodes),
-        geometry: job.plan.geometry,
-        stage: job.stage,
-        solved_at: now(),
-        solve_seconds: started.elapsed().as_secs_f64(),
-        backend: backend_name.to_string(),
-        fallback,
-        altitude,
-        notes,
-        points,
-        grid: job.grid,
-        lift: None,
-    })
+    Ok(table_from(job, tally, total, started.elapsed().as_secs_f64()))
 }
 
 /// The table's point at `mach`, linearly interpolated and held at the ends; its quality is the worse of its neighbours'.
@@ -916,7 +1062,14 @@ pub fn lift_mach_points(lift: &CfdLiftTable, mut points: Vec<MachPoint>, cg: f64
 
 /// The angle sweep at `mach` with the 3D solve's CN and CP (see [`LiftAt::at_alpha`]); `cn_alpha` is `CN/α` (the small-angle
 /// slope at zero angle), the margin comes from the CP and `cg`. Drag stays as it is.
-pub fn lift_alpha_points(lift: &CfdLiftTable, mach: f64, mut points: Vec<AlphaPoint>, cg: f64, d_ref: f64, ext: &dyn Fn(f64) -> Option<ExtStab>) -> Vec<AlphaPoint> {
+pub fn lift_alpha_points(
+    lift: &CfdLiftTable,
+    mach: f64,
+    mut points: Vec<AlphaPoint>,
+    cg: f64,
+    d_ref: f64,
+    ext: &dyn Fn(f64) -> Option<ExtStab>,
+) -> Vec<AlphaPoint> {
     let Some(at) = lift_at(lift, mach, ext) else { return points };
     for p in &mut points {
         let (cn, cp) = at.at_alpha(p.alpha);
@@ -928,6 +1081,13 @@ pub fn lift_alpha_points(lift: &CfdLiftTable, mach: f64, mut points: Vec<AlphaPo
     points
 }
 
+/// The example rocket's plan, for the tests of the modules that play scripted solves.
+#[cfg(test)]
+pub(super) fn test_plan() -> Plan {
+    let (rocket, vehicle) = tests::example();
+    plan(&rocket, &vehicle, UnitSystem::default()).expect("the example is an axisymmetric stack")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -936,7 +1096,7 @@ mod tests {
 
     const EXAMPLE: &[u8] = include_bytes!("../../assets/examples/hpr_l1_cert.bowshock");
 
-    fn example() -> (Rocket, Vehicle) {
+    pub(super) fn example() -> (Rocket, Vehicle) {
         let rocket = Rocket::from_bytes(EXAMPLE).unwrap();
         let vehicle = from_model::vehicle(&rocket, &MotorDb::bundled(), Phase::Full).unwrap();
         (rocket, vehicle)
@@ -1368,10 +1528,16 @@ mod tests {
         let (rocket, vehicle) = example();
         let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
         let job = Job { plan, altitude: 120.0, nodes: vec![0.6, 2.0], stage: 1, grid: CfdGrid::Coarse };
-        let mut events = 0;
-        let cancel = AtomicBool::new(false);
-        let t = solve(&job, &cancel, |_| events += 1).expect("the example solves");
-        assert_eq!((events, t.points.len()), (2, 2));
+        let points = Arc::new(Mutex::new(0usize));
+        let counter = points.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let t = solve(&job, &cancel, move |e| {
+            if matches!(e, Event::Point(_)) {
+                *counter.lock().unwrap() += 1;
+            }
+        })
+        .expect("the example solves");
+        assert_eq!((*points.lock().unwrap(), t.points.len()), (2, 2));
         for p in &t.points {
             assert!(p.cd > 0.2 && p.cd < 1.0, "a slender rocket's drag coefficient: {p:?}");
             assert!((p.friction + p.pressure + p.base + p.fins + p.other - p.cd).abs() < 1e-9);
@@ -1392,7 +1558,12 @@ mod tests {
         let nodes = nodes((0.1, 3.0)).unwrap();
         let job = Job { plan, altitude: 120.0, nodes, stage: 1, grid: CfdGrid::Coarse };
         let t0 = Instant::now();
-        let table = solve(&job, &AtomicBool::new(false), |e| println!("{:.0} s {e:?}", t0.elapsed().as_secs_f64())).expect("the example solves");
+        let table = solve(&job, &Arc::new(AtomicBool::new(false)), move |e| {
+            if let Event::Point(p) = e {
+                println!("{:.0} s point {p:?}", t0.elapsed().as_secs_f64());
+            }
+        })
+        .expect("the example solves");
         let atm = Atmosphere::standard();
         let cg = crate::analyze::compute::jobs(&rocket, &MotorDb::bundled(), Phase::Full).unwrap().0[0].cg_liftoff;
         println!("Mach | margin Extended | margin CFD | Cd Extended | Cd CFD | quality");
@@ -1448,9 +1619,127 @@ mod tests {
     #[test]
     fn a_cancel_stops_before_the_next_point() {
         let (rocket, vehicle) = example();
-        let job = Job { plan: plan(&rocket, &vehicle, UnitSystem::default()).unwrap(), altitude: 120.0, nodes: vec![0.6, 2.0], stage: 1, grid: CfdGrid::Coarse };
-        let cancel = AtomicBool::new(true);
+        let job =
+            Job { plan: plan(&rocket, &vehicle, UnitSystem::default()).unwrap(), altitude: 120.0, nodes: vec![0.6, 2.0], stage: 1, grid: CfdGrid::Coarse };
+        let cancel = Arc::new(AtomicBool::new(true));
         assert_eq!(solve(&job, &cancel, |_| ()).unwrap_err(), CANCELLED);
+    }
+
+    /// A real solve ended by a cancel from inside the run: the solver sees the flag at its next report (50 iterations), so the
+    /// point in flight ends within moments, not minutes, and no point is sent. Needs the solver to start (the GPU kernels, or the CPU
+    /// grid): a few seconds to half a minute.
+    #[test]
+    #[ignore = "starts the solver: seconds"]
+    fn a_cancel_ends_the_point_in_flight_within_a_report() {
+        let (rocket, vehicle) = example();
+        let job =
+            Job { plan: plan(&rocket, &vehicle, UnitSystem::default()).unwrap(), altitude: 120.0, nodes: vec![1.0, 2.0], stage: 1, grid: CfdGrid::Coarse };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let (flag, log) = (cancel.clone(), seen.clone());
+        let t0 = Instant::now();
+        let result = solve(&job, &cancel, move |e| {
+            let mut log = log.lock().unwrap();
+            match e {
+                Event::Device(name) => log.push(format!("device {name}")),
+                Event::Iteration(i) => {
+                    log.push(format!("iteration {} of Mach {} at {:.1} s", i.iteration, i.mach, i.at));
+                    // the first report cancels
+                    flag.store(true, Ordering::Relaxed);
+                }
+                Event::Point(p) => log.push(format!("point {}", p.mach)),
+                _ => {}
+            }
+        });
+        println!("{:?} after {:.1} s: {:?}", result.as_ref().err(), t0.elapsed().as_secs_f64(), seen.lock().unwrap());
+        assert_eq!(result.unwrap_err(), CANCELLED);
+        let seen = seen.lock().unwrap();
+        assert!(seen[0].starts_with("device"));
+        assert_eq!(seen.iter().filter(|l| l.starts_with("iteration")).count(), 1, "one report, then the run ended");
+        assert!(!seen.iter().any(|l| l.starts_with("point")), "a cancelled point is not sent");
+    }
+
+    /// The real event stream of a one-point solve (Mach 2): the device first, iteration reports that go up in 50s at about 10 Hz or
+    /// slower, then the point, whose iteration count the last report did not pass. Prints what the screen would see.
+    #[test]
+    #[ignore = "solves one point: about 30 s"]
+    fn a_real_point_streams_progress() {
+        let (rocket, vehicle) = example();
+        let job = Job { plan: plan(&rocket, &vehicle, UnitSystem::default()).unwrap(), altitude: 120.0, nodes: vec![2.0], stage: 1, grid: CfdGrid::Coarse };
+        let events = Arc::new(Mutex::new(Vec::<Event>::new()));
+        let log = events.clone();
+        let t0 = Instant::now();
+        let table = solve(&job, &Arc::new(AtomicBool::new(false)), move |e| log.lock().unwrap().push(e));
+        let secs = t0.elapsed().as_secs_f64();
+        let events = events.lock().unwrap();
+        let reports: Vec<&Iteration> = events.iter().filter_map(|e| if let Event::Iteration(i) = e { Some(i) } else { None }).collect();
+        let point = events.iter().find_map(|e| if let Event::Point(p) = e { Some(p) } else { None }).expect("a point was solved");
+        println!("{} reports in {secs:.1} s; device {:?}; point {point:?}", reports.len(), events.first());
+        for r in reports.iter().step_by((reports.len() / 12).max(1)) {
+            println!("  {:.1} s it {} orders {:.1} Cd {:.4} spread {:?} tol {:?}", r.at, r.iteration, r.residual_orders, r.monitor, r.spread, r.tolerance);
+        }
+        assert!(matches!(events.first(), Some(Event::Device(_))));
+        assert!(reports.windows(2).all(|w| w[1].iteration > w[0].iteration && w[1].at - w[0].at >= REPORT_INTERVAL - 1e-9));
+        assert!(reports.iter().all(|r| r.iteration % 50 == 0 && r.mach == 2.0));
+        assert!(reports.last().is_some_and(|r| r.iteration <= point.iterations));
+        assert!(reports.last().is_some_and(|r| r.monitor.is_finite() && r.monitor > 0.1 && r.monitor < 2.0), "the monitor is a drag coefficient");
+        assert_eq!(table.expect("the point solves").points.len(), 1);
+    }
+
+    #[test]
+    fn reports_go_on_at_about_ten_hertz_and_the_first_of_a_run_always_goes() {
+        // the first report of a solve (nothing sent yet)
+        assert!(report_due(f64::NEG_INFINITY, 0, 3.2, 50));
+        // 40 ms after the last one: held back
+        assert!(!report_due(3.2, 50, 3.24, 100));
+        // 100 ms after: goes
+        assert!(report_due(3.2, 50, 3.3, 100));
+        // a new run (the iteration count went back) goes at once, however soon
+        assert!(report_due(3.2, 4000, 3.21, 50));
+    }
+
+    #[test]
+    fn a_table_that_stopped_early_is_a_partial_of_the_range_and_nothing_else_is() {
+        let (rocket, vehicle) = example();
+        let mapped = plan(&rocket, &vehicle, UnitSystem::default());
+        let job = Job { plan: mapped.clone().unwrap(), altitude: 120.0, nodes: nodes((0.1, 3.0)).unwrap(), stage: 1, grid: CfdGrid::Coarse };
+        let mut tracker = Tracker::new(crate::analyze::solve::Kind::Drag, Tracker::drag_units(&job.nodes), "Test GPU");
+        let done = |mach: f64, quality: Option<CfdQuality>| PointDone {
+            at: 10.0,
+            mach,
+            alpha_deg: None,
+            outcome: Outcome::from_quality(quality),
+            point: quality.map(|quality| CfdPoint { mach, cd: 0.5, friction: 0.1, pressure: 0.1, base: 0.2, fins: 0.1, other: 0.0, quality }),
+            lift: None,
+            iterations: 2000,
+            cpu: false,
+            fallback: None,
+        };
+        tracker.on_done(&done(job.nodes[0], Some(CfdQuality::Converged)));
+        assert!(partial_table(&job, &tracker, 30.0).is_none(), "one point is not a curve");
+        tracker.on_done(&done(job.nodes[1], None));
+        assert!(partial_table(&job, &tracker, 30.0).is_none(), "a fallback is not a point");
+        tracker.on_done(&done(job.nodes[2], Some(CfdQuality::Stalled)));
+        let table = partial_table(&job, &tracker, 30.0).expect("two solved points make a table");
+        assert_eq!(table.points.iter().map(|p| p.mach).collect::<Vec<_>>(), vec![job.nodes[0], job.nodes[2]]);
+        assert_eq!(table.key, table_key(job.plan.geometry, 120.0, &job.nodes[..3]));
+        assert_eq!(table.solve_seconds, 30.0);
+        assert_eq!(table.backend, "GPU (Luma)");
+        assert!(table.notes.iter().any(|n| n.contains("did not converge and is interpolated")), "{:?}", table.notes);
+        assert!(table.notes.iter().any(|n| n == "Stopped early: 3 of 10 Mach points solved."), "{:?}", table.notes);
+        assert!(table.notes.iter().any(|n| n.contains("1 point stopped at the iteration cap")), "{:?}", table.notes);
+        // it is a table for the first 3 of the 10 nodes, and stale as the whole table
+        assert_eq!(partial_of(&mapped, &table, 120.0, (0.1, 3.0)), Some((3, 10)));
+        assert_eq!(status(&mapped, Some(&table), 120.0, (0.1, 3.0)), Status::Stale);
+        // a whole table, or one for other conditions, is not a partial one
+        let mut whole = table.clone();
+        whole.key = table_key(job.plan.geometry, 120.0, &job.nodes);
+        assert_eq!(partial_of(&mapped, &whole, 120.0, (0.1, 3.0)), None);
+        assert_eq!(partial_of(&mapped, &table, 500.0, (0.1, 3.0)), None, "another altitude");
+        // the document keeps it, and the plots can draw it over the Mach numbers it has
+        let mut kept = Rocket::default();
+        assert!(kept.store_cfd_table(table.clone()));
+        assert!(covers(&table, (0.1, 3.0)));
     }
 
     /// Linear interpolation in Mach of one OpenRocket drag column at alpha 0 (clamped at the ends).
@@ -1563,7 +1852,7 @@ mod tests {
             let nodes = nodes((0.1, 3.0)).unwrap();
             let job = Job { plan, altitude: 0.0, nodes, stage: 1, grid: CfdGrid::Coarse };
             let t0 = Instant::now();
-            let table = match solve(&job, &AtomicBool::new(false), |_| ()) {
+            let table = match solve(&job, &Arc::new(AtomicBool::new(false)), |_| ()) {
                 Ok(t) => t,
                 Err(e) => {
                     println!("SKIPPED: solve failed: {e}");

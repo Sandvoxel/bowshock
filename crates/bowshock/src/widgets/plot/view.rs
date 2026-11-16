@@ -47,6 +47,8 @@ const EVENT_REACH: f32 = 4.0;
 const TAG_PAD: f32 = 6.0;
 const FONT_TICK: f32 = TEXT_LABEL;
 const FONT_SMALL: f32 = 10.0;
+/// Height of the row under the bottom plot that holds the x axis title.
+const AXIS_TITLE_H: f32 = 14.0;
 
 /// The linked-plot canvas for one [`PlotGroup`], publishing [`PlotMessage`]s for the app to feed into
 /// [`PlotState::update`].
@@ -81,6 +83,15 @@ impl<'a> PlotView<'a> {
     pub fn element(self) -> Element<'a, PlotMessage> {
         canvas::Canvas::new(self).width(Fill).height(Fill).boxed()
     }
+}
+
+/// The x axis title (`Time · s`, `Mach number`) in the row under the bottom plot's tick labels, at the right end of the axis.
+fn draw_axis_title(f: &mut Frame, t: &Tokens, group: &PlotGroup, layout: &Layout) {
+    let title = group.x.title();
+    if title.is_empty() || layout.plots.is_empty() {
+        return;
+    }
+    put(f, &title, Point::new(layout.x1, layout.bottom + 1.0), t.ink_muted, FONT_SMALL, Alignment::Right, alignment::Vertical::Top, MONO);
 }
 
 /// The selection chip: `31.1 – 67.6 s · Δ 36.54 s   Enter zoom · Esc clear` in `accent` on a framed backing, centred on the band
@@ -140,7 +151,9 @@ impl Layout {
             None
         };
         let top = strip.map_or(0.0, |(r, _)| r.y + r.height + STRIP_GAP);
-        let bottom = (size.height - 2.0).max(top);
+        // A row under the bottom plot's tick labels names what the x axis measures.
+        let title_h = if group.x.title().is_empty() { 0.0 } else { AXIS_TITLE_H };
+        let bottom = (size.height - 2.0 - title_h).max(top);
         // The staggered rows of event tags above the first plot.
         let tag_rows = match group.events.len() {
             0 => 0,
@@ -660,6 +673,7 @@ impl canvas::Program<PlotMessage> for PlotView<'_> {
         for (panel, plot) in self.group.panels.iter().zip(&layout.plots) {
             self.draw_chrome(&mut frame, t, panel, *plot, hot);
         }
+        draw_axis_title(&mut frame, t, self.group, &layout);
         self.draw_event_tags(&mut frame, t, &layout, &lit);
         if let Some(band) = self.state.band() {
             self.draw_band(&mut frame, t, &layout, band);

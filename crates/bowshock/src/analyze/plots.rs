@@ -5,7 +5,7 @@
 use bowshock_model::{ConfigId, StabilityBands};
 use bowshock_sim::{AlphaPoint, MachPoint};
 
-use super::compute::{LIFT_LABEL, Analysis, Data, Output, Run, FLUTTER_MIN_MARGIN};
+use super::compute::{Analysis, Data, Output, Run, FLUTTER_MIN_MARGIN, LIFT_LABEL};
 use super::overlay::{Field, Overlay};
 use super::readout::{config_color, drag_parts, other_visible, DRAG_PARTS};
 use crate::units::{Quantity, Unit, UnitSystem};
@@ -284,7 +284,7 @@ fn stability(out: &Output, units: UnitSystem, overlay: Option<&Overlay>) -> Plot
         let name = if single { "CG".to_string() } else { format!("CG · {short}") };
         cpcg = cpcg.with(Series::new(name, points.iter().map(|p| deg(p, cg)).collect()).color(if single { SeriesColor::Cg } else { color }).label_inside());
     }
-    let axis = Axis { label: "AoA".into(), unit: "°".into(), prefix: "α ".into(), decimals: 1 };
+    let axis = Axis { label: "Angle of attack".into(), unit: "°".into(), prefix: "α ".into(), decimals: 1 };
     let a = Analysis::Stability;
     let (deg, id) = (f64::to_degrees, |y: f64| y);
     let margin_panel = overlaid(margin_panel(margin, out.bands), overlay, a, Field::Margin, deg, id);
@@ -387,7 +387,7 @@ fn dispersion(out: &Output, units: UnitSystem) -> (PlotGroup, GroundTrack) {
         let series = Series::new(run.name.clone(), pts).color(color);
         hist = hist.with(if single { series.filled() } else { series.label_margin() });
     }
-    let axis = Axis { label: "Apogee".into(), unit: len.symbol.into(), prefix: String::new(), decimals: 0 };
+    let axis = Axis { label: "Apogee altitude".into(), unit: len.symbol.into(), prefix: String::new(), decimals: 0 };
     let mut group = PlotGroup::new(axis).panel(hist);
     group.right_margin = if single { 0.0 } else { MARGIN_PX };
     let wind = (out.conditions.wind > 0.0).then_some(Wind { speed: out.conditions.wind, from_deg: 0.0 });
@@ -582,5 +582,19 @@ mod tests {
             assert!(b.group.panels.iter().all(|p| !p.series.is_empty()), "{a:?}");
         }
         assert!(built(Analysis::Dispersion, 1).ground.is_some());
+    }
+
+    #[test]
+    fn every_analysis_plot_names_its_x_axis_with_its_unit() {
+        let titles: Vec<(Analysis, String)> = [Analysis::Aerodynamics, Analysis::Drag, Analysis::Stability, Analysis::Flutter, Analysis::Dispersion]
+            .into_iter()
+            .map(|a| (a, built(a, 1).group.x.title()))
+            .collect();
+        let t = |a: Analysis| titles.iter().find(|(x, _)| *x == a).unwrap().1.clone();
+        assert_eq!(t(Analysis::Aerodynamics), "Mach number");
+        assert_eq!(t(Analysis::Drag), "Mach number");
+        assert_eq!(t(Analysis::Stability), "Angle of attack · °");
+        assert_eq!(t(Analysis::Flutter), "Time · s");
+        assert!(t(Analysis::Dispersion).starts_with("Apogee altitude · "), "{}", t(Analysis::Dispersion));
     }
 }

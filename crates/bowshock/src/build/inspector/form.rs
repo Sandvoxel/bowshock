@@ -45,6 +45,12 @@ where
     select(choices, current, move |c: Choice<T>| on(c.value))
 }
 
+/// `element` with a plain-words tooltip over it (260 px wide, wrapping): for a field whose meaning the label alone does not carry.
+pub fn with_tip<'a>(element: Element<'a, Message>, words: &'static str) -> Element<'a, Message> {
+    let bubble = container(text(words).size(TEXT_BODY).style(theme::ink)).width(260).padding([4.0, SPACE_2]).style(theme::tooltip);
+    tooltip(element, bubble).position(tooltip::Position::Top).gap(4).boxed()
+}
+
 /// The unit system and limit hint the fields of one inspector view share.
 pub struct Form<'a> {
     /// The shared context (unit system).

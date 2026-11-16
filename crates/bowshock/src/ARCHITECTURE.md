@@ -25,6 +25,9 @@ simulate/mod.rs          Simulate screen
 analyze/mod.rs           Analyze screen
 analyze/cfd.rs           CFD table method: document -> `bowshock-core` mapping, the off-thread solve, table keys, the coarse (default) or medium (Refine) grid, table -> plot points.
                          Tables are stored in the document (`bowshock_model::CfdTable`, a cache: not an edit, not in undo).
+analyze/solve.rs         Live state of a CFD solve (`Tracker`): units (Mach points, or Mach x angle), per-point outcome, weighted progress fraction and time left from the measured throughput. Pure, no clock.
+analyze/solve_view.rs    The solve on screen: headline, bar, the Cd(Mach) (or CN) curve filling in, the point in flight with its monitor trace, the points list; replaces the plots while a solve runs.
+analyze/solve_demo.rs    `BOWSHOCK_CFD_DEMO`: scripted solve events for screenshots (the driver cannot wait on a minutes-long real solve) and the screen-level tests.
 widgets/                 shared widgets (read-only for screens; do not edit from a screen task)
 units.rs                 unit set (UnitSystem: one unit per Family, named presets), formatting, expression parsing
 ```

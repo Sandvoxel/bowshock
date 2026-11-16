@@ -844,3 +844,103 @@ fn changing_the_drag_source_or_the_stored_table_makes_a_result_stale() {
     assert!(app.ctx_mut().doc.store_cfd_table(cfd_table(geometry ^ 3)));
     assert!(state.flight(id).unwrap().is_stale(state.stamp(app.ctx(), &state.flight(id).unwrap().spec)));
 }
+
+/// The example's fin group and a flight of it run on a fresh state: the pieces the cant tests share.
+fn example_with_fins() -> (App, bowshock_model::PartId) {
+    let mut app = App::with_example();
+    let fins = app.ctx().doc.rocket().radials().iter().find(|r| r.kind.is_fin()).map(|r| r.id).unwrap();
+    app.ctx_mut().selection = crate::app::Selection::Part(fins);
+    (app, fins)
+}
+
+/// The roll of the nominal flight as the summary reports it: `(max roll rate rad/s, summary)`, flown on the document as it stands.
+fn nominal_spin(app: &App) -> (f64, bowshock_sim::Summary) {
+    let mut state = state_for(app);
+    let nominal = named(&state, "Nominal").id;
+    fly(&mut state, app.ctx(), nominal);
+    let summary = named(&state, "Nominal").run.as_ref().unwrap().result.summary.clone();
+    (summary.max_roll_rate, summary)
+}
+
+#[test]
+fn a_cant_typed_in_the_inspector_is_one_undo_step_and_the_next_flight_spins_clockwise_seen_from_behind() {
+    use crate::app::Message as AppMessage;
+    use crate::build::inspector::{Field, Message as Inspector, State as InspectorState};
+    use bowshock_model::Dim;
+
+    let (mut app, fins) = example_with_fins();
+    let cant = |app: &App| app.ctx().doc.rocket().radial(fins).unwrap().cant;
+    let mut state = state_for(&app);
+    let nominal = named(&state, "Nominal").id;
+    fly(&mut state, app.ctx(), nominal);
+    assert_eq!(named(&state, "Nominal").run.as_ref().unwrap().result.summary.max_roll_rate, 0.0, "straight fins do not spin it");
+    assert!(!named(&state, "Nominal").is_stale(state.stamp(app.ctx(), &named(&state, "Nominal").spec)));
+
+    // Typing 3 and Enter is one commit, one undo step.
+    let mut inspector = InspectorState::new();
+    let _ = inspector.update(Inspector::Edit(Field::Dim(Dim::Cant), 3.0_f64.to_radians(), false), app.ctx_mut());
+    app.sync();
+    assert!((cant(&app) - 3.0_f64.to_radians()).abs() < 1e-12);
+
+    // The result that was on show is out of date, and the next flight carries the cant into the simulation as a positive roll.
+    assert!(named(&state, "Nominal").is_stale(state.stamp(app.ctx(), &named(&state, "Nominal").spec)));
+    let spec = named(&state, "Nominal").spec.clone();
+    let (input, _) = flight::prepare(app.ctx(), &spec).expect("flies");
+    assert!(input.vehicle.fin_sets.iter().all(|f| (f.cant - 3.0_f64.to_radians()).abs() < 1e-12), "{:?}", input.vehicle.fin_sets);
+    let (max, summary) = nominal_spin(&app);
+    // A 3 inch rocket on an H128W with 3 degrees of cant turns at about 20 turns a second at burnout: over a thousand rpm,
+    // clockwise (positive) seen from behind, and more than the pitch frequency: it passes through it spinning up.
+    assert!(max > 0.0 && format::rpm(max) > 500.0 && format::rpm(max) < 3000.0, "{} rpm", format::rpm(max));
+    assert!(summary.roll_rate_at_burnout > 0.9 * max && format::spin_sense(max) == "CW");
+    assert!(summary.roll_resonance.is_some_and(|r| r.crossed), "{:?}", summary.roll_resonance);
+
+    // One undo puts the fins straight, and the flight stops spinning with them.
+    let _ = app.update(AppMessage::Undo);
+    assert_eq!(cant(&app), 0.0);
+    assert_eq!(nominal_spin(&app).0, 0.0);
+    let _ = app.update(AppMessage::Redo);
+    assert!((cant(&app) - 3.0_f64.to_radians()).abs() < 1e-12);
+
+    // Scrubbing the field is live edits that merge, then the commit of the value the scrub ended on: still one step.
+    let _ = app.update(AppMessage::Undo);
+    assert_eq!(cant(&app), 0.0);
+    for degrees in [1.0, 2.0, 4.0] {
+        let _ = inspector.update(Inspector::Edit(Field::Dim(Dim::Cant), f64::to_radians(degrees), true), app.ctx_mut());
+    }
+    let _ = inspector.update(Inspector::Edit(Field::Dim(Dim::Cant), 4.0_f64.to_radians(), false), app.ctx_mut());
+    app.sync();
+    assert!((cant(&app) - 4.0_f64.to_radians()).abs() < 1e-12);
+    let _ = app.update(AppMessage::Undo);
+    assert_eq!(cant(&app), 0.0, "the whole scrub is one step");
+}
+
+#[test]
+fn the_other_way_of_cant_spins_the_other_way_and_fin_b_alone_a_third_as_fast() {
+    use crate::build::inspector::{Field, Message as Inspector, State as InspectorState};
+    use bowshock_model::Dim;
+
+    let (mut app, fins) = example_with_fins();
+    let cant_field = Field::Dim(Dim::Cant);
+    let mut inspector = InspectorState::new();
+    let mut send = |app: &mut App, message: Inspector| {
+        let _ = inspector.update(message, app.ctx_mut());
+        app.sync();
+    };
+    send(&mut app, Inspector::Edit(cant_field, 2.0_f64.to_radians(), false));
+    let all = nominal_spin(&app).0;
+    send(&mut app, Inspector::Edit(cant_field, -2.0_f64.to_radians(), false));
+    let back = nominal_spin(&app).0;
+    assert!(all > 0.0 && (back + all).abs() < 1e-6 * all, "{all} {back}");
+
+    // Straight fins again, then Unlink the Cant of fin B (the copy the header letter shows) and cant that fin alone: the three
+    // fins share one geometry and one roll damping, so a third of the forcing makes a third of the spin.
+    send(&mut app, Inspector::Edit(cant_field, 0.0, false));
+    app.ctx_mut().symmetry.instance = Some((fins, 1));
+    send(&mut app, Inspector::Unlink(cant_field));
+    send(&mut app, Inspector::Edit(cant_field, 2.0_f64.to_radians(), false));
+    let rocket = app.ctx().doc.rocket();
+    let group = rocket.radial(fins).unwrap();
+    assert_eq!((group.effective(0).cant, group.effective(1).cant, group.effective(2).cant), (0.0, 2.0_f64.to_radians(), 0.0));
+    let one = nominal_spin(&app).0;
+    assert!((one / all - 1.0 / 3.0).abs() < 0.01, "{one} vs {all}");
+}

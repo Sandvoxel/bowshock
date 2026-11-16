@@ -1,0 +1,27 @@
+# The x axis title (what it measures, with its unit) under every Analyze plot, and Simulate's plots with theirs.
+viewport 1300x800
+click "Analyze"
+move (600, 300)
+move (602, 302)
+screenshot axis-aero.png
+click "Stability"
+move (600, 300)
+move (602, 302)
+screenshot axis-stability.png
+click "Drag breakdown"
+move (600, 300)
+move (602, 302)
+screenshot axis-drag.png
+click "Fin flutter"
+move (600, 300)
+move (602, 302)
+screenshot axis-flutter.png
+click "Dispersion"
+move (600, 300)
+move (602, 302)
+screenshot axis-dispersion.png
+click "Simulate"
+click "Run"
+move (600, 300)
+move (602, 302)
+screenshot axis-simulate.png

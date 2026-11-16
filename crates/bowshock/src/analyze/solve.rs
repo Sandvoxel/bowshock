@@ -1,0 +1,770 @@
+//! The live state of a CFD solve: what the Analyze screen shows while the solver works, as pure data with no clock of its own.
+//!
+//! A solve is a list of *units*: one per Mach number for the zero-lift drag table, one per (Mach number, angle of attack) for the
+//! 3D stability solve. The worker thread sends [`Iteration`] reports (where the running unit is: iteration, residual drop, the
+//! monitor the solver's stop rule watches and its recent range) and a [`PointDone`] when a unit ends; [`Tracker`] folds them into
+//! what the screen draws: the unit in flight, the finished units with their outcome, the partial curve, a progress fraction
+//! weighted by the work each unit takes, and a time estimate from the measured throughput. Every event carries `at`, the seconds
+//! since the solve began on the worker's clock, so the arithmetic here is deterministic and tested.
+//!
+//! # Progress and time
+//!
+//! Solver iterations are the measure of work (a point stops by its stop rule, so the iteration count differs per Mach number and
+//! is far larger through the transonic range than elsewhere). A finished unit costs the iterations it took. A unit to come costs
+//! what its finished neighbours in Mach took, interpolated, so a transonic point is expected to cost like the transonic points
+//! already solved; until a neighbour is solved it costs [`PRIOR_ITERATIONS`], the average of the example table (HANDOFF.md: about
+//! 29 000 iterations over 10 points). The fraction is work done over the work done plus the work expected, and never goes back.
+//! The time left is the work left over the measured throughput (iterations per second over the finished units, which includes the
+//! grid and kernel set-up of every point), and is not given before [`MIN_DONE_FOR_ETA`] units are finished.
+
+use bowshock_model::{CfdLiftPoint, CfdPoint, CfdQuality};
+
+/// Units that must be finished before a time left is given.
+pub const MIN_DONE_FOR_ETA: usize = 2;
+/// Iterations assumed for a unit whose neighbours are not solved yet: the example table averages about 2 900 per Mach point
+/// (HANDOFF.md, RTX 3090, relative drag rule).
+pub const PRIOR_ITERATIONS: f64 = 3000.0;
+/// Most monitor samples kept per unit for the live trace; past it every second sample is dropped (the trace keeps its shape).
+pub const HISTORY_CAP: usize = 240;
+/// Smallest share of a running unit's iterations still expected after the cap of its prediction is passed.
+const TAIL: f64 = 0.15;
+
+/// Which solve the units belong to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// The zero-lift drag table: one unit per Mach number.
+    Drag,
+    /// The 3D stability solve: one unit per Mach number and angle of attack.
+    Stability,
+}
+
+/// How a unit ended, as the screen words it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// The residual dropped by the requested orders.
+    Converged,
+    /// The residual did not drop enough but the monitored quantity settled (the solver's stop rule fired).
+    Settled,
+    /// The iteration cap was reached before the quantity settled: the point is kept, flagged.
+    Stalled,
+    /// The solver gave no usable point; the table is interpolated from its neighbours there.
+    Fallback,
+}
+
+impl Outcome {
+    /// From the quality of the stored point; `None` is a point the solver could not give.
+    pub fn from_quality(q: Option<CfdQuality>) -> Outcome {
+        match q {
+            Some(CfdQuality::Converged) => Outcome::Converged,
+            Some(CfdQuality::Stationary) => Outcome::Settled,
+            Some(CfdQuality::Stalled) => Outcome::Stalled,
+            None => Outcome::Fallback,
+        }
+    }
+
+    /// Whether the point can be trusted as the solver's answer (converged or settled).
+    pub fn is_settled(self) -> bool {
+        matches!(self, Outcome::Converged | Outcome::Settled)
+    }
+
+    /// The word for a list row.
+    pub fn word(self) -> &'static str {
+        match self {
+            Outcome::Converged => "converged",
+            Outcome::Settled => "settled",
+            Outcome::Stalled => "not settled",
+            Outcome::Fallback => "fallback",
+        }
+    }
+}
+
+/// One unit of work: a Mach number, and for the 3D solve an angle of attack.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Unit {
+    /// Mach number.
+    pub mach: f64,
+    /// Angle of attack (degrees) for the 3D solve; `None` for the zero-lift drag table.
+    pub alpha_deg: Option<f64>,
+}
+
+impl Unit {
+    fn is(&self, mach: f64, alpha_deg: Option<f64>) -> bool {
+        (self.mach - mach).abs() < 1e-6
+            && match (self.alpha_deg, alpha_deg) {
+                (None, None) => true,
+                (Some(a), Some(b)) => (a - b).abs() < 1e-6,
+                _ => false,
+            }
+    }
+}
+
+/// A report from the running unit (throttled on the worker).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Iteration {
+    /// Seconds since the solve began.
+    pub at: f64,
+    /// Mach number of the running unit.
+    pub mach: f64,
+    /// Its angle of attack (degrees), for the 3D solve.
+    pub alpha_deg: Option<f64>,
+    /// Iterations done.
+    pub iteration: usize,
+    /// The iteration cap.
+    pub max_iterations: usize,
+    /// Orders of magnitude the residual has dropped from its peak.
+    pub residual_orders: f64,
+    /// What the stop rule watches (Cd of the drag table, CN of the 3D solve); NaN before the first sample.
+    pub monitor: f64,
+    /// Range of the monitor over the stop rule's window relative to its mean; `None` while the window is not full.
+    pub spread: Option<f64>,
+    /// The relative range below which the stop rule fires.
+    pub tolerance: Option<f64>,
+}
+
+/// A unit that ended.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PointDone {
+    /// Seconds since the solve began.
+    pub at: f64,
+    /// Mach number.
+    pub mach: f64,
+    /// Angle of attack (degrees), for the 3D solve.
+    pub alpha_deg: Option<f64>,
+    /// How it ended.
+    pub outcome: Outcome,
+    /// The stored drag point (drag table, when the solver gave one).
+    pub point: Option<CfdPoint>,
+    /// The stored 3D point (3D solve, when the solver gave one).
+    pub lift: Option<CfdLiftPoint>,
+    /// Iterations it took.
+    pub iterations: usize,
+    /// It ran on the CPU.
+    pub cpu: bool,
+    /// Why the GPU was not used, when it was not.
+    pub fallback: Option<String>,
+}
+
+/// A finished unit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Done {
+    /// How it ended.
+    pub outcome: Outcome,
+    /// Cd (drag table) or CN (3D solve) of the point; `None` for a fallback.
+    pub value: Option<f64>,
+    /// CP from the nose tip (m), for the 3D solve.
+    pub cp: Option<f64>,
+    /// Iterations it took.
+    pub iterations: usize,
+    /// Seconds it took, set-up included.
+    pub seconds: f64,
+    /// The stored drag point.
+    pub point: Option<CfdPoint>,
+    /// The stored 3D point.
+    pub lift: Option<CfdLiftPoint>,
+}
+
+/// Where a unit is.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Slot {
+    /// Not started.
+    Pending,
+    /// Reporting; `ended` is set once the next unit began (the 3D solve hands its results over per Mach number, so a unit can
+    /// have ended without its result being in).
+    Running {
+        /// Seconds since the solve began when the unit began.
+        started: f64,
+        /// Iterations reported so far.
+        iterations: usize,
+        /// When the next unit began, if it has.
+        ended: Option<f64>,
+    },
+    /// Finished.
+    Done(Done),
+}
+
+/// The unit in flight: where its iteration is, and the monitor's trace.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Live {
+    /// Index of the unit.
+    pub unit: usize,
+    /// Iterations done.
+    pub iteration: usize,
+    /// The iteration cap.
+    pub max_iterations: usize,
+    /// Orders the residual has dropped.
+    pub residual_orders: f64,
+    /// The latest monitor sample (NaN before one).
+    pub monitor: f64,
+    /// The monitor's relative range over the stop rule's window.
+    pub spread: Option<f64>,
+    /// The stop rule's tolerance.
+    pub tolerance: Option<f64>,
+    /// `(iteration, monitor)` samples, at most [`HISTORY_CAP`].
+    pub history: Vec<(usize, f64)>,
+}
+
+/// The state of a solve, built from its events.
+#[derive(Debug, Clone)]
+pub struct Tracker {
+    kind: Kind,
+    units: Vec<Unit>,
+    slots: Vec<Slot>,
+    live: Option<Live>,
+    /// Where the solve runs: the GPU's name, or `CPU`.
+    pub device: String,
+    /// Why the GPU was not used, when it was not.
+    pub fallback: Option<String>,
+    cursor: f64,
+    clock: f64,
+    fraction: f64,
+    cpu_units: usize,
+    gpu_units: usize,
+}
+
+impl Tracker {
+    /// A solve of `units` (in the order they run) on `device`.
+    pub fn new(kind: Kind, units: Vec<Unit>, device: impl Into<String>) -> Tracker {
+        let slots = vec![Slot::Pending; units.len()];
+        Tracker { kind, units, slots, live: None, device: device.into(), fallback: None, cursor: 0.0, clock: 0.0, fraction: 0.0, cpu_units: 0, gpu_units: 0 }
+    }
+
+    /// The units of a drag table at `nodes`.
+    pub fn drag_units(nodes: &[f64]) -> Vec<Unit> {
+        nodes.iter().map(|&mach| Unit { mach, alpha_deg: None }).collect()
+    }
+
+    /// The units of a 3D solve at `nodes` and `alphas` (degrees): Mach number outermost, as the solver runs them.
+    pub fn stability_units(nodes: &[f64], alphas: &[f64]) -> Vec<Unit> {
+        nodes.iter().flat_map(|&mach| alphas.iter().map(move |&a| Unit { mach, alpha_deg: Some(a) })).collect()
+    }
+
+    /// Which solve this is.
+    pub fn kind(&self) -> Kind {
+        self.kind
+    }
+
+    /// Every unit, in running order.
+    pub fn units(&self) -> &[Unit] {
+        &self.units
+    }
+
+    /// Where unit `i` is.
+    pub fn slot(&self, i: usize) -> &Slot {
+        &self.slots[i]
+    }
+
+    /// The unit in flight and its state.
+    pub fn live(&self) -> Option<(&Unit, &Live)> {
+        self.live.as_ref().map(|l| (&self.units[l.unit], l))
+    }
+
+    /// Units finished.
+    pub fn done_count(&self) -> usize {
+        self.slots.iter().filter(|s| matches!(s, Slot::Done(_))).count()
+    }
+
+    /// Units in all.
+    pub fn total(&self) -> usize {
+        self.units.len()
+    }
+
+    /// The Mach numbers of the units (each once, ascending as given).
+    pub fn machs(&self) -> Vec<f64> {
+        let mut m: Vec<f64> = Vec::new();
+        for u in &self.units {
+            if m.last().is_none_or(|l| (l - u.mach).abs() > 1e-9) {
+                m.push(u.mach);
+            }
+        }
+        m
+    }
+
+    fn find(&self, mach: f64, alpha_deg: Option<f64>) -> Option<usize> {
+        self.units.iter().position(|u| u.is(mach, alpha_deg))
+    }
+
+    /// Folds in a report from the running unit.
+    pub fn on_iteration(&mut self, it: &Iteration) {
+        let Some(idx) = self.find(it.mach, it.alpha_deg) else { return };
+        self.clock = self.clock.max(it.at);
+        if self.live.as_ref().is_some_and(|l| l.unit != idx) {
+            // The unit before this one is over (the 3D solve reports a Mach number's results only when all its angles are done).
+            let before = self.live.as_ref().map_or(idx, |l| l.unit);
+            if let Slot::Running { ended, .. } = &mut self.slots[before] {
+                ended.get_or_insert(it.at);
+            }
+            self.cursor = self.cursor.max(it.at);
+            self.live = None;
+        }
+        if let Slot::Pending = self.slots[idx] {
+            self.slots[idx] = Slot::Running { started: self.cursor, iterations: 0, ended: None };
+        }
+        if let Slot::Running { iterations, .. } = &mut self.slots[idx] {
+            *iterations = it.iteration;
+        }
+        let live = self.live.get_or_insert_with(|| Live {
+            unit: idx,
+            iteration: 0,
+            max_iterations: it.max_iterations,
+            residual_orders: 0.0,
+            monitor: f64::NAN,
+            spread: None,
+            tolerance: None,
+            history: Vec::new(),
+        });
+        live.iteration = it.iteration;
+        live.max_iterations = it.max_iterations;
+        live.residual_orders = it.residual_orders;
+        live.monitor = it.monitor;
+        live.spread = it.spread;
+        live.tolerance = it.tolerance;
+        if it.monitor.is_finite() && live.history.last().is_none_or(|h| h.0 < it.iteration) {
+            live.history.push((it.iteration, it.monitor));
+            if live.history.len() > HISTORY_CAP {
+                let kept: Vec<(usize, f64)> = live.history.iter().copied().step_by(2).collect();
+                live.history = kept;
+            }
+        }
+        self.refresh_fraction();
+    }
+
+    /// Folds in a finished unit.
+    pub fn on_done(&mut self, d: &PointDone) {
+        let Some(idx) = self.find(d.mach, d.alpha_deg) else { return };
+        self.clock = self.clock.max(d.at);
+        let (started, ended) = match self.slots[idx] {
+            Slot::Running { started, ended, .. } => (started, ended),
+            _ => (self.cursor, None),
+        };
+        let seconds = (ended.unwrap_or(d.at) - started).max(0.0);
+        let (value, cp) = match (&d.point, &d.lift) {
+            (Some(p), _) => (Some(p.cd), None),
+            (_, Some(l)) => (Some(l.cn), Some(l.x_cp)),
+            _ => (None, None),
+        };
+        self.slots[idx] = Slot::Done(Done { outcome: d.outcome, value, cp, iterations: d.iterations, seconds, point: d.point, lift: d.lift });
+        if self.live.as_ref().is_some_and(|l| l.unit == idx) {
+            self.live = None;
+        }
+        self.cursor = self.cursor.max(d.at);
+        if d.cpu {
+            self.cpu_units += 1;
+            "CPU".clone_into(&mut self.device);
+            self.fallback = d.fallback.clone().or_else(|| self.fallback.take());
+        } else {
+            self.gpu_units += 1;
+        }
+        self.refresh_fraction();
+    }
+
+    /// Marks the solve as complete.
+    pub fn finish(&mut self) {
+        self.live = None;
+        self.fraction = 1.0;
+    }
+
+    /// Marks the solve as stopped: nothing is in flight any more (its last report stays in the unit's slot).
+    pub fn halt(&mut self) {
+        self.live = None;
+    }
+
+    /// Seconds since the solve began on the worker's clock, as of the latest event.
+    pub fn clock(&self) -> f64 {
+        self.clock
+    }
+
+    /// Iterations a unit that is not done is expected to take, from its finished neighbours in Mach (same angle of attack when
+    /// there are some), nearest-held at the ends, and [`PRIOR_ITERATIONS`] without any. Units that did not settle left out: they
+    /// stopped on the iteration cap, not where the physics did.
+    fn predicted(&self, unit: usize) -> f64 {
+        let want = &self.units[unit];
+        let settled = |same_alpha: bool| -> Vec<(f64, f64)> {
+            let mut v: Vec<(f64, f64)> = self
+                .units
+                .iter()
+                .zip(&self.slots)
+                .filter_map(|(u, s)| match s {
+                    Slot::Done(d) if d.outcome.is_settled() && d.iterations > 0 && (!same_alpha || u.alpha_deg == want.alpha_deg) => {
+                        Some((u.mach, d.iterations as f64))
+                    }
+                    _ => None,
+                })
+                .collect();
+            v.sort_by(|a, b| a.0.total_cmp(&b.0));
+            v
+        };
+        let mut known = settled(true);
+        if known.is_empty() {
+            known = settled(false);
+        }
+        let (Some(first), Some(last)) = (known.first().copied(), known.last().copied()) else { return PRIOR_ITERATIONS };
+        if want.mach <= first.0 {
+            return first.1;
+        }
+        if want.mach >= last.0 {
+            return last.1;
+        }
+        let i = known.partition_point(|p| p.0 <= want.mach);
+        let (a, b) = (known[i - 1], known[i]);
+        a.1 + (b.1 - a.1) * (want.mach - a.0) / (b.0 - a.0)
+    }
+
+    /// Iterations a unit still has to do.
+    fn remaining(&self, unit: usize) -> f64 {
+        match &self.slots[unit] {
+            Slot::Done(_) => 0.0,
+            Slot::Running { ended: Some(_), .. } => 0.0,
+            Slot::Running { iterations, .. } => {
+                let done = *iterations as f64;
+                (self.predicted(unit) - done).max(TAIL * done)
+            }
+            Slot::Pending => self.predicted(unit),
+        }
+    }
+
+    fn done_iterations(&self) -> f64 {
+        self.slots
+            .iter()
+            .map(|s| match s {
+                Slot::Done(d) => d.iterations as f64,
+                Slot::Running { iterations, .. } => *iterations as f64,
+                Slot::Pending => 0.0,
+            })
+            .sum()
+    }
+
+    fn refresh_fraction(&mut self) {
+        let done = self.done_iterations();
+        let left: f64 = (0..self.units.len()).map(|i| self.remaining(i)).sum();
+        let f = if done + left > 0.0 { done / (done + left) } else { 0.0 };
+        // never complete before it is, and never backwards
+        self.fraction = self.fraction.max(f.min(0.99));
+    }
+
+    /// How far the solve is, 0 to 1: iterations done over iterations done plus expected, never decreasing.
+    pub fn fraction(&self) -> f64 {
+        self.fraction
+    }
+
+    /// Solver iterations per second over the finished units, set-up included; `None` before one finished.
+    pub fn throughput(&self) -> Option<f64> {
+        let (iters, seconds) = self.slots.iter().fold((0.0, 0.0), |(i, s), slot| match slot {
+            Slot::Done(d) => (i + d.iterations as f64, s + d.seconds),
+            _ => (i, s),
+        });
+        (seconds > 0.0 && iters > 0.0).then(|| iters / seconds)
+    }
+
+    /// Seconds left: the iterations still to do over the measured throughput. `None` ("estimating…") until
+    /// [`MIN_DONE_FOR_ETA`] units are finished.
+    pub fn eta(&self) -> Option<f64> {
+        if self.done_count() < MIN_DONE_FOR_ETA {
+            return None;
+        }
+        let rate = self.throughput()?;
+        let left: f64 = (0..self.units.len()).map(|i| self.remaining(i)).sum();
+        Some(left / rate)
+    }
+
+    /// The solved drag points so far, ascending in Mach (units run ascending).
+    pub fn points(&self) -> Vec<CfdPoint> {
+        self.slots.iter().filter_map(|s| if let Slot::Done(d) = s { d.point } else { None }).collect()
+    }
+
+    /// Units that finished on the CPU and on the GPU.
+    pub fn units_by_device(&self) -> (usize, usize) {
+        (self.cpu_units, self.gpu_units)
+    }
+
+    /// The Mach numbers (with their angle) of the finished units that did not settle, in order.
+    fn unsettled(&self) -> Vec<(Outcome, Unit)> {
+        self.units
+            .iter()
+            .zip(&self.slots)
+            .filter_map(|(u, s)| match s {
+                Slot::Done(d) if !d.outcome.is_settled() => Some((d.outcome, *u)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The one-line account of a finished solve: `Solved 10 Mach points in 2 min 14 s on Apple M1 Max · 9 converged, 1 fallback
+    /// (Mach 1.05)`.
+    pub fn summary(&self, seconds: f64) -> String {
+        let what = match self.kind {
+            Kind::Drag => format!("{} Mach points", self.done_count()),
+            Kind::Stability => format!("3D stability at {} Mach numbers", self.machs().len()),
+        };
+        let head = format!("Solved {what} in {} on {}", duration_text(seconds), self.device);
+        let settled = self.done_count() - self.unsettled().len();
+        let mut parts = vec![if settled == self.done_count() { "all converged".to_string() } else { format!("{settled} converged") }];
+        for outcome in [Outcome::Stalled, Outcome::Fallback] {
+            let at: Vec<String> = self
+                .unsettled()
+                .into_iter()
+                .filter(|(o, _)| *o == outcome)
+                .map(|(_, u)| match u.alpha_deg {
+                    Some(a) => format!("Mach {:.2}, {a:.0}°", u.mach),
+                    None => format!("Mach {:.2}", u.mach),
+                })
+                .collect();
+            if !at.is_empty() {
+                parts.push(format!("{} {} ({})", at.len(), outcome.word(), at.join("; ")));
+            }
+        }
+        format!("{head} · {}", parts.join(", "))
+    }
+
+    /// The toast's short form, for the narrow status strip (the verdict comes before the time, which is what a clipped line loses):
+    /// `Solved 10 points · 1 not converged · 2 min 14 s`.
+    pub fn brief(&self, seconds: f64) -> String {
+        let what = match self.kind {
+            Kind::Drag => format!("{} points", self.done_count()),
+            Kind::Stability => "3D stability".to_string(),
+        };
+        let bad = self.unsettled().len();
+        let verdict = if bad == 0 { "all converged".to_string() } else { format!("{bad} not converged") };
+        format!("Solved {what} · {verdict} · {}", duration_text(seconds))
+    }
+}
+
+/// `42 s`, `2 min 14 s`: how long a solve took.
+pub fn duration_text(seconds: f64) -> String {
+    let s = seconds.max(0.0).round() as u64;
+    if s < 60 {
+        format!("{s} s")
+    } else {
+        format!("{} min {} s", s / 60, s % 60)
+    }
+}
+
+/// The time left, coarsely: `a few seconds`, `about 40 s`, `about 2 min`.
+pub fn eta_text(seconds: f64) -> String {
+    let s = seconds.max(0.0);
+    if s < 10.0 {
+        "a few seconds".to_string()
+    } else if s < 90.0 {
+        format!("about {} s", (s / 5.0).round() as u64 * 5)
+    } else {
+        format!("about {} min", (s / 60.0).round() as u64)
+    }
+}
+
+/// `12,345`: an iteration count.
+pub fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tracker(nodes: &[f64]) -> Tracker {
+        Tracker::new(Kind::Drag, Tracker::drag_units(nodes), "Test GPU")
+    }
+
+    fn report(at: f64, mach: f64, iteration: usize, monitor: f64) -> Iteration {
+        Iteration { at, mach, alpha_deg: None, iteration, max_iterations: 80_000, residual_orders: 2.0, monitor, spread: Some(0.01), tolerance: Some(0.002) }
+    }
+
+    fn point(mach: f64, cd: f64, quality: CfdQuality) -> CfdPoint {
+        CfdPoint { mach, cd, friction: 0.1, pressure: 0.1, base: 0.1, fins: 0.1, other: 0.0, quality }
+    }
+
+    fn done(at: f64, mach: f64, iterations: usize, quality: Option<CfdQuality>) -> PointDone {
+        PointDone {
+            at,
+            mach,
+            alpha_deg: None,
+            outcome: Outcome::from_quality(quality),
+            point: quality.map(|q| point(mach, 0.5, q)),
+            lift: None,
+            iterations,
+            cpu: false,
+            fallback: None,
+        }
+    }
+
+    #[test]
+    fn a_unit_goes_from_pending_to_running_to_done() {
+        let mut t = tracker(&[0.5, 0.9]);
+        assert_eq!((t.done_count(), t.total(), t.live().is_none()), (0, 2, true));
+        t.on_iteration(&report(3.0, 0.5, 50, f64::NAN));
+        assert!(matches!(t.slot(0), Slot::Running { started, iterations: 50, ended: None } if *started == 0.0));
+        let (unit, live) = t.live().unwrap();
+        assert_eq!((unit.mach, live.iteration), (0.5, 50));
+        assert!(live.history.is_empty(), "no monitor sample yet");
+        t.on_iteration(&report(4.0, 0.5, 100, 0.52));
+        assert_eq!(t.live().unwrap().1.history, vec![(100, 0.52)]);
+        t.on_done(&done(20.0, 0.5, 2000, Some(CfdQuality::Converged)));
+        assert!(t.live().is_none());
+        let Slot::Done(d) = t.slot(0) else { panic!("done") };
+        assert_eq!((d.iterations, d.seconds, d.value), (2000, 20.0, Some(0.5)), "the seconds run from the start of the unit");
+        // the next unit starts where the last one ended
+        t.on_iteration(&report(25.0, 0.9, 50, 0.6));
+        assert!(matches!(t.slot(1), Slot::Running { started, .. } if *started == 20.0));
+        // a report for a unit that is not in the plan is ignored
+        t.on_iteration(&report(26.0, 1.7, 50, 0.6));
+        assert_eq!(t.live().unwrap().0.mach, 0.9);
+    }
+
+    #[test]
+    fn the_prediction_follows_the_mach_neighbours_and_ignores_units_that_did_not_settle() {
+        let mut t = tracker(&[0.5, 0.7, 0.9, 1.0, 1.1, 2.0]);
+        assert_eq!(t.predicted(1), PRIOR_ITERATIONS, "nothing solved yet");
+        t.on_done(&done(20.0, 0.5, 2000, Some(CfdQuality::Converged)));
+        t.on_done(&done(60.0, 0.9, 4000, Some(CfdQuality::Stationary)));
+        assert!((t.predicted(1) - 3000.0).abs() < 1e-9, "halfway between the neighbours: {}", t.predicted(1));
+        assert_eq!(t.predicted(3), 4000.0, "above the last solved point it is held");
+        // a point that hit the iteration cap says nothing about its neighbours' cost
+        t.on_done(&done(300.0, 1.1, 80_000, Some(CfdQuality::Stalled)));
+        assert_eq!(t.predicted(3), 4000.0);
+        assert_eq!(t.predicted(5), 4000.0);
+    }
+
+    #[test]
+    fn the_estimate_waits_for_two_points_then_follows_the_measured_throughput() {
+        let mut t = tracker(&[0.5, 0.9, 1.0, 1.1, 2.0]);
+        t.on_iteration(&report(5.0, 0.5, 1000, 0.5));
+        assert_eq!(t.eta(), None, "estimating…");
+        t.on_done(&done(20.0, 0.5, 2000, Some(CfdQuality::Converged)));
+        assert_eq!(t.eta(), None, "one point is not a rate");
+        t.on_done(&done(60.0, 0.9, 4000, Some(CfdQuality::Converged)));
+        // 6000 iterations in 60 s: 100 it/s; three units to come, each expected at the last solved point's 4000
+        assert_eq!(t.throughput(), Some(100.0));
+        assert_eq!(t.eta(), Some(120.0));
+        // work in flight is counted off
+        t.on_iteration(&report(70.0, 1.0, 1000, 0.7));
+        assert_eq!(t.eta(), Some((3000.0 + 4000.0 + 4000.0) / 100.0));
+    }
+
+    #[test]
+    fn the_fraction_is_weighted_by_expected_work_and_never_goes_back() {
+        let mut t = tracker(&[0.5, 0.9, 1.0, 1.1]);
+        let mut last = 0.0;
+        let mut step = |t: &mut Tracker, f: &dyn Fn(&mut Tracker)| {
+            f(t);
+            assert!(t.fraction() >= last, "the bar went back: {} then {}", last, t.fraction());
+            assert!(t.fraction() < 1.0);
+            last = t.fraction();
+        };
+        step(&mut t, &|t| t.on_iteration(&report(1.0, 0.5, 1500, 0.5)));
+        step(&mut t, &|t| t.on_done(&done(20.0, 0.5, 2000, Some(CfdQuality::Converged))));
+        // the 0.9 point is expected to cost what the one solved (2000), then it turns out to cost more: the estimate of the rest rises
+        // and the fraction would drop; it holds
+        step(&mut t, &|t| t.on_iteration(&report(30.0, 0.9, 1900, 0.6)));
+        step(&mut t, &|t| t.on_done(&done(80.0, 0.9, 6000, Some(CfdQuality::Converged))));
+        // the 0.9 point cost 6000, three times what its neighbour did: two of four units are done and the work done is 8000 of
+        // 8000 + 2 x 6000, 0.4; the bar holds the 3900 / 8185 it had reached while the 0.9 point was running
+        assert!((t.fraction() - 3900.0 / 8185.0).abs() < 1e-12, "{}", t.fraction());
+        t.finish();
+        assert_eq!(t.fraction(), 1.0);
+    }
+
+    #[test]
+    fn a_running_unit_past_its_prediction_still_has_a_tail() {
+        let mut t = tracker(&[0.5, 0.9]);
+        t.on_done(&done(20.0, 0.5, 2000, Some(CfdQuality::Converged)));
+        t.on_iteration(&report(30.0, 0.9, 5000, 0.6));
+        assert_eq!(t.remaining(1), 750.0, "15 % of what it has done");
+    }
+
+    #[test]
+    fn the_monitor_trace_is_decimated_at_the_cap_and_a_new_unit_starts_a_new_trace() {
+        let mut t = tracker(&[0.5, 0.9]);
+        for k in 1..=(HISTORY_CAP + 10) {
+            t.on_iteration(&report(k as f64 * 0.1, 0.5, k * 50, 0.5 + 1e-4 * k as f64));
+        }
+        let h = &t.live().unwrap().1.history;
+        assert!(h.len() <= HISTORY_CAP && h.len() > HISTORY_CAP / 2);
+        assert!(h.windows(2).all(|w| w[0].0 < w[1].0), "still in iteration order");
+        assert_eq!(h[0].0, 50, "the start of the trace is kept");
+        t.on_done(&done(30.0, 0.5, 12_000, Some(CfdQuality::Converged)));
+        t.on_iteration(&report(31.0, 0.9, 50, 0.7));
+        assert_eq!(t.live().unwrap().1.history, vec![(50, 0.7)]);
+    }
+
+    #[test]
+    fn the_stability_solve_splits_a_mach_number_between_its_angles() {
+        let units = Tracker::stability_units(&[0.8, 1.1], &[2.0, 6.0]);
+        assert_eq!(units.len(), 4);
+        let mut t = Tracker::new(Kind::Stability, units, "Test GPU");
+        let r = |at: f64, mach: f64, a: f64, iteration: usize| Iteration { alpha_deg: Some(a), ..report(at, mach, iteration, 0.1) };
+        t.on_iteration(&r(2.0, 0.8, 2.0, 50));
+        t.on_iteration(&r(10.0, 0.8, 2.0, 1000));
+        // the 6 degree run begins: the 2 degree run is over (its result comes with the Mach number's)
+        t.on_iteration(&r(20.0, 0.8, 6.0, 50));
+        assert!(matches!(t.slot(0), Slot::Running { ended: Some(e), .. } if *e == 20.0));
+        let lift = |a: f64| CfdLiftPoint { mach: 0.8, alpha_deg: a, cn: 0.1 * a, x_cp: 0.9, quality: CfdQuality::Converged };
+        for (a, iters) in [(2.0, 1000), (6.0, 400)] {
+            t.on_done(&PointDone {
+                at: 28.0,
+                mach: 0.8,
+                alpha_deg: Some(a),
+                outcome: Outcome::Converged,
+                point: None,
+                lift: Some(lift(a)),
+                iterations: iters,
+                cpu: false,
+                fallback: None,
+            });
+        }
+        let secs: Vec<f64> = (0..2).map(|i| if let Slot::Done(d) = t.slot(i) { d.seconds } else { f64::NAN }).collect();
+        assert_eq!(secs, vec![20.0, 8.0], "2° from 0 s to the start of the 6° run, 6° from there to the hand-over");
+        assert!(matches!(t.slot(0), Slot::Done(d) if d.value == Some(0.2) && d.cp == Some(0.9)));
+        // the 6° run of the next Mach number is predicted from the 6° run solved, not the 2° one
+        assert_eq!(t.predicted(3), 400.0);
+        assert_eq!(t.predicted(2), 1000.0);
+    }
+
+    #[test]
+    fn the_summary_names_what_did_not_converge() {
+        let nodes = [0.5, 0.8, 1.05, 2.0];
+        let mut t = tracker(&nodes);
+        t.on_done(&done(10.0, 0.5, 2000, Some(CfdQuality::Converged)));
+        t.on_done(&done(30.0, 0.8, 3000, Some(CfdQuality::Stationary)));
+        t.on_done(&done(100.0, 1.05, 80_000, Some(CfdQuality::Stalled)));
+        t.on_done(&done(120.0, 2.0, 100, None));
+        assert_eq!(t.summary(134.0), "Solved 4 Mach points in 2 min 14 s on Test GPU · 2 converged, 1 not settled (Mach 1.05), 1 fallback (Mach 2.00)");
+        let mut all = tracker(&[0.5, 0.9]);
+        all.on_done(&done(10.0, 0.5, 2000, Some(CfdQuality::Converged)));
+        all.on_done(&done(20.0, 0.9, 2000, Some(CfdQuality::Converged)));
+        assert_eq!(all.summary(20.0), "Solved 2 Mach points in 20 s on Test GPU · all converged");
+        assert_eq!(all.brief(20.0), "Solved 2 points · all converged · 20 s");
+        assert_eq!(t.brief(134.0), "Solved 4 points · 2 not converged · 2 min 14 s");
+        // a halted solve has nothing in flight but keeps what it had
+        t.on_iteration(&report(150.0, 2.0, 50, 0.5));
+        t.halt();
+        assert!(t.live().is_none() && t.clock() == 150.0);
+        assert_eq!(t.points().iter().filter(|p| p.quality == CfdQuality::Stalled).count(), 1);
+        assert_eq!(t.points().len(), 3, "a fallback has no point");
+    }
+
+    #[test]
+    fn a_cpu_point_changes_the_device_and_keeps_the_reason() {
+        let mut t = tracker(&[0.5, 0.9]);
+        t.on_done(&PointDone { cpu: true, fallback: Some("GPU unavailable: no adapter".into()), ..done(10.0, 0.5, 2000, Some(CfdQuality::Converged)) });
+        assert_eq!(t.device, "CPU");
+        assert_eq!(t.fallback.as_deref(), Some("GPU unavailable: no adapter"));
+        assert_eq!(t.units_by_device(), (1, 0));
+    }
+
+    #[test]
+    fn the_texts() {
+        assert_eq!(duration_text(0.4), "0 s");
+        assert_eq!(duration_text(59.6), "1 min 0 s");
+        assert_eq!(duration_text(134.0), "2 min 14 s");
+        assert_eq!(eta_text(4.0), "a few seconds");
+        assert_eq!(eta_text(42.0), "about 40 s");
+        assert_eq!(eta_text(100.0), "about 2 min");
+        assert_eq!((thousands(7), thousands(1850), thousands(80_000), thousands(1_234_567)), ("7".into(), "1,850".into(), "80,000".into(), "1,234,567".into()));
+    }
+}

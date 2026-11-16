@@ -59,8 +59,9 @@ impl NormalForce {
     }
 }
 
-/// Roll moment coefficients of the fins at one Mach number (see [`Aero::roll`]): the moment about the nose axis in the sense of
-/// increasing fin roll angle is `q (forcing + damping w / V)` for a roll rate `w` and air speed `V`.
+/// Roll moment coefficients of the fins at one Mach number (see [`Aero::roll`]): the moment about the nose axis, right-handed
+/// about the nose direction (clockwise seen from behind, the sense in which a fin's roll angle increases), is
+/// `q (forcing + damping w / V)` for a roll rate `w` in the same sense and air speed `V`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RollAero {
     /// Cant forcing `sum N K CN_alpha_1 A_ref cant arm` (m^3, `q` times it is the moment in N m).

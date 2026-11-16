@@ -21,13 +21,15 @@ pub enum Preset {
     Forces,
     /// CG against CP, the static margin, Mach.
     Stability,
+    /// The spin rate against the pitch frequency it must keep clear of, the airspeed that drives the spin, the angle of attack.
+    Roll,
     /// Anything else: shown when the layout matches no preset. Choosing it starts a one-panel layout to build on.
     Custom,
 }
 
 impl Preset {
     /// The presets in row order.
-    pub const ALL: [Preset; 5] = [Preset::FlightProfile, Preset::Aerodynamics, Preset::Forces, Preset::Stability, Preset::Custom];
+    pub const ALL: [Preset; 6] = [Preset::FlightProfile, Preset::Aerodynamics, Preset::Forces, Preset::Stability, Preset::Roll, Preset::Custom];
 
     /// The button label.
     pub fn label(self) -> &'static str {
@@ -36,6 +38,7 @@ impl Preset {
             Preset::Aerodynamics => "Aerodynamics",
             Preset::Forces => "Forces",
             Preset::Stability => "Stability",
+            Preset::Roll => "Roll",
             Preset::Custom => "Custom",
         }
     }
@@ -47,6 +50,7 @@ impl Preset {
             Preset::Aerodynamics => vec![&["mach"], &["cd", "cd_friction", "cd_pressure", "cd_base"], &["dynamic_pressure"]],
             Preset::Forces => vec![&["thrust", "drag"], &["mass", "propellant_mass"], &["total_acceleration"]],
             Preset::Stability => vec![&["cg_station", "cp_station"], &["stability_margin"], &["mach"]],
+            Preset::Roll => vec![&["roll_rate", "pitch_frequency"], &["air_speed"], &["angle_of_attack"]],
             Preset::Custom => vec![&["altitude"]],
         };
         PlotLayout { panels: panels.into_iter().map(PlotPanel::new).collect(), ..PlotLayout::default() }
@@ -54,7 +58,7 @@ impl Preset {
 
     /// The preset `layout`'s panels are (whatever it plots against), `Custom` when they are none of them.
     pub fn of(layout: &PlotLayout) -> Preset {
-        [Preset::FlightProfile, Preset::Aerodynamics, Preset::Forces, Preset::Stability]
+        [Preset::FlightProfile, Preset::Aerodynamics, Preset::Forces, Preset::Stability, Preset::Roll]
             .into_iter()
             .find(|p| p.layout().panels == layout.panels)
             .unwrap_or(Preset::Custom)

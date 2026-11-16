@@ -461,6 +461,35 @@ fn a_canted_fin_of_a_group_flies_as_its_own_fin_set() {
 }
 
 #[test]
+fn the_documents_fin_cant_spins_the_flown_rocket_the_way_positive_cant_turns_and_fin_b_alone_a_third_as_fast() {
+    use bowshock_model::{Dim, RadialField};
+    let db = MotorDb::bundled();
+    let fly = |r: &Rocket| simulate(&sim_input(r, &db, Phase::Full, Launch::default()).unwrap());
+    let (mut r, _) = single_stage();
+    let fins = r.radials()[0].id;
+    assert_eq!(fly(&r).summary.max_roll_rate, 0.0, "straight fins do not spin the rocket");
+
+    // Cant the whole group by 2 degrees: positive cant, positive roll rate (clockwise seen from behind), the whole way up.
+    assert!(r.set_cant(fins, 2.0_f64.to_radians()));
+    let all = fly(&r);
+    assert!(all.summary.max_roll_rate > 10.0 && all.summary.roll_rate_at_burnout > 10.0, "{:?}", all.summary);
+    assert!(all.trajectory.samples.iter().all(|s| s.roll_rate >= -1e-9));
+    // And the other way for negative cant.
+    r.set_cant(fins, -2.0_f64.to_radians());
+    let back = fly(&r);
+    assert!((back.summary.max_roll_rate + all.summary.max_roll_rate).abs() < 1e-6 * all.summary.max_roll_rate);
+
+    // Only fin B canted (the others straight): one fin of three drives the same damping, so a third of the forcing: a third of the
+    // spin at every instant (the three fins share one geometry).
+    r.set_cant(fins, 0.0);
+    assert!(r.unlink_field(fins, 1, RadialField::Cant));
+    r.set_instance_dim(fins, 1, Dim::Cant, 2.0_f64.to_radians()).unwrap();
+    let one = fly(&r);
+    assert!(one.summary.max_roll_rate > 0.0);
+    assert!((one.summary.max_roll_rate / all.summary.max_roll_rate - 1.0 / 3.0).abs() < 0.01, "{} vs {}", one.summary.max_roll_rate, all.summary.max_roll_rate);
+}
+
+#[test]
 fn stability_warnings_follow_the_documents_thresholds() {
     let (mut r, mount_id) = single_stage();
     let db = MotorDb::bundled();

@@ -7,6 +7,7 @@
 //! * [`analysis`]: sweeps vs Mach and angle of attack, Monte Carlo dispersion.
 //! * [`flutter`]: fin flutter along a flight (Martin, NACA TN 4197, 1958, in the form of Bennett 2023).
 //! * [`tube_fins`]: tube fin aerodynamics (open tubes on the outside of the body).
+//! * [`roll`]: the pitch natural frequency and the check of the spin rate of canted fins against it (roll-pitch resonance).
 //!
 //! Everything is SI (metres, kilograms, seconds, radians, pascals). Axial stations are measured
 //! from the nose tip, increasing aft. The core modules do not know about the application's
@@ -28,6 +29,7 @@ pub mod flight;
 pub mod flutter;
 pub mod from_model;
 pub mod rng;
+pub mod roll;
 pub mod staging;
 pub mod tube_fins;
 pub mod vehicle;
@@ -38,6 +40,7 @@ pub use atmosphere::{AirState, Atmosphere};
 pub use drag_table::{DragTable, DragTablePoint};
 pub use flight::{simulate, Deploy, Event, EventKind, FlightModel, FlightResult, Launch, RecoveryDevice, Sample, SimInput, Summary, Trajectory, Turbulence};
 pub use flutter::{flutter_velocity, FlutterFin, FlutterGeometry, FlutterInputs, FlutterPoint, FlutterTrace, FlutterWarning};
+pub use roll::{pitch_frequency, roll_resonance, RollResonance};
 pub use staging::{has_altitude_trigger, staging_times, Timeline};
 pub use vehicle::{
     BodyKind, BodySegment, FinCrossSection, FinPlanform, FinSet, MassProps, NoseShape, Protuberance, StageMass, StageMotor, ThrustCurve, Timing, Trigger,

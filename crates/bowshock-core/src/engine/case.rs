@@ -3,6 +3,7 @@
 use crate::engine::body_grid::{base_domain_grid, large_domain_grid, BaseBody, BaseGridParams, LargeGridParams, NozzleRows};
 use crate::engine::numerics::Numerics;
 use crate::error::Error;
+use crate::progress::ProgressSink;
 use bowshock_cfd::gas::freestream;
 use bowshock_cfd::gas::Prim;
 use bowshock_cfd::solver::{Bc, Config, Nozzle, Solver, Turbulence, Viscous};
@@ -40,6 +41,8 @@ pub struct Case {
     pub viscous: Option<Viscous>,
     /// Motor jet from the base; `None`: power-off.
     pub motor: Option<Jet>,
+    /// Where the run reports its progress and can be stopped; `None`: silent.
+    pub progress: Option<ProgressSink>,
 }
 
 impl Case {
@@ -71,7 +74,7 @@ impl Case {
             nozzle: None,
         };
         let grid_sting = sting_grid(&body, level);
-        Case { mach, body, wake, grid_base, grid_sting, numerics, viscous: None, motor: None }
+        Case { mach, body, wake, grid_base, grid_sting, numerics, viscous: None, motor: None, progress: None }
     }
 
     /// Wall-resolved RANS case: [`Case::new`] with [`Numerics::viscous`], first cell height at the wall for `y+ ~ 1` at the highest

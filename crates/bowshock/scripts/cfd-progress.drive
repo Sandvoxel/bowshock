@@ -1,0 +1,42 @@
+# The CFD solve screens: a solve in progress, cancelled with its solved points on offer, finished, the 3D stability solve in
+# progress and finished. A real solve takes minutes and the driver waits for running tasks, so the solves are scripted
+# (`analyze/solve_demo.rs`: the same events the worker sends, made-up numbers; the real stream is covered by the ignored tests
+# of `analyze/cfd.rs`):
+#   BOWSHOCK_CFD_DEMO=mid,done,lift-mid,lift-done cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/cfd-progress.drive out/cfd-progress
+viewport 1300x800
+click "Analyze"
+click "CFD table"
+move (100, 700)
+move (102, 702)
+screenshot solve-mid-dark.png
+
+# Cancel with four points solved: the points are on offer.
+click "Cancel"
+move (100, 700)
+move (102, 702)
+screenshot solve-stopped-dark.png
+click "Discard"
+
+# A whole solve, finished: the summary row.
+click "Re-solve"
+move (100, 700)
+move (102, 702)
+screenshot solve-done-dark.png
+
+# The 3D stability solve in progress and finished.
+click "Solve stability (3D)"
+move (100, 700)
+move (102, 702)
+screenshot solve-3d-mid-dark.png
+click "Cancel"
+click "Solve stability (3D)"
+move (100, 700)
+move (102, 702)
+screenshot solve-3d-done-dark.png
+
+# The same mid-solve screen in the light theme.
+click "Re-solve"
+click "Light"
+move (100, 700)
+move (102, 702)
+screenshot solve-mid-light.png

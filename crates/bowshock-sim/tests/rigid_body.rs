@@ -229,3 +229,43 @@ fn rigid_body_flights_run_fast() {
     let limit = if cfg!(debug_assertions) { 3000 } else { 100 };
     assert!(t0.elapsed().as_millis() < limit, "took {:?}", t0.elapsed());
 }
+
+#[test]
+fn the_summary_reports_the_peak_burnout_and_apogee_spin_of_canted_fins() {
+    let cant = 1.0_f64.to_radians();
+    let r = fly(rocket(0.62, cant), 0.0, 0.0, FlightModel::RigidBody);
+    let s = &r.summary;
+    let peak = r.trajectory.samples.iter().map(|s| s.roll_rate).fold(f64::MIN, f64::max);
+    // The summary reads the undecimated flight: the samples' peak is within a decimation step of it.
+    assert!(s.max_roll_rate > 0.0 && (s.max_roll_rate - peak).abs() < 0.02 * peak, "{} vs {peak}", s.max_roll_rate);
+    // The fin helix spins the rocket up with the airspeed, which peaks at burnout; it coasts on, a little slower, to apogee, where
+    // the deployment stops it: the number is the rate just before.
+    assert!(s.roll_rate_at_burnout > 0.95 * s.max_roll_rate, "{} vs {}", s.roll_rate_at_burnout, s.max_roll_rate);
+    assert!(s.roll_rate_at_apogee > 0.0 && s.roll_rate_at_apogee < s.roll_rate_at_burnout, "{}", s.roll_rate_at_apogee);
+    // A rocket without canted fins does not spin, and has nothing to resonate with.
+    let plain = fly(rocket(0.62, 0.0), 0.0, 0.0, FlightModel::RigidBody).summary;
+    assert_eq!((plain.max_roll_rate, plain.roll_rate_at_burnout, plain.roll_rate_at_apogee, plain.roll_resonance), (0.0, 0.0, 0.0, None));
+    // The other way round is the mirror image.
+    let back = fly(rocket(0.62, -cant), 0.0, 0.0, FlightModel::RigidBody).summary;
+    assert!((back.max_roll_rate + s.max_roll_rate).abs() < 1e-6 * s.max_roll_rate && back.roll_rate_at_burnout < 0.0);
+}
+
+#[test]
+fn a_spin_that_outruns_the_pitch_frequency_crosses_it_while_spinning_up() {
+    // The pitch frequency of this rocket peaks near 36 rad/s. One degree of cant spins it at about 0.6 of the pitch frequency all
+    // the way (both follow the airspeed): no meeting. Three degrees spins it at about 1.8 times: it passes through while
+    // the rocket accelerates off the rail.
+    let gentle = fly(rocket(0.62, 1.0_f64.to_radians()), 0.0, 0.0, FlightModel::RigidBody);
+    assert_eq!(gentle.summary.roll_resonance, None);
+    let hard = fly(rocket(0.62, 3.0_f64.to_radians()), 0.0, 0.0, FlightModel::RigidBody);
+    let res = hard.summary.roll_resonance.expect("three degrees outrun the pitch frequency");
+    assert!(res.crossed && res.time > 0.17 && res.time < 1.45, "{res:?}");
+    assert!((res.roll_rate - res.pitch_frequency).abs() < 0.05 * res.pitch_frequency, "{res:?}");
+    // The recorded pitch frequency is there to compare: none on the rail, none under the parachute, tens of rad/s in between.
+    let samples = &hard.trajectory.samples;
+    assert_eq!(samples[0].pitch_frequency, 0.0);
+    let peak = samples.iter().map(|s| s.pitch_frequency).fold(0.0, f64::max);
+    assert!((20.0..60.0).contains(&peak), "{peak}");
+    let deploy = event_time(&hard, EventKind::Deploy("Main".into()));
+    assert!(samples.iter().filter(|s| s.t > deploy + 0.01).all(|s| s.pitch_frequency == 0.0));
+}

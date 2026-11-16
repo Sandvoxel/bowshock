@@ -5,12 +5,14 @@
 //! reference diameter). Pressure forces only (Euler). The solver covers the half domain `theta in [0, pi]`, so forces are doubled.
 
 use crate::engine::case3::Case3;
+use crate::engine::result::StopReason;
 use crate::engine::run::MONITOR_LIMIT;
+use crate::progress::{drop_orders, spread, Progress};
 use bowshock_cfd::gas3::cons_to_prim3;
 use bowshock_cfd::gas3::Cons3;
 use bowshock_cfd::grid3::{Face3, Grid3};
 use bowshock_cfd::solver3::Solver3;
-use crate::engine::result::StopReason;
+use std::ops::ControlFlow;
 
 /// Iterations between samples of the normal force.
 pub const SAMPLE_EVERY: usize = 50;
@@ -231,6 +233,10 @@ pub fn run3_on(case: &Case3, s: &mut Solver3, warm: bool) -> PointResult3 {
         if rule.check(it - 1, r, cn).is_some() {
             break;
         }
+        if cn.is_some() && rule.report(case, it).is_break() {
+            rule.cancel();
+            break;
+        }
     }
     rule.finish(case, lift_forces(case, s), it)
 }
@@ -261,6 +267,27 @@ impl StopRule3 {
             hist: Vec::new(),
             reason: StopReason::MaxIterations,
         }
+    }
+
+    /// Reports the run's progress after `iterations` iterations to the case's sink; `Break` when the sink asks to stop, and `Continue`
+    /// without a sink.
+    pub fn report(&self, case: &Case3, iterations: usize) -> ControlFlow<()> {
+        let Some(sink) = &case.progress else { return ControlFlow::Continue(()) };
+        sink.report(&Progress {
+            mach: case.mach,
+            alpha: case.alpha,
+            iteration: iterations,
+            max_iterations: case.numerics.max_iter,
+            residual_drop_orders: drop_orders(self.rmax, self.r),
+            monitor: self.hist.last().map_or(f64::NAN, |h| h.1),
+            spread: spread(&self.hist, self.nwin),
+            tolerance: Some(self.rel_tol),
+        })
+    }
+
+    /// Marks the run as ended by the sink: [`StopRule3::finish`] reports [`StopReason::Cancelled`].
+    pub fn cancel(&mut self) {
+        self.reason = StopReason::Cancelled;
     }
 
     /// Residual `r` of iteration `it` (0-based) and, at a sample iteration, the CN of the state after it. `Some(reason)` ends the run
@@ -308,7 +335,17 @@ impl StopRule3 {
             reason = StopReason::NonFinite;
         }
         let drop_orders = if self.rmax > 0.0 && self.r.is_finite() { (self.rmax / self.r.max(1e-300)).log10() } else { 0.0 };
-        PointResult3 { mach: case.mach, alpha: case.alpha, cn: f.cn, ca: f.ca, x_cp: f.x_cp, iterations, stop_reason: reason, drop_orders, cn_history: self.hist }
+        PointResult3 {
+            mach: case.mach,
+            alpha: case.alpha,
+            cn: f.cn,
+            ca: f.ca,
+            x_cp: f.x_cp,
+            iterations,
+            stop_reason: reason,
+            drop_orders,
+            cn_history: self.hist,
+        }
     }
 }
 

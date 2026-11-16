@@ -9,10 +9,28 @@ use crate::engine::body_grid::BaseBody;
 use crate::engine::case::{Case, Wake};
 use crate::engine::numerics::{DRAG_REL_WINDOW, MONITOR_EVERY};
 use crate::engine::result::{BasePoint, PointResult, StopReason, WallPoint};
+use crate::progress::{drop_orders, spread, Progress};
 use bowshock_cfd::gas::{cons_to_prim, freestream, prim_to_cons, sound_speed};
 use bowshock_cfd::solver::Solver;
 use bowshock_cfd::viscous::temperature;
 use bowshock_reference::base_drag::base_drag_coefficient;
+use std::ops::ControlFlow;
+
+/// Reports the run's progress after `iteration` iterations (residual `r`, residual reference `reference`, monitor history `hist`) to
+/// the case's sink; `Break` when the sink asks to stop, and `Continue` without a sink.
+pub(crate) fn report(case: &Case, iteration: usize, r: f64, reference: f64, hist: &[(usize, f64)]) -> ControlFlow<()> {
+    let Some(sink) = &case.progress else { return ControlFlow::Continue(()) };
+    sink.report(&Progress {
+        mach: case.mach,
+        alpha: 0.0,
+        iteration,
+        max_iterations: case.numerics.max_iter,
+        residual_drop_orders: drop_orders(reference, r),
+        monitor: hist.last().map_or(f64::NAN, |h| h.1),
+        spread: spread(hist, DRAG_REL_WINDOW / MONITOR_EVERY),
+        tolerance: case.numerics.drag_rel_tol,
+    })
+}
 
 /// Cold-start run on a fresh solver.
 pub fn run_cold(case: &Case) -> PointResult {
@@ -60,6 +78,10 @@ pub fn run_on(case: &Case, s: &mut Solver, warm: bool, r_ref: Option<f64>) -> Po
         }
         if let Some(why) = stop_reason(case, it, r, r_ref.unwrap_or(rmax), skip, &hist) {
             reason = why;
+            break;
+        }
+        if it % MONITOR_EVERY == MONITOR_EVERY - 1 && report(case, it + 1, r, r_ref.unwrap_or(rmax), &hist).is_break() {
+            reason = StopReason::Cancelled;
             break;
         }
     }

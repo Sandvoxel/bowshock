@@ -5,6 +5,7 @@ use crate::engine::body_grid::{BaseBody, Body, Nose};
 use crate::engine::case::sting_grid;
 use crate::engine::grid3::{body_grid3, Fins3, Grid3Params};
 use crate::error::Error;
+use crate::progress::ProgressSink;
 use crate::spec::FinProfile;
 use bowshock_cfd::flux::Limiter;
 use bowshock_cfd::gas3::freestream3;
@@ -52,6 +53,8 @@ pub struct Case3 {
     pub body: BaseBody,
     pub grid: Grid3Params,
     pub numerics: Numerics3,
+    /// Where the run reports its progress and can be stopped; `None`: silent.
+    pub progress: Option<ProgressSink>,
 }
 
 impl Case3 {
@@ -60,7 +63,7 @@ impl Case3 {
     pub fn new(mach: f64, alpha: f64, body: BaseBody, fins: Option<Fins3>, level: u32) -> Case3 {
         let sting = sting_grid(&body, level);
         let grid = Grid3Params { sting, fins, nk: Grid3Params::default_nk(level), level, fin_chord_cells: None, span_cells: None };
-        Case3 { mach, alpha, body, grid, numerics: Numerics3::auto(mach, level) }
+        Case3 { mach, alpha, body, grid, numerics: Numerics3::auto(mach, level), progress: None }
     }
 
     /// Free-stream state at the case's Mach number and incidence.
@@ -99,7 +102,16 @@ impl Case3 {
     #[doc(hidden)]
     pub fn anf_fins() -> Fins3 {
         let profile = FinProfile::Custom { section: vec![[0.0, 0.0], [0.1, 1.0], [1.0, 1.0]] };
-        Fins3 { count: 4, root_chord: 1.0, tip_chord: 1.0, span: 1.0, sweep: 0.0, thickness: bowshock_reference::anf::FIN_THICKNESS_CAL, te_to_base: 0.0, profile }
+        Fins3 {
+            count: 4,
+            root_chord: 1.0,
+            tip_chord: 1.0,
+            span: 1.0,
+            sweep: 0.0,
+            thickness: bowshock_reference::anf::FIN_THICKNESS_CAL,
+            te_to_base: 0.0,
+            profile,
+        }
     }
 
     /// Coarse ANF-like case for tests: [`Case3::anf_body`] with [`Case3::anf_fins`], level 0, `nk = 8`, 16 cells over the fin chord and the sting grid counts

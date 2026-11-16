@@ -40,7 +40,7 @@ pub fn screen<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
     let panel = |content: Element<'a, Message>, width: f32| container(content).width(width).height(Fill).style(theme::panel);
     row![
         panel(left(state, ctx), RAIL_W + BIN_W),
-        container(centre(state)).width(Fill).height(Fill).style(plot::surface),
+        container(centre(state, ctx)).width(Fill).height(Fill).style(plot::surface),
         panel(right(state, ctx), RIGHT_PANEL_W),
     ]
     .height(Fill)
@@ -132,7 +132,10 @@ fn method(state: &State) -> Element<'_, Message> {
     let mut lines: Vec<Element<'_, Message>> = Vec::new();
     match (state.output(), &state.error) {
         (_, Some(e)) => lines.push(muted(format!("Cannot analyse: {e}"), 12.0)),
-        _ if cfd_line => lines.extend(cfd_lines(state).into_iter().map(|l| muted(l, 12.0))),
+        _ if cfd_line => {
+            lines.extend(super::solve_view::compact(state));
+            lines.extend(cfd_lines(state).into_iter().map(|l| muted(l, 12.0)));
+        }
         (None, None) => lines.push(muted("Solving…", 12.0)),
         (Some(out), None) => {
             let busy = if state.pending { "solving…".to_string() } else { state.computed_at.map_or_else(String::new, ago) };
@@ -146,7 +149,10 @@ fn method(state: &State) -> Element<'_, Message> {
     }
     let solving = cfd_line && (state.cfd.solving.is_some() || state.cfd.lift_solving.is_some());
     let stale = cfd_line && state.cfd.status == cfd::Status::Stale;
-    let resolve: Element<'_, Message> = if solving {
+    let cancelling = state.cfd.solving.as_ref().or(state.cfd.lift_solving.as_ref()).is_some_and(|s| s.cancelling);
+    let resolve: Element<'_, Message> = if solving && cancelling {
+        push("Cancelling…", Weight::Secondary).disabled("The solver is ending the run in flight").into()
+    } else if solving {
         push("Cancel", Weight::Secondary).on_press(Message::CfdCancel).into()
     } else {
         push("Re-solve", if stale { Weight::Primary } else { Weight::Secondary }).on_press(Message::Resolve).into()
@@ -182,6 +188,11 @@ fn method(state: &State) -> Element<'_, Message> {
     let mut col = column![strip, column(lines).spacing(SPACE_1), actions].spacing(SPACE_2).padding([0.0, 0.0]);
     if let Some(lift) = lift_row {
         col = col.push(lift);
+    }
+    if let Some(stopped) = state.cfd.stopped.as_ref().filter(|s| cfd_line && !solving && s.table.is_some()) {
+        let keep: Element<'_, Message> = push(&stopped.keep_label, Weight::Primary).on_press(Message::CfdKeep).into();
+        let discard: Element<'_, Message> = push("Discard", Weight::Secondary).on_press(Message::CfdDiscard).into();
+        col = col.push(row![keep, discard].spacing(SPACE_2).boxed());
     }
     if state.compare_open {
         let item = |label: &'static str, message: Message| -> Element<'_, Message> { push(label, Weight::Secondary).on_press(message).small().into() };
@@ -225,10 +236,8 @@ fn cfd_lines(state: &State) -> Vec<String> {
     let cfd = &state.cfd;
     let base = state.base_method.name();
     let mut lines = Vec::new();
-    if let Some(s) = &cfd.lift_solving {
-        lines.push(format!("Solving 3D {} / {} · {}", s.done, s.total, s.backend.as_deref().unwrap_or("starting the solver")));
-    } else if let Some(s) = &cfd.solving {
-        lines.push(format!("Solving {} / {} · {}", s.done, s.total, s.backend.as_deref().unwrap_or("starting the solver")));
+    if cfd.solving.is_some() || cfd.lift_solving.is_some() {
+        // the solve's own block (solve_view::compact) says where it is
     } else {
         match &cfd.status {
             cfd::Status::Unsupported(why) => {
@@ -246,7 +255,17 @@ fn cfd_lines(state: &State) -> Vec<String> {
         }
     }
     if let Some((out, info)) = state.output().and_then(|o| o.cfd.as_ref().map(|i| (o, i))) {
-        let stale = if cfd.status == cfd::Status::Stale { "stale · " } else { "" };
+        if let Some((_, summary)) = cfd.summary.as_ref().filter(|(key, _)| cfd.table.as_ref().is_some_and(|t| t.key == *key)) {
+            lines.push(summary.clone());
+        }
+        let partial = cfd.table.as_ref().and_then(|t| cfd::partial_of(&cfd.plan, t, state.cond.altitude, state.cond.mach));
+        let stale = if partial.is_some() {
+            "partial · "
+        } else if cfd.status == cfd::Status::Stale {
+            "stale · "
+        } else {
+            ""
+        };
         let points = match out.analysis {
             super::Analysis::Stability => format!("{} Mach points · zero-lift, at Mach {:.2}", info.nodes, out.conditions.mach_fixed),
             _ => format!("{} Mach points · zero-lift", info.nodes),
@@ -257,10 +276,16 @@ fn cfd_lines(state: &State) -> Vec<String> {
         };
         let below = info.scaled_below.map_or_else(String::new, |m| format!(" · M<{m:.1} scaled from Extended"));
         lines.push(format!("{stale}{points} · solved on {} · {grid} grid · {}{below}", info.backend, cfd::ago(info.solved_at)));
-        if !stale.is_empty() {
+        if let Some((solved, of)) = partial {
+            lines.push(format!("Stopped early: {solved} of {of} Mach points solved; Re-solve for the rest."));
+        } else if !stale.is_empty() {
             lines.push("The geometry or the conditions changed since; Re-solve for a table that matches.".to_string());
         }
         let lift = cfd::lift_status(&cfd.plan, cfd.table.as_ref().and_then(|t| t.lift.as_ref()), state.cond.mach);
+        let lift_key = cfd.table.as_ref().and_then(|t| t.lift.as_ref()).map(|l| l.key);
+        if let Some((_, summary)) = cfd.lift_summary.as_ref().filter(|(key, _)| Some(*key) == lift_key && lift == cfd::Status::Fresh) {
+            lines.push(summary.clone());
+        }
         match (&info.lift, &lift) {
             (Some(l), cfd::Status::Fresh) => lines.push(format!(
                 "Drag from the 2D solver; margin, CP and CNα from the 3D Euler solve ({} points · solved on {} · {}).",
@@ -376,7 +401,10 @@ fn centred<'a>(message: String) -> Element<'a, Message> {
     container(text(message).size(TEXT_BODY).style(theme::muted)).center(Fill).boxed()
 }
 
-fn centre<'a>(state: &'a State) -> Element<'a, Message> {
+fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
+    if let Some(solving) = super::solve_view::centre(state, ctx) {
+        return solving;
+    }
     let (Some(out), Some(built)) = (state.output(), state.built.as_ref()) else {
         return centred(state.error.as_ref().map_or_else(|| "Solving…".to_string(), |e| format!("Nothing to analyse: {e}")));
     };

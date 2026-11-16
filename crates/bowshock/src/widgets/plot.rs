@@ -24,7 +24,7 @@ use crate::theme::{self, MONO};
 use crate::tokens::{self, Tokens};
 
 pub mod demo;
-mod ticks;
+pub(crate) mod ticks;
 mod view;
 
 pub use view::PlotView;
@@ -601,6 +601,17 @@ impl Axis {
     /// Mach number: `M 1.10`, `Mach 0.10 – 3.00`.
     pub fn mach() -> Self {
         Axis { label: "Mach".into(), unit: String::new(), prefix: "M ".into(), decimals: 2 }
+    }
+
+    /// The axis title written under the bottom plot: what the x axis measures and in what unit, `Time · s`, `Altitude · ft`,
+    /// `Angle of attack · °`; a dimensionless axis gets its name alone (`Mach number`, for the label `Mach`).
+    pub fn title(&self) -> String {
+        let label = if self.label == "Mach" { "Mach number" } else { self.label.as_str() };
+        if self.unit.is_empty() {
+            label.to_string()
+        } else {
+            format!("{label} · {}", self.unit)
+        }
     }
 
     /// `x` as a readout: `4.20 s`, `M 1.10`.

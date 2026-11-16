@@ -727,8 +727,8 @@ mod tests {
         // It starts at the group's value; editing the copy leaves the group and the siblings alone.
         assert_eq!(r.radial(fins).unwrap().override_of(1, RadialField::Cant), Some(0.0));
         let edit = r.set_instance_dim(fins, 1, Dim::Cant, 0.7).unwrap();
-        // The cant limit (30 degrees) applies to a copy exactly as to the group.
-        assert!((edit.applied - 30f64.to_radians()).abs() < 1e-12 && edit.limited.is_some());
+        // The cant limit (15 degrees) applies to a copy exactly as to the group.
+        assert!((edit.applied - 15f64.to_radians()).abs() < 1e-12 && edit.limited.is_some());
         let edit = r.set_instance_dim(fins, 1, Dim::Cant, 0.0175).unwrap();
         assert_eq!(edit.limited, None);
         let g = r.radial(fins).unwrap();

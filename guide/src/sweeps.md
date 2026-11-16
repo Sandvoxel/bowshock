@@ -102,6 +102,52 @@ it only to override the default. A [motor](motor.md) needs `Wake::Base`.
 Mach number and level (it never raises it). Use a small cap for smoke tests; capped points that
 do not converge report `Quality::Stalled`.
 
+### Progress and cancelling
+
+A point takes seconds to minutes. `on_progress(f)` calls `f` with a `Progress` about every 50 solver
+iterations (the sampling interval of the stop rules, `progress::SAMPLE_INTERVAL`), from the thread
+that runs the analysis: the Mach number (and angle of attack of a 3D run), the iteration and its
+cap, the orders the density residual has dropped, and the quantity the stop rule watches (the total
+drag coefficient of a viscous run, the normal force coefficient of a 3D run) with its range over the
+rule's window and the tolerance it has to get under. Reporting reads numbers the solver already has:
+it does not change the iteration or the result. Keep the callback short (send the snapshot to a
+channel and throttle there). Returning `ControlFlow::Break(())` ends the run at once and the
+analysis returns `Error::Cancelled`; no point of a cancelled analysis is returned.
+
+```rust,no_run
+use std::ops::ControlFlow;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use bowshock_core::{AftSpec, Analysis, BodySpec, Error, NoseShape, NoseSpec};
+
+fn main() -> Result<(), Error> {
+    let spec = BodySpec {
+        nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
+        aft: vec![AftSpec::Tube { length: 0.60 }],
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    let analysis = Analysis::new(&spec)?.on_progress(move |p| {
+        println!("Mach {:.2}: iteration {} of at most {}", p.mach, p.iteration, p.max_iterations);
+        if flag.load(Ordering::Relaxed) {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    match analysis.run(&[0.9]) {
+        Err(Error::Cancelled) => println!("cancelled"),
+        other => {
+            other?;
+        }
+    }
+    // The GPU the solver runs on, if there is one: `Some("Apple M1 Max")`.
+    println!("{:?}", bowshock_core::gpu_name());
+    Ok(())
+}
+```
+
 ### Warm start
 
 `warm_start(true)` starts each Mach number from the converged field of the previous one. It is

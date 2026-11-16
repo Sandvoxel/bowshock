@@ -47,6 +47,8 @@ pub enum Dim {
     Calibers,
     /// Rotation rates (°/s).
     AngularRate,
+    /// Spin rates and oscillation frequencies (Hz: one turn or one swing per second).
+    Frequency,
 }
 
 /// Reynolds numbers reach millions: shown in units of 10⁶ so the axis labels stay short.
@@ -55,6 +57,9 @@ static REYNOLDS: Unit = Unit { symbol: "×10⁶", to_si: 1e6, offset: 0.0, decim
 static PLAIN: Unit = Unit { symbol: "", to_si: 1.0, offset: 0.0, decimals: 2 };
 /// Rotation rates: degrees per second.
 static ANGULAR_RATE: Unit = Unit { symbol: "°/s", to_si: std::f64::consts::PI / 180.0, offset: 0.0, decimals: 1 };
+/// Spin rates and frequencies: turns (or swings) per second, so a roll rate and the pitch frequency it is measured against
+/// share one axis. One hertz is 2 pi rad/s.
+static FREQUENCY: Unit = Unit { symbol: "Hz", to_si: std::f64::consts::TAU, offset: 0.0, decimals: 2 };
 
 impl Dim {
     /// The display unit in `units`: the pick of the dimension's family (distances in the altitude family, stations in the
@@ -76,6 +81,7 @@ impl Dim {
             Dim::Reynolds => REYNOLDS,
             Dim::Calibers => *Quantity::Calibers.unit_for(units),
             Dim::AngularRate => ANGULAR_RATE,
+            Dim::Frequency => FREQUENCY,
         }
     }
 
@@ -98,6 +104,7 @@ impl Dim {
             Dim::Reynolds => "Reynolds number",
             Dim::Calibers => "Static margin",
             Dim::AngularRate => "Angular rate",
+            Dim::Frequency => "Frequency",
         }
     }
 
@@ -120,6 +127,7 @@ impl Dim {
             Dim::Reynolds => "Reynolds number",
             Dim::Calibers => "margin in calibers",
             Dim::AngularRate => "angular rate",
+            Dim::Frequency => "frequency",
         }
     }
 }
@@ -249,7 +257,7 @@ const fn described(mut c: Channel, hint: &'static str) -> Channel {
 }
 
 /// Every source the plots offer, in picker order.
-pub static CHANNELS: [Channel; 38] = [
+pub static CHANNELS: [Channel; 39] = [
     // Position.
     ch("altitude", "Altitude (AGL)", Group::Position, Dim::Length, true, |s| s.altitude),
     ch("altitude_msl", "Altitude (MSL)", Group::Position, Dim::Length, false, |s| s.altitude_msl),
@@ -275,8 +283,12 @@ pub static CHANNELS: [Channel; 38] = [
         "How fast the nose swings (pitch and yaw together). Zero under a parachute, where the descent is flown as a point mass.",
     ),
     described(
-        ch("roll_rate", "Roll rate", Group::Attitude, Dim::AngularRate, false, |s| s.roll_rate),
-        "How fast the rocket spins about its axis. Only canted fins drive it; positive turns the way increasing fin angle does.",
+        ch("roll_rate", "Roll rate", Group::Attitude, Dim::Frequency, false, |s| s.roll_rate),
+        "How fast the rocket spins about its axis, in turns per second (Hz; times 60 for rpm). Only canted fins drive it; positive is clockwise seen from behind, the way positive cant turns it.",
+    ),
+    described(
+        ch("pitch_frequency", "Pitch frequency", Group::Attitude, Dim::Frequency, true, |s| s.pitch_frequency),
+        "How many times a second the nose would swing back and forth after a nudge: the fins' stiffness over the rocket's inertia. Where the spin rate meets it, roll and pitch couple (roll resonance). Zero on the rail, under a parachute and for an unstable rocket.",
     ),
     // Aerodynamics.
     ch("mach", "Mach number", Group::Aerodynamics, Dim::Mach, true, |s| s.mach),
@@ -367,6 +379,7 @@ mod tests {
             attitude_angle: std::f64::consts::FRAC_PI_3,
             pitch_rate: 0.5,
             roll_rate: -2.0,
+            pitch_frequency: 18.0,
             ..Sample::default()
         }
     }
@@ -427,9 +440,14 @@ mod tests {
         assert!((value("reynolds", metric) - 2.5).abs() < 1e-12);
         assert!((value("recovery_cd_area", si) - 0.9).abs() < 1e-12);
         assert!((value("recovery_cd_area", inch) - 0.9 / (0.0254 * 0.0254)).abs() < 1e-6);
-        // Attitude angle in degrees; rotation rates in degrees per second (0.5 rad/s is 28.65 deg/s, roll the other way).
+        // Attitude angle in degrees; the pitch rate in degrees per second (0.5 rad/s is 28.65 deg/s); the roll rate in turns per
+        // second (Hz), the other way round for a negative one: -2 rad/s is 0.318 Hz, and the pitch frequency shares its unit.
         assert!((value("attitude_angle", metric) - 60.0).abs() < 1e-9);
-        assert!((value("pitch_rate", metric) - 0.5f64.to_degrees()).abs() < 1e-9 && (value("roll_rate", inch) + 2.0f64.to_degrees()).abs() < 1e-9);
+        assert!((value("pitch_rate", metric) - 0.5f64.to_degrees()).abs() < 1e-9);
+        assert!((value("roll_rate", inch) + 2.0 / std::f64::consts::TAU).abs() < 1e-12);
+        assert!((value("pitch_frequency", metric) - 18.0 / std::f64::consts::TAU).abs() < 1e-12);
+        assert_eq!(find("roll_rate").unwrap().unit(metric).symbol, "Hz");
+        assert!(find("pitch_frequency").unwrap().joins(find("roll_rate").unwrap().dim));
         assert_eq!(find("pitch_rate").unwrap().unit(metric).symbol, "°/s");
         // The unit text matches.
         assert_eq!(find("altitude").unwrap().unit(metric).symbol, "m");

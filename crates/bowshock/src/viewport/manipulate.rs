@@ -707,13 +707,14 @@ fn label_in(frame: &mut Frame, t: &Tokens, content: &str, rect: Rectangle, color
     text(frame, content, Point::new(rect.x + 2.0, rect.y + rect.height - 2.0), color, TEXT_LABEL, alignment::Horizontal::Left, alignment::Vertical::Bottom);
 }
 
-/// The note about handles left out, framed like the key-hint bar and centred in the free band of the viewport's bottom row
-/// (between the CG/CP legend and the scale bar). The hidden-label list is dropped, then the words shortened, until it fits.
-fn draw_note(frame: &mut Frame, t: &Tokens, size: Size, note: &str) {
+/// A note in the viewport's bottom row, framed like the key-hint bar and centred in the free band between the CG/CP legend and the
+/// scale bar: the handles left out (`Zoom in for more handles`) or the way to the hidden aft view of a fin set. The words after a
+/// ` · ` are dropped, then the note shortens to `shortest`, until it fits.
+fn draw_note(frame: &mut Frame, t: &Tokens, size: Size, note: &str, shortest: &str) {
     let (left, right) = (BAR_LEFT, size.width - BAR_RIGHT);
     let short = note.split(" · ").next().unwrap_or(note);
     let fits = |s: &str| s.chars().count() as f32 * (TEXT_LABEL + 1.0) * 0.55 + 24.0 <= right - left;
-    let Some(shown) = [note, short, "Zoom in for more"].into_iter().find(|s| fits(s)) else {
+    let Some(shown) = [note, short, shortest].into_iter().find(|s| fits(s)) else {
         return;
     };
     let w = shown.chars().count() as f32 * (TEXT_LABEL + 1.0) * 0.55 + 24.0;
@@ -1019,8 +1020,13 @@ impl canvas::Program<Message> for Overlay<'_> {
             }
             label_in(&mut frame, t, &l.text, l.rect, t.ink_muted);
         }
-        if let Some(note) = plan.note(vis.crowded).filter(|_| state.drag.is_none()) {
-            draw_note(&mut frame, t, size, &note);
+        // Without Alt a fin set's cant, thickness and angle handles are in the aft-view inset, which nothing on screen mentions.
+        if state.drag.is_none() {
+            if let Some(note) = plan.note(vis.crowded) {
+                draw_note(&mut frame, t, size, &note, "Zoom in for more");
+            } else if !all && self.rocket.radial(id).is_some_and(|r| r.kind.is_fin()) {
+                draw_note(&mut frame, t, size, "Hold Alt for the aft view · fin cant", "Hold Alt for aft view");
+            }
         }
 
         if let Some(drag) = &state.drag {
@@ -1306,7 +1312,22 @@ impl Overlay<'_> {
             let (from, to) = (ins.centre + handles::arc_dir(a) * ins.base, ins.centre + handles::arc_dir(a) * (ins.base + ins.reach.max(4.0)));
             let colour = if k == 0 { t.accent } else { t.part_fin };
             if radial.kind.is_fin() {
-                frame.stroke(&Path::line(from, to), Stroke::default().with_color(t.part_fin).with_width(width));
+                // A canted fin seen end-on is a thin plate leaning to one side (its own cant, the group's or its override).
+                let own = radial.effective(k);
+                match handles::canted_outline(ins, &own.kind, a, own.cant).filter(|_| own.cant.abs() > 1e-9) {
+                    Some(plate) => {
+                        let outline = Path::new(|p| {
+                            p.move_to(plate[0]);
+                            for q in &plate[1..] {
+                                p.line_to(*q);
+                            }
+                            p.close();
+                        });
+                        frame.fill(&outline, t.part_fin);
+                        frame.stroke(&outline, Stroke::default().with_color(t.ink_muted).with_width(0.75));
+                    }
+                    None => frame.stroke(&Path::line(from, to), Stroke::default().with_color(t.part_fin).with_width(width)),
+                }
                 if k == 0 {
                     frame.stroke(&Path::line(from, to), Stroke::default().with_color(colour).with_width(1.0));
                 }
@@ -1320,16 +1341,45 @@ impl Overlay<'_> {
             }
             label_in(frame, t, &l.text, l.rect, t.ink_muted);
         }
+        // The way the rocket spins seen from behind, when any fin is canted: a curved arrow and CW / CCW at the left of the picture.
+        if let Some(clockwise) = handles::spin_sense(radial) {
+            let at = Point::new(ins.panel.x + 20.0, ins.centre.y);
+            let (arc, head) = handles::spin_arrow(at, 8.0, clockwise);
+            let path = Path::new(|p| {
+                p.move_to(arc[0]);
+                for q in &arc[1..] {
+                    p.line_to(*q);
+                }
+            });
+            frame.stroke(&path, Stroke::default().with_color(t.accent).with_width(1.5));
+            let tip = Path::new(|p| {
+                p.move_to(head[0]);
+                p.line_to(head[1]);
+                p.line_to(head[2]);
+                p.close();
+            });
+            frame.fill(&tip, t.accent);
+            text(
+                frame,
+                if clockwise { "CW" } else { "CCW" },
+                Point::new(at.x, at.y + 14.0),
+                t.accent,
+                TEXT_LABEL,
+                alignment::Horizontal::Center,
+                alignment::Vertical::Top,
+            );
+        }
         // The cant lever as a dotted arc from the fin's own direction to its tilt.
         if let Some(cant) = vis.placed.iter().find(|p| p.spec.dim == Dim::Cant) {
             let Axis::Arc { centre } = cant.axis else {
                 return;
             };
             let lever = cant.at.distance(centre).max(1.0);
-            let a0 = radial.angle;
+            let a0 = handles::copy_angle(radial, self.instance);
+            let cant_now = radial.effective(self.instance).cant;
             let arc = Path::new(|p| {
                 for i in 0..=12 {
-                    let a = a0 + radial.cant * f64::from(i) / 12.0;
+                    let a = a0 + cant_now * f64::from(i) / 12.0;
                     let pt = centre + handles::arc_dir(a) * lever;
                     if i == 0 {
                         p.move_to(pt);

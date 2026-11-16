@@ -126,8 +126,10 @@ pub struct FinSet {
     pub thickness: f64,
     /// Edge cross-section.
     pub cross_section: FinCrossSection,
-    /// Cant angle (rad): each fin turned about its span axis, positive for a positive (right-handed about the nose direction)
-    /// roll moment. Drives the roll of the rigid-body flight model (see [`crate::flight`]); the point-mass model ignores it.
+    /// Cant angle (rad): each fin turned about its span axis so that its chord swings towards the direction its roll angle
+    /// decreases; a positive cant turns the rocket the way the fins' roll angle increases (right-handed about the nose direction,
+    /// clockwise seen from behind). Drives the roll of the rigid-body flight model (see [`crate::flight`]); the point-mass model
+    /// ignores it. Reference: Barrowman 1967 and Niskanen 2009, section 3.2.3 (roll forcing and damping of canted fins).
     pub cant: f64,
     /// Surface roughness height (m).
     pub roughness: f64,
@@ -139,9 +141,9 @@ pub struct FinSet {
     /// Stations (m) of the real root chord's ends when they differ from the trapezoid's (a free-form fin): fin-fin
     /// interference compares root chords. `None` is `station .. station + root_chord`.
     pub root_extent: Option<(f64, f64)>,
-    /// Roll angle of each fin about the rocket axis (rad): 0 is +Y, increasing towards +X (plus the pod's angle for fins on
-    /// a pod). Empty means `count` fins evenly spaced from 0. The normal force of 1- and 2-fin sets depends on it (see
-    /// [`crate::aero::CROSSFLOW_ROLL`]).
+    /// Roll angle of each fin about the rocket axis (rad): 0 is +Y, increasing clockwise seen from behind, towards +X (plus the
+    /// pod's angle for fins on a pod). Empty means `count` fins evenly spaced from 0. The normal force of 1- and 2-fin sets
+    /// depends on it (see [`crate::aero::CROSSFLOW_ROLL`]).
     pub angles: Vec<f64>,
     /// Identifier of the body the fins stand on. Fin sets on the same body whose root chords overlap count together for
     /// fin-fin interference (5 or more fins lose lift, [`crate::aero::fin_fin_factor`]); sets with different ids never

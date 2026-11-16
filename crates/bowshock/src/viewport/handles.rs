@@ -308,8 +308,10 @@ fn radial(cx: &Context, up: Vec3, r: &bowshock_model::RadialPart, place: Placeme
         }
         (Dim::Cant, _) => {
             let ins = inset?;
-            let root = ins.centre + arc_dir(r.angle) * ins.base;
-            Some((root + arc_dir(r.angle + own.cant) * CANT_LEVER.max(ins.reach), Axis::Arc { centre: root }))
+            // The handle edits the shown copy's cant (its own when it has unlinked it), so it stands on that copy's fin.
+            let a0 = copy_angle(r, cx.instance);
+            let root = ins.centre + arc_dir(a0) * ins.base;
+            Some((root + arc_dir(a0 + own.cant) * CANT_LEVER.max(ins.reach), Axis::Arc { centre: root }))
         }
         (Dim::Angle, _) => {
             let ins = inset?;
@@ -319,6 +321,11 @@ fn radial(cx: &Context, up: Vec3, r: &bowshock_model::RadialPart, place: Placeme
         }
         _ => None,
     }
+}
+
+/// The angle (rad) of copy `instance` of group `r` (A is 0); the group's own angle when it has no such copy.
+pub fn copy_angle(r: &bowshock_model::RadialPart, instance: usize) -> f64 {
+    r.angles().get(instance).copied().unwrap_or(r.angle)
 }
 
 fn internal(cx: &Context, up: Vec3, id: PartId, dim: Dim) -> Option<(Point, Axis)> {
@@ -387,6 +394,40 @@ pub fn is_circle(kind: HandleKind) -> bool {
 /// Whether a handle shows inside the aft inset.
 pub fn in_inset(spec: &HandleSpec) -> bool {
     spec.view == HandleView::Aft
+}
+
+/// The end-on outline of a canted fin of `kind` at `angle` in the aft inset, seen from behind: its planform with every point
+/// turned about the span line through the root's leading edge, so a point `z` behind the leading edge moves `z sin(cant)`
+/// towards the fin's `-tangent` (the side its angle decreases): the trailing edge of a fin with positive cant leans against the
+/// way the rocket spins, and the air pushes the plate the other way. `None` for a part that is not a fin.
+pub fn canted_outline(ins: &Inset, kind: &RadialKind, angle: f64, cant: f64) -> Option<Vec<Point>> {
+    let planform = kind.planform().filter(|_| kind.is_fin())?;
+    let (radial, tangent) = (arc_dir(angle), arc_dir(angle + std::f64::consts::FRAC_PI_2));
+    Some(planform.into_iter().map(|(z, h)| ins.centre + radial * (ins.base + h as f32 * ins.scale) - tangent * ((z * cant.sin()) as f32 * ins.scale)).collect())
+}
+
+/// Which way the rocket spins seen from behind, from the fin cants of a group: `Some(true)` clockwise (the net cant of its copies
+/// is positive), `Some(false)` anticlockwise, `None` when the copies cancel or no fin is canted.
+pub fn spin_sense(radial: &bowshock_model::RadialPart) -> Option<bool> {
+    let net: f64 = (0..usize::from(radial.count.max(1))).map(|k| radial.effective(k).cant).sum();
+    (net.abs() > 1e-9).then_some(net > 0.0)
+}
+
+/// The spin arrow of the aft-view inset: a 270° arc of radius `r` about `centre` and an arrow head at its end, running the way the
+/// rocket turns seen from behind (clockwise on screen when `clockwise`, the way angles increase in the inset). The head is the
+/// triangle `[tip, left, right]`.
+pub fn spin_arrow(centre: Point, r: f32, clockwise: bool) -> (Vec<Point>, [Point; 3]) {
+    const STEPS: usize = 18;
+    let (start, sweep) =
+        if clockwise { (-0.75 * std::f64::consts::PI, 1.5 * std::f64::consts::PI) } else { (0.75 * std::f64::consts::PI, -1.5 * std::f64::consts::PI) };
+    let arc: Vec<Point> = (0..=STEPS).map(|i| centre + arc_dir(start + sweep * i as f64 / STEPS as f64) * r).collect();
+    let end = start + sweep;
+    // The direction of travel at the end: d(arc_dir)/d(angle) = (cos, sin), reversed when the angle falls.
+    let toward = if clockwise { 1.0 } else { -1.0 };
+    let tangent = Vector::new(end.cos() as f32 * toward, end.sin() as f32 * toward);
+    let side = Vector::new(-tangent.y, tangent.x);
+    let at = arc[STEPS];
+    (arc, [at + tangent * 4.5, at + side * 3.0, at - side * 3.0])
 }
 
 #[cfg(test)]
@@ -477,5 +518,75 @@ mod tests {
         let c = Point::new(10.0, 10.0);
         assert!(angle_about(c, Point::new(10.0, 0.0)).abs() < 1e-6);
         assert!((angle_about(c, Point::new(20.0, 10.0)) - std::f64::consts::FRAC_PI_2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_cant_handle_stands_on_the_fin_that_is_shown_and_leans_with_its_own_cant() {
+        let (mut r, _, fin) = rocket();
+        // Fin B (copy 1) has its own cant; the group and the other copies stay straight.
+        assert!(r.unlink_field(fin, 1, bowshock_model::RadialField::Cant));
+        r.set_instance_dim(fin, 1, Dim::Cant, 0.2).unwrap();
+        let cam = side();
+        for (instance, cant) in [(0usize, 0.0), (1, 0.2), (2, 0.0)] {
+            let cx = Context { instance, ..cx(&r, &cam) };
+            let ins = inset(&cx, fin).unwrap();
+            let handle = place(&cx, fin).into_iter().find(|h| h.spec.dim == Dim::Cant).expect("the aft inset has a cant handle");
+            // It stands on that copy's own fin, at its own angle (A 0, B 120, C 240 degrees), tilted by that copy's cant.
+            let a = copy_angle(r.radial(fin).unwrap(), instance);
+            assert!((a - f64::from(instance as u32) * std::f64::consts::TAU / 3.0).abs() < 1e-9, "{a}");
+            let root = ins.centre + arc_dir(a) * ins.base;
+            let want = root + arc_dir(a + cant) * CANT_LEVER.max(ins.reach);
+            assert!(handle.at.distance(want) < 1e-3, "copy {instance}: {:?} vs {want:?}", handle.at);
+            assert_eq!(handle.axis, Axis::Arc { centre: root });
+        }
+        // A copy that does not exist falls back to the group's own angle.
+        assert_eq!(copy_angle(r.radial(fin).unwrap(), 9), r.radial(fin).unwrap().angle);
+    }
+
+    #[test]
+    fn a_canted_fin_seen_from_behind_leans_its_trailing_edge_towards_decreasing_angle() {
+        let (mut r, _, fin) = rocket();
+        let cam = side();
+        let ins = inset(&cx(&r, &cam), fin).unwrap();
+        let kind = RadialKind::FinSet { root_chord: 0.1, tip_chord: 0.05, span: 0.05, sweep: 0.03, thickness: 0.003 };
+        // Straight: a line along the fin's radius (fin A, angle 0, points up the screen); no offset sideways.
+        let flat = canted_outline(&ins, &kind, 0.0, 0.0).unwrap();
+        assert!(flat.iter().all(|p| (p.x - ins.centre.x).abs() < 1e-4), "{flat:?}");
+        // Cant 0.2 rad: the root trailing edge (0.1 m behind the leading edge) is 0.1 sin 0.2 m to the left of the root, where the
+        // angle decreases (tangent at angle 0 is +x on screen); the root leading edge stays; the span stays.
+        let canted = canted_outline(&ins, &kind, 0.0, 0.2).unwrap();
+        assert!((canted[0].x - ins.centre.x).abs() < 1e-4 && (canted[0].y - flat[0].y).abs() < 1e-4);
+        assert!((canted[3].x - (ins.centre.x - 0.1 * 0.2f64.sin() as f32 * ins.scale)).abs() < 1e-3, "{canted:?}");
+        assert!((canted[1].y - flat[1].y).abs() < 1e-4 && canted[1].x < ins.centre.x);
+        // The same for the fin at angle 120 degrees: the offset is along its own tangent.
+        let b = 120.0f64.to_radians();
+        let (radial, tangent) = (arc_dir(b), arc_dir(b + std::f64::consts::FRAC_PI_2));
+        let at_b = canted_outline(&ins, &kind, b, 0.2).unwrap();
+        let want = ins.centre + radial * ins.base - tangent * (0.1 * 0.2f64.sin() as f32 * ins.scale);
+        assert!(at_b[3].distance(want) < 1e-3, "{:?} vs {want:?}", at_b[3]);
+        // A lug is not a fin.
+        assert!(canted_outline(&ins, &RadialKind::LaunchLug { length: 0.05, diameter: 0.01 }, 0.0, 0.2).is_none());
+        // Which way the rocket spins: the net cant of the copies.
+        assert_eq!(spin_sense(r.radial(fin).unwrap()), None);
+        r.set_cant(fin, 0.05);
+        assert_eq!(spin_sense(r.radial(fin).unwrap()), Some(true));
+        r.set_cant(fin, -0.05);
+        assert_eq!(spin_sense(r.radial(fin).unwrap()), Some(false));
+    }
+
+    #[test]
+    fn the_spin_arrow_runs_the_way_the_rocket_turns() {
+        let c = Point::new(100.0, 100.0);
+        let (arc, head) = spin_arrow(c, 10.0, true);
+        assert!(arc.iter().all(|p| (p.distance(c) - 10.0).abs() < 1e-4));
+        // Clockwise on screen: it starts lower left and runs up and over to the lower right, where it is heading down and left.
+        assert!(arc[0].x < c.x && arc[0].y > c.y && arc[arc.len() - 1].x > c.x && arc[arc.len() - 1].y > c.y);
+        let end = arc[arc.len() - 1];
+        assert!(head[0].x < end.x && head[0].y > end.y, "{head:?}");
+        // Anticlockwise is its mirror image.
+        let (back, head) = spin_arrow(c, 10.0, false);
+        assert!(back[0].x > c.x && back[0].y > c.y && back[back.len() - 1].x < c.x && back[back.len() - 1].y > c.y);
+        let end = back[back.len() - 1];
+        assert!(head[0].x > end.x && head[0].y > end.y, "{head:?}");
     }
 }

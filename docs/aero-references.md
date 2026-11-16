@@ -69,7 +69,8 @@ Reference values from other programs are kept apart, in [openrocket-comparison.m
 | Pitch/yaw damping `1/2 rho V A_ref sum CNalpha_i (x_i - x_cg)^2` | strip theory of Barrowman 1967; Mandell, Caporaso & Bengen, *Topics in Advanced Model Rocketry* (1973) |
 | Body crossflow damping `1/2 rho 1.1 w abs(w) sum A abs(x - x_cg)^3` | Hoerner, *Fluid-Dynamic Drag* (1965) crossflow drag; Zipfel 2014 strip theory |
 | Jet damping `mdot (x_exit - x_cg)^2` | Zipfel 2014 (propulsive damping); Mandell et al. 1973 |
-| Roll forcing and damping of canted fins (chord-weighted strip theory) | Barrowman 1967; Niskanen 2009 section 3.2.3 |
+| Roll forcing and damping of canted fins (chord-weighted strip theory); positive cant and positive roll rate are clockwise seen from behind (right-handed about the nose direction), the way a fin's roll angle increases; the Inspector limits cant to 15 degrees, the linear range of the fin lift slope | Barrowman 1967; Niskanen 2009 section 3.2.3 |
+| Pitch natural frequency `sqrt(q A_ref CNalpha (x_cp - x_cg) / I)` and the roll-pitch resonance flag (the spin rate crossing it, or coming within 15 % of it, above a 2 s pitch period): a Bowshock check; the axisymmetric model carries no asymmetry, so it flags the risk and does not simulate the growth | Zipfel 2014 (short-period frequency); Nielsen, *Missile Aerodynamics* (1960), roll-pitch coupling |
 | Step limit `0.3 / (fastest rotational rate)` for RK4 stability | engineering choice (RK4 real-axis stability limit 2.78) |
 | Fin flutter velocity | Martin, NACA TN 4197 (1958) |
 | Mass, CG and moments of inertia of the parts (`bowshock-model/src/mass.rs`) | Niskanen 2009 section 4.2.3; standard solid-body formulas |

@@ -2,19 +2,21 @@
 
 use crate::atmosphere::{FlightConditions, SUTHERLAND_S};
 use crate::engine::body_grid::{check_quality, BaseBody, MAX_STRETCHING, MAX_STRETCHING_VISCOUS_J};
+use crate::engine::case::{Case, Jet, Wake};
 use crate::engine::case3::Case3;
 use crate::engine::grid3::Fins3;
-use crate::engine::run3::{run3_on, PointResult3};
-use bowshock_cfd::solver3::Solver3;
-use crate::engine::case::{Case, Jet, Wake};
 use crate::engine::numerics::Numerics;
 use crate::engine::result::{PointResult, StopReason};
 use crate::engine::run::run_on;
+use crate::engine::run3::{run3_on, PointResult3};
 use crate::error::Error;
+use crate::progress::{Progress, ProgressSink};
 use crate::spec::{BodySpec, FinSpec, MotorSpec};
 use bowshock_cfd::gas::GAMMA;
 use bowshock_cfd::solver::{Solver, Turbulence, Viscous};
+use bowshock_cfd::solver3::Solver3;
 use bowshock_reference::base_drag::base_drag_coefficient;
+use std::ops::ControlFlow;
 
 /// Lowest and highest Mach number accepted by [`Analysis::run`].
 const MACH_RANGE: (f64, f64) = (0.1, 3.0);
@@ -246,6 +248,7 @@ pub struct Analysis {
     warm_start: bool,
     estimate_uncertainty: bool,
     lift_hook: Option<fn(&mut Case3)>,
+    progress: Option<ProgressSink>,
 }
 
 /// Free stream of a viscous sweep.
@@ -279,6 +282,7 @@ impl Analysis {
             warm_start: false,
             estimate_uncertainty: false,
             lift_hook: None,
+            progress: None,
         }
     }
 
@@ -342,6 +346,15 @@ impl Analysis {
     /// Caps `max_iter` of whichever numerics is used (the 3D iteration cap of [`Analysis::run_lift`] too).
     pub fn max_iterations(mut self, cap: usize) -> Self {
         self.max_iterations = Some(cap);
+        self
+    }
+
+    /// Calls `f` with the state of every run about once per [`SAMPLE_INTERVAL`](crate::progress::SAMPLE_INTERVAL) iterations, from the
+    /// thread that runs the analysis (see [`crate::progress`]). Returning [`ControlFlow::Break`] ends the analysis at once with
+    /// [`Error::Cancelled`]. Reporting does not change the iteration or the result of a run that is not cancelled. The monitor of a
+    /// viscous drag run and of a 3D run is reported as a coefficient on the reference area.
+    pub fn on_progress(mut self, f: impl Fn(&Progress) -> ControlFlow<()> + Send + Sync + 'static) -> Self {
+        self.progress = Some(ProgressSink::new(f));
         self
     }
 
@@ -546,6 +559,8 @@ impl Analysis {
         if let Some(cap) = self.max_iterations {
             case.numerics.max_iter = case.numerics.max_iter.min(cap);
         }
+        let q = if self.flight.is_some() { (self.d_nose / self.d_ref).powi(2) } else { 1.0 };
+        case.progress = self.progress.as_ref().map(|p| p.scaled(q));
         match rans.and_then(|r| r.jet) {
             Some(jet) => case.with_motor(jet),
             None => case,
@@ -651,7 +666,7 @@ impl Analysis {
     /// The sweep logic shared by the backends: first point cold; later points warm (when enabled) against the residual peak
     /// of the most recent cold start; a warm point that ends `Failed` or `Stalled` is re-run cold on a fresh solver, and a point
     /// after a `Failed` point starts cold on a fresh solver.
-    fn sweep<R: Runner>(&self, runner: &R, cases: &[Case]) -> Result<Vec<PointResult>, R::Error> {
+    fn sweep<R: Runner<Error = Error>>(&self, runner: &R, cases: &[Case]) -> Result<Vec<PointResult>, Error> {
         let quality_of = |case: &Case, d: &PointResult| quality(d, &self.drag(case.mach, d));
         let mut out: Vec<PointResult> = Vec::with_capacity(cases.len());
         let mut state: Option<R::State> = None;
@@ -661,6 +676,9 @@ impl Analysis {
             let warm = match (&mut state, previous_failed) {
                 (Some(s), false) => {
                     let r = runner.warm(s, case, r_ref)?;
+                    if r.stop_reason == StopReason::Cancelled {
+                        return Err(Error::Cancelled);
+                    }
                     matches!(quality_of(case, &r), Quality::Converged | Quality::Stationary).then_some(r)
                 }
                 _ => None,
@@ -674,6 +692,9 @@ impl Analysis {
                     r
                 }
             };
+            if result.stop_reason == StopReason::Cancelled {
+                return Err(Error::Cancelled);
+            }
             previous_failed = quality_of(case, &result) == Quality::Failed;
             out.push(result);
         }
@@ -699,6 +720,7 @@ impl Analysis {
         let why = match guard(|| self.sweep_gpu_required(cases)) {
             Ok(results) => return Ok((results, BackendUsed::Gpu, None)),
             Err(Error::Internal(m)) => m.replacen("solver panicked", "GPU solver panicked", 1),
+            Err(Error::Cancelled) => return Err(Error::Cancelled),
             Err(e) => format!("GPU unavailable: {e}"),
         };
         Ok((guard(|| self.sweep_cpu(cases))?, BackendUsed::Cpu, Some(why)))
@@ -745,14 +767,14 @@ pub struct LiftPolar {
 
 /// Quality of a 3D result: `Failed` on a non-finite state or force, else by stop reason like the 2D facade.
 fn lift_quality(d: &PointResult3) -> Quality {
-    if d.stop_reason == StopReason::NonFinite || !d.cn.is_finite() || !d.ca.is_finite() {
+    if matches!(d.stop_reason, StopReason::NonFinite | StopReason::Cancelled) || !d.cn.is_finite() || !d.ca.is_finite() {
         return Quality::Failed;
     }
     match d.stop_reason {
         StopReason::ResidualDrop => Quality::Converged,
         StopReason::CdStationary | StopReason::MeanStationary | StopReason::BasePressureStationary | StopReason::ResidualPlateau => Quality::Stationary,
         StopReason::MaxIterations => Quality::Stalled,
-        StopReason::NonFinite => Quality::Failed,
+        StopReason::NonFinite | StopReason::Cancelled => Quality::Failed,
     }
 }
 
@@ -802,6 +824,7 @@ impl Analysis {
                 let why = match guard(|| self.lift_gpu(&machs, &alphas)) {
                     Ok(p) => return Ok(p),
                     Err(Error::Internal(m)) => m.replacen("solver panicked", "GPU solver panicked", 1),
+                    Err(Error::Cancelled) => return Err(Error::Cancelled),
                     Err(e) => format!("GPU unavailable: {e}"),
                 };
                 let mut p = guard(|| self.lift_cpu(&machs, &alphas))?;
@@ -840,6 +863,7 @@ impl Analysis {
         if let Some(cap) = self.max_iterations {
             case.numerics.max_iter = case.numerics.max_iter.min(cap);
         }
+        case.progress = self.progress.as_ref().map(|p| p.scaled((self.d_nose / self.d_ref).powi(2)));
         if let Some(hook) = self.lift_hook {
             hook(&mut case);
         }
@@ -849,7 +873,15 @@ impl Analysis {
     /// Coefficients on the reference area and lengths in metres.
     fn lift_point(&self, r: &PointResult3) -> LiftPoint {
         let q = (self.d_nose / self.d_ref).powi(2);
-        LiftPoint { mach: r.mach, alpha: r.alpha, cn: r.cn * q, ca_pressure: r.ca * q, x_cp: r.x_cp * self.d_nose, quality: lift_quality(r), iterations: r.iterations }
+        LiftPoint {
+            mach: r.mach,
+            alpha: r.alpha,
+            cn: r.cn * q,
+            ca_pressure: r.ca * q,
+            x_cp: r.x_cp * self.d_nose,
+            quality: lift_quality(r),
+            iterations: r.iterations,
+        }
     }
 
     /// The sweep loop shared by the lift backends: per Mach number a cold first incidence, warm later ones. A warm point that ends
@@ -862,6 +894,9 @@ impl Analysis {
                 let case = self.lift_case(m, a.to_radians());
                 if let Some(s) = &mut state {
                     let r = runner.warm(s, &case)?;
+                    if r.stop_reason == StopReason::Cancelled {
+                        return Err(Error::Cancelled);
+                    }
                     if matches!(lift_quality(&r), Quality::Converged | Quality::Stationary) {
                         points.push(self.lift_point(&r));
                         continue;
@@ -874,6 +909,9 @@ impl Analysis {
                     c.numerics.implicit.cfl_max *= 0.5;
                     r = runner.cold(&c)?.0;
                     state = None;
+                }
+                if r.stop_reason == StopReason::Cancelled {
+                    return Err(Error::Cancelled);
                 }
                 if lift_quality(&r) == Quality::Failed {
                     state = None;
@@ -968,7 +1006,7 @@ const FARFIELD_DP_FAILED: f64 = 1.0;
 fn quality(d: &PointResult, drag: &Drag) -> Quality {
     let below_vacuum = d.cp_base < -2.0 / (GAMMA * d.mach * d.mach); // false for NaN
     let positive = |x: f64| x > 0.0; // false for NaN
-    if d.stop_reason == StopReason::NonFinite
+    if matches!(d.stop_reason, StopReason::NonFinite | StopReason::Cancelled)
         || !positive(d.min_rho)
         || !positive(d.min_p)
         || !drag.total.is_finite()
@@ -981,7 +1019,7 @@ fn quality(d: &PointResult, drag: &Drag) -> Quality {
         StopReason::ResidualDrop => Quality::Converged,
         StopReason::CdStationary | StopReason::MeanStationary | StopReason::BasePressureStationary | StopReason::ResidualPlateau => Quality::Stationary,
         StopReason::MaxIterations => Quality::Stalled,
-        StopReason::NonFinite => Quality::Failed,
+        StopReason::NonFinite | StopReason::Cancelled => Quality::Failed,
     }
 }
 

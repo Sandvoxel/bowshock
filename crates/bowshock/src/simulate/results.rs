@@ -2,6 +2,7 @@
 //! several flights ticked, the comparison against the reference (SimulateCompare), and the ground track (04). Every number is a
 //! button that moves the plots' crosshair to the moment it happened.
 
+use bowshock_sim::roll::MIN_SPIN_RATE;
 use iced::widget::{column, container, mouse_area, row, scrollable, text, Space};
 use iced::{font, mouse, Element, Fill, Theme, Widget};
 
@@ -217,18 +218,25 @@ fn sections<'a>(run: &'a Run, ctx: &'a Ctx, stale: bool) -> Vec<Element<'a, Mess
     let rail_chip = badge(if rail_ok { Severity::Ok } else { Severity::Warn }, format!("{} {}", if rail_ok { "≥" } else { "<" }, vel(MIN_RAIL_EXIT, 0).0));
     let stable = s.stability_off_rail_cal >= MIN_OFF_RAIL_CAL;
     let stab_chip = badge(if stable { Severity::Ok } else { Severity::Err }, format!("{} {MIN_OFF_RAIL_CAL:.1}", if stable { "≥" } else { "<" }));
-    let ascent = section(
-        2,
-        "Ascent",
-        true,
-        vec![
-            line("Max velocity", None, max_v, v_unit, stale, Some(t.max_speed)),
-            line("Max Mach", None, format!("{:.2}", s.max_mach), "", stale, Some(t.max_mach)),
-            line("Max accel", None, format!("{:.1}", s.max_acceleration_g), "g", stale, Some(t.max_accel)),
-            line("Rail exit", Some(rail_chip), rail, rail_unit, stale, Some(t.rail_exit)),
-            line("Stability off rail", Some(stab_chip), format!("{:.2}", s.stability_off_rail_cal), "cal", stale, Some(t.rail_exit)),
-        ],
-    );
+    let mut ascent_rows = vec![
+        line("Max velocity", None, max_v, v_unit, stale, Some(t.max_speed)),
+        line("Max Mach", None, format!("{:.2}", s.max_mach), "", stale, Some(t.max_mach)),
+        line("Max accel", None, format!("{:.1}", s.max_acceleration_g), "g", stale, Some(t.max_accel)),
+        line("Rail exit", Some(rail_chip), rail, rail_unit, stale, Some(t.rail_exit)),
+        line("Stability off rail", Some(stab_chip), format!("{:.2}", s.stability_off_rail_cal), "cal", stale, Some(t.rail_exit)),
+    ];
+    // Canted fins: how fast the rocket spins, and whether the spin meets its pitch frequency on the way.
+    if let Some(spin) = Spin::of(s) {
+        let peak = badge(Severity::Info, format!("{:.0} rpm {}", spin.max_rpm, spin.sense));
+        ascent_rows.push(line("Max spin", Some(peak), format!("{:.1}", spin.max_hz), "Hz", stale, Some(t.max_roll)));
+        ascent_rows.push(line("Spin at burnout", None, format!("{:.1}", spin.burnout_hz), "Hz", stale, Some(t.burnout)));
+        ascent_rows.push(line("Spin at apogee", None, format!("{:.1}", spin.apogee_hz), "Hz", stale, Some(t.apogee)));
+        if let Some(r) = &spin.resonance {
+            let chip = badge(Severity::Warn, r.chip.clone());
+            ascent_rows.push(line(r.label, Some(chip), format!("{:.1}", r.time), "s", stale, Some(r.time)));
+        }
+    }
+    let ascent = section(2, "Ascent", true, ascent_rows);
 
     // 03 RECOVERY
     let mut rows: Vec<Element<'a, Message>> = Vec::new();
@@ -246,6 +254,59 @@ fn sections<'a>(run: &'a Run, ctx: &'a Ctx, stale: bool) -> Vec<Element<'a, Mess
     let recovery = section(3, "Recovery", true, rows);
 
     vec![apogee, ascent, recovery]
+}
+
+/// The spin of one run as the results column reads it: the fastest turn, the turn at burnout and at apogee (turns per second), and
+/// where the spin rate meets the pitch frequency (see [`bowshock_sim::roll`]). Present only for a run that spins.
+#[derive(Debug, Clone, PartialEq)]
+struct Spin {
+    /// The largest roll rate, rev/s and rpm.
+    max_hz: f64,
+    max_rpm: f64,
+    /// Which way it turns seen from behind (`CW` or `CCW`).
+    sense: &'static str,
+    /// The roll rate at the last burnout and at apogee, rev/s.
+    burnout_hz: f64,
+    apogee_hz: f64,
+    /// Where it meets the pitch frequency.
+    resonance: Option<SpinResonance>,
+}
+
+/// A roll–pitch resonance as a results row: the label, the chip text and the time.
+#[derive(Debug, Clone, PartialEq)]
+struct SpinResonance {
+    label: &'static str,
+    chip: String,
+    time: f64,
+}
+
+impl Spin {
+    /// The spin of a run, `None` when it hardly turns (no canted fins, or a point-mass flight).
+    fn of(s: &bowshock_sim::Summary) -> Option<Spin> {
+        if s.max_roll_rate.abs() < MIN_SPIN_RATE {
+            return None;
+        }
+        let resonance = s.roll_resonance.map(|r| {
+            let pitch = r.pitch_frequency / std::f64::consts::TAU;
+            if r.crossed {
+                SpinResonance { label: "Spin crosses pitch", chip: format!("{pitch:.1} Hz"), time: r.time }
+            } else {
+                SpinResonance {
+                    label: "Spin near pitch",
+                    chip: format!("{:.0} % off {pitch:.1} Hz", 100.0 * (r.roll_rate / r.pitch_frequency - 1.0).abs()),
+                    time: r.time,
+                }
+            }
+        });
+        Some(Spin {
+            max_hz: format::rev_per_s(s.max_roll_rate),
+            max_rpm: format::rpm(s.max_roll_rate),
+            sense: format::spin_sense(s.max_roll_rate),
+            burnout_hz: format::rev_per_s(s.roll_rate_at_burnout),
+            apogee_hz: format::rev_per_s(s.roll_rate_at_apogee),
+            resonance,
+        })
+    }
 }
 
 /// A key result of the comparison table: its title, quantity, decimals, the number in SI and when it happened.
@@ -335,4 +396,42 @@ fn compare_row<'a>(flight: &'a Flight, value: String, diff: String, unit: &'a st
     .align_y(iced::Center)
     .height(ROW_H);
     pointer(cells.boxed(), seek)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bowshock_sim::{RollResonance, Summary};
+
+    #[test]
+    fn a_run_that_does_not_spin_has_no_spin_rows() {
+        assert_eq!(Spin::of(&Summary::default()), None);
+        // A drift of a hundredth of a turn per second is not a spin.
+        assert_eq!(Spin::of(&Summary { max_roll_rate: 0.01, ..Summary::default() }), None);
+    }
+
+    #[test]
+    fn the_spin_reads_in_rev_per_s_and_rpm_with_its_sense_and_the_resonance_it_meets() {
+        let tau = std::f64::consts::TAU;
+        let summary = Summary {
+            max_roll_rate: 20.0 * tau,
+            roll_rate_at_burnout: 19.5 * tau,
+            roll_rate_at_apogee: 4.0 * tau,
+            roll_resonance: Some(RollResonance { time: 0.62, roll_rate: 2.4 * tau, pitch_frequency: 2.4 * tau, crossed: true }),
+            ..Summary::default()
+        };
+        let spin = Spin::of(&summary).expect("spins");
+        assert!((spin.max_hz - 20.0).abs() < 1e-9 && (spin.max_rpm - 1200.0).abs() < 1e-9 && spin.sense == "CW");
+        assert!((spin.burnout_hz - 19.5).abs() < 1e-9 && (spin.apogee_hz - 4.0).abs() < 1e-9);
+        assert_eq!(spin.resonance, Some(SpinResonance { label: "Spin crosses pitch", chip: "2.4 Hz".into(), time: 0.62 }));
+        // The other way, and only coming near the pitch frequency.
+        let back = Summary {
+            max_roll_rate: -3.0 * tau,
+            roll_resonance: Some(RollResonance { time: 3.0, roll_rate: 2.7 * tau, pitch_frequency: 3.0 * tau, crossed: false }),
+            ..Summary::default()
+        };
+        let spin = Spin::of(&back).expect("spins");
+        assert_eq!((spin.sense, spin.max_hz.round() as i32), ("CCW", 3));
+        assert_eq!(spin.resonance.map(|r| (r.label, r.chip)), Some(("Spin near pitch", "10 % off 3.0 Hz".to_string())));
+    }
 }

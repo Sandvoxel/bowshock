@@ -1,0 +1,36 @@
+# Fin cant (spin in flight): type a cant, see the canted fins in 3D and in the aft-view inset (Alt shows it: the env variable holds it for
+# a script), drag the inset's cant handle, then fly it in Simulate and read the roll rate, the spin rows and the Roll plots.
+#   BOWSHOCK_DRIVE_MODIFIERS=alt cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/cant.drive out/cant
+# (Without the variable the viewport says `Hold Alt for the aft view · fin cant` on a selected fin set.)
+viewport 1280x1000
+# Turn the camera to the tail (drag the ViewCube round, click TAIL), select the fin group in the Station Lanes.
+press (906, 118)
+move (860, 118)
+move (800, 118)
+release (800, 118)
+press (906, 118)
+move (860, 118)
+move (800, 118)
+release (800, 118)
+click (916, 124)
+click (925, 824)
+# Type 3 degrees into Cant: positive is clockwise seen from behind (the aft view says CW).
+click (1175, 763)
+type "3"
+type enter
+screenshot cant-1-aft-3deg.png
+# Drag the cant handle of the inset round to the limit (15 degrees); the tag turns warn.
+press (886, 218)
+move (895, 222)
+move (915, 232)
+move (935, 250)
+screenshot cant-2-drag.png
+release (935, 250)
+# Back to 3 degrees, then fly it: Simulate, Run, the Roll preset.
+click (1175, 763)
+type "3"
+type enter
+click (663, 18)
+click "Run"
+click "Roll"
+screenshot cant-3-simulate-roll.png

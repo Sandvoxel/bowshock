@@ -172,6 +172,8 @@ pub struct Times {
     pub max_mach: f64,
     /// Peak acceleration on the way up.
     pub max_accel: f64,
+    /// Peak spin rate on the way up (the largest roll rate of either sense).
+    pub max_roll: f64,
     /// First recovery deployment, if any.
     pub deploy: Option<f64>,
     /// Ground contact.
@@ -193,7 +195,7 @@ impl Times {
             }
         }
         let up = result.trajectory.samples.iter().take_while(|s| s.t <= t.apogee);
-        let (mut v, mut m, mut a) = (f64::MIN, f64::MIN, f64::MIN);
+        let (mut v, mut m, mut a, mut r) = (f64::MIN, f64::MIN, f64::MIN, 0.0);
         for s in up {
             if s.speed > v {
                 (v, t.max_speed) = (s.speed, s.t);
@@ -203,6 +205,9 @@ impl Times {
             }
             if s.acceleration > a {
                 (a, t.max_accel) = (s.acceleration, s.t);
+            }
+            if s.roll_rate.abs() > r {
+                (r, t.max_roll) = (s.roll_rate.abs(), s.t);
             }
         }
         t
@@ -505,7 +510,8 @@ pub fn drag_table(rocket: &Rocket, ctx: &Ctx, stage: usize) -> Result<DragTable,
         return Err("No CFD table for this rocket yet: solve one in Analyze > CFD table. Flying on Extended.".to_string());
     };
     let phase = if stage <= 1 { Phase::Full } else { Phase::UpperFrom(stage) };
-    let plan = from_model::vehicle(rocket, ctx.physics.motors(), phase).map_err(|e| e.to_string()).and_then(|v| crate::analyze::cfd::plan(rocket, &v, ctx.units));
+    let plan =
+        from_model::vehicle(rocket, ctx.physics.motors(), phase).map_err(|e| e.to_string()).and_then(|v| crate::analyze::cfd::plan(rocket, &v, ctx.units));
     match plan {
         Ok(plan) if plan.geometry == table.geometry => Ok(DragTable::from_cfd(table)),
         Ok(_) => Err("CFD table is stale (the rocket changed): flying on Extended.".to_string()),

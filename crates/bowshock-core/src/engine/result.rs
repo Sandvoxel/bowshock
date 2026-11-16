@@ -21,6 +21,8 @@ pub enum StopReason {
     MaxIterations,
     /// The state became non-finite or non-physical.
     NonFinite,
+    /// The progress callback asked the run to stop ([`crate::progress::ProgressSink`]); the state is not a solution.
+    Cancelled,
 }
 
 impl fmt::Display for StopReason {
@@ -33,6 +35,7 @@ impl fmt::Display for StopReason {
             StopReason::ResidualPlateau => "residual plateau",
             StopReason::MaxIterations => "max iterations",
             StopReason::NonFinite => "non-finite residual",
+            StopReason::Cancelled => "cancelled",
         })
     }
 }

@@ -12,7 +12,7 @@
 use crate::engine::case::{Case, Wake};
 use crate::engine::numerics::MONITOR_EVERY;
 use crate::engine::result::{PointResult, StopReason};
-use crate::engine::run::{finish, monitor, stop_reason, wall_distribution};
+use crate::engine::run::{finish, monitor, report, stop_reason, wall_distribution};
 use crate::error::Error;
 use bowshock_cfd::gas::{cons_to_prim, freestream};
 use bowshock_cfd::gpu::{GpuSolver, Precision};
@@ -127,6 +127,7 @@ impl GpuRunner {
             } else {
                 None
             };
+            let last_r = h.last().copied();
             for (k, r) in h.into_iter().enumerate() {
                 let it = done + k;
                 residual.push(r);
@@ -143,6 +144,10 @@ impl GpuRunner {
                 }
             }
             done += len;
+            if iters_stop.is_none() && len == SYNC && report(case, done, last_r.unwrap_or(f64::NAN), r_ref.unwrap_or(rmax), &hist).is_break() {
+                reason = StopReason::Cancelled;
+                iters_stop = Some(done);
+            }
         }
         let loop_seconds = t0.elapsed().as_secs_f64();
         self.download()?;

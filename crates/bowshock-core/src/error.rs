@@ -15,12 +15,15 @@ pub enum Error {
     Gpu(String),
     /// A solver invariant failed (a bug); the message names it.
     Internal(String),
+    /// The progress callback ended the run ([`Analysis::on_progress`](crate::Analysis::on_progress)).
+    Cancelled,
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::InvalidInput(m) | Error::Unsupported(m) | Error::Grid(m) | Error::Gpu(m) | Error::Internal(m) => f.write_str(m),
+            Error::Cancelled => f.write_str("cancelled"),
         }
     }
 }

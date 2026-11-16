@@ -12,7 +12,7 @@ use iced::widget::{button as plain_button, column, container, mouse_area, row, t
 use iced::{mouse, Element, Fill, Widget};
 
 use super::edit::{Field, Trigger};
-use super::form::{choose, text_row, value_row, Form};
+use super::form::{choose, text_row, value_row, with_tip, Form};
 use super::health::{self, Flight};
 use super::separation;
 use super::symmetry::{linked, Link};
@@ -453,7 +453,8 @@ fn position<'a>(p: &Params<'a>) -> Vec<Element<'a, Message>> {
     if let Some(radial) = rocket.radial(p.id) {
         rows.push(f.num("Rotation", radial.angle, Quantity::Angle, dim(Dim::Angle)));
         if radial.kind.is_fin() {
-            rows.push(linked(p, "Cant", radial.effective(p.copy).cant, Quantity::Angle, Dim::Cant));
+            let tip = "Cant spins the rocket: + is clockwise seen from behind. It tilts the fin about its span (within 15°); the roll rate shows in Simulate. Hold Alt on the model to drag it in the aft view.";
+            rows.push(with_tip(linked(p, "Cant", radial.effective(p.copy).cant, Quantity::Angle, Dim::Cant), tip));
         }
     }
     if let Some(pod) = rocket.pod_of(p.id) {

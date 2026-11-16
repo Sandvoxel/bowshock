@@ -176,7 +176,10 @@ const MIN_LEN: f64 = 0.002;
 const MAX_LEN: f64 = 3.0;
 const MIN_DIA: f64 = 0.004;
 const MAX_DIA: f64 = 0.6;
-const MAX_CANT: f64 = 30.0 * std::f64::consts::PI / 180.0;
+/// The largest fin cant either way (15°): the roll forcing of the flight model is linear in the cant (the fin's lift slope
+/// times its angle, Barrowman 1967; Niskanen 2009, section 3.2.3), which holds only below the fin's stall angle, and working
+/// canted fins stand at a few degrees.
+const MAX_CANT: f64 = 15.0 * std::f64::consts::PI / 180.0;
 
 /// `(min, max, reason at min, reason at max)`.
 type Limits = (f64, f64, &'static str, &'static str);
@@ -389,7 +392,7 @@ impl Rocket {
             (PartRef::Radial(r), Dim::Position) => (0.0, (length_of_parent(r.parent) - r.kind.min_attached()).max(0.0), "AT TUBE FORE", "AT TUBE AFT"),
             (PartRef::Radial(_), Dim::Angle) => open(),
             (PartRef::Radial(_), Dim::Gap) => (0.0, 0.5, "TOUCHING THE SURFACE", "MAXIMUM GAP"),
-            (PartRef::Radial(_), Dim::Cant) => (-MAX_CANT, MAX_CANT, "CANT LIMIT 30°", "CANT LIMIT 30°"),
+            (PartRef::Radial(_), Dim::Cant) => (-MAX_CANT, MAX_CANT, "CANT LIMIT 15°", "CANT LIMIT 15°"),
             (PartRef::Radial(_), Dim::Span) => (0.005, 1.0, "MINIMUM HEIGHT", "MAXIMUM HEIGHT"),
             (PartRef::Radial(r), Dim::RootChord) => (0.005, length_of_parent(r.parent).max(0.005), "MINIMUM CHORD", "LONGER THAN THE TUBE"),
             (PartRef::Radial(_), Dim::TipChord) => (0.0, 2.0, "POINTED TIP", "MAXIMUM CHORD"),
@@ -975,7 +978,13 @@ mod tests {
         assert_eq!(e.limited, Some("AT TUBE AFT"));
         assert!((r.dim(fin, Dim::Position).unwrap() - (0.5 - 0.025)).abs() < 1e-9);
         let e = r.set_dim(fin, Dim::Cant, 1.0).unwrap();
-        assert_eq!(e.limited, Some("CANT LIMIT 30°"));
+        assert_eq!(e.limited, Some("CANT LIMIT 15°"));
+        assert!((r.dim(fin, Dim::Cant).unwrap() - 15.0_f64.to_radians()).abs() < 1e-12);
+        let e = r.set_dim(fin, Dim::Cant, -1.0).unwrap();
+        assert_eq!(e.limited, Some("CANT LIMIT 15°"));
+        assert!((r.dim(fin, Dim::Cant).unwrap() + 15.0_f64.to_radians()).abs() < 1e-12);
+        // A few degrees of cant is a plain edit, in either direction.
+        assert_eq!(r.set_dim(fin, Dim::Cant, 3.0_f64.to_radians()).unwrap().limited, None);
         let ring = r.attach_internal(tube, 0.1, InternalKind::CenteringRing { outer_diameter: None, inner_diameter: None, thickness: 0.006 }).unwrap();
         r.set_dim(ring, Dim::InnerDiameter, 0.03).unwrap();
         assert!((r.dim(ring, Dim::InnerDiameter).unwrap() - 0.03).abs() < 1e-12);
