@@ -64,16 +64,18 @@ fn left<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
             label.boxed()
         }
     };
-    let body = column![
-        head("ANALYSES", false),
-        analyses(state),
-        head("METHOD", false),
-        container(method(state)).padding([0.0, SPACE_3]),
-        head("CONDITIONS", true),
-        container(conditions(state, ctx)).padding([0.0, SPACE_3]),
-        Space::new().height(SPACE_3),
-    ]
-    .spacing(SPACE_1);
+    let controls: Vec<Element<'a, Message>> = if state.analysis == Analysis::Optimize {
+        vec![head("OPTIMIZE", true), state.optimize.left(ctx), Space::new().height(SPACE_3).boxed()]
+    } else {
+        vec![
+            head("METHOD", false),
+            container(method(state)).padding([0.0, SPACE_3]).boxed(),
+            head("CONDITIONS", true),
+            container(conditions(state, ctx)).padding([0.0, SPACE_3]).boxed(),
+            Space::new().height(SPACE_3).boxed(),
+        ]
+    };
+    let body = column![head("ANALYSES", false), analyses(state), column(controls).spacing(SPACE_1)].spacing(SPACE_1);
     scrollable(body).width(Fill).height(Fill).boxed()
 }
 
@@ -375,6 +377,7 @@ fn conditions<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
             rows.push(input("Mean wind", c.wind, Quantity::Velocity, Message::Wind));
             rows.push(muted("One-sigma spreads: wind 1 m/s and 10°, rail tilt 1°, thrust 3 %, drag 5 %, dry mass 2 %.", 12.0));
         }
+        Analysis::Optimize => {}
         Analysis::Components => {
             rows.push(row_of("Mach", mach_input(state, MachField::Fixed)));
             let alpha = unit_input("Angle of attack", c.alpha, Quantity::Angle, units).label_width(LABEL_W).on_commit(Message::Alpha).on_scrub(Message::Alpha);
@@ -411,6 +414,9 @@ fn centred<'a>(message: String) -> Element<'a, Message> {
 }
 
 fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
+    if state.analysis == Analysis::Optimize {
+        return state.optimize.centre(ctx);
+    }
     if let Some(solving) = super::solve_view::centre(state, ctx) {
         return solving;
     }
@@ -490,7 +496,21 @@ fn table(state: &State) -> Element<'_, Message> {
 // Right
 // ---------------------------------------------------------------------------------------------------------------------
 
+/// The right panel of the Optimize analysis: the best design against the current one, the goal and the constraints.
+fn optimize_right<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
+    let head = container(text("Best design").size(15).font(SANS_SEMIBOLD)).padding([SPACE_3, SPACE_3]).width(Fill);
+    let mut sections: Vec<Element<'a, Message>> = vec![head.boxed(), rule()];
+    for (i, sec) in state.optimize.readout(ctx).into_iter().enumerate() {
+        let rows: Vec<Element<'a, Message>> = sec.rows.into_iter().map(row_view).collect();
+        sections.push(section(i + 1, &sec.title, i > 0, rows));
+    }
+    scrollable(column(sections)).width(Fill).height(Fill).boxed()
+}
+
 fn right<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
+    if state.analysis == Analysis::Optimize {
+        return optimize_right(state, ctx);
+    }
     let active = ctx.doc.rocket().active_config_id();
     let shown = state.output().zip(state.built.as_ref());
     let hover = shown.and_then(|(_, b)| state.plot.hover_x().map(|x| b.scale.to_si(x)));

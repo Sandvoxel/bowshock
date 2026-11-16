@@ -52,11 +52,14 @@ pub enum Analysis {
     Dispersion,
     /// Normal force, CP and drag of each part at one condition.
     Components,
+    /// A search for the dimensions that reach a goal (its own state and worker; see [`super::optimize`]).
+    Optimize,
 }
 
 impl Analysis {
     /// Every analysis, in list order.
-    pub const ALL: [Analysis; 6] = [Analysis::Aerodynamics, Analysis::Stability, Analysis::Drag, Analysis::Flutter, Analysis::Dispersion, Analysis::Components];
+    pub const ALL: [Analysis; 7] =
+        [Analysis::Aerodynamics, Analysis::Stability, Analysis::Drag, Analysis::Flutter, Analysis::Dispersion, Analysis::Components, Analysis::Optimize];
 
     /// The list row's name.
     pub fn name(self) -> &'static str {
@@ -67,6 +70,7 @@ impl Analysis {
             Analysis::Flutter => "Fin flutter",
             Analysis::Dispersion => "Dispersion",
             Analysis::Components => "Components",
+            Analysis::Optimize => "Optimize",
         }
     }
 
@@ -78,6 +82,7 @@ impl Analysis {
             Analysis::Flutter => "margin",
             Analysis::Dispersion => "Monte Carlo",
             Analysis::Components => "per part",
+            Analysis::Optimize => "design",
         }
     }
 }
@@ -661,6 +666,8 @@ pub fn compute(request: &Request) -> Output {
                 }
                 Analysis::Flutter => Data::Flutter(flutter(job)),
                 Analysis::Dispersion => Data::Dispersion(scatter(job, &vehicle, &cond)),
+                // The optimiser has its own worker and never asks for a computation.
+                Analysis::Optimize => Data::Components(Vec::new()),
                 Analysis::Components => {
                     let alpha = if request.method == Method::Barrowman { 0.0 } else { cond.alpha };
                     Data::Components(components(&vehicle, cond.mach_fixed, alpha, cond.altitude, cond.burnout))
@@ -779,6 +786,7 @@ impl Output {
             Analysis::Stability => format!("{n} AoA points at Mach {:.2}", self.conditions.mach_fixed),
             Analysis::Flutter => format!("{n} flight samples"),
             Analysis::Dispersion => format!("{n} runs per configuration"),
+            Analysis::Optimize => String::new(),
             Analysis::Components => {
                 let aoa = if self.method == Method::Barrowman { 0.0 } else { self.conditions.alpha.to_degrees() };
                 format!("{n} parts at Mach {:.2}, α {aoa:.1}°", self.conditions.mach_fixed)
@@ -910,6 +918,7 @@ impl Output {
                     format!("Apogee ({})", sym(Quantity::Altitude)),
                 ]
             }
+            Analysis::Optimize => Vec::new(),
             Analysis::Components => {
                 let several = self.runs.len() > 1;
                 for run in &self.runs {

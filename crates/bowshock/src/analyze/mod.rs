@@ -29,6 +29,8 @@ pub mod cfd;
 pub mod compute;
 pub mod flutter;
 pub mod import;
+pub mod optimize;
+mod optimize_view;
 pub mod overlay;
 mod plots;
 pub mod readout;
@@ -113,6 +115,10 @@ pub enum Message {
     CfdDiscard,
     /// Solve the 3D stability table (Solve stability (3D)).
     SolveLift,
+    /// A message of the Optimize screen.
+    Optimize(optimize_view::Msg),
+    /// A message from the running optimisation (with the run's serial: a cancelled run's last words are ignored).
+    OptEvent(u64, optimize::Event),
 }
 
 /// What a computation was for; a result is used only while it is still the one wanted.
@@ -168,6 +174,8 @@ pub struct State {
     pub(crate) base_method: Method,
     /// The CFD table method's state.
     pub(crate) cfd: Cfd,
+    /// The optimiser's setup and run.
+    pub(crate) optimize: optimize_view::State,
 }
 
 impl Default for State {
@@ -212,6 +220,7 @@ impl State {
             overlay: None,
             base_method: Method::Extended,
             cfd: Cfd::default(),
+            optimize: optimize_view::State::new(),
         }
     }
 
@@ -322,6 +331,8 @@ impl State {
             Message::CfdKeep => self.keep_stopped(ctx),
             Message::CfdDiscard => self.cfd.stopped = None,
             Message::SolveLift => return self.start_lift(),
+            Message::Optimize(m) => return self.optimize.update(m, ctx),
+            Message::OptEvent(serial, event) => self.optimize.event(serial, event, ctx),
         }
         Task::none()
     }
@@ -367,6 +378,11 @@ impl State {
     /// Called by the app after every message while Analyze is showing: starts a computation when what is wanted changed and
     /// brings the plots and table up to date. The returned task carries the result back as [`Message::Done`].
     pub fn refresh(&mut self, ctx: &Ctx) -> Task<app::Message> {
+        if self.analysis == Analysis::Optimize {
+            // The optimiser owns its state and worker: nothing to compute for the plots.
+            self.optimize.sync(ctx);
+            return Task::none();
+        }
         let phase = ctx.physics.phase();
         let solve = self.refresh_cfd(ctx, phase);
         let table = self.cfd_table_for(self.analysis);
