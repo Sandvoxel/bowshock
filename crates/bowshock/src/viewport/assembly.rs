@@ -7,7 +7,7 @@
 use bowshock_model::{InternalPart, Part, PartId, PartKind, PodBody, RadialKind, RadialPart, Rocket};
 use glam::Vec3;
 use iced::widget::canvas::{self, Action, Event, Frame, Geometry, LineDash, Path, Stroke, Text};
-use iced::{alignment, mouse, Color, Point, Rectangle, Renderer, Size, Theme};
+use iced::{alignment, mouse, Color, Point, Rectangle, Renderer, Size, Theme, Vector};
 
 use super::pick::{self, SurfaceTarget};
 use super::pods::PodView;
@@ -19,6 +19,8 @@ use crate::tokens::TEXT_LABEL;
 
 /// How close (px) the cursor must be to an attach node for the part to stack there rather than attach to the tube's side.
 pub const NODE_PX: f32 = 26.0;
+/// How far from the rocket's axis line (on screen) the open space still counts as "beside the rocket" for stacking.
+pub const VOID_PX: f32 = 160.0;
 /// Diameter of a node ring.
 const RING: f32 = 7.0;
 /// Width of one MONO glyph at `TEXT_LABEL`, as a fraction of the font size (IBM Plex Mono advances 0.6 em).
@@ -136,8 +138,41 @@ impl Overlay<'_> {
                 return Some(Choice::Surface(target));
             }
         }
-        // Away from every node and any tube's side there is no target ("no node"); an empty rocket has only its first node.
+        // In the open space beside the rocket (within [`VOID_PX`] of its axis line), the node nearest along the axis takes the
+        // part, so dropping a part just below the stack still stacks it at the joint above.
+        if let Some(snap) = self.beside(at, size) {
+            return Some(Choice::Node(snap));
+        }
+        // Far from the rocket there is no target ("no node"); an empty rocket has only its first node.
         nearest.filter(|_| self.rocket.parts().is_empty()).map(|(snap, _)| Choice::Node(snap))
+    }
+
+    /// The core node nearest the cursor measured along the rocket's axis, when the cursor is within [`VOID_PX`] of the axis line
+    /// on screen and not past either end by more than that.
+    fn beside(&self, at: Point, size: Size) -> Option<Snap> {
+        let nodes: Vec<Node> = self.nodes(size).into_iter().filter(|n| matches!(n.snap, Snap::Core(_))).collect();
+        let first = nodes.iter().min_by(|a, b| a.station.total_cmp(&b.station))?;
+        let last = nodes.iter().max_by(|a, b| a.station.total_cmp(&b.station))?;
+        let axis = last.at - first.at;
+        let len = axis.x.hypot(axis.y);
+        if len < 1.0 {
+            return None;
+        }
+        let dir = Vector::new(axis.x / len, axis.y / len);
+        let rel = at - first.at;
+        let along = rel.x * dir.x + rel.y * dir.y;
+        let across = (rel.x * dir.y - rel.y * dir.x).abs();
+        if across > VOID_PX || along < -VOID_PX || along > len + VOID_PX {
+            return None;
+        }
+        nodes
+            .iter()
+            .map(|n| {
+                let r = n.at - first.at;
+                (n.snap, (r.x * dir.x + r.y * dir.y - along).abs())
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(snap, _)| snap)
     }
 
     /// Where the drag is snapped now.
