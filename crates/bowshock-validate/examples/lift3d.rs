@@ -27,10 +27,10 @@
 //! `sharp-le` is a wedge leading edge (ramp over 0.1 chord) with a full-thickness blunt trailing edge. `--limiter minmod|vanalbada|venkat`
 //! overrides the reconstruction limiter. `--geometry` prints the fin geometry actually meshed (no GPU).
 
+use bowshock_cfd::flux::Limiter;
 use bowshock_cfd::gpu::{GpuSolver3, Precision};
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
 use bowshock_core::engine::case3::Case3;
-use bowshock_cfd::flux::Limiter;
 use bowshock_core::engine::run3::{breakdown_on, PartForces};
 use bowshock_core::spec::FinProfile;
 use std::time::Instant;
@@ -120,7 +120,8 @@ fn parse(args: &[String]) -> Result<Args, String> {
             return Err(format!("--limiter minmod|vanalbada|venkat, got `{l}`"));
         }
     }
-    let num = |name: &str| -> Result<Option<usize>, String> { value(name).transpose()?.map(|v| v.parse::<usize>().map_err(|e| format!("{name}: {e}"))).transpose() };
+    let num =
+        |name: &str| -> Result<Option<usize>, String> { value(name).transpose()?.map(|v| v.parse::<usize>().map_err(|e| format!("{name}: {e}"))).transpose() };
     let cfl_max = value("--cfl-max").transpose()?.map(|v| v.parse::<f64>().map_err(|e| format!("--cfl-max: {e}"))).transpose()?;
     Ok(Args {
         case,
@@ -258,7 +259,17 @@ fn sweep(args: &Args, machs: &[f64], alphas_deg: &[f64]) -> Result<(), String> {
     let (body, fins) = body_of(&args.case)?;
     let (prec, pname) = args.precisions[0];
     let ok = |r: &bowshock_core::engine::run3::PointResult3| {
-        r.stop_reason != StopReason::NonFinite && r.cn.is_finite() && r.ca.is_finite() && matches!(r.stop_reason, StopReason::ResidualDrop | StopReason::CdStationary | StopReason::MeanStationary | StopReason::BasePressureStationary | StopReason::ResidualPlateau)
+        r.stop_reason != StopReason::NonFinite
+            && r.cn.is_finite()
+            && r.ca.is_finite()
+            && matches!(
+                r.stop_reason,
+                StopReason::ResidualDrop
+                    | StopReason::CdStationary
+                    | StopReason::MeanStationary
+                    | StopReason::BasePressureStationary
+                    | StopReason::ResidualPlateau
+            )
     };
     for &m in machs {
         let mut runner: Option<GpuRunner3> = None;
@@ -272,7 +283,8 @@ fn sweep(args: &Args, machs: &[f64], alphas_deg: &[f64]) -> Result<(), String> {
             let rn = runner.as_mut().unwrap();
             let g = &rn.host.grid;
             let (fc, sc) = g.solid.first().map_or((0, 0), |b| (b.i.len(), b.j.end));
-            let grid_json = format!("\"nk\":{},\"ni\":{},\"nj\":{},\"cells\":{},\"fin_chord_cells\":{fc},\"span_cells\":{sc}", g.nk, g.ni, g.nj, g.ni * g.nj * g.nk);
+            let grid_json =
+                format!("\"nk\":{},\"ni\":{},\"nj\":{},\"cells\":{},\"fin_chord_cells\":{fc},\"span_cells\":{sc}", g.nk, g.ni, g.nj, g.ni * g.nj * g.nk);
             let mut r = None;
             if warm {
                 let w = rn.run_on(&case, true).map_err(|e| e.to_string())?;
@@ -312,7 +324,15 @@ fn sweep(args: &Args, machs: &[f64], alphas_deg: &[f64]) -> Result<(), String> {
             let breakdown = if args.breakdown {
                 let bd = breakdown_on(&case, &rn.host.grid, &rn.gpu.state_f64().map_err(|e| e.to_string())?, rn.host.cfg.freestream[4]);
                 let part = |n: &str, p: &PartForces| format!("\"{n}_cn\":{},\"{n}_xcp\":{},\"{n}_ca\":{}", f(p.cn), f(p.x_cp), f(p.ca));
-                format!(",{},{},{},{},{},{}", part("nose", &bd.nose), part("after", &bd.afterbody), part("fin", &bd.fins()), part("fin_sides", &bd.fin_sides), part("fin_edges", &bd.fin_edges), part("fin_tips", &bd.fin_tips))
+                format!(
+                    ",{},{},{},{},{},{}",
+                    part("nose", &bd.nose),
+                    part("after", &bd.afterbody),
+                    part("fin", &bd.fins()),
+                    part("fin_sides", &bd.fin_sides),
+                    part("fin_edges", &bd.fin_edges),
+                    part("fin_tips", &bd.fin_tips)
+                )
             } else {
                 String::new()
             };
@@ -339,7 +359,10 @@ fn geometry(args: &Args) -> Result<(), String> {
     let rad = |p: [f64; 3]| (p[1] * p[1] + p[2] * p[2]).sqrt();
     println!("grid ni {} nj {} nk {} cells {}; body base x {:.4}, axis_cells {}", g.ni, g.nj, g.nk, g.ni * g.nj * g.nk, case.body.x_base(), g.axis_cells);
     if let Some(f) = &case.grid.fins {
-        println!("requested fins: count {} root {} tip {} span {} sweep {} thickness {} te_to_base {} profile {:?}", f.count, f.root_chord, f.tip_chord, f.span, f.sweep, f.thickness, f.te_to_base, f.profile);
+        println!(
+            "requested fins: count {} root {} tip {} span {} sweep {} thickness {} te_to_base {} profile {:?}",
+            f.count, f.root_chord, f.tip_chord, f.span, f.sweep, f.thickness, f.te_to_base, f.profile
+        );
     }
     for (n, b) in g.solid.iter().enumerate() {
         let (le, te, jt, k) = (b.i.start, b.i.end, b.j.end, b.k.start);

@@ -60,14 +60,7 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
 impl Grid3 {
     /// Build the grid from node coordinates (`(ni+1)*(nj+1)*(nk+1)`, `i` fastest); `Err` on a negative cell volume.
     /// Zero-volume cells are allowed (fin solid cells). `solid` is empty and `axis_cells` 0; the mesher sets them.
-    pub fn try_from_nodes(
-        ni: usize,
-        nj: usize,
-        nk: usize,
-        x: Vec<f64>,
-        y: Vec<f64>,
-        z: Vec<f64>,
-    ) -> Result<Grid3, String> {
+    pub fn try_from_nodes(ni: usize, nj: usize, nk: usize, x: Vec<f64>, y: Vec<f64>, z: Vec<f64>) -> Result<Grid3, String> {
         let nn = (ni + 1) * (nj + 1) * (nk + 1);
         assert_eq!(x.len(), nn);
         assert_eq!(y.len(), nn);
@@ -245,16 +238,7 @@ mod tests {
     }
 
     fn cone() -> crate::grid::Grid {
-        cone_grid(&ConeGridParams {
-            ni: 16,
-            nj: 8,
-            theta: 15f64.to_radians(),
-            length: 1.0,
-            x_up: -0.5,
-            h_start: 1.0,
-            h_end: 1.0,
-            cluster: 1.5,
-        })
+        cone_grid(&ConeGridParams { ni: 16, nj: 8, theta: 15f64.to_radians(), length: 1.0, x_up: -0.5, h_start: 1.0, h_end: 1.0, cluster: 1.5 })
     }
 
     #[test]

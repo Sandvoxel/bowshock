@@ -40,9 +40,9 @@ pub mod spec;
 
 pub use analysis::{Analysis, Backend, BackendUsed, Drag, FinDrag, LiftPoint, LiftPolar, PointDetail, Polar, PolarPoint, Quality, Resolution, WallCp, Warning};
 pub use atmosphere::{AirState, Atmosphere, FlightConditions};
+pub use device::gpu_name;
 pub use engine::case::Wake;
 pub use engine::result::StopReason;
-pub use device::gpu_name;
 pub use error::Error;
 pub use progress::{Progress, ProgressSink};
 pub use spec::{AftSpec, BodySpec, FinProfile, FinSpec, MotorSpec, NoseShape, NoseSpec};

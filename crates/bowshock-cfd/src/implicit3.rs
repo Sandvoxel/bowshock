@@ -576,7 +576,8 @@ mod tests {
         };
         let fac = Factor { lo: (0..n).map(|_| blocks(0.0)).collect(), d: (0..n).map(|_| blocks(3.0)).collect(), up: (0..n).map(|_| blocks(0.0)).collect() };
         let mut rng = Rng::new(6);
-        let rhs: Vec<Cons3> = (0..n).map(|_| [rng.range(-0.5, 0.5), rng.range(-0.5, 0.5), rng.range(-0.5, 0.5), rng.range(-0.5, 0.5), rng.range(-0.5, 0.5)]).collect();
+        let rhs: Vec<Cons3> =
+            (0..n).map(|_| [rng.range(-0.5, 0.5), rng.range(-0.5, 0.5), rng.range(-0.5, 0.5), rng.range(-0.5, 0.5), rng.range(-0.5, 0.5)]).collect();
         let mut x = rhs.clone();
         let mut y = vec![ZERO5; n];
         block_thomas5(n, 0, 1, &fac, &mut x, &mut y);

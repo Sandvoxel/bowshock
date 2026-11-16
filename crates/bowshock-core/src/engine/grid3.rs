@@ -78,9 +78,7 @@ pub(crate) fn half_thickness(profile: &FinProfile, t: f64, chord: f64, xi: f64) 
                 (r * r - (r - s) * (r - s)).max(0.0).sqrt()
             }
         }
-        FinProfile::Airfoil => {
-            5.0 * t * (0.2969 * xi.sqrt() - 0.1260 * xi - 0.3516 * xi * xi + 0.2843 * xi.powi(3) - 0.1015 * xi.powi(4)).max(0.0)
-        }
+        FinProfile::Airfoil => 5.0 * t * (0.2969 * xi.sqrt() - 0.1260 * xi - 0.3516 * xi * xi + 0.2843 * xi.powi(3) - 0.1015 * xi.powi(4)).max(0.0),
         FinProfile::DoubleWedge => t * xi.min(1.0 - xi),
         FinProfile::Custom { section } => {
             let z: Vec<[f64; 2]> = normalised(section).collect();
@@ -328,9 +326,7 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>) -> Result<FinPlan, E
     }
     let sj0 = radial_fractions(sp.dr_wall, sp.r_far, sp.nj);
     let target = f.span / (sp.r_far - r_t);
-    let j_tip0 = (1..=sp.nj)
-        .min_by(|&a, &b| (sj0[a] - target).abs().total_cmp(&(sj0[b] - target).abs()))
-        .unwrap();
+    let j_tip0 = (1..=sp.nj).min_by(|&a, &b| (sj0[a] - target).abs().total_cmp(&(sj0[b] - target).abs())).unwrap();
     let (sj, s_remap, j_tip) = match p.span_cells {
         None => {
             let s_remap: Vec<f64> = (0..=sp.nj)
@@ -778,7 +774,14 @@ mod tests {
         let mut p = base;
         p.nk = 48;
         assert_eq!(body_grid3(&p).unwrap().nk, 48);
-        for (label, nk, fc, sc) in [("base", 24, None, None), ("nk32", 32, None, None), ("nk48", 48, None, None), ("span2x", 24, None, Some(2 * j0)), ("chord16", 24, Some(16), None), ("all", 48, None, Some(2 * j0))] {
+        for (label, nk, fc, sc) in [
+            ("base", 24, None, None),
+            ("nk32", 32, None, None),
+            ("nk48", 48, None, None),
+            ("span2x", 24, None, Some(2 * j0)),
+            ("chord16", 24, Some(16), None),
+            ("all", 48, None, Some(2 * j0)),
+        ] {
             let mut p = params(0, Some(anf_fins(FinProfile::Square)));
             (p.nk, p.fin_chord_cells, p.span_cells) = (nk, fc, sc);
             let g = body_grid3(&p).unwrap();

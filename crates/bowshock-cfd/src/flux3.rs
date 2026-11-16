@@ -93,13 +93,7 @@ pub fn hllc3(wl: &Prim3, wr: &Prim3, n: [f64; 3]) -> Cons3 {
         let f = physical_flux3(wl, n);
         let fac = rl * (sl - unl) / (sl - sm);
         let d = sm - unl;
-        let star = [
-            fac,
-            fac * (ul + d * n[0]),
-            fac * (vl + d * n[1]),
-            fac * (wl_z + d * n[2]),
-            fac * (el / rl + d * (sm + pl / (rl * (sl - unl)))),
-        ];
+        let star = [fac, fac * (ul + d * n[0]), fac * (vl + d * n[1]), fac * (wl_z + d * n[2]), fac * (el / rl + d * (sm + pl / (rl * (sl - unl))))];
         let q = [rl, rl * ul, rl * vl, rl * wl_z, el];
         let mut out = [0.0; 5];
         for k in 0..5 {
@@ -110,13 +104,7 @@ pub fn hllc3(wl: &Prim3, wr: &Prim3, n: [f64; 3]) -> Cons3 {
         let f = physical_flux3(wr, n);
         let fac = rr * (sr - unr) / (sr - sm);
         let d = sm - unr;
-        let star = [
-            fac,
-            fac * (ur + d * n[0]),
-            fac * (vr + d * n[1]),
-            fac * (wr_z + d * n[2]),
-            fac * (er / rr + d * (sm + pr / (rr * (sr - unr)))),
-        ];
+        let star = [fac, fac * (ur + d * n[0]), fac * (vr + d * n[1]), fac * (wr_z + d * n[2]), fac * (er / rr + d * (sm + pr / (rr * (sr - unr))))];
         let q = [rr, rr * ur, rr * vr, rr * wr_z, er];
         let mut out = [0.0; 5];
         for k in 0..5 {
@@ -184,10 +172,7 @@ pub fn low_mach_states3(l: &Prim3, r: &Prim3, n: [f64; 3]) -> (Prim3, Prim3) {
     let avg = 0.5 * (unl + unr);
     let dl = avg + z * (unl - avg) - unl;
     let dr = avg + z * (unr - avg) - unr;
-    (
-        [l[0], l[1] + dl * n[0], l[2] + dl * n[1], l[3] + dl * n[2], l[4]],
-        [r[0], r[1] + dr * n[0], r[2] + dr * n[1], r[3] + dr * n[2], r[4]],
-    )
+    ([l[0], l[1] + dl * n[0], l[2] + dl * n[1], l[3] + dl * n[2], l[4]], [r[0], r[1] + dr * n[0], r[2] + dr * n[1], r[3] + dr * n[2], r[4]])
 }
 
 /// [`face_flux3`] with the optional low-Mach correction; `low_mach = false` is exactly [`face_flux3`].
@@ -242,11 +227,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn rot(r: &Rot, v: [f64; 3]) -> [f64; 3] {
-        [
-            r[0][0] * v[0] + r[0][1] * v[1] + r[0][2] * v[2],
-            r[1][0] * v[0] + r[1][1] * v[1] + r[1][2] * v[2],
-            r[2][0] * v[0] + r[2][1] * v[1] + r[2][2] * v[2],
-        ]
+        [r[0][0] * v[0] + r[0][1] * v[1] + r[0][2] * v[2], r[1][0] * v[0] + r[1][1] * v[1] + r[1][2] * v[2], r[2][0] * v[0] + r[2][1] * v[1] + r[2][2] * v[2]]
     }
 
     /// Rotate the velocity (indices 1..4) of a primitive or conservative vector.
@@ -313,15 +294,9 @@ pub(crate) mod tests {
                 }
             }
             for lim in [Limiter::FirstOrder, Limiter::Minmod, Limiter::VanAlbada] {
-                close4(
-                    &face_flux3(&s[0], a, b, &s[3], lim, n, z),
-                    &flux::face_flux(&to2(&s[0]), &to2(a), &to2(b), &to2(&s[3]), lim, nx, nr),
-                );
+                close4(&face_flux3(&s[0], a, b, &s[3], lim, n, z), &flux::face_flux(&to2(&s[0]), &to2(a), &to2(b), &to2(&s[3]), lim, nx, nr));
                 for lm in [false, true] {
-                    close4(
-                        &face_flux_lm3(&s[0], a, b, &s[3], lim, n, z, lm),
-                        &flux::face_flux_lm(&to2(&s[0]), &to2(a), &to2(b), &to2(&s[3]), lim, nx, nr, lm),
-                    );
+                    close4(&face_flux_lm3(&s[0], a, b, &s[3], lim, n, z, lm), &flux::face_flux_lm(&to2(&s[0]), &to2(a), &to2(b), &to2(&s[3]), lim, nx, nr, lm));
                 }
             }
         }
@@ -404,11 +379,7 @@ pub(crate) mod tests {
             let s: Vec<Prim3> = (0..4).map(|_| rand_state(&mut rng, false, vmax)).collect();
             let sr: Vec<Prim3> = s.iter().map(|w| rot5(&r, w)).collect();
             for lim in [Limiter::FirstOrder, Limiter::Minmod, Limiter::VanAlbada] {
-                assert_rotates(
-                    &face_flux3(&s[0], &s[1], &s[2], &s[3], lim, n0, f0),
-                    &face_flux3(&sr[0], &sr[1], &sr[2], &sr[3], lim, nr, f1),
-                    &r,
-                );
+                assert_rotates(&face_flux3(&s[0], &s[1], &s[2], &s[3], lim, n0, f0), &face_flux3(&sr[0], &sr[1], &sr[2], &sr[3], lim, nr, f1), &r);
                 for lm in [false, true] {
                     assert_rotates(
                         &face_flux_lm3(&s[0], &s[1], &s[2], &s[3], lim, n0, f0, lm),
@@ -419,7 +390,6 @@ pub(crate) mod tests {
             }
         }
     }
-
 
     #[test]
     fn hllc_consistency() {
