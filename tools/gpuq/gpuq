@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+# gpuq: tiny GPU job queue over this machine and sandvoxel@192.168.1.88.
+#
+#   gpuq submit [--host local|remote|any] [--name NAME] [--timeout SECS] -- CMD...
+#       Snapshots the repo containing $PWD and queues CMD (run from the repo root
+#       of the snapshot). Prints the job id.
+#   gpuq worker local|remote     Run forever, executing queued jobs for that host.
+#   gpuq status                  One line per job (queued, running, last 20 done).
+#   gpuq wait ID                 Block until done; print status + log tail; exit 0 on 0/ok-hung.
+#   gpuq log ID                  Print the job log.
+#
+# Spool: ${GPUQ_DIR:-$HOME/.cache/bowshock-gpuq} with queue/ running/ done/ snap/.
+# Results: done/<id>/{log,status,meta,out/}. Lines of the log starting with "PERF "
+# are appended (as JSON plus run metadata) to <repo>/perf/ledger.jsonl.
+# Status "timeout" with a passing log becomes "ok-hung" (NVIDIA driver exit hang).
+
+set -u
+
+GPUQ_DIR=${GPUQ_DIR:-$HOME/.cache/bowshock-gpuq}
+REMOTE=${GPUQ_REMOTE:-sandvoxel@192.168.1.88}
+SSH=(ssh -o BatchMode=yes -o ConnectTimeout=15 "$REMOTE")
+mkdir -p "$GPUQ_DIR"/{queue,running,done,snap}
+
+die() { echo "gpuq: $*" >&2; exit 2; }
+
+cmd_submit() {
+  local host=any name="" timeout=3600
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --host) host=${2:?}; shift 2 ;;
+      --name) name=${2:?}; shift 2 ;;
+      --timeout) timeout=${2:?}; shift 2 ;;
+      --) shift; break ;;
+      *) die "unknown option $1" ;;
+    esac
+  done
+  [ $# -gt 0 ] || die "no command given"
+  case $host in local|remote|any) ;; *) die "bad --host $host" ;; esac
+  [ -n "$name" ] || name=$(basename -- "$1" | tr -c 'A-Za-z0-9._\n-' '_')
+  local repo
+  repo=$(git rev-parse --show-toplevel 2>/dev/null) || die "not inside a git repo"
+  local id; id="$(date +%Y%m%d-%H%M%S)-$RANDOM"
+  mkdir -p "$GPUQ_DIR/snap/$id"
+  rsync -a --exclude target --exclude out --exclude .git "$repo"/ "$GPUQ_DIR/snap/$id"/ || die "snapshot failed"
+  local sha dirty
+  sha=$(git -C "$repo" rev-parse HEAD)
+  if git -C "$repo" status --porcelain | grep -q .; then dirty=1; else dirty=0; fi
+  local cmd; cmd=$(printf '%q ' "$@"); cmd=${cmd% }
+  {
+    echo "host=$host"
+    echo "name=$name"
+    echo "timeout=$timeout"
+    echo "repo=$repo"
+    echo "sha=$sha"
+    echo "dirty=$dirty"
+    echo "cmd=$cmd"
+  } > "$GPUQ_DIR/queue/.$id.tmp"
+  mv "$GPUQ_DIR/queue/.$id.tmp" "$GPUQ_DIR/queue/$id"
+  echo "$id"
+}
+
+# jobval FILE KEY
+jobval() { sed -n "s/^$2=//p" "$1" | head -n 1; }
+
+claim() { # claim WHO -> prints id or nothing
+  local who=$1 f id h
+  for f in $(ls "$GPUQ_DIR/queue" 2>/dev/null | sort); do
+    case $f in .*) continue ;; esac
+    h=$(jobval "$GPUQ_DIR/queue/$f" host)
+    if [ "$h" = "$who" ] || [ "$h" = any ]; then
+      if mv "$GPUQ_DIR/queue/$f" "$GPUQ_DIR/running/$f" 2>/dev/null; then
+        echo "$f"; return 0
+      fi
+    fi
+  done
+  return 1
+}
+
+run_job() { # run_job WHO ID
+  local who=$1 id=$2
+  local job="$GPUQ_DIR/running/$id" d="$GPUQ_DIR/done/$id" snap="$GPUQ_DIR/snap/$id"
+  mkdir -p "$d"
+  local timeout cmd name repo sha dirty gpu rc started ended t0 t1
+  timeout=$(jobval "$job" timeout); cmd=$(jobval "$job" cmd); name=$(jobval "$job" name)
+  repo=$(jobval "$job" repo); sha=$(jobval "$job" sha); dirty=$(jobval "$job" dirty)
+  started=$(date -Is); t0=$(date +%s)
+  if [ "$who" = local ]; then
+    gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n 1)
+    ( cd "$snap" && CARGO_TARGET_DIR="$GPUQ_DIR/target-local" timeout -k 30 "$timeout" bash -c "$cmd" ) > "$d/log" 2>&1
+    rc=$?
+    [ -d "$snap/out" ] && rsync -a "$snap/out/" "$d/out/"
+  else
+    {
+      "${SSH[@]}" 'mkdir -p ~/bowshock-runs/src' \
+        && rsync -a --delete "$snap"/ "$REMOTE":bowshock-runs/src/ \
+        && "${SSH[@]}" 'rm -rf ~/bowshock-runs/src/out' \
+        && "${SSH[@]}" "cd ~/bowshock-runs/src && PATH=\$HOME/.cargo/bin:\$PATH CARGO_TARGET_DIR=\$HOME/bowshock-runs/target timeout -k 30 $timeout bash -c $(printf %q "$cmd")"
+    } > "$d/log" 2>&1
+    rc=$?
+    gpu=$("${SSH[@]}" 'nvidia-smi --query-gpu=name --format=csv,noheader' 2>/dev/null | head -n 1)
+    mkdir -p "$d/out"
+    rsync -a "$REMOTE":bowshock-runs/src/out/ "$d/out/" 2>/dev/null
+    rmdir "$d/out" 2>/dev/null
+  fi
+  ended=$(date -Is); t1=$(date +%s)
+  local status=$rc
+  if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
+    status=timeout
+    if ! grep -q 'panicked' "$d/log" && grep -Eq 'test result: ok|^(PERF|RESULT) ' "$d/log"; then
+      status=ok-hung
+    fi
+  fi
+  echo "$status" > "$d/status.tmp"
+  {
+    cat "$job"
+    echo "host_actual=$who"
+    echo "gpu=$gpu"
+    echo "started=$started"
+    echo "ended=$ended"
+    echo "wall_s=$((t1 - t0))"
+  } > "$d/meta"
+  # Ledger.
+  if grep -q '^PERF ' "$d/log"; then
+    mkdir -p "$repo/perf"
+    local line json
+    grep '^PERF ' "$d/log" | while IFS= read -r line; do
+      json=$(printf '%s' "${line#PERF }" | jq -c \
+        --arg date "$ended" --arg host "$who" --arg gpu "$gpu" --arg sha "$sha" \
+        --argjson dirty "${dirty:-0}" --arg job "$id" \
+        '. + {date:$date, host:$host, gpu:$gpu, sha:$sha, dirty:$dirty, job:$job}' 2>/dev/null) || continue
+      if command -v flock >/dev/null; then
+        flock "$repo/perf/.ledger.lock" bash -c 'printf "%s\n" "$1" >> "$2"' _ "$json" "$repo/perf/ledger.jsonl"
+      else
+        printf '%s\n' "$json" >> "$repo/perf/ledger.jsonl"
+      fi
+    done
+    rm -f "$repo/perf/.ledger.lock"
+  fi
+  mv "$job" "$d/job"
+  rm -rf "$snap"
+  mv "$d/status.tmp" "$d/status"   # status last: it signals completion
+}
+
+cmd_worker() {
+  local who=${1:-}
+  case $who in local|remote) ;; *) die "usage: gpuq worker local|remote" ;; esac
+  # Adopt nothing: jobs left in running/ by a dead worker stay there.
+  local id
+  while true; do
+    if id=$(claim "$who"); then
+      run_job "$who" "$id" || echo "gpuq: job $id error" >&2
+    else
+      sleep 2
+    fi
+  done
+}
+
+cmd_status() {
+  local f id n=0
+  for f in $(ls "$GPUQ_DIR/queue" | sort); do
+    case $f in .*) continue ;; esac
+    printf '%s\t%s\tqueued\t%s\t-\n' "$f" "$(jobval "$GPUQ_DIR/queue/$f" name)" "$(jobval "$GPUQ_DIR/queue/$f" host)"
+  done
+  for f in $(ls "$GPUQ_DIR/running" | sort); do
+    printf '%s\t%s\trunning\t%s\t-\n' "$f" "$(jobval "$GPUQ_DIR/running/$f" name)" "$(jobval "$GPUQ_DIR/running/$f" host)"
+  done
+  for id in $(ls "$GPUQ_DIR/done" | sort | tail -n 20); do
+    [ -f "$GPUQ_DIR/done/$id/meta" ] || continue
+    printf '%s\t%s\t%s\t%s\t%ss\n' "$id" "$(jobval "$GPUQ_DIR/done/$id/meta" name)" \
+      "$(cat "$GPUQ_DIR/done/$id/status" 2>/dev/null || echo finishing)" \
+      "$(jobval "$GPUQ_DIR/done/$id/meta" host_actual)" "$(jobval "$GPUQ_DIR/done/$id/meta" wall_s)"
+  done
+}
+
+cmd_wait() {
+  local id=${1:?usage: gpuq wait ID} d
+  d="$GPUQ_DIR/done/$id"
+  [ -e "$GPUQ_DIR/queue/$id" ] || [ -e "$GPUQ_DIR/running/$id" ] || [ -d "$d" ] || die "unknown job $id"
+  while [ ! -f "$d/status" ]; do sleep 2; done
+  local s; s=$(cat "$d/status")
+  echo "status: $s"
+  tail -n 40 "$d/log"
+  [ "$s" = 0 ] || [ "$s" = ok-hung ]
+}
+
+cmd_log() { cat "$GPUQ_DIR/done/${1:?usage: gpuq log ID}/log"; }
+
+sub=${1:-}; [ $# -gt 0 ] && shift
+case $sub in
+  submit) cmd_submit "$@" ;;
+  worker) cmd_worker "$@" ;;
+  status) cmd_status ;;
+  wait) cmd_wait "$@" ;;
+  log) cmd_log "$@" ;;
+  *) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

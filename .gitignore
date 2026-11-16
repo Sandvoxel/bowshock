@@ -9,3 +9,4 @@ guide/book/
 *.swp
 *~
 .DS_Store
+perf/.ledger.lock
