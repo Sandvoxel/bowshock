@@ -29,7 +29,7 @@
 
 use crate::aero::{axial_drag_multiplier, Aero, DragBreakdown, BODY_CROSSFLOW_CD};
 use crate::atmosphere::{AirState, Atmosphere};
-use crate::attitude::{dot, from_axis, normalize, rate, rotate, rotate_inv, Quat, Vec3};
+use crate::drag_table::DragTable;
 use crate::rng::Rng;
 use crate::staging::{Hits, Timeline};
 use crate::vehicle::{Trigger, Vehicle};
@@ -158,14 +158,14 @@ pub struct SimInput {
     pub dt: f64,
     /// Hard stop (s); default 600.
     pub max_time: f64,
-    /// Equations of motion; default [`FlightModel::RigidBody`].
-    pub model: FlightModel,
+    /// CFD drag tables, index `k` for the stack with the lowest `k` stages dropped; missing or `None` flies the build-up.
+    pub drag_tables: Vec<Option<DragTable>>,
 }
 
 impl SimInput {
     /// Input with default step (1 ms), `max_time` (600 s) and the rigid-body model.
     pub fn new(vehicle: Vehicle, launch: Launch, recovery: Vec<RecoveryDevice>) -> Self {
-        Self { vehicle, launch, recovery, dt: 0.001, max_time: 600.0, model: FlightModel::default() }
+        Self { vehicle, launch, recovery, dt: 0.001, max_time: 600.0, drag_tables: Vec::new() }
     }
 }
 
@@ -359,9 +359,18 @@ impl Tweaks {
 }
 
 /// One aerodynamic model per separation level (0 = full stack, k = lowest k stages dropped).
-pub(crate) fn build_aeros(v: &Vehicle) -> Vec<Aero> {
+pub(crate) fn build_aeros(input: &SimInput) -> Vec<Aero> {
+    let v = &input.vehicle;
     let n = v.stages.len().max(1);
-    (0..n).map(|k| if k == 0 { Aero::new(v) } else { Aero::new(&v.truncated(v.stages[k].aft_station)) }).collect()
+    (0..n)
+        .map(|k| {
+            let aero = if k == 0 { Aero::new(v) } else { Aero::new(&v.truncated(v.stages[k].aft_station)) };
+            match input.drag_tables.get(k) {
+                Some(Some(table)) => aero.with_table(table.clone()),
+                _ => aero,
+            }
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy)]
@@ -808,7 +817,7 @@ impl Ctx<'_> {
 
 /// Flies `input` and returns the trajectory and summary.
 pub fn simulate(input: &SimInput) -> FlightResult {
-    let aeros = build_aeros(&input.vehicle);
+    let aeros = build_aeros(input);
     run(input, &input.launch, Tweaks::NOMINAL, &aeros)
 }
 

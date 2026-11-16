@@ -80,6 +80,8 @@ pub enum Edit {
     WindFrom(f64),
     /// Gust intensity.
     Turbulence(Turbulence),
+    /// Where the drag comes from.
+    Drag(bowshock_model::DragSource),
     /// Site altitude (m).
     SiteAltitude(f64),
     /// Ground temperature (K).
@@ -473,6 +475,21 @@ impl State {
         ctx.doc.revision().saturating_sub(self.own_edits)
     }
 
+    /// What a result of a flight with `spec` is compared with: the [`State::revision`], and for a flight on the CFD table the keys of
+    /// the tables it flies on (storing a table is not a document revision), so a new solve makes that flight stale.
+    fn stamp(&self, ctx: &Ctx, spec: &Spec) -> u64 {
+        let base = self.revision(ctx);
+        if spec.drag != bowshock_model::DragSource::CfdTable {
+            return base;
+        }
+        let rocket = ctx.doc.rocket();
+        let keys = (1..=rocket.stages().len().max(1)).fold(0xcbf2_9ce4_8422_2325u64, |h, stage| {
+            let key = rocket.cfd_table(stage as u32).map_or(0, |t| t.key);
+            (h ^ key).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+        base.wrapping_add(keys | 1)
+    }
+
     fn flight(&self, id: FlightId) -> Option<&Flight> {
         self.flights.iter().find(|f| f.id == id)
     }
@@ -601,9 +618,9 @@ impl State {
 
     /// Starts the simulation of flight `id` on a worker thread.
     fn launch(&mut self, id: FlightId, ctx: &Ctx) -> Task<app::Message> {
-        let revision = self.revision(ctx);
+        let Some(spec) = self.flight(id).map(|f| f.spec.clone()) else { return Task::none() };
+        let revision = self.stamp(ctx, &spec);
         let Some(flight) = self.flights.iter_mut().find(|f| f.id == id) else { return Task::none() };
-        let spec = flight.spec.clone();
         let (input, delay) = match flight::prepare(ctx, &spec) {
             Ok(prepared) => prepared,
             Err(message) => {
@@ -766,9 +783,9 @@ impl State {
 
     /// Starts a dispersion study of flight `id`: the flight flown [`flight::DISPERSION_RUNS`] times with its conditions varied.
     fn launch_dispersion(&mut self, id: FlightId, ctx: &Ctx) -> Task<app::Message> {
-        let revision = self.revision(ctx);
+        let Some(spec) = self.flight(id).map(|f| f.spec.clone()) else { return Task::none() };
+        let revision = self.stamp(ctx, &spec);
         let Some(flight) = self.flights.iter_mut().find(|f| f.id == id) else { return Task::none() };
-        let spec = flight.spec.clone();
         let input = match flight::prepare(ctx, &spec) {
             Ok((input, _)) => input,
             Err(message) => {
@@ -881,6 +898,16 @@ impl State {
                 Edit::Temperature(v) => spec.temperature = v.clamp(220.0, 330.0),
                 Edit::FieldRadius(v) => spec.field_radius = v.max(1.0),
             }
+            Edit::Delay(v) => spec.delay = Some(v.max(0.0)),
+            Edit::RailLength(v) => spec.rail_length = v.max(0.05),
+            Edit::LaunchAngle(v) => spec.launch_angle = v.clamp(0.0, 70f64.to_radians()),
+            Edit::Wind(v) => spec.wind_speed = v.max(0.0),
+            Edit::WindFrom(v) => spec.wind_from = v.rem_euclid(std::f64::consts::TAU),
+            Edit::Turbulence(t) => spec.turbulence = t,
+            Edit::Drag(d) => spec.drag = d,
+            Edit::SiteAltitude(v) => spec.site_altitude = v.clamp(-400.0, 6000.0),
+            Edit::Temperature(v) => spec.temperature = v.clamp(220.0, 330.0),
+            Edit::FieldRadius(v) => spec.field_radius = v.max(1.0),
         }
     }
 

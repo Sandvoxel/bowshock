@@ -96,6 +96,16 @@ impl Conditions {
     }
 }
 
+/// Which drag the flight flies on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DragSource {
+    /// The build-up (Barrowman / OpenRocket) drag.
+    #[default]
+    Extended,
+    /// The stored CFD drag table where one fits the rocket, the build-up elsewhere.
+    CfdTable,
+}
+
 /// One stored flight.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FlightDef {
@@ -111,12 +121,15 @@ pub struct FlightDef {
     /// Launch site and weather.
     #[serde(default)]
     pub conditions: Conditions,
+    /// Where its drag comes from; files without the field fly [`DragSource::Extended`].
+    #[serde(default)]
+    pub drag: DragSource,
 }
 
 impl FlightDef {
     /// The default flight, named `Nominal`, on the active configuration with [`Conditions::default`].
     pub fn nominal(id: FlightId) -> FlightDef {
-        FlightDef { id, name: "Nominal".to_string(), motor: FlightMotor::Active, delay: None, conditions: Conditions::default() }
+        FlightDef { id, name: "Nominal".to_string(), motor: FlightMotor::Active, delay: None, conditions: Conditions::default(), drag: DragSource::Extended }
     }
 }
 
@@ -304,6 +317,7 @@ mod tests {
             motor: FlightMotor::Motor(MotorRef::new("I284W", "AeroTech")),
             delay: Some(6.0),
             conditions: Conditions { wind_speed: 7.0, turbulence: Turbulence::High, ..Conditions::default() },
+            drag: DragSource::CfdTable,
         }
     }
 
@@ -343,6 +357,14 @@ mod tests {
     }
 
     #[test]
+    fn a_flight_without_a_drag_source_flies_extended() {
+        let def: FlightDef = serde_json::from_str(r#"{"id":1,"name":"Old","motor":"Active"}"#).unwrap();
+        assert_eq!(def.drag, DragSource::Extended);
+        let back: FlightDef = serde_json::from_str(&serde_json::to_string(&windy()).unwrap()).unwrap();
+        assert_eq!(back.drag, DragSource::CfdTable);
+    }
+
+    #[test]
     fn loading_repairs_a_bad_flight_list() {
         let mut r = Rocket::default();
         let bad = FlightDef {
@@ -351,6 +373,7 @@ mod tests {
             motor: FlightMotor::Config(4242),
             delay: Some(f64::NAN),
             conditions: Conditions { wind_speed: -3.0, launch_angle: 9.0, temperature: 5.0, wind_from: -std::f64::consts::FRAC_PI_2, ..Conditions::default() },
+            drag: DragSource::Extended,
         };
         r.set_flights(vec![FlightDef::nominal(1), bad]);
         let fixed = r.flights();

@@ -1587,6 +1587,7 @@ impl<'w> Import<'w> {
                 motor: config.map_or(FlightMotor::Active, FlightMotor::Config),
                 delay: None,
                 conditions,
+                drag: Default::default(),
             });
             self.simulations.push(sim);
         }

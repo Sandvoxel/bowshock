@@ -18,9 +18,12 @@
 //!
 //! Coefficients are referenced to the vehicle reference area; stations are from the nose tip.
 
+use crate::atmosphere::Atmosphere;
+use crate::drag_table::{DragTable, DragTablePoint};
 use crate::tube_fins::TubeFinCalc;
 use crate::vehicle::{BodyKind, BodySegment, FinCrossSection, FinPlanform, FinSet, NoseShape, Protuberance, Vehicle};
 use std::f64::consts::PI;
+use std::sync::Arc;
 
 /// Per-component and total normal-force data at a flight condition.
 #[derive(Clone, Debug, PartialEq)]
@@ -419,6 +422,8 @@ pub struct Aero {
     prots: Vec<ProtCalc>,
     /// `(roughness m, wetted area m^2)` of the body, grouped so each skin-friction value is evaluated once.
     friction_groups: Vec<(f64, f64)>,
+    /// CFD drag table flown instead of the build-up, which then supplies the corrections.
+    table: Option<Arc<DragTable>>,
 }
 
 impl Aero {
@@ -495,6 +500,7 @@ impl Aero {
             tube_fins: v.tube_fins.iter().map(TubeFinCalc::new).collect(),
             prots,
             friction_groups,
+            table: None,
         }
     }
 
@@ -593,6 +599,57 @@ impl Aero {
     /// Zero-angle-of-attack drag at `mach` with `re_per_m = v/nu` (Reynolds number per metre).
     /// With `motor_on` the base area covered by the motor exhaust carries no base drag.
     pub fn drag(&self, mach: f64, re_per_m: f64, motor_on: bool) -> DragBreakdown {
+        match &self.table {
+            None => self.buildup(mach, re_per_m, motor_on),
+            Some(table) => self.tabulated(table, mach, re_per_m, motor_on),
+        }
+    }
+
+    /// This model flying on `table`: its parts at the table's Reynolds number, corrected by the build-up for the
+    /// Reynolds number and motor exhaust of the actual condition.
+    pub fn with_table(mut self, table: DragTable) -> Aero {
+        self.table = Some(Arc::new(table));
+        self
+    }
+
+    /// Drag from the CFD table; see [`Aero::with_table`].
+    fn tabulated(&self, table: &DragTable, mach: f64, re_per_m: f64, motor_on: bool) -> DragBreakdown {
+        let m = mach.max(0.0);
+        let air = Atmosphere::standard().at_msl(table.altitude);
+        let re_tab = |m: f64| m * air.speed_of_sound * air.density / air.viscosity;
+        let now = self.buildup(m, re_per_m, motor_on);
+        let tab = self.buildup(m, re_tab(m), false);
+        let t = table.inside(m).unwrap_or_else(|| {
+            let (first, last) = (&table.points[0], &table.points[table.points.len() - 1]);
+            let end = if m > last.mach { last } else { first };
+            let at_end = self.buildup(end.mach, re_tab(end.mach), false);
+            let scale = |end: f64, here: f64, there: f64| {
+                let r = here / there;
+                if there.abs() < 1e-12 || !r.is_finite() {
+                    end
+                } else {
+                    end * r
+                }
+            };
+            DragTablePoint {
+                mach: m,
+                friction: scale(end.friction, tab.friction, at_end.friction),
+                pressure: scale(end.pressure, tab.pressure, at_end.pressure),
+                base: scale(end.base, tab.base, at_end.base),
+                fins: scale(end.fins, tab.fins, at_end.fins),
+                other: scale(end.other, tab.protuberances, at_end.protuberances),
+            }
+        });
+        let friction = (t.friction + now.friction - tab.friction).max(0.0);
+        let pressure = (t.pressure + now.pressure - tab.pressure).max(0.0);
+        let fins = (t.fins + now.fins - tab.fins).max(0.0);
+        let protuberances = (t.other + now.protuberances - tab.protuberances).max(0.0);
+        let base = if tab.base < 1e-12 { t.base } else { t.base * now.base / tab.base }.max(0.0);
+        DragBreakdown { friction, pressure, base, fins, protuberances, total: friction + pressure + base + fins + protuberances }
+    }
+
+    /// The Barrowman/OpenRocket build-up.
+    fn buildup(&self, mach: f64, re_per_m: f64, motor_on: bool) -> DragBreakdown {
         let m = mach.max(0.0);
         let ar = self.a_ref;
         let re_per_m = re_per_m.max(0.0);

@@ -3,6 +3,7 @@
 
 use std::fmt;
 
+use bowshock_model::DragSource;
 use bowshock_sim::Turbulence;
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input, tooltip, Space};
 use iced::{Background, Border, Element, Fill, Length, Theme, Widget};
@@ -47,8 +48,7 @@ pub(super) fn view<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
     let add: Element<'a, Message> = push("compare +", Weight::Ghost).tooltip("Add a flight to compare").on_press(Message::AddFlight).into();
     let head = container(row![ui::label(title), Space::new().width(Fill), add].align_y(iced::Center)).padding([0.0, SPACE_2]).height(32);
 
-    let revision = state.revision(ctx);
-    let rows = column(state.flights.iter().map(|f| flight_row(state, ctx, f, revision)));
+    let rows = column(state.flights.iter().map(|f| flight_row(state, ctx, f)));
 
     let mut body: Vec<Element<'a, Message>> = vec![rows.boxed()];
     if ctx.doc.rocket().configurations().len() > 1 {
@@ -127,6 +127,12 @@ fn conditions<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
         }),
     );
 
+    let drag = labeled(
+        "Drag",
+        segmented_fill(&[(DragSource::Extended, "Extended"), (DragSource::CfdTable, "CFD table")], spec.drag, |d| Message::Edit(Edit::Drag(d))),
+    );
+    let drag_note = flight::drag_note(ctx, spec);
+
     let keycap = container(text("F5").font(MONO).size(10)).padding([1.0, SPACE_1]).style(theme::keycap);
     let remove: Element<'a, Message> =
         icon_button(Mark::Close, if count > 1 { "Remove the selected flights" } else { "Remove this flight" }).on_press(Message::RemoveFlight).width(22).into();
@@ -143,16 +149,20 @@ fn conditions<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
         let note = format!("— flights differ · an edit sets all {count}");
         fields.push(text(note).size(TEXT_BODY - 1.0).style(theme::muted).boxed());
     }
-    fields.push(motor);
-    fields.push(field("Delay", shared.delay, flight::effective_delay(ctx, spec), Quantity::Time, Edit::Delay));
-    fields.push(field("Wind", shared.wind_speed, spec.wind_speed, Quantity::Velocity, Edit::Wind));
-    fields.push(field("Wind from", shared.wind_from, spec.wind_from, Quantity::Angle, Edit::WindFrom));
-    fields.push(field("Launch angle", shared.launch_angle, spec.launch_angle, Quantity::Angle, Edit::LaunchAngle));
-    fields.push(field("Rail length", shared.rail_length, spec.rail_length, Quantity::Length, Edit::RailLength));
-    fields.push(turbulence);
-    fields.push(field("Site altitude", shared.site_altitude, spec.site_altitude, Quantity::Altitude, Edit::SiteAltitude));
-    fields.push(field("Temperature", shared.temperature, spec.temperature, Quantity::Temperature, Edit::Temperature));
-    fields.push(field("Field radius", shared.field_radius, spec.field_radius, Quantity::Altitude, Edit::FieldRadius));
+    fields.push(field("Wind", spec.wind_speed, Quantity::Velocity, Edit::Wind));
+    fields.push(field("Wind from", spec.wind_from, Quantity::Angle, Edit::WindFrom));
+    fields.push(field("Launch angle", spec.launch_angle, Quantity::Angle, Edit::LaunchAngle));
+    if !compare {
+        fields.push(field("Rail length", spec.rail_length, Quantity::Length, Edit::RailLength));
+        fields.push(turbulence);
+        fields.push(drag);
+        if let Some(note) = drag_note {
+            fields.push(text(note).size(TEXT_LABEL).boxed());
+        }
+        fields.push(field("Site altitude", spec.site_altitude, Quantity::Altitude, Edit::SiteAltitude));
+        fields.push(field("Temperature", spec.temperature, Quantity::Temperature, Edit::Temperature));
+    }
+    fields.push(field("Field radius", spec.field_radius, Quantity::Altitude, Edit::FieldRadius));
     container(column![head, column(fields).spacing(SPACE_2)].spacing(SPACE_3)).padding(SPACE_3).boxed()
 }
 
@@ -215,9 +225,9 @@ fn status_color(severity: Option<Severity>, stale: bool) -> fn(&Tokens) -> iced:
 }
 
 /// One row: the compare checkbox, name and `motor · condition`, apogee and the status square.
-fn flight_row<'a>(state: &'a State, ctx: &'a Ctx, flight: &'a Flight, revision: u64) -> Element<'a, Message> {
-    let selected = state.is_selected(flight.id);
-    let stale = flight.is_stale(revision);
+fn flight_row<'a>(state: &'a State, ctx: &'a Ctx, flight: &'a Flight) -> Element<'a, Message> {
+    let selected = flight.id == state.selected;
+    let stale = flight.is_stale(state.stamp(ctx, &flight.spec));
     let is_ref = state.shown.compare && state.shown.ids.get(state.shown.reference) == Some(&flight.id);
 
     let slot = flight.slot;

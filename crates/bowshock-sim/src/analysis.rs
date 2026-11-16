@@ -160,7 +160,7 @@ pub struct MonteCarlo {
 /// The random stream derives from `input.launch.seed`, so results are reproducible; the runs
 /// execute on all available cores.
 pub fn monte_carlo(input: &SimInput, runs: usize, sigma: &Dispersion) -> MonteCarlo {
-    let aeros = build_aeros(&input.vehicle);
+    let aeros = build_aeros(input);
     let base = &input.launch;
     let mut rng = Rng::new(base.seed ^ 0x5EED_0000_0000_0001);
     let nominal_tilt = [base.angle_from_vertical * base.direction.sin(), base.angle_from_vertical * base.direction.cos()];

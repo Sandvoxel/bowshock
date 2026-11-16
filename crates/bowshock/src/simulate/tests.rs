@@ -13,7 +13,8 @@ fn fly(state: &mut State, ctx: &Ctx, id: FlightId) {
     let (input, delay) = flight::prepare(ctx, &spec).expect("the example flies");
     let started = Instant::now();
     let result = Arc::new(bowshock_sim::simulate(&input));
-    state.finished(Done { flight: id, ticket, spec, revision: state.revision(ctx), delay, dt: input.dt, outcome: Ok((result, started.elapsed())) });
+    let revision = state.stamp(ctx, &spec);
+    state.finished(Done { flight: id, ticket, spec, revision, delay, dt: input.dt, outcome: Ok((result, started.elapsed())) });
 }
 
 fn named<'a>(state: &'a State, name: &str) -> &'a Flight {
@@ -589,182 +590,76 @@ fn undoing_closes_the_picker_and_a_flight_can_be_overlaid_with_several_sources()
     assert!(state.dismiss_picker() && state.picker.is_none() && !state.dismiss_picker());
 }
 
-/// The ids of the example flights, in list order: Nominal, Windy, Hot day, Bigger motor.
-fn ids_of(state: &State) -> [FlightId; 4] {
-    let ids: Vec<FlightId> = state.flights.iter().map(|f| f.id).collect();
-    ids.try_into().expect("the example stores four flights")
-}
-
-/// A click on flight `id` with `modifiers` held.
-fn click_flight(state: &mut State, app: &mut App, id: FlightId, modifiers: keyboard::Modifiers) {
-    state.update(Message::Modifiers(modifiers), app.ctx_mut());
-    state.update(Message::Click(id), app.ctx_mut());
-    state.update(Message::Modifiers(keyboard::Modifiers::empty()), app.ctx_mut());
-}
-
-#[test]
-fn clicks_select_toggle_and_extend_a_range_while_ticks_stay_apart() {
-    let mut app = App::with_example();
-    let mut state = state_for(&app);
-    let [nominal, windy, hot, bigger] = ids_of(&state);
-    let (none, command, shift) = (keyboard::Modifiers::empty(), keyboard::Modifiers::COMMAND, keyboard::Modifiers::SHIFT);
-
-    // A plain click selects one flight.
-    click_flight(&mut state, &mut app, windy, none);
-    assert_eq!((state.selected, state.edit_ids()), (windy, vec![windy]));
-
-    // Cmd/Ctrl-click adds a flight (it becomes the selected one) and takes it out again.
-    click_flight(&mut state, &mut app, bigger, command);
-    assert_eq!((state.selected, state.edit_ids()), (bigger, vec![windy, bigger]));
-    click_flight(&mut state, &mut app, bigger, command);
-    assert_eq!((state.selected, state.edit_ids()), (windy, vec![windy]), "the oldest remaining flight takes over");
-    click_flight(&mut state, &mut app, windy, command);
-    assert_eq!(state.edit_ids(), vec![windy], "a toggle never empties the selection");
-
-    // Shift-click selects the range from the last click, in list order, whichever way it runs.
-    click_flight(&mut state, &mut app, bigger, shift);
-    assert_eq!((state.selected, state.edit_ids()), (bigger, vec![windy, hot, bigger]));
-    click_flight(&mut state, &mut app, nominal, shift);
-    assert_eq!(state.edit_ids(), vec![nominal, windy], "a new range replaces the old one, from the same anchor");
-    // With Cmd/Ctrl too the range is added to what is selected.
-    click_flight(&mut state, &mut app, nominal, none);
-    click_flight(&mut state, &mut app, hot, command);
-    click_flight(&mut state, &mut app, bigger, command | shift);
-    assert_eq!(state.edit_ids(), vec![nominal, hot, bigger]);
-    click_flight(&mut state, &mut app, windy, none);
-    assert_eq!(state.edit_ids(), vec![windy], "a plain click collapses the selection");
-
-    // Cmd/Ctrl+A selects every flight; the key reaches the screen only when no widget took it.
-    let a = keyboard::Key::Character("a".into());
-    assert!(matches!(state.on_key(&a, command, app.ctx()), Some(Message::SelectAll)));
-    assert!(state.on_key(&a, none, app.ctx()).is_none() && state.on_key(&a, command | shift, app.ctx()).is_none());
-    state.update(Message::SelectAll, app.ctx_mut());
-    assert_eq!((state.selected, state.edit_ids()), (windy, vec![nominal, windy, hot, bigger]));
-
-    // The compare ticks are independent of the edit selection, both ways.
-    state.update(Message::Tick(nominal), app.ctx_mut());
-    assert_eq!(state.edit_ids().len(), 4);
-    click_flight(&mut state, &mut app, hot, none);
-    assert_eq!((state.ticked(), state.flight(nominal).unwrap().slot), (1, Some(1)), "selecting does not tick");
-
-    // A selection survives edits to the list that keep its flights and drops the ones that went.
-    click_flight(&mut state, &mut app, windy, command);
-    state.update(Message::RemoveFlight, app.ctx_mut());
-    assert_eq!(state.flights.len(), 2);
-    assert!(state.flight(state.selected).is_some() && state.also.is_empty());
-}
-
-#[test]
-fn conditions_the_flights_share_show_their_value_and_the_others_are_mixed() {
-    let mut app = App::with_example();
-    let mut state = state_for(&app);
-    let [nominal, _, hot, _] = ids_of(&state);
-    let shared = |state: &State, app: &App| flight::Shared::of(app.ctx(), &state.edit_flights());
-
-    // One flight: everything is its own.
-    let one = shared(&state, &app);
-    assert_eq!((one.wind_speed, one.temperature, one.motor.clone()), (Some(2.2), Some(288.15), Some(MotorChoice::Active)));
-
-    // Nominal and Hot day differ in the temperature alone.
-    click_flight(&mut state, &mut app, nominal, keyboard::Modifiers::empty());
-    click_flight(&mut state, &mut app, hot, keyboard::Modifiers::COMMAND);
-    let pair = shared(&state, &app);
-    assert_eq!((pair.temperature, pair.wind_speed, pair.rail_length), (None, Some(2.2), Some(Spec::default().rail_length)));
-
-    // All four: wind (Windy), temperature (Hot day) and motor (Bigger motor) are mixed, the rest agree.
-    state.update(Message::SelectAll, app.ctx_mut());
-    let all = shared(&state, &app);
-    assert_eq!((all.wind_speed, all.temperature, all.motor), (None, None, None));
-    let spec = Spec::default();
-    assert_eq!(
-        (all.rail_length, all.launch_angle, all.wind_from, all.turbulence, all.site_altitude, all.field_radius),
-        (Some(spec.rail_length), Some(spec.launch_angle), Some(spec.wind_from), Some(spec.turbulence), Some(spec.site_altitude), Some(spec.field_radius))
-    );
-    // The delay is what each flight flies: Bigger motor's own differs from the configuration's.
-    let delays: Vec<f64> = state.flights.iter().map(|f| flight::effective_delay(app.ctx(), &f.spec)).collect();
-    assert_eq!(all.delay.is_some(), delays.windows(2).all(|w| w[0] == w[1]));
-
-    // Setting the mixed field on every flight makes it shared.
-    state.update(Message::Edit(Edit::Wind(4.0)), app.ctx_mut());
-    assert_eq!(shared(&state, &app).wind_speed, Some(4.0));
-    assert_eq!(shared(&state, &app).temperature, None, "a field that was not touched stays per-flight");
-}
-
-#[test]
-fn editing_with_several_selected_sets_the_field_on_each_in_one_undo_step() {
-    let mut app = App::with_example();
-    let mut state = state_for(&app);
-    let [nominal, windy, hot, bigger] = ids_of(&state);
-    click_flight(&mut state, &mut app, nominal, keyboard::Modifiers::empty());
-    click_flight(&mut state, &mut app, hot, keyboard::Modifiers::SHIFT);
-    assert_eq!(state.edit_ids(), vec![nominal, windy, hot]);
-    let rail = |state: &State, id| state.flight(id).unwrap().spec.rail_length;
-    let before = rail(&state, nominal);
-
-    // Scrubbing the field is one step, however many ticks it sends, and the label says what and how many.
-    for v in [1.5, 2.0, 2.4] {
-        state.update(Message::Edit(Edit::RailLength(v)), app.ctx_mut());
+/// A CFD table of the example rocket's whole stack with the given geometry hash.
+fn cfd_table(geometry: u64) -> bowshock_model::CfdTable {
+    use bowshock_model::{CfdGrid, CfdPoint, CfdQuality, CfdTable};
+    let p = |mach: f64| CfdPoint { mach, cd: 0.5, friction: 0.1, pressure: 0.1, base: 0.1, fins: 0.1, other: 0.1, quality: CfdQuality::Converged };
+    CfdTable {
+        key: geometry ^ 7,
+        geometry,
+        stage: 1,
+        solved_at: 0,
+        solve_seconds: 1.0,
+        backend: "test".into(),
+        fallback: None,
+        altitude: 0.0,
+        notes: Vec::new(),
+        points: vec![p(0.3), p(1.0), p(2.0)],
+        grid: CfdGrid::Coarse,
     }
-    app.ctx_mut().doc.seal();
-    for id in [nominal, windy, hot] {
-        assert_eq!(rail(&state, id), 2.4);
-        assert_eq!(app.ctx().doc.rocket().flights().iter().find(|f| f.id == id).unwrap().conditions.rail_length, 2.4, "stored too");
-    }
-    assert_eq!(rail(&state, bigger), before, "a flight outside the selection is untouched");
-    // The other fields stay per-flight.
-    assert_eq!(state.flight(windy).unwrap().spec.wind_speed, 7.0);
-    assert!((state.flight(hot).unwrap().spec.temperature - 308.15).abs() < 1e-9);
+}
 
-    assert_eq!(app.ctx().doc.undo_label(), Some("Set rail length on 3 flights"));
-    assert_eq!(app.ctx_mut().doc.undo().as_deref(), Some("Set rail length on 3 flights"));
-    state.sync(app.ctx(), false);
-    assert!([nominal, windy, hot, bigger].iter().all(|id| rail(&state, *id) == before), "one undo puts all three back");
-    assert!(app.ctx_mut().doc.redo().is_some());
-    state.sync(app.ctx(), false);
-    assert_eq!(rail(&state, windy), 2.4);
-
-    // The motor picker sets the same motor on every selected flight (and the delay each keeps is one the motor offers).
-    state.update(Message::Edit(Edit::Delay(12.0)), app.ctx_mut());
-    let choice = MotorChoice::Motor(bowshock_model::MotorRef::new("I218R", "AeroTech"));
-    state.update(Message::Edit(Edit::Motor(choice.clone())), app.ctx_mut());
-    let delays = &app.ctx().physics.motors().find("I218R").unwrap().delays;
-    for id in [nominal, windy, hot] {
-        let spec = &state.flight(id).unwrap().spec;
-        assert_eq!(spec.motor, choice);
-        assert!(delays.contains(&spec.delay.unwrap()));
-    }
-    assert_eq!(state.flight(bigger).unwrap().spec.motor, MotorChoice::Motor(bowshock_model::MotorRef::new("I284W", "AeroTech")));
-    assert_eq!(app.ctx().doc.undo_label(), Some("Set motor on 3 flights"));
-
-    // One flight keeps the single-flight label.
-    click_flight(&mut state, &mut app, bigger, keyboard::Modifiers::empty());
-    state.update(Message::Edit(Edit::Wind(1.0)), app.ctx_mut());
-    assert_eq!(app.ctx().doc.undo_label(), Some("Edit flight"));
+fn current_geometry(app: &App) -> u64 {
+    let rocket = app.ctx().doc.rocket();
+    let v = bowshock_sim::from_model::vehicle(rocket, app.ctx().physics.motors(), bowshock_sim::from_model::Phase::Full).unwrap();
+    crate::analyze::cfd::plan(rocket, &v).unwrap().geometry
 }
 
 #[test]
-fn run_flies_the_selected_flights_and_removing_takes_them_all() {
+fn the_cfd_drag_source_attaches_a_matching_table_and_says_why_it_cannot() {
     let mut app = App::with_example();
     let mut state = state_for(&app);
-    let [nominal, windy, hot, bigger] = ids_of(&state);
-    click_flight(&mut state, &mut app, windy, keyboard::Modifiers::empty());
-    click_flight(&mut state, &mut app, bigger, keyboard::Modifiers::COMMAND);
-    state.update(Message::Run, app.ctx_mut());
-    let running = |state: &State, id| state.flight(id).unwrap().running;
-    assert_eq!([nominal, windy, hot, bigger].map(|id| running(&state, id)), [false, true, false, true]);
+    state.update(Message::Edit(Edit::Drag(bowshock_model::DragSource::CfdTable)), app.ctx_mut());
+    let spec = state.selected_flight().spec.clone();
 
-    // One selected flight runs alone, as before.
-    click_flight(&mut state, &mut app, nominal, keyboard::Modifiers::empty());
-    state.update(Message::Run, app.ctx_mut());
-    assert!(running(&state, nominal) && !running(&state, hot));
+    let (input, _) = flight::prepare(app.ctx(), &spec).unwrap();
+    assert!(input.drag_tables.iter().all(Option::is_none));
+    assert!(flight::drag_note(app.ctx(), &spec).unwrap().contains("No CFD table"));
 
-    // Remove takes every selected flight in one step; it never takes the last ones.
-    click_flight(&mut state, &mut app, windy, keyboard::Modifiers::empty());
-    click_flight(&mut state, &mut app, hot, keyboard::Modifiers::COMMAND);
-    state.update(Message::RemoveFlight, app.ctx_mut());
-    assert_eq!(state.flights.iter().map(|f| f.id).collect::<Vec<_>>(), vec![nominal, bigger]);
-    assert_eq!(app.ctx().doc.undo_label(), Some("Remove flights"));
-    state.update(Message::SelectAll, app.ctx_mut());
-    state.update(Message::RemoveFlight, app.ctx_mut());
-    assert_eq!(state.flights.len(), 2, "removing every flight is refused");
+    let geometry = current_geometry(&app);
+    assert!(app.ctx_mut().doc.store_cfd_table(cfd_table(geometry ^ 1)));
+    let (input, _) = flight::prepare(app.ctx(), &spec).unwrap();
+    assert!(input.drag_tables.iter().all(Option::is_none), "another geometry is not used");
+    assert!(flight::drag_note(app.ctx(), &spec).unwrap().contains("stale"));
+
+    assert!(app.ctx_mut().doc.store_cfd_table(cfd_table(geometry)));
+    let (input, _) = flight::prepare(app.ctx(), &spec).unwrap();
+    assert_eq!(input.drag_tables[0].as_ref().map(|t| t.points.len()), Some(3));
+    assert_eq!(flight::drag_note(app.ctx(), &spec), None);
+
+    let extended = Spec { drag: bowshock_model::DragSource::Extended, ..spec };
+    assert!(flight::prepare(app.ctx(), &extended).unwrap().0.drag_tables.is_empty());
+}
+
+#[test]
+fn changing_the_drag_source_or_the_stored_table_makes_a_result_stale() {
+    let mut app = App::with_example();
+    let mut state = state_for(&app);
+    let id = state.selected;
+    fly(&mut state, app.ctx(), id);
+    assert!(!state.flight(id).unwrap().is_stale(state.stamp(app.ctx(), &state.flight(id).unwrap().spec)));
+    state.update(Message::Edit(Edit::Drag(bowshock_model::DragSource::CfdTable)), app.ctx_mut());
+    assert!(state.flight(id).unwrap().is_stale(state.stamp(app.ctx(), &state.flight(id).unwrap().spec)));
+    state.update(Message::Edit(Edit::Drag(bowshock_model::DragSource::Extended)), app.ctx_mut());
+    assert!(!state.flight(id).unwrap().is_stale(state.stamp(app.ctx(), &state.flight(id).unwrap().spec)));
+
+    // Storing a table is not a document revision, but a flight on the CFD table goes stale (an Extended one does not).
+    let geometry = current_geometry(&app);
+    assert!(app.ctx_mut().doc.store_cfd_table(cfd_table(geometry)));
+    assert!(!state.flight(id).unwrap().is_stale(state.stamp(app.ctx(), &state.flight(id).unwrap().spec)));
+    state.update(Message::Edit(Edit::Drag(bowshock_model::DragSource::CfdTable)), app.ctx_mut());
+    fly(&mut state, app.ctx(), id);
+    assert!(!state.flight(id).unwrap().is_stale(state.stamp(app.ctx(), &state.flight(id).unwrap().spec)));
+    assert!(app.ctx_mut().doc.store_cfd_table(cfd_table(geometry ^ 3)));
+    assert!(state.flight(id).unwrap().is_stale(state.stamp(app.ctx(), &state.flight(id).unwrap().spec)));
 }

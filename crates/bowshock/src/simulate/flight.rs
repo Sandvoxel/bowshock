@@ -10,9 +10,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bowshock_model::{Conditions, ConfigId, FlightDef, FlightMotor, MotorMount, MotorRef, Rocket};
+use bowshock_model::{Conditions, ConfigId, DragSource, FlightDef, FlightMotor, MotorMount, MotorRef, Rocket};
 use bowshock_sim::from_model::{self, Phase};
-use bowshock_sim::{EventKind, FlightResult, Launch, SimInput, Turbulence};
+use bowshock_sim::{DragTable, EventKind, FlightResult, Launch, SimInput, Turbulence};
 
 use crate::app::Ctx;
 use crate::widgets::chip::Severity;
@@ -104,6 +104,8 @@ pub struct Spec {
     pub temperature: f64,
     /// The distance from the pad the rocket has to land within (m).
     pub field_radius: f64,
+    /// Where the drag comes from.
+    pub drag: DragSource,
 }
 
 impl Default for Spec {
@@ -129,6 +131,7 @@ impl Spec {
             site_altitude: c.site_altitude,
             temperature: c.temperature,
             field_radius: c.field_radius,
+            drag: def.drag,
         }
     }
 
@@ -149,6 +152,7 @@ impl Spec {
                 temperature: self.temperature,
                 field_radius: self.field_radius,
             },
+            drag: self.drag,
         }
     }
 }
@@ -486,7 +490,36 @@ pub fn prepare(ctx: &Ctx, spec: &Spec) -> Result<(SimInput, f64), String> {
     if input.vehicle.stages.iter().all(|s| s.motor.is_none()) {
         return Err("Cannot fly: no motor in the configuration".to_string());
     }
+    let mut input = input;
+    if spec.drag == DragSource::CfdTable {
+        input.drag_tables = (0..input.vehicle.stages.len()).map(|k| drag_table(&rocket, ctx.physics.motors(), k + 1).ok()).collect();
+    }
     Ok((input, delay))
+}
+
+/// The CFD drag table stack from model stage `stage` (1 is the whole rocket) flies on: the stored one when its geometry is the
+/// rocket's now. `Err` says why the stack flies on the build-up instead. The table's altitude does not matter, the flight corrects
+/// for the Reynolds number.
+pub fn drag_table(rocket: &Rocket, motors: &bowshock_motors::MotorDb, stage: usize) -> Result<DragTable, String> {
+    let Some(table) = rocket.cfd_table(stage as u32) else {
+        return Err("No CFD table for this rocket yet: solve one in Analyze > CFD table. Flying on Extended.".to_string());
+    };
+    let phase = if stage <= 1 { Phase::Full } else { Phase::UpperFrom(stage) };
+    let plan = from_model::vehicle(rocket, motors, phase).map_err(|e| e.to_string()).and_then(|v| crate::analyze::cfd::plan(rocket, &v));
+    match plan {
+        Ok(plan) if plan.geometry == table.geometry => Ok(DragTable::from_cfd(table)),
+        Ok(_) => Err("CFD table is stale (the rocket changed): flying on Extended.".to_string()),
+        Err(why) => Err(format!("CFD cannot model this rocket ({why}): flying on Extended.")),
+    }
+}
+
+/// What to tell about `spec`'s drag source: why a stack of the rocket flies on the build-up although the CFD table was asked for.
+pub fn drag_note(ctx: &Ctx, spec: &Spec) -> Option<String> {
+    if spec.drag != DragSource::CfdTable {
+        return None;
+    }
+    let rocket = ctx.doc.rocket();
+    (1..=rocket.stages().len().max(1)).find_map(|stage| drag_table(rocket, ctx.physics.motors(), stage).err())
 }
 
 #[cfg(test)]

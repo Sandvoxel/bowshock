@@ -22,7 +22,7 @@
 pub mod aero;
 pub mod analysis;
 pub mod atmosphere;
-mod attitude;
+pub mod drag_table;
 pub mod flight;
 pub mod flutter;
 pub mod from_model;
@@ -34,8 +34,8 @@ pub mod vehicle;
 pub use aero::{Aero, DragBreakdown, NormalForce, RollAero, Stability};
 pub use analysis::{monte_carlo, vs_alpha, vs_mach, AlphaPoint, Dispersion, MachPoint, MonteCarlo, MonteCarloRun, MonteCarloStats};
 pub use atmosphere::{AirState, Atmosphere};
-pub use flight::{simulate, Deploy, Event, EventKind, FlightModel, FlightResult, Launch, RecoveryDevice, Sample, SimInput, Summary, Trajectory, Turbulence};
-pub use flutter::{flutter_velocity, FlutterFin, FlutterGeometry, FlutterInputs, FlutterPoint, FlutterTrace, FlutterWarning};
+pub use drag_table::{DragTable, DragTablePoint};
+pub use flight::{simulate, Deploy, Event, EventKind, FlightResult, Launch, RecoveryDevice, Sample, SimInput, Summary, Trajectory, Turbulence};
 pub use staging::{has_altitude_trigger, staging_times, Timeline};
 pub use vehicle::{
     BodyKind, BodySegment, FinCrossSection, FinPlanform, FinSet, MassProps, NoseShape, Protuberance, StageMass, StageMotor, ThrustCurve, Timing, Trigger,

@@ -32,14 +32,13 @@ fn badge<'a>(severity: Severity, label: impl Into<String>) -> Element<'a, Messag
 
 /// The whole column.
 pub(super) fn view<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
-    let revision = state.revision(ctx);
     let flight = state.selected_flight();
     let mut parts: Vec<Element<'a, Message>> = Vec::new();
 
     if state.shown.compare {
-        parts.extend(compare(state, ctx, revision));
+        parts.extend(compare(state, ctx));
     } else {
-        parts.extend(single(ctx, flight, revision));
+        parts.extend(single(ctx, flight, state.stamp(ctx, &flight.spec)));
     }
 
     parts.push(rule());
@@ -259,7 +258,7 @@ struct Table {
 }
 
 /// The comparison: one row per flight with its colour square, value and difference from the reference.
-fn compare<'a>(state: &'a State, ctx: &'a Ctx, revision: u64) -> Vec<Element<'a, Message>> {
+fn compare<'a>(state: &'a State, ctx: &'a Ctx) -> Vec<Element<'a, Message>> {
     let sys = ctx.units;
     let flights: Vec<&Flight> = state.shown.ids.iter().filter_map(|id| state.flight(*id)).collect();
     let Some(reference) = flights.get(state.shown.reference).copied() else { return vec![waiting(state.selected_flight())] };
@@ -283,7 +282,7 @@ fn compare<'a>(state: &'a State, ctx: &'a Ctx, revision: u64) -> Vec<Element<'a,
                     Some(r) => format::signed(unit.from_si((table.value)(run)) - unit.from_si((table.value)(r)), table.decimals),
                     None => String::new(),
                 };
-                Some(compare_row(f, n, diff, u, f.is_stale(revision), Some((table.time)(run))))
+                Some(compare_row(f, n, diff, u, f.is_stale(state.stamp(ctx, &f.spec)), Some((table.time)(run))))
             })
             .collect();
         parts.push(section(i + 1, table.title, i > 0, rows));
@@ -293,7 +292,7 @@ fn compare<'a>(state: &'a State, ctx: &'a Ctx, revision: u64) -> Vec<Element<'a,
         .iter()
         .filter_map(|f| {
             let run = f.run.as_ref()?;
-            let stale = f.is_stale(revision);
+            let stale = f.is_stale(state.stamp(ctx, &f.spec));
             let verdict = badge(if run.in_field() { Severity::Ok } else { Severity::Warn }, if run.in_field() { "in" } else { "out" });
             let value = text(format::landing(run.result.summary.landing.0, run.result.summary.landing.1, sys))
                 .font(MONO)

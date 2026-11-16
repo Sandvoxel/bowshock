@@ -381,3 +381,116 @@ fn wind_and_angle_of_attack_channels_follow_the_launch_conditions() {
     let p = simulate(&point);
     assert!(p.trajectory.samples.iter().filter(|s| s.t > exit + 0.1 && s.air_speed > 1.0).all(|s| s.angle_of_attack < 1e-6));
 }
+
+// ---- CFD drag table ----
+
+const TABLE_ALT: f64 = 1000.0;
+
+fn re_tab(mach: f64) -> f64 {
+    let a = Atmosphere::standard().at_msl(TABLE_ALT);
+    mach * a.speed_of_sound * a.density / a.viscosity
+}
+
+/// A table that is the build-up scaled by `k`, at the nodes, with distinct parts.
+fn table_from_buildup(aero: &Aero, k: f64) -> DragTable {
+    let points = [0.3, 0.6, 0.9, 1.2, 2.0]
+        .iter()
+        .map(|&m| {
+            let d = aero.drag(m, re_tab(m), false);
+            DragTablePoint { mach: m, friction: k * d.friction, pressure: k * d.pressure, base: k * d.base, fins: k * d.fins, other: k * d.protuberances }
+        })
+        .collect();
+    DragTable { points, altitude: TABLE_ALT }
+}
+
+fn close(a: f64, b: f64) {
+    assert!((a - b).abs() <= 1e-12, "{a} vs {b}");
+}
+
+#[test]
+fn a_table_node_at_its_own_reynolds_number_is_returned_as_is() {
+    let plain = Aero::new(&input().vehicle);
+    let mut table = table_from_buildup(&plain, 1.0);
+    for (i, p) in table.points.iter_mut().enumerate() {
+        let f = 1.0 + 0.1 * i as f64;
+        p.friction *= f;
+        p.pressure *= f + 0.05;
+        p.base *= f + 0.1;
+        p.fins += 0.01;
+        p.other += 0.02;
+    }
+    let aero = plain.clone().with_table(table.clone());
+    for p in &table.points {
+        let d = aero.drag(p.mach, re_tab(p.mach), false);
+        close(d.friction, p.friction);
+        close(d.pressure, p.pressure);
+        close(d.base, p.base);
+        close(d.fins, p.fins);
+        close(d.protuberances, p.other);
+        close(d.total, p.friction + p.pressure + p.base + p.fins + p.other);
+    }
+}
+
+#[test]
+fn motor_on_scales_only_the_table_base_by_the_buildup_ratio() {
+    let plain = Aero::new(&input().vehicle);
+    let table = table_from_buildup(&plain, 1.2);
+    let aero = plain.clone().with_table(table.clone());
+    let m = 0.6;
+    let (off, on) = (aero.drag(m, re_tab(m), false), aero.drag(m, re_tab(m), true));
+    let (b_off, b_on) = (plain.drag(m, re_tab(m), false), plain.drag(m, re_tab(m), true));
+    assert!(b_on.base < b_off.base);
+    close(on.base, off.base * b_on.base / b_off.base);
+    close(on.friction, off.friction);
+    close(on.pressure, off.pressure);
+    close(on.fins, off.fins);
+    close(on.protuberances, off.protuberances);
+}
+
+#[test]
+fn reynolds_number_changes_friction_exactly_as_the_buildup() {
+    let plain = Aero::new(&input().vehicle);
+    let aero = plain.clone().with_table(table_from_buildup(&plain, 1.2));
+    let m = 0.9;
+    let hi = 3.0 * re_tab(m);
+    let (a, b) = (aero.drag(m, re_tab(m), false), aero.drag(m, hi, false));
+    close(b.friction - a.friction, plain.drag(m, hi, false).friction - plain.drag(m, re_tab(m), false).friction);
+}
+
+#[test]
+fn below_the_first_node_the_end_follows_the_buildup_trend() {
+    let plain = Aero::new(&input().vehicle);
+    let table = table_from_buildup(&plain, 1.3);
+    let aero = plain.clone().with_table(table.clone());
+    let (m, first) = (0.1, &table.points[0]);
+    let d = aero.drag(m, re_tab(m), false);
+    let (here, at) = (plain.drag(m, re_tab(m), false), plain.drag(first.mach, re_tab(first.mach), false));
+    close(d.friction, first.friction * here.friction / at.friction);
+    close(d.pressure, first.pressure * here.pressure / at.pressure);
+    close(d.base, first.base * here.base / at.base);
+    close(d.fins, first.fins * here.fins / at.fins);
+    let last = table.points.last().unwrap();
+    let hi = aero.drag(3.0, re_tab(3.0), false);
+    let (here, at) = (plain.drag(3.0, re_tab(3.0), false), plain.drag(last.mach, re_tab(last.mach), false));
+    close(hi.friction, last.friction * here.friction / at.friction);
+}
+
+#[test]
+fn without_a_table_the_drag_is_the_buildup() {
+    let plain = Aero::new(&input().vehicle);
+    let none = plain.clone();
+    for m in [0.05, 0.4, 1.1, 2.5] {
+        assert_eq!(none.drag(m, 2.0e6, true), plain.drag(m, 2.0e6, true));
+    }
+    let mut i = input();
+    i.drag_tables = vec![None];
+    assert_eq!(simulate(&i).summary.apogee, simulate(&input()).summary.apogee);
+}
+
+#[test]
+fn a_heavier_drag_table_flies_lower() {
+    let plain = Aero::new(&input().vehicle);
+    let mut i = input();
+    i.drag_tables = vec![Some(table_from_buildup(&plain, 1.3))];
+    assert!(simulate(&i).summary.apogee < simulate(&input()).summary.apogee);
+}
