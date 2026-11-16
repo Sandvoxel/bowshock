@@ -4,7 +4,7 @@ use crate::atmosphere::{FlightConditions, SUTHERLAND_S};
 use crate::engine::body_grid::{check_quality, BaseBody, MAX_STRETCHING, MAX_STRETCHING_VISCOUS_J};
 use crate::engine::case3::Case3;
 use crate::engine::grid3::Fins3;
-use crate::engine::run3::{run3_cold, run3_on, PointResult3};
+use crate::engine::run3::{run3_on, PointResult3};
 use bowshock_cfd::solver3::Solver3;
 use crate::engine::case::{Case, Jet, Wake};
 use crate::engine::numerics::Numerics;
@@ -852,60 +852,93 @@ impl Analysis {
         LiftPoint { mach: r.mach, alpha: r.alpha, cn: r.cn * q, ca_pressure: r.ca * q, x_cp: r.x_cp * self.d_nose, quality: lift_quality(r), iterations: r.iterations }
     }
 
-    /// Cold run on a fresh solver; a diverged run is repeated once with the implicit CFL limit halved.
-    fn lift_cold(&self, case: &Case3) -> Result<PointResult3, Error> {
-        let r = run3_cold(case)?;
-        if r.stop_reason != StopReason::NonFinite {
-            return Ok(r);
-        }
-        let mut c = case.clone();
-        c.numerics.implicit.cfl_max *= 0.5;
-        run3_cold(&c)
-    }
-
-    /// CPU backend: per Mach number a cold first incidence, warm later ones.
-    fn lift_cpu(&self, machs: &[f64], alphas_deg: &[f64]) -> Result<LiftPolar, Error> {
+    /// The sweep loop shared by the lift backends: per Mach number a cold first incidence, warm later ones. A warm point that ends
+    /// `Failed` or `Stalled` is re-run cold; a cold run that diverged is repeated once with the implicit CFL limit halved.
+    fn lift_loop<R: LiftRunner>(&self, runner: &R, machs: &[f64], alphas_deg: &[f64]) -> Result<Vec<LiftPoint>, Error> {
         let mut points = Vec::with_capacity(machs.len() * alphas_deg.len());
         for &m in machs {
-            let mut state: Option<Solver3> = None;
+            let mut state: Option<R::State> = None;
             for &a in alphas_deg {
                 let case = self.lift_case(m, a.to_radians());
-                let warm = match &mut state {
-                    Some(s) => {
-                        let r = run3_on(&case, s, true);
-                        matches!(lift_quality(&r), Quality::Converged | Quality::Stationary).then_some(r)
-                    }
-                    None => None,
-                };
-                let r = match warm {
-                    Some(r) => {
+                if let Some(s) = &mut state {
+                    let r = runner.warm(s, &case)?;
+                    if matches!(lift_quality(&r), Quality::Converged | Quality::Stationary) {
                         points.push(self.lift_point(&r));
                         continue;
                     }
-                    None => {
-                        let mut s = case.build_solver()?;
-                        let r = run3_on(&case, &mut s, false);
-                        if r.stop_reason == StopReason::NonFinite {
-                            state = None;
-                            self.lift_cold(&case)?
-                        } else {
-                            state = Some(s);
-                            r
-                        }
-                    }
-                };
+                }
+                let (mut r, s) = runner.cold(&case)?;
+                state = Some(s);
+                if r.stop_reason == StopReason::NonFinite {
+                    let mut c = case.clone();
+                    c.numerics.implicit.cfl_max *= 0.5;
+                    r = runner.cold(&c)?.0;
+                    state = None;
+                }
                 if lift_quality(&r) == Quality::Failed {
                     state = None;
                 }
                 points.push(self.lift_point(&r));
             }
         }
-        Ok(LiftPolar { points, backend: BackendUsed::Cpu, fallback: None })
+        Ok(points)
     }
 
-    /// GPU backend of [`Analysis::run_lift`] (`machs` and `alphas_deg` validated and sorted). Seam for the 3D GPU runner.
+    /// CPU backend.
+    fn lift_cpu(&self, machs: &[f64], alphas_deg: &[f64]) -> Result<LiftPolar, Error> {
+        Ok(LiftPolar { points: self.lift_loop(&CpuLift, machs, alphas_deg)?, backend: BackendUsed::Cpu, fallback: None })
+    }
+
+    /// GPU backend of [`Analysis::run_lift`] (`machs` and `alphas_deg` validated and sorted): extended precision.
+    #[cfg(feature = "gpu")]
+    fn lift_gpu(&self, machs: &[f64], alphas_deg: &[f64]) -> Result<LiftPolar, Error> {
+        Ok(LiftPolar { points: self.lift_loop(&GpuLift, machs, alphas_deg)?, backend: BackendUsed::Gpu, fallback: None })
+    }
+
+    #[cfg(not(feature = "gpu"))]
     fn lift_gpu(&self, _machs: &[f64], _alphas_deg: &[f64]) -> Result<LiftPolar, Error> {
-        Err(Error::Unsupported("the 3D GPU solver is not available".into()))
+        Err(Error::Unsupported("the `gpu` feature is not enabled".into()))
+    }
+}
+
+/// One backend of the 3D lift sweep: a cold run that builds the solver state, and a warm run on it.
+trait LiftRunner {
+    type State;
+    fn cold(&self, case: &Case3) -> Result<(PointResult3, Self::State), Error>;
+    fn warm(&self, state: &mut Self::State, case: &Case3) -> Result<PointResult3, Error>;
+}
+
+struct CpuLift;
+
+impl LiftRunner for CpuLift {
+    type State = Solver3;
+
+    fn cold(&self, case: &Case3) -> Result<(PointResult3, Solver3), Error> {
+        let mut s = case.build_solver()?;
+        let r = run3_on(case, &mut s, false);
+        Ok((r, s))
+    }
+
+    fn warm(&self, s: &mut Solver3, case: &Case3) -> Result<PointResult3, Error> {
+        Ok(run3_on(case, s, true))
+    }
+}
+
+#[cfg(feature = "gpu")]
+struct GpuLift;
+
+#[cfg(feature = "gpu")]
+impl LiftRunner for GpuLift {
+    type State = crate::engine::gpu3::GpuRunner3;
+
+    fn cold(&self, case: &Case3) -> Result<(PointResult3, crate::engine::gpu3::GpuRunner3), Error> {
+        let mut r = crate::engine::gpu3::GpuRunner3::new(case, bowshock_cfd::gpu::Precision::Extended)?;
+        let p = r.run_on(case, false)?;
+        Ok((p, r))
+    }
+
+    fn warm(&self, r: &mut crate::engine::gpu3::GpuRunner3, case: &Case3) -> Result<PointResult3, Error> {
+        r.run_on(case, true)
     }
 }
 

@@ -7,7 +7,8 @@
 use crate::engine::case3::Case3;
 use crate::engine::run::MONITOR_LIMIT;
 use bowshock_cfd::gas3::cons_to_prim3;
-use bowshock_cfd::grid3::Face3;
+use bowshock_cfd::gas3::Cons3;
+use bowshock_cfd::grid3::{Face3, Grid3};
 use bowshock_cfd::solver3::Solver3;
 use crate::engine::result::StopReason;
 
@@ -59,10 +60,13 @@ pub fn lift_forces(case: &Case3, s: &Solver3) -> LiftForces {
 /// `d` the distance from the face centre to the cell centroid. A fin face whose second cell is solid or outside the grid uses the first-cell
 /// pressure. `dF = (pw - p_inf) area n_into_body`.
 pub fn lift_forces_upto(case: &Case3, s: &Solver3, x_max: f64) -> LiftForces {
-    let g = &s.grid;
+    forces_on(case, &s.grid, &s.u, s.cfg.freestream[4], x_max)
+}
+
+/// [`lift_forces_upto`] on a grid, a conserved state `u` (index `Grid3::cell`, e.g. downloaded from the GPU) and the free-stream pressure.
+pub fn forces_on(case: &Case3, g: &Grid3, u: &[Cons3], p_inf: f64, x_max: f64) -> LiftForces {
     let (ni, nj, nk) = (g.ni, g.nj, g.nk);
-    let p_inf = s.cfg.freestream[4];
-    let p = |c: usize| cons_to_prim3(&s.u[c])[4];
+    let p = |c: usize| cons_to_prim3(&u[c])[4];
     let solid = |i: usize, j: usize, k: usize| g.is_solid(i, j, k);
     let dist = |c: usize, f: &Face3| {
         let x = g.xc[c];
@@ -145,60 +149,95 @@ pub fn lift_forces_upto(case: &Case3, s: &Solver3, x_max: f64) -> LiftForces {
 ///
 /// `warm`: keep the field of the previous run, set the free stream of `case` and restart the CFL ramp (no first-order start-up).
 pub fn run3_on(case: &Case3, s: &mut Solver3, warm: bool) -> PointResult3 {
-    let n = &case.numerics;
     s.cfg.freestream = case.freestream();
     s.restart_ramp();
     if warm {
-        s.iter = s.iter.max(n.first_order_iters);
+        s.iter = s.iter.max(case.numerics.first_order_iters);
     }
-    let skip = if warm { 0 } else { 20 };
-    let nwin = (n.window / SAMPLE_EVERY).max(1);
-    let (mut rmax, mut r) = (0.0f64, f64::NAN);
-    let mut hist: Vec<(usize, f64)> = Vec::new();
-    let mut reason = StopReason::MaxIterations;
+    let mut rule = StopRule3::new(case, warm);
     let mut it = 0;
-    while it < n.max_iter {
-        r = s.step();
+    while it < case.numerics.max_iter {
+        let r = s.step();
+        let cn = ((it + 1) % SAMPLE_EVERY == 0).then(|| lift_forces(case, s).cn);
+        it += 1;
+        if rule.check(it - 1, r, cn).is_some() {
+            break;
+        }
+    }
+    rule.finish(case, lift_forces(case, s), it)
+}
+
+/// The stop rules of a 3D run, shared by the CPU and GPU runners. Feed it every iteration's residual (and, at iterations
+/// `it + 1 = 0 mod SAMPLE_EVERY`, the sampled CN); see [`run3_on`] for the order of the rules.
+pub struct StopRule3 {
+    skip: usize,
+    nwin: usize,
+    window: usize,
+    rel_tol: f64,
+    rmax: f64,
+    r: f64,
+    hist: Vec<(usize, f64)>,
+    reason: StopReason,
+}
+
+impl StopRule3 {
+    pub fn new(case: &Case3, warm: bool) -> StopRule3 {
+        let n = &case.numerics;
+        StopRule3 {
+            skip: if warm { 0 } else { 20 },
+            nwin: (n.window / SAMPLE_EVERY).max(1),
+            window: n.window,
+            rel_tol: n.rel_tol,
+            rmax: 0.0,
+            r: f64::NAN,
+            hist: Vec::new(),
+            reason: StopReason::MaxIterations,
+        }
+    }
+
+    /// Residual `r` of iteration `it` (0-based) and, at a sample iteration, the CN of the state after it. `Some(reason)` ends the run
+    /// with `it + 1` iterations.
+    pub fn check(&mut self, it: usize, r: f64, cn: Option<f64>) -> Option<StopReason> {
+        self.r = r;
+        let stop = |s: &mut Self, why| {
+            s.reason = why;
+            Some(why)
+        };
         if !r.is_finite() {
-            reason = StopReason::NonFinite;
-            it += 1;
-            break;
+            return stop(self, StopReason::NonFinite);
         }
-        if it >= skip {
-            rmax = rmax.max(r);
+        if it >= self.skip {
+            self.rmax = self.rmax.max(r);
         }
-        let drop = if rmax > 0.0 { (rmax / r.max(1e-300)).log10() } else { 0.0 };
+        let drop = if self.rmax > 0.0 { (self.rmax / r.max(1e-300)).log10() } else { 0.0 };
         if drop >= DROP_ORDERS {
-            reason = StopReason::ResidualDrop;
-            it += 1;
-            break;
+            return stop(self, StopReason::ResidualDrop);
         }
-        if (it + 1) % SAMPLE_EVERY == 0 {
-            let cn = lift_forces(case, s).cn;
+        if let Some(cn) = cn {
             if !cn.is_finite() || cn.abs() > MONITOR_LIMIT {
-                reason = StopReason::NonFinite;
-                it += 1;
-                break;
+                return stop(self, StopReason::NonFinite);
             }
-            hist.push((it + 1, cn));
-            if it + 1 >= n.window && drop >= STATIONARY_DROP_ORDERS && hist.len() >= nwin {
-                let w = &hist[hist.len() - nwin..];
+            self.hist.push((it + 1, cn));
+            if it + 1 >= self.window && drop >= STATIONARY_DROP_ORDERS && self.hist.len() >= self.nwin {
+                let w = &self.hist[self.hist.len() - self.nwin..];
                 let (lo, hi, sum) = w.iter().fold((f64::INFINITY, f64::NEG_INFINITY, 0.0), |a, &(_, c)| (a.0.min(c), a.1.max(c), a.2 + c));
-                if hi - lo < n.rel_tol * (sum / nwin as f64).abs() {
-                    reason = StopReason::CdStationary;
-                    it += 1;
-                    break;
+                if hi - lo < self.rel_tol * (sum / self.nwin as f64).abs() {
+                    return stop(self, StopReason::CdStationary);
                 }
             }
         }
-        it += 1;
+        None
     }
-    let f = lift_forces(case, s);
-    if reason != StopReason::NonFinite && !(f.cn.is_finite() && f.ca.is_finite() && f.cn.abs() <= MONITOR_LIMIT) {
-        reason = StopReason::NonFinite;
+
+    /// Result after `iterations` iterations with the final forces `f`.
+    pub fn finish(self, case: &Case3, f: LiftForces, iterations: usize) -> PointResult3 {
+        let mut reason = self.reason;
+        if reason != StopReason::NonFinite && !(f.cn.is_finite() && f.ca.is_finite() && f.cn.abs() <= MONITOR_LIMIT) {
+            reason = StopReason::NonFinite;
+        }
+        let drop_orders = if self.rmax > 0.0 && self.r.is_finite() { (self.rmax / self.r.max(1e-300)).log10() } else { 0.0 };
+        PointResult3 { mach: case.mach, alpha: case.alpha, cn: f.cn, ca: f.ca, x_cp: f.x_cp, iterations, stop_reason: reason, drop_orders, cn_history: self.hist }
     }
-    let drop_orders = if rmax > 0.0 && r.is_finite() { (rmax / r.max(1e-300)).log10() } else { 0.0 };
-    PointResult3 { mach: case.mach, alpha: case.alpha, cn: f.cn, ca: f.ca, x_cp: f.x_cp, iterations: it, stop_reason: reason, drop_orders, cn_history: hist }
 }
 
 /// Cold run on a fresh solver.

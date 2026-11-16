@@ -52,9 +52,38 @@ fn run_lift_rejects_bad_input() {
 }
 
 #[test]
-fn gpu_backend_errors_and_auto_falls_back() {
+fn gpu_without_feature_errors_and_auto_falls_back() {
+    if cfg!(feature = "gpu") {
+        return; // the GPU path is covered by the ignored `gpu_matches_cpu_tiny`
+    }
     assert!(analysis().backend(Backend::Gpu).run_lift(&[2.0], &[2.0]).is_err());
     let p = analysis().backend(Backend::Auto).max_iterations(100).run_lift(&[2.0], &[2.0]).unwrap();
     assert_eq!(p.backend, BackendUsed::Cpu);
     assert!(p.fallback.is_some());
+}
+
+/// GPU (extended precision) against the CPU on the tiny case. Run through gpuq:
+/// `cargo test --release -p bowshock-core --test run_lift -- --ignored --nocapture`.
+#[test]
+#[ignore = "needs a GPU: run through tools/gpuq/gpuq"]
+fn gpu_matches_cpu_tiny() {
+    let t = Instant::now();
+    let cpu = analysis().run_lift(&[2.0], &[2.0, 6.0]).unwrap();
+    let t_cpu = t.elapsed().as_secs_f64();
+    let t = Instant::now();
+    let gpu = analysis().backend(Backend::Gpu).run_lift(&[2.0], &[2.0, 6.0]).unwrap();
+    let t_gpu = t.elapsed().as_secs_f64();
+    println!("wall: CPU {t_cpu:.1} s, GPU {t_gpu:.1} s");
+    assert_eq!(gpu.backend, BackendUsed::Gpu);
+    assert!(gpu.fallback.is_none());
+    assert_eq!(gpu.points.len(), 2);
+    for (c, g) in cpu.points.iter().zip(&gpu.points) {
+        println!(
+            "alpha {:.0}: CPU CN {:.5} x_cp {:.5} d {:?} {} it | GPU CN {:.5} x_cp {:.5} d {:?} {} it",
+            c.alpha.to_degrees(), c.cn, c.x_cp / D, c.quality, c.iterations, g.cn, g.x_cp / D, g.quality, g.iterations
+        );
+        assert!(matches!(g.quality, Quality::Converged | Quality::Stationary));
+        assert!((g.cn - c.cn).abs() <= 0.005 * c.cn.abs(), "CN {} vs {}", g.cn, c.cn);
+        assert!((g.x_cp - c.x_cp).abs() <= 0.01 * D, "x_cp {} vs {}", g.x_cp / D, c.x_cp / D);
+    }
 }
