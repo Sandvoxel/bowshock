@@ -324,7 +324,9 @@ impl State {
         }
         self.variables.retain(|v| rocket.dim(v.part, v.dim).is_some());
         if self.flight.is_none_or(|f| !rocket.flights().iter().any(|d| d.id == f)) {
-            self.flight = rocket.flights().first().map(|f| f.id);
+            // The flight selected on the Simulate screen, else the first.
+            let selected = ctx.selected_flight.filter(|id| rocket.flights().iter().any(|d| d.id == *id));
+            self.flight = selected.or_else(|| rocket.flights().first().map(|f| f.id));
         }
         let stamp = (ctx.doc.revision(), self.flight);
         if self.flight_check.as_ref().map(|c| (c.0, c.1)) != Some(stamp) {

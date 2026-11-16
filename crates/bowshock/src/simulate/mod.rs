@@ -268,7 +268,7 @@ pub enum Message {
     Ignore,
     /// Open (`true`) or close the forecast row of the wind profile.
     ForecastOpen(bool),
-    /// The launch time typed in the forecast row (`YYYY-MM-DDTHH:00`, UTC).
+    /// The launch time typed in the forecast row (`YYYY-MM-DDTHH:00`, the site's local time).
     ForecastTime(String),
     /// Whether the forecast also sets the temperature.
     ForecastTemperature(bool),
@@ -577,6 +577,11 @@ impl State {
         self.flights.iter().find(|f| f.id == id)
     }
 
+    /// The id of the selected flight (the reference of a comparison, and the one the Conditions panel shows first).
+    pub fn selected_id(&self) -> FlightId {
+        self.selected_flight().id
+    }
+
     fn selected_flight(&self) -> &Flight {
         self.flight(self.selected).unwrap_or(&self.flights[0])
     }
@@ -831,7 +836,7 @@ impl State {
             }
             Message::Ignore => {}
             Message::ForecastOpen(open) => {
-                self.forecast = open.then(|| ForecastRow { time: forecast::next_hour_utc(), temperature: true, busy: false, error: None });
+                self.forecast = open.then(|| ForecastRow { time: forecast::next_local_hour(), temperature: true, busy: false, error: None });
             }
             Message::ForecastTime(time) => {
                 if let Some(row) = &mut self.forecast {
@@ -1226,7 +1231,7 @@ async fn offload<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -
 /// last error.
 #[derive(Debug, Clone, PartialEq)]
 struct ForecastRow {
-    /// The launch hour, `YYYY-MM-DDTHH:00` UTC.
+    /// The launch hour, `YYYY-MM-DDTHH:00` in the site's local time.
     time: String,
     /// Use the forecast temperature.
     temperature: bool,

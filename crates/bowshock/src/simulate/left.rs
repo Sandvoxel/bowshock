@@ -325,7 +325,7 @@ fn wind_profile<'a>(state: &'a State, spec: &'a Spec, shared: &Shared, count: us
     out
 }
 
-/// `Fetch forecast…`, or while it is open the forecast row: the launch hour (UTC), whether the forecast also sets the
+/// `Fetch forecast…`, or while it is open the forecast row: the launch hour (site local time), whether the forecast also sets the
 /// temperature, Fetch (a spinner while it runs) and why the last fetch failed.
 fn forecast_rows<'a>(state: &'a State) -> Vec<Element<'a, Message>> {
     let Some(row) = &state.forecast else {
@@ -350,7 +350,7 @@ fn forecast_rows<'a>(state: &'a State) -> Vec<Element<'a, Message>> {
     let close: Element<'a, Message> = icon_button(Mark::Close, "Close the forecast").on_press(Message::ForecastOpen(false)).width(22).into();
     let busy: Element<'a, Message> = if row.busy { spinner(14.0) } else { Space::new().width(14).boxed() };
     let mut out = vec![
-        labeled("Launch (UTC)", time.boxed()),
+        labeled("Launch (local)", time.boxed()),
         checkbox("Use forecast temperature", row.temperature, Message::ForecastTemperature),
         row![fetch, busy, Space::new().width(Fill), close].spacing(SPACE_2).align_y(iced::Center).boxed(),
     ];

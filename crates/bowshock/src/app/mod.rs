@@ -146,6 +146,8 @@ pub struct Ctx {
     pub part_menu: Option<part_menu::Open>,
     /// The Scale overlay, if open (see [`scale`]).
     pub scale: Option<scale::Dialog>,
+    /// The flight selected on the Simulate screen (the Optimize analysis starts from it).
+    pub selected_flight: Option<bowshock_model::FlightId>,
 }
 
 impl Ctx {
@@ -179,6 +181,7 @@ impl Ctx {
             preview: live::Preview::default(),
             part_menu: None,
             scale: None,
+            selected_flight: None,
         }
     }
 
@@ -498,6 +501,7 @@ impl App {
         }
         ctx.sanitize_selection();
         self.simulate.sync(&self.ctx, reloaded);
+        self.ctx.selected_flight = Some(self.simulate.selected_id());
         self.viewport.sync(&self.ctx);
         if std::mem::take(&mut self.ctx.camera_fit) {
             self.viewport.fit();

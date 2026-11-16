@@ -45,15 +45,16 @@ fn is_hour(hour: &str) -> bool {
         })
 }
 
-/// Fetches the forecast at `lat`/`lon` (degrees) for the site `site_altitude` metres above sea level, for the hour `utc_hour`
-/// (`YYYY-MM-DDTHH:00`, UTC). Blocks for up to 15 s: call it off the UI thread.
-pub fn fetch(lat: f64, lon: f64, site_altitude: f64, utc_hour: &str) -> Result<Forecast, String> {
-    let hour = utc_hour.trim();
+/// Fetches the forecast at `lat`/`lon` (degrees) for the site `site_altitude` metres above sea level, for the hour `local_hour`
+/// (`YYYY-MM-DDTHH:00` in the site's own time zone, which the service resolves from the coordinates). Blocks for up to 15 s:
+/// call it off the UI thread.
+pub fn fetch(lat: f64, lon: f64, site_altitude: f64, local_hour: &str) -> Result<Forecast, String> {
+    let hour = local_hour.trim();
     if !is_hour(hour) {
-        return Err("Enter the launch time as YYYY-MM-DDTHH:00 (UTC)".to_string());
+        return Err("Enter the launch time as YYYY-MM-DDTHH:00 (site local time)".to_string());
     }
     let url = format!(
-        "{API}?latitude={lat:.5}&longitude={lon:.5}&elevation={site_altitude:.0}&timezone=GMT&wind_speed_unit=ms&start_hour={hour}&end_hour={hour}&hourly={}",
+        "{API}?latitude={lat:.5}&longitude={lon:.5}&elevation={site_altitude:.0}&timezone=auto&wind_speed_unit=ms&start_hour={hour}&end_hour={hour}&hourly={}",
         variables()
     );
     let config = ureq::Agent::config_builder()
@@ -94,26 +95,17 @@ pub fn parse(json: &str, site_altitude: f64) -> Result<Forecast, String> {
     Ok(Forecast { ground: level(0.0, speed, from), temperature_k: first("temperature_2m").map(|c| c + 273.15), levels })
 }
 
-/// The next whole hour from now, UTC, as `YYYY-MM-DDTHH:00`.
-pub fn next_hour_utc() -> String {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    hour_after(secs)
+/// The next whole hour of this computer's local time, as `YYYY-MM-DDTHH:00`: the launch hour the forecast row starts from (the
+/// site's time when the computer is at the field).
+pub fn next_local_hour() -> String {
+    hour_after(chrono::Local::now().naive_local())
 }
 
-/// The whole hour after `unix_secs`, UTC, as `YYYY-MM-DDTHH:00` (civil date from the day count, Hinnant's algorithm).
-fn hour_after(unix_secs: u64) -> String {
-    let hours = unix_secs / 3600 + 1;
-    let (days, hour) = ((hours / 24) as i64, hours % 24);
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:00")
+/// The whole hour after `t`, as `YYYY-MM-DDTHH:00`.
+fn hour_after(t: chrono::NaiveDateTime) -> String {
+    use chrono::Timelike;
+    let next = t.with_minute(0).and_then(|t| t.with_second(0)).and_then(|t| t.with_nanosecond(0)).unwrap_or(t) + chrono::Duration::hours(1);
+    next.format("%Y-%m-%dT%H:00").to_string()
 }
 
 #[cfg(test)]
@@ -143,9 +135,9 @@ mod tests {
     }
 
     #[test]
-    fn the_next_hour_is_a_civil_utc_hour() {
-        // 2024-02-29 23:30 UTC → 2024-03-01T00:00.
-        assert_eq!(hour_after(1_709_249_400), "2024-03-01T00:00");
-        assert!(is_hour(&next_hour_utc()));
+    fn the_next_hour_is_a_whole_local_hour() {
+        let t = chrono::NaiveDate::from_ymd_opt(2024, 2, 29).unwrap().and_hms_opt(23, 30, 0).unwrap();
+        assert_eq!(hour_after(t), "2024-03-01T00:00");
+        assert!(is_hour(&next_local_hour()));
     }
 }

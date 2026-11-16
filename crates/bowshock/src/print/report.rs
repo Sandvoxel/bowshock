@@ -1,18 +1,20 @@
 //! The parts list and the design report: a side view with the CG and CP, the summary and configuration tables, the flights table
 //! and the health warnings, all in the user's unit set.
 //!
-//! What needs the app's context (the balance, the health list and the flights' simulation inputs) is gathered on the UI thread
-//! by [`gather`]; the flights are then flown on the worker that builds the file ([`Flown::fly`]).
+//! What needs the app's context (the balance, the health list, the flights' conditions and the motor database) is gathered on
+//! the UI thread by [`gather`]; the flights are then prepared and flown on the worker that builds the file ([`Flown::fly`]).
+
+use std::sync::Arc;
 
 use bowshock_model::{InternalKind, Rocket};
-use bowshock_sim::flight::SimInput;
+use bowshock_motors::MotorDb;
 use bowshock_sim::from_model::{self, Balance, Level, Phase, Warning};
 use bowshock_sim::Summary;
 
 use super::pdf::{Page, PageSize, Pdf};
 use super::templates::MARGIN;
 use crate::app::{ui, Ctx};
-use crate::simulate::flight::{self, Spec};
+use crate::simulate::flight::{prepare_rocket, Spec};
 use crate::units::{Quantity, UnitSystem};
 
 /// Row height of a table, mm.
@@ -41,11 +43,13 @@ pub struct Inputs {
     pub configs: Vec<ConfigRow>,
     /// The health list.
     pub warnings: Vec<Warning>,
-    /// Every document flight: its name and what is needed to fly it.
-    pub flights: Vec<(String, Result<SimInput, String>)>,
+    /// Every document flight: its name and conditions (empty without the design report).
+    pub flights: Vec<(String, Spec)>,
+    /// The motor database the flights fly with.
+    pub motors: Arc<MotorDb>,
 }
 
-/// Gathers [`Inputs`]. The flights are prepared (cheap) but not flown.
+/// Gathers [`Inputs`]. The flights are neither prepared nor flown here.
 pub fn gather(ctx: &Ctx, with_flights: bool) -> Inputs {
     let rocket = ctx.doc.rocket();
     let motors = ctx.physics.motors();
@@ -65,21 +69,19 @@ pub fn gather(ctx: &Ctx, with_flights: bool) -> Inputs {
             ConfigRow { name: c.display_name(), motors: if motors_text.is_empty() { "No motor".to_string() } else { motors_text }, liftoff }
         })
         .collect();
-    let flights = if with_flights {
-        rocket.flights().iter().map(|def| (def.name.clone(), flight::prepare(ctx, &Spec::of(def)).map(|(input, _)| input))).collect()
-    } else {
-        Vec::new()
-    };
-    Inputs { units: ctx.units, balance, configs, warnings, flights }
+    let flights = if with_flights { rocket.flights().iter().map(|def| (def.name.clone(), Spec::of(def))).collect() } else { Vec::new() };
+    let motors = Arc::new(if with_flights { motors.clone() } else { MotorDb::default() });
+    Inputs { units: ctx.units, balance, configs, warnings, flights, motors }
 }
 
 /// The flights' outcomes, in document order.
 pub struct Flown(pub Vec<(String, Result<Summary, String>)>);
 
 impl Flown {
-    /// Flies every prepared flight (this is the slow part: call it off the UI thread).
-    pub fn fly(flights: &[(String, Result<SimInput, String>)]) -> Flown {
-        Flown(flights.iter().map(|(name, input)| (name.clone(), input.as_ref().map(|i| bowshock_sim::simulate(i).summary).map_err(Clone::clone))).collect())
+    /// Prepares (with [`prepare_rocket`]) and flies every flight of `inputs` with `rocket`: the slow part, for the worker.
+    pub fn fly(rocket: &Rocket, inputs: &Inputs) -> Flown {
+        let fly = |spec: &Spec| prepare_rocket(rocket.clone(), &inputs.motors, spec).map(|(input, _)| bowshock_sim::simulate(&input).summary);
+        Flown(inputs.flights.iter().map(|(name, spec)| (name.clone(), fly(spec))).collect())
     }
 }
 
@@ -492,12 +494,36 @@ mod tests {
     #[test]
     fn the_report_without_flights_still_lays_out_two_pages() {
         let rocket = example();
-        let inputs = Inputs { units: UnitSystem::MM_G_S, balance: Err("no motor".into()), configs: Vec::new(), warnings: Vec::new(), flights: Vec::new() };
+        let inputs = Inputs {
+            units: UnitSystem::MM_G_S,
+            balance: Err("no motor".into()),
+            configs: Vec::new(),
+            warnings: Vec::new(),
+            flights: Vec::new(),
+            motors: Default::default(),
+        };
         let mut pdf = Pdf::new("t");
         design_report(&mut pdf, &rocket, &inputs, None, PageSize::A4);
         assert_eq!(pdf.page_count(), 2);
         let mut pdf = Pdf::new("t");
         parts_list(&mut pdf, &rocket, UnitSystem::IN_OZ_S, PageSize::Letter);
         assert!(pdf.page_count() >= 1);
+    }
+
+    #[test]
+    fn the_flights_are_prepared_and_flown_off_the_document() {
+        let rocket = example();
+        let flights = rocket.flights().iter().map(|def| (def.name.clone(), Spec::of(def))).collect();
+        let inputs = Inputs {
+            units: UnitSystem::MM_G_S,
+            balance: Err("unused".into()),
+            configs: Vec::new(),
+            warnings: Vec::new(),
+            flights,
+            motors: Arc::new(MotorDb::bundled()),
+        };
+        let Flown(list) = Flown::fly(&rocket, &inputs);
+        assert_eq!(list.len(), rocket.flights().len());
+        assert!(list.iter().all(|(_, s)| s.as_ref().is_ok_and(|s| s.apogee > 100.0)), "{:?}", list.iter().map(|l| &l.1).collect::<Vec<_>>());
     }
 }

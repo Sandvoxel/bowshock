@@ -162,7 +162,7 @@ impl State {
                 ctx.notify("Building the PDF…");
                 return Task::perform(
                     off_thread(move || {
-                        let flown = options.report.then(|| report::Flown::fly(&inputs.flights));
+                        let flown = options.report.then(|| report::Flown::fly(&rocket, &inputs));
                         let pdf = build(&rocket, &inputs, flown.as_ref(), options, size, &title);
                         let pages = pdf.page_count();
                         if pages == 0 {
@@ -267,7 +267,14 @@ mod tests {
     #[test]
     fn the_example_prints_every_section() {
         let rocket = example();
-        let inputs = report::Inputs { units: UnitSystem::MM_G_S, balance: Err("none".into()), configs: Vec::new(), warnings: Vec::new(), flights: Vec::new() };
+        let inputs = report::Inputs {
+            units: UnitSystem::MM_G_S,
+            balance: Err("none".into()),
+            configs: Vec::new(),
+            warnings: Vec::new(),
+            flights: Vec::new(),
+            motors: Default::default(),
+        };
         let all = build(&rocket, &inputs, None, Options::default(), PageSize::Letter, "x");
         let report_only = build(
             &rocket,
