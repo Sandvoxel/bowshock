@@ -87,6 +87,8 @@ pub enum Mark {
     CaretDown,
     /// A cross (close).
     Close,
+    /// A pencil (rename, edit in place).
+    Pencil,
 }
 
 struct Drawing {
@@ -231,6 +233,18 @@ impl<M> canvas::Program<M> for Drawing {
             Mark::Close => {
                 frame.stroke(&Path::line(at(3.5, 3.5), at(10.5, 10.5)), stroke);
                 frame.stroke(&Path::line(at(10.5, 3.5), at(3.5, 10.5)), stroke);
+            }
+            Mark::Pencil => {
+                let body = Path::new(|b| {
+                    b.move_to(at(9.5, 2.0));
+                    b.line_to(at(12.0, 4.5));
+                    b.line_to(at(5.0, 11.5));
+                    b.line_to(at(2.0, 12.0));
+                    b.line_to(at(2.5, 9.0));
+                    b.close();
+                });
+                frame.stroke(&body, thin);
+                frame.stroke(&Path::line(at(8.0, 3.5), at(10.5, 6.0)), thin);
             }
         }
         vec![frame.into_geometry()]

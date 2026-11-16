@@ -61,6 +61,8 @@ pub enum Message {
     Toggle(BarKey),
     /// A click on a separation line.
     SelectSeparation(usize),
+    /// Right-click on a bar: select its part (unless it is already selected) and open the part's context menu.
+    PartMenu(BarKey),
     /// A click on the current configuration's motor bar: open the configuration menu.
     OpenConfigMenu,
     /// A double click: select and focus the viewport on the part.
@@ -181,6 +183,14 @@ impl State {
             }
             Message::SetZoom(zoom) => self.zoom = zoom,
             Message::ResetView => self.zoom = Zoom::default(),
+            Message::PartMenu(key) => {
+                let part = key.part();
+                if !ctx.selected_parts().contains(&part) {
+                    ctx.select_one(Some(part));
+                    ctx.symmetry.instance = None;
+                }
+                return Task::done(app::Message::OpenPartMenu(part));
+            }
             Message::Menu { at, system, station, width } => self.menu = Some(menu::Open { at, system, station, width }),
             Message::Add(index) => {
                 if let Some(open) = self.menu.take() {
@@ -396,6 +406,17 @@ mod tests {
         assert!((f - fore).abs() < 1e-9 && (a - (aft + 0.03)).abs() < 1e-9);
         app.update(App_::Undo);
         assert_eq!(app.ctx().doc.rocket(), &before);
+    }
+
+    #[test]
+    fn a_right_click_on_a_bar_selects_its_part_unless_it_is_already_selected() {
+        let (mut app, ballast) = example();
+        lanes(&mut app, Message::PartMenu(BarKey::Part(ballast)));
+        assert_eq!(app.ctx().selection, Selection::Part(ballast));
+        // Right-clicking another bar moves the selection to it.
+        let mount = app.ctx().doc.rocket().motor_mounts()[0].id;
+        lanes(&mut app, Message::PartMenu(BarKey::Part(mount)));
+        assert_eq!(app.ctx().selection, Selection::Part(mount));
     }
 
     #[test]

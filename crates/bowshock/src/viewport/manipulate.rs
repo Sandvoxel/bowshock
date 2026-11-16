@@ -250,6 +250,8 @@ struct Carried {
 #[derive(Debug)]
 pub struct State {
     press: Option<Press>,
+    /// The right button's press, until it is released in place (a context menu) or moves (an orbit).
+    right: Option<Press>,
     drag: Option<Drag>,
     carry: Option<Carried>,
     modifiers: keyboard::Modifiers,
@@ -275,7 +277,7 @@ pub fn drive_modifiers() -> keyboard::Modifiers {
 
 impl Default for State {
     fn default() -> Self {
-        State { press: None, drag: None, carry: None, modifiers: drive_modifiers(), last_handle: None, last_edge: None }
+        State { press: None, right: None, drag: None, carry: None, modifiers: drive_modifiers(), last_handle: None, last_edge: None }
     }
 }
 
@@ -766,6 +768,29 @@ impl canvas::Program<Message> for Overlay<'_> {
     fn update(&self, state: &mut State, event: &Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<Action<Message>> {
         let size = bounds.size();
         let edit = |e: Edit| Some(Action::publish(Message::Edit(e)).and_capture());
+        // The right button orbits (the scene below sees it too); pressed and released in place on a part it opens that part's
+        // context menu instead, so the event is never captured here.
+        match event {
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
+                state.right = cursor
+                    .position_in(bounds)
+                    .filter(|_| state.drag.is_none() && state.carry.is_none())
+                    .map(|at| Press { at, target: pick::pick_inside(self.rocket, &self.camera, at, size, self.shown_inside()) });
+            }
+            Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                if let (Some(press), Some(at)) = (&state.right, cursor.position_in(bounds)) {
+                    if at.distance(press.at) > SLOP {
+                        state.right = None;
+                    }
+                }
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Right)) => {
+                if let Some(pick) = state.right.take().and_then(|p| p.target) {
+                    return Some(Action::publish(Message::PartMenu(pick)));
+                }
+            }
+            _ => {}
+        }
         match event {
             Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
                 state.modifiers = *modifiers;
@@ -1871,5 +1896,25 @@ mod carry_tests {
         let mut state = State::default();
         press(&o, &mut state, at(0.9, 0.01));
         assert!(matches!(moved(&o, &mut state, at(0.88, 0.01)), Some(Message::Edit(Edit::Carry(id))) if id == mount));
+    }
+    #[test]
+    fn a_right_click_in_place_on_a_part_asks_for_its_menu_and_a_right_drag_does_not() {
+        let (r, [_, _, booster], mount) = rocket();
+        let right = |b: fn(mouse::Button) -> mouse::Event| Event::Mouse(b(mouse::Button::Right));
+        // Solid: the shell hides the mount, so the booster tube is the part under the cursor.
+        let (o, mut state) = (overlay(&r, InsideView::Solid), State::default());
+        send(&o, &mut state, right(mouse::Event::ButtonPressed), at(0.9, 0.01));
+        let menu = send(&o, &mut state, right(mouse::Event::ButtonReleased), at(0.9, 0.01));
+        assert!(matches!(menu, Some(Message::PartMenu(Pick::Axial(id))) if id == booster));
+        // Cutaway: the same click is on the inner tube.
+        let (o, mut state) = (overlay(&r, InsideView::Cutaway), State::default());
+        send(&o, &mut state, right(mouse::Event::ButtonPressed), at(0.9, 0.01));
+        let menu = send(&o, &mut state, right(mouse::Event::ButtonReleased), at(0.9, 0.01));
+        assert!(matches!(menu, Some(Message::PartMenu(Pick::Internal(id))) if id == mount));
+        // Dragged (an orbit): no menu.
+        let (o, mut state) = (overlay(&r, InsideView::Solid), State::default());
+        send(&o, &mut state, right(mouse::Event::ButtonPressed), at(0.9, 0.01));
+        moved(&o, &mut state, at(0.8, 0.01));
+        assert!(send(&o, &mut state, right(mouse::Event::ButtonReleased), at(0.8, 0.01)).is_none());
     }
 }

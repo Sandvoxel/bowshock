@@ -6,6 +6,7 @@ pub mod drag;
 mod files;
 pub mod live;
 mod multi;
+pub mod part_menu;
 pub mod physics;
 pub mod refs;
 pub mod symmetry;
@@ -137,6 +138,8 @@ pub struct Ctx {
     live: live::Live,
     /// The balance of the part being carried as it would land (see [`live::Preview`]).
     pub preview: live::Preview,
+    /// The part context menu (right-click on a part), if open (see [`part_menu`]).
+    pub part_menu: Option<part_menu::Open>,
 }
 
 impl Ctx {
@@ -167,6 +170,7 @@ impl Ctx {
             multi: multi::Extra::default(),
             live: live::Live::default(),
             preview: live::Preview::default(),
+            part_menu: None,
         }
     }
 
@@ -211,6 +215,7 @@ impl Ctx {
         self.multi.clear();
         self.import_notes.clear();
         self.symmetry = symmetry::SymmetryUi::default();
+        self.part_menu = None;
         self.refs = refs::Ui::default();
         self.drag = Drags { symmetry: self.drag.symmetry, angle_snap: self.drag.angle_snap, ..Drags::default() };
         self.camera_fit = true;
@@ -272,6 +277,10 @@ pub enum Message {
     Cancel,
     /// F2: rename the selected part in the Inspector, else the active configuration.
     Rename,
+    /// Right-click on a part (the viewport and the lanes have selected it): open its context menu at the cursor.
+    OpenPartMenu(PartId),
+    /// An entry of the part context menu (or a click outside it).
+    PartMenu(part_menu::Action),
     /// Any key press (the app maps global shortcuts and forwards the rest to the active area).
     Key(KeyPress),
     /// Delete / Backspace: remove the selected part.
@@ -489,6 +498,17 @@ impl App {
             }
         }
         let was_open = self.ctx.file_menu;
+        if !matches!(
+            message,
+            Message::Frame(_)
+                | Message::Cursor(_)
+                | Message::Released
+                | Message::OpenPartMenu(_)
+                | Message::PartMenu(_)
+                | Message::Chrome(chrome::Message::Nothing)
+        ) {
+            self.ctx.part_menu = None;
+        }
         if !matches!(message, Message::Frame(_) | Message::Cursor(_) | Message::Released | Message::ToggleFileMenu | Message::Chrome(chrome::Message::Nothing))
         {
             self.ctx.file_menu = false;
@@ -611,6 +631,16 @@ impl App {
                     return iced::exit();
                 }
             }
+            Message::OpenPartMenu(part) => {
+                if ctx.mode == Mode::Build {
+                    ctx.part_menu = ctx.cursor.map(|at| part_menu::Open { part, at });
+                }
+            }
+            Message::PartMenu(action) => {
+                let Some(open) = ctx.part_menu.take() else { return Task::none() };
+                let tasks: Vec<Task<Message>> = part_menu::messages(ctx, open.part, action).into_iter().map(|m| self.update(m)).collect();
+                return Task::batch(tasks);
+            }
             Message::Rename => {
                 let part_selected = ctx.mode == Mode::Build && matches!(ctx.selection, Selection::Part(_));
                 let message = if part_selected { Message::Inspector(inspector::Message::StartRename) } else { Message::Chrome(chrome::Message::BeginRename) };
@@ -726,6 +756,7 @@ impl App {
         layers.extend(files::menu(ctx));
         layers.extend(files::unsaved_modal(ctx));
         layers.extend(refs::menu_view(ctx));
+        layers.extend(part_menu::view(ctx));
         let root: Element<'_, Message> = iced::widget::Stack::with_children(layers).boxed();
         // The root sees every cursor move and any release the widgets below leave alone: that is what lets a drag begun in the
         // parts bin follow the cursor anywhere, and end (or be cancelled) wherever it is released.
@@ -750,6 +781,7 @@ fn pick_intercept(message: &Message) -> Option<Option<PartId>> {
             Some(None)
         }
         Message::Lanes(Lanes::Select(Some(key)) | Lanes::Toggle(key)) => Some(Some(key.part())),
+        Message::Viewport(Viewport::PartMenu(_)) | Message::Lanes(Lanes::PartMenu(_)) => Some(None),
         Message::Lanes(
             Lanes::Select(None) | Lanes::SelectSeparation(_) | Lanes::Focus(_) | Lanes::GrabAxial(_) | Lanes::MoveTo { .. } | Lanes::ResizeTo { .. },
         ) => Some(None),
@@ -2001,5 +2033,37 @@ mod tests {
         app.update(Message::Undo);
         app.update(Message::Undo);
         assert_eq!(app.ctx.doc.rocket().radial(fins).unwrap().count, 3);
+    }
+    #[test]
+    fn the_part_menu_opens_on_a_right_click_renames_and_deletes_in_one_undo_step() {
+        use part_menu::Action;
+        let (mut app, [_, tube, transition]) = app();
+        app.ctx.cursor = Some(Point::new(300.0, 200.0));
+        // The viewport: the right-click selects the part under it, then the menu opens at the cursor.
+        app.update(Message::Viewport(Vp::PartMenu(Pick::Axial(tube))));
+        assert_eq!(app.ctx.selection, Selection::Part(tube));
+        app.update(Message::OpenPartMenu(tube));
+        assert_eq!(app.ctx.part_menu, Some(part_menu::Open { part: tube, at: Point::new(300.0, 200.0) }));
+        // Escape closes it.
+        app.update(Message::Cancel);
+        assert!(app.ctx.part_menu.is_none());
+        // The viewport: a right-click on another part moves the selection to it.
+        app.update(Message::Viewport(Vp::PartMenu(Pick::Axial(transition))));
+        assert_eq!(app.ctx.selection, Selection::Part(transition));
+        app.update(Message::OpenPartMenu(transition));
+        assert_eq!(app.ctx.part_menu.map(|m| m.part), Some(transition));
+        // Rename starts the inspector's inline rename (the F2 path): the commit renames the part.
+        app.update(Message::PartMenu(Action::Rename));
+        assert!(app.ctx.part_menu.is_none());
+        app.update(Message::Inspector(inspector::Message::RenameInput("Adapter".to_string())));
+        app.update(Message::Inspector(inspector::Message::RenameCommit));
+        assert_eq!(app.ctx.doc.rocket().kind_of(transition).unwrap().name(), "Adapter");
+        // Delete removes the part as one undo step.
+        let before = app.ctx.doc.rocket().clone();
+        app.update(Message::OpenPartMenu(transition));
+        app.update(Message::PartMenu(Action::Delete));
+        assert!(app.ctx.doc.rocket().kind_of(transition).is_none());
+        app.update(Message::Undo);
+        assert_eq!(app.ctx.doc.rocket(), &before);
     }
 }

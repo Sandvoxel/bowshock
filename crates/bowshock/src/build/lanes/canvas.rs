@@ -429,7 +429,7 @@ impl canvas::Program<Message> for Lanes<'_> {
                     mouse::Button::Right => {
                         let hit = geometry::hit(&self.scene, &rows, &axis, p);
                         match (hit, geometry::lane_at(&rows, p.y)) {
-                            (Some(h), _) => Some(Action::publish(Message::Select(Some(h.key))).and_capture()),
+                            (Some(h), _) => Some(Action::publish(Message::PartMenu(h.key)).and_capture()),
                             (None, Some(lane)) if p.x >= LABEL_W => Some(
                                 Action::publish(Message::Menu { at: p, system: lane.lane.system, station: axis.station(p.x), width: bounds.width })
                                     .and_capture(),

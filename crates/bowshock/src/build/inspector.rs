@@ -664,8 +664,8 @@ impl State {
         let title: Element<'a, Message> = match &self.renaming {
             Some((Selection::None, buffer)) => self.rename_field(buffer),
             _ => {
-                let name = text(title).font(SANS_SEMIBOLD).size(type_scale::UI_TITLE.size).style(theme::ink);
-                mouse_area(name).on_double_click(Message::StartRename).boxed()
+                let name = rename_title(text(title).font(SANS_SEMIBOLD).size(type_scale::UI_TITLE.size).style(theme::ink).boxed());
+                row![name, pencil()].spacing(2).align_y(iced::Center).boxed()
             }
         };
         let header = container(
@@ -731,7 +731,7 @@ impl State {
             Some((Selection::Part(p), buffer)) if *p == id => self.rename_field(buffer),
             _ => {
                 let mut cells: Vec<Element<'a, Message>> =
-                    vec![text(part.name()).font(SANS_SEMIBOLD).size(type_scale::UI_TITLE.size).style(theme::ink).boxed()];
+                    vec![rename_title(text(part.name()).font(SANS_SEMIBOLD).size(type_scale::UI_TITLE.size).style(theme::ink).boxed())];
                 if let Some(r) = rocket.radial(id).filter(|r| r.count > 1 && !r.kind.is_pod()) {
                     // A group that lost a copy names the letters it has left (`Fin set ×2 · A, C`); else the copy on show.
                     let left = crate::build::lanes::remaining_copies(r);
@@ -742,7 +742,7 @@ impl State {
                     let tag = text(label).font(SANS_SEMIBOLD).size(type_scale::UI_TITLE.size).style(theme::ink);
                     cells.push(mouse_area(tag).on_press(Message::NextInstance).interaction(mouse::Interaction::Pointer).boxed());
                 }
-                mouse_area(row(cells).align_y(iced::Center)).on_double_click(Message::StartRename).boxed()
+                row![row(cells).align_y(iced::Center), pencil()].spacing(2).align_y(iced::Center).boxed()
             }
         };
         let renaming = matches!(&self.renaming, Some((Selection::Part(p), _)) if *p == id);
@@ -788,4 +788,14 @@ fn subtype<'a>(rocket: &Rocket, id: PartId) -> Option<Element<'a, Message>> {
             _ => None,
         },
     }
+}
+
+/// The title text as a click target: one click starts the inline rename (the text cursor says it is editable).
+fn rename_title<'a>(name: Element<'a, Message>) -> Element<'a, Message> {
+    mouse_area(name).on_press(Message::StartRename).interaction(mouse::Interaction::Text).boxed()
+}
+
+/// The pencil beside a title: the visible way to start the rename.
+fn pencil<'a>() -> Element<'a, Message> {
+    icon_button(Mark::Pencil, "Rename").shortcut("F2").on_press(Message::StartRename).width(24).into()
 }

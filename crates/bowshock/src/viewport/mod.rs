@@ -187,6 +187,8 @@ pub enum Message {
     SelectPart(Option<PartId>),
     /// Shift-click or Cmd/Ctrl-click on a part: adds it to the selection or, if selected, removes it.
     Toggle(Pick),
+    /// Right-click in place on a part: select it (unless it is already selected) and open its context menu.
+    PartMenu(Pick),
     /// Select the separation of this stage (a click on its diamond).
     SelectSeparation(usize),
     /// A part was pressed and dragged: pick it up.
@@ -476,6 +478,17 @@ impl View {
                 if let (Pick::Radial { id, instance }, true) = (pick, ctx.selection.part() == Some(pick.id())) {
                     ctx.symmetry.instance = Some((id, instance));
                 }
+            }
+            Message::PartMenu(pick) => {
+                let id = pick.id();
+                if !ctx.selected_parts().contains(&id) {
+                    ctx.select_one(Some(id));
+                    ctx.symmetry.instance = None;
+                }
+                if let (Pick::Radial { id, instance }, true) = (pick, ctx.selection.part() == Some(id)) {
+                    ctx.symmetry.instance = Some((id, instance));
+                }
+                return Task::done(app::Message::OpenPartMenu(id));
             }
             Message::SelectSeparation(stage) => ctx.selection = Selection::Separation(stage),
             Message::Grab(pick) => {
