@@ -22,7 +22,7 @@ use crate::widgets::segmented::segmented;
 const UNITS_W: f32 = 124.0;
 
 /// An entry of the unit select: a named set, or the custom mix. The custom entry reads `Custom…` while a named set is current
-/// (choosing it opens the panel); while a custom mix is current it names the mix (`in · kg · s`) and re-opens the panel.
+/// (choosing it opens the panel); while a custom mix is current it stays `Custom` (the panel shows the mix) and re-opens the panel.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum SystemLabel {
     Preset(UnitSystem),
@@ -34,7 +34,7 @@ impl fmt::Display for SystemLabel {
         match self {
             SystemLabel::Preset(set) => f.write_str(&set.label()),
             SystemLabel::Custom(set) if set.preset().is_some() => f.write_str("Custom…"),
-            SystemLabel::Custom(set) => f.write_str(&set.label()),
+            SystemLabel::Custom(_) => f.write_str("Custom"),
         }
     }
 }
@@ -149,5 +149,20 @@ impl canvas::Program<Message> for ThemeGlyph {
             frame.fill(&canvas::Path::circle(iced::Point::new(c.x + 3.4, c.y - 2.6), 5.2), hole);
         }
         vec![frame.into_geometry()]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::units::Family;
+
+    #[test]
+    fn a_custom_mix_reads_custom_and_a_named_set_offers_it() {
+        let named = UnitSystem::MM_G_S;
+        assert_eq!(SystemLabel::Custom(named).to_string(), "Custom…");
+        let mix = named.with(Family::Length, "in");
+        assert!(mix.preset().is_none());
+        assert_eq!(SystemLabel::Custom(mix).to_string(), "Custom");
     }
 }
