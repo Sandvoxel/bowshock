@@ -1,3 +1,6 @@
+// Release builds on Windows are a GUI-subsystem program (no console window); `platform::attach_console` brings the output of the
+// command-line modes (`drive`, `import`, ...) back when started from a terminal.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 //! Bowshock desktop app: the rocket builder. Layout and styling follow `design/` (the Bowshock UI kit).
 // wgpu-core's auto-trait chain (Pipeline: Sync -> ... -> Hub: Send) exceeds the default depth on current nightly.
 #![recursion_limit = "256"]
@@ -8,7 +11,9 @@ mod build;
 mod chrome;
 mod drive;
 mod gallery;
+mod icons;
 mod logo;
+mod platform;
 mod simulate;
 mod theme;
 mod tokens;
@@ -26,15 +31,19 @@ use theme::SANS;
 const USAGE: &str = "usage: bowshock [--example]                         open the app (optionally with the example rocket loaded)
        bowshock drive [--example] <script> [out-dir]  run a UI script headless, saving screenshots (see src/drive.rs)
        bowshock gallery [script [out-dir]]            the widget gallery
-       bowshock import <file.ork> <out.bowshock>      convert an OpenRocket design (warnings on stderr)";
+       bowshock import <file.ork> <out.bowshock>      convert an OpenRocket design (warnings on stderr)
+       bowshock icons <out-dir>                       write bowshock.ico and bowshock.icns (the application icon files)";
 
 fn main() -> std::process::ExitCode {
+    if std::env::args_os().len() > 1 {
+        platform::attach_console();
+    }
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     // `--example` loads the built-in example rocket first (also the way a drive script gets one: it cannot press Ctrl+E).
     let example = args.iter().any(|a| a == "--example");
     args.retain(|a| a != "--example");
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-        [] => match app(example).run() {
+        [] => match app(example, true).run() {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("bowshock: {e}");
@@ -44,7 +53,7 @@ fn main() -> std::process::ExitCode {
         ["drive", script, rest @ ..] if rest.len() <= 1 => {
             let out = std::path::Path::new(rest.first().copied().unwrap_or("out/drive"));
             viewport::set_animation(false);
-            match drive::run(&app(example), std::path::Path::new(script), out) {
+            match drive::run(&app(example, false), std::path::Path::new(script), out) {
                 Ok(()) => std::process::ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("bowshock drive: {e}");
@@ -53,6 +62,16 @@ fn main() -> std::process::ExitCode {
             }
         }
         ["import", ork, out] => import_ork(std::path::Path::new(ork), std::path::Path::new(out)),
+        ["icons", dir] => match icons::write_all(std::path::Path::new(dir)) {
+            Ok(()) => {
+                println!("wrote {dir}/bowshock.ico and {dir}/bowshock.icns");
+                std::process::ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("bowshock icons: {dir}: {e}");
+                std::process::ExitCode::FAILURE
+            }
+        },
         ["gallery"] => match gallery::app().run() {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(e) => {
@@ -119,18 +138,27 @@ fn import_ork(ork: &std::path::Path, out: &std::path::Path) -> std::process::Exi
 }
 
 /// The application; with `example` the built-in example rocket is loaded at start, and `BOWSHOCK_OPEN=<file>` opens a document.
-fn app(example: bool) -> iced::Application<impl iced::Program<State = App, Message = Message, Theme = Theme>> {
-    iced::application(move || App::launch(example), App::update, App::view)
-        .title("Bowshock")
-        .theme(App::theme)
-        .subscription(App::subscription)
-        .fonts(theme::FONTS)
-        .font(SANS)
-        .window(iced::window::Settings {
-            size: Size::new(1280.0, 800.0),
-            icon: logo::window_icon(),
-            // A close request goes through the app, which asks about unsaved changes before exiting.
-            exit_on_close_request: false,
-            ..iced::window::Settings::default()
-        })
+fn app(example: bool, interactive: bool) -> iced::Application<impl iced::Program<State = App, Message = Message, Theme = Theme>> {
+    iced::application(
+        move || {
+            if interactive {
+                platform::set_dock_icon();
+            }
+            App::launch(example)
+        },
+        App::update,
+        App::view,
+    )
+    .title("Bowshock")
+    .theme(App::theme)
+    .subscription(App::subscription)
+    .fonts(theme::FONTS)
+    .font(SANS)
+    .window(iced::window::Settings {
+        size: Size::new(1280.0, 800.0),
+        icon: logo::window_icon(),
+        // A close request goes through the app, which asks about unsaved changes before exiting.
+        exit_on_close_request: false,
+        ..iced::window::Settings::default()
+    })
 }

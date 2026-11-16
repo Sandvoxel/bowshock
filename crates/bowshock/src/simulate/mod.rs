@@ -8,9 +8,12 @@
 //!   saved in the `.bowshock` file, loaded back, edited through `ctx.doc` (dirty dot, undo) and a new document has one, `Nominal`.
 //!   Results are never saved: they are re-run. A flight is flown against the rocket *as it is when you press Run*. [`State::sync`]
 //!   (called by the app after every message) mirrors the document's list; [`State::commit`] writes edits back.
-//! * **Run** ([`Message::Run`], the top bar's Simulate button and `F5`) flies the selected flight with
+//! * **Run** ([`Message::Run`], the top bar's Simulate button and `F5`) flies the selected flights with
 //!   [`bowshock_sim::from_model::sim_input`] on a worker thread and shows the result when it lands; **Run all** flies every flight.
 //!   A result whose conditions or document have changed since is *stale* and is drawn in `ink-faint` until it is run again.
+//! * **Edit selection**: a click selects one flight, Cmd/Ctrl-click toggles one, Shift-click selects a range (`Pick`); Cmd/Ctrl+A
+//!   selects all. With several selected the Conditions panel edits all of them at once: fields they agree on show the value, the
+//!   others the mixed `—`, and an edit sets that field on every selected flight as one undo step. The compare ticks are separate.
 //! * **Compare**: ticking two or more flights (up to four, colours `series-1…4` that stay with the flight) overlays them on every
 //!   plot and turns the results into a comparison against the reference (the selected flight when ticked).
 //! * The plots are [`widgets::plot`](crate::widgets::plot) groups with PlotZoom (drag a band, `Enter` zooms, `Esc` steps back); the
@@ -25,6 +28,7 @@
 mod channels;
 mod flight;
 mod format;
+mod keys;
 mod layout;
 mod left;
 mod picker;
@@ -84,6 +88,47 @@ pub enum Edit {
     FieldRadius(f64),
 }
 
+impl Edit {
+    /// What the edit changes, in the words of the undo step (`Set rail length on 3 flights`).
+    fn label(&self) -> &'static str {
+        match self {
+            Edit::Motor(_) => "motor",
+            Edit::Delay(_) => "delay",
+            Edit::RailLength(_) => "rail length",
+            Edit::LaunchAngle(_) => "launch angle",
+            Edit::Wind(_) => "wind",
+            Edit::WindFrom(_) => "wind from",
+            Edit::Turbulence(_) => "turbulence",
+            Edit::SiteAltitude(_) => "site altitude",
+            Edit::Temperature(_) => "temperature",
+            Edit::FieldRadius(_) => "field radius",
+        }
+    }
+}
+
+/// How a click on a flight row changes the edit selection (the kit's multi-select conventions, as in the viewport and Station
+/// Lanes): a plain click selects one, Cmd/Ctrl-click toggles, Shift-click selects the range from the last click, and Shift with
+/// Cmd/Ctrl adds that range to what is selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pick {
+    Only,
+    Toggle,
+    Range,
+    AddRange,
+}
+
+impl Pick {
+    /// What a click does with `modifiers` held.
+    fn of(modifiers: keyboard::Modifiers) -> Pick {
+        match (modifiers.shift(), modifiers.command() || modifiers.control()) {
+            (true, true) => Pick::AddRange,
+            (true, false) => Pick::Range,
+            (false, true) => Pick::Toggle,
+            (false, false) => Pick::Only,
+        }
+    }
+}
+
 /// An edit of the plots' layout: the presets row, the panel chrome and the source picker all send these.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LayoutEdit {
@@ -128,14 +173,19 @@ pub struct DispersionDone {
 /// The Simulate screen's messages.
 #[derive(Debug, Clone)]
 pub enum Message {
-    /// Run the selected flight (top bar button, `F5`).
+    /// Run the flights selected for editing (top bar button, `F5`).
     Run,
     /// Run every flight.
     RunAll,
     /// A simulation finished on its worker thread.
     Done(Box<Done>),
-    /// Make this flight the selected one (the reference of a comparison).
-    Select(FlightId),
+    /// A click on a flight row: selects it (the reference of a comparison), toggles it or extends the selection to it, by the
+    /// modifiers held (see [`Pick`]).
+    Click(FlightId),
+    /// The held modifier keys changed (reported by the invisible tracker in the Flights list).
+    Modifiers(keyboard::Modifiers),
+    /// Select every flight (Cmd/Ctrl+A).
+    SelectAll,
     /// Tick or untick this flight for comparison.
     Tick(FlightId),
     /// `compare +`: add a flight with the selected one's conditions.
@@ -199,6 +249,13 @@ struct Shown {
 pub struct State {
     flights: Vec<Flight>,
     selected: FlightId,
+    /// The flights selected with `selected` for editing (Cmd/Ctrl-click, Shift-click): the edit selection is `selected` plus
+    /// these. The compare ticks are separate.
+    also: Vec<FlightId>,
+    /// Where a Shift-click range starts: the last flight clicked.
+    anchor: FlightId,
+    /// The modifier keys held, as the tracker last reported them (a drive script holds `BOWSHOCK_DRIVE_MODIFIERS`).
+    modifiers: keyboard::Modifiers,
     next_id: FlightId,
     plot: PlotState,
     shown: Shown,
@@ -239,6 +296,9 @@ impl State {
         let flights: Vec<Flight> = defs.iter().map(Flight::from_def).collect();
         let mut state = State {
             selected: flights[0].id,
+            also: Vec::new(),
+            anchor: flights[0].id,
+            modifiers: crate::viewport::manipulate::drive_modifiers(),
             next_id: defs.iter().map(|d| d.id).max().map_or(1, |m| m + 1),
             flights,
             plot: PlotState::new((0.0, 1.0)),
@@ -263,7 +323,9 @@ impl State {
         let rocket = ctx.doc.rocket();
         let (defs, layout, bands) = (rocket.flights(), rocket.plot_layout(), rocket.stability_bands());
         if reloaded {
+            let modifiers = self.modifiers;
             *self = State::of(defs, layout, bands);
+            self.modifiers = modifiers;
             self.imperial = format::imperial(ctx.units);
             self.rebuild();
             return;
@@ -379,8 +441,12 @@ impl State {
             })
             .collect();
         self.next_id = self.next_id.max(defs.iter().map(|d| d.id).max().map_or(1, |m| m + 1));
+        self.also.retain(|id| self.flights.iter().any(|f| f.id == *id));
         if self.flight(self.selected).is_none() {
-            self.selected = self.flights[0].id;
+            let first = self.flights[0].id;
+            self.select_only(first);
+        } else if self.flight(self.anchor).is_none() {
+            self.anchor = self.selected;
         }
         self.stored = defs.to_vec();
         self.rebuild();
@@ -415,6 +481,77 @@ impl State {
 
     fn selected_flight(&self) -> &Flight {
         self.flight(self.selected).unwrap_or(&self.flights[0])
+    }
+
+    /// The flights the Conditions panel edits: the selected one and those selected with it, in list order.
+    fn edit_ids(&self) -> Vec<FlightId> {
+        let ids: Vec<FlightId> = self.flights.iter().filter(|f| f.id == self.selected || self.also.contains(&f.id)).map(|f| f.id).collect();
+        if ids.is_empty() {
+            vec![self.selected_flight().id]
+        } else {
+            ids
+        }
+    }
+
+    /// [`Self::edit_ids`] as flights.
+    fn edit_flights(&self) -> Vec<&Flight> {
+        self.edit_ids().into_iter().filter_map(|id| self.flight(id)).collect()
+    }
+
+    /// Whether `id` is in the edit selection.
+    fn is_selected(&self, id: FlightId) -> bool {
+        id == self.selected || self.also.contains(&id)
+    }
+
+    /// Makes `id` the only selected flight.
+    fn select_only(&mut self, id: FlightId) {
+        self.selected = id;
+        self.also.clear();
+        self.anchor = id;
+    }
+
+    /// Changes the edit selection by a click on `id`. A toggle never empties the selection; a range runs from the last flight
+    /// clicked to `id`, in list order, and `id` becomes the selected (reference) flight.
+    fn pick(&mut self, id: FlightId, how: Pick) {
+        if self.flight(id).is_none() {
+            return;
+        }
+        let mut set = self.edit_ids();
+        match how {
+            Pick::Only => {
+                self.select_only(id);
+                return;
+            }
+            Pick::Toggle => match set.iter().position(|f| *f == id) {
+                Some(at) if set.len() > 1 => {
+                    set.remove(at);
+                    if self.selected == id {
+                        self.selected = set[0];
+                    }
+                    self.anchor = self.selected;
+                }
+                Some(_) => {}
+                None => {
+                    set.push(id);
+                    self.selected = id;
+                    self.anchor = id;
+                }
+            },
+            Pick::Range | Pick::AddRange => {
+                let at = |id| self.flights.iter().position(|f| f.id == id);
+                let (Some(from), Some(to)) = (at(self.anchor).or_else(|| at(self.selected)), at(id)) else { return };
+                if how == Pick::Range {
+                    set.clear();
+                }
+                for f in &self.flights[from.min(to)..=from.max(to)] {
+                    if !set.contains(&f.id) {
+                        set.push(f.id);
+                    }
+                }
+                self.selected = id;
+            }
+        }
+        self.also = set.into_iter().filter(|f| *f != self.selected).collect();
     }
 
     /// Flights ticked for comparison.
@@ -496,10 +633,13 @@ impl State {
     pub fn update(&mut self, message: Message, ctx: &mut Ctx) -> Task<app::Message> {
         match message {
             Message::Run => {
-                let id = self.selected;
-                let task = self.launch(id, ctx);
-                if let Some(error) = self.flights.iter().find(|f| f.id == id).and_then(|f| f.error.clone()) {
-                    ctx.notify(error);
+                let ids = self.edit_ids();
+                let task = self.launch_all(ids.clone(), ctx);
+                let failed = ids.iter().filter_map(|id| self.flight(*id)).find_map(|f| f.error.clone().map(|e| (f.name.clone(), e)));
+                match failed {
+                    Some((_, error)) if ids.len() == 1 => ctx.notify(error),
+                    Some((name, error)) => ctx.notify(format!("{name}: {error}")),
+                    None => {}
                 }
                 self.rebuild();
                 return task;
@@ -514,11 +654,14 @@ impl State {
                 return task;
             }
             Message::Done(done) => self.finished(*done),
-            Message::Select(id) => {
-                if self.flight(id).is_some() {
-                    self.selected = id;
-                    self.rebuild();
-                }
+            Message::Click(id) => {
+                self.pick(id, Pick::of(self.modifiers));
+                self.rebuild();
+            }
+            Message::Modifiers(modifiers) => self.modifiers = modifiers,
+            Message::SelectAll => {
+                self.also = self.flights.iter().map(|f| f.id).filter(|id| *id != self.selected).collect();
+                self.anchor = self.selected;
             }
             Message::Tick(id) => self.tick_flight(id, ctx),
             Message::AddFlight => {
@@ -526,16 +669,20 @@ impl State {
                 let id = self.next_id;
                 self.next_id += 1;
                 self.flights.push(Flight::new(id, format!("Flight {}", self.flights.len() + 1), spec));
-                self.selected = id;
+                self.select_only(id);
                 self.commit(ctx, "Add flight", None);
             }
             Message::RemoveFlight => {
-                if self.flights.len() > 1 {
-                    self.flights.retain(|f| f.id != self.selected);
-                    self.selected = self.flights[0].id;
-                    self.commit(ctx, "Remove flight", None);
-                } else {
+                let ids = self.edit_ids();
+                if ids.len() < self.flights.len() {
+                    self.flights.retain(|f| !ids.contains(&f.id));
+                    let first = self.flights[0].id;
+                    self.select_only(first);
+                    self.commit(ctx, if ids.len() > 1 { "Remove flights" } else { "Remove flight" }, None);
+                } else if self.flights.len() == 1 {
                     ctx.notify("The last flight cannot be removed");
+                } else {
+                    ctx.notify("At least one flight must stay");
                 }
             }
             Message::PerConfiguration => return self.per_configuration(ctx),
@@ -547,11 +694,18 @@ impl State {
             }
             Message::Dispersed(done) => self.dispersed(*done),
             Message::Edit(edit) => {
-                // One undo step per field: scrubbing the wind is one step, changing the motor afterwards another.
-                let field = format!("{edit:?}");
-                let key = format!("flight:{}:{}", self.selected, field.split('(').next().unwrap_or_default());
-                self.edit(edit, ctx.physics.motors());
-                self.commit(ctx, "Edit flight", Some(&key));
+                // One undo step per field and selection: scrubbing the wind is one step, changing the motor afterwards another.
+                // With several flights selected the edit sets the field on every one of them.
+                let ids = self.edit_ids();
+                let (label, key) = match ids.as_slice() {
+                    [id] => ("Edit flight".to_string(), format!("flight:{id}:{}", edit.label())),
+                    _ => {
+                        let joined: Vec<String> = ids.iter().map(ToString::to_string).collect();
+                        (format!("Set {} on {} flights", edit.label(), ids.len()), format!("flights:{}:{}", joined.join(","), edit.label()))
+                    }
+                };
+                self.edit(edit, &ids, ctx.physics.motors());
+                self.commit(ctx, &label, Some(&key));
             }
             Message::Plot(PlotMessage::Panel(panel, action, chip)) => return self.panel_action(panel, action, chip, ctx),
             Message::Plot(m) => self.plot.update(m),
@@ -566,7 +720,7 @@ impl State {
             Message::Ground(GroundMessage::Hover(t)) => self.plot.set_hover(t),
             Message::Ground(GroundMessage::Select(i)) => {
                 if let Some(id) = self.shown.ids.get(i).copied() {
-                    self.selected = id;
+                    self.select_only(id);
                     self.rebuild();
                 }
             }
@@ -574,7 +728,7 @@ impl State {
             Message::StartRename(id) => {
                 if let Some(flight) = self.flight(id) {
                     self.renaming = Some((id, flight.name.clone()));
-                    self.selected = id;
+                    self.select_only(id);
                     self.rebuild();
                     return iced::widget::operation::focus(left::RENAME_ID).chain(iced::widget::operation::text_input::select_all(left::RENAME_ID));
                 }
@@ -698,37 +852,39 @@ impl State {
                 f.slot = Some(i as u8 + 1);
             }
         }
-        self.selected = chosen[0];
+        self.select_only(chosen[0]);
         self.commit(ctx, "Add flights", None);
         let task = self.launch_all(chosen, ctx);
         self.rebuild();
         task
     }
 
-    fn edit(&mut self, edit: Edit, motors: &MotorDb) {
-        let Some(flight) = self.flights.iter_mut().find(|f| f.id == self.selected) else { return };
-        let spec = &mut flight.spec;
-        match edit {
-            Edit::Motor(choice) => {
-                spec.delay = match (&choice, spec.delay) {
-                    // Keep a typed delay when it is one the new motor comes with, else the nearest it offers.
-                    (MotorChoice::Motor(m), Some(d)) => match bowshock_sim::from_model::find_motor(motors, m) {
-                        Some(motor) if !motor.delays.is_empty() => motor.delays.iter().copied().min_by(|a, b| (a - d).abs().total_cmp(&(b - d).abs())),
-                        _ => Some(d),
-                    },
-                    _ => None,
-                };
-                spec.motor = choice;
+    /// Applies `edit` to the conditions of every flight in `ids`.
+    fn edit(&mut self, edit: Edit, ids: &[FlightId], motors: &MotorDb) {
+        for flight in self.flights.iter_mut().filter(|f| ids.contains(&f.id)) {
+            let spec = &mut flight.spec;
+            match &edit {
+                Edit::Motor(choice) => {
+                    spec.delay = match (choice, spec.delay) {
+                        // Keep a typed delay when it is one the new motor comes with, else the nearest it offers.
+                        (MotorChoice::Motor(m), Some(d)) => match bowshock_sim::from_model::find_motor(motors, m) {
+                            Some(motor) if !motor.delays.is_empty() => motor.delays.iter().copied().min_by(|a, b| (a - d).abs().total_cmp(&(b - d).abs())),
+                            _ => Some(d),
+                        },
+                        _ => None,
+                    };
+                    spec.motor = choice.clone();
+                }
+                Edit::Delay(v) => spec.delay = Some(v.max(0.0)),
+                Edit::RailLength(v) => spec.rail_length = v.max(0.05),
+                Edit::LaunchAngle(v) => spec.launch_angle = v.clamp(0.0, 70f64.to_radians()),
+                Edit::Wind(v) => spec.wind_speed = v.max(0.0),
+                Edit::WindFrom(v) => spec.wind_from = v.rem_euclid(std::f64::consts::TAU),
+                Edit::Turbulence(t) => spec.turbulence = *t,
+                Edit::SiteAltitude(v) => spec.site_altitude = v.clamp(-400.0, 6000.0),
+                Edit::Temperature(v) => spec.temperature = v.clamp(220.0, 330.0),
+                Edit::FieldRadius(v) => spec.field_radius = v.max(1.0),
             }
-            Edit::Delay(v) => spec.delay = Some(v.max(0.0)),
-            Edit::RailLength(v) => spec.rail_length = v.max(0.05),
-            Edit::LaunchAngle(v) => spec.launch_angle = v.clamp(0.0, 70f64.to_radians()),
-            Edit::Wind(v) => spec.wind_speed = v.max(0.0),
-            Edit::WindFrom(v) => spec.wind_from = v.rem_euclid(std::f64::consts::TAU),
-            Edit::Turbulence(t) => spec.turbulence = t,
-            Edit::SiteAltitude(v) => spec.site_altitude = v.clamp(-400.0, 6000.0),
-            Edit::Temperature(v) => spec.temperature = v.clamp(220.0, 330.0),
-            Edit::FieldRadius(v) => spec.field_radius = v.max(1.0),
         }
     }
 
@@ -737,6 +893,12 @@ impl State {
     pub fn on_key(&self, key: &keyboard::Key, modifiers: keyboard::Modifiers, _ctx: &Ctx) -> Option<Message> {
         if self.renaming.is_some() && matches!(key, keyboard::Key::Named(keyboard::key::Named::Escape)) {
             return Some(Message::CancelRename);
+        }
+        // Cmd/Ctrl+A selects every flight (a focused text field takes the key first, so this is only reached from the list).
+        if let keyboard::Key::Character(c) = key {
+            if modifiers.command() && !modifiers.shift() && c.eq_ignore_ascii_case("a") {
+                return Some(Message::SelectAll);
+            }
         }
         let enter = matches!(key, keyboard::Key::Named(keyboard::key::Named::Enter));
         (enter && modifiers.is_empty() && self.plot.can_zoom_in()).then_some(Message::Plot(PlotMessage::ZoomIn))
@@ -823,7 +985,11 @@ impl State {
         } else if let Some(error) = &flight.error {
             chip(Severity::Err, error.clone()).into()
         } else {
-            text(format!("Press Run (F5) to fly {}", flight.name)).size(TEXT_BODY).style(theme::muted).boxed()
+            let what = match self.edit_ids().len() {
+                1 => flight.name.clone(),
+                n => format!("{n} flights"),
+            };
+            text(format!("Press Run (F5) to fly {what}")).size(TEXT_BODY).style(theme::muted).boxed()
         };
         container(column![crate::app::ui::label("NO RESULT YET"), status].spacing(SPACE_3).align_x(iced::Center)).center(Fill).boxed()
     }

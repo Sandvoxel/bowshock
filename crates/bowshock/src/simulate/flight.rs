@@ -346,6 +346,57 @@ impl Flight {
     }
 }
 
+/// The value every item of `values` has, or `None` when they differ (or there are none).
+fn agree<T: PartialEq>(mut values: impl Iterator<Item = T>) -> Option<T> {
+    let first = values.next()?;
+    values.all(|v| v == first).then_some(first)
+}
+
+/// What the conditions of several flights have in common (the CONDITIONS panel of a multi-selection): `Some(value)` where every
+/// flight agrees, `None` where they differ, which the panel shows as the kit's mixed `—` until the field is edited.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Shared {
+    /// The motor.
+    pub motor: Option<MotorChoice>,
+    /// The ejection delay each flight flies (s), see [`effective_delay`].
+    pub delay: Option<f64>,
+    /// Launch rail length (m).
+    pub rail_length: Option<f64>,
+    /// Rail tilt from vertical (rad).
+    pub launch_angle: Option<f64>,
+    /// Mean wind speed (m/s).
+    pub wind_speed: Option<f64>,
+    /// Direction the wind blows from (rad).
+    pub wind_from: Option<f64>,
+    /// Gust intensity.
+    pub turbulence: Option<Turbulence>,
+    /// Site altitude (m).
+    pub site_altitude: Option<f64>,
+    /// Ground temperature (K).
+    pub temperature: Option<f64>,
+    /// Field radius (m).
+    pub field_radius: Option<f64>,
+}
+
+impl Shared {
+    /// What `flights` have in common. An empty set agrees on nothing.
+    pub fn of(ctx: &Ctx, flights: &[&Flight]) -> Shared {
+        let specs = || flights.iter().map(|f| &f.spec);
+        Shared {
+            motor: agree(specs().map(|s| s.motor.clone())),
+            delay: agree(specs().map(|s| effective_delay(ctx, s))),
+            rail_length: agree(specs().map(|s| s.rail_length)),
+            launch_angle: agree(specs().map(|s| s.launch_angle)),
+            wind_speed: agree(specs().map(|s| s.wind_speed)),
+            wind_from: agree(specs().map(|s| s.wind_from)),
+            turbulence: agree(specs().map(|s| s.turbulence)),
+            site_altitude: agree(specs().map(|s| s.site_altitude)),
+            temperature: agree(specs().map(|s| s.temperature)),
+            field_radius: agree(specs().map(|s| s.field_radius)),
+        }
+    }
+}
+
 /// The first motor mount of the first stage (a cluster flies its first motor), else any mount.
 pub fn first_mount(ctx: &Ctx) -> Option<MotorMount> {
     let rocket = ctx.doc.rocket();

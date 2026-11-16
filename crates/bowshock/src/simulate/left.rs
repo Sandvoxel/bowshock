@@ -1,5 +1,5 @@
-//! The left column of the Simulate screen: the FLIGHTS list (with the compare checkboxes) and the CONDITIONS of the selected
-//! flight, then Run and Run all.
+//! The left column of the Simulate screen: the FLIGHTS list (with the compare checkboxes) and the CONDITIONS of the flights
+//! selected for editing (one, or several at once), then Run and Run all.
 
 use std::fmt;
 
@@ -7,8 +7,8 @@ use bowshock_sim::Turbulence;
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input, tooltip, Space};
 use iced::{Background, Border, Element, Fill, Length, Theme, Widget};
 
-use super::flight::{self, Flight, MotorChoice, Spec};
-use super::{format, Edit, Message, State, MAX_COMPARED};
+use super::flight::{self, Flight, MotorChoice, Shared, Spec};
+use super::{format, keys, Edit, Message, State, MAX_COMPARED};
 use crate::app::{ui, Ctx};
 use crate::theme::{self, MONO};
 use crate::tokens::{Tokens, SPACE_1, SPACE_2, SPACE_3, TEXT_BODY, TEXT_LABEL};
@@ -43,8 +43,6 @@ impl fmt::Display for MotorOption {
 
 /// The whole column.
 pub(super) fn view<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
-    let flight = state.selected_flight();
-
     let title = if state.shown.compare { format!("FLIGHTS · {} COMPARED", state.ticked()) } else { "FLIGHTS".to_string() };
     let add: Element<'a, Message> = push("compare +", Weight::Ghost).tooltip("Add a flight to compare").on_press(Message::AddFlight).into();
     let head = container(row![ui::label(title), Space::new().width(Fill), add].align_y(iced::Center)).padding([0.0, SPACE_2]).height(32);
@@ -66,13 +64,23 @@ pub(super) fn view<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
         body.push(container(text(hint).size(TEXT_BODY - 1.0).style(theme::muted)).padding([SPACE_2, SPACE_3]).boxed());
     }
     body.push(rule());
-    body.push(conditions(ctx, flight, state.shown.compare, state.renaming.as_ref().filter(|(id, _)| *id == flight.id).map(|(_, b)| b.as_str())));
+    body.push(conditions(state, ctx));
 
-    let run: Element<'a, Message> = push("Run", Weight::Primary).icon(Mark::Play).width(Fill).on_press(Message::Run).into();
+    let multi = !state.also.is_empty();
+    let run: Element<'a, Message> = push(if multi { "Run selected" } else { "Run" }, Weight::Primary)
+        .icon(Mark::Play)
+        .tooltip(if multi { "Fly the selected flights" } else { "Fly this flight" })
+        .width(Fill)
+        .on_press(Message::Run)
+        .into();
     let run_all: Element<'a, Message> = push("Run all", Weight::Secondary).tooltip("Fly every flight").on_press(Message::RunAll).into();
     let footer = container(row![run, run_all].spacing(SPACE_2)).padding(SPACE_3);
 
-    column![head, scrollable(column(body)).direction(super::thin_scrollbar()).style(super::scroll_style).height(Fill), rule(), footer].height(Fill).boxed()
+    // The tracker is invisible: it only keeps `state.modifiers` current for the row clicks.
+    let held = keys::track(state.modifiers, Message::Modifiers);
+    column![held, head, scrollable(column(body)).direction(super::thin_scrollbar()).style(super::scroll_style).height(Fill), rule(), footer]
+        .height(Fill)
+        .boxed()
 }
 
 /// The inline text field that renames a flight (Enter commits, Esc cancels).
@@ -88,54 +96,69 @@ fn rename_field<'a>(buffer: &'a str) -> Element<'a, Message> {
         .boxed()
 }
 
-/// The CONDITIONS section of `flight`: its fields, with the `F5` keycap and a remove button in the head.
-fn conditions<'a>(ctx: &'a Ctx, flight: &'a Flight, compare: bool, renaming: Option<&'a str>) -> Element<'a, Message> {
+/// The CONDITIONS section of the flights selected for editing: every field, with the `F5` keycap and a remove button in the head.
+/// With one flight the fields are its own. With several, a field they agree on shows the shared value and one they differ on the
+/// mixed `—` until it is edited; an edit sets the field on all of them (the untouched fields stay per-flight).
+fn conditions<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
+    let flights = state.edit_flights();
+    let count = flights.len();
+    let flight = state.selected_flight();
     let spec = &flight.spec;
+    let shared = Shared::of(ctx, &flights);
     let system = &ctx.units;
-    let field = |label: &'a str, value: f64, quantity: Quantity, make: fn(f64) -> Edit| -> Element<'a, Message> {
-        unit_input(label, value, quantity, system).on_commit(move |v| Message::Edit(make(v))).on_scrub(move |v| Message::Edit(make(v))).into()
+    // A field shows the value the flights share; when they differ it is mixed (and the selected flight's value stands behind it).
+    let field = |label: &'a str, shown: Option<f64>, fallback: f64, quantity: Quantity, make: fn(f64) -> Edit| -> Element<'a, Message> {
+        unit_input(label, shown.unwrap_or(fallback), quantity, system)
+            .mixed(shown.is_none())
+            .on_commit(move |v| Message::Edit(make(v)))
+            .on_scrub(move |v| Message::Edit(make(v)))
+            .into()
     };
 
-    let options = motor_options(ctx, spec);
-    let current = options.iter().find(|o| o.choice == spec.motor).cloned();
+    let specs: Vec<_> = flights.iter().map(|f| &f.spec).collect();
+    let options = motor_options(ctx, &specs);
+    let current = shared.motor.as_ref().and_then(|motor| options.iter().find(|o| o.choice == *motor)).cloned();
     let motor = labeled("Motor", select(options, current, |o: MotorOption| Message::Edit(Edit::Motor(o.choice))));
+    let gusts = [Turbulence::Off, Turbulence::Low, Turbulence::Med, Turbulence::High].map(Some);
     let turbulence = labeled(
         "Turbulence",
-        segmented_fill(&[(Turbulence::Off, "Off"), (Turbulence::Low, "Low"), (Turbulence::Med, "Med"), (Turbulence::High, "High")], spec.turbulence, |t| {
-            Message::Edit(Edit::Turbulence(t))
+        segmented_fill(&[(gusts[0], "Off"), (gusts[1], "Low"), (gusts[2], "Med"), (gusts[3], "High")], shared.turbulence, |t| {
+            Message::Edit(Edit::Turbulence(t.unwrap_or_default()))
         }),
     );
 
     let keycap = container(text("F5").font(MONO).size(10)).padding([1.0, SPACE_1]).style(theme::keycap);
-    let remove: Element<'a, Message> = icon_button(Mark::Close, "Remove this flight").on_press(Message::RemoveFlight).width(22).into();
-    let title: Element<'a, Message> = match renaming {
-        Some(buffer) => rename_field(buffer),
-        None => mouse_area(ui::label(format!("CONDITIONS · {}", flight.name.to_uppercase()))).on_double_click(Message::StartRename(flight.id)).boxed(),
+    let remove: Element<'a, Message> =
+        icon_button(Mark::Close, if count > 1 { "Remove the selected flights" } else { "Remove this flight" }).on_press(Message::RemoveFlight).width(22).into();
+    let renaming = state.renaming.as_ref().filter(|(id, _)| *id == flight.id).map(|(_, b)| b.as_str());
+    let title: Element<'a, Message> = match (count, renaming) {
+        (1, Some(buffer)) => rename_field(buffer),
+        (1, None) => mouse_area(ui::label(format!("CONDITIONS · {}", flight.name.to_uppercase()))).on_double_click(Message::StartRename(flight.id)).boxed(),
+        _ => ui::label(format!("CONDITIONS · {count} FLIGHTS")),
     };
     let head = row![title, Space::new().width(Fill), remove, keycap].spacing(SPACE_2).align_y(iced::Center);
 
-    // In a comparison the flights differ by motor, delay, turbulence, site and temperature: those fields are not comparable
-    // across a ticked set, so only the four shared launch conditions are listed (SimulateCompare).
     let mut fields: Vec<Element<'a, Message>> = Vec::new();
-    if !compare {
-        fields.push(motor);
-        fields.push(field("Delay", flight::effective_delay(ctx, spec), Quantity::Time, Edit::Delay));
+    if count > 1 {
+        let note = format!("— flights differ · an edit sets all {count}");
+        fields.push(text(note).size(TEXT_BODY - 1.0).style(theme::muted).boxed());
     }
-    fields.push(field("Wind", spec.wind_speed, Quantity::Velocity, Edit::Wind));
-    fields.push(field("Wind from", spec.wind_from, Quantity::Angle, Edit::WindFrom));
-    fields.push(field("Launch angle", spec.launch_angle, Quantity::Angle, Edit::LaunchAngle));
-    if !compare {
-        fields.push(field("Rail length", spec.rail_length, Quantity::Length, Edit::RailLength));
-        fields.push(turbulence);
-        fields.push(field("Site altitude", spec.site_altitude, Quantity::Altitude, Edit::SiteAltitude));
-        fields.push(field("Temperature", spec.temperature, Quantity::Temperature, Edit::Temperature));
-    }
-    fields.push(field("Field radius", spec.field_radius, Quantity::Altitude, Edit::FieldRadius));
+    fields.push(motor);
+    fields.push(field("Delay", shared.delay, flight::effective_delay(ctx, spec), Quantity::Time, Edit::Delay));
+    fields.push(field("Wind", shared.wind_speed, spec.wind_speed, Quantity::Velocity, Edit::Wind));
+    fields.push(field("Wind from", shared.wind_from, spec.wind_from, Quantity::Angle, Edit::WindFrom));
+    fields.push(field("Launch angle", shared.launch_angle, spec.launch_angle, Quantity::Angle, Edit::LaunchAngle));
+    fields.push(field("Rail length", shared.rail_length, spec.rail_length, Quantity::Length, Edit::RailLength));
+    fields.push(turbulence);
+    fields.push(field("Site altitude", shared.site_altitude, spec.site_altitude, Quantity::Altitude, Edit::SiteAltitude));
+    fields.push(field("Temperature", shared.temperature, spec.temperature, Quantity::Temperature, Edit::Temperature));
+    fields.push(field("Field radius", shared.field_radius, spec.field_radius, Quantity::Altitude, Edit::FieldRadius));
     container(column![head, column(fields).spacing(SPACE_2)].spacing(SPACE_3)).padding(SPACE_3).boxed()
 }
 
-/// The motor select's options: the active configuration, each configuration, then the motors that fit the first mount.
-fn motor_options(ctx: &Ctx, spec: &Spec) -> Vec<MotorOption> {
+/// The motor select's options: the active configuration, each configuration, then the motors that fit the first mount, then any
+/// motor a flight in `specs` names that does not.
+fn motor_options(ctx: &Ctx, specs: &[&Spec]) -> Vec<MotorOption> {
     let rocket = ctx.doc.rocket();
     let name = |id| rocket.configuration_name(id).unwrap_or_default();
     let mut options = vec![MotorOption { choice: MotorChoice::Active, label: format!("Current · {}", name(rocket.active_config_id())) }];
@@ -158,7 +181,8 @@ fn motor_options(ctx: &Ctx, spec: &Spec) -> Vec<MotorOption> {
         }
     }
     // A flight can name a motor that does not fit this mount (the kit's Bigger motor on another rocket): keep it selectable.
-    if let MotorChoice::Motor(m) = &spec.motor {
+    for spec in specs {
+        let MotorChoice::Motor(m) = &spec.motor else { continue };
         // A reference saved without an id (an imported flight) is the option of the curve it resolves to.
         let resolved = bowshock_sim::from_model::find_motor(ctx.physics.motors(), m).map(|motor| motor.id.as_str());
         let same = |o: &MotorOption| o.choice == spec.motor || matches!(&o.choice, MotorChoice::Motor(r) if m.id.is_empty() && Some(r.id.as_str()) == resolved);
@@ -192,7 +216,7 @@ fn status_color(severity: Option<Severity>, stale: bool) -> fn(&Tokens) -> iced:
 
 /// One row: the compare checkbox, name and `motor · condition`, apogee and the status square.
 fn flight_row<'a>(state: &'a State, ctx: &'a Ctx, flight: &'a Flight, revision: u64) -> Element<'a, Message> {
-    let selected = flight.id == state.selected;
+    let selected = state.is_selected(flight.id);
     let stale = flight.is_stale(revision);
     let is_ref = state.shown.compare && state.shown.ids.get(state.shown.reference) == Some(&flight.id);
 
@@ -273,7 +297,7 @@ fn flight_row<'a>(state: &'a State, ctx: &'a Ctx, flight: &'a Flight, revision: 
             let hot = matches!(status, button::Status::Hovered | button::Status::Pressed) && !selected;
             button::Style { background: hot.then_some(Background::Color(t.bg_300.scale_alpha(0.6))), text_color: t.ink, ..button::Style::default() }
         })
-        .on_press(Message::Select(flight.id));
+        .on_press(Message::Click(flight.id));
 
     let edge = container(Space::new()).width(EDGE_W).height(Fill).style(move |theme: &Theme| container::Style {
         background: selected.then(|| Background::Color(theme::tokens(theme).accent)),

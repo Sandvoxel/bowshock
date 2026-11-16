@@ -33,5 +33,11 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 # Rasterises the application icon (the same version iced's software renderer uses).
 tiny-skia = "0.12"
 
+# The Dock icon of an un-bundled macOS run (`platform::set_dock_icon`); the versions winit already pulls in.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSImage", "NSResponder"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSData"] }
+
 [lints]
 workspace = true

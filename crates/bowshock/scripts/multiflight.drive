@@ -1,0 +1,18 @@
+# Multi-select editing in Simulate: Cmd/Ctrl-click toggles flights into the edit selection (Shift-click selects a range), and the
+# CONDITIONS panel then edits all of them: shared values show, differing ones read `—` (mixed) until edited, and an edit sets that
+# field on every selected flight as one undo step. A drive script cannot hold keys, so the whole run holds Ctrl:
+#   BOWSHOCK_DRIVE_MODIFIERS=ctrl cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/multiflight.drive out/multiflight
+# Coordinates are for 1280x800 on the example (flight rows at y 90, 135, 179, 223; Rail length at (190, 507)).
+viewport 1280x800
+
+click (663, 18)
+screenshot one.png
+# Nominal is selected; Ctrl-click Windy and Hot day: CONDITIONS · 3 FLIGHTS, wind and temperature mixed, the rest shared.
+click (120, 135)
+click (120, 179)
+screenshot three-mixed.png
+# Rail length 2400 mm on all three at once; the wind and temperature stay mixed (per-flight).
+click (190, 507)
+type "2400"
+type enter
+screenshot three-rail.png
