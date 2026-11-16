@@ -7,6 +7,7 @@
 use crate::engine::case3::Case3;
 use crate::engine::run::MONITOR_LIMIT;
 use bowshock_cfd::gas3::cons_to_prim3;
+use bowshock_cfd::grid3::Face3;
 use bowshock_cfd::solver3::Solver3;
 use crate::engine::result::StopReason;
 
@@ -48,17 +49,40 @@ pub struct PointResult3 {
 }
 
 /// Wall forces of the current state of `s`: the `j = 0` faces on the body (`i >= axis_cells`, centroid `x <=` base station) and every
-/// face between a fluid and a solid cell. Wall pressure is the first fluid cell's pressure; `dF = (p - p_inf) area n_into_body`.
+/// face between a fluid and a solid cell. See [`lift_forces_upto`] for the wall pressure.
 pub fn lift_forces(case: &Case3, s: &Solver3) -> LiftForces {
+    lift_forces_upto(case, s, case.body.x_base())
+}
+
+/// [`lift_forces`] restricted to the wall faces with centroid `x <= x_max`. The wall pressure is extrapolated linearly from the two
+/// first fluid cells normal to the wall, as the 2D facade does (`engine::run::wall_distribution`): `pw = p0 + (p0 - p1) d0 / (d1 - d0)`,
+/// `d` the distance from the face centre to the cell centroid. A fin face whose second cell is solid or outside the grid uses the first-cell
+/// pressure. `dF = (pw - p_inf) area n_into_body`.
+pub fn lift_forces_upto(case: &Case3, s: &Solver3, x_max: f64) -> LiftForces {
     let g = &s.grid;
     let (ni, nj, nk) = (g.ni, g.nj, g.nk);
     let p_inf = s.cfg.freestream[4];
-    let x_base = case.body.x_base();
-    let pressure = |c: usize| cons_to_prim3(&s.u[c])[4] - p_inf;
+    let p = |c: usize| cons_to_prim3(&s.u[c])[4];
     let solid = |i: usize, j: usize, k: usize| g.is_solid(i, j, k);
+    let dist = |c: usize, f: &Face3| {
+        let x = g.xc[c];
+        ((x[0] - f.c[0]).powi(2) + (x[1] - f.c[1]).powi(2) + (x[2] - f.c[2]).powi(2)).sqrt()
+    };
     let (mut fx, mut fz, mut mz) = (0.0, 0.0, 0.0);
-    let mut add = |dp: f64, f: &bowshock_cfd::grid3::Face3, sign: f64| {
-        let d = dp * f.area * sign;
+    // `a`: first fluid cell, `b`: the fluid cell behind it (if any); `sign`: +1 when the face normal points into the body
+    let mut add = |a: usize, b: Option<usize>, f: &Face3, sign: f64| {
+        if f.c[0] > x_max {
+            return;
+        }
+        let p0 = p(a);
+        let pw = match b {
+            Some(b) => {
+                let (d0, d1) = (dist(a, f), dist(b, f));
+                p0 + (p0 - p(b)) * d0 / (d1 - d0)
+            }
+            None => p0,
+        };
+        let d = (pw - p_inf) * f.area * sign;
         fx += d * f.n[0];
         fz += d * f.n[2];
         mz += d * f.n[2] * f.c[0];
@@ -67,8 +91,8 @@ pub fn lift_forces(case: &Case3, s: &Solver3) -> LiftForces {
         for i in g.axis_cells..ni {
             let f = &g.jface[k * (nj + 1) * ni + i];
             // normal points into the fluid: into the body is its negative
-            if f.c[0] <= x_base && !solid(i, 0, k) {
-                add(pressure(g.cell(i, 0, k)), f, -1.0);
+            if !solid(i, 0, k) {
+                add(g.cell(i, 0, k), (nj > 1 && !solid(i, 1, k)).then(|| g.cell(i, 1, k)), f, -1.0);
             }
         }
     }
@@ -77,8 +101,8 @@ pub fn lift_forces(case: &Case3, s: &Solver3) -> LiftForces {
             for i in 1..ni {
                 let f = &g.iface[(k * nj + j) * (ni + 1) + i];
                 match (solid(i - 1, j, k), solid(i, j, k)) {
-                    (false, true) => add(pressure(g.cell(i - 1, j, k)), f, 1.0),
-                    (true, false) => add(pressure(g.cell(i, j, k)), f, -1.0),
+                    (false, true) => add(g.cell(i - 1, j, k), (i >= 2 && !solid(i - 2, j, k)).then(|| g.cell(i - 2, j, k)), f, 1.0),
+                    (true, false) => add(g.cell(i, j, k), (i + 1 < ni && !solid(i + 1, j, k)).then(|| g.cell(i + 1, j, k)), f, -1.0),
                     _ => {}
                 }
             }
@@ -89,8 +113,8 @@ pub fn lift_forces(case: &Case3, s: &Solver3) -> LiftForces {
             for i in 0..ni {
                 let f = &g.jface[(k * (nj + 1) + j) * ni + i];
                 match (solid(i, j - 1, k), solid(i, j, k)) {
-                    (false, true) => add(pressure(g.cell(i, j - 1, k)), f, 1.0),
-                    (true, false) => add(pressure(g.cell(i, j, k)), f, -1.0),
+                    (false, true) => add(g.cell(i, j - 1, k), (j >= 2 && !solid(i, j - 2, k)).then(|| g.cell(i, j - 2, k)), f, 1.0),
+                    (true, false) => add(g.cell(i, j, k), (j + 1 < nj && !solid(i, j + 1, k)).then(|| g.cell(i, j + 1, k)), f, -1.0),
                     _ => {}
                 }
             }
@@ -101,8 +125,8 @@ pub fn lift_forces(case: &Case3, s: &Solver3) -> LiftForces {
             for i in 0..ni {
                 let f = &g.kface[(k * nj + j) * ni + i];
                 match (solid(i, j, k - 1), solid(i, j, k)) {
-                    (false, true) => add(pressure(g.cell(i, j, k - 1)), f, 1.0),
-                    (true, false) => add(pressure(g.cell(i, j, k)), f, -1.0),
+                    (false, true) => add(g.cell(i, j, k - 1), (k >= 2 && !solid(i, j, k - 2)).then(|| g.cell(i, j, k - 2)), f, 1.0),
+                    (true, false) => add(g.cell(i, j, k), (k + 1 < nk && !solid(i, j, k + 1)).then(|| g.cell(i, j, k + 1)), f, -1.0),
                     _ => {}
                 }
             }

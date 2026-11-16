@@ -4,7 +4,7 @@ use bowshock_core::engine::case::{Case, Wake};
 use bowshock_core::engine::case3::Case3;
 use bowshock_core::engine::numerics::Numerics;
 use bowshock_core::engine::run::run_cold;
-use bowshock_core::engine::run3::{run3_cold, run3_on};
+use bowshock_core::engine::run3::{lift_forces_upto, run3_cold, run3_on};
 use bowshock_cfd::gas3::cons_to_prim3;
 use bowshock_core::StopReason;
 use std::time::Instant;
@@ -59,8 +59,8 @@ fn zero_incidence_has_no_normal_force() {
     assert!(r.cn.abs() < 1e-10, "CN {}", r.cn);
 }
 
-/// Nose pressure drag of the 3D solver at alpha 0 (no fins) against the 2D Euler solver on the same 2D grid. Both use the first-cell
-/// wall pressure (`cd_nose_cell`), so the comparison isolates the 3D discretisation.
+/// Nose pressure drag of the 3D solver at alpha 0 (no fins) against the 2D Euler solver on the same 2D grid, both with the wall
+/// pressure extrapolated from the two first cells (`cd_nose`); the first-cell values are printed for reference.
 #[test]
 fn axisymmetric_nose_drag_matches_2d() {
     for mach in [0.8, 2.0] {
@@ -91,11 +91,14 @@ fn axisymmetric_nose_drag_matches_2d() {
         c2.grid_sting = c3.grid.sting.clone();
         let r2 = run_cold(&c2);
         let t2 = t1.elapsed().as_secs_f64();
-        let diff = (cd3 - r2.cd_nose_cell) / r2.cd_nose_cell * 100.0;
+        let cd3x = lift_forces_upto(&c3, &s, l_nose).ca;
+        let diff = (cd3x - r2.cd_nose) / r2.cd_nose * 100.0;
+        let diff_cell = (cd3 - r2.cd_nose_cell) / r2.cd_nose_cell * 100.0;
         println!(
-            "M {mach}: 3D nose CA {cd3:.5} ({} it {:?}, {t3:.1}s) | 2D nose CD cell {:.5} extrapolated {:.5} ({} it {:?}, {t2:.1}s) | diff vs cell {diff:+.3}% | 3D total CA {:.5} CN {:.2e}",
+            "M {mach}: 3D nose CA {cd3:.5} ({} it {:?}, {t3:.1}s) | 2D nose CD cell {:.5} extrapolated {:.5} ({} it {:?}, {t2:.1}s) | 3D total CA {:.5} CN {:.2e}",
             r3.iterations, r3.stop_reason, r2.cd_nose_cell, r2.cd_nose, r2.iters, r2.stop_reason, r3.ca, r3.cn
         );
-        assert!(diff.abs() < 1.0, "M {mach}: 3D {cd3} vs 2D {} ({diff:+.3}%)", r2.cd_nose_cell);
+        println!("M {mach}: 3D nose CA extrapolated {cd3x:.5} vs 2D cd_nose {:.5} ({diff:+.3}%); first-cell {cd3:.5} vs {:.5} ({diff_cell:+.3}%)", r2.cd_nose, r2.cd_nose_cell);
+        assert!(diff.abs() < 1.0, "M {mach}: 3D {cd3x} vs 2D {} ({diff:+.3}%)", r2.cd_nose);
     }
 }
