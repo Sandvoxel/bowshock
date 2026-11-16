@@ -91,13 +91,18 @@ impl Case3 {
         BaseBody::cylinder(nose, 10.0 - l_nose)
     }
 
-    /// ANF fins: four square fins of 1 d chord and 1 d exposed span, thickness [`bowshock_reference::anf::FIN_THICKNESS_CAL`], flush with the base.
+    /// ANF fins: four fins of 1 d chord and 1 d exposed span, thickness [`bowshock_reference::anf::FIN_THICKNESS_CAL`], flush with the
+    /// base. Section: sharp leading edge and a blunt trailing edge of the full thickness (0.08 cal), as Abiza et al. (p. 3) describe
+    /// them. The source gives no bevel angle: the `FinProfile::Custom` section `[[0,0],[0.1,1],[1,1]]` (a wedge over the first
+    /// 0.1 chord, about 22 degrees per side, floored at 25 % of the half thickness) is **assumed**, and CN_alpha at M >= 2.35 is
+    /// sensitive to it.
     #[doc(hidden)]
     pub fn anf_fins() -> Fins3 {
-        Fins3 { count: 4, root_chord: 1.0, tip_chord: 1.0, span: 1.0, sweep: 0.0, thickness: bowshock_reference::anf::FIN_THICKNESS_CAL, te_to_base: 0.0, profile: FinProfile::Square }
+        let profile = FinProfile::Custom { section: vec![[0.0, 0.0], [0.1, 1.0], [1.0, 1.0]] };
+        Fins3 { count: 4, root_chord: 1.0, tip_chord: 1.0, span: 1.0, sweep: 0.0, thickness: bowshock_reference::anf::FIN_THICKNESS_CAL, te_to_base: 0.0, profile }
     }
 
-    /// Coarse ANF-like case for tests: [`Case3::anf_body`] with [`Case3::anf_fins`], level 0, `nk = 8` and the sting grid counts
+    /// Coarse ANF-like case for tests: [`Case3::anf_body`] with [`Case3::anf_fins`], level 0, `nk = 8`, 16 cells over the fin chord and the sting grid counts
     /// `n_up 10, n_nose 16, n_seg [12], n_ext 10, nj 24`. `max_iter` 3000.
     #[doc(hidden)]
     pub fn tiny_anf(mach: f64, alpha: f64) -> Case3 {
@@ -109,6 +114,7 @@ impl Case3 {
         s.n_ext = 10;
         s.nj = 24;
         c.grid.nk = 8;
+        c.grid.fin_chord_cells = Some(16);
         c.numerics.max_iter = 3000;
         c
     }

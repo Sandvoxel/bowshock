@@ -24,7 +24,7 @@
 //! `[[iteration, cn], ..]` to the RESULT line. RESULT lines carry the grid (`nk`, `ni`, `nj`, `cells`, `fin_chord_cells`, `span_cells`).
 //! `--fin-profile square|rounded|double-wedge|airfoil` replaces the fin section; `--breakdown` adds CN, CA and x_cp (calibers) of the
 //! nose, afterbody and fins (`fin`, and its parts `fin_sides`, `fin_edges`, `fin_tips`) to the RESULT line (`*_cn`, `*_ca`, `*_xcp`).
-//! `sharp-le` is a wedge leading edge (ramp over 0.1 chord) with a full-thickness blunt trailing edge. `--limiter minmod|vanalbada`
+//! `sharp-le` is a wedge leading edge (ramp over 0.1 chord) with a full-thickness blunt trailing edge. `--limiter minmod|vanalbada|venkat`
 //! overrides the reconstruction limiter. `--geometry` prints the fin geometry actually meshed (no GPU).
 
 use bowshock_cfd::gpu::{GpuSolver3, Precision};
@@ -116,8 +116,8 @@ fn parse(args: &[String]) -> Result<Args, String> {
     }
     let limiter = value("--limiter").transpose()?;
     if let Some(l) = &limiter {
-        if !matches!(l.as_str(), "minmod" | "vanalbada") {
-            return Err(format!("--limiter minmod|vanalbada, got `{l}`"));
+        if !matches!(l.as_str(), "minmod" | "vanalbada" | "venkat") {
+            return Err(format!("--limiter minmod|vanalbada|venkat, got `{l}`"));
         }
     }
     let num = |name: &str| -> Result<Option<usize>, String> { value(name).transpose()?.map(|v| v.parse::<usize>().map_err(|e| format!("{name}: {e}"))).transpose() };
@@ -244,6 +244,7 @@ fn build_case(args: &Args, body: &BaseBody, fins: &Option<bowshock_core::engine:
     match args.limiter.as_deref() {
         Some("minmod") => case.numerics.limiter = Limiter::Minmod,
         Some("vanalbada") => case.numerics.limiter = Limiter::VanAlbada,
+        Some("venkat") => case.numerics.limiter = Limiter::Venkatakrishnan,
         _ => {}
     }
     case

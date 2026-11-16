@@ -9,7 +9,7 @@
 //! * Fins sit at `theta_f = pi/n + 2 pi m / n`; those in `[0, pi]` are kept. For odd `n` the fin at `theta = pi` lies in the
 //!   symmetry plane and is a half fin owning the last cell `k = nk - 1`.
 //! * With fins, the root chord must lie on one tube segment. That segment is rebuilt as upstream piece, fin piece and downstream piece
-//!   (`16 << level` cells over the root chord, clustered at both edges); the sweep and taper are applied as a piecewise-linear
+//!   (`32 << level` cells over the root chord, clustered at both edges); the sweep and taper are applied as a piecewise-linear
 //!   remap of the segment's `x` nodes per row (the cells outside the fin stretch or shrink instead of folding), blended away over
 //!   four rows above the fin tip. The radial fractions are remapped so that a node row lies exactly on the fin tip.
 
@@ -45,9 +45,9 @@ pub struct Grid3Params {
     pub fins: Option<Fins3>,
     /// Azimuthal cells over `[0, pi]` (the plan default is `24 << level`, see [`Grid3Params::default_nk`]).
     pub nk: usize,
-    /// Grid level: sets the cells over the fin root chord (`16 << level`) unless `fin_chord_cells` overrides it.
+    /// Grid level: sets the cells over the fin root chord (`32 << level`) unless `fin_chord_cells` overrides it.
     pub level: u32,
-    /// Cells over the fin root chord (`None`: `16 << level`).
+    /// Cells over the fin root chord (`None`: `32 << level`; the ANF study found 16 too coarse for the fin loading at M >= 2).
     pub fin_chord_cells: Option<usize>,
     /// Radial cells from the body wall to the fin tip (`None`: whatever the sting grid's radial spacing puts there, with the tip
     /// row snapped to the nearest node). With `Some(n)` the radial fractions are regraded for the whole grid: `n` cells in
@@ -274,7 +274,7 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>) -> Result<FinPlan, E
     let x_le_root = if x_le_root - x_a > 1e-9 { x_le_root } else { x_a };
     let x_te_root = if x_b - x_te_root > 1e-9 { x_te_root } else { x_b };
     let flush = x_te_root >= x_b;
-    let nf = p.fin_chord_cells.unwrap_or(16usize << p.level);
+    let nf = p.fin_chord_cells.unwrap_or(32usize << p.level);
     if nf < 2 {
         return Err(Error::InvalidInput("3D fins need at least 2 cells over the root chord".to_string()));
     }
@@ -772,12 +772,13 @@ mod tests {
         };
         assert!((tip(&g) - 1.5).abs() < 1e-9 && (tip(&g0) - 1.5).abs() < 1e-9);
         let mut p = base.clone();
-        p.fin_chord_cells = Some(32);
-        assert_eq!(body_grid3(&p).unwrap().solid[0].i.len(), 32);
+        p.fin_chord_cells = Some(16);
+        assert_eq!(body_grid3(&p).unwrap().solid[0].i.len(), 16);
+        assert_eq!(g0.solid[0].i.len(), 32);
         let mut p = base;
         p.nk = 48;
         assert_eq!(body_grid3(&p).unwrap().nk, 48);
-        for (label, nk, fc, sc) in [("base", 24, None, None), ("nk32", 32, None, None), ("nk48", 48, None, None), ("span2x", 24, None, Some(2 * j0)), ("chord2x", 24, Some(32), None), ("all", 48, Some(32), Some(2 * j0))] {
+        for (label, nk, fc, sc) in [("base", 24, None, None), ("nk32", 32, None, None), ("nk48", 48, None, None), ("span2x", 24, None, Some(2 * j0)), ("chord16", 24, Some(16), None), ("all", 48, None, Some(2 * j0))] {
             let mut p = params(0, Some(anf_fins(FinProfile::Square)));
             (p.nk, p.fin_chord_cells, p.span_cells) = (nk, fc, sc);
             let g = body_grid3(&p).unwrap();
