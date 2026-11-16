@@ -293,6 +293,8 @@ impl State {
                 ctx.drag.symmetry = n;
                 if let Some(drag) = ctx.drag.radial.as_mut().filter(|d| d.detached) {
                     drag.count = n;
+                } else if !ctx.drag.active() {
+                    recount_selection(ctx, n);
                 }
             }
             Message::AngleSnap(degrees) => ctx.drag.angle_snap = degrees,
@@ -540,8 +542,23 @@ pub fn cycle_symmetry(ctx: &mut Ctx, forward: bool) {
                 ctx.drag.symmetry = drag.count;
             }
         }
-        None => ctx.drag.symmetry = step(ctx.drag.symmetry),
+        None => {
+            // Nothing carried: a selected radial group (fins, lugs, buttons, a pod set) steps its own count in place.
+            let selected = ctx.selection.part().and_then(|id| ctx.doc.rocket().radial(id)).map(|r| r.count);
+            ctx.drag.symmetry = step(selected.unwrap_or(ctx.drag.symmetry));
+            if selected.is_some() {
+                recount_selection(ctx, ctx.drag.symmetry);
+            }
+        }
     }
+}
+
+/// Gives the selected radial group (if one is selected) `count` copies in place, as one undo step.
+fn recount_selection(ctx: &mut Ctx, count: u8) {
+    let Some(id) = ctx.selection.part() else { return };
+    let Some(radial) = ctx.doc.rocket().radial(id).filter(|r| r.count != count) else { return };
+    let (kind, label) = (radial.kind.clone(), if ctx.doc.rocket().is_pod(id) { "Set pod count" } else { "Set fin count" });
+    ctx.doc.edit(label, |r| r.set_radial(id, kind, count));
 }
 
 /// The footer pinned at the bin's foot: the symmetry count (with the `X` key that cycles it) and the angle snap.
@@ -551,9 +568,12 @@ fn symmetry_footer<'a>(ctx: &'a Ctx) -> Element<'a, Message> {
         .style(|_, _| button::Style::default())
         .on_press(Message::CycleSymmetry(true));
     let head = row![label("SYMMETRY"), Space::new().width(Fill), key].align_y(iced::Center);
+    // With a radial group selected (and nothing carried) the footer shows, and sets, that group's count.
+    let shown = (!ctx.drag.active()).then(|| ctx.selection.part().and_then(|id| ctx.doc.rocket().radial(id)).map(|r| r.count)).flatten();
+    let shown = shown.unwrap_or(ctx.drag.symmetry);
     let count = row![
-        canvas_widget(SymmetryGlyph { count: ctx.drag.symmetry }).width(22).height(22),
-        segmented_dense(&SYMMETRY, ctx.drag.symmetry, Message::Symmetry, Dense { height: 26.0, pad: 7.0, size: 12.0 }, true)
+        canvas_widget(SymmetryGlyph { count: shown }).width(22).height(22),
+        segmented_dense(&SYMMETRY, shown, Message::Symmetry, Dense { height: 26.0, pad: 7.0, size: 12.0 }, true)
     ]
     .spacing(SPACE_2)
     .align_y(iced::Center);

@@ -1733,4 +1733,20 @@ mod tests {
         vp(&mut app, Vp::DropRadial);
         assert_eq!(app.ctx.doc.rocket().radial(fins).unwrap().count, 4);
     }
+
+    #[test]
+    fn the_symmetry_footer_and_x_recount_a_selected_fin_set_in_place() {
+        let (mut app, [_, tube, _]) = app();
+        let fins = finned(&mut app, tube, 0.1);
+        let before = app.ctx.doc.rocket().radial(fins).unwrap().clone();
+        app.ctx.selection = Selection::Part(fins);
+        app.update(Message::PartsBin(parts_bin::Message::Symmetry(4)));
+        let after = app.ctx.doc.rocket().radial(fins).unwrap().clone();
+        assert_eq!((after.count, after.offset, after.parent), (4, before.offset, before.parent));
+        app.update(Message::PartsBin(parts_bin::Message::CycleSymmetry(true)));
+        assert_eq!(app.ctx.doc.rocket().radial(fins).unwrap().count, 6);
+        app.update(Message::Undo);
+        app.update(Message::Undo);
+        assert_eq!(app.ctx.doc.rocket().radial(fins).unwrap().count, 3);
+    }
 }
