@@ -376,7 +376,7 @@ fn dispersion(out: &Output, units: UnitSystem) -> (PlotGroup, GroundTrack) {
         let Data::Dispersion(Some(d)) = &run.data else { continue };
         let color = config_color(i);
         let points = d.nominal.iter().map(|&(t, east, north, alt)| TrackPoint { t, east, north, alt }).collect();
-        tracks.push(Track::new(run.name.clone(), color, points).with_scatter(d.landings.iter().map(|l| (l[0], l[1])).collect()));
+        tracks.push(Track::new(color, points).with_scatter(d.landings.iter().map(|l| (l[0], l[1])).collect()));
 
         // A frequency polygon: the count of each bin at its centre, closed to zero one bin beyond either end.
         let mut counts = [0usize; BINS];
@@ -424,7 +424,15 @@ mod tests {
     fn plots_of(rocket: &Rocket, analysis: Analysis, overlay: Option<&Overlay>) -> Built {
         let (jobs, _) = jobs(rocket, &MotorDb::bundled(), Phase::Full).unwrap();
         let bands = rocket.stability_bands();
-        let out = compute(&Request { analysis, method: Method::Extended, conditions: Conditions { runs: 8, ..Conditions::default() }, jobs, bands, cfd: None });
+        let out = compute(&Request {
+            analysis,
+            method: Method::Extended,
+            conditions: Conditions { runs: 8, ..Conditions::default() },
+            jobs,
+            bands,
+            cfd: None,
+            drag_tables: Vec::new(),
+        });
         build(&out, UnitSystem::MM_G_S, overlay, rocket.active_config_id())
     }
 

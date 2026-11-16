@@ -16,7 +16,7 @@
 
 use iced::widget::canvas::{self, Frame, Geometry, LineDash, LineJoin, Path, Stroke, Text};
 use iced::widget::{column, container, row, scrollable, text, Space};
-use iced::{alignment, mouse, Color, Element, Fill, Font, Length, Pixels, Point, Rectangle, Renderer, Theme, Widget};
+use iced::{alignment, mouse, Color, Element, Fill, Length, Pixels, Point, Rectangle, Renderer, Theme, Widget};
 
 use bowshock_model::CfdGrid;
 
@@ -240,7 +240,7 @@ pub fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Option<Element<'a, Message>
         row![muted(format!("ran {}", duration_text(s.elapsed)), 12.0)]
     };
     let place = match s.altitude {
-        Some(h) => format!("{} · {} · altitude {}", device(t), grid_name(s.grid), crate::simulate::format::with_unit(h, Quantity::Altitude, ctx.units, 0)),
+        Some(h) => format!("{} · {} · altitude {}", device(t), grid_name(s.grid), crate::units::with_unit_scaled(h, Quantity::Altitude, ctx.units, 0)),
         None => format!("{} · coarse grid · Euler, 3D", device(t)),
     };
     let mut place_row: Vec<Element<'a, Message>> = vec![muted(place, 12.0)];
@@ -693,10 +693,6 @@ impl<M> canvas::Program<M> for Trace<'_> {
         vec![f.into_geometry()]
     }
 }
-
-/// A font handle kept so the plot's mono text and the rest of the screen agree (`MONO`).
-#[allow(dead_code)]
-const _: Font = MONO;
 
 #[cfg(test)]
 mod tests {

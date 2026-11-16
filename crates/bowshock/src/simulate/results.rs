@@ -11,7 +11,7 @@ use super::{format, Message, State};
 use crate::app::Ctx;
 use crate::theme::{self, MONO, SANS_SEMIBOLD};
 use crate::tokens::{text as scale, SPACE_2, SPACE_3, TEXT_BODY, TEXT_LABEL};
-use crate::units::Quantity;
+use crate::units::{self, Quantity};
 use crate::widgets::button::{button as push, Weight};
 use crate::widgets::chip::{chip, Severity};
 use crate::widgets::field::{rule, section, section_head};
@@ -73,7 +73,7 @@ fn dispersion_caption<'a>(state: &'a State, ctx: &'a Ctx, flight: &'a Flight) ->
     let study = flight.dispersion_of_run()?;
     let track = state.shown.ids.iter().position(|id| *id == flight.id).and_then(|i| state.shown.ground.tracks.get(i))?;
     let ellipse = track.ellipse?;
-    let size = |semi: f64| format::num(2.0 * semi, Quantity::Altitude, ctx.units, 0).0;
+    let size = |semi: f64| units::num_scaled(2.0 * semi, Quantity::Altitude, ctx.units, 0).0;
     let unit = Quantity::Altitude.unit_for(ctx.units).symbol;
     let (n, outside) = (study.landings.len(), study.outside(study.spec.field_radius));
     let verdict =
@@ -186,10 +186,10 @@ fn sections<'a>(run: &'a Run, ctx: &'a Ctx, stale: bool) -> Vec<Element<'a, Mess
     let s = &run.result.summary;
     let t = &run.times;
     let sys = ctx.units;
-    let vel = |v: f64, decimals: usize| format::num(v, Quantity::Velocity, sys, decimals);
+    let vel = |v: f64, decimals: usize| units::num_scaled(v, Quantity::Velocity, sys, decimals);
 
     // 01 APOGEE
-    let (alt, alt_unit) = format::num(s.apogee, Quantity::Altitude, sys, 0);
+    let (alt, alt_unit) = units::num_scaled(s.apogee, Quantity::Altitude, sys, 0);
     let off = run.delay - s.optimum_delay;
     let delay_chip = if !run.delay.is_finite() {
         None
@@ -350,10 +350,10 @@ fn compare<'a>(state: &'a State, ctx: &'a Ctx) -> Vec<Element<'a, Message>> {
             .iter()
             .filter_map(|f| {
                 let run = f.run.as_ref()?;
-                let (n, u) = format::num((table.value)(run), table.quantity, sys, table.decimals);
+                let (n, u) = units::num_scaled((table.value)(run), table.quantity, sys, table.decimals);
                 let diff = match ref_run {
                     _ if f.id == reference.id => "ref".to_string(),
-                    Some(r) => format::signed(unit.from_si((table.value)(run)) - unit.from_si((table.value)(r)), table.decimals),
+                    Some(r) => units::signed(unit.from_si((table.value)(run)) - unit.from_si((table.value)(r)), table.decimals),
                     None => String::new(),
                 };
                 Some(compare_row(f, n, diff, u, f.is_stale(state.stamp(ctx, &f.spec)), Some((table.time)(run))))

@@ -15,12 +15,13 @@ use iced::widget::{column, row, text, Space};
 use iced::{Element, Fill, Task, Widget};
 
 use crate::app::{self, Ctx};
-use crate::export::{file_name, modal, off_thread};
+use crate::export::file_name;
 use crate::theme;
 use crate::tokens::{SPACE_2, TEXT_BODY};
 use crate::units::Quantity;
 use crate::widgets::button::{button, Weight};
 use crate::widgets::field::{checkbox, labeled};
+use crate::widgets::modal::modal;
 use crate::widgets::segmented::segmented;
 use crate::widgets::spinner::spinner;
 use pdf::{PageSize, Pdf};
@@ -140,18 +141,10 @@ impl State {
                 if self.options == (Options { report: false, parts: false, fins: false, rings: false, wraps: false, marking: false }) {
                     return Task::none();
                 }
-                if let Some(path) = std::env::var_os("BOWSHOCK_EXPORT_FILE").filter(|p| !p.is_empty()) {
-                    return self.update(Message::Path(Some(PathBuf::from(path))), ctx);
-                }
                 let name = format!("{}.pdf", ctx.doc.title());
-                return Task::perform(
-                    async move {
-                        let file =
-                            rfd::AsyncFileDialog::new().set_title("Print / export PDF").set_file_name(name).add_filter("PDF", &["pdf"]).save_file().await;
-                        file.map(|f| f.path().to_path_buf())
-                    },
-                    |path| app::Message::Print(Message::Path(path)),
-                );
+                return crate::app::dialogs::save_file(ctx.env.export_file.clone(), "Print / export PDF", name, ("PDF", &["pdf"]), |path| {
+                    app::Message::Print(Message::Path(path))
+                });
             }
             Message::Path(None) => {}
             Message::Path(Some(path)) => {
@@ -160,8 +153,8 @@ impl State {
                 let inputs = report::gather(ctx, options.report);
                 let title = ctx.doc.title();
                 ctx.notify("Building the PDF…");
-                return Task::perform(
-                    off_thread(move || {
+                return crate::app::worker::perform(
+                    move || {
                         let flown = options.report.then(|| report::Flown::fly(&rocket, &inputs));
                         let pdf = build(&rocket, &inputs, flown.as_ref(), options, size, &title);
                         let pages = pdf.page_count();
@@ -171,7 +164,7 @@ impl State {
                         std::fs::write(&path, pdf.to_bytes())
                             .map(|()| format!("Saved {} ({pages} {})", file_name(&path), if pages == 1 { "page" } else { "pages" }))
                             .map_err(|e| format!("Could not save {}: {e}", path.display()))
-                    }),
+                    },
                     |result| app::Message::Print(Message::Built(result.unwrap_or_else(|| Err("The PDF build stopped".to_string())))),
                 );
             }
@@ -223,7 +216,7 @@ impl State {
         };
         let cancel: Element<'_, Message> = button("Cancel", Weight::Secondary).key("Esc").on_press(Message::Close).into();
         let buttons = row![working, Space::new().width(Fill), cancel, save].spacing(SPACE_2).align_y(iced::Center).boxed();
-        Some(modal("Print / export PDF", body, buttons, 440.0, Message::Nothing).map(app::Message::Print).boxed())
+        Some(modal("Print / export PDF", body, buttons, 440.0, Message::Nothing, Message::Nothing).map(app::Message::Print).boxed())
     }
 }
 

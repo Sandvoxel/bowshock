@@ -352,17 +352,10 @@ impl State {
             }
             Message::OutlineFromImage => {
                 if let Selection::Part(id) = ctx.selection {
-                    return Task::perform(
-                        async {
-                            let file = rfd::AsyncFileDialog::new()
-                                .set_title("Fin outline from image")
-                                .add_filter("Image", &["png", "jpg", "jpeg"])
-                                .pick_file()
-                                .await?;
-                            Some(std::fs::read(file.path()).map_err(|e| format!("Could not read the image: {e}")))
-                        },
-                        move |bytes| app::Message::Inspector(Message::FinImage(id, bytes)),
-                    );
+                    return app::dialogs::pick_bytes("Fin outline from image", ("Image", &["png", "jpg", "jpeg"]), move |res| {
+                        let res = res.map(|r| r.map_err(|e| format!("Could not read the image: {e}")));
+                        app::Message::Inspector(Message::FinImage(id, res))
+                    });
                 }
             }
             Message::FinImage(id, Some(bytes)) => {

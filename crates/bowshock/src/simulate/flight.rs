@@ -545,17 +545,7 @@ pub fn prepare_rocket(mut rocket: Rocket, motors: &bowshock_motors::MotorDb, spe
 /// rocket's now. `Err` says why the stack flies on the build-up instead (lengths in the session's units). The table's altitude does
 /// not matter, the flight corrects for the Reynolds number.
 pub fn drag_table(rocket: &Rocket, ctx: &Ctx, stage: usize) -> Result<DragTable, String> {
-    let Some(table) = rocket.cfd_table(stage as u32) else {
-        return Err("No CFD table for this rocket yet: solve one in Analyze > CFD table. Flying on Extended.".to_string());
-    };
-    let phase = if stage <= 1 { Phase::Full } else { Phase::UpperFrom(stage) };
-    let plan =
-        from_model::vehicle(rocket, ctx.physics.motors(), phase).map_err(|e| e.to_string()).and_then(|v| crate::analyze::cfd::plan(rocket, &v, ctx.units));
-    match plan {
-        Ok(plan) if plan.geometry == table.geometry => Ok(DragTable::from_cfd(table)),
-        Ok(_) => Err("CFD table is stale (the rocket changed): flying on Extended.".to_string()),
-        Err(why) => Err(format!("CFD cannot model this rocket ({why}): flying on Extended.")),
-    }
+    ctx.physics.drag_table(rocket, stage)
 }
 
 /// What to tell about `spec`'s drag source: why a stack of the rocket flies on the build-up although the CFD table was asked for,
@@ -621,5 +611,20 @@ mod tests {
         assert!(f.is_stale(4));
         f.spec.wind_speed = 3.0;
         assert!(f.is_stale(3));
+    }
+
+    #[test]
+    fn physics_caches_cfd_plan_across_views() {
+        let mut app = crate::app::App::with_example();
+        let (rocket, revision, units) = (app.ctx().doc.rocket().clone(), app.ctx().doc.revision(), app.ctx().units);
+        app.ctx_mut().physics.sync(&rocket, revision, units);
+        let first = app.ctx().physics.cfd_plan(1).expect("plan") as *const _;
+        let spec = Spec { drag: DragSource::CfdTable, ..Spec::default() };
+        for _ in 0..3 {
+            assert!(drag_note(app.ctx(), &spec).is_some());
+        }
+        assert!(!app.ctx_mut().physics.sync(&rocket, revision, units), "nothing changed, nothing recomputes");
+        let second = app.ctx().physics.cfd_plan(1).expect("plan") as *const _;
+        assert!(std::ptr::eq(first, second));
     }
 }

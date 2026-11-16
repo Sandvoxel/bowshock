@@ -11,7 +11,7 @@
 //! * **Run** ([`Message::Run`], the top bar's Simulate button and `F5`) flies the selected flights with
 //!   [`bowshock_sim::from_model::sim_input`] on a worker thread and shows the result when it lands; **Run all** flies every flight.
 //!   A result whose conditions or document have changed since is *stale* and is drawn in `ink-faint` until it is run again.
-//! * **Edit selection**: a click selects one flight, Cmd/Ctrl-click toggles one, Shift-click selects a range (`Pick`); Cmd/Ctrl+A
+//! * **Edit selection**: a click selects one flight, Cmd/Ctrl-click toggles one, Shift-click selects a range (`PickMode`); Cmd/Ctrl+A
 //!   selects all. With several selected the Conditions panel edits all of them at once: fields they agree on show the value, the
 //!   others the mixed `—`, and an edit sets that field on every selected flight as one undo step. The compare ticks are separate.
 //! * **Compare**: ticking two or more flights (up to four, colours `series-1…4` that stay with the flight) overlays them on every
@@ -28,7 +28,7 @@
 mod channels;
 pub(crate) mod flight;
 mod forecast;
-pub(crate) mod format;
+mod format;
 mod keys;
 mod layout;
 mod left;
@@ -45,6 +45,7 @@ use bowshock_sim::{FlightResult, Turbulence};
 use iced::widget::{column, container, row, stack, text, Space};
 use iced::{keyboard, Element, Fill, Point, Rectangle, Task, Widget};
 
+use crate::app::selection_set::{MultiSet, PickMode};
 use crate::app::{self, Ctx};
 use crate::theme::{self, MONO};
 use crate::tokens::{BIN_W, RAIL_W, RIGHT_PANEL_W, SPACE_2, SPACE_3, TEXT_BODY, TEXT_LABEL};
@@ -142,29 +143,6 @@ impl Edit {
     }
 }
 
-/// How a click on a flight row changes the edit selection (the kit's multi-select conventions, as in the viewport and Station
-/// Lanes): a plain click selects one, Cmd/Ctrl-click toggles, Shift-click selects the range from the last click, and Shift with
-/// Cmd/Ctrl adds that range to what is selected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Pick {
-    Only,
-    Toggle,
-    Range,
-    AddRange,
-}
-
-impl Pick {
-    /// What a click does with `modifiers` held.
-    fn of(modifiers: keyboard::Modifiers) -> Pick {
-        match (modifiers.shift(), modifiers.command() || modifiers.control()) {
-            (true, true) => Pick::AddRange,
-            (true, false) => Pick::Range,
-            (false, true) => Pick::Toggle,
-            (false, false) => Pick::Only,
-        }
-    }
-}
-
 /// An edit of the plots' layout: the presets row, the panel chrome and the source picker all send these.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LayoutEdit {
@@ -216,7 +194,7 @@ pub enum Message {
     /// A simulation finished on its worker thread.
     Done(Box<Done>),
     /// A click on a flight row: selects it (the reference of a comparison), toggles it or extends the selection to it, by the
-    /// modifiers held (see [`Pick`]).
+    /// modifiers held (see [`PickMode`]).
     Click(FlightId),
     /// The held modifier keys changed (reported by the invisible tracker in the Flights list).
     Modifiers(keyboard::Modifiers),
@@ -304,14 +282,12 @@ struct Shown {
 #[derive(Debug)]
 pub struct State {
     flights: Vec<Flight>,
-    selected: FlightId,
-    /// The flights selected with `selected` for editing (Cmd/Ctrl-click, Shift-click): the edit selection is `selected` plus
-    /// these. The compare ticks are separate.
-    also: Vec<FlightId>,
-    /// Where a Shift-click range starts: the last flight clicked.
-    anchor: FlightId,
+    /// The flights selected for editing (Cmd/Ctrl-click, Shift-click): the primary is the reference flight, the others are
+    /// selected with it. The compare ticks are separate.
+    selection: MultiSet<FlightId>,
     /// The modifier keys held, as the tracker last reported them (a drive script holds `BOWSHOCK_DRIVE_MODIFIERS`).
-    modifiers: keyboard::Modifiers,
+    /// The held modifiers, once the window has reported them (until then the drive script's).
+    modifiers: Option<keyboard::Modifiers>,
     next_id: FlightId,
     plot: PlotState,
     shown: Shown,
@@ -364,10 +340,8 @@ impl State {
         // The first flight is ticked to begin with, so the plots show it once it has run.
         flights[0].slot = Some(1);
         let mut state = State {
-            selected: flights[0].id,
-            also: Vec::new(),
-            anchor: flights[0].id,
-            modifiers: crate::viewport::manipulate::drive_modifiers(),
+            selection: MultiSet::with_primary(flights[0].id),
+            modifiers: None,
             next_id: defs.iter().map(|d| d.id).max().map_or(1, |m| m + 1),
             flights,
             plot: PlotState::new((0.0, 1.0)),
@@ -426,7 +400,7 @@ impl State {
     /// Shows the edit selection's launch location in the coordinate fields (blank when they have none or differ), unless one
     /// is being typed in for the same selected flight.
     fn refresh_coords(&mut self) {
-        if self.coord_editing.is_some_and(|(_, id)| id == self.selected) {
+        if self.coord_editing.is_some_and(|(_, id)| id == self.primary()) {
             return;
         }
         self.coord_editing = None;
@@ -531,12 +505,11 @@ impl State {
             })
             .collect();
         self.next_id = self.next_id.max(defs.iter().map(|d| d.id).max().map_or(1, |m| m + 1));
-        self.also.retain(|id| self.flights.iter().any(|f| f.id == *id));
-        if self.flight(self.selected).is_none() {
+        let flights = &self.flights;
+        self.selection.retain(|id| flights.iter().any(|f| f.id == id));
+        if self.selection.primary().is_none() {
             let first = self.flights[0].id;
             self.select_only(first);
-        } else if self.flight(self.anchor).is_none() {
-            self.anchor = self.selected;
         }
         self.stored = defs.to_vec();
         self.rebuild();
@@ -590,12 +563,12 @@ impl State {
     }
 
     fn selected_flight(&self) -> &Flight {
-        self.flight(self.selected).unwrap_or(&self.flights[0])
+        self.flight(self.primary()).unwrap_or(&self.flights[0])
     }
 
     /// The flights the Conditions panel edits: the selected one and those selected with it, in list order.
     fn edit_ids(&self) -> Vec<FlightId> {
-        let ids: Vec<FlightId> = self.flights.iter().filter(|f| f.id == self.selected || self.also.contains(&f.id)).map(|f| f.id).collect();
+        let ids = self.selection.ids_in_order(&self.flight_ids());
         if ids.is_empty() {
             vec![self.selected_flight().id]
         } else {
@@ -610,58 +583,39 @@ impl State {
 
     /// Whether `id` is in the edit selection.
     fn is_selected(&self, id: FlightId) -> bool {
-        id == self.selected || self.also.contains(&id)
+        self.selection.contains(id)
+    }
+
+    /// The flights in list order.
+    fn flight_ids(&self) -> Vec<FlightId> {
+        self.flights.iter().map(|f| f.id).collect()
+    }
+
+    /// The selected (reference) flight's id: the primary of the selection, which is never empty.
+    fn primary(&self) -> FlightId {
+        self.selection.primary().unwrap_or(self.flights[0].id)
     }
 
     /// Makes `id` the only selected flight.
     fn select_only(&mut self, id: FlightId) {
-        self.selected = id;
-        self.also.clear();
-        self.anchor = id;
+        self.selection.only(Some(id));
     }
 
     /// Changes the edit selection by a click on `id`. A toggle never empties the selection; a range runs from the last flight
     /// clicked to `id`, in list order, and `id` becomes the selected (reference) flight.
-    fn pick(&mut self, id: FlightId, how: Pick) {
+    fn pick(&mut self, id: FlightId, how: PickMode) {
         if self.flight(id).is_none() {
             return;
         }
-        let mut set = self.edit_ids();
+        let order = self.flight_ids();
         match how {
-            Pick::Only => {
-                self.select_only(id);
-                return;
+            PickMode::Only => self.select_only(id),
+            PickMode::Toggle => {
+                self.selection.toggle(id, false);
             }
-            Pick::Toggle => match set.iter().position(|f| *f == id) {
-                Some(at) if set.len() > 1 => {
-                    set.remove(at);
-                    if self.selected == id {
-                        self.selected = set[0];
-                    }
-                    self.anchor = self.selected;
-                }
-                Some(_) => {}
-                None => {
-                    set.push(id);
-                    self.selected = id;
-                    self.anchor = id;
-                }
-            },
-            Pick::Range | Pick::AddRange => {
-                let at = |id| self.flights.iter().position(|f| f.id == id);
-                let (Some(from), Some(to)) = (at(self.anchor).or_else(|| at(self.selected)), at(id)) else { return };
-                if how == Pick::Range {
-                    set.clear();
-                }
-                for f in &self.flights[from.min(to)..=from.max(to)] {
-                    if !set.contains(&f.id) {
-                        set.push(f.id);
-                    }
-                }
-                self.selected = id;
-            }
+            PickMode::Range => self.selection.range(id, &order, false),
+            PickMode::AddRange => self.selection.range(id, &order, true),
         }
-        self.also = set.into_iter().filter(|f| *f != self.selected).collect();
     }
 
     /// Flights ticked for comparison.
@@ -686,7 +640,7 @@ impl State {
             .collect();
         let ids: Vec<FlightId> = order.iter().map(|f| f.id).collect();
         // The reference is the selected flight when it is on show, else the first.
-        let reference = ids.iter().position(|id| *id == self.selected).unwrap_or(0);
+        let reference = ids.iter().position(|id| *id == self.primary()).unwrap_or(0);
 
         let group = plots::group(&entries, reference, self.units, &self.layout, self.bands.stable);
         let ground = if entries.is_empty() {
@@ -759,13 +713,13 @@ impl State {
             }
             Message::Done(done) => self.finished(*done),
             Message::Click(id) => {
-                self.pick(id, Pick::of(self.modifiers));
+                self.pick(id, PickMode::from_modifiers(self.modifiers.unwrap_or(ctx.env.drive_modifiers)));
                 self.rebuild();
             }
-            Message::Modifiers(modifiers) => self.modifiers = modifiers,
+            Message::Modifiers(modifiers) => self.modifiers = Some(modifiers),
             Message::SelectAll => {
-                self.also = self.flights.iter().map(|f| f.id).filter(|id| *id != self.selected).collect();
-                self.anchor = self.selected;
+                let order = self.flight_ids();
+                self.selection.select_all(&order);
             }
             Message::Tick(id) => self.tick_flight(id, ctx),
             Message::AddFlight => {
@@ -791,7 +745,7 @@ impl State {
             }
             Message::PerConfiguration => return self.per_configuration(ctx),
             Message::Disperse => {
-                let id = self.selected;
+                let id = self.primary();
                 let task = self.launch_dispersion(id, ctx);
                 self.rebuild();
                 return task;
@@ -825,7 +779,7 @@ impl State {
             Message::WindTable(open) => self.wind_open = open,
             Message::WindLevel(i) => self.wind_level = i,
             Message::CoordInput(lon, text) => {
-                self.coord_editing = Some((lon, self.selected));
+                self.coord_editing = Some((lon, self.primary()));
                 self.coord_text[usize::from(lon)] = text;
             }
             Message::CoordCommit => {
@@ -1204,32 +1158,27 @@ fn scroll_style(theme: &iced::Theme, status: iced::widget::scrollable::Status) -
 
 /// Flies `input` on a worker thread and waits for it without blocking the UI's executor.
 async fn compute(input: bowshock_sim::SimInput) -> Result<(Arc<FlightResult>, Duration), String> {
-    offload(move || {
+    crate::app::worker::offload(move || {
         let started = Instant::now();
         let result = bowshock_sim::simulate(&input);
         (Arc::new(result), started.elapsed())
     })
     .await
+    .ok_or_else(|| STOPPED.to_string())
 }
 
 /// Flies a dispersion study of `input` (see [`flight::tolerances`]) on a worker thread (the study itself fans out over cores).
 async fn disperse(input: bowshock_sim::SimInput, spec: Spec) -> Result<Vec<(f64, f64)>, String> {
-    offload(move || {
+    crate::app::worker::offload(move || {
         let study = bowshock_sim::monte_carlo(&input, flight::DISPERSION_RUNS, &flight::tolerances(&spec));
         study.runs.iter().map(|r| (r.landing[0], r.landing[1])).collect()
     })
     .await
+    .ok_or_else(|| STOPPED.to_string())
 }
 
-/// Runs `work` on its own thread and waits for it without blocking the UI's executor.
-async fn offload<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
-    let (tx, rx) = iced::futures::channel::oneshot::channel();
-    std::thread::spawn(move || {
-        // The receiver is gone only if the app quit meanwhile.
-        let _ = tx.send(work());
-    });
-    rx.await.map_err(|_| "the simulation stopped unexpectedly".to_string())
-}
+/// What a dead worker thread reports.
+const STOPPED: &str = "the simulation stopped unexpectedly";
 
 /// The forecast row of the wind profile: the launch time, whether the forecast sets the temperature, a fetch in flight and the
 /// last error.
@@ -1257,9 +1206,10 @@ impl State {
         row.busy = true;
         row.error = None;
         let (time, altitude) = (row.time.clone(), spec.site_altitude);
-        Task::perform(offload(move || forecast::fetch(at.latitude, at.longitude, altitude, &time)), |result| {
-            app::Message::Simulate(Message::ForecastDone(result.and_then(|r| r)))
-        })
+        crate::app::worker::perform(
+            move || forecast::fetch(at.latitude, at.longitude, altitude, &time),
+            |result| app::Message::Simulate(Message::ForecastDone(result.ok_or_else(|| STOPPED.to_string()).and_then(|r| r))),
+        )
     }
 }
 

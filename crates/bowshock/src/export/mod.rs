@@ -8,19 +8,18 @@
 
 pub mod mesh_export;
 
-use std::future::Future;
 use std::path::PathBuf;
 
-use iced::futures::channel::oneshot;
-use iced::widget::{column, container, mouse_area, row, text, text_input, Space, Stack};
-use iced::{Background, Color, Element, Fill, Task, Widget};
+use iced::widget::{column, row, text, text_input, Space};
+use iced::{Element, Fill, Task, Widget};
 
 use crate::app::{self, Ctx, Mode};
-use crate::theme::{self, MONO, SANS_MEDIUM};
+use crate::theme::{self, MONO};
 use crate::tokens::{SPACE_2, SPACE_3, TEXT_BODY};
 use crate::viewport;
 use crate::widgets::button::{button, Weight};
 use crate::widgets::field::{checkbox, labeled};
+use crate::widgets::modal::modal;
 use crate::widgets::segmented::{segmented, segmented_fill};
 
 /// Largest image side, pixels.
@@ -46,15 +45,6 @@ pub enum Format {
     Obj,
     /// Binary STL.
     Stl,
-}
-
-impl Format {
-    fn extension(self) -> &'static str {
-        match self {
-            Format::Obj => "obj",
-            Format::Stl => "stl",
-        }
-    }
 }
 
 /// The image size choices.
@@ -179,9 +169,6 @@ impl State {
                 if kind == Kind::Image && self.pixels().is_err() {
                     return Task::none();
                 }
-                if let Some(path) = std::env::var_os("BOWSHOCK_EXPORT_FILE").filter(|p| !p.is_empty()) {
-                    return self.update(Message::Path(Some(PathBuf::from(path))), ctx, viewport);
-                }
                 return self.pick(kind, ctx);
             }
             Message::Path(None) => {}
@@ -190,8 +177,8 @@ impl State {
                 match kind {
                     Kind::Model => {
                         let (rocket, format, internals) = (ctx.doc.rocket().clone(), self.format, self.internals);
-                        return Task::perform(
-                            off_thread(move || {
+                        return crate::app::worker::perform(
+                            move || {
                                 let bytes = match format {
                                     Format::Obj => mesh_export::obj(&rocket, internals).into_bytes(),
                                     Format::Stl => mesh_export::stl(&rocket, internals),
@@ -199,7 +186,7 @@ impl State {
                                 std::fs::write(&path, bytes)
                                     .map(|()| format!("Saved {}", file_name(&path)))
                                     .map_err(|e| format!("Could not save {}: {e}", path.display()))
-                            }),
+                            },
                             |result| app::Message::Export(Message::Written(result.unwrap_or_else(|| Err("The export stopped".to_string())))),
                         );
                     }
@@ -223,9 +210,10 @@ impl State {
                 match result {
                     Ok(rgba) => {
                         let (w, h) = self.pixels().unwrap_or((0, 0));
-                        return Task::perform(off_thread(move || write_png(&path, w, h, &rgba)), |result| {
-                            app::Message::Export(Message::Written(result.unwrap_or_else(|| Err("The export stopped".to_string()))))
-                        });
+                        return crate::app::worker::perform(
+                            move || write_png(&path, w, h, &rgba),
+                            |result| app::Message::Export(Message::Written(result.unwrap_or_else(|| Err("The export stopped".to_string())))),
+                        );
                     }
                     Err(e) => ctx.notify(format!("Could not render the image: {e}")),
                 }
@@ -236,20 +224,15 @@ impl State {
         Task::none()
     }
 
-    /// The file dialog for `kind`: answers [`Message::Path`].
+    /// The file dialog for `kind`: answers [`Message::Path`] (at once, with no dialog, under `BOWSHOCK_EXPORT_FILE`).
     fn pick(&self, kind: Kind, ctx: &Ctx) -> Task<app::Message> {
         let base = ctx.doc.title();
-        let (title, name, filter, extension) = match kind {
-            Kind::Model => ("Export 3D model", format!("{base}.{}", self.format.extension()), self.format.extension().to_uppercase(), self.format.extension()),
-            Kind::Image => ("Export image", format!("{base}.png"), "PNG image".to_string(), "png"),
+        let (title, name, filter) = match (kind, self.format) {
+            (Kind::Model, Format::Obj) => ("Export 3D model", format!("{base}.obj"), ("OBJ", &["obj"][..])),
+            (Kind::Model, Format::Stl) => ("Export 3D model", format!("{base}.stl"), ("STL", &["stl"][..])),
+            (Kind::Image, _) => ("Export image", format!("{base}.png"), ("PNG image", &["png"][..])),
         };
-        Task::perform(
-            async move {
-                let file = rfd::AsyncFileDialog::new().set_title(title).set_file_name(name).add_filter(filter, &[extension]).save_file().await;
-                file.map(|f| f.path().to_path_buf())
-            },
-            |path| app::Message::Export(Message::Path(path)),
-        )
+        crate::app::dialogs::save_file(ctx.env.export_file.clone(), title, name, filter, |path| app::Message::Export(Message::Path(path)))
     }
 
     /// The open dialog over a dimmed backdrop, `None` while both are closed.
@@ -265,7 +248,7 @@ impl State {
             None => button("Save…", Weight::Primary).key("↵").disabled("Fix the image size first").into(),
         };
         let buttons = row![Space::new().width(Fill), cancel, save_button].spacing(SPACE_2).align_y(iced::Center).boxed();
-        Some(modal(title, body, buttons, 440.0, Message::Nothing).map(app::Message::Export).boxed())
+        Some(modal(title, body, buttons, 440.0, Message::Nothing, Message::Nothing).map(app::Message::Export).boxed())
     }
 
     fn model_body(&self) -> Element<'_, Message> {
@@ -303,33 +286,9 @@ impl State {
     }
 }
 
-/// A modal card (`title`, `body`, a row of `buttons`) centred over a dimmed backdrop that takes every click and hides the cursor
-/// from what lies beneath (so hovering the page does not reach its hover handlers). `nothing` is the message a click inside the
-/// card sends, which keeps it from reaching the backdrop.
-pub fn modal<'a, M: Clone + 'a>(title: &'a str, body: Element<'a, M>, buttons: Element<'a, M>, width: f32, nothing: M) -> Element<'a, M> {
-    let backdrop = container(Space::new().width(Fill).height(Fill))
-        .style(|_| container::Style { background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.55))), ..container::Style::default() });
-    let heading = text(title).font(SANS_MEDIUM).size(15);
-    let card = container(mouse_area(column![heading, body, buttons].spacing(SPACE_3 + 2.0)).on_press(nothing.clone()))
-        .width(width)
-        .padding(SPACE_3 + 8.0)
-        .style(theme::overlay);
-    let scrim = mouse_area(backdrop).on_press(nothing).interaction(iced::mouse::Interaction::Idle);
-    Stack::with_children([scrim.boxed(), container(card).center(Fill).boxed()]).boxed()
-}
-
 /// The file name of `path` for the status strip.
 pub fn file_name(path: &std::path::Path) -> String {
     path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
-}
-
-/// Runs `work` on a thread of its own and awaits its result (`None` if the thread died).
-pub fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> impl Future<Output = Option<T>> {
-    let (tx, rx) = oneshot::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(work());
-    });
-    async move { rx.await.ok() }
 }
 
 /// Writes straight RGBA8 `rgba` (`width` × `height`) as a PNG.

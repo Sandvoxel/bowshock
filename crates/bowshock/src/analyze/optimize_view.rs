@@ -2,12 +2,10 @@
 //! that show it. It bypasses [`super::compute::compute`] and owns its worker, the way the CFD solve views do: [`super::optimize`]
 //! is the engine, this file is the screen.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 use bowshock_model::{Dim, FieldRef, FlightId, PartId, Rocket};
-use iced::futures::channel::mpsc;
 use iced::widget::{column, container, row, scrollable, text, Space};
 use iced::{alignment, Element, Fill, Length, Task, Theme, Widget};
 
@@ -15,6 +13,7 @@ use super::optimize::{self, Constraints, Event, Goal, Metrics, Problem, Variable
 use super::readout::{Row as ReadoutRow, Section, Tag};
 use super::Message;
 use crate::app::refs::{dim_name, dim_quantity};
+use crate::app::worker;
 use crate::app::{self, ui, Ctx};
 use crate::simulate::flight::{prepare_rocket, Spec};
 use crate::theme::{self, MONO};
@@ -227,9 +226,7 @@ enum End {
 
 /// A search in progress or finished, with what it was asked (the left panel may change meanwhile).
 struct Run {
-    serial: u64,
-    cancel: Arc<AtomicBool>,
-    handle: Option<iced::task::Handle>,
+    stream: worker::StreamHandle,
     variables: Vec<Variable>,
     /// The variables' names and quantities, as the table heads them.
     names: Vec<(String, Quantity)>,
@@ -395,8 +392,8 @@ impl State {
         }
     }
 
-    /// Begins a run: the problem to search, the cancel flag and the run's serial. `Err` is why not.
-    fn start(&mut self, ctx: &Ctx) -> Result<(Problem, Arc<AtomicBool>, u64), String> {
+    /// Checks that a run may begin and returns the problem to search. `Err` is why not.
+    fn prepare(&mut self, ctx: &Ctx) -> Result<Problem, String> {
         self.sync(ctx);
         if let Some(why) = self.blocker() {
             return Err(why);
@@ -414,7 +411,11 @@ impl State {
         };
         optimize::check(&problem)?;
         self.serial += 1;
-        let cancel = Arc::new(AtomicBool::new(false));
+        Ok(problem)
+    }
+
+    /// Records the run of `problem` that `stream` (of serial `self.serial`) delivers.
+    fn begin(&mut self, problem: &Problem, stream: worker::StreamHandle) {
         let base = problem.variables.iter().map(|v| problem.rocket.dim(v.field.part, v.field.dim).unwrap_or(v.min)).collect();
         let names = self
             .variables
@@ -425,9 +426,7 @@ impl State {
             })
             .collect();
         self.run = Some(Run {
-            serial: self.serial,
-            cancel: cancel.clone(),
-            handle: None,
+            stream,
             variables: problem.variables.clone(),
             names,
             goal_kind: self.goal,
@@ -443,7 +442,6 @@ impl State {
         });
         self.group = None;
         self.plot = PlotState::new((0.0, 1.0));
-        Ok((problem, cancel, self.serial))
     }
 
     /// Handles one of the screen's messages.
@@ -521,17 +519,15 @@ impl State {
             Msg::Plot(m) => self.plot.update(m),
             Msg::Cancel => {
                 if let Some(run) = self.run.as_mut().filter(|r| r.running()) {
-                    run.cancel.store(true, Ordering::Relaxed);
+                    run.stream.request_cancel();
                     run.cancelling = true;
                 }
             }
             Msg::Apply => self.apply(ctx),
-            Msg::Run => match self.start(ctx) {
-                Ok((problem, cancel, serial)) => {
-                    let (task, handle) = spawn(problem, cancel, serial);
-                    if let Some(run) = self.run.as_mut() {
-                        run.handle = Some(handle);
-                    }
+            Msg::Run => match self.prepare(ctx) {
+                Ok(problem) => {
+                    let (task, stream) = spawn(problem.clone(), self.serial);
+                    self.begin(&problem, stream);
                     return task;
                 }
                 Err(e) => ctx.notify(format!("Cannot optimize: {e}")),
@@ -556,7 +552,7 @@ impl State {
 
     /// A message from the worker of run `serial`.
     pub fn event(&mut self, serial: u64, event: Event, ctx: &mut Ctx) {
-        let Some(run) = self.run.as_mut().filter(|r| r.serial == serial) else { return };
+        let Some(run) = self.run.as_mut().filter(|r| r.stream.serial() == serial) else { return };
         match event {
             Event::Tick => {}
             Event::Evaluated { index, values, goal, score, feasible, metrics } => {
@@ -570,14 +566,14 @@ impl State {
             Event::Done { best, reason } => {
                 run.elapsed = run.started.elapsed().as_secs_f64();
                 run.end = Some(End::Done { best, reason });
-                run.handle = None;
+                run.stream.abort();
                 ctx.notify(format!("Optimization finished: {reason}"));
             }
             Event::Failed(e) => {
                 run.elapsed = run.started.elapsed().as_secs_f64();
                 ctx.notify(format!("Optimization stopped: {e}"));
                 run.end = Some(End::Failed(e));
-                run.handle = None;
+                run.stream.abort();
             }
         }
         self.blocked = self.blocker();
@@ -1018,29 +1014,20 @@ fn table<'a>(run: &'a Run, units: UnitSystem) -> Element<'a, Message> {
 // Worker
 // ---------------------------------------------------------------------------------------------------------------------
 
-/// Runs the search on its own thread and delivers its events as [`Message::OptEvent`]; a second thread beats [`Event::Tick`] every
+/// Runs the search on its own thread and delivers its events as [`Message::OptEvent`]; a beat sends [`Event::Tick`] every
 /// quarter second until the search is over, so the clock on screen moves between evaluations.
-fn spawn(problem: Problem, cancel: Arc<AtomicBool>, serial: u64) -> (Task<app::Message>, iced::task::Handle) {
-    let (tx, rx) = mpsc::unbounded();
-    let working = Arc::new(AtomicBool::new(true));
-    let (beat, flag) = (tx.clone(), working.clone());
-    std::thread::spawn(move || {
-        while flag.load(Ordering::Relaxed) {
-            std::thread::sleep(BEAT);
-            if beat.unbounded_send(Event::Tick).is_err() {
-                break;
-            }
-        }
-    });
-    std::thread::spawn(move || {
-        let sender = std::sync::Mutex::new(tx.clone());
-        let last = optimize::run(&problem, &cancel, &move |e| {
-            let _ = sender.lock().unwrap_or_else(|p| p.into_inner()).unbounded_send(e);
-        });
-        working.store(false, Ordering::Relaxed);
-        let _ = tx.unbounded_send(last);
-    });
-    Task::run(rx, move |event| app::Message::Analyze(Message::OptEvent(serial, event))).abortable()
+fn spawn(problem: Problem, serial: u64) -> (Task<app::Message>, worker::StreamHandle) {
+    worker::spawn_stream(
+        serial,
+        Some((BEAT, || Event::Tick)),
+        move |cancel, tx| {
+            let sender = std::sync::Mutex::new(tx);
+            optimize::run(&problem, &cancel, &move |e| {
+                let _ = sender.lock().unwrap_or_else(|p| p.into_inner()).unbounded_send(e);
+            })
+        },
+        |serial, event| app::Message::Analyze(Message::OptEvent(serial, event)),
+    )
 }
 
 #[cfg(test)]
@@ -1056,7 +1043,11 @@ mod tests {
         state.sync(app.ctx());
         assert_eq!(state.variables.len(), 1, "the first variable is the fin span");
         let before = app.ctx().doc.rocket().clone();
-        let (problem, cancel, serial) = state.start(app.ctx()).unwrap();
+        let problem = state.prepare(app.ctx()).unwrap();
+        let serial = state.serial;
+        let (_task, stream) = worker::spawn_iter(serial, Vec::new(), |_, e: Event| e);
+        state.begin(&problem, stream);
+        let cancel = std::sync::atomic::AtomicBool::new(false);
         let events = std::sync::Mutex::new(Vec::new());
         let end = optimize::run(&problem, &cancel, &|e| events.lock().unwrap().push(e));
         let events = events.into_inner().unwrap();

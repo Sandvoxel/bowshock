@@ -19,7 +19,6 @@ mod print;
 mod simulate;
 mod theme;
 mod tokens;
-#[allow(dead_code)]
 mod units;
 mod viewport;
 mod widgets;
@@ -54,7 +53,6 @@ fn main() -> std::process::ExitCode {
         },
         ["drive", script, rest @ ..] if rest.len() <= 1 => {
             let out = std::path::Path::new(rest.first().copied().unwrap_or("out/drive"));
-            viewport::set_animation(false);
             match drive::run(&app(example, false), std::path::Path::new(script), out) {
                 Ok(()) => std::process::ExitCode::SUCCESS,
                 Err(e) => {
@@ -146,7 +144,7 @@ fn app(example: bool, interactive: bool) -> iced::Application<impl iced::Program
             if interactive {
                 platform::set_dock_icon();
             }
-            App::launch(example)
+            App::launch(example, interactive)
         },
         App::update,
         App::view,

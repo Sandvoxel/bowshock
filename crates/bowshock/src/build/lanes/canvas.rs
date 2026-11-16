@@ -70,20 +70,14 @@ enum Mode {
 }
 
 /// The canvas's own interaction state.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Interaction {
     mode: Mode,
     over: Option<Over>,
     cursor: Option<Point>,
-    modifiers: keyboard::Modifiers,
+    /// The held modifiers, once the window has reported them (until then the drive script's).
+    modifiers: Option<keyboard::Modifiers>,
     last_click: Option<(Instant, Option<BarKey>)>,
-}
-
-impl Default for Interaction {
-    /// A drive script holds modifiers through `BOWSHOCK_DRIVE_MODIFIERS` (see [`crate::viewport::manipulate::drive_modifiers`]).
-    fn default() -> Self {
-        Interaction { mode: Mode::default(), over: None, cursor: None, modifiers: crate::viewport::manipulate::drive_modifiers(), last_click: None }
-    }
 }
 
 impl Interaction {
@@ -119,6 +113,8 @@ pub struct Lanes<'a> {
     pub collapsed: bool,
     /// Lane height (28 px at full size).
     pub lane_h: f32,
+    /// Modifiers a drive script holds before the window reports any.
+    pub drive_modifiers: keyboard::Modifiers,
 }
 
 /// What drawing one bar needs besides the bar.
@@ -350,7 +346,7 @@ impl canvas::Program<Message> for Lanes<'_> {
         let local = Self::local(cursor, bounds);
         match event {
             Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => {
-                state.modifiers = *m;
+                state.modifiers = Some(*m);
                 None
             }
             Event::Mouse(mouse::Event::CursorLeft) => {
@@ -360,7 +356,7 @@ impl canvas::Program<Message> for Lanes<'_> {
             Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 let p = local?;
                 state.cursor = Some(p);
-                let shift = state.modifiers.shift();
+                let shift = state.modifiers.unwrap_or(self.drive_modifiers).shift();
                 match state.mode {
                     Mode::Idle => {
                         let over = if p.x >= 0.0 && p.y >= 0.0 && p.x <= bounds.width && p.y <= bounds.height {
@@ -583,7 +579,7 @@ impl Lanes<'_> {
     fn carry_at(&self, state: &mut Interaction, axis: &Axis, rows: &[LaneBox], p: Point, bounds: Rectangle) -> Option<Action<Message>> {
         let inside = p.x >= LABEL_W && p.x <= bounds.width && geometry::lane_at(rows, p.y).is_some();
         let carry = self.carry.as_ref()?;
-        let start = self.carry_start(axis.station(p.x), carry.extent, carry.extent / 2.0, axis, state.modifiers.shift());
+        let start = self.carry_start(axis.station(p.x), carry.extent, carry.extent / 2.0, axis, state.modifiers.unwrap_or(self.drive_modifiers).shift());
         inside.then(|| Action::publish(Message::CarryAt(start)))
     }
 
@@ -621,7 +617,8 @@ impl Lanes<'_> {
         match self.over(axis, rows, p, height) {
             Some(Over::Bar(hit)) => {
                 // Shift-click or Cmd/Ctrl-click adds the part to the selection (or removes it): no drag starts.
-                if state.modifiers.shift() || state.modifiers.command() || state.modifiers.control() {
+                let held = state.modifiers.unwrap_or(self.drive_modifiers);
+                if held.shift() || held.command() || held.control() {
                     state.last_click = None;
                     return Some(Action::publish(Message::Toggle(hit.key)).and_capture());
                 }

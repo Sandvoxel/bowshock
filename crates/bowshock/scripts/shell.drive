@@ -10,21 +10,23 @@ screenshot config-menu.png
 # New configuration... opens the motor picker (mount-filtered, with the margin each motor would give).
 click "New configuration…"
 screenshot picker.png
+click #motor-search
+type "I284W"
 click "I284W"
 screenshot picker-selected.png
 click "Add configuration"
 screenshot config-added.png
 
 # Undo and redo (top bar icon buttons) take the new configuration away and bring it back.
-click (353, 20)
+click (312, 20)
 screenshot undone.png
-click (389, 20)
+click (350, 20)
 screenshot redone.png
 
 # A part added from the bin is one undo step too.
 click "Body tube"
 screenshot added-tube.png
-click (353, 20)
+click (312, 20)
 screenshot added-tube-undone.png
 
 # The mode switch: Simulate and Analyze keep the top bar and status strip.

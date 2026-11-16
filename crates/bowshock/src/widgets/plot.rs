@@ -15,8 +15,6 @@
 //! `Esc` steps back (band first, then one level), `Shift+Esc` or a double-click returns to the full range. The wheel zooms
 //! around the cursor, middle-drag or `Space`+drag pans, and the overview strip pans or recentres the window.
 
-#![allow(dead_code)] // The screens that compose these widgets arrive after the widgets do.
-
 use iced::widget::{button, container, row, text, Space};
 use iced::{Border, Color, Element, Length, Rectangle, Theme, Widget};
 
@@ -65,8 +63,6 @@ pub enum SeriesColor {
     Propulsion,
     /// Recovery system colour.
     Recovery,
-    /// Avionics system colour.
-    Avionics,
     /// Aero system colour.
     Aero,
 }
@@ -89,7 +85,6 @@ impl SeriesColor {
             SeriesColor::Err => t.err,
             SeriesColor::Propulsion => t.sys_propulsion,
             SeriesColor::Recovery => t.sys_recovery,
-            SeriesColor::Avionics => t.sys_avionics,
             SeriesColor::Aero => t.sys_aero,
         }
     }
@@ -559,6 +554,7 @@ impl EventMark {
     }
 
     /// Sets the text the tooltip adds after the name and x.
+    #[cfg(test)]
     pub fn detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
         self
@@ -740,6 +736,7 @@ impl PlotGroup {
     }
 
     /// The interpolated value of series `series` of panel `panel` at `x` (for "values at cursor" panels).
+    #[cfg(test)]
     pub fn value_at(&self, panel: usize, series: usize, x: f64) -> Option<f64> {
         self.panels.get(panel)?.series.get(series)?.value_at(x)
     }

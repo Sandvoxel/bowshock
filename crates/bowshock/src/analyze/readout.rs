@@ -622,6 +622,7 @@ mod tests {
                 jobs,
                 bands: rocket.stability_bands(),
                 cfd: None,
+                drag_tables: Vec::new(),
             }),
             rocket.active_config_id(),
         )

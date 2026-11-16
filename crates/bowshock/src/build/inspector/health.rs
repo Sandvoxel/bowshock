@@ -265,6 +265,7 @@ mod tests {
             jobs,
             bands: Default::default(),
             cfd: None,
+            drag_tables: Vec::new(),
         });
         let crate::analyze::compute::Data::Flutter(Some(on_screen)) = &out.runs[0].data else { panic!("the example has fins") };
         assert_eq!(on_screen.min_margin(), flight.flutter.as_ref().unwrap().min_margin());

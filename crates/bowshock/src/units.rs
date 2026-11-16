@@ -456,6 +456,70 @@ pub fn format_in(value_si: f64, unit: &Unit) -> String {
     }
 }
 
+/// `value_si` in the display unit of `quantity` in `system`, as the number and its unit symbol. Lengths drop a decimal
+/// (`1142.0 mm`, not `1142.00`): the status strip's readouts are for reading, not for editing.
+pub fn readout(value_si: f64, quantity: Quantity, system: UnitSystem) -> (String, &'static str) {
+    let unit = quantity.unit_for(system);
+    let unit = match quantity {
+        Quantity::Length if unit.decimals > 1 => Unit { decimals: unit.decimals - 1, ..*unit },
+        _ => *unit,
+    };
+    (format_in(value_si, &unit), unit.symbol)
+}
+
+/// [`readout`] as one string, `1142.0 mm`.
+pub fn with_unit(value_si: f64, quantity: Quantity, system: UnitSystem) -> String {
+    let (number, symbol) = readout(value_si, quantity, system);
+    format!("{number} {symbol}")
+}
+
+/// [`readout`] without the unit symbol, `712.4`.
+pub fn bare(value_si: f64, quantity: Quantity, system: UnitSystem) -> String {
+    readout(value_si, quantity, system).0
+}
+
+/// A length in the display unit of `system`, number only and a decimal short of an input field's, as the viewport tags, the
+/// parts bin and the size lines show lengths (`76.2` in mm, `3.00` in in). Pair it with [`len_unit`].
+pub fn len(metres: f64, system: UnitSystem) -> String {
+    bare(metres, Quantity::Length, system)
+}
+
+/// The symbol of the length unit of `system` (`mm`).
+pub fn len_unit(system: UnitSystem) -> &'static str {
+    Quantity::Length.unit_for(system).symbol
+}
+
+/// `value_si` of `quantity` in `system` with `base_decimals` decimals: the number and its unit symbol.
+///
+/// `base_decimals` is what the caller wants in the quantity's first unit (metres for altitudes, m/s for speeds); a unit a power
+/// of ten larger than that one (km, mi, kg for g) gets as many more decimals, so `0.616 km` does not collapse to `1 km`.
+pub fn num_scaled(value_si: f64, quantity: Quantity, system: UnitSystem, base_decimals: usize) -> (String, &'static str) {
+    let chosen = quantity.unit_for(system);
+    let ratio = chosen.to_si / quantity.units()[0].to_si;
+    let extra = if ratio >= 10.0 { ratio.log10().floor() as usize } else { 0 };
+    let unit = Unit { decimals: base_decimals + extra, ..*chosen };
+    (format_in(value_si, &unit), unit.symbol)
+}
+
+/// [`num_scaled`] with a space and the unit, `616 m`.
+pub fn with_unit_scaled(value_si: f64, quantity: Quantity, system: UnitSystem, base_decimals: usize) -> String {
+    let (n, u) = num_scaled(value_si, quantity, system, base_decimals);
+    format!("{n} {u}")
+}
+
+/// A signed difference to the reference, with a true minus: `+274`, `−34`, `0`.
+pub fn signed(diff: f64, decimals: usize) -> String {
+    let scale = 10f64.powi(decimals as i32);
+    let rounded = (diff * scale).round() / scale;
+    if rounded == 0.0 {
+        "0".to_string()
+    } else if rounded > 0.0 {
+        format!("+{rounded:.decimals$}")
+    } else {
+        format!("−{:.decimals$}", -rounded)
+    }
+}
+
 /// Expression AST. Numbers are in the display unit of the field being edited: the parser has already converted any
 /// unit suffix into that unit.
 #[derive(Debug, Clone, PartialEq)]
@@ -839,6 +903,7 @@ pub fn eval(expr: &Expr, resolve: &dyn Fn(&str) -> Option<f64>) -> Result<f64, E
 }
 
 /// All references in `expr`, in order of appearance, without duplicates (for dependency tracking and cycle detection).
+#[cfg(test)]
 pub fn refs(expr: &Expr) -> Vec<String> {
     fn walk(expr: &Expr, out: &mut Vec<String>) {
         match expr {
@@ -1426,5 +1491,43 @@ mod tests {
         let scalar = Quantity::Scalar.unit_for(UnitSystem::MM_G_S);
         assert!(parse_formula("{body_tube#3.od} / {body_tube#3.length}", Quantity::Scalar, scalar).is_ok());
         assert!(formula_text(&bowshock_model::Expr::Num(1.0), Quantity::Mass, mm, &|_| None).is_none());
+    }
+
+    #[test]
+    fn lengths_drop_one_decimal_and_other_quantities_keep_theirs() {
+        assert_eq!(with_unit(1.142, Quantity::Length, UnitSystem::MM_G_S), "1142.0 mm");
+        assert_eq!(bare(0.7124, Quantity::Length, UnitSystem::MM_G_S), "712.4");
+        assert_eq!(with_unit(1.142, Quantity::Length, UnitSystem::M_KG_S), "1.142 m");
+        assert_eq!(with_unit(1.284, Quantity::Mass, UnitSystem::M_KG_S), "1.284 kg");
+        assert_eq!(with_unit(1.284, Quantity::Mass, UnitSystem::MM_G_S), "1284.0 g");
+        assert_eq!(with_unit(0.0762, Quantity::Length, UnitSystem::IN_OZ_S), "3.00 in");
+        assert_eq!(with_unit(f64::NAN, Quantity::Length, UnitSystem::MM_G_S), "— mm");
+        // A mixed set: lengths in inches and masses in kilograms side by side.
+        let mixed = UnitSystem::MM_G_S.with(Family::Length, "in").with(Family::Mass, "kg");
+        assert_eq!(with_unit(0.0762, Quantity::Length, mixed), "3.00 in");
+        assert_eq!(with_unit(1.284, Quantity::Mass, mixed), "1.284 kg");
+        assert_eq!(len(0.0762, UnitSystem::MM_G_S), "76.2");
+        assert_eq!(len(0.0762, mixed), "3.00");
+        assert_eq!(len_unit(mixed), "in");
+    }
+
+    #[test]
+    fn differences_have_a_sign_and_a_true_minus() {
+        assert_eq!(signed(274.0, 0), "+274");
+        assert_eq!(signed(-34.0, 0), "−34");
+        assert_eq!(signed(0.2, 0), "0");
+        assert_eq!(signed(-0.04, 1), "0");
+        assert_eq!(signed(1.25, 1), "+1.3");
+    }
+
+    #[test]
+    fn quantities_follow_the_unit_set_per_family() {
+        assert_eq!(with_unit_scaled(616.0, Quantity::Altitude, UnitSystem::MM_G_S, 0), "616 m");
+        assert_eq!(with_unit_scaled(304.8, Quantity::Altitude, UnitSystem::FT_LB_S, 0), "1000 ft");
+        // Kilometres and miles keep their fraction: the decimals asked for are those of the family's first unit (metres).
+        let set = UnitSystem::MM_G_S.with(Family::Distance, "km").with(Family::Velocity, "mph");
+        assert_eq!(with_unit_scaled(616.0, Quantity::Altitude, set, 0), "0.616 km");
+        assert_eq!(with_unit_scaled(1609.344, Quantity::Altitude, UnitSystem::MM_G_S.with(Family::Distance, "mi"), 0), "1.000 mi");
+        assert_eq!(with_unit_scaled(10.0, Quantity::Velocity, set, 1), "22.4 mph");
     }
 }

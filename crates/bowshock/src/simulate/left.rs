@@ -10,11 +10,11 @@ use iced::{Background, Border, Element, Fill, Length, Theme, Widget};
 
 use super::flight::{self, Flight, MotorChoice, Shared, Spec};
 use super::sites::{self, SITES};
-use super::{format, keys, Edit, Message, State, MAX_COMPARED};
+use super::{keys, Edit, Message, State, MAX_COMPARED};
 use crate::app::{ui, Ctx};
 use crate::theme::{self, MONO};
 use crate::tokens::{Tokens, SPACE_1, SPACE_2, SPACE_3, TEXT_BODY, TEXT_LABEL};
-use crate::units::{Quantity, UnitSystem};
+use crate::units::{self, Quantity, UnitSystem};
 use crate::widgets::button::{button as push, icon_button, Weight};
 use crate::widgets::chip::Severity;
 use crate::widgets::field::{checkbox, labeled, rule, select};
@@ -68,7 +68,7 @@ pub(super) fn view<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
     body.push(rule());
     body.push(conditions(state, ctx));
 
-    let multi = !state.also.is_empty();
+    let multi = state.selection.is_multi();
     let run: Element<'a, Message> = push(if multi { "Run selected" } else { "Run" }, Weight::Primary)
         .icon(Mark::Play)
         .tooltip(if multi { "Fly the selected flights" } else { "Fly this flight" })
@@ -79,7 +79,7 @@ pub(super) fn view<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
     let footer = container(row![run, run_all].spacing(SPACE_2)).padding(SPACE_3);
 
     // The tracker is invisible: it only keeps `state.modifiers` current for the row clicks.
-    let held = keys::track(state.modifiers, Message::Modifiers);
+    let held = keys::track(state.modifiers.unwrap_or(ctx.env.drive_modifiers), Message::Modifiers);
     column![held, head, scrollable(column(body)).direction(super::thin_scrollbar()).style(super::scroll_style).height(Fill), rule(), footer]
         .height(Fill)
         .boxed()
@@ -283,9 +283,9 @@ fn wind_profile<'a>(state: &'a State, spec: &'a Spec, shared: &Shared, count: us
         let selected = state.wind_level == Some(i);
         let summary = format!(
             "{} · {} · {}",
-            format::with_unit(l.altitude, Quantity::Altitude, *system, 0),
-            format::with_unit(l.speed, Quantity::Velocity, *system, 1),
-            format::with_unit(l.from, Quantity::Angle, *system, 0)
+            units::with_unit_scaled(l.altitude, Quantity::Altitude, *system, 0),
+            units::with_unit_scaled(l.speed, Quantity::Velocity, *system, 1),
+            units::with_unit_scaled(l.from, Quantity::Angle, *system, 0)
         );
         let line = button(text(summary).font(MONO).size(TEXT_BODY - 1.0))
             .width(Fill)
@@ -464,9 +464,9 @@ fn motor_options(ctx: &Ctx, specs: &[&Spec]) -> Vec<MotorOption> {
 /// The condition that tells a flight apart, for the list's second line: the temperature of a hot or cold day, else the wind.
 fn key_condition(spec: &Spec, system: UnitSystem) -> String {
     if (spec.temperature - 288.15).abs() > 5.0 {
-        format::with_unit(spec.temperature, Quantity::Temperature, system, 0)
+        units::with_unit_scaled(spec.temperature, Quantity::Temperature, system, 0)
     } else {
-        format::with_unit(spec.wind_speed, Quantity::Velocity, system, 1)
+        units::with_unit_scaled(spec.wind_speed, Quantity::Velocity, system, 1)
     }
 }
 
@@ -537,7 +537,7 @@ fn flight_row<'a>(state: &'a State, ctx: &'a Ctx, flight: &'a Flight) -> Element
     });
     let apogee: Element<'a, Message> = match &flight.run {
         Some(run) => {
-            let (n, u) = format::num(run.result.summary.apogee, Quantity::Altitude, ctx.units, 0);
+            let (n, u) = units::num_scaled(run.result.summary.apogee, Quantity::Altitude, ctx.units, 0);
             let style = if stale { theme::faint } else { theme::ink };
             row![text(n).font(MONO).size(13).style(style), text(u).font(MONO).size(TEXT_LABEL).style(theme::faint)]
                 .spacing(SPACE_1)

@@ -47,9 +47,9 @@ impl Demo {
     }
 }
 
-/// The scripts named by `BOWSHOCK_CFD_DEMO`, in order.
-pub fn from_env() -> VecDeque<Demo> {
-    std::env::var("BOWSHOCK_CFD_DEMO").map(|v| v.split(',').filter_map(Demo::parse).collect()).unwrap_or_default()
+/// The scripts named by `BOWSHOCK_CFD_DEMO` (`Env::cfd_demo`), in order.
+pub fn from_names(names: &[String]) -> VecDeque<Demo> {
+    names.iter().filter_map(|n| Demo::parse(n)).collect()
 }
 
 /// The iteration cap the script's solver has (the real coarse viscous cap is 80 000; a smaller one keeps the stalled point's time
@@ -256,7 +256,7 @@ mod tests {
         app.analyze_mut().cfd.demo = scripts.iter().copied().collect();
         drop(app.update(AppMessage::Mode(Mode::Analyze)));
         drop(app.update(AppMessage::Analyze(Message::Method(Method::CfdTable))));
-        let serial = app.analyze().cfd.solving.as_ref().expect("choosing the CFD table method starts a solve").serial;
+        let serial = app.analyze().cfd.solving.as_ref().expect("choosing the CFD table method starts a solve").stream.serial();
         (app, serial)
     }
 
@@ -345,7 +345,7 @@ mod tests {
 
         // Re-solve; this time the cancel comes after one point only
         press(&mut app, Message::Resolve);
-        let serial = app.analyze().cfd.solving.as_ref().expect("Re-solve starts a solve").serial;
+        let serial = app.analyze().cfd.solving.as_ref().expect("Re-solve starts a solve").stream.serial();
         let first: Vec<Event> = events(Demo::Mid, &job(&app)).into_iter().take_while(|e| !matches!(e, Event::Iteration(_))).take(2).collect();
         assert!(matches!(first.last(), Some(Event::Point(_))));
         feed(&mut app, serial, first);
@@ -384,8 +384,10 @@ mod tests {
 
         press(&mut app, Message::SolveLift);
         let lift = app.analyze().cfd.lift_solving.as_ref().expect("Solve stability (3D) starts the 3D solve");
-        let (serial, job) =
-            (lift.serial, LiftJob { plan: app.analyze().cfd.plan.as_ref().clone().unwrap(), nodes: cfd::lift_nodes(app.analyze().cond.mach).unwrap() });
+        let (serial, job) = (
+            lift.stream.serial(),
+            LiftJob { plan: app.analyze().cfd.plan.as_ref().clone().unwrap(), nodes: cfd::lift_nodes(app.analyze().cond.mach).unwrap() },
+        );
         assert_eq!(lift.tracker.total(), 2 * job.nodes.len(), "a run per Mach number and angle");
         feed(&mut app, serial, lift_events(Demo::LiftMid, &job));
         let t = &app.analyze().cfd.lift_solving.as_ref().unwrap().tracker;
@@ -401,7 +403,7 @@ mod tests {
 
         // and one that finishes is stored on the drag table
         press(&mut app, Message::SolveLift);
-        let serial = app.analyze().cfd.lift_solving.as_ref().expect("a second 3D solve").serial;
+        let serial = app.analyze().cfd.lift_solving.as_ref().expect("a second 3D solve").stream.serial();
         feed(&mut app, serial, lift_events(Demo::LiftDone, &job));
         assert!(app.analyze().cfd.lift_solving.is_none());
         assert!(app.ctx().doc.rocket().cfd_table(1).is_some_and(|t| t.lift.is_some()));

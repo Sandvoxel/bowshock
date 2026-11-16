@@ -316,7 +316,7 @@ mod tests {
             assert!([(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)].iter().all(|&(x, y)| alpha(x, y) == 0), "corners are clear");
             let solid = rgba.as_chunks::<4>().0.iter().filter(|p| p[3] == 255).count();
             assert!(solid > 2000, "{solid} opaque pixels");
-            if let Some(file) = std::env::var_os("BOWSHOCK_CAPTURE_PNG").filter(|_| w == 3840) {
+            if let Some(file) = crate::app::env::Env::from_process(false).capture_png.filter(|_| w == 3840) {
                 let mut encoder = png::Encoder::new(std::fs::File::create(file).unwrap(), w as u32, h as u32);
                 encoder.set_color(png::ColorType::Rgba);
                 encoder.write_header().unwrap().write_image_data(&rgba).unwrap();

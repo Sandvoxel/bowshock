@@ -6,11 +6,11 @@
 //! `doc.edit`.
 
 use bowshock_model::{PartId, Rocket, ScaleScope};
-use iced::widget::{column, container, mouse_area, row, text, text_input, Space, Stack};
-use iced::{Background, Color, Element, Fill, Widget};
+use iced::widget::{column, row, text, text_input, Space};
+use iced::{Element, Fill, Widget};
 
 use crate::app::{Ctx, Message as AppMessage};
-use crate::theme::{self, MONO, SANS_MEDIUM};
+use crate::theme::{self, MONO};
 use crate::tokens::{CONTROL_H, SPACE_2, SPACE_3, TEXT_BODY};
 use crate::units::Quantity;
 use crate::widgets::button::{button, Weight};
@@ -156,9 +156,6 @@ pub fn view(ctx: &Ctx) -> Option<Element<'_, AppMessage>> {
     let unit = Quantity::Length.unit_for(ctx.units);
     let wrap = AppMessage::Scale;
     let nothing = || AppMessage::Chrome(crate::chrome::Message::Nothing);
-    let backdrop = container(Space::new().width(Fill).height(Fill))
-        .style(|_| container::Style { background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.55))), ..container::Style::default() });
-    let title = text(heading(dialog)).font(SANS_MEDIUM).size(15);
     let blurb = text(if dialog.parts.is_none() {
         "Multiplies every length by the factor: tubes, fins, internal parts and where they sit. Angles, counts, materials and motors stay."
     } else {
@@ -209,12 +206,8 @@ pub fn view(ctx: &Ctx) -> Option<Element<'_, AppMessage>> {
     }
     let apply: Element<'_, AppMessage> = apply.into();
     let buttons = row![Space::new().width(Fill), cancel, apply].spacing(SPACE_2).align_y(iced::Center);
-    let card = container(mouse_area(column![title, blurb, column(fields).spacing(SPACE_2), buttons].spacing(SPACE_3 + 2.0)).on_press(nothing()))
-        .width(440)
-        .padding(SPACE_3 + 8.0)
-        .style(theme::overlay);
-    let placed = container(card).center(Fill);
-    Some(Stack::with_children([mouse_area(backdrop).interaction(iced::mouse::Interaction::Idle).on_press(nothing()).boxed(), placed.boxed()]).boxed())
+    let body = column![blurb, column(fields).spacing(SPACE_2)].spacing(SPACE_3 + 2.0).boxed();
+    Some(crate::widgets::modal::modal(heading(dialog), body, buttons.boxed(), 440.0, nothing(), nothing()))
 }
 
 /// The overlay's title: what is being scaled.

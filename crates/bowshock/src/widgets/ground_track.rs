@@ -10,8 +10,6 @@
 //! Msg::Ground(GroundMessage::Select(i)) => self.select_flight(i),
 //! ```
 
-#![allow(dead_code)] // The screens that compose these widgets arrive after the widgets do.
-
 use crate::units::{Quantity, Unit, UnitSystem};
 
 use std::time::{Duration, Instant};
@@ -123,8 +121,6 @@ pub fn ring_spacing(px_per_m: f32, min_px: f32) -> f64 {
 /// One flight's path.
 #[derive(Debug, Clone)]
 pub struct Track {
-    /// Flight name.
-    pub name: String,
     /// Colour role: `Ink` for a lone flight (its apogee ring then draws in `accent`), `Series(1..4)` when compared.
     pub color: SeriesColor,
     /// Samples in time order; the last is the landing.
@@ -139,9 +135,9 @@ pub struct Track {
 
 impl Track {
     /// A track with no dispersion.
-    pub fn new(name: impl Into<String>, color: SeriesColor, points: Vec<TrackPoint>) -> Self {
+    pub fn new(color: SeriesColor, points: Vec<TrackPoint>) -> Self {
         let apogee = points.iter().enumerate().max_by(|a, b| a.1.alt.total_cmp(&b.1.alt)).map(|(i, _)| i);
-        Track { name: name.into(), color, points, apogee, scatter: Vec::new(), ellipse: None }
+        Track { color, points, apogee, scatter: Vec::new(), ellipse: None }
     }
 
     /// Adds dispersion landings and their 95 % ellipse.
@@ -843,11 +839,7 @@ mod tests {
     }
 
     fn track() -> Track {
-        Track::new(
-            "Nominal",
-            SeriesColor::Series(1),
-            vec![pt(0.0, 0.0, 0.0, 0.0), pt(10.0, -20.0, -8.0, 600.0), pt(20.0, 40.0, 16.0, 300.0), pt(30.0, 96.0, 38.0, 0.0)],
-        )
+        Track::new(SeriesColor::Series(1), vec![pt(0.0, 0.0, 0.0, 0.0), pt(10.0, -20.0, -8.0, 600.0), pt(20.0, 40.0, 16.0, 300.0), pt(30.0, 96.0, 38.0, 0.0)])
     }
 
     #[test]

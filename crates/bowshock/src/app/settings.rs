@@ -5,7 +5,7 @@
 //! defaults; unknown keys and unit symbols are ignored, so a newer or older build never refuses to start over a settings file.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -26,12 +26,6 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// Where the file lives: `$BOWSHOCK_SETTINGS_FILE`, else `~/.config/bowshock/settings.json`.
-    pub fn default_file() -> Option<PathBuf> {
-        let over = std::env::var_os("BOWSHOCK_SETTINGS_FILE").filter(|s| !s.is_empty()).map(PathBuf::from);
-        over.or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config").join("bowshock").join("settings.json")))
-    }
-
     /// The settings stored in `file`; the defaults when there is no file or it cannot be read.
     pub fn load(file: Option<&Path>) -> Settings {
         let stored: Stored = file.and_then(|f| std::fs::read_to_string(f).ok()).and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
@@ -52,6 +46,8 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use crate::units::Family;
 

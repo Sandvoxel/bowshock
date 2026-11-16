@@ -99,18 +99,6 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// Headless runs (`bowshock drive`, animations off) render between scripted clicks, which can take longer than that.
 const HEADLESS_DOUBLE_CLICK: Duration = Duration::from_secs(10);
 
-static ANIMATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
-
-/// Turns camera animations on or off. Off for `bowshock drive`: the headless emulator delivers no frame ticks.
-pub fn set_animation(on: bool) {
-    ANIMATE.store(on, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// Whether animations are on (they are not in a headless `bowshock drive` run).
-pub fn animation_on() -> bool {
-    ANIMATE.load(std::sync::atomic::Ordering::Relaxed)
-}
-
 /// 3D or the side-on 2D profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Projection {
@@ -200,9 +188,6 @@ pub enum Message {
     Grab(Pick),
     /// A handle edit (see `manipulate`).
     Edit(manipulate::Edit),
-    /// The key hints to show at the bottom (pairs of key, what it does); empty clears them.
-    #[allow(dead_code)] // For overlays that want to show keys; direct edits set theirs through `Edit`.
-    Hint(Vec<(&'static str, &'static str)>),
     /// Focus a part: turn square-on to it in an orthographic view that fills the viewport with it, and select it (also sent by a
     /// double-click on a Station Lanes bar).
     Focus(PartId),
@@ -333,21 +318,15 @@ impl View {
     }
 
     /// The camera.
-    #[allow(dead_code)] // For the viewport modules' overlays and the lanes (camera-locked ruler).
+    #[cfg(test)]
     pub fn camera(&self) -> Camera {
         self.camera
     }
 
     /// The inside view chosen on the toolbar.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn inside(&self) -> InsideView {
         self.inside
-    }
-
-    /// The toolbar's grid step, metres: what a plain handle drag moves by.
-    #[allow(dead_code)]
-    pub fn snap_step(&self) -> f64 {
-        self.snap_step
     }
 
     /// Asks for one render of the model at `width` × `height` pixels, framed like the viewport and drawn without hover, selection
@@ -369,8 +348,8 @@ impl View {
     }
 
     /// Fits the model into the viewport at its last known size.
-    pub fn fit(&mut self) {
-        self.camera_update(Message::Fit(self.size));
+    pub fn fit(&mut self, animate: bool) {
+        self.camera_update(Message::Fit(self.size), animate);
     }
 
     /// Rebuilds the mesh if the document, selection, hover, cutaway or a drag ghost changed since it was built. The app calls
@@ -380,11 +359,11 @@ impl View {
         match (ctx.drag.internal.as_ref().is_some_and(|d| d.origin.is_none()), self.drag_inside) {
             (true, None) => {
                 self.drag_inside = Some(self.inside);
-                self.set_inside(InsideView::XRay);
+                self.set_inside(InsideView::XRay, ctx.env.animate);
             }
             (false, Some(before)) => {
                 self.drag_inside = None;
-                self.set_inside(before);
+                self.set_inside(before, ctx.env.animate);
             }
             _ => {}
         }
@@ -415,7 +394,7 @@ impl View {
             if self.navigated {
                 self.stray = true;
             } else {
-                self.fit();
+                self.fit(ctx.env.animate);
             }
         }
     }
@@ -473,9 +452,9 @@ impl View {
             Message::Projection(p) => {
                 self.focus = None;
                 self.projection = p;
-                self.set_profile(p == Projection::Profile);
+                self.set_profile(p == Projection::Profile, ctx.env.animate);
             }
-            Message::InsideView(v) => self.set_inside(v),
+            Message::InsideView(v) => self.set_inside(v, ctx.env.animate),
             Message::Step(step) => self.snap_step = step.0,
             Message::Hover(hover) => self.hover = hover,
             Message::Select(pick) => {
@@ -486,14 +465,14 @@ impl View {
                 };
                 // Two selections of the same thing in quick succession: focus the part, or fit on empty space.
                 let now = Instant::now();
-                let window = if ANIMATE.load(std::sync::atomic::Ordering::Relaxed) { DOUBLE_CLICK } else { HEADLESS_DOUBLE_CLICK };
+                let window = if ctx.env.animate { DOUBLE_CLICK } else { HEADLESS_DOUBLE_CLICK };
                 let double = self.last_select.is_some_and(|(at, last)| now.duration_since(at) <= window && last == id);
                 self.last_select = if double { None } else { Some((now, id)) };
                 ctx.select_one(id);
                 if double {
                     match id {
                         Some(id) => self.focus_part(id, ctx),
-                        None => self.fit(),
+                        None => self.fit(ctx.env.animate),
                     }
                 }
             }
@@ -535,9 +514,8 @@ impl View {
                 }
                 return task;
             }
-            Message::Hint(hint) => self.hint = hint,
             Message::Focus(id) => self.focus_part(id, ctx),
-            Message::ExitFocus => self.exit_focus(),
+            Message::ExitFocus => self.exit_focus(ctx.env.animate),
             Message::Cut(cut) => self.cut = cut,
             Message::SnapNode(node) => {
                 if let Some(drag) = ctx.drag.axial.as_mut() {
@@ -573,7 +551,7 @@ impl View {
             }
             Message::DropInternal => drag::finish_internal(ctx, true),
             Message::CopiesStep(forward) => crate::build::parts_bin::cycle_symmetry(ctx, forward),
-            camera => self.camera_update(camera),
+            camera => self.camera_update(camera, ctx.env.animate),
         }
         Task::none()
     }
@@ -597,21 +575,21 @@ impl View {
     }
 
     /// Escape: goes back from a focused part, or leaves the exploded view; also clears the hover and the key hints.
-    pub fn cancel(&mut self) {
+    pub fn cancel(&mut self, animate: bool) {
         self.hover = Hover::None;
         self.hint.clear();
         if self.focus.is_some() {
-            self.exit_focus();
+            self.exit_focus(animate);
         } else if self.inside == InsideView::Exploded {
-            self.set_inside(InsideView::Solid);
+            self.set_inside(InsideView::Solid, animate);
         }
     }
 
     /// Shows the shell as `view`, animating the exploded view in or out.
-    fn set_inside(&mut self, view: InsideView) {
+    fn set_inside(&mut self, view: InsideView, animate: bool) {
         self.inside = view;
         let to = if view == InsideView::Exploded { 1.0 } else { 0.0 };
-        if ANIMATE.load(std::sync::atomic::Ordering::Relaxed) {
+        if animate {
             self.explode_anim = Some((self.explode, to, Instant::now()));
         } else {
             self.explode = to;
@@ -648,8 +626,8 @@ impl View {
         }
         if internal {
             match (self.inside, aft_on) {
-                (_, true) => self.set_inside(InsideView::XRay),
-                (InsideView::Solid, false) => self.set_inside(InsideView::Cutaway),
+                (_, true) => self.set_inside(InsideView::XRay, ctx.env.animate),
+                (InsideView::Solid, false) => self.set_inside(InsideView::Cutaway, ctx.env.animate),
                 _ => {}
             }
         }
@@ -664,24 +642,24 @@ impl View {
             whole.fit(self.mesh.min, self.mesh.max, self.size);
             to.scale = to.scale.min(whole.scale * FOCUS_MAX_ZOOM);
         }
-        self.animate_for(to, FOCUS_TIME);
+        self.animate_for(to, FOCUS_TIME, ctx.env.animate);
         ctx.selection = Selection::Part(id);
     }
 
     /// Back to where the camera, projection and view mode were before the focus.
-    fn exit_focus(&mut self) {
+    fn exit_focus(&mut self, animate: bool) {
         let Some(f) = self.focus.take() else {
             return;
         };
         self.profile = f.profile;
         self.projection = f.projection;
         if self.inside != f.inside {
-            self.set_inside(f.inside);
+            self.set_inside(f.inside, animate);
         }
-        self.animate_for(f.camera, FOCUS_TIME);
+        self.animate_for(f.camera, FOCUS_TIME, animate);
     }
 
-    fn camera_update(&mut self, message: Message) {
+    fn camera_update(&mut self, message: Message, animate: bool) {
         match message {
             // An empty rocket has nothing to turn round: the camera stays put so the empty-state view keeps its framing.
             Message::Orbit(delta) if !self.profile && !self.mesh.is_empty() => {
@@ -715,7 +693,7 @@ impl View {
                 if !self.mesh.is_empty() {
                     let mut to = self.goal();
                     to.fit(self.mesh.min, self.mesh.max, size);
-                    self.animate(to);
+                    self.animate(to, animate);
                 }
             }
             Message::Resized(size) => self.size = size,
@@ -726,17 +704,17 @@ impl View {
                 // A face is seen square-on, so orthographic like a drawing view; an edge or corner keeps perspective.
                 let face = dir.abs().element_sum() == 1;
                 to.ortho_blend = if face { 1.0 } else { 0.0 };
-                self.animate(to);
+                self.animate(to, animate);
             }
             Message::Snap(_) => {}
             Message::Home => {
                 let to = home(self.goal());
-                self.animate(to);
+                self.animate(to, animate);
             }
             Message::Roll(dir) if !self.profile => {
                 let mut to = self.goal();
                 to.roll += f32::from(dir) * FRAC_PI_2;
-                self.animate(to);
+                self.animate(to, animate);
             }
             Message::Roll(_) => {}
             Message::Tick(now) => {
@@ -760,7 +738,7 @@ impl View {
     }
 
     /// Locks the camera side-on and orthographic (Profile) or unlocks it into the perspective home view (3D).
-    pub fn set_profile(&mut self, profile: bool) {
+    pub fn set_profile(&mut self, profile: bool, animate: bool) {
         self.profile = profile;
         let mut to = self.goal();
         if profile {
@@ -769,12 +747,12 @@ impl View {
         } else {
             to = home(to);
         }
-        self.animate(to);
+        self.animate(to, animate);
     }
 
     /// Advances the camera and exploded-view animations.
     pub fn tick(&mut self, now: Instant) {
-        self.camera_update(Message::Tick(now));
+        self.camera_update(Message::Tick(now), true);
     }
 
     /// Whether a camera or exploded-view animation is running (and so wants frame ticks).
@@ -928,6 +906,7 @@ impl View {
                     inside: self.inside,
                     profile: self.profile,
                     units: ctx.units,
+                    drive_modifiers: ctx.env.drive_modifiers,
                     pod: selected.and_then(|id| pods::PodView::of_part(rocket, id, &camera)),
                     balance: ctx.shown().now.map(|b| markers::BalanceMarks {
                         cg: b.cg,
@@ -1066,12 +1045,12 @@ impl View {
         }
     }
 
-    fn animate(&mut self, to: Camera) {
-        self.animate_for(to, SNAP_TIME);
+    fn animate(&mut self, to: Camera, animate: bool) {
+        self.animate_for(to, SNAP_TIME, animate);
     }
 
-    fn animate_for(&mut self, to: Camera, duration: Duration) {
-        if ANIMATE.load(std::sync::atomic::Ordering::Relaxed) {
+    fn animate_for(&mut self, to: Camera, duration: Duration, animate: bool) {
+        if animate {
             self.anim = Some(Anim { from: self.camera, to, start: Instant::now(), duration });
         } else {
             self.anim = None;
@@ -1111,7 +1090,7 @@ mod tests {
 
     /// Runs `message` and lands any animation at its goal.
     fn run(view: &mut View, message: Message) {
-        view.camera_update(message);
+        view.camera_update(message, true);
         view.settle();
     }
 
@@ -1186,10 +1165,10 @@ mod phase_tests {
     fn the_phase_recomputes_for_the_remaining_stack_only() {
         let rocket = two_stage();
         let mut physics = crate::app::physics::Physics::new();
-        physics.sync(&rocket, 1);
+        physics.sync(&rocket, 1, crate::units::UnitSystem::MM_G_S);
         let full = *physics.balance().expect("balance");
         physics.set_phase(Phase::UpperFrom(2));
-        physics.sync(&rocket, 1);
+        physics.sync(&rocket, 1, crate::units::UnitSystem::MM_G_S);
         let upper = *physics.balance().expect("balance");
         let joint = physics.stages()[0].fore_station;
         assert!(upper.mass < full.mass && upper.length < full.length, "only the sustainer remains");

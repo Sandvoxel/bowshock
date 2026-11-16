@@ -132,11 +132,6 @@ impl GaugeState {
         self.target
     }
 
-    /// Where the needle is drawn now.
-    pub fn value(&self) -> f32 {
-        self.value
-    }
-
     /// Whether the needle still needs frames. Subscribe to `window::frames()` only while this is true.
     pub fn moving(&self) -> bool {
         (self.value - self.target).abs() > 1e-3 || self.velocity.abs() > 1e-2

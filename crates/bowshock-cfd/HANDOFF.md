@@ -61,6 +61,7 @@ the range (`cfd::partial_of`) and as stale until the rest is solved. A cancelled
 | Base-pressure guard: base Cp below vacuum -> `Failed` (ISSUES #14) | `analysis.rs::quality` | - |
 | Wall roughness: Aupoix (2015) Colebrook k-omega SST wall condition, CPU + GPU; app passes the parts' finish (wetted-area mean), fins floored at OpenRocket's roughness limit | `turbulence.rs::aupoix_wall`, `viscous.rs`, `gpu/`, `Analysis::roughness`, `FinSpec::roughness` | Flat plate fully rough +0.2 % vs Mills & Hang; transitional within 1.6 % of a Colebrook log-wake reference; example table 31 s, all points Stationary |
 | Simulate flies on the CFD table (per-flight `Drag: Extended / CFD table`): table parts + build-up Reynolds change, base x build-up motor-on/off ratio | `bowshock-sim/src/drag_table.rs`, `Aero::drag`, `simulate/` | Example Nominal flight: apogee 619 m (Extended) -> 645 m (CFD) |
+| Simulate's drag note read a per-render `cfd::plan`; Analyze Dispersion flew on Extended drag | `Physics::cfd_plan` / `Physics::drag_table` cache plans per `(revision, phase, units)`; `Request.drag_tables` -> `compute::scatter` attaches stored tables under `CFD table` | - |
 | OpenRocket comparison (ignored test `cfd_against_openrocket`, OpenRocket 23.09 jar in `~/.local/share/openrocket`) | `analyze/cfd.rs` tests | See below |
 
 CFD vs OpenRocket 23.09 (bundled examples `dual_parachute`, `simple_model_rocket`, `tarc_payload`, 60 um paint, sea level):
@@ -76,9 +77,6 @@ friction at these k_s+ (about 20-50).
   Flights use the build-up's base reduction as a ratio instead.
 - The roughness ramp (`ROUGH_RAMP_CELLS` = 8, about 0.25 diameters at Coarse) and smooth base / sting walls are stability
   measures (shorter ramps oscillate at the wall start transonic); rough runs take 1.3-2x the iterations of smooth ones.
-- Simulate's drag note recomputes the CFD plan on every render for flights on `CFD table`; cache it if it shows in frame time.
-- Analyze's Dispersion analysis and Monte Carlo from Simulate fly on whatever `SimInput.drag_tables` the caller gives; Analyze
-  Dispersion does not attach a table yet.
 - Mac timing not re-measured: the 3090 is about 10x an M1 Max per iteration, so the table should take about 5 min there.
 
 ## Timings

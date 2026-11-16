@@ -209,8 +209,8 @@ impl State {
                         config_picker::Outcome::Stay => {}
                         config_picker::Outcome::LoadFiles => return pick_motor_files(),
                         config_picker::Outcome::Debounce(generation) => return config_picker::debounce(generation),
-                        config_picker::Outcome::Search(generation, text) => return config_picker::search(generation, text),
-                        config_picker::Outcome::Download(motor) => return config_picker::download(motor),
+                        config_picker::Outcome::Search(generation, text) => return config_picker::search(generation, text, ctx.env.thrustcurve_api.clone()),
+                        config_picker::Outcome::Download(motor) => return config_picker::download(motor, ctx.env.thrustcurve_api.clone()),
                     }
                 }
             }
@@ -353,7 +353,7 @@ enum Anchor {
 /// `panel` floated over the screen at `anchor`, against the status strip or the top bar, on a transparent layer that closes it
 /// when clicked.
 fn floating<'a>(panel: Element<'a, Message>, anchor: Anchor) -> Element<'a, Message> {
-    let scrim = mouse_area(Space::new().width(Fill).height(Fill)).interaction(iced::mouse::Interaction::Idle).on_press(Message::Dismiss);
+    let scrim = crate::widgets::modal::scrim(Message::Dismiss);
     let pad = match anchor {
         Anchor::TopRight => Padding { top: TOPBAR_H, ..Padding::ZERO },
         _ => Padding { bottom: STATUSBAR_H, ..Padding::ZERO },
@@ -412,11 +412,5 @@ fn issues_list<'a>(ctx: &'a Ctx) -> Element<'a, Message> {
 
 /// The "Load .eng…" dialog (multi-select); the answer arrives as [`Message::MotorFiles`].
 fn pick_motor_files() -> Task<app::Message> {
-    Task::perform(
-        async {
-            let files = rfd::AsyncFileDialog::new().set_title("Load motor files").add_filter("RASP motor file", &["eng"]).pick_files().await;
-            files.map(|f| f.into_iter().map(|h| h.path().to_path_buf()).collect()).unwrap_or_default()
-        },
-        |paths| app::Message::Chrome(Message::MotorFiles(paths)),
-    )
+    app::dialogs::pick_files("Load motor files", ("RASP motor file", &["eng"]), |paths| app::Message::Chrome(Message::MotorFiles(paths)))
 }

@@ -119,7 +119,7 @@ impl Flight {
     }
 
     /// The ground track: leans into the wind on the way up, drifts downwind on the way down.
-    fn track(&self, name: &str, color: SeriesColor, landing: (f64, f64)) -> Track {
+    fn track(&self, color: SeriesColor, landing: (f64, f64)) -> Track {
         let (range, bearing) = landing;
         let b = bearing.to_radians();
         let apogee = self.alt.iter().copied().fold(0.0, f64::max);
@@ -139,7 +139,7 @@ impl Flight {
                 TrackPoint { t, east: along * b.sin() + across * b.cos(), north: along * b.cos() - across * b.sin(), alt }
             })
             .collect();
-        Track::new(name, color, points)
+        Track::new(color, points)
     }
 }
 
@@ -182,16 +182,13 @@ pub fn compare_group() -> PlotGroup {
 
 /// Ground tracks of the compared flights, with the wind and field radius of the design.
 pub fn compare_ground() -> GroundTrack {
-    let tracks = [("Nominal", NOMINAL, 1u8), ("Windy", WINDY, 2), ("Bigger motor", BIGGER, 3)]
-        .iter()
-        .map(|(name, m, slot)| simulate(*m).track(name, SeriesColor::Series(*slot), m.landing))
-        .collect();
+    let tracks = [(NOMINAL, 1u8), (WINDY, 2), (BIGGER, 3)].iter().map(|(m, slot)| simulate(*m).track(SeriesColor::Series(*slot), m.landing)).collect();
     GroundTrack { tracks, wind: Some(Wind { speed: 2.2, from_deg: 250.0 }), field_radius: Some(300.0), units: Default::default() }
 }
 
 /// A single flight's ground track.
 pub fn simulate_ground() -> GroundTrack {
-    let track = simulate(NOMINAL).track("Nominal", SeriesColor::Ink, NOMINAL.landing);
+    let track = simulate(NOMINAL).track(SeriesColor::Ink, NOMINAL.landing);
     GroundTrack { tracks: vec![track], wind: Some(Wind { speed: 2.2, from_deg: 250.0 }), field_radius: Some(300.0), units: Default::default() }
 }
 
@@ -217,7 +214,7 @@ pub fn dispersion_ground() -> GroundTrack {
             (e0 + along * b.sin() + across * b.cos(), n0 + along * b.cos() - across * b.sin())
         })
         .collect();
-    let track = f.track("Windy", SeriesColor::Series(2), WINDY.landing).with_scatter(scatter);
+    let track = f.track(SeriesColor::Series(2), WINDY.landing).with_scatter(scatter);
     GroundTrack { tracks: vec![track], wind: Some(Wind { speed: 7.0, from_deg: 250.0 }), field_radius: Some(300.0), units: Default::default() }
 }
 
@@ -310,7 +307,7 @@ pub enum ShowMessage {
     /// From the Compare ground track.
     CompareGround(GroundMessage),
     /// From the Dispersion ground track.
-    DispersionGround(GroundMessage),
+    DispersionGround,
 }
 
 /// The demo's data and plot states.
@@ -358,10 +355,11 @@ impl Showcase {
             ShowMessage::SimulateGround(GroundMessage::Hover(t)) => self.simulate.1.set_hover(t),
             ShowMessage::CompareGround(GroundMessage::Hover(t)) => self.compare.1.set_hover(t),
             ShowMessage::CompareGround(GroundMessage::Select(i)) => self.selected = i,
-            ShowMessage::SimulateGround(GroundMessage::Select(_)) | ShowMessage::DispersionGround(_) => {}
+            ShowMessage::SimulateGround(GroundMessage::Select(_)) | ShowMessage::DispersionGround => {}
         }
     }
 
+    #[cfg(test)]
     /// The state of a section's plots (for the "values at cursor" readout).
     pub fn state(&self, section: Section) -> Option<&PlotState> {
         match section {
@@ -411,7 +409,7 @@ impl Showcase {
                     .boxed()
             }
             Section::Dispersion => {
-                let ground = GroundTrackView::new(&self.dispersion, None).element().map(ShowMessage::DispersionGround);
+                let ground = GroundTrackView::new(&self.dispersion, None).element().map(|_| ShowMessage::DispersionGround);
                 column![caption("DISPERSION · 200 RUNS OF WINDY WITH VARIED WIND AND LAUNCH ANGLE"), framed(ground)].spacing(tokens::SPACE_2).boxed()
             }
         }
@@ -438,19 +436,26 @@ pub enum DemoMessage {
     /// A plot or ground-track message.
     Show(ShowMessage),
     /// Dark ↔ light (standalone app only).
+    #[cfg(test)]
     ToggleTheme,
 }
 
-/// The showcase with a section switcher: embed it in the gallery as a page, or run it with [`app`].
+/// The showcase with a section switcher: embed it in the gallery as a page, (the standalone app is test-only).
 pub struct Demo {
     show: Showcase,
     section: Section,
+    #[cfg(test)]
     dark: bool,
 }
 
 impl Default for Demo {
     fn default() -> Self {
-        Demo { show: Showcase::new(), section: Section::Simulate, dark: true }
+        Demo {
+            show: Showcase::new(),
+            section: Section::Simulate,
+            #[cfg(test)]
+            dark: true,
+        }
     }
 }
 
@@ -460,6 +465,7 @@ impl Demo {
         match message {
             DemoMessage::Section(s) => self.section = s,
             DemoMessage::Show(m) => self.show.update(m),
+            #[cfg(test)]
             DemoMessage::ToggleTheme => self.dark = !self.dark,
         }
     }
@@ -472,6 +478,7 @@ impl Demo {
         column![switcher, self.show.view(self.section).map(DemoMessage::Show)].spacing(tokens::SPACE_3).height(Length::Fill).boxed()
     }
 
+    #[cfg(test)]
     fn theme(&self) -> iced::Theme {
         if self.dark {
             theme::dark()
@@ -480,6 +487,7 @@ impl Demo {
         }
     }
 
+    #[cfg(test)]
     fn standalone(&self) -> Element<'_, DemoMessage> {
         let toggle: Element<'_, DemoMessage> =
             crate::widgets::button::button(if self.dark { "Light" } else { "Dark" }, crate::widgets::button::Weight::Secondary)
@@ -499,6 +507,7 @@ impl Demo {
 }
 
 /// The demo as a standalone app, for `drive::run` (see `scripts/plot.drive`).
+#[cfg(test)]
 pub fn app() -> iced::Application<impl iced::Program<State = Demo, Message = DemoMessage, Theme = iced::Theme>> {
     iced::application(Demo::default, Demo::update, Demo::standalone)
         .title("Bowshock plot demo")
@@ -532,7 +541,7 @@ mod tests {
     fn the_bigger_motor_flies_higher_and_the_tracks_land_where_declared() {
         let (a, b) = (simulate(NOMINAL), simulate(BIGGER));
         assert!(b.alt.iter().copied().fold(0.0, f64::max) > a.alt.iter().copied().fold(0.0, f64::max));
-        let t = a.track("n", SeriesColor::Ink, NOMINAL.landing);
+        let t = a.track(SeriesColor::Ink, NOMINAL.landing);
         let l = t.landing().unwrap();
         assert!((l.range() - 104.0).abs() < 8.0, "{}", l.range());
         // Ground tracks start at the pad.

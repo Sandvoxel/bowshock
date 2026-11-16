@@ -130,7 +130,6 @@ pub fn mass_catalogue() -> Vec<(&'static str, InternalKind)> {
 
 /// Every internal, recovery and mass part the bin offers, with default sizes (for menus that add a part elsewhere, such as
 /// Station Lanes).
-#[allow(dead_code)] // For the lanes' "Add here" menu.
 pub fn internal_catalogue() -> Vec<(&'static str, InternalKind)> {
     structure_catalogue().into_iter().chain(recovery_catalogue()).chain(mass_catalogue()).collect()
 }

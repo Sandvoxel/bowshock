@@ -135,13 +135,11 @@ impl Document {
     }
 
     /// The label of the step [`undo`](Self::undo) would revert.
-    #[allow(dead_code)] // For the inspector's and the top bar's tooltips; part of the document API.
     pub fn undo_label(&self) -> Option<&str> {
         self.undo.last().map(|s| s.label.as_str())
     }
 
     /// The label of the step [`redo`](Self::redo) would reapply.
-    #[allow(dead_code)]
     pub fn redo_label(&self) -> Option<&str> {
         self.redo.last().map(|s| s.label.as_str())
     }
@@ -249,7 +247,6 @@ impl Document {
     }
 
     /// Whether a drag is in progress.
-    #[allow(dead_code)] // For modules that must not edit mid-drag (inspector fields).
     pub fn dragging(&self) -> bool {
         self.drag.is_some()
     }

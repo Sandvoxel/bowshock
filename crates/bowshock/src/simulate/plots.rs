@@ -360,7 +360,7 @@ pub fn ground(entries: &[Entry], reference: usize, units: UnitSystem) -> GroundT
         .map(|e| {
             let points =
                 e.run.result.trajectory.samples.iter().map(|s| TrackPoint { t: s.t, east: s.position[0], north: s.position[1], alt: s.altitude }).collect();
-            let track = Track::new(e.name, e.color, points);
+            let track = Track::new(e.color, points);
             match e.scatter {
                 Some(landings) => track.with_scatter(landings.to_vec()),
                 None => track,

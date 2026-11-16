@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use bowshock_model::Rocket;
 use iced::Task;
 
+use super::dialogs;
 use super::document::EXTENSION;
 use super::{Ctx, Message, Pending};
 
@@ -71,7 +72,7 @@ pub(super) fn new(ctx: &mut Ctx) {
 
 /// Loads the built-in example as an unsaved document named after it.
 pub(super) fn example(ctx: &mut Ctx) {
-    let source = if std::env::var("BOWSHOCK_EXAMPLE").is_ok_and(|v| v == "two_stage") { TWO_STAGE } else { EXAMPLE };
+    let source = if ctx.env.example_two_stage { TWO_STAGE } else { EXAMPLE };
     match Rocket::from_bytes(source) {
         Ok(rocket) => {
             ctx.doc.replace(rocket, None);
@@ -138,13 +139,7 @@ pub(super) fn save_to(ctx: &mut Ctx, path: &Path) {
 
 /// The import dialog (OpenRocket `.ork` only); the answer arrives as [`Message::OpenPath`], which imports by extension.
 pub(super) fn pick_import() -> Task<Message> {
-    Task::perform(
-        async {
-            let file = rfd::AsyncFileDialog::new().set_title("Import OpenRocket design").add_filter("OpenRocket design", &["ork"]).pick_file().await;
-            file.map(|f| f.path().to_path_buf())
-        },
-        Message::OpenPath,
-    )
+    dialogs::pick_file("Import OpenRocket design", &[("OpenRocket design", &["ork"])], Message::OpenPath)
 }
 
 /// The suffix an imported design's name gets, so the top bar says where the untitled document came from.
@@ -161,12 +156,6 @@ pub struct Recent {
 }
 
 impl Recent {
-    /// Where the list lives: `$BOWSHOCK_RECENT_FILE`, else `~/.config/bowshock/recent.txt` (next to the user motors directory).
-    pub fn default_file() -> Option<PathBuf> {
-        let over = std::env::var_os("BOWSHOCK_RECENT_FILE").filter(|s| !s.is_empty()).map(PathBuf::from);
-        over.or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config").join("bowshock").join("recent.txt")))
-    }
-
     /// The list stored at `file` (empty when it is missing); later changes are written back to it.
     pub fn load(file: Option<PathBuf>) -> Self {
         let text = file.as_ref().and_then(|f| std::fs::read_to_string(f).ok()).unwrap_or_default();
@@ -197,17 +186,9 @@ impl Recent {
 
 /// The open dialog; the answer arrives as [`Message::OpenPath`].
 pub(super) fn pick_open() -> Task<Message> {
-    Task::perform(
-        async {
-            let file = rfd::AsyncFileDialog::new()
-                .set_title("Open rocket")
-                .add_filter("Bowshock or OpenRocket", &[EXTENSION, "ork"])
-                .add_filter("Bowshock document", &[EXTENSION])
-                .add_filter("OpenRocket design", &["ork"])
-                .pick_file()
-                .await;
-            file.map(|f| f.path().to_path_buf())
-        },
+    dialogs::pick_file(
+        "Open rocket",
+        &[("Bowshock or OpenRocket", &[EXTENSION, "ork"]), ("Bowshock document", &[EXTENSION]), ("OpenRocket design", &["ork"])],
         Message::OpenPath,
     )
 }
@@ -215,13 +196,7 @@ pub(super) fn pick_open() -> Task<Message> {
 /// The save dialog; the answer arrives as [`Message::SavePath`].
 pub(super) fn pick_save(ctx: &Ctx) -> Task<Message> {
     let name = format!("{}.{EXTENSION}", ctx.doc.title());
-    Task::perform(
-        async move {
-            let file = rfd::AsyncFileDialog::new().set_title("Save rocket").set_file_name(name).add_filter("Bowshock document", &[EXTENSION]).save_file().await;
-            file.map(|f| f.path().to_path_buf())
-        },
-        Message::SavePath,
-    )
+    dialogs::save_file(None, "Save rocket", name, ("Bowshock document", &[EXTENSION]), Message::SavePath)
 }
 
 /// Width of the File menu panel.
@@ -304,37 +279,29 @@ pub(super) fn menu(ctx: &Ctx) -> Option<iced::Element<'_, Message>> {
         col = col.push(row_view(r));
     }
     let panel = container(mouse_area(col).on_press(Message::Chrome(crate::chrome::Message::Nothing))).width(MENU_W).style(theme::overlay);
-    // `Idle` (not the default `None`) makes the stack hide the cursor from the page beneath, so hovering the parts bin or the
-    // viewport while the menu is open does not reach their hover handlers (which would close the menu).
-    let scrim = mouse_area(Space::new().width(Fill).height(Fill)).interaction(iced::mouse::Interaction::Idle).on_press(Message::ToggleFileMenu);
+    let scrim = crate::widgets::modal::scrim(Message::ToggleFileMenu);
     let placed = container(panel).width(Fill).height(Fill).padding(Padding { top: TOPBAR_H, left: MENU_X, ..Padding::ZERO });
-    Some(Stack::with_children([scrim.boxed(), placed.boxed()]).boxed())
+    Some(Stack::with_children([scrim, placed.boxed()]).boxed())
 }
 
 /// The "Save changes to <name>?" modal, centred over a dimmed backdrop that takes every click; `None` while no command waits on
 /// an answer. Save (Enter) is the one primary action, Don't save is destructive, Cancel (Esc) goes back to the document.
 pub(super) fn unsaved_modal(ctx: &Ctx) -> Option<iced::Element<'_, Message>> {
-    use iced::widget::{column, container, mouse_area, row, text, Space, Stack};
-    use iced::{Background, Color, Fill, Widget};
+    use iced::widget::{row, text, Space};
+    use iced::{Fill, Widget};
 
-    use crate::theme::{self, SANS_MEDIUM};
-    use crate::tokens::{SPACE_2, SPACE_3, TEXT_BODY};
+    use crate::theme;
+    use crate::tokens::{SPACE_2, TEXT_BODY};
     use crate::widgets::button::{button, Weight};
 
     ctx.unsaved.as_ref()?;
     let nothing = || Message::Chrome(crate::chrome::Message::Nothing);
-    let backdrop = container(Space::new().width(Fill).height(Fill))
-        .style(|_| container::Style { background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.55))), ..container::Style::default() });
-    let title = text(format!("Save changes to {}?", ctx.doc.title())).font(SANS_MEDIUM).size(15);
     let body = text("Your changes will be lost if you don't save them.").size(TEXT_BODY).style(theme::muted);
     let discard: iced::Element<'_, Message> = button("Don't save", Weight::Destructive).on_press(Message::UnsavedDiscard).into();
     let cancel: iced::Element<'_, Message> = button("Cancel", Weight::Secondary).key("Esc").on_press(Message::UnsavedCancel).into();
     let save: iced::Element<'_, Message> = button("Save", Weight::Primary).key("↵").on_press(Message::UnsavedSave).into();
     let buttons = row![discard, Space::new().width(Fill), cancel, save].spacing(SPACE_2).align_y(iced::Center);
-    let card =
-        container(mouse_area(column![title, body, buttons].spacing(SPACE_3 + 2.0)).on_press(nothing())).width(420).padding(SPACE_3 + 8.0).style(theme::overlay);
-    let placed = container(card).center(Fill);
-    Some(Stack::with_children([mouse_area(backdrop).on_press(nothing()).boxed(), placed.boxed()]).boxed())
+    Some(crate::widgets::modal::modal(format!("Save changes to {}?", ctx.doc.title()), body.boxed(), buttons.boxed(), 420.0, nothing(), nothing()))
 }
 
 #[cfg(test)]

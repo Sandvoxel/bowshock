@@ -90,7 +90,7 @@ fn ticking_overlays_flights_in_stable_colours_and_refuses_a_fifth() {
         fly(&mut state, app.ctx(), *id);
     }
     state.update(Message::AddFlight, app.ctx_mut());
-    let fifth = state.selected;
+    let fifth = state.primary();
     state.update(Message::Click(ids[0]), app.ctx_mut());
 
     // Nominal, the first flight, starts ticked; tick Windy and Bigger motor (the fourth default): colours follow the tick order
@@ -123,7 +123,7 @@ fn ticking_overlays_flights_in_stable_colours_and_refuses_a_fifth() {
 fn a_result_goes_stale_when_conditions_or_the_rocket_change() {
     let mut app = App::with_example();
     let mut state = state_for(&app);
-    let id = state.selected;
+    let id = state.primary();
     fly(&mut state, app.ctx(), id);
     let revision = state.revision(app.ctx());
     assert!(!state.flight(id).unwrap().is_stale(revision));
@@ -142,7 +142,7 @@ fn a_result_goes_stale_when_conditions_or_the_rocket_change() {
 fn a_superseded_result_is_ignored_and_a_failed_flight_says_why() {
     let mut app = App::with_example();
     let mut state = state_for(&app);
-    let id = state.selected;
+    let id = state.primary();
     let _ = state.launch(id, app.ctx());
     let old = state.flight(id).unwrap().ticket;
     let _ = state.launch(id, app.ctx());
@@ -186,7 +186,7 @@ fn adding_and_removing_flights() {
     assert_eq!(state.selected_flight().spec.wind_speed, 4.0, "a new flight starts from the selected one's conditions");
     state.update(Message::RemoveFlight, app.ctx_mut());
     assert_eq!(state.flights.len(), 4);
-    assert_eq!(state.selected, state.flights[0].id);
+    assert_eq!(state.primary(), state.flights[0].id);
     for _ in 0..3 {
         state.update(Message::RemoveFlight, app.ctx_mut());
     }
@@ -226,7 +226,7 @@ fn clicking_a_number_moves_the_crosshair() {
 fn a_dispersion_study_scatters_landings_around_the_run_and_hides_when_the_run_changes() {
     let mut app = App::with_example();
     let mut state = state_for(&app);
-    let id = state.selected;
+    let id = state.primary();
     fly(&mut state, app.ctx(), id);
 
     let _task = state.launch_dispersion(id, app.ctx());
@@ -263,7 +263,7 @@ fn a_dispersion_study_scatters_landings_around_the_run_and_hides_when_the_run_ch
 fn enter_zooms_to_the_band_from_anywhere_and_otherwise_does_nothing() {
     let mut app = App::with_example();
     let mut state = state_for(&app);
-    let id = state.selected;
+    let id = state.primary();
     fly(&mut state, app.ctx(), id);
     let enter = keyboard::Key::Named(keyboard::key::Named::Enter);
     assert!(state.on_key(&enter, keyboard::Modifiers::empty(), app.ctx()).is_none(), "no band, nothing to zoom to");
@@ -309,7 +309,7 @@ fn flights_are_written_to_the_document_and_follow_undo() {
     assert!(app.ctx_mut().doc.undo().is_some());
     state.sync(app.ctx(), false);
     assert_eq!(state.flights.len(), 4);
-    assert!(state.flight(state.selected).is_some(), "a selection that went away moves to a flight that exists");
+    assert!(state.flight(state.primary()).is_some(), "a selection that went away moves to a flight that exists");
 }
 
 #[test]
@@ -345,7 +345,7 @@ fn flights_are_saved_with_the_file_and_loaded_back_without_results() {
     assert_eq!(spec.motor, MotorChoice::Motor(bowshock_model::MotorRef::new("I218R", "AeroTech")));
     assert_eq!(named(&loaded, "Flight 5").spec.turbulence, bowshock_sim::Turbulence::High);
     assert!(loaded.flights.iter().all(|f| f.run.is_none()), "results are not saved: run again");
-    assert_eq!(loaded.selected, loaded.flights[0].id);
+    assert_eq!(loaded.primary(), loaded.flights[0].id);
 }
 
 #[test]
@@ -633,19 +633,19 @@ fn clicks_select_toggle_and_extend_a_range_while_ticks_stay_apart() {
 
     // A plain click selects one flight.
     click_flight(&mut state, &mut app, windy, none);
-    assert_eq!((state.selected, state.edit_ids()), (windy, vec![windy]));
+    assert_eq!((state.primary(), state.edit_ids()), (windy, vec![windy]));
 
     // Cmd/Ctrl-click adds a flight (it becomes the selected one) and takes it out again.
     click_flight(&mut state, &mut app, bigger, command);
-    assert_eq!((state.selected, state.edit_ids()), (bigger, vec![windy, bigger]));
+    assert_eq!((state.primary(), state.edit_ids()), (bigger, vec![windy, bigger]));
     click_flight(&mut state, &mut app, bigger, command);
-    assert_eq!((state.selected, state.edit_ids()), (windy, vec![windy]), "the oldest remaining flight takes over");
+    assert_eq!((state.primary(), state.edit_ids()), (windy, vec![windy]), "the oldest remaining flight takes over");
     click_flight(&mut state, &mut app, windy, command);
     assert_eq!(state.edit_ids(), vec![windy], "a toggle never empties the selection");
 
     // Shift-click selects the range from the last click, in list order, whichever way it runs.
     click_flight(&mut state, &mut app, bigger, shift);
-    assert_eq!((state.selected, state.edit_ids()), (bigger, vec![windy, hot, bigger]));
+    assert_eq!((state.primary(), state.edit_ids()), (bigger, vec![windy, hot, bigger]));
     click_flight(&mut state, &mut app, nominal, shift);
     assert_eq!(state.edit_ids(), vec![nominal, windy], "a new range replaces the old one, from the same anchor");
     // With Cmd/Ctrl too the range is added to what is selected.
@@ -661,7 +661,7 @@ fn clicks_select_toggle_and_extend_a_range_while_ticks_stay_apart() {
     assert!(matches!(state.on_key(&a, command, app.ctx()), Some(Message::SelectAll)));
     assert!(state.on_key(&a, none, app.ctx()).is_none() && state.on_key(&a, command | shift, app.ctx()).is_none());
     state.update(Message::SelectAll, app.ctx_mut());
-    assert_eq!((state.selected, state.edit_ids()), (windy, vec![nominal, windy, hot, bigger]));
+    assert_eq!((state.primary(), state.edit_ids()), (windy, vec![nominal, windy, hot, bigger]));
 
     // The compare ticks are independent of the edit selection, both ways (the first flight starts ticked).
     assert_eq!(state.edit_ids().len(), 4);
@@ -672,7 +672,7 @@ fn clicks_select_toggle_and_extend_a_range_while_ticks_stay_apart() {
     click_flight(&mut state, &mut app, windy, command);
     state.update(Message::RemoveFlight, app.ctx_mut());
     assert_eq!(state.flights.len(), 2);
-    assert!(state.flight(state.selected).is_some() && state.also.is_empty());
+    assert!(state.flight(state.primary()).is_some() && !state.selection.is_multi());
 }
 
 #[test]
@@ -904,7 +904,7 @@ fn the_cfd_drag_source_attaches_a_matching_table_and_says_why_it_cannot() {
 fn changing_the_drag_source_or_the_stored_table_makes_a_result_stale() {
     let mut app = App::with_example();
     let mut state = state_for(&app);
-    let id = state.selected;
+    let id = state.primary();
     fly(&mut state, app.ctx(), id);
     assert!(!state.flight(id).unwrap().is_stale(state.stamp(app.ctx(), &state.flight(id).unwrap().spec)));
     state.update(Message::Edit(Edit::Drag(bowshock_model::DragSource::CfdTable)), app.ctx_mut());

@@ -33,10 +33,9 @@ use rows::{RowState, RowView};
 
 use crate::app::ui::{label, len, len_unit, radial_size_label, size_label};
 use crate::app::{self, drag, Ctx};
-use crate::simulate::format::{num, with_unit};
 use crate::theme::{self, MONO};
 use crate::tokens::{RAIL_W, SPACE_1, SPACE_2, TEXT_BODY, TEXT_LABEL};
-use crate::units::{Quantity, UnitSystem};
+use crate::units::{num_scaled, with_unit_scaled, Quantity, UnitSystem};
 use crate::widgets::icons::{rail_button, RailIcon};
 use crate::widgets::segmented::{segmented_dense, Dense};
 
@@ -164,8 +163,9 @@ pub struct State {
 }
 
 impl State {
-    /// The bin on the airframe list, with the built-in and the user's presets loaded.
-    pub fn new() -> Self {
+    /// The bin on the airframe list, with the built-in presets and the user's from `env.presets_dir` loaded.
+    pub fn from_env(env: &crate::app::env::Env) -> Self {
+        let presets_dir = env.presets_dir.as_deref();
         State {
             category: Category::Airframe,
             search: String::new(),
@@ -175,7 +175,7 @@ impl State {
             dragging: None,
             hovered: false,
             last_click: None,
-            presets: presets::load_all(),
+            presets: presets::load_all(presets_dir),
         }
     }
 
@@ -283,8 +283,8 @@ impl State {
         }
     }
 
-    fn reload_presets(&mut self) {
-        self.presets = presets::load_all();
+    fn reload_presets(&mut self, ctx: &Ctx) {
+        self.presets = presets::load_all(ctx.env.presets_dir.as_deref());
     }
 
     /// Handles one of the bin's messages.
@@ -339,10 +339,10 @@ impl State {
             Message::SavePreset => {
                 let captured = ctx.selection.part().and_then(|id| presets::Preset::capture(ctx.doc.rocket(), id));
                 match captured {
-                    Some(preset) => match presets::save(&preset) {
+                    Some(preset) => match presets::save(&preset, ctx.env.presets_dir.as_deref()) {
                         Ok(_) => {
                             ctx.notify(format!("Saved preset {}", preset.name));
-                            self.reload_presets();
+                            self.reload_presets(ctx);
                         }
                         Err(e) => ctx.notify(format!("Could not save the preset: {e}")),
                     },
@@ -352,7 +352,7 @@ impl State {
             Message::DeletePreset(i) => {
                 if let Some(file) = self.presets.get(i).and_then(|p| p.file.clone()) {
                     let _ = std::fs::remove_file(file);
-                    self.reload_presets();
+                    self.reload_presets(ctx);
                 }
             }
         }
@@ -401,9 +401,9 @@ impl State {
                 current = items::motor_mount(rocket, ctx.selection)
                     .and_then(|mount| rocket.active_configuration().slot(mount.id).and_then(|s| s.motor.as_ref()))
                     .is_some_and(|r| bowshock_sim::from_model::find_motor_index(ctx.physics.motors(), r) == Some(*i));
-                let whole = |metres: f64| num(metres, Quantity::Length, ctx.units, 0).0;
+                let whole = |metres: f64| num_scaled(metres, Quantity::Length, ctx.units, 0).0;
                 let (dia, length) = (whole(m.diameter), whole(m.length));
-                let impulse = with_unit(m.total_impulse(), Quantity::Impulse, ctx.units, 0);
+                let impulse = with_unit_scaled(m.total_impulse(), Quantity::Impulse, ctx.units, 0);
                 (format!("Ø{dia} × {length} · {impulse}"), rows::motor_outline(), None)
             }
             Item::Preset(i) => {
@@ -603,7 +603,7 @@ fn internal_size(kind: &InternalKind, inner: Option<f64>, u: UnitSystem) -> Stri
         InternalKind::Parachute { diameter, line_count, .. } => format!("Ø{} · {line_count} lines", len(diameter, u)),
         InternalKind::Streamer { length, width, .. } => format!("{} × {}", len(width, u), len(length, u)),
         InternalKind::ShockCord { length, .. } => format!("{} long", len(length, u)),
-        InternalKind::MassComponent { mass, length, .. } => format!("{} · {}", with_unit(mass, Quantity::Mass, u, 0), len(length, u)),
+        InternalKind::MassComponent { mass, length, .. } => format!("{} · {}", with_unit_scaled(mass, Quantity::Mass, u, 0), len(length, u)),
     }
 }
 

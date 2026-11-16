@@ -63,8 +63,11 @@ pub fn top_bar(ctx: &Ctx) -> Element<'_, Message> {
     let name = row![text(ctx.doc.title()).font(MONO).size(TEXT_BODY).style(theme::ink), ext, dirty, caret].spacing(SPACE_1 + 2.0).align_y(Center);
     let file = iced::widget::button(name).padding([4.0, SPACE_2]).style(theme::ghost).on_press(Message::ToggleFileMenu);
 
-    let undo = icon_button(Mark::Undo, "Undo").shortcut(UNDO_TIP);
-    let redo = icon_button(Mark::Redo, "Redo").shortcut(REDO_TIP);
+    let step = |verb: &'static str, label: Option<&str>| -> std::borrow::Cow<'static, str> {
+        label.map_or(std::borrow::Cow::Borrowed(verb), |s| std::borrow::Cow::Owned(format!("{verb} {}", s.to_lowercase())))
+    };
+    let undo = icon_button(Mark::Undo, step("Undo", ctx.doc.undo_label())).shortcut(UNDO_TIP);
+    let redo = icon_button(Mark::Redo, step("Redo", ctx.doc.redo_label())).shortcut(REDO_TIP);
     let undo: Element<'_, Message> = if ctx.doc.can_undo() { undo.on_press(Message::Undo).into() } else { undo.into() };
     let redo: Element<'_, Message> = if ctx.doc.can_redo() { redo.on_press(Message::Redo).into() } else { redo.into() };
 

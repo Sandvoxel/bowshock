@@ -297,7 +297,6 @@ pub struct InternalDrag {
     /// The bin row it came from, if it came from there.
     pub row: Option<usize>,
     /// The bin's name for it, for the cursor tag of the surface that shows the targets.
-    #[allow(dead_code)] // Read by the viewport / lanes overlays.
     pub name: &'static str,
     /// Its geometry.
     pub kind: InternalKind,
@@ -311,26 +310,6 @@ pub struct InternalDrag {
 pub fn start_internal(ctx: &mut Ctx, row: Option<usize>, name: &'static str, kind: InternalKind) {
     ctx.doc.begin_drag(&format!("Add {}", name.to_lowercase()));
     ctx.drag.internal = Some(InternalDrag { row, name, kind, origin: None, target: None });
-}
-
-#[allow(dead_code)] // Called by the viewport / lanes when an internal part is picked up.
-/// Picks up internal part `id` of the rocket. Nothing happens while another drag is in progress.
-pub fn grab_internal(ctx: &mut Ctx, id: PartId) -> bool {
-    if ctx.drag.active() {
-        return false;
-    }
-    ctx.doc.begin_drag("Move part");
-    match ctx.doc.drag_update(|r| r.remove_internal(id)) {
-        Some(part) => {
-            ctx.selection = Selection::Part(id);
-            ctx.drag.internal = Some(InternalDrag { row: None, name: part.kind.name(), kind: part.kind.clone(), origin: Some(part), target: None });
-            true
-        }
-        None => {
-            ctx.doc.end_drag(false);
-            false
-        }
-    }
 }
 
 /// Ends the internal drag: lands it on its target if `drop`, else abandons it (a part picked up from the rocket goes back as it

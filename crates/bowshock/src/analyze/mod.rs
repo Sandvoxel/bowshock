@@ -12,13 +12,12 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::app::worker;
 use bowshock_model::{CfdGrid, CfdLiftTable, CfdTable};
 use bowshock_sim::from_model::Phase;
-use iced::futures::channel::{mpsc, oneshot};
 use iced::{keyboard, Element, Task};
 
 use crate::app::{self, Ctx};
@@ -132,6 +131,8 @@ pub struct Key {
     serial: u64,
     /// The CFD table the drag comes from (its key and when it was solved), for the CFD table method.
     cfd: Option<(u64, u64, Option<u64>)>,
+    /// The key and solve time of each stage's table Dispersion flies on, for the CFD table method.
+    stage_tables: Vec<(u64, u64)>,
 }
 
 /// The Analyze screen's state.
@@ -189,8 +190,13 @@ fn mach_text(m: f64) -> String {
 }
 
 impl State {
-    /// An Analyze state showing Aerodynamics with the default conditions.
+    /// An Analyze state showing Aerodynamics with the default conditions, reading nothing from the host.
     pub fn new() -> Self {
+        State::from_env(&crate::app::env::Env::for_tests())
+    }
+
+    /// [`State::new`] with the start-up comparison file and scripted CFD demos from `env`.
+    pub fn from_env(env: &crate::app::env::Env) -> Self {
         let cond = Conditions::default();
         State {
             analysis: Analysis::Aerodynamics,
@@ -212,14 +218,14 @@ impl State {
             show_table: false,
             plot: PlotState::new((0.0, 1.0)),
             default_x: None,
-            compare: compare_from_env(),
+            compare: env.compare_file.as_deref().and_then(compare_from_path),
             compare_open: false,
             compare_out: None,
             wanted_cmp: None,
             compare_rev: 0,
             overlay: None,
             base_method: Method::Extended,
-            cfd: Cfd::default(),
+            cfd: Cfd { demo: solve_demo::from_names(&env.cfd_demo), ..Cfd::default() },
             optimize: optimize_view::State::new(),
         }
     }
@@ -361,18 +367,13 @@ impl State {
         };
         let csv = out.table(ctx.units).csv();
         let name = format!("{}-{}.csv", ctx.doc.title(), out.analysis.name().to_lowercase().replace(' ', "-"));
-        Task::perform(
-            async move {
-                let Some(file) = rfd::AsyncFileDialog::new().set_title("Export analysis").set_file_name(name).add_filter("CSV", &["csv"]).save_file().await
-                else {
-                    return Ok(None);
-                };
-                let path = file.path().to_path_buf();
-                std::fs::write(&path, csv).map_err(|e| e.to_string())?;
-                Ok(Some(path))
-            },
-            |result| app::Message::Analyze(Message::Exported(result)),
-        )
+        app::dialogs::save_file(ctx.env.export_file.clone(), "Export analysis", name, ("CSV", &["csv"]), move |path| {
+            let res = match path {
+                Some(p) => std::fs::write(&p, &csv).map(|()| Some(p)).map_err(|e| e.to_string()),
+                None => Ok(None),
+            };
+            app::Message::Analyze(Message::Exported(res))
+        })
     }
 
     /// Called by the app after every message while Analyze is showing: starts a computation when what is wanted changed and
@@ -385,9 +386,20 @@ impl State {
         }
         let phase = ctx.physics.phase();
         let solve = self.refresh_cfd(ctx, phase);
+        // Dispersion flies each stage on its own stored table: a stage's table that is missing or stale flies on Extended.
+        let stage_tables: Vec<Option<bowshock_sim::DragTable>> = if self.analysis == Analysis::Dispersion {
+            (phase.first_stage()..=ctx.physics.stages().len().max(1)).map(|s| ctx.physics.drag_table(ctx.doc.rocket(), s).ok()).collect()
+        } else {
+            Vec::new()
+        };
+        let stage_stamp: Vec<(u64, u64)> = (phase.first_stage()..=ctx.physics.stages().len().max(1))
+            .zip(&stage_tables)
+            .filter_map(|(s, t)| t.as_ref().and_then(|_| ctx.doc.rocket().cfd_table(s as u32)).map(|t| (t.key, t.solved_at)))
+            .collect();
         let table = self.cfd_table_for(self.analysis);
         // The CFD table method with no table to draw (not solved yet, a geometry the solver cannot take) shows the method before it.
-        let method = if self.method == Method::CfdTable && table.is_none() { self.base_method } else { self.method };
+        let no_table = table.is_none() || (self.analysis == Analysis::Dispersion && stage_tables.iter().all(Option::is_none));
+        let method = if self.method == Method::CfdTable && no_table { self.base_method } else { self.method };
         let stamp = |t: &Option<Arc<CfdTable>>| t.as_ref().map(|t| (t.key, t.solved_at, t.lift.as_ref().map(|l| l.solved_at)));
         let key = Key {
             revision: ctx.doc.revision(),
@@ -397,13 +409,19 @@ impl State {
             conditions: self.cond,
             serial: self.serial,
             cfd: if method == Method::CfdTable { stamp(&table) } else { None },
+            stage_tables: if method == Method::CfdTable { stage_stamp.clone() } else { Vec::new() },
         };
         let mut task = solve;
         if let Some(Comparison::Method(m)) = self.compare {
             let wants = uses_cfd(key.analysis);
             // Comparing with the CFD table needs one to compare with.
-            let ready = m != Method::CfdTable || table.is_some();
-            let ckey = Key { method: m, cfd: if m == Method::CfdTable { stamp(&table) } else { None }, ..key.clone() };
+            let ready = m != Method::CfdTable || !no_table;
+            let ckey = Key {
+                method: m,
+                cfd: if m == Method::CfdTable { stamp(&table) } else { None },
+                stage_tables: if m == Method::CfdTable { stage_stamp.clone() } else { Vec::new() },
+                ..key.clone()
+            };
             if wants && ready && self.wanted_cmp.as_ref() != Some(&ckey) {
                 self.wanted_cmp = Some(ckey.clone());
                 if let Ok((jobs, _)) = compute::jobs(ctx.doc.rocket(), ctx.physics.motors(), ckey.phase) {
@@ -414,6 +432,7 @@ impl State {
                         jobs,
                         bands: ctx.doc.rocket().stability_bands(),
                         cfd: if m == Method::CfdTable { table.clone() } else { None },
+                        drag_tables: if m == Method::CfdTable && ckey.analysis == Analysis::Dispersion { stage_tables.clone() } else { Vec::new() },
                     };
                     task = Task::batch([task, spawn(request, ckey, true)]);
                 }
@@ -437,6 +456,7 @@ impl State {
                         jobs,
                         bands: ctx.doc.rocket().stability_bands(),
                         cfd: if key.method == Method::CfdTable { table } else { None },
+                        drag_tables: if key.method == Method::CfdTable && key.analysis == Analysis::Dispersion { stage_tables.clone() } else { Vec::new() },
                     };
                     task = Task::batch([task, spawn(request, key, false)]);
                 }
@@ -464,29 +484,17 @@ impl State {
         };
         self.cfd.serial += 1;
         let serial = self.cfd.serial;
-        let cancel = Arc::new(AtomicBool::new(false));
         let key = Some(cfd::lift_key(plan.geometry, &nodes));
         let tracker = solve::Tracker::new(solve::Kind::Stability, solve::Tracker::stability_units(&nodes, &cfd::LIFT_ALPHAS), "");
         let job = cfd::LiftJob { plan: plan.clone(), nodes };
         let script = self.cfd.demo.pop_front().map(|demo| solve_demo::lift_events(demo, &job));
         let scripted = script.is_some();
-        let (task, handle) = match script {
+        let (task, stream) = match script {
             Some(events) => spawn_script(events, serial),
-            None => spawn_lift(job, cancel.clone(), serial),
+            None => spawn_lift(job, serial),
         };
-        self.cfd.lift_solving = Some(Solving {
-            serial,
-            tracker,
-            job: None,
-            grid: CfdGrid::Coarse,
-            altitude: None,
-            started: Instant::now(),
-            cancelling: false,
-            scripted,
-            key,
-            cancel,
-            handle,
-        });
+        self.cfd.lift_solving =
+            Some(Solving { tracker, job: None, grid: CfdGrid::Coarse, altitude: None, started: Instant::now(), cancelling: false, scripted, key, stream });
         task
     }
 
@@ -504,12 +512,8 @@ impl State {
             return Task::none();
         }
         let rocket = ctx.doc.rocket();
-        if self.cfd.plan_at != Some((ctx.doc.revision(), phase, ctx.units)) {
-            let plan = bowshock_sim::from_model::vehicle(rocket, ctx.physics.motors(), phase)
-                .map_err(|e| e.to_string())
-                .and_then(|v| cfd::plan(rocket, &v, ctx.units));
-            self.cfd.plan = Arc::new(plan);
-            self.cfd.plan_at = Some((ctx.doc.revision(), phase, ctx.units));
+        if let Some(plan) = ctx.physics.cfd_plan(phase.first_stage()) {
+            self.cfd.plan = Arc::new(plan.clone());
         }
         let stage = phase.first_stage() as u32;
         let stored = rocket.cfd_table(stage);
@@ -539,21 +543,19 @@ impl State {
         }
         self.cfd.serial += 1;
         let serial = self.cfd.serial;
-        let cancel = Arc::new(AtomicBool::new(false));
         let grid = force.unwrap_or(CfdGrid::Coarse);
         let job = Arc::new(cfd::Job { plan: plan.clone(), altitude: self.cond.altitude, nodes: nodes.clone(), stage, grid });
         let tracker = solve::Tracker::new(solve::Kind::Drag, solve::Tracker::drag_units(&nodes), "");
         let script = self.cfd.demo.pop_front().map(|demo| solve_demo::events(demo, &job));
         let scripted = script.is_some();
-        let (task, handle) = match script {
+        let (task, stream) = match script {
             Some(events) => spawn_script(events, serial),
-            None => spawn_solve(job.clone(), cancel.clone(), serial),
+            None => spawn_solve(job.clone(), serial),
         };
         self.cfd.stopped = None;
         self.cfd.summary = None;
         self.cfd.lift_summary = None;
         self.cfd.solving = Some(Solving {
-            serial,
             tracker,
             job: Some(job),
             grid,
@@ -562,8 +564,7 @@ impl State {
             cancelling: false,
             scripted,
             key,
-            cancel,
-            handle,
+            stream,
         });
         task
     }
@@ -574,7 +575,7 @@ impl State {
         if !uses_cfd(analysis) || !matches!(self.cfd.status, cfd::Status::Fresh | cfd::Status::Stale) {
             return None;
         }
-        let table = self.cfd.table.clone().filter(|t| analysis == Analysis::Stability || cfd::covers(t, self.cond.mach))?;
+        let table = self.cfd.table.clone().filter(|t| matches!(analysis, Analysis::Stability | Analysis::Dispersion) || cfd::covers(t, self.cond.mach))?;
         // The 3D stability solve is drawn only while it is fresh; a stale one leaves Extended's margin, CP and CNα.
         let fresh = cfd::lift_status(&self.cfd.plan, table.lift.as_ref(), self.cond.mach) == cfd::Status::Fresh;
         Some(if table.lift.is_some() && !fresh { Arc::new(CfdTable { lift: None, ..(*table).clone() }) } else { table })
@@ -583,7 +584,7 @@ impl State {
     /// A message from the running solve: what it reports goes to the solve's tracker; its end stores the table (or the 3D solve), or
     /// says why there is none, or, after a cancel, offers the points solved.
     fn cfd_event(&mut self, serial: u64, event: cfd::Event, ctx: &mut Ctx) {
-        let solving = [self.cfd.solving.as_mut(), self.cfd.lift_solving.as_mut()].into_iter().flatten().find(|s| s.serial == serial);
+        let solving = [self.cfd.solving.as_mut(), self.cfd.lift_solving.as_mut()].into_iter().flatten().find(|s| s.stream.serial() == serial);
         let Some(solving) = solving else { return };
         match event {
             cfd::Event::Device(name) => solving.tracker.device = name,
@@ -598,7 +599,7 @@ impl State {
     /// The drag solve ended: store its table, or say why there is none, or (after a cancel) keep what was solved on offer.
     fn drag_finished(&mut self, result: Result<CfdTable, String>, ctx: &mut Ctx) {
         let Some(mut solving) = self.cfd.solving.take() else { return };
-        solving.handle.abort();
+        solving.stream.abort();
         let key = solving.key;
         match result {
             Ok(table) => {
@@ -638,7 +639,7 @@ impl State {
     /// discards them.
     fn lift_finished(&mut self, result: Result<CfdLiftTable, String>, ctx: &mut Ctx) {
         let Some(mut solving) = self.cfd.lift_solving.take() else { return };
-        solving.handle.abort();
+        solving.stream.abort();
         match result {
             Ok(table) => {
                 solving.tracker.finish();
@@ -660,10 +661,10 @@ impl State {
     /// it had. A scripted solve (screenshots) ends at once.
     fn cancel_solve(&mut self, ctx: &mut Ctx) {
         let Some(s) = self.cfd.solving.as_mut().or(self.cfd.lift_solving.as_mut()) else { return };
-        s.cancel.store(true, Ordering::Relaxed);
+        s.stream.request_cancel();
         s.cancelling = true;
         if s.scripted {
-            let (serial, lift) = (s.serial, self.cfd.lift_solving.is_some());
+            let (serial, lift) = (s.stream.serial(), self.cfd.lift_solving.is_some());
             let end = if lift { cfd::Event::LiftFinished(Err(cfd::CANCELLED.to_string())) } else { cfd::Event::Finished(Err(cfd::CANCELLED.to_string())) };
             self.cfd_event(serial, end, ctx);
         }
@@ -764,8 +765,6 @@ pub fn other_method(m: Method) -> Method {
 
 /// The CFD table method's state: the document mapped for the solver, the table stored for it, and the solve in progress.
 pub(crate) struct Cfd {
-    /// The revision and phase `plan` was made for.
-    plan_at: Option<(u64, Phase, UnitSystem)>,
     /// The geometry as the solver takes it, or why it cannot.
     pub(crate) plan: Arc<Result<cfd::Plan, String>>,
     /// How the stored table relates to the rocket and the conditions on screen.
@@ -795,7 +794,6 @@ pub(crate) struct Cfd {
 impl Default for Cfd {
     fn default() -> Self {
         Cfd {
-            plan_at: None,
             plan: Arc::new(Err("the geometry has not been mapped yet".to_string())),
             status: cfd::Status::Missing,
             table: None,
@@ -807,14 +805,13 @@ impl Default for Cfd {
             failed: None,
             force: None,
             serial: 0,
-            demo: solve_demo::from_env(),
+            demo: VecDeque::new(),
         }
     }
 }
 
 /// A CFD solve in progress.
 pub(crate) struct Solving {
-    serial: u64,
     /// What the worker has reported.
     pub(crate) tracker: solve::Tracker,
     /// The job of a drag solve, for the table of a solve that is stopped early.
@@ -831,8 +828,7 @@ pub(crate) struct Solving {
     scripted: bool,
     /// The key of the table it will produce.
     key: Option<u64>,
-    cancel: Arc<AtomicBool>,
-    handle: iced::task::Handle,
+    stream: worker::StreamHandle,
 }
 
 /// A drag solve that was cancelled after some points: the partial curve and, with two or more points, the table to keep.
@@ -855,83 +851,57 @@ pub(crate) struct Stopped {
 
 /// Whether the analysis uses the CFD table when the method is `CFD table` (the others do not use the method).
 fn uses_cfd(analysis: Analysis) -> bool {
-    matches!(analysis, Analysis::Aerodynamics | Analysis::Drag | Analysis::Stability)
+    matches!(analysis, Analysis::Aerodynamics | Analysis::Drag | Analysis::Stability | Analysis::Dispersion)
 }
 
 /// Seconds between the worker's beats.
 const BEAT: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// Runs `work` on its own thread and delivers what it sends, then the event it returns (the end of the solve), as
-/// [`Message::Cfd`]. A second thread beats [`cfd::Event::Tick`] every quarter second until the work is over, so the clock on screen
-/// moves between the solver's reports. The handle drops the stream (the solver, told to stop through its cancel flag, ends its run
-/// in flight and the thread exits).
-fn spawn_worker(serial: u64, work: impl FnOnce(mpsc::UnboundedSender<cfd::Event>) -> cfd::Event + Send + 'static) -> (Task<app::Message>, iced::task::Handle) {
-    let (tx, rx) = mpsc::unbounded();
-    let working = Arc::new(AtomicBool::new(true));
-    let (beat, flag) = (tx.clone(), working.clone());
-    std::thread::spawn(move || {
-        while flag.load(Ordering::Relaxed) {
-            std::thread::sleep(BEAT);
-            if beat.unbounded_send(cfd::Event::Tick).is_err() {
-                break;
-            }
-        }
-    });
-    std::thread::spawn(move || {
-        let last = work(tx.clone());
-        working.store(false, Ordering::Relaxed);
-        let _ = tx.unbounded_send(last);
-    });
-    Task::run(rx, move |event| app::Message::Analyze(Message::Cfd(serial, event))).abortable()
-}
-
-/// Runs `job` on its own thread and delivers its progress and its end as [`Message::Cfd`].
-fn spawn_solve(job: Arc<cfd::Job>, cancel: Arc<AtomicBool>, serial: u64) -> (Task<app::Message>, iced::task::Handle) {
-    spawn_worker(serial, move |tx| {
-        cfd::Event::Finished(cfd::solve(&job, &cancel, move |event| {
-            let _ = tx.unbounded_send(event);
-        }))
-    })
+/// Runs `job` on its own thread and delivers its progress and its end as [`Message::Cfd`], with a beat so the clock on screen moves.
+fn spawn_solve(job: Arc<cfd::Job>, serial: u64) -> (Task<app::Message>, worker::StreamHandle) {
+    worker::spawn_stream(
+        serial,
+        Some((BEAT, || cfd::Event::Tick)),
+        move |cancel, tx| {
+            cfd::Event::Finished(cfd::solve(&job, &cancel, move |event| {
+                let _ = tx.unbounded_send(event);
+            }))
+        },
+        |serial, event| app::Message::Analyze(Message::Cfd(serial, event)),
+    )
 }
 
 /// Runs the 3D stability solve of `job` on its own thread, like [`spawn_solve`].
-fn spawn_lift(job: cfd::LiftJob, cancel: Arc<AtomicBool>, serial: u64) -> (Task<app::Message>, iced::task::Handle) {
-    spawn_worker(serial, move |tx| {
-        cfd::Event::LiftFinished(cfd::solve_lift(&job, &cancel, move |event| {
-            let _ = tx.unbounded_send(event);
-        }))
-    })
+fn spawn_lift(job: cfd::LiftJob, serial: u64) -> (Task<app::Message>, worker::StreamHandle) {
+    worker::spawn_stream(
+        serial,
+        Some((BEAT, || cfd::Event::Tick)),
+        move |cancel, tx| {
+            cfd::Event::LiftFinished(cfd::solve_lift(&job, &cancel, move |event| {
+                let _ = tx.unbounded_send(event);
+            }))
+        },
+        |serial, event| app::Message::Analyze(Message::Cfd(serial, event)),
+    )
 }
 
 /// Plays `events` as the messages of the solve `serial` instead of running the solver (see [`solve_demo`]).
-fn spawn_script(events: Vec<cfd::Event>, serial: u64) -> (Task<app::Message>, iced::task::Handle) {
-    Task::run(iced::futures::stream::iter(events), move |event| app::Message::Analyze(Message::Cfd(serial, event))).abortable()
+fn spawn_script(events: Vec<cfd::Event>, serial: u64) -> (Task<app::Message>, worker::StreamHandle) {
+    worker::spawn_iter(serial, events, |serial, event| app::Message::Analyze(Message::Cfd(serial, event)))
 }
 
 /// Opens the file dialog for an export of `source` and delivers its text as [`Message::CompareFile`].
 fn pick_compare_file(source: import::Source) -> Task<app::Message> {
-    Task::perform(
-        async move {
-            let Some(file) =
-                rfd::AsyncFileDialog::new().set_title(format!("Import {} CSV", source.label())).add_filter("CSV", &["csv", "txt"]).pick_file().await
-            else {
-                return Ok(None);
-            };
-            let path = file.path().to_path_buf();
-            let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-            let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-            Ok(Some((source, name, text)))
-        },
-        |result| app::Message::Analyze(Message::CompareFile(result)),
-    )
+    app::dialogs::pick_named_text(format!("Import {} CSV", source.label()), ("CSV", &["csv", "txt"]), move |res| {
+        app::Message::Analyze(Message::CompareFile(res.map(|opt| opt.map(|(name, text)| (source, name, text)))))
+    })
 }
 
-/// The file named by `BOWSHOCK_COMPARE_FILE`, as a comparison (a name with `rasaero` in it is read as RASAero II's format).
-fn compare_from_env() -> Option<Comparison> {
-    let path = std::env::var_os("BOWSHOCK_COMPARE_FILE")?;
-    let name = std::path::Path::new(&path).file_name()?.to_string_lossy().into_owned();
+/// The file at `path` (`BOWSHOCK_COMPARE_FILE`), as a comparison (a name with `rasaero` in it is read as RASAero II's format).
+fn compare_from_path(path: &str) -> Option<Comparison> {
+    let name = std::path::Path::new(path).file_name()?.to_string_lossy().into_owned();
     let source = if name.to_lowercase().contains("rasaero") { import::Source::RasAero } else { import::Source::OpenRocket };
-    match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| import::parse(&t, source)) {
+    match std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|t| import::parse(&t, source)) {
         Ok(data) => Some(Comparison::File { data: Arc::new(data), name }),
         Err(e) => {
             eprintln!("BOWSHOCK_COMPARE_FILE: {e}");
@@ -942,14 +912,8 @@ fn compare_from_env() -> Option<Comparison> {
 
 /// Runs `request` on its own thread and delivers the result as [`Message::Done`] (or [`Message::CompareDone`] when `compare`).
 fn spawn(request: compute::Request, key: Key, compare: bool) -> Task<app::Message> {
-    Task::perform(
-        async move {
-            let (tx, rx) = oneshot::channel();
-            std::thread::spawn(move || {
-                let _ = tx.send(Arc::new(compute::compute(&request)));
-            });
-            rx.await.ok()
-        },
+    worker::perform(
+        move || Arc::new(compute::compute(&request)),
         move |out| {
             let key = key.clone();
             app::Message::Analyze(if compare { Message::CompareDone(key, out) } else { Message::Done(key, out) })

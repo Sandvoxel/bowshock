@@ -6,7 +6,6 @@
 //! of the dry parts plus the loaded motors at liftoff (and the burned-out casings, [`Physics::burnout`]).
 
 use std::collections::HashSet;
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use bowshock_model::{ConfigId, MotorMount, PartId, Rocket, Stage};
@@ -21,11 +20,7 @@ pub const BALANCE_MACH: f64 = 0.3;
 /// Where the user's own motors live: the `.eng` files they loaded and the ThrustCurve.org downloads (`<motorId>.motor`).
 /// `$BOWSHOCK_MOTORS_DIR`, else `~/.config/bowshock/motors/`.
 pub fn user_motors_dir() -> Option<PathBuf> {
-    user_dir_from(std::env::var_os("BOWSHOCK_MOTORS_DIR"), std::env::var_os("HOME"))
-}
-
-fn user_dir_from(over: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
-    over.filter(|s| !s.is_empty()).map(PathBuf::from).or_else(|| home.map(|h| PathBuf::from(h).join(".config").join("bowshock").join("motors")))
+    super::env::default_motors_dir()
 }
 
 /// Where a motor in the database came from.
@@ -124,12 +119,18 @@ fn import_files(db: &mut MotorDb, dir: Option<&Path>, paths: &[PathBuf]) -> Stri
 /// Cached physics of the open document. See the module docs.
 pub struct Physics {
     motors: MotorDb,
+    /// Where the user's motors are kept (`None`: nowhere, as in tests).
+    motors_dir: Option<PathBuf>,
     /// Ids of the motors downloaded from ThrustCurve.org (cached or fetched this session).
     downloaded: HashSet<String>,
     /// What is flying: the whole stack or only the upper stages. A view setting, not part of the document.
     phase: Phase,
     /// The document revision and phase the cache was computed for.
     computed_for: Option<(u64, Phase)>,
+    /// The CFD plan of the stack from each stage (index `k` is model stage `k + 1`).
+    cfd_plans: Vec<Result<crate::analyze::cfd::Plan, String>>,
+    /// The units `cfd_plans` was made in.
+    cfd_units: Option<crate::units::UnitSystem>,
     liftoff: Result<Balance, BridgeError>,
     burnout: Result<Balance, BridgeError>,
     warnings: Vec<Warning>,
@@ -151,12 +152,24 @@ impl Default for Physics {
 impl Physics {
     /// An empty cache with the bundled motor database.
     pub fn new() -> Self {
-        let (motors, downloaded) = Physics::initial_motors();
+        Physics::with_motors_dir(None)
+    }
+
+    /// The cache with the user's motors from `env.motors_dir` added to the bundled database.
+    pub fn from_env(env: &super::env::Env) -> Self {
+        Physics::with_motors_dir(env.motors_dir.clone())
+    }
+
+    fn with_motors_dir(motors_dir: Option<PathBuf>) -> Self {
+        let (motors, downloaded) = Physics::initial_motors(motors_dir.as_deref());
         Physics {
             motors,
+            motors_dir,
             downloaded,
             phase: Phase::Full,
             computed_for: None,
+            cfd_plans: Vec::new(),
+            cfd_units: None,
             liftoff: Err(BridgeError::EmptyRocket),
             burnout: Err(BridgeError::EmptyRocket),
             warnings: Vec::new(),
@@ -167,16 +180,11 @@ impl Physics {
         }
     }
 
-    /// The bundled catalogue plus the user's directory (not in tests, which must not depend on the machine), and the ids of
-    /// the cached downloads. The catalogue decodes in a few milliseconds, so this runs at startup.
-    fn initial_motors() -> (MotorDb, HashSet<String>) {
+    /// The bundled catalogue plus the user's directory, and the ids of the cached downloads. The catalogue decodes in a few
+    /// milliseconds, so this runs at startup.
+    fn initial_motors(dir: Option<&Path>) -> (MotorDb, HashSet<String>) {
         let mut db = MotorDb::bundled();
-        let mut downloaded = HashSet::new();
-        if !cfg!(test) {
-            if let Some(dir) = user_motors_dir() {
-                downloaded = load_dir(&mut db, &dir);
-            }
-        }
+        let downloaded = dir.map(|dir| load_dir(&mut db, dir)).unwrap_or_default();
         (db, downloaded)
     }
 
@@ -194,15 +202,14 @@ impl Physics {
 
     /// Loads the user's `.eng` files (from the file dialog), keeps copies in [`user_motors_dir`], and returns the notice.
     pub fn load_user_motors(&mut self, paths: &[PathBuf]) -> String {
-        import_files(&mut self.motors, user_motors_dir().as_deref(), paths)
+        import_files(&mut self.motors, self.motors_dir.as_deref(), paths)
     }
 
     /// Adds a motor downloaded from ThrustCurve.org (replacing the catalogue's copy of it, if any) and caches it in
-    /// [`user_motors_dir`] (not in tests) so it loads at the next start. Returns its index and, when the cache could not be
+    /// [`user_motors_dir`] (when it has one) so it loads at the next start. Returns its index and, when the cache could not be
     /// written, why.
     pub fn add_downloaded(&mut self, motor: Motor) -> (usize, Option<String>) {
-        let dir = if cfg!(test) { None } else { user_motors_dir() };
-        let kept = dir.map(|dir| bowshock_motors::save_cached(&dir, &motor, &bowshock_motors::today()));
+        let kept = self.motors_dir.as_deref().map(|dir| bowshock_motors::save_cached(dir, &motor, &bowshock_motors::today()));
         let note = match kept {
             Some(Err(e)) => Some(format!("{}: downloaded, but not kept for next time ({e})", motor.designation)),
             _ => None,
@@ -226,19 +233,46 @@ impl Physics {
         self.phase = phase;
     }
 
-    /// Recomputes if `revision` or the phase changed since the last time. Returns whether it did.
-    pub fn sync(&mut self, rocket: &Rocket, revision: u64) -> bool {
-        if self.computed_for == Some((revision, self.phase)) {
+    /// Recomputes if `revision`, the phase or the units changed since the last time. Returns whether it did.
+    pub fn sync(&mut self, rocket: &Rocket, revision: u64, units: crate::units::UnitSystem) -> bool {
+        let geom_same = self.computed_for == Some((revision, self.phase));
+        if geom_same && self.cfd_units == Some(units) {
             return false;
         }
-        // A phase that no longer exists (stages were removed) falls back to the whole stack.
-        let stages = rocket.stages();
-        if self.phase.first_stage() > stages.len().max(1) {
-            self.phase = Phase::Full;
+        if !geom_same {
+            // A phase that no longer exists (stages were removed) falls back to the whole stack.
+            let stages = rocket.stages();
+            if self.phase.first_stage() > stages.len().max(1) {
+                self.phase = Phase::Full;
+            }
+            self.compute(rocket, stages);
+            self.computed_for = Some((revision, self.phase));
         }
-        self.compute(rocket, stages);
-        self.computed_for = Some((revision, self.phase));
+        self.cfd_plans = (1..=self.stages.len().max(1))
+            .map(|stage| {
+                let phase = if stage <= 1 { Phase::Full } else { Phase::UpperFrom(stage) };
+                from_model::vehicle(rocket, &self.motors, phase).map_err(|e| e.to_string()).and_then(|v| crate::analyze::cfd::plan(rocket, &v, units))
+            })
+            .collect();
+        self.cfd_units = Some(units);
         true
+    }
+
+    /// The CFD plan of the stack from model stage `stage` (1 is the whole rocket), cached per revision and units.
+    pub fn cfd_plan(&self, stage: usize) -> Option<&Result<crate::analyze::cfd::Plan, String>> {
+        self.cfd_plans.get(stage.checked_sub(1)?)
+    }
+
+    /// The stored CFD drag table the stack from `stage` flies on, or why it flies on the build-up instead.
+    pub fn drag_table(&self, rocket: &Rocket, stage: usize) -> Result<bowshock_sim::DragTable, String> {
+        let Some(table) = rocket.cfd_table(stage as u32) else {
+            return Err("No CFD table for this rocket yet: solve one in Analyze > CFD table. Flying on Extended.".to_string());
+        };
+        match self.cfd_plan(stage) {
+            Some(Ok(plan)) if plan.geometry == table.geometry => Ok(bowshock_sim::DragTable::from_cfd(table)),
+            Some(Ok(_)) | None => Err("CFD table is stale (the rocket changed): flying on Extended.".to_string()),
+            Some(Err(why)) => Err(format!("CFD cannot model this rocket ({why}): flying on Extended.")),
+        }
     }
 
     fn compute(&mut self, rocket: &Rocket, stages: Vec<Stage>) {
@@ -289,19 +323,18 @@ impl Physics {
     }
 
     /// The same with the motors burned out (casings only).
-    #[allow(dead_code)] // For Analyze and the lanes (CG at burnout).
+    #[cfg(test)]
     pub fn burnout(&self) -> Option<&Balance> {
         self.burnout.as_ref().ok()
     }
 
     /// Why there is no balance (an empty rocket, a motor that is not in the database).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn error(&self) -> Option<&BridgeError> {
         self.liftoff.as_ref().err()
     }
 
     /// The health list of the active configuration, worst first within each topic, including `Ok` readings.
-    #[allow(dead_code)]
     pub fn warnings(&self) -> &[Warning] {
         self.previewed.as_deref().unwrap_or(&self.warnings)
     }
@@ -426,17 +459,17 @@ mod tests {
     fn sync_recomputes_only_when_the_revision_or_phase_changes() {
         let mut physics = Physics::new();
         let rocket = finned();
-        assert!(physics.sync(&Rocket::default(), 0));
+        assert!(physics.sync(&Rocket::default(), 0, crate::units::UnitSystem::MM_G_S));
         assert!(physics.balance().is_none() && physics.error() == Some(&BridgeError::EmptyRocket));
-        assert!(physics.sync(&rocket, 1));
-        assert!(!physics.sync(&rocket, 1));
+        assert!(physics.sync(&rocket, 1, crate::units::UnitSystem::MM_G_S));
+        assert!(!physics.sync(&rocket, 1, crate::units::UnitSystem::MM_G_S));
         let balance = *physics.balance().unwrap();
         // A finned rocket: CP aft of CG, positive margin, length and diameter from the geometry.
         assert!(balance.cp > balance.cg && balance.margin_cal > 0.0);
         assert!((balance.length - 1.1286).abs() < 1e-9 && (balance.reference_diameter - 0.0762).abs() < 1e-9);
         // Burnout has no more mass than liftoff.
         assert!(physics.burnout().unwrap().mass <= balance.mass);
-        assert!(physics.sync(&rocket, 2));
+        assert!(physics.sync(&rocket, 2, crate::units::UnitSystem::MM_G_S));
         // The only configuration's margin is the strip's.
         assert_eq!(physics.config_margin(rocket.active_config_id()), Some(balance.margin_cal));
         assert!(!physics.is_staged());
@@ -448,7 +481,7 @@ mod tests {
         let mut rocket = finned();
         // The bare airframe is far over the default 3 cal scale; this test is about Ok readings, so widen the document's band.
         rocket.set_stability_bands(bowshock_model::StabilityBands { over: 20.0, ..Default::default() });
-        physics.sync(&rocket, 1);
+        physics.sync(&rocket, 1, crate::units::UnitSystem::MM_G_S);
         // No motor and no recovery: warnings, but no errors; the stability reading is Ok and is not counted.
         assert!(physics.warnings().iter().any(|w| w.level == Level::Ok));
         assert!(physics.issues().count() >= 2 && physics.issues().all(|w| w.level != Level::Ok));
@@ -462,13 +495,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
-    }
-
-    #[test]
-    fn user_dir_prefers_the_env_override() {
-        assert_eq!(user_dir_from(Some("/x/motors".into()), Some("/home/u".into())), Some(PathBuf::from("/x/motors")));
-        assert_eq!(user_dir_from(None, Some("/home/u".into())), Some(PathBuf::from("/home/u/.config/bowshock/motors")));
-        assert_eq!(user_dir_from(Some("".into()), None), None);
     }
 
     #[test]
@@ -539,7 +565,7 @@ mod tests {
                 bowshock_model::InternalKind::InnerTube { outer_diameter: 0.031, thickness: 0.001, length: 0.3, motor_mount: true, overhang: 0.0 },
             )
             .unwrap();
-        physics.sync(&rocket, 1);
+        physics.sync(&rocket, 1, crate::units::UnitSystem::MM_G_S);
         let mount = physics.mounts_of_stage(&rocket, 1).remove(0);
         let indices: Vec<usize> = (0..physics.motors().len()).filter(|&i| (physics.motors().motors[i].diameter - 0.029).abs() < 1e-3).take(40).collect();
         assert!(indices.len() >= 20);

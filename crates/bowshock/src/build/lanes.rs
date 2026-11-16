@@ -279,6 +279,7 @@ impl State {
             pinned: self.pinned,
             collapsed: self.collapsed,
             lane_h: LANE_H,
+            drive_modifiers: ctx.env.drive_modifiers,
         };
         let drawing = canvas_widget(lanes).width(Fill).height(h);
         let body: Element<'a, Message> = match (&self.menu, self.collapsed) {
