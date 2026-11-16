@@ -72,6 +72,7 @@ const fn pt(mach: f64, cn_per_deg: f64, cm_per_deg: f64) -> AnfPoint {
 
 /// Wind-tunnel points (Dupuis; digitised from Yayla 2021 Fig. 3.10 p. 35 and Fig. 4.4 p. 40, digitised, ±3 %).
 /// Clusters within ΔM ≈ 0.04 are averaged.
+#[allow(clippy::approx_constant)] // 0.318 is a digitised reading, not 1/π
 pub const WIND_TUNNEL: &[AnfPoint] = &[
     pt(0.69, 0.274, -0.742),
     pt(0.79, 0.284, -0.779),
