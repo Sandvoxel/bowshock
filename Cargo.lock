@@ -448,6 +448,7 @@ version = "0.1.0"
 dependencies = [
  "bowshock-model",
  "bowshock-motors",
+ "bowshock-reference",
  "serde_json",
 ]
 

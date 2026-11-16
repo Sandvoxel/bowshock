@@ -2,6 +2,7 @@
 //! tangent-cone / shock-expansion theory, axisymmetric potential flow) and the published wind-tunnel data used for total-drag
 //! validation ([`arcas`]: NASA TN D-4013/D-4014 sounding-rocket axial force; [`tp2005`]: NASA TP-2005 base pressure with cold air jets).
 
+pub mod anf;
 pub mod arcas;
 pub mod base_drag;
 pub mod potential;
