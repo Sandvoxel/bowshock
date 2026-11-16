@@ -160,13 +160,14 @@ fn method(state: &State) -> Element<'_, Message> {
                 .boxed(),
         );
     }
+    let mut lift_row: Option<Element<'_, Message>> = None;
     if cfd_line && shown && state.cfd.table.is_some() && cfd::lift_nodes(state.cond.mach).is_some() {
         let lift: Element<'_, Message> = if solving {
-            push("Solve stability (3D)", Weight::Secondary).disabled("A solve is running").into()
+            push("Solve stability (3D)", Weight::Secondary).width(Fill).disabled("A solve is running").into()
         } else {
-            push("Solve stability (3D)", Weight::Secondary).on_press(Message::SolveLift).into()
+            push("Solve stability (3D)", Weight::Secondary).width(Fill).on_press(Message::SolveLift).into()
         };
-        buttons.push(
+        lift_row = Some(
             tooltip(lift, bubble("Normal force and CP from a 3D Euler solve at up to 8 Mach numbers, α 2° and 6°: minutes on a fast GPU"))
                 .position(tooltip::Position::Bottom)
                 .gap(SPACE_1)
@@ -176,6 +177,9 @@ fn method(state: &State) -> Element<'_, Message> {
     buttons.push(compare);
     let actions = row(buttons).spacing(SPACE_2);
     let mut col = column![strip, column(lines).spacing(SPACE_1), actions].spacing(SPACE_2).padding([0.0, 0.0]);
+    if let Some(lift) = lift_row {
+        col = col.push(lift);
+    }
     if state.compare_open {
         let item = |label: &'static str, message: Message| -> Element<'_, Message> { push(label, Weight::Secondary).on_press(message).small().into() };
         let mut items: Vec<Element<'_, Message>> = Vec::new();
