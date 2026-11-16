@@ -59,6 +59,8 @@ pub enum Action {
     MotorMount(bool),
     /// Select the part this one sits on or in.
     SelectParent,
+    /// Open the Scale overlay for the selected parts.
+    Scale,
 }
 
 /// One row of the menu.
@@ -89,6 +91,7 @@ fn rows(rocket: &Rocket, id: PartId, many: usize) -> Vec<Row> {
     let mut out = Vec::new();
     if many > 1 {
         out.push(Row::Item { label: format!("Delete {many} parts"), key: Some("Del"), action: Action::Delete, check: None, danger: true });
+        out.insert(0, Row::item("Scale…", None, Action::Scale));
         return out;
     }
     out.push(Row::item("Rename", Some("F2"), Action::Rename));
@@ -96,6 +99,7 @@ fn rows(rocket: &Rocket, id: PartId, many: usize) -> Vec<Row> {
         out.push(Row::item("Duplicate", None, Action::Duplicate));
     }
     out.push(Row::item("Focus", None, Action::Focus));
+    out.push(Row::item("Scale…", None, Action::Scale));
     if let PartRef::Internal(p) = &part {
         if let InternalKind::InnerTube { motor_mount, .. } = p.kind {
             out.push(Row::Rule);
@@ -200,6 +204,7 @@ pub fn messages(ctx: &Ctx, id: PartId, action: Action) -> Vec<app::Message> {
         Action::Duplicate => vec![app::Message::Inspector(Inspector::Duplicate)],
         Action::Delete => vec![app::Message::Delete],
         Action::Focus => vec![app::Message::Viewport(crate::viewport::Message::Focus(id))],
+        Action::Scale => vec![app::Message::Scale(app::scale::Message::OpenParts)],
         Action::Count(n) => vec![app::Message::Inspector(Inspector::Count(n))],
         Action::Detach => vec![app::Message::Inspector(Inspector::Detach)],
         Action::SplitAll => vec![app::Message::Inspector(Inspector::SplitAll)],

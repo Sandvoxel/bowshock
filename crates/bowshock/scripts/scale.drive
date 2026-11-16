@@ -1,0 +1,8 @@
+# The Scale overlay: the rocket Inspector's More menu (the "…" in the header) > "Scale rocket…", with a factor typed in.
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/scale.drive out/scale
+viewport 1280x800
+click (1255, 62)
+screenshot scale-menu.png
+click "Scale rocket…"
+type "1.5"
+screenshot scale-overlay.png

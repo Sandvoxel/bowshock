@@ -9,6 +9,7 @@ mod multi;
 pub mod part_menu;
 pub mod physics;
 pub mod refs;
+pub mod scale;
 pub mod settings;
 pub mod symmetry;
 pub mod ui;
@@ -143,6 +144,8 @@ pub struct Ctx {
     pub preview: live::Preview,
     /// The part context menu (right-click on a part), if open (see [`part_menu`]).
     pub part_menu: Option<part_menu::Open>,
+    /// The Scale overlay, if open (see [`scale`]).
+    pub scale: Option<scale::Dialog>,
 }
 
 impl Ctx {
@@ -175,6 +178,7 @@ impl Ctx {
             live: live::Live::default(),
             preview: live::Preview::default(),
             part_menu: None,
+            scale: None,
         }
     }
 
@@ -220,6 +224,7 @@ impl Ctx {
         self.import_notes.clear();
         self.symmetry = symmetry::SymmetryUi::default();
         self.part_menu = None;
+        self.scale = None;
         self.refs = refs::Ui::default();
         self.drag = Drags { symmetry: self.drag.symmetry, angle_snap: self.drag.angle_snap, ..Drags::default() };
         self.camera_fit = true;
@@ -285,6 +290,8 @@ pub enum Message {
     OpenPartMenu(PartId),
     /// An entry of the part context menu (or a click outside it).
     PartMenu(part_menu::Action),
+    /// The Scale overlay: open it, edit it, apply it.
+    Scale(scale::Message),
     /// Any key press (the app maps global shortcuts and forwards the rest to the active area).
     Key(KeyPress),
     /// Delete / Backspace: remove the selected part.
@@ -572,6 +579,7 @@ impl App {
                 return task;
             }
             Message::Cancel => {
+                ctx.scale = None;
                 if !ctx.drag.active() {
                     ctx.clear_multi();
                 }
@@ -658,6 +666,7 @@ impl App {
                     ctx.part_menu = ctx.cursor.map(|at| part_menu::Open { part, at });
                 }
             }
+            Message::Scale(m) => return scale::update(ctx, m),
             Message::PartMenu(action) => {
                 let Some(open) = ctx.part_menu.take() else { return Task::none() };
                 let tasks: Vec<Task<Message>> = part_menu::messages(ctx, open.part, action).into_iter().map(|m| self.update(m)).collect();
@@ -779,6 +788,7 @@ impl App {
         layers.extend(files::unsaved_modal(ctx));
         layers.extend(refs::menu_view(ctx));
         layers.extend(part_menu::view(ctx));
+        layers.extend(scale::view(ctx));
         let root: Element<'_, Message> = iced::widget::Stack::with_children(layers).boxed();
         // The root sees every cursor move and any release the widgets below leave alone: that is what lets a drag begun in the
         // parts bin follow the cursor anywhere, and end (or be cancelled) wherever it is released.
@@ -2111,6 +2121,34 @@ mod tests {
         assert!(app.ctx.doc.rocket().kind_of(transition).is_none());
         app.update(Message::Undo);
         assert_eq!(app.ctx.doc.rocket(), &before);
+    }
+
+    #[test]
+    fn the_scale_overlay_applies_one_undo_step() {
+        let (mut app, [_, tube, _]) = app();
+        let before = app.ctx.doc.rocket().clone();
+        let length = before.length();
+        app.update(Message::Scale(scale::Message::OpenWhole));
+        assert!(app.ctx.scale.is_some());
+        app.update(Message::Scale(scale::Message::Factor("2".into())));
+        app.update(Message::Scale(scale::Message::Apply));
+        assert!(app.ctx.scale.is_none());
+        assert!((app.ctx.doc.rocket().length() - 2.0 * length).abs() < 1e-9);
+        assert_eq!(app.ctx.doc.undo_label(), Some("Scale ×2.000"));
+        app.update(Message::Undo);
+        assert_eq!(app.ctx.doc.rocket(), &before, "one undo step restores the rocket");
+        // An out-of-range factor cannot be applied; the parts form scales only the selection.
+        app.update(Message::Scale(scale::Message::OpenWhole));
+        app.update(Message::Scale(scale::Message::Factor("500".into())));
+        app.update(Message::Scale(scale::Message::Apply));
+        assert!(app.ctx.scale.is_some());
+        app.update(Message::Cancel);
+        assert!(app.ctx.scale.is_none());
+        app.ctx.selection = Selection::Part(tube);
+        app.update(Message::Scale(scale::Message::OpenParts));
+        app.update(Message::Scale(scale::Message::Factor("2".into())));
+        app.update(Message::Scale(scale::Message::Apply));
+        assert!((app.ctx.doc.rocket().length() - (length + 0.5)).abs() < 1e-9);
     }
 
     #[test]

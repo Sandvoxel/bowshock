@@ -162,6 +162,12 @@ pub enum Message {
     Duplicate,
     /// Overflow menu: delete the part.
     Delete,
+    /// Rocket inspector's More menu: open the Scale overlay for the whole rocket.
+    ScaleRocket,
+    /// Fin GEOMETRY: pick an image to trace the fin outline from.
+    OutlineFromImage,
+    /// The picked image (`None` when the dialog was cancelled) for fin `id`, or why it could not be read.
+    FinImage(PartId, Option<Result<Vec<u8>, String>>),
     /// Symmetry bar: the next copy of the group is the one the fields and *Detach* act on.
     NextInstance,
     /// Symmetry bar: *Detach*, the chosen copy leaves the group.
@@ -340,6 +346,43 @@ impl State {
                 self.menu = None;
                 return Task::done(app::Message::Delete);
             }
+            Message::ScaleRocket => {
+                self.menu = None;
+                return Task::done(app::Message::Scale(app::scale::Message::OpenWhole));
+            }
+            Message::OutlineFromImage => {
+                if let Selection::Part(id) = ctx.selection {
+                    return Task::perform(
+                        async {
+                            let file = rfd::AsyncFileDialog::new()
+                                .set_title("Fin outline from image")
+                                .add_filter("Image", &["png", "jpg", "jpeg"])
+                                .pick_file()
+                                .await?;
+                            Some(std::fs::read(file.path()).map_err(|e| format!("Could not read the image: {e}")))
+                        },
+                        move |bytes| app::Message::Inspector(Message::FinImage(id, bytes)),
+                    );
+                }
+            }
+            Message::FinImage(id, Some(bytes)) => {
+                let fin = ctx.doc.rocket().radial(id).filter(|r| r.kind.is_fin()).map(|r| (r.kind.extent(), r.kind.thickness().unwrap_or(0.003), r.count));
+                if let Some((root, thickness, count)) = fin {
+                    match bytes.and_then(|b| crate::build::fin_trace::trace(&b, root)) {
+                        Ok(points) => {
+                            let n = points.len();
+                            let kind = bowshock_model::RadialKind::FreeformFin { points, thickness };
+                            if ctx.doc.edit("Fin from image", |r| r.set_radial(id, kind, count)) {
+                                ctx.notify(format!("Fin outline traced from the image ({n} points)"));
+                            } else {
+                                ctx.notify("The traced outline could not be applied");
+                            }
+                        }
+                        Err(e) => ctx.notify(e),
+                    }
+                }
+            }
+            Message::FinImage(_, None) => {}
             _ if !editing => {}
             Message::Edit(field, value, live) => self.edit_field(ctx, field, value, live),
             Message::RocketName(name) => {
@@ -669,6 +712,14 @@ impl State {
         let panel = container(body).width(Fill).height(Fill).style(theme::panel);
 
         match (&self.menu, selection) {
+            (Some(Selection::None), Selection::None) => {
+                let backdrop = mouse_area(Space::new().width(Fill).height(Fill)).interaction(iced::mouse::Interaction::Idle).on_press(Message::MenuOpen(false));
+                let items: Vec<Element<'a, Message>> = vec![button("Scale rocket…", Weight::Ghost).width(Fill).on_press(Message::ScaleRocket).into()];
+                let menu = container(container(column(items).width(150)).style(theme::overlay))
+                    .padding(iced::Padding { top: HEADER_H - 6.0, right: SPACE_2, bottom: 0.0, left: 0.0 })
+                    .align_right(Fill);
+                stack![panel, backdrop, menu].boxed()
+            }
             (Some(open), now) if *open == now && matches!(now, Selection::Part(_)) => {
                 let backdrop = mouse_area(Space::new().width(Fill).height(Fill)).interaction(iced::mouse::Interaction::Idle).on_press(Message::MenuOpen(false));
                 let can_copy =
@@ -706,10 +757,17 @@ impl State {
                 row![name, pencil()].spacing(2).align_y(iced::Center).boxed()
             }
         };
+        let more: Element<'a, Message> = icon_button(Mark::Ellipsis, "More").on_press(Message::MenuOpen(self.menu != Some(Selection::None))).into();
         let header = container(
-            row![silhouette::rocket_silhouette(ctx.doc.rocket()), title, Space::new().width(Fill), text("ROCKET").font(MONO).size(10.5).style(theme::faint)]
-                .spacing(SPACE_2)
-                .align_y(iced::Center),
+            row![
+                silhouette::rocket_silhouette(ctx.doc.rocket()),
+                title,
+                Space::new().width(Fill),
+                text("ROCKET").font(MONO).size(10.5).style(theme::faint),
+                more
+            ]
+            .spacing(SPACE_2)
+            .align_y(iced::Center),
         )
         .padding([0.0, SPACE_3])
         .height(HEADER_H)

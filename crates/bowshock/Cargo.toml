@@ -17,6 +17,8 @@ iced = { git = "https://github.com/iced-rs/iced.git", rev = "b2fbd3cb6289603f8cb
 # Headless driver for `bowshock drive` (scripted interaction + screenshots); same rev as iced.
 iced_test = { git = "https://github.com/iced-rs/iced.git", rev = "b2fbd3cb6289603f8cbbb2387a5242231f509d13" }
 png = "0.18"
+# Fin outlines are traced from a PNG or JPEG photo or drawing (`build::fin_trace`).
+image = { workspace = true, features = ["png", "jpeg"] }
 glam = { version = "0.33", features = ["bytemuck"] }
 bytemuck = { version = "1", features = ["derive"] }
 bowshock-model = { path = "../bowshock-model" }

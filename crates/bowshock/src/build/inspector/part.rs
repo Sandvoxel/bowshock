@@ -172,6 +172,7 @@ fn radial_rows<'a>(p: &Params<'a>, radial: &RadialPart) -> Vec<Element<'a, Messa
         }
     }
     if radial.kind.is_fin() {
+        rows.push(labeled("Outline", button("Outline from image…", Weight::Secondary).on_press(Message::OutlineFromImage).into()));
         rows.push(labeled("Cross-section", segmented_fill(&SECTIONS, radial.cross_section, Message::CrossSection)));
         rows.extend(fillet_rows(p, radial));
         rows.extend(tab_rows(p, radial));
