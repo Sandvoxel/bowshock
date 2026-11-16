@@ -1180,16 +1180,23 @@ the Jacobian only steers the iteration. Free-stream preservation on the GPU (per
 
 ### Speed (`lift3d --case anf|ogive --level 0|1 --precision f32|df32 --bench N`; `PERF` lines in `perf/ledger.jsonl`)
 
-Implicit step, M 2, 2 degrees, second-order from the first iteration, replay of 200 iterations after 20 warm-up (RTX 3090 / RTX 3080 Laptop):
+Implicit step, M 2, 2 degrees, second-order from the first iteration, replay of 200 iterations after 20 warm-up (RTX 3090; the RTX 3080 Laptop numbers are the
+`remote` rows of the ledger):
 
-|case|cells|f32 3090|df32 3090|f32 3080 L|df32 3080 L|
-|---|---|---|---|---|---|
-|ANF level 0 (187 x 70 x 24, 2 solid boxes)|314 160|10.26 ms|10.94 ms|20.53 ms|22.08 ms|
-|fin-less ogive level 0 (144 x 70 x 24), 100 iterations|241 920|-|6.85 ms|-|-|
+|case|cells|f32 3090|df32 3090|
+|---|---|---|---|
+|ANF level 0 (187 x 70 x 24, 2 solid boxes), E2 (as committed)|314 160|10.26 ms|10.94 ms|
+|ANF level 0, P1 (transposed i factor)|314 160|4.62 ms|5.36 ms|
+|fin-less ogive level 0 (144 x 70 x 24), E2|241 920|-|6.85 ms|
 
-The line solves are two thirds of the ANF step (profile of one step, df32, 3090, 10.9 ms: `SolveParts` Thomas along j and k 7.4 ms in 4 launches, along i
-0.5 ms in 2; the rest, 3.0 ms in 30 launches, is the face matrices and blocks, the residual and the update). `LUMA_TRIDIAGONAL=cyclic` brings the step to 8.2 ms (solves
-5.1 ms, the k lines of 24 cells the slowest). Launches per step: tiny case explicit 33 (f32) / 30 (df32); ANF level 0 implicit 34 / 36.
+**Layout of the line solves.** Luma's parts solve runs one invocation per line, and along axis 0 the neighbouring lines are `n` elements apart: the 80 loads per
+step do not coalesce (the 1680 i lines of 187 cells: 3.3 ms per solve, against 0.45 ms along axis 1 or 2 on the same data; forced `LUMA_TRIDIAGONAL=cyclic`:
+0.35 ms for i but 1.7 ms for the 13 090 k lines). The i factor is therefore assembled and solved on transposed arrays `[nj, ni, nk]` (`Lay3` in `implicit3.rs`:
+geometry uploaded in that layout, state read through transposed views, only the right-hand side and the solution are transposed as buffers, the `A_i du` of the
+defect correction is evaluated in the solve layout): i solve 3.3 -> 0.45 ms. Profile of one step (df32, 3090, 5.36 ms, 66 launches): `SolveParts` i / j 1.80 ms
+(4 launches), k 0.51 ms (2), factor assembly 1.0 ms, three flux kernels 0.53 ms, the rest below 1 ms. Time to the stop rule on ANF level 0, M 2, 2 degrees
+(`converge3d`, df32): 345 iterations, 2.2 s; `sub_iters` 1 needs 398 iterations and the same 2.2 s, so it stays 2. Launches per step: tiny case explicit 33 (f32) /
+30 (df32).
 
 ### Run
 

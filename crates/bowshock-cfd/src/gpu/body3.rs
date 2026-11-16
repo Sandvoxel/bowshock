@@ -52,11 +52,13 @@ fn select3(cond: &Array<bool>, a: &Rec3, b: &Rec3) -> Rec3 {
 // gas3.rs
 // ---------------------------------------------------------------------------------------------------------------------
 
-/// `rho = q0, u = q1 / rho, v = q2 / rho, w = q3 / rho, p = (g - 1) (E - rho (u^2 + v^2 + w^2) / 2)`.
+/// `rho = q0, u = q1 / rho, v = q2 / rho, w = q3 / rho, p = (g - 1) (E - rho (u^2 + v^2 + w^2) / 2)`. One division (`1 / rho`) and three products: a
+/// double-float division is the most expensive operation of the record, and this one is evaluated for every cell of the padded state.
 pub fn cons_to_prim3(q: Rec3) -> Rec3 {
-    let u = &q[1] / &q[0];
-    let v = &q[2] / &q[0];
-    let w = &q[3] / &q[0];
+    let inv = c(1.0) / &q[0];
+    let u = &q[1] * &inv;
+    let v = &q[2] * &inv;
+    let w = &q[3] * &inv;
     let p = c(G1) * (&q[4] - c(0.5) * &q[0] * (&u * &u + &v * &v + &w * &w));
     let [rho, ..] = q;
     [rho, u, v, w, p]
