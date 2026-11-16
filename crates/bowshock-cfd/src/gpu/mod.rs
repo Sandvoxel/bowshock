@@ -14,9 +14,15 @@
 //! Menter SST k-omega model (`turbulence.rs`) follow, for both schemes and for grids with a solid block; their left-hand sides (the `2 lam I` of
 //! the implicit operator, the line solves of the two turbulence scalars) are f32 like the rest. [`GpuSolver`] is the precision-independent handle
 //! the other crates use. See the README.
+//!
+//! The 3D Euler solver of `solver3.rs` is in `body3.rs` ([`f32s::LazySolver3`], [`df32s::LazySolver3`], behind [`GpuSolver3`]): `Scheme3::Explicit` only
+//! for now, `Scheme3::Implicit` is not implemented on the GPU yet.
 
+use crate::gas3::Cons3;
 use crate::grid::Grid;
+use crate::grid3::Grid3;
 use crate::solver::{Block, Config, Nozzle, Scheme, Solver, Viscous};
+use crate::solver3::{Config3, Scheme3, Solver3};
 use luma::Context;
 pub use luma::LumaError;
 
@@ -107,6 +113,16 @@ pub mod f32s {
         Ok(h.iter().map(|&r| f64::from(r)).collect())
     }
 
+    /// The density residual of every step of a 3D run, recorded on the GPU (`State3` holds it at index 5).
+    fn records3(until: luma::Until<'static, State3>) -> luma::Until<'static, State3> {
+        until.record("residual", |s: &State3| s[5].clone())
+    }
+
+    fn read_history3(run: &luma::Run<State3>) -> Result<Vec<f64>> {
+        let h = run.history("residual").ok_or_else(|| luma::LumaError::Unsupported("the run recorded no residual history".into()))?;
+        Ok(h.iter().map(|&r| f64::from(r)).collect())
+    }
+
     /// The left-hand side of the implicit scheme runs in f32: the f32 view of `a` (here `a` itself) and back.
     fn lhs(a: &A) -> Array<f32> {
         a.clone()
@@ -117,6 +133,7 @@ pub mod f32s {
     }
 
     include!("body.rs");
+    include!("body3.rs");
     include!("implicit.rs");
     include!("viscous.rs");
     include!("turbulence.rs");
@@ -157,6 +174,17 @@ pub mod df32s {
         Ok(hi.iter().zip(lo).map(|(&h, &l)| f64::from(h) + f64::from(l)).collect())
     }
 
+    /// The 3D counterpart of `records`: the double-float residual (`State3` index 5) as its high and low word.
+    fn records3(until: luma::Until<'static, State3>) -> luma::Until<'static, State3> {
+        until.record("residual", |s: &State3| s[5].to_f32()).record("residual_lo", |s: &State3| (&s[5] - s[5].to_f32().to_df32()).to_f32())
+    }
+
+    fn read_history3(run: &luma::Run<State3>) -> Result<Vec<f64>> {
+        let missing = || luma::LumaError::Unsupported("the run recorded no residual history".into());
+        let (hi, lo) = (run.history("residual").ok_or_else(missing)?, run.history("residual_lo").ok_or_else(missing)?);
+        Ok(hi.iter().zip(lo).map(|(&h, &l)| f64::from(h) + f64::from(l)).collect())
+    }
+
     /// The left-hand side of the implicit scheme runs in f32: the f32 view of `a` and back.
     fn lhs(a: &A) -> Array<f32> {
         a.to_f32()
@@ -167,6 +195,7 @@ pub mod df32s {
     }
 
     include!("body.rs");
+    include!("body3.rs");
     include!("implicit.rs");
     include!("viscous.rs");
     include!("turbulence.rs");
@@ -373,5 +402,140 @@ impl GpuSolver {
             return Err(GpuError::Unsupported("base_cells needs a solid block"));
         }
         Ok(on!(self, s => s.base_cells()?))
+    }
+}
+
+enum Inner3 {
+    F32(f32s::LazySolver3),
+    Ext(df32s::LazySolver3),
+}
+
+macro_rules! on3 {
+    ($self:expr, $s:ident => $e:expr) => {
+        match &$self.inner {
+            Inner3::F32($s) => $e,
+            Inner3::Ext($s) => $e,
+        }
+    };
+}
+
+macro_rules! on3_mut {
+    ($self:expr, $s:ident => $e:expr) => {
+        match &mut $self.inner {
+            Inner3::F32($s) => $e,
+            Inner3::Ext($s) => $e,
+        }
+    };
+}
+
+const IMPLICIT3_UNSUPPORTED: GpuError = GpuError::Unsupported("Scheme3::Implicit is not implemented on the GPU yet (3D plan E2); use Scheme3::Explicit");
+
+/// GPU solver of one 3D grid: [`f32s::LazySolver3`] or [`df32s::LazySolver3`] behind one type. Mirrors `crate::solver3::Solver3` with
+/// `Scheme3::Explicit` (SSP-RK3 with local time stepping, characteristic far field, axis, slip wall, symmetry planes, fin solid boxes, low-Mach
+/// correction). **`Scheme3::Implicit` is not implemented yet** (3D plan E2): [`GpuSolver3::new`], [`GpuSolver3::from_host`] and
+/// [`GpuSolver3::set_config`] return [`GpuError::Unsupported`] for it.
+pub struct GpuSolver3 {
+    inner: Inner3,
+    ctx: Context,
+    prec: Precision,
+    pub ni: usize,
+    pub nj: usize,
+    pub nk: usize,
+}
+
+impl GpuSolver3 {
+    /// Uploads the geometry (rounded from the grid's f64 metrics), starts from the free stream.
+    pub fn new(ctx: &Context, grid: &Grid3, cfg: &Config3, prec: Precision) -> Result<GpuSolver3> {
+        if !matches!(cfg.scheme, Scheme3::Explicit) {
+            return Err(IMPLICIT3_UNSUPPORTED);
+        }
+        let inner = match prec {
+            Precision::F32 => Inner3::F32(f32s::LazySolver3::new(ctx, grid, cfg)?),
+            Precision::Extended => Inner3::Ext(df32s::LazySolver3::new(ctx, grid, cfg)?),
+        };
+        Ok(GpuSolver3 { inner, ctx: ctx.clone(), prec, ni: grid.ni, nj: grid.nj, nk: grid.nk })
+    }
+
+    /// The solver of a host [`Solver3`]: its grid and config (explicit scheme), conserved state and iteration count.
+    pub fn from_host(ctx: &Context, host: &Solver3, prec: Precision) -> Result<GpuSolver3> {
+        if !matches!(host.cfg.scheme, Scheme3::Explicit) {
+            return Err(IMPLICIT3_UNSUPPORTED);
+        }
+        let inner = match prec {
+            Precision::F32 => Inner3::F32(f32s::LazySolver3::from_host(ctx, host)?),
+            Precision::Extended => Inner3::Ext(df32s::LazySolver3::from_host(ctx, host)?),
+        };
+        Ok(GpuSolver3 { inner, ctx: ctx.clone(), prec, ni: host.grid.ni, nj: host.grid.nj, nk: host.grid.nk })
+    }
+
+    pub fn precision(&self) -> Precision {
+        self.prec
+    }
+
+    pub fn context(&self) -> &Context {
+        &self.ctx
+    }
+
+    pub fn config(&self) -> &Config3 {
+        on3!(self, s => s.config())
+    }
+
+    /// Replaces the configuration: free stream, CFL, limiter, `first_order_iters` and the low-Mach flag may change between runs (a Mach / incidence
+    /// sweep) without touching the state or the geometry. `cfg.scheme` must be `Scheme3::Explicit`.
+    pub fn set_config(&mut self, cfg: &Config3) -> Result<()> {
+        if !matches!(cfg.scheme, Scheme3::Explicit) {
+            return Err(IMPLICIT3_UNSUPPORTED);
+        }
+        on3_mut!(self, s => s.set_config(cfg)?);
+        Ok(())
+    }
+
+    /// Iterations since the last [`GpuSolver3::set_state`] / [`GpuSolver3::reset`]; the first `Config3::first_order_iters` are first order.
+    pub fn iter(&self) -> usize {
+        on3!(self, s => s.iter)
+    }
+
+    pub fn set_iter(&mut self, iter: usize) {
+        on3_mut!(self, s => s.iter = iter)
+    }
+
+    /// Restarts the CFL ramp (the explicit scheme has a constant CFL: nothing changes until E2).
+    pub fn restart_ramp(&mut self) -> Result<()> {
+        on3_mut!(self, s => s.restart_ramp()?);
+        Ok(())
+    }
+
+    /// Overwrites the conserved state (e.g. with a CPU solution) and restarts the iteration counter and the CFL ramp.
+    pub fn set_state(&mut self, u: &[Cons3]) -> Result<()> {
+        on3_mut!(self, s => s.set_state(u)?);
+        Ok(())
+    }
+
+    /// Resets to the free stream of the current configuration at iteration 0, the CFL ramp restarted.
+    pub fn reset(&mut self) -> Result<()> {
+        let fs = crate::gas3::prim_to_cons3(&self.config().freestream);
+        self.set_state(&vec![fs; self.ni * self.nj * self.nk])
+    }
+
+    /// Conserved state, `ni * nj * nk`, same layout as `crate::solver3::Solver3::u` (`Grid3::cell`).
+    pub fn state_f64(&self) -> Result<Vec<Cons3>> {
+        Ok(on3!(self, s => s.state_f64()?))
+    }
+
+    /// Runs `n` iterations and returns the density residual of every one (L2 of `d rho / dt` over `sqrt(N)` of the fluid cells, as in the CPU
+    /// solver). The residual is recorded on the GPU, the host waits once per `RUN_SYNC` iterations and at the end.
+    pub fn run(&mut self, n: usize) -> Result<Vec<f64>> {
+        Ok(on3_mut!(self, s => s.run(n, RUN_SYNC.min(n.max(1)))?))
+    }
+
+    /// GPU time per kernel of one full SSP-RK3 step as the `eval` loop launches it, and where fusion cut the expressions (`Profile::launches`,
+    /// `Profile::total`).
+    pub fn profile_step(&mut self) -> Result<luma::Profile> {
+        Ok(on3_mut!(self, s => s.profile_step()?))
+    }
+
+    /// GPU time per kernel of `n` iterations of the `iterate_all` replay (the profile adds up all `n`).
+    pub fn profile_replay(&mut self, n: usize) -> Result<luma::Profile> {
+        Ok(on3_mut!(self, s => s.profile_replay(n)?))
     }
 }
