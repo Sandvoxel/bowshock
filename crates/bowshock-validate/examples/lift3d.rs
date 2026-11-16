@@ -18,7 +18,7 @@
 //!
 //! `--no-perf` suppresses the PERF line (experiments with `LUMA_TRIDIAGONAL` set must not enter the ledger).
 //!
-//! The G2 sweep mode (`--sweep --mach <list> --alpha 2,6`, one `RESULT {json}` line per point) is parsed here and added to `main` by that package.
+//! `--sweep --mach <list> --alpha 2,6 [--level L]`: one `RESULT {json}` line per (Mach, alpha) point (cold first alpha, warm later ones).
 
 use bowshock_cfd::gpu::{GpuSolver3, Precision};
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
@@ -165,13 +165,70 @@ fn bench(args: &Args, n: usize) -> Result<(), String> {
     Ok(())
 }
 
+/// G2: per Mach a cold first incidence, warm later ones (a warm point ending Failed/Stalled is re-run cold, a diverged cold run
+/// once more with `cfl_max` halved, as `Analysis::run_lift`); one `RESULT {json}` line per point.
+fn sweep(args: &Args, machs: &[f64], alphas_deg: &[f64]) -> Result<(), String> {
+    use bowshock_core::engine::gpu3::GpuRunner3;
+    use bowshock_core::engine::result::StopReason;
+    let (body, fins) = body_of(&args.case)?;
+    let (prec, pname) = args.precisions[0];
+    let ok = |r: &bowshock_core::engine::run3::PointResult3| {
+        r.stop_reason != StopReason::NonFinite && r.cn.is_finite() && r.ca.is_finite() && matches!(r.stop_reason, StopReason::ResidualDrop | StopReason::CdStationary | StopReason::MeanStationary | StopReason::BasePressureStationary | StopReason::ResidualPlateau)
+    };
+    for &m in machs {
+        let mut runner: Option<GpuRunner3> = None;
+        let mut warm = false;
+        for &a in alphas_deg {
+            let t0 = Instant::now();
+            let case = Case3::new(m, a.to_radians(), body.clone(), fins.clone(), args.level);
+            if runner.is_none() {
+                runner = Some(GpuRunner3::new(&case, prec).map_err(|e| e.to_string())?);
+            }
+            let rn = runner.as_mut().unwrap();
+            let mut r = None;
+            if warm {
+                let w = rn.run_on(&case, true).map_err(|e| e.to_string())?;
+                if ok(&w) {
+                    r = Some(w);
+                }
+            }
+            let r = match r {
+                Some(r) => r,
+                None => {
+                    let mut c = rn.run_on(&case, false).map_err(|e| e.to_string())?;
+                    if c.stop_reason == StopReason::NonFinite {
+                        let mut half = case.clone();
+                        half.numerics.implicit.cfl_max *= 0.5;
+                        c = rn.run_on(&half, false).map_err(|e| e.to_string())?;
+                    }
+                    c
+                }
+            };
+            warm = r.cn.is_finite();
+            let quality = if !r.cn.is_finite() || !r.ca.is_finite() || r.stop_reason == StopReason::NonFinite {
+                "Failed"
+            } else if r.stop_reason == StopReason::ResidualDrop {
+                "Converged"
+            } else if r.stop_reason == StopReason::MaxIterations {
+                "Stalled"
+            } else {
+                "Stationary"
+            };
+            let f = |v: f64| if v.is_finite() { format!("{v}") } else { "null".into() };
+            println!(
+                "RESULT {{\"case\":\"{}\",\"level\":{},\"precision\":\"{pname}\",\"mach\":{m},\"alpha_deg\":{a},\"cn\":{},\"cn_alpha\":{},\"x_cp_cal\":{},\"ca\":{},\"quality\":\"{quality}\",\"stop\":\"{:?}\",\"drop_orders\":{},\"iterations\":{},\"wall_s\":{:.2}}}",
+                args.case, args.level, f(r.cn), f(r.cn / a.to_radians()), f(r.x_cp), f(r.ca), r.stop_reason, f(r.drop_orders), r.iterations, t0.elapsed().as_secs_f64()
+            );
+        }
+    }
+    Ok(())
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let result = parse(&argv).and_then(|args| match &args.mode {
         Mode::Bench(n) => bench(&args, *n),
-        Mode::Sweep { machs, alphas_deg } => {
-            Err(format!("--sweep (Mach {machs:?}, alpha {alphas_deg:?} deg) is the G2 package: not implemented in this example yet"))
-        }
+        Mode::Sweep { machs, alphas_deg } => sweep(&args, machs, alphas_deg),
     });
     if let Err(e) = result {
         eprintln!("lift3d: {e}");
