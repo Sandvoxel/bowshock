@@ -7,7 +7,9 @@
 //!   [Luma](https://github.com/flipnoteman/Luma) array ops (f32 or double-float), validated against the CPU solver.
 
 pub mod bc;
+pub mod bc3;
 pub mod flux;
+pub mod flux3;
 pub mod gas;
 pub mod gas3;
 pub mod grid;
