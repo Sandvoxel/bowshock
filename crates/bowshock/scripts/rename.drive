@@ -1,0 +1,10 @@
+# Renaming a part: select it in Station Lanes, double-click the Inspector title (or press F2), type, Enter.
+viewport 1280x1100
+scale 1
+click (580, 896)
+click (1050, 62)
+click (1050, 62)
+type "Avionics bay"
+screenshot renaming.png
+type enter
+screenshot renamed.png

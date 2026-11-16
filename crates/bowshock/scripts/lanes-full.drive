@@ -1,0 +1,10 @@
+# The lanes always show the whole rocket, even when the 2D viewport is zoomed into the fins:
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/lanes-full.drive /tmp/lanesfull
+viewport 1280x800
+click "2D"
+move (640, 300)
+screenshot before.png
+# Double-click the fin bar: the viewport turns square-on and frames the fins.
+click (923, 624)
+click (923, 624)
+screenshot fins.png

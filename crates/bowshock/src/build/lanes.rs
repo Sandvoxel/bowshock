@@ -328,6 +328,7 @@ mod tests {
     use super::*;
     use crate::app::{App, Message as App_};
     use bowshock_model::{InternalKind, MassRole, PartKind};
+    use geometry::Axis;
 
     fn lanes(app: &mut App, message: Message) {
         app.update(App_::Lanes(message));
