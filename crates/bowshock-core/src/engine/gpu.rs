@@ -17,7 +17,67 @@ use crate::error::Error;
 use bowshock_cfd::gas::{cons_to_prim, freestream};
 use bowshock_cfd::gpu::{GpuSolver, Precision};
 use bowshock_cfd::solver::Solver;
+use std::sync::Mutex;
 use std::time::Instant;
+
+/// Where the time of one GPU point went (instrumentation only; no numerics). Every [`GpuRunner::run_on`] / `GpuRunner3::run_on` pushes
+/// one record to a process-wide log read with [`take_timings`], and prints it as a `TIMING {json}` line on stderr when the environment
+/// variable `BOWSHOCK_TIMING` is set.
+#[derive(Clone, Debug, Default)]
+#[doc(hidden)]
+pub struct PointTiming {
+    /// 2 or 3 (axisymmetric / 3D runner).
+    pub dim: u8,
+    pub mach: f64,
+    pub alpha_deg: f64,
+    /// Warm start on a kept solver (then `build_s`, `ctx_s`, `upload_s` are those of the cold point that created it, not paid here).
+    pub warm: bool,
+    pub cells: usize,
+    /// Host grid + host solver construction (cold points only).
+    pub build_s: f64,
+    /// `luma::default_context()`.
+    pub ctx_s: f64,
+    /// `from_host`: device arrays and geometry upload.
+    pub upload_s: f64,
+    /// `set_config`, `reset` or ramp restart, and the sync.
+    pub reset_s: f64,
+    /// The first chunk of `SYNC` iterations (includes the trace / kernel compile of a cold solver).
+    pub first_chunk_s: f64,
+    /// Chunks after the first: count and total seconds (kernels + residual read-back).
+    pub chunks_rest: usize,
+    pub rest_chunks_s: f64,
+    /// State downloads (count, seconds) and the host force / wall / monitor evaluation (seconds) of the monitor samples.
+    pub downloads: usize,
+    pub download_s: f64,
+    pub forces_s: f64,
+    /// Final download plus the host post-processing (`finish`, forces).
+    pub final_s: f64,
+    /// Whole `run_on`.
+    pub run_s: f64,
+    pub iters_stop: usize,
+    pub iters_exec: usize,
+    pub stop: String,
+}
+
+static TIMINGS: Mutex<Vec<PointTiming>> = Mutex::new(Vec::new());
+
+/// Logs `t` (and prints it under `BOWSHOCK_TIMING`).
+#[doc(hidden)]
+pub fn record_timing(t: PointTiming) {
+    if std::env::var_os("BOWSHOCK_TIMING").is_some() {
+        eprintln!(
+            "TIMING {{\"dim\":{},\"mach\":{},\"alpha_deg\":{:.1},\"warm\":{},\"cells\":{},\"build_s\":{:.4},\"ctx_s\":{:.4},\"upload_s\":{:.4},\"reset_s\":{:.4},\"first_chunk_s\":{:.4},\"chunks_rest\":{},\"rest_chunks_s\":{:.4},\"downloads\":{},\"download_s\":{:.4},\"forces_s\":{:.4},\"final_s\":{:.4},\"run_s\":{:.4},\"iters_stop\":{},\"iters_exec\":{},\"stop\":\"{}\"}}",
+            t.dim, t.mach, t.alpha_deg, t.warm, t.cells, t.build_s, t.ctx_s, t.upload_s, t.reset_s, t.first_chunk_s, t.chunks_rest, t.rest_chunks_s, t.downloads, t.download_s, t.forces_s, t.final_s, t.run_s, t.iters_stop, t.iters_exec, t.stop
+        );
+    }
+    TIMINGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(t);
+}
+
+/// Drains the timing log.
+#[doc(hidden)]
+pub fn take_timings() -> Vec<PointTiming> {
+    std::mem::take(&mut *TIMINGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+}
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -30,6 +90,10 @@ pub struct GpuRunner {
     pub host: Solver,
     /// Kernel build + geometry upload, seconds.
     pub setup_seconds: f64,
+    /// Host grid + solver construction, default-context creation and `from_host`, seconds (parts of the set-up).
+    pub build_seconds: f64,
+    pub ctx_seconds: f64,
+    pub upload_seconds: f64,
 }
 
 /// Result of one GPU run plus its cost.
@@ -54,15 +118,20 @@ impl GpuRun {
 impl GpuRunner {
     /// Builds the host solver of `case` and uploads it to the default GPU context.
     pub fn new(case: &Case, prec: Precision) -> Result<GpuRunner> {
+        let t_build = Instant::now();
         let host = case.try_build_solver()?;
+        let build_seconds = t_build.elapsed().as_secs_f64();
         let t0 = Instant::now();
         let ctx = luma::default_context()?;
+        let ctx_seconds = t0.elapsed().as_secs_f64();
         // The native CPU solver is faster than the GPU kernels on a software rasterizer, so `Backend::Auto` falls back to it.
         if ctx.is_cpu() {
             return Err(Error::Gpu("no GPU: Luma opened a software (CPU) Vulkan device".into()));
         }
+        let t1 = Instant::now();
         let gpu = GpuSolver::from_host(&ctx, &host, prec)?;
-        Ok(GpuRunner { gpu, host, setup_seconds: t0.elapsed().as_secs_f64() })
+        let upload_seconds = t1.elapsed().as_secs_f64();
+        Ok(GpuRunner { gpu, host, setup_seconds: t0.elapsed().as_secs_f64(), build_seconds, ctx_seconds, upload_seconds })
     }
 
     /// Copies the GPU state into the host solver's `u`.
@@ -74,6 +143,12 @@ impl GpuRunner {
     /// Iterate to convergence on the GPU: the same procedure and arguments as [`crate::engine::run::run_on`]
     /// (`warm`: keep the field, only change the free stream; `r_ref`: reference residual of the drop criterion).
     pub fn run_on(&mut self, case: &Case, warm: bool, r_ref: Option<f64>) -> Result<GpuRun> {
+        let t_run = Instant::now();
+        let mut tm = PointTiming { dim: 2, mach: case.mach, warm, cells: self.host.grid.ni * self.host.grid.nj, ..Default::default() };
+        if !warm {
+            (tm.build_s, tm.ctx_s, tm.upload_s) = (self.build_seconds, self.ctx_seconds, self.upload_seconds);
+        }
+        let t_reset = Instant::now();
         let n = case.numerics;
         let fs = freestream(case.mach);
         let cfg = &mut self.host.cfg;
@@ -95,6 +170,7 @@ impl GpuRunner {
             self.gpu.reset()?; // free stream of `case.mach`, iteration 0, ramp restarted
         }
         self.gpu.context().sync()?;
+        tm.reset_s = t_reset.elapsed().as_secs_f64();
 
         let viscous = case.viscous.is_some();
         let sampler = (case.wake == Wake::Base && !viscous).then(|| BaseSampler::new(&self.host, case.body.body.radius().powi(2)));
@@ -109,19 +185,35 @@ impl GpuRunner {
         let t0 = Instant::now();
         while done < n.max_iter && iters_stop.is_none() {
             let len = SYNC.min(n.max_iter - done);
+            let t_chunk = Instant::now();
             let h = self.gpu.run(len)?;
+            let dt_chunk = t_chunk.elapsed().as_secs_f64();
+            if done == 0 {
+                tm.first_chunk_s = dt_chunk;
+            } else {
+                tm.chunks_rest += 1;
+                tm.rest_chunks_s += dt_chunk;
+            }
             // monitor sample of iteration `done + SYNC` (needs the state at exactly the end of a full chunk)
             let value = if sample && len == SYNC {
                 Some(match &sampler {
-                    Some(sampler) => sampler.cp_base(&self.gpu.base_cells()?),
-                    None if viscous => {
-                        // total CD incl. friction: needs only the mean state (`u`) on the host, which `download` provides
-                        self.download()?;
-                        monitor(case, &self.host)
+                    Some(sampler) => {
+                        let t = Instant::now();
+                        let cells = self.gpu.base_cells()?;
+                        tm.downloads += 1;
+                        tm.download_s += t.elapsed().as_secs_f64();
+                        sampler.cp_base(&cells)
                     }
                     None => {
+                        let t = Instant::now();
                         self.download()?;
-                        wall_distribution(&case.body, &self.host).1
+                        tm.downloads += 1;
+                        tm.download_s += t.elapsed().as_secs_f64();
+                        let t = Instant::now();
+                        // total CD incl. friction (viscous): needs only the mean state (`u`) on the host, which `download` provides
+                        let v = if viscous { monitor(case, &self.host) } else { wall_distribution(&case.body, &self.host).1 };
+                        tm.forces_s += t.elapsed().as_secs_f64();
+                        v
                     }
                 })
             } else {
@@ -150,8 +242,15 @@ impl GpuRunner {
             }
         }
         let loop_seconds = t0.elapsed().as_secs_f64();
+        let t_final = Instant::now();
         self.download()?;
         let result = finish(case, &self.host, residual, rmax, hist, reason);
+        tm.final_s = t_final.elapsed().as_secs_f64();
+        tm.run_s = t_run.elapsed().as_secs_f64();
+        tm.iters_stop = iters_stop.unwrap_or(done);
+        tm.iters_exec = done;
+        tm.stop = format!("{:?}", result.stop_reason);
+        record_timing(tm);
         Ok(GpuRun { iters_stop: iters_stop.unwrap_or(done), iters_exec: done, loop_seconds, result })
     }
 }
