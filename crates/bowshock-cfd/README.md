@@ -1196,16 +1196,27 @@ Implicit step, M 2, 2 degrees, second-order from the first iteration, replay of 
 |---|---|---|---|
 |ANF level 0 (187 x 70 x 24, 2 solid boxes), E2, luma before 152c127|314 160|10.26 ms|10.94 ms|
 |ANF level 0, transposed i factor (P1 workaround), luma before 152c127|314 160|4.62 ms|5.36 ms|
-|ANF level 0, luma 152c127, solved in place (current)|314 160|4.22 ms|4.97 ms|
+|ANF level 0, luma 152c127, solved in place (187 x 70 x 24)|314 160|4.22 ms|4.97 ms|
+|ANF level 0 (210 x 70 x 24, 2 solid boxes), before the P2 pass (`d54beda`, current luma)|352 800|3.91 ms|4.75 ms|
+|ANF level 0, P2: lazy blocks in the line solves, flux-difference defect correction (current)|352 800|**3.15 ms**|**4.00 ms**|
+|ANF level 0 on the RTX 3080 Laptop (`remote`), before / after P2|352 800|8.70 / 6.94 ms|10.58 / 8.91 ms|
+|ANF level 1 (385 x 140 x 48, RTX 3090), before / after P2|2 587 200|31.8 / 26.6 ms|37.4 / 32.2 ms|
 |fin-less ogive level 0 (144 x 70 x 24), E2|241 920|-|6.85 ms|
 
 **Layout of the line solves.** Luma's parts solve ran one invocation per line, and along axis 0 the neighbouring lines are `n` elements apart: the 80 loads per
 step did not coalesce (the 1680 i lines of 187 cells: 3.3 ms per solve, against 0.45 ms along axis 1 or 2 on the same data). The P1 workaround assembled and solved
 the i factor on transposed arrays (i solve 0.45 ms, step 10.9 -> 5.4 ms). Luma 152c127 ("contiguous lines always cyclic") solves those lines in place in 0.32 ms
-(`SolveParts` Cyclic, workgroup 128), and the step is faster without the transposes (4.97 against 5.36 ms): the workaround was removed. Profile of one step (df32,
-3090, 4.97 ms, 61 launches): `SolveParts` j 0.81 ms (2 launches), i 0.63 ms (2), k 0.51 ms (2), factor assembly 1.0 ms, three flux kernels 0.53 ms, the rest below
-1 ms. Time to the stop rule on ANF level 0, M 2, 2 degrees (`converge3d`, df32): 345 iterations, 2.2 s; `sub_iters` 1 needs 398 iterations and the same 2.2 s, so it
-stays 2. Launches per step: tiny case explicit 33 (f32) / 30 (df32).
+(`SolveParts` Cyclic, workgroup 128), and the step is faster without the transposes (4.97 against 5.36 ms): the workaround was removed. Time to the stop rule on ANF
+level 0, M 2, 2 degrees (`converge3d`, df32): 345 iterations, 2.2 s; `sub_iters` 1 needs 398 iterations and the same 2.2 s, so it stays 2. Launches per step: tiny
+case explicit 33 (f32) / 30 (df32).
+
+**P2 pass (ISSUES.md #18).** Two changes to the left-hand side of `implicit3.rs`, no change of the result (the ANF sweep M 0.79 / 1.99 / 2.48 at 2 and 6 degrees: same
+iteration counts, CN within 3e-9, x_cp within 4e-9 calibers): the blocks `lo`, `d`, `up` of the three factors are not evaluated (the 75-array assembly kernels,
+0.84 ms, are gone; `SolveParts` computes them from the face matrices where it reads a cell), and the first defect-correction pass is `N_i (X - dU) + N_j (Y - dU)`
+from the intermediates of the solves with the products `N_d z` in flux-difference form (two kernels over the face matrices instead of three block products). Profile of
+one f32 step now (3090, 27 launches, 3.13 ms): the six line solves 2.29 ms (73 %: j 2 x 0.42, k 2 x 0.38, i 0.36 + 0.33), the three face-matrix kernels 0.32 ms, the two
+`N_d z` kernels 0.23 ms, the rest 0.29 ms; the solves are the Luma part (`~/Documents/luma/Temp.md`). Staging stays `Fluxes` (f32 3.15 / `Lines` 3.16 / `Fusion` 3.16 /
+`Split` 3.28 ms; df32 3.99 / 4.98 / 4.98 / 4.04 ms).
 
 ### Run
 

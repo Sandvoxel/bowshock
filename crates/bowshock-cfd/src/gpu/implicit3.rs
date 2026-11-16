@@ -391,11 +391,16 @@ impl LGeo3 {
     }
 }
 
-/// The blocks `lo`, `d`, `up` of `I - dt J_dir` of every cell (`[ni, nj, nk]` arrays, evaluated).
+/// The blocks `lo`, `d`, `up` of `I - dt J_dir` of every cell (`[ni, nj, nk]` arrays, lazy expressions of the face matrices below), and the face matrices.
 struct Factor3 {
     lo: [F; 25],
     d: [F; 25],
     up: [F; 25],
+    /// The face matrices `FL`, `FR` of the direction (`[.., n + 1, ..]` arrays, evaluated) and the cell coefficients `s_l`, `s_u` they enter with.
+    fl: [F; 25],
+    fr: [F; 25],
+    s_l: F,
+    s_u: F,
 }
 
 impl LazySolver3 {
@@ -480,8 +485,8 @@ impl LazySolver3 {
         let fl = flux_jacobian_f5(&l, &dg.n).add(&dis);
         let fr = flux_jacobian_f5(&r, &dg.n).sub(&dis);
         // evaluate the face matrices once: the cell blocks read each of them at two cells
-        let [fl, fr]: [[F; 25]; 2] = [fl.dense(&dg.zero, &dg.one), fr.dense(&dg.zero, &dg.one)].cache();
-        let (fl, fr) = (Blk5::of(&fl), Blk5::of(&fr));
+        let [fl_faces, fr_faces]: [[F; 25]; 2] = [fl.dense(&dg.zero, &dg.one), fr.dense(&dg.zero, &dg.one)].cache();
+        let (fl, fr) = (Blk5::of(&fl_faces), Blk5::of(&fr_faces));
 
         // cell blocks
         let s = 0.5f32 * dt / &g.vol;
@@ -539,9 +544,11 @@ impl LazySolver3 {
             };
             (lo, d, up) = (mask(&lo, false), mask(&d, true), mask(&up, false));
         }
+        // the blocks stay lazy: the line solve computes them from the (evaluated) face matrices where it reads the coefficients of a cell, so the 75 block
+        // arrays of a direction are never written and read back (the solves cost 7 % more, the three assembly kernels, 0.84 ms, are gone)
         let (z, o) = (&g.zero, &g.one);
-        let [lo, d, up] = [lo.dense(z, o), d.dense(z, o), up.dense(z, o)].cache();
-        Factor3 { lo, d, up }
+        let [lo, d, up] = [lo.dense(z, o), d.dense(z, o), up.dense(z, o)];
+        Factor3 { lo, d, up, fl: fl_faces, fr: fr_faces, s_l, s_u }
     }
 
     /// `x <- (I - dt J_dir)^{-1} x` for every line of direction `dir` (block-tridiagonal solve, `solve_lines3`); the twenty-five block entries and the
@@ -556,9 +563,57 @@ impl LazySolver3 {
 
     /// The approximate factorization `(I - dt J_k)^{-1} (I - dt J_j)^{-1} (I - dt J_i)^{-1} rhs`.
     fn approx_factor3(&self, fac: &[Factor3; 3], rhs: &V5) -> V5 {
+        self.approx_factor3_parts(fac, rhs).2
+    }
+
+    /// [`LazySolver3::approx_factor3`] with the intermediates: `(X, Y, dU)`, `X = A_i^{-1} rhs`, `Y = A_j^{-1} X`, `dU = A_k^{-1} Y` (`A_d = I - dt J_d`).
+    fn approx_factor3_parts(&self, fac: &[Factor3; 3], rhs: &V5) -> (V5, V5, V5) {
         let x = self.solve_lines3(&fac[0], 0, rhs);
-        let x = self.solve_lines3(&fac[1], 1, &x);
-        self.solve_lines3(&fac[2], 2, &x)
+        let y = self.solve_lines3(&fac[1], 1, &x);
+        let du = self.solve_lines3(&fac[2], 2, &y);
+        (x, y, du)
+    }
+
+    /// `N_dir z = (A_dir - I) z = dt (-J_dir) z` of a vector `z` (five `[ni, nj, nk]` arrays) in flux-difference form, the same operator as the blocks of
+    /// [`LazySolver3::factor3`] (`lines = true`): with the linearised numerical flux of face `f` `G_f = FL_f zl_f + FR_f zr_f` (`zl_f` / `zr_f` the vector
+    /// below / above the face: the neighbours, at a line end the ghost `T z`, at a wall face the reflection of the fluid side), the cell `m` takes
+    /// `s_u G_{m+1} - s_l G_m`; solid cells 0. Costs one pass over the face matrices instead of three block products.
+    ///
+    /// The first defect-correction pass needs only `N_i` and `N_j`: with `X = A_i^{-1} b`, `Y = A_j^{-1} X`, `dU = A_k^{-1} Y` the residual
+    /// `b - (A_i + A_j + A_k - 2 I) dU` of the approximate factorisation `A_i A_j A_k` is `N_i (X - dU) + N_j (Y - dU)` (expand `A = I + N`).
+    fn n_apply3(&self, fac: &Factor3, dir: usize, z: &V5, p: &ImplicitParams) -> V5 {
+        let g = &self.lg;
+        let dg = &g.dir[dir];
+        let n = self.dims3()[dir];
+        let (zero, one) = (g.zero.slice(dir, 0..1), g.one.slice(dir, 0..1));
+        let end = |lower: bool| -> V5 {
+            match self.ghost_jacobian3(dir, lower, z, p) {
+                Tj5::Mat(t) => {
+                    let e: V5 = v5(|k| if lower { z[k].slice(dir, 0..1) } else { z[k].slice(dir, n - 1..n) });
+                    mv5(&t.dense(&zero, &one), &e)
+                }
+                Tj5::Zero => v5(|_| zero.clone()),
+            }
+        };
+        let (lo_end, hi_end) = (end(true), end(false));
+        let zl: V5 = v5(|k| luma::concat(dir, [&lo_end[k], &z[k]]));
+        let zr: V5 = v5(|k| luma::concat(dir, [&z[k], &hi_end[k]]));
+        let (zl, zr) = match (&dg.wall_l, &dg.wall_r) {
+            (Some(wl), Some(wr)) => {
+                let (r_of_r, r_of_l) = (reflect_f3(&zr, &dg.n), reflect_f3(&zl, &dg.n));
+                (v5(|k| select(wl, &r_of_r[k], &zl[k])), v5(|k| select(wr, &r_of_l[k], &zr[k])))
+            }
+            _ => (zl, zr),
+        };
+        let (a, b) = (mv5(&fac.fl, &zl), mv5(&fac.fr, &zr));
+        let gf: V5 = v5(|q| &a[q] + &b[q]).cache();
+        v5(|q| {
+            let nz = &fac.s_u * gf[q].slice(dir, 1..n + 1) - &fac.s_l * gf[q].slice(dir, 0..n);
+            match &g.solid {
+                Some(solid) => select(solid, 0.0f32, &nz),
+                None => nz,
+            }
+        })
     }
 
     /// `(I - dt J_dir) x` (`apply_factor3`): `d x + lo x_{m-1} + up x_{m+1}`, the missing neighbours at the ends of a line being 0 (their blocks are
@@ -598,7 +653,8 @@ impl LazySolver3 {
     /// X = AF^{-1} (dt R),  r = dt R - (A_i + A_j + A_k - 2 I) X,  X += AF^{-1} r      (sub_iters - 1 times),   U += alpha X
     /// ```
     ///
-    /// with `AF = (I - dt J_i)(I - dt J_j)(I - dt J_k)` (factored) and `A_d = I - dt J_d`.
+    /// with `AF = (I - dt J_i)(I - dt J_j)(I - dt J_k)` (factored) and `A_d = I - dt J_d`. The first defect `r` is not formed from the three block
+    /// products but from the intermediates of the solve, `r = N_i (X - dU) + N_j (Y - dU)` (see [`LazySolver3::n_apply3`]).
     fn implicit_step3(&self, s: &State3, p: &ImplicitParams, lim: Limiter) -> State3 {
         let u = unpack3(s);
         let (prim, w) = self.padded3(&u);
@@ -615,9 +671,18 @@ impl LazySolver3 {
 
         // right-hand side and defect correction
         let b: V5 = v5(|k| &lhs(&r0[k]) * &dt);
-        let b = b.cache();
-        let mut du = self.approx_factor3(&fac, &b);
-        for _ in 1..p.sub_iters.max(1) {
+        let (x, y, mut du) = self.approx_factor3_parts(&fac, &b);
+        let mut passes = 1;
+        if p.lines && p.sub_iters >= 2 {
+            // the first defect, from the intermediates of the solve: `r = N_i (X - dU) + N_j (Y - dU)`
+            let (dx, dy): (V5, V5) = (v5(|k| &x[k] - &du[k]), v5(|k| &y[k] - &du[k]));
+            let (ni_, nj_) = (self.n_apply3(&fac[0], 0, &dx, p), self.n_apply3(&fac[1], 1, &dy, p));
+            let r: V5 = v5(|k| &ni_[k] + &nj_[k]);
+            let corr = self.approx_factor3(&fac, &r.cache());
+            du = v5(|k| &du[k] + &corr[k]);
+            passes = 2;
+        }
+        for _ in passes..p.sub_iters.max(1) {
             let a: [V5; 3] = std::array::from_fn(|dir| self.apply_factor3(&fac[dir], dir, &du));
             let r: V5 = v5(|k| &b[k] - (&a[0][k] + &a[1][k] + &a[2][k] - 2.0f32 * &du[k]));
             let corr = self.approx_factor3(&fac, &r.cache());
