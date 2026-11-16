@@ -33,6 +33,7 @@
 
 pub mod assembly;
 pub mod camera;
+pub mod capture;
 mod carry;
 mod cube;
 mod empty;
@@ -73,7 +74,9 @@ use crate::viewport::toolbar::Glyph;
 use crate::widgets::button::{button, Weight};
 
 pub use camera::Camera;
+pub use capture::Capture;
 pub use mesh::{Cut, GhostRadial, Marks, Mesh};
+pub use solids::{GpuVertex, LAYER_INTERNAL, LAYER_RADIAL, LAYER_SHELL};
 
 pub mod flash;
 
@@ -225,6 +228,8 @@ pub enum Message {
     SnapPodNode(Option<(PartId, usize)>),
     /// The dragged axial part is over a tube's side: it would attach radially there (it becomes a pod).
     AxialSurface(Option<SurfaceTarget>),
+    /// An image export: render the model once with this request (see [`capture`]); `None` ends it.
+    Capture(Option<Arc<Capture>>),
 }
 
 struct Anim {
@@ -293,6 +298,8 @@ pub struct View {
     reframed: Option<u64>,
     /// An edit left part of the rocket outside a view the user had set: the hint bar offers `F fit` while it stays that way.
     stray: bool,
+    /// An image export waiting for its render.
+    capture: Option<Arc<Capture>>,
 }
 
 impl View {
@@ -321,6 +328,7 @@ impl View {
             navigated: false,
             reframed: None,
             stray: false,
+            capture: None,
         }
     }
 
@@ -340,6 +348,24 @@ impl View {
     #[allow(dead_code)]
     pub fn snap_step(&self) -> f64 {
         self.snap_step
+    }
+
+    /// Asks for one render of the model at `width` × `height` pixels, framed like the viewport and drawn without hover, selection
+    /// or flash marks. The pixels arrive on the returned receiver once the viewport has drawn its next frame; end the request with
+    /// [`Message::Capture`]`(None)`.
+    pub fn start_capture(
+        &mut self,
+        ctx: &Ctx,
+        width: u32,
+        height: u32,
+        transparent: bool,
+        background: [f32; 4],
+    ) -> iced::futures::channel::oneshot::Receiver<capture::Pixels> {
+        let marks = Marks { motors: Some(ctx.physics.motors()), cut: self.cut, ..Marks::default() };
+        let mesh = Arc::new(Mesh::from_rocket(ctx.doc.rocket(), marks));
+        let (request, pixels) = Capture::new(width, height, transparent, background, mesh);
+        self.capture = Some(request);
+        pixels
     }
 
     /// Fits the model into the viewport at its last known size.
@@ -693,6 +719,7 @@ impl View {
                 }
             }
             Message::Resized(size) => self.size = size,
+            Message::Capture(capture) => self.capture = capture,
             Message::Snap(dir) if !self.profile => {
                 let mut to = self.goal();
                 (to.yaw, to.pitch) = to.facing(dir.as_vec3());
@@ -933,6 +960,7 @@ impl View {
             explode: self.explode,
             cut: self.cut,
             fade_from,
+            capture: self.capture.clone(),
         })
         .width(Fill)
         .height(Fill)

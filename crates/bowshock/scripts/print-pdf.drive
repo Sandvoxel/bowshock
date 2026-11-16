@@ -1,0 +1,7 @@
+# Builds the PDF headless (the file dialog is skipped by BOWSHOCK_EXPORT_FILE) and shows the status strip afterwards.
+#   BOWSHOCK_EXPORT_FILE=/tmp/bowshock-print.pdf cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/print-pdf.drive out/print
+viewport 1280x800
+click "hpr_l1_cert"
+click "Print / export PDF…"
+click "Save PDF…"
+screenshot print-saved.png

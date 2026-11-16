@@ -1,0 +1,18 @@
+# File > Print / export PDF…, Export 3D model…, Export image…: the three dialogs.
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/export-dialogs.drive out/export
+viewport 1280x800
+click "hpr_l1_cert"
+click "Print / export PDF…"
+screenshot print-dialog.png
+click "Cancel"
+click "hpr_l1_cert"
+click "Export 3D model…"
+click "STL"
+click "Include internal parts"
+screenshot model-dialog.png
+click "Cancel"
+click "hpr_l1_cert"
+click "Export image…"
+click "Transparent background"
+click "Custom"
+screenshot image-dialog.png

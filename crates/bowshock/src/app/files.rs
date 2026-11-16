@@ -246,6 +246,9 @@ fn menu_rows(recent: &Recent) -> (Vec<Row>, Vec<Row>) {
         m("Import OpenRocket (.ork)…", String::new(), Message::ImportOrk),
         m("Save", format!("{MOD}S"), Message::Save),
         m("Save as…", format!("{SHIFT}{MOD}S"), Message::SaveAs),
+        m("Print / export PDF…", format!("{MOD}P"), Message::Print(crate::print::Message::Open)),
+        m("Export 3D model…", String::new(), Message::Export(crate::export::Message::Open(crate::export::Kind::Model))),
+        m("Export image…", String::new(), Message::Export(crate::export::Message::Open(crate::export::Kind::Image))),
         m("Open example", format!("{MOD}E"), Message::Example),
     ];
     let recents = recent
@@ -546,14 +549,20 @@ mod menu_tests {
     fn menu_rows_route_to_commands() {
         let (commands, _) = menu_rows(&Recent::default());
         let labels: Vec<&str> = commands.iter().map(|r| r.0.as_str()).collect();
-        assert_eq!(labels, ["New", "Open…", "Import OpenRocket (.ork)…", "Save", "Save as…", "Open example"]);
+        assert_eq!(
+            labels,
+            ["New", "Open…", "Import OpenRocket (.ork)…", "Save", "Save as…", "Print / export PDF…", "Export 3D model…", "Export image…", "Open example"]
+        );
         let routes: Vec<bool> = vec![
             matches!(commands[0].2, Some(Message::New)),
             matches!(commands[1].2, Some(Message::Open)),
             matches!(commands[2].2, Some(Message::ImportOrk)),
             matches!(commands[3].2, Some(Message::Save)),
             matches!(commands[4].2, Some(Message::SaveAs)),
-            matches!(commands[5].2, Some(Message::Example)),
+            matches!(commands[5].2, Some(Message::Print(crate::print::Message::Open))),
+            matches!(commands[6].2, Some(Message::Export(crate::export::Message::Open(crate::export::Kind::Model)))),
+            matches!(commands[7].2, Some(Message::Export(crate::export::Message::Open(crate::export::Kind::Image)))),
+            matches!(commands[8].2, Some(Message::Example)),
         ];
         assert!(routes.iter().all(|&ok| ok), "{routes:?}");
         assert_eq!(commands[3].1, format!("{MOD}S"));
@@ -604,5 +613,26 @@ mod menu_tests {
         assert!(!ctx.doc.is_dirty());
         assert_eq!(ctx.notice.as_ref().map(|n| n.0.clone()), Some(format!("Saved {}.{EXTENSION}", ctx.doc.title())));
         assert_eq!(ctx.recent.paths().len(), 1);
+    }
+
+    /// The export and print dialogs hold the app: other commands are swallowed, Escape closes them, and an empty rocket opens none.
+    #[test]
+    fn the_export_and_print_dialogs_are_modal() {
+        use crate::app::App;
+        use crate::{export, print};
+        let mut app = App::with_example();
+        let _ = app.update(Message::Export(export::Message::Open(export::Kind::Image)));
+        assert!(app.export.is_open());
+        let _ = app.update(Message::New);
+        assert!(!app.ctx().doc.rocket().parts().is_empty(), "New is swallowed while the dialog is up");
+        let _ = app.update(Message::Cancel);
+        assert!(!app.export.is_open());
+        let _ = app.update(Message::Print(print::Message::Open));
+        assert!(app.print.is_open());
+        let _ = app.update(Message::Cancel);
+        assert!(!app.print.is_open());
+        let _ = app.update(Message::New);
+        let _ = app.update(Message::Export(export::Message::Open(export::Kind::Model)));
+        assert!(!app.export.is_open(), "nothing to export from an empty rocket");
     }
 }

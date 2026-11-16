@@ -21,6 +21,9 @@ build/lanes.rs + lanes/     Station Lanes: `scene` (bars, sub-rows, stages, mass
                            The lanes always fit the whole rocket (zoom/pan by hand, reset returns); they do not follow the viewport camera.
                            The Build screen's centre pane is the viewport over the fixed-height lanes (`lanes::height`), not a pane_grid pane.
 viewport/                3D viewport (View = state, Message) + overlays (assembly, manipulate, surface)
+viewport/capture.rs      One-shot offscreen render of the model at a chosen pixel size (image export): `Capture` request, read back in `Primitive::prepare`, pixels returned on a oneshot channel.
+export/                  File > Export 3D model… / Export image… (State + Message, modal dialogs); `mesh_export.rs` writes OBJ / binary STL (mm) from the viewport mesh.
+print/                   File > Print / export PDF…: `pdf.rs` (PDF 1.4 writer, Helvetica core fonts), `templates.rs` (full-size fin / ring / wrap / marking templates, tiling), `report.rs` (parts list, design report); built on a worker thread.
 simulate/mod.rs          Simulate screen
 analyze/mod.rs           Analyze screen
 analyze/cfd.rs           CFD table method: document -> `bowshock-core` mapping, the off-thread solve, table keys, the coarse (default) or medium (Refine) grid, table -> plot points.

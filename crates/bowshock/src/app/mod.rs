@@ -27,7 +27,7 @@ use crate::theme;
 use crate::tokens::{self, Tokens};
 use crate::units::UnitSystem;
 use crate::viewport;
-use crate::{analyze, simulate};
+use crate::{analyze, export, print, simulate};
 use document::Document;
 use drag::Drags;
 use physics::Physics;
@@ -346,6 +346,10 @@ pub enum Message {
     Chrome(chrome::Message),
     /// The window's close button, Cmd+Q or Alt+F4: exits at once when nothing is unsaved, else asks first.
     CloseRequested,
+    /// The export 3D model and export image dialogs.
+    Export(export::Message),
+    /// The print / PDF dialog.
+    Print(print::Message),
 }
 
 /// The application state.
@@ -362,6 +366,10 @@ pub struct App {
     simulate: simulate::State,
     analyze: analyze::State,
     chrome: chrome::State,
+    /// The 3D model and image export dialogs.
+    export: export::State,
+    /// The print / PDF dialog.
+    print: print::State,
 }
 
 impl App {
@@ -378,6 +386,8 @@ impl App {
             simulate: simulate::State::new(),
             analyze: analyze::State::new(),
             chrome: chrome::State::new(),
+            export: export::State::new(),
+            print: print::State::new(),
         }
     }
 
@@ -512,6 +522,28 @@ impl App {
                 | Message::UnsavedCancel
                 | Message::SavePath(_)
                 | Message::OpenPath(_)
+                | Message::Chrome(chrome::Message::Nothing) => {}
+                _ => return Task::none(),
+            }
+        }
+        // The export and print dialogs are modal too: Escape closes, Enter saves, and only the clock, the cursor, the layout, the
+        // viewport's size reports and the dialogs' own answers get through.
+        if self.export.is_open() || self.print.is_open() {
+            use keyboard::key::Named;
+            let printing = self.print.is_open();
+            match &message {
+                Message::Cancel => message = if printing { Message::Print(print::Message::Close) } else { Message::Export(export::Message::Close) },
+                Message::Key(KeyPress { key: keyboard::Key::Named(Named::Enter), modifiers, .. }) if modifiers.is_empty() => {
+                    message = if printing { Message::Print(print::Message::Save) } else { Message::Export(export::Message::Save) }
+                }
+                Message::Frame(_)
+                | Message::Cursor(_)
+                | Message::Resized(_)
+                | Message::Released
+                | Message::Key(_)
+                | Message::Export(_)
+                | Message::Print(_)
+                | Message::Viewport(viewport::Message::Fit(_) | viewport::Message::Resized(_))
                 | Message::Chrome(chrome::Message::Nothing) => {}
                 _ => return Task::none(),
             }
@@ -705,6 +737,8 @@ impl App {
             Message::Simulate(m) => return self.simulate.update(m, ctx),
             Message::Analyze(m) => return self.analyze.update(m, ctx),
             Message::Chrome(m) => return self.chrome.update(m, ctx),
+            Message::Export(m) => return self.export.update(m, ctx, &mut self.viewport),
+            Message::Print(m) => return self.print.update(m, ctx),
         }
         Task::none()
     }
@@ -765,7 +799,12 @@ impl App {
                 _ => None,
             }
         });
-        let animating = self.viewport.animating() || self.ctx.animating() || self.simulate.animating() || self.analyze.animating() || self.chrome.animating();
+        let animating = self.viewport.animating()
+            || self.ctx.animating()
+            || self.simulate.animating()
+            || self.analyze.animating()
+            || self.chrome.animating()
+            || self.print.animating();
         let frames = animating.then(|| iced::window::frames().map(Message::Frame));
         let closes = iced::window::close_requests().map(|_| Message::CloseRequested);
         iced::Subscription::batch([events, closes].into_iter().chain(frames))
@@ -786,6 +825,8 @@ impl App {
         layers.extend(self.chrome.overlay(ctx));
         layers.extend(files::menu(ctx));
         layers.extend(files::unsaved_modal(ctx));
+        layers.extend(self.export.view());
+        layers.extend(self.print.view());
         layers.extend(refs::menu_view(ctx));
         layers.extend(part_menu::view(ctx));
         layers.extend(scale::view(ctx));
@@ -841,6 +882,7 @@ fn shortcut(press: &KeyPress) -> Option<Message> {
                 ("s", true) => Some(Message::SaveAs),
                 ("e", false) => Some(Message::Example),
                 ("l", false) => Some(Message::Chrome(chrome::Message::NewConfiguration)),
+                ("p", false) => Some(Message::Print(print::Message::Open)),
                 _ => None,
             }
         }
