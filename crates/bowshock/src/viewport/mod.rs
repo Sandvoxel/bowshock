@@ -4,8 +4,11 @@
 //! Navigation (design/components/Navigation):
 //! - right-drag: orbit; middle-drag: pan; `Alt` + right-drag: roll; mouse wheel: zoom about the cursor; `F` or double-click on
 //!   empty space: fit; double middle-click: fit
-//! - trackpad two-finger scroll: orbit (pan in Profile); with `Shift`: pan; with `Cmd`/`Ctrl`: zoom about the cursor. iced does
-//!   not deliver pinch or rotate gestures to widgets, so `Cmd`/`Ctrl` + scroll is the zoom and `Alt` + right-drag the roll
+//! - trackpad: pinch zooms about the cursor (the vendored iced forwards winit's `PinchGesture`, see `vendor/README.md`);
+//!   two-finger scroll orbits (pan in Profile); with `Shift`: pan; with `Cmd`/`Ctrl`: zoom about the cursor as well. Rotate is
+//!   not forwarded: `Alt` + right-drag is the roll
+//! - an edit that pushes the rocket out of the view refits it, unless the view was panned or zoomed since the last fit: then the
+//!   view stays where the user put it and the hint bar says `F fit`
 //! - double-click a part: focus (the camera turns square-on in an orthographic view and fills the viewport with the part;
 //!   `Esc` goes back)
 //! - ViewCube: hover highlights a face, edge or corner; click snaps to it; drag orbits; the house returns home; when looking
@@ -280,6 +283,12 @@ pub struct View {
     fore_pan: f32,
     /// The inside view to go back to when the internal part being carried in from the bin is dropped or cancelled.
     drag_inside: Option<InsideView>,
+    /// The view was panned or zoomed by hand since the last fit: an edit leaves it alone (see [`View::reframe`]).
+    navigated: bool,
+    /// The last document revision [`View::reframe`] looked at (`None` before the first sync).
+    reframed: Option<u64>,
+    /// An edit left part of the rocket outside a view the user had set: the hint bar offers `F fit` while it stays that way.
+    stray: bool,
 }
 
 impl View {
@@ -305,6 +314,9 @@ impl View {
             mesh_key: None,
             fore_pan: 0.0,
             drag_inside: None,
+            navigated: false,
+            reframed: None,
+            stray: false,
         }
     }
 
@@ -346,6 +358,40 @@ impl View {
             }
             _ => {}
         }
+        self.rebuild_mesh(ctx);
+        self.reframe(ctx);
+    }
+
+    /// Whether any of the rocket (as meshed) lies outside the viewport at the camera's goal.
+    pub(crate) fn out_of_view(&self) -> bool {
+        !self.mesh.is_empty() && !self.goal().contains(self.mesh.min, self.mesh.max, self.size)
+    }
+
+    /// After an edit (a new document revision, once no drag or handle edit is in progress) that leaves the rocket reaching beyond
+    /// the viewport: refit gently (the usual animated fit) if the user has not panned or zoomed since the last fit, else leave
+    /// their view alone and raise [`View::stray`] so the hint bar offers `F fit`. Never mid-drag (the ghost and the handle edits
+    /// change the mesh every move, and a refit would fight the hand) and never in a focus (which crops on purpose).
+    fn reframe(&mut self, ctx: &Ctx) {
+        if ctx.drag.active() || ctx.doc.editing_live() {
+            return;
+        }
+        let revision = ctx.doc.revision();
+        let before = self.reframed.replace(revision);
+        if before.is_none() || before == Some(revision) || self.focus.is_some() {
+            return;
+        }
+        self.stray = false;
+        if self.out_of_view() {
+            if self.navigated {
+                self.stray = true;
+            } else {
+                self.fit();
+            }
+        }
+    }
+
+    /// Rebuilds the mesh if the document, selection, hover, cutaway or a drag ghost changed since it was built.
+    fn rebuild_mesh(&mut self, ctx: &Ctx) {
         let selected = ctx.selection.part();
         let also: Vec<PartId> = ctx.selected_parts().into_iter().skip(1).collect();
         let flash = ctx.flash_levels();
@@ -611,15 +657,18 @@ impl View {
             }
             Message::RollBy(_) => {}
             Message::Pan(delta) => {
+                self.navigated = true;
                 self.settle();
                 self.camera.pan(delta);
             }
             Message::Zoom { factor, offset } => {
+                self.navigated = true;
                 self.settle();
                 self.camera.zoom(factor, offset);
             }
             Message::Fit(size) => {
                 self.size = size;
+                (self.navigated, self.stray) = (false, false);
                 // Nothing to frame: keep the camera.
                 if !self.mesh.is_empty() {
                     let mut to = self.goal();
@@ -691,7 +740,7 @@ impl View {
     }
 
     /// The key hints on show: what a direct edit asked for, else what the drag or selection in progress allows.
-    fn hints(&self, ctx: &Ctx) -> Vec<(&'static str, &'static str)> {
+    pub(crate) fn hints(&self, ctx: &Ctx) -> Vec<(&'static str, &'static str)> {
         if !self.hint.is_empty() {
             return self.hint.clone();
         }
@@ -715,6 +764,9 @@ impl View {
             vec![("", "Found from the motor mounts · set the timing in the inspector")]
         } else if self.inside == InsideView::Exploded {
             vec![("", "Exploded view is view-only"), ("Esc", "leave")]
+        } else if self.stray && self.focus.is_none() && self.out_of_view() {
+            // An edit pushed part of the rocket out of a view the user had set (so it was not refitted for them).
+            vec![("", "Part of the rocket is out of view"), ("F", "fit")]
         } else {
             Vec::new()
         }

@@ -1,0 +1,48 @@
+# Vendored from iced rev b2fbd3cb6289603f8cbbb2387a5242231f509d13 (winit/), workspace inheritance resolved by hand.
+# The only change from upstream is forwarding winit's PinchGesture; see vendor/README.md.
+[package]
+name = "iced_winit"
+description = "A runtime for iced on top of winit"
+version = "0.15.0-dev"
+edition = "2024"
+authors = ["Héctor Ramón Jiménez <hector@hecrj.dev>"]
+license = "MIT"
+repository = "https://github.com/iced-rs/iced"
+homepage = "https://iced.rs"
+categories = ["gui"]
+keywords = ["gui", "ui", "graphics", "interface", "widgets"]
+
+[features]
+default = ["x11", "wayland"]
+debug = ["iced_debug/enable"]
+sysinfo = ["dep:sysinfo"]
+unconditional-rendering = []
+linux-theme-detection = ["dep:mundy", "mundy/async-io", "mundy/color-scheme"]
+image = ["iced_runtime/image", "arboard/image-data"]
+x11 = ["winit/x11"]
+wayland = ["winit/wayland", "arboard/wayland-data-control"]
+wayland-dlopen = ["winit/wayland-dlopen"]
+wayland-decorations = ["winit/wayland-csd-adwaita"]
+
+[dependencies]
+iced_debug = { git = "https://github.com/iced-rs/iced.git", rev = "b2fbd3cb6289603f8cbbb2387a5242231f509d13" }
+iced_program = { git = "https://github.com/iced-rs/iced.git", rev = "b2fbd3cb6289603f8cbbb2387a5242231f509d13" }
+iced_runtime = { git = "https://github.com/iced-rs/iced.git", rev = "b2fbd3cb6289603f8cbbb2387a5242231f509d13" }
+
+log = "0.4"
+rustc-hash = "2.0"
+thiserror = "2"
+tracing = "0.1"
+winit = { git = "https://github.com/iced-rs/winit.git", rev = "48116469f15d3bc52b5e56bb516694be8882870d", default-features = false, features = ["rwh_06"] }
+
+sysinfo = { version = "0.33", optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+arboard = { version = "3.6", default-features = false }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3.104", features = ["Document", "Window", "HtmlCanvasElement"] }
+wasm-bindgen-futures = "0.4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+mundy = { version = "0.2", default-features = false, optional = true }

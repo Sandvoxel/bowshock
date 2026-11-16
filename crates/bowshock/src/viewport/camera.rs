@@ -137,6 +137,16 @@ impl Camera {
         Point::new(size.width / 2.0 + x * k * self.scale, size.height / 2.0 - y * k * self.scale)
     }
 
+    /// Whether the world box `min..max` lies wholly inside a viewport of `size`: every corner of it projects inside (to within a
+    /// pixel). A box that [`Camera::fit`] has framed always does.
+    pub fn contains(&self, min: Vec3, max: Vec3, size: Size) -> bool {
+        (0..8).all(|i| {
+            let corner = Vec3::new(if i & 1 == 0 { min.x } else { max.x }, if i & 2 == 0 { min.y } else { max.y }, if i & 4 == 0 { min.z } else { max.z });
+            let p = self.project(corner, size);
+            p.x >= -1.0 && p.x <= size.width + 1.0 && p.y >= -1.0 && p.y <= size.height + 1.0
+        })
+    }
+
     /// The ray through screen point `at` (logical px in a viewport of `size`): its origin and unit direction. Perspective rays
     /// start at the eye; orthographic ones are parallel and start on the plane through the target.
     pub fn ray(&self, at: Point, size: Size) -> (Vec3, Vec3) {
@@ -355,6 +365,76 @@ mod tests {
             let corner = Vec3::new(if i & 1 == 0 { min.x } else { max.x }, if i & 2 == 0 { min.y } else { max.y }, if i & 4 == 0 { min.z } else { max.z });
             let p = c.project(corner, size);
             assert!(p.x >= 0.0 && p.x <= size.width && p.y >= 0.0 && p.y <= size.height, "{p:?}");
+        }
+    }
+
+    /// The box of a rocket 1.1 m long, and the same with a 2 m part stacked on at the nose (stations run from the tip, so the
+    /// rocket grows towards negative `z` there).
+    fn rocket_and_grown() -> ((Vec3, Vec3), (Vec3, Vec3)) {
+        let (min, max) = (Vec3::new(-0.04, -0.04, 0.0), Vec3::new(0.04, 0.04, 1.1));
+        ((min, max), (Vec3::new(min.x, min.y, -2.0), max))
+    }
+
+    #[test]
+    fn a_fitted_box_is_contained_and_one_that_grew_past_the_edge_is_not() {
+        let size = Size::new(900.0, 560.0);
+        for blend in [0.0, 1.0] {
+            let ((min, max), (gmin, gmax)) = rocket_and_grown();
+            let mut c = Camera { yaw: 0.8, pitch: 0.4, ortho_blend: blend, ..side() };
+            c.fit(min, max, size);
+            assert!(c.contains(min, max, size), "blend {blend}: framed");
+            assert!(!c.contains(gmin, gmax, size), "blend {blend}: the nose side now reaches beyond the view");
+            c.fit(gmin, gmax, size);
+            assert!(c.contains(gmin, gmax, size), "blend {blend}: refitted");
+        }
+    }
+
+    #[test]
+    fn zooming_out_is_never_limited_by_the_rocket_so_a_grown_one_can_always_be_reached() {
+        let size = Size::new(900.0, 560.0);
+        let ((min, max), (gmin, gmax)) = rocket_and_grown();
+        let mut c = Camera { yaw: 0.8, pitch: 0.4, ortho_blend: 0.0, ..side() };
+        c.fit(min, max, size);
+        let fitted = c.scale;
+        // Zoom out about a point near the nose end of the view, as the wheel (1.2 per notch) or a pinch would.
+        let offset = Vector::new(-300.0, 20.0);
+        let mut notches = 0;
+        while !c.contains(gmin, gmax, size) {
+            let before = c.scale;
+            c.zoom(1.2f32.powi(-1), offset);
+            assert!(c.scale < before, "each notch zooms out (stuck at {before} after {notches})");
+            notches += 1;
+            assert!(notches < 30, "the grown rocket never came into view");
+        }
+        assert!(c.scale < fitted, "zoomed out past the old fit to see the new part");
+        // The only floor is the global one, whatever the rocket.
+        for _ in 0..60 {
+            c.zoom(0.8, offset);
+        }
+        assert_eq!(c.scale, MIN_SCALE);
+    }
+
+    #[test]
+    fn pinch_zooms_about_the_cursor_and_does_not_depend_on_how_it_is_cut_into_events() {
+        use crate::widgets::pinch;
+        let size = Size::new(800.0, 600.0);
+        let offset = Vector::new(-150.0, 70.0);
+        let cursor = Point::new(400.0 + offset.x, 300.0 + offset.y);
+        for blend in [0.0, 1.0] {
+            let mut whole = Camera { ortho_blend: blend, ..side() };
+            let mut cut = whole;
+            let world = whole.target + (whole.right() * offset.x - whole.up() * offset.y) / whole.scale;
+            whole.zoom(pinch::factor(0.3), offset);
+            for _ in 0..10 {
+                cut.zoom(pinch::factor(0.03), offset);
+            }
+            assert!((whole.scale - cut.scale).abs() < 1e-2, "{} vs {}", whole.scale, cut.scale);
+            let at = cut.project(world, size);
+            assert!((at.x - cursor.x).abs() < 1e-2 && (at.y - cursor.y).abs() < 1e-2, "the point under the cursor stays under it: {at:?}");
+            assert!(whole.scale > 1000.0, "spreading the fingers zooms in");
+            let mut out = Camera { ortho_blend: blend, ..side() };
+            out.zoom(pinch::factor(-0.3), offset);
+            assert!(out.scale < 1000.0, "closing them zooms out");
         }
     }
 

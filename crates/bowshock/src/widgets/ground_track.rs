@@ -372,14 +372,22 @@ impl canvas::Program<GroundMessage> for GroundTrackView<'_> {
                 st.over_track = false;
                 Some(Action::publish(GroundMessage::Hover(None)))
             }
-            Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+            Event::Mouse(mouse::Event::WheelScrolled { .. } | mouse::Event::PinchGesture { .. }) => {
                 let p = cursor.position_in(bounds)?;
-                let lines = match delta {
-                    mouse::ScrollDelta::Lines { y, .. } => *y,
-                    mouse::ScrollDelta::Pixels { y, .. } => *y / 40.0,
+                // The wheel steps by notch (or by pixels of trackpad scroll); a pinch zooms by the gesture's own amount.
+                let step = match event {
+                    Event::Mouse(mouse::Event::PinchGesture { delta, .. }) => super::pinch::factor(*delta),
+                    Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                        let lines = match delta {
+                            mouse::ScrollDelta::Lines { y, .. } => *y,
+                            mouse::ScrollDelta::Pixels { y, .. } => *y / 40.0,
+                        };
+                        1.15f32.powf(lines)
+                    }
+                    _ => return None,
                 };
                 // Zoom around the cursor: the world point under it stays put.
-                let zoom = (st.zoom * 1.15f32.powf(lines)).clamp(0.2, 400.0);
+                let zoom = (st.zoom * step).clamp(0.2, 400.0);
                 let k = zoom / st.zoom;
                 let centre = Point::new(bounds.width / 2.0, bounds.height / 2.0);
                 let under = Vector::new(p.x - centre.x - st.pan.x, p.y - centre.y - st.pan.y);

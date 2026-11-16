@@ -1,5 +1,7 @@
 [workspace]
 members = ["crates/*"]
+# The patched iced crates are path dependencies of the app, not members: keep them out of `--workspace` builds and lints.
+exclude = ["vendor"]
 resolver = "2"
 
 [workspace.package]
@@ -50,3 +52,9 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.naga]
 opt-level = 3
+
+# Trackpad pinch: iced (this rev) drops winit's `PinchGesture`. These two vendored copies add `mouse::Event::PinchGesture` and
+# forward it; nothing else differs from upstream. See vendor/README.md.
+[patch."https://github.com/iced-rs/iced.git"]
+iced_core = { path = "vendor/iced_core" }
+iced_winit = { path = "vendor/iced_winit" }

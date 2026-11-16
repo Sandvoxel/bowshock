@@ -10,6 +10,7 @@ pub mod gauge;
 pub mod glyph;
 pub mod ground_track;
 pub mod icons;
+pub mod pinch;
 pub mod plot;
 pub mod segmented;
 pub mod status;

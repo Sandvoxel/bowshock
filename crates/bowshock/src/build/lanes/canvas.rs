@@ -476,16 +476,23 @@ impl canvas::Program<Message> for Lanes<'_> {
                 }
                 _ => None,
             },
-            Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+            Event::Mouse(mouse::Event::WheelScrolled { .. } | mouse::Event::PinchGesture { .. }) => {
                 let p = local.filter(|p| p.x >= 0.0 && p.y >= 0.0 && p.x <= bounds.width && p.y <= bounds.height)?;
-                let y = match delta {
-                    mouse::ScrollDelta::Lines { y, .. } => *y,
-                    mouse::ScrollDelta::Pixels { y, .. } => *y / 40.0,
+                // The wheel steps by notch (or by pixels of trackpad scroll); a pinch zooms by the gesture's own amount.
+                let k = match event {
+                    Event::Mouse(mouse::Event::PinchGesture { delta, .. }) => crate::widgets::pinch::factor(*delta),
+                    Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                        let y = match delta {
+                            mouse::ScrollDelta::Lines { y, .. } => *y,
+                            mouse::ScrollDelta::Pixels { y, .. } => *y / 40.0,
+                        };
+                        if y == 0.0 {
+                            return None;
+                        }
+                        1.15f32.powf(y)
+                    }
+                    _ => return None,
                 };
-                if y == 0.0 {
-                    return None;
-                }
-                let k = 1.15f32.powf(y);
                 let fit = Axis::fit(bounds.width, self.scene.length);
                 // Zoom the axis in force about the cursor; the lanes do not zoom out past the whole rocket unless they are
                 // following a camera that has.

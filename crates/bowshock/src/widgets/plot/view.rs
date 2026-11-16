@@ -361,25 +361,38 @@ impl canvas::Program<PlotMessage> for PlotView<'_> {
                     None
                 }
             }
-            Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+            // The fingers lifted: the pinch's level closes, like the modifier's release does for the Cmd/Ctrl + scroll stand-in.
+            Event::Mouse(mouse::Event::PinchGesture { phase: crate::widgets::pinch::Phase::Ended, .. }) => {
+                std::mem::take(&mut st.pinching).then(|| Action::publish(PlotMessage::PinchEnd))
+            }
+            Event::Mouse(mouse::Event::WheelScrolled { .. } | mouse::Event::PinchGesture { .. }) => {
                 let p = local.filter(|p| layout.in_plots(*p))?;
-                let lines = match delta {
-                    mouse::ScrollDelta::Lines { y, .. } => *y,
-                    mouse::ScrollDelta::Pixels { y, .. } => *y / 40.0,
+                // How much the x-range scales by, and whether this is a pinch (a level of its own on the zoom stack) rather than
+                // a wheel step. Cmd/Ctrl + scroll is the pinch stand-in.
+                let (scale, pinched) = match event {
+                    Event::Mouse(mouse::Event::PinchGesture { delta, .. }) => (f64::from(crate::widgets::pinch::span_factor(*delta)), true),
+                    Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                        let lines = match delta {
+                            mouse::ScrollDelta::Lines { y, .. } => *y,
+                            mouse::ScrollDelta::Pixels { y, .. } => *y / 40.0,
+                        };
+                        if lines == 0.0 {
+                            return None;
+                        }
+                        (0.85f64.powf(f64::from(lines)), st.modifiers.command() || st.modifiers.control())
+                    }
+                    _ => return None,
                 };
-                if lines == 0.0 {
-                    return None;
-                }
                 let (w0, w1) = layout.window;
-                let span = (w1 - w0) * 0.85f64.powf(f64::from(lines));
+                let span = (w1 - w0) * scale;
                 if span >= layout.full.1 - layout.full.0 && !self.state.is_zoomed() {
                     return Some(Action::capture());
                 }
                 let frac = f64::from((p.x - layout.x0) / layout.width());
                 let x = layout.x_at(p.x);
                 let lo = x - frac * span;
-                // Cmd/Ctrl + scroll is the pinch stand-in: it adds a level of its own, closed when the modifier is released.
-                if st.modifiers.command() || st.modifiers.control() {
+                // A pinch adds a level of its own, closed when the fingers lift (or the modifier is released).
+                if pinched {
                     st.pinching = true;
                     return Some(Action::publish(PlotMessage::Pinch((lo, lo + span))).and_capture());
                 }

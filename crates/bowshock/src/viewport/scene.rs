@@ -2,8 +2,9 @@
 //!
 //! Navigation (design/components/Navigation): right-drag orbits, middle-drag pans, `Alt` + right-drag rolls, the wheel zooms about
 //! the cursor, a trackpad's two-finger scroll orbits (pan in Profile), with `Shift` it pans and with `Cmd`/`Ctrl` it zooms.
-//! Pinch and rotate gestures are not delivered to widgets by iced, so `Cmd`/`Ctrl` + scroll is the zoom fallback on a trackpad
-//! (and `Alt` + right-drag the roll). The left button belongs to the selection and manipulation overlays above.
+//! A pinch zooms about the cursor (the vendored iced forwards winit's `PinchGesture`; `widgets::pinch`). Rotate gestures are not
+//! forwarded, so `Alt` + right-drag is the roll, and `Cmd`/`Ctrl` + scroll is the zoom for machines the gesture does not reach.
+//! The left button belongs to the selection and manipulation overlays above.
 
 use std::sync::Arc;
 
@@ -16,6 +17,7 @@ use super::mesh::{Cut, Mesh};
 use super::pipeline::{DrawPlan, Pipeline, Uniforms};
 use super::{InsideView, Message};
 use crate::tokens::Tokens;
+use crate::widgets::pinch;
 
 /// A vertex as the radial-part emitters write it; [`super::solids::Sink::adopt`] turns it into a [`super::solids::GpuVertex`].
 #[repr(C)]
@@ -159,6 +161,12 @@ impl shader::Program<Message> for Scene {
                     }
                 };
                 Some(Action::publish(message).and_capture())
+            }
+            // A trackpad pinch zooms about the cursor like the wheel does. Two-finger scroll stays orbit / pan (above).
+            iced::Event::Mouse(mouse::Event::PinchGesture { delta, .. }) => {
+                let position = cursor.position_over(bounds)?;
+                let factor = pinch::factor(*delta);
+                Some(Action::publish(Message::Zoom { factor, offset: position - bounds.center() }).and_capture())
             }
             _ => None,
         }

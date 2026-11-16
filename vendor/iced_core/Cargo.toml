@@ -1,0 +1,36 @@
+# Vendored from iced rev b2fbd3cb6289603f8cbbb2387a5242231f509d13 (core/), workspace inheritance resolved by hand.
+# The only change from upstream is the pinch gesture event; see vendor/README.md.
+[package]
+name = "iced_core"
+description = "The essential ideas of iced"
+version = "0.15.0-dev"
+edition = "2024"
+authors = ["Héctor Ramón Jiménez <hector@hecrj.dev>"]
+license = "MIT"
+repository = "https://github.com/iced-rs/iced"
+homepage = "https://iced.rs"
+categories = ["gui"]
+keywords = ["gui", "ui", "graphics", "interface", "widgets"]
+
+[features]
+advanced = []
+crisp = []
+image = []
+basic-shaping = []
+advanced-shaping = []
+
+[dependencies]
+bitflags = "2.0"
+bytes = "1.6"
+glam = "0.33.2"
+lilt = "0.8"
+log = "0.4"
+num-traits = "0.2"
+raw-window-handle = "0.6"
+rustc-hash = "2.0"
+smol_str = "0.3"
+thiserror = "2"
+unicode-segmentation = "1.0"
+web-time = "1.1"
+
+serde = { version = "1.0", optional = true, features = ["derive"] }

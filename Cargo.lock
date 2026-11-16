@@ -1371,7 +1371,6 @@ dependencies = [
 [[package]]
 name = "iced_core"
 version = "0.15.0-dev"
-source = "git+https://github.com/iced-rs/iced.git?rev=b2fbd3cb6289603f8cbbb2387a5242231f509d13#b2fbd3cb6289603f8cbbb2387a5242231f509d13"
 dependencies = [
  "bitflags",
  "bytes",
@@ -1538,7 +1537,6 @@ dependencies = [
 [[package]]
 name = "iced_winit"
 version = "0.15.0-dev"
-source = "git+https://github.com/iced-rs/iced.git?rev=b2fbd3cb6289603f8cbbb2387a5242231f509d13#b2fbd3cb6289603f8cbbb2387a5242231f509d13"
 dependencies = [
  "arboard",
  "iced_debug",
