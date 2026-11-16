@@ -707,9 +707,9 @@ impl View {
             if drag.detached && drag.target.is_none() {
                 vec![("", "Release to remove · move onto a tube to attach · back to the rocket to slide"), ("X", "copies"), ("Esc", "put back")]
             } else if drag.origin.is_some() {
-                vec![("", "Slide along the rocket · pull away to detach"), ("X", "copies"), ("Alt", "free"), ("Shift", "snap"), ("Esc", "cancel")]
+                vec![("", "Slide or turn round the tube · pull away to detach"), ("X", "copies"), ("Alt", "free"), ("Shift", "to an end"), ("Esc", "cancel")]
             } else {
-                vec![("", "Release on a tube"), ("X", "copies"), ("Alt", "free"), ("Shift", "snap"), ("Esc", "cancel")]
+                vec![("", "Release on a tube"), ("X", "copies"), ("Alt", "free"), ("Shift", "to an end"), ("Esc", "cancel")]
             }
         } else if matches!(ctx.selection, Selection::Separation(_)) {
             vec![("", "Found from the motor mounts · set the timing in the inspector")]

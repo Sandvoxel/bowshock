@@ -82,6 +82,17 @@ impl Overlay<'_> {
     /// it is free: it follows the surface under the cursor (any tube, the core's or a pod's), and over empty space it has no
     /// target (releasing there removes it). Back within reach of the rocket with no surface under the cursor, it slides again.
     fn choose(&self, state: &mut State, at: Point, size: Size) -> (Option<SurfaceTarget>, bool) {
+        let (target, detached) = self.choose_free(state, at, size);
+        // Shift snaps to the part's ends: the group's fore edge flush with the tube's fore end, or its aft edge flush with the aft
+        // end (fins down to the bottom of the tube), whichever is nearer.
+        let target = match target {
+            Some(t) if state.modifiers.shift() => Some(pick::flush(self.rocket, &self.drag.kind, t)),
+            other => other,
+        };
+        (target, detached)
+    }
+
+    fn choose_free(&self, state: &mut State, at: Point, size: Size) -> (Option<SurfaceTarget>, bool) {
         let (rocket, camera, kind) = (self.rocket, &self.camera, &self.drag.kind);
         let modifiers = state.modifiers;
         let (free, step) = (modifiers.alt(), pick::step(modifiers, self.snap_step));
@@ -102,7 +113,12 @@ impl Overlay<'_> {
             }
             state.freed = false;
         }
-        // Picked up off the rocket: slide along it, keeping the angle (the one it had, or the last target's).
+        // Picked up off the rocket: in 3D, over its own tube, it follows the cursor round and along the surface (so a placed group
+        // can be rotated about the tube as well as slid; side-on in 2D the angle is ambiguous, so there it only slides).
+        // Elsewhere it slides along the tube keeping the angle (the one it had, or the last target's).
+        if let Some(target) = (!camera.is_ortho()).then(surface).flatten().filter(|t| t.parent == origin.parent) {
+            return (Some(target), false);
+        }
         let angle = self.drag.target.map_or(origin.angle, |t| t.angle);
         let slide = || pick::slide_from(rocket, camera, at, size, kind, angle, step, origin.parent);
         (if free { surface().or_else(slide) } else { slide() }, false)

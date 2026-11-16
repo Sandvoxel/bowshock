@@ -162,6 +162,15 @@ fn slide_core(rocket: &Rocket, camera: &Camera, at: Point, size: Size, kind: &Ra
     Some(SurfaceTarget { parent, offset, angle, copy })
 }
 
+/// `t` moved so a radial part of `kind` sits flush with whichever end of its tube it is nearer: its fore edge on the tube's fore
+/// end, or its aft edge on the aft end (Shift while placing or sliding).
+pub fn flush(rocket: &Rocket, kind: &RadialKind, t: SurfaceTarget) -> SurfaceTarget {
+    let Some(part) = rocket.part(t.parent) else { return t };
+    let (length, extent) = (part.kind.length(), kind.extent());
+    let offset = if t.offset + extent / 2.0 > length / 2.0 { (length - extent).max(0.0) } else { 0.0 };
+    SurfaceTarget { offset: rocket.clamp_offset(t.parent, offset, kind).unwrap_or(t.offset), ..t }
+}
+
 /// How a radial part's position is rounded: the first copy's angle to a multiple of `angle` degrees (none if 0), and the
 /// station of its fore edge to a multiple of `station` metres (none if `None`).
 #[derive(Debug, Clone, Copy, Default)]
@@ -530,6 +539,17 @@ mod tests {
         cam.pitch = 0.4;
         let tube = r.parts()[1].id;
         assert_eq!(pick(&r, &cam, cam.project(Vec3::new(0.0, 0.0, 0.45), SIZE), SIZE), Some(Pick::Axial(tube)));
+    }
+
+    #[test]
+    fn flush_puts_the_part_against_the_nearer_end_of_its_tube() {
+        let r = rocket();
+        let tube = r.parts()[1].id;
+        let at = |offset: f64| SurfaceTarget { parent: tube, offset, angle: 1.0, copy: 0 };
+        // A 0.1 m lug on a 0.5 m tube: centred aft of the middle → aft edge on the aft end (offset 0.4); fore of it → offset 0.
+        assert!((flush(&r, &LUG, at(0.3)).offset - 0.4).abs() < 1e-12);
+        assert_eq!(flush(&r, &LUG, at(0.1)).offset, 0.0);
+        assert_eq!(flush(&r, &LUG, at(0.3)).angle, 1.0);
     }
 
     #[test]
