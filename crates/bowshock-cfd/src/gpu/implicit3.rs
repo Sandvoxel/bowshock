@@ -1,0 +1,690 @@
+// The three-factor line-implicit scheme `Scheme3::Implicit` in array ops. This file is `include!`d by `gpu/mod.rs` after `body3.rs` and `implicit.rs`
+// into the same per-precision module, so it sees `S`, `A`, `Rec3`, `State3`, `LazySolver3`, `lhs` / `from_lhs`, the f32 helpers of `implicit.rs`
+// (`F`, `cf`, `up_lhs`, the block entry `E`, `shock_weight_f`) and everything `body3.rs` imports.
+//
+// It mirrors `crate::implicit3` (`flux_jacobian3`, `abs_jacobian3`, `cell_blocks3`, `assemble3`, `solve_lines3`, `apply_factor3`, `step`) the way
+// `implicit.rs` mirrors `crate::implicit`: one iteration solves the backward-Euler pseudo-time step with the first-order flux Jacobians on the left,
+//
+//     (I - dt J_i) X = dt R,   (I - dt J_j) Y = X,   (I - dt J_k) dU = Y,   U <- U + alpha dU,
+//
+// `R` being the residual of the full second-order scheme (`LazySolver3::eval_residual`, in the precision `S`). The left-hand side (Jacobians,
+// dissipation, ghost Jacobians, dt, line solves, defect correction) is plain f32 in both precisions: it only steers the iteration, the fixed point is
+// that of the `S`-precision `R`.
+//
+// A 5x5 block is `Blk5`: twenty-five entries, row-major like the CPU `M5`, each an array over the cells or faces (`E::A`) or the constants 0 / 1
+// (`E::Z`, `E::O`), so that the structurally zero entries of the flux Jacobian cost nothing. The line solves are Luma's
+// `solve_block_tridiagonal_parts::<25, 5>` on the entries of each block (no stacking); a vector field is five `[ni, nj, nk]` arrays.
+//
+// Solid cells (fins) are identity rows (`d = I`, `lo = up = 0`, `dt = 0`, so the right-hand side is zero), which cuts every line through a fin
+// into independent segments; the fluid cell next to a solid cell drops that off-diagonal block and adds `B T` to its diagonal with `T` the
+// reflection about the wall face, exactly as the CPU does.
+
+/// Five f32 fields (primitive state, or a conserved vector).
+type V5 = [F; 5];
+/// Three f32 fields (a face normal).
+type N3 = [F; 3];
+
+/// `[b0, b1, b2, b3, b4]` of a vector of five fields.
+fn v5(f: impl FnMut(usize) -> F) -> V5 {
+    std::array::from_fn(f)
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// 5x5 blocks
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// A 5x5 block, row-major (`m[5 r + c]`, the CPU `M5`), one entry per row / column pair.
+#[derive(Clone)]
+struct Blk5([E; 25]);
+
+impl Blk5 {
+    fn zero() -> Blk5 {
+        Blk5(std::array::from_fn(|_| E::Z))
+    }
+
+    fn eye() -> Blk5 {
+        Blk5(std::array::from_fn(|k| if k % 6 == 0 { E::O } else { E::Z }))
+    }
+
+    fn zip(&self, o: &Blk5, f: impl Fn(&E, &E) -> E) -> Blk5 {
+        Blk5(std::array::from_fn(|k| f(&self.0[k], &o.0[k])))
+    }
+
+    fn add(&self, o: &Blk5) -> Blk5 {
+        self.zip(o, E::add)
+    }
+
+    fn sub(&self, o: &Blk5) -> Blk5 {
+        self.zip(o, E::sub)
+    }
+
+    /// Every entry times the array `s`.
+    fn scale(&self, s: &F) -> Blk5 {
+        Blk5(std::array::from_fn(|k| self.0[k].scale(s)))
+    }
+
+    /// `self + d I`.
+    fn add_diag(&self, d: &F) -> Blk5 {
+        Blk5(std::array::from_fn(|k| if k % 6 == 0 { self.0[k].add(&E::A(d.clone())) } else { self.0[k].clone() }))
+    }
+
+    /// `self - d I`.
+    fn sub_diag(&self, d: &F) -> Blk5 {
+        Blk5(std::array::from_fn(|k| if k % 6 == 0 { self.0[k].sub(&E::A(d.clone())) } else { self.0[k].clone() }))
+    }
+
+    /// `self o`: `c[5 i + j] = sum_k a[5 i + k] b[5 k + j]`, `k` ascending like the CPU `mm`.
+    fn mm(&self, o: &Blk5) -> Blk5 {
+        Blk5(std::array::from_fn(|n| {
+            let (i, j) = (n / 5, n % 5);
+            (0..5).fold(E::Z, |acc, k| acc.add(&self.0[5 * i + k].mul(&o.0[5 * k + j])))
+        }))
+    }
+
+    /// The part `range` of every array entry along `axis`.
+    fn slice(&self, axis: usize, range: std::ops::Range<usize>) -> Blk5 {
+        Blk5(std::array::from_fn(|k| match &self.0[k] {
+            E::A(a) => E::A(a.slice(axis, range.clone())),
+            e => e.clone(),
+        }))
+    }
+
+    /// All twenty-five entries as arrays (`z` and `o` the arrays of zeros and ones of the shape).
+    fn dense(&self, z: &F, o: &F) -> [F; 25] {
+        std::array::from_fn(|k| match &self.0[k] {
+            E::Z => z.clone(),
+            E::O => o.clone(),
+            E::A(a) => a.clone(),
+        })
+    }
+
+    fn of(dense: &[F; 25]) -> Blk5 {
+        Blk5(std::array::from_fn(|k| E::A(dense[k].clone())))
+    }
+}
+
+/// `y = a x` for a block of arrays: `y_i = sum_j a_ij x_j`.
+fn mv5(a: &[F; 25], x: &V5) -> V5 {
+    v5(|i| &a[5 * i] * &x[0] + &a[5 * i + 1] * &x[1] + &a[5 * i + 2] * &x[2] + &a[5 * i + 3] * &x[3] + &a[5 * i + 4] * &x[4])
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// gas, flux Jacobian, dissipation
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// `rho = q0, u = q1 / rho, v = q2 / rho, w = q3 / rho, p = (g - 1) (E - rho |u|^2 / 2)` in f32.
+fn cons_to_prim_f5(q: &V5) -> V5 {
+    let u = &q[1] / &q[0];
+    let v = &q[2] / &q[0];
+    let w = &q[3] / &q[0];
+    let p = cf(G1) * (&q[4] - 0.5f32 * &q[0] * (&u * &u + &v * &v + &w * &w));
+    [q[0].clone(), u, v, w, p]
+}
+
+/// `[rho, rho u, rho v, rho w, p / (g - 1) + rho |u|^2 / 2]` in f32.
+fn prim_to_cons_f5(w: &V5) -> V5 {
+    let [rho, u, v, ww, p] = w;
+    [rho.clone(), rho * u, rho * v, rho * ww, p / cf(G1) + 0.5f32 * rho * (u * u + v * v + ww * ww)]
+}
+
+/// `A = d(F.n)/dU` of the primitive state `w` for the unit normal `n` (conservative variables `(rho, rho u, rho v, rho w, E)`):
+/// `h = g p / ((g - 1) rho) + |u|^2 / 2` and the rows of [`flux_jacobian_h5`].
+fn flux_jacobian_f5(w: &V5, n: &N3) -> Blk5 {
+    let [rho, u, v, ww, p] = w;
+    let h = cf(GAMMA) * p / (cf(G1) * rho) + 0.5f32 * (u * u + v * v + ww * ww);
+    flux_jacobian_h5(u, v, ww, &h, n)
+}
+
+/// [`flux_jacobian_f5`] from the velocity and the total enthalpy `h` (the density does not enter `A(u, v, w, H)`):
+///
+/// ```text
+/// th = u.n,  phi = (g - 1) |u|^2 / 2
+/// [ 0                  n_x                     n_y                     n_z                     0        ]
+/// [ phi n_x - u th     th + (2 - g) u n_x      u n_y - (g - 1) v n_x   u n_z - (g - 1) w n_x   (g-1) n_x ]
+/// [ phi n_y - v th     v n_x - (g - 1) u n_y   th + (2 - g) v n_y      v n_z - (g - 1) w n_y   (g-1) n_y ]
+/// [ phi n_z - w th     w n_x - (g - 1) u n_z   w n_y - (g - 1) v n_z   th + (2 - g) w n_z      (g-1) n_z ]
+/// [ th (phi - h)       h n_x - (g - 1) u th    h n_y - (g - 1) v th    h n_z - (g - 1) w th    g th     ]
+/// ```
+fn flux_jacobian_h5(u: &F, v: &F, w: &F, h: &F, n: &N3) -> Blk5 {
+    let g1 = cf(G1);
+    let (nx, ny, nz) = (&n[0], &n[1], &n[2]);
+    let q2 = u * u + v * v + w * w;
+    let th = u * nx + v * ny + w * nz;
+    let phi = (0.5f32 * g1) * &q2;
+    let a = E::A;
+    let tg = cf(2.0 - GAMMA);
+    Blk5([
+        E::Z,
+        a(nx.clone()),
+        a(ny.clone()),
+        a(nz.clone()),
+        E::Z,
+        a(&phi * nx - u * &th),
+        a(&th + (tg * u) * nx),
+        a(u * ny - (g1 * v) * nx),
+        a(u * nz - (g1 * w) * nx),
+        a(g1 * nx),
+        a(&phi * ny - v * &th),
+        a(v * nx - (g1 * u) * ny),
+        a(&th + (tg * v) * ny),
+        a(v * nz - (g1 * w) * ny),
+        a(g1 * ny),
+        a(&phi * nz - w * &th),
+        a(w * nx - (g1 * u) * nz),
+        a(w * ny - (g1 * v) * nz),
+        a(&th + (tg * w) * nz),
+        a(g1 * nz),
+        a(&th * (&phi - h)),
+        a(h * nx - (g1 * u) * &th),
+        a(h * ny - (g1 * v) * &th),
+        a(h * nz - (g1 * w) * &th),
+        a(cf(GAMMA) * &th),
+    ])
+}
+
+/// `|u_n| + c` of the primitive state `w` for the unit normal `n`.
+fn spectral_f5(w: &V5, n: &N3) -> F {
+    (&w[1] * &n[0] + &w[2] * &n[1] + &w[3] * &n[2]).abs() + (cf(GAMMA) * &w[4] / &w[0]).sqrt()
+}
+
+/// `|A|` of the Roe-averaged state of `wl`, `wr` for the unit normal `n`: `|A| = d1 (A - a I) + d2 (A - a I)(A - (a + c) I) + e1 I` with `a = u~_n`, the
+/// entropy-fixed eigenvalue moduli `e1 = fix(a)`, `e2 = fix(a + c)`, `e3 = fix(a - c)` (`fix(l) = |l|` for `|l| >= eps_fix c`, else
+/// `(l^2 / (eps_fix c) + eps_fix c) / 2`), `d1 = (e2 - e1) / c`, `d2 = (e2 + e3 - 2 e1) / (2 c^2)`.
+fn abs_jacobian_f5(wl: &V5, wr: &V5, n: &N3, eps_fix: f32) -> Blk5 {
+    let (sl, sr) = (wl[0].sqrt(), wr[0].sqrt());
+    let inv = 1.0f32 / (&sl + &sr);
+    let u = (&sl * &wl[1] + &sr * &wr[1]) * &inv;
+    let v = (&sl * &wl[2] + &sr * &wr[2]) * &inv;
+    let w = (&sl * &wl[3] + &sr * &wr[3]) * &inv;
+    let ke = |q: &V5| 0.5f32 * (&q[1] * &q[1] + &q[2] * &q[2] + &q[3] * &q[3]);
+    let hl = cf(GAMMA) * &wl[4] / (cf(G1) * &wl[0]) + ke(wl);
+    let hr = cf(GAMMA) * &wr[4] / (cf(G1) * &wr[0]) + ke(wr);
+    let h = (&sl * &hl + &sr * &hr) * &inv;
+    let c = (cf(G1) * (&h - 0.5f32 * (&u * &u + &v * &v + &w * &w))).maximum(1e-30f32).sqrt();
+    let a = &u * &n[0] + &v * &n[1] + &w * &n[2];
+    let eps = eps_fix * &c;
+    let fix = |l: &F| -> F {
+        let al = l.abs();
+        select(&al.ge(&eps), &al, 0.5f32 * (l * l / &eps + &eps))
+    };
+    let (e1, e2, e3) = (fix(&a), fix(&(&a + &c)), fix(&(&a - &c)));
+    let d1 = (&e2 - &e1) / &c;
+    let d2 = (&e2 + &e3 - 2.0f32 * &e1) / (2.0f32 * &c * &c);
+    let am = flux_jacobian_h5(&u, &v, &w, &h, n);
+    let b1 = am.sub_diag(&a);
+    let b2 = am.sub_diag(&(&a + &c));
+    let prod = b1.mm(&b2);
+    b1.scale(&d1).add(&prod.scale(&d2)).add_diag(&e1)
+}
+
+/// Dissipation matrix of the face between the states `l` and `r`: Roe-type `|A|` blended with the scalar Rusanov `lambda I`, `lambda = max(|u_n| + c)`
+/// of the two states, by the shock weight `t` (`(1 - t) |A| + t lambda I`); `roe = false`: `lambda I` alone.
+fn dissipation_f5(l: &V5, r: &V5, n: &N3, p: &ImplicitParams) -> Blk5 {
+    let lam = spectral_f5(l, n).maximum(spectral_f5(r, n));
+    if p.roe {
+        let t = shock_weight_f(&l[4], &r[4]);
+        abs_jacobian_f5(l, r, n, cf(p.eps_fix)).scale(&(1.0f32 - &t)).add_diag(&(&t * &lam))
+    } else {
+        Blk5::zero().add_diag(&lam)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// ghost-state Jacobians (f32 copies of body3.rs's ghost states: only the left-hand side uses them)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// [`characteristic_ghost3`] in f32 (the same Riemann-invariant far field).
+fn characteristic_ghost_f5(fs: &[f64; 5], interior: &V5, n: &N3) -> V5 {
+    let ci = (cf(GAMMA) * &interior[4] / &interior[0]).sqrt();
+    let uni = &interior[1] * &n[0] + &interior[2] * &n[1] + &interior[3] * &n[2];
+    let m = &uni / &ci;
+    let ce = (GAMMA * fs[4] / fs[0]).sqrt();
+    let une = cf(fs[1]) * &n[0] + cf(fs[2]) * &n[1] + cf(fs[3]) * &n[2];
+    let r_out = &uni + 2.0f32 * &ci / cf(G1);
+    let r_in = &une - cf(2.0 * ce / G1);
+    let un_b = 0.5f32 * (&r_out + &r_in);
+    let c_b = (cf(0.25 * G1) * (&r_out - &r_in)).maximum(1e-8f32);
+    let from_interior = un_b.ge(0.0f32);
+    let rf = [
+        select(&from_interior, &interior[0], cf(fs[0])),
+        select(&from_interior, &interior[1], cf(fs[1])),
+        select(&from_interior, &interior[2], cf(fs[2])),
+        select(&from_interior, &interior[3], cf(fs[3])),
+    ];
+    let un_ref = select(&from_interior, &uni, &une);
+    let c_ref = select(&from_interior, &ci, cf(ce));
+    let q = &c_b / &c_ref;
+    let q2 = &q * &q;
+    let rho = &rf[0] * (&q2 * &q2 * &q);
+    let dn = &un_b - &un_ref;
+    let riemann = [rho.clone(), &rf[1] + &dn * &n[0], &rf[2] + &dn * &n[1], &rf[3] + &dn * &n[2], &rho * &c_b * &c_b / cf(GAMMA)];
+    let super_in = m.le(-1.0f32);
+    let super_out = m.ge(1.0f32);
+    v5(|k| select(&super_in, cf(fs[k]), select(&super_out, &interior[k], &riemann[k])))
+}
+
+/// `w` reflected about a wall of unit normal `n`: `v - 2 (v.n) n` (f32).
+fn reflect_f3(w: &V5, n: &N3) -> V5 {
+    let un = &w[1] * &n[0] + &w[2] * &n[1] + &w[3] * &n[2];
+    [w[0].clone(), &w[1] - 2.0f32 * &un * &n[0], &w[2] - 2.0f32 * &un * &n[1], &w[3] - 2.0f32 * &un * &n[2], w[4].clone()]
+}
+
+/// Reflection matrix of the conserved variables about the wall normal `n`: momentum mirrored, scalars kept (`I - 2 n n^T` on rows / columns 1..3).
+fn reflection_f3(n: &N3) -> Blk5 {
+    let mut m = Blk5::eye();
+    for a in 0..3 {
+        for b in 0..3 {
+            m.0[5 * (1 + a) + 1 + b] = E::A(if a == b { 1.0f32 - 2.0f32 * &n[a] * &n[b] } else { -2.0f32 * &n[a] * &n[b] });
+        }
+    }
+    m
+}
+
+/// `T = dU_ghost / dU_interior` of the first ghost layer of a line end.
+#[allow(clippy::large_enum_variant)]
+enum Tj5 {
+    /// Frozen ghost state (`implicit_bc = false`).
+    Zero,
+    Mat(Blk5),
+}
+
+/// `m T`.
+fn times_t5(m: &Blk5, t: &Tj5) -> Option<Blk5> {
+    match t {
+        Tj5::Zero => None,
+        Tj5::Mat(t) => Some(m.mm(t)),
+    }
+}
+
+/// `a` extended along `dir` by `before` / `after` copies of its edge cells.
+fn pad_dir(a: &F, dir: usize, before: usize, after: usize) -> F {
+    match dir {
+        0 => a.pad([(before, after)], PadMode::Edge),
+        1 => a.pad([(0, 0), (before, after)], PadMode::Edge),
+        _ => a.pad([(0, 0), (0, 0), (before, after)], PadMode::Edge),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// geometry of the left-hand side
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The geometry of one line end (the boundary faces of one side of direction `dir`) on its edge cells (f32): the unit normal of the boundary face
+/// (`raw`, for the wall reflections) and the outward normal (`out`, for the characteristic far field); arrays of the edge slice (`[1, nj, nk]`
+/// for the i ends, `[ni, 1, nk]`, `[ni, nj, 1]`).
+struct EdgeGeo3 {
+    raw: N3,
+    out: N3,
+}
+
+/// Uploaded f32 geometry of one direction: unit normal and area of its faces, zeros and ones of the face shape, and the masks of the cells
+/// `[ni, nj, nk]` that decide how the line ends and the solid cells fold into the blocks.
+struct LDir3 {
+    n: N3,
+    area: F,
+    zero: F,
+    one: F,
+    /// First / last cell of its line (`m = 0`, `m = n - 1`): the ghost Jacobian folds in.
+    first: Array<bool>,
+    last: Array<bool>,
+    /// The lower / upper neighbour along the line is solid: the wall reflection folds in (`None` without solid boxes).
+    lower_solid: Option<Array<bool>>,
+    upper_solid: Option<Array<bool>>,
+    /// The `lo` (`up`) block is dropped: the first (last) cell of the line, or the lower (upper) neighbour is solid.
+    cut_lo: Array<bool>,
+    cut_up: Array<bool>,
+    /// Faces with a solid cell on one side only: the state of the solid side is the reflection of the fluid side. `wall_l`: the lower cell is solid,
+    /// `wall_r`: the upper one (`None` without solid boxes).
+    wall_l: Option<Array<bool>>,
+    wall_r: Option<Array<bool>>,
+}
+
+/// The f32 geometry of the left-hand side, uploaded once from the grid (the arrays of `Geo3` are of the precision `S`).
+struct LGeo3 {
+    dir: [LDir3; 3],
+    /// Cell volume `V`.
+    vol: F,
+    /// Zeros and ones `[ni, nj, nk]`.
+    zero: F,
+    one: F,
+    /// Solid cells (`None` without solid boxes).
+    solid: Option<Array<bool>>,
+    /// `edge[dir][side]`, side 0 = lower end (`m = 0`), 1 = upper end.
+    edge: [[EdgeGeo3; 2]; 3],
+}
+
+impl LGeo3 {
+    fn new(ctx: &Context, grid: &Grid3, solid: &[bool]) -> Result<LGeo3> {
+        let (ni, nj, nk) = (grid.ni, grid.nj, grid.nk);
+        let dims = [ni, nj, nk];
+        let has_solid = solid.iter().any(|s| *s);
+        let is_solid = |c: [isize; 3]| {
+            c[0] >= 0
+                && c[1] >= 0
+                && c[2] >= 0
+                && (c[0] as usize) < ni
+                && (c[1] as usize) < nj
+                && (c[2] as usize) < nk
+                && solid[(c[2] as usize * nj + c[1] as usize) * ni + c[0] as usize]
+        };
+        let mask = |shape: [usize; 3], f: &dyn Fn(usize, usize, usize) -> bool| -> Result<Array<bool>> {
+            let mut v = Vec::with_capacity(shape[0] * shape[1] * shape[2]);
+            for k in 0..shape[2] {
+                for j in 0..shape[1] {
+                    for i in 0..shape[0] {
+                        v.push(f(i, j, k));
+                    }
+                }
+            }
+            Array::from_slice_on(ctx, &v, shape)
+        };
+        let ones = |shape: [usize; 3], x: f64| up_lhs(ctx, &vec![x; shape[0] * shape[1] * shape[2]], shape);
+        let direction = |dir: usize, faces: &[Face3]| -> Result<LDir3> {
+            let nf = [ni + (dir == 0) as usize, nj + (dir == 1) as usize, nk + (dir == 2) as usize];
+            let get = |g: &dyn Fn(&Face3) -> f64| up_lhs(ctx, &faces.iter().map(g).collect::<Vec<_>>(), nf);
+            let mut e = [0isize; 3];
+            e[dir] = 1;
+            let at = |i: usize, j: usize, k: usize| [i, j, k][dir];
+            let nl = dims[dir];
+            let cell = |i: usize, j: usize, k: usize, s: isize| [i as isize + s * e[0], j as isize + s * e[1], k as isize + s * e[2]];
+            let lower = |i, j, k| is_solid(cell(i, j, k, -1));
+            let upper = |i, j, k| is_solid(cell(i, j, k, 1));
+            // a neighbour that does not exist is not solid (the ghost state stands there): `is_solid` is false out of range
+            Ok(LDir3 {
+                n: [get(&|f| f.n[0])?, get(&|f| f.n[1])?, get(&|f| f.n[2])?],
+                area: get(&|f| f.area)?,
+                zero: ones(nf, 0.0)?,
+                one: ones(nf, 1.0)?,
+                first: mask(dims, &|i, j, k| at(i, j, k) == 0)?,
+                last: mask(dims, &|i, j, k| at(i, j, k) + 1 == nl)?,
+                lower_solid: if has_solid { Some(mask(dims, &|i, j, k| lower(i, j, k))?) } else { None },
+                upper_solid: if has_solid { Some(mask(dims, &|i, j, k| upper(i, j, k))?) } else { None },
+                cut_lo: mask(dims, &|i, j, k| at(i, j, k) == 0 || lower(i, j, k))?,
+                cut_up: mask(dims, &|i, j, k| at(i, j, k) + 1 == nl || upper(i, j, k))?,
+                wall_l: if has_solid { Some(mask(nf, &|i, j, k| lower(i, j, k) && !is_solid(cell(i, j, k, 0)))?) } else { None },
+                wall_r: if has_solid { Some(mask(nf, &|i, j, k| is_solid(cell(i, j, k, 0)) && !lower(i, j, k))?) } else { None },
+            })
+        };
+        let edge = |faces: Vec<&Face3>, sign: f64, shape: [usize; 3]| -> Result<EdgeGeo3> {
+            let get = |q: usize, s: f64| up_lhs(ctx, &faces.iter().map(|f| s * f.n[q]).collect::<Vec<_>>(), shape);
+            Ok(EdgeGeo3 { raw: [get(0, 1.0)?, get(1, 1.0)?, get(2, 1.0)?], out: [get(0, sign)?, get(1, sign)?, get(2, sign)?] })
+        };
+        // i ends `[1, nj, nk]`, j ends `[ni, 1, nk]`, k ends `[ni, nj, 1]`
+        let iend = |i: usize| -> Vec<&Face3> { (0..nk * nj).map(|q| &grid.iface[q * (ni + 1) + i]).collect() };
+        let jend = |j: usize| -> Vec<&Face3> { (0..nk).flat_map(|k| (0..ni).map(move |i| (k * (nj + 1) + j) * ni + i)).map(|q| &grid.jface[q]).collect() };
+        let kend = |k: usize| -> Vec<&Face3> { (0..nj * ni).map(|q| &grid.kface[k * nj * ni + q]).collect() };
+        Ok(LGeo3 {
+            dir: [direction(0, &grid.iface)?, direction(1, &grid.jface)?, direction(2, &grid.kface)?],
+            vol: up_lhs(ctx, &grid.vol, dims)?,
+            zero: ones(dims, 0.0)?,
+            one: ones(dims, 1.0)?,
+            solid: if has_solid { Some(Array::from_slice_on(ctx, solid, dims)?) } else { None },
+            edge: [
+                [edge(iend(0), -1.0, [1, nj, nk])?, edge(iend(ni), 1.0, [1, nj, nk])?],
+                [edge(jend(0), -1.0, [ni, 1, nk])?, edge(jend(nj), 1.0, [ni, 1, nk])?],
+                [edge(kend(0), -1.0, [ni, nj, 1])?, edge(kend(nk), 1.0, [ni, nj, 1])?],
+            ],
+        })
+    }
+}
+
+/// The blocks `lo`, `d`, `up` of `I - dt J_dir` of every cell (`[ni, nj, nk]` arrays, evaluated).
+struct Factor3 {
+    lo: [F; 25],
+    d: [F; 25],
+    up: [F; 25],
+}
+
+impl LazySolver3 {
+    /// The f32 view of the state `a` (the left-hand side runs in f32; see the module comment).
+    fn lhs_rec3(r: &Rec3) -> V5 {
+        v5(|k| lhs(&r[k]))
+    }
+
+    fn dims3(&self) -> [usize; 3] {
+        [self.ni, self.nj, self.nk]
+    }
+
+    /// `T = dU_ghost / dU_interior` of the first ghost layer at the `lower` / upper end of the lines of direction `dir`, for the edge state `edge`:
+    /// the characteristic far field (the i ends and the `j = nj` end) by the central finite difference of the ghost state with the relative step
+    /// `1e-3` (the CPU's `1e-7` is below f32 resolution): column `q` is `(U_g(U + h e_q) - U_g(U - h e_q)) / 2 h`, `h = 1e-3 (1 + |U_q|)`; the slip wall
+    /// `j = 0` and the symmetry planes: the reflection about the boundary face (at the axis cells the face has no area, so `lo` is zero there and `T`
+    /// does not matter). `ImplicitParams::implicit_bc = false` freezes the ghost states (`T = 0`).
+    fn ghost_jacobian3(&self, dir: usize, lower: bool, edge: &V5, p: &ImplicitParams) -> Tj5 {
+        if !p.implicit_bc {
+            return Tj5::Zero;
+        }
+        let e = &self.lg.edge[dir][!lower as usize];
+        if (dir == 1 && lower) || dir == 2 {
+            return Tj5::Mat(reflection_f3(&e.raw));
+        }
+        let fs = self.cfg.freestream;
+        let u0 = prim_to_cons_f5(edge);
+        let mut entries: [E; 25] = std::array::from_fn(|_| E::Z);
+        for q in 0..5 {
+            let h = 1e-3f32 * (1.0f32 + u0[q].abs());
+            let ghost_at = |sign: f32| -> V5 {
+                let mut uq = u0.clone();
+                uq[q] = &u0[q] + sign * &h;
+                prim_to_cons_f5(&characteristic_ghost_f5(&fs, &cons_to_prim_f5(&uq), &e.out))
+            };
+            let (gp, gm) = (ghost_at(1.0), ghost_at(-1.0));
+            for r in 0..5 {
+                entries[5 * r + q] = E::A((&gp[r] - &gm[r]) / (2.0f32 * &h));
+            }
+        }
+        Tj5::Mat(Blk5(entries))
+    }
+
+    /// Local pseudo-time step from the cell primitives `wk` (f32): `dt = cfl V / (L_i + L_j + L_k)` (`DtMode::Sum`) or `cfl V / (3 min(L_i, L_j, L_k))`
+    /// (`DtMode::MinDirection`), `L_d` = half the sum of `(|u.n| + c) S` over the two faces of direction `d`. `cfl` is the one-element array of the
+    /// loop state. Zero in solid cells.
+    fn pseudo_dt3(&self, wk: &V5, cfl: &F, mode: DtMode) -> F {
+        let g = &self.lg;
+        let dims = self.dims3();
+        let cs = (cf(GAMMA) * &wk[4] / &wk[0]).sqrt();
+        let lam = |dir: usize, upper: bool| -> F {
+            let d = &g.dir[dir];
+            let r = if upper { 1..dims[dir] + 1 } else { 0..dims[dir] };
+            let s = |a: &F| a.slice(dir, r.clone());
+            ((&wk[1] * s(&d.n[0]) + &wk[2] * s(&d.n[1]) + &wk[3] * s(&d.n[2])).abs() + &cs) * s(&d.area)
+        };
+        let l: [F; 3] = std::array::from_fn(|dir| 0.5f32 * (lam(dir, false) + lam(dir, true)));
+        let dt = match mode {
+            DtMode::Sum => cfl * &g.vol / (&l[0] + &l[1] + &l[2]),
+            DtMode::MinDirection => cfl * &g.vol / (3.0f32 * l[0].minimum(&l[1]).minimum(&l[2])),
+        };
+        match &g.solid {
+            Some(solid) => select(solid, 0.0f32, &dt),
+            None => dt,
+        }
+    }
+
+    /// Blocks `(lo, d, up)` of `I - dt J_dir` for every cell (`assemble3`, `cell_blocks3`). With the face matrices `FL = A(U_L) + D`, `FR = A(U_R) - D` of
+    /// every face (`D` the dissipation matrix of the face, `L` / `R` its lower / upper state, ghost states at the ends of a line, the solid side of a wall
+    /// face the reflection of its fluid side, `A` evaluated with the face normal) and the cell coefficients `s_l = dt S_l / (2 V)`, `s_u = dt S_u / (2 V)`
+    /// (`S` the areas of the lower / upper face):
+    ///
+    /// ```text
+    /// lo = -s_l FL_lower,   d = I + s_u FL_upper - s_l FR_lower,   up = s_u FR_upper
+    /// ```
+    ///
+    /// The first / last cell of a line folds `lo T` / `up T` into `d` (`T` from [`LazySolver3::ghost_jacobian3`]), a fluid cell next to a solid cell folds
+    /// `lo R` / `up R` (`R` the reflection about that face), and both drop `lo` / `up`. Solid cells: `d = I`, `lo = up = 0`. `lines = false`: point-implicit.
+    fn factor3(&self, wf: &V5, wk: &V5, dt: &F, p: &ImplicitParams, dir: usize) -> Factor3 {
+        let g = &self.lg;
+        let dg = &g.dir[dir];
+        let dims = self.dims3();
+        let n = dims[dir];
+
+        // face matrices: the states below / above every face of the direction, from the padded primitives (two ghost layers)
+        let line: V5 = v5(|k| (0..3).filter(|&a| a != dir).fold(wf[k].clone(), |a, ax| a.slice(ax, 2..dims[ax] + 2)));
+        let (l, r): (V5, V5) = (v5(|k| line[k].slice(dir, 1..n + 2)), v5(|k| line[k].slice(dir, 2..n + 3)));
+        // a face of a solid box: the solid side is the reflection of the fluid side about the face
+        let (l, r) = match (&dg.wall_l, &dg.wall_r) {
+            (Some(wl), Some(wr)) => {
+                let (r_of_r, r_of_l) = (reflect_f3(&r, &dg.n), reflect_f3(&l, &dg.n));
+                (v5(|k| select(wl, &r_of_r[k], &l[k])), v5(|k| select(wr, &r_of_l[k], &r[k])))
+            }
+            _ => (l, r),
+        };
+        let dis = dissipation_f5(&l, &r, &dg.n, p);
+        let fl = flux_jacobian_f5(&l, &dg.n).add(&dis);
+        let fr = flux_jacobian_f5(&r, &dg.n).sub(&dis);
+        // evaluate the face matrices once: the cell blocks read each of them at two cells
+        let [fl, fr]: [[F; 25]; 2] = [fl.dense(&dg.zero, &dg.one), fr.dense(&dg.zero, &dg.one)].cache();
+        let (fl, fr) = (Blk5::of(&fl), Blk5::of(&fr));
+
+        // cell blocks
+        let s = 0.5f32 * dt / &g.vol;
+        let (s_l, s_u) = (&s * dg.area.slice(dir, 0..n), &s * dg.area.slice(dir, 1..n + 1));
+        let mut d = Blk5::eye().add(&fl.slice(dir, 1..n + 1).scale(&s_u)).sub(&fr.slice(dir, 0..n).scale(&s_l));
+        let (mut lo, mut up) = if p.lines { (fl.slice(dir, 0..n).scale(&(-&s_l)), fr.slice(dir, 1..n + 1).scale(&s_u)) } else { (Blk5::zero(), Blk5::zero()) };
+
+        if p.lines {
+            // ends of the lines: fold `lo T` / `up T` into `d`
+            let edge = |at: std::ops::Range<usize>| -> V5 { v5(|k| wk[k].slice(dir, at.clone())) };
+            let (t_lo, t_hi) = (self.ghost_jacobian3(dir, true, &edge(0..1), p), self.ghost_jacobian3(dir, false, &edge(n - 1..n), p));
+            let folds = [times_t5(&lo.slice(dir, 0..1), &t_lo), times_t5(&up.slice(dir, n - 1..n), &t_hi)];
+            let (z, o) = (g.zero.slice(dir, 0..1), g.one.slice(dir, 0..1));
+            // a fluid cell next to a solid cell sees the wall: `T` = the reflection about the face towards the solid cell
+            let walls = [
+                dg.lower_solid.as_ref().map(|m| (m, lo.mm(&reflection_f3(&std::array::from_fn(|q| dg.n[q].slice(dir, 0..n)))))),
+                dg.upper_solid.as_ref().map(|m| (m, up.mm(&reflection_f3(&std::array::from_fn(|q| dg.n[q].slice(dir, 1..n + 1)))))),
+            ];
+            let present: [[bool; 25]; 2] = std::array::from_fn(|s| std::array::from_fn(|k| folds[s].as_ref().is_some_and(|b| !matches!(b.0[k], E::Z))));
+            let dense: [[F; 25]; 2] = std::array::from_fn(|s| folds[s].as_ref().map_or_else(|| std::array::from_fn(|_| z.clone()), |b| b.dense(&z, &o)));
+            let dense = dense.cache();
+            let spread = |a: &F, low: bool| -> F {
+                if low {
+                    pad_dir(a, dir, 0, n - 1)
+                } else {
+                    pad_dir(a, dir, n - 1, 0)
+                }
+            };
+            for k in 0..25 {
+                for (s, mask) in [(0, &dg.first), (1, &dg.last)] {
+                    if present[s][k] {
+                        let add = select(mask, spread(&dense[s][k], s == 0), 0.0f32);
+                        d.0[k] = d.0[k].add(&E::A(add));
+                    }
+                }
+                for (m, blk) in walls.iter().flatten() {
+                    if let E::A(x) = &blk.0[k] {
+                        d.0[k] = d.0[k].add(&E::A(select(*m, x, 0.0f32)));
+                    }
+                }
+                if let (E::A(a), E::A(b)) = (&lo.0[k], &up.0[k]) {
+                    lo.0[k] = E::A(select(&dg.cut_lo, 0.0f32, a));
+                    up.0[k] = E::A(select(&dg.cut_up, 0.0f32, b));
+                }
+            }
+        }
+
+        // solid cells: `d = I`, `lo = up = 0` (selects, not multiplies: nothing computed inside the solid reaches the blocks)
+        if let Some(solid) = &g.solid {
+            let mask = |b: &Blk5, diag: bool| -> Blk5 {
+                Blk5(std::array::from_fn(|k| match &b.0[k] {
+                    E::A(a) => E::A(select(solid, if diag && k % 6 == 0 { 1.0f32 } else { 0.0f32 }, a)),
+                    e => e.clone(),
+                }))
+            };
+            (lo, d, up) = (mask(&lo, false), mask(&d, true), mask(&up, false));
+        }
+        let (z, o) = (&g.zero, &g.one);
+        let [lo, d, up] = [lo.dense(z, o), d.dense(z, o), up.dense(z, o)].cache();
+        Factor3 { lo, d, up }
+    }
+
+    /// `x <- (I - dt J_dir)^{-1} x` for every line of direction `dir` (block-tridiagonal solve, `solve_lines3`); the twenty-five block entries and the
+    /// five components are passed as parts (no stacking).
+    fn solve_lines3(&self, fac: &Factor3, dir: usize, x: &V5) -> V5 {
+        let lo: [&F; 25] = std::array::from_fn(|k| &fac.lo[k]);
+        let d: [&F; 25] = std::array::from_fn(|k| &fac.d[k]);
+        let up: [&F; 25] = std::array::from_fn(|k| &fac.up[k]);
+        let rhs: [&F; 5] = std::array::from_fn(|k| &x[k]);
+        luma::solve_block_tridiagonal_parts(dir, lo, d, up, rhs)
+    }
+
+    /// The approximate factorization `(I - dt J_k)^{-1} (I - dt J_j)^{-1} (I - dt J_i)^{-1} rhs`.
+    fn approx_factor3(&self, fac: &[Factor3; 3], rhs: &V5) -> V5 {
+        let x = self.solve_lines3(&fac[0], 0, rhs);
+        let x = self.solve_lines3(&fac[1], 1, &x);
+        self.solve_lines3(&fac[2], 2, &x)
+    }
+
+    /// `(I - dt J_dir) x` (`apply_factor3`): `d x + lo x_{m-1} + up x_{m+1}`, the missing neighbours at the ends of a line being 0 (their blocks are
+    /// zero there).
+    fn apply_factor3(&self, fac: &Factor3, dir: usize, x: &V5) -> V5 {
+        let mut lower = [0isize; 3];
+        lower[dir] = 1;
+        let upper = lower.map(|s| -s);
+        let xm: V5 = v5(|k| x[k].shift_fill(lower, 0.0));
+        let xp: V5 = v5(|k| x[k].shift_fill(upper, 0.0));
+        let (dx, lx, ux) = (mv5(&fac.d, x), mv5(&fac.lo, &xm), mv5(&fac.up, &xp));
+        v5(|q| &dx[q] + &lx[q] + &ux[q])
+    }
+
+    /// Positivity damping: `alpha` is the first of `1, 1/2, .., 1/128` for which `U + alpha dU` has `rho > 0`, `p > 0` and five finite components, `0` if
+    /// there is none. Decided in f32 from the f32 view of `U`.
+    fn damping3(&self, u: &V5, du: &V5) -> F {
+        let ok = |a: f32| -> Array<bool> {
+            let q: V5 = v5(|k| &u[k] + a * &du[k]);
+            let w = cons_to_prim_f5(&q);
+            let finite = q.iter().map(|x| x.is_finite()).reduce(|a, b| a & b).expect("the conserved state has five components");
+            w[0].gt(0.0f32) & w[4].gt(0.0f32) & finite
+        };
+        let last = 1.0f32 / 128.0;
+        let mut alpha = select(&ok(last), last, 0.0f32);
+        for k in (0..7).rev() {
+            let a = 0.5f32.powi(k);
+            alpha = select(&ok(a), a, &alpha);
+        }
+        alpha
+    }
+
+    /// One implicit iteration of the loop state `s` (`implicit3::step`): the new state and the density residual of `R` at the start of the iteration, the
+    /// CFL ramp advanced: `cfl <- min(growth cfl, cfl_max)`, `cfl` being `s[6]` (it starts at `cfl0` at [`LazySolver3::restart_ramp`]).
+    ///
+    /// ```text
+    /// X = AF^{-1} (dt R),  r = dt R - (A_i + A_j + A_k - 2 I) X,  X += AF^{-1} r      (sub_iters - 1 times),   U += alpha X
+    /// ```
+    ///
+    /// with `AF = (I - dt J_i)(I - dt J_j)(I - dt J_k)` (factored) and `A_d = I - dt J_d`.
+    fn implicit_step3(&self, s: &State3, p: &ImplicitParams, lim: Limiter) -> State3 {
+        let u = unpack3(s);
+        let (prim, w) = self.padded3(&u);
+        let f = self.face_fluxes3(&w, lim);
+        let (r0, _) = self.cell_residual3(&prim, &f, false);
+        let rn = self.residual_norm3(&r0[0]);
+
+        // the f32 left-hand side: primitives with ghosts, pseudo-time step, factors
+        let wf: V5 = Self::lhs_rec3(&w).cache();
+        let wk: V5 = v5(|k| wf[k].slice(0, 2..self.ni + 2).slice(1, 2..self.nj + 2).slice(2, 2..self.nk + 2));
+        let cfl = lhs(&s[6]);
+        let dt = self.pseudo_dt3(&wk, &cfl, p.dt_mode);
+        let fac: [Factor3; 3] = std::array::from_fn(|dir| self.factor3(&wf, &wk, &dt, p, dir));
+
+        // right-hand side and defect correction
+        let b: V5 = v5(|k| &lhs(&r0[k]) * &dt);
+        let b = b.cache();
+        let mut du = self.approx_factor3(&fac, &b);
+        for _ in 1..p.sub_iters.max(1) {
+            let a: [V5; 3] = std::array::from_fn(|dir| self.apply_factor3(&fac[dir], dir, &du));
+            let r: V5 = v5(|k| &b[k] - (&a[0][k] + &a[1][k] + &a[2][k] - 2.0f32 * &du[k]));
+            let corr = self.approx_factor3(&fac, &r.cache());
+            du = v5(|k| &du[k] + &corr[k]);
+        }
+
+        // update with positivity damping
+        let alpha = self.damping3(&Self::lhs_rec3(&u), &du);
+        let moved = match &self.geo.fluid {
+            Some(fluid) => alpha.gt(0.0f32) & fluid,
+            None => alpha.gt(0.0f32),
+        };
+        let alpha = from_lhs(&alpha);
+        let un: Rec3 = rec3(|k| select(&moved, &u[k] + &alpha * from_lhs(&du[k]), &u[k]));
+        let cfl_next = (&s[6] * c(p.growth)).minimum(c(p.cfl_max));
+        pack3(un, rn, cfl_next)
+    }
+}

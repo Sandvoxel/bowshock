@@ -15,14 +15,14 @@
 //! the implicit operator, the line solves of the two turbulence scalars) are f32 like the rest. [`GpuSolver`] is the precision-independent handle
 //! the other crates use. See the README.
 //!
-//! The 3D Euler solver of `solver3.rs` is in `body3.rs` ([`f32s::LazySolver3`], [`df32s::LazySolver3`], behind [`GpuSolver3`]): `Scheme3::Explicit` only
-//! for now, `Scheme3::Implicit` is not implemented on the GPU yet.
+//! The 3D Euler solver of `solver3.rs` is in `body3.rs` (SSP-RK3) and `implicit3.rs` (three-factor line-implicit scheme), [`f32s::LazySolver3`] /
+//! [`df32s::LazySolver3`], behind [`GpuSolver3`].
 
 use crate::gas3::Cons3;
 use crate::grid::Grid;
 use crate::grid3::Grid3;
 use crate::solver::{Block, Config, Nozzle, Scheme, Solver, Viscous};
-use crate::solver3::{Config3, Scheme3, Solver3};
+use crate::solver3::{Config3, Solver3};
 use luma::Context;
 pub use luma::LumaError;
 
@@ -134,6 +134,7 @@ pub mod f32s {
 
     include!("body.rs");
     include!("body3.rs");
+    include!("implicit3.rs");
     include!("implicit.rs");
     include!("viscous.rs");
     include!("turbulence.rs");
@@ -196,6 +197,7 @@ pub mod df32s {
 
     include!("body.rs");
     include!("body3.rs");
+    include!("implicit3.rs");
     include!("implicit.rs");
     include!("viscous.rs");
     include!("turbulence.rs");
@@ -428,12 +430,9 @@ macro_rules! on3_mut {
     };
 }
 
-const IMPLICIT3_UNSUPPORTED: GpuError = GpuError::Unsupported("Scheme3::Implicit is not implemented on the GPU yet (3D plan E2); use Scheme3::Explicit");
-
-/// GPU solver of one 3D grid: [`f32s::LazySolver3`] or [`df32s::LazySolver3`] behind one type. Mirrors `crate::solver3::Solver3` with
-/// `Scheme3::Explicit` (SSP-RK3 with local time stepping, characteristic far field, axis, slip wall, symmetry planes, fin solid boxes, low-Mach
-/// correction). **`Scheme3::Implicit` is not implemented yet** (3D plan E2): [`GpuSolver3::new`], [`GpuSolver3::from_host`] and
-/// [`GpuSolver3::set_config`] return [`GpuError::Unsupported`] for it.
+/// GPU solver of one 3D grid: [`f32s::LazySolver3`] or [`df32s::LazySolver3`] behind one type. Mirrors `crate::solver3::Solver3` (SSP-RK3 with local
+/// time stepping or the three-factor line-implicit scheme, characteristic far field, axis, slip wall, symmetry planes, fin solid boxes, low-Mach
+/// correction). The left-hand side of the implicit scheme is f32 in both precisions.
 pub struct GpuSolver3 {
     inner: Inner3,
     ctx: Context,
@@ -446,9 +445,6 @@ pub struct GpuSolver3 {
 impl GpuSolver3 {
     /// Uploads the geometry (rounded from the grid's f64 metrics), starts from the free stream.
     pub fn new(ctx: &Context, grid: &Grid3, cfg: &Config3, prec: Precision) -> Result<GpuSolver3> {
-        if !matches!(cfg.scheme, Scheme3::Explicit) {
-            return Err(IMPLICIT3_UNSUPPORTED);
-        }
         let inner = match prec {
             Precision::F32 => Inner3::F32(f32s::LazySolver3::new(ctx, grid, cfg)?),
             Precision::Extended => Inner3::Ext(df32s::LazySolver3::new(ctx, grid, cfg)?),
@@ -456,11 +452,8 @@ impl GpuSolver3 {
         Ok(GpuSolver3 { inner, ctx: ctx.clone(), prec, ni: grid.ni, nj: grid.nj, nk: grid.nk })
     }
 
-    /// The solver of a host [`Solver3`]: its grid and config (explicit scheme), conserved state and iteration count.
+    /// The solver of a host [`Solver3`]: its grid and config, conserved state and iteration count.
     pub fn from_host(ctx: &Context, host: &Solver3, prec: Precision) -> Result<GpuSolver3> {
-        if !matches!(host.cfg.scheme, Scheme3::Explicit) {
-            return Err(IMPLICIT3_UNSUPPORTED);
-        }
         let inner = match prec {
             Precision::F32 => Inner3::F32(f32s::LazySolver3::from_host(ctx, host)?),
             Precision::Extended => Inner3::Ext(df32s::LazySolver3::from_host(ctx, host)?),
@@ -481,11 +474,8 @@ impl GpuSolver3 {
     }
 
     /// Replaces the configuration: free stream, CFL, limiter, `first_order_iters` and the low-Mach flag may change between runs (a Mach / incidence
-    /// sweep) without touching the state or the geometry. `cfg.scheme` must be `Scheme3::Explicit`.
+    /// sweep) without touching the state or the geometry. Changing the scheme restarts the CFL ramp.
     pub fn set_config(&mut self, cfg: &Config3) -> Result<()> {
-        if !matches!(cfg.scheme, Scheme3::Explicit) {
-            return Err(IMPLICIT3_UNSUPPORTED);
-        }
         on3_mut!(self, s => s.set_config(cfg)?);
         Ok(())
     }
@@ -537,5 +527,17 @@ impl GpuSolver3 {
     /// GPU time per kernel of `n` iterations of the `iterate_all` replay (the profile adds up all `n`).
     pub fn profile_replay(&mut self, n: usize) -> Result<luma::Profile> {
         Ok(on3_mut!(self, s => s.profile_replay(n)?))
+    }
+
+    /// `n` iterations as `iterate_all` replays (no residual history: what a benchmark times); call [`GpuSolver3::sync`] to wait for the GPU.
+    pub fn run_replay(&mut self, n: usize) -> Result<()> {
+        on3_mut!(self, s => s.run_replay(n)?);
+        Ok(())
+    }
+
+    /// Waits for the GPU.
+    pub fn sync(&self) -> Result<()> {
+        on3!(self, s => s.sync()?);
+        Ok(())
     }
 }

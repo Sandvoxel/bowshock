@@ -15,7 +15,7 @@
 
 use bowshock_cfd::flux::Limiter;
 use bowshock_cfd::gas3::{freestream3, prim_to_cons3, Cons3};
-use bowshock_cfd::gpu::{GpuError, GpuSolver3, Precision, Staging};
+use bowshock_cfd::gpu::{GpuSolver3, Precision, Staging};
 use bowshock_cfd::grid::Grid;
 use bowshock_cfd::grid3::{revolve, Grid3};
 use bowshock_cfd::implicit::ImplicitParams;
@@ -72,13 +72,13 @@ fn diff(u_gpu: &[Cons3], res_gpu: &[f64], u_cpu: &[Cons3], res_cpu: &[f64]) -> D
     Diff { state, residual }
 }
 
-fn state_target(precision: &str) -> f64 {
-    if precision == "f32" {
-        1e-5
-    } else {
-        3e-7
-    }
-}
+/// State targets `(f32, df32)`: the explicit tolerances of the 2D `explicit.rs`, and the implicit ones of the 2D `implicit.rs` (the f32 left-hand side
+/// steers the iteration, so the GPU and the CPU iterates differ more).
+type Targets = (f64, f64);
+const EXPLICIT: Targets = (1e-5, 3e-7);
+const IMPLICIT: Targets = (1e-3, 1e-4);
+
+type Row = (String, &'static str, Diff, f64);
 
 /// Runs the lazy solver of one precision from `u0` (iteration count `it0`) for `n` iterations.
 macro_rules! run_lazy {
@@ -92,36 +92,48 @@ macro_rules! run_lazy {
     }};
 }
 
-/// One set-up: the CPU advances `warm` iterations from the free stream, then both solvers run `n` more from that state; both precisions and every staging.
-fn compare(label: &str, grid: &Grid3, cfg: &Config3, warm: usize, n: usize, rows: &mut Vec<(String, &'static str, Diff)>) {
+/// One set-up: the CPU advances `warm` iterations from the free stream, then both solvers run `n` more from that state; both precisions and the given
+/// stagings.
+fn compare(label: &str, grid: &Grid3, cfg: &Config3, warm: usize, n: usize, stagings: &[Staging], targets: Targets, rows: &mut Vec<Row>) {
     let mut cpu = Solver3::new(grid.clone(), cfg.clone());
     for _ in 0..warm {
         cpu.step();
     }
     let (u0, it0) = (cpu.u.clone(), cpu.iter);
     let res_cpu: Vec<f64> = (0..n).map(|_| cpu.step()).collect();
+    assert!(cpu.u.iter().all(|q| q.iter().all(|x| x.is_finite())), "the CPU run is finite");
     let ctx = context();
-    for staging in [Staging::Fusion, Staging::Lines, Staging::Fluxes, Staging::Split] {
+    for &staging in stagings {
         let (u, r) = run_lazy!(f32s, &ctx, staging, grid, cfg, &u0, it0, n);
-        rows.push((format!("{label} [{staging:?}]"), "f32", diff(&u, &r, &cpu.u, &res_cpu)));
+        rows.push((format!("{label} [{staging:?}]"), "f32", diff(&u, &r, &cpu.u, &res_cpu), targets.0));
         let (u, r) = run_lazy!(df32s, &ctx, staging, grid, cfg, &u0, it0, n);
-        rows.push((format!("{label} [{staging:?}]"), "df32", diff(&u, &r, &cpu.u, &res_cpu)));
+        rows.push((format!("{label} [{staging:?}]"), "df32", diff(&u, &r, &cpu.u, &res_cpu), targets.1));
     }
 }
 
-fn report(test: &str, rows: &[(String, &'static str, Diff)]) {
+fn report(test: &str, rows: &[Row]) {
     println!("\n{test}");
     println!("| case | precision | max abs dU/(1+abs U) | max rel residual diff | target state |");
     println!("|---|---|---|---|---|");
     let mut failed = Vec::new();
-    for (label, prec, d) in rows {
-        let ts = state_target(prec);
+    for (label, prec, d, ts) in rows {
         println!("| {label} | {prec} | {:.2e} | {:.2e} | {ts:.0e} |", d.state, d.residual);
-        if d.state.is_nan() || d.state >= ts {
+        if d.state.is_nan() || d.state >= *ts {
             failed.push(format!("{label} {prec}: state {:e} (target {ts:e}), residual {:e}", d.state, d.residual));
         }
     }
     assert!(failed.is_empty(), "targets missed: {failed:#?}");
+}
+
+const ALL_STAGINGS: [Staging; 4] = [Staging::Fusion, Staging::Lines, Staging::Fluxes, Staging::Split];
+
+/// The implicit parameters of `Numerics3::auto` (`cfl_max` 10), and a steeper ramp that reaches the CFL limit within the 30 iterations.
+fn implicit_params(steep: bool) -> ImplicitParams {
+    if steep {
+        ImplicitParams { cfl0: 3.0, growth: 1.25, cfl_max: 10.0, ..ImplicitParams::DEFAULT }
+    } else {
+        ImplicitParams { cfl_max: 10.0, ..ImplicitParams::DEFAULT }
+    }
 }
 
 /// Tiny ANF-like case with fins at M = 0.5 (van Albada, low-Mach correction) and M = 2 (minmod), 2 degrees, 30 iterations from the free stream
@@ -133,10 +145,59 @@ fn tiny_anf_state_after_30_iterations_matches_cpu() {
     let mut rows = Vec::new();
     for (mach, limiter, low_mach) in [(0.5, Limiter::VanAlbada, true), (2.0, Limiter::Minmod, false)] {
         let cfg = config(mach, 2.0, limiter, low_mach);
-        compare(&format!("M {mach} cold"), &grid, &cfg, 0, 30, &mut rows);
-        compare(&format!("M {mach} warm"), &grid, &cfg, 150, 30, &mut rows);
+        compare(&format!("M {mach} cold"), &grid, &cfg, 0, 30, &ALL_STAGINGS, EXPLICIT, &mut rows);
+        compare(&format!("M {mach} warm"), &grid, &cfg, 150, 30, &ALL_STAGINGS, EXPLICIT, &mut rows);
     }
     report("tiny ANF, explicit, 30 iterations", &rows);
+}
+
+/// The implicit scheme on the tiny ANF case, M = 0.5 (van Albada, low-Mach correction) and M = 2 (minmod), 2 degrees, 30 iterations with the first 5
+/// first order from the free stream, the `Numerics3::auto` ramp and a steeper one (`implicit_params`), both precisions, `Lines` and `Fluxes` staging.
+#[test]
+fn tiny_anf_implicit_state_after_30_iterations_matches_cpu() {
+    let grid = tiny_anf_grid();
+    let mut rows = Vec::new();
+    for (mach, limiter, low_mach) in [(0.5, Limiter::VanAlbada, true), (2.0, Limiter::Minmod, false)] {
+        for steep in [false, true] {
+            let cfg = Config3 { scheme: Scheme3::Implicit(implicit_params(steep)), ..config(mach, 2.0, limiter, low_mach) };
+            let tag = if steep { "steep" } else { "auto" };
+            compare(&format!("M {mach} implicit {tag} cold"), &grid, &cfg, 0, 30, &[Staging::Lines, Staging::Fluxes], IMPLICIT, &mut rows);
+        }
+    }
+    report("tiny ANF, implicit, 30 iterations", &rows);
+}
+
+/// The implicit scheme on every solid-face pattern of `solid_box_patterns_match_cpu` (lines cut by the solid cells in all three directions, the first
+/// and last cell of a line next to a solid cell, a half layer against the symmetry plane), M = 2. Two runs on the three boxes, each box alone and
+/// together:
+///
+/// * the steep ramp, 30 iterations, with the ghost Jacobians frozen (`implicit_bc = false`): the solid-wall folds and the identity rows are checked
+///   without the far-field Jacobian. With it on, the steep ramp differs by 1e-2 after 3 iterations in the cells next to the `j = nj` far-field
+///   boundary, where the pillar shocks arrive at the switch of its Riemann branch (`u_n,b = 0`): the central finite difference of the f32
+///   left-hand side (relative step 1e-3) and the CPU's forward difference (1e-7) linearise that kink differently (the steady state is the same);
+/// * the `Numerics3::auto` ramp for 3 iterations with the ghost Jacobians on.
+#[test]
+fn solid_box_patterns_implicit_match_cpu() {
+    let mut rows = Vec::new();
+    for boxes in [&[0][..], &[1][..], &[2][..], &[0, 1, 2][..]] {
+        let grid = solid_pattern_grid(boxes);
+        let frozen = ImplicitParams { implicit_bc: false, ..implicit_params(true) };
+        let cfg = Config3 { scheme: Scheme3::Implicit(frozen), ..config(2.0, 2.0, Limiter::Minmod, false) };
+        compare(
+            &format!("solid patterns implicit {boxes:?}, bc frozen, steep, n=30"),
+            &grid,
+            &cfg,
+            0,
+            30,
+            &[Staging::Lines, Staging::Fluxes],
+            IMPLICIT,
+            &mut rows,
+        );
+    }
+    let grid = solid_pattern_grid(&[0, 1, 2]);
+    let cfg = Config3 { scheme: Scheme3::Implicit(implicit_params(false)), ..config(2.0, 2.0, Limiter::Minmod, false) };
+    compare("solid patterns [0, 1, 2], bc on, auto, n=3", &grid, &cfg, 0, 3, &[Staging::Fluxes], IMPLICIT, &mut rows);
+    report("solid box patterns, implicit", &rows);
 }
 
 /// A rectangular axisymmetric box (`x, r` in the unit square, interior nodes perturbed by 10 % of the spacing), revolved into `nk` non-uniform azimuthal
@@ -172,32 +233,35 @@ fn far_field_box_grid(ni: usize, nj: usize, nk: usize) -> Grid3 {
     g3
 }
 
-/// Free-stream preservation on the GPU: M = 0.8 at 6 degrees on the far-field box (CPU: 1e-12 after one step), 5 explicit iterations; the GPU keeps the
-/// uniform flow to round-off of its precision.
+/// Free-stream preservation on the GPU: M = 0.8 at 6 degrees on the far-field box (CPU: 1e-12 after one step), 5 explicit and 5 implicit iterations; the
+/// GPU keeps the uniform flow to round-off of its precision.
 #[test]
 fn far_field_box_preserves_the_free_stream() {
     let grid = far_field_box_grid(8, 8, 8);
-    let cfg = Config3 { first_order_iters: 0, ..config(0.8, 6.0, Limiter::VanAlbada, false) };
-    let q0 = prim_to_cons3(&cfg.freestream);
+    let explicit = Config3 { first_order_iters: 0, ..config(0.8, 6.0, Limiter::VanAlbada, false) };
+    let implicit = Config3 { scheme: Scheme3::Implicit(implicit_params(true)), ..explicit.clone() };
+    let q0 = prim_to_cons3(&explicit.freestream);
     let ctx = context();
     let mut failed = Vec::new();
-    for staging in [Staging::Fusion, Staging::Lines, Staging::Fluxes, Staging::Split] {
-        for (prec, target, run) in [("f32", 1e-6, 0), ("df32", 1e-11, 1)] {
-            let u0 = vec![q0; grid.ni * grid.nj * grid.nk];
-            let (u, _) =
-                if run == 0 { run_lazy!(f32s, &ctx, staging, &grid, &cfg, &u0, 0, 5) } else { run_lazy!(df32s, &ctx, staging, &grid, &cfg, &u0, 0, 5) };
-            let worst = u.iter().fold(0.0f64, |m, q| (0..5).fold(m, |m, k| m.max((q[k] - q0[k]).abs() / (1.0 + q0[k].abs()))));
-            println!("free stream {prec} [{staging:?}]: max |dU|/(1+|U|) = {worst:.2e} (target {target:.0e})");
-            if worst.is_nan() || worst >= target {
-                failed.push(format!("{prec} [{staging:?}]: {worst:e} (target {target:e})"));
+    for (scheme, cfg) in [("explicit", &explicit), ("implicit", &implicit)] {
+        for staging in [Staging::Fusion, Staging::Lines, Staging::Fluxes, Staging::Split] {
+            for (prec, target, run) in [("f32", 1e-6, 0), ("df32", 1e-11, 1)] {
+                let u0 = vec![q0; grid.ni * grid.nj * grid.nk];
+                let (u, _) =
+                    if run == 0 { run_lazy!(f32s, &ctx, staging, &grid, cfg, &u0, 0, 5) } else { run_lazy!(df32s, &ctx, staging, &grid, cfg, &u0, 0, 5) };
+                let worst = u.iter().fold(0.0f64, |m, q| (0..5).fold(m, |m, k| m.max((q[k] - q0[k]).abs() / (1.0 + q0[k].abs()))));
+                println!("free stream {scheme} {prec} [{staging:?}]: max |dU|/(1+|U|) = {worst:.2e} (target {target:.0e})");
+                if worst.is_nan() || worst >= target {
+                    failed.push(format!("{scheme} {prec} [{staging:?}]: {worst:e} (target {target:e})"));
+                }
             }
         }
     }
     assert!(failed.is_empty(), "free stream not preserved: {failed:#?}");
 }
 
-/// The `GpuSolver3` handle: `from_host` + `run` + `state_f64` + `reset` + `set_config` on the tiny ANF case, both precisions, the default staging; the
-/// implicit scheme is refused until package E2; kernel launches and GPU time per iteration are printed.
+/// The `GpuSolver3` handle: `from_host` + `run` + `state_f64` + `reset` + `set_config` on the tiny ANF case, both precisions, the default staging,
+/// then the implicit scheme; kernel launches and GPU time per iteration are printed.
 #[test]
 fn gpu_solver3_handle_and_timing() {
     let grid = tiny_anf_grid();
@@ -241,9 +305,13 @@ fn gpu_solver3_handle_and_timing() {
         assert!((gpu.config().freestream[1] - 2.5 * 4f64.to_radians().cos()).abs() < 1e-12);
         gpu.run(5).unwrap();
 
-        let implicit = Config3 { scheme: Scheme3::Implicit(ImplicitParams::DEFAULT), ..cfg.clone() };
-        assert!(matches!(gpu.set_config(&implicit), Err(GpuError::Unsupported(_))));
-        assert!(matches!(GpuSolver3::new(&ctx, &grid, &implicit, prec), Err(GpuError::Unsupported(_))));
+        // the implicit scheme: the ramp restarts with the scheme, the state stays finite
+        let implicit = Config3 { scheme: Scheme3::Implicit(implicit_params(false)), ..cfg.clone() };
+        gpu.set_config(&implicit).unwrap();
+        gpu.reset().unwrap();
+        gpu.run(10).unwrap();
+        assert!(gpu.state_f64().unwrap().iter().all(|q| q.iter().all(|x| x.is_finite())));
+        assert!(GpuSolver3::new(&ctx, &grid, &implicit, prec).is_ok());
     }
 }
 
@@ -274,33 +342,31 @@ fn tiny_anf_step_profile() {
     }
 }
 
-/// Every solid-face pattern of `Family::fluxes` on a revolved box (no body, free-stream start at M = 2, 2 degrees): a one-cell-wide box (`i` 4..5, so the
-/// face before and the face after it see the solid cell as `m1`/`p0` and as the outer stencil cell on the same face line), two one-cell layers in `k` with one
-/// fluid cell between them (the faces next to the gap see a solid cell on both sides of the stencil), a wider box, and a half layer at `k = nk - 1` against
-/// the symmetry plane. 30 iterations (the first 5 first order) against the CPU, both precisions, `Fusion` (lazy region writes) and `Fluxes` (cached fluxes).
-#[test]
-fn solid_box_patterns_match_cpu() {
+/// The tiny grid with a revolved far-field box and three solid boxes (every solid-face pattern of `Family::fluxes`): a one-cell-wide box (`i` 4..5, so
+/// the face before and the face after it see the solid cell as `m1`/`p0` and as the outer stencil cell on the same face line), two one-cell layers in
+/// `k` with one fluid cell between them (the faces next to the gap see a solid cell on both sides of the stencil), a wider box, and a half layer at
+/// `k = nk - 1` against the symmetry plane.
+fn solid_pattern_grid(boxes: &[usize]) -> Grid3 {
     let (ni, nj, nk) = (12, 10, 8);
     let mut grid = far_field_box_grid(ni, nj, nk);
+    // `axis_cells = 0`: the whole `j = 0` plane of the revolved box (zero-area faces on the axis) is the slip-wall branch; the solid boxes stay off it
     grid.axis_cells = 0;
-    grid.solid = vec![
+    let all = [
         bowshock_cfd::grid3::SolidBox { i: 4..5, j: 2..6, k: 2..3 },
         bowshock_cfd::grid3::SolidBox { i: 4..7, j: 2..6, k: 4..5 },
         bowshock_cfd::grid3::SolidBox { i: 8..10, j: 3..7, k: nk - 1..nk },
     ];
-    // `axis_cells = 0`: the whole `j = 0` plane of the revolved box (zero-area faces on the axis) is the slip-wall branch; the solid boxes stay off it
+    grid.solid = boxes.iter().map(|&b| all[b].clone()).collect();
+    grid
+}
+
+/// Every solid-face pattern of `Family::fluxes` on a revolved box (no body, free-stream start at M = 2, 2 degrees): 30 iterations (the first 5 first
+/// order) against the CPU, both precisions, `Fusion` (lazy region writes) and `Fluxes` (cached fluxes).
+#[test]
+fn solid_box_patterns_match_cpu() {
+    let grid = solid_pattern_grid(&[0, 1, 2]);
     let cfg = config(2.0, 2.0, Limiter::Minmod, false);
-    let mut cpu = Solver3::new(grid.clone(), cfg.clone());
-    let u0 = cpu.u.clone();
-    let res_cpu: Vec<f64> = (0..30).map(|_| cpu.step()).collect();
-    assert!(cpu.u.iter().all(|q| q.iter().all(|x| x.is_finite())), "the CPU run is finite");
-    let ctx = context();
     let mut rows = Vec::new();
-    for staging in [Staging::Fusion, Staging::Fluxes] {
-        let (u, r) = run_lazy!(f32s, &ctx, staging, &grid, &cfg, &u0, 0, 30);
-        rows.push((format!("solid patterns [{staging:?}]"), "f32", diff(&u, &r, &cpu.u, &res_cpu)));
-        let (u, r) = run_lazy!(df32s, &ctx, staging, &grid, &cfg, &u0, 0, 30);
-        rows.push((format!("solid patterns [{staging:?}]"), "df32", diff(&u, &r, &cpu.u, &res_cpu)));
-    }
+    compare("solid patterns", &grid, &cfg, 0, 30, &[Staging::Fusion, Staging::Fluxes], EXPLICIT, &mut rows);
     report("solid box patterns, explicit, 30 iterations", &rows);
 }

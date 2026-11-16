@@ -1069,3 +1069,132 @@ What still applies (`cargo run --release -p bowshock-validate --example luma_iss
   stream retraces and recompiles), and `StopReason` variety beyond one predicate index per rule.
 * **Speed.** The remaining gap to the old hand-written kernels (14 launches per step against ~7, and the traffic of the padded record and the fluxes) is small in
   f32; in double-float it is the arithmetic: the flux kernels are 700-operation `Df32` expressions.
+
+# 3D Euler solver (`gas3`, `grid3`, `flux3`, `bc3`, `solver3`, `implicit3`; GPU `gpu/body3.rs`, `gpu/implicit3.rs`)
+
+The 3D Euler stability solver of the bowshock plan: the finite-volume scheme of the axisymmetric solver on a Cartesian hexahedral grid of the half
+domain around a sting-mounted body with thick fins, f64 on the CPU and the same code in Luma array ops on the GPU (f32 and double-float). It gives
+normal force and centre of pressure at incidence (`bowshock_core::engine::{case3, run3, gpu3}`, `Analysis::run_lift`); the 2D solver stays the drag source.
+
+```
+crates/bowshock-cfd/src/gas3.rs         Cons3 / Prim3 = [rho, rho u, rho v, rho w, E] / [rho, u, v, w, p], physical flux, reflection, free stream
+crates/bowshock-cfd/src/grid3.rs        Grid3: nodes, i / j / k faces (area vector, centroid), volumes, SolidBox, `revolve`
+crates/bowshock-cfd/src/flux3.rs        MUSCL (limited in the face's cylindrical frame, `face_rot`), HLLC, Rusanov, shock blend, low-Mach
+crates/bowshock-cfd/src/bc3.rs          characteristic far field, static-pressure outflow
+crates/bowshock-cfd/src/solver3.rs      Solver3: ghost fill, face fluxes, cell residual, local dt, SSP-RK3 (Scheme3::Explicit)
+crates/bowshock-cfd/src/implicit3.rs    three-factor approximate-factorisation scheme (Scheme3::Implicit), 5x5 Jacobians, block Thomas
+crates/bowshock-cfd/src/gpu/body3.rs    LazySolver3: the explicit scheme in array ops; GpuSolver3 (mod.rs) is the precision-independent handle
+crates/bowshock-cfd/src/gpu/implicit3.rs  the implicit scheme in array ops (5x5 blocks as 25 arrays, `solve_block_tridiagonal_parts::<25, 5>`)
+crates/bowshock-core/src/engine/grid3.rs  the mesher (Grid3Params, Fins3, body_grid3): axisymmetric sting grid revolved, one-cell-thick fin layers
+```
+
+## Conventions
+
+* Velocities are Cartesian: x axial, y lateral, z vertical. `alpha > 0` means the air moves towards +z (`freestream3`): the windward side is -z and a
+  positive normal force points to +z. Non-dimensionalisation as in 2D: `rho = 1`, `c = 1`, `p = 1/g`, `u = M`.
+* The grid is the half domain `theta in [0, pi]` (`(x, r sin theta, r cos theta)`; `theta = 0` is the +z side): the pitch plane `y = 0` is a symmetry
+  plane at both ends (`k = 0` and `k = nk`). Cell, face and node layouts are those of `Grid3` (`i` fastest); the GPU arrays are `[ni, nj, nk]` with the
+  same order, `[ni + 4, nj + 4, nk + 4]` with two ghost layers on every side for the padded primitives (no corner ghosts: every stencil is 1D).
+* Faces are flat quadrilaterals: `S = (d1 x d2) / 2` of the diagonals, `V = (1/3) sum c_f . S_f`. Every cell closes (`sum S = 0` to 1e-13 of the largest
+  face), so a uniform flow is preserved to round-off on any grid (`freestream_is_preserved`: 4e-16 on a perturbed grid, explicit and implicit, M 0.8 at 6 degrees).
+* **Flat-face chord error.** A revolved grid replaces the cylinder by a prism with `nk` flat sides per half domain: the wall faces see the body radius
+  reduced by up to `R (1 - cos(pi / 2 nk))`. The wall Cp of a 15 degree cone against the 2D solver on the same meridian grid
+  (`wall_cp_converges_to_the_2d_solution`, M 2, both converged 6 orders) is `e(16) = 1.35e-3`, `e(32) = 3.6e-4` (ratio 0.27: second-order in the chord).
+
+## Boundaries (two ghost layers per side, as the 2D `NG = 2`)
+
+|boundary|ghost state|
+|---|---|
+|`i = 0`, `i = ni`, `j = nj`|`characteristic_ghost3` with the outward normal of the boundary face (Riemann invariants on the normal velocity, the tangential velocity vector from the upwind side); both layers get the same state|
+|`j = 0`, `i < axis_cells` (the axis)|layer `m` = `mirror_y` (negate `v`) of the cell `(i, m - 1, k')`, `k'` the cell whose azimuth contains `pi - theta_c(k)` (`axis_k`, computed once); the axis faces have no area|
+|`j = 0`, `i >= axis_cells` (body, sting)|slip wall: `reflect3` about the face normal|
+|`k = 0`, `k = nk`|symmetry planes: `reflect3` about the face normal|
+
+## Fins (`Grid3::solid`, `SolidBox`)
+
+Fins are one-cell-thick layers of solid cells in `k` (the mesher moves the layer edges to the fin thickness over the planform, so the fin faces are flat planes
+through the axis). Solid cells are never updated, have `res = dt = 0` and are left out of the residual norm. A face between a fluid cell and a solid cell is a
+wall face: the stencil states on the solid side are the reflections of the fluid cells, `(p0, p1) = (R(m1), R(m2))` about the face normal (`R` =
+`reflect3`); a face between two solid cells carries no flux; a fluid face whose outer stencil cell is solid sees the reflection of the adjacent fluid cell about
+the face between them. The half fin of an odd fin count lies on the `k = nk` symmetry plane (nothing special). In the implicit scheme a solid cell is an
+identity row (`d = I`, `lo = up = 0`, `dt = 0`, so a line through a fin solves as independent segments) and the fluid cell next to it drops that off-diagonal
+block `B` and adds `B T` to its diagonal with `T = I - 2 n n^T` (on the momenta) of the wall face.
+
+## Face fluxes and the frame limiting
+
+`face_flux_lm3` is the 2D `face_flux_lm` with a normal `n` and two tangential components carried by the HLLC contact. The reconstruction limits `(rho, u, v_r,
+v_t, p)` with `v_r = v sin(phi) + w cos(phi)`, `v_t = v cos(phi) - w sin(phi)` in the cylindrical frame about the x axis at the face centroid (`face_rot`, one
+`[sin, cos]` per face, precomputed): limiting the Cartesian `v`, `w` would break the axisymmetry of a flow at `alpha = 0` (the limiter acts per component), the
+frame limiting keeps it to round-off (`axisymmetric_flow_stays_axisymmetric`: azimuthal velocity 5e-16 for minmod, 5e-11 for van Albada, whose `1e-14`
+regularisation is discontinuous at `b = 0`) and makes the 3D flux in the `theta = 0` plane equal the 2D one to 1e-14. A side whose slopes all vanish or whose
+reconstructed density / pressure is not positive is the cell state itself (first order).
+
+## Implicit scheme (`Scheme3::Implicit`)
+
+The 2D scheme (`implicit.rs`) with three factors solved i, then j, then k, 5x5 blocks, no source term: `(I - dt J_i) X = dt R`, `(I - dt J_j) Y = X`,
+`(I - dt J_k) dU = Y`; `R` is the full second-order residual, `J` the first-order Jacobians with the entropy-fixed Roe `|A|` blended to `lambda I` by the shock
+sensor; `sub_iters` defect-correction passes against `I - dt J_i - dt J_j - dt J_k` (`r = b - (A_i + A_j + A_k - 2 I) du`); update halved up to 8 times until
+`rho, p > 0`; the CFL ramps `cfl0 -> cfl_max` by `growth` per iteration. Ghost Jacobians on the first / last cell of each line: characteristic far field by finite
+difference, slip wall and symmetry planes `T = I - 2 n n^T`, the axis `T = 0` (its faces have no area, so the block that `T` multiplies is zero).
+
+* **`cfl_max` 10 for every Mach number** (`Numerics3::auto`; the 2D value is 30 subsonic / 20 supersonic): the three-factor scheme diverged on the coarse ANF
+  grid once the ramp passed about 15 (it did at `cfl_max` 20 and 30; 10 and 5 converge). If a finer grid diverges at 10 as well, drop to 5; the plan's
+  last resort is to treat the k direction point-implicit (k Jacobians on the diagonal only).
+
+## GPU
+
+* `LazySolver3` (`f32s`, `df32s`) mirrors `Solver3` expression by expression: the state `[rho, rho u, rho v, rho w, E]`, the residual of the step and the CFL of the
+  next one (`State3 = [A; 7]`) are loop state of `iterate_until_all`; the density residual is recorded on the GPU (double-float as two words) and read once per `sync` iterations.
+  The ghosts are region assigns into the padded primitives (the axis ghost a `take` with the host-computed partner index), the face fluxes are three
+  kernels (one per direction, `Staging::Fluxes`).
+* The faces next to fin cells are recomputed from the wall stencils and written over the cached fluxes: per direction one box of face indices that contains all of
+  them, case masks from the host (`SolidFaces3`: zero flux, solid before / after the face, solid on both sides of the stencil), one region assign. Faces of the box
+  that see no solid cell keep their own stencil, so the box costs a few percent of the faces (ANF).
+* The implicit left-hand side is f32 in both precisions (as in 2D): Jacobians, dissipation, ghost Jacobians (central finite difference with the relative step
+  1e-3: the CPU's `1e-7` is below f32 resolution), `dt`, the three `solve_block_tridiagonal_parts::<25, 5>` per factor pass and the defect correction. A 5x5 block is
+  25 arrays (`Blk5`, structural zeros and ones are not arrays); the solves read the parts without stacking.
+* `set_config` changes the free stream, CFL, limiter, `first_order_iters`, low-Mach flag and scheme between runs without touching the state or the geometry;
+  changing the scheme (or its parameters) restarts the CFL ramp, a change of the free stream does not (`restart_ramp`).
+
+### Accuracy against the f64 `Solver3` (`cargo test --release -p bowshock-gpu-cases --test euler3d -- --nocapture`)
+
+Tiny ANF-like case (`body_grid3`, 106 x 24 x 8 cells, 2 solid boxes: 10 degree cone-cylinder, four square fins of chord 1 d, span 1 d, thickness 0.08 d, sting
+grid counts `n_up 10, n_nose 16, n_seg [12], n_ext 10, nj 24`), 2 degrees, 30 iterations with the first 5 first order from the free stream. `max |dU| / (1 + |U|)`, the
+worst case over the stagings:
+
+|scheme|M|f32|df32|target f32 / df32|
+|---|---|---|---|---|
+|explicit, cold|0.5 (van Albada, low-Mach)|1.2e-6|5.5e-11|1e-5 / 3e-7|
+|explicit, cold|2 (minmod)|1.8e-6|8.6e-14|1e-5 / 3e-7|
+|explicit, after 150 CPU iterations|0.5 / 2|1.9e-6 / 2.3e-6|1.5e-10 / 9.8e-14|1e-5 / 3e-7|
+|implicit, `cfl_max` 10 (`Numerics3::auto`)|0.5|1.1e-6|5.7e-9|1e-3 / 1e-4|
+|implicit, `cfl_max` 10|2|1.5e-6|2.9e-8|1e-3 / 1e-4|
+|implicit, steep ramp (`cfl0 3`, `growth 1.25`, `cfl_max` 10)|0.5 / 2|7.6e-5 / 5.2e-5|9.4e-8 / 6.0e-8|1e-3 / 1e-4|
+
+Every solid-face pattern (one-cell-wide box, two layers with one fluid cell between them, a wider box, a half layer on the `k = nk` plane; `solid_box_patterns_*`):
+explicit 1.8e-6 (f32) / 4.4e-14 (df32); implicit with frozen ghost Jacobians (`implicit_bc = false`, steep ramp, 30 iterations) 7.5e-7 / 6.2e-8. With the far-field
+Jacobian on, the steep ramp differs by 1e-2 after 3 iterations in the cells next to the `j = nj` boundary of that contrived flow (pillar shocks arriving at the
+`u_n,b = 0` switch of the Riemann branch, where the central difference of the f32 left-hand side and the CPU's forward difference linearise the kink differently);
+the Jacobian only steers the iteration. Free-stream preservation on the GPU (perturbed far-field box, M 0.8 at 6 degrees, 5 iterations): explicit 1.7e-7 (f32) /
+9.4e-15 (df32), implicit 3.7e-7 / 1.0e-14.
+
+### Speed (`lift3d --case anf|ogive --level 0|1 --precision f32|df32 --bench N`; `PERF` lines in `perf/ledger.jsonl`)
+
+Implicit step, M 2, 2 degrees, second-order from the first iteration, replay of 200 iterations after 20 warm-up (RTX 3090 / RTX 3080 Laptop):
+
+|case|cells|f32 3090|df32 3090|f32 3080 L|df32 3080 L|
+|---|---|---|---|---|---|
+|ANF level 0 (187 x 70 x 24, 2 solid boxes)|314 160|10.26 ms|10.94 ms|20.53 ms|22.08 ms|
+|fin-less ogive level 0 (144 x 70 x 24), 100 iterations|241 920|-|6.85 ms|-|-|
+
+The line solves are two thirds of the ANF step (profile of one step, df32, 3090, 10.9 ms: `SolveParts` Thomas along j and k 7.4 ms in 4 launches, along i
+0.5 ms in 2; the rest, 3.0 ms in 30 launches, is the face matrices and blocks, the residual and the update). `LUMA_TRIDIAGONAL=cyclic` brings the step to 8.2 ms (solves
+5.1 ms, the k lines of 24 cells the slowest). Launches per step: tiny case explicit 33 (f32) / 30 (df32); ANF level 0 implicit 34 / 36.
+
+### Run
+
+```
+cargo test --release -p bowshock-cfd --lib          # CPU (solver3, implicit3, grid3, flux3, bc3): grids, kernels, free stream, symmetry, 2D consistency, fin walls
+tools/gpuq/gpuq submit --host local -- cargo test --release -p bowshock-gpu-cases --test euler3d -- --nocapture
+tools/gpuq/gpuq submit --host local -- cargo run --release -p bowshock-validate --example lift3d -- --case anf --level 0 --precision df32 --bench 200
+```

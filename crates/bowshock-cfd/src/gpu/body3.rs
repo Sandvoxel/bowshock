@@ -4,7 +4,7 @@
 //
 // Every function mirrors the CPU routine of the same name in `solver3.rs`, `flux3.rs` and `bc3.rs`, expression by expression. The grid is
 // `[ni, nj, nk]` arrays (axis 0 = `i`, the fastest; the host order of `Grid3::cell`), the padded primitive state `[ni + 4, nj + 4, nk + 4]`
-// with two ghost layers per axis (`pidx3`). Only the explicit scheme (SSP-RK3) is implemented: `Scheme3::Implicit` is the E2 package.
+// with two ghost layers per axis (`pidx3`). `Scheme3::Explicit` (SSP-RK3) is here, `Scheme3::Implicit` in `implicit3.rs`.
 
 use crate::flux3::face_rot;
 use crate::gas3::{prim_to_cons3, Cons3};
@@ -402,7 +402,7 @@ fn solid_faces3(ctx: &Context, solid: &[bool], dims: [usize; 3], dir: usize) -> 
 }
 
 /// The solver: state, geometry and the loops that advance it. Mirrors `crate::solver3::Solver3` with `Scheme3::Explicit` (`eval_residual` and
-/// `rk3_step`); `Scheme3::Implicit` is not implemented on the GPU yet.
+/// `rk3_step`) or `Scheme3::Implicit` (`implicit3.rs`).
 pub struct LazySolver3 {
     ctx: Context,
     pub ni: usize,
@@ -417,15 +417,13 @@ pub struct LazySolver3 {
     /// Number of fluid cells (the residual norm divides by it).
     n_active: usize,
     axis_cells: usize,
+    /// The f32 geometry of the implicit left-hand side.
+    lg: LGeo3,
 }
 
 impl LazySolver3 {
-    /// Uploads the geometry (rounded from the grid's f64 metrics to `S`) and starts from the free stream. `cfg.scheme` must be
-    /// `Scheme3::Explicit`.
+    /// Uploads the geometry (rounded from the grid's f64 metrics to `S`) and starts from the free stream.
     pub fn new(ctx: &Context, grid: &Grid3, cfg: &Config3) -> Result<LazySolver3> {
-        if !matches!(cfg.scheme, Scheme3::Explicit) {
-            return Err(implicit3_unsupported());
-        }
         let (ni, nj, nk) = (grid.ni, grid.nj, grid.nk);
         let nc = ni * nj * nk;
         let mut solid = vec![false; nc];
@@ -501,8 +499,9 @@ impl LazySolver3 {
                 [None, None, None]
             },
         };
+        let lg = LGeo3::new(ctx, grid, &solid)?;
         let mut s =
-            LazySolver3 { ctx: ctx.clone(), ni, nj, nk, cfg: cfg.clone(), staging: DEFAULT_STAGING, geo, state: None, iter: 0, n_active, axis_cells: na };
+            LazySolver3 { ctx: ctx.clone(), ni, nj, nk, cfg: cfg.clone(), staging: DEFAULT_STAGING, geo, state: None, iter: 0, n_active, axis_cells: na, lg };
         let q = prim_to_cons3(&cfg.freestream);
         s.set_state(&vec![q; nc])?;
         Ok(s)
@@ -520,27 +519,33 @@ impl LazySolver3 {
         &self.cfg
     }
 
-    /// Replaces the configuration (free stream, CFL, limiter, `first_order_iters`, low-Mach flag) without touching the state or the geometry:
-    /// the next run reads it when it traces its step. Only `Scheme3::Explicit` is implemented.
+    /// Replaces the configuration (free stream, CFL, limiter, `first_order_iters`, low-Mach flag, scheme) without touching the state or the geometry:
+    /// the next run reads it when it traces its step. Changing the scheme (or its parameters) restarts the CFL ramp; a change of the free stream
+    /// does not ([`LazySolver3::restart_ramp`]).
     pub fn set_config(&mut self, cfg: &Config3) -> Result<()> {
-        if !matches!(cfg.scheme, Scheme3::Explicit) {
-            return Err(implicit3_unsupported());
-        }
+        let scheme_changed = cfg.scheme != self.cfg.scheme;
         self.cfg = cfg.clone();
+        if scheme_changed {
+            self.restart_ramp()?;
+        }
         Ok(())
     }
 
-    /// The convergence scheme (always `Scheme3::Explicit` for now).
+    /// The convergence scheme.
     pub fn scheme(&self) -> Scheme3 {
         self.cfg.scheme
     }
 
-    /// CFL of the first iteration after a restart of the ramp: the constant `Config3::cfl` of the explicit scheme.
+    /// CFL of the first iteration after a restart of the ramp: `min(cfl0, cfl_max)` for the implicit scheme, the constant `Config3::cfl` of the explicit one.
     fn cfl_start(&self) -> f64 {
-        self.cfg.cfl
+        match self.cfg.scheme {
+            Scheme3::Implicit(p) => p.cfl0.min(p.cfl_max),
+            Scheme3::Explicit => self.cfg.cfl,
+        }
     }
 
-    /// Restarts the CFL ramp (a no-op in effect for the explicit scheme: the loop state carries the constant CFL).
+    /// Restarts the CFL ramp of the implicit scheme at `cfl0` (call at the start of a run and after a change of the free stream; the loop state of
+    /// the explicit scheme carries the constant CFL).
     pub fn restart_ramp(&mut self) -> Result<()> {
         let cfl = up(&self.ctx, &[self.cfl_start()], 1)?;
         if let Some(s) = &mut self.state {
@@ -794,10 +799,15 @@ impl LazySolver3 {
         }
     }
 
-    /// One iteration from the loop state.
+    /// One iteration of the configured scheme from the loop state.
     fn step3(&self, s: &State3, lim: Limiter) -> State3 {
-        let (u, rn) = self.rk3_3(&unpack3(s), lim);
-        pack3(u, rn, &s[6] * c(1.0))
+        match self.cfg.scheme {
+            Scheme3::Implicit(p) => self.implicit_step3(s, &p, lim),
+            Scheme3::Explicit => {
+                let (u, rn) = self.rk3_3(&unpack3(s), lim);
+                pack3(u, rn, &s[6] * c(1.0))
+            }
+        }
     }
 
     /// `n` iterations as one `iterate_until_all` loop per limiter phase (the step is traced once and its kernels replayed, the density residual
@@ -899,9 +909,4 @@ impl LazySolver3 {
         }
         t0.elapsed().as_secs_f64()
     }
-}
-
-/// Error of a 3D implicit configuration (`Scheme3::Implicit`), which the GPU solver does not implement yet (plan package E2).
-fn implicit3_unsupported() -> luma::LumaError {
-    luma::LumaError::Unsupported("Scheme3::Implicit is not implemented on the GPU yet (3D plan E2); use Scheme3::Explicit".into())
 }
