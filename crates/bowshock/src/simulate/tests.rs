@@ -62,6 +62,26 @@ fn the_example_flies_the_kit_flights() {
 }
 
 #[test]
+fn the_ticked_flights_are_shown_in_colour_and_none_ticked_shows_nothing() {
+    let app = App::with_example();
+    let mut state = state_for(&app);
+    let [nominal, windy, ..] = ids_of(&state);
+    fly(&mut state, app.ctx(), nominal);
+    fly(&mut state, app.ctx(), windy);
+    // The first flight starts ticked and is drawn alone, in its slot colour.
+    assert_eq!(state.shown.ids, vec![nominal]);
+    let colour = |state: &State| state.shown.group.as_ref().unwrap().panels[0].series[0].color;
+    assert_eq!(colour(&state), SeriesColor::Series(1));
+    // Selecting another flight does not change what is drawn; unticking the last shows nothing.
+    state.select_only(windy);
+    state.rebuild();
+    assert_eq!(state.shown.ids, vec![nominal]);
+    state.flights.iter_mut().for_each(|f| f.slot = None);
+    state.rebuild();
+    assert!(state.shown.ids.is_empty() && state.shown.group.is_none());
+}
+
+#[test]
 fn ticking_overlays_flights_in_stable_colours_and_refuses_a_fifth() {
     let mut app = App::with_example();
     let mut state = state_for(&app);
@@ -73,8 +93,10 @@ fn ticking_overlays_flights_in_stable_colours_and_refuses_a_fifth() {
     let fifth = state.selected;
     state.update(Message::Click(ids[0]), app.ctx_mut());
 
-    // Tick Nominal, Windy, Bigger motor (the fourth default): colours follow the tick order and stay.
-    for id in [ids[0], ids[1], ids[3]] {
+    // Nominal, the first flight, starts ticked; tick Windy and Bigger motor (the fourth default): colours follow the tick order
+    // and stay.
+    assert_eq!(state.ticked(), 1);
+    for id in [ids[1], ids[3]] {
         state.update(Message::Tick(id), app.ctx_mut());
     }
     let slot = |state: &State, id| state.flight(id).unwrap().slot;
@@ -563,9 +585,8 @@ fn undoing_closes_the_picker_and_a_flight_can_be_overlaid_with_several_sources()
     let (nominal, windy) = (named(&state, "Nominal").id, named(&state, "Windy").id);
     fly(&mut state, app.ctx(), nominal);
     fly(&mut state, app.ctx(), windy);
-    for id in [nominal, windy] {
-        state.update(Message::Tick(id), app.ctx_mut());
-    }
+    // Nominal starts ticked; tick Windy too.
+    state.update(Message::Tick(windy), app.ctx_mut());
     state.update(Message::Layout(LayoutEdit::ToggleSource(1, "air_speed")), app.ctx_mut());
     assert_eq!(sources(&state)[1], ["vertical_velocity", "air_speed"]);
     // Two flights and two sources: four lines, colour by flight, style by source.
@@ -642,8 +663,7 @@ fn clicks_select_toggle_and_extend_a_range_while_ticks_stay_apart() {
     state.update(Message::SelectAll, app.ctx_mut());
     assert_eq!((state.selected, state.edit_ids()), (windy, vec![nominal, windy, hot, bigger]));
 
-    // The compare ticks are independent of the edit selection, both ways.
-    state.update(Message::Tick(nominal), app.ctx_mut());
+    // The compare ticks are independent of the edit selection, both ways (the first flight starts ticked).
     assert_eq!(state.edit_ids().len(), 4);
     click_flight(&mut state, &mut app, hot, none);
     assert_eq!((state.ticked(), state.flight(nominal).unwrap().slot), (1, Some(1)), "selecting does not tick");

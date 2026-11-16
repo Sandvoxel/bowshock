@@ -360,7 +360,9 @@ impl State {
 
     /// A state holding `defs` (never empty) and the plots `layout`, the first flight selected, nothing run yet.
     fn of(defs: &[FlightDef], layout: &PlotLayout, bands: StabilityBands) -> Self {
-        let flights: Vec<Flight> = defs.iter().map(Flight::from_def).collect();
+        let mut flights: Vec<Flight> = defs.iter().map(Flight::from_def).collect();
+        // The first flight is ticked to begin with, so the plots show it once it has run.
+        flights[0].slot = Some(1);
         let mut state = State {
             selected: flights[0].id,
             also: Vec::new(),
@@ -669,20 +671,16 @@ impl State {
 
     /// Recomputes what the plots and ground track show.
     fn rebuild(&mut self) {
+        // The plots show the ticked flights (one or more), each in its slot's colour; nothing is shown with none ticked.
         let compare = self.ticked() >= 2;
-        let mut order: Vec<&Flight> = if compare {
-            let mut ticked: Vec<&Flight> = self.flights.iter().filter(|f| f.slot.is_some() && f.run.is_some()).collect();
-            ticked.sort_by_key(|f| f.slot);
-            ticked
-        } else {
-            self.flights.iter().filter(|f| f.id == self.selected && f.run.is_some()).collect()
-        };
+        let mut order: Vec<&Flight> = self.flights.iter().filter(|f| f.slot.is_some() && f.run.is_some()).collect();
+        order.sort_by_key(|f| f.slot);
         order.truncate(MAX_COMPARED);
         let entries: Vec<Entry> = order
             .iter()
             .filter_map(|f| {
                 let run = f.run.as_ref()?;
-                let color = if compare { SeriesColor::Series(f.slot.unwrap_or(1)) } else { SeriesColor::Ink };
+                let color = SeriesColor::Series(f.slot.unwrap_or(1));
                 Some(Entry { name: &f.name, color, run, scatter: f.dispersion_of_run().map(|d| d.landings.as_slice()) })
             })
             .collect();

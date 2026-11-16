@@ -19,7 +19,7 @@ pub const STYLES: [LineStyle; 4] = [LineStyle::Solid, LineStyle::Dashed, LineSty
 pub struct Entry<'a> {
     /// The flight's name.
     pub name: &'a str,
-    /// `Ink` for a lone flight, `Series(1..=4)` in a comparison.
+    /// The ticked flight's slot colour `Series(1..=4)`; `Ink` draws a lone flight in its sources' own colours.
     pub color: SeriesColor,
     /// Its run.
     pub run: &'a Run,
@@ -213,6 +213,8 @@ fn phase_key(panel: &Panel) -> Option<Vec<(LineStyle, String)>> {
 pub fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &PlotLayout, min_margin: f64) -> Option<PlotGroup> {
     let reference = entries.get(reference).or(entries.first())?;
     let compare = entries.len() > 1;
+    // Ticked flights carry their slot colour even alone; a lone `Ink` entry is drawn in the sources' own colours.
+    let by_flight = compare || entries.iter().any(|e| e.color != SeriesColor::Ink);
     let count = layout.panels.len();
     let x_source = x_channel(layout.x);
     let x_unit = x_source.map(|c| c.unit(system));
@@ -238,7 +240,7 @@ pub fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &P
             legend: sources
                 .iter()
                 .zip(STYLES)
-                .map(|(c, style)| LegendItem { style, color: if compare { SeriesColor::Muted } else { c.color }, text: c.label.to_string() })
+                .map(|(c, style)| LegendItem { style, color: if by_flight { SeriesColor::Muted } else { c.color }, text: c.label.to_string() })
                 .collect(),
         });
         if primary.key == "altitude" {
@@ -263,7 +265,7 @@ pub fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &P
                     (false, true) => c.label.to_string(),
                     (true, true) => format!("{} · {}", e.name, c.label),
                 };
-                let color = if compare { e.color } else { c.color };
+                let color = if by_flight { e.color } else { c.color };
                 let Some((xc, xu)) = x_of else {
                     panel = panel.with(Series::new(name, c.series(samples, &unit)).color(color).style(style));
                     continue;
