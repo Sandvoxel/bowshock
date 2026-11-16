@@ -260,6 +260,8 @@ pub enum Message {
     KeepPicker,
     /// Show or hide the wind profile table.
     WindTable(bool),
+    /// Open the fields of wind level `i` (`None` closes them).
+    WindLevel(Option<usize>),
     /// Text typed in the latitude (`false`) or longitude (`true`) field.
     CoordInput(bool, String),
     /// Enter in a coordinate field: a number sets it, a blank field clears the location.
@@ -332,6 +334,8 @@ pub struct State {
     units: UnitSystem,
     /// Whether the wind profile table is open.
     wind_open: bool,
+    /// The wind level whose fields are open in the table.
+    wind_level: Option<usize>,
     /// The text of the latitude and longitude fields: the flights' location, or what is being typed in
     /// [`State::coord_editing`]'s field.
     coord_text: [String; 2],
@@ -375,6 +379,7 @@ impl State {
             renaming: None,
             units: UnitSystem::default(),
             wind_open: false,
+            wind_level: None,
             coord_text: [String::new(), String::new()],
             coord_editing: None,
             forecast: None,
@@ -820,6 +825,7 @@ impl State {
             Message::ClosePicker => self.picker = None,
             Message::KeepPicker => {}
             Message::WindTable(open) => self.wind_open = open,
+            Message::WindLevel(i) => self.wind_level = i,
             Message::CoordInput(lon, text) => {
                 self.coord_editing = Some((lon, self.selected));
                 self.coord_text[usize::from(lon)] = text;

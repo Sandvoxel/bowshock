@@ -278,31 +278,56 @@ fn wind_profile<'a>(state: &'a State, spec: &'a Spec, shared: &Shared, count: us
     if count > 1 && shared.wind_levels.is_none() {
         out.push(text(format!("— flights differ · an edit sets all {count}")).size(TEXT_BODY - 1.0).style(theme::muted).boxed());
     }
+    // One line a level (`1000 m · 4.2 m/s · 250°`); clicking it opens its three fields under it, full width.
     for (i, l) in levels.iter().enumerate() {
-        let cell = |label: &'a str, value: f64, quantity: Quantity, set: fn(&mut bowshock_model::WindLevel, f64)| -> Element<'a, Message> {
-            let base = levels.clone();
-            unit_input(label, value, quantity, system)
-                .label_width(if label.is_empty() { 0.0 } else { 64.0 })
-                .on_commit(move |v| {
-                    let mut next = base.clone();
-                    set(&mut next[i], v);
-                    Message::Edit(Edit::WindLevels(next))
-                })
-                .into()
-        };
+        let selected = state.wind_level == Some(i);
+        let summary = format!(
+            "{} · {} · {}",
+            format::with_unit(l.altitude, Quantity::Altitude, *system, 0),
+            format::with_unit(l.speed, Quantity::Velocity, *system, 1),
+            format::with_unit(l.from, Quantity::Angle, *system, 0)
+        );
+        let line = button(text(summary).font(MONO).size(TEXT_BODY - 1.0))
+            .width(Fill)
+            .padding([2.0, SPACE_1])
+            .style(move |theme: &Theme, status| {
+                let t = theme::tokens(theme);
+                let hot = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                button::Style {
+                    background: (selected || hot).then_some(Background::Color(if selected { t.bg_300 } else { t.bg_400 })),
+                    text_color: t.ink,
+                    ..button::Style::default()
+                }
+            })
+            .on_press(Message::WindLevel((!selected).then_some(i)));
         let mut without = levels.clone();
         without.remove(i);
         let remove: Element<'a, Message> = icon_button(Mark::Close, "Remove this level").on_press(Message::Edit(Edit::WindLevels(without))).width(22).into();
-        // Two lines a level: the altitude, then the wind there (speed and the direction it blows from).
-        let at =
-            row![container(cell("Altitude", l.altitude, Quantity::Altitude, |l, v| l.altitude = v)).width(Fill), remove].spacing(SPACE_1).align_y(iced::Center);
-        let wind = row![
-            container(cell("", l.speed, Quantity::Velocity, |l, v| l.speed = v)).width(Fill),
-            container(cell("", l.from, Quantity::Angle, |l, v| l.from = v)).width(Fill),
-        ]
-        .spacing(SPACE_1)
-        .align_y(iced::Center);
-        out.push(column![at, wind].spacing(2).boxed());
+        out.push(row![line, remove].spacing(SPACE_1).align_y(iced::Center).boxed());
+        if selected {
+            let cell = |label: &'a str, value: f64, quantity: Quantity, set: fn(&mut bowshock_model::WindLevel, f64)| -> Element<'a, Message> {
+                let base = levels.clone();
+                unit_input(label, value, quantity, system)
+                    .on_commit(move |v| {
+                        let mut next = base.clone();
+                        set(&mut next[i], v);
+                        Message::Edit(Edit::WindLevels(next))
+                    })
+                    .into()
+            };
+            out.push(
+                container(
+                    column![
+                        cell("Altitude", l.altitude, Quantity::Altitude, |l, v| l.altitude = v),
+                        cell("Speed", l.speed, Quantity::Velocity, |l, v| l.speed = v),
+                        cell("From", l.from, Quantity::Angle, |l, v| l.from = v),
+                    ]
+                    .spacing(SPACE_1),
+                )
+                .padding(iced::Padding { top: 0.0, right: 0.0, bottom: SPACE_1, left: SPACE_2 })
+                .boxed(),
+            );
+        }
     }
     let (top_altitude, top_speed, top_from) = levels.last().map_or((0.0, spec.wind_speed, spec.wind_from), |l| (l.altitude, l.speed, l.from));
     let mut added = levels.clone();
@@ -335,13 +360,7 @@ fn forecast_rows<'a>(state: &'a State) -> Vec<Element<'a, Message>> {
             .into();
         return vec![open];
     };
-    let time = text_input("YYYY-MM-DDTHH:00", &row.time)
-        .on_input(Message::ForecastTime)
-        .on_submit(Message::ForecastFetch)
-        .size(TEXT_BODY)
-        .padding([4.0, SPACE_2])
-        .style(theme::input)
-        .width(Fill);
+    let (date, hour) = picker_parts(&row.time);
     let mut fetch = push("Fetch", Weight::Secondary);
     if !row.busy {
         fetch = fetch.on_press(Message::ForecastFetch);
@@ -350,7 +369,8 @@ fn forecast_rows<'a>(state: &'a State) -> Vec<Element<'a, Message>> {
     let close: Element<'a, Message> = icon_button(Mark::Close, "Close the forecast").on_press(Message::ForecastOpen(false)).width(22).into();
     let busy: Element<'a, Message> = if row.busy { spinner(14.0) } else { Space::new().width(14).boxed() };
     let mut out = vec![
-        labeled("Launch (local)", time.boxed()),
+        labeled("Launch date", date),
+        labeled("Launch hour", hour),
         checkbox("Use forecast temperature", row.temperature, Message::ForecastTemperature),
         row![fetch, busy, Space::new().width(Fill), close].spacing(SPACE_2).align_y(iced::Center).boxed(),
     ];
@@ -358,6 +378,49 @@ fn forecast_rows<'a>(state: &'a State) -> Vec<Element<'a, Message>> {
         out.push(text(e.as_str()).size(TEXT_LABEL).style(theme::colored(|t| t.warn)).boxed());
     }
     out
+}
+
+/// An hour of the day in the launch-hour select (`14:00`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct HourChoice(u32);
+
+impl fmt::Display for HourChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:02}:00", self.0)
+    }
+}
+
+/// Days ahead of today the forecast covers (Open-Meteo's forecast reaches 16 days).
+const FORECAST_DAYS: i64 = 15;
+
+/// The date stepper (`‹  Mon 16 Nov 2026  ›`, within today and the forecast's last day) and the hour select of the forecast
+/// launch time `time` (`YYYY-MM-DDTHH:00`, site local); each sends the whole new time as [`Message::ForecastTime`].
+fn picker_parts<'a>(time: &str) -> (Element<'a, Message>, Element<'a, Message>) {
+    use chrono::{Duration, NaiveDateTime, Timelike};
+    let at = NaiveDateTime::parse_from_str(time, "%Y-%m-%dT%H:%M")
+        .unwrap_or_else(|_| NaiveDateTime::parse_from_str(&super::forecast::next_local_hour(), "%Y-%m-%dT%H:%M").unwrap_or_default());
+    let format = |t: NaiveDateTime| t.format("%Y-%m-%dT%H:00").to_string();
+    let today = chrono::Local::now().date_naive();
+    let step = |days: i64, label: &'static str, tip: &'static str| -> Element<'a, Message> {
+        let target = at + Duration::days(days);
+        let within = (0..=FORECAST_DAYS).contains(&(target.date() - today).num_days());
+        let mut b = push(label, Weight::Ghost).tooltip(tip);
+        if within {
+            b = b.on_press(Message::ForecastTime(format(target)));
+        }
+        b.into()
+    };
+    let date = row![
+        step(-1, "‹", "The day before"),
+        text(at.format("%a %-d %b").to_string()).size(TEXT_BODY).width(Fill).align_x(iced::alignment::Horizontal::Center),
+        step(1, "›", "The day after"),
+    ]
+    .align_y(iced::Center)
+    .boxed();
+    let hours: Vec<HourChoice> = (0..24).map(HourChoice).collect();
+    let day = at.date();
+    let hour = select(hours, Some(HourChoice(at.hour())), move |h: HourChoice| Message::ForecastTime(format(day.and_hms_opt(h.0, 0, 0).unwrap_or_default())));
+    (date, hour)
 }
 
 /// The motor select's options: the active configuration, each configuration, then the motors that fit the first mount, then any
