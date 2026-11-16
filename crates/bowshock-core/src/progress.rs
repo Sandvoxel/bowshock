@@ -77,7 +77,7 @@ pub(crate) fn spread(hist: &[(usize, f64)], k: usize) -> Option<f64> {
     let w = &hist[hist.len() - k..];
     let (lo, hi, sum) = w.iter().fold((f64::INFINITY, f64::NEG_INFINITY, 0.0), |(l, h, s), c| (l.min(c.1), h.max(c.1), s + c.1));
     let mean = (sum / k as f64).abs();
-    (mean > 0.0 && mean.is_finite()).then(|| (hi - lo) / mean)
+    (mean > 0.0 && mean.is_finite()).then_some((hi - lo) / mean)
 }
 
 /// Orders of drop of a residual `r` below its reference `peak` (0 without a peak).

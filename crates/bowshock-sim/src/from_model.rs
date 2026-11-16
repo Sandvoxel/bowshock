@@ -825,7 +825,7 @@ fn thrust_to_weight(rocket: &Rocket, motors: &MotorDb) -> Option<f64> {
         let parts = flown_motors(rocket, config, motors, &mounts, stage).ok()?;
         thrust += parts.iter().filter(|p| p.motor.burn_time() > 0.0).map(|p| f64::from(p.copies) * p.motor.average_thrust()).sum::<f64>();
     }
-    (thrust > 0.0 && mass > 0.0).then(|| thrust / (mass * G0))
+    (thrust > 0.0 && mass > 0.0).then_some(thrust / (mass * G0))
 }
 
 /// The health list of the rocket's active configuration, worst first within each topic: stability (judged from `balance`,

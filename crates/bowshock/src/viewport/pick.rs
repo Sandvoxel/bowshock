@@ -260,7 +260,7 @@ fn hit_radial(o: DVec3, d: DVec3, kind: &RadialKind, at: Placement, margin: f64)
             let in_length = |time: f64| (z0 - margin..=z0 + length + margin).contains(&(o.z + d.z * time));
             if a < 1e-12 {
                 // Looking along the axis: inside the circle, take the near end.
-                return (c <= 0.0 && d.z.abs() > 1e-12).then(|| (z0 - o.z) / d.z);
+                return (c <= 0.0 && d.z.abs() > 1e-12).then_some((z0 - o.z) / d.z);
             }
             let disc = b * b - 4.0 * a * c;
             if disc < 0.0 {

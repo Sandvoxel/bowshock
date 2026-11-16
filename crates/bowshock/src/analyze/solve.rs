@@ -452,7 +452,7 @@ impl Tracker {
             Slot::Done(d) => (i + d.iterations as f64, s + d.seconds),
             _ => (i, s),
         });
-        (seconds > 0.0 && iters > 0.0).then(|| iters / seconds)
+        (seconds > 0.0 && iters > 0.0).then_some(iters / seconds)
     }
 
     /// Seconds left: the iterations still to do over the measured throughput. `None` ("estimating…") until
