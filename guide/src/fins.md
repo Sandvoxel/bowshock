@@ -23,6 +23,7 @@ let fins = FinSpec {
     sweep: 0.06,
     thickness: 0.003,
     roughness: 0.0,
+    root_te_to_base: 0.0,
     profile: FinProfile::Rounded,
 };
 fins.validate().unwrap();
@@ -55,6 +56,7 @@ fins.validate().unwrap();
 | `root_chord`, `span`, `thickness` finite and > 0 | `fins.root_chord`, `fins.span`, `fins.thickness` |
 | `tip_chord` finite and >= 0 | `fins.tip_chord` |
 | `roughness` finite and >= 0 | `fins.roughness` |
+| `root_te_to_base` finite and >= 0 | `fins.root_te_to_base` |
 | `sweep` finite and the leading-edge sweep angle `atan(sweep / span)` at most 75 deg in magnitude | `fins.sweep` |
 | `thickness / mean aerodynamic chord <= 0.2` | `fins.thickness` |
 
@@ -69,6 +71,7 @@ let bad = FinSpec {
     sweep: 0.06,
     thickness: 0.003,
     roughness: 0.0,
+    root_te_to_base: 0.0,
     profile: FinProfile::Square,
 };
 let err = bad.validate().unwrap_err();
@@ -95,6 +98,7 @@ fn main() -> Result<(), bowshock_core::Error> {
         sweep: 0.06,
         thickness: 0.003,
         roughness: 0.0,
+        root_te_to_base: 0.0,
         profile: FinProfile::Rounded,
     };
     let flight = FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 0.0 } };
@@ -233,6 +237,7 @@ let fins = FinSpec {
     sweep: 0.06,
     thickness: 0.003, // the real maximum thickness in metres
     roughness: 0.0,
+    root_te_to_base: 0.0,
     profile: FinProfile::Custom { section },
 };
 fins.validate().unwrap();

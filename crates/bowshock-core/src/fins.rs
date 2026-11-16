@@ -133,7 +133,7 @@ mod tests {
     use crate::error::Error;
 
     fn fin(profile: FinProfile) -> FinSpec {
-        FinSpec { count: 4, root_chord: 0.12, tip_chord: 0.06, span: 0.08, sweep: 0.06, thickness: 0.003, roughness: 0.0, profile }
+        FinSpec { count: 4, root_chord: 0.12, tip_chord: 0.06, span: 0.08, sweep: 0.06, thickness: 0.003, roughness: 0.0, root_te_to_base: 0.0, profile }
     }
 
     #[test]

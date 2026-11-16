@@ -135,6 +135,10 @@ pub struct FinSpec {
     /// Equivalent sand-grain roughness of the fin surface \[m\]; 0 is smooth. The skin friction is floored at OpenRocket's
     /// roughness-limited value (`60e-6` is OpenRocket's regular paint).
     pub roughness: f64,
+    /// Distance the root trailing edge lies ahead of the body base \[m\]; 0 is flush with the base. Used by the 3D mesher
+    /// to place the fins; the axisymmetric solver ignores it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub root_te_to_base: f64,
     /// Edge profile.
     pub profile: FinProfile,
 }
@@ -153,6 +157,9 @@ impl FinSpec {
         }
         if !(self.roughness.is_finite() && self.roughness >= 0.0) {
             return invalid("fins.roughness", &format!("must be finite and >= 0, got {}", self.roughness));
+        }
+        if !(self.root_te_to_base.is_finite() && self.root_te_to_base >= 0.0) {
+            return invalid("fins.root_te_to_base", &format!("must be finite and >= 0, got {}", self.root_te_to_base));
         }
         if !(self.sweep.is_finite() && (self.sweep / self.span).atan().abs() <= 75f64.to_radians()) {
             return invalid("fins.sweep", &format!("must be finite with a leading-edge sweep angle of at most 75 degrees, got {}", self.sweep));

@@ -34,7 +34,7 @@ use crate::simulate::format::with_unit;
 use crate::units::{Quantity, UnitSystem};
 
 /// Bump when what a stored table means changes (solver, grid level, how the parts are mapped): old tables then read as stale.
-const SOLVER_REV: u64 = 3;
+const SOLVER_REV: u64 = 4;
 /// Relative drag tolerance of the solver's stop rule: a point ends once its total drag varies by less than this over 500
 /// iterations. Measured on the example rocket (coarse grid, RTX 3090, 10 points): about 29 000 iterations in all against about
 /// 82 000 for the default rule, the worst point within 0.39 % of its 12 000-iteration value (the aim is 1 %).
@@ -113,7 +113,7 @@ fn nose_shape(shape: bowshock_model::NoseShape) -> Result<(solver::NoseShape, Op
 }
 
 /// A fin set as the solver's fins, or why it cannot be.
-fn fin_spec(set: &FinSet) -> Result<solver::FinSpec, String> {
+fn fin_spec(set: &FinSet, x_base: f64) -> Result<solver::FinSpec, String> {
     let (tip_chord, sweep) = match set.planform {
         FinPlanform::Trapezoidal => (set.tip_chord, set.sweep),
         // The trapezoid with the ellipse's root, span and area (pi/4 root span), its tip centred on the root.
@@ -135,6 +135,7 @@ fn fin_spec(set: &FinSet) -> Result<solver::FinSpec, String> {
         sweep,
         thickness: set.thickness,
         roughness: set.roughness,
+        root_te_to_base: (x_base - (set.station + set.root_chord)).max(0.0),
         profile,
     };
     spec.validate().map_err(|e| e.to_string())?;
@@ -230,10 +231,11 @@ pub fn plan(rocket: &Rocket, vehicle: &Vehicle, units: UnitSystem) -> Result<Pla
 
     // The solver models one fin set: the supported one with the most fin area. The rest, and every lug and rail button, are
     // left to the build-up method, whose drag is added to the table.
+    let x_base = segments.last().map_or(0.0, |s| s.aft_station());
     let mut candidates: Vec<(usize, solver::FinSpec)> = Vec::new();
     let mut refused: Vec<String> = Vec::new();
     for (i, set) in vehicle.fin_sets.iter().enumerate() {
-        match fin_spec(set) {
+        match fin_spec(set, x_base) {
             Ok(spec) => candidates.push((i, spec)),
             Err(e) => refused.push(e),
         }
@@ -298,7 +300,7 @@ impl Plan {
         }
         match &self.fins {
             Some(f) => {
-                h.u64(20).u64(u64::from(f.count)).f(f.root_chord).f(f.tip_chord).f(f.span).f(f.sweep).f(f.thickness).f(f.roughness * 1e6);
+                h.u64(20).u64(u64::from(f.count)).f(f.root_chord).f(f.tip_chord).f(f.span).f(f.sweep).f(f.thickness).f(f.roughness * 1e6).f(f.root_te_to_base);
                 h.u64(match f.profile {
                     solver::FinProfile::Square => 0,
                     solver::FinProfile::Rounded => 1,
@@ -687,6 +689,19 @@ mod tests {
         let rocket = Rocket::from_bytes(EXAMPLE).unwrap();
         let vehicle = from_model::vehicle(&rocket, &MotorDb::bundled(), Phase::Full).unwrap();
         (rocket, vehicle)
+    }
+
+    #[test]
+    fn fin_position_is_the_root_trailing_edge_distance_to_the_base() {
+        let (_, vehicle) = example();
+        let x_base = vehicle.body.last().unwrap().aft_station();
+        let mut set = vehicle.fin_sets[0].clone();
+        set.station = x_base - set.root_chord - 0.05;
+        assert!((fin_spec(&set, x_base).unwrap().root_te_to_base - 0.05).abs() < 1e-12);
+        set.station = x_base - set.root_chord;
+        assert_eq!(fin_spec(&set, x_base).unwrap().root_te_to_base, 0.0);
+        set.station = x_base - set.root_chord + 0.01; // overhanging the base clamps to flush
+        assert_eq!(fin_spec(&set, x_base).unwrap().root_te_to_base, 0.0);
     }
 
     #[test]
