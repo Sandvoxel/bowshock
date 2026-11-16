@@ -1717,4 +1717,20 @@ mod tests {
         assert_eq!(app.ctx.drag.radial.as_ref().unwrap().count, 3);
         app.update(Message::Cancel);
     }
+
+    #[test]
+    fn pulling_a_fin_set_free_hands_it_the_symmetry_selection_without_pressing_anything() {
+        let (mut app, [_, tube, _]) = app();
+        let fins = finned(&mut app, tube, 0.1);
+        app.update(Message::PartsBin(parts_bin::Message::Symmetry(4)));
+        vp(&mut app, Vp::Grab(Pick::Radial { id: fins, instance: 0 }));
+        // Still stuck: the group keeps its own count.
+        assert_eq!(app.ctx.drag.radial.as_ref().unwrap().count, 3);
+        // Fully pulled free: it takes the selection at once, and lands with it.
+        vp(&mut app, Vp::Surface(None, true));
+        assert_eq!(app.ctx.drag.radial.as_ref().unwrap().count, 4);
+        vp(&mut app, Vp::Surface(Some(target(tube, 0.2, 0.0)), true));
+        vp(&mut app, Vp::DropRadial);
+        assert_eq!(app.ctx.doc.rocket().radial(fins).unwrap().count, 4);
+    }
 }

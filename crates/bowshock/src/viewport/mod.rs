@@ -468,7 +468,12 @@ impl View {
                 }
             }
             Message::Surface(target, detached) => {
+                let symmetry = ctx.drag.symmetry;
                 if let Some(drag) = ctx.drag.radial.as_mut() {
+                    // Pulling a group free of the rocket hands it the Symmetry selection: it lands with that many copies.
+                    if detached && !drag.detached {
+                        drag.count = symmetry;
+                    }
                     (drag.target, drag.detached) = (target, detached);
                 }
             }
