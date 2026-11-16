@@ -115,7 +115,7 @@ pub struct Key {
     conditions: Conditions,
     serial: u64,
     /// The CFD table the drag comes from (its key and when it was solved), for the CFD table method.
-    cfd: Option<(u64, u64)>,
+    cfd: Option<(u64, u64, Option<u64>)>,
 }
 
 /// The Analyze screen's state.
@@ -366,7 +366,7 @@ impl State {
         let table = self.cfd_table_for(self.analysis);
         // The CFD table method with no table to draw (not solved yet, a geometry the solver cannot take) shows the method before it.
         let method = if self.method == Method::CfdTable && table.is_none() { self.base_method } else { self.method };
-        let stamp = |t: &Option<Arc<CfdTable>>| t.as_ref().map(|t| (t.key, t.solved_at));
+        let stamp = |t: &Option<Arc<CfdTable>>| t.as_ref().map(|t| (t.key, t.solved_at, t.lift.as_ref().map(|l| l.solved_at)));
         let key = Key {
             revision: ctx.doc.revision(),
             phase,
@@ -487,7 +487,10 @@ impl State {
         if !uses_cfd(analysis) || !matches!(self.cfd.status, cfd::Status::Fresh | cfd::Status::Stale) {
             return None;
         }
-        self.cfd.table.clone().filter(|t| analysis == Analysis::Stability || cfd::covers(t, self.cond.mach))
+        let table = self.cfd.table.clone().filter(|t| analysis == Analysis::Stability || cfd::covers(t, self.cond.mach))?;
+        // The 3D stability solve is drawn only while it is fresh; a stale one leaves Extended's margin, CP and CNα.
+        let fresh = cfd::lift_status(&self.cfd.plan, table.lift.as_ref(), self.cond.mach) == cfd::Status::Fresh;
+        Some(if table.lift.is_some() && !fresh { Arc::new(CfdTable { lift: None, ..(*table).clone() }) } else { table })
     }
 
     /// A message from the running solve: progress, then the table (stored with the document) or the reason there is none.

@@ -109,6 +109,7 @@ pub const DRAG_PARTS: [(&str, SeriesColor); 4] =
 /// One plain sentence for a row label: what the quantity is and what moves it. Shown as the row's tooltip and, for the drag
 /// sources, under the Drag breakdown plot. `None` for labels that need no explanation (names of configurations, units).
 pub fn help(label: &str) -> Option<&'static str> {
+    let label = label.strip_suffix(super::compute::LIFT_LABEL).unwrap_or(label);
     Some(match label {
         "Skin friction" => "Air rubbing along every outer surface. Grows with wetted area and a rougher finish.",
         "Pressure" => "Drag from the nose and transitions pushing air aside; rises sharply near Mach 1 as shocks form. Includes lugs and rail buttons.",
@@ -276,8 +277,9 @@ pub fn compare_section(out: &Output, overlay: &Overlay, x_si: Option<f64>, activ
 fn stability_rows(run: &Run, p: &MachPointLike, units: UnitSystem, out: &Output) -> Vec<Row> {
     let (cp, u) = length(p.cp, units);
     let burnout = out.conditions.burnout;
+    let lift = if out.lift_3d() { super::compute::LIFT_LABEL } else { "" };
     let (cg, _) = length(run.cg(burnout), units);
-    let mut rows = vec![Row::new("Static margin", cal(p.margin), "cal").big()];
+    let mut rows = vec![Row::new(format!("Static margin{lift}"), cal(p.margin), "cal").big()];
     if out.runs.len() > 1 {
         for (i, r) in out.runs.iter().enumerate() {
             if let Some(v) = per_run_margin(r, p.x) {
@@ -285,10 +287,10 @@ fn stability_rows(run: &Run, p: &MachPointLike, units: UnitSystem, out: &Output)
             }
         }
     }
-    rows.push(Row::new("CP", cp, u.clone()));
+    rows.push(Row::new(format!("CP{lift}"), cp, u.clone()));
     // The kit shows one CG: the one the margin uses (the Conditions' "CG for margin").
     rows.push(Row::new(if burnout { "CG burnout" } else { "CG liftoff" }, cg, u));
-    rows.push(Row::new("CNα", format!("{:.2}", p.cn_alpha), "/rad"));
+    rows.push(Row::new(format!("CNα{lift}"), format!("{:.2}", p.cn_alpha), "/rad"));
     rows
 }
 

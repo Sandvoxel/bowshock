@@ -236,7 +236,20 @@ fn cfd_lines(state: &State) -> Vec<String> {
         if !stale.is_empty() {
             lines.push("The geometry or the conditions changed since; Re-solve for a table that matches.".to_string());
         }
-        lines.push("Drag from the solver; margin, CP and CNα from Extended.".to_string());
+        let lift = cfd::lift_status(&cfd.plan, cfd.table.as_ref().and_then(|t| t.lift.as_ref()), state.cond.mach);
+        match (&info.lift, &lift) {
+            (Some(l), cfd::Status::Fresh) => lines.push(format!(
+                "Drag from the 2D solver; margin, CP and CNα from the 3D Euler solve ({} points · solved on {} · {}).",
+                l.points,
+                l.backend,
+                cfd::ago(l.solved_at)
+            )),
+            (_, cfd::Status::Stale) => {
+                lines.push("Drag from the solver; margin, CP and CNα from Extended.".to_string());
+                lines.push("stale 3D stability · Solve stability (3D) to update".to_string());
+            }
+            _ => lines.push("Drag from the solver; margin, CP and CNα from Extended.".to_string()),
+        }
         lines.extend(info.fallback.iter().map(|why| format!("The GPU was not used: {why}.")));
         lines.extend(info.notes.iter().cloned());
     } else if matches!(cfd.status, cfd::Status::Fresh | cfd::Status::Stale) && cfd.solving.is_none() {

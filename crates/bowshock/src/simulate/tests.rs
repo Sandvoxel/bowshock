@@ -606,6 +606,7 @@ fn cfd_table(geometry: u64) -> bowshock_model::CfdTable {
         notes: Vec::new(),
         points: vec![p(0.3), p(1.0), p(2.0)],
         grid: CfdGrid::Coarse,
+        lift: None,
     }
 }
 

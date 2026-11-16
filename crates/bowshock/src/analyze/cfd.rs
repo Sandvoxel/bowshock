@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bowshock_core as solver;
-use bowshock_model::{CfdGrid, CfdPoint, CfdQuality, CfdTable, PartKind, RadialKind, Rocket};
+use bowshock_model::{CfdGrid, CfdLiftTable, CfdPoint, CfdQuality, CfdTable, PartKind, RadialKind, Rocket};
 use bowshock_sim::{vs_mach, AlphaPoint, Atmosphere, BodyKind, DragBreakdown, FinCrossSection, FinPlanform, FinSet, MachPoint, NoseShape, Vehicle};
 
 use crate::simulate::format::with_unit;
@@ -48,6 +48,14 @@ const SOLVER_CEILING: f64 = 20_000.0;
 const INTERIOR: [f64; 8] = [0.5, 0.8, 0.9, 1.0, 1.1, 1.3, 1.7, 2.3];
 /// An interior node this close to an end of the range is left out (the end stands for it).
 const NODE_GAP: f64 = 0.12;
+/// Bump when what a stored 3D stability solve means changes (solver, grid, how the forces are reduced).
+const LIFT_REV: u64 = 1;
+/// The Mach nodes of a 3D stability solve (sparse: each costs two 3D Euler runs); the solve takes those inside the plotted range.
+pub const LIFT_INTERIOR: [f64; 8] = [0.5, 0.8, 0.95, 1.1, 1.3, 1.7, 2.3, 3.0];
+/// The angles of attack (degrees) every node is solved at.
+pub const LIFT_ALPHAS: [f64; 2] = [2.0, 6.0];
+/// The lowest and highest Mach number of the 3D solve.
+const LIFT_MACH: (f64, f64) = (0.5, 3.0);
 
 /// Why a Mach range cannot be tabulated.
 pub const OUT_OF_RANGE: &str = "the table covers Mach 0.2 to 3";
@@ -353,6 +361,55 @@ pub fn table_key(geometry: u64, altitude: f64, nodes: &[f64]) -> u64 {
     h.0
 }
 
+/// The Mach nodes of a 3D stability solve for a Mach range: the [`LIFT_INTERIOR`] nodes inside it, or the nearest node when none
+/// is (a range between two nodes), or the first node alone when the range lies wholly below it. `None` when the range lies
+/// above Mach 3.
+pub fn lift_nodes(range: (f64, f64)) -> Option<Vec<f64>> {
+    let (a, b) = (range.0.min(range.1), range.0.max(range.1));
+    if a > LIFT_MACH.1 + 1e-9 {
+        return None;
+    }
+    if b < LIFT_MACH.0 {
+        return Some(vec![LIFT_MACH.0]);
+    }
+    let (lo, hi) = (a.max(LIFT_MACH.0) - 1e-9, b.min(LIFT_MACH.1) + 1e-9);
+    let inside: Vec<f64> = LIFT_INTERIOR.iter().copied().filter(|m| *m >= lo && *m <= hi).collect();
+    if !inside.is_empty() {
+        return Some(inside);
+    }
+    let mid = 0.5 * (lo + hi);
+    LIFT_INTERIOR.iter().copied().min_by(|x, y| (x - mid).abs().total_cmp(&(y - mid).abs())).map(|m| vec![m])
+}
+
+/// The key of a 3D stability solve: the geometry, the Mach nodes and the angles. The altitude is not in it (the solve is Euler).
+pub fn lift_key(geometry: u64, nodes: &[f64]) -> u64 {
+    let mut h = Fnv::new();
+    h.u64(LIFT_REV).u64(geometry);
+    nodes.iter().for_each(|m| {
+        h.f(*m);
+    });
+    LIFT_ALPHAS.iter().for_each(|a| {
+        h.f(*a);
+    });
+    h.0
+}
+
+/// How a stored 3D stability solve relates to the rocket and the Mach range on screen.
+pub fn lift_status(plan: &Result<Plan, String>, lift: Option<&CfdLiftTable>, mach: (f64, f64)) -> Status {
+    let plan = match plan {
+        Ok(p) => p,
+        Err(why) => return Status::Unsupported(why.clone()),
+    };
+    let Some(nodes) = lift_nodes(mach) else {
+        return Status::Unsupported(format!("the 3D solve covers Mach up to 3; the Mach range is {:.2} to {:.2}", mach.0, mach.1));
+    };
+    match lift {
+        None => Status::Missing,
+        Some(l) if l.key == lift_key(plan.geometry, &nodes) => Status::Fresh,
+        Some(_) => Status::Stale,
+    }
+}
+
 /// How a stored table relates to the rocket and the conditions on screen.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Status {
@@ -549,6 +606,7 @@ pub fn solve(job: &Job, cancel: &AtomicBool, mut progress: impl FnMut(Event)) ->
         notes,
         points,
         grid: job.grid,
+        lift: None,
     })
 }
 
@@ -677,6 +735,117 @@ pub fn alpha_points(table: &CfdTable, mach: f64, points: Vec<AlphaPoint>) -> Vec
         .collect()
 }
 
+/// Extended's stability at one Mach number (at 2°): what the 3D solve is scaled by below its first node.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExtStab {
+    /// Normal force slope per radian.
+    pub cn_alpha: f64,
+    /// CP from the nose tip (m).
+    pub cp: f64,
+}
+
+/// The 3D solve's CN and CP at one Mach number: at 2° and, when solved, at 6°.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LiftAt {
+    a2: (f64, f64),
+    a6: Option<(f64, f64)>,
+}
+
+/// Whether the solve has what the plots need (a point at 2°).
+pub fn lift_usable(lift: &CfdLiftTable) -> bool {
+    lift.points.iter().any(|p| (p.alpha_deg - LIFT_ALPHAS[0]).abs() < 1e-6)
+}
+
+/// The (Mach, CN, CP) of the solve at one angle, ascending in Mach.
+fn lift_series(lift: &CfdLiftTable, alpha_deg: f64) -> Vec<(f64, f64, f64)> {
+    let mut v: Vec<_> = lift.points.iter().filter(|p| (p.alpha_deg - alpha_deg).abs() < 1e-6).map(|p| (p.mach, p.cn, p.x_cp)).collect();
+    v.sort_by(|a, b| a.0.total_cmp(&b.0));
+    v
+}
+
+/// CN and CP of one angle's series at `mach`: linear in Mach between nodes, held above the last, and below the first the first
+/// node's CN scaled by Extended's `CNα` ratio and its CP shifted by Extended's CP difference.
+fn lift_series_at(series: &[(f64, f64, f64)], mach: f64, ext: &dyn Fn(f64) -> Option<ExtStab>) -> Option<(f64, f64)> {
+    let (first, last) = (*series.first()?, *series.last()?);
+    if mach < first.0 - 1e-9 {
+        let (m, n) = (ext(mach)?, ext(first.0)?);
+        let ratio = m.cn_alpha / n.cn_alpha;
+        let cn = if ratio.is_finite() { first.1 * ratio } else { first.1 };
+        return Some((cn, first.2 + m.cp - n.cp));
+    }
+    if mach >= last.0 {
+        return Some((last.1, last.2));
+    }
+    let i = series.partition_point(|p| p.0 <= mach).max(1);
+    let (a, b) = (series[i - 1], series[i]);
+    let t = (mach - a.0) / (b.0 - a.0);
+    Some((a.1 + (b.1 - a.1) * t, a.2 + (b.2 - a.2) * t))
+}
+
+/// The 3D solve at `mach` (`ext`: Extended's stability at 2° at any Mach, for the scaling below the first node). `None` without
+/// a point at 2°.
+pub fn lift_at(lift: &CfdLiftTable, mach: f64, ext: &dyn Fn(f64) -> Option<ExtStab>) -> Option<LiftAt> {
+    let a2 = lift_series_at(&lift_series(lift, LIFT_ALPHAS[0]), mach, ext)?;
+    let a6 = lift_series_at(&lift_series(lift, LIFT_ALPHAS[1]), mach, ext);
+    Some(LiftAt { a2, a6 })
+}
+
+impl LiftAt {
+    /// `CNα` per radian at small angle (the 2° point over 2°).
+    pub fn cn_alpha(&self) -> f64 {
+        self.a2.0 / LIFT_ALPHAS[0].to_radians()
+    }
+
+    /// CP from the nose tip at the small angle (m).
+    pub fn cp(&self) -> f64 {
+        self.a2.1
+    }
+
+    /// CN and CP at an angle of attack (rad), negative angles mirrored. Up to 2° CN is `CNα·α` with CP from 2°; between 2° and 6°
+    /// both are interpolated; above 6° CN continues with the slope of 2° to 6° and CP is held at 6°.
+    pub fn at_alpha(&self, alpha: f64) -> (f64, f64) {
+        let a = alpha.abs().to_degrees();
+        let (cn2, cp2) = self.a2;
+        let (cn, cp) = match self.a6 {
+            None => (cn2 * a / LIFT_ALPHAS[0], cp2),
+            Some(_) if a <= LIFT_ALPHAS[0] => (cn2 * a / LIFT_ALPHAS[0], cp2),
+            Some((cn6, cp6)) if a <= LIFT_ALPHAS[1] => {
+                let t = (a - LIFT_ALPHAS[0]) / (LIFT_ALPHAS[1] - LIFT_ALPHAS[0]);
+                (cn2 + (cn6 - cn2) * t, cp2 + (cp6 - cp2) * t)
+            }
+            Some((cn6, cp6)) => (cn6 + (cn6 - cn2) / (LIFT_ALPHAS[1] - LIFT_ALPHAS[0]) * (a - LIFT_ALPHAS[1]), cp6),
+        };
+        (cn.copysign(alpha), cp)
+    }
+}
+
+/// The Mach sweep with the 3D solve's stability: `CNα` and CP from the solve at 2° (see [`lift_at`]), the margin from that CP
+/// and `cg` over the reference diameter `d_ref`. Drag and everything else stay as they are.
+pub fn lift_mach_points(lift: &CfdLiftTable, mut points: Vec<MachPoint>, cg: f64, d_ref: f64, ext: &dyn Fn(f64) -> Option<ExtStab>) -> Vec<MachPoint> {
+    for p in &mut points {
+        if let Some(at) = lift_at(lift, p.mach, ext) {
+            p.cn_alpha = at.cn_alpha();
+            p.cp = at.cp();
+            p.margin_cal = (p.cp - cg) / d_ref;
+        }
+    }
+    points
+}
+
+/// The angle sweep at `mach` with the 3D solve's CN and CP (see [`LiftAt::at_alpha`]); `cn_alpha` is `CN/α` (the small-angle
+/// slope at zero angle), the margin comes from the CP and `cg`. Drag stays as it is.
+pub fn lift_alpha_points(lift: &CfdLiftTable, mach: f64, mut points: Vec<AlphaPoint>, cg: f64, d_ref: f64, ext: &dyn Fn(f64) -> Option<ExtStab>) -> Vec<AlphaPoint> {
+    let Some(at) = lift_at(lift, mach, ext) else { return points };
+    for p in &mut points {
+        let (cn, cp) = at.at_alpha(p.alpha);
+        p.cn = cn;
+        p.cp = cp;
+        p.cn_alpha = if p.alpha.abs() < 1e-9 { at.cn_alpha() } else { cn / p.alpha };
+        p.margin_cal = (cp - cg) / d_ref;
+    }
+    points
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -689,6 +858,118 @@ mod tests {
         let rocket = Rocket::from_bytes(EXAMPLE).unwrap();
         let vehicle = from_model::vehicle(&rocket, &MotorDb::bundled(), Phase::Full).unwrap();
         (rocket, vehicle)
+    }
+
+    fn lift_table(key: u64) -> CfdLiftTable {
+        // CN(2°) = 0.1 and 0.2 at M 0.8 and 2.0; CN(6°) = 0.4 and 0.8; CP 1.0 / 1.4 m at 2°, 1.1 / 1.5 m at 6°
+        let p = |mach: f64, alpha_deg: f64, cn: f64, x_cp: f64| bowshock_model::CfdLiftPoint { mach, alpha_deg, cn, x_cp, quality: CfdQuality::Converged };
+        CfdLiftTable {
+            key,
+            solved_at: 1,
+            solve_seconds: 60.0,
+            backend: "GPU (Luma)".into(),
+            points: vec![p(0.8, 2.0, 0.1, 1.0), p(0.8, 6.0, 0.4, 1.1), p(2.0, 2.0, 0.2, 1.4), p(2.0, 6.0, 0.8, 1.5)],
+        }
+    }
+
+    fn no_ext(_: f64) -> Option<ExtStab> {
+        None
+    }
+
+    #[test]
+    fn lift_nodes_are_the_interior_nodes_inside_the_range() {
+        assert_eq!(lift_nodes((0.1, 3.0)).unwrap(), LIFT_INTERIOR.to_vec());
+        assert_eq!(lift_nodes((0.8, 1.2)).unwrap(), vec![0.8, 0.95, 1.1]);
+        assert_eq!(lift_nodes((3.0, 0.8)).unwrap().last(), Some(&3.0));
+        assert_eq!(lift_nodes((0.1, 0.3)).unwrap(), vec![0.5]);
+        assert_eq!(lift_nodes((0.5, 0.5)).unwrap(), vec![0.5]);
+        assert_eq!(lift_nodes((3.2, 4.0)), None);
+        // between two nodes: the nearest one stands in
+        assert_eq!(lift_nodes((1.15, 1.2)).unwrap(), vec![1.1]);
+    }
+
+    #[test]
+    fn the_lift_key_ignores_the_altitude_and_follows_geometry_and_nodes() {
+        let (rocket, vehicle) = example();
+        let plan = plan(&rocket, &vehicle).unwrap();
+        let nodes = lift_nodes((0.1, 3.0)).unwrap();
+        assert_ne!(table_key(plan.geometry, 0.0, &nodes), table_key(plan.geometry, 3000.0, &nodes));
+        let key = lift_key(plan.geometry, &nodes);
+        let fresh = lift_table(key);
+        let ok: Result<Plan, String> = Ok(plan.clone());
+        assert_eq!(lift_status(&ok, Some(&fresh), (0.1, 3.0)), Status::Fresh);
+        assert_eq!(lift_status(&ok, None, (0.1, 3.0)), Status::Missing);
+        assert_eq!(lift_status(&ok, Some(&fresh), (0.8, 1.2)), Status::Stale, "other nodes");
+        assert_eq!(lift_status(&ok, Some(&lift_table(key ^ 1)), (0.1, 3.0)), Status::Stale);
+        assert!(matches!(lift_status(&ok, Some(&fresh), (3.5, 4.0)), Status::Unsupported(_)));
+        assert_ne!(key, lift_key(plan.geometry ^ 1, &nodes));
+    }
+
+    #[test]
+    fn the_3d_solve_is_kept_across_a_drag_re_solve() {
+        let mut rocket = Rocket::default();
+        rocket.store_cfd_table(CfdTable { lift: Some(lift_table(5)), ..table() });
+        rocket.store_cfd_table(CfdTable { key: table().key + 1, ..table() });
+        assert_eq!(rocket.cfd_table(table().stage).unwrap().lift.as_ref().map(|l| l.key), Some(5));
+    }
+
+    #[test]
+    fn the_mach_sweep_interpolates_the_3d_solve_and_holds_it_above_the_last_node() {
+        let lift = lift_table(1);
+        let two = 2f64.to_radians();
+        let at = lift_at(&lift, 1.4, &no_ext).unwrap(); // halfway between 0.8 and 2.0
+        assert!((at.cn_alpha() - 0.15 / two).abs() < 1e-12);
+        assert!((at.cp() - 1.2).abs() < 1e-12);
+        let top = lift_at(&lift, 2.7, &no_ext).unwrap();
+        assert!((top.cn_alpha() - 0.2 / two).abs() < 1e-12 && (top.cp() - 1.4).abs() < 1e-12);
+    }
+
+    #[test]
+    fn below_the_first_node_the_3d_solve_is_scaled_by_extended() {
+        let lift = lift_table(1);
+        // Extended: CNα 10 at M 0.8 and 8 at M 0.5; CP 0.9 and 0.7 m
+        let ext = |m: f64| Some(if m < 0.6 { ExtStab { cn_alpha: 8.0, cp: 0.7 } } else { ExtStab { cn_alpha: 10.0, cp: 0.9 } });
+        let at = lift_at(&lift, 0.5, &ext).unwrap();
+        assert!((at.a2.0 - 0.1 * 0.8).abs() < 1e-12, "{at:?}");
+        assert!((at.a2.1 - (1.0 - 0.2)).abs() < 1e-12);
+        let (cn6, cp6) = at.a6.unwrap();
+        assert!((cn6 - 0.4 * 0.8).abs() < 1e-12 && (cp6 - (1.1 - 0.2)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_angle_rules_of_the_3d_solve() {
+        let at = lift_at(&lift_table(1), 0.8, &no_ext).unwrap(); // CN 0.1 @ 2°, 0.4 @ 6°; CP 1.0, 1.1
+        let deg = f64::to_radians;
+        let (cn, cp) = at.at_alpha(deg(1.0));
+        assert!((cn - 0.05).abs() < 1e-12 && (cp - 1.0).abs() < 1e-12, "linear to the origin, CP of 2°");
+        let (cn, cp) = at.at_alpha(deg(4.0));
+        assert!((cn - 0.25).abs() < 1e-12 && (cp - 1.05).abs() < 1e-12, "between the angles");
+        let (cn, cp) = at.at_alpha(deg(10.0));
+        assert!((cn - (0.4 + 0.075 * 4.0)).abs() < 1e-12 && (cp - 1.1).abs() < 1e-12, "slope of 2°..6° beyond, CP held");
+        let (cn, cp) = at.at_alpha(deg(-4.0));
+        assert!((cn + 0.25).abs() < 1e-12 && (cp - 1.05).abs() < 1e-12, "negative angles mirror");
+        assert_eq!(at.at_alpha(0.0).0, 0.0);
+    }
+
+    #[test]
+    fn the_margin_from_the_3d_cp_is_cp_minus_cg_over_the_reference_diameter() {
+        let (_, vehicle) = example();
+        let cg = 0.6 * vehicle.length();
+        let d = vehicle.reference_diameter;
+        let lift = lift_table(1);
+        let sweep = vs_mach(&vehicle, cg, (0.8, 2.0), 7, 2f64.to_radians(), &Atmosphere::standard(), 0.0);
+        for p in lift_mach_points(&lift, sweep, cg, d, &no_ext) {
+            assert!((p.margin_cal - (p.cp - cg) / d).abs() < 1e-12);
+            let at = lift_at(&lift, p.mach, &no_ext).unwrap();
+            assert!((p.cn_alpha - at.cn_alpha()).abs() < 1e-12 && (p.cp - at.cp()).abs() < 1e-12);
+        }
+        let alphas = bowshock_sim::vs_alpha(&vehicle, cg, 0.8, (0.0, 10f64.to_radians()), 6);
+        let out = lift_alpha_points(&lift, 0.8, alphas, cg, d, &no_ext);
+        for p in &out {
+            assert!((p.margin_cal - (p.cp - cg) / d).abs() < 1e-12);
+        }
+        assert!((out[0].cn_alpha - 0.1 / 2f64.to_radians()).abs() < 1e-12, "zero angle: the small-angle slope");
+        assert!(out.iter().skip(1).all(|p| (p.cn - p.cn_alpha * p.alpha).abs() < 1e-12));
     }
 
     #[test]
@@ -881,6 +1162,7 @@ mod tests {
             notes: Vec::new(),
             points: vec![p(0.5, 0.4), p(1.0, 0.8), p(2.0, 0.6)],
             grid: CfdGrid::Coarse,
+            lift: None,
         }
     }
 

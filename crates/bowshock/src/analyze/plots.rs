@@ -5,7 +5,7 @@
 use bowshock_model::{ConfigId, StabilityBands};
 use bowshock_sim::{AlphaPoint, MachPoint};
 
-use super::compute::{Analysis, Data, Output, Run, FLUTTER_MIN_MARGIN};
+use super::compute::{LIFT_LABEL, Analysis, Data, Output, Run, FLUTTER_MIN_MARGIN};
 use super::overlay::{Field, Overlay};
 use super::readout::{config_color, drag_parts, other_visible, DRAG_PARTS};
 use crate::units::{Quantity, Unit, UnitSystem};
@@ -98,6 +98,15 @@ pub fn build(out: &Output, units: UnitSystem, overlay: Option<&Overlay>, active:
     Built { group, ground, legend, scale }
 }
 
+/// `label`, marked as from the 3D Euler solve when the output's stability is.
+fn label3d(out: &Output, label: &str) -> String {
+    if out.lift_3d() {
+        format!("{label}{LIFT_LABEL}")
+    } else {
+        label.to_string()
+    }
+}
+
 fn mach_runs(out: &Output) -> Vec<(usize, &Run, &[MachPoint])> {
     out.runs.iter().enumerate().filter_map(|(i, r)| if let Data::Mach(p) = &r.data { Some((i, r, p.as_slice())) } else { None }).collect()
 }
@@ -183,14 +192,14 @@ fn aero(out: &Output, units: UnitSystem, overlay: Option<&Overlay>, active: Conf
     let single = runs.len() == 1;
 
     let margin: Vec<Series> = if single {
-        runs.iter().map(|(_, _, p)| Series::new("Margin", curve(p, |p| p.margin_cal))).collect()
+        runs.iter().map(|(_, _, p)| Series::new(label3d(out, "Margin"), curve(p, |p| p.margin_cal))).collect()
     } else {
         runs.iter().map(|(i, r, p)| Series::new(r.name.clone(), curve(p, |p| p.margin_cal)).color(config_color(*i)).label_margin()).collect()
     };
 
     let mut cpcg = Panel::new("CP and CG", format!("{} from tip", len.symbol)).value_unit(len.symbol).tag(Tag::Only(0));
-    if let Some((_, first, p)) = runs.get(active) {
-        cpcg.series.push(Series::new("CP", curve(p, |p| to(p.cp))).color(SeriesColor::Cp).label_inside());
+    if let Some((_, first, p)) = runs.first() {
+        cpcg.series.push(Series::new(label3d(out, "CP"), curve(p, |p| to(p.cp))).color(SeriesColor::Cp).label_inside());
         let flat = |cg: f64| p.iter().map(|q| (q.mach, to(cg))).collect::<Vec<_>>();
         if single {
             cpcg.series.push(Series::new("CG liftoff", flat(first.cg_liftoff)).color(SeriesColor::Cg).label_inside());
@@ -259,14 +268,14 @@ fn stability(out: &Output, units: UnitSystem, overlay: Option<&Overlay>) -> Plot
         let m: Vec<_> = points.iter().map(|p| deg(p, p.margin_cal)).collect();
         let cn_pts: Vec<_> = points.iter().map(|p| deg(p, p.cn)).collect();
         if single {
-            margin.push(Series::new("Margin", m));
+            margin.push(Series::new(label3d(out, "Margin"), m));
             cn = cn.with(Series::new("CN", cn_pts));
         } else {
             margin.push(Series::new(run.name.clone(), m).color(color).label_margin());
             cn = cn.with(Series::new(run.name.clone(), cn_pts).color(color).label_margin());
         }
         if *i == 0 {
-            cpcg = cpcg.with(Series::new("CP", points.iter().map(|p| deg(p, to(p.cp))).collect()).color(SeriesColor::Cp).label_inside());
+            cpcg = cpcg.with(Series::new(label3d(out, "CP"), points.iter().map(|p| deg(p, to(p.cp))).collect()).color(SeriesColor::Cp).label_inside());
         }
         let name = if single { "CG".to_string() } else { format!("CG · {short}") };
         cpcg = cpcg.with(Series::new(name, points.iter().map(|p| deg(p, cg)).collect()).color(if single { SeriesColor::Cg } else { color }).label_inside());

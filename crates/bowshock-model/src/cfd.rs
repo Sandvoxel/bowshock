@@ -55,6 +55,45 @@ pub enum CfdGrid {
     Medium,
 }
 
+/// The 3D Euler result of one solved (Mach, angle of attack): normal force and centre of pressure.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CfdLiftPoint {
+    /// Mach number.
+    pub mach: f64,
+    /// Angle of attack (degrees).
+    pub alpha_deg: f64,
+    /// Normal force coefficient on the vehicle's reference area.
+    pub cn: f64,
+    /// Centre of pressure, from the nose tip (m).
+    pub x_cp: f64,
+    /// How far the point can be trusted.
+    pub quality: CfdQuality,
+}
+
+/// The 3D stability solve of a stack: normal force and CP at a few Mach numbers and angles. It rides on the stack's drag table
+/// and is kept when a new drag table replaces it; whether it is fresh is decided by its own [`CfdLiftTable::key`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CfdLiftTable {
+    /// Hash of the geometry, the Mach nodes and the angles the solve was made for.
+    pub key: u64,
+    /// When it finished: seconds since the Unix epoch.
+    pub solved_at: u64,
+    /// Wall time of the solve (s).
+    pub solve_seconds: f64,
+    /// `GPU (Luma)` or `CPU`.
+    pub backend: String,
+    /// The solved points, by Mach then angle.
+    pub points: Vec<CfdLiftPoint>,
+}
+
+impl CfdLiftTable {
+    fn is_sound(&self) -> bool {
+        !self.points.is_empty()
+            && self.solve_seconds.is_finite()
+            && self.points.iter().all(|p| [p.mach, p.alpha_deg, p.cn, p.x_cp].iter().all(|v| v.is_finite()))
+    }
+}
+
 /// A solved table of one flying stack: a drag coefficient per Mach number at zero angle of attack.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CfdTable {
@@ -83,6 +122,9 @@ pub struct CfdTable {
     /// The grid the points were solved on.
     #[serde(default)]
     pub grid: CfdGrid,
+    /// The 3D stability solve (normal force and CP), when there is one.
+    #[serde(default)]
+    pub lift: Option<CfdLiftTable>,
 }
 
 impl CfdTable {
@@ -121,6 +163,11 @@ impl Rocket {
         if !table.is_sound() {
             return false;
         }
+        let mut table = table;
+        if table.lift.is_none() {
+            // A new drag table keeps the stack's 3D solve: its own key says whether it is still fresh.
+            table.lift = self.cfd.0.iter().find(|t| t.stage == table.stage).and_then(|t| t.lift.clone());
+        }
         self.cfd.0.retain(|t| t.stage != table.stage);
         self.cfd.0.push(table);
         let excess = self.cfd.0.len().saturating_sub(MAX_CFD_TABLES);
@@ -141,6 +188,11 @@ impl Rocket {
     /// Drops tables that cannot be used (loading a document).
     pub(crate) fn repair_cfd(&mut self) {
         self.cfd.0.retain(CfdTable::is_sound);
+        for t in &mut self.cfd.0 {
+            if t.lift.as_ref().is_some_and(|l| !l.is_sound()) {
+                t.lift = None;
+            }
+        }
         let excess = self.cfd.0.len().saturating_sub(MAX_CFD_TABLES);
         self.cfd.0.drain(..excess);
     }
@@ -167,6 +219,7 @@ mod tests {
             notes: vec!["note".into()],
             points: vec![point(0.3), point(0.9), point(2.0)],
             grid: CfdGrid::Coarse,
+            lift: None,
         }
     }
 
@@ -226,5 +279,26 @@ mod tests {
         }
         assert_eq!(r.cfd_tables().len(), MAX_CFD_TABLES);
         assert_eq!(r.cfd_tables().last().unwrap().stage, 12);
+    }
+
+    fn lift(key: u64) -> CfdLiftTable {
+        let p = |mach, alpha_deg| CfdLiftPoint { mach, alpha_deg, cn: 0.2, x_cp: 1.0, quality: CfdQuality::Converged };
+        CfdLiftTable { key, solved_at: 1_700_000_100, solve_seconds: 90.0, backend: "GPU (Luma)".into(), points: vec![p(0.5, 2.0), p(0.5, 6.0)] }
+    }
+
+    #[test]
+    fn the_3d_solve_survives_a_drag_re_solve_and_old_files_read_without_it() {
+        let mut r = Rocket::default();
+        r.store_cfd_table(CfdTable { lift: Some(lift(11)), ..table(1, 1) });
+        r.store_cfd_table(table(1, 2)); // a new drag table: the lift stays, its own key decides freshness
+        assert_eq!(r.cfd_table(1).unwrap().key, 2);
+        assert_eq!(r.cfd_table(1).unwrap().lift.as_ref().unwrap().key, 11);
+        r.store_cfd_table(CfdTable { lift: Some(lift(12)), ..table(1, 3) });
+        assert_eq!(r.cfd_table(1).unwrap().lift.as_ref().unwrap().key, 12);
+        let back = Rocket::from_json(&r.to_json()).unwrap();
+        assert_eq!(back.cfd_table(1), r.cfd_table(1));
+        let mut v = serde_json::to_value(table(1, 1)).unwrap();
+        v.as_object_mut().unwrap().remove("lift");
+        assert_eq!(serde_json::from_value::<CfdTable>(v).unwrap().lift, None);
     }
 }

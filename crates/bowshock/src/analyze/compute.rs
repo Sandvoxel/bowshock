@@ -365,6 +365,20 @@ pub struct Output {
     pub cfd: Option<CfdInfo>,
 }
 
+/// Appended to the margin, CP and `CNα` labels when they come from the 3D Euler solve.
+pub const LIFT_LABEL: &str = " · CFD (3D)";
+
+/// What the screen says about the 3D stability solve an output was made with.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LiftInfo {
+    /// Solved (Mach, angle) points.
+    pub points: usize,
+    /// `GPU (Luma)` or `CPU`.
+    pub backend: String,
+    /// When the solve finished (seconds since the Unix epoch).
+    pub solved_at: u64,
+}
+
 /// Where a CFD table came from and what it left out: the provenance line's content.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CfdInfo {
@@ -380,6 +394,8 @@ pub struct CfdInfo {
     pub solve_seconds: f64,
     /// The grid it was solved on.
     pub grid: CfdGrid,
+    /// The 3D stability solve the margin, CP and `CNα` come from, when the table has a usable one.
+    pub lift: Option<LiftInfo>,
     /// The table's first Mach node when the plotted range starts below it (the drag there is the first point scaled by Extended's trend).
     pub scaled_below: Option<f64>,
     /// What was not solved as the document has it, and what the plots do not cover.
@@ -539,10 +555,14 @@ pub fn compute(request: &Request) -> Output {
                         mach_grid(cond.mach).into_iter().flat_map(|m| vs_mach(&vehicle, cg, (m, m), 1, alpha, &Atmosphere::standard(), cond.altitude)).collect()
                     };
                     Data::Mach(match table {
-                        // Stability from the build-up method, drag from the table plus the build-up's change with the angle.
+                        // Stability from the build-up method (or the 3D solve), drag from the table plus the build-up's change with the angle.
                         Some(t) => {
                             let zero = (alpha != 0.0).then(|| sweep(0.0));
-                            cfd::mach_points(t, sweep(alpha), zero.as_deref())
+                            let points = cfd::mach_points(t, sweep(alpha), zero.as_deref());
+                            match t.lift.as_ref().filter(|l| cfd::lift_usable(l)) {
+                                Some(l) => cfd::lift_mach_points(l, points, cg, vehicle.reference_diameter, &extended_at_2(&vehicle, cg, cond.altitude)),
+                                None => points,
+                            }
                         }
                         None => sweep(alpha),
                     })
@@ -551,7 +571,13 @@ pub fn compute(request: &Request) -> Output {
                     let cg = if cond.burnout { job.cg_burnout } else { job.cg_liftoff };
                     let points = vs_alpha(&vehicle, cg, cond.mach_fixed, (0.0, cond.alpha_max), ALPHA_POINTS);
                     Data::Alpha(match table {
-                        Some(t) => cfd::alpha_points(t, cond.mach_fixed, points),
+                        Some(t) => {
+                            let points = cfd::alpha_points(t, cond.mach_fixed, points);
+                            match t.lift.as_ref().filter(|l| cfd::lift_usable(l)) {
+                                Some(l) => cfd::lift_alpha_points(l, cond.mach_fixed, points, cg, vehicle.reference_diameter, &extended_at_2(&vehicle, cg, 0.0)),
+                                None => points,
+                            }
+                        }
                         None if request.method == Method::Barrowman => linearise(points),
                         None => points,
                     })
@@ -569,6 +595,14 @@ pub fn compute(request: &Request) -> Output {
         .collect();
     let cfd = table.map(|t| cfd_info(t, request.analysis, &cond));
     Output { analysis: request.analysis, method: request.method, conditions: cond, runs, elapsed: started.elapsed(), bands: request.bands, cfd }
+}
+
+/// Extended's `CNα` and CP at 2° at any Mach number: what the 3D solve is scaled by below its first node.
+fn extended_at_2<'a>(vehicle: &'a Vehicle, cg: f64, altitude: f64) -> impl Fn(f64) -> Option<cfd::ExtStab> + 'a {
+    move |m| {
+        let p = vs_mach(vehicle, cg, (m, m), 1, cfd::LIFT_ALPHAS[0].to_radians(), &Atmosphere::standard(), altitude).into_iter().next()?;
+        Some(cfd::ExtStab { cn_alpha: p.cn_alpha, cp: p.cp })
+    }
 }
 
 /// What the screen says about the table an output was made with.
@@ -603,6 +637,7 @@ fn cfd_info(table: &CfdTable, analysis: Analysis, cond: &Conditions) -> CfdInfo 
         solved_at: table.solved_at,
         solve_seconds: table.solve_seconds,
         grid: table.grid,
+        lift: table.lift.as_ref().filter(|l| cfd::lift_usable(l)).map(|l| LiftInfo { points: l.points.len(), backend: l.backend.clone(), solved_at: l.solved_at }),
         scaled_below,
         notes,
     }
@@ -637,6 +672,11 @@ fn s(v: f64, decimals: usize) -> String {
 }
 
 impl Output {
+    /// Whether the margin, CP and `CNα` come from the 3D Euler solve (the labels then say `· CFD (3D)`).
+    pub fn lift_3d(&self) -> bool {
+        self.cfd.as_ref().is_some_and(|c| c.lift.is_some())
+    }
+
     /// What the output has to say in the method line: the samples it holds.
     pub fn points_text(&self) -> String {
         let n = self.runs.first().map_or(0, |r| match &r.data {
@@ -833,6 +873,7 @@ mod tests {
             notes: Vec::new(),
             points: vec![point(0.3), point(1.0), point(2.0)],
             grid: CfdGrid::Coarse,
+            lift: None,
         };
         let info = |mach: (f64, f64)| cfd_info(&table, Analysis::Drag, &Conditions { mach, ..Conditions::default() });
         let low = info((0.1, 2.0));
