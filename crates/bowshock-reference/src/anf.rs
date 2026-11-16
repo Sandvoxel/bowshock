@@ -31,6 +31,18 @@
 //! canted 2° (roll only, ignored by the pitch-plane methods). Yayla's text says "20 degree nose cone", which is the
 //! included angle (the figure dimensions 10.0° and 2.84).
 //!
+//! Fin edges are not dimensioned in Fig. 3.1. Abiza et al. (XFlow LBM study of the ANF, p. 3,
+//! <https://www.3ds.com/assets/invest/2024-02/prediction_of_finned_projectile_aerodynamics_using_a_lattice-boltzmann_method_cfd_solution.pdf>)
+//! give a sharp leading edge and a blunt 0.08 cal trailing edge; Shelton, Martin & Silva (NASA, Kestrel/FUN3D, p. 2 and
+//! Table 1, <https://ntrs.nasa.gov/api/citations/20180006293/downloads/20180006293.pdf>) a leading-edge fillet r/d = 0.005
+//! and a 0.1 d trailing edge. The nose geometry above agrees with both.
+//!
+//! # Measurement spread
+//!
+//! Two wind tunnels (DREV, ISL) measuring a similar finned projectile differ by about 11 % in C_Nα and 0.4 cal in x_cp at
+//! M 3 (Dupuis & Berner, ISBS 2001, <http://www.xrayct.com/documents/data/IBS19/EB11_495.pdf>, Fig. 5); treat the
+//! high-supersonic points with that spread in mind, on top of the digitisation error.
+//!
 //! The reference area is the body cross-section π d²/4 and the reference length d. Pitching moment is about the CG, so
 //! `x_cp = x_cg − C_mα / C_Nα` (calibers from the nose tip; C_mα < 0 is stable).
 
