@@ -143,7 +143,7 @@ fn tiny_anf_state_after_30_iterations_matches_cpu() {
     let grid = tiny_anf_grid();
     println!("tiny ANF grid: {} x {} x {} cells, {} solid boxes, axis_cells {}", grid.ni, grid.nj, grid.nk, grid.solid.len(), grid.axis_cells);
     let mut rows = Vec::new();
-    for (mach, limiter, low_mach) in [(0.5, Limiter::VanAlbada, true), (2.0, Limiter::Minmod, false)] {
+    for (mach, limiter, low_mach) in [(0.5, Limiter::VanAlbada, true), (2.0, Limiter::Minmod, false), (2.0, Limiter::Venkatakrishnan, false)] {
         let cfg = config(mach, 2.0, limiter, low_mach);
         compare(&format!("M {mach} cold"), &grid, &cfg, 0, 30, &ALL_STAGINGS, EXPLICIT, &mut rows);
         compare(&format!("M {mach} warm"), &grid, &cfg, 150, 30, &ALL_STAGINGS, EXPLICIT, &mut rows);
@@ -157,7 +157,7 @@ fn tiny_anf_state_after_30_iterations_matches_cpu() {
 fn tiny_anf_implicit_state_after_30_iterations_matches_cpu() {
     let grid = tiny_anf_grid();
     let mut rows = Vec::new();
-    for (mach, limiter, low_mach) in [(0.5, Limiter::VanAlbada, true), (2.0, Limiter::Minmod, false)] {
+    for (mach, limiter, low_mach) in [(0.5, Limiter::VanAlbada, true), (2.0, Limiter::Minmod, false), (2.0, Limiter::Venkatakrishnan, false)] {
         for steep in [false, true] {
             let cfg = Config3 { scheme: Scheme3::Implicit(implicit_params(steep)), ..config(mach, 2.0, limiter, low_mach) };
             let tag = if steep { "steep" } else { "auto" };

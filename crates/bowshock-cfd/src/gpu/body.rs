@@ -122,6 +122,11 @@ fn limited_slope(a: &A, b: &A, lim: Limiter) -> A {
             let slope = (a * (b * b + c(eps)) + b * (a * a + c(eps))) / (a * a + b * b + c(2.0 * eps));
             select(&same_sign, slope, c(0.0))
         }
+        Limiter::Venkatakrishnan => {
+            let eps = 1e-14;
+            let slope = c(2.0) * b * (a * a + a * b + c(eps)) / (c(2.0) * a * a + a * b + b * b + c(2.0 * eps));
+            select(&same_sign, slope, c(0.0))
+        }
     }
 }
 

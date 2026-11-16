@@ -103,7 +103,7 @@ fn report(test: &str, rows: &[(String, &'static str, Diff, f64)]) {
 fn cone_state_after_20_iterations_matches_cpu() {
     let tm = solve_cone(2.0, 15f64.to_radians()).unwrap();
     let mut rows = Vec::new();
-    for limiter in [Limiter::Minmod, Limiter::VanAlbada] {
+    for limiter in [Limiter::Minmod, Limiter::VanAlbada, Limiter::Venkatakrishnan] {
         let mut case = ConeCase::new(2.0, 15.0, 40, 20);
         case.limiter = limiter;
         case.first_order_iters = 5;
