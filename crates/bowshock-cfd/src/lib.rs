@@ -15,8 +15,10 @@ pub mod gas3;
 pub mod grid;
 pub mod grid3;
 pub mod implicit;
+pub mod implicit3;
 pub mod multigrid;
 pub mod solver;
+pub mod solver3;
 pub mod turbulence;
 pub mod viscous;
 
