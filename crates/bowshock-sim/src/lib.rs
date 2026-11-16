@@ -8,6 +8,7 @@
 //! * [`flutter`]: fin flutter along a flight (Martin, NACA TN 4197, 1958, in the form of Bennett 2023).
 //! * [`tube_fins`]: tube fin aerodynamics (open tubes on the outside of the body).
 //! * [`roll`]: the pitch natural frequency and the check of the spin rate of canted fins against it (roll-pitch resonance).
+//! * [`drag_table`], [`lift_table`]: CFD zero-lift drag and 3D-solve normal force / CP tables the flight and the Analyze plots read.
 //!
 //! Everything is SI (metres, kilograms, seconds, radians, pascals). Axial stations are measured
 //! from the nose tip, increasing aft. The core modules do not know about the application's
@@ -28,6 +29,7 @@ pub mod drag_table;
 pub mod flight;
 pub mod flutter;
 pub mod from_model;
+pub mod lift_table;
 pub mod rng;
 pub mod roll;
 pub mod staging;
@@ -39,10 +41,11 @@ pub use analysis::{monte_carlo, vs_alpha, vs_mach, AlphaPoint, Dispersion, MachP
 pub use atmosphere::{AirState, Atmosphere};
 pub use drag_table::{DragTable, DragTablePoint};
 pub use flight::{
-    normal_gravity, simulate, Deploy, Event, EventKind, FlightModel, FlightResult, Launch, RecoveryDevice, Sample, SimInput, Summary, Trajectory, Turbulence,
-    WindPoint, EARTH_RATE,
+    normal_gravity, simulate, Deploy, Event, EventKind, FlightModel, FlightResult, Launch, MinMargin, RecoveryDevice, Sample, SimInput, Summary, Trajectory,
+    Turbulence, WindPoint, EARTH_RATE,
 };
 pub use flutter::{flutter_velocity, FlutterFin, FlutterGeometry, FlutterInputs, FlutterPoint, FlutterTrace, FlutterWarning};
+pub use lift_table::{ExtStab, LiftAt, LiftTable};
 pub use roll::{pitch_frequency, roll_resonance, RollResonance};
 pub use staging::{has_altitude_trigger, staging_times, Timeline};
 pub use vehicle::{

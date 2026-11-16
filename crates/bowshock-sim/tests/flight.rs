@@ -567,3 +567,134 @@ fn a_heavier_drag_table_flies_lower() {
     i.drag_tables = vec![Some(table_from_buildup(&plain, 1.3))];
     assert!(simulate(&i).summary.apogee < simulate(&input()).summary.apogee);
 }
+
+// ---- 3D stability solve (lift table) ----
+
+/// A stored 3D solve of Extended's own CN and CP at `machs` and 2°/6°, with the CP moved by `shift(mach)` metres.
+fn lift_from_buildup(aero: &Aero, machs: &[f64], shift: impl Fn(f64) -> f64) -> LiftTable {
+    use bowshock_model::{CfdLiftPoint, CfdLiftTable, CfdQuality};
+    let mut points = Vec::new();
+    for &mach in machs {
+        for alpha_deg in [2.0_f64, 6.0] {
+            let a = alpha_deg.to_radians();
+            let st = aero.stability(mach, a);
+            points.push(CfdLiftPoint { mach, alpha_deg, cn: st.cn_alpha * a, x_cp: st.cp + shift(mach), quality: CfdQuality::Converged });
+        }
+    }
+    let stored = CfdLiftTable { key: 0, solved_at: 0, solve_seconds: 0.0, backend: "test".into(), points, notes: Vec::new() };
+    LiftTable::from_cfd(&stored).expect("points at 2°")
+}
+
+/// Mach nodes every 0.05 from 0.05 to 3: dense enough that interpolating Extended's smooth trend between them is exact to a hair.
+fn dense_machs() -> Vec<f64> {
+    (1..=60).map(|i| 0.05 * f64::from(i)).collect()
+}
+
+#[test]
+fn a_lift_table_of_extendeds_own_values_reproduces_them_at_its_nodes_and_angles() {
+    let plain = Aero::new(&input().vehicle);
+    let aero = plain.clone().with_lift(lift_from_buildup(&plain, &dense_machs(), |_| 0.0));
+    assert!(aero.has_lift() && !plain.has_lift());
+    for m in dense_machs() {
+        for alpha_deg in [2.0_f64, 6.0] {
+            let a = alpha_deg.to_radians();
+            let (e, l) = (plain.normal_force(m, a), aero.normal_force(m, a));
+            assert!((e.cn_alpha - l.cn_alpha).abs() < 1e-9 * e.cn_alpha, "M{m} {alpha_deg}°: {} vs {}", e.cn_alpha, l.cn_alpha);
+            assert!((e.cp - l.cp).abs() < 1e-9, "M{m} {alpha_deg}°: CP {} vs {}", e.cp, l.cp);
+            // The pitch damping sums are Extended's whatever the table says.
+            assert_eq!(e.damping_sum(0.62), l.damping_sum(0.62));
+        }
+    }
+    // Below the first node (0.05) the table is scaled by Extended's own ratio, so it is Extended there too.
+    let a = 2f64.to_radians();
+    let (e, l) = (plain.normal_force(0.01, a), aero.normal_force(0.01, a));
+    assert!((e.cn_alpha - l.cn_alpha).abs() < 1e-9 * e.cn_alpha && (e.cp - l.cp).abs() < 1e-9);
+    // Between the nodes Extended's trend in Mach is followed to a small fraction of a percent.
+    let (e, l) = (plain.normal_force(0.4125, a), aero.normal_force(0.4125, a));
+    assert!((e.cn_alpha - l.cn_alpha).abs() < 2e-3 * e.cn_alpha && (e.cp - l.cp).abs() < 2e-3 * e.cp);
+}
+
+#[test]
+fn a_lift_table_of_extendeds_own_values_flies_the_same_flight() {
+    let plain = Aero::new(&input().vehicle);
+    let lift = lift_from_buildup(&plain, &dense_machs(), |_| 0.0);
+
+    // Straight up in still air the rocket never meets an angle of attack, so the normal force is never used: the trajectory is the
+    // same to rounding.
+    let mut calm = input();
+    calm.launch = Launch { rail_length: 1.5, ..Launch::default() };
+    let (a, mut with) = (simulate(&calm), calm.clone());
+    with.lift_tables = vec![Some(lift.clone())];
+    let b = simulate(&with);
+    assert!(!a.summary.stability_from_lift && b.summary.stability_from_lift);
+    assert!((a.summary.apogee - b.summary.apogee).abs() < 1e-9 * a.summary.apogee, "{} vs {}", a.summary.apogee, b.summary.apogee);
+    assert!((a.summary.landing.0 - b.summary.landing.0).abs() < 1e-6);
+
+    // In wind the rocket does fly at an angle (about 5° off the rail here). Extended's slope still grows with the angle (the Galejs
+    // body lift, 7 % of the slope at 2°) where the table is linear in it to the origin with the slope of 2°, so the flights agree to
+    // that: the apogee within 0.02 % and the margin off the rail (at an angle of about 5°) within 0.01 caliber; the least margin
+    // of the ascent, found at the slowest, near-zero angle step, differs by that nonlinearity (0.14 caliber measured), not more.
+    let mut windy = input();
+    windy.launch.wind_speed = 2.0;
+    let (a, mut with) = (simulate(&windy), windy.clone());
+    with.lift_tables = vec![Some(lift)];
+    let b = simulate(&with);
+    assert!((a.summary.apogee - b.summary.apogee).abs() < 2e-4 * a.summary.apogee, "{} vs {}", a.summary.apogee, b.summary.apogee);
+    assert!(
+        (a.summary.stability_off_rail_cal - b.summary.stability_off_rail_cal).abs() < 0.01,
+        "{} vs {}",
+        a.summary.stability_off_rail_cal,
+        b.summary.stability_off_rail_cal
+    );
+    let (x, y) = (a.summary.min_margin.unwrap(), b.summary.min_margin.unwrap());
+    assert!((x.cal - y.cal).abs() < 0.2 && (x.mach - y.mach).abs() < 1e-9, "{x:?} vs {y:?}");
+}
+
+#[test]
+fn a_transonic_cp_dip_in_the_table_puts_the_minimum_margin_at_that_mach() {
+    // The same rocket on a motor six times as strong, so that it goes through Mach 1.
+    let strong = || {
+        let mut i = input();
+        let curve = &mut i.vehicle.stages[0].motor.as_mut().unwrap().curve;
+        curve.points.iter_mut().for_each(|p| p.1 *= 6.0);
+        i
+    };
+    let plain = Aero::new(&strong().vehicle);
+    let base = simulate(&strong());
+    assert!(base.summary.max_mach > 1.2, "max Mach {}", base.summary.max_mach);
+
+    // A CP dip: 3 calibers forward of Extended's CP at Mach 0.95 and none at the other nodes.
+    let dip = 3.0 * plain.reference_diameter();
+    let machs = [0.05, 0.5, 0.8, 0.95, 1.1, 1.3, 2.0, 3.0];
+    let mut with = strong();
+    with.lift_tables = vec![Some(lift_from_buildup(&plain, &machs, |m| if (m - 0.95).abs() < 1e-9 { -dip } else { 0.0 }))];
+    let r = simulate(&with);
+    let min = r.summary.min_margin.expect("the rocket left the rail");
+    assert!((min.mach - 0.95).abs() < 0.03, "minimum at Mach {}", min.mach);
+    assert!(r.summary.stability_from_lift);
+
+    // The dip is the table's: the margin there is more than 2 calibers below Extended's, and the sample CP station shows it.
+    let extended_there =
+        base.trajectory.samples.iter().filter(|s| s.t > 0.0 && (s.mach - 0.95).abs() < 0.03).map(|s| s.stability_margin).fold(f64::INFINITY, f64::min);
+    assert!(min.cal < extended_there - 2.0, "{} vs Extended {extended_there}", min.cal);
+    let at_min = r.trajectory.samples.iter().min_by(|a, b| (a.t - min.time).abs().total_cmp(&(b.t - min.time).abs())).unwrap();
+    assert!((at_min.stability_margin - min.cal).abs() < 0.2, "{} vs {}", at_min.stability_margin, min.cal);
+    // The minimum is no later than apogee and not on the rail.
+    let rail_exit = r.trajectory.events.iter().find(|e| e.kind == EventKind::RailExit).unwrap().t;
+    assert!(min.time >= rail_exit - 1e-9 && min.time <= r.summary.time_to_apogee);
+}
+
+#[test]
+fn beyond_15_degrees_the_normal_force_continues_by_extendeds_change() {
+    let plain = Aero::new(&input().vehicle);
+    let aero = plain.clone().with_lift(lift_from_buildup(&plain, &dense_machs(), |_| 0.0));
+    let m = 0.5;
+    let at = |aero: &Aero, deg: f64| {
+        let a = deg.to_radians();
+        aero.normal_force(m, a).cn_alpha * a
+    };
+    // Continuous at 15° (the table's rule up to it, Extended's change beyond) and bounded where a straight extrapolation of the
+    // 2° to 6° slope would not be: at 60° Extended's own normal force is of the order of the table's, not several times it.
+    assert!((at(&aero, 15.0) - at(&aero, 15.0 + 1e-6)).abs() < 1e-4);
+    assert!(at(&aero, 60.0) < 1.5 * at(&plain, 60.0) && at(&aero, 60.0) > 0.5 * at(&plain, 60.0), "{} vs {}", at(&aero, 60.0), at(&plain, 60.0));
+}

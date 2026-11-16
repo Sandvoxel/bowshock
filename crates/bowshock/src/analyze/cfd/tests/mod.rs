@@ -2,7 +2,7 @@ use bowshock_core as solver;
 use bowshock_model::{CfdGrid, CfdLiftTable, CfdPoint, CfdQuality, CfdTable, Rocket};
 use bowshock_motors::MotorDb;
 use bowshock_sim::from_model::{self, Phase};
-use bowshock_sim::Vehicle;
+use bowshock_sim::{ExtStab, Vehicle};
 
 use super::*;
 

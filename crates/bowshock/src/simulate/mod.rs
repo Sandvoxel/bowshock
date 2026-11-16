@@ -539,7 +539,8 @@ impl State {
     }
 
     /// What a result of a flight with `spec` is compared with: the [`State::revision`], and for a flight on the CFD table the keys of
-    /// the tables it flies on (storing a table is not a document revision), so a new solve makes that flight stale.
+    /// the tables it flies on, the 3D stability solve's included (storing a table is not a document revision), so a new solve of
+    /// either makes that flight stale.
     fn stamp(&self, ctx: &Ctx, spec: &Spec) -> u64 {
         let base = self.revision(ctx);
         if spec.drag != bowshock_model::DragSource::CfdTable {
@@ -547,8 +548,9 @@ impl State {
         }
         let rocket = ctx.doc.rocket();
         let keys = (1..=rocket.stages().len().max(1)).fold(0xcbf2_9ce4_8422_2325u64, |h, stage| {
-            let key = rocket.cfd_table(stage as u32).map_or(0, |t| t.key);
-            (h ^ key).wrapping_mul(0x0000_0100_0000_01b3)
+            let table = rocket.cfd_table(stage as u32);
+            let h = (h ^ table.map_or(0, |t| t.key)).wrapping_mul(0x0000_0100_0000_01b3);
+            (h ^ table.and_then(|t| t.lift.as_ref()).map_or(0, |l| l.key)).wrapping_mul(0x0000_0100_0000_01b3)
         });
         base.wrapping_add(keys | 1)
     }

@@ -695,10 +695,10 @@ pub fn compute(request: &Request) -> Output {
 }
 
 /// Extended's `CNα` and CP at 2° at any Mach number: what the 3D solve is scaled by below its first node.
-fn extended_at_2<'a>(vehicle: &'a Vehicle, cg: f64, altitude: f64) -> impl Fn(f64) -> Option<cfd::ExtStab> + 'a {
+fn extended_at_2<'a>(vehicle: &'a Vehicle, cg: f64, altitude: f64) -> impl Fn(f64) -> Option<bowshock_sim::ExtStab> + 'a {
     move |m| {
         let p = vs_mach(vehicle, cg, (m, m), 1, cfd::LIFT_ALPHAS[0].to_radians(), &Atmosphere::standard(), altitude).into_iter().next()?;
-        Some(cfd::ExtStab { cn_alpha: p.cn_alpha, cp: p.cp })
+        Some(bowshock_sim::ExtStab { cn_alpha: p.cn_alpha, cp: p.cp })
     }
 }
 

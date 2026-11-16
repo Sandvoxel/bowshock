@@ -231,7 +231,8 @@ pub fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &P
         let Some(primary) = sources.first() else { continue };
         let multi = sources.len() > 1;
         let unit = primary.unit(system);
-        let title = if multi { primary.dim.title() } else { primary.label };
+        let reference_lift = reference.run.result.summary.stability_from_lift;
+        let title = if multi { primary.dim.title().to_string() } else { primary.label_in(reference_lift).into_owned() };
         let mut panel = Panel::new(title, unit.symbol).editable(PanelEditor {
             can_add: sources.len() < bowshock_model::MAX_PANEL_SOURCES,
             can_up: index > 0,
@@ -240,7 +241,11 @@ pub fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &P
             legend: sources
                 .iter()
                 .zip(STYLES)
-                .map(|(c, style)| LegendItem { style, color: if by_flight { SeriesColor::Muted } else { c.color }, text: c.label.to_string() })
+                .map(|(c, style)| LegendItem {
+                    style,
+                    color: if by_flight { SeriesColor::Muted } else { c.color },
+                    text: c.label_in(reference_lift).into_owned(),
+                })
                 .collect(),
         });
         if primary.key == "altitude" {
@@ -258,12 +263,13 @@ pub fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &P
             let events = &e.run.result.trajectory.events;
             let apogee = events.iter().find(|ev| ev.kind == EventKind::Apogee).map_or(f64::INFINITY, |ev| ev.t);
             let burnout = events.iter().filter(|ev| ev.kind == EventKind::Burnout).map(|ev| ev.t).fold(0.0, f64::max);
+            let from_lift = e.run.result.summary.stability_from_lift;
             for (c, style) in sources.iter().zip(STYLES) {
                 let name = match (compare, multi) {
-                    (false, false) => c.label.to_string(),
+                    (false, false) => c.label_in(from_lift).into_owned(),
                     (true, false) => e.name.to_string(),
-                    (false, true) => c.label.to_string(),
-                    (true, true) => format!("{} · {}", e.name, c.label),
+                    (false, true) => c.label_in(from_lift).into_owned(),
+                    (true, true) => format!("{} · {}", e.name, c.label_in(from_lift)),
                 };
                 let color = if by_flight { e.color } else { c.color };
                 let Some((xc, xu)) = x_of else {

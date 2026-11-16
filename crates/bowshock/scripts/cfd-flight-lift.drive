@@ -1,0 +1,29 @@
+# Simulate > Drag "CFD table": a flight flies on the stored drag table and, when a fresh 3D stability solve rides on it, on that
+# solve's normal force and CP. The results show "Min margin in flight" (with the Mach where it occurs and the RASAero II guidance
+# chip) and the labels read `· CFD (3D)`. The drive scripts cannot wait on real solves (minutes on a GPU), so the document is the
+# example with hand-made CFD tables (Extended's own values with a one-caliber CP dip at Mach 1; not a solver result):
+#   BOWSHOCK_FLIGHT_LIFT_FIXTURE=/tmp/example-flight-lift.bowshock cargo test -p bowshock -- --ignored the_flight_lift_fixture
+#   BOWSHOCK_OPEN=/tmp/example-flight-lift.bowshock cargo run --release -q -p bowshock -- drive --example crates/bowshock/scripts/cfd-flight-lift.drive out/cfd-flight-lift
+viewport 1300x800
+click "Simulate"
+
+# On Extended: the margin comes from the build-up. "Bigger motor" (I284W) is the example flight that gets into the transonic range.
+click (60, 232)
+click (17, 94)
+click (17, 226)
+click "Run"
+click "Stability"
+move (700, 300)
+move (702, 302)
+screenshot flight-extended-dark.png
+
+# On the CFD table: drag and stability from the tables.
+click "CFD table"
+click "Run"
+move (700, 300)
+move (702, 302)
+screenshot flight-lift-dark.png
+click "Light"
+move (700, 300)
+move (702, 302)
+screenshot flight-lift-light.png

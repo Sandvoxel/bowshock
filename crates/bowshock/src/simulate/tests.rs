@@ -894,10 +894,79 @@ fn the_cfd_drag_source_attaches_a_matching_table_and_says_why_it_cannot() {
     assert!(app.ctx_mut().doc.store_cfd_table(cfd_table(geometry)));
     let (input, _) = flight::prepare(app.ctx(), &spec).unwrap();
     assert_eq!(input.drag_tables[0].as_ref().map(|t| t.points.len()), Some(3));
-    assert_eq!(flight::drag_note(app.ctx(), &spec), None);
+    assert!(input.lift_tables.iter().all(Option::is_none), "no 3D solve to attach");
+    assert!(flight::drag_note(app.ctx(), &spec).unwrap().contains("No 3D stability solve"));
 
     let extended = Spec { drag: bowshock_model::DragSource::Extended, ..spec };
-    assert!(flight::prepare(app.ctx(), &extended).unwrap().0.drag_tables.is_empty());
+    let input = flight::prepare(app.ctx(), &extended).unwrap().0;
+    assert!(input.drag_tables.is_empty() && input.lift_tables.is_empty());
+    assert_eq!(flight::drag_note(app.ctx(), &extended), None);
+}
+
+/// A 3D stability solve at the Mach nodes 0.5, 0.8 and 1.3 for a stack of `geometry`, keyed as Analyze keys it (`fresh`) or not.
+fn lift_solve(geometry: u64, fresh: bool) -> bowshock_model::CfdLiftTable {
+    use bowshock_model::{CfdLiftPoint, CfdLiftTable, CfdQuality};
+    let nodes = [0.5, 0.8, 1.3];
+    let key = crate::analyze::cfd::lift_key(geometry, &nodes);
+    let p = |mach: f64, alpha_deg: f64| CfdLiftPoint { mach, alpha_deg, cn: 0.1 * alpha_deg, x_cp: 0.7, quality: CfdQuality::Converged };
+    CfdLiftTable {
+        key: if fresh { key } else { key ^ 1 },
+        solved_at: 1,
+        solve_seconds: 10.0,
+        backend: "test".into(),
+        points: nodes.iter().flat_map(|m| [p(*m, 2.0), p(*m, 6.0)]).collect(),
+        notes: Vec::new(),
+    }
+}
+
+#[test]
+fn a_fresh_3d_solve_is_flown_a_stale_one_is_not_and_the_note_says_which() {
+    let mut app = App::with_example();
+    let mut state = state_for(&app);
+    state.update(Message::Edit(Edit::Drag(bowshock_model::DragSource::CfdTable)), app.ctx_mut());
+    let spec = state.selected_flight().spec.clone();
+    let geometry = current_geometry(&app);
+
+    // A stale solve: the drag table is flown, the stability is Extended's, and the note says so.
+    assert!(app.ctx_mut().doc.store_cfd_table(bowshock_model::CfdTable { lift: Some(lift_solve(geometry, false)), ..cfd_table(geometry) }));
+    let (input, _) = flight::prepare(app.ctx(), &spec).unwrap();
+    assert!(input.drag_tables[0].is_some() && input.lift_tables.iter().all(Option::is_none));
+    let note = flight::drag_note(app.ctx(), &spec).unwrap();
+    assert!(note.contains("stale") && note.contains("Extended stability"), "{note}");
+
+    // A solve made for another geometry is stale too, however its key was made.
+    assert!(app.ctx_mut().doc.store_cfd_table(bowshock_model::CfdTable { lift: Some(lift_solve(geometry ^ 1, true)), ..cfd_table(geometry) }));
+    assert!(flight::prepare(app.ctx(), &spec).unwrap().0.lift_tables.iter().all(Option::is_none));
+
+    // A fresh one is attached, whatever Mach range Analyze shows, and nothing is said.
+    assert!(app.ctx_mut().doc.store_cfd_table(bowshock_model::CfdTable { lift: Some(lift_solve(geometry, true)), ..cfd_table(geometry) }));
+    let (input, _) = flight::prepare(app.ctx(), &spec).unwrap();
+    assert!(input.drag_tables[0].is_some() && input.lift_tables[0].is_some());
+    assert_eq!(flight::drag_note(app.ctx(), &spec), None);
+
+    // The flight flies on it and its results say so; with the drag source on Extended it does not.
+    let id = state.selected_flight().id;
+    fly(&mut state, app.ctx(), id);
+    let summary = state.flight(id).unwrap().run.as_ref().unwrap().result.summary.clone();
+    assert!(summary.stability_from_lift && summary.min_margin.is_some());
+    let extended = Spec { drag: bowshock_model::DragSource::Extended, ..spec };
+    assert!(flight::prepare(app.ctx(), &extended).unwrap().0.lift_tables.is_empty());
+
+    // A new solve of the stability alone makes the result stale (the drag table's key is unchanged).
+    assert!(!state.flight(id).unwrap().is_stale(state.stamp(app.ctx(), &state.flight(id).unwrap().spec)));
+    assert!(app.ctx_mut().doc.store_cfd_table(bowshock_model::CfdTable { lift: Some(lift_solve(geometry, false)), ..cfd_table(geometry) }));
+    assert!(state.flight(id).unwrap().is_stale(state.stamp(app.ctx(), &state.flight(id).unwrap().spec)));
+}
+
+#[test]
+fn the_margin_guidance_and_labels_follow_the_stability_source() {
+    assert_eq!((flight::required_margin_cal(0.3), flight::required_margin_cal(0.79)), (1.0, 1.0));
+    assert_eq!((flight::required_margin_cal(0.8), flight::required_margin_cal(2.5)), (2.0, 2.0));
+    let margin = channels::find("stability_margin").unwrap();
+    assert_eq!(margin.label_in(false), "Stability margin");
+    assert_eq!(margin.label_in(true), "Stability margin · CFD (3D)");
+    assert_eq!(channels::find("cp_station").unwrap().label_in(true), "CP station · CFD (3D)");
+    assert_eq!(channels::find("altitude").unwrap().label_in(true), "Altitude (AGL)", "only the stability channels change");
 }
 
 #[test]
@@ -1021,4 +1090,63 @@ fn the_other_way_of_cant_spins_the_other_way_and_fin_b_alone_a_third_as_fast() {
     assert_eq!((group.effective(0).cant, group.effective(1).cant, group.effective(2).cant), (0.0, 2.0_f64.to_radians(), 0.0));
     let one = nominal_spin(&app).0;
     assert!((one / all - 1.0 / 3.0).abs() < 0.01, "{one} vs {all}");
+}
+
+/// The example with CFD tables made by hand, for the drive script `cfd-flight-lift.drive` (a real solve of both takes minutes on a
+/// GPU and the drive scripts cannot wait on one): the drag is Extended's own zero-lift drag at the table's Mach numbers and the
+/// stability is Extended's own CN and CP at 2° and 6° with the CP moved forward through the transonic range (a dip of one
+/// caliber at Mach 1, a Gaussian 0.35 wide), keyed as Analyze keys them so the flight reads them as fresh. Nothing here is a
+/// solver result. `BOWSHOCK_FLIGHT_LIFT_FIXTURE=/tmp/example-flight-lift.bowshock cargo test -p bowshock -- --ignored
+/// the_flight_lift_fixture`.
+#[test]
+#[ignore = "writes a drive-script fixture: hand-made CFD tables, not a solve"]
+fn the_flight_lift_fixture() {
+    use bowshock_model::{CfdLiftPoint, CfdLiftTable, CfdPoint, CfdQuality};
+    use bowshock_sim::Aero;
+    let Some(path) = std::env::var_os("BOWSHOCK_FLIGHT_LIFT_FIXTURE") else { return };
+    let mut app = App::with_example();
+    let geometry = current_geometry(&app);
+    let vehicle = bowshock_sim::from_model::vehicle(app.ctx().doc.rocket(), app.ctx().physics.motors(), bowshock_sim::from_model::Phase::Full).unwrap();
+    let aero = Aero::new(&vehicle);
+    let air = bowshock_sim::Atmosphere::standard().at_msl(0.0);
+
+    let nodes = [0.1, 0.3, 0.5, 0.8, 0.9, 1.0, 1.1, 1.3, 1.7, 2.3, 3.0];
+    let point = |mach: f64| {
+        let d = aero.drag(mach, mach * air.speed_of_sound * air.density / air.viscosity, false);
+        CfdPoint {
+            mach,
+            cd: d.total,
+            friction: d.friction,
+            pressure: d.pressure,
+            base: d.base,
+            fins: d.fins,
+            other: d.protuberances,
+            quality: CfdQuality::Converged,
+        }
+    };
+    let drag = bowshock_model::CfdTable {
+        key: crate::analyze::cfd::table_key(geometry, 0.0, &nodes),
+        solved_at: 1_700_000_000,
+        points: nodes.iter().map(|m| point(*m)).collect(),
+        altitude: 0.0,
+        ..cfd_table(geometry)
+    };
+
+    let lift_nodes = crate::analyze::cfd::LIFT_INTERIOR;
+    let dip = |mach: f64| aero.reference_diameter() * (-((mach - 1.0) / 0.35_f64).powi(2)).exp();
+    let lift_point = |mach: f64, alpha_deg: f64| {
+        let a = alpha_deg.to_radians();
+        let st = aero.stability(mach, a);
+        CfdLiftPoint { mach, alpha_deg, cn: st.cn_alpha * a, x_cp: st.cp - dip(mach), quality: CfdQuality::Converged }
+    };
+    let lift = CfdLiftTable {
+        key: crate::analyze::cfd::lift_key(geometry, &lift_nodes),
+        solved_at: 1_700_000_100,
+        solve_seconds: 240.0,
+        backend: "GPU (Luma)".into(),
+        points: lift_nodes.iter().flat_map(|m| crate::analyze::cfd::LIFT_ALPHAS.map(|a| lift_point(*m, a))).collect(),
+        notes: Vec::new(),
+    };
+    assert!(app.ctx_mut().doc.store_cfd_table(bowshock_model::CfdTable { lift: Some(lift), ..drag }));
+    std::fs::write(path, app.ctx().doc.rocket().to_bytes()).unwrap();
 }

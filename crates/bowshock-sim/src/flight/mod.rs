@@ -66,8 +66,12 @@ pub(crate) fn build_aeros(input: &SimInput) -> Vec<Aero> {
     (0..n)
         .map(|k| {
             let aero = if k == 0 { Aero::new(v) } else { Aero::new(&v.truncated(v.stages[k].aft_station)) };
-            match input.drag_tables.get(k) {
+            let aero = match input.drag_tables.get(k) {
                 Some(Some(table)) => aero.with_table(table.clone()),
+                _ => aero,
+            };
+            match input.lift_tables.get(k) {
+                Some(Some(table)) => aero.with_lift(table.clone()),
                 _ => aero,
             }
         })

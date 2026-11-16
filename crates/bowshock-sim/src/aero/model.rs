@@ -1,11 +1,12 @@
 use super::drag::{body_calc, button_drag, fin_calc};
 use super::tables::{base_cd, roughness_correction, skin_cf, stagnation_cd};
 use super::{
-    axial_drag_multiplier, fin_fin_factor, lug_drag, Aero, Comp, ComponentAero, DragBreakdown, FinCalc, NormalForce, Pressure, ProtCalc, RollAero, Stability,
-    LUG_ROUGHNESS,
+    axial_drag_multiplier, fin_fin_factor, lug_drag, Aero, Comp, ComponentAero, DragBreakdown, FinCalc, Lift, NormalForce, Pressure, ProtCalc, RollAero,
+    Stability, LIFT_HOLD, LUG_ROUGHNESS,
 };
 use crate::atmosphere::Atmosphere;
 use crate::drag_table::{DragTable, DragTablePoint};
+use crate::lift_table::{ExtStab, LiftTable, ALPHAS_DEG};
 use crate::tube_fins::TubeFinCalc;
 use crate::vehicle::{Protuberance, Vehicle};
 use std::f64::consts::PI;
@@ -78,6 +79,7 @@ impl Aero {
             prots,
             labels: v.labels.clone(),
             table: None,
+            lift: None,
         }
     }
 
@@ -94,7 +96,8 @@ impl Aero {
         self.d_ref
     }
 
-    /// Normal-force slope and CP at `mach` and angle of attack `alpha` (rad).
+    /// Extended (Barrowman build-up) normal-force slope and CP at `mach` and angle of attack `alpha` (rad), by component. A lift
+    /// table ([`Aero::with_lift`]) is not applied here (it has no components): [`Aero::normal_force`] and [`Aero::cp`] apply it.
     ///
     /// The slope includes the nonlinear Galejs body lift evaluated at `alpha`, so
     /// `cn_alpha * alpha` is the normal force coefficient `CN` there.
@@ -185,20 +188,64 @@ impl Aero {
 
     /// Normal-force slope and CP at `mach` and angle of attack `alpha` (rad) together with the sums behind the pitch damping
     /// moment ([`NormalForce::damping_sum`]), without the per-component list of [`Aero::stability`] (no allocation): what the
-    /// rigid-body flight model evaluates every step.
+    /// rigid-body flight model evaluates every step. With a lift table ([`Aero::with_lift`]) the slope and CP are the table's
+    /// ([`LiftAt`](crate::lift_table::LiftAt) rules); the damping sums stay Extended's.
     pub fn normal_force(&self, mach: f64, alpha: f64) -> NormalForce {
+        let ext = self.extended_normal_force(mach, alpha);
+        match &self.lift {
+            Some(lift) => self.lifted(lift, ext, mach, alpha),
+            None => ext,
+        }
+    }
+
+    /// [`Aero::normal_force`] of the Extended build-up alone.
+    fn extended_normal_force(&self, mach: f64, alpha: f64) -> NormalForce {
         let (mut s0, mut s1, mut s2) = (0.0, 0.0, 0.0);
         self.each_component(mach, alpha, |_, _, cna, cp| {
             s0 += cna;
             s1 += cna * cp;
             s2 += cna * cp * cp;
         });
-        NormalForce { cn_alpha: s0, cp: if s0.abs() > 1e-9 { s1 / s0 } else { 0.5 * self.length }, s1, s2 }
+        NormalForce { cn_alpha: s0, cp: if s0.abs() > 1e-9 { s1 / s0 } else { 0.5 * self.length }, s0, s1, s2 }
     }
 
-    /// Static margin in calibers (positive = stable) for centre of gravity station `cg`.
+    /// `ext` with the slope and CP of the lift table at `mach` and `alpha`. Up to [`LIFT_HOLD`] the table's angle rules apply;
+    /// beyond it (a rocket that tumbles) `CN` continues from the table's value there by Extended's change of `CN` and the CP is held.
+    fn lifted(&self, lift: &Lift, ext: NormalForce, mach: f64, alpha: f64) -> NormalForce {
+        let first = lift.table.first_mach();
+        let extended_at_2 = |m: f64| {
+            if m == first {
+                return Some(lift.first);
+            }
+            let n = self.extended_normal_force(m, ALPHAS_DEG[0].to_radians());
+            Some(ExtStab { cn_alpha: n.cn_alpha, cp: n.cp })
+        };
+        let Some(at) = lift.table.at(mach.max(0.0), &extended_at_2) else { return ext };
+        let a = alpha.abs();
+        let (cn, cp) = if a <= LIFT_HOLD {
+            at.at_alpha(a)
+        } else {
+            let (cn_hold, cp) = at.at_alpha(LIFT_HOLD);
+            let extended = |x: f64| self.extended_normal_force(mach, x).cn_alpha * x;
+            (cn_hold + extended(a) - extended(LIFT_HOLD), cp)
+        };
+        NormalForce { cn_alpha: if a < 1e-9 { at.cn_alpha() } else { cn / a }, cp, ..ext }
+    }
+
+    /// CP station (m from the tip) at `mach` and angle of attack `alpha` (rad): the lift table's when there is one
+    /// ([`Aero::with_lift`]), else Extended's.
+    pub fn cp(&self, mach: f64, alpha: f64) -> f64 {
+        self.normal_force(mach, alpha).cp
+    }
+
+    /// Whether a lift table sets the normal force and CP ([`Aero::with_lift`]).
+    pub fn has_lift(&self) -> bool {
+        self.lift.is_some()
+    }
+
+    /// Static margin in calibers (positive = stable) for centre of gravity station `cg`, from [`Aero::cp`].
     pub fn margin_cal(&self, mach: f64, alpha: f64, cg: f64) -> f64 {
-        (self.stability(mach, alpha).cp - cg) / self.d_ref
+        (self.cp(mach, alpha) - cg) / self.d_ref
     }
 
     /// Body crossflow damping factor about a centre of gravity at station `cg`: `sum A_strip |x - cg|^3` (m^5) over strips of
@@ -256,6 +303,14 @@ impl Aero {
     pub fn with_table(mut self, table: DragTable) -> Aero {
         self.table = Some(Arc::new(table));
         self.labels = self.labels.without_cd_overrides();
+        self
+    }
+
+    /// This model with the normal force and CP of `table` (a 3D stability solve) instead of the build-up's, at any Mach number
+    /// and angle of attack: see [`Aero::normal_force`]. Drag, roll and the pitch damping sums stay as they are.
+    pub fn with_lift(mut self, table: LiftTable) -> Aero {
+        let n = self.extended_normal_force(table.first_mach(), ALPHAS_DEG[0].to_radians());
+        self.lift = Some(Arc::new(Lift { first: ExtStab { cn_alpha: n.cn_alpha, cp: n.cp }, table }));
         self
     }
 

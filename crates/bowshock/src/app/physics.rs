@@ -263,16 +263,39 @@ impl Physics {
         self.cfd_plans.get(stage.checked_sub(1)?)
     }
 
-    /// The stored CFD drag table the stack from `stage` flies on, or why it flies on the build-up instead.
-    pub fn drag_table(&self, rocket: &Rocket, stage: usize) -> Result<bowshock_sim::DragTable, String> {
+    /// The stored CFD table of the stack from `stage` and its plan, when the table's geometry is the rocket's now; otherwise why the
+    /// stack flies on the build-up instead.
+    fn fresh_table<'a>(&self, rocket: &'a Rocket, stage: usize) -> Result<(&'a bowshock_model::CfdTable, &crate::analyze::cfd::Plan), String> {
         let Some(table) = rocket.cfd_table(stage as u32) else {
             return Err("No CFD table for this rocket yet: solve one in Analyze > CFD table. Flying on Extended.".to_string());
         };
         match self.cfd_plan(stage) {
-            Some(Ok(plan)) if plan.geometry == table.geometry => Ok(bowshock_sim::DragTable::from_cfd(table)),
+            Some(Ok(plan)) if plan.geometry == table.geometry => Ok((table, plan)),
             Some(Ok(_)) | None => Err("CFD table is stale (the rocket changed): flying on Extended.".to_string()),
             Some(Err(why)) => Err(format!("CFD cannot model this rocket ({why}): flying on Extended.")),
         }
+    }
+
+    /// The stored CFD drag table the stack from `stage` flies on, or why it flies on the build-up instead.
+    pub fn drag_table(&self, rocket: &Rocket, stage: usize) -> Result<bowshock_sim::DragTable, String> {
+        self.fresh_table(rocket, stage).map(|(table, _)| bowshock_sim::DragTable::from_cfd(table))
+    }
+
+    /// The 3D stability solve (normal force and CP) that rides on the drag table of the stack from `stage`, or why the stack flies
+    /// on Extended's stability. It is valid when its key is the one [`lift_key`](crate::analyze::cfd::lift_key) gives for the
+    /// rocket's geometry and the Mach numbers of the solve's own points, so it does not depend on the Mach range Analyze shows.
+    pub fn lift_table(&self, rocket: &Rocket, stage: usize) -> Result<bowshock_sim::LiftTable, String> {
+        let (table, plan) = self.fresh_table(rocket, stage)?;
+        let Some(lift) = &table.lift else {
+            return Err("No 3D stability solve yet (Analyze > CFD table > Solve stability (3D)): flying on Extended stability.".to_string());
+        };
+        let mut nodes: Vec<f64> = lift.points.iter().map(|p| p.mach).collect();
+        nodes.sort_by(f64::total_cmp);
+        nodes.dedup();
+        if lift.key != crate::analyze::cfd::lift_key(plan.geometry, &nodes) {
+            return Err("3D stability solve is stale (the rocket changed): flying on Extended stability.".to_string());
+        }
+        bowshock_sim::LiftTable::from_cfd(lift).ok_or_else(|| "3D stability solve has no point at 2°: flying on Extended stability.".to_string())
     }
 
     fn compute(&mut self, rocket: &Rocket, stages: Vec<Stage>) {

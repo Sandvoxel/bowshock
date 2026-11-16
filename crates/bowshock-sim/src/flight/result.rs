@@ -146,6 +146,17 @@ pub struct Trajectory {
     pub events: Vec<Event>,
 }
 
+/// The least static margin of a flight (see [`Summary::min_margin`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MinMargin {
+    /// Static margin (calibers) at zero angle of attack with the CG of that moment.
+    pub cal: f64,
+    /// Mach number where it occurs.
+    pub mach: f64,
+    /// Time of flight where it occurs (s).
+    pub time: f64,
+}
+
 /// Flight summary values.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Summary {
@@ -185,6 +196,11 @@ pub struct Summary {
     pub roll_rate_at_apogee: f64,
     /// Where the spin rate meets the pitch natural frequency, if it does (see [`crate::roll`]); `None` when it keeps clear.
     pub roll_resonance: Option<RollResonance>,
+    /// Whether a 3D stability solve ([`LiftTable`](crate::lift_table::LiftTable)) set the normal force and CP in some stage of the
+    /// flight, so the margins above and below are the solve's rather than Extended's.
+    pub stability_from_lift: bool,
+    /// The least static margin between rail exit and apogee, `None` if the rocket never left the rail.
+    pub min_margin: Option<MinMargin>,
 }
 
 /// Result of [`simulate`].

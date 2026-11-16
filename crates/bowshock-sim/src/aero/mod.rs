@@ -26,6 +26,7 @@ mod tables;
 mod tests;
 
 use crate::drag_table::DragTable;
+use crate::lift_table::{ExtStab, LiftTable};
 use crate::tube_fins::TubeFinCalc;
 use crate::vehicle::{FinCrossSection, Labels};
 use std::sync::Arc;
@@ -54,6 +55,9 @@ pub struct NormalForce {
     pub cn_alpha: f64,
     /// Centre of pressure station from the tip (m).
     pub cp: f64,
+    /// `sum CN_alpha_i` over the Extended components (per rad): the slope the damping sums below belong to, which differs from
+    /// [`cn_alpha`](Self::cn_alpha) when a 3D lift table sets the normal force.
+    s0: f64,
     /// `sum CN_alpha_i x_i` over the components (m).
     s1: f64,
     /// `sum CN_alpha_i x_i^2` over the components (m^2).
@@ -66,7 +70,7 @@ impl NormalForce {
     /// is `-1/2 rho V A_ref (sum CN_alpha_i (x_i - cg)^2) w` (strip theory: Barrowman 1967; Mandell, Caporaso & Bengen,
     /// *Topics in Advanced Model Rocketry*, 1973, the fin pitch damping term).
     pub fn damping_sum(&self, cg: f64) -> f64 {
-        (self.s2 - 2.0 * cg * self.s1 + cg * cg * self.cn_alpha).max(0.0)
+        (self.s2 - 2.0 * cg * self.s1 + cg * cg * self.s0).max(0.0)
     }
 }
 
@@ -236,6 +240,17 @@ enum ProtCalc {
 /// Surface roughness assumed for launch-lug bores (regular paint, 60 um; Niskanen 2009 table 3.2).
 const LUG_ROUGHNESS: f64 = 60e-6;
 
+/// The angle of attack (rad) up to which a lift table sets the normal force by its own angle rules; its largest angle is 6 degrees
+/// and the 3D solve is meant for angles up to 15 degrees (the range `Analysis::run_lift` accepts).
+const LIFT_HOLD: f64 = 15.0 * std::f64::consts::PI / 180.0;
+
+/// A 3D stability solve attached to an [`Aero`], with Extended's stability at its first node (what the table is scaled by below it).
+#[derive(Clone, Debug)]
+struct Lift {
+    table: LiftTable,
+    first: ExtStab,
+}
+
 /// Aerodynamic model of one vehicle configuration.
 #[derive(Clone, Debug)]
 pub struct Aero {
@@ -254,4 +269,6 @@ pub struct Aero {
     labels: Labels,
     /// CFD drag table flown instead of the build-up, which then supplies the corrections.
     table: Option<Arc<DragTable>>,
+    /// 3D stability solve that sets the normal force and CP instead of the build-up, which then supplies the rest.
+    lift: Option<Arc<Lift>>,
 }

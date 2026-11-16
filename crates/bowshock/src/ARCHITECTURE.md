@@ -15,7 +15,7 @@ app/worker.rs            offload, perform, StreamHandle, spawn_stream, spawn_ite
 app/dialogs.rs           every rfd file dialog; BOWSHOCK_EXPORT_FILE override in `save_file`
 app/selection_set.rs     PickMode, MultiSet<Id>: primary + extras + range anchor, shared by app/multi.rs and simulate/mod.rs
 app/document.rs          Document: the rocket + path + dirty + undo/redo (every mutation goes through it)
-app/physics.rs           cached balance (mass, CG, CP, margin), warnings, stages, motor db, per-stage CFD plans / drag tables (bowshock-sim / -motors)
+app/physics.rs           cached balance (mass, CG, CP, margin), warnings, stages, motor db, per-stage CFD plans / drag tables / 3D stability solves (bowshock-sim / -motors)
 app/drag.rs              shared drags (bin -> viewport, grab, move) + delete, built on Document's drag support
 app/files.rs             New / Open / Save / Save As / the built-in example, unsaved-changes guard
 app/ui.rs                shared UI helpers: `label`, `mm`; re-exports the unit readouts from `units`
@@ -86,7 +86,7 @@ pub struct Ctx {
     pub doc: Document,          // the open document: rocket(), edit*(), undo/redo, path, dirty, revision
     pub selection: Selection,   // None | Part(PartId) | Separation(stage)  (any part class: axial, radial group, internal)
     pub drag: Drags,            // axial / radial drag in progress + symmetry + angle_snap
-    pub physics: Physics,       // balance(), issues(), stages(), motors(), margin_with_motor(), phase(), cfd_plan(stage), drag_table(rocket, stage)
+    pub physics: Physics,       // balance(), issues(), stages(), motors(), margin_with_motor(), phase(), cfd_plan(stage), drag_table(rocket, stage), lift_table(rocket, stage), stored_table(rocket, stage)
     pub units: UnitSystem,      // the display unit set: one unit per Family (top bar select + Custom… panel), kept in app/settings.rs (user config, not the rocket); format with crate::units::{with_unit, bare, readout, len, len_unit} (also re-exported by app::ui)
     pub cursor: Option<Point>,  // window coordinates, app-wide
     pub mode: Mode,             // Build | Simulate | Analyze
@@ -194,9 +194,10 @@ select), `stages()`, `is_staged()`, `phase()`, `config_margin(id)`, `margin_with
 `ctx.env.motors_dir`), `motor_origin(index)`, `add_downloaded(motor)`, `gauge()` (animated margin gauge). Phase is a view
 setting (`Phase::Full` or `Phase::UpperFrom(k)`), set from the status strip.
 
-It also caches the CFD plan of every stage: `cfd_plan(stage)` and `drag_table(rocket, stage)` are rebuilt once when
-`(revision, phase, units)` changes (`Physics::sync(rocket, revision, units)`), so Simulate's `view` and Analyze (CFD plan
-status, the Dispersion drag tables) never build a vehicle or a `cfd::Plan` themselves.
+It also caches the CFD plan of every stage: `cfd_plan(stage)`, `drag_table(rocket, stage)` and `lift_table(rocket, stage)` (the
+3D stability solve riding on the drag table, valid when its key matches the geometry and its own Mach nodes; `stored_table` is
+the stored table itself) are rebuilt once when `(revision, phase, units)` changes (`Physics::sync(rocket, revision, units)`), so
+Simulate's `view` and Analyze (CFD plan status, the Dispersion drag tables) never build a vehicle or a `cfd::Plan` themselves.
 
 Motors are identified by `Motor::id` (`tc:<ThrustCurve motorId>` or `eng:<curve hash>`), and a configuration's `MotorRef`
 carries that id, so two curves with one designation stay two motors. Look motors up with `from_model::find_motor` (id first,

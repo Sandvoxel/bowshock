@@ -7,8 +7,11 @@
 //!
 //! Values are SI in the samples; [`Channel::unit`] gives the display unit through `units.rs` (`Quantity`) for the app's unit set.
 
+use std::borrow::Cow;
+
 use bowshock_sim::Sample;
 
+use super::flight::CFD_3D_TAG;
 use crate::units::{Quantity, Unit, UnitSystem};
 use crate::widgets::plot::SeriesColor;
 
@@ -223,6 +226,16 @@ impl Channel {
     /// Whether this source can share a plot whose y-axis measures `plot`: one y-axis per plot, never two.
     pub fn joins(&self, plot: Dim) -> bool {
         self.dim == plot
+    }
+
+    /// The name of this source for a run: the label, and for the stability margin and the CP station ` · CFD (3D)` appended when
+    /// `from_lift` (a 3D stability solve gave the CP they are made from, see [`bowshock_sim::Summary::stability_from_lift`]).
+    pub fn label_in(&self, from_lift: bool) -> Cow<'static, str> {
+        if from_lift && matches!(self.key, "stability_margin" | "cp_station") {
+            Cow::Owned(format!("{} {CFD_3D_TAG}", self.label))
+        } else {
+            Cow::Borrowed(self.label)
+        }
     }
 
     /// Why this source cannot join a plot measuring `plot`, or `None` when it can.

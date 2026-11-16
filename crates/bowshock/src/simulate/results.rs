@@ -6,7 +6,7 @@ use bowshock_sim::roll::MIN_SPIN_RATE;
 use iced::widget::{column, container, mouse_area, row, scrollable, text, Space};
 use iced::{font, mouse, Element, Fill, Theme, Widget};
 
-use super::flight::{Flight, Run, DELAY_TOLERANCE, MAX_GROUND_HIT, MIN_OFF_RAIL_CAL, MIN_RAIL_EXIT};
+use super::flight::{required_margin_cal, Flight, Run, CFD_3D_TAG, DELAY_TOLERANCE, MAX_GROUND_HIT, MIN_OFF_RAIL_CAL, MIN_RAIL_EXIT};
 use super::{format, Message, State};
 use crate::app::Ctx;
 use crate::theme::{self, MONO, SANS_SEMIBOLD};
@@ -218,13 +218,32 @@ fn sections<'a>(run: &'a Run, ctx: &'a Ctx, stale: bool) -> Vec<Element<'a, Mess
     let rail_chip = badge(if rail_ok { Severity::Ok } else { Severity::Warn }, format!("{} {}", if rail_ok { "≥" } else { "<" }, vel(MIN_RAIL_EXIT, 0).0));
     let stable = s.stability_off_rail_cal >= MIN_OFF_RAIL_CAL;
     let stab_chip = badge(if stable { Severity::Ok } else { Severity::Err }, format!("{} {MIN_OFF_RAIL_CAL:.1}", if stable { "≥" } else { "<" }));
+    // The tag replaces "Stability" so the label still fits beside its chip.
+    let off_rail = if s.stability_from_lift { format!("Off rail {CFD_3D_TAG}") } else { "Stability off rail".to_string() };
     let mut ascent_rows = vec![
         line("Max velocity", None, max_v, v_unit, stale, Some(t.max_speed)),
         line("Max Mach", None, format!("{:.2}", s.max_mach), "", stale, Some(t.max_mach)),
         line("Max accel", None, format!("{:.1}", s.max_acceleration_g), "g", stale, Some(t.max_accel)),
         line("Rail exit", Some(rail_chip), rail, rail_unit, stale, Some(t.rail_exit)),
-        line("Stability off rail", Some(stab_chip), format!("{:.2}", s.stability_off_rail_cal), "cal", stale, Some(t.rail_exit)),
+        line(off_rail, Some(stab_chip), format!("{:.2}", s.stability_off_rail_cal), "cal", stale, Some(t.rail_exit)),
     ];
+    // The least margin between rail exit and apogee, against the guidance at the Mach number where it occurs.
+    if let Some(min) = &s.min_margin {
+        let need = required_margin_cal(min.mach);
+        let enough = min.cal >= need;
+        let severity = if enough {
+            Severity::Ok
+        } else if min.cal < 0.0 {
+            Severity::Err
+        } else {
+            Severity::Warn
+        };
+        let chip = badge(severity, format!("{} {need:.1}", if enough { "≥" } else { "<" }));
+        ascent_rows.push(line("Min margin in flight", Some(chip), format!("{:.2}", min.cal), "cal", stale, Some(min.time)));
+        // The tag goes on the row beside it: the first has no room for it next to its chip.
+        let at_mach = if s.stability_from_lift { format!("at Mach {CFD_3D_TAG}") } else { "at Mach".to_string() };
+        ascent_rows.push(line(at_mach, None, format!("{:.2}", min.mach), "", stale, Some(min.time)));
+    }
     // Canted fins: how fast the rocket spins, and whether the spin meets its pitch frequency on the way.
     if let Some(spin) = Spin::of(s) {
         let peak = badge(Severity::Info, format!("{:.0} rpm {}", spin.max_rpm, spin.sense));

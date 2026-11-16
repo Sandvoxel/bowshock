@@ -1,44 +1,6 @@
-use bowshock_sim::{vs_mach, Atmosphere, DragBreakdown, MachPoint};
+use bowshock_sim::{vs_mach, Atmosphere, DragBreakdown, LiftTable, MachPoint};
 
 use super::*;
-
-#[test]
-fn the_mach_sweep_interpolates_the_3d_solve_and_holds_it_above_the_last_node() {
-    let lift = lift_table(1);
-    let two = 2f64.to_radians();
-    let at = lift_at(&lift, 1.4, &no_ext).unwrap(); // halfway between 0.8 and 2.0
-    assert!((at.cn_alpha() - 0.15 / two).abs() < 1e-12);
-    assert!((at.cp() - 1.2).abs() < 1e-12);
-    let top = lift_at(&lift, 2.7, &no_ext).unwrap();
-    assert!((top.cn_alpha() - 0.2 / two).abs() < 1e-12 && (top.cp() - 1.4).abs() < 1e-12);
-}
-
-#[test]
-fn below_the_first_node_the_3d_solve_is_scaled_by_extended() {
-    let lift = lift_table(1);
-    // Extended: CNα 10 at M 0.8 and 8 at M 0.5; CP 0.9 and 0.7 m
-    let ext = |m: f64| Some(if m < 0.6 { ExtStab { cn_alpha: 8.0, cp: 0.7 } } else { ExtStab { cn_alpha: 10.0, cp: 0.9 } });
-    let at = lift_at(&lift, 0.5, &ext).unwrap();
-    assert!((at.a2.0 - 0.1 * 0.8).abs() < 1e-12, "{at:?}");
-    assert!((at.a2.1 - (1.0 - 0.2)).abs() < 1e-12);
-    let (cn6, cp6) = at.a6.unwrap();
-    assert!((cn6 - 0.4 * 0.8).abs() < 1e-12 && (cp6 - (1.1 - 0.2)).abs() < 1e-12);
-}
-
-#[test]
-fn the_angle_rules_of_the_3d_solve() {
-    let at = lift_at(&lift_table(1), 0.8, &no_ext).unwrap(); // CN 0.1 @ 2°, 0.4 @ 6°; CP 1.0, 1.1
-    let deg = f64::to_radians;
-    let (cn, cp) = at.at_alpha(deg(1.0));
-    assert!((cn - 0.05).abs() < 1e-12 && (cp - 1.0).abs() < 1e-12, "linear to the origin, CP of 2°");
-    let (cn, cp) = at.at_alpha(deg(4.0));
-    assert!((cn - 0.25).abs() < 1e-12 && (cp - 1.05).abs() < 1e-12, "between the angles");
-    let (cn, cp) = at.at_alpha(deg(10.0));
-    assert!((cn - (0.4 + 0.075 * 4.0)).abs() < 1e-12 && (cp - 1.1).abs() < 1e-12, "slope of 2°..6° beyond, CP held");
-    let (cn, cp) = at.at_alpha(deg(-4.0));
-    assert!((cn + 0.25).abs() < 1e-12 && (cp - 1.05).abs() < 1e-12, "negative angles mirror");
-    assert_eq!(at.at_alpha(0.0).0, 0.0);
-}
 
 #[test]
 fn the_margin_from_the_3d_cp_is_cp_minus_cg_over_the_reference_diameter() {
@@ -49,7 +11,7 @@ fn the_margin_from_the_3d_cp_is_cp_minus_cg_over_the_reference_diameter() {
     let sweep = vs_mach(&vehicle, cg, (0.8, 2.0), 7, 2f64.to_radians(), &Atmosphere::standard(), 0.0);
     for p in lift_mach_points(&lift, sweep, cg, d, &no_ext) {
         assert!((p.margin_cal - (p.cp - cg) / d).abs() < 1e-12);
-        let at = lift_at(&lift, p.mach, &no_ext).unwrap();
+        let at = LiftTable::from_cfd(&lift).unwrap().at(p.mach, &no_ext).unwrap();
         assert!((p.cn_alpha - at.cn_alpha()).abs() < 1e-12 && (p.cp - at.cp()).abs() < 1e-12);
     }
     let alphas = bowshock_sim::vs_alpha(&vehicle, cg, 0.8, (0.0, 10f64.to_radians()), 6);

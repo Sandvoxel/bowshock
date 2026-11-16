@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use bowshock_model::{AirStart, Conditions, ConfigId, DragSource, FlightDef, FlightMotor, Location, MotorMount, MotorRef, Rocket, WindLevel};
 use bowshock_sim::from_model::{self, Phase};
-use bowshock_sim::{DragTable, EventKind, FlightResult, Launch, SimInput, Turbulence, WindPoint};
+use bowshock_sim::{EventKind, FlightResult, Launch, SimInput, Turbulence, WindPoint};
 
 use crate::app::Ctx;
 use crate::widgets::chip::Severity;
@@ -26,6 +26,28 @@ pub const MIN_RAIL_EXIT: f64 = 15.0;
 pub const MAX_GROUND_HIT: f64 = 6.1;
 /// Static margin (calibers) off the rail that counts as stable.
 pub const MIN_OFF_RAIL_CAL: f64 = 1.0;
+/// Static margin (calibers) the whole ascent should keep at subsonic Mach numbers (RASAero II recommends 1.0 calibers subsonic).
+pub const MIN_MARGIN_SUBSONIC_CAL: f64 = 1.0;
+/// Static margin (calibers) the whole ascent should keep from [`TRANSONIC_MACH`] up (RASAero II recommends 2.0 calibers at
+/// transonic and supersonic Mach numbers).
+pub const MIN_MARGIN_SUPERSONIC_CAL: f64 = 2.0;
+/// The Mach number from which the supersonic margin guidance applies (the start of the transonic range).
+pub const TRANSONIC_MACH: f64 = 0.8;
+/// What a result or channel label reads when the 3D stability solve, not Extended, gave the stability.
+pub const CFD_3D_TAG: &str = "· CFD (3D)";
+
+/// The static margin (calibers) the ascent should keep at `mach`: [`MIN_MARGIN_SUBSONIC_CAL`] below [`TRANSONIC_MACH`],
+/// [`MIN_MARGIN_SUPERSONIC_CAL`] from it up. This is the guidance of the RASAero II manual ("Marginal Stability and Unstable Rocket
+/// Warnings": a recommended stability margin of 1.0 calibers at subsonic Mach numbers and 2.0 calibers at transonic and supersonic
+/// ones, checked below 5° angle of attack), <https://www.rasaero.com/dloads/RASAero%20II%20Users%20Manual.pdf>.
+pub fn required_margin_cal(mach: f64) -> f64 {
+    if mach >= TRANSONIC_MACH {
+        MIN_MARGIN_SUPERSONIC_CAL
+    } else {
+        MIN_MARGIN_SUBSONIC_CAL
+    }
+}
+
 /// How far the ejection delay may be from the optimum before the screen warns (s).
 pub const DELAY_TOLERANCE: f64 = 0.5;
 
@@ -508,7 +530,9 @@ pub fn prepare(ctx: &Ctx, spec: &Spec) -> Result<(SimInput, f64), String> {
     let rocket = ctx.doc.rocket().clone();
     let (mut input, delay) = prepare_rocket(rocket.clone(), ctx.physics.motors(), spec)?;
     if spec.drag == DragSource::CfdTable {
-        input.drag_tables = (0..input.vehicle.stages.len()).map(|k| drag_table(&rocket, ctx, k + 1).ok()).collect();
+        let stacks = 0..input.vehicle.stages.len();
+        input.drag_tables = stacks.clone().map(|k| ctx.physics.drag_table(&rocket, k + 1).ok()).collect();
+        input.lift_tables = stacks.map(|k| ctx.physics.lift_table(&rocket, k + 1).ok()).collect();
     }
     Ok((input, delay))
 }
@@ -541,22 +565,19 @@ pub fn prepare_rocket(mut rocket: Rocket, motors: &bowshock_motors::MotorDb, spe
     Ok((input, delay))
 }
 
-/// The CFD drag table stack from model stage `stage` (1 is the whole rocket) flies on: the stored one when its geometry is the
-/// rocket's now. `Err` says why the stack flies on the build-up instead (lengths in the session's units). The table's altitude does
-/// not matter, the flight corrects for the Reynolds number.
-pub fn drag_table(rocket: &Rocket, ctx: &Ctx, stage: usize) -> Result<DragTable, String> {
-    ctx.physics.drag_table(rocket, stage)
-}
-
 /// What to tell about `spec`'s drag source: why a stack of the rocket flies on the build-up although the CFD table was asked for,
-/// or, when it does fly on the table, that the parts' drag overrides do not apply to it.
+/// when the drag table is fine why it flies on Extended's stability (no or a stale 3D solve), and that the parts' drag overrides do
+/// not apply to the table.
 pub fn drag_note(ctx: &Ctx, spec: &Spec) -> Option<String> {
     if spec.drag != DragSource::CfdTable {
         return None;
     }
     let rocket = ctx.doc.rocket();
-    let fallback = (1..=rocket.stages().len().max(1)).find_map(|stage| drag_table(rocket, ctx, stage).err());
-    fallback.or_else(|| has_cd_override(rocket).then(|| "Cd overrides apply to Extended drag only.".to_string()))
+    let stages = 1..=rocket.stages().len().max(1);
+    let fallback = stages.clone().find_map(|stage| ctx.physics.drag_table(rocket, stage).err());
+    fallback
+        .or_else(|| stages.into_iter().find_map(|stage| ctx.physics.lift_table(rocket, stage).err()))
+        .or_else(|| has_cd_override(rocket).then(|| "Cd overrides apply to Extended drag only.".to_string()))
 }
 
 /// Whether any part of `rocket` (a pod's included) has a drag override.

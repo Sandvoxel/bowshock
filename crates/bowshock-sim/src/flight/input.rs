@@ -1,4 +1,5 @@
 use crate::drag_table::DragTable;
+use crate::lift_table::LiftTable;
 use crate::vehicle::Vehicle;
 
 /// Gust intensity setting (standard deviation as a fraction of the mean wind speed).
@@ -191,11 +192,14 @@ pub struct SimInput {
     pub model: FlightModel,
     /// CFD drag tables, index `k` for the stack with the lowest `k` stages dropped; missing or `None` flies the build-up.
     pub drag_tables: Vec<Option<DragTable>>,
+    /// 3D stability solves, index `k` for the stack with the lowest `k` stages dropped; missing or `None` flies Extended's normal
+    /// force and CP. A lift table is meant to ride on the same stack's drag table, but is attached on its own.
+    pub lift_tables: Vec<Option<LiftTable>>,
 }
 
 impl SimInput {
     /// Input with default step (1 ms), `max_time` (600 s) and the rigid-body model.
     pub fn new(vehicle: Vehicle, launch: Launch, recovery: Vec<RecoveryDevice>) -> Self {
-        Self { vehicle, launch, recovery, dt: 0.001, max_time: 600.0, model: FlightModel::default(), drag_tables: Vec::new() }
+        Self { vehicle, launch, recovery, dt: 0.001, max_time: 600.0, model: FlightModel::default(), drag_tables: Vec::new(), lift_tables: Vec::new() }
     }
 }

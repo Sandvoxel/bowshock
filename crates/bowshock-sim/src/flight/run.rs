@@ -1,6 +1,6 @@
 use super::{
-    build_aeros, normal_gravity, Chute, Ctx, Deploy, Diag, Event, EventKind, FlightModel, FlightResult, Launch, Mode, Raw, Sample, SimInput, Slope, State,
-    Summary, Trajectory, Tweaks, EARTH_RATE,
+    build_aeros, normal_gravity, Chute, Ctx, Deploy, Diag, Event, EventKind, FlightModel, FlightResult, Launch, MinMargin, Mode, Raw, Sample, SimInput, Slope,
+    State, Summary, Trajectory, Tweaks, EARTH_RATE,
 };
 use crate::aero::Aero;
 use crate::atmosphere::Atmosphere;
@@ -126,6 +126,7 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
     let mut apogee: Option<(f64, f64)> = None;
     let mut rail_exit_velocity = 0.0;
     let mut stability_off_rail = 0.0;
+    let mut rail_exit_time: Option<f64> = None;
     let mut rates: Vec<(String, f64)> = Vec::new();
     let mut label: Option<String> = None;
     let mut chutes: Vec<Chute> = Vec::new();
@@ -153,6 +154,7 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
         let speed = dot(rel, rel).sqrt();
         let alpha = if rigid_model && speed > 1e-9 { (dot(axis, rel) / speed).clamp(-1.0, 1.0).acos() } else { 0.0 };
         stability_off_rail = aeros[0].margin_cal(speed / air.speed_of_sound, alpha, ctx.mass_props(0.0, 0).cg);
+        rail_exit_time = Some(0.0);
         push_event(&mut events, &mut event_idx, &raws, Event { t: 0.0, kind: EventKind::RailExit, altitude: h, stage: None });
     }
 
@@ -324,6 +326,7 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
                 // the point mass weathercocks perfectly.
                 let alpha = if rigid_model && speed > 1e-9 { (dot(axis, rel) / speed).clamp(-1.0, 1.0).acos() } else { 0.0 };
                 stability_off_rail = aeros[nsep.min(aeros.len() - 1)].margin_cal(mach, alpha, cg);
+                rail_exit_time = Some(t);
                 last_event_t = t;
                 push_event(&mut events, &mut event_idx, &raws, Event { t, kind: EventKind::RailExit, altitude: pos[2], stage: None });
             }
@@ -471,6 +474,18 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
     }
     let final_burn = n.checked_sub(1).and_then(|k| ctx.sched.burnout[k]).unwrap_or(0.0);
 
+    // The least static margin from the rail to apogee (zero angle of attack, the CG of the moment: what `Sample::stability_margin`
+    // records), found over every step of the run rather than the decimated samples.
+    let level = |r: &Raw| &aeros[r.nsep.min(aeros.len() - 1)];
+    let min_margin = rail_exit_time.and_then(|t0| {
+        raws.iter()
+            .filter(|r| r.t >= t0 - 1e-9 && r.t <= t_end_ascent)
+            .map(|r| ((level(r).cp(r.d.mach, 0.0) - r.d.cg) / level(r).reference_diameter(), r))
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(cal, r)| MinMargin { cal, mach: r.d.mach, time: r.t })
+    });
+    let stability_from_lift = raws.iter().any(|r| level(r).has_lift());
+
     // Spin: the roll rate at its peak, at the last burnout and at apogee (the last state at or before the event: a parachute
     // deployed at apogee stops the roll), and where it meets the pitch frequency.
     let roll = |r: &Raw| r.d.omega[0];
@@ -497,6 +512,8 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
         roll_rate_at_burnout: roll_at(final_burn),
         roll_rate_at_apogee: apogee.map_or(0.0, |a| roll_at(a.0)),
         roll_resonance: resonance,
+        stability_from_lift,
+        min_margin,
     };
 
     // Decimate.
@@ -520,7 +537,7 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
             let speed = dot(r.vel, r.vel).sqrt();
             let horizontal = r.vel[0].hypot(r.vel[1]);
             let aero = &aeros[r.nsep.min(aeros.len() - 1)];
-            let cp = aero.stability(d.mach, 0.0).cp;
+            let cp = aero.cp(d.mach, 0.0);
             let recovery = d.open / ctx.a_ref;
             Sample {
                 t: r.t,
