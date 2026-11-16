@@ -103,6 +103,8 @@ pub enum Message {
     Cfd(u64, cfd::Event),
     /// Cancel the running CFD solve.
     CfdCancel,
+    /// Solve the 3D stability table (Solve stability (3D)).
+    SolveLift,
 }
 
 /// What a computation was for; a result is used only while it is still the one wanted.
@@ -314,8 +316,13 @@ impl State {
                     s.handle.abort();
                     self.cfd.failed = Some((s.key, "solve cancelled".to_string()));
                     ctx.notify("CFD solve cancelled");
+                } else if let Some(s) = self.cfd.lift_solving.take() {
+                    s.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    s.handle.abort();
+                    ctx.notify("3D stability solve cancelled");
                 }
             }
+            Message::SolveLift => return self.start_lift(),
         }
         Task::none()
     }
@@ -431,10 +438,29 @@ impl State {
         task
     }
 
+    /// Solve stability (3D) was pressed: solves the lift table for the Mach range on screen, unless a solve already runs.
+    fn start_lift(&mut self) -> Task<app::Message> {
+        if self.method != Method::CfdTable || !uses_cfd(self.analysis) || self.cfd.solving.is_some() || self.cfd.lift_solving.is_some() {
+            return Task::none();
+        }
+        let shown = matches!(self.cfd.status, cfd::Status::Fresh | cfd::Status::Stale) && self.cfd.table.is_some();
+        let (Ok(plan), Some(nodes), true) = (self.cfd.plan.as_ref(), cfd::lift_nodes(self.cond.mach), shown) else {
+            return Task::none();
+        };
+        self.cfd.serial += 1;
+        let serial = self.cfd.serial;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let key = Some(cfd::lift_key(plan.geometry, &nodes));
+        let total = nodes.len();
+        let (task, handle) = spawn_lift(cfd::LiftJob { plan: plan.clone(), nodes }, cancel.clone(), serial);
+        self.cfd.lift_solving = Some(Solving { serial, done: 0, total, backend: None, key, cancel, handle });
+        task
+    }
+
     /// Re-solve (coarse) or Refine (medium) was pressed: the next refresh solves on `grid`.
     fn request_solve(&mut self, grid: CfdGrid) {
         self.serial += 1;
-        self.cfd.force = (self.method == Method::CfdTable && uses_cfd(self.analysis) && self.cfd.solving.is_none()).then_some(grid);
+        self.cfd.force = (self.method == Method::CfdTable && uses_cfd(self.analysis) && self.cfd.solving.is_none() && self.cfd.lift_solving.is_none()).then_some(grid);
     }
 
     /// Keeps what the CFD table method knows about the document current (the mapped geometry, the stored table, whether it is
@@ -455,7 +481,10 @@ impl State {
         let stored = rocket.cfd_table(stage);
         self.cfd.status = cfd::status(&self.cfd.plan, stored, self.cond.altitude, self.cond.mach);
         match stored {
-            Some(t) if self.cfd.table.as_ref().is_some_and(|a| (a.key, a.solved_at) == (t.key, t.solved_at)) => {}
+            Some(t)
+                if self.cfd.table.as_ref().is_some_and(|a| {
+                    (a.key, a.solved_at, a.lift.as_ref().map(|l| (l.key, l.solved_at))) == (t.key, t.solved_at, t.lift.as_ref().map(|l| (l.key, l.solved_at)))
+                }) => {}
             Some(t) => self.cfd.table = Some(Arc::new(t.clone())),
             None => self.cfd.table = None,
         }
@@ -468,7 +497,7 @@ impl State {
             self.cfd.failed = None;
         }
         let wanted = force.is_some() || (self.cfd.status == cfd::Status::Missing && self.cfd.failed.as_ref().map(|f| f.0) != Some(key));
-        if self.method != Method::CfdTable || self.cfd.solving.is_some() || !wanted {
+        if self.method != Method::CfdTable || self.cfd.solving.is_some() || self.cfd.lift_solving.is_some() || !wanted {
             return Task::none();
         }
         self.cfd.serial += 1;
@@ -495,10 +524,37 @@ impl State {
 
     /// A message from the running solve: progress, then the table (stored with the document) or the reason there is none.
     fn cfd_event(&mut self, serial: u64, event: cfd::Event, ctx: &mut Ctx) {
+        if let Some(lift) = self.cfd.lift_solving.as_mut().filter(|s| s.serial == serial) {
+            match event {
+                cfd::Event::LiftProgress { done, total, backend } => {
+                    lift.done = done;
+                    lift.total = total;
+                    lift.backend = backend.or_else(|| lift.backend.take());
+                }
+                cfd::Event::LiftFinished(result) => {
+                    self.cfd.lift_solving = None;
+                    match result {
+                        Ok(table) => {
+                            let summary = format!("3D stability solved: {} points on {} in {}", table.points.len(), table.backend, duration_text(table.solve_seconds));
+                            let stored = self.cfd.table.as_ref().map(|t| CfdTable { lift: Some(table), ..(**t).clone() });
+                            if stored.is_some_and(|t| ctx.doc.store_cfd_table(t)) {
+                                ctx.notify(summary);
+                            } else {
+                                ctx.notify("3D stability solve stopped: the solver returned no usable table");
+                            }
+                        }
+                        Err(e) => ctx.notify(format!("3D stability solve stopped: {e}")),
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         let Some(solving) = self.cfd.solving.as_mut().filter(|s| s.serial == serial) else {
             return;
         };
         match event {
+            cfd::Event::LiftProgress { .. } | cfd::Event::LiftFinished(_) => {}
             cfd::Event::Progress { done, total, backend } => {
                 solving.done = done;
                 solving.total = total;
@@ -621,6 +677,8 @@ pub(crate) struct Cfd {
     pub(crate) table: Option<Arc<CfdTable>>,
     /// The solve in progress.
     pub(crate) solving: Option<Solving>,
+    /// The 3D stability solve in progress.
+    pub(crate) lift_solving: Option<Solving>,
     /// The key a solve was last wanted for and why it ended without a table (a failure or a cancel): no solve starts by itself
     /// again until the key changes or Re-solve is pressed.
     pub(crate) failed: Option<(Option<u64>, String)>,
@@ -637,6 +695,7 @@ impl Default for Cfd {
             status: cfd::Status::Missing,
             table: None,
             solving: None,
+            lift_solving: None,
             failed: None,
             force: None,
             serial: 0,
@@ -673,6 +732,18 @@ fn spawn_solve(job: cfd::Job, cancel: Arc<AtomicBool>, serial: u64) -> (Task<app
             let _ = tx.unbounded_send(event);
         });
         let _ = tx.unbounded_send(cfd::Event::Finished(result));
+    });
+    Task::run(rx, move |event| app::Message::Analyze(Message::Cfd(serial, event))).abortable()
+}
+
+/// Runs the 3D stability solve of `job` on its own thread, like [`spawn_solve`].
+fn spawn_lift(job: cfd::LiftJob, cancel: Arc<AtomicBool>, serial: u64) -> (Task<app::Message>, iced::task::Handle) {
+    let (tx, rx) = mpsc::unbounded();
+    std::thread::spawn(move || {
+        let result = cfd::solve_lift(&job, &cancel, |event| {
+            let _ = tx.unbounded_send(event);
+        });
+        let _ = tx.unbounded_send(cfd::Event::LiftFinished(result));
     });
     Task::run(rx, move |event| app::Message::Analyze(Message::Cfd(serial, event))).abortable()
 }

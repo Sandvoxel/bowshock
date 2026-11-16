@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bowshock_core as solver;
-use bowshock_model::{CfdGrid, CfdLiftTable, CfdPoint, CfdQuality, CfdTable, PartKind, RadialKind, Rocket};
+use bowshock_model::{CfdGrid, CfdLiftPoint, CfdLiftTable, CfdPoint, CfdQuality, CfdTable, PartKind, RadialKind, Rocket};
 use bowshock_sim::{vs_mach, AlphaPoint, Atmosphere, BodyKind, DragBreakdown, FinCrossSection, FinPlanform, FinSet, MachPoint, NoseShape, Vehicle};
 
 use crate::simulate::format::with_unit;
@@ -494,6 +494,93 @@ pub enum Event {
     },
     /// The solve is over: the table, or why there is none (`Cancelled` for a cancel).
     Finished(Result<CfdTable, String>),
+    /// `done` of `total` Mach numbers of a 3D stability solve are solved.
+    LiftProgress {
+        /// Mach numbers finished.
+        done: usize,
+        /// Mach numbers in all.
+        total: usize,
+        /// `GPU (Luma)` or `CPU`.
+        backend: Option<String>,
+    },
+    /// The 3D stability solve is over: the lift table, or why there is none.
+    LiftFinished(Result<CfdLiftTable, String>),
+}
+
+/// What a 3D stability solve was asked for.
+#[derive(Debug, Clone)]
+pub struct LiftJob {
+    /// The mapped geometry.
+    pub plan: Plan,
+    /// The Mach numbers to solve, ascending ([`lift_nodes`]).
+    pub nodes: Vec<f64>,
+}
+
+/// Keeps the usable points of a 3D solve: points of quality Failed or with a non-finite value are dropped with a note on
+/// `notes`. An error when fewer than two Mach numbers keep a point although two or more were asked for.
+pub fn reduce_lift(raw: &[solver::LiftPoint], requested: usize, notes: &mut Vec<String>) -> Result<Vec<CfdLiftPoint>, String> {
+    let mut points = Vec::with_capacity(raw.len());
+    for p in raw {
+        let alpha_deg = p.alpha.to_degrees();
+        match quality(p.quality).filter(|_| p.cn.is_finite() && p.x_cp.is_finite()) {
+            Some(q) => points.push(CfdLiftPoint { mach: p.mach, alpha_deg, cn: p.cn, x_cp: p.x_cp, quality: q }),
+            None => notes.push(format!("3D point Mach {:.2}, {alpha_deg:.0}° did not converge and is left out.", p.mach)),
+        }
+    }
+    let mut machs: Vec<f64> = points.iter().map(|p| p.mach).collect();
+    machs.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+    if machs.len() < 2 && requested >= 2 {
+        return Err("the 3D solver did not converge at enough Mach numbers".to_string());
+    }
+    if points.is_empty() {
+        return Err("the 3D solver returned no usable point".to_string());
+    }
+    Ok(points)
+}
+
+/// Solves the 3D stability table of `job`: blocking, one Mach number (at both angles) after another, `progress` after each.
+/// `cancel` is looked at between Mach numbers. The Euler solve ignores altitude, viscosity and roughness.
+pub fn solve_lift(job: &LiftJob, cancel: &AtomicBool, mut progress: impl FnMut(Event)) -> Result<CfdLiftTable, String> {
+    let started = Instant::now();
+    let total = job.nodes.len();
+    let mut raw: Vec<solver::LiftPoint> = Vec::new();
+    let (mut gpu, mut cpu) = (0usize, 0usize);
+    let mut backend = solver::Backend::Auto;
+    for (k, &mach) in job.nodes.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(CANCELLED.to_string());
+        }
+        let mut analysis = solver::Analysis::new(&job.plan.body).map_err(|e| e.to_string())?.resolution(solver::Resolution::Coarse).backend(backend);
+        if let Some(fins) = &job.plan.fins {
+            analysis = analysis.fins(fins.clone());
+        }
+        let polar = analysis.run_lift(&[mach], &LIFT_ALPHAS).map_err(|e| format!("Mach {mach:.2}: {e}"))?;
+        match polar.backend {
+            solver::BackendUsed::Gpu => gpu += 1,
+            solver::BackendUsed::Cpu => {
+                cpu += 1;
+                backend = solver::Backend::Cpu;
+            }
+        }
+        raw.extend(polar.points);
+        let used = if cpu == 0 { "GPU (Luma)" } else { "CPU" };
+        progress(Event::LiftProgress { done: k + 1, total, backend: Some(used.to_string()) });
+    }
+    let mut notes = Vec::new();
+    let points = reduce_lift(&raw, total, &mut notes)?;
+    let backend_name = match (gpu, cpu) {
+        (_, 0) => "GPU (Luma)",
+        (0, _) => "CPU",
+        _ => "GPU (Luma) and CPU",
+    };
+    Ok(CfdLiftTable {
+        key: lift_key(job.plan.geometry, &job.nodes),
+        solved_at: now(),
+        solve_seconds: started.elapsed().as_secs_f64(),
+        backend: backend_name.to_string(),
+        points,
+        notes,
+    })
 }
 
 /// The text of a cancelled solve's error.
@@ -869,11 +956,33 @@ mod tests {
             solve_seconds: 60.0,
             backend: "GPU (Luma)".into(),
             points: vec![p(0.8, 2.0, 0.1, 1.0), p(0.8, 6.0, 0.4, 1.1), p(2.0, 2.0, 0.2, 1.4), p(2.0, 6.0, 0.8, 1.5)],
+            notes: Vec::new(),
         }
     }
 
     fn no_ext(_: f64) -> Option<ExtStab> {
         None
+    }
+
+    fn raw(mach: f64, alpha_deg: f64, q: solver::Quality) -> solver::LiftPoint {
+        solver::LiftPoint { mach, alpha: alpha_deg.to_radians(), cn: 0.3, ca_pressure: 0.1, x_cp: 1.0, quality: q, iterations: 10 }
+    }
+
+    #[test]
+    fn failed_3d_points_are_dropped_and_fewer_than_two_nodes_is_an_error() {
+        use solver::Quality::{Converged, Failed, Stalled};
+        let mut notes = Vec::new();
+        let ok = [raw(0.5, 2.0, Converged), raw(0.5, 6.0, Stalled), raw(0.8, 2.0, Converged), raw(0.8, 6.0, Failed)];
+        let pts = reduce_lift(&ok, 2, &mut notes).unwrap();
+        assert_eq!(pts.len(), 3);
+        assert_eq!(notes.len(), 1);
+        assert!((pts[1].alpha_deg - 6.0).abs() < 1e-9 && pts[1].quality == CfdQuality::Stalled);
+
+        let one = [raw(0.5, 2.0, Converged), raw(0.5, 6.0, Converged), raw(0.8, 2.0, Failed), raw(0.8, 6.0, Failed)];
+        assert!(reduce_lift(&one, 2, &mut Vec::new()).is_err());
+        // A single requested node may stand alone; nothing usable is still an error.
+        assert_eq!(reduce_lift(&one[..2], 1, &mut Vec::new()).unwrap().len(), 2);
+        assert!(reduce_lift(&[raw(0.5, 2.0, Failed)], 1, &mut Vec::new()).is_err());
     }
 
     #[test]

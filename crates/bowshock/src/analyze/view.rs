@@ -141,10 +141,7 @@ fn method(state: &State) -> Element<'_, Message> {
             lines.push(muted(format!("{} · computed on CPU in {took} · {busy}", out.points_text()), 12.0));
         }
     }
-    if let Some(note) = &state.skipped_note {
-        lines.push(muted(note.clone(), 12.0));
-    }
-    let solving = cfd_line && state.cfd.solving.is_some();
+    let solving = cfd_line && (state.cfd.solving.is_some() || state.cfd.lift_solving.is_some());
     let stale = cfd_line && state.cfd.status == cfd::Status::Stale;
     let resolve: Element<'_, Message> = if solving {
         push("Cancel", Weight::Secondary).on_press(Message::CfdCancel).into()
@@ -158,6 +155,19 @@ fn method(state: &State) -> Element<'_, Message> {
         let refine: Element<'_, Message> = push("Refine", Weight::Secondary).on_press(Message::Refine).into();
         buttons.push(
             tooltip(refine, bubble("Re-solve on the medium grid: about 3.5x slower, Cd about 1 % different"))
+                .position(tooltip::Position::Bottom)
+                .gap(SPACE_1)
+                .boxed(),
+        );
+    }
+    if cfd_line && shown && state.cfd.table.is_some() && cfd::lift_nodes(state.cond.mach).is_some() {
+        let lift: Element<'_, Message> = if solving {
+            push("Solve stability (3D)", Weight::Secondary).disabled("A solve is running").into()
+        } else {
+            push("Solve stability (3D)", Weight::Secondary).on_press(Message::SolveLift).into()
+        };
+        buttons.push(
+            tooltip(lift, bubble("Normal force and CP from a 3D Euler solve at up to 8 Mach numbers, α 2° and 6°: minutes on a fast GPU"))
                 .position(tooltip::Position::Bottom)
                 .gap(SPACE_1)
                 .boxed(),
@@ -208,7 +218,9 @@ fn cfd_lines(state: &State) -> Vec<String> {
     let cfd = &state.cfd;
     let base = state.base_method.name();
     let mut lines = Vec::new();
-    if let Some(s) = &cfd.solving {
+    if let Some(s) = &cfd.lift_solving {
+        lines.push(format!("Solving 3D {} / {} · {}", s.done, s.total, s.backend.as_deref().unwrap_or("starting the solver")));
+    } else if let Some(s) = &cfd.solving {
         lines.push(format!("Solving {} / {} · {}", s.done, s.total, s.backend.as_deref().unwrap_or("starting the solver")));
     } else {
         match &cfd.status {
@@ -252,6 +264,9 @@ fn cfd_lines(state: &State) -> Vec<String> {
         }
         lines.extend(info.fallback.iter().map(|why| format!("The GPU was not used: {why}.")));
         lines.extend(info.notes.iter().cloned());
+        if lift == cfd::Status::Fresh {
+            lines.extend(cfd.table.as_ref().and_then(|t| t.lift.as_ref()).into_iter().flat_map(|l| l.notes.iter().cloned()));
+        }
     } else if matches!(cfd.status, cfd::Status::Fresh | cfd::Status::Stale) && cfd.solving.is_none() {
         lines.push(format!("The stored table does not cover this Mach range. Showing {base} instead; Re-solve for this range."));
     }
