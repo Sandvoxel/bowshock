@@ -309,9 +309,12 @@ fn per_run_margin(run: &Run, x: f64) -> Option<f64> {
     }
 }
 
-/// The stability section's title: under the CFD table it says the numbers are Extended's (the solver is zero-lift only).
+/// The stability section's title: under the CFD table it says where the numbers come from (Extended, the drag solver being
+/// zero-lift, or the 3D stability solve when a fresh one feeds them).
 fn stability_title(out: &Output) -> String {
-    if out.cfd.is_some() {
+    if out.lift_3d() {
+        "Stability · CFD (3D)".into()
+    } else if out.cfd.is_some() {
         "Stability · Extended".into()
     } else {
         "Stability".into()

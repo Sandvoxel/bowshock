@@ -50,6 +50,8 @@ fn unit(q: Quantity, units: UnitSystem) -> &'static Unit {
 
 /// The subtitle note of a panel the CFD table method takes from the Extended method (the solver has no angle of attack).
 const CFD_ELSEWHERE: &str = "Extended (CFD is zero-lift)";
+/// The subtitle note of a stability panel fed by a fresh 3D stability solve.
+const CFD_3D: &str = "CFD (3D)";
 
 /// Builds the plots of `out` for `units`, with the comparison `overlay` drawn dashed where it has the quantity. `active` is
 /// the document's active configuration: the Cd panels stack its drag by source whatever else is drawn.
@@ -68,18 +70,20 @@ pub fn build(out: &Output, units: UnitSystem, overlay: Option<&Overlay>, active:
     group.y_ticks = YTicks::Even(5);
     // One right gutter in every analysis, so switching analyses does not change the plot width.
     group.right_margin = MARGIN_PX;
-    // The CFD table is zero-lift drag only: the drag panels are the solver's, every other panel is the Extended method's, and
-    // they say so.
+    // The CFD table is zero-lift drag only: the drag panels are the solver's, and every other panel is the Extended method's,
+    // except the margin, CP and normal-force panels when a fresh 3D stability solve feeds them. Each panel says which.
     if out.cfd.is_some() {
         for panel in &mut group.panels {
             if panel.title.starts_with("Drag") || panel.title.starts_with("Share of drag") {
                 panel.unit = format!("{} · CFD", panel.unit);
                 continue;
             }
+            let from_3d = out.lift_3d() && matches!(panel.title.as_str(), "Static margin" | "CP and CG" | "Normal force CN");
+            let source = if from_3d { CFD_3D } else { CFD_ELSEWHERE };
             if panel.value_unit.is_none() && !panel.unit.is_empty() && !panel.unit.contains(' ') {
                 panel.value_unit = Some(panel.unit.clone());
             }
-            panel.unit = if panel.unit.is_empty() { CFD_ELSEWHERE.to_string() } else { format!("{} · {CFD_ELSEWHERE}", panel.unit) };
+            panel.unit = if panel.unit.is_empty() { source.to_string() } else { format!("{} · {source}", panel.unit) };
         }
     }
     // Mach beyond what the nominal flight reaches is shaded (the worst case there is out of the envelope).
