@@ -97,7 +97,7 @@ pub(crate) fn fin_drag(f: &FinSpec, mach: f64, air: &AirState, d_ref: f64, body_
 }
 
 /// Normalised section `zeta = z / z_max` at the given points.
-fn normalised(section: &[[f64; 2]]) -> impl Iterator<Item = [f64; 2]> + '_ {
+pub(crate) fn normalised(section: &[[f64; 2]]) -> impl Iterator<Item = [f64; 2]> + '_ {
     let zmax = section.iter().fold(0.0f64, |m, p| m.max(p[1]));
     section.iter().map(move |p| [p[0], p[1] / zmax])
 }
