@@ -247,6 +247,7 @@ pub struct Analysis {
     drag_tolerance: Option<f64>,
     warm_start: bool,
     estimate_uncertainty: bool,
+    grid_mach: Option<f64>,
     lift_hook: Option<fn(&mut Case3)>,
     progress: Option<ProgressSink>,
 }
@@ -281,6 +282,7 @@ impl Analysis {
             drag_tolerance: None,
             warm_start: false,
             estimate_uncertainty: false,
+            grid_mach: None,
             lift_hook: None,
             progress: None,
         }
@@ -306,6 +308,16 @@ impl Analysis {
     /// Grid resolution (default [`Resolution::Medium`]).
     pub fn resolution(mut self, r: Resolution) -> Self {
         self.resolution = r;
+        self
+    }
+
+    /// Mach number a viscous analysis sizes its grid for: the first cell height at the wall (and with it every cell count) follows
+    /// it instead of the highest Mach number of the sweep. Runs of different sweeps with the same `grid_mach` share one grid shape,
+    /// so a table solved point by point (one [`Analysis::run`] per Mach number) builds, and compiles the GPU kernels of, one grid
+    /// instead of one per point. Mach numbers above it get a first cell taller than `y+ = 1`. Default: the highest Mach number of
+    /// each [`Analysis::run`]. No effect on the Euler equations. Must lie in `[0.1, 3.0]`.
+    pub fn grid_mach(mut self, mach: f64) -> Self {
+        self.grid_mach = Some(mach);
         self
     }
 
@@ -425,7 +437,8 @@ impl Analysis {
             let mu = Viscous { re_c, sutherland, turbulence: Turbulence::Sst, wall_i_start: 0, roughness: 0.0 }.mu(t);
             Jet { r_exit: 0.5 * m.exit_diameter / self.d_nose, state: [rho, u, 0.0, p / GAMMA], turb: [k, rho * k / (10.0 * mu)] }
         });
-        Ok(Some(Rans { re_c, sutherland, mach_max: machs.iter().copied().fold(f64::NEG_INFINITY, f64::max), jet }))
+        let mach_max = self.grid_mach.unwrap_or_else(|| machs.iter().copied().fold(f64::NEG_INFINITY, f64::max));
+        Ok(Some(Rans { re_c, sutherland, mach_max, jet }))
     }
 
     /// The solver cases of a sweep in ascending Mach order, after the input checks of [`Analysis::run`]; with the Mach numbers' original
@@ -437,6 +450,11 @@ impl Analysis {
         for &m in machs {
             if !(m.is_finite() && (MACH_RANGE.0..=MACH_RANGE.1).contains(&m)) {
                 return Err(Error::InvalidInput(format!("Mach number {m} is outside [{}, {}]", MACH_RANGE.0, MACH_RANGE.1)));
+            }
+        }
+        if let Some(m) = self.grid_mach {
+            if !(m.is_finite() && (MACH_RANGE.0..=MACH_RANGE.1).contains(&m)) {
+                return Err(Error::InvalidInput(format!("grid Mach number {m} is outside [{}, {}]", MACH_RANGE.0, MACH_RANGE.1)));
             }
         }
         if !(self.d_ref.is_finite() && self.d_ref > 0.0) {

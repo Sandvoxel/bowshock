@@ -44,6 +44,11 @@ const SOLVER_REV: u64 = 4;
 /// iterations. Measured on the example rocket (coarse grid, RTX 3090, 10 points): about 29 000 iterations in all against about
 /// 82 000 for the default rule, the worst point within 0.39 % of its 12 000-iteration value (the aim is 1 %).
 const DRAG_TOLERANCE: f64 = 0.002;
+/// Whether a table's points share one grid, sized for the table's highest Mach number (`Analysis::grid_mach`), instead of one grid
+/// per point sized for its own. Off: A/B on the example table (`perf_2d_table_grid_ab`, coarse grid, RTX 3090) saves 6 % of the wall
+/// time warm and the kernel compile of every point but the first when the cache is cold, but moves Cd by +2.5 % at M 0.1 and +0.7 % at
+/// M 1.0 (base drag; the tolerance is 0.5 %). Turning it on needs a `SOLVER_REV` bump.
+const SHARED_GRID: bool = false;
 /// The Mach range the solver accepts.
 pub const SOLVER_MACH: (f64, f64) = (0.1, 3.0);
 /// The highest altitude the solver's standard atmosphere has (m).
@@ -757,7 +762,13 @@ pub fn partial_of(plan: &Result<Plan, String>, table: &CfdTable, altitude: f64, 
 /// [`CANCELLED`]; the points finished by then were all sent. The result carries what the solver reports of its backend, the
 /// build-up drag the solver left out, and notes on points that did not converge.
 pub fn solve(job: &Job, cancel: &Arc<AtomicBool>, progress: impl Fn(Event) + Send + Sync + 'static) -> Result<CfdTable, String> {
+    solve_sized(job, cancel, progress, SHARED_GRID)
+}
+
+/// [`solve`], with the grid of every point sized for the table's highest Mach number (`shared_grid`) or, as before, for the point's own.
+fn solve_sized(job: &Job, cancel: &Arc<AtomicBool>, progress: impl Fn(Event) + Send + Sync + 'static, shared_grid: bool) -> Result<CfdTable, String> {
     let started = Instant::now();
+    let grid_mach = job.nodes.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let send: Outbox = Arc::new(progress);
     let altitude = job.altitude.clamp(0.0, SOLVER_CEILING);
     let total = job.nodes.len();
@@ -783,6 +794,9 @@ pub fn solve(job: &Job, cancel: &Arc<AtomicBool>, progress: impl Fn(Event) + Sen
             .roughness(job.plan.body_roughness)
             .backend(backend)
             .on_progress(sink(started, cancel.clone(), send.clone(), false));
+        if shared_grid {
+            analysis = analysis.grid_mach(grid_mach);
+        }
         if let Some(fins) = &job.plan.fins {
             analysis = analysis.fins(fins.clone());
         }
@@ -1964,6 +1978,114 @@ mod tests {
         }
         timing_report("3d-lift-example", &solver::engine::gpu::take_timings(), wall);
     }
+    /// A/B of the grid shape of the app's table solve: `BOWSHOCK_GRID=own` (a grid sized for each point's Mach number, the old way)
+    /// or `shared` (one grid sized for the highest node): the example's drag table with a `RESULT` line per point (Cd parts and
+    /// iterations) and the timing breakdown.
+    #[test]
+    #[ignore = "A/B: solves the example's drag table twice-shaped on the GPU"]
+    fn perf_2d_table_grid_ab() {
+        let shared = match std::env::var("BOWSHOCK_GRID").as_deref() {
+            Ok("own") => false,
+            Ok("shared") => true,
+            other => panic!("BOWSHOCK_GRID must be own or shared, got {other:?}"),
+        };
+        let (rocket, vehicle) = example();
+        let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+        let job = Job { plan, altitude: 120.0, nodes: nodes((0.1, 3.0)).unwrap(), stage: 1, grid: CfdGrid::Coarse };
+        let iters = Arc::new(Mutex::new(Vec::new()));
+        let sink = iters.clone();
+        let _ = solver::engine::gpu::take_timings();
+        let t0 = Instant::now();
+        let table = solve_sized(
+            &job,
+            &Arc::new(AtomicBool::new(false)),
+            move |e| {
+                if let Event::Point(p) = e {
+                    sink.lock().unwrap().push(p.iterations);
+                }
+            },
+            shared,
+        )
+        .expect("the example solves");
+        let wall = t0.elapsed().as_secs_f64();
+        let iters = iters.lock().unwrap();
+        for (p, n) in table.points.iter().zip(iters.iter()) {
+            println!(
+                "RESULT {{\"grid\":\"{}\",\"mach\":{},\"cd\":{:.6},\"friction\":{:.6},\"pressure\":{:.6},\"base\":{:.6},\"fins\":{:.6},\"other\":{:.6},\"quality\":\"{:?}\",\"iterations\":{n}}}",
+                if shared { "shared" } else { "own" },
+                p.mach, p.cd, p.friction, p.pressure, p.base, p.fins, p.other, p.quality
+            );
+        }
+        timing_report(if shared { "2d-table-grid-shared" } else { "2d-table-grid-own" }, &solver::engine::gpu::take_timings(), wall);
+    }
+
+    /// Diagnostic: how the Cd of the app's points at M 0.1 and 1.0 depends on the grid shape (own / shared) and on the stop rule:
+    /// the app's rule, a shorter mean-stationary window, and fixed-length runs without any stop rule (Cd at several iteration counts
+    /// shows the size of the limit cycle). One `STUDY` line per run.
+    #[test]
+    #[ignore = "diagnostic: M 0.1 / 1.0 stop-rule and grid-shape study on the GPU"]
+    fn perf_2d_stop_rule_study() {
+        let (rocket, vehicle) = example();
+        let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+        let build = |shared: bool| {
+            let mut a = solver::Analysis::new(&plan.body)
+                .unwrap()
+                .viscous(solver::FlightConditions { atmosphere: solver::Atmosphere::Isa { altitude_m: 120.0 } })
+                .drag_tolerance(DRAG_TOLERANCE)
+                .resolution(solver::Resolution::Coarse)
+                .roughness(plan.body_roughness)
+                .backend(solver::Backend::Gpu);
+            if shared {
+                a = a.grid_mach(3.0);
+            }
+            if let Some(fins) = &plan.fins {
+                a = a.fins(fins.clone());
+            }
+            a
+        };
+        // (label, mean_window, fixed iterations)
+        let variants: [(&str, Option<usize>, Option<usize>); 7] = [
+            ("app", None, None),
+            ("window3000", Some(3000), None),
+            ("window2000", Some(2000), None),
+            ("fixed16000", None, Some(16000)),
+            ("fixed20000", None, Some(20000)),
+            ("fixed24000", None, Some(24000)),
+            ("fixed28000", None, Some(28000)),
+        ];
+        for mach in [0.1, 1.0] {
+            for shared in [false, true] {
+                for (label, window, fixed) in variants {
+                    if mach > 0.5 && !(label == "app" || label == "fixed16000" || label == "fixed24000") {
+                        continue;
+                    }
+                    let base = build(shared);
+                    let mut n = base.engine_cases(&[mach]).unwrap()[0].numerics;
+                    if let Some(w) = window {
+                        n.mean_window = Some(w);
+                    }
+                    if let Some(f) = fixed {
+                        (n.max_iter, n.min_iter) = (f, f);
+                    }
+                    let t0 = Instant::now();
+                    let polar = base.numerics(n).run(&[mach]).expect("the point solves");
+                    let p = &polar.points[0];
+                    println!(
+                        "STUDY {{\"mach\":{mach},\"grid\":\"{}\",\"variant\":\"{label}\",\"iterations\":{},\"stop\":\"{:?}\",\"cd_solver\":{:.6},\"friction\":{:.6},\"pressure\":{:.6},\"base\":{:.6},\"wall_s\":{:.2}}}",
+                        if shared { "shared" } else { "own" },
+                        p.detail.iterations,
+                        p.detail.stop_reason,
+                        p.drag.forebody_pressure + p.drag.friction.unwrap_or(0.0) + p.drag.base,
+                        p.drag.friction.unwrap_or(0.0),
+                        p.drag.forebody_pressure,
+                        p.drag.base,
+                        t0.elapsed().as_secs_f64()
+                    );
+                }
+            }
+        }
+    }
+
     /// Diagnostic (no `PERF` line): the same 10 Mach numbers as one `Analysis::run` sweep (warm starts from point to point, one grid
     /// for all points sized for the highest Mach), to show what the app's one-`Analysis`-per-Mach solve gives up.
     #[test]
