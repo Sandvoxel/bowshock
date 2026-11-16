@@ -9,7 +9,9 @@
 pub mod bc;
 pub mod flux;
 pub mod gas;
+pub mod gas3;
 pub mod grid;
+pub mod grid3;
 pub mod implicit;
 pub mod multigrid;
 pub mod solver;

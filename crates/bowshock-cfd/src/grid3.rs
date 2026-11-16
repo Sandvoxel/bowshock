@@ -1,0 +1,349 @@
+//! 3D structured finite-volume grid: node coordinates, face area vectors, cell volumes.
+//!
+//! Cell `(i, j, k)` is the hexahedron between node lines `i..=i+1`, `j..=j+1`, `k..=k+1`. The index layouts are fixed by the
+//! field docs; faces are oriented towards increasing index regardless of the handedness of the node mapping.
+
+use std::ops::Range;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Face3 {
+    /// Unit normal towards the +index direction (`[0; 3]` for a degenerate face).
+    pub n: [f64; 3],
+    pub area: f64,
+    /// Face centroid (mean of its 4 nodes).
+    pub c: [f64; 3],
+}
+
+/// Block of cells that are solid (fins): never updated, treated as walls by their fluid neighbours.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SolidBox {
+    pub i: Range<usize>,
+    pub j: Range<usize>,
+    pub k: Range<usize>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Grid3 {
+    pub ni: usize,
+    pub nj: usize,
+    pub nk: usize,
+    /// Nodes, index `(k*(nj+1)+j)*(ni+1)+i`.
+    pub x: Vec<f64>,
+    pub y: Vec<f64>,
+    pub z: Vec<f64>,
+    /// `(ni+1)*nj*nk`, index `(k*nj+j)*(ni+1)+i`, normal towards +i.
+    pub iface: Vec<Face3>,
+    /// `ni*(nj+1)*nk`, index `(k*(nj+1)+j)*ni+i`, normal towards +j.
+    pub jface: Vec<Face3>,
+    /// `ni*nj*(nk+1)`, index `(k*nj+j)*ni+i`, normal towards +k.
+    pub kface: Vec<Face3>,
+    /// `ni*nj*nk`, index `(k*nj+j)*ni+i`.
+    pub vol: Vec<f64>,
+    pub xc: Vec<[f64; 3]>,
+    pub solid: Vec<SolidBox>,
+    /// `j = 0` cells with `i < axis_cells` lie on the axis (degenerate faces); the rest of `j = 0` is the body/sting wall.
+    pub axis_cells: usize,
+}
+
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+
+fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+impl Grid3 {
+    /// Build the grid from node coordinates (`(ni+1)*(nj+1)*(nk+1)`, `i` fastest); `Err` on a negative cell volume.
+    /// Zero-volume cells are allowed (fin solid cells). `solid` is empty and `axis_cells` 0; the mesher sets them.
+    pub fn try_from_nodes(
+        ni: usize,
+        nj: usize,
+        nk: usize,
+        x: Vec<f64>,
+        y: Vec<f64>,
+        z: Vec<f64>,
+    ) -> Result<Grid3, String> {
+        let nn = (ni + 1) * (nj + 1) * (nk + 1);
+        assert_eq!(x.len(), nn);
+        assert_eq!(y.len(), nn);
+        assert_eq!(z.len(), nn);
+        let node = |i: usize, j: usize, k: usize| (k * (nj + 1) + j) * (ni + 1) + i;
+        let pt = |i: usize, j: usize, k: usize| {
+            let n = node(i, j, k);
+            [x[n], y[n], z[n]]
+        };
+        // Face from its 4 corner nodes in a fixed cyclic order (right-handed in (i, j, k) for the +axis normal); one global
+        // handedness sign is applied afterwards, so a folded cell shows up as a negative volume.
+        let face = |c: [(usize, usize, usize); 4]| {
+            let p = c.map(|(i, j, k)| pt(i, j, k));
+            let mut s = cross(sub(p[2], p[0]), sub(p[3], p[1]));
+            s = [0.5 * s[0], 0.5 * s[1], 0.5 * s[2]];
+            let area = dot(s, s).sqrt();
+            let n = if area < 1e-300 { [0.0; 3] } else { [s[0] / area, s[1] / area, s[2] / area] };
+            let cen = [0, 1, 2].map(|m| 0.25 * (p[0][m] + p[1][m] + p[2][m] + p[3][m]));
+            (Face3 { n, area: if area < 1e-300 { 0.0 } else { area }, c: cen }, s)
+        };
+
+        let mut iface = vec![Face3::default(); (ni + 1) * nj * nk];
+        let mut si = vec![[0.0; 3]; iface.len()];
+        for k in 0..nk {
+            for j in 0..nj {
+                for i in 0..=ni {
+                    let (f, s) = face([(i, j, k), (i, j + 1, k), (i, j + 1, k + 1), (i, j, k + 1)]);
+                    let q = (k * nj + j) * (ni + 1) + i;
+                    iface[q] = f;
+                    si[q] = s;
+                }
+            }
+        }
+        let mut jface = vec![Face3::default(); ni * (nj + 1) * nk];
+        let mut sj = vec![[0.0; 3]; jface.len()];
+        for k in 0..nk {
+            for j in 0..=nj {
+                for i in 0..ni {
+                    let (f, s) = face([(i, j, k), (i, j, k + 1), (i + 1, j, k + 1), (i + 1, j, k)]);
+                    let q = (k * (nj + 1) + j) * ni + i;
+                    jface[q] = f;
+                    sj[q] = s;
+                }
+            }
+        }
+        let mut kface = vec![Face3::default(); ni * nj * (nk + 1)];
+        let mut sk = vec![[0.0; 3]; kface.len()];
+        for k in 0..=nk {
+            for j in 0..nj {
+                for i in 0..ni {
+                    let (f, s) = face([(i, j, k), (i + 1, j, k), (i + 1, j + 1, k), (i, j + 1, k)]);
+                    let q = (k * nj + j) * ni + i;
+                    kface[q] = f;
+                    sk[q] = s;
+                }
+            }
+        }
+
+        let mut vol = vec![0.0; ni * nj * nk];
+        let mut xc = vec![[0.0; 3]; vol.len()];
+        for k in 0..nk {
+            for j in 0..nj {
+                for i in 0..ni {
+                    let qi = |ii: usize| (k * nj + j) * (ni + 1) + ii;
+                    let qj = |jj: usize| (k * (nj + 1) + jj) * ni + i;
+                    let qk = |kk: usize| (kk * nj + j) * ni + i;
+                    let mut v = 0.0;
+                    for (f, s, sign) in [
+                        (&iface[qi(i + 1)], &si[qi(i + 1)], 1.0),
+                        (&iface[qi(i)], &si[qi(i)], -1.0),
+                        (&jface[qj(j + 1)], &sj[qj(j + 1)], 1.0),
+                        (&jface[qj(j)], &sj[qj(j)], -1.0),
+                        (&kface[qk(k + 1)], &sk[qk(k + 1)], 1.0),
+                        (&kface[qk(k)], &sk[qk(k)], -1.0),
+                    ] {
+                        v += sign * dot(f.c, *s);
+                    }
+                    let c = (k * nj + j) * ni + i;
+                    vol[c] = v / 3.0;
+                    let mut m = [0.0; 3];
+                    for (dk, dj, di) in (0..8).map(|b| (b >> 2 & 1, b >> 1 & 1, b & 1)) {
+                        let p = pt(i + di, j + dj, k + dk);
+                        for a in 0..3 {
+                            m[a] += 0.125 * p[a];
+                        }
+                    }
+                    xc[c] = m;
+                }
+            }
+        }
+        // One global handedness sign: a left-handed node mapping flips every face vector and volume once.
+        if vol.iter().sum::<f64>() < 0.0 {
+            for f in iface.iter_mut().chain(jface.iter_mut()).chain(kface.iter_mut()) {
+                f.n = [-f.n[0], -f.n[1], -f.n[2]];
+            }
+            for v in vol.iter_mut() {
+                *v = -*v;
+            }
+        }
+        let vmax = vol.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        for k in 0..nk {
+            for j in 0..nj {
+                for i in 0..ni {
+                    let v = vol[(k * nj + j) * ni + i];
+                    if v < -1e-12 * vmax || v.is_nan() {
+                        return Err(format!("negative cell volume at ({i},{j},{k})"));
+                    }
+                }
+            }
+        }
+        Ok(Grid3 { ni, nj, nk, x, y, z, iface, jface, kface, vol, xc, solid: Vec::new(), axis_cells: 0 })
+    }
+
+    /// Cell index `(k*nj+j)*ni+i`.
+    #[inline]
+    pub fn cell(&self, i: usize, j: usize, k: usize) -> usize {
+        (k * self.nj + j) * self.ni + i
+    }
+
+    /// Whether cell `(i, j, k)` lies in a [`SolidBox`].
+    pub fn is_solid(&self, i: usize, j: usize, k: usize) -> bool {
+        self.solid.iter().any(|b| b.i.contains(&i) && b.j.contains(&j) && b.k.contains(&k))
+    }
+}
+
+/// Revolve a 2D grid about the x axis: node `(i, j, k)` is `(x, r sin(theta_k), r cos(theta_k))`. `theta` has `nk + 1`
+/// increasing angles over `[0, pi]` (0 is the +z side, `pi` the -z side).
+pub fn revolve(g2: &crate::grid::Grid, nk: usize, theta: &[f64]) -> Result<Grid3, String> {
+    if theta.len() != nk + 1 {
+        return Err(format!("theta has {} entries, expected {}", theta.len(), nk + 1));
+    }
+    let n2 = (g2.ni + 1) * (g2.nj + 1);
+    let mut x = Vec::with_capacity(n2 * (nk + 1));
+    let mut y = Vec::with_capacity(x.capacity());
+    let mut z = Vec::with_capacity(x.capacity());
+    for &th in theta {
+        let (s, c) = th.sin_cos();
+        for n in 0..n2 {
+            x.push(g2.x[n]);
+            y.push(g2.r[n] * s);
+            z.push(g2.r[n] * c);
+        }
+    }
+    Grid3::try_from_nodes(g2.ni, g2.nj, nk, x, y, z)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grid::{cone_grid, ConeGridParams};
+
+    fn closure_check(g: &Grid3) {
+        let amax = g.iface.iter().chain(&g.jface).chain(&g.kface).fold(0.0f64, |m, f| m.max(f.area));
+        for k in 0..g.nk {
+            for j in 0..g.nj {
+                for i in 0..g.ni {
+                    let mut s = [0.0; 3];
+                    let mut add = |f: &Face3, sign: f64| {
+                        for m in 0..3 {
+                            s[m] += sign * f.area * f.n[m];
+                        }
+                    };
+                    add(&g.iface[(k * g.nj + j) * (g.ni + 1) + i + 1], 1.0);
+                    add(&g.iface[(k * g.nj + j) * (g.ni + 1) + i], -1.0);
+                    add(&g.jface[(k * (g.nj + 1) + j + 1) * g.ni + i], 1.0);
+                    add(&g.jface[(k * (g.nj + 1) + j) * g.ni + i], -1.0);
+                    add(&g.kface[((k + 1) * g.nj + j) * g.ni + i], 1.0);
+                    add(&g.kface[(k * g.nj + j) * g.ni + i], -1.0);
+                    for c in s {
+                        assert!(c.abs() <= 1e-13 * amax, "closure {s:?} at ({i},{j},{k})");
+                    }
+                }
+            }
+        }
+    }
+
+    fn cone() -> crate::grid::Grid {
+        cone_grid(&ConeGridParams {
+            ni: 16,
+            nj: 8,
+            theta: 15f64.to_radians(),
+            length: 1.0,
+            x_up: -0.5,
+            h_start: 1.0,
+            h_end: 1.0,
+            cluster: 1.5,
+        })
+    }
+
+    #[test]
+    fn unit_cube() {
+        let n = 3;
+        let (mut x, mut y, mut z) = (vec![], vec![], vec![]);
+        for k in 0..=n {
+            for j in 0..=n {
+                for i in 0..=n {
+                    x.push(i as f64 / n as f64);
+                    y.push(j as f64 / n as f64);
+                    z.push(k as f64 / n as f64);
+                }
+            }
+        }
+        let g = Grid3::try_from_nodes(n, n, n, x, y, z).unwrap();
+        let tot: f64 = g.vol.iter().sum();
+        assert!((tot - 1.0).abs() < 1e-14);
+        assert!((g.vol[g.cell(1, 1, 1)] - 1.0 / 27.0).abs() < 1e-15);
+        assert_eq!(g.iface[0].n, [1.0, 0.0, 0.0]);
+        assert_eq!(g.jface[0].n, [0.0, 1.0, 0.0]);
+        assert_eq!(g.kface[0].n, [0.0, 0.0, 1.0]);
+        assert!((g.iface[0].area - 1.0 / 9.0).abs() < 1e-15);
+        assert!(g.solid.is_empty() && g.axis_cells == 0 && !g.is_solid(0, 0, 0));
+        closure_check(&g);
+    }
+
+    #[test]
+    fn revolved_cone_volume_and_closure() {
+        let g2 = cone();
+        let nk = 64;
+        let theta: Vec<f64> = (0..=nk).map(|k| std::f64::consts::PI * k as f64 / nk as f64).collect();
+        let g = revolve(&g2, nk, &theta).unwrap();
+        closure_check(&g);
+        // Flat-faced sectors: each sector of angle d holds sin(d) (not d) per unit of the 2D per-radian volume.
+        let sector: f64 = theta.windows(2).map(|t| (t[1] - t[0]).sin()).sum();
+        let want = sector * g2.vol.iter().sum::<f64>();
+        let got: f64 = g.vol.iter().sum();
+        assert!((got - want).abs() < 1e-10 * want, "{got} vs {want}");
+        // and within the chord error of pi * sum(vol)
+        let exact = std::f64::consts::PI * g2.vol.iter().sum::<f64>();
+        assert!((got - exact).abs() < 1e-3 * exact);
+    }
+
+    #[test]
+    fn perturbed_closure() {
+        let g2 = cone();
+        let theta = [0.0, 0.3, 0.9, 1.2, 2.0, std::f64::consts::PI];
+        let nk = 5;
+        let mut x = vec![];
+        let mut y = vec![];
+        let mut z = vec![];
+        let mut seed = 12345u64;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * 0.01
+        };
+        for &th in &theta {
+            for n in 0..(g2.ni + 1) * (g2.nj + 1) {
+                let r = g2.r[n];
+                x.push(g2.x[n] + if r > 0.0 { rnd() } else { 0.0 });
+                y.push(r * th.sin() + if r > 0.0 { rnd() } else { 0.0 });
+                z.push(r * th.cos() + if r > 0.0 { rnd() } else { 0.0 });
+            }
+        }
+        let g = Grid3::try_from_nodes(g2.ni, g2.nj, nk, x, y, z).unwrap();
+        closure_check(&g);
+    }
+
+    #[test]
+    fn folded_cell_is_rejected() {
+        let g2 = cone();
+        let nk = 4;
+        let theta: Vec<f64> = (0..=nk).map(|k| std::f64::consts::PI * k as f64 / nk as f64).collect();
+        let (ni, nj) = (g2.ni, g2.nj);
+        let mut x = vec![];
+        let mut y = vec![];
+        let mut z = vec![];
+        for &th in &theta {
+            for n in 0..(ni + 1) * (nj + 1) {
+                x.push(g2.x[n]);
+                y.push(g2.r[n] * th.sin());
+                z.push(g2.r[n] * th.cos());
+            }
+        }
+        // move interior node (8, 4, 2) past its +i neighbour
+        let n = (2 * (nj + 1) + 4) * (ni + 1) + 8;
+        x[n] = x[n + 1] + 20.0 * (x[n + 1] - x[n]);
+        let e = Grid3::try_from_nodes(ni, nj, nk, x, y, z).unwrap_err();
+        assert!(e.starts_with("negative cell volume"), "{e}");
+    }
+}
