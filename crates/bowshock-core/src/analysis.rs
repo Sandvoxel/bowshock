@@ -2,6 +2,10 @@
 
 use crate::atmosphere::{FlightConditions, SUTHERLAND_S};
 use crate::engine::body_grid::{check_quality, BaseBody, MAX_STRETCHING, MAX_STRETCHING_VISCOUS_J};
+use crate::engine::case3::Case3;
+use crate::engine::grid3::Fins3;
+use crate::engine::run3::{run3_cold, run3_on, PointResult3};
+use bowshock_cfd::solver3::Solver3;
 use crate::engine::case::{Case, Jet, Wake};
 use crate::engine::numerics::Numerics;
 use crate::engine::result::{PointResult, StopReason};
@@ -14,6 +18,9 @@ use bowshock_reference::base_drag::base_drag_coefficient;
 
 /// Lowest and highest Mach number accepted by [`Analysis::run`].
 const MACH_RANGE: (f64, f64) = (0.1, 3.0);
+/// Mach range and largest incidence \[deg\] accepted by [`Analysis::run_lift`].
+const LIFT_MACH_RANGE: (f64, f64) = (0.3, 3.0);
+const LIFT_ALPHA_MAX_DEG: f64 = 15.0;
 
 /// Where a sweep runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -238,6 +245,7 @@ pub struct Analysis {
     drag_tolerance: Option<f64>,
     warm_start: bool,
     estimate_uncertainty: bool,
+    lift_hook: Option<fn(&mut Case3)>,
 }
 
 /// Free stream of a viscous sweep.
@@ -270,6 +278,7 @@ impl Analysis {
             drag_tolerance: None,
             warm_start: false,
             estimate_uncertainty: false,
+            lift_hook: None,
         }
     }
 
@@ -323,7 +332,14 @@ impl Analysis {
         self
     }
 
-    /// Caps `max_iter` of whichever numerics is used.
+    /// Edits every 3D case of [`Analysis::run_lift`] after it is built (tests shrink the grid with it).
+    #[doc(hidden)]
+    pub fn lift_case_hook(mut self, hook: fn(&mut Case3)) -> Self {
+        self.lift_hook = Some(hook);
+        self
+    }
+
+    /// Caps `max_iter` of whichever numerics is used (the 3D iteration cap of [`Analysis::run_lift`] too).
     pub fn max_iterations(mut self, cap: usize) -> Self {
         self.max_iterations = Some(cap);
         self
@@ -691,6 +707,205 @@ impl Analysis {
     #[cfg(not(feature = "gpu"))]
     fn sweep_auto(&self, cases: &[Case]) -> Result<(Vec<PointResult>, BackendUsed, Option<String>), Error> {
         Ok((guard(|| self.sweep_cpu(cases))?, BackendUsed::Cpu, None))
+    }
+}
+
+/// One (Mach, incidence) point of a 3D lift solve; forces on the reference area, lengths in metres.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct LiftPoint {
+    /// Mach number.
+    pub mach: f64,
+    /// Incidence \[rad\].
+    pub alpha: f64,
+    /// Normal force coefficient on the reference area, positive for positive incidence.
+    pub cn: f64,
+    /// Axial force coefficient of the surface pressure (no friction, no base) on the reference area.
+    pub ca_pressure: f64,
+    /// Centre of pressure of the normal force, metres from the nose tip (NaN when the normal force vanishes).
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "nan_or_f64"))]
+    pub x_cp: f64,
+    /// How the run stopped.
+    pub quality: Quality,
+    /// Iterations of the run that produced the point.
+    pub iterations: usize,
+}
+
+/// Result of [`Analysis::run_lift`], ordered by Mach number, then incidence.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct LiftPolar {
+    /// Points ordered by Mach number, then incidence.
+    pub points: Vec<LiftPoint>,
+    /// Backend that produced the points.
+    pub backend: BackendUsed,
+    /// Under [`Backend::Auto`], why the GPU was not used.
+    pub fallback: Option<String>,
+}
+
+/// Quality of a 3D result: `Failed` on a non-finite state or force, else by stop reason like the 2D facade.
+fn lift_quality(d: &PointResult3) -> Quality {
+    if d.stop_reason == StopReason::NonFinite || !d.cn.is_finite() || !d.ca.is_finite() {
+        return Quality::Failed;
+    }
+    match d.stop_reason {
+        StopReason::ResidualDrop => Quality::Converged,
+        StopReason::CdStationary | StopReason::MeanStationary | StopReason::BasePressureStationary | StopReason::ResidualPlateau => Quality::Stationary,
+        StopReason::MaxIterations => Quality::Stalled,
+        StopReason::NonFinite => Quality::Failed,
+    }
+}
+
+impl Analysis {
+    /// Normal force and centre of pressure from a 3D Euler solve, for every Mach number of `machs` (each in `[0.3, 3.0]`) at every
+    /// incidence of `alphas_deg` (each in `(0, 15]` degrees).
+    ///
+    /// Needs an analysis built with [`Analysis::new`]. The 3D solver integrates the Euler equations on a sting-mounted body with thick
+    /// fins: viscous settings ([`Analysis::viscous`]), roughness, the motor and the wake are ignored, and so are the fin roughness and
+    /// the 2D fin-drag model. Fins come from [`Analysis::fins`]; the grid level from [`Analysis::resolution`]. Both slices are sorted
+    /// ascending; the points are ordered by Mach number, then incidence. Each Mach number starts cold; later incidences start from the
+    /// field of the previous one, and a warm point that ends `Failed` or `Stalled` is re-run cold. A point whose run diverged is
+    /// re-run once with the implicit CFL limit halved. Coefficients refer to the reference area, `x_cp` is in metres from the tip.
+    /// Backends as for [`Analysis::run`].
+    pub fn run_lift(&self, machs: &[f64], alphas_deg: &[f64]) -> Result<LiftPolar, Error> {
+        if !self.dimensional {
+            return Err(Error::InvalidInput("run_lift needs a dimensional BodySpec (Analysis::new)".into()));
+        }
+        if machs.is_empty() || alphas_deg.is_empty() {
+            return Err(Error::InvalidInput("no Mach numbers or incidences requested".into()));
+        }
+        for &m in machs {
+            if !(m.is_finite() && (LIFT_MACH_RANGE.0..=LIFT_MACH_RANGE.1).contains(&m)) {
+                return Err(Error::InvalidInput(format!("Mach number {m} is outside [{}, {}] for a lift solve", LIFT_MACH_RANGE.0, LIFT_MACH_RANGE.1)));
+            }
+        }
+        for &a in alphas_deg {
+            if !(a.is_finite() && a > 0.0 && a <= LIFT_ALPHA_MAX_DEG) {
+                return Err(Error::InvalidInput(format!("incidence {a} deg is outside (0, {LIFT_ALPHA_MAX_DEG}]")));
+            }
+        }
+        if !(self.d_ref.is_finite() && self.d_ref > 0.0) {
+            return Err(Error::InvalidInput(format!("reference diameter {} must be finite and > 0", self.d_ref)));
+        }
+        if let Some(f) = &self.fins {
+            f.validate()?;
+        }
+        let mut machs = machs.to_vec();
+        machs.sort_by(f64::total_cmp);
+        let mut alphas = alphas_deg.to_vec();
+        alphas.sort_by(f64::total_cmp);
+
+        match self.backend {
+            Backend::Cpu => guard(|| self.lift_cpu(&machs, &alphas)),
+            Backend::Gpu => guard(|| self.lift_gpu(&machs, &alphas)),
+            Backend::Auto => {
+                let why = match guard(|| self.lift_gpu(&machs, &alphas)) {
+                    Ok(p) => return Ok(p),
+                    Err(Error::Internal(m)) => m.replacen("solver panicked", "GPU solver panicked", 1),
+                    Err(e) => format!("GPU unavailable: {e}"),
+                };
+                let mut p = guard(|| self.lift_cpu(&machs, &alphas))?;
+                p.fallback = Some(why);
+                Ok(p)
+            }
+        }
+    }
+
+    /// Fins of the analysis in nose diameters.
+    fn fins3(&self) -> Option<Fins3> {
+        self.fins.as_ref().map(|f| {
+            let d = self.d_nose;
+            Fins3 {
+                count: f.count,
+                root_chord: f.root_chord / d,
+                tip_chord: f.tip_chord / d,
+                span: f.span / d,
+                sweep: f.sweep / d,
+                thickness: f.thickness / d,
+                te_to_base: f.root_te_to_base / d,
+                profile: f.profile.clone(),
+            }
+        })
+    }
+
+    /// The 3D case of one Mach number and incidence \[rad\], with the numerics overrides applied.
+    fn lift_case(&self, mach: f64, alpha: f64) -> Case3 {
+        let mut case = Case3::new(mach, alpha, self.body.clone(), self.fins3(), self.resolution.level());
+        if let Some(n) = &self.numerics {
+            case.numerics.limiter = n.limiter;
+            case.numerics.low_mach = n.low_mach;
+            case.numerics.first_order_iters = n.first_order_iters;
+            case.numerics.max_iter = n.max_iter;
+        }
+        if let Some(cap) = self.max_iterations {
+            case.numerics.max_iter = case.numerics.max_iter.min(cap);
+        }
+        if let Some(hook) = self.lift_hook {
+            hook(&mut case);
+        }
+        case
+    }
+
+    /// Coefficients on the reference area and lengths in metres.
+    fn lift_point(&self, r: &PointResult3) -> LiftPoint {
+        let q = (self.d_nose / self.d_ref).powi(2);
+        LiftPoint { mach: r.mach, alpha: r.alpha, cn: r.cn * q, ca_pressure: r.ca * q, x_cp: r.x_cp * self.d_nose, quality: lift_quality(r), iterations: r.iterations }
+    }
+
+    /// Cold run on a fresh solver; a diverged run is repeated once with the implicit CFL limit halved.
+    fn lift_cold(&self, case: &Case3) -> Result<PointResult3, Error> {
+        let r = run3_cold(case)?;
+        if r.stop_reason != StopReason::NonFinite {
+            return Ok(r);
+        }
+        let mut c = case.clone();
+        c.numerics.implicit.cfl_max *= 0.5;
+        run3_cold(&c)
+    }
+
+    /// CPU backend: per Mach number a cold first incidence, warm later ones.
+    fn lift_cpu(&self, machs: &[f64], alphas_deg: &[f64]) -> Result<LiftPolar, Error> {
+        let mut points = Vec::with_capacity(machs.len() * alphas_deg.len());
+        for &m in machs {
+            let mut state: Option<Solver3> = None;
+            for &a in alphas_deg {
+                let case = self.lift_case(m, a.to_radians());
+                let warm = match &mut state {
+                    Some(s) => {
+                        let r = run3_on(&case, s, true);
+                        matches!(lift_quality(&r), Quality::Converged | Quality::Stationary).then_some(r)
+                    }
+                    None => None,
+                };
+                let r = match warm {
+                    Some(r) => {
+                        points.push(self.lift_point(&r));
+                        continue;
+                    }
+                    None => {
+                        let mut s = case.build_solver()?;
+                        let r = run3_on(&case, &mut s, false);
+                        if r.stop_reason == StopReason::NonFinite {
+                            state = None;
+                            self.lift_cold(&case)?
+                        } else {
+                            state = Some(s);
+                            r
+                        }
+                    }
+                };
+                if lift_quality(&r) == Quality::Failed {
+                    state = None;
+                }
+                points.push(self.lift_point(&r));
+            }
+        }
+        Ok(LiftPolar { points, backend: BackendUsed::Cpu, fallback: None })
+    }
+
+    /// GPU backend of [`Analysis::run_lift`] (`machs` and `alphas_deg` validated and sorted). Seam for the 3D GPU runner.
+    fn lift_gpu(&self, _machs: &[f64], _alphas_deg: &[f64]) -> Result<LiftPolar, Error> {
+        Err(Error::Unsupported("the 3D GPU solver is not available".into()))
     }
 }
 

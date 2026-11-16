@@ -36,7 +36,7 @@ pub mod error;
 mod fins;
 pub mod spec;
 
-pub use analysis::{Analysis, Backend, BackendUsed, Drag, FinDrag, PointDetail, Polar, PolarPoint, Quality, Resolution, WallCp, Warning};
+pub use analysis::{Analysis, Backend, BackendUsed, Drag, FinDrag, LiftPoint, LiftPolar, PointDetail, Polar, PolarPoint, Quality, Resolution, WallCp, Warning};
 pub use atmosphere::{AirState, Atmosphere, FlightConditions};
 pub use engine::case::Wake;
 pub use engine::result::StopReason;
