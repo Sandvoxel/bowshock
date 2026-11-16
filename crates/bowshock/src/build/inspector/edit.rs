@@ -52,6 +52,8 @@ pub enum Field {
     DeployDelay,
     /// The mass override.
     MassOverride,
+    /// The drag coefficient override (on the rocket's reference area).
+    CdOverride,
     /// The CG override, metres behind the part's fore face.
     CgOverride,
     /// A fin group's own shear modulus for the flutter estimate, in GPa (a plain number: the document keeps it in Pa).
@@ -87,6 +89,7 @@ impl Field {
             Field::StreamerWidth => "streamer width".into(),
             Field::CordLength => "cord length".into(),
             Field::MassValue | Field::MassOverride => "mass".into(),
+            Field::CdOverride => "drag".into(),
             Field::DeployAltitude => "deploy altitude".into(),
             Field::DeployDelay => "deploy delay".into(),
             Field::CgOverride => "CG".into(),
@@ -185,6 +188,7 @@ pub fn apply_copy(r: &mut Rocket, id: PartId, copy: usize, field: Field, value: 
         }
         Field::AutoDiameter => Applied::flag(set_auto_diameter(r, id, Some(value))),
         Field::MassOverride => Applied::flag(r.set_mass_override(id, Some(value))),
+        Field::CdOverride => Applied::flag(r.set_cd_override(id, Some(value))),
         Field::CgOverride => Applied::flag(r.set_cg_override(id, Some(value))),
         Field::ShearModulus => Applied::flag(r.set_fin_shear_modulus(id, Some(value * 1.0e9))),
         Field::TabHeight | Field::TabLength | Field::TabPosition => {
@@ -209,6 +213,24 @@ pub fn apply_copy(r: &mut Rocket, id: PartId, copy: usize, field: Field, value: 
         Field::DeployDelay => Applied::flag(edit_deployment(r, id, |d| d.delay = value.max(0.0))),
         other => Applied::flag(edit_internal(r, id, other, value)),
     }
+}
+
+/// The drag coefficient the build-up gives part `id` (summed over its copies; a pod's is everything on it) at Mach 0.3 at sea
+/// level, zero angle of attack, motor off: the value an override starts from. `None` when the rocket cannot be built for the
+/// sim (a motor missing from `motors`) or the part has no aerodynamics.
+pub fn computed_cd(r: &Rocket, motors: &bowshock_motors::MotorDb, id: PartId) -> Option<f64> {
+    use bowshock_sim::from_model::{vehicle, Phase};
+    const MACH: f64 = 0.3;
+    let mut ids = vec![id];
+    if let Some(body) = r.radial(id).and_then(|p| p.kind.pod_body()) {
+        ids.extend(body.parts().iter().map(|p| p.id).chain(body.radials().iter().map(|p| p.id)));
+    }
+    let v = vehicle(r, motors, Phase::Full).ok()?;
+    let air = bowshock_sim::Atmosphere::standard().at_msl(0.0);
+    let re = MACH * air.speed_of_sound * air.density / air.viscosity;
+    let comps = bowshock_sim::Aero::new(&v).components(MACH, re, false, 0.0);
+    let mine: Vec<f64> = comps.iter().filter(|c| c.part.is_some_and(|p| ids.contains(&p))).map(|c| c.drag.total).collect();
+    (!mine.is_empty()).then(|| mine.iter().sum())
 }
 
 /// The recovery and mass fields: they change the internal part's kind.

@@ -302,6 +302,7 @@ impl Rocket {
             count: 1,
             name: Some(free_name(group, index)),
             mass_override: group.mass_override.map(|m| m / count),
+            cd_override: group.cd_override.map(|c| c / count),
             cg_override: group.cg_override,
             overrides: Vec::new(),
             instance_angles: None,
@@ -436,6 +437,7 @@ impl Rocket {
         rest.set_angles(left);
         debug_assert_eq!(rest.angle, angles[first_left]);
         rest.mass_override = group.mass_override.map(|m| m * (count - 1.0) / count);
+        rest.cd_override = group.cd_override.map(|c| c * (count - 1.0) / count);
         // The copies keep the letters they had: a group that lost `A` reads `B, C`.
         let mut letters: Vec<u8> = (0..usize::from(group.count)).map(|i| group.copy_index(i) as u8).collect();
         letters.remove(index);
@@ -485,6 +487,7 @@ impl Rocket {
         first.letters.clear();
         first.name = Some(free_name(&group, 0));
         first.mass_override = group.mass_override.map(|m| m / count);
+        first.cd_override = group.cd_override.map(|c| c / count);
         for (offset, copy) in copies.into_iter().enumerate() {
             self.radials.insert(position + 1 + offset, copy);
         }
@@ -536,9 +539,9 @@ impl Rocket {
             return Err(RadialError::BadCount);
         }
         let count = g.count + 1;
-        let per_copy = match winner {
-            Winner::Group => g.mass_override.map(|m| m / f64::from(g.count)),
-            Winner::Part => p.mass_override,
+        let (per_copy, per_copy_cd) = match winner {
+            Winner::Group => (g.mass_override.map(|m| m / f64::from(g.count)), g.cd_override.map(|c| c / f64::from(g.count))),
+            Winner::Part => (p.mass_override, p.cd_override),
         };
         let moved = match winner {
             Winner::Part => Some(self.clamp_offset(p.parent, p.offset, &p.kind).unwrap_or(0.0)),
@@ -553,6 +556,7 @@ impl Rocket {
         target.count = count;
         target.letters.clear();
         target.mass_override = per_copy.map(|m| m * f64::from(count));
+        target.cd_override = per_copy_cd.map(|c| c * f64::from(count));
         if winner == Winner::Part {
             let own = p.effective(0);
             target.kind = own.kind;

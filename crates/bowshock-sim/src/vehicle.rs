@@ -380,6 +380,117 @@ pub struct StageMass {
     pub separation: Timing,
 }
 
+/// Active roll control on a fin set: a PI controller drives the set's cant towards a target roll rate.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RollControl {
+    /// Roll rate the controller holds (rad/s).
+    pub target_rate: f64,
+    /// Time after launch the controller switches on (s).
+    pub start: f64,
+    /// Proportional gain (rad of cant per rad/s of rate error).
+    pub kp: f64,
+    /// Integral gain (rad of cant per rad of accumulated rate error).
+    pub ki: f64,
+    /// Largest cant deflection either way (rad).
+    pub max_cant: f64,
+    /// Largest cant slew rate (rad/s).
+    pub max_rate: f64,
+}
+
+/// What a vehicle component came from: a display name, the model part, and per-part overrides.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Label {
+    /// Display name of the source part.
+    pub name: String,
+    /// Model part the component was built from, if any.
+    pub part: Option<bowshock_model::PartId>,
+    /// Drag coefficient (on the vehicle reference area) that replaces this component's computed drag.
+    pub cd_override: Option<f64>,
+    /// Active roll control (fin sets only).
+    pub roll_control: Option<RollControl>,
+}
+
+/// Labels for the vehicle's components, by index: `body[i]` labels `Vehicle::body[i]`, and likewise for the
+/// other lists. A list shorter than its component list labels the missing entries with [`Label::default`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Labels {
+    /// Labels of the body segments.
+    pub body: Vec<Label>,
+    /// Labels of the fin sets.
+    pub fin_sets: Vec<Label>,
+    /// Labels of the tube fin sets.
+    pub tube_fins: Vec<Label>,
+    /// Labels of the protuberances.
+    pub protuberances: Vec<Label>,
+}
+
+/// Label `i` of `list`, or a default one when the list is short.
+fn label_at(list: &[Label], i: usize) -> Label {
+    list.get(i).cloned().unwrap_or_default()
+}
+
+impl Labels {
+    /// Label of body segment `i` (a generated name when missing).
+    pub fn body(&self, i: usize) -> Label {
+        named(label_at(&self.body, i), || format!("Body {}", i + 1))
+    }
+
+    /// Label of fin set `i` (a generated name when missing).
+    pub fn fin_set(&self, i: usize) -> Label {
+        named(label_at(&self.fin_sets, i), || format!("Fins {}", i + 1))
+    }
+
+    /// Label of tube fin set `i` (a generated name when missing).
+    pub fn tube_fin(&self, i: usize) -> Label {
+        named(label_at(&self.tube_fins, i), || format!("Tube fins {}", i + 1))
+    }
+
+    /// Label of protuberance `i` (a generated name when missing).
+    pub fn protuberance(&self, i: usize) -> Label {
+        named(label_at(&self.protuberances, i), || format!("Protuberance {}", i + 1))
+    }
+
+    /// Whether any component carries a drag override.
+    pub fn any_cd_override(&self) -> bool {
+        [&self.body, &self.fin_sets, &self.tube_fins, &self.protuberances].iter().any(|l| l.iter().any(|l| l.cd_override.is_some()))
+    }
+
+    /// Copy with every drag override removed.
+    pub fn without_cd_overrides(&self) -> Labels {
+        let mut l = self.clone();
+        for list in [&mut l.body, &mut l.fin_sets, &mut l.tube_fins, &mut l.protuberances] {
+            for label in list {
+                label.cd_override = None;
+            }
+        }
+        l
+    }
+}
+
+fn named(mut label: Label, name: impl FnOnce() -> String) -> Label {
+    if label.name.is_empty() {
+        label.name = name();
+    }
+    label
+}
+
+/// Keeps the entries of `items` (and the matching entries of `labels`) for which `keep` holds.
+fn retain_labelled<T>(items: &mut Vec<T>, labels: &mut Vec<Label>, keep: impl Fn(&T) -> bool) {
+    let mut kept_labels = Vec::with_capacity(labels.len());
+    let mut i = 0;
+    items.retain(|item| {
+        let k = keep(item);
+        if k {
+            if let Some(l) = labels.get(i) {
+                kept_labels.push(l.clone());
+            }
+        }
+        i += 1;
+        k
+    });
+    *labels = kept_labels;
+}
+
 /// Complete vehicle for simulation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Vehicle {
@@ -395,6 +506,8 @@ pub struct Vehicle {
     pub protuberances: Vec<Protuberance>,
     /// Stages in firing order (see [`StageMass`]). Empty means a massless, motorless vehicle.
     pub stages: Vec<StageMass>,
+    /// Names, source parts and overrides of the components (see [`Labels`]).
+    pub labels: Labels,
 }
 
 impl Vehicle {
@@ -413,7 +526,8 @@ impl Vehicle {
     /// aft of the cut are dropped.
     pub fn truncated(&self, station: f64) -> Vehicle {
         let mut v = self.clone();
-        v.body.retain(|b| b.station < station - 1e-9);
+        let l = &mut v.labels;
+        retain_labelled(&mut v.body, &mut l.body, |b| b.station < station - 1e-9);
         for b in &mut v.body {
             if b.aft_station() > station {
                 let new_len = station - b.station;
@@ -422,9 +536,9 @@ impl Vehicle {
                 b.length = new_len;
             }
         }
-        v.fin_sets.retain(|f| f.station < station - 1e-9);
-        v.tube_fins.retain(|t| t.station < station - 1e-9);
-        v.protuberances.retain(|p| p.station() < station - 1e-9);
+        retain_labelled(&mut v.fin_sets, &mut l.fin_sets, |f| f.station < station - 1e-9);
+        retain_labelled(&mut v.tube_fins, &mut l.tube_fins, |t| t.station < station - 1e-9);
+        retain_labelled(&mut v.protuberances, &mut l.protuberances, |p| p.station() < station - 1e-9);
         v
     }
 }

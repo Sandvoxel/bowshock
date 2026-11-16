@@ -878,6 +878,27 @@ impl Rocket {
         true
     }
 
+    /// Sets the drag coefficient (on the rocket's reference area) that replaces the computed drag of an axial part or a radial
+    /// group (all copies; on a pod, the whole pod), `None` to compute it. Limited to `0..=10`. Internal parts carry no
+    /// aerodynamics and are refused. Returns whether it was applied.
+    pub fn set_cd_override(&mut self, id: PartId, cd: Option<f64>) -> bool {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.set_cd_override(id, cd)).unwrap_or(false);
+        }
+        let cd = match cd {
+            Some(c) if !c.is_finite() => return false,
+            c => c.map(|c| c.clamp(0.0, 10.0)),
+        };
+        if let Some(p) = self.parts.iter_mut().find(|p| p.id == id) {
+            p.cd_override = cd;
+        } else if let Some(p) = self.radials.iter_mut().find(|p| p.id == id) {
+            p.cd_override = cd;
+        } else {
+            return false;
+        }
+        true
+    }
+
     /// Sets the CG that replaces the computed one for any part, metres behind the part's fore edge (`None` to compute it).
     pub fn set_cg_override(&mut self, id: PartId, cg: Option<f64>) -> bool {
         if self.pod_index(id).is_some() {

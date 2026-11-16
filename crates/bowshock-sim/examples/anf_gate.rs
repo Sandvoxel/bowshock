@@ -55,6 +55,7 @@ fn anf_vehicle() -> Vehicle {
         }],
         protuberances: vec![],
         stages: vec![],
+        labels: Default::default(),
     }
 }
 
@@ -141,7 +142,8 @@ fn main() {
 
     let mut md = String::new();
     writeln!(md, "# ANF stability gate: Extended vs Basic Finner data\n").unwrap();
-    writeln!(md, "Extended = `bowshock_sim::vs_mach` (Barrowman build-up), α = 2°, ISA sea level, CG {} cal, reference area π d²/4, CNα per rad.", anf::CG_CAL).unwrap();
+    writeln!(md, "Extended = `bowshock_sim::vs_mach` (Barrowman build-up), α = 2°, ISA sea level, CG {} cal, reference area π d²/4, CNα per rad.", anf::CG_CAL)
+        .unwrap();
     writeln!(md, "Data digitised from Yayla 2021 Fig. 3.10/4.4 (Dupuis WT and FF), ±3 % on CNα; data x_cp = x_cg − Cmα/CNα, about ±0.1 cal. See `crates/bowshock-reference/src/anf.rs`.").unwrap();
     writeln!(md, "Gate: |Δ x_cp| ≤ {CP_TOL_CAL} cal and |Δ CNα| ≤ {:.0} % at every data Mach.", CNA_TOL * 100.0).unwrap();
     table(&mut md, "Wind tunnel", &wt);
@@ -161,7 +163,10 @@ fn main() {
             }
             None => writeln!(md, "`{}` has no Summary section.", or_path.display()).unwrap(),
         },
-        Err(e) => writeln!(md, "Not available: could not read `{}` ({e}); run `OPENROCKET_JAR=<jar> tools/compare-openrocket/run.sh` first.", or_path.display()).unwrap(),
+        Err(e) => {
+            writeln!(md, "Not available: could not read `{}` ({e}); run `OPENROCKET_JAR=<jar> tools/compare-openrocket/run.sh` first.", or_path.display())
+                .unwrap()
+        }
     }
 
     let mut misses = miss_ranges("wind tunnel", &wt);

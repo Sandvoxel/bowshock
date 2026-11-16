@@ -204,10 +204,20 @@ impl Rocket {
         let new_id = self.next_id;
         self.next_id += 1;
         let share = |fraction: f64| part.mass_override.map(|m| m * fraction);
-        let aft_part = Part { id: new_id, kind: aft_kind, mass_override: share(b / length), cg_override: None, shoulder_fore: Shoulder::NONE, ..part.clone() };
+        let share_cd = |fraction: f64| part.cd_override.map(|c| c * fraction);
+        let aft_part = Part {
+            id: new_id,
+            kind: aft_kind,
+            mass_override: share(b / length),
+            cg_override: None,
+            cd_override: share_cd(b / length),
+            shoulder_fore: Shoulder::NONE,
+            ..part.clone()
+        };
         self.parts[index].kind = fore_kind;
         self.parts[index].shoulder_aft = Shoulder::NONE;
         self.parts[index].mass_override = share(a / length);
+        self.parts[index].cd_override = share_cd(a / length);
         self.parts[index].cg_override = None;
         self.parts.insert(index + 1, aft_part);
 

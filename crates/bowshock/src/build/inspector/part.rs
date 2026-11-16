@@ -59,6 +59,9 @@ pub fn view<'a>(p: &Params<'a>) -> Vec<Element<'a, Message>> {
     out.push(section_picking(2, "Position", true, in_position, position(p)));
     if let Some(rows) = material_rows(p) {
         out.push(section(3, "Material & finish", true, rows));
+    } else if let Some(pod) = p.rocket.radial(p.id).filter(|r| r.kind.is_pod()) {
+        // A pod has no stock of its own, but its drag may be overridden as a whole.
+        out.push(section(3, "Aerodynamics", true, drag_rows(p, pod.cd_override)));
     }
     out.push(section(4, "Mass", true, mass(p)));
     out.push(notes(p));
@@ -497,8 +500,27 @@ fn material_rows<'a>(p: &Params<'a>) -> Option<Vec<Element<'a, Message>>> {
     if let Some(finish) = finish {
         let finishes: Vec<(Finish, String)> = Finish::ALL.iter().map(|f| (*f, finish_label(*f))).collect();
         rows.push(labeled("Finish", choose(finishes, &finish, Message::Finish)));
+        let cd = match p.rocket.kind_of(p.id)? {
+            PartRef::Axial(part) => part.cd_override,
+            PartRef::Radial(r) => r.cd_override,
+            PartRef::Internal(_) => None,
+        };
+        rows.extend(drag_rows(p, cd));
     }
     Some(rows)
+}
+
+/// `Drag Cd  Computed  Override…`, or the override field and a Clear: the drag coefficient (on the rocket's reference area)
+/// that replaces the part's computed drag in the Extended drag build-up.
+fn drag_rows<'a>(p: &Params<'a>, cd: Option<f64>) -> Vec<Element<'a, Message>> {
+    let ghost = |label: &'static str, message: Message| -> Element<'a, Message> { button(label, Weight::Ghost).on_press(message).into() };
+    match cd {
+        None => vec![value_row("Drag Cd", "Computed".to_string(), Some(ghost("Override…", Message::StartOverride(Field::CdOverride))))],
+        Some(cd) => vec![
+            p.form.overridden("Drag Cd", cd, Quantity::Scalar, Field::CdOverride),
+            value_row("Computed", "Replaced".to_string(), Some(ghost("Clear", Message::ClearOverride(Field::CdOverride)))),
+        ],
+    }
 }
 
 /// `Basswood · 500 kg/m³`.

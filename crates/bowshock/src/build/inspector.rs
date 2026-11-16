@@ -520,12 +520,19 @@ impl State {
                 let computed = rocket.component_mass(id).map_or(0.0, |m| m.mass) / copies;
                 ctx.doc.edit("Override mass", |r| r.set_mass_override(id, Some(computed)));
             }
+            Message::StartOverride(Field::CdOverride) => {
+                let cd = edit::computed_cd(rocket, ctx.physics.motors(), id).unwrap_or(0.5);
+                ctx.doc.edit("Override drag", |r| r.set_cd_override(id, Some(cd)));
+            }
             Message::StartOverride(_) => {
                 let cg = rocket.component_mass(id).zip(rocket.part_station(id)).map_or(0.0, |(m, station)| (m.cg - station).max(0.0));
                 ctx.doc.edit("Override CG", |r| r.set_cg_override(id, Some(cg)));
             }
             Message::ClearOverride(Field::MassOverride) => {
                 ctx.doc.edit("Clear mass override", |r| r.set_mass_override(id, None));
+            }
+            Message::ClearOverride(Field::CdOverride) => {
+                ctx.doc.edit("Clear drag override", |r| r.set_cd_override(id, None));
             }
             Message::ClearOverride(_) => {
                 ctx.doc.edit("Clear CG override", |r| r.set_cg_override(id, None));

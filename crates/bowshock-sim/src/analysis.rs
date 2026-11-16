@@ -280,6 +280,7 @@ mod tests {
             }],
             protuberances: vec![],
             stages: vec![],
+            labels: Default::default(),
         }
     }
 

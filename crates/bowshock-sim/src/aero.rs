@@ -21,7 +21,7 @@
 use crate::atmosphere::Atmosphere;
 use crate::drag_table::{DragTable, DragTablePoint};
 use crate::tube_fins::TubeFinCalc;
-use crate::vehicle::{BodyKind, BodySegment, FinCrossSection, FinPlanform, FinSet, NoseShape, Protuberance, Vehicle};
+use crate::vehicle::{BodyKind, BodySegment, FinCrossSection, FinPlanform, FinSet, Labels, NoseShape, Protuberance, Vehicle};
 use std::f64::consts::PI;
 use std::sync::Arc;
 
@@ -90,6 +90,50 @@ pub struct DragBreakdown {
     pub protuberances: f64,
     /// Sum of all of the above.
     pub total: f64,
+}
+
+impl DragBreakdown {
+    /// This breakdown with every category multiplied by `k`.
+    pub fn scaled(&self, k: f64) -> DragBreakdown {
+        DragBreakdown {
+            friction: self.friction * k,
+            pressure: self.pressure * k,
+            base: self.base * k,
+            fins: self.fins * k,
+            protuberances: self.protuberances * k,
+            total: self.total * k,
+        }
+    }
+
+    /// This breakdown with `total` set to the sum of the categories.
+    fn summed(mut self) -> DragBreakdown {
+        self.total = self.friction + self.pressure + self.base + self.fins + self.protuberances;
+        self
+    }
+}
+
+/// Normal force and drag of one vehicle component (see [`Aero::components`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ComponentAero {
+    /// Display name of the component's source part.
+    pub name: String,
+    /// Model part the component was built from.
+    pub part: Option<bowshock_model::PartId>,
+    /// Normal force coefficient slope, per radian (0 for a component without lift).
+    pub cn_alpha: f64,
+    /// Centre of pressure station from the tip (m), NaN for a component without lift.
+    pub cp: f64,
+    /// Drag at the condition, axial-drag multiplier applied; a drag override is the whole drag, in the component's category.
+    pub drag: DragBreakdown,
+}
+
+/// One component of the vehicle, by its index in the vehicle's list of that kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Comp {
+    Body(usize),
+    Fin(usize),
+    TubeFin(usize),
+    Prot(usize),
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -421,8 +465,8 @@ pub struct Aero {
     fins: Vec<FinCalc>,
     tube_fins: Vec<TubeFinCalc>,
     prots: Vec<ProtCalc>,
-    /// `(roughness m, wetted area m^2)` of the body, grouped so each skin-friction value is evaluated once.
-    friction_groups: Vec<(f64, f64)>,
+    /// Names, source parts and drag overrides of the components (see [`Labels`]).
+    labels: Labels,
     /// CFD drag table flown instead of the build-up, which then supplies the corrections.
     table: Option<Arc<DragTable>>,
 }
@@ -474,13 +518,6 @@ impl Aero {
                 Protuberance::RailButton { station, height, diameter } => ProtCalc::Button { station, height, diameter },
             })
             .collect();
-        let mut friction_groups: Vec<(f64, f64)> = Vec::new();
-        for b in &bodies {
-            match friction_groups.iter_mut().find(|g| g.0 == b.roughness) {
-                Some(g) => g.1 += b.wet_area,
-                None => friction_groups.push((b.roughness, b.wet_area)),
-            }
-        }
         let motor_d = v
             .stages
             .iter()
@@ -500,7 +537,7 @@ impl Aero {
             fins,
             tube_fins: v.tube_fins.iter().map(TubeFinCalc::new).collect(),
             prots,
-            friction_groups,
+            labels: v.labels.clone(),
             table: None,
         }
     }
@@ -524,18 +561,18 @@ impl Aero {
     /// `cn_alpha * alpha` is the normal force coefficient `CN` there.
     pub fn stability(&self, mach: f64, alpha: f64) -> Stability {
         let mut comps: Vec<(String, f64, f64)> = Vec::new();
-        self.each_component(mach, alpha, |name, cna, cp| comps.push((name(), cna, cp)));
+        self.each_component(mach, alpha, |_, name, cna, cp| comps.push((name(), cna, cp)));
         let cn_alpha: f64 = comps.iter().map(|c| c.1).sum();
         let cp = if cn_alpha.abs() > 1e-9 { comps.iter().map(|c| c.1 * c.2).sum::<f64>() / cn_alpha } else { 0.5 * self.length };
         Stability { cn_alpha, cp, components: comps }
     }
 
-    /// Calls `f(name, CN_alpha per rad, CP station)` for every component with lift at `mach` and `alpha`; the name is only
-    /// built when `f` asks for it, so the flight code can sum the components without allocating.
-    fn each_component(&self, mach: f64, alpha: f64, mut f: impl FnMut(&dyn Fn() -> String, f64, f64)) {
+    /// Calls `f(component, name, CN_alpha per rad, CP station)` for every component with lift at `mach` and `alpha`; the name
+    /// is only built when `f` asks for it, so the flight code can sum the components without allocating.
+    fn each_component(&self, mach: f64, alpha: f64, mut f: impl FnMut(Comp, &dyn Fn() -> String, f64, f64)) {
         let sin_a = alpha.abs().sin();
         let sinc = if alpha.abs() > 1e-9 { sin_a / alpha.abs() } else { 1.0 };
-        for b in &self.bodies {
+        for (i, b) in self.bodies.iter().enumerate() {
             let mut cna = b.cna * sinc;
             let mut moment = cna * b.cp;
             if alpha.abs() > 1e-9 {
@@ -545,18 +582,65 @@ impl Aero {
                 moment += extra * b.plan_cp;
             }
             if cna.abs() > 1e-12 {
-                f(&|| b.name.clone(), cna, moment / cna);
+                f(Comp::Body(i), &|| b.name.clone(), cna, moment / cna);
             }
         }
-        for fin in &self.fins {
-            f(&|| fin.name.clone(), fin.cna(mach, alpha, self.a_ref), fin.cp(mach));
+        for (i, fin) in self.fins.iter().enumerate() {
+            f(Comp::Fin(i), &|| fin.name.clone(), fin.cna(mach, alpha, self.a_ref), fin.cp(mach));
         }
         for (i, t) in self.tube_fins.iter().enumerate() {
             let cna = t.cna(alpha, self.a_ref);
             if cna.abs() > 1e-12 {
-                f(&|| if self.tube_fins.len() > 1 { format!("Tube fins {}", i + 1) } else { "Tube fins".to_string() }, cna, t.cp(mach));
+                f(Comp::TubeFin(i), &|| if self.tube_fins.len() > 1 { format!("Tube fins {}", i + 1) } else { "Tube fins".to_string() }, cna, t.cp(mach));
             }
         }
+    }
+
+    /// Index of `c` in the list [`Aero::components`] returns: bodies, fin sets, tube fin sets, protuberances.
+    fn flat_index(&self, c: Comp) -> usize {
+        let (nb, nf, nt) = (self.bodies.len(), self.fins.len(), self.tube_fins.len());
+        match c {
+            Comp::Body(i) => i,
+            Comp::Fin(i) => nb + i,
+            Comp::TubeFin(i) => nb + nf + i,
+            Comp::Prot(i) => nb + nf + nt + i,
+        }
+    }
+
+    /// The drag override of component `c`, if its label carries one.
+    fn cd_override(&self, c: Comp) -> Option<f64> {
+        let l = &self.labels;
+        let list = match c {
+            Comp::Body(i) => l.body.get(i),
+            Comp::Fin(i) => l.fin_sets.get(i),
+            Comp::TubeFin(i) => l.tube_fins.get(i),
+            Comp::Prot(i) => l.protuberances.get(i),
+        };
+        list.and_then(|l| l.cd_override)
+    }
+
+    /// Normal force and drag of every component at `mach`, `re_per_m` (Reynolds number per metre) and angle of attack
+    /// `alpha`, from the build-up (a CFD table is not split by component): the bodies, fin sets, tube fin sets and
+    /// protuberances in the vehicle's order, named by the vehicle's labels. The drags sum to [`Aero::drag_at_alpha`]
+    /// without a table.
+    pub fn components(&self, mach: f64, re_per_m: f64, motor_on: bool, alpha: f64) -> Vec<ComponentAero> {
+        let k = axial_drag_multiplier(alpha);
+        let mut out = Vec::with_capacity(self.bodies.len() + self.fins.len() + self.tube_fins.len() + self.prots.len());
+        self.each_drag(mach, re_per_m, motor_on, |c, d| {
+            let label = match c {
+                Comp::Body(i) => self.labels.body(i),
+                Comp::Fin(i) => self.labels.fin_set(i),
+                Comp::TubeFin(i) => self.labels.tube_fin(i),
+                Comp::Prot(i) => self.labels.protuberance(i),
+            };
+            out.push(ComponentAero { name: label.name, part: label.part, cn_alpha: 0.0, cp: f64::NAN, drag: d.scaled(k) });
+        });
+        self.each_component(mach, alpha, |c, _, cna, cp| {
+            let i = self.flat_index(c);
+            out[i].cn_alpha = cna;
+            out[i].cp = cp;
+        });
+        out
     }
 
     /// Normal-force slope and CP at `mach` and angle of attack `alpha` (rad) together with the sums behind the pitch damping
@@ -564,7 +648,7 @@ impl Aero {
     /// rigid-body flight model evaluates every step.
     pub fn normal_force(&self, mach: f64, alpha: f64) -> NormalForce {
         let (mut s0, mut s1, mut s2) = (0.0, 0.0, 0.0);
-        self.each_component(mach, alpha, |_, cna, cp| {
+        self.each_component(mach, alpha, |_, _, cna, cp| {
             s0 += cna;
             s1 += cna * cp;
             s2 += cna * cp * cp;
@@ -606,10 +690,17 @@ impl Aero {
         }
     }
 
+    /// Whether any component carries a drag override (which only the build-up applies, not a CFD table).
+    pub fn has_cd_override(&self) -> bool {
+        self.labels.any_cd_override()
+    }
+
     /// This model flying on `table`: its parts at the table's Reynolds number, corrected by the build-up for the
-    /// Reynolds number and motor exhaust of the actual condition.
+    /// Reynolds number and motor exhaust of the actual condition. The table is the whole vehicle's drag, so the components'
+    /// drag overrides no longer apply.
     pub fn with_table(mut self, table: DragTable) -> Aero {
         self.table = Some(Arc::new(table));
+        self.labels = self.labels.without_cd_overrides();
         self
     }
 
@@ -649,14 +740,40 @@ impl Aero {
         DragBreakdown { friction, pressure, base, fins, protuberances, total: friction + pressure + base + fins + protuberances }
     }
 
-    /// The Barrowman/OpenRocket build-up.
+    /// The Barrowman build-up: the sum of [`Aero::each_drag`] over the components.
     fn buildup(&self, mach: f64, re_per_m: f64, motor_on: bool) -> DragBreakdown {
+        let mut sum = DragBreakdown::default();
+        self.each_drag(mach, re_per_m, motor_on, |_, d| {
+            sum.friction += d.friction;
+            sum.pressure += d.pressure;
+            sum.base += d.base;
+            sum.fins += d.fins;
+            sum.protuberances += d.protuberances;
+        });
+        sum.summed()
+    }
+
+    /// Calls `f(component, drag)` for every component in the order of [`Aero::flat_index`] with its zero-alpha build-up
+    /// drag: bodies carry friction, pressure and base drag, fin and tube fin sets `fins`, lugs and buttons `protuberances`.
+    /// A component whose label has a drag override gets that value instead, all in its own category (`pressure` for a body).
+    fn each_drag(&self, mach: f64, re_per_m: f64, motor_on: bool, mut f: impl FnMut(Comp, DragBreakdown)) {
         let m = mach.max(0.0);
         let ar = self.a_ref;
         let re_per_m = re_per_m.max(0.0);
         let re_len = (re_per_m * self.length).max(1.0);
         let stag = stagnation_cd(m);
         let base = base_cd(m);
+        let mut emit = |c: Comp, d: DragBreakdown| {
+            let d = match self.cd_override(c) {
+                None => d,
+                Some(v) => match c {
+                    Comp::Body(_) => DragBreakdown { pressure: v, ..DragBreakdown::default() },
+                    Comp::Fin(_) | Comp::TubeFin(_) => DragBreakdown { fins: v, ..DragBreakdown::default() },
+                    Comp::Prot(_) => DragBreakdown { protuberances: v, ..DragBreakdown::default() },
+                },
+            };
+            f(c, d.summed());
+        };
 
         // Skin friction: one flat-plate Cf from the whole-rocket length, floored per finish by the
         // roughness-limited value 0.032 (eps/L)^0.2 (Schlichting; Niskanen 2009 eq. 3.80).
@@ -676,68 +793,50 @@ impl Aero {
         };
         // Cylindrical-body correction 1 + 1/(2 fB), fB = body length / max diameter (tech doc eq. 3.85).
         let f_b = self.body_length / self.max_diameter.max(1e-9);
-        let mut friction: f64 = self.friction_groups.iter().map(|&(eps, wet)| comp_cf(eps) * wet).sum();
-        friction *= (1.0 + 1.0 / (2.0 * f_b.max(1e-9))) / ar;
+        let body_friction = (1.0 + 1.0 / (2.0 * f_b.max(1e-9))) / ar;
 
-        // Pressure drag of bodies: nose/shoulder tables plus stagnation on forward-facing steps.
-        let mut pressure = 0.0;
-        for b in &self.bodies {
-            pressure += match &b.pressure {
+        for (i, b) in self.bodies.iter().enumerate() {
+            let friction = comp_cf(b.roughness) * b.wet_area * body_friction;
+            // Pressure drag of bodies: nose/shoulder tables plus stagnation on forward-facing steps.
+            let pressure = match &b.pressure {
                 Pressure::None => 0.0,
                 Pressure::Stagnation { area } => stag * area / ar,
                 Pressure::Base { area, scale } => base * area * scale / ar,
                 Pressure::Table { table, area } => table.at(m) * area / ar,
-            };
-            pressure += stag * b.front_face / ar;
-        }
-
-        // Base drag; exhaust covers the motor exit area of the terminal base.
-        let mut base_total = 0.0;
-        for b in &self.bodies {
+            } + stag * b.front_face / ar;
+            // Base drag; exhaust covers the motor exit area of the terminal base.
             let mut area = b.back_face;
             if motor_on && b.is_last {
                 area = (area - self.motor_exit_area).max(0.0);
             }
-            base_total += base * area / ar;
+            emit(Comp::Body(i), DragBreakdown { friction, pressure, base: base * area / ar, ..DragBreakdown::default() });
         }
 
-        let mut fins = 0.0;
-        for f in &self.fins {
-            fins += f.drag(m, comp_cf(f.roughness), stag, base, ar);
+        for (i, fin) in self.fins.iter().enumerate() {
+            emit(Comp::Fin(i), DragBreakdown { fins: fin.drag(m, comp_cf(fin.roughness), stag, base, ar), ..DragBreakdown::default() });
         }
         // Tube fins: friction on the outer surface and the through-flow pressure drag, no base drag (`crate::tube_fins`).
-        for t in &self.tube_fins {
-            fins += t.friction_cd(comp_cf(t.roughness()), ar) + t.pressure_cd(re_per_m, stag, base, ar);
+        for (i, t) in self.tube_fins.iter().enumerate() {
+            let fins = t.friction_cd(comp_cf(t.roughness()), ar) + t.pressure_cd(re_per_m, stag, base, ar);
+            emit(Comp::TubeFin(i), DragBreakdown { fins, ..DragBreakdown::default() });
         }
 
-        let mut prot = 0.0;
-        for p in &self.prots {
-            prot += match *p {
+        for (i, p) in self.prots.iter().enumerate() {
+            let protuberances = match *p {
                 ProtCalc::Lug { inner_diameter, inner_area, frontal, length, roughness } => {
                     lug_drag(re_per_m, inner_diameter, inner_area, frontal, length, roughness, stag, base, ar)
                 }
                 ProtCalc::Button { station, height, diameter } => button_drag(m, re_per_m, station, height, diameter, stag, ar),
             };
+            emit(Comp::Prot(i), DragBreakdown { protuberances, ..DragBreakdown::default() });
         }
-
-        let total = friction + pressure + base_total + fins + prot;
-        DragBreakdown { friction, pressure, base: base_total, fins, protuberances: prot, total }
     }
 
     /// Drag at angle of attack `alpha`: the zero-alpha build-up scaled by the axial-drag
     /// multiplier (1 at 0 deg, 1.3 at 17 deg, falling to 0 at 90 deg), which is the drag
     /// component along the rocket axis.
     pub fn drag_at_alpha(&self, mach: f64, re_per_m: f64, motor_on: bool, alpha: f64) -> DragBreakdown {
-        let d = self.drag(mach, re_per_m, motor_on);
-        let k = axial_drag_multiplier(alpha);
-        DragBreakdown {
-            friction: d.friction * k,
-            pressure: d.pressure * k,
-            base: d.base * k,
-            fins: d.fins * k,
-            protuberances: d.protuberances * k,
-            total: d.total * k,
-        }
+        self.drag(mach, re_per_m, motor_on).scaled(axial_drag_multiplier(alpha))
     }
 }
 
@@ -1140,6 +1239,37 @@ mod tests {
     use super::*;
     use crate::vehicle::*;
 
+    #[test]
+    fn component_drags_sum_to_the_total() {
+        let a = Aero::new(&alpha_like());
+        for mach in [0.3, 1.2] {
+            let re = mach * 340.0 / 1.5e-5;
+            let total = a.drag(mach, re, false).total;
+            let comps = a.components(mach, re, false, 0.0);
+            assert_eq!(comps.len(), 4);
+            let sum: f64 = comps.iter().map(|c| c.drag.total).sum();
+            assert!((sum - total).abs() <= 1e-12 * total, "{sum} vs {total} at M{mach}");
+            let cn: f64 = comps.iter().map(|c| c.cn_alpha).sum();
+            assert!((cn - a.stability(mach, 0.0).cn_alpha).abs() < 1e-12);
+            assert!(comps[3].cp.is_nan() && comps[3].cn_alpha == 0.0, "a lug has no lift");
+        }
+    }
+
+    #[test]
+    fn a_drag_override_replaces_the_component() {
+        let mut v = alpha_like();
+        let (mach, re) = (0.3, 0.3 * 340.0 / 1.5e-5);
+        let before = Aero::new(&v);
+        let old = before.drag(mach, re, false);
+        v.labels.fin_sets = vec![Label { cd_override: Some(0.2), ..Label::default() }];
+        let after = Aero::new(&v);
+        let fins = &after.components(mach, re, false, 0.0)[2];
+        assert_eq!((fins.drag.fins, fins.drag.total, fins.drag.friction), (0.2, 0.2, 0.0));
+        let new = after.drag(mach, re, false);
+        assert!((new.total - (old.total + 0.2 - old.fins)).abs() < 1e-12);
+        assert!(after.has_cd_override() && !before.has_cd_override());
+    }
+
     /// Estes Alpha III-like: 18.7 mm body, 0.3 m long (nose 0.1 m), 3 trapezoidal fins.
     fn alpha_like() -> Vehicle {
         let r = 0.0093;
@@ -1171,6 +1301,7 @@ mod tests {
             }],
             protuberances: vec![Protuberance::LaunchLug { station: 0.15, length: 0.02, outer_diameter: 0.005, inner_diameter: 0.004 }],
             stages: vec![],
+            labels: Labels::default(),
         }
     }
 
@@ -1182,6 +1313,7 @@ mod tests {
             fin_sets: vec![],
             protuberances: vec![],
             stages: vec![],
+            labels: Labels::default(),
         }
     }
 
@@ -1196,6 +1328,7 @@ mod tests {
                 fin_sets: vec![],
                 protuberances: vec![],
                 stages: vec![],
+                labels: Labels::default(),
             };
             let st = Aero::new(&v).stability(0.3, 0.0);
             assert!((st.cn_alpha - 2.0).abs() < 1e-9);
@@ -1213,6 +1346,7 @@ mod tests {
             fin_sets: vec![],
             protuberances: vec![],
             stages: vec![],
+            labels: Labels::default(),
         };
         let st = Aero::new(&v).stability(0.3, 0.0);
         let expect = 0.1 / 3.0 * (1.0 + 0.5 / 0.75);
@@ -1454,6 +1588,7 @@ mod tests {
             tube_fins: vec![],
             protuberances: vec![],
             stages: vec![],
+            labels: Labels::default(),
         };
         let k = Aero::new(&v).crossflow_damping(0.5 * l);
         assert!((k - r * l.powi(4) / 16.0).abs() < 1e-3 * r * l.powi(4) / 16.0, "{k}");

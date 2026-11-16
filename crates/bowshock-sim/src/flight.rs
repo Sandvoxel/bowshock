@@ -1306,6 +1306,7 @@ mod tests {
                 }),
                 separation: Timing::BURNOUT,
             }],
+            labels: Default::default(),
         }
     }
 

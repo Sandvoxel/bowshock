@@ -519,13 +519,24 @@ pub fn drag_table(rocket: &Rocket, ctx: &Ctx, stage: usize) -> Result<DragTable,
     }
 }
 
-/// What to tell about `spec`'s drag source: why a stack of the rocket flies on the build-up although the CFD table was asked for.
+/// What to tell about `spec`'s drag source: why a stack of the rocket flies on the build-up although the CFD table was asked for,
+/// or, when it does fly on the table, that the parts' drag overrides do not apply to it.
 pub fn drag_note(ctx: &Ctx, spec: &Spec) -> Option<String> {
     if spec.drag != DragSource::CfdTable {
         return None;
     }
     let rocket = ctx.doc.rocket();
-    (1..=rocket.stages().len().max(1)).find_map(|stage| drag_table(rocket, ctx, stage).err())
+    let fallback = (1..=rocket.stages().len().max(1)).find_map(|stage| drag_table(rocket, ctx, stage).err());
+    fallback.or_else(|| has_cd_override(rocket).then(|| "Cd overrides apply to Extended drag only.".to_string()))
+}
+
+/// Whether any part of `rocket` (a pod's included) has a drag override.
+fn has_cd_override(rocket: &Rocket) -> bool {
+    let radial = |r: &bowshock_model::RadialPart| {
+        r.cd_override.is_some()
+            || r.kind.pod_body().is_some_and(|b| b.parts().iter().any(|p| p.cd_override.is_some()) || b.radials().iter().any(|p| p.cd_override.is_some()))
+    };
+    rocket.parts().iter().any(|p| p.cd_override.is_some()) || rocket.radials().iter().any(radial)
 }
 
 #[cfg(test)]

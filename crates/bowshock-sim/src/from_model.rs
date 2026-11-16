@@ -80,8 +80,8 @@ use bowshock_motors::{Motor, MotorDb};
 use crate::aero::Aero;
 use crate::flight::{Deploy, Launch, RecoveryDevice, SimInput};
 use crate::vehicle::{
-    BodyKind, BodySegment, FinCrossSection, FinPlanform, FinSet, MassProps, NoseShape, Protuberance, StageMass, StageMotor, ThrustCurve, Timing, Trigger,
-    TubeFinSet, Vehicle,
+    BodyKind, BodySegment, FinCrossSection, FinPlanform, FinSet, Label, Labels, MassProps, NoseShape, Protuberance, StageMass, StageMotor, ThrustCurve, Timing,
+    Trigger, TubeFinSet, Vehicle,
 };
 use crate::G0;
 
@@ -223,10 +223,23 @@ fn equivalent_trapezoid(kind: &RadialKind) -> Option<(f64, f64, f64, f64, f64)> 
 /// overrides on top) fly as one set, so a group with a canted fin B becomes a set of two and a set of one. A group on a pod
 /// stands on every one of the pod's copies, at the angles `pod_angles` (`[0.0]` on the core), so each set counts that many
 /// times the fins, each at the pod's angle plus its own.
-fn add_radial(rocket: &Rocket, r: &model::RadialPart, pod_angles: &[f64], fins: &mut Vec<FinSet>, prots: &mut Vec<Protuberance>) {
+///
+/// Pushes a label per fin set and protuberance: the group's drag override is shared out over its sets in proportion to their
+/// fin counts, and equally over its lugs and buttons. `whole` is the label of a pod whose own override replaces the drag of
+/// everything on it (see [`pod_whole_label`]).
+fn add_radial(
+    rocket: &Rocket,
+    r: &model::RadialPart,
+    pod_angles: &[f64],
+    whole: Option<&Label>,
+    fins: &mut Vec<FinSet>,
+    prots: &mut Vec<Protuberance>,
+    labels: &mut Labels,
+) {
     let (Some(station), Some(base)) = (rocket.radial_station(r), rocket.radial_base_radius(r)) else {
         return;
     };
+    let (fins0, prots0) = (fins.len(), prots.len());
     let own = r.angles();
     for (params, copies) in copy_sets(r) {
         let (own, copies) = (&own, &copies);
@@ -234,6 +247,29 @@ fn add_radial(rocket: &Rocket, r: &model::RadialPart, pod_angles: &[f64], fins: 
         let place = Placement { station, base, angles, parent: r.parent, bodies: pod_angles.len().max(1) as u32 };
         add_copies(r, &params, place, fins, prots);
     }
+    let label = |share: f64| match whole {
+        Some(w) => w.clone(),
+        None => Label { name: r.display_name(), part: Some(r.id), cd_override: r.cd_override.map(|c| c * share), roll_control: None },
+    };
+    let total_fins: u32 = fins[fins0..].iter().map(|f| f.count).sum();
+    for f in &fins[fins0..] {
+        labels.fin_sets.push(label(f64::from(f.count) / f64::from(total_fins.max(1))));
+    }
+    let lugs = prots.len() - prots0;
+    for _ in 0..lugs {
+        labels.protuberances.push(label(1.0 / lugs as f64));
+    }
+}
+
+/// The label every component of `pod` carries when the pod's own drag override replaces theirs: the pod's name and id with a
+/// drag of 0 (the override itself goes on the pod's first component). `None` without a pod override.
+fn pod_whole_label(pod: &model::RadialPart) -> Option<Label> {
+    pod.cd_override.map(|_| Label { name: pod.display_name(), part: Some(pod.id), cd_override: Some(0.0), roll_control: None })
+}
+
+/// The label of an axial part's body segment, with `share` of its drag override.
+fn part_label(p: &model::Part, share: f64) -> Label {
+    Label { name: p.display_name(), part: Some(p.id), cd_override: p.cd_override.map(|c| c * share), roll_control: None }
 }
 
 /// Where a set of copies stands: `station` on a surface of radius `base` of body `parent`, one copy at each of `angles`
@@ -534,9 +570,10 @@ pub fn vehicle(rocket: &Rocket, motors: &MotorDb, phase: Phase) -> Result<Vehicl
 
     let stations = rocket.stations();
     let body: Vec<BodySegment> = rocket.parts().iter().zip(&stations).map(|(p, &z)| body_segment(p, z)).collect();
+    let mut labels = Labels { body: rocket.parts().iter().map(|p| part_label(p, 1.0)).collect(), ..Labels::default() };
     let (mut fin_sets, mut protuberances) = (Vec::new(), Vec::new());
     for r in rocket.radials() {
-        add_radial(rocket, r, &[0.0], &mut fin_sets, &mut protuberances);
+        add_radial(rocket, r, &[0.0], None, &mut fin_sets, &mut protuberances, &mut labels);
     }
 
     let (config, mounts) = (rocket.active_configuration(), rocket.motor_mounts());
@@ -561,7 +598,7 @@ pub fn vehicle(rocket: &Rocket, motors: &MotorDb, phase: Phase) -> Result<Vehicl
         });
     }
 
-    let mut v = Vehicle { reference_diameter: 0.0, body, fin_sets, tube_fins: Vec::new(), protuberances, stages: sim_stages };
+    let mut v = Vehicle { reference_diameter: 0.0, body, fin_sets, tube_fins: Vec::new(), protuberances, stages: sim_stages, labels };
     if first > 1 {
         v = v.truncated(stages[first - 1].aft_station);
     }
@@ -591,8 +628,12 @@ fn separator(station: f64) -> BodySegment {
 /// `v`: every copy of a pod is a body of its own (its segments at the pod's station plus their local station, closed by a
 /// [`separator`]), ahead of the core's in `v.body`; the fins of its parts and its lugs and buttons are fin sets and
 /// protuberances counted once per copy. See the module docs.
+///
+/// Labels follow the components: a pod part's drag override is shared equally over the pod's copies; a pod's own override
+/// goes whole on its first component and zeroes the rest (see [`pod_whole_label`]).
 fn add_pods(rocket: &Rocket, first: usize, v: &mut Vehicle) {
     let mut bodies: Vec<BodySegment> = Vec::new();
+    let mut body_labels: Vec<Label> = Vec::new();
     for pod in rocket.pods() {
         if rocket.stage_of(pod.parent).is_some_and(|s| s < first) {
             continue;
@@ -600,26 +641,47 @@ fn add_pods(rocket: &Rocket, first: usize, v: &mut Vehicle) {
         let (Some(frame), Some(sub), Some(content)) = (rocket.pod_frame(pod), rocket.pod_rocket(pod.id), pod.kind.pod_body()) else {
             continue;
         };
+        let whole = pod_whole_label(pod);
+        let pod_label = || whole.clone().unwrap_or_else(|| Label { name: pod.display_name(), part: Some(pod.id), ..Label::default() });
+        let starts = (body_labels.len(), v.labels.tube_fins.len(), v.labels.fin_sets.len(), v.labels.protuberances.len());
         let copies = u32::from(pod.count.max(1));
         if content.is_open_tube() {
             let RadialKind::Pod { gap, .. } = pod.kind else { continue };
             let body_radius = rocket.radial_base_radius(pod).unwrap_or(0.0);
+            let before = v.tube_fins.len();
             tube_fin_sets(&sub, frame.station, copies, body_radius, gap, &mut v.tube_fins);
+            v.labels.tube_fins.extend((before..v.tube_fins.len()).map(|_| pod_label()));
         } else {
             let segments: Vec<BodySegment> = sub.parts().iter().zip(sub.stations()).map(|(p, z)| body_segment(p, frame.station + z)).collect();
             if !segments.is_empty() {
+                let share = 1.0 / f64::from(copies);
                 for _ in 0..copies {
                     bodies.extend(segments.iter().cloned());
                     bodies.push(separator(frame.station));
+                    body_labels.extend(sub.parts().iter().map(|p| whole.clone().unwrap_or_else(|| part_label(p, share))));
+                    body_labels.push(pod_label());
                 }
             }
         }
         for r in content.radials() {
-            add_radial(rocket, r, &frame.angles, &mut v.fin_sets, &mut v.protuberances);
+            add_radial(rocket, r, &frame.angles, whole.as_ref(), &mut v.fin_sets, &mut v.protuberances, &mut v.labels);
+        }
+        // The pod's own override goes on its first component.
+        if let Some(c) = pod.cd_override {
+            let first_label = body_labels
+                .get_mut(starts.0)
+                .or(v.labels.tube_fins.get_mut(starts.1))
+                .or(v.labels.fin_sets.get_mut(starts.2))
+                .or(v.labels.protuberances.get_mut(starts.3));
+            if let Some(l) = first_label {
+                l.cd_override = Some(c);
+            }
         }
     }
     bodies.append(&mut v.body);
     v.body = bodies;
+    body_labels.append(&mut v.labels.body);
+    v.labels.body = body_labels;
 }
 
 /// The tube fin sets of an open pod (see [`model::PodBody::is_open_tube`]), `copies` tubes each: one set per run of butted

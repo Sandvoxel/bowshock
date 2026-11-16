@@ -35,7 +35,7 @@
 //!   the values the model has no field for, plus OpenRocket's stored result summary.
 //!
 //! Not modelled (reported as warnings): clustered motors beyond the first tube, secant ogives, non-conical transitions,
-//! motor mounts in body tubes, drag overrides, custom reference lengths, "never" deployment/ignition.
+//! motor mounts in body tubes, drag overrides on internal components, custom reference lengths, "never" deployment/ignition.
 //!
 //! References: the OpenRocket file format (`net.sf.openrocket.file.openrocket`), Niskanen (2013) *OpenRocket technical
 //! documentation* for the component definitions.
@@ -523,8 +523,8 @@ impl<'w> Builder<'w> {
         (best.id, ratio)
     }
 
-    /// Applies OpenRocket's mass and CG overrides of `n` to part `id`; otherwise, when the material density differed from the
-    /// model's by `scale` (or the caller knows the OpenRocket mass, `expected`), overrides the mass so it matches.
+    /// Applies OpenRocket's mass, CG and drag overrides of `n` to part `id`; otherwise, when the material density differed from
+    /// the model's by `scale` (or the caller knows the OpenRocket mass, `expected`), overrides the mass so it matches.
     fn settle_mass(&mut self, id: PartId, n: Node, scale: f64, expected: Option<f64>) {
         if let Some(m) = num(n, "overridemass") {
             self.r.set_mass_override(id, Some(m));
@@ -542,8 +542,11 @@ impl<'w> Builder<'w> {
             self.r.set_cg_override(id, Some(c));
         }
         if child(n, "overridecd").is_some() {
-            let name = name_of(n).unwrap_or_else(|| n.tag_name().name().to_string());
-            self.warn(format!("{name}: drag override is not modelled"));
+            let applied = num(n, "overridecd").is_some_and(|cd| self.r.set_cd_override(id, Some(cd)));
+            if !applied {
+                let name = name_of(n).unwrap_or_else(|| n.tag_name().name().to_string());
+                self.warn(format!("{name}: drag override is not modelled"));
+            }
         }
     }
 
@@ -1211,6 +1214,12 @@ impl<'w> Builder<'w> {
                 self.r.set_cg_override(id, Some(c));
             }
         }
+        // OpenRocket's drag override is for the whole component, shared out over the instances.
+        if let Some(cd) = num(n, "overridecd") {
+            for &id in &ids {
+                self.r.set_cd_override(id, Some(cd / instances as f64));
+            }
+        }
         let _ = label;
         top + len
     }
@@ -1831,6 +1840,18 @@ mod tests {
         );
         let imp = import(xml.as_bytes()).unwrap();
         close(imp.rocket.dry_mass().mass, 1.5, 1e-9);
+    }
+
+    #[test]
+    fn a_drag_override_is_imported() {
+        let xml = format!(
+            "<openrocket><rocket><name>t</name><subcomponents><stage><name>s</name><subcomponents>{NOSE}\
+             <bodytube><name>t</name><material type=\"bulk\" density=\"1850\">g</material><length>0.5</length><radius>auto</radius><thickness>0.002</thickness>\
+             <overridecd>0.35</overridecd></bodytube></subcomponents></stage></subcomponents></rocket></openrocket>"
+        );
+        let imp = import(xml.as_bytes()).unwrap();
+        assert_eq!(imp.rocket.parts()[1].cd_override, Some(0.35));
+        assert!(!imp.warnings.iter().any(|w| w.contains("drag override")), "{:?}", imp.warnings);
     }
 
     #[test]

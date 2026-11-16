@@ -50,6 +50,7 @@ fn rocket(dry_cg: f64, cant: f64) -> Vehicle {
             motor: Some(StageMotor { curve: h128(), mount_aft_station: 1.10, ignition: Timing::LAUNCH, ejection_delay: Some(9.0) }),
             separation: Timing::BURNOUT,
         }],
+        labels: Default::default(),
     }
 }
 

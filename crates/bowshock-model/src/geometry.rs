@@ -337,6 +337,9 @@ pub struct Part {
     /// CG that replaces the computed one, metres behind the part's fore face.
     #[serde(default)]
     pub cg_override: Option<f64>,
+    /// Drag coefficient (on the rocket's reference area) that replaces the part's computed drag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cd_override: Option<f64>,
     /// The shoulder at the fore face (transitions only: a nose cone has no fore shoulder).
     #[serde(default, skip_serializing_if = "Shoulder::is_default")]
     pub shoulder_fore: Shoulder,
@@ -358,6 +361,7 @@ impl Part {
             thickness: material.material().default_wall,
             mass_override: None,
             cg_override: None,
+            cd_override: None,
             shoulder_fore: Shoulder::NONE,
             shoulder_aft: Shoulder::NONE,
         }
@@ -773,6 +777,10 @@ pub struct RadialPart {
     /// CG that replaces the computed one, metres behind the group's fore edge.
     #[serde(default)]
     pub cg_override: Option<f64>,
+    /// Drag coefficient of the whole group (all `count` copies, on the rocket's reference area) that replaces the computed
+    /// drag. On a pod it replaces the drag of the pod's every part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cd_override: Option<f64>,
     /// Per-copy overrides: single fields a copy has loosened from the group (see [`crate::symmetry`]). Empty for a plain
     /// linked group; every entry names a copy (`index < count`) and a field that applies to `kind`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -824,6 +832,7 @@ impl RadialPart {
             cant: 0.0,
             mass_override: None,
             cg_override: None,
+            cd_override: None,
             overrides: Vec::new(),
             instance_angles: None,
             letters: Vec::new(),

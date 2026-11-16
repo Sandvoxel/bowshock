@@ -137,6 +137,29 @@ fn overrides_start_from_the_computed_value_and_clear() {
 }
 
 #[test]
+fn a_drag_override_starts_from_the_build_up_is_one_step_and_flies() {
+    use bowshock_sim::from_model::{sim_input, Phase};
+    let mut fx = Fx::new();
+    let tube = fx.rocket().parts()[1].id;
+    fx.select(tube);
+    let apogee = |fx: &Fx| {
+        let input = sim_input(fx.rocket(), fx.app.ctx().physics.motors(), Phase::Full, bowshock_sim::Launch::default()).unwrap();
+        bowshock_sim::simulate(&input).summary.apogee
+    };
+    let plain = apogee(&fx);
+    fx.send(Message::StartOverride(Field::CdOverride));
+    assert_eq!(fx.app.ctx().doc.undo_label(), Some("Override drag"));
+    let seeded = fx.rocket().part(tube).unwrap().cd_override.unwrap();
+    assert!(seeded > 0.0 && seeded < 0.4 && seeded != 0.5, "seeded from the build-up: {seeded}");
+    assert!((apogee(&fx) - plain).abs() < 0.5, "the computed value flies as before");
+    fx.send(Message::Edit(Field::CdOverride, 0.4, false));
+    assert!(apogee(&fx) < plain);
+    fx.send(Message::ClearOverride(Field::CdOverride));
+    assert_eq!(fx.app.ctx().doc.undo_label(), Some("Clear drag override"));
+    assert_eq!(fx.rocket().part(tube).unwrap().cd_override, None);
+}
+
+#[test]
 fn auto_diameters_follow_until_typed_and_reset_with_a_right_click() {
     let mut fx = Fx::new();
     let ring = fx.internal(|p| matches!(p.kind, InternalKind::CenteringRing { .. }));

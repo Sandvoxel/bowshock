@@ -461,6 +461,35 @@ fn a_canted_fin_of_a_group_flies_as_its_own_fin_set() {
 }
 
 #[test]
+fn labels_name_the_parts_and_share_a_groups_drag_override() {
+    use bowshock_model::{Dim, RadialField};
+    let (mut r, _) = single_stage();
+    let fins = r.radials()[0].id;
+    let upper = r.parts()[1].id;
+    let db = MotorDb::bundled();
+    let v = vehicle(&r, &db, Phase::Full).unwrap();
+    assert_eq!(v.labels.body.len(), v.body.len());
+    assert_eq!(v.labels.body[0].name, "Nose cone");
+    assert_eq!((v.labels.fin_sets[0].part, v.labels.fin_sets[0].cd_override), (Some(fins), None));
+    // A group split into a set of two and a set of one shares its override 2:1.
+    assert!(r.set_cd_override(fins, Some(0.3)) && r.set_cd_override(upper, Some(0.1)));
+    r.unlink_field(fins, 1, RadialField::Cant);
+    r.set_instance_dim(fins, 1, Dim::Cant, 0.035).unwrap();
+    let v = vehicle(&r, &db, Phase::Full).unwrap();
+    let shares: Vec<(u32, f64)> = v.fin_sets.iter().zip(&v.labels.fin_sets).map(|(f, l)| (f.count, l.cd_override.unwrap())).collect();
+    for (count, cd) in &shares {
+        assert!((cd - 0.3 * f64::from(*count) / 3.0).abs() < 1e-12, "{shares:?}");
+    }
+    assert_eq!(v.labels.body[1].cd_override, Some(0.1));
+    // The override flies: more drag than computed lowers the apogee.
+    let fly = |r: &Rocket| simulate(&sim_input(r, &db, Phase::Full, Launch::default()).unwrap()).summary.apogee;
+    let (plain, _) = single_stage();
+    let mut draggy = plain.clone();
+    draggy.set_cd_override(draggy.parts()[1].id, Some(0.5));
+    assert!(fly(&draggy) < fly(&plain));
+}
+
+#[test]
 fn the_documents_fin_cant_spins_the_flown_rocket_the_way_positive_cant_turns_and_fin_b_alone_a_third_as_fast() {
     use bowshock_model::{Dim, RadialField};
     let db = MotorDb::bundled();
