@@ -485,7 +485,7 @@ pub(crate) fn step(s: &mut Solver3, p: &ImplicitParams) -> f64 {
 mod tests {
     use super::*;
     use crate::flux3::tests::Rng;
-    use crate::gas3::physical_flux3;
+    use crate::gas3::{physical_flux3, prim_to_cons3};
 
     fn unit(rng: &mut Rng) -> [f64; 3] {
         let n = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)];
