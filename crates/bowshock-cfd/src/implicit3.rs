@@ -14,15 +14,14 @@
 //! * Lines are cut at solid cells: a solid cell is the identity row (`d = I`, `lo = up = 0`, `rhs = 0`), so a line through a
 //!   fin solves as independent segments. A fluid cell next to a solid cell along the line drops that off-diagonal block `B` and
 //!   adds `B T` to its diagonal, `T` the reflection about the wall face normal (as for a wall boundary).
-//! * Ghost Jacobians on the first / last cell of a line: characteristic far field by finite difference, slip wall and
+//! * Ghost Jacobians on the first / last cell of a line: characteristic far field `T = 0` (frozen ghost), slip wall and
 //!   symmetry planes `T = reflection3(n_face)`, the axis `T = 0` (the ghost depends on another cell, frozen);
-//!   `ImplicitParams::implicit_bc = false` freezes all of them.
+//!   `ImplicitParams::implicit_bc = false` freezes the wall ones too.
 //! * Euler only: no source term and no viscous terms.
 
 use crate::flux::shock_weight;
-use crate::gas3::{cons_to_prim3, prim_to_cons3, reflect3, sound_speed3, Cons3, Prim3, GAMMA};
+use crate::gas3::{cons_to_prim3, reflect3, sound_speed3, Cons3, Prim3, GAMMA};
 use crate::grid3::Face3;
-use crate::bc3::characteristic_ghost3;
 use crate::implicit::ImplicitParams;
 use crate::solver3::{pidx3, Solver3};
 use rayon::prelude::*;
@@ -217,24 +216,6 @@ pub fn reflection3(n: [f64; 3]) -> M5 {
     m
 }
 
-/// `T = dU_ghost / dU_interior` of the characteristic far-field ghost (finite difference).
-fn char_jacobian(fs: &Prim3, edge: &Prim3, n: [f64; 3], outward: f64) -> M5 {
-    let no = [outward * n[0], outward * n[1], outward * n[2]];
-    let u0 = prim_to_cons3(edge);
-    let g0 = prim_to_cons3(&characteristic_ghost3(fs, edge, no).0);
-    let mut t = ZERO5;
-    for q in 0..5 {
-        let h = 1e-7 * (1.0 + u0[q].abs());
-        let mut up = u0;
-        up[q] += h;
-        let g = prim_to_cons3(&characteristic_ghost3(fs, &cons_to_prim3(&up), no).0);
-        for r in 0..5 {
-            t[5 * r + q] = (g[r] - g0[r]) / h;
-        }
-    }
-    t
-}
-
 /// Blocks `(lo, d, up)` of `I - dt J` of a cell with states `wk` (cell), `wm` / `wp` (lower / upper neighbour or ghost), faces
 /// `fl`, `fr` (normals towards the upper neighbour) and volume `vol`.
 fn cell_blocks3(wk: &Prim3, wm: &Prim3, wp: &Prim3, fl: &Face3, fr: &Face3, vol: f64, dt: f64, p: &ImplicitParams) -> (M5, M5, M5) {
@@ -293,7 +274,6 @@ fn cell_blocks3(wk: &Prim3, wm: &Prim3, wp: &Prim3, fl: &Face3, fr: &Face3, vol:
 fn assemble3(s: &Solver3, p: &ImplicitParams, dir: usize) -> Factor {
     let (ni, nj, nk) = (s.grid.ni, s.grid.nj, s.grid.nk);
     let (grid, w, dt, solid) = (&s.grid, &s.w, &s.dt, &s.solid);
-    let fs = s.cfg.freestream;
     let n = ni * nj * nk;
     let stride = [1, ni, ni * nj][dir];
     let e: [isize; 3] = match dir {
@@ -302,13 +282,15 @@ fn assemble3(s: &Solver3, p: &ImplicitParams, dir: usize) -> Factor {
         _ => [0, 0, 1],
     };
     // ghost Jacobian of the lower (`lower`) / upper end of a line
-    let ghost_t = |lower: bool, wk: &Prim3, f: &Face3, i: usize| -> M5 {
+    let ghost_t = |lower: bool, f: &Face3, i: usize| -> M5 {
         if !p.implicit_bc {
             return ZERO5;
         }
         match (dir, lower) {
-            (0, true) => char_jacobian(&fs, wk, f.n, -1.0),
-            (0, false) | (1, false) => char_jacobian(&fs, wk, f.n, 1.0),
+            // Characteristic far field (i ends, j = nj): frozen ghost, T = 0. The f32 finite-difference Jacobian at the kink of the
+            // characteristic branch switch destabilised the GPU left-hand side at CFL ~ 6 (ANF M 2.48 nk 48: a far-field corner cell lost
+            // its pressure and the run froze), so CPU and GPU both use the frozen ghost.
+            (0, _) | (1, false) => ZERO5,
             (1, true) => {
                 if i < grid.axis_cells {
                     ZERO5
@@ -350,7 +332,7 @@ fn assemble3(s: &Solver3, p: &ImplicitParams, dir: usize) -> Factor {
                 let wp = if upper_solid { reflect3(wk, fr.n) } else { w[pidx3(ni, nj, nk, ii + e[0], jj + e[1], kk + e[2])] };
                 let (mut l, mut dd, mut u) = cell_blocks3(wk, &wm, &wp, fl, fr, grid.vol[c], dt[c], p);
                 if m == 0 {
-                    let t = ghost_t(true, wk, fl, i);
+                    let t = ghost_t(true, fl, i);
                     axpy(&mut dd, 1.0, &mm(&l, &t));
                     l = ZERO5;
                 } else if lower_solid {
@@ -358,7 +340,7 @@ fn assemble3(s: &Solver3, p: &ImplicitParams, dir: usize) -> Factor {
                     l = ZERO5;
                 }
                 if m == nl - 1 {
-                    let t = ghost_t(false, wk, fr, i);
+                    let t = ghost_t(false, fr, i);
                     axpy(&mut dd, 1.0, &mm(&u, &t));
                     u = ZERO5;
                 } else if upper_solid {

@@ -121,12 +121,6 @@ fn cons_to_prim_f5(q: &V5) -> V5 {
     [q[0].clone(), u, v, w, p]
 }
 
-/// `[rho, rho u, rho v, rho w, p / (g - 1) + rho |u|^2 / 2]` in f32.
-fn prim_to_cons_f5(w: &V5) -> V5 {
-    let [rho, u, v, ww, p] = w;
-    [rho.clone(), rho * u, rho * v, rho * ww, p / cf(G1) + 0.5f32 * rho * (u * u + v * v + ww * ww)]
-}
-
 /// `A = d(F.n)/dU` of the primitive state `w` for the unit normal `n` (conservative variables `(rho, rho u, rho v, rho w, E)`):
 /// `h = g p / ((g - 1) rho) + |u|^2 / 2` and the rows of [`flux_jacobian_h5`].
 fn flux_jacobian_f5(w: &V5, n: &N3) -> Blk5 {
@@ -233,36 +227,6 @@ fn dissipation_f5(l: &V5, r: &V5, n: &N3, p: &ImplicitParams) -> Blk5 {
 // ghost-state Jacobians (f32 copies of body3.rs's ghost states: only the left-hand side uses them)
 // ---------------------------------------------------------------------------------------------------------------------
 
-/// [`characteristic_ghost3`] in f32 (the same Riemann-invariant far field).
-fn characteristic_ghost_f5(fs: &[f64; 5], interior: &V5, n: &N3) -> V5 {
-    let ci = (cf(GAMMA) * &interior[4] / &interior[0]).sqrt();
-    let uni = &interior[1] * &n[0] + &interior[2] * &n[1] + &interior[3] * &n[2];
-    let m = &uni / &ci;
-    let ce = (GAMMA * fs[4] / fs[0]).sqrt();
-    let une = cf(fs[1]) * &n[0] + cf(fs[2]) * &n[1] + cf(fs[3]) * &n[2];
-    let r_out = &uni + 2.0f32 * &ci / cf(G1);
-    let r_in = &une - cf(2.0 * ce / G1);
-    let un_b = 0.5f32 * (&r_out + &r_in);
-    let c_b = (cf(0.25 * G1) * (&r_out - &r_in)).maximum(1e-8f32);
-    let from_interior = un_b.ge(0.0f32);
-    let rf = [
-        select(&from_interior, &interior[0], cf(fs[0])),
-        select(&from_interior, &interior[1], cf(fs[1])),
-        select(&from_interior, &interior[2], cf(fs[2])),
-        select(&from_interior, &interior[3], cf(fs[3])),
-    ];
-    let un_ref = select(&from_interior, &uni, &une);
-    let c_ref = select(&from_interior, &ci, cf(ce));
-    let q = &c_b / &c_ref;
-    let q2 = &q * &q;
-    let rho = &rf[0] * (&q2 * &q2 * &q);
-    let dn = &un_b - &un_ref;
-    let riemann = [rho.clone(), &rf[1] + &dn * &n[0], &rf[2] + &dn * &n[1], &rf[3] + &dn * &n[2], &rho * &c_b * &c_b / cf(GAMMA)];
-    let super_in = m.le(-1.0f32);
-    let super_out = m.ge(1.0f32);
-    v5(|k| select(&super_in, cf(fs[k]), select(&super_out, &interior[k], &riemann[k])))
-}
-
 /// `w` reflected about a wall of unit normal `n`: `v - 2 (v.n) n` (f32).
 fn reflect_f3(w: &V5, n: &N3) -> V5 {
     let un = &w[1] * &n[0] + &w[2] * &n[1] + &w[3] * &n[2];
@@ -310,11 +274,10 @@ fn pad_dir(a: &F, dir: usize, before: usize, after: usize) -> F {
 // ---------------------------------------------------------------------------------------------------------------------
 
 /// The geometry of one line end (the boundary faces of one side of direction `dir`) on its edge cells (f32): the unit normal of the boundary face
-/// (`raw`, for the wall reflections) and the outward normal (`out`, for the characteristic far field); arrays of the edge slice (`[1, nj, nk]`
+/// (`raw`, for the wall reflections);  arrays of the edge slice (`[1, nj, nk]`
 /// for the i ends, `[ni, 1, nk]`, `[ni, nj, 1]`).
 struct EdgeGeo3 {
     raw: N3,
-    out: N3,
 }
 
 /// Uploaded f32 geometry of one direction: unit normal and area of its faces, zeros and ones of the face shape, and the masks of the cells
@@ -405,9 +368,9 @@ impl LGeo3 {
                 wall_r: if has_solid { Some(mask(nf, &|i, j, k| is_solid(cell(i, j, k, 0)) && !lower(i, j, k))?) } else { None },
             })
         };
-        let edge = |faces: Vec<&Face3>, sign: f64, shape: [usize; 3]| -> Result<EdgeGeo3> {
+        let edge = |faces: Vec<&Face3>, shape: [usize; 3]| -> Result<EdgeGeo3> {
             let get = |q: usize, s: f64| up_lhs(ctx, &faces.iter().map(|f| s * f.n[q]).collect::<Vec<_>>(), shape);
-            Ok(EdgeGeo3 { raw: [get(0, 1.0)?, get(1, 1.0)?, get(2, 1.0)?], out: [get(0, sign)?, get(1, sign)?, get(2, sign)?] })
+            Ok(EdgeGeo3 { raw: [get(0, 1.0)?, get(1, 1.0)?, get(2, 1.0)?] })
         };
         // i ends `[1, nj, nk]`, j ends `[ni, 1, nk]`, k ends `[ni, nj, 1]`
         let iend = |i: usize| -> Vec<&Face3> { (0..nk * nj).map(|q| &grid.iface[q * (ni + 1) + i]).collect() };
@@ -420,9 +383,9 @@ impl LGeo3 {
             one: ones(dims, 1.0)?,
             solid: if has_solid { Some(Array::from_slice_on(ctx, solid, dims)?) } else { None },
             edge: [
-                [edge(iend(0), -1.0, [1, nj, nk])?, edge(iend(ni), 1.0, [1, nj, nk])?],
-                [edge(jend(0), -1.0, [ni, 1, nk])?, edge(jend(nj), 1.0, [ni, 1, nk])?],
-                [edge(kend(0), -1.0, [ni, nj, 1])?, edge(kend(nk), 1.0, [ni, nj, 1])?],
+                [edge(iend(0), [1, nj, nk])?, edge(iend(ni), [1, nj, nk])?],
+                [edge(jend(0), [ni, 1, nk])?, edge(jend(nj), [ni, 1, nk])?],
+                [edge(kend(0), [ni, nj, 1])?, edge(kend(nk), [ni, nj, 1])?],
             ],
         })
     }
@@ -445,12 +408,12 @@ impl LazySolver3 {
         [self.ni, self.nj, self.nk]
     }
 
-    /// `T = dU_ghost / dU_interior` of the first ghost layer at the `lower` / upper end of the lines of direction `dir`, for the edge state `edge`:
-    /// the characteristic far field (the i ends and the `j = nj` end) by the central finite difference of the ghost state with the relative step
-    /// `1e-3` (the CPU's `1e-7` is below f32 resolution): column `q` is `(U_g(U + h e_q) - U_g(U - h e_q)) / 2 h`, `h = 1e-3 (1 + |U_q|)`; the slip wall
-    /// `j = 0` and the symmetry planes: the reflection about the boundary face (at the axis cells the face has no area, so `lo` is zero there and `T`
-    /// does not matter). `ImplicitParams::implicit_bc = false` freezes the ghost states (`T = 0`).
-    fn ghost_jacobian3(&self, dir: usize, lower: bool, edge: &V5, p: &ImplicitParams) -> Tj5 {
+    /// `T = dU_ghost / dU_interior` of the first ghost layer at the `lower` / upper end of the lines of direction `dir`: the slip wall `j = 0` and the
+    /// symmetry planes the reflection about the boundary face (at the axis cells the face has no area, so `lo` is zero there and `T` does not
+    /// matter); the characteristic far field (the i ends and the `j = nj` end) a frozen ghost, `T = 0`, as on the CPU: the f32 finite-difference
+    /// Jacobian at the kink of the characteristic branch switch destabilised the left-hand side at CFL ~ 6 (ANF M 2.48 nk 48 froze).
+    /// `ImplicitParams::implicit_bc = false` freezes the wall ghosts too.
+    fn ghost_jacobian3(&self, dir: usize, lower: bool, _edge: &V5, p: &ImplicitParams) -> Tj5 {
         if !p.implicit_bc {
             return Tj5::Zero;
         }
@@ -458,22 +421,7 @@ impl LazySolver3 {
         if (dir == 1 && lower) || dir == 2 {
             return Tj5::Mat(reflection_f3(&e.raw));
         }
-        let fs = self.cfg.freestream;
-        let u0 = prim_to_cons_f5(edge);
-        let mut entries: [E; 25] = std::array::from_fn(|_| E::Z);
-        for q in 0..5 {
-            let h = 1e-3f32 * (1.0f32 + u0[q].abs());
-            let ghost_at = |sign: f32| -> V5 {
-                let mut uq = u0.clone();
-                uq[q] = &u0[q] + sign * &h;
-                prim_to_cons_f5(&characteristic_ghost_f5(&fs, &cons_to_prim_f5(&uq), &e.out))
-            };
-            let (gp, gm) = (ghost_at(1.0), ghost_at(-1.0));
-            for r in 0..5 {
-                entries[5 * r + q] = E::A((&gp[r] - &gm[r]) / (2.0f32 * &h));
-            }
-        }
-        Tj5::Mat(Blk5(entries))
+        Tj5::Zero
     }
 
     /// Local pseudo-time step from the cell primitives `wk` (f32): `dt = cfl V / (L_i + L_j + L_k)` (`DtMode::Sum`) or `cfl V / (3 min(L_i, L_j, L_k))`

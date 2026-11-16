@@ -1134,8 +1134,9 @@ reconstructed density / pressure is not positive is the cell state itself (first
 The 2D scheme (`implicit.rs`) with three factors solved i, then j, then k, 5x5 blocks, no source term: `(I - dt J_i) X = dt R`, `(I - dt J_j) Y = X`,
 `(I - dt J_k) dU = Y`; `R` is the full second-order residual, `J` the first-order Jacobians with the entropy-fixed Roe `|A|` blended to `lambda I` by the shock
 sensor; `sub_iters` defect-correction passes against `I - dt J_i - dt J_j - dt J_k` (`r = b - (A_i + A_j + A_k - 2 I) du`); update halved up to 8 times until
-`rho, p > 0`; the CFL ramps `cfl0 -> cfl_max` by `growth` per iteration. Ghost Jacobians on the first / last cell of each line: characteristic far field by finite
-difference, slip wall and symmetry planes `T = I - 2 n n^T`, the axis `T = 0` (its faces have no area, so the block that `T` multiplies is zero).
+`rho, p > 0`; the CFL ramps `cfl0 -> cfl_max` by `growth` per iteration. Ghost Jacobians on the first / last cell of each line: characteristic far field frozen (`T = 0`, CPU and GPU alike: the f32
+finite-difference Jacobian at the kink of the characteristic branch switch destabilised the GPU left-hand side at CFL ~ 6, ANF M 2.48 nk 48: a far-field corner
+cell lost its pressure and the run froze with a constant residual), slip wall and symmetry planes `T = I - 2 n n^T`, the axis `T = 0` (its faces have no area, so the block that `T` multiplies is zero).
 
 * **`cfl_max` 10 for every Mach number** (`Numerics3::auto`; the 2D value is 30 subsonic / 20 supersonic): the three-factor scheme diverged on the coarse ANF
   grid once the ramp passed about 15 (it did at `cfl_max` 20 and 30; 10 and 5 converge). If a finer grid diverges at 10 as well, drop to 5; the plan's
@@ -1172,10 +1173,7 @@ worst case over the stagings:
 |implicit, steep ramp (`cfl0 3`, `growth 1.25`, `cfl_max` 10)|0.5 / 2|7.6e-5 / 5.2e-5|9.4e-8 / 6.0e-8|1e-3 / 1e-4|
 
 Every solid-face pattern (one-cell-wide box, two layers with one fluid cell between them, a wider box, a half layer on the `k = nk` plane; `solid_box_patterns_*`):
-explicit 1.8e-6 (f32) / 4.4e-14 (df32); implicit with frozen ghost Jacobians (`implicit_bc = false`, steep ramp, 30 iterations) 7.5e-7 / 6.2e-8. With the far-field
-Jacobian on, the steep ramp differs by 1e-2 after 3 iterations in the cells next to the `j = nj` boundary of that contrived flow (pillar shocks arriving at the
-`u_n,b = 0` switch of the Riemann branch, where the central difference of the f32 left-hand side and the CPU's forward difference linearise the kink differently);
-the Jacobian only steers the iteration. Free-stream preservation on the GPU (perturbed far-field box, M 0.8 at 6 degrees, 5 iterations): explicit 1.7e-7 (f32) /
+explicit 1.8e-6 (f32) / 4.4e-14 (df32); implicit with frozen ghost Jacobians (`implicit_bc = false`, steep ramp, 30 iterations) 7.5e-7 / 6.2e-8; the characteristic far field is frozen on both sides, so CPU and GPU use the same operator there. Free-stream preservation on the GPU (perturbed far-field box, M 0.8 at 6 degrees, 5 iterations): explicit 1.7e-7 (f32) /
 9.4e-15 (df32), implicit 3.7e-7 / 1.0e-14.
 
 ### Speed (`lift3d --case anf|ogive --level 0|1 --precision f32|df32 --bench N`; `PERF` lines in `perf/ledger.jsonl`)

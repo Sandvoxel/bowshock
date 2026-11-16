@@ -288,6 +288,10 @@ impl StopRule3 {
             self.hist.push((it + 1, cn));
             if it + 1 >= self.window.max(STATIONARY_MIN_ITERS) && self.hist.len() >= self.nwin {
                 let w = &self.hist[self.hist.len() - self.nwin..];
+                // a state that no longer changes (every sample bit-identical) without a residual drop is a frozen run, not a converged one
+                if drop < 1.0 && w.iter().all(|&(_, c)| c.to_bits() == w[0].1.to_bits()) {
+                    return stop(self, StopReason::NonFinite);
+                }
                 let (lo, hi, sum) = w.iter().fold((f64::INFINITY, f64::NEG_INFINITY, 0.0), |a, &(_, c)| (a.0.min(c), a.1.max(c), a.2 + c));
                 if hi - lo < self.rel_tol * (sum / self.nwin as f64).abs() {
                     return stop(self, StopReason::CdStationary);
@@ -312,4 +316,38 @@ impl StopRule3 {
 pub fn run3_cold(case: &Case3) -> Result<PointResult3, crate::error::Error> {
     let mut s = case.build_solver()?;
     Ok(run3_on(case, &mut s, false))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Feeds a synthetic run: residual `res(it)` every iteration, `cn(it + 1)` at the sample iterations. The stop, if any.
+    fn feed(res: impl Fn(usize) -> f64, cn: impl Fn(usize) -> f64) -> Option<(usize, StopReason)> {
+        let mut rule = StopRule3::new(&Case3::tiny_anf(2.0, 2f64.to_radians()), false);
+        for it in 0..3000 {
+            let sample = (it + 1) % SAMPLE_EVERY == 0;
+            if let Some(why) = rule.check(it, res(it), sample.then(|| cn(it + 1))) {
+                return Some((it + 1, why));
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_frozen_state_without_a_residual_drop_is_a_failure() {
+        // every CN sample bit-identical, the residual flat at 0.5: frozen, not stationary
+        let stop = feed(|_| 0.5, |_| 0.316_928_495_035_045);
+        assert_eq!(stop, Some((1000, StopReason::NonFinite)));
+    }
+
+    #[test]
+    fn a_stationary_state_with_a_residual_drop_still_stops_stationary() {
+        // identical CN samples but the residual fell 2 orders (a converged limit): CdStationary as before
+        let stop = feed(|it| if it < 100 { 1.0 } else { 1e-2 }, |_| 0.3);
+        assert_eq!(stop, Some((1000, StopReason::CdStationary)));
+        // a CN that wiggles at round-off level without a drop is not frozen (not bit-identical): CdStationary
+        let stop = feed(|_| 0.5, |it| 0.3 + 1e-9 * (it % 3) as f64);
+        assert_eq!(stop, Some((1000, StopReason::CdStationary)));
+    }
 }

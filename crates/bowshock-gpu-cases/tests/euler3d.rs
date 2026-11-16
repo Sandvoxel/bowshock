@@ -172,10 +172,9 @@ fn tiny_anf_implicit_state_after_30_iterations_matches_cpu() {
 /// together:
 ///
 /// * the steep ramp, 30 iterations, with the ghost Jacobians frozen (`implicit_bc = false`): the solid-wall folds and the identity rows are checked
-///   without the far-field Jacobian. With it on, the steep ramp differs by 1e-2 after 3 iterations in the cells next to the `j = nj` far-field
-///   boundary, where the pillar shocks arrive at the switch of its Riemann branch (`u_n,b = 0`): the central finite difference of the f32
-///   left-hand side (relative step 1e-3) and the CPU's forward difference (1e-7) linearise that kink differently (the steady state is the same);
-/// * the `Numerics3::auto` ramp for 3 iterations with the ghost Jacobians on.
+///   without any ghost Jacobian (the characteristic far field is always frozen, `T = 0`, on both sides; only the wall and symmetry reflections
+///   are switched by `implicit_bc`);
+/// * the `Numerics3::auto` ramp for 3 iterations with the wall / symmetry ghost Jacobians on.
 #[test]
 fn solid_box_patterns_implicit_match_cpu() {
     let mut rows = Vec::new();
