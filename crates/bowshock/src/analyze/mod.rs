@@ -477,7 +477,8 @@ impl State {
     /// Re-solve (coarse) or Refine (medium) was pressed: the next refresh solves on `grid`.
     fn request_solve(&mut self, grid: CfdGrid) {
         self.serial += 1;
-        self.cfd.force = (self.method == Method::CfdTable && uses_cfd(self.analysis) && self.cfd.solving.is_none() && self.cfd.lift_solving.is_none()).then_some(grid);
+        self.cfd.force =
+            (self.method == Method::CfdTable && uses_cfd(self.analysis) && self.cfd.solving.is_none() && self.cfd.lift_solving.is_none()).then_some(grid);
     }
 
     /// Keeps what the CFD table method knows about the document current (the mapped geometry, the stored table, whether it is
@@ -686,7 +687,8 @@ impl State {
         // The crosshair starts at the cursor's default (the flight's maximum Mach) and returns there when the pointer leaves.
         let active = ctx.doc.rocket().active_config_id();
         let previous = self.default_x;
-        self.default_x = (out.analysis != Analysis::Dispersion).then(|| readout::default_cursor(&out, active) / built.scale.x_si);
+        self.default_x =
+            (!matches!(out.analysis, Analysis::Dispersion | Analysis::Components)).then(|| readout::default_cursor(&out, active) / built.scale.x_si);
         if self.plot.hover_x().is_none() || self.plot.hover_x() == previous {
             self.plot.set_hover(self.default_x);
         }

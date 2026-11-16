@@ -125,6 +125,8 @@ pub struct ComponentAero {
     pub cp: f64,
     /// Drag at the condition, axial-drag multiplier applied; a drag override is the whole drag, in the component's category.
     pub drag: DragBreakdown,
+    /// Whether the drag is the label's override rather than the build-up.
+    pub overridden: bool,
 }
 
 /// One component of the vehicle, by its index in the vehicle's list of that kind.
@@ -633,7 +635,8 @@ impl Aero {
                 Comp::TubeFin(i) => self.labels.tube_fin(i),
                 Comp::Prot(i) => self.labels.protuberance(i),
             };
-            out.push(ComponentAero { name: label.name, part: label.part, cn_alpha: 0.0, cp: f64::NAN, drag: d.scaled(k) });
+            let overridden = label.cd_override.is_some();
+            out.push(ComponentAero { name: label.name, part: label.part, cn_alpha: 0.0, cp: f64::NAN, drag: d.scaled(k), overridden });
         });
         self.each_component(mach, alpha, |c, _, cna, cp| {
             let i = self.flat_index(c);

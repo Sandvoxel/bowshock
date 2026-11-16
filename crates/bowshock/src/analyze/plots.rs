@@ -62,6 +62,8 @@ pub fn build(out: &Output, units: UnitSystem, overlay: Option<&Overlay>, active:
         Analysis::Drag => (drag(out, overlay, active), None, Scale { x_si: 1.0 }),
         Analysis::Stability => (stability(out, units, overlay), None, Scale { x_si: std::f64::consts::PI / 180.0 }),
         Analysis::Flutter => (flutter(out, units), None, Scale { x_si: 1.0 }),
+        // A table, not a plot (see `view::centre`).
+        Analysis::Components => (PlotGroup::new(Axis::mach()), None, Scale { x_si: 1.0 }),
         Analysis::Dispersion => {
             let (hist, ground) = dispersion(out, units);
             (hist, Some(ground), Scale { x_si: unit(Quantity::Altitude, units).to_si })

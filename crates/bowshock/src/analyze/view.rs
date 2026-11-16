@@ -375,6 +375,15 @@ fn conditions<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
             rows.push(input("Mean wind", c.wind, Quantity::Velocity, Message::Wind));
             rows.push(muted("One-sigma spreads: wind 1 m/s and 10°, rail tilt 1°, thrust 3 %, drag 5 %, dry mass 2 %.", 12.0));
         }
+        Analysis::Components => {
+            rows.push(row_of("Mach", mach_input(state, MachField::Fixed)));
+            let alpha = unit_input("Angle of attack", c.alpha, Quantity::Angle, units).label_width(LABEL_W).on_commit(Message::Alpha).on_scrub(Message::Alpha);
+            rows.push(if state.method == Method::Barrowman { alpha.hint("Barrowman ignores the angle (α = 0)").into() } else { alpha.into() });
+            rows.push(input("Altitude", c.altitude, Quantity::Altitude, Message::Altitude));
+            rows.push(burnout);
+            rows.push(finish);
+            rows.push(muted("Each part's share of the build-up at this condition. A part's Cd override replaces its computed drag.", 12.0));
+        }
     }
     column(rows).spacing(SPACE_2).boxed()
 }
@@ -417,7 +426,7 @@ fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
     }
     let bar = |e: Element<'a, Message>| container(e).padding([SPACE_2, SPACE_3]).boxed();
 
-    let body: Element<'a, Message> = if state.show_table {
+    let body: Element<'a, Message> = if state.show_table || out.analysis == Analysis::Components {
         container(framed(table(state))).padding([0.0, SPACE_3]).height(Fill).boxed()
     } else if out.analysis == Analysis::Dispersion {
         dispersion(state, built)
@@ -580,7 +589,14 @@ fn drag_key<'a>(built: &'a Built) -> Option<Element<'a, Message>> {
 fn export<'a>(state: &'a State, ready: bool, index: usize) -> Element<'a, Message> {
     let mut table = push(if state.show_table { "Plots" } else { "Table view" }, Weight::Secondary);
     let mut csv = push("CSV", Weight::Secondary);
-    table = if ready { table.on_press(Message::Table(!state.show_table)) } else { table.disabled("Nothing computed yet") };
+    let tabular = state.analysis == Analysis::Components;
+    table = if ready && !tabular {
+        table.on_press(Message::Table(!state.show_table))
+    } else if tabular {
+        table.disabled("This analysis is a table")
+    } else {
+        table.disabled("Nothing computed yet")
+    };
     csv = if ready { csv.on_press(Message::ExportCsv) } else { csv.disabled("Nothing computed yet") };
     let cdx = push("RASAero .CDX1", Weight::Secondary).disabled(RASAERO_REASON);
     let (table, csv, cdx): (Element<'a, Message>, Element<'a, Message>, Element<'a, Message>) = (table.into(), csv.into(), cdx.into());
