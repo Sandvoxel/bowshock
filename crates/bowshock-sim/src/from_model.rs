@@ -368,12 +368,21 @@ fn mean_mid_chord_cos(points: &[(f64, f64)]) -> Option<f64> {
     Some(sum / STRIPS as f64)
 }
 
-fn find_motor<'a>(motors: &'a MotorDb, reference: &MotorRef) -> Option<&'a Motor> {
-    motors
-        .motors
-        .iter()
-        .find(|m| m.designation.eq_ignore_ascii_case(reference.designation.trim()) && m.manufacturer.eq_ignore_ascii_case(reference.manufacturer.trim()))
-        .or_else(|| motors.find(&reference.designation))
+/// The motor `reference` names in `motors`: the exact curve by id when the reference has one the database knows, else by
+/// designation and manufacturer (see [`MotorDb::resolve`]).
+pub fn find_motor<'a>(motors: &'a MotorDb, reference: &MotorRef) -> Option<&'a Motor> {
+    motors.resolve(&reference.id, &reference.designation, &reference.manufacturer)
+}
+
+/// Index in `motors` of [`find_motor`]'s motor.
+pub fn find_motor_index(motors: &MotorDb, reference: &MotorRef) -> Option<usize> {
+    motors.resolve_position(&reference.id, &reference.designation, &reference.manufacturer)
+}
+
+/// The document's reference to `motor`: its designation, manufacturer and id, so the same curve is found again even when
+/// another motor shares its designation.
+pub fn motor_ref(motor: &Motor) -> MotorRef {
+    MotorRef::new(motor.designation.clone(), motor.manufacturer.clone()).with_id(motor.id.clone())
 }
 
 fn thrust_curve(m: &Motor) -> ThrustCurve {

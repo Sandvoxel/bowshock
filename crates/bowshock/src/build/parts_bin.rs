@@ -398,7 +398,7 @@ impl State {
                 let m = &ctx.physics.motors().motors[*i];
                 current = items::motor_mount(rocket, ctx.selection)
                     .and_then(|mount| rocket.active_configuration().slot(mount.id).and_then(|s| s.motor.as_ref()))
-                    .is_some_and(|r| r.designation == m.designation);
+                    .is_some_and(|r| bowshock_sim::from_model::find_motor_index(ctx.physics.motors(), r) == Some(*i));
                 (format!("Ø{:.0} × {:.0} · {:.0} Ns", m.diameter * 1000.0, m.length * 1000.0, m.total_impulse()), rows::motor_outline(), None)
             }
             Item::Preset(i) => {

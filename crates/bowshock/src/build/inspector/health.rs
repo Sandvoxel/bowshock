@@ -1,8 +1,9 @@
 //! The inspector's inline health chips: the checks specific to the selected part (design/components/WarningChip). Fin flutter
-//! (NACA TN 4197 through `bowshock_sim::fin_flutter`), parachute descent rate, whether a recovery device packs in its tube,
-//! and whether the motor fits its mount. A check is plain data ([`Check`]) so it can be tested; the view turns it into a chip.
+//! (Martin, NACA TN 4197, through `analyze::flutter`: the same margin the Analyze screen shows), parachute descent rate, whether
+//! a recovery device packs in its tube, and whether the motor fits its mount. A check is plain data ([`Check`]) so it can be
+//! tested; the view turns it into a chip.
 //!
-//! The flutter and descent chips need a flight (the fastest speed, the descent rate). It is flown with the default launch,
+//! The flutter and descent chips need a flight (the margin along it, the descent rate). It is flown with the default launch,
 //! cached for the document revision it was flown for and reflown only when the document changes, so a field that is scrubbed
 //! does not fly the rocket on every frame ([`FlightCache::needs_flight`] says when it is stale).
 
@@ -11,16 +12,16 @@ use std::rc::Rc;
 
 use bowshock_model::{InternalKind, MotorMount, PartId, PartRef, Rocket};
 use bowshock_motors::MotorDb;
+use bowshock_sim::flutter::FlutterWarning;
 use bowshock_sim::from_model::{self, Level, Phase, Warning};
-use bowshock_sim::{fin_flutter, simulate, Atmosphere, FinSet, Launch};
+use bowshock_sim::{simulate, Launch};
 
-use super::edit::shear_modulus;
+use crate::analyze::compute::FLUTTER_MIN_MARGIN;
+use crate::analyze::flutter::{stocks, FlutterAnalysis};
 use crate::app::{ui, Ctx};
 use crate::units::Quantity;
 use crate::widgets::chip::Severity;
 
-/// A flutter margin (flutter speed over the fastest flight speed) of at least this is fine; the usual guideline.
-pub const FLUTTER_OK: f64 = 1.5;
 /// A descent rate up to this is a comfortable landing, m/s (20 ft/s; the 15 to 20 ft/s range most club rules ask for).
 pub const DESCENT_OK: f64 = 6.1;
 /// Up to this a landing is hard but survivable, m/s (30 ft/s); beyond it the rocket is likely to break.
@@ -37,30 +38,21 @@ pub struct Check {
     pub row: &'static str,
 }
 
-/// What the flight told us: the fastest speed and where, and each device's descent rate.
+/// What the flight told us: the flutter margin along it and each device's descent rate.
 #[derive(Clone, Debug, Default)]
 pub struct Flight {
-    /// Fastest speed of the flight, m/s.
-    pub max_velocity: f64,
-    /// Altitude above the launch site where it happened, m.
-    pub altitude_at_max: f64,
+    /// The fin flutter estimate along the flight up to apogee, for every fin set; `None` for a rocket without fins.
+    pub flutter: Option<FlutterAnalysis>,
     /// `(device name, descent rate m/s)`.
     pub descent_rates: Vec<(String, f64)>,
-    /// The sim's fin sets, in the order of the fins of the rocket.
-    pub fin_sets: Vec<FinSet>,
-    /// The group each of `fin_sets` belongs to (copies with their own overrides fly as separate sets).
-    pub fin_sources: Vec<PartId>,
 }
 
 /// Flies `rocket` with its active configuration (whole stack, default launch). `None` if it cannot fly (no parts, no motor).
 pub fn fly(rocket: &Rocket, motors: &MotorDb) -> Option<Flight> {
     let input = from_model::sim_input(rocket, motors, Phase::Full, Launch::default()).ok()?;
-    let fin_sets = input.vehicle.fin_sets.clone();
-    let fin_sources = from_model::fin_set_sources(rocket).into_iter().map(|(id, _)| id).collect();
     let flight = simulate(&input);
-    let (altitude_at_max, _) =
-        flight.trajectory.samples.iter().fold((0.0, f64::NEG_INFINITY), |best, s| if s.speed > best.1 { (s.altitude, s.speed) } else { best });
-    Some(Flight { max_velocity: flight.summary.max_velocity, altitude_at_max, descent_rates: flight.summary.descent_rates.clone(), fin_sets, fin_sources })
+    let flutter = FlutterAnalysis::of_flight(stocks(rocket, &input.vehicle), &input.launch, &flight);
+    Some(Flight { flutter, descent_rates: flight.summary.descent_rates.clone() })
 }
 
 /// The flight of the document at a revision, flown on demand.
@@ -89,29 +81,29 @@ impl FlightCache {
     }
 }
 
-/// The flutter check of fin group `id`: `None` for anything that is not a fin or when there is no flight to judge against.
-pub fn flutter(rocket: &Rocket, id: PartId, flight: &Flight) -> Option<Check> {
-    let radial = rocket.radial(id).filter(|r| r.kind.is_fin())?;
-    if flight.fin_sources.len() != flight.fin_sets.len() {
-        return None;
-    }
-    // Every copy flies with its own effective values (symmetry overrides); the worst of them is the group's margin.
-    let result = flight
-        .fin_sources
-        .iter()
-        .zip(&flight.fin_sets)
-        .filter(|(source, _)| **source == id)
-        .map(|(_, fin)| fin_flutter(fin, shear_modulus(radial.material), &Atmosphere::standard(), flight.altitude_at_max, flight.max_velocity))
-        .min_by(|a, b| a.margin.total_cmp(&b.margin))?;
-    let margin = result.margin;
+/// The flutter check of fin group `id`: `None` for anything that is not a fin or when there is no flight to judge against. The
+/// margin is the lowest of `V_f / V` over the whole flight up to apogee for the group's fins (each copy with its own overrides
+/// counts), the same number the Analyze screen shows for the rocket when this group governs. The message names the cause and
+/// the cheapest fix: the thickness that reaches [`FLUTTER_MIN_MARGIN`] (`V_f` grows with `t^1.5`).
+pub fn flutter(rocket: &Rocket, id: PartId, flight: &Flight, ctx: &Ctx) -> Option<Check> {
+    rocket.radial(id).filter(|r| r.kind.is_fin())?;
+    let group = flight.flutter.as_ref()?.for_group(id)?;
+    let worst = group.trace.worst();
+    let margin = group.min_margin();
+    let inputs = group.inputs()?;
+    let beyond = group.warnings().into_iter().find_map(|w| if let FlutterWarning::BeyondMach(m) = w { Some(m) } else { None });
+    let needed = ui::with_unit(inputs.thickness * (FLUTTER_MIN_MARGIN / margin).powf(2.0 / 3.0), Quantity::Length, ctx.units);
     let (severity, text) = if !margin.is_finite() {
         (Severity::Ok, "No flutter".to_string())
-    } else if margin >= FLUTTER_OK {
-        (Severity::Ok, format!("{margin:.1}× margin"))
-    } else if margin >= 1.0 {
-        (Severity::Warn, format!("{margin:.1}× (min {FLUTTER_OK:.1})"))
+    } else if margin < 1.0 {
+        let at = ui::with_unit(worst.speed, Quantity::Velocity, ctx.units);
+        (Severity::Err, format!("Flutters at {at} (M {:.2}) · fins too thin or soft: {needed} thick for {FLUTTER_MIN_MARGIN:.2}×", worst.mach))
+    } else if margin < FLUTTER_MIN_MARGIN {
+        (Severity::Warn, format!("{margin:.2}× (min {FLUTTER_MIN_MARGIN:.2}) · fins too thin or soft: {needed} thick for {FLUTTER_MIN_MARGIN:.2}×"))
+    } else if let Some(mach) = beyond {
+        (Severity::Warn, format!("{margin:.1}× margin · reaches M {mach:.1}, beyond Martin's Mach 1.5"))
     } else {
-        (Severity::Err, format!("Flutters at {:.0} m/s", result.velocity))
+        (Severity::Ok, format!("{margin:.1}× margin"))
     };
     Some(Check { severity, text, row: "Flutter" })
 }
@@ -187,7 +179,7 @@ fn fits(designation: &str, mount: &MotorMount, motors: &MotorDb, ctx: &Ctx) -> S
 pub fn checks(rocket: &Rocket, id: PartId, flight: Option<&Flight>, ctx: &Ctx) -> Vec<Check> {
     let mut out = Vec::new();
     match rocket.kind_of(id) {
-        Some(PartRef::Radial(_)) => out.extend(flight.and_then(|f| flutter(rocket, id, f))),
+        Some(PartRef::Radial(_)) => out.extend(flight.and_then(|f| flutter(rocket, id, f, ctx))),
         Some(PartRef::Internal(p)) => {
             out.extend(packing(rocket, id, ctx));
             out.extend(flight.and_then(|f| descent(rocket, id, f, ctx)));
@@ -220,16 +212,34 @@ mod tests {
         let ctx = app.ctx();
         let rocket = ctx.doc.rocket();
         let flight = fly(rocket, ctx.physics.motors()).expect("the example flies");
-        assert!(flight.max_velocity > 50.0 && flight.max_velocity < 400.0, "{}", flight.max_velocity);
-        assert!(flight.altitude_at_max >= 0.0);
+        let analysis = flight.flutter.as_ref().expect("the example has fins");
+        let top = analysis.trace.points.iter().map(|p| p.speed).fold(0.0, f64::max);
+        assert!(top > 50.0 && top < 400.0, "{top}");
         let fins = rocket.radials().iter().find(|r| r.kind.is_fin()).unwrap().id;
-        let check = flutter(rocket, fins, &flight).expect("flutter check");
-        // 120 mm root, 3.18 mm birch plywood on a Mach 0.5 to 0.7 flight: well clear of flutter.
-        assert_eq!(check.severity, Severity::Ok, "{}", check.text);
-        assert!(check.text.ends_with("× margin"), "{}", check.text);
+        let check = flutter(rocket, fins, &flight, ctx).expect("flutter check");
+        // 120 mm root, 3.18 mm birch plywood (G 0.85 GPa): V_f is about 169 m/s at Mach 0.53, 181 m/s is the rocket's speed there.
+        assert_eq!(check.severity, Severity::Err, "{}", check.text);
+        assert!(check.text.starts_with("Flutters at") && check.text.contains("thick for 1.25×"), "{}", check.text);
+        // The Analyze screen's number is the same: one fin group, one margin.
+        let (jobs, _) = crate::analyze::compute::jobs(rocket, ctx.physics.motors(), bowshock_sim::from_model::Phase::Full).unwrap();
+        let out = crate::analyze::compute::compute(&crate::analyze::compute::Request {
+            analysis: crate::analyze::Analysis::Flutter,
+            method: crate::analyze::Method::Extended,
+            conditions: Default::default(),
+            jobs,
+            bands: Default::default(),
+            cfd: None,
+        });
+        let crate::analyze::compute::Data::Flutter(Some(on_screen)) = &out.runs[0].data else { panic!("the example has fins") };
+        assert_eq!(on_screen.min_margin(), flight.flutter.as_ref().unwrap().min_margin());
+        // The fix the message names works: fins 5 mm thick.
+        let mut thicker = rocket.clone();
+        thicker.set_dim(fins, bowshock_model::Dim::Thickness, 0.005);
+        let fixed = flutter(&thicker, fins, &fly(&thicker, ctx.physics.motors()).unwrap(), ctx).unwrap();
+        assert_eq!(fixed.severity, Severity::Ok, "{}", fixed.text);
         assert!(descent(rocket, id_of(rocket, |p| matches!(p.kind, InternalKind::Parachute { .. })), &flight, ctx).is_some());
         // Nothing to say about a body tube.
-        assert!(flutter(rocket, rocket.parts()[0].id, &flight).is_none());
+        assert!(flutter(rocket, rocket.parts()[0].id, &flight, ctx).is_none());
     }
 
     #[test]
@@ -240,14 +250,14 @@ mod tests {
         let mut rocket = ctx.doc.rocket().clone();
         let fins = rocket.radials().iter().find(|r| r.kind.is_fin() && r.count > 1).unwrap().id;
         let motors = ctx.physics.motors();
-        let base = flutter(&rocket, fins, &fly(&rocket, motors).unwrap()).unwrap();
+        let base = flutter(&rocket, fins, &fly(&rocket, motors).unwrap(), ctx).unwrap();
         assert!(rocket.unlink_field(fins, 1, RadialField::Span));
         let longer = rocket.instance_dim(fins, 1, Dim::Span).unwrap() * 3.0;
         rocket.set_instance_dim(fins, 1, Dim::Span, longer).unwrap();
         let flight = fly(&rocket, motors).unwrap();
-        assert_eq!(flight.fin_sets.len(), 2, "the loose fin flies as its own set");
+        assert_eq!(flight.flutter.as_ref().unwrap().stocks.len(), 2, "the loose fin flies as its own set");
         let margin = |c: &Check| c.text.split('×').next().unwrap().parse::<f64>().unwrap_or(0.0);
-        let worst = flutter(&rocket, fins, &flight).unwrap();
+        let worst = flutter(&rocket, fins, &flight, ctx).unwrap();
         assert!(margin(&worst) < margin(&base) || worst.severity != Severity::Ok, "{} vs {}", worst.text, base.text);
     }
 
@@ -261,8 +271,15 @@ mod tests {
         rocket.set_dim(fins, bowshock_model::Dim::Thickness, 0.0004);
         rocket.set_dim(fins, bowshock_model::Dim::Span, 0.2);
         let flight = fly(&rocket, ctx.physics.motors()).unwrap();
-        let check = flutter(&rocket, fins, &flight).unwrap();
-        assert_ne!(check.severity, Severity::Ok, "{}", check.text);
+        let check = flutter(&rocket, fins, &flight, ctx).unwrap();
+        assert_eq!(check.severity, Severity::Err, "{}", check.text);
+        // The message names the cause and the fix.
+        assert!(check.text.starts_with("Flutters at") && check.text.contains("thick for"), "{}", check.text);
+        // Stock 100 times stiffer (G 20 GPa against balsa's 0.2) is 10 times the margin.
+        let before = flight.flutter.as_ref().unwrap().min_margin();
+        assert!(rocket.set_fin_shear_modulus(fins, Some(20.0e9)));
+        let after = fly(&rocket, ctx.physics.motors()).unwrap().flutter.unwrap().min_margin();
+        assert!((after / before - 10.0).abs() < 0.2, "{before} -> {after}");
     }
 
     #[test]

@@ -1,0 +1,26 @@
+# Fin flutter: the Analyze view (speed against flutter speed over the flight, the shaded gap, the minimum and its margin) and the
+# inspector's flutter chip and stiffness rows, for the example rocket and for thin balsa fins that fail.
+# Run with the example rocket loaded: `cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/flutter.drive out/flutter`
+viewport 1280x1100
+scale 1
+# The example's linked fin set, picked in the Aero lane: the stiffness rows of 03 Material & finish and the flutter chip of 04.
+click (922, 924)
+screenshot inspector-example.png
+click "Analyze"
+click "Fin flutter"
+move (100, 1000)
+move (102, 1002)
+screenshot analyze-example.png
+click "Build"
+# Thin balsa fins: 1 mm thick, and the material swapped for balsa.
+click (1180, 372)
+type "1"
+type enter
+click "Birch plywood · 630 kg/m³"
+click "Balsa · 170 kg/m³"
+screenshot inspector-balsa.png
+click "Analyze"
+click "Fin flutter"
+move (100, 1000)
+move (102, 1002)
+screenshot analyze-balsa.png

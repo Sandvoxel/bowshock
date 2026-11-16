@@ -96,6 +96,9 @@ fn import_ork(ork: &std::path::Path, out: &std::path::Path) -> std::process::Exi
     }
     let mut db = bowshock_motors::MotorDb::bundled();
     if let Some(dir) = app::physics::user_motors_dir() {
+        for motor in bowshock_motors::load_cached(&dir).0 {
+            db.upsert(motor);
+        }
         for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
             if entry.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("eng")) {
                 let _ = db.load_eng_file(entry.path());

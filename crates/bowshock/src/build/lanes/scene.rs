@@ -2,8 +2,8 @@
 //! Pure: no widgets and no pixels (those are `geometry` and `canvas`), so the packing and the numbers are unit-tested.
 
 use bowshock_model::{ConfigId, InternalKind, PartClass, PartId, PartKind, PartRef, RadialKind, RadialPart, Rocket, Stage, System};
-use bowshock_motors::{Motor, MotorDb};
-use bowshock_sim::from_model::Phase;
+use bowshock_motors::MotorDb;
+use bowshock_sim::from_model::{find_motor, Phase};
 
 use crate::app::ui;
 use crate::units::{Quantity, UnitSystem};
@@ -245,14 +245,6 @@ pub struct Scene {
     pub other_cgs: Vec<OtherCg>,
 }
 
-/// The motor `reference` names, as the bridge finds it.
-fn find_motor<'a>(db: &'a MotorDb, designation: &str, manufacturer: &str) -> Option<&'a Motor> {
-    db.motors
-        .iter()
-        .find(|m| m.designation.eq_ignore_ascii_case(designation.trim()) && m.manufacturer.eq_ignore_ascii_case(manufacturer.trim()))
-        .or_else(|| db.find(designation))
-}
-
 /// How the container is called in the drag tag.
 fn container_word(kind: &PartKind) -> &'static str {
     match kind {
@@ -470,7 +462,7 @@ impl Scene {
                 continue;
             }
             for mount in &mounts {
-                let Some(motor) = config.slot(mount.id).and_then(|s| s.motor.as_ref()).and_then(|m| find_motor(motors, &m.designation, &m.manufacturer)) else {
+                let Some(motor) = config.slot(mount.id).and_then(|s| s.motor.as_ref()).and_then(|m| find_motor(motors, m)) else {
                     continue;
                 };
                 let (end, start) = (mount.motor_aft_station, mount.motor_aft_station - motor.length);

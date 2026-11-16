@@ -645,7 +645,7 @@ impl App {
                 _ => None,
             }
         });
-        let animating = self.viewport.animating() || self.ctx.animating() || self.simulate.animating() || self.analyze.animating();
+        let animating = self.viewport.animating() || self.ctx.animating() || self.simulate.animating() || self.analyze.animating() || self.chrome.animating();
         let frames = animating.then(|| iced::window::frames().map(Message::Frame));
         iced::Subscription::batch([events].into_iter().chain(frames))
     }

@@ -779,6 +779,38 @@ impl Rocket {
         }
     }
 
+    /// Sets the shear modulus (Pa) fin group `id` uses in the flutter estimate in place of its material's (`None` goes back to
+    /// the material's). Returns whether it was applied; a non-positive or non-finite value is refused.
+    pub fn set_fin_shear_modulus(&mut self, id: PartId, shear_modulus: Option<f64>) -> bool {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.set_fin_shear_modulus(id, shear_modulus)).unwrap_or(false);
+        }
+        if shear_modulus.is_some_and(|g| !(g.is_finite() && g > 0.0)) {
+            return false;
+        }
+        match self.radials.iter_mut().find(|r| r.id == id && r.kind.is_fin()) {
+            Some(r) => {
+                r.shear_modulus = shear_modulus;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Sets whether fin group `id` is laminated tip to tip (see [`crate::RadialPart::tip_to_tip`]). Returns whether it was applied.
+    pub fn set_fin_tip_to_tip(&mut self, id: PartId, tip_to_tip: bool) -> bool {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.set_fin_tip_to_tip(id, tip_to_tip)).unwrap_or(false);
+        }
+        match self.radials.iter_mut().find(|r| r.id == id && r.kind.is_fin()) {
+            Some(r) => {
+                r.tip_to_tip = tip_to_tip;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// The `(z, height)` vertex `index` of freeform fin `id`.
     pub fn vertex(&self, id: PartId, index: usize) -> Option<(f64, f64)> {
         match &self.radial(id)?.kind {
@@ -854,6 +886,25 @@ mod tests {
         assert_eq!(e.limited, None);
         assert_eq!(r.dim(nose, Dim::Diameter), Some(0.12));
         assert_eq!(r.dim(tail, Dim::Diameter), Some(0.12));
+    }
+
+    #[test]
+    fn fin_stiffness_overrides_the_material_and_tip_to_tip_doubles_it() {
+        let (mut r, _, fins, _, _) = finned();
+        let g = |r: &Rocket| r.radial(fins).unwrap().flutter_shear_modulus();
+        let plywood = crate::MaterialId::BIRCH_PLYWOOD.shear_modulus();
+        assert_eq!(g(&r), plywood);
+        assert!(r.set_fin_tip_to_tip(fins, true));
+        assert_eq!(g(&r), 2.0 * plywood);
+        assert!(r.set_fin_shear_modulus(fins, Some(4.14e9)));
+        assert_eq!(g(&r), 8.28e9);
+        // A non-positive value is refused; `None` goes back to the material's.
+        assert!(!r.set_fin_shear_modulus(fins, Some(0.0)));
+        assert!(r.set_fin_shear_modulus(fins, None) && r.set_fin_tip_to_tip(fins, false));
+        assert_eq!(g(&r), plywood);
+        // Only fins have a stiffness.
+        let tube = r.parts()[1].id;
+        assert!(!r.set_fin_tip_to_tip(tube, true));
     }
 
     /// Fins at Bottom +0 and a ring at Top +0.02 on the tail tube.

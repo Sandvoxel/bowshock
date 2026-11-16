@@ -31,8 +31,8 @@ fn err<T>(line: usize, message: impl Into<String>) -> Result<T, ParseError> {
 /// Parses every motor in an `.eng` source string.
 ///
 /// Comment lines preceding a motor are kept in [`Motor::comments`]; a comment containing `APPROXIMATED` sets
-/// [`Motor::approximated`]. The file must contain at least one motor and every motor at least one thrust point with
-/// non-negative, non-decreasing time and non-negative thrust.
+/// [`Motor::approximated`]. Each motor's [`Motor::id`] is [`Motor::file_id`] (a hash of its curve). The file must contain at
+/// least one motor and every motor at least one thrust point with non-negative, non-decreasing time and non-negative thrust.
 pub fn parse_eng(src: &str) -> Result<Vec<Motor>, ParseError> {
     let mut motors = Vec::new();
     let mut current: Option<(usize, Motor)> = None;
@@ -98,6 +98,7 @@ fn finish(header_line: usize, mut motor: Motor) -> Result<Motor, ParseError> {
         return err(header_line, format!("motor `{}` has no thrust points", motor.designation));
     }
     motor.approximated = motor.comments.iter().any(|c| c.to_ascii_uppercase().contains("APPROXIMATED"));
+    motor.id = motor.file_id();
     Ok(motor)
 }
 
@@ -124,6 +125,8 @@ fn parse_header(line: usize, tokens: &[&str]) -> Result<Motor, ParseError> {
     let delays = parse_delays(line, tokens[3])?;
     let designation = tokens[0].to_string();
     Ok(Motor {
+        id: String::new(),
+        thrustcurve: None,
         common_name: common_name(&designation),
         designation,
         manufacturer: normalize_manufacturer(&tokens[6.min(tokens.len())..].join(" ")),
@@ -138,12 +141,11 @@ fn parse_header(line: usize, tokens: &[&str]) -> Result<Motor, ParseError> {
     })
 }
 
+/// Delays such as `4-7-10`, `P` (plugged: none) or a list that also offers a plugged motor, `2-4-8-P` (the `P` adds no delay).
 fn parse_delays(line: usize, field: &str) -> Result<Vec<f64>, ParseError> {
-    if field.eq_ignore_ascii_case("p") {
-        return Ok(Vec::new());
-    }
     field
         .split(['-', ','])
+        .filter(|s| !s.eq_ignore_ascii_case("p"))
         .map(|s| match s.parse::<f64>() {
             Ok(v) if v.is_finite() && v >= 0.0 => Ok(v),
             _ => err(line, format!("invalid delay `{s}` in `{field}` (expected seconds like `4-7-10`, or `P`)")),
@@ -153,7 +155,7 @@ fn parse_delays(line: usize, field: &str) -> Result<Vec<f64>, ParseError> {
 
 /// Expands the manufacturer abbreviations that RASP files commonly use (`AT`, `RCS/Aerotech` → `AeroTech`, `CTI` → `Cesaroni`,
 /// `E` → `Estes`).
-fn normalize_manufacturer(raw: &str) -> String {
+pub(crate) fn normalize_manufacturer(raw: &str) -> String {
     let raw = raw.trim();
     if raw == "AT" || raw.to_ascii_lowercase().contains("aerotech") {
         return "AeroTech".to_string();
@@ -215,6 +217,10 @@ Y5-P 18 70.5 P .005 .015
         assert!(m[0].approximated);
         assert_eq!(m[0].manufacturer, "AeroTech");
         assert_eq!(m[0].delays, vec![3.0, 5.0]);
+        // AeroTech's E6 lists `2-4-8-P`: three delays, or plugged.
+        let e6 = parse_eng("E6T 24 70 2-4-8-P 0.0215 0.0463 AT\n0.011 18.085\n6.033 0.0\n").unwrap();
+        assert_eq!(e6[0].delays, vec![2.0, 4.0, 8.0]);
+        assert!(e6[0].id.starts_with("eng:"));
     }
 
     #[test]

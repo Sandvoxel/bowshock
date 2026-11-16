@@ -351,8 +351,7 @@ pub fn set_motor(ctx: &mut Ctx, mount: PartId, index: usize) -> bool {
     let Some(motor) = ctx.physics.motors().motors.get(index) else {
         return false;
     };
-    let (reference, delay) =
-        (bowshock_model::MotorRef::new(motor.designation.clone(), motor.manufacturer.clone()), motor.delays.first().copied().unwrap_or(0.0));
+    let (reference, delay) = (bowshock_sim::from_model::motor_ref(motor), motor.delays.first().copied().unwrap_or(0.0));
     let name = motor.designation.clone();
     let config = ctx.doc.rocket().active_config_id();
     let ok =

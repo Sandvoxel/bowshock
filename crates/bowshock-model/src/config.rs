@@ -13,19 +13,29 @@ use crate::PartId;
 /// Stable identifier of a [`Configuration`] within a [`Rocket`].
 pub type ConfigId = u64;
 
-/// A motor in the motor database, by name.
+/// A motor in the motor database: its id when it was picked from the database, and its name (what an imported document or a
+/// database without that id falls back to).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MotorRef {
     /// Designation, e.g. `"H128W"`.
     pub designation: String,
     /// Manufacturer, e.g. `"Aerotech"`.
     pub manufacturer: String,
+    /// The motor database's id of the exact curve (`tc:<ThrustCurve motorId>`, or `eng:<hash>` for a curve from a file); empty
+    /// when only the name is known. Two curves with the same designation differ here.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
 }
 
 impl MotorRef {
-    /// A reference to `designation` by `manufacturer`.
+    /// A reference to `designation` by `manufacturer`, without an id.
     pub fn new(designation: impl Into<String>, manufacturer: impl Into<String>) -> MotorRef {
-        MotorRef { designation: designation.into(), manufacturer: manufacturer.into() }
+        MotorRef { designation: designation.into(), manufacturer: manufacturer.into(), id: String::new() }
+    }
+
+    /// This reference naming the exact curve `id` (see [`MotorRef::id`]).
+    pub fn with_id(self, id: impl Into<String>) -> MotorRef {
+        MotorRef { id: id.into(), ..self }
     }
 }
 

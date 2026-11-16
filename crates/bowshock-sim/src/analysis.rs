@@ -1,10 +1,10 @@
-//! Parametric analyses: sweeps vs Mach and angle of attack, fin flutter, Monte Carlo dispersion.
+//! Parametric analyses: sweeps vs Mach and angle of attack, Monte Carlo dispersion. Fin flutter is [`crate::flutter`].
 
 use crate::aero::{Aero, DragBreakdown};
 use crate::atmosphere::Atmosphere;
 use crate::flight::{build_aeros, run, Launch, SimInput, Tweaks};
 use crate::rng::Rng;
-use crate::vehicle::{FinPlanform, FinSet, Vehicle};
+use crate::vehicle::Vehicle;
 
 /// One point of a Mach sweep.
 #[derive(Clone, Debug, PartialEq)]
@@ -88,41 +88,6 @@ pub fn vs_alpha(vehicle: &Vehicle, cg: f64, mach: f64, alpha_range: (f64, f64), 
             }
         })
         .collect()
-}
-
-/// Fin flutter result.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct FlutterResult {
-    /// Flutter velocity at the evaluated altitude (m/s).
-    pub velocity: f64,
-    /// Flutter Mach number.
-    pub mach: f64,
-    /// `flutter velocity / max velocity`; below 1 means the fins flutter within the flight envelope
-    /// (a margin of at least ~1.5 is the usual guideline).
-    pub margin: f64,
-}
-
-/// Fin flutter velocity from NACA TN 4197 (Martin 1958):
-///
-/// `V_f = a sqrt( G / ( 1.337 AR^3 P (lambda + 1) / (2 (AR + 2) (t/c)^3) ) )`
-///
-/// with `AR = span^2 / area` of a single fin panel, `lambda = tip/root chord`, `t/c` thickness over
-/// root chord, `P` static pressure and `a` the speed of sound at `altitude` metres above the
-/// site of `atmosphere`. `shear_modulus` is in Pa. Evaluate at the altitude where the maximum
-/// velocity occurs (pressure falls with altitude, so flutter speed drops as Mach rises).
-pub fn fin_flutter(fin: &FinSet, shear_modulus: f64, atmosphere: &Atmosphere, altitude: f64, max_velocity: f64) -> FlutterResult {
-    let air = atmosphere.at_agl(altitude);
-    let area = fin.fin_area().max(1e-12);
-    let ar = fin.span * fin.span / area;
-    let (root, tip) = match fin.planform {
-        FinPlanform::Trapezoidal => (fin.root_chord, fin.tip_chord),
-        FinPlanform::Elliptical => (fin.root_chord, 0.0),
-    };
-    let lambda = tip / root.max(1e-9);
-    let tc = (fin.thickness / root.max(1e-9)).max(1e-9);
-    let denom = 1.337 * ar.powi(3) * air.pressure * (lambda + 1.0) / (2.0 * (ar + 2.0) * tc.powi(3));
-    let velocity = air.speed_of_sound * (shear_modulus / denom).sqrt();
-    FlutterResult { velocity, mach: velocity / air.speed_of_sound, margin: if max_velocity > 0.0 { velocity / max_velocity } else { f64::INFINITY } }
 }
 
 /// One-sigma dispersions applied by [`monte_carlo`].
@@ -329,23 +294,6 @@ mod tests {
         // Body lift grows with alpha, pulling the CP forward of the alpha=0 value.
         assert!(a[9].cp < a[0].cp);
         assert!(a[9].drag.total > a[0].drag.total);
-    }
-
-    #[test]
-    fn flutter_matches_hand_calculation() {
-        // Fibreglass-like fin: G = 2.7 GPa; 150 x 90 mm trapezoid, 3 mm thick.
-        let v = simple();
-        let f = fin_flutter(&v.fin_sets[0], 2.7e9, &Atmosphere::standard(), 0.0, 100.0);
-        let area = 0.5 * (0.15 + 0.06) * 0.09;
-        let ar = 0.09f64.powi(2) / area;
-        let lambda = 0.06 / 0.15;
-        let tc: f64 = 0.003 / 0.15;
-        let air = Atmosphere::standard().at_agl(0.0);
-        let expect = air.speed_of_sound * (2.7e9 * 2.0 * (ar + 2.0) * tc.powi(3) / (1.337 * ar.powi(3) * air.pressure * (lambda + 1.0))).sqrt();
-        assert!((f.velocity - expect).abs() / expect < 1e-12);
-        assert!(f.velocity > 100.0 && f.velocity < 1500.0, "{}", f.velocity);
-        let high = fin_flutter(&v.fin_sets[0], 2.7e9, &Atmosphere::standard(), 5000.0, 100.0);
-        assert!(high.mach > f.mach);
     }
 
     #[test]

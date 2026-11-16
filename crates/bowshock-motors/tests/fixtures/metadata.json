@@ -1,0 +1,177 @@
+{
+  "manufacturers": [
+    {
+      "name": "AeroTech",
+      "abbrev": "AeroTech"
+    },
+    {
+      "name": "Alpha Hybrids",
+      "abbrev": "Alpha"
+    },
+    {
+      "name": "Animal Motor Works",
+      "abbrev": "AMW"
+    },
+    {
+      "name": "Apogee Components",
+      "abbrev": "Apogee"
+    },
+    {
+      "name": "Cesaroni Technology",
+      "abbrev": "Cesaroni"
+    },
+    {
+      "name": "Contrail Rockets",
+      "abbrev": "Contrail"
+    },
+    {
+      "name": "Ellis Mountain",
+      "abbrev": "Ellis"
+    },
+    {
+      "name": "Estes Industries",
+      "abbrev": "Estes"
+    },
+    {
+      "name": "Gorilla Rocket Motors",
+      "abbrev": "Gorilla"
+    },
+    {
+      "name": "Hypertek",
+      "abbrev": "Hypertek"
+    },
+    {
+      "name": "Jambol Jet",
+      "abbrev": "Jambol"
+    },
+    {
+      "name": "Kosdon by AeroTech",
+      "abbrev": "KBA"
+    },
+    {
+      "name": "Kosdon TRM",
+      "abbrev": "Kosdon"
+    },
+    {
+      "name": "Loki Research",
+      "abbrev": "Loki"
+    },
+    {
+      "name": "Piotr Tendera Rocket Motors",
+      "abbrev": "TSP"
+    },
+    {
+      "name": "Propulsion Polymers",
+      "abbrev": "PP"
+    },
+    {
+      "name": "Public Missiles, Ltd.",
+      "abbrev": "PML"
+    },
+    {
+      "name": "Quest Aerospace",
+      "abbrev": "Quest"
+    },
+    {
+      "name": "R.A.T.T. Works",
+      "abbrev": "RATT"
+    },
+    {
+      "name": "Raketenmodellbau Klima",
+      "abbrev": "Klima"
+    },
+    {
+      "name": "Roadrunner Rocketry",
+      "abbrev": "Roadrunner"
+    },
+    {
+      "name": "Rocketvision Flight-Star",
+      "abbrev": "RV"
+    },
+    {
+      "name": "Sky Ripper Systems",
+      "abbrev": "SkyR"
+    },
+    {
+      "name": "Southern Cross Rocketry",
+      "abbrev": "SCR"
+    },
+    {
+      "name": "Ultra Energy Link",
+      "abbrev": "Ultra"
+    },
+    {
+      "name": "West Coast Hybrids",
+      "abbrev": "WCH"
+    },
+    {
+      "name": "ZEVETA Bojkovice, a.s.",
+      "abbrev": "ZEVETA"
+    }
+  ],
+  "certOrgs": [
+    {
+      "name": "Austrialian Model Rocket Society Inc.",
+      "abbrev": "AMRS"
+    },
+    {
+      "name": "Canadian Association of Rocketry",
+      "abbrev": "CAR"
+    },
+    {
+      "name": "National Association of Rocketry",
+      "abbrev": "NAR"
+    },
+    {
+      "name": "Tripoli Rocketry Association, Inc.",
+      "abbrev": "TRA"
+    },
+    {
+      "name": "Uncertified",
+      "abbrev": "UNC"
+    }
+  ],
+  "types": [
+    "SU",
+    "reload",
+    "hybrid"
+  ],
+  "diameters": [
+    6,
+    10.1,
+    13,
+    18,
+    20,
+    24,
+    29,
+    32,
+    34,
+    38,
+    54,
+    64,
+    75,
+    81,
+    98,
+    132,
+    152,
+    161
+  ],
+  "impulseClasses": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G",
+    "H",
+    "I",
+    "J",
+    "K",
+    "L",
+    "M",
+    "N",
+    "O"
+  ],
+  "source_url": "http://www.thrustcurve.org/"
+}

@@ -5,10 +5,35 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "RASP .eng motor thrust-curve parser and bundled hobby-rocket motor database for Bowshock (SI units)"
+description = "RASP .eng motor thrust-curve parser, the bundled ThrustCurve.org motor catalogue and a ThrustCurve.org client for Bowshock (SI units)"
 
 [lib]
 name = "bowshock_motors"
+
+[features]
+# The blocking HTTP client for the ThrustCurve.org API (search, download) and the `tc_catalog` generator. Parsing the API's
+# JSON and reading the bundled catalogue need no network and are always built.
+thrustcurve = ["dep:ureq"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The catalogue and the download cache are CBOR, then raw deflate (the same container style as the .bowshock document). Numbers
+# are packed little-endian f32 in CBOR byte strings (serde_bytes), so a load is a straight binary decode.
+ciborium = "0.2"
+flate2 = "1"
+serde_bytes = "0.11"
+# ThrustCurve.org returns data files Base64-encoded.
+base64 = "0.22"
+ureq = { version = "3", optional = true }
+
+[[bin]]
+name = "tc_catalog"
+required-features = ["thrustcurve"]
+
+[[example]]
+name = "thrustcurve_search"
+required-features = ["thrustcurve"]
 
 [lints]
 workspace = true

@@ -279,6 +279,10 @@ fn is_epoxy(m: &MaterialId) -> bool {
     *m == MaterialId::EPOXY
 }
 
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
 impl Default for Shoulder {
     fn default() -> Self {
         Shoulder::NONE
@@ -762,6 +766,14 @@ pub struct RadialPart {
     /// What the fillet is made of.
     #[serde(default = "epoxy", skip_serializing_if = "is_epoxy")]
     pub fillet_material: MaterialId,
+    /// Shear modulus of this fin stock in Pa that replaces the material's own in the flutter estimate (a measured or data-sheet
+    /// value for the laminate); `None` takes [`crate::Material::shear_modulus`]. Fins only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shear_modulus: Option<f64>,
+    /// Whether the fins are laminated tip to tip across the body (through-the-wall construction): the flutter estimate then
+    /// doubles `G`, a rough allowance for the extra root restraint, not a published correction. Fins only.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub tip_to_tip: bool,
 }
 
 impl RadialPart {
@@ -788,7 +800,15 @@ impl RadialPart {
             letters: Vec::new(),
             fillet_radius: 0.0,
             fillet_material: MaterialId::EPOXY,
+            shear_modulus: None,
+            tip_to_tip: false,
         }
+    }
+
+    /// The shear modulus (Pa) the flutter estimate uses for these fins: the override, else the material's, doubled for tip-to-tip
+    /// lamination (see [`RadialPart::tip_to_tip`]).
+    pub fn flutter_shear_modulus(&self) -> f64 {
+        self.shear_modulus.unwrap_or_else(|| self.material.shear_modulus()) * if self.tip_to_tip { 2.0 } else { 1.0 }
     }
 
     /// The stock a new part of this kind is made of: plywood fins, cardboard lugs, aluminum rail buttons.

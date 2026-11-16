@@ -267,6 +267,8 @@ mod tests {
         let fins = r.attach_radial(booster, 0.2, 0.3, 3, RadialKind::EllipticalFin { root_chord: 0.1, span: 0.06, thickness: 0.003 }).unwrap();
         r.set_fin_section(fins, FinSection::Airfoil);
         r.set_cant(fins, 0.02);
+        assert!(r.set_fin_shear_modulus(fins, Some(3.5e9)));
+        assert!(r.set_fin_tip_to_tip(fins, true));
         r.attach_radial(upper, 0.1, 0.0, 2, RadialKind::FreeformFin { points: vec![(0.0, 0.0), (0.04, 0.05), (0.1, 0.0)], thickness: 0.003 }).unwrap();
         r.attach_radial(upper, 0.1, 1.0, 1, RadialKind::LaunchLug { length: 0.05, diameter: 0.01 }).unwrap();
         r.attach_radial(upper, 0.3, 1.0, 2, RadialKind::RailButton { height: 0.008, diameter: 0.011 }).unwrap();

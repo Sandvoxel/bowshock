@@ -13,5 +13,6 @@ pub mod icons;
 pub mod pinch;
 pub mod plot;
 pub mod segmented;
+pub mod spinner;
 pub mod status;
 pub mod unit_input;

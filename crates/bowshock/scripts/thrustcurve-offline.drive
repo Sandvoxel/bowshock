@@ -1,0 +1,11 @@
+# The live ThrustCurve.org search without a connection: a clear "unreachable" state at once, and the catalogue still lists:
+#   BOWSHOCK_THRUSTCURVE_API=http://127.0.0.1:9 cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/thrustcurve-offline.drive out/tc
+viewport 1280x800
+click (78, 782)
+click "New configuration…"
+click "ThrustCurve.org"
+click #motor-search
+type "H128"
+screenshot tc-offline.png
+click "Catalogue"
+screenshot tc-offline-catalogue.png

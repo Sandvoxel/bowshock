@@ -418,6 +418,9 @@ fn material_rows<'a>(p: &Params<'a>) -> Option<Vec<Element<'a, Message>>> {
     if let Some(InternalPart { kind: InternalKind::Parachute { line_material, .. }, .. }) = p.rocket.internal(p.id) {
         rows.push(labeled("Lines", choose(options(MaterialKind::Line), line_material, Message::LineMaterial)));
     }
+    if let Some(radial) = p.rocket.radial(p.id).filter(|r| r.kind.is_fin()) {
+        rows.extend(stiffness_rows(p, radial));
+    }
     if let Some(finish) = finish {
         let finishes: Vec<(Finish, String)> = Finish::ALL.iter().map(|f| (*f, finish_label(*f))).collect();
         rows.push(labeled("Finish", choose(finishes, &finish, Message::Finish)));
@@ -429,6 +432,30 @@ fn material_rows<'a>(p: &Params<'a>) -> Option<Vec<Element<'a, Message>>> {
 pub fn material_label(m: &Material) -> String {
     let density = if m.density < 1.0 { format!("{:.3}", m.density) } else { format!("{:.0}", m.density) };
     format!("{} · {density} {}", m.name, m.kind.density_unit())
+}
+
+/// What the fin flutter estimate takes of the fin stock: the material's shear modulus (with its source), a value of the fin's own
+/// in its place, and the tip-to-tip allowance.
+fn stiffness_rows<'a>(p: &Params<'a>, radial: &RadialPart) -> Vec<Element<'a, Message>> {
+    let material = radial.material.material();
+    let gpa = |pa: f64| format!("{:.2} GPa", pa / 1.0e9);
+    let ghost = |label: &'static str, message: Message| -> Element<'a, Message> { button(label, Weight::Ghost).on_press(message).into() };
+    let mut rows: Vec<Element<'a, Message>> = Vec::new();
+    match radial.shear_modulus {
+        None => {
+            rows.push(value_row("Shear G", gpa(material.shear_modulus), Some(ghost("Override…", Message::StartOverride(Field::ShearModulus)))));
+            rows.push(container(text(material.shear_source).size(TEXT_LABEL).style(theme::muted)).boxed());
+        }
+        Some(g) => {
+            rows.push(p.form.overridden("G (GPa)", g / 1.0e9, Quantity::Scalar, Field::ShearModulus));
+            rows.push(value_row("From material", gpa(material.shear_modulus), Some(ghost("Clear", Message::ClearOverride(Field::ShearModulus)))));
+        }
+    }
+    rows.push(labeled("Laminate", segmented_fill(&[(false, "Plain"), (true, "Tip-to-tip")], radial.tip_to_tip, Message::TipToTip)));
+    if radial.tip_to_tip {
+        rows.push(text_row("Flutter G", format!("{} (×2, an estimate)", gpa(radial.flutter_shear_modulus()))));
+    }
+    rows
 }
 
 /// `Regular paint · 60 µm`.

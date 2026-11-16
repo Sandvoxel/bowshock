@@ -54,7 +54,7 @@ cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/shell.drive 
 | `bowshock` | the desktop app |
 | `bowshock-model` | the rocket document: parts, materials, mass/CG, configurations, stages, the binary `.bowshock` format (`BOWSHOCK` magic + version, deflated CBOR) |
 | `bowshock-sim` | Barrowman aerodynamics, flight simulation and analyses; `from_model` maps a document onto it |
-| `bowshock-motors` | RASP `.eng` parser and bundled ThrustCurve.org motors |
+| `bowshock-motors` | RASP `.eng` parser, the bundled ThrustCurve.org motor catalogue (every listed motor with a curve; data: [ThrustCurve.org](https://www.thrustcurve.org)) and a ThrustCurve.org search/download client |
 | `bowshock-core`, `bowshock-cfd`, `bowshock-reference` | CFD drag library (not yet wired into the app) |
 
 ## License

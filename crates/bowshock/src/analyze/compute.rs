@@ -20,18 +20,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::cfd;
-use bowshock_model::{CfdTable, ConfigId, Finish, MaterialId, Rocket, StabilityBands};
+use super::flutter::{FinStock, FlutterAnalysis};
+use bowshock_model::{CfdTable, ConfigId, Finish, Rocket, StabilityBands};
 use bowshock_motors::MotorDb;
 use bowshock_sim::from_model::{self, Phase};
 use bowshock_sim::{
-    fin_flutter, monte_carlo, simulate, vs_alpha, vs_mach, AlphaPoint, Atmosphere, Dispersion, DragBreakdown, Launch, MachPoint, MonteCarloStats, SimInput,
-    Vehicle,
+    monte_carlo, simulate, vs_alpha, vs_mach, AlphaPoint, Atmosphere, Dispersion, DragBreakdown, Launch, MachPoint, MonteCarloStats, SimInput, Vehicle,
 };
 
 /// The Mach number of the static balance the status strip shows (kept in step with `app::physics`).
 pub const BALANCE_MACH: f64 = crate::app::physics::BALANCE_MACH;
-/// Flutter velocity over maximum velocity below which fin flutter is a risk (the usual 1.5 guideline).
-pub const FLUTTER_MIN_MARGIN: f64 = 1.5;
+/// Flutter velocity over the flight's speed below which a fin set is flagged as marginal (a 25 % allowance on a
+/// preliminary-design estimate); below 1.0 the estimate says it flutters.
+pub const FLUTTER_MIN_MARGIN: f64 = 1.25;
 /// Most configurations drawn at once: the four categorical series colours (never cycled).
 pub const MAX_CONFIGS: usize = 4;
 
@@ -44,7 +45,7 @@ pub enum Analysis {
     Stability,
     /// Drag by source against Mach.
     Drag,
-    /// Fin flutter velocity against altitude.
+    /// Fin flutter margin along the flight.
     Flutter,
     /// Landing scatter and apogee spread of a Monte Carlo of flights.
     Dispersion,
@@ -197,28 +198,10 @@ pub struct ConfigJob {
     pub cg_liftoff: f64,
     /// CG with the motors burned out (m from the tip).
     pub cg_burnout: f64,
-    /// Shear modulus of each fin set's material, in the order of `vehicle.fin_sets` (Pa).
-    pub shear: Vec<f64>,
+    /// Each fin set's panel and shear modulus, in the order of `vehicle.fin_sets`.
+    pub stocks: Vec<FinStock>,
     /// The flight input (default launch site), `None` when the configuration has no usable motor set-up.
     pub input: Option<SimInput>,
-}
-
-/// Typical shear modulus of fin stock (Pa): handbook values for the bundled materials, 0.3 GPa for anything else.
-pub fn shear_modulus(material: MaterialId) -> f64 {
-    match material.key() {
-        "fiberglass" => 3.0e9,
-        "carbon_fiber" => 5.0e9,
-        "birch_plywood" | "aircraft_plywood" => 0.62e9,
-        "basswood" => 0.4e9,
-        "balsa" => 0.15e9,
-        "aluminum" => 26e9,
-        "steel" => 79e9,
-        "brass" => 35e9,
-        "pla" => 1.2e9,
-        "abs" => 0.9e9,
-        "polycarbonate" => 0.8e9,
-        _ => 0.3e9,
-    }
 }
 
 /// The configurations [`jobs`] did not turn into jobs.
@@ -256,10 +239,6 @@ pub fn jobs(rocket: &Rocket, motors: &MotorDb, phase: Phase) -> Result<(Vec<Conf
         }
         ids.truncate(MAX_CONFIGS);
     }
-    // One shear modulus per fin set the bridge builds (copies with symmetry overrides are separate sets).
-    let fin_materials: Vec<f64> =
-        from_model::fin_set_sources(rocket).iter().map(|(id, _)| rocket.radial(*id).map_or(0.3e9, |r| shear_modulus(r.material))).collect();
-
     let mut out = Vec::new();
     let mut first_error = None;
     for id in ids {
@@ -272,10 +251,9 @@ pub fn jobs(rocket: &Rocket, motors: &MotorDb, phase: Phase) -> Result<(Vec<Conf
         });
         match built {
             Ok((vehicle, cg_liftoff, cg_burnout)) => {
-                let default = fin_materials.first().copied().unwrap_or(0.3e9);
-                let shear = if fin_materials.len() == vehicle.fin_sets.len() { fin_materials.clone() } else { vec![default; vehicle.fin_sets.len()] };
+                let stocks = super::flutter::stocks(&copy, &vehicle);
                 let input = from_model::sim_input(&copy, motors, phase, Launch::default()).ok();
-                out.push(ConfigJob { id, name, vehicle, cg_liftoff, cg_burnout, shear, input });
+                out.push(ConfigJob { id, name, vehicle, cg_liftoff, cg_burnout, stocks, input });
             }
             Err(e) => {
                 first_error.get_or_insert(format!("{name}: {e}"));
@@ -311,31 +289,6 @@ pub struct Request {
     pub cfd: Option<Arc<CfdTable>>,
 }
 
-/// A fin-flutter curve of one configuration (worst fin set).
-#[derive(Debug, Clone, PartialEq)]
-pub struct FlutterCurve {
-    /// `(altitude m, flutter velocity m/s)`.
-    pub velocity: Vec<(f64, f64)>,
-    /// The maximum velocity of the nominal flight (m/s).
-    pub max_velocity: f64,
-    /// Altitude at which it occurs (m).
-    pub max_velocity_altitude: f64,
-    /// The apogee of the nominal flight (m).
-    pub apogee: f64,
-}
-
-impl FlutterCurve {
-    /// Flutter velocity over the maximum velocity at altitude `h` (infinite when the rocket never moves).
-    pub fn margin_at(&self, h: f64) -> f64 {
-        let v = interp(&self.velocity, h);
-        if self.max_velocity > 0.0 {
-            v / self.max_velocity
-        } else {
-            f64::INFINITY
-        }
-    }
-}
-
 /// A Monte Carlo of one configuration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Scatter {
@@ -359,7 +312,7 @@ pub enum Data {
     /// An angle-of-attack sweep.
     Alpha(Vec<AlphaPoint>),
     /// Fin flutter; `None` for a rocket without fins.
-    Flutter(Option<FlutterCurve>),
+    Flutter(Option<FlutterAnalysis>),
     /// A Monte Carlo; `None` when the configuration cannot fly (no motor).
     Dispersion(Option<Scatter>),
 }
@@ -439,8 +392,6 @@ const MACH_STEP_TRANSONIC: f64 = 0.01;
 const TRANSONIC: (f64, f64) = (0.8, 1.3);
 /// Samples of the angle-of-attack sweep.
 const ALPHA_POINTS: usize = 31;
-/// Samples of the flutter curve.
-const FLUTTER_POINTS: usize = 41;
 
 /// The Mach numbers of a sweep over `range`: every 0.025, and every 0.01 between 0.8 and 1.3 (about 150 for 0.1 to 3.0), in
 /// ascending order with the end points included.
@@ -459,24 +410,6 @@ pub fn mach_grid(range: (f64, f64)) -> Vec<f64> {
     grid.sort_by(f64::total_cmp);
     grid.dedup_by(|x, y| (*x - *y).abs() < 1e-6);
     grid
-}
-
-/// Linear interpolation of `(x, y)` samples at `x`, clamped to the ends.
-pub fn interp(points: &[(f64, f64)], x: f64) -> f64 {
-    let (Some(first), Some(last)) = (points.first(), points.last()) else { return f64::NAN };
-    if x <= first.0 {
-        return first.1;
-    }
-    if x >= last.0 {
-        return last.1;
-    }
-    let i = points.partition_point(|p| p.0 <= x);
-    let (a, b) = (points[i - 1], points[i]);
-    if b.0 == a.0 {
-        b.1
-    } else {
-        a.1 + (b.1 - a.1) * (x - a.0) / (b.0 - a.0)
-    }
 }
 
 fn lerp_drag(a: &DragBreakdown, b: &DragBreakdown, t: f64) -> DragBreakdown {
@@ -565,34 +498,9 @@ fn linearise(points: Vec<AlphaPoint>) -> Vec<AlphaPoint> {
         .collect()
 }
 
-fn flutter(job: &ConfigJob, vehicle: &Vehicle) -> Option<FlutterCurve> {
-    if vehicle.fin_sets.is_empty() {
-        return None;
-    }
-    let launch = job.input.as_ref().map(|i| i.launch.clone()).unwrap_or_default();
-    let atmosphere = Atmosphere::new(launch.site_altitude, launch.ground_temperature);
-    let (max_velocity, max_velocity_altitude, apogee) = match &job.input {
-        Some(input) => {
-            let flight = simulate(&SimInput { vehicle: vehicle.clone(), ..input.clone() });
-            let top = flight.trajectory.samples.iter().filter(|s| s.t <= flight.summary.time_to_apogee).max_by(|a, b| a.speed.total_cmp(&b.speed));
-            (flight.summary.max_velocity, top.map_or(0.0, |s| s.altitude), flight.summary.apogee)
-        }
-        None => (0.0, 0.0, 0.0),
-    };
-    let top = apogee.max(100.0);
-    let velocity: Vec<(f64, f64)> = (0..FLUTTER_POINTS)
-        .map(|i| {
-            let h = top * i as f64 / (FLUTTER_POINTS - 1) as f64;
-            let worst = vehicle
-                .fin_sets
-                .iter()
-                .zip(&job.shear)
-                .map(|(fin, &g)| fin_flutter(fin, g, &atmosphere, h, max_velocity).velocity)
-                .fold(f64::INFINITY, f64::min);
-            (h, worst)
-        })
-        .collect();
-    Some(FlutterCurve { velocity, max_velocity, max_velocity_altitude, apogee })
+fn flutter(job: &ConfigJob) -> Option<FlutterAnalysis> {
+    let input = SimInput { vehicle: job.vehicle.clone(), ..job.input.clone()? };
+    FlutterAnalysis::of_flight(job.stocks.clone(), &input.launch, &simulate(&input))
 }
 
 fn scatter(job: &ConfigJob, vehicle: &Vehicle, cond: &Conditions) -> Option<Scatter> {
@@ -647,7 +555,7 @@ pub fn compute(request: &Request) -> Output {
                         None => points,
                     })
                 }
-                Analysis::Flutter => Data::Flutter(flutter(job, &vehicle)),
+                Analysis::Flutter => Data::Flutter(flutter(job)),
                 Analysis::Dispersion => Data::Dispersion(scatter(job, &vehicle, &cond)),
             };
             let mut run = run_of(job, &vehicle, data);
@@ -728,7 +636,7 @@ impl Output {
         let n = self.runs.first().map_or(0, |r| match &r.data {
             Data::Mach(p) => self.cfd.as_ref().map_or(p.len(), |c| c.nodes),
             Data::Alpha(p) => p.len(),
-            Data::Flutter(c) => c.as_ref().map_or(0, |c| c.velocity.len()),
+            Data::Flutter(f) => f.as_ref().map_or(0, |f| f.trace.points.len()),
             Data::Dispersion(d) => d.as_ref().map_or(0, |d| d.landings.len()),
         });
         match self.analysis {
@@ -737,7 +645,7 @@ impl Output {
                 format!("{n} Mach points at α {aoa:.1}°")
             }
             Analysis::Stability => format!("{n} AoA points at Mach {:.2}", self.conditions.mach_fixed),
-            Analysis::Flutter => format!("{n} altitudes"),
+            Analysis::Flutter => format!("{n} flight samples"),
             Analysis::Dispersion => format!("{n} runs per configuration"),
         }
     }
@@ -791,12 +699,22 @@ impl Output {
             }
             Analysis::Flutter => {
                 for run in &self.runs {
-                    let Data::Flutter(Some(curve)) = &run.data else { continue };
-                    for &(h, v) in &curve.velocity {
-                        rows.push(vec![run.name.clone(), s(h, 0), s(v, 1), s(curve.max_velocity, 1), s(curve.margin_at(h), 2)]);
+                    let Data::Flutter(Some(f)) = &run.data else { continue };
+                    for p in &f.trace.points {
+                        let m = p.margin();
+                        rows.push(vec![
+                            run.name.clone(),
+                            s(p.t, 2),
+                            s(p.altitude, 0),
+                            s(p.speed, 1),
+                            s(p.mach, 3),
+                            s(p.flutter_velocity, 1),
+                            if m.is_finite() { s(m, 2) } else { "-".to_string() },
+                            f.stocks[p.governing.min(f.stocks.len() - 1)].name.clone(),
+                        ]);
                     }
                 }
-                vec!["Configuration", "Altitude (m)", "Flutter velocity (m/s)", "Max velocity (m/s)", "Flutter margin"]
+                vec!["Configuration", "Time (s)", "Altitude (m)", "Velocity (m/s)", "Mach", "Flutter velocity (m/s)", "Flutter margin", "Governing fin set"]
             }
             Analysis::Dispersion => {
                 for run in &self.runs {
@@ -839,8 +757,8 @@ mod tests {
         rocket.set_instance_dim(fins, 1, bowshock_model::Dim::Span, span * 2.0).unwrap();
         let after = n(&rocket);
         assert_eq!(after.vehicle.fin_sets.len(), before.vehicle.fin_sets.len() + 1);
-        assert_eq!(after.shear.len(), after.vehicle.fin_sets.len());
-        let worst = |j: &ConfigJob| flutter(j, &j.vehicle).unwrap().velocity.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
+        assert_eq!(after.stocks.len(), after.vehicle.fin_sets.len());
+        let worst = |j: &ConfigJob| flutter(j).unwrap().min_margin();
         assert!(worst(&after) < worst(&before), "{} vs {}", worst(&after), worst(&before));
     }
 
@@ -901,10 +819,13 @@ mod tests {
     #[test]
     fn flutter_velocity_is_positive_and_the_margin_follows_it() {
         let out = run(Analysis::Flutter, Method::Extended, Conditions::default());
-        let Data::Flutter(Some(curve)) = &out.runs[0].data else { panic!("the example has fins") };
-        assert!(curve.velocity.iter().all(|p| p.1 > 50.0 && p.1.is_finite()));
-        assert!(curve.max_velocity > 100.0, "the example flies fast: {}", curve.max_velocity);
-        assert!((curve.margin_at(curve.max_velocity_altitude) - interp(&curve.velocity, curve.max_velocity_altitude) / curve.max_velocity).abs() < 1e-12);
+        let Data::Flutter(Some(f)) = &out.runs[0].data else { panic!("the example has fins") };
+        assert!(f.trace.points.iter().all(|p| p.flutter_velocity > 50.0 && p.flutter_velocity.is_finite()));
+        assert!(f.trace.points.iter().map(|p| p.speed).fold(0.0, f64::max) > 100.0, "the example flies fast");
+        assert!((f.min_margin() - f.trace.worst().flutter_velocity / f.trace.worst().speed).abs() < 1e-12);
+        // Hand check of the example's plywood fins (root 120 mm, tip 50 mm, 76 mm span, 3.18 mm; G 0.85 GPa): V_f ≈ 169 m/s at
+        // Mach 0.53 against 181 m/s, so the margin is a little under 1.
+        assert!((0.8..1.1).contains(&f.min_margin()), "{}", f.min_margin());
     }
 
     #[test]
@@ -974,11 +895,5 @@ mod tests {
     fn csv_quotes_cells_with_commas() {
         let t = Table { headers: vec!["a".into(), "b".into()], rows: vec![vec!["x, y".into(), "z".into()]] };
         assert_eq!(t.csv(), "a,b\n\"x, y\",z\n");
-    }
-
-    #[test]
-    fn interpolation_clamps_to_the_ends() {
-        let p = [(0.0, 0.0), (2.0, 4.0)];
-        assert_eq!((interp(&p, 1.0), interp(&p, -1.0), interp(&p, 9.0)), (2.0, 0.0, 4.0));
     }
 }

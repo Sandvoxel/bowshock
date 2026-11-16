@@ -26,6 +26,7 @@ use crate::widgets::plot::{PlotMessage, PlotState};
 
 pub mod cfd;
 pub mod compute;
+pub mod flutter;
 pub mod import;
 pub mod overlay;
 mod plots;

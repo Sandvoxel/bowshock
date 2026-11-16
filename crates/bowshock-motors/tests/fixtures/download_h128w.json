@@ -1,0 +1,181 @@
+{
+  "results": [
+    {
+      "motorId": "5f4294d20002310000000083",
+      "simfileId": "5f4294d20002e90000000397",
+      "format": "RockSim",
+      "source": "user",
+      "data": "PGVuZ2luZS1kYXRhYmFzZT4NCiA8ZW5naW5lLWxpc3Q+DQo8ZW5naW5lIEZEaXY9IjEwIiBGRml4PSIxIiBGU3RlcD0iLTEuIiBJc3A9IjE3Mi4zMSIgSXRvdD0iMTU1Ljc5NSIgVHlwZT0icmVsb2FkYWJsZSIgYXV0by1jYWxjLWNnPSIxIiBhdXRvLWNhbGMtbWFzcz0iMSIgYXZnVGhydXN0PSIxMDMuODYzIiBidXJuLXRpbWU9IjEuNSIgY2dEaXY9IjEwIiBjZ0ZpeD0iMSIgY2dTdGVwPSItMS4iIGNvZGU9IkgxMjhXIiBkZWxheXM9IjYsMTAsMTQiIGRpYT0iMjkuIiBleGl0RGlhPSIwLiIgaW5pdFd0PSIyMTQuNSIgbGVuPSIxOTUuIiBtRGl2PSIxMCIgbUZpeD0iMSIgbVN0ZXA9Ii0xLiIgbWFzc0ZyYWM9IjQyLjk4IiBtZmc9IkFlcm90ZWNoIiBwZWFrVGhydXN0PSIxNTcuMjgiIHByb3BXdD0iOTIuMiIgdERpdj0iMTAiIHRGaXg9IjEiIHRTdGVwPSItMS4iIHRocm9hdERpYT0iMC4iPg0KPGRhdGE+DQo8ZW5nLWRhdGEgY2c9Ijk3LjUiIGY9IjAuIiBtPSI5Mi4yIiB0PSIwLiIvPg0KPGVuZy1kYXRhIGNnPSI5Ny41IiBmPSIxNTcuMjgiIG09Ijg3LjUyNzciIHQ9IjAuMSIvPg0KPGVuZy1kYXRhIGNnPSI5Ny41IiBmPSIxMjkuNzUiIG09Ijc5LjAzNDQiIHQ9IjAuMiIvPg0KPGVuZy1kYXRhIGNnPSI5Ny41IiBmPSIxMjkuNzUiIG09IjcxLjM1NTgiIHQ9IjAuMyIvPg0KPGVuZy1kYXRhIGNnPSI5Ny41IiBmPSIxMjUuMjYiIG09IjYzLjgxIiB0PSIwLjQiLz4NCjxlbmctZGF0YSBjZz0iOTcuNSIgZj0iMTI1LjI2IiBtPSI1Ni4zOTcxIiB0PSIwLjUiLz4NCjxlbmctZGF0YSBjZz0iOTcuNSIgZj0iMTI1LjI2IiBtPSIyNi43NDU0IiB0PSIwLjkiLz4NCjxlbmctZGF0YSBjZz0iOTcuNSIgZj0iMTIwLjgxIiBtPSIxOS40NjQxIiB0PSIxLiIvPg0KPGVuZy1kYXRhIGNnPSI5Ny41IiBmPSIxMDIuOTMiIG09IjYuMjIzMTEiIHQ9IjEuMiIvPg0KPGVuZy1kYXRhIGNnPSI5Ny41IiBmPSI0NC43NSIgbT0iMS44NTMyMyIgdD0iMS4zIi8+DQo8ZW5nLWRhdGEgY2c9Ijk3LjUiIGY9IjguOTQiIG09IjAuMjY0NTM2IiB0PSIxLjQiLz4NCjxlbmctZGF0YSBjZz0iOTcuNSIgZj0iMC4iIG09IjAuIiB0PSIxLjUiLz4NCjwvZGF0YT4NCjwvZW5naW5lPg0KIDwvZW5naW5lLWxpc3Q+DQo8L2VuZ2luZS1kYXRhYmFzZT4=",
+      "samples": [
+        {
+          "time": 0,
+          "thrust": 0
+        },
+        {
+          "time": 0.1,
+          "thrust": 157.28
+        },
+        {
+          "time": 0.2,
+          "thrust": 129.75
+        },
+        {
+          "time": 0.3,
+          "thrust": 129.75
+        },
+        {
+          "time": 0.4,
+          "thrust": 125.26
+        },
+        {
+          "time": 0.5,
+          "thrust": 125.26
+        },
+        {
+          "time": 0.9,
+          "thrust": 125.26
+        },
+        {
+          "time": 1,
+          "thrust": 120.81
+        },
+        {
+          "time": 1.2,
+          "thrust": 102.93
+        },
+        {
+          "time": 1.3,
+          "thrust": 44.75
+        },
+        {
+          "time": 1.4,
+          "thrust": 8.94
+        },
+        {
+          "time": 1.5,
+          "thrust": 0
+        }
+      ],
+      "infoUrl": "/simfiles/5f4294d20002e90000000397/",
+      "dataUrl": "/simfiles/5f4294d20002e90000000397/download/data.rse",
+      "source_url": "http://www.thrustcurve.org/simfiles/5f4294d20002e90000000397/"
+    },
+    {
+      "motorId": "5f4294d20002310000000083",
+      "simfileId": "5f4294d20002e9000000000d",
+      "format": "RASP",
+      "source": "cert",
+      "license": "PD",
+      "data": "OyBBZXJvVGVjaCBIMTI4Vwo7IGNvbnZlcnRlZCBmcm9tIFRNVCB0ZXN0IHN0YW5kIGRhdGEgMTk5NyAod3d3LnRyaXBvbGkub3JnKQo7IHByb3ZpZGVkIGJ5IFRocnVzdEN1cnZlLm9yZyAod3d3LnRocnVzdGN1cnZlLm9yZykKSDEyOFcgMjkgMTk0IDE0IDAuMDk0MDggMC4yMDE2IEFUCiAgIDAuMDI0IDEwMi40MjMKICAgMC4wNzQgMTc1LjIwMwogICAwLjEyNSAxODEuMzc5CiAgIDAuMTc2IDE3OS4yODEKICAgMC4yMjYgMTgxLjQyMwogICAwLjI3NyAxODYuMDc0CiAgIDAuMzI4IDE5MC40ODMKICAgMC4zNzggMTg5LjUwOQogICAwLjQyOSAxODYuMTYyCiAgIDAuNDgwIDE4NC4xMTQKICAgMC41MzAgMTgwLjMwMAogICAwLjU4MSAxNzQuMTQ0CiAgIDAuNjMyIDE3Mi4wMTkKICAgMC42ODMgMTY5LjM2MAogICAwLjczNCAxNjYuMDE3CiAgIDAuNzg0IDE2MS44ODIKICAgMC44MzUgMTU3LjMzMQogICAwLjg4NiAxNTMuMDczCiAgIDAuOTM2IDE1MS45ODUKICAgMC45ODggMTM5LjkwMgogICAxLjAzOSA4Ny44NjUKICAgMS4wODkgNDAuODU3CiAgIDEuMTQwIDE0LjMyOAogICAxLjE5MSA0LjMzMAogICAxLjI0MiAxLjU1MAogICAxLjI5MyAwLjAwMA==",
+      "samples": [
+        {
+          "time": 0.024,
+          "thrust": 102.423
+        },
+        {
+          "time": 0.074,
+          "thrust": 175.203
+        },
+        {
+          "time": 0.125,
+          "thrust": 181.379
+        },
+        {
+          "time": 0.176,
+          "thrust": 179.281
+        },
+        {
+          "time": 0.226,
+          "thrust": 181.423
+        },
+        {
+          "time": 0.277,
+          "thrust": 186.074
+        },
+        {
+          "time": 0.328,
+          "thrust": 190.483
+        },
+        {
+          "time": 0.378,
+          "thrust": 189.509
+        },
+        {
+          "time": 0.429,
+          "thrust": 186.162
+        },
+        {
+          "time": 0.48,
+          "thrust": 184.114
+        },
+        {
+          "time": 0.53,
+          "thrust": 180.3
+        },
+        {
+          "time": 0.581,
+          "thrust": 174.144
+        },
+        {
+          "time": 0.632,
+          "thrust": 172.019
+        },
+        {
+          "time": 0.683,
+          "thrust": 169.36
+        },
+        {
+          "time": 0.734,
+          "thrust": 166.017
+        },
+        {
+          "time": 0.784,
+          "thrust": 161.882
+        },
+        {
+          "time": 0.835,
+          "thrust": 157.331
+        },
+        {
+          "time": 0.886,
+          "thrust": 153.073
+        },
+        {
+          "time": 0.936,
+          "thrust": 151.985
+        },
+        {
+          "time": 0.988,
+          "thrust": 139.902
+        },
+        {
+          "time": 1.039,
+          "thrust": 87.865
+        },
+        {
+          "time": 1.089,
+          "thrust": 40.857
+        },
+        {
+          "time": 1.14,
+          "thrust": 14.328
+        },
+        {
+          "time": 1.191,
+          "thrust": 4.33
+        },
+        {
+          "time": 1.242,
+          "thrust": 1.55
+        },
+        {
+          "time": 1.293,
+          "thrust": 0
+        }
+      ],
+      "infoUrl": "/simfiles/5f4294d20002e9000000000d/",
+      "dataUrl": "/simfiles/5f4294d20002e9000000000d/download/data.eng",
+      "source_url": "http://www.thrustcurve.org/simfiles/5f4294d20002e9000000000d/"
+    }
+  ]
+}

@@ -10,7 +10,7 @@ use super::overlay::{Field, Overlay};
 use super::readout::{config_color, drag_parts, other_visible, DRAG_PARTS};
 use crate::units::{Quantity, Unit, UnitSystem};
 use crate::widgets::ground_track::{GroundTrack, Track, TrackPoint, Wind};
-use crate::widgets::plot::{Axis, HLine, LabelAt, LineStyle, Panel, PlotGroup, Series, SeriesColor, Tag, YTicks};
+use crate::widgets::plot::{Axis, EventMark, HLine, LabelAt, LineStyle, Panel, PlotGroup, Series, SeriesColor, StackedFill, Tag, YTicks};
 
 /// Width kept free at the right of the plots for direct labels.
 const MARGIN_PX: f32 = 130.0;
@@ -59,7 +59,7 @@ pub fn build(out: &Output, units: UnitSystem, overlay: Option<&Overlay>, active:
         Analysis::Aerodynamics => (aero(out, units, overlay, active), None, Scale { x_si: 1.0 }),
         Analysis::Drag => (drag(out, overlay, active), None, Scale { x_si: 1.0 }),
         Analysis::Stability => (stability(out, units, overlay), None, Scale { x_si: std::f64::consts::PI / 180.0 }),
-        Analysis::Flutter => (flutter(out, units), None, Scale { x_si: unit(Quantity::Altitude, units).to_si }),
+        Analysis::Flutter => (flutter(out, units), None, Scale { x_si: 1.0 }),
         Analysis::Dispersion => {
             let (hist, ground) = dispersion(out, units);
             (hist, Some(ground), Scale { x_si: unit(Quantity::Altitude, units).to_si })
@@ -277,37 +277,67 @@ fn stability(out: &Output, units: UnitSystem, overlay: Option<&Overlay>) -> Plot
     group
 }
 
+/// The highest margin the margin panel draws (a rocket nearly at rest has an unbounded one).
+const MARGIN_CAP: f64 = 5.0;
+
 fn flutter(out: &Output, units: UnitSystem) -> PlotGroup {
-    let alt = unit(Quantity::Altitude, units);
     let vel = unit(Quantity::Velocity, units);
     let single = out.runs.len() == 1;
-    let mut velocity = Panel::new("Flutter velocity", vel.symbol).value_unit(vel.symbol);
-    let mut margin = Panel::new("Flutter margin", "× max velocity").value_unit("×").hline(HLine::dashed(
+    let mut speed = Panel::new("Speed and flutter speed", vel.symbol).value_unit(vel.symbol);
+    let mut margin = Panel::new("Flutter margin", "flutter speed ÷ speed").value_unit("×").hline(HLine::dashed(
         FLUTTER_MIN_MARGIN,
-        format!("Min {FLUTTER_MIN_MARGIN:.1}"),
-        SeriesColor::Ok,
+        format!("Min {FLUTTER_MIN_MARGIN:.2}"),
+        SeriesColor::Warn,
     ));
-    let mut top: f64 = 0.0;
+    let mut group_events = Vec::new();
+    let mut end: f64 = 0.0;
     for (i, run) in out.runs.iter().enumerate() {
-        let Data::Flutter(Some(curve)) = &run.data else { continue };
+        let Data::Flutter(Some(f)) = &run.data else { continue };
+        let points = &f.trace.points;
         let color = if single { SeriesColor::Ink } else { config_color(i) };
-        let label = |s: Series| if single { s } else { s.label_margin() };
-        velocity =
-            velocity.with(label(Series::new(run.name.clone(), curve.velocity.iter().map(|&(h, v)| (h / alt.to_si, v / vel.to_si)).collect()).color(color)));
-        margin =
-            margin.with(label(Series::new(run.name.clone(), curve.velocity.iter().map(|&(h, _)| (h / alt.to_si, curve.margin_at(h))).collect()).color(color)));
-        velocity = velocity.hline(HLine::dashed(
-            curve.max_velocity / vel.to_si,
-            if single { "Max velocity".to_string() } else { format!("Max {}", run.name) },
-            SeriesColor::Warn,
-        ));
-        top = top.max(curve.velocity.last().map_or(0.0, |p| p.0));
+        let vf: Vec<(f64, f64)> = points.iter().map(|p| (p.t, p.flutter_velocity / vel.to_si)).collect();
+        let v: Vec<(f64, f64)> = points.iter().map(|p| (p.t, p.speed / vel.to_si)).collect();
+        end = end.max(points.last().map_or(0.0, |p| p.t));
+        if single {
+            // The gap between the two speeds, shaded: green where the fins have room, red where the rocket is faster than the
+            // estimated flutter speed. Layer one (the lower of the two) is invisible; the gap layers stack on it.
+            let low: Vec<(f64, f64)> = vf.iter().zip(&v).map(|(a, b)| (a.0, a.1.min(b.1))).collect();
+            let room: Vec<(f64, f64)> = vf.iter().zip(&v).map(|(a, b)| (a.0, (a.1 - b.1).max(0.0))).collect();
+            let over: Vec<(f64, f64)> = vf.iter().zip(&v).map(|(a, b)| (a.0, (b.1 - a.1).max(0.0))).collect();
+            let layer = |name: &str, pts: Vec<(f64, f64)>, color: SeriesColor, alpha: f32| {
+                let mut s = Series::new(name, pts).color(color);
+                s.fill = Some(StackedFill { alpha });
+                s
+            };
+            speed = speed.with(layer("Lower of the two", low, SeriesColor::Muted, 0.0)).with(layer("Room", room, SeriesColor::Ok, 0.22)).with(layer(
+                "Over",
+                over,
+                SeriesColor::Err,
+                0.4,
+            ));
+            speed = speed
+                .with(Series::new("Flutter speed", vf).color(SeriesColor::Ok).label_as("Flutter speed", LabelAt::Inside))
+                .with(Series::new("Rocket speed", v).color(SeriesColor::Ink));
+            // Mach 1.5, where Martin's data end, at the air of each sample.
+            let mach: Vec<(f64, f64)> = points.iter().map(|p| (p.t, 1.5 * f.trace.atmosphere.at_agl(p.altitude).speed_of_sound / vel.to_si)).collect();
+            speed = speed.with(Series::new("Mach 1.5", mach).color(SeriesColor::Warn).style(LineStyle::Dashed).label_as("Mach 1.5 limit", LabelAt::End));
+            let worst = f.trace.worst();
+            group_events.push(EventMark::new(worst.t, format!("Min {:.2}×", worst.margin())).accent());
+        } else {
+            speed = speed.with(Series::new(format!("{} flutter", run.name), vf).color(color).label_margin());
+            speed = speed.with(Series::new(format!("{} speed", run.name), v).color(color).style(LineStyle::Dashed));
+        }
+        let capped: Vec<(f64, f64)> = points.iter().filter(|p| p.margin().is_finite()).map(|p| (p.t, p.margin().min(MARGIN_CAP))).collect();
+        let series = Series::new(run.name.clone(), capped).color(color);
+        margin = margin.with(if single { series } else { series.label_margin() });
     }
-    let axis = Axis { label: "Altitude".into(), unit: alt.symbol.into(), prefix: String::new(), decimals: 0 };
-    let mut group = PlotGroup::new(axis).panel(velocity).panel(margin);
+    let axis = Axis { label: "Time".into(), unit: "s".into(), prefix: String::new(), decimals: 1 };
+    let mut group = PlotGroup::new(axis).panel(speed).panel(margin);
+    group.events = group_events;
+    group.event_tags = true;
     group.right_margin = if single { 0.0 } else { MARGIN_PX };
-    if top > 0.0 {
-        group.x_range = Some((0.0, top / alt.to_si));
+    if end > 0.0 {
+        group.x_range = Some((0.0, end));
     }
     group
 }
@@ -500,9 +530,10 @@ mod tests {
     #[test]
     fn an_imported_openrocket_design_has_the_stack_with_one_configuration_and_with_several() {
         let mut rocket = bowshock_model::ork::import(include_bytes!("../../../bowshock-model/tests/data/mini_two_stage.ork")).unwrap().rocket;
-        // The fixture's first configuration flies a motor the bundled database lacks, so only the second can be analysed.
+        // Both of the fixture's configurations fly catalogue motors; keep only the second for the one-configuration case.
         let flyable = rocket.configurations()[1].id;
         rocket.select_configuration(flyable);
+        rocket.remove_configuration(rocket.configurations()[0].id).unwrap();
         let check = |rocket: &Rocket, flying: usize| {
             for analysis in [Analysis::Aerodynamics, Analysis::Drag] {
                 let b = plots_of(rocket, analysis, None);

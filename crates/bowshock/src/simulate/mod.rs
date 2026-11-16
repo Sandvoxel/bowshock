@@ -712,7 +712,7 @@ impl State {
             Edit::Motor(choice) => {
                 spec.delay = match (&choice, spec.delay) {
                     // Keep a typed delay when it is one the new motor comes with, else the nearest it offers.
-                    (MotorChoice::Motor(m), Some(d)) => match motors.find(&m.designation) {
+                    (MotorChoice::Motor(m), Some(d)) => match bowshock_sim::from_model::find_motor(motors, m) {
                         Some(motor) if !motor.delays.is_empty() => motor.delays.iter().copied().min_by(|a, b| (a - d).abs().total_cmp(&(b - d).abs())),
                         _ => Some(d),
                     },

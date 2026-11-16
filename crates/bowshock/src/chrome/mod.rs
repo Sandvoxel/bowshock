@@ -119,6 +119,11 @@ impl State {
         self.picker = None;
     }
 
+    /// Whether the chrome needs frames: the motor picker is waiting on ThrustCurve.org (its spinner turns).
+    pub fn animating(&self) -> bool {
+        self.picker.as_ref().is_some_and(config_picker::Picker::busy)
+    }
+
     /// Handles one of the chrome's messages.
     pub fn update(&mut self, message: Message, ctx: &mut Ctx) -> Task<app::Message> {
         match message {
@@ -192,6 +197,9 @@ impl State {
                         config_picker::Outcome::Close => self.picker = None,
                         config_picker::Outcome::Stay => {}
                         config_picker::Outcome::LoadFiles => return pick_motor_files(),
+                        config_picker::Outcome::Debounce(generation) => return config_picker::debounce(generation),
+                        config_picker::Outcome::Search(generation, text) => return config_picker::search(generation, text),
+                        config_picker::Outcome::Download(motor) => return config_picker::download(motor),
                     }
                 }
             }

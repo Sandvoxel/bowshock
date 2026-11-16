@@ -54,6 +54,8 @@ pub enum Field {
     MassOverride,
     /// The CG override, metres behind the part's fore face.
     CgOverride,
+    /// A fin group's own shear modulus for the flutter estimate, in GPa (a plain number: the document keeps it in Pa).
+    ShearModulus,
     /// The active configuration's ejection delay of a motor mount.
     EjectionDelay,
     /// The active configuration's delay after the trigger of a staging event: the separation of stage `n` or the ignition of
@@ -82,6 +84,7 @@ impl Field {
             Field::DeployAltitude => "deploy altitude".into(),
             Field::DeployDelay => "deploy delay".into(),
             Field::CgOverride => "CG".into(),
+            Field::ShearModulus => "shear modulus".into(),
             Field::EjectionDelay => "ejection delay".into(),
             Field::StageDelay(_, EventKind::Separation) => "separation delay".into(),
             Field::StageDelay(_, EventKind::Ignition) => "ignition delay".into(),
@@ -174,6 +177,7 @@ pub fn apply_copy(r: &mut Rocket, id: PartId, copy: usize, field: Field, value: 
         Field::AutoDiameter => Applied::flag(set_auto_diameter(r, id, Some(value))),
         Field::MassOverride => Applied::flag(r.set_mass_override(id, Some(value))),
         Field::CgOverride => Applied::flag(r.set_cg_override(id, Some(value))),
+        Field::ShearModulus => Applied::flag(r.set_fin_shear_modulus(id, Some(value * 1.0e9))),
         Field::EjectionDelay => {
             let config = r.active_config_id();
             Applied::flag(r.set_motor_delay(config, id, value.max(0.0)).is_ok())
@@ -495,33 +499,6 @@ pub fn duplicate(r: &mut Rocket, id: PartId) -> Option<PartId> {
     Some(new)
 }
 
-/// Shear modulus of a material in Pa: the approximation the flutter chip uses. Handbook figures for the isotropic
-/// equivalent: wood and plywood from the USDA *Wood Handbook* (G about 1/16 to 1/12 of E along the grain, fins being
-/// cross-grain laminates), plastics from supplier data sheets (G = E / 2(1 + nu), nu 0.35), metals and composites from MatWeb.
-/// It is a first estimate (a laminate's real stiffness depends on its layup), enough to tell a 1.2x from a 6x margin.
-pub fn shear_modulus(material: bowshock_model::MaterialId) -> f64 {
-    use bowshock_model::MaterialId as M;
-    match material {
-        M::BALSA => 0.2e9,
-        M::BASSWOOD => 0.6e9,
-        M::BIRCH_PLYWOOD | M::AIRCRAFT_PLYWOOD => 1.0e9,
-        M::CARDBOARD => 0.3e9,
-        M::KRAFT_PHENOLIC => 1.5e9,
-        M::BLUE_TUBE => 2.0e9,
-        M::FIBERGLASS => 4.0e9,
-        M::CARBON_FIBER => 5.0e9,
-        M::ALUMINUM => 26.0e9,
-        M::STEEL => 79.0e9,
-        M::BRASS => 39.0e9,
-        M::LEAD => 5.6e9,
-        M::PLA => 1.3e9,
-        M::ABS => 0.8e9,
-        M::POLYCARBONATE => 0.85e9,
-        M::POLYSTYRENE => 1.3e9,
-        _ => 1.0e9,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -732,15 +709,6 @@ mod tests {
         assert_eq!(duplicate(&mut r, 9999), None);
         let nose = r.parts()[0].id;
         assert_eq!(duplicate(&mut r, nose), None);
-    }
-
-    #[test]
-    fn shear_moduli_order_the_materials_sensibly() {
-        assert!(shear_modulus(MaterialId::BALSA) < shear_modulus(MaterialId::BIRCH_PLYWOOD));
-        assert!(shear_modulus(MaterialId::BIRCH_PLYWOOD) < shear_modulus(MaterialId::FIBERGLASS));
-        assert!(shear_modulus(MaterialId::FIBERGLASS) < shear_modulus(MaterialId::ALUMINUM));
-        // Every database material has a positive modulus.
-        assert!(bowshock_model::materials().iter().all(|m| shear_modulus(m.id) > 0.0));
     }
 
     #[test]

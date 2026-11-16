@@ -1,0 +1,45 @@
+{
+  "criteria": [
+    {
+      "name": "commonName",
+      "value": "H128",
+      "matches": 1
+    },
+    {
+      "name": "maxResults",
+      "value": 200,
+      "matches": 1156
+    }
+  ],
+  "matches": 1,
+  "results": [
+    {
+      "motorId": "5f4294d20002310000000083",
+      "manufacturer": "AeroTech",
+      "manufacturerAbbrev": "AeroTech",
+      "designation": "H128W",
+      "commonName": "H128",
+      "impulseClass": "H",
+      "diameter": 29,
+      "length": 194,
+      "type": "reload",
+      "certOrg": "Tripoli Rocketry Association, Inc.",
+      "avgThrustN": 128,
+      "maxThrustN": 168.7,
+      "totImpulseNs": 172.9,
+      "burnTimeS": 1.27,
+      "dataFiles": 2,
+      "totalWeightG": 206,
+      "propWeightG": 94.2,
+      "delays": "4,6,8,10",
+      "delayAdjustable": false,
+      "caseInfo": "RMS-29/180",
+      "propInfo": "White Lightning",
+      "sparky": false,
+      "updatedOn": "2019-04-17",
+      "availability": "regular",
+      "source_url": "http://www.thrustcurve.org/motors/AeroTech/H128W/"
+    }
+  ],
+  "source_url": "http://www.thrustcurve.org/motors/search.html"
+}

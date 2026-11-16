@@ -2,9 +2,11 @@
 //! unit system, so the numbers can be tested without a UI. `view.rs` draws them.
 
 use bowshock_model::{ConfigId, StabilityBands};
+use bowshock_sim::flutter::FlutterWarning;
 use bowshock_sim::MachPoint;
 
-use super::compute::{alpha_at, interp, mach_at, Analysis, Data, Output, Run, FLUTTER_MIN_MARGIN};
+use super::compute::{alpha_at, mach_at, Analysis, Data, Output, Run, FLUTTER_MIN_MARGIN};
+use super::flutter::FlutterAnalysis;
 use super::overlay::{Field, Overlay};
 use crate::app::ui;
 use crate::units::{Quantity, UnitSystem};
@@ -127,8 +129,31 @@ pub fn help(label: &str) -> Option<&'static str> {
         "Peak Cd" => "The highest drag coefficient of the sweep, usually just above Mach 1 where the transonic drag rise peaks.",
         "Normal force CN" => "Side-force coefficient at this angle of attack (CNα times the angle, plus body lift).",
         "Peak CN" => "The largest side-force coefficient of the sweep, at the largest angle.",
-        "Flutter velocity" => "Speed at which the fins would start to flutter at this altitude (NACA TN 4197).",
-        "Margin here" | "Margin at Vmax" => "Flutter velocity divided by the rocket's speed. Keep it above 1.5.",
+        "Lowest margin" => {
+            "Flutter speed divided by the rocket's speed, at the worst moment of the flight up to apogee. 1.0 is the estimated flutter onset; keep it above 1.25."
+        }
+        "Margin here" => "Flutter speed divided by the rocket's speed at the cursor.",
+        "Flutter speed V_f" => "The speed at which the estimate says the fin starts to flutter, in the air at that moment (it rises as the air thins).",
+        "Rocket speed V" => "The rocket's speed through the air.",
+        "Aspect ratio AR" => "Span squared over the area of one fin panel. Slender fins flutter at lower speeds.",
+        "Taper ratio λ" => "Tip chord over root chord.",
+        "Thickness t" => "The mean thickness of the fin section (a rounded or airfoil edge removes some of the plate's thickness).",
+        "Thickness ratio t/c" => "Thickness over root chord: flutter speed grows with its 1.5 power, so thickness is the strongest lever.",
+        "Centroid offset ε" => "How far the panel's centre of area lies behind the root quarter chord, as a fraction of the root chord. Swept fins have a larger one and flutter sooner.",
+        "D_N" => "Martin's denominator constant 24 ε κ p₀ / π.",
+        "Sound speed a" => "Speed of sound in the air at that altitude.",
+        "Pressure p/p₀" => "Static pressure over sea-level standard pressure; thin air raises the flutter speed.",
+        "Shear modulus G" => "Stiffness of the fin stock in shear. Flutter speed grows with its square root.",
+        "G from" => "Where the shear modulus comes from: the material's tabulated value, or the value set on the fin.",
+        "Estimate" => "Martin (NACA TN 4197) bending–torsion flutter estimate for a thin flat panel, in the form Bennett gives (2023).",
+        "Accuracy" => "An empirical fit, good for preliminary design: it does not model the layup, the root fixity or the tip; test a marginal fin.",
+        "at time" => "When in the flight (seconds after liftoff) the margin is lowest.",
+        "Mach" => "The rocket's Mach number at that moment.",
+        "Fin set" => "The fin set that decides the margin: the one with the lowest flutter speed at the worst moment.",
+        "Fin sets" => "The rocket has more than one fin set (copies with their own overrides count); the worst is shown.",
+        "+10 % thickness" => "Flutter speed grows with the 1.5 power of thickness: a fin 10 % thicker flutters at about 15 % higher speed.",
+        "+10 % shear modulus" => "Flutter speed grows with the square root of the shear modulus: 10 % stiffer stock gives about 5 % more speed.",
+        l if l.starts_with("Thickness for") => "The fin thickness that brings the lowest margin up to the minimum, everything else unchanged.",
         "Max velocity" => "The highest speed of the configuration's nominal flight.",
         "CEP 50 %" => "Radius of the circle around the mean landing point that holds half of the landings.",
         "Ellipse major" => "Long axis of the ellipse that holds 95 % of the landings.",
@@ -173,7 +198,7 @@ pub fn default_cursor(out: &Output, active: ConfigId) -> f64 {
             run.max_mach.unwrap_or(super::compute::BALANCE_MACH).clamp(lo, hi.max(lo))
         }
         Data::Alpha(_) => 0.0,
-        Data::Flutter(c) => c.as_ref().map_or(0.0, |c| c.max_velocity_altitude),
+        Data::Flutter(f) => f.as_ref().map_or(0.0, |f| f.trace.worst().t),
         Data::Dispersion(_) => 0.0,
     }
 }
@@ -199,7 +224,7 @@ pub fn readout(out: &Output, x_si: Option<f64>, active: ConfigId, units: UnitSys
     match &run.data {
         Data::Mach(points) => mach(out, run, points, x, units),
         Data::Alpha(_) => alpha(out, run, x, units),
-        Data::Flutter(curve) => flutter(run, curve.as_ref(), x, units),
+        Data::Flutter(f) => flutter(run, f.as_ref(), x, units),
         Data::Dispersion(d) => dispersion(run, d.as_ref(), units),
     }
 }
@@ -370,54 +395,102 @@ fn alpha(out: &Output, run: &Run, alpha_rad: f64, units: UnitSystem) -> Readout 
     }
 }
 
-fn flutter(run: &Run, curve: Option<&super::compute::FlutterCurve>, h: f64, units: UnitSystem) -> Readout {
-    let alt = |m: f64| {
-        let (v, u) = ui::readout(m, Quantity::Altitude, units);
-        (v, u.to_string())
+fn flutter(run: &Run, analysis: Option<&FlutterAnalysis>, t: f64, units: UnitSystem) -> Readout {
+    let Some(f) = analysis else {
+        return Readout { cursor: String::new(), sections: vec![Section { title: "Flutter".into(), rows: vec![Row::new("No fins or no motor", "—", "")] }] };
     };
-    let vel = |v: f64| {
-        let (n, u) = ui::readout(v, Quantity::Velocity, units);
-        (n, u.to_string())
-    };
-    let Some(curve) = curve else {
-        return Readout { cursor: String::new(), sections: vec![Section { title: "Flutter".into(), rows: vec![Row::new("No fins", "—", "")] }] };
-    };
-    let (ha, hu) = alt(h);
-    let (vf, vu) = vel(interp(&curve.velocity, h));
-    let (vmax, _) = vel(curve.max_velocity);
-    let (at_alt, au) = alt(curve.max_velocity_altitude);
-    let (apogee, apu) = alt(curve.apogee);
-    let margin = curve.margin_at(curve.max_velocity_altitude);
-    let sev = if margin >= FLUTTER_MIN_MARGIN {
+    let vel = |v: f64| ui::readout(v, Quantity::Velocity, units);
+    let worst = f.trace.worst();
+    let margin = worst.margin();
+    let severity = if margin >= FLUTTER_MIN_MARGIN {
         Severity::Ok
     } else if margin >= 1.0 {
         Severity::Warn
     } else {
         Severity::Err
     };
-    let local = curve.margin_at(h);
-    Readout {
-        cursor: format!("{ha} {hu}"),
-        sections: vec![
-            Section {
-                title: format!("Flutter · {}", run.name),
-                rows: vec![
-                    Row::new("Flutter velocity", vf, vu.clone()).big(),
-                    Row::new("Margin here", if local.is_finite() { format!("{local:.2}") } else { "—".into() }, "× Vmax"),
-                    Row::new("Max velocity", vmax, vu),
-                    Row::new("at altitude", at_alt, au),
-                ],
-            },
-            Section {
-                title: "Worst case".into(),
-                rows: vec![
-                    Row::new("Margin at Vmax", if margin.is_finite() { format!("{margin:.2}") } else { "—".into() }, "× Vmax")
-                        .tag(Tag::Chip(sev, format!("min {FLUTTER_MIN_MARGIN}"))),
-                    Row::new("Apogee", apogee, apu),
-                ],
-            },
+    let (v_worst, vu) = vel(worst.speed);
+    let (vf_worst, _) = vel(worst.flutter_velocity);
+    let (alt, au) = ui::readout(worst.altitude, Quantity::Altitude, units);
+    let length_unit = Quantity::Length.unit_for(units).symbol;
+    let mut sections = vec![Section {
+        title: format!("Flutter · {}", run.name),
+        rows: vec![
+            Row::new("Lowest margin", format!("{margin:.2}"), "×").big().tag(Tag::Chip(severity, format!("min {FLUTTER_MIN_MARGIN:.2}"))),
+            Row::new("at time", format!("{:.1}", worst.t), "s"),
+            Row::new("at altitude", alt, au),
+            Row::new("Mach", format!("{:.2}", worst.mach), ""),
+            Row::new("Rocket speed V", v_worst, vu),
+            Row::new("Flutter speed V_f", vf_worst, vu),
         ],
+    }];
+    if let Some((vf, v)) = f.at_time(t) {
+        let local = if v > 1.0 { format!("{:.2}", vf / v) } else { "—".into() };
+        sections.push(Section {
+            title: "At cursor".into(),
+            rows: vec![Row::new("Rocket speed V", vel(v).0, vu), Row::new("Flutter speed V_f", vel(vf).0, vu), Row::new("Margin here", local, "×")],
+        });
     }
+    if let Some(i) = f.inputs() {
+        let gov = f.governing();
+        let mut rows = vec![
+            Row::new("Fin set", gov.name.clone(), ""),
+            Row::new("Aspect ratio AR", format!("{:.2}", i.aspect_ratio), ""),
+            Row::new("Taper ratio λ", format!("{:.2}", i.taper_ratio), ""),
+            Row::new("Thickness t", ui::bare(i.thickness, Quantity::Length, units), length_unit),
+            Row::new("Thickness ratio t/c", format!("{:.4}", i.thickness_ratio), ""),
+            Row::new("Centroid offset ε", format!("{:.3}", i.epsilon), ""),
+            Row::new("D_N", format!("{:.1}", i.denominator_constant / 1000.0), "kPa"),
+            Row::new("Sound speed a", vel(i.speed_of_sound).0, vu),
+            Row::new("Pressure p/p₀", format!("{:.3}", i.pressure_ratio), ""),
+            Row::new("Shear modulus G", format!("{:.2}", i.shear_modulus / 1e9), if gov.tip_to_tip { "GPa · tip-to-tip ×2" } else { "GPa" }),
+            Row::new("G from", gov.g_source.split_once(" · ").map_or(gov.g_source.clone(), |(_, source)| source.to_string()), "").muted(),
+        ];
+        if f.stocks.len() > 1 {
+            rows.insert(1, Row::new("Fin sets", f.stocks.len().to_string(), "the worst is shown").muted());
+        }
+        sections.push(Section { title: "Inputs at the lowest margin".into(), rows });
+        // What would move the margin: V_f ∝ t^1.5 and ∝ √G, so the thickness that reaches the target is closed-form.
+        let mut hints = vec![
+            Row::new("+10 % thickness", format!("{:+.0}", (1.1f64.powf(1.5) - 1.0) * 100.0), "% V_f"),
+            Row::new("+10 % shear modulus", format!("{:+.1}", (1.1f64.sqrt() - 1.0) * 100.0), "% V_f"),
+        ];
+        if margin.is_finite() && margin > 0.0 {
+            let needed = i.thickness * (FLUTTER_MIN_MARGIN / margin).powf(2.0 / 3.0);
+            let tag = if margin >= FLUTTER_MIN_MARGIN { Tag::Plain("met".into()) } else { Tag::Chip(Severity::Warn, "thicker".into()) };
+            hints.push(Row::new(format!("Thickness for {FLUTTER_MIN_MARGIN:.2}×"), ui::bare(needed, Quantity::Length, units), length_unit).tag(tag));
+        }
+        sections.push(Section { title: "What moves it".into(), rows: hints });
+    }
+    sections.push(Section { title: "Method".into(), rows: vec![Row::new("Estimate", "NACA TN 4197", ""), Row::new("Accuracy", "preliminary design", "")] });
+    let warnings = f.warnings();
+    if !warnings.is_empty() {
+        let rows = warnings
+            .iter()
+            .map(|w| {
+                let (label, value) = match w {
+                    FlutterWarning::BeyondMach(m) => ("Beyond Mach 1.5", format!("reaches M {m:.2}")),
+                    FlutterWarning::AspectRatio(ar) => ("Aspect ratio", format!("{ar:.2}")),
+                    FlutterWarning::ThicknessRatio(tc) => ("Thickness ratio", format!("{tc:.3}")),
+                    FlutterWarning::CentroidForward(e) => ("Centroid ahead of ¼ chord", format!("ε {e:.2}")),
+                };
+                let mut row = Row::new(label, value, "").tag(Tag::Chip(Severity::Warn, "limit".into()));
+                row.help = Some(match w {
+                    FlutterWarning::BeyondMach(_) => "Martin's flutter data do not reach past Mach 1.5; above it the estimate is an extrapolation.",
+                    FlutterWarning::AspectRatio(_) => "The aspect ratio is outside the range the thin-panel estimate was fitted to; treat the result as rough.",
+                    FlutterWarning::ThicknessRatio(_) => {
+                        "The thickness ratio is outside the range the thin-panel estimate was fitted to; treat the result as rough."
+                    }
+                    FlutterWarning::CentroidForward(_) => {
+                        "With the area centroid at or ahead of the root quarter chord the formula has no finite answer; ε is held at a small value."
+                    }
+                });
+                row
+            })
+            .collect();
+        sections.push(Section { title: "Limits of the estimate".into(), rows });
+    }
+    Readout { cursor: format!("t {t:.1} s"), sections }
 }
 
 fn dispersion(run: &Run, d: Option<&super::compute::Scatter>, units: UnitSystem) -> Readout {

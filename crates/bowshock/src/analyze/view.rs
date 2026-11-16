@@ -286,7 +286,11 @@ fn conditions<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
             rows.push(finish);
         }
         Analysis::Flutter => {
-            rows.push(muted("Flutter velocity (NACA TN 4197) from each fin's geometry and its material's shear modulus, against the maximum velocity of the configuration's flight.", 12.0));
+            rows.push(muted("Martin (NACA TN 4197) bending–torsion estimate · preliminary-design accuracy.", 12.0));
+            rows.push(muted(
+                "Flutter speed from each fin set's planform, thickness and the shear modulus of its stock, in the air at every moment of the flight up to apogee, against the rocket's speed. The lowest ratio decides.",
+                12.0,
+            ));
         }
         Analysis::Dispersion => {
             rows.push(row_of("Runs", crate::widgets::segmented::segmented(&[(50, "50"), (100, "100"), (200, "200")], c.runs, Message::Runs)));

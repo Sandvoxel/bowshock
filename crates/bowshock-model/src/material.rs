@@ -3,6 +3,13 @@
 //! The densities are typical handbook values for the common model-rocketry materials: bulk materials in kg/m^3, surface
 //! materials (fabric, film) in kg/m^2 and lines (cord, shroud line) in kg/m. Finish roughness heights are those tabulated in
 //! Niskanen 2009, table 3.2 (after Hoerner, *Fluid-Dynamic Drag*, p. 5-3).
+//!
+//! Each bulk material also carries the shear modulus the fin flutter estimate uses ([`Material::shear_modulus`]) and where
+//! that number comes from ([`Material::shear_source`]): G10 fiberglass is Bennett's 600 ksi (*Fin Flutter Analysis Revisited
+//! (Again)*, 2023); woods follow the USDA *Wood Handbook* (FPL-GTR-190, ch. 5), whose shear moduli run about a sixteenth of
+//! the modulus along the grain (cross-plied plywood shears in-plane as its plies do); metals are handbook values; plastics are
+//! `E / 2(1 + ν)` from typical data-sheet moduli with `ν ≈ 0.35`; the paper and fibre tubes are estimates. A real laminate's
+//! stiffness depends on its layup, so a measured value belongs in the fin's own override.
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -87,40 +94,67 @@ pub struct Material {
     /// A typical shell wall thickness for this stock, metres: what a new tube, nose or transition made of it gets. Zero for
     /// surface and line materials.
     pub default_wall: f64,
+    /// Shear modulus `G` of the stock, Pa: what the fin flutter estimate uses unless a fin overrides it. Zero for surface and
+    /// line materials.
+    pub shear_modulus: f64,
+    /// Where [`Material::shear_modulus`] comes from, in a few words (`"Bennett 2023 · G10, 600 ksi"`); empty for surface and
+    /// line materials.
+    pub shear_source: &'static str,
 }
 
-const fn bulk(id: MaterialId, name: &'static str, density: f64, default_wall: f64) -> Material {
-    Material { id, name, density, kind: MaterialKind::Bulk, default_wall }
+const fn bulk(id: MaterialId, name: &'static str, density: f64, default_wall: f64, shear: (f64, &'static str)) -> Material {
+    Material { id, name, density, kind: MaterialKind::Bulk, default_wall, shear_modulus: shear.0, shear_source: shear.1 }
 }
 
 const fn surface(id: MaterialId, name: &'static str, density: f64) -> Material {
-    Material { id, name, density, kind: MaterialKind::Surface, default_wall: 0.0 }
+    Material { id, name, density, kind: MaterialKind::Surface, default_wall: 0.0, shear_modulus: 0.0, shear_source: "" }
 }
 
 const fn line(id: MaterialId, name: &'static str, density: f64) -> Material {
-    Material { id, name, density, kind: MaterialKind::Line, default_wall: 0.0 }
+    Material { id, name, density, kind: MaterialKind::Line, default_wall: 0.0, shear_modulus: 0.0, shear_source: "" }
 }
+
+// The shear moduli of the bulk materials with their sources (see the module docs).
+const WOOD: &str = "USDA Wood Handbook · G ≈ E∥/16";
+const PLASTIC: &str = "E/2(1+ν) from data-sheet E";
+const G_CARDBOARD: (f64, &str) = (0.3e9, "Estimate · paperboard");
+const G_KRAFT_PHENOLIC: (f64, &str) = (1.5e9, "Estimate · paper phenolic");
+const G_BLUE_TUBE: (f64, &str) = (2.0e9, "Estimate · vulcanised fibre");
+const G_FIBERGLASS: (f64, &str) = (4.14e9, "Bennett 2023 · G10, 600 ksi");
+const G_CARBON_FIBER: (f64, &str) = (5.0e9, "Supplier data · woven 0/90 in-plane");
+const G_BASSWOOD: (f64, &str) = (0.6e9, WOOD);
+const G_BALSA: (f64, &str) = (0.2e9, WOOD);
+const G_BIRCH_PLYWOOD: (f64, &str) = (0.85e9, WOOD);
+const G_ALUMINUM: (f64, &str) = (26.0e9, "Handbook · 6061-T6");
+const G_STEEL: (f64, &str) = (79.0e9, "Handbook · carbon steel");
+const G_BRASS: (f64, &str) = (39.0e9, "Handbook · cartridge brass");
+const G_LEAD: (f64, &str) = (5.6e9, "Handbook · lead");
+const G_PLA: (f64, &str) = (1.2e9, PLASTIC);
+const G_ABS: (f64, &str) = (0.8e9, PLASTIC);
+const G_POLYCARBONATE: (f64, &str) = (0.85e9, PLASTIC);
+const G_POLYSTYRENE: (f64, &str) = (1.2e9, PLASTIC);
+const G_EPOXY: (f64, &str) = (1.1e9, PLASTIC);
 
 /// The built-in database, bulk materials first, then surface, then line.
 static MATERIALS: [Material; 26] = [
-    bulk(MaterialId::CARDBOARD, "Cardboard", 680.0, 0.0016),
-    bulk(MaterialId::KRAFT_PHENOLIC, "Kraft phenolic", 950.0, 0.0016),
-    bulk(MaterialId::BLUE_TUBE, "Blue tube", 1300.0, 0.0016),
-    bulk(MaterialId::FIBERGLASS, "Fiberglass", 1850.0, 0.0015),
-    bulk(MaterialId::CARBON_FIBER, "Carbon fiber", 1780.0, 0.0012),
-    bulk(MaterialId::BASSWOOD, "Basswood", 500.0, 0.003),
-    bulk(MaterialId::BALSA, "Balsa", 170.0, 0.003),
-    bulk(MaterialId::BIRCH_PLYWOOD, "Birch plywood", 630.0, 0.003),
-    bulk(MaterialId::AIRCRAFT_PLYWOOD, "Aircraft plywood", 630.0, 0.003),
-    bulk(MaterialId::ALUMINUM, "Aluminum", 2700.0, 0.0015),
-    bulk(MaterialId::STEEL, "Steel", 7850.0, 0.001),
-    bulk(MaterialId::BRASS, "Brass", 8500.0, 0.001),
-    bulk(MaterialId::LEAD, "Lead", 11340.0, 0.002),
-    bulk(MaterialId::PLA, "PLA", 1250.0, 0.002),
-    bulk(MaterialId::ABS, "ABS", 1050.0, 0.002),
-    bulk(MaterialId::POLYCARBONATE, "Polycarbonate", 1200.0, 0.002),
-    bulk(MaterialId::POLYSTYRENE, "Polystyrene", 1050.0, 0.002),
-    bulk(MaterialId::EPOXY, "Epoxy", 1100.0, 0.002),
+    bulk(MaterialId::CARDBOARD, "Cardboard", 680.0, 0.0016, G_CARDBOARD),
+    bulk(MaterialId::KRAFT_PHENOLIC, "Kraft phenolic", 950.0, 0.0016, G_KRAFT_PHENOLIC),
+    bulk(MaterialId::BLUE_TUBE, "Blue tube", 1300.0, 0.0016, G_BLUE_TUBE),
+    bulk(MaterialId::FIBERGLASS, "Fiberglass", 1850.0, 0.0015, G_FIBERGLASS),
+    bulk(MaterialId::CARBON_FIBER, "Carbon fiber", 1780.0, 0.0012, G_CARBON_FIBER),
+    bulk(MaterialId::BASSWOOD, "Basswood", 500.0, 0.003, G_BASSWOOD),
+    bulk(MaterialId::BALSA, "Balsa", 170.0, 0.003, G_BALSA),
+    bulk(MaterialId::BIRCH_PLYWOOD, "Birch plywood", 630.0, 0.003, G_BIRCH_PLYWOOD),
+    bulk(MaterialId::AIRCRAFT_PLYWOOD, "Aircraft plywood", 630.0, 0.003, G_BIRCH_PLYWOOD),
+    bulk(MaterialId::ALUMINUM, "Aluminum", 2700.0, 0.0015, G_ALUMINUM),
+    bulk(MaterialId::STEEL, "Steel", 7850.0, 0.001, G_STEEL),
+    bulk(MaterialId::BRASS, "Brass", 8500.0, 0.001, G_BRASS),
+    bulk(MaterialId::LEAD, "Lead", 11340.0, 0.002, G_LEAD),
+    bulk(MaterialId::PLA, "PLA", 1250.0, 0.002, G_PLA),
+    bulk(MaterialId::ABS, "ABS", 1050.0, 0.002, G_ABS),
+    bulk(MaterialId::POLYCARBONATE, "Polycarbonate", 1200.0, 0.002, G_POLYCARBONATE),
+    bulk(MaterialId::POLYSTYRENE, "Polystyrene", 1050.0, 0.002, G_POLYSTYRENE),
+    bulk(MaterialId::EPOXY, "Epoxy", 1100.0, 0.002, G_EPOXY),
     surface(MaterialId::RIPSTOP_NYLON, "Ripstop nylon", 0.067),
     surface(MaterialId::MYLAR, "Mylar", 0.021),
     line(MaterialId::KEVLAR_LINE, "Kevlar line (1/8 in)", 0.0035),
@@ -166,6 +200,11 @@ impl MaterialId {
     /// Density in the unit of [`Material::kind`].
     pub fn density(self) -> f64 {
         self.material().density
+    }
+
+    /// Shear modulus in Pa (see [`Material::shear_modulus`]); 0 for surface and line stock.
+    pub fn shear_modulus(self) -> f64 {
+        self.material().shear_modulus
     }
 
     /// Whether this is bulk, surface or line stock.
@@ -270,6 +309,20 @@ mod tests {
         assert_eq!(json, "\"mylar\"");
         assert_eq!(serde_json::from_str::<MaterialId>(&json).unwrap(), MaterialId::MYLAR);
         assert!(serde_json::from_str::<MaterialId>("\"unobtainium\"").is_err());
+    }
+
+    #[test]
+    fn every_bulk_material_has_a_sourced_shear_modulus() {
+        for m in materials() {
+            let bulk = m.kind == MaterialKind::Bulk;
+            assert_eq!(bulk, m.shear_modulus > 0.0, "{}", m.name);
+            assert_eq!(bulk, !m.shear_source.is_empty(), "{}", m.name);
+        }
+        // G10 at Bennett's 600 ksi (2023).
+        assert!((MaterialId::FIBERGLASS.shear_modulus() - 600_000.0 * 6_894.757).abs() < 0.01e9);
+        let g = MaterialId::shear_modulus;
+        assert!(g(MaterialId::BALSA) < g(MaterialId::BASSWOOD) && g(MaterialId::BASSWOOD) < g(MaterialId::BIRCH_PLYWOOD));
+        assert!(g(MaterialId::BIRCH_PLYWOOD) < g(MaterialId::FIBERGLASS) && g(MaterialId::FIBERGLASS) < g(MaterialId::ALUMINUM));
     }
 
     #[test]

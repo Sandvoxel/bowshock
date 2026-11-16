@@ -146,17 +146,25 @@ fn motor_options(ctx: &Ctx, spec: &Spec) -> Vec<MotorOption> {
         let reach = mount.length + mount.overhang;
         let mut fitting: Vec<_> = ctx.physics.motors().fitting(mount.inner_diameter, Some(reach)).collect();
         fitting.sort_by(|a, b| a.total_impulse().total_cmp(&b.total_impulse()));
-        for m in fitting {
-            options.push(MotorOption {
-                choice: MotorChoice::Motor(bowshock_model::MotorRef::new(m.designation.clone(), m.manufacturer.clone())),
-                label: format!("{} {}", m.manufacturer, m.designation),
-            });
+        for m in &fitting {
+            // Two curves can share a designation (a user's file beside the catalogue's): tell them apart by impulse.
+            let shared = fitting.iter().filter(|o| o.designation == m.designation && o.manufacturer == m.manufacturer).count() > 1;
+            let label = if shared {
+                format!("{} {} · {:.0} N·s", m.manufacturer, m.designation, m.total_impulse())
+            } else {
+                format!("{} {}", m.manufacturer, m.designation)
+            };
+            options.push(MotorOption { choice: MotorChoice::Motor(bowshock_sim::from_model::motor_ref(m)), label });
         }
     }
     // A flight can name a motor that does not fit this mount (the kit's Bigger motor on another rocket): keep it selectable.
     if let MotorChoice::Motor(m) = &spec.motor {
-        if !options.iter().any(|o| o.choice == spec.motor) {
-            options.push(MotorOption { choice: spec.motor.clone(), label: format!("{} {}", m.manufacturer, m.designation) });
+        // A reference saved without an id (an imported flight) is the option of the curve it resolves to.
+        let resolved = bowshock_sim::from_model::find_motor(ctx.physics.motors(), m).map(|motor| motor.id.as_str());
+        let same = |o: &MotorOption| o.choice == spec.motor || matches!(&o.choice, MotorChoice::Motor(r) if m.id.is_empty() && Some(r.id.as_str()) == resolved);
+        match options.iter_mut().find(|o| same(o)) {
+            Some(option) => option.choice = spec.motor.clone(),
+            None => options.push(MotorOption { choice: spec.motor.clone(), label: format!("{} {}", m.manufacturer, m.designation) }),
         }
     }
     options

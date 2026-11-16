@@ -108,6 +108,8 @@ pub enum Message {
     Material(MaterialId),
     /// The material of a fin group's fillet.
     FilletMaterial(MaterialId),
+    /// Whether a fin group is laminated tip to tip (the flutter estimate doubles its shear modulus).
+    TipToTip(bool),
     /// A parachute's shroud-line material.
     LineMaterial(MaterialId),
     /// The part's surface finish.
@@ -466,6 +468,16 @@ impl State {
             }
             Message::FilletMaterial(material) => {
                 ctx.doc.edit("Set fillet material", |r| r.set_fillet_material(id, material));
+            }
+            Message::TipToTip(on) => {
+                ctx.doc.edit("Set tip-to-tip fins", |r| r.set_fin_tip_to_tip(id, on));
+            }
+            Message::StartOverride(Field::ShearModulus) => {
+                let g = rocket.radial(id).map_or(0.0, |r| r.material.shear_modulus());
+                ctx.doc.edit("Override shear modulus", |r| r.set_fin_shear_modulus(id, Some(g)));
+            }
+            Message::ClearOverride(Field::ShearModulus) => {
+                ctx.doc.edit("Clear shear modulus override", |r| r.set_fin_shear_modulus(id, None));
             }
             Message::LineMaterial(material) => {
                 ctx.doc.edit("Set line material", |r| edit::set_line_material(r, id, material));

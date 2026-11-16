@@ -510,7 +510,7 @@ impl Mesh {
                     continue;
                 };
                 let (Some(motor), Some((parent_z, parent_dz)), InternalKind::InnerTube { length, overhang, outer_diameter, thickness, .. }) =
-                    (db.find(&motor_ref.designation), z_of(mount.parent), &mount.kind)
+                    (bowshock_sim::from_model::find_motor(db, motor_ref), z_of(mount.parent), &mount.kind)
                 else {
                     continue;
                 };

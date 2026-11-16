@@ -5,11 +5,12 @@
 //! The numbers are the static ones of [`from_model::balance`]: Barrowman CP at Mach 0.3 and zero angle of attack, mass and CG
 //! of the dry parts plus the loaded motors at liftoff (and the burned-out casings, [`Physics::burnout`]).
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use bowshock_model::{ConfigId, MotorMount, MotorRef, PartId, Rocket, Stage};
-use bowshock_motors::{Motor, MotorDb};
+use bowshock_model::{ConfigId, MotorMount, PartId, Rocket, Stage};
+use bowshock_motors::{Motor, MotorDb, FILE_ID_PREFIX};
 use bowshock_sim::from_model::{self, Balance, BridgeError, Level, Phase, Warning};
 
 use crate::widgets::gauge::GaugeState;
@@ -17,7 +18,8 @@ use crate::widgets::gauge::GaugeState;
 /// Mach number of the builder's balance readout.
 pub const BALANCE_MACH: f64 = 0.3;
 
-/// Where the user's own `.eng` files live: `$BOWSHOCK_MOTORS_DIR`, else `~/.config/bowshock/motors/`.
+/// Where the user's own motors live: the `.eng` files they loaded and the ThrustCurve.org downloads (`<motorId>.motor`).
+/// `$BOWSHOCK_MOTORS_DIR`, else `~/.config/bowshock/motors/`.
 pub fn user_motors_dir() -> Option<PathBuf> {
     user_dir_from(std::env::var_os("BOWSHOCK_MOTORS_DIR"), std::env::var_os("HOME"))
 }
@@ -26,30 +28,53 @@ fn user_dir_from(over: Option<OsString>, home: Option<OsString>) -> Option<PathB
     over.filter(|s| !s.is_empty()).map(PathBuf::from).or_else(|| home.map(|h| PathBuf::from(h).join(".config").join("bowshock").join("motors")))
 }
 
-/// Whether `db` already holds a motor with this designation and manufacturer.
+/// Where a motor in the database came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MotorOrigin {
+    /// The catalogue bundled with the app.
+    Catalogue,
+    /// Downloaded from ThrustCurve.org (and cached in [`user_motors_dir`]).
+    Downloaded,
+    /// One of the user's own `.eng` files.
+    File,
+}
+
+/// Whether `db` already holds this motor: the same id, or the same curve data under another id (a user's `.eng` copy of a
+/// catalogue motor).
 fn has_motor(db: &MotorDb, m: &Motor) -> bool {
-    db.motors.iter().any(|o| o.designation == m.designation && o.manufacturer == m.manufacturer)
+    db.motors.iter().any(|o| o.id == m.id || o.same_data(m))
 }
 
 /// Parses `.eng` text and appends the motors `db` does not hold yet; returns `(added, skipped duplicates)`. A parse error comes
-/// back as a notice with the file and line: `Custom.eng · line 12: bad header (expected 7 fields)`.
+/// back as a notice with the file and line: `Custom.eng · line 12: bad header (expected 7 fields)`. A second curve with the
+/// designation of a known motor is added: it is another motor.
 pub fn import_eng(db: &mut MotorDb, name: &str, text: &str) -> Result<(usize, usize), String> {
     let parsed = bowshock_motors::parse_eng(text).map_err(|e| format!("{name} · line {}: {}", e.line, e.message))?;
     let total = parsed.len();
     let mut added = 0;
     for motor in parsed {
         if !has_motor(db, &motor) {
-            db.motors.push(motor);
+            db.upsert(motor);
             added += 1;
         }
     }
     Ok((added, total - added))
 }
 
-/// Loads every `.eng` in `dir` (sorted by name) into `db`; files that fail to parse are skipped with a note on stderr.
-fn load_dir(db: &mut MotorDb, dir: &Path) {
+/// Loads the user motors directory into `db`: the cached downloads (`*.motor`, which replace the catalogue's copy of the same
+/// motor) and every `.eng` (sorted by name). Files that cannot be read are skipped with a note on stderr. Returns the ids of
+/// the cached downloads.
+fn load_dir(db: &mut MotorDb, dir: &Path) -> HashSet<String> {
+    let (cached, failed) = bowshock_motors::load_cached(dir);
+    for (path, e) in failed {
+        eprintln!("cached motor {}: {e}", path.display());
+    }
+    let downloaded = cached.iter().map(|m| m.id.clone()).collect();
+    for motor in cached {
+        db.upsert(motor);
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+        return downloaded;
     };
     let mut files: Vec<PathBuf> =
         entries.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("eng"))).collect();
@@ -61,6 +86,7 @@ fn load_dir(db: &mut MotorDb, dir: &Path) {
             eprintln!("motor file {e}");
         }
     }
+    downloaded
 }
 
 /// Imports `paths` into `db`, copying each good file into `dir` so it is loaded at the next start; returns the status notice.
@@ -98,8 +124,8 @@ fn import_files(db: &mut MotorDb, dir: Option<&Path>, paths: &[PathBuf]) -> Stri
 /// Cached physics of the open document. See the module docs.
 pub struct Physics {
     motors: MotorDb,
-    /// How many of `motors` are bundled; the ones after are the user's.
-    bundled: usize,
+    /// Ids of the motors downloaded from ThrustCurve.org (cached or fetched this session).
+    downloaded: HashSet<String>,
     /// What is flying: the whole stack or only the upper stages. A view setting, not part of the document.
     phase: Phase,
     /// The document revision and phase the cache was computed for.
@@ -125,10 +151,10 @@ impl Default for Physics {
 impl Physics {
     /// An empty cache with the bundled motor database.
     pub fn new() -> Self {
-        let (motors, bundled) = Physics::initial_motors();
+        let (motors, downloaded) = Physics::initial_motors();
         Physics {
             motors,
-            bundled,
+            downloaded,
             phase: Phase::Full,
             computed_for: None,
             liftoff: Err(BridgeError::EmptyRocket),
@@ -141,26 +167,48 @@ impl Physics {
         }
     }
 
-    /// The bundled motors plus the user's directory (not in tests, which must not depend on the machine), and the bundled count.
-    fn initial_motors() -> (MotorDb, usize) {
+    /// The bundled catalogue plus the user's directory (not in tests, which must not depend on the machine), and the ids of
+    /// the cached downloads. The catalogue decodes in a few milliseconds, so this runs at startup.
+    fn initial_motors() -> (MotorDb, HashSet<String>) {
         let mut db = MotorDb::bundled();
-        let bundled = db.len();
+        let mut downloaded = HashSet::new();
         if !cfg!(test) {
             if let Some(dir) = user_motors_dir() {
-                load_dir(&mut db, &dir);
+                downloaded = load_dir(&mut db, &dir);
             }
         }
-        (db, bundled)
+        (db, downloaded)
     }
 
-    /// Whether motor `index` came from the user's files rather than the bundled set.
-    pub fn is_user_motor(&self, index: usize) -> bool {
-        index >= self.bundled
+    /// Where motor `index` came from.
+    pub fn motor_origin(&self, index: usize) -> MotorOrigin {
+        let id = self.motors.motors.get(index).map_or("", |m| m.id.as_str());
+        if id.starts_with(FILE_ID_PREFIX) {
+            MotorOrigin::File
+        } else if self.downloaded.contains(id) {
+            MotorOrigin::Downloaded
+        } else {
+            MotorOrigin::Catalogue
+        }
     }
 
     /// Loads the user's `.eng` files (from the file dialog), keeps copies in [`user_motors_dir`], and returns the notice.
     pub fn load_user_motors(&mut self, paths: &[PathBuf]) -> String {
         import_files(&mut self.motors, user_motors_dir().as_deref(), paths)
+    }
+
+    /// Adds a motor downloaded from ThrustCurve.org (replacing the catalogue's copy of it, if any) and caches it in
+    /// [`user_motors_dir`] (not in tests) so it loads at the next start. Returns its index and, when the cache could not be
+    /// written, why.
+    pub fn add_downloaded(&mut self, motor: Motor) -> (usize, Option<String>) {
+        let dir = if cfg!(test) { None } else { user_motors_dir() };
+        let kept = dir.map(|dir| bowshock_motors::save_cached(&dir, &motor, &bowshock_motors::today()));
+        let note = match kept {
+            Some(Err(e)) => Some(format!("{}: downloaded, but not kept for next time ({e})", motor.designation)),
+            _ => None,
+        };
+        self.downloaded.insert(motor.id.clone());
+        (self.motors.upsert(motor), note)
     }
 
     /// The motor database.
@@ -288,8 +336,46 @@ impl Physics {
     pub fn margin_with_motor(&self, rocket: &Rocket, mount: PartId, motor: &Motor) -> Option<f64> {
         let mut copy = rocket.clone();
         let config = copy.active_config_id();
-        copy.set_motor(config, mount, Some(MotorRef::new(motor.designation.clone(), motor.manufacturer.clone()))).ok()?;
+        copy.set_motor(config, mount, Some(from_model::motor_ref(motor))).ok()?;
         from_model::balance(&copy, &self.motors, Phase::Full, BALANCE_MACH, 0.0, true).ok().map(|b| b.margin_cal)
+    }
+
+    /// [`margin_with_motor`](Self::margin_with_motor) for many motors (indices into the database) at once, as the picker's
+    /// table needs it for a catalogue of a thousand motors. CP does not depend on the motor, so the rocket is balanced once
+    /// with `mount` empty and each motor's mass is added at its CG station, exactly as the bridge places it. When emptying the
+    /// mount would let another core mount of its stage fly instead (the bridge flies a stage's first loaded core mount), it
+    /// falls back to the full computation per motor.
+    pub fn margins_with_motors(&self, rocket: &Rocket, mount: &MotorMount, indices: &[usize]) -> Vec<Option<f64>> {
+        let config = rocket.active_configuration();
+        let other_core_loaded = mount.pod.is_none()
+            && self.stages.iter().find(|s| s.mounts.contains(&mount.id)).is_some_and(|s| {
+                let mounts = rocket.motor_mounts();
+                s.mounts
+                    .iter()
+                    .filter(|&&id| id != mount.id)
+                    .any(|&id| mounts.iter().any(|m| m.id == id && m.pod.is_none()) && config.slot(id).is_some_and(|slot| slot.motor.is_some()))
+            });
+        let empty = (!other_core_loaded)
+            .then(|| {
+                let mut copy = rocket.clone();
+                let id = copy.active_config_id();
+                copy.set_motor(id, mount.id, None).ok()?;
+                from_model::balance(&copy, &self.motors, Phase::Full, BALANCE_MACH, 0.0, true).ok()
+            })
+            .flatten();
+        indices
+            .iter()
+            .map(|&i| {
+                let motor = self.motors.motors.get(i)?;
+                let Some(b) = &empty else {
+                    return self.margin_with_motor(rocket, mount.id, motor);
+                };
+                let added = f64::from(mount.copies.max(1)) * motor.total_mass;
+                let mass = b.mass + added;
+                let cg = if mass > 0.0 { (b.mass * b.cg + added * (mount.motor_aft_station - 0.5 * motor.length)) / mass } else { 0.0 };
+                Some(if b.reference_diameter > 0.0 { (b.cp - cg) / b.reference_diameter } else { 0.0 })
+            })
+            .collect()
     }
 
     /// The motor mounts of `rocket` that belong to model stage `stage` (from 1), fore to aft.
@@ -405,14 +491,79 @@ mod tests {
     }
 
     #[test]
+    fn cached_downloads_replace_the_catalogue_copy_and_load_first() {
+        let store = temp_dir("cache");
+        let mut db = MotorDb::bundled();
+        let n = db.len();
+        // A newer download of the catalogue's H128W, and a motor the catalogue does not have.
+        let mut h = db.get("tc:5f4294d20002310000000083").unwrap().clone();
+        h.thrustcurve.as_mut().unwrap().availability = "OOP".into();
+        let mut new = h.clone();
+        new.id = "tc:000000000000000000000001".into();
+        new.designation = "H999X".into();
+        bowshock_motors::save_cached(&store, &h, "2026-11-15").unwrap();
+        bowshock_motors::save_cached(&store, &new, "2026-11-15").unwrap();
+        let downloaded = load_dir(&mut db, &store);
+        assert_eq!(downloaded.len(), 2);
+        assert_eq!(db.len(), n + 1, "the cached H128W is not listed twice");
+        assert!(db.get(&h.id).unwrap().thrustcurve.as_ref().unwrap().out_of_production());
+        assert_eq!(db.find("H999X").unwrap().id, new.id);
+        let _ = std::fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    fn downloaded_motors_are_tagged_and_flown() {
+        let mut physics = Physics::new();
+        let mut new = physics.motors().find("H128W").unwrap().clone();
+        new.id = "tc:000000000000000000000002".into();
+        new.designation = "H128W-NEW".into();
+        let (index, note) = physics.add_downloaded(new);
+        assert_eq!(note, None);
+        assert_eq!(physics.motor_origin(index), MotorOrigin::Downloaded);
+        assert_eq!(physics.motor_origin(physics.motors().position("tc:5f4294d20002310000000083").unwrap()), MotorOrigin::Catalogue);
+        let mut db = MotorDb::default();
+        import_eng(&mut db, "c.eng", CUSTOM).unwrap();
+        physics.motors.upsert(db.motors.remove(0));
+        assert_eq!(physics.motor_origin(physics.motors().len() - 1), MotorOrigin::File);
+    }
+
+    #[test]
+    fn batch_margins_match_the_full_computation() {
+        let mut physics = Physics::new();
+        let mut rocket = finned();
+        let tube = rocket.parts().iter().find(|p| matches!(p.kind, bowshock_model::PartKind::BodyTube { .. })).map(|p| p.id).unwrap();
+        rocket
+            .attach_internal(
+                tube,
+                0.6,
+                bowshock_model::InternalKind::InnerTube { outer_diameter: 0.031, thickness: 0.001, length: 0.3, motor_mount: true, overhang: 0.0 },
+            )
+            .unwrap();
+        physics.sync(&rocket, 1);
+        let mount = physics.mounts_of_stage(&rocket, 1).remove(0);
+        let indices: Vec<usize> = (0..physics.motors().len()).filter(|&i| (physics.motors().motors[i].diameter - 0.029).abs() < 1e-3).take(40).collect();
+        assert!(indices.len() >= 20);
+        let fast = physics.margins_with_motors(&rocket, &mount, &indices);
+        for (&i, fast) in indices.iter().zip(fast) {
+            let full = physics.margin_with_motor(&rocket, mount.id, &physics.motors().motors[i]);
+            assert!((fast.unwrap() - full.unwrap()).abs() < 1e-9, "{}: {fast:?} vs {full:?}", physics.motors().motors[i].designation);
+        }
+    }
+
+    #[test]
     fn duplicates_are_skipped_and_reported() {
         let mut db = MotorDb::bundled();
         let before = db.len();
         assert_eq!(import_eng(&mut db, "a.eng", CUSTOM), Ok((1, 0)));
         assert_eq!(import_eng(&mut db, "a.eng", CUSTOM), Ok((0, 1)));
-        let h128w = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../bowshock-motors/data/aerotech_h128w.eng")).unwrap();
+        // ThrustCurve's H128W certification file is the catalogue's H128W.
+        let h128w = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../bowshock-motors/tests/fixtures/aerotech_h128w.eng")).unwrap();
         assert_eq!(import_eng(&mut db, "h.eng", &h128w), Ok((0, 1)));
-        assert_eq!(db.len(), before + 1);
+        // A different curve under the same designation and maker is another motor, not a duplicate.
+        let other = h128w.replace("102.423", "99.0");
+        assert_eq!(import_eng(&mut db, "h2.eng", &other), Ok((1, 0)));
+        assert_eq!(db.motors.iter().filter(|m| m.designation == "H128W" && m.manufacturer == "AeroTech").count(), 2);
+        assert_eq!(db.len(), before + 2);
     }
 
     #[test]

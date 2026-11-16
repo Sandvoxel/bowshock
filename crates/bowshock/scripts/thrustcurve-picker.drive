@@ -1,0 +1,15 @@
+# The motor picker's sources: the bundled ThrustCurve.org catalogue, a live ThrustCurve.org search, and a picked download
+# (needs the network; keep the download cache out of ~/.config with BOWSHOCK_MOTORS_DIR):
+#   BOWSHOCK_MOTORS_DIR=/tmp/bowshock-tc cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/thrustcurve-picker.drive out/tc
+# Offline state: add BOWSHOCK_THRUSTCURVE_API=http://127.0.0.1:9 (nothing listens there); the search shows "ThrustCurve
+# unreachable" and the catalogue keeps working.
+viewport 1280x800
+click (78, 782)
+click "New configuration…"
+screenshot tc-catalogue.png
+click "ThrustCurve.org"
+click #motor-search
+type "H128"
+screenshot tc-search.png
+click "In catalogue"
+screenshot tc-picked.png

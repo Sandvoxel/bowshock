@@ -174,8 +174,14 @@ copies, nested pods, motors in pods.
 `ctx.physics` is a cache, current when `view` runs: `balance()` (mass, length, ref diameter, CG, CP, margin, CNα for the phase
 on show at liftoff, `None` for an empty rocket), `burnout()`, `issues()` (non-`Ok` warnings, each with an optional `part` to
 select), `stages()`, `is_staged()`, `phase()`, `config_margin(id)`, `margin_with_motor(rocket, mount, motor)`,
-`mounts_of_stage(rocket, stage)`, `motors()` (the bundled `MotorDb`), `gauge()` (animated margin gauge). Phase is a view
+`margins_with_motors(rocket, mount, indices)` (the picker's whole column at once), `mounts_of_stage(rocket, stage)`, `motors()`
+(the `MotorDb`: the bundled ThrustCurve.org catalogue, cached downloads `<motorId>.motor` and the user's `.eng` files from
+`user_motors_dir()`), `motor_origin(index)`, `add_downloaded(motor)`, `gauge()` (animated margin gauge). Phase is a view
 setting (`Phase::Full` or `Phase::UpperFrom(k)`), set from the status strip.
+
+Motors are identified by `Motor::id` (`tc:<ThrustCurve motorId>` or `eng:<curve hash>`), and a configuration's `MotorRef`
+carries that id, so two curves with one designation stay two motors. Look motors up with `from_model::find_motor` (id first,
+then designation and maker) and make references with `from_model::motor_ref`; never match on the designation alone.
 
 ## Overlays and the viewport
 
@@ -196,7 +202,9 @@ drives one drag as `Edit::Begin`, `Dim`/`Vertex`..., `End` (one undo step; `Canc
 `chrome::top_bar(ctx)` and `chrome::status_strip(&chrome_state, ctx)` return `Element<app::Message>`; menus and the picker
 are `chrome::State::overlay(ctx)`. The strip formats everything with `ctx.units`. Chrome-only state (open menu, rename
 buffer, picker) is `chrome::State`; its messages are `chrome::Message`. The motor picker is
-`chrome/config_picker.rs` (`Picker`, `Message`, `Outcome`).
+`chrome/config_picker.rs` (`Picker`, `Message`, `Outcome`). Its ThrustCurve.org source returns `Outcome::Debounce`, `Search` and
+`Download`, which `chrome::State::update` turns into tasks that run on worker threads (`config_picker::debounce`, `search`,
+`download`); `$BOWSHOCK_THRUSTCURVE_API` points the client elsewhere (`scripts/thrustcurve-offline.drive`).
 
 ## Tests and the drive harness
 

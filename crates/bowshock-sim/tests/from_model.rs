@@ -62,11 +62,11 @@ fn single_stage_balance_is_stable_and_light() {
     assert!(lift.margin_cal > 1.0 && lift.margin_cal < 6.0, "margin {}", lift.margin_cal);
     assert!(lift.cn_alpha > 5.0 && lift.cn_alpha < 20.0, "CNa {}", lift.cn_alpha);
     assert!((lift.length - (NOSE + 0.9)).abs() < 1e-9 && (lift.reference_diameter - BODY).abs() < 1e-12);
-    // H128W: 201.6 g loaded, 94.1 g of propellant.
-    assert!((lift.motor_mass - 0.2016).abs() < 1e-9);
-    assert!((burn.motor_mass - (0.2016 - 0.09408)).abs() < 1e-9);
+    // H128W: 201.6 g loaded, 94.1 g of propellant (the catalogue stores f32: about 7 significant digits).
+    assert!((lift.motor_mass - 0.2016).abs() < 1e-6);
+    assert!((burn.motor_mass - (0.2016 - 0.09408)).abs() < 1e-6);
     assert!(lift.cg > burn.cg, "burning propellant moves the CG forward: {} vs {}", lift.cg, burn.cg);
-    assert!((lift.mass - burn.mass - 0.09408).abs() < 1e-9);
+    assert!((lift.mass - burn.mass - 0.09408).abs() < 1e-6);
     // The CP is a property of the airframe alone.
     assert_eq!(lift.cp, burn.cp);
     assert!(lift.cp > lift.cg && lift.cg > 0.4 && lift.cp < lift.length);
@@ -178,6 +178,38 @@ fn warnings_report_what_is_wrong() {
     assert!(w.iter().any(|w| w.part == Some(chute) && w.message.contains("ejection")), "{w:?}");
 }
 
+/// Two curves with the same designation and maker (the catalogue's H128W and a user's file of a hotter H128W) are two motors:
+/// a configuration names one by id, flies that one, and keeps naming it through a save and load.
+#[test]
+fn same_designation_curves_are_chosen_and_flown_distinctly() {
+    use bowshock_sim::from_model::{find_motor, motor_ref};
+    let (mut r, mount_id) = single_stage();
+    let mut db = MotorDb::bundled();
+    let catalogue = db.find("H128W").unwrap().clone();
+    let mut hotter = catalogue.clone();
+    hotter.thrustcurve = None;
+    hotter.points.iter_mut().for_each(|p| p.1 *= 1.1);
+    hotter.id = hotter.file_id();
+    db.upsert(hotter.clone());
+    assert_eq!(db.motors.iter().filter(|m| m.designation == "H128W" && m.manufacturer == "AeroTech").count(), 2);
+
+    let cfg = r.active_config_id();
+    let mut fly = |motor: &bowshock_motors::Motor| {
+        r.set_motor(cfg, mount_id, Some(motor_ref(motor))).unwrap();
+        let back = Rocket::from_bytes(&r.to_bytes()).unwrap();
+        let reference = back.active_configuration().slot(mount_id).unwrap().motor.clone().unwrap();
+        assert_eq!(find_motor(&db, &reference).unwrap().id, motor.id, "the saved reference names the same curve");
+        let input = sim_input(&back, &db, Phase::Full, Launch::default()).unwrap();
+        (input.vehicle.stages[0].motor.as_ref().unwrap().curve.points.clone(), simulate(&input).summary.apogee)
+    };
+    let (curve_a, apogee_a) = fly(&catalogue);
+    let (curve_b, apogee_b) = fly(&hotter);
+    assert_ne!(curve_a, curve_b);
+    assert!(apogee_b > apogee_a * 1.05, "the hotter curve flies higher: {apogee_b} vs {apogee_a}");
+    // A reference by name alone (an imported document) still finds a motor: the first, the catalogue's.
+    assert_eq!(find_motor(&db, &MotorRef::new("H128W", "AeroTech")).unwrap().id, catalogue.id);
+}
+
 #[test]
 fn json_round_trip_gives_identical_balance() {
     let (r, _) = single_stage();
@@ -245,7 +277,7 @@ fn two_stage_maps_to_two_sim_stages_with_ignition_and_phases() {
     assert_eq!(sm.ignition, Timing::new(Trigger::Separation, 0.5));
     assert_eq!((booster.separation, sustainer.separation.trigger), (Timing::new(Trigger::Burnout, 0.25), Trigger::Burnout));
     assert_eq!(sm.ejection_delay, Some(9.0));
-    assert!((bm.curve.total_mass - 0.2016).abs() < 1e-9 && (sm.curve.total_mass - 0.123).abs() < 1e-9);
+    assert!((bm.curve.total_mass - 0.2016).abs() < 1e-6 && (sm.curve.total_mass - 0.123).abs() < 1e-6);
     assert!((booster.dry.mass + sustainer.dry.mass - r.dry_mass().mass).abs() < 1e-9);
     assert!(booster.dry.cg > joint && sustainer.dry.cg < joint);
     assert_eq!(v.fin_sets.len(), 1);
@@ -279,7 +311,7 @@ fn two_stage_maps_to_two_sim_stages_with_ignition_and_phases() {
     let full = balance(&r, &db, Phase::Full, 0.3, 0.0, true).unwrap();
     let upper = balance(&r, &db, Phase::UpperFrom(2), 0.3, 0.0, true).unwrap();
     assert!(upper.mass < full.mass && upper.length < full.length);
-    assert!((upper.motor_mass - 0.123).abs() < 1e-9 && (full.motor_mass - (0.123 + 0.2016)).abs() < 1e-9);
+    assert!((upper.motor_mass - 0.123).abs() < 1e-6 && (full.motor_mass - (0.123 + 0.2016)).abs() < 1e-6);
     assert!(full.margin_cal > 1.0, "full margin {}", full.margin_cal);
 
     // Flights: the sim stages the rocket (booster, then sustainer, two ignitions and a separation in order).
