@@ -16,8 +16,9 @@ use crate::engine::result::StopReason;
 pub const SAMPLE_EVERY: usize = 50;
 /// Orders of density-residual drop that end a run as [`StopReason::ResidualDrop`].
 pub const DROP_ORDERS: f64 = 6.0;
-/// Orders of drop required before the stationary rule may fire.
-pub const STATIONARY_DROP_ORDERS: f64 = 2.0;
+/// Iterations before the stationary rule may fire (it has no residual condition: the residual of a fin-body flow can plateau at
+/// 1 to 2 orders of drop with the CN flat to four digits).
+pub const STATIONARY_MIN_ITERS: usize = 1000;
 
 /// Pressure-force coefficients of the body plus fins.
 #[derive(Clone, Copy, Debug)]
@@ -65,6 +66,74 @@ pub fn lift_forces_upto(case: &Case3, s: &Solver3, x_max: f64) -> LiftForces {
 
 /// [`lift_forces_upto`] on a grid, a conserved state `u` (index `Grid3::cell`, e.g. downloaded from the GPU) and the free-stream pressure.
 pub fn forces_on(case: &Case3, g: &Grid3, u: &[Cons3], p_inf: f64, x_max: f64) -> LiftForces {
+    let acc = accumulate(g, u, p_inf, x_max, 0.0);
+    let (mut fx, mut fz, mut mz) = (0.0, 0.0, 0.0);
+    for a in &acc {
+        fx += a[0];
+        fz += a[1];
+        mz += a[2];
+    }
+    coefficients(case, [fx, fz, mz])
+}
+
+/// Number of force parts of [`LiftBreakdown`].
+const PARTS: usize = 5;
+
+/// Pressure-force coefficients of one part of the wetted surface; `x_cp` (nose diameters from the tip) is NaN when `|sum Fz| < 1e-12`.
+#[derive(Clone, Copy, Debug)]
+pub struct PartForces {
+    pub cn: f64,
+    pub ca: f64,
+    pub x_cp: f64,
+}
+
+/// [`LiftForces`] split by the surface the pressure acts on. The parts sum to [`forces_on`] (`x_max` = the base station).
+#[derive(Clone, Copy, Debug)]
+pub struct LiftBreakdown {
+    /// Body wall (`j = 0` faces) up to the end of the nose.
+    pub nose: PartForces,
+    /// Body wall behind the nose up to the base station.
+    pub afterbody: PartForces,
+    /// Fin side faces (faces between a fluid and a solid cell in `k`).
+    pub fin_sides: PartForces,
+    /// Fin leading and trailing edge faces (`i` faces of the fin boxes).
+    pub fin_edges: PartForces,
+    /// Fin tip faces (`j` faces of the fin boxes).
+    pub fin_tips: PartForces,
+}
+
+impl LiftBreakdown {
+    /// The whole fin: sides, edges and tip.
+    pub fn fins(&self) -> PartForces {
+        let parts = [self.fin_sides, self.fin_edges, self.fin_tips];
+        let cn: f64 = parts.iter().map(|p| p.cn).sum();
+        let ca: f64 = parts.iter().map(|p| p.ca).sum();
+        let m: f64 = parts.iter().filter(|p| p.x_cp.is_finite()).map(|p| p.cn * p.x_cp).sum();
+        PartForces { cn, ca, x_cp: if cn.abs() < 1e-12 { f64::NAN } else { m / cn } }
+    }
+}
+
+/// [`forces_on`] split into nose, afterbody and fin faces (the nose ends at the nose length of `case.body`, the body wall at its base
+/// station).
+pub fn breakdown_on(case: &Case3, g: &Grid3, u: &[Cons3], p_inf: f64) -> LiftBreakdown {
+    let acc = accumulate(g, u, p_inf, case.body.x_base(), case.body.body.nose_length());
+    let part = |a: [f64; 3]| {
+        let f = coefficients(case, a);
+        PartForces { cn: f.cn, ca: f.ca, x_cp: f.x_cp }
+    };
+    LiftBreakdown { nose: part(acc[0]), afterbody: part(acc[1]), fin_sides: part(acc[2]), fin_edges: part(acc[3]), fin_tips: part(acc[4]) }
+}
+
+fn coefficients(case: &Case3, [fx, fz, mz]: [f64; 3]) -> LiftForces {
+    let q = 0.5 * case.mach * case.mach;
+    let s_ref = std::f64::consts::FRAC_PI_4;
+    let norm = 2.0 / (q * s_ref);
+    LiftForces { cn: norm * fz, ca: norm * fx, x_cp: if fz.abs() < 1e-12 { f64::NAN } else { mz / fz } }
+}
+
+/// Dimensional force sums `[Fx, Fz, Mz]` (half domain, `Mz = sum x Fz`) of the five parts: body wall up to `x_nose`, body wall from
+/// `x_nose` to `x_max`, fin `k` faces, fin `i` faces, fin `j` faces.
+fn accumulate(g: &Grid3, u: &[Cons3], p_inf: f64, x_max: f64, x_nose: f64) -> [[f64; 3]; PARTS] {
     let (ni, nj, nk) = (g.ni, g.nj, g.nk);
     let p = |c: usize| cons_to_prim3(&u[c])[4];
     let solid = |i: usize, j: usize, k: usize| g.is_solid(i, j, k);
@@ -72,12 +141,13 @@ pub fn forces_on(case: &Case3, g: &Grid3, u: &[Cons3], p_inf: f64, x_max: f64) -
         let x = g.xc[c];
         ((x[0] - f.c[0]).powi(2) + (x[1] - f.c[1]).powi(2) + (x[2] - f.c[2]).powi(2)).sqrt()
     };
-    let (mut fx, mut fz, mut mz) = (0.0, 0.0, 0.0);
+    let mut acc = [[0.0; 3]; PARTS];
     // `a`: first fluid cell, `b`: the fluid cell behind it (if any); `sign`: +1 when the face normal points into the body
-    let mut add = |a: usize, b: Option<usize>, f: &Face3, sign: f64| {
+    let mut add = |part: usize, a: usize, b: Option<usize>, f: &Face3, sign: f64| {
         if f.c[0] > x_max {
             return;
         }
+        let part = if part == 0 && f.c[0] > x_nose { 1 } else { part };
         let p0 = p(a);
         let pw = match b {
             Some(b) => {
@@ -87,16 +157,16 @@ pub fn forces_on(case: &Case3, g: &Grid3, u: &[Cons3], p_inf: f64, x_max: f64) -
             None => p0,
         };
         let d = (pw - p_inf) * f.area * sign;
-        fx += d * f.n[0];
-        fz += d * f.n[2];
-        mz += d * f.n[2] * f.c[0];
+        acc[part][0] += d * f.n[0];
+        acc[part][1] += d * f.n[2];
+        acc[part][2] += d * f.n[2] * f.c[0];
     };
     for k in 0..nk {
         for i in g.axis_cells..ni {
             let f = &g.jface[k * (nj + 1) * ni + i];
             // normal points into the fluid: into the body is its negative
             if !solid(i, 0, k) {
-                add(g.cell(i, 0, k), (nj > 1 && !solid(i, 1, k)).then(|| g.cell(i, 1, k)), f, -1.0);
+                add(0, g.cell(i, 0, k), (nj > 1 && !solid(i, 1, k)).then(|| g.cell(i, 1, k)), f, -1.0);
             }
         }
     }
@@ -105,8 +175,8 @@ pub fn forces_on(case: &Case3, g: &Grid3, u: &[Cons3], p_inf: f64, x_max: f64) -
             for i in 1..ni {
                 let f = &g.iface[(k * nj + j) * (ni + 1) + i];
                 match (solid(i - 1, j, k), solid(i, j, k)) {
-                    (false, true) => add(g.cell(i - 1, j, k), (i >= 2 && !solid(i - 2, j, k)).then(|| g.cell(i - 2, j, k)), f, 1.0),
-                    (true, false) => add(g.cell(i, j, k), (i + 1 < ni && !solid(i + 1, j, k)).then(|| g.cell(i + 1, j, k)), f, -1.0),
+                    (false, true) => add(3, g.cell(i - 1, j, k), (i >= 2 && !solid(i - 2, j, k)).then(|| g.cell(i - 2, j, k)), f, 1.0),
+                    (true, false) => add(3, g.cell(i, j, k), (i + 1 < ni && !solid(i + 1, j, k)).then(|| g.cell(i + 1, j, k)), f, -1.0),
                     _ => {}
                 }
             }
@@ -117,8 +187,8 @@ pub fn forces_on(case: &Case3, g: &Grid3, u: &[Cons3], p_inf: f64, x_max: f64) -
             for i in 0..ni {
                 let f = &g.jface[(k * (nj + 1) + j) * ni + i];
                 match (solid(i, j - 1, k), solid(i, j, k)) {
-                    (false, true) => add(g.cell(i, j - 1, k), (j >= 2 && !solid(i, j - 2, k)).then(|| g.cell(i, j - 2, k)), f, 1.0),
-                    (true, false) => add(g.cell(i, j, k), (j + 1 < nj && !solid(i, j + 1, k)).then(|| g.cell(i, j + 1, k)), f, -1.0),
+                    (false, true) => add(4, g.cell(i, j - 1, k), (j >= 2 && !solid(i, j - 2, k)).then(|| g.cell(i, j - 2, k)), f, 1.0),
+                    (true, false) => add(4, g.cell(i, j, k), (j + 1 < nj && !solid(i, j + 1, k)).then(|| g.cell(i, j + 1, k)), f, -1.0),
                     _ => {}
                 }
             }
@@ -129,23 +199,21 @@ pub fn forces_on(case: &Case3, g: &Grid3, u: &[Cons3], p_inf: f64, x_max: f64) -
             for i in 0..ni {
                 let f = &g.kface[(k * nj + j) * ni + i];
                 match (solid(i, j, k - 1), solid(i, j, k)) {
-                    (false, true) => add(g.cell(i, j, k - 1), (k >= 2 && !solid(i, j, k - 2)).then(|| g.cell(i, j, k - 2)), f, 1.0),
-                    (true, false) => add(g.cell(i, j, k), (k + 1 < nk && !solid(i, j, k + 1)).then(|| g.cell(i, j, k + 1)), f, -1.0),
+                    (false, true) => add(2, g.cell(i, j, k - 1), (k >= 2 && !solid(i, j, k - 2)).then(|| g.cell(i, j, k - 2)), f, 1.0),
+                    (true, false) => add(2, g.cell(i, j, k), (k + 1 < nk && !solid(i, j, k + 1)).then(|| g.cell(i, j, k + 1)), f, -1.0),
                     _ => {}
                 }
             }
         }
     }
-    let q = 0.5 * case.mach * case.mach;
-    let s_ref = std::f64::consts::FRAC_PI_4;
-    let norm = 2.0 / (q * s_ref);
-    LiftForces { cn: norm * fz, ca: norm * fx, x_cp: if fz.abs() < 1e-12 { f64::NAN } else { mz / fz } }
+    acc
 }
 
 /// Iterate `s` (built from `case`) until a stop rule fires, in this order at every iteration: a non-finite residual (or, at a sample,
 /// CN) gives `NonFinite`; a residual drop of [`DROP_ORDERS`] orders below the peak residual (from iteration 20 cold, from the start
-/// warm) gives `ResidualDrop`; at a sample with `it + 1 >= window`, a drop of [`STATIONARY_DROP_ORDERS`] and a range of the last
-/// `window / SAMPLE_EVERY` CN samples below `rel_tol |mean|` gives `CdStationary`; the iteration cap gives `MaxIterations`.
+/// warm) gives `ResidualDrop`; at a sample with `it + 1 >= max(window, STATIONARY_MIN_ITERS)` and a range of the last
+/// `window / SAMPLE_EVERY` CN samples below `rel_tol |mean|` (whatever the residual did) gives `CdStationary`; the iteration cap
+/// gives `MaxIterations`.
 ///
 /// `warm`: keep the field of the previous run, set the free stream of `case` and restart the CFL ramp (no first-order start-up).
 pub fn run3_on(case: &Case3, s: &mut Solver3, warm: bool) -> PointResult3 {
@@ -218,7 +286,7 @@ impl StopRule3 {
                 return stop(self, StopReason::NonFinite);
             }
             self.hist.push((it + 1, cn));
-            if it + 1 >= self.window && drop >= STATIONARY_DROP_ORDERS && self.hist.len() >= self.nwin {
+            if it + 1 >= self.window.max(STATIONARY_MIN_ITERS) && self.hist.len() >= self.nwin {
                 let w = &self.hist[self.hist.len() - self.nwin..];
                 let (lo, hi, sum) = w.iter().fold((f64::INFINITY, f64::NEG_INFINITY, 0.0), |a, &(_, c)| (a.0.min(c), a.1.max(c), a.2 + c));
                 if hi - lo < self.rel_tol * (sum / self.nwin as f64).abs() {
