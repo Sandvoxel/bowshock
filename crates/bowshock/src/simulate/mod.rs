@@ -26,7 +26,7 @@
 //!   The layout is stored in the document (`Rocket::plot_layout`), so it saves, loads and undoes; [`State::edit_layout`] writes it.
 
 mod channels;
-mod flight;
+pub(crate) mod flight;
 mod forecast;
 pub(crate) mod format;
 mod keys;

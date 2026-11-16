@@ -293,6 +293,51 @@ impl FinTab {
     }
 }
 
+/// Active roll control of a fin group (canards): a proportional-integral controller turns the group's cant to hold a roll rate.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RollControl {
+    /// Roll rate to hold, rad/s (positive clockwise seen from behind).
+    pub target_rate: f64,
+    /// Seconds after launch the controller switches on.
+    pub start: f64,
+    /// Proportional gain: radians of cant per rad/s of rate error.
+    pub kp: f64,
+    /// Integral gain: radians of cant per radian of accumulated rate error.
+    pub ki: f64,
+    /// Largest cant either way, radians.
+    pub max_cant: f64,
+    /// Fastest cant change, rad/s.
+    pub max_rate: f64,
+}
+
+/// Largest cant a roll controller may command (15°, the cant limit of the model's fins).
+pub const MAX_CONTROL_CANT: f64 = 15.0 * std::f64::consts::PI / 180.0;
+/// Fastest cant slew a roll controller may have (360°/s).
+pub const MAX_CONTROL_RATE: f64 = 2.0 * std::f64::consts::PI;
+
+impl Default for RollControl {
+    /// Hold zero roll from 0.5 s, `kp` 0.007 and `ki` 0.2, at most 15° of cant slewed at 10°/s.
+    fn default() -> Self {
+        RollControl { target_rate: 0.0, start: 0.5, kp: 0.007, ki: 0.2, max_cant: MAX_CONTROL_CANT, max_rate: 10f64.to_radians() }
+    }
+}
+
+impl RollControl {
+    /// This controller with every value finite and in range: gains and the start at least 0, the cant within
+    /// [`MAX_CONTROL_CANT`], the slew within [`MAX_CONTROL_RATE`]. `None` when a value is not a number.
+    pub fn sanitized(self) -> Option<RollControl> {
+        let all = [self.target_rate, self.start, self.kp, self.ki, self.max_cant, self.max_rate];
+        all.iter().all(|v| v.is_finite()).then(|| RollControl {
+            start: self.start.max(0.0),
+            kp: self.kp.max(0.0),
+            ki: self.ki.max(0.0),
+            max_cant: self.max_cant.clamp(0.0, MAX_CONTROL_CANT),
+            max_rate: self.max_rate.clamp(0.0, MAX_CONTROL_RATE),
+            ..self
+        })
+    }
+}
+
 fn is_zero(v: &f64) -> bool {
     *v == 0.0
 }
@@ -811,6 +856,9 @@ pub struct RadialPart {
     /// The through-the-wall tab of each fin, `None` for fins glued only to the outside of the tube. Fins only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab: Option<FinTab>,
+    /// Active roll control turning this group's cant (canards), `None` for fixed fins. Fins only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roll_control: Option<RollControl>,
 }
 
 impl RadialPart {
@@ -841,6 +889,7 @@ impl RadialPart {
             shear_modulus: None,
             tip_to_tip: false,
             tab: None,
+            roll_control: None,
         }
     }
 

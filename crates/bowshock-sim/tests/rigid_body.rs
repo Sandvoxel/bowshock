@@ -47,7 +47,7 @@ fn rocket(dry_cg: f64, cant: f64) -> Vehicle {
             dry: MassProps { mass: 1.07, cg: dry_cg, i_long: 0.1, i_rot: 0.0008 },
             fore_station: 0.0,
             aft_station: 1.10,
-            motor: Some(StageMotor { curve: h128(), mount_aft_station: 1.10, ignition: Timing::LAUNCH, ejection_delay: Some(9.0) }),
+            motor: Some(StageMotor { curve: h128(), mount_aft_station: 1.10, ignition: Timing::LAUNCH, ejection_delay: Some(9.0), tilt_lockout: None }),
             separation: Timing::BURNOUT,
         }],
         labels: Default::default(),
@@ -75,6 +75,24 @@ fn deg(x: f64) -> f64 {
 fn rigid_body_is_the_default_model() {
     assert_eq!(FlightModel::default(), FlightModel::RigidBody);
     assert_eq!(SimInput::new(rocket(0.62, 0.0), Launch::default(), vec![]).model, FlightModel::RigidBody);
+}
+
+#[test]
+fn active_roll_control_holds_the_spin_of_canted_fins_near_zero() {
+    let cant = 3f64.to_radians();
+    let uncontrolled = fly(rocket(0.62, cant), 0.0, 0.0, FlightModel::RigidBody);
+    let mut v = rocket(0.62, cant);
+    let rc = RollControl { target_rate: 0.0, start: 0.5, kp: 0.007, ki: 0.2, max_cant: 15f64.to_radians(), max_rate: 10f64.to_radians() };
+    v.labels.fin_sets = vec![Label { name: "Fins".into(), part: Some(7), roll_control: Some(rc), ..Label::default() }];
+    let controlled = fly(v, 0.0, 0.0, FlightModel::RigidBody);
+    let apogee = event_time(&controlled, EventKind::Apogee);
+    let up: Vec<&Sample> = controlled.trajectory.samples.iter().filter(|s| s.t <= apogee).collect();
+    let worst = uncontrolled.summary.max_roll_rate.abs();
+    let last = up.last().unwrap().roll_rate.abs();
+    assert!(worst > 1.0, "the canted fins spin the rocket: {worst} rad/s");
+    assert!(last < 0.1 * worst, "held: {last} rad/s at apogee against {worst} rad/s uncontrolled");
+    assert!(up.iter().all(|s| s.control_cant.abs() <= 15f64.to_radians() + 1e-12));
+    assert!(up.iter().any(|s| s.control_cant < cant - 1e-6), "the controller turned the cant against the spin");
 }
 
 #[test]

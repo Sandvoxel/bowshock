@@ -684,6 +684,21 @@ impl Aero {
         RollAero { forcing, damping }
     }
 
+    /// The roll forcing of fin set `set` per radian of cant at `mach` (m^3; see [`RollAero::forcing`]): what turning the set's
+    /// cant by one radian adds to the forcing. 0 for a set off the core body or out of range.
+    pub fn roll_forcing_per_rad(&self, mach: f64, set: usize) -> f64 {
+        match self.fins.get(set).filter(|f| f.on_core) {
+            Some(f) => f.n * f.unit_lift * f.cna1(mach, 0.0, self.a_ref) * self.a_ref * f.roll_arm,
+            None => 0.0,
+        }
+    }
+
+    /// The fin sets under active roll control: `(set index, source part)` of every set whose label has a
+    /// [`crate::vehicle::RollControl`].
+    pub fn controlled_fin_sets(&self) -> Vec<(usize, bowshock_model::PartId)> {
+        self.labels.fin_sets.iter().enumerate().filter_map(|(i, l)| Some((i, l.part.filter(|_| l.roll_control.is_some())?))).collect()
+    }
+
     /// Zero-angle-of-attack drag at `mach` with `re_per_m = v/nu` (Reynolds number per metre).
     /// With `motor_on` the base area covered by the motor exhaust carries no base drag.
     pub fn drag(&self, mach: f64, re_per_m: f64, motor_on: bool) -> DragBreakdown {
@@ -1422,6 +1437,7 @@ mod tests {
                 mount_aft_station: 0.33,
                 ignition: Timing::LAUNCH,
                 ejection_delay: None,
+                tilt_lockout: None,
             }),
             separation: Timing::BURNOUT,
         });

@@ -319,8 +319,11 @@ fn deployment_rows<'a>(p: &Params<'a>, id: PartId) -> Vec<Element<'a, Message>> 
     let options: Vec<(Trigger, String)> = Trigger::ALL.iter().map(|t| (*t, t.name().to_string())).collect();
     let head = row![text("DEPLOYMENT").font(MONO).size(9.5).style(theme::muted), separation::badge("PER CONFIG")].spacing(SPACE_2).align_y(iced::Center);
     let mut rows = vec![container(head).padding([SPACE_2, 0.0]).boxed(), labeled("Deploys on", choose(options, &Trigger::of(deploy.event), Message::Trigger))];
-    if let DeployEvent::Altitude(h) = deploy.event {
-        rows.push(f.num("Altitude", h, Quantity::Altitude, Field::DeployAltitude));
+    match deploy.event {
+        DeployEvent::Altitude(h) => rows.push(f.num("Altitude", h, Quantity::Altitude, Field::DeployAltitude)),
+        DeployEvent::SpeedBelow(v) => rows.push(f.num("Below speed", v, Quantity::Velocity, Field::DeploySpeed)),
+        DeployEvent::TiltAbove(a) => rows.push(f.num("Tilt above", a, Quantity::Angle, Field::DeployTilt)),
+        _ => {}
     }
     rows.push(f.num("Delay", deploy.delay, Quantity::Time, Field::DeployDelay));
     rows
@@ -458,12 +461,34 @@ fn position<'a>(p: &Params<'a>) -> Vec<Element<'a, Message>> {
         if radial.kind.is_fin() {
             let tip = "Cant spins the rocket: + is clockwise seen from behind. It tilts the fin about its span (within 15°); the roll rate shows in Simulate. Hold Alt on the model to drag it in the aft view.";
             rows.push(with_tip(linked(p, "Cant", radial.effective(p.copy).cant, Quantity::Angle, Dim::Cant), tip));
+            rows.extend(roll_control_rows(p, radial));
         }
     }
     if let Some(pod) = rocket.pod_of(p.id) {
         // A part's parent may be another part of the pod; say what the pod it stands in is mounted on.
         rows.extend(pod_rows(rocket, pod));
     }
+    rows
+}
+
+/// ROLL CONTROL of a fin group: `Active canards` and, while on, the controller's target rate, start, gains and cant limits
+/// (see [`bowshock_model::RollControl`]).
+fn roll_control_rows<'a>(p: &Params<'a>, radial: &RadialPart) -> Vec<Element<'a, Message>> {
+    let f = &p.form;
+    let head = text("ROLL CONTROL").font(MONO).size(9.5).style(theme::muted);
+    let on = radial.roll_control.is_some();
+    let mut rows = vec![
+        container(head).padding([SPACE_2, 0.0]).boxed(),
+        labeled("Active canards", crate::widgets::field::checkbox("Hold a roll rate", on, Message::ActiveRoll)),
+    ];
+    let Some(rc) = radial.roll_control else { return rows };
+    rows.push(f.num("Target °/s", rc.target_rate.to_degrees(), Quantity::Scalar, Field::RollTarget));
+    rows.push(f.num("Starts at", rc.start, Quantity::Time, Field::RollStart));
+    rows.push(f.num("Gain P ×1000", rc.kp * 1000.0, Quantity::Scalar, Field::RollKp));
+    rows.push(f.num("Gain I", rc.ki, Quantity::Scalar, Field::RollKi));
+    rows.push(f.num("Max cant", rc.max_cant, Quantity::Angle, Field::RollMaxCant));
+    rows.push(f.num("Max rate °/s", rc.max_rate.to_degrees(), Quantity::Scalar, Field::RollMaxRate));
+    rows.push(text("Needs the rigid-body flight model").size(TEXT_LABEL).style(theme::muted).boxed());
     rows
 }
 

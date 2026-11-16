@@ -31,19 +31,21 @@ pub struct Timeline {
     pub ejection: Vec<Option<f64>>,
 }
 
-/// The times at which the altitude triggers fired (before their delay), by stage index.
+/// The times at which the altitude triggers fired (before their delay), by stage index, and the ignitions a tilt lockout held off.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Hits {
     /// For ignitions.
     pub ignition: Vec<Option<f64>>,
     /// For separations.
     pub separation: Vec<Option<f64>>,
+    /// Stages whose motor never lights: its ignition came while the rocket leaned past the stage's tilt lockout.
+    pub inhibited: Vec<bool>,
 }
 
 impl Hits {
     /// Nothing has fired yet.
     pub(crate) fn none(stages: usize) -> Hits {
-        Hits { ignition: vec![None; stages], separation: vec![None; stages] }
+        Hits { ignition: vec![None; stages], separation: vec![None; stages], inhibited: vec![false; stages] }
     }
 }
 
@@ -68,7 +70,8 @@ impl Timeline {
                         Trigger::Separation => below_separation,
                         Trigger::Altitude(_) => hits.ignition[k],
                     };
-                    t.ignition[k] = base.map(|b| b + m.ignition.delay.max(0.0));
+                    let inhibited = hits.inhibited.get(k).copied().unwrap_or(false);
+                    t.ignition[k] = base.filter(|_| !inhibited).map(|b| b + m.ignition.delay.max(0.0));
                     t.burnout[k] = t.ignition[k].map(|i| i + m.curve.burn_time());
                     t.ejection[k] = m.ejection_delay.and_then(|d| t.burnout[k].map(|b| b + d));
                 }

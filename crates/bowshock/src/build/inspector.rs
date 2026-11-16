@@ -110,6 +110,8 @@ pub enum Message {
     FilletMaterial(MaterialId),
     /// Whether a fin group is laminated tip to tip (the flutter estimate doubles its shear modulus).
     TipToTip(bool),
+    /// Switch a fin group's active roll control on (with the default controller) or off.
+    ActiveRoll(bool),
     /// A fin group's through-the-wall tab on or off.
     TabOn(bool),
     /// Reach a fin group's tab to the motor mount under it (*To motor mount*).
@@ -134,6 +136,8 @@ pub enum Message {
     BallastStation(f64),
     /// What a staging event waits for (`(stage, which event, choice)`), in the active configuration.
     StageOn(usize, EventKind, StageOn),
+    /// Switch the ignition tilt lockout of a stage on (at its default) or off, in the active configuration.
+    TiltLockout(usize, bool),
     /// *Override…*: give the mass or CG an explicit value, starting from the computed one.
     StartOverride(Field),
     /// *Clear*: compute the mass or CG again.
@@ -376,6 +380,10 @@ impl State {
                     ctx.notify("Could not split the tube there");
                 }
             }
+            Message::TiltLockout(stage, on) => {
+                let lockout = on.then_some(edit::DEFAULT_TILT_LOCKOUT);
+                ctx.doc.edit("Set tilt lockout", |r| edit::set_tilt_lockout(r, stage, lockout));
+            }
             Message::StageOn(stage, kind, on) => {
                 ctx.doc.edit("Set staging trigger", |r| edit::set_stage_on(r, stage, kind, on));
             }
@@ -474,6 +482,9 @@ impl State {
             }
             Message::FilletMaterial(material) => {
                 ctx.doc.edit("Set fillet material", |r| r.set_fillet_material(id, material));
+            }
+            Message::ActiveRoll(on) => {
+                ctx.doc.edit("Set roll control", |r| r.set_roll_control(id, on.then(bowshock_model::RollControl::default)));
             }
             Message::TipToTip(on) => {
                 ctx.doc.edit("Set tip-to-tip fins", |r| r.set_fin_tip_to_tip(id, on));

@@ -42,7 +42,10 @@ pub use flights::{
     WindLevel, MAX_LAUNCH_ANGLE, MAX_PANEL_SOURCES, MAX_PLOT_PANELS, MAX_WIND_LEVELS,
 };
 pub use format::{FormatError, FORMAT_VERSION, MAGIC};
-pub use geometry::{Anchor, FinPlanform, FinSection, FinTab, NoseShape, Part, PartKind, PodBody, RadialKind, RadialPart, Shoulder, MAX_COUNT};
+pub use geometry::{
+    Anchor, FinPlanform, FinSection, FinTab, NoseShape, Part, PartKind, PodBody, RadialKind, RadialPart, RollControl, Shoulder, MAX_CONTROL_CANT,
+    MAX_CONTROL_RATE, MAX_COUNT,
+};
 pub use handles::{Dim, DimEdit, HandleKind, HandleSpec, HandleView};
 pub use internal::{DeployEvent, Deployment, InternalKind, InternalPart, MassRole, PartClass, PartRef, System, AUTO_FILL};
 pub use mass::MassProps;

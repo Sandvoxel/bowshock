@@ -80,8 +80,8 @@ use bowshock_motors::{Motor, MotorDb};
 use crate::aero::Aero;
 use crate::flight::{Deploy, Launch, RecoveryDevice, SimInput};
 use crate::vehicle::{
-    BodyKind, BodySegment, FinCrossSection, FinPlanform, FinSet, Label, Labels, MassProps, NoseShape, Protuberance, StageMass, StageMotor, ThrustCurve, Timing,
-    Trigger, TubeFinSet, Vehicle,
+    BodyKind, BodySegment, FinCrossSection, FinPlanform, FinSet, Label, Labels, MassProps, NoseShape, Protuberance, RollControl, StageMass, StageMotor,
+    ThrustCurve, Timing, Trigger, TubeFinSet, Vehicle,
 };
 use crate::G0;
 
@@ -249,7 +249,7 @@ fn add_radial(
     }
     let label = |share: f64| match whole {
         Some(w) => w.clone(),
-        None => Label { name: r.display_name(), part: Some(r.id), cd_override: r.cd_override.map(|c| c * share), roll_control: None },
+        None => Label { name: r.display_name(), part: Some(r.id), cd_override: r.cd_override.map(|c| c * share), roll_control: roll_control(r) },
     };
     let total_fins: u32 = fins[fins0..].iter().map(|f| f.count).sum();
     for f in &fins[fins0..] {
@@ -259,6 +259,12 @@ fn add_radial(
     for _ in 0..lugs {
         labels.protuberances.push(label(1.0 / lugs as f64));
     }
+}
+
+/// The sim's roll controller of fin group `r`, if it has one.
+fn roll_control(r: &model::RadialPart) -> Option<RollControl> {
+    let c = r.roll_control.filter(|_| r.kind.is_fin())?;
+    Some(RollControl { target_rate: c.target_rate, start: c.start, kp: c.kp, ki: c.ki, max_cant: c.max_cant, max_rate: c.max_rate })
 }
 
 /// The label every component of `pod` carries when the pod's own drag override replaces theirs: the pod's name and id with a
@@ -510,7 +516,13 @@ fn merged_motor(parts: &[Flown], ignition: Timing) -> Option<StageMotor> {
     let ejection_delay = first.delay;
     if let [one] = parts {
         if one.copies == 1 {
-            return Some(StageMotor { curve: thrust_curve(one.motor), mount_aft_station: one.mount.motor_aft_station, ignition, ejection_delay });
+            return Some(StageMotor {
+                curve: thrust_curve(one.motor),
+                mount_aft_station: one.mount.motor_aft_station,
+                ignition,
+                ejection_delay,
+                tilt_lockout: None,
+            });
         }
     }
     let curves: Vec<(ThrustCurve, f64)> = parts.iter().map(|p| (thrust_curve(p.motor), f64::from(p.copies))).collect();
@@ -532,6 +544,7 @@ fn merged_motor(parts: &[Flown], ignition: Timing) -> Option<StageMotor> {
         mount_aft_station: cg + 0.5 * length,
         ignition,
         ejection_delay,
+        tilt_lockout: None,
     })
 }
 
@@ -547,7 +560,8 @@ fn stage_motor(
     let parts = flown_motors(rocket, config, motors, mounts, stage)?;
     // The stack that flies from the pad lights its first motor at launch, whatever the stage's event says.
     let ignition = if first_flown && stage.index > 1 { Timing::LAUNCH } else { timing(config, stage.index, EventKind::Ignition) };
-    Ok(merged_motor(&parts, ignition))
+    let tilt_lockout = config.event(stage.index, EventKind::Ignition).tilt_lockout;
+    Ok(merged_motor(&parts, ignition).map(|m| StageMotor { tilt_lockout, ..m }))
 }
 
 fn sim_mass(m: model::MassProps) -> MassProps {
@@ -747,6 +761,8 @@ pub fn recovery(rocket: &Rocket, phase: Phase) -> Vec<RecoveryDevice> {
                 DeployEvent::Altitude(h) => Deploy::Altitude(h),
                 DeployEvent::Ejection => Deploy::Ejection,
                 DeployEvent::TimeFromLaunch => Deploy::Launch,
+                DeployEvent::SpeedBelow(v) => Deploy::SpeedBelow(v),
+                DeployEvent::TiltAbove(a) => Deploy::TiltAbove(a),
             };
             (stage >= first).then(|| RecoveryDevice { name: p.display_name(), stage: stage - first, cd_area, deploy, delay: deployment.delay.max(0.0) })
         })

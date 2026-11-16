@@ -160,6 +160,36 @@ fn a_drag_override_starts_from_the_build_up_is_one_step_and_flies() {
 }
 
 #[test]
+fn roll_control_deploy_conditions_and_tilt_lockout_edit_in_single_steps() {
+    let mut fx = Fx::new();
+    let fin = fx.fins();
+    fx.select(fin);
+    fx.send(Message::ActiveRoll(true));
+    assert_eq!(fx.app.ctx().doc.undo_label(), Some("Set roll control"));
+    assert_eq!(fx.rocket().radial(fin).unwrap().roll_control, Some(bowshock_model::RollControl::default()));
+    fx.send(Message::Edit(Field::RollKp, 5.0, false));
+    fx.send(Message::Edit(Field::RollMaxCant, 1.0, false));
+    let rc = fx.rocket().radial(fin).unwrap().roll_control.unwrap();
+    assert!((rc.kp - 0.005).abs() < 1e-12);
+    assert_eq!(rc.max_cant, bowshock_model::MAX_CONTROL_CANT, "limited to 15°");
+    fx.send(Message::ActiveRoll(false));
+    assert_eq!(fx.rocket().radial(fin).unwrap().roll_control, None);
+
+    let chute = fx.internal(|p| matches!(p.kind, InternalKind::Parachute { .. }));
+    fx.select(chute);
+    fx.send(Message::Trigger(Trigger::SpeedBelow));
+    assert_eq!(fx.rocket().active_deployment(chute).unwrap().event, DeployEvent::SpeedBelow(super::edit::DEFAULT_DEPLOY_SPEED));
+    fx.send(Message::Edit(Field::DeploySpeed, 12.0, false));
+    assert_eq!(fx.rocket().active_deployment(chute).unwrap().event, DeployEvent::SpeedBelow(12.0));
+
+    fx.send(Message::TiltLockout(2, true));
+    assert_eq!(fx.app.ctx().doc.undo_label(), Some("Set tilt lockout"));
+    assert_eq!(fx.rocket().active_configuration().event(2, EventKind::Ignition).tilt_lockout, Some(super::edit::DEFAULT_TILT_LOCKOUT));
+    fx.send(Message::TiltLockout(2, false));
+    assert_eq!(fx.rocket().active_configuration().event(2, EventKind::Ignition).tilt_lockout, None);
+}
+
+#[test]
 fn auto_diameters_follow_until_typed_and_reset_with_a_right_click() {
     let mut fx = Fx::new();
     let ring = fx.internal(|p| matches!(p.kind, InternalKind::CenteringRing { .. }));

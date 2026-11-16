@@ -47,7 +47,7 @@ fn rocket() -> Vehicle {
             dry: MassProps { mass: 1.07, cg: 0.62, i_long: 0.1, i_rot: 0.0008 },
             fore_station: 0.0,
             aft_station: 1.10,
-            motor: Some(StageMotor { curve: h128(), mount_aft_station: 1.10, ignition: Timing::LAUNCH, ejection_delay: Some(9.0) }),
+            motor: Some(StageMotor { curve: h128(), mount_aft_station: 1.10, ignition: Timing::LAUNCH, ejection_delay: Some(9.0), tilt_lockout: None }),
             separation: Timing::BURNOUT,
         }],
         labels: Default::default(),
@@ -193,7 +193,7 @@ fn two_stage(ignition: Timing, separation: Timing) -> Vehicle {
         dry: MassProps { mass: 0.4, cg: 1.3, i_long: 0.01, i_rot: 0.0003 },
         fore_station: 1.10,
         aft_station: 1.50,
-        motor: Some(StageMotor { curve: h128(), mount_aft_station: 1.50, ignition: Timing::LAUNCH, ejection_delay: None }),
+        motor: Some(StageMotor { curve: h128(), mount_aft_station: 1.50, ignition: Timing::LAUNCH, ejection_delay: None, tilt_lockout: None }),
         separation,
     };
     let mut sustainer = v.stages[0].clone();
@@ -242,6 +242,35 @@ fn separation_trigger_lights_the_upper_stage_after_the_separation_not_the_burnou
     let (sep, ign) = (event_of(&r, EventKind::Separation, 0).0, event_of(&r, EventKind::Ignition, 1).0);
     assert!((sep - (burnout + 0.25)).abs() < 0.02, "sep {sep} burnout {burnout}");
     assert!((ign - (sep + 0.5)).abs() < 0.02, "ign {ign} sep {sep}");
+}
+
+#[test]
+fn a_tilt_lockout_holds_off_the_upper_stage_of_a_leaning_rocket() {
+    let mut v = two_stage(Timing::new(Trigger::Burnout, 1.0), Timing::BURNOUT);
+    v.stages[1].motor.as_mut().unwrap().tilt_lockout = Some(20f64.to_radians());
+    let launch = Launch { rail_length: 2.0, angle_from_vertical: 30f64.to_radians(), ..Launch::default() };
+    let mut input = SimInput::new(v.clone(), launch.clone(), vec![]);
+    input.model = FlightModel::PointMass;
+    let r = simulate(&input);
+    let inhibited = r.trajectory.events.iter().find(|e| e.kind == EventKind::IgnitionInhibited).expect("the sustainer is held off");
+    assert_eq!(inhibited.stage, Some(1));
+    assert!(!r.trajectory.events.iter().any(|e| e.kind == EventKind::Ignition && e.stage == Some(1)));
+    let burnout0 = event_of(&r, EventKind::Burnout, 0).0;
+    assert!(r.trajectory.samples.iter().filter(|s| s.t > burnout0 + 0.01).all(|s| s.thrust == 0.0), "no upper motor burns");
+    // Upright, the same lockout lets it light.
+    let upright = SimInput::new(v, Launch { angle_from_vertical: 0.0, ..launch }, vec![]);
+    assert!(simulate(&upright).trajectory.events.iter().any(|e| e.kind == EventKind::Ignition && e.stage == Some(1)));
+}
+
+#[test]
+fn a_speed_deployment_waits_for_apogee_and_the_slow_descent() {
+    let rec = vec![RecoveryDevice { name: "Main".into(), stage: 0, cd_area: 0.9, deploy: Deploy::SpeedBelow(20.0), delay: 0.0 }];
+    let r = simulate(&SimInput::new(rocket(), Launch { rail_length: 1.5, ..Launch::default() }, rec));
+    let apogee = r.trajectory.events.iter().find(|e| e.kind == EventKind::Apogee).unwrap().t;
+    let deploy = r.trajectory.events.iter().find(|e| matches!(e.kind, EventKind::Deploy(_))).expect("deploys").t;
+    assert!(deploy >= apogee, "after apogee: {deploy} vs {apogee}");
+    let at = r.trajectory.samples.iter().find(|s| s.t >= deploy - 1e-9).unwrap();
+    assert!(at.air_speed < 20.5, "deployed at {} m/s", at.air_speed);
 }
 
 #[test]

@@ -899,6 +899,29 @@ impl Rocket {
         true
     }
 
+    /// Sets (or with `None` removes) the active roll control of fin group `id` (see [`crate::RollControl`]), its values brought
+    /// into range. Refuses parts that are not fins and controllers with a value that is not a number. Returns whether it was
+    /// applied.
+    pub fn set_roll_control(&mut self, id: PartId, control: Option<crate::RollControl>) -> bool {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.set_roll_control(id, control)).unwrap_or(false);
+        }
+        let control = match control {
+            Some(c) => match c.sanitized() {
+                Some(c) => Some(c),
+                None => return false,
+            },
+            None => None,
+        };
+        match self.radials.iter_mut().find(|r| r.id == id && r.kind.is_fin()) {
+            Some(r) => {
+                r.roll_control = control;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Sets the CG that replaces the computed one for any part, metres behind the part's fore edge (`None` to compute it).
     pub fn set_cg_override(&mut self, id: PartId, cg: Option<f64>) -> bool {
         if self.pod_index(id).is_some() {

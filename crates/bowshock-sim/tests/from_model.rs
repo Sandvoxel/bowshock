@@ -255,7 +255,7 @@ fn two_stage() -> TwoStage {
     r.set_motor(cfg, sustainer_mount, Some(MotorRef::new("G40W", "AeroTech"))).unwrap();
     r.set_motor_delay(cfg, booster_mount, f64::INFINITY).unwrap();
     r.set_motor_delay(cfg, sustainer_mount, 9.0).unwrap();
-    let event = |stage, kind, trigger, delay| StageEvent { stage, kind, trigger, delay };
+    let event = |stage, kind, trigger, delay| StageEvent { stage, kind, trigger, delay, tilt_lockout: None };
     r.set_stage_event(cfg, event(2, ModelEvent::Ignition, StageTrigger::Separation, 0.5)).unwrap();
     r.set_stage_event(cfg, event(1, ModelEvent::Separation, StageTrigger::Burnout, 0.25)).unwrap();
     TwoStage { rocket: r, booster_mount, sustainer_mount, booster_tube: booster }
@@ -332,7 +332,7 @@ fn every_trigger_kind_maps_to_the_sim_and_flies() {
     let TwoStage { rocket: mut r, .. } = two_stage();
     let db = MotorDb::bundled();
     let cfg = r.active_config_id();
-    let event = |stage, kind, trigger, delay| StageEvent { stage, kind, trigger, delay };
+    let event = |stage, kind, trigger, delay| StageEvent { stage, kind, trigger, delay, tilt_lockout: None };
     let cases =
         [(StageTrigger::Burnout, Trigger::Burnout), (StageTrigger::TimeFromLaunch, Trigger::Launch), (StageTrigger::Altitude(120.0), Trigger::Altitude(120.0))];
     for (model, sim) in cases {

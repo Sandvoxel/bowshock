@@ -37,7 +37,7 @@ use crate::drag_table::DragTable;
 use crate::rng::Rng;
 use crate::roll::{pitch_frequency, roll_resonance, RollResonance};
 use crate::staging::{Hits, Timeline};
-use crate::vehicle::{Trigger, Vehicle};
+use crate::vehicle::{RollControl, Trigger, Vehicle};
 use crate::G0;
 use std::f64::consts::{FRAC_PI_2, PI};
 
@@ -176,6 +176,11 @@ pub enum Deploy {
     Ejection,
     /// `delay` seconds after launch (the delay field of the device is the time from launch).
     Launch,
+    /// On descent (after apogee), once the air speed is below this (m/s).
+    SpeedBelow(f64),
+    /// Once the rocket tilts more than this from vertical after leaving the rail (rad): the body axis in the rigid-body model,
+    /// the velocity in the point-mass model.
+    TiltAbove(f64),
 }
 
 /// Parachute or other recovery device.
@@ -240,6 +245,8 @@ impl SimInput {
 pub enum EventKind {
     /// A motor ignited (see [`Event::stage`]).
     Ignition,
+    /// A motor's ignition came while the rocket leaned past its tilt lockout: it never lights (see [`Event::stage`]).
+    IgnitionInhibited,
     /// The rocket left the rail.
     RailExit,
     /// A motor burned out.
@@ -366,6 +373,8 @@ pub struct Sample {
     /// parachute, or when the CP is not aft of the CG. The spin rate [`roll_rate`](Self::roll_rate) is compared against it
     /// (roll-pitch resonance, [`Summary::roll_resonance`]).
     pub pitch_frequency: f64,
+    /// Cant of the first fin group under active roll control (rad; see [`crate::vehicle::RollControl`]); 0 without one.
+    pub control_cant: f64,
 }
 
 /// Recorded flight.
@@ -507,6 +516,12 @@ struct Ctx<'a> {
     g_surface: f64,
     /// The Earth's rotation in the local east-north-up frame (rad/s), with a latitude.
     omega: Option<[f64; 3]>,
+    /// The fin sets under active roll control, per aerodynamic model (see [`Aero::controlled_fin_sets`]).
+    controlled: Vec<Vec<(usize, bowshock_model::PartId)>>,
+    /// The cant each roll controller holds away from its group's own cant (rad), by group.
+    deflection: Vec<(bowshock_model::PartId, f64)>,
+    /// The cant of the first roll controller's group (rad), recorded with every sample.
+    control_cant: f64,
 }
 
 /// Angular rate of the Earth's rotation (rad/s), WGS 84 (NIMA TR8350.2).
@@ -668,6 +683,8 @@ struct Diag {
     stiff: f64,
     /// Natural frequency of the pitch oscillation (rad/s); zero outside the rigid-body mode or without a restoring moment.
     pitch_freq: f64,
+    /// Cant of the first actively controlled fin group (rad); 0 without one.
+    control_cant: f64,
 }
 
 impl Ctx<'_> {
@@ -784,7 +801,7 @@ impl Ctx<'_> {
                 *a += ci;
             }
         }
-        Diag { propellant: self.propellant(t, nsep), reynolds: flow.re_per_m * self.stack_length(nsep), ..d }
+        Diag { propellant: self.propellant(t, nsep), reynolds: flow.re_per_m * self.stack_length(nsep), control_cant: self.control_cant, ..d }
     }
 
     /// Point mass: the axis follows the relative wind (or the rail), drag opposes the relative velocity.
@@ -846,6 +863,7 @@ impl Ctx<'_> {
             omega: [0.0; 3],
             stiff: 0.0,
             pitch_freq: 0.0,
+            control_cant: 0.0,
         }
     }
 
@@ -896,8 +914,13 @@ impl Ctx<'_> {
         let crossflow = 0.5 * rho * BODY_CROSSFLOW_CD * aero.crossflow_damping(p.cg);
         let damp = linear + crossflow * wl;
         let roll = aero.roll(f.mach);
+        // Actively controlled fins add the forcing of their cant away from their own (see `RollControl`).
+        let controlled: f64 = self.controlled[nsep.min(self.controlled.len() - 1)]
+            .iter()
+            .map(|&(set, part)| aero.roll_forcing_per_rad(f.mach, set) * self.deflection.iter().find(|d| d.0 == part).map_or(0.0, |d| d.1))
+            .sum();
         // Roll moment about the nose direction (right-handed, so clockwise seen from behind, the way a fin's angle increases).
-        let roll_moment = if s > 1e-9 { q * (roll.forcing + roll.damping * st.w[0] / s) } else { 0.0 };
+        let roll_moment = if s > 1e-9 { q * (roll.forcing + controlled + roll.damping * st.w[0] / s) } else { 0.0 };
         let (mx, my, mz) = (roll_moment, -arm * fz - damp * st.w[1], arm * fy - damp * st.w[2]);
 
         // Euler's equations of an axisymmetric body (I_y = I_z = i_long, I_x = i_rot).
@@ -934,6 +957,7 @@ impl Ctx<'_> {
             omega: st.w,
             stiff,
             pitch_freq,
+            control_cant: 0.0,
         }
     }
 }
@@ -942,6 +966,54 @@ impl Ctx<'_> {
 pub fn simulate(input: &SimInput) -> FlightResult {
     let aeros = build_aeros(input);
     run(input, &input.launch, Tweaks::NOMINAL, &aeros)
+}
+
+/// One active roll controller (see [`RollControl`]): the group, its own cant, the cant it holds now and the integral of the
+/// rate error.
+struct Controller {
+    part: bowshock_model::PartId,
+    rc: RollControl,
+    cant0: f64,
+    cant: f64,
+    integral: f64,
+}
+
+impl Controller {
+    /// Advances the controller over a step of `dt` ending at `t` with the roll rate `rate`: a proportional-integral law on
+    /// the rate error, the integral clamped against wind-up to what the largest cant needs, the command limited to the largest
+    /// cant and the cant slewed towards it at most at the largest rate (Stevens, Lewis & Johnson, *Aircraft Control and
+    /// Simulation*, 2016, the PI controller with anti-windup and actuator rate limit).
+    fn step(&mut self, t: f64, rate: f64, dt: f64) {
+        let rc = self.rc;
+        if t < rc.start {
+            return;
+        }
+        let error = rc.target_rate - rate;
+        self.integral = if rc.ki > 0.0 { (self.integral + error * dt).clamp(-rc.max_cant / rc.ki, rc.max_cant / rc.ki) } else { 0.0 };
+        let desired = (rc.kp * error + rc.ki * self.integral).clamp(-rc.max_cant, rc.max_cant);
+        let slew = rc.max_rate * dt;
+        self.cant += (desired - self.cant).clamp(-slew, slew);
+    }
+}
+
+/// The direction the rocket points (a unit vector): the rail `axis` on the rail; with `rigid` the body axis of attitude `att`;
+/// otherwise the flight path of velocity `vel` (the rail axis while it is too slow to have one).
+fn pointing(on_rail: bool, axis: [f64; 3], rigid: bool, att: Quat, vel: [f64; 3]) -> [f64; 3] {
+    let speed = dot(vel, vel).sqrt();
+    if on_rail {
+        axis
+    } else if rigid {
+        rotate(att, [1.0, 0.0, 0.0])
+    } else if speed > 1e-6 {
+        [vel[0] / speed, vel[1] / speed, vel[2] / speed]
+    } else {
+        axis
+    }
+}
+
+/// The angle of unit vector `dir` from vertical (rad).
+fn tilt(dir: [f64; 3]) -> f64 {
+    dir[2].clamp(-1.0, 1.0).acos()
 }
 
 pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero]) -> FlightResult {
@@ -966,6 +1038,9 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
         a_ref: v.reference_area().max(1e-12),
         g_surface,
         omega,
+        controlled: aeros.iter().map(Aero::controlled_fin_sets).collect(),
+        deflection: Vec::new(),
+        control_cant: 0.0,
     };
 
     // Altitude triggers that have fired (the time they fired, before their delay), and which staging events are on record.
@@ -1032,16 +1107,40 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
         push_event(&mut events, &mut event_idx, &raws, Event { t: 0.0, kind: EventKind::RailExit, altitude: h, stage: None });
     }
 
+    // Active roll control: one PI controller per controlled fin group, holding the group's cant (it starts at the group's own).
+    let mut controllers: Vec<Controller> = Vec::new();
+    for (i, label) in v.labels.fin_sets.iter().enumerate() {
+        if let (Some(rc), Some(part)) = (label.roll_control, label.part) {
+            if !controllers.iter().any(|c| c.part == part) {
+                let cant0 = v.fin_sets.get(i).map_or(0.0, |f| f.cant);
+                controllers.push(Controller { part, rc, cant0, cant: cant0, integral: 0.0 });
+            }
+        }
+    }
+    ctx.deflection = controllers.iter().map(|c| (c.part, 0.0)).collect();
+    ctx.control_cant = controllers.first().map_or(0.0, |c| c.cant);
+
     while t < input.max_time {
         let nsep = ctx.sched.separated(t);
+        // Where the rocket points now, for the tilt lockouts and tilt deployments: the rail, the body axis of the rigid body, or the
+        // flight path of the point mass.
+        let facing = pointing(on_rail, axis, rigid_model && chutes.is_empty(), att, vel);
         // Staging events that are due; a stage dropped before its burnout never reports one.
         let mut due: Vec<Event> = Vec::new();
+        let mut inhibited = false;
         for k in 0..n {
             let separation = ctx.sched.separation[k];
-            if v.stages[k].motor.is_some() {
+            if let Some(motor) = &v.stages[k].motor {
                 if let Some(ti) = ctx.sched.ignition[k].filter(|ti| !done_ignition[k] && *ti <= t + 1e-9) {
                     done_ignition[k] = true;
-                    due.push(Event { t: ti, kind: EventKind::Ignition, altitude: 0.0, stage: Some(k) });
+                    // A motor whose tilt lockout the rocket leans past never lights (nor does anything that waits for it).
+                    if motor.tilt_lockout.is_some_and(|limit| tilt(facing) > limit) {
+                        hits.inhibited[k] = true;
+                        inhibited = true;
+                        due.push(Event { t: ti, kind: EventKind::IgnitionInhibited, altitude: 0.0, stage: Some(k) });
+                    } else {
+                        due.push(Event { t: ti, kind: EventKind::Ignition, altitude: 0.0, stage: Some(k) });
+                    }
                 }
                 if let Some(tb) = ctx.sched.burnout[k].filter(|tb| !done_burnout[k] && *tb <= t + 1e-9) {
                     done_burnout[k] = true;
@@ -1054,6 +1153,9 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
                 done_separation[k] = true;
                 due.push(Event { t: ts, kind: EventKind::Separation, altitude: 0.0, stage: Some(k) });
             }
+        }
+        if inhibited {
+            ctx.sched = Timeline::resolve(v, &hits);
         }
         due.sort_by(|a, b| a.t.total_cmp(&b.t));
         for mut e in due {
@@ -1147,6 +1249,17 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
         t += dt;
         (pos, vel, att, spin) = (next.pos, next.vel, next.q, next.w);
 
+        // Roll control: a PI law on the roll-rate error, the cant limited in angle and slew (rigid body only).
+        if mode == Mode::Rigid && !controllers.is_empty() {
+            for c in &mut controllers {
+                c.step(t, spin[0], dt);
+            }
+            for (d, c) in ctx.deflection.iter_mut().zip(&controllers) {
+                d.1 = c.cant - c.cant0;
+            }
+            ctx.control_cant = controllers[0].cant;
+        }
+
         // Rail exit.
         if on_rail {
             if dot(pos, axis) >= launch.rail_length {
@@ -1221,6 +1334,25 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
                             step_times.push(t + d.delay);
                         }
                     }
+                }
+            }
+        }
+        // Speed and tilt deployments: descending slower than the speed, or leaning past the tilt off the rail.
+        let air_speed = {
+            let wind = ctx.wind_at(pos[2].max(0.0));
+            ((vel[0] - wind[0]).powi(2) + (vel[1] - wind[1]).powi(2) + vel[2].powi(2)).sqrt()
+        };
+        let lean = tilt(pointing(on_rail, axis, rigid_model && chutes.is_empty(), att, vel));
+        for (i, d) in input.recovery.iter().enumerate() {
+            let met = match d.deploy {
+                Deploy::SpeedBelow(limit) => apogee.is_some() && air_speed < limit,
+                Deploy::TiltAbove(limit) => lean > limit,
+                _ => false,
+            };
+            if met && !deployed[i] && deploy_at[i].is_none() {
+                deploy_at[i] = Some(t + d.delay);
+                if d.delay > 1e-9 {
+                    step_times.push(t + d.delay);
                 }
             }
         }
@@ -1382,6 +1514,7 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
                 pitch_rate: d.omega[1].hypot(d.omega[2]),
                 roll_rate: d.omega[0],
                 pitch_frequency: d.pitch_freq,
+                control_cant: d.control_cant,
                 attitude_angle: d.axis[2].atan2(d.axis[0].hypot(d.axis[1])),
             }
         })
@@ -1439,6 +1572,7 @@ mod tests {
                     mount_aft_station: 1.10,
                     ignition: Timing::LAUNCH,
                     ejection_delay: None,
+                    tilt_lockout: None,
                 }),
                 separation: Timing::BURNOUT,
             }],
@@ -1462,6 +1596,9 @@ mod tests {
             a_ref: input.vehicle.reference_area(),
             g_surface: G0,
             omega: None,
+            controlled: vec![Vec::new()],
+            deflection: Vec::new(),
+            control_cant: 0.0,
         };
         f(&ctx)
     }

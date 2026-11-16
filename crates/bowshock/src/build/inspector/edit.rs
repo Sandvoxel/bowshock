@@ -48,6 +48,12 @@ pub enum Field {
     MassValue,
     /// The altitude a recovery device waits for, in the active configuration.
     DeployAltitude,
+    /// The air speed below which a recovery device deploys on descent, in the active configuration.
+    DeploySpeed,
+    /// The tilt from vertical past which a recovery device deploys, in the active configuration.
+    DeployTilt,
+    /// An ignition's tilt lockout of stage `n` (`Stage::index`), in the active configuration.
+    TiltLockout(usize),
     /// The delay after a recovery device's trigger, in the active configuration.
     DeployDelay,
     /// The mass override.
@@ -64,6 +70,18 @@ pub enum Field {
     TabLength,
     /// A fin group's tab position: its fore edge from the root's leading edge.
     TabPosition,
+    /// A fin group's roll control: the roll rate it holds, in °/s (a plain number: the document keeps rad/s).
+    RollTarget,
+    /// A fin group's roll control: when it switches on (s after launch).
+    RollStart,
+    /// A fin group's roll control: the proportional gain, ×1000 (a plain number: the document keeps rad per rad/s).
+    RollKp,
+    /// A fin group's roll control: the integral gain.
+    RollKi,
+    /// A fin group's roll control: the largest cant.
+    RollMaxCant,
+    /// A fin group's roll control: the fastest cant slew, in °/s (a plain number: the document keeps rad/s).
+    RollMaxRate,
     /// The active configuration's ejection delay of a motor mount.
     EjectionDelay,
     /// The active configuration's delay after the trigger of a staging event: the separation of stage `n` or the ignition of
@@ -92,11 +110,15 @@ impl Field {
             Field::CdOverride => "drag".into(),
             Field::DeployAltitude => "deploy altitude".into(),
             Field::DeployDelay => "deploy delay".into(),
+            Field::DeploySpeed => "deploy speed".into(),
+            Field::DeployTilt => "deploy tilt".into(),
+            Field::TiltLockout(_) => "tilt lockout".into(),
             Field::CgOverride => "CG".into(),
             Field::ShearModulus => "shear modulus".into(),
             Field::TabHeight => "tab height".into(),
             Field::TabLength => "tab length".into(),
             Field::TabPosition => "tab position".into(),
+            Field::RollTarget | Field::RollStart | Field::RollKp | Field::RollKi | Field::RollMaxCant | Field::RollMaxRate => "roll control".into(),
             Field::EjectionDelay => "ejection delay".into(),
             Field::StageDelay(_, EventKind::Separation) => "separation delay".into(),
             Field::StageDelay(_, EventKind::Ignition) => "ignition delay".into(),
@@ -203,6 +225,20 @@ pub fn apply_copy(r: &mut Rocket, id: PartId, copy: usize, field: Field, value: 
             };
             Applied::flag(r.set_fin_tab(id, Some(tab)))
         }
+        Field::RollTarget | Field::RollStart | Field::RollKp | Field::RollKi | Field::RollMaxCant | Field::RollMaxRate => {
+            let Some(mut rc) = r.radial(id).and_then(|fin| fin.roll_control) else {
+                return Applied::no();
+            };
+            match field {
+                Field::RollTarget => rc.target_rate = value.to_radians(),
+                Field::RollStart => rc.start = value,
+                Field::RollKp => rc.kp = value / 1000.0,
+                Field::RollKi => rc.ki = value,
+                Field::RollMaxCant => rc.max_cant = value,
+                _ => rc.max_rate = value.to_radians(),
+            }
+            Applied::flag(r.set_roll_control(id, Some(rc)))
+        }
         Field::EjectionDelay => {
             let config = r.active_config_id();
             Applied::flag(r.set_motor_delay(config, id, value.max(0.0)).is_ok())
@@ -211,6 +247,11 @@ pub fn apply_copy(r: &mut Rocket, id: PartId, copy: usize, field: Field, value: 
         Field::StageAltitude(stage, kind) => Applied::flag(edit_stage_event(r, stage, kind, |e| e.trigger = StageTrigger::Altitude(value.max(0.0)))),
         Field::DeployAltitude => Applied::flag(edit_deployment(r, id, |d| d.event = DeployEvent::Altitude(value.max(0.0)))),
         Field::DeployDelay => Applied::flag(edit_deployment(r, id, |d| d.delay = value.max(0.0))),
+        Field::DeploySpeed => Applied::flag(edit_deployment(r, id, |d| d.event = DeployEvent::SpeedBelow(value.max(0.0)))),
+        Field::DeployTilt => Applied::flag(edit_deployment(r, id, |d| d.event = DeployEvent::TiltAbove(value.clamp(0.0, std::f64::consts::PI)))),
+        Field::TiltLockout(stage) => {
+            Applied::flag(edit_stage_event(r, stage, EventKind::Ignition, |e| e.tilt_lockout = Some(value.clamp(0.0, std::f64::consts::PI))))
+        }
         other => Applied::flag(edit_internal(r, id, other, value)),
     }
 }
@@ -318,11 +359,20 @@ pub enum Trigger {
     Ejection,
     /// After launch (the delay is the time from launch).
     Launch,
+    /// On descent once the air speed falls below a value.
+    SpeedBelow,
+    /// Once the rocket tilts past an angle from vertical.
+    TiltAbove,
 }
+
+/// Air speed a parachute is given when its trigger is switched to a speed (20 m/s, a typical drogue-to-main hand-off).
+pub const DEFAULT_DEPLOY_SPEED: f64 = 20.0;
+/// Tilt a parachute is given when its trigger is switched to a tilt (30°).
+pub const DEFAULT_DEPLOY_TILT: f64 = 30.0 * std::f64::consts::PI / 180.0;
 
 impl Trigger {
     /// Every trigger, in menu order.
-    pub const ALL: [Trigger; 4] = [Trigger::Ejection, Trigger::Apogee, Trigger::Altitude, Trigger::Launch];
+    pub const ALL: [Trigger; 6] = [Trigger::Ejection, Trigger::Apogee, Trigger::Altitude, Trigger::Launch, Trigger::SpeedBelow, Trigger::TiltAbove];
 
     /// Display name.
     pub fn name(self) -> &'static str {
@@ -331,6 +381,8 @@ impl Trigger {
             Trigger::Altitude => "Altitude",
             Trigger::Ejection => "Motor ejection",
             Trigger::Launch => "Time from launch",
+            Trigger::SpeedBelow => "Below speed…",
+            Trigger::TiltAbove => "Tilt above…",
         }
     }
 
@@ -341,6 +393,8 @@ impl Trigger {
             DeployEvent::Altitude(_) => Trigger::Altitude,
             DeployEvent::Ejection => Trigger::Ejection,
             DeployEvent::TimeFromLaunch => Trigger::Launch,
+            DeployEvent::SpeedBelow(_) => Trigger::SpeedBelow,
+            DeployEvent::TiltAbove(_) => Trigger::TiltAbove,
         }
     }
 }
@@ -375,6 +429,10 @@ pub fn set_trigger(r: &mut Rocket, id: PartId, trigger: Trigger) -> bool {
             (Trigger::Launch, _) => DeployEvent::TimeFromLaunch,
             (Trigger::Altitude, DeployEvent::Altitude(h)) => DeployEvent::Altitude(h),
             (Trigger::Altitude, _) => DeployEvent::Altitude(DEFAULT_DEPLOY_ALTITUDE),
+            (Trigger::SpeedBelow, DeployEvent::SpeedBelow(v)) => DeployEvent::SpeedBelow(v),
+            (Trigger::SpeedBelow, _) => DeployEvent::SpeedBelow(DEFAULT_DEPLOY_SPEED),
+            (Trigger::TiltAbove, DeployEvent::TiltAbove(a)) => DeployEvent::TiltAbove(a),
+            (Trigger::TiltAbove, _) => DeployEvent::TiltAbove(DEFAULT_DEPLOY_TILT),
         }
     })
 }
@@ -449,6 +507,15 @@ pub fn set_stage_on(r: &mut Rocket, stage: usize, kind: EventKind, on: StageOn) 
             (StageOn::Altitude, _) => StageTrigger::Altitude(DEFAULT_STAGE_ALTITUDE),
         }
     })
+}
+
+/// The tilt lockout an ignition is given when it is switched on (20°, a common electronics default).
+pub const DEFAULT_TILT_LOCKOUT: f64 = 20.0 * std::f64::consts::PI / 180.0;
+
+/// Sets (or with `None` removes) the tilt lockout of stage `stage`'s ignition in the active configuration (see
+/// [`StageEvent::tilt_lockout`]).
+pub fn set_tilt_lockout(r: &mut Rocket, stage: usize, lockout: Option<f64>) -> bool {
+    edit_stage_event(r, stage, EventKind::Ignition, |e| e.tilt_lockout = lockout)
 }
 
 /// Plugs (no ejection charge) or unplugs the motor in `mount` of the active configuration. Unplugging gives it a 0 s delay.

@@ -40,6 +40,7 @@ pub fn events(result: &FlightResult) -> Vec<EventMark> {
         let mark = match &e.kind {
             EventKind::Ignition if e.t <= 1e-9 => continue,
             EventKind::Ignition => EventMark::new(e.t, numbered("Ignition")).role(EventRole::Ignition),
+            EventKind::IgnitionInhibited => EventMark::new(e.t, "No ignition (tilt)").role(EventRole::IgnitionInhibited),
             EventKind::RailExit => EventMark::new(e.t, "Rail exit").role(EventRole::RailExit),
             EventKind::Burnout => EventMark::new(e.t, numbered("Burnout")).role(EventRole::Burnout),
             EventKind::Separation => EventMark::new(e.t, numbered("Separation")).role(EventRole::Separation),

@@ -488,6 +488,8 @@ impl Panel {
 pub enum EventRole {
     /// A motor ignited (later stages): `sys-propulsion`.
     Ignition,
+    /// A motor's ignition was held off by its tilt lockout: `sys-propulsion`, dashed.
+    IgnitionInhibited,
     /// The rocket left the rail: `sys-aero`.
     RailExit,
     /// A motor burned out: `warn`.
@@ -511,7 +513,7 @@ impl EventRole {
     /// The colour role of the event's line, tag and strip tick.
     pub fn color(self) -> SeriesColor {
         match self {
-            EventRole::Ignition => SeriesColor::Propulsion,
+            EventRole::Ignition | EventRole::IgnitionInhibited => SeriesColor::Propulsion,
             EventRole::RailExit => SeriesColor::Aero,
             EventRole::Burnout => SeriesColor::Warn,
             EventRole::Separation => SeriesColor::Ink,
@@ -521,10 +523,10 @@ impl EventRole {
         }
     }
 
-    /// How the event's line is stroked: dotted, except the apogee (dashed) and a separation (dash-dot).
+    /// How the event's line is stroked: dotted, except the apogee and an ignition held off (dashed) and a separation (dash-dot).
     pub fn style(self) -> LineStyle {
         match self {
-            EventRole::Apogee | EventRole::Highlight => LineStyle::Dashed,
+            EventRole::Apogee | EventRole::Highlight | EventRole::IgnitionInhibited => LineStyle::Dashed,
             EventRole::Separation => LineStyle::DashDot,
             _ => LineStyle::Dotted,
         }

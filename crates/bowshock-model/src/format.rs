@@ -316,7 +316,7 @@ mod tests {
         r.set_motor(first, m_up, Some(MotorRef::new("H128W", "Aerotech"))).unwrap();
         r.set_motor(first, m_low, Some(MotorRef::new("I284W", "Aerotech"))).unwrap();
         r.set_motor_delay(first, m_up, f64::INFINITY).unwrap();
-        let event = |stage, kind, trigger, delay| StageEvent { stage, kind, trigger, delay };
+        let event = |stage, kind, trigger, delay| StageEvent { stage, kind, trigger, delay, tilt_lockout: None };
         r.set_stage_event(first, event(2, EventKind::Ignition, StageTrigger::Separation, 1.5)).unwrap();
         r.set_stage_event(first, event(1, EventKind::Separation, StageTrigger::Altitude(120.0), 0.5)).unwrap();
         let chute = r.internals().iter().find(|p| matches!(p.kind, InternalKind::Parachute { .. })).unwrap().id;

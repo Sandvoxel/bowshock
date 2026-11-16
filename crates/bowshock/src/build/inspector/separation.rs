@@ -180,6 +180,14 @@ pub(super) fn timing_rows<'a>(form: &Form<'a>, config: &Configuration, stage: us
         rows.push(number("Altitude", h, Quantity::Altitude, Field::StageAltitude(stage, kind)));
     }
     rows.push(number("Delay", event.delay, Quantity::Time, Field::StageDelay(stage, kind)));
+    if kind == EventKind::Ignition {
+        // The motor does not light if the rocket leans past this when the ignition comes; blank is off.
+        let toggle = crate::widgets::field::checkbox("Tilt lockout", event.tilt_lockout.is_some(), move |on| Message::TiltLockout(stage, on));
+        rows.push(labeled("Lockout", toggle));
+        if let Some(limit) = event.tilt_lockout {
+            rows.push(number("Max tilt", limit, Quantity::Angle, Field::TiltLockout(stage)));
+        }
+    }
     rows
 }
 
@@ -280,7 +288,7 @@ pub(super) mod tests {
     /// Sets a staging event of the active configuration.
     pub fn set(r: &mut Rocket, stage: usize, kind: EventKind, trigger: StageTrigger, delay: f64) {
         let config = r.active_config_id();
-        r.set_stage_event(config, StageEvent { stage, kind, trigger, delay }).unwrap();
+        r.set_stage_event(config, StageEvent { stage, kind, trigger, delay, tilt_lockout: None }).unwrap();
     }
 
     fn times(r: &Rocket, db: &MotorDb) -> Vec<(String, Option<f64>)> {

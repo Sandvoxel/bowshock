@@ -355,6 +355,9 @@ pub struct StageMotor {
     pub ignition: Timing,
     /// Ejection-charge delay after burnout (s), `None` for no ejection charge.
     pub ejection_delay: Option<f64>,
+    /// Tilt from vertical (rad) beyond which the motor does not light when its ignition comes: the stage then never fires.
+    /// `None` lights whatever the attitude.
+    pub tilt_lockout: Option<f64>,
 }
 
 impl StageMotor {

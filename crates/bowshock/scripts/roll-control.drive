@@ -1,0 +1,15 @@
+# Active roll control: 3° of fin cant held near zero spin by turning the canards, flown in Simulate with the Roll preset (the
+# Control fin cant panel shows the cant the controller holds).
+# Run with the example rocket loaded: `cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/roll-control.drive out/roll-control`
+viewport 1280x1000
+# Select the fin group in the Station Lanes, cant it 3°, switch roll control on.
+click (925, 824)
+click (1175, 797)
+type "3"
+type enter
+click "Hold a roll rate"
+screenshot roll-control-inspector.png
+click "Simulate"
+click "Run"
+click "Roll"
+screenshot roll-control-simulate.png

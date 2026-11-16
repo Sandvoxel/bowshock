@@ -1509,7 +1509,7 @@ impl<'w> Import<'w> {
             _ if stage > 1 => (StageTrigger::Separation, ign.delay),
             _ => (StageTrigger::TimeFromLaunch, ign.delay),
         };
-        let _ = self.b.r.set_stage_event(cid, StageEvent { stage, kind: EventKind::Ignition, trigger, delay });
+        let _ = self.b.r.set_stage_event(cid, StageEvent { stage, kind: EventKind::Ignition, trigger, delay, tilt_lockout: None });
     }
 
     fn separation_event(&mut self, cid: ConfigId, stage: usize, event: &str, delay: f64, mounts: &[MountRec], or_id: &str, or_stage: usize) {
@@ -1536,7 +1536,7 @@ impl<'w> Import<'w> {
                 (StageTrigger::Burnout, 0.0)
             }
         };
-        let _ = self.b.r.set_stage_event(cid, StageEvent { stage, kind: EventKind::Separation, trigger, delay });
+        let _ = self.b.r.set_stage_event(cid, StageEvent { stage, kind: EventKind::Separation, trigger, delay, tilt_lockout: None });
     }
 
     fn simulations(&mut self, sims: Option<Node>) {

@@ -48,6 +48,10 @@ pub enum DeployEvent {
     Ejection,
     /// After launch: the delay is the time from launch.
     TimeFromLaunch,
+    /// On descent (after apogee) once the air speed falls below this, m/s.
+    SpeedBelow(f64),
+    /// Once the rocket tilts more than this from vertical after leaving the rail, radians.
+    TiltAbove(f64),
 }
 
 /// When a recovery device deploys: an event and a delay after it.
