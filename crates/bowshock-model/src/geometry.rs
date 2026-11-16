@@ -267,6 +267,32 @@ impl Shoulder {
     }
 }
 
+/// A fin's through-the-wall tab: the part of the root plate that continues inward past the body wall, to be glued to the motor mount
+/// (or a centering ring) inside. It is a rectangle of the fin's thickness, `height` deep below the root, `length` along it. It adds
+/// mass but no aerodynamics (it is inside the airframe), and Martin's flutter estimate takes the root as clamped either way
+/// (NACA TN 4197), so it does not change the flutter speed.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FinTab {
+    /// How far the tab reaches inward from the root edge (the body's outer surface), m.
+    pub height: f64,
+    /// Length of the tab along the root, m.
+    pub length: f64,
+    /// Distance from the root's leading edge to the tab's fore edge, m.
+    pub position: f64,
+}
+
+impl FinTab {
+    /// Volume of one fin's tab of plate thickness `thickness` (m^3).
+    pub fn volume(&self, thickness: f64) -> f64 {
+        self.height.max(0.0) * self.length.max(0.0) * thickness.max(0.0)
+    }
+
+    /// Station range `(fore, aft)` of the tab along the body, given the station of the root's leading edge.
+    pub fn span(&self, root_station: f64) -> (f64, f64) {
+        (root_station + self.position, root_station + self.position + self.length)
+    }
+}
+
 fn is_zero(v: &f64) -> bool {
     *v == 0.0
 }
@@ -774,6 +800,9 @@ pub struct RadialPart {
     /// doubles `G`, a rough allowance for the extra root restraint, not a published correction. Fins only.
     #[serde(default, skip_serializing_if = "is_false")]
     pub tip_to_tip: bool,
+    /// The through-the-wall tab of each fin, `None` for fins glued only to the outside of the tube. Fins only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab: Option<FinTab>,
 }
 
 impl RadialPart {
@@ -802,13 +831,26 @@ impl RadialPart {
             fillet_material: MaterialId::EPOXY,
             shear_modulus: None,
             tip_to_tip: false,
+            tab: None,
         }
     }
 
-    /// The shear modulus (Pa) the flutter estimate uses for these fins: the override, else the material's, doubled for tip-to-tip
-    /// lamination (see [`RadialPart::tip_to_tip`]).
+    /// The shear modulus (Pa) and its source of the fin stock itself (no override, no tip-to-tip allowance): the material's, or, for a
+    /// material that has none (surface or line stock on a fin from a damaged or foreign file), birch plywood's with a source that says so.
+    pub fn material_shear(&self) -> (f64, &'static str) {
+        let m = self.material.material();
+        if m.shear_modulus.is_finite() && m.shear_modulus > 0.0 {
+            (m.shear_modulus, m.shear_source)
+        } else {
+            (MaterialId::BIRCH_PLYWOOD.shear_modulus(), "Estimate · plywood (this material has no shear modulus)")
+        }
+    }
+
+    /// The shear modulus (Pa) the flutter estimate uses for these fins: the override (when positive and finite), else the material's
+    /// ([`material_shear`](Self::material_shear)), doubled for tip-to-tip lamination (see [`RadialPart::tip_to_tip`]).
     pub fn flutter_shear_modulus(&self) -> f64 {
-        self.shear_modulus.unwrap_or_else(|| self.material.shear_modulus()) * if self.tip_to_tip { 2.0 } else { 1.0 }
+        let own = self.shear_modulus.filter(|g| g.is_finite() && *g > 0.0);
+        own.unwrap_or_else(|| self.material_shear().0) * if self.tip_to_tip { 2.0 } else { 1.0 }
     }
 
     /// The stock a new part of this kind is made of: plywood fins, cardboard lugs, aluminum rail buttons.

@@ -13,9 +13,10 @@ use super::pick::{self, SurfaceTarget};
 use super::pods::PodView;
 use super::radial;
 use super::{Camera, Message};
-use crate::app::ui::mm;
+use crate::app::ui::{len, len_unit};
 use crate::theme::{self, MONO};
 use crate::tokens::TEXT_LABEL;
+use crate::units::UnitSystem;
 
 /// How close (px) the cursor must be to an attach node for the part to stack there rather than attach to the tube's side.
 pub const NODE_PX: f32 = 26.0;
@@ -72,6 +73,8 @@ pub struct Overlay<'a> {
     /// The margin of the rocket as it would be if released now, calibers: appended to the cursor tag in its stability band's
     /// colour. `None` shows nothing (no valid target).
     pub margin: Option<f64>,
+    /// The display unit set the tag's stations are written in.
+    pub units: UnitSystem,
 }
 
 /// The pod body the dragged part would be on a tube's side: that one part with what stands on and in it, ids kept for a part
@@ -203,7 +206,7 @@ impl Overlay<'_> {
                 } else if snap == parts {
                     format!("{name} → snap aft")
                 } else {
-                    format!("{name} → insert at {} mm", mm(station))
+                    format!("{name} → insert at {} {}", len(station, self.units), len_unit(self.units))
                 }
             }
             Snap::Pod(pod, index) => {
@@ -215,7 +218,7 @@ impl Overlay<'_> {
                 } else if index == parts {
                     "aft".to_string()
                 } else {
-                    format!("at {} mm", mm(station))
+                    format!("at {} {}", len(station, self.units), len_unit(self.units))
                 };
                 format!("{name} → pod{times}, {place}")
             }
@@ -315,9 +318,10 @@ impl canvas::Program<Message> for Overlay<'_> {
             let times = if self.drag.count > 1 { format!(" ×{}", self.drag.count) } else { String::new() };
             let parent = self.rocket.part(target.parent).map_or("", |p| p.kind.name());
             let label = format!(
-                "{}{times} → {parent} @ {} mm, {:.0}° · radial",
+                "{}{times} → {parent} @ {} {}, {:.0}° · radial",
                 self.drag.name,
-                mm(station + target.offset),
+                len(station + target.offset, self.units),
+                len_unit(self.units),
                 target.angle.to_degrees().round() % 360.0
             );
             tag_with(&mut frame, cursor, 0.0, &label, margin_suffix(self.rocket, t, self.margin), t.ink, t.line_200, t.bg_200);

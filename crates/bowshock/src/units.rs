@@ -41,6 +41,8 @@ pub enum Quantity {
     Roughness,
     /// Altitudes above the launch site or sea level (m).
     Altitude,
+    /// Pressures (Pa).
+    Pressure,
     /// Ratios shown as percentages (1.0 = 100 %).
     Percentage,
     /// Lengths in units of body diameter (dimensionless ratio).
@@ -85,39 +87,175 @@ impl Unit {
     }
 }
 
-/// Unit systems of the top-bar selector.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum UnitSystem {
-    /// Millimetres, grams, seconds.
-    #[default]
-    MmGS,
-    /// Centimetres, grams, seconds.
-    CmGS,
-    /// Metres, kilograms, seconds.
-    MKgS,
-    /// Inches, ounces, seconds.
-    InOzS,
-    /// Feet, pounds, seconds.
-    FtLbS,
+/// A group of quantities that share one unit choice in a [`UnitSystem`]: the rows of the custom-units panel.
+///
+/// Diameters, thicknesses and stations are lengths; downrange distance and altitude share [`Family::Distance`]; areas and
+/// roughness follow the length pick; angle (°) and time (s) are fixed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Family {
+    /// Part dimensions and stations: mm, cm, m, in, ft.
+    Length,
+    /// Masses: g, kg, oz, lb.
+    Mass,
+    /// Speeds: m/s, km/h, ft/s, mph.
+    Velocity,
+    /// Accelerations: g, m/s², ft/s².
+    Acceleration,
+    /// Forces: N, lbf.
+    Force,
+    /// Impulses: N·s, lbf·s.
+    Impulse,
+    /// Pressures: kPa, psi.
+    Pressure,
+    /// Densities: kg/m³, g/cm³, lb/ft³.
+    Density,
+    /// Temperatures: °C, K, °F.
+    Temperature,
+    /// Altitude and ground distance: m, ft, km, mi.
+    Distance,
 }
 
-impl UnitSystem {
-    /// Every system, in selector order.
-    pub const ALL: [UnitSystem; 5] = [UnitSystem::MmGS, UnitSystem::CmGS, UnitSystem::MKgS, UnitSystem::InOzS, UnitSystem::FtLbS];
+impl Family {
+    /// Every family, in panel order.
+    pub const ALL: [Family; 10] = [
+        Family::Length,
+        Family::Mass,
+        Family::Velocity,
+        Family::Acceleration,
+        Family::Force,
+        Family::Impulse,
+        Family::Pressure,
+        Family::Density,
+        Family::Temperature,
+        Family::Distance,
+    ];
 
-    /// Selector label, e.g. `"mm · g · s"`.
-    pub fn label(self) -> &'static str {
+    /// The quantity whose unit list the family picks from.
+    pub fn quantity(self) -> Quantity {
         match self {
-            UnitSystem::MmGS => "mm · g · s",
-            UnitSystem::CmGS => "cm · g · s",
-            UnitSystem::MKgS => "m · kg · s",
-            UnitSystem::InOzS => "in · oz · s",
-            UnitSystem::FtLbS => "ft · lb · s",
+            Family::Length => Quantity::Length,
+            Family::Mass => Quantity::Mass,
+            Family::Velocity => Quantity::Velocity,
+            Family::Acceleration => Quantity::Acceleration,
+            Family::Force => Quantity::Force,
+            Family::Impulse => Quantity::Impulse,
+            Family::Pressure => Quantity::Pressure,
+            Family::Density => Quantity::Density,
+            Family::Temperature => Quantity::Temperature,
+            Family::Distance => Quantity::Altitude,
         }
     }
 
-    fn is_imperial(self) -> bool {
-        matches!(self, UnitSystem::InOzS | UnitSystem::FtLbS)
+    /// The panel row's name.
+    pub fn label(self) -> &'static str {
+        match self {
+            Family::Length => "Length",
+            Family::Mass => "Mass",
+            Family::Velocity => "Speed",
+            Family::Acceleration => "Acceleration",
+            Family::Force => "Force",
+            Family::Impulse => "Impulse",
+            Family::Pressure => "Pressure",
+            Family::Density => "Density",
+            Family::Temperature => "Temperature",
+            Family::Distance => "Altitude",
+        }
+    }
+
+    /// The key the family is stored under in the settings file.
+    pub fn key(self) -> &'static str {
+        match self {
+            Family::Length => "length",
+            Family::Mass => "mass",
+            Family::Velocity => "velocity",
+            Family::Acceleration => "acceleration",
+            Family::Force => "force",
+            Family::Impulse => "impulse",
+            Family::Pressure => "pressure",
+            Family::Density => "density",
+            Family::Temperature => "temperature",
+            Family::Distance => "distance",
+        }
+    }
+}
+
+/// The display units: one unit per [`Family`]. The top bar offers the named presets ([`UnitSystem::PRESETS`]) and a custom
+/// panel that sets each family on its own, so `in · kg · s` (lengths in inches, masses in kilograms) is one choice.
+///
+/// The set is a small `Copy` value: indices into [`Quantity::units`] per family, in [`Family::ALL`] order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UnitSystem {
+    picks: [u8; 10],
+}
+
+impl Default for UnitSystem {
+    fn default() -> Self {
+        UnitSystem::MM_G_S
+    }
+}
+
+impl UnitSystem {
+    /// Millimetres, grams, seconds (the default).
+    pub const MM_G_S: UnitSystem = UnitSystem { picks: [0, 0, 0, 0, 0, 0, 0, 1, 0, 0] };
+    /// Centimetres, grams, seconds.
+    pub const CM_G_S: UnitSystem = UnitSystem { picks: [1, 0, 0, 0, 0, 0, 0, 1, 0, 0] };
+    /// Metres, kilograms, seconds (SI: acceleration in m/s²).
+    pub const M_KG_S: UnitSystem = UnitSystem { picks: [2, 1, 0, 1, 0, 0, 0, 0, 0, 0] };
+    /// Inches, ounces, seconds (feet per second, lbf, psi, °F).
+    pub const IN_OZ_S: UnitSystem = UnitSystem { picks: [3, 2, 2, 0, 1, 1, 1, 2, 2, 1] };
+    /// Feet, pounds, seconds (as [`UnitSystem::IN_OZ_S`]).
+    pub const FT_LB_S: UnitSystem = UnitSystem { picks: [4, 3, 2, 0, 1, 1, 1, 2, 2, 1] };
+
+    /// The named sets, in selector order.
+    pub const PRESETS: [UnitSystem; 5] = [UnitSystem::MM_G_S, UnitSystem::CM_G_S, UnitSystem::M_KG_S, UnitSystem::IN_OZ_S, UnitSystem::FT_LB_S];
+
+    /// The short name of a preset (`"mm · g · s"`), `None` for a custom mix.
+    pub fn preset(self) -> Option<&'static str> {
+        const NAMES: [&str; 5] = ["mm · g · s", "cm · g · s", "m · kg · s", "in · oz · s", "ft · lb · s"];
+        UnitSystem::PRESETS.iter().position(|p| *p == self).map(|i| NAMES[i])
+    }
+
+    /// Selector label: a preset's name, else `length · mass · s` of the custom mix (`"in · kg · s"`).
+    pub fn label(self) -> String {
+        match self.preset() {
+            Some(name) => name.to_string(),
+            None => format!("{} · {} · s", self.unit(Family::Length).symbol, self.unit(Family::Mass).symbol),
+        }
+    }
+
+    fn index(self, family: Family) -> usize {
+        let units = family.quantity().units();
+        usize::from(self.picks[family as usize]).min(units.len() - 1)
+    }
+
+    /// The unit this set gives `family`.
+    pub fn unit(self, family: Family) -> &'static Unit {
+        &family.quantity().units()[self.index(family)]
+    }
+
+    /// This set with `family` shown in the unit with `symbol`; unchanged when the family has no such unit.
+    pub fn with(mut self, family: Family, symbol: &str) -> UnitSystem {
+        if let Some(i) = family.quantity().units().iter().position(|u| u.symbol == symbol) {
+            self.picks[family as usize] = i as u8;
+        }
+        self
+    }
+
+    /// `(settings key, unit symbol)` for every family, for the settings file.
+    pub fn symbols(self) -> Vec<(&'static str, &'static str)> {
+        Family::ALL.iter().map(|f| (f.key(), self.unit(*f).symbol)).collect()
+    }
+
+    /// The set a settings file describes: the default set with each known `(key, symbol)` applied; unknown keys and symbols
+    /// are ignored.
+    pub fn from_symbols<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> UnitSystem {
+        let mut set = UnitSystem::default();
+        for (key, symbol) in pairs {
+            if let Some(family) = Family::ALL.iter().find(|f| f.key() == key) {
+                set = set.with(*family, symbol);
+            }
+        }
+        set
     }
 }
 
@@ -138,7 +276,7 @@ static LENGTH: [Unit; 5] = [unit("mm", 0.001, 2), unit("cm", 0.01, 3), unit("m",
 static MASS: [Unit; 4] = [unit("g", 0.001, 1), unit("kg", 1.0, 3), unit("oz", OUNCE, 2), unit("lb", POUND, 3)];
 static ANGLE: [Unit; 2] = [unit("°", std::f64::consts::PI / 180.0, 1), unit("rad", 1.0, 3)];
 static VELOCITY: [Unit; 4] = [unit("m/s", 1.0, 1), unit("km/h", 1.0 / 3.6, 1), unit("ft/s", FOOT, 1), unit("mph", 1609.344 / 3600.0, 1)];
-static ACCELERATION: [Unit; 2] = [unit("g", G0, 2), unit("m/s²", 1.0, 2)];
+static ACCELERATION: [Unit; 3] = [unit("g", G0, 2), unit("m/s²", 1.0, 2), unit("ft/s²", FOOT, 2)];
 static FORCE: [Unit; 2] = [unit("N", 1.0, 2), unit("lbf", LBF, 2)];
 static IMPULSE: [Unit; 2] = [unit("N·s", 1.0, 2), unit("lbf·s", LBF, 2)];
 static DENSITY: [Unit; 3] = [unit("kg/m³", 1.0, 0), unit("g/cm³", 1000.0, 3), unit("lb/ft³", POUND / (FOOT * FOOT * FOOT), 1)];
@@ -150,14 +288,18 @@ static TEMPERATURE: [Unit; 3] = [
     Unit { symbol: "°F", to_si: 5.0 / 9.0, offset: 459.67 * 5.0 / 9.0, decimals: 1 },
 ];
 static ROUGHNESS: [Unit; 2] = [unit("µm", 1e-6, 1), unit("mil", 25.4e-6, 2)];
-static ALTITUDE: [Unit; 3] = [unit("m", 1.0, 0), unit("ft", FOOT, 0), unit("km", 1000.0, 3)];
+static ALTITUDE: [Unit; 4] = [unit("m", 1.0, 0), unit("ft", FOOT, 0), unit("km", 1000.0, 3), unit("mi", 1609.344, 3)];
 static PERCENTAGE: [Unit; 1] = [unit("%", 0.01, 1)];
 static CALIBERS: [Unit; 1] = [unit("cal", 1.0, 2)];
 static SCALAR: [Unit; 1] = [unit("·", 1.0, 2)];
+static PRESSURE: [Unit; 2] = [unit("kPa", 1000.0, 2), unit("psi", 6_894.757_293_168, 2)];
+
+/// The number of [`Quantity`] variants (the size of the per-quantity override table).
+const QUANTITY_COUNT: usize = Quantity::Scalar as usize + 1;
 
 thread_local! {
     /// The unit the user picked for a quantity across the whole project (right-click on a unit chip), by `Quantity as usize`.
-    static OVERRIDES: std::cell::RefCell<[Option<&'static Unit>; 16]> = const { std::cell::RefCell::new([None; 16]) };
+    static OVERRIDES: std::cell::RefCell<[Option<&'static Unit>; QUANTITY_COUNT]> = const { std::cell::RefCell::new([None; QUANTITY_COUNT]) };
 }
 
 /// Makes `unit` the display unit of `quantity` everywhere ([`Quantity::unit_for`] and so every field, readout and label).
@@ -167,7 +309,7 @@ pub fn set_unit_override(quantity: Quantity, unit: &'static Unit) {
 
 /// Forgets every project-wide unit choice (the unit system select was changed).
 pub fn clear_unit_overrides() {
-    OVERRIDES.with(|o| *o.borrow_mut() = [None; 16]);
+    OVERRIDES.with(|o| *o.borrow_mut() = [None; QUANTITY_COUNT]);
 }
 
 #[cfg(test)]
@@ -177,13 +319,13 @@ mod override_tests {
     #[test]
     fn an_override_wins_over_the_system_until_cleared() {
         let inch = &Quantity::Length.units()[3];
-        assert_eq!(Quantity::Length.unit_for(UnitSystem::MmGS).symbol, "mm");
+        assert_eq!(Quantity::Length.unit_for(UnitSystem::MM_G_S).symbol, "mm");
         set_unit_override(Quantity::Length, inch);
-        assert_eq!(Quantity::Length.unit_for(UnitSystem::MmGS).symbol, "in");
-        assert_eq!(format(0.0254, Quantity::Length, &UnitSystem::MmGS), ("1.000".to_string(), "in"));
-        assert_eq!(Quantity::Mass.unit_for(UnitSystem::MmGS).symbol, "g");
+        assert_eq!(Quantity::Length.unit_for(UnitSystem::MM_G_S).symbol, "in");
+        assert_eq!(format(0.0254, Quantity::Length, &UnitSystem::MM_G_S), ("1.000".to_string(), "in"));
+        assert_eq!(Quantity::Mass.unit_for(UnitSystem::MM_G_S).symbol, "g");
         clear_unit_overrides();
-        assert_eq!(Quantity::Length.unit_for(UnitSystem::MmGS).symbol, "mm");
+        assert_eq!(Quantity::Length.unit_for(UnitSystem::MM_G_S).symbol, "mm");
     }
 }
 
@@ -204,6 +346,7 @@ impl Quantity {
             Quantity::Temperature => &TEMPERATURE,
             Quantity::Roughness => &ROUGHNESS,
             Quantity::Altitude => &ALTITUDE,
+            Quantity::Pressure => &PRESSURE,
             Quantity::Percentage => &PERCENTAGE,
             Quantity::Calibers => &CALIBERS,
             Quantity::Scalar => &SCALAR,
@@ -221,54 +364,36 @@ impl Quantity {
     }
 
     /// The unit `system` gives this quantity, ignoring any project-wide choice.
+    ///
+    /// Areas follow the length unit (mm², cm², m², in²; feet show square inches) and roughness follows it too (µm, or mil for
+    /// inches and feet); the other quantities with a [`Family`] use that family's pick.
     pub fn system_unit(self, system: UnitSystem) -> &'static Unit {
-        use UnitSystem::*;
-        let imperial = system.is_imperial();
-        let index = match self {
-            Quantity::Length => match system {
-                MmGS => 0,
-                CmGS => 1,
-                MKgS => 2,
-                InOzS => 3,
-                FtLbS => 4,
-            },
-            Quantity::Mass => match system {
-                MmGS | CmGS => 0,
-                MKgS => 1,
-                InOzS => 2,
-                FtLbS => 3,
-            },
-            Quantity::Velocity => {
-                if imperial {
-                    2
-                } else {
-                    0
-                }
-            }
-            Quantity::Acceleration => usize::from(system == MKgS),
-            Quantity::Force | Quantity::Impulse | Quantity::Roughness | Quantity::Altitude => usize::from(imperial),
-            Quantity::Temperature => {
-                if imperial {
-                    2
-                } else {
-                    0
-                }
-            }
-            Quantity::Density => match system {
-                MmGS | CmGS => 1,
-                MKgS => 0,
-                InOzS | FtLbS => 2,
-            },
-            Quantity::Area => match system {
-                MmGS => 0,
-                CmGS => 1,
-                MKgS => 2,
-                InOzS | FtLbS => 3,
-            },
-            Quantity::Angle | Quantity::Time | Quantity::Percentage | Quantity::Calibers | Quantity::Scalar => 0,
-        };
         let units = self.units();
+        let index = match self {
+            Quantity::Area => [0, 1, 2, 3, 3][system.index(Family::Length)],
+            Quantity::Roughness => usize::from(system.index(Family::Length) >= 3),
+            Quantity::Angle | Quantity::Time | Quantity::Percentage | Quantity::Calibers | Quantity::Scalar => 0,
+            _ => self.family().map_or(0, |f| system.index(f)),
+        };
         &units[index.min(units.len() - 1)]
+    }
+
+    /// The family whose unit pick this quantity follows directly, `None` for those that follow another family or have a
+    /// single unit.
+    pub fn family(self) -> Option<Family> {
+        Some(match self {
+            Quantity::Length => Family::Length,
+            Quantity::Mass => Family::Mass,
+            Quantity::Velocity => Family::Velocity,
+            Quantity::Acceleration => Family::Acceleration,
+            Quantity::Force => Family::Force,
+            Quantity::Impulse => Family::Impulse,
+            Quantity::Pressure => Family::Pressure,
+            Quantity::Density => Family::Density,
+            Quantity::Temperature => Family::Temperature,
+            Quantity::Altitude => Family::Distance,
+            _ => return None,
+        })
     }
 
     /// Position of `unit` in [`Quantity::units`] (matched by symbol), or 0 if it is not one of this quantity's units.
@@ -289,7 +414,7 @@ impl Quantity {
             Quantity::Mass => &[("lbs", 3), ("gram", 0), ("grams", 0)],
             Quantity::Angle => &[("°", 0), ("deg", 0), ("degrees", 0), ("radian", 1), ("radians", 1)],
             Quantity::Velocity => &[("kph", 1), ("kmh", 1), ("fps", 2)],
-            Quantity::Acceleration => &[("m/s2", 1)],
+            Quantity::Acceleration => &[("m/s2", 1), ("ft/s2", 2)],
             Quantity::Force => &[],
             Quantity::Impulse => &[("Ns", 0), ("lbfs", 1)],
             Quantity::Density => &[("kg/m3", 0), ("g/cm3", 1), ("lb/ft3", 2), ("lbs/ft3", 2)],
@@ -297,7 +422,8 @@ impl Quantity {
             Quantity::Time => &[("sec", 0), ("secs", 0)],
             Quantity::Temperature => &[("C", 0), ("F", 2), ("degC", 0), ("degF", 2)],
             Quantity::Roughness => &[("um", 0), ("μm", 0), ("mils", 1)],
-            Quantity::Altitude => &[("feet", 1), ("foot", 1)],
+            Quantity::Altitude => &[("feet", 1), ("foot", 1), ("mile", 3), ("miles", 3)],
+            Quantity::Pressure => &[("kpa", 0), ("PSI", 1)],
             Quantity::Percentage => &[("pct", 0)],
             Quantity::Calibers => &[("cals", 0), ("caliber", 0), ("calibers", 0)],
             Quantity::Scalar => &[],
@@ -310,7 +436,7 @@ impl Quantity {
 /// Values that round to zero print without a sign (no `-0.00`). Non-finite values print as `"—"`.
 ///
 /// ```ignore
-/// assert_eq!(format(0.1524, Quantity::Length, &UnitSystem::MmGS), ("152.40".to_string(), "mm"));
+/// assert_eq!(format(0.1524, Quantity::Length, &UnitSystem::MM_G_S), ("152.40".to_string(), "mm"));
 /// ```
 pub fn format(value_si: f64, quantity: Quantity, system: &UnitSystem) -> (String, &'static str) {
     let unit = quantity.unit_for(*system);
@@ -796,7 +922,7 @@ pub fn formula_text(expr: &bowshock_model::Expr, quantity: Quantity, unit: &Unit
 mod tests {
     use super::*;
 
-    const ALL_QUANTITIES: [Quantity; 15] = [
+    const ALL_QUANTITIES: [Quantity; 16] = [
         Quantity::Length,
         Quantity::Mass,
         Quantity::Angle,
@@ -804,6 +930,7 @@ mod tests {
         Quantity::Acceleration,
         Quantity::Force,
         Quantity::Impulse,
+        Quantity::Pressure,
         Quantity::Density,
         Quantity::Area,
         Quantity::Time,
@@ -902,7 +1029,7 @@ mod tests {
 
     #[test]
     fn format_examples() {
-        let s = UnitSystem::MmGS;
+        let s = UnitSystem::MM_G_S;
         assert_eq!(format(0.1524, Quantity::Length, &s), ("152.40".to_string(), "mm"));
         assert_eq!(format_in(0.0762, u(Quantity::Length, "in")), "3.000");
         assert_eq!(format_in(1.284, u(Quantity::Mass, "kg")), "1.284");
@@ -922,7 +1049,7 @@ mod tests {
         assert_eq!(format_in(-0.0015, mm), "-1.50");
         assert_eq!(format_in(f64::NAN, mm), "—");
         assert_eq!(format_in(f64::INFINITY, mm), "—");
-        assert_eq!(format(f64::NAN, Quantity::Mass, &UnitSystem::MKgS), ("—".to_string(), "kg"));
+        assert_eq!(format(f64::NAN, Quantity::Mass, &UnitSystem::M_KG_S), ("—".to_string(), "kg"));
         assert_eq!(format_in(1234.5678, u(Quantity::Length, "m")), "1234.5678");
     }
 
@@ -962,7 +1089,9 @@ mod tests {
         assert_eq!(syms(Quantity::Mass), ["g", "kg", "oz", "lb"]);
         assert_eq!(syms(Quantity::Velocity), ["m/s", "km/h", "ft/s", "mph"]);
         assert_eq!(syms(Quantity::Temperature), ["°C", "K", "°F"]);
-        assert_eq!(syms(Quantity::Altitude), ["m", "ft", "km"]);
+        assert_eq!(syms(Quantity::Altitude), ["m", "ft", "km", "mi"]);
+        assert_eq!(syms(Quantity::Acceleration), ["g", "m/s²", "ft/s²"]);
+        assert_eq!(syms(Quantity::Pressure), ["kPa", "psi"]);
         let dec = |q: Quantity| q.units().iter().map(|u| u.decimals).collect::<Vec<_>>();
         assert_eq!(dec(Quantity::Length), [2, 3, 4, 3, 4]);
         assert_eq!(dec(Quantity::Mass), [1, 3, 2, 3]);
@@ -970,21 +1099,20 @@ mod tests {
         assert_eq!(dec(Quantity::Density), [0, 3, 1]);
         assert_eq!(dec(Quantity::Area), [1, 2, 4, 3]);
         assert_eq!(dec(Quantity::Time), [2, 1, 2]);
-        assert_eq!(dec(Quantity::Altitude), [0, 0, 3]);
+        assert_eq!(dec(Quantity::Altitude), [0, 0, 3, 3]);
         assert_eq!(dec(Quantity::Roughness), [1, 2]);
     }
 
     #[test]
-    fn unit_for_each_system() {
+    fn unit_for_each_preset() {
         let sym = |q: Quantity, s: UnitSystem| q.unit_for(s).symbol;
         use Quantity::*;
-        use UnitSystem::*;
-        let expect: [(UnitSystem, [&str; 11]); 5] = [
-            (MmGS, ["mm", "g", "m/s", "g", "N", "N·s", "g/cm³", "mm²", "µm", "m", "°C"]),
-            (CmGS, ["cm", "g", "m/s", "g", "N", "N·s", "g/cm³", "cm²", "µm", "m", "°C"]),
-            (MKgS, ["m", "kg", "m/s", "m/s²", "N", "N·s", "kg/m³", "m²", "µm", "m", "°C"]),
-            (InOzS, ["in", "oz", "ft/s", "g", "lbf", "lbf·s", "lb/ft³", "in²", "mil", "ft", "°F"]),
-            (FtLbS, ["ft", "lb", "ft/s", "g", "lbf", "lbf·s", "lb/ft³", "in²", "mil", "ft", "°F"]),
+        let expect: [(UnitSystem, [&str; 12]); 5] = [
+            (UnitSystem::MM_G_S, ["mm", "g", "m/s", "g", "N", "N·s", "g/cm³", "mm²", "µm", "m", "°C", "kPa"]),
+            (UnitSystem::CM_G_S, ["cm", "g", "m/s", "g", "N", "N·s", "g/cm³", "cm²", "µm", "m", "°C", "kPa"]),
+            (UnitSystem::M_KG_S, ["m", "kg", "m/s", "m/s²", "N", "N·s", "kg/m³", "m²", "µm", "m", "°C", "kPa"]),
+            (UnitSystem::IN_OZ_S, ["in", "oz", "ft/s", "g", "lbf", "lbf·s", "lb/ft³", "in²", "mil", "ft", "°F", "psi"]),
+            (UnitSystem::FT_LB_S, ["ft", "lb", "ft/s", "g", "lbf", "lbf·s", "lb/ft³", "in²", "mil", "ft", "°F", "psi"]),
         ];
         for (system, want) in expect {
             let got = [
@@ -999,15 +1127,16 @@ mod tests {
                 sym(Roughness, system),
                 sym(Altitude, system),
                 sym(Temperature, system),
+                sym(Pressure, system),
             ];
-            assert_eq!(got, want, "{system:?}");
+            assert_eq!(got, want, "{}", system.label());
             assert_eq!(sym(Angle, system), "°");
             assert_eq!(sym(Time, system), "s");
             assert_eq!(sym(Percentage, system), "%");
             assert_eq!(sym(Calibers, system), "cal");
         }
         // Every system/quantity resolves to a member of units().
-        for system in UnitSystem::ALL {
+        for system in UnitSystem::PRESETS {
             for q in ALL_QUANTITIES {
                 assert!(q.units().contains(q.unit_for(system)));
             }
@@ -1015,11 +1144,69 @@ mod tests {
     }
 
     #[test]
-    fn system_labels() {
-        assert_eq!(UnitSystem::default(), UnitSystem::MmGS);
-        let labels: Vec<_> = UnitSystem::ALL.iter().map(|s| s.label()).collect();
+    fn preset_labels() {
+        assert_eq!(UnitSystem::default(), UnitSystem::MM_G_S);
+        let labels: Vec<_> = UnitSystem::PRESETS.iter().map(|s| s.label()).collect();
         assert_eq!(labels, ["mm · g · s", "cm · g · s", "m · kg · s", "in · oz · s", "ft · lb · s"]);
         assert!(labels[0].contains('\u{00B7}'));
+        assert!(UnitSystem::PRESETS.iter().all(|s| s.preset().is_some()));
+    }
+
+    #[test]
+    fn a_custom_set_mixes_families_and_labels_itself() {
+        let inch_kg = UnitSystem::MM_G_S.with(Family::Length, "in").with(Family::Mass, "kg");
+        assert_eq!(inch_kg.label(), "in · kg · s");
+        assert_eq!(inch_kg.preset(), None);
+        // Lengths in inches and masses in kilograms in the same view.
+        assert_eq!(format(0.0762, Quantity::Length, &inch_kg), ("3.000".to_string(), "in"));
+        assert_eq!(format(1.284, Quantity::Mass, &inch_kg), ("1.284".to_string(), "kg"));
+        // The other families keep the base set's choice; areas and roughness follow the length unit.
+        assert_eq!(Quantity::Velocity.unit_for(inch_kg).symbol, "m/s");
+        assert_eq!(Quantity::Area.unit_for(inch_kg).symbol, "in²");
+        assert_eq!(Quantity::Roughness.unit_for(inch_kg).symbol, "mil");
+        // Picking a preset's own units again gives the preset back, with its short name.
+        let back = inch_kg.with(Family::Length, "mm").with(Family::Mass, "g");
+        assert_eq!(back, UnitSystem::MM_G_S);
+        assert_eq!(back.label(), "mm · g · s");
+        // An unknown symbol changes nothing.
+        assert_eq!(inch_kg.with(Family::Length, "parsec"), inch_kg);
+    }
+
+    #[test]
+    fn every_family_unit_round_trips_si() {
+        for family in Family::ALL {
+            for unit in family.quantity().units() {
+                for si in [0.0, 1.0, 12.345, 273.15, 1e5] {
+                    let back = unit.to_si(unit.from_si(si));
+                    assert!(close(back, si), "{} {}: {back} vs {si}", family.label(), unit.symbol);
+                }
+                // Typed in the unit, the value parses back to the SI it was formatted from.
+                let text = format!("{}", unit.from_si(2.5));
+                let parsed = parse_quantity(&text, family.quantity(), unit, &none).expect("parses");
+                assert!(close(parsed, 2.5), "{}", unit.symbol);
+            }
+        }
+    }
+
+    #[test]
+    fn inputs_parse_in_the_chosen_unit() {
+        let set = UnitSystem::MM_G_S.with(Family::Length, "in").with(Family::Mass, "kg");
+        let length = Quantity::Length.unit_for(set);
+        // A bare number is already in the field's unit (inches); a suffix converts.
+        assert!(close(parse_quantity("3", Quantity::Length, length, &none).unwrap(), 0.0762));
+        assert!(close(parse_quantity("76.2mm", Quantity::Length, length, &none).unwrap(), 0.0762));
+        let mass = Quantity::Mass.unit_for(set);
+        assert!(close(parse_quantity("1.5", Quantity::Mass, mass, &none).unwrap(), 1.5));
+        assert!(close(parse_quantity("500g", Quantity::Mass, mass, &none).unwrap(), 0.5));
+    }
+
+    #[test]
+    fn symbols_round_trip_a_set() {
+        let set = UnitSystem::IN_OZ_S.with(Family::Mass, "kg").with(Family::Distance, "km");
+        let pairs: Vec<(String, String)> = set.symbols().into_iter().map(|(k, s)| (k.to_string(), s.to_string())).collect();
+        assert_eq!(UnitSystem::from_symbols(pairs.iter().map(|(k, s)| (k.as_str(), s.as_str()))), set);
+        // Unknown keys and symbols fall back to the default set's choice.
+        assert_eq!(UnitSystem::from_symbols([("length", "furlong"), ("nonsense", "x")]), UnitSystem::default());
     }
 
     #[test]
@@ -1236,7 +1423,7 @@ mod tests {
         assert!(parse_formula("{body_tube#3.cant} + 2", Quantity::Length, mm).is_err(), "an angle is not a length");
         assert!(parse_formula("{body_tube#3.od} * {body_tube#3.length}", Quantity::Length, mm).is_err());
         assert!(parse_formula("{body_tube#3.od} / {body_tube#3.length}", Quantity::Length, mm).is_err(), "a ratio is not a length");
-        let scalar = Quantity::Scalar.unit_for(UnitSystem::MmGS);
+        let scalar = Quantity::Scalar.unit_for(UnitSystem::MM_G_S);
         assert!(parse_formula("{body_tube#3.od} / {body_tube#3.length}", Quantity::Scalar, scalar).is_ok());
         assert!(formula_text(&bowshock_model::Expr::Num(1.0), Quantity::Mass, mm, &|_| None).is_none());
     }

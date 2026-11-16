@@ -1072,7 +1072,7 @@ impl Overlay<'_> {
                 frame,
                 cursor,
                 0.0,
-                &format!("{name} → {parent} @ {} mm", crate::app::ui::mm(station)),
+                &format!("{name} → {parent} @ {} {}", crate::app::ui::len(station, self.units), crate::app::ui::len_unit(self.units)),
                 suffix,
                 t.ink,
                 t.line_200,
@@ -1263,10 +1263,10 @@ impl Overlay<'_> {
             return;
         }
         let label = match (self.rocket.part(id), self.rocket.radial(id)) {
-            (Some(part), _) => Some(format!("{} · {}", part.kind.name(), size_label(&part.kind))),
+            (Some(part), _) => Some(format!("{} · {}", part.kind.name(), size_label(&part.kind, self.units))),
             (_, Some(radial)) => {
                 let times = if radial.count > 1 { format!(" ×{}", radial.count) } else { String::new() };
-                Some(format!("{}{times} · {}", radial.kind.name(), radial_size_label(&radial.kind)))
+                Some(format!("{}{times} · {}", radial.kind.name(), radial_size_label(&radial.kind, self.units)))
             }
             _ => None,
         };

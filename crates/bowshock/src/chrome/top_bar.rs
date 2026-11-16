@@ -21,13 +21,21 @@ use crate::widgets::segmented::segmented;
 /// Width of the unit system select.
 const UNITS_W: f32 = 124.0;
 
-/// A unit system as the select lists it (`mm · g · s`).
+/// An entry of the unit select: a named set, or the custom mix. The custom entry reads `Custom…` while a named set is current
+/// (choosing it opens the panel); while a custom mix is current it names the mix (`in · kg · s`) and re-opens the panel.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct SystemLabel(UnitSystem);
+enum SystemLabel {
+    Preset(UnitSystem),
+    Custom(UnitSystem),
+}
 
 impl fmt::Display for SystemLabel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.0.label())
+        match self {
+            SystemLabel::Preset(set) => f.write_str(&set.label()),
+            SystemLabel::Custom(set) if set.preset().is_some() => f.write_str("Custom…"),
+            SystemLabel::Custom(set) => f.write_str(&set.label()),
+        }
     }
 }
 
@@ -62,8 +70,15 @@ pub fn top_bar(ctx: &Ctx) -> Element<'_, Message> {
 
     let modes = segmented(&[(Mode::Build, "Build"), (Mode::Simulate, "Simulate"), (Mode::Analyze, "Analyze")], ctx.mode, Message::Mode);
 
-    let systems: Vec<SystemLabel> = UnitSystem::ALL.iter().copied().map(SystemLabel).collect();
-    let units = container(field::select(systems, Some(SystemLabel(ctx.units)), |s| Message::Units(s.0))).width(UNITS_W);
+    let current = ctx.units;
+    let mut systems: Vec<SystemLabel> = UnitSystem::PRESETS.iter().copied().map(SystemLabel::Preset).collect();
+    systems.push(SystemLabel::Custom(current));
+    let shown = if current.preset().is_some() { SystemLabel::Preset(current) } else { SystemLabel::Custom(current) };
+    let units = container(field::select(systems, Some(shown), |s| match s {
+        SystemLabel::Preset(set) => Message::Units(set),
+        SystemLabel::Custom(_) => Message::Chrome(ChromeMessage::OpenUnits),
+    }))
+    .width(UNITS_W);
     let theme_toggle = theme_toggle(ctx.dark);
     let simulate: Element<'_, Message> = button("Simulate", Weight::Primary).icon(Mark::Play).key("F5").on_press(Message::Run).into();
     let menu: Element<'_, Message> =

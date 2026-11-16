@@ -8,6 +8,7 @@
 use bowshock_model::{PlotLayout, PlotPanel, MAX_PANEL_SOURCES, MAX_PLOT_PANELS};
 
 use super::channels::{self, Dim};
+use crate::units::UnitSystem;
 
 /// A ready-made layout (the presets row above the plots).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,7 +98,7 @@ pub fn set_primary(layout: &mut PlotLayout, panel: usize, key: &str) {
 
 /// Adds `key` to the panel, or removes it when the panel already draws it. Refused (with the reason) when it measures something
 /// else, when the panel is full, or when it would leave the panel with no source.
-pub fn toggle_source(layout: &mut PlotLayout, panel: usize, key: &str, imperial: bool) -> Result<(), String> {
+pub fn toggle_source(layout: &mut PlotLayout, panel: usize, key: &str, units: UnitSystem) -> Result<(), String> {
     let channel = channels::find(key).ok_or_else(|| format!("Unknown source {key}"))?;
     let p = layout.panels.get_mut(panel).ok_or_else(|| "No such plot".to_string())?;
     if let Some(at) = p.sources.iter().position(|k| k == key) {
@@ -108,7 +109,7 @@ pub fn toggle_source(layout: &mut PlotLayout, panel: usize, key: &str, imperial:
         return Ok(());
     }
     if let Some(dim) = panel_dim(p) {
-        if let Some(reason) = channel.refusal(dim, imperial) {
+        if let Some(reason) = channel.refusal(dim, units) {
             return Err(reason);
         }
     }
@@ -206,15 +207,15 @@ mod tests {
     #[test]
     fn a_series_joins_only_a_panel_with_the_same_unit() {
         let mut l = layout(&[&["altitude"]]);
-        assert!(toggle_source(&mut l, 0, "ground_distance", false).is_ok());
+        assert!(toggle_source(&mut l, 0, "ground_distance", UnitSystem::MM_G_S).is_ok());
         assert_eq!(l.panels[0].sources, ["altitude", "ground_distance"]);
         // A speed is refused, with the reason, and the panel is untouched.
-        let why = toggle_source(&mut l, 0, "vertical_velocity", false).unwrap_err();
+        let why = toggle_source(&mut l, 0, "vertical_velocity", UnitSystem::MM_G_S).unwrap_err();
         assert!(why.contains("Vertical velocity") && why.contains("one y-axis"), "{why}");
         assert_eq!(l.panels[0].sources, ["altitude", "ground_distance"]);
         // Toggling a present source removes it, but never the last one.
-        assert!(toggle_source(&mut l, 0, "ground_distance", false).is_ok());
-        assert!(toggle_source(&mut l, 0, "altitude", false).unwrap_err().contains("at least one"));
+        assert!(toggle_source(&mut l, 0, "ground_distance", UnitSystem::MM_G_S).is_ok());
+        assert!(toggle_source(&mut l, 0, "altitude", UnitSystem::MM_G_S).unwrap_err().contains("at least one"));
         assert_eq!(l.panels[0].sources, ["altitude"]);
     }
 
@@ -222,10 +223,10 @@ mod tests {
     fn a_panel_holds_at_most_four_sources() {
         let mut l = layout(&[&["cd"]]);
         for key in ["cd_friction", "cd_pressure", "cd_base"] {
-            assert!(toggle_source(&mut l, 0, key, false).is_ok());
+            assert!(toggle_source(&mut l, 0, key, UnitSystem::MM_G_S).is_ok());
         }
         assert_eq!(l.panels[0].sources.len(), MAX_PANEL_SOURCES);
-        assert!(toggle_source(&mut l, 0, "cd_fins", false).unwrap_err().contains("at most 4"));
+        assert!(toggle_source(&mut l, 0, "cd_fins", UnitSystem::MM_G_S).unwrap_err().contains("at most 4"));
     }
 
     #[test]

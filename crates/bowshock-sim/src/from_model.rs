@@ -946,6 +946,16 @@ pub fn warnings(rocket: &Rocket, motors: &MotorDb, balance: &Balance) -> Vec<War
         }
     }
 
+    // Through-the-wall fin tabs.
+    for id in rocket.ids() {
+        let Some(fin) = rocket.radial(id).filter(|r| r.tab.is_some()) else {
+            continue;
+        };
+        for issue in rocket.fin_tab_issues(id) {
+            out.push(Warning::new(Level::Warn, format!("{} · {}", fin.display_name(), issue.message()), Some(id)));
+        }
+    }
+
     // Thrust to weight.
     if let Some(twr) = thrust_to_weight(rocket, motors) {
         if twr < MIN_THRUST_TO_WEIGHT {

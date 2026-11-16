@@ -15,6 +15,7 @@ use super::layout::panel_dim;
 use super::{LayoutEdit, Message};
 use crate::theme::{self, MONO};
 use crate::tokens::{SPACE_1, SPACE_2, TEXT_BODY, TEXT_LABEL};
+use crate::units::UnitSystem;
 
 /// The widget id of the search field.
 pub(super) const SEARCH_ID: &str = "plot-source-search";
@@ -63,7 +64,7 @@ enum Row {
 
 impl Picker {
     /// A closed-form description of every row for `layout`: the groups that have a match, each with its rows.
-    fn rows(&self, layout: &PlotLayout, imperial: bool) -> Vec<(Group, Vec<Row>)> {
+    fn rows(&self, layout: &PlotLayout, units: UnitSystem) -> Vec<(Group, Vec<Row>)> {
         let Some(panel) = layout.panels.get(self.panel) else { return Vec::new() };
         let dim = panel_dim(panel);
         let mut out = Vec::new();
@@ -81,7 +82,7 @@ impl Picker {
                         },
                         Mode::Add if on && panel.sources.len() == 1 => Row::Disabled { channel: c, on, reason: "A plot needs at least one source".to_string() },
                         Mode::Add if on => Row::Open { channel: c, current: true, on, message: Message::Layout(LayoutEdit::ToggleSource(self.panel, c.key)) },
-                        Mode::Add => match dim.and_then(|d| c.refusal(d, imperial)) {
+                        Mode::Add => match dim.and_then(|d| c.refusal(d, units)) {
                             Some(reason) => Row::Disabled { channel: c, on, reason },
                             None if panel.sources.len() >= MAX_PANEL_SOURCES => {
                                 Row::Disabled { channel: c, on, reason: format!("A plot holds at most {MAX_PANEL_SOURCES} sources") }
@@ -100,23 +101,23 @@ impl Picker {
 
     /// The menu as an overlay of the plots: a transparent layer that closes it, and the menu hanging at [`Picker::at`], slid back
     /// inside the plots where it would overhang an edge.
-    pub fn view<'a>(&'a self, layout: &'a PlotLayout, imperial: bool) -> Element<'a, Message> {
+    pub fn view<'a>(&'a self, layout: &'a PlotLayout, units: UnitSystem) -> Element<'a, Message> {
         responsive(move |size| {
-            let rows = self.rows(layout, imperial);
+            let rows = self.rows(layout, units);
             let groups = rows.len() as f32;
             let count: usize = rows.iter().map(|(_, r)| r.len()).sum();
             let list_h = (count as f32 * ROW_H + groups * HEAD_H).clamp(ROW_H, LIST_MAX);
-            let card = self.card(rows, layout, list_h, imperial);
+            let card = self.card(rows, layout, list_h, units);
             let x = self.at.x.min(size.width - WIDTH - 8.0).max(8.0);
             let y = self.at.y.min(size.height - (CHROME_H + list_h) - 8.0).max(8.0);
             let placed = container(card).padding(Padding { top: y, left: x, right: 0.0, bottom: 0.0 });
-            let backdrop = mouse_area(Space::new().width(Fill).height(Fill)).on_press(Message::ClosePicker);
+            let backdrop = mouse_area(Space::new().width(Fill).height(Fill)).interaction(iced::mouse::Interaction::Idle).on_press(Message::ClosePicker);
             stack![backdrop, placed].boxed()
         })
         .boxed()
     }
 
-    fn card<'a>(&'a self, rows: Vec<(Group, Vec<Row>)>, layout: &PlotLayout, list_h: f32, imperial: bool) -> Element<'a, Message> {
+    fn card<'a>(&'a self, rows: Vec<(Group, Vec<Row>)>, layout: &PlotLayout, list_h: f32, units: UnitSystem) -> Element<'a, Message> {
         let title = match self.mode {
             Mode::Primary => format!("PLOT {} · SOURCE", self.panel + 1),
             Mode::Add => format!("PLOT {} · ADD SERIES", self.panel + 1),
@@ -143,7 +144,7 @@ impl Picker {
                     .boxed(),
             );
             for r in group_rows {
-                list.push(source_row(r, imperial));
+                list.push(source_row(r, units));
             }
         }
         if list.is_empty() {
@@ -159,7 +160,7 @@ impl Picker {
         ];
         // The rule behind the disabled rows, stated once where it can be read without hovering.
         if let (Mode::Add, Some(dim)) = (self.mode, layout.panels.get(self.panel).and_then(panel_dim)) {
-            let unit = dim.unit(imperial).symbol;
+            let unit = dim.unit(units).symbol;
             let what = if unit.is_empty() { dim.noun().to_string() } else { format!("{} ({unit})", dim.noun()) };
             body.push(rule());
             body.push(
@@ -174,8 +175,8 @@ impl Picker {
 }
 
 /// The unit text at the right of a row (`m/s`; nothing for a dimensionless source).
-fn unit_text(channel: &Channel, imperial: bool) -> String {
-    let symbol = channel.unit(imperial).symbol;
+fn unit_text(channel: &Channel, units: UnitSystem) -> String {
+    let symbol = channel.unit(units).symbol;
     if symbol.is_empty() {
         "—".to_string()
     } else {
@@ -183,14 +184,14 @@ fn unit_text(channel: &Channel, imperial: bool) -> String {
     }
 }
 
-fn source_row<'a>(row_data: Row, imperial: bool) -> Element<'a, Message> {
+fn source_row<'a>(row_data: Row, units: UnitSystem) -> Element<'a, Message> {
     match row_data {
         Row::Open { channel, current, on, message } => {
             let edge = container(Space::new()).width(EDGE_W).height(ROW_H).style(move |theme: &Theme| container::Style {
                 background: current.then(|| theme::tokens(theme).accent.into()),
                 ..container::Style::default()
             });
-            let right = if on { "ON".to_string() } else { unit_text(channel, imperial) };
+            let right = if on { "ON".to_string() } else { unit_text(channel, units) };
             let label = row![
                 text(channel.label).size(TEXT_BODY).style(theme::ink),
                 Space::new().width(Fill),
@@ -202,7 +203,7 @@ fn source_row<'a>(row_data: Row, imperial: bool) -> Element<'a, Message> {
             hinted(line, channel.hint)
         }
         Row::Disabled { channel, on, reason } => {
-            let right = if on { "ON".to_string() } else { unit_text(channel, imperial) };
+            let right = if on { "ON".to_string() } else { unit_text(channel, units) };
             let label = row![
                 text(channel.label).size(TEXT_BODY).style(theme::faint),
                 Space::new().width(Fill),

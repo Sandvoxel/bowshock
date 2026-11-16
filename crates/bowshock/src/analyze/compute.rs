@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use super::cfd;
 use super::flutter::{FinStock, FlutterAnalysis};
+use crate::units::{Quantity, UnitSystem};
 use bowshock_model::{CfdTable, ConfigId, Finish, Rocket, StabilityBands};
 use bowshock_motors::MotorDb;
 use bowshock_sim::from_model::{self, Phase};
@@ -650,10 +651,16 @@ impl Output {
         }
     }
 
-    /// The numbers as a table: lengths in millimetres, angles in degrees, speeds in m/s.
-    pub fn table(&self) -> Table {
+    /// The numbers as a table in `units`: stations in the length unit, altitudes and landing offsets in the altitude unit, speeds
+    /// in the speed unit (each heading names its unit), angles in degrees. A column's decimals follow its unit.
+    pub fn table(&self, units: UnitSystem) -> Table {
+        let q = |quantity: Quantity, si: f64, extra: usize| {
+            let unit = quantity.unit_for(units);
+            format!("{:.*}", unit.decimals + extra, unit.from_si(si))
+        };
+        let sym = |quantity: Quantity| quantity.unit_for(units).symbol;
         let mut rows = Vec::new();
-        let headers: Vec<&str> = match self.analysis {
+        let headers: Vec<String> = match self.analysis {
             Analysis::Aerodynamics | Analysis::Drag => {
                 for run in &self.runs {
                     let Data::Mach(points) = &run.data else { continue };
@@ -664,8 +671,8 @@ impl Output {
                             run.name.clone(),
                             s(p.mach, 3),
                             s(p.margin_cal, 3),
-                            s(p.cp * 1e3, 1),
-                            s(cg * 1e3, 1),
+                            q(Quantity::Length, p.cp, 1),
+                            q(Quantity::Length, cg, 1),
                             s(p.cn_alpha, 3),
                             s(p.drag.total, 3),
                             s(p.drag.friction, 3),
@@ -676,7 +683,21 @@ impl Output {
                         ]);
                     }
                 }
-                vec!["Configuration", "Mach", "Margin (cal)", "CP (mm)", "CG (mm)", "CNa (/rad)", "Cd", "Cd skin", "Cd press", "Cd base", "Cd fins", "Cd other"]
+                let length = sym(Quantity::Length);
+                vec![
+                    "Configuration".to_string(),
+                    "Mach".to_string(),
+                    "Margin (cal)".to_string(),
+                    format!("CP ({length})"),
+                    format!("CG ({length})"),
+                    "CNa (/rad)".to_string(),
+                    "Cd".to_string(),
+                    "Cd skin".to_string(),
+                    "Cd press".to_string(),
+                    "Cd base".to_string(),
+                    "Cd fins".to_string(),
+                    "Cd other".to_string(),
+                ]
             }
             Analysis::Stability => {
                 for run in &self.runs {
@@ -687,15 +708,25 @@ impl Output {
                             run.name.clone(),
                             s(p.alpha.to_degrees(), 2),
                             s(p.margin_cal, 3),
-                            s(p.cp * 1e3, 1),
-                            s(cg * 1e3, 1),
+                            q(Quantity::Length, p.cp, 1),
+                            q(Quantity::Length, cg, 1),
                             s(p.cn_alpha, 3),
                             s(p.cn, 4),
                             s(p.drag.total, 4),
                         ]);
                     }
                 }
-                vec!["Configuration", "AoA (deg)", "Margin (cal)", "CP (mm)", "CG (mm)", "CNa (/rad)", "CN", "Cd"]
+                let length = sym(Quantity::Length);
+                vec![
+                    "Configuration".to_string(),
+                    "AoA (deg)".to_string(),
+                    "Margin (cal)".to_string(),
+                    format!("CP ({length})"),
+                    format!("CG ({length})"),
+                    "CNa (/rad)".to_string(),
+                    "CN".to_string(),
+                    "Cd".to_string(),
+                ]
             }
             Analysis::Flutter => {
                 for run in &self.runs {
@@ -705,28 +736,47 @@ impl Output {
                         rows.push(vec![
                             run.name.clone(),
                             s(p.t, 2),
-                            s(p.altitude, 0),
-                            s(p.speed, 1),
+                            q(Quantity::Altitude, p.altitude, 0),
+                            q(Quantity::Velocity, p.speed, 0),
                             s(p.mach, 3),
-                            s(p.flutter_velocity, 1),
+                            q(Quantity::Velocity, p.flutter_velocity, 0),
                             if m.is_finite() { s(m, 2) } else { "-".to_string() },
                             f.stocks[p.governing.min(f.stocks.len() - 1)].name.clone(),
                         ]);
                     }
                 }
-                vec!["Configuration", "Time (s)", "Altitude (m)", "Velocity (m/s)", "Mach", "Flutter velocity (m/s)", "Flutter margin", "Governing fin set"]
+                vec![
+                    "Configuration".to_string(),
+                    "Time (s)".to_string(),
+                    format!("Altitude ({})", sym(Quantity::Altitude)),
+                    format!("Velocity ({})", sym(Quantity::Velocity)),
+                    "Mach".to_string(),
+                    format!("Flutter velocity ({})", sym(Quantity::Velocity)),
+                    "Flutter margin".to_string(),
+                    "Governing fin set".to_string(),
+                ]
             }
             Analysis::Dispersion => {
                 for run in &self.runs {
                     let Data::Dispersion(Some(d)) = &run.data else { continue };
                     for (landing, apogee) in d.landings.iter().zip(&d.apogees) {
-                        rows.push(vec![run.name.clone(), s(landing[0], 1), s(landing[1], 1), s(*apogee, 1)]);
+                        rows.push(vec![
+                            run.name.clone(),
+                            q(Quantity::Altitude, landing[0], 1),
+                            q(Quantity::Altitude, landing[1], 1),
+                            q(Quantity::Altitude, *apogee, 1),
+                        ]);
                     }
                 }
-                vec!["Configuration", "Landing east (m)", "Landing north (m)", "Apogee (m)"]
+                vec![
+                    "Configuration".to_string(),
+                    format!("Landing east ({})", sym(Quantity::Altitude)),
+                    format!("Landing north ({})", sym(Quantity::Altitude)),
+                    format!("Apogee ({})", sym(Quantity::Altitude)),
+                ]
             }
         };
-        Table { headers: headers.into_iter().map(String::from).collect(), rows }
+        Table { headers, rows }
     }
 }
 
@@ -854,10 +904,16 @@ mod tests {
             bands: Default::default(),
             cfd: None,
         });
-        let table = out.table();
+        let table = out.table(UnitSystem::MM_G_S);
         assert_eq!(table.rows.len(), out.runs.len() * mach_grid((0.1, 3.0)).len());
         assert!(table.rows.iter().all(|r| r.len() == table.headers.len()));
         assert!(table.csv().lines().count() == table.rows.len() + 1);
+        // The CSV follows the unit set: stations in inches, the headings say so.
+        let inch = out.table(UnitSystem::MM_G_S.with(crate::units::Family::Length, "in"));
+        assert_eq!(&inch.headers[3..5], ["CP (in)", "CG (in)"]);
+        assert_eq!(&table.headers[3..5], ["CP (mm)", "CG (mm)"]);
+        let (mm, ins): (f64, f64) = (table.rows[0][3].parse().unwrap(), inch.rows[0][3].parse().unwrap());
+        assert!((mm / 25.4 - ins).abs() < 0.01, "{mm} mm vs {ins} in");
     }
 
     #[test]

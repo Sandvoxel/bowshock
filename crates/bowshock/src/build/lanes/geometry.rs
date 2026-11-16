@@ -283,7 +283,7 @@ mod tests {
     use bowshock_model::System;
 
     fn mm() -> Unit {
-        *Quantity::Length.unit_for(UnitSystem::MmGS)
+        *Quantity::Length.unit_for(UnitSystem::MM_G_S)
     }
 
     #[test]
@@ -327,7 +327,7 @@ mod tests {
 
     #[test]
     fn ticks_follow_the_unit_system() {
-        let inch = *Quantity::Length.unit_for(UnitSystem::InOzS);
+        let inch = *Quantity::Length.unit_for(UnitSystem::IN_OZ_S);
         let axis = Axis::fit(700.0, 1.0);
         let labels: Vec<String> = ticks(&axis, LABEL_W, 700.0, &inch).into_iter().filter_map(|t| t.label).collect();
         assert!(labels.len() >= 3 && labels[0] == "0", "{labels:?}");

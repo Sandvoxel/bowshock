@@ -14,6 +14,7 @@ use bowshock_model::{Anchor, InternalKind, InternalPart, Part, PartId, PartKind,
 
 use super::{Ctx, Selection};
 use crate::app::ui;
+use crate::units::UnitSystem;
 use crate::viewport::assembly::{body_of, Drag, Origin};
 use crate::viewport::pick::{Pick, SurfaceTarget};
 use crate::viewport::surface::RadialDrag;
@@ -68,14 +69,14 @@ fn insert_in_pod(rocket: &mut Rocket, pod: PartId, index: usize, kind: &PartKind
 }
 
 /// The status message for a part whose diameter was changed to fit its neighbours, if it was.
-fn matched_notice(asked: &PartKind, matched: &PartKind) -> Option<String> {
+fn matched_notice(asked: &PartKind, matched: &PartKind, units: UnitSystem) -> Option<String> {
     let differs = |a: f64, b: f64| (a - b).abs() > 1e-9;
     if !differs(matched.fore_diameter(), asked.fore_diameter()) && !differs(matched.aft_diameter(), asked.aft_diameter()) {
         return None;
     }
     let diameter =
         if differs(matched.fore_diameter(), asked.fore_diameter()) && matched.fore_diameter() > 0.0 { matched.fore_diameter() } else { matched.aft_diameter() };
-    Some(format!("Diameter matched to {} mm", ui::mm(diameter)))
+    Some(format!("Diameter matched to {} {}", ui::len(diameter, units), ui::len_unit(units)))
 }
 
 /// Inserts `kind` at attach node `index` as one undo step (a click on a bin row). A new part also frames the rocket.
@@ -83,7 +84,7 @@ pub fn place(ctx: &mut Ctx, index: usize, kind: PartKind) -> bool {
     let name = kind.name();
     let placed = ctx.doc.edit(&format!("Add {}", name.to_lowercase()), |r| insert_part(r, index, &kind, None));
     if let Some(matched) = &placed {
-        if let Some(message) = matched_notice(&kind, matched) {
+        if let Some(message) = matched_notice(&kind, matched, ctx.units) {
             ctx.notify(message);
         }
         ctx.camera_fit = true;
@@ -96,7 +97,7 @@ pub fn place_in_pod(ctx: &mut Ctx, pod: PartId, index: usize, kind: PartKind) ->
     let name = kind.name();
     let placed = ctx.doc.edit(&format!("Add {}", name.to_lowercase()), |r| insert_in_pod(r, pod, index, &kind, None));
     if let Some(matched) = &placed {
-        if let Some(message) = matched_notice(&kind, matched) {
+        if let Some(message) = matched_notice(&kind, matched, ctx.units) {
             ctx.notify(message);
         }
         ctx.camera_fit = true;
@@ -248,7 +249,7 @@ pub fn finish_axial(ctx: &mut Ctx, drop: bool) {
         _ => None,
     };
     if let Some(matched) = &placed {
-        if let Some(message) = matched_notice(&drag.kind, matched) {
+        if let Some(message) = matched_notice(&drag.kind, matched, ctx.units) {
             ctx.notify(message);
         }
         // A part from the bin frames the rocket; one that was moved leaves the camera where the user put it.
@@ -398,7 +399,8 @@ fn land_radial(r: &mut Rocket, drag: &RadialDrag, t: SurfaceTarget) -> bool {
             // A new count re-spaces the group: the overrides and letters of its copies are dropped, as by any count change.
             r.restore_radial(moved).is_ok() && (drag.count == origin.count || r.set_radial(origin.id, drag.kind.clone(), drag.count))
         }
-        None => r.attach_radial(t.parent, t.offset, t.angle, drag.count, drag.kind.clone()).is_ok(),
+        // New fins over a motor mount are glued to it through the wall (the common build); the inspector's tab toggle undoes it.
+        None => r.attach_radial(t.parent, t.offset, t.angle, drag.count, drag.kind.clone()).map(|id| r.set_fin_tab_to_motor_mount(id)).is_ok(),
     }
 }
 
@@ -508,5 +510,41 @@ pub fn delete_selection(ctx: &mut Ctx) {
 fn remove_any(rocket: &mut Rocket, id: PartId) {
     if rocket.remove(id).is_none() && rocket.remove_radial(id).is_none() {
         rocket.remove_internal(id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A tube with a 54 mm motor mount under its aft 300 mm.
+    fn rocket() -> (Rocket, PartId) {
+        let mut r = Rocket::default();
+        let tube = r.insert(0, PartKind::BodyTube { length: 0.5, diameter: 0.1 }).unwrap();
+        let mount = InternalKind::InnerTube { outer_diameter: 0.054, thickness: 0.002, length: 0.3, motor_mount: true, overhang: 0.0 };
+        r.attach_internal(tube, 0.2, mount).unwrap();
+        (r, tube)
+    }
+
+    fn drag(kind: RadialKind) -> RadialDrag {
+        RadialDrag { row: None, kind, count: 3, origin: None, target: None, detached: false }
+    }
+
+    /// New fins dropped over a motor mount are glued to it through the wall (the common build); fins elsewhere, and lugs, get no tab.
+    #[test]
+    fn new_fins_over_a_motor_mount_get_a_through_the_wall_tab_to_it() {
+        let (mut r, tube) = rocket();
+        let fin = RadialKind::FinSet { root_chord: 0.2, tip_chord: 0.08, span: 0.08, sweep: 0.08, thickness: 0.004 };
+        let over = SurfaceTarget { parent: tube, offset: 0.25, angle: 0.0, copy: 0 };
+        assert!(land_radial(&mut r, &drag(fin.clone()), over));
+        let placed = r.radials().last().unwrap();
+        let tab = placed.tab.expect("a tab to the mount");
+        assert!((tab.height - 0.023).abs() < 1e-12 && (tab.length - 0.2).abs() < 1e-12 && tab.position.abs() < 1e-12, "{tab:?}");
+        // Ahead of the mount: no tab. A lug never has one.
+        let ahead = SurfaceTarget { parent: tube, offset: 0.0, angle: 0.0, copy: 0 };
+        assert!(land_radial(&mut r, &drag(fin), ahead));
+        assert!(r.radials().last().unwrap().tab.is_none());
+        assert!(land_radial(&mut r, &drag(RadialKind::LaunchLug { length: 0.05, diameter: 0.01 }), over));
+        assert!(r.radials().last().unwrap().tab.is_none());
     }
 }

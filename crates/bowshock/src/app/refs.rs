@@ -316,7 +316,9 @@ pub fn menu_view(ctx: &Ctx) -> Option<Element<'_, app::Message>> {
             let left = (menu.at.x + 6.0).min(window.width - MENU_W - 8.0).max(8.0);
             let top = (menu.at.y + 6.0).min(window.height - height - 8.0).max(8.0);
             let placed = container(card).padding(iced::Padding { top, left, right: 0.0, bottom: 0.0 });
-            let backdrop = mouse_area(Space::new().width(Fill).height(Fill)).on_press(app::Message::Inspector(inspector::Message::PickMenuClose));
+            let backdrop = mouse_area(Space::new().width(Fill).height(Fill))
+                .interaction(iced::mouse::Interaction::Idle)
+                .on_press(app::Message::Inspector(inspector::Message::PickMenuClose));
             iced::widget::stack![backdrop, placed].boxed()
         })
         .boxed(),

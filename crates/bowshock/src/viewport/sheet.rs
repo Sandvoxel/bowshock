@@ -12,8 +12,11 @@ use iced::{alignment, mouse, Point, Rectangle, Renderer, Size, Theme, Vector};
 use super::Camera;
 use crate::theme::{self, MONO};
 use crate::tokens::{SPACE_4, TEXT_LABEL};
+use crate::units::{Quantity, UnitSystem};
 
 pub struct Sheet {
+    /// The display unit set: the scale bar is a power of ten of its length unit.
+    pub units: UnitSystem,
     pub camera: Camera,
     /// The rocket's axial extent (nose tip and tail, metres along `z`); the centreline runs a little past both ends.
     pub span: Option<(f32, f32)>,
@@ -59,11 +62,15 @@ impl<Message> canvas::Program<Message> for Sheet {
         });
         frame.stroke(&marks, Stroke::default().with_color(t.line_200).with_width(1.0));
 
-        // Scale bar, bottom right: the largest of 1/10/100/1000 mm that fits in 160 px.
-        let (metres, label) = [(1.0, "1 m"), (0.1, "100 mm"), (0.01, "10 mm"), (0.001, "1 mm")]
-            .into_iter()
+        // Scale bar, bottom right: the largest power of ten of the length unit (1000 mm … 0.001 in) that fits in 160 px.
+        let unit = Quantity::Length.unit_for(self.units);
+        let name =
+            |k: i32| if k >= 0 { format!("{} {}", 10u32.pow(k as u32), unit.symbol) } else { format!("0.{}1 {}", "0".repeat((-k - 1) as usize), unit.symbol) };
+        let (metres, label) = (-3..=3)
+            .rev()
+            .map(|k: i32| ((10f64.powi(k) * unit.to_si) as f32, name(k)))
             .find(|(m, _)| m * self.camera.scale <= 160.0)
-            .unwrap_or((0.001, "1 mm"));
+            .unwrap_or(((0.001 * unit.to_si) as f32, name(-3)));
         let len = metres * self.camera.scale;
         let base = Point::new(w - SPACE_4 * 2.0, h - SPACE_4 * 2.0);
         let bar = Path::new(|p| {
@@ -74,7 +81,7 @@ impl<Message> canvas::Program<Message> for Sheet {
         });
         frame.stroke(&bar, Stroke::default().with_color(t.ink_muted).with_width(1.0));
         frame.fill_text(Text {
-            content: label.into(),
+            content: label,
             position: base + Vector::new(-len / 2.0, -6.0),
             color: t.ink_muted,
             size: TEXT_LABEL.into(),

@@ -130,7 +130,7 @@ pub enum InsideView {
     Exploded,
 }
 
-/// The toolbar's grid step: what a plain handle drag moves by.
+/// The toolbar's grid step: what a plain handle drag moves by, metres.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GridStep(pub f64);
 
@@ -139,14 +139,16 @@ impl GridStep {
     pub const ALL: [GridStep; 5] = [GridStep(0.0001), GridStep(0.0005), GridStep(0.001), GridStep(0.005), GridStep(0.01)];
 }
 
-impl fmt::Display for GridStep {
+/// A grid step as the toolbar's select lists it: written in the length unit of the unit set, to the digits it needs
+/// (`0.1 mm`, `1 mm`, `0.039 in`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct GridChoice(GridStep, crate::units::UnitSystem);
+
+impl fmt::Display for GridChoice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mm = self.0 * 1000.0;
-        if mm < 1.0 {
-            write!(f, "{mm:.1} mm")
-        } else {
-            write!(f, "{mm:.0} mm")
-        }
+        let unit = crate::units::Quantity::Length.unit_for(self.1);
+        let text = format!("{:.3}", unit.from_si(self.0 .0));
+        write!(f, "{} {}", text.trim_end_matches('0').trim_end_matches('.'), unit.symbol)
     }
 }
 
@@ -787,7 +789,7 @@ impl View {
     }
 
     /// The view toolbar: 3D / 2D, the inside views, the snap step, and the focus tag with its way back.
-    fn toolbar<'a>(&'a self) -> Element<'a, Message> {
+    fn toolbar<'a>(&'a self, units: crate::units::UnitSystem) -> Element<'a, Message> {
         let mut cells = toolbar::group(
             &[(Projection::ThreeD, Some(Glyph::Cube), "3D"), (Projection::Profile, Some(Glyph::Profile), "2D")],
             self.projection,
@@ -806,7 +808,8 @@ impl View {
         ));
         cells.push(toolbar::rule());
         // The snap step: a magnet and the flat select, one cell.
-        let step = toolbar::flat_select(GridStep::ALL.as_slice(), GridStep(self.snap_step), Message::Step);
+        let choices: Vec<GridChoice> = GridStep::ALL.iter().map(|s| GridChoice(*s, units)).collect();
+        let step = toolbar::flat_select(choices, GridChoice(GridStep(self.snap_step), units), |c| Message::Step(c.0));
         cells.push(
             row![container(toolbar::icon(Glyph::Magnet, false)).padding([0.0, SPACE_2]), container(step).width(70)]
                 .align_y(alignment::Vertical::Center)
@@ -839,6 +842,7 @@ impl View {
                     snap_angle: ctx.drag.angle_snap,
                     snap_step,
                     margin: ctx.shown().now.map(|b| b.margin_cal).filter(|_| ctx.drag.landing().is_some()),
+                    units: ctx.units,
                 })
                 .width(Fill)
                 .height(Fill)
@@ -855,6 +859,7 @@ impl View {
                     snap_step,
                     cursor: ctx.cursor,
                     margin: ctx.shown().now.map(|b| b.margin_cal).filter(|_| ctx.drag.landing().is_some()),
+                    units: ctx.units,
                 })
                 .width(Fill)
                 .height(Fill)
@@ -870,6 +875,7 @@ impl View {
                     snap_step,
                     cursor: ctx.cursor,
                     margin: ctx.shown().now.map(|b| b.margin_cal).filter(|_| ctx.drag.landing().is_some()),
+                    units: ctx.units,
                 })
                 .width(Fill)
                 .height(Fill)
@@ -914,7 +920,7 @@ impl View {
         let phase = ctx.physics.phase();
         let fade_from = dropped_from(ctx.physics.stages(), phase);
         let span = (!self.mesh.is_empty()).then_some((self.mesh.min.z, self.mesh.max.z));
-        let sheet: Element<'_, Message> = canvas(sheet::Sheet { camera, span }).width(Fill).height(Fill).boxed();
+        let sheet: Element<'_, Message> = canvas(sheet::Sheet { camera, span, units: ctx.units }).width(Fill).height(Fill).boxed();
         let sheet = empty::over(sheet, ctx);
         let model: Element<'_, Message> = shader(scene::Scene {
             camera,
@@ -976,7 +982,7 @@ impl View {
             layers = layers.push(cube);
         }
         // Overlays float `space-4` from the viewport edges.
-        let mut top: Vec<Element<'a, Message>> = vec![container(self.toolbar()).padding(SPACE_4).boxed()];
+        let mut top: Vec<Element<'a, Message>> = vec![container(self.toolbar(ctx.units)).padding(SPACE_4).boxed()];
         if self.focus.is_some() {
             let back = Element::from(button("Esc · back", Weight::Secondary).on_press(Message::ExitFocus));
             top.push(container(back).align_right(Fill).padding(SPACE_4).boxed());

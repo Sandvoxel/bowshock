@@ -291,6 +291,7 @@ fn conditions<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
                 "Flutter speed from each fin set's planform, thickness and the shear modulus of its stock, in the air at every moment of the flight up to apogee, against the rocket's speed. The lowest ratio decides.",
                 12.0,
             ));
+            rows.push(muted("The fin root is taken as clamped, as for a glued or through-the-wall fin; a tab earns no credit.", 12.0));
         }
         Analysis::Dispersion => {
             rows.push(row_of("Runs", crate::widgets::segmented::segmented(&[(50, "50"), (100, "100"), (200, "200")], c.runs, Message::Runs)));

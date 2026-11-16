@@ -123,7 +123,7 @@ mod tests {
 
         /// Types `text` (millimetres) into `dim` of the fin set, as the field would publish it.
         fn type_formula(&mut self, dim: Dim, text: &str) {
-            let mm = Quantity::Length.unit_for(UnitSystem::MmGS);
+            let mm = Quantity::Length.unit_for(UnitSystem::MM_G_S);
             self.send(Message::Formula(FieldRef::new(self.fins, dim), text.to_string(), mm));
         }
 

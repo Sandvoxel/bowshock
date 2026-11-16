@@ -187,14 +187,28 @@ impl Rocket {
                 // diameter it lies on plus its own chord-wise spread, treated as a thin rod.
                 let fin =
                     MassProps { mass: n * mass, cg: cz, i_long: n * mass * (radius * radius / 2.0 + chord * chord / 12.0), i_rot: n * mass * radius * radius };
+                // The through-the-wall tab: a plate of the fin's thickness, `height` deep below the root, centred on the tab's
+                // chordwise middle and half its height inside the surface.
+                let tab = r.tab.filter(|t| t.volume(thickness) > 0.0).map(|t| {
+                    let m = n * bulk(r.material) * t.volume(thickness);
+                    let inside = (base - t.height / 2.0).max(0.0);
+                    MassProps {
+                        mass: m,
+                        cg: t.position + t.length / 2.0,
+                        i_long: m * (inside * inside / 2.0 + t.length * t.length / 12.0),
+                        i_rot: m * inside * inside,
+                    }
+                });
                 // The fillet: two concave strips of cross-section r^2 (1 - pi/4) along the root, each a
                 // point-like mass at the root with the fin's centroid station and the surface radius.
-                if r.fillet_radius > 0.0 {
+                let strip = (r.fillet_radius > 0.0).then(|| {
                     let m = n * 2.0 * r.fillet_radius * r.fillet_radius * (1.0 - PI / 4.0) * chord * bulk(r.fillet_material);
-                    let strip = MassProps { mass: m, cg: chord / 2.0, i_long: m * (base * base / 2.0 + chord * chord / 12.0), i_rot: m * base * base };
-                    return MassProps::combine([fin, strip]);
+                    MassProps { mass: m, cg: chord / 2.0, i_long: m * (base * base / 2.0 + chord * chord / 12.0), i_rot: m * base * base }
+                });
+                if tab.is_none() && strip.is_none() {
+                    return fin;
                 }
-                fin
+                MassProps::combine(std::iter::once(fin).chain(tab).chain(strip))
             }
             RadialKind::LaunchLug { length, diameter } => {
                 let (ro, wall) = (diameter / 2.0, (diameter / 10.0).min(LUG_WALL_MAX));

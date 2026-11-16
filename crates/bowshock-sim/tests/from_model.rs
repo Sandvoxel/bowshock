@@ -513,3 +513,99 @@ fn fin_angles_and_free_form_mid_chord_reach_the_vehicle() {
     let three = v.fin_sets.iter().find(|f| f.count == 3).unwrap();
     assert_eq!((three.parent, three.mid_chord_cos, three.root_extent), (free.parent, None, None));
 }
+
+/// The freeform plywood fins of a 4 in L2 rocket (HYPERLOC): 3 mm 'aircraft plywood', a swept outline (root 330.2 mm, tip 52.7 mm,
+/// 107.95 mm span, 234.95 mm sweep) with rounded edges. Hand calculation of Martin's estimate (NACA TN 4197, in the form of Bennett 2023):
+///   S = (330.2 + 52.705)/2 · 107.95 = 20 667 mm², AR = b²/S = 0.5638, λ = c_t/c_r = 0.1596,
+///   C_x = [m (c_r + 2 c_t) + c_r² + c_r c_t + c_t²] / [3 (c_r + c_t)] = 201.58 mm, ε = C_x/c_r − 1/4 = 0.3605,
+///   D_N = 24 ε κ p0/π = 390.65 kPa, t = t₀ (1 − (1 − π/4) t₀/c̄) = 2.9897 mm for rounded edges, t/c_r = 0.009054,
+///   V_f = a √(G / (D_N AR³/((t/c)³ (AR+2)) · (λ+1)/2 · p/p0)) = 340.29 √(0.85e9 / 2.092e10) = 67.9 m/s at sea level.
+#[test]
+fn a_swept_freeform_plywood_fin_flutters_where_the_hand_calculation_says() {
+    use bowshock_model::FinSection;
+    use bowshock_sim::flutter::{FlutterFin, FlutterGeometry, FlutterTrace, FlutterWarning, P0};
+    use bowshock_sim::Atmosphere;
+    let mut r = Rocket::default();
+    r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.3, diameter: 0.1016 }).unwrap();
+    let tube = r.insert(1, PartKind::BodyTube { length: 0.86, diameter: 0.1016 }).unwrap();
+    let outline = vec![(0.0, 0.0), (0.23495, 0.10795), (0.287655, 0.10795), (0.3302, 0.0)];
+    let fins = r.attach_radial(tube, 0.52705, 0.0, 3, RadialKind::FreeformFin { points: outline, thickness: 0.00299974 }).unwrap();
+    r.set_fin_section(fins, FinSection::Rounded);
+    assert!(r.set_material(fins, bowshock_model::MaterialId::AIRCRAFT_PLYWOOD));
+    let v = vehicle(&r, &MotorDb::bundled(), Phase::Full).unwrap();
+    let g = FlutterGeometry::of(&v.fin_sets[0]);
+    let rel = |a: f64, b: f64, tol: f64| assert!((a - b).abs() <= tol * b.abs(), "{a} vs {b}");
+    rel(g.area, 0.020_667_297, 1e-6);
+    rel(g.aspect_ratio(), 0.563_847, 1e-5);
+    rel(g.taper_ratio(), 0.159_615, 1e-5);
+    rel(g.centroid, 0.201_581, 1e-5);
+    rel(g.epsilon(), 0.360_483, 1e-5);
+    rel(g.denominator_constant(), 390_652.5, 1e-5);
+    rel(g.thickness, 0.002_989_65, 1e-5);
+    rel(g.thickness_ratio(), 0.009_054, 1e-4);
+    // Plywood's shear modulus, with the standard sea-level air.
+    let plywood = r.radial(fins).unwrap().flutter_shear_modulus();
+    rel(plywood, 0.85e9, 1e-12);
+    let fin = FlutterFin { geometry: g, shear_modulus: plywood };
+    let air = Atmosphere::standard().at_agl(0.0);
+    rel(air.pressure, P0, 1e-9);
+    rel(bowshock_sim::flutter_velocity(&fin, &air), 67.92, 1e-3);
+    // Along a boost through Mach 0.47: finite, no warning about the planform (AR 0.56, t/c 0.009, ε 0.36 are all in range).
+    let trace = FlutterTrace::along(&[fin], &Atmosphere::standard(), [(0.0, 0.0, 0.0), (1.5, 136.0, 160.0)]).unwrap();
+    assert!(trace.min_margin().is_finite() && trace.min_margin() < 0.5, "{}", trace.min_margin());
+    assert!(trace.warnings(&[fin]).is_empty(), "{:?}", trace.warnings(&[fin]));
+    // The same fin cut from paperboard (the stiffness the nearest-density import once gave it) flutters 1.7 times slower.
+    let paper = FlutterFin { shear_modulus: 0.3e9, ..fin };
+    rel(bowshock_sim::flutter_velocity(&paper, &air), 40.35, 1e-3);
+    assert!(!trace.warnings(&[paper]).contains(&FlutterWarning::NoShearModulus));
+}
+
+#[test]
+fn a_degenerate_fin_or_stock_gives_a_flagged_finite_estimate() {
+    use bowshock_sim::flutter::{FlutterFin, FlutterGeometry, FlutterTrace, FlutterWarning};
+    use bowshock_sim::Atmosphere;
+    let atmosphere = Atmosphere::standard();
+    let path = [(1.0, 0.0, 100.0)];
+    let judge = |fin: FlutterFin| {
+        let trace = FlutterTrace::along(&[fin], &atmosphere, path).unwrap();
+        assert!(trace.worst().flutter_velocity.is_finite() && trace.min_margin().is_finite(), "{fin:?}");
+        trace.warnings(&[fin])
+    };
+    let good = FlutterFin { geometry: FlutterGeometry::trapezoid(0.15, 0.07, 0.09, 0.06, 0.003), shear_modulus: 1e9 };
+    assert!(judge(good).is_empty());
+    assert!(judge(FlutterFin { shear_modulus: 0.0, ..good }).contains(&FlutterWarning::NoShearModulus));
+    assert!(judge(FlutterFin { shear_modulus: f64::NAN, ..good }).contains(&FlutterWarning::NoShearModulus));
+    assert!(judge(FlutterFin { geometry: FlutterGeometry::trapezoid(0.15, 0.07, 0.0, 0.06, 0.003), ..good }).contains(&FlutterWarning::Degenerate));
+    assert!(judge(FlutterFin { geometry: FlutterGeometry::trapezoid(0.15, 0.07, 0.09, 0.06, f64::NAN), ..good }).contains(&FlutterWarning::Degenerate));
+    // A far-swept panel with its centroid behind the root trailing edge (ε = 0.97).
+    let swept = FlutterFin { geometry: FlutterGeometry::trapezoid(0.1, 0.02, 0.05, 0.3, 0.003), ..good };
+    assert!(swept.geometry.epsilon() > 0.75);
+    assert!(judge(swept).iter().any(|w| matches!(w, FlutterWarning::CentroidAft(e) if *e > 0.75)));
+}
+
+#[test]
+fn a_fin_tab_to_the_motor_mount_is_checked_by_the_health_list() {
+    let (mut r, _) = single_stage();
+    let db = MotorDb::bundled();
+    let fins = r.radials()[0].id;
+    let tab_warnings = |r: &Rocket| {
+        let b = balance(r, &db, Phase::Full, 0.3, 0.0, true).unwrap();
+        warnings(r, &db, &b).into_iter().filter(|w| w.message.contains("Fin tab")).collect::<Vec<_>>()
+    };
+    assert!(tab_warnings(&r).is_empty());
+    assert!(r.set_fin_tab_to_motor_mount(fins));
+    // Body radius 38.1 mm less the 41 mm mount's radius.
+    assert!((r.radial(fins).unwrap().tab.unwrap().height - (BODY / 2.0 - 0.0205)).abs() < 1e-12);
+    assert!(tab_warnings(&r).is_empty());
+    let mut tab = r.radial(fins).unwrap().tab.unwrap();
+    tab.length = 0.2;
+    assert!(r.set_fin_tab(fins, Some(tab)));
+    let w = tab_warnings(&r);
+    // 200 mm from the root's fore end also runs into the aft centering ring (at 294 mm of the 300 mm tube).
+    assert!(w.len() == 2 && w.iter().all(|w| w.part == Some(fins)), "{w:?}");
+    assert!(w[0].message.contains("longer than the 150.0 mm root chord") && w[1].message.contains("hits Centering ring"), "{w:?}");
+    // The tab changes neither the fin's flight shape nor its flutter inputs.
+    let flat = vehicle(&r, &db, Phase::Full).unwrap();
+    assert!(r.set_fin_tab(fins, None));
+    assert_eq!(vehicle(&r, &db, Phase::Full).unwrap().fin_sets, flat.fin_sets);
+}

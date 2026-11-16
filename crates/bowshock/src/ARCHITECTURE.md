@@ -26,7 +26,7 @@ analyze/mod.rs           Analyze screen
 analyze/cfd.rs           CFD table method: document -> `bowshock-core` mapping, the off-thread solve, table keys, table -> plot points.
                          Tables are stored in the document (`bowshock_model::CfdTable`, a cache: not an edit, not in undo).
 widgets/                 shared widgets (read-only for screens; do not edit from a screen task)
-units.rs                 unit systems, formatting, expression parsing
+units.rs                 unit set (UnitSystem: one unit per Family, named presets), formatting, expression parsing
 ```
 
 ## The module contract
@@ -73,7 +73,7 @@ pub struct Ctx {
     pub selection: Selection,   // None | Part(PartId) | Separation(stage)  (any part class: axial, radial group, internal)
     pub drag: Drags,            // axial / radial drag in progress + symmetry + angle_snap
     pub physics: Physics,       // balance(), burnout(), issues(), warnings(), stages(), motors(), margin_with_motor(), phase()
-    pub units: UnitSystem,      // the display unit system (top bar select); format with app::ui::{with_unit, bare, readout}
+    pub units: UnitSystem,      // the display unit set: one unit per Family (top bar select + Custom… panel), kept in app/settings.rs (user config, not the rocket); format with app::ui::{with_unit, bare, readout, len, len_unit}
     pub cursor: Option<Point>,  // window coordinates, app-wide
     pub mode: Mode,             // Build | Simulate | Analyze
     pub dark: bool,             // ctx.tokens() gives the design tokens of the current theme

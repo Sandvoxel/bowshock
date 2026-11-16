@@ -269,6 +269,7 @@ mod tests {
         r.set_cant(fins, 0.02);
         assert!(r.set_fin_shear_modulus(fins, Some(3.5e9)));
         assert!(r.set_fin_tip_to_tip(fins, true));
+        assert!(r.set_fin_tab(fins, Some(crate::FinTab { height: 0.012, length: 0.05, position: 0.02 })));
         r.attach_radial(upper, 0.1, 0.0, 2, RadialKind::FreeformFin { points: vec![(0.0, 0.0), (0.04, 0.05), (0.1, 0.0)], thickness: 0.003 }).unwrap();
         r.attach_radial(upper, 0.1, 1.0, 1, RadialKind::LaunchLug { length: 0.05, diameter: 0.01 }).unwrap();
         r.attach_radial(upper, 0.3, 1.0, 2, RadialKind::RailButton { height: 0.008, diameter: 0.011 }).unwrap();

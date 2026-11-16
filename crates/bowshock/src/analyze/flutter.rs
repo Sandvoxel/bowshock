@@ -26,6 +26,8 @@ pub struct FinStock {
     pub overridden: bool,
     /// Whether the tip-to-tip allowance doubled the shear modulus.
     pub tip_to_tip: bool,
+    /// Whether the fins have a through-the-wall tab (the estimate takes the root as clamped either way).
+    pub tabbed: bool,
 }
 
 /// The stock of each fin set of `vehicle`, in order. `rocket` names the groups and their materials; when the vehicle has other fin
@@ -47,18 +49,20 @@ pub fn stocks(rocket: &Rocket, vehicle: &Vehicle) -> Vec<FinStock> {
                 let letters = copies.iter().map(|&c| char::from(b'A' + (c.min(25)) as u8).to_string()).collect::<Vec<_>>().join(", ");
                 name = format!("{name} · fin{} {letters}", if copies.len() > 1 { "s" } else { "" });
             }
-            let (g, g_source, overridden, tip_to_tip) = match radial {
+            let (g, g_source, overridden, tip_to_tip, tabbed) = match radial {
                 Some(r) => {
-                    let material = r.material.material();
                     let (label, overridden) = match r.shear_modulus {
                         Some(_) => ("Fin's own value".to_string(), true),
-                        None => (format!("{} · {}", material.name, material.shear_source), false),
+                        None => {
+                            let (_, source) = r.material_shear();
+                            (format!("{} · {source}", r.material.name()), false)
+                        }
                     };
-                    (r.flutter_shear_modulus(), label, overridden, r.tip_to_tip)
+                    (r.flutter_shear_modulus(), label, overridden, r.tip_to_tip, r.tab.is_some())
                 }
-                None => (FALLBACK_G, "Birch plywood estimate".to_string(), false, false),
+                None => (FALLBACK_G, "Birch plywood estimate".to_string(), false, false, false),
             };
-            FinStock { source, name, fin: FlutterFin { geometry: FlutterGeometry::of(set), shear_modulus: g }, g_source, overridden, tip_to_tip }
+            FinStock { source, name, fin: FlutterFin { geometry: FlutterGeometry::of(set), shear_modulus: g }, g_source, overridden, tip_to_tip, tabbed }
         })
         .collect()
 }
@@ -160,5 +164,34 @@ mod tests {
         assert!(rocket.set_fin_shear_modulus(id, Some(3.0e9)));
         let own = stocks(&rocket, &input(&rocket).vehicle)[0].clone();
         assert!((own.fin.shear_modulus - 6.0e9).abs() < 1.0 && own.overridden);
+    }
+
+    /// The freeform plywood fins of the HYPERLOC L2 `.ork` (fins `Aircraft plywood (LOC)`, 725 kg/m³, nearest to cardboard in the
+    /// table; tubes and fillet cardboard): through the importer and the bridge they fly as plywood, with the tab noted, and the
+    /// estimate at the sea-level start agrees with the hand calculation of Martin's formula (67.9 m/s, see the sim bridge test).
+    #[test]
+    fn an_imported_plywood_ttw_fin_set_flies_with_plywood_stiffness_and_the_hand_calculated_flutter_speed() {
+        let xml = "<openrocket><rocket><name>t</name><motorconfiguration configid=\"c1\" default=\"true\"/><subcomponents><stage><name>s</name><subcomponents>\
+             <nosecone><name>n</name><material type=\"bulk\" density=\"680.0\">Cardboard</material><length>0.3</length><thickness>0.002</thickness><shape>ogive</shape><shapeparameter>1.0</shapeparameter><aftradius>0.0508</aftradius></nosecone>\
+             <bodytube><name>body</name><material type=\"bulk\" density=\"680.0\">Cardboard</material><length>0.86</length><radius>0.0508</radius><thickness>0.0013</thickness><subcomponents>\
+             <innertube><name>mount</name><axialoffset method=\"bottom\">0.0</axialoffset><length>0.6</length><outerradius>0.028702</outerradius><thickness>0.0015</thickness>\
+               <motormount><ignitionevent>automatic</ignitionevent><overhang>0.0</overhang><motor configid=\"c1\"><designation>H128W</designation><manufacturer>AeroTech</manufacturer><delay>6</delay></motor></motormount></innertube>\
+             <freeformfinset><name>Fin set</name><fincount>3</fincount><axialoffset method=\"top\">0.52705</axialoffset>\
+               <material type=\"bulk\" density=\"724.996\">Aircraft plywood (LOC)</material><thickness>0.00299974</thickness><crosssection>rounded</crosssection>\
+               <tabheight>0.022098</tabheight><tablength>0.117475</tablength><tabposition relativeto=\"front\">0.200025</tabposition>\
+               <filletradius>0.0</filletradius><filletmaterial type=\"bulk\" density=\"680.0\">Cardboard</filletmaterial>\
+               <finpoints><point x=\"0.0\" y=\"0.0\"/><point x=\"0.23495\" y=\"0.10795\"/><point x=\"0.287655\" y=\"0.10795\"/><point x=\"0.3302\" y=\"0.0\"/></finpoints></freeformfinset>\
+             </subcomponents></bodytube></subcomponents></stage></subcomponents></rocket></openrocket>";
+        let rocket = bowshock_model::ork::import(xml.as_bytes()).unwrap().rocket;
+        let vehicle = from_model::vehicle(&rocket, &MotorDb::bundled(), Phase::Full).unwrap();
+        let stock = stocks(&rocket, &vehicle)[0].clone();
+        assert!(stock.g_source.contains("plywood") && stock.g_source.contains("Wood Handbook"), "{}", stock.g_source);
+        assert!(stock.tabbed && !stock.overridden);
+        assert!((stock.fin.shear_modulus - 0.85e9).abs() < 1.0, "{}", stock.fin.shear_modulus);
+        let air = Atmosphere::standard().at_agl(0.0);
+        let vf = bowshock_sim::flutter::flutter_velocity(&stock.fin, &air);
+        assert!((vf - 67.92).abs() < 0.07, "{vf}");
+        let trace = FlutterTrace::along(&[stock.fin], &Atmosphere::standard(), [(1.5, 136.0, 160.0)]).unwrap();
+        assert!(trace.warnings(&[stock.fin]).is_empty() && trace.min_margin().is_finite());
     }
 }

@@ -372,7 +372,7 @@ fn dispersion(out: &Output, units: UnitSystem) -> (PlotGroup, GroundTrack) {
     let mut group = PlotGroup::new(axis).panel(hist);
     group.right_margin = if single { 0.0 } else { MARGIN_PX };
     let wind = (out.conditions.wind > 0.0).then_some(Wind { speed: out.conditions.wind, from_deg: 0.0 });
-    (group, GroundTrack { tracks, wind, field_radius: None })
+    (group, GroundTrack { tracks, wind, field_radius: None, units })
 }
 
 #[cfg(test)]
@@ -404,7 +404,7 @@ mod tests {
         let (jobs, _) = jobs(rocket, &MotorDb::bundled(), Phase::Full).unwrap();
         let bands = rocket.stability_bands();
         let out = compute(&Request { analysis, method: Method::Extended, conditions: Conditions { runs: 8, ..Conditions::default() }, jobs, bands, cfd: None });
-        build(&out, UnitSystem::MmGS, overlay, rocket.active_config_id())
+        build(&out, UnitSystem::MM_G_S, overlay, rocket.active_config_id())
     }
 
     fn built(analysis: Analysis, configs: usize) -> Built {

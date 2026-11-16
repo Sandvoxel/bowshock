@@ -182,6 +182,7 @@ pub fn view(ctx: &Ctx) -> Option<Element<'_, app::Message>> {
             let top = open.at.y.min(window.height - height - EDGE).max(EDGE);
             let placed = container(card).padding(Padding { top, left, right: 0.0, bottom: 0.0 });
             let backdrop = mouse_area(Space::new().width(Fill).height(Fill))
+                .interaction(iced::mouse::Interaction::Idle)
                 .on_press(app::Message::PartMenu(Action::Close))
                 .on_right_press(app::Message::PartMenu(Action::Close));
             iced::widget::stack![backdrop, placed].boxed()

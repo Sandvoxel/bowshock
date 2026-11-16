@@ -14,16 +14,18 @@
 //! * **Body.** Nose cones (ogive with parameter 1, conical, ellipsoid, power, parabolic, Haack), body tubes, conical
 //!   transitions, with wall thickness (`filled` is solid), shoulders and finish (`normal` is regular paint, `rough`, `unfinished`,
 //!   `smooth`, `polished`).
-//! * **Radial parts.** Trapezoidal, elliptical and freeform fin sets (count, cant, cross-section, thickness, fillet, position),
+//! * **Radial parts.** Trapezoidal, elliptical and freeform fin sets (count, cant, cross-section, thickness, fillet, through-the-wall
+//!   tab, position),
 //!   launch lugs and rail buttons (linear `instancecount`/`instanceseparation` instances become one group each), pod sets and
 //!   parallel stages (as pods), tube fin sets (as a pod of one open tube).
 //! * **Internal parts.** Inner tubes (motor mounts with their overhang; a body tube that is its own motor mount gets a massless
 //!   inner tube of its bore and length to hold the motor, with a warning), centering rings, bulkheads, tube couplers, engine
 //!   blocks, parachutes, streamers, shock cord and mass components, placed exactly where OpenRocket puts them (the part's OpenRocket
 //!   parent keeps it, even when it overhangs a joint).
-//! * **Materials.** The model's material table is fixed. A part takes the table entry of the same kind nearest in density; when
-//!   the densities differ the part's mass is *overridden* with OpenRocket's mass (`density × the model's own volume`), so mass
-//!   and CG match. Components with an OpenRocket mass override carry it (a group's override is for the whole group; with
+//! * **Materials.** The model's material table is fixed. A part takes the table entry of the same *family* by the words in its name
+//!   (`Aircraft plywood (LOC)` is plywood, so it keeps a plywood's shear modulus for fin flutter), else the entry of the same kind
+//!   nearest in density; when the densities differ the part's mass is *overridden* with OpenRocket's mass (`density × the model's own
+//!   volume`), so mass and CG match. Components with an OpenRocket mass override carry it (a group's override is for the whole group; with
 //!   "override subcomponents" the children are zeroed). CG overrides carry over too.
 //! * **Configurations.** Each OpenRocket flight configuration becomes a [`Configuration`](crate::Configuration) (motor
 //!   designation and manufacturer, ejection delay, `none` is a plugged motor, ignition and separation events, per-configuration
@@ -33,7 +35,7 @@
 //!   the values the model has no field for, plus OpenRocket's stored result summary.
 //!
 //! Not modelled (reported as warnings): clustered motors beyond the first tube, secant ogives, non-conical transitions,
-//! fin tabs (mass only), motor mounts in body tubes, drag overrides, custom reference lengths, "never" deployment/ignition.
+//! motor mounts in body tubes, drag overrides, custom reference lengths, "never" deployment/ignition.
 //!
 //! References: the OpenRocket file format (`net.sf.openrocket.file.openrocket`), Niskanen (2013) *OpenRocket technical
 //! documentation* for the component definitions.
@@ -47,7 +49,7 @@ use roxmltree::{Document, Node};
 
 use crate::config::{ConfigId, EventKind, MotorRef, StageEvent, StageTrigger};
 use crate::flights::{Conditions, FlightDef, FlightMotor, Turbulence};
-use crate::geometry::{FinSection, NoseShape, Part, PartKind, PodBody, RadialKind, RadialPart, Shoulder};
+use crate::geometry::{FinSection, FinTab, NoseShape, Part, PartKind, PodBody, RadialKind, RadialPart, Shoulder};
 use crate::internal::{DeployEvent, Deployment, InternalKind, InternalPart, MassRole};
 use crate::material::{materials_of_kind, Finish, MaterialId, MaterialKind};
 use crate::rocket::Rocket;
@@ -407,6 +409,57 @@ fn deg(v: f64) -> f64 {
     v.to_radians()
 }
 
+/// The model materials an OpenRocket material of this name can be: its family by the words in the name (`Aircraft plywood (LOC)` is
+/// plywood whatever its density, so it takes a plywood's shear modulus, not that of the nearest-density cardboard). `None` for a name
+/// that says nothing about what it is made of (the nearest density then decides).
+fn family_of(name: &str) -> Option<&'static [MaterialId]> {
+    const WOODS: &[MaterialId] = &[MaterialId::BASSWOOD, MaterialId::BALSA, MaterialId::BIRCH_PLYWOOD, MaterialId::AIRCRAFT_PLYWOOD];
+    const FAMILIES: [(&[&str], &[MaterialId]); 16] = [
+        (&["aircraft ply"], &[MaterialId::AIRCRAFT_PLYWOOD]),
+        (&["plywood", "birch ply"], &[MaterialId::BIRCH_PLYWOOD, MaterialId::AIRCRAFT_PLYWOOD]),
+        (&["balsa"], &[MaterialId::BALSA]),
+        (&["basswood"], &[MaterialId::BASSWOOD]),
+        (&["fiberglass", "fibreglass", "g10", "fr4", "glass"], &[MaterialId::FIBERGLASS]),
+        (&["carbon"], &[MaterialId::CARBON_FIBER]),
+        (&["aluminum", "aluminium"], &[MaterialId::ALUMINUM]),
+        (&["steel"], &[MaterialId::STEEL]),
+        (&["brass"], &[MaterialId::BRASS]),
+        (&["lead"], &[MaterialId::LEAD]),
+        (&["epoxy"], &[MaterialId::EPOXY]),
+        (&["polycarbonate"], &[MaterialId::POLYCARBONATE]),
+        (&["polystyrene"], &[MaterialId::POLYSTYRENE]),
+        (&["blue tube", "quantum"], &[MaterialId::BLUE_TUBE]),
+        (&["phenolic"], &[MaterialId::KRAFT_PHENOLIC]),
+        (&["cardboard", "paper"], &[MaterialId::CARDBOARD]),
+    ];
+    let lower = name.to_lowercase();
+    if let Some((_, ids)) = FAMILIES.iter().find(|(words, _)| words.iter().any(|w| lower.contains(w))) {
+        return Some(ids);
+    }
+    ["birch", "maple", "spruce", "pine", "oak", "poplar", "wood", "lumber"].iter().any(|w| lower.contains(w)).then_some(WOODS)
+}
+
+/// The through-the-wall tab of an OpenRocket fin set `n` whose root chord is `root`: `tabheight`, `tablength` and `tabposition`, which
+/// is measured from the root's leading edge (`relativeto="front"`), from the middle of the root (`center`) or from its trailing edge
+/// (`end`, the tab's aft edge that far ahead of it). `None` without a tab.
+fn fin_tab_of(n: Node, root: f64) -> Option<FinTab> {
+    let (height, length) = (num(n, "tabheight")?, num(n, "tablength")?);
+    if !(height > 0.0 && length > 0.0) {
+        return None;
+    }
+    let at = |rel: &str| children(n, "tabposition").find(|c| c.attribute("relativeto") == Some(rel)).and_then(|c| c.text()?.trim().parse::<f64>().ok());
+    let position = if let Some(v) = at("front") {
+        v
+    } else if let Some(v) = at("center") {
+        (root - length) / 2.0 + v
+    } else if let Some(v) = at("end") {
+        root - length - v
+    } else {
+        children(n, "tabposition").find_map(|c| c.text()?.trim().parse::<f64>().ok()).unwrap_or(0.0)
+    };
+    Some(FinTab { height, length, position: position.max(0.0) })
+}
+
 impl<'w> Builder<'w> {
     fn new(w: &'w mut Vec<String>) -> Builder<'w> {
         Builder { r: Rocket::default(), w, mounts: Vec::new(), recovery: Vec::new(), stage: 0, x: 0.0, radii: HashMap::new(), reported: Vec::new() }
@@ -445,7 +498,15 @@ impl<'w> Builder<'w> {
             self.warn(format!("material \"{name}\" is {given} stock where {want} stock is needed; using the default material"));
             return (default, 1.0);
         }
-        let best = materials_of_kind(kind).min_by(|a, b| (density / a.density).ln().abs().total_cmp(&(density / b.density).ln().abs()));
+        // The family the name gives (plywood, fiberglass, ...) first, so a part keeps its stiffness (shear modulus) with its name;
+        // only without a recognisable name does the nearest density decide.
+        let family = if kind == MaterialKind::Bulk { family_of(&name) } else { None };
+        let nearest = |ids: Option<&[MaterialId]>| {
+            materials_of_kind(kind)
+                .filter(|m| ids.is_none_or(|ids| ids.contains(&m.id)))
+                .min_by(|a, b| (density / a.density).ln().abs().total_cmp(&(density / b.density).ln().abs()))
+        };
+        let best = nearest(family).or_else(|| nearest(None));
         let Some(best) = best else {
             return (default, 1.0);
         };
@@ -1082,6 +1143,17 @@ impl<'w> Builder<'w> {
             self.warn(format!("{label}: {count} fins exceed the model's 16; imported with 16"));
         }
         let (material, scale) = self.material(n, "material", MaterialKind::Bulk, MaterialId::BIRCH_PLYWOOD);
+        // The fin's own stock sets its shear modulus for the flutter estimate: say so when only its density picked the table entry.
+        if let Some(m) = child(n, "material").filter(|m| m.attribute("type").is_none_or(|t| t == "bulk")) {
+            let name = m.text().unwrap_or("").trim();
+            if family_of(name).is_none() {
+                let g = material.shear_modulus() / 1.0e9;
+                self.warn(format!(
+                    "{label}: fin material \"{name}\" is not recognised, so its shear modulus is unknown; the flutter estimate uses {} ({g:.2} GPa) by density (set the fin's own value to override)",
+                    material.name()
+                ));
+            }
+        }
         let id = self.push_radial(n, p, top, Self::angle_of(n), count.min(16.0) as u8, kind, material);
         let section = match text(n, "crosssection") {
             Some("rounded") => FinSection::Rounded,
@@ -1090,22 +1162,17 @@ impl<'w> Builder<'w> {
         };
         let fillet = num(n, "filletradius").unwrap_or(0.0);
         let (fillet_material, fillet_scale) = self.material(n, "filletmaterial", MaterialKind::Bulk, MaterialId::EPOXY);
+        // A tab (the part of the root that goes through the airframe wall) adds the mass of its plate; it has no aerodynamics.
+        let tab = fin_tab_of(n, root);
         if let Some(r) = self.r.radials.iter_mut().find(|r| r.id == id) {
             r.cross_section = section;
             r.cant = deg(num(n, "cant").unwrap_or(0.0));
             r.fillet_radius = fillet.max(0.0);
             r.fillet_material = fillet_material;
+            r.tab = tab;
         }
         let _ = fillet_scale;
-        // Fin tabs (the part of the root that goes through the airframe wall) add mass only: a plate of the fin's thickness.
-        let tab = num(n, "tabheight").unwrap_or(0.0) * num(n, "tablength").unwrap_or(0.0);
-        let expected = (tab > 0.0 && num(n, "overridemass").is_none()).then(|| {
-            let thickness = num(n, "thickness").unwrap_or(0.0);
-            let density = child(n, "material").and_then(|m| m.attribute("density")).and_then(|d| d.parse::<f64>().ok()).unwrap_or(0.0);
-            let model = self.r.component_mass(id).map_or(0.0, |m| m.mass) * scale;
-            model + tab * thickness * density * count.min(16.0)
-        });
-        self.settle_mass(id, n, scale, expected);
+        self.settle_mass(id, n, scale, None);
         top + root
     }
 
@@ -1897,6 +1964,80 @@ mod tests {
             zip.extend_from_slice(&[0, 0]);
             assert_eq!(import(&zip).unwrap().rocket, plain.rocket, "deflate = {deflate}");
         }
+    }
+
+    /// The freeform plywood fin of a 4 in L2 rocket (HYPERLOC) with a through-the-wall tab onto its 54 mm motor mount: `Aircraft plywood
+    /// (LOC)` is 725 kg/m^3, nearest in density to cardboard (680) in the table, but the fin is plywood and must keep a plywood's shear
+    /// modulus.
+    #[test]
+    fn a_ttw_plywood_fin_keeps_its_plywood_stiffness_and_its_tab() {
+        let xml = format!(
+            "<openrocket><rocket><name>t</name><motorconfiguration configid=\"c1\" default=\"true\"/><subcomponents><stage><name>s</name><subcomponents>{NOSE}\
+             <bodytube><name>body</name><material type=\"bulk\" density=\"680.0\">Cardboard</material><length>0.86</length><radius>0.0508</radius><thickness>0.0013</thickness><subcomponents>\
+             <innertube><name>mount</name><axialoffset method=\"bottom\">0.0</axialoffset><length>0.6</length><outerradius>0.028702</outerradius><thickness>0.0015</thickness>\
+               <motormount><ignitionevent>automatic</ignitionevent><overhang>0.0</overhang><motor configid=\"c1\"><designation>J425R</designation><manufacturer>AeroTech</manufacturer><delay>14</delay></motor></motormount></innertube>\
+             <freeformfinset><name>Fin set</name><fincount>3</fincount><axialoffset method=\"top\">0.52705</axialoffset>\
+               <material type=\"bulk\" density=\"724.996\">Aircraft plywood (LOC)</material><thickness>0.00299974</thickness><crosssection>rounded</crosssection>\
+               <tabheight>0.022098</tabheight><tablength>0.117475</tablength><tabposition relativeto=\"front\">0.200025</tabposition><tabposition relativeto=\"top\">0.200025</tabposition>\
+               <filletradius>0.0</filletradius><filletmaterial type=\"bulk\" density=\"680.0\">Cardboard</filletmaterial>\
+               <finpoints><point x=\"0.0\" y=\"0.0\"/><point x=\"0.23495\" y=\"0.10795\"/><point x=\"0.287655\" y=\"0.10795\"/><point x=\"0.3302\" y=\"0.0\"/></finpoints></freeformfinset>\
+             </subcomponents></bodytube></subcomponents></stage></subcomponents></rocket></openrocket>"
+        );
+        let imp = import(xml.as_bytes()).unwrap();
+        let r = &imp.rocket;
+        let fins = r.radials().iter().find(|f| f.kind.is_fin()).unwrap();
+        // Plywood, not the paperboard (0.30 GPa) the nearest density gave.
+        assert!(fins.material.name().contains("plywood"), "{}", fins.material.name());
+        close(fins.flutter_shear_modulus(), 0.85e9, 1e-12);
+        assert!(!fins.material.material().shear_source.contains("paperboard"));
+        // The tab, from the root's leading edge, and the height that reaches the mount (body radius less mount radius).
+        assert_eq!(fins.tab, Some(FinTab { height: 0.022098, length: 0.117475, position: 0.200025 }));
+        close(r.fin_tab_target(fins.id).unwrap().height, 0.0508 - 0.028702, 1e-9);
+        assert!(r.fin_tab_issues(fins.id).is_empty());
+        // OpenRocket's fin mass: plate (area x thickness x the rounded section's volume factor) plus the tab plate, at 725 kg/m^3.
+        let area = 0.5 * (0.3302 + (0.287655 - 0.23495)) * 0.10795;
+        let plate = area * 0.00299974 * FinSection::Rounded.volume_factor() + 0.022098 * 0.117475 * 0.00299974;
+        close(r.component_mass(fins.id).unwrap().mass, 3.0 * 724.996 * plate, 1e-9);
+    }
+
+    #[test]
+    fn tab_positions_are_taken_from_the_front_the_centre_or_the_end_of_the_root() {
+        let fin = |position: &str| {
+            let xml = format!("<f><tabheight>0.02</tabheight><tablength>0.1</tablength>{position}</f>");
+            let doc = Document::parse(&xml).unwrap();
+            fin_tab_of(doc.root_element(), 0.3)
+        };
+        assert_eq!(fin("<tabposition relativeto=\"front\">0.05</tabposition>").unwrap().position, 0.05);
+        // Centred and shifted 10 mm aft: (300 - 100)/2 + 10 from the front.
+        close(fin("<tabposition relativeto=\"center\">0.01</tabposition>").unwrap().position, 0.11, 1e-12);
+        // 20 mm ahead of the trailing edge: 300 - 100 - 20.
+        close(fin("<tabposition relativeto=\"end\">0.02</tabposition>").unwrap().position, 0.18, 1e-12);
+        assert!(fin("").is_some());
+        let none = Document::parse("<f><tabheight>0.0</tabheight><tablength>0.1</tablength></f>").unwrap();
+        assert!(fin_tab_of(none.root_element(), 0.3).is_none());
+    }
+
+    #[test]
+    fn an_unrecognised_fin_material_is_reported_with_the_shear_modulus_it_got() {
+        let xml = |name: &str| {
+            format!(
+                "<openrocket><rocket><name>t</name><subcomponents><stage><name>s</name><subcomponents>{NOSE}\
+                 <bodytube><name>t</name><length>0.5</length><radius>auto</radius><thickness>0.001</thickness><subcomponents>\
+                 <trapezoidfinset><name>f</name><fincount>3</fincount><axialoffset method=\"bottom\">0.0</axialoffset><material type=\"bulk\" density=\"1210.0\">{name}</material>\
+                 <thickness>0.002</thickness><rootchord>0.1</rootchord><tipchord>0.05</tipchord><height>0.05</height><sweeplength>0.03</sweeplength></trapezoidfinset>\
+                 </subcomponents></bodytube></subcomponents></stage></subcomponents></rocket></openrocket>"
+            )
+        };
+        let known = import(xml("Fiberglass (G10)").as_bytes()).unwrap();
+        assert_eq!(known.rocket.radials()[0].material, MaterialId::FIBERGLASS);
+        assert!(!known.warnings.iter().any(|w| w.contains("shear modulus is unknown")));
+        let unknown = import(xml("Unobtainium").as_bytes()).unwrap();
+        assert!(
+            unknown.warnings.iter().any(|w| w.contains("Unobtainium") && w.contains("shear modulus is unknown") && w.contains("GPa")),
+            "{:?}",
+            unknown.warnings
+        );
+        assert!(unknown.rocket.radials()[0].flutter_shear_modulus() > 0.0);
     }
 
     #[test]

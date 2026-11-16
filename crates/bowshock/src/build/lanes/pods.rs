@@ -177,7 +177,7 @@ mod tests {
     fn build(rocket: &Rocket) -> Scene {
         let db = MotorDb::bundled();
         let stages = rocket.stages();
-        Scene::build(&Inputs { rocket, stages: &stages, phase: Phase::Full, motors: &db, units: UnitSystem::MmGS, compare: false })
+        Scene::build(&Inputs { rocket, stages: &stages, phase: Phase::Full, motors: &db, units: UnitSystem::MM_G_S, compare: false })
     }
 
     /// A 0.2 m nose and a 1.2 m core tube (stations 0.2 to 1.4) with a pod set of two at 0.1 m along it, and the pod's tube.

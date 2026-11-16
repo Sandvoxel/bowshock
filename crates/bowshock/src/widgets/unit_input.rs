@@ -1443,9 +1443,9 @@ mod tests {
     #[test]
     fn a_mixed_value_shows_no_number_and_focusing_starts_empty() {
         let m = Memory::default();
-        let plain: UnitInput<'_, ()> = unit_input("Length", 0.1, Quantity::Length, &UnitSystem::MmGS);
+        let plain: UnitInput<'_, ()> = unit_input("Length", 0.1, Quantity::Length, &UnitSystem::MM_G_S);
         assert_eq!(plain.display(&m), "100.00");
-        let mixed: UnitInput<'_, ()> = unit_input("Length", 0.1, Quantity::Length, &UnitSystem::MmGS).mixed(true);
+        let mixed: UnitInput<'_, ()> = unit_input("Length", 0.1, Quantity::Length, &UnitSystem::MM_G_S).mixed(true);
         // The text input shows its `—` placeholder over an empty value; an edit starts from nothing.
         assert_eq!(mixed.display(&m), "");
     }
@@ -1453,7 +1453,7 @@ mod tests {
     #[test]
     fn scrub_moves_one_display_step_per_pixel() {
         // Section 4 of design/README.md: mm shows two decimals, so one pixel is 0.01 mm.
-        let step = units::Quantity::Length.unit_for(units::UnitSystem::MmGS).step();
+        let step = units::Quantity::Length.unit_for(units::UnitSystem::MM_G_S).step();
         let (_, value) = scrub(100.0, 5.0, step, keyboard::Modifiers::default());
         assert!((value - 100.05).abs() < 1e-9);
         let (_, value) = scrub(100.0, -3.0, step, keyboard::Modifiers::default());

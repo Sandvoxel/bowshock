@@ -110,6 +110,10 @@ pub enum Message {
     FilletMaterial(MaterialId),
     /// Whether a fin group is laminated tip to tip (the flutter estimate doubles its shear modulus).
     TipToTip(bool),
+    /// A fin group's through-the-wall tab on or off.
+    TabOn(bool),
+    /// Reach a fin group's tab to the motor mount under it (*To motor mount*).
+    TabToMotor,
     /// A parachute's shroud-line material.
     LineMaterial(MaterialId),
     /// The part's surface finish.
@@ -474,8 +478,18 @@ impl State {
             Message::TipToTip(on) => {
                 ctx.doc.edit("Set tip-to-tip fins", |r| r.set_fin_tip_to_tip(id, on));
             }
+            Message::TabOn(on) => {
+                if on {
+                    ctx.doc.edit("Add fin tab", |r| r.add_fin_tab(id));
+                } else {
+                    ctx.doc.edit("Remove fin tab", |r| r.set_fin_tab(id, None));
+                }
+            }
+            Message::TabToMotor => {
+                ctx.doc.edit("Reach tab to motor mount", |r| r.set_fin_tab_to_motor_mount(id));
+            }
             Message::StartOverride(Field::ShearModulus) => {
-                let g = rocket.radial(id).map_or(0.0, |r| r.material.shear_modulus());
+                let g = rocket.radial(id).map_or(0.0, |r| r.material_shear().0);
                 ctx.doc.edit("Override shear modulus", |r| r.set_fin_shear_modulus(id, Some(g)));
             }
             Message::ClearOverride(Field::ShearModulus) => {
@@ -638,7 +652,7 @@ impl State {
 
         match (&self.menu, selection) {
             (Some(open), now) if *open == now && matches!(now, Selection::Part(_)) => {
-                let backdrop = mouse_area(Space::new().width(Fill).height(Fill)).on_press(Message::MenuOpen(false));
+                let backdrop = mouse_area(Space::new().width(Fill).height(Fill)).interaction(iced::mouse::Interaction::Idle).on_press(Message::MenuOpen(false));
                 let can_copy =
                     matches!(now, Selection::Part(id) if rocket.part(id).is_none_or(|p| !matches!(p.kind, bowshock_model::PartKind::NoseCone { .. })));
                 let mut items: Vec<Element<'a, Message>> = Vec::new();

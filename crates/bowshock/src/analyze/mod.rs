@@ -342,7 +342,7 @@ impl State {
         let Some(out) = self.output() else {
             return Task::none();
         };
-        let csv = out.table().csv();
+        let csv = out.table(ctx.units).csv();
         let name = format!("{}-{}.csv", ctx.doc.title(), out.analysis.name().to_lowercase().replace(' ', "-"));
         Task::perform(
             async move {
@@ -438,10 +438,12 @@ impl State {
             return Task::none();
         }
         let rocket = ctx.doc.rocket();
-        if self.cfd.plan_at != Some((ctx.doc.revision(), phase)) {
-            let plan = bowshock_sim::from_model::vehicle(rocket, ctx.physics.motors(), phase).map_err(|e| e.to_string()).and_then(|v| cfd::plan(rocket, &v));
+        if self.cfd.plan_at != Some((ctx.doc.revision(), phase, ctx.units)) {
+            let plan = bowshock_sim::from_model::vehicle(rocket, ctx.physics.motors(), phase)
+                .map_err(|e| e.to_string())
+                .and_then(|v| cfd::plan(rocket, &v, ctx.units));
             self.cfd.plan = Arc::new(plan);
-            self.cfd.plan_at = Some((ctx.doc.revision(), phase));
+            self.cfd.plan_at = Some((ctx.doc.revision(), phase, ctx.units));
         }
         let stage = phase.first_stage() as u32;
         let stored = rocket.cfd_table(stage);
@@ -529,7 +531,7 @@ impl State {
             };
             let built = plots::build(&out, ctx.units, self.overlay.as_ref(), active);
             self.plot.set_full(built.group.x_extent());
-            self.table = Some(out.table());
+            self.table = Some(out.table(ctx.units));
             self.built = Some(built);
             self.built_for = Some((self.generation, ctx.units, self.compare_rev));
         }
@@ -600,7 +602,7 @@ pub fn other_method(m: Method) -> Method {
 /// The CFD table method's state: the document mapped for the solver, the table stored for it, and the solve in progress.
 pub(crate) struct Cfd {
     /// The revision and phase `plan` was made for.
-    plan_at: Option<(u64, Phase)>,
+    plan_at: Option<(u64, Phase, UnitSystem)>,
     /// The geometry as the solver takes it, or why it cannot.
     pub(crate) plan: Arc<Result<cfd::Plan, String>>,
     /// How the stored table relates to the rocket and the conditions on screen.

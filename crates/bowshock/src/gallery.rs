@@ -86,7 +86,7 @@ impl Gallery {
     fn new() -> Self {
         Self {
             dark: true,
-            units: UnitSystem::MmGS,
+            units: UnitSystem::MM_G_S,
             root_chord: 0.120,
             tip_chord: 0.050,
             mass: 0.0482,
@@ -151,8 +151,8 @@ impl Gallery {
 
     fn view(&self) -> Element<'_, Message> {
         let theme_toggle: Element<'_, Message> = button(if self.dark { "Light" } else { "Dark" }, Weight::Secondary).on_press(Message::ToggleTheme).into();
-        let units = select(UnitSystem::ALL.map(|u| u.label()).to_vec(), Some(self.units.label()), |label| {
-            Message::Units(UnitSystem::ALL.into_iter().find(|u| u.label() == label).unwrap_or_default())
+        let units = select(UnitSystem::PRESETS.map(|u| u.label()).to_vec(), Some(self.units.label()), |label| {
+            Message::Units(UnitSystem::PRESETS.into_iter().find(|u| u.label() == label).unwrap_or_default())
         });
         let header = row![
             text("WIDGET GALLERY").font(MONO).size(TEXT_BODY).style(theme::ink),

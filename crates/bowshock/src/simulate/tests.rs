@@ -53,9 +53,9 @@ fn the_example_flies_the_kit_flights() {
     let apogee = |name: &str| named(&state, name).run.as_ref().unwrap().result.summary.apogee;
     assert!(apogee("Bigger motor") > apogee("Nominal"));
 
-    // The selected flight is on show alone: one track, the plots built for both unit families.
+    // The selected flight is on show alone: one track, the plots built for the unit set.
     assert_eq!(state.shown.ids, vec![nominal]);
-    assert!(!state.shown.compare && state.shown.groups.iter().all(Option::is_some));
+    assert!(!state.shown.compare && state.shown.group.is_some());
     assert_eq!(state.shown.ground.tracks.len(), 1);
     assert_eq!(state.plot.full().0, 0.0);
 }
@@ -397,7 +397,7 @@ fn choosing_a_source_in_the_picker_replaces_the_panels_source_as_one_undo_step()
     assert!(state.picker.is_none(), "a choice closes the menu");
     assert_eq!(sources(&state), [vec!["altitude"], vec!["mach"], vec!["vertical_acceleration"]]);
     // The plots follow: the second panel is the Mach number of the run, and the document holds the layout.
-    let group = state.shown.groups[0].as_ref().unwrap();
+    let group = state.shown.group.as_ref().unwrap();
     assert_eq!((group.panels[1].title.as_str(), group.panels[1].unit.as_str()), ("Mach number", ""));
     let max = group.panels[1].series[0].points.iter().map(|p| p.1).fold(0.0, f64::max);
     assert!((max - named(&state, "Nominal").run.as_ref().unwrap().result.summary.max_mach).abs() < 0.02, "{max}");
@@ -426,7 +426,7 @@ fn a_series_joins_only_with_the_same_unit_and_a_refusal_says_why() {
     // Ground distance is a length like altitude: it overlays.
     state.update(Message::Layout(LayoutEdit::ToggleSource(0, "ground_distance")), app.ctx_mut());
     assert_eq!(sources(&state)[0], ["altitude", "ground_distance"]);
-    let group = state.shown.groups[0].as_ref().unwrap();
+    let group = state.shown.group.as_ref().unwrap();
     assert_eq!(group.panels[0].title, "Distance");
     // A speed does not: nothing changes, nothing is written, and the status strip says why.
     let revision = app.ctx().doc.revision();
@@ -500,7 +500,7 @@ fn the_x_axis_is_one_undo_step_kept_by_presets_and_follows_the_units() {
     state.update(Message::Layout(LayoutEdit::Preset(Preset::Forces)), app.ctx_mut());
     assert_eq!((state.layout.x, Preset::of(&state.layout)), (PlotX::Altitude, Preset::Forces));
     // In feet the zoom's full range is in feet too.
-    app.ctx_mut().units = UnitSystem::FtLbS;
+    app.ctx_mut().units = UnitSystem::FT_LB_S;
     state.sync(app.ctx(), false);
     assert!((state.plot.full().1 - apogee / 0.3048).abs() < 3.0, "{:?}", state.plot.full());
     let _ = app.update(crate::app::Message::Undo);
@@ -568,7 +568,7 @@ fn undoing_closes_the_picker_and_a_flight_can_be_overlaid_with_several_sources()
     state.update(Message::Layout(LayoutEdit::ToggleSource(1, "air_speed")), app.ctx_mut());
     assert_eq!(sources(&state)[1], ["vertical_velocity", "air_speed"]);
     // Two flights and two sources: four lines, colour by flight, style by source.
-    let group = state.shown.groups[0].as_ref().unwrap();
+    let group = state.shown.group.as_ref().unwrap();
     assert_eq!(group.panels[1].series.len(), 4);
     let styles: Vec<_> = group.panels[1].series.iter().map(|s| (s.color, s.style)).collect();
     assert_eq!(styles[0].0, styles[1].0);

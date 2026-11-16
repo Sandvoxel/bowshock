@@ -12,6 +12,8 @@
 
 #![allow(dead_code)] // The screens that compose these widgets arrive after the widgets do.
 
+use crate::units::{Quantity, Unit, UnitSystem};
+
 use std::time::{Duration, Instant};
 
 use iced::advanced::text::Alignment;
@@ -103,9 +105,9 @@ pub fn bearing_deg(east: f64, north: f64) -> f64 {
     east.atan2(north).to_degrees().rem_euclid(360.0)
 }
 
-/// `337 m · 067°`: distance and bearing from the pad.
-pub fn landing_label(east: f64, north: f64) -> String {
-    format!("{:.0} m · {:03.0}°", east.hypot(north), bearing_deg(east, north).rem_euclid(360.0).round() % 360.0)
+/// `337 m · 067°`: distance (in `dist`, at its decimals) and bearing from the pad.
+pub fn landing_label(east: f64, north: f64, dist: &Unit) -> String {
+    format!("{:.*} {} · {:03.0}°", dist.decimals, dist.from_si(east.hypot(north)), dist.symbol, bearing_deg(east, north).rem_euclid(360.0).round() % 360.0)
 }
 
 /// The smallest 1-2-5 × 10ⁿ spacing (m) that keeps rings at least `min_px` apart at `px_per_m`.
@@ -200,9 +202,27 @@ pub struct GroundTrack {
     pub wind: Option<Wind>,
     /// Field radius from the pad, m (dashed `warn` circle).
     pub field_radius: Option<f64>,
+    /// The display unit set: distances (rings, labels, tooltip) are in its altitude unit, the wind speed in its speed unit.
+    pub units: UnitSystem,
 }
 
 impl GroundTrack {
+    /// The unit distances are written in.
+    fn dist(&self) -> Unit {
+        *Quantity::Altitude.unit_for(self.units)
+    }
+
+    /// The unit the wind speed is written in.
+    fn speed(&self) -> Unit {
+        *Quantity::Velocity.unit_for(self.units)
+    }
+
+    /// `FIELD 300 m`, the key of the field circle.
+    fn field_label(&self) -> Option<String> {
+        let dist = self.dist();
+        self.field_radius.map(|r| format!("FIELD {} {}", fmt_m(dist.from_si(r)), dist.symbol))
+    }
+
     /// The ground bounds (min east, min north, max east, max north) of the pad and everything drawn, m.
     pub fn extent(&self) -> (f64, f64, f64, f64) {
         let mut b = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
@@ -428,18 +448,19 @@ impl canvas::Program<GroundMessage> for GroundTrackView<'_> {
         let faint = |f: &mut Frame, a: Point, b: Point| f.stroke(&Path::line(a, b), Stroke::default().with_color(t.line_100).with_width(1.0));
         faint(&mut f, Point::new(0.0, pad.y.floor() + 0.5), Point::new(size.width, pad.y.floor() + 0.5));
         faint(&mut f, Point::new(pad.x.floor() + 0.5, 0.0), Point::new(pad.x.floor() + 0.5, size.height));
-        let spacing = ring_spacing(xf.scale, RING_MIN_PX);
+        let dist = self.data.dist();
+        let spacing = ring_spacing(xf.scale * dist.to_si as f32, RING_MIN_PX);
         let farthest = [(0.0, 0.0), (size.width, 0.0), (0.0, size.height), (size.width, size.height)]
             .iter()
             .map(|c| pad.distance(Point::new(c.0, c.1)))
             .fold(0.0f32, f32::max);
-        let rings = ((f64::from(farthest / xf.scale) / spacing).ceil() as usize).min(60);
+        let rings = ((f64::from(farthest / xf.scale) / (spacing * dist.to_si)).ceil() as usize).min(60);
         for k in 1..=rings {
-            let r = (spacing * k as f64) as f32 * xf.scale;
+            let r = (spacing * dist.to_si * k as f64) as f32 * xf.scale;
             f.stroke(&Path::circle(pad, r), Stroke::default().with_color(t.line_100).with_width(1.0));
             let at = Point::new(pad.x, pad.y + r + 3.0);
             if at.y < size.height - 12.0 && at.y > 0.0 {
-                put(&mut f, &format!("{} m", fmt_m(spacing * k as f64)), at, t.ink_faint, 10.0, Alignment::Center, alignment::Vertical::Top);
+                put(&mut f, &format!("{} {}", fmt_m(spacing * k as f64), dist.symbol), at, t.ink_faint, 10.0, Alignment::Center, alignment::Vertical::Top);
             }
         }
 
@@ -508,7 +529,7 @@ impl canvas::Program<GroundMessage> for GroundTrackView<'_> {
         // leader line when it had to move away.
         let label_h = TEXT_LABEL + 2.0;
         let pad_w = text_w("PAD", 10.0);
-        let mut reserved = corner_rects(size, self.data.wind, self.data.field_radius.map(|r| format!("FIELD {} m", fmt_m(r))).as_deref());
+        let mut reserved = corner_rects(size, self.data.wind, self.data.field_label().as_deref(), self.data.speed().symbol);
         reserved.push(Rectangle::new(Point::new(pad.x - 3.0 - pad_w - 2.0, pad.y - 7.0 - 12.0), Size::new(pad_w + 4.0, 14.0)));
         reserved.push(Rectangle::new(Point::new(pad.x - 7.0, pad.y - 7.0), Size::new(14.0, 14.0)));
         let mut samples: Vec<Point> = Vec::new();
@@ -529,7 +550,7 @@ impl canvas::Program<GroundMessage> for GroundTrackView<'_> {
             .iter()
             .filter_map(|track| {
                 let l = track.landing()?;
-                Some((xf.to_screen(l.east, l.north), landing_label(l.east, l.north), colour(track.color)))
+                Some((xf.to_screen(l.east, l.north), landing_label(l.east, l.north, &self.data.dist()), colour(track.color)))
             })
             .collect();
         let items: Vec<(Point, f32)> = landings.iter().map(|(at, label, _)| (*at, text_w(label, TEXT_LABEL))).collect();
@@ -573,14 +594,23 @@ impl canvas::Program<GroundMessage> for GroundTrackView<'_> {
             }
         }
 
-        let field = self.data.field_radius.map(|r| format!("FIELD {} m", fmt_m(r)));
-        corner_marks(&mut f, t, size, self.data.wind, field.as_deref(), xf.scale);
+        let field = self.data.field_label();
+        corner_marks(&mut f, t, size, self.data.wind, field.as_deref(), xf.scale, &self.data.dist(), &self.data.speed());
 
         // Hovering a track: a tooltip with time, altitude and distance from the pad.
         if let Some(p) = cursor.position_in(bounds) {
             if st.drag.is_none() {
                 if let Some((_, point)) = self.data.nearest(&xf, p, HIT_PX) {
-                    let text = format!("{:.2} s · {:.0} m up · {:.0} m out", point.t, point.alt, point.range());
+                    let (dist, decimals) = (self.data.dist(), self.data.dist().decimals);
+                    let text = format!(
+                        "{:.2} s · {:.*} {sym} up · {:.*} {sym} out",
+                        point.t,
+                        decimals,
+                        dist.from_si(point.alt),
+                        decimals,
+                        dist.from_si(point.range()),
+                        sym = dist.symbol
+                    );
                     let at = xf.to_screen(point.east, point.north);
                     tooltip(&mut f, t, size, at, &text);
                 }
@@ -620,13 +650,13 @@ fn tooltip(f: &mut Frame, t: &Tokens, size: Size, at: Point, text: &str) {
 
 /// The corners the marks of `corner_marks` own: the wind block (top left), the north arrow (top right), the scale bar (bottom
 /// right) and the field-radius key (bottom left). Landing labels keep out of them.
-fn corner_rects(size: Size, wind: Option<Wind>, field: Option<&str>) -> Vec<Rectangle> {
+fn corner_rects(size: Size, wind: Option<Wind>, field: Option<&str>, speed_symbol: &str) -> Vec<Rectangle> {
     let mut out = vec![
         Rectangle::new(Point::new(size.width - 36.0, 0.0), Size::new(36.0, 52.0)),
         Rectangle::new(Point::new(size.width - 140.0, size.height - 30.0), Size::new(140.0, 30.0)),
     ];
     if wind.is_some() {
-        let w = text_w("0.0 m/s · 000°", TEXT_LABEL).max(60.0) + 20.0;
+        let w = text_w(&format!("0.0 {speed_symbol} · 000°"), TEXT_LABEL).max(60.0) + 20.0;
         out.push(Rectangle::new(Point::ORIGIN, Size::new(w, 70.0)));
     }
     if let Some(label) = field {
@@ -696,9 +726,9 @@ fn place_landing_labels(size: Size, items: &[(Point, f32)], height: f32, samples
 }
 
 /// Wind readout (top left), north arrow (top right), field-radius key (bottom left) and scale bar (bottom right).
-fn corner_marks(f: &mut Frame, t: &Tokens, size: Size, wind: Option<Wind>, field: Option<&str>, px_per_m: f32) {
+fn corner_marks(f: &mut Frame, t: &Tokens, size: Size, wind: Option<Wind>, field: Option<&str>, px_per_m: f32, dist: &Unit, speed: &Unit) {
     // Only the text corners get a backing, so a ring or the field circle never strikes through them.
-    for r in corner_rects(size, wind, field).into_iter().skip(2) {
+    for r in corner_rects(size, wind, field, speed.symbol).into_iter().skip(2) {
         f.fill_rectangle(r.position(), r.size(), Color { a: 0.85, ..t.bg_200 });
     }
     if let Some(label) = field {
@@ -713,7 +743,7 @@ fn corner_marks(f: &mut Frame, t: &Tokens, size: Size, wind: Option<Wind>, field
         put(f, "WIND", Point::new(10.0, 8.0), t.ink_faint, 10.0, Alignment::Left, alignment::Vertical::Top);
         put(
             f,
-            &format!("{:.1} m/s · {:03.0}°", w.speed, w.from_deg.rem_euclid(360.0)),
+            &format!("{:.1} {} · {:03.0}°", speed.from_si(w.speed), speed.symbol, w.from_deg.rem_euclid(360.0)),
             Point::new(10.0, 21.0),
             t.ink,
             TEXT_LABEL,
@@ -748,8 +778,9 @@ fn corner_marks(f: &mut Frame, t: &Tokens, size: Size, wind: Option<Wind>, field
     put(f, "N", Point::new(n.x, n.y + 13.0), t.ink_faint, 10.0, Alignment::Center, alignment::Vertical::Top);
 
     // Scale bar: the longest 1-2-5 length that fits in 50–120 px.
-    let metres = ring_spacing(px_per_m, 50.0);
-    let px = metres as f32 * px_per_m;
+    let px_per_unit = px_per_m * dist.to_si as f32;
+    let spacing = ring_spacing(px_per_unit, 50.0);
+    let px = spacing as f32 * px_per_unit;
     if px <= 120.0 * 1.25 {
         let (x1, y) = (size.width - 12.0, size.height - 14.0);
         let x0 = x1 - px;
@@ -758,7 +789,7 @@ fn corner_marks(f: &mut Frame, t: &Tokens, size: Size, wind: Option<Wind>, field
         for x in [x0, x1] {
             f.stroke(&Path::line(Point::new(x, y - 3.0), Point::new(x, y + 3.0)), s());
         }
-        put(f, &format!("{} m", fmt_m(metres)), Point::new(x1, y - 6.0), t.ink_faint, 10.0, Alignment::Right, alignment::Vertical::Bottom);
+        put(f, &format!("{} {}", fmt_m(spacing), dist.symbol), Point::new(x1, y - 6.0), t.ink_faint, 10.0, Alignment::Right, alignment::Vertical::Bottom);
     }
 }
 
@@ -770,7 +801,7 @@ mod tests {
     fn landing_labels_never_intersect_each_other_or_the_corner_marks() {
         let size = Size::new(340.0, 300.0);
         let wind = Some(Wind { speed: 2.2, from_deg: 250.0 });
-        let reserved = corner_rects(size, wind, Some("FIELD 300 m"));
+        let reserved = corner_rects(size, wind, Some("FIELD 300 m"), "m/s");
         // Landing points almost on top of each other, one near the north arrow, one near the wind block.
         let items = [
             (Point::new(200.0, 140.0), 90.0),
@@ -796,7 +827,7 @@ mod tests {
     fn two_near_identical_landings_at_the_right_edge_get_separate_labels_clear_of_the_north_arrow() {
         // Nominal (190 m) and Windy (195 m) land almost on the same spot, close to the right edge and below the north arrow.
         let size = Size::new(340.0, 232.0);
-        let reserved = corner_rects(size, Some(Wind { speed: 2.2, from_deg: 250.0 }), Some("FIELD 300 m"));
+        let reserved = corner_rects(size, Some(Wind { speed: 2.2, from_deg: 250.0 }), Some("FIELD 300 m"), "m/s");
         let markers = [Point::new(300.0, 100.0), Point::new(303.0, 98.0)];
         let items: Vec<(Point, f32)> = markers.iter().map(|m| (*m, 90.0)).collect();
         let rects = place_landing_labels(Size::new(size.width - 10.0, size.height), &items, 13.0, &[], &reserved);
@@ -827,13 +858,15 @@ mod tests {
         assert_eq!(bearing_deg(-100.0, 0.0), 270.0);
         // 104 m at 068° (SimulateScreen): east = 104 sin 68°, north = 104 cos 68°.
         let (e, n) = (104.0 * 68f64.to_radians().sin(), 104.0 * 68f64.to_radians().cos());
-        assert_eq!(landing_label(e, n), "104 m · 068°");
+        assert_eq!(landing_label(e, n, &Quantity::Altitude.units()[0]), "104 m · 068°");
+        // In feet (the unit set's distance unit) the same landing reads 341 ft.
+        assert_eq!(landing_label(e, n, &Quantity::Altitude.units()[1]), "341 ft · 068°");
     }
 
     #[test]
     fn landing_label_wraps_to_three_digits() {
-        assert_eq!(landing_label(0.0, 50.0), "50 m · 000°");
-        assert_eq!(landing_label(-0.001, 50.0), "50 m · 000°");
+        assert_eq!(landing_label(0.0, 50.0, &Quantity::Altitude.units()[0]), "50 m · 000°");
+        assert_eq!(landing_label(-0.001, 50.0, &Quantity::Altitude.units()[0]), "50 m · 000°");
     }
 
     #[test]
@@ -903,7 +936,7 @@ mod tests {
 
     #[test]
     fn extent_covers_pad_and_tracks_and_has_a_default() {
-        let g = GroundTrack { tracks: vec![track()], wind: None, field_radius: Some(300.0) };
+        let g = GroundTrack { tracks: vec![track()], wind: None, field_radius: Some(300.0), units: UnitSystem::default() };
         assert_eq!(g.extent(), (-20.0, -8.0, 96.0, 38.0));
         let empty = GroundTrack { field_radius: Some(300.0), ..GroundTrack::default() };
         assert_eq!(empty.extent(), (-300.0, -300.0, 300.0, 300.0));
@@ -911,7 +944,7 @@ mod tests {
 
     #[test]
     fn north_is_up_and_scale_is_equal() {
-        let g = GroundTrack { tracks: vec![track()], wind: None, field_radius: None };
+        let g = GroundTrack { tracks: vec![track()], wind: None, field_radius: None, units: UnitSystem::default() };
         let xf = Xf::new(&g, Size::new(400.0, 300.0), &View::default());
         let (a, b) = (xf.to_screen(0.0, 0.0), xf.to_screen(0.0, 100.0));
         assert!(b.y < a.y && (b.x - a.x).abs() < 1e-4, "north is up the screen");
@@ -921,7 +954,7 @@ mod tests {
 
     #[test]
     fn nearest_finds_the_track_under_the_cursor_with_its_time() {
-        let g = GroundTrack { tracks: vec![track()], wind: None, field_radius: None };
+        let g = GroundTrack { tracks: vec![track()], wind: None, field_radius: None, units: UnitSystem::default() };
         let xf = Xf::new(&g, Size::new(400.0, 300.0), &View::default());
         let at = xf.to_screen(10.0, 4.0);
         let (i, p) = g.nearest(&xf, Point::new(at.x + 2.0, at.y + 1.0), HIT_PX).unwrap();

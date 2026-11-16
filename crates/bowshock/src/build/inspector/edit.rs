@@ -5,7 +5,7 @@
 //! the handle in the viewport can never disagree. The fields that are not a plain dimension (sweep angle, an auto diameter, the
 //! parachute's numbers, mass overrides) are the [`Field`] variants beside [`Field::Dim`].
 
-use bowshock_model::{DeployEvent, Deployment, Dim, EventKind, InternalKind, MassRole, PartId, Rocket, StageEvent, StageTrigger};
+use bowshock_model::{DeployEvent, Deployment, Dim, EventKind, FinTab, InternalKind, MassRole, PartId, Rocket, StageEvent, StageTrigger};
 
 /// Most a shroud-line count may be.
 const MAX_LINES: f64 = 64.0;
@@ -56,6 +56,12 @@ pub enum Field {
     CgOverride,
     /// A fin group's own shear modulus for the flutter estimate, in GPa (a plain number: the document keeps it in Pa).
     ShearModulus,
+    /// A fin group's through-the-wall tab: how deep it reaches below the root.
+    TabHeight,
+    /// A fin group's tab length along the root.
+    TabLength,
+    /// A fin group's tab position: its fore edge from the root's leading edge.
+    TabPosition,
     /// The active configuration's ejection delay of a motor mount.
     EjectionDelay,
     /// The active configuration's delay after the trigger of a staging event: the separation of stage `n` or the ignition of
@@ -85,6 +91,9 @@ impl Field {
             Field::DeployDelay => "deploy delay".into(),
             Field::CgOverride => "CG".into(),
             Field::ShearModulus => "shear modulus".into(),
+            Field::TabHeight => "tab height".into(),
+            Field::TabLength => "tab length".into(),
+            Field::TabPosition => "tab position".into(),
             Field::EjectionDelay => "ejection delay".into(),
             Field::StageDelay(_, EventKind::Separation) => "separation delay".into(),
             Field::StageDelay(_, EventKind::Ignition) => "ignition delay".into(),
@@ -178,6 +187,18 @@ pub fn apply_copy(r: &mut Rocket, id: PartId, copy: usize, field: Field, value: 
         Field::MassOverride => Applied::flag(r.set_mass_override(id, Some(value))),
         Field::CgOverride => Applied::flag(r.set_cg_override(id, Some(value))),
         Field::ShearModulus => Applied::flag(r.set_fin_shear_modulus(id, Some(value * 1.0e9))),
+        Field::TabHeight | Field::TabLength | Field::TabPosition => {
+            let Some(tab) = r.radial(id).and_then(|fin| fin.tab) else {
+                return Applied::no();
+            };
+            let v = value.max(0.0);
+            let tab = match field {
+                Field::TabHeight => FinTab { height: v, ..tab },
+                Field::TabLength => FinTab { length: v, ..tab },
+                _ => FinTab { position: v, ..tab },
+            };
+            Applied::flag(r.set_fin_tab(id, Some(tab)))
+        }
         Field::EjectionDelay => {
             let config = r.active_config_id();
             Applied::flag(r.set_motor_delay(config, id, value.max(0.0)).is_ok())

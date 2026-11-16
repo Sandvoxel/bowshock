@@ -89,14 +89,14 @@ pub fn x_label(x: PlotX) -> &'static str {
     }
 }
 
-/// The shared x axis for `x` in the unit family `imperial` (time in s, Mach bare, lengths in m or ft).
-fn x_axis(x: PlotX, imperial: bool) -> Axis {
+/// The shared x axis for `x` in `units` (time in s, Mach bare, lengths in the altitude family's unit).
+fn x_axis(x: PlotX, units: UnitSystem) -> Axis {
     match x_channel(x) {
         None => Axis::time(),
         Some(_) if x == PlotX::Mach => Axis::mach(),
         Some(c) => {
             let label = if x == PlotX::Altitude { "Altitude" } else { "Distance" };
-            Axis { label: label.into(), unit: c.unit(imperial).symbol.to_string(), prefix: String::new(), decimals: 0 }
+            Axis { label: label.into(), unit: c.unit(units).symbol.to_string(), prefix: String::new(), decimals: 0 }
         }
     }
 }
@@ -212,13 +212,12 @@ fn phase_key(panel: &Panel) -> Option<Vec<(LineStyle, String)>> {
 pub fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &PlotLayout, min_margin: f64) -> Option<PlotGroup> {
     let reference = entries.get(reference).or(entries.first())?;
     let compare = entries.len() > 1;
-    let imperial = super::format::imperial(system);
     let count = layout.panels.len();
     let x_source = x_channel(layout.x);
-    let x_unit = x_source.map(|c| c.unit(imperial));
+    let x_unit = x_source.map(|c| c.unit(system));
     let x_of = x_source.zip(x_unit.as_ref());
 
-    let mut group = PlotGroup::new(x_axis(layout.x, imperial));
+    let mut group = PlotGroup::new(x_axis(layout.x, system));
     for (index, def) in layout.panels.iter().enumerate() {
         let mut sources: Vec<&Channel> = def.sources.iter().filter_map(|key| channels::find(key)).collect();
         // A source equal to the x quantity is a straight line against itself: it is dropped, and a panel left empty by that is
@@ -228,7 +227,7 @@ pub fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &P
         }
         let Some(primary) = sources.first() else { continue };
         let multi = sources.len() > 1;
-        let unit = primary.unit(imperial);
+        let unit = primary.unit(system);
         let title = if multi { primary.dim.title() } else { primary.label };
         let mut panel = Panel::new(title, unit.symbol).editable(PanelEditor {
             can_add: sources.len() < bowshock_model::MAX_PANEL_SOURCES,
@@ -314,9 +313,9 @@ pub fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &P
     // What else is true at each event, for its hover tooltip: the altitude on a time-like axis, the time on every other, and both
     // against Mach or distance.
     if let Some(altitude) = channels::find("altitude") {
-        let alt_unit = altitude.unit(imperial);
+        let alt_unit = altitude.unit(system);
         for m in &mut group.events {
-            let height = format!("{:.0} {}", x_at(samples, Some((altitude, &alt_unit)), m.x).max(0.0), alt_unit.symbol);
+            let height = format!("{:.*} {}", alt_unit.decimals, x_at(samples, Some((altitude, &alt_unit)), m.x).max(0.0), alt_unit.symbol);
             let time = format!("{:.1} s", m.x);
             m.detail = Some(match layout.x {
                 PlotX::Time => height,
@@ -351,7 +350,7 @@ pub fn wind(spec: &Spec) -> Wind {
 }
 
 /// The ground tracks of `entries` (metres from the pad), north up, with the reference flight's wind and field radius.
-pub fn ground(entries: &[Entry], reference: usize) -> GroundTrack {
+pub fn ground(entries: &[Entry], reference: usize, units: UnitSystem) -> GroundTrack {
     let Some(reference) = entries.get(reference).or(entries.first()) else { return GroundTrack::default() };
     let tracks = entries
         .iter()
@@ -365,7 +364,7 @@ pub fn ground(entries: &[Entry], reference: usize) -> GroundTrack {
             }
         })
         .collect();
-    GroundTrack { tracks, wind: Some(wind(&reference.run.spec)), field_radius: Some(reference.run.spec.field_radius) }
+    GroundTrack { tracks, wind: Some(wind(&reference.run.spec)), field_radius: Some(reference.run.spec.field_radius), units }
 }
 
 #[cfg(test)]
@@ -491,7 +490,7 @@ mod tests {
         let run = run();
         let entries = [Entry { name: "Nominal", color: SeriesColor::Ink, run: &run, scatter: None }];
         let layout = PlotLayout { x: PlotX::Altitude, ..layout(&[&["vertical_velocity"]]) };
-        let g = group(&entries, 0, UnitSystem::MKgS, &layout, 1.0).unwrap();
+        let g = group(&entries, 0, UnitSystem::M_KG_S, &layout, 1.0).unwrap();
         assert_eq!(g.x.label, "Altitude");
         assert_eq!(g.x.unit, "m");
         let series = &g.panels[0].series;
@@ -509,7 +508,7 @@ mod tests {
         assert!((apogee.x - 300.0).abs() < 1e-9);
         assert!(g.events.iter().all(|m| m.label != "Landing") && g.phases.is_empty() && !g.timeline);
         // In imperial the axis is in feet.
-        let g = group(&entries, 0, UnitSystem::FtLbS, &layout, 1.0).unwrap();
+        let g = group(&entries, 0, UnitSystem::FT_LB_S, &layout, 1.0).unwrap();
         assert_eq!(g.x.unit, "ft");
         assert!((g.x_extent().1 - 300.0 / 0.3048).abs() < 1e-6);
     }
@@ -519,7 +518,7 @@ mod tests {
         let run = run();
         let entries = [Entry { name: "Nominal", color: SeriesColor::Ink, run: &run, scatter: None }];
         let layout = PlotLayout { x: PlotX::Altitude, ..layout(&[&["altitude"], &["vertical_velocity"]]) };
-        let g = group(&entries, 0, UnitSystem::MKgS, &layout, 1.0).unwrap();
+        let g = group(&entries, 0, UnitSystem::M_KG_S, &layout, 1.0).unwrap();
         assert_eq!(g.panels.len(), 1);
         assert_eq!(g.panels[0].title, "Vertical velocity");
         // Burnout (t = 1.6, 96 m on the way up) is passed again on the way down: no single place on the axis.
@@ -533,7 +532,7 @@ mod tests {
     fn a_lone_flight_is_ink_and_a_comparison_labels_the_first_plot_and_keeps_the_reference_events() {
         let r = run();
         let one = [Entry { name: "Nominal", color: SeriesColor::Ink, run: &r, scatter: None }];
-        let g = group(&one, 0, UnitSystem::MmGS, &PlotLayout::default(), 1.0).unwrap();
+        let g = group(&one, 0, UnitSystem::MM_G_S, &PlotLayout::default(), 1.0).unwrap();
         assert_eq!(g.panels.len(), 3);
         assert_eq!(g.panels[0].unit, "m");
         assert!(g.panels[0].series[0].label.is_none() && g.right_margin == 0.0);
@@ -547,7 +546,7 @@ mod tests {
         assert!(editors.iter().all(|e| e.can_add && e.can_remove));
 
         let two = [one[0], Entry { name: "Windy", color: SeriesColor::Series(2), run: &r, scatter: None }];
-        let g = group(&two, 1, UnitSystem::MmGS, &PlotLayout::default(), 1.0).unwrap();
+        let g = group(&two, 1, UnitSystem::MM_G_S, &PlotLayout::default(), 1.0).unwrap();
         assert!(g.panels.iter().all(|p| p.series.iter().all(|s| s.label.is_none())));
         assert!(g.right_margin == 0.0 && g.panels[1].tag == Tag::Auto);
         assert!(g.events.iter().all(|m| m.label != "Landing"));
@@ -558,9 +557,24 @@ mod tests {
     fn imperial_systems_plot_feet() {
         let r = run();
         let e = [Entry { name: "n", color: SeriesColor::Ink, run: &r, scatter: None }];
-        let g = group(&e, 0, UnitSystem::FtLbS, &PlotLayout::default(), 1.0).unwrap();
+        let g = group(&e, 0, UnitSystem::FT_LB_S, &PlotLayout::default(), 1.0).unwrap();
         assert_eq!((g.panels[0].unit.as_str(), g.panels[1].unit.as_str()), ("ft", "ft/s"));
         assert!((g.panels[0].series[0].points[1].1 - 300.0 / 0.3048).abs() < 1e-9);
+    }
+
+    #[test]
+    fn every_axis_uses_the_unit_of_its_family_in_a_mixed_set() {
+        use crate::units::Family;
+        let r = run();
+        let e = [Entry { name: "n", color: SeriesColor::Ink, run: &r, scatter: None }];
+        // Altitude in km, speeds in mph, stations in inches, mass in kg: each panel and the x axis follow their own family.
+        let set = UnitSystem::MM_G_S.with(Family::Distance, "km").with(Family::Velocity, "mph").with(Family::Length, "in").with(Family::Mass, "kg");
+        let g = group(&e, 0, set, &layout(&[&["altitude"], &["vertical_velocity"], &["cg_station"], &["mass"]]), 1.0).unwrap();
+        let units: Vec<&str> = g.panels.iter().map(|p| p.unit.as_str()).collect();
+        assert_eq!(units, ["km", "mph", "in", "kg"]);
+        assert!((g.panels[0].series[0].points[1].1 - 0.3).abs() < 1e-9);
+        let against_altitude = PlotLayout { x: PlotX::Altitude, ..layout(&[&["vertical_velocity"]]) };
+        assert_eq!(group(&e, 0, set, &against_altitude, 1.0).unwrap().x.unit, "km");
     }
 
     fn layout(panels: &[&[&str]]) -> PlotLayout {
@@ -571,7 +585,7 @@ mod tests {
     fn a_panel_draws_any_source_in_its_unit_with_one_line_style_per_source() {
         let r = run();
         let e = [Entry { name: "Nominal", color: SeriesColor::Ink, run: &r, scatter: None }];
-        let g = group(&e, 0, UnitSystem::MmGS, &layout(&[&["thrust", "drag"], &["cg_station", "cp_station"], &["mach"]]), 1.0).unwrap();
+        let g = group(&e, 0, UnitSystem::MM_G_S, &layout(&[&["thrust", "drag"], &["cg_station", "cp_station"], &["mach"]]), 1.0).unwrap();
         // Force: both lines in N, the first solid and the second dashed, named by source and listed in the legend.
         let force = &g.panels[0];
         assert_eq!((force.title.as_str(), force.unit.as_str()), ("Force", "N"));
@@ -590,7 +604,7 @@ mod tests {
         // Mach has no unit text.
         assert_eq!((g.panels[2].title.as_str(), g.panels[2].unit.as_str()), ("Mach number", ""));
         // The same layout in imperial: stations in inches, forces in lbf.
-        let g = group(&e, 0, UnitSystem::InOzS, &layout(&[&["thrust"], &["cg_station"]]), 1.0).unwrap();
+        let g = group(&e, 0, UnitSystem::IN_OZ_S, &layout(&[&["thrust"], &["cg_station"]]), 1.0).unwrap();
         assert_eq!((g.panels[0].unit.as_str(), g.panels[1].unit.as_str()), ("lbf", "in"));
         assert!((g.panels[1].series[0].points[0].1 - 0.7 / 0.0254).abs() < 1e-9);
     }
@@ -600,7 +614,7 @@ mod tests {
         let r = run();
         let a = Entry { name: "Nominal", color: SeriesColor::Series(1), run: &r, scatter: None };
         let b = Entry { name: "Windy", color: SeriesColor::Series(2), run: &r, scatter: None };
-        let g = group(&[a, b], 0, UnitSystem::MmGS, &layout(&[&["thrust", "drag"]]), 1.0).unwrap();
+        let g = group(&[a, b], 0, UnitSystem::MM_G_S, &layout(&[&["thrust", "drag"]]), 1.0).unwrap();
         let lines: Vec<_> = g.panels[0].series.iter().map(|s| (s.name.as_str(), s.color, s.style)).collect();
         assert_eq!(
             lines,
@@ -615,7 +629,7 @@ mod tests {
         assert!(g.panels[0].series.iter().all(|s| s.label.is_none()));
         assert!(g.panels[0].editor.as_ref().unwrap().legend.iter().all(|l| l.color == SeriesColor::Muted));
         // One source per panel and two flights: the lines are named by flight.
-        let g = group(&[a, b], 0, UnitSystem::MmGS, &layout(&[&["mach"]]), 1.0).unwrap();
+        let g = group(&[a, b], 0, UnitSystem::MM_G_S, &layout(&[&["mach"]]), 1.0).unwrap();
         assert_eq!(g.panels[0].series.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["Nominal", "Windy"]);
     }
 
@@ -623,12 +637,12 @@ mod tests {
     fn ground_tracks_start_at_the_pad_and_carry_the_wind_and_field() {
         let r = run();
         let e = [Entry { name: "n", color: SeriesColor::Ink, run: &r, scatter: None }];
-        let g = ground(&e, 0);
+        let g = ground(&e, 0, UnitSystem::MM_G_S);
         assert_eq!(g.tracks.len(), 1);
         assert_eq!((g.tracks[0].points[0].east, g.tracks[0].points[0].north), (0.0, 0.0));
         assert_eq!(g.field_radius, Some(300.0));
         assert!((g.wind.unwrap().from_deg - 250.0).abs() < 1e-9);
-        assert!(group(&[], 0, UnitSystem::MmGS, &PlotLayout::default(), 1.0).is_none());
-        assert!(ground(&[], 0).tracks.is_empty());
+        assert!(group(&[], 0, UnitSystem::MM_G_S, &PlotLayout::default(), 1.0).is_none());
+        assert!(ground(&[], 0, UnitSystem::MM_G_S).tracks.is_empty());
     }
 }

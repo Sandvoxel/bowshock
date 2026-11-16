@@ -206,7 +206,7 @@ pub fn motor(rocket: &Rocket, id: PartId, motors: &MotorDb, warnings: &[Warning]
 fn fits(designation: &str, mount: &MotorMount, motors: &MotorDb, ctx: &Ctx) -> String {
     let mm = |v: f64| ui::with_unit(v, Quantity::Length, ctx.units);
     match motors.find(designation) {
-        Some(m) => format!("{designation} fits · {} mm", crate::app::ui::mm(m.length)),
+        Some(m) => format!("{designation} fits · {}", mm(m.length)),
         None => format!("{designation} fits {}", mm(mount.inner_diameter)),
     }
 }

@@ -145,8 +145,10 @@ pub fn help(label: &str) -> Option<&'static str> {
         "Pressure p/p₀" => "Static pressure over sea-level standard pressure; thin air raises the flutter speed.",
         "Shear modulus G" => "Stiffness of the fin stock in shear. Flutter speed grows with its square root.",
         "G from" => "Where the shear modulus comes from: the material's tabulated value, or the value set on the fin.",
+        "Stock" => "The fin material the shear modulus is taken from (an imported material takes the table entry of its family, e.g. plywood for 'Aircraft plywood').",
         "Estimate" => "Martin (NACA TN 4197) bending–torsion flutter estimate for a thin flat panel, in the form Bennett gives (2023).",
         "Accuracy" => "An empirical fit, good for preliminary design: it does not model the layup, the root fixity or the tip; test a marginal fin.",
+        "Root" => "Martin's panels are clamped at the root, which is how a fin glued along its root, filleted or through-the-wall is built; a tab adds no credit to the estimate.",
         "at time" => "When in the flight (seconds after liftoff) the margin is lowest.",
         "Mach" => "The rocket's Mach number at that moment.",
         "Fin set" => "The fin set that decides the margin: the one with the lowest flutter speed at the worst moment.",
@@ -433,6 +435,7 @@ fn flutter(run: &Run, analysis: Option<&FlutterAnalysis>, t: f64, units: UnitSys
     }
     if let Some(i) = f.inputs() {
         let gov = f.governing();
+        let (dn, dn_unit) = ui::readout(i.denominator_constant, Quantity::Pressure, units);
         let mut rows = vec![
             Row::new("Fin set", gov.name.clone(), ""),
             Row::new("Aspect ratio AR", format!("{:.2}", i.aspect_ratio), ""),
@@ -440,10 +443,11 @@ fn flutter(run: &Run, analysis: Option<&FlutterAnalysis>, t: f64, units: UnitSys
             Row::new("Thickness t", ui::bare(i.thickness, Quantity::Length, units), length_unit),
             Row::new("Thickness ratio t/c", format!("{:.4}", i.thickness_ratio), ""),
             Row::new("Centroid offset ε", format!("{:.3}", i.epsilon), ""),
-            Row::new("D_N", format!("{:.1}", i.denominator_constant / 1000.0), "kPa"),
+            Row::new("D_N", dn, dn_unit),
             Row::new("Sound speed a", vel(i.speed_of_sound).0, vu),
             Row::new("Pressure p/p₀", format!("{:.3}", i.pressure_ratio), ""),
             Row::new("Shear modulus G", format!("{:.2}", i.shear_modulus / 1e9), if gov.tip_to_tip { "GPa · tip-to-tip ×2" } else { "GPa" }),
+            Row::new("Stock", gov.g_source.split_once(" · ").map_or("set on the fin".to_string(), |(stock, _)| stock.to_string()), "").muted(),
             Row::new("G from", gov.g_source.split_once(" · ").map_or(gov.g_source.clone(), |(_, source)| source.to_string()), "").muted(),
         ];
         if f.stocks.len() > 1 {
@@ -462,7 +466,14 @@ fn flutter(run: &Run, analysis: Option<&FlutterAnalysis>, t: f64, units: UnitSys
         }
         sections.push(Section { title: "What moves it".into(), rows: hints });
     }
-    sections.push(Section { title: "Method".into(), rows: vec![Row::new("Estimate", "NACA TN 4197", ""), Row::new("Accuracy", "preliminary design", "")] });
+    sections.push(Section {
+        title: "Method".into(),
+        rows: vec![
+            Row::new("Estimate", "NACA TN 4197", ""),
+            Row::new("Accuracy", "preliminary design", ""),
+            Row::new("Root", if f.governing().tabbed { "clamped · tab" } else { "clamped" }, "").muted(),
+        ],
+    });
     let warnings = f.warnings();
     if !warnings.is_empty() {
         let rows = warnings
@@ -473,8 +484,15 @@ fn flutter(run: &Run, analysis: Option<&FlutterAnalysis>, t: f64, units: UnitSys
                     FlutterWarning::AspectRatio(ar) => ("Aspect ratio", format!("{ar:.2}")),
                     FlutterWarning::ThicknessRatio(tc) => ("Thickness ratio", format!("{tc:.3}")),
                     FlutterWarning::CentroidForward(e) => ("Centroid ahead of ¼ chord", format!("ε {e:.2}")),
+                    FlutterWarning::CentroidAft(e) => ("Centroid behind the root", format!("ε {e:.2}")),
+                    FlutterWarning::Degenerate => ("Fin panel", "unusable".to_string()),
+                    FlutterWarning::NoShearModulus => ("Shear modulus G", "not set".to_string()),
                 };
-                let mut row = Row::new(label, value, "").tag(Tag::Chip(Severity::Warn, "limit".into()));
+                let chip = match w {
+                    FlutterWarning::Degenerate | FlutterWarning::NoShearModulus => Tag::Chip(Severity::Err, "no estimate".into()),
+                    _ => Tag::Chip(Severity::Warn, "limit".into()),
+                };
+                let mut row = Row::new(label, value, "").tag(chip);
                 row.help = Some(match w {
                     FlutterWarning::BeyondMach(_) => "Martin's flutter data do not reach past Mach 1.5; above it the estimate is an extrapolation.",
                     FlutterWarning::AspectRatio(_) => "The aspect ratio is outside the range the thin-panel estimate was fitted to; treat the result as rough.",
@@ -484,6 +502,11 @@ fn flutter(run: &Run, analysis: Option<&FlutterAnalysis>, t: f64, units: UnitSys
                     FlutterWarning::CentroidForward(_) => {
                         "With the area centroid at or ahead of the root quarter chord the formula has no finite answer; ε is held at a small value."
                     }
+                    FlutterWarning::CentroidAft(_) => {
+                        "The area centroid lies behind the root's trailing edge: the panel is swept far more than the trapezoids the formula is meant for, so its D_N is an extrapolation."
+                    }
+                    FlutterWarning::Degenerate => "The fin has a zero or non-finite chord, span, area or thickness, so there is no panel to estimate; the speed shown is 0.",
+                    FlutterWarning::NoShearModulus => "The fin stock has no shear modulus (zero or not a number); set the fin's own value in the inspector.",
                 });
                 row
             })
@@ -569,7 +592,7 @@ mod tests {
     #[test]
     fn aerodynamics_readout_has_the_kit_sections() {
         let (o, id) = out(Analysis::Aerodynamics);
-        let r = readout(&o, Some(1.1), id, UnitSystem::MmGS);
+        let r = readout(&o, Some(1.1), id, UnitSystem::MM_G_S);
         assert_eq!(r.cursor, "M 1.10");
         let titles: Vec<&str> = r.sections.iter().map(|s| s.title.as_str()).collect();
         let flight_mach = active_run(&o, id).unwrap().max_mach.expect("the example flies");
@@ -609,7 +632,7 @@ mod tests {
         assert!(flight_mach > 0.2 && flight_mach < 1.0, "{flight_mach}");
         let x = default_cursor(&o, id);
         assert_eq!(x, flight_mach);
-        assert_eq!(readout(&o, None, id, UnitSystem::MmGS).cursor, format!("M {x:.2}"));
+        assert_eq!(readout(&o, None, id, UnitSystem::MM_G_S).cursor, format!("M {x:.2}"));
     }
 
     #[test]
@@ -631,7 +654,7 @@ mod tests {
     fn every_readout_row_explains_itself() {
         for analysis in [Analysis::Aerodynamics, Analysis::Drag, Analysis::Stability, Analysis::Flutter, Analysis::Dispersion] {
             let (o, id) = out(analysis);
-            for section in readout(&o, None, id, UnitSystem::MmGS).sections {
+            for section in readout(&o, None, id, UnitSystem::MM_G_S).sections {
                 for row in section.rows {
                     // Rows that are plain measurements (altitude, apogee, spreads, means) need no sentence; the rest do.
                     let plain = ["Apogee", "at altitude", "Mean distance", "Bearing", "σ east / north", "Mean", "σ", "Min", "Max"];
@@ -644,7 +667,7 @@ mod tests {
     #[test]
     fn drag_rows_carry_their_share_and_the_four_sources_have_the_kit_sentences() {
         let (o, id) = out(Analysis::Aerodynamics);
-        let r = readout(&o, Some(1.1), id, UnitSystem::MmGS);
+        let r = readout(&o, Some(1.1), id, UnitSystem::MM_G_S);
         let drag = &r.sections[1];
         let shares: f64 = drag.rows[1..].iter().map(|row| row.share.as_ref().unwrap().trim_end_matches('%').parse::<f64>().unwrap()).sum();
         assert!((shares - 100.0).abs() <= 2.0, "shares of the four sources sum to the total: {shares}");
@@ -658,20 +681,20 @@ mod tests {
     fn comparing_a_result_with_itself_has_zero_differences() {
         let (o, id) = out(Analysis::Aerodynamics);
         let overlay = Overlay::from_output(&o, id, "Same").unwrap();
-        let s = compare_section(&o, &overlay, Some(1.1), id, UnitSystem::MmGS).unwrap();
+        let s = compare_section(&o, &overlay, Some(1.1), id, UnitSystem::MM_G_S).unwrap();
         assert_eq!(s.title, "Compare · Same");
         let labels: Vec<&str> = s.rows.iter().map(|r| r.label.as_str()).collect();
         assert_eq!(labels, ["Margin", "CP", "Cd"]);
         assert!(s.rows.iter().all(|r| matches!(&r.tag, Some(Tag::Plain(t)) if t.starts_with("Δ +0") || t.starts_with("Δ −0"))));
         // Outside the comparison's data there is nothing to compare.
-        assert!(compare_section(&o, &overlay, Some(9.0), id, UnitSystem::MmGS).is_none());
+        assert!(compare_section(&o, &overlay, Some(9.0), id, UnitSystem::MM_G_S).is_none());
     }
 
     #[test]
     fn other_analyses_have_readouts() {
         for a in [Analysis::Stability, Analysis::Flutter, Analysis::Dispersion] {
             let (o, id) = out(a);
-            let r = readout(&o, None, id, UnitSystem::MmGS);
+            let r = readout(&o, None, id, UnitSystem::MM_G_S);
             assert!(!r.sections.is_empty() && r.sections.iter().all(|s| !s.rows.is_empty()), "{a:?}");
         }
     }

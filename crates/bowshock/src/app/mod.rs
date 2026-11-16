@@ -9,6 +9,7 @@ mod multi;
 pub mod part_menu;
 pub mod physics;
 pub mod refs;
+pub mod settings;
 pub mod symmetry;
 pub mod ui;
 
@@ -97,6 +98,8 @@ pub struct Ctx {
     pub physics: Physics,
     /// The display unit system (top bar).
     pub units: UnitSystem,
+    /// Where the user's settings (the unit set) are written; `None` keeps them for the session only.
+    pub settings_file: Option<PathBuf>,
     /// The cursor in window coordinates, tracked app-wide so a drag can leave the parts bin.
     pub cursor: Option<Point>,
     /// The mode on show.
@@ -150,6 +153,7 @@ impl Ctx {
             drag: Drags::default(),
             physics: Physics::new(),
             units: UnitSystem::default(),
+            settings_file: None,
             cursor: None,
             mode: Mode::Build,
             dark: true,
@@ -388,6 +392,11 @@ impl App {
             files::open(&mut app.ctx, std::path::Path::new(&path));
         }
         app.ctx.recent = files::Recent::load(files::Recent::default_file());
+        // Unit choices are the user's, kept across documents and runs. Unit tests start from the defaults, never the real file.
+        if !cfg!(test) {
+            app.ctx.settings_file = settings::Settings::default_file();
+            app.ctx.units = settings::Settings::load(app.ctx.settings_file.as_deref()).units;
+        }
         app.after_update();
         // A headless `drive` run delivers no key subscription events, so `BOWSHOCK_DRIVE_TAB=1` presses Tab once at start-up.
         if std::env::var_os("BOWSHOCK_DRIVE_TAB").is_some() {
@@ -498,19 +507,16 @@ impl App {
             }
         }
         let was_open = self.ctx.file_menu;
-        if !matches!(
+        // Pointer movement is not a decision: a hover highlight (the parts bin's rows, its keyboard-focus flag) must never close
+        // a menu. Only clicks, Esc and choosing an item do.
+        let passive = matches!(
             message,
-            Message::Frame(_)
-                | Message::Cursor(_)
-                | Message::Released
-                | Message::OpenPartMenu(_)
-                | Message::PartMenu(_)
-                | Message::Chrome(chrome::Message::Nothing)
-        ) {
+            Message::Frame(_) | Message::Cursor(_) | Message::Released | Message::PartsBin(parts_bin::Message::Hover(_) | parts_bin::Message::RowHover(_))
+        );
+        if !passive && !matches!(message, Message::OpenPartMenu(_) | Message::PartMenu(_) | Message::Chrome(chrome::Message::Nothing)) {
             self.ctx.part_menu = None;
         }
-        if !matches!(message, Message::Frame(_) | Message::Cursor(_) | Message::Released | Message::ToggleFileMenu | Message::Chrome(chrome::Message::Nothing))
-        {
+        if !passive && !matches!(message, Message::ToggleFileMenu | Message::Chrome(chrome::Message::Nothing)) {
             self.ctx.file_menu = false;
         }
         let ctx = &mut self.ctx;
@@ -524,6 +530,10 @@ impl App {
             Message::Units(units) => {
                 crate::units::clear_unit_overrides();
                 ctx.units = units;
+                let saved = settings::Settings { units }.save(ctx.settings_file.as_deref());
+                if let Err(e) = saved {
+                    ctx.notify(format!("Could not save settings: {e}"));
+                }
             }
             Message::Frame(now) => {
                 if let Some((_, since)) = ctx.flash {
@@ -1091,6 +1101,22 @@ mod tests {
         SurfaceTarget { parent, offset, angle, copy: 0 }
     }
 
+    /// Hovering the parts bin (rows, focus flag) while the File menu is open must not close it; a click elsewhere still does.
+    #[test]
+    fn hovering_the_parts_bin_keeps_the_file_menu_open() {
+        let (mut app, _) = app();
+        app.update(Message::ToggleFileMenu);
+        assert!(app.ctx.file_menu);
+        let row = parts_bin::RowId::new(parts_bin::Category::Fins, 0);
+        app.update(Message::PartsBin(parts_bin::Message::Hover(true)));
+        app.update(Message::PartsBin(parts_bin::Message::RowHover(Some(row))));
+        app.update(Message::PartsBin(parts_bin::Message::RowHover(None)));
+        app.update(Message::PartsBin(parts_bin::Message::Hover(false)));
+        assert!(app.ctx.file_menu, "hover must not dismiss the menu");
+        app.update(Message::PartsBin(parts_bin::Message::Category(parts_bin::Category::Fins)));
+        assert!(!app.ctx.file_menu, "a real action closes it");
+    }
+
     #[test]
     fn a_click_attaches_radial_parts_to_the_aftmost_tube_with_the_symmetry_count() {
         let (mut app, [_, tube, _]) = app();
@@ -1638,8 +1664,16 @@ mod tests {
         // the camera's own wheel handler (zoom) never sees it.
         let camera = app.viewport.camera();
         let drag = app.ctx.drag.radial.clone().unwrap();
-        let overlay =
-            crate::viewport::surface::Overlay { rocket: app.ctx.doc.rocket(), drag: &drag, camera, snap: 0, snap_step: 0.001, cursor: None, margin: None };
+        let overlay = crate::viewport::surface::Overlay {
+            rocket: app.ctx.doc.rocket(),
+            drag: &drag,
+            camera,
+            snap: 0,
+            snap_step: 0.001,
+            cursor: None,
+            margin: None,
+            units: Default::default(),
+        };
         let bounds = iced::Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
         let cursor = mouse::Cursor::Available(Point::new(400.0, 300.0));
         let wheel = |y: f32| iced::Event::Mouse(mouse::Event::WheelScrolled { delta: mouse::ScrollDelta::Lines { x: 0.0, y } });
@@ -2065,5 +2099,32 @@ mod tests {
         assert!(app.ctx.doc.rocket().kind_of(transition).is_none());
         app.update(Message::Undo);
         assert_eq!(app.ctx.doc.rocket(), &before);
+    }
+
+    #[test]
+    fn a_chosen_unit_set_is_kept_in_the_settings_file_and_not_in_the_rocket() {
+        use crate::units::{Family, Quantity};
+        let file = std::env::temp_dir().join(format!("bowshock_app_units_{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let (mut app, _) = app();
+        app.ctx.settings_file = Some(file.clone());
+        let rocket_before = app.ctx.doc.rocket().clone();
+
+        let mixed = UnitSystem::MM_G_S.with(Family::Length, "in").with(Family::Mass, "kg");
+        app.update(Message::Units(mixed));
+        assert_eq!(app.ctx.units.label(), "in · kg · s");
+        // Lengths read in inches and masses in kilograms through the same set.
+        assert_eq!(ui::with_unit(0.0762, Quantity::Length, app.ctx.units), "3.00 in");
+        assert_eq!(ui::with_unit(1.284, Quantity::Mass, app.ctx.units), "1.284 kg");
+        // The next launch reads the choice back; the document is untouched (not dirty from a display preference).
+        assert_eq!(settings::Settings::load(Some(&file)).units, mixed);
+        assert_eq!(app.ctx.doc.rocket(), &rocket_before);
+
+        // A preset replaces it, and so does a project-wide chip choice (cleared when the set changes).
+        crate::units::set_unit_override(Quantity::Length, &Quantity::Length.units()[4]);
+        app.update(Message::Units(UnitSystem::M_KG_S));
+        assert_eq!(Quantity::Length.unit_for(app.ctx.units).symbol, "m");
+        assert_eq!(settings::Settings::load(Some(&file)).units, UnitSystem::M_KG_S);
+        let _ = std::fs::remove_file(&file);
     }
 }

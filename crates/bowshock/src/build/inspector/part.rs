@@ -171,6 +171,7 @@ fn radial_rows<'a>(p: &Params<'a>, radial: &RadialPart) -> Vec<Element<'a, Messa
     if radial.kind.is_fin() {
         rows.push(labeled("Cross-section", segmented_fill(&SECTIONS, radial.cross_section, Message::CrossSection)));
         rows.extend(fillet_rows(p, radial));
+        rows.extend(tab_rows(p, radial));
     }
     rows
 }
@@ -198,6 +199,50 @@ fn fillet_rows<'a>(p: &Params<'a>, radial: &RadialPart) -> Vec<Element<'a, Messa
         rows.push(p.form.num("Fillet radius", radial.fillet_radius, Quantity::Length, dim(Dim::FilletRadius)));
         rows.push(labeled("Fillet material", choose(options, &radial.fillet_material, Message::FilletMaterial)));
     }
+    rows
+}
+
+/// A fin set's through-the-wall tab: a toggle, the tab's height, length and position from the root's leading edge, and *To motor
+/// mount* (the height that just meets the mount under the fins). Closed it is the toggle and, when a mount lies under the fins, the
+/// one-click way to glue the fins to it.
+fn tab_rows<'a>(p: &Params<'a>, radial: &RadialPart) -> Vec<Element<'a, Message>> {
+    let f = &p.form;
+    let units = f.ctx.units;
+    let length = |v: f64| ui::with_unit(v, Quantity::Length, units);
+    let target = p.rocket.fin_tab_target(p.id);
+    let to_mount = |label: &'static str| -> Element<'a, Message> { button(label, Weight::Ghost).on_press(Message::TabToMotor).into() };
+    let mut rows: Vec<Element<'a, Message>> = vec![
+        container(ui::label("TAB · THROUGH THE WALL")).padding([SPACE_2, 0.0]).boxed(),
+        labeled("Fin tab", crate::widgets::field::checkbox("Through the wall", radial.tab.is_some(), Message::TabOn)),
+    ];
+    let Some(tab) = radial.tab else {
+        if let Some(t) = target {
+            rows.push(text_row("Motor mount", format!("under the fins · {} down", length(t.height))));
+            rows.push(labeled("", to_mount("To motor mount")));
+        }
+        return rows;
+    };
+    rows.push(f.num("Tab height", tab.height, Quantity::Length, Field::TabHeight));
+    rows.push(f.num("Tab length", tab.length, Quantity::Length, Field::TabLength));
+    rows.push(f.num("Tab position", tab.position, Quantity::Length, Field::TabPosition));
+    match target {
+        Some(t) => {
+            let gap = t.height - tab.height;
+            let state = if gap.abs() < 1.0e-4 {
+                "reached".to_string()
+            } else if gap > 0.0 {
+                format!("{} short", length(gap))
+            } else {
+                format!("{} too deep", length(-gap))
+            };
+            rows.push(text_row("Motor mount", state));
+            if gap.abs() >= 1.0e-4 {
+                rows.push(labeled("", to_mount("To motor mount")));
+            }
+        }
+        None => rows.push(text_row("Motor mount", "none under the fins".to_string())),
+    }
+    rows.push(container(text("Adds mass, no drag. Flutter takes the root as clamped either way.").size(TEXT_LABEL).style(theme::muted)).boxed());
     rows
 }
 
@@ -464,18 +509,18 @@ pub fn material_label(m: &Material) -> String {
 /// What the fin flutter estimate takes of the fin stock: the material's shear modulus (with its source), a value of the fin's own
 /// in its place, and the tip-to-tip allowance.
 fn stiffness_rows<'a>(p: &Params<'a>, radial: &RadialPart) -> Vec<Element<'a, Message>> {
-    let material = radial.material.material();
+    let (material_g, material_source) = radial.material_shear();
     let gpa = |pa: f64| format!("{:.2} GPa", pa / 1.0e9);
     let ghost = |label: &'static str, message: Message| -> Element<'a, Message> { button(label, Weight::Ghost).on_press(message).into() };
     let mut rows: Vec<Element<'a, Message>> = Vec::new();
     match radial.shear_modulus {
         None => {
-            rows.push(value_row("Shear G", gpa(material.shear_modulus), Some(ghost("Override…", Message::StartOverride(Field::ShearModulus)))));
-            rows.push(container(text(material.shear_source).size(TEXT_LABEL).style(theme::muted)).boxed());
+            rows.push(value_row("Shear G", gpa(material_g), Some(ghost("Override…", Message::StartOverride(Field::ShearModulus)))));
+            rows.push(container(text(material_source).size(TEXT_LABEL).style(theme::muted)).boxed());
         }
         Some(g) => {
             rows.push(p.form.overridden("G (GPa)", g / 1.0e9, Quantity::Scalar, Field::ShearModulus));
-            rows.push(value_row("From material", gpa(material.shear_modulus), Some(ghost("Clear", Message::ClearOverride(Field::ShearModulus)))));
+            rows.push(value_row("From material", gpa(material_g), Some(ghost("Clear", Message::ClearOverride(Field::ShearModulus)))));
         }
     }
     rows.push(labeled("Laminate", segmented_fill(&[(false, "Plain"), (true, "Tip-to-tip")], radial.tip_to_tip, Message::TipToTip)));

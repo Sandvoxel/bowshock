@@ -27,7 +27,7 @@
 
 mod channels;
 mod flight;
-mod format;
+pub(crate) mod format;
 mod keys;
 mod layout;
 mod left;
@@ -233,8 +233,8 @@ struct Shown {
     reference: usize,
     /// Two or more flights ticked.
     compare: bool,
-    /// The plots in metric and imperial units, `None` while nothing on show has run.
-    groups: [Option<PlotGroup>; 2],
+    /// The plots in the unit set `State::units`, `None` while nothing on show has run.
+    group: Option<PlotGroup>,
     /// The ground tracks (the selected flight's wind and field when nothing has run).
     ground: GroundTrack,
 }
@@ -274,8 +274,8 @@ pub struct State {
     own_edits: u64,
     /// The flight being renamed and the text typed so far.
     renaming: Option<(FlightId, String)>,
-    /// The plots are shown in imperial units: the zoom's full x range follows that group (lengths along x differ by unit).
-    imperial: bool,
+    /// The unit set the plots were built in: the zoom's full x range follows it (lengths along x differ by unit).
+    units: UnitSystem,
 }
 
 impl Default for State {
@@ -310,7 +310,7 @@ impl State {
             bands,
             own_edits: 0,
             renaming: None,
-            imperial: false,
+            units: UnitSystem::default(),
         };
         state.rebuild();
         state
@@ -326,13 +326,12 @@ impl State {
             let modifiers = self.modifiers;
             *self = State::of(defs, layout, bands);
             self.modifiers = modifiers;
-            self.imperial = format::imperial(ctx.units);
+            self.units = ctx.units;
             self.rebuild();
             return;
         }
-        let imperial = format::imperial(ctx.units);
-        if self.imperial != imperial {
-            self.imperial = imperial;
+        if self.units != ctx.units {
+            self.units = ctx.units;
             self.rebuild();
         }
         if self.bands != bands {
@@ -357,7 +356,6 @@ impl State {
 
     /// Applies `edit` to the plots' layout as one undo step. A refused edit says why in the status strip and changes nothing.
     fn edit_layout(&mut self, edit: LayoutEdit, ctx: &mut Ctx) {
-        let imperial = format::imperial(ctx.units);
         let mut next = self.layout.clone();
         let (label, outcome): (&str, Result<(), String>) = match edit {
             LayoutEdit::Preset(Preset::Custom) if Preset::of(&next) == Preset::Custom => ("Set plots", Ok(())),
@@ -380,7 +378,7 @@ impl State {
                 layout::set_primary(&mut next, i, key);
                 ("Change plot source", Ok(()))
             }
-            LayoutEdit::ToggleSource(i, key) => ("Edit plot sources", layout::toggle_source(&mut next, i, key, imperial)),
+            LayoutEdit::ToggleSource(i, key) => ("Edit plot sources", layout::toggle_source(&mut next, i, key, ctx.units)),
         };
         self.picker = None;
         if let Err(reason) = outcome {
@@ -582,25 +580,23 @@ impl State {
         // The reference is the selected flight when it is on show, else the first.
         let reference = ids.iter().position(|id| *id == self.selected).unwrap_or(0);
 
-        let groups = [
-            plots::group(&entries, reference, UnitSystem::MKgS, &self.layout, self.bands.stable),
-            plots::group(&entries, reference, UnitSystem::FtLbS, &self.layout, self.bands.stable),
-        ];
+        let group = plots::group(&entries, reference, self.units, &self.layout, self.bands.stable);
         let ground = if entries.is_empty() {
             GroundTrack {
                 tracks: Vec::new(),
                 wind: Some(plots::wind(&self.selected_flight().spec)),
                 field_radius: Some(self.selected_flight().spec.field_radius),
+                units: self.units,
             }
         } else {
-            plots::ground(&entries, reference)
+            plots::ground(&entries, reference, self.units)
         };
-        if let Some(g) = groups[usize::from(self.imperial)].as_ref() {
+        if let Some(g) = group.as_ref() {
             self.plot.set_full(g.x_extent());
         }
         // `entries` borrows the flights; end it before assigning.
         drop(entries);
-        self.shown = Shown { ids, reference, compare, groups, ground };
+        self.shown = Shown { ids, reference, compare, group, ground };
     }
 
     /// Starts the simulation of flight `id` on a worker thread.
@@ -928,8 +924,7 @@ impl State {
     /// The centre column: the PlotZoom header, the presets row, the legend of a comparison, the plots (with the source picker over
     /// them while it is open).
     fn centre<'a>(&'a self, ctx: &'a Ctx) -> Element<'a, Message> {
-        let imperial = format::imperial(ctx.units);
-        let Some(group) = self.shown.groups[usize::from(imperial)].as_ref() else { return self.placeholder() };
+        let Some(group) = self.shown.group.as_ref() else { return self.placeholder() };
         let bar = |e: Element<'a, Message>| container(e).padding([SPACE_2, SPACE_3]).boxed();
         let (crumbs, hint) = header_parts(group, &self.plot, true);
         // One row: the zoom breadcrumb, the plot presets, then the hints; it wraps onto a second line in a narrow window instead of
@@ -950,7 +945,7 @@ impl State {
             .width(Fill)
             .height(Fill);
         parts.push(match &self.picker {
-            Some(picker) => stack![canvas, picker.view(&self.layout, imperial)].boxed(),
+            Some(picker) => stack![canvas, picker.view(&self.layout, ctx.units)].boxed(),
             None => canvas.boxed(),
         });
         column(parts).boxed()

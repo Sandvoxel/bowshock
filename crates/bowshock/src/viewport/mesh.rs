@@ -363,6 +363,13 @@ impl Mesh {
                         b.outer.adopt(&tmp);
                     }
                 }
+                // A through-the-wall tab: the root plate carried on down through the wall (hidden by the shell in Solid; the
+                // cutaway and X-ray show it reaching the mount).
+                if let (Some(tab), Some(thickness)) = (radial.tab.filter(|_| own.kind.is_fin()), own.kind.thickness()) {
+                    let (fore, aft) = (tab.position as f32, (tab.position + tab.length) as f32);
+                    let depth = (tab.height as f32).min(at.base);
+                    b.outer.plate(&[(fore, 0.0), (aft, 0.0), (aft, -depth), (fore, -depth)], at.z0, at.base, at.angle, at.cant, thickness as f32);
+                }
                 if radial.fillet_radius > 0.0 && own.kind.is_fin() {
                     b.outer.fillet(
                         at.z0,

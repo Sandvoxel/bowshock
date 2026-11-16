@@ -34,6 +34,8 @@
 //!   mean thickness is the plate of the same material volume, never more than the torsion-equivalent (cube-mean) thickness, so
 //!   it errs on the low, conservative side. Fins of tapering thickness are not modelled (the document has one thickness).
 //! * Tube fins are not panels and have no estimate here.
+//! * The root is taken as clamped: Martin's panels were fixed at the root, which is how a fin that is glued along its root, filleted
+//!   or through-the-wall (a tab to the motor mount) is built. The estimate does not change with a tab and takes no credit for one.
 //!
 //! # Along a flight ([`FlutterTrace`])
 //!
@@ -62,6 +64,9 @@ pub const KAPPA: f64 = GAMMA;
 pub const VALIDATED_MACH: f64 = 1.5;
 /// Smallest `ε` the estimate uses: a centroid at or ahead of the root quarter chord is held here (and flagged).
 pub const MIN_EPSILON: f64 = 0.02;
+/// Largest `ε` not flagged: `ε = 3/4` puts the centroid at the root's trailing edge (`C_x = c_r`); a panel swept further back than
+/// that is outside the planforms the estimate is meant for.
+pub const MAX_EPSILON: f64 = 0.75;
 /// Aspect ratios outside this range are flagged as unusual for the method.
 pub const ASPECT_RATIO_RANGE: (f64, f64) = (0.3, 3.0);
 /// Thickness ratios outside this range are flagged as unusual for the method.
@@ -153,6 +158,15 @@ impl FlutterGeometry {
     pub fn denominator_constant(&self) -> f64 {
         24.0 * self.epsilon().max(MIN_EPSILON) * KAPPA * P0 / std::f64::consts::PI
     }
+
+    /// Whether the panel can be put through the formula: a finite, positive root chord, span, area and thickness.
+    pub fn is_usable(&self) -> bool {
+        [self.root_chord, self.span, self.area, self.thickness, self.centroid, self.tip_chord].iter().all(|v| v.is_finite())
+            && self.root_chord > 0.0
+            && self.span > 0.0
+            && self.area > 0.0
+            && self.thickness > 0.0
+    }
 }
 
 /// One fin set as the estimate sees it: its panel and the shear modulus of its stock.
@@ -197,7 +211,9 @@ impl FlutterInputs {
         let dn = g.denominator_constant();
         let pressure_ratio = air.pressure / P0;
         let denominator = dn * ar.powi(3) / (tc.powi(3) * (ar + 2.0)) * (lambda + 1.0) / 2.0 * pressure_ratio;
-        let flutter_velocity = air.speed_of_sound * (fin.shear_modulus.max(0.0) / denominator.max(1e-300)).sqrt();
+        // A degenerate panel or stock has no estimate: V_f is 0 (margin 0, flagged), never infinite or not a number.
+        let raw = air.speed_of_sound * (fin.shear_modulus.max(0.0) / denominator.max(1e-300)).sqrt();
+        let flutter_velocity = if g.is_usable() && raw.is_finite() { raw } else { 0.0 };
         FlutterInputs {
             aspect_ratio: ar,
             taper_ratio: lambda,
@@ -257,6 +273,12 @@ pub enum FlutterWarning {
     ThicknessRatio(f64),
     /// The governing panel's centroid is at or ahead of the root quarter chord: its `ε`, held at [`MIN_EPSILON`].
     CentroidForward(f64),
+    /// The governing panel's centroid is behind the root trailing edge (`ε` above [`MAX_EPSILON`]): a far-swept planform.
+    CentroidAft(f64),
+    /// The governing panel has a zero or non-finite chord, span, area or thickness.
+    Degenerate,
+    /// The governing fin stock's shear modulus is zero or not a number.
+    NoShearModulus,
 }
 
 impl fmt::Display for FlutterWarning {
@@ -274,6 +296,12 @@ impl fmt::Display for FlutterWarning {
             FlutterWarning::CentroidForward(e) => {
                 write!(f, "Centroid ahead of the quarter chord (ε {e:.2}): the method has no answer there; ε is held at {MIN_EPSILON}")
             }
+            FlutterWarning::CentroidAft(e) => write!(
+                f,
+                "Centroid behind the root trailing edge (ε {e:.2}, above {MAX_EPSILON}): the panel is swept far beyond the trapezoids the method is meant for, so D_N and V_f are extrapolated"
+            ),
+            FlutterWarning::Degenerate => f.write_str("The fin has no usable panel (a zero or non-finite chord, span, area or thickness): no flutter estimate"),
+            FlutterWarning::NoShearModulus => f.write_str("The fin stock has no shear modulus: no flutter estimate until one is set"),
         }
     }
 }
@@ -356,6 +384,15 @@ impl FlutterTrace {
             }
             if e < MIN_EPSILON {
                 out.push(FlutterWarning::CentroidForward(e));
+            }
+            if e > MAX_EPSILON {
+                out.push(FlutterWarning::CentroidAft(e));
+            }
+            if !g.is_usable() {
+                out.push(FlutterWarning::Degenerate);
+            }
+            if !(fin.shear_modulus.is_finite() && fin.shear_modulus > 0.0) {
+                out.push(FlutterWarning::NoShearModulus);
             }
         }
         out

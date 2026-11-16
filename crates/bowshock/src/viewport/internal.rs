@@ -12,8 +12,9 @@ use super::assembly::{margin_suffix, no_entry, tag, tag_with};
 use super::carry::{centred_landing, Landing};
 use super::{handles, pick, Camera, Message};
 use crate::app::drag::InternalDrag;
-use crate::app::ui::mm;
+use crate::app::ui::{len, len_unit};
 use crate::theme;
+use crate::units::UnitSystem;
 
 pub struct Overlay<'a> {
     pub rocket: &'a Rocket,
@@ -25,6 +26,8 @@ pub struct Overlay<'a> {
     pub cursor: Option<Point>,
     /// The margin of the rocket as it would be if released now, calibers, for the tag; `None` with no valid target.
     pub margin: Option<f64>,
+    /// The display unit set the tag's stations are written in.
+    pub units: UnitSystem,
 }
 
 #[derive(Debug, Default)]
@@ -92,7 +95,7 @@ impl canvas::Program<Message> for Overlay<'_> {
         frame.stroke(&ghost, Stroke { line_dash: LineDash { segments: &[4.0, 3.0], offset: 0 }, ..Stroke::default().with_color(ink).with_width(1.0) });
         let parent = rocket.part(landing.parent).map_or_else(String::new, |p| p.display_name());
         if landing.fits {
-            let label = format!("{} → {parent} @ {} mm", self.drag.name, mm(fore));
+            let label = format!("{} → {parent} @ {} {}", self.drag.name, len(fore, self.units), len_unit(self.units));
             tag_with(&mut frame, cursor, 0.0, &label, margin_suffix(rocket, t, self.margin), t.ink, t.line_200, t.bg_200);
         } else {
             no_entry(&mut frame, cursor + Vector::new(14.0, 14.0), t.err);

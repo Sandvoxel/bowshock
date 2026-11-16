@@ -699,7 +699,7 @@ mod tests {
     fn build(rocket: &Rocket, compare: bool, phase: Phase) -> Scene {
         let db = MotorDb::bundled();
         let stages = rocket.stages();
-        Scene::build(&Inputs { rocket, stages: &stages, phase, motors: &db, units: UnitSystem::MmGS, compare })
+        Scene::build(&Inputs { rocket, stages: &stages, phase, motors: &db, units: UnitSystem::MM_G_S, compare })
     }
 
     #[test]
@@ -852,7 +852,7 @@ mod pod_tests {
     fn build(rocket: &Rocket) -> Scene {
         let db = MotorDb::bundled();
         let stages = rocket.stages();
-        Scene::build(&Inputs { rocket, stages: &stages, phase: Phase::Full, motors: &db, units: UnitSystem::MmGS, compare: false })
+        Scene::build(&Inputs { rocket, stages: &stages, phase: Phase::Full, motors: &db, units: UnitSystem::MM_G_S, compare: false })
     }
 
     #[test]
@@ -897,7 +897,7 @@ mod pod_tests {
         let n = rocket.ids().len();
         assert_eq!(scene.bars.iter().filter(|b| matches!(b.key, BarKey::Part(_)) && !b.shoulder).count(), n);
         // Hovering names the pod.
-        assert!(describe(fin_bar, &rocket, UnitSystem::MmGS).ends_with("in Pod ×2"));
+        assert!(describe(fin_bar, &rocket, UnitSystem::MM_G_S).ends_with("in Pod ×2"));
         // The pod's mass is on the mass shading.
         assert!(scene.mass.iter().sum::<f32>() > 0.0);
     }
@@ -962,7 +962,7 @@ mod pod_tests {
         let plain = motors.iter().find(|b| b.part() == core_mount).unwrap();
         assert_eq!((plain.name.as_str(), plain.count, plain.pod.is_none()), ("I284W", 1, true));
         // Hovering names the motor and its pod.
-        assert!(describe(bar, &rocket, UnitSystem::MmGS).ends_with("in Pod ×2"));
+        assert!(describe(bar, &rocket, UnitSystem::MM_G_S).ends_with("in Pod ×2"));
         // The pod's mount is not a stage: the core's one mount is the only one the stage lists.
         let stages = rocket.stages();
         assert_eq!(stages.len(), 1);
@@ -997,7 +997,7 @@ mod pod_tests {
 
         let build_phase = |phase| {
             let db = MotorDb::bundled();
-            Scene::build(&Inputs { rocket: &rocket, stages: &stages, phase, motors: &db, units: UnitSystem::MmGS, compare: false })
+            Scene::build(&Inputs { rocket: &rocket, stages: &stages, phase, motors: &db, units: UnitSystem::MM_G_S, compare: false })
         };
         let full = build_phase(Phase::Full);
         assert!(full.bars.iter().all(|b| !b.dropped));

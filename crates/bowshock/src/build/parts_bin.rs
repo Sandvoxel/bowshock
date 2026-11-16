@@ -31,10 +31,12 @@ pub use items::{airframe_items, axial_catalogue, internal_catalogue, mass_catalo
 use presets::PresetEntry;
 use rows::{RowState, RowView};
 
-use crate::app::ui::{label, mm, radial_size_label, size_label};
+use crate::app::ui::{label, len, len_unit, radial_size_label, size_label};
 use crate::app::{self, drag, Ctx};
+use crate::simulate::format::{num, with_unit};
 use crate::theme::{self, MONO};
 use crate::tokens::{RAIL_W, SPACE_1, SPACE_2, TEXT_BODY, TEXT_LABEL};
+use crate::units::{Quantity, UnitSystem};
 use crate::widgets::icons::{rail_button, RailIcon};
 use crate::widgets::segmented::{segmented_dense, Dense};
 
@@ -384,22 +386,25 @@ impl State {
             Item::Axial(_, kind) => {
                 let kind = sized(kind, self.sizing(ctx));
                 let size = match &kind {
-                    PartKind::NoseCone { shape: bowshock_model::NoseShape::TangentOgive, .. } => format!("Ogive · {}", size_label(&kind)),
-                    _ => size_label(&kind),
+                    PartKind::NoseCone { shape: bowshock_model::NoseShape::TangentOgive, .. } => format!("Ogive · {}", size_label(&kind, ctx.units)),
+                    _ => size_label(&kind, ctx.units),
                 };
                 (size, rows::Sil::fill(rows::axial_outline(&kind)), None)
             }
-            Item::Radial(_, kind) => (radial_size_label(kind), rows::Sil::fill(rows::radial_outline(kind)), None),
+            Item::Radial(_, kind) => (radial_size_label(kind, ctx.units), rows::Sil::fill(rows::radial_outline(kind)), None),
             Item::Internal(_, kind) => {
                 let inner = items::host_for(rocket, ctx.selection, items::zone_of(kind)).and_then(|h| items::host_inner(rocket, h));
-                (internal_size(kind, inner), rows::internal_outline(kind), None)
+                (internal_size(kind, inner, ctx.units), rows::internal_outline(kind), None)
             }
             Item::Motor(i) => {
                 let m = &ctx.physics.motors().motors[*i];
                 current = items::motor_mount(rocket, ctx.selection)
                     .and_then(|mount| rocket.active_configuration().slot(mount.id).and_then(|s| s.motor.as_ref()))
                     .is_some_and(|r| bowshock_sim::from_model::find_motor_index(ctx.physics.motors(), r) == Some(*i));
-                (format!("Ø{:.0} × {:.0} · {:.0} Ns", m.diameter * 1000.0, m.length * 1000.0, m.total_impulse()), rows::motor_outline(), None)
+                let whole = |metres: f64| num(metres, Quantity::Length, ctx.units, 0).0;
+                let (dia, length) = (whole(m.diameter), whole(m.length));
+                let impulse = with_unit(m.total_impulse(), Quantity::Impulse, ctx.units, 0);
+                (format!("Ø{dia} × {length} · {impulse}"), rows::motor_outline(), None)
             }
             Item::Preset(i) => {
                 let entry = &self.presets[*i];
@@ -477,7 +482,7 @@ impl State {
                 .spacing(6)
                 .style(theme::check)
                 .on_toggle(Message::SizeToSelection),
-            text(rocket.reference_diameter().map(|d| format!("Ø{}", mm(d))).unwrap_or_default()).font(MONO).size(TEXT_LABEL),
+            text(rocket.reference_diameter().map(|d| format!("Ø{}", len(d, ctx.units))).unwrap_or_default()).font(MONO).size(TEXT_LABEL),
         ]
         .spacing(SPACE_1)
         .align_y(iced::Center);
@@ -498,7 +503,7 @@ impl State {
             _ if searching => "No part matches".to_string(),
             Category::Motors => match items::motor_mount(rocket, ctx.selection) {
                 None => "No motor mount. Add one under Internal.".to_string(),
-                Some(m) => format!("No bundled motor fits Ø{} mm.", mm(m.inner_diameter)),
+                Some(m) => format!("No bundled motor fits Ø{} {}.", len(m.inner_diameter, ctx.units), len_unit(ctx.units)),
             },
             _ => String::new(),
         });
@@ -586,18 +591,19 @@ fn symmetry_footer<'a>(ctx: &'a Ctx) -> Element<'a, Message> {
     container(column![head, count, snap].spacing(SPACE_2)).padding(theme::PAD_PANEL).width(Fill).boxed()
 }
 
-/// The size line of an internal part, in mm. Diameters that follow the part it goes in (`inner`, its bore) are shown resolved.
-fn internal_size(kind: &InternalKind, inner: Option<f64>) -> String {
-    let dia = |v: Option<f64>| v.or(inner).map_or("Ø auto".to_string(), |d| format!("Ø{}", mm(d)));
+/// The size line of an internal part, in the unit set's units. Diameters that follow the part it goes in (`inner`, its bore) are
+/// shown resolved.
+fn internal_size(kind: &InternalKind, inner: Option<f64>, u: UnitSystem) -> String {
+    let dia = |v: Option<f64>| v.or(inner).map_or("Ø auto".to_string(), |d| format!("Ø{}", len(d, u)));
     match *kind {
-        InternalKind::InnerTube { outer_diameter, length, .. } => format!("Ø{} × {}", mm(outer_diameter), mm(length)),
-        InternalKind::CenteringRing { outer_diameter, thickness, .. } => format!("{} × {}", dia(outer_diameter), mm(thickness)),
-        InternalKind::Bulkhead { diameter, thickness } => format!("{} × {}", dia(diameter), mm(thickness)),
-        InternalKind::Coupler { outer_diameter, length, .. } => format!("{} × {}", dia(outer_diameter), mm(length)),
-        InternalKind::Parachute { diameter, line_count, .. } => format!("Ø{} · {line_count} lines", mm(diameter)),
-        InternalKind::Streamer { length, width, .. } => format!("{} × {}", mm(width), mm(length)),
-        InternalKind::ShockCord { length, .. } => format!("{} long", mm(length)),
-        InternalKind::MassComponent { mass, length, .. } => format!("{:.0} g · {}", mass * 1000.0, mm(length)),
+        InternalKind::InnerTube { outer_diameter, length, .. } => format!("Ø{} × {}", len(outer_diameter, u), len(length, u)),
+        InternalKind::CenteringRing { outer_diameter, thickness, .. } => format!("{} × {}", dia(outer_diameter), len(thickness, u)),
+        InternalKind::Bulkhead { diameter, thickness } => format!("{} × {}", dia(diameter), len(thickness, u)),
+        InternalKind::Coupler { outer_diameter, length, .. } => format!("{} × {}", dia(outer_diameter), len(length, u)),
+        InternalKind::Parachute { diameter, line_count, .. } => format!("Ø{} · {line_count} lines", len(diameter, u)),
+        InternalKind::Streamer { length, width, .. } => format!("{} × {}", len(width, u), len(length, u)),
+        InternalKind::ShockCord { length, .. } => format!("{} long", len(length, u)),
+        InternalKind::MassComponent { mass, length, .. } => format!("{} · {}", with_unit(mass, Quantity::Mass, u, 0), len(length, u)),
     }
 }
 
@@ -642,24 +648,29 @@ impl<M> canvas::Program<M> for SymmetryGlyph {
 mod tests {
     use super::*;
     use crate::app::ui::size_label;
+    use crate::units::UnitSystem;
 
     #[test]
     fn defaults_follow_the_reference_diameter() {
         let cat = axial_catalogue();
         let (nose, tube, transition) = (&cat[0].1, &cat[5].1, &cat[6].1);
-        assert_eq!(size_label(tube), "Ø76.2 × 600.0");
-        assert_eq!(size_label(transition), "Ø76.2 → Ø54.0 × 76.2");
+        assert_eq!(size_label(tube, UnitSystem::MM_G_S), "Ø76.2 × 600.0");
+        assert_eq!(size_label(transition, UnitSystem::MM_G_S), "Ø76.2 → Ø54.0 × 76.2");
         assert_eq!(sized(nose, Some(0.1)).fore_diameter().max(sized(nose, Some(0.1)).aft_diameter()), 0.1);
         // A transition keeps its ratio and its length.
         let big = sized(transition, Some(0.1524));
-        assert_eq!(size_label(&big), "Ø152.4 → Ø108.0 × 76.2");
+        assert_eq!(size_label(&big, UnitSystem::MM_G_S), "Ø152.4 → Ø108.0 × 76.2");
         assert_eq!(sized(tube, None), *tube);
     }
 
     #[test]
     fn size_lines_follow_the_kit() {
         let coupler = &structure_catalogue()[3].1;
-        assert_eq!(internal_size(coupler, None), "Ø auto × 152.4");
-        assert_eq!(internal_size(&mass_catalogue()[4].1, None), "100 g · 30.0");
+        let u = UnitSystem::MM_G_S;
+        assert_eq!(internal_size(coupler, None, u), "Ø auto × 152.4");
+        assert_eq!(internal_size(&mass_catalogue()[4].1, None, u), "100 g · 30.0");
+        // In a mixed set the lengths are inches and the mass kilograms in the same row.
+        let mixed = u.with(crate::units::Family::Length, "in").with(crate::units::Family::Mass, "kg");
+        assert_eq!(internal_size(&mass_catalogue()[4].1, None, mixed), "0.100 kg · 1.18");
     }
 }

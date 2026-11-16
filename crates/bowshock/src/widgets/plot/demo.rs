@@ -186,13 +186,13 @@ pub fn compare_ground() -> GroundTrack {
         .iter()
         .map(|(name, m, slot)| simulate(*m).track(name, SeriesColor::Series(*slot), m.landing))
         .collect();
-    GroundTrack { tracks, wind: Some(Wind { speed: 2.2, from_deg: 250.0 }), field_radius: Some(300.0) }
+    GroundTrack { tracks, wind: Some(Wind { speed: 2.2, from_deg: 250.0 }), field_radius: Some(300.0), units: Default::default() }
 }
 
 /// A single flight's ground track.
 pub fn simulate_ground() -> GroundTrack {
     let track = simulate(NOMINAL).track("Nominal", SeriesColor::Ink, NOMINAL.landing);
-    GroundTrack { tracks: vec![track], wind: Some(Wind { speed: 2.2, from_deg: 250.0 }), field_radius: Some(300.0) }
+    GroundTrack { tracks: vec![track], wind: Some(Wind { speed: 2.2, from_deg: 250.0 }), field_radius: Some(300.0), units: Default::default() }
 }
 
 /// Dispersion: 200 landings of the windy flight with their 95 % ellipse.
@@ -218,7 +218,7 @@ pub fn dispersion_ground() -> GroundTrack {
         })
         .collect();
     let track = f.track("Windy", SeriesColor::Series(2), WINDY.landing).with_scatter(scatter);
-    GroundTrack { tracks: vec![track], wind: Some(Wind { speed: 7.0, from_deg: 250.0 }), field_radius: Some(300.0) }
+    GroundTrack { tracks: vec![track], wind: Some(Wind { speed: 7.0, from_deg: 250.0 }), field_radius: Some(300.0), units: Default::default() }
 }
 
 fn bump(x: f64, centre: f64, width: f64) -> f64 {

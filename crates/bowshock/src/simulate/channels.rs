@@ -5,7 +5,7 @@
 //! measure the same kind of thing: that is [`Dim`], and [`Channel::joins`] is the rule. Channels are addressed by a stable string
 //! key (the key the document stores in `PlotLayout`), so a saved layout survives reordering this table.
 //!
-//! Values are SI in the samples; [`Channel::unit`] gives the display unit through `units.rs` (`Quantity`), metric or imperial.
+//! Values are SI in the samples; [`Channel::unit`] gives the display unit through `units.rs` (`Quantity`) for the app's unit set.
 
 use bowshock_sim::Sample;
 
@@ -49,9 +49,6 @@ pub enum Dim {
     AngularRate,
 }
 
-/// Pressures: kPa and psi (`units.rs` has no pressure quantity; flight plots are the only place one is shown).
-static PRESSURE: [Unit; 2] =
-    [Unit { symbol: "kPa", to_si: 1000.0, offset: 0.0, decimals: 2 }, Unit { symbol: "psi", to_si: 6_894.757_293_168, offset: 0.0, decimals: 2 }];
 /// Reynolds numbers reach millions: shown in units of 10⁶ so the axis labels stay short.
 static REYNOLDS: Unit = Unit { symbol: "×10⁶", to_si: 1e6, offset: 0.0, decimals: 2 };
 /// Dimensionless: no unit text.
@@ -60,25 +57,24 @@ static PLAIN: Unit = Unit { symbol: "", to_si: 1.0, offset: 0.0, decimals: 2 };
 static ANGULAR_RATE: Unit = Unit { symbol: "°/s", to_si: std::f64::consts::PI / 180.0, offset: 0.0, decimals: 1 };
 
 impl Dim {
-    /// The display unit in the metric (`imperial = false`) or imperial family: lengths in m or ft, never mm (except stations,
-    /// which read in mm or in like the rest of the app).
-    pub fn unit(self, imperial: bool) -> Unit {
-        let plot = if imperial { UnitSystem::FtLbS } else { UnitSystem::MKgS };
+    /// The display unit in `units`: the pick of the dimension's family (distances in the altitude family, stations in the
+    /// length family), so a plot axis and a readout of the same quantity always agree.
+    pub fn unit(self, units: UnitSystem) -> Unit {
         match self {
-            Dim::Length => *Quantity::Altitude.unit_for(plot),
-            Dim::Station => *Quantity::Length.unit_for(if imperial { UnitSystem::InOzS } else { UnitSystem::MmGS }),
-            Dim::Velocity => *Quantity::Velocity.unit_for(plot),
-            Dim::Acceleration => Quantity::Acceleration.units()[0],
-            Dim::Angle => *Quantity::Angle.unit_for(plot),
+            Dim::Length => *Quantity::Altitude.unit_for(units),
+            Dim::Station => *Quantity::Length.unit_for(units),
+            Dim::Velocity => *Quantity::Velocity.unit_for(units),
+            Dim::Acceleration => *Quantity::Acceleration.unit_for(units),
+            Dim::Angle => *Quantity::Angle.unit_for(units),
             Dim::Mach | Dim::DragCoefficient => PLAIN,
-            Dim::Pressure => PRESSURE[usize::from(imperial)],
-            Dim::Density => *Quantity::Density.unit_for(plot),
-            Dim::Temperature => *Quantity::Temperature.unit_for(plot),
-            Dim::Force => *Quantity::Force.unit_for(plot),
-            Dim::Mass => *Quantity::Mass.unit_for(plot),
-            Dim::Area => *Quantity::Area.unit_for(plot),
+            Dim::Pressure => *Quantity::Pressure.unit_for(units),
+            Dim::Density => *Quantity::Density.unit_for(units),
+            Dim::Temperature => *Quantity::Temperature.unit_for(units),
+            Dim::Force => *Quantity::Force.unit_for(units),
+            Dim::Mass => *Quantity::Mass.unit_for(units),
+            Dim::Area => *Quantity::Area.unit_for(units),
             Dim::Reynolds => REYNOLDS,
-            Dim::Calibers => *Quantity::Calibers.unit_for(plot),
+            Dim::Calibers => *Quantity::Calibers.unit_for(units),
             Dim::AngularRate => ANGULAR_RATE,
         }
     }
@@ -206,9 +202,9 @@ impl Channel {
         (self.get)(sample)
     }
 
-    /// The display unit in the metric or imperial family.
-    pub fn unit(&self, imperial: bool) -> Unit {
-        self.dim.unit(imperial)
+    /// The display unit in `units`.
+    pub fn unit(&self, units: UnitSystem) -> Unit {
+        self.dim.unit(units)
     }
 
     /// `(time, value in unit)` for every sample.
@@ -222,11 +218,11 @@ impl Channel {
     }
 
     /// Why this source cannot join a plot measuring `plot`, or `None` when it can.
-    pub fn refusal(&self, plot: Dim, imperial: bool) -> Option<String> {
+    pub fn refusal(&self, plot: Dim, units: UnitSystem) -> Option<String> {
         if self.joins(plot) {
             return None;
         }
-        let unit = plot.unit(imperial).symbol;
+        let unit = plot.unit(units).symbol;
         let shown = if unit.is_empty() { plot.noun().to_string() } else { format!("{} ({unit})", plot.noun()) };
         Some(format!("{} is a {}, but this plot shows {shown}. There is one y-axis per plot.", self.label, self.dim.noun()))
     }
@@ -399,51 +395,54 @@ mod tests {
     #[test]
     fn values_are_extracted_and_converted_to_the_display_unit() {
         let s = sample();
-        let value = |key: &str, imperial: bool| {
+        let value = |key: &str, set: UnitSystem| {
             let c = find(key).unwrap();
-            c.unit(imperial).from_si(c.si(&s))
+            c.unit(set).from_si(c.si(&s))
         };
+        let (metric, si, inch, foot) = (UnitSystem::MM_G_S, UnitSystem::M_KG_S, UnitSystem::IN_OZ_S, UnitSystem::FT_LB_S);
         // Altitude: m, then ft.
-        assert!((value("altitude", false) - 500.0).abs() < 1e-12);
-        assert!((value("altitude", true) - 500.0 / 0.3048).abs() < 1e-9);
-        assert!((value("altitude_msl", false) - 620.0).abs() < 1e-12);
-        assert_eq!((value("position_east", false), value("position_north", false)), (30.0, 40.0));
-        // Acceleration is in g in both families: -g reads -1, twice g reads 2.
-        assert!((value("vertical_acceleration", false) + 1.0).abs() < 1e-12 && (value("vertical_acceleration", true) + 1.0).abs() < 1e-12);
-        assert!((value("total_acceleration", false) - 2.0).abs() < 1e-12);
+        assert!((value("altitude", metric) - 500.0).abs() < 1e-12);
+        assert!((value("altitude", foot) - 500.0 / 0.3048).abs() < 1e-9);
+        assert!((value("altitude_msl", metric) - 620.0).abs() < 1e-12);
+        assert_eq!((value("position_east", metric), value("position_north", metric)), (30.0, 40.0));
+        // Acceleration is in g in these sets: -g reads -1, twice g reads 2; SI sets read m/s².
+        assert!((value("vertical_acceleration", metric) + 1.0).abs() < 1e-12 && (value("vertical_acceleration", inch) + 1.0).abs() < 1e-12);
+        assert!((value("total_acceleration", metric) - 2.0).abs() < 1e-12);
+        assert!((value("total_acceleration", si) - 2.0 * 9.80665).abs() < 1e-9);
         // Stations: mm, then inches.
-        assert!((value("cg_station", false) - 712.4).abs() < 1e-9);
-        assert!((value("cp_station", true) - 0.8587 / 0.0254).abs() < 1e-9);
+        assert!((value("cg_station", metric) - 712.4).abs() < 1e-9);
+        assert!((value("cp_station", inch) - 0.8587 / 0.0254).abs() < 1e-9);
         // Pressure: kPa, then psi. 101 325 Pa is 101.325 kPa and 14.696 psi.
-        assert!((value("air_pressure", false) - 101.325).abs() < 1e-9);
-        assert!((value("air_pressure", true) - 14.6959).abs() < 1e-3);
-        assert!((value("dynamic_pressure", false) - 2.0).abs() < 1e-12);
+        assert!((value("air_pressure", metric) - 101.325).abs() < 1e-9);
+        assert!((value("air_pressure", inch) - 14.6959).abs() < 1e-3);
+        assert!((value("dynamic_pressure", metric) - 2.0).abs() < 1e-12);
         // Temperature: °C, then °F (288.15 K is 15 °C = 59 °F).
-        assert!((value("air_temperature", false) - 15.0).abs() < 1e-9 && (value("air_temperature", true) - 59.0).abs() < 1e-9);
+        assert!((value("air_temperature", metric) - 15.0).abs() < 1e-9 && (value("air_temperature", inch) - 59.0).abs() < 1e-9);
         // Speed: m/s, then ft/s. Force: N, then lbf. Mass: kg, then lb.
-        assert!((value("total_velocity", true) - 25.0 / 0.3048).abs() < 1e-9);
-        assert!((value("thrust", true) - 100.0 / 4.448_221_615_260_5).abs() < 1e-9);
-        assert!((value("mass", true) - 1.2 / 0.453_592_37).abs() < 1e-9);
+        assert!((value("total_velocity", inch) - 25.0 / 0.3048).abs() < 1e-9);
+        assert!((value("thrust", inch) - 100.0 / 4.448_221_615_260_5).abs() < 1e-9);
+        assert!((value("mass", si) - 1.2).abs() < 1e-9);
+        assert!((value("mass", foot) - 1.2 / 0.453_592_37).abs() < 1e-9);
         // Reynolds in millions; Cd·A in m², then in².
-        assert!((value("reynolds", false) - 2.5).abs() < 1e-12);
-        assert!((value("recovery_cd_area", false) - 0.9).abs() < 1e-12);
-        assert!((value("recovery_cd_area", true) - 0.9 / (0.0254 * 0.0254)).abs() < 1e-6);
+        assert!((value("reynolds", metric) - 2.5).abs() < 1e-12);
+        assert!((value("recovery_cd_area", si) - 0.9).abs() < 1e-12);
+        assert!((value("recovery_cd_area", inch) - 0.9 / (0.0254 * 0.0254)).abs() < 1e-6);
         // Attitude angle in degrees; rotation rates in degrees per second (0.5 rad/s is 28.65 deg/s, roll the other way).
-        assert!((value("attitude_angle", false) - 60.0).abs() < 1e-9);
-        assert!((value("pitch_rate", false) - 0.5f64.to_degrees()).abs() < 1e-9 && (value("roll_rate", true) + 2.0f64.to_degrees()).abs() < 1e-9);
-        assert_eq!(find("pitch_rate").unwrap().unit(false).symbol, "°/s");
+        assert!((value("attitude_angle", metric) - 60.0).abs() < 1e-9);
+        assert!((value("pitch_rate", metric) - 0.5f64.to_degrees()).abs() < 1e-9 && (value("roll_rate", inch) + 2.0f64.to_degrees()).abs() < 1e-9);
+        assert_eq!(find("pitch_rate").unwrap().unit(metric).symbol, "°/s");
         // The unit text matches.
-        assert_eq!(find("altitude").unwrap().unit(false).symbol, "m");
-        assert_eq!(find("altitude").unwrap().unit(true).symbol, "ft");
-        assert_eq!(find("air_pressure").unwrap().unit(true).symbol, "psi");
-        assert_eq!(find("mach").unwrap().unit(false).symbol, "");
+        assert_eq!(find("altitude").unwrap().unit(metric).symbol, "m");
+        assert_eq!(find("altitude").unwrap().unit(inch).symbol, "ft");
+        assert_eq!(find("air_pressure").unwrap().unit(inch).symbol, "psi");
+        assert_eq!(find("mach").unwrap().unit(metric).symbol, "");
     }
 
     #[test]
     fn a_series_has_one_point_per_sample_in_time_order() {
         let samples = [Sample { t: 0.0, altitude: 0.0, ..Sample::default() }, sample()];
         let c = find("altitude").unwrap();
-        assert_eq!(c.series(&samples, &c.unit(false)), [(0.0, 0.0), (3.0, 500.0)]);
+        assert_eq!(c.series(&samples, &c.unit(UnitSystem::MM_G_S)), [(0.0, 0.0), (3.0, 500.0)]);
     }
 
     #[test]
@@ -473,12 +472,25 @@ mod tests {
     #[test]
     fn a_refusal_names_both_quantities() {
         let thrust = find("thrust").unwrap();
-        assert!(thrust.refusal(Dim::Force, false).is_none());
-        let why = find("vertical_velocity").unwrap().refusal(Dim::Force, false).unwrap();
+        let si = UnitSystem::MM_G_S;
+        assert!(thrust.refusal(Dim::Force, si).is_none());
+        let why = find("vertical_velocity").unwrap().refusal(Dim::Force, si).unwrap();
         assert!(why.contains("Vertical velocity") && why.contains("speed") && why.contains("force (N)") && why.contains("one y-axis"), "{why}");
-        let why = find("altitude").unwrap().refusal(Dim::Mach, false).unwrap();
+        let why = find("altitude").unwrap().refusal(Dim::Mach, si).unwrap();
         assert!(why.contains("Mach"), "{why}");
-        assert!(find("altitude").unwrap().refusal(Dim::Velocity, true).unwrap().contains("ft/s"));
+        assert!(find("altitude").unwrap().refusal(Dim::Velocity, UnitSystem::IN_OZ_S).unwrap().contains("ft/s"));
+    }
+
+    #[test]
+    fn every_dimension_follows_its_family_in_a_mixed_set() {
+        use crate::units::Family;
+        let set = UnitSystem::MM_G_S.with(Family::Length, "in").with(Family::Mass, "kg").with(Family::Distance, "ft").with(Family::Pressure, "psi");
+        assert_eq!(Dim::Station.unit(set).symbol, "in");
+        assert_eq!(Dim::Mass.unit(set).symbol, "kg");
+        assert_eq!(Dim::Length.unit(set).symbol, "ft");
+        assert_eq!(Dim::Pressure.unit(set).symbol, "psi");
+        assert_eq!(Dim::Velocity.unit(set).symbol, "m/s");
+        assert_eq!(Dim::Force.unit(set).symbol, "N");
     }
 
     #[test]

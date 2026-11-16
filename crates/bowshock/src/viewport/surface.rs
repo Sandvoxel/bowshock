@@ -20,8 +20,9 @@ use super::pick::{self, SurfaceTarget};
 use super::pods::PodView;
 use super::radial;
 use super::{Camera, Message};
-use crate::app::ui::mm;
+use crate::app::ui::{len, len_unit};
 use crate::theme;
+use crate::units::UnitSystem;
 
 /// Diameter of the ring marking the target.
 const RING: f32 = 7.0;
@@ -60,6 +61,8 @@ pub struct Overlay<'a> {
     pub cursor: Option<Point>,
     /// The margin of the rocket as it would be if released now, calibers, for the tag; `None` with no valid target.
     pub margin: Option<f64>,
+    /// The display unit set the tag's stations are written in.
+    pub units: UnitSystem,
 }
 
 #[derive(Debug, Default)]
@@ -194,10 +197,11 @@ impl canvas::Program<Message> for Overlay<'_> {
                 frame.stroke(&Path::line(cursor, at), dashed);
                 let times = if self.drag.count > 1 { format!(" ×{}", self.drag.count) } else { String::new() };
                 let label = format!(
-                    "{}{times} → {} @ {} mm, {:.0}°",
+                    "{}{times} → {} @ {} {}, {:.0}°",
                     self.drag.kind.name(),
                     self.parent_name(target.parent),
-                    mm(station + target.offset),
+                    len(station + target.offset, self.units),
+                    len_unit(self.units),
                     target.angle.to_degrees().round() % 360.0
                 );
                 tag_with(&mut frame, cursor, 0.0, &label, margin_suffix(self.rocket, t, self.margin), t.ink, t.line_200, t.bg_200);
@@ -280,7 +284,7 @@ mod tests {
     }
 
     fn overlay<'a>(r: &'a Rocket, drag: &'a RadialDrag) -> Overlay<'a> {
-        Overlay { rocket: r, drag, camera: camera(), snap: 0, snap_step: 0.001, cursor: None, margin: None }
+        Overlay { rocket: r, drag, camera: camera(), snap: 0, snap_step: 0.001, cursor: None, margin: None, units: UnitSystem::default() }
     }
 
     fn at(z: f32, y: f32) -> Point {

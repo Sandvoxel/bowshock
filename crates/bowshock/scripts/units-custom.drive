@@ -1,0 +1,28 @@
+# Mixed units: the top bar's unit select ends in Custom…, which opens a panel with one selector per quantity family.
+# The set is a user setting (not in the rocket file); point BOWSHOCK_SETTINGS_FILE at a scratch file so the run is hermetic:
+#   rm -f /tmp/bowshock-settings.json; BOWSHOCK_SETTINGS_FILE=/tmp/bowshock-settings.json \
+#     cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/units-custom.drive out/units
+# Seeding that file with {"units":{"length":"in","mass":"kg"}} starts the app in `in · kg · s`.
+viewport 1280x800
+scale 1
+
+# The select, open: the named sets and Custom….
+click (1008, 18)
+screenshot units-select.png
+click "Custom…"
+screenshot units-panel-open.png
+
+# Lengths to inches and masses to kilograms: the select now names the mix.
+click "in"
+click "kg"
+screenshot units-panel-in-kg.png
+press escape
+
+# Build: the Inspector's lengths are inches and its mass kilograms.
+click (580, 600)
+screenshot units-build.png
+
+# Simulate in the same set.
+click (663, 18)
+click "Run"
+screenshot units-simulate.png

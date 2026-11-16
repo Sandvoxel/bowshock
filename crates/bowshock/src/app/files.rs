@@ -301,7 +301,9 @@ pub(super) fn menu(ctx: &Ctx) -> Option<iced::Element<'_, Message>> {
         col = col.push(row_view(r));
     }
     let panel = container(mouse_area(col).on_press(Message::Chrome(crate::chrome::Message::Nothing))).width(MENU_W).style(theme::overlay);
-    let scrim = mouse_area(Space::new().width(Fill).height(Fill)).on_press(Message::ToggleFileMenu);
+    // `Idle` (not the default `None`) makes the stack hide the cursor from the page beneath, so hovering the parts bin or the
+    // viewport while the menu is open does not reach their hover handlers (which would close the menu).
+    let scrim = mouse_area(Space::new().width(Fill).height(Fill)).interaction(iced::mouse::Interaction::Idle).on_press(Message::ToggleFileMenu);
     let placed = container(panel).width(Fill).height(Fill).padding(Padding { top: TOPBAR_H, left: MENU_X, ..Padding::ZERO });
     Some(Stack::with_children([scrim.boxed(), placed.boxed()]).boxed())
 }

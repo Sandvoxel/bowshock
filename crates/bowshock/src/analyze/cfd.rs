@@ -30,6 +30,9 @@ use bowshock_core as solver;
 use bowshock_model::{CfdPoint, CfdQuality, CfdTable, PartKind, RadialKind, Rocket};
 use bowshock_sim::{vs_mach, AlphaPoint, Atmosphere, BodyKind, DragBreakdown, FinCrossSection, FinPlanform, FinSet, MachPoint, NoseShape, Vehicle};
 
+use crate::simulate::format::with_unit;
+use crate::units::{Quantity, UnitSystem};
+
 /// Bump when what a stored table means changes (solver, grid level, how the parts are mapped): old tables then read as stale.
 const SOLVER_REV: u64 = 1;
 /// The grid level the table is solved on: `Coarse` (grid level 0), the setting for exploring. On an Apple M1 Max a coarse
@@ -128,13 +131,9 @@ fn fin_spec(set: &FinSet) -> Result<solver::FinSpec, String> {
     Ok(spec)
 }
 
-fn mm(m: f64) -> String {
-    format!("{:.0} mm", m * 1e3)
-}
-
 /// Maps the vehicle of one flying stack of `rocket` (the document supplies the nose family the vehicle rounds to its five) to
-/// what the solver takes. The error says why the geometry cannot be solved at all.
-pub fn plan(rocket: &Rocket, vehicle: &Vehicle) -> Result<Plan, String> {
+/// what the solver takes. The error says why the geometry cannot be solved at all, with lengths in `units`.
+pub fn plan(rocket: &Rocket, vehicle: &Vehicle, units: UnitSystem) -> Result<Plan, String> {
     let segments = &vehicle.body;
     let mut notes: Vec<String> = Vec::new();
     // Pods are bodies of their own put ahead of the core's, each closed by a zero-size tube; a stack the solver can take is one
@@ -169,11 +168,12 @@ pub fn plan(rocket: &Rocket, vehicle: &Vehicle) -> Result<Plan, String> {
     let mut radius = first.aft_radius;
     for s in &segments[1..] {
         if (s.fore_radius - radius).abs() > 5e-4 {
+            let length = |m: f64| with_unit(m, Quantity::Length, units, 0);
             return Err(format!(
                 "there is a step in diameter, {} to {}, at {} from the tip; the solver's body is continuous",
-                mm(2.0 * radius),
-                mm(2.0 * s.fore_radius),
-                mm(s.station)
+                length(2.0 * radius),
+                length(2.0 * s.fore_radius),
+                length(s.station)
             ));
         }
         match s.kind {
@@ -618,7 +618,7 @@ mod tests {
     #[test]
     fn the_example_rocket_maps_to_a_body_and_four_fins() {
         let (rocket, vehicle) = example();
-        let plan = plan(&rocket, &vehicle).expect("the example is an axisymmetric stack");
+        let plan = plan(&rocket, &vehicle, UnitSystem::default()).expect("the example is an axisymmetric stack");
         let d = vehicle.reference_diameter;
         assert!((plan.body.reference_diameter() - d).abs() < 1e-9, "reference diameter {d}");
         let len = plan.body.nose.length
@@ -641,13 +641,13 @@ mod tests {
     fn what_is_not_solved_is_said() {
         let (rocket, mut vehicle) = example();
         vehicle.protuberances.push(bowshock_sim::Protuberance::RailButton { station: 0.5, height: 0.01, diameter: 0.01 });
-        let mapped = plan(&rocket, &vehicle).unwrap();
+        let mapped = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
         assert!(mapped.notes.iter().any(|n| n.contains("rail buttons")), "{:?}", mapped.notes);
         // A second fin set is left to the build-up and said so.
         let (rocket, mut vehicle) = example();
         let again = vehicle.fin_sets[0].clone();
         vehicle.fin_sets.push(again);
-        let mapped = plan(&rocket, &vehicle).unwrap();
+        let mapped = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
         assert!(mapped.notes.iter().any(|n| n.contains("fin set")), "{:?}", mapped.notes);
         assert_eq!(mapped.rest.fin_sets.len(), 1);
     }
@@ -657,17 +657,17 @@ mod tests {
         let (rocket, mut vehicle) = example();
         // A step in diameter.
         vehicle.body[1].fore_radius += 0.01;
-        let why = plan(&rocket, &vehicle).unwrap_err();
+        let why = plan(&rocket, &vehicle, UnitSystem::default()).unwrap_err();
         assert!(why.contains("step in diameter"), "{why}");
         // A pod: a zero-size separator ahead of the core.
         let (rocket, mut vehicle) = example();
         vehicle.body.insert(0, separator());
-        let why = plan(&rocket, &vehicle).unwrap_err();
+        let why = plan(&rocket, &vehicle, UnitSystem::default()).unwrap_err();
         assert!(why.contains("pods"), "{why}");
         // No nose.
         let (rocket, mut vehicle) = example();
         vehicle.body[0].kind = BodyKind::Tube;
-        assert!(plan(&rocket, &vehicle).unwrap_err().contains("nose"));
+        assert!(plan(&rocket, &vehicle, UnitSystem::default()).unwrap_err().contains("nose"));
         // Tube fins (open pod tubes) are bodies beside the axis too.
         let (rocket, mut vehicle) = example();
         vehicle.tube_fins.push(bowshock_sim::TubeFinSet {
@@ -680,7 +680,7 @@ mod tests {
             gap: 0.0,
             roughness: 0.0,
         });
-        assert!(plan(&rocket, &vehicle).unwrap_err().contains("tube fins"));
+        assert!(plan(&rocket, &vehicle, UnitSystem::default()).unwrap_err().contains("tube fins"));
     }
 
     fn separator() -> bowshock_sim::BodySegment {
@@ -690,8 +690,8 @@ mod tests {
     #[test]
     fn keys_are_stable_and_follow_geometry_and_conditions() {
         let (rocket, vehicle) = example();
-        let a = plan(&rocket, &vehicle).unwrap();
-        let b = plan(&rocket, &vehicle).unwrap();
+        let a = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+        let b = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
         assert_eq!(a.geometry, b.geometry);
         // The hash must not change from run to run, platform to platform or toolchain to toolchain, or every stored table would
         // read as stale: FNV-1a is pinned by its published test vector ("a" hashes to 0xaf63dc4c8601ec8c).
@@ -705,9 +705,9 @@ mod tests {
         // A recomputed length that differs in the last bits is the same geometry; a millimetre is not.
         let mut v = vehicle.clone();
         v.body[1].length += 1e-12;
-        assert_eq!(plan(&rocket, &v).unwrap().geometry, a.geometry);
+        assert_eq!(plan(&rocket, &v, UnitSystem::default()).unwrap().geometry, a.geometry);
         v.body[1].length += 1e-3;
-        assert_ne!(plan(&rocket, &v).unwrap().geometry, a.geometry);
+        assert_ne!(plan(&rocket, &v, UnitSystem::default()).unwrap().geometry, a.geometry);
     }
 
     #[test]
@@ -792,7 +792,7 @@ mod tests {
     #[ignore = "solves on the GPU: about a minute"]
     fn a_tiny_grid_solves_and_is_sane() {
         let (rocket, vehicle) = example();
-        let plan = plan(&rocket, &vehicle).unwrap();
+        let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
         let job = Job { plan, altitude: 120.0, nodes: vec![0.6, 2.0], stage: 1 };
         let mut events = 0;
         let cancel = AtomicBool::new(false);
@@ -814,7 +814,7 @@ mod tests {
     #[ignore = "solves ten Mach numbers on the GPU: minutes"]
     fn the_example_table_solves_and_agrees_with_extended() {
         let (mut rocket, vehicle) = example();
-        let plan = plan(&rocket, &vehicle).unwrap();
+        let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
         let nodes = nodes((0.1, 3.0)).unwrap();
         let job = Job { plan, altitude: 120.0, nodes, stage: 1 };
         let t0 = Instant::now();
@@ -839,7 +839,7 @@ mod tests {
     #[test]
     fn a_stored_table_is_fresh_until_the_geometry_or_the_conditions_change() {
         let (rocket, vehicle) = example();
-        let mapped = plan(&rocket, &vehicle);
+        let mapped = plan(&rocket, &vehicle, UnitSystem::default());
         let full = (0.1, 3.0);
         let mut t = table();
         t.geometry = mapped.as_ref().unwrap().geometry;
@@ -853,7 +853,7 @@ mod tests {
         // A longer tube pushes everything behind it aft, so the stack stays contiguous.
         longer.body[1].length += 0.01;
         longer.body[2..].iter_mut().for_each(|s| s.station += 0.01);
-        assert_eq!(status(&plan(&rocket, &longer), Some(&t), 120.0, full), Status::Stale);
+        assert_eq!(status(&plan(&rocket, &longer, UnitSystem::default()), Some(&t), 120.0, full), Status::Stale);
         // Not solvable at all, and a Mach range the solver does not cover.
         assert!(matches!(status(&Err("pods".to_string()), Some(&t), 120.0, full), Status::Unsupported(_)));
         assert!(matches!(status(&mapped, None, 120.0, (4.0, 6.0)), Status::Unsupported(_)));
@@ -862,7 +862,7 @@ mod tests {
     #[test]
     fn a_cancel_stops_before_the_next_point() {
         let (rocket, vehicle) = example();
-        let job = Job { plan: plan(&rocket, &vehicle).unwrap(), altitude: 120.0, nodes: vec![0.6, 2.0], stage: 1 };
+        let job = Job { plan: plan(&rocket, &vehicle, UnitSystem::default()).unwrap(), altitude: 120.0, nodes: vec![0.6, 2.0], stage: 1 };
         let cancel = AtomicBool::new(true);
         assert_eq!(solve(&job, &cancel, |_| ()).unwrap_err(), CANCELLED);
     }

@@ -153,9 +153,10 @@ where
 }
 
 /// The snap step as a flat cell of the strip: the choice and its caret, no frame of its own, hot (`bg-400`) under the cursor.
-pub fn flat_select<'a, T, M>(options: &'a [T], selected: T, on_select: impl Fn(T) -> M + 'a) -> Element<'a, M>
+pub fn flat_select<'a, T, L, M>(options: L, selected: T, on_select: impl Fn(T) -> M + 'a) -> Element<'a, M>
 where
     T: ToString + PartialEq + Clone + 'a,
+    L: std::borrow::Borrow<[T]> + 'a,
     M: Clone + 'a,
 {
     pick_list(Some(selected), options, |item: &T| item.to_string())

@@ -448,3 +448,24 @@ fn a_fillet_stays_closed_until_it_is_opened_and_follows_the_user_after() {
     fx.send(Message::FilletOpen(true));
     assert_eq!(fx.state.fillet_open, Some((fin, true)));
 }
+
+#[test]
+fn a_fin_tab_is_toggled_reached_to_the_motor_mount_and_edited_with_undo() {
+    let mut fx = Fx::new();
+    let fin = fx.fins();
+    fx.select(fin);
+    assert!(fx.rocket().radial(fin).unwrap().tab.is_none());
+    let target = fx.rocket().fin_tab_target(fin).expect("the example's fins stand over its motor mount");
+    fx.send(Message::TabOn(true));
+    let tab = fx.rocket().radial(fin).unwrap().tab.expect("the toggle adds a tab");
+    assert_eq!(tab, target.tab);
+    // Typing a height (a field) changes only the height; the button brings it back to the mount.
+    fx.send(Message::Edit(Field::TabHeight, 0.004, false));
+    assert_eq!(fx.rocket().radial(fin).unwrap().tab.map(|t| (t.height, t.length, t.position)), Some((0.004, tab.length, tab.position)));
+    fx.send(Message::TabToMotor);
+    assert_eq!(fx.rocket().radial(fin).unwrap().tab, Some(tab));
+    fx.undo();
+    assert_eq!(fx.rocket().radial(fin).unwrap().tab.map(|t| t.height), Some(0.004));
+    fx.send(Message::TabOn(false));
+    assert!(fx.rocket().radial(fin).unwrap().tab.is_none());
+}
