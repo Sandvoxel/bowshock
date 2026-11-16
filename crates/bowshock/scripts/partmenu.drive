@@ -1,0 +1,21 @@
+# Right-click a part: a context menu opens at the cursor (viewport, then Station Lanes), and the Inspector title renames on one click.
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/partmenu.drive /tmp/partmenu
+viewport 1280x800
+scale 1
+move (640, 300)
+screenshot base.png
+move (560, 318)
+click right (560, 318)
+screenshot viewport-menu.png
+click (1000, 100)
+screenshot closed.png
+move (930, 624)
+click right (930, 624)
+screenshot lanes-fins-menu.png
+click "Rename"
+screenshot lanes-rename.png
+type "Fin can"
+type enter
+move (540, 596)
+click right (540, 596)
+screenshot lanes-tube-menu.png

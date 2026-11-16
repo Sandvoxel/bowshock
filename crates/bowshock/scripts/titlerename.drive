@@ -1,0 +1,13 @@
+# One click on the Inspector title (or its pencil) starts the inline rename with the name selected; (F2 and the menu do the same).
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/titlerename.drive /tmp/titlerename
+viewport 1280x800
+scale 1
+click (540, 596)
+click (1050, 62)
+screenshot click-title.png
+type enter
+click (1103, 62)
+screenshot click-pencil.png
+type "Pipe"
+type enter
+screenshot renamed.png

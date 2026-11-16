@@ -362,7 +362,7 @@ impl RawFile {
             common_name: String::new(),
             diameter: meta.diameter,
             length: meta.length,
-            delays: meta.delays.split([',', '-']).filter_map(|d| d.trim().parse::<f64>().ok()).filter(|d| d.is_finite() && *d >= 0.0).collect(),
+            delays: listed_delays(&meta.delays),
             propellant_mass: meta.propellant_mass,
             total_mass: meta.total_mass,
             points,
@@ -372,6 +372,11 @@ impl RawFile {
     }
 }
 
+/// The delays of a listing such as `4,6,8,10` or `2-4-8-P`, s (`P` for plugged is not a delay).
+fn listed_delays(listing: &str) -> Vec<f64> {
+    listing.split([',', '-']).filter_map(|d| d.trim().parse::<f64>().ok()).filter(|d| d.is_finite() && *d >= 0.0).collect()
+}
+
 /// The motor for `meta` from its best usable data file among `files` (see [`RawFile::rank`]): the file's curve, masses and
 /// dimensions, the listing's designation and manufacturer, the id `tc:<motorId>` and the listing as [`ThrustCurveInfo`].
 fn motor_from(meta: &RemoteMotor, files: &[&RawFile]) -> Option<Motor> {
@@ -379,6 +384,10 @@ fn motor_from(meta: &RemoteMotor, files: &[&RawFile]) -> Option<Motor> {
     files.sort_by_key(|f| f.rank());
     files.into_iter().find_map(|file| {
         let mut motor = file.rasp_motor().or_else(|| file.sampled_motor(meta))?;
+        // The listing has every delay the motor ships with; a data file's header carries only the one it was tested with.
+        if !meta.delays.trim().is_empty() {
+            motor.delays = listed_delays(&meta.delays);
+        }
         if !meta.designation.is_empty() {
             motor.designation = meta.designation.clone();
         }

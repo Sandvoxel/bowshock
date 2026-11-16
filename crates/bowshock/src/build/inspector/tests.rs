@@ -228,6 +228,43 @@ fn recovery_and_motor_controls_edit_the_active_configuration_and_the_part() {
 }
 
 #[test]
+fn the_delay_tip_is_the_flights_burnout_to_apogee_and_use_sets_the_nearest_listed_delay() {
+    let mut fx = Fx::new();
+    let mount = fx.internal(|p| p.kind.is_motor_mount());
+    fx.select(mount);
+    let motors = fx.app.ctx().physics.motors();
+    let flight = super::health::fly(fx.rocket(), motors).expect("the example flies");
+    // The Simulate screen's number: the summary of the same default flight.
+    let input = bowshock_sim::from_model::sim_input(fx.rocket(), motors, bowshock_sim::from_model::Phase::Full, bowshock_sim::Launch::default()).unwrap();
+    let sim = bowshock_sim::simulate(&input).summary;
+    assert_eq!(flight.optimum_delay, Some(sim.optimum_delay));
+    assert!(sim.optimum_delay > 1.0, "{}", sim.optimum_delay);
+    let designation = fx.rocket().active_configuration().slot(mount).unwrap().motor.as_ref().unwrap().designation.clone();
+    let delays = motors.find(&designation).unwrap().delays.clone();
+    assert!(!delays.is_empty());
+    let nearest = delays.iter().copied().min_by(|a, b| (a - sim.optimum_delay).abs().total_cmp(&(b - sim.optimum_delay).abs())).unwrap();
+    let tip = super::health::delay_tip(sim.optimum_delay, 0.0, Some(&delays));
+    assert_eq!(tip.nearest, Some(nearest));
+    fx.send(Message::Edit(Field::EjectionDelay, 0.0, false));
+    fx.send(Message::UseDelay(nearest));
+    let slot_delay = |fx: &Fx| fx.rocket().active_configuration().slot(mount).unwrap().delay;
+    assert_eq!(slot_delay(&fx), nearest);
+    assert_eq!(fx.app.ctx().doc.undo_label(), Some("Set ejection delay"));
+    fx.undo();
+    assert_ne!(slot_delay(&fx), nearest, "one undo step");
+}
+
+#[test]
+fn the_example_h128w_carries_thrustcurves_delays_and_the_tip_offers_8_s() {
+    let fx = Fx::new();
+    let motors = fx.app.ctx().physics.motors();
+    let delays = &motors.find("H128W").unwrap().delays;
+    assert!(delays.contains(&8.0), "{delays:?}");
+    let optimum = super::health::fly(fx.rocket(), motors).unwrap().optimum_delay.unwrap();
+    assert_eq!(super::health::delay_tip(optimum, 14.0, Some(delays)).nearest, Some(8.0), "optimum {optimum}");
+}
+
+#[test]
 fn a_selected_separation_edits_the_configuration_timing() {
     let mut fx = Fx::new();
     fx.app.ctx_mut().doc.replace(separation::tests::two_stage(), None);

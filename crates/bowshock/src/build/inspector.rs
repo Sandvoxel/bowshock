@@ -122,6 +122,8 @@ pub enum Message {
     MotorMount(bool),
     /// Plug the motor of this mount (no ejection charge) in the active configuration.
     Plug(bool),
+    /// Set the ejection delay (s) of this mount's motor in the active configuration: the tip's one-click nearest delay.
+    UseDelay(f64),
     /// The active configuration's ballast mass (kg); zero removes it (Rocket inspector, Configuration section).
     BallastMass(f64),
     /// The station of the active configuration's ballast, from the nose tip (m).
@@ -491,6 +493,10 @@ impl State {
             Message::MotorMount(mount) => {
                 ctx.doc.edit("Set motor mount", |r| edit::set_motor_mount(r, id, mount));
             }
+            Message::UseDelay(delay) => {
+                let config = ctx.doc.rocket().active_config_id();
+                ctx.doc.edit("Set ejection delay", |r| r.set_motor_delay(config, id, delay.max(0.0)).is_ok());
+            }
             Message::Plug(plugged) => {
                 ctx.doc.edit("Set ejection charge", |r| edit::set_plugged(r, id, plugged));
             }
@@ -698,6 +704,7 @@ impl State {
         let rocket = ctx.doc.rocket();
         let flight = match rocket.kind_of(id) {
             Some(PartRef::Radial(r)) if r.kind.is_fin() => self.flight_for(ctx),
+            Some(PartRef::Internal(p)) if p.kind.is_motor_mount() => self.flight_for(ctx),
             Some(PartRef::Internal(p)) if matches!(p.kind, bowshock_model::InternalKind::Parachute { .. } | bowshock_model::InternalKind::Streamer { .. }) => {
                 self.flight_for(ctx)
             }

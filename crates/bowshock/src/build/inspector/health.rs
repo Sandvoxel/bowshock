@@ -45,6 +45,9 @@ pub struct Flight {
     pub flutter: Option<FlutterAnalysis>,
     /// `(device name, descent rate m/s)`.
     pub descent_rates: Vec<(String, f64)>,
+    /// Time from the last stage's burnout to apogee, s: the ejection delay that fires at the top (what Simulate calls the
+    /// optimum delay). `None` when the flight never reaches an apogee.
+    pub optimum_delay: Option<f64>,
 }
 
 /// Flies `rocket` with its active configuration (whole stack, default launch). `None` if it cannot fly (no parts, no motor).
@@ -52,7 +55,40 @@ pub fn fly(rocket: &Rocket, motors: &MotorDb) -> Option<Flight> {
     let input = from_model::sim_input(rocket, motors, Phase::Full, Launch::default()).ok()?;
     let flight = simulate(&input);
     let flutter = FlutterAnalysis::of_flight(stocks(rocket, &input.vehicle), &input.launch, &flight);
-    Some(Flight { flutter, descent_rates: flight.summary.descent_rates.clone() })
+    let optimum_delay = (flight.summary.time_to_apogee > 0.0).then_some(flight.summary.optimum_delay);
+    Some(Flight { flutter, descent_rates: flight.summary.descent_rates.clone(), optimum_delay })
+}
+
+/// Within this of the optimum the delay is fine, s (the tolerance Simulate's results use before flagging a delay).
+pub const DELAY_OK: f64 = 0.5;
+/// Within this of the optimum a delay is a warning, s; beyond it an error.
+pub const DELAY_WARN: f64 = 3.0;
+
+/// What the ejection-delay field says about the motor of a mount: the optimum, how far off the set delay is, and the delay
+/// the motor offers that is nearest the optimum.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DelayTip {
+    /// Burnout to apogee of the active configuration, s.
+    pub optimum: f64,
+    /// The chip: severity and words (`5.4 s late`, `2.1 s early`, `on time`).
+    pub chip: (Severity, String),
+    /// The listed delay nearest the optimum, s; `None` for a motor with no listed delays (plugged only) or an unknown motor.
+    pub nearest: Option<f64>,
+    /// Whether the motor lists no delays at all: it only comes plugged.
+    pub plugged_only: bool,
+}
+
+/// The tip for a motor with `delays` listed flown with `set` seconds of delay and an `optimum` burnout-to-apogee time.
+pub fn delay_tip(optimum: f64, set: f64, delays: Option<&[f64]>) -> DelayTip {
+    let off = set - optimum;
+    let chip = if !set.is_finite() || off.abs() <= DELAY_OK {
+        (Severity::Ok, "on time".to_string())
+    } else {
+        let severity = if off.abs() <= DELAY_WARN { Severity::Warn } else { Severity::Err };
+        (severity, if off > 0.0 { format!("{off:.1} s late") } else { format!("{:.1} s early", -off) })
+    };
+    let nearest = delays.and_then(|d| d.iter().copied().min_by(|a, b| (a - optimum).abs().total_cmp(&(b - optimum).abs())));
+    DelayTip { optimum, chip, nearest, plugged_only: delays.is_some_and(<[f64]>::is_empty) }
 }
 
 /// The flight of the document at a revision, flown on demand.
@@ -324,5 +360,29 @@ mod tests {
         assert!(!cache.needs_flight(7) && cache.needs_flight(8));
         let b = cache.get(ctx.doc.rocket(), ctx.physics.motors(), 7).unwrap();
         assert!(Rc::ptr_eq(&a, &b));
+    }
+}
+
+#[cfg(test)]
+mod delay_tests {
+    use super::*;
+
+    #[test]
+    fn the_chip_grades_how_far_the_delay_is_off() {
+        let chip = |set: f64| delay_tip(8.6, set, Some(&[6.0, 10.0, 14.0])).chip;
+        assert_eq!(chip(9.0), (Severity::Ok, "on time".into()));
+        assert_eq!(chip(10.0), (Severity::Warn, "1.4 s late".into()));
+        assert_eq!(chip(6.0), (Severity::Warn, "2.6 s early".into()));
+        assert_eq!(chip(14.0), (Severity::Err, "5.4 s late".into()));
+        assert_eq!(chip(3.0), (Severity::Err, "5.6 s early".into()));
+    }
+
+    #[test]
+    fn the_nearest_listed_delay_and_plugged_only_motors() {
+        assert_eq!(delay_tip(8.6, 6.0, Some(&[6.0, 10.0, 14.0])).nearest, Some(10.0));
+        assert_eq!(delay_tip(7.0, 6.0, Some(&[6.0, 10.0])).nearest, Some(6.0));
+        let plugged = delay_tip(8.6, 6.0, Some(&[]));
+        assert!(plugged.plugged_only && plugged.nearest.is_none());
+        assert!(!delay_tip(8.6, 6.0, None).plugged_only);
     }
 }

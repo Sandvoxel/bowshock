@@ -300,6 +300,7 @@ fn motor_rows<'a>(p: &Params<'a>) -> Vec<Element<'a, Message>> {
     rows.push(labeled("Ejection", crate::widgets::field::checkbox("Plugged (no charge)", slot.is_plugged(), Message::Plug)));
     if !slot.is_plugged() {
         rows.push(f.per_config("Ejection delay", slot.delay, Quantity::Time, Field::EjectionDelay));
+        rows.extend(delay_tip_rows(p, slot.delay, &designation));
     }
     let stage = p.state.stage_of_mount(p.rocket, p.id);
     if pod_copies.is_some() {
@@ -307,6 +308,37 @@ fn motor_rows<'a>(p: &Params<'a>) -> Vec<Element<'a, Message>> {
     } else if stage > 1 {
         let lower = separation::stage_name(stage - 1, p.rocket.stages().len());
         rows.extend(separation::timing_rows(f, config, stage, EventKind::Ignition, &lower, true));
+    }
+    rows
+}
+
+/// The tip under the ejection delay: the optimum (burnout to apogee of the live flight) with a chip for how far the set delay is
+/// off, and the nearest delay the motor lists with a one-click button. Empty without a flight, for a stage whose ejection
+/// separates it (only the last stage's delay fires at apogee) and for a delay set to infinity.
+fn delay_tip_rows<'a>(p: &Params<'a>, set: f64, designation: &str) -> Vec<Element<'a, Message>> {
+    let stage = p.state.stage_of_mount(p.rocket, p.id);
+    let Some(optimum) = p.flight.as_ref().and_then(|f| f.optimum_delay).filter(|_| stage == p.rocket.stages().len()) else {
+        return Vec::new();
+    };
+    let ctx = p.form.ctx;
+    let delays = ctx.physics.motors().find(designation).map(|m| m.delays.as_slice());
+    let tip = health::delay_tip(optimum, set, delays);
+    let seconds = |v: f64| ui::with_unit(v, Quantity::Time, ctx.units);
+    let (severity, label) = tip.chip.clone();
+    let chip: Element<'a, Message> = chip(severity, label).into();
+    let head = row![text(seconds(tip.optimum)).size(TEXT_BODY).style(theme::ink), chip].spacing(SPACE_2).align_y(iced::Center);
+    let mut rows = vec![labeled("Optimum", head.boxed())];
+    if tip.plugged_only {
+        rows.push(labeled("Delays", text("None listed: plugged only").size(TEXT_LABEL).style(theme::muted).boxed()));
+    } else if let Some(nearest) = tip.nearest.filter(|n| (n - set).abs() > 1e-9) {
+        let use_it = plain_button(text(format!("Use {}", seconds(nearest))).size(TEXT_LABEL).style(theme::colored(|t| t.accent)))
+            .padding([2.0, SPACE_2])
+            .style(theme::ghost)
+            .on_press(Message::UseDelay(nearest));
+        rows.push(labeled(
+            "Nearest",
+            row![text(format!("{} listed", seconds(nearest))).size(TEXT_LABEL).style(theme::muted), use_it].spacing(SPACE_2).align_y(iced::Center).boxed(),
+        ));
     }
     rows
 }
