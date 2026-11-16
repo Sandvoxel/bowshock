@@ -179,8 +179,9 @@ fn aft_drag(bb: &BaseBody, wall: &[WallPoint]) -> Vec<f64> {
 /// Skin-friction drag and the largest `y+` of the first cell over the no-slip body-surface faces ahead of the base plane
 /// (the sting extension of a `Wake::Sting` grid and the surface of a sting behind the base are not part of the body): `(cd_friction, y_plus_max)`,
 /// `(0.0, NaN)` for the Euler equations. With the wall tangent `t = (nr, -nx)` pointing downstream, the first-cell tangential
-/// velocity `u_t`, its wall distance `d_n` and `tau_w = mu(T) u_t / d_n`: `CD = sum 2 tau_w t_x r_m len / (q_inf R^2)`,
-/// `y+ = d_n sqrt(rho tau_w) / mu`. Works on the conserved state `s.u`.
+/// velocity `u_t`, its wall distance `d_n` and `tau_w = (mu(T) + mu_t,w) u_t / d_n` (`mu_t,w` the Aupoix wall eddy viscosity of a rough wall,
+/// `Viscous::roughness > 0`, else 0): `CD = sum 2 tau_w t_x r_m len / (q_inf R^2)`, `y+ = d_n sqrt(rho tau_w) / mu`. Works on the
+/// conserved state `s.u`.
 pub fn friction(case: &Case, s: &Solver) -> (f64, f64) {
     let Some(v) = s.viscous() else {
         return (0.0, f64::NAN);
@@ -214,7 +215,9 @@ pub fn friction(case: &Case, s: &Solver) -> (f64, f64) {
             let u_t = w[1] * tx + w[2] * tr;
             let d_n = ((g.xc[c] - xm) * f.nx + (g.rc[c] - f.rm) * f.nr).abs();
             let mu = v.mu(temperature(&w));
-            let tau = mu * u_t / d_n;
+            // rough wall: the discrete wall shear is (mu + mu_t,w) u_t / d_n with the Aupoix wall eddy viscosity of the cell state (0 for a smooth wall)
+            let mu_tw = if v.rough() { w[0] * bowshock_cfd::turbulence::aupoix_wall(mu / w[0], w[1].hypot(w[2]), d_n, v.roughness)[2] } else { 0.0 };
+            let tau = (mu + mu_tw) * u_t / d_n;
             cd += 2.0 * tau * tx * f.rm * f.len / (q_inf * r2);
             y_plus_max = y_plus_max.max(d_n * (w[0] * tau.abs()).sqrt() / mu);
         }
@@ -442,7 +445,7 @@ mod tests {
         assert_eq!(stop_reason(&c, 4999, 1e-3, 1.0, 20, &moving), None);
         // a viscous case stops on a stationary total CD for either wake
         let mut v = case(Some(1e-3), Wake::Base);
-        v.viscous = Some(Viscous { re_c: 1e6, sutherland: 0.38, turbulence: Turbulence::Sst, wall_i_start: 28 });
+        v.viscous = Some(Viscous { re_c: 1e6, sutherland: 0.38, turbulence: Turbulence::Sst, wall_i_start: 28, roughness: 0.0 });
         assert_eq!(stop_reason(&v, 4999, 1e-3, 1.0, 20, &flat), Some(StopReason::CdStationary));
     }
 
@@ -450,7 +453,7 @@ mod tests {
     fn relative_drag_rule_stops_a_flat_viscous_history() {
         let hist = |rel: f64| -> Vec<(usize, f64)> { (1..=10).map(|k| (k * 50, 0.4 * (1.0 + if k % 2 == 0 { rel } else { 0.0 }))).collect() };
         let mut v = case(None, Wake::Base);
-        v.viscous = Some(Viscous { re_c: 1e6, sutherland: 0.38, turbulence: Turbulence::Sst, wall_i_start: 28 });
+        v.viscous = Some(Viscous { re_c: 1e6, sutherland: 0.38, turbulence: Turbulence::Sst, wall_i_start: 28, roughness: 0.0 });
         v.numerics.drag_rel_tol = Some(2e-3);
         // (a) relative range 1e-3, 3 orders of drop: stops at the first sample at iteration 500, not before
         assert_eq!(stop_reason(&v, 499, 1e-3, 1.0, 20, &hist(1e-3)), Some(StopReason::CdStationary));
@@ -478,7 +481,7 @@ mod tests {
     #[test]
     fn mean_stationary_stops_at_a_mean_crossing_of_a_limit_cycle() {
         let mut v = case(Some(1e-4), Wake::Base);
-        v.viscous = Some(Viscous { re_c: 1e6, sutherland: 0.38, turbulence: Turbulence::Sst, wall_i_start: 28 });
+        v.viscous = Some(Viscous { re_c: 1e6, sutherland: 0.38, turbulence: Turbulence::Sst, wall_i_start: 28, roughness: 0.0 });
         v.numerics.mean_window = Some(6000);
         let full = cycle(40_000, 0.1475, 0.0015, 0.0);
         // first monitor sample that stops: not before 2 windows after the start-up, and with the last two samples across the mean

@@ -7,6 +7,10 @@
 //     rho dk/dt     = (-conv_k + diff_k) / V + P - beta* rho omega k
 //     rho domega/dt = (-conv_w + diff_w) / V + gamma rho P / max(mu_t, 1e-30) - beta rho omega^2 + (1 - F1) X
 //
+// With a wall roughness `Viscous::roughness > 0` the wall cells carry the Aupoix (2015) "Colebrook" state of `crate::turbulence::aupoix_wall`
+// (`LazySolver::aupoix_wall`, evaluated with the viscous quantities in `VFlow::rough`): `k` and `omega` ghosts `2 k_w - k`, `2 omega_w - omega`, and the
+// eddy viscosity of a no-slip face is `mu_t,w` instead of 0; with `ks = 0` none of it is built.
+//
 // (the constants and the boundary states of the two scalars are documented there). The two scalars are advanced once per iteration, after the
 // mean-flow update, from the quantities of the start of the iteration: a loosely coupled pseudo-time step with the line-implicit solves
 // `(diag0 + dd_i) x + lo_i x_- + up_i x_+ = V R` (i lines) and `(1 + dd_j / diag0) dphi + (lo_j / diag0) dphi_- + (up_j / diag0) dphi_+ = x`
@@ -16,7 +20,7 @@
 // `Stage::mass` is `F[0]` of the face fluxes, `dt` the time step of the iteration (the pseudo time step of the implicit scheme, in the
 // element type).
 
-use crate::turbulence::{A1, BETA1, BETA2, BETA_STAR, GAMMA1, GAMMA2, SIGMA_K1, SIGMA_K2, SIGMA_W1, SIGMA_W2};
+use crate::turbulence::{AUPOIX_ITERATIONS, A1, BETA1, BETA2, BETA_STAR, GAMMA1, GAMMA2, NU_T_WALL_MAX, SIGMA_K1, SIGMA_K2, SIGMA_W1, SIGMA_W2};
 
 /// `S^2 = 2 (u_x^2 + v_r^2 + (v/r)^2) + (u_r + v_x)^2 - 2/3 div^2` of a cell from its gradient `g = (u_x, u_r, v_x, v_r, ..)`, radial
 /// velocity `v` and radius `r`.
@@ -50,6 +54,30 @@ fn bc_inf(bc: Bc) -> bool {
 }
 
 impl LazySolver {
+    /// Aupoix (2015) "Colebrook" rough-wall state `[k_w, omega_w, nu_t,w]` of every cell (`crate::turbulence::aupoix_wall`, which documents the
+    /// formulas) from `nu`, the speed `|u|`, the wall distance `d` and the roughness `ks > 0` of every cell: `AUPOIX_ITERATIONS` fixed-point iterations of `u_tau^2 = (nu + nu_t,w) |u|
+    /// from `nu |u| / d`, each evaluated (`staging`) before the next. `ks+` is floored at `1e-30` and `omega_w+ u_tau^2 / nu` evaluated in the closed form
+    /// `300 nu / ks^2 / tanh(15 / (4 ks+)) + 191 u_tau / ks (1 - exp(-ks+ / 250))`, so a cell at rest stays finite.
+    fn aupoix_wall(&self, nu: &A, speed: &A, d: &A, ks: &A) -> [A; 3] {
+        let smooth = c(60.0) * nu / (c(BETA1) * d * d);
+        let at = |u2: &A| -> [A; 3] {
+            let u_tau = u2.sqrt();
+            let ks_plus = (&u_tau * ks / nu).maximum(c(1e-30));
+            let t = (&ks_plus / c(125.0)).tanh();
+            let log10 = (&ks_plus / c(30.0)).ln() * c(std::f64::consts::LOG10_E);
+            let k_plus = ((log10 + c(1.0) - &t) * &t).tanh().maximum(c(0.0)) * c(1.0 / BETA_STAR.sqrt());
+            let om_rough = c(300.0) * nu / (ks * ks) / (c(15.0 / 4.0) / &ks_plus).tanh() + c(191.0) * &u_tau / ks * (c(1.0) - (-&ks_plus / c(250.0)).exp());
+            let (k_w, om_w) = (k_plus * u2, om_rough.minimum(&smooth));
+            let nu_t = (&k_w / &om_w).minimum(c(NU_T_WALL_MAX) * nu);
+            [k_w, om_w, nu_t]
+        };
+        let mut u2 = nu * speed / d;
+        for _ in 0..AUPOIX_ITERATIONS {
+            u2 = staged(self.staging, [(nu + &at(&u2)[2]) * speed / d]).into_iter().next().expect("one array");
+        }
+        at(&u2)
+    }
+
     /// Green-Gauss gradient `g = (1/A) sum_faces s phi_f n len`, `phi_f = (phi_c + phi_neighbour) / 2`, of the `M` fields `pc` of every cell
     /// from the neighbour values `nb` across the right, left, top and bottom face; the `2 M` components are ordered `(x, r)` per field.
     fn green_gauss<const M: usize>(&self, pc: &[A; M], nb: &[[A; M]; 4]) -> Vec<A> {
@@ -150,7 +178,10 @@ impl LazySolver {
         let inf = [K_INF, omega_inf(v.re_c)];
 
         // kernel 1: Green-Gauss gradient (k_x, k_r, omega_x, omega_r) of every cell from the face values of `k`, `omega`
-        let wall = [-k, c(2.0) * (c(60.0) * &nu / (c(BETA1) * d * d)) - om];
+        let wall = match &vf.rough {
+            Some(r) => [c(2.0) * &r[0] - k, c(2.0) * &r[1] - om],
+            None => [-k, c(2.0) * (c(60.0) * &nu / (c(BETA1) * d * d)) - om],
+        };
         let t = [k.clone(), om.clone()];
         let (kw_i, kw_j) = (self.kw_sides(&t, &wall, 0), self.kw_sides(&t, &wall, 1));
         let nb = [
@@ -180,7 +211,14 @@ impl LazySolver {
             let (cl, cr) = self.cell_sides(&cells, dir, &self.jet_values(5, 6));
             let (kw_l, kw_r) = if dir == 0 { (&kw_i.0, &kw_i.1) } else { (&kw_j.0, &kw_j.1) };
             let mu_f = c(0.5) * (&cl[5] + &cr[5]);
-            let mut_f = select(&dg.noslip, c(0.0), c(0.5) * (&cl[6] + &cr[6]));
+            let mut_f = c(0.5) * (&cl[6] + &cr[6]);
+            let mut_f = match &vf.rough {
+                Some(r) => {
+                    let (tl, tr) = self.cell_sides(&[r[2].clone()], dir, &[]);
+                    select(&dg.noslip, c(0.5) * (&tl[0] + &tr[0]), &mut_f)
+                }
+                None => select(&dg.noslip, c(0.0), &mut_f),
+            };
             let mut out: Vec<A> = vec![&st.mass[dir] * w];
             let (mut cond, mut flux) = (vec![], vec![]);
             for e in 0..2 {
@@ -276,7 +314,8 @@ impl LazySolver {
         let k_new = (k + &dphi[0]).maximum(c(0.1) * k).maximum(c(1e-3 * inf[0]));
         let om_new = (om + &dphi[1]).maximum(c(0.1) * om).maximum(c(1e-3 * inf[1]));
         let strain = s2.maximum(c(0.0)).sqrt();
-        let mu_t_new = eddy_viscosity(rho, &k_new, &om_new, &strain, &f2_of(&nu, &k_new, &om_new, d), v.re_c);
+        let f2 = f2_of(&nu, &k_new, &om_new, d);
+        let mu_t_new = eddy_viscosity(rho, &k_new, &om_new, &strain, &f2, v.re_c);
         let rk2 = &r[0] * &r[0];
         let (mu_t_new, sum) = match &self.lb {
             Some(lb) => (select(&lb.solid, c(0.0), &mu_t_new), rk2.sum_where(&lb.fluid)),

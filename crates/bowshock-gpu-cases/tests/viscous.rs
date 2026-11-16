@@ -23,6 +23,11 @@ use bowshock_core::{Analysis, Resolution};
 
 /// The flat plates of the CPU gates, with only 5 first-order iterations: G1 (laminar, `re_c = 1e6`) or G2 (SST, `re_c = 2.5e7`).
 fn plate_solver(sst: bool, scheme: Scheme) -> Solver {
+    plate_solver_ks(sst, scheme, 0.0)
+}
+
+/// [`plate_solver`] with the wall roughness `ks` (nose diameters) on the plate.
+fn plate_solver_ks(sst: bool, scheme: Scheme, ks: f64) -> Solver {
     let (grid, re_c, turbulence, wall_i_start) = if sst {
         (
             plate_grid(&PlateGridParams { r0: 20.0, x_up: 0.33, length: 2.0, height: 1.0, n_up: 24, n_plate: 112, nj: 72, dx_le: 0.002, dr_wall: 4e-6 }),
@@ -48,7 +53,7 @@ fn plate_solver(sst: bool, scheme: Scheme) -> Solver {
     let mut s = Solver::new(grid, cfg);
     s.low_mach = true;
     s.set_scheme(scheme);
-    s.set_viscous(Some(Viscous { re_c, sutherland: 0.368, turbulence, wall_i_start }));
+    s.set_viscous(Some(Viscous { re_c, sutherland: 0.368, turbulence, wall_i_start, roughness: ks }));
     s
 }
 
@@ -109,9 +114,12 @@ fn laminar_plate_explicit_state_matches_cpu() {
 /// SST flat plate (G2 grid), 50 iterations from the free stream: the mean state and the `k`, `omega` fields on the cells where the turbulence has
 /// grown (`k > 10 k_inf`).
 macro_rules! sst_plate {
-    ($prec:expr, $scheme:expr, $grown:expr) => {{
+    ($prec:expr, $scheme:expr, $grown:expr) => {
+        sst_plate!($prec, $scheme, $grown, 0.0)
+    };
+    ($prec:expr, $scheme:expr, $grown:expr, $ks:expr) => {{
         let ctx = luma::default_context().unwrap();
-        let mut cpu = plate_solver(true, $scheme);
+        let mut cpu = plate_solver_ks(true, $scheme, $ks);
         let mut lazy = GpuSolver::from_host(&ctx, &cpu, $prec).unwrap();
         let res_cpu: Vec<f64> = (0..50).map(|_| cpu.step()).collect();
         let res = lazy.run(50).unwrap();
@@ -150,6 +158,18 @@ fn sst_plate_state_matches_cpu_f32() {
 #[test]
 fn sst_plate_state_matches_cpu_df32() {
     sst_plate!(Precision::Extended, Scheme::Implicit(ImplicitParams::VISCOUS), 10.0);
+}
+
+/// The rough-wall SST plate: `ks = 1e-3 x` at the G2 station `x = 0.97` (fully rough there), the rough `omega_w` of the wall ghost and the `F3` factor
+/// of the eddy viscosity, same state tolerances as the smooth plate.
+#[test]
+fn sst_rough_plate_state_matches_cpu_f32() {
+    sst_plate!(Precision::F32, Scheme::Implicit(ImplicitParams::VISCOUS), 10.0, 1e-3 * 0.97);
+}
+
+#[test]
+fn sst_rough_plate_state_matches_cpu_df32() {
+    sst_plate!(Precision::Extended, Scheme::Implicit(ImplicitParams::VISCOUS), 10.0, 1e-3 * 0.97);
 }
 
 /// The explicit scheme with the SST update after the Runge-Kutta step (the last-stage quantities and the first-stage time step); the explicit

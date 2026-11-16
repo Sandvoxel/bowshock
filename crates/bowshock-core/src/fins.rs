@@ -34,8 +34,23 @@ fn rounded_leading_edge(mach: f64) -> f64 {
     }
 }
 
+/// OpenRocket's compressibility factor of the roughness-limited skin friction (same as `Aero::drag` in `bowshock-sim`).
+fn roughness_correction(mach: f64) -> f64 {
+    if mach < 0.9 {
+        1.0 - 0.1 * mach * mach
+    } else if mach > 1.1 {
+        1.0 / (1.0 + 0.18 * mach * mach)
+    } else {
+        let c1 = 1.0 - 0.1 * 0.81;
+        let c2 = 1.0 / (1.0 + 0.18 * 1.21);
+        c2 * (mach - 0.9) / 0.2 + c1 * (1.1 - mach) / 0.2
+    }
+}
+
 /// Drag of the fin set `f` at Mach `mach` in air `air`, referenced to the area of a circle of diameter `d_ref` [m].
-pub(crate) fn fin_drag(f: &FinSpec, mach: f64, air: &AirState, d_ref: f64) -> FinDrag {
+/// `body_length` [m] is the whole-rocket length, the reference length of OpenRocket's roughness-limited skin friction
+/// `0.032 (eps / L)^0.2` (as in `Aero::drag` of `bowshock-sim`, which uses the rocket length, not the fin chord).
+pub(crate) fn fin_drag(f: &FinSpec, mach: f64, air: &AirState, d_ref: f64, body_length: f64) -> FinDrag {
     let n = f64::from(f.count);
     let (cr, ct, t) = (f.root_chord, f.tip_chord, f.thickness);
     let a_fin = f.span * (cr + ct) / 2.0;
@@ -45,10 +60,12 @@ pub(crate) fn fin_drag(f: &FinSpec, mach: f64, air: &AirState, d_ref: f64) -> Fi
     let a_front = n * t * f.span;
     let a_ref = PI * d_ref * d_ref / 4.0;
 
-    // skin friction, fully turbulent smooth surface (eqs. 3.78-3.81)
+    // skin friction, fully turbulent smooth surface (eqs. 3.78-3.81), floored below by the roughness limit
     let re = air.density * mach * air.sound_speed * mac / air.viscosity;
     let cf = if re < 1e4 { 1.48e-2 } else { 1.0 / (1.50 * re.ln() - 5.6).powi(2) };
     let cf_c = if mach < 1.0 { cf * (1.0 - 0.1 * mach * mach) } else { cf / (1.0 + 0.15 * mach * mach).powf(0.58) };
+    // a rough surface floors the friction at the roughness-limited value
+    let cf_c = if f.roughness > 0.0 { cf_c.max(0.032 * (f.roughness / body_length.max(1e-9)).powf(0.2) * roughness_correction(mach)) } else { cf_c };
     let friction = cf_c * (1.0 + 2.0 * t / mac) * a_wet / a_ref;
 
     // leading- and trailing-edge pressure drag (eqs. 3.85-3.94)
@@ -116,7 +133,7 @@ mod tests {
     use crate::error::Error;
 
     fn fin(profile: FinProfile) -> FinSpec {
-        FinSpec { count: 4, root_chord: 0.12, tip_chord: 0.06, span: 0.08, sweep: 0.06, thickness: 0.003, profile }
+        FinSpec { count: 4, root_chord: 0.12, tip_chord: 0.06, span: 0.08, sweep: 0.06, thickness: 0.003, roughness: 0.0, profile }
     }
 
     #[test]
@@ -135,7 +152,7 @@ mod tests {
     fn square_fins_at_mach_half_match_the_formulas() {
         let air = Atmosphere::Isa { altitude_m: 0.0 }.state().unwrap();
         let (m, d_ref) = (0.5, 0.1);
-        let got = fin_drag(&fin(FinProfile::Square), m, &air, d_ref);
+        let got = fin_drag(&fin(FinProfile::Square), m, &air, d_ref, 1.0);
 
         // independent evaluation: chords 0.12 / 0.06 m, span 0.08 m, sweep 0.06 m, thickness 3 mm, four fins
         let area = 0.08 * 0.09; // span * mean chord
@@ -157,14 +174,16 @@ mod tests {
     fn double_wedge_has_wave_drag_only_above_mach_one() {
         let air = Atmosphere::Isa { altitude_m: 0.0 }.state().unwrap();
         let f = fin(FinProfile::DoubleWedge);
-        assert_eq!(fin_drag(&f, 0.8, &air, 0.1).pressure, 0.0);
-        assert!(fin_drag(&f, 1.5, &air, 0.1).pressure > 0.0);
+        assert_eq!(fin_drag(&f, 0.8, &air, 0.1, 1.0).pressure, 0.0);
+        assert!(fin_drag(&f, 1.5, &air, 0.1, 1.0).pressure > 0.0);
     }
 
     #[test]
     fn invalid_fins_are_rejected_with_the_field_named() {
         type Edit = fn(&mut FinSpec);
-        let cases: [(&str, Edit); 10] = [
+        let cases: [(&str, Edit); 12] = [
+            ("fins.roughness", |f| f.roughness = -1e-6),
+            ("fins.roughness", |f| f.roughness = f64::NAN),
             ("fins.count", |f| f.count = 2),
             ("fins.count", |f| f.count = 9),
             ("fins.root_chord", |f| f.root_chord = 0.0),
@@ -187,6 +206,30 @@ mod tests {
         assert!(fin(FinProfile::Rounded).validate().is_ok());
     }
 
+    #[test]
+    fn roughness_floors_the_friction_at_the_openrocket_limit() {
+        let air = Atmosphere::Isa { altitude_m: 0.0 }.state().unwrap();
+        let (d_ref, length) = (0.1, 0.3);
+        for mach in [0.5, 1.0, 2.0] {
+            let smooth = fin(FinProfile::Rounded);
+            let rough = FinSpec { roughness: 60e-6, ..smooth.clone() };
+            let (a, b) = (fin_drag(&smooth, mach, &air, d_ref, length), fin_drag(&rough, mach, &air, d_ref, length));
+            assert_eq!(a.pressure, b.pressure);
+            // friction scales with the skin-friction coefficient: recover it from the smooth value
+            let limited = 0.032 * (60e-6f64 / length).powf(0.2) * roughness_correction(mach);
+            let mac = mean_aerodynamic_chord(0.12, 0.06);
+            let re = air.density * mach * air.sound_speed * mac / air.viscosity;
+            let cf = 1.0 / (1.5 * re.ln() - 5.6).powi(2);
+            let cf_c = if mach < 1.0 { cf * (1.0 - 0.1 * mach * mach) } else { cf / (1.0 + 0.15 * mach * mach).powf(0.58) };
+            assert!(limited > cf_c, "test premise: the limit is active at Mach {mach}");
+            let expected = a.friction * limited / cf_c;
+            close(b.friction, expected, "rough friction");
+        }
+        // a roughness below the smooth friction changes nothing
+        let fine = FinSpec { roughness: 1e-9, ..fin(FinProfile::Rounded) };
+        assert_eq!(fin_drag(&fine, 0.5, &air, d_ref, length).friction, fin_drag(&fin(FinProfile::Rounded), 0.5, &air, d_ref, length).friction);
+    }
+
     fn custom(section: &[[f64; 2]]) -> FinSpec {
         fin(FinProfile::Custom { section: section.to_vec() })
     }
@@ -201,7 +244,7 @@ mod tests {
         let c = custom(&[[0.0, 0.0], [0.5, 1.0], [1.0, 0.0]]);
         let d = fin(FinProfile::DoubleWedge);
         for m in [0.8, 2.0] {
-            let (a, b) = (fin_drag(&c, m, &air, 0.1), fin_drag(&d, m, &air, 0.1));
+            let (a, b) = (fin_drag(&c, m, &air, 0.1, 1.0), fin_drag(&d, m, &air, 0.1, 1.0));
             close(a.friction, b.friction, "friction");
             close(a.pressure, b.pressure, "pressure");
         }
@@ -213,7 +256,7 @@ mod tests {
         let c = custom(&[[0.0, 1.0], [0.5, 1.0], [1.0, 1.0]]);
         let s = fin(FinProfile::Square);
         for m in [0.5, 1.5] {
-            let (a, b) = (fin_drag(&c, m, &air, 0.1), fin_drag(&s, m, &air, 0.1));
+            let (a, b) = (fin_drag(&c, m, &air, 0.1, 1.0), fin_drag(&s, m, &air, 0.1, 1.0));
             close(a.friction, b.friction, "friction");
             close(a.pressure, b.pressure, "pressure");
         }
@@ -229,9 +272,9 @@ mod tests {
         let air = Atmosphere::Isa { altitude_m: 0.0 }.state().unwrap();
         let (n, a) = (fin(FinProfile::Custom { section }), fin(FinProfile::Airfoil));
         // the thin trailing edge (about 2 % of the thickness) adds TE * CD_base on top of the Airfoil leading edge
-        let (pn, pa) = (fin_drag(&n, 0.9, &air, 0.1).pressure, fin_drag(&a, 0.9, &air, 0.1).pressure);
+        let (pn, pa) = (fin_drag(&n, 0.9, &air, 0.1, 1.0).pressure, fin_drag(&a, 0.9, &air, 0.1, 1.0).pressure);
         assert!((pn - pa).abs() < 0.01 * pa, "{pn} vs {pa}");
-        let p2 = fin_drag(&n, 2.0, &air, 0.1).pressure;
+        let p2 = fin_drag(&n, 2.0, &air, 0.1, 1.0).pressure;
         assert!(p2 > 0.0 && p2.is_finite());
     }
 

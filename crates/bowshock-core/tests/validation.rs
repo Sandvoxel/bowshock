@@ -38,6 +38,7 @@ fn arcas_fins() -> FinSpec {
         span: arcas::FIN_SPAN,
         sweep: arcas::FIN_SWEEP,
         thickness: arcas::FIN_THICKNESS,
+        roughness: 0.0,
         profile: FinProfile::DoubleWedge,
     }
 }

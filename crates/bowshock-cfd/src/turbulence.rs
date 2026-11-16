@@ -28,7 +28,12 @@
 //! Boundary states of the two scalars (the ghost of a face, mirrored in the face centre like the mean-flow ghosts):
 //! `Bc::Freestream | Characteristic | PressureOutflow` take `(k_inf, omega_inf)`; `Extrapolate`, slip walls and the axis the
 //! cell values; a no-slip wall `k_ghost = -k_c`, `omega_ghost = 2 omega_w - omega_c`, `omega_w = 60 nu_c / (0.075 d_c^2)`
-//! (the face values are then `k = 0`, `omega = omega_w`).
+//! (the face values are then `k = 0`, `omega = omega_w`). With a wall roughness `ks > 0` (`Viscous::roughness`, equivalent sand grain in
+//! nose diameters) the wall cells take the Aupoix (2015) "Colebrook" rough-wall values of [`aupoix_wall`]: `k_ghost = 2 k_w - k_c`,
+//! `omega_ghost = 2 omega_w - omega_c`, and the face eddy viscosity of a no-slip face is the wall value `mu_t,w = rho k_w / omega_w`
+//! instead of 0 (`Solver::rough_wall`, read by `viscous::face_mu`: the mean-flow wall shear is `(mu + mu_t,w) u_c / d_c`). The rough state is for
+//! the body surface (`Walls::rough_jface`; the base wall and the sting keep the smooth state) and its roughness is phased in over the first
+//! [`ROUGH_RAMP_CELLS`] wall cells ([`rough_ramp`]); `ks = 0` takes none of these paths.
 //!
 //! The update is a sequence of data-parallel kernels (`update`): cell gradients of `k`, `omega`; the blending functions; the
 //! face coefficients; the per-cell residual and the coefficients of the two linear systems; the line solves; the clipped
@@ -154,6 +159,8 @@ fn bc_kind(bc: Bc) -> Kind {
 
 /// Read-only data of one update.
 struct Ctx<'a> {
+    /// `[k_w, omega_w, mu_t,w]` of the wall cells of a rough run (`Solver::rough_wall`); empty for smooth walls.
+    rough: &'a [[f64; 3]],
     grid: &'a Grid,
     w: &'a [Prim],
     walls: Walls,
@@ -225,9 +232,14 @@ impl Ctx<'_> {
             Kind::Fixed(v) => v,
             Kind::Wall => {
                 let [k, om] = self.turb[c];
-                let nu = self.mu[c] / self.rho(c);
-                let d = self.dwall[c];
-                [-k, 2.0 * (60.0 * nu / (BETA1 * d * d)) - om]
+                if self.rough.is_empty() {
+                    let nu = self.mu[c] / self.rho(c);
+                    let d = self.dwall[c];
+                    [-k, 2.0 * (60.0 * nu / (BETA1 * d * d)) - om]
+                } else {
+                    let r = &self.rough[c];
+                    [2.0 * r[0] - k, 2.0 * r[1] - om]
+                }
             }
         }
     }
@@ -254,6 +266,57 @@ fn f2_of(nu: f64, k: f64, om: f64, d: f64) -> f64 {
     let (t1, t2) = blend_args(nu, k, om, d);
     let b = (2.0 * t1).max(t2);
     (b * b).tanh()
+}
+
+/// Fixed-point iterations of `aupoix_wall` (and its GPU twin). The map `u_tau^2 -> (nu + nu_t,w) U / d` contracts by at most about 0.65 per iteration, from
+/// a start that is up to a factor `1 + nu_t,w / nu` (10 and more at a leading edge) below the fixed point: 4 iterations leave that error unresolved and the
+/// plate of G2r did not converge (density residual stuck at 0.5-1), 5 or more converge; 16 leave under 1e-3.
+pub const AUPOIX_ITERATIONS: usize = 16;
+
+/// Upper bound of `nu_t,w / nu`: the cap `1e5 / re_c` of the eddy viscosity of the cells (`eddy_viscosity`) in units of the free-stream `nu`. Where the
+/// smooth `omega_w` bound is active (`d` large against the roughness) `nu_t,w` grows with `u_tau^2` and the fixed point has no solution without it.
+pub const NU_T_WALL_MAX: f64 = 1e5;
+
+/// Number of wall cells over which the roughness is phased in from the wall start (`Viscous::wall_i_start`): the roughness of the first wall cells is
+/// `ks rough_ramp(i)`. A roughness wall state that starts as a step feeds turbulence (`k_w` with the low rough `omega_w`) into the slip cells ahead of the
+/// wall start, where it spreads up their column (`mu_t / mu` 15-45 against 3 smooth) and the column oscillates with period 2 at transonic speed (M 0.9-1.3,
+/// ks / d 6e-4 to 1.2e-3: the stall at 80 000 iterations); a ramp of 2 and 3 cells still oscillates, 4 and 16 do not.
+pub const ROUGH_RAMP_CELLS: usize = 8;
+
+/// Fraction of the roughness `ks` that wall cell `i` carries: `min(1, (i + 1 - wall_i_start) / ROUGH_RAMP_CELLS)`.
+#[inline]
+pub fn rough_ramp(i: usize, wall_i_start: usize) -> f64 {
+    ((i + 1).saturating_sub(wall_i_start) as f64 / ROUGH_RAMP_CELLS as f64).min(1.0)
+}
+
+/// Aupoix (2015) "Colebrook" rough-wall state of a no-slip wall cell with kinematic viscosity `nu`, speed `speed`, wall distance `d`
+/// and equivalent sand-grain roughness `ks > 0`: `[k_w, omega_w, nu_t,w]` with `nu_t,w = k_w / omega_w`.
+///
+/// ```text
+///   ks+      = u_tau ks / nu                                                    (floored at 1e-30)
+///   k_w+     = max(0, tanh( (log10(ks+ / 30) + 1 - tanh(ks+ / 125)) tanh(ks+ / 125) ) / sqrt(beta*))
+///   omega_w+ = (300 / ks+^2) / tanh(15 / (4 ks+)) + (191 / ks+) (1 - exp(-ks+ / 250))
+///   k_w = k_w+ u_tau^2,   omega_w = min(omega_w+ u_tau^2 / nu, 60 nu / (beta1 d^2))
+///   u_tau^2 = (nu + nu_t,w) speed / d      (the discrete wall shear (mu + mu_t,w) U / d), `AUPOIX_ITERATIONS` fixed-point iterations from nu speed / d
+/// ```
+///
+/// `omega_w+ u_tau^2 / nu` is evaluated as `300 nu / ks^2 / tanh(..) + 191 u_tau / ks (1 - exp(..))`, which stays finite at rest.
+pub fn aupoix_wall(nu: f64, speed: f64, d: f64, ks: f64) -> [f64; 3] {
+    let smooth = 60.0 * nu / (BETA1 * d * d);
+    let at = |u2: f64| -> [f64; 3] {
+        let u_tau = u2.sqrt();
+        let ks_plus = (u_tau * ks / nu).max(1e-30);
+        let t = (ks_plus / 125.0).tanh();
+        let k_plus = (((ks_plus / 30.0).log10() + 1.0 - t) * t).tanh().max(0.0) / BETA_STAR.sqrt();
+        let om_rough = 300.0 * nu / (ks * ks) / (15.0 / (4.0 * ks_plus)).tanh() + 191.0 * u_tau / ks * (1.0 - (-ks_plus / 250.0).exp());
+        let (k_w, om_w) = (k_plus * u2, om_rough.min(smooth));
+        [k_w, om_w, (k_w / om_w).min(NU_T_WALL_MAX * nu)]
+    };
+    let mut u2 = nu * speed / d;
+    for _ in 0..AUPOIX_ITERATIONS {
+        u2 = (nu + at(u2)[2]) * speed / d;
+    }
+    at(u2)
 }
 
 /// Eddy viscosity `min(rho a1 k / max(a1 omega, S F2), 1e5 / re_c)`.
@@ -357,7 +420,7 @@ fn tface(cx: &Ctx, tg: &[[f64; 4]], blend: &[Blend], sides: &FaceSides, kind: Ki
     let w = f.w();
     let (dd, ex, er) = stencil(cx.grid, sides, xf, rf);
     let (gl, gr) = (&tg[sides.l.cell], &tg[sides.r.cell]);
-    let (mu_f, mut_f) = face_mu(cx.mu, cx.mu_t, sides);
+    let (mu_f, mut_f) = face_mu(cx.mu, cx.mu_t, cx.rough, sides);
     let (f1l, f1r) = (blend[sides.l.cell].f1, blend[sides.r.cell].f1);
     let mut out = TFace { m, g: [0.0; 2], flux: [0.0; 2], l: kl, r: kr };
     for e in 0..2 {
@@ -484,7 +547,8 @@ pub(crate) fn update(s: &mut Solver) {
     let n = ni * nj;
     let inf = [K_INF, omega_inf(v.re_c)];
     let (turb, mu_t, rnorm) = {
-        let cx = Ctx { grid: &s.grid, w: &s.w, walls: s.walls(), bc: s.cfg.bc, mu: &s.mu, mu_t: &s.mu_t, turb: &s.turb, dwall: &s.dwall, inf };
+        let cx =
+            Ctx { rough: &s.rough_wall, grid: &s.grid, w: &s.w, walls: s.walls(), bc: s.cfg.bc, mu: &s.mu, mu_t: &s.mu_t, turb: &s.turb, dwall: &s.dwall, inf };
         let tg = scalar_gradients(&cx);
         let blend = blends(&cx, &tg);
         let (ti, tj) = face_pass(&cx, &tg, &blend, &s.fi, &s.fj);
@@ -552,6 +616,11 @@ mod tests {
 
     /// Flat plate of G2 in the annulus formulation: SST, Mach 0.2, `re_c = 2.5e7`.
     fn plate_solver() -> (Solver, Viscous) {
+        rough_plate_solver(0.0)
+    }
+
+    /// The plate of G2 with the sand-grain roughness `ks` (nose diameters) on the plate.
+    fn rough_plate_solver(ks: f64) -> (Solver, Viscous) {
         let grid = plate_grid(&PlateGridParams { r0: 20.0, x_up: 0.33, length: 2.0, height: 1.0, n_up: 24, n_plate: 112, nj: 72, dx_le: 0.002, dr_wall: 4e-6 });
         let cfg = Config {
             cfl: 0.5,
@@ -563,7 +632,7 @@ mod tests {
         let mut s = Solver::new(grid, cfg);
         s.low_mach = true;
         s.set_scheme(Scheme::Implicit(ImplicitParams::VISCOUS));
-        let v = Viscous { re_c: 2.5e7, sutherland: 0.368, turbulence: Turbulence::Sst, wall_i_start: 24 };
+        let v = Viscous { re_c: 2.5e7, sutherland: 0.368, turbulence: Turbulence::Sst, wall_i_start: 24, roughness: ks };
         s.set_viscous(Some(v));
         (s, v)
     }
@@ -636,5 +705,124 @@ mod tests {
         assert!((cf / corr - 1.0).abs() < 0.05, "G2: skin friction off by {:.2} % from the correlation", 100.0 * (cf / corr - 1.0));
         assert!(y_plus < 2.0, "G2: y+ = {y_plus}");
         assert!(mu_t_max > 50.0, "G2: max mu_t / mu_inf = {mu_t_max}");
+    }
+
+    /// What the rough-plate runs report at the G2 station `x = 0.97`.
+    struct Station {
+        x: f64,
+        cf: f64,
+        ks_plus: f64,
+        y_plus: f64,
+        /// `k_w+`, `omega_w+` and `nu_t,w / nu` of the wall cell.
+        k_plus: f64,
+        om_plus: f64,
+        nut_ratio: f64,
+        /// Did the density residual drop 4 orders within the iteration budget?
+        converged: bool,
+    }
+
+    /// Local skin friction `cf = (mu + mu_t,w) u_t / d_n / (0.5 M^2)` (`cf_at`) and the wall-unit quantities at the G2 station `x = 0.97` of a plate run
+    /// as G2 iterates it (to 4 orders of density residual drop or 20 000 iterations).
+    fn rough_plate_station(ks: f64, tag: &str) -> Station {
+        let mach = 0.2;
+        let (mut s, v) = rough_plate_solver(ks);
+        let (mut peak, mut iters, mut converged) = (0.0f64, 0, false);
+        for it in 0..20_000 {
+            let r = s.step();
+            iters = it + 1;
+            if it > 20 {
+                peak = peak.max(r);
+            }
+            if it > 20 && peak / r >= 1e4 {
+                converged = true;
+                break;
+            }
+        }
+        let (x, cf) = cf_at(&s, &v, mach, 0.97);
+        let g = &s.grid;
+        let i = (v.wall_i_start..g.ni).min_by(|&a, &b| (g.xc[a] - 0.97).abs().total_cmp(&(g.xc[b] - 0.97).abs())).unwrap();
+        let f = &g.jface[i];
+        let (xf, rf) = (0.5 * (g.node(i, 0).0 + g.node(i + 1, 0).0), 0.5 * (g.node(i, 0).1 + g.node(i + 1, 0).1));
+        let dn = ((g.xc[i] - xf) * f.nx + (g.rc[i] - rf) * f.nr).abs();
+        let w = s.prim(i, 0);
+        let nu = v.mu(temperature(&w)) / w[0];
+        let u2 = 0.5 * mach * mach * cf / w[0];
+        let (ks_plus, y_plus) = (u2.sqrt() * ks / nu, dn * u2.sqrt() / nu);
+        let [k_w, om_w, nut] = if ks > 0.0 { aupoix_wall(nu, w[1].hypot(w[2]), dn, ks) } else { [0.0, 60.0 * nu / (BETA1 * dn * dn), 0.0] };
+        let st = Station { x, cf, ks_plus, y_plus, k_plus: k_w / u2, om_plus: om_w * nu / u2, nut_ratio: nut / nu, converged };
+        println!(
+            "{tag}: {iters} iterations, x = {x:.4}  cf = {cf:.6e}  ks+ = {ks_plus:.3}  y+ = {y_plus:.3}  k_w+ = {:.4}  omega_w+ = {:.4e}  nu_t,w/nu = {:.4}",
+            st.k_plus, st.om_plus, st.nut_ratio
+        );
+        st
+    }
+
+    /// G2r: the plate of G2 fully rough, `ks = 1e-3 x` (`x = 0.97`, nose diameters), Aupoix-Colebrook wall: the density residual drops 4 orders and the local
+    /// skin friction is within 10 % of the Mills & Hang (1983) fully rough correlation `cf = (3.476 + 0.707 ln(x / ks))^-2.46` (`150 < x / ks < 1.5e7`);
+    /// Schlichting's `(2.87 + 1.58 log10(x / ks))^-2.5`, which reads higher, is printed for reference.
+    #[test]
+    #[ignore]
+    fn sst_rough_flat_plate_cf() {
+        let ks = 1e-3 * 0.97;
+        let st = rough_plate_station(ks, "G2r");
+        let corr = (3.476 + 0.707 * (st.x / ks).ln()).powf(-2.46);
+        let schlichting = (2.87 + 1.58 * (st.x / ks).log10()).powf(-2.5);
+        println!(
+            "G2r: x = {:.4}  cf = {:.6e}  ks+ = {:.3}  y+ = {:.3}  Mills-Hang = {corr:.6e}  error = {:+.2} %  (Schlichting {schlichting:.6e}, {:+.2} %)",
+            st.x,
+            st.cf,
+            st.ks_plus,
+            st.y_plus,
+            100.0 * (st.cf / corr - 1.0),
+            100.0 * (st.cf / schlichting - 1.0)
+        );
+        assert!(st.converged, "G2r: the density residual did not drop 4 orders");
+        assert!((st.cf / corr - 1.0).abs() < 0.10, "G2r: skin friction off by {:.2} % from the Mills & Hang correlation", 100.0 * (st.cf / corr - 1.0));
+    }
+
+    /// Transitional trend (no assertion): `cf(0.97)` of the G2 plate for `ks / x = 0` (smooth), `1e-5`, `1e-4` (G2r prints `1e-3`).
+    #[test]
+    #[ignore]
+    fn sst_rough_flat_plate_trend() {
+        for ratio in [0.0, 1e-5, 1e-4] {
+            rough_plate_station(ratio * 0.97, &format!("G2 trend ks/x = {ratio:e}"));
+        }
+    }
+
+    /// `aupoix_wall`: a tiny `ks+` gives `k_w = 0`, `nu_t,w = 0` and the smooth `omega_w = 60 nu / (beta1 d^2)`; at `ks+ = 100` the values are those of the
+    /// Colebrook formulas at the fixed point `u_tau^2 = (nu + nu_t,w) U / d`.
+    #[test]
+    fn aupoix_wall_limits() {
+        let (nu, d, speed) = (1e-6, 1e-4, 1.0);
+        let smooth = 60.0 * nu / (BETA1 * d * d);
+        let [k_w, om_w, nut] = aupoix_wall(nu, speed, d, 1e-9);
+        assert_eq!((k_w, om_w, nut), (0.0, smooth, 0.0), "ks+ = 1e-4 must give the smooth wall");
+        // at rest the values stay finite
+        assert!(aupoix_wall(nu, 0.0, d, 1e-3).iter().all(|x| x.is_finite()));
+        // the roughness whose fixed point is ks+ = 100
+        let ks_plus_of = |ks: f64| {
+            let nt = aupoix_wall(nu, speed, d, ks)[2];
+            ((nu + nt) * speed / d).sqrt() * ks / nu
+        };
+        let (mut lo, mut hi) = (1e-4f64, 1e-2f64);
+        for _ in 0..60 {
+            let mid = (lo * hi).sqrt();
+            if ks_plus_of(mid) < 100.0 {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let ks = (lo * hi).sqrt();
+        let [k_w, om_w, nut] = aupoix_wall(nu, speed, d, ks);
+        let u2 = (nu + nut) * speed / d;
+        let ks_plus = u2.sqrt() * ks / nu;
+        assert!((ks_plus / 100.0 - 1.0).abs() < 1e-6, "ks+ = {ks_plus}");
+        let t = (ks_plus / 125.0).tanh();
+        let k_plus = (((ks_plus / 30.0).log10() + 1.0 - t) * t).tanh().max(0.0) / BETA_STAR.sqrt();
+        let om_plus = 300.0 / (ks_plus * ks_plus) / (15.0 / (4.0 * ks_plus)).tanh() + 191.0 / ks_plus * (1.0 - (-ks_plus / 250.0).exp());
+        assert!((k_w / u2 / k_plus - 1.0).abs() < 2e-2, "k_w+ = {} against {k_plus}", k_w / u2);
+        assert!((om_w * nu / u2 / om_plus - 1.0).abs() < 2e-2, "omega_w+ = {} against {om_plus}", om_w * nu / u2);
+        assert!((nut - k_w / om_w).abs() <= 1e-15 * nut && nut > 0.0 && om_w < smooth, "nu_t,w = {nut}");
     }
 }

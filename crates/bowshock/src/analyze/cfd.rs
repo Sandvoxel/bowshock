@@ -34,7 +34,7 @@ use crate::simulate::format::with_unit;
 use crate::units::{Quantity, UnitSystem};
 
 /// Bump when what a stored table means changes (solver, grid level, how the parts are mapped): old tables then read as stale.
-const SOLVER_REV: u64 = 2;
+const SOLVER_REV: u64 = 3;
 /// Relative drag tolerance of the solver's stop rule: a point ends once its total drag varies by less than this over 500
 /// iterations. Measured on the example rocket (coarse grid, RTX 3090, 10 points): about 29 000 iterations in all against about
 /// 82 000 for the default rule, the worst point within 0.39 % of its 12 000-iteration value (the aim is 1 %).
@@ -85,6 +85,8 @@ pub struct Plan {
     pub body: solver::BodySpec,
     /// The fin set the solver models, if the rocket has one it can take.
     pub fins: Option<solver::FinSpec>,
+    /// Equivalent sand-grain roughness of the solved walls (m): the mean of the parts' finish roughness weighted by wetted area.
+    pub body_roughness: f64,
     /// The vehicle without the solved fin set: what the build-up method still adds (other fin sets, lugs, rail buttons).
     rest: Vehicle,
     /// What was not solved as the document has it, in the app's voice.
@@ -125,9 +127,49 @@ fn fin_spec(set: &FinSet) -> Result<solver::FinSpec, String> {
         FinCrossSection::Rounded => solver::FinProfile::Rounded,
         FinCrossSection::Airfoil => solver::FinProfile::Airfoil,
     };
-    let spec = solver::FinSpec { count: set.count, root_chord: set.root_chord, tip_chord, span: set.span, sweep, thickness: set.thickness, profile };
+    let spec = solver::FinSpec {
+        count: set.count,
+        root_chord: set.root_chord,
+        tip_chord,
+        span: set.span,
+        sweep,
+        thickness: set.thickness,
+        roughness: set.roughness,
+        profile,
+    };
     spec.validate().map_err(|e| e.to_string())?;
     Ok(spec)
+}
+
+fn mm(m: f64) -> String {
+    format!("{:.0} mm", m * 1e3)
+}
+
+/// Wetted (lateral) area of a body segment (m^2), integrated along its profile.
+fn wetted_area(s: &bowshock_sim::BodySegment) -> f64 {
+    const N: usize = 256;
+    let dx = s.length / N as f64;
+    let mut r_prev = s.radius_at(0.0);
+    let mut area = 0.0;
+    for i in 1..=N {
+        let r = s.radius_at(i as f64 * dx);
+        area += std::f64::consts::PI * (r_prev + r) * (r - r_prev).hypot(dx);
+        r_prev = r;
+    }
+    area
+}
+
+/// Mean of the segments' finish roughness (m) weighted by wetted area; 0 without area.
+fn wetted_mean_roughness(segments: &[bowshock_sim::BodySegment]) -> f64 {
+    let (sum, area) = segments.iter().fold((0.0, 0.0), |(sum, area), s| {
+        let a = wetted_area(s);
+        (sum + s.roughness * a, area + a)
+    });
+    if area > 0.0 {
+        sum / area
+    } else {
+        0.0
+    }
 }
 
 /// Maps the vehicle of one flying stack of `rocket` (the document supplies the nose family the vehicle rounds to its five) to
@@ -220,11 +262,14 @@ pub fn plan(rocket: &Rocket, vehicle: &Vehicle, units: UnitSystem) -> Result<Pla
     if vehicle.fin_sets.iter().any(|f| matches!(f.planform, FinPlanform::Elliptical)) && fins.is_some() {
         notes.push("Elliptical fins are solved as equivalent trapezoids.".to_string());
     }
-    if vehicle.body.iter().any(|s| s.roughness > 0.0) {
-        notes.push("Walls are solved smooth; the surface finish is not modelled.".to_string());
-    }
+    let body_roughness = wetted_mean_roughness(segments);
+    notes.push(if body_roughness > 0.0 {
+        format!("Walls solved with the parts' finish: {:.0} um sand-grain roughness.", body_roughness * 1e6)
+    } else {
+        "Walls solved smooth (the parts' finish is polished).".to_string()
+    });
 
-    let mut plan = Plan { body, fins, rest, notes, geometry: 0 };
+    let mut plan = Plan { body, fins, body_roughness, rest, notes, geometry: 0 };
     plan.geometry = plan.hash();
     Ok(plan)
 }
@@ -243,6 +288,8 @@ impl Plan {
             solver::NoseShape::Haack { c } => h.u64(4).f(c),
         };
         h.f(n.length).f(n.diameter);
+        // roughness in micrometres: the micro-unit rounding of `f` would otherwise blur the finishes
+        h.f(self.body_roughness * 1e6);
         for a in &self.body.aft {
             match *a {
                 solver::AftSpec::Tube { length } => h.u64(10).f(length),
@@ -251,7 +298,7 @@ impl Plan {
         }
         match &self.fins {
             Some(f) => {
-                h.u64(20).u64(u64::from(f.count)).f(f.root_chord).f(f.tip_chord).f(f.span).f(f.sweep).f(f.thickness);
+                h.u64(20).u64(u64::from(f.count)).f(f.root_chord).f(f.tip_chord).f(f.span).f(f.sweep).f(f.thickness).f(f.roughness * 1e6);
                 h.u64(match f.profile {
                     solver::FinProfile::Square => 0,
                     solver::FinProfile::Rounded => 1,
@@ -439,6 +486,7 @@ pub fn solve(job: &Job, cancel: &AtomicBool, mut progress: impl FnMut(Event)) ->
                 CfdGrid::Coarse => solver::Resolution::Coarse,
                 CfdGrid::Medium => solver::Resolution::Medium,
             })
+            .roughness(job.plan.body_roughness)
             .backend(backend);
         if let Some(fins) = &job.plan.fins {
             analysis = analysis.fins(fins.clone());
@@ -661,6 +709,51 @@ mod tests {
         let set = &vehicle.fin_sets[0];
         assert_eq!((fins.count, fins.root_chord, fins.span), (set.count, set.root_chord, set.span));
         fins.validate().unwrap();
+    }
+
+    #[test]
+    fn the_wall_roughness_is_the_wetted_area_mean_of_the_finishes() {
+        // independent areas: fine trapezoid integration of the profile
+        let area = |s: &bowshock_sim::BodySegment| {
+            let n = 4000;
+            (0..n)
+                .map(|i| {
+                    let (x0, x1) = (s.length * i as f64 / n as f64, s.length * (i + 1) as f64 / n as f64);
+                    let (r0, r1) = (s.radius_at(x0), s.radius_at(x1));
+                    std::f64::consts::PI * (r0 + r1) * (r1 - r0).hypot(x1 - x0)
+                })
+                .sum::<f64>()
+        };
+        let (rocket, mut vehicle) = example();
+        let all = plan(&rocket, &vehicle).unwrap();
+        let expected = {
+            let (sum, a) = vehicle.body.iter().fold((0.0, 0.0), |(s, a), seg| (s + seg.roughness * area(seg), a + area(seg)));
+            sum / a
+        };
+        assert!(expected > 0.0);
+        assert!((all.body_roughness - expected).abs() < 1e-3 * expected, "{} vs {expected}", all.body_roughness);
+        let um = format!("{:.0} um", expected * 1e6);
+        assert!(all.notes.iter().any(|n| n.contains(&um) && n.contains("roughness")), "{:?}", all.notes);
+        assert!(!all.notes.iter().any(|n| n.contains("solved smooth;")), "{:?}", all.notes);
+        // a different finish on part of the body moves the mean and the geometry hash
+        vehicle.body[0].roughness = 0.0;
+        for s in &mut vehicle.body[1..] {
+            s.roughness = 100e-6;
+        }
+        let split = plan(&rocket, &vehicle).unwrap();
+        let (nose, rest) = (area(&vehicle.body[0]), vehicle.body[1..].iter().map(area).sum::<f64>());
+        let expected = 100e-6 * rest / (nose + rest);
+        assert!((split.body_roughness - expected).abs() < 1e-3 * expected, "{} vs {expected}", split.body_roughness);
+        assert_ne!(split.geometry, all.geometry);
+        // fins carry their own finish
+        assert_eq!(all.fins.as_ref().unwrap().roughness, vehicle.fin_sets[0].roughness);
+        // a polished body is solved smooth and says so
+        for s in &mut vehicle.body {
+            s.roughness = 0.0;
+        }
+        let smooth = plan(&rocket, &vehicle).unwrap();
+        assert_eq!(smooth.body_roughness, 0.0);
+        assert!(smooth.notes.iter().any(|n| n.contains("solved smooth")), "{:?}", smooth.notes);
     }
 
     #[test]
@@ -1052,7 +1145,11 @@ mod tests {
             }
             let mut finishes: Vec<String> = rocket.parts().iter().map(|p| format!("{:?} ({:.0} um)", p.finish, p.finish.roughness() * 1e6)).collect();
             finishes.dedup();
-            println!("Model body finishes: {}; OpenRocket perfect_finish = {}; CFD walls are smooth.\n", finishes.join(", "), reference["perfect_finish"]);
+            println!(
+                "Model body finishes: {}; OpenRocket perfect_finish = {}; CFD walls use the same finishes.\n",
+                finishes.join(", "),
+                reference["perfect_finish"]
+            );
             let mut rows: Vec<(f64, Value)> = cfg["aero"]
                 .as_array()
                 .cloned()

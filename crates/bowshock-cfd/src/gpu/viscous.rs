@@ -35,6 +35,9 @@ struct VFlow {
     cell: [A; 8],
     fvi: [A; 3],
     fvj: [A; 3],
+    /// Rough-wall run (`Viscous::rough`): `[k_w, omega_w, mu_t,w]` of every cell (`LazySolver::aupoix_wall`, zero in solid cells), from the primitives of this
+    /// evaluation; `mu_t,w = rho nu_t,w` is the eddy viscosity of a no-slip face, `k_w`, `omega_w` the wall values of the turbulence scalars.
+    rough: Option<[A; 3]>,
 }
 
 /// Geometry of the compact face gradients, per direction (i faces `[ni + 1, nj]`, j faces `[ni, nj + 1]`): the unit vector `e` and the
@@ -68,6 +71,10 @@ struct VGeo {
     fold: Option<[[Array<bool>; 2]; 2]>,
     /// The wall distance of every cell centroid (`f64::INFINITY` capped to `1e10`) of the SST model.
     dwall: Option<A>,
+    /// A rough-wall run (`Viscous::rough`): the cells above a rough no-slip face (`Walls::rough_jface`: the body surface) as a mask `[ni, nj]`.
+    rough_cells: Option<Array<bool>>,
+    /// A rough-wall run: the roughness `ks rough_ramp(i)` of every cell (`ks` outside the rough wall cells, where it is not used).
+    rough_ks: Option<A>,
 }
 
 /// `Walls::noslip_jface`: is the j-face `(i, j)` a no-slip wall?
@@ -230,6 +237,26 @@ impl VGeo {
                 None => None,
             },
             dwall,
+            rough_cells: v
+                .rough()
+                .then(|| {
+                    mask_array(ctx, [ni, nj], &|i, j| match blk {
+                        None => j == 0 && jmin_slip && i >= v.wall_i_start,
+                        Some(b) => j == b.j_end && i >= v.wall_i_start && i < b.i_end,
+                    })
+                })
+                .transpose()?,
+            rough_ks: v
+                .rough()
+                .then(|| {
+                    let rough_cell = |i: usize, j: usize| match blk {
+                        None => j == 0 && jmin_slip && i >= v.wall_i_start,
+                        Some(b) => j == b.j_end && i >= v.wall_i_start && i < b.i_end,
+                    };
+                    let ks: Vec<f64> = (0..ni * nj).map(|c| if rough_cell(c % ni, c / ni) { v.roughness * crate::turbulence::rough_ramp(c % ni, v.wall_i_start) } else { v.roughness }).collect();
+                    up(ctx, &ks, [ni, nj])
+                })
+                .transpose()?,
         })
     }
 }
@@ -448,7 +475,8 @@ impl LazySolver {
     /// Fv.n = [0, txx n_x + txr n_r, txr n_x + trr n_r, (u txx + v txr + kappa T_x) n_x + (u txr + v trr + kappa T_r) n_r]
     /// ```
     ///
-    /// The eddy viscosity of a face on a no-slip wall is 0 (the ghost carries the negated eddy viscosity of its cell).
+    /// The eddy viscosity of a face on a no-slip wall is 0 (the ghost carries the negated eddy viscosity of its cell), or `mu_t,w` of the Aupoix wall state
+    /// (`VFlow::rough`) of a rough wall.
     fn viscous_flow(&self, p: &Rec, w: &Rec, mu_t: Option<&A>) -> Option<VFlow> {
         let vg = self.visc.as_ref()?;
         let v = vg.v;
@@ -485,17 +513,29 @@ impl LazySolver {
             acc.expect("a cell has four faces") * &vg.inv_a
         });
         let [g0, g1, g2, g3, g4, g5] = grad;
+        let rough = v.rough().then(|| {
+            let d = vg.dwall.as_ref().expect("an SST run computes the wall distance in set_viscous");
+            let speed = (&p[1] * &p[1] + &p[2] * &p[2]).sqrt();
+            let nu = &mu / &p[0];
+            let ks = vg.rough_ks.as_ref().expect("a rough run builds the roughness array");
+            let [k_w, om_w, nu_t] = self.aupoix_wall(&nu, &speed, d, ks);
+            let mask = vg.rough_cells.as_ref().expect("a rough run builds the rough-cell mask");
+            // the other no-slip cells (base wall, sting) keep the smooth state `[0, 60 nu / (beta1 d^2), 0]`
+            let smooth = c(60.0) * &nu / (c(BETA1) * d * d);
+            staged(self.staging, [select(mask, &k_w, c(0.0)), select(mask, &om_w, &smooth), select(mask, &p[0] * nu_t, c(0.0))])
+        });
         let mu_t = mu_t.cloned().unwrap_or_else(|| vg.zero.clone());
         let cell = staged(self.staging, [g0, g1, g2, g3, g4, g5, mu, mu_t]);
         // pass 2: viscous fluxes of the faces
-        let fvi = staged(self.staging, self.viscous_face_flux(vg, 0, &li, &ri, &cell));
-        let fvj = staged(self.staging, self.viscous_face_flux(vg, 1, &lj, &rj, &cell));
-        Some(VFlow { cell, fvi, fvj })
+        let mu_tw = rough.as_ref().map(|r| &r[2]);
+        let fvi = staged(self.staging, self.viscous_face_flux(vg, 0, &li, &ri, &cell, mu_tw));
+        let fvj = staged(self.staging, self.viscous_face_flux(vg, 1, &lj, &rj, &cell, mu_tw));
+        Some(VFlow { cell, fvi, fvj, rough })
     }
 
     /// `Fv.n` (components 1 to 3) of every face of direction `dir` from the states `wl`, `wr` on the two sides and the cell record
     /// `cell` (see [`LazySolver::viscous_flow`]).
-    fn viscous_face_flux(&self, vg: &VGeo, dir: usize, wl: &Rec, wr: &Rec, cell: &[A; 8]) -> [A; 3] {
+    fn viscous_face_flux(&self, vg: &VGeo, dir: usize, wl: &Rec, wr: &Rec, cell: &[A; 8], mu_tw: Option<&A>) -> [A; 3] {
         let g = &self.geo;
         let d = &vg.dir[dir];
         let (nx, nr) = if dir == 0 { (&g.inx, &g.inr) } else { (&g.jnx, &g.jnr) };
@@ -512,7 +552,14 @@ impl LazySolver {
         }
         let mu_f = c(0.5) * (&cl[6] + &cr[6]);
         let mut_f = c(0.5) * (&cl[7] + &cr[7]);
-        let mut_f = if vg.v.turbulence == Turbulence::Sst { select(&d.noslip, c(0.0), &mut_f) } else { mut_f };
+        let mut_f = match (vg.v.turbulence == Turbulence::Sst, mu_tw) {
+            (true, Some(m)) => {
+                let (tl, tr) = self.cell_sides(std::array::from_ref(m), dir, &[]);
+                select(&d.noslip, c(0.5) * (&tl[0] + &tr[0]), &mut_f)
+            }
+            (true, None) => select(&d.noslip, c(0.0), &mut_f),
+            (false, _) => mut_f,
+        };
         let (uf, vf) = (c(0.5) * (&wl[1] + &wr[1]), c(0.5) * (&wl[2] + &wr[2]));
         let (u_x, u_r, v_x, v_r, t_x, t_r) = (&gf[0], &gf[1], &gf[2], &gf[3], &gf[4], &gf[5]);
         let div = u_x + v_r + &vf / &d.rm;
@@ -565,7 +612,14 @@ impl LazySolver {
         let (cl, cr) = self.cell_sides(&[vf.cell[6].clone(), vf.cell[7].clone()], dir, &self.jet_values(0, 1));
         let mu_f = lhs(&(c(0.5) * (&cl[0] + &cr[0])));
         let mut_f = lhs(&(c(0.5) * (&cl[1] + &cr[1])));
-        let mut_f = if vg.v.turbulence == Turbulence::Sst { select(&vg.dir[dir].noslip, 0.0f32, &mut_f) } else { mut_f };
+        let mut_f = match (vg.v.turbulence == Turbulence::Sst, &vf.rough) {
+            (true, Some(r)) => {
+                let (tl, tr) = self.cell_sides(&[r[2].clone()], dir, &[]);
+                select(&vg.dir[dir].noslip, lhs(&(c(0.5) * (&tl[0] + &tr[0]))), &mut_f)
+            }
+            (true, None) => select(&vg.dir[dir].noslip, 0.0f32, &mut_f),
+            (false, _) => mut_f,
+        };
         let rho_f = 0.5f32 * (rho_l + rho_r);
         cf(2.0 * GAMMA) * (mu_f / cf(PRANDTL) + mut_f / cf(PRANDTL_T)) * &vg.dir[dir].inv_d_f / rho_f
     }

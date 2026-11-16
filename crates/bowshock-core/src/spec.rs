@@ -132,6 +132,9 @@ pub struct FinSpec {
     pub sweep: f64,
     /// Maximum thickness \[m\].
     pub thickness: f64,
+    /// Equivalent sand-grain roughness of the fin surface \[m\]; 0 is smooth. The skin friction is floored at OpenRocket's
+    /// roughness-limited value (`60e-6` is OpenRocket's regular paint).
+    pub roughness: f64,
     /// Edge profile.
     pub profile: FinProfile,
 }
@@ -147,6 +150,9 @@ impl FinSpec {
         positive("fins.thickness", self.thickness)?;
         if !(self.tip_chord.is_finite() && self.tip_chord >= 0.0) {
             return invalid("fins.tip_chord", &format!("must be finite and >= 0, got {}", self.tip_chord));
+        }
+        if !(self.roughness.is_finite() && self.roughness >= 0.0) {
+            return invalid("fins.roughness", &format!("must be finite and >= 0, got {}", self.roughness));
         }
         if !(self.sweep.is_finite() && (self.sweep / self.span).atan().abs() <= 75f64.to_radians()) {
             return invalid("fins.sweep", &format!("must be finite with a leading-edge sweep angle of at most 75 degrees, got {}", self.sweep));

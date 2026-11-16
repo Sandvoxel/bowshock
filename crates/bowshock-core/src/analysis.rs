@@ -225,6 +225,8 @@ pub struct Analysis {
     d_ref: f64,
     /// Built from a dimensional [`BodySpec`] (`d_nose` in metres).
     dimensional: bool,
+    /// Equivalent sand-grain roughness of the body surface \[m\].
+    roughness_m: f64,
     resolution: Resolution,
     wake: Option<Wake>,
     flight: Option<FlightConditions>,
@@ -256,6 +258,7 @@ impl Analysis {
             d_nose: 1.0,
             d_ref: 1.0,
             dimensional: false,
+            roughness_m: 0.0,
             resolution: Resolution::Medium,
             wake: None,
             flight: None,
@@ -351,6 +354,13 @@ impl Analysis {
         self
     }
 
+    /// Equivalent sand-grain roughness of the body surface in metres (default 0 = smooth). Needs [`Analysis::viscous`] and a
+    /// dimensional [`BodySpec`]; must be finite, `>= 0` and below 1 % of the nose diameter.
+    pub fn roughness(mut self, ks_m: f64) -> Self {
+        self.roughness_m = ks_m;
+        self
+    }
+
     /// Add a set of fins to the drag. Needs [`Analysis::viscous`] flight conditions, which give the Reynolds number.
     pub fn fins(mut self, f: FinSpec) -> Self {
         self.fins = Some(f);
@@ -383,7 +393,7 @@ impl Analysis {
             let rho = p / t;
             let u = m.exit_mach * t.sqrt();
             let k = 1.5 * (0.01 * u).powi(2);
-            let mu = Viscous { re_c, sutherland, turbulence: Turbulence::Sst, wall_i_start: 0 }.mu(t);
+            let mu = Viscous { re_c, sutherland, turbulence: Turbulence::Sst, wall_i_start: 0, roughness: 0.0 }.mu(t);
             Jet { r_exit: 0.5 * m.exit_diameter / self.d_nose, state: [rho, u, 0.0, p / GAMMA], turb: [k, rho * k / (10.0 * mu)] }
         });
         Ok(Some(Rans { re_c, sutherland, mach_max: machs.iter().copied().fold(f64::NEG_INFINITY, f64::max), jet }))
@@ -412,6 +422,16 @@ impl Analysis {
             }
         }
 
+        if !(self.roughness_m.is_finite() && self.roughness_m >= 0.0 && self.roughness_m < 0.01 * self.d_nose) {
+            return Err(Error::InvalidInput(format!(
+                "roughness {} m must be finite, >= 0 and below 1% of the nose diameter ({} m)",
+                self.roughness_m,
+                0.01 * self.d_nose
+            )));
+        }
+        if self.roughness_m > 0.0 && (self.flight.is_none() || !self.dimensional) {
+            return Err(Error::InvalidInput("roughness needs Analysis::viscous and a dimensional BodySpec".into()));
+        }
         if let Some(f) = &self.fins {
             f.validate()?;
             if self.flight.is_none() {
@@ -500,6 +520,9 @@ impl Analysis {
             Some(r) => Case::viscous(mach, self.body.clone(), level, wake, r.re_c, r.sutherland, r.mach_max),
             None => Case::new(mach, self.body.clone(), level, wake, Numerics::auto(mach, level, wake)),
         };
+        if let Some(v) = case.viscous.as_mut() {
+            v.roughness = self.roughness_m / self.d_nose;
+        }
         if let Some(n) = self.numerics {
             case.numerics = n;
         }
@@ -523,7 +546,11 @@ impl Analysis {
         let base_modelled = !(viscous && self.wake_used() == Wake::Base);
         let base = if base_modelled { base_drag_coefficient(mach) * (self.body.base_radius() / self.body.body.radius()).powi(2) } else { detail.cd_base };
         let mut total = (forebody_pressure + friction.unwrap_or(0.0) + base) * q;
-        let fins = self.fins.as_ref().zip(self.flight.and_then(|f| f.atmosphere.state().ok())).map(|(f, air)| crate::fins::fin_drag(f, mach, &air, self.d_ref));
+        let fins = self
+            .fins
+            .as_ref()
+            .zip(self.flight.and_then(|f| f.atmosphere.state().ok()))
+            .map(|(f, air)| crate::fins::fin_drag(f, mach, &air, self.d_ref, self.body.x_base() * self.d_nose));
         if let Some(fd) = fins {
             total += fd.friction + fd.pressure;
         }

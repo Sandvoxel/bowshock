@@ -30,8 +30,8 @@
 //!
 //! A state across a boundary is the ghost cell of `Solver::w`; the solid cell across a wall of a body block is its ghost as
 //! well (block ghost in the j direction, [`wall_ghost`] across the base wall). A ghost sits at the mirror image of the centre
-//! of its cell in the face centre and carries the gradient, viscosity and eddy viscosity of that cell (the eddy viscosity with
-//! the sign flipped across a no-slip face, so it vanishes at the wall).
+//! of its cell in the face centre and carries the gradient, viscosity and eddy viscosity of that cell (the eddy viscosity
+//! `2 mu_t,w - mu_t` across a no-slip face, `-mu_t` for a smooth wall, so it is the wall value `mu_t,w` there: 0 when smooth).
 //!
 //! No-slip walls (`Walls`): the face where the viscous flow starts (`Viscous::wall_i_start`) and the body surface, base wall
 //! and sting surface of a block. The wall ghost of a no-slip face is `(rho, -u, -v, p)` (adiabatic wall, zero normal pressure
@@ -47,6 +47,12 @@ impl Viscous {
     #[inline]
     pub fn mu(&self, t: f64) -> f64 {
         t.powf(1.5) * (1.0 + self.sutherland) / (t + self.sutherland) / self.re_c
+    }
+
+    /// Does the run use a rough wall (SST with `roughness > 0`)? Then `Solver::rough_wall` holds the Aupoix wall state of the wall cells.
+    #[inline]
+    pub fn rough(&self) -> bool {
+        self.turbulence == Turbulence::Sst && self.roughness > 0.0
     }
 }
 
@@ -100,6 +106,18 @@ impl Walls {
     #[inline]
     pub(crate) fn noslip_iface(&self, i: usize, j: usize) -> bool {
         self.visc.is_some() && self.blk.is_some_and(|b| i == b.i_end && j >= b.j_sting && j < b.j_end) && !self.nozzle.is_some_and(|n| j < n.j_end)
+    }
+
+    /// Is the j-face `(i, j)` a rough no-slip wall (`Viscous::roughness`)? The body surface (the domain `jmin` wall without a block): not the
+    /// base wall and not the sting, whose coarse cells are no place for a roughness wall state.
+    #[inline]
+    pub(crate) fn rough_jface(&self, i: usize, j: usize) -> bool {
+        let Some(v) = self.visc else { return false };
+        v.rough()
+            && match self.blk {
+                None => j == 0 && self.jmin_slip && i >= v.wall_i_start,
+                Some(b) => j == b.j_end && i >= v.wall_i_start && i < b.i_end,
+            }
     }
 
     /// Is the i-face `(i, j)` a nozzle exit face (fixed inflow state)?
@@ -231,14 +249,21 @@ pub(crate) fn stencil(grid: &Grid, sides: &FaceSides, xf: f64, rf: f64) -> (f64,
     (dd, dx / dd, dr / dd)
 }
 
-/// Face viscosity and eddy viscosity: mean of the two sides, a ghost taking its cell's values (eddy viscosity negated
-/// across a no-slip face; a jet ghost has the fixed jet values).
+/// Face viscosity and eddy viscosity: mean of the two sides, a ghost taking its cell's values (eddy viscosity `2 mu_t,w - mu_t` across a
+/// no-slip face, `-mu_t` for a smooth wall (`rough` empty): the face value is the wall eddy viscosity `mu_t,w = rough[cell][2]`; a jet ghost
+/// has the fixed jet values).
 #[inline]
-pub(crate) fn face_mu(mu: &[f64], mu_t: &[f64], sides: &FaceSides) -> (f64, f64) {
+pub(crate) fn face_mu(mu: &[f64], mu_t: &[f64], rough: &[[f64; 3]], sides: &FaceSides) -> (f64, f64) {
     let mu_side = |s: &Side| s.fixed.map_or(mu[s.cell], |f| f.0);
     let mut_side = |s: &Side| match s.fixed {
         Some(f) => f.1,
-        None if s.ghost && sides.noslip => -mu_t[s.cell],
+        None if s.ghost && sides.noslip => {
+            if rough.is_empty() {
+                -mu_t[s.cell]
+            } else {
+                2.0 * rough[s.cell][2] - mu_t[s.cell]
+            }
+        }
         None => mu_t[s.cell],
     };
     (0.5 * (mu_side(&sides.l) + mu_side(&sides.r)), 0.5 * (mut_side(&sides.l) + mut_side(&sides.r)))
@@ -291,7 +316,7 @@ pub(crate) fn cell_pass(v: &Viscous, grid: &Grid, w: &[Prim], walls: &Walls, gra
 }
 
 /// Viscous flux `Fv.n` of one face (see the module documentation); `f` is the face, `(xf, rf)` its centre.
-fn viscous_flux(grid: &Grid, grad: &[[f64; 6]], mu: &[f64], mu_t: &[f64], sides: &FaceSides, f: &Face, xf: f64, rf: f64) -> Cons {
+fn viscous_flux(grid: &Grid, grad: &[[f64; 6]], mu: &[f64], mu_t: &[f64], rough: &[[f64; 3]], sides: &FaceSides, f: &Face, xf: f64, rf: f64) -> Cons {
     if f.rm == 0.0 {
         return [0.0; 4];
     }
@@ -305,7 +330,7 @@ fn viscous_flux(grid: &Grid, grad: &[[f64; 6]], mu: &[f64], mu_t: &[f64], sides:
         gf[2 * m] = gbx + corr * ex;
         gf[2 * m + 1] = gbr + corr * er;
     }
-    let (mu_f, mut_f) = face_mu(mu, mu_t, sides);
+    let (mu_f, mut_f) = face_mu(mu, mu_t, rough, sides);
     let (uf, vf) = (0.5 * (sides.l.w[1] + sides.r.w[1]), 0.5 * (sides.l.w[2] + sides.r.w[2]));
     let (u_x, u_r, v_x, v_r, t_x, t_r) = (gf[0], gf[1], gf[2], gf[3], gf[4], gf[5]);
     let div = u_x + v_r + vf / f.rm;
@@ -318,14 +343,25 @@ fn viscous_flux(grid: &Grid, grad: &[[f64; 6]], mu: &[f64], mu_t: &[f64], sides:
 }
 
 /// Pass 2: viscous fluxes of every i-face (`fvi`, `(ni + 1) * nj`) and j-face (`fvj`, `ni * (nj + 1)`).
-pub(crate) fn face_pass(grid: &Grid, w: &[Prim], walls: &Walls, grad: &[[f64; 6]], mu: &[f64], mu_t: &[f64], fvi: &mut [Cons], fvj: &mut [Cons]) {
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn face_pass(
+    grid: &Grid,
+    w: &[Prim],
+    walls: &Walls,
+    grad: &[[f64; 6]],
+    mu: &[f64],
+    mu_t: &[f64],
+    rough: &[[f64; 3]],
+    fvi: &mut [Cons],
+    fvj: &mut [Cons],
+) {
     let ni = grid.ni;
     fvi.par_chunks_mut(ni + 1).enumerate().for_each(|(j, row)| {
         for (i, out) in row.iter_mut().enumerate() {
             *out = match iface_sides(grid, w, walls, i, j) {
                 Some(s) => {
                     let (xf, rf) = iface_centre(grid, i, j);
-                    viscous_flux(grid, grad, mu, mu_t, &s, &grid.iface[j * (ni + 1) + i], xf, rf)
+                    viscous_flux(grid, grad, mu, mu_t, rough, &s, &grid.iface[j * (ni + 1) + i], xf, rf)
                 }
                 None => [0.0; 4],
             };
@@ -336,9 +372,37 @@ pub(crate) fn face_pass(grid: &Grid, w: &[Prim], walls: &Walls, grad: &[[f64; 6]
             *out = match jface_sides(grid, w, walls, i, j) {
                 Some(s) => {
                     let (xf, rf) = jface_centre(grid, i, j);
-                    viscous_flux(grid, grad, mu, mu_t, &s, &grid.jface[j * ni + i], xf, rf)
+                    viscous_flux(grid, grad, mu, mu_t, rough, &s, &grid.jface[j * ni + i], xf, rf)
                 }
                 None => [0.0; 4],
+            };
+        }
+    });
+}
+
+/// Rough-wall state `[k_w, omega_w, mu_t,w]` of every fluid cell that has a no-slip face (the cell above / behind it), from the primitives `w`, the
+/// viscosity `mu` and the wall distance `dwall`; zero elsewhere. Cells of a rough wall (`Walls::rough_jface`) take `turbulence::aupoix_wall` with
+/// the roughness `ks` phased in over the first wall cells (`turbulence::rough_ramp`) and `mu_t,w = rho nu_t,w`; the other no-slip cells (base wall,
+/// sting) the smooth state `[0, 60 nu / (beta1 d^2), 0]`.
+pub(crate) fn rough_pass(grid: &Grid, w: &[Prim], walls: &Walls, dwall: &[f64], mu: &[f64], ks: f64, out: &mut [[f64; 3]]) {
+    let ni = grid.ni;
+    let wall_i_start = walls.visc.map_or(0, |v| v.wall_i_start);
+    out.par_chunks_mut(ni).enumerate().for_each(|(j, row)| {
+        for (i, o) in row.iter_mut().enumerate() {
+            *o = [0.0; 3];
+            let rough = walls.rough_jface(i, j);
+            if walls.blk.is_some_and(|b| b.solid(i, j)) || !(rough || walls.noslip_jface(i, j) || walls.noslip_iface(i, j)) {
+                continue;
+            }
+            let c = j * ni + i;
+            let wc = &w[pidx(ni, i as isize, j as isize)];
+            let nu = mu[c] / wc[0];
+            *o = if rough {
+                let ks_eff = ks * crate::turbulence::rough_ramp(i, wall_i_start);
+                let [k_w, om_w, nu_t] = crate::turbulence::aupoix_wall(nu, wc[1].hypot(wc[2]), dwall[c], ks_eff);
+                [k_w, om_w, wc[0] * nu_t]
+            } else {
+                [0.0, 60.0 * nu / (crate::turbulence::BETA1 * dwall[c] * dwall[c]), 0.0]
             };
         }
     });
@@ -362,11 +426,21 @@ pub(crate) fn diffusion_rate(mu_c: f64, mu_t_c: f64, rho_c: f64, len: f64, area:
 /// Diffusive spectral radius `lam = gamma (mu_f / PRANDTL + mu_t,f / PRANDTL_T) / (rho_f |d|)` of the faces `(lower, upper)`
 /// of the cell `(i, j)` in the line direction (`0.0` for a face inside the solid block): the implicit operator adds `2 lam I`
 /// to the dissipation matrix of the face.
-pub(crate) fn face_lambdas(grid: &Grid, w: &[Prim], walls: &Walls, mu: &[f64], mu_t: &[f64], dir_i: bool, i: usize, j: usize) -> (f64, f64) {
+pub(crate) fn face_lambdas(
+    grid: &Grid,
+    w: &[Prim],
+    walls: &Walls,
+    mu: &[f64],
+    mu_t: &[f64],
+    rough: &[[f64; 3]],
+    dir_i: bool,
+    i: usize,
+    j: usize,
+) -> (f64, f64) {
     let lam = |sides: Option<FaceSides>, (xf, rf): (f64, f64)| match sides {
         Some(s) => {
             let (dd, _, _) = stencil(grid, &s, xf, rf);
-            let (mu_f, mut_f) = face_mu(mu, mu_t, &s);
+            let (mu_f, mut_f) = face_mu(mu, mu_t, rough, &s);
             let rho_f = 0.5 * (s.l.w[0] + s.r.w[0]);
             GAMMA * (mu_f / PRANDTL + mut_f / PRANDTL_T) / (rho_f * dd)
         }
@@ -400,7 +474,7 @@ pub(crate) mod tests {
             first_order_iters: 0,
         };
         let mut s = Solver::new(crate::solver::tests::curved_grid(ni, nj), cfg);
-        s.set_viscous(Some(Viscous { re_c: 1e4, sutherland: 0.368, turbulence: Turbulence::Laminar, wall_i_start: ni }));
+        s.set_viscous(Some(Viscous { re_c: 1e4, sutherland: 0.368, turbulence: Turbulence::Laminar, wall_i_start: ni, roughness: 0.0 }));
         s.eval_residual(true);
         let m = s.res.iter().flat_map(|r| r.iter()).fold(0.0f64, |a, b| a.max(b.abs()));
         assert!(m < 1e-12, "max |dU/dt| = {m:e}");
@@ -417,7 +491,10 @@ pub(crate) mod tests {
         let (tx, tr) = (f.nr, -f.nx);
         let ut = w[1] * tx + w[2] * tr;
         let dn = ((g.xc[i] - xf) * f.nx + (g.rc[i] - rf) * f.nr).abs();
-        (xf, v.mu(temperature(&w)) * ut / dn / (0.5 * mach * mach))
+        let mu = v.mu(temperature(&w));
+        // rough wall: the wall shear is (mu + mu_t,w) u_t / d_n with the Aupoix wall eddy viscosity of the cell state
+        let mu_tw = if v.rough() { w[0] * crate::turbulence::aupoix_wall(mu / w[0], w[1].hypot(w[2]), dn, v.roughness)[2] } else { 0.0 };
+        (xf, (mu + mu_tw) * ut / dn / (0.5 * mach * mach))
     }
 
     /// G1: laminar flat plate (Blasius) in the annulus formulation, `Re_x = re_c M x`.
@@ -442,7 +519,7 @@ pub(crate) mod tests {
         let mut s = Solver::new(grid, cfg);
         s.low_mach = true;
         s.set_scheme(Scheme::Implicit(ImplicitParams::VISCOUS));
-        let v = Viscous { re_c, sutherland: 0.368, turbulence: Turbulence::Laminar, wall_i_start: 20 };
+        let v = Viscous { re_c, sutherland: 0.368, turbulence: Turbulence::Laminar, wall_i_start: 20, roughness: 0.0 };
         s.set_viscous(Some(v));
         let (mut peak, mut last, mut iters) = (0.0f64, f64::INFINITY, 0);
         let mut cf_prev = [f64::NAN; 2];

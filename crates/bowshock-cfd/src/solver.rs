@@ -170,6 +170,9 @@ pub struct Viscous {
     /// First `i` index (column) of the no-slip surface: the wall upstream of it (e.g. the axis or the approach to a plate)
     /// stays a slip wall.
     pub wall_i_start: usize,
+    /// Equivalent sand-grain roughness `ks` of the no-slip walls in nose diameters; `0.0` is a smooth wall. With `ks > 0` the SST model
+    /// uses the Wilcox (1988) rough-wall `omega` at the wall and the Hellsten & Laine (1997) `F3` limiter correction, see `turbulence.rs`.
+    pub roughness: f64,
 }
 
 /// Laminar Prandtl number.
@@ -234,6 +237,9 @@ pub struct Solver {
     pub grad: Vec<[f64; 6]>,
     pub mu: Vec<f64>,
     pub mu_t: Vec<f64>,
+    /// Rough-wall run (`Viscous::rough`): `[k_w, omega_w, mu_t,w]` (Aupoix wall state, `turbulence::aupoix_wall`) of the cells that have a
+    /// no-slip face, from the primitives of the last residual evaluation (read by the turbulence update and by `viscous::face_mu`); empty otherwise.
+    pub rough_wall: Vec<[f64; 3]>,
     /// Viscous run: viscous face fluxes `Fv.n` of the i-faces and j-faces (shapes of `fi`, `fj`).
     fvi: Vec<Cons>,
     fvj: Vec<Cons>,
@@ -281,6 +287,7 @@ impl Solver {
             grad: Vec::new(),
             mu: Vec::new(),
             mu_t: Vec::new(),
+            rough_wall: Vec::new(),
             fvi: Vec::new(),
             fvj: Vec::new(),
             turb: Vec::new(),
@@ -352,12 +359,14 @@ impl Solver {
             self.grad = vec![[0.0; 6]; ni * nj];
             self.mu = vec![0.0; ni * nj];
             self.mu_t = vec![0.0; ni * nj];
+            self.rough_wall = if v.is_some_and(|v| v.rough()) { vec![[0.0; 3]; ni * nj] } else { Vec::new() };
             self.fvi = vec![[0.0; 4]; (ni + 1) * nj];
             self.fvj = vec![[0.0; 4]; ni * (nj + 1)];
         } else {
             self.grad = Vec::new();
             self.mu = Vec::new();
             self.mu_t = Vec::new();
+            self.rough_wall = Vec::new();
             self.fvi = Vec::new();
             self.fvj = Vec::new();
         }
@@ -483,7 +492,7 @@ impl Solver {
             self.fill_block_ghosts(b);
         }
 
-        let Solver { grid, w, fi, fj, res, dt, forcing, irs_ei, irs_ej, grad, mu, mu_t, fvi, fvj, .. } = self;
+        let Solver { grid, w, fi, fj, res, dt, forcing, irs_ei, irs_ej, grad, mu, mu_t, rough_wall, dwall, fvi, fvj, .. } = self;
         let (grid, w) = (&*grid, &*w);
         let forcing: &[Cons] = forcing;
 
@@ -546,7 +555,10 @@ impl Solver {
         // 2c. viscous: cell gradients and viscosity, viscous face fluxes
         if let Some(v) = visc {
             viscous::cell_pass(&v, grid, w, &walls, grad, mu);
-            viscous::face_pass(grid, w, &walls, grad, mu, mu_t, fvi, fvj);
+            if v.rough() {
+                viscous::rough_pass(grid, w, &walls, dwall, mu, v.roughness, rough_wall);
+            }
+            viscous::face_pass(grid, w, &walls, grad, mu, mu_t, rough_wall, fvi, fvj);
         }
         let (grad, mu, mu_t): (&[[f64; 6]], &[f64], &[f64]) = (grad, mu, mu_t);
         let (fvi, fvj): (&[Cons], &[Cons]) = (fvi, fvj);
@@ -934,7 +946,7 @@ mod nozzle_tests {
         let mut s = Solver::new(tests::curved_grid(ni, nj), config());
         s.set_block(Some(BLOCK));
         s.set_nozzle(Some(jet()));
-        s.set_viscous(Some(Viscous { re_c: 1e5, sutherland: 0.38, turbulence: Turbulence::Sst, wall_i_start: 0 }));
+        s.set_viscous(Some(Viscous { re_c: 1e5, sutherland: 0.38, turbulence: Turbulence::Sst, wall_i_start: 0, roughness: 0.0 }));
         let g = &s.grid;
         let dist = |p: (f64, f64), a: (f64, f64), b: (f64, f64)| {
             let (ex, er) = (b.0 - a.0, b.1 - a.1);

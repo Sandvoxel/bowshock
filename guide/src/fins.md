@@ -8,7 +8,9 @@ alone. **Fin-body interference drag is neglected**.
 
 ## FinSpec
 
-One set of identical trapezoidal fins, equally spaced around the body:
+One set of identical trapezoidal fins, equally spaced around the body. `roughness` is the equivalent sand-grain roughness of the fin
+surface in metres (0 = smooth; `60e-6` is OpenRocket's regular paint): the skin friction is floored at OpenRocket's roughness-limited
+value `0.032 (roughness / L)^0.2`, with `L` the length of the body.
 
 ```rust
 use bowshock_core::{FinProfile, FinSpec};
@@ -20,6 +22,7 @@ let fins = FinSpec {
     span: 0.08,
     sweep: 0.06,
     thickness: 0.003,
+    roughness: 0.0,
     profile: FinProfile::Rounded,
 };
 fins.validate().unwrap();
@@ -51,6 +54,7 @@ fins.validate().unwrap();
 | `count` in 3..=8 | `fins.count` |
 | `root_chord`, `span`, `thickness` finite and > 0 | `fins.root_chord`, `fins.span`, `fins.thickness` |
 | `tip_chord` finite and >= 0 | `fins.tip_chord` |
+| `roughness` finite and >= 0 | `fins.roughness` |
 | `sweep` finite and the leading-edge sweep angle `atan(sweep / span)` at most 75 deg in magnitude | `fins.sweep` |
 | `thickness / mean aerodynamic chord <= 0.2` | `fins.thickness` |
 
@@ -64,6 +68,7 @@ let bad = FinSpec {
     span: 0.08,
     sweep: 0.06,
     thickness: 0.003,
+    roughness: 0.0,
     profile: FinProfile::Square,
 };
 let err = bad.validate().unwrap_err();
@@ -89,6 +94,7 @@ fn main() -> Result<(), bowshock_core::Error> {
         span: 0.08,
         sweep: 0.06,
         thickness: 0.003,
+        roughness: 0.0,
         profile: FinProfile::Rounded,
     };
     let flight = FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 0.0 } };
@@ -226,6 +232,7 @@ let fins = FinSpec {
     span: 0.08,
     sweep: 0.06,
     thickness: 0.003, // the real maximum thickness in metres
+    roughness: 0.0,
     profile: FinProfile::Custom { section },
 };
 fins.validate().unwrap();

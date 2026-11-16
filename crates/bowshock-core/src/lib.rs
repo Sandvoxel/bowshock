@@ -14,7 +14,7 @@
 //!     nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
 //!     aft: vec![AftSpec::Tube { length: 0.60 }, AftSpec::Transition { length: 0.10, aft_diameter: 0.08 }],
 //! };
-//! let fins = FinSpec { count: 4, root_chord: 0.12, tip_chord: 0.06, span: 0.08, sweep: 0.06, thickness: 0.003, profile: FinProfile::Rounded };
+//! let fins = FinSpec { count: 4, root_chord: 0.12, tip_chord: 0.06, span: 0.08, sweep: 0.06, thickness: 0.003, roughness: 0.0, profile: FinProfile::Rounded };
 //! let motor = MotorSpec { exit_diameter: 0.05, exit_mach: 2.5, exit_pressure_pa: 101_325.0, total_temperature_k: 1500.0 };
 //! let flight = FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 0.0 } };
 //!

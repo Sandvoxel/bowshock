@@ -392,7 +392,7 @@ fn assemble(s: &Solver, p: &ImplicitParams, dir_i: bool) -> Factor {
     };
     let walls = s.walls();
     let viscous_on = s.viscous.is_some();
-    let (mu, mu_t) = (&s.mu, &s.mu_t);
+    let (mu, mu_t, rough) = (&s.mu, &s.mu_t, &s.rough_wall);
     let n = ni * nj;
     let mut fac = Factor { lo: vec![ZERO; n], d: vec![ZERO; n], up: vec![ZERO; n] };
     let (lo, d, up) = (&mut fac.lo, &mut fac.d, &mut fac.up);
@@ -428,7 +428,7 @@ fn assemble(s: &Solver, p: &ImplicitParams, dir_i: bool) -> Factor {
             } else {
                 w[wm_idx]
             };
-            let (lam_l, lam_r) = if viscous_on { viscous::face_lambdas(grid, w, &walls, mu, mu_t, dir_i, i, j) } else { (0.0, 0.0) };
+            let (lam_l, lam_r) = if viscous_on { viscous::face_lambdas(grid, w, &walls, mu, mu_t, rough, dir_i, i, j) } else { (0.0, 0.0) };
             let (mut l, mut dd, mut u) = cell_blocks(wk, &wm, &w[wp_idx], fl, fr, grid.vol[c], dt[c], p.lines, src, p.roe, p.eps_fix, lam_l, lam_r);
             if k == k0 {
                 let t = if jet {

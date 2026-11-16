@@ -124,7 +124,7 @@ impl Case {
             Wake::Base => c.grid_base.n_up,
             Wake::Sting => c.grid_sting.n_up,
         };
-        c.viscous = Some(Viscous { re_c, sutherland, turbulence: Turbulence::Sst, wall_i_start });
+        c.viscous = Some(Viscous { re_c, sutherland, turbulence: Turbulence::Sst, wall_i_start, roughness: 0.0 });
         c
     }
 

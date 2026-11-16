@@ -112,7 +112,7 @@ fn g3_gpu_matches_cpu() {
 }
 
 fn fin_set() -> FinSpec {
-    FinSpec { count: 4, root_chord: 0.12, tip_chord: 0.06, span: 0.08, sweep: 0.06, thickness: 0.003, profile: FinProfile::Rounded }
+    FinSpec { count: 4, root_chord: 0.12, tip_chord: 0.06, span: 0.08, sweep: 0.06, thickness: 0.003, roughness: 0.0, profile: FinProfile::Rounded }
 }
 
 fn g3_spec() -> BodySpec {
@@ -227,4 +227,31 @@ fn drag_tolerance_needs_viscous_and_a_sane_value() {
     for rel in [0.0, f64::NAN, -1e-3, 0.5] {
         assert!(bad(base().viscous(flight()).drag_tolerance(rel)), "{rel}");
     }
+}
+
+fn roughness_spec() -> BodySpec {
+    BodySpec { nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 }, aft: vec![AftSpec::Tube { length: 0.60 }] }
+}
+
+#[test]
+fn roughness_is_validated() {
+    let invalid = |a: Analysis| match a.backend(Backend::Cpu).run(&[0.5]) {
+        Err(bowshock_core::Error::InvalidInput(m)) => m,
+        other => panic!("expected InvalidInput, got {:?}", other.map(|p| p.points.len())),
+    };
+    let viscous = || Analysis::new(&roughness_spec()).unwrap().viscous(flight());
+    for bad in [-1e-6, f64::NAN, f64::INFINITY, 1e-3, 0.01 * 0.10] {
+        assert!(invalid(viscous().roughness(bad)).contains("roughness"), "{bad}");
+    }
+    let m = invalid(Analysis::new(&roughness_spec()).unwrap().roughness(60e-6));
+    assert!(m.contains("needs Analysis::viscous"), "{m}");
+}
+
+#[test]
+fn roughness_reaches_the_solver_case_in_nose_diameters() {
+    let a = Analysis::new(&roughness_spec()).unwrap().viscous(flight()).roughness(60e-6);
+    let v = a.engine_cases(&[0.5]).unwrap()[0].viscous.unwrap();
+    assert!((v.roughness - 60e-6 / 0.10).abs() < 1e-15, "{}", v.roughness);
+    let smooth = Analysis::new(&roughness_spec()).unwrap().viscous(flight()).engine_cases(&[0.5]).unwrap();
+    assert_eq!(smooth[0].viscous.unwrap().roughness, 0.0);
 }

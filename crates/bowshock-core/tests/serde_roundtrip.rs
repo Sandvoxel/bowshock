@@ -22,7 +22,8 @@ fn inputs_round_trip() {
     assert_eq!(roundtrip(&s), s);
     let f = FlightConditions { atmosphere: Atmosphere::Explicit { temperature_k: 250.0, pressure_pa: 80_000.0 } };
     assert_eq!(roundtrip(&f), f);
-    let fins = FinSpec { count: 4, root_chord: 0.12, tip_chord: 0.06, span: 0.08, sweep: 0.06, thickness: 0.003, profile: FinProfile::DoubleWedge };
+    let fins =
+        FinSpec { count: 4, root_chord: 0.12, tip_chord: 0.06, span: 0.08, sweep: 0.06, thickness: 0.003, roughness: 0.0, profile: FinProfile::DoubleWedge };
     assert_eq!(roundtrip(&fins), fins);
     let custom = FinSpec { profile: FinProfile::Custom { section: vec![[0.0, 0.0], [0.1, 0.8], [1.0, 0.05]] }, ..fins.clone() };
     assert_eq!(roundtrip(&custom), custom);
