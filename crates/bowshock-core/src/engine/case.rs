@@ -50,27 +50,9 @@ impl Case {
         let dx_tip = 0.03 / f as f64;
         let l_body = body.x_base();
         let n_sting = if body.sting_radius > 0.0 { 4 * f } else { 0 };
-        let nseg = body.segments.len();
         // cells per segment: tubes are finer than cones, never finer than the end-cell size `dx_tip` allows
         let count = |per: usize, length: f64| per.min(even_ceil(length / dx_tip)).max(4);
         let n_seg_base: Vec<usize> = body.segments.iter().map(|s| count(if s.slope == 0.0 { 40 * f } else { 24 * f }, s.length)).collect();
-        let n_seg_sting: Vec<usize> = body
-            .segments
-            .iter()
-            .enumerate()
-            .map(|(k, s)| {
-                count(
-                    if s.slope != 0.0 {
-                        24 * f
-                    } else if k + 1 == nseg {
-                        36 * f
-                    } else {
-                        40 * f
-                    },
-                    s.length,
-                )
-            })
-            .collect();
         let grid_base = BaseGridParams {
             body: body.clone(),
             x_up: 10.0 * l_body,
@@ -88,19 +70,7 @@ impl Case {
             gap_one_sided: false,
             nozzle: None,
         };
-        let grid_sting = LargeGridParams {
-            body: body.clone(),
-            x_up: 10.0 * l_body,
-            x_down: 5.0 * l_body,
-            r_far: 10.0 * l_body,
-            n_up: 30 * f,
-            n_nose: 48 * f,
-            n_seg: n_seg_sting,
-            n_ext: 30 * f,
-            nj: 70 * f,
-            dx_tip,
-            dr_wall: 0.03 / f as f64,
-        };
+        let grid_sting = sting_grid(&body, level);
         Case { mach, body, wake, grid_base, grid_sting, numerics, viscous: None, motor: None }
     }
 
@@ -211,4 +181,44 @@ fn even_ceil(x: f64) -> usize {
 /// Number of rows of a wall-clustered layer of height `h` with first cell height `y1` and growth ratio 1.2 (even).
 fn layer_count(h: f64, y1: f64) -> usize {
     even_ceil((1.0 + 0.2 * h / y1).ln() / 1.2f64.ln())
+}
+
+/// Sting-wake grid parameters of [`Case::new`] for `body` at grid `level` (domain `10 L` upstream and radially, `5 L` downstream).
+pub(crate) fn sting_grid(body: &BaseBody, level: u32) -> LargeGridParams {
+    let f = 1usize << level;
+    let dx_tip = 0.03 / f as f64;
+    let l_body = body.x_base();
+    let nseg = body.segments.len();
+    // cells per segment: tubes are finer than cones, never finer than the end-cell size `dx_tip` allows
+    let count = |per: usize, length: f64| per.min(even_ceil(length / dx_tip)).max(4);
+    let n_seg_sting: Vec<usize> = body
+        .segments
+        .iter()
+        .enumerate()
+        .map(|(k, s)| {
+            count(
+                if s.slope != 0.0 {
+                    24 * f
+                } else if k + 1 == nseg {
+                    36 * f
+                } else {
+                    40 * f
+                },
+                s.length,
+            )
+        })
+        .collect();
+    LargeGridParams {
+        body: body.clone(),
+        x_up: 10.0 * l_body,
+        x_down: 5.0 * l_body,
+        r_far: 10.0 * l_body,
+        n_up: 30 * f,
+        n_nose: 48 * f,
+        n_seg: n_seg_sting,
+        n_ext: 30 * f,
+        nj: 70 * f,
+        dx_tip,
+        dr_wall: 0.03 / f as f64,
+    }
 }

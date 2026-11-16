@@ -2,9 +2,11 @@
 #![allow(missing_docs)]
 pub mod body_grid;
 pub mod case;
+pub mod case3;
 pub mod grid3;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod numerics;
 pub mod result;
 pub mod run;
+pub mod run3;
