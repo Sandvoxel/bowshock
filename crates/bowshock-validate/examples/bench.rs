@@ -2,12 +2,13 @@
 //! (M = 2, 15 degree cone, minmod, MUSCL from the first iteration, from the free stream, best of 3).
 //!
 //! `cargo run --release -p bowshock-validate --example bench [-- --quick] [--n 2000] [--sync 50] [--no-cpu] [--no-profile] [--profile-only]
-//! [--implicit] [--no-implicit]`
+//! [--implicit] [--no-implicit] [--perf-json]`
 //!
 //! `--implicit` runs only the line-implicit section: us/iteration of `Scheme::Implicit` on the sting case and the base case (solid
 //! block) of `subsonic_case` (M = 0.5, tangent ogive, grid levels 0 and 1; 200 iterations from the free stream, the first 100 first order) for the CPU
-//! `Solver::step` and the lazy solver (`iterate_until_all` and `iterate_all` replay), and the per-kernel profile of one lazy implicit step at
-//! level 0. `LUMA_TRIDIAGONAL=thomas|cyclic` forces the algorithm of the line solves. `--no-implicit` skips the section.
+//! `Solver::step` and the lazy solver (`iterate_until_all` and `iterate_all` replay), and the per-kernel profile of one lazy implicit step at level 0.
+//! `--perf-json` additionally prints, per (case, precision) of the implicit section, one `PERF {json}` line (replay us/iteration; case `2d-implicit-{sting|base}-L{level}`; f64 only without `--no-cpu`) for `perfcheck`.
+//! `LUMA_TRIDIAGONAL=thomas|cyclic` forces the algorithm of the line solves. `--no-implicit` skips the section.
 //!
 //! `--quick` skips 400x200. Steady-state us/iteration excludes compilation: the first call of every loop form is run (and
 //! timed, reported separately as "first call") before the steady measurement starts.
@@ -95,7 +96,7 @@ macro_rules! bench_lazy {
 }
 
 /// The line-implicit section: see the module comment.
-fn implicit_section(ctx: &luma::Context, n: usize, sync: usize, no_cpu: bool, profile: bool) {
+fn implicit_section(ctx: &luma::Context, n: usize, sync: usize, no_cpu: bool, profile: bool, perf_json: bool) {
     println!("\n### Line-implicit scheme (`Scheme::Implicit`), us/iteration: M = 0.5, {n} iterations from the free stream (100 first order), best of 3");
     println!(
         "`lazy until` = `iterate_until_all` with the residual recorded, `lazy replay` = `iterate_all`; `LUMA_TRIDIAGONAL` = {}",
@@ -158,6 +159,19 @@ fn implicit_section(ctx: &luma::Context, n: usize, sync: usize, no_cpu: bool, pr
             d.0,
             d.1
         );
+        if perf_json {
+            let tag = format!("2d-implicit-{}-L{level}", if base { "base" } else { "sting" });
+            let mut rows = vec![("f32", f.1), ("df32", d.1)];
+            if !no_cpu {
+                rows.push(("f64", cpu));
+            }
+            for (precision, us) in rows {
+                println!(
+                    "PERF {{\"case\":\"{tag}\",\"precision\":\"{precision}\",\"cells\":{},\"iters\":{n},\"us_per_iter\":{us:.3},\"launches_per_iter\":null,\"gpu_us_per_iter\":null,\"wall_s\":null}}",
+                    ni * nj
+                );
+            }
+        }
     }
 
     for base in [false, true].into_iter().filter(|_| profile) {
@@ -212,7 +226,7 @@ fn main() {
     let ctx = luma::default_context().expect("open GPU (lazy Luma)");
     println!("{n} iterations (eval loop {n_eval}), sync every {sync}");
     if flag("--implicit") {
-        implicit_section(&ctx, arg("--n").unwrap_or(200), sync, flag("--no-cpu"), !flag("--no-profile"));
+        implicit_section(&ctx, arg("--n").unwrap_or(200), sync, flag("--no-cpu"), !flag("--no-profile"), flag("--perf-json"));
         return;
     }
     let tm = solve_cone(2.0, 15f64.to_radians()).unwrap();
@@ -338,6 +352,6 @@ fn main() {
     }
 
     if !flag("--no-implicit") && !flag("--profile-only") {
-        implicit_section(&ctx, arg("--n").map_or(200, |n| n.min(200)), sync, flag("--no-cpu"), !flag("--no-profile"));
+        implicit_section(&ctx, arg("--n").map_or(200, |n| n.min(200)), sync, flag("--no-cpu"), !flag("--no-profile"), flag("--perf-json"));
     }
 }

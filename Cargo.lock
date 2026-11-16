@@ -462,6 +462,7 @@ dependencies = [
  "bowshock-reference",
  "luma",
  "rayon",
+ "serde_json",
 ]
 
 [[package]]
