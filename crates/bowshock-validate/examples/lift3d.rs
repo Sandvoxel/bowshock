@@ -19,6 +19,9 @@
 //! `--no-perf` suppresses the PERF line (experiments with `LUMA_TRIDIAGONAL` set must not enter the ledger).
 //!
 //! `--sweep --mach <list> --alpha 2,6 [--level L]`: one `RESULT {json}` line per (Mach, alpha) point (cold first alpha, warm later ones).
+//! Refinement knobs (defaults reproduce the level grid): `--nk N` (azimuthal cells), `--fin-chord N` (cells over the fin root chord),
+//! `--span-cells N` (radial cells from the wall to the fin tip), `--max-iter N`, `--cfl-max X`; `--history` appends the CN samples
+//! `[[iteration, cn], ..]` to the RESULT line. RESULT lines carry the grid (`nk`, `ni`, `nj`, `cells`, `fin_chord_cells`, `span_cells`).
 
 use bowshock_cfd::gpu::{GpuSolver3, Precision};
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
@@ -46,6 +49,12 @@ struct Args {
     mode: Mode,
     /// Print the `PERF` line (`--no-perf` for experiments that must not enter the ledger, e.g. with `LUMA_TRIDIAGONAL` set).
     perf: bool,
+    nk: Option<usize>,
+    fin_chord: Option<usize>,
+    span_cells: Option<usize>,
+    max_iter: Option<usize>,
+    cfl_max: Option<f64>,
+    history: bool,
 }
 
 enum Mode {
@@ -85,7 +94,21 @@ fn parse(args: &[String]) -> Result<Args, String> {
     } else {
         return Err("one of --bench N or --sweep".into());
     };
-    Ok(Args { case, level, precisions, mode, perf: !flag("--no-perf") })
+    let num = |name: &str| -> Result<Option<usize>, String> { value(name).transpose()?.map(|v| v.parse::<usize>().map_err(|e| format!("{name}: {e}"))).transpose() };
+    let cfl_max = value("--cfl-max").transpose()?.map(|v| v.parse::<f64>().map_err(|e| format!("--cfl-max: {e}"))).transpose()?;
+    Ok(Args {
+        case,
+        level,
+        precisions,
+        mode,
+        perf: !flag("--no-perf"),
+        nk: num("--nk")?,
+        fin_chord: num("--fin-chord")?,
+        span_cells: num("--span-cells")?,
+        max_iter: num("--max-iter")?,
+        cfl_max,
+        history: flag("--history"),
+    })
 }
 
 fn best_of<F: FnMut() -> f64>(reps: usize, mut f: F) -> f64 {
@@ -180,11 +203,25 @@ fn sweep(args: &Args, machs: &[f64], alphas_deg: &[f64]) -> Result<(), String> {
         let mut warm = false;
         for &a in alphas_deg {
             let t0 = Instant::now();
-            let case = Case3::new(m, a.to_radians(), body.clone(), fins.clone(), args.level);
+            let mut case = Case3::new(m, a.to_radians(), body.clone(), fins.clone(), args.level);
+            if let Some(nk) = args.nk {
+                case.grid.nk = nk;
+            }
+            case.grid.fin_chord_cells = args.fin_chord;
+            case.grid.span_cells = args.span_cells;
+            if let Some(n) = args.max_iter {
+                case.numerics.max_iter = n;
+            }
+            if let Some(c) = args.cfl_max {
+                case.numerics.implicit.cfl_max = c;
+            }
             if runner.is_none() {
                 runner = Some(GpuRunner3::new(&case, prec).map_err(|e| e.to_string())?);
             }
             let rn = runner.as_mut().unwrap();
+            let g = &rn.host.grid;
+            let (fc, sc) = g.solid.first().map_or((0, 0), |b| (b.i.len(), b.j.end));
+            let grid_json = format!("\"nk\":{},\"ni\":{},\"nj\":{},\"cells\":{},\"fin_chord_cells\":{fc},\"span_cells\":{sc}", g.nk, g.ni, g.nj, g.ni * g.nj * g.nk);
             let mut r = None;
             if warm {
                 let w = rn.run_on(&case, true).map_err(|e| e.to_string())?;
@@ -215,9 +252,15 @@ fn sweep(args: &Args, machs: &[f64], alphas_deg: &[f64]) -> Result<(), String> {
                 "Stationary"
             };
             let f = |v: f64| if v.is_finite() { format!("{v}") } else { "null".into() };
+            let hist = if args.history {
+                let h: Vec<String> = r.cn_history.iter().map(|(it, cn)| format!("[{it},{}]", f(*cn))).collect();
+                format!(",\"cn_history\":[{}]", h.join(","))
+            } else {
+                String::new()
+            };
             println!(
-                "RESULT {{\"case\":\"{}\",\"level\":{},\"precision\":\"{pname}\",\"mach\":{m},\"alpha_deg\":{a},\"cn\":{},\"cn_alpha\":{},\"x_cp_cal\":{},\"ca\":{},\"quality\":\"{quality}\",\"stop\":\"{:?}\",\"drop_orders\":{},\"iterations\":{},\"wall_s\":{:.2}}}",
-                args.case, args.level, f(r.cn), f(r.cn / a.to_radians()), f(r.x_cp), f(r.ca), r.stop_reason, f(r.drop_orders), r.iterations, t0.elapsed().as_secs_f64()
+                "RESULT {{\"case\":\"{}\",\"level\":{},{grid_json},\"max_iter\":{},\"cfl_max\":{},\"precision\":\"{pname}\",\"mach\":{m},\"alpha_deg\":{a},\"cn\":{},\"cn_alpha\":{},\"x_cp_cal\":{},\"ca\":{},\"quality\":\"{quality}\",\"stop\":\"{:?}\",\"drop_orders\":{},\"iterations\":{},\"wall_s\":{:.2}{hist}}}",
+                args.case, args.level, case.numerics.max_iter, case.numerics.implicit.cfl_max, f(r.cn), f(r.cn / a.to_radians()), f(r.x_cp), f(r.ca), r.stop_reason, f(r.drop_orders), r.iterations, t0.elapsed().as_secs_f64()
             );
         }
     }

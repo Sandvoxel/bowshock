@@ -45,7 +45,7 @@ fn tiny_anf_grid() -> Grid3 {
         dr_wall: 0.03,
     };
     let fins = Fins3 { count: 4, root_chord: 1.0, tip_chord: 1.0, span: 1.0, sweep: 0.0, thickness: 0.08, te_to_base: 0.0, profile: FinProfile::Square };
-    body_grid3(&Grid3Params { sting, fins: Some(fins), nk: 8, level: 0 }).expect("the tiny ANF grid builds")
+    body_grid3(&Grid3Params { sting, fins: Some(fins), nk: 8, level: 0, fin_chord_cells: None, span_cells: None }).expect("the tiny ANF grid builds")
 }
 
 fn config(mach: f64, alpha_deg: f64, limiter: Limiter, low_mach: bool) -> Config3 {

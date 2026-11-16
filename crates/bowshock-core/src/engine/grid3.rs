@@ -17,6 +17,7 @@ use super::body_grid::{axial_nodes, radial_fractions, two_sided_nodes, LargeGrid
 use crate::error::Error;
 use crate::fins::normalised;
 use crate::spec::FinProfile;
+use bowshock_cfd::grid::geometric_offsets;
 use bowshock_cfd::grid3::{Grid3, SolidBox};
 use std::f64::consts::PI;
 
@@ -44,8 +45,15 @@ pub struct Grid3Params {
     pub fins: Option<Fins3>,
     /// Azimuthal cells over `[0, pi]` (the plan default is `24 << level`, see [`Grid3Params::default_nk`]).
     pub nk: usize,
-    /// Grid level: sets the cells over the fin root chord (`16 << level`).
+    /// Grid level: sets the cells over the fin root chord (`16 << level`) unless `fin_chord_cells` overrides it.
     pub level: u32,
+    /// Cells over the fin root chord (`None`: `16 << level`).
+    pub fin_chord_cells: Option<usize>,
+    /// Radial cells from the body wall to the fin tip (`None`: whatever the sting grid's radial spacing puts there, with the tip
+    /// row snapped to the nearest node). With `Some(n)` the radial fractions are regraded for the whole grid: `n` cells in
+    /// `[R, R + span]` starting at the wall spacing (uniform when that is already finer than `span / n`), then a geometric fan of
+    /// at least the sting grid's outer cell count with growth `<= 1.2` to the far boundary. `nj` grows accordingly.
+    pub span_cells: Option<usize>,
 }
 
 impl Grid3Params {
@@ -102,6 +110,8 @@ struct FinPlan {
     x_le_root: f64,
     x_te_root: f64,
     r_t: f64,
+    /// Radial fractions of the node rows, including the extra rows of `span_cells` (`nj + 1`).
+    sj: Vec<f64>,
     /// Remapped radial fractions (`nj + 1`).
     s_remap: Vec<f64>,
 }
@@ -264,7 +274,10 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>) -> Result<FinPlan, E
     let x_le_root = if x_le_root - x_a > 1e-9 { x_le_root } else { x_a };
     let x_te_root = if x_b - x_te_root > 1e-9 { x_te_root } else { x_b };
     let flush = x_te_root >= x_b;
-    let nf = 16usize << p.level;
+    let nf = p.fin_chord_cells.unwrap_or(16usize << p.level);
+    if nf < 2 {
+        return Err(Error::InvalidInput("3D fins need at least 2 cells over the root chord".to_string()));
+    }
     let mut fin_offs = two_sided_nodes(f.root_chord, nf, 0.3 * f.root_chord / nf as f64);
     fin_offs[nf] = x_te_root - x_le_root;
     let dx_f = fin_offs[1] - fin_offs[0];
@@ -313,32 +326,86 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>) -> Result<FinPlan, E
     if sp.r_far.is_nan() || sp.r_far <= r_t + f.span || sp.nj < 6 {
         return Err(Error::Grid("the fin tip must lie inside the domain".to_string()));
     }
-    let sj = radial_fractions(sp.dr_wall, sp.r_far, sp.nj);
+    let sj0 = radial_fractions(sp.dr_wall, sp.r_far, sp.nj);
     let target = f.span / (sp.r_far - r_t);
-    let j_tip = (1..=sp.nj)
-        .min_by(|&a, &b| (sj[a] - target).abs().total_cmp(&(sj[b] - target).abs()))
+    let j_tip0 = (1..=sp.nj)
+        .min_by(|&a, &b| (sj0[a] - target).abs().total_cmp(&(sj0[b] - target).abs()))
         .unwrap();
-    if j_tip + 4 > sp.nj {
+    let (sj, s_remap, j_tip) = match p.span_cells {
+        None => {
+            let s_remap: Vec<f64> = (0..=sp.nj)
+                .map(|j| {
+                    if j == j_tip0 {
+                        target
+                    } else if j < j_tip0 {
+                        sj0[j] * target / sj0[j_tip0]
+                    } else {
+                        target + (sj0[j] - sj0[j_tip0]) * (1.0 - target) / (1.0 - sj0[j_tip0])
+                    }
+                })
+                .collect();
+            (sj0, s_remap, j_tip0)
+        }
+        Some(n) => {
+            if n < 2 {
+                return Err(Error::InvalidInput("span_cells >= 2 is required".to_string()));
+            }
+            let first = sj0[1];
+            let inner = if first * n as f64 >= target {
+                (0..=n).map(|j| target * j as f64 / n as f64).collect::<Vec<_>>()
+            } else {
+                geometric_offsets(first, target, n)
+            };
+            let c_last = inner[n] - inner[n - 1];
+            let outer = 1.0 - target;
+            // growth q of `m` cells c_last q, c_last q^2, .. summing to `outer`
+            let growth = |m: usize| -> f64 {
+                let (mut lo, mut hi) = (0.2f64, 4.0f64);
+                for _ in 0..200 {
+                    let q = 0.5 * (lo + hi);
+                    let (mut s, mut d) = (0.0, c_last);
+                    for _ in 0..m {
+                        d *= q;
+                        s += d;
+                    }
+                    if s < outer {
+                        lo = q;
+                    } else {
+                        hi = q;
+                    }
+                }
+                0.5 * (lo + hi)
+            };
+            let mut m = (sp.nj - j_tip0).max(4);
+            while growth(m) > 1.2 {
+                m += 1;
+                if m > 2000 {
+                    return Err(Error::Grid("span_cells: no outer fan with growth <= 1.2".to_string()));
+                }
+            }
+            let q = growth(m);
+            let mut s = inner;
+            let (mut acc, mut d) = (target, c_last);
+            for _ in 0..m {
+                d *= q;
+                acc += d;
+                s.push(acc);
+            }
+            *s.last_mut().unwrap() = 1.0;
+            (s.clone(), s, n)
+        }
+    };
+    let nj = s_remap.len() - 1;
+    if j_tip + 4 > nj {
         return Err(Error::Grid("the fin tip is too close to the outer boundary".to_string()));
     }
-    let s_remap: Vec<f64> = (0..=sp.nj)
-        .map(|j| {
-            if j == j_tip {
-                target
-            } else if j < j_tip {
-                sj[j] * target / sj[j_tip]
-            } else {
-                target + (sj[j] - sj[j_tip]) * (1.0 - target) / (1.0 - sj[j_tip])
-            }
-        })
-        .collect();
     // the swept tip trailing edge must stay inside the rebuilt segment (flush: not behind the base)
     let x_te_tip = x_le_root + f.sweep + f.tip_chord;
     let room = if i_te == i_seg1 { 1e-9 } else { 0.5 * (x_b - x_te_root) };
     if x_te_tip > x_te_root + room || x_le_root + f.sweep < x_a - 1e-9 {
         return Err(Error::Unsupported("3D fin tip trailing edge lies behind the root trailing edge room".to_string()));
     }
-    Ok(FinPlan { i_seg0: a, i_seg1, i_le, i_te, j_tip, x_le_root, x_te_root, r_t, s_remap })
+    Ok(FinPlan { i_seg0: a, i_seg1, i_le, i_te, j_tip, x_le_root, x_te_root, r_t, sj, s_remap })
 }
 
 /// Build the 3D grid. With fins the grid has `sting.nj`, `nk` cells in `j`, `k` and the axial count of `axial_nodes` changed by
@@ -361,9 +428,13 @@ pub fn body_grid3(p: &Grid3Params) -> Result<Grid3, Error> {
         Some(f) => Some(layers(f.count, nk)?),
         None => None,
     };
-    let (ni, nj) = (xs.len() - 1, sp.nj);
+    let ni = xs.len() - 1;
+    let sj = match &plan {
+        Some((pl, _)) => pl.sj.clone(),
+        None => radial_fractions(sp.dr_wall, sp.r_far, sp.nj),
+    };
+    let nj = sj.len() - 1;
     let n2 = (ni + 1) * (nj + 1);
-    let sj = radial_fractions(sp.dr_wall, sp.r_far, nj);
 
     // (x, r) of every (i, j) node
     let mut xn = vec![0.0; n2];
@@ -517,7 +588,7 @@ mod tests {
     }
 
     fn params(level: u32, fins: Option<Fins3>) -> Grid3Params {
-        Grid3Params { sting: anf_sting(level), fins, nk: Grid3Params::default_nk(level), level }
+        Grid3Params { sting: anf_sting(level), fins, nk: Grid3Params::default_nk(level), level, fin_chord_cells: None, span_cells: None }
     }
 
     /// Distance of node `(i, j, k)` from the fin mid-plane at angle `th`.
@@ -681,6 +752,36 @@ mod tests {
             );
             assert!(q <= 1.5 && q_aft <= 1.5, "level {level}: ratio {q} at {iq}, from the tip {q_aft} at {iqa}");
             let _ = q2_aft;
+        }
+    }
+
+    #[test]
+    fn refinement_knobs_change_only_what_they_name() {
+        let base = params(0, Some(anf_fins(FinProfile::Square)));
+        let g0 = body_grid3(&base).unwrap();
+        let j0 = g0.solid[0].j.end;
+        let mut p = base.clone();
+        p.span_cells = Some(2 * j0);
+        let g = body_grid3(&p).unwrap();
+        assert_eq!(g.solid[0].j.end, 2 * j0);
+        assert_eq!(g.ni, g0.ni);
+        assert!(g.nj >= g0.nj + j0 - 2, "nj {} vs {}", g.nj, g0.nj);
+        let tip = |g: &Grid3| {
+            let id = g.solid[0].j.end * (g.ni + 1) + g.solid[0].i.start;
+            (g.y[id].powi(2) + g.z[id].powi(2)).sqrt()
+        };
+        assert!((tip(&g) - 1.5).abs() < 1e-9 && (tip(&g0) - 1.5).abs() < 1e-9);
+        let mut p = base.clone();
+        p.fin_chord_cells = Some(32);
+        assert_eq!(body_grid3(&p).unwrap().solid[0].i.len(), 32);
+        let mut p = base;
+        p.nk = 48;
+        assert_eq!(body_grid3(&p).unwrap().nk, 48);
+        for (label, nk, fc, sc) in [("base", 24, None, None), ("nk32", 32, None, None), ("nk48", 48, None, None), ("span2x", 24, None, Some(2 * j0)), ("chord2x", 24, Some(32), None), ("all", 48, Some(32), Some(2 * j0))] {
+            let mut p = params(0, Some(anf_fins(FinProfile::Square)));
+            (p.nk, p.fin_chord_cells, p.span_cells) = (nk, fc, sc);
+            let g = body_grid3(&p).unwrap();
+            eprintln!("{label}: ni {} nj {} nk {} cells {} span cells {}", g.ni, g.nj, g.nk, g.ni * g.nj * g.nk, g.solid[0].j.end);
         }
     }
 }

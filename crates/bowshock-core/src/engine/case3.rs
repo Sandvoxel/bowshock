@@ -59,7 +59,7 @@ impl Case3 {
     /// [`Numerics3::auto`].
     pub fn new(mach: f64, alpha: f64, body: BaseBody, fins: Option<Fins3>, level: u32) -> Case3 {
         let sting = sting_grid(&body, level);
-        let grid = Grid3Params { sting, fins, nk: Grid3Params::default_nk(level), level };
+        let grid = Grid3Params { sting, fins, nk: Grid3Params::default_nk(level), level, fin_chord_cells: None, span_cells: None };
         Case3 { mach, alpha, body, grid, numerics: Numerics3::auto(mach, level) }
     }
 
