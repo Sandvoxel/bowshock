@@ -24,6 +24,8 @@
 //! `[[iteration, cn], ..]` to the RESULT line. RESULT lines carry the grid (`nk`, `ni`, `nj`, `cells`, `fin_chord_cells`, `span_cells`).
 //! `--fin-profile square|rounded|double-wedge|airfoil` replaces the fin section; `--breakdown` adds CN, CA and x_cp (calibers) of the
 //! nose, afterbody and fins (`fin`, and its parts `fin_sides`, `fin_edges`, `fin_tips`) to the RESULT line (`*_cn`, `*_ca`, `*_xcp`).
+//! Stop-rule and warm-start knobs (defaults = `Numerics3::auto`): `--window N` (stationary window, a multiple of 50), `--stat-min N` (cold stationary floor, iterations), `--warm-min N` (the
+//! floor of a warm run).
 //! `sharp-le` is a wedge leading edge (ramp over 0.1 chord) with a full-thickness blunt trailing edge. `--limiter minmod|vanalbada|venkat`
 //! overrides the reconstruction limiter. `--geometry` prints the fin geometry actually meshed (no GPU).
 
@@ -65,6 +67,9 @@ struct Args {
     breakdown: bool,
     fin_profile: Option<String>,
     limiter: Option<String>,
+    stat_min: Option<usize>,
+    window: Option<usize>,
+    warm_min: Option<usize>,
 }
 
 enum Mode {
@@ -137,6 +142,9 @@ fn parse(args: &[String]) -> Result<Args, String> {
         breakdown: flag("--breakdown"),
         fin_profile,
         limiter,
+        stat_min: num("--stat-min")?,
+        window: num("--window")?,
+        warm_min: num("--warm-min")?,
     })
 }
 
@@ -240,6 +248,15 @@ fn build_case(args: &Args, body: &BaseBody, fins: &Option<bowshock_core::engine:
     }
     if let Some(c) = args.cfl_max {
         case.numerics.implicit.cfl_max = c;
+    }
+    if let Some(n) = args.stat_min {
+        case.numerics.stationary_min_iters = n;
+    }
+    if let Some(n) = args.window {
+        case.numerics.window = n;
+    }
+    if let Some(n) = args.warm_min {
+        case.numerics.warm_min_iters = n;
     }
     match args.limiter.as_deref() {
         Some("minmod") => case.numerics.limiter = Limiter::Minmod,

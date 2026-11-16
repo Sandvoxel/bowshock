@@ -1,5 +1,5 @@
 //! GPU runner of a [`Case3`]: the procedure and stop rule of [`crate::engine::run3::run3_on`] with the iterations executed by
-//! `bowshock_cfd::gpu::GpuSolver3` (extended precision).
+//! `bowshock_cfd::gpu::GpuSolver3` (the facade runs `Precision::F32`; the runner takes any precision).
 //!
 //! The GPU records [`SYNC`] iterations back to back and reads their residuals. CN is sampled once per full chunk from the downloaded
 //! state, so the stop rule sees the same samples as the CPU loop; the reported stop iteration is the CPU-equivalent one, the GPU may

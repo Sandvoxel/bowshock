@@ -18,9 +18,6 @@ use std::ops::ControlFlow;
 pub const SAMPLE_EVERY: usize = 50;
 /// Orders of density-residual drop that end a run as [`StopReason::ResidualDrop`].
 pub const DROP_ORDERS: f64 = 6.0;
-/// Iterations before the stationary rule may fire (it has no residual condition: the residual of a fin-body flow can plateau at
-/// 1 to 2 orders of drop with the CN flat to four digits).
-pub const STATIONARY_MIN_ITERS: usize = 1000;
 
 /// Pressure-force coefficients of the body plus fins.
 #[derive(Clone, Copy, Debug)]
@@ -213,7 +210,7 @@ fn accumulate(g: &Grid3, u: &[Cons3], p_inf: f64, x_max: f64, x_nose: f64) -> [[
 
 /// Iterate `s` (built from `case`) until a stop rule fires, in this order at every iteration: a non-finite residual (or, at a sample,
 /// CN) gives `NonFinite`; a residual drop of [`DROP_ORDERS`] orders below the peak residual (from iteration 20 cold, from the start
-/// warm) gives `ResidualDrop`; at a sample with `it + 1 >= max(window, STATIONARY_MIN_ITERS)` and a range of the last
+/// warm) gives `ResidualDrop`; at a sample with `it + 1 >= max(window, the floor of [`Numerics3`])` and a range of the last
 /// `window / SAMPLE_EVERY` CN samples below `rel_tol |mean|` (whatever the residual did) gives `CdStationary`; the iteration cap
 /// gives `MaxIterations`.
 ///
@@ -252,6 +249,7 @@ pub struct StopRule3 {
     r: f64,
     hist: Vec<(usize, f64)>,
     reason: StopReason,
+    min_iters: usize,
 }
 
 impl StopRule3 {
@@ -266,6 +264,7 @@ impl StopRule3 {
             r: f64::NAN,
             hist: Vec::new(),
             reason: StopReason::MaxIterations,
+            min_iters: if warm { n.warm_min_iters } else { n.stationary_min_iters },
         }
     }
 
@@ -313,7 +312,7 @@ impl StopRule3 {
                 return stop(self, StopReason::NonFinite);
             }
             self.hist.push((it + 1, cn));
-            if it + 1 >= self.window.max(STATIONARY_MIN_ITERS) && self.hist.len() >= self.nwin {
+            if it + 1 >= self.window.max(self.min_iters) && self.hist.len() >= self.nwin {
                 let w = &self.hist[self.hist.len() - self.nwin..];
                 // a state that no longer changes (every sample bit-identical) without a residual drop is a frozen run, not a converged one
                 if drop < 1.0 && w.iter().all(|&(_, c)| c.to_bits() == w[0].1.to_bits()) {
@@ -375,16 +374,16 @@ mod tests {
     fn a_frozen_state_without_a_residual_drop_is_a_failure() {
         // every CN sample bit-identical, the residual flat at 0.5: frozen, not stationary
         let stop = feed(|_| 0.5, |_| 0.316_928_495_035_045);
-        assert_eq!(stop, Some((1000, StopReason::NonFinite)));
+        assert_eq!(stop, Some((250, StopReason::NonFinite)));
     }
 
     #[test]
     fn a_stationary_state_with_a_residual_drop_still_stops_stationary() {
         // identical CN samples but the residual fell 2 orders (a converged limit): CdStationary as before
         let stop = feed(|it| if it < 100 { 1.0 } else { 1e-2 }, |_| 0.3);
-        assert_eq!(stop, Some((1000, StopReason::CdStationary)));
+        assert_eq!(stop, Some((250, StopReason::CdStationary)));
         // a CN that wiggles at round-off level without a drop is not frozen (not bit-identical): CdStationary
         let stop = feed(|_| 0.5, |it| 0.3 + 1e-9 * (it % 3) as f64);
-        assert_eq!(stop, Some((1000, StopReason::CdStationary)));
+        assert_eq!(stop, Some((250, StopReason::CdStationary)));
     }
 }

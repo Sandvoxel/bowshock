@@ -25,11 +25,19 @@ pub struct Numerics3 {
     pub rel_tol: f64,
     /// Window \[iterations\] of the stationary rule (a multiple of [`crate::engine::run3::SAMPLE_EVERY`]).
     pub window: usize,
+    /// Iterations (from the start of a cold run) before the stationary rule may fire (the rule also needs one full window).
+    pub stationary_min_iters: usize,
+    /// The same floor for a warm-started run, counted from the warm start.
+    pub warm_min_iters: usize,
 }
 
 impl Numerics3 {
     /// Van Albada with the low-Mach correction below Mach 0.85, minmod above; the implicit defaults with `cfl_max` 10 for every Mach
-    /// number (the three-factor scheme diverged on the coarse ANF grid after the ramp passed about 15, at 20 and 30; 10 and 5 converge).
+    /// number (the three-factor scheme diverged on the coarse ANF grid after the ramp passed about 15, at 20 and 30; 10 and 5 converge;
+    /// measured again with the frozen far-field Jacobian: `cfl_max` 15 saves 6 to 9 % of the iterations, 20 stalls a point of the example
+    /// table and moves CN by 1 %). The stationary window is 250 iterations with a floor of one window: CN of the ANF and the example rocket
+    /// settles to 1e-4 within 200 to 300 iterations, and against the 500-iteration window with a 1000-iteration floor the table moved by
+    /// at most 0.18 % in CN and 0.003 cal in `x_cp` while using 40 % fewer iterations (a window of 200 moved M 0.95 by 0.54 %).
     pub fn auto(mach: f64, level: u32) -> Numerics3 {
         let subsonic = mach < 0.85;
         Numerics3 {
@@ -39,7 +47,9 @@ impl Numerics3 {
             first_order_iters: 100,
             max_iter: 8000 << level,
             rel_tol: 0.002,
-            window: 500,
+            window: 250,
+            stationary_min_iters: 250,
+            warm_min_iters: 250,
         }
     }
 }

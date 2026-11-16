@@ -1141,6 +1141,17 @@ cell lost its pressure and the run froze with a constant residual), slip wall an
 * **`cfl_max` 10 for every Mach number** (`Numerics3::auto`; the 2D value is 30 subsonic / 20 supersonic): the three-factor scheme diverged on the coarse ANF
   grid once the ramp passed about 15 (it did at `cfl_max` 20 and 30; 10 and 5 converge). If a finer grid diverges at 10 as well, drop to 5; the plan's
   last resort is to treat the k direction point-implicit (k Jacobians on the diagonal only).
+* **Stop rule and precision of the facade (overnight A/B, `lift3d --sweep`, ANF level 0, 17 Mach x alpha 2, 6; deltas against the 500-window / 1000-floor
+  rule in df32, which was the default before).** CN settles to 1e-4 within 200 to 300 iterations, so the old window of 500 with a floor of 1000 mostly counted
+  iterations after convergence (13 of 16 points of the example table stopped exactly on the floor). `Numerics3::auto` now uses a **window of 250 with a floor of
+  250** (`window`, `stationary_min_iters`, `warm_min_iters`, knobs `--window/--stat-min/--warm-min` of `lift3d`): table 36 288 -> 21 783 iterations, max |dCN|
+  0.17 % (M 0.966), max |dx_cp| 0.0024 cal; example lift 20 400 -> 12 250 iterations, max |dCN| 0.18 %, |dx_cp| 0.4 mm. A window of 200 fails (0.54 - 0.68 % at
+  M 0.95 / 0.966, where CN cycles by +-0.3 % for 2000+ iterations: a physical-looking limit cycle of the transonic shock, not slow convergence). Not adopted:
+  floor 500 only (-13 % iterations), warm start without restarting the CFL ramp (the ramp is ~115 of the iterations: -3 %), requiring x_cp stationarity
+  (changed nothing), a mean-of-windows rule for the cycling CN (never fired), `cfl_max` 15 (-6 to -9 % iterations, +-0.2 % CN) and 20 (an example point stalls, 1 % CN).
+  The facade's GPU lift path runs **`Precision::F32`** (`analysis.rs`): CN agrees with df32 to 0.007 % and x_cp to 1e-4 cal on the whole table (M 0.8 and 2.0
+  included), 0.02 % on the example; step 4.2 against 5.0 ms. f32 never reaches the 6-order residual drop (plateau near 4.5 orders), so points that used to end
+  `Converged` now end `Stationary` at the first full window.
 
 ## GPU
 

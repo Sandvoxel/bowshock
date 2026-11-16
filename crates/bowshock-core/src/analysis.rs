@@ -927,7 +927,7 @@ impl Analysis {
         Ok(LiftPolar { points: self.lift_loop(&CpuLift, machs, alphas_deg)?, backend: BackendUsed::Cpu, fallback: None })
     }
 
-    /// GPU backend of [`Analysis::run_lift`] (`machs` and `alphas_deg` validated and sorted): extended precision.
+    /// GPU backend of [`Analysis::run_lift`] (`machs` and `alphas_deg` validated and sorted): single precision (`Precision::F32`, within 0.01 % of extended on the ANF table).
     #[cfg(feature = "gpu")]
     fn lift_gpu(&self, machs: &[f64], alphas_deg: &[f64]) -> Result<LiftPolar, Error> {
         Ok(LiftPolar { points: self.lift_loop(&GpuLift, machs, alphas_deg)?, backend: BackendUsed::Gpu, fallback: None })
@@ -970,7 +970,7 @@ impl LiftRunner for GpuLift {
     type State = crate::engine::gpu3::GpuRunner3;
 
     fn cold(&self, case: &Case3) -> Result<(PointResult3, crate::engine::gpu3::GpuRunner3), Error> {
-        let mut r = crate::engine::gpu3::GpuRunner3::new(case, bowshock_cfd::gpu::Precision::Extended)?;
+        let mut r = crate::engine::gpu3::GpuRunner3::new(case, bowshock_cfd::gpu::Precision::F32)?;
         let p = r.run_on(case, false)?;
         Ok((p, r))
     }
