@@ -744,6 +744,45 @@ fn editing_with_several_selected_sets_the_field_on_each_in_one_undo_step() {
 }
 
 #[test]
+fn a_launch_site_is_one_step_and_the_location_and_wind_profile_fly() {
+    let mut app = App::with_example();
+    let mut state = state_for(&app);
+    let [nominal, ..] = ids_of(&state);
+    click_flight(&mut state, &mut app, nominal, keyboard::Modifiers::empty());
+    let spec = |state: &State| state.flight(nominal).unwrap().spec.clone();
+    let far = sites::SITES[0];
+    state.update(Message::Edit(Edit::Site(0)), app.ctx_mut());
+    app.ctx_mut().doc.seal();
+    let s = spec(&state);
+    assert_eq!(s.site_altitude, far.altitude);
+    assert_eq!(sites::matching(s.location, s.site_altitude), Some(&sites::SITES[0]));
+    assert!((s.temperature - sites::isa_temperature(far.altitude)).abs() < 1e-9, "the standard day at the site");
+    assert_eq!(app.ctx().doc.undo_label(), Some("Set launch site"));
+    assert_eq!(app.ctx_mut().doc.undo().as_deref(), Some("Set launch site"));
+    state.sync(app.ctx(), false);
+    assert_eq!(spec(&state).location, None, "one undo takes the altitude, location and temperature back");
+
+    // Typing a latitude makes a location (longitude 0); a blank field clears it.
+    state.update(Message::CoordInput(false, "45.5".into()), app.ctx_mut());
+    state.update(Message::CoordCommit, app.ctx_mut());
+    assert_eq!(spec(&state).location, Some(bowshock_model::Location { latitude: 45.5, longitude: 0.0 }));
+    assert_eq!(app.ctx().doc.undo_label(), Some("Set launch location"));
+    let launch = flight::launch_of(&spec(&state));
+    assert!((launch.latitude.unwrap() - 45.5f64.to_radians()).abs() < 1e-12);
+    state.update(Message::CoordInput(false, " ".into()), app.ctx_mut());
+    state.update(Message::CoordCommit, app.ctx_mut());
+    assert_eq!(spec(&state).location, None);
+
+    // A wind profile is stored sorted and reaches the flight.
+    let level = |altitude: f64, speed: f64| bowshock_model::WindLevel { altitude, speed, from: 0.0 };
+    state.update(Message::Edit(Edit::WindLevels(vec![level(1000.0, 20.0), level(300.0, 8.0)])), app.ctx_mut());
+    assert_eq!(app.ctx().doc.undo_label(), Some("Set wind profile"));
+    let stored = &app.ctx().doc.rocket().flights().iter().find(|f| f.id == nominal).unwrap().conditions.wind_levels;
+    assert_eq!(stored.iter().map(|l| l.altitude).collect::<Vec<_>>(), [300.0, 1000.0]);
+    assert_eq!(flight::launch_of(&spec(&state)).wind_levels.len(), 2);
+}
+
+#[test]
 fn run_flies_the_selected_flights_and_removing_takes_them_all() {
     let mut app = App::with_example();
     let mut state = state_for(&app);

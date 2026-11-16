@@ -9,6 +9,7 @@ use iced::widget::{button, column, container, mouse_area, row, scrollable, text,
 use iced::{Background, Border, Element, Fill, Length, Theme, Widget};
 
 use super::flight::{self, Flight, MotorChoice, Shared, Spec};
+use super::sites::{self, SITES};
 use super::{format, keys, Edit, Message, State, MAX_COMPARED};
 use crate::app::{ui, Ctx};
 use crate::theme::{self, MONO};
@@ -149,21 +150,176 @@ fn conditions<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
         let note = format!("— flights differ · an edit sets all {count}");
         fields.push(text(note).size(TEXT_BODY - 1.0).style(theme::muted).boxed());
     }
+    fields.push(site_row(&shared));
     fields.push(motor);
     fields.push(field("Delay", shared.delay, flight::effective_delay(ctx, spec), Quantity::Time, Edit::Delay));
     fields.push(field("Wind", shared.wind_speed, spec.wind_speed, Quantity::Velocity, Edit::Wind));
     fields.push(field("Wind from", shared.wind_from, spec.wind_from, Quantity::Angle, Edit::WindFrom));
+    fields.extend(wind_profile(state, spec, &shared, count, system));
     fields.push(field("Launch angle", shared.launch_angle, spec.launch_angle, Quantity::Angle, Edit::LaunchAngle));
-    fields.push(field("Rail length", shared.rail_length, spec.rail_length, Quantity::Length, Edit::RailLength));
+    fields.extend(start_rows(&shared, spec, system));
+    if spec.air_start.is_none() {
+        fields.push(field("Rail length", shared.rail_length, spec.rail_length, Quantity::Length, Edit::RailLength));
+    }
     fields.push(turbulence);
     fields.push(drag);
     if let Some(note) = drag_note {
         fields.push(text(note).size(TEXT_LABEL).boxed());
     }
     fields.push(field("Site altitude", shared.site_altitude, spec.site_altitude, Quantity::Altitude, Edit::SiteAltitude));
+    fields.push(coord_field(state, false, &shared));
+    fields.push(coord_field(state, true, &shared));
     fields.push(field("Temperature", shared.temperature, spec.temperature, Quantity::Temperature, Edit::Temperature));
     fields.push(field("Field radius", shared.field_radius, spec.field_radius, Quantity::Altitude, Edit::FieldRadius));
     container(column![head, column(fields).spacing(SPACE_2)].spacing(SPACE_3)).padding(SPACE_3).boxed()
+}
+
+/// Where an air start begins when it is switched on: 1 km up at 100 m/s.
+const AIR_START: bowshock_model::AirStart = bowshock_model::AirStart { altitude: 1000.0, speed: 100.0 };
+
+/// `Start  Pad | Air start`, and while the selected flight starts in the air its altitude and speed. An edit of either sets the
+/// pair on every selected flight.
+fn start_rows<'a>(shared: &Shared, spec: &Spec, system: &'a UnitSystem) -> Vec<Element<'a, Message>> {
+    let current = shared.air_start.map(|a| a.is_some());
+    let toggle = segmented_fill(&[(Some(false), "Pad"), (Some(true), "Air start")], current, |on| {
+        Message::Edit(Edit::AirStart((on == Some(true)).then_some(AIR_START)))
+    });
+    let mut rows = vec![labeled("Start", toggle)];
+    if let Some(start) = spec.air_start {
+        let mixed = shared.air_start.is_none();
+        let altitude = unit_input("Start altitude", start.altitude, Quantity::Altitude, system)
+            .mixed(mixed)
+            .on_commit(move |altitude| Message::Edit(Edit::AirStart(Some(bowshock_model::AirStart { altitude, ..start }))));
+        let speed = unit_input("Start speed", start.speed, Quantity::Velocity, system)
+            .mixed(mixed)
+            .on_commit(move |speed| Message::Edit(Edit::AirStart(Some(bowshock_model::AirStart { speed, ..start }))));
+        rows.push(altitude.into());
+        rows.push(speed.into());
+    }
+    rows
+}
+
+/// A choice of the Site select: no built-in site, or one of [`SITES`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SiteChoice {
+    Custom,
+    Site(usize),
+}
+
+impl fmt::Display for SiteChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SiteChoice::Custom => f.write_str("Custom"),
+            SiteChoice::Site(i) => f.write_str(SITES[*i].name),
+        }
+    }
+}
+
+/// The Site select: the built-in site the flights are at (`Custom` for any other place, `—` when they differ). Picking a site
+/// sets the site altitude and location (see [`Edit::Site`]).
+fn site_row<'a>(shared: &Shared) -> Element<'a, Message> {
+    let current = match (shared.location, shared.site_altitude) {
+        (Some(location), Some(altitude)) => {
+            Some(sites::matching(location, altitude).and_then(|s| SITES.iter().position(|x| x == s)).map_or(SiteChoice::Custom, SiteChoice::Site))
+        }
+        _ => None,
+    };
+    let options: Vec<SiteChoice> = std::iter::once(SiteChoice::Custom).chain((0..SITES.len()).map(SiteChoice::Site)).collect();
+    labeled(
+        "Site",
+        select(options, current, |c| match c {
+            SiteChoice::Custom => Message::Ignore,
+            SiteChoice::Site(i) => Message::Edit(Edit::Site(i)),
+        }),
+    )
+}
+
+/// The latitude (`lon` false) or longitude field, in degrees: blank is no location (a flat Earth); Enter applies what is typed.
+fn coord_field<'a>(state: &'a State, lon: bool, shared: &Shared) -> Element<'a, Message> {
+    let placeholder = if shared.location.is_none() { "—" } else { "Set to include Earth rotation" };
+    let input = text_input(placeholder, &state.coord_text[usize::from(lon)])
+        .on_input(move |t| Message::CoordInput(lon, t))
+        .on_submit(Message::CoordCommit)
+        .size(TEXT_BODY)
+        .padding([4.0, SPACE_2])
+        .style(theme::input)
+        .width(Fill);
+    labeled(if lon { "Longitude °" } else { "Latitude °" }, input.boxed())
+}
+
+/// Heights of the 1/7 power-law profile (m).
+const POWER_LAW_HEIGHTS: [f64; 7] = [50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0];
+
+/// The wind of the 1/7 power law (Hellman's exponent for open, neutral-stability terrain) at `h` metres, for `ground` m/s
+/// measured at the 10 m reference height.
+fn power_law(ground: f64, h: f64) -> f64 {
+    ground * (h / 10.0).powf(1.0 / 7.0)
+}
+
+/// The Wind profile row (`Constant` or `N levels`, which opens the table) and, while open, the table of levels: altitude, speed
+/// and direction, each row removable, then Add level, Power law and Clear. With several flights the table is the selected
+/// flight's, and an edit sets every one of them.
+fn wind_profile<'a>(state: &'a State, spec: &'a Spec, shared: &Shared, count: usize, system: &'a UnitSystem) -> Vec<Element<'a, Message>> {
+    let levels = &spec.wind_levels;
+    let summary = match levels.len() {
+        0 => "Constant".to_string(),
+        1 => "1 level".to_string(),
+        n => format!("{n} levels"),
+    };
+    let open = state.wind_open;
+    let toggle: Element<'a, Message> =
+        push(if open { "Hide" } else { "Edit" }, Weight::Ghost).tooltip("The wind at altitudes above the ground").on_press(Message::WindTable(!open)).into();
+    let shown = row![text(summary).size(TEXT_BODY), Space::new().width(Fill), toggle].align_y(iced::Center).boxed();
+    let mut out = vec![labeled("Wind profile", shown)];
+    if !open {
+        return out;
+    }
+    if count > 1 && shared.wind_levels.is_none() {
+        out.push(text(format!("— flights differ · an edit sets all {count}")).size(TEXT_BODY - 1.0).style(theme::muted).boxed());
+    }
+    for (i, l) in levels.iter().enumerate() {
+        let cell = |label: &'a str, value: f64, quantity: Quantity, set: fn(&mut bowshock_model::WindLevel, f64)| -> Element<'a, Message> {
+            let base = levels.clone();
+            unit_input(label, value, quantity, system)
+                .label_width(if label.is_empty() { 0.0 } else { 64.0 })
+                .on_commit(move |v| {
+                    let mut next = base.clone();
+                    set(&mut next[i], v);
+                    Message::Edit(Edit::WindLevels(next))
+                })
+                .into()
+        };
+        let mut without = levels.clone();
+        without.remove(i);
+        let remove: Element<'a, Message> = icon_button(Mark::Close, "Remove this level").on_press(Message::Edit(Edit::WindLevels(without))).width(22).into();
+        // Two lines a level: the altitude, then the wind there (speed and the direction it blows from).
+        let at =
+            row![container(cell("Altitude", l.altitude, Quantity::Altitude, |l, v| l.altitude = v)).width(Fill), remove].spacing(SPACE_1).align_y(iced::Center);
+        let wind = row![
+            container(cell("", l.speed, Quantity::Velocity, |l, v| l.speed = v)).width(Fill),
+            container(cell("", l.from, Quantity::Angle, |l, v| l.from = v)).width(Fill),
+        ]
+        .spacing(SPACE_1)
+        .align_y(iced::Center);
+        out.push(column![at, wind].spacing(2).boxed());
+    }
+    let (top_altitude, top_speed, top_from) = levels.last().map_or((0.0, spec.wind_speed, spec.wind_from), |l| (l.altitude, l.speed, l.from));
+    let mut added = levels.clone();
+    added.push(bowshock_model::WindLevel { altitude: top_altitude + 500.0, speed: top_speed, from: top_from });
+    let law: Vec<bowshock_model::WindLevel> =
+        POWER_LAW_HEIGHTS.iter().map(|&h| bowshock_model::WindLevel { altitude: h, speed: power_law(spec.wind_speed, h), from: spec.wind_from }).collect();
+    let add: Element<'a, Message> = push("Add level", Weight::Ghost).on_press(Message::Edit(Edit::WindLevels(added))).into();
+    let power: Element<'a, Message> = push("Power law", Weight::Ghost)
+        .tooltip("Levels from 50 m to 5 km by the 1/7 power law of the ground wind")
+        .on_press(Message::Edit(Edit::WindLevels(law)))
+        .into();
+    let mut clear = push("Clear", Weight::Ghost);
+    if !levels.is_empty() {
+        clear = clear.on_press(Message::Edit(Edit::WindLevels(Vec::new())));
+    }
+    let clear: Element<'a, Message> = clear.into();
+    out.push(row![add, power, clear].spacing(SPACE_1).boxed());
+    out
 }
 
 /// The motor select's options: the active configuration, each configuration, then the motors that fit the first mount, then any

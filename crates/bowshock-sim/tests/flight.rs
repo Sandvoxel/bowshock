@@ -61,6 +61,49 @@ fn input() -> SimInput {
 }
 
 #[test]
+fn the_wind_profile_interpolates_between_levels_and_holds_above() {
+    let west = 270f64.to_radians();
+    let launch = Launch { wind_speed: 2.0, wind_from: west, wind_levels: vec![WindPoint { altitude: 1000.0, speed: 20.0, from: west }], ..Launch::default() };
+    // A wind from the west blows east: +x.
+    let at = |h: f64| launch.wind_at(h);
+    assert!((at(500.0)[0] - 11.0).abs() < 1e-9 && at(500.0)[1].abs() < 1e-9, "{:?}", at(500.0));
+    assert!((at(2000.0)[0] - 20.0).abs() < 1e-9);
+    assert!((at(0.0)[0] - 2.0).abs() < 1e-9);
+    // No levels: the same wind everywhere.
+    let flat = Launch { wind_speed: 2.0, wind_from: west, ..Launch::default() };
+    assert_eq!(flat.wind_at(0.0), flat.wind_at(5000.0));
+}
+
+#[test]
+fn the_rotating_earth_moves_the_landing_and_gravity_follows_latitude() {
+    assert!(normal_gravity(std::f64::consts::FRAC_PI_2) > normal_gravity(0.0));
+    assert!((normal_gravity(0.0) - 9.7803253359).abs() < 1e-9);
+    let fly = |latitude: Option<f64>| {
+        let launch = Launch { rail_length: 1.5, latitude, ..Launch::default() };
+        let rec = vec![RecoveryDevice { name: "Main".into(), stage: 0, cd_area: 0.9, deploy: Deploy::Ejection, delay: 0.0 }];
+        let mut input = SimInput::new(rocket(), launch, rec);
+        input.model = FlightModel::PointMass;
+        simulate(&input).summary.landing_position
+    };
+    let (flat, turning) = (fly(None), fly(Some(45f64.to_radians())));
+    assert!(turning.iter().all(|x| x.is_finite()));
+    let moved = (turning[0] - flat[0]).hypot(turning[1] - flat[1]);
+    assert!(moved > 0.01, "the landing moved {moved} m");
+}
+
+#[test]
+fn an_air_start_begins_at_its_altitude_and_speed() {
+    let launch = Launch { air_start: Some((1000.0, 100.0)), ..Launch::default() };
+    let r = simulate(&SimInput::new(rocket(), launch, vec![]));
+    let first = &r.trajectory.samples[0];
+    assert!((first.altitude - 1000.0).abs() < 1e-9 && (first.speed - 100.0).abs() < 1e-9, "{} m at {} m/s", first.altitude, first.speed);
+    assert!(r.summary.apogee > 1000.0);
+    assert_eq!(r.summary.rail_exit_velocity, 100.0);
+    let rail_exit = r.trajectory.events.iter().find(|e| e.kind == EventKind::RailExit).unwrap();
+    assert_eq!((rail_exit.t, rail_exit.altitude), (0.0, 1000.0));
+}
+
+#[test]
 fn h128_flight_is_plausible_and_ordered() {
     let h = h128();
     assert!((h.total_impulse() - 176.0).abs() < 12.0, "impulse {}", h.total_impulse());

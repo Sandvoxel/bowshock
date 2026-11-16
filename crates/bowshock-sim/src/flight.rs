@@ -4,7 +4,9 @@
 //! Model summary:
 //! * On the rail the rocket is constrained to the rail axis and does not rotate. Off the rail the point-mass model points the
 //!   thrust along the velocity relative to the air (perfect weathercocking); the rigid-body model flies the attitude (below).
-//!   Gravity varies with altitude in both.
+//!   Gravity varies with altitude in both. With a launch latitude ([`Launch::latitude`]) the surface gravity is the WGS 84
+//!   normal gravity of that latitude (Somigliana's formula, NIMA TR8350.2) and the Coriolis acceleration `-2 Omega x v` of the
+//!   rotating Earth acts off the rail, in the local east-north-up frame (a flat Earth otherwise).
 //! * **Rigid body.** State: position, velocity, attitude quaternion and body angular rate. Forces in the body frame: thrust along
 //!   the axis, the axial drag `q A_ref Cd` (zero-lift build-up times the axial multiplier of [`crate::aero::axial_drag_multiplier`])
 //!   and the normal force `q A_ref CNalpha alpha` from [`Aero::normal_force`] against the lateral velocity. The normal force
@@ -24,8 +26,9 @@
 //!   goes: altitude triggers fire the first step the rocket is at or above the altitude while ascending. A separated stage is
 //!   dropped; only the remaining upper stack is flown afterwards and the aerodynamics are rebuilt for the truncated vehicle.
 //!   Recovery devices on dropped stages are ignored.
-//! * Wind is constant with altitude; turbulence adds an Ornstein-Uhlenbeck gust with standard
-//!   deviation `intensity x wind_speed`.
+//! * Wind is the ground wind below the first level of [`Launch::wind_levels`], interpolated linearly in its east and north
+//!   components between levels and held above the top one; turbulence adds an Ornstein-Uhlenbeck gust with standard
+//!   deviation `intensity x` the mean wind speed at the rocket's altitude.
 
 use crate::aero::{axial_drag_multiplier, Aero, DragBreakdown, BODY_CROSSFLOW_CD};
 use crate::atmosphere::{AirState, Atmosphere};
@@ -64,6 +67,17 @@ impl Turbulence {
     }
 }
 
+/// One point of a wind profile (see [`Launch::wind_levels`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindPoint {
+    /// Altitude above the site (m).
+    pub altitude: f64,
+    /// Wind speed (m/s).
+    pub speed: f64,
+    /// Direction the wind blows *from*, clockwise from north (rad).
+    pub from: f64,
+}
+
 /// Launch site and conditions.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Launch {
@@ -77,14 +91,23 @@ pub struct Launch {
     pub site_altitude: f64,
     /// Ground temperature at the site (K).
     pub ground_temperature: f64,
-    /// Mean wind speed (m/s).
+    /// Mean wind speed at the ground (m/s).
     pub wind_speed: f64,
-    /// Direction the wind blows *from*, clockwise from north (rad), meteorological convention.
+    /// Direction the ground wind blows *from*, clockwise from north (rad), meteorological convention.
     pub wind_from: f64,
+    /// The wind above the ground, ascending in altitude: the ground wind is the point at 0 m, the wind's east and north
+    /// components vary linearly between points and hold above the top one (see [`Launch::wind_at`]). Empty for a wind that
+    /// is the same at every altitude.
+    pub wind_levels: Vec<WindPoint>,
     /// Gust intensity.
     pub turbulence: Turbulence,
     /// Seed for the gust generator.
     pub seed: u64,
+    /// Geodetic latitude of the site (rad): with one, gravity follows the latitude and the Coriolis acceleration of the
+    /// rotating Earth acts (see the module docs); `None` is a flat, non-rotating Earth with standard gravity.
+    pub latitude: Option<f64>,
+    /// Start in the air instead of on the rail: `(altitude above the site m, speed m/s along the launch direction)`.
+    pub air_start: Option<(f64, f64)>,
 }
 
 impl Default for Launch {
@@ -97,9 +120,48 @@ impl Default for Launch {
             ground_temperature: 288.15,
             wind_speed: 0.0,
             wind_from: 0.0,
+            wind_levels: Vec::new(),
             turbulence: Turbulence::Off,
             seed: 1,
+            latitude: None,
+            air_start: None,
         }
+    }
+}
+
+/// The wind vector `[east, north]` (m/s) of `speed` blowing from `from` (rad clockwise from north).
+fn wind_vector(speed: f64, from: f64) -> [f64; 2] {
+    [-speed * from.sin(), -speed * from.cos()]
+}
+
+/// The wind of `profile` (`(altitude, [east, north])`, ascending, the ground first) at altitude `h`: linear between points,
+/// held below the first and above the last.
+fn wind_in(profile: &[(f64, [f64; 2])], h: f64) -> [f64; 2] {
+    let Some(&(_, first)) = profile.first() else { return [0.0; 2] };
+    let i = profile.partition_point(|p| p.0 <= h);
+    if i == 0 {
+        return first;
+    }
+    if i >= profile.len() {
+        return profile[profile.len() - 1].1;
+    }
+    let ((h0, a), (h1, b)) = (profile[i - 1], profile[i]);
+    let f = if h1 > h0 { (h - h0) / (h1 - h0) } else { 1.0 };
+    [a[0] + f * (b[0] - a[0]), a[1] + f * (b[1] - a[1])]
+}
+
+impl Launch {
+    /// The wind profile as `(altitude, [east, north])` points: the ground wind at 0 m, then the levels above it.
+    fn wind_profile(&self) -> Vec<(f64, [f64; 2])> {
+        let mut out = vec![(0.0, wind_vector(self.wind_speed, self.wind_from))];
+        out.extend(self.wind_levels.iter().filter(|l| l.altitude > 0.0).map(|l| (l.altitude, wind_vector(l.speed, l.from))));
+        out.sort_by(|a, b| a.0.total_cmp(&b.0));
+        out
+    }
+
+    /// The mean wind `[east, north]` (m/s) at `altitude_agl` above the site (see [`Launch::wind_levels`]).
+    pub fn wind_at(&self, altitude_agl: f64) -> [f64; 2] {
+        wind_in(&self.wind_profile(), altitude_agl)
     }
 }
 
@@ -437,9 +499,38 @@ struct Ctx<'a> {
     aeros: &'a [Aero],
     atm: Atmosphere,
     sched: Timeline,
-    wind: [f64; 2],
+    /// The mean wind profile (see [`Launch::wind_at`]).
+    wind: Vec<(f64, [f64; 2])>,
     axis: [f64; 3],
     a_ref: f64,
+    /// Gravity at the site's surface (m/s^2): standard, or the normal gravity of the latitude.
+    g_surface: f64,
+    /// The Earth's rotation in the local east-north-up frame (rad/s), with a latitude.
+    omega: Option<[f64; 3]>,
+}
+
+/// Angular rate of the Earth's rotation (rad/s), WGS 84 (NIMA TR8350.2).
+pub const EARTH_RATE: f64 = 7.292_115e-5;
+
+/// Normal gravity on the WGS 84 ellipsoid at geodetic latitude `lat` (rad), Somigliana's closed form (NIMA TR8350.2, eq. 4-1):
+/// `γ = γe (1 + k sin²φ) / sqrt(1 − e² sin²φ)`.
+pub fn normal_gravity(lat: f64) -> f64 {
+    let s2 = lat.sin().powi(2);
+    9.780_325_335_9 * (1.0 + 0.001_931_852_652_41 * s2) / (1.0 - 0.006_694_379_990_13 * s2).sqrt()
+}
+
+impl Ctx<'_> {
+    /// The mean wind `[east, north]` at `h` above the site.
+    fn wind_at(&self, h: f64) -> [f64; 2] {
+        wind_in(&self.wind, h)
+    }
+
+    /// The Coriolis acceleration `−2 Ω × v` of velocity `v` in the local east-north-up frame, zero without a latitude.
+    fn coriolis(&self, v: [f64; 3]) -> [f64; 3] {
+        let Some(w) = self.omega else { return [0.0; 3] };
+        let c = [w[1] * v[2] - w[2] * v[1], w[2] * v[0] - w[0] * v[2], w[0] * v[1] - w[1] * v[0]];
+        [-2.0 * c[0], -2.0 * c[1], -2.0 * c[2]]
+    }
 }
 
 /// How a step's equations of motion treat the attitude.
@@ -671,7 +762,8 @@ impl Ctx<'_> {
     fn eval(&self, t: f64, st: &State, gust: [f64; 3], nsep: usize, mode: Mode, chutes: &[Chute]) -> Diag {
         let p = self.mass_props(t, nsep);
         let air = self.atm.at_agl(st.pos[2].max(0.0));
-        let wind = [self.wind[0] + gust[0], self.wind[1] + gust[1]];
+        let mean = self.wind_at(st.pos[2].max(0.0));
+        let wind = [mean[0] + gust[0], mean[1] + gust[1]];
         let rel = [st.vel[0] - wind[0], st.vel[1] - wind[1], st.vel[2] - gust[2]];
         let s = dot(rel, rel).sqrt();
         let flow = Flow {
@@ -682,9 +774,16 @@ impl Ctx<'_> {
             s,
             mach: s / air.speed_of_sound,
             re_per_m: s * air.density / air.viscosity,
-            g: G0 * (6_371_000.0 / (6_371_000.0 + st.pos[2].max(0.0) + self.launch.site_altitude)).powi(2),
+            g: self.g_surface * (6_371_000.0 / (6_371_000.0 + st.pos[2].max(0.0) + self.launch.site_altitude)).powi(2),
         };
-        let d = if mode == Mode::Rigid { self.rigid_eval(st, &flow, nsep) } else { self.point_eval(t, st, &flow, nsep, mode == Mode::Rail, chutes) };
+        let mut d = if mode == Mode::Rigid { self.rigid_eval(st, &flow, nsep) } else { self.point_eval(t, st, &flow, nsep, mode == Mode::Rail, chutes) };
+        // The rotating Earth (WGS 84, NIMA TR8350.2): the Coriolis acceleration in the local east-north-up frame, off the rail.
+        if mode != Mode::Rail {
+            let c = self.coriolis(st.vel);
+            for (a, ci) in d.acc.iter_mut().zip(c) {
+                *a += ci;
+            }
+        }
         Diag { propellant: self.propellant(t, nsep), reynolds: flow.re_per_m * self.stack_length(nsep), ..d }
     }
 
@@ -851,8 +950,23 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
     let atm = Atmosphere::new(launch.site_altitude, launch.ground_temperature);
     let th = launch.angle_from_vertical;
     let axis = [th.sin() * launch.direction.sin(), th.sin() * launch.direction.cos(), th.cos()];
-    let wind = [-launch.wind_speed * launch.wind_from.sin(), -launch.wind_speed * launch.wind_from.cos()];
-    let mut ctx = Ctx { input, launch, tw, aeros, atm, sched: Timeline::resolve(v, &Hits::none(n)), wind, axis, a_ref: v.reference_area().max(1e-12) };
+    let (g_surface, omega) = match launch.latitude {
+        Some(lat) => (normal_gravity(lat), Some([0.0, EARTH_RATE * lat.cos(), EARTH_RATE * lat.sin()])),
+        None => (G0, None),
+    };
+    let mut ctx = Ctx {
+        input,
+        launch,
+        tw,
+        aeros,
+        atm,
+        sched: Timeline::resolve(v, &Hits::none(n)),
+        wind: launch.wind_profile(),
+        axis,
+        a_ref: v.reference_area().max(1e-12),
+        g_surface,
+        omega,
+    };
 
     // Altitude triggers that have fired (the time they fired, before their delay), and which staging events are on record.
     let mut hits = Hits::none(n);
@@ -863,7 +977,8 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
     let mut deployed = vec![false; input.recovery.len()];
 
     let mut rng = Rng::new(launch.seed ^ 0xA5A5_5A5A_1234_5678);
-    let gust_sigma = launch.turbulence.intensity() * launch.wind_speed;
+    // Gusts scale with the mean wind where the rocket is (see the gust update below).
+    let intensity = launch.turbulence.intensity();
     let tau_gust = 1.5;
     let mut gust = [0.0; 3];
 
@@ -900,6 +1015,22 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
         event_idx.push(raws.len());
         events.push(e);
     };
+
+    // An air start begins off the rail, at its altitude, already moving along the launch direction.
+    if let Some((h, v0)) = launch.air_start {
+        let (h, v0) = (h.max(0.0), v0.max(0.0));
+        pos = [0.0, 0.0, h];
+        vel = [axis[0] * v0, axis[1] * v0, axis[2] * v0];
+        on_rail = false;
+        rail_exit_velocity = v0;
+        let air = atm.at_agl(h);
+        let wind = ctx.wind_at(h);
+        let rel = [vel[0] - wind[0], vel[1] - wind[1], vel[2]];
+        let speed = dot(rel, rel).sqrt();
+        let alpha = if rigid_model && speed > 1e-9 { (dot(axis, rel) / speed).clamp(-1.0, 1.0).acos() } else { 0.0 };
+        stability_off_rail = aeros[0].margin_cal(speed / air.speed_of_sound, alpha, ctx.mass_props(0.0, 0).cg);
+        push_event(&mut events, &mut event_idx, &raws, Event { t: 0.0, kind: EventKind::RailExit, altitude: h, stage: None });
+    }
 
     while t < input.max_time {
         let nsep = ctx.sched.separated(t);
@@ -989,7 +1120,10 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
             dt = 1e-9;
         }
 
-        // Gust update (held constant over the step).
+        // Gust update (held constant over the step): a first-order Gauss-Markov process whose spread is the turbulence
+        // intensity times the mean wind at the rocket's altitude.
+        let mean = ctx.wind_at(pos[2].max(0.0));
+        let gust_sigma = intensity * mean[0].hypot(mean[1]);
         if gust_sigma > 0.0 {
             let a = (-dt / tau_gust).exp();
             let b = gust_sigma * (1.0 - a * a).sqrt();
@@ -1019,6 +1153,7 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
                 on_rail = false;
                 rail_exit_velocity = dot(vel, vel).sqrt();
                 let air = atm.at_agl(pos[2]);
+                let wind = ctx.wind_at(pos[2].max(0.0));
                 let rel = [vel[0] - wind[0], vel[1] - wind[1], vel[2]];
                 let speed = dot(rel, rel).sqrt();
                 let mach = speed / air.speed_of_sound;
@@ -1093,6 +1228,7 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
             if let Some(dt_at) = deploy_at[i] {
                 if !deployed[i] && t >= dt_at - 1e-9 {
                     deployed[i] = true;
+                    let wind = ctx.wind_at(pos[2].max(0.0));
                     let rel_speed = ((vel[0] - wind[0]).powi(2) + (vel[1] - wind[1]).powi(2) + vel[2].powi(2)).sqrt();
                     chutes.push(Chute::new(d.cd_area, t, rel_speed));
                     // Under a canopy the descent is a point mass: the attitude follows the relative wind from here on.
@@ -1321,9 +1457,11 @@ mod tests {
             aeros: &aeros,
             atm: Atmosphere::new(0.0, 288.15),
             sched: Timeline::resolve(&input.vehicle, &Hits::none(n)),
-            wind: [0.0; 2],
+            wind: input.launch.wind_profile(),
             axis: [0.0, 0.0, 1.0],
             a_ref: input.vehicle.reference_area(),
+            g_surface: G0,
+            omega: None,
         };
         f(&ctx)
     }

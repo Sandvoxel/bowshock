@@ -251,9 +251,22 @@ fn sections<'a>(run: &'a Run, ctx: &'a Ctx, stale: bool) -> Vec<Element<'a, Mess
     rows.push(line("Flight time", None, format!("{:.1}", s.flight_time), "s", stale, Some(t.landing)));
     let lands = badge(if run.in_field() { Severity::Ok } else { Severity::Warn }, if run.in_field() { "in field" } else { "outside field" });
     rows.push(line("Lands", Some(lands), format::landing(s.landing.0, s.landing.1, sys), "", stale, Some(t.landing)));
+    if let Some(at) = run.spec.location {
+        let (lat, lon) = landing_coordinates(at, s.landing_position);
+        rows.push(line("Landing at", None, format!("{lat:.5}°, {lon:.5}°").replace('-', "−"), "", stale, Some(t.landing)));
+    }
     let recovery = section(3, "Recovery", true, rows);
 
     vec![apogee, ascent, recovery]
+}
+
+/// The latitude and longitude (degrees) of the point `[east, north]` metres from the pad at `at`, on a sphere of the Earth's mean
+/// radius (6 371 km): small offsets, so the local flat-Earth conversion holds.
+fn landing_coordinates(at: bowshock_model::Location, offset: [f64; 2]) -> (f64, f64) {
+    const R: f64 = 6_371_000.0;
+    let lat = at.latitude + (offset[1] / R).to_degrees();
+    let lon = at.longitude + (offset[0] / (R * at.latitude.to_radians().cos().max(1e-6))).to_degrees();
+    (lat, (lon + 180.0).rem_euclid(360.0) - 180.0)
 }
 
 /// The spin of one run as the results column reads it: the fastest turn, the turn at burnout and at apogee (turns per second), and

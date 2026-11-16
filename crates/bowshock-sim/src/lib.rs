@@ -38,7 +38,10 @@ pub use aero::{Aero, ComponentAero, DragBreakdown, NormalForce, RollAero, Stabil
 pub use analysis::{monte_carlo, vs_alpha, vs_mach, AlphaPoint, Dispersion, MachPoint, MonteCarlo, MonteCarloRun, MonteCarloStats};
 pub use atmosphere::{AirState, Atmosphere};
 pub use drag_table::{DragTable, DragTablePoint};
-pub use flight::{simulate, Deploy, Event, EventKind, FlightModel, FlightResult, Launch, RecoveryDevice, Sample, SimInput, Summary, Trajectory, Turbulence};
+pub use flight::{
+    normal_gravity, simulate, Deploy, Event, EventKind, FlightModel, FlightResult, Launch, RecoveryDevice, Sample, SimInput, Summary, Trajectory, Turbulence,
+    WindPoint, EARTH_RATE,
+};
 pub use flutter::{flutter_velocity, FlutterFin, FlutterGeometry, FlutterInputs, FlutterPoint, FlutterTrace, FlutterWarning};
 pub use roll::{pitch_frequency, roll_resonance, RollResonance};
 pub use staging::{has_altitude_trigger, staging_times, Timeline};

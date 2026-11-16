@@ -1589,6 +1589,10 @@ impl<'w> Import<'w> {
                 site_altitude: altitude,
                 temperature,
                 field_radius: 300.0,
+                // OpenRocket stores a latitude (default 45°) for its Earth model; a stored one becomes the launch location.
+                location: num(c, "launchlatitude").map(|latitude| crate::flights::Location { latitude, longitude: num(c, "launchlongitude").unwrap_or(0.0) }),
+                wind_levels: Vec::new(),
+                air_start: None,
             };
             flights.push(FlightDef {
                 id: flights.len() as u64 + 1,

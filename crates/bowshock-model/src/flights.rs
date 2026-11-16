@@ -40,6 +40,38 @@ pub enum Turbulence {
     High,
 }
 
+/// The wind at one altitude of a wind profile (see [`Conditions::wind_levels`]).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WindLevel {
+    /// Altitude above the launch site (m).
+    pub altitude: f64,
+    /// Wind speed (m/s).
+    pub speed: f64,
+    /// Direction the wind blows from, clockwise from north (rad).
+    pub from: f64,
+}
+
+/// Where on Earth a flight launches.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Location {
+    /// Geodetic latitude (degrees, north positive).
+    pub latitude: f64,
+    /// Longitude (degrees, east positive).
+    pub longitude: f64,
+}
+
+/// A flight that starts in the air instead of on the pad: at `altitude`, already moving at `speed` along the launch direction.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AirStart {
+    /// Altitude above the launch site (m).
+    pub altitude: f64,
+    /// Speed along the launch direction (m/s).
+    pub speed: f64,
+}
+
+/// Most levels a wind profile keeps.
+pub const MAX_WIND_LEVELS: usize = 32;
+
 /// The launch site and weather of a flight. SI throughout: metres, radians, kelvin, m/s.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -48,9 +80,9 @@ pub struct Conditions {
     pub rail_length: f64,
     /// Rail tilt from vertical (rad), `0..=`[`MAX_LAUNCH_ANGLE`].
     pub launch_angle: f64,
-    /// Mean wind speed (m/s).
+    /// Mean wind speed at the ground (m/s).
     pub wind_speed: f64,
-    /// Direction the wind blows from, clockwise from north (rad), `0..2π`.
+    /// Direction the ground wind blows from, clockwise from north (rad), `0..2π`.
     pub wind_from: f64,
     /// Gust intensity.
     pub turbulence: Turbulence,
@@ -60,6 +92,17 @@ pub struct Conditions {
     pub temperature: f64,
     /// The distance from the pad the rocket has to land within (m).
     pub field_radius: f64,
+    /// The wind above the ground, by altitude (ascending): `wind_speed`/`wind_from` is the wind at 0 m, each level a point
+    /// above it; between points the wind's east and north components vary linearly, and above the top level it holds. Empty
+    /// for a wind that is the same at every altitude.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub wind_levels: Vec<WindLevel>,
+    /// The launch site's latitude and longitude, `None` for a flat, non-rotating Earth.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<Location>,
+    /// A start in the air instead of on the rail, `None` for a pad launch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub air_start: Option<AirStart>,
 }
 
 impl Default for Conditions {
@@ -74,12 +117,16 @@ impl Default for Conditions {
             site_altitude: 120.0,
             temperature: 288.15,
             field_radius: 300.0,
+            wind_levels: Vec::new(),
+            location: None,
+            air_start: None,
         }
     }
 }
 
 impl Conditions {
-    /// Brings every value into range; a value that is not a number takes its default.
+    /// Brings every value into range; a value that is not a number takes its default. Wind levels go through
+    /// [`sanitized_levels`]; a location or air start that is not a number is dropped.
     fn sanitized(&self) -> Conditions {
         let d = Conditions::default();
         let pick = |v: f64, fallback: f64| if v.is_finite() { v } else { fallback };
@@ -92,8 +139,33 @@ impl Conditions {
             site_altitude: pick(self.site_altitude, d.site_altitude).clamp(-400.0, 6000.0),
             temperature: pick(self.temperature, d.temperature).clamp(220.0, 330.0),
             field_radius: pick(self.field_radius, d.field_radius).max(1.0),
+            wind_levels: sanitized_levels(&self.wind_levels),
+            location: self
+                .location
+                .filter(|l| l.latitude.is_finite() && l.longitude.is_finite())
+                .map(|l| Location { latitude: l.latitude.clamp(-90.0, 90.0), longitude: (l.longitude + 180.0).rem_euclid(360.0) - 180.0 }),
+            air_start: self
+                .air_start
+                .filter(|a| a.altitude.is_finite() && a.speed.is_finite())
+                .map(|a| AirStart { altitude: a.altitude.clamp(0.0, 30_000.0), speed: a.speed.clamp(0.0, 2000.0) }),
         }
     }
+}
+
+/// `levels` with the non-finite ones dropped, altitudes in `1..=30 000` m, speeds at least 0 and directions in `0..2π`, sorted
+/// by altitude, one per altitude (the last given wins), at most [`MAX_WIND_LEVELS`].
+pub fn sanitized_levels(levels: &[WindLevel]) -> Vec<WindLevel> {
+    let mut out: Vec<WindLevel> = Vec::with_capacity(levels.len());
+    for l in levels.iter().filter(|l| l.altitude.is_finite() && l.speed.is_finite() && l.from.is_finite()) {
+        let l = WindLevel { altitude: l.altitude.clamp(1.0, 30_000.0), speed: l.speed.max(0.0), from: l.from.rem_euclid(std::f64::consts::TAU) };
+        match out.iter_mut().find(|o| o.altitude == l.altitude) {
+            Some(o) => *o = l,
+            None => out.push(l),
+        }
+    }
+    out.sort_by(|a, b| a.altitude.total_cmp(&b.altitude));
+    out.truncate(MAX_WIND_LEVELS);
+    out
 }
 
 /// Which drag the flight flies on.
@@ -309,6 +381,26 @@ impl Rocket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wind_levels_location_and_air_start_are_brought_into_range() {
+        let level = |altitude: f64, speed: f64| WindLevel { altitude, speed, from: -1.0 };
+        let c = Conditions {
+            wind_levels: vec![level(2000.0, 10.0), level(f64::NAN, 1.0), level(0.0, -3.0), level(2000.0, 12.0), level(500.0, 5.0)],
+            location: Some(Location { latitude: 95.0, longitude: 190.0 }),
+            air_start: Some(AirStart { altitude: -5.0, speed: 5000.0 }),
+            ..Conditions::default()
+        }
+        .sanitized();
+        let alts: Vec<f64> = c.wind_levels.iter().map(|l| l.altitude).collect();
+        assert_eq!(alts, [1.0, 500.0, 2000.0]);
+        assert_eq!((c.wind_levels[0].speed, c.wind_levels[2].speed), (0.0, 12.0), "clamped, and the last of equal altitudes wins");
+        assert!(c.wind_levels.iter().all(|l| (0.0..std::f64::consts::TAU).contains(&l.from)));
+        assert_eq!(c.location, Some(Location { latitude: 90.0, longitude: -170.0 }));
+        assert_eq!(c.air_start, Some(AirStart { altitude: 0.0, speed: 2000.0 }));
+        let many: Vec<WindLevel> = (1..50).map(|i| level(f64::from(i) * 100.0, 1.0)).collect();
+        assert_eq!(sanitized_levels(&many).len(), MAX_WIND_LEVELS);
+    }
 
     fn windy() -> FlightDef {
         FlightDef {

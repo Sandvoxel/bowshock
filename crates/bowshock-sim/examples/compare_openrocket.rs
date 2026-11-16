@@ -312,6 +312,7 @@ fn compare(label: &str, reference: &Value, imp: &ork::OrkImport, dir: &Path) -> 
                 wind_from,
                 turbulence: Turbulence::Off,
                 seed: 1,
+                ..Launch::default()
             };
             let name = s["name"].as_str().unwrap_or("?");
             let db = db_of(s["config"].as_str().unwrap_or(""));

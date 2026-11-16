@@ -1,0 +1,12 @@
+# The Simulate Conditions panel: a launch site, the wind profile table filled by the 1/7 power law, and an air start.
+# Run with the example rocket loaded: `cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/wind-profile.drive out/wind-profile`
+viewport 1300x1100
+click "Simulate"
+click "Custom"
+click "FAR (Mojave, CA)"
+click "Edit"
+click "Power law"
+screenshot wind-profile.png
+click "Hide"
+click "Air start"
+screenshot air-start.png

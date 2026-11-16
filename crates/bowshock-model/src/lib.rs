@@ -38,8 +38,8 @@ pub use config::{Ballast, ConfigError, ConfigId, Configuration, EventKind, Motor
 pub use expr::{dim_from_key, dim_key, dim_kind, EvalError, Expr, ExprError, FieldRef, Formula, FormulaError, FormulaStatus, Kind, Op, Value};
 pub use fin_tab::{TabIssue, TabTarget};
 pub use flights::{
-    example_flights, Conditions, DragSource, FlightDef, FlightId, FlightMotor, PlotLayout, PlotPanel, PlotX, Turbulence, MAX_LAUNCH_ANGLE, MAX_PANEL_SOURCES,
-    MAX_PLOT_PANELS,
+    example_flights, sanitized_levels, AirStart, Conditions, DragSource, FlightDef, FlightId, FlightMotor, Location, PlotLayout, PlotPanel, PlotX, Turbulence,
+    WindLevel, MAX_LAUNCH_ANGLE, MAX_PANEL_SOURCES, MAX_PLOT_PANELS, MAX_WIND_LEVELS,
 };
 pub use format::{FormatError, FORMAT_VERSION, MAGIC};
 pub use geometry::{Anchor, FinPlanform, FinSection, FinTab, NoseShape, Part, PartKind, PodBody, RadialKind, RadialPart, Shoulder, MAX_COUNT};

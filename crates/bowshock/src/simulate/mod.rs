@@ -34,6 +34,7 @@ mod left;
 mod picker;
 mod plots;
 mod results;
+pub(crate) mod sites;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -88,6 +89,17 @@ pub enum Edit {
     Temperature(f64),
     /// Field radius (m).
     FieldRadius(f64),
+    /// The wind profile above the ground wind.
+    WindLevels(Vec<bowshock_model::WindLevel>),
+    /// The launch latitude (degrees); `None` clears the location. A flight without a location gets longitude 0.
+    Latitude(Option<f64>),
+    /// The launch longitude (degrees); `None` clears the location. A flight without a location gets latitude 0.
+    Longitude(Option<f64>),
+    /// A start in the air, `None` for a pad launch.
+    AirStart(Option<bowshock_model::AirStart>),
+    /// Built-in launch site `i` of [`sites::SITES`]: its altitude and location, and the standard temperature there when the
+    /// temperature is still the standard sea-level one.
+    Site(usize),
 }
 
 impl Edit {
@@ -105,7 +117,16 @@ impl Edit {
             Edit::SiteAltitude(_) => "site altitude",
             Edit::Temperature(_) => "temperature",
             Edit::FieldRadius(_) => "field radius",
+            Edit::WindLevels(_) => "wind profile",
+            Edit::Latitude(_) | Edit::Longitude(_) => "launch location",
+            Edit::AirStart(_) => "air start",
+            Edit::Site(_) => "launch site",
         }
+    }
+
+    /// Whether a single flight's undo step names the edit (`Set wind profile`) instead of the generic `Edit flight`.
+    fn named(&self) -> bool {
+        matches!(self, Edit::WindLevels(_) | Edit::Latitude(_) | Edit::Longitude(_) | Edit::AirStart(_) | Edit::Site(_))
     }
 }
 
@@ -225,6 +246,14 @@ pub enum Message {
     ClosePicker,
     /// A click inside the source picker that no row took: it stays open.
     KeepPicker,
+    /// Show or hide the wind profile table.
+    WindTable(bool),
+    /// Text typed in the latitude (`false`) or longitude (`true`) field.
+    CoordInput(bool, String),
+    /// Enter in a coordinate field: a number sets it, a blank field clears the location.
+    CoordCommit,
+    /// A control that needs no action (the `Custom` launch site).
+    Ignore,
 }
 
 /// What the plots and the ground track show: derived from the flights whenever a run lands or the ticks change.
@@ -279,6 +308,13 @@ pub struct State {
     renaming: Option<(FlightId, String)>,
     /// The unit set the plots were built in: the zoom's full x range follows it (lengths along x differ by unit).
     units: UnitSystem,
+    /// Whether the wind profile table is open.
+    wind_open: bool,
+    /// The text of the latitude and longitude fields: the flights' location, or what is being typed in
+    /// [`State::coord_editing`]'s field.
+    coord_text: [String; 2],
+    /// The coordinate field being typed in (`true` for longitude) and the flight selected when typing began.
+    coord_editing: Option<(bool, FlightId)>,
 }
 
 impl Default for State {
@@ -314,8 +350,12 @@ impl State {
             own_edits: 0,
             renaming: None,
             units: UnitSystem::default(),
+            wind_open: false,
+            coord_text: [String::new(), String::new()],
+            coord_editing: None,
         };
         state.rebuild();
+        state.refresh_coords();
         state
     }
 
@@ -331,6 +371,7 @@ impl State {
             self.modifiers = modifiers;
             self.units = ctx.units;
             self.rebuild();
+            self.refresh_coords();
             return;
         }
         if self.units != ctx.units {
@@ -347,6 +388,22 @@ impl State {
         if self.stored_layout != *layout {
             self.adopt_layout(layout);
         }
+        self.refresh_coords();
+    }
+
+    /// Shows the edit selection's launch location in the coordinate fields (blank when they have none or differ), unless one
+    /// is being typed in for the same selected flight.
+    fn refresh_coords(&mut self) {
+        if self.coord_editing.is_some_and(|(_, id)| id == self.selected) {
+            return;
+        }
+        self.coord_editing = None;
+        let locations: Vec<_> = self.edit_flights().iter().map(|f| f.spec.location).collect();
+        let agreed = locations.first().copied().filter(|first| locations.iter().all(|l| l == first)).flatten();
+        self.coord_text = match agreed {
+            Some(at) => [format!("{:.5}", at.latitude), format!("{:.5}", at.longitude)],
+            None => [String::new(), String::new()],
+        };
     }
 
     /// Takes `layout` as the plots' layout (undo, redo): the picker, whose panel may be gone, closes.
@@ -712,6 +769,7 @@ impl State {
                 // With several flights selected the edit sets the field on every one of them.
                 let ids = self.edit_ids();
                 let (label, key) = match ids.as_slice() {
+                    [id] if edit.named() => (format!("Set {}", edit.label()), format!("flight:{id}:{}", edit.label())),
                     [id] => ("Edit flight".to_string(), format!("flight:{id}:{}", edit.label())),
                     _ => {
                         let joined: Vec<String> = ids.iter().map(ToString::to_string).collect();
@@ -731,6 +789,22 @@ impl State {
             }
             Message::ClosePicker => self.picker = None,
             Message::KeepPicker => {}
+            Message::WindTable(open) => self.wind_open = open,
+            Message::CoordInput(lon, text) => {
+                self.coord_editing = Some((lon, self.selected));
+                self.coord_text[usize::from(lon)] = text;
+            }
+            Message::CoordCommit => {
+                if let Some((lon, _)) = self.coord_editing.take() {
+                    let text = self.coord_text[usize::from(lon)].trim();
+                    let value = if text.is_empty() { Some(None) } else { text.parse::<f64>().ok().filter(|v| v.is_finite()).map(Some) };
+                    if let Some(value) = value {
+                        let edit = if lon { Edit::Longitude(value) } else { Edit::Latitude(value) };
+                        return self.update(Message::Edit(edit), ctx);
+                    }
+                }
+            }
+            Message::Ignore => {}
             Message::Ground(GroundMessage::Hover(t)) => self.plot.set_hover(t),
             Message::Ground(GroundMessage::Select(i)) => {
                 if let Some(id) = self.shown.ids.get(i).copied() {
@@ -899,6 +973,31 @@ impl State {
                 Edit::SiteAltitude(v) => spec.site_altitude = v.clamp(-400.0, 6000.0),
                 Edit::Temperature(v) => spec.temperature = v.clamp(220.0, 330.0),
                 Edit::FieldRadius(v) => spec.field_radius = v.max(1.0),
+                Edit::WindLevels(levels) => spec.wind_levels = bowshock_model::sanitized_levels(levels),
+                Edit::Latitude(lat) => {
+                    spec.location = lat.filter(|v| v.is_finite()).map(|latitude| bowshock_model::Location {
+                        latitude: latitude.clamp(-90.0, 90.0),
+                        longitude: spec.location.map_or(0.0, |l| l.longitude),
+                    })
+                }
+                Edit::Longitude(lon) => {
+                    spec.location = lon.filter(|v| v.is_finite()).map(|longitude| bowshock_model::Location {
+                        latitude: spec.location.map_or(0.0, |l| l.latitude),
+                        longitude: (longitude + 180.0).rem_euclid(360.0) - 180.0,
+                    })
+                }
+                Edit::AirStart(start) => {
+                    spec.air_start = start.map(|a| bowshock_model::AirStart { altitude: a.altitude.clamp(0.0, 30_000.0), speed: a.speed.clamp(0.0, 2000.0) });
+                }
+                Edit::Site(i) => {
+                    if let Some(site) = sites::SITES.get(*i) {
+                        spec.site_altitude = site.altitude;
+                        spec.location = Some(bowshock_model::Location { latitude: site.latitude, longitude: site.longitude });
+                        if (spec.temperature - 288.15).abs() < 1e-9 {
+                            spec.temperature = sites::isa_temperature(site.altitude);
+                        }
+                    }
+                }
             }
         }
     }
