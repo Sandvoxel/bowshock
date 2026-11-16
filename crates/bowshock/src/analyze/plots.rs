@@ -198,7 +198,7 @@ fn aero(out: &Output, units: UnitSystem, overlay: Option<&Overlay>, active: Conf
     };
 
     let mut cpcg = Panel::new("CP and CG", format!("{} from tip", len.symbol)).value_unit(len.symbol).tag(Tag::Only(0));
-    if let Some((_, first, p)) = runs.first() {
+    if let Some((_, first, p)) = runs.get(active) {
         cpcg.series.push(Series::new(label3d(out, "CP"), curve(p, |p| to(p.cp))).color(SeriesColor::Cp).label_inside());
         let flat = |cg: f64| p.iter().map(|q| (q.mach, to(cg))).collect::<Vec<_>>();
         if single {

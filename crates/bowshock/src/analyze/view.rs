@@ -141,6 +141,9 @@ fn method(state: &State) -> Element<'_, Message> {
             lines.push(muted(format!("{} · computed on CPU in {took} · {busy}", out.points_text()), 12.0));
         }
     }
+    if let Some(note) = &state.skipped_note {
+        lines.push(muted(note.clone(), 12.0));
+    }
     let solving = cfd_line && (state.cfd.solving.is_some() || state.cfd.lift_solving.is_some());
     let stale = cfd_line && state.cfd.status == cfd::Status::Stale;
     let resolve: Element<'_, Message> = if solving {
@@ -244,11 +247,16 @@ fn cfd_lines(state: &State) -> Vec<String> {
     }
     if let Some((out, info)) = state.output().and_then(|o| o.cfd.as_ref().map(|i| (o, i))) {
         let stale = if cfd.status == cfd::Status::Stale { "stale · " } else { "" };
+        let points = match out.analysis {
+            super::Analysis::Stability => format!("{} Mach points · zero-lift, at Mach {:.2}", info.nodes, out.conditions.mach_fixed),
+            _ => format!("{} Mach points · zero-lift", info.nodes),
+        };
         let grid = match info.grid {
             CfdGrid::Coarse => "coarse",
             CfdGrid::Medium => "medium",
         };
-        lines.push(format!("{stale}{} · solved on {} · {grid} grid · {}", out.points_text(), info.backend, cfd::ago(info.solved_at)));
+        let below = info.scaled_below.map_or_else(String::new, |m| format!(" · M<{m:.1} scaled from Extended"));
+        lines.push(format!("{stale}{points} · solved on {} · {grid} grid · {}{below}", info.backend, cfd::ago(info.solved_at)));
         if !stale.is_empty() {
             lines.push("The geometry or the conditions changed since; Re-solve for a table that matches.".to_string());
         }

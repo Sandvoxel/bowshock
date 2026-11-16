@@ -20,7 +20,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::cfd;
-use bowshock_model::{CfdGrid, CfdTable, ConfigId, Finish, MaterialId, Rocket, StabilityBands};
+use super::flutter::{FinStock, FlutterAnalysis};
+use bowshock_model::{CfdGrid, CfdTable, ConfigId, Finish, Rocket, StabilityBands};
 use bowshock_motors::MotorDb;
 use bowshock_sim::from_model::{self, Phase};
 use bowshock_sim::{
@@ -619,8 +620,8 @@ fn cfd_info(table: &CfdTable, analysis: Analysis, cond: &Conditions) -> CfdInfo 
         }
         _ => {
             let (lo, hi) = (cond.mach.0.min(cond.mach.1), cond.mach.0.max(cond.mach.1));
-            let (low, high) = (lo < first - 1e-9, hi > last + 1e-9);
-            if low {
+            let high = hi > last + 1e-9;
+            if lo < first - 1e-9 {
                 scaled_below = Some(first);
                 notes.push(format!("Below Mach {first:.2} the drag is the table's first point scaled by Extended's Mach trend (shaded)."));
             }

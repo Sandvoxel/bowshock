@@ -298,7 +298,7 @@ mod tests {
         assert_eq!(r.cfd_table(1).unwrap().lift.as_ref().unwrap().key, 11);
         r.store_cfd_table(CfdTable { lift: Some(lift(12)), ..table(1, 3) });
         assert_eq!(r.cfd_table(1).unwrap().lift.as_ref().unwrap().key, 12);
-        let back = Rocket::from_json(&r.to_json()).unwrap();
+        let back = Rocket::from_bytes(&r.to_bytes()).unwrap();
         assert_eq!(back.cfd_table(1), r.cfd_table(1));
         let mut v = serde_json::to_value(table(1, 1)).unwrap();
         v.as_object_mut().unwrap().remove("lift");

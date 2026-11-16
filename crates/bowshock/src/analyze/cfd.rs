@@ -58,7 +58,7 @@ pub const LIFT_ALPHAS: [f64; 2] = [2.0, 6.0];
 const LIFT_MACH: (f64, f64) = (0.5, 3.0);
 
 /// Why a Mach range cannot be tabulated.
-pub const OUT_OF_RANGE: &str = "the table covers Mach 0.2 to 3";
+pub const OUT_OF_RANGE: &str = "the solver covers Mach 0.1 to 3";
 
 /// Hash of the bytes of numbers: FNV-1a, stable across runs, platforms and Rust versions (unlike `DefaultHasher`).
 struct Fnv(u64);
@@ -1237,7 +1237,7 @@ mod tests {
     #[test]
     fn nodes_cover_the_range_and_follow_it() {
         let all = nodes((0.1, 3.0)).unwrap();
-        assert_eq!((all[0], *all.last().unwrap()), (0.2, 3.0), "Mach 0.1 costs two minutes a point: the table starts at 0.2");
+        assert_eq!((all[0], *all.last().unwrap()), (0.1, 3.0));
         assert!(all.windows(2).all(|w| w[0] < w[1]) && all.len() <= 12, "{all:?}");
         assert!(all.contains(&1.0) && all.contains(&0.9) && all.contains(&1.1), "transonic detail: {all:?}");
         assert_eq!(nodes((3.0, 0.1)).unwrap(), all, "the range may be given either way round");

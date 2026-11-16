@@ -101,6 +101,7 @@ impl Edit {
             Edit::Wind(_) => "wind",
             Edit::WindFrom(_) => "wind from",
             Edit::Turbulence(_) => "turbulence",
+            Edit::Drag(_) => "drag source",
             Edit::SiteAltitude(_) => "site altitude",
             Edit::Temperature(_) => "temperature",
             Edit::FieldRadius(_) => "field radius",
@@ -894,20 +895,11 @@ impl State {
                 Edit::Wind(v) => spec.wind_speed = v.max(0.0),
                 Edit::WindFrom(v) => spec.wind_from = v.rem_euclid(std::f64::consts::TAU),
                 Edit::Turbulence(t) => spec.turbulence = *t,
+                Edit::Drag(d) => spec.drag = *d,
                 Edit::SiteAltitude(v) => spec.site_altitude = v.clamp(-400.0, 6000.0),
                 Edit::Temperature(v) => spec.temperature = v.clamp(220.0, 330.0),
                 Edit::FieldRadius(v) => spec.field_radius = v.max(1.0),
             }
-            Edit::Delay(v) => spec.delay = Some(v.max(0.0)),
-            Edit::RailLength(v) => spec.rail_length = v.max(0.05),
-            Edit::LaunchAngle(v) => spec.launch_angle = v.clamp(0.0, 70f64.to_radians()),
-            Edit::Wind(v) => spec.wind_speed = v.max(0.0),
-            Edit::WindFrom(v) => spec.wind_from = v.rem_euclid(std::f64::consts::TAU),
-            Edit::Turbulence(t) => spec.turbulence = t,
-            Edit::Drag(d) => spec.drag = d,
-            Edit::SiteAltitude(v) => spec.site_altitude = v.clamp(-400.0, 6000.0),
-            Edit::Temperature(v) => spec.temperature = v.clamp(220.0, 330.0),
-            Edit::FieldRadius(v) => spec.field_radius = v.max(1.0),
         }
     }
 

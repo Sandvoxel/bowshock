@@ -38,7 +38,7 @@ pub use config::{Ballast, ConfigError, ConfigId, Configuration, EventKind, Motor
 pub use expr::{dim_from_key, dim_key, dim_kind, EvalError, Expr, ExprError, FieldRef, Formula, FormulaError, FormulaStatus, Kind, Op, Value};
 pub use fin_tab::{TabIssue, TabTarget};
 pub use flights::{
-    example_flights, Conditions, DragSource, FlightDef, FlightId, FlightMotor, PlotLayout, PlotPanel, Turbulence, MAX_LAUNCH_ANGLE, MAX_PANEL_SOURCES,
+    example_flights, Conditions, DragSource, FlightDef, FlightId, FlightMotor, PlotLayout, PlotPanel, PlotX, Turbulence, MAX_LAUNCH_ANGLE, MAX_PANEL_SOURCES,
     MAX_PLOT_PANELS,
 };
 pub use format::{FormatError, FORMAT_VERSION, MAGIC};

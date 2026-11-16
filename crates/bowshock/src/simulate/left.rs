@@ -149,20 +149,20 @@ fn conditions<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
         let note = format!("— flights differ · an edit sets all {count}");
         fields.push(text(note).size(TEXT_BODY - 1.0).style(theme::muted).boxed());
     }
-    fields.push(field("Wind", spec.wind_speed, Quantity::Velocity, Edit::Wind));
-    fields.push(field("Wind from", spec.wind_from, Quantity::Angle, Edit::WindFrom));
-    fields.push(field("Launch angle", spec.launch_angle, Quantity::Angle, Edit::LaunchAngle));
-    if !compare {
-        fields.push(field("Rail length", spec.rail_length, Quantity::Length, Edit::RailLength));
-        fields.push(turbulence);
-        fields.push(drag);
-        if let Some(note) = drag_note {
-            fields.push(text(note).size(TEXT_LABEL).boxed());
-        }
-        fields.push(field("Site altitude", spec.site_altitude, Quantity::Altitude, Edit::SiteAltitude));
-        fields.push(field("Temperature", spec.temperature, Quantity::Temperature, Edit::Temperature));
+    fields.push(motor);
+    fields.push(field("Delay", shared.delay, flight::effective_delay(ctx, spec), Quantity::Time, Edit::Delay));
+    fields.push(field("Wind", shared.wind_speed, spec.wind_speed, Quantity::Velocity, Edit::Wind));
+    fields.push(field("Wind from", shared.wind_from, spec.wind_from, Quantity::Angle, Edit::WindFrom));
+    fields.push(field("Launch angle", shared.launch_angle, spec.launch_angle, Quantity::Angle, Edit::LaunchAngle));
+    fields.push(field("Rail length", shared.rail_length, spec.rail_length, Quantity::Length, Edit::RailLength));
+    fields.push(turbulence);
+    fields.push(drag);
+    if let Some(note) = drag_note {
+        fields.push(text(note).size(TEXT_LABEL).boxed());
     }
-    fields.push(field("Field radius", spec.field_radius, Quantity::Altitude, Edit::FieldRadius));
+    fields.push(field("Site altitude", shared.site_altitude, spec.site_altitude, Quantity::Altitude, Edit::SiteAltitude));
+    fields.push(field("Temperature", shared.temperature, spec.temperature, Quantity::Temperature, Edit::Temperature));
+    fields.push(field("Field radius", shared.field_radius, spec.field_radius, Quantity::Altitude, Edit::FieldRadius));
     container(column![head, column(fields).spacing(SPACE_2)].spacing(SPACE_3)).padding(SPACE_3).boxed()
 }
 
@@ -226,7 +226,7 @@ fn status_color(severity: Option<Severity>, stale: bool) -> fn(&Tokens) -> iced:
 
 /// One row: the compare checkbox, name and `motor · condition`, apogee and the status square.
 fn flight_row<'a>(state: &'a State, ctx: &'a Ctx, flight: &'a Flight) -> Element<'a, Message> {
-    let selected = flight.id == state.selected;
+    let selected = state.is_selected(flight.id);
     let stale = flight.is_stale(state.stamp(ctx, &flight.spec));
     let is_ref = state.shown.compare && state.shown.ids.get(state.shown.reference) == Some(&flight.id);
 
