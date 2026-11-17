@@ -625,7 +625,7 @@ pub(super) mod tests {
         let p = Prepared3::new(Arc::new(f));
         assert_eq!(p.tiles.len(), 180);
         assert!(p.tiles.len() <= super::super::gpu3::MAX_TILES, "the GPU side has room for every copy");
-        assert!(p.sheet_draws(Sheet::Meridian(0), p.window, true).iter().all(|d| d.mesh.triangles.len() > 0));
+        assert!(p.sheet_draws(Sheet::Meridian(0), p.window, true).iter().all(|d| !d.mesh.triangles.is_empty()));
     }
 
     #[test]
