@@ -176,7 +176,11 @@ fn a_kept_gpu_solver_gives_the_point_a_fresh_one_gives() {
     let last = |conditions: &'static [Condition]| {
         std::thread::spawn(move || {
             let a = solver3().backend(Backend::Gpu).max_iterations(200);
-            conditions.iter().map(|&c| a.run(&[c]).unwrap().points.remove(0)).last().unwrap()
+            let mut last = None;
+            for &c in conditions {
+                last = Some(a.run(&[c]).unwrap().points.remove(0));
+            }
+            last.unwrap()
         })
         .join()
         .unwrap()
