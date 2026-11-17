@@ -1,18 +1,19 @@
 //! A [`Field3`] from the 3D solver's state: the grid, the conserved state (`Grid3::cell` order, from the CPU solver or downloaded from
 //! the GPU), the free stream and the case's body.
 //!
-//! The walls are found generically: every face between a fluid and a solid cell, and the `j = 0` rows of the sting grid (`i >=
-//! axis_cells`) while that grid exists. The wall pressure is the one of the force integration (`run3::accumulate`): the pressure of the
-//! first two fluid cells normal to the wall extrapolated linearly to the face centre, the first cell's alone when there is no second
-//! fluid cell. The viewer's `sum -cp A n` over the walls therefore reproduces the pressure force `run3::forces_on` reports (a test
-//! below).
-//!
-//! The part of a face is decided in `classify`, the one place that knows how the solver marks the body and the fins.
+//! The walls are the faces [`run3::for_each_wall_face`] hands out, the same ones the force integration ([`run3::wall_forces`]) sums: every
+//! face between a fluid cell and a wall cell (a solid cell with a part) and the `j = 0` body rows of a sting grid. The part of a face is
+//! its [`Wall`] class (the part id of the cell behind it and the direction of the face), the wall pressure the one of the force integration
+//! ([`run3::wall_pressure`]): the pressure of the first two fluid cells normal to the wall extrapolated linearly to the face centre, the
+//! first cell's alone when there is no second fluid cell. The viewer's `sum -cp A n` over the walls therefore reproduces the pressure force
+//! the integration reports (a test below). The symmetry of the solved domain is the grid's.
 
 use crate::engine::case3::Case3;
+use crate::engine::grid3::{Domain3, FinPhase};
+use crate::engine::run3::{for_each_wall_face, wall_pressure, Wall, WallFaceRef};
 use crate::field3::{Field3, Part, Symmetry, WallFace};
 use bowshock_cfd::gas3::{cons_to_prim3, Cons3};
-use bowshock_cfd::grid3::{Face3, Grid3};
+use bowshock_cfd::grid3::{self, Grid3, PART_FLUID};
 use bowshock_cfd::solver3::Solver3;
 use std::f32::consts::PI;
 use std::fmt;
@@ -54,24 +55,42 @@ impl fmt::Debug for Snapshots3 {
     }
 }
 
-/// What a wall face is, as far as the solver's topology goes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Surface {
-    /// A `j = 0` row of the sting grid: the body, then the sting.
-    BodyRow,
-    /// A face between a fluid cell and a solid box (a fin).
-    SolidBox,
+/// The part of the vehicle a wall face belongs to. The only function that names the viewer's parts from the grid's: the face's [`Wall`] class
+/// (from the part id of the cell behind it and the direction of the face) and the part behind it.
+fn part_of(w: &WallFaceRef) -> Part {
+    match (w.class, w.part) {
+        (Wall::Body(0), _) => Part::Nose,
+        (Wall::Body(_), _) => Part::Body,
+        (Wall::Base, _) => Part::Base,
+        (Wall::Sting, _) => Part::Other,
+        (_, grid3::Part::Fin(n)) => Part::Fin(n as u8),
+        (_, grid3::Part::Appendage(n)) => Part::Appendage(n as u8),
+        (Wall::FinSide | Wall::FinLe | Wall::FinTe | Wall::FinTip | Wall::Appendage, _) => Part::Other,
+    }
 }
 
-/// The part of the vehicle of a wall face of kind `what` whose centroid is at `x` (nose diameters from the tip). The only function that
-/// reads the solver's topology to name parts; with a per-cell part id in the grid it is the one to replace.
-fn classify(case: &Case3, what: Surface, x: f64) -> Part {
-    match what {
-        Surface::SolidBox => Part::Fin(0),
-        Surface::BodyRow if x <= case.body.body.nose_length() => Part::Nose,
-        Surface::BodyRow if x <= case.body.x_base() => Part::Body,
-        Surface::BodyRow => Part::Other,
+/// The symmetry of the solved domain of `g`, as the viewer replicates it (azimuth `0..theta_span`).
+fn symmetry_of(g: &Grid3) -> Symmetry {
+    let span = g.theta_span as f32;
+    match g.sym {
+        grid3::Symmetry::Half => Symmetry::Mirror { theta0: 0.0, theta1: PI },
+        grid3::Symmetry::Sector { .. } => Symmetry::Mirror { theta0: 0.0, theta1: span },
+        grid3::Symmetry::Wedge => Symmetry::Axisymmetric { theta0: 0.0, theta1: span },
     }
+}
+
+/// The azimuths of the fin mid-planes inside the solved domain.
+fn fin_theta_of(case: &Case3, g: &Grid3) -> Vec<f32> {
+    let Some(f) = &case.grid.fins else { return Vec::new() };
+    let n = f64::from(f.count);
+    let at = |phase: f64| (0..f.count).map(move |m| phase + std::f64::consts::TAU * f64::from(m) / n);
+    let thetas: Vec<f64> = match case.grid.domain {
+        Domain3::Half { phase: FinPhase::Between } => at(std::f64::consts::PI / n).collect(),
+        Domain3::Half { phase: FinPhase::InPlane } => at(0.0).collect(),
+        Domain3::Sector => vec![0.0],
+        Domain3::Wedge { .. } => Vec::new(),
+    };
+    thetas.into_iter().filter(|&t| t <= g.theta_span + 1e-9).map(|t| t as f32).collect()
 }
 
 /// [`Field3`] of the CPU solver `s` after `iteration` iterations, lengths in metres through `scale` (metres per nose diameter).
@@ -83,27 +102,11 @@ pub fn field3_of_solver(case: &Case3, s: &Solver3, iteration: usize, scale: f64)
 pub fn field3_of(case: &Case3, g: &Grid3, u: &[Cons3], iteration: usize, scale: f64) -> Field3 {
     let (ni, nj, nk) = (g.ni, g.nj, g.nk);
     let fs = case.freestream();
-    let mut solid = vec![false; ni * nj * nk];
-    for b in &g.solid {
-        for k in b.k.clone() {
-            for j in b.j.clone() {
-                for i in b.i.clone() {
-                    solid[g.cell(i, j, k)] = true;
-                }
-            }
-        }
-    }
+    let solid: Vec<bool> = g.part.iter().map(|&p| p != PART_FLUID).collect();
     let prim: Vec<[f32; 5]> = u.iter().zip(&solid).map(|(q, &s)| (if s { fs } else { cons_to_prim3(q) }).map(|v| v as f32)).collect();
     let nodes: Vec<[f32; 3]> = (0..g.x.len()).map(|n| [g.x[n], g.y[n], g.z[n]].map(|v| (v * scale) as f32)).collect();
-    let walls = walls_of(case, g, u, &solid, &fs);
-    let fin_theta = case.grid.fins.as_ref().map_or_else(Vec::new, |f| {
-        let n = f64::from(f.count);
-        (0..f.count)
-            .map(|m| std::f64::consts::PI / n + std::f64::consts::TAU * f64::from(m) / n)
-            .filter(|&t| t <= std::f64::consts::PI + 1e-9)
-            .map(|t| t as f32)
-            .collect()
-    });
+    let walls = walls_of(g, u, &fs);
+    let fin_theta = fin_theta_of(case, g);
     let mut f = Field3 {
         mach: case.mach,
         alpha_deg: case.alpha.to_degrees(),
@@ -119,7 +122,7 @@ pub fn field3_of(case: &Case3, g: &Grid3, u: &[Cons3], iteration: usize, scale: 
         eddy_ratio: Vec::new(),
         walls,
         fin_theta,
-        symmetry: Symmetry::Mirror { theta0: 0.0, theta1: PI },
+        symmetry: symmetry_of(g),
     };
     f.mesh_id = mesh_id(&f);
     f
@@ -153,93 +156,25 @@ pub fn mesh_id(f: &Field3) -> u64 {
 }
 
 /// Every wall face of the solved domain with its pressure coefficient.
-fn walls_of(case: &Case3, g: &Grid3, u: &[Cons3], solid: &[bool], fs: &[f64; 5]) -> Vec<WallFace> {
-    let (ni, nj, nk) = (g.ni, g.nj, g.nk);
-    let cell = |i: usize, j: usize, k: usize| (k * nj + j) * ni + i;
-    let is_solid = |i: usize, j: usize, k: usize| solid[cell(i, j, k)];
-    let p = |c: usize| cons_to_prim3(&u[c])[4];
+fn walls_of(g: &Grid3, u: &[Cons3], fs: &[f64; 5]) -> Vec<WallFace> {
+    let (ni, nj) = (g.ni, g.nj);
     let node = |i: usize, j: usize, k: usize| (k * (nj + 1) + j) * (ni + 1) + i;
     let q_inf = 0.5 * fs[0] * (fs[1] * fs[1] + fs[2] * fs[2] + fs[3] * fs[3]);
-    let dist = |c: usize, f: &Face3| {
-        let x = g.xc[c];
-        ((x[0] - f.c[0]).powi(2) + (x[1] - f.c[1]).powi(2) + (x[2] - f.c[2]).powi(2)).sqrt()
-    };
+    let pt = |n: usize| [g.x[n], g.y[n], g.z[n]];
     let mut walls = Vec::new();
-    // `a`: the first fluid cell, `b`: the fluid cell behind it (if any), `into`: +1 when the fluid lies on the +index side of the face
-    // (the face normal then points into the flow), `corners`: the face's nodes in the order Grid3 builds its faces from
-    let mut add = |what: Surface, a: usize, b: Option<usize>, f: &Face3, into: f64, corners: [(usize, usize, usize); 4]| {
-        let p0 = p(a);
-        let pw = match b {
-            Some(b) => {
-                let (d0, d1) = (dist(a, f), dist(b, f));
-                p0 + (p0 - p(b)) * d0 / (d1 - d0)
-            }
-            None => p0,
-        };
-        let mut ids = corners.map(|(i, j, k)| node(i, j, k));
-        // wind counter-clockwise seen from the fluid: the area vector (p2 - p0) x (p3 - p1) / 2 along the normal into the flow
-        let pt = |n: usize| [g.x[n], g.y[n], g.z[n]];
+    for_each_wall_face(g, |w| {
+        let pw = wall_pressure(g, w, |c| cons_to_prim3(&u[c])[4]);
+        let mut ids = w.corners.map(|(i, j, k)| node(i, j, k));
+        // wind counter-clockwise seen from the fluid: the area vector (p2 - p0) x (p3 - p1) / 2 along the normal into the flow, which is the
+        // face normal when the fluid is on its +index side (`sign` -1) and its negative otherwise
         let (d02, d13) = (sub(pt(ids[2]), pt(ids[0])), sub(pt(ids[3]), pt(ids[1])));
         let s = cross(d02, d13);
-        if s[0] * f.n[0] * into + s[1] * f.n[1] * into + s[2] * f.n[2] * into < 0.0 {
+        let into = -w.sign;
+        if s[0] * w.face.n[0] * into + s[1] * w.face.n[1] * into + s[2] * w.face.n[2] * into < 0.0 {
             ids.swap(1, 3);
         }
-        walls.push(WallFace {
-            nodes: ids.map(|n| n as u32),
-            cell: a as u32,
-            part: classify(case, what, f.c[0]),
-            cp: ((pw - fs[4]) / q_inf) as f32,
-            cf: [0.0; 3],
-        });
-    };
-    for k in 0..nk {
-        for i in g.axis_cells..ni {
-            if !is_solid(i, 0, k) {
-                let f = &g.jface[k * (nj + 1) * ni + i];
-                let b = (nj > 1 && !is_solid(i, 1, k)).then(|| cell(i, 1, k));
-                add(Surface::BodyRow, cell(i, 0, k), b, f, 1.0, [(i, 0, k), (i, 0, k + 1), (i + 1, 0, k + 1), (i + 1, 0, k)]);
-            }
-        }
-    }
-    for k in 0..nk {
-        for j in 0..nj {
-            for i in 1..ni {
-                let f = &g.iface[(k * nj + j) * (ni + 1) + i];
-                let c = [(i, j, k), (i, j + 1, k), (i, j + 1, k + 1), (i, j, k + 1)];
-                match (is_solid(i - 1, j, k), is_solid(i, j, k)) {
-                    (false, true) => add(Surface::SolidBox, cell(i - 1, j, k), (i >= 2 && !is_solid(i - 2, j, k)).then(|| cell(i - 2, j, k)), f, -1.0, c),
-                    (true, false) => add(Surface::SolidBox, cell(i, j, k), (i + 1 < ni && !is_solid(i + 1, j, k)).then(|| cell(i + 1, j, k)), f, 1.0, c),
-                    _ => {}
-                }
-            }
-        }
-    }
-    for k in 0..nk {
-        for j in 1..nj {
-            for i in 0..ni {
-                let f = &g.jface[(k * (nj + 1) + j) * ni + i];
-                let c = [(i, j, k), (i, j, k + 1), (i + 1, j, k + 1), (i + 1, j, k)];
-                match (is_solid(i, j - 1, k), is_solid(i, j, k)) {
-                    (false, true) => add(Surface::SolidBox, cell(i, j - 1, k), (j >= 2 && !is_solid(i, j - 2, k)).then(|| cell(i, j - 2, k)), f, -1.0, c),
-                    (true, false) => add(Surface::SolidBox, cell(i, j, k), (j + 1 < nj && !is_solid(i, j + 1, k)).then(|| cell(i, j + 1, k)), f, 1.0, c),
-                    _ => {}
-                }
-            }
-        }
-    }
-    for k in 1..nk {
-        for j in 0..nj {
-            for i in 0..ni {
-                let f = &g.kface[(k * nj + j) * ni + i];
-                let c = [(i, j, k), (i + 1, j, k), (i + 1, j + 1, k), (i, j + 1, k)];
-                match (is_solid(i, j, k - 1), is_solid(i, j, k)) {
-                    (false, true) => add(Surface::SolidBox, cell(i, j, k - 1), (k >= 2 && !is_solid(i, j, k - 2)).then(|| cell(i, j, k - 2)), f, -1.0, c),
-                    (true, false) => add(Surface::SolidBox, cell(i, j, k), (k + 1 < nk && !is_solid(i, j, k + 1)).then(|| cell(i, j, k + 1)), f, 1.0, c),
-                    _ => {}
-                }
-            }
-        }
-    }
+        walls.push(WallFace { nodes: ids.map(|n| n as u32), cell: w.a as u32, part: part_of(w), cp: ((pw - fs[4]) / q_inf) as f32, cf: [0.0; 3] });
+    });
     walls
 }
 
@@ -315,11 +250,16 @@ mod tests {
             assert!(f.is_fluid(w.cell as usize));
         }
         let count = |p: fn(&Part) -> bool| f.walls.iter().filter(|w| p(&w.part)).count();
-        // the body rows: one face per fluid cell of row j = 0 behind the axis cells (the fin roots are solid cells of that row)
-        let rows = (0..s.grid.nk).flat_map(|k| (s.grid.axis_cells..s.grid.ni).map(move |i| (i, k))).filter(|&(i, k)| !f.solid[s.grid.cell(i, 0, k)]).count();
+        // the body rows: one face per fluid cell of row j = 0 inside the grid's body runs, off the axis (the fin roots are solid cells of that row)
+        let g = &s.grid;
+        let rows = (0..g.nk)
+            .flat_map(|k| (0..g.ni).map(move |i| (i, k)))
+            .filter(|&(i, k)| g.wall_j0.iter().any(|(r, _)| r.contains(&i)) && !g.is_axis(i, 0) && !f.solid[g.cell(i, 0, k)])
+            .count();
         assert_eq!(count(|p| matches!(p, Part::Nose | Part::Body | Part::Other)), rows);
-        assert!(count(|p| *p == Part::Nose) > 0 && count(|p| *p == Part::Body) > 0 && count(|p| *p == Part::Other) > 0);
+        assert!(count(|p| *p == Part::Nose) > 0 && count(|p| *p == Part::Body) > 0 && count(|p| *p == Part::Other) > 0, "the sting is a wall too, and hidden");
         assert!(count(|p| *p == Part::Fin(0)) > 0);
+        assert_eq!(f.symmetry, Symmetry::Mirror { theta0: 0.0, theta1: PI });
         assert_eq!(f.fin_theta, vec![PI / 4.0, 3.0 * PI / 4.0]);
         assert_eq!(f.alpha_deg, 4.0f64.to_radians().to_degrees());
     }
@@ -344,5 +284,28 @@ mod tests {
         assert!(f.walls.iter().all(|w| w.cp.abs() < 1e-6));
         assert!(f.prim.iter().all(|p| (p[0] - 1.0).abs() < 1e-6));
         assert!((f.mach_number(0) - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn the_symmetry_the_fins_and_the_parts_come_from_the_grid_of_each_domain() {
+        // a fin sector: the sector's two mirror planes, the half fin on the first, the walls of the fin and the body
+        let mut sector = Case3::tiny_anf(2.0, 0.0);
+        sector.grid.domain = Domain3::Sector;
+        sector.grid.nk = 6;
+        let s = sector.build_solver().unwrap();
+        let f = field3_of_solver(&sector, &s, 0, 1.0);
+        assert_eq!(f.symmetry, Symmetry::Mirror { theta0: 0.0, theta1: PI / 4.0 });
+        assert_eq!(f.fin_theta, vec![0.0]);
+        assert_eq!(f.symmetry.tiles().len(), 8, "four fins: eight copies of the sector");
+        assert!(f.walls.iter().any(|w| w.part == Part::Fin(0)) && f.walls.iter().any(|w| w.part == Part::Nose));
+        // a finless wedge on the base-wake grid: any rotation is a symmetry, no fins, and the base is a wall of its own
+        let wedge = Case3::wedge(2.0, Case3::anf_body(), 0);
+        let s = wedge.build_solver().unwrap();
+        let f = field3_of_solver(&wedge, &s, 0, 1.0);
+        assert_eq!((f.nk, f.fin_theta.len()), (1, 0));
+        assert!(matches!(f.symmetry, Symmetry::Axisymmetric { theta0, theta1 } if theta0 == 0.0 && (theta1 - 2.0f32.to_radians()).abs() < 1e-6));
+        assert!(f.walls.iter().any(|w| w.part == Part::Base), "the base of the base-wake grid");
+        assert!(f.walls.iter().any(|w| w.part == Part::Nose) && f.walls.iter().any(|w| w.part == Part::Body));
+        assert!(f.walls.iter().all(|w| w.cp.abs() < 1e-6), "the free stream has no wall pressure");
     }
 }

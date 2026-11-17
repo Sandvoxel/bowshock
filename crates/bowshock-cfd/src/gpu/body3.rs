@@ -308,6 +308,16 @@ struct Geo3 {
     solid_faces: [Option<SolidFaces3>; 3],
 }
 
+/// Cells of the axis run at `j = 0` from `i = 0`: the only axis the GPU solver supports so far (the CPU solver's `AxisMap` handles every run and symmetry;
+/// the port is `gpu3d`'s S2). A grid with another axis run or another symmetry than the half domain is refused.
+fn axis_cells3(grid: &Grid3) -> usize {
+    assert!(
+        grid.sym == crate::grid3::Symmetry::Half && grid.axis.iter().all(|r| r.j == 0 && r.i.start == 0) && grid.axis.len() <= 1,
+        "the GPU solver supports half-domain grids with one axis run at j = 0 only (generalised axis: port pending)"
+    );
+    grid.axis.first().map_or(0, |r| r.i.end)
+}
+
 /// The cell across the axis of every axis cell `(i, 0, k)`, `i < axis_cells`: the one whose centroid azimuth is closest to `pi - theta`
 /// (`axis_k[i * nk + k]`, as `Solver3::new`).
 fn axis_partners3(grid: &Grid3) -> Vec<usize> {
@@ -316,7 +326,7 @@ fn axis_partners3(grid: &Grid3) -> Vec<usize> {
         let cen = grid.xc[(k * nj) * ni + i];
         cen[1].atan2(cen[2])
     };
-    let na = grid.axis_cells.min(ni);
+    let na = axis_cells3(grid).min(ni);
     let mut axis_k = vec![0; na * nk];
     for i in 0..na {
         for k in 0..nk {
@@ -440,7 +450,7 @@ impl LazySolver3 {
         }
         let n_active = solid.iter().filter(|s| !**s).count();
         let has_solid = n_active < nc;
-        let na = grid.axis_cells.min(ni);
+        let na = axis_cells3(grid).min(ni);
 
         let face_geo = |faces: &[Face3], shape: [usize; 3]| -> Result<FaceGeo3> {
             let get = |g: &dyn Fn(&Face3) -> f64| up(ctx, &faces.iter().map(g).collect::<Vec<_>>(), shape);

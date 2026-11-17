@@ -1,6 +1,8 @@
 //! `Analysis::run`, the one solve entry: conditions at zero incidence go to the drag solver and those at an angle of attack to the 3D
 //! solver. The numbers it gives are those of the two entries it replaced (`run` over Mach numbers and `run_lift`), bit for bit on the CPU:
-//! the constants below were taken from those two functions at the commit before they were merged.
+//! the constants below were taken from those two functions at the commit before they were merged (the drag numbers are the same at the
+//! commit before and after the 3D topology of `cfd-3d` S1, 65c1d78, whose force integration moved the 3D numbers by a few last bits; the
+//! angle-of-attack constants are S1's: `Analysis::run_lift` of 65c1d78).
 
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
 use bowshock_core::{
@@ -117,8 +119,8 @@ fn conditions_at_an_angle_of_attack_give_the_numbers_of_the_old_lift_entry_to_th
     let p = finned_3d().max_iterations(3000).run(&[Condition::new(2.0, 6.0), Condition::new(2.0, 2.0)]).unwrap();
     // (angle, CN, CA of the pressure, x_cp [m], iterations)
     let want = [
-        (6.0, 0x3ff394c225ec3ddeu64, 0x3ff01b9bec4d022du64, 0x3fd17e5353844eb3u64, 318),
-        (2.0, 0x3fd85d6ebf7557dc, 0x3ff05c45835ed819, 0x3fd21cc7180c0dec, 291),
+        (6.0, 0x3ff394c225ec3ddeu64, 0x3ff01b9bec4d022eu64, 0x3fd17e5353844eafu64, 318),
+        (2.0, 0x3fd85d6ebf7557ce, 0x3ff05c45835ed819, 0x3fd21cc7180c0df5, 291),
     ];
     for (pt, (alpha, cn, ca, x_cp, iters)) in p.points.iter().zip(want) {
         let f = pt.forces.expect("forces at an angle of attack");
