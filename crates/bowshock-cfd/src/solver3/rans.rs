@@ -10,7 +10,8 @@
 //!                    turbulence3::wall_state_pass w, mu, dwall, ks -> wall[c] = [k_w, omega_w, mu_t,w]   (SST only; cells with a no-slip face)
 //!                    viscous3::face_pass          w, grad, mu, mu_t, wall, dirs -> fvi, fvj, fvk  (Fv.n of every face)
 //!  3. inviscid face fluxes fi, fj, fk (Family::fluxes): the solid side of a wall is the NO-SLIP ghost (rho, -u, -v, -w, p), also in the MUSCL stencil
-//!  4. res = -(1/V) sum S F  (unchanged);  add_viscous_residual: res += (1/V) sum S Fv
+//!  4. res = -(1/V) sum S F  (unchanged);  add_viscous_residual: res += (1/V) sum S Fv;  on a WEDGE the azimuthal momentum of res is projected out
+//!     (res_v, res_w -= (res_v cos(th_m) - res_w sin(th_m)) (cos(th_m), -sin(th_m)), th_m = theta_span / 2): see `add_viscous_residual`
 //!  5. compute_dt: CFL V / (L_i + L_j + L_k), L_d = convective (|u.n| + c) A  [preconditioned |u'| + c' with ImplicitParams::low_mach_precond]
 //!                 + the diffusive 2 lv A^2 / V (viscous3::diffusion_rates) of the cell
 //!  6. implicit step (implicit3): (a) face_lambdas: lambda_pass -> lam_i, lam_j, lam_k (diffusive spectral radius of every face)
@@ -34,12 +35,22 @@
 //! | `fvi, fvj, fvk` (5 f per face) | viscous flux `Fv.n` | `face_pass` |
 //! | `lam_i, lam_j, lam_k` (1 f per face) | diffusive spectral radius of the face (implicit operator) | `lambda_pass` |
 //!
-//! # Boundaries
+//! # Boundaries and walls
 //!
 //! `RansOpts3::sym` (which sides of the domain box have a mirror-image ghost layer: a symmetry plane or the slip wall `j = 0`) goes to `viscous3::face_dirs`, and
 //! `RansOpts3::bc` (the scalar ghost of every side: free stream or the cell's own value) to `turbulence3`. The defaults match the boundary conditions of
 //! [`Solver3`]: `i0, i1, j1` far field (`Inf`), `j0` slip wall / axis, `k0, k1` symmetry planes. Every fluid/solid face is a no-slip adiabatic wall
-//! (the viscous solver has no slip solid walls).
+//! (the viscous solver has no slip solid walls), and so is every `j = 0` boundary face inside a run of `Grid3::wall_j0` (the body surface of a grid without solid
+//! cells under it): `viscous3::face_cells` returns the `Wall` side, `fill_ghosts` fills the `j = -1, -2` layers with the no-slip ghost, `assemble3` uses the
+//! no-slip ghost Jacobian and `walldist3::wall_faces` lists the face for the wall distance. A `j = 0` face outside the runs stays a slip wall.
+//!
+//! # Wedge (`Symmetry::Wedge`)
+//!
+//! The `k` faces carry the pressure only in the inviscid flux (`Family::fluxes`) and the viscous flux of the mirror ghost (the hoop terms: for an axisymmetric
+//! state the mirror image of a cell is its rotation by the wedge angle). The mirror also damps a swirl perturbation with `2 mu / (rho (r dtheta / 2)^2)`, an explicit
+//! rate no CFL survives (swirl of round-off size grew by 500 per iteration at the axis cells), so the azimuthal momentum of the residual is projected out
+//! (step 4); no `k` line, no `k` term in `compute_dt`, two factors in the block and the diagonal solves (`P` is applied between them: a `k` factor of `I` would
+//! be a second `P^-1`).
 
 use super::Solver3;
 use crate::gas3::{Cons3, Prim3};
@@ -226,11 +237,22 @@ impl Solver3 {
         viscous3::face_pass(grid, solid, w, &r.dirs, &r.grad, &r.mu, &r.mu_t, &r.wall, &mut r.fvi, &mut r.fvj, &mut r.fvk);
     }
 
-    /// Step 4: `res += (1/V) sum S Fv`.
+    /// Step 4: `res += (1/V) sum S Fv`. On a wedge the azimuthal momentum of the residual is then projected out: the flow of a wedge has none (the pressure of its `k`
+    /// faces is radial, and so are the hoop terms of their viscous fluxes), but a swirl perturbation of a cell meets the mirror ghost of the symmetry planes and is
+    /// damped by `2 mu / (rho (r dtheta / 2)^2)` per unit time, a rate that the explicit `k` fluxes do not survive at any CFL (the swirl of round-off size grew by
+    /// 500 per iteration at the axis cells). With the projection the swirl is neutral, as it is in the inviscid wedge, whose `k` flux has no swirl term.
     pub(crate) fn add_viscous_residual(&mut self) {
+        let wedge = self.is_wedge();
         let Solver3 { grid, solid, rans, res, .. } = self;
-        if let Some(r) = rans.as_deref() {
-            viscous3::add_viscous_residual(grid, solid, &r.fvi, &r.fvj, &r.fvk, res);
+        let Some(r) = rans.as_deref() else { return };
+        viscous3::add_viscous_residual(grid, solid, &r.fvi, &r.fvj, &r.fvk, res);
+        if wedge {
+            let (s, c) = (0.5 * grid.theta_span).sin_cos();
+            for q in res.iter_mut() {
+                let t = q[2] * c - q[3] * s;
+                q[2] -= t * c;
+                q[3] += t * s;
+            }
         }
     }
 

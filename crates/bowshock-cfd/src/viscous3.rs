@@ -151,7 +151,8 @@ impl FaceCells {
 }
 
 /// Sides of face `(i, j, k)` of family `dir`; `None` for a face that carries no flux: `area == 0`, between two solid cells, or on the domain boundary
-/// in front of a solid cell. `solid` is the per-cell mask (`ni * nj * nk`).
+/// in front of a solid cell. `solid` is the per-cell mask (`ni * nj * nk`). A `j = 0` boundary face inside a run of [`Grid3::wall_j0`] (the body surface of a
+/// grid that has no solid cells under it) is a no-slip wall like a fluid/solid face: its ghost side is `Wall`.
 pub fn face_cells(grid: &Grid3, solid: &[bool], dir: usize, i: usize, j: usize, k: usize) -> Option<FaceCells> {
     let (ni, nj, nk) = (grid.ni, grid.nj, grid.nk);
     let (_, face) = face_of(grid, dir, i, j, k);
@@ -179,7 +180,11 @@ pub fn face_cells(grid: &Grid3, solid: &[bool], dir: usize, i: usize, j: usize, 
             (false, true) => Some(FaceCells { cell: [a, a], kind: [Cell, Wall], pad: [lo_p, lo_p] }),
             (false, false) => Some(FaceCells { cell: [a, b], kind: [Cell, Cell], pad: [lo_p, hi_p] }),
         },
-        (None, Some(b)) => (!solid[b]).then_some(FaceCells { cell: [b, b], kind: [Domain, Cell], pad: [lo_p, hi_p] }),
+        (None, Some(b)) if solid[b] => None,
+        (None, Some(b)) if dir == 1 && grid.wall_j0.iter().any(|(r, _)| r.contains(&i)) => {
+            Some(FaceCells { cell: [b, b], kind: [Wall, Cell], pad: [hi_p, hi_p] })
+        }
+        (None, Some(b)) => Some(FaceCells { cell: [b, b], kind: [Domain, Cell], pad: [lo_p, hi_p] }),
         (Some(a), None) => (!solid[a]).then_some(FaceCells { cell: [a, a], kind: [Cell, Domain], pad: [lo_p, hi_p] }),
         (None, None) => None,
     }
@@ -291,7 +296,7 @@ pub fn face_dirs(grid: &Grid3, solid: &[bool], sym: &SymSides) -> FaceDirs3 {
             }
             let n = [grid.ni, grid.nj, grid.nk][dir];
             let idx = [i, j, k][dir];
-            let on_sym = (idx == 0 && sym[2 * dir]) || (idx == n && sym[2 * dir + 1]);
+            let on_sym = ((idx == 0 && sym[2 * dir]) || (idx == n && sym[2 * dir + 1])) && !fc.noslip();
             FaceDir3 { e: [d[0] / dd, d[1] / dd, d[2] / dd], d: dd, noslip: fc.noslip(), sym: on_sym }
         });
         v

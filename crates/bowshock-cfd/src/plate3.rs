@@ -37,7 +37,8 @@ pub struct PlateCase {
     /// `dz = dx_le` here.
     pub nk: usize,
     pub dz: f64,
-    /// Thickness of the solid slab under the plate in units of `dr_wall` (the height of the leading-edge step).
+    /// Thickness of the solid slab under the plate in units of `dr_wall` (the height of the leading-edge step); `0`: no slab, the plate is the `j = 0` boundary of the
+    /// grid ([`Grid3::wall_j0`]) and the leading edge is step-free, as in the 2D plate ([`PlateCase::boundary_wall`]).
     pub slab: f64,
 }
 
@@ -91,21 +92,32 @@ impl PlateCase {
     pub fn i_le(&self) -> usize {
         self.grid.n_up
     }
+
+    /// This plate as the `j = 0` boundary wall of the grid, without the solid slab: the geometry of the 2D plate (a step-free leading edge, the slip floor upstream of it).
+    pub fn boundary_wall(self) -> PlateCase {
+        PlateCase { slab: 0.0, ..self }
+    }
+
+    /// The first fluid row over the plate: `1` over the slab, `0` for the boundary wall.
+    pub fn j_first(&self) -> usize {
+        usize::from(self.slab > 0.0)
+    }
 }
 
-/// The box grid of a plate case: nodes `x` and `y = r - r0` of the 2D plate grid, one more row of nodes `y = -dr_wall` below the plate, `nk + 1` planes
-/// `z = k dz / nk`; the solid slab is `i >= n_up, j = 0`.
+/// The box grid of a plate case: nodes `x` and `y = r - r0` of the 2D plate grid, one more row of nodes `y = -slab dr_wall` below the plate (none for the boundary wall,
+/// [`PlateCase::boundary_wall`]), `nk + 1` planes `z = k dz / nk`; the solid slab is `i >= n_up, j = 0`, the boundary wall the `j = 0` faces of `i >= n_up`.
 pub fn plate_grid3(case: &PlateCase) -> Grid3 {
     let g2 = plate_grid(&case.grid);
-    let (ni, nj, nk) = (g2.ni, g2.nj + 1, case.nk);
+    let rows = usize::from(case.slab > 0.0);
+    let (ni, nj, nk) = (g2.ni, g2.nj + rows, case.nk);
     let (mut x, mut y, mut z) = (Vec::new(), Vec::new(), Vec::new());
     for k in 0..=nk {
         for j in 0..=nj {
             for i in 0..=ni {
-                let (xn, yn) = if j == 0 {
+                let (xn, yn) = if j < rows {
                     (g2.node(i, 0).0, -case.slab * case.grid.dr_wall)
                 } else {
-                    let (xx, rr) = g2.node(i, j - 1);
+                    let (xx, rr) = g2.node(i, j - rows);
                     (xx, rr - case.grid.r0)
                 };
                 x.push(xn);
@@ -115,7 +127,11 @@ pub fn plate_grid3(case: &PlateCase) -> Grid3 {
         }
     }
     let mut g = Grid3::try_from_nodes(ni, nj, nk, x, y, z).expect("plate grid");
-    g.mark_solid(SolidBox { i: case.i_le()..ni, j: 0..1, k: 0..nk }, Some(Part::Body(0)));
+    if rows == 1 {
+        g.mark_solid(SolidBox { i: case.i_le()..ni, j: 0..1, k: 0..nk }, Some(Part::Body(0)));
+    } else {
+        g.wall_j0 = vec![(case.i_le()..ni, Part::Body(0))];
+    }
     g
 }
 
@@ -137,7 +153,7 @@ pub fn plate_solver3(case: &PlateCase, params: ImplicitParams) -> Solver3 {
         opts.ks = vec![0.0; grid.ni * grid.nj * grid.nk];
         for i in case.i_le()..grid.ni {
             for k in 0..grid.nk {
-                opts.ks[grid.cell(i, 1, k)] = case.ks * crate::turbulence::rough_ramp(i, case.i_le());
+                opts.ks[grid.cell(i, case.j_first(), k)] = case.ks * crate::turbulence::rough_ramp(i, case.i_le());
             }
         }
     }
@@ -260,11 +276,38 @@ mod tests {
         assert!((vol - area * case.dz).abs() < 1e-9 * vol);
     }
 
+    /// The boundary-wall plate has the 2D plate's rows (no extra row under it), no solid cell and the plate as the `j = 0` boundary faces of `i >= n_up`.
+    #[test]
+    fn boundary_wall_grid_is_the_2d_plate() {
+        let case = PlateCase::g1().boundary_wall();
+        let g = plate_grid3(&case);
+        let g2 = plate_grid(&case.grid);
+        assert_eq!((g.ni, g.nj, g.nk), (g2.ni, g2.nj, 1));
+        assert!(g.solid.is_empty() && g.part.iter().all(|&p| p == 0));
+        assert_eq!(g.wall_j0, vec![(case.i_le()..g.ni, Part::Body(0))]);
+        let c = g.cell(case.i_le() + 3, case.j_first(), 0);
+        assert!((g.xc[c][1] - 0.5 * case.grid.dr_wall).abs() < 1e-15, "first cell centre {}", g.xc[c][1]);
+        let s = plate_solver3(&case, ImplicitParams::VISCOUS);
+        // the plate faces are no-slip walls with a distance field from the boundary faces; the faces upstream of the leading edge are not
+        let tractions = s.wall_tractions();
+        assert_eq!(tractions.len(), g.ni - case.i_le());
+        assert!(tractions.iter().all(|t| t.dir == 1 && t.idx[1] == 0 && t.idx[0] >= case.i_le()));
+    }
+
     /// G1: the laminar plate against Blasius at `x = 0.5` and `0.9` (`Re_x = 1e5`, `1.8e5`), the stop rule of the 2D test (the density residual 5 orders, or both `cf`
     /// stationary to `1e-5` per 250 iterations, 6000 at most).
     #[test]
     fn g1_laminar_plate_matches_blasius() {
-        let case = PlateCase::g1();
+        g1_gate(PlateCase::g1());
+    }
+
+    /// G1 on the plate as the `j = 0` boundary wall of the grid ([`PlateCase::boundary_wall`]): no slab, a step-free leading edge as in the 2D plate.
+    #[test]
+    fn g1_laminar_boundary_wall_plate_matches_blasius() {
+        g1_gate(PlateCase::g1().boundary_wall());
+    }
+
+    fn g1_gate(case: PlateCase) {
         let mut s = plate_solver3(&case, ImplicitParams::VISCOUS);
         let mut prev = [f64::NAN; 2];
         let t0 = std::time::Instant::now();
@@ -331,7 +374,17 @@ mod tests {
     #[test]
     #[ignore]
     fn g2_turbulent_plate_matches_the_correlation() {
-        let case = PlateCase::g2();
+        g2_gate(PlateCase::g2());
+    }
+
+    /// G2 on the plate as the `j = 0` boundary wall of the grid (no slab, a step-free leading edge as in the 2D plate).
+    #[test]
+    #[ignore]
+    fn g2_turbulent_boundary_wall_plate_matches_the_correlation() {
+        g2_gate(PlateCase::g2().boundary_wall());
+    }
+
+    fn g2_gate(case: PlateCase) {
         let (s, info, _) = converge(&case, ImplicitParams::VISCOUS, 4.0, 20_000, 0.97);
         for x_target in [0.25, 0.5, 0.75] {
             let st = station(&s, &case, x_target);
@@ -483,9 +536,9 @@ mod tests {
         }
         println!(
             "wall state of the first cell: k_w {:.3e} omega_w {:.3e} mu_t_w/mu {:.3}",
-            r.wall[g.cell(st.col, 1, 0)][0],
-            r.wall[g.cell(st.col, 1, 0)][1],
-            r.wall[g.cell(st.col, 1, 0)][2] / r.mu[g.cell(st.col, 1, 0)]
+            r.wall[g.cell(st.col, case.j_first(), 0)][0],
+            r.wall[g.cell(st.col, case.j_first(), 0)][1],
+            r.wall[g.cell(st.col, case.j_first(), 0)][2] / r.mu[g.cell(st.col, case.j_first(), 0)]
         );
     }
 }

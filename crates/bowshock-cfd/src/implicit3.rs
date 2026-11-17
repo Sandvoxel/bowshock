@@ -354,6 +354,9 @@ fn assemble3(s: &Solver3, p: &ImplicitParams, dir: usize) -> Factor {
             (1, true) => {
                 if grid.is_axis(i, 0) {
                     ZERO5
+                } else if grid.wall_j0.iter().any(|(r, _)| r.contains(&i)) {
+                    // the body-surface boundary face: the no-slip ghost of a viscous run, the reflection otherwise
+                    s.wall_jacobian(f.n)
                 } else {
                     reflection3(f.n)
                 }
@@ -500,18 +503,19 @@ fn apply_factor3(s: &Solver3, fac: &Factor, dir: usize, x: &[Cons3]) -> Vec<Cons
     out
 }
 
-/// The correction `dU` of the block scheme for the right-hand side `b = dt R`: the three-factor solve with block-tridiagonal lines and
-/// `ImplicitParams::sub_iters - 1` defect-correction passes against the unfactored operator.
+/// The correction `dU` of the block scheme for the right-hand side `b = dt R`: the three-factor solve (two on a wedge: it has no `k` line, and a `k` factor of
+/// `I` between `P`s would be a second `P^-1`) with block-tridiagonal lines and `ImplicitParams::sub_iters - 1` defect-correction passes against the unfactored operator.
 fn du_block(s: &Solver3, p: &ImplicitParams, b: &[Cons3]) -> Vec<Cons3> {
     let n = s.u.len();
-    let facs = [assemble3(s, p, 0), assemble3(s, p, 1), assemble3(s, p, 2)];
+    let nd = if s.is_wedge() { 2 } else { 3 };
+    let facs: Vec<Factor> = (0..nd).map(|dir| assemble3(s, p, dir)).collect();
     let pm = precond_blocks(s);
     let af = |rhs: &[Cons3]| -> Vec<Cons3> {
         let mut x = rhs.to_vec();
-        for dir in 0..3 {
+        for dir in 0..nd {
             solve_lines3(s, &facs[dir], dir, &mut x);
             // low-Mach run: `(P - dt J_i) X = rhs, (P - dt J_j) Y = P X, (P - dt J_k) dU = P Y`
-            if let (Some(pm), true) = (&pm, dir < 2) {
+            if let (Some(pm), true) = (&pm, dir + 1 < nd) {
                 apply_p(pm, &mut x);
             }
         }
@@ -519,7 +523,7 @@ fn du_block(s: &Solver3, p: &ImplicitParams, b: &[Cons3]) -> Vec<Cons3> {
     };
     let mut du = af(b);
     for _ in 1..p.sub_iters.max(1) {
-        let a: Vec<Vec<Cons3>> = (0..3).map(|dir| apply_factor3(s, &facs[dir], dir, &du)).collect();
+        let a: Vec<Vec<Cons3>> = (0..nd).map(|dir| apply_factor3(s, &facs[dir], dir, &du)).collect();
         let r: Vec<Cons3> = (0..n)
             .into_par_iter()
             .map(|c| {
@@ -527,7 +531,7 @@ fn du_block(s: &Solver3, p: &ImplicitParams, b: &[Cons3]) -> Vec<Cons3> {
                 let pdu = pm.as_ref().map_or(du[c], |pm| mv(&pm[c], &du[c]));
                 let mut v = [0.0; 5];
                 for q in 0..5 {
-                    v[q] = b[c][q] - (a[0][c][q] + a[1][c][q] + a[2][c][q] - 2.0 * pdu[q]);
+                    v[q] = b[c][q] - (a.iter().map(|f| f[c][q]).sum::<f64>() - (nd - 1) as f64 * pdu[q]);
                 }
                 v
             })

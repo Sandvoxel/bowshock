@@ -252,7 +252,10 @@ pub fn wall_state(rho: f64, nu: f64, speed: f64, d: f64, ks: f64) -> WallState {
 
 /// The wall state `[k_w, omega_w, mu_t,w]` of every fluid cell with a no-slip face (zero elsewhere), from the primitives `w` (padded), the viscosity `mu`
 /// (`viscous3::cell_pass`), the wall distance `dwall` (`walldist3`) and the roughness per cell `ks` (empty: all smooth); this is the `wall` array of
-/// `viscous3::face_mu3` and of [`update`]. Needed after every change of the mean flow, before the viscous face pass.
+/// `viscous3::face_mu3` and of [`update`]. Needed after every change of the mean flow, before the viscous face pass. The speed of the wall treatment is the one
+/// tangential to the wall (`|u - (u.n) n|`, `n` = `FaceDir3::e` of a no-slip face; the largest over the cell's no-slip faces): the cells in front of the base plane
+/// of a body see the recirculation hit the wall, a normal velocity that is no shear (with the total speed the base corner cells carried `tau` 1000 times a
+/// log-law value at `y+ ~ 1600`).
 pub fn wall_state_pass(grid: &Grid3, solid: &[bool], dirs: &FaceDirs3, w: &[Prim3], mu: &[f64], dwall: &[f64], ks: &[f64], out: &mut [[f64; 3]]) {
     let (ni, nj, nk) = (grid.ni, grid.nj, grid.nk);
     let plane = ni * nj;
@@ -272,12 +275,33 @@ pub fn wall_state_pass(grid: &Grid3, solid: &[bool], dirs: &FaceDirs3, w: &[Prim
                 }
                 let wc = &w[pidx3(ni, nj, nk, i as isize, j as isize, k as isize)];
                 let nu = mu[c] / wc[0];
-                let speed = (wc[1] * wc[1] + wc[2] * wc[2] + wc[3] * wc[3]).sqrt();
+                let speed = wall_speed(grid, dirs, i, j, k, wc);
                 let s = wall_state(wc[0], nu, speed, dwall[c], ks.get(c).copied().unwrap_or(0.0));
                 pl[j * ni + i] = [s.k_w, s.omega_w, s.mu_t_w];
             }
         }
     });
+}
+
+/// The speed of the cell `(i, j, k)` tangential to its no-slip faces, `|u - (u.n) n|` with `n = FaceDir3::e` of the face (the largest over the cell's no-slip faces; zero
+/// without one): the speed the law of the wall takes. A normal velocity is no shear: the cells in front of the base plane of a body see the recirculation hit the wall.
+#[inline]
+pub fn wall_speed(grid: &Grid3, dirs: &FaceDirs3, i: usize, j: usize, k: usize, w: &Prim3) -> f64 {
+    let (ni, nj) = (grid.ni, grid.nj);
+    let lo = (k * nj + j) * (ni + 1) + i;
+    let jl = (k * (nj + 1) + j) * ni + i;
+    let c = grid.cell(i, j, k);
+    let faces = [&dirs.i[lo], &dirs.i[lo + 1], &dirs.j[jl], &dirs.j[jl + ni], &dirs.k[c], &dirs.k[c + ni * nj]];
+    let speed2 = w[1] * w[1] + w[2] * w[2] + w[3] * w[3];
+    let t2 = faces
+        .iter()
+        .filter(|f| f.noslip)
+        .map(|f| {
+            let un = w[1] * f.e[0] + w[2] * f.e[1] + w[3] * f.e[2];
+            (speed2 - un * un).max(0.0)
+        })
+        .fold(0.0f64, f64::max);
+    t2.sqrt()
 }
 
 /// The wall shear vector `tau_w = rho u_tau^2 t` (force per unit area of the wall on the fluid's tangential motion, i.e. opposing it) of a cell next to a wall of
@@ -532,12 +556,19 @@ impl<const N: usize> TurbIn<'_, N> {
         let w = &self.w[pidx3(g.ni, g.nj, g.nk, (c % g.ni) as isize, ((c / g.ni) % g.nj) as isize, (c / (g.ni * g.nj)) as isize)];
         let nu = self.mu[c] / w[0];
         let s2 = if self.is_smooth_wall(c) {
-            let s = strain_law(nu, (w[1] * w[1] + w[2] * w[2] + w[3] * w[3]).sqrt(), self.dwall[c]);
+            let s = strain_law(nu, self.wall_speed(c, w), self.dwall[c]);
             s * s
         } else {
             strain2(&self.grad[c])
         };
         CellIn { rho: w[0], nu, d: self.dwall[c], phi, grad, s2, mu_t: self.mu_t[c] }
+    }
+
+    /// The speed the law of the wall takes in the cell `c` ([`wall_speed`]).
+    #[inline]
+    fn wall_speed(&self, c: usize, w: &Prim3) -> f64 {
+        let g = self.grid;
+        wall_speed(g, self.dirs, c % g.ni, (c / g.ni) % g.nj, c / (g.ni * g.nj), w)
     }
 
     /// Does the cell take the law of the wall for its strain and its pinned scalars (`law_strain`, a no-slip face, smooth)?
@@ -554,7 +585,7 @@ impl<const N: usize> TurbIn<'_, N> {
         let g = self.grid;
         let w = &self.w[pidx3(g.ni, g.nj, g.nk, (c % g.ni) as isize, ((c / g.ni) % g.nj) as isize, (c / (g.ni * g.nj)) as isize)];
         let nu = self.mu[c] / w[0];
-        let u_tau = u_tau_law(nu, (w[1] * w[1] + w[2] * w[2] + w[3] * w[3]).sqrt(), self.dwall[c]);
+        let u_tau = u_tau_law(nu, self.wall_speed(c, w), self.dwall[c]);
         Some((self.dwall[c] * u_tau / nu, u_tau, nu))
     }
 }

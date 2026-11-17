@@ -41,8 +41,8 @@ pub fn face_corners(grid: &Grid3, dir: usize, i: usize, j: usize, k: usize) -> [
     }
 }
 
-/// Every no-slip wall face of the grid: the faces between a fluid and a solid cell (non-zero area). A solver with other kinds of fluid/solid faces (a nozzle
-/// exit patch) removes them from the list before building the distance field.
+/// Every no-slip wall face of the grid: the faces between a fluid and a solid cell (non-zero area) and the `j = 0` boundary faces of the runs of
+/// [`Grid3::wall_j0`]. A solver with other kinds of fluid/solid faces (a nozzle exit patch) removes them from the list before building the distance field.
 pub fn wall_faces(grid: &Grid3, solid: &[bool]) -> Vec<WallFace> {
     let (ni, nj, nk) = (grid.ni, grid.nj, grid.nk);
     let mut out = Vec::new();
@@ -66,6 +66,15 @@ pub fn wall_faces(grid: &Grid3, solid: &[bool]) -> Vec<WallFace> {
                         continue;
                     }
                     out.push(WallFace { dir, idx: c, corners: face_corners(grid, dir, i, j, k) });
+                }
+            }
+        }
+    }
+    for k in 0..nk {
+        for (run, _) in &grid.wall_j0 {
+            for i in run.clone() {
+                if !solid[grid.cell(i, 0, k)] && crate::viscous3::face_of(grid, 1, i, 0, k).1.area > 0.0 {
+                    out.push(WallFace { dir: 1, idx: [i, 0, k], corners: face_corners(grid, 1, i, 0, k) });
                 }
             }
         }
