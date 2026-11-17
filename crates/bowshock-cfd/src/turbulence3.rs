@@ -256,7 +256,24 @@ pub fn wall_state(rho: f64, nu: f64, speed: f64, d: f64, ks: f64) -> WallState {
 /// tangential to the wall (`|u - (u.n) n|`, `n` = `FaceDir3::e` of a no-slip face; the largest over the cell's no-slip faces): the cells in front of the base plane
 /// of a body see the recirculation hit the wall, a normal velocity that is no shear (with the total speed the base corner cells carried `tau` 1000 times a
 /// log-law value at `y+ ~ 1600`).
-pub fn wall_state_pass(grid: &Grid3, solid: &[bool], dirs: &FaceDirs3, w: &[Prim3], mu: &[f64], dwall: &[f64], ks: &[f64], out: &mut [[f64; 3]]) {
+///
+/// **Wall classes** (`law_i_walls`): the automatic all-`y+` treatment is that of the streamwise walls, the no-slip faces of the `j` and `k` families (a body surface, the
+/// sides and tip of a fin). A cell whose only no-slip faces are `i` faces (the base plane of a body, the blunt leading and trailing edge of a fin) gets the plain wall state
+/// of a resolved wall, the `y+ -> 0` limit: `k_w = 0`, `omega_w` Menter's `60 nu / (beta1 d^2)`, `mu_t,w = 0` (speed `0` in [`wall_state`]); the log law means nothing in a
+/// recirculation or at a stagnation face (G-V3: with the law on the base wall the base drag is `-3.2 %` against the 2D solver, plain `+0.35 %`). `law_i_walls = true` gives the `i`
+/// faces the law as well. A rough cell (`ks > 0`) keeps the Aupoix state either way.
+#[allow(clippy::too_many_arguments)]
+pub fn wall_state_pass(
+    grid: &Grid3,
+    solid: &[bool],
+    dirs: &FaceDirs3,
+    w: &[Prim3],
+    mu: &[f64],
+    dwall: &[f64],
+    ks: &[f64],
+    law_i_walls: bool,
+    out: &mut [[f64; 3]],
+) {
     let (ni, nj, nk) = (grid.ni, grid.nj, grid.nk);
     let plane = ni * nj;
     out.par_chunks_mut(plane).enumerate().for_each(|(k, pl)| {
@@ -275,7 +292,7 @@ pub fn wall_state_pass(grid: &Grid3, solid: &[bool], dirs: &FaceDirs3, w: &[Prim
                 }
                 let wc = &w[pidx3(ni, nj, nk, i as isize, j as isize, k as isize)];
                 let nu = mu[c] / wc[0];
-                let speed = wall_speed(grid, dirs, i, j, k, wc);
+                let speed = wall_speed(grid, dirs, i, j, k, wc, law_i_walls).unwrap_or(0.0);
                 let s = wall_state(wc[0], nu, speed, dwall[c], ks.get(c).copied().unwrap_or(0.0));
                 pl[j * ni + i] = [s.k_w, s.omega_w, s.mu_t_w];
             }
@@ -283,25 +300,27 @@ pub fn wall_state_pass(grid: &Grid3, solid: &[bool], dirs: &FaceDirs3, w: &[Prim
     });
 }
 
-/// The speed of the cell `(i, j, k)` tangential to its no-slip faces, `|u - (u.n) n|` with `n = FaceDir3::e` of the face (the largest over the cell's no-slip faces; zero
-/// without one): the speed the law of the wall takes. A normal velocity is no shear: the cells in front of the base plane of a body see the recirculation hit the wall.
+/// The speed of the cell `(i, j, k)` tangential to its no-slip faces of the law-of-the-wall class, `|u - (u.n) n|` with `n = FaceDir3::e` of the face (the largest over those
+/// faces): the speed the law of the wall takes. `None` for a cell without such a face: the no-slip faces of the `i` family are of the law class only with `law_i_walls`
+/// (see [`wall_state_pass`]), so a cell that has only those is a plain wall cell. A normal velocity is no shear: the cells in front of the base plane of a body see
+/// the recirculation hit the wall.
 #[inline]
-pub fn wall_speed(grid: &Grid3, dirs: &FaceDirs3, i: usize, j: usize, k: usize, w: &Prim3) -> f64 {
+pub fn wall_speed(grid: &Grid3, dirs: &FaceDirs3, i: usize, j: usize, k: usize, w: &Prim3, law_i_walls: bool) -> Option<f64> {
     let (ni, nj) = (grid.ni, grid.nj);
     let lo = (k * nj + j) * (ni + 1) + i;
     let jl = (k * (nj + 1) + j) * ni + i;
     let c = grid.cell(i, j, k);
     let faces = [&dirs.i[lo], &dirs.i[lo + 1], &dirs.j[jl], &dirs.j[jl + ni], &dirs.k[c], &dirs.k[c + ni * nj]];
     let speed2 = w[1] * w[1] + w[2] * w[2] + w[3] * w[3];
-    let t2 = faces
+    let first = if law_i_walls { 0 } else { 2 };
+    faces[first..]
         .iter()
         .filter(|f| f.noslip)
         .map(|f| {
             let un = w[1] * f.e[0] + w[2] * f.e[1] + w[3] * f.e[2];
-            (speed2 - un * un).max(0.0)
+            (speed2 - un * un).max(0.0).sqrt()
         })
-        .fold(0.0f64, f64::max);
-    t2.sqrt()
+        .reduce(f64::max)
 }
 
 /// The wall shear vector `tau_w = rho u_tau^2 t` (force per unit area of the wall on the fluid's tangential motion, i.e. opposing it) of a cell next to a wall of
@@ -500,6 +519,8 @@ pub struct TurbIn<'a, const N: usize> {
     /// A smooth wall cell takes its `S^2` from the law of the wall ([`strain_law`]) instead of its mean-flow gradient (a rough one always keeps the gradient). `false`
     /// is the 2D module's treatment (the wedge parity tests); the solver runs with `true`.
     pub law_strain: bool,
+    /// The no-slip faces of the `i` family take the automatic wall treatment too (`false`: a cell with only such faces is a plain wall cell, see [`wall_state_pass`]).
+    pub law_i_walls: bool,
     /// Wall distance of the cell centroids (`walldist3`; `f64::INFINITY` without a wall).
     pub dwall: &'a [f64],
     /// Inviscid face fluxes (layouts of `Grid3::{iface, jface, kface}`): `F[0] A` is the mass flow the scalars are convected with.
@@ -555,37 +576,34 @@ impl<const N: usize> TurbIn<'_, N> {
         let g = self.grid;
         let w = &self.w[pidx3(g.ni, g.nj, g.nk, (c % g.ni) as isize, ((c / g.ni) % g.nj) as isize, (c / (g.ni * g.nj)) as isize)];
         let nu = self.mu[c] / w[0];
-        let s2 = if self.is_smooth_wall(c) {
-            let s = strain_law(nu, self.wall_speed(c, w), self.dwall[c]);
-            s * s
-        } else {
-            strain2(&self.grad[c])
+        let s2 = match self.law_speed(c, w) {
+            Some(speed) => {
+                let s = strain_law(nu, speed, self.dwall[c]);
+                s * s
+            }
+            None => strain2(&self.grad[c]),
         };
         CellIn { rho: w[0], nu, d: self.dwall[c], phi, grad, s2, mu_t: self.mu_t[c] }
     }
 
-    /// The speed the law of the wall takes in the cell `c` ([`wall_speed`]).
+    /// The speed the law of the wall takes in the cell `c` if it takes the law for its strain and its pinned scalars: `law_strain`, a smooth wall cell with a no-slip
+    /// face of the law class ([`wall_speed`]); `None` otherwise (a plain wall cell, a rough one, no wall).
     #[inline]
-    fn wall_speed(&self, c: usize, w: &Prim3) -> f64 {
+    fn law_speed(&self, c: usize, w: &Prim3) -> Option<f64> {
+        if !(self.law_strain && self.wall.get(c).is_some_and(|w| w[1] > 0.0) && self.ks.get(c).is_none_or(|&ks| ks == 0.0)) {
+            return None;
+        }
         let g = self.grid;
-        wall_speed(g, self.dirs, c % g.ni, (c / g.ni) % g.nj, c / (g.ni * g.nj), w)
-    }
-
-    /// Does the cell take the law of the wall for its strain and its pinned scalars (`law_strain`, a no-slip face, smooth)?
-    #[inline]
-    fn is_smooth_wall(&self, c: usize) -> bool {
-        self.law_strain && self.wall.get(c).is_some_and(|w| w[1] > 0.0) && self.ks.get(c).is_none_or(|&ks| ks == 0.0)
+        wall_speed(g, self.dirs, c % g.ni, (c / g.ni) % g.nj, c / (g.ni * g.nj), w, self.law_i_walls)
     }
 
     /// The pin `(y+, u_tau, nu)` of the law of the wall of a smooth wall cell.
     fn wall_law(&self, c: usize) -> Option<(f64, f64, f64)> {
-        if !self.is_smooth_wall(c) {
-            return None;
-        }
         let g = self.grid;
         let w = &self.w[pidx3(g.ni, g.nj, g.nk, (c % g.ni) as isize, ((c / g.ni) % g.nj) as isize, (c / (g.ni * g.nj)) as isize)];
+        let speed = self.law_speed(c, w)?;
         let nu = self.mu[c] / w[0];
-        let u_tau = u_tau_law(nu, self.wall_speed(c, w), self.dwall[c]);
+        let u_tau = u_tau_law(nu, speed, self.dwall[c]);
         Some((self.dwall[c] * u_tau / nu, u_tau, nu))
     }
 }
@@ -982,7 +1000,7 @@ mod tests {
             cell_pass(&visc(re_c), &grid, &solid, &w, &mut grad, &mut mu);
             let dwall = wall_distance3(&grid, &solid, &wall_faces(&grid, &solid));
             let mut wall = vec![[0.0; 3]; nc];
-            wall_state_pass(&grid, &solid, &dirs, &w, &mu, &dwall, ks, &mut wall);
+            wall_state_pass(&grid, &solid, &dirs, &w, &mu, &dwall, ks, false, &mut wall);
             let f = [0, 1, 2].map(|dir| {
                 let [n0, n1, n2] = face_shape(&grid, dir);
                 let mut v = vec![[0.0; 5]; n0 * n1 * n2];
@@ -1042,6 +1060,7 @@ mod tests {
                 wall: &self.wall,
                 ks: &[],
                 law_strain: false,
+                law_i_walls: false,
                 dwall: &self.dwall,
                 fi: &self.f[0],
                 fj: &self.f[1],
@@ -1204,7 +1223,7 @@ mod tests {
         ks[g.cell(1, 1, 1)] = 1e-4; // rough junction cell
         ks[g.cell(1, 2, 1)] = 0.0; // smooth: a cell above the z wall only (j = 2 is beside no y wall)
         let mut out = vec![[0.0; 3]; nc];
-        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &ks, &mut out);
+        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &ks, false, &mut out);
         let st = |c: usize, k: f64| {
             let s = wall_state(1.0, 1.0e-6, 0.8, dwall[c], k);
             [s.k_w, s.omega_w, s.mu_t_w]
@@ -1220,6 +1239,46 @@ mod tests {
         // a cell far from every wall, a solid cell
         assert_eq!(out[g.cell(1, 3, 3)], [0.0; 3]);
         assert_eq!(out[g.cell(1, 0, 2)], [0.0; 3]);
+    }
+
+    /// The wall classes: a cell with only an `i` wall (the front slab, a base plane) gets the plain state (speed 0 in `wall_state`: `k_w = 0`, `mu_t,w = 0`, Menter's `omega_w`)
+    /// unless `law_i_walls`, when it takes the law at the speed tangential to that wall; a cell with a `j` wall takes the law at the speed tangential to the `j` wall whether
+    /// or not it also has an `i` wall (the largest tangential speed of the law-class faces).
+    #[test]
+    fn i_walls_get_the_plain_wall_state_unless_the_switch_is_on() {
+        let (n, h) = ([5, 4, 3], [0.01, 0.0004, 0.001]);
+        let mut g = box_grid(n, h);
+        // an `i` wall: the slab i < 2; a streamwise wall: the floor under the fluid at i >= 2 (cell (2, 1, 1) has both)
+        set_solids(&mut g, vec![SolidBox { i: 0..2, j: 0..4, k: 0..3 }, SolidBox { i: 2..5, j: 0..1, k: 0..3 }]);
+        let solid = solid_mask(&g);
+        let dirs = face_dirs(&g, &solid, &[false; 6]);
+        let nc = solid.len();
+        let w = padded(&g, &solid, &vec![[1.0, 0.8, 0.3, 0.0, 0.7]; nc]);
+        let mu = vec![1.0e-6; nc];
+        let dwall = wall_distance3(&g, &solid, &wall_faces(&g, &solid));
+        let state = |c: usize, speed: f64| {
+            let s = wall_state(1.0, 1.0e-6, speed, dwall[c], 0.0);
+            [s.k_w, s.omega_w, s.mu_t_w]
+        };
+        let (only_i, floor, both) = (g.cell(2, 2, 1), g.cell(3, 1, 1), g.cell(2, 1, 1));
+        let cell = w[pidx3(n[0], n[1], n[2], 2, 2, 1)];
+        assert_eq!(wall_speed(&g, &dirs, 2, 2, 1, &cell, false), None);
+        assert!((wall_speed(&g, &dirs, 2, 2, 1, &cell, true).unwrap() - 0.3).abs() < 1e-14, "tangential to the i wall: the v component");
+        assert!((wall_speed(&g, &dirs, 3, 1, 1, &cell, false).unwrap() - 0.8).abs() < 1e-14, "tangential to the floor: the u component");
+        let mut out = vec![[0.0; 3]; nc];
+        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &[], false, &mut out);
+        let same = |a: [f64; 3], b: [f64; 3]| a.iter().zip(&b).all(|(x, y)| (x - y).abs() <= 1e-12 * (x.abs() + y.abs()));
+        assert!(same(out[only_i], state(only_i, 0.0)), "{:?}", out[only_i]);
+        assert_eq!(out[only_i][0], 0.0);
+        assert_eq!(out[only_i][2], 0.0);
+        let menter = 60.0 * 1.0e-6 / (BETA1 * dwall[only_i] * dwall[only_i]);
+        assert!((out[only_i][1] / menter - 1.0).abs() < 1e-12, "Menter's 2D value {} vs {menter}", out[only_i][1]);
+        assert!(same(out[floor], state(floor, 0.8)), "{:?}", out[floor]);
+        assert!(same(out[both], state(both, 0.8)), "the i wall does not enter the speed of a cell with a streamwise wall: {:?}", out[both]);
+        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &[], true, &mut out);
+        assert!(same(out[only_i], state(only_i, 0.3)), "{:?}", out[only_i]);
+        assert!(same(out[floor], state(floor, 0.8)));
+        assert!(same(out[both], state(both, 0.8)));
     }
 
     /// The friction drag is the momentum flux through the wall faces: with the wall state of the automatic treatment at `y+ = 15`, the viscous flux of `viscous3` through
@@ -1247,7 +1306,7 @@ mod tests {
         cell_pass(&v, &g, &solid, &w, &mut grad, &mut mu);
         let dwall = wall_distance3(&g, &solid, &wall_faces(&g, &solid));
         let mut wall = vec![[0.0; 3]; nc];
-        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &[], &mut wall);
+        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &[], false, &mut wall);
         let mu_t = vec![0.0; nc];
         let run = |wall: &[[f64; 3]]| {
             let (mut fi, mut fj, mut fk) = (vec![[0.0; 5]; g.iface.len()], vec![[0.0; 5]; g.jface.len()], vec![[0.0; 5]; g.kface.len()]);
@@ -1683,7 +1742,7 @@ mod tests {
         let t_cell = t.elapsed();
         let mut wall = vec![[0.0; 3]; nc];
         let t = Instant::now();
-        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &[], &mut wall);
+        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &[], false, &mut wall);
         let t_wall = t.elapsed();
         let mu_t = vec![1e-5; nc];
         let (mut fi, mut fj, mut fk) = (vec![[0.0; 5]; g.iface.len()], vec![[0.0; 5]; g.jface.len()], vec![[0.0; 5]; g.kface.len()]);
@@ -1718,6 +1777,7 @@ mod tests {
             wall: &wall,
             ks: &[],
             law_strain: false,
+            law_i_walls: false,
             dwall: &dwall,
             fi: &f[0],
             fj: &f[1],
@@ -1884,6 +1944,7 @@ mod tests {
             wall: &case.wall,
             ks: &[],
             law_strain: false,
+            law_i_walls: false,
             dwall: &case.dwall,
             fi: &case.f[0],
             fj: &case.f[1],

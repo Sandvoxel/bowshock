@@ -407,6 +407,7 @@ impl WedgeRunner for GpuWedge {
                     thickness: 0.08,
                     te_to_base: 0.0,
                     profile: bowshock_core::FinProfile::Square,
+                    planform: None,
                 };
                 let mut c = Case3::sector(mach, body, fins, Tier::Euler, 0);
                 c.grid.nk = 6;

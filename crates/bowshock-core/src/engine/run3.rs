@@ -76,7 +76,7 @@ pub fn forces_on(case: &Case3, g: &Grid3, u: &[Cons3], p_inf: f64, x_max: f64) -
 pub(crate) fn forces_from(case: &Case3, g: &Grid3, w: &WallForces) -> LiftForces {
     let (mut fx, mut fz, mut mz) = (0.0, 0.0, 0.0);
     for (c, a) in &w.by {
-        if *c != Wall::Sting {
+        if !matches!(*c, Wall::Sting | Wall::Jet) {
             fx += a[0];
             fz += a[1];
             mz += a[2];
@@ -180,6 +180,8 @@ pub enum Wall {
     /// Fin tip (normal in `j`).
     FinTip,
     Appendage,
+    /// The nozzle exit of a motor-on case (the `+i` faces of `Part::Jet` cells): an inflow with the jet state, not a wall; no pressure force of the exit is counted.
+    Jet,
 }
 
 /// The class of a wall face between a fluid cell and a cell of `part`: `dir` the direction of the face (0, 1, 2 = `i`, `j`, `k`), `solid_low` whether
@@ -196,6 +198,7 @@ pub(crate) fn wall_class(part: Part, dir: usize, solid_low: bool) -> Wall {
             _ => Wall::FinSide,
         },
         Part::Appendage(_) => Wall::Appendage,
+        Part::Jet => Wall::Jet,
     }
 }
 

@@ -4,11 +4,11 @@
 //!   (NACA RM A54H23, Table I(a)), tangent-cone and shock-expansion theory, coarse/medium/fine grids.
 //! * `--sweep`: forebody pressure drag vs Mach (1.5, 3.0, 4.0 in addition) against theory only (no data).
 //!
-//! Usage: `cargo run --release --bin ogive [-- --quick] [--sweep] [--limiter minmod|vanalbada]`
-//! `--quick` runs only the coarse and medium grids. `--stretch s` clusters nose cells towards the tip
+//! Usage: `cargo run --release --bin ogive [-- --quick] [--sweep] [--wedge] [--limiter minmod|vanalbada]`
+//! `--quick` runs only the coarse and medium grids. `--wedge` solves on the single-cell wedge of the 3D engine (`bowshock_cases::wedge`) instead of the 2D solver. `--stretch s` clusters nose cells towards the tip
 //! (`x = L (k/n)^s`; output then goes to `out/ogive_stretch<s>/`). Output: `out/ogive/`.
 
-use bowshock_cases::ogive::{perkins_jorgensen as pj, run_ogive, theory_for, wall_cp_at, OgiveCase, OgiveResult};
+use bowshock_cases::ogive::{perkins_jorgensen as pj, run_ogive, run_ogive_wedge, theory_for, wall_cp_at, OgiveCase, OgiveResult};
 use bowshock_cfd::flux::Limiter;
 use bowshock_reference::shock_expansion::{Ogive, SurfaceTheory};
 use std::fmt::Write as _;
@@ -23,6 +23,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let quick = args.iter().any(|a| a == "--quick");
     let sweep = args.iter().any(|a| a == "--sweep");
+    let wedge = args.iter().any(|a| a == "--wedge");
     let limiter = match args.iter().position(|a| a == "--limiter").and_then(|i| args.get(i + 1)).map(String::as_str) {
         Some("vanalbada") => Limiter::VanAlbada,
         _ => Limiter::Minmod,
@@ -75,7 +76,7 @@ fn main() {
         case.nose_stretch = stretch;
         let (ni, nj) = case.cells();
         let t0 = Instant::now();
-        let res = run_ogive(&case);
+        let res = if wedge { run_ogive_wedge(&case).expect("wedge run") } else { run_ogive(&case) };
         let dt = t0.elapsed().as_secs_f64();
         let name = GRID_NAMES[lv as usize];
         write_case_files(&out_dir, mach, name, &res, &th);
@@ -174,7 +175,7 @@ fn main() {
                 let th = theory_for(&case);
                 let (ni, nj) = case.cells();
                 let t0 = Instant::now();
-                let res = run_ogive(&case);
+                let res = if wedge { run_ogive_wedge(&case).expect("wedge run") } else { run_ogive(&case) };
                 let name = GRID_NAMES[lv as usize];
                 write_case_files(&out_dir, m, name, &res, &th);
                 report_run(name, ni, nj, &res, t0.elapsed().as_secs_f64());

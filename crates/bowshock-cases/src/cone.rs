@@ -115,6 +115,14 @@ pub fn run_cone(case: &ConeCase, tm: &ConeSolution) -> ConeResult {
     postprocess(case, &s, residual, drop_orders, reason)
 }
 
+/// [`run_cone`] on the single-cell wedge of the 3D engine ([`crate::wedge`]): the same grid, free stream, limiter and stop rule (the residual drop counted from the
+/// second-order phase), the same post-processing.
+pub fn run_cone_wedge(case: &ConeCase, tm: &ConeSolution) -> Result<ConeResult, String> {
+    let mut s = build_solver(case, tm.beta);
+    let run = crate::wedge::run_on_wedge(&mut s, case.mach, case.limiter, case.first_order_iters, case.max_iter, case.drop_orders)?;
+    Ok(postprocess(case, &s, run.residual, run.drop_orders, run.stop_reason))
+}
+
 fn postprocess(case: &ConeCase, s: &Solver, residual: Vec<f64>, drop_orders: f64, reason: StopReason) -> ConeResult {
     let g = &s.grid;
     let (ni, nj) = (g.ni, g.nj);
@@ -211,5 +219,19 @@ mod tests {
         let res = run_cone(&case, &tm);
         assert_eq!(res.stop_reason, StopReason::ResidualDrop, "only {:.1} orders in {} iters", res.drop_orders, res.iters);
         assert!((res.cp_avg - tm.cp_surface).abs() / tm.cp_surface < 0.003, "Cp {} vs TM {}", res.cp_avg, tm.cp_surface);
+    }
+
+    /// The wedge reproduces the 2D case: the cone Cp and the shock angle on the coarse grid, and Taylor-Maccoll.
+    #[test]
+    fn wedge_10deg_100x50_matches_the_2d_case() {
+        let tm = solve_cone(2.0, 10f64.to_radians()).unwrap();
+        let mut case = ConeCase::new(2.0, 10.0, 100, 50);
+        case.max_iter = 3000;
+        let two_d = run_cone(&case, &tm);
+        let wedge = run_cone_wedge(&case, &tm).unwrap();
+        assert_eq!(wedge.stop_reason, StopReason::ResidualDrop, "only {:.1} orders in {} iters", wedge.drop_orders, wedge.iters);
+        assert!((wedge.cp_avg / two_d.cp_avg - 1.0).abs() < 0.005, "Cp wedge {} vs 2D {}", wedge.cp_avg, two_d.cp_avg);
+        assert!((wedge.cp_avg / tm.cp_surface - 1.0).abs() < 0.01, "Cp wedge {} vs TM {}", wedge.cp_avg, tm.cp_surface);
+        assert!((wedge.beta_num - two_d.beta_num).abs().to_degrees() < 0.1, "beta wedge {} vs 2D {}", wedge.beta_num, two_d.beta_num);
     }
 }

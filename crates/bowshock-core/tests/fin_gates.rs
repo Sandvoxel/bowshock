@@ -49,7 +49,7 @@ fn run(mach: f64, fins: Fins3, max_iter: usize) -> FinRun {
 }
 
 fn fins(profile: FinProfile, chord: f64, span: f64, thickness: f64) -> Fins3 {
-    Fins3 { count: N_FINS, root_chord: chord, tip_chord: chord, span, sweep: 0.0, thickness, te_to_base: 0.0, profile }
+    Fins3 { count: N_FINS, root_chord: chord, tip_chord: chord, span, sweep: 0.0, thickness, te_to_base: 0.0, profile, planform: None }
 }
 
 fn report(id: &str, case: &str, measured: f64, reference: f64, band: &str, pass: bool) -> bool {
@@ -207,4 +207,44 @@ fn niskanen_stagnation_numbers() {
     for (m, cd) in [(0.5, 0.9045), (1.5, 1.3074), (3.0, 1.4941)] {
         assert!((0.85 * niskanen_stagnation(m) - cd).abs() < 1e-3, "M {m}");
     }
+}
+
+/// G-F2p (S11): the Euler fin pressure drag of an elliptical planform at Mach 2 against the trapezoid of equal area, span, root chord and thickness (flush trailing
+/// edge, swept leading edge), double wedges of the same thickness (0.012 d, 4 % of the root chord) on the fin-stack grid. Strip theory for a constant thickness
+/// `t` has the wave drag per unit span `4 t^2 / (beta c(h))`, so the ratio of the two fins is `integral(dh / c_ell) / integral(dh / c_trap)`, the ellipse above 1
+/// because its chord falls towards the tip (cut at 4 % of the root chord). The gate is the measured ratio within 20 % of that: the 3D relief at the tips is
+/// larger where the chord is short, which strip theory does not know.
+#[test]
+#[ignore = "validation: CPU, minutes (two 650k-cell Euler runs in parallel threads)"]
+fn gate_f2p_elliptical_fin_wave_drag_matches_the_equal_area_trapezoid_in_strip_theory() {
+    use bowshock_core::engine::planform::Planform;
+    let (root, span, t) = (0.3, 1.0, 0.012);
+    let ell = Planform::ellipse(root, span).expect("ellipse");
+    let area = ell.area();
+    // equal area, flush trailing edge: the tip chord c_t with (root + c_t) span / 2 = area, the leading edge swept by root - c_t
+    let tip = 2.0 * area / span - root;
+    let trap = Planform::trapezoid(root, tip, span, root - tip).expect("trapezoid");
+    let base = |pf: Planform| Fins3 { thickness: t, profile: FinProfile::DoubleWedge, ..fins(FinProfile::DoubleWedge, root, span, t) }.with_planform(pf);
+    let runs: Vec<FinRun> = std::thread::scope(|sc| {
+        let hs: Vec<_> = [ell.clone(), trap.clone()].into_iter().map(|pf| sc.spawn(move || run(2.0, base(pf), 3000))).collect();
+        hs.into_iter().map(|h| h.join().expect("run")).collect()
+    });
+    // strip theory: integral of 1 / chord over the meshed height (the ellipse cut at 4 % of the root chord)
+    let strip = |pf: &Planform, h_max: f64| -> f64 {
+        let n = 20_000;
+        (0..n).map(|k| 1.0 / pf.chord((k as f64 + 0.5) * h_max / n as f64) * h_max / n as f64).sum::<f64>()
+    };
+    let cut = ell.height_with_chord_at_least(bowshock_core::engine::grid3::TIP_CHORD_FLOOR * root);
+    let r_strip = strip(&ell, cut) / strip(&trap, span);
+    let (d_ell, d_trap) = (runs[0].fin_drag(), runs[1].fin_drag());
+    println!(
+        "INFO G-F2p areas {area:.5} (trapezoid tip chord {tip:.4}, ellipse cut at {cut:.4}); fin drag ellipse {d_ell:+.5} ({} it, {}), trapezoid {d_trap:+.5} ({} it, {}); ratio {:.3}, strip theory {r_strip:.3}",
+        runs[0].iterations,
+        runs[0].stop,
+        runs[1].iterations,
+        runs[1].stop,
+        d_ell / d_trap
+    );
+    let ok = report("G-F2p", "ellipse-over-trapezoid-M2.0:fin_drag_ratio", d_ell / d_trap, r_strip, "rel20%", (d_ell / d_trap / r_strip - 1.0).abs() <= 0.20);
+    assert!(ok, "G-F2p: the ratio {} is not within 20 % of strip theory {r_strip}", d_ell / d_trap);
 }

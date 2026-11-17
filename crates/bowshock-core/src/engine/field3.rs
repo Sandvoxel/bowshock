@@ -63,6 +63,7 @@ fn part_of(w: &WallFaceRef) -> Part {
         (Wall::Body(_), _) => Part::Body,
         (Wall::Base, _) => Part::Base,
         (Wall::Sting, _) => Part::Other,
+        (Wall::Jet, _) => Part::Jet,
         (_, grid3::Part::Fin(n)) => Part::Fin(n as u8),
         (_, grid3::Part::Appendage(n)) => Part::Appendage(n as u8),
         (Wall::FinSide | Wall::FinLe | Wall::FinTe | Wall::FinTip | Wall::Appendage, _) => Part::Other,
