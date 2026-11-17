@@ -80,8 +80,8 @@ use bowshock_motors::{Motor, MotorDb};
 use crate::aero::Aero;
 use crate::flight::{Deploy, Launch, RecoveryDevice, SimInput};
 use crate::vehicle::{
-    BodyKind, BodySegment, FinCrossSection, FinPlanform, FinSet, Label, Labels, MassProps, NoseShape, Protuberance, RollControl, StageMass, StageMotor,
-    ThrustCurve, Timing, Trigger, TubeFinSet, Vehicle,
+    BodyKind, BodySegment, FinCrossSection, FinPlanform, FinSet, Label, Labels, MassProps, NoseShape, Protuberance, StageMass, StageMotor, ThrustCurve, Timing,
+    Trigger, TubeFinSet, Vehicle,
 };
 use crate::G0;
 
@@ -138,7 +138,7 @@ impl std::error::Error for BridgeError {}
 
 // ---- vehicle ------------------------------------------------------------------------------------------------------------
 
-/// Maps a model nose shape to the nearest of the sim's five (see the module docs).
+/// Maps a model nose shape to the nearest of the sim's five (see the module docs). `length` is the length of the sharp profile.
 fn nose_shape(shape: model::NoseShape, length: f64, diameter: f64) -> NoseShape {
     match shape {
         model::NoseShape::Conical => return NoseShape::Conical,
@@ -151,9 +151,17 @@ fn nose_shape(shape: model::NoseShape, length: f64, diameter: f64) -> NoseShape 
         return NoseShape::Conical;
     }
     const SAMPLES: usize = 32;
-    let model_nose = model::PartKind::NoseCone { shape, length, diameter };
+    let model_nose = model::PartKind::NoseCone { shape, length, diameter, tip_radius: 0.0 };
     let error = |candidate: NoseShape| -> f64 {
-        let seg = BodySegment { station: 0.0, length, fore_radius: 0.0, aft_radius: diameter / 2.0, kind: BodyKind::Nose(candidate), roughness: 0.0 };
+        let seg = BodySegment {
+            station: 0.0,
+            length,
+            fore_radius: 0.0,
+            aft_radius: diameter / 2.0,
+            kind: BodyKind::Nose(candidate),
+            tip_radius: 0.0,
+            roughness: 0.0,
+        };
         (1..SAMPLES)
             .map(|i| {
                 let x = length * i as f64 / SAMPLES as f64;
@@ -168,8 +176,11 @@ fn nose_shape(shape: model::NoseShape, length: f64, diameter: f64) -> NoseShape 
 }
 
 fn body_segment(part: &model::Part, station: f64) -> BodySegment {
+    // A blunted nose is the sharp nose of its family with the tip sphere on it: the family is matched on the sharp profile (the
+    // nose's length with the cut-off added back), and the segment keeps the length as built.
+    let blunt = part.kind.nose_blunt();
     let kind = match part.kind {
-        model::PartKind::NoseCone { shape, length, diameter } => BodyKind::Nose(nose_shape(shape, length, diameter)),
+        model::PartKind::NoseCone { shape, length, diameter, .. } => BodyKind::Nose(nose_shape(shape, blunt.map_or(length, |b| b.sharp_length), diameter)),
         model::PartKind::BodyTube { .. } => BodyKind::Tube,
         model::PartKind::Transition { .. } => BodyKind::Transition,
     };
@@ -179,6 +190,7 @@ fn body_segment(part: &model::Part, station: f64) -> BodySegment {
         fore_radius: part.kind.fore_diameter() / 2.0,
         aft_radius: part.kind.aft_diameter() / 2.0,
         kind,
+        tip_radius: blunt.map_or(0.0, |b| b.tip_radius),
         roughness: part.finish.roughness(),
     }
 }
@@ -188,6 +200,9 @@ fn cross_section(section: model::FinSection) -> FinCrossSection {
         model::FinSection::Square => FinCrossSection::Square,
         model::FinSection::Rounded => FinCrossSection::Rounded,
         model::FinSection::Airfoil => FinCrossSection::Airfoil,
+        model::FinSection::DoubleWedge => FinCrossSection::DoubleWedge,
+        model::FinSection::Hexagonal(f) => FinCrossSection::Hexagonal(model::FinSection::clamp_wedge_fraction(f)),
+        model::FinSection::Biconvex => FinCrossSection::Biconvex,
     }
 }
 
@@ -249,7 +264,7 @@ fn add_radial(
     }
     let label = |share: f64| match whole {
         Some(w) => w.clone(),
-        None => Label { name: r.display_name(), part: Some(r.id), cd_override: r.cd_override.map(|c| c * share), roll_control: roll_control(r) },
+        None => Label { name: r.display_name(), part: Some(r.id), cd_override: r.cd_override.map(|c| c * share) },
     };
     let total_fins: u32 = fins[fins0..].iter().map(|f| f.count).sum();
     for f in &fins[fins0..] {
@@ -261,21 +276,15 @@ fn add_radial(
     }
 }
 
-/// The sim's roll controller of fin group `r`, if it has one.
-fn roll_control(r: &model::RadialPart) -> Option<RollControl> {
-    let c = r.roll_control.filter(|_| r.kind.is_fin())?;
-    Some(RollControl { target_rate: c.target_rate, start: c.start, kp: c.kp, ki: c.ki, max_cant: c.max_cant, max_rate: c.max_rate })
-}
-
 /// The label every component of `pod` carries when the pod's own drag override replaces theirs: the pod's name and id with a
 /// drag of 0 (the override itself goes on the pod's first component). `None` without a pod override.
 fn pod_whole_label(pod: &model::RadialPart) -> Option<Label> {
-    pod.cd_override.map(|_| Label { name: pod.display_name(), part: Some(pod.id), cd_override: Some(0.0), roll_control: None })
+    pod.cd_override.map(|_| Label { name: pod.display_name(), part: Some(pod.id), cd_override: Some(0.0) })
 }
 
 /// The label of an axial part's body segment, with `share` of its drag override.
 fn part_label(p: &model::Part, share: f64) -> Label {
-    Label { name: p.display_name(), part: Some(p.id), cd_override: p.cd_override.map(|c| c * share), roll_control: None }
+    Label { name: p.display_name(), part: Some(p.id), cd_override: p.cd_override.map(|c| c * share) }
 }
 
 /// Where a set of copies stands: `station` on a surface of radius `base` of body `parent`, one copy at each of `angles`
@@ -635,7 +644,7 @@ fn stage_of_any(rocket: &Rocket, id: PartId) -> Option<usize> {
 /// radius 0: the aft end of a pod has its own base and the first segment after it has no forward face. It adds no area, lift
 /// or drag.
 fn separator(station: f64) -> BodySegment {
-    BodySegment { station, length: 0.0, fore_radius: 0.0, aft_radius: 0.0, kind: BodyKind::Tube, roughness: 0.0 }
+    BodySegment { station, length: 0.0, fore_radius: 0.0, aft_radius: 0.0, kind: BodyKind::Tube, tip_radius: 0.0, roughness: 0.0 }
 }
 
 /// Adds the pods that fly in the phase starting at model stage `first` (those standing on a part of that stage or above) to

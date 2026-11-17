@@ -8,8 +8,9 @@
 //!   saved in the `.bowshock` file, loaded back, edited through `ctx.doc` (dirty dot, undo) and a new document has one, `Nominal`.
 //!   Results are never saved: they are re-run. A flight is flown against the rocket *as it is when you press Run*. [`State::sync`]
 //!   (called by the app after every message) mirrors the document's list; [`State::commit`] writes edits back.
-//! * **Run** ([`Message::Run`], the top bar's Simulate button and `F5`) flies the selected flights with
-//!   [`bowshock_sim::from_model::sim_input`] on a worker thread and shows the result when it lands; **Run all** flies every flight.
+//! * **Run all** ([`Message::RunAll`], the top bar's Simulate button and `F5`) flies every flight with
+//!   [`bowshock_sim::from_model::sim_input`] on worker threads and shows each result when it lands; **Run selected**
+//!   ([`Message::Run`]) flies only the flights selected for editing.
 //!   A result whose conditions or document have changed since is *stale* and is drawn in `ink-faint` until it is run again.
 //! * **Edit selection**: a click selects one flight, Cmd/Ctrl-click toggles one, Shift-click selects a range (`PickMode`); Cmd/Ctrl+A
 //!   selects all. With several selected the Conditions panel edits all of them at once: fields they agree on show the value, the
@@ -18,6 +19,11 @@
 //!   plot and turns the results into a comparison against the reference (the selected flight when ticked).
 //! * The plots are [`widgets::plot`](crate::widgets::plot) groups with PlotZoom (drag a band, `Enter` zooms, `Esc` steps back); the
 //!   ground track shares the plots' crosshair; every result number moves it to the moment it happened.
+//! * **Dropped stages**: a staged flight's result holds a [`bowshock_sim::Branch`] per separation, the dropped stage flown on its own
+//!   to the ground. They are drawn with their flight: dashed lines from the separation on every plot, a thin row each under the
+//!   events strip, a dashed ground track with a hollow landing square, and a results section each after the recovery. The
+//!   `Dropped stages` checkbox in the plots header ([`Message::Dropped`]) hides the lines and rows. They are part of the flight's
+//!   result, so they go stale and re-run with it.
 //! * **Plot sources** ([`channels`], [`layout`], [`picker`]): every quantity a flight records is a data source (position, velocity,
 //!   acceleration, aerodynamics, forces, mass and balance, atmosphere, recovery). Each panel's title is a button that opens a
 //!   searchable menu of them; `+ series` overlays another source *of the same unit* (one y-axis per plot, never two: the others are
@@ -187,7 +193,7 @@ pub struct DispersionDone {
 /// The Simulate screen's messages.
 #[derive(Debug, Clone)]
 pub enum Message {
-    /// Run the flights selected for editing (top bar button, `F5`).
+    /// Run the flights selected for editing (the Simulate screen's *Run selected*, the Simulate button's menu).
     Run,
     /// Run every flight.
     RunAll,
@@ -236,6 +242,8 @@ pub enum Message {
     ClosePicker,
     /// A click inside the source picker that no row took: it stays open.
     KeepPicker,
+    /// Draw the dropped stages (a booster after its separation) on the plots and the events strip, or hide them.
+    Dropped(bool),
     /// Show or hide the wind profile table.
     WindTable(bool),
     /// Open the fields of wind level `i` (`None` closes them).
@@ -271,6 +279,8 @@ struct Shown {
     group: Option<PlotGroup>,
     /// The ground tracks (the selected flight's wind and field when nothing has run).
     ground: GroundTrack,
+    /// A flight on show has a dropped stage: the plots header offers the `Dropped stages` toggle.
+    has_dropped: bool,
 }
 
 /// The Simulate screen's state.
@@ -319,6 +329,8 @@ pub struct State {
     coord_editing: Option<(bool, FlightId)>,
     /// The forecast row of the wind profile, while open.
     forecast: Option<ForecastRow>,
+    /// Whether the plots draw the dropped stages (`Dropped stages` in the plots header, on by default).
+    dropped: bool,
 }
 
 impl Default for State {
@@ -359,6 +371,7 @@ impl State {
             coord_text: [String::new(), String::new()],
             coord_editing: None,
             forecast: None,
+            dropped: true,
         };
         state.rebuild();
         state.refresh_coords();
@@ -557,6 +570,12 @@ impl State {
         self.flights.iter().find(|f| f.id == id)
     }
 
+    /// For each flight, whether it has a result or is flying now (tests).
+    #[cfg(test)]
+    pub(crate) fn launched(&self) -> Vec<bool> {
+        self.flights.iter().map(|f| f.running || f.run.is_some()).collect()
+    }
+
     /// The id of the selected flight (the reference of a comparison, and the one the Conditions panel shows first).
     pub fn selected_id(&self) -> FlightId {
         self.selected_flight().id
@@ -642,7 +661,7 @@ impl State {
         // The reference is the selected flight when it is on show, else the first.
         let reference = ids.iter().position(|id| *id == self.primary()).unwrap_or(0);
 
-        let group = plots::group(&entries, reference, self.units, &self.layout, self.bands.stable);
+        let group = plots::group_with(&entries, reference, self.units, &self.layout, self.bands.stable, self.dropped);
         let ground = if entries.is_empty() {
             GroundTrack {
                 tracks: Vec::new(),
@@ -656,9 +675,10 @@ impl State {
         if let Some(g) = group.as_ref() {
             self.plot.set_full(g.x_extent());
         }
+        let has_dropped = entries.iter().any(|e| !e.run.result.branches.is_empty());
         // `entries` borrows the flights; end it before assigning.
         drop(entries);
-        self.shown = Shown { ids, reference, compare, group, ground };
+        self.shown = Shown { ids, reference, compare, group, ground, has_dropped };
     }
 
     /// Starts the simulation of flight `id` on a worker thread.
@@ -683,8 +703,16 @@ impl State {
         })
     }
 
-    fn launch_all(&mut self, ids: Vec<FlightId>, ctx: &Ctx) -> Task<app::Message> {
-        Task::batch(ids.into_iter().map(|id| self.launch(id, ctx)))
+    fn launch_all(&mut self, ids: Vec<FlightId>, ctx: &mut Ctx) -> Task<app::Message> {
+        let task = Task::batch(ids.iter().map(|&id| self.launch(id, ctx)));
+        // The run's report (the toast away from this screen): flying flights are pending, ones that could not start carry why.
+        let lines = ids
+            .iter()
+            .filter_map(|&id| self.flight(id))
+            .map(|f| app::RunLine { id: f.id, name: f.name.clone(), outcome: (!f.running).then(|| Err(f.error.clone().unwrap_or_default())) })
+            .collect();
+        ctx.start_run(lines);
+        task
     }
 
     /// Handles one of the screen's messages.
@@ -711,7 +739,11 @@ impl State {
                 self.rebuild();
                 return task;
             }
-            Message::Done(done) => self.finished(*done),
+            Message::Done(done) => {
+                if let Some((id, outcome)) = self.finished(*done) {
+                    ctx.finish_run_line(id, outcome);
+                }
+            }
             Message::Click(id) => {
                 self.pick(id, PickMode::from_modifiers(self.modifiers.unwrap_or(ctx.env.drive_modifiers)));
                 self.rebuild();
@@ -776,6 +808,10 @@ impl State {
             }
             Message::ClosePicker => self.picker = None,
             Message::KeepPicker => {}
+            Message::Dropped(on) => {
+                self.dropped = on;
+                self.rebuild();
+            }
             Message::WindTable(open) => self.wind_open = open,
             Message::WindLevel(i) => self.wind_level = i,
             Message::CoordInput(lon, text) => {
@@ -822,7 +858,9 @@ impl State {
             }
             Message::Ground(GroundMessage::Hover(t)) => self.plot.set_hover(t),
             Message::Ground(GroundMessage::Select(i)) => {
-                if let Some(id) = self.shown.ids.get(i).copied() {
+                // The landing of a dropped stage selects the flight it was dropped from.
+                let flight = self.shown.ground.tracks.get(i).and_then(|t| t.dropped.as_ref()).map_or(i, |d| d.of);
+                if let Some(id) = self.shown.ids.get(flight).copied() {
                     self.select_only(id);
                     self.rebuild();
                 }
@@ -892,21 +930,31 @@ impl State {
         })
     }
 
-    fn finished(&mut self, done: Done) {
-        let Some(flight) = self.flights.iter_mut().find(|f| f.id == done.flight) else { return };
+    /// Stores a finished run. Returns the flight and how it ended for the run report, or `None` when the result is stale.
+    fn finished(&mut self, done: Done) -> Option<(FlightId, Result<app::RunSummary, String>)> {
+        let Some(flight) = self.flights.iter_mut().find(|f| f.id == done.flight) else {
+            return Some((done.flight, Err("The flight was removed".to_string())));
+        };
         if flight.ticket != done.ticket {
-            return;
+            return None;
         }
         flight.running = false;
-        match done.outcome {
+        let outcome = match done.outcome {
             Ok((result, took)) => {
+                let s = &result.summary;
+                let summary = app::RunSummary { apogee: s.apogee, max_speed: s.max_velocity, flight_time: s.flight_time };
                 let times = Times::of(&result);
                 flight.run = Some(Run { spec: done.spec, revision: done.revision, result, took, dt: done.dt, delay: done.delay, times });
                 flight.error = None;
+                Ok(summary)
             }
-            Err(message) => flight.error = Some(message),
-        }
+            Err(message) => {
+                flight.error = Some(message.clone());
+                Err(message)
+            }
+        };
         self.rebuild();
+        Some((done.flight, outcome))
     }
 
     /// Ticks or unticks `id`. A fifth tick is refused; the colour slot stays with the flight until it is unticked.
@@ -1110,7 +1158,12 @@ impl State {
         }
         let against: Vec<(PlotX, &str)> = PlotX::ALL.iter().map(|x| (*x, plots::x_label(*x))).collect();
         let x = segmented_dense(&against, self.layout.x, |x| Message::Layout(LayoutEdit::X(x)), Dense { height: 24.0, pad: 6.0, size: 12.0 }, false);
-        vec![strip, add.into(), crate::app::ui::label("VS"), x]
+        let mut items = vec![strip, add.into(), crate::app::ui::label("VS"), x];
+        // A flight with a dropped stage (a booster flown on its own) offers to hide those lines.
+        if self.shown.has_dropped {
+            items.push(crate::widgets::field::checkbox("Dropped stages", self.dropped, Message::Dropped));
+        }
+        items
     }
 
     /// What the centre shows before the selected flight has run.

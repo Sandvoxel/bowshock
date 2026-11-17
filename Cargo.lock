@@ -419,6 +419,7 @@ dependencies = [
 name = "bowshock-model"
 version = "0.1.0"
 dependencies = [
+ "bowshock-reference",
  "ciborium",
  "flate2",
  "roxmltree 0.21.2",

@@ -2,8 +2,8 @@
 #   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/plot-x.drive /tmp/plot-x
 viewport 1280x800
 scale 2
-click (625, 18)
-click "Run"
+click "Simulate"
+click "Run selected"
 click "Alt"
 move (700, 300)
 screenshot 01-vs-altitude-dark.png
@@ -12,7 +12,9 @@ move (690, 520)
 screenshot 02-vs-mach-dark.png
 click "Dist"
 screenshot 03-vs-distance-dark.png
+click "Prefs"
 click "Light"
+click "Done"
 click "Alt"
 move (650, 300)
 screenshot 04-vs-altitude-light.png

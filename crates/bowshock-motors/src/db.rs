@@ -2,6 +2,7 @@
 
 use crate::motor::Motor;
 use crate::rasp::{parse_eng, ParseError};
+use crate::rse::{parse_rse, RseError};
 use crate::store::MotorFile;
 use std::fmt;
 use std::path::Path;
@@ -69,6 +70,19 @@ impl From<ParseError> for MotorError {
     }
 }
 
+/// Whether two motors share a name: the same designation and the same manufacturer, each ignoring case and surrounding space.
+/// The rule [`MotorDb::resolve`] looks a saved reference up by, and the one a search result must meet to stand for a reference.
+pub fn same_motor_name(designation: &str, manufacturer: &str, other_designation: &str, other_manufacturer: &str) -> bool {
+    designation.trim().eq_ignore_ascii_case(other_designation.trim()) && manufacturer.trim().eq_ignore_ascii_case(other_manufacturer.trim())
+}
+
+/// Whether two motors share a name once a delay or option suffix is dropped from each designation (the text from the first
+/// `-`): ThrustCurve.org lists the AeroTech `K455NW` as `K455NW-17`, and a design file names it without the delay.
+pub fn same_motor_base_name(designation: &str, manufacturer: &str, other_designation: &str, other_manufacturer: &str) -> bool {
+    let base = |d: &str| d.trim().split('-').next().unwrap_or_default().to_ascii_uppercase();
+    base(designation) == base(other_designation) && manufacturer.trim().eq_ignore_ascii_case(other_manufacturer.trim())
+}
+
 /// A collection of motors.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MotorDb {
@@ -130,7 +144,7 @@ impl MotorDb {
         (!id.is_empty()).then(|| self.position(id)).flatten().or_else(|| {
             self.motors
                 .iter()
-                .position(|m| m.designation.eq_ignore_ascii_case(designation) && m.manufacturer.eq_ignore_ascii_case(manufacturer))
+                .position(|m| same_motor_name(&m.designation, &m.manufacturer, designation, manufacturer))
                 .or_else(|| self.find_position(designation))
         })
     }
@@ -144,6 +158,16 @@ impl MotorDb {
     /// many were parsed.
     pub fn add_eng_str(&mut self, src: &str) -> Result<usize, ParseError> {
         let parsed = parse_eng(src)?;
+        let n = parsed.len();
+        for motor in parsed {
+            self.upsert(motor);
+        }
+        Ok(n)
+    }
+
+    /// Parses `.rse` (RockSim) text and adds its motors, like [`add_eng_str`](Self::add_eng_str); returns how many were parsed.
+    pub fn add_rse_str(&mut self, src: &str) -> Result<usize, RseError> {
+        let parsed = parse_rse(src)?;
         let n = parsed.len();
         for motor in parsed {
             self.upsert(motor);

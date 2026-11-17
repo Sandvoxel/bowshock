@@ -2,13 +2,13 @@
 #   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/simulate-ground.drive out/simulate-ground
 viewport 1280x1100
 
-click (625, 18)
-click "Run"
+click "Simulate"
+click "Run selected"
 screenshot GroundTrack-dark.png
 
 # Windy is the flight that lands farthest out; fly it 100 times with wind, launch angle and thrust varied.
 click "Windy"
-click "Run"
+click "Run selected"
 click "Run dispersion"
 move (1100, 800)
 screenshot GroundTrack-dispersion.png
@@ -22,5 +22,7 @@ move (500, 300)
 move (510, 300)
 screenshot GroundTrack-compare.png
 
+click "Prefs"
 click "Light"
+click "Done"
 screenshot GroundTrack-light.png

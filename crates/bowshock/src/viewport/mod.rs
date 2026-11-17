@@ -47,7 +47,7 @@ pub mod pick;
 mod pipeline;
 pub mod pods;
 mod radial;
-mod scene;
+pub(crate) mod scene;
 mod sheet;
 mod snap;
 mod solids;
@@ -62,7 +62,7 @@ use std::time::{Duration, Instant};
 use bowshock_model::{Dim, InternalKind, PartId, PartRef, RadialKind};
 use glam::{IVec3, Vec3};
 use iced::widget::{canvas, column, container, row, shader, stack, text, Space};
-use iced::{alignment, keyboard, mouse, Element, Fill, Size, Task, Vector, Widget};
+use iced::{alignment, keyboard, mouse, Element, Fill, Point, Rectangle, Size, Task, Vector, Widget};
 
 use crate::app::{self, drag, Ctx, Selection};
 use crate::theme::{self, MONO};
@@ -75,7 +75,7 @@ use crate::widgets::button::{button, Weight};
 
 pub use camera::Camera;
 pub use capture::Capture;
-pub use mesh::{Cut, GhostRadial, Marks, Mesh};
+pub use mesh::{Carried, Cut, Free, Ghost, GhostRadial, Marks, Mesh};
 pub use solids::{GpuVertex, LAYER_INTERNAL, LAYER_RADIAL, LAYER_SHELL};
 
 pub mod flash;
@@ -154,8 +154,9 @@ pub enum Message {
     Zoom { factor: f32, offset: Vector },
     /// Fit the model into a viewport of this logical size.
     Fit(Size),
-    /// The viewport changed size (remembered so [`View::fit`] knows the size to fit to).
-    Resized(Size),
+    /// The viewport changed size or place in the window (remembered so [`View::fit`] knows the size to fit to and where the
+    /// cursor is in the viewport).
+    Resized(Rectangle),
     /// Snap to a ViewCube region: each component in {-1, 0, 1}, not all zero. The camera ends up looking along `-dir`.
     Snap(IVec3),
     /// Return to the home view.
@@ -184,6 +185,11 @@ pub enum Message {
     PartMenu(Pick),
     /// Select the separation of this stage (a click on its diamond).
     SelectSeparation(usize),
+    /// The separation diamond of this stage was dragged: it now sits at the joint just aft of this airframe part (`None`: the
+    /// automatic joint). The first one opens the drag's single undo step.
+    SeparationTo(usize, Option<PartId>),
+    /// The diamond was released (`true`: keep the move as one undo step) or Esc was pressed (`false`: put it back).
+    SeparationEnd(bool),
     /// A part was pressed and dragged: pick it up.
     Grab(Pick),
     /// A handle edit (see `manipulate`).
@@ -242,6 +248,8 @@ struct MeshKey {
     selected: Option<PartId>,
     also: Vec<PartId>,
     axial: Option<(Option<usize>, Option<(PartId, usize)>, Option<SurfaceTarget>, u8)>,
+    /// The cursor (viewport px, rounded) while a part of the rocket is carried free of it.
+    free: Option<(i32, i32)>,
     radial: Option<(Option<SurfaceTarget>, u8)>,
     cut: Cut,
     flash: Option<(PartId, f32, f32)>,
@@ -255,6 +263,10 @@ pub struct View {
     mesh: Arc<Mesh>,
     /// Logical size of the viewport, as last reported.
     size: Size,
+    /// Where the viewport's top-left corner is in the window, as last reported.
+    origin: Point,
+    /// Whether the viewport has been fitted to its first size.
+    sized: bool,
     projection: Projection,
     inside: InsideView,
     /// The cutaway wedge.
@@ -297,6 +309,8 @@ impl View {
             profile: false,
             mesh: Arc::new(Mesh::from_rocket(&bowshock_model::Rocket::default(), Marks::default())),
             size: Size::new(860.0, 560.0),
+            origin: Point::ORIGIN,
+            sized: false,
             projection: Projection::ThreeD,
             inside: InsideView::Solid,
             cut: Cut::default(),
@@ -323,8 +337,12 @@ impl View {
         self.camera
     }
 
+    /// The projection chosen on the toolbar.
+    pub fn projection(&self) -> Projection {
+        self.projection
+    }
+
     /// The inside view chosen on the toolbar.
-    #[cfg(test)]
     pub fn inside(&self) -> InsideView {
         self.inside
     }
@@ -404,12 +422,15 @@ impl View {
         let selected = ctx.selection.part();
         let also: Vec<PartId> = ctx.selected_parts().into_iter().skip(1).collect();
         let flash = ctx.flash_levels();
+        // A part picked up from the rocket and held clear of every target follows the cursor.
+        let free = ctx.drag.axial.as_ref().is_some_and(|d| d.origin.is_some() && d.snap.is_none() && d.pod_snap.is_none() && d.surface.is_none());
         let key = MeshKey {
             revision: ctx.doc.revision(),
             hovered: self.hover.part(),
             selected,
             also: also.clone(),
             axial: ctx.drag.axial.as_ref().map(|d| (d.snap, d.pod_snap, d.surface, d.count)),
+            free: free.then(|| self.local_cursor(ctx)).flatten().map(|p| (p.x.round() as i32, p.y.round() as i32)),
             radial: ctx.drag.radial.as_ref().map(|d| (d.target, d.count)),
             cut: self.cut,
             flash,
@@ -418,6 +439,9 @@ impl View {
             return;
         }
         let rocket = ctx.doc.rocket();
+        // What a part picked up from the rocket brings with it: its ghost shows that too, wherever the ghost is.
+        let carried = ctx.drag.axial.as_ref().and_then(|d| Some(Carried { origin: d.origin.as_ref()?, base: ctx.doc.drag_base() }));
+        let free_at = free.then(|| self.free_ghost_at(ctx)).flatten();
         let ghost = ctx.drag.axial.as_ref().and_then(|d| d.snap.map(|node| (node, rocket.matched(node, &d.kind))));
         let ghost_pod = ctx.drag.axial.as_ref().and_then(|d| d.pod_snap.map(|(pod, node)| (pod, node, rocket.matched_in_pod(pod, node, &d.kind))));
         // A part dragged over a tube's side stands there as a pod of its own: the ghost is that pod.
@@ -432,9 +456,11 @@ impl View {
             })
             .or_else(|| axial_pod.as_ref().map(|(kind, t, count)| GhostRadial { kind, parent: t.parent, offset: t.offset, angle: t.angle, count: *count }));
         let marks = Marks {
-            ghost: ghost.as_ref().map(|(node, kind)| (*node, kind)),
+            ghost: ghost.as_ref().map(|(node, kind)| Ghost { index: *node, kind, carried }),
             ghost_radial,
-            ghost_pod: ghost_pod.as_ref().map(|(pod, node, kind)| (*pod, *node, kind)),
+            ghost_pod: ghost_pod.as_ref().map(|(pod, node, kind)| (*pod, Ghost { index: *node, kind, carried: carried.map(|c| Carried { base: None, ..c }) })),
+            free: free_at.zip(carried).map(|(at, carried)| Free { carried, at }),
+            ghosted: &[],
             hovered: self.hover.part(),
             selected,
             also_selected: &also,
@@ -444,6 +470,39 @@ impl View {
         };
         self.mesh = Arc::new(Mesh::from_rocket(rocket, marks));
         self.mesh_key = Some(key);
+    }
+
+    /// The mesh on show (for the tests).
+    #[cfg(test)]
+    pub(crate) fn mesh(&self) -> &Mesh {
+        &self.mesh
+    }
+
+    /// The cursor in the viewport's own px, if it is over the viewport.
+    fn local_cursor(&self, ctx: &Ctx) -> Option<Point> {
+        let at = ctx.cursor?;
+        let local = Point::new(at.x - self.origin.x, at.y - self.origin.y);
+        ((0.0..=self.size.width).contains(&local.x) && (0.0..=self.size.height).contains(&local.y)).then_some(local)
+    }
+
+    /// Where a part picked up from the rocket and held clear of it stands under the cursor: the cursor's ray meets the plane
+    /// through the rocket's axis that faces the camera (looking along the axis, the plane through the view target), and the
+    /// part's middle goes there, its axis parallel to the rocket's. World position of its fore face; `None` while the cursor is
+    /// off the viewport.
+    fn free_ghost_at(&self, ctx: &Ctx) -> Option<Vec3> {
+        let origin = &ctx.drag.axial.as_ref()?.origin.as_ref()?.part;
+        let local = self.local_cursor(ctx)?;
+        let (from, dir) = self.camera.ray(local, self.size);
+        let back = self.camera.back();
+        let across = back - Vec3::Z * back.z;
+        // Looking (nearly) along the axis there is no plane through it facing the camera: use the one through the target.
+        let (normal, through) = if across.length() > 0.05 { (across.normalize(), Vec3::ZERO) } else { (back, self.camera.target) };
+        let facing = normal.dot(dir);
+        if facing.abs() < 1e-4 {
+            return None;
+        }
+        let hit = from + dir * (normal.dot(through - from) / facing);
+        Some(Vec3::new(hit.x, hit.y, hit.z - origin.kind.length() as f32 / 2.0))
     }
 
     /// Handles a message: camera and toolbar changes stay here; edits go to the document and drags to `app::drag`.
@@ -498,6 +557,14 @@ impl View {
                 return Task::done(app::Message::OpenPartMenu(id));
             }
             Message::SelectSeparation(stage) => ctx.selection = Selection::Separation(stage),
+            Message::SeparationTo(stage, joint) => {
+                drag::move_separation(ctx, stage, joint);
+                self.hint = vec![("", "Slide to a joint"), ("Esc", "cancel")];
+            }
+            Message::SeparationEnd(commit) => {
+                drag::finish_separation(ctx, commit);
+                self.hint.clear();
+            }
             Message::Grab(pick) => {
                 drag::grab(ctx, pick);
                 self.hover = Hover::None;
@@ -687,7 +754,7 @@ impl View {
                 self.camera.zoom(factor, offset);
             }
             Message::Fit(size) => {
-                self.size = size;
+                (self.size, self.sized) = (size, true);
                 (self.navigated, self.stray) = (false, false);
                 // Nothing to frame: keep the camera.
                 if !self.mesh.is_empty() {
@@ -696,7 +763,13 @@ impl View {
                     self.animate(to, animate);
                 }
             }
-            Message::Resized(size) => self.size = size,
+            Message::Resized(bounds) => {
+                (self.size, self.origin) = (bounds.size(), bounds.position());
+                // The first report is the initial fit.
+                if !self.sized {
+                    self.fit(animate);
+                }
+            }
             Message::Capture(capture) => self.capture = capture,
             Message::Snap(dir) if !self.profile => {
                 let mut to = self.goal();
@@ -971,6 +1044,10 @@ impl View {
                 cut: self.cut,
                 units: ctx.units,
                 interactive: !ctx.drag.active(),
+                dragging: match ctx.selection {
+                    Selection::Separation(stage) if ctx.doc.dragging() => Some(stage),
+                    _ => None,
+                },
                 hit,
             })
             .width(Fill)

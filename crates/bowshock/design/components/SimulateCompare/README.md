@@ -21,7 +21,7 @@ Simulate with several flights overlaid. Same layout as **SimulateScreen**; ticki
 - **Ground track** shows every compared flight from above, in the same colours, with the crosshair's moment as a dot on each track (see **GroundTrack**).
 
 **Comparing configurations**
-- **Run all configurations** in the Simulate button's menu makes one flight per motor configuration and ticks them, which is the quickest way to compare motors (see **ConfigPicker**).
+- **One flight per configuration** in the Simulate button's menu makes one flight per motor configuration and ticks them, which is the quickest way to compare motors (see **ConfigPicker**).
 
 **Accessibility**
 - Identity is never colour alone: the legend, the apogee labels and the tooltip all name the flight.

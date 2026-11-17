@@ -18,9 +18,9 @@ Bowshock's interface takes the *feel* of a KSP-style vehicle assembly building: 
 ## 2. Layout anatomy
 
 ```
-┌──────────┬──────────────┬──────┬──────────────────────────────┬────────┬──────────┐ topbar-h 40
-│ BOWSHOCK │ hpr_l1_cert ■│ ↶ ↷  │    [Build|Simulate|Analyze]  │ mm·g·s │ Simulate │
-├──┬───────┴──────────┬───┴──────┴──────────────────────────────┬─┴────────┴──────────┤
+┌──────────┬──────────────┬─────────────────┬────────────────────────┬───┬──────────┐ topbar-h 40
+│ BOWSHOCK │File Edit View│hpr_l1_cert ■ ↶ ↷│[Build|Simulate|Analyze]│ ≡ │Simulate ▾│
+├──┬───────┴──────────┬───┴─────────────────┴───────────────────┬────┴───┴──────────┤
 │▣ │ AIRFRAME       6 │ ┌[3D|2D][Solid|Cut|X-ray|Expl] 1mm┐ ▣   │ Fin set  Trapezoid ▾│
 │△ │ [search      /]  │                                     cube  │ 01 GEOMETRY         │
 │▤ │ ☑ size to Ø76.2  │        CG ◐       ◉ CP        ⌜ ⌝         │ Fin count [2|3|4|5] │
@@ -38,6 +38,7 @@ Bowshock's interface takes the *feel* of a KSP-style vehicle assembly building: 
 └──────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
+- **Top**: the logo, the **File / Edit / View** menu bar, the document title (plain text, with an accent dot when unsaved), undo / redo, the Build / Simulate / Analyze switch, the Preferences button (a sliders glyph; theme and units live there) and the **Simulate** split button (runs every flight; its caret menu offers *Run selected flights* and *One flight per configuration*).
 - **Left**: the **Parts bin**, a category rail (`rail-w`) plus a part list whose default sizes follow the selection, with the **Symmetry** picker (1/2/3/4/6/8, angle snap) pinned at its foot, KSP-style. There is no tile grid.
 - **Centre top**: the **Viewport**. Its mode is 3D, Profile (2D side view) or Split. Overlays are the view toolbar (top left: 3D/2D · **Solid / Cutaway / X-ray / Exploded** · snap step), view cube + axis triad (top right), the CG/CP legend + flight condition (bottom left), the key-hint bar (bottom centre) and the scale bar (bottom right). Corner registration marks frame the drawing area.
 - **Centre bottom**: **Station Lanes**, every part drawn as a bar along the rocket's length (measured from the nose tip), **one lane per system** (Structure · Aero · Propulsion · Recovery · Avionics), with CG/CP lines running through. This is Bowshock's structure view; **there is no component tree**. When the camera is side-on, the map shares the viewport's scale, so parts line up with the model above them.
@@ -48,7 +49,7 @@ Bowshock's interface takes the *feel* of a KSP-style vehicle assembly building: 
 
 ## 3. Colour
 
-The dark theme is the default; Light is for daylight work and printing reports. Colour tokens are listed in **Colors**, and here is how they're meant to be used:
+The dark theme is the default; Light is for daylight work and printing reports. The theme and the unit set are both chosen in Preferences, not in the top bar. Colour tokens are listed in **Colors**, and here is how they're meant to be used:
 
 | Role | Tokens | Rule |
 |---|---|---|

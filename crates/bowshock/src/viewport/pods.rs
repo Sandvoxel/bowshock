@@ -149,7 +149,7 @@ pub(super) fn append(
             ..Marks::default()
         };
         if !ghost {
-            sub_marks.ghost = marks.ghost_pod.filter(|g| g.0 == pod.id).map(|g| (g.1, g.2));
+            sub_marks.ghost = marks.ghost_pod.filter(|g| g.0 == pod.id).map(|g| g.1);
             sub_marks.ghost_radial = marks.ghost_radial.filter(|g| sub.part(g.parent).is_some() && rocket.pod_of(g.parent).is_some_and(|p| p.id == pod.id));
         }
         let mesh = Mesh::from_rocket(&sub, sub_marks);
@@ -192,7 +192,7 @@ pub(super) fn append(
         }
     };
     for pod in rocket.pods() {
-        carry(pod, None, false);
+        carry(pod, None, marks.ghosted.contains(&pod.id));
     }
     if let Some(g) = marks.ghost_radial.filter(|g| g.kind.is_pod()) {
         if let RadialKind::Pod { body, .. } = g.kind {
@@ -249,7 +249,7 @@ mod tests {
 
     fn pod_rocket() -> (Rocket, PartId) {
         let mut r = Rocket::default();
-        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.3, diameter: 0.1 }).unwrap();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.3, diameter: 0.1, tip_radius: 0.0 }).unwrap();
         let tube = r.insert(1, PartKind::BodyTube { length: 1.0, diameter: 0.1 }).unwrap();
         let kind = r.default_pod();
         let pod = r.attach_radial(tube, 0.3, 0.0, 2, kind).unwrap();

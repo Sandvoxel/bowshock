@@ -95,7 +95,7 @@ mod tests {
     fn app() -> (App, Vec<PartId>) {
         let mut app = App::new();
         let ctx = &mut app.ctx;
-        drag::place(ctx, 0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1 });
+        drag::place(ctx, 0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1, tip_radius: 0.0 });
         drag::place(ctx, 1, PartKind::BodyTube { length: 0.5, diameter: 0.1 });
         drag::place(ctx, 2, PartKind::Transition { length: 0.1, fore_diameter: 0.1, aft_diameter: 0.06 });
         app.after_update();

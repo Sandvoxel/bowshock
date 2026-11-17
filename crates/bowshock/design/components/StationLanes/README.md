@@ -9,7 +9,7 @@ Where everything sits in the rocket. Every part is a bar **along the rocket's le
 | Lane | Colour | What goes in it |
 |---|---|---|
 | **Structure** | `part-body` | Nose cone, body tubes, transitions, couplers, bulkheads, centering rings |
-| **Aero** | `sys-aero` | Fins, canards, rail buttons, launch lugs |
+| **Aero** | `sys-aero` | Fins, rail buttons, launch lugs |
 | **Propulsion** | `sys-propulsion` | Motor mount tube, motor, engine block, thrust ring, retainer |
 | **Recovery** | `sys-recovery` | Parachutes, drogue, shock cord, harness, deployment charges |
 | **Avionics & payload** | `sys-avionics` | Altimeters, batteries, trackers, payload, ballast |

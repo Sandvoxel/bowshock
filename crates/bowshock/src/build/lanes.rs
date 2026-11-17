@@ -61,6 +61,11 @@ pub enum Message {
     Toggle(BarKey),
     /// A click on a separation line.
     SelectSeparation(usize),
+    /// A separation line dragged: it now sits at the joint just aft of this airframe part. The first one opens the drag's one
+    /// undo step.
+    SeparationTo(usize, Option<PartId>),
+    /// The separation line was released (`true`: keep it as one undo step) or Esc was pressed (`false`: put it back).
+    SeparationEnd(bool),
     /// Right-click on a bar: select its part (unless it is already selected) and open the part's context menu.
     PartMenu(BarKey),
     /// A click on the current configuration's motor bar: open the configuration menu.
@@ -166,6 +171,8 @@ impl State {
             }
             Message::GrabAxial(id) => drag::grab(ctx, Pick::Axial(id)),
             Message::CarryAt(start) => carry_at(ctx, start),
+            Message::SeparationTo(stage, joint) => drag::move_separation(ctx, stage, joint),
+            Message::SeparationEnd(commit) => drag::finish_separation(ctx, commit),
             Message::EditEnd => {
                 drag::finish_axial(ctx, true);
                 drag::finish_radial(ctx, true);
@@ -474,7 +481,7 @@ mod tests {
     fn an_airframe_part_picked_up_by_its_bar_reorders_through_the_viewport_drag_path() {
         let mut app = App::new();
         for (i, kind) in [
-            PartKind::NoseCone { shape: bowshock_model::NoseShape::TangentOgive, length: 0.2, diameter: 0.1 },
+            PartKind::NoseCone { shape: bowshock_model::NoseShape::TangentOgive, length: 0.2, diameter: 0.1, tip_radius: 0.0 },
             PartKind::BodyTube { length: 0.5, diameter: 0.1 },
             PartKind::Transition { length: 0.1, fore_diameter: 0.1, aft_diameter: 0.06 },
         ]

@@ -74,9 +74,9 @@ pub struct Plan {
 }
 
 /// The solver's nose family for the document's, `None` when there is none; the second value says the nose was approximated.
-pub(super) fn nose_shape(shape: bowshock_model::NoseShape) -> Result<(solver::NoseShape, Option<&'static str>), String> {
+pub(super) fn nose_shape(shape: bowshock_model::NoseShape) -> Result<(solver::SharpShape, Option<&'static str>), String> {
     use bowshock_model::NoseShape as M;
-    use solver::NoseShape as S;
+    use solver::SharpShape as S;
     Ok(match shape {
         M::Conical => (S::Cone, None),
         M::TangentOgive => (S::TangentOgive, None),
@@ -88,6 +88,17 @@ pub(super) fn nose_shape(shape: bowshock_model::NoseShape) -> Result<(solver::No
         M::PowerSeries(n) => return Err(format!("the nose is a power series with n = {n:.2}; the solver takes n from 0.5 to 1")),
         M::Elliptical => (S::Power { n: 0.5 }, Some("The elliptical nose is solved as a half-power profile.")),
     })
+}
+
+/// A sharp family as the solver's pointed nose shape.
+fn sharp_nose(shape: solver::SharpShape) -> solver::NoseShape {
+    match shape {
+        solver::SharpShape::Cone => solver::NoseShape::Cone,
+        solver::SharpShape::TangentOgive => solver::NoseShape::TangentOgive,
+        solver::SharpShape::Power { n } => solver::NoseShape::Power { n },
+        solver::SharpShape::Parabolic { k } => solver::NoseShape::Parabolic { k },
+        solver::SharpShape::Haack { c } => solver::NoseShape::Haack { c },
+    }
 }
 
 /// A fin set as the solver's fins, or why it cannot be.
@@ -104,6 +115,9 @@ pub(super) fn fin_spec(set: &FinSet, x_base: f64) -> Result<solver::FinSpec, Str
         FinCrossSection::Square => solver::FinProfile::Square,
         FinCrossSection::Rounded => solver::FinProfile::Rounded,
         FinCrossSection::Airfoil => solver::FinProfile::Airfoil,
+        FinCrossSection::DoubleWedge => solver::FinProfile::DoubleWedge,
+        FinCrossSection::Hexagonal(wedge_fraction) => solver::FinProfile::Hexagonal { wedge_fraction },
+        FinCrossSection::Biconvex => solver::FinProfile::Biconvex,
     };
     let spec = solver::FinSpec {
         count: set.count,
@@ -175,8 +189,11 @@ pub fn plan(rocket: &Rocket, vehicle: &Vehicle, units: UnitSystem) -> Result<Pla
             NoseShape::Parabolic => bowshock_model::NoseShape::PowerSeries(0.5),
         },
     };
-    let (shape, approximated) = nose_shape(model_shape)?;
+    let (base, approximated) = nose_shape(model_shape)?;
     notes.extend(approximated.map(String::from));
+    // The segment's length is the nose as built and its tip radius the (feasible) sphere on it: the solver blunts the sharp family
+    // itself, so the solved profile is the one the model draws.
+    let shape = if first.tip_radius > 0.0 { solver::NoseShape::Blunted { base, tip_radius: first.tip_radius } } else { sharp_nose(base) };
     let nose = solver::NoseSpec { shape, length: first.length, diameter: 2.0 * first.aft_radius };
 
     let mut aft = Vec::new();
@@ -261,6 +278,15 @@ impl Plan {
             solver::NoseShape::Power { n } => h.u64(2).f(n),
             solver::NoseShape::Parabolic { k } => h.u64(3).f(k),
             solver::NoseShape::Haack { c } => h.u64(4).f(c),
+            // a blunted nose: its sharp family, then the tip radius (a pointed nose hashes as it always did)
+            solver::NoseShape::Blunted { base, tip_radius } => match base {
+                solver::SharpShape::Cone => h.u64(5),
+                solver::SharpShape::TangentOgive => h.u64(6),
+                solver::SharpShape::Power { n } => h.u64(7).f(n),
+                solver::SharpShape::Parabolic { k } => h.u64(8).f(k),
+                solver::SharpShape::Haack { c } => h.u64(9).f(c),
+            }
+            .f(tip_radius),
         };
         h.f(n.length).f(n.diameter);
         // roughness in micrometres: the micro-unit rounding of `f` would otherwise blur the finishes
@@ -280,7 +306,12 @@ impl Plan {
                     solver::FinProfile::Airfoil => 2,
                     solver::FinProfile::DoubleWedge => 3,
                     solver::FinProfile::Custom { .. } => 4,
+                    solver::FinProfile::Hexagonal { .. } => 5,
+                    solver::FinProfile::Biconvex => 6,
                 });
+                if let solver::FinProfile::Hexagonal { wedge_fraction } = f.profile {
+                    h.f(wedge_fraction);
+                }
             }
             None => {
                 h.u64(21);

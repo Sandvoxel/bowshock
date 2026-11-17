@@ -10,9 +10,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
-use iced::widget::{column, row, text, text_input};
+use iced::widget::{column, container, row, text, text_input};
 use iced::{Element, Fill, Task, Widget};
 
+use super::{card, group, setting};
 use crate::analyze::cfd::remote::{self, Probe};
 use crate::app::settings::{Machine, MachineRef, Mode};
 use crate::app::worker::{self, StreamHandle};
@@ -20,7 +21,7 @@ use crate::app::Ctx;
 use crate::theme::{self, MONO};
 use crate::tokens::{SPACE_1, SPACE_2, SPACE_3, TEXT_BODY};
 use crate::widgets::button::{button as push, Weight};
-use crate::widgets::field::{checkbox, rule, select};
+use crate::widgets::field::{checkbox, select};
 use crate::widgets::segmented::segmented;
 
 /// What the last connection test of a machine found.
@@ -251,7 +252,12 @@ fn machine_row<'a>(m: &'a Machine, test: &'a Test) -> Element<'a, ComputeMessage
     if let Some(status) = status {
         col = col.push(row![text("").width(28), note(status)].boxed());
     }
-    col.boxed()
+    padded(col.boxed())
+}
+
+/// `body` as a row of a card.
+fn padded<'a>(body: Element<'a, ComputeMessage>) -> Element<'a, ComputeMessage> {
+    container(body).padding(SPACE_3).width(Fill).boxed()
 }
 
 /// The page: the machines with their switches, Add machine, and how the solves use them.
@@ -265,10 +271,9 @@ pub fn view<'a>(ui: &'a ComputeState, ctx: &'a Ctx) -> Element<'a, ComputeMessag
     ]
     .spacing(SPACE_3)
     .align_y(iced::Center);
-    let mut list = column![this].spacing(SPACE_2);
+    let mut rows = vec![padded(this.boxed())];
     for m in &compute.machines {
-        list = list.push(rule());
-        list = list.push(machine_row(m, ui.test_of(&m.key())));
+        rows.push(machine_row(m, ui.test_of(&m.key())));
     }
 
     let adding = Machine::parse(&ui.add_text);
@@ -286,15 +291,14 @@ pub fn view<'a>(ui: &'a ComputeState, ctx: &'a Ctx) -> Element<'a, ComputeMessag
     } else {
         push("Add machine", Weight::Secondary).disabled("Type the machine's user@host first").into()
     };
-    let adder = row![field, add].spacing(SPACE_2).align_y(iced::Center);
+    rows.push(padded(row![field, add].spacing(SPACE_2).align_y(iced::Center).boxed()));
 
     let how = segmented(&[(false, "Use one"), (true, "Share across all switched-on machines")], share, ComputeMessage::Share);
-    let mut col =
-        column![list, rule(), adder, note("Machines are used over SSH with your keys; the first connection sets up their solver (minutes).".to_string()), how]
-            .spacing(SPACE_2 + SPACE_1);
+    let mut use_rows = vec![setting("Use", None, how)];
+    let mut under = column![].spacing(SPACE_1);
     if share {
         let n = compute.places().map_or(0, |p| p.len());
-        col = col.push(note(format!(
+        under = under.push(note(format!(
             "Each Mach number goes to the next machine that is free, so a faster one does more. {n} machine{} on now. A machine that cannot connect is left out; one that fails mid-solve hands its Mach number to the others.",
             if n == 1 { "" } else { "s" }
         )));
@@ -304,12 +308,18 @@ pub fn view<'a>(ui: &'a ComputeState, ctx: &'a Ctx) -> Element<'a, ComputeMessag
             Mode::Pick(r) => choices.iter().find(|c| &c.which == r).cloned(),
             Mode::Share => None,
         };
-        col = col.push(select(choices, picked, ComputeMessage::Pick));
+        use_rows.push(setting("Machine", None, container(select(choices, picked, ComputeMessage::Pick)).width(220).boxed()));
         if compute.pickable().is_empty() {
-            col = col.push(note("Nothing is switched on: switch This computer or a machine on.".to_string()));
+            under = under.push(note("Nothing is switched on: switch This computer or a machine on.".to_string()));
         }
     }
-    col.boxed()
+    let how_card = column![card(use_rows), under].spacing(SPACE_2);
+    column![
+        group("WHERE SOLVES RUN", card(rows), Some("Machines are used over SSH with your keys; the first connection sets up their solver (minutes).")),
+        how_card
+    ]
+    .spacing(SPACE_3)
+    .boxed()
 }
 
 #[cfg(test)]

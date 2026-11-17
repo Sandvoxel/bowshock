@@ -43,7 +43,7 @@ pub enum Item {
 /// The airframe parts offered, with their default sizes (metres). The names are the bin's: the model calls any contracting
 /// transition a boattail, but the bin offers a plain Transition that happens to contract too.
 pub fn axial_catalogue() -> Vec<(&'static str, PartKind)> {
-    let nose = |shape| PartKind::NoseCone { shape, length: 0.2286, diameter: 0.0762 };
+    let nose = |shape| PartKind::NoseCone { shape, length: 0.2286, diameter: 0.0762, tip_radius: 0.0 };
     vec![
         ("Nose cone", nose(NoseShape::TangentOgive)),
         ("Conical nose", nose(NoseShape::Conical)),
@@ -140,7 +140,8 @@ pub fn sized(kind: &PartKind, diameter: Option<f64>) -> PartKind {
         return kind.clone();
     };
     match *kind {
-        PartKind::NoseCone { shape, length, .. } => PartKind::NoseCone { shape, length, diameter: d },
+        // the tip sphere scales with the base (and is limited if the new base is too small for it)
+        PartKind::NoseCone { diameter: old, tip_radius, .. } => kind.with_aft_diameter(d).with_tip_radius(if old > 0.0 { tip_radius * d / old } else { 0.0 }),
         PartKind::BodyTube { length, .. } => PartKind::BodyTube { length, diameter: d },
         PartKind::Transition { length, fore_diameter, aft_diameter } => {
             let k = d / fore_diameter.max(aft_diameter);

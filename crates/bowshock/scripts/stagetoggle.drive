@@ -9,6 +9,8 @@ click "Full stack"
 screenshot stagetoggle-back.png
 
 # Light theme, booster dropped.
-click (936, 20)
+click "Prefs"
+click "Light"
+click "Done"
 click "Stage 2"
 screenshot stagetoggle-stage2-light.png

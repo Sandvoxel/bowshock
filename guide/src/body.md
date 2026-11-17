@@ -20,7 +20,7 @@ assert_eq!(spec.base_diameter(), 0.08);
 ## Nose
 
 `NoseSpec { shape, length, diameter }`: `length` is the axial length of the nose [m], `diameter`
-the diameter at the nose base [m]. The tip is on the axis (sharp). The fineness ratio
+the diameter at the nose base [m]. The tip is on the axis (sharp, or a sphere with `Blunted`). The fineness ratio
 `length / diameter` must be in [0.5, 12].
 
 | `NoseShape` | Profile | Parameter range |
@@ -30,6 +30,11 @@ the diameter at the nose base [m]. The tip is on the axis (sharp). The fineness 
 | `Power { n }` | `r/R = (x/L)^n` | `n` in [0.5, 1] |
 | `Parabolic { k }` | parabolic series | `k` in [0, 1] (0 cone, 1 tangent parabola) |
 | `Haack { c }` | Haack series | `c` in [0, 1/3] (0 Von Karman, 1/3 LV-Haack) |
+| `Blunted { base, tip_radius }` | any of the shapes above (`SharpShape`) with its tip replaced by a sphere of radius `tip_radius` [m] tangent to the profile | `tip_radius` at most 0.9 of the base radius, and a sphere that is tangent (a `Power` of `n = 0.5` takes none smaller than its tip's radius of curvature `R^2 / (2 L)`) |
+
+With `Blunted`, `length` is the length of the nose as built, from the sphere's apex to the base: the sharp profile
+the sphere sits on is longer by the cut-off. The fineness limits apply to `length`, the cone half-angle limit to the
+sharp cone.
 
 ## Aft sections
 
@@ -51,10 +56,11 @@ with the offending field:
 | fineness `nose.length / nose.diameter` in [0.5, 12] | `nose.length` |
 | cone half-angle <= 30 deg | `nose.shape` |
 | `Power::n`, `Parabolic::k`, `Haack::c` inside their ranges | `nose.shape.n`, `nose.shape.k`, `nose.shape.c` |
+| `Blunted::tip_radius` in (0, 0.9 of the base radius] with a tangent sphere on the profile | `nose.shape.tip_radius` |
 | `aft` not empty | `aft` |
 | every section `length` and `aft_diameter` finite and > 0 | `aft[<index>].length`, `aft[<index>].aft_diameter` |
 | transition half-angle <= 30 deg | `aft[<index>]` |
-| total length (nose + sections) <= 40 nose diameters | `aft` |
+| total length (nose + sections) <= 100 nose diameters | `aft` |
 
 ```rust
 use bowshock_core::{AftSpec, Analysis, BodySpec, Error, NoseShape, NoseSpec};

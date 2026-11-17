@@ -117,7 +117,7 @@ unchanged numbers.
 
 Goal: describe an actual rocket, not a unit-diameter nose on a fixed cylinder.
 
-Status: done on branch `usable-release`. Deviations: no blunted-tip shape; Haack and power-series noses (infinite tip slope) are accepted and run.
+Status: done on branch `usable-release`. Deviations: the blunted tip (a tangent sphere on the sharp family) is implemented but no blunted body has been solved or checked against a sphere-cone reference; Haack and power-series noses (infinite tip slope) are accepted unblunted and run.
 
 - [x] Dimensional input (lengths in metres, reference diameter explicit); non-dimensionalise internally.
 - [x] Piecewise body profile: nose, any number of tubes, conical transitions (expanding and contracting),
@@ -125,9 +125,9 @@ Status: done on branch `usable-release`. Deviations: no blunted-tip shape; Haack
       second type.
 - [x] Geometry validation with clear errors: non-monotone `x`, zero-length segments, slope discontinuities
       steeper than the grid can take.
-- [ ] Blunt and rounded tips. The H-grid has vertical grid lines, so an infinite tip slope is not
+- [x] Blunt and rounded tips. The H-grid has vertical grid lines, so an infinite tip slope is not
       representable as is. Either implement a tip treatment or reject such bodies with an error that says
-      why. Decide by measuring how badly a Haack or power-series tip behaves today. — not done: no blunted-tip shape was added; Haack and power-series noses (infinite tip slope) are accepted and run (body C in the robustness matrix is a Von Karman nose).
+      why. Decide by measuring how badly a Haack or power-series tip behaves today. — done as a nose option: `NoseShape::Blunted { base, tip_radius }` replaces the tip of the sharp family with a tangent sphere (`bowshock-reference::blunt_nose`; the nose length stays the length as built) and the solver's wall is that profile; the model draws the same outline. No solve of a blunted body has been run yet: the grid's behaviour at the round tip is unmeasured and the tip is not checked against a sphere-cone reference solution. Haack and power-series noses (infinite tip slope) are still accepted unblunted and run (body C in the robustness matrix is a Von Karman nose).
 - [x] Grid sizing from the body: cells per diameter by resolution level, domain extent in body lengths, as
       `TransonicCase::with_body` and `SubsonicCase::with_body` already do.
 - [x] Grid quality check before solving (minimum cell area, maximum stretching ratio).

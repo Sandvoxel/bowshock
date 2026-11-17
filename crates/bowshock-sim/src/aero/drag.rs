@@ -1,5 +1,5 @@
 use super::fin::{roll_factor, SUBSONIC_CP_POS};
-use super::tables::pressure_table;
+use super::tables::{hemisphere_table, pressure_table};
 use super::{BodyCalc, FinCalc, Pressure};
 use crate::vehicle::{BodyKind, BodySegment, FinPlanform, FinSet, NoseShape};
 use std::f64::consts::PI;
@@ -60,13 +60,15 @@ pub(super) fn button_drag(mach: f64, re_per_m: f64, station: f64, height: f64, d
 
 /// Numerically integrates a body segment's geometry and selects its pressure-drag model.
 pub(super) fn body_calc(s: &BodySegment, prev_aft: f64, next_fore: Option<f64>, a_ref: f64) -> BodyCalc {
-    const N: usize = 64;
+    // The cap of a blunted tip is a few strips of a 64-strip nose: it gets 256.
+    let blunt = s.blunt_nose();
+    let n: usize = if blunt.is_some() { 256 } else { 64 };
     let l = s.length.max(1e-12);
-    let dx = l / N as f64;
+    let dx = l / n as f64;
     let (mut vol, mut plan, mut plan_m, mut wet) = (0.0, 0.0, 0.0, 0.0);
-    let mut strips: Vec<(f64, f64)> = Vec::with_capacity(N);
+    let mut strips: Vec<(f64, f64)> = Vec::with_capacity(n);
     let mut r_prev = s.radius_at(0.0);
-    for i in 0..N {
+    for i in 0..n {
         let x_mid = (i as f64 + 0.5) * dx;
         let r_next = s.radius_at((i + 1) as f64 * dx);
         let r = 0.5 * (r_prev + r_next);
@@ -112,10 +114,17 @@ pub(super) fn body_calc(s: &BodySegment, prev_aft: f64, next_fore: Option<f64>, 
             Pressure::Base { area: frontal, scale: if fineness <= 1.0 { 1.0 } else { (3.0 - fineness) / 2.0 } }
         }
     } else {
-        let r = s.radius_at(0.99 * s.length);
+        // A blunted nose's pressure drag is that of the sharp profile its tip sits on, so its fineness and the slope near its base
+        // are those of the sharp nose (`sharp_length`); the tip itself is `Pressure::BluntTable`'s cap (own estimate).
+        let ls = s.sharp_length();
+        let r = if blunt.is_some() { s.radius_at(s.length - 0.01 * ls) } else { s.radius_at(0.99 * s.length) };
         let tangent_ogive = matches!(shape, Some(NoseShape::TangentOgive));
-        let sinphi = if tangent_ogive { 0.0 } else { (r1 - r) / ((r1 - r).hypot(0.01 * s.length)) };
-        Pressure::Table { table: pressure_table(shape, fineness, sinphi), area: frontal }
+        let sinphi = if tangent_ogive { 0.0 } else { (r1 - r) / ((r1 - r).hypot(0.01 * ls)) };
+        let table = pressure_table(shape, ls / (2.0 * (r1 - r0).abs()).max(1e-12), sinphi);
+        match blunt {
+            Some(b) => Pressure::BluntTable { table, hemisphere: hemisphere_table(), tip_ratio: b.tip_radius / r1, area: frontal },
+            None => Pressure::Table { table, area: frontal },
+        }
     };
 
     let next_r = next_fore.unwrap_or(0.0);

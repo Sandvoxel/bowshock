@@ -5,7 +5,7 @@
 //! the handle in the viewport can never disagree. The fields that are not a plain dimension (sweep angle, an auto diameter, the
 //! parachute's numbers, mass overrides) are the [`Field`] variants beside [`Field::Dim`].
 
-use bowshock_model::{DeployEvent, Deployment, Dim, EventKind, FinTab, InternalKind, MassRole, PartId, Rocket, StageEvent, StageTrigger};
+use bowshock_model::{DeployEvent, Deployment, Dim, EventKind, FinSection, FinTab, InternalKind, MassRole, PartId, Rocket, StageEvent, StageTrigger};
 
 /// Most a shroud-line count may be.
 const MAX_LINES: f64 = 64.0;
@@ -70,18 +70,8 @@ pub enum Field {
     TabLength,
     /// A fin group's tab position: its fore edge from the root's leading edge.
     TabPosition,
-    /// A fin group's roll control: the roll rate it holds, in °/s (a plain number: the document keeps rad/s).
-    RollTarget,
-    /// A fin group's roll control: when it switches on (s after launch).
-    RollStart,
-    /// A fin group's roll control: the proportional gain, ×1000 (a plain number: the document keeps rad per rad/s).
-    RollKp,
-    /// A fin group's roll control: the integral gain.
-    RollKi,
-    /// A fin group's roll control: the largest cant.
-    RollMaxCant,
-    /// A fin group's roll control: the fastest cant slew, in °/s (a plain number: the document keeps rad/s).
-    RollMaxRate,
+    /// A fin group's hexagonal section: the length of each wedge as a fraction of the chord (shown in percent).
+    WedgeLength,
     /// The active configuration's ejection delay of a motor mount.
     EjectionDelay,
     /// The active configuration's delay after the trigger of a staging event: the separation of stage `n` or the ignition of
@@ -118,7 +108,7 @@ impl Field {
             Field::TabHeight => "tab height".into(),
             Field::TabLength => "tab length".into(),
             Field::TabPosition => "tab position".into(),
-            Field::RollTarget | Field::RollStart | Field::RollKp | Field::RollKi | Field::RollMaxCant | Field::RollMaxRate => "roll control".into(),
+            Field::WedgeLength => "wedge length".into(),
             Field::EjectionDelay => "ejection delay".into(),
             Field::StageDelay(_, EventKind::Separation) => "separation delay".into(),
             Field::StageDelay(_, EventKind::Ignition) => "ignition delay".into(),
@@ -225,19 +215,17 @@ pub fn apply_copy(r: &mut Rocket, id: PartId, copy: usize, field: Field, value: 
             };
             Applied::flag(r.set_fin_tab(id, Some(tab)))
         }
-        Field::RollTarget | Field::RollStart | Field::RollKp | Field::RollKi | Field::RollMaxCant | Field::RollMaxRate => {
-            let Some(mut rc) = r.radial(id).and_then(|fin| fin.roll_control) else {
+        Field::WedgeLength => {
+            if !matches!(r.radial(id).map(|fin| fin.cross_section), Some(FinSection::Hexagonal(_))) {
                 return Applied::no();
-            };
-            match field {
-                Field::RollTarget => rc.target_rate = value.to_radians(),
-                Field::RollStart => rc.start = value,
-                Field::RollKp => rc.kp = value / 1000.0,
-                Field::RollKi => rc.ki = value,
-                Field::RollMaxCant => rc.max_cant = value,
-                _ => rc.max_rate = value.to_radians(),
             }
-            Applied::flag(r.set_roll_control(id, Some(rc)))
+            let fraction = FinSection::clamp_wedge_fraction(value);
+            let limited = (fraction != value).then_some("WEDGE LENGTH LIMIT 1–50 %");
+            if r.set_fin_section(id, FinSection::Hexagonal(fraction)) {
+                Applied::yes(limited)
+            } else {
+                Applied::no()
+            }
         }
         Field::EjectionDelay => {
             let config = r.active_config_id();
@@ -545,10 +533,13 @@ pub fn set_count(r: &mut Rocket, id: PartId, count: u8) -> bool {
     }
 }
 
-/// Gives a nose cone another profile family (parametric ones start at their conventional parameter).
+/// Gives a nose cone another profile family (parametric ones start at their conventional parameter). The tip radius stays when the
+/// new family has a tangent sphere that size and is dropped (the nose becomes pointed) when it has none.
 pub fn set_nose_shape(r: &mut Rocket, id: PartId, shape: bowshock_model::NoseShape) -> bool {
     match r.part(id).map(|p| p.kind.clone()) {
-        Some(bowshock_model::PartKind::NoseCone { length, diameter, .. }) => r.set_kind(id, bowshock_model::PartKind::NoseCone { shape, length, diameter }),
+        Some(bowshock_model::PartKind::NoseCone { length, diameter, tip_radius, .. }) => {
+            r.set_kind(id, bowshock_model::PartKind::NoseCone { shape, length, diameter, tip_radius })
+        }
         _ => false,
     }
 }
@@ -617,7 +608,7 @@ mod tests {
     /// Nose, one 600 mm tube with a 3-fin set at its aft end, a motor mount, a ring, a parachute and a ballast weight.
     fn rocket() -> (Rocket, PartId, PartId, [PartId; 4]) {
         let mut r = Rocket::default();
-        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762 }).unwrap();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762, tip_radius: 0.0 }).unwrap();
         let tube = r.insert(1, PartKind::BodyTube { length: 0.6, diameter: 0.0762 }).unwrap();
         let fins = r
             .attach_radial(tube, 0.48, 0.0, 3, RadialKind::FinSet { root_chord: 0.12, tip_chord: 0.05, span: 0.0762, sweep: 0.06, thickness: 0.00318 })

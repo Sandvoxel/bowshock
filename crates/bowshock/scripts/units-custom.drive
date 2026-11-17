@@ -1,4 +1,4 @@
-# Mixed units: the top bar's unit select ends in Custom…, which opens a panel with one selector per quantity family.
+# Mixed units: Preferences > Units has the unit-set select and one strip per quantity, and changing one strip makes the set a custom mix.
 # The set is a user setting (not in the rocket file); point BOWSHOCK_SETTINGS_FILE at a scratch file so the run is hermetic:
 #   rm -f /tmp/bowshock-settings.json; BOWSHOCK_SETTINGS_FILE=/tmp/bowshock-settings.json \
 #     cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/units-custom.drive out/units
@@ -6,23 +6,22 @@
 viewport 1280x800
 scale 1
 
-# The select, open: the named sets and Custom….
-click (982, 18)
+# The Units page: the named sets in the select, the per-quantity rows below.
+click "Prefs"
+click "Units"
 screenshot units-select.png
-click "Custom…"
-screenshot units-panel-open.png
 
 # Lengths to inches and masses to kilograms: the select now names the mix.
 click "in"
 click "kg"
 screenshot units-panel-in-kg.png
-press escape
+click "Done"
 
 # Build: the Inspector's lengths are inches and its mass kilograms.
 click (580, 600)
 screenshot units-build.png
 
 # Simulate in the same set.
-click (625, 18)
-click "Run"
+click "Simulate"
+click "Run selected"
 screenshot units-simulate.png

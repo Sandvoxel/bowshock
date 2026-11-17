@@ -302,7 +302,7 @@ fn wrap_drawing(name: &str, r1: f64, r2: f64, length: f64, material: &str, thick
 /// A nose that curves along its length has no exact flat pattern. At each point of the outline, `s` metres along it, the gore is
 /// `2π·r(s)/GORES` wide: the circumference there divided between the gores, which is how a globe's gores are cut. The tip is at the left.
 fn gore_drawing(name: &str, part: &Part, units: UnitSystem) -> Result<Drawing, String> {
-    let PartKind::NoseCone { shape, length, diameter } = part.kind else { return Err(format!("{name}: not a nose cone")) };
+    let PartKind::NoseCone { shape, length, diameter, .. } = part.kind else { return Err(format!("{name}: not a nose cone")) };
     let (material, thickness) = (part.material.name(), part.thickness);
     // The outline in 96 steps, finer than the model's 32, so that the cut edge is smooth.
     let profile: Vec<(f64, f64)> = (0..=96).map(|i| length * f64::from(i) / 96.0).map(|z| (z, part.kind.radius_at(z))).collect();
@@ -350,10 +350,14 @@ pub fn wrap_drawings(rocket: &Rocket, units: UnitSystem) -> (Vec<Drawing>, Vec<S
                 }
                 wrap_drawing(&name, r1, r2, length, part.material.name(), part.thickness, units)
             }
-            PartKind::NoseCone { shape: NoseShape::Conical, length, diameter } => {
-                wrap_drawing(&name, 0.0, diameter / 2.0, length, part.material.name(), part.thickness, units)
+            // a blunted cone is no longer a cone's pattern: it is cut as gores
+            PartKind::NoseCone { shape, length, diameter, tip_radius } => {
+                if shape == NoseShape::Conical && tip_radius == 0.0 {
+                    wrap_drawing(&name, 0.0, diameter / 2.0, length, part.material.name(), part.thickness, units)
+                } else {
+                    gore_drawing(&name, part, units)
+                }
             }
-            PartKind::NoseCone { .. } => gore_drawing(&name, part, units),
             PartKind::BodyTube { .. } => continue,
         };
         match pattern {
@@ -553,7 +557,7 @@ mod tests {
 
     fn rocket_with_fin(root: f64, tip: f64, span: f64, sweep: f64) -> Rocket {
         let mut r = Rocket::default();
-        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.076 }).unwrap();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.076, tip_radius: 0.0 }).unwrap();
         let tube = r.insert(1, PartKind::BodyTube { length: 0.6, diameter: 0.076 }).unwrap();
         let _ = r.attach_radial(tube, 0.45, 0.0, 3, RadialKind::FinSet { root_chord: root, tip_chord: tip, span, sweep, thickness: 0.004 });
         r
@@ -592,7 +596,7 @@ mod tests {
     #[test]
     fn wraps_cover_noses_and_transitions() {
         let mut rocket = Rocket::default();
-        rocket.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.076 }).unwrap();
+        rocket.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.076, tip_radius: 0.0 }).unwrap();
         rocket.insert(1, PartKind::Transition { length: 0.076, fore_diameter: 0.076, aft_diameter: 0.054 }).unwrap();
         rocket.insert(2, PartKind::BodyTube { length: 0.3, diameter: 0.054 }).unwrap();
         let (drawings, notes) = wrap_drawings(&rocket, UnitSystem::MM_G_S);
@@ -662,7 +666,7 @@ mod tests {
     #[test]
     fn a_conical_nose_is_a_sector_and_a_rocket_without_cones_has_no_wraps() {
         let mut rocket = Rocket::default();
-        rocket.insert(0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.15, diameter: 0.054 }).unwrap();
+        rocket.insert(0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.15, diameter: 0.054, tip_radius: 0.0 }).unwrap();
         rocket.insert(1, PartKind::BodyTube { length: 0.3, diameter: 0.054 }).unwrap();
         let (drawings, _) = wrap_drawings(&rocket, UnitSystem::MM_G_S);
         assert_eq!(drawings.len(), 1);
@@ -694,7 +698,7 @@ mod tests {
     fn a_wide_tube_tiles_the_guide_with_overlap_and_covers_all_of_it() {
         // 200 mm tube: 628 mm round.
         let mut rocket = Rocket::default();
-        rocket.insert(0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.3, diameter: 0.2 }).unwrap();
+        rocket.insert(0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.3, diameter: 0.2, tip_radius: 0.0 }).unwrap();
         let tube = rocket.insert(1, PartKind::BodyTube { length: 0.9, diameter: 0.2 }).unwrap();
         let _ = rocket.attach_radial(tube, 0.7, 0.0, 4, RadialKind::FinSet { root_chord: 0.3, tip_chord: 0.1, span: 0.15, sweep: 0.1, thickness: 0.004 });
         let strips = marking_drawings(&rocket, UnitSystem::MM_G_S);

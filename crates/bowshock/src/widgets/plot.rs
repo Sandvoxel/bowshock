@@ -310,6 +310,9 @@ pub struct Panel {
     pub editor: Option<PanelEditor>,
     /// A compact key of the line styles in the panel (stroke sample and word), drawn muted at the bottom right inside the plot.
     pub key: Vec<(LineStyle, String)>,
+    /// Names of the panel's series, right-aligned in its title row (a colour square, or the stroke of a dashed line, and the
+    /// name). What does not fit folds into `+N`. Empty by default; a panel that sets it keeps its labels out of the right margin.
+    pub legend: Vec<LegendItem>,
 }
 
 impl Panel {
@@ -326,6 +329,7 @@ impl Panel {
             value_unit: None,
             editor: None,
             key: Vec::new(),
+            legend: Vec::new(),
         }
     }
 
@@ -577,6 +581,22 @@ pub struct Phase {
     pub color: SeriesColor,
 }
 
+/// A thin row of the events strip under the main one: a dropped stage's own flight from its separation to its landing, with the
+/// events of that flight (a deployment, the landing). Drawn only with [`PlotGroup::timeline`].
+#[derive(Debug, Clone)]
+pub struct StripRow {
+    /// The row's name (`Booster`), written upper-case at the left of the strip.
+    pub name: String,
+    /// Start (the separation) on the x axis.
+    pub from: f64,
+    /// End (the landing) on the x axis.
+    pub to: f64,
+    /// Bar colour role.
+    pub color: SeriesColor,
+    /// The row's own events: a tick each in the event's colour, named beside it.
+    pub events: Vec<EventMark>,
+}
+
 /// The shared x axis: how its values and ranges are written.
 #[derive(Debug, Clone)]
 pub struct Axis {
@@ -673,6 +693,8 @@ pub struct PlotGroup {
     pub events: Vec<EventMark>,
     /// Phase bars of the events strip.
     pub phases: Vec<Phase>,
+    /// Thin rows under the strip, one per dropped stage (see [`StripRow`]).
+    pub rows: Vec<StripRow>,
     /// Show the events strip (Simulate) above the plots, always. Otherwise a minimap appears only while zoomed.
     pub timeline: bool,
     /// A line the event tooltip ends with (`Reference flight · Nominal` in a comparison, whose lines are the reference's only).
@@ -699,6 +721,7 @@ impl PlotGroup {
             panels: Vec::new(),
             events: Vec::new(),
             phases: Vec::new(),
+            rows: Vec::new(),
             timeline: false,
             events_note: None,
             right_margin: 0.0,

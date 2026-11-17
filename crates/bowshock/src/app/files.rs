@@ -2,7 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
-use bowshock_model::Rocket;
+use bowshock_model::ork::OrkImport;
+use bowshock_model::{FlightMotor, MotorRef, Rocket};
+use bowshock_motors::{same_motor_name, Motor};
+use bowshock_sim::from_model::{find_motor, motor_ref};
 use iced::Task;
 
 use super::dialogs;
@@ -77,6 +80,7 @@ pub(super) fn example(ctx: &mut Ctx) {
         Ok(rocket) => {
             ctx.doc.replace(rocket, None);
             ctx.loaded();
+            ctx.fetch_wanted = true;
         }
         Err(e) => ctx.notify(format!("The example rocket is not loadable: {e}")),
     }
@@ -88,18 +92,21 @@ pub(super) fn open(ctx: &mut Ctx, path: &Path) {
     if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("ork")) {
         match bowshock_model::ork::import_file(path) {
             Ok(imp) => {
-                let mut rocket = imp.rocket;
+                let mut rocket = imp.rocket.clone();
+                let mut notes = imp.warnings.clone();
+                notes.extend(use_embedded_curves(ctx, &imp, &mut rocket));
                 if !rocket.name.ends_with(IMPORTED) {
                     rocket.name = if rocket.name.is_empty() { format!("untitled{IMPORTED}") } else { format!("{}{IMPORTED}", rocket.name) };
                 }
                 ctx.doc.replace(rocket, None);
                 ctx.loaded();
-                ctx.notify(match imp.warnings.len() {
+                ctx.fetch_wanted = true;
+                ctx.notify(match notes.len() {
                     0 => "Imported from OpenRocket".to_string(),
                     1 => "Imported from OpenRocket · 1 note".to_string(),
                     n => format!("Imported from OpenRocket · {n} notes"),
                 });
-                ctx.import_notes = imp.warnings.iter().map(ToString::to_string).collect();
+                ctx.import_notes = notes;
             }
             Err(e) => ctx.notify(format!("Could not import {}: {e}", path.display())),
         }
@@ -108,10 +115,90 @@ pub(super) fn open(ctx: &mut Ctx, path: &Path) {
     match ctx.doc.load(path) {
         Ok(()) => {
             ctx.loaded();
+            ctx.fetch_wanted = true;
             ctx.recent.push(path);
         }
         Err(e) => ctx.notify(format!("Could not open {}: {e}", path.display())),
     }
+}
+
+/// Registers the thrust curves an `.ork` stores in its ZIP (`thrustcurves/<digest>.rse`) for the motors the design names that
+/// the motor database cannot resolve, so they fly and the ThrustCurve.org lookup is not needed for them.
+///
+/// Each distinct `(designation, manufacturer, digest)` of `imp.motor_digests` whose digest has an embedded curve becomes a
+/// motor (the curve's first engine under the *design's* designation and manufacturer, so one digest carrying `J33N`, `I32N` and
+/// `J34N` gives three motors; see [`Motor::renamed`] for its `eng:` id), added through [`Physics::add_embedded`](super::physics::Physics::add_embedded)
+/// (a user motor, kept in the motors directory). The references of `rocket` that name them get the new ids. Returns the notes for
+/// the import list: what was taken from the file, what could not be read and what could not be kept. A motor of the catalogue
+/// stays the catalogue's.
+fn use_embedded_curves(ctx: &mut Ctx, imp: &OrkImport, rocket: &mut Rocket) -> Vec<String> {
+    let mut notes = Vec::new();
+    let mut parsed: Vec<(&str, Option<Motor>)> = Vec::new();
+    let mut registered: Vec<MotorRef> = Vec::new();
+    let mut names: Vec<&str> = Vec::new();
+    for (reference, digest) in &imp.motor_digests {
+        if find_motor(ctx.physics.motors(), reference).is_some() {
+            continue;
+        }
+        let Some(curve) = imp.embedded_curves.iter().find(|c| &c.digest == digest) else { continue };
+        if !parsed.iter().any(|(d, _)| *d == digest.as_str()) {
+            let motor = match bowshock_motors::parse_rse(&curve.rse) {
+                Ok(engines) => engines.into_iter().next(),
+                Err(e) => {
+                    let prefix: String = digest.chars().take(8).collect();
+                    notes.push(format!("thrust curve {prefix}… in the file could not be read: {e}"));
+                    None
+                }
+            };
+            parsed.push((digest.as_str(), motor));
+        }
+        let Some((_, Some(curve))) = parsed.iter().find(|(d, _)| *d == digest.as_str()) else { continue };
+        let motor = curve.renamed(&reference.designation, &reference.manufacturer);
+        registered.push(motor_ref(&motor));
+        names.push(&reference.designation);
+        notes.extend(ctx.physics.add_embedded(motor));
+    }
+    if !registered.is_empty() {
+        let n = registered.len();
+        notes.push(if n == 1 {
+            format!("1 motor uses a thrust curve stored in the file ({})", names[0])
+        } else {
+            format!("{n} motors use thrust curves stored in the file ({})", names.join(", "))
+        });
+        carry_ids(rocket, &registered);
+    }
+    notes
+}
+
+/// Makes the references of `rocket` (every configuration's motors and every flight's own motor) that name one of `motors` and
+/// carry no id name it exactly.
+fn carry_ids(rocket: &mut Rocket, motors: &[MotorRef]) {
+    let exact = |m: &MotorRef| -> Option<MotorRef> {
+        if !m.id.is_empty() {
+            return None;
+        }
+        motors.iter().find(|r| same_motor_name(&r.designation, &r.manufacturer, &m.designation, &m.manufacturer)).cloned()
+    };
+    let mut slots = Vec::new();
+    for config in rocket.configurations() {
+        for slot in &config.motors {
+            if let Some(motor) = slot.motor.as_ref().and_then(exact) {
+                slots.push((config.id, slot.mount, motor));
+            }
+        }
+    }
+    for (config, mount, motor) in slots {
+        let _ = rocket.set_motor(config, mount, Some(motor));
+    }
+    let mut flights = rocket.flights().to_vec();
+    for flight in &mut flights {
+        if let FlightMotor::Motor(m) = &flight.motor {
+            if let Some(motor) = exact(m) {
+                flight.motor = FlightMotor::Motor(motor);
+            }
+        }
+    }
+    rocket.set_flights(flights);
 }
 
 /// Saves to the document's path, or asks for one.
@@ -199,92 +286,6 @@ pub(super) fn pick_save(ctx: &Ctx) -> Task<Message> {
     dialogs::save_file(None, "Save rocket", name, ("Bowshock document", &[EXTENSION]), Message::SavePath)
 }
 
-/// Width of the File menu panel.
-const MENU_W: f32 = 300.0;
-/// Where the panel's left edge sits: under the file name in the top bar.
-const MENU_X: f32 = 148.0;
-
-/// The modifier a shortcut hint is written with.
-const MOD: &str = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl+" };
-/// Shift's glyph in a hint.
-const SHIFT: &str = if cfg!(target_os = "macos") { "⇧" } else { "Shift+" };
-
-/// One File menu row, as `(label, shortcut hint, what it sends)`; `None` is a greyed row.
-type Row = (String, String, Option<Message>);
-
-/// The rows of the File menu: the commands, then the recent files.
-fn menu_rows(recent: &Recent) -> (Vec<Row>, Vec<Row>) {
-    let m = |label: &str, hint: String, message: Message| (label.to_string(), hint, Some(message));
-    let commands = vec![
-        m("New", format!("{MOD}N"), Message::New),
-        m("Open…", format!("{MOD}O"), Message::Open),
-        m("Import OpenRocket (.ork)…", String::new(), Message::ImportOrk),
-        m("Save", format!("{MOD}S"), Message::Save),
-        m("Save as…", format!("{SHIFT}{MOD}S"), Message::SaveAs),
-        m("Print / export PDF…", format!("{MOD}P"), Message::Print(crate::print::Message::Open)),
-        m("Export 3D model…", String::new(), Message::Export(crate::export::Message::Open(crate::export::Kind::Model))),
-        m("Export image…", String::new(), Message::Export(crate::export::Message::Open(crate::export::Kind::Image))),
-        m("Open example", format!("{MOD}E"), Message::Example),
-        m("Preferences…", format!("{MOD},"), Message::Prefs(crate::prefs::Message::Show)),
-    ];
-    let recents = recent
-        .paths()
-        .iter()
-        .map(|p| {
-            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string());
-            let dir = p.parent().and_then(|d| d.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            (name, dir, p.exists().then(|| Message::OpenRecent(p.clone())))
-        })
-        .collect();
-    (commands, recents)
-}
-
-/// The File menu, hung from the file name in the top bar; `None` while it is closed. A click anywhere else closes it.
-pub(super) fn menu(ctx: &Ctx) -> Option<iced::Element<'_, Message>> {
-    use iced::widget::{button, column, container, mouse_area, row, text, Space, Stack};
-    use iced::{Background, Center, Element, Fill, Padding, Theme, Widget};
-
-    use crate::theme::{self, MONO};
-    use crate::tokens::TOPBAR_H;
-
-    if !ctx.file_menu {
-        return None;
-    }
-    let item_style = |theme: &Theme, status: button::Status| {
-        let t = theme::tokens(theme);
-        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
-        let background = hovered.then_some(Background::Color(t.bg_400));
-        let text_color = if matches!(status, button::Status::Disabled) { t.ink_faint } else { t.ink };
-        button::Style { background, text_color, border: iced::Border::default(), ..button::Style::default() }
-    };
-    let rule = || container(Space::new()).width(Fill).height(1).style(theme::hairline);
-    let row_view = |(label, hint, message): Row| -> Element<'_, Message> {
-        let line = row![text(label).size(12.5), Space::new().width(Fill), text(hint).font(MONO).size(11.5).style(theme::muted)].align_y(Center);
-        let mut b = button(line).width(Fill).height(26).padding([0.0, 10.0]).style(item_style);
-        if let Some(message) = message {
-            b = b.on_press(message);
-        }
-        b.boxed()
-    };
-    let (commands, recents) = menu_rows(&ctx.recent);
-    let mut col = column![];
-    for r in commands {
-        col = col.push(row_view(r));
-    }
-    col = col.push(rule().boxed());
-    col = col.push(container(super::ui::label("RECENT")).padding([6.0, 10.0]).boxed());
-    if recents.is_empty() {
-        col = col.push(container(text("No recent files").size(12.5).style(theme::faint)).padding([4.0, 10.0]).boxed());
-    }
-    for r in recents {
-        col = col.push(row_view(r));
-    }
-    let panel = container(mouse_area(col).on_press(Message::Chrome(crate::chrome::Message::Nothing))).width(MENU_W).style(theme::overlay);
-    let scrim = crate::widgets::modal::scrim(Message::ToggleFileMenu);
-    let placed = container(panel).width(Fill).height(Fill).padding(Padding { top: TOPBAR_H, left: MENU_X, ..Padding::ZERO });
-    Some(Stack::with_children([scrim, placed.boxed()]).boxed())
-}
-
 /// The "Save changes to <name>?" modal, centred over a dimmed backdrop that takes every click; `None` while no command waits on
 /// an answer. Save (Enter) is the one primary action, Don't save is destructive, Cancel (Esc) goes back to the document.
 pub(super) fn unsaved_modal(ctx: &Ctx) -> Option<iced::Element<'_, Message>> {
@@ -339,7 +340,7 @@ mod tests {
         let mut r = Rocket::default();
         r.name = "hpr_l1_cert".to_string();
         r.designer = "Bowshock".to_string();
-        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762 }).unwrap();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762, tip_radius: 0.0 }).unwrap();
         let tube = r.insert(1, PartKind::BodyTube { length: 0.9134, diameter: 0.0762 }).unwrap();
         r.set_name(tube, Some("Body tube".to_string()));
 
@@ -429,7 +430,7 @@ mod tests {
         let mut r = Rocket::default();
         r.name = "two_stage".to_string();
         r.designer = "Bowshock".to_string();
-        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762 }).unwrap();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762, tip_radius: 0.0 }).unwrap();
         let sustainer = r.insert(1, PartKind::BodyTube { length: 0.642, diameter: 0.0762 }).unwrap();
         let booster = r.insert(2, PartKind::BodyTube { length: 0.530, diameter: 0.0762 }).unwrap();
         r.set_name(sustainer, Some("Sustainer tube".to_string()));
@@ -512,56 +513,6 @@ mod menu_tests {
         std::env::temp_dir().join(format!("bowshock-{}-{name}", std::process::id()))
     }
 
-    /// The File menu's rows route to the right commands, in order.
-    #[test]
-    fn menu_rows_route_to_commands() {
-        let (commands, _) = menu_rows(&Recent::default());
-        let labels: Vec<&str> = commands.iter().map(|r| r.0.as_str()).collect();
-        assert_eq!(
-            labels,
-            [
-                "New",
-                "Open…",
-                "Import OpenRocket (.ork)…",
-                "Save",
-                "Save as…",
-                "Print / export PDF…",
-                "Export 3D model…",
-                "Export image…",
-                "Open example",
-                "Preferences…"
-            ]
-        );
-        let routes: Vec<bool> = vec![
-            matches!(commands[0].2, Some(Message::New)),
-            matches!(commands[1].2, Some(Message::Open)),
-            matches!(commands[2].2, Some(Message::ImportOrk)),
-            matches!(commands[3].2, Some(Message::Save)),
-            matches!(commands[4].2, Some(Message::SaveAs)),
-            matches!(commands[5].2, Some(Message::Print(crate::print::Message::Open))),
-            matches!(commands[6].2, Some(Message::Export(crate::export::Message::Open(crate::export::Kind::Model)))),
-            matches!(commands[7].2, Some(Message::Export(crate::export::Message::Open(crate::export::Kind::Image)))),
-            matches!(commands[8].2, Some(Message::Example)),
-            matches!(commands[9].2, Some(Message::Prefs(crate::prefs::Message::Show))),
-        ];
-        assert!(routes.iter().all(|&ok| ok), "{routes:?}");
-        assert_eq!(commands[3].1, format!("{MOD}S"));
-    }
-
-    /// A recent file that is gone is greyed (no message); one that exists opens.
-    #[test]
-    fn missing_recent_files_are_greyed() {
-        let real = temp("real.bowshock");
-        std::fs::write(&real, "{}").unwrap();
-        let mut recent = Recent::default();
-        recent.push(&temp("gone.bowshock"));
-        recent.push(&real);
-        let (_, rows) = menu_rows(&recent);
-        std::fs::remove_file(&real).ok();
-        assert!(matches!(rows[0].2, Some(Message::OpenRecent(_))));
-        assert!(rows[1].2.is_none(), "a missing file is greyed");
-    }
-
     /// Newest first, no duplicates, at most five, and it survives a reload.
     #[test]
     fn recent_files_order_dedupe_and_persist() {
@@ -614,5 +565,135 @@ mod menu_tests {
         let _ = app.update(Message::New);
         let _ = app.update(Message::Export(export::Message::Open(export::Kind::Model)));
         assert!(!app.export.is_open(), "nothing to export from an empty rocket");
+    }
+
+    /// A ZIP of stored entries (the importer does not check CRCs).
+    fn stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let (mut zip, mut central) = (Vec::new(), Vec::new());
+        for (name, data) in entries {
+            let offset = zip.len() as u32;
+            for (bytes, header) in [(&mut zip, true), (&mut central, false)] {
+                bytes.extend_from_slice(if header { &[0x50, 0x4b, 3, 4] } else { &[0x50, 0x4b, 1, 2, 20, 0] });
+                bytes.extend_from_slice(&[20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+                bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+                bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+                bytes.extend_from_slice(&(name.len() as u16).to_le_bytes());
+                bytes.extend_from_slice(&[0, 0]);
+                if !header {
+                    bytes.extend_from_slice(&[0; 10]);
+                    bytes.extend_from_slice(&offset.to_le_bytes());
+                }
+                bytes.extend_from_slice(name.as_bytes());
+                if header {
+                    bytes.extend_from_slice(data);
+                }
+            }
+        }
+        let start = zip.len() as u32;
+        zip.extend_from_slice(&central);
+        zip.extend_from_slice(&[0x50, 0x4b, 5, 6, 0, 0, 0, 0]);
+        zip.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        zip.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        zip.extend_from_slice(&(central.len() as u32).to_le_bytes());
+        zip.extend_from_slice(&start.to_le_bytes());
+        zip.extend_from_slice(&[0, 0]);
+        zip
+    }
+
+    /// A design whose configurations fly the given `(designation, manufacturer, digest)` motors from one mount.
+    fn ork_with(motors: &[(&str, &str, &str)]) -> String {
+        let ids = ["c1", "c2", "c3", "c4"];
+        let configs: String = ids
+            .iter()
+            .take(motors.len())
+            .enumerate()
+            .map(|(i, id)| format!("<motorconfiguration configid=\"{id}\"{}/>", if i == 0 { " default=\"true\"" } else { "" }))
+            .collect();
+        let motors: String = motors
+            .iter()
+            .zip(ids)
+            .map(|((d, m, g), id)| {
+                format!("<motor configid=\"{id}\"><manufacturer>{m}</manufacturer><digest>{g}</digest><designation>{d}</designation><diameter>0.038</diameter><length>0.356</length><delay>none</delay></motor>")
+            })
+            .collect();
+        format!(
+            "<openrocket version=\"1.11\"><rocket><name>t</name>{configs}<subcomponents><stage><name>s</name><subcomponents>\
+             <nosecone><name>n</name><material type=\"bulk\" density=\"1050\">p</material><length>0.2</length><thickness>0.002</thickness><shape>ogive</shape><shapeparameter>1.0</shapeparameter><aftradius>0.025</aftradius></nosecone>\
+             <bodytube><name>body</name><material type=\"bulk\" density=\"680.0\">Cardboard</material><length>0.86</length><radius>0.0508</radius><thickness>0.0013</thickness><subcomponents>\
+             <innertube><name>mount</name><axialoffset method=\"bottom\">0.0</axialoffset><length>0.6</length><outerradius>0.0205</outerradius><thickness>0.0015</thickness>\
+             <motormount><ignitionevent>automatic</ignitionevent><overhang>0.0</overhang>{motors}</motormount></innertube>\
+             </subcomponents></bodytube></subcomponents></stage></subcomponents></rocket></openrocket>"
+        )
+    }
+
+    const RSE: &str = "<engine-database><engine-list><engine mfg=\"AeroTech\" code=\"Q32N\" dia=\"38\" len=\"356\" initWt=\"647\" propWt=\"380.5\" delays=\"1000\">\
+        <data><eng-data t=\"0\" f=\"0\" m=\"647\"/><eng-data t=\"1\" f=\"30\" m=\"500\"/><eng-data t=\"20\" f=\"0\" m=\"266.5\"/></data></engine></engine-list></engine-database>";
+
+    fn open_zip(ctx: &mut Ctx, tag: &str, ork: &str, curves: &[(&str, &str)]) {
+        let names: Vec<String> = curves.iter().map(|(d, _)| format!("thrustcurves/{d}.rse")).collect();
+        let mut entries: Vec<(&str, &[u8])> = vec![("rocket.ork", ork.as_bytes())];
+        entries.extend(names.iter().zip(curves).map(|(n, (_, text))| (n.as_str(), text.as_bytes())));
+        let path = std::env::temp_dir().join(format!("bowshock-embedded-{tag}-{}.ork", std::process::id()));
+        std::fs::write(&path, stored_zip(&entries)).unwrap();
+        open(ctx, &path);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The thrust curves stored in an `.ork` fly the motors that carry their digest: every name of the digest is a user motor with
+    /// the curve's data, the document's references name them by id, and nothing is fetched for them.
+    #[test]
+    fn an_ork_with_stored_thrust_curves_flies_them_without_a_lookup() {
+        let mut ctx = Ctx::new();
+        ctx.env.fetch_motors = true;
+        let ork = ork_with(&[("Q33N", "AeroTech", "d1"), ("Q32N", "AeroTech", "d1"), ("Q34N", "Kuhns", "d1")]);
+        open_zip(&mut ctx, "all", &ork, &[("d1", RSE)]);
+        let rocket = ctx.doc.rocket();
+        assert_eq!(rocket.configurations().len(), 3);
+        let db = ctx.physics.motors();
+        let curve = bowshock_motors::parse_rse(RSE).unwrap().remove(0);
+        for (designation, manufacturer) in [("Q33N", "AeroTech"), ("Q32N", "AeroTech"), ("Q34N", "Kuhns")] {
+            let reference = rocket
+                .configurations()
+                .iter()
+                .flat_map(|c| c.motors.iter().filter_map(|s| s.motor.clone()))
+                .find(|m| m.designation == designation)
+                .unwrap_or_else(|| panic!("{designation} is not in a configuration"));
+            assert!(reference.id.starts_with("eng:") && reference.manufacturer == manufacturer, "{reference:?}");
+            let motor = find_motor(db, &reference).unwrap_or_else(|| panic!("{designation} does not resolve"));
+            assert_eq!(motor.id, reference.id);
+            assert_eq!((motor.designation.as_str(), motor.manufacturer.as_str()), (designation, manufacturer));
+            assert_eq!(motor.points, curve.points);
+            assert!((motor.total_impulse() - curve.total_impulse()).abs() < 1e-9 && motor.total_impulse() > 100.0);
+            assert!((motor.total_mass - 0.647).abs() < 1e-9 && (motor.propellant_mass - 0.3805).abs() < 1e-9);
+            let index = db.position(&motor.id).unwrap();
+            assert_eq!(ctx.physics.motor_origin(index), super::super::physics::MotorOrigin::File);
+        }
+        assert!(super::super::motor_fetch::missing(rocket, db).is_empty());
+        ctx.physics.sync(ctx.doc.rocket(), ctx.doc.revision(), ctx.units);
+        assert!(!ctx.physics.warnings().iter().any(|w| w.message.contains("not in the motor database")), "{:?}", ctx.physics.warnings());
+        assert!(ctx.import_notes.iter().any(|n| n == "3 motors use thrust curves stored in the file (Q33N, Q32N, Q34N)"), "{:?}", ctx.import_notes);
+        let _ = super::super::motor_fetch::start(&mut ctx);
+        assert!(!ctx.notice.as_ref().is_some_and(|n| n.0.starts_with("Fetching")), "no lookup for motors the file carries");
+    }
+
+    /// A catalogue motor keeps the catalogue entry, and a digest without a stored curve stays missing (and is looked up).
+    #[test]
+    fn a_catalogue_motor_or_an_unstored_digest_is_not_taken_from_the_file() {
+        let mut ctx = Ctx::new();
+        let ork = ork_with(&[("H128W", "AeroTech", "d1"), ("X999Q", "Nobody", "d9"), ("Q32N", "AeroTech", "d1")]);
+        open_zip(&mut ctx, "mixed", &ork, &[("d1", RSE)]);
+        let rocket = ctx.doc.rocket();
+        let named =
+            |d: &str| rocket.configurations().iter().flat_map(|c| c.motors.iter().filter_map(|s| s.motor.clone())).find(|m| m.designation == d).unwrap();
+        assert!(named("H128W").id.is_empty(), "the catalogue's H128W stays a name");
+        assert!(named("X999Q").id.is_empty());
+        assert!(named("Q32N").id.starts_with("eng:"));
+        assert_eq!(super::super::motor_fetch::missing(rocket, ctx.physics.motors()), vec![MotorRef::new("X999Q", "Nobody")]);
+        assert!(ctx.import_notes.iter().any(|n| n == "1 motor uses a thrust curve stored in the file (Q32N)"), "{:?}", ctx.import_notes);
+        // A curve that cannot be read is noted, and its motor is left to the lookup.
+        let ork = ork_with(&[("Q35N", "AeroTech", "0123456789abcdef")]);
+        open_zip(&mut ctx, "broken", &ork, &[("0123456789abcdef", "<engine-database/>")]);
+        assert!(ctx.import_notes.iter().any(|n| n.starts_with("thrust curve 01234567… in the file could not be read: ")), "{:?}", ctx.import_notes);
+        assert_eq!(super::super::motor_fetch::missing(ctx.doc.rocket(), ctx.physics.motors()), vec![MotorRef::new("Q35N", "AeroTech")]);
     }
 }

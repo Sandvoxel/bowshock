@@ -183,7 +183,7 @@ mod tests {
     /// A 0.2 m nose and a 1.2 m core tube (stations 0.2 to 1.4) with a pod set of two at 0.1 m along it, and the pod's tube.
     fn core_with_pod() -> (Rocket, PartId, PartId) {
         let mut r = Rocket::default();
-        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1 }).unwrap();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1, tip_radius: 0.0 }).unwrap();
         let core = r.insert(1, PartKind::BodyTube { length: 1.2, diameter: 0.1 }).unwrap();
         let kind = r.default_pod();
         r.attach_radial(core, 0.1, 0.0, 2, kind).unwrap();

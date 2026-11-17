@@ -15,7 +15,7 @@ use bowshock_model::{Anchor, InternalKind, InternalPart, Part, PartId, PartKind,
 use super::{Ctx, Selection};
 use crate::app::ui;
 use crate::units::UnitSystem;
-use crate::viewport::assembly::{body_of, Drag, Origin};
+use crate::viewport::assembly::{body_of, land_carried, restore_motors, Drag, Origin};
 use crate::viewport::pick::{Pick, SurfaceTarget};
 use crate::viewport::surface::RadialDrag;
 
@@ -206,25 +206,6 @@ pub fn grab(ctx: &mut Ctx, pick: Pick) {
     }
 }
 
-/// Puts back what removing and re-adding a part dropped from the configurations: every motor slot of `from` whose mount exists
-/// again in `rocket` but has lost its slot, and every recovery deployment of a device that exists again.
-fn restore_motors(rocket: &mut Rocket, from: &Rocket) {
-    for config in from.configurations() {
-        for slot in &config.motors {
-            let present = rocket.configuration(config.id).is_some_and(|c| c.slot(slot.mount).is_some());
-            if !present && rocket.internal(slot.mount).is_some() {
-                let _ = rocket.set_motor(config.id, slot.mount, slot.motor.clone());
-                let _ = rocket.set_motor_delay(config.id, slot.mount, slot.delay);
-            }
-        }
-        for timing in &config.recovery {
-            if rocket.configuration(config.id).is_some_and(|c| c.deployment(timing.part).is_none()) {
-                let _ = rocket.set_deployment(config.id, timing.part, timing.deploy);
-            }
-        }
-    }
-}
-
 /// Ends the axial drag: lands it on its snap node if `drop`, else abandons it. A part picked up from the rocket that is not
 /// landed goes back where it was, as it was.
 pub fn finish_axial(ctx: &mut Ctx, drop: bool) {
@@ -348,16 +329,11 @@ fn land_on_surface(r: &mut Rocket, drag: &Drag, base: Option<&Rocket>, t: Surfac
 
 /// Lands the carried axial part on attach node `node`, with what it carried; the matched kind.
 fn land_on_node(r: &mut Rocket, drag: &Drag, node: usize, base: Option<&Rocket>) -> Option<PartKind> {
-    let matched = insert_part(r, node, &drag.kind, drag.origin.as_ref().map(|o| &o.part));
-    if let (Some(_), Some(origin)) = (&matched, &drag.origin) {
-        // The parts it carried go back on it, wherever it landed.
-        r.restore_radials(origin.radials.clone());
-        r.restore_internals(origin.internals.clone());
-        if let Some(base) = base {
-            restore_motors(r, base);
-        }
+    match &drag.origin {
+        // The parts it carried go back on it, wherever it landed (the ghost shows the same: see `land_carried`).
+        Some(origin) => land_carried(r, node, &drag.kind, origin, base),
+        None => insert_part(r, node, &drag.kind, None),
     }
-    matched
 }
 
 /// Lands the carried axial part on node `node` of pod `pod`'s stack; the matched kind.
@@ -490,6 +466,19 @@ fn remove_any(rocket: &mut Rocket, id: PartId) {
     if rocket.remove(id).is_none() && rocket.remove_radial(id).is_none() {
         rocket.remove_internal(id);
     }
+}
+
+/// Slides the separation of stage `stage` to the joint just aft of airframe part `joint` (`None`: the automatic joint), live.
+/// The first call opens the drag's one undo step, `Move separation`, and selects the separation; [`finish_separation`] ends it.
+pub fn move_separation(ctx: &mut Ctx, stage: usize, joint: Option<PartId>) {
+    ctx.doc.begin_drag("Move separation");
+    ctx.doc.drag_update(|r| r.set_separation_joint(stage, joint));
+    ctx.selection = Selection::Separation(stage);
+}
+
+/// Ends a [`move_separation`] drag: `commit` keeps it as one undo step, otherwise the rocket goes back as it was.
+pub fn finish_separation(ctx: &mut Ctx, commit: bool) {
+    ctx.doc.end_drag(commit);
 }
 
 #[cfg(test)]

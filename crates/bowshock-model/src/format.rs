@@ -14,7 +14,8 @@
 //!
 //! # Versions
 //!
-//! * **1** (current): the first release of the format.
+//! * **1** (current): the first release of the format. The nose cone's `tip_radius` (the spherical tip, 0 and left out when
+//!   pointed) was added to it without a new version, as the rules below allow.
 //!
 //! # Changing the format
 //!
@@ -152,6 +153,17 @@ impl Rocket {
             if sizes.iter().any(|s| !s.is_finite() || *s < 0.0) || !p.thickness.is_finite() || p.thickness < 0.0 {
                 return Err(format!("part {} has a negative or non-finite size", p.id));
             }
+            if let PartKind::NoseCone { tip_radius, .. } = p.kind {
+                if !tip_radius.is_finite() || tip_radius < 0.0 {
+                    return Err(format!("nose cone {} has a negative or non-finite tip radius", p.id));
+                }
+                if tip_radius > 0.0 && p.kind.nose_blunt().is_none() {
+                    return Err(format!(
+                        "nose cone {} has a tip radius no tangent sphere fits (at most 0.9 of the base radius, and only where one is tangent)",
+                        p.id
+                    ));
+                }
+            }
             if matches!(p.kind, PartKind::NoseCone { .. }) && i != 0 {
                 return Err(format!("nose cone {} is not at the fore end", p.id));
             }
@@ -250,10 +262,34 @@ mod tests {
         assert_eq!(Rocket::from_bytes(&r.to_bytes()).unwrap(), r);
     }
 
+    /// Each fin section, the hexagonal one with its wedge length, survives a save and a load.
+    #[test]
+    fn every_fin_section_round_trips() {
+        let mut r = Rocket::default();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.2, diameter: 0.05, tip_radius: 0.0 }).unwrap();
+        let tube = r.insert(1, PartKind::BodyTube { length: 0.4, diameter: 0.05 }).unwrap();
+        let fins = r.attach_radial(tube, 0.2, 0.0, 3, RadialKind::EllipticalFin { root_chord: 0.1, span: 0.06, thickness: 0.003 }).unwrap();
+        for section in [FinSection::DoubleWedge, FinSection::Hexagonal(0.3), FinSection::Hexagonal(FinSection::DEFAULT_WEDGE_FRACTION), FinSection::Biconvex] {
+            assert!(r.set_fin_section(fins, section));
+            let back = Rocket::from_bytes(&r.to_bytes()).unwrap();
+            assert_eq!(back.radial(fins).unwrap().cross_section, section);
+            assert_eq!(back, r);
+        }
+    }
+
+    #[test]
+    fn section_volume_factors_are_the_area_fractions_of_the_bounding_rectangle() {
+        assert_eq!(FinSection::DoubleWedge.volume_factor(), 0.5);
+        assert_eq!(FinSection::Hexagonal(0.25).volume_factor(), 0.75);
+        assert_eq!(FinSection::Hexagonal(0.5).volume_factor(), FinSection::DoubleWedge.volume_factor());
+        assert_eq!(FinSection::Biconvex.volume_factor(), 2.0 / 3.0);
+        assert_eq!(FinSection::Hexagonal(2.0).volume_factor(), 0.5, "limited to a double wedge");
+    }
+
     /// A rocket using every kind of part and every optional field.
     fn full_rocket() -> Rocket {
         let mut r = Rocket { name: "Test rocket".to_string(), designer: "Bowshock".to_string(), ..Rocket::default() };
-        let nose = r.insert(0, PartKind::NoseCone { shape: NoseShape::Haack(1.0 / 3.0), length: 0.3, diameter: 0.0762 }).unwrap();
+        let nose = r.insert(0, PartKind::NoseCone { shape: NoseShape::Haack(1.0 / 3.0), length: 0.3, diameter: 0.0762, tip_radius: 0.0 }).unwrap();
         let upper = r.insert(1, PartKind::BodyTube { length: 0.5, diameter: 0.0762 }).unwrap();
         r.insert(2, PartKind::Transition { length: 0.1, fore_diameter: 0.0762, aft_diameter: 0.054 }).unwrap();
         let booster = r.insert(3, PartKind::BodyTube { length: 0.4, diameter: 0.054 }).unwrap();
@@ -420,5 +456,50 @@ mod tests {
         r.active_config = 4242;
         let back = Rocket::from_bytes(&r.to_bytes()).unwrap();
         assert_eq!(back.active_config_id(), back.configurations()[0].id);
+    }
+
+    /// A nose with a spherical tip keeps its tip radius through a save and a load, a pointed nose does not write the field at
+    /// all (so a file without a tip radius is the same as one with 0), and the version-1 golden file reads as pointed.
+    #[test]
+    fn a_blunted_nose_round_trips_and_the_golden_file_loads_pointed() {
+        let mut r = Rocket::default();
+        let nose = r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.25, diameter: 0.0762, tip_radius: 0.0 }).unwrap();
+        r.insert(1, PartKind::BodyTube { length: 0.4, diameter: 0.0762 }).unwrap();
+        assert!(!cbor_text(&r).contains("tip_radius"), "a pointed nose writes no tip radius");
+        assert_eq!(r.set_dim(nose, crate::Dim::TipRadius, 0.012).map(|e| e.applied), Some(0.012));
+        assert_eq!(r.part(nose).unwrap().kind.tip_radius(), 0.012);
+        assert!(cbor_text(&r).contains("tip_radius"));
+        let back = Rocket::from_bytes(&r.to_bytes()).unwrap();
+        assert_eq!(back, r);
+        assert_eq!(back.part(nose).unwrap().kind.tip_radius(), 0.012);
+        assert_eq!(back.part(nose).unwrap().kind.length(), 0.25, "the stored length is the length as built");
+
+        const GOLDEN: &[u8] = include_bytes!("../tests/data/v1_example.bowshock");
+        let golden = Rocket::from_bytes(GOLDEN).unwrap();
+        assert!(matches!(golden.parts()[0].kind, PartKind::NoseCone { tip_radius, .. } if tip_radius == 0.0));
+    }
+
+    #[test]
+    fn rejects_a_tip_radius_no_sphere_fits() {
+        let mut r = Rocket::default();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.25, diameter: 0.0762, tip_radius: 0.0 }).unwrap();
+        for bad in [-0.001, f64::NAN, f64::INFINITY, 0.0762 / 2.0] {
+            let mut broken = r.clone();
+            broken.parts[0].kind = PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.25, diameter: 0.0762, tip_radius: bad };
+            assert!(matches!(Rocket::from_bytes(&broken.to_bytes()), Err(FormatError::Invalid(_)) | Err(FormatError::Corrupt(_))), "{bad}");
+        }
+        // a power series with n < 1/2 has no tangent sphere at all
+        let mut broken = r;
+        broken.parts[0].kind = PartKind::NoseCone { shape: NoseShape::PowerSeries(0.3), length: 0.25, diameter: 0.0762, tip_radius: 0.01 };
+        assert!(matches!(Rocket::from_bytes(&broken.to_bytes()), Err(FormatError::Invalid(_))));
+    }
+
+    /// The version-1 golden file has no chosen separation joints, and an automatic rocket writes none.
+    #[test]
+    fn the_golden_file_has_no_separation_choices() {
+        const GOLDEN: &[u8] = include_bytes!("../tests/data/v1_example.bowshock");
+        let r = Rocket::from_bytes(GOLDEN).unwrap();
+        assert!(r.separation_joints.is_empty());
+        assert!(r.stages().iter().all(|s| s.separation.is_none_or(|sep| !sep.chosen)));
     }
 }

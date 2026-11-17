@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 use iced::widget::{column, container, row, text, Space};
 use iced::{Element, Fill, Task, Widget};
 
-use super::Message as PrefsMessage;
+use super::{card, Message as PrefsMessage};
 use crate::app::{self, worker, Ctx};
-use crate::theme::{self, MONO};
-use crate::tokens::{SPACE_1, SPACE_2, SPACE_3, TEXT_BODY, TEXT_LABEL};
+use crate::theme::{self, MONO, SANS_MEDIUM};
+use crate::tokens::{SPACE_1, SPACE_2, SPACE_3, TEXT_BODY};
 use crate::widgets::button::{button, Weight};
 
 /// One place Bowshock keeps data.
@@ -150,10 +150,7 @@ impl State {
     /// The page body.
     pub fn view(&self) -> Element<'_, PrefsMessage> {
         let mut page = column![].spacing(SPACE_3);
-        for (i, entry) in self.entries.iter().enumerate() {
-            if i > 0 {
-                page = page.push(container(Space::new()).width(Fill).height(1).style(theme::hairline).boxed());
-            }
+        for entry in &self.entries {
             page = page.push(self.row(entry));
         }
         page.push(text("Cleared caches never touch your rockets or settings.").size(12.0).style(theme::faint).boxed()).boxed()
@@ -162,18 +159,15 @@ impl State {
     fn row<'a>(&'a self, entry: &'a Entry) -> Element<'a, PrefsMessage> {
         let kind = entry.kind;
         let path: Element<'a, Message> = match (&entry.path, kind) {
-            (Some(p), _) => text(p.display().to_string()).font(MONO).size(TEXT_LABEL + 0.5).style(theme::faint).boxed(),
-            (None, Kind::Settings) => text("Not kept in this session").size(TEXT_LABEL + 0.5).style(theme::faint).boxed(),
-            (None, _) => text("Not available on this computer").size(TEXT_LABEL + 0.5).style(theme::faint).boxed(),
+            (Some(p), _) => text(p.display().to_string()).font(MONO).size(12.0).style(theme::faint).boxed(),
+            (None, Kind::Settings) => text("Not kept in this session").size(12.0).style(theme::faint).boxed(),
+            (None, _) => text("Not available on this computer").size(12.0).style(theme::faint).boxed(),
         };
         let size = match entry.size {
             Size::Measuring => "…".to_string(),
             Size::Missing => "empty".to_string(),
             Size::Bytes(b) => format_size(b),
         };
-        let head =
-            row![text(kind.title()).size(TEXT_BODY).style(theme::ink), Space::new().width(Fill), text(size).font(MONO).size(TEXT_BODY).style(theme::muted)]
-                .align_y(iced::Center);
         let open: Element<'a, Message> = match folder_of(entry) {
             Some(_) => button("Open folder", Weight::Secondary).small().on_press(Message::OpenFolder(kind)).into(),
             None => button("Open folder", Weight::Secondary).small().disabled("There is no folder yet").into(),
@@ -190,10 +184,25 @@ impl State {
                 actions = actions.push(Element::from(button("Clear…", Weight::Secondary).small().disabled("Nothing to clear")));
             }
         }
-        let note = text(kind.note()).size(12.0).style(theme::muted);
-        let body: Element<'a, Message> = column![head, path, note, actions].spacing(SPACE_1 + 2.0).boxed();
-        Element::map(body, PrefsMessage::Storage).boxed()
+        let info = column![
+            row![text(kind.title()).font(SANS_MEDIUM).size(TEXT_BODY).style(theme::ink), Space::new().width(Fill), tag(size)].align_y(iced::Center),
+            path,
+            text(kind.note()).size(12.0).style(theme::muted),
+        ]
+        .spacing(SPACE_1 + 2.0);
+        let actions = row![Space::new().width(Fill).boxed(), actions.boxed()].spacing(SPACE_2).align_y(iced::Center);
+        let rows: Vec<Element<'a, Message>> =
+            vec![container(info).padding(SPACE_3).width(Fill).boxed(), container(actions).padding([SPACE_2, SPACE_3]).width(Fill).boxed()];
+        Element::map(card(rows), PrefsMessage::Storage).boxed()
     }
+}
+
+/// A size as a small mono tag in a 1 px `line-200` frame.
+fn tag<'a>(size: String) -> Element<'a, Message> {
+    container(text(size).font(MONO).size(11.0).style(theme::muted))
+        .padding([2.0, 6.0])
+        .style(|theme: &iced::Theme| container::Style { border: theme::frame(theme::tokens(theme).line_200), ..container::Style::default() })
+        .boxed()
 }
 
 fn measure(kind: Kind, path: Option<PathBuf>) -> Task<app::Message> {

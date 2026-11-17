@@ -4,11 +4,11 @@
 viewport 1280x800
 
 # Simulate mode (the top bar's switch), before anything has run.
-click (625, 18)
+click "Simulate"
 screenshot SimulateScreen-empty.png
 
 # Run the selected flight (Nominal) on a worker thread; the result lands before the next step.
-click "Run"
+click "Run selected"
 screenshot SimulateScreen-dark.png
 
 # Hover: one crosshair across the plots, a dot on the ground track.
@@ -45,7 +45,9 @@ click "Windy"
 screenshot SimulateCompare-select.png
 
 # Light theme.
+click "Prefs"
 click "Light"
+click "Done"
 screenshot SimulateCompare-light.png
 click (17, 94)
 click (17, 138)

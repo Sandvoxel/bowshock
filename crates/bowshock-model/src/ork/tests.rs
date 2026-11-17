@@ -512,3 +512,87 @@ fn a_body_tube_can_be_its_own_motor_mount() {
     close(r.dry_mass().cg, plain.rocket.dry_mass().cg, 1e-12);
     assert!(imp.warnings.iter().any(|w| w.contains("body: the body tube is its own motor mount")), "{:?}", imp.warnings);
 }
+
+/// A ZIP of stored (uncompressed) entries, as `containers_zip_gzip_and_plain_xml_all_import` builds one (CRCs are not checked).
+fn stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut zip = Vec::new();
+    let mut central = Vec::new();
+    for (name, data) in entries {
+        let offset = zip.len() as u32;
+        for (bytes, header) in [(&mut zip, true), (&mut central, false)] {
+            bytes.extend_from_slice(if header { &[0x50, 0x4b, 3, 4] } else { &[0x50, 0x4b, 1, 2] });
+            if !header {
+                bytes.extend_from_slice(&[20, 0]);
+            }
+            bytes.extend_from_slice(&[20, 0, 0, 0, 0, 0]); // version, flags, method 0 (stored)
+            bytes.extend_from_slice(&[0; 8]); // time, date, crc
+            bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            bytes.extend_from_slice(&[0, 0]);
+            if !header {
+                bytes.extend_from_slice(&[0; 10]);
+                bytes.extend_from_slice(&offset.to_le_bytes());
+            }
+            bytes.extend_from_slice(name.as_bytes());
+            if header {
+                bytes.extend_from_slice(data);
+            }
+        }
+    }
+    let start = zip.len() as u32;
+    zip.extend_from_slice(&central);
+    zip.extend_from_slice(&[0x50, 0x4b, 5, 6, 0, 0, 0, 0]);
+    zip.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    zip.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    zip.extend_from_slice(&(central.len() as u32).to_le_bytes());
+    zip.extend_from_slice(&start.to_le_bytes());
+    zip.extend_from_slice(&[0, 0]);
+    zip
+}
+
+/// A one-mount design whose configurations `c1` and `c2` fly `J33N` and `I32N` (both with digest `d1`) and `c3` flies `X1` (`d2`).
+pub(crate) const EMBEDDED_ORK: &str = "<openrocket version=\"1.11\"><rocket><name>t</name>\
+     <motorconfiguration configid=\"c1\" default=\"true\"/><motorconfiguration configid=\"c2\"/><motorconfiguration configid=\"c3\"/><subcomponents><stage><name>s</name><subcomponents>\
+     <nosecone><name>n</name><material type=\"bulk\" density=\"1050\">p</material><length>0.2</length><thickness>0.002</thickness><shape>ogive</shape><shapeparameter>1.0</shapeparameter><aftradius>0.025</aftradius></nosecone>\
+     <bodytube><name>body</name><material type=\"bulk\" density=\"680.0\">Cardboard</material><length>0.86</length><radius>0.0508</radius><thickness>0.0013</thickness><subcomponents>\
+     <innertube><name>mount</name><axialoffset method=\"bottom\">0.0</axialoffset><length>0.6</length><outerradius>0.0205</outerradius><thickness>0.0015</thickness>\
+     <motormount><ignitionevent>automatic</ignitionevent><overhang>0.0</overhang>\
+     <motor configid=\"c1\"><manufacturer>AeroTech</manufacturer><digest>d1</digest><designation>J33N</designation><diameter>0.038</diameter><length>0.356</length><delay>none</delay></motor>\
+     <motor configid=\"c2\"><manufacturer>AeroTech</manufacturer><digest>d1</digest><designation>I32N</designation><diameter>0.038</diameter><length>0.356</length><delay>none</delay></motor>\
+     <motor configid=\"c3\"><manufacturer>Nobody</manufacturer><digest>d2</digest><designation>X1</designation><diameter>0.038</diameter><length>0.356</length><delay>none</delay></motor>\
+     </motormount></innertube></subcomponents></bodytube></subcomponents></stage></subcomponents></rocket></openrocket>";
+
+/// The curve `d1`: a minimal one-engine `.rse`.
+pub(crate) const EMBEDDED_RSE: &str =
+    "<engine-database><engine-list><engine mfg=\"AeroTech\" code=\"I32N\" dia=\"38\" len=\"356\" initWt=\"647\" propWt=\"380.5\" delays=\"1000\"><data>\
+     <eng-data t=\"0\" f=\"0\" m=\"647\"/><eng-data t=\"1\" f=\"30\" m=\"500\"/><eng-data t=\"20\" f=\"0\" m=\"266.5\"/></data></engine></engine-list></engine-database>";
+
+#[test]
+fn thrust_curves_stored_in_the_zip_come_back_raw_with_each_motors_digest() {
+    let zip = stored_zip(&[
+        ("rocket.ork", EMBEDDED_ORK.as_bytes()),
+        ("preview.png", b"png"),
+        ("thrustcurves/d1.rse", EMBEDDED_RSE.as_bytes()),
+        ("thrustcurves/notes.txt", b"not a curve"),
+    ]);
+    let imp = import(&zip).unwrap();
+    assert_eq!(imp.embedded_curves, vec![super::EmbeddedCurve { digest: "d1".into(), rse: EMBEDDED_RSE.into() }]);
+    let motor = |d: &str| MotorRef::new(d, if d == "X1" { "Nobody" } else { "AeroTech" });
+    assert_eq!(imp.motors, vec![motor("J33N"), motor("I32N"), motor("X1")]);
+    assert_eq!(imp.motor_digests, vec![(motor("J33N"), "d1".to_string()), (motor("I32N"), "d1".to_string()), (motor("X1"), "d2".to_string())]);
+    assert!(!imp.warnings.iter().any(|w| w.contains("thrust curve")), "{:?}", imp.warnings);
+    // Bare XML (and so gzip) has none, but the motors still carry their digests.
+    let plain = import(EMBEDDED_ORK.as_bytes()).unwrap();
+    assert!(plain.embedded_curves.is_empty());
+    assert_eq!(plain.motor_digests, imp.motor_digests);
+    assert_eq!(plain.rocket, imp.rocket);
+}
+
+#[test]
+fn an_unreadable_curve_entry_is_a_warning_not_a_failure() {
+    let zip = stored_zip(&[("rocket.ork", EMBEDDED_ORK.as_bytes()), ("thrustcurves/d1.rse", &[0xff, 0xfe, 0xfd])]);
+    let imp = import(&zip).unwrap();
+    assert!(imp.embedded_curves.is_empty());
+    assert!(imp.warnings.iter().any(|w| w.contains("thrustcurves/d1.rse") && w.contains("could not be read")), "{:?}", imp.warnings);
+}

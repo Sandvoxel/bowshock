@@ -16,7 +16,9 @@ click "2D"
 click (906, 624)
 screenshot fin-lane-2d-dark.png
 click (600, 500)
+click "Prefs"
 click "Light"
+click "Done"
 screenshot side-light.png
 click (918, 275)
 screenshot fin-2d-light.png
@@ -36,7 +38,9 @@ screenshot drag-side-light.png
 type escape
 release (560, 330)
 # 2D: the ghost on a node (dashed accent outline), then far from any node ("no node").
+click "Prefs"
 click "Dark"
+click "Done"
 click "2D"
 press (130, 356)
 move (500, 420)

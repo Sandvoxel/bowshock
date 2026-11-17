@@ -65,18 +65,17 @@ fn leaving_storage_drops_an_unanswered_clear() {
 }
 
 #[test]
-fn the_theme_is_kept_and_the_top_bar_toggle_stays_in_step() {
+fn the_theme_is_kept() {
     let (mut app, file) = open_app("theme");
     assert!(app.ctx().dark);
     app.update(app::Message::Prefs(Message::Show));
     app.update(app::Message::Prefs(Message::Theme(false)));
     assert!(!app.ctx().dark);
     assert!(!Settings::load(Some(&file)).dark, "Light is in the settings file");
-    // The toggle is the same setting: it flips what Preferences set, and Preferences reads it back.
-    app.update(app::Message::Prefs(Message::Close));
-    app.update(app::Message::ToggleTheme);
+    app.update(app::Message::Prefs(Message::Theme(true)));
     assert!(app.ctx().dark);
-    assert!(Settings::load(Some(&file)).dark, "the toggle is kept too");
+    assert!(Settings::load(Some(&file)).dark, "Dark is kept too");
+    app.update(app::Message::Prefs(Message::Close));
     let _ = std::fs::remove_file(&file);
 }
 

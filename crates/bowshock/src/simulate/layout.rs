@@ -50,7 +50,7 @@ impl Preset {
             Preset::Aerodynamics => vec![&["mach"], &["cd", "cd_friction", "cd_pressure", "cd_base"], &["dynamic_pressure"]],
             Preset::Forces => vec![&["thrust", "drag"], &["mass", "propellant_mass"], &["total_acceleration"]],
             Preset::Stability => vec![&["cg_station", "cp_station"], &["stability_margin"], &["mach"]],
-            Preset::Roll => vec![&["roll_rate", "pitch_frequency"], &["control_cant"], &["air_speed"], &["angle_of_attack"]],
+            Preset::Roll => vec![&["roll_rate", "pitch_frequency"], &["air_speed"], &["angle_of_attack"]],
             Preset::Custom => vec![&["altitude"]],
         };
         PlotLayout { panels: panels.into_iter().map(PlotPanel::new).collect(), ..PlotLayout::default() }

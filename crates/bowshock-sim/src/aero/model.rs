@@ -1,5 +1,5 @@
 use super::drag::{body_calc, button_drag, fin_calc};
-use super::tables::{base_cd, roughness_correction, skin_cf, stagnation_cd};
+use super::tables::{base_cd, blunt_nose_cd, cap_cd, roughness_correction, skin_cf, stagnation_cd};
 use super::{
     axial_drag_multiplier, fin_fin_factor, lug_drag, Aero, Comp, ComponentAero, DragBreakdown, FinCalc, NormalForce, Pressure, ProtCalc, RollAero, Stability,
     LUG_ROUGHNESS,
@@ -221,21 +221,6 @@ impl Aero {
         RollAero { forcing, damping }
     }
 
-    /// The roll forcing of fin set `set` per radian of cant at `mach` (m^3; see [`RollAero::forcing`]): what turning the set's
-    /// cant by one radian adds to the forcing. 0 for a set off the core body or out of range.
-    pub fn roll_forcing_per_rad(&self, mach: f64, set: usize) -> f64 {
-        match self.fins.get(set).filter(|f| f.on_core) {
-            Some(f) => f.n * f.unit_lift * f.cna1(mach, 0.0, self.a_ref) * self.a_ref * f.roll_arm,
-            None => 0.0,
-        }
-    }
-
-    /// The fin sets under active roll control: `(set index, source part)` of every set whose label has a
-    /// [`crate::vehicle::RollControl`].
-    pub fn controlled_fin_sets(&self) -> Vec<(usize, bowshock_model::PartId)> {
-        self.labels.fin_sets.iter().enumerate().filter_map(|(i, l)| Some((i, l.part.filter(|_| l.roll_control.is_some())?))).collect()
-    }
-
     /// Zero-angle-of-attack drag at `mach` with `re_per_m = v/nu` (Reynolds number per metre).
     /// With `motor_on` the base area covered by the motor exhaust carries no base drag.
     pub fn drag(&self, mach: f64, re_per_m: f64, motor_on: bool) -> DragBreakdown {
@@ -358,6 +343,7 @@ impl Aero {
                 Pressure::Stagnation { area } => stag * area / ar,
                 Pressure::Base { area, scale } => base * area * scale / ar,
                 Pressure::Table { table, area } => table.at(m) * area / ar,
+                Pressure::BluntTable { table, hemisphere, tip_ratio, area } => blunt_nose_cd(table.at(m), cap_cd(m, hemisphere), *tip_ratio) * area / ar,
             } + stag * b.front_face / ar;
             // Base drag; exhaust covers the motor exit area of the terminal base.
             let mut area = b.back_face;

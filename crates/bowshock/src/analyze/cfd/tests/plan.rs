@@ -168,7 +168,7 @@ fn geometry_the_solver_cannot_take_is_refused_with_a_reason() {
 }
 
 fn separator() -> bowshock_sim::BodySegment {
-    bowshock_sim::BodySegment { station: 0.0, length: 0.0, fore_radius: 0.0, aft_radius: 0.0, kind: BodyKind::Tube, roughness: 0.0 }
+    bowshock_sim::BodySegment { station: 0.0, length: 0.0, fore_radius: 0.0, aft_radius: 0.0, kind: BodyKind::Tube, tip_radius: 0.0, roughness: 0.0 }
 }
 
 #[test]
@@ -241,4 +241,31 @@ fn a_medium_table_of_the_same_geometry_and_conditions_is_fresh() {
     t.key = table_key(t.geometry, 120.0, &nodes(full).unwrap());
     t.grid = CfdGrid::Medium;
     assert_eq!(status(&mapped, Some(&t), 120.0, full), Status::Fresh);
+}
+
+/// A blunted nose goes to the solver as the blunted profile: the solver's body is the same outline the model draws (the tangent
+/// sphere on the sharp ogive, the length as built), and the geometry hash follows the tip.
+#[test]
+fn a_blunted_nose_is_solved_as_the_blunted_profile() {
+    let (mut rocket, pointed_vehicle) = example();
+    let pointed = plan(&rocket, &pointed_vehicle, UnitSystem::default()).unwrap();
+    assert!(!matches!(pointed.body.nose.shape, solver::NoseShape::Blunted { .. }));
+    let nose = rocket.parts()[0].id;
+    assert!(rocket.set_dim(nose, bowshock_model::Dim::TipRadius, 0.01).is_some());
+    let vehicle = from_model::vehicle(&rocket, &MotorDb::bundled(), Phase::Full).unwrap();
+    let mapped = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    let first = &vehicle.body[0];
+    assert!(matches!(mapped.body.nose.shape, solver::NoseShape::Blunted { tip_radius, .. } if tip_radius == 0.01), "{:?}", mapped.body.nose.shape);
+    assert_eq!(mapped.body.nose.length, first.length, "the nose length is the length as built");
+    assert_eq!(mapped.body.nose.length, rocket.parts()[0].kind.length());
+    assert_ne!(mapped.geometry, pointed.geometry);
+    // the solver's wall is the model's outline
+    let (internal, scale) = mapped.body.to_internal().unwrap();
+    let kind = &rocket.parts()[0].kind;
+    for i in 0..=40 {
+        let z = first.length * f64::from(i) / 40.0;
+        let solved = internal.body.r(z / scale.d_nose) * scale.d_nose;
+        assert!((solved - kind.radius_at(z)).abs() < 1e-9, "z {z}: solver {solved} vs model {}", kind.radius_at(z));
+        assert!((solved - first.radius_at(z)).abs() < 1e-9, "z {z}: solver {solved} vs sim {}", first.radius_at(z));
+    }
 }

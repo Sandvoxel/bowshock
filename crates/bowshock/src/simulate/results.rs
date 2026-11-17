@@ -3,6 +3,7 @@
 //! button that moves the plots' crosshair to the moment it happened.
 
 use bowshock_sim::roll::MIN_SPIN_RATE;
+use bowshock_sim::EventKind;
 use iced::widget::{column, container, mouse_area, row, scrollable, text, Space};
 use iced::{font, mouse, Element, Fill, Theme, Widget};
 
@@ -47,11 +48,14 @@ pub(super) fn view<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
     scrollable(column(parts).width(Fill)).direction(super::thin_scrollbar()).style(super::scroll_style).height(Fill).boxed()
 }
 
-/// 04 GROUND TRACK: the map, the run-dispersion button and, once a study has flown, its caption.
+/// The ground track section (after 01–03 and one per dropped stage): the map, the run-dispersion button and, once a study has
+/// flown, its caption.
 fn ground_section<'a>(state: &'a State, ctx: &'a Ctx, flight: &'a Flight) -> Element<'a, Message> {
     // The study needs a result to vary: the button appears with the first run (one style, not a dashed stand-in), and the
-    // numbering follows the sections above (01–03 once there is a result, otherwise this is the first section).
-    let index = if state.shown.compare || flight.run.is_some() { 4 } else { 1 };
+    // numbering follows the sections above (01–03 once there is a result and a section per dropped stage of the flight shown on
+    // its own, otherwise this is the first section).
+    let dropped = if state.shown.compare { 0 } else { flight.run.as_ref().map_or(0, |r| r.result.branches.len()) };
+    let index = if state.shown.compare || flight.run.is_some() { 4 + dropped } else { 1 };
     let mut head: Vec<Element<'a, Message>> = vec![section_head(index, "Ground track"), Space::new().width(Fill).boxed()];
     if flight.run.is_some() {
         let mut disperse = push("Run dispersion", Weight::Ghost).tooltip("Fly this flight many times with wind, launch angle and thrust varied");
@@ -165,7 +169,9 @@ fn single<'a>(ctx: &'a Ctx, flight: &'a Flight, revision: u64) -> Vec<Element<'a
         parts.push(waiting(flight));
         return parts;
     };
-    parts.extend(sections(run, ctx, flight.is_stale(revision)));
+    let stale = flight.is_stale(revision);
+    parts.extend(sections(run, ctx, stale));
+    parts.extend(branch_sections(run, ctx, stale, 4));
     if let Some(error) = &flight.error {
         parts.push(container(badge(Severity::Err, error.clone())).padding([0.0, SPACE_3]).boxed());
     }
@@ -242,7 +248,7 @@ fn sections<'a>(run: &'a Run, ctx: &'a Ctx, stale: bool) -> Vec<Element<'a, Mess
     let mut rows: Vec<Element<'a, Message>> = Vec::new();
     for (name, rate) in &s.descent_rates {
         let (n, u) = vel(*rate, 1);
-        rows.push(line(format!("{name} descent"), None, n, u, stale, t.deploy));
+        rows.push(line(descent_label(name), None, n, u, stale, t.deploy));
     }
     let (hit, hit_unit) = vel(s.ground_hit_velocity, 1);
     let hard = s.ground_hit_velocity > MAX_GROUND_HIT;
@@ -258,6 +264,50 @@ fn sections<'a>(run: &'a Run, ctx: &'a Ctx, stale: bool) -> Vec<Element<'a, Mess
     let recovery = section(3, "Recovery", true, rows);
 
     vec![apogee, ascent, recovery]
+}
+
+/// One section per dropped stage of the run, numbered from `first`, after the sustainer's recovery: the separation, the fastest
+/// the stage flew, how it came down (the canopy's descent rate, or the vertical speed of a stage with no device), the ground hit
+/// with the same safe-speed chip as the main recovery, the time of the landing and where it lands with the in-field chip. Every
+/// number moves the plots' crosshair to its moment.
+fn branch_sections<'a>(run: &'a Run, ctx: &'a Ctx, stale: bool, first: usize) -> Vec<Element<'a, Message>> {
+    let sys = ctx.units;
+    let vel = |v: f64, decimals: usize| units::num_scaled(v, Quantity::Velocity, sys, decimals);
+    run.result
+        .branches
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            let s = &b.summary;
+            let landing_t = s.flight_time;
+            let fastest = b.trajectory.samples.iter().max_by(|x, y| x.speed.total_cmp(&y.speed)).map_or(b.start, |p| p.t);
+            let deploy = b.trajectory.events.iter().find(|e| matches!(e.kind, EventKind::Deploy(_))).map(|e| e.t);
+            let mut rows: Vec<Element<'a, Message>> = vec![line("Separation", None, format!("{:.1}", b.start), "s", stale, Some(b.start))];
+            let (max_v, v_unit) = vel(s.max_velocity, 0);
+            rows.push(line("Max velocity", None, max_v, v_unit, stale, Some(fastest)));
+            if s.descent_rates.is_empty() {
+                let (n, u) = vel(s.descent_rate, 1);
+                rows.push(line("Descent rate", None, n, u, stale, Some(landing_t)));
+            }
+            for (name, rate) in &s.descent_rates {
+                let (n, u) = vel(*rate, 1);
+                rows.push(line(descent_label(name), None, n, u, stale, deploy));
+            }
+            let (hit, hit_unit) = vel(s.ground_hit_velocity, 1);
+            let hard = s.ground_hit_velocity > MAX_GROUND_HIT;
+            let hit_chip = badge(if hard { Severity::Warn } else { Severity::Ok }, format!("{} {}", if hard { ">" } else { "<" }, vel(MAX_GROUND_HIT, 1).0));
+            rows.push(line("Ground hit", Some(hit_chip), hit, hit_unit, stale, Some(landing_t)));
+            rows.push(line("Flight time", None, format!("{landing_t:.1}"), "s", stale, Some(landing_t)));
+            let in_field = s.landing.0 <= run.spec.field_radius;
+            let lands = badge(if in_field { Severity::Ok } else { Severity::Warn }, if in_field { "in field" } else { "outside field" });
+            rows.push(line("Lands", Some(lands), format::landing(s.landing.0, s.landing.1, sys), "", stale, Some(landing_t)));
+            if let Some(at) = run.spec.location {
+                let (lat, lon) = landing_coordinates(at, s.landing_position);
+                rows.push(line("Landing at", None, format!("{lat:.5}°, {lon:.5}°").replace('-', "−"), "", stale, Some(landing_t)));
+            }
+            section(first + i, &b.name, true, rows)
+        })
+        .collect()
 }
 
 /// The latitude and longitude (degrees) of the point `[east, north]` metres from the pad at `at`, on a sphere of the Earth's mean
@@ -411,6 +461,17 @@ fn compare_row<'a>(flight: &'a Flight, value: String, diff: String, unit: &'a st
     pointer(cells.boxed(), seek)
 }
 
+/// `<device> descent` as a row label: an imported device can carry a sentence for a name, and the row has one line beside its
+/// value, so the name is cut to its first words.
+fn descent_label(name: &str) -> String {
+    const MAX: usize = 16;
+    if name.chars().count() > MAX {
+        format!("{}… descent", name.chars().take(MAX - 1).collect::<String>().trim_end())
+    } else {
+        format!("{name} descent")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,5 +507,44 @@ mod tests {
         let spin = Spin::of(&back).expect("spins");
         assert_eq!((spin.sense, spin.max_hz.round() as i32), ("CCW", 3));
         assert_eq!(spin.resonance.map(|r| (r.label, r.chip)), Some(("Spin near pitch", "10 % off 3.0 Hz".to_string())));
+    }
+
+    /// A run whose result holds `n` dropped stages, `Stage 1`, `Stage 2`, ...
+    fn run_with(n: usize) -> Run {
+        use super::super::flight::{Spec, Times};
+        use bowshock_sim::{Branch, BranchSummary, FlightResult};
+        let branch = |i: usize| Branch {
+            name: format!("Stage {}", i + 1),
+            stage: i,
+            start: 2.0,
+            summary: BranchSummary {
+                max_velocity: 80.0,
+                descent_rate: 20.0,
+                ground_hit_velocity: 22.0,
+                flight_time: 9.0,
+                landing: (120.0, 40.0),
+                ..BranchSummary::default()
+            },
+            ..Branch::default()
+        };
+        let result = FlightResult { branches: (0..n).map(branch).collect(), ..FlightResult::default() };
+        Run {
+            spec: Spec::default(),
+            revision: 0,
+            result: std::sync::Arc::new(result),
+            took: std::time::Duration::ZERO,
+            dt: 0.001,
+            delay: 4.0,
+            times: Times::default(),
+        }
+    }
+
+    #[test]
+    fn a_dropped_stage_gets_a_section_after_the_recovery_and_a_single_stage_flight_none() {
+        let app = crate::app::App::with_example();
+        assert!(branch_sections(&run_with(0), app.ctx(), false, 4).is_empty());
+        assert_eq!(branch_sections(&run_with(1), app.ctx(), false, 4).len(), 1);
+        // One section per separation, numbered on from the recovery.
+        assert_eq!(branch_sections(&run_with(2), app.ctx(), true, 4).len(), 2);
     }
 }

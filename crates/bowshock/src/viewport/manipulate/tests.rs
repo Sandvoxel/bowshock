@@ -23,7 +23,7 @@ mod edit_tests {
 
     fn rocket() -> (Rocket, PartId, PartId, PartId) {
         let mut r = Rocket::default();
-        r.insert(0, PartKind::NoseCone { shape: NoseShape::Haack(1.0 / 3.0), length: 0.2, diameter: 0.1 }).unwrap();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::Haack(1.0 / 3.0), length: 0.2, diameter: 0.1, tip_radius: 0.0 }).unwrap();
         let tube = r.insert(1, PartKind::BodyTube { length: 0.5, diameter: 0.1 }).unwrap();
         let fin =
             r.attach_radial(tube, 0.4, 0.0, 3, RadialKind::FinSet { root_chord: 0.1, tip_chord: 0.05, span: 0.06, sweep: 0.04, thickness: 0.003 }).unwrap();
@@ -170,7 +170,7 @@ mod label_tests {
     /// The example rocket's airframe (76.2 mm, nose + two tubes) with its three-fin set and a rail button.
     fn example() -> (Rocket, PartId) {
         let mut r = Rocket::default();
-        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762 }).unwrap();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762, tip_radius: 0.0 }).unwrap();
         r.insert(1, PartKind::BodyTube { length: 0.52, diameter: 0.0762 }).unwrap();
         let booster = r.insert(2, PartKind::BodyTube { length: 0.3934, diameter: 0.0762 }).unwrap();
         let fins = r
@@ -320,7 +320,7 @@ mod carry_tests {
     /// Nose (0 to 0.2), a recovery bay (to 0.7), a booster (to 1.1) with a Ø40 mount in it at stations 0.8 to 1.0.
     fn rocket() -> (Rocket, [PartId; 3], PartId) {
         let mut r = Rocket::default();
-        let nose = r.insert(0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.2, diameter: 0.1 }).unwrap();
+        let nose = r.insert(0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.2, diameter: 0.1, tip_radius: 0.0 }).unwrap();
         let bay = r.insert(1, PartKind::BodyTube { length: 0.5, diameter: 0.1 }).unwrap();
         let booster = r.insert(2, PartKind::BodyTube { length: 0.4, diameter: 0.1 }).unwrap();
         let mount = r

@@ -10,10 +10,15 @@ use super::overlay::{Field, Overlay};
 use super::readout::{config_color, drag_parts, other_visible, DRAG_PARTS};
 use crate::units::{Quantity, Unit, UnitSystem};
 use crate::widgets::ground_track::{GroundTrack, Track, TrackPoint, Wind};
-use crate::widgets::plot::{Axis, EventMark, EventRole, HLine, LabelAt, LineStyle, Panel, PlotGroup, Series, SeriesColor, StackedFill, Tag, YTicks};
+use crate::widgets::plot::{
+    Axis, EventMark, EventRole, HLine, LabelAt, LegendItem, LineStyle, Panel, PlotGroup, Series, SeriesColor, StackedFill, Tag, YTicks,
+};
 
-/// Width kept free at the right of the plots for direct labels.
-const MARGIN_PX: f32 = 130.0;
+/// The header legend of a panel: one entry per series of `series`, in the order given (a stack's order).
+fn legend_of(series: &[Series]) -> Vec<LegendItem> {
+    series.iter().map(|s| LegendItem { style: s.style, color: s.color, text: s.name.clone() }).collect()
+}
+
 /// Bins of the apogee histogram.
 const BINS: usize = 12;
 
@@ -70,8 +75,6 @@ pub fn build(out: &Output, units: UnitSystem, overlay: Option<&Overlay>, active:
         }
     };
     group.y_ticks = YTicks::Even(5);
-    // One right gutter in every analysis, so switching analyses does not change the plot width.
-    group.right_margin = MARGIN_PX;
     // The CFD table is zero-lift drag only: the drag panels are the solver's, and every other panel is the Extended method's,
     // except the margin, CP and normal-force panels when a fresh 3D stability solve feeds them. Each panel says which.
     if out.cfd.is_some() {
@@ -136,12 +139,10 @@ fn stacked(points: &[MachPoint]) -> Vec<Series> {
     let mut layers: Vec<Series> = DRAG_PARTS
         .iter()
         .enumerate()
-        .map(|(i, (name, color))| {
-            Series::new(*name, points.iter().map(|p| (p.mach, drag_parts(&p.drag, show_other)[i])).collect()).color(*color).filled().label_margin()
-        })
+        .map(|(i, (name, color))| Series::new(*name, points.iter().map(|p| (p.mach, drag_parts(&p.drag, show_other)[i])).collect()).color(*color).filled())
         .collect();
     if show_other {
-        layers.push(Series::new("Other", curve(points, |p| p.drag.protuberances)).color(SeriesColor::Muted).filled().label_margin());
+        layers.push(Series::new("Other", curve(points, |p| p.drag.protuberances)).color(SeriesColor::Muted).filled());
     }
     layers
 }
@@ -164,12 +165,12 @@ fn overlaid(panel: Panel, overlay: Option<&Overlay>, analysis: Analysis, field: 
     }
     // Ink-muted: a colour the stack (series 0..3) and the configuration lines never use, so a comparison is never mistaken for
     // the pressure layer or another configuration.
-    panel.with(Series::new(o.label.clone(), points).color(SeriesColor::Muted).style(LineStyle::Dashed).label_margin())
+    panel.with(Series::new(o.label.clone(), points).color(SeriesColor::Muted).style(LineStyle::Dashed).label_inside())
 }
 
 /// The Cd panel of the Mach analyses: always the stacked areas by source of the active configuration `active` (an index into
 /// `runs`) with its total as an `ink` line on top, whatever else is drawn. Every other configuration is its total Cd as a dashed
-/// line in its own colour (the one of its legend entry and of its margin and CP lines), labelled in the margin; they are added
+/// line in its own colour (the one of its legend entry and of its margin and CP lines), labelled inside the plot; they are added
 /// over the stack and never replace it.
 fn cd_panel(runs: &[(usize, &Run, &[MachPoint])], active: usize) -> Panel {
     let Some((_, run, points)) = runs.get(active) else { return Panel::new("Drag coefficient Cd", "") };
@@ -177,10 +178,11 @@ fn cd_panel(runs: &[(usize, &Run, &[MachPoint])], active: usize) -> Panel {
     let mut panel = Panel::new("Drag coefficient Cd", subtitle).weight(1.4);
     let layers = stacked(points);
     panel.tag = Tag::Only(layers.len());
+    panel.legend = legend_of(&layers);
     panel.series = layers;
     panel.series.push(Series::new("Cd", curve(points, |p| p.drag.total)).label_as("Total", LabelAt::Inside));
     for (i, run, points) in runs.iter().enumerate().filter_map(|(k, r)| (k != active).then_some(r)) {
-        panel.series.push(Series::new(run.name.clone(), curve(points, |p| p.drag.total)).color(config_color(*i)).style(LineStyle::Dashed).label_margin());
+        panel.series.push(Series::new(run.name.clone(), curve(points, |p| p.drag.total)).color(config_color(*i)).style(LineStyle::Dashed).label_inside());
     }
     panel
 }
@@ -200,7 +202,7 @@ fn aero(out: &Output, units: UnitSystem, overlay: Option<&Overlay>, active: Conf
     let margin: Vec<Series> = if single {
         runs.iter().map(|(_, _, p)| Series::new(label3d(out, "Margin"), curve(p, |p| p.margin_cal))).collect()
     } else {
-        runs.iter().map(|(i, r, p)| Series::new(r.name.clone(), curve(p, |p| p.margin_cal)).color(config_color(*i)).label_margin()).collect()
+        runs.iter().map(|(i, r, p)| Series::new(r.name.clone(), curve(p, |p| p.margin_cal)).color(config_color(*i)).label_inside()).collect()
     };
 
     let mut cpcg = Panel::new("CP and CG", format!("{} from tip", len.symbol)).value_unit(len.symbol).tag(Tag::Only(0));
@@ -226,7 +228,6 @@ fn aero(out: &Output, units: UnitSystem, overlay: Option<&Overlay>, active: Conf
     let cpcg = overlaid(cpcg, overlay, a, Field::Cp, id, to);
     let cd = overlaid(cd_panel(&runs, active), overlay, a, Field::Cd, id, id);
     let mut group = PlotGroup::new(Axis::mach()).panel(margin_panel).panel(cpcg).panel(cd);
-    group.right_margin = MARGIN_PX;
     group.x_range = Some(out.conditions.mach);
     group
 }
@@ -240,18 +241,16 @@ fn drag(out: &Output, overlay: Option<&Overlay>, active: ConfigId) -> PlotGroup 
         let show_other = other_visible(points);
         let part = |i: usize| move |p: &MachPoint| 100.0 * drag_parts(&p.drag, show_other)[i] / p.drag.total.max(1e-12);
         for (i, (name, color)) in DRAG_PARTS.iter().enumerate() {
-            shares.series.push(Series::new(*name, curve(points, part(i))).color(*color).label_margin());
+            shares.series.push(Series::new(*name, curve(points, part(i))).color(*color));
         }
         if show_other {
-            shares
-                .series
-                .push(Series::new("Other", curve(points, |p| 100.0 * p.drag.protuberances / p.drag.total.max(1e-12))).color(SeriesColor::Muted).label_margin());
+            shares.series.push(Series::new("Other", curve(points, |p| 100.0 * p.drag.protuberances / p.drag.total.max(1e-12))).color(SeriesColor::Muted));
         }
     }
+    shares.legend = legend_of(&shares.series);
     let id = |x: f64| x;
     let cd = overlaid(cd_panel(&runs, active).weight(1.6), overlay, Analysis::Drag, Field::Cd, id, id);
     let mut group = PlotGroup::new(Axis::mach()).panel(cd).panel(shares);
-    group.right_margin = MARGIN_PX;
     group.x_range = Some(out.conditions.mach);
     group
 }
@@ -277,8 +276,8 @@ fn stability(out: &Output, units: UnitSystem, overlay: Option<&Overlay>) -> Plot
             margin.push(Series::new(label3d(out, "Margin"), m));
             cn = cn.with(Series::new("CN", cn_pts));
         } else {
-            margin.push(Series::new(run.name.clone(), m).color(color).label_margin());
-            cn = cn.with(Series::new(run.name.clone(), cn_pts).color(color).label_margin());
+            margin.push(Series::new(run.name.clone(), m).color(color).label_inside());
+            cn = cn.with(Series::new(run.name.clone(), cn_pts).color(color).label_inside());
         }
         if *i == 0 {
             cpcg = cpcg.with(Series::new(label3d(out, "CP"), points.iter().map(|p| deg(p, to(p.cp))).collect()).color(SeriesColor::Cp).label_inside());
@@ -293,7 +292,6 @@ fn stability(out: &Output, units: UnitSystem, overlay: Option<&Overlay>) -> Plot
     let cpcg = overlaid(cpcg, overlay, a, Field::Cp, deg, to);
     let cn = overlaid(cn, overlay, a, Field::Cn, deg, id);
     let mut group = PlotGroup::new(axis).panel(margin_panel).panel(cpcg).panel(cn);
-    group.right_margin = MARGIN_PX;
     group.x_range = Some((0.0, out.conditions.alpha_max.to_degrees()));
     group
 }
@@ -345,17 +343,16 @@ fn flutter(out: &Output, units: UnitSystem) -> PlotGroup {
             let worst = f.trace.worst();
             group_events.push(EventMark::new(worst.t, format!("Min {:.2}×", worst.margin())).role(EventRole::Highlight));
         } else {
-            speed = speed.with(Series::new(format!("{} flutter", run.name), vf).color(color).label_margin());
+            speed = speed.with(Series::new(format!("{} flutter", run.name), vf).color(color).label_inside());
             speed = speed.with(Series::new(format!("{} speed", run.name), v).color(color).style(LineStyle::Dashed));
         }
         let capped: Vec<(f64, f64)> = points.iter().filter(|p| p.margin().is_finite()).map(|p| (p.t, p.margin().min(MARGIN_CAP))).collect();
         let series = Series::new(run.name.clone(), capped).color(color);
-        margin = margin.with(if single { series } else { series.label_margin() });
+        margin = margin.with(if single { series } else { series.label_inside() });
     }
     let axis = Axis { label: "Time".into(), unit: "s".into(), prefix: String::new(), decimals: 1 };
     let mut group = PlotGroup::new(axis).panel(speed).panel(margin);
     group.events = group_events;
-    group.right_margin = if single { 0.0 } else { MARGIN_PX };
     if end > 0.0 {
         group.x_range = Some((0.0, end));
     }
@@ -387,11 +384,10 @@ fn dispersion(out: &Output, units: UnitSystem) -> (PlotGroup, GroundTrack) {
         pts.extend(counts.iter().enumerate().map(|(k, &c)| ((lo + (k as f64 + 0.5) * width) / len.to_si, c as f64)));
         pts.push(((lo + (BINS as f64 + 0.5) * width) / len.to_si, 0.0));
         let series = Series::new(run.name.clone(), pts).color(color);
-        hist = hist.with(if single { series.filled() } else { series.label_margin() });
+        hist = hist.with(if single { series.filled() } else { series.label_inside() });
     }
     let axis = Axis { label: "Apogee altitude".into(), unit: len.symbol.into(), prefix: String::new(), decimals: 0 };
-    let mut group = PlotGroup::new(axis).panel(hist);
-    group.right_margin = if single { 0.0 } else { MARGIN_PX };
+    let group = PlotGroup::new(axis).panel(hist);
     let wind = (out.conditions.wind > 0.0).then_some(Wind { speed: out.conditions.wind, from_deg: 0.0 });
     (group, GroundTrack { tracks, wind, field_radius: None, units })
 }
@@ -502,7 +498,26 @@ mod tests {
             // The other configurations are totals on top, dashed, one each; the active one's total is the stack's line.
             let others = lines_over(cd);
             assert_eq!(others.len(), configs - 1, "{configs} configurations");
-            assert!(others.iter().all(|s| s.style == LineStyle::Dashed && s.label == Some(LabelAt::Margin)));
+            assert!(others.iter().all(|s| s.style == LineStyle::Dashed && s.label == Some(LabelAt::Inside)));
+        }
+    }
+
+    #[test]
+    fn multi_series_panels_carry_a_header_legend_per_series_and_reserve_no_label_margin() {
+        for analysis in [Analysis::Aerodynamics, Analysis::Drag, Analysis::Stability, Analysis::Flutter, Analysis::Dispersion] {
+            for configs in [1, 3] {
+                let b = built(analysis, configs);
+                assert_eq!(b.group.right_margin, 0.0, "{analysis:?}");
+                assert!(b.group.panels.iter().flat_map(|p| &p.series).all(|s| s.label != Some(LabelAt::Margin)), "{analysis:?}");
+            }
+        }
+        let drag = built(Analysis::Drag, 1);
+        let sources = ["Skin friction", "Pressure", "Base", "Fins"];
+        for panel in &drag.group.panels {
+            let names: Vec<&str> = panel.legend.iter().map(|l| l.text.as_str()).collect();
+            assert!(names.len() >= 4 && names[..4] == sources, "{}: {names:?}", panel.title);
+            let colors: Vec<SeriesColor> = panel.series.iter().take(names.len()).map(|s| s.color).collect();
+            assert_eq!(panel.legend.iter().map(|l| l.color).collect::<Vec<_>>(), colors);
         }
     }
 

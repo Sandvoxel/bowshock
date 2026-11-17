@@ -26,11 +26,11 @@ move (915, 232)
 move (935, 250)
 screenshot cant-2-drag.png
 release (935, 250)
-# Back to 3 degrees, then fly it: Simulate, Run, the Roll preset.
+# Back to 3 degrees, then fly it: Simulate, Run selected, the Roll preset.
 click (1175, 763)
 type "3"
 type enter
-click (625, 18)
-click "Run"
+click "Simulate"
+click "Run selected"
 click "Roll"
 screenshot cant-3-simulate-roll.png

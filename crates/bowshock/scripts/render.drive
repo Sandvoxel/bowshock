@@ -36,7 +36,9 @@ click (640, 150)
 click (640, 150)
 screenshot fit.png
 # Light theme parity.
+click "Prefs"
 click "Light"
+click "Done"
 click "Cutaway"
 screenshot light-cutaway.png
 click "X-ray"

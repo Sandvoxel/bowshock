@@ -120,6 +120,16 @@ impl Motor {
         format!("{FILE_ID_PREFIX}{:016x}", self.content_hash())
     }
 
+    /// This motor under another name: `designation` and `manufacturer` replaced, [`common_name`](Self::common_name) and
+    /// [`id`](Self::id) (the [`file_id`](Self::file_id) of the renamed curve) following. How a design's own name for a curve
+    /// stored in its file (OpenRocket names it by digest, with whatever designation the user typed) becomes a motor.
+    pub fn renamed(&self, designation: &str, manufacturer: &str) -> Motor {
+        let designation = designation.trim().to_string();
+        let mut motor = Motor { common_name: common_name(&designation), designation, manufacturer: manufacturer.trim().to_string(), ..self.clone() };
+        motor.id = motor.file_id();
+        motor
+    }
+
     /// Whether `other` holds the same curve data (see [`content_hash`](Self::content_hash)), whatever its id.
     pub fn same_data(&self, other: &Motor) -> bool {
         self.content_hash() == other.content_hash()

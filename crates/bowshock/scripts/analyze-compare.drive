@@ -32,7 +32,9 @@ move (702, 302)
 screenshot aero-method-dark.png
 
 # The light theme.
+click "Prefs"
 click "Light"
+click "Done"
 move (700, 300)
 move (702, 302)
 screenshot aero-method-light.png

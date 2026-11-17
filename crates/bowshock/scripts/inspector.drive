@@ -46,7 +46,9 @@ click (922, 938)
 click (1257, 62)
 screenshot menu.png
 click (1257, 62)
-click (966, 20)
+click "Prefs"
+click "Light"
+click "Done"
 screenshot light-fin.png
 # Double-click the name to rename it.
 click (1040, 62)

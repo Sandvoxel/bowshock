@@ -22,6 +22,8 @@ pub enum Dim {
     Wall,
     /// Nose shape parameter (Haack `C`, power-series `n`).
     Shape,
+    /// Radius of a nose cone's spherical tip (0 is pointed).
+    TipRadius,
     /// Offset of the fore edge from the parent's fore face (radial and internal parts).
     Position,
     /// Fin span (the height above the surface).
@@ -76,6 +78,7 @@ impl Dim {
             Dim::ForeDiameter => "FORE DIAMETER".into(),
             Dim::Wall => "WALL".into(),
             Dim::Shape => "SHAPE".into(),
+            Dim::TipRadius => "TIP RADIUS".into(),
             Dim::Position => "POSITION".into(),
             Dim::Span => "HEIGHT".into(),
             Dim::RootChord => "ROOT CHORD".into(),
@@ -315,6 +318,7 @@ impl Rocket {
                     PartKind::NoseCone { shape, .. } => shape.parameter(),
                     _ => None,
                 },
+                Dim::TipRadius => matches!(p.kind, PartKind::NoseCone { .. }).then(|| p.kind.tip_radius()),
                 d if shoulder_dim(d).is_some() => {
                     let (aft, field) = shoulder_dim(d)?;
                     let s = self.shoulder(id, aft)?;
@@ -389,6 +393,7 @@ impl Rocket {
                 PartKind::NoseCone { shape: NoseShape::PowerSeries(_), .. } => (0.01, 1.0, "n AT MINIMUM", "n = 1 IS A CONE"),
                 _ => (0.0, 1.0, "C AT MINIMUM", "C AT MAXIMUM"),
             },
+            (PartRef::Axial(p), Dim::TipRadius) => (0.0, p.kind.tip_radius_limits().map_or(0.0, |(_, hi)| hi), "POINTED TIP", "TIP LIMIT 0.9 × BASE RADIUS"),
             (PartRef::Radial(r), Dim::Position) => (0.0, (length_of_parent(r.parent) - r.kind.min_attached()).max(0.0), "AT TUBE FORE", "AT TUBE AFT"),
             (PartRef::Radial(_), Dim::Angle) => open(),
             (PartRef::Radial(_), Dim::Gap) => (0.0, 0.5, "TOUCHING THE SURFACE", "MAXIMUM GAP"),
@@ -434,6 +439,10 @@ impl Rocket {
             return sub.clamp_dim(id, dim, value);
         }
         self.dim(id, dim)?;
+        if dim == Dim::TipRadius {
+            // 0 is allowed and so is every radius from the smallest tangent sphere (0 for a pointed profile): not an interval.
+            return self.part(id)?.kind.clamp_tip_radius(value);
+        }
         let (lo, hi, rlo, rhi) = self.dim_limits(id, dim)?;
         Some(if value < lo - 1e-12 {
             (lo, Some(rlo))
@@ -483,14 +492,15 @@ impl Rocket {
                         let (aft, field) = shoulder_dim(d).unwrap_or((true, 0));
                         self.set_shoulder_field(id, aft, field, v)
                     }
+                    Dim::TipRadius => self.set_kind(id, kind.with_tip_radius(v)),
                     Dim::Shape => match kind {
-                        PartKind::NoseCone { shape, length, diameter } => {
+                        PartKind::NoseCone { shape, length, diameter, tip_radius } => {
                             let shape = match shape {
                                 NoseShape::PowerSeries(_) => NoseShape::PowerSeries(v),
                                 NoseShape::Haack(_) => NoseShape::Haack(v),
                                 other => other,
                             };
-                            self.set_kind(id, PartKind::NoseCone { shape, length, diameter })
+                            self.set_kind(id, PartKind::NoseCone { shape, length, diameter, tip_radius })
                         }
                         _ => false,
                     },
@@ -867,7 +877,7 @@ mod tests {
 
     fn rocket() -> (Rocket, PartId, PartId, PartId) {
         let mut r = Rocket::default();
-        let nose = r.insert(0, PartKind::NoseCone { shape: NoseShape::Haack(1.0 / 3.0), length: 0.2, diameter: 0.1 }).unwrap();
+        let nose = r.insert(0, PartKind::NoseCone { shape: NoseShape::Haack(1.0 / 3.0), length: 0.2, diameter: 0.1, tip_radius: 0.0 }).unwrap();
         let tube = r.insert(1, PartKind::BodyTube { length: 0.5, diameter: 0.1 }).unwrap();
         let tail = r.insert(2, PartKind::BodyTube { length: 0.3, diameter: 0.1 }).unwrap();
         (r, nose, tube, tail)

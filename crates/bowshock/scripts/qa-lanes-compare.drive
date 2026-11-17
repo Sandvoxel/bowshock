@@ -16,5 +16,7 @@ click "Compare all in lanes"
 screenshot menu2.png
 click (500, 400)
 screenshot compare-dark.png
+click "Prefs"
 click "Light"
+click "Done"
 screenshot compare-light.png

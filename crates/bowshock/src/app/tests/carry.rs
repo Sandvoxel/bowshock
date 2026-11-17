@@ -188,6 +188,24 @@ fn the_symmetry_footer_and_x_recount_a_selected_fin_set_in_place() {
 }
 
 #[test]
+fn the_angle_snap_footer_rounds_a_selected_fin_set_in_one_undo_step() {
+    let (mut app, [_, tube, _]) = app();
+    let fins = finned(&mut app, tube, 0.1);
+    let off = 20f64.to_radians();
+    let offset = app.ctx.doc.rocket().radial(fins).unwrap().offset;
+    app.ctx.doc.edit("Turn", |r| {
+        r.move_radial(fins, tube, offset, off).unwrap();
+    });
+    app.ctx.selection = Selection::Part(fins);
+    app.update(Message::PartsBin(parts_bin::Message::AngleSnap(0)));
+    assert!((app.ctx.doc.rocket().radial(fins).unwrap().angle - off).abs() < 1e-9);
+    app.update(Message::PartsBin(parts_bin::Message::AngleSnap(15)));
+    assert!((app.ctx.doc.rocket().radial(fins).unwrap().angle.to_degrees() - 15.0).abs() < 1e-6);
+    app.update(Message::Undo);
+    assert!((app.ctx.doc.rocket().radial(fins).unwrap().angle - off).abs() < 1e-9);
+}
+
+#[test]
 fn the_part_menu_opens_on_a_right_click_renames_and_deletes_in_one_undo_step() {
     use part_menu::Action;
     let (mut app, [_, tube, transition]) = app();
@@ -270,7 +288,7 @@ fn a_chosen_unit_set_is_kept_in_the_settings_file_and_not_in_the_rocket() {
     let rocket_before = app.ctx.doc.rocket().clone();
 
     let mixed = UnitSystem::MM_G_S.with(Family::Length, "in").with(Family::Mass, "kg");
-    app.update(Message::Units(mixed));
+    app.update(Message::Prefs(crate::prefs::Message::Units(mixed)));
     assert_eq!(app.ctx.units.label(), "in · kg · s");
     // Lengths read in inches and masses in kilograms through the same set.
     assert_eq!(ui::with_unit(0.0762, Quantity::Length, app.ctx.units), "3.00 in");
@@ -281,8 +299,90 @@ fn a_chosen_unit_set_is_kept_in_the_settings_file_and_not_in_the_rocket() {
 
     // A preset replaces it, and so does a project-wide chip choice (cleared when the set changes).
     crate::units::set_unit_override(Quantity::Length, &Quantity::Length.units()[4]);
-    app.update(Message::Units(UnitSystem::M_KG_S));
+    app.update(Message::Prefs(crate::prefs::Message::Units(UnitSystem::M_KG_S)));
     assert_eq!(Quantity::Length.unit_for(app.ctx.units).symbol, "m");
     assert_eq!(settings::Settings::load(Some(&file)).units, UnitSystem::M_KG_S);
     let _ = std::fs::remove_file(&file);
+}
+
+/// The vertices of the mesh on show in the ghost state, on `layer`.
+fn ghost_on(app: &App, layer: f32) -> Vec<[f32; 3]> {
+    app.viewport.mesh().vertices.iter().filter(|v| v.state == crate::viewport::scene::GHOST && v.layer == layer).map(|v| v.position).collect()
+}
+
+fn z_range(points: &[[f32; 3]]) -> (f32, f32) {
+    points.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p[2]), hi.max(p[2])))
+}
+
+#[test]
+fn a_picked_up_tube_is_ghosted_with_its_fins_and_internals_where_a_drop_would_put_them() {
+    use crate::viewport::{LAYER_INTERNAL, LAYER_RADIAL};
+    let (mut app, [_, tube, _]) = app();
+    let fins = finned(&mut app, tube, 0.1);
+    let bulkhead =
+        app.ctx.doc.edit("Bulkhead", |r| r.attach_internal(tube, 0.05, bowshock_model::InternalKind::Bulkhead { diameter: None, thickness: 0.006 }).unwrap());
+    app.after_update();
+    let before = app.ctx.doc.rocket().clone();
+    let fin_vertices = app.viewport.mesh().vertices.iter().filter(|v| v.layer == LAYER_RADIAL).count();
+    assert!(fin_vertices > 0 && ghost_on(&app, LAYER_RADIAL).is_empty());
+
+    // Held at the node behind the transition (station 0.3): the fin set (0.1 behind the tube's fore face) and the bulkhead
+    // (0.05 behind it) stand at 0.4 and 0.35, in the ghost state, not at their old stations.
+    vp(&mut app, Vp::Grab(Pick::Axial(tube)));
+    vp(&mut app, Vp::SnapNode(Some(2)));
+    app.after_update();
+    let ghost_fins = ghost_on(&app, LAYER_RADIAL);
+    assert_eq!(ghost_fins.len(), fin_vertices, "every copy of the fin set is drawn");
+    let (lo, _) = z_range(&ghost_fins);
+    assert!((lo - 0.4).abs() < 1e-4, "fins at the ghost's station: {lo}");
+    let (lo, hi) = z_range(&ghost_on(&app, LAYER_INTERNAL));
+    assert!(lo > 0.3499 && hi < 0.3561, "bulkhead at {lo}..{hi}");
+
+    // Released there: the real parts land where the ghost showed them, relative to the tube as before.
+    vp(&mut app, Vp::DropAxial);
+    let rocket = app.ctx.doc.rocket();
+    let (tube_at, fins_at) = (rocket.part_station(tube).unwrap(), rocket.radial_station(rocket.radial(fins).unwrap()).unwrap());
+    assert!((tube_at - 0.3).abs() < 1e-9 && (fins_at - tube_at - 0.1).abs() < 1e-9);
+    assert!((rocket.part_station(bulkhead).unwrap() - tube_at - 0.05).abs() < 1e-9);
+    app.after_update();
+    assert!(ghost_on(&app, LAYER_RADIAL).is_empty());
+
+    // Esc puts everything back exactly.
+    app.update(Message::Undo);
+    vp(&mut app, Vp::Grab(Pick::Axial(tube)));
+    vp(&mut app, Vp::SnapNode(Some(2)));
+    app.update(Message::Cancel);
+    assert_eq!(app.ctx.doc.rocket(), &before);
+}
+
+#[test]
+fn a_part_from_the_bin_is_ghosted_alone() {
+    use crate::viewport::{LAYER_INTERNAL, LAYER_RADIAL};
+    let (mut app, _) = app();
+    drag::start_axial(&mut app.ctx, 0, "Body tube", PartKind::BodyTube { length: 0.3, diameter: 0.1 });
+    vp(&mut app, Vp::SnapNode(Some(3)));
+    app.after_update();
+    assert!(app.viewport.mesh().vertices.iter().any(|v| v.state == crate::viewport::scene::GHOST));
+    assert!(ghost_on(&app, LAYER_RADIAL).is_empty() && ghost_on(&app, LAYER_INTERNAL).is_empty());
+}
+
+#[test]
+fn a_picked_up_tube_pulled_free_follows_the_cursor_with_its_fins() {
+    use crate::viewport::LAYER_RADIAL;
+    let (mut app, [_, tube, _]) = fitted();
+    finned(&mut app, tube, 0.1);
+    vp(&mut app, Vp::Grab(Pick::Axial(tube)));
+    app.update(Message::Cursor(Point::new(300.0, 100.0)));
+    app.after_update();
+    let near = ghost_on(&app, LAYER_RADIAL);
+    assert!(!near.is_empty(), "the fins are in hand");
+    app.update(Message::Cursor(Point::new(600.0, 100.0)));
+    app.after_update();
+    let far = ghost_on(&app, LAYER_RADIAL);
+    assert_eq!(near.len(), far.len());
+    assert!(near.iter().zip(&far).any(|(a, b)| a != b), "the ghost moved with the cursor");
+    // Snapped to a node it is drawn there instead, and the free ghost is gone.
+    vp(&mut app, Vp::SnapNode(Some(2)));
+    app.after_update();
+    assert_eq!(ghost_on(&app, LAYER_RADIAL).len(), near.len());
 }

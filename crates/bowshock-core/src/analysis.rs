@@ -74,7 +74,7 @@ impl Resolution {
 pub struct FinDrag {
     /// Skin friction of the fins.
     pub friction: f64,
-    /// Pressure drag of the fins: leading and trailing edges, plus wave drag of a double-wedge section.
+    /// Pressure drag of the fins: leading and trailing edges, plus Ackeret wave drag of the sharp (double-wedge, hexagonal, biconvex) and custom sections.
     pub pressure: f64,
 }
 

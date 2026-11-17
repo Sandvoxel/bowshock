@@ -145,7 +145,7 @@ fn app(example: bool, interactive: bool) -> iced::Application<impl iced::Program
             if interactive {
                 platform::set_dock_icon();
             }
-            App::launch(example, interactive)
+            App::boot(example, interactive)
         },
         App::update,
         App::view,

@@ -4,11 +4,15 @@ click "Analyze"
 move (100, 700)
 move (102, 702)
 screenshot an-dark.png
+click "Prefs"
 click "Light"
+click "Done"
 move (100, 700)
 move (102, 702)
 screenshot an-light.png
+click "Prefs"
 click "Dark"
+click "Done"
 click "Stability"
 move (100, 700)
 move (102, 702)
@@ -19,7 +23,7 @@ move (102, 702)
 screenshot an-flutter.png
 click "Simulate"
 screenshot sim-empty.png
-click "Run"
+click "Run selected"
 move (100, 700)
 move (102, 702)
 screenshot sim-run-idle.png
@@ -45,9 +49,13 @@ click (17, 226)
 move (100, 700)
 move (102, 702)
 screenshot sim-compare.png
+click "Prefs"
 click "Light"
+click "Done"
 screenshot sim-compare-light.png
+click "Prefs"
 click "Dark"
+click "Done"
 click "Analyze"
 click "Fin flutter"
 move (700, 200)
@@ -57,7 +65,9 @@ click "Simulate"
 move (462, 190)
 move (464, 192)
 screenshot sim-title-hover.png
+click "Prefs"
 click "Light"
+click "Done"
 click "Analyze"
 click "Aerodynamics"
 move (100, 700)

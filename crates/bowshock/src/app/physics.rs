@@ -17,7 +17,7 @@ use crate::widgets::gauge::GaugeState;
 /// Mach number of the builder's balance readout.
 pub const BALANCE_MACH: f64 = 0.3;
 
-/// Where the user's own motors live: the `.eng` files they loaded and the ThrustCurve.org downloads (`<motorId>.motor`).
+/// Where the user's own motors live: the `.eng` and `.rse` files they loaded, the thrust curves stored in imported OpenRocket files (kept as `.eng`) and the ThrustCurve.org downloads (`<motorId>.motor`).
 /// `$BOWSHOCK_MOTORS_DIR`, else `~/.config/bowshock/motors/`.
 pub fn user_motors_dir() -> Option<PathBuf> {
     super::env::default_motors_dir()
@@ -45,6 +45,22 @@ fn has_motor(db: &MotorDb, m: &Motor) -> bool {
 /// designation of a known motor is added: it is another motor.
 pub fn import_eng(db: &mut MotorDb, name: &str, text: &str) -> Result<(usize, usize), String> {
     let parsed = bowshock_motors::parse_eng(text).map_err(|e| format!("{name} · line {}: {}", e.line, e.message))?;
+    Ok(add_new(db, parsed))
+}
+
+/// Whether `name` is a RockSim engine file (`.rse`); anything else is read as RASP.
+fn is_rse(name: &str) -> bool {
+    Path::new(name).extension().is_some_and(|x| x.eq_ignore_ascii_case("rse"))
+}
+
+/// Parses `.rse` text and appends the motors `db` does not hold yet, like [`import_eng`]; the error is `Name.rse · <why>`.
+pub fn import_rse(db: &mut MotorDb, name: &str, text: &str) -> Result<(usize, usize), String> {
+    let parsed = bowshock_motors::parse_rse(text).map_err(|e| format!("{name} · {e}"))?;
+    Ok(add_new(db, parsed))
+}
+
+/// Appends the motors of `parsed` that `db` does not hold yet; returns `(added, skipped)`.
+fn add_new(db: &mut MotorDb, parsed: Vec<Motor>) -> (usize, usize) {
     let total = parsed.len();
     let mut added = 0;
     for motor in parsed {
@@ -53,11 +69,52 @@ pub fn import_eng(db: &mut MotorDb, name: &str, text: &str) -> Result<(usize, us
             added += 1;
         }
     }
-    Ok((added, total - added))
+    (added, total - added)
+}
+
+/// [`import_rse`] for a name ending in `.rse`, else [`import_eng`].
+fn import_text(db: &mut MotorDb, name: &str, text: &str) -> Result<(usize, usize), String> {
+    if is_rse(name) {
+        import_rse(db, name, text)
+    } else {
+        import_eng(db, name, text)
+    }
+}
+
+/// The RASP `.eng` text of `motor` (full precision, so reading it back gives the same [`Motor::id`]).
+fn eng_text(motor: &Motor) -> String {
+    let mut out = String::new();
+    for line in &motor.comments {
+        out.push_str(&format!("; {line}\n"));
+    }
+    let delays = if motor.delays.is_empty() { "P".to_string() } else { motor.delays.iter().map(ToString::to_string).collect::<Vec<_>>().join("-") };
+    out.push_str(&format!(
+        "{} {} {} {} {} {} {}\n",
+        motor.designation,
+        motor.diameter * 1000.0,
+        motor.length * 1000.0,
+        delays,
+        motor.propellant_mass,
+        motor.total_mass,
+        motor.manufacturer
+    ));
+    for (t, f) in &motor.points {
+        out.push_str(&format!("{t} {f}\n"));
+    }
+    out
+}
+
+/// Writes `motor` into the user motors directory `dir` as `<designation>-<hash>.eng`, where the next start loads it.
+fn keep_as_eng(dir: &Path, motor: &Motor) -> Result<(), String> {
+    if motor.designation.split_whitespace().count() != 1 || motor.designation.contains(['/', '\\', ':']) {
+        return Err(format!("`{}` cannot be a file name", motor.designation));
+    }
+    let name = format!("{}-{}.eng", motor.designation, motor.id.trim_start_matches(FILE_ID_PREFIX));
+    std::fs::create_dir_all(dir).and_then(|()| std::fs::write(dir.join(name), eng_text(motor))).map_err(|e| e.to_string())
 }
 
 /// Loads the user motors directory into `db`: the cached downloads (`*.motor`, which replace the catalogue's copy of the same
-/// motor) and every `.eng` (sorted by name). Files that cannot be read are skipped with a note on stderr. Returns the ids of
+/// motor) and every `.eng` and `.rse` (sorted by name). Files that cannot be read are skipped with a note on stderr. Returns the ids of
 /// the cached downloads.
 fn load_dir(db: &mut MotorDb, dir: &Path) -> HashSet<String> {
     let (cached, failed) = bowshock_motors::load_cached(dir);
@@ -71,12 +128,15 @@ fn load_dir(db: &mut MotorDb, dir: &Path) -> HashSet<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return downloaded;
     };
-    let mut files: Vec<PathBuf> =
-        entries.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("eng"))).collect();
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("eng") || x.eq_ignore_ascii_case("rse")))
+        .collect();
     files.sort();
     for file in files {
         let name = file.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-        let result = std::fs::read_to_string(&file).map_err(|e| format!("{name}: {e}")).and_then(|text| import_eng(db, &name, &text));
+        let result = std::fs::read_to_string(&file).map_err(|e| format!("{name}: {e}")).and_then(|text| import_text(db, &name, &text));
         if let Err(e) = result {
             eprintln!("motor file {e}");
         }
@@ -96,7 +156,7 @@ fn import_files(db: &mut MotorDb, dir: Option<&Path>, paths: &[PathBuf]) -> Stri
                 continue;
             }
         };
-        match import_eng(db, &name, &text) {
+        match import_text(db, &name, &text) {
             Err(e) => notes.push(e),
             Ok((added, skipped)) => {
                 if let Some(dir) = dir {
@@ -200,7 +260,7 @@ impl Physics {
         }
     }
 
-    /// Loads the user's `.eng` files (from the file dialog), keeps copies in [`user_motors_dir`], and returns the notice.
+    /// Loads the user's `.eng` and `.rse` files (from the file dialog), keeps copies in [`user_motors_dir`], and returns the notice.
     pub fn load_user_motors(&mut self, paths: &[PathBuf]) -> String {
         import_files(&mut self.motors, self.motors_dir.as_deref(), paths)
     }
@@ -215,7 +275,24 @@ impl Physics {
             _ => None,
         };
         self.downloaded.insert(motor.id.clone());
+        // A motor that was missing changes the balance and the warnings of the document already computed.
+        self.computed_for = None;
         (self.motors.upsert(motor), note)
+    }
+
+    /// Adds a motor made from a thrust curve stored in an OpenRocket file (see [`Motor::renamed`]) and, when there is a motors
+    /// directory, keeps it there as an `.eng` file so the saved document finds it by id at the next start (the cache of
+    /// downloads is for ThrustCurve.org motors only). It is a file motor: [`MotorOrigin::File`], the picker's USER tag.
+    /// Returns why it could not be kept, if so.
+    pub fn add_embedded(&mut self, motor: Motor) -> Option<String> {
+        let note = self
+            .motors_dir
+            .as_deref()
+            .and_then(|dir| keep_as_eng(dir, &motor).err())
+            .map(|e| format!("{}: thrust curve not kept for next time ({e})", motor.designation));
+        self.computed_for = None;
+        self.motors.upsert(motor);
+        note
     }
 
     /// The motor database.
@@ -449,7 +526,7 @@ mod tests {
 
     fn finned() -> Rocket {
         let mut r = Rocket::default();
-        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762 }).unwrap();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762, tip_radius: 0.0 }).unwrap();
         let tube = r.insert(1, PartKind::BodyTube { length: 0.9, diameter: 0.0762 }).unwrap();
         r.attach_radial(tube, 0.78, 0.0, 3, RadialKind::FinSet { root_chord: 0.12, tip_chord: 0.05, span: 0.0762, sweep: 0.06, thickness: 0.003 }).unwrap();
         r
@@ -551,6 +628,62 @@ mod tests {
         import_eng(&mut db, "c.eng", CUSTOM).unwrap();
         physics.motors.upsert(db.motors.remove(0));
         assert_eq!(physics.motor_origin(physics.motors().len() - 1), MotorOrigin::File);
+    }
+
+    const RSE: &str = "<engine-database><engine-list><engine mfg=\"AeroTech\" code=\"I32N\" dia=\"38\" len=\"356\" initWt=\"647\" propWt=\"380.5\" delays=\"1000\">\
+        <comments>from a post</comments><data><eng-data t=\"0\" f=\"0\" m=\"647\"/><eng-data t=\"0.055\" f=\"93.099\" m=\"645\"/><eng-data t=\"20.192\" f=\"0\" m=\"266.5\"/></data></engine></engine-list></engine-database>";
+
+    #[test]
+    fn rse_files_load_like_eng_files_and_are_kept_for_the_next_start() {
+        let dir = temp_dir("rse");
+        let source = dir.join("Curve.rse");
+        std::fs::write(&source, RSE).unwrap();
+        let store = dir.join("store");
+        let mut db = MotorDb::bundled();
+        let bundled = db.len();
+        assert_eq!(import_files(&mut db, Some(&store), std::slice::from_ref(&source)), "Loaded 1 motor from Curve.rse");
+        assert_eq!(db.len(), bundled + 1);
+        assert_eq!(import_files(&mut db, None, &[source]), "Loaded 0 motors from Curve.rse (1 already known)");
+        assert!(store.join("Curve.rse").is_file());
+        let mut next = MotorDb::bundled();
+        load_dir(&mut next, &store);
+        assert_eq!(next.motors.last().unwrap().designation, "I32N");
+        let bad = dir.join("Bad.rse");
+        std::fs::write(&bad, "<engine code=\"Q1\" dia=\"1\" len=\"1\" initWt=\"1\" propWt=\"1\"><data/></engine>").unwrap();
+        let notice = import_files(&mut db, None, &[bad]);
+        assert!(notice.starts_with("Bad.rse · ") && notice.contains("Q1"), "{notice}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn embedded_curves_are_user_motors_kept_as_eng_files_that_keep_their_id() {
+        let store = temp_dir("embedded");
+        let env = crate::app::env::Env { motors_dir: Some(store.clone()), ..crate::app::env::Env::for_tests() };
+        let mut physics = Physics::from_env(&env);
+        let curve = bowshock_motors::parse_rse(RSE).unwrap().remove(0);
+        let j33n = curve.renamed("J33N", "AeroTech");
+        let j34n = curve.renamed("J34N", "Kuhns");
+        assert_ne!(j33n.id, j34n.id, "one curve under two names is two motors");
+        assert!(j33n.id.starts_with(FILE_ID_PREFIX));
+        for m in [&j33n, &j34n] {
+            assert_eq!(physics.add_embedded(m.clone()), None);
+            let index = physics.motors().position(&m.id).unwrap();
+            assert_eq!(physics.motor_origin(index), MotorOrigin::File);
+        }
+        // The next session finds both by id, with the same data.
+        let next = Physics::from_env(&env);
+        for m in [&j33n, &j34n] {
+            let found = next.motors().get(&m.id).unwrap_or_else(|| panic!("{} was not kept", m.designation));
+            assert_eq!((found.designation.as_str(), found.manufacturer.as_str()), (m.designation.as_str(), m.manufacturer.as_str()));
+            assert_eq!(found.points, m.points);
+            assert_eq!(found.delays, m.delays);
+            assert!((found.total_mass - m.total_mass).abs() < 1e-9 && (found.propellant_mass - m.propellant_mass).abs() < 1e-9);
+        }
+        // A name that cannot be a file name is reported, and the motor still flies this session.
+        let odd = curve.renamed("J 33/N", "AeroTech");
+        assert!(physics.add_embedded(odd.clone()).is_some());
+        assert!(physics.motors().get(&odd.id).is_some());
+        let _ = std::fs::remove_dir_all(&store);
     }
 
     #[test]

@@ -7,5 +7,9 @@ click "Delete"
 screenshot nofins-dark.png
 click "1 error"
 screenshot issues-dark.png
+# A click outside closes the issues list (the headless driver delivers keys to widgets only, so Escape does not reach the app).
+click (640, 300)
+click "Prefs"
 click "Light"
+click "Done"
 screenshot nofins-light.png

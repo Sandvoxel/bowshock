@@ -19,9 +19,18 @@ use crate::tokens::TEXT_LABEL;
 use crate::units::UnitSystem;
 
 /// How close (px) the cursor must be to an attach node for the part to stack there rather than attach to the tube's side.
-pub const NODE_PX: f32 = 26.0;
-/// How far from the rocket's axis line (on screen) the open space still counts as "beside the rocket" for stacking.
-pub const VOID_PX: f32 = 160.0;
+pub const NODE_PX: f32 = 20.0;
+/// How far from the rocket's axis line (on screen), and past either end of it, the open space still counts as "beside the
+/// rocket" for stacking. Kept near the body: a part pulled clear of the rocket must come free, not jump back to the nearest
+/// joint.
+pub const VOID_PX: f32 = 48.0;
+/// A node catches the cursor within this multiple of the airframe's projected radius there (when that is more than
+/// [`NODE_PX`]), and never beyond [`CATCH_MAX_PX`] px.
+const CATCH_SCALE: f32 = 1.15;
+const CATCH_MAX_PX: f32 = 96.0;
+/// The view counts as along the rocket when the view direction has more than this much of the axis in it (a view direction on
+/// the axis is 1).
+const FORESHORTENED: f32 = 0.75;
 /// Diameter of a node ring.
 const RING: f32 = 7.0;
 /// Width of one MONO glyph at `TEXT_LABEL`, as a fraction of the font size (IBM Plex Mono advances 0.6 em).
@@ -86,6 +95,59 @@ pub fn body_of(drag: &Drag) -> PodBody {
     }
 }
 
+/// Every id of the part picked up and of what it carries (its radial and internal parts): what the ghost draws in the ghost state.
+pub fn carried_ids(origin: &Origin) -> Vec<PartId> {
+    std::iter::once(origin.part.id).chain(origin.radials.iter().map(|r| r.id)).chain(origin.internals.iter().map(|i| i.id)).collect()
+}
+
+/// Puts back what removing and re-adding a part dropped from the configurations: every motor slot of `from` whose mount exists
+/// again in `rocket` but has lost its slot, and every recovery deployment of a device that exists again.
+pub fn restore_motors(rocket: &mut Rocket, from: &Rocket) {
+    for config in from.configurations() {
+        for slot in &config.motors {
+            let present = rocket.configuration(config.id).is_some_and(|c| c.slot(slot.mount).is_some());
+            if !present && rocket.internal(slot.mount).is_some() {
+                let _ = rocket.set_motor(config.id, slot.mount, slot.motor.clone());
+                let _ = rocket.set_motor_delay(config.id, slot.mount, slot.delay);
+            }
+        }
+        for timing in &config.recovery {
+            if rocket.configuration(config.id).is_some_and(|c| c.deployment(timing.part).is_none()) {
+                let _ = rocket.set_deployment(config.id, timing.part, timing.deploy);
+            }
+        }
+    }
+}
+
+/// Lands the part picked up (`origin`, of `kind`) on attach node `node` of `rocket` with what it carried: its radial and internal
+/// parts, offsets limited to the matched part by the model, and its motors (from `base`, the rocket as it was before the drag).
+/// The matched kind. A drop and the ghost both use this, so the ghost shows exactly what the drop makes.
+pub fn land_carried(rocket: &mut Rocket, node: usize, kind: &PartKind, origin: &Origin, base: Option<&Rocket>) -> Option<PartKind> {
+    let matched = rocket.matched(node, kind);
+    rocket.restore(node, Part { kind: matched.clone(), ..origin.part.clone() }).ok()?;
+    rocket.restore_radials(origin.radials.clone());
+    rocket.restore_internals(origin.internals.clone());
+    if let Some(base) = base {
+        restore_motors(rocket, base);
+    }
+    Some(matched)
+}
+
+/// The picked-up part with what it carries as a rocket of its own (the part alone in the stack, its motors in the active
+/// configuration if `base` loaded them), for the ghost pulled free of the rocket.
+pub fn free_rocket(origin: &Origin, base: Option<&Rocket>) -> Rocket {
+    let mut rocket = PodBody::single(origin.part.clone(), origin.radials.clone(), origin.internals.clone()).to_rocket();
+    if let Some(base) = base {
+        let config = rocket.active_configuration().id;
+        for slot in &base.active_configuration().motors {
+            if origin.internals.iter().any(|i| i.id == slot.mount) {
+                let _ = rocket.set_motor(config, slot.mount, slot.motor.clone());
+            }
+        }
+    }
+    rocket
+}
+
 /// What the cursor chooses.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Choice {
@@ -107,10 +169,9 @@ impl Overlay<'_> {
 
     /// Valid nodes of the core and of every pod's stack, with their screen positions (a pod's on each of its copies).
     fn nodes(&self, size: Size) -> Vec<Node> {
-        let core = self.rocket.nodes_for(&self.drag.kind).into_iter().map(|(index, station)| Node {
-            snap: Snap::Core(index),
-            station,
-            at: self.camera.project(Vec3::new(0.0, 0.0, station as f32), size),
+        let core = self.rocket.nodes_for(&self.drag.kind).into_iter().map(|(index, station)| {
+            let at = self.camera.project(Vec3::new(0.0, 0.0, station as f32), size);
+            Node { snap: Snap::Core(index), station, at, catch: self.catch_px(index, at, size) }
         });
         let mut nodes: Vec<Node> = core.collect();
         if !self.carries_pod() {
@@ -119,7 +180,7 @@ impl Overlay<'_> {
                 for (index, station) in self.rocket.nodes_for_pod(pod.id, &self.drag.kind) {
                     for (pose, camera) in view.poses.iter().zip(&view.cameras) {
                         let at = camera.project(Vec3::Z * (station as f32 - pose.z0), size);
-                        nodes.push(Node { snap: Snap::Pod(pod.id, index), station, at });
+                        nodes.push(Node { snap: Snap::Pod(pod.id, index), station, at, catch: NODE_PX });
                     }
                 }
             }
@@ -127,17 +188,35 @@ impl Overlay<'_> {
         nodes
     }
 
-    /// What the cursor at `at` chooses: a node within [`NODE_PX`], else the tube side under it (a part that carries a pod cannot
-    /// become one), else the nearest node.
+    /// How close (px) the cursor must be to core node `index` (on screen at `at`) to catch it: the node's own [`NODE_PX`], or
+    /// 1.15 times the airframe's projected outer radius there if that is more, so the catch disc covers the end face of the
+    /// tube as it appears (at most [`CATCH_MAX_PX`]).
+    fn catch_px(&self, index: usize, at: Point, size: Size) -> f32 {
+        let parts = self.rocket.parts();
+        let fore = parts.get(index).map_or(0.0, |p| p.kind.fore_diameter());
+        let aft = index.checked_sub(1).and_then(|i| parts.get(i)).map_or(0.0, |p| p.kind.aft_diameter());
+        let rim = self.camera.project(
+            Vec3::new(0.0, 0.0, self.rocket.stations().get(index).copied().unwrap_or(0.0) as f32) + self.camera.right() * (fore.max(aft) / 2.0) as f32,
+            size,
+        );
+        (CATCH_SCALE * at.distance(rim)).clamp(NODE_PX, CATCH_MAX_PX)
+    }
+
+    /// What the cursor at `at` chooses: over a part's surface in a view along the rocket, the node at that part's far end;
+    /// else a node whose catch disc holds the cursor (the nearest centre), else the tube side under it (a part that carries a
+    /// pod cannot become one), else the node beside the rocket along its axis.
     fn choice(&self, at: Point, size: Size) -> Option<Choice> {
-        let nearest = self.nodes(size).into_iter().map(|n| (n.snap, n.at.distance(at))).min_by(|a, b| a.1.total_cmp(&b.1));
-        if let Some((snap, _)) = nearest.filter(|n| n.1 <= NODE_PX) {
+        let nodes = self.nodes(size);
+        if let Some(snap) = self.far_end(&nodes, at, size) {
+            return Some(Choice::Node(snap));
+        }
+        let nearest = nodes.iter().map(|n| (n.snap, n.at.distance(at))).min_by(|a, b| a.1.total_cmp(&b.1));
+        let caught = nodes.iter().map(|n| (n.snap, n.at.distance(at), n.catch)).filter(|n| n.1 <= n.2).min_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((snap, ..)) = caught {
             return Some(Choice::Node(snap));
         }
         if !self.carries_pod() {
-            let kind = RadialKind::Pod { gap: 0.0, body: body_of(self.drag) };
-            let snapping = pick::Snapping { angle: self.snap_angle, station: Some(self.snap_step) };
-            if let Some(target) = pick::surface_target(self.rocket, &self.camera, at, size, &kind, snapping) {
+            if let Some(target) = self.surface_under(at, size) {
                 return Some(Choice::Surface(target));
             }
         }
@@ -147,7 +226,26 @@ impl Overlay<'_> {
             return Some(Choice::Node(snap));
         }
         // Far from the rocket there is no target ("no node"); an empty rocket has only its first node.
-        nearest.filter(|_| self.rocket.parts().is_empty()).map(|(snap, _)| Choice::Node(snap))
+        nearest.filter(|_| self.rocket.parts().is_empty()).map(|(snap, ..)| Choice::Node(snap))
+    }
+
+    /// The tube side under the cursor, where the part would stand as a pod.
+    fn surface_under(&self, at: Point, size: Size) -> Option<SurfaceTarget> {
+        let kind = RadialKind::Pod { gap: 0.0, body: body_of(self.drag) };
+        pick::surface_target(self.rocket, &self.camera, at, size, &kind, pick::Snapping { angle: self.snap_angle, station: Some(self.snap_step) })
+    }
+
+    /// Looking along the rocket (more than [`FORESHORTENED`] of the view direction on the axis) every node projects into a few
+    /// pixels and the far end of a piece is hidden behind it: with the cursor over a piece's surface, its far end from the
+    /// viewer (the aft node looking from the nose, the fore node looking from the tail) is the node, if the part can stack there.
+    fn far_end(&self, nodes: &[Node], at: Point, size: Size) -> Option<Snap> {
+        let along = self.camera.back().z;
+        if along.abs() <= FORESHORTENED {
+            return None;
+        }
+        let index = self.rocket.index_of(self.surface_under(at, size)?.parent)?;
+        let snap = Snap::Core(if along < 0.0 { index + 1 } else { index });
+        nodes.iter().any(|n| n.snap == snap).then_some(snap)
     }
 
     /// The core node nearest the cursor measured along the rocket's axis, when the cursor is within [`VOID_PX`] of the axis line
@@ -240,6 +338,8 @@ struct Node {
     snap: Snap,
     station: f64,
     at: Point,
+    /// How close (px) the cursor must be for the node to catch it.
+    catch: f32,
 }
 
 impl canvas::Program<Message> for Overlay<'_> {
@@ -411,4 +511,78 @@ pub fn no_entry(frame: &mut Frame, at: Point, color: Color) {
     frame.stroke(&Path::circle(centre, r), stroke);
     let d = r * std::f32::consts::FRAC_1_SQRT_2;
     frame.stroke(&Path::line(Point::new(centre.x - d, centre.y + d), Point::new(centre.x + d, centre.y - d)), stroke);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bowshock_model::NoseShape;
+
+    const SIZE: Size = Size::new(900.0, 400.0);
+
+    /// A nose (0 to 0.2 m) and a tube (0.2 to 0.7 m), both Ø0.1 m: nodes 0, 1 and 2 at stations 0, 0.2 and 0.7.
+    fn rocket() -> (Rocket, PartId) {
+        let mut r = Rocket::default();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1, tip_radius: 0.0 }).unwrap();
+        let tube = r.insert(1, PartKind::BodyTube { length: 0.5, diameter: 0.1 }).unwrap();
+        (r, tube)
+    }
+
+    fn drag(kind: PartKind) -> Drag {
+        Drag { row: Some(0), origin: None, name: "Part", kind, snap: None, surface: None, count: 3, pod_snap: None }
+    }
+
+    /// Orthographic, 500 px per metre, looking at the middle of the rocket.
+    fn camera(yaw: f32, pitch: f32) -> Camera {
+        Camera { target: Vec3::new(0.0, 0.0, 0.35), yaw, pitch, scale: 500.0, ortho_blend: 1.0, ..Camera::default() }
+    }
+
+    fn choose(rocket: &Rocket, drag: &Drag, camera: Camera, at: Point) -> Option<Choice> {
+        let overlay = Overlay { rocket, drag, camera, cursor: None, snap_angle: 0, snap_step: 0.001, margin: None, units: UnitSystem::default() };
+        overlay.choice(at, SIZE)
+    }
+
+    #[test]
+    fn a_nodes_catch_disc_covers_the_tubes_projected_end_face() {
+        let (rocket, tube) = rocket();
+        let drag = drag(PartKind::BodyTube { length: 0.3, diameter: 0.1 });
+        // Side view (+z to the right, 500 px/m): the joint at 0.2 m is at x = 375 and the Ø0.1 tube is 25 px in radius there, so
+        // its disc is 1.15 * 25 = 28.75 px (NODE_PX alone is 20).
+        let side = camera(-std::f32::consts::FRAC_PI_2, 0.0);
+        assert_eq!(choose(&rocket, &drag, side, Point::new(400.0, 200.0)), Some(Choice::Node(Snap::Core(1))), "25 px along the body is inside the disc");
+        let outside = choose(&rocket, &drag, side, Point::new(405.0, 200.0));
+        assert!(matches!(outside, Some(Choice::Surface(t)) if t.parent == tube), "30 px along the body is outside it: the side: {outside:?}");
+        // A small tube (radius 5 px at 100 px/m) keeps the 20 px base.
+        let far = Camera { scale: 100.0, ..side };
+        assert_eq!(choose(&rocket, &drag, far, Point::new(450.0 + (0.2 - 0.35) * 100.0 + 18.0, 200.0)), Some(Choice::Node(Snap::Core(1))));
+    }
+
+    #[test]
+    fn looking_along_the_rocket_a_piece_snaps_to_its_far_end() {
+        let (rocket, tube) = rocket();
+        let drag = drag(PartKind::BodyTube { length: 0.3, diameter: 0.1 });
+        // Raised so the tube's top is seen: from the nose looking aft (view direction 88% on the axis) the far end is its aft node
+        // (2); from the tail looking forward it is its fore node (1).
+        let on_the_tube = Vec3::new(0.0, 0.05, 0.45);
+        for (yaw, node) in [(std::f32::consts::PI, 2), (0.0, 1)] {
+            let camera = camera(yaw, 0.5);
+            assert!(camera.back().z.abs() > FORESHORTENED);
+            let at = camera.project(on_the_tube, SIZE);
+            assert_eq!(choose(&rocket, &drag, camera, at), Some(Choice::Node(Snap::Core(node))), "yaw {yaw}");
+        }
+        // Side on nothing changes: the tube's side (the near face, mid-tube) is a pod.
+        let side = camera(-std::f32::consts::FRAC_PI_2, 0.0);
+        let got = choose(&rocket, &drag, side, side.project(Vec3::new(-0.05, 0.0, 0.45), SIZE));
+        assert!(matches!(got, Some(Choice::Surface(t)) if t.parent == tube), "{got:?}");
+    }
+
+    #[test]
+    fn a_part_that_cannot_stack_at_the_far_end_gets_what_it_got_before() {
+        let (rocket, tube) = rocket();
+        // A nose cone stacks only at the fore node: the tube's aft node is no choice, so the cursor on the tube makes a pod.
+        let drag = drag(PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1, tip_radius: 0.0 });
+        let camera = camera(std::f32::consts::PI, 0.5);
+        let choice = choose(&rocket, &drag, camera, camera.project(Vec3::new(0.0, 0.05, 0.45), SIZE));
+        assert!(matches!(choice, Some(Choice::Surface(t)) if t.parent == tube), "{choice:?}");
+    }
 }

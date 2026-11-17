@@ -23,15 +23,18 @@
 //!   drag is `0.5 rho v^2 CdA` summed over deployed devices.
 //! * Stages are in firing order (see [`StageMass`]). Each stage's ignition and separation are [`Timing`]s (a trigger plus a
 //!   delay: burnout, separation, time from launch, or climbing through an altitude), resolved by [`Timeline`] as the flight
-//!   goes: altitude triggers fire the first step the rocket is at or above the altitude while ascending. A separated stage is
-//!   dropped; only the remaining upper stack is flown afterwards and the aerodynamics are rebuilt for the truncated vehicle.
-//!   Recovery devices on dropped stages are ignored.
+//!   goes: altitude triggers fire the first step the rocket is at or above the altitude while ascending. A separated stage leaves
+//!   the upper stack, whose flight (the primary track) goes on with the aerodynamics rebuilt for the truncated vehicle. Each
+//!   dropped stage is then flown on its own from the separation state to the ground, with its own mass, aerodynamics and recovery
+//!   devices, and reported as a [`Branch`] of the result (see `branch.rs`).
 //! * Wind is the ground wind below the first level of [`Launch::wind_levels`], interpolated linearly in its east and north
 //!   components between levels and held above the top one; turbulence adds an Ornstein-Uhlenbeck gust with standard
 //!   deviation `intensity x` the mean wind speed at the rocket's altitude.
 
+mod branch;
 mod dynamics;
 mod input;
+mod record;
 mod result;
 mod run;
 #[cfg(test)]
@@ -127,12 +130,6 @@ struct Ctx<'a> {
     g_surface: f64,
     /// The Earth's rotation in the local east-north-up frame (rad/s), with a latitude.
     omega: Option<[f64; 3]>,
-    /// The fin sets under active roll control, per aerodynamic model (see [`Aero::controlled_fin_sets`]).
-    controlled: Vec<Vec<(usize, bowshock_model::PartId)>>,
-    /// The cant each roll controller holds away from its group's own cant (rad), by group.
-    deflection: Vec<(bowshock_model::PartId, f64)>,
-    /// The cant of the first roll controller's group (rad), recorded with every sample.
-    control_cant: f64,
 }
 
 /// Angular rate of the Earth's rotation (rad/s), WGS 84 (NIMA TR8350.2).
@@ -280,6 +277,4 @@ struct Diag {
     stiff: f64,
     /// Natural frequency of the pitch oscillation (rad/s); zero outside the rigid-body mode or without a restoring moment.
     pitch_freq: f64,
-    /// Cant of the first actively controlled fin group (rad); 0 without one.
-    control_cant: f64,
 }

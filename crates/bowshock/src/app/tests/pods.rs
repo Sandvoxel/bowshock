@@ -194,7 +194,10 @@ fn the_nose_rows_stay_enabled_while_any_body_has_a_free_fore_end() {
     let (pod, _) = bare_pod(&mut app, tube);
     assert!(nose_reasons(&app).iter().all(Option::is_none), "{:?}", nose_reasons(&app));
     // Once that pod has a nose too, no body has a free fore end.
-    assert!(app.ctx.doc.edit("Nose", |r| r.insert_in_pod(pod, 0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.05, diameter: 0.03 }).is_ok()));
+    assert!(app
+        .ctx
+        .doc
+        .edit("Nose", |r| r.insert_in_pod(pod, 0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.05, diameter: 0.03, tip_radius: 0.0 }).is_ok()));
     assert!(nose_reasons(&app).iter().all(Option::is_some));
     // The tail cone goes to the aft node of any body, the pod's included.
     let boattail = parts_bin::RowId::new(parts_bin::Category::Airframe, 7);

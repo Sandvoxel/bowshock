@@ -33,7 +33,7 @@ fn parachute(diameter: f64, event: DeployEvent, delay: f64) -> InternalKind {
 /// plus 1 s and an altimeter, H128W loaded.
 fn single_stage() -> (Rocket, PartId) {
     let mut r = Rocket::default();
-    r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: NOSE, diameter: BODY }).unwrap();
+    r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: NOSE, diameter: BODY, tip_radius: 0.0 }).unwrap();
     let upper = r.insert(1, PartKind::BodyTube { length: 0.6, diameter: BODY }).unwrap();
     let lower = r.insert(2, PartKind::BodyTube { length: 0.3, diameter: BODY }).unwrap();
     let motor_mount = r.attach_internal(lower, 0.05, mount(0.041, 0.25)).unwrap();
@@ -236,7 +236,7 @@ struct TwoStage {
 /// the sustainer.
 fn two_stage() -> TwoStage {
     let mut r = Rocket::default();
-    r.insert(0, PartKind::NoseCone { shape: NoseShape::VonKarman, length: NOSE, diameter: BODY }).unwrap();
+    r.insert(0, PartKind::NoseCone { shape: NoseShape::VonKarman, length: NOSE, diameter: BODY, tip_radius: 0.0 }).unwrap();
     let sustainer = r.insert(1, PartKind::BodyTube { length: 0.6, diameter: BODY }).unwrap();
     let booster = r.insert(2, PartKind::BodyTube { length: 0.5, diameter: BODY }).unwrap();
     let sustainer_mount = r.attach_internal(sustainer, 0.3, mount(0.032, 0.25)).unwrap();
@@ -400,7 +400,7 @@ fn staging_problems_and_clusters_are_warned_about() {
 #[test]
 fn freeform_fin_becomes_the_equivalent_trapezoid() {
     let mut r = Rocket::default();
-    r.insert(0, PartKind::NoseCone { shape: NoseShape::Haack(0.0), length: NOSE, diameter: BODY }).unwrap();
+    r.insert(0, PartKind::NoseCone { shape: NoseShape::Haack(0.0), length: NOSE, diameter: BODY, tip_radius: 0.0 }).unwrap();
     let tube = r.insert(1, PartKind::BodyTube { length: 0.5, diameter: BODY }).unwrap();
     // A trapezoid written as a polygon: root 0.15, tip 0.07 swept 0.06, span 0.09.
     let outline = vec![(0.0, 0.0), (0.06, 0.09), (0.13, 0.09), (0.15, 0.0)];
@@ -428,7 +428,7 @@ fn freeform_fin_becomes_the_equivalent_trapezoid() {
     assert!((f.fin_area() - area).abs() < 1e-9 && (f.span - 0.12).abs() < 1e-9, "{f:?}");
     // Parametric noses fall back to the closest of the sim's shapes.
     let mut n = Rocket::default();
-    n.insert(0, PartKind::NoseCone { shape: NoseShape::PowerSeries(1.0), length: NOSE, diameter: BODY }).unwrap();
+    n.insert(0, PartKind::NoseCone { shape: NoseShape::PowerSeries(1.0), length: NOSE, diameter: BODY, tip_radius: 0.0 }).unwrap();
     assert_eq!(vehicle(&n, &db, Phase::Full).unwrap().body[0].kind, BodyKind::Nose(SimNose::Conical));
     assert_eq!(vehicle(&Rocket::default(), &db, Phase::Full), Err(BridgeError::EmptyRocket));
 }
@@ -584,7 +584,7 @@ fn a_swept_freeform_plywood_fin_flutters_where_the_hand_calculation_says() {
     use bowshock_sim::flutter::{FlutterFin, FlutterGeometry, FlutterTrace, FlutterWarning, P0};
     use bowshock_sim::Atmosphere;
     let mut r = Rocket::default();
-    r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.3, diameter: 0.1016 }).unwrap();
+    r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.3, diameter: 0.1016, tip_radius: 0.0 }).unwrap();
     let tube = r.insert(1, PartKind::BodyTube { length: 0.86, diameter: 0.1016 }).unwrap();
     let outline = vec![(0.0, 0.0), (0.23495, 0.10795), (0.287655, 0.10795), (0.3302, 0.0)];
     let fins = r.attach_radial(tube, 0.52705, 0.0, 3, RadialKind::FreeformFin { points: outline, thickness: 0.00299974 }).unwrap();
@@ -666,4 +666,29 @@ fn a_fin_tab_to_the_motor_mount_is_checked_by_the_health_list() {
     let flat = vehicle(&r, &db, Phase::Full).unwrap();
     assert!(r.set_fin_tab(fins, None));
     assert_eq!(vehicle(&r, &db, Phase::Full).unwrap().fin_sets, flat.fin_sets);
+}
+
+/// A nose with a tip sphere reaches the sim as the same outline: the segment keeps the length as built and the tip radius, and
+/// where the sim's family is the model's (cone, tangent ogive, Von Karman) its radius agrees with the model's everywhere; a nose
+/// without a tip radius is the sharp segment as before.
+#[test]
+fn a_blunted_nose_is_the_same_outline_in_the_sim() {
+    let db = MotorDb::bundled();
+    for (shape, tip) in [(NoseShape::Conical, 0.012), (NoseShape::TangentOgive, 0.012), (NoseShape::VonKarman, 0.01)] {
+        let mut r = Rocket::default();
+        let nose = r.insert(0, PartKind::NoseCone { shape, length: NOSE, diameter: BODY, tip_radius: 0.0 }).unwrap();
+        r.insert(1, PartKind::BodyTube { length: 0.5, diameter: BODY }).unwrap();
+        let sharp = vehicle(&r, &db, Phase::Full).unwrap().body[0].clone();
+        assert_eq!((sharp.tip_radius, sharp.length), (0.0, NOSE), "{shape:?}");
+        assert!(r.set_dim(nose, bowshock_model::Dim::TipRadius, tip).is_some());
+        let kind = r.part(nose).unwrap().kind.clone();
+        let seg = vehicle(&r, &db, Phase::Full).unwrap().body[0].clone();
+        assert_eq!((seg.tip_radius, seg.length, seg.aft_radius), (tip, NOSE, BODY / 2.0), "{shape:?}: built length kept");
+        let (a, b) = (kind.nose_blunt().unwrap(), seg.blunt_nose().unwrap());
+        assert!((a.sharp_length - b.sharp_length).abs() < 1e-9 && (a.x_t - b.x_t).abs() < 1e-9, "{shape:?}: {a:?} vs {b:?}");
+        for i in 0..=50 {
+            let z = NOSE * f64::from(i) / 50.0;
+            assert!((seg.radius_at(z) - kind.radius_at(z)).abs() < 1e-9, "{shape:?} z {z}: {} vs {}", seg.radius_at(z), kind.radius_at(z));
+        }
+    }
 }

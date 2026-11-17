@@ -8,6 +8,7 @@ The flight seen from above: where the rocket goes and where it comes down. It an
 - **Wind** top left: speed and the direction it blows from, with an arrow pointing the way it blows.
 - **Field radius**, set in Conditions, as a dashed `warn` circle labelled `FIELD 300 m`.
 - **One track per flight**, 2 px. Each track shows its **apogee** as a hollow ring and its **landing** as a filled square, both with a 2 px surface ring so overlapping marks stay separate. The landing gets a label with distance and bearing from the pad (`337 m · 067°`) in `ink-muted`.
+- **A dropped stage** (a booster after its separation) has a track of its own in its flight's colour, **dashed**, from the separation point to where it lands. Its landing is a **hollow square**, labelled with its name before the distance and bearing (`Booster 112 m · 240°`). It is checked against the field radius like the flight's own landing, and a click on its marker selects its flight.
 - The ascent usually leans **into** the wind (weathercocking) and the descent drifts downwind, so a track normally hooks back on itself: that's expected, not a bug.
 
 **Colour**

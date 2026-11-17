@@ -112,7 +112,8 @@ impl<'w> Builder<'w> {
                         Some(d) => d.parse().unwrap_or(f64::INFINITY),
                     };
                     let manufacturer = text(c, "manufacturer").unwrap_or("").to_string();
-                    rec.motors.push(MotorSpec { config, motor: MotorRef::new(designation, manufacturer), delay });
+                    let digest = text(c, "digest").unwrap_or("").to_string();
+                    rec.motors.push(MotorSpec { config, motor: MotorRef::new(designation, manufacturer), digest, delay });
                 }
                 "ignitionconfiguration" => rec.ignition.push(IgnitionSpec {
                     config,

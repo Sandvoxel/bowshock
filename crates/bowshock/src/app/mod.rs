@@ -9,11 +9,13 @@ pub mod env;
 mod files;
 pub mod live;
 mod message;
+mod motor_fetch;
 mod multi;
 pub mod part_menu;
 pub mod physics;
 pub mod refs;
 mod route;
+mod run_report;
 pub mod scale;
 pub mod selection_set;
 pub mod settings;
@@ -26,6 +28,7 @@ pub mod worker;
 pub(crate) use ctx::Pending;
 pub use ctx::{Ctx, Mode, Selection};
 pub use message::{KeyPress, Message};
+pub use run_report::{RunLine, RunReport, RunSummary};
 
 use bowshock_model::PartId;
 use iced::widget::{column, mouse_area};
@@ -117,6 +120,13 @@ impl App {
         app
     }
 
+    /// [`launch`](Self::launch) and the lookup of the motors a start-up document is missing (see [`motor_fetch`]).
+    pub fn boot(example: bool, animate: bool) -> (Self, Task<Message>) {
+        let mut app = App::launch(example, animate);
+        let fetch = motor_fetch::start(&mut app.ctx);
+        (app, fetch)
+    }
+
     /// The shared context (tests and drive hooks).
     #[cfg(test)]
     pub fn ctx(&self) -> &Ctx {
@@ -156,6 +166,7 @@ impl App {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let before = self.ctx.physics.balance().copied();
         let task = self.route(message);
+        let task = Task::batch([task, motor_fetch::start(&mut self.ctx)]);
         self.track_drop();
         self.after_update();
         self.ctx.track_live(before);
@@ -253,7 +264,8 @@ impl App {
         // a menu or the part menu of a pick comes and goes above it.
         let mut layers: Vec<Element<'_, Message>> = vec![page.boxed()];
         layers.extend(self.chrome.overlay(ctx));
-        layers.extend(files::menu(ctx));
+        layers.extend(chrome::menu_overlay(ctx, chrome::ViewChecks { projection: self.viewport.projection(), inside: self.viewport.inside() }));
+        layers.extend(chrome::run_toast(ctx));
         layers.extend(files::unsaved_modal(ctx));
         layers.extend(self.export.view());
         layers.extend(self.print.view());

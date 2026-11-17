@@ -35,6 +35,8 @@ fn strip<'a>(state: &'a State, ctx: &'a Ctx, width: f32) -> Element<'a, Message>
     let wrap = Message::Chrome;
 
     let name = rocket.configuration_name(rocket.active_config_id()).unwrap_or_default();
+    // What the CONFIG cell takes beyond the 150 px `BASE_W` counts for it (a staged configuration's name is long).
+    let config_extra = (name.chars().count() as f32 * 8.0 + 110.0 - 150.0).max(0.0);
     let mut cells: Vec<Element<'a, Message>> = vec![config_cell(name, state.menu_is_config())];
 
     if ctx.physics.is_staged() {
@@ -102,8 +104,18 @@ fn strip<'a>(state: &'a State, ctx: &'a Ctx, width: f32) -> Element<'a, Message>
     let [d_mass, d_length, d_diameter, d_cg, d_cp, d_margin] = deltas;
     let live = |changing: bool, delta: Option<String>| status::Live { changing, delta, color: None };
     cells.push(status::readout_live("MASS", value(|b| b.mass, Quantity::Mass, true), None, live(changing.mass, d_mass)));
-    cells.push(status::readout_live("LEN", value(|b| b.length, Quantity::Length, true), None, live(changing.length, d_length)));
-    cells.push(status::readout_live("Ø REF", value(|b| b.reference_diameter, Quantity::Length, true), None, live(changing.diameter, d_diameter)));
+    // A window too narrow for every cell and the chip gives up the reference diameter, then the length (both are in the
+    // inspector): the warnings chip and the balance are what the strip is for.
+    // The estimate is a little generous towards itself: the cells go a few px before they would touch the chip.
+    let over = BASE_W + config_extra + extra - width + 16.0;
+    let (show_ref, show_len) = (over <= 0.0, over <= REF_CELL_W);
+    let freed = if show_len { 0.0 } else { LEN_CELL_W } + if show_ref { 0.0 } else { REF_CELL_W };
+    if show_len {
+        cells.push(status::readout_live("LEN", value(|b| b.length, Quantity::Length, true), None, live(changing.length, d_length)));
+    }
+    if show_ref {
+        cells.push(status::readout_live("Ø REF", value(|b| b.reference_diameter, Quantity::Length, true), None, live(changing.diameter, d_diameter)));
+    }
     cells.push(status::cg_live(value(|b| b.cg, Quantity::Length, false), ctx.show_cg, Some(wrap(ChromeMessage::ToggleCg)), live(changing.cg, d_cg)));
     cells.push(status::cp_live(value(|b| b.cp, Quantity::Length, false), ctx.show_cp, Some(wrap(ChromeMessage::ToggleCp)), live(changing.cp, d_cp)));
     if let Some(b) = balance {
@@ -121,13 +133,18 @@ fn strip<'a>(state: &'a State, ctx: &'a Ctx, width: f32) -> Element<'a, Message>
 
     let mut trailing: Vec<Element<'a, Message>> = Vec::new();
     // Priority: SELECTED never clips, so the transient message gives way while a value is live (its deltas need the room).
-    if let Some(notice) = ctx.notice.as_ref().filter(|_| !live_now) {
-        trailing.push(single_line(&notice.0, NOTICE_MAX, TEXT_BODY, false, theme::colored(|t| t.ok)));
+    // The message takes only the room the readouts, the selection and the chip leave: it is cut to fit, and dropped when even a
+    // few words do not, so it can never push the chip off the strip's end.
+    let room = ((width + freed - BASE_W - config_extra - extra - 24.0) / NOTICE_CHAR_W).floor().max(0.0) as usize;
+    if let Some(notice) = ctx.notice.as_ref().filter(|_| !live_now && room >= NOTICE_MIN) {
+        trailing.push(single_line(&notice.0, NOTICE_MAX.min(room), TEXT_BODY, false, theme::colored(|t| t.ok)));
     }
     if let Some((name, mass)) = selection {
         trailing.push(summary(&name, mass));
     }
     if let Some((severity, label)) = chip_label {
+        // With every optional cell gone and still no room, the chip keeps its count and drops its word.
+        let label = if over > REF_CELL_W + LEN_CELL_W { label.split(' ').next().unwrap_or_default().to_string() } else { label };
         // Never wraps: the chip is given the width its words need (icon, gap, text at 12 px, padding).
         let chip_w = 36.0 + label.chars().count() as f32 * 6.8;
         let chip: Element<'a, Message> = chip(severity, label).on_press(wrap(ChromeMessage::ToggleIssues)).into();
@@ -183,6 +200,13 @@ fn config_cell<'a>(name: String, open: bool) -> Element<'a, Message> {
 
 /// Longest notice / selection line shown before it is cut with an ellipsis (characters).
 const NOTICE_MAX: usize = 44;
+/// Fewest characters of a notice worth showing; with less room than that it is left out.
+const NOTICE_MIN: usize = 10;
+/// Average advance of the notice's 13 px sans text, px (on the generous side, so the estimate errs towards cutting).
+const NOTICE_CHAR_W: f32 = 7.2;
+/// Widths of the LEN and Ø REF cells, px: what leaving one out frees.
+const LEN_CELL_W: f32 = 140.0;
+const REF_CELL_W: f32 = 125.0;
 /// Longest part name in the SELECTED cell before the ellipsis (the mass after it is never cut).
 const SELECTION_NAME_MAX: usize = 22;
 

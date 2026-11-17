@@ -15,7 +15,9 @@ move (100, 700)
 move (102, 702)
 screenshot drag-dark.png
 
+click "Prefs"
 click "Light"
+click "Done"
 move (100, 700)
 move (102, 702)
 screenshot drag-light.png

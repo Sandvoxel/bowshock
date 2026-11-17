@@ -68,15 +68,10 @@ pub(super) fn view<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
     body.push(rule());
     body.push(conditions(state, ctx));
 
-    let multi = state.selection.is_multi();
-    let run: Element<'a, Message> = push(if multi { "Run selected" } else { "Run" }, Weight::Primary)
-        .icon(Mark::Play)
-        .tooltip(if multi { "Fly the selected flights" } else { "Fly this flight" })
-        .width(Fill)
-        .on_press(Message::Run)
-        .into();
-    let run_all: Element<'a, Message> = push("Run all", Weight::Secondary).tooltip("Fly every flight").on_press(Message::RunAll).into();
-    let footer = container(row![run, run_all].spacing(SPACE_2)).padding(SPACE_3);
+    let run_all: Element<'a, Message> =
+        push("Run all", Weight::Primary).icon(Mark::Play).tooltip("Fly every flight").width(Fill).on_press(Message::RunAll).into();
+    let run: Element<'a, Message> = push("Run selected", Weight::Secondary).tooltip("Fly the selected flights").on_press(Message::Run).into();
+    let footer = container(row![run_all, run].spacing(SPACE_2)).padding(SPACE_3);
 
     // The tracker is invisible: it only keeps `state.modifiers` current for the row clicks.
     let held = keys::track(state.modifiers.unwrap_or(ctx.env.drive_modifiers), Message::Modifiers);

@@ -10,7 +10,15 @@ use crate::internal::{InternalKind, InternalPart};
 
 impl<'w> Import<'w> {
     pub(in crate::ork) fn new(w: &'w mut Vec<String>) -> Import<'w> {
-        Import { b: Builder::new(w), config_ids: Vec::new(), config_map: HashMap::new(), simulations: Vec::new(), motors: Vec::new(), separations: Vec::new() }
+        Import {
+            b: Builder::new(w),
+            config_ids: Vec::new(),
+            config_map: HashMap::new(),
+            simulations: Vec::new(),
+            motors: Vec::new(),
+            motor_digests: Vec::new(),
+            separations: Vec::new(),
+        }
     }
 
     pub(in crate::ork) fn rocket_node(&mut self, n: Node) {
@@ -140,6 +148,9 @@ impl<'w> Import<'w> {
                 let _ = self.b.r.set_motor_delay(cid, m.part, spec.delay);
                 if !self.motors.contains(&spec.motor) {
                     self.motors.push(spec.motor.clone());
+                }
+                if !spec.digest.is_empty() && !self.motor_digests.iter().any(|(m, d)| m == &spec.motor && d == &spec.digest) {
+                    self.motor_digests.push((spec.motor.clone(), spec.digest.clone()));
                 }
                 if in_core {
                     if let (Some(stage), Some(ign)) = (model_stage(m.stage), ignition) {

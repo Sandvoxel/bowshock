@@ -10,11 +10,11 @@ move (720, 311)
 move (737, 311)
 screenshot snap-length.png
 release (737, 311)
-click (353, 20)
+click "Undo"
 # Diameter: neighbouring tubes, stock sizes.
 press (707, 294)
 move (707, 290)
 move (707, 286)
 screenshot snap-diameter.png
 release (707, 286)
-click (353, 20)
+click "Undo"

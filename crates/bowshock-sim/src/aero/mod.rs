@@ -171,6 +171,15 @@ enum Pressure {
         table: Table,
         area: f64,
     },
+    /// A spherically blunted nose (**own estimate**, see `tables::blunt_nose_cd`):
+    /// `(table(M) (1 - k^2) + cap_cd(M) k^2) * area / A_ref` with `k = r_n / R`, `area` the nose base area, `table` the pressure
+    /// drag of the sharp profile the tip sits on and `hemisphere` the nose table of a hemisphere (the cap's subsonic drag).
+    BluntTable {
+        table: Table,
+        hemisphere: Table,
+        tip_ratio: f64,
+        area: f64,
+    },
 }
 
 #[derive(Clone, Debug)]

@@ -30,6 +30,7 @@ fn awkward_bodies_return_ok_with_finite_or_failed_points() {
         ("cone 29.9 deg", spec(NoseShape::Cone, 0.87, vec![tube(1.0)])),
         ("flare and boattail 30 deg", spec(NoseShape::TangentOgive, 3.0, vec![tube(2.0), transition(1.0, 1.5), tube(1.0), transition(1.5, 1.0)])),
         ("40 d long", spec(NoseShape::TangentOgive, 3.0, vec![tube(37.0)])),
+        ("80 d long", spec(NoseShape::TangentOgive, 3.0, vec![tube(77.0)])),
     ];
     for (name, body) in &bodies {
         let result = Analysis::new(body)

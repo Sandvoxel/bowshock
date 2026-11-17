@@ -9,7 +9,9 @@ screenshot chrome-picker.png
 click "Cancel"
 click "Stage 2"
 screenshot chrome-phase.png
+click "Prefs"
 click "Light"
+click "Done"
 screenshot chrome-light.png
 click (78, 782)
 click "New configuration…"

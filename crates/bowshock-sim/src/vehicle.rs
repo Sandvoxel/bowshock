@@ -2,6 +2,8 @@
 //!
 //! All lengths are metres, stations are measured from the nose tip increasing aft.
 
+use bowshock_reference::blunt_nose::{self, BluntNose};
+
 /// Nose cone profile family.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NoseShape {
@@ -20,7 +22,8 @@ pub enum NoseShape {
 /// What a body segment is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BodyKind {
-    /// Nose cone with the given profile; `fore_radius` is the (usually zero) tip radius.
+    /// Nose cone with the given profile; `fore_radius` is the (usually zero) radius of the fore face, and the segment's
+    /// `tip_radius` the radius of a spherical tip.
     Nose(NoseShape),
     /// Cylindrical or constant-radius tube.
     Tube,
@@ -41,6 +44,10 @@ pub struct BodySegment {
     pub aft_radius: f64,
     /// Segment type.
     pub kind: BodyKind,
+    /// Radius of the spherical tip of a nose (0 is a point): the sharp profile of [`BodyKind::Nose`]'s family with its tip
+    /// replaced by a sphere tangent to it, and `length` the length of the nose as built, sphere apex to base (see
+    /// [`bowshock_reference::blunt_nose`]). A tip radius that has no tangent sphere on the profile gives the sharp nose.
+    pub tip_radius: f64,
     /// Surface roughness height (m); 0 is polished.
     pub roughness: f64,
 }
@@ -51,9 +58,36 @@ impl BodySegment {
         self.station + self.length
     }
 
+    /// The tip sphere of a blunted nose and the sharp nose it sits on; `None` for a sharp nose and every other kind of segment.
+    pub fn blunt_nose(&self) -> Option<BluntNose> {
+        let BodyKind::Nose(shape) = self.kind else { return None };
+        let r = self.aft_radius;
+        if !(self.tip_radius > 0.0 && self.fore_radius == 0.0 && r > 0.0 && self.length > 0.0) {
+            return None;
+        }
+        // The model's nose cones are memoised under their own tags 0..=6: the sim's five families approximate those, so they get
+        // theirs.
+        let key = [100 + shape as u64, 0, self.length.to_bits(), r.to_bits(), self.tip_radius.to_bits()];
+        let sharp = |l: f64, x: f64| r * nose_profile(shape, x / l, 0.0, r, l);
+        let limit = blunt_nose::MAX_TIP_FRACTION * r * (1.0 + 1.0e-9);
+        (self.tip_radius <= limit)
+            .then(|| blunt_nose::solve_cached(key, &sharp, self.length, self.tip_radius, (shape == NoseShape::Conical).then_some(r)))
+            .flatten()
+    }
+
+    /// Length of the sharp nose a blunted nose sits on; the segment's length otherwise.
+    pub fn sharp_length(&self) -> f64 {
+        self.blunt_nose().map_or(self.length, |b| b.sharp_length)
+    }
+
     /// Outer radius at distance `x` (0..=length) from the fore face.
     pub fn radius_at(&self, x: f64) -> f64 {
         let l = self.length.max(1e-12);
+        if let Some(b) = self.blunt_nose() {
+            let r = self.aft_radius;
+            let BodyKind::Nose(shape) = self.kind else { return r };
+            return b.radius(|s| r * nose_profile(shape, s / b.sharp_length, 0.0, r, b.sharp_length), x.clamp(0.0, l)).clamp(0.0, r);
+        }
         let u = (x / l).clamp(0.0, 1.0);
         let s = match self.kind {
             BodyKind::Nose(shape) => nose_profile(shape, u, self.fore_radius, self.aft_radius, self.length),
@@ -95,7 +129,7 @@ pub enum FinPlanform {
 }
 
 /// Fin edge cross-section.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FinCrossSection {
     /// Flat slab with square edges.
     Square,
@@ -103,6 +137,13 @@ pub enum FinCrossSection {
     Rounded,
     /// Symmetric airfoil (sharp trailing edge).
     Airfoil,
+    /// Sharp-edged double wedge (supersonic wave drag after Ackeret).
+    DoubleWedge,
+    /// Sharp-edged hexagonal section: a wedge of this fraction of the chord (`0 < f <= 0.5`) at the leading and at the
+    /// trailing edge with a flat mid-section (supersonic wave drag after Ackeret).
+    Hexagonal(f64),
+    /// Sharp-edged biconvex (circular-arc) section (supersonic wave drag after Ackeret).
+    Biconvex,
 }
 
 /// A set of identical fins evenly spaced around the body.
@@ -383,23 +424,6 @@ pub struct StageMass {
     pub separation: Timing,
 }
 
-/// Active roll control on a fin set: a PI controller drives the set's cant towards a target roll rate.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RollControl {
-    /// Roll rate the controller holds (rad/s).
-    pub target_rate: f64,
-    /// Time after launch the controller switches on (s).
-    pub start: f64,
-    /// Proportional gain (rad of cant per rad/s of rate error).
-    pub kp: f64,
-    /// Integral gain (rad of cant per rad of accumulated rate error).
-    pub ki: f64,
-    /// Largest cant deflection either way (rad).
-    pub max_cant: f64,
-    /// Largest cant slew rate (rad/s).
-    pub max_rate: f64,
-}
-
 /// What a vehicle component came from: a display name, the model part, and per-part overrides.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Label {
@@ -409,8 +433,6 @@ pub struct Label {
     pub part: Option<bowshock_model::PartId>,
     /// Drag coefficient (on the vehicle reference area) that replaces this component's computed drag.
     pub cd_override: Option<f64>,
-    /// Active roll control (fin sets only).
-    pub roll_control: Option<RollControl>,
 }
 
 /// Labels for the vehicle's components, by index: `body[i]` labels `Vehicle::body[i]`, and likewise for the
@@ -544,6 +566,61 @@ impl Vehicle {
         retain_labelled(&mut v.protuberances, &mut l.protuberances, |p| p.station() < station - 1e-9);
         v
     }
+
+    /// Stage `k` (firing order) as a vehicle of its own, the way it flies once it has separated from the stage above: everything
+    /// from the joint it separates at (the aft end of stage `k + 1`) to its own aft end (the end of the vehicle for stage 0; for a
+    /// later stage the joint the stage below it left at). Stations are measured from the joint, so the vehicle begins at station 0
+    /// with an open face, not a nose. The segment the joint cuts is cut there (a nose cut this way becomes a transition); fin
+    /// sets, tube fins and protuberances that start forward of the joint belong to the stage above and are dropped. The one stage
+    /// of the result is stage `k` with its dry mass, motor and stations moved to the new origin; the reference diameter is the
+    /// whole vehicle's, so coefficients keep their reference area. `None` for the top stage (it separates from nothing) and for
+    /// a stage that does not exist.
+    pub fn dropped_stage(&self, k: usize) -> Option<Vehicle> {
+        let joint = self.stages.get(k + 1)?.aft_station;
+        let stage = &self.stages[k];
+        let mut v = if k == 0 { self.clone() } else { self.truncated(stage.aft_station) };
+        let l = &mut v.labels;
+        retain_labelled(&mut v.body, &mut l.body, |b| b.aft_station() > joint + 1e-9);
+        for b in &mut v.body {
+            if b.station < joint {
+                let cut = joint - b.station;
+                b.fore_radius = b.radius_at(cut);
+                b.length -= cut;
+                b.station = joint;
+                if matches!(b.kind, BodyKind::Nose(_)) {
+                    b.kind = BodyKind::Transition;
+                    b.tip_radius = 0.0;
+                }
+            }
+            b.station -= joint;
+        }
+        retain_labelled(&mut v.fin_sets, &mut l.fin_sets, |f| f.station >= joint - 1e-9);
+        for f in &mut v.fin_sets {
+            f.station -= joint;
+            if let Some((a, b)) = f.root_extent.as_mut() {
+                *a -= joint;
+                *b -= joint;
+            }
+        }
+        retain_labelled(&mut v.tube_fins, &mut l.tube_fins, |t| t.station >= joint - 1e-9);
+        for t in &mut v.tube_fins {
+            t.station -= joint;
+        }
+        retain_labelled(&mut v.protuberances, &mut l.protuberances, |p| p.station() >= joint - 1e-9);
+        for p in &mut v.protuberances {
+            match p {
+                Protuberance::LaunchLug { station, .. } | Protuberance::RailButton { station, .. } => *station -= joint,
+            }
+        }
+        v.stages = vec![StageMass {
+            dry: MassProps { cg: stage.dry.cg - joint, ..stage.dry },
+            fore_station: 0.0,
+            aft_station: stage.aft_station - joint,
+            motor: stage.motor.clone().map(|m| StageMotor { mount_aft_station: m.mount_aft_station - joint, ..m }),
+            separation: stage.separation,
+        }];
+        Some(v)
+    }
 }
 
 #[cfg(test)]
@@ -569,10 +646,42 @@ mod tests {
     #[test]
     fn nose_profiles_hit_endpoints() {
         for shape in [NoseShape::Conical, NoseShape::TangentOgive, NoseShape::VonKarman, NoseShape::Elliptical, NoseShape::Parabolic] {
-            let s = BodySegment { station: 0.0, length: 0.2, fore_radius: 0.0, aft_radius: 0.03, kind: BodyKind::Nose(shape), roughness: 0.0 };
+            let s = BodySegment { station: 0.0, length: 0.2, fore_radius: 0.0, aft_radius: 0.03, kind: BodyKind::Nose(shape), tip_radius: 0.0, roughness: 0.0 };
             assert!(s.radius_at(0.0).abs() < 1e-9, "{shape:?}");
             assert!((s.radius_at(0.2) - 0.03).abs() < 1e-9, "{shape:?}");
             assert!(s.radius_at(0.1) > 0.0);
+        }
+    }
+
+    /// Without a tip radius the segment is the legacy profile bit for bit (the fast path never touches the blunting).
+    #[test]
+    fn a_sharp_nose_is_the_legacy_profile_exactly() {
+        for shape in [NoseShape::Conical, NoseShape::TangentOgive, NoseShape::VonKarman, NoseShape::Elliptical, NoseShape::Parabolic] {
+            let s = BodySegment { station: 0.0, length: 0.2, fore_radius: 0.0, aft_radius: 0.03, kind: BodyKind::Nose(shape), tip_radius: 0.0, roughness: 0.0 };
+            assert!(s.blunt_nose().is_none() && s.sharp_length() == 0.2);
+            for i in 0..=20 {
+                let x = 0.2 * f64::from(i) / 20.0;
+                let legacy = 0.0 + (0.03 - 0.0) * nose_profile(shape, (x / 0.2).clamp(0.0, 1.0), 0.0, 0.03, 0.2);
+                assert_eq!(s.radius_at(x), legacy, "{shape:?} {x}");
+            }
+        }
+    }
+
+    /// A blunted segment starts at a point, ends at the base radius, is as long as built and its sharp nose is longer.
+    #[test]
+    fn blunted_noses_hit_endpoints_and_keep_the_built_length() {
+        for shape in [NoseShape::Conical, NoseShape::TangentOgive, NoseShape::VonKarman, NoseShape::Parabolic] {
+            let s =
+                BodySegment { station: 0.0, length: 0.2, fore_radius: 0.0, aft_radius: 0.03, kind: BodyKind::Nose(shape), tip_radius: 0.01, roughness: 0.0 };
+            let b = s.blunt_nose().unwrap_or_else(|| panic!("{shape:?} takes a tip sphere"));
+            assert!((b.length() - 0.2).abs() < 1e-11 && s.sharp_length() > 0.2, "{shape:?}");
+            assert_eq!(s.radius_at(0.0), 0.0);
+            assert!((s.radius_at(0.2) - 0.03).abs() < 1e-12, "{shape:?}");
+            // a round tip: the radius leaves the axis faster than the sharp profile does
+            assert!(s.radius_at(0.002) > 0.0 && s.radius_at(0.002) < 0.015);
+            // and a sphere larger than 0.9 of the base radius is refused (the nose stays sharp)
+            let big = BodySegment { tip_radius: 0.03, ..s.clone() };
+            assert!(big.blunt_nose().is_none());
         }
     }
 }

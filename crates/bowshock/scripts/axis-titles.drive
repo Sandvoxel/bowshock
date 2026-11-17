@@ -21,7 +21,7 @@ move (600, 300)
 move (602, 302)
 screenshot axis-dispersion.png
 click "Simulate"
-click "Run"
+click "Run selected"
 move (600, 300)
 move (602, 302)
 screenshot axis-simulate.png

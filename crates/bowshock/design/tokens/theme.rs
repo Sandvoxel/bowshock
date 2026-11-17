@@ -54,7 +54,7 @@ pub struct Palette {
     pub part_body: Color,
     /// Default fin / flat-plate shading base in Solid view.
     pub part_fin: Color,
-    /// Aero system: fins, canards, rail buttons, lugs. The edge of Aero bars in Station Lanes and Aero parts in X-ray / Cutaway.
+    /// Aero system: fins, rail buttons, lugs. The edge of Aero bars in Station Lanes and Aero parts in X-ray / Cutaway.
     pub sys_aero: Color,
     /// Propulsion system: motor mount, motor, engine block, thrust ring, retainer. Lanes edge + parts in Cutaway / X-ray.
     pub sys_propulsion: Color,

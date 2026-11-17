@@ -275,7 +275,7 @@ mod tests {
     /// A nose and a tube (Ø0.1), with the fin set picked up off the tube (it is out of the rocket, as while dragged).
     fn picked_up() -> (Rocket, PartId, RadialDrag) {
         let mut r = Rocket::default();
-        r.insert(0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.2, diameter: 0.1 }).unwrap();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.2, diameter: 0.1, tip_radius: 0.0 }).unwrap();
         let tube = r.insert(1, PartKind::BodyTube { length: 0.5, diameter: 0.1 }).unwrap();
         let id = r.attach_radial(tube, 0.3, 0.0, 3, FINS).unwrap();
         let origin = r.remove_radial(id).unwrap();

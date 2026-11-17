@@ -8,7 +8,9 @@ click (1092, 62)
 click (1020, 136)
 screenshot polish-2-detached.png
 # Light theme: build screen with a long selection summary in the status strip.
+click "Prefs"
 click "Light"
+click "Done"
 screenshot polish-3-build-light.png
 # Axial view (TAIL): CG/CP labels fade out.
 press (906, 118)
@@ -22,14 +24,14 @@ release (800, 118)
 click (916, 124)
 screenshot polish-4-tail-light.png
 # Simulate: rename a flight by double-clicking its name.
-click (625, 18)
+click "Simulate"
 click "Nominal"
 click "Nominal"
 type "Windy run"
 type enter
 screenshot polish-5-simulate-renamed.png
-click "Run"
+click "Run selected"
 screenshot polish-6-simulate-light.png
 # Analyze in light.
-click (690, 18)
+click "Analyze"
 screenshot polish-7-analyze-light.png

@@ -10,5 +10,7 @@ move (816, 282)
 release (816, 282)
 click (816, 282)
 screenshot pod-part-dark.png
+click "Prefs"
 click "Light"
+click "Done"
 screenshot pod-part-light.png

@@ -1,7 +1,7 @@
 //! App settings kept per user, not per document: they live in the user config directory next to the recent-files list and the
 //! user motors (`~/.config/bowshock/settings.json`, or `$BOWSHOCK_SETTINGS_FILE`), so they follow the person to every rocket.
 //!
-//! Today that is the display unit set (top bar select and its custom panel), the theme, where CFD solves run ([`Compute`]) and which
+//! Today that is the display unit set (Preferences > Units), the theme, where CFD solves run ([`Compute`]) and which
 //! device the local ones use ([`LocalSolver`]); Preferences (`crate::prefs`) edits all of them. A missing, unreadable or malformed
 //! file is the defaults; unknown keys and unit symbols are ignored, so a newer or older build never refuses to start over a settings
 //! file.
@@ -319,14 +319,14 @@ impl super::Ctx {
         }
     }
 
-    /// Switches to the unit set `units` (top bar select, Preferences) and keeps it.
+    /// Switches to the unit set `units` (Preferences) and keeps it.
     pub fn set_units(&mut self, units: UnitSystem) {
         crate::units::clear_unit_overrides();
         self.units = units;
         self.save_settings();
     }
 
-    /// Switches between the dark and the light theme (top bar toggle, Preferences) and keeps the choice.
+    /// Switches between the dark and the light theme (Preferences) and keeps the choice.
     pub fn set_dark(&mut self, dark: bool) {
         self.dark = dark;
         self.save_settings();

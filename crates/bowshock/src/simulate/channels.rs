@@ -257,7 +257,7 @@ const fn described(mut c: Channel, hint: &'static str) -> Channel {
 }
 
 /// Every source the plots offer, in picker order.
-pub static CHANNELS: [Channel; 40] = [
+pub static CHANNELS: [Channel; 39] = [
     // Position.
     ch("altitude", "Altitude (AGL)", Group::Position, Dim::Length, true, |s| s.altitude),
     ch("altitude_msl", "Altitude (MSL)", Group::Position, Dim::Length, false, |s| s.altitude_msl),
@@ -289,10 +289,6 @@ pub static CHANNELS: [Channel; 40] = [
     described(
         ch("pitch_frequency", "Pitch frequency", Group::Attitude, Dim::Frequency, true, |s| s.pitch_frequency),
         "How many times a second the nose would swing back and forth after a nudge: the fins' stiffness over the rocket's inertia. Where the spin rate meets it, roll and pitch couple (roll resonance). Zero on the rail, under a parachute and for an unstable rocket.",
-    ),
-    described(
-        ch("control_cant", "Control fin cant", Group::Attitude, Dim::Angle, false, |s| s.control_cant),
-        "The cant the active roll controller holds on its fin group (the first one under control). Zero without roll control; it moves only in the rigid-body flight model.",
     ),
     // Aerodynamics.
     ch("mach", "Mach number", Group::Aerodynamics, Dim::Mach, true, |s| s.mach),
@@ -534,7 +530,6 @@ mod tests {
             "flight_path_angle",
             "attitude_angle",
             "roll_rate",
-            "control_cant",
             "vertical_acceleration",
             "stability_margin",
             "air_temperature",

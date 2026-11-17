@@ -14,7 +14,7 @@ use super::readout::{self, Row, Tag};
 use super::{Comparison, MachField, Message, State};
 use crate::app::{ui, Ctx};
 use crate::theme::{self, MONO, SANS_SEMIBOLD};
-use crate::tokens::{BIN_W, CONTROL_H, RAIL_W, RIGHT_PANEL_W, SPACE_1, SPACE_2, SPACE_3, SPACE_4, TEXT_BODY, TEXT_LABEL};
+use crate::tokens::{BIN_W, CONTROL_H, RAIL_W, RIGHT_PANEL_W, SPACE_1, SPACE_2, SPACE_3, TEXT_BODY, TEXT_LABEL};
 use crate::units::Quantity;
 use crate::widgets::button::{button as push, Weight};
 use crate::widgets::chip::{chip, Severity};
@@ -453,13 +453,10 @@ fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
         dispersion(state, built)
     } else {
         // The kit's centre column: the zoom breadcrumb and hover hint on one row at the top, then the plots down to the strip.
-        let mut plots: Vec<Element<'a, Message>> = vec![
+        let plots: Vec<Element<'a, Message>> = vec![
             bar(plot::header(&built.group, &state.plot).map(Message::Plot).boxed()),
             container(PlotView::new(&built.group, &state.plot).element().map(Message::Plot).boxed()).width(Fill).height(Fill).boxed(),
         ];
-        if out.analysis == Analysis::Drag {
-            plots.extend(drag_key(built));
-        }
         column(plots).height(Fill).boxed()
     };
     if notes.is_empty() {
@@ -566,9 +563,9 @@ fn swatch<'a>(color: SeriesColor) -> Element<'a, Message> {
         .boxed()
 }
 
-/// A tooltip in the kit's style: a raised surface, 1 px border, 11 px text, at most about 260 px wide.
+/// A tooltip in the kit's style: a raised surface, 1 px border, 11 px text wrapped at about 320 px.
 fn help_bubble<'a>(tip: &'static str) -> Element<'a, Message> {
-    container(text(tip).size(TEXT_LABEL)).width(260).padding([SPACE_1, SPACE_2]).style(|t: &Theme| theme::tooltip(t)).boxed()
+    container(text(tip).size(TEXT_LABEL)).width(320).padding([SPACE_1, SPACE_2]).style(|t: &Theme| theme::tooltip(t)).boxed()
 }
 
 fn row_view<'a>(r: Row) -> Element<'a, Message> {
@@ -596,29 +593,6 @@ fn row_view<'a>(r: Row) -> Element<'a, Message> {
         Some(tip) => tooltip(line, help_bubble(tip)).position(tooltip::Position::Bottom).gap(SPACE_1).boxed(),
         None => line,
     }
-}
-
-/// The Drag breakdown's key under the plot: each stacked source with a one-sentence explanation (kit muted 11 px).
-fn drag_key<'a>(built: &'a Built) -> Option<Element<'a, Message>> {
-    let entries: Vec<(SeriesColor, &str)> =
-        built.group.panels.first()?.series.iter().filter(|s| s.fill.is_some()).map(|s| (s.color, s.name.as_str())).collect();
-    if entries.is_empty() {
-        return None;
-    }
-    let entry = |(color, name): (SeriesColor, &'a str)| -> Element<'a, Message> {
-        let body =
-            column![text(name).size(TEXT_LABEL).style(theme::ink), text(readout::help(name).unwrap_or("")).size(TEXT_LABEL).style(theme::muted)].spacing(2);
-        row![container(swatch(color)).padding([3.0, 0.0]), body.width(Fill)].spacing(SPACE_2).width(Length::FillPortion(1)).boxed()
-    };
-    let mut grid: Vec<Element<'a, Message>> = Vec::new();
-    for pair in entries.chunks(2) {
-        let mut cells: Vec<Element<'a, Message>> = pair.iter().map(|e| entry(*e)).collect();
-        if cells.len() == 1 {
-            cells.push(Space::new().width(Length::FillPortion(1)).boxed());
-        }
-        grid.push(row(cells).spacing(SPACE_4).boxed());
-    }
-    Some(container(column(grid).spacing(SPACE_2)).padding([SPACE_2, SPACE_3]).width(Fill).style(theme::panel).boxed())
 }
 
 fn export<'a>(state: &'a State, ready: bool, index: usize) -> Element<'a, Message> {

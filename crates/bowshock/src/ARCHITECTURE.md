@@ -9,6 +9,7 @@ main.rs                  CLI (app / drive / gallery) and the `app()` builder onl
 app/mod.rs               App lifecycle (new, launch, update, after_update, view, subscription)
 app/ctx.rs               Ctx, Mode, Selection, Pending
 app/message.rs           Message, KeyPress, the global keyboard map (`shortcut`)
+app/run_report.rs        RunReport: the last background run (a line per flight, its outcome as `simulate::Message::Done` lands); `Ctx::{start_run, finish_run_line}`; cleared by the `Frame` clock, `DismissRun` and switching to Simulate
 app/route.rs             message routing, modal interception (`intercept_modals`), key dispatch
 app/env.rs               Env: centralized BOWSHOCK_* / $HOME config plus `animate` / `freeze_flash` (`Env::from_process`, `Env::for_tests`)
 app/worker.rs            offload, perform, StreamHandle, spawn_stream, spawn_iter: off-thread work and cancellable streams
@@ -17,9 +18,12 @@ app/selection_set.rs     PickMode, MultiSet<Id>: primary + extras + range anchor
 app/document.rs          Document: the rocket + path + dirty + undo/redo (every mutation goes through it)
 app/physics.rs           cached balance (mass, CG, CP, margin), warnings, stages, motor db, per-stage CFD plans / drag tables (bowshock-sim / -motors)
 app/drag.rs              shared drags (bin -> viewport, grab, move) + delete, built on Document's drag support
-app/files.rs             New / Open / Save / Save As / the built-in example, unsaved-changes guard
+app/files.rs             New / Open / Save / Save As / the built-in example, unsaved-changes guard; `.ork` import, which first registers the thrust curves stored in the file (`use_embedded_curves`) so they never reach the ThrustCurve lookup
+app/motor_fetch.rs       after a load (`Ctx::fetch_wanted`, `load_ticket`), looks up motors the database cannot resolve on ThrustCurve.org (one worker task; exactly-one-match rule; `Env::fetch_motors` gates it) and adds them via `add_downloaded`
 app/ui.rs                shared UI helpers: `label`, `mm`; re-exports the unit readouts from `units`
 chrome/                  top bar, status strip, config menu, issues list, motor picker (State + Message)
+chrome/menu_bar.rs       the File / Edit / View menu bar: labels, the dropdown overlay and each menu's rows as data (`TopMenu`, `Ctx::menu`, `app::Message::Menu`); the bar's x positions are shared constants with `top_bar.rs`
+chrome/run_toast.rs      the run toast under the top bar (non-modal) while `ctx.run` is set and the mode is not Simulate; the Simulate button reads `Running…` while flights are pending
 build/mod.rs             Build screen composition (pane_grid) only
 build/parts_bin.rs       parts bin
 build/inspector.rs       inspector
@@ -32,8 +36,8 @@ viewport/manipulate/     selection / handle overlay: `mod` (state, Edit), `query
 viewport/capture.rs      One-shot offscreen render of the model at a chosen pixel size (image export): `Capture` request, read back in `Primitive::prepare`, pixels returned on a oneshot channel.
 export/                  File > Export 3D model… / Export image… (State + Message, modal dialogs); `mesh_export.rs` writes OBJ / binary STL (mm) from the viewport mesh.
 print/                   File > Print / export PDF…: `pdf.rs` (PDF 1.4 writer, Helvetica core fonts), `templates.rs` (full-size fin / ring / wrap / marking templates, tiling), `report.rs` (parts list, design report); built on a worker thread.
-prefs/                   File > Preferences… (top bar gear, ⌘, / Ctrl+,): the modal window, a section list and a page each: `appearance.rs` (theme), `units.rs` (unit set, reusing `chrome::{units_select, unit_rows}`), `compute.rs` (the machines the solves run on: switches, per-machine connection test, use one / share), `storage.rs` (files and caches, sizes measured off-thread, Open folder / Clear). Every control applies at once through `Ctx::{set_dark, set_units, save_settings}` and is kept in `app/settings.rs`; the app intercepts all other messages while it is open (`route.rs`).
-simulate/mod.rs          Simulate screen (`format.rs`: flight-only formatting: bearing, landing, spin)
+prefs/                   Edit > Preferences… (top bar Preferences button, ⌘, / Ctrl+,): the modal window, a section list and a page each: `appearance.rs` (theme), `units.rs` (unit set select and per-quantity rows), `compute.rs` (the machines the solves run on: switches, per-machine connection test, use one / share), `storage.rs` (files and caches, sizes measured off-thread, Open folder / Clear). Every control applies at once through `Ctx::{set_dark, set_units, save_settings}` and is kept in `app/settings.rs`; the app intercepts all other messages while it is open (`route.rs`).
+simulate/mod.rs          Simulate screen (`format.rs`: flight-only formatting: bearing, landing, spin). A staged flight's result carries one `bowshock_sim::Branch` per separation (the dropped stage flown on its own, `flight/branch.rs`): `plots.rs` draws each as a dashed line from the separation (the `Dropped stages` header toggle hides them), a thin `StripRow` under the events strip and a dashed ground `Track::dropped`; `results.rs` adds a section per branch after the recovery
 analyze/mod.rs           Analyze screen
 analyze/cfd/             CFD table method: `plan` (document -> `bowshock-core` mapping, table keys, coarse (default) or medium (Refine) grid), `fresh` (table status), `run` (off-thread solve, events), `share` (the work queue that hands Mach numbers to the machines that are on), `remote` (a machine over SSH through `bowshock-remote`), `interp` (table -> plot points, Mach / alpha interpolation).
                          Tables are stored in the document (`bowshock_model::CfdTable`, a cache: not an edit, not in undo).
@@ -88,7 +92,7 @@ pub struct Ctx {
     pub selection: Selection,   // None | Part(PartId) | Separation(stage)  (any part class: axial, radial group, internal)
     pub drag: Drags,            // axial / radial drag in progress + symmetry + angle_snap
     pub physics: Physics,       // balance(), issues(), stages(), motors(), margin_with_motor(), phase(), cfd_plan(stage), drag_table(rocket, stage)
-    pub units: UnitSystem,      // the display unit set: one unit per Family (top bar select + Custom… panel), kept in app/settings.rs (user config, not the rocket); format with crate::units::{with_unit, bare, readout, len, len_unit} (also re-exported by app::ui)
+    pub units: UnitSystem,      // the display unit set: one unit per Family (Preferences > Units), kept in app/settings.rs (user config, not the rocket); format with crate::units::{with_unit, bare, readout, len, len_unit} (also re-exported by app::ui)
     pub cursor: Option<Point>,  // window coordinates, app-wide
     pub mode: Mode,             // Build | Simulate | Analyze
     pub dark: bool,             // ctx.tokens() gives the design tokens of the current theme
@@ -133,7 +137,11 @@ ctx.doc.seal();                                                      // end the 
 
 `ctx.selection` is app-level and shared by the viewport, lanes and inspector. Set it directly
 (`ctx.selection = Selection::Part(id)`); it is validated after every message. `Selection::Separation(n)` is the separation of
-stage `n` from the stage ahead (`Stage::index`, from 2). While a part is being carried by a drag it is out of the rocket but
+stage `n` from the stage ahead (`Stage::index` of the stage below the joint, from 1; the lower stage separates). The joint is
+the rocket's own: `Rocket::separation_joints(n)` lists the eligible ones and `set_separation_joint(n, joint)` moves it (inspector
+select = one `Move separation` step; the diamond in the viewport and the line in Station Lanes drag it through
+`app::drag::{move_separation, finish_separation}`, the document's drag support, so Esc restores it). While a part is being
+carried by a drag it is out of the rocket but
 stays selected.
 
 **Multi-selection** (`app/multi.rs`, on `app/selection_set.rs`'s `MultiSet<PartId>`; Simulate's flight selection uses `MultiSet<FlightId>`): `ctx.selection` stays one value, `Selection::Part(primary)`; the parts selected with it live
@@ -191,8 +199,8 @@ copies, nested pods, motors in pods.
 on show at liftoff, `None` for an empty rocket), `issues()` (non-`Ok` warnings, each with an optional `part` to
 select), `stages()`, `is_staged()`, `phase()`, `config_margin(id)`, `margin_with_motor(rocket, mount, motor)`,
 `margins_with_motors(rocket, mount, indices)` (the picker's whole column at once), `mounts_of_stage(rocket, stage)`, `motors()`
-(the `MotorDb`: the bundled ThrustCurve.org catalogue, cached downloads `<motorId>.motor` and the user's `.eng` files from
-`ctx.env.motors_dir`), `motor_origin(index)`, `add_downloaded(motor)`, `gauge()` (animated margin gauge). Phase is a view
+(the `MotorDb`: the bundled ThrustCurve.org catalogue, cached downloads `<motorId>.motor` and the user's `.eng` / `.rse` files from
+`ctx.env.motors_dir`), `motor_origin(index)`, `add_downloaded(motor)`, `add_embedded(motor)` (a curve stored in an imported `.ork`), `gauge()` (animated margin gauge). Phase is a view
 setting (`Phase::Full` or `Phase::UpperFrom(k)`), set from the status strip.
 
 It also caches the CFD plan of every stage: `cfd_plan(stage)` and `drag_table(rocket, stage)` are rebuilt once when
@@ -203,6 +211,14 @@ Motors are identified by `Motor::id` (`tc:<ThrustCurve motorId>` or `eng:<curve 
 carries that id, so two curves with one designation stay two motors. Look motors up with `from_model::find_motor` (id first,
 then designation and maker) and make references with `from_model::motor_ref`; never match on the designation alone.
 
+An OpenRocket 26.xx `.ork` stores user-defined curves as `thrustcurves/<digest>.rse` in its ZIP and names each motor by `<digest>`;
+`ork::import` returns them raw (`embedded_curves`, `motor_digests`; the model crate has no motor parser). On import,
+`files::use_embedded_curves` takes every referenced `(designation, maker, digest)` the database cannot resolve and has a stored curve,
+parses it with `bowshock_motors::parse_rse`, and adds its first engine under the *design's* name (`Motor::renamed`: one digest under
+three names is three motors, ids `eng:<hash of name + data>`) through `Physics::add_embedded`: a `File`-origin (USER) motor kept as
+`<designation>-<hash>.eng` in the motors directory, so the saved document's `MotorRef` id resolves next session. The imported
+references get those ids, and the load-time ThrustCurve lookup (`motor_fetch`) then finds nothing missing for them.
+
 ## Overlays and the viewport
 
 The viewport pane is `viewport::View::view`; overlays (`assembly` for axial drags, `surface` for radial drags,
@@ -210,6 +226,13 @@ The viewport pane is `viewport::View::view`; overlays (`assembly` for axial drag
 `DropRadial`, `Hover`, `Select`, `Grab`, `Edit`); `View::update` turns them into document edits
 and drag calls. Camera messages (`Orbit`, `Pan`, `Zoom`, `Fit`, `Snap`, `Home`, `Roll`, `Tick`) are the same enum. The mesh
 (`View::sync`) rebuilds from `ctx.doc.revision()`, hover, selection and the drag ghosts.
+
+A part picked up from the rocket (`Drag::origin`) is out of the document while carried, with its radial and internal parts held in
+`assembly::Origin` (motors: from `Document::drag_base`). Its ghost is the part landed by the same call a drop uses
+(`assembly::land_carried`) with the part and all it carries drawn in the ghost state (`Marks::ghost` = `mesh::Ghost`, its
+`carried`), so fins, rings and the loaded motor appear as they will. With no target (`Marks::free`) the same ghost, alone as a
+small rocket (`assembly::free_rocket`), follows the cursor on the plane through the rocket's axis that faces the camera. A part
+from the bin has no `origin`: its ghost is the bare part.
 
 Handle edits (DirectEdit, Snapping): the model lists every part's handles (`Rocket::handle_specs`), reads and writes a dimension
 (`Rocket::dim`, `clamp_dim`, `set_dim`, the same calls the Inspector uses) and offers snap targets (`Rocket::snap_targets`).

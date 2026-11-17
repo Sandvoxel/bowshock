@@ -133,7 +133,7 @@ impl Ctx<'_> {
                 *a += ci;
             }
         }
-        Diag { propellant: self.propellant(t, nsep), reynolds: flow.re_per_m * self.stack_length(nsep), control_cant: self.control_cant, ..d }
+        Diag { propellant: self.propellant(t, nsep), reynolds: flow.re_per_m * self.stack_length(nsep), ..d }
     }
 
     /// Point mass: the axis follows the relative wind (or the rail), drag opposes the relative velocity.
@@ -195,7 +195,6 @@ impl Ctx<'_> {
             omega: [0.0; 3],
             stiff: 0.0,
             pitch_freq: 0.0,
-            control_cant: 0.0,
         }
     }
 
@@ -246,13 +245,8 @@ impl Ctx<'_> {
         let crossflow = 0.5 * rho * BODY_CROSSFLOW_CD * aero.crossflow_damping(p.cg);
         let damp = linear + crossflow * wl;
         let roll = aero.roll(f.mach);
-        // Actively controlled fins add the forcing of their cant away from their own (see `RollControl`).
-        let controlled: f64 = self.controlled[nsep.min(self.controlled.len() - 1)]
-            .iter()
-            .map(|&(set, part)| aero.roll_forcing_per_rad(f.mach, set) * self.deflection.iter().find(|d| d.0 == part).map_or(0.0, |d| d.1))
-            .sum();
         // Roll moment about the nose direction (right-handed, so clockwise seen from behind, the way a fin's angle increases).
-        let roll_moment = if s > 1e-9 { q * (roll.forcing + controlled + roll.damping * st.w[0] / s) } else { 0.0 };
+        let roll_moment = if s > 1e-9 { q * (roll.forcing + roll.damping * st.w[0] / s) } else { 0.0 };
         let (mx, my, mz) = (roll_moment, -arm * fz - damp * st.w[1], arm * fy - damp * st.w[2]);
 
         // Euler's equations of an axisymmetric body (I_y = I_z = i_long, I_x = i_rot).
@@ -289,7 +283,6 @@ impl Ctx<'_> {
             omega: st.w,
             stiff,
             pitch_freq,
-            control_cant: 0.0,
         }
     }
 }

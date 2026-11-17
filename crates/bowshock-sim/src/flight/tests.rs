@@ -11,8 +11,16 @@ fn vehicle() -> Vehicle {
     Vehicle {
         reference_diameter: 2.0 * r,
         body: vec![
-            BodySegment { station: 0.0, length: 0.30, fore_radius: 0.0, aft_radius: r, kind: BodyKind::Nose(NoseShape::TangentOgive), roughness: 30e-6 },
-            BodySegment { station: 0.30, length: 0.80, fore_radius: r, aft_radius: r, kind: BodyKind::Tube, roughness: 30e-6 },
+            BodySegment {
+                station: 0.0,
+                length: 0.30,
+                fore_radius: 0.0,
+                aft_radius: r,
+                kind: BodyKind::Nose(NoseShape::TangentOgive),
+                tip_radius: 0.0,
+                roughness: 30e-6,
+            },
+            BodySegment { station: 0.30, length: 0.80, fore_radius: r, aft_radius: r, kind: BodyKind::Tube, tip_radius: 0.0, roughness: 30e-6 },
         ],
         tube_fins: vec![],
         fin_sets: vec![FinSet {
@@ -74,9 +82,6 @@ fn with_ctx<R>(v: Vehicle, f: impl FnOnce(&Ctx<'_>) -> R) -> R {
         a_ref: input.vehicle.reference_area(),
         g_surface: G0,
         omega: None,
-        controlled: vec![Vec::new()],
-        deflection: Vec::new(),
-        control_cant: 0.0,
     };
     f(&ctx)
 }

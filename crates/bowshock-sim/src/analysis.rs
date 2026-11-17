@@ -262,8 +262,16 @@ mod tests {
         Vehicle {
             reference_diameter: 2.0 * r,
             body: vec![
-                BodySegment { station: 0.0, length: 0.2, fore_radius: 0.0, aft_radius: r, kind: BodyKind::Nose(NoseShape::VonKarman), roughness: 0.0 },
-                BodySegment { station: 0.2, length: 0.6, fore_radius: r, aft_radius: r, kind: BodyKind::Tube, roughness: 0.0 },
+                BodySegment {
+                    station: 0.0,
+                    length: 0.2,
+                    fore_radius: 0.0,
+                    aft_radius: r,
+                    kind: BodyKind::Nose(NoseShape::VonKarman),
+                    tip_radius: 0.0,
+                    roughness: 0.0,
+                },
+                BodySegment { station: 0.2, length: 0.6, fore_radius: r, aft_radius: r, kind: BodyKind::Tube, tip_radius: 0.0, roughness: 0.0 },
             ],
             tube_fins: vec![],
             fin_sets: vec![FinSet {

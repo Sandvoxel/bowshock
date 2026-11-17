@@ -4,7 +4,8 @@ viewport 1300x1100
 click "Simulate"
 click "Custom"
 click "FAR (Mojave, CA)"
-click "Edit"
+# The wind profile's Edit, by position: the text "Edit" is also the top bar's Edit menu.
+click (240, 483)
 click "Power law"
 screenshot wind-profile.png
 click "Hide"

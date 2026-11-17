@@ -1,6 +1,8 @@
+use super::branch::{self, Handoff};
+use super::record;
 use super::{
-    build_aeros, normal_gravity, Chute, Ctx, Deploy, Diag, Event, EventKind, FlightModel, FlightResult, Launch, Mode, Raw, Sample, SimInput, Slope, State,
-    Summary, Trajectory, Tweaks, EARTH_RATE,
+    build_aeros, normal_gravity, Chute, Ctx, Deploy, Diag, Event, EventKind, FlightModel, FlightResult, Launch, Mode, Raw, SimInput, Slope, State, Summary,
+    Trajectory, Tweaks, EARTH_RATE,
 };
 use crate::aero::Aero;
 use crate::atmosphere::Atmosphere;
@@ -8,46 +10,26 @@ use crate::attitude::{dot, from_axis, rotate, Quat};
 use crate::rng::Rng;
 use crate::roll::roll_resonance;
 use crate::staging::{Hits, Timeline};
-use crate::vehicle::{RollControl, Trigger};
+use crate::vehicle::Trigger;
 use crate::G0;
 
-/// Flies `input` and returns the trajectory and summary.
+/// Flies `input` and returns the trajectory and summary of the upper stack, and the dropped stages flown on their own after
+/// each separation ([`FlightResult::branches`]).
 pub fn simulate(input: &SimInput) -> FlightResult {
     let aeros = build_aeros(input);
-    run(input, &input.launch, Tweaks::NOMINAL, &aeros)
+    let (mut result, handoffs) = track(input, &input.launch, Tweaks::NOMINAL, &aeros);
+    result.branches = handoffs.iter().filter_map(|h| branch::fly(input, &input.launch, Tweaks::NOMINAL, h)).collect();
+    result
 }
 
-/// One active roll controller (see [`RollControl`]): the group, its own cant, the cant it holds now and the integral of the
-/// rate error.
-struct Controller {
-    part: bowshock_model::PartId,
-    rc: RollControl,
-    cant0: f64,
-    cant: f64,
-    integral: f64,
-}
-
-impl Controller {
-    /// Advances the controller over a step of `dt` ending at `t` with the roll rate `rate`: a proportional-integral law on
-    /// the rate error, the integral clamped against wind-up to what the largest cant needs, the command limited to the largest
-    /// cant and the cant slewed towards it at most at the largest rate (Stevens, Lewis & Johnson, *Aircraft Control and
-    /// Simulation*, 2016, the PI controller with anti-windup and actuator rate limit).
-    fn step(&mut self, t: f64, rate: f64, dt: f64) {
-        let rc = self.rc;
-        if t < rc.start {
-            return;
-        }
-        let error = rc.target_rate - rate;
-        self.integral = if rc.ki > 0.0 { (self.integral + error * dt).clamp(-rc.max_cant / rc.ki, rc.max_cant / rc.ki) } else { 0.0 };
-        let desired = (rc.kp * error + rc.ki * self.integral).clamp(-rc.max_cant, rc.max_cant);
-        let slew = rc.max_rate * dt;
-        self.cant += (desired - self.cant).clamp(-slew, slew);
-    }
+/// The upper stack's flight alone, without the dropped stages (what a Monte Carlo run and the staging timeline need).
+pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero]) -> FlightResult {
+    track(input, launch, tw, aeros).0
 }
 
 /// The direction the rocket points (a unit vector): the rail `axis` on the rail; with `rigid` the body axis of attitude `att`;
 /// otherwise the flight path of velocity `vel` (the rail axis while it is too slow to have one).
-fn pointing(on_rail: bool, axis: [f64; 3], rigid: bool, att: Quat, vel: [f64; 3]) -> [f64; 3] {
+pub(super) fn pointing(on_rail: bool, axis: [f64; 3], rigid: bool, att: Quat, vel: [f64; 3]) -> [f64; 3] {
     let speed = dot(vel, vel).sqrt();
     if on_rail {
         axis
@@ -61,11 +43,12 @@ fn pointing(on_rail: bool, axis: [f64; 3], rigid: bool, att: Quat, vel: [f64; 3]
 }
 
 /// The angle of unit vector `dir` from vertical (rad).
-fn tilt(dir: [f64; 3]) -> f64 {
+pub(super) fn tilt(dir: [f64; 3]) -> f64 {
     dir[2].clamp(-1.0, 1.0).acos()
 }
 
-pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero]) -> FlightResult {
+/// The flight of the upper stack, and the state of the rocket at every separation (the start of each dropped stage's own flight).
+fn track(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero]) -> (FlightResult, Vec<Handoff>) {
     let v = &input.vehicle;
     let n = v.stages.len();
     let atm = Atmosphere::new(launch.site_altitude, launch.ground_temperature);
@@ -87,9 +70,6 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
         a_ref: v.reference_area().max(1e-12),
         g_surface,
         omega,
-        controlled: aeros.iter().map(Aero::controlled_fin_sets).collect(),
-        deflection: Vec::new(),
-        control_cant: 0.0,
     };
 
     // Altitude triggers that have fired (the time they fired, before their delay), and which staging events are on record.
@@ -129,6 +109,9 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
     let mut rates: Vec<(String, f64)> = Vec::new();
     let mut label: Option<String> = None;
     let mut chutes: Vec<Chute> = Vec::new();
+    // The recovery device each deployed canopy of `chutes` belongs to, and the state at each separation (see `branch`).
+    let mut chute_device: Vec<usize> = Vec::new();
+    let mut handoffs: Vec<Handoff> = Vec::new();
     let mut last_event_t = f64::NEG_INFINITY;
     let mut landed = false;
     let mut ground_hit = 0.0;
@@ -155,19 +138,6 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
         stability_off_rail = aeros[0].margin_cal(speed / air.speed_of_sound, alpha, ctx.mass_props(0.0, 0).cg);
         push_event(&mut events, &mut event_idx, &raws, Event { t: 0.0, kind: EventKind::RailExit, altitude: h, stage: None });
     }
-
-    // Active roll control: one PI controller per controlled fin group, holding the group's cant (it starts at the group's own).
-    let mut controllers: Vec<Controller> = Vec::new();
-    for (i, label) in v.labels.fin_sets.iter().enumerate() {
-        if let (Some(rc), Some(part)) = (label.roll_control, label.part) {
-            if !controllers.iter().any(|c| c.part == part) {
-                let cant0 = v.fin_sets.get(i).map_or(0.0, |f| f.cant);
-                controllers.push(Controller { part, rc, cant0, cant: cant0, integral: 0.0 });
-            }
-        }
-    }
-    ctx.deflection = controllers.iter().map(|c| (c.part, 0.0)).collect();
-    ctx.control_cant = controllers.first().map_or(0.0, |c| c.cant);
 
     while t < input.max_time {
         let nsep = ctx.sched.separated(t);
@@ -211,6 +181,21 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
             e.t = t;
             e.altitude = pos[2];
             last_event_t = t;
+            // The stage that separates is flown on its own from this state (see `branch`).
+            if let (EventKind::Separation, Some(stage)) = (&e.kind, e.stage) {
+                handoffs.push(Handoff {
+                    stage,
+                    t,
+                    pos,
+                    vel,
+                    att,
+                    spin,
+                    gust,
+                    sched: ctx.sched.clone(),
+                    chutes: chutes.iter().zip(&chute_device).filter(|(_, &i)| input.recovery[i].stage == stage).map(|(c, &i)| (i, *c)).collect(),
+                    deployed: deployed.clone(),
+                });
+            }
             push_event(&mut events, &mut event_idx, &raws, e);
         }
         // Ejection deployments wait for their stage's charge, whenever the timeline learns of it.
@@ -297,17 +282,6 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
         let (t0, pos0, vel0) = (t, pos, vel);
         t += dt;
         (pos, vel, att, spin) = (next.pos, next.vel, next.q, next.w);
-
-        // Roll control: a PI law on the roll-rate error, the cant limited in angle and slew (rigid body only).
-        if mode == Mode::Rigid && !controllers.is_empty() {
-            for c in &mut controllers {
-                c.step(t, spin[0], dt);
-            }
-            for (d, c) in ctx.deflection.iter_mut().zip(&controllers) {
-                d.1 = c.cant - c.cant0;
-            }
-            ctx.control_cant = controllers[0].cant;
-        }
 
         // Rail exit.
         if on_rail {
@@ -412,6 +386,7 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
                     let wind = ctx.wind_at(pos[2].max(0.0));
                     let rel_speed = ((vel[0] - wind[0]).powi(2) + (vel[1] - wind[1]).powi(2) + vel[2].powi(2)).sqrt();
                     chutes.push(Chute::new(d.cd_area, t, rel_speed));
+                    chute_device.push(i);
                     // Under a canopy the descent is a point mass: the attitude follows the relative wind from here on.
                     spin = [0.0; 3];
                     if let Some(l) = label.take() {
@@ -500,73 +475,6 @@ pub(crate) fn run(input: &SimInput, launch: &Launch, tw: Tweaks, aeros: &[Aero])
     };
 
     // Decimate.
-    let len = raws.len();
-    let stride = len.div_ceil(2000).max(1);
-    let mut keep = vec![false; len];
-    for (i, k) in keep.iter_mut().enumerate() {
-        *k = i % stride == 0 || i + 1 == len;
-    }
-    for &i in &event_idx {
-        if i < len {
-            keep[i] = true;
-        }
-    }
-    let samples = raws
-        .iter()
-        .zip(&keep)
-        .filter(|(_, &k)| k)
-        .map(|(r, _)| {
-            let d = &r.d;
-            let speed = dot(r.vel, r.vel).sqrt();
-            let horizontal = r.vel[0].hypot(r.vel[1]);
-            let aero = &aeros[r.nsep.min(aeros.len() - 1)];
-            let cp = aero.stability(d.mach, 0.0).cp;
-            let recovery = d.open / ctx.a_ref;
-            Sample {
-                t: r.t,
-                position: r.pos,
-                velocity: r.vel,
-                altitude: r.pos[2],
-                altitude_msl: launch.site_altitude + r.pos[2],
-                vertical_velocity: r.vel[2],
-                horizontal_velocity: horizontal,
-                speed,
-                air_speed: d.air_speed,
-                ground_distance: r.pos[0].hypot(r.pos[1]),
-                flight_path_angle: r.vel[2].atan2(horizontal),
-                mach: d.mach,
-                acceleration: dot(d.acc, d.acc).sqrt(),
-                vertical_acceleration: d.acc[2],
-                thrust: d.thrust,
-                drag: d.drag,
-                cd: d.cd.total,
-                cd_friction: d.cd.friction,
-                cd_pressure: d.cd.pressure,
-                cd_base: d.cd.base,
-                cd_fins: d.cd.fins,
-                cd_protuberances: d.cd.protuberances,
-                cd_recovery: recovery,
-                recovery_cd_area: d.open,
-                mass: d.mass,
-                propellant_mass: d.propellant,
-                cg: d.cg,
-                cp,
-                stability_margin: (cp - d.cg) / aero.reference_diameter(),
-                angle_of_attack: d.alpha,
-                wind_speed: d.wind,
-                dynamic_pressure: 0.5 * d.air.density * d.air_speed * d.air_speed,
-                air_density: d.air.density,
-                air_temperature: d.air.temperature,
-                air_pressure: d.air.pressure,
-                speed_of_sound: d.air.speed_of_sound,
-                reynolds: d.reynolds,
-                pitch_rate: d.omega[1].hypot(d.omega[2]),
-                roll_rate: d.omega[0],
-                pitch_frequency: d.pitch_freq,
-                control_cant: d.control_cant,
-                attitude_angle: d.axis[2].atan2(d.axis[0].hypot(d.axis[1])),
-            }
-        })
-        .collect();
-    FlightResult { trajectory: Trajectory { samples, events }, summary }
+    let samples = record::samples(&raws, &event_idx, aeros, ctx.a_ref, launch.site_altitude);
+    (FlightResult { trajectory: Trajectory { samples, events }, summary, branches: Vec::new() }, handoffs)
 }

@@ -85,8 +85,8 @@ pub struct Input {
     modifiers: keyboard::Modifiers,
     drag: Option<Drag>,
     last_click: Option<(Instant, Point)>,
-    /// The widget size last reported (zero until the initial fit has been requested).
-    size: iced::Size,
+    /// The widget bounds last reported (zero size until the initial fit has been requested).
+    bounds: Rectangle,
 }
 
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
@@ -97,11 +97,10 @@ impl shader::Program<Message> for Scene {
     type Primitive = Primitive;
 
     fn update(&self, state: &mut Input, event: &iced::Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<Action<Message>> {
-        if bounds.width > 0.0 && bounds.height > 0.0 && state.size != bounds.size() {
-            // The first size triggers the initial fit; later ones only keep the view's idea of the size current.
-            let first = state.size == iced::Size::ZERO;
-            state.size = bounds.size();
-            return Some(Action::publish(if first { Message::Fit(bounds.size()) } else { Message::Resized(bounds.size()) }));
+        if bounds.width > 0.0 && bounds.height > 0.0 && state.bounds != bounds {
+            // Every size or place of the widget is reported; the first one also makes the view fit its model.
+            state.bounds = bounds;
+            return Some(Action::publish(Message::Resized(bounds)));
         }
         match event {
             iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {

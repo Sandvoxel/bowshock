@@ -133,8 +133,6 @@ pub struct Sample {
     /// parachute, or when the CP is not aft of the CG. The spin rate [`roll_rate`](Self::roll_rate) is compared against it
     /// (roll-pitch resonance, [`Summary::roll_resonance`]).
     pub pitch_frequency: f64,
-    /// Cant of the first fin group under active roll control (rad; see [`crate::vehicle::RollControl`]); 0 without one.
-    pub control_cant: f64,
 }
 
 /// Recorded flight.
@@ -187,6 +185,44 @@ pub struct Summary {
     pub roll_resonance: Option<RollResonance>,
 }
 
+/// A stage dropped at a separation, flown on its own from the separation state to the ground (see the module docs of
+/// [`crate::flight`]). Times are seconds from launch, like the primary track's; the stations of the samples (`cg`, `cp`) are
+/// from the nose tip of the whole rocket, like the primary track's.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Branch {
+    /// `Booster` for the lower stage of a two-stage rocket; `Stage 1`, `Stage 2`, ... (the model's names) otherwise.
+    pub name: String,
+    /// The dropped stage, in firing order (0 is the aft-most): the `stage` of its [`EventKind::Separation`].
+    pub stage: usize,
+    /// Time of the separation (s): the first sample and the first event.
+    pub start: f64,
+    /// Samples (decimated like the primary track, always including the start, the end and the event instants) and events: the
+    /// separation, a burnout that comes after it, the recovery deployments and the landing.
+    pub trajectory: Trajectory,
+    /// Headline numbers.
+    pub summary: BranchSummary,
+}
+
+/// Headline numbers of a [`Branch`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BranchSummary {
+    /// Maximum ground speed after the separation (m/s).
+    pub max_velocity: f64,
+    /// `(device name, descent rate m/s)`, as [`Summary::descent_rates`]: empty for a stage without a recovery device.
+    pub descent_rates: Vec<(String, f64)>,
+    /// Vertical speed at ground contact (m/s, positive down): the descent rate of a tumbling stage with no device, the canopy's
+    /// at the end of a descent under one.
+    pub descent_rate: f64,
+    /// Speed at ground contact (m/s).
+    pub ground_hit_velocity: f64,
+    /// Time from launch to ground contact (s).
+    pub flight_time: f64,
+    /// `(distance m, bearing deg clockwise from north)` of the landing point from the pad.
+    pub landing: (f64, f64),
+    /// Landing point `[east, north]` (m).
+    pub landing_position: [f64; 2],
+}
+
 /// Result of [`simulate`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FlightResult {
@@ -194,4 +230,7 @@ pub struct FlightResult {
     pub trajectory: Trajectory,
     /// Headline numbers.
     pub summary: Summary,
+    /// The stages dropped on the way, one per separation, in firing order: each flown on its own from the separation to the
+    /// ground. Empty for a rocket of one stage. The primary track above is the upper stack only and does not depend on them.
+    pub branches: Vec<Branch>,
 }

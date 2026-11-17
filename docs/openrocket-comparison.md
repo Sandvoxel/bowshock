@@ -171,6 +171,11 @@ the drift.
    differences, kept.
 4. **Rail-exit speed -2 .. -4 % against OpenRocket at its default step**: OpenRocket's 50 ms step overshoots the rail end; against its own 2 ms run
    the difference is within 1 %.
+5. **Fin CNα and CP above Mach 1.5: Bowshock's supersonic fin slope is now twice the one it used to share with OpenRocket (known, deliberate).** Bowshock used to implement
+   Niskanen's eq. 3.49, `A (K1 + K2 α + K3 α²)/A_ref` with one surface's `Cp`, and agreed with OpenRocket to four digits at Mach 2 (table above). It now uses the two-surface
+   flat-plate slope `2 A (K1 + K3 α²)/A_ref` with Barrowman's `K3` (`-12 M²` included), which reproduces the exact shock-expansion flat plate (`docs/aero-references.md`, tests `supersonic_fin_*`). The Mach >= 1.5 rows of the
+   tables above and in `openrocket-comparison-tables.md` (e.g. CNα at Mach 2.0, Spaceport final 13.176 | 13.176; conical simple rocket 8.959 | 8.959) were produced before this change and
+   are no longer expected to agree; the fin share of CNα doubles and the CP moves aft. The tables have not been regenerated.
 
 Not a Bowshock-vs-OpenRocket difference: OpenRocket's own results vary a little from run to run on staged rockets (two-stage sim 1 apogee 678.4 and 666.6 m
 in two runs of the harness), so differences of 1-2 % on those are within its noise.

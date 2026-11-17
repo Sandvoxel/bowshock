@@ -16,7 +16,7 @@ const RE_SUPERSONIC: f64 = 3.0e7;
 /// A 3" rocket: nose, two body tubes, three fins on the lower one. Returns the rocket and the upper tube.
 fn core() -> (Rocket, PartId) {
     let mut r = Rocket::default();
-    r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: NOSE, diameter: BODY }).unwrap();
+    r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: NOSE, diameter: BODY, tip_radius: 0.0 }).unwrap();
     let upper = r.insert(1, PartKind::BodyTube { length: 0.6, diameter: BODY }).unwrap();
     let lower = r.insert(2, PartKind::BodyTube { length: 0.3, diameter: BODY }).unwrap();
     r.attach_radial(lower, 0.12, 0.0, 3, RadialKind::FinSet { root_chord: 0.15, tip_chord: 0.07, span: 0.09, sweep: 0.07, thickness: 0.003 }).unwrap();
@@ -220,7 +220,7 @@ fn pod_launch_lugs_fly_once_per_copy() {
 fn upper_stack_flight_drops_pods_of_the_stages_below() {
     // Two stages: the pod stands on the lower tube, so the upper stack alone flies without it.
     let mut r = Rocket::default();
-    r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: NOSE, diameter: BODY }).unwrap();
+    r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: NOSE, diameter: BODY, tip_radius: 0.0 }).unwrap();
     let upper = r.insert(1, PartKind::BodyTube { length: 0.4, diameter: BODY }).unwrap();
     let lower = r.insert(2, PartKind::BodyTube { length: 0.5, diameter: BODY }).unwrap();
     let mount = InternalKind::InnerTube { outer_diameter: 0.041, thickness: 0.0015, length: 0.2, motor_mount: true, overhang: 0.0 };
@@ -403,7 +403,7 @@ fn strap_ons_leave_with_their_stage_and_fire_alone_without_a_core_motor() {
     let db = MotorDb::bundled();
     // Two stages; the pods stand on the lower (booster) one and carry the only motors of it.
     let mut r = Rocket::default();
-    r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: NOSE, diameter: BODY }).unwrap();
+    r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: NOSE, diameter: BODY, tip_radius: 0.0 }).unwrap();
     let upper = r.insert(1, PartKind::BodyTube { length: 0.4, diameter: BODY }).unwrap();
     let lower = r.insert(2, PartKind::BodyTube { length: 0.5, diameter: BODY }).unwrap();
     let sustainer = r.attach_internal(upper, 0.15, mount(0.041, 0.0015, 0.2)).unwrap();

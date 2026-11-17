@@ -15,7 +15,7 @@
 //!
 //! Times that depend on something unknown (an altitude not yet reached) are `None`, and so is everything that depends on them.
 
-use crate::flight::{simulate, EventKind, SimInput};
+use crate::flight::{build_aeros, run, EventKind, SimInput, Tweaks};
 use crate::vehicle::{Trigger, Vehicle};
 
 /// Event times of a vehicle's stages, by stage index in firing order (`None`: not known, or never).
@@ -111,7 +111,8 @@ pub fn has_altitude_trigger(v: &Vehicle) -> bool {
 }
 
 /// The staging timeline of `input`'s vehicle. Without altitude triggers this is [`Timeline::of`]; with them the times come from a
-/// coarse flight (5 ms step, no recovery) of up to two minutes, whose events are the same ones [`simulate`] reports.
+/// coarse flight (5 ms step, no recovery, the upper stack only: no dropped stage is flown) of up to two minutes, whose events are
+/// the same ones [`simulate`](crate::flight::simulate) reports.
 pub fn staging_times(input: &SimInput) -> Timeline {
     let v = &input.vehicle;
     if !has_altitude_trigger(v) {
@@ -121,7 +122,7 @@ pub fn staging_times(input: &SimInput) -> Timeline {
     quick.dt = 0.005;
     quick.max_time = 120.0;
     quick.recovery.clear();
-    let flight = simulate(&quick);
+    let flight = run(&quick, &quick.launch, Tweaks::NOMINAL, &build_aeros(&quick));
     let mut hits = Hits::none(v.stages.len());
     for e in &flight.trajectory.events {
         let Some(k) = e.stage.filter(|k| *k < v.stages.len()) else {

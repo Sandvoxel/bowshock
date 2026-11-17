@@ -380,7 +380,7 @@ mod tests {
     use bowshock_model::{NoseShape, PartKind};
 
     fn nose() -> PartKind {
-        PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1 }
+        PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1, tip_radius: 0.0 }
     }
 
     fn tube(length: f64) -> PartKind {
@@ -456,7 +456,7 @@ mod tests {
         let id = doc.rocket().parts()[0].id;
         let revision = doc.revision();
         for length in [0.21, 0.22, 0.25, 0.3] {
-            let kind = PartKind::NoseCone { shape: NoseShape::TangentOgive, length, diameter: 0.1 };
+            let kind = PartKind::NoseCone { shape: NoseShape::TangentOgive, length, diameter: 0.1, tip_radius: 0.0 };
             doc.edit_merging("Resize", "resize", |r| r.set_kind(id, kind));
         }
         assert!(doc.revision() > revision);
@@ -468,7 +468,7 @@ mod tests {
         // A drag that ends where it started leaves no step.
         let steps = doc.undo.len();
         for length in [0.3, 0.2] {
-            let kind = PartKind::NoseCone { shape: NoseShape::TangentOgive, length, diameter: 0.1 };
+            let kind = PartKind::NoseCone { shape: NoseShape::TangentOgive, length, diameter: 0.1, tip_radius: 0.0 };
             doc.edit_merging("Resize", "resize", |r| r.set_kind(id, kind));
         }
         doc.seal();

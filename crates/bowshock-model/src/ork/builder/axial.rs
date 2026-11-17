@@ -108,7 +108,7 @@ impl<'w> Builder<'w> {
             }
             "nosecone" => {
                 let shape = self.nose_shape(&label, text(n, "shape").unwrap_or("ogive"), num(n, "shapeparameter").unwrap_or(1.0), length, 2.0 * ra);
-                (PartKind::NoseCone { shape, length, diameter: 2.0 * ra }, [None, shoulder(n, "aft")])
+                (PartKind::NoseCone { shape, length, diameter: 2.0 * ra, tip_radius: 0.0 }, [None, shoulder(n, "aft")])
             }
             "bodytube" => (PartKind::BodyTube { length, diameter: 2.0 * rf }, [None, None]),
             _ => {

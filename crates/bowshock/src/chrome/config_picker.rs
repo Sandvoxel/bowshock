@@ -88,7 +88,7 @@ pub enum Message {
     Add,
     /// Close without adding.
     Cancel,
-    /// "Load .eng…": pick motor files of one's own.
+    /// "Load .eng / .rse…": pick motor files of one's own.
     LoadFiles,
     /// Typing paused: search if `generation` is still the latest text.
     Debounced(u64),
@@ -107,7 +107,7 @@ pub enum Outcome {
     Stay,
     /// Close it.
     Close,
-    /// Open the file dialog for the user's own `.eng` files.
+    /// Open the file dialog for the user's own `.eng` / `.rse` files.
     LoadFiles,
     /// Start the typing pause of search `generation` ([`debounce`]).
     Debounce(u64),
@@ -530,7 +530,7 @@ impl Picker {
             Some(_) => action("Add configuration", Weight::Primary).on_press(msg(Message::Add)).into(),
             None => action("Add configuration", Weight::Primary).disabled("Pick a motor").into(),
         };
-        let load: Element<'a, ChromeMessage> = action("Load .eng…", Weight::Secondary).on_press(msg(Message::LoadFiles)).into();
+        let load: Element<'a, ChromeMessage> = action("Load .eng / .rse…", Weight::Secondary).on_press(msg(Message::LoadFiles)).into();
         let footer = row![container(delay).width(160), load, Space::new().width(Fill), cancel, add].spacing(SPACE_2).align_y(Center);
 
         let rule = || container(Space::new()).width(Fill).height(1).style(theme::hairline).boxed();
@@ -798,7 +798,7 @@ mod tests {
     fn with_mount(app: &mut App) -> PartId {
         let ctx = app.ctx_mut();
         ctx.doc.edit("Build", |r| {
-            r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762 }).unwrap();
+            r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762, tip_radius: 0.0 }).unwrap();
             let tube = r.insert(1, PartKind::BodyTube { length: 0.9, diameter: 0.0762 }).unwrap();
             r.attach_internal(tube, 0.5, InternalKind::InnerTube { outer_diameter: 0.040, thickness: 0.001, length: 0.34, motor_mount: true, overhang: 0.0 })
                 .unwrap()

@@ -21,6 +21,7 @@ mod handles;
 mod internal;
 mod mass;
 mod material;
+mod nose;
 mod notes;
 pub mod ork;
 mod pod;
@@ -43,17 +44,15 @@ pub use flights::{
     WindLevel, MAX_LAUNCH_ANGLE, MAX_PANEL_SOURCES, MAX_PLOT_PANELS, MAX_WIND_LEVELS,
 };
 pub use format::{FormatError, FORMAT_VERSION, MAGIC};
-pub use geometry::{
-    Anchor, FinPlanform, FinSection, FinTab, NoseShape, Part, PartKind, PodBody, RadialKind, RadialPart, RollControl, Shoulder, MAX_CONTROL_CANT,
-    MAX_CONTROL_RATE, MAX_COUNT,
-};
+pub use geometry::{Anchor, FinPlanform, FinSection, FinTab, NoseShape, Part, PartKind, PodBody, RadialKind, RadialPart, Shoulder, MAX_COUNT};
 pub use handles::{Dim, DimEdit, HandleKind, HandleSpec, HandleView};
 pub use internal::{DeployEvent, Deployment, InternalKind, InternalPart, MassRole, PartClass, PartRef, System, AUTO_FILL};
 pub use mass::MassProps;
 pub use material::{materials, materials_of_kind, Finish, Material, MaterialId, MaterialKind};
+pub use nose::{blunting, NoseProfile};
 pub use pod::PodFrame;
 pub use rocket::{InsertError, InternalError, RadialError, Resolved, Rocket};
 pub use scale::ScaleScope;
 pub use snap::Target;
-pub use stage::{Separation, SplitError, Stage, StageIssue};
+pub use stage::{JointOption, Separation, SplitError, Stage, StageIssue};
 pub use symmetry::{instance_letter, FieldOverride, InstanceParams, RadialField, Winner};

@@ -1,19 +1,32 @@
 use super::*;
 
-/// Hovering the parts bin (rows, focus flag) while the File menu is open must not close it; a click elsewhere still does.
+/// Opening another menu while one is open switches to it instead of closing.
 #[test]
-fn hovering_the_parts_bin_keeps_the_file_menu_open() {
+fn opening_another_menu_switches_to_it() {
+    use crate::chrome::TopMenu;
     let (mut app, _) = app();
-    app.update(Message::ToggleFileMenu);
-    assert!(app.ctx.file_menu);
+    app.update(Message::Menu(Some(TopMenu::File)));
+    assert_eq!(app.ctx.menu, Some(TopMenu::File));
+    app.update(Message::Menu(Some(TopMenu::Edit)));
+    assert_eq!(app.ctx.menu, Some(TopMenu::Edit));
+    app.update(Message::Menu(None));
+    assert_eq!(app.ctx.menu, None);
+}
+
+/// Hovering the parts bin (rows, focus flag) while a menu is open must not close it; a click elsewhere still does.
+#[test]
+fn hovering_the_parts_bin_keeps_the_menu_open() {
+    let (mut app, _) = app();
+    app.update(Message::Menu(Some(crate::chrome::TopMenu::File)));
+    assert!(app.ctx.menu.is_some());
     let row = parts_bin::RowId::new(parts_bin::Category::Fins, 0);
     app.update(Message::PartsBin(parts_bin::Message::Hover(true)));
     app.update(Message::PartsBin(parts_bin::Message::RowHover(Some(row))));
     app.update(Message::PartsBin(parts_bin::Message::RowHover(None)));
     app.update(Message::PartsBin(parts_bin::Message::Hover(false)));
-    assert!(app.ctx.file_menu, "hover must not dismiss the menu");
+    assert!(app.ctx.menu.is_some(), "hover must not dismiss the menu");
     app.update(Message::PartsBin(parts_bin::Message::Category(parts_bin::Category::Fins)));
-    assert!(!app.ctx.file_menu, "a real action closes it");
+    assert!(app.ctx.menu.is_none(), "a real action closes it");
 }
 
 #[test]
@@ -173,4 +186,33 @@ fn configuration_commands_undo_and_the_status_values_follow_the_document() {
     app.update(Message::Chrome(Chrome::DeleteConfig(last)));
     assert_eq!(app.ctx.doc.rocket().configurations().len(), 1);
     assert!(app.ctx.notice.is_some());
+}
+
+/// The Simulate button (and F5) flies every flight, not just the selected one, and leaves the screen where it was.
+#[test]
+fn run_flies_every_flight() {
+    let mut app = App::with_example();
+    let count = app.ctx().doc.rocket().flights().len();
+    assert!(count >= 2);
+    let _ = app.update(Message::Run);
+    assert_eq!(app.ctx().mode, crate::app::Mode::Build);
+    let launched = app.simulate.launched();
+    assert_eq!(launched.len(), count);
+    assert!(launched.iter().all(|&l| l), "{launched:?}");
+}
+
+/// The run leaves a report with one pending line per flight, and opening Simulate clears it.
+#[test]
+fn run_starts_a_report_and_simulate_clears_it() {
+    let mut app = App::with_example();
+    let count = app.ctx().doc.rocket().flights().len();
+    let _ = app.update(Message::Run);
+    assert_eq!(app.ctx().mode, crate::app::Mode::Build);
+    let report = app.ctx().run.as_ref().expect("a report");
+    assert_eq!(report.lines.len(), count);
+    assert_eq!(report.pending, count);
+    assert!(report.lines.iter().all(|l| l.outcome.is_none()));
+    assert!(app.ctx().run_pending() && app.ctx().animating());
+    let _ = app.update(Message::Mode(crate::app::Mode::Simulate));
+    assert!(app.ctx().run.is_none());
 }

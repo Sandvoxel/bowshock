@@ -14,6 +14,8 @@ ciborium = "0.2"
 # OpenRocket .ork import: an .ork is XML, usually inside a ZIP (deflate) entry. Also the .bowshock compression.
 roxmltree = "0.21"
 flate2 = "1"
+# The spherically blunted nose tip geometry (tangent sphere solve) is shared with the aerodynamics and the CFD solver.
+bowshock-reference.workspace = true
 
 [dev-dependencies]
 serde_json = "1"

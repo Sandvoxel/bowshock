@@ -10,5 +10,7 @@ type " + 2"
 screenshot chip-dark.png
 type enter
 screenshot formula-dark.png
+click "Prefs"
 click "Light"
+click "Done"
 screenshot formula-light.png

@@ -47,7 +47,7 @@ pub use engine::case::Wake;
 pub use engine::result::StopReason;
 pub use error::Error;
 pub use progress::{Progress, ProgressSink};
-pub use spec::{AftSpec, BodySpec, FinProfile, FinSpec, MotorSpec, NoseShape, NoseSpec};
+pub use spec::{AftSpec, BodySpec, FinProfile, FinSpec, MotorSpec, NoseShape, NoseSpec, SharpShape};
 
 /// Compiles and runs the code blocks of the user guide (`guide/src/*.md`) as doctests.
 #[cfg(doctest)]

@@ -65,6 +65,10 @@ enum Mode {
     Moving { id: PartId, grab: f64 },
     /// Dragging one end of a part.
     Resizing { id: PartId, end: End },
+    /// Button down on a separation line, not moved far enough to be a drag.
+    SepPressed { stage: usize, at: Point },
+    /// Dragging a separation line along the joints it can take; `last` is the joint (the part just aft of it) it was last put at.
+    Separating { stage: usize, last: Option<PartId> },
     /// Middle button: panning.
     Panning { last: f32 },
 }
@@ -83,7 +87,7 @@ pub struct Interaction {
 impl Interaction {
     /// A drag of the lanes' own is in progress.
     fn dragging(&self) -> bool {
-        matches!(self.mode, Mode::Moving { .. } | Mode::Resizing { .. })
+        matches!(self.mode, Mode::Moving { .. } | Mode::Resizing { .. } | Mode::Separating { .. })
     }
 }
 
@@ -408,6 +412,14 @@ impl canvas::Program<Message> for Lanes<'_> {
                         let station = self.edge_station(BarKey::Part(id), axis.station(p.x), &axis, shift);
                         Some(Action::publish(Message::ResizeTo { id, end, station }).and_capture())
                     }
+                    Mode::SepPressed { stage, at } => {
+                        if p.distance(at) < DRAG_SLOP {
+                            return None;
+                        }
+                        state.mode = Mode::Separating { stage, last: None };
+                        self.slide_separation(state, &axis, p)
+                    }
+                    Mode::Separating { .. } => self.slide_separation(state, &axis, p),
                     Mode::Panning { last } => {
                         state.mode = Mode::Panning { last: p.x };
                         let next = axis.panned(p.x - last);
@@ -440,7 +452,22 @@ impl canvas::Program<Message> for Lanes<'_> {
                     _ => None,
                 }
             }
+            Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::Escape), .. })
+                if matches!(state.mode, Mode::SepPressed { .. } | Mode::Separating { .. }) =>
+            {
+                let live = matches!(state.mode, Mode::Separating { .. });
+                state.mode = Mode::Idle;
+                live.then(|| Action::publish(Message::SeparationEnd(false)).and_capture())
+            }
             Event::Mouse(mouse::Event::ButtonReleased(button)) => match (button, state.mode) {
+                (mouse::Button::Left, Mode::Separating { .. }) => {
+                    state.mode = Mode::Idle;
+                    Some(Action::publish(Message::SeparationEnd(true)).and_capture())
+                }
+                (mouse::Button::Left, Mode::SepPressed { .. }) => {
+                    state.mode = Mode::Idle;
+                    Some(Action::capture())
+                }
                 (mouse::Button::Left, Mode::Moving { id, .. }) => {
                     state.mode = Mode::Idle;
                     // A free fin released on a group's bar asks to rejoin it; anywhere else the move just ends.
@@ -553,19 +580,33 @@ impl canvas::Program<Message> for Lanes<'_> {
 
     fn mouse_interaction(&self, state: &Interaction, _bounds: Rectangle, _cursor: mouse::Cursor) -> mouse::Interaction {
         match (state.mode, state.over) {
-            (Mode::Moving { .. }, _) => mouse::Interaction::Grabbing,
+            (Mode::Moving { .. } | Mode::Separating { .. }, _) => mouse::Interaction::Grabbing,
             (Mode::Resizing { .. }, _) => mouse::Interaction::ResizingHorizontally,
             (Mode::Panning { .. }, _) => mouse::Interaction::Grabbing,
             _ if self.carry.is_some() => mouse::Interaction::Grabbing,
             (_, Some(Over::Bar(Hit { zone: Zone::Fore | Zone::Aft, .. }))) => mouse::Interaction::ResizingHorizontally,
             (_, Some(Over::Bar(_))) => mouse::Interaction::Grab,
-            (_, Some(Over::Separation(_) | Over::CgLabel)) => mouse::Interaction::Pointer,
+            (_, Some(Over::Separation(_))) => mouse::Interaction::Grab,
+            (_, Some(Over::CgLabel)) => mouse::Interaction::Pointer,
             _ => mouse::Interaction::default(),
         }
     }
 }
 
 impl Lanes<'_> {
+    /// A separation line being dragged with the cursor at `p`: the nearest eligible joint, published when it changes.
+    fn slide_separation(&self, state: &mut Interaction, axis: &Axis, p: Point) -> Option<Action<Message>> {
+        let Mode::Separating { stage, last } = state.mode else { return None };
+        let nearest =
+            self.rocket.separation_joints(stage).into_iter().min_by(|a, b| (axis.px(a.station) - p.x).abs().total_cmp(&(axis.px(b.station) - p.x).abs()))?;
+        let aft = nearest.between.1;
+        if last == Some(aft) {
+            return Some(Action::capture());
+        }
+        state.mode = Mode::Separating { stage, last: Some(aft) };
+        Some(Action::publish(Message::SeparationTo(stage, Some(aft))).and_capture())
+    }
+
     /// The station an end being dragged lands on: the cursor, snapped to faces with Shift.
     fn edge_station(&self, key: BarKey, station: f64, axis: &Axis, shift: bool) -> f64 {
         if !shift {
@@ -601,6 +642,14 @@ impl Lanes<'_> {
         if p.y < RULER_H && p.x >= bounds_width - CARET_W {
             return Some(Action::publish(Message::ToggleCollapsed).and_capture());
         }
+        // The separation line is also taken in the ruler, where no bar is in the way.
+        if p.y < RULER_H {
+            if let Some(stage) = self.separation_at(axis, p, height) {
+                state.last_click = None;
+                state.mode = Mode::SepPressed { stage, at: p };
+                return Some(Action::publish(Message::SelectSeparation(stage)).and_capture());
+            }
+        }
         if p.y < RULER_H {
             let was = double(None);
             state.last_click = Some((now, None));
@@ -632,6 +681,7 @@ impl Lanes<'_> {
             }
             Some(Over::Separation(stage)) => {
                 state.last_click = None;
+                state.mode = Mode::SepPressed { stage, at: p };
                 Some(Action::publish(Message::SelectSeparation(stage)).and_capture())
             }
             _ => {
@@ -843,6 +893,27 @@ impl Lanes<'_> {
         }
         for other in &self.scene.other_cgs {
             vline(f, axis.px(other.cg), size.height - 18.0, size.height - 9.0, Stroke::default().with_color(t.cg.scale_alpha(0.6)).with_width(1.0));
+        }
+
+        // Dragging a separation: every joint it can move to, and the live station.
+        if let Mode::Separating { stage, .. } = state.mode {
+            for joint in self.rocket.separation_joints(stage) {
+                let x = axis.px(joint.station);
+                vline(f, x, RULER_H, foot, dotted(t.accent.scale_alpha(0.6)));
+                let d = Path::new(|b| {
+                    b.move_to(Point::new(x, RULER_H - 11.0));
+                    b.line_to(Point::new(x + 4.5, RULER_H - 6.5));
+                    b.line_to(Point::new(x, RULER_H - 2.0));
+                    b.line_to(Point::new(x - 4.5, RULER_H - 6.5));
+                    b.close();
+                });
+                f.fill(&d, t.bg_100);
+                f.stroke(&d, Stroke::default().with_color(t.accent).with_width(1.0));
+            }
+            if let Some(sep) = self.scene.seps.iter().find(|s| s.stage == stage) {
+                let words = format!("SEPARATION · {}", ui::bare(sep.station, Quantity::Length, self.units));
+                tag(f, axis.px(sep.station) + 8.0, RULER_H + 12.0, &words, t.ink, t.bg_300, Some(t.accent), false);
+            }
         }
 
         // Hover: short parts are named (with their station) because their label cannot fit.

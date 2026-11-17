@@ -18,8 +18,16 @@ fn rocket() -> Vehicle {
     Vehicle {
         reference_diameter: 2.0 * r,
         body: vec![
-            BodySegment { station: 0.0, length: 0.30, fore_radius: 0.0, aft_radius: r, kind: BodyKind::Nose(NoseShape::TangentOgive), roughness: 30e-6 },
-            BodySegment { station: 0.30, length: 0.80, fore_radius: r, aft_radius: r, kind: BodyKind::Tube, roughness: 30e-6 },
+            BodySegment {
+                station: 0.0,
+                length: 0.30,
+                fore_radius: 0.0,
+                aft_radius: r,
+                kind: BodyKind::Nose(NoseShape::TangentOgive),
+                tip_radius: 0.0,
+                roughness: 30e-6,
+            },
+            BodySegment { station: 0.30, length: 0.80, fore_radius: r, aft_radius: r, kind: BodyKind::Tube, tip_radius: 0.0, roughness: 30e-6 },
         ],
         tube_fins: vec![],
         fin_sets: vec![FinSet {
@@ -200,7 +208,7 @@ fn two_stage(ignition: Timing, separation: Timing) -> Vehicle {
     sustainer.motor.as_mut().unwrap().ignition = ignition;
     sustainer.motor.as_mut().unwrap().ejection_delay = Some(6.0);
     v.stages = vec![booster, sustainer];
-    v.body.push(BodySegment { station: 1.10, length: 0.4, fore_radius: 0.038, aft_radius: 0.038, kind: BodyKind::Tube, roughness: 30e-6 });
+    v.body.push(BodySegment { station: 1.10, length: 0.4, fore_radius: 0.038, aft_radius: 0.038, kind: BodyKind::Tube, tip_radius: 0.0, roughness: 30e-6 });
     v
 }
 
@@ -566,4 +574,128 @@ fn a_heavier_drag_table_flies_lower() {
     let mut i = input();
     i.drag_tables = vec![Some(table_from_buildup(&plain, 1.3))];
     assert!(simulate(&i).summary.apogee < simulate(&input()).summary.apogee);
+}
+
+// ---- The dropped stage flies on its own ----------------------------------------------------------------------------
+
+/// A first stage below the booster of [`two_stage`]: three stages, the booster separating second.
+fn three_stage() -> Vehicle {
+    let mut v = two_stage(Timing::new(Trigger::Burnout, 1.0), Timing::BURNOUT);
+    v.stages[0].motor.as_mut().unwrap().ignition = Timing::new(Trigger::Burnout, 0.5);
+    let first = StageMass {
+        dry: MassProps { mass: 0.3, cg: 1.7, i_long: 0.008, i_rot: 0.0003 },
+        fore_station: 1.50,
+        aft_station: 1.90,
+        motor: Some(StageMotor { curve: h128(), mount_aft_station: 1.90, ignition: Timing::LAUNCH, ejection_delay: None, tilt_lockout: None }),
+        separation: Timing::BURNOUT,
+    };
+    v.stages.insert(0, first);
+    v.body.push(BodySegment { station: 1.50, length: 0.4, fore_radius: 0.038, aft_radius: 0.038, kind: BodyKind::Tube, tip_radius: 0.0, roughness: 30e-6 });
+    v
+}
+
+fn booster_chute() -> RecoveryDevice {
+    RecoveryDevice { name: "Booster chute".into(), stage: 0, cd_area: 0.5, deploy: Deploy::Apogee, delay: 0.0 }
+}
+
+/// The two-stage rocket flown with the sustainer's `Main` and the extra devices `more`.
+fn fly_with_booster_devices(more: Vec<RecoveryDevice>) -> FlightResult {
+    let launch = Launch { rail_length: 2.0, ..Launch::default() };
+    let mut rec = vec![RecoveryDevice { name: "Main".into(), stage: 1, cd_area: 0.9, deploy: Deploy::Ejection, delay: 0.0 }];
+    rec.extend(more);
+    simulate(&SimInput::new(two_stage(Timing::new(Trigger::Burnout, 1.0), Timing::BURNOUT), launch, rec))
+}
+
+#[test]
+fn a_single_stage_flight_has_no_branches() {
+    assert!(simulate(&input()).branches.is_empty());
+}
+
+#[test]
+fn the_dropped_stage_is_the_part_between_its_joint_and_its_aft_end_on_its_own_stations() {
+    let v = two_stage(Timing::new(Trigger::Burnout, 1.0), Timing::BURNOUT);
+    let booster = v.dropped_stage(0).expect("the booster is dropped");
+    // Only the tube behind the joint at 1.10 m; the fins and the rail button belong to the sustainer.
+    assert_eq!(booster.body.len(), 1);
+    assert!((booster.body[0].station).abs() < 1e-12 && (booster.body[0].length - 0.4).abs() < 1e-12);
+    assert!(booster.fin_sets.is_empty() && booster.protuberances.is_empty());
+    assert_eq!(booster.stages.len(), 1);
+    let (stage, original) = (&booster.stages[0], &v.stages[0]);
+    assert!((stage.dry.cg - (original.dry.cg - 1.10)).abs() < 1e-12 && stage.dry.mass == original.dry.mass);
+    assert!((stage.motor.as_ref().unwrap().mount_aft_station - 0.4).abs() < 1e-12);
+    assert_eq!(booster.reference_diameter, v.reference_diameter);
+    // The top stage separates from nothing.
+    assert!(v.dropped_stage(1).is_none());
+}
+
+#[test]
+fn the_booster_branch_starts_at_the_separation_state_with_the_booster_mass() {
+    let r = fly_with_booster_devices(vec![]);
+    assert_eq!(r.branches.len(), 1);
+    let b = &r.branches[0];
+    assert_eq!((b.name.as_str(), b.stage), ("Booster", 0));
+    let (t_sep, _) = event_of(&r, EventKind::Separation, 0);
+    assert!((b.start - t_sep).abs() < 1e-9);
+    assert_eq!(b.trajectory.events[0].kind, EventKind::Separation);
+
+    // Position and velocity continue the rocket's own at the separation.
+    let at = r.trajectory.samples.iter().find(|s| (s.t - b.start).abs() < 1e-12).expect("the separation instant is always a sample");
+    let first = &b.trajectory.samples[0];
+    assert!((first.t - b.start).abs() < 1e-12);
+    for i in 0..3 {
+        assert!((first.position[i] - at.position[i]).abs() < 1e-9, "position {i}");
+        assert!((first.velocity[i] - at.velocity[i]).abs() < 1e-9, "velocity {i}");
+    }
+    // The mass is the booster's alone: its dry mass and what is left of its motor.
+    let ignition = event_of(&r, EventKind::Ignition, 0).0;
+    let expected = 0.4 + h128().mass(b.start - ignition);
+    assert!((first.mass - expected).abs() < 1e-9, "{} vs {expected}", first.mass);
+    assert!(first.mass < at.mass, "the sustainer stack is heavier than the booster alone");
+    // The stations are from the nose tip of the whole rocket: the booster's CG is aft of the joint.
+    assert!(first.cg > 1.10 && first.cg < 1.50, "{}", first.cg);
+}
+
+#[test]
+fn the_booster_lands_after_the_separation_and_the_summary_says_where() {
+    let r = fly_with_booster_devices(vec![]);
+    let b = &r.branches[0];
+    let landing = b.trajectory.events.last().expect("events");
+    assert_eq!(landing.kind, EventKind::Landing);
+    assert!(landing.t > b.start && landing.altitude.abs() < 1e-9);
+    assert!(b.trajectory.samples.windows(2).all(|w| w[0].t < w[1].t));
+    let end = b.trajectory.samples.last().unwrap();
+    assert!(end.altitude.abs() < 1e-9 && (end.t - landing.t).abs() < 1e-12);
+    let s = &b.summary;
+    assert!((s.flight_time - landing.t).abs() < 1e-12);
+    assert!(s.max_velocity > 20.0 && s.ground_hit_velocity > 0.0 && s.descent_rate > 0.0 && s.descent_rates.is_empty());
+    assert!((s.landing_position[0].hypot(s.landing_position[1]) - s.landing.0).abs() < 1e-9);
+    assert!((end.position[0] - s.landing_position[0]).abs() < 1e-9 && (end.position[1] - s.landing_position[1]).abs() < 1e-9);
+}
+
+#[test]
+fn a_recovery_device_on_the_booster_slows_its_landing_and_leaves_the_primary_track_alone() {
+    let bare = fly_with_booster_devices(vec![]);
+    let saved = fly_with_booster_devices(vec![booster_chute()]);
+    let (a, b) = (&bare.branches[0], &saved.branches[0]);
+    assert!(b.trajectory.events.iter().any(|e| e.kind == EventKind::Deploy("Booster chute".into())));
+    assert_eq!(b.summary.descent_rates.len(), 1);
+    assert!(b.summary.ground_hit_velocity < 0.25 * a.summary.ground_hit_velocity, "{} vs {}", b.summary.ground_hit_velocity, a.summary.ground_hit_velocity);
+    assert!(b.summary.flight_time > a.summary.flight_time, "the canopy takes longer to come down");
+    // What the booster carries does not touch the upper stack's flight.
+    assert_eq!(bare.trajectory, saved.trajectory);
+    assert_eq!(bare.summary, saved.summary);
+}
+
+#[test]
+fn each_separation_of_a_three_stage_rocket_drops_its_own_branch() {
+    let launch = Launch { rail_length: 2.0, ..Launch::default() };
+    let r = simulate(&SimInput::new(three_stage(), launch, vec![]));
+    assert_eq!(r.branches.len(), 2);
+    assert_eq!(r.branches.iter().map(|b| (b.name.as_str(), b.stage)).collect::<Vec<_>>(), [("Stage 1", 0), ("Stage 2", 1)]);
+    assert!(r.branches[0].start < r.branches[1].start);
+    for b in &r.branches {
+        let at = r.trajectory.samples.iter().find(|s| (s.t - b.start).abs() < 1e-12).expect("a sample at the separation");
+        assert!((0..3).all(|i| (b.trajectory.samples[0].position[i] - at.position[i]).abs() < 1e-9));
+        assert!(b.trajectory.events.last().is_some_and(|e| e.kind == EventKind::Landing), "{} lands", b.name);
+    }
 }

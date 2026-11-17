@@ -18,21 +18,21 @@ click "Add configuration"
 screenshot config-added.png
 
 # Undo and redo (top bar icon buttons) take the new configuration away and bring it back.
-click (312, 20)
+click "Undo"
 screenshot undone.png
-click (350, 20)
+click "Redo"
 screenshot redone.png
 
 # A part added from the bin is one undo step too.
 click "Body tube"
 screenshot added-tube.png
-click (312, 20)
+click "Undo"
 screenshot added-tube-undone.png
 
 # The mode switch: Simulate and Analyze keep the top bar and status strip.
-click (625, 18)
+click "Simulate"
 screenshot simulate.png
-click (690, 18)
+click "Analyze"
 screenshot analyze.png
-click (565, 18)
+click "Build"
 screenshot back-to-build.png

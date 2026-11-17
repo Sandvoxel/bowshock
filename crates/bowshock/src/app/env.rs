@@ -32,6 +32,9 @@ pub struct Env {
     pub presets_dir: Option<PathBuf>,
     /// `BOWSHOCK_THRUSTCURVE_API`: base URL of the ThrustCurve.org client.
     pub thrustcurve_api: Option<String>,
+    /// Fetch the motors a loaded document needs from ThrustCurve.org: in the windowed app, and in a headless run or a test only
+    /// when `BOWSHOCK_THRUSTCURVE_API` names an endpoint explicitly.
+    pub fetch_motors: bool,
     /// `BOWSHOCK_CAPTURE_PNG`: where the 4K capture is written.
     #[cfg(test)]
     pub capture_png: Option<PathBuf>,
@@ -85,6 +88,7 @@ impl Env {
             motors_dir: default_motors_dir(),
             presets_dir: var("BOWSHOCK_PRESETS_DIR").map(PathBuf::from).or_else(|| config_file("presets")),
             thrustcurve_api: std::env::var("BOWSHOCK_THRUSTCURVE_API").ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty()),
+            fetch_motors: animate || std::env::var("BOWSHOCK_THRUSTCURVE_API").is_ok_and(|v| !v.trim().is_empty()),
             #[cfg(test)]
             capture_png: var("BOWSHOCK_CAPTURE_PNG").map(PathBuf::from),
         }
@@ -107,6 +111,7 @@ impl Env {
             motors_dir: None,
             presets_dir: None,
             thrustcurve_api: None,
+            fetch_motors: false,
             #[cfg(test)]
             capture_png: None,
         }
@@ -124,7 +129,7 @@ mod tests {
         assert!(env.drive_modifiers.is_empty() && env.cfd_demo.is_empty());
         assert!(env.open_path.is_none() && env.export_file.is_none() && env.compare_file.is_none());
         assert!(env.recent_file.is_none() && env.settings_file.is_none() && env.motors_dir.is_none() && env.presets_dir.is_none());
-        assert!(env.thrustcurve_api.is_none() && env.capture_png.is_none());
+        assert!(env.thrustcurve_api.is_none() && !env.fetch_motors && env.capture_png.is_none());
     }
 
     #[test]

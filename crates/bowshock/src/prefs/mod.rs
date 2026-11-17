@@ -1,4 +1,4 @@
-//! Preferences: one modal window (File > Preferences…, the top bar's gear, `⌘,` / `Ctrl+,`) with a list of sections on the left and
+//! Preferences: one modal window (Edit > Preferences…, the top bar's Preferences button, `⌘,` / `Ctrl+,`) with a list of sections on the left and
 //! the section on the right. Every control applies at once and is kept in the user's settings (`app/settings.rs`); there is
 //! nothing to confirm except clearing a cache.
 //!
@@ -10,10 +10,11 @@
 
 mod appearance;
 pub mod compute;
+mod nav;
 pub mod storage;
 mod units;
 
-use iced::widget::{button, column, container, row, scrollable, text, Space};
+use iced::widget::{column, container, row, scrollable, text, Space};
 use iced::{Background, Element, Fill, Task, Theme, Widget};
 
 use crate::app::settings::LocalSolver;
@@ -29,8 +30,6 @@ use crate::widgets::segmented::segmented;
 const CARD_W: f32 = 780.0;
 /// Height of the card's body (the section list and the section).
 const BODY_H: f32 = 520.0;
-/// Width of the section list.
-const NAV_W: f32 = 168.0;
 
 /// A page of the window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -73,7 +72,7 @@ impl Section {
 /// The window's messages.
 #[derive(Debug, Clone)]
 pub enum Message {
-    /// Open the window on the page it was last left on (File menu, gear, `⌘,`).
+    /// Open the window on the page it was last left on (Edit menu, the top bar's Preferences button, `⌘,`).
     Show,
     /// Open the window on this page.
     Open(Section),
@@ -174,11 +173,7 @@ impl State {
         if !self.open {
             return None;
         }
-        let mut list = column![].spacing(SPACE_1).width(NAV_W);
-        for section in Section::ALL {
-            let item = button(text(section.label()).size(TEXT_BODY)).width(Fill).padding([6.0, SPACE_2 + 2.0]).style(nav_item(section == self.section));
-            list = list.push(item.on_press(Message::Select(section)));
-        }
+        let list = nav::list(self.section);
         let page: Element<'a, Message> = match self.section {
             Section::Appearance => appearance::view(ctx),
             Section::Units => units::view(ctx),
@@ -187,12 +182,12 @@ impl State {
         };
         let head =
             column![text(self.section.label()).font(SANS_MEDIUM).size(16), text(self.section.blurb()).size(TEXT_BODY).style(theme::muted)].spacing(SPACE_1);
-        let content = scrollable(column![head, page].spacing(SPACE_3 + 6.0).width(Fill).padding(iced::Padding { right: SPACE_3, ..iced::Padding::ZERO }))
+        let rule = container(Space::new()).width(Fill).height(1).style(theme::hairline);
+        let content = scrollable(column![head, rule, page].spacing(SPACE_3 + 4.0).width(Fill).padding(iced::Padding { right: SPACE_3, ..iced::Padding::ZERO }))
             .width(Fill)
             .height(Fill)
             .style(theme::scroll);
-        let divider = container(Space::new()).width(1).height(Fill).style(theme::hairline);
-        let body = row![list, divider, content].spacing(SPACE_3 + 4.0).height(BODY_H).boxed();
+        let body = row![list, content].spacing(SPACE_3 + 4.0).height(BODY_H).boxed();
         let done: Element<'_, Message> = push("Done", Weight::Primary).key("Esc").on_press(Message::Close).into();
         let buttons = row![text("Changes apply at once and are kept for every rocket.").size(TEXT_BODY).style(theme::faint), Space::new().width(Fill), done]
             .align_y(iced::Center)
@@ -201,17 +196,13 @@ impl State {
     }
 
     fn compute_page<'a>(&'a self, ctx: &'a Ctx) -> Element<'a, Message> {
-        let device = container(segmented(&[(LocalSolver::Auto, "Auto"), (LocalSolver::Cpu, "CPU only")], ctx.local_solver, Message::Solver)).width(220);
-        column![
-            group("WHERE SOLVES RUN", Element::map(compute::view(&self.compute, ctx), Message::Compute).boxed(), None),
-            group(
-                "ON THIS COMPUTER",
-                device.boxed(),
-                Some("Auto uses the GPU when there is one and falls back to the CPU. CPU only is slower, but never touches the GPU.")
-            ),
-        ]
-        .spacing(SPACE_3 + 4.0)
-        .boxed()
+        let device = segmented(&[(LocalSolver::Auto, "Auto"), (LocalSolver::Cpu, "CPU only")], ctx.local_solver, Message::Solver);
+        let local = card(vec![setting(
+            "Local solver",
+            Some("Auto uses the GPU when there is one and falls back to the CPU. CPU only is slower, but never touches the GPU."),
+            device,
+        )]);
+        column![Element::map(compute::view(&self.compute, ctx), Message::Compute), group("ON THIS COMPUTER", local, None)].spacing(SPACE_3 + 4.0).boxed()
     }
 }
 
@@ -224,20 +215,32 @@ pub(super) fn group<'a, M: 'a>(title: &'a str, control: Element<'a, M>, note: Op
     group.boxed()
 }
 
-/// A row of the section list: the accent's soft ground when current, `bg-400` on hover.
-fn nav_item(current: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
-    move |theme, status| {
-        let t = theme::tokens(theme);
-        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
-        let background = if current {
-            Some(Background::Color(t.accent_soft))
-        } else if hovered {
-            Some(Background::Color(t.bg_400))
-        } else {
-            None
-        };
-        button::Style { background, text_color: if current { t.ink } else { t.ink_muted }, border: iced::Border::default(), ..button::Style::default() }
+/// A panel one surface step above the modal card's ground, in a 1 px `line-100` frame, its rows split by hairlines.
+pub(super) fn card<'a, M: 'a>(rows: Vec<Element<'a, M>>) -> Element<'a, M> {
+    let mut body = iced::widget::Column::new().width(Fill);
+    for (i, row) in rows.into_iter().enumerate() {
+        if i > 0 {
+            body = body.push(container(Space::new()).width(Fill).height(1).style(theme::hairline).boxed());
+        }
+        body = body.push(row);
     }
+    container(body).width(Fill).style(card_style).boxed()
+}
+
+fn card_style(theme: &Theme) -> container::Style {
+    let t = theme::tokens(theme);
+    container::Style { background: Some(Background::Color(t.bg_300)), border: theme::frame(t.line_100), ..container::Style::default() }
+}
+
+/// One row of a [`card`]: the label (with an optional note under it) on the left, the control on the right, centred.
+pub(super) fn setting<'a, M: 'a>(label: &'a str, note: Option<&'a str>, control: Element<'a, M>) -> Element<'a, M> {
+    let mut names = column![text(label).size(TEXT_BODY).style(theme::ink).boxed()].spacing(2).width(Fill);
+    if let Some(note) = note {
+        names = names.push(text(note).size(12.0).style(theme::muted).boxed());
+    }
+    // The spacer holds the row to a 44 px minimum (its height plus the padding) and keeps the control off the label.
+    let body = row![names, Space::new().width(SPACE_3).height(20), control].align_y(iced::Center);
+    container(body).padding([SPACE_3, SPACE_3]).width(Fill).boxed()
 }
 
 #[cfg(test)]

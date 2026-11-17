@@ -105,14 +105,19 @@ pub struct Ctx {
     pub notice: Option<(String, Instant)>,
     /// What an OpenRocket import could not carry over exactly, one line each (the warnings chip lists them); cleared on every load.
     pub import_notes: Vec<String>,
-    /// The File menu is open (the top bar's file name toggles it).
-    pub file_menu: bool,
+    /// The menu-bar menu that is open (File / Edit / View), if any.
+    pub menu: Option<crate::chrome::TopMenu>,
     /// The recently opened or saved documents (File menu).
     pub recent: files::Recent,
     /// Ask the viewport to frame the rocket once its mesh is current (set after adding a part or loading a document).
     pub camera_fit: bool,
     /// The document was just replaced: select nothing and let the gauge jump rather than animate.
     pub(super) reloaded: bool,
+    /// Counts the documents loaded so far; a motor fetch answers with the count it started for, so a document that has been
+    /// replaced since is told apart (see [`super::motor_fetch`]).
+    pub(super) load_ticket: u64,
+    /// A document was just opened or imported: the next update looks for the motors it is missing.
+    pub(super) fetch_wanted: bool,
     /// A file command that would discard unsaved changes, waiting on the "Save changes?" modal (which is open while this is set).
     pub(super) unsaved: Option<Pending>,
     /// The same command while the Save As dialog the modal's Save opened is up; cancelling the dialog abandons it.
@@ -136,6 +141,8 @@ pub struct Ctx {
     pub scale: Option<scale::Dialog>,
     /// The flight selected on the Simulate screen (the Optimize analysis starts from it).
     pub selected_flight: Option<bowshock_model::FlightId>,
+    /// The report of the last background run, shown as a toast away from Simulate (see [`super::run_report`]).
+    pub run: Option<super::run_report::RunReport>,
 }
 
 impl Ctx {
@@ -165,9 +172,11 @@ impl Ctx {
             notice: None,
             import_notes: Vec::new(),
             recent: files::Recent::default(),
-            file_menu: false,
+            menu: None,
             camera_fit: false,
             reloaded: false,
+            load_ticket: 0,
+            fetch_wanted: false,
             unsaved: None,
             saving_for: None,
             symmetry: symmetry::SymmetryUi::default(),
@@ -179,6 +188,7 @@ impl Ctx {
             part_menu: None,
             scale: None,
             selected_flight: None,
+            run: None,
         }
     }
 
@@ -198,7 +208,7 @@ impl Ctx {
 
     /// Whether anything needs frame ticks because of the context itself.
     pub(super) fn animating(&self) -> bool {
-        self.notice.is_some() || self.physics.animating() || (self.flash.is_some() && self.env.animate && !self.env.freeze_flash)
+        self.notice.is_some() || self.run_animating() || self.physics.animating() || (self.flash.is_some() && self.env.animate && !self.env.freeze_flash)
     }
 
     /// Starts the one-time flash and settle of part `id` (it was just dropped or its edit was committed).
@@ -229,6 +239,8 @@ impl Ctx {
         self.drag = Drags { symmetry: self.drag.symmetry, angle_snap: self.drag.angle_snap, ..Drags::default() };
         self.camera_fit = true;
         self.reloaded = true;
+        self.load_ticket += 1;
+        self.fetch_wanted = false;
     }
 
     /// Drops a selection that no longer exists (after a delete, an undo, a load).

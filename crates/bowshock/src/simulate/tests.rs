@@ -28,6 +28,30 @@ fn state_for(app: &App) -> State {
     state
 }
 
+/// Every flight of a run lands: the report has no pending lines and each line an outcome; `until` is set for the toast.
+#[test]
+fn run_report_fills_as_flights_land() {
+    let mut app = App::with_example();
+    let mut state = state_for(&app);
+    let ids = state.flight_ids();
+    state.update(Message::RunAll, app.ctx_mut());
+    assert_eq!(app.ctx().run.as_ref().map(|r| (r.lines.len(), r.pending)), Some((ids.len(), ids.len())));
+    for (n, id) in ids.iter().enumerate() {
+        let f = state.flight(*id).unwrap();
+        let (ticket, spec) = (f.ticket, f.spec.clone());
+        let (input, delay) = flight::prepare(app.ctx(), &spec).expect("the example flies");
+        let result = Arc::new(bowshock_sim::simulate(&input));
+        let revision = state.stamp(app.ctx(), &spec);
+        let done = Done { flight: *id, ticket, spec, revision, delay, dt: input.dt, outcome: Ok((result, Duration::ZERO)) };
+        state.update(Message::Done(Box::new(done)), app.ctx_mut());
+        let report = app.ctx().run.as_ref().unwrap();
+        assert_eq!(report.pending, ids.len() - n - 1);
+        assert_eq!(report.until.is_some(), n + 1 == ids.len());
+    }
+    let report = app.ctx().run.as_ref().unwrap();
+    assert!(report.lines.iter().all(|l| matches!(&l.outcome, Some(Ok(s)) if s.apogee > 0.0 && s.flight_time > 0.0)));
+}
+
 #[test]
 fn the_example_flies_the_kit_flights() {
     let app = App::with_example();
@@ -1021,4 +1045,58 @@ fn the_other_way_of_cant_spins_the_other_way_and_fin_b_alone_a_third_as_fast() {
     assert_eq!((group.effective(0).cant, group.effective(1).cant, group.effective(2).cant), (0.0, 2.0_f64.to_radians(), 0.0));
     let one = nominal_spin(&app).0;
     assert!((one / all - 1.0 / 3.0).abs() < 0.01, "{one} vs {all}");
+}
+
+/// A dropped stage for the flight tests: a booster separated at 1.6 s that lands at 8 s.
+fn booster() -> bowshock_sim::Branch {
+    use bowshock_sim::{Branch, BranchSummary, Event, EventKind, Sample, Trajectory};
+    let sample = |t: f64, altitude: f64| Sample { t, altitude, position: [t, 0.0, altitude], ..Sample::default() };
+    let event = |t, kind| Event { t, kind, altitude: 0.0, stage: None };
+    Branch {
+        name: "Booster".into(),
+        stage: 0,
+        start: 1.6,
+        trajectory: Trajectory {
+            samples: vec![sample(1.6, 100.0), sample(4.0, 150.0), sample(8.0, 0.0)],
+            events: vec![event(1.6, EventKind::Separation), event(8.0, EventKind::Landing)],
+        },
+        summary: BranchSummary { flight_time: 8.0, ..BranchSummary::default() },
+    }
+}
+
+#[test]
+fn a_dropped_stage_is_drawn_with_its_flight_and_the_header_toggle_hides_it() {
+    let mut app = App::with_example();
+    let mut state = state_for(&app);
+    let id = state.flights[0].id;
+    fly(&mut state, app.ctx(), id);
+    // A single-stage flight has nothing dropped: no toggle, no extra lines, no strip row, one ground track.
+    assert!(!state.shown.has_dropped);
+    let lines = |state: &State| state.shown.group.as_ref().unwrap().panels[0].series.len();
+    let before = lines(&state);
+    assert_eq!(state.shown.ground.tracks.len(), 1);
+    assert!(state.shown.group.as_ref().unwrap().rows.is_empty());
+
+    // Give the run a booster: its lines, a strip row and a ground track join the flight's.
+    let mut run = state.flights[0].run.clone().unwrap();
+    let mut result = (*run.result).clone();
+    result.branches.push(booster());
+    run.result = Arc::new(result);
+    state.flights[0].run = Some(run);
+    state.rebuild();
+    assert!(state.shown.has_dropped && state.dropped);
+    assert!(lines(&state) > before);
+    assert_eq!(state.shown.group.as_ref().unwrap().rows.len(), 1);
+    assert_eq!(state.shown.ground.tracks.len(), 2);
+
+    // The header toggle hides the lines and the row; the ground track keeps the landing.
+    state.update(Message::Dropped(false), app.ctx_mut());
+    assert_eq!(lines(&state), before);
+    assert!(state.shown.group.as_ref().unwrap().rows.is_empty());
+    assert_eq!(state.shown.ground.tracks.len(), 2);
+
+    // A click on the booster's landing selects the flight it was dropped from.
+    state.select_only(ids_of(&state)[1]);
+    state.update(Message::Ground(GroundMessage::Select(1)), app.ctx_mut());
+    assert_eq!(state.selected_id(), id);
 }

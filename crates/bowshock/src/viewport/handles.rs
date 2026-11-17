@@ -222,7 +222,7 @@ fn axial(camera: &Camera, size: Size, up: Vec3, z0: f64, kind: &PartKind, wall: 
         Dim::ForeDiameter => line(camera, size, at(up, kind.fore_diameter() / 2.0, z0), up, 0.5),
         Dim::Wall => line(camera, size, at(up, kind.radius_at(l / 2.0) - wall, z0 + l / 2.0), -up, 1.0),
         Dim::Shape => {
-            let PartKind::NoseCone { shape, length, diameter } = *kind else {
+            let PartKind::NoseCone { shape, length, diameter, tip_radius } = *kind else {
                 return None;
             };
             let p = shape.parameter()?;
@@ -235,7 +235,7 @@ fn axial(camera: &Camera, size: Size, up: Vec3, z0: f64, kind: &PartKind, wall: 
                     bowshock_model::NoseShape::PowerSeries(_) => bowshock_model::NoseShape::PowerSeries(q.clamp(0.01, 1.0)),
                     _ => bowshock_model::NoseShape::Haack(q.clamp(0.0, 1.0)),
                 };
-                PartKind::NoseCone { shape, length, diameter }.radius_at(x)
+                PartKind::NoseCone { shape, length, diameter, tip_radius }.radius_at(x)
             };
             let d_r = (probe(p + h) - probe(p - h)) / (2.0 * h);
             let (pos, axis) = line(camera, size, at(up, r, z0 + x), up, 1.0)?;
@@ -444,7 +444,7 @@ mod tests {
 
     fn rocket() -> (Rocket, PartId, PartId) {
         let mut r = Rocket::default();
-        r.insert(0, PartKind::NoseCone { shape: NoseShape::Haack(1.0 / 3.0), length: 0.2, diameter: 0.1 }).unwrap();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::Haack(1.0 / 3.0), length: 0.2, diameter: 0.1, tip_radius: 0.0 }).unwrap();
         let tube = r.insert(1, PartKind::BodyTube { length: 0.5, diameter: 0.1 }).unwrap();
         let fin =
             r.attach_radial(tube, 0.4, 0.0, 3, RadialKind::FinSet { root_chord: 0.1, tip_chord: 0.05, span: 0.05, sweep: 0.03, thickness: 0.003 }).unwrap();

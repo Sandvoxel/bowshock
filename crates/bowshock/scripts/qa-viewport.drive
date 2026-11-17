@@ -16,7 +16,7 @@ screenshot tube-drag-length.png
 release (740, 311)
 screenshot tube-resized.png
 # Undo (top bar): the whole drag was one step.
-click (353, 20)
+click "Undo"
 
 # A limit stops the drag: the tag turns warn and says why.
 press (707, 311)
@@ -36,7 +36,7 @@ type "0"
 screenshot tube-typed.png
 type enter
 screenshot tube-committed.png
-click (353, 20)
+click "Undo"
 
 # The nose cone: tip handle sets the length.
 click (400, 314)
@@ -45,7 +45,7 @@ press (469, 311)
 move (495, 311)
 screenshot nose-drag-length.png
 release (495, 311)
-click (353, 20)
+click "Undo"
 
 # Cutaway: internal dimensions get handles too (the motor mount selected from its lane, then the nose cone's wall).
 click (600, 500)
@@ -67,4 +67,4 @@ move (796, 272)
 move (816, 272)
 screenshot fin-drag-root-chord.png
 release (816, 272)
-click (353, 20)
+click "Undo"

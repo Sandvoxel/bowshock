@@ -5,5 +5,7 @@ click (923, 624)
 click "Detach"
 click (925, 619)
 screenshot group-dark.png
+click "Prefs"
 click "Light"
+click "Done"
 screenshot group-light.png

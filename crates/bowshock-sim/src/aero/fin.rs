@@ -1,5 +1,6 @@
 use super::FinCalc;
 use crate::vehicle::FinCrossSection;
+use bowshock_reference::fin_wave::{biconvex_slope_integral, double_wedge_slope_integral, hexagonal_slope_integral, wave_drag_coefficient};
 use std::f64::consts::PI;
 /// Roll angle (rad) of the crossflow Bowshock assumes: the lateral wind lies along +Y, the angle
 /// a fin at roll angle 0 points to (a fin's roll angle is measured from +Y towards +X, see
@@ -44,18 +45,29 @@ const GAMMA: f64 = 1.4;
 /// Fin stall angle (20 deg): the angle-of-attack terms of the fin lift saturate there.
 pub(crate) const FIN_STALL: f64 = 20.0 * PI / 180.0;
 
-/// Supersonic coefficients `(K1, K2, K3)` of `CN = A (K1 a + K2 a^2 + K3 a^3)` per unit angle
-/// (Busemann second-order thin-airfoil theory; Pitts, Nielsen & Kaattari, NACA Report 1307;
-/// Niskanen 2009 §3.2.2), evaluated in closed form.
-pub(super) fn supersonic_k(mach: f64) -> (f64, f64, f64) {
+/// Busemann strip coefficients `(K1, K3)` of one *surface* of a sharp thin fin, `Cp = K1 eta + K2 eta^2 + K3 eta^3`
+/// with `eta` the surface inclination to the stream (Barrowman 1967, eq. 3-7 and App. A eq. 2a-2c, Busemann's third-order
+/// expansion; Niskanen 2009 eqs. 3.41-3.44 transcribe them).
+///
+/// `K1 = 2/beta`; `K3` is Barrowman's, *with* the `-12 M^2` term of his eq. 2c that Niskanen's eq. 3.44 drops. `K2` is not
+/// returned: on a flat plate the windward (`eta = alpha`) and leeward (`eta = -alpha`) surfaces give
+/// `Cp_w - Cp_l = 2 K1 alpha + 2 K3 alpha^3` and the even terms cancel. Both corrections were checked against the exact
+/// oblique-shock / Prandtl-Meyer series, see `supersonic_fin_k3_matches_exact_series` in `tests.rs`.
+pub(super) fn supersonic_k(mach: f64) -> (f64, f64) {
     let m = mach.clamp(CNA_SUPERSONIC, 4.9);
     let b2 = m * m - 1.0;
     let beta = b2.sqrt();
     let k1 = 2.0 / beta;
-    let k2 = ((GAMMA + 1.0) * m.powi(4) - 4.0 * b2) / (4.0 * b2 * b2);
-    let k3 =
-        ((GAMMA + 1.0) * m.powi(8) + (2.0 * GAMMA * GAMMA - 7.0 * GAMMA - 5.0) * m.powi(6) + 10.0 * (GAMMA + 1.0) * m.powi(4) + 8.0) / (6.0 * beta.powi(7));
-    (k1, k2, k3)
+    let k3 = ((GAMMA + 1.0) * m.powi(8) + (2.0 * GAMMA * GAMMA - 7.0 * GAMMA - 5.0) * m.powi(6) + 10.0 * (GAMMA + 1.0) * m.powi(4) - 12.0 * m * m + 8.0)
+        / (6.0 * beta.powi(7));
+    (k1, k3)
+}
+
+/// Supersonic slope `CN/alpha` of a flat plate fin per unit planform area at fin angle `alpha`: both surfaces,
+/// `(Cp_windward - Cp_leeward)/alpha = 2 (K1 + K3 alpha^2)` (the `K2` terms cancel).
+fn supersonic_plate_slope(mach: f64, alpha: f64) -> f64 {
+    let (k1, k3) = supersonic_k(mach);
+    2.0 * (k1 + k3 * alpha * alpha)
 }
 
 pub(super) const SUBSONIC_CP_POS: f64 = 0.25;
@@ -139,7 +151,8 @@ pub(crate) fn fin_cp_fraction(mach: f64, ar: f64) -> f64 {
 
 impl FinCalc {
     /// Normal-force slope of one fin on the reference area (Niskanen 2009 §3.2.2):
-    /// Diederich below Mach 0.9, `A (K1 + K2 a + K3 a^2)/A_ref` above Mach 1.5, and a quartic
+    /// Diederich below Mach 0.9, `A * 2 (K1 + K3 a^2)/A_ref` above Mach 1.5 (both surfaces of the plate, see
+    /// [`supersonic_k`]; Niskanen's `A (K1 + K2 a + K3 a^2)` takes the pressure of one surface only), and a quartic
     /// through value and slope at both ends (zero curvature at 0.9) in between.
     pub(super) fn cna1(&self, mach: f64, alpha: f64, a_ref: f64) -> f64 {
         if self.area < 1e-12 || self.span < 1e-9 || self.cos_mid < 1e-9 {
@@ -148,10 +161,7 @@ impl FinCalc {
         let alpha = alpha.abs().min(PI - alpha.abs()).min(FIN_STALL);
         let q = self.span * self.span / (self.area * self.cos_mid);
         let sub = |m: f64| 2.0 * PI * self.span * self.span / (1.0 + (1.0 + (1.0 - m * m) * q * q).sqrt()) / a_ref;
-        let sup = |m: f64, a: f64| {
-            let (k1, k2, k3) = supersonic_k(m);
-            self.area * (k1 + k2 * a + k3 * a * a) / a_ref
-        };
+        let sup = |m: f64, a: f64| self.area * supersonic_plate_slope(m, a) / a_ref;
         if mach <= CNA_SUBSONIC {
             return sub(mach);
         }
@@ -162,7 +172,10 @@ impl FinCalc {
         let sub_v = sub(CNA_SUBSONIC);
         let sub_d = 2.0 * CNA_SUBSONIC * PI * self.span.powi(6) / ((self.area * self.cos_mid).powi(2) * a_ref * sq * (1.0 + sq).powi(2));
         let sup_v = sup(CNA_SUPERSONIC, alpha);
-        let sup_d = -self.area / a_ref * 2.0 * CNA_SUPERSONIC / (CNA_SUPERSONIC * CNA_SUPERSONIC - 1.0).powf(1.5);
+        // Slope of the supersonic branch at its start: second-order one-sided difference (the coefficients are clamped
+        // below Mach 1.5, so a central difference would straddle the clamp).
+        let dm = 1e-4;
+        let sup_d = (-3.0 * sup_v + 4.0 * sup(CNA_SUPERSONIC + dm, alpha) - sup(CNA_SUPERSONIC + 2.0 * dm, alpha)) / (2.0 * dm);
         // Quartic p(t), t = M - 0.9: p(0) = sub_v, p'(0) = sub_d, p''(0) = 0, p(h) = sup_v, p'(h) = sup_d.
         let h = CNA_SUPERSONIC - CNA_SUBSONIC;
         let t = mach - CNA_SUBSONIC;
@@ -185,22 +198,31 @@ impl FinCalc {
     }
 
     /// Fin drag (Niskanen 2009 section 3.4.4): friction `Cf (1 + 2 t/MAC) 2 A`, leading-edge pressure
-    /// drag (stagnation for square edges, the rounded-edge fit for rounded/airfoil) scaled by
+    /// drag (stagnation for square edges, the rounded-edge fit for rounded/airfoil, none for the sharp sections) scaled by
     /// `cos^2` of the leading-edge sweep, and trailing-edge base drag (full for square, half for
-    /// rounded, none for airfoil), all times the fin count.
+    /// rounded, none for airfoil and the sharp sections), all times the fin count; plus, for the sharp sections, the Ackeret
+    /// wave drag above Mach 1 (the same `bowshock_reference::fin_wave` the CFD table's fin drag uses), on the fin planform area.
     pub(super) fn drag(&self, mach: f64, cf: f64, stag: f64, base: f64, a_ref: f64) -> f64 {
         let friction = cf * (1.0 + 2.0 * self.thickness / self.mac.max(1e-9)) * 2.0 * self.area * self.n / a_ref;
         let a_edge = self.n * self.span * self.thickness / a_ref;
         let le_cd = match self.cross {
             FinCrossSection::Square => stag,
             FinCrossSection::Rounded | FinCrossSection::Airfoil => round_edge_cd(mach),
+            FinCrossSection::DoubleWedge | FinCrossSection::Hexagonal(_) | FinCrossSection::Biconvex => 0.0,
         };
         let te_cd = match self.cross {
             FinCrossSection::Square => base,
             FinCrossSection::Rounded => 0.5 * base,
-            FinCrossSection::Airfoil => 0.0,
+            FinCrossSection::Airfoil | FinCrossSection::DoubleWedge | FinCrossSection::Hexagonal(_) | FinCrossSection::Biconvex => 0.0,
         };
-        friction + (le_cd * self.cos_lead * self.cos_lead + te_cd) * a_edge
+        let shape_factor = match self.cross {
+            FinCrossSection::DoubleWedge => double_wedge_slope_integral(),
+            FinCrossSection::Hexagonal(f) => hexagonal_slope_integral(f),
+            FinCrossSection::Biconvex => biconvex_slope_integral(),
+            FinCrossSection::Square | FinCrossSection::Rounded | FinCrossSection::Airfoil => 0.0,
+        };
+        let wave = wave_drag_coefficient(shape_factor, self.thickness / self.mac.max(1e-9), mach) * self.n * self.area / a_ref;
+        friction + (le_cd * self.cos_lead * self.cos_lead + te_cd) * a_edge + wave
     }
 }
 

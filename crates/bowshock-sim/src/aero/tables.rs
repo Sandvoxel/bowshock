@@ -150,6 +150,57 @@ pub(super) fn pressure_table(shape: Option<NoseShape>, fineness: f64, sinphi: f6
 }
 
 // ---------------------------------------------------------------------------------------------
+// Spherically blunted nose tips. **Own estimate** (no published correlation was found for a blunt rocket-nose tip; see
+// `docs/aero-references.md`): the nose's pressure drag on its base area is the sharp profile's drag and the drag of a
+// hemispherical cap on its own frontal area, weighted by the areas they act on.
+// ---------------------------------------------------------------------------------------------
+
+/// Stagnation pressure coefficient behind a normal shock, `Cp_max = (2 / (gamma M^2)) (p02/p1 - 1)` with the Rayleigh pitot
+/// ratio `p02/p1 = [(gamma+1)^2 M^2 / (4 gamma M^2 - 2 (gamma-1))]^(gamma/(gamma-1)) (1 - gamma + 2 gamma M^2)/(gamma+1)`
+/// (Anderson, *Hypersonic and High-Temperature Gas Dynamics*, eq. 3.16-3.18; NACA Rep. 1135 eq. 100). Valid for `M >= 1`
+/// (1.2756 at Mach 1, 1.8381 at Mach 25, 1.839 as `M` tends to infinity).
+pub(super) fn cp_max(m: f64) -> f64 {
+    const G: f64 = 1.4;
+    let m2 = m * m;
+    let pitot = ((G + 1.0).powi(2) * m2 / (4.0 * G * m2 - 2.0 * (G - 1.0))).powf(G / (G - 1.0)) * ((1.0 - G + 2.0 * G * m2) / (G + 1.0));
+    2.0 / (G * m2) * (pitot - 1.0)
+}
+
+/// The nose table of a hemispherical nose (an elliptical nose of length `R`, `L/D = 1/2`) as the build-up gives it: the subsonic
+/// drag of a hemisphere has the same provenance as every other nose's.
+pub(super) fn hemisphere_table() -> Table {
+    // `body_calc`'s sin(phi) for an elliptical nose at 0.99 L, in units of R = L.
+    let r = (1.0 - (1.0 - 0.99f64).powi(2)).sqrt();
+    let sinphi = (1.0 - r) / (1.0 - r).hypot(0.01);
+    pressure_table(Some(NoseShape::Elliptical), 0.5, sinphi)
+}
+
+/// Drag coefficient of a hemispherical cap on its own frontal area at Mach `m`. At `M >= 1` the modified Newtonian value
+/// `Cp_max / 2`: the pressure `Cp = Cp_max cos^2(phi)` (Lees; Anderson eq. 3.15) on the hemisphere, whose axial force on its
+/// frontal area is `2 Cp_max integral of cos^3(phi) sin(phi) d phi = Cp_max / 2` (hemisphere `0..pi/2`). Below Mach 1 the table
+/// of a hemispherical nose (`hemisphere`, see [`hemisphere_table`]) up to Mach 0.95; between 0.95 and 1 the two are joined by
+/// linear interpolation over that 0.05 step, the way [`blunt_cd`] samples the stagnation drag every 0.05 Mach and interpolates.
+pub(super) fn cap_cd(m: f64, hemisphere: &Table) -> f64 {
+    const JOIN: f64 = 0.95;
+    let newton = |m: f64| 0.5 * cp_max(m);
+    if m >= 1.0 {
+        newton(m)
+    } else if m <= JOIN {
+        hemisphere.at(m)
+    } else {
+        let below = hemisphere.at(JOIN);
+        below + (m - JOIN) / (1.0 - JOIN) * (newton(1.0) - below)
+    }
+}
+
+/// Pressure drag coefficient of a blunted nose on its base area: `CD_sharp (1 - k^2) + CD_cap k^2` with `k = r_n / R` the tip
+/// radius over the base radius. The cap's own frontal area is `k^2` of the base area; the sharp profile's drag acts on the rest.
+pub(super) fn blunt_nose_cd(sharp: f64, cap: f64, tip_ratio: f64) -> f64 {
+    let w = tip_ratio * tip_ratio;
+    sharp * (1.0 - w) + cap * w
+}
+
+// ---------------------------------------------------------------------------------------------
 // Skin friction: Blasius laminar and Prandtl-Schlichting turbulent flat-plate laws (Schlichting; Niskanen 2009 section 3.4.2).
 // ---------------------------------------------------------------------------------------------
 

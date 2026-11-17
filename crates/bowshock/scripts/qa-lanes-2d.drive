@@ -4,5 +4,7 @@ scale 1
 click "2D"
 move (640, 300)
 screenshot two-stage-2d.png
+click "Prefs"
 click "Light"
+click "Done"
 screenshot two-stage-2d-light.png

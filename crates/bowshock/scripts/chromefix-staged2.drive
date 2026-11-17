@@ -6,7 +6,9 @@ screenshot menu-dark.png
 click "New configuration…"
 screenshot picker-dark.png
 click "Cancel"
+click "Prefs"
 click "Light"
+click "Done"
 click "CONFIG"
 screenshot menu-light.png
 click "New configuration…"

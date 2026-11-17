@@ -299,7 +299,12 @@ impl State {
                     recount_selection(ctx, n);
                 }
             }
-            Message::AngleSnap(degrees) => ctx.drag.angle_snap = degrees,
+            Message::AngleSnap(degrees) => {
+                ctx.drag.angle_snap = degrees;
+                if degrees != 0 && !ctx.drag.active() {
+                    snap_selection(ctx, degrees);
+                }
+            }
             Message::Search(s) => self.search = s,
             Message::FocusSearch => return iced::widget::operation::focus(SEARCH_ID),
             Message::SizeToSelection(on) => self.size_to_selection = on,
@@ -566,7 +571,27 @@ fn recount_selection(ctx: &mut Ctx, count: u8) {
     ctx.doc.edit(label, |r| r.set_radial(id, kind, count));
 }
 
-/// The footer pinned at the bin's foot: the symmetry count (with the `X` key that cycles it) and the angle snap.
+/// Rounds the selected radial group's start angle (if one is selected) to a multiple of `degrees`, as one undo step. The copies
+/// of an unevenly spaced group turn with it.
+fn snap_selection(ctx: &mut Ctx, degrees: u8) {
+    let Some(id) = ctx.selection.part() else { return };
+    let Some(radial) = ctx.doc.rocket().radial(id) else { return };
+    let (parent, offset) = (radial.parent, radial.offset);
+    let start = radial.angles().first().copied().unwrap_or(radial.angle);
+    // The same rounding the viewport's radial drop applies (see `pick::surface_target`).
+    let step = f64::from(degrees).to_radians();
+    let snapped = ((start / step).round() * step).rem_euclid(std::f64::consts::TAU);
+    let off = (snapped - start).rem_euclid(std::f64::consts::TAU);
+    if off < 1e-9 || std::f64::consts::TAU - off < 1e-9 {
+        return;
+    }
+    ctx.doc.edit("Snap angle", |r| {
+        let _ = r.move_radial(id, parent, offset, snapped);
+    });
+}
+
+/// The footer pinned at the bin's foot: the symmetry count (with the `X` key that cycles it) and the angle snap. With a radial
+/// group selected and nothing carried, a count re-counts it and a snap step rounds its start angle, each as one undo step.
 fn symmetry_footer<'a>(ctx: &'a Ctx) -> Element<'a, Message> {
     let key = button(container(text("X").font(MONO).size(TEXT_LABEL)).padding([0.0, 4.0]).style(theme::keycap))
         .padding(0)

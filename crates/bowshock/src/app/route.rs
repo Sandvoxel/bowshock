@@ -4,7 +4,7 @@ use bowshock_model::PartId;
 use iced::{keyboard, Task};
 
 use super::message::{pick_intercept, shortcut};
-use super::{drag, files, part_menu, scale, App, KeyPress, Message, Mode, Pending, Selection};
+use super::{drag, files, motor_fetch, part_menu, scale, App, KeyPress, Message, Mode, Pending, Selection};
 use crate::build::{inspector, parts_bin};
 use crate::viewport;
 use crate::{chrome, export, prefs, print, simulate};
@@ -99,7 +99,6 @@ impl App {
                 return Task::none();
             }
         }
-        let was_open = self.ctx.file_menu;
         // Pointer movement is not a decision: a hover highlight (the parts bin's rows, its keyboard-focus flag) must never close
         // a menu. Only clicks, Esc and choosing an item do.
         let passive = matches!(
@@ -109,18 +108,20 @@ impl App {
         if !passive && !matches!(message, Message::OpenPartMenu(_) | Message::PartMenu(_) | Message::Chrome(chrome::Message::Nothing)) {
             self.ctx.part_menu = None;
         }
-        if !passive && !matches!(message, Message::ToggleFileMenu | Message::Chrome(chrome::Message::Nothing)) {
-            self.ctx.file_menu = false;
+        if !passive && !matches!(message, Message::Menu(_) | Message::Chrome(chrome::Message::Nothing)) {
+            self.ctx.menu = None;
         }
         let ctx = &mut self.ctx;
         match message {
             Message::Resized(e) => self.layout.resize(e),
             Message::Mode(mode) => {
                 ctx.mode = mode;
+                // Simulate shows the results itself.
+                if mode == Mode::Simulate {
+                    ctx.run = None;
+                }
                 self.chrome.dismiss();
             }
-            Message::ToggleTheme => ctx.set_dark(!ctx.dark),
-            Message::Units(units) => ctx.set_units(units),
             Message::Frame(now) => {
                 if let Some((_, since)) = ctx.flash {
                     if crate::viewport::flash::done(crate::viewport::flash::age(since, now, ctx.env.freeze_flash)) {
@@ -133,6 +134,9 @@ impl App {
                 self.analyze.tick(now);
                 if ctx.notice.as_ref().is_some_and(|(_, until)| now >= *until) {
                     ctx.notice = None;
+                }
+                if ctx.run.as_ref().is_some_and(|r| r.until.is_some_and(|until| now >= until)) {
+                    ctx.run = None;
                 }
             }
             Message::Cursor(at) => {
@@ -198,9 +202,9 @@ impl App {
                     files::example(ctx);
                 }
             }
-            Message::ToggleFileMenu => {
+            Message::Menu(menu) => {
                 self.chrome.dismiss();
-                ctx.file_menu = !was_open;
+                ctx.menu = menu;
             }
             Message::ImportOrk => {
                 if files::guard(ctx, Pending::Import) {
@@ -244,13 +248,17 @@ impl App {
                 let message = if part_selected { Message::Inspector(inspector::Message::StartRename) } else { Message::Chrome(chrome::Message::BeginRename) };
                 return self.update(message);
             }
+            // Running never changes the screen: the flights fly in the background and Simulate shows them when it is opened.
             Message::Run => {
-                ctx.mode = Mode::Simulate;
+                self.chrome.dismiss();
+                return self.simulate.update(simulate::Message::RunAll, ctx);
+            }
+            Message::DismissRun => ctx.run = None,
+            Message::RunSelected => {
                 self.chrome.dismiss();
                 return self.simulate.update(simulate::Message::Run, ctx);
             }
-            Message::RunAll => {
-                ctx.mode = Mode::Simulate;
+            Message::RunPerConfiguration => {
                 self.chrome.dismiss();
                 return self.simulate.update(simulate::Message::PerConfiguration, ctx);
             }
@@ -275,6 +283,7 @@ impl App {
             Message::Export(m) => return self.export.update(m, ctx, &mut self.viewport),
             Message::Print(m) => return self.print.update(m, ctx),
             Message::Prefs(m) => return self.prefs.update(m, ctx),
+            Message::MotorsFetched(ticket, results) => motor_fetch::apply(ctx, ticket, results),
         }
         Task::none()
     }

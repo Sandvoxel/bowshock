@@ -30,8 +30,6 @@ use crate::widgets::unit_input::unit_input;
 const LABEL_W: f32 = 70.0;
 /// Seconds between the worker's beats.
 const BEAT: std::time::Duration = std::time::Duration::from_millis(250);
-/// Width kept free at the right of the plot for the direct label (as every Analyze plot).
-const MARGIN_PX: f32 = 130.0;
 
 /// The messages of the Optimize screen.
 #[derive(Debug, Clone)]
@@ -964,7 +962,6 @@ fn score_plot(run: &Run) -> PlotGroup {
     );
     group.x_range = Some((0.0, last));
     group.y_ticks = YTicks::Even(5);
-    group.right_margin = MARGIN_PX;
     group
 }
 

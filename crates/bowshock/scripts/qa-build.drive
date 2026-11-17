@@ -5,5 +5,7 @@ scale 1
 click "Cutaway"
 click (925, 583)
 screenshot builder-dark.png
+click "Prefs"
 click "Light"
+click "Done"
 screenshot builder-light.png

@@ -210,15 +210,29 @@ impl Overlay<'_> {
         out
     }
 
-    /// A multi-selection: accent brackets on every selected part and one tag (`3 PARTS`) over the group. No handles.
+    /// A multi-selection: accent brackets on every selected part and one tag (`3 PARTS`) over the group. No handles. A linked
+    /// radial group (a fin set) is one part with brackets on every copy, dashed on the copies beside the first, as when it is
+    /// selected alone.
     pub(super) fn draw_multi(&self, frame: &mut Frame, t: &Tokens, size: Size) {
         let parts = self.selected.iter().chain(&self.also);
         let mut union: Option<Rectangle> = None;
         let mut count = 0;
-        for b in parts.filter_map(|id| self.bounds_of(*id, size)) {
+        for id in parts {
+            let Some(b) = self.bounds_of(*id, size) else { continue };
             brackets(frame, b, t.accent, false);
             union = Some(union.map_or(b, |u| u.union(&b)));
             count += 1;
+            if let Some(radial) = self.rocket.radial(*id) {
+                for i in 0..radial.angles().len() {
+                    let Some(at) = pick::placement(self.rocket, radial, i) else { continue };
+                    let copy = pick::radial_bounds(&self.camera, size, &radial.effective(i).kind, at);
+                    // The copy `bounds_of` already framed is not framed twice.
+                    if (copy.x - b.x).abs() + (copy.y - b.y).abs() + (copy.width - b.width).abs() + (copy.height - b.height).abs() > 0.5 {
+                        brackets(frame, copy, t.accent, true);
+                        union = union.map(|u| u.union(&copy));
+                    }
+                }
+            }
         }
         let Some(b) = union else { return };
         let caption_y = if b.y - BRACKET_GAP - 4.0 < TOOLBAR_Y && b.x < TOOLBAR_X { b.y + b.height + BRACKET_GAP + 22.0 } else { b.y - BRACKET_GAP - 4.0 };

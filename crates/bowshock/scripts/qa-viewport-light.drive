@@ -3,7 +3,9 @@
 # A drive script cannot hold keys: the 2D profile shows every handle (what Alt does in 3D), and the env variable
 # BOWSHOCK_DRIVE_MODIFIERS=shift holds Shift (see directedit-snap.drive).
 viewport 1280x800
+click "Prefs"
 click "Light"
+click "Done"
 click "2D"
 
 # Body tube selected: primary handles (length at the aft face, diameter at the top edge), labelled in 2D.
@@ -17,7 +19,7 @@ screenshot tube-drag-length.png
 release (740, 311)
 screenshot tube-resized.png
 # Undo (top bar): the whole drag was one step.
-click (353, 20)
+click "Undo"
 
 # A limit stops the drag: the tag turns warn and says why.
 press (707, 311)
@@ -37,7 +39,7 @@ type "0"
 screenshot tube-typed.png
 type enter
 screenshot tube-committed.png
-click (353, 20)
+click "Undo"
 
 # The nose cone: tip handle sets the length.
 click (400, 314)
@@ -46,7 +48,7 @@ press (469, 311)
 move (495, 311)
 screenshot nose-drag-length.png
 release (495, 311)
-click (353, 20)
+click "Undo"
 
 # Cutaway: internal dimensions get handles too (the motor mount selected from its lane, then the nose cone's wall).
 click (600, 500)
@@ -68,7 +70,7 @@ move (796, 272)
 move (816, 272)
 screenshot fin-drag-root-chord.png
 release (816, 272)
-click (353, 20)
+click "Undo"
 click "Cutaway"
 screenshot cutaway.png
 click "X-ray"

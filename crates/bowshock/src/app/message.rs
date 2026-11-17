@@ -8,7 +8,6 @@ use iced::{keyboard, Point};
 
 use super::{part_menu, scale, Mode};
 use crate::build::{inspector, lanes, parts_bin};
-use crate::units::UnitSystem;
 use crate::viewport;
 use crate::{analyze, chrome, export, prefs, print, simulate};
 
@@ -30,10 +29,6 @@ pub enum Message {
     Resized(iced::widget::pane_grid::ResizeEvent),
     /// The top bar's Build / Simulate / Analyze switch.
     Mode(Mode),
-    /// Light / dark.
-    ToggleTheme,
-    /// The unit system select.
-    Units(UnitSystem),
     /// Animation / notice clock tick.
     Frame(Instant),
     /// The cursor moved (window coordinates).
@@ -72,11 +67,11 @@ pub enum Message {
     SavePath(Option<PathBuf>),
     /// Load the built-in example rocket.
     Example,
-    /// The top bar's file name: open or close the File menu.
-    ToggleFileMenu,
-    /// File menu > Import OpenRocket (.ork)…: shows the import dialog.
+    /// The menu bar: open this menu (`None` closes the open one).
+    Menu(Option<chrome::TopMenu>),
+    /// File > Import OpenRocket (.ork)…: shows the import dialog.
     ImportOrk,
-    /// File menu > a recent file.
+    /// File > a recent file.
     OpenRecent(PathBuf),
     /// The "Save changes?" modal's *Save* (Enter): save, then run the held command.
     UnsavedSave,
@@ -84,10 +79,14 @@ pub enum Message {
     UnsavedDiscard,
     /// The modal's *Cancel* (Escape): keep the document.
     UnsavedCancel,
-    /// The Simulate button (F5): switch to Simulate and run the current configuration's flight.
+    /// The Simulate button (F5): fly every flight in the list. The screen stays where it is.
     Run,
-    /// The Simulate button's menu: switch to Simulate and fly every configuration (one flight each).
-    RunAll,
+    /// The Simulate button's menu, *Run selected flights*: fly the flights selected on the Simulate screen.
+    RunSelected,
+    /// The Simulate button's menu, *One flight per configuration*: add and fly one flight per configuration.
+    RunPerConfiguration,
+    /// The run toast's close button: forget the last run's report.
+    DismissRun,
     /// The parts bin.
     PartsBin(parts_bin::Message),
     /// The viewport.
@@ -110,6 +109,8 @@ pub enum Message {
     Print(print::Message),
     /// The Preferences window.
     Prefs(prefs::Message),
+    /// The lookup of the motors a loaded document was missing finished (the load it was started for, what each reference got).
+    MotorsFetched(u64, Vec<super::motor_fetch::Outcome>),
 }
 
 /// What a click means while a field is in pick mode (the viewport and the lanes are pickable): `Some(Some(part))` opens the part's

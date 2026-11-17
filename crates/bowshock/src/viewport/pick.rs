@@ -509,7 +509,7 @@ mod tests {
 
     fn rocket() -> Rocket {
         let mut r = Rocket::default();
-        r.insert(0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.2, diameter: 0.1 }).unwrap();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.2, diameter: 0.1, tip_radius: 0.0 }).unwrap();
         r.insert(1, PartKind::BodyTube { length: 0.5, diameter: 0.1 }).unwrap();
         r
     }

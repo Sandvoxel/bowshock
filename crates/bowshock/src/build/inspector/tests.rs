@@ -160,21 +160,8 @@ fn a_drag_override_starts_from_the_build_up_is_one_step_and_flies() {
 }
 
 #[test]
-fn roll_control_deploy_conditions_and_tilt_lockout_edit_in_single_steps() {
+fn deploy_conditions_and_tilt_lockout_edit_in_single_steps() {
     let mut fx = Fx::new();
-    let fin = fx.fins();
-    fx.select(fin);
-    fx.send(Message::ActiveRoll(true));
-    assert_eq!(fx.app.ctx().doc.undo_label(), Some("Set roll control"));
-    assert_eq!(fx.rocket().radial(fin).unwrap().roll_control, Some(bowshock_model::RollControl::default()));
-    fx.send(Message::Edit(Field::RollKp, 5.0, false));
-    fx.send(Message::Edit(Field::RollMaxCant, 1.0, false));
-    let rc = fx.rocket().radial(fin).unwrap().roll_control.unwrap();
-    assert!((rc.kp - 0.005).abs() < 1e-12);
-    assert_eq!(rc.max_cant, bowshock_model::MAX_CONTROL_CANT, "limited to 15°");
-    fx.send(Message::ActiveRoll(false));
-    assert_eq!(fx.rocket().radial(fin).unwrap().roll_control, None);
-
     let chute = fx.internal(|p| matches!(p.kind, InternalKind::Parachute { .. }));
     fx.select(chute);
     fx.send(Message::Trigger(Trigger::SpeedBelow));
@@ -521,4 +508,61 @@ fn a_fin_tab_is_toggled_reached_to_the_motor_mount_and_edited_with_undo() {
     assert_eq!(fx.rocket().radial(fin).unwrap().tab.map(|t| t.height), Some(0.004));
     fx.send(Message::TabOn(false));
     assert!(fx.rocket().radial(fin).unwrap().tab.is_none());
+}
+
+/// The two-stage fixture with an interstage tube between the stages: three airframe joints, two of them eligible. Returns
+/// the interstage and the booster tube (the parts just aft of the two joints).
+fn staged_with_interstage(fx: &mut Fx) -> (PartId, PartId) {
+    let mut r = separation::tests::two_stage();
+    let inter = r.insert(2, bowshock_model::PartKind::BodyTube { length: 0.2, diameter: 0.0762 }).unwrap();
+    let booster = r.parts()[3].id;
+    fx.app.ctx_mut().doc.replace(r, None);
+    fx.app.ctx_mut().selection = Selection::Separation(1);
+    fx.app.sync();
+    (inter, booster)
+}
+
+#[test]
+fn the_separation_select_chooses_the_joint_as_one_undo_step() {
+    let mut fx = Fx::new();
+    let (inter, booster) = staged_with_interstage(&mut fx);
+    assert!(separation::view(fx.app.ctx(), 1).is_some());
+    assert_eq!(fx.rocket().separation_choice(1), None);
+    let joints: Vec<PartId> = fx.rocket().separation_joints(1).iter().map(|j| j.between.1).collect();
+    assert_eq!(joints, vec![inter, booster]);
+    fx.send(Message::SeparationJoint(1, Some(booster)));
+    assert_eq!(fx.rocket().separation_choice(1), Some(booster));
+    assert_eq!(fx.app.ctx().doc.undo_label(), Some("Move separation"));
+    assert!(separation::view(fx.app.ctx(), 1).is_some());
+    fx.undo();
+    assert_eq!(fx.rocket().separation_choice(1), None);
+    fx.redo();
+    assert_eq!(fx.rocket().separation_choice(1), Some(booster));
+    fx.send(Message::SeparationJoint(1, None));
+    assert_eq!(fx.rocket().separation_choice(1), None);
+}
+
+#[test]
+fn dragging_the_separation_over_two_joints_commits_one_step_and_escape_puts_it_back() {
+    use crate::viewport;
+    let mut fx = Fx::new();
+    let (inter, booster) = staged_with_interstage(&mut fx);
+    let before = fx.rocket().clone();
+    let view = |fx: &mut Fx, message| {
+        let _ = fx.app.update(AppMessage::Viewport(message));
+    };
+    view(&mut fx, viewport::Message::SeparationTo(1, Some(booster)));
+    view(&mut fx, viewport::Message::SeparationTo(1, Some(inter)));
+    view(&mut fx, viewport::Message::SeparationTo(1, Some(booster)));
+    assert!(fx.app.ctx().doc.dragging());
+    view(&mut fx, viewport::Message::SeparationEnd(true));
+    assert_eq!(fx.rocket().separation_choice(1), Some(booster));
+    assert_eq!(fx.app.ctx().doc.undo_label(), Some("Move separation"));
+    fx.undo();
+    assert_eq!(*fx.rocket(), before, "one undo step undoes the whole drag");
+    // Escape: the rocket goes back and no step is recorded.
+    view(&mut fx, viewport::Message::SeparationTo(1, Some(booster)));
+    view(&mut fx, viewport::Message::SeparationEnd(false));
+    assert_eq!(*fx.rocket(), before);
+    assert!(!fx.app.ctx().doc.dragging());
 }

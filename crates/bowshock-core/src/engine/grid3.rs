@@ -80,6 +80,8 @@ pub(crate) fn half_thickness(profile: &FinProfile, t: f64, chord: f64, xi: f64) 
         }
         FinProfile::Airfoil => 5.0 * t * (0.2969 * xi.sqrt() - 0.1260 * xi - 0.3516 * xi * xi + 0.2843 * xi.powi(3) - 0.1015 * xi.powi(4)).max(0.0),
         FinProfile::DoubleWedge => t * xi.min(1.0 - xi),
+        FinProfile::Hexagonal { wedge_fraction } => r * (xi / wedge_fraction).min((1.0 - xi) / wedge_fraction).min(1.0),
+        FinProfile::Biconvex => r * 4.0 * xi * (1.0 - xi),
         FinProfile::Custom { section } => {
             let z: Vec<[f64; 2]> = normalised(section).collect();
             let mut v = z[z.len() - 1][1];

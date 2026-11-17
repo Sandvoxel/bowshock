@@ -64,7 +64,10 @@ fn scale_opt(v: Option<f64>, f: f64) -> Option<f64> {
 
 fn part_kind(k: &PartKind, f: f64) -> PartKind {
     match k {
-        PartKind::NoseCone { shape, length, diameter } => PartKind::NoseCone { shape: *shape, length: length * f, diameter: diameter * f },
+        PartKind::NoseCone { shape, length, diameter, tip_radius } => {
+            // A sphere scales to a sphere, so the tangent point and the proportions are those of the original.
+            PartKind::NoseCone { shape: *shape, length: length * f, diameter: diameter * f, tip_radius: tip_radius * f }
+        }
         PartKind::BodyTube { length, diameter } => PartKind::BodyTube { length: length * f, diameter: diameter * f },
         PartKind::Transition { length, fore_diameter, aft_diameter } => {
             PartKind::Transition { length: length * f, fore_diameter: fore_diameter * f, aft_diameter: aft_diameter * f }
@@ -286,7 +289,7 @@ mod tests {
     /// Nose, tube and a 3-fin set on the tube.
     fn example() -> (Rocket, PartId, PartId) {
         let mut r = Rocket::default();
-        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.06 }).unwrap();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.06, tip_radius: 0.0 }).unwrap();
         let tube = r.insert(1, PartKind::BodyTube { length: 0.5, diameter: 0.06 }).unwrap();
         let fin =
             r.attach_radial(tube, 0.3, 0.0, 3, RadialKind::FinSet { root_chord: 0.12, tip_chord: 0.05, span: 0.08, sweep: 0.04, thickness: 0.003 }).unwrap();

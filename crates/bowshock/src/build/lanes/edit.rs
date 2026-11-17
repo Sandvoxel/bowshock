@@ -211,7 +211,7 @@ mod tests {
     /// A 0.2 m nose, a 0.5 m tube and a 0.3 m tube (stations 0 / 0.2 / 0.7 / 1.0).
     fn rocket() -> (Rocket, PartId, PartId, PartId) {
         let mut r = Rocket::default();
-        let nose = r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1 }).unwrap();
+        let nose = r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1, tip_radius: 0.0 }).unwrap();
         let a = r.insert(1, PartKind::BodyTube { length: 0.5, diameter: 0.1 }).unwrap();
         let b = r.insert(2, PartKind::BodyTube { length: 0.3, diameter: 0.1 }).unwrap();
         (r, nose, a, b)
@@ -333,7 +333,7 @@ mod pod_tests {
     /// ballast on the pod's tube. Returns the rocket, the core tube, the pod set, the pod's nose and tube, its fins and ballast.
     fn rocket() -> (Rocket, PartId, PartId, PartId, PartId, PartId, PartId) {
         let mut r = Rocket::default();
-        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1 }).unwrap();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1, tip_radius: 0.0 }).unwrap();
         let core = r.insert(1, PartKind::BodyTube { length: 0.8, diameter: 0.1 }).unwrap();
         let kind = r.default_pod();
         let pod = r.attach_radial(core, 0.2, 0.0, 2, kind).unwrap();

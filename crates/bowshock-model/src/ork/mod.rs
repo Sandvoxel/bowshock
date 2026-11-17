@@ -29,10 +29,16 @@
 //!   "override subcomponents" the children are zeroed). CG overrides carry over too.
 //! * **Configurations.** Each OpenRocket flight configuration becomes a [`Configuration`](crate::Configuration) (motor
 //!   designation and manufacturer, ejection delay, `none` is a plugged motor, ignition and separation events, per-configuration
-//!   recovery deployment). Thrust curves are not in an `.ork`; the motors are listed in [`OrkImport::motors`] to be resolved
+//!   recovery deployment). Thrust curves are not in the design XML; the motors are listed in [`OrkImport::motors`] to be resolved
 //!   against a motor database (e.g. RASP files exported by `tools/openrocket-harness`).
 //! * **Simulations.** Each stored simulation becomes a [`FlightDef`] (rail, wind, site, turbulence) and an [`OrkSimulation`] with
 //!   the values the model has no field for, plus OpenRocket's stored result summary.
+//!
+//! * **Thrust curves.** Older files carry none. OpenRocket 26.xx snapshots (file version 1.11) store user-defined curves inside the
+//!   ZIP as `thrustcurves/<digest>.rse` (RockSim engine XML) beside `rocket.ork`, and each `<motor>` element names its curve by
+//!   `<digest>`. [`import`] returns the entries raw in [`OrkImport::embedded_curves`] (this crate does not read motor files) and each
+//!   motor reference's digest in [`OrkImport::motor_digests`]; one digest may carry several designations. A caller resolves
+//!   them against the curves. Bare-XML and gzip files have none; an unreadable entry is a warning.
 //!
 //! Not modelled (reported as warnings): clustered motors beyond the first tube, secant ogives, non-conical transitions,
 //! motor mounts in body tubes, drag overrides on internal components, custom reference lengths, "never" deployment/ignition.
@@ -141,6 +147,16 @@ pub struct OrkSimulation {
     pub stored: Option<OrkStored>,
 }
 
+/// A thrust curve stored inside the `.ork` ZIP (`thrustcurves/<digest>.rse`, newer OpenRocket versions): the user-defined motors
+/// of the design, in RockSim engine format (parse it with `bowshock_motors::parse_rse`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmbeddedCurve {
+    /// The file name without its extension: the digest OpenRocket identifies the motor by (a motor's `<digest>` element).
+    pub digest: String,
+    /// The file's text.
+    pub rse: String,
+}
+
 /// The result of an import.
 #[derive(Clone, Debug)]
 pub struct OrkImport {
@@ -154,6 +170,11 @@ pub struct OrkImport {
     pub simulations: Vec<OrkSimulation>,
     /// OpenRocket configuration ids (`configid` attributes) in the order of the rocket's configurations.
     pub config_ids: Vec<String>,
+    /// The digest (`<digest>`) of every motor in [`motors`](Self::motors) that has one, once per distinct reference and digest.
+    /// OpenRocket names a motor by its digest: one digest can carry several names (the same curve as `J33N` and `I32N`).
+    pub motor_digests: Vec<(MotorRef, String)>,
+    /// The thrust curves stored in the file, in archive order. Empty for bare-XML and gzip files.
+    pub embedded_curves: Vec<EmbeddedCurve>,
 }
 
 /// Imports the `.ork` file at `path`.
@@ -164,21 +185,21 @@ pub fn import_file(path: impl AsRef<Path>) -> Result<OrkImport, OrkError> {
 
 /// Imports an `.ork` held in memory: a ZIP archive with a `rocket.ork` entry, a gzip stream or bare XML.
 pub fn import(bytes: &[u8]) -> Result<OrkImport, OrkError> {
-    let xml = unpack(bytes)?;
+    let mut warnings = Vec::new();
+    let (xml, embedded_curves) = unpack(bytes, &mut warnings)?;
     let doc = Document::parse(&xml).map_err(|e| OrkError::Xml(e.to_string()))?;
     let root = doc.root_element();
     if root.tag_name().name() != "openrocket" {
         return Err(OrkError::NotOpenRocket);
     }
     let rocket_node = child(root, "rocket").ok_or(OrkError::NotOpenRocket)?;
-    let mut warnings = Vec::new();
     let mut ctx = Import::new(&mut warnings);
     ctx.rocket_node(rocket_node);
     ctx.simulations(child(root, "simulations"));
-    let Import { b, config_ids, simulations, motors, .. } = ctx;
+    let Import { b, config_ids, simulations, motors, motor_digests, .. } = ctx;
     let mut rocket = b.r;
     rocket.repair_flights();
-    Ok(OrkImport { rocket, warnings, motors, simulations, config_ids })
+    Ok(OrkImport { rocket, warnings, motors, simulations, config_ids, motor_digests, embedded_curves })
 }
 
 // ---- containers ---------------------------------------------------------------------------------------------------------
@@ -206,6 +227,8 @@ struct Parent {
 struct MotorSpec {
     config: String,
     motor: MotorRef,
+    /// The motor's `<digest>` (empty when the file has none).
+    digest: String,
     /// Ejection delay (infinite: plugged).
     delay: f64,
 }
@@ -259,6 +282,7 @@ struct Import<'w> {
     config_map: HashMap<String, ConfigId>,
     simulations: Vec<OrkSimulation>,
     motors: Vec<MotorRef>,
+    motor_digests: Vec<(MotorRef, String)>,
     /// `(stage separation default, per-config)` of every OpenRocket stage, by stage index.
     separations: Vec<SeparationRec>,
 }

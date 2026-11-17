@@ -29,8 +29,16 @@ fn anf_vehicle() -> Vehicle {
     Vehicle {
         reference_diameter: CAL,
         body: vec![
-            BodySegment { station: 0.0, length: nose, fore_radius: 0.0, aft_radius: r, kind: BodyKind::Nose(NoseShape::Conical), roughness: 0.0 },
-            BodySegment { station: nose, length: length - nose, fore_radius: r, aft_radius: r, kind: BodyKind::Tube, roughness: 0.0 },
+            BodySegment {
+                station: 0.0,
+                length: nose,
+                fore_radius: 0.0,
+                aft_radius: r,
+                kind: BodyKind::Nose(NoseShape::Conical),
+                tip_radius: 0.0,
+                roughness: 0.0,
+            },
+            BodySegment { station: nose, length: length - nose, fore_radius: r, aft_radius: r, kind: BodyKind::Tube, tip_radius: 0.0, roughness: 0.0 },
         ],
         tube_fins: vec![],
         fin_sets: vec![FinSet {

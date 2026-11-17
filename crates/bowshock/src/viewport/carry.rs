@@ -77,7 +77,7 @@ mod tests {
     /// tube.
     fn rocket() -> (Rocket, [PartId; 3], PartId) {
         let mut r = Rocket::default();
-        let nose = r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.3, diameter: 0.1 }).unwrap();
+        let nose = r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.3, diameter: 0.1, tip_radius: 0.0 }).unwrap();
         let wide = r.insert(1, PartKind::BodyTube { length: 0.5, diameter: 0.1 }).unwrap();
         r.restore(2, Part::new(60, PartKind::BodyTube { length: 0.3, diameter: 0.05 })).unwrap();
         let mount = r

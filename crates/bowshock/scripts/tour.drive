@@ -4,6 +4,7 @@ screenshot builder.png
 click "Cutaway"
 click "6"
 screenshot cutaway.png
+click "Prefs"
 click "Light"
-expect "Dark"
+click "Done"
 screenshot light.png
