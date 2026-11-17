@@ -94,12 +94,17 @@ pub struct Solver3 {
 impl Solver3 {
     /// Solver on `grid` with the free stream everywhere.
     pub fn new(grid: Grid3, cfg: Config3) -> Solver3 {
+        let axis = AxisMap::new(&grid);
+        Solver3::with_axis(grid, axis, cfg)
+    }
+
+    /// [`Solver3::new`] with the axis map of `grid` already built (`AxisMap::new(&grid)`; the engine's grid cache shares it between the solvers of one grid).
+    pub fn with_axis(grid: Grid3, axis: AxisMap, cfg: Config3) -> Solver3 {
         let (ni, nj, nk) = (grid.ni, grid.nj, grid.nk);
         let nc = ni * nj * nk;
         let solid: Vec<bool> = grid.part.iter().map(|&p| p != PART_FLUID).collect();
         let wall: Vec<bool> = grid.part.iter().map(|&p| !matches!(p, PART_FLUID | PART_DEAD)).collect();
         let n_active = solid.iter().filter(|s| !**s).count();
-        let axis = AxisMap::new(&grid);
         let rot = |f: &[Face3]| f.iter().map(|f| face_rot(f.c)).collect::<Vec<_>>();
         let q = prim_to_cons3(&cfg.freestream);
         Solver3 {
@@ -169,6 +174,7 @@ impl Solver3 {
         let (ni, nj, nk) = (self.grid.ni, self.grid.nj, self.grid.nk);
         let fs = self.cfg.freestream;
         let p_out = self.rans.as_ref().and_then(|r| r.p_outflow);
+        let noslip = self.rans.is_some();
         let (w, g, axis) = (&mut self.w, &self.grid, &self.axis);
         let id = |i: isize, j: isize, k: isize| pidx3(ni, nj, nk, i, j, k);
         let (nii, njj, nkk) = (ni as isize, nj as isize, nk as isize);
@@ -191,8 +197,11 @@ impl Solver3 {
                 let iu = i as usize;
                 if !g.is_axis(iu, 0) {
                     let f = &g.jface[(k as usize * (nj + 1)) * ni + iu];
+                    // a body-surface boundary face of a viscous run (`Grid3::wall_j0`) is the no-slip wall, any other one a slip wall
+                    let wall = noslip && g.wall_j0.iter().any(|(r, _)| r.contains(&iu));
                     for m in 1..=NG as isize {
-                        w[id(i, -m, k)] = reflect3(&w[id(i, m - 1, k)], f.n);
+                        let inner = w[id(i, m - 1, k)];
+                        w[id(i, -m, k)] = if wall { crate::viscous3::wall_ghost3(&inner) } else { reflect3(&inner, f.n) };
                     }
                 }
                 let f = &g.jface[(k as usize * (nj + 1) + nj) * ni + iu];
