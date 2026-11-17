@@ -1,0 +1,191 @@
+//! The client against the worker's serve loop in this process, over a TCP socket on localhost (what ssh's stdin/stdout carry).
+
+use bowshock_core::{AftSpec, Analysis, AnalysisSpec, Backend, BodySpec, Error, FinProfile, FinSpec, NoseShape, NoseSpec, Resolution};
+use bowshock_remote::proto::{read_frame, write_frame, ClientMsg, WorkerMsg, PROTOCOL};
+use bowshock_remote::{worker, Remote, RemoteError, WORKER_KEY};
+use std::net::{TcpListener, TcpStream};
+use std::ops::ControlFlow;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
+
+const D: f64 = 0.04;
+
+fn body() -> BodySpec {
+    let nose_len = 0.5 * D / 10f64.to_radians().tan();
+    BodySpec { nose: NoseSpec { shape: NoseShape::Cone, length: nose_len, diameter: D }, aft: vec![AftSpec::Tube { length: 10.0 * D - nose_len }] }
+}
+
+fn fins() -> FinSpec {
+    FinSpec { count: 4, root_chord: D, tip_chord: D, span: D, sweep: 0.0, thickness: 0.08 * D, roughness: 0.0, root_te_to_base: 0.0, profile: FinProfile::Square }
+}
+
+fn spec() -> AnalysisSpec {
+    Analysis::new(&body()).unwrap().fins(fins()).backend(Backend::Cpu).resolution(Resolution::Coarse).max_iterations(3000).spec().unwrap()
+}
+
+/// A fin-less Euler drag analysis.
+fn drag_spec(iterations: usize) -> AnalysisSpec {
+    AnalysisSpec { fins: None, max_iterations: Some(iterations), ..spec() }
+}
+
+/// The tiny 3D case of the facade's own lift tests.
+fn tiny(a: Analysis) -> Analysis {
+    a.lift_case_hook(|c| {
+        let s = &mut c.grid.sting;
+        s.n_up = 10;
+        s.n_nose = 16;
+        s.n_seg = vec![12];
+        s.n_ext = 10;
+        s.nj = 24;
+        c.grid.nk = 8;
+    })
+}
+
+/// A connection to a worker thread that serves one client.
+fn connect() -> (Remote, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (s, _) = listener.accept().unwrap();
+        worker::serve(s.try_clone().unwrap(), s, tiny).unwrap();
+    });
+    let s = TcpStream::connect(addr).unwrap();
+    let remote = Remote::over_streams(s.try_clone().unwrap(), s, WORKER_KEY, false).unwrap();
+    (remote, server)
+}
+
+fn json<T: serde::Serialize>(x: &T) -> String {
+    serde_json::to_string(x).unwrap()
+}
+
+#[test]
+fn a_drag_job_matches_a_local_run_and_reports_progress() {
+    let (mut remote, server) = connect();
+    assert_eq!(remote.device().worker_key, WORKER_KEY);
+    let spec = drag_spec(200);
+    let local = Analysis::from_spec(&spec).unwrap().run(&[2.0]).unwrap();
+    let frames = AtomicUsize::new(0);
+    let polar = remote
+        .run_drag(&spec, &[2.0], &|p| {
+            assert_eq!(p.mach, 2.0);
+            frames.fetch_add(1, Ordering::SeqCst);
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+    assert!(frames.load(Ordering::SeqCst) >= 1, "no progress frame");
+    assert_eq!(json(&polar), json(&local));
+    // the same connection serves the next job
+    let again = remote.run_drag(&spec, &[2.0], &|_| ControlFlow::Continue(())).unwrap();
+    assert_eq!(json(&again), json(&local));
+    drop(remote);
+    server.join().unwrap();
+}
+
+#[test]
+fn a_lift_job_matches_a_local_run() {
+    let (mut remote, server) = connect();
+    let spec = spec();
+    let t = Instant::now();
+    let local = tiny(Analysis::from_spec(&spec).unwrap()).run_lift(&[2.0], &[2.0, 6.0]).unwrap();
+    println!("local lift {:.1} s", t.elapsed().as_secs_f64());
+    let frames = AtomicUsize::new(0);
+    let polar = remote
+        .run_lift(&spec, &[2.0], &[2.0, 6.0], &|_| {
+            frames.fetch_add(1, Ordering::SeqCst);
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+    assert!(frames.load(Ordering::SeqCst) >= 1);
+    assert_eq!(polar.points.len(), 2);
+    assert_eq!(json(&polar), json(&local));
+    drop(remote);
+    server.join().unwrap();
+}
+
+#[test]
+fn cancel_ends_the_job_and_the_connection_serves_the_next() {
+    let (mut remote, server) = connect();
+    let spec = spec();
+    let seen = AtomicUsize::new(0);
+    let t = Instant::now();
+    let r = remote.run_lift(&spec, &[2.0], &[2.0, 6.0], &|_| {
+        seen.fetch_add(1, Ordering::SeqCst);
+        ControlFlow::Break(())
+    });
+    println!("cancelled after {:.2} s", t.elapsed().as_secs_f64());
+    assert!(matches!(r, Err(RemoteError::Solver(Error::Cancelled))), "{r:?}");
+    assert_eq!(seen.load(Ordering::SeqCst), 1, "the callback is not called again after Break");
+    // a later job is not hit by the old cancel
+    let ok = remote.run_drag(&drag_spec(60), &[2.0], &|_| ControlFlow::Continue(())).unwrap();
+    assert_eq!(ok.points.len(), 1);
+    drop(remote);
+    server.join().unwrap();
+}
+
+#[test]
+fn solver_errors_cross_the_wire_with_their_kind() {
+    let (mut remote, server) = connect();
+    let r = remote.run_drag(&drag_spec(60), &[9.0], &|_| ControlFlow::Continue(()));
+    assert!(matches!(r, Err(RemoteError::Solver(Error::InvalidInput(_)))), "{r:?}");
+    let r = remote.run_lift(&spec(), &[2.0], &[30.0], &|_| ControlFlow::Continue(()));
+    assert!(matches!(r, Err(RemoteError::Solver(Error::InvalidInput(_)))), "{r:?}");
+    drop(remote);
+    server.join().unwrap();
+}
+
+#[test]
+fn a_worker_of_another_version_is_refused() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (s, _) = listener.accept().unwrap();
+        let _ = worker::serve(s.try_clone().unwrap(), s, |a| a);
+    });
+    let s = TcpStream::connect(addr).unwrap();
+    let r = Remote::over_streams(s.try_clone().unwrap(), s, "not-the-worker-key", false);
+    assert!(matches!(&r, Err(RemoteError::Protocol(m)) if m.contains("version")), "{:?}", r.err());
+    server.join().unwrap();
+}
+
+#[test]
+fn output_before_the_handshake_is_skipped_and_a_wrong_protocol_is_refused() {
+    use std::io::Write;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        s.write_all(b"Last login: yesterday\nWelcome!\n").unwrap();
+        s.write_all(bowshock_remote::proto::MAGIC).unwrap();
+        let mut r = s.try_clone().unwrap();
+        let _hello: Option<ClientMsg> = read_frame(&mut r).unwrap();
+        let device = worker::device_info();
+        write_frame(&mut s, &WorkerMsg::Ready { protocol: PROTOCOL + 1, key: WORKER_KEY.into(), device }).unwrap();
+    });
+    let s = TcpStream::connect(addr).unwrap();
+    let r = Remote::over_streams(s.try_clone().unwrap(), s, WORKER_KEY, false);
+    assert!(matches!(&r, Err(RemoteError::Protocol(m)) if m.contains("protocol")), "{:?}", r.err());
+    server.join().unwrap();
+}
+
+#[test]
+fn messages_round_trip_through_cbor_frames() {
+    let msg = WorkerMsg::Progress(bowshock_core::Progress {
+        mach: 2.0,
+        alpha: 0.03,
+        iteration: 50,
+        max_iterations: 3000,
+        residual_drop_orders: 1.5,
+        monitor: f64::NAN,
+        spread: None,
+        tolerance: Some(0.002),
+    });
+    let mut buf = Vec::new();
+    write_frame(&mut buf, &msg).unwrap();
+    let WorkerMsg::Progress(p) = read_frame::<_, WorkerMsg>(&mut buf.as_slice()).unwrap().unwrap() else { panic!() };
+    assert!(p.monitor.is_nan() && p.iteration == 50 && p.tolerance == Some(0.002));
+    let job = ClientMsg::Job { id: 3, job: bowshock_remote::Job::Lift { spec: spec(), machs: vec![0.5, 2.0], alphas_deg: vec![2.0, 6.0] } };
+    let mut buf = Vec::new();
+    write_frame(&mut buf, &job).unwrap();
+    assert_eq!(read_frame::<_, ClientMsg>(&mut buf.as_slice()).unwrap().unwrap(), job);
+    assert!(read_frame::<_, ClientMsg>(&mut [].as_slice()).unwrap().is_none());
+}
