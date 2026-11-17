@@ -11,16 +11,13 @@
 //! (k-omega SST) side by side -> `tables_validate_rans.md`; `--lowmach-study` = low-Mach correction on/off at M = 0.1 ... 0.5 against
 //! potential theory -> `lowmach_<tag>.csv`, `tables_lowmach.md`.
 
-use bowshock_cases::subsonic::{fox_case, fox_tm_x2439 as fox, subsonic_case};
+use bowshock_cases::subsonic::{fox_tm_x2439 as fox, fox_wedge_case};
 use bowshock_cases::transonic::named_body;
-use bowshock_cfd::implicit_params::ImplicitParams;
+use bowshock_cases::wedge::{base_case, run_wedge_point, sting_case, WedgeResult};
 use bowshock_cfd::limiter::Limiter;
-use bowshock_cfd::solver::Scheme;
-use bowshock_core::engine::body_grid::{Body, Nose};
-use bowshock_core::engine::case::Case;
-use bowshock_core::engine::meshing::Wake;
-use bowshock_core::engine::result::{wall_cp_at, PointResult};
-use bowshock_core::engine::run::{run_cold, run_on};
+use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
+use bowshock_core::engine::case3::{Case3, Tier, WallFlow};
+use bowshock_core::engine::result::wall_cp_at;
 use bowshock_reference::potential::{nose_cylinder_body, solve, solve_compressible, PotentialSolution};
 use std::fmt::Write as _;
 use std::fs;
@@ -36,16 +33,15 @@ struct Opts {
     level: u32,
     limiter: Limiter,
     low_mach: bool,
-    scheme: Scheme,
     max_iter: Option<usize>,
-    drop: Option<f64>,
     domain: Option<f64>,
 }
 
 impl Opts {
     fn parse(args: &[String]) -> Opts {
         let quick = args.iter().any(|a| a == "--quick");
-        let explicit = arg(args, "--scheme") == Some("explicit");
+        assert!(arg(args, "--scheme") != Some("explicit"), "the 3D engine has the line-implicit scheme only");
+        let explicit = false;
         Opts {
             level: arg(args, "--level").and_then(|v| v.parse().ok()).unwrap_or(if quick { 0 } else { 1 }),
             limiter: match arg(args, "--limiter") {
@@ -55,27 +51,24 @@ impl Opts {
                 _ => Limiter::VanAlbada,
             },
             low_mach: arg(args, "--lowmach") != Some("off"),
-            scheme: if explicit { Scheme::Explicit } else { Scheme::Implicit(ImplicitParams::DEFAULT) },
             max_iter: arg(args, "--max-iter").and_then(|v| v.parse().ok()),
-            drop: arg(args, "--drop").and_then(|v| v.parse().ok()),
             domain: arg(args, "--domain").and_then(|v| v.parse().ok()),
         }
     }
-    fn apply(&self, mut c: Case) -> Case {
+    fn apply(&self, mut c: Case3) -> Case3 {
         c.numerics.limiter = self.limiter;
         c.numerics.low_mach = self.low_mach;
-        c.numerics.scheme = self.scheme;
         if let Some(n) = self.max_iter {
             c.numerics.max_iter = n;
-        } else if self.scheme == Scheme::Explicit {
-            c.numerics.max_iter = 60_000;
-            c.numerics.first_order_iters = 300;
-        }
-        if let Some(d) = self.drop {
-            c.numerics.drop_orders = d;
         }
         if let Some(d) = self.domain {
-            c = c.with_domain(d, 0.5 * d);
+            let l = c.body.x_base();
+            c.grid.sting.x_up = d * l;
+            c.grid.sting.r_far = d * l;
+            c.grid.sting.x_down = 0.5 * d * l;
+            if let Some(b) = c.grid.base.as_mut() {
+                (b.x_up, b.r_far, b.x_down) = (d * l, d * l, 0.5 * d * l);
+            }
         }
         c
     }
@@ -96,7 +89,7 @@ fn potential(body: &Body, mach: f64) -> Option<Potential> {
 }
 
 /// RMS of `cp - reference` over the wall faces `0.3 < x < 9` (nose + cylinder) for the incompressible and the Goethert reference.
-fn rms_vs_potential(r: &PointResult, p: &Potential) -> (f64, f64) {
+fn rms_vs_potential(r: &WedgeResult, p: &Potential) -> (f64, f64) {
     let (mut a, mut b, mut n) = (0.0, 0.0, 0usize);
     for w in &r.wall {
         if w.x > 0.3 && w.x < 9.0 {
@@ -110,7 +103,7 @@ fn rms_vs_potential(r: &PointResult, p: &Potential) -> (f64, f64) {
     ((a / n.max(1) as f64).sqrt(), (b / n.max(1) as f64).sqrt())
 }
 
-fn write_case_files(dir: &Path, name: &str, r: &PointResult, pot: Option<&Potential>) {
+fn write_case_files(dir: &Path, name: &str, r: &WedgeResult, pot: Option<&Potential>) {
     let mut f = fs::File::create(dir.join(format!("cp_{name}.csv"))).unwrap();
     writeln!(f, "x_over_d,r_over_d,cp_wall_extrapolated,cp_first_cell,cp_goethert_potential,cp_incompressible_potential").unwrap();
     for w in &r.wall {
@@ -119,16 +112,17 @@ fn write_case_files(dir: &Path, name: &str, r: &PointResult, pot: Option<&Potent
     }
     if !r.base_wall.is_empty() {
         let mut f = fs::File::create(dir.join(format!("base_{name}.csv"))).unwrap();
-        writeln!(f, "r0,r1,cp_wall_extrapolated,cp_first_cell").unwrap();
-        for b in &r.base_wall {
-            writeln!(f, "{:.6},{:.6},{:.6},{:.6}", b.r0, b.r1, b.cp, b.cp_cell).unwrap();
+        writeln!(f, "r,cp_wall_extrapolated").unwrap();
+        for (r, cp) in &r.base_wall {
+            writeln!(f, "{r:.6},{cp:.6}").unwrap();
         }
     }
-    let mut f = fs::File::create(dir.join(format!("residual_{name}.csv"))).unwrap();
-    writeln!(f, "iter,density_residual_l2").unwrap();
-    for (i, x) in r.residual.iter().enumerate() {
-        writeln!(f, "{},{:e}", i + 1, x).unwrap();
-    }
+}
+
+/// A case from its mesh to its stop rule on the wedge, cold.
+fn run_cold(case: &Case3) -> WedgeResult {
+    let mut s = case.build_solver().expect("wedge grid");
+    run_wedge_point(case, &mut s, false)
 }
 
 fn main() {
@@ -136,13 +130,7 @@ fn main() {
     let out_dir: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join("out").join("subsonic");
     fs::create_dir_all(&out_dir).expect("create out dir");
     let opts = Opts::parse(&args);
-    println!(
-        "bowshock-cfd subsonic: grid level {}, limiter {:?}, low-Mach {}, scheme {}",
-        opts.level,
-        opts.limiter,
-        opts.low_mach,
-        if matches!(opts.scheme, Scheme::Explicit) { "explicit SSP-RK3" } else { "line-implicit" }
-    );
+    println!("bowshock-cfd subsonic: grid level {}, limiter {:?}, low-Mach {}, line-implicit on the 3D wedge", opts.level, opts.limiter, opts.low_mach);
     println!("threads (rayon): {}", rayon::current_num_threads());
     if args.iter().any(|a| a == "--validate") && args.iter().any(|a| a == "--rans") {
         validate_rans(&out_dir, &opts);
@@ -171,46 +159,39 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
     let cyl: f64 = arg(args, "--cyl").and_then(|v| v.parse().ok()).unwrap_or(6.0);
     let tag = arg(args, "--tag").map(String::from).unwrap_or_else(|| format!("{body_name}_L{}{}", opts.level, if warm { "_warm" } else { "" }));
     let make = |m: f64, base: bool| {
-        let mut bb = subsonic_case(m, body.nose, opts.level, base);
-        bb.body.segments[0].length = cyl;
-        bb.grid_base.body.segments[0].length = cyl;
-        bb.grid_sting.body.segments[0].length = cyl;
-        opts.apply(bb)
+        let b = BaseBody::cylinder(Body { nose: body.nose }, cyl);
+        opts.apply(if base { base_case(m, b, opts.level) } else { sting_case(m, b, opts.level) })
+    };
+    let cells = |c: &Case3| {
+        let g = c.build_solver().expect("wedge grid").grid.clone();
+        g.ni * g.nj
     };
     let c0 = make(machs[0], true);
     println!("body {body_name} (nose l/d {:.2}), cylinder {cyl} d, {} sweep", body.nose_length(), if warm { "warm-start" } else { "cold-start" });
-    let mut sweep_csv = String::from("mach,base,iters,seconds,stop_reason,drop_orders,cd_nose,cd_cylinder,cd_boattail,cd_base,cd_total,cp_base_mean,cp_base_range,cp_base_last,cp_min,x_cp_min,m_max,rms_vs_incompressible,rms_vs_goethert,farfield_dp_over_p\n");
+    let mut sweep_csv = String::from("mach,base,iters,seconds,stop_reason,drop_orders,cd_nose,cd_cylinder,cd_boattail,cd_base,cd_total,cp_base,cp_min,x_cp_min,m_max,rms_vs_incompressible,rms_vs_goethert,farfield_dp_over_p\n");
     let mut md = String::new();
     writeln!(
         md,
         "### {body_name}, grid level {}, {} cells (no base) / {} cells (base), {}\n",
         opts.level,
-        {
-            let (a, b) = make(machs[0], false).cells();
-            a * b
-        },
-        {
-            let (a, b) = c0.cells();
-            a * b
-        },
+        cells(&make(machs[0], false)),
+        cells(&c0),
         if warm { "warm starts" } else { "cold starts" }
     )
     .unwrap();
-    writeln!(md, "| M | base | iters | time [s] | residual drop | CD nose | CD base | CD total | CD base corr. | CD total corr. | Cp_base (mean, range) | Cp_min | RMS vs Goethert | RMS vs incompressible |").unwrap();
+    writeln!(md, "| M | base | iters | time [s] | residual drop | CD nose | CD base | CD total | CD base corr. | CD total corr. | Cp_base | Cp_min | RMS vs Goethert | RMS vs incompressible |").unwrap();
     writeln!(md, "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|").unwrap();
     for &base in &bases {
         let mut solver = None;
-        let mut r_ref = None;
         for (k, &m) in machs.iter().enumerate() {
             let case = make(m, base);
             let t0 = Instant::now();
             let res = if warm && k > 0 {
-                run_on(&case, solver.as_mut().unwrap(), true, r_ref)
+                run_wedge_point(&case, solver.as_mut().unwrap(), true)
             } else {
-                let mut s = case.build_solver();
-                let r = run_on(&case, &mut s, false, None);
+                let mut s = case.build_solver().expect("wedge grid");
+                let r = run_wedge_point(&case, &mut s, false);
                 if warm {
-                    r_ref = Some(r.residual_peak);
                     solver = Some(s);
                 }
                 r
@@ -221,12 +202,12 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
             let name = format!("{tag}_M{m}_{}", if base { "base" } else { "nobase" });
             write_case_files(out_dir, &name, &res, pot.as_ref());
             println!(
-                "M={m:<4} base={:<5} {:>6} iters ({dt:6.1} s) {:<22} drop {:.1}: CD nose {:+.4} cyl {:+.4} boat {:+.4} base {:+.4} total {:+.4}; Cp_b {:+.4} (window range {:.1e}); Cp_min {:+.3} @ {:.2}; M_max {:.2}; vs Goethert {:.4} (incomp. {:.4}); far-field |dp/p| {:.1e}",
-                base, res.iters, res.stop_reason, res.drop_orders, res.cd_nose, res.cd_aft[0], res.cd_aft.get(1).copied().unwrap_or(0.0), res.cd_base, res.cd_total, res.cp_base_mean, res.cp_base_range, res.cp_min, res.x_cp_min, res.m_max, rg, ri, res.farfield_dp
+                "M={m:<4} base={:<5} {:>6} iters ({dt:6.1} s) {:<22} drop {:.1}: CD nose {:+.4} cyl {:+.4} boat {:+.4} base {:+.4} total {:+.4}; Cp_b {:+.4}; Cp_min {:+.3} @ {:.2}; M_max {:.2}; vs Goethert {:.4} (incomp. {:.4}); far-field |dp/p| {:.1e}",
+                base, res.iters, res.stop_reason, res.drop_orders, res.cd_nose, res.cd_aft[0], res.cd_aft.get(1).copied().unwrap_or(0.0), res.cd_base, res.cd_total, res.cp_base, res.cp_min, res.x_cp_min, res.m_max, rg, ri, res.farfield_dp
             );
             writeln!(
                 sweep_csv,
-                "{m},{base},{},{dt:.1},{},{:.2},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.5},{:.3},{:.3},{:.5},{:.5},{:e}",
+                "{m},{base},{},{dt:.1},{},{:.2},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.5},{:.3},{:.3},{:.5},{:.5},{:e}",
                 res.iters,
                 res.stop_reason,
                 res.drop_orders,
@@ -235,8 +216,6 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
                 res.cd_aft.get(1).copied().unwrap_or(0.0),
                 res.cd_base,
                 res.cd_total,
-                res.cp_base_mean,
-                res.cp_base_range,
                 res.cp_base,
                 res.cp_min,
                 res.x_cp_min,
@@ -257,7 +236,7 @@ fn sweep(out_dir: &Path, opts: &Opts, args: &[String]) {
                 res.cd_total,
                 res.cd_base_model,
                 res.cd_total_model,
-                if base { format!("{:+.3} ({:.0e})", res.cp_base_mean, res.cp_base_range) } else { "-".into() },
+                if base { format!("{:+.3}", res.cp_base) } else { "-".into() },
                 res.cp_min,
                 rg,
                 ri
@@ -277,7 +256,7 @@ fn validate(out_dir: &Path, opts: &Opts) {
     writeln!(md, "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|").unwrap();
     for cone in [false, true] {
         for (k, &m) in fox::MACH.iter().enumerate() {
-            let case = opts.apply(fox_case(cone, m, opts.level));
+            let case = opts.apply(fox_wedge_case(cone, m, opts.level));
             let t0 = Instant::now();
             let r = run_cold(&case);
             let dt = t0.elapsed().as_secs_f64();
@@ -307,7 +286,7 @@ fn validate(out_dir: &Path, opts: &Opts) {
             let data_base = if cone { fox::BASE_CP_CONE[k] } else { fox::BASE_CP_OGIVE[k] };
             println!(
                 "config {cfg} M={m}: {} iters ({dt:.1} s) {} drop {:.1}; Cp RMS (x <= {x_fore}) {:.4} max {:.4} ({} stations), boattail RMS {:.4}; base Cp CFD {:+.4} vs data {:+.4}; CD fore {:+.4} boat {:+.4} base {:+.4} total {:+.4}; gage unc. {:.4}",
-                r.iters, r.stop_reason, r.drop_orders, (s1 / n1 as f64).sqrt(), m1, n1, (s2 / n2.max(1) as f64).sqrt(), r.cp_base_mean, data_base, r.cd_nose, r.cd_aft.get(1).copied().unwrap_or(0.0), r.cd_base, r.cd_total, fox::CP_UNCERTAINTY[k]
+                r.iters, r.stop_reason, r.drop_orders, (s1 / n1 as f64).sqrt(), m1, n1, (s2 / n2.max(1) as f64).sqrt(), r.cp_base, data_base, r.cd_nose, r.cd_aft.get(1).copied().unwrap_or(0.0), r.cd_base, r.cd_total, fox::CP_UNCERTAINTY[k]
             );
             writeln!(
                 md,
@@ -317,7 +296,7 @@ fn validate(out_dir: &Path, opts: &Opts) {
                 (s1 / n1 as f64).sqrt(),
                 m1,
                 (s2 / n2.max(1) as f64).sqrt(),
-                r.cp_base_mean,
+                r.cp_base,
                 data_base,
                 r.cd_nose + r.cd_aft[0],
                 r.cd_aft.get(1).copied().unwrap_or(0.0),
@@ -361,7 +340,7 @@ fn fox_x_fore(cone: bool) -> f64 {
 }
 
 /// RMS of `cp - data` over the fore+cylinder stations (`x <= x_fore`) and over the boattail stations.
-fn fox_rms(r: &PointResult, cone: bool, k: usize) -> (f64, f64) {
+fn fox_rms(r: &WedgeResult, cone: bool, k: usize) -> (f64, f64) {
     let (xs, cps) = fox_cp_data(cone, k);
     let x_fore = fox_x_fore(cone);
     let (mut s1, mut n1, mut s2, mut n2) = (0.0f64, 0usize, 0.0f64, 0usize);
@@ -393,13 +372,11 @@ fn validate_rans(out_dir: &Path, opts: &Opts) {
     writeln!(md, "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|").unwrap();
     for cone in [false, true] {
         for (k, &m) in fox::MACH.iter().enumerate() {
-            let euler_case = opts.apply(fox_case(cone, m, opts.level));
-            let mut rans_case = Case::viscous(m, fox_case(cone, m, opts.level).body, opts.level, Wake::Base, FOX_RE_D[k] / m, FOX_SUTHERLAND, m);
+            let euler_case = opts.apply(fox_wedge_case(cone, m, opts.level));
+            let flow = WallFlow { re_c: FOX_RE_D[k] / m, mach_max: m, ks_body: 0.0, ks_fin: 0.0, sutherland: FOX_SUTHERLAND };
+            let mut rans_case = fox_wedge_case(cone, m, opts.level).with_tier(Tier::Coarse(flow));
             if let Some(n) = opts.max_iter {
                 rans_case.numerics.max_iter = n;
-            }
-            if let Some(d) = opts.drop {
-                rans_case.numerics.drop_orders = d;
             }
             let re = run_cold(&euler_case);
             let t0 = Instant::now();
@@ -411,12 +388,12 @@ fn validate_rans(out_dir: &Path, opts: &Opts) {
             let data_base = if cone { fox::BASE_CP_CONE[k] } else { fox::BASE_CP_OGIVE[k] };
             println!(
                 "config {cfg} M={m}: Euler {} iters, base Cp {:+.4}, RMS {fe:.4} / {be:.4}; RANS {} iters ({dt:.0} s) {} drop {:.1}, base Cp {:+.4}, RMS {fr:.4} / {br:.4}, CD friction {:+.5}, y+ max {:.2}; data base Cp {data_base:+.4}",
-                re.iters, re.cp_base_mean, rr.iters, rr.stop_reason, rr.drop_orders, rr.cp_base, rr.cd_friction, rr.y_plus_max
+                re.iters, re.cp_base, rr.iters, rr.stop_reason, rr.drop_orders, rr.cp_base, rr.cd_friction, rr.y_plus_max
             );
             writeln!(
                 md,
                 "| {cfg} | {m} | {:.2e} | {} | {} | {dt:.0} | {} | {fe:.4} | {fr:.4} | {be:.4} | {br:.4} | {:+.4} | {:+.4} | {data_base:+.4} | {:+.5} | {:.2} |",
-                FOX_RE_D[k], re.iters, rr.iters, rr.stop_reason, re.cp_base_mean, rr.cp_base, rr.cd_friction, rr.y_plus_max
+                FOX_RE_D[k], re.iters, rr.iters, rr.stop_reason, re.cp_base, rr.cp_base, rr.cd_friction, rr.y_plus_max
             )
             .unwrap();
         }
@@ -448,7 +425,7 @@ fn lowmach_study(out_dir: &Path, opts: &Opts, args: &[String]) {
     for &m in &machs {
         let pot = potential(&body, m).unwrap();
         for lm in [false, true] {
-            let mut case = opts.apply(subsonic_case(m, body.nose, opts.level, false));
+            let mut case = opts.apply(sting_case(m, BaseBody::cylinder(Body { nose: body.nose }, 6.0), opts.level));
             case.numerics.low_mach = lm;
             let t0 = Instant::now();
             let r = run_cold(&case);

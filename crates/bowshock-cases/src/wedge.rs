@@ -148,6 +148,13 @@ pub struct WedgeResult {
     pub y_plus_max: f64,
     /// Mean base `Cp` (area weighted, NaN without a base) and the `Cp` of the base face per radius.
     pub cp_base: f64,
+    /// `cd_nose + cd_aft + cd_friction + cd_base` and the same with the base drag of the correlation (`bowshock_reference::base_drag`; NaN with a sting behind the base, 0
+    /// without a base) instead of the solution's.
+    pub cd_total: f64,
+    pub cd_base_model: f64,
+    pub cd_total_model: f64,
+    /// Largest relative deviation of the pressure of the outer-boundary cells from the free stream.
+    pub farfield_dp: f64,
     pub base_wall: Vec<(f64, f64)>,
     /// The body wall in axial order (`s0`, `s1`, `cp_cell` unused: NaN).
     pub wall: Vec<WallPoint>,
@@ -189,6 +196,24 @@ pub fn run_wedge_point(case: &Case3, s: &mut Solver3, warm: bool) -> WedgeResult
         min_p = min_p.min(w[4]);
     }
     let friction = p.friction.total;
+    let g = &s.grid;
+    let dev = |i: usize, j: usize| (cons_to_prim3(&s.u[g.cell(i, j, 0)])[4] / p_inf - 1.0).abs();
+    let mut farfield_dp = 0.0f64;
+    for i in 0..g.ni {
+        farfield_dp = farfield_dp.max(dev(i, g.nj - 1));
+    }
+    for j in 0..g.nj {
+        farfield_dp = farfield_dp.max(dev(0, j)).max(dev(g.ni - 1, j));
+    }
+    let rb2 = case.body.body.radius().powi(2);
+    let cd_base_model = if case.grid.base.is_none() {
+        0.0
+    } else if case.body.sting_radius > 0.0 {
+        f64::NAN
+    } else {
+        bowshock_reference::base_drag::base_drag_coefficient(case.mach) * case.body.base_radius().powi(2) / rb2
+    };
+    let fore = p.nose + p.aft.iter().sum::<f64>();
     WedgeResult {
         mach: case.mach,
         iters: r.iterations,
@@ -200,6 +225,10 @@ pub fn run_wedge_point(case: &Case3, s: &mut Solver3, warm: bool) -> WedgeResult
         cd_friction: friction,
         y_plus_max: if s.rans().is_some() { y_plus_max(s) } else { f64::NAN },
         cp_base: base_cp(case, s),
+        cd_total: fore + friction + p.base,
+        cd_base_model,
+        cd_total_model: fore + friction + cd_base_model,
+        farfield_dp,
         base_wall,
         wall,
         cp_min,
