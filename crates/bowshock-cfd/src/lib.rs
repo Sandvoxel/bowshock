@@ -22,6 +22,7 @@ pub mod solver3;
 pub mod turbulence;
 pub mod viscous;
 pub mod viscous3;
+pub mod walldist3;
 
 #[cfg(feature = "gpu")]
 pub mod gpu;
