@@ -17,7 +17,7 @@
 
 use super::Solver3;
 use crate::gas3::{prim_to_cons3, Prim3, GAMMA};
-use crate::solver::Turbulence;
+use crate::sst::Turbulence;
 use crate::viscous3::is_jet_cell;
 
 /// The state of the jet at the exit plane in solver units: `[rho, u, v, w, p]` (axial) and the `[k, omega]` of the SST run.
@@ -94,12 +94,12 @@ impl Solver3 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flux::Limiter;
     use crate::gas3::freestream3;
     use crate::grid3::{Part, SolidBox};
-    use crate::implicit::{ImplicitParams, LineSolve3};
-    use crate::solver::Viscous;
+    use crate::implicit_params::{ImplicitParams, LineSolve3};
+    use crate::limiter::Limiter;
     use crate::solver3::{Config3, Scheme3};
+    use crate::sst::Viscous;
     use crate::viscous3::tests::box_grid;
     use crate::viscous3::{face_cells, SideKind};
     use crate::walldist3::wall_faces;
@@ -112,7 +112,7 @@ mod tests {
         let cfg = Config3 { freestream: fs, cfl: 0.5, limiter: Limiter::VanAlbada, first_order_iters: 0, low_mach: true, scheme };
         let mut s = Solver3::new(g, cfg);
         if viscous {
-            s.set_viscous(Some(Viscous { re_c: 500.0, sutherland: 0.368, turbulence: crate::solver::Turbulence::Sst, wall_i_start: 0, roughness: 0.0 }));
+            s.set_viscous(Some(Viscous { re_c: 500.0, sutherland: 0.368, turbulence: crate::sst::Turbulence::Sst, wall_i_start: 0, roughness: 0.0 }));
         }
         s.set_jet(Some(JetState3 { state: fs, turb: [1e-6, 1.0] }));
         s

@@ -10,7 +10,7 @@
 //! Tier::Euler, 0)` with the fins between the pitch plane and each other. One line per `--every` iterations: residual, lowest pressure and its cell (device state download).
 
 use bowshock_cfd::gpu::Precision;
-use bowshock_cfd::implicit::LineSolve3;
+use bowshock_cfd::implicit_params::LineSolve3;
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
 use bowshock_core::engine::case3::{Case3, Tier};
 use bowshock_core::engine::gpu3::GpuRunner3;

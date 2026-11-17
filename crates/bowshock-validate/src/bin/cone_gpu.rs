@@ -9,8 +9,8 @@
 //! CSV output: `out/gpu/`.
 
 use bowshock_cases::cone::{build_solver, ConeCase};
-use bowshock_cfd::flux::Limiter;
 use bowshock_cfd::gpu::{GpuSolver, Precision};
+use bowshock_cfd::limiter::Limiter;
 use bowshock_gpu_cases::cone::{compare, residual_on_state, run_cpu, run_gpu, Compare, RunResult};
 use bowshock_reference::taylor_maccoll::{solve_cone, ConeSolution};
 use std::fs;

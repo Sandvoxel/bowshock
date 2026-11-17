@@ -1,9 +1,9 @@
 //! Set-ups shared by the GPU-vs-CPU test files.
 #![allow(dead_code)]
 
-use bowshock_cfd::flux::Limiter;
 use bowshock_cfd::gas::{freestream, prim_to_cons};
 use bowshock_cfd::grid::Grid;
+use bowshock_cfd::limiter::Limiter;
 use bowshock_cfd::solver::{Bc, Config, Solver};
 
 /// Rectangular axisymmetric box `x in [0, 4]`, `r in [0, 2]` (axis at `j = 0`, slightly stretched in both directions so that

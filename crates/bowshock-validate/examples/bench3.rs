@@ -28,11 +28,11 @@
 //! (`tools/gpuq/gpumem` measures any command the same way).
 //! The viscous + SST step drops in by implementing [`Step`] for its solver and adding a case that builds it; nothing else here is Euler-specific.
 
-use bowshock_cfd::flux::Limiter;
 use bowshock_cfd::gas3::freestream3;
 use bowshock_cfd::gpu::{GpuSolver3, Precision};
 use bowshock_cfd::grid3::Grid3;
-use bowshock_cfd::implicit::{ImplicitParams, LineSolve3};
+use bowshock_cfd::implicit_params::{ImplicitParams, LineSolve3};
+use bowshock_cfd::limiter::Limiter;
 use bowshock_cfd::solver3::{Config3, Scheme3};
 use bowshock_core::engine::case3::{Case3, Tier};
 use bowshock_core::engine::gpu3::GpuRunner3;
@@ -443,13 +443,8 @@ fn bench_combo(case: &BenchCase, precision: (Precision, &'static str), solve: (L
         // the viscous residual of the current state (stage S5a kernels, laminar), the kernels alone, the host data of the face passes allocated
         let sampler = if o.mem { MemSampler::start() } else { None };
         let sym = [false, false, false, false, true, true];
-        let v = bowshock_cfd::solver::Viscous {
-            re_c: 2.0e6,
-            sutherland: 0.368,
-            turbulence: bowshock_cfd::solver::Turbulence::Laminar,
-            wall_i_start: 0,
-            roughness: 0.0,
-        };
+        let v =
+            bowshock_cfd::sst::Viscous { re_c: 2.0e6, sutherland: 0.368, turbulence: bowshock_cfd::sst::Turbulence::Laminar, wall_i_start: 0, roughness: 0.0 };
         s.set_viscous(&case.grid, v, &sym).map_err(|e| format!("set_viscous: {e}"))?;
         let pv = s.profile_viscous().map_err(|e| format!("profile_viscous: {e}"))?;
         let peak_v = sampler.map(MemSampler::stop);

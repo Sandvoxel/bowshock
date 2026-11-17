@@ -10,13 +10,16 @@
 use crate::engine::case3::Case3;
 use crate::engine::grid3::Domain3;
 use crate::engine::result::StopReason;
-use crate::engine::run::MONITOR_LIMIT;
 use crate::progress::{drop_orders, spread, Progress};
 use bowshock_cfd::gas3::cons_to_prim3;
 use bowshock_cfd::gas3::Cons3;
 use bowshock_cfd::grid3::{Face3, Grid3, Part, Symmetry};
 use bowshock_cfd::solver3::Solver3;
 use std::ops::ControlFlow;
+
+/// Largest magnitude of the convergence monitor (a drag or pressure coefficient) of a meaningful solution; a sample beyond it, or a
+/// non-finite one, means the state has blown up (the residual of such a state can still be finite).
+pub const MONITOR_LIMIT: f64 = 1e3;
 
 /// Iterations between samples of the normal force.
 pub const SAMPLE_EVERY: usize = 50;

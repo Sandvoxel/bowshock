@@ -171,6 +171,51 @@ impl Grid3Params {
     }
 }
 
+impl Grid3Params {
+    /// The grid one sequencing level down (DESIGN3D S9): every axial and radial cell count halved (semi-coarsening in `i` and `j`; the azimuth, with its fin stack, is
+    /// kept), so that the cells of this grid are the 2 x 2 children (in `i`, `j`) of the cells of the result: the section ends (nose, base plane, segment ends, body
+    /// surface, base radius) and the fin leading / trailing edges and tip row fall on even indices. `Err` names a count that is odd (a diameter step is one cell and
+    /// cannot be halved; a nozzle's rows are not halved).
+    pub fn coarsened(&self) -> Result<Grid3Params, String> {
+        let half = |what: &str, n: usize| -> Result<usize, String> {
+            if n >= 2 && n.is_multiple_of(2) {
+                Ok(n / 2)
+            } else {
+                Err(format!("{what} = {n} cannot be halved"))
+            }
+        };
+        let mut c = self.clone();
+        let segs = |what: &str, n_seg: &[usize]| -> Result<Vec<usize>, String> { n_seg.iter().map(|&n| half(what, n)).collect() };
+        c.sting.n_up = half("sting n_up", self.sting.n_up)?;
+        c.sting.n_nose = half("sting n_nose", self.sting.n_nose)?;
+        c.sting.n_seg = segs("sting n_seg", &self.sting.n_seg)?;
+        c.sting.n_ext = half("sting n_ext", self.sting.n_ext)?;
+        c.sting.nj = half("sting nj", self.sting.nj)?;
+        if let Some(b) = &self.base {
+            if b.nozzle.is_some() {
+                return Err("a motor's nozzle rows are not halved".to_string());
+            }
+            let cb = c.base.as_mut().expect("base");
+            cb.n_up = half("base n_up", b.n_up)?;
+            cb.n_nose = half("base n_nose", b.n_nose)?;
+            cb.n_seg = segs("base n_seg", &b.n_seg)?;
+            cb.n_wake = half("base n_wake", b.n_wake)?;
+            cb.n_gap = half("base n_gap", b.n_gap)?;
+            cb.nj_out = half("base nj_out", b.nj_out)?;
+            if b.n_sting > 0 {
+                cb.n_sting = half("base n_sting", b.n_sting)?;
+            }
+        }
+        if self.fins.is_some() {
+            c.fin_chord_cells = Some(half("cells over the fin root chord", self.fin_chord_cells.unwrap_or(32usize << self.level))?);
+            if let Some(n) = self.span_cells {
+                c.span_cells = Some(half("span_cells", n)?);
+            }
+        }
+        Ok(c)
+    }
+}
+
 /// Half thickness of the fin section at the chordwise fraction `xi` (chord length `chord`, maximum thickness `t`). At an end that is really sharp (the section's
 /// thickness there is below 5 % of `t/2`: a wedge, an airfoil, the circle of a rounded edge) it is floored at 2 % of `t/2`, a needle the nodes follow (a zero-area
 /// edge face, the polygon of the clustered nodes for a round edge); at a blunt end (a square section, a blunt trailing edge) 25 % of `t/2` as before.
@@ -1227,7 +1272,8 @@ pub fn fin_stack_report(g: &Grid3) -> Option<StackReport> {
 mod tests {
     use super::*;
     use crate::engine::body_grid::{BaseBody, Body, Nose};
-    use crate::engine::case::{Case, Wake};
+    use crate::engine::case::Case;
+    use crate::engine::meshing::Wake;
     use crate::engine::numerics::Numerics;
     use bowshock_cfd::grid::Grid;
 

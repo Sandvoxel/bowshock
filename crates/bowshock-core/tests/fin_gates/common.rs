@@ -39,8 +39,8 @@ pub fn tier(kind: TierKind, flow: WallFlow) -> Tier {
     }
 }
 
-/// Does the engine solve the viscous equations for `case`? Both backends do when the case is viscous (`Case3::viscous`: the wall-resolved tiers, a viscous 2D case on
-/// the wedge; `Case3::euler_equations` drops it): the GPU runner runs the SST step since stage S5b.
+/// Does the engine solve the viscous equations for `case`? Both runners do when the case is viscous (`Case3::viscous`: the wall-resolved tiers;
+/// `Case3::euler_equations` drops it): the CPU solver and, since `gpu3d` integrated the viscous step, the GPU runner.
 pub fn engine_is_viscous(case: &Case3) -> bool {
     case.viscous.is_some()
 }

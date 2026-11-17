@@ -11,7 +11,7 @@
 //! of the device state (`GpuSolver3::viscous_flux`, `viscous3::wall_tractions`).
 
 use bowshock_cfd::gpu::{GpuSolver3, Precision};
-use bowshock_cfd::implicit::{ImplicitParams, LineSolve3};
+use bowshock_cfd::implicit_params::{ImplicitParams, LineSolve3};
 use bowshock_cfd::plate3::{blasius, mills_hang, plate_solver3, turbulent_correlation, PlateCase};
 use bowshock_cfd::viscous3::wall_tractions;
 use std::time::Instant;

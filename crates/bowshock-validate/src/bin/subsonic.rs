@@ -13,11 +13,12 @@
 
 use bowshock_cases::subsonic::{fox_case, fox_tm_x2439 as fox, subsonic_case};
 use bowshock_cases::transonic::named_body;
-use bowshock_cfd::flux::Limiter;
-use bowshock_cfd::implicit::ImplicitParams;
+use bowshock_cfd::implicit_params::ImplicitParams;
+use bowshock_cfd::limiter::Limiter;
 use bowshock_cfd::solver::Scheme;
 use bowshock_core::engine::body_grid::{Body, Nose};
-use bowshock_core::engine::case::{Case, Wake};
+use bowshock_core::engine::case::Case;
+use bowshock_core::engine::meshing::Wake;
 use bowshock_core::engine::result::{wall_cp_at, PointResult};
 use bowshock_core::engine::run::{run_cold, run_on};
 use bowshock_reference::potential::{nose_cylinder_body, solve, solve_compressible, PotentialSolution};

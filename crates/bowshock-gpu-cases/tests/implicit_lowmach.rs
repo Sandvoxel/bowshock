@@ -4,7 +4,7 @@
 //! `implicit.rs`.
 
 use bowshock_cases::subsonic::subsonic_case;
-use bowshock_cfd::implicit::ImplicitParams;
+use bowshock_cfd::implicit_params::ImplicitParams;
 use bowshock_cfd::solver::Scheme;
 use bowshock_core::engine::body_grid::Nose;
 

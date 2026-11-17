@@ -12,9 +12,11 @@
 //!    fluxes `Fv` that enter the cell residual as `F - Fv`, no-slip wall ghost states.
 
 use crate::bc::{characteristic_ghost, pressure_outflow_ghost};
-use crate::flux::{face_flux_lm, Limiter};
+use crate::flux::face_flux_lm;
 use crate::gas::{cons_to_prim, prim_to_cons, reflect, sound_speed, Cons, Prim};
-use crate::grid::{Face, Grid};
+use crate::grid::{Block, Face, Grid};
+use crate::limiter::Limiter;
+use crate::sst::{Turbulence, Viscous};
 use crate::viscous::{self, wall_ghost, Walls};
 use rayon::prelude::*;
 
@@ -45,60 +47,6 @@ pub struct Config {
     pub bc: [Bc; 4],
     /// Number of initial iterations run with first-order reconstruction (start-up robustness).
     pub first_order_iters: usize,
-}
-
-/// Solid body region of the structured grid. Cells `i < i_end && j < j_end` are inside the body, and (with a sting) cells
-/// `i >= i_end && j < j_sting` are inside the sting; they are never updated.
-///
-/// * The grid line `j = j_end` (for `i < i_end`) is the body surface (slip wall) and the grid line `i = i_end` (for
-///   `j_sting <= j < j_end`) is the flat base wall.
-/// * For `i >= i_end` the line `j = j_sting` is the sting surface (slip wall); with `j_sting = 0` there is no sting and the
-///   first `j_end` rows behind the base are ordinary wake cells reaching the axis.
-///
-/// All indices must be even (multigrid coarsening halves them) and `j_sting` is `0` or `>= 2`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Block {
-    pub i_end: usize,
-    pub j_end: usize,
-    pub j_sting: usize,
-}
-
-impl Block {
-    #[inline]
-    pub fn solid(&self, i: usize, j: usize) -> bool {
-        if i < self.i_end {
-            j < self.j_end
-        } else {
-            j < self.j_sting
-        }
-    }
-    /// First fluid cell of row `j` (`None` if the whole row is solid).
-    #[inline]
-    pub fn row_start(&self, j: usize) -> Option<usize> {
-        if j < self.j_sting {
-            None
-        } else if j < self.j_end {
-            Some(self.i_end)
-        } else {
-            Some(0)
-        }
-    }
-    /// First fluid cell of column `i`.
-    #[inline]
-    pub fn col_start(&self, i: usize) -> usize {
-        if i < self.i_end {
-            self.j_end
-        } else {
-            self.j_sting
-        }
-    }
-    pub fn coarsen(&self) -> Option<Block> {
-        (self.i_end.is_multiple_of(2) && self.j_end.is_multiple_of(2) && self.j_sting.is_multiple_of(2)).then_some(Block {
-            i_end: self.i_end / 2,
-            j_end: self.j_end / 2,
-            j_sting: self.j_sting / 2,
-        })
-    }
 }
 
 /// Variable-coefficient implicit residual smoothing (Jameson / Martinelli): `(1 - eps_i d_ii)(1 - eps_j d_jj) R_bar = R`,
@@ -149,36 +97,8 @@ pub enum Scheme {
     /// FAS multigrid cycle with an SSP-RK3 smoother (first-order coarse levels).
     Multigrid(MgParams),
     /// Line-implicit approximate-factorization pseudo-time stepping with a CFL ramp (`implicit.rs`).
-    Implicit(crate::implicit::ImplicitParams),
+    Implicit(crate::implicit_params::ImplicitParams),
 }
-
-/// Turbulence model of a viscous run: `Laminar` (`mu_t = 0`) or the Menter SST k-omega model (`turbulence.rs`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Turbulence {
-    Laminar,
-    Sst,
-}
-
-/// Viscous-flow parameters (non-dimensionalisation of `viscous.rs`: `rho_inf = c_inf = 1`, lengths in nose diameters).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Viscous {
-    /// Reynolds number `rho_inf c_inf d_nose / mu_inf` of the free stream.
-    pub re_c: f64,
-    /// Sutherland constant `110.4 K / T_inf[K]`.
-    pub sutherland: f64,
-    pub turbulence: Turbulence,
-    /// First `i` index (column) of the no-slip surface: the wall upstream of it (e.g. the axis or the approach to a plate)
-    /// stays a slip wall.
-    pub wall_i_start: usize,
-    /// Equivalent sand-grain roughness `ks` of the no-slip walls in nose diameters; `0.0` is a smooth wall. With `ks > 0` the SST model
-    /// uses the Wilcox (1988) rough-wall `omega` at the wall and the Hellsten & Laine (1997) `F3` limiter correction, see `turbulence.rs`.
-    pub roughness: f64,
-}
-
-/// Laminar Prandtl number.
-pub const PRANDTL: f64 = 0.72;
-/// Turbulent Prandtl number.
-pub const PRANDTL_T: f64 = 0.9;
 
 /// Nozzle exit on the base face: rows `0..j_end` of `i = i_end` are a fixed inflow state instead of a wall (needs a block with
 /// `j_sting == 0`); rows `j_end..block.j_end` stay wall (the annulus).

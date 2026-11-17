@@ -14,9 +14,10 @@
 
 use crate::gas::Prim;
 use crate::gas3::{reflect3, Prim3};
+use crate::grid::Block;
 use crate::grid::Grid;
 use crate::grid3::{revolve, Grid3, Part, SolidBox};
-use crate::solver::{pidx, Block};
+use crate::solver::pidx;
 use crate::solver3::{pidx3, NG};
 use crate::viscous::{self, Walls};
 
@@ -256,8 +257,8 @@ fn d(g: &dyn Fn(f64, f64) -> f64, axis: usize, x: f64, r: f64, h: f64) -> f64 {
 /// `R_x = d_x t_xx + (1/r) d_r (r t_xr)`, `R_r = d_x t_xr + (1/r) d_r (r t_rr) - t_tt / r`,
 /// `R_E = d_x (u t_xx + v t_xr + k T_x) + (1/r) d_r (r (u t_xr + v t_rr + k T_r))`, `div = u_x + v_r + v / r`, `t_tt = mu (2 v / r - 2/3 div)`.
 pub(crate) fn analytic_viscous_residual(f: &dyn Fn(f64, f64) -> Prim, x: f64, r: f64) -> [f64; 3] {
-    use crate::gas::GAMMA;
-    use crate::solver::PRANDTL;
+    use crate::gas3::GAMMA;
+    use crate::sst::PRANDTL;
     let h = 1e-3;
     let vis = super::tests::VISC;
     let u = |x: f64, r: f64| f(x, r)[1];

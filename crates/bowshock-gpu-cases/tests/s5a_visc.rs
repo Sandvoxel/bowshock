@@ -8,9 +8,9 @@
 use bowshock_cfd::gas3::{freestream3, reflect3, Prim3};
 use bowshock_cfd::gpu::TractionFace3;
 use bowshock_cfd::grid3::{Face3, Grid3, Part, SolidBox, PART_FLUID};
-use bowshock_cfd::implicit::ImplicitParams;
-use bowshock_cfd::solver::{Turbulence, Viscous};
+use bowshock_cfd::implicit_params::ImplicitParams;
 use bowshock_cfd::solver3::{Config3, Scheme3};
+use bowshock_cfd::sst::{Turbulence, Viscous};
 use bowshock_cfd::viscous3::{
     add_viscous_residual, cell_pass, diffusion_rates, face_dirs, face_pass, face_shape, lambda_pass, wall_tractions, Grad3, SymSides,
 };
@@ -175,7 +175,7 @@ macro_rules! probe {
         let cfg = Config3 {
             freestream: freestream3(2.0, 0.0),
             cfl: 0.5,
-            limiter: bowshock_cfd::flux::Limiter::Minmod,
+            limiter: bowshock_cfd::limiter::Limiter::Minmod,
             first_order_iters: 0,
             low_mach: false,
             scheme: Scheme3::Explicit,

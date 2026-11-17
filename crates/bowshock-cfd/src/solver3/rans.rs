@@ -59,7 +59,7 @@
 use super::Solver3;
 use crate::gas3::{Cons3, Prim3};
 use crate::grid3::Grid3;
-use crate::solver::{Turbulence, Viscous};
+use crate::sst::{Turbulence, Viscous};
 use crate::turbulence3::{self, ScalarBc, ScalarSides, Sst, TurbIn};
 use crate::viscous3::{self, face_shape, FaceDirs3, Grad3, SymSides, WallTraction};
 use crate::walldist3::{wall_distance3, wall_faces};
@@ -322,10 +322,10 @@ impl Solver3 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flux::Limiter;
     use crate::gas3::{cons_to_prim3, freestream3, prim_to_cons3};
     use crate::grid3::{Part, SolidBox};
-    use crate::implicit::{ImplicitParams, LineSolve3};
+    use crate::implicit_params::{ImplicitParams, LineSolve3};
+    use crate::limiter::Limiter;
     use crate::solver3::{Config3, Scheme3};
     use crate::viscous3::diffusion_rates;
     use crate::viscous3::tests::box_grid;
@@ -435,7 +435,7 @@ mod tests {
         se.set_viscous(None);
         for s in [&mut sv, &mut se] {
             s.eval_residual();
-            s.compute_dt(0.5, crate::implicit::DtMode::Sum);
+            s.compute_dt(0.5, crate::implicit_params::DtMode::Sum);
         }
         let g = &sv.grid;
         let r = sv.rans().unwrap();

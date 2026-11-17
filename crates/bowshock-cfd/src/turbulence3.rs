@@ -101,7 +101,7 @@
 use crate::gas3::{Cons3, Prim3};
 use crate::grid3::Grid3;
 use crate::solver3::pidx3;
-use crate::turbulence::{aupoix_wall, A1, BETA1, BETA2, BETA_STAR, GAMMA1, GAMMA2, NU_T_WALL_MAX, SIGMA_K1, SIGMA_K2, SIGMA_W1, SIGMA_W2};
+use crate::sst::{aupoix_wall, A1, BETA1, BETA2, BETA_STAR, GAMMA1, GAMMA2, NU_T_WALL_MAX, SIGMA_K1, SIGMA_K2, SIGMA_W1, SIGMA_W2};
 use crate::viscous3::{face_cells, face_mu_cells, face_of, face_shape, map_faces, FaceCells, FaceDirs3, Grad3, SideKind};
 use rayon::prelude::*;
 
@@ -422,7 +422,7 @@ impl Sst {
 
 impl TurbModel<2> for Sst {
     fn inf(&self) -> [f64; 2] {
-        [crate::turbulence::K_INF, crate::turbulence::omega_inf(self.re_c)]
+        [crate::sst::K_INF, crate::sst::omega_inf(self.re_c)]
     }
 
     fn sigmas(&self, e: usize) -> [f64; 2] {
@@ -944,7 +944,7 @@ mod tests {
     use super::*;
     use crate::flux3::tests::{random_rotation, rot, Rng};
     use crate::grid3::SolidBox;
-    use crate::solver::{Turbulence, Viscous};
+    use crate::sst::{Turbulence, Viscous};
     use crate::viscous3::tests::{box_grid, padded, set_solids, solid_mask};
     use crate::viscous3::{cell_pass, face_dirs, face_pass, face_sides3, wall_tractions, SymSides};
     use crate::walldist3::{wall_distance3, wall_faces};
@@ -1506,8 +1506,8 @@ mod tests {
 
     mod parity {
         use super::*;
-        use crate::flux::Limiter;
         use crate::gas::{freestream, prim_to_cons};
+        use crate::limiter::Limiter;
         use crate::solver::{Bc, Config, Solver};
         use crate::viscous::{iface_sides, jface_sides};
         use crate::viscous3::wedge::{col_x, smooth_state, wedge};

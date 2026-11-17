@@ -6,15 +6,10 @@
 // Every function mirrors the CPU routine of the same name in the CPU modules of this crate expression by expression; the array code is
 // the equation, the doc comment states it.
 
-use crate::flux::{Limiter, LOW_MACH_FLOOR, SHOCK_SENSOR_HI, SHOCK_SENSOR_LO};
-use crate::gas::GAMMA;
 use crate::grid::Grid;
-use crate::solver::{Bc, Block, Config, Nozzle};
-use crate::gpu::Staging;
-use luma::{concat, select, Array, Context, Fields, PadMode, Result};
+use crate::solver::{Bc, Config, Nozzle};
+use crate::grid::{Block};
 
-/// Array of one field (`rho`, `u`, ...) over a block of cells or faces.
-pub type A = Array<S>;
 /// Four fields: primitive `[rho, u, v, p]`, conservative `[rho, rho u, rho v, E]` or a flux. A record of arrays
 /// (`luma::Fields`): `slice`, `pad`, `assign` and `cache` apply to the four fields at once.
 pub type Rec = [A; 4];
@@ -50,8 +45,6 @@ fn download_state(s: &State) -> Result<Vec<[f64; 4]>> {
     let v: Vec<Vec<f64>> = (0..4).map(|k| to_f64(&s[k])).collect::<Result<_>>()?;
     Ok((0..v[0].len()).map(|c| [v[0][c], v[1][c], v[2][c], v[3][c]]).collect())
 }
-
-const G1: f64 = GAMMA - 1.0;
 
 // ---------------------------------------------------------------------------------------------------------------------
 // gas.rs
@@ -109,26 +102,6 @@ fn reflect(w: &Rec, nx: &A, nr: &A) -> Rec {
 // ---------------------------------------------------------------------------------------------------------------------
 // flux.rs
 // ---------------------------------------------------------------------------------------------------------------------
-
-/// Limited slope `phi(a, b)`, `a = q_i - q_{i-1}`, `b = q_{i+1} - q_i`; zero unless `a b > 0`.
-/// minmod: the smaller of `a`, `b` in modulus. van Albada: `(a (b^2 + e) + b (a^2 + e)) / (a^2 + b^2 + 2 e)`, `e = 1e-14`.
-fn limited_slope(a: &A, b: &A, lim: Limiter) -> A {
-    let same_sign = (a * b).gt(c(0.0));
-    match lim {
-        Limiter::FirstOrder => unreachable!("first order reconstruction has no slopes"),
-        Limiter::Minmod => select(&same_sign, select(&a.abs().lt(b.abs()), a, b), c(0.0)),
-        Limiter::VanAlbada => {
-            let eps = 1e-14;
-            let slope = (a * (b * b + c(eps)) + b * (a * a + c(eps))) / (a * a + b * b + c(2.0 * eps));
-            select(&same_sign, slope, c(0.0))
-        }
-        Limiter::Venkatakrishnan => {
-            let eps = 1e-14;
-            let slope = c(2.0) * b * (a * a + a * b + c(eps)) / (c(2.0) * a * a + a * b + b * b + c(2.0 * eps));
-            select(&same_sign, slope, c(0.0))
-        }
-    }
-}
 
 /// MUSCL reconstruction at the face between the cells `m1 | p0` (`m2`, `p1` the outer neighbours):
 /// `l = m1 + phi(m1 - m2, p0 - m1) / 2`, `r = p0 - phi(p0 - m1, p1 - p0) / 2`;
@@ -208,13 +181,6 @@ fn rusanov(l: &Side, r: &Side) -> Rec {
     let smax = (l.un.abs() + &l.c).maximum(r.un.abs() + &r.c);
     let dq = [rr - rl, rr * ur - rl * ul, rr * vr - rl * vl, &r.e - &l.e];
     rec(|k| c(0.5) * (&l.f[k] + &r.f[k]) - c(0.5) * &smax * &dq[k])
-}
-
-/// Weight of the Rusanov flux: `s = |p_R - p_L| / min(p_L, p_R)`, `t = clamp((s - lo) / (hi - lo), 0, 1)`, `theta = t^2 (3 - 2 t)`.
-fn shock_weight(pl: &A, pr: &A) -> A {
-    let s = (pr - pl).abs() / pl.minimum(pr);
-    let t = ((s - c(SHOCK_SENSOR_LO)) / c(SHOCK_SENSOR_HI - SHOCK_SENSOR_LO)).maximum(c(0.0)).minimum(c(1.0));
-    &t * &t * (c(3.0) - c(2.0) * &t)
 }
 
 /// Low-Mach scaling of the face-normal velocity jump (Thornber et al. 2008): `z = clamp(max(M_L, M_R), 0.05, 1)`,
@@ -409,7 +375,7 @@ impl LazySolver {
         l.iter = s.iter;
         l.set_scheme(s.scheme())?;
         l.set_viscous(s.viscous(), &s.grid)?;
-        if s.viscous().is_some_and(|v| v.turbulence == crate::solver::Turbulence::Sst) {
+        if s.viscous().is_some_and(|v| v.turbulence == crate::sst::Turbulence::Sst) {
             l.set_turb(&s.turb, &s.mu_t)?;
         }
         Ok(l)
@@ -814,16 +780,6 @@ impl LazySolver {
     }
 }
 
-/// The density residual scalars of an `eval` loop, one per iteration, as evaluated GPU arrays.
-pub struct Residuals(Vec<A>);
-
-impl Residuals {
-    /// Reads the residual history (waits for the GPU).
-    pub fn read(&self) -> Result<Vec<f64>> {
-        self.0.iter().map(|a| Ok(to_f64(a)?[0])).collect()
-    }
-}
-
 impl LazySolver {
     /// GPU time per kernel of one full SSP-RK3 step (three residual evaluations and the stage updates) as the `eval` loop
     /// launches it, and where fusion cut the expressions.
@@ -864,9 +820,4 @@ impl LazySolver {
         }
         t0.elapsed().as_secs_f64()
     }
-}
-
-/// Error of an operation that needs the loop state before one was set.
-fn no_state() -> luma::LumaError {
-    luma::LumaError::Unsupported("the solver has no state: it is set by from_host or set_state".into())
 }

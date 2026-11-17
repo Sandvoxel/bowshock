@@ -6,11 +6,11 @@
 //! execute up to `SYNC - 1` further iterations and the final forces are those of the state after them.
 
 use crate::engine::case3::Case3;
-use crate::engine::gpu::{record_timing, PointTiming};
 use crate::engine::run3::{
     breakdown_from, coefficients, drag_parts_from, forces_from, wall_class, wall_faces, zero_incidence, DragParts, LiftBreakdown, LiftForces, PointResult3,
     StopRule3, Wall, WallForces, MEAN_EVERY, SAMPLE_EVERY,
 };
+use crate::engine::timing::{record_timing, PointTiming};
 use crate::error::Error;
 use bowshock_cfd::gpu::{GpuSolver3, Precision, TractionFace3, WallFace3};
 use bowshock_cfd::grid3::Face3;
@@ -27,7 +27,7 @@ pub struct GpuRunner3 {
     /// The wall classes of the device force integration, in the order of `GpuSolver3::set_wall_faces`.
     classes: Vec<Wall>,
     /// The viscous parameters of a RANS run (`None`: Euler).
-    visc: Option<bowshock_cfd::solver::Viscous>,
+    visc: Option<bowshock_cfd::sst::Viscous>,
     /// Kernel build + geometry upload, seconds.
     pub setup_seconds: f64,
     /// Parts of the set-up: host grid + solver, default context, `from_host`, seconds.
@@ -242,7 +242,7 @@ impl GpuRunner3 {
             scheme: Scheme3::Implicit({
                 let mut p = n.implicit_for(true);
                 if n.line_solve.is_none() || self.host.rans().is_some() {
-                    p.line_solve = bowshock_cfd::implicit::LineSolve3::Block;
+                    p.line_solve = bowshock_cfd::implicit_params::LineSolve3::Block;
                 }
                 p
             }),

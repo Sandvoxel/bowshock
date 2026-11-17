@@ -65,7 +65,7 @@ impl LazySolver3 {
         let Scheme3::Implicit(p) = self.cfg.scheme else {
             return Err(luma::LumaError::Unsupported("profile_stages3 profiles the implicit scheme".into()));
         };
-        if p.line_solve != crate::implicit::LineSolve3::Block {
+        if p.line_solve != crate::implicit_params::LineSolve3::Block {
             return Err(luma::LumaError::Unsupported("profile_stages3 profiles the block line solve".into()));
         }
         let reps = reps.max(1);

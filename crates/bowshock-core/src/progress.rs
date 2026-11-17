@@ -13,7 +13,7 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 
 /// Solver iterations between two [`Progress`] reports: the sampling interval of the stop rules' monitor.
-pub const SAMPLE_INTERVAL: usize = crate::engine::numerics::MONITOR_EVERY;
+pub const SAMPLE_INTERVAL: usize = 50;
 
 /// Where one run (one Mach number, one angle of attack) is.
 #[derive(Clone, Copy, Debug, PartialEq)]

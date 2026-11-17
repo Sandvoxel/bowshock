@@ -2,8 +2,8 @@
 //! shock-sensor blend and the low-Mach correction, all projected on a unit normal `n: [f64; 3]`.
 //! The limiters, `limited_slope`, `shock_weight` and the sensor / low-Mach constants are shared with 2D.
 
-use crate::flux::{limited_slope, shock_weight, Limiter, LOW_MACH_FLOOR};
 use crate::gas3::{physical_flux3, Cons3, Prim3, GAMMA};
+use crate::limiter::{limited_slope, shock_weight, Limiter, LOW_MACH_FLOOR};
 
 /// Cylindrical frame about the x axis at a face centroid `c`: `[sin, cos]` of its azimuth, `[c_y / r, c_z / r]` with
 /// `r = hypot(c_y, c_z)`; `[0, 1]` on the axis.

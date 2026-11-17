@@ -19,10 +19,12 @@
 //! [`df32s::LazySolver3`], behind [`GpuSolver3`].
 
 use crate::gas3::Cons3;
+use crate::grid::Block;
 use crate::grid::Grid;
 use crate::grid3::Grid3;
-use crate::solver::{Block, Config, Nozzle, Scheme, Solver, Viscous};
+use crate::solver::{Config, Nozzle, Scheme, Solver};
 use crate::solver3::{Config3, Solver3};
+use crate::sst::Viscous;
 use luma::Context;
 pub use luma::LumaError;
 
@@ -146,8 +148,10 @@ pub mod f32s {
         a.clone()
     }
 
+    include!("common.rs");
     include!("body.rs");
     include!("body3.rs");
+    include!("implicit_common.rs");
     include!("viscous3.rs");
     include!("turbulence3.rs");
     include!("rans3.rs");
@@ -231,8 +235,10 @@ pub mod df32s {
         a.to_df32()
     }
 
+    include!("common.rs");
     include!("body.rs");
     include!("body3.rs");
+    include!("implicit_common.rs");
     include!("viscous3.rs");
     include!("turbulence3.rs");
     include!("rans3.rs");
@@ -403,7 +409,7 @@ impl GpuSolver {
 
     /// `([k, omega], mu_t)` of every cell of an SST run (`Solver::turb`, `Solver::mu_t`), as f64.
     pub fn turb_state(&self) -> Result<(Vec<[f64; 2]>, Vec<f64>)> {
-        if !self.viscous().is_some_and(|v| v.turbulence == crate::solver::Turbulence::Sst) {
+        if !self.viscous().is_some_and(|v| v.turbulence == crate::sst::Turbulence::Sst) {
             return Err(GpuError::Unsupported("turb_state needs the SST model"));
         }
         Ok(on!(self, s => s.turb_state_f64()?))
@@ -632,7 +638,7 @@ impl GpuSolver3 {
     }
 
     /// Switches the 3D viscous kernels on (the host geometry of the face passes: `grid`, the symmetry sides of the domain box); see `LazySolver3::set_viscous3`.
-    pub fn set_viscous(&mut self, grid: &Grid3, v: crate::solver::Viscous, sym: &crate::viscous3::SymSides) -> Result<()> {
+    pub fn set_viscous(&mut self, grid: &Grid3, v: crate::sst::Viscous, sym: &crate::viscous3::SymSides) -> Result<()> {
         on3_mut!(self, s => s.set_viscous3(grid, v, sym)?);
         Ok(())
     }

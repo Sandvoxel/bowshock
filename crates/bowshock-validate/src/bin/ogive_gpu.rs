@@ -8,8 +8,8 @@
 //! synchronisations (default 50, max 256). Output: `out/gpu_ogive/`.
 
 use bowshock_cases::ogive::{perkins_jorgensen as pj, wall_cp_at, OgiveCase};
-use bowshock_cfd::flux::Limiter;
 use bowshock_cfd::gpu::{GpuSolver, Precision};
+use bowshock_cfd::limiter::Limiter;
 use bowshock_gpu_cases::ogive::{compare, run_cpu, run_gpu, Compare, OgiveRun};
 use bowshock_reference::shock_expansion::{Ogive, SurfaceTheory};
 use std::fs;

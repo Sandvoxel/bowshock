@@ -10,10 +10,10 @@
 
 use bowshock_cfd::gpu::{GpuSolver3, Precision};
 use bowshock_core::engine::case3::Case3;
-use bowshock_core::engine::gpu::{take_timings, PointTiming};
 use bowshock_core::engine::gpu3::GpuRunner3;
 use bowshock_core::engine::grid3::body_grid3;
 use bowshock_core::engine::run3::forces_on;
+use bowshock_core::engine::timing::{take_timings, PointTiming};
 use std::time::Instant;
 
 fn anf(mach: f64, alpha_deg: f64) -> Case3 {

@@ -24,7 +24,7 @@
 //   (`tanh` is 1 there; `a^4` would overflow f32), as in the 2D `turbulence.rs`;
 // * the line solves are Luma's `solve_tridiagonal_parts` in f32 (the left-hand side is f32 in both precisions, as everywhere in the implicit schemes).
 
-use crate::turbulence as sst2;
+use crate::sst as sst2;
 use crate::turbulence3 as cpu3;
 use crate::viscous3 as cv3;
 
@@ -852,7 +852,7 @@ impl LazySolver3 {
         if (cx.grid.ni, cx.grid.nj, cx.grid.nk) != (self.ni, self.nj, self.nk) {
             return Err(luma::LumaError::Unsupported("the grid of the turbulence inputs differs from the grid of the solver".into()));
         }
-        let visc = crate::solver::Viscous { re_c: 1.0, sutherland: 0.368, turbulence: crate::solver::Turbulence::Sst, wall_i_start: 0, roughness: 0.0 };
+        let visc = crate::sst::Viscous { re_c: 1.0, sutherland: 0.368, turbulence: crate::sst::Turbulence::Sst, wall_i_start: 0, roughness: 0.0 };
         let vg = VGeo3::new(&self.ctx, cx.grid, cx.solid, sym, visc)?;
         let tg = TGeo3::new(&self.ctx, cx.grid, cx.solid, sym, cx.bc, &vg, cx.law_i_walls)?;
         Ok((vg, tg))

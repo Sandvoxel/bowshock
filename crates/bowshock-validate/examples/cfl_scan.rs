@@ -9,7 +9,7 @@
 //! stop rule of the facade (`Numerics3::auto`: residual drop or stationary `ca`). One line per (Mach, line solve, `cfl_max`).
 
 use bowshock_cfd::gpu::Precision;
-use bowshock_cfd::implicit::LineSolve3;
+use bowshock_cfd::implicit_params::LineSolve3;
 use bowshock_core::engine::gpu3::GpuRunner3;
 use bowshock_core::{AftSpec, BodySpec, NoseShape, NoseSpec, Resolution};
 use bowshock_gpu_cases::wedge3::{engine_case, wedge_case3};

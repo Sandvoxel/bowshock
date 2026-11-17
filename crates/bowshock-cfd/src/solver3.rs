@@ -14,11 +14,11 @@
 
 use crate::axis3::AxisMap;
 use crate::bc3::{characteristic_ghost3, pressure_outflow_ghost3};
-use crate::flux::Limiter;
 use crate::flux3::{face_flux_lm3, face_rot};
 use crate::gas3::{cons_to_prim3, prim_to_cons3, reflect3, sound_speed3, Cons3, Prim3};
 use crate::grid3::{Face3, Grid3, Symmetry, PART_DEAD, PART_FLUID};
-use crate::implicit::{DtMode, ImplicitParams};
+use crate::implicit_params::{DtMode, ImplicitParams};
+use crate::limiter::Limiter;
 use crate::lowmach5::{spectral_pc3, LowMach};
 use crate::viscous3::{diffusion_rates, wall_ghost3};
 use rayon::prelude::*;
@@ -30,6 +30,14 @@ pub use rans::RansOpts3;
 
 /// Ghost layers per side.
 pub(crate) const NG: usize = 2;
+
+/// The stability limit of a wedge's axis cells: their time step is at most `WEDGE_AXIS_DT r_c / c` (`r_c` the radius of the centroid, `c` the sound speed). The
+/// pressure source of a wedge (`p / r` in the radial momentum, `(E + p) v / r` in the energy) is explicit in the energy row and stiff as `c / r_c`; the first row
+/// off the axis ahead of the nose of a wall-resolved grid has `r_c` of a few `1e-6` against cells `1e-2` to `10` long, and the CFL time step is `10^2` to `10^3` times
+/// `r_c / c` there. The cell then swings with a period of two iterations (its density by 1 %, its swirl momentum by 40 % of the free-stream speed, the pressure by 1.6 %).
+/// Measured on the ogive-cylinder wedge of the RANS table at Mach 0.1 on the grid sized for Mach 3 (`y+` 0.04, `cfl_max` 50, low-Mach preconditioning): the limit
+/// is stable for 4 and unstable for 12 (and 40), 2 is used.
+pub(crate) const WEDGE_AXIS_DT: f64 = 2.0;
 
 /// Index of cell `(i, j, k)` (ghost cells have negative / out-of-range indices) in the padded primitive array.
 #[inline]
@@ -78,7 +86,9 @@ pub struct Solver3 {
     pub(crate) solid: Vec<bool>,
     /// Per cell: a wall for its fluid neighbours (solid and not dead).
     pub(crate) wall: Vec<bool>,
-    pub(crate) n_active: usize,
+    /// Per cell: counts in [`Solver3::density_residual`] (fluid and not on an axis run).
+    in_norm: Vec<bool>,
+    n_norm: usize,
     /// Iterations since the start of the implicit CFL ramp.
     pub(crate) ramp_k: usize,
     /// Ghost states across the axis runs of the grid.
@@ -108,7 +118,8 @@ impl Solver3 {
         let nc = ni * nj * nk;
         let solid: Vec<bool> = grid.part.iter().map(|&p| p != PART_FLUID).collect();
         let wall: Vec<bool> = grid.part.iter().map(|&p| !matches!(p, PART_FLUID | PART_DEAD)).collect();
-        let n_active = solid.iter().filter(|s| !**s).count();
+        let in_norm: Vec<bool> = (0..nc).map(|c| !solid[c] && !grid.is_axis(c % ni, (c / ni) % nj)).collect();
+        let n_norm = in_norm.iter().filter(|&&m| m).count();
         let rot = |f: &[Face3]| f.iter().map(|f| face_rot(f.c)).collect::<Vec<_>>();
         let q = prim_to_cons3(&cfg.freestream);
         Solver3 {
@@ -123,7 +134,8 @@ impl Solver3 {
             u0: vec![[0.0; 5]; nc],
             solid,
             wall,
-            n_active,
+            in_norm,
+            n_norm,
             ramp_k: 0,
             axis,
             rot_i: rot(&grid.iface),
@@ -152,10 +164,13 @@ impl Solver3 {
         self.w[pidx3(self.grid.ni, self.grid.nj, self.grid.nk, i as isize, j as isize, k as isize)]
     }
 
-    /// L2 norm of `d rho / dt` normalised by sqrt(N) (N = number of fluid cells).
+    /// L2 norm of `d rho / dt` normalised by sqrt(N), N the number of fluid cells **off the axis runs**. The cells of an axis run are left out: the volume of the first
+    /// row off the axis ahead of a nose is `r^2` (`1e-14` of a nose diameter cubed on a wall-resolved grid), the residual is a flux imbalance over that volume, and
+    /// noise of `1e-3` in the face states gives `1e4` there while the cell follows its neighbours (the forces do not see it). They dominated the norm of the finned sectors
+    /// (`1e2`, not falling) and of the wedge at Mach 0.1 on the Mach 3 grid (`6e2`; `0.7` at iteration 2000 with the cells left out and [`WEDGE_AXIS_DT`]).
     pub fn density_residual(&self) -> f64 {
-        let s: f64 = self.res.par_iter().map(|r| r[0] * r[0]).sum();
-        (s / self.n_active as f64).sqrt()
+        let s: f64 = self.res.par_iter().zip(self.in_norm.par_iter()).map(|(r, &m)| if m { r[0] * r[0] } else { 0.0 }).sum();
+        (s / self.n_norm as f64).sqrt()
     }
 
     /// One iteration with the configured [`Scheme3`]; returns the density residual at the start of the iteration.
@@ -296,7 +311,7 @@ impl Solver3 {
 
     /// Local pseudo-time step into `self.dt` from the primitives of the last residual evaluation:
     /// `CFL V / (L_i + L_j + L_k)` (`DtMode::Sum`) or `CFL V / (3 min L_d)`; `L_d = (lam(lo) + lam(hi)) / 2`,
-    /// `lam(f) = (|u.n| + c) area`. Zero in solid cells.
+    /// `lam(f) = (|u.n| + c) area`. Zero in solid cells. In the axis cells of a wedge at most [`WEDGE_AXIS_DT`]` r_c / c`.
     pub(crate) fn compute_dt(&mut self, cfl: f64, mode: DtMode) {
         let (ni, nj, nk) = (self.grid.ni, self.grid.nj, self.grid.nk);
         let wedge = self.is_wedge();
@@ -328,10 +343,16 @@ impl Solver3 {
                             lk += d[2];
                         }
                     }
-                    pl[j * ni + i] = match mode {
+                    let dtc = match mode {
                         DtMode::Sum => cfl * grid.vol[c] / (li + lj + lk),
                         DtMode::MinDirection if wedge => cfl * grid.vol[c] / (2.0 * li.min(lj)),
                         DtMode::MinDirection => cfl * grid.vol[c] / (3.0 * li.min(lj).min(lk)),
+                    };
+                    pl[j * ni + i] = if wedge && grid.is_axis(i, j) {
+                        let x = grid.xc[c];
+                        dtc.min(WEDGE_AXIS_DT * x[1].hypot(x[2]) / cs)
+                    } else {
+                        dtc
                     };
                 }
             }
@@ -662,7 +683,7 @@ mod tests {
         let us = t0.elapsed().as_secs_f64() * 1e6 / (s3.iter as f64 * s3.u.len() as f64);
         println!("3D nk={nk}: {us:.2} us per cell per implicit iteration ({} cells, {} threads)", s3.u.len(), rayon::current_num_threads());
         println!("3D nk={nk} residual {r:e} (r0 {r0:e}) after {} iterations", s3.iter);
-        let (pinf, q) = (1.0 / crate::gas::GAMMA, 0.5 * mach * mach);
+        let (pinf, q) = (1.0 / crate::gas3::GAMMA, 0.5 * mach * mach);
         let mut e = 0.0f64;
         for i in n_up(&g2)..g2.ni {
             let cp2 = (cons_to_prim(&s2.u[i])[3] - pinf) / q;
@@ -761,5 +782,64 @@ mod tests {
         }
         println!("fin wall: {nwall} wall faces, max |F[0]| = {worst:e} (rho u = {scale})");
         assert!(nwall > 0 && worst <= 1e-14 * scale, "{worst:e}");
+    }
+
+    /// A grid whose first row off the axis is a sliver (`r` of a few `1e-5` against cells `0.2` long, as ahead of the nose of a wall-resolved grid), `nk` cells over `span`.
+    fn sliver_grid(nk: usize, span: f64, sym: Symmetry) -> Grid3 {
+        let (ni, nj) = (5, 6);
+        let rr = [0.0, 1e-4, 1e-2, 0.1, 0.3, 0.6, 1.0];
+        let (mut x, mut r) = (vec![0.0; (ni + 1) * (nj + 1)], vec![0.0; (ni + 1) * (nj + 1)]);
+        for j in 0..=nj {
+            for i in 0..=ni {
+                x[j * (ni + 1) + i] = i as f64 / ni as f64;
+                r[j * (ni + 1) + i] = rr[j];
+            }
+        }
+        let g2 = Grid::try_from_nodes(ni, nj, x, r).unwrap();
+        let theta: Vec<f64> = (0..=nk).map(|k| (k as f64 / nk as f64 - 0.5) * span).collect();
+        let mut g3 = revolve(&g2, nk, &theta).unwrap();
+        g3.axis = vec![AxisRun { j: 0, i: 0..ni }];
+        g3.sym = sym;
+        g3
+    }
+
+    /// The cells of an axis run do not count in the density residual: a residual of `1e6` in them leaves the norm of the cells off the axis (`1`) as it is.
+    #[test]
+    fn axis_cells_are_left_out_of_the_residual_norm() {
+        let g3 = sliver_grid(4, std::f64::consts::PI, Symmetry::Half);
+        let (ni, nj) = (g3.ni, g3.nj);
+        let mut s = Solver3::new(g3, cfg(freestream3(0.5, 0.0), Scheme3::Explicit, Limiter::VanAlbada));
+        for (c, r) in s.res.iter_mut().enumerate() {
+            r[0] = if (c / ni) % nj == 0 { 1e6 } else { 1.0 };
+        }
+        let n = s.density_residual();
+        assert!((n - 1.0).abs() < 1e-12, "{n:e}");
+    }
+
+    /// The time step of a wedge's axis cells is `WEDGE_AXIS_DT r_c / c` where the CFL step is larger; the rows above and the axis cells of a grid that is not a wedge
+    /// (their `k` faces are in the step) are not limited.
+    #[test]
+    fn wedge_axis_time_step_is_limited_by_the_radial_source() {
+        let fs = freestream3(0.1, 0.0);
+        let c_inf = sound_speed3(&fs);
+        let implicit = Scheme3::Implicit(ImplicitParams { cfl_max: 50.0, ..ImplicitParams::DEFAULT });
+        let mut wedge = Solver3::new(sliver_grid(1, 0.0873, Symmetry::Wedge), cfg(fs, implicit, Limiter::VanAlbada));
+        wedge.eval_residual();
+        wedge.compute_dt(50.0, DtMode::Sum);
+        let ni = wedge.grid.ni;
+        for i in 0..ni {
+            let x = wedge.grid.xc[i];
+            let cap = WEDGE_AXIS_DT * x[1].hypot(x[2]) / c_inf;
+            assert!((wedge.dt[i] - cap).abs() <= 1e-9 * cap, "axis cell {i}: dt {:e} vs {cap:e}", wedge.dt[i]);
+            let above = wedge.grid.xc[ni + i];
+            let cap_above = WEDGE_AXIS_DT * above[1].hypot(above[2]) / c_inf;
+            assert!(wedge.dt[ni + i] > 2.0 * cap_above, "the row above is limited: dt {:e} vs {cap_above:e}", wedge.dt[ni + i]);
+        }
+        let mut half = Solver3::new(sliver_grid(2, std::f64::consts::PI, Symmetry::Half), cfg(fs, implicit, Limiter::VanAlbada));
+        half.eval_residual();
+        half.compute_dt(50.0, DtMode::Sum);
+        let x = half.grid.xc[0];
+        let cap = WEDGE_AXIS_DT * x[1].hypot(x[2]) / c_inf;
+        assert!(half.dt[0] > 1.5 * cap, "the axis cell of a half domain is limited: dt {:e} vs {cap:e}", half.dt[0]);
     }
 }

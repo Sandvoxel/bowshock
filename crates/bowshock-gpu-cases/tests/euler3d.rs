@@ -13,12 +13,12 @@
 //! Targets: f32 state < 1e-5, double-float state < 3e-7 (the 2D `explicit.rs` tolerances). The numbers are printed
 //! (`cargo test --release -- --nocapture`) whether or not they meet the targets.
 
-use bowshock_cfd::flux::Limiter;
 use bowshock_cfd::gas3::{freestream3, prim_to_cons3, Cons3};
 use bowshock_cfd::gpu::{GpuSolver3, Precision, Staging};
 use bowshock_cfd::grid::Grid;
 use bowshock_cfd::grid3::{revolve, Grid3};
-use bowshock_cfd::implicit::{ImplicitParams, LineSolve3};
+use bowshock_cfd::implicit_params::{ImplicitParams, LineSolve3};
+use bowshock_cfd::limiter::Limiter;
 use bowshock_cfd::solver3::{Config3, Scheme3, Solver3};
 use bowshock_core::engine::body_grid::{BaseBody, Body, LargeGridParams, Nose};
 use bowshock_core::engine::grid3::{body_grid3, Fins3, Grid3Params};

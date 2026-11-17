@@ -22,8 +22,8 @@
 //! the same fractions in every column: `r = r_body(x) + s_j (r_far - r_body(x))`.
 
 use crate::error::Error;
+use bowshock_cfd::grid::Block;
 use bowshock_cfd::grid::{geometric_offsets, Grid};
-use bowshock_cfd::solver::Block;
 use bowshock_reference::shock_expansion::Ogive;
 
 /// Nose shape of the body (diameter `d = 1`, nose length `L_n`).
@@ -441,6 +441,9 @@ pub struct BaseGridParams {
     /// Cluster the rows of the gap between the sting (or axis) and the base radius at the base corner only (geometric growth
     /// from `dr_wall` towards the sting) instead of at both ends.
     pub gap_one_sided: bool,
+    /// First cell height of the gap rows at the base corner when it differs from `dr_wall` (`None`: `dr_wall`). The gap rows below the body surface are solid: a
+    /// coarser spacing here (the Draft tier) saves the rows, and the cells of the body block behind them.
+    pub dr_gap: Option<f64>,
     /// Motor-on grids: the rows of the gap behind the base that form the nozzle exit (needs `n_sting == 0`).
     pub nozzle: Option<NozzleRows>,
 }
@@ -548,10 +551,10 @@ pub(crate) fn base_rows_below(p: &BaseGridParams, xs: &[f64], i_end: usize) -> R
         let outer = two_sided_nodes(re - nz.r_exit, p.n_gap - nz.n_jet, p.dr_wall);
         (0..=p.n_gap).map(|k| if k <= nz.n_jet { nz.r_exit - off[nz.n_jet - k] } else { nz.r_exit + outer[k - nz.n_jet] }).collect()
     } else if p.gap_one_sided {
-        let off = geometric_offsets(p.dr_wall, re - rs, p.n_gap);
+        let off = geometric_offsets(p.dr_gap.unwrap_or(p.dr_wall), re - rs, p.n_gap);
         (0..=p.n_gap).map(|k| (re - rs) - off[p.n_gap - k]).collect()
     } else {
-        two_sided_nodes(re - rs, p.n_gap, p.dr_wall)
+        two_sided_nodes(re - rs, p.n_gap, p.dr_gap.unwrap_or(p.dr_wall))
     };
     let mut r = vec![0.0; (j_end + 1) * (ni + 1)];
     for i in 0..=ni {
@@ -715,6 +718,7 @@ mod tests {
             dx_tip: 0.05,
             dr_wall: 0.05,
             gap_one_sided: false,
+            dr_gap: None,
             nozzle: None,
         }
     }
@@ -842,6 +846,7 @@ mod tests {
             dx_tip: 0.05,
             dr_wall: 0.05,
             gap_one_sided: false,
+            dr_gap: None,
             nozzle: None,
         };
         let (g, b) = base_domain_grid(&bp).expect("grid");

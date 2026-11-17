@@ -3,13 +3,13 @@
 //! Tiny grids, f32 and df32, explicit scheme and the implicit block scheme. The diagonal line solve of a viscous run is not ported (a wedge runs on `Block`).
 //! `cargo test --release -p bowshock-gpu-cases --test s5b -- --nocapture` (through gpuq).
 
-use bowshock_cfd::flux::Limiter;
 use bowshock_cfd::gas3::{freestream3, Cons3};
 use bowshock_cfd::gpu::Staging;
 use bowshock_cfd::grid3::{Grid3, Part, SolidBox};
-use bowshock_cfd::implicit::{ImplicitParams, LineSolve3};
-use bowshock_cfd::solver::{Turbulence, Viscous};
+use bowshock_cfd::implicit_params::{ImplicitParams, LineSolve3};
+use bowshock_cfd::limiter::Limiter;
 use bowshock_cfd::solver3::{Config3, Scheme3, Solver3};
+use bowshock_cfd::sst::{Turbulence, Viscous};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 /// A `10 x 8 x 6` box of cubes (a slightly sheared grid) with a no-slip block on the floor and a thin dead block: `j = 0` is the slip floor of the domain, `k`
@@ -234,8 +234,8 @@ fn viscous_wedge_matches_cpu() {
 /// stream against the f64 CPU, Euler and SST, explicit and block.
 #[test]
 fn motor_jet_wedge_matches_cpu() {
-    use bowshock_core::engine::case::Jet;
     use bowshock_core::engine::case3::Case3;
+    use bowshock_core::engine::meshing::Jet;
 
     let make = |turbulence: Option<Turbulence>, explicit: bool| -> Solver3 {
         let jet = Jet { r_exit: 0.25, state: [0.5, 2.0, 0.0, 0.5], turb: [1e-4, 10.0] };

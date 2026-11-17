@@ -16,23 +16,86 @@
 // constants 0 / 1 (`E::Z`, `E::O`), so that the structurally zero entries of the flux Jacobian cost nothing. The line solves are
 // Luma's `solve_block_tridiagonal_parts` on the sixteen entries of each block (no stacking); a vector field is four `[ni, nj]` arrays.
 
-use crate::implicit::{DtMode, ImplicitParams, LineSolve3};
 use crate::solver::Scheme;
 
-/// Array of the f32 left-hand side.
-type F = Array<f32>;
 /// Four f32 fields (primitive state, or a conserved vector).
 type V4 = [F; 4];
 
-fn cf(x: f64) -> f32 {
-    x as f32
+/// A 4x4 block, row-major (`m[4 r + c]`, the CPU `M4`), one entry per row / column pair.
+#[derive(Clone)]
+struct Blk([E; 16]);
+
+impl Blk {
+    fn zero() -> Blk {
+        Blk(std::array::from_fn(|_| E::Z))
+    }
+
+    fn eye() -> Blk {
+        Blk(std::array::from_fn(|k| if k % 5 == 0 { E::O } else { E::Z }))
+    }
+
+    fn zip(&self, o: &Blk, f: impl Fn(&E, &E) -> E) -> Blk {
+        Blk(std::array::from_fn(|k| f(&self.0[k], &o.0[k])))
+    }
+
+    fn add(&self, o: &Blk) -> Blk {
+        self.zip(o, E::add)
+    }
+
+    fn sub(&self, o: &Blk) -> Blk {
+        self.zip(o, E::sub)
+    }
+
+    /// Every entry times the array `s`.
+    fn scale(&self, s: &F) -> Blk {
+        Blk(std::array::from_fn(|k| self.0[k].scale(s)))
+    }
+
+    /// `self + d I`.
+    fn add_diag(&self, d: &F) -> Blk {
+        Blk(std::array::from_fn(|k| if k % 5 == 0 { self.0[k].add(&E::A(d.clone())) } else { self.0[k].clone() }))
+    }
+
+    /// `self - d I`.
+    fn sub_diag(&self, d: &F) -> Blk {
+        Blk(std::array::from_fn(|k| if k % 5 == 0 { self.0[k].sub(&E::A(d.clone())) } else { self.0[k].clone() }))
+    }
+
+    /// `self o`: `c[4 i + j] = sum_k a[4 i + k] b[4 k + j]`, `k` ascending like the CPU `mm`.
+    fn mm(&self, o: &Blk) -> Blk {
+        Blk(std::array::from_fn(|n| {
+            let (i, j) = (n / 4, n % 4);
+            (0..4).fold(E::Z, |acc, k| acc.add(&self.0[4 * i + k].mul(&o.0[4 * k + j])))
+        }))
+    }
+
+    /// The part `range` of every array entry along `axis`.
+    fn slice(&self, axis: usize, range: std::ops::Range<usize>) -> Blk {
+        Blk(std::array::from_fn(|k| match &self.0[k] {
+            E::A(a) => E::A(a.slice(axis, range.clone())),
+            e => e.clone(),
+        }))
+    }
+
+    /// All sixteen entries as arrays (`z` and `o` the arrays of zeros and ones of the shape).
+    fn dense(&self, z: &F, o: &F) -> [F; 16] {
+        std::array::from_fn(|k| match &self.0[k] {
+            E::Z => z.clone(),
+            E::O => o.clone(),
+            E::A(a) => a.clone(),
+        })
+    }
+
+    fn of(dense: &[F; 16]) -> Blk {
+        Blk(std::array::from_fn(|k| E::A(dense[k].clone())))
+    }
 }
 
-/// Host f64 data (row-major, `i` fastest) as an f32 array of `shape`.
-fn up_lhs(ctx: &Context, data: &[f64], shape: impl Into<luma::Shape>) -> Result<F> {
-    let v: Vec<f32> = data.iter().map(|&x| x as f32).collect();
-    Array::from_slice_on(ctx, &v, shape)
+/// `y = a x` for a block of arrays: `y_i = a_i0 x_0 + a_i1 x_1 + a_i2 x_2 + a_i3 x_3`.
+fn mv(a: &[F; 16], x: &V4) -> V4 {
+    std::array::from_fn(|i| &a[4 * i] * &x[0] + &a[4 * i + 1] * &x[1] + &a[4 * i + 2] * &x[2] + &a[4 * i + 3] * &x[3])
 }
+
 
 // ---------------------------------------------------------------------------------------------------------------------
 // low-Mach preconditioning (`ImplicitParams::low_mach_precond`; the CPU counterpart is `crate::implicit::LowMach`)
@@ -151,140 +214,6 @@ fn precond_p(wk: &V4, lm: &LmGpu, solid: Option<&Array<bool>>) -> [F; 16] {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// 4x4 blocks
-// ---------------------------------------------------------------------------------------------------------------------
-
-/// One entry of a block: the constant 0, the constant 1, or an array.
-#[derive(Clone)]
-enum E {
-    Z,
-    O,
-    A(F),
-}
-
-impl E {
-    fn add(&self, o: &E) -> E {
-        match (self, o) {
-            (E::Z, x) | (x, E::Z) => x.clone(),
-            (E::A(a), E::A(b)) => E::A(a + b),
-            (E::O, E::A(b)) | (E::A(b), E::O) => E::A(1.0f32 + b),
-            (E::O, E::O) => unreachable!("1 + 1 is not an entry of any block of the scheme"),
-        }
-    }
-
-    fn sub(&self, o: &E) -> E {
-        match (self, o) {
-            (x, E::Z) => x.clone(),
-            (E::Z, E::A(b)) => E::A(-b),
-            (E::A(a), E::A(b)) => E::A(a - b),
-            (E::O, E::A(b)) => E::A(1.0f32 - b),
-            (E::A(a), E::O) => E::A(a - 1.0f32),
-            (E::Z, E::O) | (E::O, E::O) => unreachable!("-1 and 1 - 1 are not entries of any block of the scheme"),
-        }
-    }
-
-    /// Every array entry times the constant `s` (no entry of the blocks it is used on is the constant 1).
-    fn muls(&self, s: f32) -> E {
-        match self {
-            E::Z => E::Z,
-            E::A(a) => E::A(a * s),
-            E::O => unreachable!("a constant 1 entry times a constant is not an entry of any block of the scheme"),
-        }
-    }
-
-    fn mul(&self, o: &E) -> E {
-        match (self, o) {
-            (E::Z, _) | (_, E::Z) => E::Z,
-            (E::O, x) | (x, E::O) => x.clone(),
-            (E::A(a), E::A(b)) => E::A(a * b),
-        }
-    }
-
-    fn scale(&self, s: &F) -> E {
-        match self {
-            E::Z => E::Z,
-            E::O => E::A(s.clone()),
-            E::A(a) => E::A(a * s),
-        }
-    }
-}
-
-/// A 4x4 block, row-major (`m[4 r + c]`, the CPU `M4`), one entry per row / column pair.
-#[derive(Clone)]
-struct Blk([E; 16]);
-
-impl Blk {
-    fn zero() -> Blk {
-        Blk(std::array::from_fn(|_| E::Z))
-    }
-
-    fn eye() -> Blk {
-        Blk(std::array::from_fn(|k| if k % 5 == 0 { E::O } else { E::Z }))
-    }
-
-    fn zip(&self, o: &Blk, f: impl Fn(&E, &E) -> E) -> Blk {
-        Blk(std::array::from_fn(|k| f(&self.0[k], &o.0[k])))
-    }
-
-    fn add(&self, o: &Blk) -> Blk {
-        self.zip(o, E::add)
-    }
-
-    fn sub(&self, o: &Blk) -> Blk {
-        self.zip(o, E::sub)
-    }
-
-    /// Every entry times the array `s`.
-    fn scale(&self, s: &F) -> Blk {
-        Blk(std::array::from_fn(|k| self.0[k].scale(s)))
-    }
-
-    /// `self + d I`.
-    fn add_diag(&self, d: &F) -> Blk {
-        Blk(std::array::from_fn(|k| if k % 5 == 0 { self.0[k].add(&E::A(d.clone())) } else { self.0[k].clone() }))
-    }
-
-    /// `self - d I`.
-    fn sub_diag(&self, d: &F) -> Blk {
-        Blk(std::array::from_fn(|k| if k % 5 == 0 { self.0[k].sub(&E::A(d.clone())) } else { self.0[k].clone() }))
-    }
-
-    /// `self o`: `c[4 i + j] = sum_k a[4 i + k] b[4 k + j]`, `k` ascending like the CPU `mm`.
-    fn mm(&self, o: &Blk) -> Blk {
-        Blk(std::array::from_fn(|n| {
-            let (i, j) = (n / 4, n % 4);
-            (0..4).fold(E::Z, |acc, k| acc.add(&self.0[4 * i + k].mul(&o.0[4 * k + j])))
-        }))
-    }
-
-    /// The part `range` of every array entry along `axis`.
-    fn slice(&self, axis: usize, range: std::ops::Range<usize>) -> Blk {
-        Blk(std::array::from_fn(|k| match &self.0[k] {
-            E::A(a) => E::A(a.slice(axis, range.clone())),
-            e => e.clone(),
-        }))
-    }
-
-    /// All sixteen entries as arrays (`z` and `o` the arrays of zeros and ones of the shape).
-    fn dense(&self, z: &F, o: &F) -> [F; 16] {
-        std::array::from_fn(|k| match &self.0[k] {
-            E::Z => z.clone(),
-            E::O => o.clone(),
-            E::A(a) => a.clone(),
-        })
-    }
-
-    fn of(dense: &[F; 16]) -> Blk {
-        Blk(std::array::from_fn(|k| E::A(dense[k].clone())))
-    }
-}
-
-/// `y = a x` for a block of arrays: `y_i = a_i0 x_0 + a_i1 x_1 + a_i2 x_2 + a_i3 x_3`.
-fn mv(a: &[F; 16], x: &V4) -> V4 {
-    std::array::from_fn(|i| &a[4 * i] * &x[0] + &a[4 * i + 1] * &x[1] + &a[4 * i + 2] * &x[2] + &a[4 * i + 3] * &x[3])
-}
-
-// ---------------------------------------------------------------------------------------------------------------------
 // gas, flux Jacobian, dissipation
 // ---------------------------------------------------------------------------------------------------------------------
 
@@ -348,14 +277,6 @@ fn flux_jacobian_h(u: &F, v: &F, h: &F, nx: &F, nr: &F) -> Blk {
 /// `|u_n| + c` of the primitive state `w` for the unit normal `(n_x, n_r)`.
 fn spectral_f(w: &V4, nx: &F, nr: &F) -> F {
     (&w[1] * nx + &w[2] * nr).abs() + (cf(GAMMA) * &w[3] / &w[0]).sqrt()
-}
-
-/// Weight of the Rusanov-like dissipation (the shock sensor of the face flux): `s = |p_R - p_L| / min(p_L, p_R)`,
-/// `t = clamp((s - lo) / (hi - lo), 0, 1)`, `theta = t^2 (3 - 2 t)`.
-fn shock_weight_f(pl: &F, pr: &F) -> F {
-    let s = (pr - pl).abs() / pl.minimum(pr);
-    let t = ((s - cf(SHOCK_SENSOR_LO)) / cf(SHOCK_SENSOR_HI - SHOCK_SENSOR_LO)).maximum(0.0f32).minimum(1.0f32);
-    &t * &t * (3.0f32 - 2.0f32 * &t)
 }
 
 /// `|A|` of the Roe-averaged state of `wl`, `wr` for the unit normal `(n_x, n_r)`: `|A| = d1 (A - a I) + d2 (A - a I)(A - (a + c) I) + e1 I`
@@ -605,7 +526,7 @@ struct LBlockGeo {
 }
 
 impl LBlockGeo {
-    fn new(ctx: &Context, ni: usize, nj: usize, b: crate::solver::Block, nozzle: Option<crate::solver::Nozzle>) -> Result<LBlockGeo> {
+    fn new(ctx: &Context, ni: usize, nj: usize, b: crate::grid::Block, nozzle: Option<crate::solver::Nozzle>) -> Result<LBlockGeo> {
         let mask = |shape: [usize; 2], f: &dyn Fn(usize, usize) -> bool| {
             let v: Vec<bool> = (0..shape[1]).flat_map(|j| (0..shape[0]).map(move |i| (i, j))).map(|(i, j)| f(i, j)).collect();
             Array::from_slice_on(ctx, &v, shape)

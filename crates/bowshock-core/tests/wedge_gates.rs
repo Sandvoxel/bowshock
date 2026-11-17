@@ -737,6 +737,20 @@ fn gate_v3(r: &dyn WedgeRunner, rep: &mut Report) {
 fn gate_v4(r: &dyn WedgeRunner, rep: &mut Report, groups: &[&str]) {
     for c in facade_cases("G-V4").into_iter().filter(|c| groups.contains(&c.group.as_str())) {
         match r.facade_case(&c) {
+            // An inviscid wake that cycles is not compared sample against sample: the 2D reference of such a case hit its iteration cap (its value is the phase it stopped
+            // in), and the wedge stops on the mean-stationary rule (a window mean, reported as INFO by the runner). Reported, not gated, as in G-W1.
+            Ok(m) if !c.rans && (c.reference.stop_reason == "MaxIterations" || m.stop_reason.contains("mean stationary")) => {
+                println!(
+                    "INFO G-V4 {} not gated: an inviscid wake that cycles (2D stop {}, {} iterations; wedge stop {}, {} iterations); wedge cd_total {} 2D {}",
+                    c.id,
+                    c.reference.stop_reason,
+                    c.reference.iterations,
+                    m.stop_reason,
+                    m.iterations,
+                    fmt(m.cd_total),
+                    fmt(c.reference.cd_total)
+                );
+            }
             Ok(m) => {
                 rep.check("G-V4", &format!("{}:cd_total", c.id), m.cd_total, c.reference.cd_total, v4_band(c.mach));
                 println!(
@@ -1057,21 +1071,13 @@ mod cpu_wedge {
     use bowshock_cfd::grid::{cone_grid, ConeGridParams};
     use bowshock_cfd::solver3::Solver3;
     use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
-    use bowshock_core::engine::case::Wake;
     use bowshock_core::engine::case3::Case3;
     use bowshock_core::engine::grid3::{wedge_of_meridian, WEDGE_ANGLE};
+    use bowshock_core::engine::meshing::Wake;
     use bowshock_core::engine::run3::{drag_parts_on, run3_on};
     use bowshock_core::Analysis;
 
     pub struct CpuWedge;
-
-    fn level_of(r: Resolution) -> u32 {
-        match r {
-            Resolution::Coarse => 0,
-            Resolution::Medium => 1,
-            Resolution::Fine => 2,
-        }
-    }
 
     fn pressure(s: &Solver3, i: usize, j: usize) -> f64 {
         cons_to_prim3(&s.u[s.grid.cell(i, j, 0)])[4]
@@ -1145,7 +1151,7 @@ mod cpu_wedge {
     }
 
     impl WedgeRunner for CpuWedge {
-        /// Euler and RANS fixture cases on the wedge through `Case3::wedge_of` (the 2D case's grids and numerics, its viscous parameters). `BOWSHOCK_CPU_ONLY=<id>`
+        /// Euler and RANS fixture cases on the wedge through `Analysis::wedge_cases` (`Case3::wedge`, the coarse tier of the flow, the roughness and the motor of the case). `BOWSHOCK_CPU_ONLY=<id>`
         /// runs only the case with that id (the others are `Err("not selected")`), for running the points of a table in parallel processes.
         fn facade_case(&self, c: &FacadeCase) -> Result<Numbers, String> {
             if std::env::var("BOWSHOCK_CPU_ONLY").is_ok_and(|id| id != c.id) {
@@ -1162,10 +1168,19 @@ mod cpu_wedge {
                     analysis = analysis.motor(m);
                 }
             }
-            let case2 = analysis.engine_cases(&[c.mach]).map_err(|e| e.to_string())?.remove(0);
-            let case = Case3::wedge_of(&case2, level_of(c.resolution));
+            let mut case = analysis.wedge_cases(&[c.mach]).map_err(|e| e.to_string())?.remove(0);
+            // BOWSHOCK_MEAN_WINDOW=<iterations> overrides the window of the mean-stationary rule (0: off), to see an oscillating wake's last state
+            if let Some(n) = std::env::var("BOWSHOCK_SUB_ITERS").ok().and_then(|v| v.parse().ok()) {
+                case.numerics.implicit.sub_iters = n;
+            }
+            if let Some(w) = std::env::var("BOWSHOCK_MEAN_WINDOW").ok().and_then(|v| v.parse().ok()) {
+                case.numerics.mean_window = w;
+            }
             let mut s = case.build_solver().map_err(|e| e.to_string())?;
             let r = run3_on(&case, &mut s, false);
+            if let Some(w) = r.window {
+                println!("INFO window mean of {} iterations to {}: CA {:.5} oscillation {:.3}", w.length, w.end, w.ca, w.oscillation);
+            }
             let p = drag_parts_on(&case, &s);
             // the facade (the fixture) refers to the largest cross-section, the engine to the nose base: one factor, `BaseBody::nose_to_largest_area`
             let q = case.body.nose_to_largest_area();

@@ -6,7 +6,8 @@
 //! maximum cross-section `pi R^2`.
 
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
-use bowshock_core::engine::case::{Case, Wake};
+use bowshock_core::engine::case::Case;
+use bowshock_core::engine::meshing::Wake;
 use bowshock_core::engine::numerics::Numerics;
 
 /// Body `nose + 6 d` cylinder (no boattail, no sting), domain `10 L` upstream and radially, `5 L` downstream (`L` = total body
@@ -17,6 +18,23 @@ pub fn subsonic_case(mach: f64, nose: Nose, level: u32, base: bool) -> Case {
     let body = BaseBody::cylinder(Body { nose }, 6.0);
     let wake = if base { Wake::Base } else { Wake::Sting };
     Case::new(mach, body, level, wake, Numerics::subsonic(level, wake))
+}
+
+/// [`subsonic_case`] on the single-cell wedge of the 3D engine: the base-wake grid (`base`) or the sting grid at grid `level`.
+pub fn subsonic_wedge_case(mach: f64, nose: Nose, level: u32, base: bool) -> bowshock_core::engine::case3::Case3 {
+    let body = BaseBody::cylinder(Body { nose }, 6.0);
+    if base {
+        crate::wedge::base_case(mach, body, level)
+    } else {
+        crate::wedge::sting_case(mach, body, level)
+    }
+}
+
+/// [`fox_case`] on the single-cell wedge of the 3D engine (base-wake grid, the sting behind the base).
+pub fn fox_wedge_case(cone: bool, mach: f64, level: u32) -> bowshock_core::engine::case3::Case3 {
+    let nose = if cone { Nose::Cone { half_angle: 10f64.to_radians() } } else { Nose::TangentOgive { fineness: 2.0 } };
+    let body = BaseBody::cylinder(Body { nose }, 2.0).with_boattail(1.0, 10f64.to_radians()).with_sting(fox_tm_x2439::STING_RADIUS);
+    crate::wedge::base_case(mach, body, level)
 }
 
 /// NASA TM X-2439 test body (`cone = false`: configuration 4, 2-caliber tangent ogive; `cone = true`: configuration 2, 10 deg cone)
@@ -88,7 +106,7 @@ pub mod fox_tm_x2439 {
 mod tests {
     use super::*;
     use bowshock_cfd::gas::freestream;
-    use bowshock_cfd::implicit::ImplicitParams;
+    use bowshock_cfd::implicit_params::ImplicitParams;
     use bowshock_cfd::solver::Scheme;
     use bowshock_core::engine::result::StopReason;
     use bowshock_core::engine::run::run_cold;
@@ -187,8 +205,8 @@ mod tests {
     /// the implicit variants are also compared with each other in the second-order van Albada scheme.
     #[test]
     fn converged_state_is_independent_of_the_acceleration_scheme() {
-        use bowshock_cfd::flux::Limiter;
         use bowshock_cfd::gas::Cons;
+        use bowshock_cfd::limiter::Limiter;
         let mut case = subsonic_case(0.5, Nose::TangentOgive { fineness: 3.0 }, 0, false);
         case.grid_sting.n_up = 12;
         case.grid_sting.n_nose = 20;
