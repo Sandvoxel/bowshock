@@ -787,3 +787,19 @@ fn unsupported_outlines_are_rejected_with_the_reason() {
     let e = sector_on("base", long).build_solver().err().expect("a fin that starts on the nose is refused").to_string();
     assert!(e.contains("ahead of the aft body"), "{e}");
 }
+
+/// 8 azimuthal cells of 22.5 degrees over the half domain fold a cell beside the 0.93 d Arcas fins (the gap cells on the two sides of a fin are 22.5 and 45 degrees
+/// wide, so the polygon scale puts the fin's two faces at different radii): the mesher refuses with the cause and the smallest `nk` that builds, never with a
+/// bare "negative cell volume", and that `nk` builds.
+#[test]
+fn a_fold_beside_wide_fins_is_refused_naming_the_cause_and_the_nk() {
+    let mut c = Case3::base_half(0.5, 0.0, arcas_like(), Some(arcas_fins(4, 0.0)), Tier::Euler, 0);
+    c.grid.domain = Domain3::Half { phase: FinPhase::Between };
+    c.grid.nk = 8;
+    let e = c.build_solver().err().expect("8 cells fold beside these fins").to_string();
+    assert!(e.contains("22.5 degrees wide") && e.contains("two sides of the fin") && !e.starts_with("negative"), "{e}");
+    let nk: usize =
+        e.split("use nk >= ").nth(1).and_then(|t| t.split_whitespace().next()).and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("no nk in `{e}`"));
+    c.grid.nk = nk;
+    c.build_solver().unwrap_or_else(|e| panic!("the suggested nk = {nk} does not build: {e}"));
+}
