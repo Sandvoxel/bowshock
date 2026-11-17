@@ -157,6 +157,7 @@ pub mod f32s {
     include!("rans3.rs");
     include!("implicit3.rs");
     include!("stages3.rs");
+    include!("memory3.rs");
     include!("implicit.rs");
     include!("viscous.rs");
     include!("turbulence.rs");
@@ -244,6 +245,7 @@ pub mod df32s {
     include!("rans3.rs");
     include!("implicit3.rs");
     include!("stages3.rs");
+    include!("memory3.rs");
     include!("implicit.rs");
     include!("viscous.rs");
     include!("turbulence.rs");
@@ -651,6 +653,12 @@ impl GpuSolver3 {
     /// The stages of one implicit block step and their GPU profiles (best of `reps`), the state unchanged: see `stages3.rs`.
     pub fn profile_stages(&mut self, reps: usize) -> Result<Vec<(String, luma::Profile)>> {
         Ok(on3_mut!(self, s => s.profile_stages3(reps)?))
+    }
+
+    /// The device bytes of the arrays the solver holds, `(group, bytes)` (geometry by family, the f32 left-hand-side geometry, the viscous and SST data, the force
+    /// arrays, one set of the loop state): see `memory3.rs`. The transients of the step are not in it: the process peak minus the sum of these.
+    pub fn memory_report(&self) -> Vec<(&'static str, usize)> {
+        on3!(self, s => s.memory_report())
     }
 
     /// Are the viscous terms on?

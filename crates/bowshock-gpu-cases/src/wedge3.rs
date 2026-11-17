@@ -6,11 +6,16 @@ use bowshock_core::engine::case3::Case3;
 use bowshock_core::{Analysis, Atmosphere, BodySpec, FlightConditions, Resolution, Wake};
 
 /// The 2D engine case of the facade (`Analysis::engine_cases`) at `mach`: the Euler base-wake grid, or, with `rans`, the wall-resolved grid sized for
-/// `mach` (ISA at 120 m as the app's table).
+/// `mach` (ISA at 120 m as the app's table) with the table's drag tolerance (`drag_tolerance` 0.002 of the fixture: `Numerics3::from_2d` then stops a viscous wedge
+/// as the 2D engine does, the relative range of the monitor below it over 500 iterations; the facade's default is none).
 pub fn engine_case(body: &BodySpec, mach: f64, rans: bool, resolution: Resolution) -> Case {
     let mut a = Analysis::new(body).expect("body spec").resolution(resolution);
     a = if rans { a.viscous(FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 120.0 } }) } else { a.wake(Wake::Base) };
-    a.engine_cases(&[mach]).expect("engine case").remove(0)
+    let mut case = a.engine_cases(&[mach]).expect("engine case").remove(0);
+    if rans {
+        case.numerics.drag_rel_tol = Some(2e-3);
+    }
+    case
 }
 
 /// The base-grid parameters of [`engine_case`].

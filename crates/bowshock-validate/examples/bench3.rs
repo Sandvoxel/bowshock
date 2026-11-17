@@ -340,6 +340,22 @@ fn bench_combo(case: &BenchCase, precision: (Precision, &'static str), solve: (L
         _ => unreachable!("one of the two solvers is built"),
     };
     let (first_call_s, us, p, last) = measure(s, n)?;
+    if o.mem {
+        // the arrays the solver holds, by group (`memory_report`); the process peak (below) minus their sum is the transients of the compiled step
+        let rep = s.memory_report();
+        let total: usize = rep.iter().map(|(_, b)| b).sum();
+        let cells = case.cells() as f64;
+        println!(
+            "### {} {} memory ledger of the persistent arrays ({} cells)\n| group | MiB | bytes / cell |\n|---|---|---|",
+            case.name,
+            precision.1,
+            case.cells()
+        );
+        for (g, b) in &rep {
+            println!("| {g} | {:.1} | {:.1} |", *b as f64 / 1048576.0, *b as f64 / cells);
+        }
+        println!("| total | {:.1} | {:.1} |", total as f64 / 1048576.0, total as f64 / cells);
+    }
     {
         // where the loop time goes: the host time to trace one step, the eval-per-iteration loop, the `run` loop with the residual history, and the replay against its own GPU time
         let m = 20;

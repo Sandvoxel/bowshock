@@ -1409,3 +1409,7 @@ assembly 0.058, line solves (7) 0.31, defects 0.033, SST update 0.10 / 0.22; 0.6
 End to end: G3 M0.5 wedge 2600 iterations 4.0 s (f32), the 10-Mach RANS table 41.9 s (2D 18 s; 871 s before), G-F1 sector points 7100 iterations 89.6 s (M0.5) and 6940 in 78.7 s (M2.0). f32 and df32 agree on the RANS wedge to 5 digits of
 CD (G-V3 0.213277 both; G3 M0.5 0.26710 both), so the gates and the facade run f32. Luma main (`compile_until_all`, kernels independent of array extents) is 5-9 % faster than 0.4.1 on this loop; the workspace pins it by git rev.
 Axis cells of a wedge: the density residual norm leaves the axis-run cells out and their time step is at most `2 r_c / c` (CPU c5aa96e65d), on the device in `residual_norm3` / `cell_residual3` / `pseudo_dt3`.
+
+Device memory (`GpuSolver3::memory_report`, `bench3 --mem`; Coarse 4-fin sector, 677 376 cells): the arrays the solver holds are 412 MiB f32 (638 B/cell: Geo3 faces 73, solid-face masks 68, LGeo3 187, VGeo3 134, SST 123, state 32) / 527 MiB df32;
+the process peak is 5570 MiB f32 / 9254 MiB df32, so about 7.5 kB per cell is transient buffers of the compiled step (face matrices, `lo`/`d`/`up` stacks, line-solve scratch, gradients). The 3D wedge: 15 MiB held (830 B/cell).
+`bench3 --stage` and the ledger give the split; the lever is buffer reuse inside the compiled loop, not the held arrays.

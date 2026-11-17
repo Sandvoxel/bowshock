@@ -62,7 +62,12 @@ fn engine_case_of(c: &FacadeCase) -> Result<bowshock_core::engine::case::Case, S
     } else {
         a.wake(if c.wake_base { Wake::Base } else { Wake::Sting })
     };
-    Ok(a.engine_cases(&[c.mach]).map_err(err)?.remove(0))
+    let mut case = a.engine_cases(&[c.mach]).map_err(err)?.remove(0);
+    // the fixture's `drag_tolerance` (the 2D engine's stop rule): `Numerics3::from_2d` stops a viscous wedge on it as the 2D engine does (the facade's default is none)
+    if c.rans {
+        case.numerics.drag_rel_tol = c.drag_tolerance;
+    }
+    Ok(case)
 }
 
 /// The GPU precision of a facade case: single precision whatever the fixture's (the 2D table ran in df32): the product's `GpuRunner3` runs `Precision::F32`
