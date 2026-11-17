@@ -59,7 +59,7 @@ pub(crate) fn resolve_walls(grid_base: &mut BaseGridParams, grid_sting: &mut Lar
     let (re, rs) = (body.base_radius(), body.sting_radius);
     grid_base.dr_wall = y1;
     grid_base.nj_out = layer_count(grid_base.r_far - re, y1);
-    grid_base.n_gap = layer_count(re - rs, y1);
+    grid_base.n_gap = layer_count(re - rs, grid_base.dr_gap.unwrap_or(y1));
     grid_base.gap_one_sided = true;
     grid_sting.dr_wall = y1;
     grid_sting.nj = layer_count(grid_sting.r_far, y1);
@@ -147,9 +147,40 @@ pub(crate) fn base_grid(body: &BaseBody, level: u32) -> BaseGridParams {
         dx_tip,
         dr_wall: 0.03 / f as f64,
         gap_one_sided: false,
+        dr_gap: None,
         nozzle: None,
     }
 }
+/// Cell counts of the Draft tier relative to the wall-resolved tiers: axial cells (upstream, nose, segments, wake) times this, even, at least 4.
+pub const DRAFT_AXIAL: f64 = 0.6;
+/// Domain of the Draft tier in body lengths: inflow plane and outer radius, outflow plane (the full tiers: 10 and 5). The grid does not depend on the Mach number
+/// (a table shares it), so this is the size a subsonic far field still tolerates with the characteristic boundary conditions.
+pub const DRAFT_DOMAIN: (f64, f64) = (5.0, 3.0);
+/// First cell height of the gap rows behind the base of the Draft tier (the wall-resolved tiers: the wall spacing, 1e-5 d and less). Env `BOWSHOCK_DRAFT_GAP` overrides it for the study.
+pub const DRAFT_DR_GAP: f64 = 0.01;
+/// End-cell size at the nose tip and the segment ends of the Draft tier.
+pub const DRAFT_DX_TIP: f64 = 0.05;
+
+/// The coarse axial grid and the smaller domain of the Draft tier for `body` ([`crate::engine::case3::Tier::Draft`]); the radial layers follow from the wall spacing
+/// ([`resolve_walls`], call it after this: the layer counts depend on the outer radius).
+pub(crate) fn draft_coarsen(base: &mut BaseGridParams, sting: &mut LargeGridParams, body: &BaseBody) {
+    let cut = |n: usize| even_ceil(n as f64 * DRAFT_AXIAL).max(4);
+    let l = body.x_base();
+    base.n_up = cut(base.n_up);
+    base.n_nose = cut(base.n_nose);
+    base.n_seg.iter_mut().zip(&body.segments).for_each(|(n, s)| *n = if s.is_step() { 1 } else { cut(*n) });
+    base.n_wake = cut(base.n_wake);
+    base.dx_tip = DRAFT_DX_TIP;
+    base.dr_gap = Some(std::env::var("BOWSHOCK_DRAFT_GAP").ok().and_then(|v| v.parse().ok()).unwrap_or(DRAFT_DR_GAP));
+    (base.x_up, base.r_far, base.x_down) = (DRAFT_DOMAIN.0 * l, DRAFT_DOMAIN.0 * l, DRAFT_DOMAIN.1 * l);
+    sting.n_up = cut(sting.n_up);
+    sting.n_nose = cut(sting.n_nose);
+    sting.n_seg.iter_mut().zip(&body.segments).for_each(|(n, s)| *n = if s.is_step() { 1 } else { cut(*n) });
+    sting.n_ext = cut(sting.n_ext);
+    sting.dx_tip = DRAFT_DX_TIP;
+    (sting.x_up, sting.r_far, sting.x_down) = (DRAFT_DOMAIN.0 * l, DRAFT_DOMAIN.0 * l, DRAFT_DOMAIN.1 * l);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

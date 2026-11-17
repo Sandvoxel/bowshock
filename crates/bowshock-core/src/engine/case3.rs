@@ -5,7 +5,7 @@ use crate::engine::body_grid::{BaseBody, Body, Nose};
 use crate::engine::case::Case;
 use crate::engine::field3::Snapshots3;
 use crate::engine::grid3::{body_grid3, Domain3, FinStack, Fins3, Grid3Params, WEDGE_ANGLE};
-use crate::engine::meshing::{base_grid, motor_rows, resolve_walls, sting_grid, wall_spacing, Jet};
+use crate::engine::meshing::{base_grid, draft_coarsen, motor_rows, resolve_walls, sting_grid, wall_spacing, Jet};
 use crate::error::Error;
 use crate::progress::ProgressSink;
 use crate::spec::FinProfile;
@@ -170,6 +170,12 @@ pub struct WallFlow {
 /// `110.4 K / 288.15 K`: the Sutherland ratio of the ISA at sea level.
 pub const SUTHERLAND_SEA_LEVEL: f64 = 110.4 / 288.15;
 
+/// Cells over the fin root chord of the Draft tier at level 0 (the others: 32).
+pub const DRAFT_CHORD_CELLS: usize = 20;
+
+/// Target `y+` of the first cell of the Draft tier on the body and on the fin sides.
+pub const DRAFT_Y_PLUS: f64 = 40.0;
+
 /// What a 3D grid is resolved for: the wall spacing of the body and of the fin sides, and the azimuthal policy.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Tier {
@@ -179,17 +185,25 @@ pub enum Tier {
     Coarse(WallFlow),
     /// Body and fin sides `y+` ~ 1.
     Fine(WallFlow),
+    /// A cheaper RANS solve: wall functions on the body and on the fins (first cell at the `y+` of the second field, [`DRAFT_Y_PLUS`] by default, through the automatic wall treatment, as the lift tier), a coarser axial grid
+    /// ([`crate::engine::meshing::DRAFT_AXIAL`]) and a smaller domain ([`crate::engine::meshing::DRAFT_DOMAIN`]); with fins the fin stack at that `y+`.
+    Draft(WallFlow, f64),
     /// The lift tier of a half domain: body and fins `y+` ~ 60 (wall functions); without fins uniform azimuthal cells, `32 << level` over the half domain, with fins the
     /// fin stack of [`FinStack`] at `y+` 60 (a uniform azimuth puts the first cell of a fin side at thousands of wall units).
     Lift(WallFlow),
 }
 
 impl Tier {
+    /// The Draft tier of `flow` at [`DRAFT_Y_PLUS`].
+    pub fn draft(flow: WallFlow) -> Tier {
+        Tier::Draft(flow, DRAFT_Y_PLUS)
+    }
+
     /// The flow the walls are sized for (`None` for [`Tier::Euler`]).
     pub fn flow(&self) -> Option<&WallFlow> {
         match self {
             Tier::Euler => None,
-            Tier::Coarse(f) | Tier::Fine(f) | Tier::Lift(f) => Some(f),
+            Tier::Coarse(f) | Tier::Fine(f) | Tier::Lift(f) | Tier::Draft(f, _) => Some(f),
         }
     }
 
@@ -200,6 +214,7 @@ impl Tier {
             Tier::Coarse(_) => Some((1.0, 15.0)),
             Tier::Fine(_) => Some((1.0, 1.0)),
             Tier::Lift(_) => Some((60.0, 60.0)),
+            Tier::Draft(_, y) => Some((*y, *y)),
         }
     }
 }
@@ -330,6 +345,9 @@ impl Case3 {
         let level = self.grid.level;
         let y1 = wall_spacing(&self.body, flow.re_c, flow.mach_max, y_body);
         let mut base = self.grid.base.clone().unwrap_or_else(|| base_grid(&self.body, level));
+        if matches!(tier, Tier::Draft(..)) {
+            draft_coarsen(&mut base, &mut self.grid.sting, &self.body);
+        }
         resolve_walls(&mut base, &mut self.grid.sting, &self.body, y1);
         if self.grid.base.is_some() {
             self.grid.base = Some(base);
@@ -339,6 +357,11 @@ impl Case3 {
         self.viscous = Some(Viscous { re_c: flow.re_c, sutherland: flow.sutherland, turbulence: Turbulence::Sst, wall_i_start: 0, roughness: 0.0 });
         self.numerics = Numerics3::viscous(self.mach, level);
         match (&self.grid.fins, tier) {
+            (Some(f), Tier::Draft(..)) => {
+                // growth 1.35 / 1.6 in and outside the layer (1.25 / 1.35), 20 cells over the root chord (32)
+                self.grid.fin_stack = Some(FinStack { growth_bl: 1.35, growth_out: 1.6, ..FinStack::from_flow(flow.re_c, flow.mach_max, f.root_chord, y_fin) });
+                self.grid.fin_chord_cells = Some(DRAFT_CHORD_CELLS << level);
+            }
             (Some(f), _) => self.grid.fin_stack = Some(FinStack::from_flow(flow.re_c, flow.mach_max, f.root_chord, y_fin)),
             (None, Tier::Lift(_)) if matches!(self.grid.domain, Domain3::Half { .. }) => self.grid.nk = 32usize << level,
             _ => {}
