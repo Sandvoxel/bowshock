@@ -160,7 +160,8 @@ pub enum Tier {
     Coarse(WallFlow),
     /// Body and fin sides `y+` ~ 1.
     Fine(WallFlow),
-    /// The lift tier of a half domain: body and fins `y+` ~ 60 (wall functions), uniform azimuthal cells, `32 << level` over the half domain.
+    /// The lift tier of a half domain: body and fins `y+` ~ 60 (wall functions); without fins uniform azimuthal cells, `32 << level` over the half domain, with fins the
+    /// fin stack of [`FinStack`] at `y+` 60 (a uniform azimuth puts the first cell of a fin side at thousands of wall units).
     Lift(WallFlow),
 }
 
@@ -320,8 +321,8 @@ impl Case3 {
         self.viscous = Some(Viscous { re_c: flow.re_c, sutherland: flow.sutherland, turbulence: Turbulence::Sst, wall_i_start: 0, roughness: 0.0 });
         self.numerics = Numerics3::viscous(self.mach, level);
         match (&self.grid.fins, tier) {
-            (Some(f), Tier::Coarse(_) | Tier::Fine(_)) => self.grid.fin_stack = Some(FinStack::from_flow(flow.re_c, flow.mach_max, f.root_chord, y_fin)),
-            (_, Tier::Lift(_)) if matches!(self.grid.domain, Domain3::Half { .. }) => self.grid.nk = 32usize << level,
+            (Some(f), _) => self.grid.fin_stack = Some(FinStack::from_flow(flow.re_c, flow.mach_max, f.root_chord, y_fin)),
+            (None, Tier::Lift(_)) if matches!(self.grid.domain, Domain3::Half { .. }) => self.grid.nk = 32usize << level,
             _ => {}
         }
         self

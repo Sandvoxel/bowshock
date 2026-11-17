@@ -561,10 +561,12 @@ fn face_at(g: &Grid3, dir: usize, i: usize, j: usize, k: usize) -> Face3 {
     }
 }
 
-/// Largest `y+` of the streamwise no-slip walls (the faces whose normal is `j` or `k`: the body surface, the fin sides and tips; not the `i` faces of the base and of
-/// blunt fin edges, where the log law has no meaning): `d_n sqrt(rho |tau|) / mu` of the first cell. `0` for Euler.
+/// Largest `y+` of the streamwise no-slip walls that are resolved (the faces whose normal is `j` or `k`: the body surface and the fin sides; not the `i` faces of the
+/// base and of blunt fin edges, where the log law has no meaning, and not the fin tips: the tip face is thickness times tip chord, a negligible wetted area, and the
+/// cell above it belongs to the far-field fan, `y+` in the thousands by design; [`y_plus_max_of`] gives them): `d_n sqrt(rho |tau|) / mu` of the first cell. `0` for Euler.
+/// This is the number for quality and warnings.
 pub fn y_plus_max(s: &Solver3) -> f64 {
-    y_plus_at(s).into_iter().map(|w| w.0).fold(0.0, f64::max)
+    y_plus_max_of(s, |w| w != Wall::FinTip)
 }
 
 /// [`y_plus_max`] over the faces of the wall classes for which `keep` holds (the body surface, the fin sides, the fin tips).
