@@ -596,6 +596,30 @@ impl GpuSolver3 {
         Ok(on3_mut!(self, s => s.profile_viscous3()?))
     }
 
+    /// The viscous face fluxes of the current state on the host (`None` for the Euler equations): the input of `viscous3::wall_tractions`.
+    pub fn viscous_flux(&self) -> Result<Option<[Vec<[f64; 5]>; 3]>> {
+        if !on3!(self, s => s.has_viscous()) {
+            return Ok(None);
+        }
+        Ok(Some(on3!(self, s => s.viscous_flux_f64()?)))
+    }
+
+    /// `[k, omega]` and `mu_t` of every cell on the host (`None` without SST).
+    pub fn turb_state(&self) -> Result<Option<(Vec<[f64; 2]>, Vec<f64>)>> {
+        Ok(on3!(self, s => s.turb_f64()?))
+    }
+
+    /// Uploads the no-slip faces of the viscous force reduction (see [`TractionFace3`]).
+    pub fn set_traction_faces(&mut self, faces: &[TractionFace3], n_classes: usize) -> Result<()> {
+        on3_mut!(self, s => s.set_traction_faces(faces, n_classes)?);
+        Ok(())
+    }
+
+    /// The viscous wall force by class `[Fx, Fz, Mz]` of the current state, reduced on the device.
+    pub fn viscous_wall_forces(&self) -> Result<Vec<[f64; 3]>> {
+        Ok(on3!(self, s => s.viscous_wall_forces()?))
+    }
+
     /// GPU time per kernel of `n` iterations of the `iterate_all` replay (the profile adds up all `n`).
     pub fn profile_replay(&mut self, n: usize) -> Result<luma::Profile> {
         Ok(on3_mut!(self, s => s.profile_replay(n)?))

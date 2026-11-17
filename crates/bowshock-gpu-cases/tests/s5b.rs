@@ -157,3 +157,17 @@ fn laminar_box_matches_cpu() {
     }
     report("S5b laminar viscous box (10 x 8 x 6, no-slip block, dead block), 30 iterations from the free stream", &rows);
 }
+
+/// SST with the automatic wall treatment (law-of-the-wall strain and `k` cap in the wall cells): the state and `k`, `omega`, `mu_t` after 30 iterations; two
+/// Reynolds numbers put the first cell of the block walls at a small and at a large `y+`.
+#[test]
+fn sst_box_matches_cpu() {
+    let g = box_grid();
+    let mut rows = Vec::new();
+    for (mach, re) in [(0.3, 2e3), (0.3, 2e5)] {
+        let v = viscous(Turbulence::Sst, re);
+        compare(&format!("SST M {mach} Re {re:.0e} explicit"), &g, mach, Scheme3::Explicit, v, 30, EXPLICIT, &mut rows);
+        compare(&format!("SST M {mach} Re {re:.0e} implicit block"), &g, mach, block(), v, 30, IMPLICIT, &mut rows);
+    }
+    report("S5b SST box (10 x 8 x 6, no-slip block, dead block), 30 iterations from the free stream", &rows);
+}

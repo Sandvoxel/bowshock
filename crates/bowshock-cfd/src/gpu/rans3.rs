@@ -8,9 +8,13 @@
 //  5. the implicit scheme (`implicit3.rs`: 2 lam_f I on every face dissipation, the no-slip wall Jacobian), then the turbulence update (SST)
 
 
-/// The SST model of a viscous run (the constants live in `turbulence3.rs`; the wall distance and the other host data of the update are in `TurbGeo`).
+/// The SST model of a viscous run: the model, the host-built geometry of its kernels, the wall distance (uploaded once) and the roughness per cell.
 pub(crate) struct TurbRun3 {
     re_c: f64,
+    model: Sst3,
+    tg: TGeo3,
+    dwall: A,
+    ks: Option<A>,
 }
 
 impl TurbRun3 {
@@ -27,6 +31,8 @@ struct VisAux {
     fv: [Vec4; 3],
     /// The eddy viscosity of the evaluation (zeros for a laminar run).
     mu_t: A,
+    /// The wall state `[k_w, omega_w, mu_t,w]` of the wall cells (SST).
+    wall: Option<[A; 3]>,
 }
 
 /// One residual evaluation: the residual, the time step (if asked), the primitives and the inviscid face fluxes `[fi, fj, fk]` (the mass flow of the
@@ -76,8 +82,22 @@ impl LazySolver3 {
 
     /// The turbulence part of the next loop state: the SST update of `k`, `omega`, `mu_t` from the residual evaluation `last` and the time step `dt` (the CPU
     /// `Solver3::turbulence_update`); passed on unchanged without SST.
-    fn turb_step3(&self, s: &State3, _dt: &A, _last: &Resid3) -> [A; 3] {
-        turb_pass(s)
+    fn turb_step3(&self, s: &State3, dt: &A, last: &Resid3) -> [A; 3] {
+        let (Some(t), Some(vg), Some(vis)) = (&self.turb, &self.visc, &last.vis) else { return turb_pass(s) };
+        let wall = vis.wall.clone().expect("an SST evaluation computes the wall state");
+        let dev = TDev3 {
+            rho: last.p[0].clone(),
+            cell: VCell3 { grad: vis.cell.grad.clone(), mu: vis.cell.mu.clone() },
+            mu_t: vis.mu_t.clone(),
+            wall,
+            dwall: t.dwall.clone(),
+            mass: std::array::from_fn(|d| last.f[d][0].clone()),
+            dt: dt.clone(),
+            turb: [s[7].clone(), s[8].clone()],
+        };
+        let u = self.turbulence_update3(&t.tg, vg, &t.model, &dev);
+        let [k, om] = u.turb;
+        [k, om, u.mu_t]
     }
 
     /// `[k, omega]` and `mu_t` of every cell on the host (`None` without SST).
@@ -90,9 +110,9 @@ impl LazySolver3 {
         Ok(Some(((0..k.len()).map(|q| [k[q], om[q]]).collect(), mt)))
     }
 
-    /// Does the run carry the SST model?
-    fn sst3(&self) -> bool {
-        self.turb.is_some()
+    /// Are the viscous terms on?
+    pub fn has_viscous(&self) -> bool {
+        self.visc.is_some()
     }
 
     /// The eddy viscosity of the current loop state (`None` without SST).
@@ -122,9 +142,21 @@ impl LazySolver3 {
             })
         };
         let sym: crate::viscous3::SymSides = [sym_side(0, false), sym_side(0, true), sym_side(1, false), sym_side(1, true), sym_side(2, false), sym_side(2, true)];
-        self.visc = Some(VGeo3::new(&self.ctx, g, &self.solid_host, &sym, r.visc)?);
+        let vg = VGeo3::new(&self.ctx, g, &self.solid_host, &sym, r.visc)?;
         self.p_out = r.p_outflow;
-        self.turb = (r.visc.turbulence == Turbulence::Sst).then_some(TurbRun3 { re_c: r.visc.re_c });
+        self.turb = if r.visc.turbulence == Turbulence::Sst {
+            let shape = [g.ni, g.nj, g.nk];
+            Some(TurbRun3 {
+                re_c: r.visc.re_c,
+                model: Sst3 { re_c: r.visc.re_c },
+                tg: TGeo3::new(&self.ctx, g, &self.solid_host, &sym, &r.bc, &vg)?,
+                dwall: up(&self.ctx, &r.dwall.iter().map(|d| d.min(1e10)).collect::<Vec<_>>(), shape)?,
+                ks: if r.ks.is_empty() { None } else { Some(up(&self.ctx, &r.ks, shape)?) },
+            })
+        } else {
+            None
+        };
+        self.visc = Some(vg);
         Ok(())
     }
 
@@ -138,10 +170,37 @@ impl LazySolver3 {
         };
         let cell = self.viscous_cells3(vg, &p, &w);
         let mu_t = mu_t.cloned().unwrap_or_else(|| &cell.mu * c(0.0));
-        let fv = self.viscous_fluxes3(vg, &w, &cell, &mu_t, None);
+        // SST: the wall state of the cells with a no-slip face (the automatic treatment), its eddy viscosity `mu_t,w` the face value of the wall faces
+        let wall = self.turb.as_ref().map(|t| self.wall_state_pass3(&t.tg, &p, &cell.mu, &t.dwall, t.ks.as_ref()).expect("the wall state arrays of the grid"));
+        let fv = self.viscous_fluxes3(vg, &w, &cell, &mu_t, wall.as_ref().map(|w| &w[2]));
         let total: [Rec3; 3] = std::array::from_fn(|d| Self::total_flux3(&f[d], &fv[d]));
         let diff = compute_dt.then(|| self.diffusion_rates3(&cell, &mu_t, &p[0]));
         let (res, dt) = self.cell_residual3(&p, &total, compute_dt, diff.as_ref());
-        Resid3 { res, dt, p, w, f, vis: Some(VisAux { cell, fv, mu_t }) }
+        Resid3 { res, dt, p, w, f, vis: Some(VisAux { cell, fv, mu_t, wall }) }
+    }
+
+    /// The viscous face fluxes `Fv.n` (mass component 0) of the three families at the current state, on the host (the eddy viscosity and wall state of the SST run included):
+    /// the input of `viscous3::wall_tractions` (skin friction, `plate3::station`).
+    pub fn viscous_flux_f64(&self) -> Result<[Vec<[f64; 5]>; 3]> {
+        let r = self.residual_at_state3(false)?;
+        let vis = r.vis.ok_or_else(|| luma::LumaError::Unsupported("viscous terms are not set".into()))?;
+        let rows = |f: &Vec4| -> Result<Vec<[f64; 5]>> {
+            let cols: Vec<Vec<f64>> = f.iter().map(to_f64).collect::<Result<_>>()?;
+            Ok((0..cols[0].len()).map(|q| [0.0, cols[0][q], cols[1][q], cols[2][q], cols[3][q]]).collect())
+        };
+        Ok([rows(&vis.fv[0])?, rows(&vis.fv[1])?, rows(&vis.fv[2])?])
+    }
+
+    /// The viscous wall force by class `[Fx, Fz, Mz]` of the current state, reduced on the device (needs [`LazySolver3::set_traction_faces`]).
+    pub fn viscous_wall_forces(&self) -> Result<Vec<[f64; 3]>> {
+        let vis = self.residual_at_state3(false)?.vis.ok_or_else(|| luma::LumaError::Unsupported("viscous terms are not set".into()))?;
+        self.wall_tractions3(&vis.fv)
+    }
+
+    /// One residual evaluation of the current loop state (its eddy viscosity included).
+    fn residual_at_state3(&self, compute_dt: bool) -> Result<Resid3> {
+        let u = unpack3(self.state.as_ref().ok_or_else(no_state)?);
+        let mu_t = self.state_mu_t();
+        Ok(self.residual3(&u, mu_t.as_ref(), self.limiter3(self.iter), compute_dt))
     }
 }

@@ -34,11 +34,6 @@ fn pack3(u: Rec3, rn: A, cfl: A, turb: [A; 3]) -> State3 {
     [u0, u1, u2, u3, u4, rn, cfl, k, om, mt]
 }
 
-/// The turbulence part of the loop state: `k`, `omega`, `mu_t` (`[ni, nj, nk]` arrays for an SST run, one-element placeholders otherwise).
-fn turb_of(s: &State3) -> [A; 3] {
-    [s[7].clone(), s[8].clone(), s[9].clone()]
-}
-
 /// The turbulence part passed on unchanged (a placeholder is a fresh expression so the loop state does not alias).
 fn turb_pass(s: &State3) -> [A; 3] {
     [&s[7] * c(1.0), &s[8] * c(1.0), &s[9] * c(1.0)]

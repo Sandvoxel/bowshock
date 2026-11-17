@@ -945,7 +945,7 @@ impl LazySolver3 {
         let (diff, lam): (Option<[F; 3]>, Option<[F; 3]>) = match (&self.visc, &rs.vis) {
             (Some(vg), Some(vis)) => {
                 let d = self.diffusion_rates3(&vis.cell, &vis.mu_t, &prim[0]);
-                let lam = self.lambda_pass3(vg, w, &vis.cell, &vis.mu_t, None);
+                let lam = self.lambda_pass3(vg, w, &vis.cell, &vis.mu_t, vis.wall.as_ref().map(|w| &w[2]));
                 (Some(std::array::from_fn(|k| lhs(&d[k]).cache())), Some(std::array::from_fn(|k| lhs(&lam[k]).cache())))
             }
             _ => (None, None),
