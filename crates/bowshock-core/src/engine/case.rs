@@ -208,6 +208,9 @@ pub(crate) fn sting_grid(body: &BaseBody, level: u32) -> LargeGridParams {
         .iter()
         .enumerate()
         .map(|(k, s)| {
+            if s.is_step() {
+                return 1;
+            }
             segment_cells(
                 if s.slope != 0.0 {
                     24 * f
@@ -245,7 +248,8 @@ pub(crate) fn base_grid(body: &BaseBody, level: u32) -> BaseGridParams {
     let n_sting = if body.sting_radius > 0.0 { 4 * f } else { 0 };
     // cells per segment: tubes are finer than cones, never finer than the end-cell size `dx_tip` allows, never coarser than
     // `MAX_AXIAL_CELL / f` (see `segment_cells`)
-    let n_seg: Vec<usize> = body.segments.iter().map(|s| segment_cells(if s.slope == 0.0 { 40 * f } else { 24 * f }, s.length, f, dx_tip)).collect();
+    let n_seg: Vec<usize> =
+        body.segments.iter().map(|s| if s.is_step() { 1 } else { segment_cells(if s.slope == 0.0 { 40 * f } else { 24 * f }, s.length, f, dx_tip) }).collect();
     BaseGridParams {
         body: body.clone(),
         x_up: 10.0 * l_body,
