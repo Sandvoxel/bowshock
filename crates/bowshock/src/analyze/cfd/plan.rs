@@ -174,10 +174,10 @@ pub fn plan(rocket: &Rocket, vehicle: &Vehicle, units: UnitSystem) -> Result<Pla
     // contiguous run of segments from the tip.
     let contiguous = segments.windows(2).all(|w| (w[1].station - w[0].aft_station()).abs() < 1e-6);
     if segments.iter().any(|s| s.length <= 1e-9) || !contiguous || segments.first().is_some_and(|s| s.station.abs() > 1e-6) {
-        return Err("pods and strap-ons are bodies beside the axis; the solver takes one axisymmetric stack".to_string());
+        return Err(super::wording::NO_PODS.to_string());
     }
     if !vehicle.tube_fins.is_empty() {
-        return Err("tube fins (open pod tubes) are bodies beside the axis; the solver takes one axisymmetric stack".to_string());
+        return Err(super::wording::NO_TUBE_FINS.to_string());
     }
     let first = segments.first().ok_or("the rocket has no parts")?;
     let BodyKind::Nose(sim_shape) = first.kind else {
@@ -251,7 +251,7 @@ pub fn plan(rocket: &Rocket, vehicle: &Vehicle, units: UnitSystem) -> Result<Pla
         notes.push(format!("Only one fin set is solved; {extra} more come{} from the build-up.", if extra == 1 { "s" } else { "" }));
     }
     if !rest.protuberances.is_empty() {
-        notes.push("Lugs and rail buttons come from the build-up (the solver is axisymmetric).".to_string());
+        notes.push(super::wording::APPENDAGES_NOTE.to_string());
     }
     if rocket.radials().iter().any(|r| matches!(r.kind, RadialKind::FreeformFin { .. })) {
         notes.push("Freeform fins are solved as equivalent trapezoids.".to_string());

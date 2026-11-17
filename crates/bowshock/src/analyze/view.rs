@@ -149,9 +149,9 @@ fn method<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
     if let Some(note) = &state.skipped_note {
         lines.push(muted(note.clone(), 12.0));
     }
-    let solving = cfd_line && (state.cfd.solving.is_some() || state.cfd.lift_solving.is_some());
-    let stale = cfd_line && state.cfd.status == cfd::Status::Stale;
-    let cancelling = state.cfd.solving.as_ref().or(state.cfd.lift_solving.as_ref()).is_some_and(|s| s.cancelling);
+    let solving = cfd_line && state.cfd.solving.is_some();
+    let stale = cfd_line && state.solve_status() == cfd::Status::Stale;
+    let cancelling = state.cfd.solving.as_ref().is_some_and(|s| s.cancelling);
     let resolve: Element<'_, Message> = if solving && cancelling {
         push("Cancelling…", Weight::Secondary).disabled("The solver is ending the run in flight").into()
     } else if solving {
@@ -171,26 +171,9 @@ fn method<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
                 .boxed(),
         );
     }
-    let mut lift_row: Option<Element<'_, Message>> = None;
-    if cfd_line && shown && state.cfd.table.is_some() && cfd::lift_nodes(state.cond.mach).is_some() {
-        let lift: Element<'_, Message> = if solving {
-            push("Solve stability (3D)", Weight::Secondary).width(Fill).disabled("A solve is running").into()
-        } else {
-            push("Solve stability (3D)", Weight::Secondary).width(Fill).on_press(Message::SolveLift).into()
-        };
-        lift_row = Some(
-            tooltip(lift, bubble("Normal force and CP from a 3D Euler solve at up to 8 Mach numbers, α 2° and 6°: minutes on a fast GPU"))
-                .position(tooltip::Position::Bottom)
-                .gap(SPACE_1)
-                .boxed(),
-        );
-    }
     buttons.push(compare);
     let actions = row(buttons).spacing(SPACE_2);
     let mut col = column![strip, column(lines).spacing(SPACE_1), actions].spacing(SPACE_2).padding([0.0, 0.0]);
-    if let Some(lift) = lift_row {
-        col = col.push(lift);
-    }
     if cfd_line {
         col = col.push(runs_on(ctx));
     }
@@ -242,13 +225,13 @@ fn runs_on<'a>(ctx: &'a Ctx) -> Element<'a, Message> {
 }
 
 /// The provenance of the CFD table method, line by line: the solve in progress, or what the table is and was not (the kit's
-/// `42 Mach × 9 AoA points · solved on GPU (Luma) · 6 min ago`, here Mach points only: the solver has no angle of attack), then why
-/// the plots show another method if they do.
-fn cfd_lines(state: &State) -> Vec<String> {
+/// `42 Mach × 9 AoA points · solved on GPU (Luma) · 6 min ago`: here the drag at zero incidence and, when the solve took them, the 3D
+/// angles), then why the plots show another method if they do. What each part comes from is worded in [`cfd`] (`wording.rs`).
+pub(super) fn cfd_lines(state: &State) -> Vec<String> {
     let cfd = &state.cfd;
     let base = state.base_method.name();
     let mut lines = Vec::new();
-    if cfd.solving.is_some() || cfd.lift_solving.is_some() {
+    if cfd.solving.is_some() {
         // the solve's own block (solve_view::compact) says where it is
     } else {
         match &cfd.status {
@@ -268,24 +251,27 @@ fn cfd_lines(state: &State) -> Vec<String> {
             }
         }
     }
-    if cfd.lift_solving.is_none() {
-        lines.extend(cfd.lift_error.iter().map(|why| format!("3D stability solve stopped: {why}")));
-    }
     if let Some((out, info)) = state.output().and_then(|o| o.cfd.as_ref().map(|i| (o, i))) {
         if let Some((_, summary)) = cfd.summary.as_ref().filter(|(key, _)| cfd.table.as_ref().is_some_and(|t| t.key == *key)) {
             lines.push(summary.clone());
         }
-        let partial = cfd.table.as_ref().and_then(|t| cfd::partial_of(&cfd.plan, t, state.cond.altitude, state.cond.mach));
-        let stale = if partial.is_some() {
+        let table = cfd.table.as_deref();
+        let partial = table.and_then(|t| cfd::partial_of(&cfd.plan, t, state.cond.altitude, state.cond.mach));
+        let angles_partial = table.and_then(|t| t.lift.as_ref()).and_then(|l| cfd::lift_partial_of(&cfd.plan, l, state.cond.mach));
+        let verdict = state.solve_status();
+        let stale = if partial.is_some() || angles_partial.is_some() {
             "partial · "
-        } else if cfd.status == cfd::Status::Stale {
+        } else if verdict == cfd::Status::Stale {
             "stale · "
         } else {
             ""
         };
+        let lift = cfd::lift_status(&cfd.plan, table.and_then(|t| t.lift.as_ref()), state.cond.mach);
+        let fresh_lift = lift == cfd::Status::Fresh;
+        let shown_lift = table.and_then(|t| t.lift.as_ref()).filter(|_| fresh_lift || angles_partial.is_some());
         let points = match out.analysis {
-            super::Analysis::Stability => format!("{} Mach points · zero-lift, at Mach {:.2}", info.nodes, out.conditions.mach_fixed),
-            _ => format!("{} Mach points · zero-lift", info.nodes),
+            super::Analysis::Stability => format!("{} · at Mach {:.2}", cfd::table_points(info.nodes, shown_lift), out.conditions.mach_fixed),
+            _ => cfd::table_points(info.nodes, shown_lift),
         };
         let grid = match info.grid {
             CfdGrid::Coarse => "coarse",
@@ -293,33 +279,16 @@ fn cfd_lines(state: &State) -> Vec<String> {
         };
         let below = info.scaled_below.map_or_else(String::new, |m| format!(" · M<{m:.1} scaled from Extended"));
         lines.push(format!("{stale}{points} · solved on {} · {grid} grid · {}{below}", info.backend, cfd::ago(info.solved_at)));
-        if let Some((solved, of)) = partial {
-            lines.push(format!("Stopped early: {solved} of {of} Mach points solved; Re-solve for the rest."));
-        } else if !stale.is_empty() {
-            lines.push("The geometry or the conditions changed since; Re-solve for a table that matches.".to_string());
+        if partial.is_some() || angles_partial.is_some() {
+            lines.push(cfd::PARTIAL_ACTION.to_string());
+        } else if verdict == cfd::Status::Stale {
+            lines.push(cfd::stale_reason(cfd.status == cfd::Status::Stale, table.is_some_and(|t| t.lift.is_none()), lift == cfd::Status::Stale));
         }
-        let lift = cfd::lift_status(&cfd.plan, cfd.table.as_ref().and_then(|t| t.lift.as_ref()), state.cond.mach);
-        let lift_key = cfd.table.as_ref().and_then(|t| t.lift.as_ref()).map(|l| l.key);
-        if let Some((_, summary)) = cfd.lift_summary.as_ref().filter(|(key, _)| Some(*key) == lift_key && lift == cfd::Status::Fresh) {
-            lines.push(summary.clone());
-        }
-        match (&info.lift, &lift) {
-            (Some(l), cfd::Status::Fresh) => lines.push(format!(
-                "Drag from the 2D solver; margin, CP and CNα from the 3D Euler solve ({} points · solved on {} · {}).",
-                l.points,
-                l.backend,
-                cfd::ago(l.solved_at)
-            )),
-            (_, cfd::Status::Stale) => {
-                lines.push("Drag from the solver; margin, CP and CNα from Extended.".to_string());
-                lines.push("stale 3D stability · Solve stability (3D) to update".to_string());
-            }
-            _ => lines.push("Drag from the solver; margin, CP and CNα from Extended.".to_string()),
-        }
+        lines.push(if fresh_lift { cfd::stability_from_3d() } else { cfd::stability_from_extended() });
         lines.extend(info.fallback.iter().map(|why| format!("The GPU was not used: {why}.")));
         lines.extend(info.notes.iter().cloned());
-        if lift == cfd::Status::Fresh {
-            lines.extend(cfd.table.as_ref().and_then(|t| t.lift.as_ref()).into_iter().flat_map(|l| l.notes.iter().cloned()));
+        if fresh_lift {
+            lines.extend(table.and_then(|t| t.lift.as_ref()).into_iter().flat_map(|l| l.notes.iter().cloned()));
         }
     } else if matches!(cfd.status, cfd::Status::Fresh | cfd::Status::Stale) && cfd.solving.is_none() {
         lines.push(format!("The stored table does not cover this Mach range. Showing {base} instead; Re-solve for this range."));
@@ -345,6 +314,16 @@ fn mach_input<'a>(state: &'a State, field: MachField) -> Element<'a, Message> {
         .boxed()
 }
 
+/// The option to leave the 3D angles out of the CFD solve: a drag-only table is much quicker. Only with the CFD table method.
+fn angles_row(state: &State) -> Option<Element<'_, Message>> {
+    if state.method != Method::CfdTable {
+        return None;
+    }
+    let strip = crate::widgets::segmented::segmented(&[(true, "On"), (false, "Off")], state.cfd.angles, Message::Angles);
+    let tip: Element<'_, Message> = tooltip(strip, bubble(cfd::ANGLES_TIP)).position(tooltip::Position::Bottom).gap(SPACE_1).boxed();
+    Some(row_of(cfd::ANGLES_LABEL, tip))
+}
+
 fn conditions<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
     let c = &state.cond;
     let units = &ctx.units;
@@ -366,15 +345,17 @@ fn conditions<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
             let alpha = unit_input("Angle of attack", c.alpha, Quantity::Angle, units).label_width(LABEL_W).on_commit(Message::Alpha).on_scrub(Message::Alpha);
             rows.push(match state.method {
                 Method::Barrowman => alpha.hint("Barrowman ignores the angle (α = 0)").into(),
-                Method::CfdTable => alpha.hint("Solved at α = 0; Extended adds the change with angle").into(),
+                Method::CfdTable => alpha.hint(cfd::alpha_hint(state.cfd.angles)).into(),
                 Method::Extended => alpha.into(),
             });
             rows.push(input("Altitude", c.altitude, Quantity::Altitude, Message::Altitude));
+            rows.extend(angles_row(state));
             rows.push(burnout);
             rows.push(finish);
         }
         Analysis::Stability => {
             rows.push(row_of("Mach", mach_input(state, MachField::Fixed)));
+            rows.extend(angles_row(state));
             rows.push(input("Largest angle", c.alpha_max, Quantity::Angle, Message::AlphaMax));
             rows.push(burnout);
             rows.push(finish);
@@ -611,7 +592,7 @@ fn flow_button(state: &State) -> crate::widgets::button::Button<'_, Message> {
     let table = state.cfd.table.as_ref().filter(|_| state.cfd_ready());
     match table {
         _ if !cfd => b.disabled("Choose the CFD table method: the flow fields are what the solver left of each point"),
-        _ if state.cfd.solving.is_some() || state.cfd.lift_solving.is_some() => b.disabled("A solve is running: its flow is on show"),
+        _ if state.cfd.solving.is_some() => b.disabled("A solve is running: its flow is on show"),
         None => b.disabled("Solve the CFD table first"),
         Some(t) if !state.cfd.fields.has_any(t) => {
             b.disabled("No flow fields for this table: it was loaded from a file or its geometry changed. Re-solve to see them")

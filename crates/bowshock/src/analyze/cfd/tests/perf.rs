@@ -75,7 +75,16 @@ fn timing_report(case: &str, tm: &[solver::engine::gpu::PointTiming], wall: f64)
 fn perf_2d_table_example() {
     let (rocket, vehicle) = example();
     let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
-    let job = Job { plan, altitude: 120.0, nodes: nodes((0.1, 3.0)).unwrap(), stage: 1, grid: CfdGrid::Coarse, compute: Default::default(), cpu_only: false };
+    let job = Job {
+        plan,
+        altitude: 120.0,
+        nodes: nodes((0.1, 3.0)).unwrap(),
+        stage: 1,
+        grid: CfdGrid::Coarse,
+        compute: Default::default(),
+        cpu_only: false,
+        stability: Vec::new(),
+    };
     let _ = solver::engine::gpu::take_timings();
     let t0 = Instant::now();
     let table = solve(&job, &Arc::new(AtomicBool::new(false)), |_| ()).expect("the example solves");
@@ -84,17 +93,27 @@ fn perf_2d_table_example() {
     timing_report("2d-table-example", &solver::engine::gpu::take_timings(), wall);
 }
 
-/// End to end: the example rocket's 3D stability solve as `solve_lift` runs it (the lift nodes of the example's Mach range
+/// End to end: the example rocket's 3D stability solve as the stability nodes of `solve` run it (the lift nodes of the example's Mach range
 /// [0.1, 3.0], alpha 2 and 6 degrees, coarse grid, this computer alone), with the per-point timing breakdown and a `PERF` line.
 #[test]
 #[ignore = "perf baseline: solves the example's 3D stability table on the GPU"]
 fn perf_3d_lift_example() {
     let (rocket, vehicle) = example();
     let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
-    let job = LiftJob { plan, nodes: lift_nodes((0.1, 3.0)).unwrap(), compute: Default::default(), cpu_only: false };
+    // the angles alone: no drag nodes, so the time stays the 3D part's (the ledger's `3d-lift-example`)
+    let job = Job {
+        plan,
+        altitude: 120.0,
+        nodes: Vec::new(),
+        stage: 1,
+        grid: CfdGrid::Coarse,
+        compute: Default::default(),
+        cpu_only: false,
+        stability: lift_nodes((0.1, 3.0)).unwrap(),
+    };
     let _ = solver::engine::gpu::take_timings();
     let t0 = Instant::now();
-    let table = solve_lift(&job, &Arc::new(AtomicBool::new(false)), |_| ()).expect("the example solves in 3D");
+    let table = solve(&job, &Arc::new(AtomicBool::new(false)), |_| ()).expect("the example solves in 3D").lift.expect("with its 3D part");
     let wall = t0.elapsed().as_secs_f64();
     println!("{} points on {} in {:.1} s; notes {:?}", table.points.len(), table.backend, table.solve_seconds, table.notes);
     for p in &table.points {
@@ -116,7 +135,16 @@ fn perf_2d_table_grid_ab() {
     };
     let (rocket, vehicle) = example();
     let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
-    let job = Job { plan, altitude: 120.0, nodes: nodes((0.1, 3.0)).unwrap(), stage: 1, grid: CfdGrid::Coarse, compute: Default::default(), cpu_only: false };
+    let job = Job {
+        plan,
+        altitude: 120.0,
+        nodes: nodes((0.1, 3.0)).unwrap(),
+        stage: 1,
+        grid: CfdGrid::Coarse,
+        compute: Default::default(),
+        cpu_only: false,
+        stability: Vec::new(),
+    };
     let iters = Arc::new(Mutex::new(Vec::new()));
     let sink = iters.clone();
     let _ = solver::engine::gpu::take_timings();

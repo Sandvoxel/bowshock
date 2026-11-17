@@ -1,6 +1,7 @@
-# Analyze > CFD table > Solve stability (3D), from a document that already carries its drag table. The headless driver runs every
-# task to its end before the next step, so the 3D solve (up to 8 Mach numbers at 2 and 6 degrees) is finished when the screenshot
-# is taken: minutes on a fast GPU, far longer on the CPU.
+# Analyze > CFD table with the 3D angles, from a document that already carries a drag table (solved without them): the table reads as
+# stale until one Re-solve takes the drag nodes and then the angles (one solve, one progress screen). The headless driver runs every task
+# to its end before the next step, so the solve (the drag table, then up to 8 Mach numbers at 2 and 6 degrees in 3D) is finished when the
+# screenshot is taken: minutes on a fast GPU, far longer on the CPU.
 #
 # Make the document once:
 #   BOWSHOCK_CFD_FIXTURE=/tmp/example-cfd.bowshock cargo test -p bowshock -- --ignored the_example_table --nocapture
@@ -9,7 +10,7 @@
 viewport 1300x800
 click "Analyze"
 click "CFD table"
-click "Solve stability (3D)"
+click "Re-solve"
 click "Aerodynamics"
 move (100, 700)
 move (102, 702)

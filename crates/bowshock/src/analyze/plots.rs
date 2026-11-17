@@ -5,7 +5,8 @@
 use bowshock_model::{ConfigId, StabilityBands};
 use bowshock_sim::{AlphaPoint, MachPoint};
 
-use super::compute::{Analysis, Data, Output, Run, FLUTTER_MIN_MARGIN, LIFT_LABEL};
+use super::cfd;
+use super::compute::{Analysis, Data, Output, Run, FLUTTER_MIN_MARGIN};
 use super::overlay::{Field, Overlay};
 use super::readout::{config_color, drag_parts, other_visible, DRAG_PARTS};
 use crate::units::{Quantity, Unit, UnitSystem};
@@ -53,11 +54,6 @@ fn unit(q: Quantity, units: UnitSystem) -> &'static Unit {
     q.unit_for(units)
 }
 
-/// The subtitle note of a panel the CFD table method takes from the Extended method (the solver has no angle of attack).
-const CFD_ELSEWHERE: &str = "Extended (CFD is zero-lift)";
-/// The subtitle note of a stability panel fed by a fresh 3D stability solve.
-const CFD_3D: &str = "CFD (3D)";
-
 /// Builds the plots of `out` for `units`, with the comparison `overlay` drawn dashed where it has the quantity. `active` is
 /// the document's active configuration: the Cd panels stack its drag by source whatever else is drawn.
 pub fn build(out: &Output, units: UnitSystem, overlay: Option<&Overlay>, active: ConfigId) -> Built {
@@ -84,7 +80,7 @@ pub fn build(out: &Output, units: UnitSystem, overlay: Option<&Overlay>, active:
                 continue;
             }
             let from_3d = out.lift_3d() && matches!(panel.title.as_str(), "Static margin" | "CP and CG" | "Normal force CN");
-            let source = if from_3d { CFD_3D } else { CFD_ELSEWHERE };
+            let source = if from_3d { cfd::PANEL_FROM_3D } else { cfd::PANEL_FROM_EXTENDED };
             if panel.value_unit.is_none() && !panel.unit.is_empty() && !panel.unit.contains(' ') {
                 panel.value_unit = Some(panel.unit.clone());
             }
@@ -107,10 +103,10 @@ pub fn build(out: &Output, units: UnitSystem, overlay: Option<&Overlay>, active:
     Built { group, ground, legend, scale }
 }
 
-/// `label`, marked as from the 3D Euler solve when the output's stability is.
+/// `label`, marked as from the 3D solve when the output's stability is.
 fn label3d(out: &Output, label: &str) -> String {
     if out.lift_3d() {
-        format!("{label}{LIFT_LABEL}")
+        format!("{label}{}", cfd::LIFT_LABEL)
     } else {
         label.to_string()
     }

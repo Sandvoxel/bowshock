@@ -4,14 +4,16 @@
 //! rocket, and the table's interpolation onto the Mach grid the plots use. What the screen makes of the events is in [`super::solve`]
 //! (the state) and `solve_view` (the drawing).
 //!
-//! # What the solver gives
+//! # What a solve gives
 //!
-//! `bowshock-core` solves the axisymmetric Reynolds-averaged Navier-Stokes equations (k-omega SST, wall-resolved) on the GPU
-//! (Luma; Metal on a Mac) or the CPU for **one axisymmetric body at zero angle of attack** from Mach 0.1 to 3, and adds an
-//! empirical drag for one set of 3 to 8 trapezoidal fins. It returns the zero-lift drag with its parts (nose and aft-body
-//! pressure, skin friction, base, fins). It has **no angle of attack, no normal force and no centre of pressure**, and no
-//! pods, lugs or rail buttons. So the table holds drag only; the Analyze screen takes margin, CP and `CNα` from the Extended
-//! method and adds Extended's angle-of-attack change of the drag on top of the solved zero-lift drag.
+//! One solve, one job: the drag at zero incidence at each Mach node of the table and, unless the Conditions leave them out, the
+//! normal force and centre of pressure at two angles of attack at the sparser stability nodes ([`lift_nodes`]). Both go through the
+//! one `bowshock_core::Analysis::run` (a node of each kind has its own [`Analysis`](bowshock_core::Analysis): the drag nodes are the
+//! viscous axisymmetric solve, the angle nodes the coarse 3D one), the result is one [`CfdTable`](bowshock_model::CfdTable) whose
+//! `lift` part is the angles, and the screen has one action, one progress screen, one cancel and one staleness verdict for it. The
+//! Analyze screen takes what the solve did not give (the margin, CP and `CNα` of a table without angles, the drag change with the
+//! angle of attack) from the Extended method. **What each part is made of is the engine's business and changes with it; the app
+//! says so in [`wording`] and nowhere else.**
 //!
 //! # What does not map
 //!
@@ -34,12 +36,14 @@ mod run;
 mod share;
 #[cfg(test)]
 mod tests;
+mod wording;
 
 pub use fields::*;
 pub use fresh::*;
 pub use interp::*;
 pub use plan::*;
 pub use run::*;
+pub use wording::*;
 
 /// The example rocket's plan, for the tests of the modules that play scripted solves.
 #[cfg(test)]

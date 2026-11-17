@@ -7,9 +7,9 @@
 //!   attack, whatever angle is set (the angle field is ignored; drag is the zero-angle build-up).
 //! * **Extended** is Barrowman plus the body lift and induced drag `bowshock-sim` adds at an angle of attack: the
 //!   margin, CP, `CNα` and drag follow the angle the Conditions set.
-//! * **CFD table** is the zero-lift drag solved by `bowshock-core` (see [`super::cfd`]) on a table of Mach numbers, with the
-//!   margin, CP and `CNα` of Extended and Extended's change of drag with the angle of attack added to the solved drag. The
-//!   solver is axisymmetric at zero angle, so it gives drag only.
+//! * **CFD table** is the drag at zero incidence solved by `bowshock-core` (see [`super::cfd`]) on a table of Mach numbers and,
+//!   unless left out, the margin, CP and `CNα` from its 3D solve at two angles of attack; Extended's change of drag with the angle
+//!   is added to the solved drag, and Extended gives whatever the solve did not (what the screens say about it is `cfd::wording`).
 //!
 //! # References
 //!
@@ -90,7 +90,7 @@ pub enum Method {
     Barrowman,
     /// Barrowman plus body lift and induced drag at the set angle.
     Extended,
-    /// A solved CFD drag table (zero-lift drag from `bowshock-core`; stability from Extended).
+    /// A solved CFD table (drag from `bowshock-core`, with its 3D angles when it has them; Extended gives the rest).
     CfdTable,
 }
 
@@ -109,9 +109,7 @@ impl Method {
         match self {
             Method::Barrowman => "Barrowman (1967): linear normal force and CP at zero angle of attack; the angle of attack is ignored",
             Method::Extended => "Barrowman plus body lift and induced drag at the set angle of attack",
-            Method::CfdTable => {
-                "Zero-lift drag solved by CFD (axisymmetric RANS on the GPU) on a Mach table, with the fins' empirical drag; margin, CP and CNα from Extended, which also adds the drag change with angle"
-            }
+            Method::CfdTable => super::cfd::METHOD_TIP,
         }
     }
 }
@@ -373,9 +371,6 @@ pub struct Output {
     /// The CFD table the drag comes from, when the method is [`Method::CfdTable`].
     pub cfd: Option<CfdInfo>,
 }
-
-/// Appended to the margin, CP and `CNα` labels when they come from the 3D Euler solve.
-pub const LIFT_LABEL: &str = " · CFD (3D)";
 
 /// What the screen says about the 3D stability solve an output was made with.
 #[derive(Debug, Clone, PartialEq)]

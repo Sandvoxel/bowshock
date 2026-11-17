@@ -19,7 +19,7 @@ use std::collections::VecDeque;
 
 use bowshock_model::{CfdLiftPoint, CfdLiftTable, CfdPoint, CfdQuality};
 
-use super::cfd::{self, Event, Job, LiftJob, Tally};
+use super::cfd::{self, Event, Job, Tally};
 use super::solve::{Iteration, MachineInfo, MachineState, Outcome, PointDone};
 use bowshock_core as solver;
 use std::sync::Arc;
@@ -29,14 +29,14 @@ use std::sync::Arc;
 pub enum Demo {
     /// A drag solve stopped partway: four points solved, the fifth running.
     Mid,
-    /// A drag solve that finished.
+    /// A solve that finished: the drag table and, when the job has them, the 3D angles.
     Done,
     /// A drag solve that was cancelled with five points solved.
     Stopped,
-    /// A 3D solve stopped partway.
-    LiftMid,
-    /// A 3D solve that finished.
-    LiftDone,
+    /// A solve whose drag table is done and whose 3D angles are stopped partway: the third Mach number is at its second angle.
+    AngleMid,
+    /// [`Demo::AngleMid`], cancelled.
+    AngleStopped,
     /// A drag solve that is still setting up a remote GPU (building the worker there).
     RemoteSetup,
     /// A drag solve stopped partway on a remote GPU.
@@ -44,12 +44,12 @@ pub enum Demo {
     /// A drag solve shared by three machines (this computer, a remote GPU, one still building its worker), stopped partway with
     /// two points in flight.
     ShareMid,
-    /// A 3D solve shared by the same three machines, stopped partway.
-    LiftShareMid,
-    /// [`Demo::Mid`] with 3D flow fields: the finned finner of the fixture (`BOWSHOCK_FLOW3_FIXTURE`, default the one in
+    /// The angles of a solve shared by the same three machines, stopped partway.
+    AngleShareMid,
+    /// [`Demo::AngleMid`] with 3D flow fields: the finned finner of the fixture (`BOWSHOCK_FLOW3_FIXTURE`, default the one in
     /// `crates/bowshock/tests/data`) with its velocities scaled to the point's Mach number, as live snapshots and final fields.
     Flow3dMid,
-    /// [`Demo::Done`] with 3D flow fields, at two angles of attack per point.
+    /// [`Demo::Done`] with 3D flow fields at the angle nodes.
     Flow3dDone,
 }
 
@@ -59,12 +59,12 @@ impl Demo {
             "mid" => Demo::Mid,
             "done" => Demo::Done,
             "stopped" => Demo::Stopped,
-            "lift-mid" => Demo::LiftMid,
-            "lift-done" => Demo::LiftDone,
+            "angle-mid" => Demo::AngleMid,
+            "angle-stopped" => Demo::AngleStopped,
             "remote-setup" => Demo::RemoteSetup,
             "remote-mid" => Demo::RemoteMid,
             "share-mid" => Demo::ShareMid,
-            "lift-share-mid" => Demo::LiftShareMid,
+            "angle-share-mid" => Demo::AngleShareMid,
             "flow3d-mid" => Demo::Flow3dMid,
             "flow3d-done" => Demo::Flow3dDone,
             _ => return None,
@@ -121,16 +121,14 @@ fn quality(o: Outcome) -> CfdQuality {
     }
 }
 
-/// Snapshots of the point at `mach` at `iterations` (0 is the grid with the free stream on it), as a live local solve sends them.
-fn snapshots(job: &Job, mach: f64, iterations: &[usize], three_d: bool) -> Vec<Event> {
-    let fields = |it: usize| -> Vec<Arc<solver::Field3>> {
-        if three_d {
-            fixture_field(mach, FIXTURE_ALPHA, it).into_iter().collect()
-        } else {
-            synthetic_field(job, mach, it).into_iter().collect()
-        }
-    };
-    iterations.iter().flat_map(|&it| fields(it)).map(|f| Event::Field(cfd::FieldRef(f))).collect()
+/// Snapshots of the drag point at `mach` at `iterations` (0 is the grid with the free stream on it), as a live local solve sends them.
+fn snapshots(job: &Job, mach: f64, iterations: &[usize]) -> Vec<Event> {
+    iterations.iter().filter_map(|&it| synthetic_field(job, mach, it)).map(|f| Event::Field(cfd::FieldRef(f))).collect()
+}
+
+/// The same for the 3D fixture's flow at `alpha_deg`.
+fn fixture_snapshots(mach: f64, alpha_deg: f64, iterations: &[usize]) -> Vec<Event> {
+    iterations.iter().filter_map(|&it| fixture_field(mach, alpha_deg, it)).map(|f| Event::Field(cfd::FieldRef(f))).collect()
 }
 
 /// The angle of attack of the fixture's flow (degrees).
@@ -344,7 +342,7 @@ fn fleet(demo: Demo) -> Vec<Event> {
     match demo {
         Demo::RemoteSetup => vec![Event::Machines(vec![info("omarchy", true)]), building(0)],
         Demo::RemoteMid => vec![Event::Machines(vec![info("omarchy", true)]), ready(0, "NVIDIA GeForce RTX 3080 Laptop GPU on omarchy")],
-        Demo::ShareMid | Demo::LiftShareMid => vec![
+        Demo::ShareMid | Demo::AngleShareMid => vec![
             Event::Machines(vec![info("This computer", false), info("omarchy", true), info("lab", true)]),
             ready(0, "NVIDIA GeForce RTX 3090"),
             ready(1, "NVIDIA GeForce RTX 3080 Laptop GPU on omarchy"),
@@ -354,36 +352,62 @@ fn fleet(demo: Demo) -> Vec<Event> {
     }
 }
 
-/// The events of a scripted drag solve of `job`.
+/// How far a script has got.
+struct Shape {
+    /// Drag nodes solved.
+    drag: usize,
+    /// Stability Mach numbers solved (both angles).
+    stability: usize,
+    /// What follows the solved nodes.
+    end: End,
+}
+
+enum End {
+    /// The solve is over, with its table.
+    Finished,
+    /// The solve is cancelled.
+    Cancelled,
+    /// The solve is still running: the next node of the part that has not finished is in flight.
+    Running,
+}
+
+impl Demo {
+    fn shape(self, nodes: usize, stability: usize) -> Shape {
+        let half = (stability / 2).min(stability.saturating_sub(1));
+        match self {
+            Demo::Mid | Demo::RemoteMid | Demo::ShareMid => Shape { drag: 4, stability: 0, end: End::Running },
+            Demo::Stopped => Shape { drag: 5.min(nodes), stability: 0, end: End::Cancelled },
+            Demo::AngleMid | Demo::Flow3dMid => Shape { drag: nodes, stability: half, end: End::Running },
+            Demo::AngleStopped => Shape { drag: nodes, stability: half, end: End::Cancelled },
+            Demo::AngleShareMid => Shape { drag: nodes, stability: 2.min(stability.saturating_sub(2)), end: End::Running },
+            Demo::Done | Demo::Flow3dDone | Demo::RemoteSetup => Shape { drag: nodes, stability, end: End::Finished },
+        }
+    }
+
+    /// The angle part has 3D fields (the fixture's), live and final.
+    fn fields3d(self) -> bool {
+        matches!(self, Demo::Flow3dMid | Demo::Flow3dDone)
+    }
+}
+
+/// The events of a scripted solve of `job`: its drag nodes, then (when the job has stability nodes) its angles.
 pub fn events(demo: Demo, job: &Job) -> Vec<Event> {
     let nodes = &job.nodes;
     let mut out = fleet(demo);
     if demo == Demo::RemoteSetup {
         return out;
     }
-    let finished = match demo {
-        Demo::Mid | Demo::Flow3dMid | Demo::RemoteMid | Demo::ShareMid => 4,
-        Demo::Stopped => 5.min(nodes.len()),
-        _ => nodes.len(),
-    };
+    let shape = demo.shape(nodes.len(), job.stability.len());
     // Shared by three machines, the first points were taken by the two that were ready.
     let owner = |i: usize| if demo == Demo::ShareMid { [0, 1, 0, 0][i % 4] } else { 0 };
-    let three_d = matches!(demo, Demo::Flow3dMid | Demo::Flow3dDone);
     let mut at = 0.0;
     let mut tally = Tally { points: Vec::new(), notes: job.plan.notes.clone(), gpu: 0, cpu: 0, fallback: None };
-    for (i, &mach) in nodes[..finished].iter().enumerate() {
+    for (i, &mach) in nodes[..shape.drag].iter().enumerate() {
         let o = outcome(mach, nodes);
         let its = if o == Outcome::Stalled { CAP } else { iterations(mach) };
         let p = point(mach, quality(o));
         at += SETUP + its as f64 * PER_ITERATION;
-        if three_d {
-            // the result has two angles of attack at every Mach number
-            for alpha in [2.0, FIXTURE_ALPHA] {
-                out.extend(fixture_field(mach, alpha, its).map(|field| Event::PointField { field: cfd::FieldRef(field) }));
-            }
-        } else {
-            out.extend(synthetic_field(job, mach, its).map(|field| Event::PointField { field: cfd::FieldRef(field) }));
-        }
+        out.extend(synthetic_field(job, mach, its).map(|field| Event::PointField { field: cfd::FieldRef(field) }));
         out.push(Event::Point(PointDone {
             machine: owner(i),
             at,
@@ -399,45 +423,58 @@ pub fn events(demo: Demo, job: &Job) -> Vec<Event> {
         tally.points.push(p);
         tally.gpu += 1;
     }
-    match demo {
-        Demo::Mid | Demo::Flow3dMid => {
-            // the next point has reached iteration 1 450 and has shown its flow at 500 and 1 000
-            let mach = nodes[finished];
-            out.extend(trace(0, mach, None, cd(mach), at + SETUP, 1450));
-            out.extend(snapshots(job, mach, &[0, 500, 1000], three_d));
+    let angles = angle_events(demo, job, &shape, &mut out, &mut at);
+    if shape.drag < nodes.len() {
+        // the next drag point is in flight
+        match demo {
+            Demo::Mid => {
+                // it has reached iteration 1 450 and has shown its flow at 500 and 1 000
+                let mach = nodes[shape.drag];
+                out.extend(trace(0, mach, None, cd(mach), at + SETUP, 1450));
+                out.extend(snapshots(job, mach, &[0, 500, 1000]));
+            }
+            Demo::RemoteMid => {
+                // a remote machine sends no snapshots
+                let mach = nodes[shape.drag];
+                out.extend(trace(0, mach, None, cd(mach), at + SETUP, 1450));
+            }
+            Demo::ShareMid => {
+                // the next two points are in flight, one on each machine that is ready
+                let (a, b) = (nodes[shape.drag], nodes[shape.drag + 1]);
+                out.extend(trace(0, a, None, cd(a), at + SETUP, 1450));
+                out.extend(snapshots(job, a, &[0, 500, 1000]));
+                out.extend(trace(1, b, None, cd(b), at + SETUP, 800));
+            }
+            _ => out.extend(snapshots(job, nodes[shape.drag], &[0, 500])),
         }
-        Demo::RemoteMid => {
-            // a remote machine sends no snapshots
-            let mach = nodes[finished];
-            out.extend(trace(0, mach, None, cd(mach), at + SETUP, 1450));
+    }
+    match shape.end {
+        End::Running => {}
+        End::Cancelled => out.push(Event::Finished(Err(cfd::CANCELLED.to_string()))),
+        End::Finished => {
+            let mut table = cfd::table_from(job, tally, nodes.len(), at);
+            table.lift = angles.map(|points| CfdLiftTable {
+                key: cfd::lift_key(job.plan.geometry, &job.stability),
+                solved_at: cfd::now(),
+                solve_seconds: at,
+                backend: "GPU (Luma)".to_string(),
+                points,
+                notes: Vec::new(),
+            });
+            out.push(Event::Finished(Ok(table)));
         }
-        Demo::ShareMid => {
-            // the next two points are in flight, one on each machine that is ready
-            let (a, b) = (nodes[finished], nodes[finished + 1]);
-            out.extend(trace(0, a, None, cd(a), at + SETUP, 1450));
-            out.extend(snapshots(job, a, &[0, 500, 1000], false));
-            out.extend(trace(1, b, None, cd(b), at + SETUP, 800));
-        }
-        Demo::Stopped => {
-            out.extend(snapshots(job, nodes[finished.min(nodes.len() - 1)], &[0, 500], false));
-            out.push(Event::Finished(Err(cfd::CANCELLED.to_string())));
-        }
-        _ => out.push(Event::Finished(Ok(cfd::table_from(job, tally, nodes.len(), at)))),
     }
     out
 }
 
-/// The events of a scripted 3D stability solve of `job`.
-pub fn lift_events(demo: Demo, job: &LiftJob) -> Vec<Event> {
-    let nodes = &job.nodes;
-    let finished = match demo {
-        Demo::LiftMid => (nodes.len() / 2).min(nodes.len().saturating_sub(1)),
-        Demo::LiftShareMid => 2.min(nodes.len().saturating_sub(2)),
-        _ => nodes.len(),
-    };
-    let mut out = fleet(demo);
-    let owner = |i: usize| if demo == Demo::LiftShareMid { i % 2 } else { 0 };
-    let mut at = 0.0;
+/// The stability part of the script (`shape.stability` Mach numbers solved, then the one or two in flight): appends its events to `out`
+/// and returns the points of the solved ones, `None` when the job has no stability nodes.
+fn angle_events(demo: Demo, job: &Job, shape: &Shape, out: &mut Vec<Event>, at: &mut f64) -> Option<Vec<CfdLiftPoint>> {
+    let nodes = &job.stability;
+    if nodes.is_empty() || shape.drag < job.nodes.len() {
+        return None;
+    }
+    let owner = |i: usize| if demo == Demo::AngleShareMid { i % 2 } else { 0 };
     let mut points: Vec<CfdLiftPoint> = Vec::new();
     // CN grows with the angle (slightly sub-linearly) and with Mach up to the transonic range; CP sits about 60 % of the length aft.
     let lift = |mach: f64, a: f64| CfdLiftPoint {
@@ -449,13 +486,16 @@ pub fn lift_events(demo: Demo, job: &LiftJob) -> Vec<Event> {
         cm: None,
         quality: CfdQuality::Converged,
     };
-    for (i, &mach) in nodes[..finished].iter().enumerate() {
+    for (i, &mach) in nodes[..shape.stability].iter().enumerate() {
         let mut hand = Vec::new();
         for (k, &a) in cfd::LIFT_ALPHAS.iter().enumerate() {
             let its = if k == 0 { 1800 } else { 700 };
-            out.extend(trace(owner(i), mach, Some(a), lift(mach, a).cn, at + SETUP, its));
-            at += SETUP + its as f64 * PER_ITERATION;
+            out.extend(trace(owner(i), mach, Some(a), lift(mach, a).cn, *at + SETUP, its));
+            *at += SETUP + its as f64 * PER_ITERATION;
             let p = lift(mach, a);
+            if demo.fields3d() {
+                out.extend(fixture_field(mach, a, its).map(|field| Event::PointField { field: cfd::FieldRef(field) }));
+            }
             hand.push(PointDone {
                 machine: owner(i),
                 at: 0.0,
@@ -471,45 +511,41 @@ pub fn lift_events(demo: Demo, job: &LiftJob) -> Vec<Event> {
             points.push(p);
         }
         for mut d in hand {
-            d.at = at;
+            d.at = *at;
             out.push(Event::Point(d));
         }
     }
-    if demo == Demo::LiftShareMid {
-        // the next two Mach numbers, one on each machine that is ready: the first has run its first angle and is at iteration 600
-        // of its second; the other is at iteration 900 of its first
-        let (a, b) = (nodes[finished], nodes[finished + 1]);
+    if shape.stability < nodes.len() {
         let [a2, a6] = cfd::LIFT_ALPHAS;
-        out.extend(trace(0, a, Some(a2), lift(a, a2).cn, at + SETUP, 1800));
-        out.extend(trace(0, a, Some(a6), lift(a, a6).cn, at + SETUP + 1800.0 * PER_ITERATION, 600));
-        out.extend(trace(1, b, Some(a2), lift(b, a2).cn, at + SETUP, 900));
-    } else if demo == Demo::LiftMid {
-        // the next Mach number: its first angle has run, its second is at iteration 600
-        let mach = nodes[finished];
-        out.extend(trace(0, mach, Some(cfd::LIFT_ALPHAS[0]), lift(mach, cfd::LIFT_ALPHAS[0]).cn, at + SETUP, 1800));
-        at += SETUP + 1800.0 * PER_ITERATION;
-        out.extend(trace(0, mach, Some(cfd::LIFT_ALPHAS[1]), lift(mach, cfd::LIFT_ALPHAS[1]).cn, at, 600));
-    } else {
-        out.push(Event::LiftFinished(Ok(CfdLiftTable {
-            key: cfd::lift_key(job.plan.geometry, nodes),
-            solved_at: cfd::now(),
-            solve_seconds: at,
-            backend: "GPU (Luma)".to_string(),
-            points,
-            notes: Vec::new(),
-        })));
+        if demo == Demo::AngleShareMid {
+            // the next two Mach numbers, one on each machine that is ready: the first has run its first angle and is at iteration 600
+            // of its second; the other is at iteration 900 of its first
+            let (a, b) = (nodes[shape.stability], nodes[shape.stability + 1]);
+            out.extend(trace(0, a, Some(a2), lift(a, a2).cn, *at + SETUP, 1800));
+            out.extend(trace(0, a, Some(a6), lift(a, a6).cn, *at + SETUP + 1800.0 * PER_ITERATION, 600));
+            out.extend(trace(1, b, Some(a2), lift(b, a2).cn, *at + SETUP, 900));
+        } else {
+            // the next Mach number: its first angle has run, its second is at iteration 600, and shows its flow at 500 and 1 000
+            let mach = nodes[shape.stability];
+            out.extend(trace(0, mach, Some(a2), lift(mach, a2).cn, *at + SETUP, 1800));
+            *at += SETUP + 1800.0 * PER_ITERATION;
+            out.extend(trace(0, mach, Some(a6), lift(mach, a6).cn, *at, 600));
+            if demo.fields3d() {
+                out.extend(fixture_snapshots(mach, a6, &[0, 500, 1000]));
+            }
+        }
     }
-    out
+    Some(points)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analyze::solve::{Kind, Slot, Tracker};
+    use crate::analyze::solve::{Slot, Tracker};
 
     /// A tracker fed the events of a script: the machines, iterations and points (not the end).
-    fn tracked(kind: Kind, units: Vec<crate::analyze::solve::Unit>, events: &[Event]) -> Tracker {
-        let mut t = Tracker::new(kind, units);
+    fn tracked(units: Vec<crate::analyze::solve::Unit>, events: &[Event]) -> Tracker {
+        let mut t = Tracker::new(units);
         for e in events {
             match e {
                 Event::Machines(m) => t.set_machines(m),
@@ -524,8 +560,8 @@ mod tests {
 
     #[test]
     fn the_names_parse_in_order_and_unknown_names_are_skipped() {
-        let parsed: VecDeque<Demo> = "done, lift-mid,nonsense,stopped".split(',').filter_map(Demo::parse).collect();
-        assert_eq!(parsed, VecDeque::from([Demo::Done, Demo::LiftMid, Demo::Stopped]));
+        let parsed: VecDeque<Demo> = "done, angle-mid,nonsense,stopped".split(',').filter_map(Demo::parse).collect();
+        assert_eq!(parsed, VecDeque::from([Demo::Done, Demo::AngleMid, Demo::Stopped]));
     }
 
     #[test]
@@ -539,8 +575,9 @@ mod tests {
             grid: bowshock_model::CfdGrid::Coarse,
             compute: Default::default(),
             cpu_only: false,
+            stability: Vec::new(),
         };
-        let t = tracked(Kind::Drag, Tracker::drag_units(&nodes), &events(Demo::Mid, &job));
+        let t = tracked(Tracker::drag_units(&nodes), &events(Demo::Mid, &job));
         assert_eq!(t.done_count(), 4);
         assert_eq!(t.lives().next().unwrap().1.iteration, 1450);
         assert!(matches!(t.slot(3), Slot::Done(d) if d.outcome == Outcome::Stalled), "Mach 0.9 hit the cap");
@@ -556,7 +593,13 @@ mod tests {
 
     /// The Analyze screen with the CFD table method chosen and `scripts` queued: the drag solve has started (scripted).
     fn app_with(scripts: &[Demo]) -> (App, u64) {
+        app_with_angles(scripts, true)
+    }
+
+    /// [`app_with`], with the 3D angles option set as given before the solve starts.
+    fn app_with_angles(scripts: &[Demo], angles: bool) -> (App, u64) {
         let mut app = App::with_example();
+        app.analyze_mut().cfd.angles = angles;
         app.analyze_mut().cfd.demo = scripts.iter().copied().collect();
         drop(app.update(AppMessage::Mode(Mode::Analyze)));
         drop(app.update(AppMessage::Analyze(Message::Method(Method::CfdTable))));
@@ -598,7 +641,7 @@ mod tests {
         let data = solve_view::plot_data(t, None);
         assert_eq!(data.curves[0].solved.len(), 4);
         assert_eq!(data.curves[0].solved.iter().filter(|m| !m.outcome.is_settled()).count(), 1);
-        assert_eq!(data.curves[0].pending.len(), total - 4);
+        assert_eq!(data.curves[0].pending.len(), job(&app).nodes.len() - 4, "the drag part of the solve is on the chart; the angles come after it");
         assert!(!data.live.is_empty());
         assert!(app.ctx().doc.rocket().cfd_table(1).is_none(), "nothing is stored before the solve ends");
         assert!(solve_view::active(app.analyze()));
@@ -612,7 +655,7 @@ mod tests {
         feed(&mut app, serial, script);
         press(&mut app, Message::CfdCancel);
         assert!(app.analyze().cfd.solving.is_none(), "the solve is over");
-        assert!(notice(&app).contains("cancelled after 4 of"), "{}", notice(&app));
+        assert!(notice(&app).contains("Cancelled after 4 of"), "{}", notice(&app));
         let stopped = app.analyze().cfd.stopped.as_ref().expect("four points are on offer");
         assert_eq!(stopped.table.as_ref().map(|t| t.points.len()), Some(4));
         assert_eq!(stopped.keep_label, "Keep 4 solved points");
@@ -662,7 +705,7 @@ mod tests {
 
     #[test]
     fn a_finished_solve_is_stored_and_summarised() {
-        let (mut app, serial) = app_with(&[Demo::Done]);
+        let (mut app, serial) = app_with_angles(&[Demo::Done], false);
         let script = events(Demo::Done, &job(&app));
         feed(&mut app, serial, script);
         assert!(app.analyze().cfd.solving.is_none());
@@ -681,45 +724,109 @@ mod tests {
     }
 
     #[test]
-    fn the_3d_solve_reports_per_angle_and_a_cancel_discards_it_cleanly() {
-        let (mut app, serial) = app_with(&[Demo::Done, Demo::LiftMid, Demo::LiftDone]);
-        let script = events(Demo::Done, &job(&app));
-        feed(&mut app, serial, script);
-        assert!(app.ctx().doc.rocket().cfd_table(1).is_some());
-
-        press(&mut app, Message::SolveLift);
-        let lift = app.analyze().cfd.lift_solving.as_ref().expect("Solve stability (3D) starts the 3D solve");
-        let (serial, job) = (
-            lift.stream.serial(),
-            LiftJob {
-                plan: app.analyze().cfd.plan.as_ref().clone().unwrap(),
-                nodes: cfd::lift_nodes(app.analyze().cond.mach).unwrap(),
-                compute: Default::default(),
-                cpu_only: false,
-            },
-        );
-        assert_eq!(lift.tracker.total(), 2 * job.nodes.len(), "a run per Mach number and angle");
-        feed(&mut app, serial, lift_events(Demo::LiftMid, &job));
-        let t = &app.analyze().cfd.lift_solving.as_ref().unwrap().tracker;
+    fn the_script_runs_the_angles_after_the_drag_nodes_in_one_stream() {
+        let (app, _) = app_with(&[Demo::AngleMid]);
+        let job = job(&app);
+        assert!(!job.stability.is_empty(), "the angles are on by default: the job has stability nodes");
+        let t = tracked(job.units(), &events(Demo::AngleMid, &job));
+        let (drag, stab) = (job.nodes.len(), job.stability.len());
+        assert_eq!(t.total(), drag + 2 * stab, "a unit per drag node, then one per Mach number and angle");
+        assert_eq!(t.phase(), crate::analyze::solve::Phase::Stability);
         let (unit, live) = t.lives().next().unwrap();
         assert_eq!((unit.alpha_deg, live.iteration), (Some(cfd::LIFT_ALPHAS[1]), 600));
-        assert!(t.done_count() >= 2);
-        assert_eq!(solve_view::plot_data(t, None).curves.len(), 2, "a curve per angle");
+        let kept = stab / 2;
+        assert_eq!(t.done_count(), drag + 2 * kept);
+        assert_eq!(t.stability_kept().1, kept);
+        // the picture is one curve per angle once the angles run
+        assert_eq!(solve_view::plot_data(&t, None).curves.len(), 2);
+        // the whole stream ends in one table with both parts
+        let done = events(Demo::Done, &job);
+        let Some(Event::Finished(Ok(table))) = done.last() else { panic!("a finished solve ends in its table") };
+        assert_eq!(table.points.len(), drag);
+        assert_eq!(table.lift.as_ref().map(|l| l.points.len()), Some(2 * stab));
+        assert_eq!(table.lift.as_ref().map(|l| l.key), Some(cfd::lift_key(job.plan.geometry, &job.stability)));
+    }
 
-        press(&mut app, Message::CfdCancel);
-        assert!(app.analyze().cfd.lift_solving.is_none() && app.analyze().cfd.stopped.is_none());
-        assert_eq!(notice(&app), "3D stability solve cancelled");
-        assert!(app.ctx().doc.rocket().cfd_table(1).is_some_and(|t| t.lift.is_none()), "the 3D solve left the drag table as it was");
+    #[test]
+    fn a_solve_without_angles_is_the_drag_table_alone_and_asking_for_them_later_makes_it_stale() {
+        let (mut app, serial) = app_with_angles(&[Demo::Done], false);
+        let j = job(&app);
+        assert!(j.stability.is_empty(), "the option is off: the job has drag nodes only");
+        assert_eq!(solve_view::plot_data(&Tracker::new(j.units()), None).curves.len(), 1);
+        feed(&mut app, serial, events(Demo::Done, &j));
+        let table = app.ctx().doc.rocket().cfd_table(1).expect("stored");
+        assert!(table.lift.is_none());
+        assert_eq!(app.analyze().solve_status(), cfd::Status::Fresh, "asked for the drag alone, the drag is the whole table");
+        // asking for the angles makes it stale (the table is shown meanwhile); turning them off again makes it fresh
+        press(&mut app, Message::Angles(true));
+        assert_eq!((app.analyze().solve_status(), app.analyze().cfd.status.clone()), (cfd::Status::Stale, cfd::Status::Fresh));
+        press(&mut app, Message::Angles(false));
+        assert_eq!(app.analyze().solve_status(), cfd::Status::Fresh);
+    }
 
-        // and one that finishes is stored on the drag table
-        press(&mut app, Message::SolveLift);
-        let serial = app.analyze().cfd.lift_solving.as_ref().expect("a second 3D solve").stream.serial();
-        feed(&mut app, serial, lift_events(Demo::LiftDone, &job));
-        assert!(app.analyze().cfd.lift_solving.is_none());
-        assert!(app.ctx().doc.rocket().cfd_table(1).is_some_and(|t| t.lift.is_some()));
-        assert_eq!(notice(&app), "Solved 3D stability · all converged · 3 min 28 s");
-        let row = app.analyze().cfd.lift_summary.as_ref().map(|(_, s)| s.clone()).unwrap_or_default();
-        assert!(row.starts_with("Solved 3D stability at ") && row.contains(" on Apple M1 Max · all converged"), "{row}");
+    #[test]
+    fn a_cancel_in_the_angles_keeps_the_drag_table_and_the_mach_numbers_with_both_angles() {
+        let (mut app, serial) = app_with(&[Demo::AngleStopped]);
+        let j = job(&app);
+        feed(&mut app, serial, events(Demo::AngleStopped, &j));
+        assert!(app.analyze().cfd.solving.is_none(), "the script ended in the cancel");
+        let stopped = app.analyze().cfd.stopped.as_ref().expect("the drag points and the angles solved are on offer");
+        let table = stopped.table.as_ref().expect("a table");
+        let kept = j.stability.len() / 2;
+        assert_eq!(table.points.len(), j.nodes.len());
+        let lift = table.lift.as_ref().expect("the 3D angles that were in");
+        assert_eq!(lift.points.len(), 2 * kept);
+        assert_eq!(lift.key, cfd::lift_key(j.plan.geometry, &j.stability[..kept]), "the key is the partial list's: it reads as stale");
+        assert_eq!(stopped.keep_label, format!("Keep {} points · 3D at {kept} Mach", j.nodes.len()));
+        assert!(table.notes.iter().any(|n| n.starts_with("Stopped early") && n.contains("3D Mach numbers solved")), "{:?}", table.notes);
+        assert!(app.ctx().doc.rocket().cfd_table(1).is_none(), "nothing is stored until Keep");
+        press(&mut app, Message::CfdKeep);
+        let stored = app.ctx().doc.rocket().cfd_table(1).expect("kept").clone();
+        assert_eq!(stored.lift.as_ref().map(|l| l.points.len()), Some(2 * kept));
+        assert_eq!(notice(&app), format!("Kept {} points, 3D at {kept} Mach numbers", j.nodes.len()));
+        // it is a partial table of the range, not a fresh one
+        assert_eq!(app.analyze().solve_status(), cfd::Status::Stale);
+    }
+
+    #[test]
+    fn a_mach_number_with_only_one_of_its_angles_is_left_out_of_a_stopped_table() {
+        let (app, _) = app_with(&[Demo::AngleMid]);
+        let j = job(&app);
+        let mut events = events(Demo::AngleMid, &j);
+        // the running Mach number's first angle ends (a remote machine sends each angle as it ends), its second does not
+        let (mach, a2) = (j.stability[j.stability.len() / 2], cfd::LIFT_ALPHAS[0]);
+        events.push(Event::Point(PointDone {
+            machine: 0,
+            at: 99.0,
+            mach,
+            alpha_deg: Some(a2),
+            outcome: Outcome::Converged,
+            point: None,
+            lift: Some(CfdLiftPoint { mach, alpha_deg: a2, cn: 0.1, x_cp: 1.0, cd: None, cm: None, quality: CfdQuality::Converged }),
+            iterations: 100,
+            cpu: false,
+            fallback: None,
+        }));
+        let t = tracked(j.units(), &events);
+        let (points, kept, half) = t.stability_kept();
+        assert_eq!((kept, points.len(), half), (j.stability.len() / 2, 2 * (j.stability.len() / 2), Some(mach)));
+        let table = cfd::partial_table(&j, &t, 60.0).expect("the drag points are a table");
+        assert!(table.notes.contains(&cfd::half_angle_note(mach)), "{:?}", table.notes);
+        assert_eq!(table.lift.as_ref().map(|l| l.points.len()), Some(2 * kept));
+    }
+
+    #[test]
+    fn a_finished_solve_with_angles_is_stored_with_them_and_says_so() {
+        let (mut app, serial) = app_with(&[Demo::Done]);
+        let j = job(&app);
+        feed(&mut app, serial, events(Demo::Done, &j));
+        let table = app.ctx().doc.rocket().cfd_table(1).expect("stored").clone();
+        assert_eq!(table.lift.as_ref().map(|l| l.points.len()), Some(2 * j.stability.len()));
+        assert_eq!(notice(&app), format!("Solved {} points and 3D stability · 1 not converged · 12 min 21 s", table.points.len()));
+        let (_, row) = app.analyze().cfd.summary.clone().expect("the account");
+        assert!(row.starts_with(&format!("Solved {} Mach points and 3D stability at {} Mach numbers in ", table.points.len(), j.stability.len())), "{row}");
+        assert_eq!(app.analyze().solve_status(), cfd::Status::Fresh);
+        assert_eq!(app.analyze().cfd.status, cfd::Status::Fresh);
     }
 
     #[test]
@@ -782,26 +889,14 @@ mod tests {
     }
 
     #[test]
-    fn a_shared_3d_solve_has_a_run_in_flight_per_machine() {
-        let (mut app, serial) = app_with(&[Demo::Done, Demo::LiftShareMid]);
-        let script = events(Demo::Done, &job(&app));
-        feed(&mut app, serial, script);
-        press(&mut app, Message::SolveLift);
-        let lift = app.analyze().cfd.lift_solving.as_ref().expect("Solve stability (3D) starts the 3D solve");
-        let (serial, job) = (
-            lift.stream.serial(),
-            LiftJob {
-                plan: app.analyze().cfd.plan.as_ref().clone().unwrap(),
-                nodes: cfd::lift_nodes(app.analyze().cond.mach).unwrap(),
-                compute: Default::default(),
-                cpu_only: false,
-            },
-        );
-        feed(&mut app, serial, lift_events(Demo::LiftShareMid, &job));
-        let t = &app.analyze().cfd.lift_solving.as_ref().unwrap().tracker;
+    fn a_shared_solve_has_a_run_in_flight_per_machine_in_the_angles_too() {
+        let (mut app, serial) = app_with(&[Demo::AngleShareMid]);
+        let j = job(&app);
+        feed(&mut app, serial, events(Demo::AngleShareMid, &j));
+        let t = &app.analyze().cfd.solving.as_ref().expect("still solving").tracker;
         let lives: Vec<(usize, Option<f64>, usize)> = t.lives().map(|(u, l)| (l.machine, u.alpha_deg, l.iteration)).collect();
         assert_eq!(lives, vec![(0, Some(cfd::LIFT_ALPHAS[1]), 600), (1, Some(cfd::LIFT_ALPHAS[0]), 900)]);
-        assert_eq!(t.done_count(), 4, "two Mach numbers at two angles, one on each machine");
+        assert_eq!(t.done_count(), j.nodes.len() + 4, "every drag node, then two Mach numbers at two angles");
         assert_eq!(solve_view::plot_data(t, None).live.len(), 2);
     }
 
@@ -902,123 +997,111 @@ mod tests {
     }
 
     #[test]
-    fn the_3d_demos_show_a_finned_field_live_and_two_angles_per_mach_when_done() {
-        // in flight: the latest snapshot is a 3D field, and the viewer takes it as the scene
+    fn the_3d_demos_show_a_finned_field_live_at_an_angle_node_and_two_angles_per_stability_mach_when_done() {
+        // in flight at an angle node: the latest snapshot is a 3D field, and the viewer takes it as the scene
         let (mut app, serial) = app_with(&[Demo::Flow3dMid]);
-        play(&mut app, serial, Demo::Flow3dMid);
-        let live = app.analyze().cfd.solving.as_ref().and_then(|s| s.picture.clone()).expect("the point in flight has shown its flow");
+        // the live picture follows what runs: the last drag node's field is the axisymmetric solver's (side view), the angles' the 3D scene
+        let mut script = events(Demo::Flow3dMid, &job(&app));
+        let drag_end = script.iter().rposition(|e| matches!(e, Event::Point(p) if p.alpha_deg.is_none())).expect("the drag nodes ended");
+        let rest = script.split_off(drag_end + 1);
+        feed(&mut app, serial, script);
+        assert_eq!(app.analyze().flow.mode(), flow_view::Mode::Side, "a drag node is in 2D");
+        feed(&mut app, serial, rest);
+        let live = app.analyze().cfd.solving.as_ref().and_then(|s| s.picture.clone()).expect("the angle in flight has shown its flow");
         assert!(live.nk > 1 && live.iteration == 1000 && !live.fin_theta.is_empty(), "nk {} fins {:?}", live.nk, live.fin_theta);
-        assert_eq!(app.analyze().flow.mode(), flow_view::Mode::Scene);
+        assert_eq!((live.alpha_deg, app.analyze().flow.mode()), (cfd::LIFT_ALPHAS[1], flow_view::Mode::Scene));
         assert!(app.analyze().flow.scene.picture().is_some());
 
-        // done: a field for each angle of each Mach node, and the stepper walks the angles
+        // done: a field for each drag node, and for each angle of each stability Mach number; the stepper walks the angles
         let (mut app, serial) = app_with(&[Demo::Flow3dDone]);
         play(&mut app, serial, Demo::Flow3dDone);
         let table = app.ctx().doc.rocket().cfd_table(1).expect("the table is stored").clone();
+        let lift = table.lift.clone().expect("with its angles");
+        let machs: Vec<f64> = lift.points.iter().map(|p| p.mach).fold(Vec::new(), |mut v, m| {
+            if !v.contains(&m) {
+                v.push(m);
+            }
+            v
+        });
         let store = &app.analyze().cfd.fields;
-        assert_eq!(store.len(), 2 * table.points.len());
-        for p in &table.points {
-            assert_eq!(store.alphas_at(&table, p.mach), vec![2.0, 4.0], "Mach {}", p.mach);
-            assert!(store.has_mach(&table, p.mach));
+        assert_eq!(store.len(), table.points.len() + 2 * machs.len());
+        for &m in &machs {
+            let angled: Vec<f64> = store.alphas_at(&table, m).into_iter().filter(|a| *a > 0.0).collect();
+            assert_eq!(angled, cfd::LIFT_ALPHAS.to_vec(), "Mach {m}");
+            assert!(store.has_mach(&table, m));
         }
+        // a stability Mach number that is not a drag node has only its angles
+        let mach = machs.iter().copied().find(|m| table.points.iter().all(|p| (p.mach - m).abs() > 1e-6)).expect("the stability nodes are not the table's");
         press(&mut app, Message::Flow(flow_view::Msg::Open(true)));
-        let flow = &app.analyze().flow;
-        assert_eq!((flow.alphas.clone(), flow.selected_alpha), (vec![2.0, 4.0], Some(2.0)));
-        assert!(flow.caption().contains("α 2.0°"), "{}", flow.caption());
-        press(&mut app, Message::Flow(flow_view::Msg::AlphaStep(1)));
-        let flow = &app.analyze().flow;
-        assert_eq!(flow.selected_alpha, Some(4.0));
-        assert!(flow.caption().contains("α 4.0°"), "{}", flow.caption());
-        // stepping to another Mach number keeps the angle when it has it
-        press(&mut app, Message::Flow(flow_view::Msg::Step(1)));
-        assert_eq!(app.analyze().flow.selected_alpha, Some(4.0));
-    }
-
-    #[test]
-    fn the_fields_of_a_stability_solve_are_kept_and_the_flow_view_steps_their_angles() {
-        let (mut app, serial) = app_with(&[Demo::Done, Demo::LiftDone]);
-        play(&mut app, serial, Demo::Done);
-        let table = app.ctx().doc.rocket().cfd_table(1).expect("the drag table").clone();
-        press(&mut app, Message::SolveLift);
-        let lift = app.analyze().cfd.lift_solving.as_ref().expect("the 3D solve started");
-        let serial = lift.stream.serial();
-        let job = LiftJob {
-            plan: app.analyze().cfd.plan.as_ref().clone().unwrap(),
-            nodes: cfd::lift_nodes(app.analyze().cond.mach).unwrap(),
-            compute: Default::default(),
-            cpu_only: false,
-        };
-        // a Mach number that is not a node of the drag table
-        let mach = job.nodes.iter().copied().find(|m| table.points.iter().all(|p| (p.mach - m).abs() > 1e-6)).expect("the stability nodes are not the table's");
-        let fields: Vec<Event> =
-            cfd::LIFT_ALPHAS.iter().filter_map(|&a| fixture_field(mach, a, 3000)).map(|f| Event::PointField { field: cfd::FieldRef(f) }).collect();
-        assert_eq!(fields.len(), 2);
-        // the live picture of the stability solve is the one on show
-        feed(&mut app, serial, fields);
-        let flow = &app.analyze().flow;
-        assert_eq!((flow.picture_mach(), flow.mode()), (Some(mach), flow_view::Mode::Scene));
-        feed(&mut app, serial, lift_events(Demo::LiftDone, &job));
-        assert!(app.ctx().doc.rocket().cfd_table(1).is_some_and(|t| t.lift.is_some()));
-        let store = &app.analyze().cfd.fields;
-        assert_eq!(store.alphas_at(&table, mach), cfd::LIFT_ALPHAS.to_vec());
-        assert_eq!(store.len(), table.points.len() + 2, "the drag solve's fields stay");
-        // the Flow field view lists the stability solve's Mach number too, and steps its angles
-        press(&mut app, Message::Flow(flow_view::Msg::Open(true)));
-        assert!(app.analyze().flow.machs.contains(&mach));
         press(&mut app, Message::Flow(flow_view::Msg::Pick(mach)));
         let flow = &app.analyze().flow;
         assert_eq!((flow.alphas.clone(), flow.selected_alpha), (cfd::LIFT_ALPHAS.to_vec(), Some(cfd::LIFT_ALPHAS[0])));
-        assert_eq!(flow.picture_mach(), Some(mach));
+        assert!(flow.caption().contains(&format!("α {:.1}°", cfd::LIFT_ALPHAS[0])), "{}", flow.caption());
         press(&mut app, Message::Flow(flow_view::Msg::AlphaStep(1)));
-        assert_eq!(app.analyze().flow.selected_alpha, Some(cfd::LIFT_ALPHAS[1]));
-        assert!(app.analyze().flow.caption().contains(&format!("α {:.1}°", cfd::LIFT_ALPHAS[1])), "{}", app.analyze().flow.caption());
+        let flow = &app.analyze().flow;
+        assert_eq!(flow.selected_alpha, Some(cfd::LIFT_ALPHAS[1]));
+        assert!(flow.caption().contains(&format!("α {:.1}°", cfd::LIFT_ALPHAS[1])), "{}", flow.caption());
     }
 
-    /// A real 3D solve of the example (GPU, a few minutes at most) through the app's own path: the events of `solve_lift` (the live snapshots
-    /// of a running point and the final field of each) reach the app, and the Flow field view shows the stability solve's fields.
-    /// `cargo nextest run --release -p bowshock a_real_3d_solve --run-ignored only --no-capture` (through `tools/gpuq/gpuq`).
     #[test]
-    #[ignore = "solves the example's 3D stability table on the GPU"]
-    fn a_real_3d_solve_through_the_app_ends_with_its_fields_in_the_store() {
-        let (mut app, serial) = app_with(&[Demo::Done]);
-        // the drag table is the scripted one (a real one is the same code path, minutes); the 3D solve is real
-        play(&mut app, serial, Demo::Done);
-        let table = app.ctx().doc.rocket().cfd_table(1).expect("the drag table").clone();
-        press(&mut app, Message::SolveLift);
-        let serial = app.analyze().cfd.lift_solving.as_ref().expect("the 3D solve started").stream.serial();
-        let job = LiftJob {
-            plan: app.analyze().cfd.plan.as_ref().clone().unwrap(),
-            nodes: cfd::lift_nodes(app.analyze().cond.mach).unwrap(),
-            compute: Default::default(),
-            cpu_only: false,
-        };
+    fn a_stopped_solve_keeps_the_fields_of_the_angles_it_keeps() {
+        let (mut app, serial) = app_with(&[Demo::Flow3dMid]);
+        play(&mut app, serial, Demo::Flow3dMid);
+        press(&mut app, Message::CfdCancel);
+        let table = app.analyze().cfd.stopped.as_ref().and_then(|s| s.table.clone()).expect("the drag points and the angles solved are on offer");
+        let kept = table.lift.as_ref().map_or(0, cfd::distinct_machs);
+        assert!(kept > 0);
+        assert!(app.analyze().cfd.fields.is_empty(), "nothing before Keep");
+        press(&mut app, Message::CfdKeep);
+        let store = &app.analyze().cfd.fields;
+        assert_eq!(store.len(), table.points.len() + 2 * kept, "the drag nodes' fields and both angles of each kept Mach number; the running one is not kept");
+    }
+
+    /// A real solve of the example (GPU, minutes) through the app's own path: the events of the one `solve` (the drag nodes, then the 3D
+    /// angles with the live snapshots of a running angle and the final field of each) reach the app, which stores the table with its
+    /// angles and keeps the fields. `cargo nextest run --release -p bowshock a_real_solve --run-ignored only --no-capture` (through
+    /// `tools/gpuq/gpuq`).
+    #[test]
+    #[ignore = "solves the example's whole table, drag and 3D angles, on the GPU"]
+    fn a_real_solve_through_the_app_ends_with_its_table_and_fields_in_the_store() {
+        // the screen's solve is scripted down to its set-up so that nothing else runs; the job it built is the real one
+        let (mut app, serial) = app_with(&[Demo::RemoteSetup]);
+        let job = job(&app);
+        assert!(!job.stability.is_empty());
         let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = log.clone();
         let t = std::time::Instant::now();
-        let result = cfd::solve_lift(&job, &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), move |e| sink.lock().unwrap().push(e));
+        let result = cfd::solve(&job, &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), move |e| sink.lock().unwrap().push(e));
         let seconds = t.elapsed().as_secs_f64();
         let mut events = std::mem::take(&mut *log.lock().unwrap());
         let (snapshots, finals) =
             (events.iter().filter(|e| matches!(e, Event::Field(_))).count(), events.iter().filter(|e| matches!(e, Event::PointField { .. })).count());
-        println!("REAL3D solve_lift {seconds:.1} s, {} nodes, {snapshots} live snapshots, {finals} final fields", job.nodes.len());
-        events.push(Event::LiftFinished(result));
+        println!(
+            "REAL solve {seconds:.1} s, {} drag nodes + {} stability nodes, {snapshots} live snapshots, {finals} final fields",
+            job.nodes.len(),
+            job.stability.len()
+        );
+        events.push(Event::Finished(result));
         feed(&mut app, serial, events);
-        assert!(app.ctx().doc.rocket().cfd_table(1).is_some_and(|t| t.lift.is_some()), "the 3D solve is stored: {}", notice(&app));
-        assert!(snapshots >= job.nodes.len() && finals == 2 * job.nodes.len(), "{snapshots} snapshots, {finals} final fields");
+        let table = app.ctx().doc.rocket().cfd_table(1).expect("the solve is stored").clone();
+        assert!(table.lift.is_some(), "the 3D angles are in the table: {}", notice(&app));
+        println!("REAL table {} points, lift {:?}; notice: {}", table.points.len(), table.lift.as_ref().map(|l| l.points.len()), notice(&app));
+        assert_eq!(app.analyze().solve_status(), cfd::Status::Fresh);
+        assert!(snapshots >= job.stability.len() && finals >= 2 * job.stability.len(), "{snapshots} snapshots, {finals} final fields");
         let store = &app.analyze().cfd.fields;
-        for &m in &job.nodes {
+        for &m in &job.stability {
             assert_eq!(store.alphas_at(&table, m).iter().filter(|a| **a > 0.0).count(), 2, "Mach {m}: both angles have a field");
         }
         // the viewer shows a real one: cells in the hundreds of thousands, the fins, the angle on the caption
         press(&mut app, Message::Flow(flow_view::Msg::Open(true)));
-        press(&mut app, Message::Flow(flow_view::Msg::Pick(job.nodes[job.nodes.len() / 2])));
+        press(&mut app, Message::Flow(flow_view::Msg::Pick(job.stability[job.stability.len() / 2])));
         for _ in 0..2 {
             press(&mut app, Message::Flow(flow_view::Msg::AlphaStep(1)));
         }
         let flow = &app.analyze().flow;
         let picture = flow.scene.picture().expect("the 3D scene shows the real field");
         println!(
-            "REAL3D field {} cells, {} wall faces, {} tiles, caption {}",
+            "REAL field {} cells, {} wall faces, {} tiles, caption {}",
             picture.field.cells(),
             picture.field.walls.len(),
             picture.tiles.len(),

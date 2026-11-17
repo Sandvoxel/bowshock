@@ -35,12 +35,13 @@ pub const HISTORY_CAP: usize = 240;
 /// Smallest share of a running unit's iterations still expected after the cap of its prediction is passed.
 const TAIL: f64 = 0.15;
 
-/// Which solve the units belong to.
+/// Which part of the solve is on show: the drag points (one unit per Mach number at zero incidence) or the 3D angles (one unit per
+/// Mach number and angle of attack). One solve has both, the drag first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
-    /// The zero-lift drag table: one unit per Mach number.
+pub enum Phase {
+    /// The drag table's points.
     Drag,
-    /// The 3D stability solve: one unit per Mach number and angle of attack.
+    /// The stability points at angles of attack.
     Stability,
 }
 
@@ -280,7 +281,6 @@ impl MachineRow {
 /// The state of a solve, built from its events.
 #[derive(Debug, Clone)]
 pub struct Tracker {
-    kind: Kind,
     units: Vec<Unit>,
     slots: Vec<Slot>,
     /// The units in flight, one per busy machine.
@@ -294,9 +294,9 @@ pub struct Tracker {
 
 impl Tracker {
     /// A solve of `units` (in the order they are asked for); its machines are named by [`Tracker::set_machines`].
-    pub fn new(kind: Kind, units: Vec<Unit>) -> Tracker {
+    pub fn new(units: Vec<Unit>) -> Tracker {
         let slots = vec![Slot::Pending; units.len()];
-        Tracker { kind, units, slots, live: Vec::new(), machines: Vec::new(), fallback: None, clock: 0.0, fraction: 0.0 }
+        Tracker { units, slots, live: Vec::new(), machines: Vec::new(), fallback: None, clock: 0.0, fraction: 0.0 }
     }
 
     /// The units of a drag table at `nodes`.
@@ -309,9 +309,41 @@ impl Tracker {
         nodes.iter().flat_map(|&mach| alphas.iter().map(move |&a| Unit { mach, alpha_deg: Some(a) })).collect()
     }
 
-    /// Which solve this is.
-    pub fn kind(&self) -> Kind {
-        self.kind
+    /// The units of a whole solve: the drag points at `nodes`, then the stability points at `stability` Mach numbers and `alphas`.
+    pub fn solve_units(nodes: &[f64], stability: &[f64], alphas: &[f64]) -> Vec<Unit> {
+        let mut units = Tracker::drag_units(nodes);
+        units.extend(Tracker::stability_units(stability, alphas));
+        units
+    }
+
+    /// Which part of the solve is on show: what is in flight, else the stability part once every drag point is in (and there is
+    /// one), else the drag part.
+    pub fn phase(&self) -> Phase {
+        if let Some((u, _)) = self.lives().next() {
+            return if u.alpha_deg.is_some() { Phase::Stability } else { Phase::Drag };
+        }
+        let drag_in = self.units.iter().zip(&self.slots).filter(|(u, _)| u.alpha_deg.is_none()).all(|(_, s)| matches!(s, Slot::Done(_)));
+        if drag_in && self.units.iter().any(|u| u.alpha_deg.is_some()) {
+            Phase::Stability
+        } else {
+            Phase::Drag
+        }
+    }
+
+    /// The drag units: how many, the first of them.
+    pub fn drag_count(&self) -> usize {
+        self.units.iter().filter(|u| u.alpha_deg.is_none()).count()
+    }
+
+    /// The Mach numbers of the stability units, each once, in order.
+    pub fn stability_machs(&self) -> Vec<f64> {
+        let mut m: Vec<f64> = Vec::new();
+        for u in self.units.iter().filter(|u| u.alpha_deg.is_some()) {
+            if m.last().is_none_or(|l| (l - u.mach).abs() > 1e-9) {
+                m.push(u.mach);
+            }
+        }
+        m
     }
 
     /// Every unit, in running order.
@@ -378,6 +410,11 @@ impl Tracker {
         pool.iter().filter_map(|m| m.device()).collect::<Vec<_>>().join(", ")
     }
 
+    /// Drag units finished.
+    pub fn drag_done(&self) -> usize {
+        self.units.iter().zip(&self.slots).filter(|(u, s)| u.alpha_deg.is_none() && matches!(s, Slot::Done(_))).count()
+    }
+
     /// Units finished.
     pub fn done_count(&self) -> usize {
         self.slots.iter().filter(|s| matches!(s, Slot::Done(_))).count()
@@ -386,17 +423,6 @@ impl Tracker {
     /// Units in all.
     pub fn total(&self) -> usize {
         self.units.len()
-    }
-
-    /// The Mach numbers of the units (each once, ascending as given).
-    pub fn machs(&self) -> Vec<f64> {
-        let mut m: Vec<f64> = Vec::new();
-        for u in &self.units {
-            if m.last().is_none_or(|l| (l - u.mach).abs() > 1e-9) {
-                m.push(u.mach);
-            }
-        }
-        m
     }
 
     fn find(&self, mach: f64, alpha_deg: Option<f64>) -> Option<usize> {
@@ -615,18 +641,46 @@ impl Tracker {
         Some(left / rate)
     }
 
-    /// How many units from the first are all finished: the part of the range a stopped solve covers without a gap (machines that
-    /// share the work finish out of order).
+    /// How many drag units from the first are all finished: the part of the range a stopped solve covers without a gap (machines that
+    /// share the work finish out of order). The stability units come after the drag units and have their own run, see
+    /// [`Tracker::stability_kept`].
     pub fn done_prefix(&self) -> usize {
-        self.slots.iter().take_while(|s| matches!(s, Slot::Done(_))).count()
+        self.slots.iter().take(self.drag_count()).take_while(|s| matches!(s, Slot::Done(_))).count()
     }
 
-    /// For each machine that solved one of the first [`Tracker::done_prefix`] units: its index, how many of them, and how many of
-    /// those on its CPU.
+    /// The stability part a stopped solve keeps: the leading Mach numbers (in the order solved) whose angles all finished, with their
+    /// points, how many Mach numbers that is, and the Mach number that was left with only some of its angles, if there is one. A
+    /// Mach number with an angle missing is not kept: a stability table needs every node at every angle.
+    pub fn stability_kept(&self) -> (Vec<CfdLiftPoint>, usize, Option<f64>) {
+        let machs = self.stability_machs();
+        let (mut points, mut kept, mut half) = (Vec::new(), 0, None);
+        for &m in &machs {
+            let group: Vec<&Slot> =
+                self.units.iter().zip(&self.slots).filter(|(u, _)| u.alpha_deg.is_some() && (u.mach - m).abs() < 1e-9).map(|(_, s)| s).collect();
+            if group.iter().all(|s| matches!(s, Slot::Done(_))) {
+                points.extend(group.iter().filter_map(|s| if let Slot::Done(d) = s { d.lift } else { None }));
+                kept += 1;
+            } else {
+                half = group.iter().any(|s| matches!(s, Slot::Done(_))).then_some(m);
+                break;
+            }
+        }
+        (points, kept, half)
+    }
+
+    /// For each machine that solved one of the kept units (the first [`Tracker::done_prefix`] drag units and the stability units of
+    /// [`Tracker::stability_kept`]): its index, how many of them, and how many of those on its CPU.
     pub fn prefix_machines(&self) -> Vec<(usize, usize, usize)> {
         let mut out: Vec<(usize, usize, usize)> = Vec::new();
-        for slot in self.slots.iter().take_while(|s| matches!(s, Slot::Done(_))) {
+        let (_, kept, _) = self.stability_kept();
+        let kept_machs: Vec<f64> = self.stability_machs().into_iter().take(kept).collect();
+        let n = self.done_prefix();
+        for (i, (u, slot)) in self.units.iter().zip(&self.slots).enumerate() {
             let Slot::Done(d) = slot else { continue };
+            let keep = if u.alpha_deg.is_none() { i < n } else { kept_machs.iter().any(|m| (m - u.mach).abs() < 1e-9) };
+            if !keep {
+                continue;
+            }
             match out.iter_mut().find(|e| e.0 == d.machine) {
                 Some(e) => {
                     e.1 += 1;
@@ -641,7 +695,7 @@ impl Tracker {
 
     /// The drag points of the first [`Tracker::done_prefix`] units.
     pub fn prefix_points(&self) -> Vec<CfdPoint> {
-        self.slots.iter().take_while(|s| matches!(s, Slot::Done(_))).filter_map(|s| if let Slot::Done(d) = s { d.point } else { None }).collect()
+        self.slots.iter().take(self.done_prefix()).filter_map(|s| if let Slot::Done(d) = s { d.point } else { None }).collect()
     }
 
     /// The Mach numbers (with their angle) of the finished units that did not settle, in order.
@@ -659,10 +713,7 @@ impl Tracker {
     /// The one-line account of a finished solve: `Solved 10 Mach points in 2 min 14 s on Apple M1 Max · 9 converged, 1 fallback
     /// (Mach 1.05)`.
     pub fn summary(&self, seconds: f64) -> String {
-        let what = match self.kind {
-            Kind::Drag => format!("{} Mach points", self.done_count()),
-            Kind::Stability => format!("3D stability at {} Mach numbers", self.machs().len()),
-        };
+        let what = super::cfd::solved_what(self.drag_done(), self.stability_machs().len());
         let head = format!("Solved {what} in {} on {}", duration_text(seconds), self.device());
         let settled = self.done_count() - self.unsettled().len();
         let mut parts = vec![if settled == self.done_count() { "all converged".to_string() } else { format!("{settled} converged") }];
@@ -686,10 +737,7 @@ impl Tracker {
     /// The toast's short form, for the narrow status strip (the verdict comes before the time, which is what a clipped line loses):
     /// `Solved 10 points · 1 not converged · 2 min 14 s`.
     pub fn brief(&self, seconds: f64) -> String {
-        let what = match self.kind {
-            Kind::Drag => format!("{} points", self.done_count()),
-            Kind::Stability => "3D stability".to_string(),
-        };
+        let what = super::cfd::solved_brief(self.drag_done(), !self.stability_machs().is_empty());
         let bad = self.unsettled().len();
         let verdict = if bad == 0 { "all converged".to_string() } else { format!("{bad} not converged") };
         format!("Solved {what} · {verdict} · {}", duration_text(seconds))
@@ -735,15 +783,15 @@ pub fn thousands(n: usize) -> String {
 mod tests {
     use super::*;
 
-    fn on_test_gpu(kind: Kind, units: Vec<Unit>) -> Tracker {
-        let mut t = Tracker::new(kind, units);
+    fn on_test_gpu(units: Vec<Unit>) -> Tracker {
+        let mut t = Tracker::new(units);
         t.set_machines(&[MachineInfo { name: "This computer".into(), remote: false }]);
         t.on_machine(0, 0.0, MachineState::Ready("Test GPU".into()));
         t
     }
 
     fn tracker(nodes: &[f64]) -> Tracker {
-        on_test_gpu(Kind::Drag, Tracker::drag_units(nodes))
+        on_test_gpu(Tracker::drag_units(nodes))
     }
 
     /// The first unit in flight.
@@ -888,7 +936,7 @@ mod tests {
     fn the_stability_solve_splits_a_mach_number_between_its_angles() {
         let units = Tracker::stability_units(&[0.8, 1.1], &[2.0, 6.0]);
         assert_eq!(units.len(), 4);
-        let mut t = on_test_gpu(Kind::Stability, units);
+        let mut t = on_test_gpu(units);
         let r = |at: f64, mach: f64, a: f64, iteration: usize| Iteration { alpha_deg: Some(a), ..report(at, mach, iteration, 0.1) };
         t.on_iteration(&r(2.0, 0.8, 2.0, 50));
         t.on_iteration(&r(10.0, 0.8, 2.0, 1000));
@@ -962,7 +1010,7 @@ mod tests {
     }
 
     fn two_machines(units: Vec<Unit>) -> Tracker {
-        let mut t = Tracker::new(Kind::Drag, units);
+        let mut t = Tracker::new(units);
         t.set_machines(&[MachineInfo { name: "This computer".into(), remote: false }, MachineInfo { name: "omarchy".into(), remote: true }]);
         t.on_machine(0, 0.0, MachineState::Ready("RTX 3090".into()));
         t.on_machine(1, 120.0, MachineState::Ready("RTX 3080 on omarchy".into()));
