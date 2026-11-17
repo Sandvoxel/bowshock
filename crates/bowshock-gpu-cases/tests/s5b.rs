@@ -83,8 +83,13 @@ fn rel(a: &[f64], b: &[f64]) -> f64 {
 
 /// One set-up: the CPU runs `n` iterations from the free stream, both GPU precisions run the same.
 fn compare(label: &str, grid: &Grid3, mach: f64, scheme: Scheme3, v: Viscous, n: usize, targets: (f64, f64), rows: &mut Vec<Row>) {
-    let mut cpu = host(grid, mach, scheme, v);
-    let fresh = host(grid, mach, scheme, v);
+    compare_with(label, &|| host(grid, mach, scheme, v), n, targets, rows)
+}
+
+/// [`compare`] for the host solver `make` builds (called twice: the CPU run and the state the GPU starts from).
+fn compare_with(label: &str, make: &dyn Fn() -> Solver3, n: usize, targets: (f64, f64), rows: &mut Vec<Row>) {
+    let mut cpu = make();
+    let fresh = make();
     let cpu_ok = catch_unwind(AssertUnwindSafe(|| {
         for _ in 0..n {
             cpu.step();
@@ -185,4 +190,40 @@ fn low_mach_block_matches_cpu() {
     }
     compare("SST M 0.1 Re 2e3 block + P", &g, 0.1, pre, viscous(Turbulence::Sst, 2e3), 30, IMPLICIT, &mut rows);
     report("S5b low-Mach preconditioning (10 x 8 x 6 box, no-slip block, dead block), 30 iterations from the free stream", &rows);
+}
+
+/// The viscous single-cell wedge of an axisymmetric body (`Case3::wedge_of`, the G3 ogive-cylinder at Mach 0.5, level 0, SST, the 2D case's numerics: block lines,
+/// the low-Mach correction and preconditioning, characteristic outflow; the body surface is `Grid3::wall_j0`, a no-slip wall of a viscous run) after 20 iterations:
+/// the swirl projection, the tangential wall speed, the no-slip `j = 0` ghost and its Jacobian, `P` with two factors.
+#[test]
+fn viscous_wedge_matches_cpu() {
+    use bowshock_cfd::solver::Scheme;
+    use bowshock_cfd::solver3::RansOpts3;
+    use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
+    use bowshock_core::engine::case::Case;
+    use bowshock_core::engine::case3::Case3;
+    use bowshock_core::{Atmosphere, Wake};
+
+    let air = Atmosphere::Isa { altitude_m: 0.0 }.state().unwrap();
+    let (re_c, sutherland) = (air.density * air.sound_speed * 0.1 / air.viscosity, 110.4 / air.temperature_k);
+    let body = BaseBody::cylinder(Body { nose: Nose::TangentOgive { fineness: 3.0 } }, 6.0);
+    let case = Case::viscous(0.5, body, 0, Wake::Base, re_c, sutherland, 0.5);
+    let make = |turbulence: Turbulence| -> Solver3 {
+        let c3 = Case3::wedge_of(&case, 0);
+        let mut s = c3.build_solver().unwrap();
+        let n = &case.numerics;
+        let Scheme::Implicit(p) = n.scheme else { panic!("the viscous numerics are implicit") };
+        s.cfg.scheme = Scheme3::Implicit(ImplicitParams { line_solve: LineSolve3::Block, ..p });
+        s.cfg.limiter = n.limiter;
+        s.cfg.low_mach = n.low_mach;
+        s.cfg.first_order_iters = n.first_order_iters;
+        let visc = case.viscous.map(|v| Viscous { turbulence, ..v });
+        s.set_viscous_with(visc, RansOpts3 { pressure_outflow: n.outflow == bowshock_cfd::solver::Bc::PressureOutflow, ..RansOpts3::default() });
+        s.restart_ramp();
+        s
+    };
+    let mut rows = Vec::new();
+    compare_with("G3 wedge laminar M 0.5 block + P", &|| make(Turbulence::Laminar), 20, IMPLICIT, &mut rows);
+    compare_with("G3 wedge SST M 0.5 block + P", &|| make(Turbulence::Sst), 20, IMPLICIT, &mut rows);
+    report("S5b viscous wedge (G3 ogive-cylinder, level 0), 20 iterations from the free stream", &rows);
 }

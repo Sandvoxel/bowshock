@@ -26,6 +26,8 @@ pub struct GpuRunner3 {
     pub host: Solver3,
     /// The wall classes of the device force integration, in the order of `GpuSolver3::set_wall_faces`.
     classes: Vec<Wall>,
+    /// The viscous parameters of a RANS run (`None`: Euler).
+    visc: Option<bowshock_cfd::solver::Viscous>,
     /// Kernel build + geometry upload, seconds.
     pub setup_seconds: f64,
     /// Parts of the set-up: host grid + solver, default context, `from_host`, seconds.
@@ -51,6 +53,7 @@ impl GpuRunner3 {
         // the grid (mesher, face geometry) comes from the process-wide cache: one `Analysis::run` per Mach node rebuilds neither it nor, with the shared default
         // context, the compiled kernels of the previous call
         let mut host = case.build_solver_cached()?;
+        let visc = rans.as_ref().map(|(v, _)| *v);
         if let Some((v, opts)) = rans {
             host.set_viscous_with(Some(v), opts);
         }
@@ -64,7 +67,8 @@ impl GpuRunner3 {
         let t1 = Instant::now();
         let gpu = GpuSolver3::from_host(&ctx, &host, prec)?;
         let upload_seconds = t1.elapsed().as_secs_f64();
-        let mut runner = GpuRunner3 { gpu, host, classes: Vec::new(), setup_seconds: t0.elapsed().as_secs_f64(), build_seconds, ctx_seconds, upload_seconds };
+        let mut runner =
+            GpuRunner3 { gpu, host, classes: Vec::new(), visc, setup_seconds: t0.elapsed().as_secs_f64(), build_seconds, ctx_seconds, upload_seconds };
         runner.upload_wall_faces(case)?;
         Ok(runner)
     }
@@ -117,13 +121,19 @@ impl GpuRunner3 {
                     _ => &g.kface[q],
                 };
                 let sigma = if t.n[0] * face.n[0] + t.n[1] * face.n[1] + t.n[2] * face.n[2] > 0.0 { 1.0 } else { -1.0 };
-                // the solid side: the upper cell where the fluid cell is the lower one (`sigma = +1`), else the lower one
-                let mut sc = t.idx;
-                if sigma < 0.0 {
-                    sc[t.dir] -= 1;
-                }
-                let Some(part) = g.part_of(sc[0], sc[1], sc[2]) else { continue };
-                let class = wall_class(part, t.dir, sigma < 0.0);
+                // the solid side: the upper cell where the fluid cell is the lower one (`sigma = +1`), else the lower one; a `j = 0` boundary face of `Grid3::wall_j0` has
+                // none (its part is the run's, the class that of `wall_faces`)
+                let class = if t.dir == 1 && t.idx[1] == 0 {
+                    let Some((_, part)) = g.wall_j0.iter().find(|(r, _)| r.contains(&t.idx[0])) else { continue };
+                    wall_class(*part, 1, false)
+                } else {
+                    let mut sc = t.idx;
+                    if sigma < 0.0 {
+                        sc[t.dir] -= 1;
+                    }
+                    let Some(part) = g.part_of(sc[0], sc[1], sc[2]) else { continue };
+                    wall_class(part, t.dir, sigma < 0.0)
+                };
                 let ci = classes.iter().position(|&c| c == class).unwrap_or_else(|| {
                     classes.push(class);
                     classes.len() - 1
@@ -152,7 +162,8 @@ impl GpuRunner3 {
                 .enumerate()
                 .map(|(i, &c)| {
                     let mut a = sums[off + i];
-                    if let Some(f) = &friction {
+                    // the shear of the base wall is no part of the drag (the 2D `Case::cd_total`: friction of the body surface, pressure of the base)
+                    if let (Some(f), false) = (&friction, c == Wall::Base) {
                         for q in 0..3 {
                             a[q] += f[i][q];
                         }
@@ -171,6 +182,41 @@ impl GpuRunner3 {
         }
         let f = self.gpu.viscous_wall_forces()?;
         Ok(WallForces { by: self.classes.iter().enumerate().map(|(i, &c)| (c, f[i])).collect() })
+    }
+
+    /// The skin friction coefficient and the largest first-cell `y+` of the device state of a viscous run (`None` for Euler), as the 2D solver reports them: the shear of the
+    /// body surface ahead of the base plane (the `j` faces; the base wall's shear is no part of the 2D drag) on the nose-base area, and `d_n sqrt(rho |tau|) / mu` over the
+    /// same faces. Downloads the state and the viscous face fluxes (once, at the end of a run).
+    pub fn friction_report(&self, case: &Case3) -> Result<Option<(f64, f64)>, Error> {
+        let (Some(visc), Some(fluxes)) = (self.visc, self.gpu.viscous_flux()?) else { return Ok(None) };
+        let g = &self.host.grid;
+        let r = self.host.rans().ok_or_else(|| Error::Gpu("the host solver has no viscous state".into()))?;
+        let u = self.gpu.state_f64()?;
+        let solid: Vec<bool> = g.part.iter().map(|&p| p != bowshock_cfd::grid3::PART_FLUID).collect();
+        let fs = self.host.cfg.freestream;
+        let q = 0.5 * fs[0] * fs[1] * fs[1];
+        let norm = (2.0 * std::f64::consts::PI / g.theta_span) / (q * std::f64::consts::FRAC_PI_4);
+        let x_base = case.body.x_base();
+        let (mut cd, mut y_plus_max) = (0.0, 0.0f64);
+        for t in bowshock_cfd::viscous3::wall_tractions(g, &solid, &r.dirs, &fluxes[0], &fluxes[1], &fluxes[2]) {
+            if t.dir != 1 {
+                continue;
+            }
+            let [i, j, k] = t.idx;
+            let f = &g.jface[(k * (g.nj + 1) + j) * g.ni + i];
+            if f.c[0] >= x_base {
+                continue;
+            }
+            cd += t.tau[0] * t.area;
+            let cell = if j == 0 || g.part[g.cell(i, j, k)] == bowshock_cfd::grid3::PART_FLUID { g.cell(i, j, k) } else { g.cell(i, j - 1, k) };
+            let x = g.xc[cell];
+            let d_n = ((x[0] - f.c[0]) * t.n[0] + (x[1] - f.c[1]) * t.n[1] + (x[2] - f.c[2]) * t.n[2]).abs();
+            let tau = (t.tau[0] * t.tau[0] + t.tau[1] * t.tau[1] + t.tau[2] * t.tau[2]).sqrt();
+            let w = bowshock_cfd::gas3::cons_to_prim3(&u[cell]);
+            let mu = visc.mu(bowshock_cfd::gas3::GAMMA * w[4] / w[0]);
+            y_plus_max = y_plus_max.max(d_n * (w[0] * tau).sqrt() / mu);
+        }
+        Ok(Some((norm * cd, y_plus_max)))
     }
 
     /// [`crate::engine::run3::lift_forces`] of the device state (the sting not counted, the wall faces up to the base station).

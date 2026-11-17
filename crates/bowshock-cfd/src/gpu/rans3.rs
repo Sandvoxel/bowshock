@@ -94,7 +94,7 @@ impl LazySolver3 {
             mass: std::array::from_fn(|d| last.f[d][0].clone()),
             dt: dt.clone(),
             turb: [s[7].clone(), s[8].clone()],
-            speed: (&last.p[1] * &last.p[1] + &last.p[2] * &last.p[2] + &last.p[3] * &last.p[3]).sqrt(),
+            speed: self.wall_speed_grid3(&t.tg, &last.p).expect("the wall speed of the wall cells"),
             ks: t.ks.clone(),
             law_strain: true,
             law: None,
@@ -132,6 +132,9 @@ impl LazySolver3 {
             self.visc = None;
             self.turb = None;
             self.p_out = None;
+            self.wall_j0.clear();
+            self.wall_j0_cols = None;
+            self.swirl = None;
             return Ok(());
         };
         let g = &s.grid;
@@ -160,6 +163,16 @@ impl LazySolver3 {
         } else {
             None
         };
+        self.wall_j0 = g.wall_j0.iter().map(|(r, _)| r.clone()).collect();
+        self.wall_j0_cols = {
+            let cols: Vec<bool> = (0..g.nk).flat_map(|_| (0..g.ni).map(|i| self.wall_j0.iter().any(|r| r.contains(&i)) && !g.is_axis(i, 0))).collect();
+            if cols.iter().any(|&b| b) {
+                Some(Array::from_slice_on(&self.ctx, &cols, [g.ni, 1, g.nk])?)
+            } else {
+                None
+            }
+        };
+        self.swirl = s.is_wedge().then(|| (0.5 * g.theta_span).sin_cos());
         self.visc = Some(vg);
         Ok(())
     }
@@ -179,7 +192,14 @@ impl LazySolver3 {
         let fv = self.viscous_fluxes3(vg, &w, &cell, &mu_t, wall.as_ref().map(|w| &w[2]));
         let total: [Rec3; 3] = std::array::from_fn(|d| Self::total_flux3(&f[d], &fv[d]));
         let diff = compute_dt.then(|| self.diffusion_rates3(&cell, &mu_t, &p[0]));
-        let (res, dt) = self.cell_residual3(&p, &total, compute_dt, diff.as_ref());
+        let (mut res, dt) = self.cell_residual3(&p, &total, compute_dt, diff.as_ref());
+        // a viscous wedge: the azimuthal momentum of the residual is projected out (the mirror ghost of the symmetry planes damps a swirl at an explicit rate no CFL
+        // survives): `t = res_v cos - res_w sin`, `res_v -= t cos`, `res_w += t sin` with `th = theta_span / 2` (`Solver3::add_viscous_residual`)
+        if let Some((sn, cs)) = self.swirl {
+            let t = &res[2] * c(cs) - &res[3] * c(sn);
+            res[2] = &res[2] - &t * c(cs);
+            res[3] = &res[3] + &t * c(sn);
+        }
         Resid3 { res, dt, p, w, f, vis: Some(VisAux { cell, fv, mu_t, wall }) }
     }
 

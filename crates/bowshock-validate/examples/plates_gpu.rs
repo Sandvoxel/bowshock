@@ -54,6 +54,8 @@ fn main() -> Result<(), String> {
         s if s.starts_with("yplus:") => (PlateCase::g2_yplus(s[6..].parse().map_err(|e| format!("y+: {e}"))?), 4.0, 0.97, false),
         other => return Err(format!("--case g1|g2|g2r|yplus:<y+>, got `{other}`")),
     };
+    // the plate as the `j = 0` boundary wall of the grid (step-free leading edge, as in 2D); `--slab`: the solid slab under it with the step at the leading edge
+    let case = if args.iter().any(|a| a == "--slab") { case } else { case.boundary_wall() };
     let max_iter: usize = value("--max-iter").map_or(Ok(if stationary { 6000 } else { 20_000 }), |v| v.parse().map_err(|e| format!("--max-iter: {e}")))?;
     let params = ImplicitParams { line_solve: LineSolve3::Block, ..ImplicitParams::VISCOUS };
     let host = plate_solver3(&case, params);

@@ -49,7 +49,18 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 
 /// The 2D engine case of a fixture facade case.
 fn engine_case_of(c: &FacadeCase) -> Result<bowshock_core::engine::case::Case, String> {
-    let a = Analysis::new(&c.body).map_err(err)?.resolution(c.resolution).wake(if c.wake_base { Wake::Base } else { Wake::Sting });
+    let mut a = Analysis::new(&c.body).map_err(err)?.resolution(c.resolution);
+    a = if c.rans {
+        // the wall-resolved grid of the facade's viscous analysis (ISA 120 m unless the fixture says otherwise), the wall roughness of the fixture
+        let a = a.viscous(bowshock_core::FlightConditions { atmosphere: c.atmosphere.unwrap_or(bowshock_core::Atmosphere::Isa { altitude_m: 120.0 }) });
+        if c.roughness_m > 0.0 {
+            a.roughness(c.roughness_m)
+        } else {
+            a
+        }
+    } else {
+        a.wake(if c.wake_base { Wake::Base } else { Wake::Sting })
+    };
     Ok(a.engine_cases(&[c.mach]).map_err(err)?.remove(0))
 }
 
@@ -142,12 +153,64 @@ fn p_of(q: &Cons3) -> f64 {
     cons_to_prim3(q)[4]
 }
 
+/// The settings of a RANS run on the wedge: the 2D case's own (van Albada / minmod, the low-Mach correction and preconditioning below Mach 1, 200 first-order
+/// iterations, the summed-direction time step), the block line solve; the stop rule on the total CD: 5 orders of residual drop or a CD range below `1e-4` over 2000
+/// iterations (the 2D rule `monitor_tol` / `monitor_window`).
+fn rans_numerics3(case2: &bowshock_core::engine::case::Case) -> Result<Numerics3, String> {
+    let n = &case2.numerics;
+    let bowshock_cfd::solver::Scheme::Implicit(p) = n.scheme else { return Err("the viscous numerics are implicit".into()) };
+    Ok(Numerics3 {
+        limiter: n.limiter,
+        low_mach: n.low_mach,
+        implicit: ImplicitParams { line_solve: LineSolve3::Block, ..p },
+        first_order_iters: n.first_order_iters,
+        max_iter: n.max_iter,
+        rel_tol: n.monitor_tol.unwrap_or(1e-4),
+        window: n.monitor_window,
+        stationary_min_iters: n.monitor_window,
+        warm_min_iters: n.monitor_window,
+        line_solve: Some(LineSolve3::Block),
+    })
+}
+
+impl GpuWedge {
+    /// A RANS case of the facade on the single-cell wedge of its wall-resolved 2D grid, on the GPU: SST, the 2D numerics, friction of the body surface from the device
+    /// state (`GpuRunner3::friction_report`), the wall forces of the monitor with the friction included.
+    fn rans_case(&self, c: &FacadeCase, case2: &bowshock_core::engine::case::Case) -> Result<Numbers, String> {
+        let mut case = Case3::wedge_of(case2, 0);
+        case.numerics = rans_numerics3(case2)?;
+        let v = case2.viscous.ok_or("the engine case of a RANS facade case is viscous")?;
+        let opts =
+            bowshock_cfd::solver3::RansOpts3 { pressure_outflow: case2.numerics.outflow == bowshock_cfd::solver::Bc::PressureOutflow, ..Default::default() };
+        let mut r = GpuRunner3::new_rans(&case, self.precision.unwrap_or_else(|| precision_of(c)), v, opts).map_err(err)?;
+        let t = Instant::now();
+        let p = r.run_on(&case, false).map_err(err)?;
+        let wall_s = t.elapsed().as_secs_f64();
+        let d = r.drag_parts(&case).map_err(err)?;
+        let (cd_friction, y_plus_max) = r.friction_report(&case).map_err(err)?.ok_or("no viscous state on the runner")?;
+        // the facade reports on the largest cross-section (`BaseBody::nose_to_largest_area`), the solver on the nose-base area
+        let q = case.body.nose_to_largest_area();
+        println!("INFO RANS wedge {} on the GPU: {} iterations, {wall_s:.1} s, stop {:?}, {:.2} orders", c.id, p.iterations, p.stop_reason, p.drop_orders);
+        Ok(Numbers {
+            cd_total: q * d.total,
+            cd_nose: q * d.nose,
+            cd_aft: d.aft.iter().map(|x| q * x).collect(),
+            cd_friction: Some(q * cd_friction),
+            cd_base: Some(q * d.base),
+            cp_base: None,
+            y_plus_max: Some(y_plus_max),
+            iterations: p.iterations,
+            stop_reason: format!("{:?}", p.stop_reason),
+        })
+    }
+}
+
 impl WedgeRunner for GpuWedge {
     fn facade_case(&self, c: &FacadeCase) -> Result<Numbers, String> {
-        if c.rans {
-            return Err("RANS on the 3D GPU solver is stage S5 (viscous3 / turbulence3 / walldist3 are not ported)".into());
-        }
         let case2 = engine_case_of(c)?;
+        if c.rans {
+            return self.rans_case(c, &case2);
+        }
         let mut case = if c.wake_base {
             wedge_case3(&case2)
         } else {

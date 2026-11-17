@@ -655,7 +655,20 @@ impl LazySolver3 {
             }
             return Tj5::Mat(m);
         }
-        if (dir == 1 && lower) || dir == 2 {
+        if dir == 1 && lower {
+            // a viscous run: the columns of `Grid3::wall_j0` are the no-slip wall (`diag(1, -1, -1, -1, 1)`), the others the reflection (`implicit3::assemble3`)
+            let refl = reflection_f3(&e.raw);
+            return Tj5::Mat(match (&self.wall_j0_cols, self.visc.is_some()) {
+                (Some(cols), true) => {
+                    let (z, one) = (0.0f32 * &edge[0], 1.0f32 + 0.0f32 * &edge[0]);
+                    let noslip = self.wall_jac_f3(&e.raw, &one);
+                    let (r, nsl) = (refl.dense(&z, &one), noslip.dense(&z, &one));
+                    Blk5::of(&std::array::from_fn(|k| select(cols, &nsl[k], &r[k])))
+                }
+                _ => refl,
+            });
+        }
+        if dir == 2 {
             return Tj5::Mat(reflection_f3(&e.raw));
         }
         Tj5::Zero

@@ -245,6 +245,9 @@ pub(crate) struct TGeo3 {
     /// Per cell: its position in `wall_idx` (zero elsewhere) and whether it is a wall cell: the gather that puts a result of the wall cells back on the grid.
     wall_pos: Option<Array<u32>>,
     wall_cell: Array<bool>,
+    /// The wall cells' faces: no-slip flags and directions `e` of the six faces (`None` without wall cells), gathered like `wall_idx`.
+    wall_ns: Option<[Array<bool>; 6]>,
+    wall_e: Option<[[A; 3]; 6]>,
     /// `1 / V` (zero in solid cells) and `V` (one in solid cells).
     inv_v: A,
     vol: A,
@@ -312,12 +315,40 @@ impl TGeo3 {
         }
         let wall_pos = if wall.is_empty() { None } else { Some(Array::from_slice_on(ctx, &pos, shape)?) };
         let wall_cell = Array::from_slice_on(ctx, &is_wall, shape)?;
+        // the no-slip faces of every wall cell (its six faces: `i`, `j`, `k` lower and upper) and their directions `e` for the tangential speed of the law of the wall
+        let (wall_ns, wall_e) = if wall.is_empty() {
+            (None, None)
+        } else {
+            let dirs = cv3::face_dirs(grid, solid, sym);
+            let mut ns: Vec<Vec<bool>> = (0..6).map(|_| Vec::with_capacity(wall.len())).collect();
+            let mut ev: Vec<[Vec<f64>; 3]> = (0..6).map(|_| [Vec::new(), Vec::new(), Vec::new()]).collect();
+            for &cell in &wall {
+                let c = cell as usize;
+                let lo = [c % ni, (c / ni) % nj, c / (ni * nj)];
+                for f in 0..6 {
+                    let (d, upper) = (f / 2, f % 2 == 1);
+                    let mut at = lo;
+                    at[d] += upper as usize;
+                    let fd = &dirs.family(d)[face_q3(grid, d, at)];
+                    ns[f].push(fd.noslip);
+                    for a in 0..3 {
+                        ev[f][a].push(if fd.noslip { fd.e[a] } else { 0.0 });
+                    }
+                }
+            }
+            let nw = [wall.len()];
+            let ns: Result<Vec<Array<bool>>> = ns.iter().map(|v| Array::from_slice_on(ctx, v, nw)).collect();
+            let ev: Result<Vec<[A; 3]>> = ev.iter().map(|v| Ok([up(ctx, &v[0], nw)?, up(ctx, &v[1], nw)?, up(ctx, &v[2], nw)?])).collect();
+            (ns?.try_into().ok(), ev?.try_into().ok())
+        };
         Ok(TGeo3 {
             dir,
             fluid,
             wall_idx,
             wall_pos,
             wall_cell,
+            wall_ns,
+            wall_e,
             inv_v: up(ctx, &grid.vol.iter().zip(solid).map(|(v, s)| if *s { 0.0 } else { 1.0 / v }).collect::<Vec<_>>(), shape)?,
             vol: up(ctx, &grid.vol.iter().zip(solid).map(|(v, s)| if *s { 1.0 } else { *v }).collect::<Vec<_>>(), shape)?,
             n_active: solid.iter().filter(|s| !**s).count().max(1),
@@ -343,7 +374,8 @@ pub(crate) struct TDev3<const N: usize> {
     dt: A,
     /// The scalars.
     turb: [A; N],
-    /// Speed `|u|` of the cell.
+    /// Speed of the cell tangential to its no-slip faces (`turbulence3::wall_speed`; zero at the cells without one): the speed of the law of the wall
+    /// ([`LazySolver3::wall_speed_grid3`]).
     speed: A,
     /// Roughness per cell (`None`: all smooth).
     ks: Option<A>,
@@ -449,6 +481,29 @@ impl LazySolver3 {
         at(&u2)
     }
 
+    /// `turbulence3::wall_speed` of the gathered wall cells from their velocity components: `|u - (u.e) e|` with `e` the unit direction of a no-slip face, the largest over
+    /// the cell's no-slip faces.
+    fn wall_speed_at3(&self, tg: &TGeo3, u: &A, v: &A, w: &A) -> A {
+        let (Some(ns), Some(e)) = (&tg.wall_ns, &tg.wall_e) else { return (u * u + v * v + w * w).sqrt() };
+        let q2 = u * u + v * v + w * w;
+        let mut t2 = c(0.0) * &q2;
+        for f in 0..6 {
+            let un = u * &e[f][0] + v * &e[f][1] + w * &e[f][2];
+            t2 = t2.maximum(select(&ns[f], (&q2 - &un * &un).maximum(c(0.0)), c(0.0)));
+        }
+        t2.sqrt()
+    }
+
+    /// [`LazySolver3::wall_speed_at3`] on the grid: the unpadded primitives `p`, zero at the cells that are no wall cells.
+    pub(crate) fn wall_speed_grid3(&self, tg: &TGeo3, p: &Rec3) -> Result<A> {
+        let mut out = A::zeros_on(&self.ctx, [self.ni, self.nj, self.nk])?;
+        if let Some(idx) = &tg.wall_idx {
+            let s = self.wall_speed_at3(tg, &p[1].take(idx), &p[2].take(idx), &p[3].take(idx));
+            out.put(idx, &s)?;
+        }
+        Ok(out)
+    }
+
     /// `turbulence3::wall_state_pass`: the wall state `[k_w, omega_w, mu_t,w]` of every fluid cell with a no-slip face (zero elsewhere) from the unpadded primitives `p`,
     /// the viscosity `mu`, the wall distance `dwall` and the roughness per cell `ks` (`None`: all smooth). The state is computed on the gathered wall cells only (the
     /// Newton and fixed-point iterations are transcendental: in `Df32` they cost as much as the rest of the update on all cells) and scattered into zeros.
@@ -460,7 +515,7 @@ impl LazySolver3 {
         let (rho, mu, d) = (at(&p[0]), at(mu), at(dwall));
         let nu = &mu / &rho;
         let (u, v, w) = (at(&p[1]), at(&p[2]), at(&p[3]));
-        let speed = (&u * &u + &v * &v + &w * &w).sqrt();
+        let speed = self.wall_speed_at3(tg, &u, &v, &w);
         let smooth = self.wall_smooth3(&rho, &nu, &speed, &d);
         let state = match ks {
             None => smooth,
@@ -731,7 +786,7 @@ impl LazySolver3 {
 
     /// Uploads the arrays of the CPU `TurbIn` (the padded host primitives reduced to the cells; `dwall` clamped to a finite value, a non-finite primitive of a solid cell
     /// replaced by 1) as the device inputs of the update.
-    fn upload_turb3<const N: usize>(&self, cx: &cpu3::TurbIn<N>) -> Result<(TDev3<N>, Rec3)> {
+    fn upload_turb3<const N: usize>(&self, tg: &TGeo3, cx: &cpu3::TurbIn<N>) -> Result<(TDev3<N>, Rec3)> {
         let (ni, nj, nk) = (self.ni, self.nj, self.nk);
         let nc = ni * nj * nk;
         let shape = [ni, nj, nk];
@@ -778,7 +833,7 @@ impl LazySolver3 {
                 }
                 a.try_into().unwrap_or_else(|_| unreachable!("N scalars"))
             },
-            speed: (&p[1] * &p[1] + &p[2] * &p[2] + &p[3] * &p[3]).sqrt().cache(),
+            speed: self.wall_speed_grid3(tg, &p)?,
             ks: if cx.ks.is_empty() { None } else { Some(per_cell(&|c| cx.ks[c])?) },
             law_strain: cx.law_strain,
             law: None,
@@ -802,7 +857,7 @@ impl LazySolver3 {
     /// `cx.wall` given (the stages chain on the device: the gradients of the stage 1 feed the blends and so on). The kernel-level comparison with `crate::turbulence3`.
     pub fn turbulence_probe3<M: TurbModel3<N>, const N: usize>(&self, model: &M, cx: &cpu3::TurbIn<N>, sym: &cv3::SymSides) -> Result<TurbProbe<N>> {
         let (vg, tg) = self.geometry_turb3(cx, sym)?;
-        let (dev, p) = self.upload_turb3(cx)?;
+        let (dev, p) = self.upload_turb3(&tg, cx)?;
         let nc = self.ni * self.nj * self.nk;
         let wall_out = self.wall_state_pass3(&tg, &p, &dev.cell.mu, &dev.dwall, dev.ks.as_ref())?;
         let dev = self.with_law3(&tg, &dev);
@@ -854,7 +909,7 @@ impl LazySolver3 {
     /// returned (the GPU is shared: a run can be slowed by other work). `(wall pass, update)`.
     pub fn turbulence_profile3<M: TurbModel3<N>, const N: usize>(&self, model: &M, cx: &cpu3::TurbIn<N>, sym: &cv3::SymSides, reps: usize) -> Result<(luma::Profile, luma::Profile)> {
         let (vg, tg) = self.geometry_turb3(cx, sym)?;
-        let (dev, p) = self.upload_turb3(cx)?;
+        let (dev, p) = self.upload_turb3(&tg, cx)?;
         let wall_run = || -> Result<()> {
             self.wall_state_pass3(&tg, &p, &dev.cell.mu, &dev.dwall, dev.ks.as_ref())?.eval()?;
             self.ctx.sync()

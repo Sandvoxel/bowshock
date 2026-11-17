@@ -488,6 +488,13 @@ pub struct LazySolver3 {
     solid_host: Vec<bool>,
     /// Back pressure of the `i = ni` static-pressure outflow of a viscous run (`RansOpts3::pressure_outflow`); `None`: the characteristic ghost.
     p_out: Option<f64>,
+    /// The runs of columns `i` of `j = 0` that are the no-slip body surface of a viscous run (`Grid3::wall_j0`; the axis columns excluded): the ghost layers there are the
+    /// no-slip ghost, not the mirror image (`Solver3::fill_ghosts`).
+    wall_j0: Vec<std::ops::Range<usize>>,
+    /// The same columns as a mask `[ni, 1, nk]` for the ghost Jacobian of the left-hand side (`None` without any).
+    wall_j0_cols: Option<Array<bool>>,
+    /// `(sin, cos)` of half the wedge angle in a viscous wedge run: the azimuthal momentum of the residual is projected out (`Solver3::add_viscous_residual`).
+    swirl: Option<(f64, f64)>,
 }
 
 impl LazySolver3 {
@@ -589,6 +596,9 @@ impl LazySolver3 {
             turb: None,
             solid_host: solid,
             p_out: None,
+            wall_j0: Vec::new(),
+            wall_j0_cols: None,
+            swirl: None,
         };
         let q = prim_to_cons3(&cfg.freestream);
         s.set_state(&vec![q; nc])?;
@@ -785,10 +795,25 @@ impl LazySolver3 {
             ];
             w.slice_mut(0, 2 + run.i0..2 + run.i1).slice(1, run.j..run.j + 2).slice(2, 2..nk + 2).assign(ghost).expect(ok);
         }
-        // the rest of j = 0: slip wall
+        // the rest of j = 0: slip wall, except the columns of `Grid3::wall_j0` of a viscous run (the body surface: the no-slip ghost `(rho, -u, -v, -w, p)`)
         for (i0, i1, n) in &g.slip {
-            let mirror = rec3(|f| p[f].pad([(0, 0), (2, 0)], PadMode::Mirror).slice(1, 0..2).slice(0, *i0..*i1));
-            w.slice_mut(0, 2 + i0..2 + i1).slice(1, 0..2).slice(2, 2..nk + 2).assign(reflect3(&mirror, n)).expect(ok);
+            let mut cuts = vec![*i0, *i1];
+            for r in &self.wall_j0 {
+                cuts.extend([r.start, r.end].into_iter().filter(|b| b > i0 && b < i1));
+            }
+            cuts.sort_unstable();
+            cuts.dedup();
+            for seg in cuts.windows(2) {
+                let (a, b) = (seg[0], seg[1]);
+                let mirror = rec3(|f| p[f].pad([(0, 0), (2, 0)], PadMode::Mirror).slice(1, 0..2).slice(0, a..b));
+                let ghost = if self.visc.is_some() && self.wall_j0.iter().any(|r| r.contains(&a)) {
+                    [mirror[0].clone(), -&mirror[1], -&mirror[2], -&mirror[3], mirror[4].clone()]
+                } else {
+                    let nn: Vec3 = std::array::from_fn(|q| n[q].slice(0, a - i0..b - i0));
+                    reflect3(&mirror, &nn)
+                };
+                w.slice_mut(0, 2 + a..2 + b).slice(1, 0..2).slice(2, 2..nk + 2).assign(ghost).expect(ok);
+            }
         }
 
         // k = 0 and k = nk: symmetry planes
