@@ -213,6 +213,8 @@ struct Opts {
     perf: bool,
     profile: bool,
     mem: bool,
+    /// Time a combination whose 100-iteration sanity run diverges (the step cost does not depend on the values), with a warning.
+    allow_nonfinite: bool,
     n: Option<usize>,
 }
 
@@ -263,7 +265,13 @@ fn bench_combo(case: &BenchCase, precision: (Precision, &'static str), solve: (L
         );
     }
     if !last.is_finite() {
-        return Err(format!("{} {} {}: residual {last} after 100 iterations", case.name, precision.1, solve.1));
+        if !o.allow_nonfinite {
+            return Err(format!("{} {} {}: residual {last} after 100 iterations", case.name, precision.1, solve.1));
+        }
+        eprintln!(
+            "WARNING {} {} {}: residual {last} after 100 iterations (--allow-nonfinite: the step time is of a diverging iteration)",
+            case.name, precision.1, solve.1
+        );
     }
     let peak_mib = sampler.map(MemSampler::stop);
     Ok(Result3 {
@@ -299,6 +307,7 @@ fn main() -> Result<(), String> {
         perf: !flag("--no-perf"),
         profile: !flag("--no-profile"),
         mem: flag("--mem"),
+        allow_nonfinite: flag("--allow-nonfinite"),
         n: value("--n").map(|n| n.parse::<usize>().map_err(|e| format!("--n: {e}"))).transpose()?,
     };
     let mut cases = Vec::new();

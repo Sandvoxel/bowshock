@@ -32,11 +32,14 @@ use bowshock_gpu_cases::wedge3::wedge_case3;
 use serde_json::json;
 use std::time::Instant;
 
-pub struct GpuWedge;
+/// `precision`: `None` runs a case in the precision of the fixture's 2D case, `Some` forces one.
+pub struct GpuWedge {
+    pub precision: Option<Precision>,
+}
 
 impl GpuWedge {
     pub fn new() -> GpuWedge {
-        GpuWedge
+        GpuWedge { precision: None }
     }
 }
 
@@ -156,7 +159,7 @@ impl WedgeRunner for GpuWedge {
         // `DiagonalCorrected` (the GPU default of `Numerics3::implicit_for`) diverges on the wedge, CPU f64 too (cfl_scan --cpu): the block factorisation it is
         // verified against is the one that converges
         case.numerics.line_solve = Some(LineSolve3::Block);
-        let mut r = GpuRunner3::new(&case, precision_of(c)).map_err(err)?;
+        let mut r = GpuRunner3::new(&case, self.precision.unwrap_or_else(|| precision_of(c))).map_err(err)?;
         let p = r.run_on(&case, false).map_err(err)?;
         let d = r.drag_parts(&case).map_err(err)?;
         // the facade reports on the area of the largest diameter of the body, the solver (and `drag_parts`) on the nose-base area
@@ -276,7 +279,7 @@ impl WedgeRunner for GpuWedge {
         case.numerics.first_order_iters = i["first_order_iters"].as_u64().unwrap_or(0) as usize;
         case.numerics.max_iter = i["max_iter"].as_u64().unwrap_or(0) as usize;
         case.numerics.line_solve = Some(LineSolve3::Block);
-        let mut r = GpuRunner3::new(&case, Precision::F32).map_err(err)?;
+        let mut r = GpuRunner3::new(&case, Precision::Extended).map_err(err)?;
         let p = r.run_on(&case, false).map_err(err)?;
         let d = r.drag_parts(&case).map_err(err)?;
         let u = r.gpu.state_f64().map_err(err)?;
@@ -391,36 +394,41 @@ fn gpu_euler_wedge_table_perf() {
     let cases = facade_cases("G-V4");
     let cases: Vec<&FacadeCase> = cases.iter().filter(|c| c.group == "table-euler").collect();
     assert!(!cases.is_empty(), "the fixture has no table-euler cases");
-    let runner = GpuWedge::new();
-    let (t0, mut iters, mut worst) = (Instant::now(), 0usize, 0.0f64);
-    println!("| Mach | grid | iterations | stop | cd_total | 2D cd_total | rel diff | 2D iterations | wall s |\n|---|---|---|---|---|---|---|---|---|");
-    for c in &cases {
-        let t = Instant::now();
-        let m = runner.facade_case(c).expect("wedge case");
-        let rel = (m.cd_total - c.reference.cd_total) / c.reference.cd_total;
-        worst = worst.max(rel.abs());
-        iters += m.iterations;
+    // the 2D table ran on the GPU in df32 (the fixture's backend and precision): both precisions are timed
+    for (label, precision) in [("df32", Precision::Extended), ("f32", Precision::F32)] {
+        let runner = GpuWedge { precision: Some(precision) };
+        let (t0, mut iters, mut worst) = (Instant::now(), 0usize, 0.0f64);
         println!(
-            "| {} | - | {} | {} | {:.5} | {:.5} | {:+.2} % | {} | {:.2} |",
-            c.mach,
-            m.iterations,
-            m.stop_reason,
-            m.cd_total,
-            c.reference.cd_total,
-            100.0 * rel,
-            c.reference.iterations,
-            t.elapsed().as_secs_f64()
+            "{label}\n| Mach | grid | iterations | stop | cd_total | 2D cd_total | rel diff | 2D iterations | wall s |\n|---|---|---|---|---|---|---|---|---|"
+        );
+        for c in &cases {
+            let t = Instant::now();
+            let m = runner.facade_case(c).expect("wedge case");
+            let rel = (m.cd_total - c.reference.cd_total) / c.reference.cd_total;
+            worst = worst.max(rel.abs());
+            iters += m.iterations;
+            println!(
+                "| {} | - | {} | {} | {:.5} | {:.5} | {:+.2} % | {} | {:.2} |",
+                c.mach,
+                m.iterations,
+                m.stop_reason,
+                m.cd_total,
+                c.reference.cd_total,
+                100.0 * rel,
+                c.reference.iterations,
+                t.elapsed().as_secs_f64()
+            );
+        }
+        let wall = t0.elapsed().as_secs_f64();
+        let (ref_wall, ref_iters): (f64, usize) = (cases.iter().map(|c| c.wall_s).sum(), cases.iter().map(|c| c.reference.iterations).sum());
+        println!(
+            "TABLE wedge euler {label}: {} points, {wall:.1} s, {iters} iterations; 2D table {ref_wall:.1} s, {ref_iters} iterations; worst |cd_total| difference {:.2} %",
+            cases.len(),
+            100.0 * worst
+        );
+        println!(
+            "PERF {}",
+            json!({"case": "3d-wedge-euler-table", "precision": label, "cells": null, "iters": iters, "us_per_iter": 1e6 * wall / iters as f64, "wall_s": wall})
         );
     }
-    let wall = t0.elapsed().as_secs_f64();
-    let (ref_wall, ref_iters): (f64, usize) = (cases.iter().map(|c| c.wall_s).sum(), cases.iter().map(|c| c.reference.iterations).sum());
-    println!(
-        "TABLE wedge euler: {} points, {wall:.1} s, {iters} iterations; 2D table {ref_wall:.1} s, {ref_iters} iterations; worst |cd_total| difference {:.2} %",
-        cases.len(),
-        100.0 * worst
-    );
-    println!(
-        "PERF {}",
-        json!({"case": "3d-wedge-euler-table", "precision": "f32", "cells": null, "iters": iters, "us_per_iter": 1e6 * wall / iters as f64, "wall_s": wall})
-    );
 }
