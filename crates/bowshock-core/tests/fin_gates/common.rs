@@ -100,7 +100,12 @@ impl Session {
     pub fn new(case: &Case3) -> Result<Session, String> {
         #[cfg(feature = "gpu")]
         if gpu_backend() {
-            let r = bowshock_core::engine::gpu3::GpuRunner3::new(case, bowshock_cfd::gpu::Precision::Extended).map_err(|e| e.to_string())?;
+            let prec = if std::env::var("BOWSHOCK_WEDGE_PRECISION").as_deref() == Ok("f32") {
+                bowshock_cfd::gpu::Precision::F32
+            } else {
+                bowshock_cfd::gpu::Precision::Extended
+            };
+            let r = bowshock_core::engine::gpu3::GpuRunner3::new(case, prec).map_err(|e| e.to_string())?;
             return Ok(Session::Gpu(Box::new(r)));
         }
         Ok(Session::Cpu(Box::new(case.build_solver_cached().map_err(|e| e.to_string())?)))
