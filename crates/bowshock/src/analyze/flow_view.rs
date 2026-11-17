@@ -22,6 +22,7 @@ mod gpu;
 mod map;
 mod meridian;
 mod prepared;
+mod scene3;
 
 use iced::widget::canvas::{self, Action, Event, Frame, Geometry, LineDash, Path, Stroke, Text};
 use iced::widget::{column, container, row, stack, text, Space};
