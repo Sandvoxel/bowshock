@@ -299,6 +299,9 @@ fn bench_combo(case: &BenchCase, precision: (Precision, &'static str), solve: (L
             pv.splits.len(),
             peak_v.map_or(String::new(), |m| format!(", peak device memory of this process {m} MiB"))
         );
+        for sp in &pv.splits {
+            println!("  fusion cut: {sp}");
+        }
         if o.profile {
             println!("```\n{}```", compact(&pv));
         }
