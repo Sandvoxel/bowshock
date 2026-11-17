@@ -54,7 +54,12 @@ fn the_arcas_axial_force_by_part() {
     let (body, fins, flow) = if anf {
         // the Army-Navy Finner (0.03 m) at the sea-level atmosphere, the grid sized for Mach 3.147 as in G-F5
         let flow = WallFlow { re_c: 1.225 * 340.294 * 0.03 / 1.7894e-5, mach_max: env("STUDY_GRID_MACH", 3.147), ks_body: 0.0, ks_fin: 0.0, sutherland: 0.368 };
-        (Case3::anf_body(), Case3::anf_fins(), flow)
+        let mut f = Case3::anf_fins();
+        // STUDY_LE=<f>: the leading-edge wedge of the flat-back section over the fraction f of the chord (the code's default is 0.1: a 21.8 degree half angle)
+        if let Some(le) = std::env::var("STUDY_LE").ok().and_then(|v| v.parse::<f64>().ok()) {
+            f.profile = FinProfile::Custom { section: vec![[0.0, 0.0], [le, 1.0], [1.0, 1.0]] };
+        }
+        (Case3::anf_body(), f, flow)
     } else {
         (body, fins, flow)
     };
