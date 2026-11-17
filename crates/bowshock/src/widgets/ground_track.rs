@@ -440,7 +440,7 @@ impl canvas::Program<GroundMessage> for GroundTrackView<'_> {
         let pad = xf.pad();
         let colour = |c: SeriesColor| c.resolve(t);
 
-        // Axes through the pad and range rings, labelled on the south side.
+        // Axes through the pad and range rings, labelled along the clearest cardinal spoke (south first).
         let faint = |f: &mut Frame, a: Point, b: Point| f.stroke(&Path::line(a, b), Stroke::default().with_color(t.line_100).with_width(1.0));
         faint(&mut f, Point::new(0.0, pad.y.floor() + 0.5), Point::new(size.width, pad.y.floor() + 0.5));
         faint(&mut f, Point::new(pad.x.floor() + 0.5, 0.0), Point::new(pad.x.floor() + 0.5, size.height));
@@ -451,13 +451,11 @@ impl canvas::Program<GroundMessage> for GroundTrackView<'_> {
             .map(|c| pad.distance(Point::new(c.0, c.1)))
             .fold(0.0f32, f32::max);
         let rings = ((f64::from(farthest / xf.scale) / (spacing * dist.to_si)).ceil() as usize).min(60);
+        let mut ring_items: Vec<(f32, String)> = Vec::with_capacity(rings);
         for k in 1..=rings {
             let r = (spacing * dist.to_si * k as f64) as f32 * xf.scale;
             f.stroke(&Path::circle(pad, r), Stroke::default().with_color(t.line_100).with_width(1.0));
-            let at = Point::new(pad.x, pad.y + r + 3.0);
-            if at.y < size.height - 12.0 && at.y > 0.0 {
-                put(&mut f, &format!("{} {}", fmt_m(spacing * k as f64), dist.symbol), at, t.ink_faint, 10.0, Alignment::Center, alignment::Vertical::Top);
-            }
+            ring_items.push((r, format!("{} {}", fmt_m(spacing * k as f64), dist.symbol)));
         }
 
         // Field radius: the dashed circle; its name is in the bottom-left corner (`corner_marks`), clear of everything else.
@@ -467,6 +465,44 @@ impl canvas::Program<GroundMessage> for GroundTrackView<'_> {
                 &Path::circle(pad, r),
                 Stroke { line_dash: LineDash { segments: &[6.0, 4.0], offset: 0 }, ..Stroke::default().with_color(t.warn).with_width(1.0) },
             );
+        }
+
+        let label_h = TEXT_LABEL + 2.0;
+        let pad_w = text_w("PAD", 10.0);
+        let mut reserved = corner_rects(size, self.data.wind, self.data.field_label().as_deref(), self.data.speed().symbol);
+        reserved.push(Rectangle::new(Point::new(pad.x - 3.0 - pad_w - 2.0, pad.y - 7.0 - 12.0), Size::new(pad_w + 4.0, 14.0)));
+        reserved.push(Rectangle::new(Point::new(pad.x - 7.0, pad.y - 7.0), Size::new(14.0, 14.0)));
+        let mut samples: Vec<Point> = Vec::new();
+        for track in &self.data.tracks {
+            let screen: Vec<Point> = track.points.iter().map(|p| xf.to_screen(p.east, p.north)).collect();
+            for pair in screen.windows(2) {
+                let n = (pair[0].distance(pair[1]) / 2.0).ceil().max(1.0) as usize;
+                samples.extend((0..n).map(|k| {
+                    let u = k as f32 / n as f32;
+                    Point::new(pair[0].x + (pair[1].x - pair[0].x) * u, pair[0].y + (pair[1].y - pair[0].y) * u)
+                }));
+            }
+            samples.extend(screen.last().copied());
+        }
+        let mut ring_obstacles = samples.clone();
+        for track in &self.data.tracks {
+            if let Some(l) = track.landing() {
+                ring_obstacles.push(xf.to_screen(l.east, l.north));
+            }
+            ring_obstacles.extend(track.scatter.iter().map(|&(e, n)| xf.to_screen(e, n)));
+            if let Some(e) = &track.ellipse {
+                ring_obstacles.extend((0..32).map(|k| {
+                    let p = e.at(k as f64 / 32.0 * std::f64::consts::TAU);
+                    xf.to_screen(p.0, p.1)
+                }));
+            }
+        }
+        let label_bounds = Size::new((size.width - 10.0).max(0.0), size.height);
+        let (_, ring_labels) = place_ring_labels(label_bounds, pad, &ring_items, &ring_obstacles, &reserved);
+        for (rect, label) in &ring_labels {
+            f.fill_rectangle(rect.position(), rect.size(), Color { a: 0.85, ..t.bg_200 });
+            put(&mut f, label, Point::new(rect.x + 2.0, rect.y + 1.0), t.ink_faint, 10.0, Alignment::Left, alignment::Vertical::Top);
+            reserved.push(*rect);
         }
 
         // Dispersion: dots and the 95 % ellipse.
@@ -523,23 +559,6 @@ impl canvas::Program<GroundMessage> for GroundTrackView<'_> {
         }
         // Landing labels: each on the first free spot around its marker (see `place_landing_labels`), joined to the marker by a
         // leader line when it had to move away.
-        let label_h = TEXT_LABEL + 2.0;
-        let pad_w = text_w("PAD", 10.0);
-        let mut reserved = corner_rects(size, self.data.wind, self.data.field_label().as_deref(), self.data.speed().symbol);
-        reserved.push(Rectangle::new(Point::new(pad.x - 3.0 - pad_w - 2.0, pad.y - 7.0 - 12.0), Size::new(pad_w + 4.0, 14.0)));
-        reserved.push(Rectangle::new(Point::new(pad.x - 7.0, pad.y - 7.0), Size::new(14.0, 14.0)));
-        let mut samples: Vec<Point> = Vec::new();
-        for track in &self.data.tracks {
-            let screen: Vec<Point> = track.points.iter().map(|p| xf.to_screen(p.east, p.north)).collect();
-            for pair in screen.windows(2) {
-                let n = (pair[0].distance(pair[1]) / 2.0).ceil().max(1.0) as usize;
-                samples.extend((0..n).map(|k| {
-                    let u = k as f32 / n as f32;
-                    Point::new(pair[0].x + (pair[1].x - pair[0].x) * u, pair[0].y + (pair[1].y - pair[0].y) * u)
-                }));
-            }
-            samples.extend(screen.last().copied());
-        }
         let landings: Vec<(Point, String, Color)> = self
             .data
             .tracks
@@ -551,7 +570,7 @@ impl canvas::Program<GroundMessage> for GroundTrackView<'_> {
             .collect();
         let items: Vec<(Point, f32)> = landings.iter().map(|(at, label, _)| (*at, text_w(label, TEXT_LABEL))).collect();
         // A margin at the right edge, where the results column's scrollbar overlays the map.
-        let rects = place_landing_labels(Size::new(size.width - 10.0, size.height), &items, label_h, &samples, &reserved);
+        let rects = place_landing_labels(label_bounds, &items, label_h, &samples, &reserved);
         for ((at, label, c), rect) in landings.iter().zip(&rects) {
             let near = Point::new(at.x.clamp(rect.x, rect.x + rect.width), at.y.clamp(rect.y, rect.y + rect.height));
             if near.distance(*at) > 14.0 {
@@ -719,6 +738,57 @@ fn place_landing_labels(size: Size, items: &[(Point, f32)], height: f32, samples
         out.push(rect);
     }
     out
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Spoke {
+    South,
+    East,
+    West,
+    North,
+}
+
+/// Places the range-ring labels `(radius_px, text)` along the clearest cardinal spoke from `pad` (`South` first, matching the
+/// design kit, then `East`, `West`, `North` when a track or dispersion cloud runs south).
+fn place_ring_labels(size: Size, pad: Point, rings: &[(f32, String)], obstacles: &[Point], reserved: &[Rectangle]) -> (Spoke, Vec<(Rectangle, String)>) {
+    const SPOKES: [Spoke; 4] = [Spoke::South, Spoke::East, Spoke::West, Spoke::North];
+    let h = 12.0;
+    let candidate = |spoke: Spoke| -> Vec<(Rectangle, String)> {
+        rings
+            .iter()
+            .filter_map(|(r, label)| {
+                let w = text_w(label, 10.0) + 4.0;
+                let origin = match spoke {
+                    Spoke::South => Point::new(pad.x + 3.0, pad.y + r + 2.0),
+                    Spoke::East => Point::new(pad.x + r + 3.0, pad.y + 3.0),
+                    Spoke::West => Point::new(pad.x - r - 3.0 - w, pad.y + 3.0),
+                    Spoke::North => Point::new(pad.x + 3.0, pad.y - r - 2.0 - h),
+                };
+                let rect = Rectangle::new(origin, Size::new(w, h));
+                let inside = rect.x >= 2.0 && rect.y >= 2.0 && rect.x + rect.width <= size.width - 2.0 && rect.y + rect.height <= size.height - 2.0;
+                (inside && !reserved.iter().any(|c| c.intersects(&rect))).then(|| (rect, label.clone()))
+            })
+            .collect()
+    };
+    SPOKES
+        .into_iter()
+        .enumerate()
+        .map(|(order, spoke)| {
+            let placed = candidate(spoke);
+            let mut hit_labels = 0usize;
+            let mut hit_points = 0usize;
+            for (rect, _) in &placed {
+                let grown = Rectangle::new(Point::new(rect.x - 4.0, rect.y - 4.0), Size::new(rect.width + 8.0, rect.height + 8.0));
+                let hits = obstacles.iter().filter(|p| grown.contains(**p)).count();
+                if hits > 0 {
+                    hit_labels += 1;
+                    hit_points += hits;
+                }
+            }
+            ((placed.is_empty(), hit_labels, hit_points, order), (spoke, placed))
+        })
+        .min_by_key(|(score, _)| *score)
+        .map_or((Spoke::South, Vec::new()), |(_, best)| best)
 }
 
 /// Wind readout (top left), north arrow (top right), field-radius key (bottom left) and scale bar (bottom right).
@@ -953,5 +1023,29 @@ mod tests {
         assert_eq!(i, 0);
         assert!((p.t - 15.0).abs() < 0.5, "{p:?}");
         assert!(g.nearest(&xf, Point::new(at.x, at.y - 80.0), HIT_PX).is_none());
+    }
+
+    #[test]
+    fn ring_labels_default_to_south_and_switch_spokes_when_drift_runs_south() {
+        let size = Size::new(680.0, 240.0);
+        let pad = Point::new(340.0, 80.0);
+        let rings = vec![(60.0, "200 m".to_string()), (120.0, "400 m".to_string()), (180.0, "600 m".to_string())];
+        let reserved = corner_rects(size, Some(Wind { speed: 3.0, from_deg: 0.0 }), Some("FIELD 300 m"), "m/s");
+
+        // With an east-northeast track, south is clear and sits to the right of the vertical axis line.
+        let ene: Vec<Point> = (1..=30).map(|k| Point::new(pad.x + k as f32 * 4.0, pad.y - k as f32 * 1.5)).collect();
+        let (spoke, placed) = place_ring_labels(size, pad, &rings, &ene, &reserved);
+        assert_eq!(spoke, Spoke::South);
+        assert!(!placed.is_empty());
+        assert!(placed.iter().all(|(r, _)| r.x > pad.x), "south labels stay clear of the vertical axis hairline");
+
+        // A north wind (from 0°) blows due south along x = pad.x: ring labels move off the 180° drift vector onto the east spoke.
+        let due_south: Vec<Point> = (1..=70).map(|k| Point::new(pad.x, pad.y + k as f32 * 2.0)).collect();
+        let (spoke, placed) = place_ring_labels(size, pad, &rings, &due_south, &reserved);
+        assert_eq!(spoke, Spoke::East);
+        assert_eq!(placed.len(), 3);
+        for (rect, _) in &placed {
+            assert!(due_south.iter().all(|p| !rect.contains(*p)), "{rect:?} overlaps south drift");
+        }
     }
 }

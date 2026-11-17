@@ -366,7 +366,7 @@ fn points<'a>(t: &'a Tracker) -> Element<'a, Message> {
             .boxed(),
         );
     }
-    scrollable(column(rows)).width(Fill).height(Fill).style(theme::scroll).boxed()
+    scrollable(column(rows)).direction(theme::thin_scrollbar()).style(theme::scroll).width(Fill).height(Fill).boxed()
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

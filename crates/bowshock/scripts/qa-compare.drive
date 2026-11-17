@@ -3,6 +3,8 @@ viewport 1280x760
 scale 1
 click "CONFIG"
 click "New configuration…"
+click #motor-search
+type "I284"
 click "I284W"
 click "Add configuration"
 click "CONFIG"

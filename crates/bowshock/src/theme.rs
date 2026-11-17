@@ -134,17 +134,39 @@ pub fn segment(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style
     }
 }
 
-/// The scrollbar in token colours: no rail, a square `line-200` scroller that brightens under the cursor.
+/// A thin vertical scrollbar, so panel content is not narrowed while keeping a clear rail cue.
+pub fn thin_scrollbar() -> iced::widget::scrollable::Direction {
+    iced::widget::scrollable::Direction::Vertical(iced::widget::scrollable::Scrollbar::new().width(4).scroller_width(4).margin(1))
+}
+
+/// The scrollbar in token colours: a `bg-400` rail when the content overflows, and a square `ink-faint` scroller that brightens
+/// under the cursor.
 pub fn scroll(theme: &Theme, status: iced::widget::scrollable::Status) -> iced::widget::scrollable::Style {
     use iced::widget::scrollable::{default, Rail, Scroller, Status};
     let t = tokens(theme);
-    let hot = matches!(status, Status::Hovered { .. } | Status::Dragged { .. });
-    let rail = Rail {
-        background: None,
-        border: Border::default(),
-        scroller: Scroller { background: Background::Color(if hot { t.ink_faint } else { t.line_200 }), border: Border::default() },
+    let (y_disabled, x_disabled, y_hot, x_hot) = match status {
+        Status::Active { is_vertical_scrollbar_disabled, is_horizontal_scrollbar_disabled } => {
+            (is_vertical_scrollbar_disabled, is_horizontal_scrollbar_disabled, false, false)
+        }
+        Status::Hovered {
+            is_vertical_scrollbar_disabled,
+            is_horizontal_scrollbar_disabled,
+            is_vertical_scrollbar_hovered,
+            is_horizontal_scrollbar_hovered,
+        } => (is_vertical_scrollbar_disabled, is_horizontal_scrollbar_disabled, is_vertical_scrollbar_hovered, is_horizontal_scrollbar_hovered),
+        Status::Dragged {
+            is_vertical_scrollbar_disabled,
+            is_horizontal_scrollbar_disabled,
+            is_vertical_scrollbar_dragged,
+            is_horizontal_scrollbar_dragged,
+        } => (is_vertical_scrollbar_disabled, is_horizontal_scrollbar_disabled, is_vertical_scrollbar_dragged, is_horizontal_scrollbar_dragged),
     };
-    iced::widget::scrollable::Style { vertical_rail: rail, horizontal_rail: rail, ..default(theme, status) }
+    let rail = |disabled: bool, hot: bool| Rail {
+        background: (!disabled).then_some(Background::Color(t.bg_400)),
+        border: Border::default(),
+        scroller: Scroller { background: Background::Color(if hot { t.ink_muted } else { t.ink_faint }), border: Border::default() },
+    };
+    iced::widget::scrollable::Style { vertical_rail: rail(y_disabled, y_hot), horizontal_rail: rail(x_disabled, x_hot), ..default(theme, status) }
 }
 
 /// A segmented control's strip: `bg-100` inside a 1 px `line-200` frame.

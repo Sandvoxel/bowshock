@@ -511,10 +511,7 @@ impl State {
         if let Some(message) = empty.filter(|m| !m.is_empty()) {
             rows.push(container(text(message).size(TEXT_LABEL).style(theme::faint)).padding(theme::PAD_PANEL).boxed());
         }
-        let list = scrollable(column(rows).width(Fill))
-            .height(Fill)
-            .direction(scrollable::Direction::Vertical(scrollable::Scrollbar::new().width(4).scroller_width(4).margin(1)))
-            .style(theme::scroll);
+        let list = scrollable(column(rows).width(Fill)).height(Fill).direction(theme::thin_scrollbar()).style(theme::scroll);
 
         let rule = || container(Space::new()).width(Fill).height(1).style(theme::hairline);
         let body = column![header, rule(), controls, rule(), list, rule(), symmetry_footer(ctx)].width(Fill).height(Fill);

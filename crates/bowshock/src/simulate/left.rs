@@ -80,9 +80,7 @@ pub(super) fn view<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
 
     // The tracker is invisible: it only keeps `state.modifiers` current for the row clicks.
     let held = keys::track(state.modifiers.unwrap_or(ctx.env.drive_modifiers), Message::Modifiers);
-    column![held, head, scrollable(column(body)).direction(super::thin_scrollbar()).style(super::scroll_style).height(Fill), rule(), footer]
-        .height(Fill)
-        .boxed()
+    column![held, head, scrollable(column(body)).direction(theme::thin_scrollbar()).style(theme::scroll).height(Fill), rule(), footer].height(Fill).boxed()
 }
 
 /// The inline text field that renames a flight (Enter commits, Esc cancels).
@@ -172,7 +170,9 @@ fn conditions<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
     fields.push(coord_field(state, true, &shared));
     fields.push(field("Temperature", shared.temperature, spec.temperature, Quantity::Temperature, Edit::Temperature));
     fields.push(field("Field radius", shared.field_radius, spec.field_radius, Quantity::Altitude, Edit::FieldRadius));
-    container(column![head, column(fields).spacing(SPACE_2)].spacing(SPACE_3)).padding(SPACE_3).boxed()
+    container(column![head, column(fields).spacing(SPACE_2)].spacing(SPACE_2))
+        .padding(iced::Padding { top: SPACE_2, right: SPACE_3, bottom: SPACE_3, left: SPACE_3 })
+        .boxed()
 }
 
 /// Where an air start begins when it is switched on: 1 km up at 100 m/s.

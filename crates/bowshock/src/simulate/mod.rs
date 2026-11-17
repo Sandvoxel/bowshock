@@ -1138,24 +1138,6 @@ fn repaired(layout: &PlotLayout) -> PlotLayout {
     layout
 }
 
-/// A thin vertical scrollbar, so the panels' content is not narrowed.
-fn thin_scrollbar() -> iced::widget::scrollable::Direction {
-    iced::widget::scrollable::Direction::Vertical(iced::widget::scrollable::Scrollbar::new().width(4).scroller_width(4).margin(1))
-}
-
-/// The scrollbar in token colours: no rail, a square `line-200` scroller that brightens under the cursor.
-fn scroll_style(theme: &iced::Theme, status: iced::widget::scrollable::Status) -> iced::widget::scrollable::Style {
-    use iced::widget::scrollable::{Rail, Scroller, Status};
-    let t = theme::tokens(theme);
-    let hot = matches!(status, Status::Hovered { .. } | Status::Dragged { .. });
-    let rail = Rail {
-        background: None,
-        border: iced::Border::default(),
-        scroller: Scroller { background: iced::Background::Color(if hot { t.ink_faint } else { t.line_200 }), border: iced::Border::default() },
-    };
-    iced::widget::scrollable::Style { vertical_rail: rail, horizontal_rail: rail, ..iced::widget::scrollable::default(theme, status) }
-}
-
 /// Flies `input` on a worker thread and waits for it without blocking the UI's executor.
 async fn compute(input: bowshock_sim::SimInput) -> Result<(Arc<FlightResult>, Duration), String> {
     crate::app::worker::offload(move || {

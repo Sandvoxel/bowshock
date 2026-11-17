@@ -1007,7 +1007,7 @@ fn table<'a>(run: &'a Run, units: UnitSystem) -> Element<'a, Message> {
             .collect::<Vec<_>>(),
     )
     .spacing(1);
-    column![head, crate::widgets::field::rule(), scrollable(rows).height(Fill)].boxed()
+    column![head, crate::widgets::field::rule(), scrollable(rows).direction(theme::thin_scrollbar()).style(theme::scroll).height(Fill)].boxed()
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

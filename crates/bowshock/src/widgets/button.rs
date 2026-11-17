@@ -152,7 +152,7 @@ impl<'a, M: Clone + 'a> From<Button<'a, M>> for Element<'a, M> {
             content.push(glyph::icon(mark, tone, if b.label.is_some() { 12.0 } else { 14.0 }));
         }
         if let Some(label) = b.label {
-            content.push(text(label).font(SANS_MEDIUM).size(if b.small { 12.0 } else { TEXT_BODY }).boxed());
+            content.push(text(label).font(SANS_MEDIUM).size(if b.small { 12.0 } else { TEXT_BODY }).wrapping(text::Wrapping::None).boxed());
         }
         if let Some(key) = b.key {
             let style: fn(&Theme) -> iced::widget::container::Style =

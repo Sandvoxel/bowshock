@@ -57,6 +57,8 @@ screenshot back-to-plots.png
 # the active configuration's stack by source and adds the other's total as a dashed line.
 click "CONFIG"
 click "New configuration…"
+click #motor-search
+type "I284"
 click "I284W"
 click "Add configuration"
 move (500, 300)

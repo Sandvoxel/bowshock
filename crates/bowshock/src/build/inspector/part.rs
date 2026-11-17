@@ -9,7 +9,7 @@ use bowshock_model::{
     PartRef, PodBody, RadialKind, RadialPart, Rocket,
 };
 use iced::widget::{button as plain_button, column, container, mouse_area, row, text, text_input, Space};
-use iced::{mouse, Element, Fill, Widget};
+use iced::{mouse, Element, Fill, Padding, Widget};
 
 use super::edit::{Field, Trigger};
 use super::form::{choose, text_row, value_row, with_tip, Form};
@@ -19,7 +19,7 @@ use super::symmetry::{linked, Link};
 use super::{Message, State};
 use crate::app::ui;
 use crate::theme::{self, MONO};
-use crate::tokens::{SPACE_2, SPACE_3, TEXT_BODY, TEXT_LABEL};
+use crate::tokens::{SPACE_1, SPACE_2, SPACE_3, TEXT_BODY, TEXT_LABEL};
 use crate::units::Quantity;
 use crate::widgets::button::{button, Weight};
 use crate::widgets::chip::chip;
@@ -197,7 +197,7 @@ fn fillet_rows<'a>(p: &Params<'a>, radial: &RadialPart) -> Vec<Element<'a, Messa
     let head = mouse_area(row![ui::label("FILLET"), caret, Space::new().width(Fill).boxed(), summary].spacing(SPACE_2).align_y(iced::Center))
         .on_press(Message::FilletOpen(!open))
         .interaction(mouse::Interaction::Pointer);
-    let mut rows: Vec<Element<'a, Message>> = vec![container(head).padding([SPACE_2, 0.0]).boxed()];
+    let mut rows: Vec<Element<'a, Message>> = vec![container(head).padding(Padding { top: SPACE_1, right: 0.0, bottom: 0.0, left: 0.0 }).boxed()];
     if open {
         let options: Vec<(bowshock_model::MaterialId, String)> = materials_of_kind(MaterialKind::Bulk).map(|m| (m.id, material_label(m))).collect();
         rows.push(p.form.num("Fillet radius", radial.fillet_radius, Quantity::Length, dim(Dim::FilletRadius)));
@@ -214,15 +214,17 @@ fn tab_rows<'a>(p: &Params<'a>, radial: &RadialPart) -> Vec<Element<'a, Message>
     let units = f.ctx.units;
     let length = |v: f64| ui::with_unit(v, Quantity::Length, units);
     let target = p.rocket.fin_tab_target(p.id);
-    let to_mount = |label: &'static str| -> Element<'a, Message> { button(label, Weight::Ghost).on_press(Message::TabToMotor).into() };
+    let to_mount = || -> Element<'a, Message> {
+        button("To mount", Weight::Ghost).small().tooltip("Set the tab height to meet the motor mount").on_press(Message::TabToMotor).into()
+    };
     let mut rows: Vec<Element<'a, Message>> = vec![
-        container(ui::label("TAB · THROUGH THE WALL")).padding([SPACE_2, 0.0]).boxed(),
+        container(ui::label("TAB · THROUGH THE WALL")).padding(Padding { top: SPACE_1, right: 0.0, bottom: 0.0, left: 0.0 }).boxed(),
         labeled("Fin tab", crate::widgets::field::checkbox("Through the wall", radial.tab.is_some(), Message::TabOn)),
     ];
     let Some(tab) = radial.tab else {
         if let Some(t) = target {
-            rows.push(text_row("Motor mount", format!("under the fins · {} down", length(t.height))));
-            rows.push(labeled("", to_mount("To motor mount")));
+            let status = text(format!("{} down", length(t.height))).font(MONO).size(12.5).style(theme::muted);
+            rows.push(labeled("Motor mount", row![status, Space::new().width(Fill), to_mount()].spacing(SPACE_2).align_y(iced::Center).boxed()));
         }
         return rows;
     };
@@ -232,16 +234,12 @@ fn tab_rows<'a>(p: &Params<'a>, radial: &RadialPart) -> Vec<Element<'a, Message>
     match target {
         Some(t) => {
             let gap = t.height - tab.height;
-            let state = if gap.abs() < 1.0e-4 {
-                "reached".to_string()
-            } else if gap > 0.0 {
-                format!("{} short", length(gap))
+            if gap.abs() < 1.0e-4 {
+                rows.push(text_row("Motor mount", "reached".to_string()));
             } else {
-                format!("{} too deep", length(-gap))
-            };
-            rows.push(text_row("Motor mount", state));
-            if gap.abs() >= 1.0e-4 {
-                rows.push(labeled("", to_mount("To motor mount")));
+                let state = if gap > 0.0 { format!("{} short", length(gap)) } else { format!("{} too deep", length(-gap)) };
+                let status = text(state).font(MONO).size(12.5).style(theme::muted);
+                rows.push(labeled("Motor mount", row![status, Space::new().width(Fill), to_mount()].spacing(SPACE_2).align_y(iced::Center).boxed()));
             }
         }
         None => rows.push(text_row("Motor mount", "none under the fins".to_string())),

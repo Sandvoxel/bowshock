@@ -553,7 +553,7 @@ impl Picker {
             .push(rule())
             .push(head.boxed())
             .push(rule())
-            .push(scrollable(table).height(table_h).boxed())
+            .push(scrollable(table).direction(theme::thin_scrollbar()).style(theme::scroll).height(table_h).boxed())
             .push(container(footer).padding([SPACE_2, SPACE_3 - 2.0]).boxed());
         let panel = container(body).width(WIDTH).style(theme::overlay);
 

@@ -150,7 +150,7 @@ impl Picker {
         if list.is_empty() {
             list.push(container(text("No source matches").size(TEXT_LABEL).style(theme::faint)).padding([SPACE_2, 12.0]).boxed());
         }
-        let list = scrollable(column(list).width(Fill)).height(list_h).direction(super::thin_scrollbar()).style(super::scroll_style);
+        let list = scrollable(column(list).width(Fill)).height(list_h).direction(theme::thin_scrollbar()).style(theme::scroll);
         let rule = || container(Space::new()).width(Fill).height(1).style(theme::hairline).boxed();
         let mut body: Vec<Element<'a, Message>> = vec![
             container(head).padding(Padding { top: 8.0, left: 12.0, right: 12.0, bottom: SPACE_1 }).boxed(),

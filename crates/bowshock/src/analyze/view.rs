@@ -76,7 +76,7 @@ fn left<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
         ]
     };
     let body = column![head("ANALYSES", false), analyses(state), column(controls).spacing(SPACE_1)].spacing(SPACE_1);
-    scrollable(body).width(Fill).height(Fill).boxed()
+    scrollable(body).direction(theme::thin_scrollbar()).style(theme::scroll).width(Fill).height(Fill).boxed()
 }
 
 fn analyses(state: &State) -> Element<'_, Message> {
@@ -489,7 +489,7 @@ fn table(state: &State) -> Element<'_, Message> {
     )
     .spacing(2)
     .padding(iced::Padding { top: 0.0, right: SPACE_3 + 8.0, bottom: 0.0, left: SPACE_3 });
-    column![head, rule(), scrollable(rows).height(Fill)].boxed()
+    column![head, rule(), scrollable(rows).direction(theme::thin_scrollbar()).style(theme::scroll).height(Fill)].boxed()
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -504,7 +504,7 @@ fn optimize_right<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
         let rows: Vec<Element<'a, Message>> = sec.rows.into_iter().map(row_view).collect();
         sections.push(section(i + 1, &sec.title, i > 0, rows));
     }
-    scrollable(column(sections)).width(Fill).height(Fill).boxed()
+    scrollable(column(sections)).direction(theme::thin_scrollbar()).style(theme::scroll).width(Fill).height(Fill).boxed()
 }
 
 fn right<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
@@ -540,7 +540,7 @@ fn right<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
         }
     }
     sections.push(export(state, shown.is_some(), count + 1));
-    scrollable(column(sections)).width(Fill).height(Fill).boxed()
+    scrollable(column(sections)).direction(theme::thin_scrollbar()).style(theme::scroll).width(Fill).height(Fill).boxed()
 }
 
 fn swatch<'a>(color: SeriesColor) -> Element<'a, Message> {

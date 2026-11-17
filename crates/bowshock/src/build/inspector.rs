@@ -692,15 +692,7 @@ impl State {
             cells.push(bar);
             cells.push(rule());
         }
-        cells.push(
-            scrollable(column(sections))
-                .id(reveal::SCROLL_ID)
-                .direction(scrollable::Direction::Vertical(scrollable::Scrollbar::new().width(4).scroller_width(4).margin(1)))
-                .style(theme::scroll)
-                .width(Fill)
-                .height(Fill)
-                .boxed(),
-        );
+        cells.push(scrollable(column(sections)).id(reveal::SCROLL_ID).direction(theme::thin_scrollbar()).style(theme::scroll).width(Fill).height(Fill).boxed());
         let body = column(cells);
         let panel = container(body).width(Fill).height(Fill).style(theme::panel);
 

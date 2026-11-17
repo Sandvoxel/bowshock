@@ -11,7 +11,7 @@ screenshot config-menu.png
 click "New configuration…"
 screenshot picker.png
 click #motor-search
-type "I284W"
+type "I284"
 click "I284W"
 screenshot picker-selected.png
 click "Add configuration"
@@ -30,9 +30,9 @@ click (312, 20)
 screenshot added-tube-undone.png
 
 # The mode switch: Simulate and Analyze keep the top bar and status strip.
-click (663, 18)
+click "Simulate"
 screenshot simulate.png
-click (737, 18)
+click "Analyze"
 screenshot analyze.png
-click (598, 18)
+click "Build"
 screenshot back-to-build.png

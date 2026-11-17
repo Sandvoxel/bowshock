@@ -100,11 +100,11 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     var shaded = true;
 
     if layer == 3 {
-        // A cut wall: diagonal hatching in cut-face over the dark interior, in screen space.
+        // A cut wall: diagonal hatching in cut-face over the shell colour, in screen space (design/components/InsideViews).
         let spacing = 5.0 * u.screen.y;
         let p = (in.clip.x + in.clip.y) / spacing;
         let line = smoothstep(0.30, 0.38, abs(fract(p) - 0.5) * 2.0 - 0.0);
-        base = mix(u.colors[CUT_INTERIOR].rgb, u.colors[CUT_FACE].rgb, 1.0 - line);
+        base = mix(u.colors[BODY].rgb, u.colors[CUT_FACE].rgb, 1.0 - line);
         shaded = false;
     } else if layer == 4 {
         // A cut solid: flat in its system colour.

@@ -44,7 +44,7 @@ pub(super) fn view<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
 
     parts.push(rule());
     parts.push(ground_section(state, ctx, flight));
-    scrollable(column(parts).width(Fill)).direction(super::thin_scrollbar()).style(super::scroll_style).height(Fill).boxed()
+    scrollable(column(parts).width(Fill)).direction(theme::thin_scrollbar()).style(theme::scroll).height(Fill).boxed()
 }
 
 /// 04 GROUND TRACK: the map, the run-dispersion button and, once a study has flown, its caption.
