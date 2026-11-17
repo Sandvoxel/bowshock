@@ -113,7 +113,7 @@ fn tunnel_re_c(mach: f64, re_per_m: f64) -> f64 {
 }
 
 /// The axial force without the base, `C_A,corr`, of the Arcas at `mach`, fins on or off, on the body cross-section.
-fn arcas_axial(mach: f64, fins_on: bool, re_per_m: f64) -> Result<(Solved, f64), String> {
+fn arcas_axial(mach: f64, fins_on: bool, re_per_m: f64) -> Result<(Solved, f64, bool), String> {
     let (body, _) = arcas_body_spec().to_internal().map_err(|e| e.to_string())?;
     let d = arcas::BODY_DIAMETER;
     let flow = WallFlow { re_c: tunnel_re_c(mach, re_per_m), mach_max: mach, ks_body: 0.0, ks_fin: 0.0, sutherland: 0.368 };
@@ -140,7 +140,7 @@ fn arcas_axial(mach: f64, fins_on: bool, re_per_m: f64) -> Result<(Solved, f64),
     let q = case.body.nose_to_largest_area();
     // the axial force without the base: pressure and friction of the body and the fins (`C_A,corr` of the data)
     let value = q * (solved.parts.total - solved.parts.base - solved.parts.friction.base);
-    Ok((solved, value))
+    Ok((solved, value, is_gate(kind, &case)))
 }
 
 /// G-F4: the Arcas axial force without the base (NASA TN D-4013 / D-4014), fins on and off, through `Case3` (the wedge without fins, the four-fin sector with
@@ -159,9 +159,8 @@ fn gate_f4_arcas_axial_force_with_and_without_fins() {
     }
     let keep = machs(&cases.iter().map(|c| c.0).collect::<Vec<_>>());
     cases.retain(|c| keep.iter().any(|m| (m - c.0).abs() < 1e-9));
-    let runs: Vec<(Result<(Solved, f64), String>, Result<(Solved, f64), String>)> =
+    let runs: Vec<(Result<(Solved, f64, bool), String>, Result<(Solved, f64, bool), String>)> =
         par_map(&cases, |c| (arcas_axial(c.0, false, c.3), arcas_axial(c.0, true, c.3)));
-    let kind = tier_kind();
     let mut lines = Lines::default();
     for (c, (off, on)) in cases.iter().zip(runs) {
         let (m, data_off, data_on, _, gated) = *c;
@@ -173,8 +172,8 @@ fn gate_f4_arcas_axial_force_with_and_without_fins() {
                 continue;
             }
         };
-        let probe = Case3::wedge(m, arcas_body_spec().to_internal().expect("body").0, 0);
-        let gate = gated && is_gate(kind, &probe);
+        // viscous (a wall-resolved tier on an engine that solves the viscous equations) as the cases that ran, not as a bare wedge
+        let gate = gated && off.2 && on.2;
         let (v_off, v_on) = (off.1, on.1);
         lines.info(
             "G-F4",

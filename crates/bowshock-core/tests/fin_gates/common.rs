@@ -39,11 +39,10 @@ pub fn tier(kind: TierKind, flow: WallFlow) -> Tier {
     }
 }
 
-/// Does the engine solve the viscous equations for `case`? The CPU solver does when the case is viscous (`Case3::viscous`: the wall-resolved tiers, a viscous 2D
-/// case on the wedge; `Case3::euler_equations` drops it); the GPU runner is Euler until `gpu3d` integrates the viscous step (`BOWSHOCK_WEDGE_BACKEND=gpu` is then
-/// INFO / "engine is inviscid").
+/// Does the engine solve the viscous equations for `case`? Both runners do when the case is viscous (`Case3::viscous`: the wall-resolved tiers;
+/// `Case3::euler_equations` drops it): the CPU solver and, since `gpu3d` integrated the viscous step, the GPU runner.
 pub fn engine_is_viscous(case: &Case3) -> bool {
-    case.viscous.is_some() && !gpu_backend()
+    case.viscous.is_some()
 }
 
 /// Does a run of `kind` count as a gate (viscous) or as INFO (inviscid)?
