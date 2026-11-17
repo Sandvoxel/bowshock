@@ -280,7 +280,7 @@ pub(super) mod tests {
         assert!(p.vertices[2].values.iter().all(|x| x.is_nan()));
         assert!(p.triangles.iter().all(|&i| p.vertices[i as usize].values.iter().all(|x| x.is_finite())));
         // every cell has its edges once: 10 flow cells give a bottom and a left edge each, plus the edges on the open sides
-        assert!(p.edges.len() % 2 == 0 && p.edges.iter().all(|&i| (i as usize) < p.vertices.len()));
+        assert!(p.edges.len().is_multiple_of(2) && p.edges.iter().all(|&i| (i as usize) < p.vertices.len()));
     }
 
     #[test]
