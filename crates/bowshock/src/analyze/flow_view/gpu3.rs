@@ -777,8 +777,10 @@ pub(super) mod tests {
                 ..view_of(&picture, camera_for(&picture, size, true, FROM_MINUS_X))
             };
             let draw = Draw3 { picture: picture.clone(), view };
+            let t_first = Instant::now();
             rig.frame(&draw, false);
             rig.wait();
+            let first_ms = t_first.elapsed().as_secs_f64() * 1e3;
             let t3 = Instant::now();
             for _ in 0..frames {
                 rig.frame(&draw, false);
@@ -786,7 +788,7 @@ pub(super) mod tests {
             }
             let frame_ms = t3.elapsed().as_secs_f64() * 1e3 / frames as f64;
             println!(
-                "FLOW3 {{\"case\":\"{name}\",\"cells\":{cells},\"walls\":{},\"tiles\":{},\"new_ms\":{new_ms:.1},\"meridian_plane_ms\":{meridian_ms:.1},\"cross_disc_ms\":{cross_ms:.1},\"frame_ms\":{frame_ms:.2},\"adapter\":\"{}\"}}",
+                "FLOW3 {{\"case\":\"{name}\",\"cells\":{cells},\"walls\":{},\"tiles\":{},\"new_ms\":{new_ms:.1},\"meridian_plane_ms\":{meridian_ms:.1},\"cross_disc_ms\":{cross_ms:.1},\"first_frame_with_upload_ms\":{first_ms:.1},\"frame_ms\":{frame_ms:.2},\"adapter\":\"{}\"}}",
                 field.walls.len(),
                 picture.tiles.len(),
                 adapter.get_info().name

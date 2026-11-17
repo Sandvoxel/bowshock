@@ -1183,4 +1183,46 @@ mod tests {
         assert_eq!(strip.nearest(size, -20.0), 0);
         assert_eq!(strip.nearest(size, 500.0), 99);
     }
+
+    /// What a live snapshot costs the UI thread: [`SceneState::set_field`] with the next snapshot of the same mesh (the picture's derived
+    /// data, the sheets on screen, the fitted ranges) at the sizes the solver will give. Prints `SNAPSHOT` lines.
+    /// `cargo nextest run --release -p bowshock snapshot_cost --run-ignored only --no-capture`.
+    #[test]
+    #[ignore = "measures a live snapshot at 0.35, 0.5 and 2 million cells"]
+    fn snapshot_cost_at_solver_sizes() {
+        use super::super::scene3::tests::synthetic;
+        let mut cases: Vec<(String, Arc<bowshock_core::Field3>)> = Vec::new();
+        if let Ok(bytes) = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../out/field3/anf-level0.field3")) {
+            cases.push(("anf-level0".into(), Arc::new(super::super::scene3::decode_fixture(&bytes).unwrap())));
+        }
+        cases.push(("synthetic-0.5M".into(), Arc::new(synthetic(160, 60, 52))));
+        cases.push(("synthetic-2M".into(), Arc::new(synthetic(200, 100, 100))));
+        for (name, first) in cases {
+            let mut s = SceneState::new();
+            s.update(SceneMsg::Resized(Size::new(1280.0, 720.0)));
+            s.set_field(Some(&first));
+            s.update(SceneMsg::Station(first.ni / 2));
+            s.update(SceneMsg::FitRange);
+            let mut next = (*first).clone();
+            next.iteration += 500;
+            let t0 = std::time::Instant::now();
+            let clone_ms = {
+                let c = (*first).clone();
+                let ms = t0.elapsed().as_secs_f64() * 1e3;
+                drop(c);
+                ms
+            };
+            let next = Arc::new(next);
+            let t = std::time::Instant::now();
+            s.set_field(Some(&next));
+            let set_ms = t.elapsed().as_secs_f64() * 1e3;
+            let t = std::time::Instant::now();
+            let _ = s.draw(true);
+            let draw_ms = t.elapsed().as_secs_f64() * 1e3;
+            println!(
+                "SNAPSHOT {{\"case\":\"{name}\",\"cells\":{},\"field_clone_ms\":{clone_ms:.1},\"set_field_ms\":{set_ms:.1},\"draw_ms\":{draw_ms:.2}}}",
+                first.cells()
+            );
+        }
+    }
 }
