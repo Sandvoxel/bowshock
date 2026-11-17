@@ -521,9 +521,18 @@ impl LazySolver3 {
         Tj5::Zero
     }
 
+    /// Number of line-implicit directions: 3, or 2 without the k factor (`skip_k`, see [`LazySolver3::skip_k`]).
+    fn n_dirs3(&self) -> usize {
+        if self.skip_k {
+            2
+        } else {
+            3
+        }
+    }
+
     /// Local pseudo-time step from the cell primitives `wk` (f32): `dt = cfl V / (L_i + L_j + L_k)` (`DtMode::Sum`) or `cfl V / (3 min(L_i, L_j, L_k))`
     /// (`DtMode::MinDirection`), `L_d` = half the sum of `(|u.n| + c) S` over the two faces of direction `d`. `cfl` is the one-element array of the
-    /// loop state. Zero in solid cells.
+    /// loop state. Zero in solid cells. `no_dt_k`: `L_k` is left out (`L_i + L_j`, or `2 min(L_i, L_j)`).
     fn pseudo_dt3(&self, wk: &V5, cfl: &F, mode: DtMode) -> F {
         let g = &self.lg;
         let dims = self.dims3();
@@ -534,10 +543,13 @@ impl LazySolver3 {
             let s = |a: &F| a.slice(dir, r.clone());
             ((&wk[1] * s(&d.n[0]) + &wk[2] * s(&d.n[1]) + &wk[3] * s(&d.n[2])).abs() + &cs) * s(&d.area)
         };
-        let l: [F; 3] = std::array::from_fn(|dir| 0.5f32 * (lam(dir, false) + lam(dir, true)));
-        let dt = match mode {
-            DtMode::Sum => cfl * &g.vol / (&l[0] + &l[1] + &l[2]),
-            DtMode::MinDirection => cfl * &g.vol / (3.0f32 * l[0].minimum(&l[1]).minimum(&l[2])),
+        let l: Vec<F> = (0..if self.no_dt_k { 2 } else { 3 }).map(|dir| 0.5f32 * (lam(dir, false) + lam(dir, true))).collect();
+        let dt = match (mode, l.as_slice()) {
+            (DtMode::Sum, [a, b, c]) => cfl * &g.vol / (a + b + c),
+            (DtMode::Sum, [a, b]) => cfl * &g.vol / (a + b),
+            (DtMode::MinDirection, [a, b, c]) => cfl * &g.vol / (3.0f32 * a.minimum(b).minimum(c)),
+            (DtMode::MinDirection, [a, b]) => cfl * &g.vol / (2.0f32 * a.minimum(b)),
+            _ => unreachable!("two or three directions"),
         };
         match &g.solid {
             Some(solid) => select(solid, 0.0f32, &dt),
@@ -660,16 +672,20 @@ impl LazySolver3 {
         luma::solve_block_tridiagonal_parts(dir, lo, d, up, rhs)
     }
 
-    /// The approximate factorization `(I - dt J_k)^{-1} (I - dt J_j)^{-1} (I - dt J_i)^{-1} rhs`.
-    fn approx_factor3(&self, fac: &[Factor3; 3], rhs: &V5) -> V5 {
+    /// The approximate factorization `(I - dt J_k)^{-1} (I - dt J_j)^{-1} (I - dt J_i)^{-1} rhs` (wedge mode: without the k factor).
+    fn approx_factor3(&self, fac: &[Factor3], rhs: &V5) -> V5 {
         self.approx_factor3_parts(fac, rhs).2
     }
 
-    /// [`LazySolver3::approx_factor3`] with the intermediates: `(X, Y, dU)`, `X = A_i^{-1} rhs`, `Y = A_j^{-1} X`, `dU = A_k^{-1} Y` (`A_d = I - dt J_d`).
-    fn approx_factor3_parts(&self, fac: &[Factor3; 3], rhs: &V5) -> (V5, V5, V5) {
+    /// [`LazySolver3::approx_factor3`] with the intermediates: `(X, Y, dU)`, `X = A_i^{-1} rhs`, `Y = A_j^{-1} X`, `dU = A_k^{-1} Y` (`A_d = I - dt J_d`);
+    /// in wedge mode (`fac` has two factors) `dU = Y`.
+    fn approx_factor3_parts(&self, fac: &[Factor3], rhs: &V5) -> (V5, V5, V5) {
         let x = self.solve_lines3(&fac[0], 0, rhs);
         let y = self.solve_lines3(&fac[1], 1, &x);
-        let du = self.solve_lines3(&fac[2], 2, &y);
+        let du = match fac.get(2) {
+            Some(f) => self.solve_lines3(f, 2, &y),
+            None => y.clone(),
+        };
         (x, y, du)
     }
 
@@ -798,23 +814,27 @@ impl LazySolver3 {
         pick(&sol, fac.eig.char_to_cons(&sol))
     }
 
-    /// `D_2^{-1} D_1^{-1} D_0^{-1} rhs`: the diagonal factorisation.
-    fn diag_af3(&self, fac: &[DiagFac3; 3], rhs: &V5) -> V5 {
+    /// `D_2^{-1} D_1^{-1} D_0^{-1} rhs`: the diagonal factorisation (wedge mode: `D_1^{-1} D_0^{-1} rhs`).
+    fn diag_af3(&self, fac: &[DiagFac3], rhs: &V5) -> V5 {
         let x = self.diag_dir3(&fac[0], 0, rhs);
         let y = self.diag_dir3(&fac[1], 1, &x);
-        self.diag_dir3(&fac[2], 2, &y)
+        match fac.get(2) {
+            Some(f) => self.diag_dir3(f, 2, &y),
+            None => y,
+        }
     }
 
     /// The correction of the diagonal scheme for `b = dt R` (`LineSolve3::DiagonalCorrected`, the CPU `diag3::du3`): the diagonal solve `dU0 = D^{-1} b`
     /// and one defect-correction pass against the unfactored BLOCK operator `I + N_i + N_j + N_k` (`n_apply3`, no block solves):
-    /// `dU = dU0 + D^{-1} (b - (I + N_i + N_j + N_k) dU0)`.
+    /// `dU = dU0 + D^{-1} (b - (I + N_i + N_j + N_k) dU0)` (wedge mode: without `N_k` and the k factor).
     fn diag_du3(&self, wf: &V5, wk: &V5, dt: &F, p: &ImplicitParams, b: &V5) -> V5 {
-        let dfac: [DiagFac3; 3] = std::array::from_fn(|dir| self.diag_factor3(wf, wk, dt, p, dir));
+        let nd = self.n_dirs3();
+        let dfac: Vec<DiagFac3> = (0..nd).map(|dir| self.diag_factor3(wf, wk, dt, p, dir)).collect();
         let du0 = self.diag_af3(&dfac, b);
         let du0 = v5(|k| du0[k].clone()).cache();
-        let fac: [Factor3; 3] = std::array::from_fn(|dir| self.factor3(wf, wk, dt, p, dir));
-        let nz: [V5; 3] = std::array::from_fn(|dir| self.n_apply3(&fac[dir], dir, &du0, p));
-        let r: V5 = v5(|k| &b[k] - &du0[k] - &nz[0][k] - &nz[1][k] - &nz[2][k]);
+        let fac: Vec<Factor3> = (0..nd).map(|dir| self.factor3(wf, wk, dt, p, dir)).collect();
+        let nz: Vec<V5> = (0..nd).map(|dir| self.n_apply3(&fac[dir], dir, &du0, p)).collect();
+        let r: V5 = v5(|k| nz.iter().fold(&b[k] - &du0[k], |acc, z| acc - &z[k]));
         let corr = self.diag_af3(&dfac, &r.cache());
         v5(|k| &du0[k] + &corr[k])
     }
@@ -862,22 +882,28 @@ impl LazySolver3 {
         let du = match p.line_solve {
             LineSolve3::DiagonalCorrected => self.diag_du3(&wf, &wk, &dt, p, &b),
             LineSolve3::Block => {
-                let fac: [Factor3; 3] = std::array::from_fn(|dir| self.factor3(&wf, &wk, &dt, p, dir));
+                let nd = self.n_dirs3();
+                let fac: Vec<Factor3> = (0..nd).map(|dir| self.factor3(&wf, &wk, &dt, p, dir)).collect();
                 // right-hand side and defect correction
                 let (x, y, mut du) = self.approx_factor3_parts(&fac, &b);
                 let mut passes = 1;
                 if p.lines && p.sub_iters >= 2 {
-                    // the first defect, from the intermediates of the solve: `r = N_i (X - dU) + N_j (Y - dU)`
-                    let (dx, dy): (V5, V5) = (v5(|k| &x[k] - &du[k]), v5(|k| &y[k] - &du[k]));
-                    let (ni_, nj_) = (self.n_apply3(&fac[0], 0, &dx, p), self.n_apply3(&fac[1], 1, &dy, p));
-                    let r: V5 = v5(|k| &ni_[k] + &nj_[k]);
+                    // the first defect, from the intermediates of the solve: `r = N_i (X - dU) + N_j (Y - dU)` (wedge mode: `Y = dU`, so `r = N_i (X - dU)`)
+                    let ni_ = self.n_apply3(&fac[0], 0, &v5(|k| &x[k] - &du[k]), p);
+                    let r: V5 = if nd == 3 {
+                        let nj_ = self.n_apply3(&fac[1], 1, &v5(|k| &y[k] - &du[k]), p);
+                        v5(|k| &ni_[k] + &nj_[k])
+                    } else {
+                        ni_
+                    };
                     let corr = self.approx_factor3(&fac, &r.cache());
                     du = v5(|k| &du[k] + &corr[k]);
                     passes = 2;
                 }
                 for _ in passes..p.sub_iters.max(1) {
-                    let a: [V5; 3] = std::array::from_fn(|dir| self.apply_factor3(&fac[dir], dir, &du));
-                    let r: V5 = v5(|k| &b[k] - (&a[0][k] + &a[1][k] + &a[2][k] - 2.0f32 * &du[k]));
+                    // `r = b - (A_i + A_j + A_k - 2 I) du` (two factors: `A_i + A_j - I`)
+                    let a: Vec<V5> = (0..nd).map(|dir| self.apply_factor3(&fac[dir], dir, &du)).collect();
+                    let r: V5 = v5(|k| &b[k] - (a.iter().fold(&du[k] * -((nd - 1) as f32), |acc, x| acc + &x[k])));
                     let corr = self.approx_factor3(&fac, &r.cache());
                     du = v5(|k| &du[k] + &corr[k]);
                 }

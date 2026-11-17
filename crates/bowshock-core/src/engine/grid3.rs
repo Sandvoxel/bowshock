@@ -7,6 +7,12 @@
 //! Fins are one-cell-thick solid layers in `k` (see `Grid3::part`): the layer edges follow the fin thickness over the planform and relax to
 //! the nominal cell width away from it, so the fin faces are flat planes through the body axis. Lengths are in nose diameters.
 //!
+//! The nodes of a `k` line are scaled out to `s_k r` ([`bowshock_cfd::grid3::polygon_scale`]) so that every polygonal ring has the cross-section area of the
+//! circular one (the inscribed polygon lacks `dtheta^2 / 6` of it); the fin faces are put where their scaled offset is the fin half-thickness. With a
+//! [`FinStack`] the cells of every gap grow from the fin sides (first cell from a target `y+`, 1.25 inside the boundary layer, 1.35 beyond) and the azimuthal
+//! count follows from it. Sharp fin edges keep a needle (2 % of the half thickness at really sharp nodes; 25 % at blunt ends), tapered over four cells ahead of
+//! the leading edge, behind the trailing edge and above the tip. Per-part roughness is carried on the grid ([`Grid3Params::roughness`]).
+//!
 //! * `Grid3` nodes are `(x, r sin(theta), r cos(theta))`: the pitch plane is `y = 0`, `theta = 0` points to `+z` (the lee side
 //!   for `alpha > 0`) and `theta = pi` to `-z`.
 //! * Half domain: fins sit at `theta_f = phi0 + 2 pi m / n` with `phi0 = pi/n` ([`FinPhase::Between`]: no fin in the pitch plane) or `0`
@@ -24,7 +30,7 @@ use crate::error::Error;
 use crate::fins::normalised;
 use crate::spec::FinProfile;
 use bowshock_cfd::grid::geometric_offsets;
-use bowshock_cfd::grid3::{revolve, AxisRun, Grid3, Part, SolidBox, Symmetry};
+use bowshock_cfd::grid3::{polygon_scale_where, revolve, AxisRun, Grid3, Part, PartRoughness, SolidBox, Symmetry};
 use std::f64::consts::PI;
 
 /// Trapezoidal fins in nose diameters.
@@ -64,9 +70,36 @@ pub enum Domain3 {
     Wedge { dtheta: f64 },
 }
 
-/// Default angle of a wedge domain, 2 degrees. The flat-faced cells divide the radial flux divergence by `cos(d/2)` (the face area is the chord, the
-/// volume the polygon's), so the drag has a bias of about `-0.17 d^2` (Mach 0.9, boattailed body, against 2 degrees: 6 degrees -0.17 %, 12 degrees -0.76 %).
+/// Default angle of a wedge domain, 2 degrees. The nodes of a revolved grid are area-preserving (`bowshock_cfd::grid3::polygon_scale`); against 2 degrees the
+/// drag of the 2D-parity body (Mach 0.9 / Mach 2) changes by 0.000 % / 0.003 % at 1 degree, 0.004 % / 0.035 % at 6 and 0.018 % / 0.153 % at 12 (the
+/// inscribed polygon alone gave -0.76 % and -1.17 % at 12 degrees).
 pub const WEDGE_ANGLE: f64 = 2.0 * PI / 180.0;
+
+/// Azimuthal spacing next to the fin sides of a wall-resolved grid: the cells of every gap grow from the fin face, `growth_bl` inside the boundary layer
+/// (`delta`) and `growth_out` beyond it, until two stacks meet in mid-gap (a gap between two fins) or the mid-gap plane is reached (a gap next to a symmetry
+/// plane). The heights are the lateral distances at the fin root radius; the nodes of a `k` line are on one azimuth for every radius, so the cells are
+/// `r / r_root` times higher at radius `r`. The number of azimuthal cells follows from the stacks (`Grid3Params::nk` is not used).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FinStack {
+    /// Height of the first cell next to a fin side \[d\].
+    pub y1: f64,
+    /// Thickness of the turbulent boundary layer on the fin \[d\]: the growth switches from `growth_bl` to `growth_out` there.
+    pub delta: f64,
+    pub growth_bl: f64,
+    pub growth_out: f64,
+}
+
+impl FinStack {
+    /// The stack for `y+ = y_plus` of the first cell on a flat plate of the fin's root chord `chord` \[d\] at the free-stream state of `re_c = rho c d / mu`
+    /// and the largest Mach number `mach` of the grid: the friction of `Case::viscous` (`cf = 0.027 Re_x^(-1/7)`), `delta = 0.37 chord Re_x^(-1/5)`, growth
+    /// 1.25 in the layer and 1.35 outside.
+    pub fn from_flow(re_c: f64, mach: f64, chord: f64, y_plus: f64) -> FinStack {
+        let re_d = re_c * mach;
+        let re_x = re_d * chord;
+        let cf = 0.027 * re_x.powf(-1.0 / 7.0);
+        FinStack { y1: y_plus / (re_d * (0.5 * cf).sqrt()), delta: 0.37 * chord * re_x.powf(-0.2), growth_bl: 1.25, growth_out: 1.35 }
+    }
+}
 
 /// Grid parameters: the meridian grid of the 2D case (sting grid, or base-wake grid when `base` is set) plus the fins, the domain and the
 /// azimuthal resolution.
@@ -76,7 +109,7 @@ pub struct Grid3Params {
     /// The base-wake meridian grid: used instead of `sting` when set (no fins on it yet).
     pub base: Option<BaseGridParams>,
     pub fins: Option<Fins3>,
-    /// Azimuthal cells over the domain (the plan default is `24 << level` over `[0, pi]`, see [`Grid3Params::default_nk`]).
+    /// Azimuthal cells over the domain (the plan default is `24 << level` over `[0, pi]`, see [`Grid3Params::default_nk`]); ignored with a `fin_stack`.
     pub nk: usize,
     /// Grid level: sets the cells over the fin root chord (`32 << level`) unless `fin_chord_cells` overrides it.
     pub level: u32,
@@ -88,6 +121,10 @@ pub struct Grid3Params {
     /// at least the sting grid's outer cell count with growth `<= 1.2` to the far boundary. `nj` grows accordingly.
     pub span_cells: Option<usize>,
     pub domain: Domain3,
+    /// Wall-resolved azimuthal spacing next to the fin sides (`None`: uniform cells in every gap, `nk` of them over the domain).
+    pub fin_stack: Option<FinStack>,
+    /// Roughness of the body and the fins, carried on the grid for the wall treatment ([`Grid3::wall_ks`]).
+    pub roughness: PartRoughness,
 }
 
 impl Grid3Params {
@@ -98,44 +135,60 @@ impl Grid3Params {
 
     /// Half domain on the sting grid, fins between the pitch plane and each other (the layout of the incidence solves).
     pub fn half(sting: LargeGridParams, fins: Option<Fins3>, nk: usize, level: u32) -> Grid3Params {
-        Grid3Params { sting, base: None, fins, nk, level, fin_chord_cells: None, span_cells: None, domain: Domain3::Half { phase: FinPhase::Between } }
+        Grid3Params {
+            sting,
+            base: None,
+            fins,
+            nk,
+            level,
+            fin_chord_cells: None,
+            span_cells: None,
+            domain: Domain3::Half { phase: FinPhase::Between },
+            fin_stack: None,
+            roughness: PartRoughness::default(),
+        }
     }
 }
 
-/// Half thickness of the fin section at the chordwise fraction `xi` (chord length `chord`, maximum thickness `t`), floored at
-/// 25 % of `t/2` so that edges are blunted.
+/// Half thickness of the fin section at the chordwise fraction `xi` (chord length `chord`, maximum thickness `t`). At an end that is really sharp (the section's
+/// thickness there is below 5 % of `t/2`: a wedge, an airfoil, the circle of a rounded edge) it is floored at 2 % of `t/2`, a needle the nodes follow (a zero-area
+/// edge face, the polygon of the clustered nodes for a round edge); at a blunt end (a square section, a blunt trailing edge) 25 % of `t/2` as before.
 pub(crate) fn half_thickness(profile: &FinProfile, t: f64, chord: f64, xi: f64) -> f64 {
-    let xi = xi.clamp(0.0, 1.0);
     let r = 0.5 * t;
-    let h = match profile {
-        FinProfile::Square => r,
-        FinProfile::Rounded => {
-            let s = (xi * chord).min((1.0 - xi) * chord);
-            if s >= r {
-                r
-            } else {
-                (r * r - (r - s) * (r - s)).max(0.0).sqrt()
-            }
-        }
-        FinProfile::Airfoil => 5.0 * t * (0.2969 * xi.sqrt() - 0.1260 * xi - 0.3516 * xi * xi + 0.2843 * xi.powi(3) - 0.1015 * xi.powi(4)).max(0.0),
-        FinProfile::DoubleWedge => t * xi.min(1.0 - xi),
-        FinProfile::Hexagonal { wedge_fraction } => r * (xi / wedge_fraction).min((1.0 - xi) / wedge_fraction).min(1.0),
-        FinProfile::Biconvex => r * 4.0 * xi * (1.0 - xi),
-        FinProfile::Custom { section } => {
-            let z: Vec<[f64; 2]> = normalised(section).collect();
-            let mut v = z[z.len() - 1][1];
-            for w in z.windows(2) {
-                if xi <= w[1][0] {
-                    let d = w[1][0] - w[0][0];
-                    let f = if d > 0.0 { ((xi - w[0][0]) / d).clamp(0.0, 1.0) } else { 1.0 };
-                    v = w[0][1] + f * (w[1][1] - w[0][1]);
-                    break;
+    let raw = |xi: f64| -> f64 {
+        let xi = xi.clamp(0.0, 1.0);
+        match profile {
+            FinProfile::Square => r,
+            FinProfile::Rounded => {
+                let s = (xi * chord).min((1.0 - xi) * chord);
+                if s >= r {
+                    r
+                } else {
+                    (r * r - (r - s) * (r - s)).max(0.0).sqrt()
                 }
             }
-            r * v
+            FinProfile::Airfoil => 5.0 * t * (0.2969 * xi.sqrt() - 0.1260 * xi - 0.3516 * xi * xi + 0.2843 * xi.powi(3) - 0.1015 * xi.powi(4)).max(0.0),
+            FinProfile::DoubleWedge => t * xi.min(1.0 - xi),
+            FinProfile::Hexagonal { wedge_fraction } => r * (xi / wedge_fraction).min((1.0 - xi) / wedge_fraction).min(1.0),
+            FinProfile::Biconvex => r * 4.0 * xi * (1.0 - xi),
+            FinProfile::Custom { section } => {
+                let z: Vec<[f64; 2]> = normalised(section).collect();
+                let mut v = z[z.len() - 1][1];
+                for w in z.windows(2) {
+                    if xi <= w[1][0] {
+                        let d = w[1][0] - w[0][0];
+                        let f = if d > 0.0 { ((xi - w[0][0]) / d).clamp(0.0, 1.0) } else { 1.0 };
+                        v = w[0][1] + f * (w[1][1] - w[0][1]);
+                        break;
+                    }
+                }
+                r * v
+            }
         }
     };
-    h.max(0.25 * r)
+    let xi = xi.clamp(0.0, 1.0);
+    let sharp_end = raw(if xi < 0.5 { 0.0 } else { 1.0 }) < 0.05 * r;
+    raw(xi).max(if sharp_end { 0.02 * r } else { 0.25 * r })
 }
 
 /// Node-index layout of the fins on the axial/radial lines.
@@ -155,7 +208,7 @@ struct FinPlan {
     s_remap: Vec<f64>,
 }
 
-/// Azimuthal layer structure: fin angles and the number of cells in each gap.
+/// Azimuthal layer structure: fin angles, the number of cells in each gap and where the nodes of a gap lie.
 struct Layers {
     theta_f: Vec<f64>,
     /// The first / last layer is a half fin on the `theta = 0` / end plane: it owns only its own half thickness and has no gap before / after it.
@@ -163,12 +216,16 @@ struct Layers {
     half_last: bool,
     /// Cells of the gap before each layer (0 before a half first layer) and one trailing gap behind the last (0 behind a half last layer).
     gaps: Vec<usize>,
+    /// Node positions of each gap as fractions of its width, `gaps[s] + 1` of them from 0 to 1 (empty for an absent gap).
+    gap_frac: Vec<Vec<f64>>,
     /// `k` of the cell owned by each layer.
     k_f: Vec<usize>,
+    /// Azimuth width of the cells next to a layer: what a layer cell relaxes to away from the fin.
+    cell_ang: f64,
 }
 
-/// Layers of a half domain `[0, pi]` with `count` fins at `phase`.
-fn layers(count: u32, nk: usize, phase: FinPhase) -> Result<Layers, Error> {
+/// Fin azimuths of a half domain `[0, pi]` with `count` fins at `phase`, and whether the first / last is a half fin on the `theta = 0` / `pi` plane.
+fn fin_angles(count: u32, phase: FinPhase) -> (Vec<f64>, bool, bool) {
     let n = f64::from(count);
     let phi0 = match phase {
         FinPhase::Between => PI / n,
@@ -187,9 +244,30 @@ fn layers(count: u32, nk: usize, phase: FinPhase) -> Result<Layers, Error> {
             });
         }
     }
+    let (first, last) = (theta_f[0], theta_f[theta_f.len() - 1]);
+    (theta_f, first == 0.0, last == PI)
+}
+
+/// `k` of the cell owned by each layer, for the cells of every gap.
+fn layer_cells(gaps: &[usize]) -> Vec<usize> {
+    let mut k = 0;
+    (0..gaps.len() - 1)
+        .map(|l| {
+            k += gaps[l];
+            k += 1;
+            k - 1
+        })
+        .collect()
+}
+
+fn uniform_fractions(gaps: &[usize]) -> Vec<Vec<f64>> {
+    gaps.iter().map(|&n| if n == 0 { Vec::new() } else { (0..=n).map(|m| m as f64 / n as f64).collect() }).collect()
+}
+
+/// Layers of a half domain `[0, pi]` with `count` fins at `phase`, `nk` cells in all, uniform in every gap.
+fn layers(count: u32, nk: usize, phase: FinPhase) -> Result<Layers, Error> {
+    let (theta_f, half_first, half_last) = fin_angles(count, phase);
     let nl = theta_f.len();
-    let half_first = theta_f[0] == 0.0;
-    let half_last = theta_f[nl - 1] == PI;
     let nh = PI / (2.0 * nk as f64);
     // gap `s` (before layer `s`, `s = nl`: behind the last) between the end of the previous layer and the start of the next
     let present: Vec<bool> = (0..=nl).map(|s| !(s == 0 && half_first) && !(s == nl && half_last)).collect();
@@ -232,22 +310,118 @@ fn layers(count: u32, nk: usize, phase: FinPhase) -> Result<Layers, Error> {
             gaps[i] += 1;
         }
     }
-    let mut k_f = Vec::new();
-    let mut k = 0;
-    for l in 0..nl {
-        k += gaps[l];
-        k_f.push(k);
-        k += 1;
-    }
-    Ok(Layers { theta_f, half_first, half_last, gaps, k_f })
+    let k_f = layer_cells(&gaps);
+    let gap_frac = uniform_fractions(&gaps);
+    Ok(Layers { theta_f, half_first, half_last, gaps, gap_frac, k_f, cell_ang: PI / nk as f64 })
 }
 
-/// Layers of a sector `[0, pi/n]`: a half fin on the `theta = 0` plane and `nk - 1` gap cells to the mid-gap plane.
-fn sector_layers(nk: usize) -> Result<Layers, Error> {
+/// Layers of a sector `[0, big]`, `big = pi/n`: a half fin on the `theta = 0` plane and `nk - 1` gap cells to the mid-gap plane.
+fn sector_layers(nk: usize, big: f64) -> Result<Layers, Error> {
     if nk < 3 {
         return Err(Error::Grid("a sector needs nk >= 3".to_string()));
     }
-    Ok(Layers { theta_f: vec![0.0], half_first: true, half_last: false, gaps: vec![0, nk - 1], k_f: vec![0] })
+    let gaps = vec![0, nk - 1];
+    Ok(Layers { theta_f: vec![0.0], half_first: true, half_last: false, gap_frac: uniform_fractions(&gaps), gaps, k_f: vec![0], cell_ang: big / nk as f64 })
+}
+
+/// Cell heights of a stack that starts with `h1` at a wall and grows by `growth_bl` until it is `delta` high and by `growth_out` beyond, over a gap of height
+/// `total`: the fewest cells that reach `total` at those growth rates, with the growth increments scaled down together (a common factor `lam <= 1`) so that
+/// the stack closes the gap exactly. The first cell stays `h1` and no growth ratio exceeds the design's.
+fn stack_sizes(total: f64, st: &FinStack, h1: f64, delta: f64) -> Vec<f64> {
+    let sizes_at = |n: usize, lam: f64| -> Vec<f64> {
+        let (qb, qo) = (1.0 + lam * (st.growth_bl - 1.0), 1.0 + lam * (st.growth_out - 1.0));
+        let (mut sum, mut h) = (0.0, h1);
+        (0..n)
+            .map(|_| {
+                let s = h;
+                sum += s;
+                h *= if sum < delta { qb } else { qo };
+                s
+            })
+            .collect()
+    };
+    let mut n = 1;
+    while sizes_at(n, 1.0).iter().sum::<f64>() < total && n < 1000 {
+        n += 1;
+    }
+    if n == 1 {
+        return vec![total];
+    }
+    if n as f64 * h1 >= total {
+        return vec![total / n as f64; n];
+    }
+    let (mut lo, mut hi) = (0.0, 1.0);
+    for _ in 0..60 {
+        let mid = 0.5 * (lo + hi);
+        if sizes_at(n, mid).iter().sum::<f64>() < total {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let mut sizes = sizes_at(n, hi);
+    let scale = total / sizes.iter().sum::<f64>();
+    sizes.iter_mut().for_each(|s| *s *= scale);
+    sizes
+}
+
+/// Node positions (fractions of `width`) of a gap with a fin wall at its low end (`wall_lo`), at its high end (`wall_hi`) or at both (the stacks meet in the
+/// middle); `y1` and `delta` are the first cell and the boundary layer in azimuth.
+fn stack_fractions(width: f64, wall_lo: bool, wall_hi: bool, st: &FinStack, y1: f64, delta: f64) -> Vec<f64> {
+    let mut sizes = match (wall_lo, wall_hi) {
+        (true, true) => {
+            let half = stack_sizes(0.5 * width, st, y1, delta);
+            half.iter().chain(half.iter().rev()).copied().collect()
+        }
+        (true, false) => stack_sizes(width, st, y1, delta),
+        (false, true) => {
+            let mut s = stack_sizes(width, st, y1, delta);
+            s.reverse();
+            s
+        }
+        (false, false) => vec![0.5 * width; 2],
+    };
+    if sizes.len() < 2 {
+        sizes = vec![0.5 * sizes[0]; 2];
+    }
+    let mut acc = 0.0;
+    let mut frac = vec![0.0];
+    for s in &sizes {
+        acc += s;
+        frac.push(acc / width);
+    }
+    *frac.last_mut().expect("nodes") = 1.0;
+    frac
+}
+
+/// Layers whose gaps are stacked from the fin sides: `fins` is `Some((count, phase))` for a half domain, `None` for a sector `[0, big]` with its half fin on
+/// `theta = 0`. `r_root` and `h_max` are the fin's root radius and its largest half-thickness (the nominal angle of the fin side).
+fn stacked_layers(fins: Option<(u32, FinPhase)>, st: &FinStack, r_root: f64, h_max: f64, big: f64) -> Result<Layers, Error> {
+    let (theta_f, half_first, half_last) = match fins {
+        Some((count, phase)) => fin_angles(count, phase),
+        None => (vec![0.0], true, false),
+    };
+    let nl = theta_f.len();
+    let alpha_ref = (h_max / r_root).min(0.99).asin();
+    let (y1, delta) = (st.y1 / r_root, st.delta / r_root);
+    let mut gaps = vec![0; nl + 1];
+    let mut gap_frac = vec![Vec::new(); nl + 1];
+    for s in 0..=nl {
+        if (s == 0 && half_first) || (s == nl && half_last) {
+            continue;
+        }
+        // the gap between the previous fin side (or the plane at 0) and the next one (or the end plane)
+        let lo = if s == 0 { 0.0 } else { theta_f[s - 1] + alpha_ref };
+        let hi = if s == nl { big } else { theta_f[s] - alpha_ref };
+        if hi - lo <= 2.0 * y1 {
+            return Err(Error::Grid("fins too close for the wall-resolved stack".to_string()));
+        }
+        let frac = stack_fractions(hi - lo, s > 0, s < nl, st, y1, delta);
+        gaps[s] = frac.len() - 1;
+        gap_frac[s] = frac;
+    }
+    let k_f = layer_cells(&gaps);
+    Ok(Layers { theta_f, half_first, half_last, gaps, gap_frac, k_f, cell_ang: y1 })
 }
 
 /// Azimuth of the nodes `k = 0..=nk` of one `(i, j)` column for the layer half-angle `alpha` in the domain `[0, big]`.
@@ -274,7 +448,7 @@ fn fill_theta(theta: &mut [f64], lay: &Layers, alpha: f64, big: f64) {
         };
         let ng = lay.gaps[l];
         for m in 1..=ng {
-            theta[k + m] = prev + (lo - prev) * m as f64 / ng as f64;
+            theta[k + m] = prev + (lo - prev) * lay.gap_frac[l][m];
         }
         k += ng;
         theta[k + 1] = hi;
@@ -283,7 +457,7 @@ fn fill_theta(theta: &mut [f64], lay: &Layers, alpha: f64, big: f64) {
     }
     let ng = lay.gaps[nl];
     for m in 1..=ng {
-        theta[k + m] = prev + (big - prev) * m as f64 / ng as f64;
+        theta[k + m] = prev + (big - prev) * lay.gap_frac[nl][m];
     }
     theta[nk] = big;
 }
@@ -506,8 +680,8 @@ pub fn body_grid3(p: &Grid3Params) -> Result<Grid3, Error> {
     let sp = &p.sting;
     let (span, sym) = domain_span(p)?;
     let wedge = sym == Symmetry::Wedge;
-    let nk = if wedge { 1 } else { p.nk };
-    if nk < 2 && !wedge {
+    let nk_req = if wedge { 1 } else { p.nk };
+    if nk_req < 2 && !wedge && p.fin_stack.is_none() {
         return Err(Error::Grid("nk >= 2 is required".to_string()));
     }
     if !(sp.nj >= 1 && sp.dr_wall > 0.0 && sp.r_far > 0.0) {
@@ -518,10 +692,18 @@ pub fn body_grid3(p: &Grid3Params) -> Result<Grid3, Error> {
         Some(f) => Some((plan_fins(p, f, &mut xs)?, f)),
         None => None,
     };
-    let lay = match (p.domain, &p.fins) {
-        (Domain3::Half { phase }, Some(f)) => Some(layers(f.count, nk, phase)?),
-        (Domain3::Sector, Some(_)) => Some(sector_layers(nk)?),
+    let root = plan.as_ref().map(|(pl, f)| (pl.r_t, 0.5 * f.thickness));
+    let lay = match (p.domain, &p.fins, &p.fin_stack, root) {
+        (Domain3::Half { phase }, Some(f), None, _) => Some(layers(f.count, nk_req, phase)?),
+        (Domain3::Sector, Some(_), None, _) => Some(sector_layers(nk_req, span)?),
+        (Domain3::Half { phase }, Some(f), Some(st), Some((r, h))) => Some(stacked_layers(Some((f.count, phase)), st, r, h, span)?),
+        (Domain3::Sector, Some(_), Some(st), Some((r, h))) => Some(stacked_layers(None, st, r, h, span)?),
         _ => None,
+    };
+    // with a stack the cells of the gaps, not `nk`, set the azimuthal count
+    let nk = match (&lay, &p.fin_stack) {
+        (Some(l), Some(_)) => l.k_f.len() + l.gaps.iter().sum::<usize>(),
+        _ => nk_req,
     };
     let ni = xs.len() - 1;
     let sj = match &plan {
@@ -543,6 +725,8 @@ pub fn body_grid3(p: &Grid3Params) -> Result<Grid3, Error> {
     }
     // per-row planform (frac along the span, LE position, chord) and the half-angle of the fin layer at each column
     let mut alpha = Vec::new();
+    // half-thickness of the fin layer at every node (`NaN` on the axis)
+    let mut half_w = Vec::new();
     if let Some((pl, f)) = &plan {
         let wcol = |i: usize| -> f64 {
             let d = if i < pl.i_le { pl.i_le - i } else { i.saturating_sub(pl.i_te) };
@@ -587,8 +771,11 @@ pub fn body_grid3(p: &Grid3Params) -> Result<Grid3, Error> {
                 }
             }
         }
+        // nominal angular width of a layer cell away from the fin: the cells next to it (one uniform cell of the domain, the first cell of a stack)
+        let cell_ang = lay.as_ref().map_or(span / nk as f64, |l| l.cell_ang);
         // layer half-angle at every (i, j) node
         alpha = vec![0.0; n2];
+        half_w = vec![f64::NAN; n2];
         let t = f.thickness;
         let h_at = |i: usize, j: usize| -> f64 {
             let (_, _, chord) = row(j);
@@ -603,9 +790,12 @@ pub fn body_grid3(p: &Grid3Params) -> Result<Grid3, Error> {
                 let d = di.max(dj);
                 let (ic, jc) = (i.clamp(pl.i_le, pl.i_te), j.min(pl.j_tip));
                 let h_f = h_at(ic, jc);
-                let nominal = 0.5 * r * span / nk as f64;
+                let nominal = 0.5 * r * cell_ang;
                 let w = if d == 0 { h_f } else { h_f + (nominal - h_f) * smoothstep(d as f64 / 4.0) };
-                alpha[j * (ni + 1) + i] = if r < 1e-12 { (span / (2.0 * nk as f64)).asin() } else { (w / r).min(0.99).asin() };
+                alpha[j * (ni + 1) + i] = if r < 1e-12 { (0.5 * cell_ang).asin() } else { (w / r).min(0.99).asin() };
+                if r >= 1e-12 {
+                    half_w[j * (ni + 1) + i] = w;
+                }
             }
         }
     }
@@ -613,23 +803,56 @@ pub fn body_grid3(p: &Grid3Params) -> Result<Grid3, Error> {
     let nn = (ni + 1) * (nj + 1) * (nk + 1);
     let (mut x, mut y, mut z) = (vec![0.0; nn], vec![0.0; nn], vec![0.0; nn]);
     let mut theta = vec![0.0; nk + 1];
+    // nodes bounding the fin layers (not the symmetry planes) with the azimuth of their layer and the side: the node's lateral offset from the fin mid-plane,
+    // `s_k r sin(theta_k - theta_f)`, is the fin half-thickness
+    let sides: Vec<(usize, f64, f64)> = lay
+        .iter()
+        .flat_map(|l| {
+            let nl = l.theta_f.len();
+            (0..nl).flat_map(move |m| {
+                let (hf, hl) = (l.half_first && m == 0, l.half_last && m + 1 == nl);
+                [(!hf).then_some((l.k_f[m], l.theta_f[m], -1.0)), (!hl).then_some((l.k_f[m] + 1, l.theta_f[m], 1.0))]
+            })
+        })
+        .flatten()
+        .collect();
+    // cells of the fin layers, solid inside the planform: they do not set the scale of the lines at their sides
+    let mut layer_cell = vec![false; nk];
+    for &kf in lay.iter().flat_map(|l| &l.k_f) {
+        layer_cell[kf] = true;
+    }
     for j in 0..=nj {
         for i in 0..=ni {
             let c = j * (ni + 1) + i;
+            let (xc, r) = (xn[c], rn[c]);
+            let in_plan = plan.as_ref().is_some_and(|(pl, _)| (pl.i_le..=pl.i_te).contains(&i) && j <= pl.j_tip);
+            let scale_of = |theta: &[f64]| polygon_scale_where(theta, |k| !(in_plan && layer_cell[k]));
             match &lay {
-                Some(l) => fill_theta(&mut theta, l, alpha[c], span),
+                Some(l) => {
+                    fill_theta(&mut theta, l, alpha[c], span);
+                    if !half_w[c].is_nan() {
+                        // the nodes of a line are scaled by `polygon_scale` (the rings keep the circle's area), which moves the fin faces out by that factor:
+                        // put every side node at the angle whose scaled offset is the half-thickness (the scale depends on the neighbouring angles: a few passes)
+                        for _ in 0..8 {
+                            let s = scale_of(&theta);
+                            for &(k, th, sign) in &sides {
+                                theta[k] = th + sign * (half_w[c] / (r * s[k])).min(0.99).asin();
+                            }
+                        }
+                    }
+                }
                 None => {
                     for (k, t) in theta.iter_mut().enumerate() {
                         *t = span * k as f64 / nk as f64;
                     }
                 }
             }
-            let (xc, r) = (xn[c], rn[c]);
+            let scale = scale_of(&theta);
             for k in 0..=nk {
                 let id = (k * (nj + 1) + j) * (ni + 1) + i;
                 x[id] = xc;
-                y[id] = r * theta[k].sin();
-                z[id] = r * theta[k].cos();
+                y[id] = r * scale[k] * theta[k].sin();
+                z[id] = r * scale[k] * theta[k].cos();
             }
         }
     }
@@ -637,6 +860,7 @@ pub fn body_grid3(p: &Grid3Params) -> Result<Grid3, Error> {
     g.axis = vec![AxisRun { j: 0, i: 0..sp.n_up }];
     g.sym = sym;
     g.theta_span = span;
+    g.roughness = p.roughness;
     // the body is the `j = 0` wall: its runs by body segment (the nose, each aft segment, then the sting extension)
     let col = |x: f64| xs.partition_point(|&v| v < x - 1e-9 * (1.0 + x.abs())).min(ni);
     let bb = &sp.body;
@@ -688,6 +912,7 @@ fn base_grid3(p: &Grid3Params, bp: &BaseGridParams) -> Result<Grid3, Error> {
     }
     g.sym = sym;
     g.theta_span = span;
+    g.roughness = p.roughness;
     let (rows, ks) = (0..blk.j_end, 0..nk);
     g.mark_solid(SolidBox { i: 0..n_up, j: rows.clone(), k: ks.clone() }, None);
     let mut i0 = n_up;
@@ -711,6 +936,47 @@ fn base_grid3(p: &Grid3Params, bp: &BaseGridParams) -> Result<Grid3, Error> {
         }
     }
     Ok(g)
+}
+
+/// The azimuthal stack on the + side of the first fin of a grid, measured at the root row (`j = 0`) of the mid-chord column: for the wall-resolved checks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StackReport {
+    /// Height of the first cell next to the fin side, normal to the fin \[d\].
+    pub y1: f64,
+    /// Largest ratio of one cell's height to the previous one's, moving away from the fin.
+    pub growth_max: f64,
+    /// Cells from the fin to the next fin or symmetry plane.
+    pub cells: usize,
+}
+
+/// [`StackReport`] of the first fin layer of `g`; `None` without fins.
+pub fn fin_stack_report(g: &Grid3) -> Option<StackReport> {
+    let b = g.solid.iter().find(|b| b.k.len() == 1 && matches!(g.part_of(b.i.start, b.j.start, b.k.start), Some(Part::Fin(_))))?;
+    let i = (b.i.start + b.i.end) / 2;
+    let node = |k: usize| {
+        let id = (k * (g.nj + 1)) * (g.ni + 1) + i;
+        [g.y[id], g.z[id]]
+    };
+    // the fin's mid-plane azimuth: a half fin on the `theta = 0` plane or the end plane, else the middle of its two sides
+    let th = if b.k.start == 0 {
+        0.0
+    } else if b.k.end == g.nk {
+        let q = node(g.nk);
+        q[0].atan2(q[1])
+    } else {
+        let (a, c) = (node(b.k.start), node(b.k.end));
+        0.5 * (a[0].atan2(a[1]) + c[0].atan2(c[1]))
+    };
+    // distance of node `k` from the mid-plane, so the height of cell `k` normal to the fin is the difference of its two nodes' distances
+    let off = |k: usize| {
+        let q = node(k);
+        q[0] * th.cos() - q[1] * th.sin()
+    };
+    let height = |k: usize| (off(k + 1) - off(k)).abs();
+    let ks: Vec<usize> = (b.k.end..g.nk).take_while(|&k| !g.is_solid(i, 0, k)).collect();
+    let first = *ks.first()?;
+    let growth_max = ks.windows(2).map(|w| height(w[1]) / height(w[0])).fold(1.0, f64::max);
+    Some(StackReport { y1: height(first), growth_max, cells: ks.len() })
 }
 
 #[cfg(test)]
@@ -772,7 +1038,9 @@ mod tests {
                 for j in 0..=b.j.end {
                     for i in b.i.start..=b.i.end {
                         let p = node(&g, i, j, b.k.start);
-                        let r = (p[1] * p[1] + p[2] * p[2]).sqrt();
+                        // the nodes of a `k` line are scaled out by `polygon_scale`: the nominal radius is the node's over that scale
+                        let theta: Vec<f64> = (0..=g.nk).map(|k| node(&g, i, j, k)).map(|q| q[1].atan2(q[2])).collect();
+                        let r = (p[1] * p[1] + p[2] * p[2]).sqrt() / polygon_scale_where(&theta, |k| !g.solid.iter().any(|s| s.k.contains(&k)))[b.k.start];
                         let frac = (r - R) / f.span;
                         let x_le = f.sweep * frac;
                         let x_le0 = g.x[b.i.start]; // wall row (k = 0, j = 0) at the root leading edge
@@ -780,7 +1048,7 @@ mod tests {
                         let xi = (p[0] - (x_le0 + x_le)) / chord;
                         let h = half_thickness(&profile, f.thickness, chord, xi);
                         let (lo, hi) = (dist(&g, i, j, b.k.start, th), dist(&g, i, j, b.k.end, th));
-                        assert!((lo + h).abs() < 1e-12 && (hi - h).abs() < 1e-12, "{profile:?} ({i},{j}): {lo} {hi} vs {h}");
+                        assert!((lo + h).abs() < 1e-9 && (hi - h).abs() < 1e-9, "{profile:?} ({i},{j}): {lo} {hi} vs {h}");
                     }
                 }
             }
@@ -812,9 +1080,8 @@ mod tests {
         let g2: Grid = crate::engine::body_grid::large_domain_grid(&p.sting).unwrap();
         let v2: f64 = g2.vol.iter().sum();
         let v3: f64 = g.vol.iter().sum();
-        let flat = p.nk as f64 * (PI / p.nk as f64).sin() * v2;
-        assert!((v3 / flat - 1.0).abs() < 1e-10, "{v3} vs {flat}");
-        assert!((v3 / (PI * v2) - 1.0).abs() < 1e-3, "{v3} vs {}", PI * v2);
+        // area-preserving rings: the volume is the revolved 2D grid's
+        assert!((v3 / (PI * v2) - 1.0).abs() < 1e-10, "{v3} vs {}", PI * v2);
         assert_eq!(g.axis, vec![AxisRun { j: 0, i: 0..p.sting.n_up }]);
         assert!(g.solid.is_empty());
     }
@@ -918,7 +1185,8 @@ mod tests {
             let id = g.solid[0].j.end * (g.ni + 1) + g.solid[0].i.start;
             (g.y[id].powi(2) + g.z[id].powi(2)).sqrt()
         };
-        assert!((tip(&g) - 1.5).abs() < 1e-9 && (tip(&g0) - 1.5).abs() < 1e-9);
+        // the nodes of a `k` line sit at `polygon_scale` times their nominal radius (`1 + dtheta^2 / 12`, 0.14 % for the 24 cells of 7.5 degrees)
+        assert!((tip(&g) / 1.5 - 1.0).abs() < 5e-3 && (tip(&g0) / 1.5 - 1.0).abs() < 5e-3 && (tip(&g) - tip(&g0)).abs() < 1e-9);
         let mut p = base.clone();
         p.fin_chord_cells = Some(16);
         assert_eq!(body_grid3(&p).unwrap().solid[0].i.len(), 16);
@@ -939,5 +1207,198 @@ mod tests {
             let g = body_grid3(&p).unwrap();
             eprintln!("{label}: ni {} nj {} nk {} cells {} span cells {}", g.ni, g.nj, g.nk, g.ni * g.nj * g.nk, g.solid[0].j.end);
         }
+    }
+
+    fn flow() -> crate::engine::case3::WallFlow {
+        // the example rocket at Mach 2: Re/m 9.84e6, d = 0.0572 m
+        crate::engine::case3::WallFlow { re_c: 9.84e6 * 0.0572 / 2.0, mach_max: 2.0, ks_body: 2e-5, ks_fin: 1e-4 }
+    }
+
+    #[test]
+    fn a_stack_starts_at_the_wall_and_grows_at_the_design_rates() {
+        let st = FinStack::from_flow(flow().re_c, 2.0, 1.5, 15.0);
+        // the design's numbers for the example fin: first cell 6.1e-4 d, boundary layer 0.036 d
+        assert!((st.y1 / 6.1e-4 - 1.0).abs() < 0.1 && (st.delta / 0.036 - 1.0).abs() < 0.1, "{st:?}");
+        let (y1, delta) = (st.y1 / 0.5, st.delta / 0.5);
+        for (lo, hi) in [(true, false), (false, true), (true, true)] {
+            let f = stack_fractions(0.7, lo, hi, &st, y1, delta);
+            assert!(f[0] == 0.0 && (f[f.len() - 1] - 1.0).abs() < 1e-15 && f.windows(2).all(|w| w[1] > w[0]));
+            let sizes: Vec<f64> = f.windows(2).map(|w| 0.7 * (w[1] - w[0])).collect();
+            // the wall end: the first cell, `y1`; away from it the cells grow by at most 1.35 (and by 1.25 inside the layer)
+            let from_wall: Vec<f64> = if lo { sizes.clone() } else { sizes.iter().rev().copied().collect() };
+            assert!((from_wall[0] / y1 - 1.0).abs() < 1e-9, "first cell {} vs {y1}", from_wall[0]);
+            let half = if lo && hi { from_wall.len() / 2 } else { from_wall.len() };
+            for w in from_wall[..half].windows(2) {
+                assert!(w[1] / w[0] <= 1.35 + 1e-9 && w[1] / w[0] >= 1.0 - 1e-9, "growth {}", w[1] / w[0]);
+            }
+            let inside = from_wall
+                .iter()
+                .scan(0.0, |s, h| {
+                    *s += h;
+                    Some(*s)
+                })
+                .take_while(|&s| s < delta)
+                .count();
+            assert!(inside >= 8 && from_wall[..inside.min(half)].windows(2).all(|w| w[1] / w[0] <= 1.25 + 1e-9), "{inside} cells in the layer");
+        }
+    }
+
+    #[test]
+    fn the_fin_stack_sets_the_azimuthal_count_and_keeps_the_fin_thickness() {
+        let fl = flow();
+        for (sector, phase) in [(true, FinPhase::Between), (false, FinPhase::Between), (false, FinPhase::InPlane)] {
+            let mut p = params(0, Some(anf_fins(FinProfile::Square)));
+            p.fin_stack = Some(FinStack::from_flow(fl.re_c, fl.mach_max, 1.0, 15.0));
+            p.domain = if sector { Domain3::Sector } else { Domain3::Half { phase } };
+            let g = body_grid3(&p).unwrap();
+            let rep = fin_stack_report(&g).unwrap();
+            eprintln!("sector {sector} {phase:?}: nk {} {rep:?}", g.nk);
+            // the first cell is the design's, measured on the grid (the nodes sit at 1 + dtheta^2/12 of their radius)
+            let y1 = p.fin_stack.unwrap().y1;
+            assert!((rep.y1 / y1 - 1.0).abs() < 0.02, "first cell {} vs {y1}", rep.y1);
+            assert!(rep.growth_max <= 1.35 + 1e-9, "growth {}", rep.growth_max);
+            assert!(g.nk >= 12 && g.nk != p.nk, "nk {} is set by the stack, not by `nk` ({})", g.nk, p.nk);
+            // the fin face is at the half-thickness 0.04 from the mid-plane, exactly (the scale of the nodes is taken out)
+            let b = &g.solid[0];
+            let th = if sector || phase == FinPhase::InPlane { 0.0 } else { PI / 4.0 };
+            for (i, j) in [(b.i.start + 3, 0), (b.i.end - 2, b.j.end - 1)] {
+                let hi = dist(&g, i, j, b.k.end, th);
+                assert!((hi - 0.04).abs() < 1e-9, "face at {hi}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_two_sided_gap_between_two_fins_is_symmetric() {
+        let fl = flow();
+        let mut p = params(0, Some(anf_fins(FinProfile::Square)));
+        p.fin_stack = Some(FinStack::from_flow(fl.re_c, fl.mach_max, 1.0, 15.0));
+        let g = body_grid3(&p).unwrap();
+        // two fins at 45 and 135 degrees: the gap between them (90 degrees) has its stacks meeting at 90
+        let (b0, b1) = (&g.solid[0], &g.solid[1]);
+        let i = (b0.i.start + b0.i.end) / 2;
+        let theta = |k: usize| {
+            let id = (k * (g.nj + 1)) * (g.ni + 1) + i;
+            g.y[id].atan2(g.z[id])
+        };
+        let (k0, k1) = (b0.k.end, b1.k.start);
+        assert_eq!((k1 - k0) % 2, 0);
+        let mid = theta(k0 + (k1 - k0) / 2);
+        assert!((mid - PI / 2.0).abs() < 2e-3, "stacks meet at {mid}");
+        for m in 0..(k1 - k0) / 2 {
+            let (a, c) = (theta(k0 + m + 1) - theta(k0 + m), theta(k1 - m) - theta(k1 - m - 1));
+            assert!((a / c - 1.0).abs() < 0.05, "cell {m}: {a} vs {c}");
+        }
+    }
+
+    /// Grid quality of a wall-resolved sector: everywhere in the flow the azimuthal cells of a gap grow by at most the design's ratio (the same fractions of
+    /// the gap at every `(i, j)`), the fin layer cell against its first neighbour is the one place that jumps (the fin is one cell thick: the report says how
+    /// much), no cell is folded or flat, and the radial and axial spacings the fins add stay as smooth as without the stack.
+    #[test]
+    fn the_wall_resolved_sector_is_smooth_in_the_gaps_and_reports_the_fin_jump() {
+        let fl = flow();
+        let mut p = params(0, Some(anf_fins(FinProfile::DoubleWedge)));
+        p.domain = Domain3::Sector;
+        p.fin_stack = Some(FinStack::from_flow(fl.re_c, fl.mach_max, 1.0, 15.0));
+        let g = body_grid3(&p).unwrap();
+        let width = |i: usize, j: usize, k: usize| {
+            let (id0, id1) = (((k * (g.nj + 1)) + j) * (g.ni + 1) + i, (((k + 1) * (g.nj + 1)) + j) * (g.ni + 1) + i);
+            (g.y[id0] - g.y[id1]).hypot(g.z[id0] - g.z[id1])
+        };
+        let layer = &g.solid[0].k;
+        let (mut gap_growth, mut jump) = (1.0f64, 1.0f64);
+        for j in 1..g.nj {
+            for i in p.sting.n_up..g.ni {
+                for k in 0..g.nk - 1 {
+                    let (w0, w1) = (width(i, j, k), width(i, j, k + 1));
+                    if w0 < 1e-12 || w1 < 1e-12 {
+                        continue;
+                    }
+                    let q = (w1 / w0).max(w0 / w1);
+                    if layer.contains(&k) || layer.contains(&(k + 1)) {
+                        jump = jump.max(q);
+                    } else {
+                        gap_growth = gap_growth.max(q);
+                    }
+                }
+            }
+        }
+        eprintln!("sector stack: gap growth {gap_growth:.3}, layer cell against its neighbour at most {jump:.1}");
+        assert!(gap_growth <= 1.45, "gap growth {gap_growth}");
+        // the layer is as wide as the fin (0.08 d) next to a first cell of 6e-4 d at the root: the jump is by design, bounded by their ratio
+        assert!(jump < 0.08 * 1.5 / (0.9 * p.fin_stack.unwrap().y1), "layer jump {jump}");
+    }
+
+    #[test]
+    fn sharp_edges_keep_their_needle_and_blunt_ones_their_floor() {
+        let (t, chord) = (0.08, 1.0);
+        let r = 0.5 * t;
+        // a double wedge: both ends sharp, the floor 2 % of the half thickness, no 25 % flat face
+        assert!((half_thickness(&FinProfile::DoubleWedge, t, chord, 0.0) - 0.02 * r).abs() < 1e-15);
+        assert!((half_thickness(&FinProfile::DoubleWedge, t, chord, 1.0) - 0.02 * r).abs() < 1e-15);
+        // the rounded edge: the node at the nose is a point, the next one on the circle
+        assert!((half_thickness(&FinProfile::Rounded, t, chord, 0.0) - 0.02 * r).abs() < 1e-15);
+        let s = 0.01;
+        assert!((half_thickness(&FinProfile::Rounded, t, chord, s / chord) - (r * r - (r - s) * (r - s)).sqrt()).abs() < 1e-15);
+        // the ANF section: sharp leading edge, blunt trailing edge of the full thickness
+        let anf = FinProfile::Custom { section: vec![[0.0, 0.0], [0.1, 1.0], [1.0, 1.0]] };
+        assert!((half_thickness(&anf, t, chord, 0.0) - 0.02 * r).abs() < 1e-15);
+        assert!((half_thickness(&anf, t, chord, 1.0) - r).abs() < 1e-15);
+        // a square section and a blunt end are not touched
+        assert!((half_thickness(&FinProfile::Square, t, chord, 0.0) - r).abs() < 1e-15);
+        let blunt = FinProfile::Custom { section: vec![[0.0, 0.1], [0.5, 1.0], [1.0, 0.1]] };
+        assert!((half_thickness(&blunt, t, chord, 0.0) - 0.25 * r).abs() < 1e-15, "{}", half_thickness(&blunt, t, chord, 0.0));
+        // on the grid the leading-edge face of a double wedge is a sliver: its area against a square fin's
+        let area = |profile: FinProfile| {
+            let g = body_grid3(&params(0, Some(anf_fins(profile)))).unwrap();
+            let b = &g.solid[0];
+            (b.j.start..b.j.end).map(|j| g.iface[(b.k.start * g.nj + j) * (g.ni + 1) + b.i.start].area).sum::<f64>()
+        };
+        let (wedge, square) = (area(FinProfile::DoubleWedge), area(FinProfile::Square));
+        assert!(wedge < 0.1 * square, "double wedge LE face {wedge} vs square {square}");
+    }
+
+    #[test]
+    fn the_roughness_of_the_parts_reaches_the_cells_that_touch_them() {
+        let mut p = params(0, Some(anf_fins(FinProfile::Square)));
+        p.roughness = PartRoughness { body: 1e-4, fin: 5e-4 };
+        let g = body_grid3(&p).unwrap();
+        let ks = g.wall_ks();
+        let b = &g.solid[0];
+        let i = (b.i.start + b.i.end) / 2;
+        // beside a fin side, away from the body: the fin's; on the body wall under no fin: the body's; at the root next to the fin: the larger
+        assert_eq!(ks[g.cell(i, b.j.end / 2 + 1, b.k.end)], 5e-4);
+        assert_eq!(ks[g.cell(p.sting.n_up + 2, 0, 1)], 1e-4);
+        assert_eq!(ks[g.cell(i, 0, b.k.end)], 5e-4);
+        // far from every wall, on the axis rows and in solid cells: 0
+        assert_eq!(ks[g.cell(i, g.nj - 1, 3)], 0.0);
+        assert_eq!(ks[g.cell(2, 0, 3)], 0.0, "axis row");
+        assert_eq!(ks[g.cell(i, 2, b.k.start)], 0.0, "solid cell");
+    }
+
+    #[test]
+    fn the_wall_resolved_tiers_size_the_grid_from_the_flow() {
+        use crate::engine::case3::{Case3, Tier};
+        let fl = flow();
+        let body = Case3::anf_body();
+        let euler = Case3::sector(2.0, body.clone(), Case3::anf_fins(), Tier::Euler, 0);
+        let coarse = Case3::sector(2.0, body.clone(), Case3::anf_fins(), Tier::Coarse(fl), 0);
+        let fine = Case3::sector(2.0, body.clone(), Case3::anf_fins(), Tier::Fine(fl), 0);
+        assert!(euler.grid.fin_stack.is_none() && euler.grid.roughness == PartRoughness::default());
+        let (sc, sf) = (coarse.grid.fin_stack.unwrap(), fine.grid.fin_stack.unwrap());
+        // fin y+ 15 against 1: 15 times the first cell; the body wall spacing is the 2D case's for y+ 1 on both
+        assert!((sc.y1 / sf.y1 - 15.0).abs() < 1e-9);
+        let viscous = Case::viscous(2.0, body.clone(), 0, Wake::Sting, fl.re_c, 0.5, fl.mach_max);
+        assert_eq!(coarse.grid.sting.dr_wall, viscous.grid_sting.dr_wall);
+        assert_eq!(coarse.grid.sting.nj, viscous.grid_sting.nj);
+        assert_eq!(coarse.grid.roughness, PartRoughness { body: 2e-5, fin: 1e-4 });
+        let (gc, gf) = (body_grid3(&coarse.grid).unwrap(), body_grid3(&fine.grid).unwrap());
+        eprintln!("sector N=4: Euler nk {}, coarse nk {}, fine nk {}; coarse {} x {} x {}", euler.grid.nk, gc.nk, gf.nk, gc.ni, gc.nj, gc.nk);
+        // the design's estimate for the example fin: nk 18 (y+ 15) and 30 (y+ 1)
+        assert!(gf.nk > gc.nk && (12..=30).contains(&gc.nk) && gf.nk >= 20, "nk {} {}", gc.nk, gf.nk);
+        // the lift tier keeps uniform cells on the half domain
+        let lift = Case3::base_half(2.0, 0.0, body, Tier::Lift(fl), 0);
+        assert_eq!(lift.grid.nk, 32);
+        assert!(lift.grid.base.as_ref().unwrap().dr_wall > 30.0 * viscous.grid_base.dr_wall);
     }
 }

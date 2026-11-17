@@ -495,6 +495,27 @@ impl GpuSolver3 {
         Ok(())
     }
 
+    /// Wedge mode of a one-cell wedge (`nk == 1`): no k factor in the line solves, no `L_k` in the pseudo-time step, and the flux through the two k planes
+    /// is the cell's pressure on the face normal instead of the Riemann flux of the cell against its mirror image. Measured (`wedge3d`): without the k factor
+    /// the iteration diverges at `cfl_max` 10 and converges only at `cfl_max` of about 1 (ISSUES.md #22). Needs `nk == 1`.
+    pub fn set_wedge_mode(&mut self, on: bool) -> Result<()> {
+        if on && self.nk != 1 {
+            return Err(GpuError::Unsupported("wedge mode needs nk == 1"));
+        }
+        on3_mut!(self, s => s.set_wedge_mode(on));
+        Ok(())
+    }
+
+    /// The three parts of wedge mode one by one: `(skip_k, no_dt_k, k_wall_flux)` (experiments; [`GpuSolver3::set_wedge_mode`] sets them together).
+    pub fn set_wedge_parts(&mut self, skip_k: bool, no_dt_k: bool, k_wall_flux: bool) {
+        on3_mut!(self, s => (s.skip_k, s.no_dt_k, s.k_wall_flux) = (skip_k, no_dt_k, k_wall_flux))
+    }
+
+    /// Whether wedge mode is on (all three parts).
+    pub fn wedge_mode(&self) -> bool {
+        on3!(self, s => s.skip_k && s.no_dt_k && s.k_wall_flux)
+    }
+
     /// Overwrites the conserved state (e.g. with a CPU solution) and restarts the iteration counter and the CFL ramp.
     pub fn set_state(&mut self, u: &[Cons3]) -> Result<()> {
         on3_mut!(self, s => s.set_state(u)?);

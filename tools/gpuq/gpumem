@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# gpumem: run a command and report the peak device memory it used on the GPU.
+#
+#   gpumem [--interval MS] [--label NAME] -- CMD...
+#
+# While CMD (and everything it starts) runs, samples every MS milliseconds (default 100)
+#   * the device memory of the processes of CMD's tree: `nvidia-smi --query-compute-apps=pid,used_memory`, summed over the pids of the tree (Vulkan / wgpu
+#     contexts are listed there; other processes and the desktop do not count), and
+#   * the whole device: `nvidia-smi --query-gpu=memory.used` (the baseline is the minimum of three samples before CMD starts),
+# and prints, after CMD, one line on stdout
+#
+#   MEM {"label":NAME,"proc_peak_mib":P,"device_baseline_mib":B,"device_peak_mib":D,"device_delta_mib":D-B,"samples":N,"interval_ms":MS}
+#
+# `proc_peak_mib` is the number to quote (it does not move when the desktop or another session allocates); the device figures are the cross-check. The exit
+# status is CMD's. Use it inside a gpuq job on the built binary, not on `cargo run`:
+#   gpuq submit --host local -- bash -c 'cargo build --release -p P --example E && tools/gpuq/gpumem --label X -- "$CARGO_TARGET_DIR"/release/examples/E ARGS'
+# Luma pools its buffers, so the peak is close to the high-water mark; a spike shorter than the interval can be missed. The `MEM` line goes to the job log,
+# not to the ledger (gpuq appends only `PERF` lines); the `bench3` example puts the same per-process figure in its `PERF` line (`peak_device_mib`).
+set -u
+interval=100
+label=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    --interval) interval=${2:?}; shift 2 ;;
+    --label) label=${2:?}; shift 2 ;;
+    --) shift; break ;;
+    *) echo "gpumem: unknown option $1" >&2; exit 2 ;;
+  esac
+done
+[ $# -gt 0 ] || { echo "usage: gpumem [--interval MS] [--label NAME] -- CMD..." >&2; exit 2; }
+command -v nvidia-smi >/dev/null || { echo "gpumem: no nvidia-smi" >&2; exit 2; }
+
+used() { nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -n 1 | tr -d ' \r'; }
+# the pid and every descendant of it, one per line
+tree() { ps -eo pid=,ppid= | awk -v root="$1" '{ p[$1] = $2 } END { for (c in p) { x = c; while (x != "" && x != 0) { if (x == root) { print c; break } x = p[x] } } }'; }
+
+base=$(for _ in 1 2 3; do used; sleep 0.1; done | sort -n | head -n 1)
+base=${base:-0}
+"$@" &
+child=$!
+dev_peak=0
+proc_peak=0
+n=0
+step=$(awk -v ms="$interval" 'BEGIN { printf "%.3f", ms / 1000 }')
+while kill -0 "$child" 2>/dev/null; do
+  d=$(used)
+  [ -n "$d" ] && [ "$d" -gt "$dev_peak" ] && dev_peak=$d
+  p=$(nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits 2>/dev/null | tr -d ' \r' \
+    | awk -F, -v pids="$(tree "$child" | tr '\n' ' ')" 'BEGIN { n = split(pids, a, " "); for (i = 1; i <= n; i++) m[a[i]] = 1 } ($1 in m) { s += $2 } END { print s + 0 }')
+  [ "$p" -gt "$proc_peak" ] && proc_peak=$p
+  n=$((n + 1))
+  sleep "$step"
+done
+wait "$child"
+rc=$?
+printf 'MEM {"label":"%s","proc_peak_mib":%s,"device_baseline_mib":%s,"device_peak_mib":%s,"device_delta_mib":%s,"samples":%s,"interval_ms":%s}\n' \
+  "$label" "$proc_peak" "$base" "$dev_peak" "$((dev_peak - base))" "$n" "$interval"
+exit "$rc"

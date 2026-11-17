@@ -2,14 +2,15 @@
 //! CPU solver built from them. Lengths are in nose diameters (`d = 1`).
 
 use crate::engine::body_grid::{BaseBody, Body, Nose};
-use crate::engine::case::{base_grid, sting_grid};
+use crate::engine::case::{base_grid, resolve_walls, sting_grid, wall_spacing};
 use crate::engine::field3::Snapshots3;
-use crate::engine::grid3::{body_grid3, Domain3, Fins3, Grid3Params, WEDGE_ANGLE};
+use crate::engine::grid3::{body_grid3, Domain3, FinStack, Fins3, Grid3Params, WEDGE_ANGLE};
 use crate::error::Error;
 use crate::progress::ProgressSink;
 use crate::spec::FinProfile;
 use bowshock_cfd::flux::Limiter;
 use bowshock_cfd::gas3::freestream3;
+use bowshock_cfd::grid3::PartRoughness;
 use bowshock_cfd::implicit::{ImplicitParams, LineSolve3};
 use bowshock_cfd::solver3::{Config3, Scheme3, Solver3};
 
@@ -71,6 +72,51 @@ impl Numerics3 {
     }
 }
 
+/// Free-stream and surface data a wall-resolved 3D grid is sized from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WallFlow {
+    /// `rho c d / mu` of the free stream (`d` the nose diameter).
+    pub re_c: f64,
+    /// Largest Mach number of the table the grid serves (the wall spacing is for the highest Reynolds number).
+    pub mach_max: f64,
+    /// Equivalent sand-grain roughness heights of the body and of the fins \[d\].
+    pub ks_body: f64,
+    pub ks_fin: f64,
+}
+
+/// What a 3D grid is resolved for: the wall spacing of the body and of the fin sides, and the azimuthal policy.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Tier {
+    /// Inviscid: no wall spacing, uniform azimuthal cells.
+    Euler,
+    /// `Resolution::Coarse` of a wall-resolved case: body `y+` ~ 1, fin sides `y+` ~ 15 (automatic wall treatment), the fin stack of [`FinStack`].
+    Coarse(WallFlow),
+    /// Body and fin sides `y+` ~ 1.
+    Fine(WallFlow),
+    /// The lift tier of a half domain: body and fins `y+` ~ 60 (wall functions), uniform azimuthal cells, `32 << level` over the half domain.
+    Lift(WallFlow),
+}
+
+impl Tier {
+    /// The flow the walls are sized for (`None` for [`Tier::Euler`]).
+    pub fn flow(&self) -> Option<&WallFlow> {
+        match self {
+            Tier::Euler => None,
+            Tier::Coarse(f) | Tier::Fine(f) | Tier::Lift(f) => Some(f),
+        }
+    }
+
+    /// Target `y+` of the first cell on the body and on the fin sides (`None` for [`Tier::Euler`]).
+    pub fn y_plus(&self) -> Option<(f64, f64)> {
+        match self {
+            Tier::Euler => None,
+            Tier::Coarse(_) => Some((1.0, 15.0)),
+            Tier::Fine(_) => Some((1.0, 1.0)),
+            Tier::Lift(_) => Some((60.0, 60.0)),
+        }
+    }
+}
+
 /// One Mach number and incidence on one body.
 #[derive(Clone, Debug)]
 pub struct Case3 {
@@ -80,6 +126,7 @@ pub struct Case3 {
     pub body: BaseBody,
     pub grid: Grid3Params,
     pub numerics: Numerics3,
+    pub tier: Tier,
     /// Where the run reports its progress and can be stopped; `None`: silent.
     pub progress: Option<ProgressSink>,
     /// Where the run hands snapshots of its flow field; `None`: none.
@@ -91,7 +138,7 @@ impl Case3 {
     /// and [`Numerics3::auto`].
     pub fn new(mach: f64, alpha: f64, body: BaseBody, fins: Option<Fins3>, level: u32) -> Case3 {
         let grid = Grid3Params::half(sting_grid(&body, level), fins, Grid3Params::default_nk(level), level);
-        Case3 { mach, alpha, body, grid, numerics: Numerics3::auto(mach, level), progress: None, snapshots: None }
+        Case3 { mach, alpha, body, grid, numerics: Numerics3::auto(mach, level), tier: Tier::Euler, progress: None, snapshots: None }
     }
 
     /// An axisymmetric body at zero incidence as a single-cell wedge of [`WEDGE_ANGLE`] on the base-wake grid of the 2D case
@@ -103,20 +150,44 @@ impl Case3 {
         c
     }
 
-    /// A finless body on the base-wake grid as a half domain (incidence `alpha`), `24 << level` azimuthal cells.
-    pub fn base_half(mach: f64, alpha: f64, body: BaseBody, level: u32) -> Case3 {
+    /// A finless body on the base-wake grid as a half domain (incidence `alpha`): `24 << level` azimuthal cells (`32 << level` on the lift tier), the walls
+    /// resolved for `tier`.
+    pub fn base_half(mach: f64, alpha: f64, body: BaseBody, tier: Tier, level: u32) -> Case3 {
         let mut c = Case3::new(mach, alpha, body, None, level);
         c.grid.base = Some(base_grid(&c.body, level));
-        c
+        c.with_tier(tier)
     }
 
-    /// A body with `fins.count` fins at zero incidence as the sector `[0, pi/count]` on the sting grid (the fins are not built on the base-wake
-    /// grid yet), `nk` azimuthal cells over the sector.
-    pub fn sector(mach: f64, body: BaseBody, fins: Fins3, nk: usize, level: u32) -> Case3 {
+    /// A body with `fins.count` fins at zero incidence as the sector `[0, pi/count]` on the sting grid (the fins are not built on the base-wake grid yet):
+    /// `8 << level` azimuthal cells for [`Tier::Euler`], the fin stack for the wall-resolved tiers, the walls resolved for `tier`.
+    pub fn sector(mach: f64, body: BaseBody, fins: Fins3, tier: Tier, level: u32) -> Case3 {
         let mut c = Case3::new(mach, 0.0, body, Some(fins), level);
         c.grid.domain = Domain3::Sector;
-        c.grid.nk = nk;
-        c
+        c.grid.nk = 8usize << level;
+        c.with_tier(tier)
+    }
+
+    /// This case sized for `tier`: the first cell of the body walls on both meridian grids for the body `y+`, the fin stack for the fin `y+` (the wall-resolved
+    /// tiers; the lift tier keeps uniform azimuthal cells, `32 << level` over a half domain), the roughness of the body and of the fins carried on the grid.
+    pub fn with_tier(mut self, tier: Tier) -> Case3 {
+        self.tier = tier;
+        let (Some(flow), Some((y_body, y_fin))) = (tier.flow(), tier.y_plus()) else {
+            return self;
+        };
+        let level = self.grid.level;
+        let y1 = wall_spacing(&self.body, flow.re_c, flow.mach_max, y_body);
+        let mut base = self.grid.base.clone().unwrap_or_else(|| base_grid(&self.body, level));
+        resolve_walls(&mut base, &mut self.grid.sting, &self.body, y1);
+        if self.grid.base.is_some() {
+            self.grid.base = Some(base);
+        }
+        self.grid.roughness = PartRoughness { body: flow.ks_body, fin: flow.ks_fin };
+        match (&self.grid.fins, tier) {
+            (Some(f), Tier::Coarse(_) | Tier::Fine(_)) => self.grid.fin_stack = Some(FinStack::from_flow(flow.re_c, flow.mach_max, f.root_chord, y_fin)),
+            (_, Tier::Lift(_)) if matches!(self.grid.domain, Domain3::Half { .. }) => self.grid.nk = 32usize << level,
+            _ => {}
+        }
+        self
     }
 
     /// Free-stream state at the case's Mach number and incidence.

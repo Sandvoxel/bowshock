@@ -63,16 +63,8 @@ impl Case {
     /// the nose tip. `re_c = rho c d_nose / mu` of the free stream, `sutherland = 110.4 K / T_inf`.
     pub fn viscous(mach: f64, body: BaseBody, level: u32, wake: Wake, re_c: f64, sutherland: f64, mach_max: f64) -> Case {
         let mut c = Case::new(mach, body, level, wake, Numerics::viscous(mach, level));
-        let cf = 0.027 * (re_c * mach_max * c.body.x_base()).powf(-1.0 / 7.0);
-        let y1 = 1.0 / (re_c * mach_max * (0.5 * cf).sqrt());
-        let count = |h: f64| layer_count(h, y1);
-        let (re, rs) = (c.body.base_radius(), c.body.sting_radius);
-        c.grid_base.dr_wall = y1;
-        c.grid_base.nj_out = count(c.grid_base.r_far - re);
-        c.grid_base.n_gap = count(re - rs);
-        c.grid_base.gap_one_sided = true;
-        c.grid_sting.dr_wall = y1;
-        c.grid_sting.nj = count(c.grid_sting.r_far);
+        let y1 = wall_spacing(&c.body, re_c, mach_max, 1.0);
+        resolve_walls(&mut c.grid_base, &mut c.grid_sting, &c.body, y1);
         let wall_i_start = match wake {
             Wake::Base => c.grid_base.n_up,
             Wake::Sting => c.grid_sting.n_up,
@@ -164,6 +156,25 @@ fn even_ceil(x: f64) -> usize {
 /// Number of rows of a wall-clustered layer of height `h` with first cell height `y1` and growth ratio 1.2 (even).
 fn layer_count(h: f64, y1: f64) -> usize {
     even_ceil((1.0 + 0.2 * h / y1).ln() / 1.2f64.ln())
+}
+
+/// First cell height at the body wall \[d\] for `y_plus` at the highest Mach number `mach_max` of a sweep: the flat-plate friction over the body length,
+/// `cf = 0.027 (re_c M L)^(-1/7)`, `y1 = y+ / (re_c M sqrt(cf/2))` (`re_c = rho c d / mu` of the free stream).
+pub(crate) fn wall_spacing(body: &BaseBody, re_c: f64, mach_max: f64, y_plus: f64) -> f64 {
+    let cf = 0.027 * (re_c * mach_max * body.x_base()).powf(-1.0 / 7.0);
+    y_plus / (re_c * mach_max * (0.5 * cf).sqrt())
+}
+
+/// Wall-resolve both meridian grids of a case for the first cell height `y1`: radial cell counts for a growth ratio of 1.2, the gap behind the base clustered at
+/// the base corner only.
+pub(crate) fn resolve_walls(grid_base: &mut BaseGridParams, grid_sting: &mut LargeGridParams, body: &BaseBody, y1: f64) {
+    let (re, rs) = (body.base_radius(), body.sting_radius);
+    grid_base.dr_wall = y1;
+    grid_base.nj_out = layer_count(grid_base.r_far - re, y1);
+    grid_base.n_gap = layer_count(re - rs, y1);
+    grid_base.gap_one_sided = true;
+    grid_sting.dr_wall = y1;
+    grid_sting.nj = layer_count(grid_sting.r_far, y1);
 }
 
 /// Longest mean axial cell of an aft segment (tube or cone) of the grids of [`Case::new`] at level 0, in nose diameters; level `l`

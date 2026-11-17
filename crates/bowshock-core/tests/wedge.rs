@@ -6,7 +6,7 @@ use bowshock_cfd::grid3::Symmetry;
 use bowshock_cfd::solver3::Solver3;
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
 use bowshock_core::engine::case::{Case, Wake};
-use bowshock_core::engine::case3::Case3;
+use bowshock_core::engine::case3::{Case3, Tier};
 use bowshock_core::engine::grid3::{Domain3, FinPhase, Fins3};
 use bowshock_core::engine::numerics::Numerics;
 use bowshock_core::engine::result::StopReason;
@@ -53,7 +53,7 @@ fn rest_state_is_a_fixed_point(case: Case3, what: &str) {
 #[test]
 fn a_gas_at_rest_stays_at_rest_on_every_domain() {
     rest_state_is_a_fixed_point(Case3::wedge(0.5, boattailed(), 0), "wedge on the base grid");
-    rest_state_is_a_fixed_point(small(Case3::base_half(0.5, 0.0, boattailed(), 0)), "half domain on the base grid");
+    rest_state_is_a_fixed_point(small(Case3::base_half(0.5, 0.0, boattailed(), Tier::Euler, 0)), "half domain on the base grid");
     let mut sector = Case3::tiny_anf(0.5, 0.0);
     sector.grid.domain = Domain3::Sector;
     sector.grid.nk = 5;
@@ -72,7 +72,7 @@ fn a_gas_at_rest_stays_at_rest_on_every_domain() {
 /// nose are found by part and direction.
 #[test]
 fn wall_classes_partition_the_closed_body() {
-    for (case, what) in [(Case3::wedge(0.5, boattailed(), 0), "wedge"), (small(Case3::base_half(0.5, 0.0, boattailed(), 0)), "half domain")] {
+    for (case, what) in [(Case3::wedge(0.5, boattailed(), 0), "wedge"), (small(Case3::base_half(0.5, 0.0, boattailed(), Tier::Euler, 0)), "half domain")] {
         let s = case.build_solver().unwrap();
         let g = &s.grid;
         let p_inf = case.freestream()[4];
@@ -143,11 +143,11 @@ fn the_wedge_matches_the_2d_solver() {
     }
 }
 
-/// G-W2: the wedge angle hardly matters. The flat-faced wedge cell has a bias `~ -0.17 d^2` in the drag (the radial flux divergence is divided by
-/// `cos(d/2)`), so against the 2 degree default: 1 degree within 0.05 %, 6 degrees within 0.3 %, 12 degrees within 1.5 % (the design asked for 0.3 % at 12).
+/// G-W2: the wedge angle does not matter (the nodes are area-preserving, `polygon_scale`): against the 2 degree default, 1, 6 and 12 degrees within 0.3 %.
 #[test]
 #[ignore = "validation: CPU, minutes"]
 fn the_wedge_angle_does_not_matter() {
+    let mut failed = Vec::new();
     for mach in [0.9, 2.0] {
         let total = |deg: f64| {
             let mut c = Case3::wedge(mach, boattailed(), 0);
@@ -157,12 +157,15 @@ fn the_wedge_angle_does_not_matter() {
             p.total
         };
         let base = total(2.0);
-        for (deg, tol) in [(1.0, 5e-4), (6.0, 3e-3), (12.0, 1.5e-2)] {
+        for deg in [1.0, 6.0, 12.0] {
             let t = total(deg);
             println!("M {mach}: {deg} deg against 2 deg: {:+.3} %", 100.0 * (t / base - 1.0));
-            assert!((t / base - 1.0).abs() < tol, "M {mach}: {deg} deg {t} vs 2 deg {base}");
+            if (t / base - 1.0).abs() >= 3e-3 {
+                failed.push(format!("M {mach}: {deg} deg {t} vs 2 deg {base}"));
+            }
         }
     }
+    assert!(failed.is_empty(), "{failed:?}");
 }
 
 /// Fins of the tiny ANF case with `n` of them.
@@ -175,8 +178,8 @@ fn tiny_fins(n: u32) -> Fins3 {
 /// G-W3: a sector of `n` fins gives the same drag as the half domain (the whole body's mirror half) at zero incidence, on grids that are the sector
 /// replicated. `nk_half` is the number of cells of the half domain. Where a fin of the half domain is a full layer cell (not a half cell on a symmetry
 /// plane) the sector's layer cell is the half of it with a mirror on the plane: the same grid lines, a different cell centre, so the discretisations
-/// differ at the fin; `tol` says how much.
-fn sector_vs_half(n: u32, phase: FinPhase, nk_sector: usize, nk_half: usize, mach: f64, tol: f64) {
+/// differ at the fin. The `Err` says which band (`tol` of the total, and of the fins) failed.
+fn sector_vs_half(n: u32, phase: FinPhase, nk_sector: usize, nk_half: usize, mach: f64, tol: f64) -> Result<(), String> {
     let mut sector = Case3::tiny_anf(mach, 0.0);
     sector.grid.fins = Some(tiny_fins(n));
     sector.grid.domain = Domain3::Sector;
@@ -192,8 +195,14 @@ fn sector_vs_half(n: u32, phase: FinPhase, nk_sector: usize, nk_half: usize, mac
         ps.fin_sides, ps.fin_edges, ps.fin_tips, ps.nose, ps.total, ph.fin_sides, ph.fin_edges, ph.fin_tips, ph.nose, ph.total, 100.0 * (ps.total / ph.total - 1.0)
     );
     let near = |a: f64, b: f64| (a - b).abs() <= tol * ph.total.abs().max(1e-3);
-    assert!(near(ps.total, ph.total), "N {n}: total {} vs half {}", ps.total, ph.total);
-    assert!(near(ps.fin_sides + ps.fin_edges + ps.fin_tips, ph.fin_sides + ph.fin_edges + ph.fin_tips), "N {n}: fins");
+    let (fs, fh) = (ps.fin_sides + ps.fin_edges + ps.fin_tips, ph.fin_sides + ph.fin_edges + ph.fin_tips);
+    if !near(ps.total, ph.total) {
+        return Err(format!("N {n} {phase:?} M {mach}: total {} vs half {}", ps.total, ph.total));
+    }
+    if !near(fs, fh) {
+        return Err(format!("N {n} {phase:?} M {mach}: fins {fs} vs half {fh}"));
+    }
+    Ok(())
 }
 
 /// Two fins in the pitch plane: the half domain has a half fin on each plane, exactly two sectors (same cells, same fin treatment; even n, same-cell axis
@@ -201,20 +210,24 @@ fn sector_vs_half(n: u32, phase: FinPhase, nk_sector: usize, nk_half: usize, mac
 #[test]
 #[ignore = "validation: CPU, minutes"]
 fn two_fin_sectors_match_the_half_domain() {
-    for mach in [0.8, 2.0] {
-        sector_vs_half(2, FinPhase::InPlane, 4, 8, mach, 0.01);
-    }
+    let failed: Vec<String> = [0.8, 2.0].iter().filter_map(|&mach| sector_vs_half(2, FinPhase::InPlane, 4, 8, mach, 0.01).err()).collect();
+    assert!(failed.is_empty(), "{failed:?}");
 }
 
-/// Four fins "x" (even n) and three fins with one in the pitch plane (odd n: mirrored, interpolated axis ghost): the half domain's full fin cells straddle
-/// the symmetry plane the sector's half cells end at: 5 %.
+/// Four fins "x" (even n) and three fins with one in the pitch plane (odd n: mirrored, interpolated axis ghost): the half domain's fins here are full layer
+/// cells straddling the plane, the sector's a half cell on it. On these 13 to 15 degree cells (sharp leading edge, blunt trailing edge) the totals differ
+/// by +1.4 % and +1.1 % at Mach 2 (the fin sides agree to 0.05 %, the edge faces to 3 %, the nose to 1 %), 2 % here, the design's band was 1 %; at Mach 0.8 by
+/// -3.5 % and -1.3 %, 5 %: the polygon bias did not cause it (-3.7 % and -1.3 % before the area-preserving nodes), a refined sector (6 gap cells) did not
+/// close it (-9 %, not converged in 3000 iterations); the cause is not established.
 #[test]
 #[ignore = "validation: CPU, minutes"]
 fn four_and_three_fin_sectors_match_the_half_domain() {
-    for mach in [0.8, 2.0] {
-        sector_vs_half(4, FinPhase::Between, 4, 14, mach, 0.05);
-        sector_vs_half(3, FinPhase::InPlane, 4, 11, mach, 0.05);
+    let mut failed = Vec::new();
+    for (mach, tol) in [(0.8, 0.05), (2.0, 0.02)] {
+        failed.extend(sector_vs_half(4, FinPhase::Between, 4, 14, mach, tol).err());
+        failed.extend(sector_vs_half(3, FinPhase::InPlane, 4, 11, mach, tol).err());
     }
+    assert!(failed.is_empty(), "{failed:?}");
 }
 
 #[test]
@@ -278,16 +291,17 @@ fn the_wedge_cone_matches_taylor_maccoll() {
     }
 }
 
-/// The revolved base-wake grid as a half domain (24 azimuthal cells of 7.5 degrees, zero incidence, axis ghost of the mirror kind) gives the wedge's drag
-/// within 1.5 %: the same meridian grid, the same axis, a 3D flow that stays axisymmetric. The cells are flat-faced polygons: the drag has the wedge's
-/// bias `~ -0.17 d^2` with `d` the cell angle (8 cells of 22.5 degrees: -2.9 % at Mach 1.3, measured; 24 cells: below 0.5 %).
+/// The revolved base-wake grid as a half domain (zero incidence, axis ghost of the mirror kind) gives the wedge's drag within 1 %: the same meridian grid, the
+/// same axis, a 3D flow that stays axisymmetric. The nodes are area-preserving, so the cells of 22.5 degrees (8 over the half domain) are +0.7 % (Mach 1.3) and
+/// +0.3 % (Mach 2) off, the inscribed polygon was -2.9 % and -0.4 %; 24 cells of 7.5 degrees: -0.01 % and -0.02 %.
 #[test]
 #[ignore = "validation: CPU, minutes"]
 fn the_half_domain_on_the_base_grid_matches_the_wedge() {
-    for mach in [1.3, 2.0] {
+    let mut failed = Vec::new();
+    for (mach, nk) in [(1.3, 8), (2.0, 8), (1.3, 24), (2.0, 24)] {
         let (w, itw, whyw) = converged(&Case3::wedge(mach, boattailed(), 0));
-        let mut half = Case3::base_half(mach, 0.0, boattailed(), 0);
-        half.grid.nk = 24;
+        let mut half = Case3::base_half(mach, 0.0, boattailed(), Tier::Euler, 0);
+        half.grid.nk = nk;
         let (h, ith, whyh) = converged(&half);
         println!(
             "M {mach}: wedge nose {:+.5} aft {:+.5} base {:+.5} total {:+.5} ({itw} it, {whyw});  half nose {:+.5} aft {:+.5} base {:+.5} total {:+.5} ({ith} it, {whyh});  d total {:+.2} %",
@@ -301,14 +315,18 @@ fn the_half_domain_on_the_base_grid_matches_the_wedge() {
             h.total,
             100.0 * (h.total / w.total - 1.0)
         );
-        assert!((h.total / w.total - 1.0).abs() < 0.015, "M {mach}: half {} vs wedge {}", h.total, w.total);
+        println!("M {mach}, nk {nk}: d total {:+.2} %", 100.0 * (h.total / w.total - 1.0));
+        if (h.total / w.total - 1.0).abs() >= 0.01 {
+            failed.push(format!("M {mach}, nk {nk}: half {} vs wedge {}", h.total, w.total));
+        }
     }
+    assert!(failed.is_empty(), "{failed:?}");
 }
 
 /// G-W3, odd `n`: the design asked a three-fin sector to give the per-fin drag of a one-fin sector. Measured (Mach 2, 15 and 20 degree cells): +8 % per fin,
-/// +1.4 % on the nose, so the per-fin drag is not an invariant (the fins interfere through the body flow, and the coarse fin cells carry the polygon bias).
+/// +1.4 % on the nose, so the per-fin drag is not an invariant (the fins interfere through the body flow, and the coarse fin cells resolve them differently).
 /// What is invariant is the nose drag, supersonic (the fins are downstream): every fin count 1..=6 (even `n`: same-cell axis ghost; odd `n`: mirrored and
-/// interpolated) gives it within 3 % of the mean on cells of about 18 degrees; the polygon bias `~ -0.17 d^2` is the spread.
+/// interpolated) gives it within 3 % of the mean on cells of about 18 degrees; the O(d^2) of the cell angle is the spread.
 #[test]
 #[ignore = "validation: CPU, minutes"]
 fn the_nose_drag_does_not_depend_on_the_fin_count_or_the_axis_ghost_kind() {
