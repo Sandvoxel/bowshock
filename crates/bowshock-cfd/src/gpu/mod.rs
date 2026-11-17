@@ -134,6 +134,8 @@ pub mod f32s {
 
     include!("body.rs");
     include!("body3.rs");
+    include!("viscous3.rs");
+    include!("turbulence3.rs");
     include!("implicit3.rs");
     include!("implicit.rs");
     include!("viscous.rs");
@@ -197,6 +199,8 @@ pub mod df32s {
 
     include!("body.rs");
     include!("body3.rs");
+    include!("viscous3.rs");
+    include!("turbulence3.rs");
     include!("implicit3.rs");
     include!("implicit.rs");
     include!("viscous.rs");
@@ -421,6 +425,33 @@ pub struct WallFace3 {
     pub cz: f64,
     pub cm: f64,
     pub cut: bool,
+}
+
+/// One no-slip face of the viscous force reduction: the class (an index chosen by the caller), the family `dir` of the face (0: i, 1: j, 2: k), its flat index `q`
+/// in the family layout (`viscous3::face_of`), `sigma` (+1 where the fluid cell is the lower side: `viscous3::wall_tractions`), the area and the abscissa of the
+/// centroid.
+#[derive(Clone, Copy, Debug)]
+pub struct TractionFace3 {
+    pub class: usize,
+    pub dir: usize,
+    pub q: usize,
+    pub sigma: f64,
+    pub area: f64,
+    pub cx: f64,
+}
+
+/// Everything the viscous kernels produce on a padded host state, downloaded (`LazySolver3::viscous_probe3`): the cell gradients and viscosity, the viscous face
+/// fluxes `Fv.n` of the three families (mass component 0), the diffusive spectral radius of every face, the diffusion rates and the viscous residual of every
+/// cell, and the viscous wall forces by class (`[Fx, Fz, Mz]`, empty without traction faces).
+#[derive(Clone, Debug)]
+pub struct VisProbe {
+    pub grad: Vec<[f64; 12]>,
+    pub mu: Vec<f64>,
+    pub fv: [Vec<[f64; 5]>; 3],
+    pub lambda: [Vec<f64>; 3],
+    pub dr: Vec<[f64; 3]>,
+    pub residual: Vec<[f64; 5]>,
+    pub tractions: Vec<[f64; 3]>,
 }
 
 enum Inner3 {

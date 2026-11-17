@@ -470,6 +470,10 @@ pub struct LazySolver3 {
     lg: LGeo3,
     /// The wall faces of the on-device force integration (`set_wall_faces`).
     forces: Option<ForceGeo3>,
+    /// The viscous terms (`viscous3.rs`): the host-built face data; `None` for the Euler equations.
+    visc: Option<VGeo3>,
+    /// The no-slip faces of the viscous force reduction.
+    traction: Option<TractionGeo3>,
 }
 
 impl LazySolver3 {
@@ -566,6 +570,8 @@ impl LazySolver3 {
             k_src: wedge,
             lg,
             forces: None,
+            visc: None,
+            traction: None,
         };
         let q = prim_to_cons3(&cfg.freestream);
         s.set_state(&vec![q; nc])?;
