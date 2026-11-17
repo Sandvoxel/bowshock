@@ -419,6 +419,14 @@ pub struct LazySolver3 {
     /// Number of fluid cells (the residual norm divides by it).
     n_active: usize,
     axis_cells: usize,
+    /// Wedge-mode switches of the implicit scheme, for a one-cell wedge (`nk == 1`, where the k faces are the two reflecting planes and `V / (c A_k)` is only
+    /// the stiffness of a one-cell azimuth). `skip_k`: no k factor in the line solves. `no_dt_k`: no `L_k` in the pseudo-time step. `k_wall_flux`: the flux
+    /// through the two k planes is the pressure of the cell, `[0, p n, 0]` (the wall flux: the hoop term of the axisymmetric equations), not the
+    /// Riemann flux between the cell and its mirror image. All off by default; see [`GpuSolver3::set_wedge_mode`] for what works together (the
+    /// Riemann flux through the planes is stiff, with it the k factor cannot be dropped).
+    pub skip_k: bool,
+    pub no_dt_k: bool,
+    pub k_wall_flux: bool,
     /// The f32 geometry of the implicit left-hand side.
     lg: LGeo3,
 }
@@ -502,8 +510,23 @@ impl LazySolver3 {
             },
         };
         let lg = LGeo3::new(ctx, grid, &solid)?;
-        let mut s =
-            LazySolver3 { ctx: ctx.clone(), ni, nj, nk, cfg: cfg.clone(), staging: DEFAULT_STAGING, geo, state: None, iter: 0, n_active, axis_cells: na, lg };
+        let mut s = LazySolver3 {
+            ctx: ctx.clone(),
+            ni,
+            nj,
+            nk,
+            cfg: cfg.clone(),
+            staging: DEFAULT_STAGING,
+            geo,
+            state: None,
+            iter: 0,
+            n_active,
+            axis_cells: na,
+            skip_k: false,
+            no_dt_k: false,
+            k_wall_flux: false,
+            lg,
+        };
         let q = prim_to_cons3(&cfg.freestream);
         s.set_state(&vec![q; nc])?;
         Ok(s)
@@ -609,10 +632,23 @@ impl LazySolver3 {
         }
 
         // k = 0 and k = nk: symmetry planes
-        let mirror_lo = rec3(|f| p[f].pad([(0, 0), (0, 0), (2, 0)], PadMode::Mirror).slice(2, 0..2));
-        w.slice_mut(2, ..2).slice(0, 2..ni + 2).slice(1, 2..nj + 2).assign(reflect3(&mirror_lo, &g.ksym[0])).expect(ok);
-        let mirror_hi = rec3(|f| p[f].pad([(0, 0), (0, 0), (0, 2)], PadMode::Mirror).slice(2, nk..nk + 2));
-        w.slice_mut(2, nk + 2..).slice(0, 2..ni + 2).slice(1, 2..nj + 2).assign(reflect3(&mirror_hi, &g.ksym[1])).expect(ok);
+        if nk == 1 {
+            // One cell between the two planes. The CPU fills layer 1 of both planes from the cell, then layer 2 from "the cell `m - 1` / `nk - m`", which
+            // for `nk = 1` is the first ghost layer of the other plane: layer 2 of a plane is the reflection of the other plane's layer 1 (a double
+            // reflection of the cell). `PadMode::Mirror` cannot say that (a mirror of a one-cell axis repeats the cell), so build the four layers.
+            let n = |side: usize, layer: usize| -> Vec3 { std::array::from_fn(|q| g.ksym[side][q].slice(2, layer..layer + 1)) };
+            let (lo1, hi1) = (reflect3(p, &n(0, 1)), reflect3(p, &n(1, 0)));
+            let (lo2, hi2) = (reflect3(&hi1, &n(0, 0)), reflect3(&lo1, &n(1, 1)));
+            let lo = rec3(|f| luma::concat(2, [&lo2[f], &lo1[f]]));
+            let hi = rec3(|f| luma::concat(2, [&hi1[f], &hi2[f]]));
+            w.slice_mut(2, ..2).slice(0, 2..ni + 2).slice(1, 2..nj + 2).assign(lo).expect(ok);
+            w.slice_mut(2, nk + 2..).slice(0, 2..ni + 2).slice(1, 2..nj + 2).assign(hi).expect(ok);
+        } else {
+            let mirror_lo = rec3(|f| p[f].pad([(0, 0), (0, 0), (2, 0)], PadMode::Mirror).slice(2, 0..2));
+            w.slice_mut(2, ..2).slice(0, 2..ni + 2).slice(1, 2..nj + 2).assign(reflect3(&mirror_lo, &g.ksym[0])).expect(ok);
+            let mirror_hi = rec3(|f| p[f].pad([(0, 0), (0, 0), (0, 2)], PadMode::Mirror).slice(2, nk..nk + 2));
+            w.slice_mut(2, nk + 2..).slice(0, 2..ni + 2).slice(1, 2..nj + 2).assign(reflect3(&mirror_hi, &g.ksym[1])).expect(ok);
+        }
     }
 
     /// `res = dU/dt` of the conserved state `u` (`[ni, nj, nk]` fields) and, if asked, the local time step.
@@ -661,7 +697,16 @@ impl LazySolver3 {
             }
             let cell = |off: usize| line.slice(dir, off..n[dir] + 1 + off);
             let fg = &g.f[dir];
-            let mut f = face_flux_lm3(&cell(0), &cell(1), &cell(2), &cell(3), lim, &fg.n, &fg.rot, lm, split);
+            let mut f = if dir == 2 && self.k_wall_flux && nk == 1 {
+                // the two planes of a one-cell wedge: the pressure of the cell on the face normal, nothing else (no mass, no energy)
+                let p = w[4].slice(0, 2..ni + 2).slice(1, 2..nj + 2).slice(2, 2..3);
+                let pp = luma::concat(2, [&p, &p]);
+                // two distinct expressions for the zero mass and energy fluxes (a region assign refuses records that share an array)
+                let (z_mass, z_energy) = (c(0.0) * &pp, &pp * &fg.n[0] * c(0.0));
+                [z_mass, &pp * &fg.n[0], &pp * &fg.n[1], &pp * &fg.n[2], z_energy]
+            } else {
+                face_flux_lm3(&cell(0), &cell(1), &cell(2), &cell(3), lim, &fg.n, &fg.rot, lm, split)
+            };
             // `Fluxes` and up: evaluate the face fluxes before the solid faces are written over them (a lazy write would make every face pay for both
             // expressions); the residual and the stage update then fuse into the next stage's padded record
             if cached {
@@ -672,6 +717,12 @@ impl LazySolver3 {
             }
             f
         })
+    }
+
+    /// Wedge mode of a one-cell wedge, as three switches (see `skip_k`, `no_dt_k`, `k_wall_flux`): `on` sets all of them, which is the only combination that
+    /// is stable with a pressure-only flux through the planes.
+    pub fn set_wedge_mode(&mut self, on: bool) {
+        (self.skip_k, self.no_dt_k, self.k_wall_flux) = (on, on, on);
     }
 
     /// The fluxes of the faces of the box `sf` (see [`SolidFaces3`]), written into the flux record `f` of direction `dir`.
