@@ -56,6 +56,11 @@ pub struct Numerics3 {
     /// Static-pressure outflow `p = p_inf` at the last `i` plane instead of the characteristic ghost (the plates of the viscous gates; the body cases of the 2D
     /// engine, and so these, use the characteristic outflow: `false`). Read by the viscous solver only.
     pub pressure_outflow: bool,
+    /// The CFL the windows and floors above are calibrated for (10: the Euler numerics' cap; 20: the viscous ones). The settling of a run is pseudo-time, it runs at the CFL (the
+    /// iterations to a given error times `cfl_max` are constant on the G-F1 sector at 20, 30 and 50), so a drift-based rule that watches a window of iterations at a lower CFL sees
+    /// less drift for the same remaining error and fires early (the application's rule at `cfl_max` 10 on that sector: 1.5 % high, at 20: 0.9 %). [`crate::engine::run3::StopRule3`]
+    /// multiplies every window and floor by `max(1, cfl_ref / CFL in force)`: unchanged at and above `cfl_ref`, twice as long at 10 for a viscous run. `0`: off.
+    pub cfl_ref: f64,
 }
 
 impl Numerics3 {
@@ -84,6 +89,7 @@ impl Numerics3 {
             mean_tol: 1e-2,
             line_solve: None,
             pressure_outflow: false,
+            cfl_ref: 10.0,
         }
     }
 
@@ -133,6 +139,7 @@ impl Numerics3 {
             mean_from: 2000,
             mean_tol: 5e-3,
             line_solve: Some(LineSolve3::Block),
+            cfl_ref: 20.0,
             pressure_outflow: false,
         }
     }

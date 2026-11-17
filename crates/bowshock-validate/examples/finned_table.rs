@@ -74,6 +74,9 @@ fn main() -> Result<(), String> {
     if let Some(c) = value("--cfl-max") {
         case.numerics.implicit.cfl_max = c.parse().map_err(|e| format!("--cfl-max: {e}"))?;
     }
+    if let Some(c) = value("--cfl-ref") {
+        case.numerics.cfl_ref = c.parse().map_err(|e| format!("--cfl-ref: {e}"))?;
+    }
     if let Some(n) = value("--first-order") {
         case.numerics.first_order_iters = n.parse().map_err(|e| format!("--first-order: {e}"))?;
     }
@@ -122,8 +125,30 @@ fn main() -> Result<(), String> {
         d.fin_sides + d.fin_edges + d.fin_tips,
         p.y_plus_max
     );
-    if !run.cfl_rollbacks.is_empty() {
-        println!("TABLE-ROLLBACKS {tier_name} M{mach}: {} (iteration of the failure, new cfl_max): {:?}", run.cfl_rollbacks.len(), run.cfl_rollbacks);
+    println!(
+        "TABLE-RUN {tier_name} M{mach}: cfl_max_start {} cfl_max_end {} cfl_ref {} sub_iters {} accepted {} wasted {} wall_s {wall:.1} stop {:?} ca {:.5} window_osc {}",
+        case.numerics.implicit.cfl_max,
+        p.final_cfl_cap().unwrap_or(case.numerics.implicit.cfl_max),
+        case.numerics.cfl_ref,
+        case.numerics.implicit.sub_iters,
+        p.iterations,
+        p.wasted_iterations(),
+        p.stop_reason,
+        p.ca,
+        p.window.map_or("null".to_string(), |w| format!("{:.4}", w.oscillation))
+    );
+    if !p.cfl_events.is_empty() {
+        let list: Vec<String> = p
+            .cfl_events
+            .iter()
+            .map(|e| format!("{}: cfl {:.1} -> cap {:.1} -> {:.1}, back to {}", e.iteration, e.cfl_reached, e.cfl_before, e.cfl_after, e.restored_to))
+            .collect();
+        println!(
+            "TABLE-ROLLBACKS {tier_name} M{mach}: {} (iteration: CFL reached, cfl_max before -> after, restored to; {} iterations wasted): {}",
+            p.cfl_events.len(),
+            p.wasted_iterations(),
+            list.join("; ")
+        );
     }
     if args.iter().any(|a| a == "--worst") {
         // where the field is worst (run to a `--max-iter` before the blow-up): the fluid cells of lowest pressure and density, with their indices and centroids
