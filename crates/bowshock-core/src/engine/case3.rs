@@ -115,10 +115,12 @@ impl Numerics3 {
     }
 
     /// The numerics of a 2D engine case on the wedge: its limiter, low-Mach flags, first-order iterations, implicit parameters (with the block lines) and outflow; **one factored
-    /// solve** per iteration for a viscous case: on the CPU wedge (RANS-table body at Mach 0.1, 0.9, 2.3 and G3 at Mach 0.5, 1.5) 1, 2 and 3 need the same iterations to within 5 % (2050 /
-    /// 2900 / 2850 / 3900 / 3400 for 1) and reach the same `C_D` to 0.03 %, at 0.66 to 0.71 of the time per iteration of 3; at Mach 0.1 the converged `C_D` of 2 and 3 is 1.5 % above the
-    /// 2D solver's and that of 1 is 0.3 % above it (the residual of 2 and 3 stalls 14 times higher). The stop rule is [`Numerics3::auto`]'s for an Euler case and [`Numerics3::viscous`]'s
-    /// for a viscous one, except that
+    /// solve** per iteration for a viscous case **below Mach 1**: on the CPU wedge (RANS-table body at Mach 0.1, 0.9, 2.3 and G3 at Mach 0.5, 1.5, level 0) 1, 2 and 3 need the same
+    /// iterations to within 5 % (2050 / 2900 / 2850 / 3900 / 3400 for 1) and reach the same `C_D` to 0.03 %, at 0.66 to 0.71 of the time per iteration of 3; at Mach 0.1 the converged
+    /// `C_D` of 2 and 3 is 1.5 % above the 2D solver's and that of 1 is 0.3 % above it (the residual of 2 and 3 stalls 14 times higher). **Not from Mach 1**: at the medium level
+    /// (level 1) `sub_iters` 1 is non-finite on the Arcas fins-off body at Mach 2.3 (iteration 250, density 1e71) and on TP-2005 at Mach 1.65 (pb 1e104), where 3 passes
+    /// (`solver3d`'s G-V4 and G-J on the merged build); the level-0 supersonic points above did not show it, so the supersonic wedge keeps the 2D case's 3. The stop rule is
+    /// [`Numerics3::auto`]'s for an Euler case and [`Numerics3::viscous`]'s for a viscous one, except that
     /// a case with a `drag_rel_tol` (the facade's `drag_tolerance`) is stopped as the 2D engine stops it: the relative range of the monitor below that tolerance over
     /// [`DRAG_REL_WINDOW`] iterations. On one CPU wedge history per point (RANS-table body at Mach 0.1, 0.9, 2.3, G3 at Mach 0.5, 1.5) the rule of 5e-4 over 1000 iterations
     /// fires at 2050 / 3900 / 3400 / 2900 / 2850 iterations and the 2D rule at 1350 / 1850 / 1650 / 2050 / 1800 (the fixture's 2D runs: 1200 / 1850 / 1650), at a `C_D` that is
@@ -130,7 +132,8 @@ impl Numerics3 {
         n.first_order_iters = case.numerics.first_order_iters;
         n.max_iter = case.numerics.max_iter;
         if let Scheme::Implicit(p) = case.numerics.scheme {
-            n.implicit = ImplicitParams { line_solve: LineSolve3::Block, sub_iters: if case.viscous.is_some() { 1 } else { p.sub_iters }, ..p };
+            let sub_iters = if case.viscous.is_some() && case.mach < 1.0 { 1 } else { p.sub_iters };
+            n.implicit = ImplicitParams { line_solve: LineSolve3::Block, sub_iters, ..p };
         }
         if let (Some(tol), true) = (case.numerics.drag_rel_tol, case.viscous.is_some()) {
             (n.rel_tol, n.window, n.stationary_min_iters, n.warm_min_iters) = (tol, DRAG_REL_WINDOW, DRAG_REL_WINDOW, DRAG_REL_WINDOW);
