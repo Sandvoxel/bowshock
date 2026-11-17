@@ -3,3 +3,4 @@
 pub mod cone;
 pub mod ogive;
 pub mod run;
+pub mod wedge3;
