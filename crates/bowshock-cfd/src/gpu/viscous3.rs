@@ -175,6 +175,7 @@ impl LazySolver3 {
 
     /// Switches the viscous terms on: the host geometry of the face passes (`grid`, `sym` the symmetry sides of the domain box) and the gas parameters.
     pub fn set_viscous3(&mut self, grid: &Grid3, v: Viscous, sym: &SymSides) -> Result<()> {
+        self.compiled = None;
         let solid: Vec<bool> = grid.part.iter().map(|&p| p != crate::grid3::PART_FLUID).collect();
         self.visc = Some(VGeo3::new(&self.ctx, grid, &solid, sym, v)?);
         Ok(())

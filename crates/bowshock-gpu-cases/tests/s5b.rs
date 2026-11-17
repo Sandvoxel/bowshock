@@ -111,9 +111,13 @@ fn compare_with(label: &str, make: &dyn Fn() -> Solver3, n: usize, targets: (f64
                 let st = rel(&flat(&u), &flat(&cpu.u));
                 let tb = match (t, cpu.rans()) {
                     (Some((k, mu_t)), Some(r)) if !r.turb.is_empty() => {
-                        let kk: Vec<f64> = k.iter().flatten().copied().collect();
-                        let cc: Vec<f64> = r.turb.iter().flatten().copied().collect();
-                        Some(rel(&kk, &cc).max(rel(&mu_t, &r.mu_t)))
+                        // the CPU update zeroes the entries of the solid cells, the motor-jet cells included (their jet state is the ghost the exit faces read, re-stored when
+                        // it is read); the GPU keeps the jet state in the cell: compare the cells the CPU holds
+                        let keep: Vec<usize> = (0..r.turb.len()).filter(|&c| r.turb[c] != [0.0, 0.0]).collect();
+                        let kk: Vec<f64> = keep.iter().flat_map(|&c| k[c]).collect();
+                        let cc: Vec<f64> = keep.iter().flat_map(|&c| r.turb[c]).collect();
+                        let (mg, mc): (Vec<f64>, Vec<f64>) = keep.iter().map(|&c| (mu_t[c], r.mu_t[c])).unzip();
+                        Some(rel(&kk, &cc).max(rel(&mg, &mc)))
                     }
                     _ => None,
                 };
@@ -249,7 +253,9 @@ fn motor_jet_wedge_matches_cpu() {
         s
     };
     let mut rows = Vec::new();
-    compare_with("jet Euler explicit", &|| make(None, true), 30, EXPLICIT, &mut rows);
+    // the Euler jet exit is a strong start-up transient (jet p 0.5 against the free stream): single precision rounding grows to 2.3e-5 over the 30 explicit steps (the same
+    // exit with the SST terms: 1.5e-6, and df32 agrees to 7e-12: the logic is the CPU's), so the f32 target of this row is 5e-5
+    compare_with("jet Euler explicit", &|| make(None, true), 30, (5e-5, EXPLICIT.1), &mut rows);
     compare_with("jet Euler block", &|| make(None, false), 30, IMPLICIT, &mut rows);
     compare_with("jet SST explicit", &|| make(Some(Turbulence::Sst), true), 30, EXPLICIT, &mut rows);
     compare_with("jet SST block", &|| make(Some(Turbulence::Sst), false), 30, IMPLICIT, &mut rows);

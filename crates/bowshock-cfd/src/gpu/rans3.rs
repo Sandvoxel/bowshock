@@ -127,6 +127,7 @@ impl LazySolver3 {
 
     /// Sets the jet of the run to `jet` (the jet cells must exist: the solver was built from a host with a jet): the jet cells of the loop state take its state, `k`, `omega`, `mu_t`.
     pub fn set_jet(&mut self, jet: crate::solver3::JetState3) -> Result<()> {
+        self.compiled = None;
         let Some(j) = &mut self.jet else {
             return Err(luma::LumaError::Unsupported("the solver was built without a motor jet (build it from a host with Solver3::set_jet)".into()));
         };
@@ -170,6 +171,7 @@ impl LazySolver3 {
     /// Switches the viscous terms (and with `Turbulence::Sst` the SST model) on from a host solver that has them (`Solver3::set_viscous`): the geometry of the
     /// face passes (`viscous3::face_dirs`, the symmetry sides derived from its flags), the outflow back pressure and, for SST, the free-stream turbulence state.
     pub fn set_viscous_from_host(&mut self, s: &Solver3) -> Result<()> {
+        self.compiled = None;
         let Some(r) = s.rans() else {
             self.visc = None;
             self.turb = None;

@@ -718,6 +718,11 @@ impl LazySolver3 {
             (DtMode::MinDirection, [a, b]) => cfl * &g.vol / (2.0f32 * a.minimum(b)),
             _ => unreachable!("two or three directions"),
         };
+        // the axis cells of a wedge: at most `WEDGE_AXIS_DT r_c / c` (`Solver3::compute_dt`)
+        let dt = match &self.axis_dt {
+            Some(a) => select(&a.mask, dt.minimum(&a.cap_f / &cs), &dt),
+            None => dt,
+        };
         match &g.solid {
             Some(solid) => select(solid, 0.0f32, &dt),
             None => dt,

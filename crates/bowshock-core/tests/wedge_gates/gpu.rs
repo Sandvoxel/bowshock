@@ -65,12 +65,10 @@ fn engine_case_of(c: &FacadeCase) -> Result<bowshock_core::engine::case::Case, S
     Ok(a.engine_cases(&[c.mach]).map_err(err)?.remove(0))
 }
 
-fn precision_of(c: &FacadeCase) -> Precision {
-    if c.precision == "df32" {
-        Precision::Extended
-    } else {
-        Precision::F32
-    }
+/// The GPU precision of a facade case: single precision whatever the fixture's (the 2D table ran in df32): the product's `GpuRunner3` runs `Precision::F32`
+/// (`analysis.rs`), and on the RANS wedge it is within 0.001 % CD of df32 (G-V3 0.213277 both, 5 digits) at 0.55 of the step time.
+fn precision_of(_c: &FacadeCase) -> Precision {
+    Precision::F32
 }
 
 /// The one-cell wedge of a 2D meridian grid `g2` (the cone and ogive grids of `bowshock-cases`: slip wall on `j = 0` from the tip, the axis upstream of
@@ -318,7 +316,7 @@ impl WedgeRunner for GpuWedge {
         case.numerics.first_order_iters = i["first_order_iters"].as_u64().unwrap_or(0) as usize;
         case.numerics.max_iter = i["max_iter"].as_u64().unwrap_or(0) as usize;
         case.numerics.line_solve = Some(LineSolve3::Block);
-        let mut r = GpuRunner3::new(&case, Precision::Extended).map_err(err)?;
+        let mut r = GpuRunner3::new(&case, Precision::F32).map_err(err)?;
         let p = r.run_on(&case, false).map_err(err)?;
         let d = r.drag_parts(&case).map_err(err)?;
         let u = r.gpu.state_f64().map_err(err)?;
