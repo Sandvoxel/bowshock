@@ -64,7 +64,9 @@ impl VGeo3 {
                         if let Some(f) = face_cells(grid, solid, dir, i, j, k) {
                             fc[q] = true;
                             for s in 0..2 {
-                                ghost[s][q] = f.kind[s] != SideKind::Cell;
+                                // the jet side of an exit face reads the jet cell's own data (state, `mu`, `mu_t`, gradient, scalars: `LazySolver3::jet_fix3`), not the
+                                // fluid cell next to it as a wall or domain ghost does
+                                ghost[s][q] = !matches!(f.kind[s], SideKind::Cell | SideKind::Jet);
                                 wall[s][q] = f.kind[s] == SideKind::Wall;
                             }
                         }

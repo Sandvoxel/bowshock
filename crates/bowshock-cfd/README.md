@@ -1375,8 +1375,15 @@ or the start-of-step evaluation (implicit). `State3` is ten arrays (`U` x5, resi
 * **Wall treatment** (CPU 8484d6f .. e9ed05a): Reichardt + bump law, `k` cap, law strain at smooth wall cells with the speed **tangential** to the cell's no-slip faces of the law class (`wall_speed_at3`: `|u - (u.e) e|`, largest
   over the faces; the `i` faces count only with `law_i_walls`, a cell with only `i` walls is a plain wall cell: speed 0, no law strain, no `k` cap: `TGeo3.wall_ns/wall_e/wall_counted`, built on the host from `face_dirs`).
 * **Forces**: `GpuRunner3::wall_forces` adds the shear of the no-slip faces, reduced on the device (`TractionFace3`: class, direction, face index, sign, area, `x`; `viscous_wall_forces`), to the pressure force of its
-  class, the base wall's shear excluded (the 2D drag has none); the monitor of the stop rule is the total `ca`. `friction_report` (host, once per run) gives CD friction and `y+ max` as the 2D solver reports them.
-* **Runner**: `GpuRunner3::new_rans(case, prec, Viscous, RansOpts3)`; `run_on` forces `Block` for a viscous host. `GpuRunner3::build` takes the host solver from `cache3::shared()` (`build_solver_cached`).
+  class (`WallForces::shear`, `[all faces, faces up to the base station]` like the pressure; the base wall's shear included as on the CPU); the monitor of the stop rule is the total `ca`; `y_plus_report`
+  (host, once per run) fills `PointResult3::y_plus_max` and `cp_base`.
+* **Runner**: `GpuRunner3::new(case, prec)` runs a `Case3::viscous` case (the host solver comes from `cache3::shared()` with `set_viscous_with` applied); `run_on` takes `Block` unless the case asks for the
+  diagonal solve explicitly (the diagonal default of `Numerics3::implicit_for(true)` blows up on the finned M 3 / 6 degree half domain at `cfl_max` 10 and 5, is stable at 3, and Block is stable; ISSUES #24) and
+  feeds the mean-stationary rule (chunks of 10 iterations after `mean_from`).
+* **Motor jet** (CPU b71420f, `Solver3::set_jet`): `LazySolver3::new_with_jet` marks the `Part::Jet` cells solid and not wall (`wall` mask, `LGeo3`), the exit-face stencil is `(jet, jet, p0, p1)`
+  (`SolidFaces3::{ja, jb}`, `solid_fluxes3`), the implicit factor sees the padded jet state with no wall ghost, no wall Jacobian and no sub-diagonal block, the viscous side of the exit reads the jet
+  cell's own data (`VFace3.ghost` false for `SideKind::Jet`; `jet_fix_cell3`: the gradient of the fluid cell behind the exit; `mu(T_jet)` is the cell pass's own; `jet_fix_turb3`: `k`, `omega`,
+  `mu_t = rho_jet k / omega` re-stored after every turbulence update, which zeroes solid cells), `set_state` / `set_jet` keep the jet cells at the jet state (a reset, a warm start at another Mach number).
 
 Tests (`tests/s5b.rs`, through gpuq, 10 x 8 x 6 skewed box with a no-slip block and a dead block, 30 iterations from the free stream, `max |dU| / (1 + |U|)` against the f64 CPU): laminar M 0.3 / 2 explicit f32 6.6e-7 / 1.3e-6,
 df32 7.6e-12 / 1.5e-11, block f32 3.6e-7 / 4.0e-7, df32 3.3e-9 / 1.0e-8; SST M 0.3 Re 2e3 / 2e5 explicit f32 7.3e-7 / 6.8e-7, df32 1.1e-12 / 8.1e-12, block f32 3.8e-7 / 4.7e-7, df32 4.1e-9 / 3.9e-9, with

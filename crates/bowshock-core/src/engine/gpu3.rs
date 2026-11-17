@@ -242,6 +242,10 @@ impl GpuRunner3 {
         };
         self.gpu.set_config(&cfg)?;
         self.host.cfg = cfg;
+        // the motor jet of this case (its state follows the Mach number): the jet cells of a warm state take it, a cold reset starts from it
+        if let Some(jet) = case.jet_state3() {
+            self.gpu.set_jet(jet)?;
+        }
         if warm {
             let it = self.gpu.iter().max(n.first_order_iters);
             self.gpu.set_iter(it);

@@ -101,7 +101,49 @@ impl LazySolver3 {
         };
         let u = self.turbulence_update3(&t.tg, vg, &t.model, &dev);
         let [k, om] = u.turb;
-        [k, om, u.mu_t]
+        let (k, om, mu_t) = self.jet_fix_turb3(k, om, u.mu_t);
+        [k, om, mu_t]
+    }
+
+    /// The viscous data the exit faces of a motor jet read in the jet cell (`Solver3::jet_viscous_fix`): `mu(T_jet)` is the cell pass's own (the jet cell holds the jet state);
+    /// the velocity / temperature gradient of the jet cell is that of the fluid cell behind the exit (`+i`).
+    fn jet_fix_cell3(&self, cell: VCell3) -> VCell3 {
+        let Some(j) = &self.jet else { return cell };
+        let ni = self.ni;
+        let grad: Grad12 = std::array::from_fn(|q| {
+            let ahead = pad_edge3(&cell.grad[q], 0, 0, 1).slice(0, 1..ni + 1);
+            select(&j.behind, ahead, &cell.grad[q])
+        });
+        VCell3 { grad, mu: cell.mu }
+    }
+
+    /// The scalars of the jet cells after a turbulence update (it zeroes the solid cells): `k`, `omega` of the jet and `mu_t = rho_jet k / omega`.
+    fn jet_fix_turb3(&self, k: A, om: A, mu_t: A) -> (A, A, A) {
+        let Some(j) = &self.jet else { return (k, om, mu_t) };
+        let [rho, _, _, _, _] = j.state.state;
+        let [kj, oj] = j.state.turb;
+        (select(&j.mask, c(kj), &k), select(&j.mask, c(oj), &om), select(&j.mask, c(rho * kj / oj), &mu_t))
+    }
+
+    /// Sets the jet of the run to `jet` (the jet cells must exist: the solver was built from a host with a jet): the jet cells of the loop state take its state, `k`, `omega`, `mu_t`.
+    pub fn set_jet(&mut self, jet: crate::solver3::JetState3) -> Result<()> {
+        let Some(j) = &mut self.jet else {
+            return Err(luma::LumaError::Unsupported("the solver was built without a motor jet (build it from a host with Solver3::set_jet)".into()));
+        };
+        j.state = jet;
+        let (mask, [rho, kj, oj]) = (j.mask.clone(), [jet.state[0], jet.turb[0], jet.turb[1]]);
+        let q = crate::gas3::prim_to_cons3(&jet.state);
+        if let Some(s) = &mut self.state {
+            for (k, qk) in q.iter().enumerate() {
+                s[k] = select(&mask, c(*qk), &s[k]);
+            }
+            if self.turb.is_some() {
+                s[7] = select(&mask, c(kj), &s[7]);
+                s[8] = select(&mask, c(oj), &s[8]);
+                s[9] = select(&mask, c(rho * kj / oj), &s[9]);
+            }
+        }
+        Ok(())
     }
 
     /// `[k, omega]` and `mu_t` of every cell on the host (`None` without SST).
@@ -185,7 +227,7 @@ impl LazySolver3 {
             let (res, dt) = self.cell_residual3(&p, &f, compute_dt, None);
             return Resid3 { res, dt, p, w, f, vis: None };
         };
-        let cell = self.viscous_cells3(vg, &p, &w);
+        let cell = self.jet_fix_cell3(self.viscous_cells3(vg, &p, &w));
         let mu_t = mu_t.cloned().unwrap_or_else(|| &cell.mu * c(0.0));
         // SST: the wall state of the cells with a no-slip face (the automatic treatment), its eddy viscosity `mu_t,w` the face value of the wall faces
         let wall = self.turb.as_ref().map(|t| self.wall_state_pass3(&t.tg, &p, &cell.mu, &t.dwall, t.ks.as_ref()).expect("the wall state arrays of the grid"));

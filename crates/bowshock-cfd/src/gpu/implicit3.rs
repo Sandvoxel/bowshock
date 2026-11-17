@@ -423,7 +423,7 @@ struct LGeo3 {
 }
 
 impl LGeo3 {
-    fn new(ctx: &Context, grid: &Grid3, solid: &[bool]) -> Result<LGeo3> {
+    fn new(ctx: &Context, grid: &Grid3, solid: &[bool], jet: &[bool]) -> Result<LGeo3> {
         let (ni, nj, nk) = (grid.ni, grid.nj, grid.nk);
         let dims = [ni, nj, nk];
         let has_solid = solid.iter().any(|s| *s);
@@ -436,6 +436,7 @@ impl LGeo3 {
                 && (c[2] as usize) < nk
                 && solid[(c[2] as usize * nj + c[1] as usize) * ni + c[0] as usize]
         };
+        let is_wall = |c: [isize; 3]| is_solid(c) && !jet[(c[2] as usize * nj + c[1] as usize) * ni + c[0] as usize];
         let mask = |shape: [usize; 3], f: &dyn Fn(usize, usize, usize) -> bool| -> Result<Array<bool>> {
             let mut v = Vec::with_capacity(shape[0] * shape[1] * shape[2]);
             for k in 0..shape[2] {
@@ -458,6 +459,9 @@ impl LGeo3 {
             let cell = |i: usize, j: usize, k: usize, s: isize| [i as isize + s * e[0], j as isize + s * e[1], k as isize + s * e[2]];
             let lower = |i, j, k| is_solid(cell(i, j, k, -1));
             let upper = |i, j, k| is_solid(cell(i, j, k, 1));
+            // a motor-jet cell is solid (no line passes through it) but no wall: no wall ghost, no wall Jacobian (the fixed jet state of the padded array stands there)
+            let lower_wall = |i, j, k| is_wall(cell(i, j, k, -1));
+            let upper_wall = |i, j, k| is_wall(cell(i, j, k, 1));
             // a neighbour that does not exist is not solid (the ghost state stands there): `is_solid` is false out of range
             Ok(LDir3 {
                 n: [get(&|f| f.n[0])?, get(&|f| f.n[1])?, get(&|f| f.n[2])?],
@@ -466,12 +470,12 @@ impl LGeo3 {
                 one: ones(nf, 1.0)?,
                 first: mask(dims, &|i, j, k| at(i, j, k) == 0)?,
                 last: mask(dims, &|i, j, k| at(i, j, k) + 1 == nl)?,
-                lower_solid: if has_solid { Some(mask(dims, &|i, j, k| lower(i, j, k))?) } else { None },
-                upper_solid: if has_solid { Some(mask(dims, &|i, j, k| upper(i, j, k))?) } else { None },
+                lower_solid: if has_solid { Some(mask(dims, &|i, j, k| lower_wall(i, j, k))?) } else { None },
+                upper_solid: if has_solid { Some(mask(dims, &|i, j, k| upper_wall(i, j, k))?) } else { None },
                 cut_lo: mask(dims, &|i, j, k| at(i, j, k) == 0 || lower(i, j, k))?,
                 cut_up: mask(dims, &|i, j, k| at(i, j, k) + 1 == nl || upper(i, j, k))?,
-                wall_l: if has_solid { Some(mask(nf, &|i, j, k| lower(i, j, k) && !is_solid(cell(i, j, k, 0)))?) } else { None },
-                wall_r: if has_solid { Some(mask(nf, &|i, j, k| is_solid(cell(i, j, k, 0)) && !lower(i, j, k))?) } else { None },
+                wall_l: if has_solid { Some(mask(nf, &|i, j, k| lower_wall(i, j, k) && !is_solid(cell(i, j, k, 0)))?) } else { None },
+                wall_r: if has_solid { Some(mask(nf, &|i, j, k| is_wall(cell(i, j, k, 0)) && !lower(i, j, k))?) } else { None },
             })
         };
         let edge = |faces: Vec<&Face3>, shape: [usize; 3]| -> Result<EdgeGeo3> {

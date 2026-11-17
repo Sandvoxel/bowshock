@@ -227,3 +227,31 @@ fn viscous_wedge_matches_cpu() {
     compare_with("G3 wedge SST M 0.5 block + P", &|| make(Turbulence::Sst), 20, IMPLICIT, &mut rows);
     report("S5b viscous wedge (G3 ogive-cylinder, level 0), 20 iterations from the free stream", &rows);
 }
+
+/// The motor jet on the wedge (`Case3::wedge` with `with_motor`: the ANF body, the nozzle rows of the base-wake grid, two columns of `Part::Jet` cells ahead of the base whose
+/// `+i` faces are an inflow of the jet state): the exit-face stencil `(jet, jet, p0, p1)`, the jet state kept in the jet cells, the implicit factor without wall Jacobian and
+/// sub-diagonal at the exit, and the viscous / scalar ghost of the jet (SST: `mu(T_jet)`, `rho_jet k / omega`, the gradient of the fluid cell behind it). 30 iterations from the free
+/// stream against the f64 CPU, Euler and SST, explicit and block.
+#[test]
+fn motor_jet_wedge_matches_cpu() {
+    use bowshock_core::engine::case::Jet;
+    use bowshock_core::engine::case3::Case3;
+
+    let make = |turbulence: Option<Turbulence>, explicit: bool| -> Solver3 {
+        let jet = Jet { r_exit: 0.25, state: [0.5, 2.0, 0.0, 0.5], turb: [1e-4, 10.0] };
+        let mut c = Case3::wedge(2.0, Case3::anf_body(), 0).with_motor(jet).expect("motor");
+        c.viscous = turbulence.map(|turbulence| Viscous { re_c: 2.0e5, sutherland: 0.368, turbulence, wall_i_start: 0, roughness: 0.0 });
+        let mut s = c.build_solver().expect("solver");
+        assert!(s.jet().is_some(), "the case carries the jet");
+        if explicit {
+            s.cfg.scheme = Scheme3::Explicit;
+        }
+        s
+    };
+    let mut rows = Vec::new();
+    compare_with("jet Euler explicit", &|| make(None, true), 30, EXPLICIT, &mut rows);
+    compare_with("jet Euler block", &|| make(None, false), 30, IMPLICIT, &mut rows);
+    compare_with("jet SST explicit", &|| make(Some(Turbulence::Sst), true), 30, EXPLICIT, &mut rows);
+    compare_with("jet SST block", &|| make(Some(Turbulence::Sst), false), 30, IMPLICIT, &mut rows);
+    report("S5b motor jet on the wedge (ANF body, jet 0.25 d, Mach 2), 30 iterations from the free stream", &rows);
+}

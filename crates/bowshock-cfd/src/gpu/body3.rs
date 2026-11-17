@@ -291,6 +291,18 @@ struct SolidFaces3 {
     md: Array<bool>,
     m2s: Array<bool>,
     m1s: Array<bool>,
+    /// The cell before / after the face is a jet cell: its state is both stencil cells on that side (`m1 = m2 = jet`, `p0 = p1 = jet`).
+    ja: Array<bool>,
+    jb: Array<bool>,
+}
+
+/// The motor jet of a run (`Solver3::set_jet`): the jet state `[rho, u, v, w, p]` and `[k, omega]`, the flat indices of the `Part::Jet` cells, their mask over the grid, and the
+/// mask of the jet cells that have a fluid cell behind them (`+i`; those take its velocity / temperature gradient as the ghost of the exit face).
+struct JetGpu {
+    state: crate::solver3::JetState3,
+    cells: Vec<usize>,
+    mask: Array<bool>,
+    behind: Array<bool>,
 }
 
 /// Geometry and cell metrics, uploaded once from the grid.
@@ -368,14 +380,17 @@ impl AxisGeo3 {
 /// The solid-face case masks of direction `dir` (see [`SolidFaces3`]); `None` if no face sees a solid cell. `solid`: cells that are never updated (walls and
 /// dead cells, the CPU `Solver3::solid`); `wall`: the ones that reflect for the outer stencil of a fluid face (the CPU `Solver3::wall`: walls only, a dead
 /// cell leaves the padded state there, which holds the axis ghost).
-fn solid_faces3(ctx: &Context, solid: &[bool], wall: &[bool], dims: [usize; 3], dir: usize) -> Result<Option<SolidFaces3>> {
-    const Z: u8 = 1;
-    const MA: u8 = 2;
-    const MB: u8 = 4;
-    const MC: u8 = 8;
-    const MD: u8 = 16;
-    const M2S: u8 = 32;
-    const M1S: u8 = 64;
+fn solid_faces3(ctx: &Context, solid: &[bool], wall: &[bool], jet: &[bool], dims: [usize; 3], dir: usize) -> Result<Option<SolidFaces3>> {
+    const Z: u16 = 1;
+    const MA: u16 = 2;
+    const MB: u16 = 4;
+    const MC: u16 = 8;
+    const MD: u16 = 16;
+    const M2S: u16 = 32;
+    const M1S: u16 = 64;
+    // the exit of a motor jet: the cell before (`JA`) / after (`JB`) the face is a `Part::Jet` cell, whose state replaces both stencil cells on its side (the CPU `jet_at`)
+    const JA: u16 = 128;
+    const JB: u16 = 256;
     let [ni, nj, nk] = dims;
     let at = |flags: &[bool], c: [isize; 3]| {
         c[0] >= 0
@@ -389,7 +404,7 @@ fn solid_faces3(ctx: &Context, solid: &[bool], wall: &[bool], dims: [usize; 3], 
     let nf = [ni + (dir == 0) as usize, nj + (dir == 1) as usize, nk + (dir == 2) as usize];
     let mut e = [0isize; 3];
     e[dir] = 1;
-    let mut class = vec![0u8; nf[0] * nf[1] * nf[2]];
+    let mut class = vec![0u16; nf[0] * nf[1] * nf[2]];
     let (mut lo, mut hi) = ([usize::MAX; 3], [0usize; 3]);
     for k in 0..nf[2] {
         for j in 0..nf[1] {
@@ -402,13 +417,13 @@ fn solid_faces3(ctx: &Context, solid: &[bool], wall: &[bool], dims: [usize; 3], 
                 if !(s_m1 || s_p0 || w_m2 || w_p1) {
                     continue;
                 }
-                let mut bits = 0;
+                let mut bits: u16 = 0;
                 if s_m1 && s_p0 {
                     bits |= Z;
                 } else if s_m1 {
-                    bits |= MA | if s_p1 { MC } else { 0 };
+                    bits |= MA | if s_p1 { MC } else { 0 } | if at(jet, off(-1)) { JA } else { 0 };
                 } else if s_p0 {
-                    bits |= MB | if s_m2 { MD } else { 0 };
+                    bits |= MB | if s_m2 { MD } else { 0 } | if at(jet, p0) { JB } else { 0 };
                 } else {
                     bits |= if w_m2 { M2S } else { 0 } | if w_p1 { M1S } else { 0 };
                 }
@@ -424,7 +439,7 @@ fn solid_faces3(ctx: &Context, solid: &[bool], wall: &[bool], dims: [usize; 3], 
         return Ok(None);
     }
     let shape = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
-    let mask = |bit: u8| {
+    let mask = |bit: u16| {
         let mut v = Vec::with_capacity(shape[0] * shape[1] * shape[2]);
         for k in lo[2]..hi[2] {
             for j in lo[1]..hi[1] {
@@ -435,7 +450,19 @@ fn solid_faces3(ctx: &Context, solid: &[bool], wall: &[bool], dims: [usize; 3], 
         }
         Array::from_slice_on(ctx, &v, shape)
     };
-    Ok(Some(SolidFaces3 { lo, hi, z: mask(Z)?, ma: mask(MA)?, mb: mask(MB)?, mc: mask(MC)?, md: mask(MD)?, m2s: mask(M2S)?, m1s: mask(M1S)? }))
+    Ok(Some(SolidFaces3 {
+        lo,
+        hi,
+        z: mask(Z)?,
+        ma: mask(MA)?,
+        mb: mask(MB)?,
+        mc: mask(MC)?,
+        md: mask(MD)?,
+        m2s: mask(M2S)?,
+        m1s: mask(M1S)?,
+        ja: mask(JA)?,
+        jb: mask(JB)?,
+    }))
 }
 
 /// Device arrays of the force integration, one entry per wall face (`[faces]`): the cells `a`, `b` of the wall-pressure extrapolation, its coefficient,
@@ -495,16 +522,24 @@ pub struct LazySolver3 {
     wall_j0_cols: Option<Array<bool>>,
     /// `(sin, cos)` of half the wedge angle in a viscous wedge run: the azimuthal momentum of the residual is projected out (`Solver3::add_viscous_residual`).
     swirl: Option<(f64, f64)>,
+    /// The motor jet: its state and the jet cells (`None`: no jet).
+    jet: Option<JetGpu>,
 }
 
 impl LazySolver3 {
     /// Uploads the geometry (rounded from the grid's f64 metrics to `S`) and starts from the free stream.
     pub fn new(ctx: &Context, grid: &Grid3, cfg: &Config3) -> Result<LazySolver3> {
+        Self::new_with_jet(ctx, grid, cfg, None)
+    }
+
+    /// [`LazySolver3::new`] for a grid whose `Part::Jet` cells hold the jet state `jet` (`Solver3::set_jet`): they are solid but no wall.
+    pub fn new_with_jet(ctx: &Context, grid: &Grid3, cfg: &Config3, jet: Option<&crate::solver3::JetState3>) -> Result<LazySolver3> {
         let (ni, nj, nk) = (grid.ni, grid.nj, grid.nk);
         let nc = ni * nj * nk;
-        // never updated: walls and dead cells (`Grid3::part != PART_FLUID`, the CPU `Solver3::solid`); `wall`: the ones that reflect (`Solver3::wall`)
+        // never updated: walls and dead cells (`Grid3::part != PART_FLUID`, the CPU `Solver3::solid`); `wall`: the ones that reflect (`Solver3::wall`); a jet cell is none
         let solid: Vec<bool> = grid.part.iter().map(|&p| p != crate::grid3::PART_FLUID).collect();
-        let wall: Vec<bool> = grid.part.iter().map(|&p| p != crate::grid3::PART_FLUID && p != crate::grid3::PART_DEAD).collect();
+        let jet_mask: Vec<bool> = (0..nc).map(|c| jet.is_some() && crate::viscous3::is_jet_cell(grid, c)).collect();
+        let wall: Vec<bool> = (0..nc).map(|c| grid.part[c] != crate::grid3::PART_FLUID && grid.part[c] != crate::grid3::PART_DEAD && !jet_mask[c]).collect();
         let wedge = grid.sym == crate::grid3::Symmetry::Wedge;
         let n_active = solid.iter().filter(|s| !**s).count();
         let has_solid = n_active < nc;
@@ -565,15 +600,28 @@ impl LazySolver3 {
             ksym,
             solid_faces: if has_solid {
                 [
-                    solid_faces3(ctx, &solid, &wall, [ni, nj, nk], 0)?,
-                    solid_faces3(ctx, &solid, &wall, [ni, nj, nk], 1)?,
-                    solid_faces3(ctx, &solid, &wall, [ni, nj, nk], 2)?,
+                    solid_faces3(ctx, &solid, &wall, &jet_mask, [ni, nj, nk], 0)?,
+                    solid_faces3(ctx, &solid, &wall, &jet_mask, [ni, nj, nk], 1)?,
+                    solid_faces3(ctx, &solid, &wall, &jet_mask, [ni, nj, nk], 2)?,
                 ]
             } else {
                 [None, None, None]
             },
         };
-        let lg = LGeo3::new(ctx, grid, &solid)?;
+        let lg = LGeo3::new(ctx, grid, &solid, &jet_mask)?;
+        let jet_gpu = match jet {
+            Some(j) => {
+                let cells: Vec<usize> = (0..nc).filter(|&c| jet_mask[c]).collect();
+                let behind: Vec<bool> = (0..nc).map(|c| jet_mask[c] && c % ni + 1 < ni && !solid[c + 1]).collect();
+                Some(JetGpu {
+                    state: *j,
+                    cells,
+                    mask: Array::from_slice_on(ctx, &jet_mask, [ni, nj, nk])?,
+                    behind: Array::from_slice_on(ctx, &behind, [ni, nj, nk])?,
+                })
+            }
+            None => None,
+        };
         let mut s = LazySolver3 {
             ctx: ctx.clone(),
             ni,
@@ -599,6 +647,7 @@ impl LazySolver3 {
             wall_j0: Vec::new(),
             wall_j0_cols: None,
             swirl: None,
+            jet: jet_gpu,
         };
         let q = prim_to_cons3(&cfg.freestream);
         s.set_state(&vec![q; nc])?;
@@ -607,7 +656,8 @@ impl LazySolver3 {
 
     /// A lazy solver in the state of a host solver: grid, config, conserved state and iteration count.
     pub fn from_host(ctx: &Context, s: &Solver3) -> Result<LazySolver3> {
-        let mut l = LazySolver3::new(ctx, &s.grid, &s.cfg)?;
+        let jet = s.jet();
+        let mut l = LazySolver3::new_with_jet(ctx, &s.grid, &s.cfg, jet.as_ref())?;
         l.set_viscous_from_host(s)?;
         if l.visc.is_some() && matches!(s.cfg.scheme, Scheme3::Implicit(p) if p.line_solve == crate::implicit::LineSolve3::DiagonalCorrected) {
             return Err(luma::LumaError::Unsupported("the diagonal line solve of a viscous run is not ported (use LineSolve3::Block)".into()));
@@ -661,10 +711,24 @@ impl LazySolver3 {
 
     /// Overwrites the conserved state and restarts the iteration counter and the CFL ramp.
     pub fn set_state(&mut self, u: &[Cons3]) -> Result<()> {
-        let mut s = upload_state3(&self.ctx, u, [self.ni, self.nj, self.nk], self.cfl_start())?;
+        // the jet cells hold the jet state whatever the caller passes (a reset to the free stream, a state of another Mach number)
+        let mut u = u.to_vec();
+        if let Some(j) = &self.jet {
+            let q = prim_to_cons3(&j.state.state);
+            for &c in &j.cells {
+                u[c] = q;
+            }
+        }
+        let mut s = upload_state3(&self.ctx, &u, [self.ni, self.nj, self.nk], self.cfl_start())?;
         // an SST run restarts `k`, `omega`, `mu_t` at the free stream (the host `turbulence3::init`); the other runs carry three one-element placeholders
         if let Some(t) = &self.turb {
-            let (turb, mu_t) = t.init_host(&self.solid_host, self.cfg.freestream[0]);
+            let (mut turb, mut mu_t) = t.init_host(&self.solid_host, self.cfg.freestream[0]);
+            if let Some(j) = &self.jet {
+                for &c in &j.cells {
+                    turb[c] = j.state.turb;
+                    mu_t[c] = j.state.state[0] * j.state.turb[0] / j.state.turb[1];
+                }
+            }
             let shape = [self.ni, self.nj, self.nk];
             s[7] = up(&self.ctx, &turb.iter().map(|x| x[0]).collect::<Vec<_>>(), shape)?;
             s[8] = up(&self.ctx, &turb.iter().map(|x| x[1]).collect::<Vec<_>>(), shape)?;
@@ -942,6 +1006,15 @@ impl LazySolver3 {
         let m2 = select3(&sf.ma, &select3(&sf.mc, &r_p0, &r_p1), &select3(&sf.m2s, &self.wall_ghost3(&wm1, &n_prev), &wm2));
         let p0 = select3(&sf.mb, &r_m1, &wp0);
         let p1 = select3(&sf.mb, &select3(&sf.md, &r_m1, &r_m2), &select3(&sf.m1s, &self.wall_ghost3(&wp0, &n_next), &wp1));
+        // the exit face of a motor jet: the stencil behind it is the jet state, `(jet, jet, p0, p1)` (the CPU `Family::jet_at`); the same two cells on the other side of a
+        // face whose upper cell is a jet cell
+        let (m1, m2, p0, p1) = match &self.jet {
+            Some(j) => {
+                let jp: Rec3 = rec3(|q| &wm1[q] * c(0.0) + c(j.state.state[q]));
+                (select3(&sf.ja, &jp, &m1), select3(&sf.ja, &jp, &m2), select3(&sf.jb, &jp, &p0), select3(&sf.jb, &jp, &p1))
+            }
+            None => (m1, m2, p0, p1),
+        };
         let flux = face_flux_lm3(&m2, &m1, &p0, &p1, lim, &n, &rot, self.cfg.low_mach, split);
         let flux = rec3(|k| select(&sf.z, c(0.0), &flux[k]));
         let mut dest = f.slice_mut(0, lo[0]..hi[0]).slice(1, lo[1]..hi[1]).slice(2, lo[2]..hi[2]);

@@ -601,6 +601,13 @@ impl GpuSolver3 {
         on3!(self, s => s.has_viscous())
     }
 
+    /// Sets the motor jet of the run (the solver was built from a host that has one: `Solver3::set_jet`); the jet cells of the current state take it. A warm run at another Mach
+    /// number sets its jet this way.
+    pub fn set_jet(&mut self, jet: crate::solver3::JetState3) -> Result<()> {
+        on3_mut!(self, s => s.set_jet(jet)?);
+        Ok(())
+    }
+
     /// The viscous face fluxes of the current state on the host (`None` for the Euler equations): the input of `viscous3::wall_tractions`.
     pub fn viscous_flux(&self) -> Result<Option<[Vec<[f64; 5]>; 3]>> {
         if !on3!(self, s => s.has_viscous()) {

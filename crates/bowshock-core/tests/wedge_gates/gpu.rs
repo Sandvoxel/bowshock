@@ -53,10 +53,11 @@ fn engine_case_of(c: &FacadeCase) -> Result<bowshock_core::engine::case::Case, S
     a = if c.rans {
         // the wall-resolved grid of the facade's viscous analysis (ISA 120 m unless the fixture says otherwise), the wall roughness of the fixture
         let a = a.viscous(bowshock_core::FlightConditions { atmosphere: c.atmosphere.unwrap_or(bowshock_core::Atmosphere::Isa { altitude_m: 120.0 }) });
-        if c.roughness_m > 0.0 {
-            a.roughness(c.roughness_m)
-        } else {
-            a
+        let a = if c.roughness_m > 0.0 { a.roughness(c.roughness_m) } else { a };
+        // the motor of the fixture case (TP-2005): the nozzle rows of the 2D base grid and the jet state (`Case3::wedge_of` carries both)
+        match c.motor {
+            Some(m) => a.motor(m),
+            None => a,
         }
     } else {
         a.wake(if c.wake_base { Wake::Base } else { Wake::Sting })
@@ -171,7 +172,7 @@ impl GpuWedge {
             cd_nose: q * d.nose,
             cd_aft: d.aft.iter().map(|x| q * x).collect(),
             cd_friction: Some(q * d.friction.total),
-            cd_base: Some(q * d.base),
+            cd_base: Some(q * (d.base + d.friction.base)),
             cp_base: p.cp_base.is_finite().then_some(p.cp_base),
             y_plus_max: p.y_plus_max.is_finite().then_some(p.y_plus_max),
             iterations: p.iterations,
