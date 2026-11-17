@@ -57,6 +57,9 @@ fn main() -> Result<(), String> {
     let max_iter: usize = value("--max-iter").map_or(Ok(if stationary { 6000 } else { 20_000 }), |v| v.parse().map_err(|e| format!("--max-iter: {e}")))?;
     let params = ImplicitParams { line_solve: LineSolve3::Block, ..ImplicitParams::VISCOUS };
     let host = plate_solver3(&case, params);
+    if args.iter().any(|a| a == "--cpu") {
+        return run_cpu(&which, &case, drop, max_iter, host);
+    }
     let solid: Vec<bool> = host.grid.part.iter().map(|&p| p != bowshock_cfd::grid3::PART_FLUID).collect();
     let ctx = luma::Context::new().map_err(|e| e.to_string())?;
     let t0 = Instant::now();
@@ -98,25 +101,7 @@ fn main() -> Result<(), String> {
         1e3 * wall / iters as f64,
         (peak / last).log10()
     );
-    let stations: &[f64] = if which == "g1" {
-        &[0.5, 0.9]
-    } else if which == "g2" {
-        &[0.25, 0.5, 0.76, 0.97]
-    } else {
-        &[0.97]
-    };
-    println!("| station x | cf | reference | difference | first-cell y+ |\n|---|---|---|---|---|");
-    for &xt in stations {
-        let (x, cf, yp) = station(&gpu, &host, &case, &solid, xt)?;
-        let reference = if case.ks > 0.0 {
-            mills_hang(x, case.ks)
-        } else if which == "g1" {
-            blasius(&case, x)
-        } else {
-            turbulent_correlation(x)
-        };
-        println!("| {x:.4} | {cf:.5e} | {reference:.5e} | {:+.2} % | {yp:.2} |", 100.0 * (cf / reference - 1.0));
-    }
+    table(&which, &case, |xt| station(&gpu, &host, &case, &solid, xt))?;
     if let Some((k, mu_t)) = gpu.turb_state().map_err(|e| e.to_string())? {
         let kmax = k.iter().map(|x| x[0]).fold(0.0f64, f64::max);
         let mmax = mu_t.iter().copied().fold(0.0f64, f64::max);
@@ -130,4 +115,40 @@ fn main() -> Result<(), String> {
         1e6 * wall / iters as f64
     );
     Ok(())
+}
+
+/// The station table: `cf` and first-cell `y+` of the stations of the case against the reference (Blasius, the turbulent correlation, Mills & Hang).
+fn table(which: &str, case: &PlateCase, mut at: impl FnMut(f64) -> Result<(f64, f64, f64), String>) -> Result<(), String> {
+    let stations: &[f64] = if which == "g1" {
+        &[0.5, 0.9]
+    } else if which == "g2" {
+        &[0.25, 0.5, 0.76, 0.97]
+    } else {
+        &[0.97]
+    };
+    println!("| station x | cf | reference | difference | first-cell y+ |\n|---|---|---|---|---|");
+    for &xt in stations {
+        let (x, cf, yp) = at(xt)?;
+        let reference = if case.ks > 0.0 {
+            mills_hang(x, case.ks)
+        } else if which == "g1" {
+            blasius(case, x)
+        } else {
+            turbulent_correlation(x)
+        };
+        println!("| {x:.4} | {cf:.5e} | {reference:.5e} | {:+.2} % | {yp:.2} |", 100.0 * (cf / reference - 1.0));
+    }
+    Ok(())
+}
+
+/// The same run on the CPU (`plate3::run`, the stop rule of the CPU gates), for the table next to the GPU one.
+fn run_cpu(which: &str, case: &PlateCase, drop: f64, max_iter: usize, mut host: bowshock_cfd::solver3::Solver3) -> Result<(), String> {
+    let t = Instant::now();
+    let info = bowshock_cfd::plate3::run(&mut host, drop, max_iter, 0, |_, _| false);
+    let wall = t.elapsed().as_secs_f64();
+    println!("{which} (CPU): {} iterations, {wall:.1} s, drop {:.2} orders, converged {}", info.iters, info.drop_orders(), info.converged);
+    table(which, case, |xt| {
+        let s = bowshock_cfd::plate3::station(&host, case, xt);
+        Ok((s.x, s.cf, s.y_plus))
+    })
 }

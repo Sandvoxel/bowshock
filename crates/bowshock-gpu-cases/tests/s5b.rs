@@ -38,7 +38,8 @@ fn viscous(turbulence: Turbulence, re_c: f64) -> Viscous {
 }
 
 fn host(grid: &Grid3, mach: f64, scheme: Scheme3, v: Viscous) -> Solver3 {
-    let cfg = Config3 { freestream: freestream3(mach, 0.0), cfl: 0.5, limiter: Limiter::VanAlbada, first_order_iters: 5, low_mach: false, scheme };
+    let low_mach = matches!(scheme, Scheme3::Implicit(p) if p.low_mach_precond);
+    let cfg = Config3 { freestream: freestream3(mach, 0.0), cfl: 0.5, limiter: Limiter::VanAlbada, first_order_iters: 5, low_mach, scheme };
     let mut s = Solver3::new(grid.clone(), cfg);
     s.set_viscous(Some(v));
     s
@@ -170,4 +171,18 @@ fn sst_box_matches_cpu() {
         compare(&format!("SST M {mach} Re {re:.0e} implicit block"), &g, mach, block(), v, 30, IMPLICIT, &mut rows);
     }
     report("S5b SST box (10 x 8 x 6, no-slip block, dead block), 30 iterations from the free stream", &rows);
+}
+
+/// The low-Mach preconditioning of the block scheme (`P` in the factors, between the sweeps and in the defect, `P |P^-1 A|` and `|u'| + c'` in the left-hand side,
+/// the low-Mach flux correction on the right) at Mach 0.1 and 0.3: laminar and SST; 30 iterations from the free stream.
+#[test]
+fn low_mach_block_matches_cpu() {
+    let g = box_grid();
+    let mut rows = Vec::new();
+    let pre = Scheme3::Implicit(ImplicitParams { line_solve: LineSolve3::Block, low_mach_precond: true, ..ImplicitParams::VISCOUS });
+    for (mach, re) in [(0.1, 500.0), (0.3, 2e3)] {
+        compare(&format!("laminar M {mach} Re {re} block + P"), &g, mach, pre, viscous(Turbulence::Laminar, re), 30, IMPLICIT, &mut rows);
+    }
+    compare("SST M 0.1 Re 2e3 block + P", &g, 0.1, pre, viscous(Turbulence::Sst, 2e3), 30, IMPLICIT, &mut rows);
+    report("S5b low-Mach preconditioning (10 x 8 x 6 box, no-slip block, dead block), 30 iterations from the free stream", &rows);
 }

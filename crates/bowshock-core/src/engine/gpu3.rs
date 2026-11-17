@@ -48,7 +48,9 @@ impl GpuRunner3 {
 
     fn build(case: &Case3, prec: Precision, rans: Option<(bowshock_cfd::solver::Viscous, bowshock_cfd::solver3::RansOpts3)>) -> Result<GpuRunner3, Error> {
         let t_build = Instant::now();
-        let mut host = case.build_solver()?;
+        // the grid (mesher, face geometry) comes from the process-wide cache: one `Analysis::run` per Mach node rebuilds neither it nor, with the shared default
+        // context, the compiled kernels of the previous call
+        let mut host = case.build_solver_cached()?;
         if let Some((v, opts)) = rans {
             host.set_viscous_with(Some(v), opts);
         }

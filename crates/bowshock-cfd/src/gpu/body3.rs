@@ -602,6 +602,9 @@ impl LazySolver3 {
         if l.visc.is_some() && matches!(s.cfg.scheme, Scheme3::Implicit(p) if p.line_solve == crate::implicit::LineSolve3::DiagonalCorrected) {
             return Err(luma::LumaError::Unsupported("the diagonal line solve of a viscous run is not ported (use LineSolve3::Block)".into()));
         }
+        if matches!(s.cfg.scheme, Scheme3::Implicit(p) if p.low_mach_precond && p.line_solve == crate::implicit::LineSolve3::DiagonalCorrected) {
+            return Err(luma::LumaError::Unsupported("the diagonal line solve with the low-Mach preconditioning is not ported (it stalls on the CPU too: use LineSolve3::Block)".into()));
+        }
         l.set_state(&s.u)?;
         l.iter = s.iter;
         Ok(l)
