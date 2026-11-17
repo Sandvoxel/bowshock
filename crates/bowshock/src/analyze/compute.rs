@@ -170,7 +170,7 @@ pub struct Conditions {
 impl Default for Conditions {
     fn default() -> Self {
         Conditions {
-            mach: (0.1, 3.0),
+            mach: restricted_range().unwrap_or((0.1, 3.0)),
             mach_fixed: BALANCE_MACH,
             alpha: 0.0,
             alpha_max: 15f64.to_radians(),
@@ -1106,4 +1106,12 @@ mod tests {
         let t = Table { headers: vec!["a".into(), "b".into()], rows: vec![vec!["x, y".into(), "z".into()]] };
         assert_eq!(t.csv(), "a,b\n\"x, y\",z\n");
     }
+}
+
+/// `BOWSHOCK_CFD_RESTRICT=1.0,1.7` (a diagnostic, for measuring a part of the table through the app): the Mach range a new analysis starts with, and the 3D angles
+/// start off (see [`restricted_range`] users). Unset or malformed: `None`.
+pub(crate) fn restricted_range() -> Option<(f64, f64)> {
+    let v = std::env::var("BOWSHOCK_CFD_RESTRICT").ok()?;
+    let (a, b) = v.split_once(',')?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
 }

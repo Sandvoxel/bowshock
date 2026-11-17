@@ -721,18 +721,13 @@ fn engine3d_probe_cold_half_points() {
 fn finned_drag_split() {
     let (rocket, vehicle) = example();
     let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
-    let machs = nodes((0.1, 3.0)).unwrap();
+    // BOWSHOCK_MACHS=1.0,1.1 picks the Mach numbers (default: the table's ten), BOWSHOCK_GRID=draft the quick grid
+    let machs: Vec<f64> =
+        std::env::var("BOWSHOCK_MACHS").map(|v| v.split(',').map(|m| m.trim().parse().unwrap()).collect()).unwrap_or_else(|_| nodes((0.1, 3.0)).unwrap());
+    let grid = if std::env::var("BOWSHOCK_GRID").is_ok_and(|g| g == "draft") { CfdGrid::Draft } else { CfdGrid::Coarse };
+    println!("GRID {grid:?}");
     let grid_mach = machs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let job = Job {
-        plan,
-        altitude: 120.0,
-        nodes: machs.clone(),
-        stage: 1,
-        grid: CfdGrid::Coarse,
-        compute: Default::default(),
-        cpu_only: false,
-        stability: Vec::new(),
-    };
+    let job = Job { plan, altitude: 120.0, nodes: machs.clone(), stage: 1, grid, compute: Default::default(), cpu_only: false, stability: Vec::new() };
     let session = Session::Local { backend: solver::Backend::Gpu };
     println!("ENGINE {:?}", solver::Engine::from_env());
     println!(
@@ -742,9 +737,14 @@ fn finned_drag_split() {
     let t_all = Instant::now();
     for &mach in &machs {
         let analysis = node_analysis(&job, NodeKind::Drag, &session, 120.0, grid_mach, solves_3d()).unwrap_or_else(|_| panic!("the node analysis"));
+        let _ = solver::engine::timing::take_timings();
         let t = Instant::now();
         let polar = analysis.run(&[mach]).expect("the point solves");
         let wall = t.elapsed().as_secs_f64();
+        // every run of the point (a retry after a NonFinite shows as a second row)
+        for r in solver::engine::timing::take_timings() {
+            println!("RUN M {mach:.2}: {} cells, {} its, stop {}, {:.1} s", r.cells, r.iters_exec, r.stop, r.run_s);
+        }
         let (p, d) = (&polar.points[0], &polar.points[0].drag);
         let (ff, fp) = d.fins.map_or((f64::NAN, f64::NAN), |f| (f.friction, f.pressure));
         println!(
@@ -761,4 +761,24 @@ fn finned_drag_split() {
         );
     }
     println!("TOTAL {:.1} s for {} points", t_all.elapsed().as_secs_f64(), machs.len());
+}
+
+/// One subsonic point of the finned example through the app's path (`solve_sized` with one node), to see what a point that diverges looks like to the user: how long it
+/// takes, the error or the note, the runs behind it (a retry with the CFL halved is a second `RUN` row) and the facade's own verdict on the point.
+#[test]
+#[ignore = "solves one subsonic point of the finned example on the GPU"]
+fn finned_subsonic_failure_path() {
+    let mach: f64 = std::env::var("BOWSHOCK_MACH").ok().and_then(|m| m.parse().ok()).unwrap_or(0.5);
+    let (rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    let job =
+        Job { plan, altitude: 120.0, nodes: vec![mach], stage: 1, grid: CfdGrid::Coarse, compute: Default::default(), cpu_only: false, stability: Vec::new() };
+    let _ = solver::engine::timing::take_timings();
+    let t = Instant::now();
+    let table =
+        solve_sized(&job, &Arc::new(AtomicBool::new(false)), |e| println!("EVENT {}", format!("{e:?}").chars().take(160).collect::<String>()), solves_3d());
+    println!("APP RESULT after {:.1} s: {:?}", t.elapsed().as_secs_f64(), table.as_ref().map(|t| (t.points.len(), t.notes.clone())));
+    for r in solver::engine::timing::take_timings() {
+        println!("RUN M {:.2}: {} cells, {} its (stop {}), {:.1} s, {}", r.mach, r.cells, r.iters_exec, r.iters_stop, r.run_s, r.stop);
+    }
 }

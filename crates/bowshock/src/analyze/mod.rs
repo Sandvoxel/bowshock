@@ -860,7 +860,7 @@ impl Default for Cfd {
             table: None,
             fields: cfd::FieldStore::default(),
             solving: None,
-            angles: true,
+            angles: compute::restricted_range().is_none(),
             stopped: None,
             summary: None,
             failed: None,
