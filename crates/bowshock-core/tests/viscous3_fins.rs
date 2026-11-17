@@ -409,6 +409,37 @@ fn anf_incidence_case(mach: f64, alpha_deg: f64) -> Case3 {
     resolution(c)
 }
 
+/// The example rocket of the application (`tests/grid_census.rs`: tangent ogive, 4 swept square-section fins) as the sector at zero incidence on the Draft tier (`TIER=coarse`: the
+/// Coarse one), `f` = `Re_c` 1.7e6 and `mach_max` 3: `CASE=rocket` of [`fin_half_incidence_series`] (run it with `ALPHA=0`). One-at-a-time changes of the fins: `PROFILE`
+/// (`square` | `rounded` | `airfoil` | `wedge`), `SWEEP` (calibres, 0.787), `THICK` (calibres, 0.0417), `TIP` (tip chord, calibres, 0.656), `N` (fins, 4).
+fn rocket_sector_case(mach: f64) -> Case3 {
+    let d = 0.0762;
+    let body = BaseBody::cylinder(Body { nose: Nose::TangentOgive { fineness: 0.2286 / d } }, 0.9134 / d);
+    let profile = match std::env::var("PROFILE").as_deref() {
+        Ok("rounded") => FinProfile::Rounded,
+        Ok("airfoil") => FinProfile::Airfoil,
+        Ok("wedge") => FinProfile::DoubleWedge,
+        _ => FinProfile::Square,
+    };
+    let fins = Fins3 {
+        count: env("N", 4u32),
+        root_chord: 0.12 / d,
+        tip_chord: env("TIP", 0.05 / d),
+        span: 0.0762 / d,
+        sweep: env("SWEEP", 0.06 / d),
+        thickness: env("THICK", 0.00318 / d),
+        te_to_base: 0.0,
+        profile,
+        planform: None,
+    };
+    let flow = WallFlow { re_c: 1.7e6, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0, sutherland: bowshock_core::engine::case3::SUTHERLAND_SEA_LEVEL };
+    let tier = match std::env::var("TIER").as_deref() {
+        Ok("coarse") => Tier::Coarse(flow),
+        _ => Tier::draft(flow),
+    };
+    Case3::sector(mach, body, fins, tier, 0)
+}
+
 /// A run as `run3::run3_on` does it (the same stop rule, the same samples) on the solver `Case3::build_solver` gives (the viscous tier, its numerics: the engine's, not
 /// the 2D ones of `build`), recording CA, CN and x_cp every `MEAN_EVERY` iterations: the verdict of the mean-stationary rule and the oscillation of every force over the
 /// last `WINDOW` iterations.
@@ -417,7 +448,7 @@ fn anf_incidence_case(mach: f64, alpha_deg: f64) -> Case3 {
 fn fin_half_incidence_series() {
     use bowshock_core::engine::run3::{lift_forces, StopRule3, MEAN_EVERY, SAMPLE_EVERY};
     let (mach, alpha): (f64, f64) = (env("MACH", 0.8), env("ALPHA", 2.0));
-    let mut case = anf_incidence_case(mach, alpha);
+    let mut case = if std::env::var("CASE").as_deref() == Ok("rocket") { rocket_sector_case(mach) } else { anf_incidence_case(mach, alpha) };
     if let Some(n) = std::env::var("MAX_ITER").ok().and_then(|v| v.parse().ok()) {
         case.numerics.max_iter = n;
     }
@@ -428,6 +459,10 @@ fn fin_half_incidence_series() {
     let imp = &mut case.numerics.implicit;
     (imp.growth, imp.sub_iters) = (env("GROWTH", imp.growth), env("SUB", imp.sub_iters));
     imp.low_mach_precond = env("PRECOND", u8::from(imp.low_mach_precond)) != 0;
+    // the implicit operator: the Roe-type (`1`) or scalar (`0`) dissipation of the left-hand side, its entropy-fix level, the linearised ghost states
+    imp.roe = env("ROE", u8::from(imp.roe)) != 0;
+    imp.eps_fix = env("EPS_FIX", imp.eps_fix);
+    imp.implicit_bc = env("IMPLICIT_BC", u8::from(imp.implicit_bc)) != 0;
     case.numerics.first_order_iters = env("FIRST", case.numerics.first_order_iters);
     let mut s = case.build_solver().expect("solver");
     // `EULER=1`: the same grid and numerics without the viscous terms; `MODEL=laminar`: the viscous terms without the turbulence model
@@ -636,7 +671,8 @@ fn blowup_report(s: &Solver3, u: &[bowshock_cfd::gas3::Cons3]) {
 #[ignore]
 fn corner_geometry() {
     use bowshock_cfd::grid3::{PART_DEAD, PART_FLUID};
-    let case = anf_incidence_case(env("MACH", 2.0), env("ALPHA", 2.0));
+    let (mach, alpha) = (env("MACH", 2.0), env("ALPHA", 2.0));
+    let case = if std::env::var("CASE").as_deref() == Ok("rocket") { rocket_sector_case(mach) } else { anf_incidence_case(mach, alpha) };
     let s = case.build_solver().expect("solver");
     describe("half", &s.grid);
     let g = &s.grid;
@@ -686,8 +722,8 @@ fn corner_geometry() {
     println!("   cell            vol       dx       dj       dk       Ai       Aj       Ak  walls   dwall    Vi-   Vi+   Vj-   Vj+   Vk-   Vk+   cos(i j k)");
     let cols = env("TE_COLS", 5usize);
     for i in i_te..=(i_te + cols).min(g.ni - 1) {
-        for j in j_root.saturating_sub(3)..(j_root + 3).min(g.nj) {
-            for k in k_lo.saturating_sub(1)..=(k_hi + 1).min(g.nk - 1) {
+        for j in j_root.saturating_sub(3)..(j_root + env("J_SPAN", 3usize)).min(g.nj) {
+            for k in k_lo.saturating_sub(1)..=(k_hi + env("K_SPAN", 1usize)).min(g.nk - 1) {
                 let c = g.cell(i, j, k);
                 if g.part[c] != PART_FLUID {
                     continue;
