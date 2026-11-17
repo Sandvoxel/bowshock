@@ -2,14 +2,14 @@
 //! CPU solver built from them. Lengths are in nose diameters (`d = 1`).
 
 use crate::engine::body_grid::{BaseBody, Body, Nose};
-use crate::engine::case::{base_grid, resolve_walls, sting_grid, wall_spacing, Case};
+use crate::engine::case::{base_grid, motor_rows, resolve_walls, sting_grid, wall_spacing, Case, Jet};
 use crate::engine::field3::Snapshots3;
 use crate::engine::grid3::{body_grid3, Domain3, FinStack, Fins3, Grid3Params, WEDGE_ANGLE};
 use crate::error::Error;
 use crate::progress::ProgressSink;
 use crate::spec::FinProfile;
 use bowshock_cfd::flux::Limiter;
-use bowshock_cfd::gas3::freestream3;
+use bowshock_cfd::gas3::{freestream3, Prim3};
 use bowshock_cfd::grid3::{Grid3, PartRoughness};
 use bowshock_cfd::implicit::{ImplicitParams, LineSolve3};
 use bowshock_cfd::solver3::{Config3, Scheme3, Solver3};
@@ -132,6 +132,15 @@ pub struct Case3 {
     pub progress: Option<ProgressSink>,
     /// Where the run hands snapshots of its flow field; `None`: none.
     pub snapshots: Option<Snapshots3>,
+    /// The motor jet at the nozzle exit of the base ([`Case3::with_motor`]); `None`: power off.
+    pub jet: Option<Jet>,
+}
+
+/// What the solver needs of the motor jet at the nozzle exit faces (`Wall::Jet`): the primitive state `[rho, u, v, w, p]` (axial, supersonic) and `[k, omega]`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct JetState3 {
+    pub state: Prim3,
+    pub turb: [f64; 2],
 }
 
 impl Case3 {
@@ -139,7 +148,33 @@ impl Case3 {
     /// and [`Numerics3::auto`].
     pub fn new(mach: f64, alpha: f64, body: BaseBody, fins: Option<Fins3>, level: u32) -> Case3 {
         let grid = Grid3Params::half(sting_grid(&body, level), fins, Grid3Params::default_nk(level), level);
-        Case3 { mach, alpha, body, grid, numerics: Numerics3::auto(mach, level), tier: Tier::Euler, progress: None, snapshots: None }
+        Case3 { mach, alpha, body, grid, numerics: Numerics3::auto(mach, level), tier: Tier::Euler, progress: None, snapshots: None, jet: None }
+    }
+
+    /// This case with a motor jet from the centre of the base (the 2D [`crate::engine::case::Case::with_motor`]): the gap behind the base of the base-wake grid is
+    /// split into the nozzle exit (`n_jet` rows at the axis, the mesher marks the two cell columns ahead of them `Part::Jet`, their `+i` faces `Wall::Jet`) and the
+    /// annulus, from the wall spacing `dr_wall` of the grid: **call it after [`Case3::with_tier`]** (which sets that spacing). Needs the base-wake grid and a base
+    /// without a sting.
+    pub fn with_motor(mut self, jet: Jet) -> Result<Case3, Error> {
+        let base = self.grid.base.as_mut().ok_or_else(|| Error::Grid("a motor needs the base-wake grid".to_string()))?;
+        if base.n_sting != 0 {
+            return Err(Error::Grid("a motor needs a base without a sting".to_string()));
+        }
+        if !(jet.r_exit > 0.0 && jet.r_exit < self.body.base_radius()) {
+            return Err(Error::Grid("the nozzle exit must lie inside the base".to_string()));
+        }
+        let [rho, u, _, p] = jet.state;
+        if !(rho > 0.0 && p > 0.0 && u >= (1.4 * p / rho).sqrt()) {
+            return Err(Error::Grid("the nozzle exit state must be supersonic and axial (rho, p > 0, u >= c)".to_string()));
+        }
+        motor_rows(base, &self.body, &jet);
+        self.jet = Some(jet);
+        Ok(self)
+    }
+
+    /// The jet state the solver gives the `Wall::Jet` faces (`None`: power off).
+    pub fn jet_state3(&self) -> Option<JetState3> {
+        self.jet.map(|j| JetState3 { state: [j.state[0], j.state[1], 0.0, 0.0, j.state[3]], turb: j.turb })
     }
 
     /// An axisymmetric body at zero incidence as a single-cell wedge of [`WEDGE_ANGLE`] on the base-wake grid of the 2D case

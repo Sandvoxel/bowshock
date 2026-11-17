@@ -954,6 +954,7 @@ pub fn body_grid3(p: &Grid3Params) -> Result<Grid3, Error> {
             if bp.n_sting > 0 {
                 g.mark_solid(SolidBox { i: ie..ni, j: 0..bp.n_sting, k: ks }, Some(Part::Sting));
             }
+            mark_jet(&mut g, bp, ie, nk);
         }
         _ => {
             g.axis = vec![AxisRun { j: 0, i: 0..host.n_up }];
@@ -996,6 +997,15 @@ pub fn wedge_of_meridian(g2: &bowshock_cfd::grid::Grid, dtheta: f64, n_axis: usi
     Ok(g)
 }
 
+/// Motor-on grids: the nozzle rows of the 2D base grid (`NozzleRows`, rows `0..n_jet` behind the base, none of them a wall) as a face patch on the base. The two
+/// cell columns of the body block just ahead of the base plane (`i_end - 2..i_end`, the ghost cells the 2D solver fills with the jet state) in those rows, every
+/// `k`, become `Part::Jet`; the `+i` faces between them and the fluid behind the base are the exit (`Wall::Jet`), the rest of the base stays `Wall::Base`.
+fn mark_jet(g: &mut Grid3, bp: &BaseGridParams, i_end: usize, nk: usize) {
+    if let Some(nz) = &bp.nozzle {
+        g.mark_solid(SolidBox { i: i_end - 2..i_end, j: 0..nz.n_jet, k: 0..nk }, Some(Part::Jet));
+    }
+}
+
 /// Build a finless grid on the base-wake meridian grid `bp` (`base_domain_grid`): the body block (the cells inside the body, from the nose tip to the
 /// base plane) is solid, split by body segment for the force classes, its cells upstream of the nose tip are dead (their nodes lie on or behind the axis,
 /// see `revolve`), a sting behind the base is its own part. Axis runs: the line `j = j_end` upstream of the nose and, without a sting, the rows
@@ -1030,6 +1040,7 @@ fn base_grid3(p: &Grid3Params, bp: &BaseGridParams) -> Result<Grid3, Error> {
     if blk.j_sting > 0 {
         g.mark_solid(SolidBox { i: blk.i_end..ni, j: 0..blk.j_sting, k: ks }, Some(Part::Sting));
     }
+    mark_jet(&mut g, bp, blk.i_end, nk);
     for k in 0..nk {
         for j in 0..g.nj {
             for i in 0..ni {

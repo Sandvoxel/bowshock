@@ -8,7 +8,7 @@ use bowshock_cfd::solver3::Solver3;
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
 use bowshock_core::engine::case3::{Case3, Tier, WallFlow};
 use bowshock_core::engine::grid3::{Domain3, FinPhase, Fins3};
-use bowshock_core::engine::run3::{drag_parts, run3_on, wall_forces, DragParts, Wall};
+use bowshock_core::engine::run3::{drag_parts, run3_on, wall_forces, wall_samples, DragParts, Wall};
 
 /// Tangent ogive (fineness 3), 6 d cylinder, 1 d boattail of 5 degrees: nose, one tube and one cone, a base smaller than the body.
 fn boattailed() -> BaseBody {
@@ -490,7 +490,7 @@ fn half_domains_at_incidence_on_the_base_grid_build_for_both_roll_phases_and_tie
                 let s = c.build_solver().unwrap_or_else(|e| panic!("Re_c {re_c:e} {name} {phase:?}: {e}"));
                 let g = &s.grid;
                 assert!(g.vol.iter().all(|v| *v >= 0.0), "Re_c {re_c:e} {name} {phase:?}: a negative volume");
-                let fin_faces = bowshock_core::engine::run3::wall_samples(g, &s.u).iter().filter(|w| w.class == Wall::FinSide).count();
+                let fin_faces = wall_samples(g, &s.u).iter().filter(|w| w.class == Wall::FinSide).count();
                 assert!(fin_faces >= 1, "Re_c {re_c:e} {name} {phase:?}: no fin wall faces");
                 if name == "lift" {
                     assert_eq!(g.nk, 32, "uniform azimuth over the half domain");
@@ -498,4 +498,85 @@ fn half_domains_at_incidence_on_the_base_grid_build_for_both_roll_phases_and_tie
             }
         }
     }
+}
+
+/// A supersonic axial jet in the units of the free stream (`rho_inf = 1`, `a_inf = 1`, `p_inf = 1/gamma`): Mach 1.7 at the exit.
+fn test_jet(r_exit: f64) -> bowshock_core::engine::case::Jet {
+    bowshock_core::engine::case::Jet { r_exit, state: [0.5, 2.0, 0.0, 0.5], turb: [1e-4, 10.0] }
+}
+
+/// Motor on, mesher side: the nozzle rows of the 2D base grid become a face patch on the base, `Wall::Jet`, all `k`, in the rows `j < n_jet` of the plane `i = i_end`;
+/// the rest of the base (the annulus) stays `Wall::Base`; the patch's area is the exit's, the jet exit counts in no force, the free stream is a fixed point.
+#[test]
+fn the_nozzle_rows_become_a_jet_patch_on_the_base() {
+    for (domain, name) in [(None, "wedge"), (Some(FinPhase::Between), "half")] {
+        let mut c = match domain {
+            None => Case3::wedge(2.0, cone_cylinder(), 0),
+            Some(_) => Case3::base_half(2.0, 0.0, cone_cylinder(), None, Tier::Euler, 0),
+        }
+        .with_motor(test_jet(0.25))
+        .expect("motor");
+        if domain.is_some() {
+            c.grid.nk = 8;
+        }
+        let n_jet = c.grid.base.as_ref().and_then(|b| b.nozzle).expect("nozzle rows").n_jet;
+        let s = c.build_solver().expect("grid");
+        let g = &s.grid;
+        let samples = wall_samples(g, &s.u);
+        let jet: Vec<_> = samples.iter().filter(|w| w.class == Wall::Jet).collect();
+        assert!(!jet.is_empty(), "{name}: no jet faces");
+        let nk = if domain.is_some() { 8 } else { 1 };
+        assert_eq!(jet.len(), n_jet * nk, "{name}: one face per nozzle row and k");
+        let x_base = c.body.x_base();
+        assert!(jet.iter().all(|w| (w.face.c[0] - x_base).abs() < 1e-9 && w.face.n[0].abs() > 1.0 - 1e-9), "{name}: the exit faces lie on the base plane");
+        let r_max = jet.iter().map(|w| w.face.c[1].hypot(w.face.c[2])).fold(0.0, f64::max);
+        assert!(r_max < 0.25, "{name}: the face centres are inside the lip radius, {r_max}");
+        // area of the exit on the whole body: the polygon of the revolved nodes has the circle's area
+        let area: f64 = jet.iter().map(|w| w.face.area * w.face.n[0].abs()).sum::<f64>() * 2.0 * std::f64::consts::PI / g.theta_span;
+        let want = std::f64::consts::PI * 0.25 * 0.25;
+        assert!((area / want - 1.0).abs() < 2e-3, "{name}: exit area {area} vs {want}");
+        let base_rows = samples.iter().filter(|w| w.class == Wall::Base).count();
+        assert_eq!(base_rows % nk, 0);
+        assert!(base_rows > 0, "{name}: the annulus is still base");
+        // the jet exit is no wall force: a uniform overpressure acts on the annulus only
+        let mut u = s.u.clone();
+        let fs = s.cfg.freestream;
+        let over = bowshock_cfd::gas3::prim_to_cons3(&[fs[0], fs[1], fs[2], fs[3], 1.2 * fs[4]]);
+        u.iter_mut().for_each(|c| *c = over);
+        let w = wall_forces(g, &u, fs[4], f64::INFINITY);
+        let fx_jet = w.get(Wall::Jet)[0] * 2.0 * std::f64::consts::PI / g.theta_span;
+        assert!(fx_jet < 0.0, "{name}: the exit face pushes the body forward like the base: {fx_jet}");
+        let p = drag_parts(&c, g, &u, fs[4]);
+        let base_only = w.get(Wall::Base)[0] * 2.0 * std::f64::consts::PI / g.theta_span / (0.5 * 4.0 * std::f64::consts::FRAC_PI_4);
+        assert!((p.base - base_only).abs() < 1e-12, "{name}: the base drag is the annulus's ({} vs {base_only})", p.base);
+        let total = p.nose + p.aft.iter().sum::<f64>() + p.base;
+        assert!((p.total - total).abs() < 1e-12, "{name}: the exit is in no total");
+    }
+}
+
+/// The motor needs a supersonic state, the base-wake grid and a base without a sting.
+#[test]
+fn a_motor_needs_a_supersonic_jet_inside_the_base() {
+    let jet = test_jet(0.25);
+    assert!(Case3::wedge(2.0, cone_cylinder(), 0).with_motor(bowshock_core::engine::case::Jet { state: [0.5, 0.5, 0.0, 0.5], ..jet }).is_err(), "subsonic");
+    assert!(Case3::wedge(2.0, cone_cylinder(), 0).with_motor(bowshock_core::engine::case::Jet { r_exit: 0.6, ..jet }).is_err(), "wider than the base");
+    assert!(Case3::new(2.0, 0.0, cone_cylinder(), None, 0).with_motor(jet).is_err(), "sting grid");
+}
+
+/// **Fails until `Solver3` implements the jet patch** (DESIGN3D L item 20): after 30 iterations from the free stream the first fluid cells behind the exit rows move
+/// with the jet (axial velocity at least half the exit's), where a wall (what `Part::Jet` is to the solver today) leaves them at rest or reversed.
+#[test]
+#[ignore = "S9b: the solver's jet patch (phys3d, solver3.rs / implicit3*) is not there yet; fails until it is"]
+fn the_jet_is_an_inflow_at_the_exit_faces() {
+    let mut c = Case3::wedge(2.0, cone_cylinder(), 0).with_motor(test_jet(0.25)).expect("motor");
+    c.numerics.max_iter = 30;
+    let mut s = c.build_solver().expect("grid");
+    run3_on(&c, &mut s, false);
+    let g = &s.grid;
+    let jet_faces: Vec<_> = wall_samples(g, &s.u).into_iter().filter(|w| w.class == Wall::Jet).collect();
+    assert!(!jet_faces.is_empty());
+    // the fluid cell behind the exit row 0 is the cell at (i_end, 0, 0)
+    let i_end = (0..g.ni).find(|&i| g.xc[g.cell(i, 0, 0)][0] > c.body.x_base()).expect("a cell behind the base");
+    let q = bowshock_cfd::gas3::cons_to_prim3(&s.u[g.cell(i_end, 0, 0)]);
+    assert!(q[1] >= 1.0, "axial velocity behind the exit {} against the jet's 2.0", q[1]);
 }

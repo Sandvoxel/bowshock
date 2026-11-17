@@ -78,12 +78,7 @@ impl Case {
     /// around it (`n_ann` rows, at least 4), `n_gap = n_jet + n_ann`.
     pub fn with_motor(mut self, jet: Jet) -> Case {
         assert!(self.viscous.is_some() && self.wake == Wake::Base, "a motor needs a viscous case with the base wake");
-        let y1 = self.grid_base.dr_wall;
-        let re = self.body.base_radius();
-        let n_jet = layer_count(jet.r_exit, y1);
-        let n_ann = (2 * layer_count(0.5 * (re - jet.r_exit), y1)).max(4);
-        self.grid_base.n_gap = n_jet + n_ann;
-        self.grid_base.nozzle = Some(NozzleRows { r_exit: jet.r_exit, n_jet });
+        motor_rows(&mut self.grid_base, &self.body, &jet);
         self.motor = Some(jet);
         self
     }
@@ -154,6 +149,17 @@ fn even_ceil(x: f64) -> usize {
 }
 
 /// Number of rows of a wall-clustered layer of height `h` with first cell height `y1` and growth ratio 1.2 (even).
+/// Splits the gap behind the base of `grid` into the nozzle exit (rows clustered at the lip, `n_jet` rows) and the annulus around it (`n_ann` rows, at least 4),
+/// `n_gap = n_jet + n_ann`, the first cell height `dr_wall` of the grid: the base grid of [`Case::with_motor`] and of [`crate::engine::case3::Case3::with_motor`].
+pub(crate) fn motor_rows(grid: &mut BaseGridParams, body: &BaseBody, jet: &Jet) {
+    let y1 = grid.dr_wall;
+    let re = body.base_radius();
+    let n_jet = layer_count(jet.r_exit, y1);
+    let n_ann = (2 * layer_count(0.5 * (re - jet.r_exit), y1)).max(4);
+    grid.n_gap = n_jet + n_ann;
+    grid.nozzle = Some(NozzleRows { r_exit: jet.r_exit, n_jet });
+}
+
 fn layer_count(h: f64, y1: f64) -> usize {
     even_ceil((1.0 + 0.2 * h / y1).ln() / 1.2f64.ln())
 }
