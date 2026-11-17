@@ -858,10 +858,11 @@ fn the_wedge_of_a_2d_rans_case_is_the_wedge_built_with_the_tier() {
     let body = BaseBody::cylinder(Body { nose: Nose::TangentOgive { fineness: 3.0 } }, 6.0);
     for (mach, level) in [(0.5, 0u32), (2.3, 0), (0.9, 1)] {
         let (re_c, sutherland, mach_max) = (6.989e5, 0.368, 3.0);
-        let case2 = Case::viscous(mach, body.clone(), level, Wake::Base, re_c, sutherland, mach_max);
+        let mut case2 = Case::viscous(mach, body.clone(), level, Wake::Base, re_c, sutherland, mach_max);
+        case2.numerics.drag_rel_tol = Some(2e-3);
         let via2d = Case3::wedge_of(&case2, level);
         let flow = WallFlow { re_c, mach_max, ks_body: 0.0, ks_fin: 0.0, sutherland };
-        let direct = Case3::wedge(mach, body.clone(), level).with_tier(Tier::Coarse(flow));
+        let direct = Case3::wedge(mach, body.clone(), level).with_tier(Tier::Coarse(flow)).with_drag_tolerance(2e-3);
         assert_eq!(format!("{:?}", via2d.grid.base), format!("{:?}", direct.grid.base), "M {mach} level {level}: base grid");
         assert_eq!(format!("{:?}", via2d.grid.sting), format!("{:?}", direct.grid.sting), "M {mach} level {level}: sting grid");
         assert_eq!(

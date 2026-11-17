@@ -737,6 +737,20 @@ fn gate_v3(r: &dyn WedgeRunner, rep: &mut Report) {
 fn gate_v4(r: &dyn WedgeRunner, rep: &mut Report, groups: &[&str]) {
     for c in facade_cases("G-V4").into_iter().filter(|c| groups.contains(&c.group.as_str())) {
         match r.facade_case(&c) {
+            // An inviscid wake that cycles is not compared sample against sample: the 2D reference of such a case hit its iteration cap (its value is the phase it stopped
+            // in), and the wedge stops on the mean-stationary rule (a window mean, reported as INFO by the runner). Reported, not gated, as in G-W1.
+            Ok(m) if !c.rans && (c.reference.stop_reason == "MaxIterations" || m.stop_reason.contains("mean stationary")) => {
+                println!(
+                    "INFO G-V4 {} not gated: an inviscid wake that cycles (2D stop {}, {} iterations; wedge stop {}, {} iterations); wedge cd_total {} 2D {}",
+                    c.id,
+                    c.reference.stop_reason,
+                    c.reference.iterations,
+                    m.stop_reason,
+                    m.iterations,
+                    fmt(m.cd_total),
+                    fmt(c.reference.cd_total)
+                );
+            }
             Ok(m) => {
                 rep.check("G-V4", &format!("{}:cd_total", c.id), m.cd_total, c.reference.cd_total, v4_band(c.mach));
                 println!(

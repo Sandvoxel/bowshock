@@ -630,3 +630,197 @@ fn gate_j_tp2005_jet_case_on_the_wedge() {
     println!("G-J 3D vs 2D: pb/pinf {:+.4} (band 0.15), CD {:+.2} %", ratio(cp3) - ratio(r2.cp_base), 100.0 * (f.total() / r2.cd_total - 1.0));
     assert!((ratio(cp3) - ratio(r2.cp_base)).abs() < 0.15, "base pressure ratio {} against the 2D solver's {}", ratio(cp3), ratio(r2.cp_base));
 }
+
+/// The cells of the largest `|d rho / dt|` of the last residual evaluation, with their place in the grid (axis row, volume, whether the cell touches the axis).
+fn residual_map(s: &Solver3, n: usize) {
+    let g = &s.grid;
+    let mut v: Vec<(f64, usize)> = (0..s.res.len()).filter(|&c| g.part[c] == 0).map(|c| (s.res[c][0].abs(), c)).collect();
+    v.sort_by(|a, b| b.0.total_cmp(&a.0));
+    for (r, c) in v.iter().take(n) {
+        let (i, j, k) = (c % g.ni, (c / g.ni) % g.nj, c / (g.ni * g.nj));
+        let x = g.xc[*c];
+        let w = s.prim(i, j, k);
+        println!(
+            "    |d rho/dt| {r:.3e} at ({i}, {j}, {k})  x {:.4} r {:.5}  vol {:.2e}  axis {}  rho {:.4} u {:.4} p {:.4}  dt {:.2e}",
+            x[0],
+            x[1].hypot(x[2]),
+            g.vol[*c],
+            g.is_axis(i, j),
+            w[0],
+            w[1],
+            w[4],
+            s.dt[*c]
+        );
+    }
+}
+
+/// The 2D case of the fixture's RANS table (`table-rans-M<mach>`: ogive 3 d + tube 12 d of 0.0762 m, ISA 120 m, roughness 6e-5 m, wake of the base, `drag_tolerance` 2e-3) with
+/// the grid sized for `mach_max` (the fixture's points are single-Mach runs: the point's own Mach number), and its `Re_c`.
+fn table_case(mach: f64, mach_max: f64, level: u32) -> (Case, f64) {
+    let d = 0.0762;
+    let air = Atmosphere::Isa { altitude_m: 120.0 }.state().unwrap();
+    let body = BaseBody::cylinder(Body { nose: Nose::TangentOgive { fineness: 3.0 } }, 0.9134 / d);
+    let (re_c, sutherland) = (air.density * air.sound_speed * d / air.viscosity, 110.4 / air.temperature_k);
+    let mut case = Case::viscous(mach, body, level, Wake::Base, re_c, sutherland, mach_max);
+    if let Some(v) = case.viscous.as_mut() {
+        v.roughness = 6e-5 / d;
+    }
+    case.numerics.drag_rel_tol = Some(2e-3);
+    (case, re_c)
+}
+
+/// The RANS table of the fixture (`table-rans-M<mach>`: ogive 3 d + tube 12 d of 0.0762 m, ISA 120 m, roughness 6e-5 m, wake of the base, grid sized for Mach 3) at `MACH` as
+/// a viscous wedge (`LEVEL` 0 = coarse): forces, the minimum density and pressure, and the cells of the largest residual. `WITH2D=1` runs the 2D solver too.
+#[test]
+#[ignore]
+fn table_point_on_the_wedge() {
+    let mach: f64 = env("MACH", 0.1);
+    let (iters, level): (usize, u32) = (env("ITERS", 2000), env("LEVEL", 0));
+    let (case, re_c) = table_case(mach, env("MACH_MAX", mach), level);
+    if std::env::var_os("WITH2D").is_some() {
+        let (_, r2, secs2) = run2(&case, iters, 1000);
+        println!(
+            "table 2D {iters} its ({secs2:.1} s): CD {:.5} (p {:.5} f {:.5} base {:.5})",
+            r2.cd_total,
+            r2.cd_nose + r2.cd_aft.iter().sum::<f64>(),
+            r2.cd_friction,
+            r2.cd_base
+        );
+    }
+    let (c3, mut s3) = build3(&case, bowshock_core::engine::grid3::WEDGE_ANGLE, level);
+    let g = &s3.grid;
+    println!("table M {mach}: {} x {} cells, axis runs {:?}, Re_c {re_c:.4e}", g.ni, g.nj, g.axis);
+    let t0 = Instant::now();
+    for it in 0..iters {
+        let r = s3.step();
+        if !r.is_finite() {
+            println!("  non-finite residual at iteration {}", it + 1);
+            break;
+        }
+        if (it + 1) % 250 == 0 || it + 1 == iters {
+            let f = forces3(&c3, &s3);
+            let (mut rho_min, mut p_min) = (f64::INFINITY, f64::INFINITY);
+            for c in 0..s3.u.len() {
+                if s3.grid.part[c] == 0 {
+                    let w = bowshock_cfd::gas3::cons_to_prim3(&s3.u[c]);
+                    rho_min = rho_min.min(w[0]);
+                    p_min = p_min.min(w[4]);
+                }
+            }
+            println!(
+                "  it {:5}  r {r:.3e}  CD {:.5} (p {:.5} f {:.5} base {:.5})  y+ {:.3}  rho min {rho_min:.4} p min {p_min:.4}  {:.1} s",
+                it + 1,
+                f.total(),
+                f.cd_pressure,
+                f.cd_friction,
+                f.cd_base,
+                f.y_plus_max,
+                t0.elapsed().as_secs_f64()
+            );
+        }
+    }
+    residual_map(&s3, 10);
+    if let Some(i) = std::env::var("PROBE_I").ok().and_then(|v| v.parse::<usize>().ok()) {
+        let j0 = (0..s3.grid.nj).find(|&j| s3.grid.is_axis(i, j)).unwrap_or(0);
+        println!("axis probe at i {i}: first axis row j {j0}");
+        for j in j0.saturating_sub(1)..(j0 + 6).min(s3.grid.nj) {
+            let c = s3.grid.cell(i, j, 0);
+            let w = s3.prim(i, j, 0);
+            let x = s3.grid.xc[c];
+            println!(
+                "  j {j}: r {:.2e} vol {:.2e} dt {:.2e}  w [{:.5} {:.5} {:.3e} {:.3e} {:.5}]  res [{:.2e} {:.2e} {:.2e} {:.2e} {:.2e}]",
+                x[1].hypot(x[2]),
+                s3.grid.vol[c],
+                s3.dt[c],
+                w[0],
+                w[1],
+                w[2],
+                w[3],
+                w[4],
+                s3.res[c][0],
+                s3.res[c][1],
+                s3.res[c][2],
+                s3.res[c][3],
+                s3.res[c][4]
+            );
+        }
+        let before = s3.u.clone();
+        s3.step();
+        println!("  the next step's update du / (state) at i {i}:");
+        for j in j0..(j0 + 4).min(s3.grid.nj) {
+            let c = s3.grid.cell(i, j, 0);
+            let d: Vec<String> = (0..5).map(|m| format!("{:.2e}", s3.u[c][m] - before[c][m])).collect();
+            println!("  j {j}: du [{}]  u [{:.5} {:.5} {:.3e} {:.3e} {:.5}]", d.join(" "), s3.u[c][0], s3.u[c][1], s3.u[c][2], s3.u[c][3], s3.u[c][4]);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// the cost study: iterations to the stop rule on the viscous wedge
+
+/// One wedge point run with the engine's own stop rule of the 3D runs ([`run3::StopRule3`], fed as `run3::run3_on` feeds it) and, on the same history, the stop rule of the
+/// 2D facade (`run::stop_reason` of the fixture's `drag_tolerance` 2e-3 on the total CD every 50 iterations): the iteration each fires first, and the total CD there. The run goes
+/// on until both have fired or `ITERS`. `POINT` = `g3-<mach>` (the G3 ogive-cylinder, 100 mm, sea level) or `tab-<mach>` (the RANS table body); `SUB`, `CFL`, `PRECOND`, `LINES`
+/// as `build3` has them. The history (iteration, total CD, CA of the 3D monitor, residual) is printed every 50 iterations as `HIST` lines for offline rules.
+#[test]
+#[ignore]
+fn cost_point() {
+    let point = std::env::var("POINT").unwrap_or_else(|_| "tab-0.5".into());
+    let (kind, mach) = point.split_once('-').map(|(k, m)| (k.to_string(), m.parse::<f64>().unwrap())).expect("POINT=<g3|tab>-<mach>");
+    let level: u32 = env("LEVEL", 0);
+    let mut case = if kind == "g3" { g3_case(mach, level) } else { table_case(mach, mach, level).0 };
+    case.numerics.drag_rel_tol = Some(2e-3);
+    let cap: usize = env("ITERS", 9000);
+    let (c3, mut s) = build3(&case, bowshock_core::engine::grid3::WEDGE_ANGLE, level);
+    let scheme = format!("{:?}", s.cfg.scheme);
+    println!("COSTPOINT {point} {}x{} cells; {}", s.grid.ni, s.grid.nj, scheme.split("line_solve").next().unwrap_or(""));
+    let mut rule3 = run3::StopRule3::new(&c3, false);
+    let (mut hist2, mut rmax2) = (Vec::<(usize, f64)>::new(), 0.0f64);
+    let (mut fire3, mut fire2): (Option<(usize, StopReason, f64)>, Option<(usize, StopReason, f64)>) = (None, None);
+    let t0 = Instant::now();
+    let mut it = 0;
+    while it < cap {
+        let r = s.step();
+        let ca = ((it + 1) % run3::SAMPLE_EVERY == 0).then(|| run3::lift_forces(&c3, &s).ca);
+        let total = ((it + 1) % 50 == 0).then(|| forces3(&c3, &s).total());
+        if it >= 20 {
+            rmax2 = rmax2.max(r);
+        }
+        if let Some(t) = total {
+            hist2.push((it + 1, t));
+            println!("HIST {} {:.6} {:.6} {:.4e}", it + 1, t, ca.unwrap_or(f64::NAN), r);
+        }
+        it += 1;
+        if rule3.wants_forces(it, run3::MEAN_EVERY) {
+            rule3.observe(it, &run3::lift_forces(&c3, &s));
+        }
+        let why3 = rule3.check(it - 1, r, ca);
+        if let (Some(w), None) = (why3, &fire3) {
+            fire3 = Some((it, w, hist2.last().map_or(f64::NAN, |h| h.1)));
+        }
+        if fire2.is_none() {
+            if let Some(w) = run::stop_reason(&case, it - 1, r, rmax2, 20, &hist2) {
+                fire2 = Some((it, w, hist2.last().map_or(f64::NAN, |h| h.1)));
+            }
+        }
+        if matches!(why3, Some(StopReason::NonFinite)) || !r.is_finite() {
+            println!("  non-finite at iteration {it}");
+            break;
+        }
+        if it % 250 == 0 {
+            println!("  it {it:5} r {r:.3e} {:.1} s ({:.0} ms/it)", t0.elapsed().as_secs_f64(), 1e3 * t0.elapsed().as_secs_f64() / it as f64);
+        }
+        if fire3.is_some() && fire2.is_some() {
+            break;
+        }
+    }
+    let fmt = |f: &Option<(usize, StopReason, f64)>| f.map_or("none".to_string(), |(i, w, cd)| format!("{i} {w:?} cd {cd:.5}"));
+    println!(
+        "COSTROW {point} sub {} cfl {} | rule3d: {} | rule2d: {} | iterations run {it} | {:.0} ms/it",
+        env("SUB", 3usize),
+        std::env::var("CFL").unwrap_or_else(|_| "default".into()),
+        fmt(&fire3),
+        fmt(&fire2),
+        1e3 * t0.elapsed().as_secs_f64() / it.max(1) as f64
+    );
+}

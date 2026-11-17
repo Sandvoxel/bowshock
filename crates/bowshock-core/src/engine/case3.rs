@@ -17,6 +17,11 @@ use bowshock_cfd::solver::{Bc, Scheme};
 use bowshock_cfd::solver3::{Config3, RansOpts3, Scheme3, Solver3};
 use bowshock_cfd::sst::{Turbulence, Viscous};
 
+/// `cfl_max` of a wall-resolved (viscous) **half domain**: the engine's `Numerics3::viscous` value (50 below Mach 1, 20 above) is not usable there. The Lift-tier half domain of
+/// the ANF nose with fins (short body, 692k cells) at 2 and 6 degrees goes non-finite at iteration 176 to 192 at Mach 0.8 and 2 (the ramp passes about 15 to 40, in the first-order
+/// phase), and runs at 10 (stable to 500 iterations, the longest run).
+pub const HALF_DOMAIN_CFL_MAX: f64 = 10.0;
+
 /// Numerical settings and stop-rule tolerances of a 3D run.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Numerics3 {
@@ -96,8 +101,11 @@ impl Numerics3 {
 
     /// The settings of a wall-resolved RANS run, as the 2D engine's `Numerics::viscous` has them: van Albada below Mach 0.85 and minmod above, the low-Mach
     /// correction and (below Mach 1) the low-Mach preconditioning of the implicit left-hand side, `cfl_max` 50 (20 from Mach 1: the supersonic wake diverges at 50),
-    /// `DtMode::Sum`, 200 first-order iterations, the **block** lines (the diagonal solve is unmeasured on viscous wedges and stalls with the preconditioning on plates),
-    /// the characteristic outflow. The stationary rule waits 1000 iterations and a window of 1000 (friction settles slowly).
+    /// `DtMode::Sum`, three factored solves per iteration (`sub_iters` 3). One is enough on the wedge ([`Numerics3::from_2d`]) but not on a finned grid: the small finned sector
+    /// (short body, 4 fins, 324k cells, Mach 0.5, `cfl_max` 50) with `sub_iters` 1 went non-finite at iteration 370, 170 after the CFL ramp reached 50 (the residual jumped from 80
+    /// to 260 at 300), and with 3 its residual holds at 80 over iterations 200 to 300; at Mach 2 (`cfl_max` 20) 1 and 3 agree to 450 iterations. 200 first-order iterations,
+    /// the **block** lines (the diagonal solve is unmeasured on viscous wedges and stalls with the preconditioning on plates), the characteristic outflow. The stationary rule
+    /// waits 1000 iterations and a window of 1000 (friction settles slowly).
     pub fn viscous(mach: f64, level: u32) -> Numerics3 {
         let subsonic = mach < 0.85;
         Numerics3 {
@@ -124,8 +132,15 @@ impl Numerics3 {
         }
     }
 
-    /// The numerics of a 2D engine case on the wedge: its limiter, low-Mach flags, first-order iterations, implicit parameters (with the block lines) and outflow;
-    /// the stop rule is [`Numerics3::auto`]'s for an Euler case and [`Numerics3::viscous`]'s for a viscous one.
+    /// The numerics of a 2D engine case on the wedge: its limiter, low-Mach flags, first-order iterations, implicit parameters (with the block lines) and outflow; **one factored
+    /// solve** per iteration for a viscous case: on the CPU wedge (RANS-table body at Mach 0.1, 0.9, 2.3 and G3 at Mach 0.5, 1.5) 1, 2 and 3 need the same iterations to within 5 % (2050 /
+    /// 2900 / 2850 / 3900 / 3400 for 1) and reach the same `C_D` to 0.03 %, at 0.66 to 0.71 of the time per iteration of 3; at Mach 0.1 the converged `C_D` of 2 and 3 is 1.5 % above the
+    /// 2D solver's and that of 1 is 0.3 % above it (the residual of 2 and 3 stalls 14 times higher). The stop rule is [`Numerics3::auto`]'s for an Euler case and [`Numerics3::viscous`]'s
+    /// for a viscous one, except that
+    /// a case with a `drag_rel_tol` (the facade's `drag_tolerance`) is stopped as the 2D engine stops it: the relative range of the monitor below that tolerance over
+    /// [`DRAG_REL_WINDOW`] iterations. On one CPU wedge history per point (RANS-table body at Mach 0.1, 0.9, 2.3, G3 at Mach 0.5, 1.5) the rule of 5e-4 over 1000 iterations
+    /// fires at 2050 / 3900 / 3400 / 2900 / 2850 iterations and the 2D rule at 1350 / 1850 / 1650 / 2050 / 1800 (the fixture's 2D runs: 1200 / 1850 / 1650), at a `C_D` that is
+    /// 0.0 % to 0.24 % apart.
     pub fn from_2d(case: &Case, level: u32) -> Numerics3 {
         let mut n = if case.viscous.is_some() { Numerics3::viscous(case.mach, level) } else { Numerics3::auto(case.mach, level) };
         n.limiter = case.numerics.limiter;
@@ -133,7 +148,10 @@ impl Numerics3 {
         n.first_order_iters = case.numerics.first_order_iters;
         n.max_iter = case.numerics.max_iter;
         if let Scheme::Implicit(p) = case.numerics.scheme {
-            n.implicit = ImplicitParams { line_solve: LineSolve3::Block, ..p };
+            n.implicit = ImplicitParams { line_solve: LineSolve3::Block, sub_iters: if case.viscous.is_some() { 1 } else { p.sub_iters }, ..p };
+        }
+        if let (Some(tol), true) = (case.numerics.drag_rel_tol, case.viscous.is_some()) {
+            (n.rel_tol, n.window, n.stationary_min_iters, n.warm_min_iters) = (tol, DRAG_REL_WINDOW, DRAG_REL_WINDOW, DRAG_REL_WINDOW);
         }
         n.line_solve = Some(LineSolve3::Block);
         n.pressure_outflow = case.numerics.outflow == Bc::PressureOutflow;
@@ -172,6 +190,9 @@ pub const SUTHERLAND_SEA_LEVEL: f64 = 110.4 / 288.15;
 
 /// Cells over the fin root chord of the Draft tier at level 0 (the others: 32).
 pub const DRAFT_CHORD_CELLS: usize = 20;
+
+/// Window \[iterations\] of the relative drag rule on a wedge ([`Case3::with_drag_tolerance`]; the number of the 2D engine's rule).
+pub const DRAG_REL_WINDOW: usize = 500;
 
 /// Target `y+` of the first cell of the Draft tier on the body and on the fin sides.
 pub const DRAFT_Y_PLUS: f64 = 40.0;
@@ -280,6 +301,15 @@ impl Case3 {
         Ok(self)
     }
 
+    /// A viscous case that stops on a relative drag tolerance `tol` over [`DRAG_REL_WINDOW`] iterations (the facade's `Analysis::drag_tolerance`); an Euler case is unchanged.
+    pub fn with_drag_tolerance(mut self, tol: f64) -> Case3 {
+        if self.viscous.is_some() {
+            (self.numerics.rel_tol, self.numerics.window, self.numerics.stationary_min_iters, self.numerics.warm_min_iters) =
+                (tol, DRAG_REL_WINDOW, DRAG_REL_WINDOW, DRAG_REL_WINDOW);
+        }
+        self
+    }
+
     /// The jet state the solver gives the `Wall::Jet` faces (`None`: power off).
     pub fn jet_state3(&self) -> Option<JetState3> {
         self.jet.map(|j| JetState3 { state: [j.state[0], j.state[1], 0.0, 0.0, j.state[3]], turb: j.turb })
@@ -356,6 +386,13 @@ impl Case3 {
         // a wall-resolved tier is a RANS run (SST, the automatic wall treatment): the equations follow the grid; `euler_equations` keeps the grid only
         self.viscous = Some(Viscous { re_c: flow.re_c, sutherland: flow.sutherland, turbulence: Turbulence::Sst, wall_i_start: 0, roughness: 0.0 });
         self.numerics = Numerics3::viscous(self.mach, level);
+        if matches!(self.grid.domain, Domain3::Wedge { .. }) {
+            // one factored solve per iteration on the wedge (the finned domains keep three): same state, 20-25 % cheaper (DESIGN3D item 35)
+            self.numerics.implicit.sub_iters = 1;
+        }
+        if matches!(self.grid.domain, Domain3::Half { .. }) {
+            self.numerics.implicit.cfl_max = self.numerics.implicit.cfl_max.min(HALF_DOMAIN_CFL_MAX);
+        }
         match (&self.grid.fins, tier) {
             (Some(f), Tier::Draft(..)) => {
                 // growth 1.35 / 1.6 in and outside the layer (1.25 / 1.35), 20 cells over the root chord (32)
@@ -471,5 +508,27 @@ impl Case3 {
         c.grid.fin_chord_cells = Some(16);
         c.numerics.max_iter = 3000;
         c
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A viscous half domain takes [`HALF_DOMAIN_CFL_MAX`]; a viscous sector and a viscous wedge keep the engine's limit (50 below Mach 1, 20 above).
+    #[test]
+    fn only_the_viscous_half_domain_takes_the_lower_cfl() {
+        let flow = WallFlow { re_c: 7.0e5, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0, sutherland: SUTHERLAND_SEA_LEVEL };
+        let cfl = |c: &Case3| c.numerics.implicit.cfl_max;
+        for (mach, base) in [(0.8, 50.0), (2.0, 20.0)] {
+            let half = Case3::base_half(mach, 2f64.to_radians(), Case3::anf_body(), Some(Case3::anf_fins()), Tier::Lift(flow), 0);
+            assert_eq!(cfl(&half), HALF_DOMAIN_CFL_MAX, "half domain at Mach {mach}");
+            let finless = Case3::base_half(mach, 0.0, Case3::anf_body(), None, Tier::Lift(flow), 0);
+            assert_eq!(cfl(&finless), HALF_DOMAIN_CFL_MAX, "finless half domain at Mach {mach}");
+            let sector = Case3::sector(mach, Case3::anf_body(), Case3::anf_fins(), Tier::Coarse(flow), 0);
+            assert_eq!(cfl(&sector), base, "sector at Mach {mach}");
+            let euler = Case3::base_half(mach, 0.0, Case3::anf_body(), Some(Case3::anf_fins()), Tier::Euler, 0);
+            assert_eq!(cfl(&euler), Numerics3::auto(mach, 0).implicit.cfl_max, "Euler half domain at Mach {mach}");
+        }
     }
 }

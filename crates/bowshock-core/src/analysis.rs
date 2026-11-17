@@ -744,6 +744,9 @@ impl Analysis {
                         case = case.with_motor(jet)?;
                     }
                 }
+                if let Some(tol) = self.drag_tolerance {
+                    case = case.with_drag_tolerance(tol);
+                }
                 if let Some(cap) = self.max_iterations {
                     case.numerics.max_iter = case.numerics.max_iter.min(cap);
                 }

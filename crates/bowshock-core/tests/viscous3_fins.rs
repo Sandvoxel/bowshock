@@ -116,7 +116,7 @@ fn build(case: &Case3) -> Solver3 {
         dt_mode: DtMode::Sum,
         cfl_max: env("CFL", if subsonic { 50.0 } else { 20.0 }),
         growth: env("GROWTH", 1.02),
-        sub_iters: 3,
+        sub_iters: env("SUB", 3),
         low_mach_precond: env("PRECOND", u8::from(subsonic)) != 0,
         line_solve: if std::env::var("LINES").as_deref() == Ok("diag") { LineSolve3::DiagonalCorrected } else { LineSolve3::Block },
         ..ImplicitParams::DEFAULT
@@ -283,7 +283,55 @@ fn run(label: &str, case: &Case3, iters: usize, every: usize) -> Solver3 {
         }
     }
     residual_map(&s);
+    if std::env::var_os("PROBE").is_some() {
+        axis_probe(&mut s);
+    }
     s
+}
+
+/// The axis cell of the largest `|d rho / dt|`: the state of its row of `k` cells across the sector, their residuals, and the update of the next step (a limit cycle of the
+/// cell shows as an update as large as the swirl it has).
+fn axis_probe(s: &mut Solver3) {
+    let g = &s.grid;
+    let Some((c0, _)) = (0..s.res.len())
+        .filter(|&c| g.part[c] == 0 && g.is_axis(c % g.ni, (c / g.ni) % g.nj))
+        .map(|c| (c, s.res[c][0].abs()))
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+    else {
+        println!("  no axis cell");
+        return;
+    };
+    let (i, j) = (c0 % g.ni, (c0 / g.ni) % g.nj);
+    println!("  axis probe at i {i} j {j}: x {:.4}", g.xc[c0][0]);
+    let (nk, ni, nj) = (g.nk, g.ni, g.nj);
+    let row = |k: usize| (k * nj + j) * ni + i;
+    for k in 0..nk {
+        let c = row(k);
+        let w = s.prim(i, j, k);
+        println!(
+            "    k {k:2}: r {:.1e} vol {:.1e} dt {:.1e}  w [{:.5} {:.5} {:.2e} {:.2e} {:.5}]  res [{:.1e} {:.1e} {:.1e} {:.1e} {:.1e}]",
+            s.grid.xc[c][1].hypot(s.grid.xc[c][2]),
+            s.grid.vol[c],
+            s.dt[c],
+            w[0],
+            w[1],
+            w[2],
+            w[3],
+            w[4],
+            s.res[c][0],
+            s.res[c][1],
+            s.res[c][2],
+            s.res[c][3],
+            s.res[c][4]
+        );
+    }
+    let before = s.u.clone();
+    s.step();
+    for k in 0..nk {
+        let c = row(k);
+        let d: Vec<String> = (0..5).map(|m| format!("{:.1e}", s.u[c][m] - before[c][m])).collect();
+        println!("    k {k:2}: du [{}]  u [{:.5} {:.5} {:.2e} {:.2e} {:.5}]", d.join(" "), s.u[c][0], s.u[c][1], s.u[c][2], s.u[c][3], s.u[c][4]);
+    }
 }
 
 /// The cells of the largest `|d rho / dt|` of the last residual evaluation: where the residual that does not fall sits.
@@ -333,4 +381,187 @@ fn fin_sector_runs() {
 fn fin_half_runs() {
     let case = half_case(env("MACH", 0.5), env("N", 4), env("LEVEL", 0));
     run("half", &case, env("ITERS", 300), env("EVERY", 25));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// the finned half domain at incidence, the release path of the lift tier
+
+/// The half domain of the G-L1 ANF case (`anf_half` of `tests/fin_lift_gates.rs`): ANF body and fins, the tier `TIER` (`lift` default here), `ALPHA` degrees, `MACH`,
+/// `PHASE` (`between` | `inplane`), grid sized for `MACH_MAX` (3.147) at the sea-level `Re_c` of the 0.03 m ANF (6.99e5), the viscous engine as `Case3::with_tier` wires it.
+fn anf_incidence_case(mach: f64, alpha_deg: f64) -> Case3 {
+    use bowshock_core::engine::grid3::{Domain3, FinPhase};
+    let flow = WallFlow {
+        re_c: env("RE_C", 1.225 * 340.294 * 0.03 / 1.7894e-5),
+        mach_max: env("MACH_MAX", 3.147),
+        ks_body: 0.0,
+        ks_fin: 0.0,
+        sutherland: bowshock_core::engine::case3::SUTHERLAND_SEA_LEVEL,
+    };
+    let tier = match std::env::var("TIER").as_deref() {
+        Ok("coarse") => Tier::Coarse(flow),
+        Ok("fine") => Tier::Fine(flow),
+        _ => Tier::Lift(flow),
+    };
+    let mut c = Case3::base_half(mach, alpha_deg.to_radians(), body(), Some(Case3::anf_fins()), tier, env("LEVEL", 0));
+    let phase = if std::env::var("PHASE").as_deref() == Ok("inplane") { FinPhase::InPlane } else { FinPhase::Between };
+    c.grid.domain = Domain3::Half { phase };
+    resolution(c)
+}
+
+/// A run as `run3::run3_on` does it (the same stop rule, the same samples) on the solver `Case3::build_solver` gives (the viscous tier, its numerics: the engine's, not
+/// the 2D ones of `build`), recording CA, CN and x_cp every `MEAN_EVERY` iterations: the verdict of the mean-stationary rule and the oscillation of every force over the
+/// last `WINDOW` iterations.
+#[test]
+#[ignore]
+fn fin_half_incidence_series() {
+    use bowshock_core::engine::run3::{lift_forces, StopRule3, MEAN_EVERY, SAMPLE_EVERY};
+    let (mach, alpha): (f64, f64) = (env("MACH", 0.8), env("ALPHA", 2.0));
+    let mut case = anf_incidence_case(mach, alpha);
+    if let Some(n) = std::env::var("MAX_ITER").ok().and_then(|v| v.parse().ok()) {
+        case.numerics.max_iter = n;
+    }
+    if let Some(c) = std::env::var("CFL_MAX").ok().and_then(|v| v.parse().ok()) {
+        case.numerics.implicit.cfl_max = c;
+    }
+    let mut s = case.build_solver().expect("solver");
+    describe("half", &s.grid);
+    println!(
+        "  tier {:?}, scheme {:?}, limiter {:?}, viscous {}, max_iter {}, stop rule window {} rel_tol {}",
+        case.tier,
+        s.cfg.scheme,
+        s.cfg.limiter,
+        s.viscous().is_some(),
+        case.numerics.max_iter,
+        case.numerics.window,
+        case.numerics.rel_tol
+    );
+    s.cfg.freestream = case.freestream();
+    s.restart_ramp();
+    let mut rule = StopRule3::new(&case, false);
+    let t0 = Instant::now();
+    let mut series: Vec<(usize, f64, f64, f64)> = Vec::new();
+    let mut it = 0;
+    let mut hist = Vec::new();
+    let diag_from: usize = env("DIAG_FROM", 100);
+    let mut prev: Vec<bowshock_cfd::gas3::Cons3> = Vec::new();
+    while it < case.numerics.max_iter {
+        if it >= diag_from {
+            prev.clone_from(&s.u);
+        }
+        let r = s.step();
+        let monitor = ((it + 1) % SAMPLE_EVERY == 0).then(|| {
+            let f = lift_forces(&case, &s);
+            if alpha.abs() < 1e-12 {
+                f.ca
+            } else {
+                f.cn
+            }
+        });
+        it += 1;
+        if rule.wants_forces(it, MEAN_EVERY) {
+            let f = lift_forces(&case, &s);
+            rule.observe(it, &f);
+            series.push((it, f.ca, f.cn, f.x_cp));
+        }
+        hist.push(r);
+        if let Some(why) = rule.check(it - 1, r, monitor) {
+            println!("  stop rule at iteration {it}: {why:?}");
+            if !prev.is_empty() && matches!(why, bowshock_core::StopReason::NonFinite) {
+                println!("  state before the last step:");
+                blowup_report(&s, &prev);
+                println!("  state after it:");
+                blowup_report(&s, &s.u);
+            }
+            break;
+        }
+        if it % env("EVERY", 250usize) == 0 {
+            let f = lift_forces(&case, &s);
+            println!(
+                "  it {it:5}  r {r:.3e}  CA {:.5}  CN {:.5}  x_cp {:.4}  {:.0} s ({:.0} ms/it)",
+                f.ca,
+                f.cn,
+                f.x_cp,
+                t0.elapsed().as_secs_f64(),
+                1e3 * t0.elapsed().as_secs_f64() / it as f64
+            );
+        }
+        if !r.is_finite() {
+            println!("  non-finite residual at iteration {it}");
+            break;
+        }
+    }
+    let result = rule.finish(&case, lift_forces(&case, &s), it);
+    println!(
+        "  result: {:?} after {} iterations: CN {:.5} CA {:.5} x_cp {:.4} y+ max (n/a) window {:?}",
+        result.stop_reason, result.iterations, result.cn, result.ca, result.x_cp, result.window
+    );
+    // the oscillation of each force over the last windows of 500 / 1000 / 2000 iterations: mean and half range / |mean|
+    for w in [500usize, 1000, 2000] {
+        let tail: Vec<_> = series.iter().filter(|(i, ..)| *i + w > it).collect();
+        if tail.len() < 10 {
+            continue;
+        }
+        let stat = |f: &dyn Fn(&(usize, f64, f64, f64)) -> f64| {
+            let v: Vec<f64> = tail.iter().map(|t| f(t)).collect();
+            let mean = v.iter().sum::<f64>() / v.len() as f64;
+            let (lo, hi) = v.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), &x| (l.min(x), h.max(x)));
+            (mean, 0.5 * (hi - lo), 0.5 * (hi - lo) / mean.abs().max(1e-300))
+        };
+        let (ca, cn, xc) = (stat(&|t| t.1), stat(&|t| t.2), stat(&|t| t.3));
+        println!(
+            "  last {w} its: CA {:.5} +- {:.5} ({:.2} %)  CN {:.5} +- {:.5} ({:.2} %)  x_cp {:.4} +- {:.4} ({:.2} %)",
+            ca.0,
+            ca.1,
+            100.0 * ca.2,
+            cn.0,
+            cn.1,
+            100.0 * cn.2,
+            xc.0,
+            xc.1,
+            100.0 * xc.2
+        );
+    }
+}
+
+/// Where a state is about to blow up: the cells of lowest pressure, lowest density and highest speed (and any non-finite one), with their place in the grid.
+fn blowup_report(s: &Solver3, u: &[bowshock_cfd::gas3::Cons3]) {
+    let g = &s.grid;
+    let rows: Vec<(usize, [f64; 5])> = (0..u.len()).filter(|&c| g.part[c] == 0).map(|c| (c, cons_to_prim3(&u[c]))).collect();
+    let bad = rows.iter().filter(|(_, w)| !w.iter().all(|x| x.is_finite())).count();
+    println!("    non-finite fluid cells: {bad} of {}", rows.len());
+    let place = |c: usize| {
+        let (i, j, k) = (c % g.ni, (c / g.ni) % g.nj, c / (g.ni * g.nj));
+        let x = g.xc[c];
+        // the fin / body part touching the cell (a solid neighbour)
+        let mut near = String::new();
+        for (di, dj, dk) in [(-1i64, 0i64, 0i64), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)] {
+            let (a, b, d) = (i as i64 + di, j as i64 + dj, k as i64 + dk);
+            if a >= 0 && b >= 0 && d >= 0 && (a as usize) < g.ni && (b as usize) < g.nj && (d as usize) < g.nk {
+                if let Some(p) = g.part_of(a as usize, b as usize, d as usize) {
+                    near.push_str(&format!("{p:?} "));
+                }
+            }
+        }
+        format!(
+            "({i}, {j}, {k}) x {:.3} r {:.4} theta {:.3} vol {:.2e} axis {} next to [{near}]",
+            x[0],
+            x[1].hypot(x[2]),
+            x[1].atan2(x[2]),
+            g.vol[c],
+            g.is_axis(i, j)
+        )
+    };
+    let mut by_p: Vec<&(usize, [f64; 5])> = rows.iter().filter(|(_, w)| w[4].is_finite()).collect();
+    by_p.sort_by(|a, b| a.1[4].total_cmp(&b.1[4]));
+    for (c, w) in by_p.iter().take(4) {
+        println!("    low p {:.3e} rho {:.3e} |u| {:.2} at {}", w[4], w[0], (w[1] * w[1] + w[2] * w[2] + w[3] * w[3]).sqrt(), place(*c));
+    }
+    let mut by_v: Vec<&(usize, [f64; 5])> = rows.iter().filter(|(_, w)| w.iter().all(|x| x.is_finite())).collect();
+    by_v.sort_by(|a, b| (b.1[1] * b.1[1] + b.1[2] * b.1[2] + b.1[3] * b.1[3]).total_cmp(&(a.1[1] * a.1[1] + a.1[2] * a.1[2] + a.1[3] * a.1[3])));
+    for (c, w) in by_v.iter().take(3) {
+        println!("    fast |u| {:.2} rho {:.3e} p {:.3e} at {}", (w[1] * w[1] + w[2] * w[2] + w[3] * w[3]).sqrt(), w[0], w[4], place(*c));
+    }
+    if let Some((c, _)) = rows.iter().find(|(_, w)| !w.iter().all(|x| x.is_finite())) {
+        println!("    first non-finite cell at {}", place(*c));
+    }
 }
