@@ -14,7 +14,7 @@
 //! fin_tips base base_friction_nose+aft fin_friction` (the parts with pressure and shear as `LiftBreakdown`, base and the friction of `DragParts`).
 
 use bowshock_cfd::gpu::Precision;
-use bowshock_cfd::implicit::{ImplicitParams, LineSolve3};
+use bowshock_cfd::implicit_params::{ImplicitParams, LineSolve3};
 use bowshock_cfd::solver3::{Config3, Scheme3};
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
 use bowshock_core::engine::case3::{Case3, Tier, WallFlow, SUTHERLAND_SEA_LEVEL};
