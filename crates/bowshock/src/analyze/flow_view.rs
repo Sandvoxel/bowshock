@@ -500,7 +500,7 @@ impl State {
         }
         let scalars = segmented(&Scalar::ALL.map(|s| (s, s.name())), self.scalar, Msg::Scalar);
         let grid = toggle("Grid", self.grid, Msg::Grid, "Draw the cell edges", false);
-        let fit: Element<'a, Msg> = push("Fit", Weight::Secondary).small().on_press(Msg::Fit).into();
+        let fit: Element<'a, Msg> = push("Fit", Weight::Secondary).on_press(Msg::Fit).into();
         let fitted = self.fit.is_some_and(|(s, _)| s == self.scalar);
         let range = toggle(
             "Fit range",

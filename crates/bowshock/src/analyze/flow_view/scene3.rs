@@ -629,6 +629,29 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn the_rows_next_to_the_axis_take_the_gradient_of_the_row_beyond_them_and_the_wall_rows_keep_their_own() {
+        let f = anf();
+        // ahead of the nose (the sting grid's axis cells are the first 10 columns): no grey line along the axis
+        for k in [0, 3, 7] {
+            for i in [2, 5, 8] {
+                let beyond = f.density_gradient_at(i, 2, k);
+                assert!(beyond.is_finite());
+                assert_eq!((f.density_gradient_at(i, 0, k), f.density_gradient_at(i, 1, k)), (beyond, beyond), "column {i} layer {k}");
+            }
+        }
+        // on the body the first row is the wall's: the boundary layer's own gradient, not the row beyond
+        assert!(f.density_gradient_at(20, 0, 0) != f.density_gradient_at(20, 2, 0));
+        // a solid cell has none
+        let solid = (0..f.cells()).find(|&c| f.solid[c]).unwrap();
+        let (i, j, k) = (solid % f.ni, solid / f.ni % f.nj, solid / (f.ni * f.nj));
+        assert!(f.density_gradient_at(i, j, k).is_nan());
+        // so the line is as dark as the free stream beside it
+        let ahead = (0..8).map(|i| f.density_gradient_at(i, 0, 0)).fold(0.0f32, f32::max);
+        let beside = (0..8).map(|i| f.density_gradient_at(i, 2, 0)).fold(0.0f32, f32::max);
+        assert_eq!(ahead, beside);
+    }
+
+    #[test]
     fn the_ranges_follow_the_flow() {
         let p = Prepared3::new(anf());
         let (m, cp, s) = (p.ranges[Scalar3::Mach.index()], p.ranges[Scalar3::Cp.index()], p.ranges[Scalar3::Schlieren.index()]);

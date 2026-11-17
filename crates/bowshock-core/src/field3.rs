@@ -276,11 +276,42 @@ impl Field3 {
         (0..self.cells()).map(|c| if self.solid[c] { f32::NAN } else { self.pressure_coefficient(c) }).collect()
     }
 
+    /// Whether the cell `(i, j, k)` lies on the axis: its low-`j` face is a point or a line on it (the nodes of that face have no radius).
+    fn on_axis(&self, i: usize, j: usize, k: usize) -> bool {
+        let r = |a: usize, b: usize, c: usize| {
+            let n = self.node(a, b, c);
+            n[1].hypot(n[2])
+        };
+        let dx = (self.node(i + 1, j, k)[0] - self.node(i, j, k)[0]).abs().max(f32::MIN_POSITIVE);
+        [(i, k), (i + 1, k), (i, k + 1), (i + 1, k + 1)].into_iter().all(|(a, c)| r(a, j, c) <= 1e-5 * dx)
+    }
+
     /// Magnitude of the gradient of the density (over the free-stream density) at cell `(i, j, k)`, per metre: what a schlieren picture
     /// shows. From differences of the cell-centre values along the grid directions through the cell-centre metric: central where both
     /// neighbours are flow cells, one-sided at the boundaries and beside solid cells. A direction without any neighbour (a one-cell wedge
     /// in `k`) is left out and the gradient is the one in the plane of the others. NaN in a solid cell.
+    ///
+    /// The two rows of cells next to the axis take the gradient of the row beyond them: there the azimuthal differences run over a distance of
+    /// a few per cent of a cell and amplify the round-off of the density by the inverse of it, which draws a grey line along the axis ahead
+    /// of the nose in a schlieren picture. A one-cell wedge has no azimuthal difference and is left as it is.
     pub fn density_gradient_at(&self, i: usize, j: usize, k: usize) -> f32 {
+        if self.nk > 1 {
+            let beyond = if self.on_axis(i, j, k) {
+                Some(j + 2)
+            } else if j >= 1 && self.on_axis(i, j - 1, k) {
+                Some(j + 1)
+            } else {
+                None
+            };
+            if let Some(row) = beyond.filter(|&row| row < self.nj && self.is_fluid(self.cell_index(i, row, k))) {
+                return self.density_gradient_raw(i, row, k);
+            }
+        }
+        self.density_gradient_raw(i, j, k)
+    }
+
+    /// [`Field3::density_gradient_at`] without the treatment of the axis.
+    fn density_gradient_raw(&self, i: usize, j: usize, k: usize) -> f32 {
         let c = self.cell_index(i, j, k);
         if self.solid[c] {
             return f32::NAN;
