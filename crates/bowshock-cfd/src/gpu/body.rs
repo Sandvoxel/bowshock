@@ -6,11 +6,8 @@
 // Every function mirrors the CPU routine of the same name in the CPU modules of this crate expression by expression; the array code is
 // the equation, the doc comment states it.
 
-use crate::limiter::LOW_MACH_FLOOR;
 use crate::grid::Grid;
 use crate::solver::{Bc, Block, Config, Nozzle};
-use crate::gpu::Staging;
-use luma::{concat, Context, Fields, PadMode, Result};
 
 /// Four fields: primitive `[rho, u, v, p]`, conservative `[rho, rho u, rho v, E]` or a flux. A record of arrays
 /// (`luma::Fields`): `slice`, `pad`, `assign` and `cache` apply to the four fields at once.

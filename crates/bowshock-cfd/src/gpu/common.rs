@@ -1,9 +1,10 @@
 // What the 2D and 3D array-op solvers share: `include!`d by `gpu/mod.rs` before `body.rs` and `body3.rs`, once per precision, into a module that defines `S`,
-// `c(f64) -> S`, `up(..)` and `to_f64(..)`: the array type `A`, `G1`, the limiter and the shock weight on arrays, the residual history and the missing-state error.
+// `c(f64) -> S`, `up(..)` and `to_f64(..)` (and the imports every array-op file of the module uses): the array type `A`, `G1`, the limiter and the shock weight on arrays, the residual history and the missing-state error.
 
 use crate::gas3::GAMMA;
-use crate::limiter::{Limiter, SHOCK_SENSOR_HI, SHOCK_SENSOR_LO};
-use luma::{select, Array};
+use crate::gpu::Staging;
+use crate::limiter::{Limiter, LOW_MACH_FLOOR, SHOCK_SENSOR_HI, SHOCK_SENSOR_LO};
+use luma::{concat, select, Array, Context, Fields, PadMode, Result};
 
 /// Array of one field (`rho`, `u`, ...) over a block of cells or faces.
 pub type A = Array<S>;
