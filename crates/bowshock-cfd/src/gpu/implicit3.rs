@@ -718,6 +718,11 @@ impl LazySolver3 {
             (DtMode::MinDirection, [a, b]) => cfl * &g.vol / (2.0f32 * a.minimum(b)),
             _ => unreachable!("two or three directions"),
         };
+        // the axis cells of a wedge: at most `WEDGE_AXIS_DT r_c / c` (`Solver3::compute_dt`)
+        let dt = match &self.axis_dt {
+            Some(a) => select(&a.mask, dt.minimum(&a.cap_f / &cs), &dt),
+            None => dt,
+        };
         match &g.solid {
             Some(solid) => select(solid, 0.0f32, &dt),
             None => dt,
@@ -1158,6 +1163,8 @@ impl LazySolver3 {
         let un: Rec3 = rec3(|k| select(&moved, &u[k] + &alpha * from_lhs(&du[k]), &u[k]));
         let cfl_next = (&s[6] * c(p.growth)).minimum(c(p.cfl_max));
         let turb = self.turb_step3(s, &from_lhs(&dt), &rs);
-        pack3(un, rn, cfl_next, turb)
+        // the forces of the state this step started from, from the pressure and the viscous face fluxes evaluated above (the force monitor of the loop)
+        let mon = self.force_monitor3(&rs.p[4], rs.vis.as_ref().map(|v| &v.fv)).unwrap_or_else(|| &s[10] * c(1.0));
+        pack3(un, rn, cfl_next, turb, mon)
     }
 }

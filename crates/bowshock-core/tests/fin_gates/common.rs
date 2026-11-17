@@ -100,10 +100,11 @@ impl Session {
     pub fn new(case: &Case3) -> Result<Session, String> {
         #[cfg(feature = "gpu")]
         if gpu_backend() {
-            let prec = if std::env::var("BOWSHOCK_WEDGE_PRECISION").as_deref() == Ok("f32") {
-                bowshock_cfd::gpu::Precision::F32
-            } else {
+            // single precision, the product's (`analysis.rs`): the sector grids are 0.68 M cells, and df32 needs 1.35 x the memory; `BOWSHOCK_WEDGE_PRECISION=ext` for df32
+            let prec = if std::env::var("BOWSHOCK_WEDGE_PRECISION").as_deref() == Ok("ext") {
                 bowshock_cfd::gpu::Precision::Extended
+            } else {
+                bowshock_cfd::gpu::Precision::F32
             };
             let r = bowshock_core::engine::gpu3::GpuRunner3::new(case, prec).map_err(|e| e.to_string())?;
             return Ok(Session::Gpu(Box::new(r)));
