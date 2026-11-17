@@ -6,9 +6,11 @@
 //! nose tip downstream (the base face is traversed from its outer to its inner radius, so `CD_base = -Cp_b A_b / A_ref`).
 
 use crate::engine::body_grid::BaseBody;
-use crate::engine::case::{Case, Wake};
+use crate::engine::case::Case;
+use crate::engine::meshing::Wake;
 use crate::engine::numerics::{DRAG_REL_WINDOW, MONITOR_EVERY};
 use crate::engine::result::{BasePoint, PointResult, StopReason, WallPoint};
+use crate::engine::run3::MONITOR_LIMIT;
 use crate::progress::{drop_orders, spread, Progress};
 use bowshock_cfd::gas::{cons_to_prim, freestream, prim_to_cons, sound_speed};
 use bowshock_cfd::solver::Solver;
@@ -92,10 +94,6 @@ pub fn run_on(case: &Case, s: &mut Solver, warm: bool, r_ref: Option<f64>) -> Po
     }
     finish(case, s, residual, rmax, hist, reason)
 }
-
-/// Largest magnitude of the convergence monitor (a drag or pressure coefficient) of a meaningful solution; a sample beyond it, or a
-/// non-finite one, means the state has blown up (the residual of such a state can still be finite).
-pub const MONITOR_LIMIT: f64 = 1e3;
 
 /// Stopping rule after iteration `it` with density residual `r`, in this order: non-finite residual, or a monitor sample taken at
 /// this iteration (the last of `hist`) that is non-finite or larger than [`MONITOR_LIMIT`] in magnitude (always); then, from
@@ -243,7 +241,7 @@ pub fn friction(case: &Case, s: &Solver) -> (f64, f64) {
             let d_n = ((g.xc[c] - xm) * f.nx + (g.rc[c] - f.rm) * f.nr).abs();
             let mu = v.mu(temperature(&w));
             // rough wall: the discrete wall shear is (mu + mu_t,w) u_t / d_n with the Aupoix wall eddy viscosity of the cell state (0 for a smooth wall)
-            let mu_tw = if v.rough() { w[0] * bowshock_cfd::turbulence::aupoix_wall(mu / w[0], w[1].hypot(w[2]), d_n, v.roughness)[2] } else { 0.0 };
+            let mu_tw = if v.rough() { w[0] * bowshock_cfd::sst::aupoix_wall(mu / w[0], w[1].hypot(w[2]), d_n, v.roughness)[2] } else { 0.0 };
             let tau = (mu + mu_tw) * u_t / d_n;
             cd += 2.0 * tau * tx * f.rm * f.len / (q_inf * r2);
             y_plus_max = y_plus_max.max(d_n * (w[0] * tau.abs()).sqrt() / mu);
@@ -430,7 +428,7 @@ mod tests {
     use super::*;
     use crate::engine::body_grid::{Body, Nose};
     use crate::engine::numerics::Numerics;
-    use bowshock_cfd::solver::{Turbulence, Viscous};
+    use bowshock_cfd::sst::{Turbulence, Viscous};
 
     fn case(tol: Option<f64>, wake: Wake) -> Case {
         let mut n = Numerics::transonic();

@@ -6,11 +6,11 @@
 //! execute up to `SYNC - 1` further iterations and the final forces are those of the state after them.
 
 use crate::engine::case3::Case3;
-use crate::engine::gpu::{record_timing, PointTiming};
 use crate::engine::run3::{
-    breakdown_from, drag_parts_from, forces_from, wall_class, wall_faces, zero_incidence, DragParts, LiftBreakdown, LiftForces, PointResult3, StopRule3, Wall,
-    WallForces, SAMPLE_EVERY,
+    breakdown_from, coefficients, drag_parts_from, forces_from, wall_class, wall_faces, zero_incidence, DragParts, LiftBreakdown, LiftForces, PointResult3,
+    StopRule3, Wall, WallForces, MEAN_EVERY, SAMPLE_EVERY,
 };
+use crate::engine::timing::{record_timing, PointTiming};
 use crate::error::Error;
 use bowshock_cfd::gpu::{GpuSolver3, Precision, TractionFace3, WallFace3};
 use bowshock_cfd::grid3::Face3;
@@ -27,7 +27,7 @@ pub struct GpuRunner3 {
     /// The wall classes of the device force integration, in the order of `GpuSolver3::set_wall_faces`.
     classes: Vec<Wall>,
     /// The viscous parameters of a RANS run (`None`: Euler).
-    visc: Option<bowshock_cfd::solver::Viscous>,
+    visc: Option<bowshock_cfd::sst::Viscous>,
     /// Kernel build + geometry upload, seconds.
     pub setup_seconds: f64,
     /// Parts of the set-up: host grid + solver, default context, `from_host`, seconds.
@@ -134,16 +134,23 @@ impl GpuRunner3 {
             }
         }
         self.gpu.set_wall_faces(&faces, classes.len())?;
-        if self.host.rans().is_some() {
-            // the shear sums `[all faces (classes 0..n), faces up to the base station (n..2n)]` like the pressure: the faces of the second set are listed again
-            let n = classes.len();
-            let tfaces: Vec<TractionFace3> = pending
+        // the shear sums `[all faces (classes 0..n), faces up to the base station (n..2n)]` like the pressure: the faces of the second set are listed again
+        let n = classes.len();
+        let tfaces: Vec<TractionFace3> = if self.host.rans().is_some() {
+            pending
                 .iter()
                 .map(|(_, f, _)| *f)
                 .chain(pending.iter().filter(|(_, _, cut)| *cut).map(|(ci, f, _)| TractionFace3 { class: n + ci, ..*f }))
-                .collect();
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if self.host.rans().is_some() {
             self.gpu.set_traction_faces(&tfaces, 2 * n)?;
         }
+        // the force monitor of the loop: the sums of `lift_forces` (the cut faces, the sting and the jet not counted), reduced in every step
+        let keep: Vec<bool> = classes.iter().map(|c| !matches!(c, Wall::Sting | Wall::Jet)).collect();
+        self.gpu.set_force_monitor(&faces, &tfaces, &keep)?;
         self.classes = classes;
         Ok(())
     }
@@ -229,17 +236,23 @@ impl GpuRunner3 {
             limiter: n.limiter,
             first_order_iters: n.first_order_iters,
             low_mach: n.low_mach,
-            // the diagonal line solve of a viscous run is not ported to the GPU (and diverges on a wedge): the block factorisation
+            // the line solve: `Block` unless the case asks for the diagonal one (`numerics.line_solve = Some(DiagonalCorrected)`, Euler only: it is not ported to the viscous
+            // step). The diagonal default of `Numerics3::implicit_for(true)` diverges where the block solve does not (the finned half domain at M 3 / 6 degrees: pmin 0.018 at
+            // the base plane by iteration 30-100, non-finite at 110 at `cfl_max` 10 and 150 at 5, stable at 3; the wedge: ISSUES #24), so the runner never takes it by default
             scheme: Scheme3::Implicit({
                 let mut p = n.implicit_for(true);
-                if self.host.rans().is_some() {
-                    p.line_solve = bowshock_cfd::implicit::LineSolve3::Block;
+                if n.line_solve.is_none() || self.host.rans().is_some() {
+                    p.line_solve = bowshock_cfd::implicit_params::LineSolve3::Block;
                 }
                 p
             }),
         };
         self.gpu.set_config(&cfg)?;
         self.host.cfg = cfg;
+        // the motor jet of this case (its state follows the Mach number): the jet cells of a warm state take it, a cold reset starts from it
+        if let Some(jet) = case.jet_state3() {
+            self.gpu.set_jet(jet)?;
+        }
         if warm {
             let it = self.gpu.iter().max(n.first_order_iters);
             self.gpu.set_iter(it);
@@ -254,9 +267,13 @@ impl GpuRunner3 {
         let mut done = 0usize;
         let mut stop: Option<usize> = None;
         while done < n.max_iter && stop.is_none() {
+            // chunks of `SYNC` iterations (the sampling interval of the range rule); the forces of the rules come from the loop itself: the force monitor of the step records
+            // `[Fx, Fz, Mz]` of the state each iteration started from (so the sample of an iteration count is one iteration old), the mean rule reads every `MEAN_EVERY`-th
+            // of them, and the one exact `lift_forces` is the result's
             let len = SYNC.min(n.max_iter - done);
+            let end = done + len;
             let t_chunk = Instant::now();
-            let h = self.gpu.run(len)?;
+            let (h, mon) = self.gpu.run_monitored(len)?;
             let dt_chunk = t_chunk.elapsed().as_secs_f64();
             if done == 0 {
                 tm.first_chunk_s = dt_chunk;
@@ -264,28 +281,26 @@ impl GpuRunner3 {
                 tm.chunks_rest += 1;
                 tm.rest_chunks_s += dt_chunk;
             }
-            let cn = if len == SYNC {
-                let t = Instant::now();
-                let f = self.lift_forces(case)?;
-                tm.forces_s += t.elapsed().as_secs_f64();
-                Some(if zero_incidence(&self.host.grid) || case.alpha.abs() < 1e-12 { f.ca } else { f.cn })
-            } else {
-                None
-            };
+            let coeffs = |k: usize| coefficients(case, &self.host.grid, mon[k]);
+            let by_incidence = |f: &LiftForces| if zero_incidence(&self.host.grid) || case.alpha.abs() < 1e-12 { f.ca } else { f.cn };
             for (k, r) in h.into_iter().enumerate() {
                 let it = done + k;
-                let sample = if it % SYNC == SYNC - 1 { cn } else { None };
+                if rule.wants_forces(it + 1, MEAN_EVERY) {
+                    rule.observe(it + 1, &coeffs(k));
+                }
+                let sample = (it % SYNC == SYNC - 1).then(|| by_incidence(&coeffs(k)));
                 if rule.check(it, r, sample).is_some() {
                     stop = Some(it + 1);
                     break;
                 }
             }
-            done += len;
+            done = end;
             // the state leaves the device only at a chunk where a snapshot is due
-            if let Some(t) = case.snapshots.as_ref().filter(|t| stop.is_none() && len == SYNC && t.due(done)) {
+            let on_grid = done.is_multiple_of(SYNC);
+            if let Some(t) = case.snapshots.as_ref().filter(|t| stop.is_none() && on_grid && t.due(done)) {
                 t.send(case, &self.host.grid, &self.gpu.state_f64()?, done);
             }
-            if stop.is_none() && len == SYNC && rule.report(case, done).is_break() {
+            if stop.is_none() && on_grid && rule.report(case, done).is_break() {
                 rule.cancel();
                 stop = Some(done);
             }

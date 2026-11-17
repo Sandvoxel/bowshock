@@ -54,7 +54,7 @@ fn implicit_scheme_state_matches_cpu() {
 /// replay, `eval_all` loop) against each other: the line solves are traced and replayed like any other kernel.
 #[test]
 fn implicit_options_and_loop_forms() {
-    use bowshock_cfd::implicit::{DtMode, ImplicitParams};
+    use bowshock_cfd::implicit_params::{DtMode, ImplicitParams};
     use bowshock_cfd::solver::Scheme;
     let base = match subsonic_case(0.5, Nose::TangentOgive { fineness: 3.0 }, 0, false).numerics.scheme {
         Scheme::Implicit(p) => p,

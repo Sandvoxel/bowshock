@@ -10,9 +10,9 @@ use bowshock_model::CfdGrid;
 use super::*;
 use crate::units::UnitSystem;
 
-/// Prints the per-point timing table of the runs in `tm` (see `bowshock_core::engine::gpu::PointTiming`) and the `PERF` line of
+/// Prints the per-point timing table of the runs in `tm` (see `bowshock_core::engine::timing::PointTiming`) and the `PERF` line of
 /// the end-to-end case `case` (`wall` seconds in total). Instrumentation only.
-fn timing_report(case: &str, tm: &[solver::engine::gpu::PointTiming], wall: f64) {
+fn timing_report(case: &str, tm: &[solver::engine::timing::PointTiming], wall: f64) {
     let perf = !case.starts_with("diag-");
     println!("dim mach alpha warm cells | build ctx upload reset | first_chunk rest(n,s) | dl(n,s) forces final | run | iters(stop/exec) stop");
     for t in tm {
@@ -40,7 +40,7 @@ fn timing_report(case: &str, tm: &[solver::engine::gpu::PointTiming], wall: f64)
             t.stop
         );
     }
-    let sum = |f: fn(&solver::engine::gpu::PointTiming) -> f64| tm.iter().map(f).sum::<f64>();
+    let sum = |f: fn(&solver::engine::timing::PointTiming) -> f64| tm.iter().map(f).sum::<f64>();
     let iters: usize = tm.iter().map(|t| t.iters_exec).sum();
     println!(
         "TOTAL wall {wall:.2} s over {} runs ({} cold): build {:.2} ctx {:.2} upload {:.2} reset {:.2} first_chunks {:.2} rest_chunks {:.2} downloads {:.2} forces {:.2} final {:.2} run_sum {:.2}; {iters} iterations",
@@ -85,12 +85,12 @@ fn perf_2d_table_example() {
         cpu_only: false,
         stability: Vec::new(),
     };
-    let _ = solver::engine::gpu::take_timings();
+    let _ = solver::engine::timing::take_timings();
     let t0 = Instant::now();
     let table = solve(&job, &Arc::new(AtomicBool::new(false)), |_| ()).expect("the example solves");
     let wall = t0.elapsed().as_secs_f64();
     println!("{} points on {} in {:.1} s; notes {:?}", table.points.len(), table.backend, table.solve_seconds, table.notes);
-    timing_report("2d-table-example", &solver::engine::gpu::take_timings(), wall);
+    timing_report("2d-table-example", &solver::engine::timing::take_timings(), wall);
 }
 
 /// End to end: the example rocket's 3D stability solve as the stability nodes of `solve` run it (the lift nodes of the example's Mach range
@@ -111,7 +111,7 @@ fn perf_3d_lift_example() {
         cpu_only: false,
         stability: lift_nodes((0.1, 3.0)).unwrap(),
     };
-    let _ = solver::engine::gpu::take_timings();
+    let _ = solver::engine::timing::take_timings();
     let t0 = Instant::now();
     let table = solve(&job, &Arc::new(AtomicBool::new(false)), |_| ()).expect("the example solves in 3D").lift.expect("with its 3D part");
     let wall = t0.elapsed().as_secs_f64();
@@ -119,7 +119,7 @@ fn perf_3d_lift_example() {
     for p in &table.points {
         println!("M {:.2} alpha {:.0} CN {:.4} x_cp {:.4} {:?}", p.mach, p.alpha_deg, p.cn, p.x_cp, p.quality);
     }
-    timing_report("3d-lift-example", &solver::engine::gpu::take_timings(), wall);
+    timing_report("3d-lift-example", &solver::engine::timing::take_timings(), wall);
 }
 
 /// A/B of the grid shape of the app's table solve: `BOWSHOCK_GRID=own` (a grid sized for each point's Mach number, the old way)
@@ -147,7 +147,7 @@ fn perf_2d_table_grid_ab() {
     };
     let iters = Arc::new(Mutex::new(Vec::new()));
     let sink = iters.clone();
-    let _ = solver::engine::gpu::take_timings();
+    let _ = solver::engine::timing::take_timings();
     let t0 = Instant::now();
     let table = solve_sized(
         &job,
@@ -176,7 +176,7 @@ fn perf_2d_table_grid_ab() {
             p.quality
         );
     }
-    timing_report(if shared { "2d-table-grid-shared" } else { "2d-table-grid-own" }, &solver::engine::gpu::take_timings(), wall);
+    timing_report(if shared { "2d-table-grid-shared" } else { "2d-table-grid-own" }, &solver::engine::timing::take_timings(), wall);
 }
 
 /// Diagnostic: how the Cd of the app's points at M 0.1 and 1.0 depends on the grid shape (own / shared) and on the stop rule:
@@ -263,14 +263,14 @@ fn perf_2d_table_one_sweep() {
     if let Some(fins) = &plan.fins {
         analysis = analysis.fins(fins.clone());
     }
-    let _ = solver::engine::gpu::take_timings();
+    let _ = solver::engine::timing::take_timings();
     let t0 = Instant::now();
     let polar = analysis.run(&machs).expect("the sweep solves");
     let wall = t0.elapsed().as_secs_f64();
     for p in &polar.points {
         println!("M {:.2} Cd {:.4} {:?} {} iterations", p.mach, p.drag.total, p.quality, p.detail.iterations);
     }
-    timing_report("diag-2d-one-sweep", &solver::engine::gpu::take_timings(), wall);
+    timing_report("diag-2d-one-sweep", &solver::engine::timing::take_timings(), wall);
 }
 
 /// The example document without its fins (the 3D engine's finless wedge table), written to `BOWSHOCK_FINLESS_FIXTURE=<path>` for a drive script
@@ -359,12 +359,12 @@ fn engine3d_finned_timing() {
         cpu_only: false,
         stability: lift_nodes((0.1, 3.0)).unwrap(),
     };
-    let _ = solver::engine::gpu::take_timings();
+    let _ = solver::engine::timing::take_timings();
     let _ = solver::take_facade_timings();
     let t0 = Instant::now();
     let table = solve_sized(&job, &Arc::new(AtomicBool::new(false)), |_| (), shared).expect("the example solves");
     let wall = t0.elapsed().as_secs_f64();
-    let runs = solver::engine::gpu::take_timings();
+    let runs = solver::engine::timing::take_timings();
     let facade = solver::take_facade_timings();
     println!(
         "{} points + {} angle points on {}; {:.1} s wall (app solve {:.1} s); notes {:?}",

@@ -18,8 +18,8 @@
 //! The converged state of a cycle is the converged state of the fine-grid (second-order) discretisation: the coarse
 //! correction vanishes with the fine-grid defect.
 
-use crate::flux::Limiter;
 use crate::gas::{cons_to_prim, Cons};
+use crate::limiter::Limiter;
 use crate::solver::{Config, MgParams, Scheme, Solver};
 use rayon::prelude::*;
 
@@ -219,9 +219,9 @@ fn prolong_correct(coarse: &Solver, fine: &mut Solver) {
 
 #[cfg(test)]
 mod tests {
-    use crate::flux::Limiter;
     use crate::gas::{freestream, prim_to_cons};
     use crate::grid::Grid;
+    use crate::limiter::Limiter;
     use crate::solver::{Bc, Config, MgParams, Scheme, Solver};
 
     fn grid(ni: usize, nj: usize) -> Grid {

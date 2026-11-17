@@ -171,6 +171,51 @@ impl Grid3Params {
     }
 }
 
+impl Grid3Params {
+    /// The grid one sequencing level down (DESIGN3D S9): every axial and radial cell count halved (semi-coarsening in `i` and `j`; the azimuth, with its fin stack, is
+    /// kept), so that the cells of this grid are the 2 x 2 children (in `i`, `j`) of the cells of the result: the section ends (nose, base plane, segment ends, body
+    /// surface, base radius) and the fin leading / trailing edges and tip row fall on even indices. `Err` names a count that is odd (a diameter step is one cell and
+    /// cannot be halved; a nozzle's rows are not halved).
+    pub fn coarsened(&self) -> Result<Grid3Params, String> {
+        let half = |what: &str, n: usize| -> Result<usize, String> {
+            if n >= 2 && n.is_multiple_of(2) {
+                Ok(n / 2)
+            } else {
+                Err(format!("{what} = {n} cannot be halved"))
+            }
+        };
+        let mut c = self.clone();
+        let segs = |what: &str, n_seg: &[usize]| -> Result<Vec<usize>, String> { n_seg.iter().map(|&n| half(what, n)).collect() };
+        c.sting.n_up = half("sting n_up", self.sting.n_up)?;
+        c.sting.n_nose = half("sting n_nose", self.sting.n_nose)?;
+        c.sting.n_seg = segs("sting n_seg", &self.sting.n_seg)?;
+        c.sting.n_ext = half("sting n_ext", self.sting.n_ext)?;
+        c.sting.nj = half("sting nj", self.sting.nj)?;
+        if let Some(b) = &self.base {
+            if b.nozzle.is_some() {
+                return Err("a motor's nozzle rows are not halved".to_string());
+            }
+            let cb = c.base.as_mut().expect("base");
+            cb.n_up = half("base n_up", b.n_up)?;
+            cb.n_nose = half("base n_nose", b.n_nose)?;
+            cb.n_seg = segs("base n_seg", &b.n_seg)?;
+            cb.n_wake = half("base n_wake", b.n_wake)?;
+            cb.n_gap = half("base n_gap", b.n_gap)?;
+            cb.nj_out = half("base nj_out", b.nj_out)?;
+            if b.n_sting > 0 {
+                cb.n_sting = half("base n_sting", b.n_sting)?;
+            }
+        }
+        if self.fins.is_some() {
+            c.fin_chord_cells = Some(half("cells over the fin root chord", self.fin_chord_cells.unwrap_or(32usize << self.level))?);
+            if let Some(n) = self.span_cells {
+                c.span_cells = Some(half("span_cells", n)?);
+            }
+        }
+        Ok(c)
+    }
+}
+
 /// Half thickness of the fin section at the chordwise fraction `xi` (chord length `chord`, maximum thickness `t`). At an end that is really sharp (the section's
 /// thickness there is below 5 % of `t/2`: a wedge, an airfoil, the circle of a rounded edge) it is floored at 2 % of `t/2`, a needle the nodes follow (a zero-area
 /// edge face, the polygon of the clustered nodes for a round edge); at a blunt end (a square section, a blunt trailing edge) 25 % of `t/2` as before.
@@ -506,6 +551,14 @@ fn fill_theta(theta: &mut [f64], lay: &Layers, alpha: f64, big: f64) {
     theta[nk] = big;
 }
 
+/// Columns over which the layer behind a flush fin trailing edge tapers from the fin's thickness (at the base plane) to the nominal cell width. The layer cell behind the trailing
+/// edge is as wide as the fin (0.074 d across on the ANF Lift-tier grid) and its two neighbours are the thin first cells of the fin stack (7e-4 d): over 4 columns (the value of the
+/// other fin edges) its side faces tilt by up to 23 degrees against the axis (the cosine between a face normal and the line to the lower neighbour is 0.918 in `k`, 0.934 in `i`)
+/// and its volume falls by up to a factor 10 per column. The viscous Lift-tier half domain with fins is then non-finite in iteration 150 to 190 at `cfl_max` 20 (Mach 2) and
+/// 50 (Mach 0.8); the first cells to go lie right behind the trailing edge at the body radius (`DESIGN3D.md`, "The viscous half domain at incidence"). Over 8 columns the cosines
+/// are 0.968 and 0.986 and the Mach 2 runs hold at `cfl_max` 20 and 30 (4 columns: 0.918 / 0.934, non-finite; 2: 0.83 / 0.85, earlier).
+const TE_TAPER_COLUMNS: f64 = 8.0;
+
 fn smoothstep(u: f64) -> f64 {
     let u = u.clamp(0.0, 1.0);
     u * u * (3.0 - 2.0 * u)
@@ -590,6 +643,13 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>, host: &Host) -> Resu
     let k1 = (k0..nseg).find(|&k| x_te_root > bb.station(k).0 + 1e-9 && x_te_root <= seg_end(k) + 1e-9).ok_or_else(|| {
         Error::Unsupported(format!("the fin root trailing edge (x = {x_te_root:.4} d) lies behind the body base or ahead of its leading edge"))
     })?;
+    if let Some(k) = (k0..=k1).find(|&k| bb.segments[k].is_step()) {
+        return Err(Error::Unsupported(format!(
+            "the fin root crosses a diameter step (segment {k}, x = {:.4} to {:.4} d): fins stand on tubes, boattails and flares",
+            bb.station(k).0,
+            seg_end(k)
+        )));
+    }
     let a = host.n_up + host.n_nose + host.n_seg[..k0].iter().sum::<usize>();
     let b_old = host.n_up + host.n_nose + host.n_seg[..=k1].iter().sum::<usize>();
     let (x_a, x_b) = (xs[a], xs[b_old]);
@@ -970,11 +1030,12 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
                 let r = rn[j * (ni + 1) + i];
                 let di = if i < pl.i_le { pl.i_le - i } else { i.saturating_sub(pl.i_te) };
                 let dj = jj.saturating_sub(pl.j_tip);
-                let d = di.max(dj);
+                let u_i = if i > pl.i_te { di as f64 / TE_TAPER_COLUMNS } else { di as f64 / 4.0 };
+                let u = u_i.max(dj as f64 / 4.0);
                 let (ic, jc) = (i.clamp(pl.i_le, pl.i_te), jj.min(pl.j_tip));
                 let h_f = h_at(ic, jc);
                 let nominal = 0.5 * r * cell_ang;
-                let w = if d == 0 { h_f } else { h_f + (nominal - h_f) * smoothstep(d as f64 / 4.0) };
+                let w = if u == 0.0 { h_f } else { h_f + (nominal - h_f) * smoothstep(u) };
                 alpha[j * (ni + 1) + i] = if r < 1e-12 { (0.5 * cell_ang).asin() } else { (w / r).min(0.99).asin() };
                 if r >= 1e-12 {
                     half_w[j * (ni + 1) + i] = w;
@@ -1220,7 +1281,8 @@ pub fn fin_stack_report(g: &Grid3) -> Option<StackReport> {
 mod tests {
     use super::*;
     use crate::engine::body_grid::{BaseBody, Body, Nose};
-    use crate::engine::case::{Case, Wake};
+    use crate::engine::case::Case;
+    use crate::engine::meshing::Wake;
     use crate::engine::numerics::Numerics;
     use bowshock_cfd::grid::Grid;
 

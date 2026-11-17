@@ -12,7 +12,7 @@
 //! runs the same case R times from the free stream in one process (the first run includes compile and trace; the later ones are warm).
 
 use bowshock_cfd::gpu::Precision;
-use bowshock_cfd::implicit::LineSolve3;
+use bowshock_cfd::implicit_params::LineSolve3;
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
 use bowshock_core::engine::case3::Case3;
 use bowshock_core::engine::gpu3::GpuRunner3;

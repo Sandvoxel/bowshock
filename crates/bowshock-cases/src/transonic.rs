@@ -6,13 +6,19 @@
 //! or `Bc::PressureOutflow`; axis/body `Bc::SlipWall`. Lengths are in body diameters.
 
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
-use bowshock_core::engine::case::{Case, Wake};
+use bowshock_core::engine::case::Case;
+use bowshock_core::engine::meshing::Wake;
 use bowshock_core::engine::numerics::Numerics;
 
 /// Transonic validation case: nose + cylinder `cyl_length` long, sting wake (no base), explicit minmod numerics
 /// ([`Numerics::transonic`]); domain 10 body lengths upstream and radially, 5 downstream.
 pub fn transonic_case(mach: f64, level: u32, body: Body, cyl_length: f64) -> Case {
     Case::new(mach, BaseBody::cylinder(body, cyl_length), level, Wake::Sting, Numerics::transonic())
+}
+
+/// [`transonic_case`] on the single-cell wedge of the 3D engine ([`crate::wedge::sting_case`]): the same nose + cylinder on the sting grid at grid `level`.
+pub fn transonic_wedge_case(mach: f64, level: u32, body: Body, cyl_length: f64) -> bowshock_core::engine::case3::Case3 {
+    crate::wedge::sting_case(mach, BaseBody::cylinder(body, cyl_length), level)
 }
 
 /// Published free-flight nose pressure-drag data, zero lift, fineness-ratio-3 noses on a cylinder.
@@ -181,9 +187,9 @@ pub mod czarnecki_monta {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bowshock_cfd::flux::Limiter;
     use bowshock_cfd::gas::{cons_to_prim, freestream, prim_to_cons};
     use bowshock_cfd::grid::Grid;
+    use bowshock_cfd::limiter::Limiter;
     use bowshock_cfd::solver::{Bc, Config, Solver};
     use bowshock_core::engine::run::run_cold;
 

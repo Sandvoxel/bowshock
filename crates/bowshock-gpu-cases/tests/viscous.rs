@@ -6,16 +6,18 @@
 //! `max |dU| / (1 + |U|)`, the residual histories by `max |r - r_cpu| / r_cpu` (from the second iteration: the first is round-off of the
 //! uniform start on both sides).
 
-use bowshock_cfd::flux::Limiter;
 use bowshock_cfd::gas::freestream;
 use bowshock_cfd::gpu::{GpuSolver, Precision};
 use bowshock_cfd::grid::{plate_grid, PlateGridParams};
-use bowshock_cfd::implicit::ImplicitParams;
-use bowshock_cfd::solver::{Bc, Config, Scheme, Solver, Turbulence, Viscous};
-use bowshock_cfd::turbulence::K_INF;
+use bowshock_cfd::implicit_params::ImplicitParams;
+use bowshock_cfd::limiter::Limiter;
+use bowshock_cfd::solver::{Bc, Config, Scheme, Solver};
+use bowshock_cfd::sst::K_INF;
+use bowshock_cfd::sst::{Turbulence, Viscous};
 use bowshock_core::atmosphere::{Atmosphere, FlightConditions};
 use bowshock_core::engine::body_grid::BaseBody;
-use bowshock_core::engine::case::{Case, Wake};
+use bowshock_core::engine::case::Case;
+use bowshock_core::engine::meshing::Wake;
 use bowshock_core::engine::result::StopReason;
 use bowshock_core::engine::run::{finish, run_on};
 use bowshock_core::spec::{AftSpec, BodySpec, MotorSpec, NoseShape, NoseSpec};

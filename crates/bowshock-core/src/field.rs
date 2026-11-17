@@ -27,14 +27,14 @@
 //! coefficient and the density gradient ([`Field::mach_numbers`], [`Field::pressure_coefficients`], [`Field::density_gradient`]).
 //! Values are stored as `f32`: a snapshot is for looking at, the drag is integrated from the solver's own `f64` state.
 
-use crate::engine::case::Wake;
+use crate::engine::meshing::Wake;
 use bowshock_cfd::gas::cons_to_prim;
 use bowshock_cfd::solver::Solver;
 use std::fmt;
 use std::sync::Arc;
 
 /// Ratio of specific heats of the gas the solver uses (air).
-pub const GAMMA: f64 = bowshock_cfd::gas::GAMMA;
+pub const GAMMA: f64 = bowshock_cfd::gas3::GAMMA;
 
 /// Solver iterations between two snapshots that an interactive caller should ask [`Analysis::on_field`](crate::Analysis::on_field)
 /// for (the cost of a snapshot is in the documentation of that method).

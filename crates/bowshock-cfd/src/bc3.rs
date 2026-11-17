@@ -1,9 +1,17 @@
 //! 3D characteristic far-field and static-pressure outflow ghost states, ported from [`crate::bc`] with the outward
 //! unit normal `n: [f64; 3]`. The Riemann-invariant logic acts on the normal velocity; the tangential velocity vector
-//! is taken from the upwind side (free stream on inflow, interior on outflow). The 2D [`Regime`] is reused.
+//! is taken from the upwind side (free stream on inflow, interior on outflow).
 
-use crate::bc::Regime;
 use crate::gas3::{sound_speed3, Prim3, GAMMA};
+
+/// Flow regime of a far-field face, selected by the interior normal Mach number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Regime {
+    SupersonicInflow,
+    SubsonicInflow,
+    SubsonicOutflow,
+    SupersonicOutflow,
+}
 
 /// Normal Mach number `v.n / c` of `w` for the outward unit normal `n`.
 #[inline]

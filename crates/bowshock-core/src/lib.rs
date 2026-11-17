@@ -50,7 +50,7 @@ pub use atmosphere::{AirState, Atmosphere, FlightConditions};
 #[doc(hidden)]
 pub use bowshock_cfd::gpu::Precision;
 pub use device::gpu_name;
-pub use engine::case::Wake;
+pub use engine::meshing::Wake;
 pub use engine::result::StopReason;
 pub use error::Error;
 pub use field::Field;

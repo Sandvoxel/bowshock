@@ -10,13 +10,16 @@
 use crate::engine::case3::Case3;
 use crate::engine::grid3::Domain3;
 use crate::engine::result::StopReason;
-use crate::engine::run::MONITOR_LIMIT;
 use crate::progress::{drop_orders, spread, Progress};
 use bowshock_cfd::gas3::cons_to_prim3;
 use bowshock_cfd::gas3::Cons3;
 use bowshock_cfd::grid3::{Face3, Grid3, Part, Symmetry};
 use bowshock_cfd::solver3::Solver3;
 use std::ops::ControlFlow;
+
+/// Largest magnitude of the convergence monitor (a drag or pressure coefficient) of a meaningful solution; a sample beyond it, or a
+/// non-finite one, means the state has blown up (the residual of such a state can still be finite).
+pub const MONITOR_LIMIT: f64 = 1e3;
 
 /// Iterations between samples of the normal force.
 pub const SAMPLE_EVERY: usize = 50;
@@ -74,7 +77,7 @@ pub struct WindowMean {
     pub cn: f64,
     /// `cm / cn`, nose diameters from the tip; NaN without incidence.
     pub x_cp: f64,
-    /// Largest relative half range `(max - min) / (2 |mean|)` of CA (and, at incidence, CN and the moment) over the window: the size of the oscillation, for an unsteady-wake warning.
+    /// Largest relative half range `(max - min) / (2 |mean|)` of CA (and, at incidence, CN) over the window: the size of the oscillation, for an unsteady-wake warning.
     pub oscillation: f64,
 }
 
@@ -561,10 +564,12 @@ fn face_at(g: &Grid3, dir: usize, i: usize, j: usize, k: usize) -> Face3 {
     }
 }
 
-/// Largest `y+` of the streamwise no-slip walls (the faces whose normal is `j` or `k`: the body surface, the fin sides and tips; not the `i` faces of the base and of
-/// blunt fin edges, where the log law has no meaning): `d_n sqrt(rho |tau|) / mu` of the first cell. `0` for Euler.
+/// Largest `y+` of the streamwise no-slip walls that are resolved (the faces whose normal is `j` or `k`: the body surface and the fin sides; not the `i` faces of the
+/// base and of blunt fin edges, where the log law has no meaning, and not the fin tips: the tip face is thickness times tip chord, a negligible wetted area, and the
+/// cell above it belongs to the far-field fan, `y+` in the thousands by design; [`y_plus_max_of`] gives them): `d_n sqrt(rho |tau|) / mu` of the first cell. `0` for Euler.
+/// This is the number for quality and warnings.
 pub fn y_plus_max(s: &Solver3) -> f64 {
-    y_plus_at(s).into_iter().map(|w| w.0).fold(0.0, f64::max)
+    y_plus_max_of(s, |w| w != Wall::FinTip)
 }
 
 /// [`y_plus_max`] over the faces of the wall classes for which `keep` holds (the body surface, the fin sides, the fin tips).
@@ -852,7 +857,10 @@ pub fn window_means(samples: &[(usize, [f64; 3])], length: usize, from: usize, t
         let m = 0.5 * (m0 + m1);
         agree &= (m1 - m0).abs() <= tol * m.abs() + 1e-4;
         let (lo, hi) = second.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), s| (l.min(s[c]), h.max(s[c])));
-        oscillation = oscillation.max(0.5 * (hi - lo) / m1.abs().max(1e-12));
+        // the moment is a ratio (CN x_cp) whose mean can vanish while its swing does not: it takes part in the agreement, not in the oscillation
+        if c < 2 {
+            oscillation = oscillation.max(0.5 * (hi - lo) / m1.abs().max(1e-12));
+        }
     }
     let (ca, cn, cm) = (mean(&second, 0), mean(&second, 1), mean(&second, 2));
     let x_cp = if incidence && cn.abs() > 1e-12 { cm / cn } else { f64::NAN };

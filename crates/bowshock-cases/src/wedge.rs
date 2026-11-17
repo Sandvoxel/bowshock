@@ -1,10 +1,11 @@
-//! The cone and ogive cases on the single-cell wedge of the 3D engine (`Case3::wedge`): the CPU Euler solver of the product, run on the 2D case's own meridian
-//! grid revolved by the wedge angle, its final state written back into the 2D solver so the cases' own post-processing (wall pressure, shock angle, forebody
-//! drag) reads it unchanged. Where the wedge reproduces the frozen 2D results (G-W1 and G-W4 in `tests/wedge_gates.rs`) a validation driver can run on it
-//! (`--wedge`); the 2D runners stay until the 2D deletion.
+//! The cone and ogive cases on the single-cell wedge of the 3D engine (`Case3::wedge`): the CPU Euler solver of the product, run on the case's meridian grid
+//! revolved by the wedge angle; its final state is a [`Meridian`] (the grid and the conserved state of the meridian plane) that the cases' own post-processing (wall
+//! pressure, shock angle, forebody drag) reads. Where the wedge reproduces the frozen 2D results (G-W1 and G-W4 in `tests/wedge_gates.rs`) a validation driver can run
+//! on it (`--wedge`); the 2D runners stay until the 2D deletion.
 
-use bowshock_cfd::flux::Limiter;
-use bowshock_cfd::solver::Solver;
+use bowshock_cfd::gas3::GAMMA;
+use bowshock_cfd::grid::Grid;
+use bowshock_cfd::limiter::Limiter;
 use bowshock_core::engine::case3::Case3;
 use bowshock_core::engine::grid3::{wedge_of_meridian, WEDGE_ANGLE};
 use bowshock_core::engine::result::StopReason;
@@ -18,11 +19,42 @@ pub struct WedgeRun {
     pub stop_reason: StopReason,
 }
 
-/// Iterates the flow of `s2` (its grid, its free stream: Mach `mach`) on the wedge until the density residual has dropped `drop_orders` orders from the peak of
-/// the second-order phase (`first_order_iters` onward, as `StopRule3`), `max_iter`, or a plateau (the 2D runners' rule); writes the final state into `s2` (the
-/// radial momentum from the wedge cell's `y`, `z` momenta) and refreshes its primitives.
-pub fn run_on_wedge(s2: &mut Solver, mach: f64, limiter: Limiter, first_order_iters: usize, max_iter: usize, drop_orders: f64) -> Result<WedgeRun, String> {
-    let g2 = &s2.grid;
+/// The state of a meridian grid: the conserved variables `[rho, rho u, rho v, E]` per cell (`j * ni + i`) and the free stream `[rho, u, v, p]`.
+pub struct Meridian {
+    pub grid: Grid,
+    pub u: Vec<[f64; 4]>,
+    pub freestream: [f64; 4],
+}
+
+/// Primitive variables `[rho, u, v, p]` of a conserved state of the meridian plane.
+pub fn prim(q: &[f64; 4]) -> [f64; 4] {
+    let (rho, u, v) = (q[0], q[1] / q[0], q[2] / q[0]);
+    [rho, u, v, (GAMMA - 1.0) * (q[3] - 0.5 * rho * (u * u + v * v))]
+}
+
+impl Meridian {
+    /// Pressure at the cell centre of `(i, j)`.
+    pub fn pressure(&self, i: usize, j: usize) -> f64 {
+        prim(&self.u[j * self.grid.ni + i])[3]
+    }
+
+    /// The state of a 2D solver (the 2D runners of the cases, until the 2D deletion).
+    pub fn of_solver(s: &bowshock_cfd::solver::Solver) -> Meridian {
+        Meridian { grid: s.grid.clone(), u: s.u.clone(), freestream: s.cfg.freestream }
+    }
+}
+
+/// Iterates the flow on `g2` (free stream Mach number `mach`) on the wedge until the density residual has dropped `drop_orders` orders from the peak of the second-order
+/// phase (`first_order_iters` onward, as `StopRule3`), `max_iter`, or a plateau (the 2D runners' rule); the final state is the [`Meridian`] (the radial momentum from the
+/// wedge cell's `y`, `z` momenta).
+pub fn run_on_wedge(
+    g2: &Grid,
+    mach: f64,
+    limiter: Limiter,
+    first_order_iters: usize,
+    max_iter: usize,
+    drop_orders: f64,
+) -> Result<(Meridian, WedgeRun), String> {
     // the lower boundary is the axis for x < 0 and the body from the tip on
     let n_axis = (0..g2.ni).take_while(|&i| g2.x[i + 1] <= 1e-12).count();
     let grid = wedge_of_meridian(g2, WEDGE_ANGLE, n_axis).map_err(|e| e.to_string())?;
@@ -57,8 +89,9 @@ pub fn run_on_wedge(s2: &mut Solver, mach: f64, limiter: Limiter, first_order_it
             }
         }
     }
-    let (ni, nj) = (s2.grid.ni, s2.grid.nj);
+    let (ni, nj) = (g2.ni, g2.nj);
     let g3 = &s3.grid;
+    let mut u = vec![[0.0; 4]; ni * nj];
     for j in 0..nj {
         for i in 0..ni {
             let c = g3.cell(i, j, 0);
@@ -66,10 +99,142 @@ pub fn run_on_wedge(s2: &mut Solver, mach: f64, limiter: Limiter, first_order_it
             let r = x[1].hypot(x[2]);
             // the wedge cell's radial direction at its centroid: y = r sin(theta), z = r cos(theta)
             let m_r = if r > 0.0 { (q[2] * x[1] + q[3] * x[2]) / r } else { 0.0 };
-            s2.u[j * ni + i] = [q[0], q[1], m_r, q[4]];
+            u[j * ni + i] = [q[0], q[1], m_r, q[4]];
         }
     }
-    s2.eval_residual(false);
     let drop_orders = if rmax > 0.0 { (rmax / residual.last().copied().unwrap_or(rmax)).log10() } else { 0.0 };
-    Ok(WedgeRun { residual, drop_orders, stop_reason: reason })
+    let freestream = [1.0, mach, 0.0, 1.0 / GAMMA];
+    Ok((Meridian { grid: g2.clone(), u, freestream }, WedgeRun { residual, drop_orders, stop_reason: reason }))
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The sting and base-wake cases of the transonic and subsonic families on the wedge: no 2D solver, no 2D `PointResult`.
+// ---------------------------------------------------------------------------------------------------------------------
+
+use bowshock_cfd::gas3::{cons_to_prim3, sound_speed3};
+use bowshock_cfd::grid3::PART_FLUID;
+use bowshock_cfd::solver3::Solver3;
+use bowshock_core::engine::body_grid::BaseBody;
+use bowshock_core::engine::result::WallPoint;
+use bowshock_core::engine::run3::{base_cp, drag_parts_on, run3_on, wall_samples, y_plus_max, Wall};
+
+/// A body with the cylinder continuing as a sting to the outflow plane (no base), as a single-cell wedge on the sting grid at grid `level`: the Euler wedge numerics of
+/// the Mach regime ([`bowshock_core::engine::case3::Numerics3::euler_wedge`]).
+pub fn sting_case(mach: f64, body: BaseBody, level: u32) -> Case3 {
+    let mut c = Case3::new(mach, 0.0, body, None, level);
+    c.numerics = bowshock_core::engine::case3::Numerics3::euler_wedge(mach, level);
+    c.on_wedge()
+}
+
+/// A finite body with a flat base and a wake region (the base-wake grid) as a single-cell wedge at grid `level`.
+pub fn base_case(mach: f64, body: BaseBody, level: u32) -> Case3 {
+    Case3::wedge(mach, body, level)
+}
+
+/// What a run of a sting or base-wake case on the wedge reports: the quantities the transonic and subsonic drivers print and compare with the published data.
+/// Drag coefficients refer to the nose base area (`d = 1`); the wall `Cp` is the extrapolated wall value, as `bowshock_core::engine::run3::lift_forces` has it.
+#[derive(Clone, Debug)]
+pub struct WedgeResult {
+    pub mach: f64,
+    pub iters: usize,
+    pub stop_reason: StopReason,
+    pub drop_orders: f64,
+    pub cd_nose: f64,
+    /// One per aft segment.
+    pub cd_aft: Vec<f64>,
+    pub cd_base: f64,
+    /// Friction and largest `y+` of a viscous case (`0`, `NaN` for Euler).
+    pub cd_friction: f64,
+    pub y_plus_max: f64,
+    /// Mean base `Cp` (area weighted, NaN without a base) and the `Cp` of the base face per radius.
+    pub cp_base: f64,
+    /// `cd_nose + cd_aft + cd_friction + cd_base` and the same with the base drag of the correlation (`bowshock_reference::base_drag`; NaN with a sting behind the base, 0
+    /// without a base) instead of the solution's.
+    pub cd_total: f64,
+    pub cd_base_model: f64,
+    pub cd_total_model: f64,
+    /// Largest relative deviation of the pressure of the outer-boundary cells from the free stream.
+    pub farfield_dp: f64,
+    pub base_wall: Vec<(f64, f64)>,
+    /// The body wall in axial order (`s0`, `s1`, `cp_cell` unused: NaN).
+    pub wall: Vec<WallPoint>,
+    pub cp_min: f64,
+    pub x_cp_min: f64,
+    /// Largest Mach number of the flow field.
+    pub m_max: f64,
+    pub min_rho: f64,
+    pub min_p: f64,
+}
+
+/// Iterates `s` (built from `case`, [`Case3::build_solver`]) to its stop rule ([`run3_on`]; `warm`: from the state it holds) and collects the [`WedgeResult`].
+pub fn run_wedge_point(case: &Case3, s: &mut Solver3, warm: bool) -> WedgeResult {
+    let r = run3_on(case, s, warm);
+    let p = drag_parts_on(case, s);
+    let (p_inf, q) = (s.cfg.freestream[4], 0.5 * case.mach * case.mach);
+    let mut wall = Vec::new();
+    let mut base_wall = Vec::new();
+    for w in wall_samples(&s.grid, &s.u) {
+        let cp = (w.pw - p_inf) / q;
+        let (x, rad) = (w.face.c[0], w.face.c[1].hypot(w.face.c[2]));
+        match w.class {
+            Wall::Body(_) | Wall::Sting => wall.push(WallPoint { x, r: rad, s0: f64::NAN, s1: f64::NAN, cp, cp_cell: f64::NAN }),
+            Wall::Base => base_wall.push((rad, cp)),
+            _ => {}
+        }
+    }
+    wall.sort_by(|a, b| a.x.total_cmp(&b.x));
+    base_wall.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (cp_min, x_cp_min) = wall.iter().fold((f64::INFINITY, f64::NAN), |(m, xm), w| if w.cp < m { (w.cp, w.x) } else { (m, xm) });
+    let (mut m_max, mut min_rho, mut min_p) = (0.0f64, f64::INFINITY, f64::INFINITY);
+    for (c, u) in s.u.iter().enumerate() {
+        if s.grid.part[c] != PART_FLUID {
+            continue;
+        }
+        let w = cons_to_prim3(u);
+        m_max = m_max.max((w[1] * w[1] + w[2] * w[2] + w[3] * w[3]).sqrt() / sound_speed3(&w));
+        min_rho = min_rho.min(w[0]);
+        min_p = min_p.min(w[4]);
+    }
+    let friction = p.friction.total;
+    let g = &s.grid;
+    let dev = |i: usize, j: usize| (cons_to_prim3(&s.u[g.cell(i, j, 0)])[4] / p_inf - 1.0).abs();
+    let mut farfield_dp = 0.0f64;
+    for i in 0..g.ni {
+        farfield_dp = farfield_dp.max(dev(i, g.nj - 1));
+    }
+    for j in 0..g.nj {
+        farfield_dp = farfield_dp.max(dev(0, j)).max(dev(g.ni - 1, j));
+    }
+    let rb2 = case.body.body.radius().powi(2);
+    let cd_base_model = if case.grid.base.is_none() {
+        0.0
+    } else if case.body.sting_radius > 0.0 {
+        f64::NAN
+    } else {
+        bowshock_reference::base_drag::base_drag_coefficient(case.mach) * case.body.base_radius().powi(2) / rb2
+    };
+    let fore = p.nose + p.aft.iter().sum::<f64>();
+    WedgeResult {
+        mach: case.mach,
+        iters: r.iterations,
+        stop_reason: r.stop_reason,
+        drop_orders: r.drop_orders,
+        cd_nose: p.nose,
+        cd_aft: p.aft,
+        cd_base: p.base,
+        cd_friction: friction,
+        y_plus_max: if s.rans().is_some() { y_plus_max(s) } else { f64::NAN },
+        cp_base: base_cp(case, s),
+        cd_total: fore + friction + p.base,
+        cd_base_model,
+        cd_total_model: fore + friction + cd_base_model,
+        farfield_dp,
+        base_wall,
+        wall,
+        cp_min,
+        x_cp_min,
+        m_max,
+        min_rho,
+        min_p,
+    }
 }

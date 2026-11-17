@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # gpuq: tiny GPU job queue over this machine and sandvoxel@192.168.1.88.
 #
-#   gpuq submit [--host local|remote|any] [--name NAME] [--timeout SECS] -- CMD...
+#   gpuq submit [--host local|remote|any] [--name NAME] [--timeout SECS] [--prio 0-9] -- CMD...
 #       Snapshots the repo containing $PWD and queues CMD (run from the repo root
-#       of the snapshot). Prints the job id.
+#       of the snapshot). Prints the job id. --prio: lower runs first among the queued jobs (0-2 before the jobs without --prio, 3-9 after them;
+#       a running job is never preempted): put a short timing job ahead of a long validation run.
 #   gpuq worker local|remote     Run forever, executing queued jobs for that host.
 #   gpuq status                  One line per job (queued, running, last 20 done).
 #   gpuq wait ID                 Block until done; print status + log tail; exit 0 on 0/ok-hung.
@@ -27,11 +28,12 @@ mkdir -p "$GPUQ_DIR"/{queue,running,done,snap}
 die() { echo "gpuq: $*" >&2; exit 2; }
 
 cmd_submit() {
-  local host=any name="" timeout=3600
+  local host=any name="" timeout=3600 prio=""
   while [ $# -gt 0 ]; do
     case $1 in
       --host) host=${2:?}; shift 2 ;;
       --name) name=${2:?}; shift 2 ;;
+      --prio) prio=${2:?}; shift 2 ;;
       --timeout) timeout=${2:?}; shift 2 ;;
       --) shift; break ;;
       *) die "unknown option $1" ;;
@@ -39,10 +41,14 @@ cmd_submit() {
   done
   [ $# -gt 0 ] || die "no command given"
   case $host in local|remote|any) ;; *) die "bad --host $host" ;; esac
+  case $prio in "" | [0-9]) ;; *) die "bad --prio $prio (0-9, lower runs first)" ;; esac
   [ -n "$name" ] || name=$(basename -- "$1" | tr -c 'A-Za-z0-9._\n-' '_')
   local repo
   repo=$(git rev-parse --show-toplevel 2>/dev/null) || die "not inside a git repo"
+  # `--prio N` (0-9): the workers claim the queue in the order of the sorted job ids, so a priority is a prefix of the id (`N-<timestamp>-<random>`, no change to the
+  # workers): `0-` .. `2-` sort before the unprefixed ids (every job without `--prio`, in submission order), `3-` .. `9-` after them; among equal priorities the timestamp decides
   local id; id="$(date +%Y%m%d-%H%M%S)-$RANDOM"
+  [ -z "$prio" ] || id="$prio-$id"
   mkdir -p "$GPUQ_DIR/snap/$id"
   rsync -a --exclude target --exclude out --exclude .git "$repo"/ "$GPUQ_DIR/snap/$id"/ || die "snapshot failed"
   local sha dirty

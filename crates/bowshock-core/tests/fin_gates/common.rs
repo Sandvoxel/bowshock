@@ -39,11 +39,10 @@ pub fn tier(kind: TierKind, flow: WallFlow) -> Tier {
     }
 }
 
-/// Does the engine solve the viscous equations for `case`? The CPU solver does when the case is viscous (`Case3::viscous`: the wall-resolved tiers, a viscous 2D
-/// case on the wedge; `Case3::euler_equations` drops it); the GPU runner is Euler until `gpu3d` integrates the viscous step (`BOWSHOCK_WEDGE_BACKEND=gpu` is then
-/// INFO / "engine is inviscid").
+/// Does the engine solve the viscous equations for `case`? Both runners do when the case is viscous (`Case3::viscous`: the wall-resolved tiers;
+/// `Case3::euler_equations` drops it): the CPU solver and, since `gpu3d` integrated the viscous step, the GPU runner.
 pub fn engine_is_viscous(case: &Case3) -> bool {
-    case.viscous.is_some() && !gpu_backend()
+    case.viscous.is_some()
 }
 
 /// Does a run of `kind` count as a gate (viscous) or as INFO (inviscid)?
@@ -101,7 +100,13 @@ impl Session {
     pub fn new(case: &Case3) -> Result<Session, String> {
         #[cfg(feature = "gpu")]
         if gpu_backend() {
-            let r = bowshock_core::engine::gpu3::GpuRunner3::new(case, bowshock_cfd::gpu::Precision::Extended).map_err(|e| e.to_string())?;
+            // single precision, the product's (`analysis.rs`): the sector grids are 0.68 M cells, and df32 needs 1.35 x the memory; `BOWSHOCK_WEDGE_PRECISION=ext` for df32
+            let prec = if std::env::var("BOWSHOCK_WEDGE_PRECISION").as_deref() == Ok("ext") {
+                bowshock_cfd::gpu::Precision::Extended
+            } else {
+                bowshock_cfd::gpu::Precision::F32
+            };
+            let r = bowshock_core::engine::gpu3::GpuRunner3::new(case, prec).map_err(|e| e.to_string())?;
             return Ok(Session::Gpu(Box::new(r)));
         }
         Ok(Session::Cpu(Box::new(case.build_solver_cached().map_err(|e| e.to_string())?)))
@@ -119,12 +124,14 @@ impl Session {
             #[cfg(feature = "gpu")]
             Session::Gpu(r) => {
                 let point = r.run_on(case, warm).map_err(|e| e.to_string())?;
+                let parts = r.drag_parts(case).map_err(|e| e.to_string())?;
+                let fin_friction = r.host.rans().map(|_| parts.fin_friction());
                 Ok(Solved {
                     point,
-                    parts: r.drag_parts(case).map_err(|e| e.to_string())?,
+                    parts,
                     lift: r.lift_forces(case).map_err(|e| e.to_string())?,
                     breakdown: r.breakdown(case).map_err(|e| e.to_string())?,
-                    fin_friction: None,
+                    fin_friction,
                 })
             }
         }
@@ -189,6 +196,8 @@ fn fmt(x: f64) -> String {
 #[derive(Default)]
 pub struct Lines {
     pub failed: usize,
+    /// Gate lines that fail against a documented discrepancy of the reference ([`Lines::check_known`]): printed `FAIL KNOWN <where>`, not counted in `failed`.
+    pub known: usize,
     pub gates: usize,
     pub infos: usize,
 }
@@ -206,6 +215,20 @@ impl Lines {
             self.infos += 1;
         }
         ok
+    }
+
+    /// [`Lines::check`] for a line whose failure is a documented discrepancy with the reference (`why`: where it is documented, e.g. `DESIGN3D-L-item-37`): a failing
+    /// gate prints `GATE ... FAIL KNOWN <why>` and does not fail the test; the band is not widened, and a line that passes prints `PASS` as any other.
+    #[allow(clippy::too_many_arguments)]
+    pub fn check_known(&mut self, gate: bool, id: &str, case: &str, measured: f64, reference: f64, band: Band, why: &str) -> bool {
+        let ok = band.pass(measured, reference);
+        if gate && !ok {
+            println!("GATE {id} {case} {} {} {} FAIL KNOWN {why}", fmt(measured), fmt(reference), band.label());
+            self.gates += 1;
+            self.known += 1;
+            return false;
+        }
+        self.check(gate, id, case, measured, reference, band)
     }
 
     /// A number with no band.

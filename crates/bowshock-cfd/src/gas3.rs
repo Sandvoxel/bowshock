@@ -5,7 +5,8 @@
 //! Velocities are Cartesian: `u` axial (x), `v` lateral (y), `w` vertical (z). Incidence `alpha > 0` means the air moves
 //! towards +z relative to the body, so the windward side is -z and a positive normal force points to +z.
 
-pub use crate::gas::GAMMA;
+/// Ratio of specific heats of the ideal gas (air).
+pub const GAMMA: f64 = 1.4;
 
 pub type Cons3 = [f64; 5];
 pub type Prim3 = [f64; 5];

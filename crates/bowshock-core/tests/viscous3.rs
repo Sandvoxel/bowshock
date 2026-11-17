@@ -10,9 +10,10 @@
 
 use bowshock_cfd::gas3::Cons3;
 use bowshock_cfd::grid3::Grid3;
-use bowshock_cfd::implicit::{ImplicitParams, LineSolve3};
-use bowshock_cfd::solver::{Scheme, Solver, Turbulence};
+use bowshock_cfd::implicit_params::{ImplicitParams, LineSolve3};
+use bowshock_cfd::solver::{Scheme, Solver};
 use bowshock_cfd::solver3::{RansOpts3, Scheme3, Solver3};
+use bowshock_cfd::sst::Turbulence;
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
 use bowshock_core::engine::case::Case;
 use bowshock_core::engine::case3::Case3;
@@ -45,6 +46,7 @@ fn g3_case(mach: f64, level: u32) -> Case {
 /// The 3D solver on the wedge of `case` with the numerics of the 2D case and its viscous parameters.
 fn build3(case: &Case, dtheta: f64, level: u32) -> (Case3, Solver3) {
     let mut c3 = Case3::wedge_of(case, level);
+    c3.jet = case.motor;
     c3.grid.domain = Domain3::Wedge { dtheta };
     let mut s = c3.build_solver().unwrap();
     let n = &case.numerics;
@@ -68,7 +70,7 @@ fn build3(case: &Case, dtheta: f64, level: u32) -> (Case3, Solver3) {
     s.cfg.first_order_iters = n.first_order_iters;
     let visc = match std::env::var("MODEL").as_deref() {
         Ok("euler") => None,
-        Ok("laminar") => case.viscous.map(|v| bowshock_cfd::solver::Viscous { turbulence: Turbulence::Laminar, ..v }),
+        Ok("laminar") => case.viscous.map(|v| bowshock_cfd::sst::Viscous { turbulence: Turbulence::Laminar, ..v }),
         _ => case.viscous,
     };
     // the outflow plane of the 2D case: characteristic (the wall-resolved body cases) or static pressure (the plates); `LAW_I=1`: the automatic wall treatment on the i walls
@@ -556,4 +558,345 @@ fn report_residuals(label: &str, r2: &[[f64; 4]], r3: &[Cons3], g: &Grid3) {
         let skew = ((v[0] * f.n[0] + v[1] * f.n[1] + v[2] * f.n[2]).abs() / (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()).acos().to_degrees();
         println!("      skew of the lower j face: {skew:.1} deg");
     }
+}
+
+/// The TP-2005 motor-on case of `ref2d.json` (`tp2005-M<mach>-Me<exit_mach>`): the ogive-cylinder of 0.0635 m (3 d nose, 10 d tube), the facade's atmosphere (11 455 Pa,
+/// 210.42 K), Mach `mach`, a nozzle of 0.8 d at exit Mach `exit_mach`, exit pressure `p_exit` Pa, total temperature 305 K, SST, the wake of the base; the jet state as
+/// `Analysis::viscous` builds it (`k = 1.5 (0.01 u)^2`, `omega = rho k / (10 mu)`).
+fn tp2005_case(mach: f64, exit_mach: f64, p_exit: f64, level: u32) -> Case {
+    use bowshock_core::engine::meshing::Jet;
+    // the facade cases' atmosphere of each Mach number (`ref2d.json` inputs)
+    let (temperature_k, pressure_pa) = match mach {
+        m if m < 1.8 => (210.424_084_564_550_17, 11_455.082_439_789_36),
+        m if m < 2.2 => (180.555_555_555_555_51, 7_672.259_674_998_845),
+        _ => (144.444_444_444_444_46, 4_484.817_118_370_865),
+    };
+    let air = Atmosphere::Explicit { temperature_k, pressure_pa }.state().unwrap();
+    let d = 0.0635;
+    let body = BaseBody::cylinder(Body { nose: Nose::TangentOgive { fineness: 3.0 } }, 10.0);
+    let (re_c, sutherland) = (air.density * air.sound_speed * d / air.viscosity, 110.4 / air.temperature_k);
+    let t = 305.0 / (1.0 + 0.2 * exit_mach * exit_mach) / air.temperature_k;
+    let p = p_exit / air.pressure_pa;
+    let (rho, u) = (p / t, exit_mach * t.sqrt());
+    let k = 1.5 * (0.01 * u).powi(2);
+    let mu = bowshock_cfd::sst::Viscous { re_c, sutherland, turbulence: Turbulence::Sst, wall_i_start: 0, roughness: 0.0 }.mu(t);
+    let jet = Jet { r_exit: 0.5 * 0.0508 / d, state: [rho, u, 0.0, p / bowshock_cfd::gas3::GAMMA], turb: [k, rho * k / (10.0 * mu)] };
+    Case::viscous(mach, body, level, Wake::Base, re_c, sutherland, mach).with_motor(jet)
+}
+
+/// G-J on the CPU wedge: one TP-2005 case (`MACH`, `EXIT_MACH`, `P_EXIT` Pa; default Mach 2.5, exit Mach 1.69, 149 368 Pa) as a wedge against the 2D solver on the same grid
+/// (`LEVEL`, 1: the facade's `Medium`): the area-mean base `Cp` of the annulus and `p_b / p_inf = 1 + 0.7 M^2 Cp` (the gate: within 0.15 of the 2D value) and the force parts.
+#[test]
+#[ignore]
+fn gate_j_tp2005_jet_case_on_the_wedge() {
+    let (mach, exit_mach, p_exit): (f64, f64, f64) = (env("MACH", 2.5), env("EXIT_MACH", 1.69), env("P_EXIT", 34_497.438_192_913_876));
+    let (iters, level): (usize, u32) = (env("ITERS", 4000), env("LEVEL", 1));
+    let case = tp2005_case(mach, exit_mach, p_exit, level);
+    let (_, r2, secs2) = run2(&case, iters, 1000);
+    let ratio = |cp: f64| 1.0 + 0.7 * mach * mach * cp;
+    println!(
+        "G-J 2D {iters} its ({secs2:.1} s): cp_base {:.4}  pb/pinf {:.4}  CD nose+aft {:.4} friction {:.4} base {:.4} total {:.4}",
+        r2.cp_base,
+        ratio(r2.cp_base),
+        r2.cd_nose + r2.cd_aft.iter().sum::<f64>(),
+        r2.cd_friction,
+        r2.cd_base,
+        r2.cd_total
+    );
+    let (c3, mut s3) = build3(&case, bowshock_core::engine::grid3::WEDGE_ANGLE, level);
+    assert!(s3.jet().is_some(), "the wedge has the jet");
+    println!("G-J grid {} x {}, {} cells", s3.grid.ni, s3.grid.nj, s3.grid.ni * s3.grid.nj);
+    let t0 = Instant::now();
+    iterate3(&c3, &mut s3, iters, 1000);
+    let secs = t0.elapsed().as_secs_f64();
+    let f = forces3(&c3, &s3);
+    let samples = run3::wall_samples(&s3.grid, &s3.u);
+    let (mut a, mut pa) = (0.0, 0.0);
+    for w in samples.iter().filter(|w| w.class == run3::Wall::Base) {
+        a += w.face.area;
+        pa += w.pw * w.face.area;
+    }
+    let cp3 = (pa / a - s3.cfg.freestream[4]) / (0.5 * mach * mach);
+    println!(
+        "G-J 3D {iters} its ({secs:.1} s, {:.0} ms each): cp_base {cp3:.4}  pb/pinf {:.4}  CD p {:.4} friction {:.4} base {:.4} total {:.4}  y+ {:.3}",
+        1e3 * secs / iters as f64,
+        ratio(cp3),
+        f.cd_pressure,
+        f.cd_friction,
+        f.cd_base,
+        f.total(),
+        f.y_plus_max
+    );
+    println!("G-J 3D vs 2D: pb/pinf {:+.4} (band 0.15), CD {:+.2} %", ratio(cp3) - ratio(r2.cp_base), 100.0 * (f.total() / r2.cd_total - 1.0));
+    assert!((ratio(cp3) - ratio(r2.cp_base)).abs() < 0.15, "base pressure ratio {} against the 2D solver's {}", ratio(cp3), ratio(r2.cp_base));
+}
+
+/// The cells of the largest `|d rho / dt|` of the last residual evaluation, with their place in the grid (axis row, volume, whether the cell touches the axis).
+fn residual_map(s: &Solver3, n: usize) {
+    let g = &s.grid;
+    let mut v: Vec<(f64, usize)> = (0..s.res.len()).filter(|&c| g.part[c] == 0).map(|c| (s.res[c][0].abs(), c)).collect();
+    v.sort_by(|a, b| b.0.total_cmp(&a.0));
+    for (r, c) in v.iter().take(n) {
+        let (i, j, k) = (c % g.ni, (c / g.ni) % g.nj, c / (g.ni * g.nj));
+        let x = g.xc[*c];
+        let w = s.prim(i, j, k);
+        println!(
+            "    |d rho/dt| {r:.3e} at ({i}, {j}, {k})  x {:.4} r {:.5}  vol {:.2e}  axis {}  rho {:.4} u {:.4} p {:.4}  dt {:.2e}",
+            x[0],
+            x[1].hypot(x[2]),
+            g.vol[*c],
+            g.is_axis(i, j),
+            w[0],
+            w[1],
+            w[4],
+            s.dt[*c]
+        );
+    }
+}
+
+/// The 2D case of the fixture's RANS table (`table-rans-M<mach>`: ogive 3 d + tube 12 d of 0.0762 m, ISA 120 m, roughness 6e-5 m, wake of the base, `drag_tolerance` 2e-3) with
+/// the grid sized for `mach_max` (the fixture's points are single-Mach runs: the point's own Mach number), and its `Re_c`.
+fn table_case(mach: f64, mach_max: f64, level: u32) -> (Case, f64) {
+    let d = 0.0762;
+    let air = Atmosphere::Isa { altitude_m: 120.0 }.state().unwrap();
+    let body = BaseBody::cylinder(Body { nose: Nose::TangentOgive { fineness: 3.0 } }, 0.9134 / d);
+    let (re_c, sutherland) = (air.density * air.sound_speed * d / air.viscosity, 110.4 / air.temperature_k);
+    let mut case = Case::viscous(mach, body, level, Wake::Base, re_c, sutherland, mach_max);
+    if let Some(v) = case.viscous.as_mut() {
+        v.roughness = 6e-5 / d;
+    }
+    case.numerics.drag_rel_tol = Some(2e-3);
+    (case, re_c)
+}
+
+/// The RANS table of the fixture (`table-rans-M<mach>`: ogive 3 d + tube 12 d of 0.0762 m, ISA 120 m, roughness 6e-5 m, wake of the base, grid sized for Mach 3) at `MACH` as
+/// a viscous wedge (`LEVEL` 0 = coarse): forces, the minimum density and pressure, and the cells of the largest residual. `WITH2D=1` runs the 2D solver too.
+#[test]
+#[ignore]
+fn table_point_on_the_wedge() {
+    let mach: f64 = env("MACH", 0.1);
+    let (iters, level): (usize, u32) = (env("ITERS", 2000), env("LEVEL", 0));
+    let (case, re_c) = table_case(mach, env("MACH_MAX", mach), level);
+    if std::env::var_os("WITH2D").is_some() {
+        let (_, r2, secs2) = run2(&case, iters, 1000);
+        println!(
+            "table 2D {iters} its ({secs2:.1} s): CD {:.5} (p {:.5} f {:.5} base {:.5})",
+            r2.cd_total,
+            r2.cd_nose + r2.cd_aft.iter().sum::<f64>(),
+            r2.cd_friction,
+            r2.cd_base
+        );
+    }
+    let (c3, mut s3) = build3(&case, bowshock_core::engine::grid3::WEDGE_ANGLE, level);
+    let g = &s3.grid;
+    println!("table M {mach}: {} x {} cells, axis runs {:?}, Re_c {re_c:.4e}", g.ni, g.nj, g.axis);
+    let t0 = Instant::now();
+    for it in 0..iters {
+        let r = s3.step();
+        if !r.is_finite() {
+            println!("  non-finite residual at iteration {}", it + 1);
+            break;
+        }
+        if (it + 1) % 250 == 0 || it + 1 == iters {
+            let f = forces3(&c3, &s3);
+            let (mut rho_min, mut p_min) = (f64::INFINITY, f64::INFINITY);
+            for c in 0..s3.u.len() {
+                if s3.grid.part[c] == 0 {
+                    let w = bowshock_cfd::gas3::cons_to_prim3(&s3.u[c]);
+                    rho_min = rho_min.min(w[0]);
+                    p_min = p_min.min(w[4]);
+                }
+            }
+            println!(
+                "  it {:5}  r {r:.3e}  CD {:.5} (p {:.5} f {:.5} base {:.5})  y+ {:.3}  rho min {rho_min:.4} p min {p_min:.4}  {:.1} s",
+                it + 1,
+                f.total(),
+                f.cd_pressure,
+                f.cd_friction,
+                f.cd_base,
+                f.y_plus_max,
+                t0.elapsed().as_secs_f64()
+            );
+        }
+    }
+    residual_map(&s3, 10);
+    if let Some(i) = std::env::var("PROBE_I").ok().and_then(|v| v.parse::<usize>().ok()) {
+        let j0 = (0..s3.grid.nj).find(|&j| s3.grid.is_axis(i, j)).unwrap_or(0);
+        println!("axis probe at i {i}: first axis row j {j0}");
+        for j in j0.saturating_sub(1)..(j0 + 6).min(s3.grid.nj) {
+            let c = s3.grid.cell(i, j, 0);
+            let w = s3.prim(i, j, 0);
+            let x = s3.grid.xc[c];
+            println!(
+                "  j {j}: r {:.2e} vol {:.2e} dt {:.2e}  w [{:.5} {:.5} {:.3e} {:.3e} {:.5}]  res [{:.2e} {:.2e} {:.2e} {:.2e} {:.2e}]",
+                x[1].hypot(x[2]),
+                s3.grid.vol[c],
+                s3.dt[c],
+                w[0],
+                w[1],
+                w[2],
+                w[3],
+                w[4],
+                s3.res[c][0],
+                s3.res[c][1],
+                s3.res[c][2],
+                s3.res[c][3],
+                s3.res[c][4]
+            );
+        }
+        let before = s3.u.clone();
+        s3.step();
+        println!("  the next step's update du / (state) at i {i}:");
+        for j in j0..(j0 + 4).min(s3.grid.nj) {
+            let c = s3.grid.cell(i, j, 0);
+            let d: Vec<String> = (0..5).map(|m| format!("{:.2e}", s3.u[c][m] - before[c][m])).collect();
+            println!("  j {j}: du [{}]  u [{:.5} {:.5} {:.3e} {:.3e} {:.5}]", d.join(" "), s3.u[c][0], s3.u[c][1], s3.u[c][2], s3.u[c][3], s3.u[c][4]);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// the cost study: iterations to the stop rule on the viscous wedge
+
+/// One wedge point run with the engine's own stop rule of the 3D runs ([`run3::StopRule3`], fed as `run3::run3_on` feeds it) and, on the same history, the stop rule of the
+/// 2D facade (`run::stop_reason` of the fixture's `drag_tolerance` 2e-3 on the total CD every 50 iterations): the iteration each fires first, and the total CD there. The run goes
+/// on until both have fired or `ITERS`. `POINT` = `g3-<mach>` (the G3 ogive-cylinder, 100 mm, sea level) or `tab-<mach>` (the RANS table body); `SUB`, `CFL`, `PRECOND`, `LINES`
+/// as `build3` has them. The history (iteration, total CD, CA of the 3D monitor, residual) is printed every 50 iterations as `HIST` lines for offline rules.
+#[test]
+#[ignore]
+fn cost_point() {
+    let point = std::env::var("POINT").unwrap_or_else(|_| "tab-0.5".into());
+    let (kind, mach) = point.split_once('-').map(|(k, m)| (k.to_string(), m.parse::<f64>().unwrap())).expect("POINT=<g3|tab>-<mach>");
+    let level: u32 = env("LEVEL", 0);
+    let mut case = if kind == "g3" { g3_case(mach, level) } else { table_case(mach, mach, level).0 };
+    case.numerics.drag_rel_tol = Some(2e-3);
+    let cap: usize = env("ITERS", 9000);
+    let (c3, mut s) = build3(&case, bowshock_core::engine::grid3::WEDGE_ANGLE, level);
+    let scheme = format!("{:?}", s.cfg.scheme);
+    println!("COSTPOINT {point} {}x{} cells; {}", s.grid.ni, s.grid.nj, scheme.split("line_solve").next().unwrap_or(""));
+    let mut rule3 = run3::StopRule3::new(&c3, false);
+    let (mut hist2, mut rmax2) = (Vec::<(usize, f64)>::new(), 0.0f64);
+    let (mut fire3, mut fire2): (Option<(usize, StopReason, f64)>, Option<(usize, StopReason, f64)>) = (None, None);
+    let t0 = Instant::now();
+    let mut it = 0;
+    while it < cap {
+        let r = s.step();
+        let ca = ((it + 1) % run3::SAMPLE_EVERY == 0).then(|| run3::lift_forces(&c3, &s).ca);
+        let total = ((it + 1) % 50 == 0).then(|| forces3(&c3, &s).total());
+        if it >= 20 {
+            rmax2 = rmax2.max(r);
+        }
+        if let Some(t) = total {
+            hist2.push((it + 1, t));
+            println!("HIST {} {:.6} {:.6} {:.4e}", it + 1, t, ca.unwrap_or(f64::NAN), r);
+        }
+        it += 1;
+        if rule3.wants_forces(it, run3::MEAN_EVERY) {
+            rule3.observe(it, &run3::lift_forces(&c3, &s));
+        }
+        let why3 = rule3.check(it - 1, r, ca);
+        if let (Some(w), None) = (why3, &fire3) {
+            fire3 = Some((it, w, hist2.last().map_or(f64::NAN, |h| h.1)));
+        }
+        if fire2.is_none() {
+            if let Some(w) = run::stop_reason(&case, it - 1, r, rmax2, 20, &hist2) {
+                fire2 = Some((it, w, hist2.last().map_or(f64::NAN, |h| h.1)));
+            }
+        }
+        if matches!(why3, Some(StopReason::NonFinite)) || !r.is_finite() {
+            println!("  non-finite at iteration {it}");
+            break;
+        }
+        if it % 250 == 0 {
+            println!("  it {it:5} r {r:.3e} {:.1} s ({:.0} ms/it)", t0.elapsed().as_secs_f64(), 1e3 * t0.elapsed().as_secs_f64() / it as f64);
+        }
+        if fire3.is_some() && fire2.is_some() {
+            break;
+        }
+    }
+    let fmt = |f: &Option<(usize, StopReason, f64)>| f.map_or("none".to_string(), |(i, w, cd)| format!("{i} {w:?} cd {cd:.5}"));
+    println!(
+        "COSTROW {point} sub {} cfl {} | rule3d: {} | rule2d: {} | iterations run {it} | {:.0} ms/it",
+        env("SUB", 3usize),
+        std::env::var("CFL").unwrap_or_else(|_| "default".into()),
+        fmt(&fire3),
+        fmt(&fire2),
+        1e3 * t0.elapsed().as_secs_f64() / it.max(1) as f64
+    );
+}
+
+/// What the CPU holds in the jet cells (`Part::Jet`, the ghosts of the exit faces) of a TP-2005 case, `k`, `omega`, `mu_t`, `mu` and the density, at the three moments a dump can
+/// take it: after `step()` (the turbulence update has run, the jet fix not since), after `eval_residual()` (`viscous_pass` -> `jet_viscous_fix`), and the values the jet gives (`JetState3`).
+#[test]
+#[ignore]
+fn jet_turb_probe() {
+    use bowshock_cfd::grid3::Part;
+    let (mach, exit_mach, p_exit): (f64, f64, f64) = (env("MACH", 2.5), env("EXIT_MACH", 1.69), env("P_EXIT", 34_497.438_192_913_876));
+    let case = tp2005_case(mach, exit_mach, p_exit, env("LEVEL", 0));
+    let (_, mut s) = build3(&case, bowshock_core::engine::grid3::WEDGE_ANGLE, env("LEVEL", 0));
+    let jet = s.jet().expect("the wedge has the jet");
+    let (rho, kj, oj) = (jet.state[0], jet.turb[0], jet.turb[1]);
+    let mu_j = s.viscous().expect("viscous").mu(bowshock_cfd::gas::GAMMA * jet.state[4] / rho);
+    println!(
+        "jet: rho {rho:.5} p {:.5} u {:.5}  k {kj:.4e} omega {oj:.4e}  mu {mu_j:.4e}  rho k / omega {:.4e} (= {:.2} mu)",
+        jet.state[4],
+        jet.state[1],
+        rho * kj / oj,
+        rho * kj / oj / mu_j
+    );
+    let cells: Vec<usize> = (0..s.grid.part.len())
+        .filter(|&c| s.grid.part_of(c % s.grid.ni, (c / s.grid.ni) % s.grid.nj, c / (s.grid.ni * s.grid.nj)) == Some(Part::Jet))
+        .collect();
+    println!("{} jet cells", cells.len());
+    let show = |s: &Solver3, tag: &str| {
+        let r = s.rans().expect("viscous");
+        let c = cells[cells.len() / 2];
+        let (i, j, k) = (c % s.grid.ni, (c / s.grid.ni) % s.grid.nj, c / (s.grid.ni * s.grid.nj));
+        let f = s.grid.cell(i + 1, j, k);
+        println!(
+            "  {tag:>28}: jet cell ({i},{j},{k}) k {:.4e} omega {:.4e} mu_t {:.4e} mu {:.4e} | fluid cell behind: k {:.4e} omega {:.4e} mu_t {:.4e} mu {:.4e}",
+            r.turb[c][0], r.turb[c][1], r.mu_t[c], r.mu[c], r.turb[f][0], r.turb[f][1], r.mu_t[f], r.mu[f]
+        );
+    };
+    show(&s, "before any step");
+    for n in [1usize, 5, 30] {
+        while s.iter < n {
+            s.step();
+        }
+        show(&s, &format!("after step {n}"));
+        s.eval_residual();
+        show(&s, &format!("then eval_residual {n}"));
+    }
+}
+
+/// The sensitivity of the TP-2005 base pressure to the turbulence of the jet: the G-J case (`MACH`, `EXIT_MACH`, `P_EXIT`, `LEVEL`, `ITERS`) on the wedge with `k` of the jet scaled by
+/// `K_SCALE` (`omega` kept, so `mu_t = rho k / omega` scales with it; 1: the gate's jet), the area-mean base `Cp` and `p_b / p_inf` as in `gate_j_tp2005_jet_case_on_the_wedge`.
+#[test]
+#[ignore]
+fn jet_turbulence_sensitivity() {
+    let (mach, exit_mach, p_exit): (f64, f64, f64) = (env("MACH", 2.5), env("EXIT_MACH", 1.69), env("P_EXIT", 34_497.438_192_913_876));
+    let (iters, level): (usize, u32) = (env("ITERS", 3000), env("LEVEL", 0));
+    let scale: f64 = env("K_SCALE", 1.0);
+    let mut case = tp2005_case(mach, exit_mach, p_exit, level);
+    if let Some(j) = case.motor.as_mut() {
+        j.turb[0] *= scale;
+    }
+    let (c3, mut s3) = build3(&case, bowshock_core::engine::grid3::WEDGE_ANGLE, level);
+    iterate3(&c3, &mut s3, iters, 1000);
+    let f = forces3(&c3, &s3);
+    let samples = run3::wall_samples(&s3.grid, &s3.u);
+    let (mut a, mut pa) = (0.0, 0.0);
+    for w in samples.iter().filter(|w| w.class == run3::Wall::Base) {
+        a += w.face.area;
+        pa += w.pw * w.face.area;
+    }
+    let cp3 = (pa / a - s3.cfg.freestream[4]) / (0.5 * mach * mach);
+    println!(
+        "JETK scale {scale}: {iters} its  cp_base {cp3:.5}  pb/pinf {:.5}  CD p {:.5} friction {:.5} base {:.5} total {:.5}",
+        1.0 + 0.7 * mach * mach * cp3,
+        f.cd_pressure,
+        f.cd_friction,
+        f.cd_base,
+        f.total()
+    );
 }

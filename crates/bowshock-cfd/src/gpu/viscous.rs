@@ -15,8 +15,9 @@
 // base wall of the block it is the wall ghost of the first fluid cell. A ghost carries the gradient, viscosity and eddy viscosity of its
 // fluid cell (`cell_sides`) and sits at the mirror image of that cell's centre in the face centre (the geometry arrays `VDir`).
 
-use crate::solver::{Turbulence, Viscous, PRANDTL, PRANDTL_T};
-use crate::turbulence::{omega_inf, wall_distances, K_INF};
+use crate::sst::{PRANDTL, PRANDTL_T, Turbulence, Viscous};
+use crate::turbulence::{wall_distances};
+use crate::sst::{K_INF, omega_inf};
 
 /// One residual evaluation: the residual, the time step, the primitives and padded primitives of the evaluated state, the mass flow
 /// density `F[0]` of the faces (what the turbulence transport convects with) and the viscous quantities.
@@ -253,7 +254,7 @@ impl VGeo {
                         None => j == 0 && jmin_slip && i >= v.wall_i_start,
                         Some(b) => j == b.j_end && i >= v.wall_i_start && i < b.i_end,
                     };
-                    let ks: Vec<f64> = (0..ni * nj).map(|c| if rough_cell(c % ni, c / ni) { v.roughness * crate::turbulence::rough_ramp(c % ni, v.wall_i_start) } else { v.roughness }).collect();
+                    let ks: Vec<f64> = (0..ni * nj).map(|c| if rough_cell(c % ni, c / ni) { v.roughness * crate::sst::rough_ramp(c % ni, v.wall_i_start) } else { v.roughness }).collect();
                     up(ctx, &ks, [ni, nj])
                 })
                 .transpose()?,

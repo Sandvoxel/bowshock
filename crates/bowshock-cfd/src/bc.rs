@@ -32,16 +32,8 @@
 //! If the interior state is the free stream, every branch returns the free stream (to round-off), so a uniform
 //! flow produces no spurious waves.
 
+use crate::bc3::Regime;
 use crate::gas::{sound_speed, Prim, GAMMA};
-
-/// Flow regime of a far-field face, selected by the interior normal Mach number.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Regime {
-    SupersonicInflow,
-    SubsonicInflow,
-    SubsonicOutflow,
-    SupersonicOutflow,
-}
 
 /// Normal Mach number `v.n / c` of `w` for the outward unit normal `(nx, nr)`.
 #[inline]

@@ -11,10 +11,11 @@
 //! one lazy step.
 
 use bowshock_cfd::gpu::Staging;
-use bowshock_cfd::solver::Turbulence;
+use bowshock_cfd::sst::Turbulence;
 use bowshock_core::atmosphere::Atmosphere;
 use bowshock_core::engine::body_grid::BaseBody;
-use bowshock_core::engine::case::{Case, Wake};
+use bowshock_core::engine::case::Case;
+use bowshock_core::engine::meshing::Wake;
 use bowshock_core::spec::{AftSpec, BodySpec, NoseShape, NoseSpec};
 use std::time::Instant;
 

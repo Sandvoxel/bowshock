@@ -433,12 +433,6 @@ impl Analysis {
         if let Some(cap) = self.max_iterations {
             case.numerics.max_iter = case.numerics.max_iter.min(cap);
         }
-        // The half domain runs the block line solve on the GPU too: the diagonalised form (the GPU default) diverges on the finned example at Mach 3 and 6 degrees
-        // (and at Mach 0.8 in some runs) unless cfl_max is 3 or less (gpu3d, M 3 / 6 deg: cfl 10 at iteration 110, cfl 5 at 150, cfl 3 stable); the block form is stable at
-        // cfl 10 and costs about 1.5x a step. The sector's diagonal solve has not diverged on the example's table and keeps the cheaper step.
-        if matches!(self.kind_of(c), Kind::Half) {
-            case.numerics.line_solve = Some(bowshock_cfd::implicit::LineSolve3::Block);
-        }
         if let Some(tol) = self.drag_tolerance {
             case.numerics.rel_tol = tol;
         }

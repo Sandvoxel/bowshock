@@ -19,10 +19,12 @@
 //! [`df32s::LazySolver3`], behind [`GpuSolver3`].
 
 use crate::gas3::Cons3;
+use crate::grid::Block;
 use crate::grid::Grid;
 use crate::grid3::Grid3;
-use crate::solver::{Block, Config, Nozzle, Scheme, Solver, Viscous};
+use crate::solver::{Config, Nozzle, Scheme, Solver};
 use crate::solver3::{Config3, Solver3};
+use crate::sst::Viscous;
 use luma::Context;
 pub use luma::LumaError;
 
@@ -113,14 +115,28 @@ pub mod f32s {
         Ok(h.iter().map(|&r| f64::from(r)).collect())
     }
 
-    /// The density residual of every step of a 3D run, recorded on the GPU (`State3` holds it at index 5).
-    fn records3(until: luma::Until<'static, State3>) -> luma::Until<'static, State3> {
-        until.record("residual", |s: &State3| s[5].clone())
+    /// The density residual of every step of a 3D run, recorded on the GPU (`State3` holds it at index 5); with `monitor`, the three force sums (index 10).
+    fn records3(until: luma::Until<'static, State3>, monitor: bool) -> luma::Until<'static, State3> {
+        let mut until = until.record("residual", |s: &State3| s[5].clone());
+        if monitor {
+            for (q, name) in ["fx", "fz", "mz"].into_iter().enumerate() {
+                until = until.record(name, move |s: &State3| s[10].slice(0, q..q + 1));
+            }
+        }
+        until
     }
 
     fn read_history3(run: &luma::Run<State3>) -> Result<Vec<f64>> {
         let h = run.history("residual").ok_or_else(|| luma::LumaError::Unsupported("the run recorded no residual history".into()))?;
         Ok(h.iter().map(|&r| f64::from(r)).collect())
+    }
+
+    /// The force monitor of every step (`[Fx, Fz, Mz]`, see `records3`).
+    fn read_forces3(run: &luma::Run<State3>) -> Result<Vec<[f64; 3]>> {
+        let missing = || luma::LumaError::Unsupported("the run recorded no force history".into());
+        let word = |name: &str| run.history(name).ok_or_else(missing);
+        let (x, z, m) = (word("fx")?, word("fz")?, word("mz")?);
+        Ok((0..x.len()).map(|i| [f64::from(x[i]), f64::from(z[i]), f64::from(m[i])]).collect())
     }
 
     /// The left-hand side of the implicit scheme runs in f32: the f32 view of `a` (here `a` itself) and back.
@@ -132,12 +148,16 @@ pub mod f32s {
         a.clone()
     }
 
+    include!("common.rs");
     include!("body.rs");
     include!("body3.rs");
+    include!("implicit_common.rs");
     include!("viscous3.rs");
     include!("turbulence3.rs");
     include!("rans3.rs");
     include!("implicit3.rs");
+    include!("stages3.rs");
+    include!("memory3.rs");
     include!("implicit.rs");
     include!("viscous.rs");
     include!("turbulence.rs");
@@ -178,15 +198,33 @@ pub mod df32s {
         Ok(hi.iter().zip(lo).map(|(&h, &l)| f64::from(h) + f64::from(l)).collect())
     }
 
-    /// The 3D counterpart of `records`: the double-float residual (`State3` index 5) as its high and low word.
-    fn records3(until: luma::Until<'static, State3>) -> luma::Until<'static, State3> {
-        until.record("residual", |s: &State3| s[5].to_f32()).record("residual_lo", |s: &State3| (&s[5] - s[5].to_f32().to_df32()).to_f32())
+    /// The 3D counterpart of `records`: the double-float residual (`State3` index 5) as its high and low word; with `monitor`, the three force sums (`State3`
+    /// index 10) as high and low words too.
+    fn records3(until: luma::Until<'static, State3>, monitor: bool) -> luma::Until<'static, State3> {
+        let mut until = until.record("residual", |s: &State3| s[5].to_f32()).record("residual_lo", |s: &State3| (&s[5] - s[5].to_f32().to_df32()).to_f32());
+        if monitor {
+            for (q, name) in ["fx", "fz", "mz"].into_iter().enumerate() {
+                until = until
+                    .record(name, move |s: &State3| s[10].slice(0, q..q + 1).to_f32())
+                    .record(&format!("{name}_lo"), move |s: &State3| (&s[10].slice(0, q..q + 1) - s[10].slice(0, q..q + 1).to_f32().to_df32()).to_f32());
+            }
+        }
+        until
     }
 
     fn read_history3(run: &luma::Run<State3>) -> Result<Vec<f64>> {
         let missing = || luma::LumaError::Unsupported("the run recorded no residual history".into());
         let (hi, lo) = (run.history("residual").ok_or_else(missing)?, run.history("residual_lo").ok_or_else(missing)?);
         Ok(hi.iter().zip(lo).map(|(&h, &l)| f64::from(h) + f64::from(l)).collect())
+    }
+
+    /// The force monitor of every step (`[Fx, Fz, Mz]`, see `records3`).
+    fn read_forces3(run: &luma::Run<State3>) -> Result<Vec<[f64; 3]>> {
+        let missing = || luma::LumaError::Unsupported("the run recorded no force history".into());
+        let word = |name: &str| run.history(name).ok_or_else(missing);
+        let (x, z, m) = (word("fx")?, word("fz")?, word("mz")?);
+        let (xl, zl, ml) = (word("fx_lo")?, word("fz_lo")?, word("mz_lo")?);
+        Ok((0..x.len()).map(|i| [f64::from(x[i]) + f64::from(xl[i]), f64::from(z[i]) + f64::from(zl[i]), f64::from(m[i]) + f64::from(ml[i])]).collect())
     }
 
     /// The left-hand side of the implicit scheme runs in f32: the f32 view of `a` and back.
@@ -198,12 +236,16 @@ pub mod df32s {
         a.to_df32()
     }
 
+    include!("common.rs");
     include!("body.rs");
     include!("body3.rs");
+    include!("implicit_common.rs");
     include!("viscous3.rs");
     include!("turbulence3.rs");
     include!("rans3.rs");
     include!("implicit3.rs");
+    include!("stages3.rs");
+    include!("memory3.rs");
     include!("implicit.rs");
     include!("viscous.rs");
     include!("turbulence.rs");
@@ -369,7 +411,7 @@ impl GpuSolver {
 
     /// `([k, omega], mu_t)` of every cell of an SST run (`Solver::turb`, `Solver::mu_t`), as f64.
     pub fn turb_state(&self) -> Result<(Vec<[f64; 2]>, Vec<f64>)> {
-        if !self.viscous().is_some_and(|v| v.turbulence == crate::solver::Turbulence::Sst) {
+        if !self.viscous().is_some_and(|v| v.turbulence == crate::sst::Turbulence::Sst) {
             return Err(GpuError::Unsupported("turb_state needs the SST model"));
         }
         Ok(on!(self, s => s.turb_state_f64()?))
@@ -579,6 +621,18 @@ impl GpuSolver3 {
         Ok(on3_mut!(self, s => s.run(n, RUN_SYNC.min(n.max(1)))?))
     }
 
+    /// [`GpuSolver3::run`] with the force monitor of every iteration (`[Fx, Fz, Mz]` of the classes of [`GpuSolver3::set_force_monitor`]; entry `i` is the state the
+    /// step `i` started from).
+    pub fn run_monitored(&mut self, n: usize) -> Result<(Vec<f64>, Vec<[f64; 3]>)> {
+        Ok(on3_mut!(self, s => s.run_monitored(n, RUN_SYNC.min(n.max(1)))?))
+    }
+
+    /// The force monitor of the loop: see [`LazySolver3::set_force_monitor`] (`faces` / `tfaces` as given to `set_wall_faces` / `set_traction_faces`).
+    pub fn set_force_monitor(&mut self, faces: &[WallFace3], tfaces: &[TractionFace3], keep: &[bool]) -> Result<()> {
+        on3_mut!(self, s => s.set_force_monitor(faces, tfaces, keep)?);
+        Ok(())
+    }
+
     /// GPU time per kernel of one full SSP-RK3 step as the `eval` loop launches it, and where fusion cut the expressions (`Profile::launches`,
     /// `Profile::total`).
     pub fn profile_step(&mut self) -> Result<luma::Profile> {
@@ -586,7 +640,7 @@ impl GpuSolver3 {
     }
 
     /// Switches the 3D viscous kernels on (the host geometry of the face passes: `grid`, the symmetry sides of the domain box); see `LazySolver3::set_viscous3`.
-    pub fn set_viscous(&mut self, grid: &Grid3, v: crate::solver::Viscous, sym: &crate::viscous3::SymSides) -> Result<()> {
+    pub fn set_viscous(&mut self, grid: &Grid3, v: crate::sst::Viscous, sym: &crate::viscous3::SymSides) -> Result<()> {
         on3_mut!(self, s => s.set_viscous3(grid, v, sym)?);
         Ok(())
     }
@@ -596,9 +650,27 @@ impl GpuSolver3 {
         Ok(on3_mut!(self, s => s.profile_viscous3()?))
     }
 
+    /// The stages of one implicit block step and their GPU profiles (best of `reps`), the state unchanged: see `stages3.rs`.
+    pub fn profile_stages(&mut self, reps: usize) -> Result<Vec<(String, luma::Profile)>> {
+        Ok(on3_mut!(self, s => s.profile_stages3(reps)?))
+    }
+
+    /// The device bytes of the arrays the solver holds, `(group, bytes)` (geometry by family, the f32 left-hand-side geometry, the viscous and SST data, the force
+    /// arrays, one set of the loop state): see `memory3.rs`. The transients of the step are not in it: the process peak minus the sum of these.
+    pub fn memory_report(&self) -> Vec<(&'static str, usize)> {
+        on3!(self, s => s.memory_report())
+    }
+
     /// Are the viscous terms on?
     pub fn has_viscous(&self) -> bool {
         on3!(self, s => s.has_viscous())
+    }
+
+    /// Sets the motor jet of the run (the solver was built from a host that has one: `Solver3::set_jet`); the jet cells of the current state take it. A warm run at another Mach
+    /// number sets its jet this way.
+    pub fn set_jet(&mut self, jet: crate::solver3::JetState3) -> Result<()> {
+        on3_mut!(self, s => s.set_jet(jet)?);
+        Ok(())
     }
 
     /// The viscous face fluxes of the current state on the host (`None` for the Euler equations): the input of `viscous3::wall_tractions`.
@@ -628,6 +700,19 @@ impl GpuSolver3 {
     /// GPU time per kernel of `n` iterations of the `iterate_all` replay (the profile adds up all `n`).
     pub fn profile_replay(&mut self, n: usize) -> Result<luma::Profile> {
         Ok(on3_mut!(self, s => s.profile_replay(n)?))
+    }
+
+    /// Host seconds to trace the lazy expression of one step `n` times, nothing evaluated.
+    pub fn trace_step_seconds(&self, n: usize) -> f64 {
+        on3!(self, s => s.trace_step_seconds(n))
+    }
+
+    /// `n` iterations calling the step every iteration and evaluating the new state (no replay): the loop a host-driven solver would run.
+    pub fn run_eval(&mut self, n: usize) -> Result<()> {
+        on3_mut!(self, s => {
+            s.run_eval(n)?;
+        });
+        Ok(())
     }
 
     /// `n` iterations as `iterate_all` replays (no residual history: what a benchmark times); call [`GpuSolver3::sync`] to wait for the GPU.

@@ -6,8 +6,8 @@ mod common;
 
 use bowshock_cases::subsonic::subsonic_case;
 use bowshock_cases::transonic::transonic_case;
-use bowshock_cfd::flux::Limiter;
 use bowshock_cfd::gpu::{GpuSolver, Precision};
+use bowshock_cfd::limiter::Limiter;
 use bowshock_cfd::solver::{Bc, Scheme};
 use bowshock_core::engine::body_grid::{Body, Nose};
 use bowshock_core::engine::case::Case;
@@ -140,7 +140,7 @@ fn implicit_scheme_converged_state_matches_cpu() {
 fn implicit_transonic_warm_start_matches_cpu() {
     let mut case = transonic_level(0.8);
     case.numerics.limiter = Limiter::VanAlbada;
-    case.numerics.scheme = Scheme::Implicit(bowshock_cfd::implicit::ImplicitParams::DEFAULT);
+    case.numerics.scheme = Scheme::Implicit(bowshock_cfd::implicit_params::ImplicitParams::DEFAULT);
     case.numerics.first_order_iters = 100;
     case.numerics.max_iter = 150;
     let mut s = case.build_solver();

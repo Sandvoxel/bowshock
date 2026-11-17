@@ -9,7 +9,7 @@
 //! (`x = L (k/n)^s`; output then goes to `out/ogive_stretch<s>/`). Output: `out/ogive/`.
 
 use bowshock_cases::ogive::{perkins_jorgensen as pj, run_ogive, run_ogive_wedge, theory_for, wall_cp_at, OgiveCase, OgiveResult};
-use bowshock_cfd::flux::Limiter;
+use bowshock_cfd::limiter::Limiter;
 use bowshock_reference::shock_expansion::{Ogive, SurfaceTheory};
 use std::fmt::Write as _;
 use std::fs;

@@ -22,8 +22,8 @@
 //! the same fractions in every column: `r = r_body(x) + s_j (r_far - r_body(x))`.
 
 use crate::error::Error;
+use bowshock_cfd::grid::Block;
 use bowshock_cfd::grid::{geometric_offsets, Grid};
-use bowshock_cfd::solver::Block;
 use bowshock_reference::shock_expansion::Ogive;
 
 /// Nose shape of the body (diameter `d = 1`, nose length `L_n`).
@@ -297,6 +297,23 @@ pub struct Segment {
     pub slope: f64,
 }
 
+/// A segment of at least this slope (45 degrees: boattails and flares are far below) is a diameter step: one grid cell wide, see [`Segment::step`].
+pub const STEP_SLOPE: f64 = 1.0;
+
+impl Segment {
+    /// A change of radius `dr` (positive: the body gets wider) as a very steep ramp `width` long: the chamfer of one grid cell the meridian grids give a
+    /// step. `width` is the axial size of the cells next to it (a chamfer much narrower than its neighbours is a jump of the cell size the solver sees);
+    /// the slope `|dr| / width` must be at least [`STEP_SLOPE`].
+    pub fn step(dr: f64, width: f64) -> Segment {
+        Segment { length: width, slope: dr / width }
+    }
+
+    /// Whether this segment is a diameter step (one cell, never clustered or subdivided by the builders).
+    pub fn is_step(&self) -> bool {
+        self.slope.abs() >= STEP_SLOPE
+    }
+}
+
 /// Nose followed by a list of conical segments (tubes, flares, boattails) and a flat base, on a sting or free (wake behind the base).
 ///
 /// The axial profile is `body.r(x)` up to the end of the nose `x = L_n`, then the segments in order (`r` linear in `x` on each),
@@ -317,6 +334,11 @@ impl BaseBody {
     /// Append a conical boattail of the given length and half-angle [rad].
     pub fn with_boattail(mut self, length: f64, half_angle: f64) -> BaseBody {
         self.segments.push(Segment { length, slope: -half_angle.tan() });
+        self
+    }
+    /// Append a diameter step: the radius changes by `dr` over an axial `width` (see [`Segment::step`]); the meridian grids give it one cell.
+    pub fn with_step(mut self, dr: f64, width: f64) -> BaseBody {
+        self.segments.push(Segment::step(dr, width));
         self
     }
     /// Set the sting radius behind the base.
@@ -419,6 +441,9 @@ pub struct BaseGridParams {
     /// Cluster the rows of the gap between the sting (or axis) and the base radius at the base corner only (geometric growth
     /// from `dr_wall` towards the sting) instead of at both ends.
     pub gap_one_sided: bool,
+    /// First cell height of the gap rows at the base corner when it differs from `dr_wall` (`None`: `dr_wall`). The gap rows below the body surface are solid: a
+    /// coarser spacing here (the Draft tier) saves the rows, and the cells of the body block behind them.
+    pub dr_gap: Option<f64>,
     /// Motor-on grids: the rows of the gap behind the base that form the nozzle exit (needs `n_sting == 0`).
     pub nozzle: Option<NozzleRows>,
 }
@@ -526,10 +551,10 @@ pub(crate) fn base_rows_below(p: &BaseGridParams, xs: &[f64], i_end: usize) -> R
         let outer = two_sided_nodes(re - nz.r_exit, p.n_gap - nz.n_jet, p.dr_wall);
         (0..=p.n_gap).map(|k| if k <= nz.n_jet { nz.r_exit - off[nz.n_jet - k] } else { nz.r_exit + outer[k - nz.n_jet] }).collect()
     } else if p.gap_one_sided {
-        let off = geometric_offsets(p.dr_wall, re - rs, p.n_gap);
+        let off = geometric_offsets(p.dr_gap.unwrap_or(p.dr_wall), re - rs, p.n_gap);
         (0..=p.n_gap).map(|k| (re - rs) - off[p.n_gap - k]).collect()
     } else {
-        two_sided_nodes(re - rs, p.n_gap, p.dr_wall)
+        two_sided_nodes(re - rs, p.n_gap, p.dr_gap.unwrap_or(p.dr_wall))
     };
     let mut r = vec![0.0; (j_end + 1) * (ni + 1)];
     for i in 0..=ni {
@@ -693,6 +718,7 @@ mod tests {
             dx_tip: 0.05,
             dr_wall: 0.05,
             gap_one_sided: false,
+            dr_gap: None,
             nozzle: None,
         }
     }
@@ -820,6 +846,7 @@ mod tests {
             dx_tip: 0.05,
             dr_wall: 0.05,
             gap_one_sided: false,
+            dr_gap: None,
             nozzle: None,
         };
         let (g, b) = base_domain_grid(&bp).expect("grid");

@@ -1375,8 +1375,15 @@ or the start-of-step evaluation (implicit). `State3` is ten arrays (`U` x5, resi
 * **Wall treatment** (CPU 8484d6f .. e9ed05a): Reichardt + bump law, `k` cap, law strain at smooth wall cells with the speed **tangential** to the cell's no-slip faces of the law class (`wall_speed_at3`: `|u - (u.e) e|`, largest
   over the faces; the `i` faces count only with `law_i_walls`, a cell with only `i` walls is a plain wall cell: speed 0, no law strain, no `k` cap: `TGeo3.wall_ns/wall_e/wall_counted`, built on the host from `face_dirs`).
 * **Forces**: `GpuRunner3::wall_forces` adds the shear of the no-slip faces, reduced on the device (`TractionFace3`: class, direction, face index, sign, area, `x`; `viscous_wall_forces`), to the pressure force of its
-  class, the base wall's shear excluded (the 2D drag has none); the monitor of the stop rule is the total `ca`. `friction_report` (host, once per run) gives CD friction and `y+ max` as the 2D solver reports them.
-* **Runner**: `GpuRunner3::new_rans(case, prec, Viscous, RansOpts3)`; `run_on` forces `Block` for a viscous host. `GpuRunner3::build` takes the host solver from `cache3::shared()` (`build_solver_cached`).
+  class (`WallForces::shear`, `[all faces, faces up to the base station]` like the pressure; the base wall's shear included as on the CPU); the monitor of the stop rule is the total `ca`; `y_plus_report`
+  (host, once per run) fills `PointResult3::y_plus_max` and `cp_base`.
+* **Runner**: `GpuRunner3::new(case, prec)` runs a `Case3::viscous` case (the host solver comes from `cache3::shared()` with `set_viscous_with` applied); `run_on` takes `Block` unless the case asks for the
+  diagonal solve explicitly (the diagonal default of `Numerics3::implicit_for(true)` blows up on the finned M 3 / 6 degree half domain at `cfl_max` 10 and 5, is stable at 3, and Block is stable; ISSUES #24) and
+  feeds the mean-stationary rule (chunks of 10 iterations after `mean_from`).
+* **Motor jet** (CPU b71420f, `Solver3::set_jet`): `LazySolver3::new_with_jet` marks the `Part::Jet` cells solid and not wall (`wall` mask, `LGeo3`), the exit-face stencil is `(jet, jet, p0, p1)`
+  (`SolidFaces3::{ja, jb}`, `solid_fluxes3`), the implicit factor sees the padded jet state with no wall ghost, no wall Jacobian and no sub-diagonal block, the viscous side of the exit reads the jet
+  cell's own data (`VFace3.ghost` false for `SideKind::Jet`; `jet_fix_cell3`: the gradient of the fluid cell behind the exit; `mu(T_jet)` is the cell pass's own; `jet_fix_turb3`: `k`, `omega`,
+  `mu_t = rho_jet k / omega` re-stored after every turbulence update, which zeroes solid cells), `set_state` / `set_jet` keep the jet cells at the jet state (a reset, a warm start at another Mach number).
 
 Tests (`tests/s5b.rs`, through gpuq, 10 x 8 x 6 skewed box with a no-slip block and a dead block, 30 iterations from the free stream, `max |dU| / (1 + |U|)` against the f64 CPU): laminar M 0.3 / 2 explicit f32 6.6e-7 / 1.3e-6,
 df32 7.6e-12 / 1.5e-11, block f32 3.6e-7 / 4.0e-7, df32 3.3e-9 / 1.0e-8; SST M 0.3 Re 2e3 / 2e5 explicit f32 7.3e-7 / 6.8e-7, df32 1.1e-12 / 8.1e-12, block f32 3.8e-7 / 4.7e-7, df32 4.1e-9 / 3.9e-9, with
@@ -1387,3 +1394,22 @@ the G3 wedge (156 x 122, level 0, M 0.5, the 2D case's block + `P` numerics, wal
 Plates (`plates_gpu --case g1|g2|g2r|yplus:<y+>`, the step-free boundary-wall plate of `plate3`, `Block`, `ImplicitParams::VISCOUS`, df32; `--cpu` runs the CPU on the same case): G1 `cf` +0.65 % / +1.64 % against Blasius at x = 0.4955 /
 0.8909 in 1250 iterations (CPU +0.65 / +1.64, 1250); G2 -4.25 % against the correlation at 0.9615 in 703 iterations (CPU -4.25, 709; 2D -4.25, 717); G2r +0.23 % against Mills-Hang (2D +0.20); `y+` sweep at 0.9615
 (vs `y+` 0.5): 1: -2.5 %, 5: +4.0 %, 15: -1.1 %, 30: -0.4 %, all inside the 5 % band.
+
+#### Compute time of the RANS loop (3090, f32, Luma `5a592c4`; `bench3 --case wedge-rans:0.5|sector-rans:2.0 --stages`, `BOWSHOCK_TIMING=1`)
+
+What made a RANS wedge cost 32 ms per iteration against 0.8 ms in 2D was never the kernels. (1) `Array::zeros_on` + `put` inside the traced step (`wall_state_pass3`, `wall_speed_grid3`) is a host clear, which aborts Luma's
+recording of the loop: every iteration then re-traced the whole step and ran it eagerly (25-50 ms of host time; found by the Luma session, fixed by a gather + select: 32.5 -> 0.60 ms per iteration f32, 28.4 -> 1.08 ms df32). Never
+call `zeros_on`, `put`, `to_vec` or anything that needs a real buffer inside `step3`. (2) The runner paid, per 50 (10 after `mean_from`) iterations, a re-trace of the loop (`iterate_until_all`, 100-150 ms) and a fresh eager evaluation
+of the viscous residual for the forces (`lift_forces`, 8-65 ms, 73 launches). Now: `luma::compile_until_all` traces the loop once per (limiter, configuration) (`LazySolver3::run_monitored`, `CompiledLoop3`; the setters that change what the step
+reads drop it) and the step computes the forces itself (`set_force_monitor`: `[Fx, Fz, Mz]` of the classes of `lift_forces` from the pressure and the viscous face fluxes the step has anyway, state slot 10, recorded per iteration in the
+history; entry `i` is the state step `i` started from, one iteration old; the one exact `lift_forces` is the result's; agreement with the exact device sums 8e-8 f32 / 1.5e-15 df32 wedge, 5e-8 sector).
+
+Step (wedge 19 032 cells, f32 / df32, sub_iters 3): inviscid fluxes 0.043 / 0.26 ms, viscous cell pass 0.008 / 0.020, wall state 0.030 / 0.094, viscous faces 0.017 / 0.069, residual 0.010 / 0.022, lambdas 0.011 / 0.020, lhs 0.007 / 0.019, block
+assembly 0.058, line solves (7) 0.31, defects 0.033, SST update 0.10 / 0.22; 0.66 / 1.14 ms in 67 / 72 launches (+ the force monitor: 71 / 76). Sector (677 376 cells): 10.9 ms f32 (90 launches), 15.9 ms df32 (95).
+End to end: G3 M0.5 wedge 2600 iterations 4.0 s (f32), the 10-Mach RANS table 41.9 s (2D 18 s; 871 s before), G-F1 sector points 7100 iterations 89.6 s (M0.5) and 6940 in 78.7 s (M2.0). f32 and df32 agree on the RANS wedge to 5 digits of
+CD (G-V3 0.213277 both; G3 M0.5 0.26710 both), so the gates and the facade run f32. Luma main (`compile_until_all`, kernels independent of array extents) is 5-9 % faster than 0.4.1 on this loop; the workspace pins it by git rev.
+Axis cells of a wedge: the density residual norm leaves the axis-run cells out and their time step is at most `2 r_c / c` (CPU c5aa96e65d), on the device in `residual_norm3` / `cell_residual3` / `pseudo_dt3`.
+
+Device memory (`GpuSolver3::memory_report`, `bench3 --mem`; Coarse 4-fin sector, 677 376 cells): the arrays the solver holds are 412 MiB f32 (638 B/cell: Geo3 faces 73, solid-face masks 68, LGeo3 187, VGeo3 134, SST 123, state 32) / 527 MiB df32;
+the process peak is 5570 MiB f32 / 9254 MiB df32, so about 7.5 kB per cell is transient buffers of the compiled step (face matrices, `lo`/`d`/`up` stacks, line-solve scratch, gradients). The 3D wedge: 15 MiB held (830 B/cell).
+`bench3 --stage` and the ledger give the split; the lever is buffer reuse inside the compiled loop, not the held arrays.

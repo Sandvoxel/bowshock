@@ -8,9 +8,9 @@
 use bowshock_cfd::gas3::{Cons3, Prim3, GAMMA};
 use bowshock_cfd::gpu::Staging;
 use bowshock_cfd::grid3::{Grid3, Part, SolidBox, Symmetry, PART_FLUID};
-use bowshock_cfd::implicit::ImplicitParams;
-use bowshock_cfd::solver::{Turbulence, Viscous};
+use bowshock_cfd::implicit_params::ImplicitParams;
 use bowshock_cfd::solver3::{Config3, Scheme3};
+use bowshock_cfd::sst::{Turbulence, Viscous};
 use bowshock_cfd::turbulence3::{self as t3, Blend, CellIn, CellTerms, ScalarBc, ScalarSides, Sst, TFace, TurbIn, TurbModel, Update};
 use bowshock_cfd::viscous3::{self as v3, face_dirs, face_of, face_shape, face_sides3, Grad3, SymSides};
 use bowshock_cfd::walldist3::{wall_distance3, wall_faces};
@@ -82,7 +82,7 @@ fn box_config() -> Config3 {
     Config3 {
         freestream: [1.0, 0.8, 0.0, 0.0, 1.0 / GAMMA],
         cfl: 0.5,
-        limiter: bowshock_cfd::flux::Limiter::Minmod,
+        limiter: bowshock_cfd::limiter::Limiter::Minmod,
         first_order_iters: 5,
         low_mach: false,
         scheme: Scheme3::Implicit(ImplicitParams::DEFAULT),
