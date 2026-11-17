@@ -39,7 +39,7 @@ use crate::simulate::format::with_unit;
 use crate::units::{Quantity, UnitSystem};
 
 /// Bump when what a stored table means changes (solver, grid level, how the parts are mapped): old tables then read as stale.
-const SOLVER_REV: u64 = 4;
+const SOLVER_REV: u64 = 5;
 /// Relative drag tolerance of the solver's stop rule: a point ends once its total drag varies by less than this over 500
 /// iterations. Measured on the example rocket (coarse grid, RTX 3090, 10 points): about 29 000 iterations in all against about
 /// 82 000 for the default rule, the worst point within 0.39 % of its 12 000-iteration value (the aim is 1 %).
@@ -59,7 +59,7 @@ const INTERIOR: [f64; 8] = [0.5, 0.8, 0.9, 1.0, 1.1, 1.3, 1.7, 2.3];
 /// An interior node this close to an end of the range is left out (the end stands for it).
 const NODE_GAP: f64 = 0.12;
 /// Bump when what a stored 3D stability solve means changes (solver, grid, how the forces are reduced).
-const LIFT_REV: u64 = 3;
+const LIFT_REV: u64 = 4;
 /// The Mach nodes of a 3D stability solve (sparse: each costs two 3D Euler runs); the solve takes those inside the plotted range.
 pub const LIFT_INTERIOR: [f64; 8] = [0.5, 0.8, 0.95, 1.1, 1.3, 1.7, 2.3, 3.0];
 /// The angles of attack (degrees) every node is solved at.
