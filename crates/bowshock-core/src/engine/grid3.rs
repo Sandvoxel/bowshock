@@ -25,7 +25,9 @@
 //!   four rows above the fin tip. The radial fractions are remapped so that a node row lies exactly on the fin tip. Fins are built on the sting
 //!   grid only for now.
 
-use super::body_grid::{axial_nodes, base_domain_grid, radial_fractions, two_sided_nodes, BaseGridParams, LargeGridParams};
+use super::body_grid::{
+    axial_nodes, base_axial_nodes, base_domain_grid, base_rows_below, radial_fractions, two_sided_nodes, BaseBody, BaseGridParams, LargeGridParams,
+};
 use crate::error::Error;
 use crate::fins::normalised;
 use crate::spec::FinProfile;
@@ -106,7 +108,7 @@ impl FinStack {
 #[derive(Clone, Debug)]
 pub struct Grid3Params {
     pub sting: LargeGridParams,
-    /// The base-wake meridian grid: used instead of `sting` when set (no fins on it yet).
+    /// The base-wake meridian grid: used instead of `sting` when set (the product grid; fins stand on it as on the sting grid).
     pub base: Option<BaseGridParams>,
     pub fins: Option<Fins3>,
     /// Azimuthal cells over the domain (the plan default is `24 << level` over `[0, pi]`, see [`Grid3Params::default_nk`]); ignored with a `fin_stack`.
@@ -501,9 +503,23 @@ fn fan(dx: f64, cands: &[(usize, f64, f64)]) -> Option<(usize, usize, f64)> {
     best.map(|b| (b.1, b.2, b.3))
 }
 
+/// What the fins sit on: the body of the meridian grid, the cell counts that find its segments among the axial nodes, and the radial fractions of the rows above
+/// the body surface (`sj0`, `0` at the surface, `1` at the outer boundary, first cell `dr_wall` of the grid).
+struct Host<'a> {
+    body: &'a BaseBody,
+    n_up: usize,
+    n_nose: usize,
+    n_seg: &'a [usize],
+    r_far: f64,
+    sj0: Vec<f64>,
+    /// The nodes behind the base are the wake grid's and stay as the finless grids have them (flush fins do not regrade the wake: the inviscid base drag
+    /// depends on the first wake cells, by 10 % for a cell a third as long). On the sting grid the body goes on behind the base and the fan may use it.
+    keep_wake: bool,
+}
+
 /// Rebuild the tube segment that carries the fins in `xs` and compute the radial remap.
-fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>) -> Result<FinPlan, Error> {
-    let sp = &p.sting;
+fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>, host: &Host) -> Result<FinPlan, Error> {
+    let (nj0, r_far) = (host.sj0.len() - 1, host.r_far);
     let bad = |m: &str| Err(Error::InvalidInput(m.to_string()));
     let ok = |v: f64| v.is_finite();
     if !(f.count >= 1 && ok(f.root_chord) && f.root_chord > 0.0 && ok(f.tip_chord) && f.tip_chord >= 0.0 && ok(f.span) && f.span > 0.0)
@@ -511,7 +527,7 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>) -> Result<FinPlan, E
     {
         return bad("3D fins need count >= 1, positive root chord, span and thickness, tip chord >= 0 and te_to_base >= 0");
     }
-    let bb = &sp.body;
+    let bb = host.body;
     let x_te_root = bb.x_base() - f.te_to_base;
     let x_le_root = x_te_root - f.root_chord;
     let nseg = bb.segments.len();
@@ -522,8 +538,8 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>) -> Result<FinPlan, E
             bb.segments[k].slope == 0.0 && x_le_root >= x0 - 1e-9 && x_te_root <= x0 + bb.segments[k].length + 1e-9
         })
         .ok_or_else(unsupported)?;
-    let a = sp.n_up + sp.n_nose + sp.n_seg[..k].iter().sum::<usize>();
-    let b_old = a + sp.n_seg[k];
+    let a = host.n_up + host.n_nose + host.n_seg[..k].iter().sum::<usize>();
+    let b_old = a + host.n_seg[k];
     let (x_a, x_b) = (xs[a], xs[b_old]);
     let x_le_root = if x_le_root - x_a > 1e-9 { x_le_root } else { x_a };
     let x_te_root = if x_b - x_te_root > 1e-9 { x_te_root } else { x_b };
@@ -539,7 +555,7 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>) -> Result<FinPlan, E
     // to the first original node where the spacing has caught up with the original one (ratio <= 1.5 on both sides).
     // Candidates: `(node, distance from the fin edge, width of the original cell beyond the node)`.
     let up: Vec<(usize, f64, f64)> = (a..b_old).rev().filter(|&o| x_le_root - xs[o] > 1e-9).map(|o| (o, x_le_root - xs[o], xs[o] - xs[o - 1])).collect();
-    let o_max = if flush { (b_old + 60).min(xs.len() - 1) } else { b_old };
+    let o_max = if flush && !host.keep_wake { (b_old + 60).min(xs.len() - 1) } else { b_old };
     let down: Vec<(usize, f64, f64)> = (a..=o_max)
         .filter(|&o| xs[o] - x_te_root > 1e-9)
         .map(|o| (o, xs[o] - x_te_root, if o + 1 < xs.len() { xs[o + 1] - xs[o] } else { xs[o] - xs[o - 1] }))
@@ -577,15 +593,15 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>) -> Result<FinPlan, E
     *xs = new;
 
     let r_t = bb.station(k).1;
-    if sp.r_far.is_nan() || sp.r_far <= r_t + f.span || sp.nj < 6 {
+    if r_far.is_nan() || r_far <= r_t + f.span || nj0 < 6 {
         return Err(Error::Grid("the fin tip must lie inside the domain".to_string()));
     }
-    let sj0 = radial_fractions(sp.dr_wall, sp.r_far, sp.nj);
-    let target = f.span / (sp.r_far - r_t);
-    let j_tip0 = (1..=sp.nj).min_by(|&a, &b| (sj0[a] - target).abs().total_cmp(&(sj0[b] - target).abs())).unwrap();
+    let sj0 = host.sj0.clone();
+    let target = f.span / (r_far - r_t);
+    let j_tip0 = (1..=nj0).min_by(|&a, &b| (sj0[a] - target).abs().total_cmp(&(sj0[b] - target).abs())).unwrap();
     let (sj, s_remap, j_tip) = match p.span_cells {
         None => {
-            let s_remap: Vec<f64> = (0..=sp.nj)
+            let s_remap: Vec<f64> = (0..=nj0)
                 .map(|j| {
                     if j == j_tip0 {
                         target
@@ -628,7 +644,7 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>) -> Result<FinPlan, E
                 }
                 0.5 * (lo + hi)
             };
-            let mut m = (sp.nj - j_tip0).max(4);
+            let mut m = (nj0 - j_tip0).max(4);
             while growth(m) > 1.2 {
                 m += 1;
                 if m > 2000 {
@@ -671,25 +687,58 @@ fn domain_span(p: &Grid3Params) -> Result<(f64, Symmetry), Error> {
     })
 }
 
-/// Build the 3D grid. With fins the grid has `sting.nj`, `nk` cells in `j`, `k` and the axial count of `axial_nodes` changed by
-/// the rebuilt fin segment.
+/// Build the 3D grid. With fins the grid has `nk` cells in `k` and the axial count of the meridian grid changed by the rebuilt fin segment; the rows are
+/// those of the sting grid (`sting.nj`) or the base-wake grid (`n_sting + n_gap + nj_out`), regraded so that a node row lies on the fin tip.
+///
+/// On the base-wake grid the fins stand on the rows above the body surface (`j >= j_off = n_sting + n_gap`, the rows below are the solid body block and the wake
+/// gap). A fin whose trailing edge is flush with the base (`te_to_base = 0`) ends on the base plane: its trailing-edge face (`+i`, rows `j_off..j_off + j_tip`)
+/// is coplanar with the base face (rows below `j_off`, the body block's `+i` face) and joins it along the root of the trailing edge, so the closed body is one
+/// plane `x = x_base` there. Behind the plane the layer continues as fluid cells that taper over four columns to the nominal width; below the base radius
+/// (the wake rows under the surface) the layer keeps the angle it has on the surface row, so it is a thin sector that narrows to the axis, never a jump.
 pub fn body_grid3(p: &Grid3Params) -> Result<Grid3, Error> {
-    if let Some(bp) = &p.base {
+    if let (Some(bp), None) = (&p.base, &p.fins) {
         return base_grid3(p, bp);
     }
-    let sp = &p.sting;
     let (span, sym) = domain_span(p)?;
     let wedge = sym == Symmetry::Wedge;
     let nk_req = if wedge { 1 } else { p.nk };
     if nk_req < 2 && !wedge && p.fin_stack.is_none() {
         return Err(Error::Grid("nk >= 2 is required".to_string()));
     }
-    if !(sp.nj >= 1 && sp.dr_wall > 0.0 && sp.r_far > 0.0) {
-        return Err(Error::Grid("nj >= 1, dr_wall > 0 and r_far > 0 are required".to_string()));
-    }
-    let mut xs = axial_nodes(sp)?;
+    // the meridian grid the fins stand on: its axial nodes, the host data of `plan_fins`, the first row above the body surface
+    let (mut xs, host, j_off) = match &p.base {
+        None => {
+            let sp = &p.sting;
+            if !(sp.nj >= 1 && sp.dr_wall > 0.0 && sp.r_far > 0.0) {
+                return Err(Error::Grid("nj >= 1, dr_wall > 0 and r_far > 0 are required".to_string()));
+            }
+            let host = Host {
+                body: &sp.body,
+                n_up: sp.n_up,
+                n_nose: sp.n_nose,
+                n_seg: &sp.n_seg,
+                r_far: sp.r_far,
+                sj0: radial_fractions(sp.dr_wall, sp.r_far, sp.nj),
+                keep_wake: false,
+            };
+            (axial_nodes(sp)?, host, 0)
+        }
+        Some(bp) => {
+            let host = Host {
+                body: &bp.body,
+                n_up: bp.n_up,
+                n_nose: bp.n_nose,
+                n_seg: &bp.n_seg,
+                r_far: bp.r_far,
+                sj0: radial_fractions(bp.dr_wall, bp.r_far - bp.body.base_radius(), bp.nj_out),
+                keep_wake: true,
+            };
+            (base_axial_nodes(bp)?.0, host, bp.n_sting + bp.n_gap)
+        }
+    };
+    let r_far = host.r_far;
     let plan = match &p.fins {
-        Some(f) => Some((plan_fins(p, f, &mut xs)?, f)),
+        Some(f) => Some((plan_fins(p, f, &mut xs, &host)?, f)),
         None => None,
     };
     let root = plan.as_ref().map(|(pl, f)| (pl.r_t, 0.5 * f.thickness));
@@ -706,26 +755,35 @@ pub fn body_grid3(p: &Grid3Params) -> Result<Grid3, Error> {
         _ => nk_req,
     };
     let ni = xs.len() - 1;
+    // the base plane among the nodes (the rebuilt fin segment keeps it)
+    let i_end = p.base.as_ref().map(|bp| {
+        let xb = bp.body.x_base();
+        xs.partition_point(|&v| v < xb - 1e-9 * (1.0 + xb.abs()))
+    });
     let sj = match &plan {
         Some((pl, _)) => pl.sj.clone(),
-        None => radial_fractions(sp.dr_wall, sp.r_far, sp.nj),
+        None => host.sj0.clone(),
     };
-    let nj = sj.len() - 1;
+    let nj = j_off + sj.len() - 1;
     let n2 = (ni + 1) * (nj + 1);
+    let below = match (&p.base, i_end) {
+        (Some(bp), Some(ie)) => base_rows_below(bp, &xs, ie)?,
+        _ => Vec::new(),
+    };
 
     // (x, r) of every (i, j) node
     let mut xn = vec![0.0; n2];
     let mut rn = vec![0.0; n2];
-    let r_in: Vec<f64> = xs.iter().map(|&x| sp.body.r(x)).collect();
+    let r_in: Vec<f64> = xs.iter().map(|&x| host.body.r(x)).collect();
     for j in 0..=nj {
         for i in 0..=ni {
             xn[j * (ni + 1) + i] = xs[i];
-            rn[j * (ni + 1) + i] = r_in[i] + sj[j] * (sp.r_far - r_in[i]);
+            rn[j * (ni + 1) + i] = if j < j_off { below[j * (ni + 1) + i] } else { r_in[i] + sj[j - j_off] * (r_far - r_in[i]) };
         }
     }
     // per-row planform (frac along the span, LE position, chord) and the half-angle of the fin layer at each column
     let mut alpha = Vec::new();
-    // half-thickness of the fin layer at every node (`NaN` on the axis)
+    // half-thickness of the fin layer at every node (`NaN` on the axis and below the body surface)
     let mut half_w = Vec::new();
     if let Some((pl, f)) = &plan {
         let wcol = |i: usize| -> f64 {
@@ -736,22 +794,24 @@ pub fn body_grid3(p: &Grid3Params) -> Result<Grid3, Error> {
                 (1.0 - (d as f64 - 4.0) / 4.0).max(0.0)
             }
         };
-        for j in 0..=nj {
+        for j in j_off..=nj {
             for i in 0..=ni {
-                let s = sj[j] + wcol(i) * (pl.s_remap[j] - sj[j]);
-                rn[j * (ni + 1) + i] = r_in[i] + s * (sp.r_far - r_in[i]);
+                let s = sj[j - j_off] + wcol(i) * (pl.s_remap[j - j_off] - sj[j - j_off]);
+                rn[j * (ni + 1) + i] = r_in[i] + s * (r_far - r_in[i]);
             }
         }
-        let row = |j: usize| -> (f64, f64, f64) {
-            let r = pl.r_t + pl.s_remap[j.min(pl.j_tip)] * (sp.r_far - pl.r_t);
+        // planform of the row `jj` above the surface
+        let row = |jj: usize| -> (f64, f64, f64) {
+            let r = pl.r_t + pl.s_remap[jj.min(pl.j_tip)] * (r_far - pl.r_t);
             let frac = ((r - pl.r_t) / f.span).clamp(0.0, 1.0);
             (frac, pl.x_le_root + f.sweep * frac, f.root_chord + (f.tip_chord - f.root_chord) * frac)
         };
         // sweep and taper: piecewise-linear remap of the segment nodes
         let nodes0: Vec<f64> = xs.clone();
-        for j in 0..=(pl.j_tip + 3).min(nj) {
-            let vj = if j <= pl.j_tip { 1.0 } else { 1.0 - (j - pl.j_tip) as f64 / 4.0 };
-            let (_, x_le, chord) = row(j);
+        for jj in 0..=(pl.j_tip + 3).min(nj - j_off) {
+            let j = j_off + jj;
+            let vj = if jj <= pl.j_tip { 1.0 } else { 1.0 - (jj - pl.j_tip) as f64 / 4.0 };
+            let (_, x_le, chord) = row(jj);
             let mut knots = vec![(pl.i_seg0, nodes0[pl.i_seg0], nodes0[pl.i_seg0])];
             if pl.i_le == pl.i_seg0 {
                 knots.clear();
@@ -777,18 +837,19 @@ pub fn body_grid3(p: &Grid3Params) -> Result<Grid3, Error> {
         alpha = vec![0.0; n2];
         half_w = vec![f64::NAN; n2];
         let t = f.thickness;
-        let h_at = |i: usize, j: usize| -> f64 {
-            let (_, _, chord) = row(j);
+        let h_at = |i: usize, jj: usize| -> f64 {
+            let (_, _, chord) = row(jj);
             let xi = (nodes0[i] - pl.x_le_root) / f.root_chord;
             half_thickness(&f.profile, t, chord, xi)
         };
-        for j in 0..=nj {
+        for j in j_off..=nj {
+            let jj = j - j_off;
             for i in 0..=ni {
                 let r = rn[j * (ni + 1) + i];
                 let di = if i < pl.i_le { pl.i_le - i } else { i.saturating_sub(pl.i_te) };
-                let dj = j.saturating_sub(pl.j_tip);
+                let dj = jj.saturating_sub(pl.j_tip);
                 let d = di.max(dj);
-                let (ic, jc) = (i.clamp(pl.i_le, pl.i_te), j.min(pl.j_tip));
+                let (ic, jc) = (i.clamp(pl.i_le, pl.i_te), jj.min(pl.j_tip));
                 let h_f = h_at(ic, jc);
                 let nominal = 0.5 * r * cell_ang;
                 let w = if d == 0 { h_f } else { h_f + (nominal - h_f) * smoothstep(d as f64 / 4.0) };
@@ -824,19 +885,26 @@ pub fn body_grid3(p: &Grid3Params) -> Result<Grid3, Error> {
     for j in 0..=nj {
         for i in 0..=ni {
             let c = j * (ni + 1) + i;
-            let (xc, r) = (xn[c], rn[c]);
-            let in_plan = plan.as_ref().is_some_and(|(pl, _)| (pl.i_le..=pl.i_te).contains(&i) && j <= pl.j_tip);
+            // the rows below the body surface (base-wake grid: the solid body block, and behind the base plane the wake rows down to the axis) take the node
+            // angles and the scales of the surface row `j_off` at the column: the node lines are planes through the axis there, so no cell is sheared where the
+            // layer is wide on the surface (a stack cell folded otherwise, and so did the cells of a wall-resolved grid, whose height is smaller than the
+            // lateral shift of the side nodes by the polygon scale), and the layer tapering behind the trailing edge is a thin sector down to the axis, not a
+            // width that jumps at the base radius
+            let cr = if plan.is_some() && j < j_off { j_off * (ni + 1) + i } else { c };
+            // the rows of the body block upstream of the nose tip lie below the axis: clamped onto it as in `revolve`, their cells are dead
+            let (xc, r, r_ref) = (xn[c], rn[c].max(0.0), rn[cr].max(0.0));
+            let in_plan = plan.as_ref().is_some_and(|(pl, _)| (pl.i_le..=pl.i_te).contains(&i) && cr >= j_off * (ni + 1) && cr / (ni + 1) - j_off <= pl.j_tip);
             let scale_of = |theta: &[f64]| polygon_scale_where(theta, |k| !(in_plan && layer_cell[k]));
             match &lay {
                 Some(l) => {
-                    fill_theta(&mut theta, l, alpha[c], span);
-                    if !half_w[c].is_nan() {
+                    fill_theta(&mut theta, l, alpha[cr], span);
+                    if !half_w[cr].is_nan() {
                         // the nodes of a line are scaled by `polygon_scale` (the rings keep the circle's area), which moves the fin faces out by that factor:
                         // put every side node at the angle whose scaled offset is the half-thickness (the scale depends on the neighbouring angles: a few passes)
                         for _ in 0..8 {
                             let s = scale_of(&theta);
                             for &(k, th, sign) in &sides {
-                                theta[k] = th + sign * (half_w[c] / (r * s[k])).min(0.99).asin();
+                                theta[k] = th + sign * (half_w[cr] / (r_ref * s[k])).min(0.99).asin();
                             }
                         }
                     }
@@ -857,30 +925,58 @@ pub fn body_grid3(p: &Grid3Params) -> Result<Grid3, Error> {
         }
     }
     let mut g = Grid3::try_from_nodes(ni, nj, nk, x, y, z).map_err(Error::Grid)?;
-    g.axis = vec![AxisRun { j: 0, i: 0..sp.n_up }];
     g.sym = sym;
     g.theta_span = span;
     g.roughness = p.roughness;
-    // the body is the `j = 0` wall: its runs by body segment (the nose, each aft segment, then the sting extension)
     let col = |x: f64| xs.partition_point(|&v| v < x - 1e-9 * (1.0 + x.abs())).min(ni);
-    let bb = &sp.body;
-    let mut i0 = sp.n_up;
-    for s in 0..=bb.segments.len() {
-        let x_end = if s == 0 { bb.body.nose_length() } else { bb.station(s).0 };
-        let i1 = col(x_end).max(i0);
-        g.wall_j0.push((i0..i1, Part::Body(s as u16)));
-        i0 = i1;
+    let bb = host.body;
+    match (&p.base, i_end) {
+        (Some(bp), Some(ie)) => {
+            // the body is a solid block under row `j_off` from the nose tip to the base plane (its cells upstream of the tip are dead, see `revolve`), split by
+            // segment for the force classes, with the sting block behind the base; the axis rows are the line `j_off` upstream and the rows `j = 0` in the wake
+            let n_up = bp.n_up;
+            g.axis.push(AxisRun { j: j_off, i: 0..n_up });
+            if bp.n_sting == 0 {
+                g.axis.push(AxisRun { j: 0, i: ie..ni });
+            }
+            let (rows, ks) = (0..j_off, 0..nk);
+            g.mark_solid(SolidBox { i: 0..n_up, j: rows.clone(), k: ks.clone() }, None);
+            let mut i0 = n_up;
+            for s in 0..=bb.segments.len() {
+                let x_end = if s == 0 { bb.body.nose_length() } else { bb.station(s).0 };
+                let i1 = col(x_end).max(i0);
+                g.mark_solid(SolidBox { i: i0..i1, j: rows.clone(), k: ks.clone() }, Some(Part::Body(s as u16)));
+                i0 = i1;
+            }
+            if i0 != ie {
+                return Err(Error::Grid(format!("the body block ends at {i0} but the base plane is node {ie}")));
+            }
+            if bp.n_sting > 0 {
+                g.mark_solid(SolidBox { i: ie..ni, j: 0..bp.n_sting, k: ks }, Some(Part::Sting));
+            }
+        }
+        _ => {
+            g.axis = vec![AxisRun { j: 0, i: 0..host.n_up }];
+            // the body is the `j = 0` wall: its runs by body segment (the nose, each aft segment, then the sting extension)
+            let mut i0 = host.n_up;
+            for s in 0..=bb.segments.len() {
+                let x_end = if s == 0 { bb.body.nose_length() } else { bb.station(s).0 };
+                let i1 = col(x_end).max(i0);
+                g.wall_j0.push((i0..i1, Part::Body(s as u16)));
+                i0 = i1;
+            }
+            g.wall_j0.push((i0..ni, Part::Sting));
+        }
     }
-    g.wall_j0.push((i0..ni, Part::Sting));
     if let (Some((pl, _)), Some(l)) = (&plan, &lay) {
         for &kf in &l.k_f {
-            g.mark_solid(SolidBox { i: pl.i_le..pl.i_te, j: 0..pl.j_tip, k: kf..kf + 1 }, Some(Part::Fin(0)));
+            g.mark_solid(SolidBox { i: pl.i_le..pl.i_te, j: j_off..j_off + pl.j_tip, k: kf..kf + 1 }, Some(Part::Fin(0)));
         }
     }
     for k in 0..nk {
         for j in 0..nj {
             for i in 0..ni {
-                if !g.is_solid(i, j, k) && g.vol[g.cell(i, j, k)] <= 0.0 && i >= sp.n_up {
+                if !g.is_solid(i, j, k) && g.vol[g.cell(i, j, k)] <= 0.0 && (p.base.is_some() || i >= host.n_up) {
                     return Err(Error::Grid(format!("non-positive fluid cell volume at ({i},{j},{k})")));
                 }
             }
@@ -889,14 +985,22 @@ pub fn body_grid3(p: &Grid3Params) -> Result<Grid3, Error> {
     Ok(g)
 }
 
+/// A single-cell wedge of the angle `dtheta` on a 2D grid whose `j = 0` boundary is the body wall behind `n_axis` columns that lie on the axis (the validation
+/// cases' grids: the cone and the ogive, `bowshock_cfd::grid::cone_grid` and the ogive grid): area-preserving nodes, the axis run, the wall a body part.
+pub fn wedge_of_meridian(g2: &bowshock_cfd::grid::Grid, dtheta: f64, n_axis: usize) -> Result<Grid3, Error> {
+    let mut g = revolve(g2, 1, &[0.0, dtheta]).map_err(Error::Grid)?;
+    g.axis = vec![AxisRun { j: 0, i: 0..n_axis }];
+    g.sym = Symmetry::Wedge;
+    g.theta_span = dtheta;
+    g.wall_j0.push((n_axis..g.ni, Part::Body(0)));
+    Ok(g)
+}
+
 /// Build a finless grid on the base-wake meridian grid `bp` (`base_domain_grid`): the body block (the cells inside the body, from the nose tip to the
 /// base plane) is solid, split by body segment for the force classes, its cells upstream of the nose tip are dead (their nodes lie on or behind the axis,
 /// see `revolve`), a sting behind the base is its own part. Axis runs: the line `j = j_end` upstream of the nose and, without a sting, the rows
 /// `j = 0` behind the base.
 fn base_grid3(p: &Grid3Params, bp: &BaseGridParams) -> Result<Grid3, Error> {
-    if p.fins.is_some() {
-        return Err(Error::Unsupported("fins on the base-wake grid are not built yet".to_string()));
-    }
     let (span, sym) = domain_span(p)?;
     let nk = if sym == Symmetry::Wedge { 1 } else { p.nk };
     if nk < 2 && sym != Symmetry::Wedge {
@@ -949,12 +1053,12 @@ pub struct StackReport {
     pub cells: usize,
 }
 
-/// [`StackReport`] of the first fin layer of `g`; `None` without fins.
+/// [`StackReport`] of the first fin layer of `g` (at its root row, the body surface); `None` without fins.
 pub fn fin_stack_report(g: &Grid3) -> Option<StackReport> {
     let b = g.solid.iter().find(|b| b.k.len() == 1 && matches!(g.part_of(b.i.start, b.j.start, b.k.start), Some(Part::Fin(_))))?;
-    let i = (b.i.start + b.i.end) / 2;
+    let (i, j) = ((b.i.start + b.i.end) / 2, b.j.start);
     let node = |k: usize| {
-        let id = (k * (g.nj + 1)) * (g.ni + 1) + i;
+        let id = (k * (g.nj + 1) + j) * (g.ni + 1) + i;
         [g.y[id], g.z[id]]
     };
     // the fin's mid-plane azimuth: a half fin on the `theta = 0` plane or the end plane, else the middle of its two sides
@@ -973,7 +1077,7 @@ pub fn fin_stack_report(g: &Grid3) -> Option<StackReport> {
         q[0] * th.cos() - q[1] * th.sin()
     };
     let height = |k: usize| (off(k + 1) - off(k)).abs();
-    let ks: Vec<usize> = (b.k.end..g.nk).take_while(|&k| !g.is_solid(i, 0, k)).collect();
+    let ks: Vec<usize> = (b.k.end..g.nk).take_while(|&k| !g.is_solid(i, j, k)).collect();
     let first = *ks.first()?;
     let growth_max = ks.windows(2).map(|w| height(w[1]) / height(w[0])).fold(1.0, f64::max);
     Some(StackReport { y1: height(first), growth_max, cells: ks.len() })
@@ -1397,8 +1501,104 @@ mod tests {
         // the design's estimate for the example fin: nk 18 (y+ 15) and 30 (y+ 1)
         assert!(gf.nk > gc.nk && (12..=30).contains(&gc.nk) && gf.nk >= 20, "nk {} {}", gc.nk, gf.nk);
         // the lift tier keeps uniform cells on the half domain
-        let lift = Case3::base_half(2.0, 0.0, body, Tier::Lift(fl), 0);
+        let lift = Case3::base_half(2.0, 0.0, body, None, Tier::Lift(fl), 0);
         assert_eq!(lift.grid.nk, 32);
         assert!(lift.grid.base.as_ref().unwrap().dr_wall > 30.0 * viscous.grid_base.dr_wall);
+    }
+
+    /// ANF sector on the base-wake grid (level 0) with `nk` cells and the fins' trailing edge `te_to_base` ahead of the base.
+    fn base_fin_grid(profile: FinProfile, te_to_base: f64, nk: usize) -> (Grid3Params, Grid3) {
+        use crate::engine::case3::{Case3, Tier};
+        let mut f = anf_fins(profile);
+        f.te_to_base = te_to_base;
+        let mut p = Case3::sector(2.0, Case3::anf_body(), f, Tier::Euler, 0).grid;
+        p.nk = nk;
+        let g = body_grid3(&p).unwrap();
+        (p, g)
+    }
+
+    /// `(base plane node, first row above the body)` of a base-wake grid with fins.
+    fn base_plane(g: &Grid3) -> (usize, usize) {
+        let body: Vec<&SolidBox> = g.solid.iter().filter(|b| matches!(g.part_of(b.i.start, b.j.start, b.k.start), Some(Part::Body(_)))).collect();
+        (body.iter().map(|b| b.i.end).max().unwrap(), body.iter().map(|b| b.j.end).max().unwrap())
+    }
+
+    #[test]
+    fn flush_fins_on_the_base_grid_end_on_the_base_plane_and_taper_behind_it() {
+        let (p, g) = base_fin_grid(FinProfile::Square, 0.0, 6);
+        let (i_end, j_off) = base_plane(&g);
+        let fin = g.solid.iter().find(|b| matches!(g.part_of(b.i.start, b.j.start, b.k.start), Some(Part::Fin(0)))).unwrap();
+        assert_eq!((fin.i.end, fin.j.start, fin.k.len()), (i_end, j_off, 1), "the fin ends on the base plane and stands on the body surface row");
+        // the trailing-edge face of the fin and the base face are one plane `x = x_base`, normal +x
+        let x_base = p.base.as_ref().unwrap().body.x_base();
+        let mut faces = 0;
+        for j in (0..j_off).chain(fin.j.clone()) {
+            let f = &g.iface[(fin.k.start * g.nj + j) * (g.ni + 1) + i_end];
+            if f.area > 1e-14 {
+                assert!((f.c[0] - x_base).abs() < 1e-12 && (f.n[0] - 1.0).abs() < 1e-12, "row {j}: x {} normal {:?}", f.c[0], f.n);
+                faces += 1;
+            }
+        }
+        assert!(faces >= j_off - 2 + fin.j.len(), "{faces} faces on the plane");
+        // behind the plane: the layer is the fin's angle on every wake row below the surface (a sector to the axis) and tapers over the next columns
+        let theta = |i: usize, j: usize, k: usize| {
+            let id = (k * (g.nj + 1) + j) * (g.ni + 1) + i;
+            g.y[id].atan2(g.z[id])
+        };
+        let width = |i: usize, j: usize| theta(i, j, fin.k.end) - theta(i, j, fin.k.start);
+        let mut last = f64::INFINITY;
+        for i in i_end..i_end + 6 {
+            let w = width(i, j_off);
+            assert!(w > 0.0 && w <= last + 1e-12, "column {i}: width {w} after {last}");
+            last = w;
+            for j in 1..j_off {
+                // the surface row's side nodes are placed at the scaled offset (`1 + d^2/12`, here 0.2 %), the rows below at the plain angle
+                assert!((width(i, j) / w - 1.0).abs() < 5e-3, "column {i} row {j}: {} vs {w}", width(i, j));
+            }
+        }
+        // the layer at the base plane is the fin's: its full angle
+        assert!(width(i_end, j_off) > 0.07, "{}", width(i_end, j_off));
+    }
+
+    #[test]
+    fn fins_ahead_of_the_boattail_and_half_domains_build_on_the_base_grid() {
+        use crate::engine::case3::{Case3, Tier};
+        // a tube of 6 d then a 1 d boattail: the fins' trailing edge 1.2 d ahead of the base is on the tube
+        let body = BaseBody::cylinder(Body { nose: Nose::TangentOgive { fineness: 3.0 } }, 6.0).with_boattail(1.0, 5f64.to_radians());
+        let mut f = anf_fins(FinProfile::DoubleWedge);
+        f.te_to_base = 1.2;
+        f.span = 0.6;
+        let g = body_grid3(&Case3::sector(2.0, body.clone(), f.clone(), Tier::Euler, 0).grid).unwrap();
+        let (i_end, j_off) = base_plane(&g);
+        let fin = g.solid.iter().find(|b| matches!(g.part_of(b.i.start, b.j.start, b.k.start), Some(Part::Fin(0)))).unwrap();
+        assert!(fin.i.end < i_end && fin.j.start == j_off, "fin {:?} base plane {i_end}", fin);
+        for (count, nk) in [(4, 24), (3, 24), (2, 16)] {
+            let mut f = anf_fins(FinProfile::Square);
+            f.count = count;
+            let g = body_grid3(&Case3::base_half(2.0, 0.0, Case3::anf_body(), Some(f), Tier::Euler, 0).grid).unwrap();
+            let fins = g.solid.iter().filter(|b| matches!(g.part_of(b.i.start, b.j.start, b.k.start), Some(Part::Fin(0)))).count();
+            assert_eq!(fins, (count as usize).div_ceil(2), "N {count}: fin layers in the half domain");
+            let _ = nk;
+        }
+    }
+
+    #[test]
+    fn the_fin_stack_grid_on_the_base_grid_is_as_smooth_as_on_the_sting_grid() {
+        use crate::engine::case3::{Case3, Tier};
+        let fl = flow();
+        let sting = {
+            let mut p = params(0, Some(anf_fins(FinProfile::DoubleWedge)));
+            p.domain = Domain3::Sector;
+            p.fin_stack = Some(FinStack::from_flow(fl.re_c, fl.mach_max, 1.0, 15.0));
+            body_grid3(&p).unwrap()
+        };
+        let mut f = anf_fins(FinProfile::DoubleWedge);
+        f.count = 4;
+        let case = Case3::sector(2.0, Case3::anf_body(), f, Tier::Coarse(fl), 0);
+        let g = body_grid3(&case.grid).unwrap();
+        let (a, b) = (fin_stack_report(&sting).unwrap(), fin_stack_report(&g).unwrap());
+        eprintln!("stack on the sting grid {a:?} (nk {}), on the base grid {b:?} (nk {})", sting.nk, g.nk);
+        assert!((b.y1 / a.y1 - 1.0).abs() < 0.01 && b.growth_max <= 1.35 + 1e-9 && b.cells == a.cells, "{a:?} {b:?}");
+        assert_eq!(g.nk, sting.nk);
     }
 }

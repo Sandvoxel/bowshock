@@ -40,7 +40,7 @@ fn wedge(mach: f64) -> Case3 {
 
 /// The half domain (pitch-plane symmetry) on the tiny base-wake grid, 2 degrees incidence.
 fn half(mach: f64) -> Case3 {
-    let mut c = Case3::base_half(mach, 2f64.to_radians(), body(), Tier::Euler, 0);
+    let mut c = Case3::base_half(mach, 2f64.to_radians(), body(), None, Tier::Euler, 0);
     tiny_base(&mut c);
     c.grid.nk = 8;
     c
