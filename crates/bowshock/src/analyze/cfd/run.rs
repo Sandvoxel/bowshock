@@ -448,6 +448,12 @@ pub fn partial_of(plan: &Result<Plan, String>, table: &CfdTable, altitude: f64, 
     (1..nodes.len()).find(|&n| table.key == table_key(plan.geometry, altitude, &nodes[..n])).map(|n| (n, nodes.len()))
 }
 
+/// The 3D engine (`BOWSHOCK_ENGINE=3d`, [`solver::Engine::Solver3`]) solves the Euler equations only for now: the drag nodes of a solve under it leave out the viscous
+/// settings (fail loudly otherwise). One place, so the engine swap deletes it with the viscous path.
+fn solves_euler_only() -> bool {
+    solver::Engine::from_env() == solver::Engine::Solver3
+}
+
 /// A Mach number of the drag table, solved: its point (none when the solver gave none) and where.
 struct DragNode {
     point: Option<CfdPoint>,
@@ -572,21 +578,25 @@ pub(super) fn solve_sized(
             let mach = job.nodes[node];
             let mut analysis = solver::Analysis::new(&job.plan.body)
                 .map_err(|e| Failed::Message(e.to_string()))?
-                .viscous(solver::FlightConditions { atmosphere: solver::Atmosphere::Isa { altitude_m: altitude } })
-                .drag_tolerance(DRAG_TOLERANCE)
                 .resolution(match job.grid {
                     // Coarse is the default, for exploring; Medium (Refine) is about 3.5x slower per point and its Cd about 1 % different.
                     CfdGrid::Coarse => solver::Resolution::Coarse,
                     CfdGrid::Medium => solver::Resolution::Medium,
                 })
-                .roughness(job.plan.body_roughness)
                 .backend(session.backend())
                 .keep_fields(true);
+            // The 3D engine (BOWSHOCK_ENGINE=3d) solves the Euler equations only for now: a viscous request would fail, so the drag nodes ask for none of it.
+            if !solves_euler_only() {
+                analysis = analysis
+                    .viscous(solver::FlightConditions { atmosphere: solver::Atmosphere::Isa { altitude_m: altitude } })
+                    .drag_tolerance(DRAG_TOLERANCE)
+                    .roughness(job.plan.body_roughness);
+                if shared_grid {
+                    analysis = analysis.grid_mach(grid_mach);
+                }
+            }
             if let Some(fins) = &job.plan.fins {
                 analysis = analysis.fins(fins.clone());
-            }
-            if shared_grid {
-                analysis = analysis.grid_mach(grid_mach);
             }
             let progress = sink(started, cancel.clone(), send.clone(), false, machine);
             let mut polar = match session {
@@ -596,11 +606,15 @@ pub(super) fn solve_sized(
                 Session::Local { backend } => {
                     // A picture of the flow every few hundred iterations (the first is the grid with the free stream on it, at once).
                     // A remote worker brings back only the final field of the point: its snapshots stay on its side.
-                    if let Ok(first) = analysis.initial_field(mach) {
-                        send(Event::Field(FieldRef::from_2d(&first)));
+                    if !solves_euler_only() {
+                        if let Ok(first) = analysis.initial_field(mach) {
+                            send(Event::Field(FieldRef::from_2d(&first)));
+                        }
                     }
-                    let live = send.clone();
-                    analysis = analysis.on_field(solver::field::SNAPSHOT_INTERVAL, move |f| live(Event::Field(FieldRef::from_2d(&f))));
+                    let (live, live3) = (send.clone(), send.clone());
+                    analysis = analysis
+                        .on_field(solver::field::SNAPSHOT_INTERVAL, move |f| live(Event::Field(FieldRef::from_2d(&f))))
+                        .on_field3(solver::field::SNAPSHOT_INTERVAL, move |f| live3(Event::Field(FieldRef::of(f))));
                     let polar = analysis.on_progress(progress).run(&[mach]).map_err(|e| Failed::local(mach, e))?;
                     if polar.backend == solver::BackendUsed::Cpu {
                         // The GPU did not start: do not try it again for every point.
@@ -610,8 +624,11 @@ pub(super) fn solve_sized(
                 }
             };
             let cpu = polar.backend == solver::BackendUsed::Cpu;
+            // the final field: the axisymmetric solver's (2D), or the 3D engine's wedge (a Field3 the viewer shows side-on, like a 2D one)
             if let Some(field) = polar.points[0].field.take() {
                 send(Event::PointField { field: FieldRef::from_2d(&field) });
+            } else if let Some(field) = polar.points[0].field3.take() {
+                send(Event::PointField { field: FieldRef::of(field) });
             }
             let p = &polar.points[0];
             let stored = quality(p.quality).filter(|_| p.drag.total.is_finite()).map(|q| {

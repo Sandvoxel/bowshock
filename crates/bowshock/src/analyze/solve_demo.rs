@@ -1109,4 +1109,54 @@ mod tests {
         );
         assert!(picture.field.cells() > 100_000 && !picture.field.fin_theta.is_empty() && picture.field.iteration > 100);
     }
+
+    /// A real solve of the finless example with the 3D engine (`BOWSHOCK_ENGINE=3d`, GPU): the drag nodes are wedges, the angles the half domain on the base-wake grid.
+    /// The events reach the app like the legacy engine's, the drag nodes' final fields are wedge `Field3`s that the viewer shows side-on, and the table is stored.
+    /// `tools/gpuq/gpuq submit --host local --name engine3d-app -- env BOWSHOCK_ENGINE=3d cargo nextest run --release -p bowshock a_real_finless_3d_engine --run-ignored only --no-capture`.
+    #[test]
+    #[ignore = "BOWSHOCK_ENGINE=3d: solves a finless table and its angles with the 3D engine on the GPU"]
+    fn a_real_finless_3d_engine_table_through_the_app_has_wedge_fields() {
+        assert_eq!(solver::Engine::from_env(), solver::Engine::Solver3, "run with BOWSHOCK_ENGINE=3d");
+        let (mut app, serial) = app_with(&[Demo::RemoteSetup]);
+        let mut job = (*job(&app)).clone();
+        job.plan.fins = None;
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = log.clone();
+        let t = std::time::Instant::now();
+        let result = cfd::solve(&job, &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), move |e| sink.lock().unwrap().push(e));
+        let seconds = t.elapsed().as_secs_f64();
+        let mut events = std::mem::take(&mut *log.lock().unwrap());
+        let (snapshots, finals) =
+            (events.iter().filter(|e| matches!(e, Event::Field(_))).count(), events.iter().filter(|e| matches!(e, Event::PointField { .. })).count());
+        println!(
+            "ENGINE3D solve {seconds:.1} s, {} drag nodes + {} stability nodes, {snapshots} live snapshots, {finals} final fields",
+            job.nodes.len(),
+            job.stability.len()
+        );
+        events.push(Event::Finished(result));
+        feed(&mut app, serial, events);
+        let table = app.ctx().doc.rocket().cfd_table(1).expect("the solve is stored").clone();
+        println!("ENGINE3D table {} points; lift {:?}; notice: {}", table.points.len(), table.lift.as_ref().map(|l| l.points.len()), notice(&app));
+        println!("| Mach | Cd | pressure | base | quality |\n|---|---|---|---|---|");
+        for p in &table.points {
+            println!("| {:.2} | {:.4} | {:.4} | {:.4} | {:?} |", p.mach, p.cd, p.pressure, p.base, p.quality);
+        }
+        assert_eq!(table.points.len(), job.nodes.len(), "every drag node gave a point");
+        assert!(table.lift.is_some(), "the angles are in the table");
+        let store = &app.analyze().cfd.fields;
+        let drag_field = store.get(&table, table.points[table.points.len() / 2].mach, 0.0).expect("a wedge field at a drag node").clone();
+        println!(
+            "ENGINE3D drag field: {} cells, symmetry {:?}, caption M {} a {}",
+            drag_field.cells(),
+            drag_field.symmetry,
+            drag_field.mach,
+            drag_field.alpha_deg
+        );
+        assert!(matches!(drag_field.symmetry, solver::Symmetry::Axisymmetric { .. }));
+        // the viewer shows it side-on, like a 2D field
+        let mach = drag_field.mach;
+        press(&mut app, Message::Flow(flow_view::Msg::Open(true)));
+        press(&mut app, Message::Flow(flow_view::Msg::Pick(mach)));
+        assert_eq!(app.analyze().flow.mode(), flow_view::Mode::Side);
+    }
 }

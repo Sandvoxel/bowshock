@@ -40,6 +40,8 @@ mod fins;
 pub mod progress;
 pub mod spec;
 
+#[doc(hidden)]
+pub use analysis::Engine;
 pub use analysis::{
     Analysis, AnalysisSpec, Backend, BackendUsed, Condition, Drag, FinDrag, Forces, PointDetail, Polar, PolarPoint, Quality, Resolution, WallCp, Warning,
 };

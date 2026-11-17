@@ -109,6 +109,18 @@ fn an_analysis_spec_round_trips_through_json_and_rebuilds_the_analysis() {
     .is_err());
 }
 
+/// The engine is additive on the wire: a spec written before it (no `engine` key) is the legacy engine's, and the 3D engine survives the round trip.
+#[test]
+fn the_engine_of_a_spec_defaults_to_legacy_and_round_trips() {
+    let s = full_analysis().engine(bowshock_core::Engine::Solver3).spec().unwrap();
+    let back: bowshock_core::AnalysisSpec = roundtrip(&s);
+    assert_eq!(back.engine, bowshock_core::Engine::Solver3);
+    let mut v = serde_json::to_value(&s).unwrap();
+    v.as_object_mut().unwrap().remove("engine");
+    let old: bowshock_core::AnalysisSpec = serde_json::from_value(v).unwrap();
+    assert_eq!(old.engine, bowshock_core::Engine::Legacy);
+}
+
 #[test]
 fn from_spec_of_spec_gives_the_same_run() {
     let a = Analysis::new(&spec()).unwrap().backend(Backend::Cpu).resolution(Resolution::Coarse).max_iterations(40);

@@ -50,6 +50,30 @@ pub enum BackendUsed {
     Gpu,
 }
 
+/// Which engine solves a [`Condition`]: hidden until the 3D solver replaces the legacy pair (see [`Analysis::engine`]).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum Engine {
+    /// The axisymmetric drag solver at zero incidence, the sting-grid 3D Euler solver at an angle of attack.
+    #[default]
+    Legacy,
+    /// The 3D solver on the base-wake grid for both: the one-cell wedge at zero incidence, the half domain at an angle of attack
+    /// (`analysis_solver3.rs`).
+    Solver3,
+}
+
+impl Engine {
+    /// The engine the `BOWSHOCK_ENGINE` environment variable names (`3d`, `solver3`: [`Engine::Solver3`]; anything else or unset:
+    /// [`Engine::Legacy`]): the default of every new [`Analysis`], so that the app and the tests can switch without code.
+    pub fn from_env() -> Engine {
+        match std::env::var("BOWSHOCK_ENGINE").as_deref().map(str::trim) {
+            Ok(v) if v.eq_ignore_ascii_case("3d") || v.eq_ignore_ascii_case("solver3") => Engine::Solver3,
+            _ => Engine::Legacy,
+        }
+    }
+}
+
 /// Grid resolution (grid level 0, 1, 2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -326,6 +350,10 @@ pub struct AnalysisSpec {
     /// Mach number a viscous grid is sized for ([`Analysis::grid_mach`]), `None` for the highest Mach number of each run.
     #[cfg_attr(feature = "serde", serde(default))]
     pub grid_mach: Option<f64>,
+    /// The engine ([`Analysis::engine`]); [`Engine::Legacy`] when absent.
+    #[doc(hidden)]
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub engine: Engine,
 }
 
 /// Configuration of a sweep over Mach number for one body.
@@ -358,7 +386,10 @@ pub struct Analysis {
     keep_fields: bool,
     field_sink: Option<FieldSink>,
     field3_sink: Option<Snapshots3>,
+    engine: Engine,
 }
+
+mod solver3;
 
 /// Free stream of a viscous sweep.
 struct Rans {
@@ -397,6 +428,7 @@ impl Analysis {
             keep_fields: false,
             field_sink: None,
             field3_sink: None,
+            engine: Engine::from_env(),
         }
     }
 
@@ -440,6 +472,7 @@ impl Analysis {
             estimate_uncertainty: self.estimate_uncertainty,
             keep_fields: self.keep_fields,
             grid_mach: self.grid_mach,
+            engine: self.engine,
         })
     }
 
@@ -460,7 +493,16 @@ impl Analysis {
         a.estimate_uncertainty = spec.estimate_uncertainty;
         a.keep_fields = spec.keep_fields;
         a.grid_mach = spec.grid_mach;
+        a.engine = spec.engine;
         Ok(a)
+    }
+
+    /// The engine that solves the conditions (default [`Engine::Legacy`], or the one `BOWSHOCK_ENGINE` names). Hidden: the product
+    /// flips by changing the default, not through this call; tests and the app's switch use it.
+    #[doc(hidden)]
+    pub fn engine(mut self, engine: Engine) -> Self {
+        self.engine = engine;
+        self
     }
 
     /// Reference diameter \[m\] of the drag coefficients (internal units for [`Analysis::from_internal`]).
@@ -780,6 +822,9 @@ impl Analysis {
         }
         if let Some(c) = conditions.iter().find(|c| !c.alpha_deg.is_finite()) {
             return Err(Error::InvalidInput(format!("incidence {} deg is not finite", c.alpha_deg)));
+        }
+        if self.engine == Engine::Solver3 {
+            return self.run_solver3(conditions);
         }
         let (drag_at, lift_at): (Vec<usize>, Vec<usize>) = (0..conditions.len()).partition(|&k| conditions[k].alpha_deg == 0.0);
         let lift_conditions: Vec<Condition> = lift_at.iter().map(|&k| conditions[k]).collect();

@@ -272,3 +272,67 @@ fn perf_2d_table_one_sweep() {
     }
     timing_report("diag-2d-one-sweep", &solver::engine::gpu::take_timings(), wall);
 }
+
+/// The example document without its fins (the 3D engine's finless wedge table), written to `BOWSHOCK_FINLESS_FIXTURE=<path>` for a drive script
+/// (`BOWSHOCK_OPEN`): `BOWSHOCK_FINLESS_FIXTURE=/tmp/example-finless.bowshock cargo test -p bowshock -- --ignored the_finless_example --nocapture`.
+#[test]
+#[ignore = "writes the finless example document for the drive scripts"]
+fn the_finless_example_document() {
+    let (mut rocket, _) = example();
+    let fins: Vec<_> = rocket.radials().iter().filter(|r| format!("{:?}", r.kind).contains("Fin")).map(|r| r.id).collect();
+    assert!(!fins.is_empty(), "the example has fin sets");
+    for id in fins {
+        rocket.remove_radial(id);
+    }
+    let vehicle = from_model::vehicle(&rocket, &MotorDb::bundled(), Phase::Full).unwrap();
+    assert!(plan(&rocket, &vehicle, UnitSystem::default()).unwrap().fins.is_none());
+    let path = std::env::var_os("BOWSHOCK_FINLESS_FIXTURE").expect("set BOWSHOCK_FINLESS_FIXTURE=<path>");
+    std::fs::write(path, rocket.to_bytes()).unwrap();
+}
+
+/// The half domain at incidence of the 3D engine (`Engine::Solver3`: the base-wake grid, the base solved) against today's sting-grid lift case (`Engine::Legacy`)
+/// for the example rocket as the app solves its stability nodes (coarse grid, GPU): CN, `x_cp` and the axial force per Mach number and angle. The two differ
+/// because the base is now solved instead of a sting and a mild fin-grid change; reported, not gated. `cargo nextest run --release -p bowshock half_domain_against --run-ignored only --no-capture`
+/// through `tools/gpuq/gpuq`.
+#[test]
+#[ignore = "solves the example's stability nodes twice on the GPU"]
+fn half_domain_against_the_sting_grid() {
+    let (rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    let nodes = lift_nodes((0.1, 3.0)).unwrap();
+    let conditions: Vec<solver::Condition> = nodes.iter().flat_map(|&m| LIFT_ALPHAS.iter().map(move |&a| solver::Condition::new(m, a))).collect();
+    let run = |engine: solver::Engine| {
+        let mut a = solver::Analysis::new(&plan.body).unwrap().engine(engine).resolution(solver::Resolution::Coarse).backend(solver::Backend::Gpu);
+        if let Some(f) = &plan.fins {
+            a = a.fins(f.clone());
+        }
+        let t = Instant::now();
+        let polar = a.run(&conditions).expect("the stability nodes solve");
+        println!("{engine:?}: {:.1} s on {:?}", t.elapsed().as_secs_f64(), polar.backend);
+        polar
+    };
+    let (old, new) = (run(solver::Engine::Legacy), run(solver::Engine::Solver3));
+    let cal = plan.body.nose.diameter;
+    println!("| Mach | alpha | CN sting | CN base | dCN % | x_cp sting m | x_cp base m | d x_cp mm | d x_cp cal | CA sting | CA base | its sting | its base | quality base |");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    for (o, n) in old.points.iter().zip(&new.points) {
+        let (fo, fn_) = (o.forces.unwrap(), n.forces.unwrap());
+        println!(
+            "| {:.2} | {:.0} | {:.4} | {:.4} | {:+.1} | {:.4} | {:.4} | {:+.1} | {:+.3} | {:.4} | {:.4} | {} | {} | {:?} |",
+            o.mach,
+            o.alpha_deg,
+            fo.cn,
+            fn_.cn,
+            100.0 * (fn_.cn - fo.cn) / fo.cn,
+            fo.x_cp,
+            fn_.x_cp,
+            1000.0 * (fn_.x_cp - fo.x_cp),
+            (fn_.x_cp - fo.x_cp) / cal,
+            fo.ca,
+            fn_.ca,
+            o.detail.iterations,
+            n.detail.iterations,
+            n.quality
+        );
+    }
+}

@@ -223,9 +223,23 @@ fn wedge_runner() -> Option<Box<dyn WedgeRunner>> {
         return Some(Box::new(gpu::GpuWedge::new()));
     }
     // --- end of the GPU runner ---
+    // --- the facade runner (`app-integrate`): the same gates through `Analysis::engine(Engine::Solver3)`, `BOWSHOCK_WEDGE_BACKEND=facade` (see `wedge_gates/facade.rs`) ---
+    if std::env::var("BOWSHOCK_WEDGE_BACKEND").as_deref() == Ok("facade") {
+        #[cfg(feature = "gpu")]
+        let direct: Box<dyn WedgeRunner> =
+            if std::env::var("BOWSHOCK_FACADE_BACKEND").as_deref() == Ok("cpu") { Box::new(cpu_wedge::CpuWedge) } else { Box::new(gpu::GpuWedge::new()) };
+        #[cfg(not(feature = "gpu"))]
+        let direct: Box<dyn WedgeRunner> = Box::new(cpu_wedge::CpuWedge);
+        return Some(Box::new(facade::FacadeWedge::new(direct)));
+    }
+    // --- end of the facade runner ---
     // --- CPU runner (solver3d): the default, `cpu_wedge` at the end of the file ---
     Some(Box::new(cpu_wedge::CpuWedge))
 }
+
+/// The wedge runner through the facade (`BOWSHOCK_WEDGE_BACKEND=facade`).
+#[path = "wedge_gates/facade.rs"]
+mod facade;
 
 /// The GPU half of the wedge runner (`BOWSHOCK_WEDGE_BACKEND=gpu`).
 #[cfg(feature = "gpu")]
@@ -613,6 +627,18 @@ fn gate_w1(r: &dyn WedgeRunner, rep: &mut Report) {
                     fmt(c.reference.cd_total)
                 );
             }
+            // Decision (the director): the transonic point of the table is not gated. The 2D wake cycles at M 0.9; the wedge settles on a steady wake, and the two
+            // differ by more than the band in the base and the total: reported with the numbers, not a gate.
+            Ok(m) if c.id == "table-euler-M0.90" => {
+                println!(
+                    "INFO G-W1 {} not gated (transonic wake): wedge cd_total {} base {} 2D cd_total {} base {}",
+                    c.id,
+                    fmt(m.cd_total),
+                    fmt(m.cd_base.unwrap_or(f64::NAN)),
+                    fmt(c.reference.cd_total),
+                    fmt(c.reference.cd_base.unwrap_or(f64::NAN))
+                );
+            }
             Ok(m) => compare_parts(rep, "G-W1", &c, &m, W1_BAND),
             Err(e) => rep.error("G-W1", &c.id, &e),
         }
@@ -650,7 +676,12 @@ fn gate_w4(r: &dyn WedgeRunner, rep: &mut Report) {
                     let key = s(&check["key"]);
                     let name = format!("{}:{key}", case.id);
                     if let Some(allowed) = check.get("in") {
-                        let allowed: Vec<String> = allowed.as_array().expect("in").iter().map(s).collect();
+                        let mut allowed: Vec<String> = allowed.as_array().expect("in").iter().map(s).collect();
+                        // Decision (the director): the 3D stop rule is the stationary-CN (axial force) one, so a smoke case that settles ends `CdStationary`, as well as on
+                        // the residual drop the 2D case stops on.
+                        if key == "stop_reason" && !allowed.iter().any(|a| a == "CdStationary") {
+                            allowed.push("CdStationary".to_string());
+                        }
                         rep.check_in("G-W4", &name, m[key.as_str()].as_str().unwrap_or(""), &allowed);
                     } else if let Some(want) = check.get("is") {
                         rep.check_is("G-W4", &name, m[key.as_str()].as_bool(), want.as_bool().expect("is"));
