@@ -69,7 +69,11 @@ pub fn lift_forces_upto(case: &Case3, s: &Solver3, x_max: f64) -> LiftForces {
 /// [`lift_forces_upto`] on a grid, a conserved state `u` (index `Grid3::cell`, e.g. downloaded from the GPU) and the free-stream pressure. The sting
 /// is not counted.
 pub fn forces_on(case: &Case3, g: &Grid3, u: &[Cons3], p_inf: f64, x_max: f64) -> LiftForces {
-    let w = wall_forces(g, u, p_inf, x_max);
+    forces_from(case, g, &wall_forces(g, u, p_inf, x_max))
+}
+
+/// [`forces_on`] of wall forces `w` already integrated (the GPU runner reduces them on the device).
+pub(crate) fn forces_from(case: &Case3, g: &Grid3, w: &WallForces) -> LiftForces {
     let (mut fx, mut fz, mut mz) = (0.0, 0.0, 0.0);
     for (c, a) in &w.by {
         if *c != Wall::Sting {
@@ -117,7 +121,11 @@ impl LiftBreakdown {
 
 /// [`forces_on`] split into nose, afterbody and fin faces (the walls of the grid's parts, the base and the sting not counted).
 pub fn breakdown_on(case: &Case3, g: &Grid3, u: &[Cons3], p_inf: f64) -> LiftBreakdown {
-    let w = wall_forces(g, u, p_inf, case.body.x_base());
+    breakdown_from(case, g, &wall_forces(g, u, p_inf, case.body.x_base()))
+}
+
+/// [`breakdown_on`] of wall forces `w` already integrated up to the base station (the GPU runner reduces them on the device).
+pub(crate) fn breakdown_from(case: &Case3, g: &Grid3, w: &WallForces) -> LiftBreakdown {
     let part = |classes: &dyn Fn(Wall) -> bool| {
         let mut a = [0.0; 3];
         for (c, f) in &w.by {
@@ -140,11 +148,11 @@ pub fn breakdown_on(case: &Case3, g: &Grid3, u: &[Cons3], p_inf: f64) -> LiftBre
 }
 
 /// Whether the domain is an axisymmetric wedge or a fin sector: zero incidence, the axial force is the monitor and CN is not defined (reported as 0).
-fn zero_incidence(g: &Grid3) -> bool {
+pub(crate) fn zero_incidence(g: &Grid3) -> bool {
     matches!(g.sym, Symmetry::Wedge | Symmetry::Sector { .. })
 }
 
-fn coefficients(case: &Case3, g: &Grid3, [fx, fz, mz]: [f64; 3]) -> LiftForces {
+pub(crate) fn coefficients(case: &Case3, g: &Grid3, [fx, fz, mz]: [f64; 3]) -> LiftForces {
     let q = 0.5 * case.mach * case.mach;
     let s_ref = std::f64::consts::FRAC_PI_4;
     let norm = (2.0 * std::f64::consts::PI / g.theta_span) / (q * s_ref);
@@ -215,28 +223,29 @@ impl WallForces {
     }
 }
 
-/// A wall face of the solved domain as [`for_each_wall_face`] hands it out.
-pub struct WallFaceRef<'a> {
-    /// The class of the face ([`wall_class`] of the part behind it and its direction).
+/// One wall face for the force integration: its class, the part of the wall behind it, the first fluid cell `a`, the fluid cell `b` behind it (if any), the
+/// face, `sign` (+1 when the face normal points into the body) and the four nodes `(i, j, k)` of the face in the order [`Grid3`] builds its faces from.
+#[derive(Clone, Debug)]
+pub(crate) struct WallFaceRef {
     pub class: Wall,
-    /// The part of the wall behind the face.
     pub part: Part,
-    /// The first fluid cell (`Grid3::cell` index) and the fluid cell behind it along the wall normal, if any.
+    pub corners: [(usize, usize, usize); 4],
     pub a: usize,
     pub b: Option<usize>,
-    pub face: &'a Face3,
-    /// `+1` when the face normal points into the wall (the fluid is on the low-index side of the face), `-1` when into the fluid.
+    pub face: Face3,
     pub sign: f64,
-    /// The four nodes `(i, j, k)` of the face in the order [`Grid3`] builds its faces from.
-    pub corners: [(usize, usize, usize); 4],
 }
 
-/// Hands every wall face of `g` to `visit`: the `j = 0` boundary faces inside the grid's `wall_j0` runs (not on the axis) and every face between a fluid
-/// cell and a wall cell (a solid cell that has a part; dead cells are no walls), in a fixed order. The one place that decides what a wall face
-/// is: the force integration ([`wall_forces`]) and the flow field of the viewer (`engine::field3`) both read the faces from here.
-pub fn for_each_wall_face(g: &Grid3, mut visit: impl FnMut(&WallFaceRef)) {
+/// The wall faces of `g` in the order the force integration visits them: the `j = 0` boundary faces inside the grid's `wall_j0` runs (not on the axis) and
+/// every face between a fluid cell and a wall cell (a solid cell that has a part; dead cells are no walls). The GPU runner builds its device face list from it.
+pub(crate) fn wall_faces(g: &Grid3) -> Vec<WallFaceRef> {
     let (ni, nj, nk) = (g.ni, g.nj, g.nk);
     let solid = |i: usize, j: usize, k: usize| g.is_solid(i, j, k);
+    let mut list: Vec<WallFaceRef> = Vec::new();
+    // `a`: first fluid cell, `b`: the fluid cell behind it (if any); `sign`: +1 when the face normal points into the body
+    let mut add = |part: Part, class: Wall, a: usize, b: Option<usize>, f: &Face3, sign: f64, corners: [(usize, usize, usize); 4]| {
+        list.push(WallFaceRef { class, part, corners, a, b, face: *f, sign });
+    };
     let wall_part = |i: usize, j: usize, k: usize| g.part_of(i, j, k);
     let j0_part: Vec<Option<Part>> = (0..ni).map(|i| g.wall_j0.iter().find(|(r, _)| r.contains(&i)).map(|(_, p)| *p)).collect();
     for k in 0..nk {
@@ -245,9 +254,15 @@ pub fn for_each_wall_face(g: &Grid3, mut visit: impl FnMut(&WallFaceRef)) {
             let f = &g.jface[k * (nj + 1) * ni + i];
             // normal points into the fluid: into the body is its negative
             if !solid(i, 0, k) && !g.is_axis(i, 0) {
-                let (a, b) = (g.cell(i, 0, k), (nj > 1 && !solid(i, 1, k)).then(|| g.cell(i, 1, k)));
-                let corners = [(i, 0, k), (i, 0, k + 1), (i + 1, 0, k + 1), (i + 1, 0, k)];
-                visit(&WallFaceRef { class: wall_class(part, 1, false), part, a, b, face: f, sign: -1.0, corners });
+                add(
+                    part,
+                    wall_class(part, 1, false),
+                    g.cell(i, 0, k),
+                    (nj > 1 && !solid(i, 1, k)).then(|| g.cell(i, 1, k)),
+                    f,
+                    -1.0,
+                    [(i, 0, k), (i, 0, k + 1), (i + 1, 0, k + 1), (i + 1, 0, k)],
+                );
             }
         }
     }
@@ -255,13 +270,11 @@ pub fn for_each_wall_face(g: &Grid3, mut visit: impl FnMut(&WallFaceRef)) {
         for j in 0..nj {
             for i in 1..ni {
                 let f = &g.iface[(k * nj + j) * (ni + 1) + i];
-                let corners = [(i, j, k), (i, j + 1, k), (i, j + 1, k + 1), (i, j, k + 1)];
+                let c = [(i, j, k), (i, j + 1, k), (i, j + 1, k + 1), (i, j, k + 1)];
                 if let (false, Some(part)) = (solid(i - 1, j, k), wall_part(i, j, k)) {
-                    let (a, b) = (g.cell(i - 1, j, k), (i >= 2 && !solid(i - 2, j, k)).then(|| g.cell(i - 2, j, k)));
-                    visit(&WallFaceRef { class: wall_class(part, 0, false), part, a, b, face: f, sign: 1.0, corners });
+                    add(part, wall_class(part, 0, false), g.cell(i - 1, j, k), (i >= 2 && !solid(i - 2, j, k)).then(|| g.cell(i - 2, j, k)), f, 1.0, c);
                 } else if let (Some(part), false) = (wall_part(i - 1, j, k), solid(i, j, k)) {
-                    let (a, b) = (g.cell(i, j, k), (i + 1 < ni && !solid(i + 1, j, k)).then(|| g.cell(i + 1, j, k)));
-                    visit(&WallFaceRef { class: wall_class(part, 0, true), part, a, b, face: f, sign: -1.0, corners });
+                    add(part, wall_class(part, 0, true), g.cell(i, j, k), (i + 1 < ni && !solid(i + 1, j, k)).then(|| g.cell(i + 1, j, k)), f, -1.0, c);
                 }
             }
         }
@@ -270,13 +283,11 @@ pub fn for_each_wall_face(g: &Grid3, mut visit: impl FnMut(&WallFaceRef)) {
         for j in 1..nj {
             for i in 0..ni {
                 let f = &g.jface[(k * (nj + 1) + j) * ni + i];
-                let corners = [(i, j, k), (i, j, k + 1), (i + 1, j, k + 1), (i + 1, j, k)];
+                let c = [(i, j, k), (i, j, k + 1), (i + 1, j, k + 1), (i + 1, j, k)];
                 if let (false, Some(part)) = (solid(i, j - 1, k), wall_part(i, j, k)) {
-                    let (a, b) = (g.cell(i, j - 1, k), (j >= 2 && !solid(i, j - 2, k)).then(|| g.cell(i, j - 2, k)));
-                    visit(&WallFaceRef { class: wall_class(part, 1, false), part, a, b, face: f, sign: 1.0, corners });
+                    add(part, wall_class(part, 1, false), g.cell(i, j - 1, k), (j >= 2 && !solid(i, j - 2, k)).then(|| g.cell(i, j - 2, k)), f, 1.0, c);
                 } else if let (Some(part), false) = (wall_part(i, j - 1, k), solid(i, j, k)) {
-                    let (a, b) = (g.cell(i, j, k), (j + 1 < nj && !solid(i, j + 1, k)).then(|| g.cell(i, j + 1, k)));
-                    visit(&WallFaceRef { class: wall_class(part, 1, true), part, a, b, face: f, sign: -1.0, corners });
+                    add(part, wall_class(part, 1, true), g.cell(i, j, k), (j + 1 < nj && !solid(i, j + 1, k)).then(|| g.cell(i, j + 1, k)), f, -1.0, c);
                 }
             }
         }
@@ -285,49 +296,74 @@ pub fn for_each_wall_face(g: &Grid3, mut visit: impl FnMut(&WallFaceRef)) {
         for j in 0..nj {
             for i in 0..ni {
                 let f = &g.kface[(k * nj + j) * ni + i];
-                let corners = [(i, j, k), (i + 1, j, k), (i + 1, j + 1, k), (i, j + 1, k)];
+                let c = [(i, j, k), (i + 1, j, k), (i + 1, j + 1, k), (i, j + 1, k)];
                 if let (false, Some(part)) = (solid(i, j, k - 1), wall_part(i, j, k)) {
-                    let (a, b) = (g.cell(i, j, k - 1), (k >= 2 && !solid(i, j, k - 2)).then(|| g.cell(i, j, k - 2)));
-                    visit(&WallFaceRef { class: wall_class(part, 2, false), part, a, b, face: f, sign: 1.0, corners });
+                    add(part, wall_class(part, 2, false), g.cell(i, j, k - 1), (k >= 2 && !solid(i, j, k - 2)).then(|| g.cell(i, j, k - 2)), f, 1.0, c);
                 } else if let (Some(part), false) = (wall_part(i, j, k - 1), solid(i, j, k)) {
-                    let (a, b) = (g.cell(i, j, k), (k + 1 < nk && !solid(i, j, k + 1)).then(|| g.cell(i, j, k + 1)));
-                    visit(&WallFaceRef { class: wall_class(part, 2, true), part, a, b, face: f, sign: -1.0, corners });
+                    add(part, wall_class(part, 2, true), g.cell(i, j, k), (k + 1 < nk && !solid(i, j, k + 1)).then(|| g.cell(i, j, k + 1)), f, -1.0, c);
                 }
             }
         }
     }
+    list
 }
 
-/// The wall pressure of a wall face: the pressure of its first two fluid cells extrapolated linearly to the face centre (the first cell's alone
-/// when there is no second), `p` the pressure of a cell.
-pub fn wall_pressure(g: &Grid3, w: &WallFaceRef, p: impl Fn(usize) -> f64) -> f64 {
-    let dist = |c: usize| {
-        let (x, f) = (g.xc[c], &w.face.c);
-        ((x[0] - f[0]).powi(2) + (x[1] - f[1]).powi(2) + (x[2] - f[2]).powi(2)).sqrt()
+/// Wall forces of the state `u` of `g` by class. The faces counted are those of [`wall_faces`] (the `j = 0` boundary faces inside the grid's `wall_j0` runs, not
+/// on the axis, and every face between a fluid cell and a wall cell: a solid cell that has a part; dead cells are no walls). Faces with centroid `x > x_max` are
+/// left out except the base.
+pub fn wall_forces(g: &Grid3, u: &[Cons3], p_inf: f64, x_max: f64) -> WallForces {
+    let mut acc = WallForces::default();
+    for w in wall_samples(g, u) {
+        let (f, class) = (&w.face, w.class);
+        if f.c[0] > x_max + 1e-9 && class != Wall::Base {
+            continue;
+        }
+        let d = (w.pw - p_inf) * f.area * w.sign;
+        acc.add(class, [d * f.n[0], d * f.n[2], d * f.n[2] * f.c[0]]);
+    }
+    acc
+}
+
+/// A wall face with the wall pressure of the state: `pw = p0 + (p0 - p1) d0 / (d1 - d0)`, `p0`, `p1` the pressures of the first two fluid cells normal to the
+/// wall and `d` their distances from the face centre; the first-cell pressure when the second cell is solid or outside the grid.
+#[derive(Clone, Debug)]
+pub struct WallSample {
+    pub class: Wall,
+    pub face: Face3,
+    /// +1 when the face normal points into the body.
+    pub sign: f64,
+    pub pw: f64,
+    /// Pressure of the first fluid cell.
+    pub p0: f64,
+}
+
+/// The wall pressure of the wall face `w` in the state whose cell pressures are `p`: `pw = p0 + (p0 - p1) d0 / (d1 - d0)` (see [`WallSample`]). The one rule
+/// the force integration and the viewer's wall field share.
+pub(crate) fn wall_pressure(g: &Grid3, w: &WallFaceRef, p: impl Fn(usize) -> f64) -> f64 {
+    let dist = |c: usize, f: &Face3| {
+        let x = g.xc[c];
+        ((x[0] - f.c[0]).powi(2) + (x[1] - f.c[1]).powi(2) + (x[2] - f.c[2]).powi(2)).sqrt()
     };
     let p0 = p(w.a);
     match w.b {
         Some(b) => {
-            let (d0, d1) = (dist(w.a), dist(b));
+            let (d0, d1) = (dist(w.a, &w.face), dist(b, &w.face));
             p0 + (p0 - p(b)) * d0 / (d1 - d0)
         }
         None => p0,
     }
 }
 
-/// Wall forces of the state `u` of `g` by class (see [`for_each_wall_face`] for the faces). Faces with centroid `x > x_max` are left out except
-/// the base.
-pub fn wall_forces(g: &Grid3, u: &[Cons3], p_inf: f64, x_max: f64) -> WallForces {
-    let mut acc = WallForces::default();
-    for_each_wall_face(g, |w| {
-        if w.face.c[0] > x_max + 1e-9 && w.class != Wall::Base {
-            return;
-        }
-        let pw = wall_pressure(g, w, |c| cons_to_prim3(&u[c])[4]);
-        let d = (pw - p_inf) * w.face.area * w.sign;
-        acc.add(w.class, [d * w.face.n[0], d * w.face.n[2], d * w.face.n[2] * w.face.c[0]]);
-    });
-    acc
+/// The [`wall_faces`] of `g` with their wall pressures in the state `u` (index `Grid3::cell`).
+pub fn wall_samples(g: &Grid3, u: &[Cons3]) -> Vec<WallSample> {
+    let p = |c: usize| cons_to_prim3(&u[c])[4];
+    wall_faces(g)
+        .into_iter()
+        .map(|w| {
+            let pw = wall_pressure(g, &w, p);
+            WallSample { class: w.class, face: w.face, sign: w.sign, pw, p0: p(w.a) }
+        })
+        .collect()
 }
 
 /// The zero-lift drag of a wedge or a sector split by surface, coefficients on `pi/4` like [`LiftForces::ca`]: what the 2D facade reports as
@@ -347,7 +383,11 @@ pub struct DragParts {
 
 /// [`DragParts`] of the state `u` of `g` for the case `case` (axial force only; every segment of the body of `case`).
 pub fn drag_parts(case: &Case3, g: &Grid3, u: &[Cons3], p_inf: f64) -> DragParts {
-    let w = wall_forces(g, u, p_inf, f64::INFINITY);
+    drag_parts_from(case, g, &wall_forces(g, u, p_inf, f64::INFINITY))
+}
+
+/// [`drag_parts`] of wall forces `w` integrated over every face (the GPU runner reduces them on the device).
+pub fn drag_parts_from(case: &Case3, g: &Grid3, w: &WallForces) -> DragParts {
     let q = 0.5 * case.mach * case.mach;
     let norm = (2.0 * std::f64::consts::PI / g.theta_span) / (q * std::f64::consts::FRAC_PI_4);
     let cd = |c: Wall| norm * w.get(c)[0];

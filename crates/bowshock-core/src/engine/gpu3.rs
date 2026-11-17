@@ -7,9 +7,13 @@
 
 use crate::engine::case3::Case3;
 use crate::engine::gpu::{record_timing, PointTiming};
-use crate::engine::run3::{forces_on, PointResult3, StopRule3, SAMPLE_EVERY};
+use crate::engine::run3::{
+    breakdown_from, drag_parts_from, forces_from, wall_faces, zero_incidence, DragParts, LiftBreakdown, LiftForces, PointResult3, StopRule3, Wall, WallForces,
+    SAMPLE_EVERY,
+};
 use crate::error::Error;
-use bowshock_cfd::gpu::{GpuSolver3, Precision};
+use bowshock_cfd::gpu::{GpuSolver3, Precision, WallFace3};
+use bowshock_cfd::grid3::Face3;
 use bowshock_cfd::solver3::{Config3, Scheme3, Solver3};
 use std::time::Instant;
 
@@ -20,6 +24,8 @@ pub const SYNC: usize = SAMPLE_EVERY;
 pub struct GpuRunner3 {
     pub gpu: GpuSolver3,
     pub host: Solver3,
+    /// The wall classes of the device force integration, in the order of `GpuSolver3::set_wall_faces`.
+    classes: Vec<Wall>,
     /// Kernel build + geometry upload, seconds.
     pub setup_seconds: f64,
     /// Parts of the set-up: host grid + solver, default context, `from_host`, seconds.
@@ -43,7 +49,71 @@ impl GpuRunner3 {
         let t1 = Instant::now();
         let gpu = GpuSolver3::from_host(&ctx, &host, prec)?;
         let upload_seconds = t1.elapsed().as_secs_f64();
-        Ok(GpuRunner3 { gpu, host, setup_seconds: t0.elapsed().as_secs_f64(), build_seconds, ctx_seconds, upload_seconds })
+        let mut runner = GpuRunner3 { gpu, host, classes: Vec::new(), setup_seconds: t0.elapsed().as_secs_f64(), build_seconds, ctx_seconds, upload_seconds };
+        runner.upload_wall_faces(case)?;
+        Ok(runner)
+    }
+
+    /// Uploads the wall faces of the force integration (`run3::wall_faces`, in the order of the CPU integration) to the device.
+    fn upload_wall_faces(&mut self, case: &Case3) -> Result<(), Error> {
+        let g = &self.host.grid;
+        let x_max = case.body.x_base();
+        let dist = |c: usize, f: &Face3| {
+            let x = g.xc[c];
+            ((x[0] - f.c[0]).powi(2) + (x[1] - f.c[1]).powi(2) + (x[2] - f.c[2]).powi(2)).sqrt()
+        };
+        let mut classes: Vec<Wall> = Vec::new();
+        let faces: Vec<WallFace3> = wall_faces(g)
+            .into_iter()
+            .map(|w| {
+                let class = classes.iter().position(|&c| c == w.class).unwrap_or_else(|| {
+                    classes.push(w.class);
+                    classes.len() - 1
+                });
+                let f = &w.face;
+                let k = w.b.map_or(0.0, |b| {
+                    let (d0, d1) = (dist(w.a, f), dist(b, f));
+                    d0 / (d1 - d0)
+                });
+                let wt = f.area * w.sign;
+                WallFace3 {
+                    class,
+                    a: w.a,
+                    b: w.b,
+                    k,
+                    cx: wt * f.n[0],
+                    cz: wt * f.n[2],
+                    cm: wt * f.n[2] * f.c[0],
+                    cut: f.c[0] <= x_max + 1e-9 || w.class == Wall::Base,
+                }
+            })
+            .collect();
+        self.gpu.set_wall_faces(&faces, classes.len())?;
+        self.classes = classes;
+        Ok(())
+    }
+
+    /// The wall forces per class reduced on the device, `(all faces, faces up to the base station)`; downloads a few numbers, not the state.
+    pub fn wall_forces(&self) -> Result<(WallForces, WallForces), Error> {
+        let sums = self.gpu.wall_forces(self.host.cfg.freestream[4])?;
+        let n = self.classes.len();
+        let by = |off: usize| WallForces { by: self.classes.iter().enumerate().map(|(i, &c)| (c, sums[off + i])).collect() };
+        Ok((by(0), by(n)))
+    }
+
+    /// [`crate::engine::run3::lift_forces`] of the device state (the sting not counted, the wall faces up to the base station).
+    pub fn lift_forces(&self, case: &Case3) -> Result<LiftForces, Error> {
+        Ok(forces_from(case, &self.host.grid, &self.wall_forces()?.1))
+    }
+
+    /// [`crate::engine::run3::breakdown_on`] of the device state.
+    pub fn breakdown(&self, case: &Case3) -> Result<LiftBreakdown, Error> {
+        Ok(breakdown_from(case, &self.host.grid, &self.wall_forces()?.1))
+    }
+
+    /// [`crate::engine::run3::drag_parts`] of the device state (every wall face, the base included).
+    pub fn drag_parts(&self, case: &Case3) -> Result<DragParts, Error> {
+        Ok(drag_parts_from(case, &self.host.grid, &self.wall_forces()?.0))
     }
 
     /// Iterate to a stop rule: as [`crate::engine::run3::run3_on`] (`warm`: keep the field, set the free stream of `case`, restart
@@ -76,8 +146,6 @@ impl GpuRunner3 {
         self.gpu.context().sync()?;
         tm.reset_s = t_run.elapsed().as_secs_f64();
 
-        let x_base = case.body.x_base();
-        let p_inf = self.host.cfg.freestream[4];
         let mut rule = StopRule3::new(case, warm);
         let mut done = 0usize;
         let mut stop: Option<usize> = None;
@@ -94,16 +162,9 @@ impl GpuRunner3 {
             }
             let cn = if len == SYNC {
                 let t = Instant::now();
-                let u = self.gpu.state_f64()?;
-                tm.downloads += 1;
-                tm.download_s += t.elapsed().as_secs_f64();
-                let t = Instant::now();
-                let cn = forces_on(case, &self.host.grid, &u, p_inf, x_base).cn;
+                let f = self.lift_forces(case)?;
                 tm.forces_s += t.elapsed().as_secs_f64();
-                if let Some(t) = case.snapshots.as_ref().filter(|t| t.due(done + len)) {
-                    t.send(case, &self.host.grid, &u, done + len);
-                }
-                Some(cn)
+                Some(if zero_incidence(&self.host.grid) || case.alpha.abs() < 1e-12 { f.ca } else { f.cn })
             } else {
                 None
             };
@@ -116,13 +177,17 @@ impl GpuRunner3 {
                 }
             }
             done += len;
+            // the state leaves the device only at a chunk where a snapshot is due
+            if let Some(t) = case.snapshots.as_ref().filter(|t| stop.is_none() && len == SYNC && t.due(done)) {
+                t.send(case, &self.host.grid, &self.gpu.state_f64()?, done);
+            }
             if stop.is_none() && len == SYNC && rule.report(case, done).is_break() {
                 rule.cancel();
                 stop = Some(done);
             }
         }
         let t_final = Instant::now();
-        let f = forces_on(case, &self.host.grid, &self.gpu.state_f64()?, p_inf, x_base);
+        let f = self.lift_forces(case)?;
         let result = rule.finish(case, f, stop.unwrap_or(done));
         tm.final_s = t_final.elapsed().as_secs_f64();
         tm.run_s = t_run.elapsed().as_secs_f64();

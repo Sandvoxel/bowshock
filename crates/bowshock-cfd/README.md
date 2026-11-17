@@ -1228,43 +1228,70 @@ tools/gpuq/gpuq submit --host local -- cargo test --release -p bowshock-gpu-case
 tools/gpuq/gpuq submit --host local -- cargo run --release -p bowshock-validate --example lift3d -- --case anf --level 0 --precision df32 --bench 200
 ```
 
-### One-cell wedge and thin sectors on the GPU (S2 preparation: `gpu-cases/src/wedge3.rs`, `tests/wedge3d.rs`, `examples/bench3.rs`)
+### The S1 topologies on the GPU (stage S2: `gpu/body3.rs`, `gpu/implicit3.rs`, `tests/s2.rs`, `examples/{bench3,cfl_scan,sector_vs_half}.rs`)
 
-The 3D plan replaces the axisymmetric solver by a one-cell wedge (`nk` = 1) of the same meridian grid; the GPU code has to cope with a singleton `k` axis. `wedge3::wedge_grid` revolves
-the 2D base-wake grid (`base_domain_grid`) by 6 degrees into `nk` cells, the body block a `SolidBox` over every `k`, `axis_cells = 0` (the real axis runs and ghost are stage S1; the physics
-of this wedge is wrong, only GPU against CPU on the same grid is compared). `cargo test --release -p bowshock-gpu-cases --test wedge3d` (small grid, 34 x 16 x `nk`, M 0.5 Euler, 30 / 20
-iterations from the free stream, `max |dU| / (1 + |U|)` against the f64 `Solver3`, targets of `euler3d.rs`):
+The GPU solver mirrors the CPU `Solver3` on the S1 grids (`Grid3`: per-cell parts, axis runs, `Symmetry::{Half, Sector, Wedge}`) expression by expression:
 
-|`nk`|explicit (`Fusion`, `Fluxes`) f32 / df32|implicit block f32 / df32|implicit diagonal f32 / df32|
-|---|---|---|---|
-|1|before: FAIL 2.3e-2 (both); now 9.6e-7 / 8.4e-13|before: FAIL 6.0e-2; now 1.8e-6 / 2.9e-8|before: FAIL 4.0e-1; now 4.2e-6 / 2.9e-8|
-|2|1.2e-6 / 3.6e-13|2.9e-6 / 2.3e-8|2.9e-6 / 6.0e-8|
-|4|1.1e-6 / 5.5e-14|4.1e-6 / 1.2e-7|3.7e-6 / 4.6e-8|
-|12|9.3e-7 / 1.7e-13|6.4e-6 / 5.4e-8|3.6e-6 / 3.7e-8|
+* **Axis runs** (`Geo3::axis`, one `AxisGeo3` per `AxisRun`): the ghost of the two rows below the axis is the weighted two-source state of `axis3::AxisMap` (`rho`, `u`, `p` weighted, `(v, w)` through the
+  2x2 matrix of each source, a one-source ghost has weight 0 on the second): same cell with `-I` (wedge and even-`N` sector), the mirror cell (half domain), interpolation (odd `N`). The columns of
+  `j = 0` that are not on an axis run keep the slip-wall ghost.
+* **Masks**: `PART_DEAD` cells (upstream of a revolved nose, never updated) are in the update mask but are no walls; solid cells with a part are the walls of the outer-stencil classes and of the force classes.
+* **Wedge** (automatic from `Symmetry::Wedge`, `LazySolver3::{skip_k, no_dt_k, k_wall_flux, k_src}`): the flux through the two k planes is the cell's own pressure on the face normal `[0, p n, 0]`, no `L_k` in the
+  time step (`MinDirection`: `2 min(l_i, l_j)`), no k line, and the 2D-style pressure-source block `dt/V (A1 n1 - A0 n0) dp` on the diagonal of the j factor (`factor3`, applied in `n_apply3`, so
+  that the `DiagonalCorrected` defect carries it as on the CPU).
+* **Forces on the device** (`set_wall_faces`, `wall_forces`): the wall faces of `run3::wall_faces` (class, cells `a`, `b`, `k = d0 / (d1 - d0)`, weights) as arrays, the wall pressure `p_a + k (p_a - p_b)`,
+  the class sums (all faces and the faces up to the base station) as masked reductions, one download of `6 n_classes` numbers every 50 iterations; the stop rule monitors `ca` for the wedge, a sector and a
+  half domain at zero incidence. No state download in a run.
 
-Luma and the array code need no change for short `k` lines: the block (`solve_block_tridiagonal_parts`, 25 + 5 parts) and scalar parts solves along an axis of length 1, 2, 4, the width-0 `pad_dir`
-of the line-end folds, the solid-face masks, the reductions all agree with the CPU. The one failure was ours (ISSUES.md #21): with `nk` = 1 the second ghost layer of a k plane came from a
-`PadMode::Mirror` pad of a one-cell axis (which repeats the cell); the CPU fills layer 1 of both planes from the cell and layer 2 from the other plane's layer 1 (a double reflection).
+Checks (`cargo test --release -p bowshock-gpu-cases --test s2`, through gpuq, `max |dU| / (1 + |U|)` against the f64 `Solver3` on tiny grids, 30 iterations explicit / block, 20 diagonal, targets of
+`euler3d.rs`): wedge (M 0.5, 2), base half domain at 2 degrees, sectors N = 4 and 3 (`nk` 6, 7): explicit f32 1.6e-6 - 2.0e-5 / df32 6e-13 - 1e-13 (the one-cell wedge amplifies the f32 round-off, target 5e-5 there),
+block 7.9e-7 - 3.9e-5 / 1.9e-8 - 7.2e-8, diagonal 5.6e-7 - 2.0e-5 / 2.3e-8 - 5.2e-8; the device forces equal the host `wall_forces` (class by class, all faces and cut) to 1e-13 (df32) and 3.8e-5 (f32).
 
-**Wedge mode** (`GpuSolver3::set_wedge_mode`, off by default): no k factor in the line solves (`skip_k`), no `L_k` in the pseudo-time step (`no_dt_k`), and the pressure of the cell as the flux through the
-two planes (`k_wall_flux`, the hoop term of the axisymmetric equations). Measured on the wedge grid at M 0.5 (`wedge_mode_converges_like_the_k_factor`, scan of 1500 iterations at `cfl_max` 0.5, 1, 2, 5, 10):
-with the pressure flux through the planes the iteration without the k factor converges at `cfl_max` 1 and below, rises at 2, is O(1) (`Block`) or NaN (`DiagonalCorrected`) at 5 and NaN at 10; with the
-Riemann flux it was only run at 10 (NaN); the pressure flux with the k factor kept is stable at 10 (`Block`) and changes the converged state by 2.6e-4. At `cfl_max` 1 the residual falls as fast as
-the product's `cfl_max` 10 with the k factor (there `dt` carries `L_k`, so the step is about the same). A step without the k factor on the 156 x 140 wedge costs 22-27 % less (table below).
-Not the one-line switch DESIGN3D A2 describes; whether it pays on the wall-resolved RANS grid is S5.
+**`cfl_max` on the wedge** (`cfl_scan`, Euler base-wake grid of the example rocket 156 x 76 x 1, the facade stop rule, GPU f32 `Block`; the CPU f64 gives the same iteration counts and `ca` to 4 digits):
 
-**`bench3`** (`cargo run --release -p bowshock-validate --example bench3 -- --case wedge|sector|anf|all [--mem]`, Euler `Scheme3::Implicit`, M 2, `cfl_max` 10, second order from the first iteration,
-replay of 200 / 1000 iterations after 20, best of 3, RTX 3090, one process per row): one step, us (kernel launches / GPU us of the profiled step in brackets), and device memory of the process (`nvidia-smi
---query-compute-apps`):
+|Mach|`cfl_max` 5|10|20|50|
+|---|---|---|---|---|
+|2|400 it|350|350|350 (`ca` 0.30036 / 0.30036 / 0.30035 / 0.30052)|
+|0.9|1750|1050|8000 (cap, `ca` 0.1625)|8000 (cap, 0.1951)|
+
+`DiagonalCorrected` is non-finite at iteration 72-88 at every `cfl_max`, on the CPU as on the GPU (ISSUES.md #24); the gates run the wedge with `Block`. `cfl_max` 10 stays the default (above it the transonic M 0.9 point
+does not settle).
+
+**Gates** (`BOWSHOCK_WEDGE_BACKEND=gpu cargo test --release -p bowshock-core --test wedge_gates -- --ignored --nocapture gate_w1 gate_w4`, through gpuq; the runner is `tests/wedge_gates/gpu.rs`): 99 PASS, 4 FAIL.
+G-W1: all Euler base cases within 2 % except `table-euler-M0.90` (cd_total 0.17052 against 0.17480, -2.4 %; the CPU wedge gives the same 0.17052 as the GPU) and the M 0.5 cases, which the 2D reference ran to its
+iteration cap and the gate does not gate. G-W4: the four cones, the two ogives, the transonic smoke case and the subsonic base case pass; the two subsonic smoke cases fail only on the name of the stop reason
+(`CdStationary` of the 3D stop rule against the 2D `ResidualDrop`), their numbers pass. The medium cones and the level-1 ogive end on the plateau rule after 8000 iterations at 3-4 orders (their coefficients are within the band).
+
+**Sector against half domain** (`sector_vs_half`, GPU f32, level 0 of the Army-Navy Basic Finner at zero incidence, sector `nk` 6 against the half domain with the cell count that replicates it; total drag
+coefficient on `pi/4`; cell width = angle of one azimuthal cell, `theta_span / nk`):
+
+|N|Mach|sector (cells, width)|half (cells, width)|sector total (fins / nose)|half total (fins / nose)|d total|
+|---|---|---|---|---|---|---|
+|4|2|210 x 70 x 6, 7.50 deg|210 x 70 x 22, 8.18 deg|0.48227 (0.37873 / 0.10343), 350 it|0.48947 (0.38631 / 0.10300), 350 it|-1.47 %|
+|4|0.8|same|same|0.68853, **8000 it, not converged**|0.73496, 600 it|-6.32 % (sector not settled)|
+|3|2|210 x 70 x 6, 10.00 deg|210 x 70 x 17, 10.59 deg|0.34467 (0.24147 / 0.10309), 350 it|0.34616 (0.24330 / 0.10270), 350 it|-0.43 %|
+|3|0.8|same|same|0.51824 (0.50205 / 0.01630), 800 it|0.53448 (0.51851 / 0.01589), 600 it|-3.04 %|
+
+The 1 % band is met only by N = 3 at M 2. At M 2 the nose differs by +0.4 % (sector larger) and the fins by -2.0 % (N = 4) and -0.75 % (N = 3); the polygon bias of the revolved cells at these widths
+(`1 - sin(dtheta)/dtheta` = 0.3 % at 7.5 deg, 0.5 % at 10 deg) would make the sector smaller, not larger, so it does not explain the nose. [INFERENCE: the fin difference is the discretisation at the fin, a half
+cell with a mirror on the symmetry plane against a full layer cell, see `wedge.rs::sector_vs_half`; not isolated.] The N = 4, M 0.8 sector does not settle (iteration cap); at M 0.8 the half domains need 600 iterations.
+
+**Performance** (`bench3`, Euler `Scheme3::Implicit`, M 2, `cfl_max` 10, replay after 20 warm-up iterations, best of 3, RTX 3090, one process per row; us per step, kernel launches / GPU us in brackets; the wedge, sector
+and ANF grids are the S1 meshes: `Case3::wedge` on the example table's Mach 3 grid, `Case3::sector` of the Army-Navy Basic Finner with 18 cells over `[0, pi/4]`, the lift half domain):
 
 |grid|cells|f32 block|f32 diagonal|df32 block|df32 diagonal|
 |---|---|---|---|---|---|
-|wedge 156 x 140 x 1 (example table grid, Mach 3 sizing)|21 840|449 (27 / 474)|249 (38 / 289)|660 (28 / 682)|465 (39 / 496)|
-|wedge, wedge mode|21 840|336 (22 / 354)|181 (30 / 212)|513 (23 / 530)|365 (31 / 395)|
-|sector 176 x 140 x 18 (+ one-cell fin stand-in on `k` = 0)|443 520|4 420 (27 / 4 409)|2 479 (38 / 2 478)|6 398 (28 / 6 359)|4 501 (39 / 4 483)|
-|ANF half domain 210 x 70 x 24 (2 solid boxes)|352 800|3 171 (27 / 3 158)|1 949 (38 / 1 951)|4 011 (28 / 4 034)|2 793 (39 / 2 793)|
-|device memory, sector (MiB)||1 161|971|1 322|1 136|
-|device memory, ANF (MiB)||1 161|907|1 328|1 078|
+|wedge 156 x 140 x 1|21 840|357 (22 / 372)|186 (30 / 216), diverges|547 (23 / 567)|382 (31 / 413), diverges|
+|sector 210 x 70 x 18|264 600|2 627 (27 / 2 552)|1 559 (38 / 1 542)|3 277 (28 / 3 235)|2 237 (39 / 2 218)|
+|ANF half domain 210 x 70 x 24|352 800|3 168 (27 / 3 171)|1 953 (38 / 1 945)|4 040 (28 / 4 033)|2 820 (39 / 2 766)|
+|device memory, wedge (MiB)||97|119|187|133|
+|device memory, sector (MiB)||969|907|1 134|1 076|
+|device memory, ANF (MiB)||1 161|907|1 326|1 076|
+
+The diagonal wedge rows are timed with `--allow-nonfinite` (the step cost does not depend on the values). The Euler wedge table of the example rocket (`gpu_euler_wedge_table_perf`: the ten Mach numbers of the
+fixture's `table-euler` on their own grids, each from the free stream, `Block`, `cfl_max` 10, the facade stop rule): df32 (the precision of the 2D table) 6.8 s and 5 900 iterations, f32 8.5 s and 9 850 iterations
+(M 0.1 needs 5 150 in f32: the stationarity of `ca` is judged at the round-off of the sums), against 16.6 s and 55 264 iterations of the 2D Euler table (ref2d.json; its M 0.5 and M 0.9 points ran to 10 000 / 13 500
+iterations). cd_total against the 2D table: within 0.32 % at M 0.8, 1, 1.1, 1.3, 1.7, 2.3, 3; M 0.1 +0.91 % (df32) / -0.13 % (f32); M 0.9 -2.45 %; M 0.5 -16 % (the 2D point ran to its iteration cap, see G-W1).
 
 Device memory of the sector in f32 with the diagonal scheme against its size (`nk` 6, 18, 36, 72; 147 840 / 443 520 / 887 040 / 1 774 080 cells): 453 / 963 / 1 765 / 3 493 MiB, about 1.96 kB per cell and
 0.18 GB fixed: the Euler step alone needs 2.3 kB per cell with the block scheme and df32 3.0 kB, more than the 0.6-1.0 kB of DESIGN3D E, and a 1.7 M-cell half domain is 3.5 GB before any viscous or SST array.

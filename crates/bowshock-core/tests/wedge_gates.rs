@@ -216,8 +216,19 @@ pub trait WedgeRunner {
 
 /// The wedge runner. `solver3d` / `gpu3d`: return `Some(Box::new(..))` here once a wedge exists (see [`WedgeRunner`]).
 fn wedge_runner() -> Option<Box<dyn WedgeRunner>> {
+    // --- GPU runner (gpu3d, stage S2): `BOWSHOCK_WEDGE_BACKEND=gpu`, through `tools/gpuq` (see `wedge_gates/gpu.rs`) ---
+    #[cfg(feature = "gpu")]
+    if std::env::var("BOWSHOCK_WEDGE_BACKEND").as_deref() == Ok("gpu") {
+        return Some(Box::new(gpu::GpuWedge::new()));
+    }
+    // --- end of the GPU runner ---
     None
 }
+
+/// The GPU half of the wedge runner (`BOWSHOCK_WEDGE_BACKEND=gpu`).
+#[cfg(feature = "gpu")]
+#[path = "wedge_gates/gpu.rs"]
+mod gpu;
 
 fn runner() -> Box<dyn WedgeRunner> {
     wedge_runner().expect("GATE: no wedge runner is wired yet (edit `wedge_runner()` in tests/wedge_gates.rs)")

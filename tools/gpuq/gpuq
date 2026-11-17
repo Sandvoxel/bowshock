@@ -55,7 +55,10 @@ cmd_submit() {
   # enough and the worker script needs no change. Inside one worktree the mtimes are the real ones, as in an ordinary cargo build there.
   local key; key=$(printf '%s' "$repo" | sha1sum | cut -c1-10)
   local cmd; cmd=$(printf '%q ' "$@"); cmd=${cmd% }
-  cmd="if [ -n \"\${CARGO_TARGET_DIR:-}\" ]; then export CARGO_TARGET_DIR=\"\$CARGO_TARGET_DIR/wt-$key\"; fi; echo \"gpuq: target dir \${CARGO_TARGET_DIR:-default} (worktree $repo)\"; $cmd"
+  # A reused artifact also keeps the paths baked into it (env!("CARGO_MANIFEST_DIR"): the fixture of the wedge gates, the out dirs of the cone binaries), which
+  # point into the snapshot of the job that built it, deleted long ago. The job therefore runs in a run dir that is stable per worktree (rsync -a --delete of its
+  # snapshot, mtimes kept; the worker runs one job at a time per host) and copies out/ back to the snapshot for the worker to collect.
+  cmd="if [ -n \"\${CARGO_TARGET_DIR:-}\" ]; then export CARGO_TARGET_DIR=\"\$CARGO_TARGET_DIR/wt-$key\"; fi; GQ_SNAP=\$PWD; GQ_RUN=\"\${GPUQ_RUN_ROOT:-\$HOME/.cache/bowshock-gpuq/run}/wt-$key\"; { mkdir -p \"\$GQ_RUN\" && rsync -a --delete \"\$GQ_SNAP\"/ \"\$GQ_RUN\"/ && cd \"\$GQ_RUN\" && rm -rf out; } || { echo 'gpuq: run dir setup failed'; exit 97; }; echo \"gpuq: target dir \${CARGO_TARGET_DIR:-default}, run dir \$GQ_RUN (worktree $repo)\"; $cmd; GQ_RC=\$?; if [ -d out ]; then rsync -a out/ \"\$GQ_SNAP\"/out/; fi; exit \$GQ_RC"
   {
     echo "host=$host"
     echo "name=$name"

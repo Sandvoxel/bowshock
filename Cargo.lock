@@ -399,7 +399,9 @@ dependencies = [
 name = "bowshock-core"
 version = "0.1.0"
 dependencies = [
+ "bowshock-cases",
  "bowshock-cfd",
+ "bowshock-gpu-cases",
  "bowshock-reference",
  "luma",
  "serde",

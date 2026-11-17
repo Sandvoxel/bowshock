@@ -18,6 +18,9 @@ serde = { version = "1", features = ["derive"], optional = true }
 
 [dev-dependencies]
 serde_json = { version = "1", features = ["float_roundtrip"] }
+# the GPU half of the wedge gates (tests/wedge_gates/gpu.rs): the validation cases and their GPU runners (dev-dependency cycle: both depend on this crate)
+bowshock-cases.workspace = true
+bowshock-gpu-cases.workspace = true
 
 [features]
 default = ["gpu"]

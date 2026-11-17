@@ -1,16 +1,16 @@
 //! A [`Field3`] from the 3D solver's state: the grid, the conserved state (`Grid3::cell` order, from the CPU solver or downloaded from
 //! the GPU), the free stream and the case's body.
 //!
-//! The walls are the faces [`run3::for_each_wall_face`] hands out, the same ones the force integration ([`run3::wall_forces`]) sums: every
+//! The walls are the faces of `run3::wall_faces`, the same ones the force integration (`run3::wall_forces`, and the device-side reduction of the GPU runner) sums: every
 //! face between a fluid cell and a wall cell (a solid cell with a part) and the `j = 0` body rows of a sting grid. The part of a face is
 //! its [`Wall`] class (the part id of the cell behind it and the direction of the face), the wall pressure the one of the force integration
-//! ([`run3::wall_pressure`]): the pressure of the first two fluid cells normal to the wall extrapolated linearly to the face centre, the
+//! (`run3::wall_pressure`): the pressure of the first two fluid cells normal to the wall extrapolated linearly to the face centre, the
 //! first cell's alone when there is no second fluid cell. The viewer's `sum -cp A n` over the walls therefore reproduces the pressure force
 //! the integration reports (a test below). The symmetry of the solved domain is the grid's.
 
 use crate::engine::case3::Case3;
 use crate::engine::grid3::{Domain3, FinPhase};
-use crate::engine::run3::{for_each_wall_face, wall_pressure, Wall, WallFaceRef};
+use crate::engine::run3::{wall_faces, wall_pressure, Wall, WallFaceRef};
 use crate::field3::{Field3, Part, Symmetry, WallFace};
 use bowshock_cfd::gas3::{cons_to_prim3, Cons3};
 use bowshock_cfd::grid3::{self, Grid3, PART_FLUID};
@@ -162,7 +162,7 @@ fn walls_of(g: &Grid3, u: &[Cons3], fs: &[f64; 5]) -> Vec<WallFace> {
     let q_inf = 0.5 * fs[0] * (fs[1] * fs[1] + fs[2] * fs[2] + fs[3] * fs[3]);
     let pt = |n: usize| [g.x[n], g.y[n], g.z[n]];
     let mut walls = Vec::new();
-    for_each_wall_face(g, |w| {
+    for w in &wall_faces(g) {
         let pw = wall_pressure(g, w, |c| cons_to_prim3(&u[c])[4]);
         let mut ids = w.corners.map(|(i, j, k)| node(i, j, k));
         // wind counter-clockwise seen from the fluid: the area vector (p2 - p0) x (p3 - p1) / 2 along the normal into the flow, which is the
@@ -174,7 +174,7 @@ fn walls_of(g: &Grid3, u: &[Cons3], fs: &[f64; 5]) -> Vec<WallFace> {
             ids.swap(1, 3);
         }
         walls.push(WallFace { nodes: ids.map(|n| n as u32), cell: w.a as u32, part: part_of(w), cp: ((pw - fs[4]) / q_inf) as f32, cf: [0.0; 3] });
-    });
+    }
     walls
 }
 
