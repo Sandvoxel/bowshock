@@ -142,8 +142,8 @@ fn analysis_full() -> Analysis {
     Analysis::new(&spec).unwrap().fins(fins).backend(Backend::Gpu).resolution(Resolution::Coarse)
 }
 
-/// What the flow field of a running 3D solve costs: the same two conditions on the GPU with and without `on_field3(500)` and `keep_fields`,
-/// alternating, three times each. The solve does not change (same iterations, same CN); the wall time is printed (`SNAPSHOT_COST`).
+/// What the flow field of a running 3D solve costs: the same two conditions on the GPU with and without `on_field3(100)` (five times the rate of
+/// the app's 500) and `keep_fields`, alternating, four times each; the first round (kernels, context) is not counted. The solve does not change (same iterations, same CN); the wall time is printed (`SNAPSHOT_COST`).
 /// `cargo test --release -p bowshock-core --features gpu --test angle_of_attack -- --ignored --nocapture gpu_snapshots`, through `tools/gpuq/gpuq`.
 #[test]
 #[ignore = "needs a GPU: run through tools/gpuq/gpuq"]
@@ -151,12 +151,12 @@ fn gpu_snapshots_and_kept_fields_cost_nothing_measurable() {
     let conditions = [Condition::new(2.0, 2.0), Condition::new(2.0, 6.0)];
     let mut times = [Vec::new(), Vec::new()];
     let mut seen = 0usize;
-    for round in 0..3 {
+    for round in 0..5 {
         for (with, name) in [(false, "plain"), (true, "snapshots + kept fields")] {
             let count = Arc::new(AtomicUsize::new(0));
             let c = count.clone();
             let analysis = if with {
-                analysis_full().keep_fields(true).on_field3(500, move |_| {
+                analysis_full().keep_fields(true).on_field3(100, move |_| {
                     c.fetch_add(1, Ordering::SeqCst);
                 })
             } else {
@@ -171,7 +171,9 @@ fn gpu_snapshots_and_kept_fields_cost_nothing_measurable() {
                 count.load(Ordering::SeqCst),
                 polar.points.iter().all(|p| p.field3.is_some())
             );
-            times[usize::from(with)].push(secs);
+            if round > 0 {
+                times[usize::from(with)].push(secs);
+            }
             if with {
                 seen = count.load(Ordering::SeqCst);
             }

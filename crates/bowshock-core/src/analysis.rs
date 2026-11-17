@@ -765,6 +765,15 @@ impl Analysis {
     /// condition at zero incidence goes to [`Analysis::run_drag`] (the axisymmetric solver), one at an angle of attack to
     /// [`Analysis::run_lift_points`] (the 3D Euler solver). When one 3D viscous solver does both, this function becomes a single call
     /// of it and the two paths below are deleted.
+    ///
+    /// Swapping the engine replaces: this function, [`Analysis::run_drag`] with the drag helpers it uses (`prepare`, `case`, `drag`, `point`,
+    /// `detail`, `warnings`, `sweep*`, `Runner`), and the 3D path (`check_lift`, `run_lift_points`, `lift_case`, `lift_point`, `lift_loop`,
+    /// `lift_gpu`, `LiftRunner` and its two runners, `lift_quality`). It keeps the public types ([`Condition`], [`Forces`], [`PolarPoint`] with
+    /// its `alpha_deg`, `forces` and `field3`), the sweep order and the progress, cancel and snapshot contracts: a point at an angle of attack
+    /// is built in `lift_point` (what is NaN there is listed on [`PolarPoint`]), the final `Field3` comes from the runner's state
+    /// (`LiftRunner::field3`) and the live ones from `Case3::snapshots` ([`Snapshots3`]), which a runner calls where it holds the state
+    /// of the grid after a chunk of iterations (`run3_on` and `GpuRunner3::run_on`: three lines each). [`Analysis::case3_hook`] is the tests'
+    /// way to shrink the grid of every 3D case.
     fn route(&self, conditions: &[Condition]) -> Result<Polar, Error> {
         if conditions.is_empty() {
             return Err(Error::InvalidInput("no flight conditions requested".into()));

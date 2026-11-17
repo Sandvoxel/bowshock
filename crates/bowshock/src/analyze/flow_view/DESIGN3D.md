@@ -146,3 +146,11 @@ second curve for the lower half when it differs), Cp/Mach/Schlieren colour bar, 
 * `gpu3.rs` draws one picture per frame (a single pipeline instance); `gpu.rs` keys its GPU items by (picture id, half) because the side view
   draws two at once. If the scene is ever shown twice at once `gpu3.rs` needs the same treatment.
 * Drive screenshots of GPU content need `ICED_TEST_BACKEND=wgpu`; the default backend leaves the picture blank.
+* **Real 3D fields** (the facade unification): `Analysis::run` gives `PolarPoint::field3` (`keep_fields`) and `on_field3` snapshots for the conditions at an
+  angle of attack; `cfd/run.rs` sends them as `Event::PointField` / `Event::Field`, the stability solve's screen shows its live picture (`solve_view` no longer
+  limits the picture to the drag solve) and `FieldStore::replace_stability` / `machs` put its fields beside the drag solve's. The drive script
+  `scripts/flow3d-real.drive` and the ignored test `a_real_3d_solve_through_the_app_ends_with_its_fields_in_the_store` use a real solve, not the demo.
+* The wall faces, their parts, the fin azimuths and the symmetry of a `Field3` come from the grid (`engine::field3` through `run3::for_each_wall_face`, the
+  function the force integration uses), not from positions. `Part::Other` is the sting (hidden). `MAX_TILES` is 256 (the solver's 2 degree wedge is 180 copies).
+* Toggles are SegmentedControl one-segment strips (`flow_view::toggle`: `bg-300` and the accent underline when on): the primary button's accent fill is
+  for the one commit action of a region (kit, Button).
