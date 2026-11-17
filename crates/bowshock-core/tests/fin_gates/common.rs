@@ -190,6 +190,8 @@ fn fmt(x: f64) -> String {
 #[derive(Default)]
 pub struct Lines {
     pub failed: usize,
+    /// Gate lines that fail against a documented discrepancy of the reference ([`Lines::check_known`]): printed `FAIL KNOWN <where>`, not counted in `failed`.
+    pub known: usize,
     pub gates: usize,
     pub infos: usize,
 }
@@ -207,6 +209,20 @@ impl Lines {
             self.infos += 1;
         }
         ok
+    }
+
+    /// [`Lines::check`] for a line whose failure is a documented discrepancy with the reference (`why`: where it is documented, e.g. `DESIGN3D-L-item-37`): a failing
+    /// gate prints `GATE ... FAIL KNOWN <why>` and does not fail the test; the band is not widened, and a line that passes prints `PASS` as any other.
+    #[allow(clippy::too_many_arguments)]
+    pub fn check_known(&mut self, gate: bool, id: &str, case: &str, measured: f64, reference: f64, band: Band, why: &str) -> bool {
+        let ok = band.pass(measured, reference);
+        if gate && !ok {
+            println!("GATE {id} {case} {} {} {} FAIL KNOWN {why}", fmt(measured), fmt(reference), band.label());
+            self.gates += 1;
+            self.known += 1;
+            return false;
+        }
+        self.check(gate, id, case, measured, reference, band)
     }
 
     /// A number with no band.
