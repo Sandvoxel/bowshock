@@ -233,6 +233,14 @@ pub fn run_ogive(case: &OgiveCase) -> OgiveResult {
     postprocess(case, &s, residual, drop_orders, reason)
 }
 
+/// [`run_ogive`] on the single-cell wedge of the 3D engine ([`crate::wedge`]): the same grid, free stream, limiter and stop rule (the residual drop counted from
+/// the second-order phase), the same post-processing.
+pub fn run_ogive_wedge(case: &OgiveCase) -> Result<OgiveResult, String> {
+    let mut s = case.build_solver();
+    let run = crate::wedge::run_on_wedge(&mut s, case.mach, case.limiter, case.first_order_iters, case.max_iter, case.drop_orders)?;
+    Ok(postprocess(case, &s, run.residual, run.drop_orders, run.stop_reason))
+}
+
 fn postprocess(case: &OgiveCase, s: &Solver, residual: Vec<f64>, drop_orders: f64, reason: StopReason) -> OgiveResult {
     let g = &s.grid;
     let (ni, nj) = (g.ni, g.nj);
@@ -350,5 +358,16 @@ mod tests {
         let body = Ogive { fineness: 3.0 };
         let cd = perkins_jorgensen::forebody_cd(&body, 0.28, -0.038);
         assert!(cd > 0.05 && cd < 0.15, "CD = {cd}");
+    }
+
+    /// The wedge reproduces the 2D case on the coarse grid: the forebody drag within 2 % (the G-W4 band; +0.75 % against the frozen fixture).
+    #[test]
+    fn coarse_wedge_run_matches_the_2d_case() {
+        let mut case = OgiveCase::level(1.98, 0);
+        case.max_iter = 3000;
+        let two_d = run_ogive(&case);
+        let wedge = run_ogive_wedge(&case).unwrap();
+        assert!(wedge.residual.iter().all(|r| r.is_finite()) && wedge.min_rho > 0.0 && wedge.min_p > 0.0);
+        assert!((wedge.cd_nose / two_d.cd_nose - 1.0).abs() < 0.02, "CD wedge {} vs 2D {}", wedge.cd_nose, two_d.cd_nose);
     }
 }

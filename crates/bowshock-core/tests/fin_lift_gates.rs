@@ -118,7 +118,8 @@ fn arcas_axial(mach: f64, fins_on: bool, re_per_m: f64) -> Result<(Solved, f64),
             span: f.span / d,
             sweep: f.sweep / d,
             thickness: f.thickness / d,
-            te_to_base: 0.0,
+            // the mesher puts fins on a tube: the Arcas fin (root chord 1.5 d) cannot straddle the 0.8 d boattail, so its root trailing edge sits where the boattail starts
+            te_to_base: arcas::BOATTAIL_LENGTH / d,
             profile: f.profile,
         };
         Case3::sector(mach, body, fins, tier(kind, flow), 0)
