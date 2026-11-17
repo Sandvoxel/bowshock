@@ -39,6 +39,29 @@
 //!   Face viscosity and eddy viscosity are the mean of the two sides ([`face_mu3`]); across a no-slip face the ghost eddy viscosity is `2 mu_t,w - mu_t`
 //!   with the wall eddy viscosity `mu_t,w = wall[cell][2]` of the turbulence wall treatment (`-mu_t`, i.e. a face value 0, when `wall` is empty).
 //!
+//! # Differences from the 2D module and DESIGN3D section C (read this before integrating or porting)
+//!
+//! 1. **Ghost position**: the mirror image of the cell centre in the *plane of the face* (through its centroid, normal `Face3::n`), not in the face centre.
+//!    The compact gradient `(phi_R - phi_L) / d` then acts along the face normal (`FaceDir3::e` is the normal on every wall and boundary face). Equal to the 2D
+//!    rule on an orthogonal cell. A point mirror tilts `e` by half the opening angle on a wedge `k` face, which the weight `1 / (r dtheta)` of the hoop terms
+//!    turns into an `O(1)` error of the residual (measured: radial-momentum error 5 against the analytic operator, growing like `1 / h`, independent of `dtheta`).
+//! 2. **`SymSides`** (`[i0, i1, j0, j1, k0, k1]`, given to [`face_dirs`] by the solver): the sides of the domain box whose ghost layer is the reflection
+//!    `gas3::reflect3` of the cells (wedge, sector and half-domain `k` planes). A ghost across such a side carries the *reflected* gradient `R G R`
+//!    ([`reflect_grad`]) instead of the gradient of its cell; the face tensor is then the mean of the tensors of the cell and its mirror image and carries no
+//!    shear `n.G.t` (the unreflected gradient leaves an `O(dtheta)` shear, again `O(1)` after the `1 / (r dtheta)` weight). Far-field, outflow and axis ghosts
+//!    keep the gradient of their cell; a no-slip wall ghost `(rho, -u, -v, -w, p)` too (the odd field has the same gradient).
+//! 3. **`wall: &[[f64; 3]]`** replaces the 2D `rough` argument of `face_mu`: `[k_w, omega_w, mu_t,w]` per cell with a no-slip face, produced by the
+//!    turbulence wall treatment for every wall cell (smooth walls too, `turbulence3`); an empty slice is a smooth wall with `mu_t,w = 0`. A cell with two wall
+//!    faces (a fin-body junction) has one state for both.
+//! 4. **`diffusion_rate`** is `2 lv A_f^2 / V` (mean face area of the direction, cell volume): the 2D `2 lv len^2 / A` with face length -> face area and cell
+//!    area -> volume, the partner of the convective `(|u.n| + c) A_f` of `Solver3::compute_dt`. [`face_lambda3`] is the 2D `face_lambdas`.
+//! 5. **Types**: `crate::solver::{Viscous, PRANDTL, PRANDTL_T}` and `Viscous::mu` are reused, not moved (only `re_c`, `sutherland` are read); the solid mask is the
+//!    per-cell `Solver3::solid` (full length), never `Grid3::solid` boxes; the Fv.n arrays have the layout and 5 components of `Solver3::{fi, fj, fk}` (mass
+//!    component 0), so the residual is `F - Fv` componentwise.
+//! 6. **Grid note**: `grid3::revolve` has flat faces, so a wedge wall lies `r (1 - cos(dtheta / 2))` inside the revolved surface (0.14 % of `r` at 6 degrees);
+//!    the parity fixture scales the node radii by `1 / cos(dtheta / 2)` ("matched") to compare against the 2D grid. And the hoop terms need `Grid3::xc` to be
+//!    the mean of the 8 nodes (consistent with the face centroids): sampling a wedge at other points amplifies like `h^2 / dtheta`.
+//!
 //! Plain functions of their inputs; every pass writes the whole output arrays (zero where there is no flux / no fluid) and keeps no state. The parameters
 //! are the 2D ones (`crate::solver::Viscous`: only `re_c`, `sutherland` are read, `wall_i_start` is not used in 3D).
 //!
