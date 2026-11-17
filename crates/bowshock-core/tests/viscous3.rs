@@ -71,8 +71,9 @@ fn build3(case: &Case, dtheta: f64, level: u32) -> (Case3, Solver3) {
         Ok("laminar") => case.viscous.map(|v| bowshock_cfd::solver::Viscous { turbulence: Turbulence::Laminar, ..v }),
         _ => case.viscous,
     };
-    // the outflow plane of the 2D case: characteristic (the wall-resolved body cases) or static pressure (the plates)
-    let opts = RansOpts3 { pressure_outflow: n.outflow == bowshock_cfd::solver::Bc::PressureOutflow, ..RansOpts3::default() };
+    // the outflow plane of the 2D case: characteristic (the wall-resolved body cases) or static pressure (the plates); `LAW_I=1`: the automatic wall treatment on the i walls
+    let opts =
+        RansOpts3 { pressure_outflow: n.outflow == bowshock_cfd::solver::Bc::PressureOutflow, law_i_walls: env("LAW_I", 0u8) != 0, ..RansOpts3::default() };
     s.set_viscous_with(visc, opts);
     s.restart_ramp();
     (c3, s)
