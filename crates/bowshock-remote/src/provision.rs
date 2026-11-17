@@ -388,7 +388,7 @@ mod tests {
                 }
                 if !dev {
                     if let Some(name) = line.split(|ch: char| !(ch.is_alphanumeric() || ch == '-')).find(|w| w.starts_with("bowshock-")) {
-                        assert!(sourceset::CRATES.contains(&name) || name == c.to_string(), "{c} depends on {name}, which is not in the source set");
+                        assert!(sourceset::CRATES.contains(&name) || name == *c, "{c} depends on {name}, which is not in the source set");
                     }
                 }
             }

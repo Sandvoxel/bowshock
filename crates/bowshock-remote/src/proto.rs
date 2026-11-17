@@ -35,6 +35,7 @@ pub enum Job {
 }
 
 /// Client to worker.
+#[allow(clippy::large_enum_variant)] // one message in flight at a time
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ClientMsg {
     /// First message: the protocol version and the worker version (source key) the client expects.
