@@ -61,6 +61,9 @@
 //! 6. **Grid note**: `grid3::revolve` has flat faces, so a wedge wall lies `r (1 - cos(dtheta / 2))` inside the revolved surface (0.14 % of `r` at 6 degrees);
 //!    the parity fixture scales the node radii by `1 / cos(dtheta / 2)` ("matched") to compare against the 2D grid. And the hoop terms need `Grid3::xc` to be
 //!    the mean of the 8 nodes (consistent with the face centroids): sampling a wedge at other points amplifies like `h^2 / dtheta`.
+//! 7. **Wall forces**: [`wall_tractions`] reads the viscous force on the body from the very flux `Fv.n` of the no-slip faces the mean-flow equations see (face viscosity
+//!    `mu + mu_t,w` of the wall treatment), so the friction drag is the sum of those fluxes and there is no second shear formula; the wall-function value
+//!    `rho u_tau^2` (`turbulence3::wall_shear_vector`) is carried exactly as the tangential part of that flux.
 //!
 //! Plain functions of their inputs; every pass writes the whole output arrays (zero where there is no flux / no fluid) and keeps no state. The parameters
 //! are the 2D ones (`crate::solver::Viscous`: only `re_c`, `sutherland` are read, `wall_i_start` is not used in 3D).
@@ -249,7 +252,7 @@ impl FaceDirs3 {
 }
 
 /// Apply `f(i, j, k, q)` to every face `(i, j, k)` (flat index `q`) of family `dir` into `out`, in parallel over the `k` planes.
-fn map_faces<T: Send>(grid: &Grid3, dir: usize, out: &mut [T], f: impl Fn(usize, usize, usize, usize) -> T + Sync) {
+pub(crate) fn map_faces<T: Send>(grid: &Grid3, dir: usize, out: &mut [T], f: impl Fn(usize, usize, usize, usize) -> T + Sync) {
     let [nfi, nfj, _] = face_shape(grid, dir);
     let plane = nfi * nfj;
     out.par_chunks_mut(plane).enumerate().for_each(|(k, po)| {
@@ -344,18 +347,25 @@ pub fn cell_pass(v: &Viscous, grid: &Grid3, solid: &[bool], w: &[Prim3], grad: &
 /// for `wall` empty: the face value is the wall eddy viscosity `mu_t,w = wall[cell][2]`, 0 when smooth).
 #[inline]
 pub fn face_mu3(mu: &[f64], mu_t: &[f64], wall: &[[f64; 3]], sides: &FaceSides3) -> (f64, f64) {
-    let mut_side = |s: &Side3| {
-        if s.ghost && sides.noslip {
+    face_mu_cells(mu, mu_t, wall, [sides.l.cell, sides.r.cell], [sides.l.ghost, sides.r.ghost], sides.noslip)
+}
+
+/// [`face_mu3`] from the fluid cells of the two sides (`cell`, for a ghost the adjacent fluid cell) and their ghost flags.
+#[inline]
+pub fn face_mu_cells(mu: &[f64], mu_t: &[f64], wall: &[[f64; 3]], cell: [usize; 2], ghost: [bool; 2], noslip: bool) -> (f64, f64) {
+    let mut_side = |s: usize| {
+        let c = cell[s];
+        if ghost[s] && noslip {
             if wall.is_empty() {
-                -mu_t[s.cell]
+                -mu_t[c]
             } else {
-                2.0 * wall[s.cell][2] - mu_t[s.cell]
+                2.0 * wall[c][2] - mu_t[c]
             }
         } else {
-            mu_t[s.cell]
+            mu_t[c]
         }
     };
-    (0.5 * (mu[sides.l.cell] + mu[sides.r.cell]), 0.5 * (mut_side(&sides.l) + mut_side(&sides.r)))
+    (0.5 * (mu[cell[0]] + mu[cell[1]]), 0.5 * (mut_side(0) + mut_side(1)))
 }
 
 /// The gradient record of the mirror image of the field about the plane with unit normal `n`: the field `phi_g(x) = R phi(R x)` of a symmetry-plane ghost
@@ -474,6 +484,49 @@ pub fn add_viscous_residual(grid: &Grid3, solid: &[bool], fvi: &[Cons3], fvj: &[
             }
         }
     });
+}
+
+/// The viscous force on the body at one no-slip face: the family `dir` and index `idx` of the face (as [`face_of`]), its `area`, the unit normal `n` out of the
+/// fluid into the solid, and the force per unit area `tau` that the fluid exerts on the wall by viscous stress (shear and the small normal viscous stress).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WallTraction {
+    pub dir: usize,
+    pub idx: [usize; 3],
+    pub area: f64,
+    pub n: [f64; 3],
+    pub tau: [f64; 3],
+}
+
+/// The viscous traction of every no-slip face from the face fluxes `fvi, fvj, fvk` of [`face_pass`]: the residual adds `+(Fv.n) A` to the momentum of a fluid
+/// cell through its upper face and `-(Fv.n) A` through its lower one, so the force on the wall is `tau = -sigma Fv.n[1..4]` with `sigma = +1` where the fluid cell
+/// is the lower side of the face and `-1` where it is the upper one (`n = sigma n_face`). The momentum flux the mean-flow equations see (face viscosity
+/// `mu + mu_t,w` of the wall treatment) is therefore the very force the body feels: the friction drag is `sum tau.e_x area`, no second shear formula.
+pub fn wall_tractions(grid: &Grid3, solid: &[bool], dirs: &FaceDirs3, fvi: &[Cons3], fvj: &[Cons3], fvk: &[Cons3]) -> Vec<WallTraction> {
+    let mut out = Vec::new();
+    for (dir, fv) in [(0, fvi), (1, fvj), (2, fvk)] {
+        let [n0, n1, n2] = face_shape(grid, dir);
+        for k in 0..n2 {
+            for j in 0..n1 {
+                for i in 0..n0 {
+                    let (q, face) = face_of(grid, dir, i, j, k);
+                    if !dirs.family(dir)[q].noslip {
+                        continue;
+                    }
+                    let Some(fc) = face_cells(grid, solid, dir, i, j, k) else { continue };
+                    let sigma = if fc.kind[0] == SideKind::Cell { 1.0 } else { -1.0 };
+                    let f = &fv[q];
+                    out.push(WallTraction {
+                        dir,
+                        idx: [i, j, k],
+                        area: face.area,
+                        n: [sigma * face.n[0], sigma * face.n[1], sigma * face.n[2]],
+                        tau: [-sigma * f[1], -sigma * f[2], -sigma * f[3]],
+                    });
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Diffusive contribution `2 lv A_f^2 / V` to the spectral radius `L_d` of one direction (`area`: mean area of the two faces of that direction, `vol` the cell

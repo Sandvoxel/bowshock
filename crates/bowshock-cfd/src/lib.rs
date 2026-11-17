@@ -20,6 +20,7 @@ pub mod multigrid;
 pub mod solver;
 pub mod solver3;
 pub mod turbulence;
+pub mod turbulence3;
 pub mod viscous;
 pub mod viscous3;
 pub mod walldist3;
