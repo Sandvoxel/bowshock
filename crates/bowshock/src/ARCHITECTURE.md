@@ -1,18 +1,29 @@
 # Bowshock app architecture
 
-One `App` (in `app/mod.rs`) owns one shared context, `Ctx`, and one state struct per area. A single top-level
-`app::Message` wraps each area's own `Message`. Modules work in parallel by owning their own file(s) and never needing to
+One `App` (in `app/mod.rs`) owns one shared context, `Ctx` (`app/ctx.rs`), and one state struct per area. A single top-level
+`app::Message` (`app/message.rs`) wraps each area's own `Message`. Modules work in parallel by owning their own file(s) and never needing to
 touch `app/mod.rs`.
 
 ```
 main.rs                  CLI (app / drive / gallery) and the `app()` builder only
-app/mod.rs               App, Ctx, Message, Selection, routing, the global keyboard map
+app/mod.rs               App lifecycle (new, launch, update, after_update, view, subscription)
+app/ctx.rs               Ctx, Mode, Selection, Pending
+app/message.rs           Message, KeyPress, the global keyboard map (`shortcut`)
+app/run_report.rs        RunReport: the last background run (a line per flight, its outcome as `simulate::Message::Done` lands); `Ctx::{start_run, finish_run_line}`; cleared by the `Frame` clock, `DismissRun` and switching to Simulate
+app/route.rs             message routing, modal interception (`intercept_modals`), key dispatch
+app/env.rs               Env: centralized BOWSHOCK_* / $HOME config plus `animate` / `freeze_flash` (`Env::from_process`, `Env::for_tests`)
+app/worker.rs            offload, perform, StreamHandle, spawn_stream, spawn_iter: off-thread work and cancellable streams
+app/dialogs.rs           every rfd file dialog; BOWSHOCK_EXPORT_FILE override in `save_file`
+app/selection_set.rs     PickMode, MultiSet<Id>: primary + extras + range anchor, shared by app/multi.rs and simulate/mod.rs
 app/document.rs          Document: the rocket + path + dirty + undo/redo (every mutation goes through it)
-app/physics.rs           cached balance (mass, CG, CP, margin), warnings, stages, motor db (bowshock-sim / -motors)
-app/drag.rs              shared drags (bin -> viewport, grab, move) + delete, built on Document's drag support
-app/files.rs             New / Open / Save / Save As / the built-in example, unsaved-changes guard
-app/ui.rs                shared UI helpers: `label`, `mm`, unit-system readouts
+app/physics.rs           cached balance (mass, CG, CP, margin), warnings, stages, motor db, per-stage CFD plans / drag tables (bowshock-sim / -motors)
+app/drag.rs              shared drags (bin -> viewport, grab, move) + delete, built on Document's drag support. `end_carry(ctx, Gesture, Over)` is the one decision point for what a release or a click does to a part in hand, in drag and drop and in click to place (`ctx.click_to_place`): every overlay, the lanes, the bin and the window root report to it; a part dropped on the bin (`ctx.over_bin`, set by the bin) is deleted through the same `delete_parts` Delete uses, or discarded if it came from the bin
+app/files.rs             New / Open / Save / Save As / the built-in example, unsaved-changes guard; `.ork` import, which first registers the thrust curves stored in the file (`use_embedded_curves`) so they never reach the ThrustCurve lookup
+app/motor_fetch.rs       after a load (`Ctx::fetch_wanted`, `load_ticket`), looks up motors the database cannot resolve on ThrustCurve.org (one worker task; exactly-one-match rule; `Env::fetch_motors` gates it) and adds them via `add_downloaded`
+app/ui.rs                shared UI helpers: `label`, `mm`; re-exports the unit readouts from `units`
 chrome/                  top bar, status strip, config menu, issues list, motor picker (State + Message)
+chrome/menu_bar.rs       the File / Edit / View menu bar: labels, the dropdown overlay and each menu's rows as data (`TopMenu`, `Ctx::menu`, `app::Message::Menu`); the bar's x positions are shared constants with `top_bar.rs`
+chrome/run_toast.rs      the run toast under the top bar (non-modal) while `ctx.run` is set and the mode is not Simulate; the Simulate button reads `Running…` while flights are pending
 build/mod.rs             Build screen composition (pane_grid) only
 build/parts_bin.rs       parts bin
 build/inspector.rs       inspector
@@ -20,16 +31,23 @@ build/lanes.rs + lanes/     Station Lanes: `scene` (bars, sub-rows, stages, mass
                            (move / resize / landing / snap on the Rocket), `canvas` (drawing + mouse), `menu` ("Add here…").
                            The lanes always fit the whole rocket (zoom/pan by hand, reset returns); they do not follow the viewport camera.
                            The Build screen's centre pane is the viewport over the fixed-height lanes (`lanes::height`), not a pane_grid pane.
-viewport/                3D viewport (View = state, Message) + overlays (assembly, manipulate, surface)
-simulate/mod.rs          Simulate screen
+viewport/                3D viewport (View = state, Message) + overlays (assembly, surface)
+viewport/manipulate/     selection / handle overlay: `mod` (state, Edit), `query` (hit tests, drag math), `paint` (labels, shapes), `program` (canvas::Program), `draw` (overlay painters)
+viewport/capture.rs      One-shot offscreen render of the model at a chosen pixel size (image export): `Capture` request, read back in `Primitive::prepare`, pixels returned on a oneshot channel.
+export/                  File > Export 3D model… / Export image… (State + Message, modal dialogs); `mesh_export.rs` writes OBJ / binary STL (mm) from the viewport mesh.
+print/                   File > Print / export PDF…: `pdf.rs` (PDF 1.4 writer, Helvetica core fonts), `templates.rs` (full-size fin / ring / wrap / marking templates, tiling), `report.rs` (parts list, design report); built on a worker thread.
+prefs/                   Edit > Preferences… (top bar Preferences button, ⌘, / Ctrl+,): the modal window, a section list and a page each: `appearance.rs` (theme), `editor.rs` (how parts are placed: drag and drop or click to place), `units.rs` (unit set select and per-quantity rows), `compute.rs` (the machines the solves run on: switches, per-machine connection test, use one / share), `storage.rs` (files and caches, sizes measured off-thread, Open folder / Clear). Every control applies at once through `Ctx::{set_dark, set_click_to_place, set_units, save_settings}` and is kept in `app/settings.rs`; the app intercepts all other messages while it is open (`route.rs`).
+simulate/mod.rs          Simulate screen (`format.rs`: flight-only formatting: bearing, landing, spin). A staged flight's result carries one `bowshock_sim::Branch` per separation (the dropped stage flown on its own, `flight/branch.rs`): `plots.rs` draws each as a dashed line from the separation (the `Dropped stages` header toggle hides them), a thin `StripRow` under the events strip and a dashed ground `Track::dropped`; `results.rs` adds a section per branch after the recovery
 analyze/mod.rs           Analyze screen
-analyze/cfd.rs           CFD table method: document -> `bowshock-core` mapping, the off-thread solve, table keys, the coarse (default) or medium (Refine) grid, table -> plot points.
+analyze/cfd/             CFD table method: `plan` (document -> `bowshock-core` mapping, table keys, coarse (default) or medium (Refine) grid), `fresh` (table status), `run` (off-thread solve, events), `share` (the work queue that hands Mach numbers to the machines that are on), `remote` (a machine over SSH through `bowshock-remote`), `interp` (table -> plot points, Mach / alpha interpolation).
                          Tables are stored in the document (`bowshock_model::CfdTable`, a cache: not an edit, not in undo).
+                         The final flow field of each point (`bowshock_core::Field`) rides the solve's events (`Event::PointField`; a local solve also sends `Event::Field` snapshots every 500 iterations) into `cfd/fields.rs`' `FieldStore`: session-only, beside the table state, keyed by Mach node, never saved, dropped when the geometry or the table it belongs to changes.
 analyze/solve.rs         Live state of a CFD solve (`Tracker`): units (Mach points, or Mach x angle), per-point outcome, weighted progress fraction and time left from the measured throughput. Pure, no clock.
 analyze/solve_view.rs    The solve on screen: headline, bar, the Cd(Mach) (or CN) curve filling in, the point in flight with its monitor trace, the points list; replaces the plots while a solve runs.
 analyze/solve_demo.rs    `BOWSHOCK_CFD_DEMO`: scripted solve events for screenshots (the driver cannot wait on a minutes-long real solve) and the screen-level tests.
-widgets/                 shared widgets (read-only for screens; do not edit from a screen task)
-units.rs                 unit set (UnitSystem: one unit per Family, named presets), formatting, expression parsing
+analyze/flow_view.rs     The flow viewer, in the solve screen (the live picture) and as the `Flow field` view of a finished table: `State` (scalar, grid, camera, Mach stepper), the screen transform `Xf` with the mirror about the axis, the canvas overlay (body, ticks, hover readout, wall Cp under it, sharing the x axis) and the Cd(Mach) picker. `flow_view/prepared.rs` (a field made ready: Mach, Cp, schlieren per cell and their ranges, one vertex per grid node, the cell under the pointer), `flow_view/map.rs` (colour maps: viridis, ColorBrewer RdBu, grey), `flow_view/gpu.rs` + `flow.wgsl` (the cells drawn by a `shader` primitive: vertices uploaded once per picture, pan / zoom / scalar are uniforms).
+widgets/                 shared widgets (read-only for screens; do not edit from a screen task); `modal.rs` (modal card + `scrim`), `unit_input/` (the unit field: `builder`, `logic`, `widget`, `cells`)
+units.rs                 unit set (UnitSystem), all SI/display formatting (`readout`, `with_unit`, `bare`, `len`, `len_unit`, `num_scaled`, `with_unit_scaled`, `signed`), expression parsing
 ```
 
 ## The module contract
@@ -75,14 +93,15 @@ pub struct Ctx {
     pub doc: Document,          // the open document: rocket(), edit*(), undo/redo, path, dirty, revision
     pub selection: Selection,   // None | Part(PartId) | Separation(stage)  (any part class: axial, radial group, internal)
     pub drag: Drags,            // axial / radial drag in progress + symmetry + angle_snap
-    pub physics: Physics,       // balance(), burnout(), issues(), warnings(), stages(), motors(), margin_with_motor(), phase()
-    pub units: UnitSystem,      // the display unit set: one unit per Family (top bar select + Custom… panel), kept in app/settings.rs (user config, not the rocket); format with app::ui::{with_unit, bare, readout, len, len_unit}
+    pub physics: Physics,       // balance(), issues(), stages(), motors(), margin_with_motor(), phase(), cfd_plan(stage), drag_table(rocket, stage)
+    pub units: UnitSystem,      // the display unit set: one unit per Family (Preferences > Units), kept in app/settings.rs (user config, not the rocket); format with crate::units::{with_unit, bare, readout, len, len_unit} (also re-exported by app::ui)
     pub cursor: Option<Point>,  // window coordinates, app-wide
     pub mode: Mode,             // Build | Simulate | Analyze
     pub dark: bool,             // ctx.tokens() gives the design tokens of the current theme
     pub compare_configs: bool,  // "Compare all in lanes"
     pub notice: Option<(String, Instant)>,  // ctx.notify("text") shows it in the status strip for 3 s
     pub camera_fit: bool,       // set true to ask the viewport to frame the rocket once its mesh is current
+    pub env: env::Env,          // runtime config read once from the process (BOWSHOCK_* vars, animate, freeze_flash)
 }
 ```
 
@@ -120,10 +139,14 @@ ctx.doc.seal();                                                      // end the 
 
 `ctx.selection` is app-level and shared by the viewport, lanes and inspector. Set it directly
 (`ctx.selection = Selection::Part(id)`); it is validated after every message. `Selection::Separation(n)` is the separation of
-stage `n` from the stage ahead (`Stage::index`, from 2). While a part is being carried by a drag it is out of the rocket but
+stage `n` from the stage ahead (`Stage::index` of the stage below the joint, from 1; the lower stage separates). The joint is
+the rocket's own: `Rocket::separation_joints(n)` lists the eligible ones and `set_separation_joint(n, joint)` moves it (inspector
+select = one `Move separation` step; the diamond in the viewport and the line in Station Lanes drag it through
+`app::drag::{move_separation, finish_separation}`, the document's drag support, so Esc restores it). While a part is being
+carried by a drag it is out of the rocket but
 stays selected.
 
-**Multi-selection** (`app/multi.rs`): `ctx.selection` stays one value, `Selection::Part(primary)`; the parts selected with it live
+**Multi-selection** (`app/multi.rs`, on `app/selection_set.rs`'s `MultiSet<PartId>`; Simulate's flight selection uses `MultiSet<FlightId>`): `ctx.selection` stays one value, `Selection::Part(primary)`; the parts selected with it live
 in a private list tied to that primary, read with `ctx.selected_parts()` (primary first) / `ctx.is_multi()`. Shift-click and
 Cmd/Ctrl-click in the viewport (`viewport::Message::Toggle`) and in Station Lanes (`lanes::Message::Toggle`) call
 `ctx.toggle_part(id)`; a plain click calls `ctx.select_one(..)`; Esc (no drag open) or an empty click clears. Anything that sets
@@ -175,16 +198,28 @@ copies, nested pods, motors in pods.
 ## Physics
 
 `ctx.physics` is a cache, current when `view` runs: `balance()` (mass, length, ref diameter, CG, CP, margin, CNα for the phase
-on show at liftoff, `None` for an empty rocket), `burnout()`, `issues()` (non-`Ok` warnings, each with an optional `part` to
+on show at liftoff, `None` for an empty rocket), `issues()` (non-`Ok` warnings, each with an optional `part` to
 select), `stages()`, `is_staged()`, `phase()`, `config_margin(id)`, `margin_with_motor(rocket, mount, motor)`,
 `margins_with_motors(rocket, mount, indices)` (the picker's whole column at once), `mounts_of_stage(rocket, stage)`, `motors()`
-(the `MotorDb`: the bundled ThrustCurve.org catalogue, cached downloads `<motorId>.motor` and the user's `.eng` files from
-`user_motors_dir()`), `motor_origin(index)`, `add_downloaded(motor)`, `gauge()` (animated margin gauge). Phase is a view
+(the `MotorDb`: the bundled ThrustCurve.org catalogue, cached downloads `<motorId>.motor` and the user's `.eng` / `.rse` files from
+`ctx.env.motors_dir`), `motor_origin(index)`, `add_downloaded(motor)`, `add_embedded(motor)` (a curve stored in an imported `.ork`), `gauge()` (animated margin gauge). Phase is a view
 setting (`Phase::Full` or `Phase::UpperFrom(k)`), set from the status strip.
+
+It also caches the CFD plan of every stage: `cfd_plan(stage)` and `drag_table(rocket, stage)` are rebuilt once when
+`(revision, phase, units)` changes (`Physics::sync(rocket, revision, units)`), so Simulate's `view` and Analyze (CFD plan
+status, the Dispersion drag tables) never build a vehicle or a `cfd::Plan` themselves.
 
 Motors are identified by `Motor::id` (`tc:<ThrustCurve motorId>` or `eng:<curve hash>`), and a configuration's `MotorRef`
 carries that id, so two curves with one designation stay two motors. Look motors up with `from_model::find_motor` (id first,
 then designation and maker) and make references with `from_model::motor_ref`; never match on the designation alone.
+
+An OpenRocket 26.xx `.ork` stores user-defined curves as `thrustcurves/<digest>.rse` in its ZIP and names each motor by `<digest>`;
+`ork::import` returns them raw (`embedded_curves`, `motor_digests`; the model crate has no motor parser). On import,
+`files::use_embedded_curves` takes every referenced `(designation, maker, digest)` the database cannot resolve and has a stored curve,
+parses it with `bowshock_motors::parse_rse`, and adds its first engine under the *design's* name (`Motor::renamed`: one digest under
+three names is three motors, ids `eng:<hash of name + data>`) through `Physics::add_embedded`: a `File`-origin (USER) motor kept as
+`<designation>-<hash>.eng` in the motors directory, so the saved document's `MotorRef` id resolves next session. The imported
+references get those ids, and the load-time ThrustCurve lookup (`motor_fetch`) then finds nothing missing for them.
 
 ## Overlays and the viewport
 
@@ -194,11 +229,30 @@ The viewport pane is `viewport::View::view`; overlays (`assembly` for axial drag
 and drag calls. Camera messages (`Orbit`, `Pan`, `Zoom`, `Fit`, `Snap`, `Home`, `Roll`, `Tick`) are the same enum. The mesh
 (`View::sync`) rebuilds from `ctx.doc.revision()`, hover, selection and the drag ghosts.
 
+A part picked up from the rocket (`Drag::origin`) is out of the document while carried, with its radial and internal parts held in
+`assembly::Origin` (motors: from `Document::drag_base`). Its ghost is the part landed by the same call a drop uses
+(`assembly::land_carried`) with the part and all it carries drawn in the ghost state (`Marks::ghost` = `mesh::Ghost`, its
+`carried`), so fins, rings and the loaded motor appear as they will. With no target (`Marks::free`) the same ghost, alone as a
+small rocket (`assembly::free_rocket`), follows the cursor on the plane through the rocket's axis that faces the camera. A part
+from the bin has no `origin`: its ghost is the bare part.
+
 Handle edits (DirectEdit, Snapping): the model lists every part's handles (`Rocket::handle_specs`), reads and writes a dimension
 (`Rocket::dim`, `clamp_dim`, `set_dim`, the same calls the Inspector uses) and offers snap targets (`Rocket::snap_targets`).
 `viewport/handles.rs` places the handles for the camera, `viewport/snap.rs` picks the catching target, and `manipulate`
 drives one drag as `Edit::Begin`, `Dim`/`Vertex`..., `End` (one undo step; `Cancel` restores). `BOWSHOCK_DRIVE_MODIFIERS`
 (`shift`, `alt`, `ctrl`) holds modifiers for drive scripts (`scripts/directedit-snap.drive`).
+
+## Runtime plumbing (`app/env.rs`, `app/worker.rs`, `app/dialogs.rs`, `widgets/modal.rs`)
+
+* `ctx.env` (`Env`) is the one place that reads `BOWSHOCK_*` variables and `$HOME` fallbacks (read once at launch;
+  `Env::for_tests()` touches nothing on the host). It also carries `animate` and `freeze_flash`; nothing else holds global
+  animation flags. Read config from `ctx.env`, never `std::env`.
+* `app::worker`: `offload` / `perform` run one closure on a thread; `spawn_stream` / `spawn_iter` return a `Task` plus a
+  `StreamHandle` (serial, `request_cancel`, `abort`) for cancellable beat + worker streams (CFD solves, optimiser, scripted demo).
+* `app::dialogs` wraps every `rfd` file dialog (`pick_file`, `pick_files`, `save_file`, `pick_bytes`, `pick_named_text`);
+  `save_file` honours `ctx.env.export_file` so headless runs skip the dialog. Screens never import `rfd`.
+* `widgets::modal::modal` is the one dimmed-scrim card (export, print, scale, unsaved changes); `widgets::modal::scrim` is the bare
+  scrim. `App::intercept_modals` (in `app/route.rs`) owns Enter/Escape while one is open.
 
 ## Chrome (top bar, status strip, config menu, motor picker)
 
@@ -208,6 +262,15 @@ buffer, picker) is `chrome::State`; its messages are `chrome::Message`. The moto
 `chrome/config_picker.rs` (`Picker`, `Message`, `Outcome`). Its ThrustCurve.org source returns `Outcome::Debounce`, `Search` and
 `Download`, which `chrome::State::update` turns into tasks that run on worker threads (`config_picker::debounce`, `search`,
 `download`); `$BOWSHOCK_THRUSTCURVE_API` points the client elsewhere (`scripts/thrustcurve-offline.drive`).
+
+## The flow viewer (`analyze/flow_view*`)
+
+Rendering: the cells are drawn by a `shader` primitive (`flow_view/gpu.rs`), a canvas overlay on top draws the body, ticks, readout
+and wall Cp and takes the mouse. A canvas-only picture would re-tessellate every cell whenever the view moves. Measured by the test
+`the_picture_renders_on_a_device_…` (Apple M1 Max, a 1408 x 500 px target, debug build, submit to done, 300 frames):
+0.70 ms a frame for 27 280 cells (0.74 ms with the cell edges), 0.85 ms for 109 120 cells (0.98 ms with edges); the mirror draws
+each twice. `Prepared::new` (once per picture, UI thread) took 38 ms for 27 280 cells and the hover lookup 2 ms, both in a debug
+build (a release build is unmeasured). Live snapshot cost on the solver side is in the docs of `Analysis::on_field`.
 
 ## Tests and the drive harness
 

@@ -7,7 +7,7 @@ use iced::widget::canvas::{self, Action, Event, Frame, Geometry, LineDash, LineJ
 use iced::{alignment, keyboard, mouse, Color, Element, Fill, Font, Pixels, Point, Rectangle, Renderer, Size, Theme, Widget};
 
 use super::ticks::{decimals_for, even_range, even_ticks, fmt_fixed, nice_step, nice_ticks};
-use super::{window_points, LabelAt, LineStyle, Panel, PanelAction, PlotGroup, PlotMessage, PlotState, Tag, YTicks};
+use super::{window_points, EventMark, LabelAt, LineStyle, Panel, PanelAction, PlotGroup, PlotMessage, PlotState, Tag, YTicks};
 use crate::theme::{self, MONO, SANS};
 use crate::tokens::{Tokens, TEXT_LABEL};
 
@@ -22,6 +22,8 @@ const PANEL_TOP: f32 = 6.0;
 const STRIP_TIMELINE_H: f32 = 40.0;
 const STRIP_MINI_H: f32 = 26.0;
 const STRIP_GAP: f32 = 4.0;
+/// Height of one thin row of the strip under the events (a dropped stage's flight).
+const STRIP_ROW_H: f32 = 16.0;
 /// Reach of a band's edge handle.
 const EDGE_GRAB: f32 = 5.0;
 /// Shift-drag snaps to an event within this many px.
@@ -85,6 +87,38 @@ impl<'a> PlotView<'a> {
     }
 }
 
+/// The thin rows under the events strip, one per dropped stage: its name (upper-case) at the left, a bar over its span in its
+/// colour on a hairline across the strip, and a tick per event in the event's colour with the event's name beside it (to the
+/// right, or to the left where the right has no room; a name that would overprint the one before it is left out).
+fn draw_rows(f: &mut Frame, t: &Tokens, group: &PlotGroup, layout: &Layout, rect: Rectangle) {
+    let (x0, x1) = (rect.x, rect.x + rect.width);
+    for (i, row) in group.rows.iter().enumerate() {
+        let y = rect.y + STRIP_ROW_H * i as f32;
+        put(f, &row.name.to_uppercase(), Point::new(6.0, y + 6.0), t.ink_faint, FONT_SMALL, Alignment::Left, alignment::Vertical::Center, MONO);
+        f.fill_rectangle(Point::new(x0, y + 12.0), Size::new(rect.width, 1.0), t.line_200);
+        let (a, b) = (layout.strip_px(row.from).max(x0), layout.strip_px(row.to).min(x1));
+        if b > a {
+            f.fill_rectangle(Point::new(a, y + 11.0), Size::new(b - a, 3.0), row.color.resolve(t));
+        }
+        let mut events: Vec<&EventMark> = row.events.iter().collect();
+        events.sort_by(|a, b| a.x.total_cmp(&b.x));
+        let mut taken = f32::NEG_INFINITY;
+        for e in events {
+            let px = crisp(layout.strip_px(e.x));
+            let color = e.role.color().resolve(t);
+            line(f, Point::new(px, y + 3.0), Point::new(px, y + 15.0), color, 1.0, LineStyle::Solid);
+            let text = tag_text(&e.label).to_uppercase();
+            let w = mono_width(text.chars().count(), FONT_SMALL);
+            let right = px + 3.0;
+            let start = if right + w <= x1 && right >= taken + 4.0 { right } else { px - 3.0 - w };
+            if start >= x0 && start >= taken + 4.0 {
+                put(f, &text, Point::new(start, y + 6.0), color, FONT_SMALL, Alignment::Left, alignment::Vertical::Center, MONO);
+                taken = start + w;
+            }
+        }
+    }
+}
+
 /// The x axis title (`Time · s`, `Mach number`) in the row under the bottom plot's tick labels, at the right end of the axis.
 fn draw_axis_title(f: &mut Frame, t: &Tokens, group: &PlotGroup, layout: &Layout) {
     let title = group.x.title();
@@ -127,6 +161,8 @@ struct Layout {
     window: (f64, f64),
     full: (f64, f64),
     strip: Option<(Rectangle, StripKind)>,
+    /// The thin rows under the strip (one per [`StripRow`]), when the group has a timeline.
+    rows: Option<Rectangle>,
     plots: Vec<Rectangle>,
     top: f32,
     bottom: f32,
@@ -150,7 +186,10 @@ impl Layout {
         } else {
             None
         };
-        let top = strip.map_or(0.0, |(r, _)| r.y + r.height + STRIP_GAP);
+        let rows = strip
+            .filter(|_| group.timeline && !group.rows.is_empty())
+            .map(|(r, _)| Rectangle::new(Point::new(r.x, r.y + r.height), Size::new(r.width, STRIP_ROW_H * group.rows.len() as f32)));
+        let top = rows.or(strip.map(|(r, _)| r)).map_or(0.0, |r| r.y + r.height + STRIP_GAP);
         // A row under the bottom plot's tick labels names what the x axis measures.
         let title_h = if group.x.title().is_empty() { 0.0 } else { AXIS_TITLE_H };
         let bottom = (size.height - 2.0 - title_h).max(top);
@@ -175,7 +214,7 @@ impl Layout {
                 plot
             })
             .collect();
-        Layout { x0, x1, window: state.window(), full: state.full(), strip, plots, top, bottom, tag_rows, tags_h }
+        Layout { x0, x1, window: state.window(), full: state.full(), strip, rows, plots, top, bottom, tag_rows, tags_h }
     }
 
     /// The block of event tag rows above the first plot, when there are events.
@@ -644,7 +683,7 @@ impl canvas::Program<PlotMessage> for PlotView<'_> {
             .iter()
             .zip(&layout.plots)
             .map(|(p, plot)| {
-                let (lo, hi) = below_header(p.y_range(layout.window.0, layout.window.1), plot.height, p.editor.is_some());
+                let (lo, hi) = below_header(p.y_range(layout.window.0, layout.window.1), plot.height, p.editor.is_some() || !p.legend.is_empty());
                 match self.group.y_ticks {
                     YTicks::Even(n) => even_range(lo, hi, n),
                     YTicks::Nice => (lo, hi),
@@ -666,6 +705,9 @@ impl canvas::Program<PlotMessage> for PlotView<'_> {
         };
         if let Some((rect, kind)) = layout.strip {
             self.draw_strip(&mut frame, t, &layout, rect, kind, &lit);
+        }
+        if let Some(rect) = layout.rows {
+            draw_rows(&mut frame, t, self.group, &layout, rect);
         }
         for ((panel, plot), range) in self.group.panels.iter().zip(&layout.plots).zip(&ranges) {
             self.draw_panel(&mut frame, t, &layout, panel, *plot, *range, &lit);
@@ -1106,6 +1148,8 @@ impl PlotView<'_> {
             put(f, &ellipsize(name, room, FONT_TICK), Point::new(right + 18.0, *y), t.ink_muted, FONT_TICK, Alignment::Left, alignment::Vertical::Center, SANS);
         }
 
+        self.draw_header_legend(f, t, panel, plot);
+
         // Key of the line styles, in the title row after the title, on a backing so no line strikes through it.
         if !panel.key.is_empty() {
             let tr = title_rect(panel, plot);
@@ -1120,6 +1164,39 @@ impl PlotView<'_> {
                     kx += 16.0 + 4.0 + mono_width(word.chars().count(), FONT_SMALL) + 12.0;
                 }
             }
+        }
+    }
+
+    /// The panel's legend, right-aligned in the title row on a backing: a colour square per series (a stroke for a dashed one)
+    /// and its name; what does not fit the room after the title folds into `+N`.
+    fn draw_header_legend(&self, f: &mut Frame, t: &Tokens, panel: &Panel, plot: Rectangle) {
+        if panel.legend.is_empty() {
+            return;
+        }
+        let tr = title_rect(panel, plot);
+        let y = tr.y + tr.height / 2.0;
+        let right = plot.x + plot.width - 6.0;
+        let widths: Vec<f32> = panel.legend.iter().map(|i| legend_head_w(&i.text)).collect();
+        let more = mono_width(4, LEGEND_FONT);
+        let shown = legend_fit(&widths, (right - (tr.x + tr.width + 12.0)).max(0.0), more);
+        let hidden = panel.legend.len() - shown;
+        let used: f32 = widths.iter().take(shown).map(|w| w + LEGEND_GAP).sum::<f32>() + if hidden > 0 { more } else { 0.0 };
+        let total = (used - if hidden > 0 { 0.0 } else { LEGEND_GAP }).max(0.0);
+        let mut x = right - total;
+        f.fill_rectangle(Point::new(x - 4.0, y - 8.0), Size::new(total + 8.0, 16.0), t.bg_200);
+        let mid = alignment::Vertical::Center;
+        for (item, &w) in panel.legend.iter().zip(&widths).take(shown) {
+            let color = item.color.resolve(t);
+            if item.style == LineStyle::Solid {
+                f.fill_rectangle(Point::new(x, y - 4.0), Size::new(8.0, 8.0), color);
+            } else {
+                line(f, Point::new(x, y), Point::new(x + 8.0, y), color, 2.0, item.style);
+            }
+            put(f, &item.text, Point::new(x + 12.0, y), t.ink_muted, LEGEND_FONT, Alignment::Left, mid, MONO);
+            x += w + LEGEND_GAP;
+        }
+        if hidden > 0 {
+            put(f, &format!("+{hidden}"), Point::new(x, y), t.ink_muted, LEGEND_FONT, Alignment::Left, mid, MONO);
         }
     }
 
@@ -1606,6 +1683,16 @@ impl PlotView<'_> {
     }
 }
 
+/// Text size of a header legend.
+const LEGEND_FONT: f32 = 11.5;
+/// Gap between header legend entries (`SPACE_3`).
+const LEGEND_GAP: f32 = 12.0;
+
+/// Width of one header legend entry: an 8 px swatch, a gap and the name.
+fn legend_head_w(text: &str) -> f32 {
+    12.0 + mono_width(text.chars().count(), LEGEND_FONT)
+}
+
 /// Width of one legend entry: a 16 px stroke, a gap and the name.
 fn legend_item_w(text: &str) -> f32 {
     20.0 + mono_width(text.chars().count(), FONT_SMALL)
@@ -1765,6 +1852,24 @@ mod tests {
         g.timeline = true;
         let l = Layout::new(Size::new(800.0, 400.0), &g, &PlotState::new((0.0, 100.0)));
         assert!(matches!(l.strip, Some((_, StripKind::Timeline))));
+    }
+
+    #[test]
+    fn thin_rows_sit_under_the_events_strip_and_push_the_plots_down() {
+        let mut g = group();
+        g.timeline = true;
+        let s = PlotState::new((0.0, 100.0));
+        let plain = Layout::new(Size::new(800.0, 400.0), &g, &s);
+        assert!(plain.rows.is_none());
+        g.rows.push(super::super::StripRow { name: "Booster".into(), from: 10.0, to: 60.0, color: super::super::SeriesColor::Muted, events: Vec::new() });
+        let l = Layout::new(Size::new(800.0, 400.0), &g, &s);
+        let (strip, _) = l.strip.unwrap();
+        let rows = l.rows.expect("a row under the strip");
+        assert_eq!((rows.y, rows.height), (strip.y + strip.height, STRIP_ROW_H));
+        assert!((l.plots[0].y - plain.plots[0].y - STRIP_ROW_H).abs() < 1e-3);
+        // Without a timeline (a Mach axis, say) the rows are not drawn and take no room.
+        g.timeline = false;
+        assert!(Layout::new(Size::new(800.0, 400.0), &g, &s).rows.is_none());
     }
 
     #[test]

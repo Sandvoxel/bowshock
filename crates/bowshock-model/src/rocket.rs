@@ -132,6 +132,22 @@ pub struct Rocket {
     /// Solved CFD drag tables of the Analyze screen (a cache: not part of the rocket's equality, see [`crate::cfd`]).
     #[serde(default, skip_serializing_if = "crate::cfd::CfdStore::is_empty")]
     pub(crate) cfd: crate::cfd::CfdStore,
+    /// The separation joints the user chose: the first airframe part of the lower stage (the part just aft of the joint), keyed
+    /// by the id of the fore-most motor mount of the stage above (see [`Rocket::stages`]). An entry that no longer fits is
+    /// ignored, not removed. Empty (and not written) while every separation is automatic.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub(crate) separation_joints: std::collections::BTreeMap<PartId, PartId>,
+    /// The assembly definitions this document carries (see [`crate::assembly`]): every definition an instance uses, and shelf
+    /// definitions nothing uses yet. Not written while there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) assemblies: Vec<crate::assembly::AssemblyDef>,
+    /// The uses of the definitions: which ordinary parts of this document are the members of which definition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) instances: Vec<crate::assembly::AssemblyInstance>,
+    /// The stand-in host tube of an assembly opened as a document ([`AssemblyDef::to_rocket`](crate::AssemblyDef::to_rocket)): not
+    /// part of the assembly, stripped again by [`AssemblyDef::from_rocket`](crate::AssemblyDef::from_rocket).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) stand_in: Option<PartId>,
 }
 
 impl Default for Rocket {
@@ -152,6 +168,10 @@ impl Default for Rocket {
             bands: crate::bands::StabilityBands::default(),
             plots: crate::flights::PlotLayout::default(),
             cfd: crate::cfd::CfdStore::default(),
+            separation_joints: std::collections::BTreeMap::new(),
+            assemblies: Vec::new(),
+            instances: Vec::new(),
+            stand_in: None,
         }
     }
 }
@@ -241,10 +261,10 @@ impl Rocket {
                 }
             }
         }
-        out
+        out.sanitized_tip()
     }
 
-    fn fresh_id(&mut self) -> PartId {
+    pub(crate) fn fresh_id(&mut self) -> PartId {
         let id = self.next_id;
         self.next_id += 1;
         id
@@ -401,8 +421,10 @@ impl Rocket {
         true
     }
 
-    /// Removes radial part `id`, returning it.
+    /// Removes radial part `id`, returning it. An instance of an assembly it is a member of is detached first.
     pub fn remove_radial(&mut self, id: PartId) -> Option<RadialPart> {
+        let doomed = self.carried_ids(id);
+        self.release_touching(&doomed);
         if self.pod_index(id).is_some() {
             return self.in_pod(id, |s| s.remove_radial(id)).flatten();
         }
@@ -546,8 +568,10 @@ impl Rocket {
         true
     }
 
-    /// Removes internal part `id`, returning it. Motors configured for it are dropped from every configuration.
+    /// Removes internal part `id`, returning it. Motors configured for it are dropped from every configuration. An instance of an
+    /// assembly it is a member of is detached first.
     pub fn remove_internal(&mut self, id: PartId) -> Option<InternalPart> {
+        self.release_touching(&[id]);
         if self.pod_index(id).is_some() {
             return self.in_pod(id, |s| s.remove_internal(id)).flatten();
         }
@@ -706,7 +730,7 @@ impl Rocket {
         }
         match self.parts.iter_mut().find(|p| p.id == id) {
             Some(part) if std::mem::discriminant(&part.kind) == std::mem::discriminant(&kind) => {
-                part.kind = kind;
+                part.kind = kind.sanitized_tip();
                 self.clamp_radials(id);
                 self.clamp_internals(id);
                 true
@@ -716,8 +740,11 @@ impl Rocket {
     }
 
     /// Removes the axial part with `id` (and the radial and internal parts on it), returning it. Motors configured for
-    /// removed motor mounts are dropped from every configuration.
+    /// removed motor mounts are dropped from every configuration. Instances of assemblies that have any of the removed parts
+    /// as members are detached first (their other members stay as ordinary parts).
     pub fn remove(&mut self, id: PartId) -> Option<Part> {
+        let doomed = self.carried_ids(id);
+        self.release_touching(&doomed);
         if let Some(i) = self.pod_index(id) {
             let pod = self.radials[i].id;
             let part = self.in_pod(id, |s| s.remove(id)).flatten();
@@ -878,6 +905,27 @@ impl Rocket {
         true
     }
 
+    /// Sets the drag coefficient (on the rocket's reference area) that replaces the computed drag of an axial part or a radial
+    /// group (all copies; on a pod, the whole pod), `None` to compute it. Limited to `0..=10`. Internal parts carry no
+    /// aerodynamics and are refused. Returns whether it was applied.
+    pub fn set_cd_override(&mut self, id: PartId, cd: Option<f64>) -> bool {
+        if self.pod_index(id).is_some() {
+            return self.in_pod(id, |s| s.set_cd_override(id, cd)).unwrap_or(false);
+        }
+        let cd = match cd {
+            Some(c) if !c.is_finite() => return false,
+            c => c.map(|c| c.clamp(0.0, 10.0)),
+        };
+        if let Some(p) = self.parts.iter_mut().find(|p| p.id == id) {
+            p.cd_override = cd;
+        } else if let Some(p) = self.radials.iter_mut().find(|p| p.id == id) {
+            p.cd_override = cd;
+        } else {
+            return false;
+        }
+        true
+    }
+
     /// Sets the CG that replaces the computed one for any part, metres behind the part's fore edge (`None` to compute it).
     pub fn set_cg_override(&mut self, id: PartId, cg: Option<f64>) -> bool {
         if self.pod_index(id).is_some() {
@@ -936,7 +984,7 @@ mod tests {
     const SHAPES: [NoseShape; 5] = [NoseShape::Conical, NoseShape::TangentOgive, NoseShape::VonKarman, NoseShape::Elliptical, NoseShape::Parabolic];
 
     fn nose(d: f64) -> PartKind {
-        PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.3, diameter: d }
+        PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.3, diameter: d, tip_radius: 0.0 }
     }
     fn tube(l: f64, d: f64) -> PartKind {
         PartKind::BodyTube { length: l, diameter: d }
@@ -948,7 +996,7 @@ mod tests {
     #[test]
     fn nose_profiles() {
         for shape in SHAPES {
-            let k = PartKind::NoseCone { shape, length: 0.4, diameter: 0.1 };
+            let k = PartKind::NoseCone { shape, length: 0.4, diameter: 0.1, tip_radius: 0.0 };
             let p = k.profile();
             assert_eq!(p.len(), 33);
             assert_eq!(p[0], (0.0, 0.0));
@@ -1250,7 +1298,7 @@ mod tests {
 
     #[test]
     fn parametric_nose_shapes() {
-        let profile = |shape| PartKind::NoseCone { shape, length: 0.4, diameter: 0.1 }.profile();
+        let profile = |shape| PartKind::NoseCone { shape, length: 0.4, diameter: 0.1, tip_radius: 0.0 }.profile();
         // A power series with n = 1 is the cone; n = 0.5 is fuller than the cone but monotonic; Haack C = 0 is the Von Karman.
         for (a, b) in profile(NoseShape::PowerSeries(1.0)).iter().zip(profile(NoseShape::Conical)) {
             assert!((a.1 - b.1).abs() < 1e-12);
@@ -1269,7 +1317,7 @@ mod tests {
         assert_eq!(NoseShape::Haack(0.25).parameter(), Some(0.25));
         assert_eq!(NoseShape::Conical.parameter(), None);
         // radius_at agrees with the sampled profile at its vertices.
-        let k = PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.4, diameter: 0.1 };
+        let k = PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.4, diameter: 0.1, tip_radius: 0.0 };
         let p = k.profile();
         assert!((k.radius_at(p[10].0) - p[10].1).abs() < 1e-12);
         assert!((k.radius_at(9.0) - 0.05).abs() < 1e-12);

@@ -26,7 +26,8 @@ use bowshock_model::{CfdGrid, CfdTable, ConfigId, Finish, Rocket, StabilityBands
 use bowshock_motors::MotorDb;
 use bowshock_sim::from_model::{self, Phase};
 use bowshock_sim::{
-    monte_carlo, simulate, vs_alpha, vs_mach, AlphaPoint, Atmosphere, Dispersion, DragBreakdown, Launch, MachPoint, MonteCarloStats, SimInput, Vehicle,
+    monte_carlo, simulate, vs_alpha, vs_mach, AlphaPoint, Atmosphere, Dispersion, DragBreakdown, DragTable, Launch, MachPoint, MonteCarloStats, SimInput,
+    Vehicle,
 };
 
 /// The Mach number of the static balance the status strip shows (kept in step with `app::physics`).
@@ -50,6 +51,8 @@ pub enum Analysis {
     Flutter,
     /// Landing scatter and apogee spread of a Monte Carlo of flights.
     Dispersion,
+    /// A search for the dimensions that reach a goal (its own state and worker; see [`super::optimize`]).
+    Optimize,
 }
 
 impl Analysis {
@@ -64,6 +67,7 @@ impl Analysis {
             Analysis::Drag => "Drag breakdown",
             Analysis::Flutter => "Fin flutter",
             Analysis::Dispersion => "Dispersion",
+            Analysis::Optimize => "Optimize",
         }
     }
 
@@ -74,6 +78,7 @@ impl Analysis {
             Analysis::Stability => "vs AoA",
             Analysis::Flutter => "margin",
             Analysis::Dispersion => "Monte Carlo",
+            Analysis::Optimize => "design",
         }
     }
 }
@@ -288,6 +293,8 @@ pub struct Request {
     pub bands: StabilityBands,
     /// The solved CFD table the [`Method::CfdTable`] drag comes from. Without one that method is computed as Extended.
     pub cfd: Option<Arc<CfdTable>>,
+    /// The per-stage drag tables the Dispersion flights use under [`Method::CfdTable`] (empty: Extended drag).
+    pub drag_tables: Vec<Option<DragTable>>,
 }
 
 /// A Monte Carlo of one configuration.
@@ -522,10 +529,13 @@ fn flutter(job: &ConfigJob) -> Option<FlutterAnalysis> {
     FlutterAnalysis::of_flight(job.stocks.clone(), &input.launch, &simulate(&input))
 }
 
-fn scatter(job: &ConfigJob, vehicle: &Vehicle, cond: &Conditions) -> Option<Scatter> {
+fn scatter(job: &ConfigJob, vehicle: &Vehicle, cond: &Conditions, drag_tables: &[Option<DragTable>]) -> Option<Scatter> {
     let input = job.input.as_ref()?;
     let mut input = SimInput { vehicle: vehicle.clone(), ..input.clone() };
     input.launch.wind_speed = cond.wind;
+    if !drag_tables.is_empty() {
+        input.drag_tables = drag_tables.to_vec();
+    }
     let nominal = simulate(&input);
     let mc = monte_carlo(&input, cond.runs.max(2), &dispersion());
     Some(Scatter {
@@ -576,7 +586,9 @@ pub fn compute(request: &Request) -> Output {
                         Some(t) => {
                             let points = cfd::alpha_points(t, cond.mach_fixed, points);
                             match t.lift.as_ref().filter(|l| cfd::lift_usable(l)) {
-                                Some(l) => cfd::lift_alpha_points(l, cond.mach_fixed, points, cg, vehicle.reference_diameter, &extended_at_2(&vehicle, cg, 0.0)),
+                                Some(l) => {
+                                    cfd::lift_alpha_points(l, cond.mach_fixed, points, cg, vehicle.reference_diameter, &extended_at_2(&vehicle, cg, 0.0))
+                                }
                                 None => points,
                             }
                         }
@@ -585,7 +597,12 @@ pub fn compute(request: &Request) -> Output {
                     })
                 }
                 Analysis::Flutter => Data::Flutter(flutter(job)),
-                Analysis::Dispersion => Data::Dispersion(scatter(job, &vehicle, &cond)),
+                Analysis::Dispersion => {
+                    let tables: &[Option<DragTable>] = if request.method == Method::CfdTable { &request.drag_tables } else { &[] };
+                    Data::Dispersion(scatter(job, &vehicle, &cond, tables))
+                }
+                // The optimiser has its own worker and never asks for a computation.
+                Analysis::Optimize => Data::Mach(Vec::new()),
             };
             let mut run = run_of(job, &vehicle, data);
             if matches!(request.analysis, Analysis::Aerodynamics | Analysis::Drag) {
@@ -619,6 +636,7 @@ fn cfd_info(table: &CfdTable, analysis: Analysis, cond: &Conditions) -> CfdInfo 
             }
             table.points.len()
         }
+        Analysis::Dispersion => table.points.len(),
         _ => {
             let (lo, hi) = (cond.mach.0.min(cond.mach.1), cond.mach.0.max(cond.mach.1));
             let high = hi > last + 1e-9;
@@ -639,7 +657,11 @@ fn cfd_info(table: &CfdTable, analysis: Analysis, cond: &Conditions) -> CfdInfo 
         solved_at: table.solved_at,
         solve_seconds: table.solve_seconds,
         grid: table.grid,
-        lift: table.lift.as_ref().filter(|l| cfd::lift_usable(l)).map(|l| LiftInfo { points: l.points.len(), backend: l.backend.clone(), solved_at: l.solved_at }),
+        lift: table.lift.as_ref().filter(|l| cfd::lift_usable(l)).map(|l| LiftInfo {
+            points: l.points.len(),
+            backend: l.backend.clone(),
+            solved_at: l.solved_at,
+        }),
         scaled_below,
         notes,
     }
@@ -695,6 +717,7 @@ impl Output {
             Analysis::Stability => format!("{n} AoA points at Mach {:.2}", self.conditions.mach_fixed),
             Analysis::Flutter => format!("{n} flight samples"),
             Analysis::Dispersion => format!("{n} runs per configuration"),
+            Analysis::Optimize => String::new(),
         }
     }
 
@@ -822,6 +845,7 @@ impl Output {
                     format!("Apogee ({})", sym(Quantity::Altitude)),
                 ]
             }
+            Analysis::Optimize => Vec::new(),
         };
         Table { headers, rows }
     }
@@ -839,7 +863,7 @@ mod tests {
     }
 
     fn run(analysis: Analysis, method: Method, conditions: Conditions) -> Output {
-        compute(&Request { analysis, method, conditions, jobs: example_jobs(), bands: Default::default(), cfd: None })
+        compute(&Request { analysis, method, conditions, jobs: example_jobs(), bands: Default::default(), cfd: None, drag_tables: Vec::new() })
     }
 
     #[test]
@@ -963,6 +987,46 @@ mod tests {
     }
 
     #[test]
+    fn dispersion_uses_cfd_drag_table() {
+        use bowshock_model::{CfdGrid, CfdPoint, CfdQuality};
+        let point = |mach| CfdPoint { mach, cd: 1.8, friction: 0.4, pressure: 0.8, base: 0.4, fins: 0.2, other: 0.0, quality: CfdQuality::Converged };
+        let cfd_table = CfdTable {
+            key: 1,
+            geometry: 1,
+            stage: 1,
+            solved_at: 0,
+            solve_seconds: 0.0,
+            backend: "CPU".to_string(),
+            fallback: None,
+            altitude: 0.0,
+            notes: Vec::new(),
+            points: [0.1, 0.5, 1.0, 2.0, 3.0].into_iter().map(point).collect(),
+            grid: CfdGrid::Coarse,
+            lift: None,
+        };
+        let drag_table = DragTable::from_cfd(&cfd_table);
+        let conditions = Conditions { runs: 16, ..Conditions::default() };
+        let request = |method, cfd: Option<Arc<CfdTable>>, drag_tables| Request {
+            analysis: Analysis::Dispersion,
+            method,
+            conditions,
+            jobs: example_jobs(),
+            bands: Default::default(),
+            cfd,
+            drag_tables,
+        };
+        let scatter_of = |out: Output| match out.runs[0].data.clone() {
+            Data::Dispersion(Some(d)) => d,
+            _ => panic!("the example flies"),
+        };
+        let ext = scatter_of(compute(&request(Method::Extended, None, Vec::new())));
+        let cfd = scatter_of(compute(&request(Method::CfdTable, Some(Arc::new(cfd_table)), vec![Some(drag_table)])));
+        let apogee = |s: &Scatter| s.nominal.iter().map(|p| p.3).fold(0.0, f64::max);
+        assert!(apogee(&cfd) < apogee(&ext), "{} vs {}", apogee(&cfd), apogee(&ext));
+        assert!(cfd.stats.apogee_mean < ext.stats.apogee_mean, "{} vs {}", cfd.stats.apogee_mean, ext.stats.apogee_mean);
+    }
+
+    #[test]
     fn every_configuration_is_a_run_and_the_table_matches() {
         let mut rocket = Rocket::from_bytes(EXAMPLE).unwrap();
         let before = rocket.configurations().len();
@@ -977,6 +1041,7 @@ mod tests {
             jobs,
             bands: Default::default(),
             cfd: None,
+            drag_tables: Vec::new(),
         });
         let table = out.table(UnitSystem::MM_G_S);
         assert_eq!(table.rows.len(), out.runs.len() * mach_grid((0.1, 3.0)).len());

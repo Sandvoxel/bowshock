@@ -5,6 +5,7 @@ use iced::wgpu::{self, util::DeviceExt};
 use iced::widget::shader::{self, Viewport};
 use iced::Rectangle;
 
+use super::capture::Capture;
 use super::mesh::Mesh;
 use super::solids::GpuVertex;
 
@@ -41,6 +42,7 @@ pub struct DrawPlan {
 struct Offscreen {
     size: (u32, u32),
     msaa_view: wgpu::TextureView,
+    resolve: wgpu::Texture,
     resolve_view: wgpu::TextureView,
     depth_view: wgpu::TextureView,
     blit_group: wgpu::BindGroup,
@@ -54,6 +56,7 @@ pub struct Pipeline {
     blit: wgpu::RenderPipeline,
     uniforms: wgpu::Buffer,
     uniform_group: wgpu::BindGroup,
+    uniform_layout: wgpu::BindGroupLayout,
     blit_layout: wgpu::BindGroupLayout,
     vertices: Option<(u64, wgpu::Buffer)>,
     ranges: [std::ops::Range<u32>; 3],
@@ -219,6 +222,7 @@ impl shader::Pipeline for Pipeline {
             blit,
             uniforms,
             uniform_group,
+            uniform_layout,
             blit_layout,
             vertices: None,
             ranges: [0..0, 0..0, 0..0],
@@ -270,28 +274,34 @@ impl Pipeline {
     fn create_offscreen(&self, device: &wgpu::Device, size: (u32, u32)) -> Offscreen {
         let extent = wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 };
         let texture = |label: &str, format, samples, usage| {
-            device
-                .create_texture(&wgpu::TextureDescriptor {
-                    label: Some(label),
-                    size: extent,
-                    mip_level_count: 1,
-                    sample_count: samples,
-                    dimension: wgpu::TextureDimension::D2,
-                    format,
-                    usage,
-                    view_formats: &[],
-                })
-                .create_view(&wgpu::TextureViewDescriptor::default())
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: extent,
+                mip_level_count: 1,
+                sample_count: samples,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            })
         };
-        let msaa_view = texture("viewport.msaa", self.format, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT);
-        let resolve_view = texture("viewport.resolve", self.format, 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
-        let depth_view = texture("viewport.depth", DEPTH_FORMAT, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT);
+        let view = |texture: &wgpu::Texture| texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let msaa_view = view(&texture("viewport.msaa", self.format, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT));
+        // COPY_SRC: an image export reads the resolved pixels back.
+        let resolve = texture(
+            "viewport.resolve",
+            self.format,
+            1,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+        );
+        let resolve_view = view(&resolve);
+        let depth_view = view(&texture("viewport.depth", DEPTH_FORMAT, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT));
         let blit_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("viewport.blit_group"),
             layout: &self.blit_layout,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&resolve_view) }],
         });
-        Offscreen { size, msaa_view, resolve_view, depth_view, blit_group }
+        Offscreen { size, msaa_view, resolve, resolve_view, depth_view, blit_group }
     }
 
     pub fn render(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, clip: &Rectangle<u32>) {
@@ -328,17 +338,7 @@ impl Pipeline {
             let [x, y, w, h] = self.viewport;
             pass.set_viewport(x, y, w.max(1.0), h.max(1.0), 0.0, 1.0);
             pass.set_scissor_rect(sx, sy, sw, sh);
-            pass.set_bind_group(0, &self.uniform_group, &[]);
-            pass.set_vertex_buffer(0, vertices.slice(..));
-            // Internal solids, then the cutaway faces, then the airframe (blended over the rest when it is translucent).
-            pass.set_pipeline(&self.body);
-            pass.draw(self.ranges[0].clone(), 0..1);
-            if self.plan.caps {
-                pass.set_pipeline(&self.caps);
-                pass.draw(self.ranges[1].clone(), 0..1);
-            }
-            pass.set_pipeline(if self.plan.translucent { &self.translucent } else { &self.body });
-            pass.draw(self.ranges[2].clone(), 0..1);
+            self.draw_body(&mut pass, &self.uniform_group, vertices, &self.ranges, self.plan);
         }
 
         {
@@ -361,5 +361,111 @@ impl Pipeline {
             pass.set_bind_group(0, &off.blit_group, &[]);
             pass.draw(0..3, 0..1);
         }
+    }
+
+    /// Binds `group` and `vertices` and draws the three ranges: internal solids, then the cutaway faces, then the airframe (blended
+    /// over the rest when it is translucent).
+    fn draw_body(&self, pass: &mut wgpu::RenderPass<'_>, group: &wgpu::BindGroup, vertices: &wgpu::Buffer, ranges: &[std::ops::Range<u32>; 3], plan: DrawPlan) {
+        pass.set_bind_group(0, group, &[]);
+        pass.set_vertex_buffer(0, vertices.slice(..));
+        pass.set_pipeline(&self.body);
+        pass.draw(ranges[0].clone(), 0..1);
+        if plan.caps {
+            pass.set_pipeline(&self.caps);
+            pass.draw(ranges[1].clone(), 0..1);
+        }
+        pass.set_pipeline(if plan.translucent { &self.translucent } else { &self.body });
+        pass.draw(ranges[2].clone(), 0..1);
+    }
+
+    /// Renders `capture`'s mesh once at the capture's size with `uniforms` (which must already be in the capture's pixels: the
+    /// device pixel ratio is 1) and reads the resolved texture back as straight RGBA8, top row first.
+    pub fn capture(&self, device: &wgpu::Device, queue: &wgpu::Queue, uniforms: &Uniforms, plan: DrawPlan, capture: &Capture) -> Result<Vec<u8>, String> {
+        let (width, height) = (capture.width, capture.height);
+        let max = device.limits().max_texture_dimension_2d;
+        if width == 0 || height == 0 || width > max || height > max {
+            return Err(format!("The image size {width}×{height} is outside what the graphics device can render (up to {max})"));
+        }
+        let bgra = match self.format {
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb => true,
+            wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Rgba8UnormSrgb => false,
+            other => return Err(format!("The window's pixel format {other:?} cannot be read back")),
+        };
+        let mesh = &capture.mesh;
+        if mesh.is_empty() {
+            return Err("There is nothing to draw".to_string());
+        }
+        let off = self.create_offscreen(device, (width, height));
+        let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("viewport.capture_vertices"),
+            contents: bytemuck::cast_slice(&mesh.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("viewport.capture_uniforms"),
+            contents: bytemuck::bytes_of(uniforms),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("viewport.capture_group"),
+            layout: &self.uniform_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniform_buffer.as_entire_binding() }],
+        });
+        // Rows in the copy are padded to 256 bytes.
+        let row = (width * 4) as usize;
+        let padded = row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize);
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("viewport.capture_readback"),
+            size: (padded * height as usize) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("viewport.capture_encoder") });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("viewport.capture_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &off.msaa_view,
+                    depth_slice: None,
+                    resolve_target: Some(&off.resolve_view),
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Discard },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &off.depth_view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            let ranges = [mesh.inner.clone(), mesh.caps.clone(), mesh.outer.clone()];
+            self.draw_body(&mut pass, &group, &vertices, &ranges, plan);
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture: &off.resolve, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded as u32), rows_per_image: Some(height) },
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        queue.submit(Some(encoder.finish()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        readback.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| format!("The graphics device failed while rendering the image: {e}"))?;
+        rx.recv().map_err(|e| e.to_string())?.map_err(|e| format!("Could not read the rendered image back: {e}"))?;
+        let mut pixels = Vec::with_capacity(row * height as usize);
+        {
+            let mapped = readback.slice(..).get_mapped_range().map_err(|e| format!("Could not read the rendered image back: {e}"))?;
+            for line in mapped.chunks(padded).take(height as usize) {
+                pixels.extend_from_slice(&line[..row]);
+            }
+        }
+        readback.unmap();
+        super::capture::to_rgba(&mut pixels, bgra, capture.transparent, capture.background);
+        Ok(pixels)
     }
 }

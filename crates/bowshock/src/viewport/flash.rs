@@ -6,7 +6,6 @@
 //! headless `bowshock drive` run nothing animates, so the flash is only taken when `BOWSHOCK_FREEZE_FLASH` is set, and then
 //! it is held at its first frame (full outline, part still lifted) so a screenshot can show it.
 
-use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 /// The accent outline fades out over this long.
@@ -18,21 +17,9 @@ const LIFT: f32 = 0.008;
 /// The mesh is rebuilt when the level changes by one step of this many per unit.
 const STEPS: f32 = 16.0;
 
-/// Whether `BOWSHOCK_FREEZE_FLASH` asks for the flash to be held at its first frame (screenshots).
-static FROZEN: LazyLock<bool> = LazyLock::new(|| std::env::var_os("BOWSHOCK_FREEZE_FLASH").is_some());
-
-fn frozen() -> bool {
-    *FROZEN
-}
-
-/// Whether a flash is worth starting: the animations are on, or the screenshot hook holds it.
-pub fn enabled() -> bool {
-    super::animation_on() || frozen()
-}
-
-/// How long a flash started at `since` has run at `now` (always zero when frozen).
-pub fn age(since: Instant, now: Instant) -> Duration {
-    if frozen() {
+/// How long a flash started at `since` has run at `now` (always zero when `freeze` holds it for screenshots).
+pub fn age(since: Instant, now: Instant, freeze: bool) -> Duration {
+    if freeze {
         Duration::ZERO
     } else {
         now.saturating_duration_since(since)
@@ -74,5 +61,9 @@ mod tests {
         // The outline outlives the settle.
         assert!(level(SETTLE_TIME) > 0.0);
         assert!(done(FLASH_TIME) && !done(SETTLE_TIME));
+        let since = Instant::now();
+        let now = since + Duration::from_secs(1);
+        assert_eq!(age(since, now, true), Duration::ZERO);
+        assert_eq!(age(since, now, false), Duration::from_secs(1));
     }
 }

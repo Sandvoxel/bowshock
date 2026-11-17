@@ -46,6 +46,7 @@ fn main() -> Result<(), bowshock_core::Error> {
 | `quality` | [`Quality`](#quality) of the point |
 | `warnings` | [`Warning`](#warnings)s: conditions that make the point less reliable than its quality suggests |
 | `cd_uncertainty` | `Some(d)`, `d` the absolute difference of the total drag to the neighbouring grid level, with `estimate_uncertainty(true)`; else `None` |
+| `field` | `Some(`[`Field`](#field)`)`, the final flow field of the point, with `keep_fields(true)`; else `None` |
 
 ## Drag
 
@@ -120,11 +121,32 @@ Derived from how the iteration stopped:
 | `MaxIterations` | the iteration cap was reached |
 | `NonFinite` | the state became non-finite or non-physical |
 
+## Field
+
+`Field` is the flow the solver left at the end of a point: the grid, which cells are blocked, and the primitive state in each
+cell. It is the state the reported drag was integrated from, on the grid of the requested resolution and wake treatment (with
+`estimate_uncertainty(true)` the point is also solved one grid level away; that field is not kept). It is off unless asked for
+(`keep_fields(true)`): on the 1.1 m example body a field is about 0.5 MB on the coarse viscous grid and 1.1 MB on the medium one.
+
+| Field | Meaning |
+| --- | --- |
+| `mach`, `iteration`, `wake` | the free-stream Mach number, the iterations done, the grid (`Wake::Sting` or `Wake::Base`) |
+| `ni`, `nj` | cells along `i` (downstream) and `j` (away from the axis) |
+| `x`, `r` | node coordinates in metres, `(ni + 1) * (nj + 1)` each, node `(i, j)` at `j * (ni + 1) + i`; `x` runs from the nose tip, `r` from the axis |
+| `solid` | per cell, `ni * nj`, cell `(i, j)` at `j * ni + i`: blocked (inside the body or the sting), not part of the flow |
+| `rho`, `u`, `v`, `p` | per cell: density over the free-stream density, axial and radial velocity over the free-stream speed of sound, pressure over `rho_inf c_inf^2` |
+| `freestream` | `[rho, u, v, p]` of the free stream in the same units, `[1, Mach, 0, 1 / GAMMA]`, which is all that is needed to form coefficients |
+
+`mach_numbers()`, `pressure_coefficients()` and `density_gradient()` derive the Mach number, the pressure coefficient and the
+magnitude of the density gradient per cell (NaN in blocked cells), `wall()` the pressure coefficient along the body surface by the
+rule the point's own `detail.wall` uses, and `surface()` the lower edge of the flow, the body's outline. `Analysis::on_field(every,
+f)` hands a snapshot of the run in flight to `f` every `every` iterations, see [Progress and cancelling](sweeps.md#progress-and-cancelling).
+
 ## serde
 
 With the `serde` feature, the inputs (`BodySpec`, `NoseSpec`, `NoseShape`, `AftSpec`,
 `Atmosphere`, `FlightConditions`, `FinSpec`, `FinProfile`, `MotorSpec`) and the results (`Polar`,
-`PolarPoint`, `PointDetail`, `WallCp`, `Drag`, `FinDrag`, `Quality`, `Warning`, `BackendUsed`,
+`PolarPoint`, `PointDetail`, `WallCp`, `Field`, `Drag`, `FinDrag`, `Quality`, `Warning`, `BackendUsed`,
 `StopReason`) implement `Serialize` and `Deserialize`.
 
 ```rust

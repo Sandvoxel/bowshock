@@ -3,13 +3,15 @@
 //! (GroundTrack).
 
 use bowshock_model::{PlotLayout, PlotX};
-use bowshock_sim::{EventKind, FlightResult, Sample};
+use bowshock_sim::{Branch, EventKind, FlightResult, Sample};
 
 use super::channels::{self, Channel};
 use super::flight::{Run, Spec};
 use crate::units::UnitSystem;
 use crate::widgets::ground_track::{GroundTrack, Track, TrackPoint, Wind};
-use crate::widgets::plot::{Axis, EventMark, EventRole, HLine, LabelAt, LegendItem, LineStyle, Panel, PanelEditor, Phase, PlotGroup, Series, SeriesColor};
+use crate::widgets::plot::{
+    Axis, EventMark, EventRole, HLine, LabelAt, LegendItem, LineStyle, Panel, PanelEditor, Phase, PlotGroup, Series, SeriesColor, StripRow,
+};
 
 /// The line style of the first, second, third and fourth source of a plot: the flight is the colour, the source is the style.
 pub const STYLES: [LineStyle; 4] = [LineStyle::Solid, LineStyle::Dashed, LineStyle::Dotted, LineStyle::DashDot];
@@ -19,7 +21,7 @@ pub const STYLES: [LineStyle; 4] = [LineStyle::Solid, LineStyle::Dashed, LineSty
 pub struct Entry<'a> {
     /// The flight's name.
     pub name: &'a str,
-    /// `Ink` for a lone flight, `Series(1..=4)` in a comparison.
+    /// The ticked flight's slot colour `Series(1..=4)`; `Ink` draws a lone flight in its sources' own colours.
     pub color: SeriesColor,
     /// Its run.
     pub run: &'a Run,
@@ -40,6 +42,7 @@ pub fn events(result: &FlightResult) -> Vec<EventMark> {
         let mark = match &e.kind {
             EventKind::Ignition if e.t <= 1e-9 => continue,
             EventKind::Ignition => EventMark::new(e.t, numbered("Ignition")).role(EventRole::Ignition),
+            EventKind::IgnitionInhibited => EventMark::new(e.t, "No ignition (tilt)").role(EventRole::IgnitionInhibited),
             EventKind::RailExit => EventMark::new(e.t, "Rail exit").role(EventRole::RailExit),
             EventKind::Burnout => EventMark::new(e.t, numbered("Burnout")).role(EventRole::Burnout),
             EventKind::Separation => EventMark::new(e.t, numbered("Separation")).role(EventRole::Separation),
@@ -209,9 +212,16 @@ fn phase_key(panel: &Panel) -> Option<Vec<(LineStyle, String)>> {
 /// of [`monotone_runs`], each named by its phase (`· boost`, `· coast`, `· descent`...; no two alike, and the hover lists only
 /// the pieces whose x range holds the cursor), the descent dashed (a solid source), and
 /// the events sit where the reference flight's x was at their time (no phase bars or timeline: they are spans of time).
-pub fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &PlotLayout, min_margin: f64) -> Option<PlotGroup> {
+///
+/// With `dropped` the dropped stages of the flights (their [`bowshock_sim::Branch`]es) are drawn or, off, left out of
+/// the plots, the events strip and the time axis. Each dropped stage is drawn on every panel from its separation to its
+/// landing in its flight's colour, dashed (a solid source), named at its end; on the events strip it is a thin row of its own
+/// with its own deployments and landing (the reference flight's only).
+pub fn group_with(entries: &[Entry], reference: usize, system: UnitSystem, layout: &PlotLayout, min_margin: f64, dropped: bool) -> Option<PlotGroup> {
     let reference = entries.get(reference).or(entries.first())?;
     let compare = entries.len() > 1;
+    // Ticked flights carry their slot colour even alone; a lone `Ink` entry is drawn in the sources' own colours.
+    let by_flight = compare || entries.iter().any(|e| e.color != SeriesColor::Ink);
     let count = layout.panels.len();
     let x_source = x_channel(layout.x);
     let x_unit = x_source.map(|c| c.unit(system));
@@ -237,7 +247,7 @@ pub fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &P
             legend: sources
                 .iter()
                 .zip(STYLES)
-                .map(|(c, style)| LegendItem { style, color: if compare { SeriesColor::Muted } else { c.color }, text: c.label.to_string() })
+                .map(|(c, style)| LegendItem { style, color: if by_flight { SeriesColor::Muted } else { c.color }, text: c.label.to_string() })
                 .collect(),
         });
         if primary.key == "altitude" {
@@ -262,7 +272,7 @@ pub fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &P
                     (false, true) => c.label.to_string(),
                     (true, true) => format!("{} · {}", e.name, c.label),
                 };
-                let color = if compare { e.color } else { c.color };
+                let color = if by_flight { e.color } else { c.color };
                 let Some((xc, xu)) = x_of else {
                     panel = panel.with(Series::new(name, c.series(samples, &unit)).color(color).style(style));
                     continue;
@@ -297,6 +307,42 @@ pub fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &P
         if x_of.is_some() && !compare && sources.len() == 1 {
             if let Some(key) = phase_key(&panel) {
                 panel = panel.key(key);
+            }
+        }
+        // The dropped stages, after the flights' own lines (the key above names those only): the same sources, from the
+        // separation to the landing, dashed where the source is solid.
+        if dropped {
+            for e in entries {
+                for b in &e.run.result.branches {
+                    let samples = &b.trajectory.samples;
+                    let burnout = b.trajectory.events.iter().filter(|ev| ev.kind == EventKind::Burnout).map(|ev| ev.t).fold(0.0, f64::max);
+                    let apogee = samples.iter().max_by(|x, y| x.altitude.total_cmp(&y.altitude)).map_or(f64::INFINITY, |s| s.t);
+                    for (c, style) in sources.iter().zip(STYLES) {
+                        let style = if style == LineStyle::Solid { LineStyle::Dashed } else { style };
+                        let name = match (compare, multi) {
+                            (false, false) => b.name.clone(),
+                            (true, false) => format!("{} · {}", e.name, b.name),
+                            (false, true) => format!("{} · {}", b.name, c.label),
+                            (true, true) => format!("{} · {} · {}", e.name, b.name, c.label),
+                        };
+                        let color = if by_flight { e.color } else { c.color };
+                        // Named at its end, on the first source of a lone flight (a comparison names lines in its tooltip).
+                        let named = !compare && std::ptr::eq(*c, sources[0]);
+                        let Some((xc, xu)) = x_of else {
+                            let series = Series::new(name, c.series(samples, &unit)).color(color).style(style);
+                            panel = panel.with(if named { series.label_as(b.name.clone(), LabelAt::End) } else { series });
+                            continue;
+                        };
+                        let curve: Vec<(f64, f64, f64)> = samples.iter().map(|s| (s.t, xu.from_si(xc.si(s)), unit.from_si(c.si(s)))).collect();
+                        let runs = monotone_runs(&curve, burnout, apogee);
+                        let span = |pts: &[(f64, f64)]| pts.last().map_or(0.0, |l| (l.0 - pts[0].0).abs());
+                        let widest = runs.iter().enumerate().max_by(|x, y| span(&x.1.points).total_cmp(&span(&y.1.points))).map(|(k, _)| k);
+                        for (i, run) in runs.into_iter().enumerate() {
+                            let series = Series::new(format!("{name} · {}", run.phase), run.points).color(color).style(style);
+                            panel = panel.with(if named && widest == Some(i) { series.label_as(b.name.clone(), LabelAt::End) } else { series });
+                        }
+                    }
+                }
             }
         }
         group = group.panel(panel);
@@ -339,8 +385,30 @@ pub fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &P
     }
     group.phases = phases(&reference.run.result);
     group.timeline = true;
-    let end = entries.iter().map(|e| e.run.result.trajectory.samples.last().map_or(0.0, |s| s.t)).fold(0.0, f64::max);
+    let mut end = 0.0_f64;
+    for e in entries {
+        end = end.max(e.run.result.trajectory.samples.last().map_or(0.0, |s| s.t));
+        for b in e.run.result.branches.iter().filter(|_| dropped) {
+            end = end.max(b.trajectory.samples.last().map_or(0.0, |s| s.t));
+        }
+    }
     group.x_range = (end > 0.0).then_some((0.0, end));
+    if dropped {
+        let color = if by_flight { reference.color } else { SeriesColor::Muted };
+        group.rows = reference
+            .run
+            .result
+            .branches
+            .iter()
+            .map(|b| StripRow {
+                name: b.name.clone(),
+                from: b.start,
+                to: b.trajectory.samples.last().map_or(b.start, |s| s.t),
+                color,
+                events: branch_events(b),
+            })
+            .collect();
+    }
     Some(group)
 }
 
@@ -349,21 +417,43 @@ pub fn wind(spec: &Spec) -> Wind {
     Wind { speed: spec.wind_speed, from_deg: spec.wind_from.to_degrees().rem_euclid(360.0) }
 }
 
-/// The ground tracks of `entries` (metres from the pad), north up, with the reference flight's wind and field radius.
+/// The marks of a dropped stage's row of the events strip: a burnout that comes after the separation, the deployments (named by
+/// the device) and the landing. The separation is where the row starts.
+fn branch_events(b: &Branch) -> Vec<EventMark> {
+    b.trajectory
+        .events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::Burnout => Some(EventMark::new(e.t, "Burnout").role(EventRole::Burnout)),
+            EventKind::Deploy(name) => Some(EventMark::new(e.t, name.clone()).role(EventRole::Deploy)),
+            EventKind::Landing => Some(EventMark::new(e.t, "Landing").role(EventRole::Landing)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The ground tracks of `entries` (metres from the pad), north up, with the reference flight's wind and field radius: one per
+/// flight, in order, then one per dropped stage of each flight (its [`Track::dropped`], pointing at its flight's track).
 pub fn ground(entries: &[Entry], reference: usize, units: UnitSystem) -> GroundTrack {
     let Some(reference) = entries.get(reference).or(entries.first()) else { return GroundTrack::default() };
-    let tracks = entries
+    let points = |samples: &[Sample]| -> Vec<TrackPoint> {
+        samples.iter().map(|s| TrackPoint { t: s.t, east: s.position[0], north: s.position[1], alt: s.altitude }).collect()
+    };
+    let mut tracks: Vec<Track> = entries
         .iter()
         .map(|e| {
-            let points =
-                e.run.result.trajectory.samples.iter().map(|s| TrackPoint { t: s.t, east: s.position[0], north: s.position[1], alt: s.altitude }).collect();
-            let track = Track::new(e.name, e.color, points);
+            let track = Track::new(e.color, points(&e.run.result.trajectory.samples));
             match e.scatter {
                 Some(landings) => track.with_scatter(landings.to_vec()),
                 None => track,
             }
         })
         .collect();
+    for (i, e) in entries.iter().enumerate() {
+        for b in &e.run.result.branches {
+            tracks.push(Track::dropped(e.color, points(&b.trajectory.samples), b.name.clone(), i));
+        }
+    }
     GroundTrack { tracks, wind: Some(wind(&reference.run.spec)), field_radius: Some(reference.run.spec.field_radius), units }
 }
 
@@ -374,6 +464,10 @@ mod tests {
     use bowshock_sim::{Event, Sample, Summary, Trajectory, G0};
     use std::sync::Arc;
     use std::time::Duration;
+
+    fn group(entries: &[Entry], reference: usize, system: UnitSystem, layout: &PlotLayout, min_margin: f64) -> Option<PlotGroup> {
+        group_with(entries, reference, system, layout, min_margin, true)
+    }
 
     use crate::widgets::plot::Tag;
 
@@ -413,6 +507,7 @@ mod tests {
                 ],
             },
             summary: Summary { flight_time: 10.0, ..Summary::default() },
+            branches: Vec::new(),
         };
         Run {
             spec: Spec::default(),
@@ -644,5 +739,96 @@ mod tests {
         assert!((g.wind.unwrap().from_deg - 250.0).abs() < 1e-9);
         assert!(group(&[], 0, UnitSystem::MM_G_S, &PlotLayout::default(), 1.0).is_none());
         assert!(ground(&[], 0, UnitSystem::MM_G_S).tracks.is_empty());
+    }
+
+    /// The run of `run()` with a booster dropped at 1.6 s that opens a chute at 5 s and lands at 8 s.
+    fn staged_run() -> Run {
+        let mut r = run();
+        let event = |t, kind| Event { t, kind, altitude: 0.0, stage: None };
+        let booster = Branch {
+            name: "Booster".into(),
+            stage: 0,
+            start: 1.6,
+            trajectory: Trajectory {
+                samples: vec![sample(1.6, 100.0, 30.0), sample(4.0, 150.0, 0.0), sample(8.0, 0.0, -6.0)],
+                events: vec![event(1.6, EventKind::Separation), event(5.0, EventKind::Deploy("Booster chute".into())), event(8.0, EventKind::Landing)],
+            },
+            summary: bowshock_sim::BranchSummary { flight_time: 8.0, ..Default::default() },
+        };
+        let mut result = (*r.result).clone();
+        result.branches.push(booster);
+        r.result = Arc::new(result);
+        r
+    }
+
+    #[test]
+    fn a_dropped_stage_is_a_dashed_line_from_its_separation_named_at_its_end_with_a_strip_row_of_its_own() {
+        let r = staged_run();
+        let e = [Entry { name: "Nominal", color: SeriesColor::Ink, run: &r, scatter: None }];
+        let panels = layout(&[&["altitude"]]);
+        let g = group(&e, 0, UnitSystem::MM_G_S, &panels, 1.0).unwrap();
+        let series = &g.panels[0].series;
+        assert_eq!(series.len(), 2);
+        assert_eq!((series[1].name.as_str(), series[1].style), ("Booster", LineStyle::Dashed));
+        assert_eq!((series[1].label, series[1].label_text.as_deref()), (Some(LabelAt::End), Some("Booster")));
+        assert!(series[0].label.is_none());
+        assert_eq!(series[1].points[0], (1.6, 100.0));
+        // The strip carries a thin row of its own from the separation to the landing, with its deployment and its landing.
+        assert_eq!(g.rows.len(), 1);
+        let row = &g.rows[0];
+        assert_eq!((row.name.as_str(), row.from, row.to), ("Booster", 1.6, 8.0));
+        assert_eq!(row.events.iter().map(|m| m.label.as_str()).collect::<Vec<_>>(), ["Booster chute", "Landing"]);
+        // Hidden, the plots are what they were without it.
+        let off = group_with(&e, 0, UnitSystem::MM_G_S, &panels, 1.0, false).unwrap();
+        assert_eq!(off.panels[0].series.len(), 1);
+        assert!(off.rows.is_empty());
+    }
+
+    #[test]
+    fn in_a_comparison_a_dropped_stage_keeps_its_flights_colour_and_is_named_by_flight() {
+        let r = staged_run();
+        let a = Entry { name: "Nominal", color: SeriesColor::Series(1), run: &r, scatter: None };
+        let b = Entry { name: "Windy", color: SeriesColor::Series(2), run: &r, scatter: None };
+        let g = group(&[a, b], 0, UnitSystem::MM_G_S, &layout(&[&["altitude"]]), 1.0).unwrap();
+        let lines: Vec<_> = g.panels[0].series.iter().map(|s| (s.name.as_str(), s.color, s.style)).collect();
+        assert_eq!(
+            lines,
+            [
+                ("Nominal", SeriesColor::Series(1), LineStyle::Solid),
+                ("Windy", SeriesColor::Series(2), LineStyle::Solid),
+                ("Nominal · Booster", SeriesColor::Series(1), LineStyle::Dashed),
+                ("Windy · Booster", SeriesColor::Series(2), LineStyle::Dashed),
+            ]
+        );
+        assert!(g.panels[0].series.iter().all(|s| s.label.is_none()));
+        // The strip row is the reference flight's.
+        assert_eq!(g.rows.len(), 1);
+    }
+
+    #[test]
+    fn against_altitude_a_dropped_stage_is_drawn_in_pieces_named_once_and_has_no_strip_row() {
+        let r = staged_run();
+        let e = [Entry { name: "Nominal", color: SeriesColor::Ink, run: &r, scatter: None }];
+        let panels = PlotLayout { x: PlotX::Altitude, ..layout(&[&["vertical_velocity"]]) };
+        let g = group(&e, 0, UnitSystem::M_KG_S, &panels, 1.0).unwrap();
+        let booster: Vec<&Series> = g.panels[0].series.iter().filter(|s| s.name.starts_with("Booster")).collect();
+        // Up to its own apogee at 150 m and down again.
+        assert_eq!(booster.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["Booster · ascent", "Booster · descent"]);
+        assert!(booster.iter().all(|s| s.style == LineStyle::Dashed));
+        assert_eq!(booster.iter().filter(|s| s.label_text.as_deref() == Some("Booster")).count(), 1);
+        assert!(g.rows.is_empty());
+    }
+
+    #[test]
+    fn a_dropped_stage_has_its_own_dashed_ground_track_pointing_at_its_flight() {
+        let r = staged_run();
+        let e = [Entry { name: "n", color: SeriesColor::Series(1), run: &r, scatter: None }];
+        let g = ground(&e, 0, UnitSystem::MM_G_S);
+        assert_eq!(g.tracks.len(), 2);
+        assert!(g.tracks[0].dropped.is_none());
+        assert_eq!(g.tracks[1].dropped, Some(crate::widgets::ground_track::Dropped { name: "Booster".into(), of: 0 }));
+        assert_eq!((g.tracks[1].points[0].t, g.tracks[1].points.len()), (1.6, 3));
+        assert!(g.tracks[1].apogee.is_none());
+        assert_eq!(g.tracks[1].color, SeriesColor::Series(1));
     }
 }

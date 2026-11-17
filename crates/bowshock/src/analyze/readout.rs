@@ -106,8 +106,8 @@ pub fn config_color(i: usize) -> SeriesColor {
 pub const DRAG_PARTS: [(&str, SeriesColor); 4] =
     [("Skin friction", SeriesColor::Series(1)), ("Pressure", SeriesColor::Series(2)), ("Base", SeriesColor::Series(3)), ("Fins", SeriesColor::Series(4))];
 
-/// One plain sentence for a row label: what the quantity is and what moves it. Shown as the row's tooltip and, for the drag
-/// sources, under the Drag breakdown plot. `None` for labels that need no explanation (names of configurations, units).
+/// One plain sentence for a row label: what the quantity is and what moves it, shown as the row's tooltip (the drag sources'
+/// sentences live here and nowhere else). `None` for labels that need no explanation (names of configurations, units).
 pub fn help(label: &str) -> Option<&'static str> {
     let label = label.strip_suffix(super::compute::LIFT_LABEL).unwrap_or(label);
     Some(match label {
@@ -589,6 +589,7 @@ mod tests {
                 jobs,
                 bands: rocket.stability_bands(),
                 cfd: None,
+                drag_tables: Vec::new(),
             }),
             rocket.active_config_id(),
         )

@@ -17,6 +17,7 @@ pub const SAMPLE_INTERVAL: usize = crate::engine::numerics::MONITOR_EVERY;
 
 /// Where one run (one Mach number, one angle of attack) is.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Progress {
     /// Mach number of the run.
     pub mach: f64,

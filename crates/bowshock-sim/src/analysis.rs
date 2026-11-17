@@ -2,7 +2,7 @@
 
 use crate::aero::{Aero, DragBreakdown};
 use crate::atmosphere::Atmosphere;
-use crate::flight::{build_aeros, run, Launch, SimInput, Tweaks};
+use crate::flight::{build_aeros, run, Launch, SimInput, Tweaks, WindPoint};
 use crate::rng::Rng;
 use crate::vehicle::Vehicle;
 
@@ -168,9 +168,16 @@ pub fn monte_carlo(input: &SimInput, runs: usize, sigma: &Dispersion) -> MonteCa
         .map(|i| {
             let tx = nominal_tilt[0] + sigma.launch_angle * rng.normal();
             let ty = nominal_tilt[1] + sigma.launch_angle * rng.normal();
+            let wind_speed = (base.wind_speed + sigma.wind_speed * rng.normal()).max(0.0);
+            let wind_from = base.wind_from + sigma.wind_dir * rng.normal();
+            // A wind profile moves with the ground wind: every level scaled by the same factor and turned by the same angle.
+            let (scale, turn) = (if base.wind_speed < 1e-9 { None } else { Some(wind_speed / base.wind_speed) }, wind_from - base.wind_from);
+            let wind_levels =
+                base.wind_levels.iter().map(|l| WindPoint { speed: scale.map_or(wind_speed, |k| l.speed * k), from: l.from + turn, ..*l }).collect();
             let launch = Launch {
-                wind_speed: (base.wind_speed + sigma.wind_speed * rng.normal()).max(0.0),
-                wind_from: base.wind_from + sigma.wind_dir * rng.normal(),
+                wind_speed,
+                wind_from,
+                wind_levels,
                 angle_from_vertical: tx.hypot(ty).min(1.2),
                 direction: if tx == 0.0 && ty == 0.0 { base.direction } else { tx.atan2(ty) },
                 seed: base.seed.wrapping_add(i as u64 + 1),
@@ -255,8 +262,16 @@ mod tests {
         Vehicle {
             reference_diameter: 2.0 * r,
             body: vec![
-                BodySegment { station: 0.0, length: 0.2, fore_radius: 0.0, aft_radius: r, kind: BodyKind::Nose(NoseShape::VonKarman), roughness: 0.0 },
-                BodySegment { station: 0.2, length: 0.6, fore_radius: r, aft_radius: r, kind: BodyKind::Tube, roughness: 0.0 },
+                BodySegment {
+                    station: 0.0,
+                    length: 0.2,
+                    fore_radius: 0.0,
+                    aft_radius: r,
+                    kind: BodyKind::Nose(NoseShape::VonKarman),
+                    tip_radius: 0.0,
+                    roughness: 0.0,
+                },
+                BodySegment { station: 0.2, length: 0.6, fore_radius: r, aft_radius: r, kind: BodyKind::Tube, tip_radius: 0.0, roughness: 0.0 },
             ],
             tube_fins: vec![],
             fin_sets: vec![FinSet {
@@ -280,6 +295,7 @@ mod tests {
             }],
             protuberances: vec![],
             stages: vec![],
+            labels: Default::default(),
         }
     }
 

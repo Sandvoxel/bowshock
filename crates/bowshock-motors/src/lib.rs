@@ -1,6 +1,7 @@
 //! Model-rocket motor thrust curves for Bowshock.
 //!
 //! * [`parse_eng`] reads RASP `.eng` files (the format used by ThrustCurve.org and most rocketry simulators).
+//! * [`parse_rse`] reads RockSim `.rse` files (the format OpenRocket stores user-defined thrust curves in, inside an `.ork`).
 //! * [`Motor`] is one motor with thrust / mass queries; everything is SI (m, kg, s, N). [`Motor::id`] identifies it: two
 //!   curves with the same designation are two motors.
 //! * [`MotorDb`] is a searchable collection. [`MotorDb::bundled`] is the motor catalogue compiled into the binary.
@@ -27,12 +28,14 @@
 mod db;
 mod motor;
 mod rasp;
+mod rse;
 mod store;
 pub mod thrustcurve;
 
-pub use db::{CatalogueInfo, MotorDb, MotorError};
+pub use db::{same_motor_base_name, same_motor_name, CatalogueInfo, MotorDb, MotorError};
 pub use motor::{Motor, ThrustCurveInfo, FILE_ID_PREFIX, THRUSTCURVE_ID_PREFIX};
 pub use rasp::{parse_eng, ParseError};
+pub use rse::{parse_rse, RseError, PLUGGED_DELAY};
 pub use store::{
     cache_path, load_cached, save_cached, today, MotorFile, StoreError, CACHE_EXTENSION, MOTOR_FILE_MAGIC, MOTOR_FILE_VERSION, THRUSTCURVE_ATTRIBUTION,
 };

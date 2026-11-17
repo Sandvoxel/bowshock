@@ -31,8 +31,10 @@ fn main() -> Result<(), bowshock_core::Error> {
 
 - Guide: <https://sandvoxel.github.io/bowshock/> (getting started, body and fin input, motor-on runs, results, validation, limits).
 - API reference: <https://sandvoxel.github.io/bowshock/main/api/bowshock_core/>.
-- Limits in short: axisymmetric bodies, zero angle of attack, fully turbulent smooth walls; fins are empirical and under-predicted
-  against wind-tunnel data; motor-on base pressure is not validated. Details and measured errors are in the guide's validation chapter.
+- Limits in short: axisymmetric bodies; axisymmetric RANS drag is zero angle of attack with fully turbulent walls (smooth, or
+  Aupoix Colebrook wall roughness), and stability comes from 3D Euler normal-force / CP sweeps (`Analysis::lift`). Fins are
+  empirical in the 2D drag and under-predicted against wind-tunnel data; motor-on base pressure is not validated. Details and
+  measured errors are in the guide's validation chapter.
 - Working on bowshock itself: [developer notes and validation drivers](crates/bowshock-validate/README.md).
 
 ## Desktop app
@@ -47,6 +49,7 @@ fed by the rocket document in `bowshock-model` and the thrust curves in `bowshoc
 cargo run --release -p bowshock               # open the app (Ctrl/Cmd+E loads the example rocket)
 cargo run --release -p bowshock -- --example  # start with the example rocket
 cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/shell.drive out/shell   # scripted run + screenshots
+just ci                                       # fmt, clippy, tests, CFD tests and the headless UI smoke (see `just --list`)
 ```
 
 | Crate | What it is |
@@ -55,7 +58,7 @@ cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/shell.drive 
 | `bowshock-model` | the rocket document: parts, materials, mass/CG, configurations, stages, the binary `.bowshock` format (`BOWSHOCK` magic + version, deflated CBOR) |
 | `bowshock-sim` | Barrowman aerodynamics, flight simulation and analyses; `from_model` maps a document onto it |
 | `bowshock-motors` | RASP `.eng` parser, the bundled ThrustCurve.org motor catalogue (every listed motor with a curve; data: [ThrustCurve.org](https://www.thrustcurve.org)) and a ThrustCurve.org search/download client |
-| `bowshock-core`, `bowshock-cfd`, `bowshock-reference` | CFD drag library (not yet wired into the app) |
+| `bowshock-core`, `bowshock-cfd`, `bowshock-reference` | 2D axisymmetric Euler/RANS (rough-wall k-omega SST) drag and 3D Euler stability CFD solver, integrated into Analyze and Simulate |
 
 ## License
 

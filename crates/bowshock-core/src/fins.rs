@@ -1,11 +1,12 @@
 //! Empirical drag of a set of trapezoidal fins: skin friction and leading-edge / trailing-edge pressure drag after S. Niskanen,
 //! *Development of an Open Source model rocket simulation software* (M.Sc. thesis, 2009), eqs. 3.78-3.85, 3.89-3.94 and B.1-B.2 (after
-//! Hoerner, *Fluid-Dynamic Drag*), plus the Ackeret wave drag of a double wedge above Mach 1. Fin-body interference drag is neglected.
+//! Hoerner, *Fluid-Dynamic Drag*), plus the Ackeret wave drag of the sharp sections above Mach 1 (`bowshock_reference::fin_wave`). Fin-body interference drag is neglected.
 
 use crate::analysis::FinDrag;
 use crate::atmosphere::AirState;
 use crate::spec::{FinProfile, FinSpec};
 use bowshock_reference::base_drag::base_drag_coefficient;
+use bowshock_reference::fin_wave::{biconvex_slope_integral, double_wedge_slope_integral, hexagonal_slope_integral, wave_drag_coefficient};
 use std::f64::consts::PI;
 
 /// Mean aerodynamic chord of a trapezoidal fin [m].
@@ -76,22 +77,23 @@ pub(crate) fn fin_drag(f: &FinSpec, mach: f64, air: &AirState, d_ref: f64, body_
         FinProfile::Square => (cd_stag, cd_base),
         FinProfile::Rounded => (le_round, 0.5 * cd_base),
         FinProfile::Airfoil => (le_round, 0.0),
-        FinProfile::DoubleWedge => (0.0, 0.0),
+        FinProfile::DoubleWedge | FinProfile::Hexagonal { .. } | FinProfile::Biconvex => (0.0, 0.0),
         FinProfile::Custom { section } => {
             let (b, e, rounded) = section_edges(section);
             (b * cd_stag + (1.0 - b) * if rounded { le_round } else { 0.0 }, e * cd_base)
         }
     };
     let mut pressure = (le_perp * sweep.cos().powi(2) + te) * a_front / a_ref;
-    let wave = match &f.profile {
-        FinProfile::DoubleWedge => Some(4.0 * (t / mac).powi(2)),
-        FinProfile::Custom { section } => Some(4.0 * section_slope_integral(section) * (t / mac / 2.0).powi(2)),
-        _ => None,
+    // Ackeret wave drag of the sharp sections and of a custom one (the blunt-edged profiles get none)
+    let shape_factor = match &f.profile {
+        FinProfile::DoubleWedge => Some(double_wedge_slope_integral()),
+        FinProfile::Hexagonal { wedge_fraction } => Some(hexagonal_slope_integral(*wedge_fraction)),
+        FinProfile::Biconvex => Some(biconvex_slope_integral()),
+        FinProfile::Custom { section } => Some(section_slope_integral(section)),
+        FinProfile::Square | FinProfile::Rounded | FinProfile::Airfoil => None,
     };
-    if let (Some(w), true) = (wave, mach >= 1.0) {
-        // Ackeret wave drag, beta floored at M = 1.15
-        let beta = (mach * mach - 1.0).max(0.3225).sqrt();
-        pressure += w / beta * n * a_fin / a_ref;
+    if let Some(s) = shape_factor {
+        pressure += wave_drag_coefficient(s, t / mac, mach) * n * a_fin / a_ref;
     }
     FinDrag { friction, pressure }
 }
@@ -176,6 +178,52 @@ mod tests {
         let f = fin(FinProfile::DoubleWedge);
         assert_eq!(fin_drag(&f, 0.8, &air, 0.1, 1.0).pressure, 0.0);
         assert!(fin_drag(&f, 1.5, &air, 0.1, 1.0).pressure > 0.0);
+    }
+
+    fn sharp_profiles() -> [FinProfile; 3] {
+        [FinProfile::DoubleWedge, FinProfile::Hexagonal { wedge_fraction: 0.25 }, FinProfile::Biconvex]
+    }
+
+    #[test]
+    fn sharp_sections_have_no_edge_drag_and_no_wave_drag_below_mach_one() {
+        let air = Atmosphere::Isa { altitude_m: 0.0 }.state().unwrap();
+        for p in sharp_profiles() {
+            for m in [0.3, 0.8, 0.99] {
+                assert_eq!(fin_drag(&fin(p.clone()), m, &air, 0.1, 1.0).pressure, 0.0, "{p:?} at Mach {m}");
+            }
+            assert!(fin_drag(&fin(p.clone()), 2.0, &air, 0.1, 1.0).pressure > 0.0, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn wave_drag_of_each_section_follows_its_closed_form_at_mach_two() {
+        let air = Atmosphere::Isa { altitude_m: 0.0 }.state().unwrap();
+        let (d_ref, mach) = (0.1, 2.0);
+        let f = fin(FinProfile::DoubleWedge);
+        let tau = f.thickness / mean_aerodynamic_chord(f.root_chord, f.tip_chord);
+        let beta = (mach * mach - 1.0f64).sqrt();
+        let area = f64::from(f.count) * f.span * (f.root_chord + f.tip_chord) / 2.0 / (PI * d_ref * d_ref / 4.0);
+        let cases = [
+            (FinProfile::DoubleWedge, 4.0 * tau * tau / beta),
+            (FinProfile::Hexagonal { wedge_fraction: 0.25 }, 2.0 * tau * tau / (0.25 * beta)),
+            (FinProfile::Hexagonal { wedge_fraction: 0.5 }, 4.0 * tau * tau / beta),
+            (FinProfile::Biconvex, 16.0 / 3.0 * tau * tau / beta),
+        ];
+        for (p, cd) in cases {
+            let got = fin_drag(&fin(p.clone()), mach, &air, d_ref, 1.0).pressure;
+            close(got, cd * area, &format!("{p:?}"));
+        }
+    }
+
+    #[test]
+    fn hexagonal_wedge_fraction_is_validated() {
+        for f in [0.0, -0.1, 0.51, f64::NAN] {
+            assert!(
+                matches!(fin(FinProfile::Hexagonal { wedge_fraction: f }).validate(), Err(Error::InvalidInput(m)) if m.starts_with("fins.profile.wedge_fraction")),
+                "{f}"
+            );
+        }
+        assert!(fin(FinProfile::Hexagonal { wedge_fraction: 0.5 }).validate().is_ok());
     }
 
     #[test]

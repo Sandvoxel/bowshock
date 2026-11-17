@@ -33,6 +33,7 @@
 
 pub mod assembly;
 pub mod camera;
+pub mod capture;
 mod carry;
 mod cube;
 mod empty;
@@ -46,7 +47,7 @@ pub mod pick;
 mod pipeline;
 pub mod pods;
 mod radial;
-mod scene;
+pub(crate) mod scene;
 mod sheet;
 mod snap;
 mod solids;
@@ -58,10 +59,10 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bowshock_model::{Dim, InternalKind, PartId, PartRef, RadialKind};
+use bowshock_model::{Dim, InternalKind, PartId, PartKind, PartRef, RadialKind};
 use glam::{IVec3, Vec3};
 use iced::widget::{canvas, column, container, row, shader, stack, text, Space};
-use iced::{alignment, keyboard, mouse, Element, Fill, Size, Task, Vector, Widget};
+use iced::{alignment, keyboard, mouse, Element, Fill, Point, Rectangle, Size, Task, Vector, Widget};
 
 use crate::app::{self, drag, Ctx, Selection};
 use crate::theme::{self, MONO};
@@ -73,7 +74,9 @@ use crate::viewport::toolbar::Glyph;
 use crate::widgets::button::{button, Weight};
 
 pub use camera::Camera;
-pub use mesh::{Cut, GhostRadial, Marks, Mesh};
+pub use capture::Capture;
+pub use mesh::{Carried, Cut, Free, FreeKind, Ghost, GhostRadial, Marks, Mesh};
+pub use solids::{GpuVertex, LAYER_INTERNAL, LAYER_RADIAL, LAYER_SHELL};
 
 pub mod flash;
 
@@ -95,18 +98,6 @@ const FOCUS_MAX_ZOOM: f32 = 2.0;
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// Headless runs (`bowshock drive`, animations off) render between scripted clicks, which can take longer than that.
 const HEADLESS_DOUBLE_CLICK: Duration = Duration::from_secs(10);
-
-static ANIMATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
-
-/// Turns camera animations on or off. Off for `bowshock drive`: the headless emulator delivers no frame ticks.
-pub fn set_animation(on: bool) {
-    ANIMATE.store(on, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// Whether animations are on (they are not in a headless `bowshock drive` run).
-pub fn animation_on() -> bool {
-    ANIMATE.load(std::sync::atomic::Ordering::Relaxed)
-}
 
 /// 3D or the side-on 2D profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,8 +154,9 @@ pub enum Message {
     Zoom { factor: f32, offset: Vector },
     /// Fit the model into a viewport of this logical size.
     Fit(Size),
-    /// The viewport changed size (remembered so [`View::fit`] knows the size to fit to).
-    Resized(Size),
+    /// The viewport changed size or place in the window (remembered so [`View::fit`] knows the size to fit to and where the
+    /// cursor is in the viewport).
+    Resized(Rectangle),
     /// Snap to a ViewCube region: each component in {-1, 0, 1}, not all zero. The camera ends up looking along `-dir`.
     Snap(IVec3),
     /// Return to the home view.
@@ -193,13 +185,17 @@ pub enum Message {
     PartMenu(Pick),
     /// Select the separation of this stage (a click on its diamond).
     SelectSeparation(usize),
+    /// The separation diamond of this stage was dragged: it now sits at the joint just aft of this airframe part (`None`: the
+    /// automatic joint). The first one opens the drag's single undo step.
+    SeparationTo(usize, Option<PartId>),
+    /// The diamond was released (`true`: keep the move as one undo step) or Esc was pressed (`false`: put it back).
+    SeparationEnd(bool),
     /// A part was pressed and dragged: pick it up.
     Grab(Pick),
+    /// An axial part was pressed `f64` metres behind its fore face: if it is then picked up, this is where it is held.
+    Held(PartId, f64),
     /// A handle edit (see `manipulate`).
     Edit(manipulate::Edit),
-    /// The key hints to show at the bottom (pairs of key, what it does); empty clears them.
-    #[allow(dead_code)] // For overlays that want to show keys; direct edits set theirs through `Edit`.
-    Hint(Vec<(&'static str, &'static str)>),
     /// Focus a part: turn square-on to it in an orthographic view that fills the viewport with it, and select it (also sent by a
     /// double-click on a Station Lanes bar).
     Focus(PartId),
@@ -211,20 +207,24 @@ pub enum Message {
     SnapNode(Option<usize>),
     /// The dragged radial part's surface target changed, and whether it has been pulled free of the rocket it came from.
     Surface(Option<SurfaceTarget>, bool),
-    /// Released over the viewport: drop the dragged axial part on the snap node, if any.
+    /// Released over the viewport with an axial part carried: the app decides what that does (`drag::end_carry`).
     DropAxial,
-    /// Released over the viewport: drop the dragged radial part on its surface target, if any.
+    /// Released over the viewport with a radial part carried.
     DropRadial,
     /// The dragged internal part's landing changed.
     InternalTarget(Option<crate::app::drag::InternalTarget>),
-    /// Released over the viewport: drop the dragged internal part on its target, if any.
+    /// Released over the viewport with an internal part carried.
     DropInternal,
+    /// Pressed over the viewport with a part held and no button down (click to place): puts it down on its target, if it has one.
+    PlaceHere,
     /// The mouse wheel turned during a radial drag: one step through the symmetry counts (like `X` / `Shift+X`), no zoom.
     CopiesStep(bool),
     /// The dragged axial part's nearest attach node is on a pod's stack: `(pod, node index)`.
     SnapPodNode(Option<(PartId, usize)>),
     /// The dragged axial part is over a tube's side: it would attach radially there (it becomes a pod).
     AxialSurface(Option<SurfaceTarget>),
+    /// An image export: render the model once with this request (see [`capture`]); `None` ends it.
+    Capture(Option<Arc<Capture>>),
 }
 
 struct Anim {
@@ -252,9 +252,31 @@ struct MeshKey {
     selected: Option<PartId>,
     also: Vec<PartId>,
     axial: Option<(Option<usize>, Option<(PartId, usize)>, Option<SurfaceTarget>, u8)>,
+    /// The carried part held in the air (what, the cursor in viewport px and the camera it was placed through).
+    free: Option<FreeKey>,
     radial: Option<(Option<SurfaceTarget>, u8)>,
     cut: Cut,
     flash: Option<(PartId, f32, f32)>,
+}
+
+/// A carried part held in the air, as far as the mesh is concerned: what, where the cursor is and the camera it is placed through.
+#[derive(Debug, Clone, PartialEq)]
+struct FreeKey {
+    what: FreeWhat,
+    /// The cursor in viewport px, rounded.
+    cursor: (i32, i32),
+    camera: Camera,
+}
+
+/// What is held in the air.
+#[derive(Debug, Clone, PartialEq)]
+enum FreeWhat {
+    /// An axial part, where it is held (metres behind its fore face) and whether it was picked up off the rocket.
+    Axial(PartKind, f64, bool),
+    /// A radial group and its copies.
+    Radial(RadialKind, u8),
+    /// An internal part.
+    Internal(InternalKind),
 }
 
 /// The viewport's state: camera, toolbar choices, hover and the mesh on show.
@@ -265,6 +287,10 @@ pub struct View {
     mesh: Arc<Mesh>,
     /// Logical size of the viewport, as last reported.
     size: Size,
+    /// Where the viewport's top-left corner is in the window, as last reported.
+    origin: Point,
+    /// Whether the viewport has been fitted to its first size.
+    sized: bool,
     projection: Projection,
     inside: InsideView,
     /// The cutaway wedge.
@@ -287,12 +313,18 @@ pub struct View {
     fore_pan: f32,
     /// The inside view to go back to when the internal part being carried in from the bin is dropped or cancelled.
     drag_inside: Option<InsideView>,
+    /// The axial part last pressed and how far behind its fore face (metres): where it is held if the press becomes a pick-up.
+    held: Option<(PartId, f64)>,
+    /// The camera, size and place the carried axial part's snap was last decided for (see [`View::resnap`]).
+    snapped: Option<(Camera, Size, Point)>,
     /// The view was panned or zoomed by hand since the last fit: an edit leaves it alone (see [`View::reframe`]).
     navigated: bool,
     /// The last document revision [`View::reframe`] looked at (`None` before the first sync).
     reframed: Option<u64>,
     /// An edit left part of the rocket outside a view the user had set: the hint bar offers `F fit` while it stays that way.
     stray: bool,
+    /// An image export waiting for its render.
+    capture: Option<Arc<Capture>>,
 }
 
 impl View {
@@ -305,6 +337,8 @@ impl View {
             profile: false,
             mesh: Arc::new(Mesh::from_rocket(&bowshock_model::Rocket::default(), Marks::default())),
             size: Size::new(860.0, 560.0),
+            origin: Point::ORIGIN,
+            sized: false,
             projection: Projection::ThreeD,
             inside: InsideView::Solid,
             cut: Cut::default(),
@@ -318,33 +352,81 @@ impl View {
             mesh_key: None,
             fore_pan: 0.0,
             drag_inside: None,
+            held: None,
+            snapped: None,
             navigated: false,
             reframed: None,
             stray: false,
+            capture: None,
         }
     }
 
     /// The camera.
-    #[allow(dead_code)] // For the viewport modules' overlays and the lanes (camera-locked ruler).
+    #[cfg(test)]
     pub fn camera(&self) -> Camera {
         self.camera
     }
 
+    /// The projection chosen on the toolbar.
+    pub fn projection(&self) -> Projection {
+        self.projection
+    }
+
     /// The inside view chosen on the toolbar.
-    #[allow(dead_code)]
     pub fn inside(&self) -> InsideView {
         self.inside
     }
 
-    /// The toolbar's grid step, metres: what a plain handle drag moves by.
-    #[allow(dead_code)]
-    pub fn snap_step(&self) -> f64 {
-        self.snap_step
+    /// Asks for one render of the model at `width` × `height` pixels, framed like the viewport and drawn without hover, selection
+    /// or flash marks. The pixels arrive on the returned receiver once the viewport has drawn its next frame; end the request with
+    /// [`Message::Capture`]`(None)`.
+    pub fn start_capture(
+        &mut self,
+        ctx: &Ctx,
+        width: u32,
+        height: u32,
+        transparent: bool,
+        background: [f32; 4],
+    ) -> iced::futures::channel::oneshot::Receiver<capture::Pixels> {
+        let marks = Marks { motors: Some(ctx.physics.motors()), cut: self.cut, ..Marks::default() };
+        let mesh = Arc::new(Mesh::from_rocket(ctx.doc.rocket(), marks));
+        let (request, pixels) = Capture::new(width, height, transparent, background, mesh);
+        self.capture = Some(request);
+        pixels
     }
 
     /// Fits the model into the viewport at its last known size.
-    pub fn fit(&mut self) {
-        self.camera_update(Message::Fit(self.size));
+    pub fn fit(&mut self, animate: bool) {
+        self.camera_update(Message::Fit(self.size), animate);
+    }
+
+    /// While an axial part is carried, decides its snap again when the view has changed under a cursor that has not moved (an orbit
+    /// or zoom with the part held in click to place, a camera animation, a window resize): the overlay only decides on events, and
+    /// the camera moving is not one it sees. The app calls this before [`View::sync`].
+    pub fn resnap(&mut self, ctx: &mut Ctx) {
+        let Some(drag) = ctx.drag.axial.as_ref() else {
+            self.snapped = None;
+            return;
+        };
+        let view = (self.camera, self.size, self.origin);
+        if self.snapped.replace(view) == Some(view) {
+            return;
+        }
+        let Some(at) = self.local_cursor(ctx) else { return };
+        let overlay = assembly::Overlay {
+            rocket: ctx.doc.rocket(),
+            drag,
+            camera: self.camera,
+            cursor: None,
+            snap_angle: ctx.drag.angle_snap,
+            snap_step: self.snap_step,
+            margin: None,
+            units: ctx.units,
+        };
+        let (snap, pod_snap, surface) = overlay.resolve(at, self.size);
+        if let Some(drag) = ctx.drag.axial.as_mut() {
+            (drag.snap, drag.pod_snap, drag.surface) = (snap, pod_snap, surface);
+        }
     }
 
     /// Rebuilds the mesh if the document, selection, hover, cutaway or a drag ghost changed since it was built. The app calls
@@ -354,11 +436,11 @@ impl View {
         match (ctx.drag.internal.as_ref().is_some_and(|d| d.origin.is_none()), self.drag_inside) {
             (true, None) => {
                 self.drag_inside = Some(self.inside);
-                self.set_inside(InsideView::XRay);
+                self.set_inside(InsideView::XRay, ctx.env.animate);
             }
             (false, Some(before)) => {
                 self.drag_inside = None;
-                self.set_inside(before);
+                self.set_inside(before, ctx.env.animate);
             }
             _ => {}
         }
@@ -389,7 +471,7 @@ impl View {
             if self.navigated {
                 self.stray = true;
             } else {
-                self.fit();
+                self.fit(ctx.env.animate);
             }
         }
     }
@@ -399,12 +481,15 @@ impl View {
         let selected = ctx.selection.part();
         let also: Vec<PartId> = ctx.selected_parts().into_iter().skip(1).collect();
         let flash = ctx.flash_levels();
+        // A carried part that is over no target is held in the air at the cursor (see [`View::free_marks`]).
+        let free = self.free_key(ctx);
         let key = MeshKey {
             revision: ctx.doc.revision(),
             hovered: self.hover.part(),
             selected,
             also: also.clone(),
             axial: ctx.drag.axial.as_ref().map(|d| (d.snap, d.pod_snap, d.surface, d.count)),
+            free: free.clone(),
             radial: ctx.drag.radial.as_ref().map(|d| (d.target, d.count)),
             cut: self.cut,
             flash,
@@ -413,6 +498,10 @@ impl View {
             return;
         }
         let rocket = ctx.doc.rocket();
+        // What a part picked up from the rocket brings with it: its ghost shows that too, wherever the ghost is.
+        let carried = ctx.drag.axial.as_ref().and_then(|d| Some(Carried { origin: d.origin.as_ref()?, base: ctx.doc.drag_base() }));
+        let bin_origin = ctx.drag.axial.as_ref().filter(|d| d.origin.is_none()).map(|d| assembly::bin_origin(&d.kind));
+        let free = free.as_ref().and_then(|key| self.free_marks(ctx, key, bin_origin.as_ref()));
         let ghost = ctx.drag.axial.as_ref().and_then(|d| d.snap.map(|node| (node, rocket.matched(node, &d.kind))));
         let ghost_pod = ctx.drag.axial.as_ref().and_then(|d| d.pod_snap.map(|(pod, node)| (pod, node, rocket.matched_in_pod(pod, node, &d.kind))));
         // A part dragged over a tube's side stands there as a pod of its own: the ghost is that pod.
@@ -427,9 +516,11 @@ impl View {
             })
             .or_else(|| axial_pod.as_ref().map(|(kind, t, count)| GhostRadial { kind, parent: t.parent, offset: t.offset, angle: t.angle, count: *count }));
         let marks = Marks {
-            ghost: ghost.as_ref().map(|(node, kind)| (*node, kind)),
+            ghost: ghost.as_ref().map(|(node, kind)| Ghost { index: *node, kind, carried }),
             ghost_radial,
-            ghost_pod: ghost_pod.as_ref().map(|(pod, node, kind)| (*pod, *node, kind)),
+            ghost_pod: ghost_pod.as_ref().map(|(pod, node, kind)| (*pod, Ghost { index: *node, kind, carried: carried.map(|c| Carried { base: None, ..c }) })),
+            free,
+            ghosted: &[],
             hovered: self.hover.part(),
             selected,
             also_selected: &also,
@@ -441,15 +532,75 @@ impl View {
         self.mesh_key = Some(key);
     }
 
+    /// The mesh on show (for the tests).
+    #[cfg(test)]
+    pub(crate) fn mesh(&self) -> &Mesh {
+        &self.mesh
+    }
+
+    /// The cursor in the viewport's own px, if it is over the viewport.
+    fn local_cursor(&self, ctx: &Ctx) -> Option<Point> {
+        let at = ctx.cursor?;
+        let local = Point::new(at.x - self.origin.x, at.y - self.origin.y);
+        ((0.0..=self.size.width).contains(&local.x) && (0.0..=self.size.height).contains(&local.y)).then_some(local)
+    }
+
+    /// What is held in the air, if anything, for the mesh key: an axial, radial or internal part carried over no target, while the
+    /// cursor is over the viewport.
+    fn free_key(&self, ctx: &Ctx) -> Option<FreeKey> {
+        let cursor = self.local_cursor(ctx)?;
+        let what = if let Some(d) = ctx.drag.axial.as_ref().filter(|d| d.snap.is_none() && d.pod_snap.is_none() && d.surface.is_none()) {
+            FreeWhat::Axial(d.kind.clone(), d.hold, d.origin.is_some())
+        } else if let Some(d) = ctx.drag.radial.as_ref().filter(|d| d.target.is_none()) {
+            FreeWhat::Radial(d.kind.clone(), d.count)
+        } else {
+            FreeWhat::Internal(ctx.drag.internal.as_ref().filter(|d| d.target.is_none())?.kind.clone())
+        };
+        Some(FreeKey { what, cursor: (cursor.x.round() as i32, cursor.y.round() as i32), camera: self.camera })
+    }
+
+    /// The part held in the air for the mesh: where it stands comes from [`assembly::free_pose`], the one place the overlay's
+    /// snapping takes it from too, with the hold point under the cursor. An axial part is itself (with what it carries, if it was
+    /// picked up off the rocket; `bin` is the stand-in for one from the bin); a radial group is `count` copies round an axis through
+    /// the pose, on the body they would most plausibly go on (the selected part's radius, else the widest in the rocket); an
+    /// internal part is itself, sized for the selected body part's bore else the widest.
+    fn free_marks<'a>(&self, ctx: &'a Ctx, key: &FreeKey, bin: Option<&'a assembly::Origin>) -> Option<Free<'a>> {
+        let cursor = Point::new(key.cursor.0 as f32, key.cursor.1 as f32);
+        let rocket = ctx.doc.rocket();
+        let selected = ctx.selection.part();
+        match &key.what {
+            FreeWhat::Axial(..) => {
+                let d = ctx.drag.axial.as_ref()?;
+                let origin = d.origin.as_ref().or(bin)?;
+                let pose = assembly::free_pose(&self.camera, self.size, cursor, d.kind.length(), d.hold)?;
+                Some(Free { what: FreeKind::Axial(Carried { origin, base: ctx.doc.drag_base() }), at: pose.fore })
+            }
+            FreeWhat::Radial(..) => {
+                let d = ctx.drag.radial.as_ref()?;
+                let extent = d.kind.extent();
+                let pose = assembly::free_pose(&self.camera, self.size, cursor, extent, extent / 2.0)?;
+                let angle = d.origin.as_ref().map_or(0.0, |o| o.angle);
+                let radius = assembly::plausible_radius(rocket, selected);
+                Some(Free { what: FreeKind::Radial { kind: &d.kind, count: d.count, angle, radius }, at: pose.fore })
+            }
+            FreeWhat::Internal(..) => {
+                let d = ctx.drag.internal.as_ref()?;
+                let extent = d.kind.extent();
+                let pose = assembly::free_pose(&self.camera, self.size, cursor, extent, extent / 2.0)?;
+                Some(Free { what: FreeKind::Internal { kind: &d.kind, bore: assembly::plausible_bore(rocket, selected) }, at: pose.fore })
+            }
+        }
+    }
+
     /// Handles a message: camera and toolbar changes stay here; edits go to the document and drags to `app::drag`.
     pub fn update(&mut self, message: Message, ctx: &mut Ctx) -> Task<app::Message> {
         match message {
             Message::Projection(p) => {
                 self.focus = None;
                 self.projection = p;
-                self.set_profile(p == Projection::Profile);
+                self.set_profile(p == Projection::Profile, ctx.env.animate);
             }
-            Message::InsideView(v) => self.set_inside(v),
+            Message::InsideView(v) => self.set_inside(v, ctx.env.animate),
             Message::Step(step) => self.snap_step = step.0,
             Message::Hover(hover) => self.hover = hover,
             Message::Select(pick) => {
@@ -460,14 +611,14 @@ impl View {
                 };
                 // Two selections of the same thing in quick succession: focus the part, or fit on empty space.
                 let now = Instant::now();
-                let window = if ANIMATE.load(std::sync::atomic::Ordering::Relaxed) { DOUBLE_CLICK } else { HEADLESS_DOUBLE_CLICK };
+                let window = if ctx.env.animate { DOUBLE_CLICK } else { HEADLESS_DOUBLE_CLICK };
                 let double = self.last_select.is_some_and(|(at, last)| now.duration_since(at) <= window && last == id);
                 self.last_select = if double { None } else { Some((now, id)) };
                 ctx.select_one(id);
                 if double {
                     match id {
                         Some(id) => self.focus_part(id, ctx),
-                        None => self.fit(),
+                        None => self.fit(ctx.env.animate),
                     }
                 }
             }
@@ -493,8 +644,22 @@ impl View {
                 return Task::done(app::Message::OpenPartMenu(id));
             }
             Message::SelectSeparation(stage) => ctx.selection = Selection::Separation(stage),
+            Message::SeparationTo(stage, joint) => {
+                drag::move_separation(ctx, stage, joint);
+                self.hint = vec![("", "Slide to a joint"), ("Esc", "cancel")];
+            }
+            Message::SeparationEnd(commit) => {
+                drag::finish_separation(ctx, commit);
+                self.hint.clear();
+            }
+            Message::Held(id, hold) => self.held = Some((id, hold)),
             Message::Grab(pick) => {
-                drag::grab(ctx, pick);
+                // Held where it was pressed, if that was this part; a part pressed elsewhere (or never) is held by its middle.
+                let hold = match pick {
+                    Pick::Axial(id) => self.held.take().filter(|(held, _)| *held == id).map(|(_, hold)| hold),
+                    _ => None,
+                };
+                drag::grab(ctx, pick, hold);
                 self.hover = Hover::None;
                 ctx.symmetry.instance = None;
             }
@@ -509,9 +674,8 @@ impl View {
                 }
                 return task;
             }
-            Message::Hint(hint) => self.hint = hint,
             Message::Focus(id) => self.focus_part(id, ctx),
-            Message::ExitFocus => self.exit_focus(),
+            Message::ExitFocus => self.exit_focus(ctx.env.animate),
             Message::Cut(cut) => self.cut = cut,
             Message::SnapNode(node) => {
                 if let Some(drag) = ctx.drag.axial.as_mut() {
@@ -538,16 +702,15 @@ impl View {
                     (drag.target, drag.detached) = (target, detached);
                 }
             }
-            Message::DropAxial => drag::finish_axial(ctx, true),
-            Message::DropRadial => drag::finish_radial(ctx, true),
+            Message::DropAxial | Message::DropRadial | Message::DropInternal => drag::end_carry(ctx, drag::Gesture::Release, drag::Over::Surface),
+            Message::PlaceHere => drag::end_carry(ctx, drag::Gesture::Press, drag::Over::Surface),
             Message::InternalTarget(target) => {
                 if let Some(drag) = ctx.drag.internal.as_mut() {
                     drag.target = target;
                 }
             }
-            Message::DropInternal => drag::finish_internal(ctx, true),
             Message::CopiesStep(forward) => crate::build::parts_bin::cycle_symmetry(ctx, forward),
-            camera => self.camera_update(camera),
+            camera => self.camera_update(camera, ctx.env.animate),
         }
         Task::none()
     }
@@ -571,21 +734,21 @@ impl View {
     }
 
     /// Escape: goes back from a focused part, or leaves the exploded view; also clears the hover and the key hints.
-    pub fn cancel(&mut self) {
+    pub fn cancel(&mut self, animate: bool) {
         self.hover = Hover::None;
         self.hint.clear();
         if self.focus.is_some() {
-            self.exit_focus();
+            self.exit_focus(animate);
         } else if self.inside == InsideView::Exploded {
-            self.set_inside(InsideView::Solid);
+            self.set_inside(InsideView::Solid, animate);
         }
     }
 
     /// Shows the shell as `view`, animating the exploded view in or out.
-    fn set_inside(&mut self, view: InsideView) {
+    fn set_inside(&mut self, view: InsideView, animate: bool) {
         self.inside = view;
         let to = if view == InsideView::Exploded { 1.0 } else { 0.0 };
-        if ANIMATE.load(std::sync::atomic::Ordering::Relaxed) {
+        if animate {
             self.explode_anim = Some((self.explode, to, Instant::now()));
         } else {
             self.explode = to;
@@ -622,8 +785,8 @@ impl View {
         }
         if internal {
             match (self.inside, aft_on) {
-                (_, true) => self.set_inside(InsideView::XRay),
-                (InsideView::Solid, false) => self.set_inside(InsideView::Cutaway),
+                (_, true) => self.set_inside(InsideView::XRay, ctx.env.animate),
+                (InsideView::Solid, false) => self.set_inside(InsideView::Cutaway, ctx.env.animate),
                 _ => {}
             }
         }
@@ -638,24 +801,24 @@ impl View {
             whole.fit(self.mesh.min, self.mesh.max, self.size);
             to.scale = to.scale.min(whole.scale * FOCUS_MAX_ZOOM);
         }
-        self.animate_for(to, FOCUS_TIME);
+        self.animate_for(to, FOCUS_TIME, ctx.env.animate);
         ctx.selection = Selection::Part(id);
     }
 
     /// Back to where the camera, projection and view mode were before the focus.
-    fn exit_focus(&mut self) {
+    fn exit_focus(&mut self, animate: bool) {
         let Some(f) = self.focus.take() else {
             return;
         };
         self.profile = f.profile;
         self.projection = f.projection;
         if self.inside != f.inside {
-            self.set_inside(f.inside);
+            self.set_inside(f.inside, animate);
         }
-        self.animate_for(f.camera, FOCUS_TIME);
+        self.animate_for(f.camera, FOCUS_TIME, animate);
     }
 
-    fn camera_update(&mut self, message: Message) {
+    fn camera_update(&mut self, message: Message, animate: bool) {
         match message {
             // An empty rocket has nothing to turn round: the camera stays put so the empty-state view keeps its framing.
             Message::Orbit(delta) if !self.profile && !self.mesh.is_empty() => {
@@ -683,33 +846,40 @@ impl View {
                 self.camera.zoom(factor, offset);
             }
             Message::Fit(size) => {
-                self.size = size;
+                (self.size, self.sized) = (size, true);
                 (self.navigated, self.stray) = (false, false);
                 // Nothing to frame: keep the camera.
                 if !self.mesh.is_empty() {
                     let mut to = self.goal();
                     to.fit(self.mesh.min, self.mesh.max, size);
-                    self.animate(to);
+                    self.animate(to, animate);
                 }
             }
-            Message::Resized(size) => self.size = size,
+            Message::Resized(bounds) => {
+                (self.size, self.origin) = (bounds.size(), bounds.position());
+                // The first report is the initial fit.
+                if !self.sized {
+                    self.fit(animate);
+                }
+            }
+            Message::Capture(capture) => self.capture = capture,
             Message::Snap(dir) if !self.profile => {
                 let mut to = self.goal();
                 (to.yaw, to.pitch) = to.facing(dir.as_vec3());
                 // A face is seen square-on, so orthographic like a drawing view; an edge or corner keeps perspective.
                 let face = dir.abs().element_sum() == 1;
                 to.ortho_blend = if face { 1.0 } else { 0.0 };
-                self.animate(to);
+                self.animate(to, animate);
             }
             Message::Snap(_) => {}
             Message::Home => {
                 let to = home(self.goal());
-                self.animate(to);
+                self.animate(to, animate);
             }
             Message::Roll(dir) if !self.profile => {
                 let mut to = self.goal();
                 to.roll += f32::from(dir) * FRAC_PI_2;
-                self.animate(to);
+                self.animate(to, animate);
             }
             Message::Roll(_) => {}
             Message::Tick(now) => {
@@ -733,7 +903,7 @@ impl View {
     }
 
     /// Locks the camera side-on and orthographic (Profile) or unlocks it into the perspective home view (3D).
-    pub fn set_profile(&mut self, profile: bool) {
+    pub fn set_profile(&mut self, profile: bool, animate: bool) {
         self.profile = profile;
         let mut to = self.goal();
         if profile {
@@ -742,12 +912,12 @@ impl View {
         } else {
             to = home(to);
         }
-        self.animate(to);
+        self.animate(to, animate);
     }
 
     /// Advances the camera and exploded-view animations.
     pub fn tick(&mut self, now: Instant) {
-        self.camera_update(Message::Tick(now));
+        self.camera_update(Message::Tick(now), true);
     }
 
     /// Whether a camera or exploded-view animation is running (and so wants frame ticks).
@@ -757,6 +927,14 @@ impl View {
 
     /// The key hints on show: what a direct edit asked for, else what the drag or selection in progress allows.
     pub(crate) fn hints(&self, ctx: &Ctx) -> Vec<(&'static str, &'static str)> {
+        // A part held with no button down is put down by a click: that is all the hint says, whatever started the carry.
+        if ctx.click_to_place && ctx.drag.in_hand() {
+            let mut hints = vec![("", "Click to place · Esc to put back")];
+            if ctx.drag.axial.as_ref().is_some_and(|d| d.surface.is_some()) || ctx.drag.radial.is_some() {
+                hints.push(("X", "copies"));
+            }
+            return hints;
+        }
         if !self.hint.is_empty() {
             return self.hint.clone();
         }
@@ -860,6 +1038,7 @@ impl View {
                     cursor: ctx.cursor,
                     margin: ctx.shown().now.map(|b| b.margin_cal).filter(|_| ctx.drag.landing().is_some()),
                     units: ctx.units,
+                    click: ctx.click_to_place,
                 })
                 .width(Fill)
                 .height(Fill)
@@ -901,6 +1080,7 @@ impl View {
                     inside: self.inside,
                     profile: self.profile,
                     units: ctx.units,
+                    drive_modifiers: ctx.env.drive_modifiers,
                     pod: selected.and_then(|id| pods::PodView::of_part(rocket, id, &camera)),
                     balance: ctx.shown().now.map(|b| markers::BalanceMarks {
                         cg: b.cg,
@@ -909,6 +1089,7 @@ impl View {
                         show: (ctx.show_cg, ctx.show_cp),
                         staged: ctx.physics.stages().len() > 1,
                     }),
+                    hand: manipulate::Hand { click: ctx.click_to_place, lifted: ctx.drag.lifted },
                 })
                 .width(Fill)
                 .height(Fill)
@@ -933,6 +1114,7 @@ impl View {
             explode: self.explode,
             cut: self.cut,
             fade_from,
+            capture: self.capture.clone(),
         })
         .width(Fill)
         .height(Fill)
@@ -964,6 +1146,10 @@ impl View {
                 cut: self.cut,
                 units: ctx.units,
                 interactive: !ctx.drag.active(),
+                dragging: match ctx.selection {
+                    Selection::Separation(stage) if ctx.doc.dragging() => Some(stage),
+                    _ => None,
+                },
                 hit,
             })
             .width(Fill)
@@ -1038,12 +1224,12 @@ impl View {
         }
     }
 
-    fn animate(&mut self, to: Camera) {
-        self.animate_for(to, SNAP_TIME);
+    fn animate(&mut self, to: Camera, animate: bool) {
+        self.animate_for(to, SNAP_TIME, animate);
     }
 
-    fn animate_for(&mut self, to: Camera, duration: Duration) {
-        if ANIMATE.load(std::sync::atomic::Ordering::Relaxed) {
+    fn animate_for(&mut self, to: Camera, duration: Duration, animate: bool) {
+        if animate {
             self.anim = Some(Anim { from: self.camera, to, start: Instant::now(), duration });
         } else {
             self.anim = None;
@@ -1083,7 +1269,7 @@ mod tests {
 
     /// Runs `message` and lands any animation at its goal.
     fn run(view: &mut View, message: Message) {
-        view.camera_update(message);
+        view.camera_update(message, true);
         view.settle();
     }
 
@@ -1158,10 +1344,10 @@ mod phase_tests {
     fn the_phase_recomputes_for_the_remaining_stack_only() {
         let rocket = two_stage();
         let mut physics = crate::app::physics::Physics::new();
-        physics.sync(&rocket, 1);
+        physics.sync(&rocket, 1, crate::units::UnitSystem::MM_G_S);
         let full = *physics.balance().expect("balance");
         physics.set_phase(Phase::UpperFrom(2));
-        physics.sync(&rocket, 1);
+        physics.sync(&rocket, 1, crate::units::UnitSystem::MM_G_S);
         let upper = *physics.balance().expect("balance");
         let joint = physics.stages()[0].fore_station;
         assert!(upper.mass < full.mass && upper.length < full.length, "only the sustainer remains");

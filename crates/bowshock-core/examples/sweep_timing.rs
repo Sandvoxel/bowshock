@@ -12,7 +12,17 @@ fn main() {
         nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
         aft: vec![AftSpec::Tube { length: 0.60 }, AftSpec::Transition { length: 0.10, aft_diameter: 0.08 }],
     };
-    let fins = FinSpec { count: 4, root_chord: 0.12, tip_chord: 0.06, span: 0.08, sweep: 0.06, thickness: 0.003, roughness: 0.0, root_te_to_base: 0.0, profile: FinProfile::Rounded };
+    let fins = FinSpec {
+        count: 4,
+        root_chord: 0.12,
+        tip_chord: 0.06,
+        span: 0.08,
+        sweep: 0.06,
+        thickness: 0.003,
+        roughness: 0.0,
+        root_te_to_base: 0.0,
+        profile: FinProfile::Rounded,
+    };
     let (backend, machs): (Backend, Vec<f64>) =
         if cpu { (Backend::Cpu, vec![0.5, 1.0, 2.0]) } else { (Backend::Auto, (3..=25).map(|k| f64::from(k) / 10.0).collect()) };
     let analysis = Analysis::new(&spec)

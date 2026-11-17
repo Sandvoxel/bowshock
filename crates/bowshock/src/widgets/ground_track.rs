@@ -10,8 +10,6 @@
 //! Msg::Ground(GroundMessage::Select(i)) => self.select_flight(i),
 //! ```
 
-#![allow(dead_code)] // The screens that compose these widgets arrive after the widgets do.
-
 use crate::units::{Quantity, Unit, UnitSystem};
 
 use std::time::{Duration, Instant};
@@ -120,11 +118,20 @@ pub fn ring_spacing(px_per_m: f32, min_px: f32) -> f64 {
     [1.0, 2.0, 5.0, 10.0].into_iter().map(|m| m * mag).find(|s| *s >= want).unwrap_or(10.0 * mag)
 }
 
+/// What makes a track a dropped stage's flight (a booster after its separation) and not a whole flight's: it is drawn dashed, its
+/// landing is a hollow square and its landing label starts with `name`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Dropped {
+    /// The stage's name (`Booster`).
+    pub name: String,
+    /// The index, in [`GroundTrack::tracks`], of the whole flight's track it was dropped from: a click on its landing selects that
+    /// flight.
+    pub of: usize,
+}
+
 /// One flight's path.
 #[derive(Debug, Clone)]
 pub struct Track {
-    /// Flight name.
-    pub name: String,
     /// Colour role: `Ink` for a lone flight (its apogee ring then draws in `accent`), `Series(1..4)` when compared.
     pub color: SeriesColor,
     /// Samples in time order; the last is the landing.
@@ -135,13 +142,15 @@ pub struct Track {
     pub scatter: Vec<(f64, f64)>,
     /// Dashed 95 % ellipse around the scatter.
     pub ellipse: Option<Ellipse>,
+    /// `Some` for the track of a dropped stage (see [`Dropped`]).
+    pub dropped: Option<Dropped>,
 }
 
 impl Track {
     /// A track with no dispersion.
-    pub fn new(name: impl Into<String>, color: SeriesColor, points: Vec<TrackPoint>) -> Self {
+    pub fn new(color: SeriesColor, points: Vec<TrackPoint>) -> Self {
         let apogee = points.iter().enumerate().max_by(|a, b| a.1.alt.total_cmp(&b.1.alt)).map(|(i, _)| i);
-        Track { name: name.into(), color, points, apogee, scatter: Vec::new(), ellipse: None }
+        Track { color, points, apogee, scatter: Vec::new(), ellipse: None, dropped: None }
     }
 
     /// Adds dispersion landings and their 95 % ellipse.
@@ -149,6 +158,12 @@ impl Track {
         self.ellipse = confidence_ellipse(&scatter);
         self.scatter = scatter;
         self
+    }
+
+    /// The track of the stage `name` dropped from the flight whose track is `of`: `points` from its separation to its landing, no
+    /// apogee ring.
+    pub fn dropped(color: SeriesColor, points: Vec<TrackPoint>, name: impl Into<String>, of: usize) -> Self {
+        Track { color, points, apogee: None, scatter: Vec::new(), ellipse: None, dropped: Some(Dropped { name: name.into(), of }) }
     }
 
     /// The landing sample.
@@ -523,7 +538,9 @@ impl canvas::Program<GroundMessage> for GroundTrackView<'_> {
                     last = Some(at);
                 }
             });
-            f.stroke(&path, Stroke::default().with_color(c).with_width(2.0).with_line_cap(LineCap::Round));
+            let stroke = Stroke::default().with_color(c).with_width(2.0).with_line_cap(LineCap::Round);
+            let stroke = if track.dropped.is_some() { Stroke { line_dash: LineDash { segments: &[6.0, 4.0], offset: 0 }, ..stroke } } else { stroke };
+            f.stroke(&path, stroke);
         }
         // Landing labels: each on the first free spot around its marker (see `place_landing_labels`), joined to the marker by a
         // leader line when it had to move away.
@@ -550,7 +567,12 @@ impl canvas::Program<GroundMessage> for GroundTrackView<'_> {
             .iter()
             .filter_map(|track| {
                 let l = track.landing()?;
-                Some((xf.to_screen(l.east, l.north), landing_label(l.east, l.north, &self.data.dist()), colour(track.color)))
+                let label = landing_label(l.east, l.north, &self.data.dist());
+                let label = match &track.dropped {
+                    Some(d) => format!("{} {label}", d.name),
+                    None => label,
+                };
+                Some((xf.to_screen(l.east, l.north), label, colour(track.color)))
             })
             .collect();
         let items: Vec<(Point, f32)> = landings.iter().map(|(at, label, _)| (*at, text_w(label, TEXT_LABEL))).collect();
@@ -575,11 +597,15 @@ impl canvas::Program<GroundMessage> for GroundTrackView<'_> {
                 f.fill(&Path::circle(at, 4.0), ring);
                 f.fill(&Path::circle(at, 2.0), t.bg_200);
             }
-            // Landing: a filled square with a surface ring, and the label.
+            // Landing: a filled square with a surface ring, and the label; a dropped stage's is hollow.
             if let Some(l) = track.landing() {
                 let at = xf.to_screen(l.east, l.north);
                 f.fill_rectangle(Point::new(at.x - 5.5, at.y - 5.5), Size::new(11.0, 11.0), t.bg_200);
-                f.fill_rectangle(Point::new(at.x - 3.5, at.y - 3.5), Size::new(7.0, 7.0), c);
+                if track.dropped.is_some() {
+                    f.stroke_rectangle(Point::new(at.x - 3.5, at.y - 3.5), Size::new(7.0, 7.0), Stroke::default().with_color(c).with_width(2.0));
+                } else {
+                    f.fill_rectangle(Point::new(at.x - 3.5, at.y - 3.5), Size::new(7.0, 7.0), c);
+                }
             }
         }
 
@@ -843,11 +869,7 @@ mod tests {
     }
 
     fn track() -> Track {
-        Track::new(
-            "Nominal",
-            SeriesColor::Series(1),
-            vec![pt(0.0, 0.0, 0.0, 0.0), pt(10.0, -20.0, -8.0, 600.0), pt(20.0, 40.0, 16.0, 300.0), pt(30.0, 96.0, 38.0, 0.0)],
-        )
+        Track::new(SeriesColor::Series(1), vec![pt(0.0, 0.0, 0.0, 0.0), pt(10.0, -20.0, -8.0, 600.0), pt(20.0, 40.0, 16.0, 300.0), pt(30.0, 96.0, 38.0, 0.0)])
     }
 
     #[test]

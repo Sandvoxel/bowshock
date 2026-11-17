@@ -286,7 +286,14 @@ mod tests {
 
     fn lift(key: u64) -> CfdLiftTable {
         let p = |mach, alpha_deg| CfdLiftPoint { mach, alpha_deg, cn: 0.2, x_cp: 1.0, quality: CfdQuality::Converged };
-        CfdLiftTable { key, solved_at: 1_700_000_100, solve_seconds: 90.0, backend: "GPU (Luma)".into(), points: vec![p(0.5, 2.0), p(0.5, 6.0)], notes: Vec::new() }
+        CfdLiftTable {
+            key,
+            solved_at: 1_700_000_100,
+            solve_seconds: 90.0,
+            backend: "GPU (Luma)".into(),
+            points: vec![p(0.5, 2.0), p(0.5, 6.0)],
+            notes: Vec::new(),
+        }
     }
 
     #[test]

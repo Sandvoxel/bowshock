@@ -302,6 +302,7 @@ impl Rocket {
             count: 1,
             name: Some(free_name(group, index)),
             mass_override: group.mass_override.map(|m| m / count),
+            cd_override: group.cd_override.map(|c| c / count),
             cg_override: group.cg_override,
             overrides: Vec::new(),
             instance_angles: None,
@@ -424,6 +425,7 @@ impl Rocket {
         if group.count < 2 || index >= usize::from(group.count) {
             return Err(RadialError::NoSuchRadial);
         }
+        self.release_touching(&[id]);
         let free = self.free_copy(&group, index);
         let free_id = free.id;
         let angles = group.angles();
@@ -436,6 +438,7 @@ impl Rocket {
         rest.set_angles(left);
         debug_assert_eq!(rest.angle, angles[first_left]);
         rest.mass_override = group.mass_override.map(|m| m * (count - 1.0) / count);
+        rest.cd_override = group.cd_override.map(|c| c * (count - 1.0) / count);
         // The copies keep the letters they had: a group that lost `A` reads `B, C`.
         let mut letters: Vec<u8> = (0..usize::from(group.count)).map(|i| group.copy_index(i) as u8).collect();
         letters.remove(index);
@@ -465,6 +468,7 @@ impl Rocket {
         if group.count < 2 {
             return Ok(vec![id]);
         }
+        self.release_touching(&[id]);
         let position = self.radials.iter().position(|r| r.id == id).ok_or(RadialError::NoSuchRadial)?;
         let mut ids = vec![id];
         let mut copies = Vec::new();
@@ -485,6 +489,7 @@ impl Rocket {
         first.letters.clear();
         first.name = Some(free_name(&group, 0));
         first.mass_override = group.mass_override.map(|m| m / count);
+        first.cd_override = group.cd_override.map(|c| c / count);
         for (offset, copy) in copies.into_iter().enumerate() {
             self.radials.insert(position + 1 + offset, copy);
         }
@@ -535,10 +540,11 @@ impl Rocket {
         if g.count >= MAX_COUNT {
             return Err(RadialError::BadCount);
         }
+        self.release_touching(&[part, group]);
         let count = g.count + 1;
-        let per_copy = match winner {
-            Winner::Group => g.mass_override.map(|m| m / f64::from(g.count)),
-            Winner::Part => p.mass_override,
+        let (per_copy, per_copy_cd) = match winner {
+            Winner::Group => (g.mass_override.map(|m| m / f64::from(g.count)), g.cd_override.map(|c| c / f64::from(g.count))),
+            Winner::Part => (p.mass_override, p.cd_override),
         };
         let moved = match winner {
             Winner::Part => Some(self.clamp_offset(p.parent, p.offset, &p.kind).unwrap_or(0.0)),
@@ -553,6 +559,7 @@ impl Rocket {
         target.count = count;
         target.letters.clear();
         target.mass_override = per_copy.map(|m| m * f64::from(count));
+        target.cd_override = per_copy_cd.map(|c| c * f64::from(count));
         if winner == Winner::Part {
             let own = p.effective(0);
             target.kind = own.kind;
@@ -578,7 +585,7 @@ mod tests {
 
     fn finned(count: u8) -> (Rocket, PartId) {
         let mut r = Rocket::default();
-        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762 }).unwrap();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762, tip_radius: 0.0 }).unwrap();
         let tube = r.insert(1, PartKind::BodyTube { length: 0.9, diameter: 0.0762 }).unwrap();
         let fins = r
             .attach_radial(tube, 0.78, 0.0, count, RadialKind::FinSet { root_chord: 0.12, tip_chord: 0.05, span: 0.0762, sweep: 0.06, thickness: 0.003 })

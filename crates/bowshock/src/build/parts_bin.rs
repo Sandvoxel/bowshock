@@ -33,10 +33,9 @@ use rows::{RowState, RowView};
 
 use crate::app::ui::{label, len, len_unit, radial_size_label, size_label};
 use crate::app::{self, drag, Ctx};
-use crate::simulate::format::{num, with_unit};
 use crate::theme::{self, MONO};
 use crate::tokens::{RAIL_W, SPACE_1, SPACE_2, TEXT_BODY, TEXT_LABEL};
-use crate::units::{Quantity, UnitSystem};
+use crate::units::{num_scaled, with_unit_scaled, Quantity, UnitSystem};
 use crate::widgets::icons::{rail_button, RailIcon};
 use crate::widgets::segmented::{segmented_dense, Dense};
 
@@ -54,6 +53,11 @@ pub const SYMMETRY: [(u8, &str); 6] = [(1, "1"), (2, "2"), (3, "3"), (4, "4"), (
 
 /// Angle snap choices for radial parts, in degrees.
 pub const ANGLE_SNAP: [(u8, &str); 3] = [(0, "off"), (15, "15°"), (45, "45°")];
+
+/// The cue over the bin for a part picked up off the rocket (letting go deletes it), and for one that came from the bin (letting go
+/// puts it back).
+pub const DROP_TO_DELETE: &str = "Drop to delete";
+pub const DROP_TO_PUT_BACK: &str = "Drop to put back";
 
 /// The rail's categories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +126,8 @@ pub enum Message {
     SizeToSelection(bool),
     /// Left button pressed on a row.
     RowPress(RowId),
+    /// Left button pressed on the bin while a part is held (click to place; the bin only reports it then).
+    BinPress,
     /// The cursor entered or left a row.
     RowHover(Option<RowId>),
     /// The cursor entered or left the bin (the rail keys `1`..`7` only work while it is over).
@@ -164,8 +170,9 @@ pub struct State {
 }
 
 impl State {
-    /// The bin on the airframe list, with the built-in and the user's presets loaded.
-    pub fn new() -> Self {
+    /// The bin on the airframe list, with the built-in presets and the user's from `env.presets_dir` loaded.
+    pub fn from_env(env: &crate::app::env::Env) -> Self {
+        let presets_dir = env.presets_dir.as_deref();
         State {
             category: Category::Airframe,
             search: String::new(),
@@ -175,7 +182,7 @@ impl State {
             dragging: None,
             hovered: false,
             last_click: None,
-            presets: presets::load_all(),
+            presets: presets::load_all(presets_dir),
         }
     }
 
@@ -283,8 +290,8 @@ impl State {
         }
     }
 
-    fn reload_presets(&mut self) {
-        self.presets = presets::load_all();
+    fn reload_presets(&mut self, ctx: &Ctx) {
+        self.presets = presets::load_all(ctx.env.presets_dir.as_deref());
     }
 
     /// Handles one of the bin's messages.
@@ -299,13 +306,27 @@ impl State {
                     recount_selection(ctx, n);
                 }
             }
-            Message::AngleSnap(degrees) => ctx.drag.angle_snap = degrees,
+            Message::AngleSnap(degrees) => {
+                ctx.drag.angle_snap = degrees;
+                if degrees != 0 && !ctx.drag.active() {
+                    snap_selection(ctx, degrees);
+                }
+            }
             Message::Search(s) => self.search = s,
             Message::FocusSearch => return iced::widget::operation::focus(SEARCH_ID),
             Message::SizeToSelection(on) => self.size_to_selection = on,
+            Message::RowPress(_) | Message::BinPress if ctx.click_to_place && ctx.drag.in_hand() => {
+                // Click to place: a click on the bin with a part in hand puts it back (a part from the bin) or deletes it (one
+                // picked up off the rocket). The row is not pressed.
+                drag::end_carry(ctx, drag::Gesture::Press, drag::Over::Bin);
+            }
             Message::RowPress(row) => self.press = Some(Press { row, origin: ctx.cursor }),
             Message::RowHover(row) => self.row_hover = row,
-            Message::Hover(on) => self.hovered = on,
+            Message::Hover(on) => {
+                self.hovered = on;
+                ctx.over_bin = on;
+            }
+            Message::BinPress => {}
             Message::CursorMoved => {
                 let at = ctx.cursor;
                 let started = self.press.as_ref().filter(|p| matches!((p.origin, at), (Some(o), Some(at)) if o.distance(at) > DRAG_SLOP)).map(|p| p.row);
@@ -315,11 +336,21 @@ impl State {
                 }
             }
             Message::Released => {
-                self.dragging = None;
+                // A part in hand (click to place) keeps its row marked while it is carried.
+                if !(ctx.click_to_place && ctx.drag.active()) {
+                    self.dragging = None;
+                }
                 if let Some(press) = self.press.take() {
                     let Some(item) = self.item(press.row, ctx).filter(|i| self.unavailable(i, ctx).is_none()) else {
                         return Task::none();
                     };
+                    // Click to place: a click on a row that can be carried picks the part up, as a drag out of the row does.
+                    if ctx.click_to_place && matches!(item, Item::Axial(..) | Item::Radial(..) | Item::Internal(..)) {
+                        if !ctx.drag.active() {
+                            self.start_drag(press.row, ctx);
+                        }
+                        return Task::none();
+                    }
                     let now = Instant::now();
                     if self.last_click.is_some_and(|(row, at)| row == press.row && now.duration_since(at) < DOUBLE_CLICK) {
                         // The first click already added the part: the second only moves on to editing it.
@@ -339,10 +370,10 @@ impl State {
             Message::SavePreset => {
                 let captured = ctx.selection.part().and_then(|id| presets::Preset::capture(ctx.doc.rocket(), id));
                 match captured {
-                    Some(preset) => match presets::save(&preset) {
+                    Some(preset) => match presets::save(&preset, ctx.env.presets_dir.as_deref()) {
                         Ok(_) => {
                             ctx.notify(format!("Saved preset {}", preset.name));
-                            self.reload_presets();
+                            self.reload_presets(ctx);
                         }
                         Err(e) => ctx.notify(format!("Could not save the preset: {e}")),
                     },
@@ -352,7 +383,7 @@ impl State {
             Message::DeletePreset(i) => {
                 if let Some(file) = self.presets.get(i).and_then(|p| p.file.clone()) {
                     let _ = std::fs::remove_file(file);
-                    self.reload_presets();
+                    self.reload_presets(ctx);
                 }
             }
         }
@@ -401,9 +432,9 @@ impl State {
                 current = items::motor_mount(rocket, ctx.selection)
                     .and_then(|mount| rocket.active_configuration().slot(mount.id).and_then(|s| s.motor.as_ref()))
                     .is_some_and(|r| bowshock_sim::from_model::find_motor_index(ctx.physics.motors(), r) == Some(*i));
-                let whole = |metres: f64| num(metres, Quantity::Length, ctx.units, 0).0;
+                let whole = |metres: f64| num_scaled(metres, Quantity::Length, ctx.units, 0).0;
                 let (dia, length) = (whole(m.diameter), whole(m.length));
-                let impulse = with_unit(m.total_impulse(), Quantity::Impulse, ctx.units, 0);
+                let impulse = with_unit_scaled(m.total_impulse(), Quantity::Impulse, ctx.units, 0);
                 (format!("Ø{dia} × {length} · {impulse}"), rows::motor_outline(), None)
             }
             Item::Preset(i) => {
@@ -519,7 +550,59 @@ impl State {
         let rule = || container(Space::new()).width(Fill).height(1).style(theme::hairline);
         let body = column![header, rule(), controls, rule(), list, rule(), symmetry_footer(ctx)].width(Fill).height(Fill);
         let content = container(row![rail, body]).height(Fill).style(theme::panel);
-        mouse_area(content).on_enter(Message::Hover(true)).on_exit(Message::Hover(false)).boxed()
+        let mut area = mouse_area(content).on_enter(Message::Hover(true)).on_exit(Message::Hover(false));
+        // Click to place: with a part in hand, a press on the bin (that no row or button took) puts it back or deletes it.
+        if ctx.click_to_place && ctx.drag.in_hand() {
+            area = area.on_press(Message::BinPress);
+        }
+        // Always a stack, the cue or nothing over the bin, so the bin's hover state survives the cue coming and going.
+        stack![area, self.drop_cue(ctx).unwrap_or_else(|| Space::new().boxed())].boxed()
+    }
+
+    /// What a carried part over the bin is told: `Drop to delete` for one picked up off the rocket (letting go deletes it) and
+    /// `Drop to put back` for one that came from the bin, with whether it is the deleting one. `None` while nothing is carried or the
+    /// cursor is elsewhere.
+    pub(crate) fn cue_words(&self, ctx: &Ctx) -> Option<(&'static str, bool)> {
+        if !self.hovered || !ctx.drag.in_hand() {
+            return None;
+        }
+        let picked = ctx.drag.axial.as_ref().is_some_and(|d| d.origin.is_some())
+            || ctx.drag.radial.as_ref().is_some_and(|d| d.origin.is_some())
+            || ctx.drag.internal.as_ref().is_some_and(|d| d.origin.is_some())
+            || ctx.drag.lifted.is_some();
+        Some((if picked { DROP_TO_DELETE } else { DROP_TO_PUT_BACK }, picked))
+    }
+
+    /// While a carried part is over the bin: what letting go (or clicking) there does. The bin's rows are dimmed to about a third so
+    /// they read as inactive, a part picked up off the rocket (deleted) also washes the bin in the `err` soft ground, and the words
+    /// sit on their own opaque plate centred in the bin: `err` on a surface ground with an `err` frame for the delete, neutral
+    /// colours for a part from the bin (put back).
+    fn drop_cue<'a>(&self, ctx: &Ctx) -> Option<Element<'a, Message>> {
+        let (words, delete) = self.cue_words(ctx)?;
+        let fill = |alpha: f32, err: bool| {
+            container(Space::new()).width(Fill).height(Fill).style(move |theme: &Theme| {
+                let t = theme::tokens(theme);
+                let ground = if err { t.err.scale_alpha(alpha) } else { t.bg_200.scale_alpha(alpha) };
+                container::Style { background: Some(Background::Color(ground)), ..container::Style::default() }
+            })
+        };
+        let words_style = move |theme: &Theme| {
+            let t = theme::tokens(theme);
+            text::Style { color: Some(if delete { t.err } else { t.ink }), ..text::Style::default() }
+        };
+        let plate = container(text(words).font(MONO).size(TEXT_BODY).style(words_style)).padding([SPACE_2, theme::PAD_PANEL]).style(move |theme: &Theme| {
+            let t = theme::tokens(theme);
+            container::Style {
+                background: Some(Background::Color(t.bg_300)),
+                border: theme::frame(if delete { t.err } else { t.line_200 }),
+                ..container::Style::default()
+            }
+        });
+        let mut layers = stack![fill(0.65, false).boxed()];
+        if delete {
+            layers = layers.push(fill(0.22, true).boxed());
+        }
+        Some(layers.push(container(plate).center(Fill).boxed()).boxed())
     }
 }
 
@@ -566,7 +649,27 @@ fn recount_selection(ctx: &mut Ctx, count: u8) {
     ctx.doc.edit(label, |r| r.set_radial(id, kind, count));
 }
 
-/// The footer pinned at the bin's foot: the symmetry count (with the `X` key that cycles it) and the angle snap.
+/// Rounds the selected radial group's start angle (if one is selected) to a multiple of `degrees`, as one undo step. The copies
+/// of an unevenly spaced group turn with it.
+fn snap_selection(ctx: &mut Ctx, degrees: u8) {
+    let Some(id) = ctx.selection.part() else { return };
+    let Some(radial) = ctx.doc.rocket().radial(id) else { return };
+    let (parent, offset) = (radial.parent, radial.offset);
+    let start = radial.angles().first().copied().unwrap_or(radial.angle);
+    // The same rounding the viewport's radial drop applies (see `pick::surface_target`).
+    let step = f64::from(degrees).to_radians();
+    let snapped = ((start / step).round() * step).rem_euclid(std::f64::consts::TAU);
+    let off = (snapped - start).rem_euclid(std::f64::consts::TAU);
+    if off < 1e-9 || std::f64::consts::TAU - off < 1e-9 {
+        return;
+    }
+    ctx.doc.edit("Snap angle", |r| {
+        let _ = r.move_radial(id, parent, offset, snapped);
+    });
+}
+
+/// The footer pinned at the bin's foot: the symmetry count (with the `X` key that cycles it) and the angle snap. With a radial
+/// group selected and nothing carried, a count re-counts it and a snap step rounds its start angle, each as one undo step.
 fn symmetry_footer<'a>(ctx: &'a Ctx) -> Element<'a, Message> {
     let key = button(container(text("X").font(MONO).size(TEXT_LABEL)).padding([0.0, 4.0]).style(theme::keycap))
         .padding(0)
@@ -603,7 +706,7 @@ fn internal_size(kind: &InternalKind, inner: Option<f64>, u: UnitSystem) -> Stri
         InternalKind::Parachute { diameter, line_count, .. } => format!("Ø{} · {line_count} lines", len(diameter, u)),
         InternalKind::Streamer { length, width, .. } => format!("{} × {}", len(width, u), len(length, u)),
         InternalKind::ShockCord { length, .. } => format!("{} long", len(length, u)),
-        InternalKind::MassComponent { mass, length, .. } => format!("{} · {}", with_unit(mass, Quantity::Mass, u, 0), len(length, u)),
+        InternalKind::MassComponent { mass, length, .. } => format!("{} · {}", with_unit_scaled(mass, Quantity::Mass, u, 0), len(length, u)),
     }
 }
 

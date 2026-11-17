@@ -16,6 +16,12 @@
 //! 29 000 iterations over 10 points). The fraction is work done over the work done plus the work expected, and never goes back.
 //! The time left is the work left over the measured throughput (iterations per second over the finished units, which includes the
 //! grid and kernel set-up of every point), and is not given before [`MIN_DONE_FOR_ETA`] units are finished.
+//!
+//! # Several machines
+//!
+//! A solve runs on one or more *machines* (this computer, remote GPUs), each working on its own unit; every report carries the
+//! index of its machine. The tracker keeps each machine's state (connecting, ready on a device, skipped, dropped) and the unit it
+//! has in flight, and the time left uses the combined throughput: the sum over the machines of their own iterations per second.
 
 use bowshock_model::{CfdLiftPoint, CfdPoint, CfdQuality};
 
@@ -101,6 +107,8 @@ impl Unit {
 /// A report from the running unit (throttled on the worker).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Iteration {
+    /// The machine that reports (its index in [`Tracker::machines`]).
+    pub machine: usize,
     /// Seconds since the solve began.
     pub at: f64,
     /// Mach number of the running unit.
@@ -124,6 +132,8 @@ pub struct Iteration {
 /// A unit that ended.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PointDone {
+    /// The machine that solved it.
+    pub machine: usize,
     /// Seconds since the solve began.
     pub at: f64,
     /// Mach number.
@@ -147,6 +157,10 @@ pub struct PointDone {
 /// A finished unit.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Done {
+    /// The machine that solved it.
+    pub machine: usize,
+    /// It ran on the CPU.
+    pub cpu: bool,
     /// How it ended.
     pub outcome: Outcome,
     /// Cd (drag table) or CN (3D solve) of the point; `None` for a fallback.
@@ -171,6 +185,8 @@ pub enum Slot {
     /// Reporting; `ended` is set once the next unit began (the 3D solve hands its results over per Mach number, so a unit can
     /// have ended without its result being in).
     Running {
+        /// The machine running it.
+        machine: usize,
         /// Seconds since the solve began when the unit began.
         started: f64,
         /// Iterations reported so far.
@@ -185,6 +201,8 @@ pub enum Slot {
 /// The unit in flight: where its iteration is, and the monitor's trace.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Live {
+    /// The machine it runs on.
+    pub machine: usize,
     /// Index of the unit.
     pub unit: usize,
     /// Iterations done.
@@ -203,29 +221,82 @@ pub struct Live {
     pub history: Vec<(usize, f64)>,
 }
 
+/// A machine a solve runs on, as the screen is told of it first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineInfo {
+    /// What the screen calls it (`This computer`, the machine's label).
+    pub name: String,
+    /// It is another computer over SSH, not this one.
+    pub remote: bool,
+}
+
+/// Where a machine is in the solve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MachineState {
+    /// Connecting or setting up (a remote's worker is built on its first use); the step, empty until one is known.
+    Connecting(String),
+    /// Ready, on this device (the GPU's name, `CPU`, or `<gpu> on <host>`).
+    Ready(String),
+    /// Never took part: it could not connect. The reason.
+    Skipped(String),
+    /// Took part and was lost: its connection failed mid-solve. The reason; its unit went back to the others.
+    Dropped(String),
+}
+
+/// A machine of the solve and what it has done.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MachineRow {
+    /// What the screen calls it.
+    pub name: String,
+    /// It is another computer over SSH.
+    pub remote: bool,
+    /// Where it is.
+    pub state: MachineState,
+    /// The device it was ready on, kept after it left.
+    device: Option<String>,
+    /// Units it finished.
+    pub done: usize,
+    /// Of those, on its CPU.
+    pub cpu_done: usize,
+    cursor: f64,
+}
+
+impl MachineRow {
+    fn new(name: impl Into<String>, remote: bool) -> MachineRow {
+        MachineRow { name: name.into(), remote, state: MachineState::Connecting(String::new()), device: None, done: 0, cpu_done: 0, cursor: 0.0 }
+    }
+
+    /// Whether it can still take work (not skipped, not dropped).
+    pub fn alive(&self) -> bool {
+        !matches!(self.state, MachineState::Skipped(_) | MachineState::Dropped(_))
+    }
+
+    /// The device it was ready on, once known.
+    pub fn device(&self) -> Option<&str> {
+        self.device.as_deref()
+    }
+}
+
 /// The state of a solve, built from its events.
 #[derive(Debug, Clone)]
 pub struct Tracker {
     kind: Kind,
     units: Vec<Unit>,
     slots: Vec<Slot>,
-    live: Option<Live>,
-    /// Where the solve runs: the GPU's name, or `CPU`.
-    pub device: String,
+    /// The units in flight, one per busy machine.
+    live: Vec<Live>,
+    machines: Vec<MachineRow>,
     /// Why the GPU was not used, when it was not.
     pub fallback: Option<String>,
-    cursor: f64,
     clock: f64,
     fraction: f64,
-    cpu_units: usize,
-    gpu_units: usize,
 }
 
 impl Tracker {
-    /// A solve of `units` (in the order they run) on `device`.
-    pub fn new(kind: Kind, units: Vec<Unit>, device: impl Into<String>) -> Tracker {
+    /// A solve of `units` (in the order they are asked for); its machines are named by [`Tracker::set_machines`].
+    pub fn new(kind: Kind, units: Vec<Unit>) -> Tracker {
         let slots = vec![Slot::Pending; units.len()];
-        Tracker { kind, units, slots, live: None, device: device.into(), fallback: None, cursor: 0.0, clock: 0.0, fraction: 0.0, cpu_units: 0, gpu_units: 0 }
+        Tracker { kind, units, slots, live: Vec::new(), machines: Vec::new(), fallback: None, clock: 0.0, fraction: 0.0 }
     }
 
     /// The units of a drag table at `nodes`.
@@ -253,9 +324,58 @@ impl Tracker {
         &self.slots[i]
     }
 
-    /// The unit in flight and its state.
-    pub fn live(&self) -> Option<(&Unit, &Live)> {
-        self.live.as_ref().map(|l| (&self.units[l.unit], l))
+    /// The units in flight (one per busy machine) and their state.
+    pub fn lives(&self) -> impl Iterator<Item = (&Unit, &Live)> {
+        self.live.iter().map(|l| (&self.units[l.unit], l))
+    }
+
+    /// The machines of the solve.
+    pub fn machines(&self) -> &[MachineRow] {
+        &self.machines
+    }
+
+    /// Names the machines of the solve (sent first).
+    pub fn set_machines(&mut self, infos: &[MachineInfo]) {
+        self.machines = infos.iter().map(|i| MachineRow::new(i.name.clone(), i.remote)).collect();
+    }
+
+    fn machine_mut(&mut self, i: usize) -> &mut MachineRow {
+        while self.machines.len() <= i {
+            self.machines.push(MachineRow::new("This computer", false));
+        }
+        &mut self.machines[i]
+    }
+
+    /// Folds in a change of a machine's state at `at` seconds.
+    pub fn on_machine(&mut self, index: usize, at: f64, state: MachineState) {
+        self.clock = self.clock.max(at);
+        let ready = matches!(state, MachineState::Ready(_));
+        let row = self.machine_mut(index);
+        if let MachineState::Ready(device) = &state {
+            row.device = Some(device.clone());
+        }
+        row.state = state;
+        if ready {
+            // its first unit starts now, not when the solve began (a remote's worker may have been built first)
+            row.cursor = row.cursor.max(at);
+        }
+        if !self.machines[index].alive() {
+            // what it had in flight went back to the others
+            self.live.retain(|l| l.machine != index);
+            for slot in &mut self.slots {
+                if matches!(slot, Slot::Running { machine, .. } if *machine == index) {
+                    *slot = Slot::Pending;
+                }
+            }
+        }
+    }
+
+    /// Where the solve runs, for the lines that name it: the devices of the machines that solved something, else of those that are
+    /// ready, joined; empty before one is.
+    pub fn device(&self) -> String {
+        let used: Vec<&MachineRow> = self.machines.iter().filter(|m| m.done > 0).collect();
+        let pool: Vec<&MachineRow> = if used.is_empty() { self.machines.iter().collect() } else { used };
+        pool.iter().filter_map(|m| m.device()).collect::<Vec<_>>().join(", ")
     }
 
     /// Units finished.
@@ -283,35 +403,46 @@ impl Tracker {
         self.units.iter().position(|u| u.is(mach, alpha_deg))
     }
 
-    /// Folds in a report from the running unit.
+    /// Folds in a report from the running unit of a machine.
     pub fn on_iteration(&mut self, it: &Iteration) {
         let Some(idx) = self.find(it.mach, it.alpha_deg) else { return };
         self.clock = self.clock.max(it.at);
-        if self.live.as_ref().is_some_and(|l| l.unit != idx) {
-            // The unit before this one is over (the 3D solve reports a Mach number's results only when all its angles are done).
-            let before = self.live.as_ref().map_or(idx, |l| l.unit);
+        let m = it.machine;
+        self.machine_mut(m);
+        if let Some(pos) = self.live.iter().position(|l| l.machine == m && l.unit != idx) {
+            // The unit before this one on the machine is over (the 3D solve reports a Mach number's results only when all its
+            // angles are done).
+            let before = self.live.remove(pos).unit;
             if let Slot::Running { ended, .. } = &mut self.slots[before] {
                 ended.get_or_insert(it.at);
             }
-            self.cursor = self.cursor.max(it.at);
-            self.live = None;
+            let row = &mut self.machines[m];
+            row.cursor = row.cursor.max(it.at);
         }
         if let Slot::Pending = self.slots[idx] {
-            self.slots[idx] = Slot::Running { started: self.cursor, iterations: 0, ended: None };
+            self.slots[idx] = Slot::Running { machine: m, started: self.machines[m].cursor, iterations: 0, ended: None };
         }
         if let Slot::Running { iterations, .. } = &mut self.slots[idx] {
             *iterations = it.iteration;
         }
-        let live = self.live.get_or_insert_with(|| Live {
-            unit: idx,
-            iteration: 0,
-            max_iterations: it.max_iterations,
-            residual_orders: 0.0,
-            monitor: f64::NAN,
-            spread: None,
-            tolerance: None,
-            history: Vec::new(),
-        });
+        let pos = match self.live.iter().position(|l| l.machine == m) {
+            Some(pos) => pos,
+            None => {
+                self.live.push(Live {
+                    machine: m,
+                    unit: idx,
+                    iteration: 0,
+                    max_iterations: it.max_iterations,
+                    residual_orders: 0.0,
+                    monitor: f64::NAN,
+                    spread: None,
+                    tolerance: None,
+                    history: Vec::new(),
+                });
+                self.live.len() - 1
+            }
+        };
+        let live = &mut self.live[pos];
         live.iteration = it.iteration;
         live.max_iterations = it.max_iterations;
         live.residual_orders = it.residual_orders;
@@ -332,9 +463,11 @@ impl Tracker {
     pub fn on_done(&mut self, d: &PointDone) {
         let Some(idx) = self.find(d.mach, d.alpha_deg) else { return };
         self.clock = self.clock.max(d.at);
+        let m = d.machine;
+        let cursor = self.machine_mut(m).cursor;
         let (started, ended) = match self.slots[idx] {
             Slot::Running { started, ended, .. } => (started, ended),
-            _ => (self.cursor, None),
+            _ => (cursor, None),
         };
         let seconds = (ended.unwrap_or(d.at) - started).max(0.0);
         let (value, cp) = match (&d.point, &d.lift) {
@@ -342,30 +475,32 @@ impl Tracker {
             (_, Some(l)) => (Some(l.cn), Some(l.x_cp)),
             _ => (None, None),
         };
-        self.slots[idx] = Slot::Done(Done { outcome: d.outcome, value, cp, iterations: d.iterations, seconds, point: d.point, lift: d.lift });
-        if self.live.as_ref().is_some_and(|l| l.unit == idx) {
-            self.live = None;
-        }
-        self.cursor = self.cursor.max(d.at);
+        self.slots[idx] =
+            Slot::Done(Done { machine: m, cpu: d.cpu, outcome: d.outcome, value, cp, iterations: d.iterations, seconds, point: d.point, lift: d.lift });
+        self.live.retain(|l| l.unit != idx);
+        let row = &mut self.machines[m];
+        row.cursor = row.cursor.max(d.at);
+        row.done += 1;
         if d.cpu {
-            self.cpu_units += 1;
-            "CPU".clone_into(&mut self.device);
+            row.cpu_done += 1;
+            row.device = Some("CPU".to_string());
+            if matches!(row.state, MachineState::Ready(_)) {
+                row.state = MachineState::Ready("CPU".to_string());
+            }
             self.fallback = d.fallback.clone().or_else(|| self.fallback.take());
-        } else {
-            self.gpu_units += 1;
         }
         self.refresh_fraction();
     }
 
     /// Marks the solve as complete.
     pub fn finish(&mut self) {
-        self.live = None;
+        self.live.clear();
         self.fraction = 1.0;
     }
 
     /// Marks the solve as stopped: nothing is in flight any more (its last report stays in the unit's slot).
     pub fn halt(&mut self) {
-        self.live = None;
+        self.live.clear();
     }
 
     /// Seconds since the solve began on the worker's clock, as of the latest event.
@@ -446,13 +581,27 @@ impl Tracker {
         self.fraction
     }
 
-    /// Solver iterations per second over the finished units, set-up included; `None` before one finished.
+    /// Solver iterations per second over the finished units, set-up included, for the whole solve: the sum over the machines that
+    /// can still work of their own rate (a machine with no finished unit adds nothing); `None` before one finished.
     pub fn throughput(&self) -> Option<f64> {
-        let (iters, seconds) = self.slots.iter().fold((0.0, 0.0), |(i, s), slot| match slot {
-            Slot::Done(d) => (i + d.iterations as f64, s + d.seconds),
-            _ => (i, s),
-        });
-        (seconds > 0.0 && iters > 0.0).then_some(iters / seconds)
+        let mut per: Vec<(f64, f64)> = vec![(0.0, 0.0); self.machines.len().max(1)];
+        for slot in &self.slots {
+            if let Slot::Done(d) = slot {
+                if per.len() <= d.machine {
+                    per.resize(d.machine + 1, (0.0, 0.0));
+                }
+                per[d.machine].0 += d.iterations as f64;
+                per[d.machine].1 += d.seconds;
+            }
+        }
+        let rate: f64 = per
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| self.machines.get(*i).is_none_or(MachineRow::alive))
+            .filter(|(_, (iters, seconds))| *seconds > 0.0 && *iters > 0.0)
+            .map(|(_, (iters, seconds))| iters / seconds)
+            .sum();
+        (rate > 0.0).then_some(rate)
     }
 
     /// Seconds left: the iterations still to do over the measured throughput. `None` ("estimating…") until
@@ -466,14 +615,33 @@ impl Tracker {
         Some(left / rate)
     }
 
-    /// The solved drag points so far, ascending in Mach (units run ascending).
-    pub fn points(&self) -> Vec<CfdPoint> {
-        self.slots.iter().filter_map(|s| if let Slot::Done(d) = s { d.point } else { None }).collect()
+    /// How many units from the first are all finished: the part of the range a stopped solve covers without a gap (machines that
+    /// share the work finish out of order).
+    pub fn done_prefix(&self) -> usize {
+        self.slots.iter().take_while(|s| matches!(s, Slot::Done(_))).count()
     }
 
-    /// Units that finished on the CPU and on the GPU.
-    pub fn units_by_device(&self) -> (usize, usize) {
-        (self.cpu_units, self.gpu_units)
+    /// For each machine that solved one of the first [`Tracker::done_prefix`] units: its index, how many of them, and how many of
+    /// those on its CPU.
+    pub fn prefix_machines(&self) -> Vec<(usize, usize, usize)> {
+        let mut out: Vec<(usize, usize, usize)> = Vec::new();
+        for slot in self.slots.iter().take_while(|s| matches!(s, Slot::Done(_))) {
+            let Slot::Done(d) = slot else { continue };
+            match out.iter_mut().find(|e| e.0 == d.machine) {
+                Some(e) => {
+                    e.1 += 1;
+                    e.2 += usize::from(d.cpu);
+                }
+                None => out.push((d.machine, 1, usize::from(d.cpu))),
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
+    /// The drag points of the first [`Tracker::done_prefix`] units.
+    pub fn prefix_points(&self) -> Vec<CfdPoint> {
+        self.slots.iter().take_while(|s| matches!(s, Slot::Done(_))).filter_map(|s| if let Slot::Done(d) = s { d.point } else { None }).collect()
     }
 
     /// The Mach numbers (with their angle) of the finished units that did not settle, in order.
@@ -495,7 +663,7 @@ impl Tracker {
             Kind::Drag => format!("{} Mach points", self.done_count()),
             Kind::Stability => format!("3D stability at {} Mach numbers", self.machs().len()),
         };
-        let head = format!("Solved {what} in {} on {}", duration_text(seconds), self.device);
+        let head = format!("Solved {what} in {} on {}", duration_text(seconds), self.device());
         let settled = self.done_count() - self.unsettled().len();
         let mut parts = vec![if settled == self.done_count() { "all converged".to_string() } else { format!("{settled} converged") }];
         for outcome in [Outcome::Stalled, Outcome::Fallback] {
@@ -567,12 +735,35 @@ pub fn thousands(n: usize) -> String {
 mod tests {
     use super::*;
 
+    fn on_test_gpu(kind: Kind, units: Vec<Unit>) -> Tracker {
+        let mut t = Tracker::new(kind, units);
+        t.set_machines(&[MachineInfo { name: "This computer".into(), remote: false }]);
+        t.on_machine(0, 0.0, MachineState::Ready("Test GPU".into()));
+        t
+    }
+
     fn tracker(nodes: &[f64]) -> Tracker {
-        Tracker::new(Kind::Drag, Tracker::drag_units(nodes), "Test GPU")
+        on_test_gpu(Kind::Drag, Tracker::drag_units(nodes))
+    }
+
+    /// The first unit in flight.
+    fn first_live(t: &Tracker) -> Option<(&Unit, &Live)> {
+        t.lives().next()
     }
 
     fn report(at: f64, mach: f64, iteration: usize, monitor: f64) -> Iteration {
-        Iteration { at, mach, alpha_deg: None, iteration, max_iterations: 80_000, residual_orders: 2.0, monitor, spread: Some(0.01), tolerance: Some(0.002) }
+        Iteration {
+            machine: 0,
+            at,
+            mach,
+            alpha_deg: None,
+            iteration,
+            max_iterations: 80_000,
+            residual_orders: 2.0,
+            monitor,
+            spread: Some(0.01),
+            tolerance: Some(0.002),
+        }
     }
 
     fn point(mach: f64, cd: f64, quality: CfdQuality) -> CfdPoint {
@@ -581,6 +772,7 @@ mod tests {
 
     fn done(at: f64, mach: f64, iterations: usize, quality: Option<CfdQuality>) -> PointDone {
         PointDone {
+            machine: 0,
             at,
             mach,
             alpha_deg: None,
@@ -596,16 +788,16 @@ mod tests {
     #[test]
     fn a_unit_goes_from_pending_to_running_to_done() {
         let mut t = tracker(&[0.5, 0.9]);
-        assert_eq!((t.done_count(), t.total(), t.live().is_none()), (0, 2, true));
+        assert_eq!((t.done_count(), t.total(), first_live(&t).is_none()), (0, 2, true));
         t.on_iteration(&report(3.0, 0.5, 50, f64::NAN));
-        assert!(matches!(t.slot(0), Slot::Running { started, iterations: 50, ended: None } if *started == 0.0));
-        let (unit, live) = t.live().unwrap();
+        assert!(matches!(t.slot(0), Slot::Running { started, iterations: 50, ended: None, .. } if *started == 0.0));
+        let (unit, live) = first_live(&t).unwrap();
         assert_eq!((unit.mach, live.iteration), (0.5, 50));
         assert!(live.history.is_empty(), "no monitor sample yet");
         t.on_iteration(&report(4.0, 0.5, 100, 0.52));
-        assert_eq!(t.live().unwrap().1.history, vec![(100, 0.52)]);
+        assert_eq!(first_live(&t).unwrap().1.history, vec![(100, 0.52)]);
         t.on_done(&done(20.0, 0.5, 2000, Some(CfdQuality::Converged)));
-        assert!(t.live().is_none());
+        assert!(first_live(&t).is_none());
         let Slot::Done(d) = t.slot(0) else { panic!("done") };
         assert_eq!((d.iterations, d.seconds, d.value), (2000, 20.0, Some(0.5)), "the seconds run from the start of the unit");
         // the next unit starts where the last one ended
@@ -613,7 +805,7 @@ mod tests {
         assert!(matches!(t.slot(1), Slot::Running { started, .. } if *started == 20.0));
         // a report for a unit that is not in the plan is ignored
         t.on_iteration(&report(26.0, 1.7, 50, 0.6));
-        assert_eq!(t.live().unwrap().0.mach, 0.9);
+        assert_eq!(first_live(&t).unwrap().0.mach, 0.9);
     }
 
     #[test]
@@ -683,20 +875,20 @@ mod tests {
         for k in 1..=(HISTORY_CAP + 10) {
             t.on_iteration(&report(k as f64 * 0.1, 0.5, k * 50, 0.5 + 1e-4 * k as f64));
         }
-        let h = &t.live().unwrap().1.history;
+        let h = &first_live(&t).unwrap().1.history;
         assert!(h.len() <= HISTORY_CAP && h.len() > HISTORY_CAP / 2);
         assert!(h.windows(2).all(|w| w[0].0 < w[1].0), "still in iteration order");
         assert_eq!(h[0].0, 50, "the start of the trace is kept");
         t.on_done(&done(30.0, 0.5, 12_000, Some(CfdQuality::Converged)));
         t.on_iteration(&report(31.0, 0.9, 50, 0.7));
-        assert_eq!(t.live().unwrap().1.history, vec![(50, 0.7)]);
+        assert_eq!(first_live(&t).unwrap().1.history, vec![(50, 0.7)]);
     }
 
     #[test]
     fn the_stability_solve_splits_a_mach_number_between_its_angles() {
         let units = Tracker::stability_units(&[0.8, 1.1], &[2.0, 6.0]);
         assert_eq!(units.len(), 4);
-        let mut t = Tracker::new(Kind::Stability, units, "Test GPU");
+        let mut t = on_test_gpu(Kind::Stability, units);
         let r = |at: f64, mach: f64, a: f64, iteration: usize| Iteration { alpha_deg: Some(a), ..report(at, mach, iteration, 0.1) };
         t.on_iteration(&r(2.0, 0.8, 2.0, 50));
         t.on_iteration(&r(10.0, 0.8, 2.0, 1000));
@@ -706,6 +898,7 @@ mod tests {
         let lift = |a: f64| CfdLiftPoint { mach: 0.8, alpha_deg: a, cn: 0.1 * a, x_cp: 0.9, quality: CfdQuality::Converged };
         for (a, iters) in [(2.0, 1000), (6.0, 400)] {
             t.on_done(&PointDone {
+                machine: 0,
                 at: 28.0,
                 mach: 0.8,
                 alpha_deg: Some(a),
@@ -743,18 +936,18 @@ mod tests {
         // a halted solve has nothing in flight but keeps what it had
         t.on_iteration(&report(150.0, 2.0, 50, 0.5));
         t.halt();
-        assert!(t.live().is_none() && t.clock() == 150.0);
-        assert_eq!(t.points().iter().filter(|p| p.quality == CfdQuality::Stalled).count(), 1);
-        assert_eq!(t.points().len(), 3, "a fallback has no point");
+        assert!(first_live(&t).is_none() && t.clock() == 150.0);
+        assert_eq!(t.prefix_points().iter().filter(|p| p.quality == CfdQuality::Stalled).count(), 1);
+        assert_eq!(t.prefix_points().len(), 3, "a fallback has no point");
     }
 
     #[test]
     fn a_cpu_point_changes_the_device_and_keeps_the_reason() {
         let mut t = tracker(&[0.5, 0.9]);
         t.on_done(&PointDone { cpu: true, fallback: Some("GPU unavailable: no adapter".into()), ..done(10.0, 0.5, 2000, Some(CfdQuality::Converged)) });
-        assert_eq!(t.device, "CPU");
+        assert_eq!(t.device(), "CPU");
         assert_eq!(t.fallback.as_deref(), Some("GPU unavailable: no adapter"));
-        assert_eq!(t.units_by_device(), (1, 0));
+        assert_eq!(t.machines()[0].cpu_done, 1);
     }
 
     #[test]
@@ -766,5 +959,76 @@ mod tests {
         assert_eq!(eta_text(42.0), "about 40 s");
         assert_eq!(eta_text(100.0), "about 2 min");
         assert_eq!((thousands(7), thousands(1850), thousands(80_000), thousands(1_234_567)), ("7".into(), "1,850".into(), "80,000".into(), "1,234,567".into()));
+    }
+
+    fn two_machines(units: Vec<Unit>) -> Tracker {
+        let mut t = Tracker::new(Kind::Drag, units);
+        t.set_machines(&[MachineInfo { name: "This computer".into(), remote: false }, MachineInfo { name: "omarchy".into(), remote: true }]);
+        t.on_machine(0, 0.0, MachineState::Ready("RTX 3090".into()));
+        t.on_machine(1, 120.0, MachineState::Ready("RTX 3080 on omarchy".into()));
+        t
+    }
+
+    fn on(machine: usize, mut r: Iteration) -> Iteration {
+        r.machine = machine;
+        r
+    }
+
+    #[test]
+    fn two_machines_each_have_a_unit_in_flight_and_a_dropped_one_gives_its_unit_back() {
+        let mut t = two_machines(Tracker::drag_units(&[0.5, 0.9, 1.1, 1.5]));
+        t.on_iteration(&on(0, report(130.0, 0.5, 50, 0.4)));
+        t.on_iteration(&on(1, report(131.0, 0.9, 100, 0.5)));
+        let lives: Vec<(f64, usize, usize)> = t.lives().map(|(u, l)| (u.mach, l.machine, l.iteration)).collect();
+        assert_eq!(lives, vec![(0.5, 0, 50), (0.9, 1, 100)], "one per machine");
+        // the second machine's first unit began when it was ready, not when the solve began
+        assert!(matches!(t.slot(1), Slot::Running { machine: 1, started, .. } if *started == 120.0));
+        // machine 0 finishes its unit and starts the next one while machine 1 goes on
+        t.on_done(&PointDone { machine: 0, ..done(140.0, 0.5, 2000, Some(CfdQuality::Converged)) });
+        t.on_iteration(&on(0, report(141.0, 1.1, 50, 0.6)));
+        assert_eq!(t.lives().map(|(u, _)| u.mach).collect::<Vec<_>>(), vec![0.9, 1.1]);
+        assert_eq!((t.machines()[0].done, t.machines()[1].done), (1, 0));
+        // machine 1 is lost: its unit is waiting again, machine 0 keeps its own
+        t.on_machine(1, 150.0, MachineState::Dropped("connection closed".into()));
+        assert!(matches!(t.slot(1), Slot::Pending));
+        assert_eq!(t.lives().map(|(u, _)| u.mach).collect::<Vec<_>>(), vec![1.1]);
+        assert!(!t.machines()[1].alive() && t.machines()[0].alive());
+        // and another machine finishing it later is the one that solved it
+        t.on_done(&PointDone { machine: 0, ..done(160.0, 0.9, 2500, Some(CfdQuality::Converged)) });
+        assert!(matches!(t.slot(1), Slot::Done(d) if d.machine == 0));
+    }
+
+    #[test]
+    fn the_time_left_is_over_the_combined_throughput_of_the_machines_still_working() {
+        let nodes = [0.5, 0.9, 1.1, 1.5, 1.7, 2.0];
+        let mut t = two_machines(Tracker::drag_units(&nodes));
+        // machine 0: 2 000 iterations in 20 s (100 it/s); machine 1: 2 000 in 40 s (50 it/s), both starting when ready
+        t.on_iteration(&on(0, report(1.0, 0.5, 50, 0.4)));
+        t.on_done(&PointDone { machine: 0, ..done(20.0, 0.5, 2000, Some(CfdQuality::Converged)) });
+        t.on_iteration(&on(1, report(121.0, 0.9, 50, 0.4)));
+        t.on_done(&PointDone { machine: 1, ..done(160.0, 0.9, 2000, Some(CfdQuality::Converged)) });
+        assert_eq!(t.done_count(), 2);
+        let rate = t.throughput().unwrap();
+        assert!((rate - 150.0).abs() < 1e-9, "100 + 50 it/s, not their mean: {rate}");
+        let left: f64 = 4.0 * 2000.0;
+        assert!((t.eta().unwrap() - left / 150.0).abs() < 1e-9);
+        // a lost machine no longer counts
+        t.on_machine(1, 161.0, MachineState::Dropped("gone".into()));
+        assert!((t.throughput().unwrap() - 100.0).abs() < 1e-9);
+        // the device line lists the machines that solved something
+        assert_eq!(t.device(), "RTX 3090, RTX 3080 on omarchy");
+    }
+
+    #[test]
+    fn a_stopped_solve_that_finished_out_of_order_covers_only_the_part_without_a_gap() {
+        let mut t = two_machines(Tracker::drag_units(&[0.5, 0.9, 1.1, 1.5]));
+        t.on_done(&PointDone { machine: 0, ..done(10.0, 0.5, 2000, Some(CfdQuality::Converged)) });
+        t.on_done(&PointDone { machine: 1, ..done(11.0, 1.1, 2000, Some(CfdQuality::Converged)) });
+        t.on_done(&PointDone { machine: 0, ..done(12.0, 1.5, 2000, Some(CfdQuality::Converged)) });
+        assert_eq!((t.done_count(), t.done_prefix()), (3, 1));
+        assert_eq!(t.prefix_points().iter().map(|p| p.mach).collect::<Vec<_>>(), vec![0.5]);
+        assert_eq!(t.done_count(), 3, "all three are still solved");
+        t.on_done(&PointDone { machine: 1, ..done(13.0, 0.9, 2000, Some(CfdQuality::Converged)) });
+        assert_eq!(t.done_prefix(), 4);
     }
 }

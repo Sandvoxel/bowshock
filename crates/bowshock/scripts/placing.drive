@@ -1,0 +1,75 @@
+# Placing a carried part: held by its ends, the free ghost, dropping on the bin, and click to place.
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/placing.drive /tmp/placing
+# 2D profile so the coordinates are the same every run. Rows of the bin: Boattail (130, 495), Body tube (130, 360).
+viewport 1280x800
+scale 1
+click "2D"
+
+# ---- 1. A boattail from the bin, free: its ghost at the cursor with a ring at each end (hollow, ink-muted).
+press (130, 495)
+move (200, 495)
+move (700, 200)
+screenshot 1-free-with-end-markers.png
+
+# ---- 2. Held by its middle with its fore end at the tail node (946, 314): the cursor is half a boattail aft of it. The fore end's
+# ring fills with accent and the ghost snaps to the tail.
+move (955, 318)
+screenshot 2-snapped-by-its-end-to-the-tail.png
+release (955, 318)
+click "Undo"
+
+# ---- 3. A part picked up off the rocket and carried over the bin: `Drop to delete` on the err soft ground; letting go deletes
+# it (the body tube with everything it carries), and Undo brings it back.
+press (600, 314)
+move (590, 314)
+move (400, 300)
+move (150, 300)
+screenshot 3-drop-to-delete.png
+release (150, 300)
+screenshot 4-deleted.png
+click "Undo"
+
+# ---- 4. A part from the bin carried over the bin: `Drop to put back`.
+press (130, 360)
+move (200, 360)
+move (150, 300)
+screenshot 5-drop-to-put-back.png
+release (150, 300)
+
+# ---- 5. Click to place, switched on in Preferences > Editor.
+click "Edit"
+click "Preferences…"
+click "Editor"
+click "Click to place"
+screenshot 6-preferences-editor.png
+click "Done"
+press (130, 360)
+move (200, 360)
+move (600, 200)
+release (600, 200)
+move (640, 190)
+screenshot 7-in-hand-no-button.png
+move (955, 318)
+screenshot 8-in-hand-snapped.png
+click (955, 318)
+screenshot 9-placed-by-a-click.png
+click "Undo"
+
+# ---- 6. The same cues in the light theme (still clicking to place: the part stays in hand over the bin until it is clicked).
+click "Edit"
+click "Preferences…"
+click "Appearance"
+click "Light"
+click "Done"
+press (600, 314)
+move (590, 314)
+move (400, 300)
+move (150, 300)
+screenshot 10-light-drop-to-delete.png
+click (150, 300)
+click "Undo"
+press (130, 360)
+move (200, 360)
+move (150, 300)
+screenshot 11-light-drop-to-put-back.png
+click (150, 300)

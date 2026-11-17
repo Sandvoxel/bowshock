@@ -8,16 +8,22 @@
 //!   saved in the `.bowshock` file, loaded back, edited through `ctx.doc` (dirty dot, undo) and a new document has one, `Nominal`.
 //!   Results are never saved: they are re-run. A flight is flown against the rocket *as it is when you press Run*. [`State::sync`]
 //!   (called by the app after every message) mirrors the document's list; [`State::commit`] writes edits back.
-//! * **Run** ([`Message::Run`], the top bar's Simulate button and `F5`) flies the selected flights with
-//!   [`bowshock_sim::from_model::sim_input`] on a worker thread and shows the result when it lands; **Run all** flies every flight.
+//! * **Run all** ([`Message::RunAll`], the top bar's Simulate button and `F5`) flies every flight with
+//!   [`bowshock_sim::from_model::sim_input`] on worker threads and shows each result when it lands; **Run selected**
+//!   ([`Message::Run`]) flies only the flights selected for editing.
 //!   A result whose conditions or document have changed since is *stale* and is drawn in `ink-faint` until it is run again.
-//! * **Edit selection**: a click selects one flight, Cmd/Ctrl-click toggles one, Shift-click selects a range (`Pick`); Cmd/Ctrl+A
+//! * **Edit selection**: a click selects one flight, Cmd/Ctrl-click toggles one, Shift-click selects a range (`PickMode`); Cmd/Ctrl+A
 //!   selects all. With several selected the Conditions panel edits all of them at once: fields they agree on show the value, the
 //!   others the mixed `—`, and an edit sets that field on every selected flight as one undo step. The compare ticks are separate.
 //! * **Compare**: ticking two or more flights (up to four, colours `series-1…4` that stay with the flight) overlays them on every
 //!   plot and turns the results into a comparison against the reference (the selected flight when ticked).
 //! * The plots are [`widgets::plot`](crate::widgets::plot) groups with PlotZoom (drag a band, `Enter` zooms, `Esc` steps back); the
 //!   ground track shares the plots' crosshair; every result number moves it to the moment it happened.
+//! * **Dropped stages**: a staged flight's result holds a [`bowshock_sim::Branch`] per separation, the dropped stage flown on its own
+//!   to the ground. They are drawn with their flight: dashed lines from the separation on every plot, a thin row each under the
+//!   events strip, a dashed ground track with a hollow landing square, and a results section each after the recovery. The
+//!   `Dropped stages` checkbox in the plots header ([`Message::Dropped`]) hides the lines and rows. They are part of the flight's
+//!   result, so they go stale and re-run with it.
 //! * **Plot sources** ([`channels`], [`layout`], [`picker`]): every quantity a flight records is a data source (position, velocity,
 //!   acceleration, aerodynamics, forces, mass and balance, atmosphere, recovery). Each panel's title is a button that opens a
 //!   searchable menu of them; `+ series` overlays another source *of the same unit* (one y-axis per plot, never two: the others are
@@ -26,14 +32,16 @@
 //!   The layout is stored in the document (`Rocket::plot_layout`), so it saves, loads and undoes; [`State::edit_layout`] writes it.
 
 mod channels;
-mod flight;
-pub(crate) mod format;
+pub(crate) mod flight;
+mod forecast;
+mod format;
 mod keys;
 mod layout;
 mod left;
 mod picker;
 mod plots;
 mod results;
+pub(crate) mod sites;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -43,6 +51,7 @@ use bowshock_sim::{FlightResult, Turbulence};
 use iced::widget::{column, container, row, stack, text, Space};
 use iced::{keyboard, Element, Fill, Point, Rectangle, Task, Widget};
 
+use crate::app::selection_set::{MultiSet, PickMode};
 use crate::app::{self, Ctx};
 use crate::theme::{self, MONO};
 use crate::tokens::{BIN_W, RAIL_W, RIGHT_PANEL_W, SPACE_2, SPACE_3, TEXT_BODY, TEXT_LABEL};
@@ -88,6 +97,19 @@ pub enum Edit {
     Temperature(f64),
     /// Field radius (m).
     FieldRadius(f64),
+    /// The wind profile above the ground wind.
+    WindLevels(Vec<bowshock_model::WindLevel>),
+    /// The launch latitude (degrees); `None` clears the location. A flight without a location gets longitude 0.
+    Latitude(Option<f64>),
+    /// The launch longitude (degrees); `None` clears the location. A flight without a location gets latitude 0.
+    Longitude(Option<f64>),
+    /// A start in the air, `None` for a pad launch.
+    AirStart(Option<bowshock_model::AirStart>),
+    /// Built-in launch site `i` of [`sites::SITES`]: its altitude and location, and the standard temperature there when the
+    /// temperature is still the standard sea-level one.
+    Site(usize),
+    /// A forecast wind: the ground wind, the levels above it and, when asked for, the forecast temperature (K).
+    Forecast { speed: f64, from: f64, levels: Vec<bowshock_model::WindLevel>, temperature: Option<f64> },
 }
 
 impl Edit {
@@ -105,29 +127,24 @@ impl Edit {
             Edit::SiteAltitude(_) => "site altitude",
             Edit::Temperature(_) => "temperature",
             Edit::FieldRadius(_) => "field radius",
+            Edit::WindLevels(_) => "wind profile",
+            Edit::Latitude(_) | Edit::Longitude(_) => "launch location",
+            Edit::AirStart(_) => "air start",
+            Edit::Site(_) => "launch site",
+            Edit::Forecast { .. } => "forecast wind",
         }
     }
-}
 
-/// How a click on a flight row changes the edit selection (the kit's multi-select conventions, as in the viewport and Station
-/// Lanes): a plain click selects one, Cmd/Ctrl-click toggles, Shift-click selects the range from the last click, and Shift with
-/// Cmd/Ctrl adds that range to what is selected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Pick {
-    Only,
-    Toggle,
-    Range,
-    AddRange,
-}
+    /// Whether a single flight's undo step names the edit (`Set wind profile`) instead of the generic `Edit flight`.
+    fn named(&self) -> bool {
+        matches!(self, Edit::WindLevels(_) | Edit::Latitude(_) | Edit::Longitude(_) | Edit::AirStart(_) | Edit::Site(_) | Edit::Forecast { .. })
+    }
 
-impl Pick {
-    /// What a click does with `modifiers` held.
-    fn of(modifiers: keyboard::Modifiers) -> Pick {
-        match (modifiers.shift(), modifiers.command() || modifiers.control()) {
-            (true, true) => Pick::AddRange,
-            (true, false) => Pick::Range,
-            (false, true) => Pick::Toggle,
-            (false, false) => Pick::Only,
+    /// The undo step of a single flight's edit that [`Edit::named`] names.
+    fn title(&self) -> String {
+        match self {
+            Edit::Forecast { .. } => "Wind from forecast".to_string(),
+            other => format!("Set {}", other.label()),
         }
     }
 }
@@ -176,14 +193,14 @@ pub struct DispersionDone {
 /// The Simulate screen's messages.
 #[derive(Debug, Clone)]
 pub enum Message {
-    /// Run the flights selected for editing (top bar button, `F5`).
+    /// Run the flights selected for editing (the Simulate screen's *Run selected*, the Simulate button's menu).
     Run,
     /// Run every flight.
     RunAll,
     /// A simulation finished on its worker thread.
     Done(Box<Done>),
     /// A click on a flight row: selects it (the reference of a comparison), toggles it or extends the selection to it, by the
-    /// modifiers held (see [`Pick`]).
+    /// modifiers held (see [`PickMode`]).
     Click(FlightId),
     /// The held modifier keys changed (reported by the invisible tracker in the Flights list).
     Modifiers(keyboard::Modifiers),
@@ -225,6 +242,28 @@ pub enum Message {
     ClosePicker,
     /// A click inside the source picker that no row took: it stays open.
     KeepPicker,
+    /// Draw the dropped stages (a booster after its separation) on the plots and the events strip, or hide them.
+    Dropped(bool),
+    /// Show or hide the wind profile table.
+    WindTable(bool),
+    /// Open the fields of wind level `i` (`None` closes them).
+    WindLevel(Option<usize>),
+    /// Text typed in the latitude (`false`) or longitude (`true`) field.
+    CoordInput(bool, String),
+    /// Enter in a coordinate field: a number sets it, a blank field clears the location.
+    CoordCommit,
+    /// A control that needs no action (the `Custom` launch site).
+    Ignore,
+    /// Open (`true`) or close the forecast row of the wind profile.
+    ForecastOpen(bool),
+    /// The launch time typed in the forecast row (`YYYY-MM-DDTHH:00`, the site's local time).
+    ForecastTime(String),
+    /// Whether the forecast also sets the temperature.
+    ForecastTemperature(bool),
+    /// Fetch the forecast for the selected flight's location and the typed time.
+    ForecastFetch,
+    /// The forecast arrived (or why it did not).
+    ForecastDone(Result<forecast::Forecast, String>),
 }
 
 /// What the plots and the ground track show: derived from the flights whenever a run lands or the ticks change.
@@ -240,6 +279,8 @@ struct Shown {
     group: Option<PlotGroup>,
     /// The ground tracks (the selected flight's wind and field when nothing has run).
     ground: GroundTrack,
+    /// A flight on show has a dropped stage: the plots header offers the `Dropped stages` toggle.
+    has_dropped: bool,
 }
 
 /// The Simulate screen's state.
@@ -251,14 +292,12 @@ struct Shown {
 #[derive(Debug)]
 pub struct State {
     flights: Vec<Flight>,
-    selected: FlightId,
-    /// The flights selected with `selected` for editing (Cmd/Ctrl-click, Shift-click): the edit selection is `selected` plus
-    /// these. The compare ticks are separate.
-    also: Vec<FlightId>,
-    /// Where a Shift-click range starts: the last flight clicked.
-    anchor: FlightId,
+    /// The flights selected for editing (Cmd/Ctrl-click, Shift-click): the primary is the reference flight, the others are
+    /// selected with it. The compare ticks are separate.
+    selection: MultiSet<FlightId>,
     /// The modifier keys held, as the tracker last reported them (a drive script holds `BOWSHOCK_DRIVE_MODIFIERS`).
-    modifiers: keyboard::Modifiers,
+    /// The held modifiers, once the window has reported them (until then the drive script's).
+    modifiers: Option<keyboard::Modifiers>,
     next_id: FlightId,
     plot: PlotState,
     shown: Shown,
@@ -279,6 +318,19 @@ pub struct State {
     renaming: Option<(FlightId, String)>,
     /// The unit set the plots were built in: the zoom's full x range follows it (lengths along x differ by unit).
     units: UnitSystem,
+    /// Whether the wind profile table is open.
+    wind_open: bool,
+    /// The wind level whose fields are open in the table.
+    wind_level: Option<usize>,
+    /// The text of the latitude and longitude fields: the flights' location, or what is being typed in
+    /// [`State::coord_editing`]'s field.
+    coord_text: [String; 2],
+    /// The coordinate field being typed in (`true` for longitude) and the flight selected when typing began.
+    coord_editing: Option<(bool, FlightId)>,
+    /// The forecast row of the wind profile, while open.
+    forecast: Option<ForecastRow>,
+    /// Whether the plots draw the dropped stages (`Dropped stages` in the plots header, on by default).
+    dropped: bool,
 }
 
 impl Default for State {
@@ -296,12 +348,12 @@ impl State {
 
     /// A state holding `defs` (never empty) and the plots `layout`, the first flight selected, nothing run yet.
     fn of(defs: &[FlightDef], layout: &PlotLayout, bands: StabilityBands) -> Self {
-        let flights: Vec<Flight> = defs.iter().map(Flight::from_def).collect();
+        let mut flights: Vec<Flight> = defs.iter().map(Flight::from_def).collect();
+        // The first flight is ticked to begin with, so the plots show it once it has run.
+        flights[0].slot = Some(1);
         let mut state = State {
-            selected: flights[0].id,
-            also: Vec::new(),
-            anchor: flights[0].id,
-            modifiers: crate::viewport::manipulate::drive_modifiers(),
+            selection: MultiSet::with_primary(flights[0].id),
+            modifiers: None,
             next_id: defs.iter().map(|d| d.id).max().map_or(1, |m| m + 1),
             flights,
             plot: PlotState::new((0.0, 1.0)),
@@ -314,8 +366,15 @@ impl State {
             own_edits: 0,
             renaming: None,
             units: UnitSystem::default(),
+            wind_open: false,
+            wind_level: None,
+            coord_text: [String::new(), String::new()],
+            coord_editing: None,
+            forecast: None,
+            dropped: true,
         };
         state.rebuild();
+        state.refresh_coords();
         state
     }
 
@@ -331,6 +390,7 @@ impl State {
             self.modifiers = modifiers;
             self.units = ctx.units;
             self.rebuild();
+            self.refresh_coords();
             return;
         }
         if self.units != ctx.units {
@@ -347,6 +407,22 @@ impl State {
         if self.stored_layout != *layout {
             self.adopt_layout(layout);
         }
+        self.refresh_coords();
+    }
+
+    /// Shows the edit selection's launch location in the coordinate fields (blank when they have none or differ), unless one
+    /// is being typed in for the same selected flight.
+    fn refresh_coords(&mut self) {
+        if self.coord_editing.is_some_and(|(_, id)| id == self.primary()) {
+            return;
+        }
+        self.coord_editing = None;
+        let locations: Vec<_> = self.edit_flights().iter().map(|f| f.spec.location).collect();
+        let agreed = locations.first().copied().filter(|first| locations.iter().all(|l| l == first)).flatten();
+        self.coord_text = match agreed {
+            Some(at) => [format!("{:.5}", at.latitude), format!("{:.5}", at.longitude)],
+            None => [String::new(), String::new()],
+        };
     }
 
     /// Takes `layout` as the plots' layout (undo, redo): the picker, whose panel may be gone, closes.
@@ -442,12 +518,11 @@ impl State {
             })
             .collect();
         self.next_id = self.next_id.max(defs.iter().map(|d| d.id).max().map_or(1, |m| m + 1));
-        self.also.retain(|id| self.flights.iter().any(|f| f.id == *id));
-        if self.flight(self.selected).is_none() {
+        let flights = &self.flights;
+        self.selection.retain(|id| flights.iter().any(|f| f.id == id));
+        if self.selection.primary().is_none() {
             let first = self.flights[0].id;
             self.select_only(first);
-        } else if self.flight(self.anchor).is_none() {
-            self.anchor = self.selected;
         }
         self.stored = defs.to_vec();
         self.rebuild();
@@ -495,13 +570,24 @@ impl State {
         self.flights.iter().find(|f| f.id == id)
     }
 
+    /// For each flight, whether it has a result or is flying now (tests).
+    #[cfg(test)]
+    pub(crate) fn launched(&self) -> Vec<bool> {
+        self.flights.iter().map(|f| f.running || f.run.is_some()).collect()
+    }
+
+    /// The id of the selected flight (the reference of a comparison, and the one the Conditions panel shows first).
+    pub fn selected_id(&self) -> FlightId {
+        self.selected_flight().id
+    }
+
     fn selected_flight(&self) -> &Flight {
-        self.flight(self.selected).unwrap_or(&self.flights[0])
+        self.flight(self.primary()).unwrap_or(&self.flights[0])
     }
 
     /// The flights the Conditions panel edits: the selected one and those selected with it, in list order.
     fn edit_ids(&self) -> Vec<FlightId> {
-        let ids: Vec<FlightId> = self.flights.iter().filter(|f| f.id == self.selected || self.also.contains(&f.id)).map(|f| f.id).collect();
+        let ids = self.selection.ids_in_order(&self.flight_ids());
         if ids.is_empty() {
             vec![self.selected_flight().id]
         } else {
@@ -516,58 +602,39 @@ impl State {
 
     /// Whether `id` is in the edit selection.
     fn is_selected(&self, id: FlightId) -> bool {
-        id == self.selected || self.also.contains(&id)
+        self.selection.contains(id)
+    }
+
+    /// The flights in list order.
+    fn flight_ids(&self) -> Vec<FlightId> {
+        self.flights.iter().map(|f| f.id).collect()
+    }
+
+    /// The selected (reference) flight's id: the primary of the selection, which is never empty.
+    fn primary(&self) -> FlightId {
+        self.selection.primary().unwrap_or(self.flights[0].id)
     }
 
     /// Makes `id` the only selected flight.
     fn select_only(&mut self, id: FlightId) {
-        self.selected = id;
-        self.also.clear();
-        self.anchor = id;
+        self.selection.only(Some(id));
     }
 
     /// Changes the edit selection by a click on `id`. A toggle never empties the selection; a range runs from the last flight
     /// clicked to `id`, in list order, and `id` becomes the selected (reference) flight.
-    fn pick(&mut self, id: FlightId, how: Pick) {
+    fn pick(&mut self, id: FlightId, how: PickMode) {
         if self.flight(id).is_none() {
             return;
         }
-        let mut set = self.edit_ids();
+        let order = self.flight_ids();
         match how {
-            Pick::Only => {
-                self.select_only(id);
-                return;
+            PickMode::Only => self.select_only(id),
+            PickMode::Toggle => {
+                self.selection.toggle(id, false);
             }
-            Pick::Toggle => match set.iter().position(|f| *f == id) {
-                Some(at) if set.len() > 1 => {
-                    set.remove(at);
-                    if self.selected == id {
-                        self.selected = set[0];
-                    }
-                    self.anchor = self.selected;
-                }
-                Some(_) => {}
-                None => {
-                    set.push(id);
-                    self.selected = id;
-                    self.anchor = id;
-                }
-            },
-            Pick::Range | Pick::AddRange => {
-                let at = |id| self.flights.iter().position(|f| f.id == id);
-                let (Some(from), Some(to)) = (at(self.anchor).or_else(|| at(self.selected)), at(id)) else { return };
-                if how == Pick::Range {
-                    set.clear();
-                }
-                for f in &self.flights[from.min(to)..=from.max(to)] {
-                    if !set.contains(&f.id) {
-                        set.push(f.id);
-                    }
-                }
-                self.selected = id;
-            }
+            PickMode::Range => self.selection.range(id, &order, false),
+            PickMode::AddRange => self.selection.range(id, &order, true),
         }
-        self.also = set.into_iter().filter(|f| *f != self.selected).collect();
     }
 
     /// Flights ticked for comparison.
@@ -577,28 +644,24 @@ impl State {
 
     /// Recomputes what the plots and ground track show.
     fn rebuild(&mut self) {
+        // The plots show the ticked flights (one or more), each in its slot's colour; nothing is shown with none ticked.
         let compare = self.ticked() >= 2;
-        let mut order: Vec<&Flight> = if compare {
-            let mut ticked: Vec<&Flight> = self.flights.iter().filter(|f| f.slot.is_some() && f.run.is_some()).collect();
-            ticked.sort_by_key(|f| f.slot);
-            ticked
-        } else {
-            self.flights.iter().filter(|f| f.id == self.selected && f.run.is_some()).collect()
-        };
+        let mut order: Vec<&Flight> = self.flights.iter().filter(|f| f.slot.is_some() && f.run.is_some()).collect();
+        order.sort_by_key(|f| f.slot);
         order.truncate(MAX_COMPARED);
         let entries: Vec<Entry> = order
             .iter()
             .filter_map(|f| {
                 let run = f.run.as_ref()?;
-                let color = if compare { SeriesColor::Series(f.slot.unwrap_or(1)) } else { SeriesColor::Ink };
+                let color = SeriesColor::Series(f.slot.unwrap_or(1));
                 Some(Entry { name: &f.name, color, run, scatter: f.dispersion_of_run().map(|d| d.landings.as_slice()) })
             })
             .collect();
         let ids: Vec<FlightId> = order.iter().map(|f| f.id).collect();
         // The reference is the selected flight when it is on show, else the first.
-        let reference = ids.iter().position(|id| *id == self.selected).unwrap_or(0);
+        let reference = ids.iter().position(|id| *id == self.primary()).unwrap_or(0);
 
-        let group = plots::group(&entries, reference, self.units, &self.layout, self.bands.stable);
+        let group = plots::group_with(&entries, reference, self.units, &self.layout, self.bands.stable, self.dropped);
         let ground = if entries.is_empty() {
             GroundTrack {
                 tracks: Vec::new(),
@@ -612,9 +675,10 @@ impl State {
         if let Some(g) = group.as_ref() {
             self.plot.set_full(g.x_extent());
         }
+        let has_dropped = entries.iter().any(|e| !e.run.result.branches.is_empty());
         // `entries` borrows the flights; end it before assigning.
         drop(entries);
-        self.shown = Shown { ids, reference, compare, group, ground };
+        self.shown = Shown { ids, reference, compare, group, ground, has_dropped };
     }
 
     /// Starts the simulation of flight `id` on a worker thread.
@@ -639,8 +703,16 @@ impl State {
         })
     }
 
-    fn launch_all(&mut self, ids: Vec<FlightId>, ctx: &Ctx) -> Task<app::Message> {
-        Task::batch(ids.into_iter().map(|id| self.launch(id, ctx)))
+    fn launch_all(&mut self, ids: Vec<FlightId>, ctx: &mut Ctx) -> Task<app::Message> {
+        let task = Task::batch(ids.iter().map(|&id| self.launch(id, ctx)));
+        // The run's report (the toast away from this screen): flying flights are pending, ones that could not start carry why.
+        let lines = ids
+            .iter()
+            .filter_map(|&id| self.flight(id))
+            .map(|f| app::RunLine { id: f.id, name: f.name.clone(), outcome: (!f.running).then(|| Err(f.error.clone().unwrap_or_default())) })
+            .collect();
+        ctx.start_run(lines);
+        task
     }
 
     /// Handles one of the screen's messages.
@@ -667,15 +739,19 @@ impl State {
                 self.rebuild();
                 return task;
             }
-            Message::Done(done) => self.finished(*done),
+            Message::Done(done) => {
+                if let Some((id, outcome)) = self.finished(*done) {
+                    ctx.finish_run_line(id, outcome);
+                }
+            }
             Message::Click(id) => {
-                self.pick(id, Pick::of(self.modifiers));
+                self.pick(id, PickMode::from_modifiers(self.modifiers.unwrap_or(ctx.env.drive_modifiers)));
                 self.rebuild();
             }
-            Message::Modifiers(modifiers) => self.modifiers = modifiers,
+            Message::Modifiers(modifiers) => self.modifiers = Some(modifiers),
             Message::SelectAll => {
-                self.also = self.flights.iter().map(|f| f.id).filter(|id| *id != self.selected).collect();
-                self.anchor = self.selected;
+                let order = self.flight_ids();
+                self.selection.select_all(&order);
             }
             Message::Tick(id) => self.tick_flight(id, ctx),
             Message::AddFlight => {
@@ -701,7 +777,7 @@ impl State {
             }
             Message::PerConfiguration => return self.per_configuration(ctx),
             Message::Disperse => {
-                let id = self.selected;
+                let id = self.primary();
                 let task = self.launch_dispersion(id, ctx);
                 self.rebuild();
                 return task;
@@ -712,6 +788,7 @@ impl State {
                 // With several flights selected the edit sets the field on every one of them.
                 let ids = self.edit_ids();
                 let (label, key) = match ids.as_slice() {
+                    [id] if edit.named() => (edit.title(), format!("flight:{id}:{}", edit.label())),
                     [id] => ("Edit flight".to_string(), format!("flight:{id}:{}", edit.label())),
                     _ => {
                         let joined: Vec<String> = ids.iter().map(ToString::to_string).collect();
@@ -731,9 +808,59 @@ impl State {
             }
             Message::ClosePicker => self.picker = None,
             Message::KeepPicker => {}
+            Message::Dropped(on) => {
+                self.dropped = on;
+                self.rebuild();
+            }
+            Message::WindTable(open) => self.wind_open = open,
+            Message::WindLevel(i) => self.wind_level = i,
+            Message::CoordInput(lon, text) => {
+                self.coord_editing = Some((lon, self.primary()));
+                self.coord_text[usize::from(lon)] = text;
+            }
+            Message::CoordCommit => {
+                if let Some((lon, _)) = self.coord_editing.take() {
+                    let text = self.coord_text[usize::from(lon)].trim();
+                    let value = if text.is_empty() { Some(None) } else { text.parse::<f64>().ok().filter(|v| v.is_finite()).map(Some) };
+                    if let Some(value) = value {
+                        let edit = if lon { Edit::Longitude(value) } else { Edit::Latitude(value) };
+                        return self.update(Message::Edit(edit), ctx);
+                    }
+                }
+            }
+            Message::Ignore => {}
+            Message::ForecastOpen(open) => {
+                self.forecast = open.then(|| ForecastRow { time: forecast::next_local_hour(), temperature: true, busy: false, error: None });
+            }
+            Message::ForecastTime(time) => {
+                if let Some(row) = &mut self.forecast {
+                    row.time = time;
+                }
+            }
+            Message::ForecastTemperature(on) => {
+                if let Some(row) = &mut self.forecast {
+                    row.temperature = on;
+                }
+            }
+            Message::ForecastFetch => return self.fetch_forecast(),
+            Message::ForecastDone(result) => {
+                let Some(row) = &mut self.forecast else { return Task::none() };
+                row.busy = false;
+                match result {
+                    Ok(f) => {
+                        let temperature = row.temperature.then_some(f.temperature_k).flatten();
+                        self.forecast = None;
+                        let edit = Edit::Forecast { speed: f.ground.speed, from: f.ground.from, levels: f.levels, temperature };
+                        return self.update(Message::Edit(edit), ctx);
+                    }
+                    Err(e) => row.error = Some(e),
+                }
+            }
             Message::Ground(GroundMessage::Hover(t)) => self.plot.set_hover(t),
             Message::Ground(GroundMessage::Select(i)) => {
-                if let Some(id) = self.shown.ids.get(i).copied() {
+                // The landing of a dropped stage selects the flight it was dropped from.
+                let flight = self.shown.ground.tracks.get(i).and_then(|t| t.dropped.as_ref()).map_or(i, |d| d.of);
+                if let Some(id) = self.shown.ids.get(flight).copied() {
                     self.select_only(id);
                     self.rebuild();
                 }
@@ -803,21 +930,31 @@ impl State {
         })
     }
 
-    fn finished(&mut self, done: Done) {
-        let Some(flight) = self.flights.iter_mut().find(|f| f.id == done.flight) else { return };
+    /// Stores a finished run. Returns the flight and how it ended for the run report, or `None` when the result is stale.
+    fn finished(&mut self, done: Done) -> Option<(FlightId, Result<app::RunSummary, String>)> {
+        let Some(flight) = self.flights.iter_mut().find(|f| f.id == done.flight) else {
+            return Some((done.flight, Err("The flight was removed".to_string())));
+        };
         if flight.ticket != done.ticket {
-            return;
+            return None;
         }
         flight.running = false;
-        match done.outcome {
+        let outcome = match done.outcome {
             Ok((result, took)) => {
+                let s = &result.summary;
+                let summary = app::RunSummary { apogee: s.apogee, max_speed: s.max_velocity, flight_time: s.flight_time };
                 let times = Times::of(&result);
                 flight.run = Some(Run { spec: done.spec, revision: done.revision, result, took, dt: done.dt, delay: done.delay, times });
                 flight.error = None;
+                Ok(summary)
             }
-            Err(message) => flight.error = Some(message),
-        }
+            Err(message) => {
+                flight.error = Some(message.clone());
+                Err(message)
+            }
+        };
         self.rebuild();
+        Some((done.flight, outcome))
     }
 
     /// Ticks or unticks `id`. A fifth tick is refused; the colour slot stays with the flight until it is unticked.
@@ -899,6 +1036,39 @@ impl State {
                 Edit::SiteAltitude(v) => spec.site_altitude = v.clamp(-400.0, 6000.0),
                 Edit::Temperature(v) => spec.temperature = v.clamp(220.0, 330.0),
                 Edit::FieldRadius(v) => spec.field_radius = v.max(1.0),
+                Edit::WindLevels(levels) => spec.wind_levels = bowshock_model::sanitized_levels(levels),
+                Edit::Latitude(lat) => {
+                    spec.location = lat.filter(|v| v.is_finite()).map(|latitude| bowshock_model::Location {
+                        latitude: latitude.clamp(-90.0, 90.0),
+                        longitude: spec.location.map_or(0.0, |l| l.longitude),
+                    })
+                }
+                Edit::Longitude(lon) => {
+                    spec.location = lon.filter(|v| v.is_finite()).map(|longitude| bowshock_model::Location {
+                        latitude: spec.location.map_or(0.0, |l| l.latitude),
+                        longitude: (longitude + 180.0).rem_euclid(360.0) - 180.0,
+                    })
+                }
+                Edit::AirStart(start) => {
+                    spec.air_start = start.map(|a| bowshock_model::AirStart { altitude: a.altitude.clamp(0.0, 30_000.0), speed: a.speed.clamp(0.0, 2000.0) });
+                }
+                Edit::Site(i) => {
+                    if let Some(site) = sites::SITES.get(*i) {
+                        spec.site_altitude = site.altitude;
+                        spec.location = Some(bowshock_model::Location { latitude: site.latitude, longitude: site.longitude });
+                        if (spec.temperature - 288.15).abs() < 1e-9 {
+                            spec.temperature = sites::isa_temperature(site.altitude);
+                        }
+                    }
+                }
+                Edit::Forecast { speed, from, levels, temperature } => {
+                    spec.wind_speed = speed.max(0.0);
+                    spec.wind_from = from.rem_euclid(std::f64::consts::TAU);
+                    spec.wind_levels = bowshock_model::sanitized_levels(levels);
+                    if let Some(t) = temperature {
+                        spec.temperature = t.clamp(220.0, 330.0);
+                    }
+                }
             }
         }
     }
@@ -988,7 +1158,12 @@ impl State {
         }
         let against: Vec<(PlotX, &str)> = PlotX::ALL.iter().map(|x| (*x, plots::x_label(*x))).collect();
         let x = segmented_dense(&against, self.layout.x, |x| Message::Layout(LayoutEdit::X(x)), Dense { height: 24.0, pad: 6.0, size: 12.0 }, false);
-        vec![strip, add.into(), crate::app::ui::label("VS"), x]
+        let mut items = vec![strip, add.into(), crate::app::ui::label("VS"), x];
+        // A flight with a dropped stage (a booster flown on its own) offers to hide those lines.
+        if self.shown.has_dropped {
+            items.push(crate::widgets::field::checkbox("Dropped stages", self.dropped, Message::Dropped));
+        }
+        items
     }
 
     /// What the centre shows before the selected flight has run.
@@ -1036,31 +1211,59 @@ fn scroll_style(theme: &iced::Theme, status: iced::widget::scrollable::Status) -
 
 /// Flies `input` on a worker thread and waits for it without blocking the UI's executor.
 async fn compute(input: bowshock_sim::SimInput) -> Result<(Arc<FlightResult>, Duration), String> {
-    offload(move || {
+    crate::app::worker::offload(move || {
         let started = Instant::now();
         let result = bowshock_sim::simulate(&input);
         (Arc::new(result), started.elapsed())
     })
     .await
+    .ok_or_else(|| STOPPED.to_string())
 }
 
 /// Flies a dispersion study of `input` (see [`flight::tolerances`]) on a worker thread (the study itself fans out over cores).
 async fn disperse(input: bowshock_sim::SimInput, spec: Spec) -> Result<Vec<(f64, f64)>, String> {
-    offload(move || {
+    crate::app::worker::offload(move || {
         let study = bowshock_sim::monte_carlo(&input, flight::DISPERSION_RUNS, &flight::tolerances(&spec));
         study.runs.iter().map(|r| (r.landing[0], r.landing[1])).collect()
     })
     .await
+    .ok_or_else(|| STOPPED.to_string())
 }
 
-/// Runs `work` on its own thread and waits for it without blocking the UI's executor.
-async fn offload<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
-    let (tx, rx) = iced::futures::channel::oneshot::channel();
-    std::thread::spawn(move || {
-        // The receiver is gone only if the app quit meanwhile.
-        let _ = tx.send(work());
-    });
-    rx.await.map_err(|_| "the simulation stopped unexpectedly".to_string())
+/// What a dead worker thread reports.
+const STOPPED: &str = "the simulation stopped unexpectedly";
+
+/// The forecast row of the wind profile: the launch time, whether the forecast sets the temperature, a fetch in flight and the
+/// last error.
+#[derive(Debug, Clone, PartialEq)]
+struct ForecastRow {
+    /// The launch hour, `YYYY-MM-DDTHH:00` in the site's local time.
+    time: String,
+    /// Use the forecast temperature.
+    temperature: bool,
+    /// A fetch is running.
+    busy: bool,
+    /// Why the last fetch failed.
+    error: Option<String>,
+}
+
+impl State {
+    /// Starts fetching the forecast for the selected flight's location and the typed hour (see [`forecast::fetch`]).
+    fn fetch_forecast(&mut self) -> Task<app::Message> {
+        let spec = self.selected_flight().spec.clone();
+        let Some(row) = &mut self.forecast else { return Task::none() };
+        let Some(at) = spec.location else {
+            row.error = Some("Set the launch latitude and longitude first".to_string());
+            return Task::none();
+        };
+        row.busy = true;
+        row.error = None;
+        let (time, altitude) = (row.time.clone(), spec.site_altitude);
+        crate::app::worker::perform(
+            move || forecast::fetch(at.latitude, at.longitude, altitude, &time),
+            |result| app::Message::Simulate(Message::ForecastDone(result.ok_or_else(|| STOPPED.to_string()).and_then(|r| r))),
+        )
+    }
 }
 
 #[cfg(test)]

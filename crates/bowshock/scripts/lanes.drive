@@ -54,5 +54,7 @@ screenshot resize-mid.png
 release (705, 702)
 screenshot resized.png
 # Light theme.
+click "Prefs"
 click "Light"
+click "Done"
 screenshot light.png

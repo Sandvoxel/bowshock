@@ -2,8 +2,8 @@
 # presets row sets common layouts, panels add/remove/move, and overlaying flights combines with multiple sources.
 #   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/plotsources.drive out/plotsources
 viewport 1280x800
-click (663, 18)
-click "Run"
+click "Simulate"
+click "Run selected"
 screenshot 01-default.png
 
 # Click a panel's title: a searchable menu of every source, grouped. Choosing one replaces the panel's source.
@@ -54,7 +54,9 @@ move (610, 600)
 screenshot 14-compare-hover.png
 
 # Light theme.
+click "Prefs"
 click "Light"
+click "Done"
 screenshot 15-compare-light.png
 click "Stability"
 screenshot 16-stability-light.png

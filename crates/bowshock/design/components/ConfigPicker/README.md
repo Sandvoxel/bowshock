@@ -31,7 +31,7 @@ Everything else (tubes, fins, motor mounts, and so where the rocket separates) b
 - **Add configuration** is the single primary button. The new configuration becomes current.
 
 **In other modes**
-- **Simulate:** a flight runs the current configuration, or all of them from the Simulate button's menu.
+- **Simulate:** the Simulate button runs every flight, and *One flight per configuration* in its menu makes a flight for each configuration.
 - **Analyze:** with more than one configuration, plots draw one series per configuration using the chart series colours, labelled by name.
 
 **iced:** `Rocket { parts, configs: Vec<Config>, current: ConfigId }`, with `Config { name, motors: BTreeMap<MountId, MotorChoice>, events, ballast }`. The margin column is a cheap recompute of CG only, since CP doesn't depend on the motor. The menu is an `overlay` anchored to the cell's top edge.

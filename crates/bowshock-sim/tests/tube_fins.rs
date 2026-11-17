@@ -18,7 +18,7 @@ const RE_PER_M: f64 = 102.0 / 1.4607e-5;
 /// A 3" rocket (nose, two tubes, three fins on the lower one), the lower tube's id.
 fn core() -> (Rocket, PartId) {
     let mut r = Rocket::default();
-    r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: NOSE, diameter: BODY }).unwrap();
+    r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: NOSE, diameter: BODY, tip_radius: 0.0 }).unwrap();
     r.insert(1, PartKind::BodyTube { length: 0.6, diameter: BODY }).unwrap();
     let lower = r.insert(2, PartKind::BodyTube { length: 0.3, diameter: BODY }).unwrap();
     r.attach_radial(lower, 0.12, 0.0, 3, RadialKind::FinSet { root_chord: 0.15, tip_chord: 0.07, span: 0.09, sweep: 0.07, thickness: 0.003 }).unwrap();

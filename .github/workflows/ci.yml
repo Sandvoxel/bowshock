@@ -11,7 +11,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test -p bowshock-model -p bowshock-motors -p bowshock-sim -p bowshock
       - run: cargo test --release -p bowshock-cfd -p bowshock-reference -p bowshock-cases -p bowshock-core
       - run: cargo test --release -p bowshock-core --features serde --test serde_roundtrip
       - run: cargo test --release -p bowshock-cases -- --ignored subsonic_smoke_with_base
-      - run: cargo test --release -p bowshock-core --doc
+      - run: cargo test --doc --workspace --exclude bowshock-gpu-cases
+      - name: Headless UI smoke (drive)
+        env:
+          ICED_TEST_BACKEND: tiny-skia
+        run: |
+          cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/shell.drive /tmp/drive-shell
+          cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/simulate.drive /tmp/drive-simulate
+          cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/unsaved-modal.drive /tmp/drive-unsaved

@@ -46,8 +46,16 @@ pub struct Params<'a> {
     pub copy: usize,
 }
 
-/// The fin cross-section options as the kit words them.
-const SECTIONS: [(FinSection, &str); 3] = [(FinSection::Square, "Square"), (FinSection::Rounded, "Round"), (FinSection::Airfoil, "Airfoil")];
+/// The fin cross-section options (the hexagonal section stands for any wedge length). Six do not fit a segmented switch in the
+/// column, so they are a select.
+const SECTIONS: [(FinSection, &str); 6] = [
+    (FinSection::Square, "Square"),
+    (FinSection::Rounded, "Rounded"),
+    (FinSection::Airfoil, "Airfoil"),
+    (FinSection::DoubleWedge, "Double wedge"),
+    (FinSection::Hexagonal(FinSection::DEFAULT_WEDGE_FRACTION), "Hexagonal"),
+    (FinSection::Biconvex, "Biconvex"),
+];
 /// Symmetry counts offered for a radial group.
 const COUNTS: [(u8, &str); 6] = [(1, "1"), (2, "2"), (3, "3"), (4, "4"), (6, "6"), (8, "8")];
 
@@ -59,6 +67,9 @@ pub fn view<'a>(p: &Params<'a>) -> Vec<Element<'a, Message>> {
     out.push(section_picking(2, "Position", true, in_position, position(p)));
     if let Some(rows) = material_rows(p) {
         out.push(section(3, "Material & finish", true, rows));
+    } else if let Some(pod) = p.rocket.radial(p.id).filter(|r| r.kind.is_pod()) {
+        // A pod has no stock of its own, but its drag may be overridden as a whole.
+        out.push(section(3, "Aerodynamics", true, drag_rows(p, pod.cd_override)));
     }
     out.push(section(4, "Mass", true, mass(p)));
     out.push(notes(p));
@@ -82,13 +93,21 @@ fn axial<'a>(p: &Params<'a>, part: &Part) -> Vec<Element<'a, Message>> {
     let f = &p.form;
     let mut rows = Vec::new();
     match &part.kind {
-        PartKind::NoseCone { shape, length, diameter } => {
+        PartKind::NoseCone { shape, length, diameter, tip_radius } => {
             rows.push(f.num("Length", *length, Quantity::Length, dim(Dim::Length)));
             rows.push(f.num("Base Ø", *diameter, Quantity::Length, dim(Dim::Diameter)));
             if let Some(parameter) = shape.parameter() {
                 let label = if matches!(shape, bowshock_model::NoseShape::PowerSeries(_)) { "Exponent n" } else { "Shape C" };
                 rows.push(f.num(label, parameter, Quantity::Scalar, dim(Dim::Shape)));
             }
+            // The spherical tip: 0 is pointed. A family no sphere is tangent to shows the reason instead of a field.
+            rows.push(match part.kind.tip_radius_refusal() {
+                Some(reason) => with_tip(f.fixed("Tip radius", 0.0, Quantity::Length), reason),
+                None => with_tip(
+                    f.num("Tip radius", *tip_radius, Quantity::Length, dim(Dim::TipRadius)),
+                    "Radius of the spherical tip, tangent to the profile; 0 is pointed. The length above is the nose as built, from the tip to the base.",
+                ),
+            });
         }
         PartKind::BodyTube { length, diameter } => {
             rows.push(f.num("Length", *length, Quantity::Length, dim(Dim::Length)));
@@ -169,7 +188,17 @@ fn radial_rows<'a>(p: &Params<'a>, radial: &RadialPart) -> Vec<Element<'a, Messa
         }
     }
     if radial.kind.is_fin() {
-        rows.push(labeled("Cross-section", segmented_fill(&SECTIONS, radial.cross_section, Message::CrossSection)));
+        rows.push(labeled("Outline", button("Outline from image…", Weight::Secondary).on_press(Message::OutlineFromImage).into()));
+        let current = radial.cross_section;
+        let shown = if matches!(current, FinSection::Hexagonal(_)) { FinSection::Hexagonal(FinSection::DEFAULT_WEDGE_FRACTION) } else { current };
+        // picking Hex again keeps the wedge length the group has
+        let pick = move |s: FinSection| {
+            Message::CrossSection(if let (FinSection::Hexagonal(_), FinSection::Hexagonal(f)) = (s, current) { FinSection::Hexagonal(f) } else { s })
+        };
+        rows.push(labeled("Cross-section", choose(SECTIONS.iter().map(|(s, name)| (*s, name.to_string())).collect(), &shown, pick)));
+        if let FinSection::Hexagonal(fraction) = current {
+            rows.push(p.form.num("Wedge length", fraction, Quantity::Percentage, Field::WedgeLength));
+        }
         rows.extend(fillet_rows(p, radial));
         rows.extend(tab_rows(p, radial));
     }
@@ -316,8 +345,11 @@ fn deployment_rows<'a>(p: &Params<'a>, id: PartId) -> Vec<Element<'a, Message>> 
     let options: Vec<(Trigger, String)> = Trigger::ALL.iter().map(|t| (*t, t.name().to_string())).collect();
     let head = row![text("DEPLOYMENT").font(MONO).size(9.5).style(theme::muted), separation::badge("PER CONFIG")].spacing(SPACE_2).align_y(iced::Center);
     let mut rows = vec![container(head).padding([SPACE_2, 0.0]).boxed(), labeled("Deploys on", choose(options, &Trigger::of(deploy.event), Message::Trigger))];
-    if let DeployEvent::Altitude(h) = deploy.event {
-        rows.push(f.num("Altitude", h, Quantity::Altitude, Field::DeployAltitude));
+    match deploy.event {
+        DeployEvent::Altitude(h) => rows.push(f.num("Altitude", h, Quantity::Altitude, Field::DeployAltitude)),
+        DeployEvent::SpeedBelow(v) => rows.push(f.num("Below speed", v, Quantity::Velocity, Field::DeploySpeed)),
+        DeployEvent::TiltAbove(a) => rows.push(f.num("Tilt above", a, Quantity::Angle, Field::DeployTilt)),
+        _ => {}
     }
     rows.push(f.num("Delay", deploy.delay, Quantity::Time, Field::DeployDelay));
     rows
@@ -497,8 +529,27 @@ fn material_rows<'a>(p: &Params<'a>) -> Option<Vec<Element<'a, Message>>> {
     if let Some(finish) = finish {
         let finishes: Vec<(Finish, String)> = Finish::ALL.iter().map(|f| (*f, finish_label(*f))).collect();
         rows.push(labeled("Finish", choose(finishes, &finish, Message::Finish)));
+        let cd = match p.rocket.kind_of(p.id)? {
+            PartRef::Axial(part) => part.cd_override,
+            PartRef::Radial(r) => r.cd_override,
+            PartRef::Internal(_) => None,
+        };
+        rows.extend(drag_rows(p, cd));
     }
     Some(rows)
+}
+
+/// `Drag Cd  Computed  Override…`, or the override field and a Clear: the drag coefficient (on the rocket's reference area)
+/// that replaces the part's computed drag in the Extended drag build-up.
+fn drag_rows<'a>(p: &Params<'a>, cd: Option<f64>) -> Vec<Element<'a, Message>> {
+    let ghost = |label: &'static str, message: Message| -> Element<'a, Message> { button(label, Weight::Ghost).on_press(message).into() };
+    match cd {
+        None => vec![value_row("Drag Cd", "Computed".to_string(), Some(ghost("Override…", Message::StartOverride(Field::CdOverride))))],
+        Some(cd) => vec![
+            p.form.overridden("Drag Cd", cd, Quantity::Scalar, Field::CdOverride),
+            value_row("Computed", "Replaced".to_string(), Some(ghost("Clear", Message::ClearOverride(Field::CdOverride)))),
+        ],
+    }
 }
 
 /// `Basswood · 500 kg/m³`.

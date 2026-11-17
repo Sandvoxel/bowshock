@@ -1,11 +1,11 @@
 //! 3D Euler lift engine: tiny ANF-like case on the CPU.
 
+use bowshock_cfd::gas3::cons_to_prim3;
 use bowshock_core::engine::case::{Case, Wake};
 use bowshock_core::engine::case3::Case3;
 use bowshock_core::engine::numerics::Numerics;
 use bowshock_core::engine::run::run_cold;
 use bowshock_core::engine::run3::{lift_forces_upto, run3_cold, run3_on};
-use bowshock_cfd::gas3::cons_to_prim3;
 use bowshock_core::StopReason;
 use std::time::Instant;
 
@@ -45,7 +45,15 @@ fn normal_force_is_antisymmetric_in_alpha() {
     let rel_xcp = (m.x_cp - p.x_cp).abs() / p.x_cp.abs();
     println!(
         "antisymmetry: CN(+2) {:.12} CN(-2) {:.12} rel {:.2e}; x_cp {:.12} {:.12} rel {:.2e}; iters {} {}; wall {:.1}s",
-        p.cn, m.cn, rel_cn, p.x_cp, m.x_cp, rel_xcp, p.iterations, m.iterations, t0.elapsed().as_secs_f64()
+        p.cn,
+        m.cn,
+        rel_cn,
+        p.x_cp,
+        m.x_cp,
+        rel_xcp,
+        p.iterations,
+        m.iterations,
+        t0.elapsed().as_secs_f64()
     );
     assert!(rel_cn < 1e-8, "CN relative asymmetry {rel_cn:e}");
     assert!(rel_xcp < 1e-8, "x_cp relative asymmetry {rel_xcp:e}");
@@ -98,7 +106,10 @@ fn axisymmetric_nose_drag_matches_2d() {
             "M {mach}: 3D nose CA {cd3:.5} ({} it {:?}, {t3:.1}s) | 2D nose CD cell {:.5} extrapolated {:.5} ({} it {:?}, {t2:.1}s) | 3D total CA {:.5} CN {:.2e}",
             r3.iterations, r3.stop_reason, r2.cd_nose_cell, r2.cd_nose, r2.iters, r2.stop_reason, r3.ca, r3.cn
         );
-        println!("M {mach}: 3D nose CA extrapolated {cd3x:.5} vs 2D cd_nose {:.5} ({diff:+.3}%); first-cell {cd3:.5} vs {:.5} ({diff_cell:+.3}%)", r2.cd_nose, r2.cd_nose_cell);
+        println!(
+            "M {mach}: 3D nose CA extrapolated {cd3x:.5} vs 2D cd_nose {:.5} ({diff:+.3}%); first-cell {cd3:.5} vs {:.5} ({diff_cell:+.3}%)",
+            r2.cd_nose, r2.cd_nose_cell
+        );
         assert!(diff.abs() < 1.0, "M {mach}: 3D {cd3x} vs 2D {} ({diff:+.3}%)", r2.cd_nose);
     }
 }

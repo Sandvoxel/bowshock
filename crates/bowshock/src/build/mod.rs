@@ -3,6 +3,7 @@
 //! ([`parts_bin`], [`crate::viewport`], [`lanes`], [`inspector`]). Station Lanes has a fixed height ([`lanes::height`]), so it is
 //! stacked under the viewport rather than being a resizable pane.
 
+pub mod fin_trace;
 pub mod inspector;
 pub mod lanes;
 pub mod parts_bin;

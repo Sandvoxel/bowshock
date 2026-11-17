@@ -10,9 +10,10 @@ use std::sync::Arc;
 
 use iced::time::{Duration, Instant};
 use iced::widget::shader::{self, Action};
-use iced::{keyboard, mouse, Point, Rectangle, Vector};
+use iced::{keyboard, mouse, Point, Rectangle, Size, Vector};
 
 use super::camera::Camera;
+use super::capture::Capture;
 use super::mesh::{Cut, Mesh};
 use super::pipeline::{DrawPlan, Pipeline, Uniforms};
 use super::{InsideView, Message};
@@ -62,6 +63,8 @@ pub struct Scene {
     pub cut: Cut,
     /// Parts aft of this station have dropped away in the phase on show: drawn faint.
     pub fade_from: Option<f32>,
+    /// An image export in progress (see [`super::capture`]).
+    pub capture: Option<Arc<Capture>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,8 +85,8 @@ pub struct Input {
     modifiers: keyboard::Modifiers,
     drag: Option<Drag>,
     last_click: Option<(Instant, Point)>,
-    /// The widget size last reported (zero until the initial fit has been requested).
-    size: iced::Size,
+    /// The widget bounds last reported (zero size until the initial fit has been requested).
+    bounds: Rectangle,
 }
 
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
@@ -94,11 +97,10 @@ impl shader::Program<Message> for Scene {
     type Primitive = Primitive;
 
     fn update(&self, state: &mut Input, event: &iced::Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<Action<Message>> {
-        if bounds.width > 0.0 && bounds.height > 0.0 && state.size != bounds.size() {
-            // The first size triggers the initial fit; later ones only keep the view's idea of the size current.
-            let first = state.size == iced::Size::ZERO;
-            state.size = bounds.size();
-            return Some(Action::publish(if first { Message::Fit(bounds.size()) } else { Message::Resized(bounds.size()) }));
+        if bounds.width > 0.0 && bounds.height > 0.0 && state.bounds != bounds {
+            // Every size or place of the widget is reported; the first one also makes the view fit its model.
+            state.bounds = bounds;
+            return Some(Action::publish(Message::Resized(bounds)));
         }
         match event {
             iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
@@ -202,19 +204,29 @@ impl shader::Program<Message> for Scene {
             InsideView::Exploded => (3.0, false),
         };
         let centre = (self.cut.centre.cos(), self.cut.centre.sin());
+        let uniforms = |camera: &Camera, size: Size| Uniforms {
+            view_proj: camera.view_proj(size).to_cols_array_2d(),
+            light_dir: [light.x, light.y, light.z, 0.0],
+            eye: [eye.x, eye.y, eye.z, if camera.is_ortho() { 0.0 } else { 1.0 }],
+            view_dir: [back.x, back.y, back.z, 0.0],
+            params: [mode, f32::from(self.reveal), self.explode, self.fade_from.unwrap_or(1.0e9)],
+            cut: [centre.0, centre.1, (self.cut.span / 2.0).cos(), 1.0],
+            screen: [camera.scale, 0.0, 0.0, 0.0],
+            colors,
+        };
+        // An image export frames the model like the viewport does (the same field of view, the same share of the height) at its
+        // own size. Its pixels are final: the device pixel ratio is 1.
+        let capture = self.capture.clone().filter(|c| !c.is_done()).map(|c| {
+            let scaled = Camera { scale: camera.scale * c.height as f32 / bounds.height.max(1.0), ..*camera };
+            let mut u = uniforms(&scaled, Size::new(c.width as f32, c.height as f32));
+            u.screen = [scaled.scale, 1.0, 0.0, 0.0];
+            (c, u)
+        });
         Primitive {
-            uniforms: Uniforms {
-                view_proj: camera.view_proj(size).to_cols_array_2d(),
-                light_dir: [light.x, light.y, light.z, 0.0],
-                eye: [eye.x, eye.y, eye.z, if camera.is_ortho() { 0.0 } else { 1.0 }],
-                view_dir: [back.x, back.y, back.z, 0.0],
-                params: [mode, f32::from(self.reveal), self.explode, self.fade_from.unwrap_or(1.0e9)],
-                cut: [centre.0, centre.1, (self.cut.span / 2.0).cos(), 1.0],
-                screen: [camera.scale, 0.0, 0.0, 0.0],
-                colors,
-            },
+            uniforms: uniforms(camera, size),
             plan: DrawPlan { caps: self.inside == InsideView::Cutaway, translucent },
             mesh: self.mesh.clone(),
+            capture,
         }
     }
 
@@ -234,6 +246,8 @@ pub struct Primitive {
     uniforms: Uniforms,
     plan: DrawPlan,
     mesh: Arc<Mesh>,
+    /// An image export waiting for its render, with the uniforms for its size.
+    capture: Option<(Arc<Capture>, Uniforms)>,
 }
 
 impl shader::Primitive for Primitive {
@@ -241,9 +255,71 @@ impl shader::Primitive for Primitive {
 
     fn prepare(&self, pipeline: &mut Pipeline, device: &iced::wgpu::Device, queue: &iced::wgpu::Queue, bounds: &Rectangle, viewport: &shader::Viewport) {
         pipeline.prepare(device, queue, &self.uniforms, self.plan, &self.mesh, bounds, viewport);
+        if let Some((capture, uniforms)) = &self.capture {
+            if capture.claim() {
+                capture.finish(pipeline.capture(device, queue, uniforms, self.plan, capture));
+            }
+        }
     }
 
     fn render(&self, pipeline: &Pipeline, encoder: &mut iced::wgpu::CommandEncoder, target: &iced::wgpu::TextureView, clip_bounds: &Rectangle<u32>) {
         pipeline.render(encoder, target, clip_bounds);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::viewport::{InsideView, Marks};
+    use iced::futures::executor::block_on;
+    use iced::wgpu;
+    use iced::widget::shader::Pipeline as _;
+    use iced::widget::shader::Program as _;
+
+    /// The real capture path on a real device (skipped where there is no adapter): a 640 × 360 transparent render of the example
+    /// has the model in it and clear corners. `BOWSHOCK_CAPTURE_PNG=<file>` also writes it out to look at.
+    #[test]
+    fn a_capture_renders_the_model_at_its_own_size() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok(adapter) = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())) else {
+            eprintln!("no graphics adapter: capture test skipped");
+            return;
+        };
+        let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).expect("a device");
+        let rocket = bowshock_model::Rocket::from_bytes(include_bytes!("../../assets/examples/hpr_l1_cert.bowshock")).expect("the example loads");
+        let mesh = Arc::new(Mesh::from_rocket(&rocket, Marks::default()));
+        let pipeline = Pipeline::new(&device, &queue, wgpu::TextureFormat::Bgra8UnormSrgb);
+        for (w, h) in [(640u32, 360u32), (3840, 2160)] {
+            let (capture, _pixels) = Capture::new(w, h, true, [0.0; 4], mesh.clone());
+            let camera = Camera { target: (mesh.min + mesh.max) / 2.0, scale: 600.0, ..Camera::default() };
+            let scene = Scene {
+                camera,
+                tokens: crate::tokens::DARK,
+                mesh: mesh.clone(),
+                interaction: mouse::Interaction::default(),
+                orbit: true,
+                inside: InsideView::Solid,
+                reveal: false,
+                explode: 0.0,
+                cut: Cut::default(),
+                fade_from: None,
+                capture: Some(capture),
+            };
+            let primitive = scene.draw(&Input::default(), mouse::Cursor::Unavailable, Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 450.0)));
+            let (request, uniforms) = primitive.capture.as_ref().expect("the scene carries the capture");
+            assert!(request.claim());
+            let rgba = pipeline.capture(&device, &queue, uniforms, primitive.plan, request).expect("rendered");
+            let (w, h) = (w as usize, h as usize);
+            assert_eq!(rgba.len(), w * h * 4);
+            let alpha = |x: usize, y: usize| rgba[(y * w + x) * 4 + 3];
+            assert!([(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)].iter().all(|&(x, y)| alpha(x, y) == 0), "corners are clear");
+            let solid = rgba.as_chunks::<4>().0.iter().filter(|p| p[3] == 255).count();
+            assert!(solid > 2000, "{solid} opaque pixels");
+            if let Some(file) = crate::app::env::Env::from_process(false).capture_png.filter(|_| w == 3840) {
+                let mut encoder = png::Encoder::new(std::fs::File::create(file).unwrap(), w as u32, h as u32);
+                encoder.set_color(png::ColorType::Rgba);
+                encoder.write_header().unwrap().write_image_data(&rgba).unwrap();
+            }
+        }
     }
 }

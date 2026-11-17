@@ -2,8 +2,12 @@
 viewport 1280x800
 click (733, 700)
 screenshot staging-dark.png
+click "Prefs"
 click "Light"
+click "Done"
 screenshot staging-light.png
+click "Prefs"
 click "Dark"
+click "Done"
 click "2D"
 screenshot staging-2d-dark.png

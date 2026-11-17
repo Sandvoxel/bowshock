@@ -1,0 +1,53 @@
+# Edit > Preferences…: every page in dark and in light.
+# The settings are a user setting and the Storage page lists real folders, so make the run hermetic (the sizes below are fixtures):
+#   rm -rf /tmp/bowshock-prefs && mkdir -p /tmp/bowshock-prefs/motors /tmp/bowshock-prefs/luma
+#   for i in 1 2 3 4 5 6 7 8; do head -c 4200 /dev/urandom > /tmp/bowshock-prefs/motors/$i.motor; done
+#   head -c 4400000 /dev/urandom > /tmp/bowshock-prefs/luma/pipelines.bin; head -c 3100000 /dev/urandom > /tmp/bowshock-prefs/luma/cost.bin
+#   BOWSHOCK_SETTINGS_FILE=/tmp/bowshock-prefs/settings.json BOWSHOCK_MOTORS_DIR=/tmp/bowshock-prefs/motors \
+#     LUMA_CACHE_DIR=/tmp/bowshock-prefs/luma cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/preferences.drive out/preferences
+viewport 1280x800
+scale 1
+
+# Dark: open from the Edit menu.
+click "Edit"
+click "Preferences…"
+screenshot appearance-dark.png
+click "Units"
+screenshot units-dark.png
+click "in"
+click "kg"
+screenshot units-custom-dark.png
+click "mm"
+click "g"
+click "Compute"
+screenshot compute-dark.png
+click "Remote GPU"
+screenshot compute-remote-dark.png
+click "This computer"
+click "Storage"
+screenshot storage-dark.png
+click "Clear…"
+screenshot storage-clear-confirm-dark.png
+click "Cancel"
+click "Done"
+
+# The same pages in light: the theme is switched on the Appearance page itself (Preferences opens on the page it was left on, so
+# step back to Appearance first).
+click "Edit"
+click "Preferences…"
+click "Appearance"
+click "Light"
+screenshot appearance-light.png
+click "Units"
+screenshot units-light.png
+click "Compute"
+screenshot compute-light.png
+click "Remote GPU"
+screenshot compute-remote-light.png
+click "This computer"
+click "Storage"
+screenshot storage-light.png
+click "Clear…"
+screenshot storage-clear-confirm-light.png
+click "Cancel"
+click "Done"

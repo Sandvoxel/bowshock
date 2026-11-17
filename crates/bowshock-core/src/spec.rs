@@ -1,12 +1,47 @@
 //! Dimensional body description (metres) and its conversion to the internal body (lengths in nose diameters).
 
-use crate::engine::body_grid::{BaseBody, Body, Nose, Segment};
+use bowshock_reference::blunt_nose::MAX_TIP_FRACTION;
+
+use crate::engine::body_grid::{BaseBody, Body, Family, Nose, Segment};
 use crate::error::Error;
 
-/// Longest accepted body, in nose diameters.
-const MAX_LENGTH_DIAMETERS: f64 = 40.0;
+/// Longest accepted body, in nose diameters. The cell count along every tube and cone follows its length (a cell is at most one nose
+/// diameter long at the coarsest grid level), the domain scales with the body length and no solver array or device limit is reached, so
+/// what bounds the length is what has been solved. The two-stage rocket of `tests/long_body.rs` (tangent ogive of fineness 5, a 54 mm
+/// booster on a 38.1 mm sustainer) was run with RANS on the coarse grid on the CPU at Mach 0.5 and 2 at 40, 46, 80 and 100 diameters
+/// (and the Euler sting grid at 40 and 80): every run reaches a stationary drag, in 4500 to 8000 iterations (at 100 diameters 5500 at
+/// Mach 0.5; 15000 at Mach 2, where the drag then wobbles by 0.1 % and the point carries `Warning::OscillatingDrag`); the skin friction
+/// matches the flat-plate estimate over the wetted area to 3 %; the forebody pressure drag does not change with the length; doubling the
+/// axial cell count changes the drag by 0.2 % at 40 as at 80 diameters. The limit was 40 only because the first version of the
+/// validation set it, with no reason recorded. Past 100 diameters nothing has been run.
+const MAX_LENGTH_DIAMETERS: f64 = 100.0;
 /// Steepest accepted nose cone / transition half-angle.
 const MAX_HALF_ANGLE: f64 = 30.0 * std::f64::consts::PI / 180.0;
+
+/// Sharp nose profile family: [`NoseShape`] without its blunted variant, the profile a tip sphere sits on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum SharpShape {
+    /// Cone (half-angle at most 30 deg).
+    Cone,
+    /// Circular-arc tangent ogive.
+    TangentOgive,
+    /// Power series `r/R = (x/L)^n`, `n` in `[0.5, 1]`.
+    Power {
+        /// Exponent.
+        n: f64,
+    },
+    /// Parabolic series with parameter `k` in `[0, 1]` (`0` cone, `1` tangent parabola).
+    Parabolic {
+        /// Series parameter.
+        k: f64,
+    },
+    /// Haack series with parameter `c` in `[0, 1/3]` (`0` Von Karman, `1/3` LV-Haack).
+    Haack {
+        /// Series parameter.
+        c: f64,
+    },
+}
 
 /// Nose profile family.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -30,6 +65,16 @@ pub enum NoseShape {
     Haack {
         /// Series parameter.
         c: f64,
+    },
+    /// A sharp nose with its tip replaced by a sphere tangent to the profile (Crowell, *The Descriptive Geometry of Nose Cones*,
+    /// 1996; `bowshock_reference::blunt_nose`). The [`NoseSpec::length`] is then the nose as built, sphere apex to base; the
+    /// sharp profile the sphere sits on is longer. At most 0.9 of the base radius, and only where a sphere of that radius is
+    /// tangent to the profile.
+    Blunted {
+        /// The sharp profile.
+        base: SharpShape,
+        /// Radius of the tip sphere \[m\].
+        tip_radius: f64,
     },
 }
 
@@ -107,6 +152,15 @@ pub enum FinProfile {
     Airfoil,
     /// Sharp edges, double-wedge section (supersonic wave drag).
     DoubleWedge,
+    /// Sharp edges, hexagonal (modified double wedge) section: a wedge of chordwise length `wedge_fraction` of the chord at the
+    /// leading and at the trailing edge with a flat mid-section (supersonic wave drag). `0 < wedge_fraction <= 0.5`; 0.5 is the
+    /// double wedge.
+    Hexagonal {
+        /// Length of each wedge as a fraction of the chord.
+        wedge_fraction: f64,
+    },
+    /// Sharp edges, biconvex (circular-arc) section (supersonic wave drag).
+    Biconvex,
     /// User-defined symmetric section: upper-surface coordinates `[x/c, z]` from the leading edge (`x = 0`) to the trailing edge
     /// (`x = 1`). Only the shape matters: `z` is normalised by its maximum and the maximum thickness is [`FinSpec::thickness`], so
     /// the scale of `z` is irrelevant (a NACA `.dat` upper surface can be pasted as is).
@@ -164,8 +218,12 @@ impl FinSpec {
         if !(self.sweep.is_finite() && (self.sweep / self.span).atan().abs() <= 75f64.to_radians()) {
             return invalid("fins.sweep", &format!("must be finite with a leading-edge sweep angle of at most 75 degrees, got {}", self.sweep));
         }
-        if let FinProfile::Custom { section } = &self.profile {
-            validate_section(section)?;
+        match &self.profile {
+            FinProfile::Custom { section } => validate_section(section)?,
+            FinProfile::Hexagonal { wedge_fraction } if !(*wedge_fraction > 0.0 && *wedge_fraction <= 0.5) => {
+                return invalid("fins.profile.wedge_fraction", &format!("must be in (0, 0.5], got {wedge_fraction}"));
+            }
+            _ => {}
         }
         let mac = crate::fins::mean_aerodynamic_chord(self.root_chord, self.tip_chord);
         if self.thickness / mac > 0.2 {
@@ -260,33 +318,58 @@ impl BodySpec {
         if !(0.5 * (1.0 - 1e-9)..=12.0 * (1.0 + 1e-9)).contains(&fineness) {
             return invalid("nose.length", &format!("fineness length / diameter = {fineness:.3} must be in [0.5, 12]"));
         }
-        let nose = match n.shape {
-            NoseShape::Cone => {
-                let half_angle = (0.5 * n.diameter / n.length).atan();
-                if half_angle > MAX_HALF_ANGLE {
-                    return invalid("nose.shape", &format!("cone half-angle {:.1} deg exceeds 30 deg", half_angle.to_degrees()));
-                }
-                Nose::cone_fineness(fineness)
-            }
-            NoseShape::TangentOgive => Nose::TangentOgive { fineness },
-            NoseShape::Power { n } => {
+        let (base, tip) = match n.shape {
+            NoseShape::Cone => (SharpShape::Cone, 0.0),
+            NoseShape::TangentOgive => (SharpShape::TangentOgive, 0.0),
+            NoseShape::Power { n } => (SharpShape::Power { n }, 0.0),
+            NoseShape::Parabolic { k } => (SharpShape::Parabolic { k }, 0.0),
+            NoseShape::Haack { c } => (SharpShape::Haack { c }, 0.0),
+            NoseShape::Blunted { base, tip_radius } => (base, tip_radius),
+        };
+        let family = match base {
+            SharpShape::Cone => Family::Cone,
+            SharpShape::TangentOgive => Family::TangentOgive,
+            SharpShape::Power { n } => {
                 if !(0.5..=1.0).contains(&n) {
                     return invalid("nose.shape.n", &format!("must be in [0.5, 1], got {n}"));
                 }
-                Nose::Power { fineness, n }
+                Family::Power { n }
             }
-            NoseShape::Parabolic { k } => {
+            SharpShape::Parabolic { k } => {
                 if !(0.0..=1.0).contains(&k) {
                     return invalid("nose.shape.k", &format!("must be in [0, 1], got {k}"));
                 }
-                Nose::Parabolic { fineness, k }
+                Family::Parabolic { k }
             }
-            NoseShape::Haack { c } => {
+            SharpShape::Haack { c } => {
                 if !(0.0..=1.0 / 3.0).contains(&c) {
                     return invalid("nose.shape.c", &format!("must be in [0, 1/3], got {c}"));
                 }
-                Nose::Haack { fineness, c }
+                Family::Haack { c }
             }
+        };
+        // The cone's half-angle is that of the sharp cone: with a tip sphere the sharp nose is longer than the one as built.
+        let check_cone = |sharp_length: f64| -> Result<(), Error> {
+            let half_angle = (0.5 * n.diameter / sharp_length).atan();
+            if family == Family::Cone && half_angle > MAX_HALF_ANGLE {
+                return invalid("nose.shape", &format!("cone half-angle {:.1} deg exceeds 30 deg", half_angle.to_degrees()));
+            }
+            Ok(())
+        };
+        let nose = if tip == 0.0 {
+            check_cone(n.length)?;
+            family.nose(fineness)
+        } else {
+            if !(tip.is_finite() && tip > 0.0 && tip <= MAX_TIP_FRACTION * 0.5 * n.diameter * (1.0 + 1e-9)) {
+                return invalid("nose.shape.tip_radius", &format!("must be in (0, {MAX_TIP_FRACTION} of the base radius], got {tip}"));
+            }
+            let Some(blunt) = family.blunted(fineness, tip / n.diameter) else {
+                return invalid("nose.shape.tip_radius", "no sphere of that radius is tangent to the nose profile");
+            };
+            if let Nose::Blunt { tip: sphere, .. } = blunt {
+                check_cone(sphere.sharp_length * n.diameter)?;
+            }
+            blunt
         };
         if self.aft.is_empty() {
             return invalid("aft", "needs at least one section");
@@ -344,5 +427,70 @@ mod tests {
         assert!((b.body.nose_length() - 3.0).abs() < 1e-12);
         assert!((b.x_base() - 10.0).abs() < 1e-12);
         assert!((b.base_radius() - 0.4).abs() < 1e-12);
+    }
+
+    fn blunted(base: SharpShape, tip_radius: f64) -> BodySpec {
+        BodySpec { nose: NoseSpec { shape: NoseShape::Blunted { base, tip_radius }, length: 0.3, diameter: 0.1 }, aft: vec![AftSpec::Tube { length: 0.6 }] }
+    }
+
+    /// The solved nose keeps the length as built (the sharp nose behind the sphere is longer), starts at a point, ends at the base
+    /// radius, and is C1 where the sphere meets the profile.
+    #[test]
+    fn a_blunted_nose_keeps_its_built_length_and_is_c1() {
+        for base in [SharpShape::Cone, SharpShape::TangentOgive, SharpShape::Haack { c: 0.0 }, SharpShape::Power { n: 0.75 }] {
+            let (b, s) = blunted(base, 0.02).to_internal().unwrap();
+            assert_eq!(s.d_nose, 0.1);
+            assert!((b.body.nose_length() - 3.0).abs() < 1e-11, "{base:?}: {}", b.body.nose_length());
+            assert!((b.x_base() - 9.0).abs() < 1e-11);
+            let Nose::Blunt { tip, .. } = b.body.nose else { panic!("{base:?}: not blunted") };
+            assert!(tip.sharp_length > 3.0 && (tip.tip_radius - 0.2).abs() < 1e-12);
+            assert_eq!(b.body.r(0.0), 0.0);
+            assert!((b.body.r(3.0) - 0.5).abs() < 1e-12);
+            // value and slope agree across the tangent point
+            let z_t = tip.tangent_z();
+            let h = 1e-6;
+            let (before, after) = (b.body.r(z_t - h), b.body.r(z_t + h));
+            let (slope_before, slope_after) = (b.body.slope(z_t - h), b.body.slope(z_t + h));
+            assert!((after - before - 0.5 * (slope_before + slope_after) * 2.0 * h).abs() < 1e-9, "{base:?}");
+            assert!((slope_before - slope_after).abs() < 1e-4, "{base:?}: {slope_before} vs {slope_after}");
+            // the tip is round: the half-angle there is 90 degrees
+            assert!((b.body.tip_half_angle() - std::f64::consts::FRAC_PI_2).abs() < 1e-3);
+        }
+    }
+
+    /// A blunted cone against the closed form: `r(x) = R (x + cut) / L` behind the tangent point on the sharp cone of length `L`.
+    #[test]
+    fn a_blunted_cone_follows_the_sharp_cone_behind_the_tangent_point() {
+        let (b, _) = blunted(SharpShape::Cone, 0.02).to_internal().unwrap();
+        let (built, k, rn) = (3.0_f64, 0.4_f64, 0.2_f64);
+        let c = built - rn;
+        let sharp = (c + k * (c * c + 0.25 * (1.0 - k * k)).sqrt()) / (1.0 - k * k);
+        let cut = rn * ((0.5_f64).hypot(sharp) / 0.5 - 1.0);
+        for x in [1.0, 1.5, 2.0, 2.9] {
+            assert!((b.body.r(x) - 0.5 * (x + cut) / sharp).abs() < 1e-12, "x {x}");
+        }
+    }
+
+    #[test]
+    fn a_tip_radius_no_sphere_fits_is_refused() {
+        // more than 0.9 of the base radius
+        let err = blunted(SharpShape::Cone, 0.049).to_internal().unwrap_err().to_string();
+        assert!(err.contains("tip_radius"), "{err}");
+        assert!(blunted(SharpShape::Cone, f64::NAN).to_internal().is_err());
+        assert!(blunted(SharpShape::Cone, -0.01).to_internal().is_err());
+        // n < 1/2 is not a family the solver takes; n = 1/2 has a tip radius of curvature R^2/(2 L): a smaller sphere is not tangent
+        assert!(blunted(SharpShape::Power { n: 0.4 }, 0.02).to_internal().is_err());
+        assert!(blunted(SharpShape::Power { n: 0.5 }, 0.001).to_internal().is_err());
+        // zero is the sharp nose, as `Cone` is
+        let (zero, _) = blunted(SharpShape::TangentOgive, 0.0).to_internal().unwrap();
+        let (sharp, _) =
+            BodySpec { nose: NoseSpec { shape: NoseShape::TangentOgive, ..spec().nose }, aft: vec![AftSpec::Tube { length: 0.6 }] }.to_internal().unwrap();
+        assert!(matches!(zero.body.nose, Nose::TangentOgive { .. }) && zero.body.r(1.5) == sharp.body.r(1.5));
+        // the cone limit is the sharp cone's half-angle
+        let steep = BodySpec {
+            nose: NoseSpec { shape: NoseShape::Blunted { base: SharpShape::Cone, tip_radius: 0.0 }, length: 0.05, diameter: 0.1 },
+            aft: vec![AftSpec::Tube { length: 0.5 }],
+        };
+        assert!(steep.to_internal().unwrap_err().to_string().contains("half-angle"));
     }
 }

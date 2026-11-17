@@ -3,11 +3,15 @@ click "Analyze"
 move (100, 700)
 move (102, 702)
 screenshot an-dark.png
+click "Prefs"
 click "Light"
+click "Done"
 move (100, 700)
 move (102, 702)
 screenshot an-light.png
+click "Prefs"
 click "Dark"
+click "Done"
 click "Simulate"
 click "Run all"
 click (17, 94)
@@ -16,5 +20,7 @@ click (17, 226)
 move (100, 700)
 move (102, 702)
 screenshot compare-dark.png
+click "Prefs"
 click "Light"
+click "Done"
 screenshot compare-light.png

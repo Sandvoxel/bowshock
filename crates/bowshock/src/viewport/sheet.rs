@@ -41,10 +41,8 @@ impl<Message> canvas::Program<Message> for Sheet {
             let a = self.camera.project(Vec3::new(0.0, 0.0, z0 - pad), size);
             let b = self.camera.project(Vec3::new(0.0, 0.0, z1 + pad), size);
             if (b.x - a.x).hypot(b.y - a.y) > 1.0 {
-                let dashed = Stroke {
-                    line_dash: LineDash { segments: &[8.0, 4.0, 2.0, 4.0], offset: 0 },
-                    ..Stroke::default().with_color(t.grid_major.scale_alpha(2.0)).with_width(1.0)
-                };
+                let dashed =
+                    Stroke { line_dash: LineDash { segments: &[8.0, 4.0, 2.0, 4.0], offset: 0 }, ..Stroke::default().with_color(t.grid_major).with_width(1.0) };
                 frame.stroke(&Path::line(a, b), dashed);
             }
         }

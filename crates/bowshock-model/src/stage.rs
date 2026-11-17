@@ -1,5 +1,6 @@
-//! Stages, derived (never stored) from the motor mounts: one stage per in-line group of mounts, split at the first joint between
-//! airframe parts at or aft of the upper motor's aft end.
+//! Stages, derived (never stored) from the motor mounts: one stage per in-line group of mounts, split at a joint between
+//! airframe parts: by default the first one at or aft of the upper motor's aft end, or the joint the user chose (the one stored
+//! per-rocket choice, see [`Rocket::set_separation_joint`]).
 
 use std::fmt;
 
@@ -19,8 +20,19 @@ pub struct Separation {
     pub station: f64,
     /// The airframe parts either side of the joint, fore then aft.
     pub joint_between: (PartId, PartId),
-    /// The motor mount of the upper stage whose aft end the joint was found from.
+    /// The motor mount of the upper stage whose aft end the default joint is found from.
     pub found_from: PartId,
+    /// The joint was chosen by the user (see [`Rocket::set_separation_joint`]) rather than found by the default rule.
+    pub chosen: bool,
+}
+
+/// A joint a separation can be moved to (see [`Rocket::separation_joints`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct JointOption {
+    /// Station of the joint, from the rocket's tip.
+    pub station: f64,
+    /// The airframe parts either side of the joint, fore then aft. The aft part is what the choice is stored as.
+    pub between: (PartId, PartId),
 }
 
 /// A problem with a stage's separation.
@@ -80,32 +92,55 @@ impl fmt::Display for SplitError {
 
 impl std::error::Error for SplitError {}
 
+/// Everything about one separation (the boundary between cluster `p - 1` and cluster `p`) that the default rule and the
+/// choice share.
+struct Gap {
+    /// Key of the stored choice: the upper cluster's fore-most mount.
+    key: PartId,
+    /// The upper cluster's mount with the aft-most motor end.
+    source: MotorMount,
+    /// The joints a separation here can take, fore to aft.
+    eligible: Vec<JointOption>,
+    /// The first joint at or aft of the upper motor's aft end (the default rule).
+    default: Option<JointOption>,
+}
+
 impl Rocket {
+    /// The separation between cluster `p - 1` (above) and cluster `p`, or `None` when either has no motors.
+    fn gap(&self, clusters: &[Vec<MotorMount>], stations: &[f64], p: usize) -> Option<Gap> {
+        let (upper, lower) = (clusters.get(p.checked_sub(1)?)?, clusters.get(p)?);
+        let source = upper.iter().max_by(|a, b| a.motor_aft_station.total_cmp(&b.motor_aft_station)).copied()?;
+        let lower_fore = lower.iter().map(|m| m.fore_station).reduce(f64::min)?;
+        let tube_aft = upper.iter().map(|m| m.aft_station).fold(f64::NEG_INFINITY, f64::max);
+        let reach = source.motor_aft_station.min(tube_aft);
+        let joints: Vec<JointOption> =
+            (1..self.parts.len()).map(|j| JointOption { station: stations[j], between: (self.parts[j - 1].id, self.parts[j].id) }).collect();
+        let default = joints.iter().find(|j| j.station >= source.motor_aft_station - TOL && j.station <= lower_fore + TOL).copied();
+        let eligible = joints.into_iter().filter(|j| j.station >= reach - TOL && j.station <= lower_fore + TOL).collect();
+        Some(Gap { key: upper[0].id, source, eligible, default })
+    }
+
     /// The stages, in firing order (stage 1, the aft-most, first). A rocket with fewer than two in-line motor mounts (a
     /// cluster is one stage) has the single stage 1 and no separation. See the Staging spec: the separation of a stage is the
-    /// first joint between airframe parts at or aft of the upper motor's aft end (mount aft end plus overhang) and at or
-    /// fore of the stage's own mounts; if there is none the stage carries a [`StageIssue::NoJoint`].
+    /// joint the user chose for it ([`Rocket::set_separation_joint`]) while that choice is eligible, otherwise the first joint
+    /// between airframe parts at or aft of the upper motor's aft end (mount aft end plus overhang) and at or fore of the
+    /// stage's own mounts; if there is none the stage carries a [`StageIssue::NoJoint`].
     pub fn stages(&self) -> Vec<Stage> {
         let clusters = self.mount_clusters();
         let length = self.length();
         let count = clusters.len().max(1);
         let stations = self.stations();
-        let joints: Vec<(f64, (PartId, PartId))> = (1..self.parts.len()).map(|j| (stations[j], (self.parts[j - 1].id, self.parts[j].id))).collect();
 
         // For cluster `p` (0 is the fore-most): the separation from the cluster ahead of it.
         let find = |p: usize| -> (Option<Separation>, Option<StageIssue>) {
-            if p == 0 {
-                return (None, None);
-            }
-            let (upper, lower) = (&clusters[p - 1], &clusters[p]);
-            let source = upper.iter().max_by(|a, b| a.motor_aft_station.total_cmp(&b.motor_aft_station)).copied();
-            let (Some(source), Some(lower_fore)) = (source, lower.iter().map(|m| m.fore_station).reduce(f64::min)) else {
+            let Some(gap) = self.gap(&clusters, &stations, p) else {
                 return (None, None);
             };
-            let upper_aft = source.motor_aft_station;
-            match joints.iter().find(|(s, _)| *s >= upper_aft - TOL && *s <= lower_fore + TOL) {
-                Some(&(station, joint_between)) => (Some(Separation { station, joint_between, found_from: source.id }), None),
+            let chosen = self.separation_joints.get(&gap.key).and_then(|&aft| gap.eligible.iter().find(|j| j.between.1 == aft)).copied();
+            match chosen.or(gap.default) {
+                Some(j) => (Some(Separation { station: j.station, joint_between: j.between, found_from: gap.source.id, chosen: chosen.is_some() }), None),
                 None => {
+                    let upper_aft = gap.source.motor_aft_station;
                     let tube = (0..self.parts.len())
                         .find(|&j| upper_aft >= stations[j] - TOL && upper_aft < stations[j + 1] - TOL)
                         .or(self.parts.len().checked_sub(1));
@@ -135,6 +170,55 @@ impl Rocket {
                 }
             })
             .collect()
+    }
+
+    /// The joints the separation of stage `stage` (the [`Stage::index`] of the stage below the joint: 1 for a two-stage
+    /// rocket) can be moved to, fore to aft; empty when that stage has no separation. A joint between two airframe parts is
+    /// eligible when it lies at or aft of the upper stage's
+    /// motor-mount reach, `min(aft end of the upper motor, aft end of the upper motor-mount tube)` (so the upper stage
+    /// contains its mount tube, and its motor too unless the motor overhangs the tube), and at or fore of the fore end of
+    /// the lower stage's foremost motor-mount tube (so the lower stage contains its mounts). The default joint (see
+    /// [`stages`](Self::stages)) is always among them when it exists. A motor overhanging the chosen joint is not warned about.
+    pub fn separation_joints(&self, stage: usize) -> Vec<JointOption> {
+        let clusters = self.mount_clusters();
+        let count = clusters.len().max(1);
+        if stage < 1 || stage >= count {
+            return Vec::new();
+        }
+        self.gap(&clusters, &self.stations(), count - stage).map(|g| g.eligible).unwrap_or_default()
+    }
+
+    /// The joint the user chose for stage `stage`'s separation, as the first airframe part behind it, if that choice is stored
+    /// and still eligible; `None` when the separation is automatic.
+    pub fn separation_choice(&self, stage: usize) -> Option<PartId> {
+        let sep = self.stages().into_iter().find(|s| s.index == stage)?.separation?;
+        sep.chosen.then_some(sep.joint_between.1)
+    }
+
+    /// Chooses the joint stage `stage` separates at: `Some(part)` stores the airframe part just aft of the joint (it must be
+    /// one of [`separation_joints`](Self::separation_joints)), `None` returns to the automatic joint. Returns whether
+    /// anything changed; an ineligible part changes nothing. The choice is keyed by the upper stage's foremost motor mount,
+    /// not by the stage number, so adding or removing other stages does not move it, and it is kept (but ignored while
+    /// ineligible) when parts come and go. Choosing the joint the automatic rule would pick stores no choice.
+    pub fn set_separation_joint(&mut self, stage: usize, joint: Option<PartId>) -> bool {
+        let clusters = self.mount_clusters();
+        let count = clusters.len().max(1);
+        if stage < 1 || stage >= count {
+            return false;
+        }
+        let Some(gap) = self.gap(&clusters, &self.stations(), count - stage) else {
+            return false;
+        };
+        let wanted = match joint {
+            None => None,
+            Some(aft) if gap.default.is_some_and(|d| d.between.1 == aft) => None,
+            Some(aft) if gap.eligible.iter().any(|j| j.between.1 == aft) => Some(aft),
+            Some(_) => return false,
+        };
+        match wanted {
+            Some(aft) => self.separation_joints.insert(gap.key, aft) != Some(aft),
+            None => self.separation_joints.remove(&gap.key).is_some(),
+        }
     }
 
     /// Every stage's issue, in firing order.
@@ -190,6 +274,8 @@ impl Rocket {
         if !(a > TOL && a < length - TOL) {
             return Err(SplitError::OutOfRange);
         }
+        let carried = self.carried_ids(id);
+        self.release_touching(&carried);
         let b = length - a;
         let (fore_kind, aft_kind) = match part.kind {
             PartKind::Transition { fore_diameter, aft_diameter, .. } => {
@@ -204,10 +290,20 @@ impl Rocket {
         let new_id = self.next_id;
         self.next_id += 1;
         let share = |fraction: f64| part.mass_override.map(|m| m * fraction);
-        let aft_part = Part { id: new_id, kind: aft_kind, mass_override: share(b / length), cg_override: None, shoulder_fore: Shoulder::NONE, ..part.clone() };
+        let share_cd = |fraction: f64| part.cd_override.map(|c| c * fraction);
+        let aft_part = Part {
+            id: new_id,
+            kind: aft_kind,
+            mass_override: share(b / length),
+            cg_override: None,
+            cd_override: share_cd(b / length),
+            shoulder_fore: Shoulder::NONE,
+            ..part.clone()
+        };
         self.parts[index].kind = fore_kind;
         self.parts[index].shoulder_aft = Shoulder::NONE;
         self.parts[index].mass_override = share(a / length);
+        self.parts[index].cd_override = share_cd(a / length);
         self.parts[index].cg_override = None;
         self.parts.insert(index + 1, aft_part);
 
@@ -241,7 +337,7 @@ mod tests {
 
     fn nose_and_tube(tube_len: f64) -> (Rocket, PartId) {
         let mut r = Rocket::default();
-        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.3, diameter: 0.0762 }).unwrap();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.3, diameter: 0.0762, tip_radius: 0.0 }).unwrap();
         let t = r.insert(1, PartKind::BodyTube { length: tube_len, diameter: 0.0762 }).unwrap();
         (r, t)
     }
@@ -265,7 +361,7 @@ mod tests {
     #[test]
     fn two_stages_split_at_the_joint_behind_the_upper_motor() {
         let mut r = Rocket::default();
-        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.3, diameter: 0.0762 }).unwrap();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.3, diameter: 0.0762, tip_radius: 0.0 }).unwrap();
         let upper = r.insert(1, PartKind::BodyTube { length: 0.5, diameter: 0.0762 }).unwrap();
         let booster = r.insert(2, PartKind::BodyTube { length: 0.5, diameter: 0.0762 }).unwrap();
         let m_up = r.attach_internal(upper, 0.3, mount(0.0)).unwrap();
@@ -379,5 +475,81 @@ mod tests {
         let (x, y) = t.split_tube(tr, 0.04).unwrap();
         assert!((t.part(x).unwrap().kind.aft_diameter() - 0.08).abs() < 1e-12);
         assert!((t.part(y).unwrap().kind.fore_diameter() - 0.08).abs() < 1e-12);
+    }
+
+    /// Nose, upper tube, two interstage tubes and a booster; one motor mount in the upper tube and one in the booster.
+    /// Joints at 0.8 (upper | inter1), 1.0 (inter1 | inter2), 1.2 (inter2 | booster).
+    fn three_joint_rocket() -> (Rocket, [PartId; 4], [PartId; 2]) {
+        let mut r = Rocket::default();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.3, diameter: 0.0762, tip_radius: 0.0 }).unwrap();
+        let upper = r.insert(1, PartKind::BodyTube { length: 0.5, diameter: 0.0762 }).unwrap();
+        let inter1 = r.insert(2, PartKind::BodyTube { length: 0.2, diameter: 0.0762 }).unwrap();
+        let inter2 = r.insert(3, PartKind::BodyTube { length: 0.2, diameter: 0.0762 }).unwrap();
+        let booster = r.insert(4, PartKind::BodyTube { length: 0.5, diameter: 0.0762 }).unwrap();
+        let m_up = r.attach_internal(upper, 0.3, mount(0.0)).unwrap();
+        let m_low = r.attach_internal(booster, 0.3, mount(0.0)).unwrap();
+        (r, [upper, inter1, inter2, booster], [m_up, m_low])
+    }
+
+    #[test]
+    fn a_chosen_joint_moves_the_stage_spans_and_the_default_stays_without_one() {
+        let (mut r, [upper, inter1, inter2, booster], _) = three_joint_rocket();
+        let auto = r.stages();
+        let sep = auto[0].separation.unwrap();
+        assert!((sep.station - 0.8).abs() < 1e-12 && sep.joint_between == (upper, inter1) && !sep.chosen);
+        assert_eq!(r.separation_choice(1), None);
+        let joints = r.separation_joints(1);
+        assert_eq!(joints.iter().map(|j| j.between).collect::<Vec<_>>(), vec![(upper, inter1), (inter1, inter2), (inter2, booster)]);
+        assert!(r.separation_joints(2).is_empty() && r.separation_joints(0).is_empty());
+
+        assert!(r.set_separation_joint(1, Some(inter2)));
+        assert!(!r.set_separation_joint(1, Some(inter2)), "no change the second time");
+        let stages = r.stages();
+        let sep = stages[0].separation.unwrap();
+        assert!(sep.chosen && (sep.station - 1.0).abs() < 1e-12 && sep.joint_between == (inter1, inter2));
+        assert!((stages[0].fore_station - 1.0).abs() < 1e-12 && (stages[1].aft_station - 1.0).abs() < 1e-12);
+        assert_eq!((r.stage_of(inter1), r.stage_of(inter2)), (Some(2), Some(1)));
+        assert_eq!(r.separation_choice(1), Some(inter2));
+
+        // The default joint, ineligible parts and unknown stages are not stored.
+        assert!(r.set_separation_joint(1, Some(inter1)), "back to the default joint clears the choice");
+        assert_eq!(r.separation_choice(1), None);
+        assert!(!r.set_separation_joint(1, Some(upper)) && !r.set_separation_joint(1, Some(999)) && !r.set_separation_joint(2, Some(inter2)));
+        assert!(r.set_separation_joint(1, Some(inter2)));
+        assert!(r.set_separation_joint(1, None));
+        assert_eq!(r.stages(), auto);
+    }
+
+    #[test]
+    fn a_stale_choice_falls_back_to_automatic_and_comes_back() {
+        let (mut r, [upper, inter1, inter2, booster], [_, m_low]) = three_joint_rocket();
+        // Ineligible: the lower mount moves up to station 1.0, so the joint at 1.2 is aft of it.
+        assert!(r.set_separation_joint(1, Some(booster)));
+        let chosen = r.clone();
+        r.move_internal(m_low, inter2, 0.0).unwrap();
+        let sep = r.stages()[0].separation.unwrap();
+        assert!(!sep.chosen && sep.joint_between == (upper, inter1), "{sep:?}");
+        assert_eq!(r.separation_choice(1), None);
+        assert!(!r.separation_joints(1).iter().any(|j| j.between.1 == booster));
+        // Not deleted: moving the mount back makes it count again.
+        r.move_internal(m_low, booster, 0.3).unwrap();
+        assert_eq!(r.stages(), chosen.stages());
+        // A deleted part: the choice is ignored.
+        let (mut r, [upper, inter1, inter2, _], _) = three_joint_rocket();
+        assert!(r.set_separation_joint(1, Some(inter2)));
+        r.remove(inter2);
+        let sep = r.stages()[0].separation.unwrap();
+        assert!(!sep.chosen && sep.joint_between == (upper, inter1));
+    }
+
+    #[test]
+    fn a_choice_survives_a_save_and_old_documents_have_none() {
+        let (mut r, [_, _, inter2, _], _) = three_joint_rocket();
+        assert!(r.set_separation_joint(1, Some(inter2)));
+        let back = Rocket::from_bytes(&r.to_bytes()).unwrap();
+        assert_eq!(back, r);
+        assert_eq!(back.separation_choice(1), Some(inter2));
+        let (plain, _, _) = three_joint_rocket();
+        assert!(Rocket::from_bytes(&plain.to_bytes()).unwrap().separation_joints.is_empty());
     }
 }

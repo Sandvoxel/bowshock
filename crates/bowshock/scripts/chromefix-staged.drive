@@ -3,5 +3,7 @@ viewport 1280x800
 scale 1
 click (733, 700)
 screenshot staged-dark.png
+click "Prefs"
 click "Light"
+click "Done"
 screenshot staged-light.png

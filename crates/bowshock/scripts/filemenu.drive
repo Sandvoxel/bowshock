@@ -1,10 +1,28 @@
-# The File menu: click the file name in the top bar. Headless runs cannot show OS dialogs, so the import path is
-# BOWSHOCK_OPEN=crates/bowshock-model/tests/data/mini_two_stage.ork (the title then reads "<name> (imported)", untitled).
+# The File, Edit and View menus: the three menu labels at the left of the top bar, in dark and in light. Headless runs cannot show
+# OS dialogs, so the import path is BOWSHOCK_OPEN=crates/bowshock-model/tests/data/mini_two_stage.ork (the title then reads
+# "<name> (imported)", untitled).
 #   BOWSHOCK_RECENT_FILE=/tmp/bowshock-recent.txt cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/filemenu.drive out/filemenu
 viewport 1280x800
-click "hpr_l1_cert"
+
+# Dark: each menu opens under its label; clicking the next label switches menus.
+click "File"
 screenshot filemenu-dark.png
-press escape
+click "Edit"
+screenshot editmenu-dark.png
+click "View"
+screenshot viewmenu-dark.png
+# A click on the open label closes its menu (the headless driver delivers keys to widgets only, so Escape does not reach the app).
+click "View"
+
+# The theme is switched in Preferences > Appearance (the Edit menu's Preferences… opens the same window).
+click "Prefs"
 click "Light"
-click "hpr_l1_cert"
+click "Done"
+
+click "File"
 screenshot filemenu-light.png
+click "Edit"
+screenshot editmenu-light.png
+click "View"
+screenshot viewmenu-light.png
+click "View"

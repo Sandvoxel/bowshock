@@ -65,7 +65,14 @@ fn main() {
     let new_s = t0.elapsed().as_secs_f64();
     let res = r.run_on(&case, false).unwrap();
     let wall = t0.elapsed().as_secs_f64();
-    println!("cold point (new {new_s:.3} s + run {:.3} s) = {wall:.3} s: CN {:.4} x_cp {:.3} {:?} after {} iterations", wall - new_s, res.cn, res.x_cp, res.stop_reason, res.iterations);
+    println!(
+        "cold point (new {new_s:.3} s + run {:.3} s) = {wall:.3} s: CN {:.4} x_cp {:.3} {:?} after {} iterations",
+        wall - new_s,
+        res.cn,
+        res.x_cp,
+        res.stop_reason,
+        res.iterations
+    );
     let iters = take_timings();
     iters.iter().for_each(row);
     let it = iters[0].iters_exec.max(1);

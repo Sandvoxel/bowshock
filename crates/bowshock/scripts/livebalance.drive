@@ -11,7 +11,7 @@ move (740, 284)
 screenshot fin-move-2d.png
 move (861, 284)
 release (861, 284)
-click (352, 20)
+click "Undo"
 click "3D"
 press (816, 247)
 move (805, 250)
@@ -20,7 +20,7 @@ move (760, 272)
 screenshot fin-move-3d.png
 move (816, 247)
 release (816, 247)
-click (352, 20)
+click "Undo"
 click "2D"
 press "Body tube"
 move (300, 400)
@@ -36,8 +36,10 @@ move (620, 729)
 screenshot lane-bar.png
 move (487, 729)
 release (487, 729)
-click (352, 20)
-click (935, 20)
+click "Undo"
+click "Prefs"
+click "Light"
+click "Done"
 press (861, 284)
 move (850, 284)
 move (800, 284)
@@ -45,7 +47,7 @@ move (740, 284)
 screenshot light-fin-move-2d.png
 move (861, 284)
 release (861, 284)
-click (352, 20)
+click "Undo"
 press "Body tube"
 move (300, 400)
 move (380, 320)

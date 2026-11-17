@@ -747,7 +747,7 @@ mod tests {
     #[test]
     fn empty_lanes_are_hidden_and_short_parts_open_no_row() {
         let mut rocket = Rocket::default();
-        let nose = rocket.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1 }).unwrap();
+        let nose = rocket.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1, tip_radius: 0.0 }).unwrap();
         let tube = rocket.insert(1, PartKind::BodyTube { length: 0.5, diameter: 0.1 }).unwrap();
         let _ = nose;
         let ring = |r: &mut Rocket, at: f64| {
@@ -765,7 +765,7 @@ mod tests {
     #[test]
     fn two_discs_at_one_station_are_flagged() {
         let mut rocket = Rocket::default();
-        rocket.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1 }).unwrap();
+        rocket.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1, tip_radius: 0.0 }).unwrap();
         let tube = rocket.insert(1, PartKind::BodyTube { length: 0.5, diameter: 0.1 }).unwrap();
         let kind = InternalKind::CenteringRing { outer_diameter: None, inner_diameter: None, thickness: 0.006 };
         let a = rocket.attach_internal(tube, 0.1, kind.clone()).unwrap();
@@ -806,7 +806,7 @@ mod tests {
     #[test]
     fn the_phase_fades_what_has_dropped_away() {
         let mut rocket = Rocket::default();
-        rocket.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1 }).unwrap();
+        rocket.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1, tip_radius: 0.0 }).unwrap();
         let sustainer = rocket.insert(1, PartKind::BodyTube { length: 0.6, diameter: 0.1 }).unwrap();
         let booster = rocket.insert(2, PartKind::BodyTube { length: 0.5, diameter: 0.1 }).unwrap();
         let mount = |r: &mut Rocket, tube: PartId| {
@@ -838,7 +838,7 @@ mod pod_tests {
     /// tube and a ballast in it. Returns the rocket, the pod set, the pod's tube, its fins and the ballast.
     fn with_pods() -> (Rocket, PartId, PartId, PartId, PartId) {
         let mut r = Rocket::default();
-        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1 }).unwrap();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1, tip_radius: 0.0 }).unwrap();
         let core = r.insert(1, PartKind::BodyTube { length: 0.8, diameter: 0.1 }).unwrap();
         let kind = r.default_pod();
         let pod = r.attach_radial(core, 0.2, 0.0, 2, kind).unwrap();
@@ -973,7 +973,7 @@ mod pod_tests {
     #[test]
     fn a_pods_motor_drops_away_with_the_stage_the_pod_stands_on() {
         let mut rocket = Rocket::default();
-        rocket.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1 }).unwrap();
+        rocket.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1, tip_radius: 0.0 }).unwrap();
         let sustainer = rocket.insert(1, PartKind::BodyTube { length: 0.6, diameter: 0.1 }).unwrap();
         let booster = rocket.insert(2, PartKind::BodyTube { length: 0.5, diameter: 0.1 }).unwrap();
         let (s_mount, b_mount) = (mount(&mut rocket, sustainer, 0.25), mount(&mut rocket, booster, 0.25));

@@ -78,13 +78,7 @@ mod tests {
     }
 
     fn state(rng: &mut Rng, vmax: f64) -> Prim3 {
-        [
-            rng.range(0.5, 2.0),
-            rng.range(-vmax, vmax),
-            rng.range(-vmax, vmax),
-            rng.range(-vmax, vmax),
-            rng.range(0.5, 2.0),
-        ]
+        [rng.range(0.5, 2.0), rng.range(-vmax, vmax), rng.range(-vmax, vmax), rng.range(-vmax, vmax), rng.range(0.5, 2.0)]
     }
 
     #[test]

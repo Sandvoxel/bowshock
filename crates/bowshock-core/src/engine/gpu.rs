@@ -219,6 +219,8 @@ impl GpuRunner {
             } else {
                 None
             };
+            // whether the host solver holds the state of the end of this chunk
+            let downloaded = value.is_some() && sampler.is_none();
             let last_r = h.last().copied();
             for (k, r) in h.into_iter().enumerate() {
                 let it = done + k;
@@ -236,6 +238,15 @@ impl GpuRunner {
                 }
             }
             done += len;
+            if iters_stop.is_none() && len == SYNC {
+                if let Some(tap) = case.fields.as_ref().filter(|t| t.due(done)) {
+                    // a snapshot of the run in flight: the state is read back only when the monitor has not already done so
+                    if !downloaded {
+                        self.download()?;
+                    }
+                    tap.send(&self.host, case.mach, done, case.wake);
+                }
+            }
             if iters_stop.is_none() && len == SYNC && report(case, done, last_r.unwrap_or(f64::NAN), r_ref.unwrap_or(rmax), &hist).is_break() {
                 reason = StopReason::Cancelled;
                 iters_stop = Some(done);

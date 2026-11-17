@@ -1,0 +1,19 @@
+# File > Print / export PDF…, Export 3D model…, Export image…: the three dialogs.
+# Each dialog is opened from the File menu in the top bar.
+#   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/export-dialogs.drive out/export
+viewport 1280x800
+click "File"
+click "Print / export PDF…"
+screenshot print-dialog.png
+click "Cancel"
+click "File"
+click "Export 3D model…"
+click "STL"
+click "Include internal parts"
+screenshot model-dialog.png
+click "Cancel"
+click "File"
+click "Export image…"
+click "Transparent background"
+click "Custom"
+screenshot image-dialog.png

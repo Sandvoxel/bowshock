@@ -76,10 +76,8 @@ impl<M> canvas::Program<M> for Cover {
         frame.stroke(&grid(false), Stroke::default().with_color(t.grid_minor).with_width(1.0));
         frame.stroke(&grid(true), Stroke::default().with_color(t.grid_major).with_width(1.0));
         let axis = Path::line(Point::new(0.0, cy + 0.5), Point::new(w, cy + 0.5));
-        let dashed = Stroke {
-            line_dash: LineDash { segments: &[10.0, 3.0, 2.0, 3.0], offset: 0 },
-            ..Stroke::default().with_color(t.grid_major.scale_alpha(2.0)).with_width(1.0)
-        };
+        let dashed =
+            Stroke { line_dash: LineDash { segments: &[10.0, 3.0, 2.0, 3.0], offset: 0 }, ..Stroke::default().with_color(t.grid_major).with_width(1.0) };
         frame.stroke(&axis, dashed);
 
         // Registration marks, 20 px legs, as the sheet draws them.

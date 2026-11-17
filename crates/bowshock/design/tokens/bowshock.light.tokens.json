@@ -128,7 +128,7 @@
     "sys-aero": {
       "$type": "color",
       "$value": "#11807a",
-      "$description": "Aero system: fins, canards, rail buttons, lugs. The edge of Aero bars in Station Lanes and Aero parts in X-ray / Cutaway."
+      "$description": "Aero system: fins, rail buttons, lugs. The edge of Aero bars in Station Lanes and Aero parts in X-ray / Cutaway."
     },
     "sys-propulsion": {
       "$type": "color",

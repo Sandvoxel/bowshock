@@ -14,7 +14,7 @@ use super::readout::{self, Row, Tag};
 use super::{Comparison, MachField, Message, State};
 use crate::app::{ui, Ctx};
 use crate::theme::{self, MONO, SANS_SEMIBOLD};
-use crate::tokens::{BIN_W, CONTROL_H, RAIL_W, RIGHT_PANEL_W, SPACE_1, SPACE_2, SPACE_3, SPACE_4, TEXT_BODY, TEXT_LABEL};
+use crate::tokens::{BIN_W, CONTROL_H, RAIL_W, RIGHT_PANEL_W, SPACE_1, SPACE_2, SPACE_3, TEXT_BODY, TEXT_LABEL};
 use crate::units::Quantity;
 use crate::widgets::button::{button as push, Weight};
 use crate::widgets::chip::{chip, Severity};
@@ -64,16 +64,18 @@ fn left<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
             label.boxed()
         }
     };
-    let body = column![
-        head("ANALYSES", false),
-        analyses(state),
-        head("METHOD", false),
-        container(method(state)).padding([0.0, SPACE_3]),
-        head("CONDITIONS", true),
-        container(conditions(state, ctx)).padding([0.0, SPACE_3]),
-        Space::new().height(SPACE_3),
-    ]
-    .spacing(SPACE_1);
+    let controls: Vec<Element<'a, Message>> = if state.analysis == Analysis::Optimize {
+        vec![head("OPTIMIZE", true), state.optimize.left(ctx), Space::new().height(SPACE_3).boxed()]
+    } else {
+        vec![
+            head("METHOD", false),
+            container(method(state, ctx)).padding([0.0, SPACE_3]).boxed(),
+            head("CONDITIONS", true),
+            container(conditions(state, ctx)).padding([0.0, SPACE_3]).boxed(),
+            Space::new().height(SPACE_3).boxed(),
+        ]
+    };
+    let body = column![head("ANALYSES", false), analyses(state), column(controls).spacing(SPACE_1)].spacing(SPACE_1);
     scrollable(body).width(Fill).height(Fill).boxed()
 }
 
@@ -111,7 +113,7 @@ fn bubble<'a>(tip: &'a str) -> Element<'a, Message> {
     container(text(tip).size(TEXT_BODY)).width(260).padding([SPACE_1, SPACE_2]).style(|t: &Theme| theme::tooltip(t)).boxed()
 }
 
-fn method(state: &State) -> Element<'_, Message> {
+fn method<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
     let mut cells: Vec<Element<'_, Message>> = Vec::new();
     for (i, m) in [Method::Barrowman, Method::Extended, Method::CfdTable].into_iter().enumerate() {
         if i > 0 {
@@ -189,6 +191,9 @@ fn method(state: &State) -> Element<'_, Message> {
     if let Some(lift) = lift_row {
         col = col.push(lift);
     }
+    if cfd_line {
+        col = col.push(runs_on(ctx));
+    }
     if let Some(stopped) = state.cfd.stopped.as_ref().filter(|s| cfd_line && !solving && s.table.is_some()) {
         let keep: Element<'_, Message> = push(&stopped.keep_label, Weight::Primary).on_press(Message::CfdKeep).into();
         let discard: Element<'_, Message> = push("Discard", Weight::Secondary).on_press(Message::CfdDiscard).into();
@@ -229,6 +234,13 @@ fn method(state: &State) -> Element<'_, Message> {
     col.boxed()
 }
 
+/// `Runs on: This computer`, `Runs on: <gpu> on <host>` or `Runs on: Shared: 3 machines`, and the button that opens Preferences at Compute.
+fn runs_on<'a>(ctx: &'a Ctx) -> Element<'a, Message> {
+    let place = ctx.compute.runs_on(&ctx.compute_devices);
+    let change: Element<'_, Message> = push("Change…", Weight::Ghost).on_press(Message::OpenPrefs).small().into();
+    row![muted(format!("Runs on: {place}"), 12.0), change].spacing(SPACE_2).align_y(iced::Center).boxed()
+}
+
 /// The provenance of the CFD table method, line by line: the solve in progress, or what the table is and was not (the kit's
 /// `42 Mach × 9 AoA points · solved on GPU (Luma) · 6 min ago`, here Mach points only: the solver has no angle of attack), then why
 /// the plots show another method if they do.
@@ -251,8 +263,13 @@ fn cfd_lines(state: &State) -> Vec<String> {
                 });
                 lines.push(format!("Showing {base} until one is solved; Re-solve starts a solve."));
             }
-            cfd::Status::Fresh | cfd::Status::Stale => {}
+            cfd::Status::Fresh | cfd::Status::Stale => {
+                lines.extend(cfd.failed.iter().filter(|(_, why)| why != "solve cancelled").map(|(_, why)| format!("Solve stopped: {why}")));
+            }
         }
+    }
+    if cfd.lift_solving.is_none() {
+        lines.extend(cfd.lift_error.iter().map(|why| format!("3D stability solve stopped: {why}")));
     }
     if let Some((out, info)) = state.output().and_then(|o| o.cfd.as_ref().map(|i| (o, i))) {
         if let Some((_, summary)) = cfd.summary.as_ref().filter(|(key, _)| cfd.table.as_ref().is_some_and(|t| t.key == *key)) {
@@ -375,6 +392,7 @@ fn conditions<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
             rows.push(input("Mean wind", c.wind, Quantity::Velocity, Message::Wind));
             rows.push(muted("One-sigma spreads: wind 1 m/s and 10°, rail tilt 1°, thrust 3 %, drag 5 %, dry mass 2 %.", 12.0));
         }
+        Analysis::Optimize => {}
     }
     column(rows).spacing(SPACE_2).boxed()
 }
@@ -402,8 +420,14 @@ fn centred<'a>(message: String) -> Element<'a, Message> {
 }
 
 fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
+    if state.analysis == Analysis::Optimize {
+        return state.optimize.centre(ctx);
+    }
     if let Some(solving) = super::solve_view::centre(state, ctx) {
         return solving;
+    }
+    if let Some(flow) = super::flow_view::centre(state, ctx) {
+        return flow;
     }
     let (Some(out), Some(built)) = (state.output(), state.built.as_ref()) else {
         return centred(state.error.as_ref().map_or_else(|| "Solving…".to_string(), |e| format!("Nothing to analyse: {e}")));
@@ -423,13 +447,10 @@ fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
         dispersion(state, built)
     } else {
         // The kit's centre column: the zoom breadcrumb and hover hint on one row at the top, then the plots down to the strip.
-        let mut plots: Vec<Element<'a, Message>> = vec![
+        let plots: Vec<Element<'a, Message>> = vec![
             bar(plot::header(&built.group, &state.plot).map(Message::Plot).boxed()),
             container(PlotView::new(&built.group, &state.plot).element().map(Message::Plot).boxed()).width(Fill).height(Fill).boxed(),
         ];
-        if out.analysis == Analysis::Drag {
-            plots.extend(drag_key(built));
-        }
         column(plots).height(Fill).boxed()
     };
     if notes.is_empty() {
@@ -481,7 +502,21 @@ fn table(state: &State) -> Element<'_, Message> {
 // Right
 // ---------------------------------------------------------------------------------------------------------------------
 
+/// The right panel of the Optimize analysis: the best design against the current one, the goal and the constraints.
+fn optimize_right<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
+    let head = container(text("Best design").size(15).font(SANS_SEMIBOLD)).padding([SPACE_3, SPACE_3]).width(Fill);
+    let mut sections: Vec<Element<'a, Message>> = vec![head.boxed(), rule()];
+    for (i, sec) in state.optimize.readout(ctx).into_iter().enumerate() {
+        let rows: Vec<Element<'a, Message>> = sec.rows.into_iter().map(row_view).collect();
+        sections.push(section(i + 1, &sec.title, i > 0, rows));
+    }
+    scrollable(column(sections)).width(Fill).height(Fill).boxed()
+}
+
 fn right<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
+    if state.analysis == Analysis::Optimize {
+        return optimize_right(state, ctx);
+    }
     let active = ctx.doc.rocket().active_config_id();
     let shown = state.output().zip(state.built.as_ref());
     let hover = shown.and_then(|(_, b)| state.plot.hover_x().map(|x| b.scale.to_si(x)));
@@ -522,9 +557,9 @@ fn swatch<'a>(color: SeriesColor) -> Element<'a, Message> {
         .boxed()
 }
 
-/// A tooltip in the kit's style: a raised surface, 1 px border, 11 px text, at most about 260 px wide.
+/// A tooltip in the kit's style: a raised surface, 1 px border, 11 px text wrapped at about 320 px.
 fn help_bubble<'a>(tip: &'static str) -> Element<'a, Message> {
-    container(text(tip).size(TEXT_LABEL)).width(260).padding([SPACE_1, SPACE_2]).style(|t: &Theme| theme::tooltip(t)).boxed()
+    container(text(tip).size(TEXT_LABEL)).width(320).padding([SPACE_1, SPACE_2]).style(|t: &Theme| theme::tooltip(t)).boxed()
 }
 
 fn row_view<'a>(r: Row) -> Element<'a, Message> {
@@ -554,29 +589,6 @@ fn row_view<'a>(r: Row) -> Element<'a, Message> {
     }
 }
 
-/// The Drag breakdown's key under the plot: each stacked source with a one-sentence explanation (kit muted 11 px).
-fn drag_key<'a>(built: &'a Built) -> Option<Element<'a, Message>> {
-    let entries: Vec<(SeriesColor, &str)> =
-        built.group.panels.first()?.series.iter().filter(|s| s.fill.is_some()).map(|s| (s.color, s.name.as_str())).collect();
-    if entries.is_empty() {
-        return None;
-    }
-    let entry = |(color, name): (SeriesColor, &'a str)| -> Element<'a, Message> {
-        let body =
-            column![text(name).size(TEXT_LABEL).style(theme::ink), text(readout::help(name).unwrap_or("")).size(TEXT_LABEL).style(theme::muted)].spacing(2);
-        row![container(swatch(color)).padding([3.0, 0.0]), body.width(Fill)].spacing(SPACE_2).width(Length::FillPortion(1)).boxed()
-    };
-    let mut grid: Vec<Element<'a, Message>> = Vec::new();
-    for pair in entries.chunks(2) {
-        let mut cells: Vec<Element<'a, Message>> = pair.iter().map(|e| entry(*e)).collect();
-        if cells.len() == 1 {
-            cells.push(Space::new().width(Length::FillPortion(1)).boxed());
-        }
-        grid.push(row(cells).spacing(SPACE_4).boxed());
-    }
-    Some(container(column(grid).spacing(SPACE_2)).padding([SPACE_2, SPACE_3]).width(Fill).style(theme::panel).boxed())
-}
-
 fn export<'a>(state: &'a State, ready: bool, index: usize) -> Element<'a, Message> {
     let mut table = push(if state.show_table { "Plots" } else { "Table view" }, Weight::Secondary);
     let mut csv = push("CSV", Weight::Secondary);
@@ -584,7 +596,28 @@ fn export<'a>(state: &'a State, ready: bool, index: usize) -> Element<'a, Messag
     csv = if ready { csv.on_press(Message::ExportCsv) } else { csv.disabled("Nothing computed yet") };
     let cdx = push("RASAero .CDX1", Weight::Secondary).disabled(RASAERO_REASON);
     let (table, csv, cdx): (Element<'a, Message>, Element<'a, Message>, Element<'a, Message>) = (table.into(), csv.into(), cdx.into());
-    section(index, "Export", true, vec![row![table, csv, cdx].spacing(SPACE_2).boxed()])
+    let flow: Element<'a, Message> = flow_button(state).into();
+    section(index, "Export", true, vec![row![table, flow].spacing(SPACE_2).boxed(), row![csv, cdx].spacing(SPACE_2).boxed()])
+}
+
+/// The `Flow field` button beside `Table view`: the flow fields of the CFD table solved in this session, or why there are none.
+fn flow_button(state: &State) -> crate::widgets::button::Button<'_, Message> {
+    let open = state.flow.open;
+    let b = push(if open { "Plots" } else { "Flow field" }, Weight::Secondary);
+    if open {
+        return b.on_press(Message::Flow(super::flow_view::Msg::Open(false)));
+    }
+    let cfd = state.method == Method::CfdTable && super::uses_cfd(state.analysis);
+    let table = state.cfd.table.as_ref().filter(|_| state.cfd_ready());
+    match table {
+        _ if !cfd => b.disabled("Choose the CFD table method: the flow fields are what the solver left of each point"),
+        _ if state.cfd.solving.is_some() || state.cfd.lift_solving.is_some() => b.disabled("A solve is running: its flow is on show"),
+        None => b.disabled("Solve the CFD table first"),
+        Some(t) if !state.cfd.fields.has_any(t) => {
+            b.disabled("No flow fields for this table: it was loaded from a file or its geometry changed. Re-solve to see them")
+        }
+        Some(_) => b.on_press(Message::Flow(super::flow_view::Msg::Open(true))).tooltip("The flow of each solved Mach number"),
+    }
 }
 
 /// A numbered section of the right panel: tighter than the inspector's so the whole readout fits in 800 px.

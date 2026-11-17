@@ -129,4 +129,6 @@ pub struct PointResult {
     pub min_p: f64,
     /// Largest wall distance `y+` of the first cell over the body surface (NaN for the Euler equations).
     pub y_plus_max: f64,
+    /// The final flow field, when the case keeps it (`Case::fields`).
+    pub field: Option<crate::field::Field>,
 }

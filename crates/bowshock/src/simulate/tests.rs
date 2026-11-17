@@ -28,6 +28,30 @@ fn state_for(app: &App) -> State {
     state
 }
 
+/// Every flight of a run lands: the report has no pending lines and each line an outcome; `until` is set for the toast.
+#[test]
+fn run_report_fills_as_flights_land() {
+    let mut app = App::with_example();
+    let mut state = state_for(&app);
+    let ids = state.flight_ids();
+    state.update(Message::RunAll, app.ctx_mut());
+    assert_eq!(app.ctx().run.as_ref().map(|r| (r.lines.len(), r.pending)), Some((ids.len(), ids.len())));
+    for (n, id) in ids.iter().enumerate() {
+        let f = state.flight(*id).unwrap();
+        let (ticket, spec) = (f.ticket, f.spec.clone());
+        let (input, delay) = flight::prepare(app.ctx(), &spec).expect("the example flies");
+        let result = Arc::new(bowshock_sim::simulate(&input));
+        let revision = state.stamp(app.ctx(), &spec);
+        let done = Done { flight: *id, ticket, spec, revision, delay, dt: input.dt, outcome: Ok((result, Duration::ZERO)) };
+        state.update(Message::Done(Box::new(done)), app.ctx_mut());
+        let report = app.ctx().run.as_ref().unwrap();
+        assert_eq!(report.pending, ids.len() - n - 1);
+        assert_eq!(report.until.is_some(), n + 1 == ids.len());
+    }
+    let report = app.ctx().run.as_ref().unwrap();
+    assert!(report.lines.iter().all(|l| matches!(&l.outcome, Some(Ok(s)) if s.apogee > 0.0 && s.flight_time > 0.0)));
+}
+
 #[test]
 fn the_example_flies_the_kit_flights() {
     let app = App::with_example();
@@ -62,6 +86,26 @@ fn the_example_flies_the_kit_flights() {
 }
 
 #[test]
+fn the_ticked_flights_are_shown_in_colour_and_none_ticked_shows_nothing() {
+    let app = App::with_example();
+    let mut state = state_for(&app);
+    let [nominal, windy, ..] = ids_of(&state);
+    fly(&mut state, app.ctx(), nominal);
+    fly(&mut state, app.ctx(), windy);
+    // The first flight starts ticked and is drawn alone, in its slot colour.
+    assert_eq!(state.shown.ids, vec![nominal]);
+    let colour = |state: &State| state.shown.group.as_ref().unwrap().panels[0].series[0].color;
+    assert_eq!(colour(&state), SeriesColor::Series(1));
+    // Selecting another flight does not change what is drawn; unticking the last shows nothing.
+    state.select_only(windy);
+    state.rebuild();
+    assert_eq!(state.shown.ids, vec![nominal]);
+    state.flights.iter_mut().for_each(|f| f.slot = None);
+    state.rebuild();
+    assert!(state.shown.ids.is_empty() && state.shown.group.is_none());
+}
+
+#[test]
 fn ticking_overlays_flights_in_stable_colours_and_refuses_a_fifth() {
     let mut app = App::with_example();
     let mut state = state_for(&app);
@@ -70,11 +114,13 @@ fn ticking_overlays_flights_in_stable_colours_and_refuses_a_fifth() {
         fly(&mut state, app.ctx(), *id);
     }
     state.update(Message::AddFlight, app.ctx_mut());
-    let fifth = state.selected;
+    let fifth = state.primary();
     state.update(Message::Click(ids[0]), app.ctx_mut());
 
-    // Tick Nominal, Windy, Bigger motor (the fourth default): colours follow the tick order and stay.
-    for id in [ids[0], ids[1], ids[3]] {
+    // Nominal, the first flight, starts ticked; tick Windy and Bigger motor (the fourth default): colours follow the tick order
+    // and stay.
+    assert_eq!(state.ticked(), 1);
+    for id in [ids[1], ids[3]] {
         state.update(Message::Tick(id), app.ctx_mut());
     }
     let slot = |state: &State, id| state.flight(id).unwrap().slot;
@@ -101,7 +147,7 @@ fn ticking_overlays_flights_in_stable_colours_and_refuses_a_fifth() {
 fn a_result_goes_stale_when_conditions_or_the_rocket_change() {
     let mut app = App::with_example();
     let mut state = state_for(&app);
-    let id = state.selected;
+    let id = state.primary();
     fly(&mut state, app.ctx(), id);
     let revision = state.revision(app.ctx());
     assert!(!state.flight(id).unwrap().is_stale(revision));
@@ -120,7 +166,7 @@ fn a_result_goes_stale_when_conditions_or_the_rocket_change() {
 fn a_superseded_result_is_ignored_and_a_failed_flight_says_why() {
     let mut app = App::with_example();
     let mut state = state_for(&app);
-    let id = state.selected;
+    let id = state.primary();
     let _ = state.launch(id, app.ctx());
     let old = state.flight(id).unwrap().ticket;
     let _ = state.launch(id, app.ctx());
@@ -164,7 +210,7 @@ fn adding_and_removing_flights() {
     assert_eq!(state.selected_flight().spec.wind_speed, 4.0, "a new flight starts from the selected one's conditions");
     state.update(Message::RemoveFlight, app.ctx_mut());
     assert_eq!(state.flights.len(), 4);
-    assert_eq!(state.selected, state.flights[0].id);
+    assert_eq!(state.primary(), state.flights[0].id);
     for _ in 0..3 {
         state.update(Message::RemoveFlight, app.ctx_mut());
     }
@@ -204,7 +250,7 @@ fn clicking_a_number_moves_the_crosshair() {
 fn a_dispersion_study_scatters_landings_around_the_run_and_hides_when_the_run_changes() {
     let mut app = App::with_example();
     let mut state = state_for(&app);
-    let id = state.selected;
+    let id = state.primary();
     fly(&mut state, app.ctx(), id);
 
     let _task = state.launch_dispersion(id, app.ctx());
@@ -241,7 +287,7 @@ fn a_dispersion_study_scatters_landings_around_the_run_and_hides_when_the_run_ch
 fn enter_zooms_to_the_band_from_anywhere_and_otherwise_does_nothing() {
     let mut app = App::with_example();
     let mut state = state_for(&app);
-    let id = state.selected;
+    let id = state.primary();
     fly(&mut state, app.ctx(), id);
     let enter = keyboard::Key::Named(keyboard::key::Named::Enter);
     assert!(state.on_key(&enter, keyboard::Modifiers::empty(), app.ctx()).is_none(), "no band, nothing to zoom to");
@@ -287,7 +333,7 @@ fn flights_are_written_to_the_document_and_follow_undo() {
     assert!(app.ctx_mut().doc.undo().is_some());
     state.sync(app.ctx(), false);
     assert_eq!(state.flights.len(), 4);
-    assert!(state.flight(state.selected).is_some(), "a selection that went away moves to a flight that exists");
+    assert!(state.flight(state.primary()).is_some(), "a selection that went away moves to a flight that exists");
 }
 
 #[test]
@@ -323,7 +369,7 @@ fn flights_are_saved_with_the_file_and_loaded_back_without_results() {
     assert_eq!(spec.motor, MotorChoice::Motor(bowshock_model::MotorRef::new("I218R", "AeroTech")));
     assert_eq!(named(&loaded, "Flight 5").spec.turbulence, bowshock_sim::Turbulence::High);
     assert!(loaded.flights.iter().all(|f| f.run.is_none()), "results are not saved: run again");
-    assert_eq!(loaded.selected, loaded.flights[0].id);
+    assert_eq!(loaded.primary(), loaded.flights[0].id);
 }
 
 #[test]
@@ -563,9 +609,8 @@ fn undoing_closes_the_picker_and_a_flight_can_be_overlaid_with_several_sources()
     let (nominal, windy) = (named(&state, "Nominal").id, named(&state, "Windy").id);
     fly(&mut state, app.ctx(), nominal);
     fly(&mut state, app.ctx(), windy);
-    for id in [nominal, windy] {
-        state.update(Message::Tick(id), app.ctx_mut());
-    }
+    // Nominal starts ticked; tick Windy too.
+    state.update(Message::Tick(windy), app.ctx_mut());
     state.update(Message::Layout(LayoutEdit::ToggleSource(1, "air_speed")), app.ctx_mut());
     assert_eq!(sources(&state)[1], ["vertical_velocity", "air_speed"]);
     // Two flights and two sources: four lines, colour by flight, style by source.
@@ -612,19 +657,19 @@ fn clicks_select_toggle_and_extend_a_range_while_ticks_stay_apart() {
 
     // A plain click selects one flight.
     click_flight(&mut state, &mut app, windy, none);
-    assert_eq!((state.selected, state.edit_ids()), (windy, vec![windy]));
+    assert_eq!((state.primary(), state.edit_ids()), (windy, vec![windy]));
 
     // Cmd/Ctrl-click adds a flight (it becomes the selected one) and takes it out again.
     click_flight(&mut state, &mut app, bigger, command);
-    assert_eq!((state.selected, state.edit_ids()), (bigger, vec![windy, bigger]));
+    assert_eq!((state.primary(), state.edit_ids()), (bigger, vec![windy, bigger]));
     click_flight(&mut state, &mut app, bigger, command);
-    assert_eq!((state.selected, state.edit_ids()), (windy, vec![windy]), "the oldest remaining flight takes over");
+    assert_eq!((state.primary(), state.edit_ids()), (windy, vec![windy]), "the oldest remaining flight takes over");
     click_flight(&mut state, &mut app, windy, command);
     assert_eq!(state.edit_ids(), vec![windy], "a toggle never empties the selection");
 
     // Shift-click selects the range from the last click, in list order, whichever way it runs.
     click_flight(&mut state, &mut app, bigger, shift);
-    assert_eq!((state.selected, state.edit_ids()), (bigger, vec![windy, hot, bigger]));
+    assert_eq!((state.primary(), state.edit_ids()), (bigger, vec![windy, hot, bigger]));
     click_flight(&mut state, &mut app, nominal, shift);
     assert_eq!(state.edit_ids(), vec![nominal, windy], "a new range replaces the old one, from the same anchor");
     // With Cmd/Ctrl too the range is added to what is selected.
@@ -640,10 +685,9 @@ fn clicks_select_toggle_and_extend_a_range_while_ticks_stay_apart() {
     assert!(matches!(state.on_key(&a, command, app.ctx()), Some(Message::SelectAll)));
     assert!(state.on_key(&a, none, app.ctx()).is_none() && state.on_key(&a, command | shift, app.ctx()).is_none());
     state.update(Message::SelectAll, app.ctx_mut());
-    assert_eq!((state.selected, state.edit_ids()), (windy, vec![nominal, windy, hot, bigger]));
+    assert_eq!((state.primary(), state.edit_ids()), (windy, vec![nominal, windy, hot, bigger]));
 
-    // The compare ticks are independent of the edit selection, both ways.
-    state.update(Message::Tick(nominal), app.ctx_mut());
+    // The compare ticks are independent of the edit selection, both ways (the first flight starts ticked).
     assert_eq!(state.edit_ids().len(), 4);
     click_flight(&mut state, &mut app, hot, none);
     assert_eq!((state.ticked(), state.flight(nominal).unwrap().slot), (1, Some(1)), "selecting does not tick");
@@ -652,7 +696,7 @@ fn clicks_select_toggle_and_extend_a_range_while_ticks_stay_apart() {
     click_flight(&mut state, &mut app, windy, command);
     state.update(Message::RemoveFlight, app.ctx_mut());
     assert_eq!(state.flights.len(), 2);
-    assert!(state.flight(state.selected).is_some() && state.also.is_empty());
+    assert!(state.flight(state.primary()).is_some() && !state.selection.is_multi());
 }
 
 #[test]
@@ -744,6 +788,64 @@ fn editing_with_several_selected_sets_the_field_on_each_in_one_undo_step() {
 }
 
 #[test]
+fn a_launch_site_is_one_step_and_the_location_and_wind_profile_fly() {
+    let mut app = App::with_example();
+    let mut state = state_for(&app);
+    let [nominal, ..] = ids_of(&state);
+    click_flight(&mut state, &mut app, nominal, keyboard::Modifiers::empty());
+    let spec = |state: &State| state.flight(nominal).unwrap().spec.clone();
+    let far = sites::SITES[0];
+    state.update(Message::Edit(Edit::Site(0)), app.ctx_mut());
+    app.ctx_mut().doc.seal();
+    let s = spec(&state);
+    assert_eq!(s.site_altitude, far.altitude);
+    assert_eq!(sites::matching(s.location, s.site_altitude), Some(&sites::SITES[0]));
+    assert!((s.temperature - sites::isa_temperature(far.altitude)).abs() < 1e-9, "the standard day at the site");
+    assert_eq!(app.ctx().doc.undo_label(), Some("Set launch site"));
+    assert_eq!(app.ctx_mut().doc.undo().as_deref(), Some("Set launch site"));
+    state.sync(app.ctx(), false);
+    assert_eq!(spec(&state).location, None, "one undo takes the altitude, location and temperature back");
+
+    // Typing a latitude makes a location (longitude 0); a blank field clears it.
+    state.update(Message::CoordInput(false, "45.5".into()), app.ctx_mut());
+    state.update(Message::CoordCommit, app.ctx_mut());
+    assert_eq!(spec(&state).location, Some(bowshock_model::Location { latitude: 45.5, longitude: 0.0 }));
+    assert_eq!(app.ctx().doc.undo_label(), Some("Set launch location"));
+    let launch = flight::launch_of(&spec(&state));
+    assert!((launch.latitude.unwrap() - 45.5f64.to_radians()).abs() < 1e-12);
+    state.update(Message::CoordInput(false, " ".into()), app.ctx_mut());
+    state.update(Message::CoordCommit, app.ctx_mut());
+    assert_eq!(spec(&state).location, None);
+
+    // A wind profile is stored sorted and reaches the flight.
+    let level = |altitude: f64, speed: f64| bowshock_model::WindLevel { altitude, speed, from: 0.0 };
+    state.update(Message::Edit(Edit::WindLevels(vec![level(1000.0, 20.0), level(300.0, 8.0)])), app.ctx_mut());
+    assert_eq!(app.ctx().doc.undo_label(), Some("Set wind profile"));
+    let stored = &app.ctx().doc.rocket().flights().iter().find(|f| f.id == nominal).unwrap().conditions.wind_levels;
+    assert_eq!(stored.iter().map(|l| l.altitude).collect::<Vec<_>>(), [300.0, 1000.0]);
+    assert_eq!(flight::launch_of(&spec(&state)).wind_levels.len(), 2);
+}
+
+#[test]
+fn a_forecast_sets_the_wind_and_temperature_in_one_step() {
+    let mut app = App::with_example();
+    let mut state = state_for(&app);
+    let [nominal, ..] = ids_of(&state);
+    click_flight(&mut state, &mut app, nominal, keyboard::Modifiers::empty());
+    state.update(Message::ForecastOpen(true), app.ctx_mut());
+    // No location: the fetch says what is missing instead of asking.
+    state.update(Message::ForecastFetch, app.ctx_mut());
+    assert_eq!(state.forecast.as_ref().unwrap().error.as_deref(), Some("Set the launch latitude and longitude first"));
+    let f = forecast::parse(include_str!("../../tests/data/openmeteo.json"), 622.0).unwrap();
+    state.update(Message::ForecastDone(Ok(f.clone())), app.ctx_mut());
+    assert_eq!(app.ctx().doc.undo_label(), Some("Wind from forecast"));
+    let spec = &state.flight(nominal).unwrap().spec;
+    assert_eq!((spec.wind_speed, spec.wind_levels.len()), (f.ground.speed, f.levels.len()));
+    assert!((spec.temperature - f.temperature_k.unwrap()).abs() < 1e-9);
+    assert!(state.forecast.is_none(), "the row closes once applied");
+}
+
+#[test]
 fn run_flies_the_selected_flights_and_removing_takes_them_all() {
     let mut app = App::with_example();
     let mut state = state_for(&app);
@@ -826,7 +928,7 @@ fn the_cfd_drag_source_attaches_a_matching_table_and_says_why_it_cannot() {
 fn changing_the_drag_source_or_the_stored_table_makes_a_result_stale() {
     let mut app = App::with_example();
     let mut state = state_for(&app);
-    let id = state.selected;
+    let id = state.primary();
     fly(&mut state, app.ctx(), id);
     assert!(!state.flight(id).unwrap().is_stale(state.stamp(app.ctx(), &state.flight(id).unwrap().spec)));
     state.update(Message::Edit(Edit::Drag(bowshock_model::DragSource::CfdTable)), app.ctx_mut());
@@ -943,4 +1045,58 @@ fn the_other_way_of_cant_spins_the_other_way_and_fin_b_alone_a_third_as_fast() {
     assert_eq!((group.effective(0).cant, group.effective(1).cant, group.effective(2).cant), (0.0, 2.0_f64.to_radians(), 0.0));
     let one = nominal_spin(&app).0;
     assert!((one / all - 1.0 / 3.0).abs() < 0.01, "{one} vs {all}");
+}
+
+/// A dropped stage for the flight tests: a booster separated at 1.6 s that lands at 8 s.
+fn booster() -> bowshock_sim::Branch {
+    use bowshock_sim::{Branch, BranchSummary, Event, EventKind, Sample, Trajectory};
+    let sample = |t: f64, altitude: f64| Sample { t, altitude, position: [t, 0.0, altitude], ..Sample::default() };
+    let event = |t, kind| Event { t, kind, altitude: 0.0, stage: None };
+    Branch {
+        name: "Booster".into(),
+        stage: 0,
+        start: 1.6,
+        trajectory: Trajectory {
+            samples: vec![sample(1.6, 100.0), sample(4.0, 150.0), sample(8.0, 0.0)],
+            events: vec![event(1.6, EventKind::Separation), event(8.0, EventKind::Landing)],
+        },
+        summary: BranchSummary { flight_time: 8.0, ..BranchSummary::default() },
+    }
+}
+
+#[test]
+fn a_dropped_stage_is_drawn_with_its_flight_and_the_header_toggle_hides_it() {
+    let mut app = App::with_example();
+    let mut state = state_for(&app);
+    let id = state.flights[0].id;
+    fly(&mut state, app.ctx(), id);
+    // A single-stage flight has nothing dropped: no toggle, no extra lines, no strip row, one ground track.
+    assert!(!state.shown.has_dropped);
+    let lines = |state: &State| state.shown.group.as_ref().unwrap().panels[0].series.len();
+    let before = lines(&state);
+    assert_eq!(state.shown.ground.tracks.len(), 1);
+    assert!(state.shown.group.as_ref().unwrap().rows.is_empty());
+
+    // Give the run a booster: its lines, a strip row and a ground track join the flight's.
+    let mut run = state.flights[0].run.clone().unwrap();
+    let mut result = (*run.result).clone();
+    result.branches.push(booster());
+    run.result = Arc::new(result);
+    state.flights[0].run = Some(run);
+    state.rebuild();
+    assert!(state.shown.has_dropped && state.dropped);
+    assert!(lines(&state) > before);
+    assert_eq!(state.shown.group.as_ref().unwrap().rows.len(), 1);
+    assert_eq!(state.shown.ground.tracks.len(), 2);
+
+    // The header toggle hides the lines and the row; the ground track keeps the landing.
+    state.update(Message::Dropped(false), app.ctx_mut());
+    assert_eq!(lines(&state), before);
+    assert!(state.shown.group.as_ref().unwrap().rows.is_empty());
+    assert_eq!(state.shown.ground.tracks.len(), 2);
+
+    // A click on the booster's landing selects the flight it was dropped from.
+    state.select_only(ids_of(&state)[1]);
+    state.update(Message::Ground(GroundMessage::Select(1)), app.ctx_mut());
+    assert_eq!(state.selected_id(), id);
 }

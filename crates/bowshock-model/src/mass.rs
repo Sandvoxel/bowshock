@@ -77,14 +77,16 @@ fn cylinder_lump(mass: f64, len: f64, ro: f64, ri: f64) -> MassProps {
     MassProps { mass, cg: len / 2.0, i_long: mass / 12.0 * (3.0 * sq + len * len), i_rot: mass / 2.0 * sq }
 }
 
-/// The shell of axial part `kind` with wall `wall`, integrated in thin discs; CG relative to the fore face.
+/// The shell of axial part `kind` with wall `wall`, integrated in thin discs; CG relative to the fore face. A nose is read through
+/// one [`NoseProfile`](crate::NoseProfile), so a blunted tip is integrated as the sphere it is.
 fn shell(kind: &PartKind, wall: f64, rho: f64) -> MassProps {
     let len = kind.length().max(0.0);
     let n = if matches!(kind, PartKind::BodyTube { .. }) { 1 } else { SLICES };
     let dz = len / n as f64;
+    let nose = kind.nose_profile();
     MassProps::combine((0..n).map(|i| {
         let z = (i as f64 + 0.5) * dz;
-        let ro = kind.radius_at(z);
+        let ro = nose.map_or_else(|| kind.radius_at(z), |p| p.radius(z));
         annulus(rho, ro, (ro - wall).max(0.0), dz).shifted(z - dz / 2.0)
     }))
 }
@@ -292,7 +294,7 @@ mod tests {
     #[test]
     fn cg_is_in_station_coordinates() {
         let mut r = Rocket::default();
-        r.insert(0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.3, diameter: 0.0762 }).unwrap();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.3, diameter: 0.0762, tip_radius: 0.0 }).unwrap();
         let t = r.insert(1, PartKind::BodyTube { length: 0.6, diameter: 0.0762 }).unwrap();
         assert!(close(r.component_mass(t).unwrap().cg, 0.6, 1e-9));
         assert!(r.component_mass(99).is_none());
@@ -316,7 +318,7 @@ mod tests {
     #[test]
     fn solid_cone_matches_closed_form() {
         let mut r = Rocket::default();
-        let n = r.insert(0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.3, diameter: 0.1 }).unwrap();
+        let n = r.insert(0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.3, diameter: 0.1, tip_radius: 0.0 }).unwrap();
         assert!(r.set_thickness(n, 1.0)); // limited to the radius: a solid cone
         assert!(close(r.part(n).unwrap().thickness, 0.05, 1e-12));
         let rho = r.part(n).unwrap().material.density();
@@ -327,10 +329,32 @@ mod tests {
         assert!(close(m.i_rot, 0.3 * m.mass * 0.05 * 0.05, 1e-3));
     }
 
+    /// A solid cone with a tip sphere weighs its analytic volume: a frustum from the tangent circle to the base plus the
+    /// spherical cap ahead of it (the mass integrates the blunted profile, not the sharp cone's).
+    #[test]
+    fn solid_blunted_cone_matches_frustum_plus_cap() {
+        let (built, r, rn) = (0.3, 0.05, 0.02);
+        let mut rocket = Rocket::default();
+        let n = rocket.insert(0, PartKind::NoseCone { shape: NoseShape::Conical, length: built, diameter: 2.0 * r, tip_radius: rn }).unwrap();
+        assert!(rocket.set_thickness(n, 1.0));
+        // sharp length from L_b = L - r_n (sqrt(R^2 + L^2)/R - 1), then the tangent circle and the cap
+        let (k, c) = (rn / r, built - rn);
+        let sharp = (c + k * (c * c + r * r * (1.0 - k * k)).sqrt()) / (1.0 - k * k);
+        let sin_a = r / r.hypot(sharp);
+        let (x_c, r_t) = (rn / sin_a, rn * (1.0 - sin_a * sin_a).sqrt());
+        let x_t = x_c - rn * sin_a;
+        let (cap_h, frustum_len) = (rn * (1.0 - sin_a), sharp - x_t);
+        let volume = PI * cap_h * cap_h * (3.0 * rn - cap_h) / 3.0 + PI * frustum_len / 3.0 * (r * r + r * r_t + r_t * r_t);
+        let rho = rocket.part(n).unwrap().material.density();
+        let m = rocket.component_mass(n).unwrap();
+        assert!(close(m.mass, rho * volume, 5e-4), "{} vs {}", m.mass, rho * volume);
+        assert!(m.cg > 0.0 && m.cg < built);
+    }
+
     #[test]
     fn hollow_ogive_is_lighter_than_solid_and_heavier_for_thicker_walls() {
         let mut r = Rocket::default();
-        let n = r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.0762 }).unwrap();
+        let n = r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.0762, tip_radius: 0.0 }).unwrap();
         let thin = r.component_mass(n).unwrap().mass;
         r.set_thickness(n, 0.004);
         let thick = r.component_mass(n).unwrap().mass;
@@ -450,7 +474,7 @@ mod tests {
     #[test]
     fn dry_mass_is_the_sum_of_parts() {
         let mut r = Rocket::default();
-        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.0762 }).unwrap();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.0762, tip_radius: 0.0 }).unwrap();
         let t = r.insert(1, PartKind::BodyTube { length: 0.6, diameter: 0.0762 }).unwrap();
         r.attach_radial(t, 0.45, 0.0, 4, RadialKind::FinSet { root_chord: 0.12, tip_chord: 0.05, span: 0.07, sweep: 0.06, thickness: 0.003 }).unwrap();
         r.attach_internal(t, 0.1, InternalKind::MassComponent { mass: 0.15, length: 0.08, diameter: None, role: crate::internal::MassRole::Altimeter })
@@ -480,7 +504,7 @@ mod shoulder_tests {
     #[test]
     fn nose_shoulder_adds_a_tube_into_the_airframe() {
         let mut r = Rocket::default();
-        let nose = r.insert(0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.2, diameter: 0.0762 }).unwrap();
+        let nose = r.insert(0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.2, diameter: 0.0762, tip_radius: 0.0 }).unwrap();
         r.insert(1, PartKind::BodyTube { length: 0.5, diameter: 0.0762 }).unwrap();
         let before = r.component_mass(nose).unwrap();
         assert!(r.set_dim(nose, Dim::ShoulderLength, 0.05).is_some());
@@ -545,7 +569,7 @@ mod shoulder_tests {
     #[test]
     fn old_documents_load_without_shoulders_or_fillets() {
         let mut r = Rocket::default();
-        let nose = r.insert(0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.2, diameter: 0.0762 }).unwrap();
+        let nose = r.insert(0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.2, diameter: 0.0762, tip_radius: 0.0 }).unwrap();
         let tube = r.insert(1, PartKind::BodyTube { length: 0.5, diameter: 0.0762 }).unwrap();
         let fin =
             r.attach_radial(tube, 0.3, 0.0, 3, RadialKind::FinSet { root_chord: 0.1, tip_chord: 0.05, span: 0.06, sweep: 0.03, thickness: 0.003 }).unwrap();

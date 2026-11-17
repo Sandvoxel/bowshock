@@ -56,6 +56,9 @@ impl canvas::Program<Message> for Overlay<'_> {
         if let Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) = event {
             return Some(Action::publish(Message::DropInternal).and_capture());
         }
+        if let Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event {
+            return Some(Action::publish(Message::PlaceHere).and_capture());
+        }
         let target = self
             .landing_at(at, bounds.size(), state.modifiers)
             .filter(|l| l.fits)

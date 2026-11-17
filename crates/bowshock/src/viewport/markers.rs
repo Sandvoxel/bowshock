@@ -34,9 +34,15 @@ const DIAMOND: f32 = 5.5;
 const HANDLE_R: f32 = 8.0;
 /// Distance from the nose tip to the section handle, px.
 const HANDLE_GAP: f32 = 26.0;
+/// How far (px) a pressed separation diamond must move before it drags instead of selecting.
+const SEP_SLOP: f32 = 4.0;
 /// |view direction . rocket axis| where the CG / CP labels start to fade, and where they are gone.
 const AXIAL_FADE_FROM: f32 = 0.7;
 const AXIAL_FADE_TO: f32 = 0.9;
+/// Space kept on each side of a stage's label inside its bracket, px.
+const STAGE_PAD: f32 = 8.0;
+/// Where the pinned stage strip's line sits, px above the viewport's foot (clear of the legend, the scale and the hint line).
+const STAGE_STRIP_FOOT: f32 = 84.0;
 
 /// What the markers draw, and the state they read.
 pub struct Markers<'a> {
@@ -59,6 +65,8 @@ pub struct Markers<'a> {
     pub units: UnitSystem,
     /// Clickable things react (off while a part is being dragged in).
     pub interactive: bool,
+    /// The stage whose separation diamond is being dragged: its eligible joints show as hollow diamonds.
+    pub dragging: Option<usize>,
     /// This is the transparent layer above the manipulation overlay that takes clicks (it draws nothing); the other instance
     /// draws and takes none.
     pub hit: bool,
@@ -70,6 +78,20 @@ pub struct State {
     modifiers: keyboard::Modifiers,
     /// Cursor y and the span when the handle was grabbed.
     handle: Option<(f32, f32)>,
+    /// The separation diamond pressed (and maybe being dragged).
+    sep: Option<SepPress>,
+}
+
+/// A press on a separation diamond.
+#[derive(Debug)]
+struct SepPress {
+    stage: usize,
+    /// Where it was pressed, in the layer's coordinates.
+    at: Point,
+    /// The cursor has moved past the slop: the separation is being dragged.
+    live: bool,
+    /// The joint (the part just aft of it) the separation was last put at.
+    last: Option<PartId>,
 }
 
 /// A separation drawn on the rocket.
@@ -178,6 +200,27 @@ impl Markers<'_> {
         let z = self.rocket.length() as f32 / 2.0;
         let p = Vec3::new(0.0, 0.0, z);
         self.camera.project(p, size).distance(self.camera.project(p + self.camera.up() * self.rmax().max(0.005), size))
+    }
+
+    /// Nearest eligible joint to the cursor `at` while a separation diamond is pressed: past the slop the drag is live, and
+    /// the separation is published each time the nearest joint changes (and once when the drag starts).
+    fn drag_separation(&self, press: &mut SepPress, at: Point, size: Size) -> Option<Action<Message>> {
+        if !press.live && at.distance(press.at) < SEP_SLOP {
+            return Some(Action::capture());
+        }
+        let nearest = self
+            .rocket
+            .separation_joints(press.stage)
+            .into_iter()
+            .min_by(|a, b| self.axis(a.station as f32, size).distance(at).total_cmp(&self.axis(b.station as f32, size).distance(at)))?;
+        let first = !press.live;
+        press.live = true;
+        let aft = nearest.between.1;
+        if !first && press.last == Some(aft) {
+            return Some(Action::capture());
+        }
+        press.last = Some(aft);
+        Some(Action::publish(Message::SeparationTo(press.stage, Some(aft))).and_capture())
     }
 
     fn seams(&self) -> Vec<Seam> {
@@ -293,6 +336,7 @@ impl canvas::Program<Message> for Markers<'_> {
     fn update(&self, state: &mut State, event: &Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<Action<Message>> {
         if !self.hit || !self.interactive {
             state.handle = None;
+            state.sep = None;
             return None;
         }
         let size = bounds.size();
@@ -310,6 +354,9 @@ impl canvas::Program<Message> for Markers<'_> {
                     }
                 }
                 if let Some(seam) = self.seams().into_iter().find(|s| !s.issue && self.axis(s.station, size).distance(at) <= HIT) {
+                    // A plain click selects; a drag past the slop slides the separation along its joints.
+                    let joint = self.stages.iter().find(|s| s.index == seam.stage).and_then(|s| s.separation).map(|s| s.joint_between.1);
+                    state.sep = Some(SepPress { stage: seam.stage, at, live: false, last: joint });
                     return Some(Action::publish(Message::SelectSeparation(seam.stage)).and_capture());
                 }
                 if self.inside == InsideView::Exploded && self.explode > 0.5 {
@@ -318,6 +365,10 @@ impl canvas::Program<Message> for Markers<'_> {
                 None
             }
             Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                if let Some(press) = state.sep.as_mut() {
+                    let at = Point::new(position.x - bounds.x, position.y - bounds.y);
+                    return self.drag_separation(press, at, size);
+                }
                 let (y0, span0) = state.handle?;
                 // One degree per pixel dragged up; Shift snaps to quarter turns (a quarter, half or three-quarter cut).
                 let y = position.y - bounds.y;
@@ -329,7 +380,15 @@ impl canvas::Program<Message> for Markers<'_> {
                 let span = span.clamp(if state.modifiers.shift() { FRAC_PI_2 } else { lo }, hi);
                 Some(Action::publish(Message::Cut(Cut { span, ..self.cut })).and_capture())
             }
-            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => state.handle.take().map(|_| Action::capture()),
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => match state.sep.take() {
+                Some(press) if press.live => Some(Action::publish(Message::SeparationEnd(true)).and_capture()),
+                Some(_) => Some(Action::capture()),
+                None => state.handle.take().map(|_| Action::capture()),
+            },
+            Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::Escape), .. }) => match state.sep.take() {
+                Some(press) if press.live => Some(Action::publish(Message::SeparationEnd(false)).and_capture()),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -338,7 +397,7 @@ impl canvas::Program<Message> for Markers<'_> {
         if !self.hit || !self.interactive {
             return mouse::Interaction::None;
         }
-        if state.handle.is_some() {
+        if state.handle.is_some() || state.sep.as_ref().is_some_and(|p| p.live) {
             return mouse::Interaction::Grabbing;
         }
         let Some(at) = cursor.position_in(bounds) else {
@@ -347,10 +406,8 @@ impl canvas::Program<Message> for Markers<'_> {
         let size = bounds.size();
         let on_handle = self.handle(size).is_some_and(|(c, r)| at.distance(c) <= r + 3.0);
         let on_seam = self.seams().iter().any(|s| !s.issue && self.axis(s.station, size).distance(at) <= HIT);
-        if on_handle {
+        if on_handle || on_seam {
             mouse::Interaction::Grab
-        } else if on_seam {
-            mouse::Interaction::Pointer
         } else {
             mouse::Interaction::None
         }
@@ -409,24 +466,72 @@ impl canvas::Program<Message> for Markers<'_> {
             let c = self.axis(seam.station, size);
             let tag_color = if selected || seam.issue { color } else { t.ink_muted };
             let station = bare(f64::from(seam.station), Quantity::Length, self.units);
-            label(
-                &mut frame,
-                if seam.issue { format!("NO JOINT · {station}") } else { format!("SEPARATION · {station}") },
-                Point::new(c.x, c.y - body - 14.0),
-                tag_color,
-                alignment::Horizontal::Center,
-                alignment::Vertical::Bottom,
-            );
+            let words = if seam.issue { format!("NO JOINT · {station}") } else { format!("SEPARATION · {station}") };
+            // On a plate of the ground: seen along the axis the body runs up through the label.
+            let w = words.chars().count() as f32 * TEXT_LABEL * 0.62 + 8.0;
+            let at = Point::new(c.x, c.y - body - 14.0);
+            frame.fill_rectangle(Point::new(at.x - w / 2.0, at.y - TEXT_LABEL - 3.0), Size::new(w, TEXT_LABEL + 5.0), t.bg_000.scale_alpha(0.82));
+            label(&mut frame, words, at, tag_color, alignment::Horizontal::Center, alignment::Vertical::Bottom);
             if !seam.issue {
+                if self.dragging == Some(seam.stage) {
+                    // Every joint the separation can move to, as a hollow diamond.
+                    for joint in self.rocket.separation_joints(seam.stage) {
+                        let at = self.axis(joint.station as f32, size);
+                        frame.fill(&diamond(at, DIAMOND * 0.8), t.bg_000);
+                        frame.stroke(&diamond(at, DIAMOND * 0.8), Stroke::default().with_color(t.accent).with_width(1.0));
+                    }
+                }
                 let d = diamond(c, DIAMOND);
                 frame.fill(&d, if selected { t.accent } else { t.bg_000 });
                 frame.stroke(&d, Stroke::default().with_color(t.accent).with_width(1.5));
             }
         }
         if self.stages.len() > 1 && self.explode < 0.01 {
-            for s in self.stages {
-                let (x0, x1) = (self.axis(s.fore_station as f32, size).x, self.axis(s.aft_station as f32, size).x);
-                let y = self.axis(0.0, size).y + stage_row;
+            let named: Vec<(f32, f32, String)> = self
+                .stages
+                .iter()
+                .map(|s| {
+                    let motors: Vec<&str> = self.motors.iter().filter(|(i, _)| *i == s.index).map(|(_, m)| m.as_str()).collect();
+                    let mut name = format!("STAGE {}", s.index);
+                    if s.index == self.stages.len() {
+                        name.push_str(" · SUSTAINER");
+                    }
+                    if !motors.is_empty() {
+                        name.push_str(&format!(" · {}", motors.join(" + ")));
+                    }
+                    (s.fore_station as f32, s.aft_station as f32, name)
+                })
+                .collect();
+            // Under the rocket while the view shows its length: every stage's span on screen must hold its own label. Turned
+            // towards the axis the spans shrink to nothing and the labels pile up, so the strip is then pinned to the foot of
+            // the viewport at a fixed size (nose end on the left), where it stays readable from any direction.
+            let label_w = |name: &str| name.chars().count() as f32 * TEXT_LABEL * 0.62 + 2.0 * STAGE_PAD;
+            let spans: Vec<(f32, f32)> = named.iter().map(|(fore, aft, _)| (self.axis(*fore, size).x, self.axis(*aft, size).x)).collect();
+            let tracked = named.iter().zip(&spans).all(|((_, _, name), (x0, x1))| x1 - x0 >= label_w(name));
+            // The line hangs below the lower end of the rocket, not the nose: in a tilted view the tail can sit well under the
+            // nose, and a line hung from the nose would run through the body.
+            let low = self.stages.iter().flat_map(|s| [s.fore_station, s.aft_station]).map(|z| self.axis(z as f32, size).y).fold(f32::MIN, f32::max);
+            let (spans, y) = if tracked {
+                (spans, low + stage_row)
+            } else {
+                let widths: Vec<f32> = named.iter().map(|(_, _, name)| label_w(name)).collect();
+                let total: f32 = widths.iter().sum();
+                let mut x = (size.width - total) / 2.0;
+                let mut order: Vec<usize> = (0..named.len()).collect();
+                order.sort_by(|a, b| named[*a].0.total_cmp(&named[*b].0));
+                let mut fixed = vec![(0.0, 0.0); named.len()];
+                for i in order {
+                    fixed[i] = (x, x + widths[i]);
+                    x += widths[i];
+                }
+                (fixed, size.height - STAGE_STRIP_FOOT)
+            };
+            if !tracked {
+                // The pinned strip can lie over the rocket: a plate of the ground keeps it readable.
+                let (left, right) = spans.iter().fold((f32::MAX, f32::MIN), |(l, r), (x0, x1)| (l.min(*x0), r.max(*x1)));
+                frame.fill_rectangle(Point::new(left - 6.0, y - 9.0), Size::new(right - left + 12.0, TEXT_LABEL + 22.0), t.bg_000.scale_alpha(0.82));
+            }
+            for ((_, _, name), (x0, x1)) in named.into_iter().zip(spans) {
                 let bracket = Path::new(|b| {
                     b.move_to(Point::new(x0 + 1.0, y - 5.0));
                     b.line_to(Point::new(x0 + 1.0, y));
@@ -434,17 +539,7 @@ impl canvas::Program<Message> for Markers<'_> {
                     b.line_to(Point::new(x1 - 1.0, y - 5.0));
                 });
                 frame.stroke(&bracket, Stroke::default().with_color(t.ink_faint).with_width(1.0));
-                let top = s.index == self.stages.len();
-                let motors: Vec<&str> = self.motors.iter().filter(|(i, _)| *i == s.index).map(|(_, m)| m.as_str()).collect();
-                let mut name = format!("STAGE {}", s.index);
-                if top {
-                    name.push_str(" · SUSTAINER");
-                }
-                if !motors.is_empty() {
-                    name.push_str(&format!(" · {}", motors.join(" + ")));
-                }
-                let (x, align) = if s.fore_station <= 1e-9 { (x0 + 2.0, alignment::Horizontal::Left) } else { (x1 - 2.0, alignment::Horizontal::Right) };
-                label(&mut frame, name, Point::new(x, y + 5.0), t.ink_muted, align, alignment::Vertical::Top);
+                label(&mut frame, name, Point::new((x0 + x1) / 2.0, y + 5.0), t.ink_muted, alignment::Horizontal::Center, alignment::Vertical::Top);
             }
         }
 
@@ -454,9 +549,10 @@ impl canvas::Program<Message> for Markers<'_> {
         let fade = 1.0 - ((axial - AXIAL_FADE_FROM) / (AXIAL_FADE_TO - AXIAL_FADE_FROM)).clamp(0.0, 1.0);
         if let Some((cg, cp, margin)) = self.balance.filter(|_| fade > 0.02) {
             let (zc, zp) = (cg as f32, cp as f32);
-            // The stage brackets hang from the nose's height, which in a tilted view is not the CG's: the glyph row never rises
-            // into them (their labels would collide with the value labels and the margin).
-            let floor = if self.stages.len() > 1 && self.explode < 0.01 { self.axis(0.0, size).y + stage_row + 24.0 + GLYPH_R } else { f32::MIN };
+            // The stage brackets hang below the rocket's lower end, which in a tilted view is not the CG's height: the glyph row
+            // never rises into them (their labels would collide with the value labels and the margin).
+            let low = self.stages.iter().flat_map(|s| [s.fore_station, s.aft_station]).map(|z| self.axis(z as f32, size).y).fold(f32::MIN, f32::max);
+            let floor = if self.stages.len() > 1 && self.explode < 0.01 { low + stage_row + 24.0 + GLYPH_R } else { f32::MIN };
             let glyph_y = |at: Point| (at.y + glyph_row).max(floor);
             let (a, b) = (self.axis(zc, size), self.axis(zp, size));
             let side = |leans_left: bool| if leans_left { alignment::Horizontal::Right } else { alignment::Horizontal::Left };

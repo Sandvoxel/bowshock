@@ -36,7 +36,7 @@ pub struct Button<'a, M> {
     mark: Option<Mark>,
     key: Option<&'a str>,
     shortcut: Option<&'a str>,
-    tip: Option<&'a str>,
+    tip: Option<std::borrow::Cow<'a, str>>,
     reason: Option<&'a str>,
     weight: Weight,
     on_press: Option<M>,
@@ -63,13 +63,13 @@ pub fn button<'a, M>(label: &'a str, weight: Weight) -> Button<'a, M> {
 }
 
 /// A square icon-only ghost button; `tooltip` names the command (add `.shortcut(..)`).
-pub fn icon_button<'a, M>(mark: Mark, tooltip: &'a str) -> Button<'a, M> {
+pub fn icon_button<'a, M>(mark: Mark, tooltip: impl Into<std::borrow::Cow<'a, str>>) -> Button<'a, M> {
     Button {
         label: None,
         mark: Some(mark),
         key: None,
         shortcut: None,
-        tip: Some(tooltip),
+        tip: Some(tooltip.into()),
         reason: None,
         weight: Weight::Ghost,
         on_press: None,
@@ -105,8 +105,8 @@ impl<'a, M> Button<'a, M> {
     }
 
     /// A tooltip for a labelled button.
-    pub fn tooltip(mut self, tip: &'a str) -> Self {
-        self.tip = Some(tip);
+    pub fn tooltip(mut self, tip: impl Into<std::borrow::Cow<'a, str>>) -> Self {
+        self.tip = Some(tip.into());
         self
     }
 
@@ -178,7 +178,7 @@ impl<'a, M: Clone + 'a> From<Button<'a, M>> for Element<'a, M> {
 
         let mut body: Element<'a, M> = if disabled && b.label.is_some() { stack![press, dashed::frame(|t| t.line_200)].boxed() } else { press.boxed() };
 
-        let tip = if let Some(reason) = b.reason { Some((reason, None)) } else { b.tip.map(|tip| (tip, b.shortcut)) };
+        let tip = if let Some(reason) = b.reason { Some((reason.into(), None)) } else { b.tip.map(|tip| (tip, b.shortcut)) };
         if let Some((tip, shortcut)) = tip {
             let mut parts: Vec<Element<'a, M>> = vec![text(tip).size(TEXT_BODY).boxed()];
             if let Some(shortcut) = shortcut {

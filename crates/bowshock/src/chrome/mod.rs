@@ -2,10 +2,13 @@
 //! configuration menu over the foot of the parts bin, the issues list over the strip's right end, the motor picker modal).
 //!
 //! Module contract (see `ARCHITECTURE.md`): [`State`] is the chrome's own state (which menu is open, the rename buffer, the
-//! picker), [`Message`] its messages; the top bar's buttons send `app::Message` directly (undo, mode, units, run), everything
-//! that opens a menu or touches configurations sends [`Message`] wrapped in `app::Message::Chrome`.
+//! picker), [`Message`] its messages; the top bar's buttons send `app::Message` directly (undo, mode, run, the File / Edit / View
+//! menus of [`menu_bar`]), everything that opens a status-strip menu or touches configurations sends [`Message`] wrapped in
+//! `app::Message::Chrome`.
 
 pub mod config_picker;
+mod menu_bar;
+mod run_toast;
 mod status_strip;
 #[cfg(test)]
 mod tests;
@@ -18,10 +21,11 @@ use iced::{Background, Center, Element, Fill, Padding, Task, Theme, Widget};
 
 use crate::app::{self, ui, Ctx, Selection};
 use crate::theme::{self, MONO};
-use crate::tokens::{BIN_W, RAIL_W, SPACE_1, SPACE_2, SPACE_3, STATUSBAR_H, TEXT_BODY, TEXT_LABEL, TOPBAR_H};
-use crate::units::{Family, Quantity, UnitSystem};
+use crate::tokens::{BIN_W, RAIL_W, SPACE_1, SPACE_2, SPACE_3, STATUSBAR_H, TEXT_BODY, TOPBAR_H};
+use crate::units::Quantity;
 use crate::widgets::glyph::{self, Mark, Tone};
-use crate::widgets::segmented::{segmented_dense, Dense};
+pub use menu_bar::{overlay as menu_overlay, TopMenu, ViewChecks};
+pub use run_toast::run_toast;
 pub use status_strip::status_strip;
 pub use top_bar::top_bar;
 
@@ -37,9 +41,6 @@ const MENU_PAD: f32 = 10.0;
 const RUN_MENU_W: f32 = 240.0;
 /// Width of the issues list.
 const ISSUES_W: f32 = 420.0;
-/// Width of the custom units panel and of its family-name column.
-const UNITS_PANEL_W: f32 = 372.0;
-const UNITS_LABEL_W: f32 = 84.0;
 
 /// Which menu is open from the status strip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,7 +49,6 @@ enum Menu {
     Config,
     Issues,
     Run,
-    Units,
 }
 
 /// The chrome's messages.
@@ -60,14 +60,10 @@ pub enum Message {
     ToggleIssues,
     /// The Simulate button's caret: open or close its menu.
     ToggleRunMenu,
-    /// The top bar's unit select, `Custom…`: open the custom units panel.
-    OpenUnits,
-    /// A choice in the custom units panel: the whole unit set with that family changed.
-    SetUnits(UnitSystem),
-    /// "Run current configuration" in that menu.
-    RunCurrent,
-    /// "Run all configurations" in that menu.
-    RunAll,
+    /// "Run selected flights" in that menu.
+    RunSelected,
+    /// "One flight per configuration" in that menu.
+    RunPerConfiguration,
     /// Close whatever is open (Escape, a click outside).
     Dismiss,
     /// Make this configuration current.
@@ -96,7 +92,7 @@ pub enum Message {
     ToggleCg,
     /// The CP cell: show or hide the CP marker in the viewport and lanes.
     ToggleCp,
-    /// The files chosen in the "Load .eng…" dialog (empty when it was cancelled).
+    /// The files chosen in the "Load .eng / .rse…" dialog (empty when it was cancelled).
     MotorFiles(Vec<std::path::PathBuf>),
     /// Swallows a press (so clicking inside a modal panel does not close it).
     Nothing,
@@ -142,15 +138,13 @@ impl State {
             }
             Message::ToggleIssues => self.menu = if self.menu == Menu::Issues { Menu::Closed } else { Menu::Issues },
             Message::ToggleRunMenu => self.menu = if self.menu == Menu::Run { Menu::Closed } else { Menu::Run },
-            Message::OpenUnits => self.menu = Menu::Units,
-            Message::SetUnits(set) => return Task::done(app::Message::Units(set)),
-            Message::RunCurrent => {
+            Message::RunSelected => {
                 self.dismiss();
-                return Task::done(app::Message::Run);
+                return Task::done(app::Message::RunSelected);
             }
-            Message::RunAll => {
+            Message::RunPerConfiguration => {
                 self.dismiss();
-                return Task::done(app::Message::RunAll);
+                return Task::done(app::Message::RunPerConfiguration);
             }
             Message::Dismiss => self.dismiss(),
             Message::SelectConfig(id) => {
@@ -209,8 +203,8 @@ impl State {
                         config_picker::Outcome::Stay => {}
                         config_picker::Outcome::LoadFiles => return pick_motor_files(),
                         config_picker::Outcome::Debounce(generation) => return config_picker::debounce(generation),
-                        config_picker::Outcome::Search(generation, text) => return config_picker::search(generation, text),
-                        config_picker::Outcome::Download(motor) => return config_picker::download(motor),
+                        config_picker::Outcome::Search(generation, text) => return config_picker::search(generation, text, ctx.env.thrustcurve_api.clone()),
+                        config_picker::Outcome::Download(motor) => return config_picker::download(motor, ctx.env.thrustcurve_api.clone()),
                     }
                 }
             }
@@ -240,7 +234,6 @@ impl State {
                 Menu::Config => self.config_menu(ctx),
                 Menu::Issues => issues_list(ctx),
                 Menu::Run => run_menu(ctx),
-                Menu::Units => units_panel(ctx),
             }
         };
         Some(overlay.map(app::Message::Chrome).boxed())
@@ -308,8 +301,8 @@ impl State {
     }
 }
 
-/// The Simulate button's menu: run the current configuration or all of them (ConfigPicker, "In other modes"). It hangs from the
-/// top bar's right end.
+/// The Simulate button's menu: fly the selected flights, or one flight per configuration (ConfigPicker, "In other modes"). It
+/// hangs from the top bar's right end.
 fn run_menu<'a>(ctx: &'a Ctx) -> Element<'a, Message> {
     let count = ctx.doc.rocket().configurations().len();
     let item = |label: &'static str, hint: String, message: Message| -> Element<'a, Message> {
@@ -317,29 +310,11 @@ fn run_menu<'a>(ctx: &'a Ctx) -> Element<'a, Message> {
         let item = button(line).width(Fill).height(ROW_H).padding([0.0, MENU_PAD]).style(menu_item(false, false)).on_press(message);
         column![item, container(Space::new()).width(Fill).height(1).style(theme::hairline)].boxed()
     };
-    let menu =
-        column![item("Run current configuration", "F5".to_string(), Message::RunCurrent), item("Run all configurations", format!("{count}"), Message::RunAll),];
+    let menu = column![
+        item("Run selected flights", String::new(), Message::RunSelected),
+        item("One flight per configuration", format!("{count}"), Message::RunPerConfiguration),
+    ];
     let panel = container(mouse_area(menu).on_press(Message::Nothing)).width(RUN_MENU_W).style(theme::overlay);
-    floating(panel.boxed(), Anchor::TopRight)
-}
-
-/// The custom units panel (the top bar's `Custom…`): one selector per quantity family, so lengths can be in inches and masses in
-/// kilograms at once. Every choice applies at once and is kept in the user's settings. It hangs from the top bar's right end.
-fn units_panel<'a>(ctx: &'a Ctx) -> Element<'a, Message> {
-    let dense = Dense { height: 22.0, pad: 6.0, size: 11.5 };
-    let mut rows = column![container(text("CUSTOM UNITS").font(MONO).size(TEXT_LABEL).style(theme::faint)).padding([SPACE_2, MENU_PAD])].spacing(0);
-    for family in Family::ALL {
-        let units = family.quantity().units();
-        let options: Vec<(usize, &'static str)> = units.iter().enumerate().map(|(i, u)| (i, u.symbol)).collect();
-        let current = family.quantity().unit_index(ctx.units.unit(family));
-        let set = ctx.units;
-        let strip = segmented_dense(&options, current, move |i| Message::SetUnits(set.with(family, units[i].symbol)), dense, false);
-        let line = row![container(text(family.label()).size(MENU_SIZE).style(theme::muted)).width(UNITS_LABEL_W), strip].align_y(Center).spacing(SPACE_2);
-        rows = rows.push(container(line).padding([3.0, MENU_PAD]).boxed());
-    }
-    let note = "Areas and roughness follow length; angles are degrees, time is seconds.";
-    rows = rows.push(container(text(note).size(TEXT_LABEL).style(theme::faint)).padding([SPACE_2, MENU_PAD]).boxed());
-    let panel = container(mouse_area(rows).on_press(Message::Nothing)).width(UNITS_PANEL_W).style(theme::overlay);
     floating(panel.boxed(), Anchor::TopRight)
 }
 
@@ -353,7 +328,7 @@ enum Anchor {
 /// `panel` floated over the screen at `anchor`, against the status strip or the top bar, on a transparent layer that closes it
 /// when clicked.
 fn floating<'a>(panel: Element<'a, Message>, anchor: Anchor) -> Element<'a, Message> {
-    let scrim = mouse_area(Space::new().width(Fill).height(Fill)).interaction(iced::mouse::Interaction::Idle).on_press(Message::Dismiss);
+    let scrim = crate::widgets::modal::scrim(Message::Dismiss);
     let pad = match anchor {
         Anchor::TopRight => Padding { top: TOPBAR_H, ..Padding::ZERO },
         _ => Padding { bottom: STATUSBAR_H, ..Padding::ZERO },
@@ -410,13 +385,7 @@ fn issues_list<'a>(ctx: &'a Ctx) -> Element<'a, Message> {
     floating(panel.boxed(), Anchor::BottomRight)
 }
 
-/// The "Load .eng…" dialog (multi-select); the answer arrives as [`Message::MotorFiles`].
+/// The "Load .eng / .rse…" dialog (multi-select); the answer arrives as [`Message::MotorFiles`].
 fn pick_motor_files() -> Task<app::Message> {
-    Task::perform(
-        async {
-            let files = rfd::AsyncFileDialog::new().set_title("Load motor files").add_filter("RASP motor file", &["eng"]).pick_files().await;
-            files.map(|f| f.into_iter().map(|h| h.path().to_path_buf()).collect()).unwrap_or_default()
-        },
-        |paths| app::Message::Chrome(Message::MotorFiles(paths)),
-    )
+    app::dialogs::pick_files("Load motor files", ("RASP or RockSim motor file", &["eng", "rse"]), |paths| app::Message::Chrome(Message::MotorFiles(paths)))
 }

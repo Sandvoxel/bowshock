@@ -5,7 +5,7 @@
 # Coordinates are for 1280x800 on the example (flight rows at y 90, 135, 179, 223; Rail length at (190, 507)).
 viewport 1280x800
 
-click (663, 18)
+click "Simulate"
 screenshot one.png
 # Nominal is selected; Ctrl-click Windy and Hot day: CONDITIONS · 3 FLIGHTS, wind and temperature mixed, the rest shared.
 click (120, 135)

@@ -11,13 +11,19 @@ click (1180, 643)
 type "2"
 type enter
 screenshot sym-3-unlinked.png
+click "Prefs"
 click "Light"
+click "Done"
 move (600, 300)
 screenshot sym-3-unlinked-light.png
+click "Prefs"
 click "Dark"
+click "Done"
 click "Relink"
 click "Detach"
 screenshot sym-4-detached.png
+click "Prefs"
 click "Light"
+click "Done"
 move (600, 300)
 screenshot sym-4-detached-light.png

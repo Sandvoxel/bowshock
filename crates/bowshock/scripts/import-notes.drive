@@ -7,6 +7,8 @@ screenshot 01-imported.png
 click "2 errors"
 screenshot 02-issues-and-notes.png
 click (640, 300)
+click "Prefs"
 click "Light"
+click "Done"
 click "2 errors"
 screenshot 03-issues-and-notes-light.png

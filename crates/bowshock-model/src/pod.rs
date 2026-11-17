@@ -42,7 +42,7 @@ impl PodBody {
     /// pod is placed ([`Rocket::attach_radial`]).
     pub fn standard(parent_diameter: f64, parent_length: f64) -> PodBody {
         let diameter = (0.5 * parent_diameter).max(0.01);
-        let nose = Part::new(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 3.0 * diameter, diameter });
+        let nose = Part::new(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 3.0 * diameter, diameter, tip_radius: 0.0 });
         let tube = Part::new(1, PartKind::BodyTube { length: (0.6 * parent_length).max(4.0 * diameter), diameter });
         PodBody { parts: vec![nose, tube], radials: Vec::new(), internals: Vec::new() }
     }
@@ -142,6 +142,10 @@ impl Rocket {
             bands: crate::bands::StabilityBands::default(),
             plots: crate::flights::PlotLayout::default(),
             cfd: crate::cfd::CfdStore::default(),
+            separation_joints: std::collections::BTreeMap::new(),
+            assemblies: Vec::new(),
+            instances: Vec::new(),
+            stand_in: None,
         }
     }
 
@@ -337,7 +341,7 @@ mod tests {
 
     fn core() -> (Rocket, PartId, PartId) {
         let mut r = Rocket::default();
-        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.3, diameter: 0.1 }).unwrap();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.3, diameter: 0.1, tip_radius: 0.0 }).unwrap();
         let tube = r.insert(1, PartKind::BodyTube { length: 1.0, diameter: 0.1 }).unwrap();
         (r, tube, 0)
     }
@@ -513,7 +517,10 @@ mod tests {
         assert_eq!(r.pod_part_index(id), Some((pod, 2)));
         assert!((r.part_station(id).unwrap() - (0.6 + 0.75)).abs() < 1e-12);
         // A second nose is refused, as in the core.
-        assert_eq!(r.insert_in_pod(pod, 0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.1, diameter: 0.05 }), Err(InsertError::SecondNose));
+        assert_eq!(
+            r.insert_in_pod(pod, 0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.1, diameter: 0.05, tip_radius: 0.0 }),
+            Err(InsertError::SecondNose)
+        );
     }
 
     #[test]
@@ -545,7 +552,7 @@ mod tests {
     #[test]
     fn every_body_stack_takes_one_nose_and_one_tail_cone() {
         let (mut r, tube, _) = core();
-        let nose = PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.1, diameter: 0.04 };
+        let nose = PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.1, diameter: 0.04, tip_radius: 0.0 };
         let pod = r.attach_radial(tube, 0.3, 0.0, 3, RadialKind::Pod { gap: 0.0, body: bare_tube_pod() }).unwrap();
         // The core has its nose, so only the pod's fore node takes one (the core's nodes for a nose are none).
         assert!(r.nodes_for(&nose).is_empty());

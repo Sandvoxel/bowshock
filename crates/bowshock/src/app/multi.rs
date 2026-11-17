@@ -1,6 +1,6 @@
 //! Multi-selection (design/components/Inspector: *Multi-select shows only the fields the selected parts share*).
 //!
-//! `Ctx::selection` stays one value (`Selection::Part(primary)`); the parts selected *with* it live in [`Extra`], tied to that
+//! `Ctx::selection` stays one value (`Selection::Part(primary)`); the parts selected *with* it live in a [`MultiSet`], tied to that
 //! primary: a plain `ctx.selection = ..` anywhere in the app (which every area does) that names another thing silently drops the
 //! extras, so only the two places that build a multi-selection ([`Ctx::toggle_part`], [`Ctx::select_parts`]) need to know.
 //!
@@ -11,78 +11,45 @@
 
 use bowshock_model::{PartId, Rocket};
 
+use super::selection_set::MultiSet;
 use super::{Ctx, Selection};
 
-/// The parts selected in addition to the primary one (`Ctx::selection`).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Extra {
-    /// The primary part these were added to; the extras are void when the selection is anything else.
-    primary: Option<PartId>,
-    /// The other selected parts, in the order they were added.
-    parts: Vec<PartId>,
+/// Drops the extras that no longer exist in `rocket`, and all of them if `selection` is not their primary.
+pub fn validate(multi: &mut MultiSet<PartId>, selection: Selection, rocket: &Rocket) {
+    multi.sync_external_primary(selection.part());
+    let primary = multi.primary();
+    multi.retain(|id| Some(id) == primary || rocket.kind_of(id).is_some());
 }
 
-impl Extra {
-    /// The extras that go with `selection` (none if it is not the primary they were added to).
-    fn of(&self, selection: Selection) -> &[PartId] {
-        match (selection, self.primary) {
-            (Selection::Part(p), Some(q)) if p == q => &self.parts,
-            _ => &[],
-        }
-    }
-
-    /// Forgets every extra part.
-    pub fn clear(&mut self) {
-        self.primary = None;
-        self.parts.clear();
-    }
-
-    /// Drops the extras that no longer exist in `rocket`, and all of them if `selection` is not their primary.
-    pub fn validate(&mut self, selection: Selection, rocket: &Rocket) {
-        if self.of(selection).is_empty() {
-            self.clear();
-        } else {
-            self.parts.retain(|id| rocket.kind_of(*id).is_some());
-        }
-    }
-}
-
-/// Toggles `id` in the selection `(selection, extra)`: added when absent, removed when present (the oldest remaining part
+/// Toggles `id` in the selection `(selection, multi)`: added when absent, removed when present (the oldest remaining part
 /// becomes the primary when the primary goes). A selection of something else (nothing, a separation) starts a new one.
-fn toggle(selection: Selection, extra: &mut Extra, id: PartId) -> Selection {
+fn toggle(selection: Selection, multi: &mut MultiSet<PartId>, id: PartId) -> Selection {
     let Selection::Part(primary) = selection else {
-        extra.clear();
+        multi.only(Some(id));
         return Selection::Part(id);
     };
-    let mut all: Vec<PartId> = std::iter::once(primary).chain(extra.of(selection).iter().copied()).collect();
-    match all.iter().position(|p| *p == id) {
-        Some(at) => {
-            all.remove(at);
-        }
-        None => all.push(id),
-    }
-    let mut parts = all.into_iter();
-    let Some(first) = parts.next() else {
-        extra.clear();
-        return Selection::None;
-    };
-    extra.primary = Some(first);
-    extra.parts = parts.collect();
-    Selection::Part(first)
+    multi.sync_external_primary(Some(primary));
+    multi.toggle(id, true).map_or(Selection::None, Selection::Part)
 }
 
 impl Ctx {
+    /// The multi-selection, void when `selection` was written directly to something else.
+    fn live_multi(&self) -> Option<&MultiSet<PartId>> {
+        (self.multi.primary() == self.selection.part()).then_some(&self.multi)
+    }
+
     /// Every selected part: the primary first, then the others in the order they were added. Empty unless parts are selected.
     pub fn selected_parts(&self) -> Vec<PartId> {
-        match self.selection {
-            Selection::Part(p) => std::iter::once(p).chain(self.multi.of(self.selection).iter().copied()).collect(),
+        match (self.selection, self.live_multi()) {
+            (Selection::Part(_), Some(multi)) => multi.ids_insertion_order(),
+            (Selection::Part(p), None) => vec![p],
             _ => Vec::new(),
         }
     }
 
     /// Whether more than one part is selected.
     pub fn is_multi(&self) -> bool {
-        !self.multi.of(self.selection).is_empty()
+        self.live_multi().is_some_and(MultiSet::is_multi)
     }
 
     /// Shift-click / Cmd/Ctrl-click on part `id`: adds it to the selection, or removes it if it is already selected.
@@ -100,18 +67,8 @@ impl Ctx {
     /// Selects exactly `parts` (the first is the primary); an empty list selects nothing.
     #[cfg(test)]
     pub fn select_parts(&mut self, parts: &[PartId]) {
-        let mut it = parts.iter().copied();
-        match it.next() {
-            Some(first) => {
-                self.selection = Selection::Part(first);
-                self.multi.primary = Some(first);
-                self.multi.parts = it.filter(|p| *p != first).collect();
-            }
-            None => {
-                self.selection = Selection::None;
-                self.multi.clear();
-            }
-        }
+        self.multi.set_exact(parts);
+        self.selection = parts.first().map_or(Selection::None, |p| Selection::Part(*p));
     }
 
     /// Esc: a multi-selection is cleared. Returns whether it was one.
@@ -138,7 +95,7 @@ mod tests {
     fn app() -> (App, Vec<PartId>) {
         let mut app = App::new();
         let ctx = &mut app.ctx;
-        drag::place(ctx, 0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1 });
+        drag::place(ctx, 0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1, tip_radius: 0.0 });
         drag::place(ctx, 1, PartKind::BodyTube { length: 0.5, diameter: 0.1 });
         drag::place(ctx, 2, PartKind::Transition { length: 0.1, fore_diameter: 0.1, aft_diameter: 0.06 });
         app.after_update();
@@ -148,21 +105,21 @@ mod tests {
 
     #[test]
     fn toggling_adds_and_removes() {
-        let mut extra = Extra::default();
-        let s = toggle(Selection::None, &mut extra, 1);
+        let mut multi = MultiSet::default();
+        let s = toggle(Selection::None, &mut multi, 1);
         assert_eq!(s, Selection::Part(1));
-        let s = toggle(s, &mut extra, 2);
-        let s = toggle(s, &mut extra, 3);
-        assert_eq!((s, extra.of(s).to_vec()), (Selection::Part(1), vec![2, 3]));
+        let s = toggle(s, &mut multi, 2);
+        let s = toggle(s, &mut multi, 3);
+        assert_eq!((s, multi.ids_insertion_order()), (Selection::Part(1), vec![1, 2, 3]));
         // Removing a secondary part keeps the primary; removing the primary promotes the next.
-        let s = toggle(s, &mut extra, 2);
-        assert_eq!((s, extra.of(s).to_vec()), (Selection::Part(1), vec![3]));
-        let s = toggle(s, &mut extra, 1);
-        assert_eq!((s, extra.of(s).to_vec()), (Selection::Part(3), vec![]));
-        let s = toggle(s, &mut extra, 3);
+        let s = toggle(s, &mut multi, 2);
+        assert_eq!((s, multi.ids_insertion_order()), (Selection::Part(1), vec![1, 3]));
+        let s = toggle(s, &mut multi, 1);
+        assert_eq!((s, multi.ids_insertion_order()), (Selection::Part(3), vec![3]));
+        let s = toggle(s, &mut multi, 3);
         assert_eq!(s, Selection::None);
         // A separation selection is replaced, not extended.
-        assert_eq!(toggle(Selection::Separation(2), &mut extra, 4), Selection::Part(4));
+        assert_eq!(toggle(Selection::Separation(2), &mut multi, 4), Selection::Part(4));
     }
 
     #[test]

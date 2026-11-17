@@ -36,7 +36,9 @@ screenshot solve-3d-done-dark.png
 
 # The same mid-solve screen in the light theme.
 click "Re-solve"
+click "Prefs"
 click "Light"
+click "Done"
 move (100, 700)
 move (102, 702)
 screenshot solve-mid-light.png

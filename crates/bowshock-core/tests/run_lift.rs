@@ -7,7 +7,17 @@ const D: f64 = 0.04;
 fn analysis() -> Analysis {
     let nose_len = 0.5 * D / 10f64.to_radians().tan();
     let spec = BodySpec { nose: NoseSpec { shape: NoseShape::Cone, length: nose_len, diameter: D }, aft: vec![AftSpec::Tube { length: 10.0 * D - nose_len }] };
-    let fins = FinSpec { count: 4, root_chord: D, tip_chord: D, span: D, sweep: 0.0, thickness: 0.08 * D, roughness: 0.0, root_te_to_base: 0.0, profile: FinProfile::Square };
+    let fins = FinSpec {
+        count: 4,
+        root_chord: D,
+        tip_chord: D,
+        span: D,
+        sweep: 0.0,
+        thickness: 0.08 * D,
+        roughness: 0.0,
+        root_te_to_base: 0.0,
+        profile: FinProfile::Square,
+    };
     Analysis::new(&spec)
         .unwrap()
         .fins(fins)
@@ -34,7 +44,16 @@ fn run_lift_gives_ordered_physical_points() {
     assert!(polar.fallback.is_none());
     assert_eq!(polar.points.len(), 2);
     for p in &polar.points {
-        println!("M {} alpha {:.1} deg: CN {:.4} CA {:.4} x_cp {:.4} m {:?} iters {}", p.mach, p.alpha.to_degrees(), p.cn, p.ca_pressure, p.x_cp, p.quality, p.iterations);
+        println!(
+            "M {} alpha {:.1} deg: CN {:.4} CA {:.4} x_cp {:.4} m {:?} iters {}",
+            p.mach,
+            p.alpha.to_degrees(),
+            p.cn,
+            p.ca_pressure,
+            p.x_cp,
+            p.quality,
+            p.iterations
+        );
         assert!(matches!(p.quality, Quality::Converged | Quality::Stationary));
         assert!(p.x_cp > 0.0 && p.x_cp < 10.0 * D, "x_cp {}", p.x_cp);
     }
@@ -80,7 +99,15 @@ fn gpu_matches_cpu_tiny() {
     for (c, g) in cpu.points.iter().zip(&gpu.points) {
         println!(
             "alpha {:.0}: CPU CN {:.5} x_cp {:.5} d {:?} {} it | GPU CN {:.5} x_cp {:.5} d {:?} {} it",
-            c.alpha.to_degrees(), c.cn, c.x_cp / D, c.quality, c.iterations, g.cn, g.x_cp / D, g.quality, g.iterations
+            c.alpha.to_degrees(),
+            c.cn,
+            c.x_cp / D,
+            c.quality,
+            c.iterations,
+            g.cn,
+            g.x_cp / D,
+            g.quality,
+            g.iterations
         );
         assert!(matches!(g.quality, Quality::Converged | Quality::Stationary));
         assert!((g.cn - c.cn).abs() <= 0.005 * c.cn.abs(), "CN {} vs {}", g.cn, c.cn);

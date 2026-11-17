@@ -9,8 +9,6 @@
 //! catalogue keeps working.
 
 use std::collections::BTreeMap;
-use std::future::Future;
-use std::sync::LazyLock;
 use std::time::Duration;
 
 use bowshock_model::StabilityBands;
@@ -18,7 +16,6 @@ use bowshock_model::{MotorMount, MotorRef, PartId};
 use bowshock_motors::thrustcurve::{self as tc, Client, RemoteMotor, TcError};
 use bowshock_motors::{Motor, MotorDb};
 use bowshock_sim::from_model;
-use iced::futures::channel::oneshot;
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input, Space};
 use iced::{Background, Center, Element, Fill, Length, Task, Theme, Widget};
 
@@ -53,15 +50,15 @@ const NETWORK_TIMEOUT: Duration = Duration::from_secs(12);
 /// Id of the search field (for scripts: `click #motor-search`).
 pub const SEARCH_ID: &str = "motor-search";
 
-/// The ThrustCurve.org client of the picker. `$BOWSHOCK_THRUSTCURVE_API` replaces the API root (a mirror, or an unreachable
-/// address to see the offline state).
-static CLIENT: LazyLock<Client> = LazyLock::new(|| {
+/// The ThrustCurve.org client of the picker. `api_base` (`BOWSHOCK_THRUSTCURVE_API`) replaces the API root (a mirror, or an
+/// unreachable address to see the offline state).
+fn client(api_base: Option<&str>) -> Client {
     let client = Client::with_timeout(NETWORK_TIMEOUT);
-    match std::env::var("BOWSHOCK_THRUSTCURVE_API") {
-        Ok(base) if !base.trim().is_empty() => client.with_base(base.trim()),
-        _ => client,
+    match api_base {
+        Some(base) => client.with_base(base),
+        None => client,
     }
-});
+}
 
 /// Where the table's motors come from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,7 +88,7 @@ pub enum Message {
     Add,
     /// Close without adding.
     Cancel,
-    /// "Load .eng…": pick motor files of one's own.
+    /// "Load .eng / .rse…": pick motor files of one's own.
     LoadFiles,
     /// Typing paused: search if `generation` is still the latest text.
     Debounced(u64),
@@ -110,7 +107,7 @@ pub enum Outcome {
     Stay,
     /// Close it.
     Close,
-    /// Open the file dialog for the user's own `.eng` files.
+    /// Open the file dialog for the user's own `.eng` / `.rse` files.
     LoadFiles,
     /// Start the typing pause of search `generation` ([`debounce`]).
     Debounce(u64),
@@ -533,7 +530,7 @@ impl Picker {
             Some(_) => action("Add configuration", Weight::Primary).on_press(msg(Message::Add)).into(),
             None => action("Add configuration", Weight::Primary).disabled("Pick a motor").into(),
         };
-        let load: Element<'a, ChromeMessage> = action("Load .eng…", Weight::Secondary).on_press(msg(Message::LoadFiles)).into();
+        let load: Element<'a, ChromeMessage> = action("Load .eng / .rse…", Weight::Secondary).on_press(msg(Message::LoadFiles)).into();
         let footer = row![container(delay).width(160), load, Space::new().width(Fill), cancel, add].spacing(SPACE_2).align_y(Center);
 
         let rule = || container(Space::new()).width(Fill).height(1).style(theme::hairline).boxed();
@@ -622,39 +619,31 @@ impl Picker {
     }
 }
 
-/// Runs `work` on a thread of its own (network calls and waits must not hold the UI or the executor's threads).
-fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> impl Future<Output = Option<T>> {
-    let (tx, rx) = oneshot::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(work());
-    });
-    async move { rx.await.ok() }
-}
-
 fn to_app(message: Message) -> app::Message {
     app::Message::Chrome(ChromeMessage::Picker(message))
 }
 
 /// The typing pause of live search `generation`: answers [`Message::Debounced`] after [`DEBOUNCE`].
 pub fn debounce(generation: u64) -> Task<app::Message> {
-    Task::perform(off_thread(|| std::thread::sleep(DEBOUNCE)), move |_| to_app(Message::Debounced(generation)))
+    app::worker::perform(|| std::thread::sleep(DEBOUNCE), move |_| to_app(Message::Debounced(generation)))
 }
 
 /// Live search `generation` for `text` on a worker thread: answers [`Message::Results`].
-pub fn search(generation: u64, text: String) -> Task<app::Message> {
-    Task::perform(off_thread(move || CLIENT.search_text(&text)), move |result| {
-        to_app(Message::Results(generation, result.unwrap_or_else(|| Err(TcError::Unreachable("the search stopped".into())))))
-    })
+pub fn search(generation: u64, text: String, api_base: Option<String>) -> Task<app::Message> {
+    app::worker::perform(
+        move || client(api_base.as_deref()).search_text(&text),
+        move |result| to_app(Message::Results(generation, result.unwrap_or_else(|| Err(TcError::Unreachable("the search stopped".into()))))),
+    )
 }
 
 /// Downloads `motor`'s curve on a worker thread: answers [`Message::Downloaded`].
-pub fn download(motor: Box<RemoteMotor>) -> Task<app::Message> {
+pub fn download(motor: Box<RemoteMotor>, api_base: Option<String>) -> Task<app::Message> {
     let id = motor.motor_id.clone();
     let fetch = move || {
-        let found = CLIENT.download(std::slice::from_ref(&*motor))?;
+        let found = client(api_base.as_deref()).download(std::slice::from_ref(&*motor))?;
         found.into_iter().next().map(Box::new).ok_or(TcError::NoData(motor.designation.clone()))
     };
-    Task::perform(off_thread(fetch), move |result| {
+    app::worker::perform(fetch, move |result| {
         to_app(Message::Downloaded(id, result.unwrap_or_else(|| Err(TcError::Unreachable("the download stopped".into())))))
     })
 }
@@ -809,7 +798,7 @@ mod tests {
     fn with_mount(app: &mut App) -> PartId {
         let ctx = app.ctx_mut();
         ctx.doc.edit("Build", |r| {
-            r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762 }).unwrap();
+            r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762, tip_radius: 0.0 }).unwrap();
             let tube = r.insert(1, PartKind::BodyTube { length: 0.9, diameter: 0.0762 }).unwrap();
             r.attach_internal(tube, 0.5, InternalKind::InnerTube { outer_diameter: 0.040, thickness: 0.001, length: 0.34, motor_mount: true, overhang: 0.0 })
                 .unwrap()

@@ -54,7 +54,7 @@ mod tests {
     #[test]
     fn the_clicked_copy_belongs_to_its_group_and_wraps() {
         let mut r = Rocket::default();
-        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.07 }).unwrap();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.07, tip_radius: 0.0 }).unwrap();
         let tube = r.insert(1, PartKind::BodyTube { length: 0.5, diameter: 0.07 }).unwrap();
         let fins =
             r.attach_radial(tube, 0.3, 0.0, 3, RadialKind::FinSet { root_chord: 0.1, tip_chord: 0.05, span: 0.06, sweep: 0.04, thickness: 0.003 }).unwrap();

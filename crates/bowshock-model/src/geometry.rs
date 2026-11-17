@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::material::{Finish, MaterialId};
+use crate::nose::NoseProfile;
 use crate::symmetry::FieldOverride;
 use crate::PartId;
 
@@ -66,14 +67,20 @@ impl NoseShape {
 /// Geometry of one airframe part.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PartKind {
-    /// Nose cone ending at `diameter`.
+    /// Nose cone ending at `diameter`, optionally with a spherical tip.
     NoseCone {
-        /// Profile family.
+        /// Profile family (of the sharp nose; with a tip radius the sphere replaces its tip, see [`crate::nose`]).
         shape: NoseShape,
-        /// Length along the axis.
+        /// Length along the axis of the nose as built: from the apex of the tip sphere (the point when `tip_radius` is 0) to
+        /// the base.
         length: f64,
         /// Aft (base) diameter.
         diameter: f64,
+        /// Radius of the spherical tip, tangent to the profile (Crowell, *The Descriptive Geometry of Nose Cones*); 0 is a
+        /// pointed nose. At most 0.9 of the base radius and only where a sphere of that radius is tangent to the family
+        /// ([`PartKind::tip_radius_limits`]).
+        #[serde(default, skip_serializing_if = "is_zero")]
+        tip_radius: f64,
     },
     /// Cylindrical body tube.
     BodyTube {
@@ -92,8 +99,6 @@ pub enum PartKind {
         aft_diameter: f64,
     },
 }
-
-const NOSE_POINTS: usize = 32;
 
 impl PartKind {
     /// Display name: "Nose cone", "Body tube", "Transition", or "Boattail" when aft < fore.
@@ -141,7 +146,7 @@ impl PartKind {
         match &mut out {
             PartKind::NoseCone { length: l, .. } | PartKind::BodyTube { length: l, .. } | PartKind::Transition { length: l, .. } => *l = length,
         }
-        out
+        out.sanitized_tip()
     }
 
     /// This kind with its aft diameter replaced (a nose cone's base diameter, a tube's only diameter).
@@ -150,7 +155,7 @@ impl PartKind {
         match &mut out {
             PartKind::NoseCone { diameter: d, .. } | PartKind::BodyTube { diameter: d, .. } | PartKind::Transition { aft_diameter: d, .. } => *d = diameter,
         }
-        out
+        out.sanitized_tip()
     }
 
     /// This kind with its fore diameter replaced. A nose cone has no fore diameter (always a point) and a body tube has one
@@ -166,13 +171,7 @@ impl PartKind {
     /// Outer radius at `z` from the part's fore face (clamped to the part).
     pub fn radius_at(&self, z: f64) -> f64 {
         match *self {
-            PartKind::NoseCone { shape, length, diameter } => {
-                if length <= 0.0 {
-                    diameter / 2.0
-                } else {
-                    nose_radius(shape, length, diameter / 2.0, z.clamp(0.0, length))
-                }
-            }
+            PartKind::NoseCone { shape, length, diameter, tip_radius } => NoseProfile::new(shape, length, diameter, tip_radius).radius(z),
             PartKind::BodyTube { diameter, .. } => diameter / 2.0,
             PartKind::Transition { length, fore_diameter, aft_diameter } => {
                 let t = if length > 0.0 { (z / length).clamp(0.0, 1.0) } else { 1.0 };
@@ -182,24 +181,11 @@ impl PartKind {
     }
 
     /// Outer profile as `(z, radius)` with z measured from the part's fore face, fore to aft.
-    /// Noses are sampled with 33 points (32 segments); tubes and transitions use two.
+    /// A pointed nose is sampled with 33 points (32 segments), a blunted one with the tip sphere as well (see
+    /// [`NoseProfile::profile`]); tubes and transitions use two.
     pub fn profile(&self) -> Vec<(f64, f64)> {
         match *self {
-            PartKind::NoseCone { shape, length, diameter } => {
-                let r_max = diameter / 2.0;
-                (0..=NOSE_POINTS)
-                    .map(|i| {
-                        if i == 0 {
-                            return (0.0, 0.0);
-                        }
-                        if i == NOSE_POINTS {
-                            return (length, r_max);
-                        }
-                        let x = length * i as f64 / NOSE_POINTS as f64;
-                        (x, nose_radius(shape, length, r_max, x))
-                    })
-                    .collect()
-            }
+            PartKind::NoseCone { shape, length, diameter, tip_radius } => NoseProfile::new(shape, length, diameter, tip_radius).profile(),
             PartKind::BodyTube { length, diameter } => {
                 vec![(0.0, diameter / 2.0), (length, diameter / 2.0)]
             }
@@ -337,6 +323,9 @@ pub struct Part {
     /// CG that replaces the computed one, metres behind the part's fore face.
     #[serde(default)]
     pub cg_override: Option<f64>,
+    /// Drag coefficient (on the rocket's reference area) that replaces the part's computed drag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cd_override: Option<f64>,
     /// The shoulder at the fore face (transitions only: a nose cone has no fore shoulder).
     #[serde(default, skip_serializing_if = "Shoulder::is_default")]
     pub shoulder_fore: Shoulder,
@@ -358,6 +347,7 @@ impl Part {
             thickness: material.material().default_wall,
             mass_override: None,
             cg_override: None,
+            cd_override: None,
             shoulder_fore: Shoulder::NONE,
             shoulder_aft: Shoulder::NONE,
         }
@@ -375,7 +365,9 @@ impl Part {
 }
 
 /// Section of a fin's plate.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// Not `Eq` or `Hash`: [`FinSection::Hexagonal`] carries its wedge length, as [`NoseShape`]'s parametric families carry theirs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum FinSection {
     /// Flat plate with square edges.
     #[default]
@@ -384,11 +376,41 @@ pub enum FinSection {
     Rounded,
     /// Symmetric airfoil.
     Airfoil,
+    /// Sharp-edged double wedge: two flat faces meeting at mid-chord.
+    DoubleWedge,
+    /// Sharp-edged hexagonal (modified double wedge) section: a wedge of this fraction of the chord at the leading and at the
+    /// trailing edge with a flat mid-section. `0 < f <= 0.5` ([`FinSection::clamp_wedge_fraction`]); 0.5 is the double wedge.
+    Hexagonal(f64),
+    /// Sharp-edged biconvex (circular-arc) section.
+    Biconvex,
 }
 
 impl FinSection {
-    /// Every section.
-    pub const ALL: [FinSection; 3] = [FinSection::Square, FinSection::Rounded, FinSection::Airfoil];
+    /// The wedge fraction a new hexagonal section has.
+    pub const DEFAULT_WEDGE_FRACTION: f64 = 0.25;
+    /// The smallest wedge fraction [`FinSection::clamp_wedge_fraction`] allows (the wave drag grows as its inverse).
+    pub const MIN_WEDGE_FRACTION: f64 = 0.01;
+    /// The largest wedge fraction: the two wedges meet at mid-chord, a double wedge.
+    pub const MAX_WEDGE_FRACTION: f64 = 0.5;
+
+    /// Every section (a hexagonal one with the default wedge).
+    pub const ALL: [FinSection; 6] = [
+        FinSection::Square,
+        FinSection::Rounded,
+        FinSection::Airfoil,
+        FinSection::DoubleWedge,
+        FinSection::Hexagonal(FinSection::DEFAULT_WEDGE_FRACTION),
+        FinSection::Biconvex,
+    ];
+
+    /// `f` limited to the valid wedge fractions; the default when it is not a number.
+    pub fn clamp_wedge_fraction(f: f64) -> f64 {
+        if f.is_nan() {
+            Self::DEFAULT_WEDGE_FRACTION
+        } else {
+            f.clamp(Self::MIN_WEDGE_FRACTION, Self::MAX_WEDGE_FRACTION)
+        }
+    }
 
     /// Display name.
     pub fn name(self) -> &'static str {
@@ -396,16 +418,23 @@ impl FinSection {
             FinSection::Square => "Square",
             FinSection::Rounded => "Rounded",
             FinSection::Airfoil => "Airfoil",
+            FinSection::DoubleWedge => "Double wedge",
+            FinSection::Hexagonal(_) => "Hexagonal",
+            FinSection::Biconvex => "Biconvex",
         }
     }
 
-    /// Plate volume as a fraction of planform area x thickness. Square is 1; an airfoil takes the area of a symmetric
-    /// four-digit NACA section (0.685 of chord x thickness); rounded edges are an estimate (0.9).
+    /// Plate volume as a fraction of planform area x thickness (the section's area over the rectangle `t c`). Square is 1; an
+    /// airfoil takes the area of a symmetric four-digit NACA section (0.685 of chord x thickness); rounded edges are an
+    /// estimate (0.9); a double wedge is 1/2, a hexagonal section with wedge fraction `f` is `1 - f` and a biconvex one 2/3.
     pub fn volume_factor(self) -> f64 {
         match self {
             FinSection::Square => 1.0,
             FinSection::Rounded => 0.9,
             FinSection::Airfoil => 0.685,
+            FinSection::DoubleWedge => 0.5,
+            FinSection::Hexagonal(f) => 1.0 - Self::clamp_wedge_fraction(f),
+            FinSection::Biconvex => 2.0 / 3.0,
         }
     }
 }
@@ -773,6 +802,10 @@ pub struct RadialPart {
     /// CG that replaces the computed one, metres behind the group's fore edge.
     #[serde(default)]
     pub cg_override: Option<f64>,
+    /// Drag coefficient of the whole group (all `count` copies, on the rocket's reference area) that replaces the computed
+    /// drag. On a pod it replaces the drag of the pod's every part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cd_override: Option<f64>,
     /// Per-copy overrides: single fields a copy has loosened from the group (see [`crate::symmetry`]). Empty for a plain
     /// linked group; every entry names a copy (`index < count`) and a field that applies to `kind`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -824,6 +857,7 @@ impl RadialPart {
             cant: 0.0,
             mass_override: None,
             cg_override: None,
+            cd_override: None,
             overrides: Vec::new(),
             instance_angles: None,
             letters: Vec::new(),

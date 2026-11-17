@@ -15,7 +15,7 @@
 //!
 //! Times that depend on something unknown (an altitude not yet reached) are `None`, and so is everything that depends on them.
 
-use crate::flight::{simulate, EventKind, SimInput};
+use crate::flight::{build_aeros, run, EventKind, SimInput, Tweaks};
 use crate::vehicle::{Trigger, Vehicle};
 
 /// Event times of a vehicle's stages, by stage index in firing order (`None`: not known, or never).
@@ -31,19 +31,21 @@ pub struct Timeline {
     pub ejection: Vec<Option<f64>>,
 }
 
-/// The times at which the altitude triggers fired (before their delay), by stage index.
+/// The times at which the altitude triggers fired (before their delay), by stage index, and the ignitions a tilt lockout held off.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Hits {
     /// For ignitions.
     pub ignition: Vec<Option<f64>>,
     /// For separations.
     pub separation: Vec<Option<f64>>,
+    /// Stages whose motor never lights: its ignition came while the rocket leaned past the stage's tilt lockout.
+    pub inhibited: Vec<bool>,
 }
 
 impl Hits {
     /// Nothing has fired yet.
     pub(crate) fn none(stages: usize) -> Hits {
-        Hits { ignition: vec![None; stages], separation: vec![None; stages] }
+        Hits { ignition: vec![None; stages], separation: vec![None; stages], inhibited: vec![false; stages] }
     }
 }
 
@@ -68,7 +70,8 @@ impl Timeline {
                         Trigger::Separation => below_separation,
                         Trigger::Altitude(_) => hits.ignition[k],
                     };
-                    t.ignition[k] = base.map(|b| b + m.ignition.delay.max(0.0));
+                    let inhibited = hits.inhibited.get(k).copied().unwrap_or(false);
+                    t.ignition[k] = base.filter(|_| !inhibited).map(|b| b + m.ignition.delay.max(0.0));
                     t.burnout[k] = t.ignition[k].map(|i| i + m.curve.burn_time());
                     t.ejection[k] = m.ejection_delay.and_then(|d| t.burnout[k].map(|b| b + d));
                 }
@@ -108,7 +111,8 @@ pub fn has_altitude_trigger(v: &Vehicle) -> bool {
 }
 
 /// The staging timeline of `input`'s vehicle. Without altitude triggers this is [`Timeline::of`]; with them the times come from a
-/// coarse flight (5 ms step, no recovery) of up to two minutes, whose events are the same ones [`simulate`] reports.
+/// coarse flight (5 ms step, no recovery, the upper stack only: no dropped stage is flown) of up to two minutes, whose events are
+/// the same ones [`simulate`](crate::flight::simulate) reports.
 pub fn staging_times(input: &SimInput) -> Timeline {
     let v = &input.vehicle;
     if !has_altitude_trigger(v) {
@@ -118,7 +122,7 @@ pub fn staging_times(input: &SimInput) -> Timeline {
     quick.dt = 0.005;
     quick.max_time = 120.0;
     quick.recovery.clear();
-    let flight = simulate(&quick);
+    let flight = run(&quick, &quick.launch, Tweaks::NOMINAL, &build_aeros(&quick));
     let mut hits = Hits::none(v.stages.len());
     for e in &flight.trajectory.events {
         let Some(k) = e.stage.filter(|k| *k < v.stages.len()) else {

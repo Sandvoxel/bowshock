@@ -1,13 +1,17 @@
 # Charts QA: Simulate (run, hover, zoom, compare), ground track, Analyze, dark and light.
 viewport 1300x900
-click (663, 18)
-click "Run"
+click "Simulate"
+click "Run selected"
 move (560, 300)
 move (570, 300)
 screenshot SimulateScreen-dark.png
+click "Prefs"
 click "Light"
+click "Done"
 screenshot SimulateScreen-light.png
+click "Prefs"
 click "Dark"
+click "Done"
 press (500, 300)
 move (560, 300)
 move (640, 300)
@@ -16,9 +20,13 @@ screenshot PlotZoom-band-dark.png
 type enter
 move (600, 300)
 screenshot PlotZoom-dark.png
+click "Prefs"
 click "Light"
+click "Done"
 screenshot PlotZoom-light.png
+click "Prefs"
 click "Dark"
+click "Done"
 type escape
 click "Run all"
 click (17, 94)
@@ -27,13 +35,19 @@ click (17, 226)
 move (500, 300)
 move (510, 300)
 screenshot SimulateCompare-dark.png
+click "Prefs"
 click "Light"
+click "Done"
 screenshot SimulateCompare-light.png
+click "Prefs"
 click "Dark"
+click "Done"
 click "Analyze"
 move (640, 400)
 move (700, 300)
 move (702, 302)
 screenshot AnalyzeScreen-dark.png
+click "Prefs"
 click "Light"
+click "Done"
 screenshot AnalyzeScreen-light.png

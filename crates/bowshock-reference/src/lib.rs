@@ -5,6 +5,8 @@
 pub mod anf;
 pub mod arcas;
 pub mod base_drag;
+pub mod blunt_nose;
+pub mod fin_wave;
 pub mod potential;
 pub mod shock_expansion;
 pub mod taylor_maccoll;

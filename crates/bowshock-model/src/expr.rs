@@ -81,6 +81,7 @@ pub fn dim_key(dim: Dim) -> String {
         Dim::ForeShoulderDiameter => "fore_shoulder_od".into(),
         Dim::ForeShoulderThickness => "fore_shoulder_thickness".into(),
         Dim::FilletRadius => "fillet".into(),
+        Dim::TipRadius => "tip_radius".into(),
         Dim::Vertex(i) => format!("vertex{i}"),
     }
 }
@@ -114,6 +115,7 @@ pub fn dim_from_key(key: &str) -> Option<Dim> {
         "fore_shoulder_od" => Dim::ForeShoulderDiameter,
         "fore_shoulder_thickness" => Dim::ForeShoulderThickness,
         "fillet" => Dim::FilletRadius,
+        "tip_radius" => Dim::TipRadius,
         other => Dim::Vertex(other.strip_prefix("vertex")?.parse().ok()?),
     })
 }

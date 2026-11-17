@@ -180,6 +180,14 @@ pub(super) fn timing_rows<'a>(form: &Form<'a>, config: &Configuration, stage: us
         rows.push(number("Altitude", h, Quantity::Altitude, Field::StageAltitude(stage, kind)));
     }
     rows.push(number("Delay", event.delay, Quantity::Time, Field::StageDelay(stage, kind)));
+    if kind == EventKind::Ignition {
+        // The motor does not light if the rocket leans past this when the ignition comes; blank is off.
+        let toggle = crate::widgets::field::checkbox("Tilt lockout", event.tilt_lockout.is_some(), move |on| Message::TiltLockout(stage, on));
+        rows.push(labeled("Lockout", toggle));
+        if let Some(limit) = event.tilt_lockout {
+            rows.push(number("Max tilt", limit, Quantity::Angle, Field::TiltLockout(stage)));
+        }
+    }
     rows
 }
 
@@ -193,15 +201,30 @@ pub fn view<'a>(ctx: &'a Ctx, n: usize) -> Option<(String, String, Vec<Element<'
     let form = Form { ctx, limit: None, first: None };
     let config = rocket.active_configuration();
 
+    let name = |id: PartId| rocket.part(id).map_or_else(|| "?".to_string(), |p| p.display_name());
     let found_from = {
         let name = config.slot(separation.found_from).and_then(|s| s.motor.as_ref()).map(|m| m.designation.clone());
         format!("Aft end of {}", name.unwrap_or_else(|| "the upper motor mount".to_string()))
     };
-    let joint = {
-        let name = |id: PartId| rocket.part(id).map_or_else(|| "?".to_string(), |p| p.display_name());
-        format!("{} · {}", name(separation.joint_between.0), name(separation.joint_between.1))
-    };
-    let where_rows = vec![form.fixed("Position", separation.station, Quantity::Length), text_row("Found from", found_from), text_row("Joint", joint)];
+    // The joint is a property of the rocket (not of a configuration): the select lists every joint it can take.
+    let mut options: Vec<(Option<PartId>, String)> = vec![(None, "Automatic (first joint behind the motor)".to_string())];
+    for joint in rocket.separation_joints(n) {
+        options.push((
+            Some(joint.between.1),
+            format!("{} · {} | {}", ui::with_unit(joint.station, Quantity::Length, ctx.units), name(joint.between.0), name(joint.between.1)),
+        ));
+    }
+    let selected = separation.chosen.then_some(separation.joint_between.1);
+    let picker = column![
+        choose(options, &selected, move |joint| Message::SeparationJoint(n, joint)),
+        text(if separation.chosen { "Chosen" } else { "Automatic" }).size(TEXT_BODY).style(theme::muted).boxed(),
+    ]
+    .spacing(SPACE_2)
+    .boxed();
+    let mut where_rows = vec![labeled("Separates at", picker)];
+    if !separation.chosen {
+        where_rows.push(text_row("Found from", found_from));
+    }
 
     let lower_name = stage_name(n, total);
     let separates = timing_rows(&form, config, n, EventKind::Separation, &lower_name, false);
@@ -258,7 +281,7 @@ pub(super) mod tests {
     /// after the separation.
     pub fn two_stage() -> Rocket {
         let mut r = Rocket::default();
-        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762 }).unwrap();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762, tip_radius: 0.0 }).unwrap();
         let upper = r.insert(1, PartKind::BodyTube { length: 0.5, diameter: 0.0762 }).unwrap();
         let lower = r.insert(2, PartKind::BodyTube { length: 0.5, diameter: 0.0762 }).unwrap();
         let mount = |r: &mut Rocket, parent: PartId, offset: f64| {
@@ -280,7 +303,7 @@ pub(super) mod tests {
     /// Sets a staging event of the active configuration.
     pub fn set(r: &mut Rocket, stage: usize, kind: EventKind, trigger: StageTrigger, delay: f64) {
         let config = r.active_config_id();
-        r.set_stage_event(config, StageEvent { stage, kind, trigger, delay }).unwrap();
+        r.set_stage_event(config, StageEvent { stage, kind, trigger, delay, tilt_lockout: None }).unwrap();
     }
 
     fn times(r: &Rocket, db: &MotorDb) -> Vec<(String, Option<f64>)> {

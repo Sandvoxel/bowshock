@@ -54,7 +54,7 @@ fn invalid_specs_are_rejected_with_the_field_named() {
         ("aft[1].aft_diameter", |s| s.aft[1] = AftSpec::Transition { length: 0.1, aft_diameter: f64::INFINITY }),
         ("aft[1].aft_diameter", |s| s.aft[1] = AftSpec::Transition { length: 0.1, aft_diameter: -0.08 }),
         ("aft[1]", |s| s.aft[1] = AftSpec::Transition { length: 0.01, aft_diameter: 0.04 }), // 71 deg
-        ("aft", |s| s.aft[0] = AftSpec::Tube { length: 5.0 }),                               // 53 diameters
+        ("aft", |s| s.aft[0] = AftSpec::Tube { length: 11.0 }),                              // 114 diameters
     ];
     for (field, edit) in cases {
         let mut s = spec();

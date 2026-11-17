@@ -18,7 +18,7 @@ use crate::tokens::{RAIL_W, SPACE_1, SPACE_2};
 pub enum RailIcon {
     /// Body tubes, nose cones, transitions.
     Airframe,
-    /// Fins, canards, rail buttons and lugs.
+    /// Fins, rail buttons and lugs.
     FinsGuides,
     /// Bulkheads, motor mounts, couplers.
     Internal,

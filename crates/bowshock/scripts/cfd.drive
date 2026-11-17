@@ -30,7 +30,9 @@ move (702, 302)
 screenshot cfd-vs-extended-dark.png
 
 # The light theme.
+click "Prefs"
 click "Light"
+click "Done"
 move (700, 300)
 move (702, 302)
 screenshot cfd-vs-extended-light.png

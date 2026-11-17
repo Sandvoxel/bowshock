@@ -79,6 +79,10 @@ pub struct StageEvent {
     pub trigger: StageTrigger,
     /// Seconds after the trigger.
     pub delay: f64,
+    /// An ignition's tilt lockout (radians from vertical): the motor does not light if the rocket leans more than this when the
+    /// ignition comes. `None` lights whatever the attitude. Ignored for separations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tilt_lockout: Option<f64>,
 }
 
 impl StageEvent {
@@ -90,7 +94,7 @@ impl StageEvent {
             (EventKind::Ignition, 0 | 1) => StageTrigger::TimeFromLaunch,
             (EventKind::Ignition, _) => StageTrigger::Separation,
         };
-        StageEvent { stage, kind, trigger, delay: 0.0 }
+        StageEvent { stage, kind, trigger, delay: 0.0, tilt_lockout: None }
     }
 }
 
@@ -369,6 +373,7 @@ impl Rocket {
                 StageTrigger::Altitude(h) => StageTrigger::Altitude(clean(h)),
                 other => other,
             },
+            tilt_lockout: event.tilt_lockout.filter(|a| a.is_finite() && event.kind == EventKind::Ignition).map(|a| a.clamp(0.0, std::f64::consts::PI)),
             ..event
         };
         let c = self.configs.iter_mut().find(|c| c.id == config).ok_or(ConfigError::NoSuchConfig)?;
@@ -405,6 +410,8 @@ impl Rocket {
             delay: clean(deploy.delay),
             event: match deploy.event {
                 DeployEvent::Altitude(h) => DeployEvent::Altitude(clean(h)),
+                DeployEvent::SpeedBelow(v) => DeployEvent::SpeedBelow(clean(v)),
+                DeployEvent::TiltAbove(a) => DeployEvent::TiltAbove(clean(a).min(std::f64::consts::PI)),
                 other => other,
             },
         };
@@ -590,8 +597,8 @@ mod tests {
         assert_eq!(r.set_motor(77, mount, None), Err(ConfigError::NoSuchConfig));
         r.set_motor_delay(id, mount, f64::INFINITY).unwrap();
         assert!(r.active_configuration().slot(mount).unwrap().is_plugged());
-        r.set_stage_event(id, StageEvent { stage: 2, kind: EventKind::Ignition, trigger: StageTrigger::Separation, delay: 0.5 }).unwrap();
-        let sep = |delay| StageEvent { stage: 1, kind: EventKind::Separation, trigger: StageTrigger::Burnout, delay };
+        r.set_stage_event(id, StageEvent { stage: 2, kind: EventKind::Ignition, trigger: StageTrigger::Separation, delay: 0.5, tilt_lockout: None }).unwrap();
+        let sep = |delay| StageEvent { stage: 1, kind: EventKind::Separation, trigger: StageTrigger::Burnout, delay, tilt_lockout: None };
         r.set_stage_event(id, sep(0.25)).unwrap();
         r.set_stage_event(id, sep(0.5)).unwrap();
         assert_eq!(r.active_configuration().events.len(), 2, "one entry per stage and kind");

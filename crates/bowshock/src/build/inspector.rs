@@ -134,6 +134,11 @@ pub enum Message {
     BallastStation(f64),
     /// What a staging event waits for (`(stage, which event, choice)`), in the active configuration.
     StageOn(usize, EventKind, StageOn),
+    /// Switch the ignition tilt lockout of a stage on (at its default) or off, in the active configuration.
+    TiltLockout(usize, bool),
+    /// The joint stage `n` separates at: the airframe part just aft of it, or `None` for the automatic joint (the rocket's, not
+    /// a configuration's).
+    SeparationJoint(usize, Option<PartId>),
     /// *Override…*: give the mass or CG an explicit value, starting from the computed one.
     StartOverride(Field),
     /// *Clear*: compute the mass or CG again.
@@ -158,6 +163,12 @@ pub enum Message {
     Duplicate,
     /// Overflow menu: delete the part.
     Delete,
+    /// Rocket inspector's More menu: open the Scale overlay for the whole rocket.
+    ScaleRocket,
+    /// Fin GEOMETRY: pick an image to trace the fin outline from.
+    OutlineFromImage,
+    /// The picked image (`None` when the dialog was cancelled) for fin `id`, or why it could not be read.
+    FinImage(PartId, Option<Result<Vec<u8>, String>>),
     /// Symmetry bar: the next copy of the group is the one the fields and *Detach* act on.
     NextInstance,
     /// Symmetry bar: *Detach*, the chosen copy leaves the group.
@@ -336,6 +347,36 @@ impl State {
                 self.menu = None;
                 return Task::done(app::Message::Delete);
             }
+            Message::ScaleRocket => {
+                self.menu = None;
+                return Task::done(app::Message::Scale(app::scale::Message::OpenWhole));
+            }
+            Message::OutlineFromImage => {
+                if let Selection::Part(id) = ctx.selection {
+                    return app::dialogs::pick_bytes("Fin outline from image", ("Image", &["png", "jpg", "jpeg"]), move |res| {
+                        let res = res.map(|r| r.map_err(|e| format!("Could not read the image: {e}")));
+                        app::Message::Inspector(Message::FinImage(id, res))
+                    });
+                }
+            }
+            Message::FinImage(id, Some(bytes)) => {
+                let fin = ctx.doc.rocket().radial(id).filter(|r| r.kind.is_fin()).map(|r| (r.kind.extent(), r.kind.thickness().unwrap_or(0.003), r.count));
+                if let Some((root, thickness, count)) = fin {
+                    match bytes.and_then(|b| crate::build::fin_trace::trace(&b, root)) {
+                        Ok(points) => {
+                            let n = points.len();
+                            let kind = bowshock_model::RadialKind::FreeformFin { points, thickness };
+                            if ctx.doc.edit("Fin from image", |r| r.set_radial(id, kind, count)) {
+                                ctx.notify(format!("Fin outline traced from the image ({n} points)"));
+                            } else {
+                                ctx.notify("The traced outline could not be applied");
+                            }
+                        }
+                        Err(e) => ctx.notify(e),
+                    }
+                }
+            }
+            Message::FinImage(_, None) => {}
             _ if !editing => {}
             Message::Edit(field, value, live) => self.edit_field(ctx, field, value, live),
             Message::RocketName(name) => {
@@ -376,8 +417,15 @@ impl State {
                     ctx.notify("Could not split the tube there");
                 }
             }
+            Message::TiltLockout(stage, on) => {
+                let lockout = on.then_some(edit::DEFAULT_TILT_LOCKOUT);
+                ctx.doc.edit("Set tilt lockout", |r| edit::set_tilt_lockout(r, stage, lockout));
+            }
             Message::StageOn(stage, kind, on) => {
                 ctx.doc.edit("Set staging trigger", |r| edit::set_stage_on(r, stage, kind, on));
+            }
+            Message::SeparationJoint(stage, joint) => {
+                ctx.doc.edit("Move separation", |r| r.set_separation_joint(stage, joint));
             }
             Message::Note(note) => {
                 if let Selection::Part(id) = ctx.selection {
@@ -520,12 +568,19 @@ impl State {
                 let computed = rocket.component_mass(id).map_or(0.0, |m| m.mass) / copies;
                 ctx.doc.edit("Override mass", |r| r.set_mass_override(id, Some(computed)));
             }
+            Message::StartOverride(Field::CdOverride) => {
+                let cd = edit::computed_cd(rocket, ctx.physics.motors(), id).unwrap_or(0.5);
+                ctx.doc.edit("Override drag", |r| r.set_cd_override(id, Some(cd)));
+            }
             Message::StartOverride(_) => {
                 let cg = rocket.component_mass(id).zip(rocket.part_station(id)).map_or(0.0, |(m, station)| (m.cg - station).max(0.0));
                 ctx.doc.edit("Override CG", |r| r.set_cg_override(id, Some(cg)));
             }
             Message::ClearOverride(Field::MassOverride) => {
                 ctx.doc.edit("Clear mass override", |r| r.set_mass_override(id, None));
+            }
+            Message::ClearOverride(Field::CdOverride) => {
+                ctx.doc.edit("Clear drag override", |r| r.set_cd_override(id, None));
             }
             Message::ClearOverride(_) => {
                 ctx.doc.edit("Clear CG override", |r| r.set_cg_override(id, None));
@@ -651,6 +706,14 @@ impl State {
         let panel = container(body).width(Fill).height(Fill).style(theme::panel);
 
         match (&self.menu, selection) {
+            (Some(Selection::None), Selection::None) => {
+                let backdrop = mouse_area(Space::new().width(Fill).height(Fill)).interaction(iced::mouse::Interaction::Idle).on_press(Message::MenuOpen(false));
+                let items: Vec<Element<'a, Message>> = vec![button("Scale rocket…", Weight::Ghost).width(Fill).on_press(Message::ScaleRocket).into()];
+                let menu = container(container(column(items).width(150)).style(theme::overlay))
+                    .padding(iced::Padding { top: HEADER_H - 6.0, right: SPACE_2, bottom: 0.0, left: 0.0 })
+                    .align_right(Fill);
+                stack![panel, backdrop, menu].boxed()
+            }
             (Some(open), now) if *open == now && matches!(now, Selection::Part(_)) => {
                 let backdrop = mouse_area(Space::new().width(Fill).height(Fill)).interaction(iced::mouse::Interaction::Idle).on_press(Message::MenuOpen(false));
                 let can_copy =
@@ -688,10 +751,17 @@ impl State {
                 row![name, pencil()].spacing(2).align_y(iced::Center).boxed()
             }
         };
+        let more: Element<'a, Message> = icon_button(Mark::Ellipsis, "More").on_press(Message::MenuOpen(self.menu != Some(Selection::None))).into();
         let header = container(
-            row![silhouette::rocket_silhouette(ctx.doc.rocket()), title, Space::new().width(Fill), text("ROCKET").font(MONO).size(10.5).style(theme::faint)]
-                .spacing(SPACE_2)
-                .align_y(iced::Center),
+            row![
+                silhouette::rocket_silhouette(ctx.doc.rocket()),
+                title,
+                Space::new().width(Fill),
+                text("ROCKET").font(MONO).size(10.5).style(theme::faint),
+                more
+            ]
+            .spacing(SPACE_2)
+            .align_y(iced::Center),
         )
         .padding([0.0, SPACE_3])
         .height(HEADER_H)

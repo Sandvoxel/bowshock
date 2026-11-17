@@ -1,0 +1,37 @@
+# Remote compute: add a machine in Preferences > Compute, test its connection, and a solve running on it. The CFD panel has the
+# one-line `Runs on:` indicator with a Change… button that opens Preferences at Compute. Run headless with an empty scratch settings
+# file and the scripted solves (a real remote solve takes minutes and the driver waits for running tasks; `remote-setup` is a solve
+# still building its worker on the remote, `remote-mid` one running on the remote GPU):
+#   rm -f /tmp/remote-compute-settings.json
+#   BOWSHOCK_SETTINGS_FILE=/tmp/remote-compute-settings.json BOWSHOCK_CFD_DEMO=remote-setup,remote-mid \
+#     cargo run --release -q -p bowshock -- drive --example crates/bowshock/scripts/remote-compute.drive out/remote-compute
+# `Test connection` talks to the real host below over SSH (key auth; the first run provisions the worker there).
+viewport 1300x800
+click "Analyze"
+
+# This computer only: the CFD table method's indicator reads `Runs on: This computer`.
+click "CFD table"
+move (100, 700)
+move (102, 702)
+screenshot compute-1-local-analyze.png
+
+# Preferences > Compute, no machine added yet.
+click "Change…"
+screenshot compute-2-prefs-local.png
+
+# A machine, typed in and added.
+click "user@host (or user@host:port)"
+type "sandvoxel@192.168.1.88"
+screenshot compute-3-prefs-typed.png
+click "Add machine"
+
+# Test connection against the real host: the set-up steps, then `<gpu> on <host>`.
+click "Test connection"
+screenshot compute-4-prefs-tested.png
+
+# Share the work with it: the Analyze line reads `Shared: 2 machines`.
+click "Share across all switched-on machines"
+click "Done"
+move (100, 700)
+move (102, 702)
+screenshot compute-5-analyze-shared.png

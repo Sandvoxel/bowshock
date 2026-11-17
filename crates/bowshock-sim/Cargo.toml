@@ -10,12 +10,12 @@ description = "Barrowman rocket aerodynamics and 3-DOF flight simulation (SI uni
 [dependencies]
 bowshock-model = { path = "../bowshock-model" }
 bowshock-motors = { path = "../bowshock-motors" }
+# The Ackeret fin wave drag shared with the CFD fin drag, and the published Basic Finner data of the ANF gate example.
+bowshock-reference.workspace = true
 
 [dev-dependencies]
 # The OpenRocket comparison example reads the reference harness's JSON.
 serde_json = "1"
-# The ANF gate example compares Extended with the published Basic Finner data.
-bowshock-reference.workspace = true
 
 [lints]
 workspace = true

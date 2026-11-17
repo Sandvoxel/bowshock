@@ -13,11 +13,15 @@ move (702, 302)
 screenshot aerodynamics-hover.png
 
 # The light theme, same screen.
+click "Prefs"
 click "Light"
+click "Done"
 move (100, 700)
 move (102, 702)
 screenshot light.png
+click "Prefs"
 click "Dark"
+click "Done"
 
 # CG for margin: burnout.
 click "Burnout"

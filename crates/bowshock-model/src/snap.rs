@@ -319,7 +319,7 @@ mod tests {
 
     fn rocket() -> (Rocket, PartId, PartId, PartId) {
         let mut r = Rocket::default();
-        r.insert(0, PartKind::NoseCone { shape: NoseShape::Haack(1.0 / 3.0), length: 0.3, diameter: 0.1 }).unwrap();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::Haack(1.0 / 3.0), length: 0.3, diameter: 0.1, tip_radius: 0.0 }).unwrap();
         let booster = r.insert(1, PartKind::BodyTube { length: 0.4, diameter: 0.0762 }).unwrap();
         let payload = r.insert(1, PartKind::BodyTube { length: 0.3, diameter: 0.0762 }).unwrap();
         (r, booster, payload, 0)

@@ -1,0 +1,12 @@
+# PARKED: Optimize is off the Analyze list until it gets its own tab, so `click "Optimize"` finds nothing. Do not run this script.
+# The Analyze screen's Optimize analysis: a fin-span search for a target margin, shown after Run.
+# Run with the example rocket loaded: `cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/optimize.drive out/optimize`
+viewport 1400x900
+click "Analyze"
+click "Optimize"
+screenshot optimize-setup.png
+click "Run"
+screenshot optimize-running.png
+move (700, 400)
+move (702, 402)
+screenshot optimize-later.png

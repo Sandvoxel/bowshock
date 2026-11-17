@@ -40,6 +40,10 @@ pub enum Nose {
     /// Haack series `r/R = sqrt((theta - sin(2 theta)/2 + C sin^3 theta)/pi)`, `theta = acos(1 - 2 eta)`
     /// (`C = 0` Von Karman / LD-Haack, `C = 1/3` LV-Haack).
     Haack { fineness: f64, c: f64 },
+    /// A sharp nose of a [`Family`] with its tip replaced by a sphere tangent to the profile (Crowell, *The Descriptive Geometry
+    /// of Nose Cones*, 1996; [`bowshock_reference::blunt_nose`]). The nose length is the length as built, sphere apex to base
+    /// (`tip.length()`); the tip sphere sits on the sharp nose `tip.sharp_length` long. Lengths are in diameters.
+    Blunt { family: Family, tip: bowshock_reference::blunt_nose::BluntNose },
 }
 
 impl Nose {
@@ -63,6 +67,7 @@ impl Body {
         match self.nose {
             Nose::TangentOgive { fineness } | Nose::Power { fineness, .. } | Nose::Parabolic { fineness, .. } | Nose::Haack { fineness, .. } => fineness,
             Nose::Cone { half_angle } => self.radius() / half_angle.tan(),
+            Nose::Blunt { tip, .. } => tip.length(),
         }
     }
     /// Body radius at `x` (0 upstream of the tip, `R` on the cylinder).
@@ -74,8 +79,19 @@ impl Body {
         if x >= ln {
             return rr;
         }
+        let xs = match self.nose {
+            Nose::Blunt { tip, .. } => x + tip.apex(),
+            _ => x,
+        };
         let eta = x / ln;
         match self.nose {
+            Nose::Blunt { family, tip } => {
+                if xs <= tip.x_t {
+                    tip.sphere(xs)
+                } else {
+                    Body { nose: family.nose(tip.sharp_length) }.r(xs)
+                }
+            }
             Nose::TangentOgive { fineness } => Ogive { fineness }.r(x),
             Nose::Cone { half_angle } => x * half_angle.tan(),
             Nose::Power { n, .. } => rr * eta.powf(n),
@@ -97,6 +113,14 @@ impl Body {
             return 0.0;
         }
         match self.nose {
+            Nose::Blunt { family, tip } => {
+                let xs = x + tip.apex();
+                if xs <= tip.x_t {
+                    tip.sphere_slope(xs)
+                } else {
+                    Body { nose: family.nose(tip.sharp_length) }.slope(xs)
+                }
+            }
             Nose::TangentOgive { fineness } => Ogive { fineness }.slope(x),
             Nose::Cone { half_angle } => half_angle.tan(),
             _ => {
@@ -105,6 +129,41 @@ impl Body {
                 (self.r(b) - self.r(a)) / (b - a)
             }
         }
+    }
+}
+
+/// The sharp family a [`Nose::Blunt`] tip sits on: [`Nose`]'s variants without the length, which the blunted nose supplies.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Family {
+    TangentOgive,
+    Cone,
+    Power { n: f64 },
+    Parabolic { k: f64 },
+    Haack { c: f64 },
+}
+
+impl Family {
+    /// The sharp nose of this family with nose length (fineness) `fineness` diameters.
+    pub fn nose(self, fineness: f64) -> Nose {
+        match self {
+            Family::TangentOgive => Nose::TangentOgive { fineness },
+            Family::Cone => Nose::cone_fineness(fineness),
+            Family::Power { n } => Nose::Power { fineness, n },
+            Family::Parabolic { k } => Nose::Parabolic { fineness, k },
+            Family::Haack { c } => Nose::Haack { fineness, c },
+        }
+    }
+
+    /// The blunted nose of this family `built_length` diameters long (sphere apex to base) with a tip sphere of radius `tip_radius`
+    /// diameters (a cone in closed form, every other family by [`bowshock_reference::blunt_nose::solve`]); `None` when no sphere
+    /// of that radius is tangent to the family or the nose cannot be that short.
+    pub fn blunted(self, built_length: f64, tip_radius: f64) -> Option<Nose> {
+        use bowshock_reference::blunt_nose;
+        let tip = match self {
+            Family::Cone => blunt_nose::cone(built_length, 0.5, tip_radius)?,
+            other => blunt_nose::solve(&|l: f64, x: f64| Body { nose: other.nose(l) }.r(x), built_length, tip_radius)?,
+        };
+        Some(Nose::Blunt { family: self, tip })
     }
 }
 

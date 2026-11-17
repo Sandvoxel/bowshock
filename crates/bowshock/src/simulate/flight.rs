@@ -10,9 +10,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bowshock_model::{Conditions, ConfigId, DragSource, FlightDef, FlightMotor, MotorMount, MotorRef, Rocket};
+use bowshock_model::{AirStart, Conditions, ConfigId, DragSource, FlightDef, FlightMotor, Location, MotorMount, MotorRef, Rocket, WindLevel};
 use bowshock_sim::from_model::{self, Phase};
-use bowshock_sim::{DragTable, EventKind, FlightResult, Launch, SimInput, Turbulence};
+use bowshock_sim::{DragTable, EventKind, FlightResult, Launch, SimInput, Turbulence, WindPoint};
 
 use crate::app::Ctx;
 use crate::widgets::chip::Severity;
@@ -106,6 +106,12 @@ pub struct Spec {
     pub field_radius: f64,
     /// Where the drag comes from.
     pub drag: DragSource,
+    /// The wind above the ground (see [`Conditions::wind_levels`]).
+    pub wind_levels: Vec<WindLevel>,
+    /// The launch site's latitude and longitude.
+    pub location: Option<Location>,
+    /// A start in the air instead of on the pad.
+    pub air_start: Option<AirStart>,
 }
 
 impl Default for Spec {
@@ -132,6 +138,9 @@ impl Spec {
             temperature: c.temperature,
             field_radius: c.field_radius,
             drag: def.drag,
+            wind_levels: c.wind_levels.clone(),
+            location: c.location,
+            air_start: c.air_start,
         }
     }
 
@@ -151,6 +160,9 @@ impl Spec {
                 site_altitude: self.site_altitude,
                 temperature: self.temperature,
                 field_radius: self.field_radius,
+                wind_levels: self.wind_levels.clone(),
+                location: self.location,
+                air_start: self.air_start,
             },
             drag: self.drag,
         }
@@ -385,6 +397,12 @@ pub struct Shared {
     pub temperature: Option<f64>,
     /// Field radius (m).
     pub field_radius: Option<f64>,
+    /// The wind profile.
+    pub wind_levels: Option<Vec<WindLevel>>,
+    /// The launch location (`Some(None)`: none of the flights has one).
+    pub location: Option<Option<Location>>,
+    /// The air start (`Some(None)`: every flight starts on the pad).
+    pub air_start: Option<Option<AirStart>>,
 }
 
 impl Shared {
@@ -402,6 +420,9 @@ impl Shared {
             site_altitude: agree(specs().map(|s| s.site_altitude)),
             temperature: agree(specs().map(|s| s.temperature)),
             field_radius: agree(specs().map(|s| s.field_radius)),
+            wind_levels: agree(specs().map(|s| s.wind_levels.clone())),
+            location: agree(specs().map(|s| s.location)),
+            air_start: agree(specs().map(|s| s.air_start)),
         }
     }
 }
@@ -465,16 +486,38 @@ pub fn launch_of(spec: &Spec) -> Launch {
         ground_temperature: spec.temperature,
         wind_speed: spec.wind_speed,
         wind_from: spec.wind_from,
+        wind_levels: spec.wind_levels.iter().map(|l| WindPoint { altitude: l.altitude, speed: l.speed, from: l.from }).collect(),
         turbulence: spec.turbulence,
         seed: 1,
+        latitude: spec.location.map(|l| l.latitude.to_radians()),
+        air_start: spec.air_start.map(|a| (a.altitude, a.speed)),
     }
+}
+
+/// The first motor mount of `rocket`'s first stage, else its first mount (see [`first_mount`]).
+fn first_mount_of(rocket: &Rocket) -> Option<MotorMount> {
+    let mounts = rocket.motor_mounts();
+    let first = rocket.stages().into_iter().find(|s| s.index == 1);
+    let of_stage = first.and_then(|s| mounts.iter().find(|m| s.mounts.contains(&m.id)).cloned());
+    of_stage.or_else(|| mounts.into_iter().next())
 }
 
 /// Builds the simulation input for `spec` from the document and returns it with the ejection delay it flies. The document is
 /// cloned, never touched: the flight's motor and delay are swapped into the clone.
 pub fn prepare(ctx: &Ctx, spec: &Spec) -> Result<(SimInput, f64), String> {
-    let mut rocket = ctx.doc.rocket().clone();
-    let mount = first_mount(ctx);
+    let rocket = ctx.doc.rocket().clone();
+    let (mut input, delay) = prepare_rocket(rocket.clone(), ctx.physics.motors(), spec)?;
+    if spec.drag == DragSource::CfdTable {
+        input.drag_tables = (0..input.vehicle.stages.len()).map(|k| drag_table(&rocket, ctx, k + 1).ok()).collect();
+    }
+    Ok((input, delay))
+}
+
+/// The simulation input of `spec` flown by `rocket` with `motors` (no CFD tables: those live with the session), and the ejection
+/// delay it flies: the flight's motor and delay swapped into `rocket`. What [`prepare`] builds on, and what a worker thread
+/// that has no [`Ctx`] calls.
+pub fn prepare_rocket(mut rocket: Rocket, motors: &bowshock_motors::MotorDb, spec: &Spec) -> Result<(SimInput, f64), String> {
+    let mount = first_mount_of(&rocket);
     match &spec.motor {
         MotorChoice::Active => {}
         MotorChoice::Config(id) => {
@@ -491,13 +534,9 @@ pub fn prepare(ctx: &Ctx, spec: &Spec) -> Result<(SimInput, f64), String> {
         rocket.set_motor_delay(rocket.active_config_id(), mount.id, delay).map_err(|e| e.to_string())?;
     }
     let delay = mount.and_then(|m| rocket.active_configuration().slot(m.id).map(|s| s.delay)).unwrap_or(0.0);
-    let input = from_model::sim_input(&rocket, ctx.physics.motors(), Phase::Full, launch_of(spec)).map_err(|e| format!("Cannot fly: {e}"))?;
+    let input = from_model::sim_input(&rocket, motors, Phase::Full, launch_of(spec)).map_err(|e| format!("Cannot fly: {e}"))?;
     if input.vehicle.stages.iter().all(|s| s.motor.is_none()) {
         return Err("Cannot fly: no motor in the configuration".to_string());
-    }
-    let mut input = input;
-    if spec.drag == DragSource::CfdTable {
-        input.drag_tables = (0..input.vehicle.stages.len()).map(|k| drag_table(&rocket, ctx, k + 1).ok()).collect();
     }
     Ok((input, delay))
 }
@@ -506,26 +545,27 @@ pub fn prepare(ctx: &Ctx, spec: &Spec) -> Result<(SimInput, f64), String> {
 /// rocket's now. `Err` says why the stack flies on the build-up instead (lengths in the session's units). The table's altitude does
 /// not matter, the flight corrects for the Reynolds number.
 pub fn drag_table(rocket: &Rocket, ctx: &Ctx, stage: usize) -> Result<DragTable, String> {
-    let Some(table) = rocket.cfd_table(stage as u32) else {
-        return Err("No CFD table for this rocket yet: solve one in Analyze > CFD table. Flying on Extended.".to_string());
-    };
-    let phase = if stage <= 1 { Phase::Full } else { Phase::UpperFrom(stage) };
-    let plan =
-        from_model::vehicle(rocket, ctx.physics.motors(), phase).map_err(|e| e.to_string()).and_then(|v| crate::analyze::cfd::plan(rocket, &v, ctx.units));
-    match plan {
-        Ok(plan) if plan.geometry == table.geometry => Ok(DragTable::from_cfd(table)),
-        Ok(_) => Err("CFD table is stale (the rocket changed): flying on Extended.".to_string()),
-        Err(why) => Err(format!("CFD cannot model this rocket ({why}): flying on Extended.")),
-    }
+    ctx.physics.drag_table(rocket, stage)
 }
 
-/// What to tell about `spec`'s drag source: why a stack of the rocket flies on the build-up although the CFD table was asked for.
+/// What to tell about `spec`'s drag source: why a stack of the rocket flies on the build-up although the CFD table was asked for,
+/// or, when it does fly on the table, that the parts' drag overrides do not apply to it.
 pub fn drag_note(ctx: &Ctx, spec: &Spec) -> Option<String> {
     if spec.drag != DragSource::CfdTable {
         return None;
     }
     let rocket = ctx.doc.rocket();
-    (1..=rocket.stages().len().max(1)).find_map(|stage| drag_table(rocket, ctx, stage).err())
+    let fallback = (1..=rocket.stages().len().max(1)).find_map(|stage| drag_table(rocket, ctx, stage).err());
+    fallback.or_else(|| has_cd_override(rocket).then(|| "Cd overrides apply to Extended drag only.".to_string()))
+}
+
+/// Whether any part of `rocket` (a pod's included) has a drag override.
+fn has_cd_override(rocket: &Rocket) -> bool {
+    let radial = |r: &bowshock_model::RadialPart| {
+        r.cd_override.is_some()
+            || r.kind.pod_body().is_some_and(|b| b.parts().iter().any(|p| p.cd_override.is_some()) || b.radials().iter().any(|p| p.cd_override.is_some()))
+    };
+    rocket.parts().iter().any(|p| p.cd_override.is_some()) || rocket.radials().iter().any(radial)
 }
 
 #[cfg(test)]
@@ -571,5 +611,20 @@ mod tests {
         assert!(f.is_stale(4));
         f.spec.wind_speed = 3.0;
         assert!(f.is_stale(3));
+    }
+
+    #[test]
+    fn physics_caches_cfd_plan_across_views() {
+        let mut app = crate::app::App::with_example();
+        let (rocket, revision, units) = (app.ctx().doc.rocket().clone(), app.ctx().doc.revision(), app.ctx().units);
+        app.ctx_mut().physics.sync(&rocket, revision, units);
+        let first = app.ctx().physics.cfd_plan(1).expect("plan") as *const _;
+        let spec = Spec { drag: DragSource::CfdTable, ..Spec::default() };
+        for _ in 0..3 {
+            assert!(drag_note(app.ctx(), &spec).is_some());
+        }
+        assert!(!app.ctx_mut().physics.sync(&rocket, revision, units), "nothing changed, nothing recomputes");
+        let second = app.ctx().physics.cfd_plan(1).expect("plan") as *const _;
+        assert!(std::ptr::eq(first, second));
     }
 }

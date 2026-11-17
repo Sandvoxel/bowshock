@@ -30,6 +30,7 @@ fn awkward_bodies_return_ok_with_finite_or_failed_points() {
         ("cone 29.9 deg", spec(NoseShape::Cone, 0.87, vec![tube(1.0)])),
         ("flare and boattail 30 deg", spec(NoseShape::TangentOgive, 3.0, vec![tube(2.0), transition(1.0, 1.5), tube(1.0), transition(1.5, 1.0)])),
         ("40 d long", spec(NoseShape::TangentOgive, 3.0, vec![tube(37.0)])),
+        ("80 d long", spec(NoseShape::TangentOgive, 3.0, vec![tube(77.0)])),
     ];
     for (name, body) in &bodies {
         let result = Analysis::new(body)
@@ -58,7 +59,17 @@ fn awkward_bodies_return_ok_with_finite_or_failed_points() {
 #[test]
 fn fins_and_motor_return_ok_with_finite_or_failed_points() {
     let body = spec(NoseShape::TangentOgive, 3.0, vec![tube(5.0)]);
-    let fins = FinSpec { count: 4, root_chord: 0.12, tip_chord: 0.06, span: 0.08, sweep: 0.06, thickness: 0.003, roughness: 0.0, root_te_to_base: 0.0, profile: FinProfile::Rounded };
+    let fins = FinSpec {
+        count: 4,
+        root_chord: 0.12,
+        tip_chord: 0.06,
+        span: 0.08,
+        sweep: 0.06,
+        thickness: 0.003,
+        roughness: 0.0,
+        root_te_to_base: 0.0,
+        profile: FinProfile::Rounded,
+    };
     let motor = MotorSpec { exit_diameter: 0.06, exit_mach: 2.5, exit_pressure_pa: 101_325.0, total_temperature_k: 1500.0 };
     let analysis = || {
         Analysis::new(&body)

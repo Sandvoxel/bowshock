@@ -1,0 +1,71 @@
+# The flow viewer: the live picture of a solve in progress, and the Flow field view of a finished table, in the dark and the light
+# theme. A real solve takes minutes and the driver waits for running tasks, so the solves are scripted (`analyze/solve_demo.rs`, with
+# a made-up flow painted on the real grid of the body):
+#   BOWSHOCK_CFD_DEMO=mid,done cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/flow-view.drive out/flow-view
+viewport 1300x800
+click "Analyze"
+click "CFD table"
+move (100, 700)
+move (102, 702)
+screenshot live-mach-dark.png
+
+# Cp, the schlieren, the cell edges, and the pointer over the picture (the readout)
+click "Cp"
+screenshot live-cp-dark.png
+click "Schlieren"
+click "Grid"
+move (560, 280)
+move (562, 282)
+screenshot live-schlieren-grid-dark.png
+click "Grid"
+click "Mach"
+
+# The curve has the room instead
+click "Curve"
+screenshot live-curve-emphasis-dark.png
+click "Flow"
+
+# The same in the light theme
+click "Prefs"
+click "Light"
+click "Done"
+move (100, 700)
+move (102, 702)
+screenshot live-mach-light.png
+click "Schlieren"
+screenshot live-schlieren-light.png
+click "Cp"
+screenshot live-cp-light.png
+
+# Back to dark, a finished solve and its Flow field view
+click "Prefs"
+click "Dark"
+click "Done"
+click "Cancel"
+click "Discard"
+click "Re-solve"
+move (100, 700)
+move (102, 702)
+click "Flow field"
+move (100, 700)
+move (102, 702)
+screenshot field-mach-dark.png
+click "Cp"
+screenshot field-cp-dark.png
+click "Schlieren"
+move (560, 280)
+move (562, 282)
+screenshot field-schlieren-dark.png
+click "▶"
+move (100, 700)
+move (102, 702)
+screenshot field-next-mach-dark.png
+
+# Light
+click "Prefs"
+click "Light"
+click "Done"
+click "Mach"
+move (100, 700)
+move (102, 702)
+screenshot field-mach-light.png

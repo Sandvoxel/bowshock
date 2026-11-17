@@ -1,0 +1,42 @@
+# Several compute machines: Preferences > Compute with two machines (one switched off), Use one against Share, and a solve shared by
+# three machines (scripted: a real one takes minutes and the driver waits for running tasks; `share-mid` is a drag solve with two
+# points in flight, `lift-share-mid` the 3D one). Seed the settings and run:
+#   cat > /tmp/share-settings.json <<'JSON'
+#   {"compute":{"machines":[{"target":"sandvoxel@192.168.1.88","enabled":true},
+#                           {"target":"lab@192.168.1.99","enabled":false,"label":"Lab"}],
+#               "use_this_computer":true,"mode":"share"}}
+#   JSON
+#   BOWSHOCK_SETTINGS_FILE=/tmp/share-settings.json BOWSHOCK_CFD_DEMO=share-mid,done,lift-share-mid \
+#     cargo run --release -q -p bowshock -- drive --example crates/bowshock/scripts/share-compute.drive out/share-compute
+# `Test connection` talks to the real host over SSH (key auth; the first run sets the worker up there).
+viewport 1300x800
+click "Analyze"
+
+# The shared drag solve: the left panel lists the machines, the chart rings two points, the strips show one row per busy machine.
+click "CFD table"
+move (100, 700)
+move (102, 702)
+screenshot share-1-solve-shared.png
+
+# Preferences > Compute: Share across all switched-on machines (the machine that is off is not used or contacted).
+click "Change…"
+screenshot share-2-prefs-share.png
+
+# Use one: pick among the machines that are on.
+click "Use one"
+screenshot share-3-prefs-pick.png
+
+# Back to sharing, and test the machine that is on against the real host.
+click "Share across all switched-on machines"
+click "Test connection"
+screenshot share-4-prefs-tested.png
+click "Done"
+
+# The 3D stability solve shared by the same machines.
+click "Cancel"
+click "Discard"
+click "Re-solve"
+click "Solve stability (3D)"
+move (100, 700)
+move (102, 702)
+screenshot share-5-solve-3d-shared.png

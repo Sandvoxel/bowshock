@@ -1,11 +1,11 @@
 //! Presets: saved assemblies (a fin can, a mount with its rings) that the bin adds in one click.
 //!
 //! A preset is a small JSON document. Built-in ones live in `assets/presets/` and are embedded; the user's are files in
-//! [`user_dir`] (`$BOWSHOCK_PRESETS_DIR`, else `~/.config/bowshock/presets`). A preset with no axial parts is a set of radial
+//! the user's presets directory (`Env::presets_dir`). A preset with no axial parts is a set of radial
 //! and internal parts for whatever tube it is added to; one with axial parts adds them at the aft end of the stack.
 
 use std::path::{Path, PathBuf};
-use std::{env, fs, io};
+use std::{fs, io};
 
 use bowshock_model::{Finish, InternalKind, MaterialId, PartId, PartKind, RadialKind, Rocket};
 use serde::{Deserialize, Serialize};
@@ -230,15 +230,10 @@ pub fn builtin() -> Vec<Preset> {
         .collect()
 }
 
-/// Where the user's presets live: `$BOWSHOCK_PRESETS_DIR`, else `~/.config/bowshock/presets`.
-pub fn user_dir() -> Option<PathBuf> {
-    env::var_os("BOWSHOCK_PRESETS_DIR").map(PathBuf::from).or_else(|| env::var_os("HOME").map(|h| Path::new(&h).join(".config/bowshock/presets")))
-}
-
-/// The built-in presets, then the user's (by file name). Unreadable files are skipped.
-pub fn load_all() -> Vec<PresetEntry> {
+/// The built-in presets, then the user's from `dir` (by file name). Unreadable files are skipped.
+pub fn load_all(dir: Option<&Path>) -> Vec<PresetEntry> {
     let mut entries: Vec<PresetEntry> = builtin().into_iter().map(|preset| PresetEntry { preset, builtin: true, file: None }).collect();
-    if let Some(dir) = user_dir() {
+    if let Some(dir) = dir {
         let mut files: Vec<PathBuf> =
             fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "json")).collect();
         files.sort();
@@ -251,10 +246,10 @@ pub fn load_all() -> Vec<PresetEntry> {
     entries
 }
 
-/// Writes `preset` into [`user_dir`] under a file name made from its name (numbered if taken). Returns the file.
-pub fn save(preset: &Preset) -> io::Result<PathBuf> {
-    let dir = user_dir().ok_or_else(|| io::Error::other("no home directory for presets"))?;
-    fs::create_dir_all(&dir)?;
+/// Writes `preset` into `dir` under a file name made from its name (numbered if taken). Returns the file.
+pub fn save(preset: &Preset, dir: Option<&Path>) -> io::Result<PathBuf> {
+    let dir = dir.ok_or_else(|| io::Error::other("no home directory for presets"))?;
+    fs::create_dir_all(dir)?;
     let slug: String = preset.name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' }).collect();
     let slug = if slug.trim_matches('_').is_empty() { "preset".to_string() } else { slug };
     let mut file = dir.join(format!("{slug}.json"));

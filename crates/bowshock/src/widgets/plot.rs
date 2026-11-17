@@ -15,8 +15,6 @@
 //! `Esc` steps back (band first, then one level), `Shift+Esc` or a double-click returns to the full range. The wheel zooms
 //! around the cursor, middle-drag or `Space`+drag pans, and the overview strip pans or recentres the window.
 
-#![allow(dead_code)] // The screens that compose these widgets arrive after the widgets do.
-
 use iced::widget::{button, container, row, text, Space};
 use iced::{Border, Color, Element, Length, Rectangle, Theme, Widget};
 
@@ -65,8 +63,6 @@ pub enum SeriesColor {
     Propulsion,
     /// Recovery system colour.
     Recovery,
-    /// Avionics system colour.
-    Avionics,
     /// Aero system colour.
     Aero,
 }
@@ -89,7 +85,6 @@ impl SeriesColor {
             SeriesColor::Err => t.err,
             SeriesColor::Propulsion => t.sys_propulsion,
             SeriesColor::Recovery => t.sys_recovery,
-            SeriesColor::Avionics => t.sys_avionics,
             SeriesColor::Aero => t.sys_aero,
         }
     }
@@ -315,6 +310,9 @@ pub struct Panel {
     pub editor: Option<PanelEditor>,
     /// A compact key of the line styles in the panel (stroke sample and word), drawn muted at the bottom right inside the plot.
     pub key: Vec<(LineStyle, String)>,
+    /// Names of the panel's series, right-aligned in its title row (a colour square, or the stroke of a dashed line, and the
+    /// name). What does not fit folds into `+N`. Empty by default; a panel that sets it keeps its labels out of the right margin.
+    pub legend: Vec<LegendItem>,
 }
 
 impl Panel {
@@ -331,6 +329,7 @@ impl Panel {
             value_unit: None,
             editor: None,
             key: Vec::new(),
+            legend: Vec::new(),
         }
     }
 
@@ -488,6 +487,8 @@ impl Panel {
 pub enum EventRole {
     /// A motor ignited (later stages): `sys-propulsion`.
     Ignition,
+    /// A motor's ignition was held off by its tilt lockout: `sys-propulsion`, dashed.
+    IgnitionInhibited,
     /// The rocket left the rail: `sys-aero`.
     RailExit,
     /// A motor burned out: `warn`.
@@ -511,7 +512,7 @@ impl EventRole {
     /// The colour role of the event's line, tag and strip tick.
     pub fn color(self) -> SeriesColor {
         match self {
-            EventRole::Ignition => SeriesColor::Propulsion,
+            EventRole::Ignition | EventRole::IgnitionInhibited => SeriesColor::Propulsion,
             EventRole::RailExit => SeriesColor::Aero,
             EventRole::Burnout => SeriesColor::Warn,
             EventRole::Separation => SeriesColor::Ink,
@@ -521,10 +522,10 @@ impl EventRole {
         }
     }
 
-    /// How the event's line is stroked: dotted, except the apogee (dashed) and a separation (dash-dot).
+    /// How the event's line is stroked: dotted, except the apogee and an ignition held off (dashed) and a separation (dash-dot).
     pub fn style(self) -> LineStyle {
         match self {
-            EventRole::Apogee | EventRole::Highlight => LineStyle::Dashed,
+            EventRole::Apogee | EventRole::Highlight | EventRole::IgnitionInhibited => LineStyle::Dashed,
             EventRole::Separation => LineStyle::DashDot,
             _ => LineStyle::Dotted,
         }
@@ -557,6 +558,7 @@ impl EventMark {
     }
 
     /// Sets the text the tooltip adds after the name and x.
+    #[cfg(test)]
     pub fn detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
         self
@@ -577,6 +579,22 @@ pub struct Phase {
     pub to: f64,
     /// Bar colour role.
     pub color: SeriesColor,
+}
+
+/// A thin row of the events strip under the main one: a dropped stage's own flight from its separation to its landing, with the
+/// events of that flight (a deployment, the landing). Drawn only with [`PlotGroup::timeline`].
+#[derive(Debug, Clone)]
+pub struct StripRow {
+    /// The row's name (`Booster`), written upper-case at the left of the strip.
+    pub name: String,
+    /// Start (the separation) on the x axis.
+    pub from: f64,
+    /// End (the landing) on the x axis.
+    pub to: f64,
+    /// Bar colour role.
+    pub color: SeriesColor,
+    /// The row's own events: a tick each in the event's colour, named beside it.
+    pub events: Vec<EventMark>,
 }
 
 /// The shared x axis: how its values and ranges are written.
@@ -675,6 +693,8 @@ pub struct PlotGroup {
     pub events: Vec<EventMark>,
     /// Phase bars of the events strip.
     pub phases: Vec<Phase>,
+    /// Thin rows under the strip, one per dropped stage (see [`StripRow`]).
+    pub rows: Vec<StripRow>,
     /// Show the events strip (Simulate) above the plots, always. Otherwise a minimap appears only while zoomed.
     pub timeline: bool,
     /// A line the event tooltip ends with (`Reference flight · Nominal` in a comparison, whose lines are the reference's only).
@@ -701,6 +721,7 @@ impl PlotGroup {
             panels: Vec::new(),
             events: Vec::new(),
             phases: Vec::new(),
+            rows: Vec::new(),
             timeline: false,
             events_note: None,
             right_margin: 0.0,
@@ -738,6 +759,7 @@ impl PlotGroup {
     }
 
     /// The interpolated value of series `series` of panel `panel` at `x` (for "values at cursor" panels).
+    #[cfg(test)]
     pub fn value_at(&self, panel: usize, series: usize, x: f64) -> Option<f64> {
         self.panels.get(panel)?.series.get(series)?.value_at(x)
     }

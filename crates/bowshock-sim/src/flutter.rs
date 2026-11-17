@@ -127,6 +127,10 @@ impl FlutterGeometry {
             FinCrossSection::Square => fin.thickness,
             FinCrossSection::Rounded => fin.thickness * (1.0 - (1.0 - std::f64::consts::FRAC_PI_4) * fin.thickness / mean_chord.max(1e-12)).max(0.0),
             FinCrossSection::Airfoil => AIRFOIL_AREA * fin.thickness,
+            // sharp sections: the area fraction of the bounding rectangle (1/2, 1 - f, 2/3)
+            FinCrossSection::DoubleWedge => 0.5 * fin.thickness,
+            FinCrossSection::Hexagonal(f) => (1.0 - f) * fin.thickness,
+            FinCrossSection::Biconvex => 2.0 / 3.0 * fin.thickness,
         };
         match fin.planform {
             FinPlanform::Trapezoidal => FlutterGeometry::trapezoid(fin.root_chord, fin.tip_chord, fin.span, fin.sweep, thickness),

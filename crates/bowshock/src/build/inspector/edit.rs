@@ -5,7 +5,7 @@
 //! the handle in the viewport can never disagree. The fields that are not a plain dimension (sweep angle, an auto diameter, the
 //! parachute's numbers, mass overrides) are the [`Field`] variants beside [`Field::Dim`].
 
-use bowshock_model::{DeployEvent, Deployment, Dim, EventKind, FinTab, InternalKind, MassRole, PartId, Rocket, StageEvent, StageTrigger};
+use bowshock_model::{DeployEvent, Deployment, Dim, EventKind, FinSection, FinTab, InternalKind, MassRole, PartId, Rocket, StageEvent, StageTrigger};
 
 /// Most a shroud-line count may be.
 const MAX_LINES: f64 = 64.0;
@@ -48,10 +48,18 @@ pub enum Field {
     MassValue,
     /// The altitude a recovery device waits for, in the active configuration.
     DeployAltitude,
+    /// The air speed below which a recovery device deploys on descent, in the active configuration.
+    DeploySpeed,
+    /// The tilt from vertical past which a recovery device deploys, in the active configuration.
+    DeployTilt,
+    /// An ignition's tilt lockout of stage `n` (`Stage::index`), in the active configuration.
+    TiltLockout(usize),
     /// The delay after a recovery device's trigger, in the active configuration.
     DeployDelay,
     /// The mass override.
     MassOverride,
+    /// The drag coefficient override (on the rocket's reference area).
+    CdOverride,
     /// The CG override, metres behind the part's fore face.
     CgOverride,
     /// A fin group's own shear modulus for the flutter estimate, in GPa (a plain number: the document keeps it in Pa).
@@ -62,6 +70,8 @@ pub enum Field {
     TabLength,
     /// A fin group's tab position: its fore edge from the root's leading edge.
     TabPosition,
+    /// A fin group's hexagonal section: the length of each wedge as a fraction of the chord (shown in percent).
+    WedgeLength,
     /// The active configuration's ejection delay of a motor mount.
     EjectionDelay,
     /// The active configuration's delay after the trigger of a staging event: the separation of stage `n` or the ignition of
@@ -87,13 +97,18 @@ impl Field {
             Field::StreamerWidth => "streamer width".into(),
             Field::CordLength => "cord length".into(),
             Field::MassValue | Field::MassOverride => "mass".into(),
+            Field::CdOverride => "drag".into(),
             Field::DeployAltitude => "deploy altitude".into(),
             Field::DeployDelay => "deploy delay".into(),
+            Field::DeploySpeed => "deploy speed".into(),
+            Field::DeployTilt => "deploy tilt".into(),
+            Field::TiltLockout(_) => "tilt lockout".into(),
             Field::CgOverride => "CG".into(),
             Field::ShearModulus => "shear modulus".into(),
             Field::TabHeight => "tab height".into(),
             Field::TabLength => "tab length".into(),
             Field::TabPosition => "tab position".into(),
+            Field::WedgeLength => "wedge length".into(),
             Field::EjectionDelay => "ejection delay".into(),
             Field::StageDelay(_, EventKind::Separation) => "separation delay".into(),
             Field::StageDelay(_, EventKind::Ignition) => "ignition delay".into(),
@@ -185,6 +200,7 @@ pub fn apply_copy(r: &mut Rocket, id: PartId, copy: usize, field: Field, value: 
         }
         Field::AutoDiameter => Applied::flag(set_auto_diameter(r, id, Some(value))),
         Field::MassOverride => Applied::flag(r.set_mass_override(id, Some(value))),
+        Field::CdOverride => Applied::flag(r.set_cd_override(id, Some(value))),
         Field::CgOverride => Applied::flag(r.set_cg_override(id, Some(value))),
         Field::ShearModulus => Applied::flag(r.set_fin_shear_modulus(id, Some(value * 1.0e9))),
         Field::TabHeight | Field::TabLength | Field::TabPosition => {
@@ -199,6 +215,18 @@ pub fn apply_copy(r: &mut Rocket, id: PartId, copy: usize, field: Field, value: 
             };
             Applied::flag(r.set_fin_tab(id, Some(tab)))
         }
+        Field::WedgeLength => {
+            if !matches!(r.radial(id).map(|fin| fin.cross_section), Some(FinSection::Hexagonal(_))) {
+                return Applied::no();
+            }
+            let fraction = FinSection::clamp_wedge_fraction(value);
+            let limited = (fraction != value).then_some("WEDGE LENGTH LIMIT 1–50 %");
+            if r.set_fin_section(id, FinSection::Hexagonal(fraction)) {
+                Applied::yes(limited)
+            } else {
+                Applied::no()
+            }
+        }
         Field::EjectionDelay => {
             let config = r.active_config_id();
             Applied::flag(r.set_motor_delay(config, id, value.max(0.0)).is_ok())
@@ -207,8 +235,31 @@ pub fn apply_copy(r: &mut Rocket, id: PartId, copy: usize, field: Field, value: 
         Field::StageAltitude(stage, kind) => Applied::flag(edit_stage_event(r, stage, kind, |e| e.trigger = StageTrigger::Altitude(value.max(0.0)))),
         Field::DeployAltitude => Applied::flag(edit_deployment(r, id, |d| d.event = DeployEvent::Altitude(value.max(0.0)))),
         Field::DeployDelay => Applied::flag(edit_deployment(r, id, |d| d.delay = value.max(0.0))),
+        Field::DeploySpeed => Applied::flag(edit_deployment(r, id, |d| d.event = DeployEvent::SpeedBelow(value.max(0.0)))),
+        Field::DeployTilt => Applied::flag(edit_deployment(r, id, |d| d.event = DeployEvent::TiltAbove(value.clamp(0.0, std::f64::consts::PI)))),
+        Field::TiltLockout(stage) => {
+            Applied::flag(edit_stage_event(r, stage, EventKind::Ignition, |e| e.tilt_lockout = Some(value.clamp(0.0, std::f64::consts::PI))))
+        }
         other => Applied::flag(edit_internal(r, id, other, value)),
     }
+}
+
+/// The drag coefficient the build-up gives part `id` (summed over its copies; a pod's is everything on it) at Mach 0.3 at sea
+/// level, zero angle of attack, motor off: the value an override starts from. `None` when the rocket cannot be built for the
+/// sim (a motor missing from `motors`) or the part has no aerodynamics.
+pub fn computed_cd(r: &Rocket, motors: &bowshock_motors::MotorDb, id: PartId) -> Option<f64> {
+    use bowshock_sim::from_model::{vehicle, Phase};
+    const MACH: f64 = 0.3;
+    let mut ids = vec![id];
+    if let Some(body) = r.radial(id).and_then(|p| p.kind.pod_body()) {
+        ids.extend(body.parts().iter().map(|p| p.id).chain(body.radials().iter().map(|p| p.id)));
+    }
+    let v = vehicle(r, motors, Phase::Full).ok()?;
+    let air = bowshock_sim::Atmosphere::standard().at_msl(0.0);
+    let re = MACH * air.speed_of_sound * air.density / air.viscosity;
+    let comps = bowshock_sim::Aero::new(&v).components(MACH, re, false, 0.0);
+    let mine: Vec<f64> = comps.iter().filter(|c| c.part.is_some_and(|p| ids.contains(&p))).map(|c| c.drag.total).collect();
+    (!mine.is_empty()).then(|| mine.iter().sum())
 }
 
 /// The recovery and mass fields: they change the internal part's kind.
@@ -296,11 +347,20 @@ pub enum Trigger {
     Ejection,
     /// After launch (the delay is the time from launch).
     Launch,
+    /// On descent once the air speed falls below a value.
+    SpeedBelow,
+    /// Once the rocket tilts past an angle from vertical.
+    TiltAbove,
 }
+
+/// Air speed a parachute is given when its trigger is switched to a speed (20 m/s, a typical drogue-to-main hand-off).
+pub const DEFAULT_DEPLOY_SPEED: f64 = 20.0;
+/// Tilt a parachute is given when its trigger is switched to a tilt (30°).
+pub const DEFAULT_DEPLOY_TILT: f64 = 30.0 * std::f64::consts::PI / 180.0;
 
 impl Trigger {
     /// Every trigger, in menu order.
-    pub const ALL: [Trigger; 4] = [Trigger::Ejection, Trigger::Apogee, Trigger::Altitude, Trigger::Launch];
+    pub const ALL: [Trigger; 6] = [Trigger::Ejection, Trigger::Apogee, Trigger::Altitude, Trigger::Launch, Trigger::SpeedBelow, Trigger::TiltAbove];
 
     /// Display name.
     pub fn name(self) -> &'static str {
@@ -309,6 +369,8 @@ impl Trigger {
             Trigger::Altitude => "Altitude",
             Trigger::Ejection => "Motor ejection",
             Trigger::Launch => "Time from launch",
+            Trigger::SpeedBelow => "Below speed…",
+            Trigger::TiltAbove => "Tilt above…",
         }
     }
 
@@ -319,6 +381,8 @@ impl Trigger {
             DeployEvent::Altitude(_) => Trigger::Altitude,
             DeployEvent::Ejection => Trigger::Ejection,
             DeployEvent::TimeFromLaunch => Trigger::Launch,
+            DeployEvent::SpeedBelow(_) => Trigger::SpeedBelow,
+            DeployEvent::TiltAbove(_) => Trigger::TiltAbove,
         }
     }
 }
@@ -353,6 +417,10 @@ pub fn set_trigger(r: &mut Rocket, id: PartId, trigger: Trigger) -> bool {
             (Trigger::Launch, _) => DeployEvent::TimeFromLaunch,
             (Trigger::Altitude, DeployEvent::Altitude(h)) => DeployEvent::Altitude(h),
             (Trigger::Altitude, _) => DeployEvent::Altitude(DEFAULT_DEPLOY_ALTITUDE),
+            (Trigger::SpeedBelow, DeployEvent::SpeedBelow(v)) => DeployEvent::SpeedBelow(v),
+            (Trigger::SpeedBelow, _) => DeployEvent::SpeedBelow(DEFAULT_DEPLOY_SPEED),
+            (Trigger::TiltAbove, DeployEvent::TiltAbove(a)) => DeployEvent::TiltAbove(a),
+            (Trigger::TiltAbove, _) => DeployEvent::TiltAbove(DEFAULT_DEPLOY_TILT),
         }
     })
 }
@@ -429,6 +497,15 @@ pub fn set_stage_on(r: &mut Rocket, stage: usize, kind: EventKind, on: StageOn) 
     })
 }
 
+/// The tilt lockout an ignition is given when it is switched on (20°, a common electronics default).
+pub const DEFAULT_TILT_LOCKOUT: f64 = 20.0 * std::f64::consts::PI / 180.0;
+
+/// Sets (or with `None` removes) the tilt lockout of stage `stage`'s ignition in the active configuration (see
+/// [`StageEvent::tilt_lockout`]).
+pub fn set_tilt_lockout(r: &mut Rocket, stage: usize, lockout: Option<f64>) -> bool {
+    edit_stage_event(r, stage, EventKind::Ignition, |e| e.tilt_lockout = lockout)
+}
+
 /// Plugs (no ejection charge) or unplugs the motor in `mount` of the active configuration. Unplugging gives it a 0 s delay.
 pub fn set_plugged(r: &mut Rocket, mount: PartId, plugged: bool) -> bool {
     let config = r.active_config_id();
@@ -456,10 +533,13 @@ pub fn set_count(r: &mut Rocket, id: PartId, count: u8) -> bool {
     }
 }
 
-/// Gives a nose cone another profile family (parametric ones start at their conventional parameter).
+/// Gives a nose cone another profile family (parametric ones start at their conventional parameter). The tip radius stays when the
+/// new family has a tangent sphere that size and is dropped (the nose becomes pointed) when it has none.
 pub fn set_nose_shape(r: &mut Rocket, id: PartId, shape: bowshock_model::NoseShape) -> bool {
     match r.part(id).map(|p| p.kind.clone()) {
-        Some(bowshock_model::PartKind::NoseCone { length, diameter, .. }) => r.set_kind(id, bowshock_model::PartKind::NoseCone { shape, length, diameter }),
+        Some(bowshock_model::PartKind::NoseCone { length, diameter, tip_radius, .. }) => {
+            r.set_kind(id, bowshock_model::PartKind::NoseCone { shape, length, diameter, tip_radius })
+        }
         _ => false,
     }
 }
@@ -528,7 +608,7 @@ mod tests {
     /// Nose, one 600 mm tube with a 3-fin set at its aft end, a motor mount, a ring, a parachute and a ballast weight.
     fn rocket() -> (Rocket, PartId, PartId, [PartId; 4]) {
         let mut r = Rocket::default();
-        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762 }).unwrap();
+        r.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762, tip_radius: 0.0 }).unwrap();
         let tube = r.insert(1, PartKind::BodyTube { length: 0.6, diameter: 0.0762 }).unwrap();
         let fins = r
             .attach_radial(tube, 0.48, 0.0, 3, RadialKind::FinSet { root_chord: 0.12, tip_chord: 0.05, span: 0.0762, sweep: 0.06, thickness: 0.00318 })

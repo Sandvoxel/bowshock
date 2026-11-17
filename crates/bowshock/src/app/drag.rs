@@ -15,7 +15,7 @@ use bowshock_model::{Anchor, InternalKind, InternalPart, Part, PartId, PartKind,
 use super::{Ctx, Selection};
 use crate::app::ui;
 use crate::units::UnitSystem;
-use crate::viewport::assembly::{body_of, Drag, Origin};
+use crate::viewport::assembly::{body_of, land_carried, restore_motors, Drag, Origin};
 use crate::viewport::pick::{Pick, SurfaceTarget};
 use crate::viewport::surface::RadialDrag;
 
@@ -28,6 +28,9 @@ pub struct Drags {
     pub radial: Option<RadialDrag>,
     /// An internal part (ring, chute, ballast, ...) being carried.
     pub internal: Option<InternalDrag>,
+    /// An internal part of the rocket being carried along it (the manipulation overlay's `Edit::Carry`): it stays in the rocket and
+    /// moves as a live edit, so it is not one of the carries above, but it is in hand all the same.
+    pub lifted: Option<PartId>,
     /// Copies a new radial part gets (the parts bin's symmetry footer).
     pub symmetry: u8,
     /// Angle snap for radial parts, degrees (0 for none).
@@ -36,14 +39,20 @@ pub struct Drags {
 
 impl Default for Drags {
     fn default() -> Self {
-        Drags { axial: None, radial: None, internal: None, symmetry: 3, angle_snap: 0 }
+        Drags { axial: None, radial: None, internal: None, lifted: None, symmetry: 3, angle_snap: 0 }
     }
 }
 
 impl Drags {
-    /// Whether any drag is in progress.
+    /// Whether a part is out of the rocket in a drag in progress: the carries above, which the rest of the app previews and
+    /// guards against. An internal part carried along the rocket ([`Drags::lifted`]) stays in it and is not one.
     pub fn active(&self) -> bool {
         self.axial.is_some() || self.radial.is_some() || self.internal.is_some()
+    }
+
+    /// Whether any part is in hand: an active drag, or an internal part carried along the rocket.
+    pub fn in_hand(&self) -> bool {
+        self.active() || self.lifted.is_some()
     }
 }
 
@@ -109,7 +118,8 @@ pub fn place_in_pod(ctx: &mut Ctx, pod: PartId, index: usize, kind: PartKind) ->
 pub fn start_axial(ctx: &mut Ctx, row: usize, name: &'static str, kind: PartKind) {
     ctx.doc.begin_drag(&format!("Add {}", name.to_lowercase()));
     let count = ctx.drag.symmetry;
-    ctx.drag.axial = Some(Drag { row: Some(row), origin: None, name, kind, snap: None, pod_snap: None, surface: None, count });
+    let hold = Drag::held(&kind, None);
+    ctx.drag.axial = Some(Drag { row: Some(row), origin: None, name, kind, snap: None, pod_snap: None, surface: None, count, hold });
 }
 
 /// Starts carrying a new radial part from bin row `row`.
@@ -121,9 +131,10 @@ pub fn start_radial(ctx: &mut Ctx, row: usize, kind: RadialKind) {
     ctx.drag.radial = Some(RadialDrag { row: Some(row), kind, count, origin: None, target: None, detached: false });
 }
 
-/// Picks up a part of the rocket: an axial part comes out of the rocket with the radial and internal parts it carries; a
-/// radial part comes out whole. Nothing happens while another drag is in progress.
-pub fn grab(ctx: &mut Ctx, pick: Pick) {
+/// Picks up a part of the rocket: an axial part comes out of the rocket with the radial and internal parts it carries (held
+/// `hold` metres behind its fore face, else by its middle); a radial part comes out whole. Nothing happens while another drag is
+/// in progress.
+pub fn grab(ctx: &mut Ctx, pick: Pick, hold: Option<f64>) {
     if ctx.drag.active() {
         return;
     }
@@ -143,7 +154,8 @@ pub fn grab(ctx: &mut Ctx, pick: Pick) {
             Some(origin) => {
                 ctx.selection = Selection::Part(id);
                 let (name, kind) = (origin.part.kind.name(), origin.part.kind.clone());
-                ctx.drag.axial = Some(Drag { row: None, name, kind, snap: None, pod_snap: None, surface: None, count, origin: Some(origin) });
+                let hold = Drag::held(&kind, None);
+                ctx.drag.axial = Some(Drag { row: None, name, kind, snap: None, pod_snap: None, surface: None, count, origin: Some(origin), hold });
             }
             None => {
                 ctx.doc.end_drag(false);
@@ -172,10 +184,12 @@ pub fn grab(ctx: &mut Ctx, pick: Pick) {
             match taken {
                 Some(origin) => {
                     ctx.selection = Selection::Part(id);
+                    let kind = origin.part.kind.clone();
                     ctx.drag.axial = Some(Drag {
                         row: None,
                         name: origin.part.kind.name(),
-                        kind: origin.part.kind.clone(),
+                        hold: Drag::held(&kind, hold),
+                        kind,
                         snap: None,
                         pod_snap: None,
                         surface: None,
@@ -201,25 +215,6 @@ pub fn grab(ctx: &mut Ctx, pick: Pick) {
                 None => {
                     ctx.doc.end_drag(false);
                 }
-            }
-        }
-    }
-}
-
-/// Puts back what removing and re-adding a part dropped from the configurations: every motor slot of `from` whose mount exists
-/// again in `rocket` but has lost its slot, and every recovery deployment of a device that exists again.
-fn restore_motors(rocket: &mut Rocket, from: &Rocket) {
-    for config in from.configurations() {
-        for slot in &config.motors {
-            let present = rocket.configuration(config.id).is_some_and(|c| c.slot(slot.mount).is_some());
-            if !present && rocket.internal(slot.mount).is_some() {
-                let _ = rocket.set_motor(config.id, slot.mount, slot.motor.clone());
-                let _ = rocket.set_motor_delay(config.id, slot.mount, slot.delay);
-            }
-        }
-        for timing in &config.recovery {
-            if rocket.configuration(config.id).is_some_and(|c| c.deployment(timing.part).is_none()) {
-                let _ = rocket.set_deployment(config.id, timing.part, timing.deploy);
             }
         }
     }
@@ -297,7 +292,6 @@ pub struct InternalDrag {
     /// The bin row it came from, if it came from there.
     pub row: Option<usize>,
     /// The bin's name for it, for the cursor tag of the surface that shows the targets.
-    #[allow(dead_code)] // Read by the viewport / lanes overlays.
     pub name: &'static str,
     /// Its geometry.
     pub kind: InternalKind,
@@ -311,26 +305,6 @@ pub struct InternalDrag {
 pub fn start_internal(ctx: &mut Ctx, row: Option<usize>, name: &'static str, kind: InternalKind) {
     ctx.doc.begin_drag(&format!("Add {}", name.to_lowercase()));
     ctx.drag.internal = Some(InternalDrag { row, name, kind, origin: None, target: None });
-}
-
-#[allow(dead_code)] // Called by the viewport / lanes when an internal part is picked up.
-/// Picks up internal part `id` of the rocket. Nothing happens while another drag is in progress.
-pub fn grab_internal(ctx: &mut Ctx, id: PartId) -> bool {
-    if ctx.drag.active() {
-        return false;
-    }
-    ctx.doc.begin_drag("Move part");
-    match ctx.doc.drag_update(|r| r.remove_internal(id)) {
-        Some(part) => {
-            ctx.selection = Selection::Part(id);
-            ctx.drag.internal = Some(InternalDrag { row: None, name: part.kind.name(), kind: part.kind.clone(), origin: Some(part), target: None });
-            true
-        }
-        None => {
-            ctx.doc.end_drag(false);
-            false
-        }
-    }
 }
 
 /// Ends the internal drag: lands it on its target if `drop`, else abandons it (a part picked up from the rocket goes back as it
@@ -369,16 +343,11 @@ fn land_on_surface(r: &mut Rocket, drag: &Drag, base: Option<&Rocket>, t: Surfac
 
 /// Lands the carried axial part on attach node `node`, with what it carried; the matched kind.
 fn land_on_node(r: &mut Rocket, drag: &Drag, node: usize, base: Option<&Rocket>) -> Option<PartKind> {
-    let matched = insert_part(r, node, &drag.kind, drag.origin.as_ref().map(|o| &o.part));
-    if let (Some(_), Some(origin)) = (&matched, &drag.origin) {
-        // The parts it carried go back on it, wherever it landed.
-        r.restore_radials(origin.radials.clone());
-        r.restore_internals(origin.internals.clone());
-        if let Some(base) = base {
-            restore_motors(r, base);
-        }
+    match &drag.origin {
+        // The parts it carried go back on it, wherever it landed (the ghost shows the same: see `land_carried`).
+        Some(origin) => land_carried(r, node, &drag.kind, origin, base),
+        None => insert_part(r, node, &drag.kind, None),
     }
-    matched
 }
 
 /// Lands the carried axial part on node `node` of pod `pod`'s stack; the matched kind.
@@ -484,11 +453,101 @@ pub fn landed(ctx: &Ctx) -> Option<Rocket> {
     ok.then_some(rocket)
 }
 
-/// Abandons whichever drag is in progress.
+/// Abandons whichever drag is in progress (an internal part carried along the rocket goes back where it was).
 pub fn cancel(ctx: &mut Ctx) {
     finish_axial(ctx, false);
     finish_radial(ctx, false);
     finish_internal(ctx, false);
+    if ctx.drag.lifted.take().is_some() {
+        ctx.doc.end_drag(false);
+    }
+}
+
+/// What a press or a release of the left button is, to a part in hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gesture {
+    /// The button went up (the end of a drag).
+    Release,
+    /// The button went down (a click, with a part held and no button down).
+    Press,
+}
+
+/// Where a [`Gesture`] happened, as far as a carried part is concerned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Over {
+    /// Over a surface that shows targets and set the part's target (the viewport, Station Lanes).
+    Surface,
+    /// Over the parts bin.
+    Bin,
+    /// Anywhere else.
+    Elsewhere,
+}
+
+/// The one decision point for what a button does to a part in hand; every place that sees a release (the viewport's overlays, the
+/// lanes, the parts bin, the window's root) or a click (the viewport, the lanes, the bin) reports it here.
+///
+/// * **Drag and drop** (`ctx.click_to_place` off): the release ends the carry. Over a surface it lands the part on its target (no
+///   target: it goes back as it was); over the bin it is deleted or discarded ([`drop_on_bin`]); anywhere else it goes back. A
+///   press does nothing.
+/// * **Click to place**: the release does nothing, the part stays in hand and follows the cursor. A press over a surface lands
+///   the part if it has a target the model accepts (else nothing happens and it stays in hand); a press over the bin is the bin
+///   drop; a press elsewhere is not reported.
+pub fn end_carry(ctx: &mut Ctx, gesture: Gesture, over: Over) {
+    if !ctx.drag.in_hand() {
+        return;
+    }
+    match (ctx.click_to_place, gesture, over) {
+        (false, Gesture::Press, _) | (true, Gesture::Release, _) => {}
+        (_, _, Over::Bin) => drop_on_bin(ctx),
+        (false, _, Over::Surface) => finish(ctx, true),
+        (false, _, Over::Elsewhere) => cancel(ctx),
+        (true, _, Over::Surface) => {
+            // A group pulled free over empty space would be removed by a release; a click there does nothing (the bin deletes).
+            let target = ctx.drag.landing().is_some_and(|l| l != Landing::Removed);
+            if target && landed(ctx).is_some() {
+                finish(ctx, true);
+            }
+        }
+        (true, _, Over::Elsewhere) => {}
+    }
+}
+
+/// Ends whichever drag is in progress, landing it on its target if `drop`.
+fn finish(ctx: &mut Ctx, drop: bool) {
+    finish_axial(ctx, drop);
+    finish_radial(ctx, drop);
+    finish_internal(ctx, drop);
+}
+
+/// A carried part is released over (or, clicking to place, clicked on) the parts bin. A part picked up off the rocket is deleted
+/// with everything it carries, exactly as Delete would delete it ([`delete_parts`]: one undo step, `Delete part`, which brings the
+/// rocket back as it was); a part from the bin is discarded, with no change to the document and no undo step.
+fn drop_on_bin(ctx: &mut Ctx) {
+    let picked = ctx
+        .drag
+        .axial
+        .as_ref()
+        .and_then(|d| d.origin.as_ref().map(|o| o.part.id))
+        .or_else(|| ctx.drag.radial.as_ref().and_then(|d| d.origin.as_ref().map(|o| o.id)))
+        .or_else(|| ctx.drag.internal.as_ref().and_then(|d| d.origin.as_ref().map(|o| o.id)))
+        .or(ctx.drag.lifted);
+    // The drag's own step is abandoned: the rocket is exactly as it was before the part was lifted, and the deletion is a step of
+    // its own on top of that.
+    cancel(ctx);
+    if let Some(id) = picked {
+        delete_parts(ctx, &[id]);
+    }
+}
+
+/// Ends the carry of an internal part along the rocket (the manipulation overlay's `Edit::Carry`: the part moves inside the rocket
+/// as a live edit): placed where it is as one undo step, or, with the cursor over the parts bin, deleted ([`drop_on_bin`]).
+pub fn end_lifted(ctx: &mut Ctx) {
+    if ctx.over_bin {
+        drop_on_bin(ctx);
+    } else {
+        ctx.drag.lifted = None;
+        ctx.doc.end_drag(true);
+    }
 }
 
 /// Deletes every selected part (an axial part takes its radial and internal parts with it; a radial part is a whole group) as
@@ -501,6 +560,12 @@ pub fn delete_selection(ctx: &mut Ctx) {
     if ids.is_empty() {
         return;
     }
+    delete_parts(ctx, &ids);
+}
+
+/// Deletes `ids` as one undo step (`Delete part`, or `Delete n parts`) and clears the selection: what Delete, the part menu's
+/// Delete and a part dropped on the parts bin all do.
+fn delete_parts(ctx: &mut Ctx, ids: &[PartId]) {
     let label = if ids.len() > 1 { format!("Delete {} parts", ids.len()) } else { "Delete part".to_string() };
     ctx.doc.edit(&label, |r| ids.iter().for_each(|id| remove_any(r, *id)));
     ctx.select_one(None);
@@ -511,6 +576,19 @@ fn remove_any(rocket: &mut Rocket, id: PartId) {
     if rocket.remove(id).is_none() && rocket.remove_radial(id).is_none() {
         rocket.remove_internal(id);
     }
+}
+
+/// Slides the separation of stage `stage` to the joint just aft of airframe part `joint` (`None`: the automatic joint), live.
+/// The first call opens the drag's one undo step, `Move separation`, and selects the separation; [`finish_separation`] ends it.
+pub fn move_separation(ctx: &mut Ctx, stage: usize, joint: Option<PartId>) {
+    ctx.doc.begin_drag("Move separation");
+    ctx.doc.drag_update(|r| r.set_separation_joint(stage, joint));
+    ctx.selection = Selection::Separation(stage);
+}
+
+/// Ends a [`move_separation`] drag: `commit` keeps it as one undo step, otherwise the rocket goes back as it was.
+pub fn finish_separation(ctx: &mut Ctx, commit: bool) {
+    ctx.doc.end_drag(commit);
 }
 
 #[cfg(test)]

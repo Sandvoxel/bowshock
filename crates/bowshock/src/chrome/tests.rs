@@ -58,8 +58,8 @@ fn the_simulate_menu_runs_one_flight_per_configuration() {
     let _ = app.update(Message::Chrome(Chrome::DuplicateConfig));
     assert_eq!(app.ctx().doc.rocket().configurations().len(), 2);
     let _ = app.update(Message::Chrome(Chrome::ToggleRunMenu));
-    let _ = app.update(Message::Chrome(Chrome::RunAll));
-    let _ = app.update(Message::RunAll);
-    assert_eq!(app.ctx().mode, Mode::Simulate);
+    let _ = app.update(Message::Chrome(Chrome::RunPerConfiguration));
+    let _ = app.update(Message::RunPerConfiguration);
+    assert_eq!(app.ctx().mode, Mode::Build, "running leaves the screen where it was");
     assert!(app.ctx().doc.rocket().flights().len() >= 2, "{}", app.ctx().doc.rocket().flights().len());
 }

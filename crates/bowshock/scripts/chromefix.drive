@@ -11,7 +11,9 @@ click (923, 624)
 screenshot fin-selected-dark.png
 click "Detach"
 screenshot detached-dark.png
+click "Prefs"
 click "Light"
+click "Done"
 screenshot detached-light.png
 click "CONFIG"
 click "New configuration…"
@@ -28,5 +30,7 @@ release (860, 596)
 # Rocket inspector (nothing selected): ruled Name / Designer fields, ballast in the Configuration section.
 click (400, 150)
 screenshot rocket-light.png
+click "Prefs"
 click "Dark"
+click "Done"
 screenshot rocket-dark.png

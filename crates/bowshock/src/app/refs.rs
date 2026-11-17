@@ -140,6 +140,7 @@ pub fn dim_short(dim: Dim) -> String {
         Dim::ForeShoulderDiameter => "Fore shoulder Ø".into(),
         Dim::ForeShoulderThickness => "Fore shoulder wall".into(),
         Dim::FilletRadius => "Fillet".into(),
+        Dim::TipRadius => "Tip radius".into(),
         Dim::Vertex(i) => format!("Vertex {}", i + 1),
     }
 }

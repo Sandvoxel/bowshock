@@ -60,11 +60,7 @@ fn main() {
                 let best = prior.iter().map(|x| x.value).fold(f64::INFINITY, f64::min);
                 let bad = last.value > LIMIT * best;
                 regressed |= bad;
-                (
-                    format!("{:.1}", p.value),
-                    format!("{best:.1}"),
-                    format!("{:+.1}{}", 100.0 * (last.value / best - 1.0), if bad { " REGRESSION" } else { "" }),
-                )
+                (format!("{:.1}", p.value), format!("{best:.1}"), format!("{:+.1}{}", 100.0 * (last.value / best - 1.0), if bad { " REGRESSION" } else { "" }))
             }
         };
         println!("| {host} | {case} | {precision} | {unit} | {:.1} | {prev} | {best} | {delta} | {} |", last.value, last.sha);

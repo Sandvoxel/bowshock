@@ -6,11 +6,11 @@
 //! execute up to `SYNC - 1` further iterations and the final forces are those of the state after them.
 
 use crate::engine::case3::Case3;
+use crate::engine::gpu::{record_timing, PointTiming};
 use crate::engine::run3::{forces_on, PointResult3, StopRule3, SAMPLE_EVERY};
 use crate::error::Error;
 use bowshock_cfd::gpu::{GpuSolver3, Precision};
 use bowshock_cfd::solver3::{Config3, Scheme3, Solver3};
-use crate::engine::gpu::{record_timing, PointTiming};
 use std::time::Instant;
 
 /// Iterations between two synchronisations (the CN sampling interval).

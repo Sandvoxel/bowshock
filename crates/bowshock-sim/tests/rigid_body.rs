@@ -19,8 +19,16 @@ fn rocket(dry_cg: f64, cant: f64) -> Vehicle {
     Vehicle {
         reference_diameter: 2.0 * r,
         body: vec![
-            BodySegment { station: 0.0, length: 0.30, fore_radius: 0.0, aft_radius: r, kind: BodyKind::Nose(NoseShape::TangentOgive), roughness: 30e-6 },
-            BodySegment { station: 0.30, length: 0.80, fore_radius: r, aft_radius: r, kind: BodyKind::Tube, roughness: 30e-6 },
+            BodySegment {
+                station: 0.0,
+                length: 0.30,
+                fore_radius: 0.0,
+                aft_radius: r,
+                kind: BodyKind::Nose(NoseShape::TangentOgive),
+                tip_radius: 0.0,
+                roughness: 30e-6,
+            },
+            BodySegment { station: 0.30, length: 0.80, fore_radius: r, aft_radius: r, kind: BodyKind::Tube, tip_radius: 0.0, roughness: 30e-6 },
         ],
         tube_fins: vec![],
         fin_sets: vec![FinSet {
@@ -47,9 +55,10 @@ fn rocket(dry_cg: f64, cant: f64) -> Vehicle {
             dry: MassProps { mass: 1.07, cg: dry_cg, i_long: 0.1, i_rot: 0.0008 },
             fore_station: 0.0,
             aft_station: 1.10,
-            motor: Some(StageMotor { curve: h128(), mount_aft_station: 1.10, ignition: Timing::LAUNCH, ejection_delay: Some(9.0) }),
+            motor: Some(StageMotor { curve: h128(), mount_aft_station: 1.10, ignition: Timing::LAUNCH, ejection_delay: Some(9.0), tilt_lockout: None }),
             separation: Timing::BURNOUT,
         }],
+        labels: Default::default(),
     }
 }
 
