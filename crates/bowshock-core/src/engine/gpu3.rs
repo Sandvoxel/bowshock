@@ -9,7 +9,7 @@ use crate::engine::case3::Case3;
 use crate::engine::gpu::{record_timing, PointTiming};
 use crate::engine::run3::{
     breakdown_from, drag_parts_from, forces_from, wall_class, wall_faces, zero_incidence, DragParts, LiftBreakdown, LiftForces, PointResult3, StopRule3, Wall,
-    WallForces, SAMPLE_EVERY,
+    WallForces, MEAN_EVERY, SAMPLE_EVERY,
 };
 use crate::error::Error;
 use bowshock_cfd::gpu::{GpuSolver3, Precision, TractionFace3, WallFace3};
@@ -229,10 +229,12 @@ impl GpuRunner3 {
             limiter: n.limiter,
             first_order_iters: n.first_order_iters,
             low_mach: n.low_mach,
-            // the diagonal line solve of a viscous run is not ported to the GPU (and diverges on a wedge): the block factorisation
+            // the line solve: `Block` unless the case asks for the diagonal one (`numerics.line_solve = Some(DiagonalCorrected)`, Euler only: it is not ported to the viscous
+            // step). The diagonal default of `Numerics3::implicit_for(true)` diverges where the block solve does not (the finned half domain at M 3 / 6 degrees: pmin 0.018 at
+            // the base plane by iteration 30-100, non-finite at 110 at `cfl_max` 10 and 150 at 5, stable at 3; the wedge: ISSUES #24), so the runner never takes it by default
             scheme: Scheme3::Implicit({
                 let mut p = n.implicit_for(true);
-                if self.host.rans().is_some() {
+                if n.line_solve.is_none() || self.host.rans().is_some() {
                     p.line_solve = bowshock_cfd::implicit::LineSolve3::Block;
                 }
                 p
@@ -254,7 +256,10 @@ impl GpuRunner3 {
         let mut done = 0usize;
         let mut stop: Option<usize> = None;
         while done < n.max_iter && stop.is_none() {
-            let len = SYNC.min(n.max_iter - done);
+            // the mean-stationary rule needs the forces every `MEAN_EVERY` iterations once it is past `mean_from` (a 50-iteration chunk would alias the wake periods): chunks
+            // of 10 from there on, 50 before (`SYNC`, the sampling interval of the range rule)
+            let len = if rule.wants_forces(done + MEAN_EVERY, MEAN_EVERY) { MEAN_EVERY } else { SYNC }.min(n.max_iter - done);
+            let end = done + len;
             let t_chunk = Instant::now();
             let h = self.gpu.run(len)?;
             let dt_chunk = t_chunk.elapsed().as_secs_f64();
@@ -264,11 +269,17 @@ impl GpuRunner3 {
                 tm.chunks_rest += 1;
                 tm.rest_chunks_s += dt_chunk;
             }
-            let cn = if len == SYNC {
+            // the force coefficients of the state after the chunk: for the mean rule (`observe` before the `check`s of the chunk) and for the CN sample of the range rule
+            let sample_due = end.is_multiple_of(SYNC);
+            let wants = rule.wants_forces(end, MEAN_EVERY);
+            let cn = if wants || sample_due {
                 let t = Instant::now();
                 let f = self.lift_forces(case)?;
                 tm.forces_s += t.elapsed().as_secs_f64();
-                Some(if zero_incidence(&self.host.grid) || case.alpha.abs() < 1e-12 { f.ca } else { f.cn })
+                if wants {
+                    rule.observe(end, &f);
+                }
+                sample_due.then(|| if zero_incidence(&self.host.grid) || case.alpha.abs() < 1e-12 { f.ca } else { f.cn })
             } else {
                 None
             };
@@ -280,12 +291,13 @@ impl GpuRunner3 {
                     break;
                 }
             }
-            done += len;
+            done = end;
             // the state leaves the device only at a chunk where a snapshot is due
-            if let Some(t) = case.snapshots.as_ref().filter(|t| stop.is_none() && len == SYNC && t.due(done)) {
+            let on_grid = done.is_multiple_of(SYNC);
+            if let Some(t) = case.snapshots.as_ref().filter(|t| stop.is_none() && on_grid && t.due(done)) {
                 t.send(case, &self.host.grid, &self.gpu.state_f64()?, done);
             }
-            if stop.is_none() && len == SYNC && rule.report(case, done).is_break() {
+            if stop.is_none() && on_grid && rule.report(case, done).is_break() {
                 rule.cancel();
                 stop = Some(done);
             }

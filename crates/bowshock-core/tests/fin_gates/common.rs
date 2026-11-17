@@ -39,11 +39,10 @@ pub fn tier(kind: TierKind, flow: WallFlow) -> Tier {
     }
 }
 
-/// Does the engine solve the viscous equations for `case`? The CPU solver does when the case is viscous (`Case3::viscous`: the wall-resolved tiers, a viscous 2D
-/// case on the wedge; `Case3::euler_equations` drops it); the GPU runner is Euler until `gpu3d` integrates the viscous step (`BOWSHOCK_WEDGE_BACKEND=gpu` is then
-/// INFO / "engine is inviscid").
+/// Does the engine solve the viscous equations for `case`? Both backends do when the case is viscous (`Case3::viscous`: the wall-resolved tiers, a viscous 2D case on
+/// the wedge; `Case3::euler_equations` drops it): the GPU runner runs the SST step since stage S5b.
 pub fn engine_is_viscous(case: &Case3) -> bool {
-    case.viscous.is_some() && !gpu_backend()
+    case.viscous.is_some()
 }
 
 /// Does a run of `kind` count as a gate (viscous) or as INFO (inviscid)?
@@ -119,12 +118,14 @@ impl Session {
             #[cfg(feature = "gpu")]
             Session::Gpu(r) => {
                 let point = r.run_on(case, warm).map_err(|e| e.to_string())?;
+                let parts = r.drag_parts(case).map_err(|e| e.to_string())?;
+                let fin_friction = r.host.rans().map(|_| parts.fin_friction());
                 Ok(Solved {
                     point,
-                    parts: r.drag_parts(case).map_err(|e| e.to_string())?,
+                    parts,
                     lift: r.lift_forces(case).map_err(|e| e.to_string())?,
                     breakdown: r.breakdown(case).map_err(|e| e.to_string())?,
-                    fin_friction: None,
+                    fin_friction,
                 })
             }
         }
