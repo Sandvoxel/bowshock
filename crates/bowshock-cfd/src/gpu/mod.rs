@@ -498,6 +498,16 @@ pub struct VisProbe {
     pub tractions: Vec<[f64; 3]>,
 }
 
+/// A copy of the loop state of a [`GpuSolver3`] at one iteration ([`GpuSolver3::snapshot`]): the device buffers are shared, not copied.
+#[derive(Clone)]
+pub struct Snapshot3(SnapInner);
+
+#[derive(Clone)]
+enum SnapInner {
+    F32(f32s::Snapshot3),
+    Ext(df32s::Snapshot3),
+}
+
 enum Inner3 {
     F32(f32s::LazySolver3),
     Ext(df32s::LazySolver3),
@@ -601,6 +611,25 @@ impl GpuSolver3 {
     /// Overwrites the conserved state (e.g. with a CPU solution) and restarts the iteration counter and the CFL ramp.
     pub fn set_state(&mut self, u: &[Cons3]) -> Result<()> {
         on3_mut!(self, s => s.set_state(u)?);
+        Ok(())
+    }
+
+    /// A copy of the loop state (the device buffers are shared, nothing moves) to return to with [`GpuSolver3::restore`]: the CFL controller of the 3D runner.
+    pub fn snapshot(&self) -> Result<Snapshot3> {
+        Ok(Snapshot3(match &self.inner {
+            Inner3::F32(s) => SnapInner::F32(s.snapshot()?),
+            Inner3::Ext(s) => SnapInner::Ext(s.snapshot()?),
+        }))
+    }
+
+    /// Returns to a [`Snapshot3`] of this solver (state, CFL ramp value, iteration count); with `cfl_cap` the CFL of the restored state is at most that. Set the new
+    /// configuration ([`GpuSolver3::set_config`]) first: a changed scheme restarts the ramp.
+    pub fn restore(&mut self, snap: &Snapshot3, cfl_cap: Option<f64>) -> Result<()> {
+        match (&mut self.inner, &snap.0) {
+            (Inner3::F32(s), SnapInner::F32(n)) => s.restore(n, cfl_cap)?,
+            (Inner3::Ext(s), SnapInner::Ext(n)) => s.restore(n, cfl_cap)?,
+            _ => return Err(GpuError::Unsupported("a snapshot of the other precision")),
+        }
         Ok(())
     }
 

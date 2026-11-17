@@ -497,6 +497,13 @@ struct MonitorFam3 {
     wm: A,
 }
 
+/// The loop state at one iteration: see [`LazySolver3::snapshot`].
+#[derive(Clone)]
+pub struct Snapshot3 {
+    state: State3,
+    iter: usize,
+}
+
 /// The time-step cap of a wedge's axis cells (`WEDGE_AXIS_DT r_c`, in the solver's precision and in f32 for the implicit left-hand side).
 struct AxisDt3 {
     mask: Array<bool>,
@@ -767,6 +774,25 @@ impl LazySolver3 {
         if let Some(s) = &mut self.state {
             s[6] = cfl;
         }
+        Ok(())
+    }
+
+    /// A copy of the loop state to return to ([`LazySolver3::restore`]). The arrays are immutable values: the copy shares the device buffers, nothing moves or is allocated
+    /// but the references (a step makes new arrays, it does not write into the old ones).
+    pub fn snapshot(&self) -> Result<Snapshot3> {
+        Ok(Snapshot3 { state: self.state.clone().ok_or_else(no_state)?, iter: self.iter })
+    }
+
+    /// Returns to `snap` (the state, the CFL of its ramp and the iteration count); with `cfl_cap` the CFL of the state is at most that (a controller that lowers `cfl_max`
+    /// after a failure: [`LazySolver3::set_config`] first, then this).
+    pub fn restore(&mut self, snap: &Snapshot3, cfl_cap: Option<f64>) -> Result<()> {
+        let mut state = snap.state.clone();
+        if let Some(cap) = cfl_cap {
+            let cfl = to_f64(&state[6])?[0].min(cap);
+            state[6] = up(&self.ctx, &[cfl], 1)?;
+        }
+        self.state = Some(state);
+        self.iter = snap.iter;
         Ok(())
     }
 

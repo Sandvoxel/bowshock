@@ -12,13 +12,22 @@ use crate::engine::run3::{
 };
 use crate::engine::timing::{record_timing, PointTiming};
 use crate::error::Error;
-use bowshock_cfd::gpu::{GpuSolver3, Precision, TractionFace3, WallFace3};
+use bowshock_cfd::gpu::{GpuSolver3, Precision, Snapshot3, TractionFace3, WallFace3};
 use bowshock_cfd::grid3::Face3;
 use bowshock_cfd::solver3::{Config3, Scheme3, Solver3};
 use std::time::Instant;
 
 /// Iterations between two synchronisations (the CN sampling interval).
 pub const SYNC: usize = SAMPLE_EVERY;
+
+/// A chunk whose density residual is above this (or not finite) is a failure of the CFL controller (the residual of a healthy start is 1e1 to 1e3 at most).
+const ROLLBACK_RESIDUAL: f64 = 1e5;
+/// The factor of `cfl_max` after a failure.
+const CFL_BACKOFF: f64 = 0.7;
+/// A failure within this many iterations of a restore goes back to the older snapshot.
+const RECENT_RESTORE: usize = 10;
+/// Failures after which the controller gives up (0.7^12 = 0.014 of the cap).
+const MAX_ROLLBACKS: usize = 12;
 
 /// GPU solver plus the host solver (grid and config) of one 3D case.
 pub struct GpuRunner3 {
@@ -34,6 +43,8 @@ pub struct GpuRunner3 {
     pub build_seconds: f64,
     pub ctx_seconds: f64,
     pub upload_seconds: f64,
+    /// The failures of the last run the CFL controller answered: `(iteration of the failure, the new cfl_max)`; empty when it never had to step in.
+    pub cfl_rollbacks: Vec<(usize, f64)>,
 }
 
 impl GpuRunner3 {
@@ -55,8 +66,17 @@ impl GpuRunner3 {
         let t1 = Instant::now();
         let gpu = GpuSolver3::from_host(&ctx, &host, prec)?;
         let upload_seconds = t1.elapsed().as_secs_f64();
-        let mut runner =
-            GpuRunner3 { gpu, host, classes: Vec::new(), visc, setup_seconds: t0.elapsed().as_secs_f64(), build_seconds, ctx_seconds, upload_seconds };
+        let mut runner = GpuRunner3 {
+            gpu,
+            host,
+            classes: Vec::new(),
+            visc,
+            setup_seconds: t0.elapsed().as_secs_f64(),
+            build_seconds,
+            ctx_seconds,
+            upload_seconds,
+            cfl_rollbacks: Vec::new(),
+        };
         runner.upload_wall_faces(case)?;
         Ok(runner)
     }
@@ -266,6 +286,14 @@ impl GpuRunner3 {
         let mut rule = StopRule3::new(case, warm);
         let mut done = 0usize;
         let mut stop: Option<usize> = None;
+        // the CFL controller by rollback (DESIGN3D "A CFL controller by rollback"): the stable CFL differs by case and a fixed cap leaves a factor of two to five on the table.
+        // The state after every good chunk is kept (two of them: the device buffers are shared, nothing is copied); a chunk with a residual that is not finite or above
+        // `ROLLBACK_RESIDUAL`, or a non-finite force monitor, is not fed to the stop rule: the run returns to the last snapshot (to the one before it when the failure follows a
+        // restore within `RECENT_RESTORE` iterations: the snapshot taken right before a failure can already hold the growing mode), `cfl_max` is multiplied by `CFL_BACKOFF` and
+        // the chunk is run again. The cap only goes down; the converged state does not depend on it. `MAX_ROLLBACKS` failures end the control: the run then fails as it would have.
+        self.cfl_rollbacks.clear();
+        let mut snaps: Vec<(Snapshot3, usize)> = vec![(self.gpu.snapshot()?, 0)];
+        let mut restored_at: Option<usize> = None;
         while done < n.max_iter && stop.is_none() {
             // chunks of `SYNC` iterations (the sampling interval of the range rule); the forces of the rules come from the loop itself: the force monitor of the step records
             // `[Fx, Fz, Mz]` of the state each iteration started from (so the sample of an iteration count is one iteration old), the mean rule reads every `MEAN_EVERY`-th
@@ -275,6 +303,23 @@ impl GpuRunner3 {
             let t_chunk = Instant::now();
             let (h, mon) = self.gpu.run_monitored(len)?;
             let dt_chunk = t_chunk.elapsed().as_secs_f64();
+            let failure = h.iter().position(|r| !r.is_finite() || *r > ROLLBACK_RESIDUAL).or_else(|| mon.iter().position(|m| m.iter().any(|x| !x.is_finite())));
+            if let (Some(k), true) = (failure, self.cfl_rollbacks.len() < MAX_ROLLBACKS) {
+                let recent = restored_at.is_some_and(|r| done + k <= r + RECENT_RESTORE);
+                let from = if recent && snaps.len() >= 2 { snaps.len() - 2 } else { snaps.len() - 1 };
+                snaps.truncate(from + 1);
+                let (snap, at) = snaps[from].clone();
+                let mut cfg = self.host.cfg.clone();
+                let Scheme3::Implicit(p) = &mut cfg.scheme else { return Err(Error::Gpu("the CFL controller needs the implicit scheme".into())) };
+                p.cfl_max *= CFL_BACKOFF;
+                let cap = p.cfl_max;
+                self.gpu.set_config(&cfg)?;
+                self.host.cfg = cfg;
+                self.gpu.restore(&snap, Some(cap))?;
+                self.cfl_rollbacks.push((done + k, cap));
+                (done, restored_at) = (at, Some(at));
+                continue;
+            }
             if done == 0 {
                 tm.first_chunk_s = dt_chunk;
             } else {
@@ -295,6 +340,12 @@ impl GpuRunner3 {
                 }
             }
             done = end;
+            if stop.is_none() {
+                snaps.push((self.gpu.snapshot()?, done));
+                if snaps.len() > 2 {
+                    snaps.remove(0);
+                }
+            }
             // the state leaves the device only at a chunk where a snapshot is due
             let on_grid = done.is_multiple_of(SYNC);
             if let Some(t) = case.snapshots.as_ref().filter(|t| stop.is_none() && on_grid && t.due(done)) {
