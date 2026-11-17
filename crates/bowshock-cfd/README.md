@@ -1296,3 +1296,94 @@ iterations). cd_total against the 2D table: within 0.32 % at M 0.8, 1, 1.1, 1.3,
 Device memory of the sector in f32 with the diagonal scheme against its size (`nk` 6, 18, 36, 72; 147 840 / 443 520 / 887 040 / 1 774 080 cells): 453 / 963 / 1 765 / 3 493 MiB, about 1.96 kB per cell and
 0.18 GB fixed: the Euler step alone needs 2.3 kB per cell with the block scheme and df32 3.0 kB, more than the 0.6-1.0 kB of DESIGN3D E, and a 1.7 M-cell half domain is 3.5 GB before any viscous or SST array.
 `tools/gpuq/gpumem -- CMD` measures any command the same way.
+
+### The 3D viscous kernels on the GPU (stage S5a: `gpu/viscous3.rs`, `tests/s5a_visc.rs`)
+
+Port of `viscous3.rs` (read its module header: the ghost in the plane of the face, the reflected gradient across symmetry planes, the wall ghost `(rho, -u, -v, -w, p)`, the eddy viscosity of a no-slip face
+`2 mu_t,w - mu_t`), expression by expression, kernel level only (not in `GpuSolver3`'s step yet; `GpuSolver3::set_viscous` builds the host data, `LazySolver3::viscous_probe3` runs the kernels on a given padded state):
+
+* `VGeo3`: the host-built face data of the three families (`face_dirs`: `e`, `1/d`, flux mask `d != 0`; `face_cells`: the Green-Gauss mask, the ghost and wall flags of each side, no-slip), uploaded once.
+  The wall mask (`face_cells` sides, solid and dead cells) is the update mask of S2, so a dead cell is no flux and no wall of its own; the solver's state arrays are read through the padded record `w` of `assign_ghosts3`.
+* `viscous_cells3` (the cell pass: Sutherland `mu = T sqrt(T) (1 + S) / (T + S) / re_c` and the Green-Gauss gradient as per-face contributions `0.5 (phi_c + phi_neighbour) n A` of the three families, the wall
+  side being the wall ghost), `viscous_fluxes3` (the face pass: ghost-selected side states and cell data, the reflected gradient `R G R` written into the two symmetry slabs of each family by region assigns, the compact
+  face gradient, the flux `[tau.n, u.tau.n + kappa grad T.n]`), `viscous_residual3`, `diffusion_rates3`, `lambda_pass3` and `wall_tractions3`: the viscous force by wall class `[Fx, Fz, Mz]` as masked
+  reductions of the same fluxes the mean flow sees (`-sigma Fv.n[1..4] A` per no-slip face, one download of `3 n_classes` numbers), next to the pressure forces.
+
+Tests (`cargo test --release -p bowshock-gpu-cases --test s5a_visc`, through gpuq): the same padded primitive state, solid mask, symmetry sides, `mu_t` and `mu_t,w` into the CPU `viscous3` and the GPU, every output
+compared (`max |gpu - cpu| / max |cpu|`) on a skewed box with three solid blocks (one a dead block), the one-cell wedge and the fin sectors N = 4 and 3, laminar and with eddy viscosity, symmetry planes in `k` (and `j`
+on the box): f32 at most 7e-6 (the wedge cell gradient; every other quantity 1e-6 or below), df32 at most 4e-13 (cell gradient, flux, spectral radius, diffusion rate, residual, wall forces).
+
+Kernels alone (`bench3 --viscous`, one evaluation of the laminar viscous residual of the current state: cell pass, the three face families, the residual, the face spectral radii; padded state evaluated beforehand;
+RTX 3090): wedge 156 x 140 x 1 f32 7 launches / 53 us, df32 7 / 249 us; sector 210 x 70 x 18 (264 600 cells) f32 7 / 238 us, df32 9 / 884 us (the implicit Euler steps of the table above are 186-357 us and
+1.6-2.6 ms). Device memory of the process with the viscous face data allocated: wedge 123 / 209 MiB (f32 / df32, step 97 / 187), sector 969 / 1 150 MiB (step 969 / 1 134). One fusion cut, `viscous3.rs:304`
+(the face energy flux): `1537 inlined operations > 1536` (f32; df32 adds two `recomputations of an expression cost more than storing it` cuts); harmless here (one extra launch). [INFERENCE: a `cache()` of the
+face gradient record removes it; not tried, for S5b to decide with the whole step in view.]
+
+### The 3D SST update on the GPU (stage S5a: `gpu/turbulence3.rs`, `tests/s5a_turb.rs`)
+
+Port of `turbulence3.rs` (written by the `GpuTurb3` agent in the worktree `gpu3d-turb`, merged), kernel level only: `TurbModel3<N>` with `Sst3` (`N` = 2; the lists of scalars are written for `N` as on the CPU), `wall_state_pass3`
+(Reichardt inversion with its fixed 8 Newton steps, the Aupoix state with its fixed 16 steps, per-cell `ks`; run on the gathered wall cells only, `take` / `put`: in df32 the transcendental iterations on all cells cost
+as much as the rest of the update), `scalar_gradients3`, `blends3`, `face_data3`, `cell_terms3` (four `staged3` groups), `solve_and_update3` (the three scalar tridiagonal line solves of Luma's parts solver, one launch per
+direction, no k line when `skip_k`, solid rows identity, a ghost that follows its cell adds nothing to the diagonal) and `turbulence_update3`; the wall distance is computed on the host (`walldist3`) and uploaded.
+`LazySolver3::turbulence_probe3` runs the stages on the CPU `TurbIn` and returns every stage; the geometry is a standalone `TGeo3` (`VFace3.noslip` of the viscous geometry gives the wall cells).
+
+Tests (`--test s5a_turb`, through gpuq; a jittered box with a solid block, the same box with symmetry planes, a y+ sweep 0.2-300 with rough cells, the tiny wedge, the tiny sector; each stage against the CPU,
+relative to its own largest value, floor 1e-3, gradient normwise): f32 worst: wall state 3.2e-5, gradients 5.8e-6, F1 and X 3.3e-5, face data 9.9e-6, R and d0 7.0e-6, line coefficients 2.3e-7, new `k`, `omega` 8.4e-6, `mu_t` 1.2e-5;
+df32 worst: 1.2e-12 (wall state), 1.4e-13, 1.6e-12, 4.9e-13, 4.9e-13, 1.3e-14, **1.1e-5** (`k`, `omega` after the line solves) and **8.1e-6** (`mu_t`): Luma's tridiagonal parts solver takes `f32` arrays only, so `dphi` is
+f32-accurate in both precisions and `mu_t` inherits it (it acts as pseudo-time damping; the fixed point `R = 0` is the same). The df32 target 1e-8 is therefore asserted at 5e-5 for those two rows; iterative refinement
+is the way to a true df32 solve (not done).
+
+Kernels alone (`turbulence_profile3`, best of 20 after warm-up, `Staging::Fluxes`, RTX 3090, other agents' jobs share the GPU: single runs came out up to 5x slower): wall-state pass / update, wedge-like 156 x 140 x 1:
+f32 27 launches 0.09 ms / 16 launches 0.087 ms, df32 27 / 0.24 ms, 17 / 0.164 ms; sector 210 x 70 x 18: f32 27 / 0.14 ms, 17 / 0.83 ms, df32 27 / 0.35 ms, 18 / 1.53 ms. No fusion cuts under `Fluxes`; under
+`Staging::Fusion` the update is 2-10x slower (f32 1.8 ms wedge-like, 1.3 ms sector; df32 6.9 ms, 7-12 ms) with the usual `1537 inlined operations > 1536` cuts. Device memory with them allocated is not measured separately.
+
+CPU findings of the port: `scalar_gradients` took the cell as its own face neighbour (`hi as usize ^ 1`: every scalar gradient about zero, the ghosts never entered); fixed in this tree, `phys3d` takes the same
+one-line fix. The GPU runs every kernel on all cells and ends each stage with a select to the CPU's solid-cell values; at rest the Newton `0/0` is `u_tau = 0`; `hypot` is `m sqrt(1 + (n/m)^2)` (no `hypot` for `Df32`);
+the arguments of F1 and F2 are capped at 1e3 as in the 2D `turbulence.rs`; the probe clamps the wall distance (inf in solid cells) and sanitises solid-cell primitives (the solver's padded array must stay finite there).
+**Reading `lowmach5.rs` (S5a item 5; the block path is implemented in S5b, the diagonal one is not and stalls on the CPU too): what the GPU block and diagonal paths needed.** `P = I + kappa a g^T` is rank one in conservative variables
+(`kappa = 1/U_r^2 - 1/c^2`, `a = (1, u, v, w, H)`, `g = (gamma - 1)(q^2/2, -u, -v, -w, 1)`, `U_r = clamp(|u|, ur_min, c)`, `kappa = 0` and so `P = I` where `U_r = c`: no branch is needed), so `P x` costs a dot product
+and five multiply-adds per cell, never a 25-array block.
+
+* **Block path** (`gpu/implicit3.rs`): (1) `factor3`: the diagonal starts from `P` instead of `Blk5::eye()` (25 products `kappa a_i g_j`, added like the wedge source block of S2); (2) `implicit_step3`, `approx_factor3_parts`: the
+  sweeps become `(P - dt J_i) X = dt R`, `(P - dt J_j) dU = P X`, `(P - dt J_k) dU = P dU`, i.e. a `P` application between the three solves; (3) `n_apply3` / the defect residual use `P dU` instead of `dU`
+  (`b - (P - dt J_i - dt J_j - dt J_k) dU0`); (4) the face dissipation `abs_jacobian_f5` becomes `abs_jacobian_pc3`: the Roe state, `M = P^-1 A`, three entropy-fixed `|lambda|` (`u_n`, `u' +- c'`), the
+  quadratic polynomial in `M` and `P |M|`: three more 5x5 products per face and direction (`Blk5::mm` has the lazy `E::{Z, O, A}` algebra for it; `P` and `P^-1` are `I + rank one`, so two of the three products
+  are rank-one updates), with the unchanged shock-sensor blend towards the Rusanov `lambda I`; (5) `pseudo_dt3`: `|u'| + c'` of `precond_speeds` for `|u_n| + c`. `ur_min` is a host constant of the free stream
+  (`LowMach::for_freestream`). [INFERENCE: the face-matrix assembly grows by about the cost of `abs_jacobian`; the fusion limits of that kernel are not measured here.]
+* **Diagonal path** (`diag_factor3`, `diag_du3`): the per-cell eigensystem `T` of `A` is replaced by `eig_pc5` (closed form: `R`, `L` and `L P^-1`; the first sweep applies
+  `L P^-1`, the later ones `L`), the scalar coefficients take `lam_pc5` for the Jacobian eigenvalues and `face_dis_pc5` (`roe_eigs_pc5`, the shock blend kept as the scalar `t lambda`) for the dissipation. The defect pass is
+  the block operator with `P`, so the whole block list above is needed for the diagonal scheme too; the diagonal scheme only adds `eig_pc5` and the scalar eigenvalues. The wedge-wide fact of S2 stays: `DiagonalCorrected`
+  diverges on the wedge (ISSUES #24), so the wedge starts on the block path, where the low-Mach `P` and the wedge source block both live in the diagonal of the j factor (`factor3`).
+* **Luma**: nothing new is needed (`sqrt`, division, the tangent-vector rule `tangents` shared with `diag3`; the GPU `Eig` of `diag_factor3` has the same `cons_to_char` / `char_to_cons` shape); `P` enters the boundary
+  treatment nowhere (ghost Jacobian blocks unchanged), as the CPU module says. The explicit low-Mach flux correction of `body3.rs` (`cfg.low_mach`) is independent of it.
+
+### The viscous / SST step on the GPU (stage S5b: `gpu/{rans3,implicit3,body3,turbulence3}.rs`, `tests/s5b.rs`, `examples/{plates_gpu,bench3,setup_cache}.rs`, `GpuRunner3::new_rans`)
+
+`GpuSolver3::from_host` takes a `Solver3` with `set_viscous_with` (laminar or SST) and runs the whole viscous iteration on the device, the order of `solver3/rans.rs`: cell pass (gradients, `mu`), SST wall state, viscous
+face fluxes, inviscid fluxes, `res = -(1/V) sum S (F - Fv)` (`rans3.rs: residual3`), the diffusive terms in the pseudo-time step, the implicit step, the SST update with the residual evaluation and the first-stage `dt` (explicit)
+or the start-of-step evaluation (implicit). `State3` is ten arrays (`U` x5, residual norm, CFL, `k`, `omega`, `mu_t`; one-element placeholders without SST) so the turbulence state rides the lazy loop. Ported with it:
+
+* **Boundaries**: the no-slip solid side `(rho, -u, -v, -w, p)` of every fluid/solid face (also in the MUSCL stencil), `diag(1, -1, -1, -1, 1)` in the ghost Jacobian; the `i = ni` static-pressure outflow (analytic
+  Jacobian); the `j = 0` columns of `Grid3::wall_j0` (the body surface of a grid without solid cells under it) are no-slip in a viscous run (ghost layers and ghost Jacobian by column mask); the `k` mirror ghost of a wedge is
+  the host's, and the **swirl projection** of the wedge residual (`res_v, res_w -= (res_v cos - res_w sin)(cos, -sin)`, `th = theta_span / 2`) is applied after the viscous divergence.
+* **Implicit step**: `2 lam_f I` on the dissipation of every face (`lambda_pass3`), the diffusive terms in `pseudo_dt3` (`no_dt_k` drops the k term of a wedge), `Block` only: the viscous diagonal path and the diagonal +
+  low-Mach path are refused by `from_host` (`Unsupported`; the CPU diagonal + `P` stalls, the diagonal on a wedge diverges: ISSUES #24).
+* **Low-Mach preconditioning, block path** (`ImplicitParams::low_mach_precond`): `P` of every cell from the f32 primitives (`p_cells3`, rank one, identity in solid cells), `P` in the diagonal block, between the sweeps
+  (`approx_factor3_parts`: two factors on a wedge, `P` between them only), in the defect (`b - (sum_d A_d - (nd - 1) P) dU`; the first defect `N_i (X - dU) + N_j (Y - dU)` is unchanged, `N_d = A_d - P`), `P |P^-1 A|` as the face
+  dissipation (`abs_jacobian_pc_f5`: `P^-1 A` and `P` as rank-one updates, the Newton-form polynomial through the entropy-fixed `|u_n|`, `|u' +- c'|`, shock blend towards the plain Rusanov `lambda I`), `|u'| + c'` in
+  `pseudo_dt3`. The explicit flux correction (`cfg.low_mach`) was already on the device.
+* **Wall treatment** (CPU 8484d6f .. e9ed05a): Reichardt + bump law, `k` cap, law strain at smooth wall cells with the speed **tangential** to the cell's no-slip faces of the law class (`wall_speed_at3`: `|u - (u.e) e|`, largest
+  over the faces; the `i` faces count only with `law_i_walls`, a cell with only `i` walls is a plain wall cell: speed 0, no law strain, no `k` cap: `TGeo3.wall_ns/wall_e/wall_counted`, built on the host from `face_dirs`).
+* **Forces**: `GpuRunner3::wall_forces` adds the shear of the no-slip faces, reduced on the device (`TractionFace3`: class, direction, face index, sign, area, `x`; `viscous_wall_forces`), to the pressure force of its
+  class, the base wall's shear excluded (the 2D drag has none); the monitor of the stop rule is the total `ca`. `friction_report` (host, once per run) gives CD friction and `y+ max` as the 2D solver reports them.
+* **Runner**: `GpuRunner3::new_rans(case, prec, Viscous, RansOpts3)`; `run_on` forces `Block` for a viscous host. `GpuRunner3::build` takes the host solver from `cache3::shared()` (`build_solver_cached`).
+
+Tests (`tests/s5b.rs`, through gpuq, 10 x 8 x 6 skewed box with a no-slip block and a dead block, 30 iterations from the free stream, `max |dU| / (1 + |U|)` against the f64 CPU): laminar M 0.3 / 2 explicit f32 6.6e-7 / 1.3e-6,
+df32 7.6e-12 / 1.5e-11, block f32 3.6e-7 / 4.0e-7, df32 3.3e-9 / 1.0e-8; SST M 0.3 Re 2e3 / 2e5 explicit f32 7.3e-7 / 6.8e-7, df32 1.1e-12 / 8.1e-12, block f32 3.8e-7 / 4.7e-7, df32 4.1e-9 / 3.9e-9, with
+`k, omega, mu_t` f32 <= 5.9e-6 and df32 <= 1.1e-7 (explicit) / 9.9e-8 (block); low-Mach block + `P` (M 0.1 / 0.3 laminar, M 0.1 SST) f32 1.0e-6 / 7.6e-7 / 2.0e-6, df32 7.0e-9 / 1.0e-8 / 1.2e-8 (`k, omega, mu_t` 1.2e-5 / 1.9e-7);
+the G3 wedge (156 x 122, level 0, M 0.5, the 2D case's block + `P` numerics, wall_j0 body, 20 iterations) laminar f32 1.6e-6, df32 2.2e-8, SST f32 1.6e-6 (`k, omega, mu_t` 1.6e-5), df32 2.9e-8 (5.1e-7). Targets
+1e-5 / 3e-7 explicit, 1e-3 / 1e-4 implicit (f32 / df32).
+
+Plates (`plates_gpu --case g1|g2|g2r|yplus:<y+>`, the step-free boundary-wall plate of `plate3`, `Block`, `ImplicitParams::VISCOUS`, df32; `--cpu` runs the CPU on the same case): G1 `cf` +0.65 % / +1.64 % against Blasius at x = 0.4955 /
+0.8909 in 1250 iterations (CPU +0.65 / +1.64, 1250); G2 -4.25 % against the correlation at 0.9615 in 703 iterations (CPU -4.25, 709; 2D -4.25, 717); G2r +0.23 % against Mills-Hang (2D +0.20); `y+` sweep at 0.9615
+(vs `y+` 0.5): 1: -2.5 %, 5: +4.0 %, 15: -1.1 %, 30: -0.4 %, all inside the 5 % band.

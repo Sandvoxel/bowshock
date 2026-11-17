@@ -82,6 +82,8 @@ struct BenchCase {
     alpha_deg: f64,
     /// Default number of timed iterations.
     n: usize,
+    /// A viscous SST case: the 2D engine case whose wedge it runs (`None`: Euler on `grid`).
+    rans: Option<bowshock_core::engine::case::Case>,
 }
 
 impl BenchCase {
@@ -113,7 +115,7 @@ fn wedge_case() -> Result<BenchCase, String> {
     let c2 = engine_case(&example_body(), 3.0, true, Resolution::Coarse);
     let case = wedge_case3(&c2);
     let grid = body_grid3(&case.grid).map_err(|e| format!("wedge grid: {e}"))?;
-    Ok(BenchCase { name: "wedge", grid, alpha_deg: 0.0, n: 1000 })
+    Ok(BenchCase { name: "wedge", grid, alpha_deg: 0.0, n: 1000, rans: None })
 }
 
 /// The real fin sector: the Army-Navy Basic Finner (4 fins, even `N`) as the sector `[0, pi/4]` on the sting grid, `nk` azimuthal cells.
@@ -121,13 +123,21 @@ fn sector_case(nk: usize) -> Result<BenchCase, String> {
     let mut case = Case3::sector(2.0, Case3::anf_body(), Case3::anf_fins(), Tier::Euler, 0);
     case.grid.nk = nk;
     let grid = body_grid3(&case.grid).map_err(|e| format!("sector grid: {e}"))?;
-    Ok(BenchCase { name: "sector", grid, alpha_deg: 0.0, n: 200 })
+    Ok(BenchCase { name: "sector", grid, alpha_deg: 0.0, n: 200, rans: None })
 }
 
 fn anf_case() -> Result<BenchCase, String> {
     let case = Case3::new(2.0, 2f64.to_radians(), Case3::anf_body(), Some(Case3::anf_fins()), 0);
     let host = case.build_solver().map_err(|e| format!("ANF grid: {e}"))?;
-    Ok(BenchCase { name: "anf", grid: host.grid.clone(), alpha_deg: 2.0, n: 200 })
+    Ok(BenchCase { name: "anf", grid: host.grid.clone(), alpha_deg: 2.0, n: 200, rans: None })
+}
+
+/// The viscous SST wedge of the example table's node at `mach`: the wall-resolved grid sized for it, the 2D case's numerics (block lines; the low-Mach
+/// preconditioning below Mach 1), the free stream of that Mach number.
+fn wedge_rans_case(mach: f64) -> Result<BenchCase, String> {
+    let c2 = engine_case(&example_body(), mach, true, Resolution::Coarse);
+    let grid = Case3::wedge_of(&c2, 0).build_solver().map_err(|e| format!("wedge grid: {e}"))?.grid;
+    Ok(BenchCase { name: "wedge", grid, alpha_deg: 0.0, n: 500, rans: Some(c2) })
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------
@@ -216,6 +226,8 @@ struct Opts {
     mem: bool,
     /// Time a combination whose 100-iteration sanity run diverges (the step cost does not depend on the values), with a warning.
     allow_nonfinite: bool,
+    /// Also profile the viscous residual (the S5a kernels) on the grid.
+    viscous: bool,
     n: Option<usize>,
 }
 
@@ -250,7 +262,17 @@ fn bench_combo(case: &BenchCase, precision: (Precision, &'static str), solve: (L
     let sampler = if o.mem { MemSampler::start() } else { None };
     let ctx = luma::Context::new().map_err(|e| format!("no GPU context: {e}"))?;
     let cfg = case.config(solve.0);
-    let mut s = GpuSolver3::new(&ctx, &case.grid, &cfg, precision.0).map_err(|e| format!("{}: {e}", precision.1))?;
+    let mut s = match &case.rans {
+        // the viscous SST wedge: `Case3::wedge_of` carries the 2D case's numerics and viscous parameters (first-order start-up 0: the timed step is the MUSCL one)
+        Some(c2) => {
+            let mut host = Case3::wedge_of(c2, 0).build_solver().map_err(|e| format!("wedge solver: {e}"))?;
+            let bowshock_cfd::solver::Scheme::Implicit(p) = c2.numerics.scheme else { return Err("the viscous numerics are implicit".into()) };
+            host.cfg.scheme = Scheme3::Implicit(ImplicitParams { line_solve: solve.0, ..p });
+            host.cfg.first_order_iters = 0;
+            GpuSolver3::from_host(&ctx, &host, precision.0).map_err(|e| format!("{}: {e}", precision.1))?
+        }
+        None => GpuSolver3::new(&ctx, &case.grid, &cfg, precision.0).map_err(|e| format!("{}: {e}", precision.1))?,
+    };
     let (first_call_s, us, p, last) = measure(&mut s, n)?;
     if o.profile {
         println!(
@@ -275,6 +297,45 @@ fn bench_combo(case: &BenchCase, precision: (Precision, &'static str), solve: (L
         );
     }
     let peak_mib = sampler.map(MemSampler::stop);
+    if o.viscous {
+        // the viscous residual of the current state (stage S5a kernels, laminar), the kernels alone, the host data of the face passes allocated
+        let sampler = if o.mem { MemSampler::start() } else { None };
+        let sym = [false, false, false, false, true, true];
+        let v = bowshock_cfd::solver::Viscous {
+            re_c: 2.0e6,
+            sutherland: 0.368,
+            turbulence: bowshock_cfd::solver::Turbulence::Laminar,
+            wall_i_start: 0,
+            roughness: 0.0,
+        };
+        s.set_viscous(&case.grid, v, &sym).map_err(|e| format!("set_viscous: {e}"))?;
+        let pv = s.profile_viscous().map_err(|e| format!("profile_viscous: {e}"))?;
+        let peak_v = sampler.map(MemSampler::stop);
+        let (launches, gpu_us) = (pv.launches(), pv.total().as_secs_f64() * 1e6);
+        println!(
+            "{} {} viscous residual {}: {launches} launches / {gpu_us:.1} us GPU, {} fusion cuts{}",
+            case.name,
+            precision.1,
+            case.cells(),
+            pv.splits.len(),
+            peak_v.map_or(String::new(), |m| format!(", peak device memory of this process {m} MiB"))
+        );
+        for sp in &pv.splits {
+            println!("  fusion cut: {sp}");
+        }
+        if o.profile {
+            println!("```\n{}```", compact(&pv));
+        }
+        if o.perf {
+            println!(
+                "PERF {{\"case\":\"3d-{}-viscous-residual\",\"precision\":\"{}\",\"cells\":{},\"iters\":1,\"us_per_iter\":{gpu_us:.3},\"launches_per_iter\":{launches},\"gpu_us_per_iter\":{gpu_us:.3},\"wall_s\":null{}}}",
+                case.name,
+                precision.1,
+                case.cells(),
+                peak_v.map_or(String::new(), |m| format!(",\"peak_device_mib\":{m}"))
+            );
+        }
+    }
     Ok(Result3 {
         case: case.name.to_string(),
         cells: case.cells(),
@@ -309,6 +370,7 @@ fn main() -> Result<(), String> {
         profile: !flag("--no-profile"),
         mem: flag("--mem"),
         allow_nonfinite: flag("--allow-nonfinite"),
+        viscous: flag("--viscous"),
         n: value("--n").map(|n| n.parse::<usize>().map_err(|e| format!("--n: {e}"))).transpose()?,
     };
     let mut cases = Vec::new();
@@ -317,7 +379,8 @@ fn main() -> Result<(), String> {
             "wedge" => wedge_case()?,
             "sector" => sector_case(value("--nk").map_or(Ok(18), |v| v.parse::<usize>().map_err(|e| format!("--nk: {e}")))?)?,
             "anf" => anf_case()?,
-            other => return Err(format!("--case wedge|sector|anf|all, got `{other}`")),
+            r if r.starts_with("wedge-rans:") => wedge_rans_case(r[11..].parse::<f64>().map_err(|e| format!("--case wedge-rans:<mach>: {e}"))?)?,
+            other => return Err(format!("--case wedge|sector|anf|wedge-rans:<mach>|all, got `{other}`")),
         });
     }
     if opts.mem && MemSampler::start().map(MemSampler::stop).is_none() {
@@ -353,8 +416,9 @@ fn main() -> Result<(), String> {
                 );
                 if opts.perf {
                     println!(
-                        "PERF {{\"case\":\"3d-{}-euler-{}\",\"precision\":\"{}\",\"cells\":{},\"iters\":{},\"us_per_iter\":{:.3},\"launches_per_iter\":{},\"gpu_us_per_iter\":{:.3},\"wall_s\":null{}}}",
+                        "PERF {{\"case\":\"3d-{}-{}-{}\",\"precision\":\"{}\",\"cells\":{},\"iters\":{},\"us_per_iter\":{:.3},\"launches_per_iter\":{},\"gpu_us_per_iter\":{:.3},\"wall_s\":null{}}}",
                         case.name,
+                        if case.rans.is_some() { "rans" } else { "euler" },
                         r.solve,
                         r.precision,
                         r.cells,

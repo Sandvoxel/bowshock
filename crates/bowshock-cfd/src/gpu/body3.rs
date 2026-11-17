@@ -15,9 +15,10 @@ use crate::solver3::{Config3, Scheme3, Solver3};
 pub type Rec3 = [A; 5];
 /// Three components of a vector field (a face normal).
 pub type Vec3 = [A; 3];
-/// The loop state: the conserved record, the density residual of the step that produced it (one element) and the CFL of the next iteration
-/// (one element; the ramp of the implicit scheme is loop state, the explicit scheme passes it through).
-pub type State3 = [A; 7];
+/// The loop state: the conserved record, the density residual of the step that produced it (one element), the CFL of the next iteration
+/// (one element; the ramp of the implicit scheme is loop state, the explicit scheme passes it through) and the SST scalars `k`, `omega` and the eddy
+/// viscosity `mu_t` (cell arrays of an SST run, one-element placeholders otherwise).
+pub type State3 = [A; 10];
 
 fn rec3(f: impl FnMut(usize) -> A) -> Rec3 {
     std::array::from_fn(f)
@@ -27,15 +28,22 @@ fn unpack3(s: &State3) -> Rec3 {
     rec3(|k| s[k].clone())
 }
 
-fn pack3(u: Rec3, rn: A, cfl: A) -> State3 {
+fn pack3(u: Rec3, rn: A, cfl: A, turb: [A; 3]) -> State3 {
     let [u0, u1, u2, u3, u4] = u;
-    [u0, u1, u2, u3, u4, rn, cfl]
+    let [k, om, mt] = turb;
+    [u0, u1, u2, u3, u4, rn, cfl, k, om, mt]
+}
+
+/// The turbulence part passed on unchanged (a placeholder is a fresh expression so the loop state does not alias).
+fn turb_pass(s: &State3) -> [A; 3] {
+    [&s[7] * c(1.0), &s[8] * c(1.0), &s[9] * c(1.0)]
 }
 
 /// The loop state of host data: the conserved state `u` (cell-major, `Grid3::cell` order), a zero residual and the CFL `cfl`.
 fn upload_state3(ctx: &Context, u: &[Cons3], shape: [usize; 3], cfl: f64) -> Result<State3> {
     let comp = |k: usize| up(ctx, &u.iter().map(|q| q[k]).collect::<Vec<_>>(), shape);
-    Ok([comp(0)?, comp(1)?, comp(2)?, comp(3)?, comp(4)?, up(ctx, &[0.0], 1)?, up(ctx, &[cfl], 1)?])
+    let zero = || up(ctx, &[0.0], 1);
+    Ok([comp(0)?, comp(1)?, comp(2)?, comp(3)?, comp(4)?, zero()?, up(ctx, &[cfl], 1)?, zero()?, zero()?, zero()?])
 }
 
 fn download_state3(s: &State3) -> Result<Vec<Cons3>> {
@@ -470,6 +478,23 @@ pub struct LazySolver3 {
     lg: LGeo3,
     /// The wall faces of the on-device force integration (`set_wall_faces`).
     forces: Option<ForceGeo3>,
+    /// The viscous terms (`viscous3.rs`): the host-built face data; `None` for the Euler equations.
+    visc: Option<VGeo3>,
+    /// The no-slip faces of the viscous force reduction.
+    traction: Option<TractionGeo3>,
+    /// The SST model of a viscous run (`rans3.rs`); `None`: laminar or Euler.
+    turb: Option<TurbRun3>,
+    /// The per-cell update mask on the host (set-up of the turbulence state).
+    solid_host: Vec<bool>,
+    /// Back pressure of the `i = ni` static-pressure outflow of a viscous run (`RansOpts3::pressure_outflow`); `None`: the characteristic ghost.
+    p_out: Option<f64>,
+    /// The runs of columns `i` of `j = 0` that are the no-slip body surface of a viscous run (`Grid3::wall_j0`; the axis columns excluded): the ghost layers there are the
+    /// no-slip ghost, not the mirror image (`Solver3::fill_ghosts`).
+    wall_j0: Vec<std::ops::Range<usize>>,
+    /// The same columns as a mask `[ni, 1, nk]` for the ghost Jacobian of the left-hand side (`None` without any).
+    wall_j0_cols: Option<Array<bool>>,
+    /// `(sin, cos)` of half the wedge angle in a viscous wedge run: the azimuthal momentum of the residual is projected out (`Solver3::add_viscous_residual`).
+    swirl: Option<(f64, f64)>,
 }
 
 impl LazySolver3 {
@@ -566,6 +591,14 @@ impl LazySolver3 {
             k_src: wedge,
             lg,
             forces: None,
+            visc: None,
+            traction: None,
+            turb: None,
+            solid_host: solid,
+            p_out: None,
+            wall_j0: Vec::new(),
+            wall_j0_cols: None,
+            swirl: None,
         };
         let q = prim_to_cons3(&cfg.freestream);
         s.set_state(&vec![q; nc])?;
@@ -575,6 +608,13 @@ impl LazySolver3 {
     /// A lazy solver in the state of a host solver: grid, config, conserved state and iteration count.
     pub fn from_host(ctx: &Context, s: &Solver3) -> Result<LazySolver3> {
         let mut l = LazySolver3::new(ctx, &s.grid, &s.cfg)?;
+        l.set_viscous_from_host(s)?;
+        if l.visc.is_some() && matches!(s.cfg.scheme, Scheme3::Implicit(p) if p.line_solve == crate::implicit::LineSolve3::DiagonalCorrected) {
+            return Err(luma::LumaError::Unsupported("the diagonal line solve of a viscous run is not ported (use LineSolve3::Block)".into()));
+        }
+        if matches!(s.cfg.scheme, Scheme3::Implicit(p) if p.low_mach_precond && p.line_solve == crate::implicit::LineSolve3::DiagonalCorrected) {
+            return Err(luma::LumaError::Unsupported("the diagonal line solve with the low-Mach preconditioning is not ported (it stalls on the CPU too: use LineSolve3::Block)".into()));
+        }
         l.set_state(&s.u)?;
         l.iter = s.iter;
         Ok(l)
@@ -621,7 +661,16 @@ impl LazySolver3 {
 
     /// Overwrites the conserved state and restarts the iteration counter and the CFL ramp.
     pub fn set_state(&mut self, u: &[Cons3]) -> Result<()> {
-        self.state = Some(upload_state3(&self.ctx, u, [self.ni, self.nj, self.nk], self.cfl_start())?);
+        let mut s = upload_state3(&self.ctx, u, [self.ni, self.nj, self.nk], self.cfl_start())?;
+        // an SST run restarts `k`, `omega`, `mu_t` at the free stream (the host `turbulence3::init`); the other runs carry three one-element placeholders
+        if let Some(t) = &self.turb {
+            let (turb, mu_t) = t.init_host(&self.solid_host, self.cfg.freestream[0]);
+            let shape = [self.ni, self.nj, self.nk];
+            s[7] = up(&self.ctx, &turb.iter().map(|x| x[0]).collect::<Vec<_>>(), shape)?;
+            s[8] = up(&self.ctx, &turb.iter().map(|x| x[1]).collect::<Vec<_>>(), shape)?;
+            s[9] = up(&self.ctx, &mu_t, shape)?;
+        }
+        self.state = Some(s);
         self.iter = 0;
         Ok(())
     }
@@ -713,7 +762,18 @@ impl LazySolver3 {
         let edge_lo = rec3(|f| p[f].pad([(2, 0)], PadMode::Edge).slice(0, 0..2));
         w.slice_mut(0, ..2).slice(1, 2..nj + 2).slice(2, 2..nk + 2).assign(characteristic_ghost3(&fs, &edge_lo, &g.imin)).expect(ok);
         let edge_hi = rec3(|f| p[f].pad([(0, 2)], PadMode::Edge).slice(0, ni..ni + 2));
-        w.slice_mut(0, ni + 2..).slice(1, 2..nj + 2).slice(2, 2..nk + 2).assign(characteristic_ghost3(&fs, &edge_hi, &g.imax)).expect(ok);
+        // a viscous run: the static-pressure outflow at `i = ni` (`bc3::pressure_outflow_ghost3`; the characteristic ghost would impose the free-stream normal
+        // velocity on the boundary layer), subsonic faces take `rho, u, v, w` from the cell and `p = p_back`, supersonic faces extrapolate
+        let ghost_hi = match self.p_out {
+            Some(pb) => {
+                let un = &edge_hi[1] * &g.imax[0] + &edge_hi[2] * &g.imax[1] + &edge_hi[3] * &g.imax[2];
+                let ci = (c(GAMMA) * &edge_hi[4] / &edge_hi[0]).sqrt();
+                let sub = (&un / &ci).lt(c(1.0));
+                rec3(|k| if k == 4 { select(&sub, c(pb), &edge_hi[4]) } else { edge_hi[k].clone() })
+            }
+            None => characteristic_ghost3(&fs, &edge_hi, &g.imax),
+        };
+        w.slice_mut(0, ni + 2..).slice(1, 2..nj + 2).slice(2, 2..nk + 2).assign(ghost_hi).expect(ok);
 
         // j = nj: characteristic far field
         let edge_top = rec3(|f| p[f].pad([(0, 0), (0, 2)], PadMode::Edge).slice(1, nj..nj + 2));
@@ -735,10 +795,25 @@ impl LazySolver3 {
             ];
             w.slice_mut(0, 2 + run.i0..2 + run.i1).slice(1, run.j..run.j + 2).slice(2, 2..nk + 2).assign(ghost).expect(ok);
         }
-        // the rest of j = 0: slip wall
+        // the rest of j = 0: slip wall, except the columns of `Grid3::wall_j0` of a viscous run (the body surface: the no-slip ghost `(rho, -u, -v, -w, p)`)
         for (i0, i1, n) in &g.slip {
-            let mirror = rec3(|f| p[f].pad([(0, 0), (2, 0)], PadMode::Mirror).slice(1, 0..2).slice(0, *i0..*i1));
-            w.slice_mut(0, 2 + i0..2 + i1).slice(1, 0..2).slice(2, 2..nk + 2).assign(reflect3(&mirror, n)).expect(ok);
+            let mut cuts = vec![*i0, *i1];
+            for r in &self.wall_j0 {
+                cuts.extend([r.start, r.end].into_iter().filter(|b| b > i0 && b < i1));
+            }
+            cuts.sort_unstable();
+            cuts.dedup();
+            for seg in cuts.windows(2) {
+                let (a, b) = (seg[0], seg[1]);
+                let mirror = rec3(|f| p[f].pad([(0, 0), (2, 0)], PadMode::Mirror).slice(1, 0..2).slice(0, a..b));
+                let ghost = if self.visc.is_some() && self.wall_j0.iter().any(|r| r.contains(&a)) {
+                    [mirror[0].clone(), -&mirror[1], -&mirror[2], -&mirror[3], mirror[4].clone()]
+                } else {
+                    let nn: Vec3 = std::array::from_fn(|q| n[q].slice(0, a - i0..b - i0));
+                    reflect3(&mirror, &nn)
+                };
+                w.slice_mut(0, 2 + a..2 + b).slice(1, 0..2).slice(2, 2..nk + 2).assign(ghost).expect(ok);
+            }
         }
 
         // k = 0 and k = nk: symmetry planes
@@ -767,9 +842,9 @@ impl LazySolver3 {
     /// dU/dt = -(1/V) sum_faces S F.n        dt = cfl V / (1/2 sum_faces (|u.n| + c) S)        (zero in solid cells)
     /// ```
     pub fn eval_residual(&self, u: &Rec3, lim: Limiter, compute_dt: bool) -> (Rec3, Option<A>) {
-        let (p, w) = self.padded3(u);
-        let f = self.face_fluxes3(&w, lim);
-        self.cell_residual3(&p, &f, compute_dt)
+        let mu_t = self.state_mu_t();
+        let r = self.residual3(u, mu_t.as_ref(), lim, compute_dt);
+        (r.res, r.dt)
     }
 
     /// Step 1 of `eval_residual`: the primitives `p = cons_to_prim3(u)` and the padded primitives `w` with the ghosts (the `Staging` cache applied).
@@ -861,12 +936,12 @@ impl LazySolver3 {
         let n_next: Vec3 = std::array::from_fn(|q| shifted(q, 2));
         let (wm2, wm1, wp0, wp1) =
             (Self::stencil3(w, dir, 0, lo, hi), Self::stencil3(w, dir, 1, lo, hi), Self::stencil3(w, dir, 2, lo, hi), Self::stencil3(w, dir, 3, lo, hi));
-        let (r_p0, r_p1) = (reflect3(&wp0, &n), reflect3(&wp1, &n));
-        let (r_m1, r_m2) = (reflect3(&wm1, &n), reflect3(&wm2, &n));
+        let (r_p0, r_p1) = (self.wall_ghost3(&wp0, &n), self.wall_ghost3(&wp1, &n));
+        let (r_m1, r_m2) = (self.wall_ghost3(&wm1, &n), self.wall_ghost3(&wm2, &n));
         let m1 = select3(&sf.ma, &r_p0, &wm1);
-        let m2 = select3(&sf.ma, &select3(&sf.mc, &r_p0, &r_p1), &select3(&sf.m2s, &reflect3(&wm1, &n_prev), &wm2));
+        let m2 = select3(&sf.ma, &select3(&sf.mc, &r_p0, &r_p1), &select3(&sf.m2s, &self.wall_ghost3(&wm1, &n_prev), &wm2));
         let p0 = select3(&sf.mb, &r_m1, &wp0);
-        let p1 = select3(&sf.mb, &select3(&sf.md, &r_m1, &r_m2), &select3(&sf.m1s, &reflect3(&wp0, &n_next), &wp1));
+        let p1 = select3(&sf.mb, &select3(&sf.md, &r_m1, &r_m2), &select3(&sf.m1s, &self.wall_ghost3(&wp0, &n_next), &wp1));
         let flux = face_flux_lm3(&m2, &m1, &p0, &p1, lim, &n, &rot, self.cfg.low_mach, split);
         let flux = rec3(|k| select(&sf.z, c(0.0), &flux[k]));
         let mut dest = f.slice_mut(0, lo[0]..hi[0]).slice(1, lo[1]..hi[1]).slice(2, lo[2]..hi[2]);
@@ -875,7 +950,7 @@ impl LazySolver3 {
 
     /// Steps 4 and 5 of `eval_residual`: the cell residual and the time step from the face fluxes `f = [fi, fj, fk]` and the primitives `p`; both are
     /// zero in solid cells (selects, so nothing computed inside the solid reaches the state or the residual norm).
-    fn cell_residual3(&self, p: &Rec3, f: &[Rec3; 3], compute_dt: bool) -> (Rec3, Option<A>) {
+    fn cell_residual3(&self, p: &Rec3, f: &[Rec3; 3], compute_dt: bool, diff: Option<&[A; 3]>) -> (Rec3, Option<A>) {
         let (ni, nj, nk) = (self.ni, self.nj, self.nk);
         let g = &self.geo;
         let (ai, aj, ak) = (&g.f[0].area, &g.f[1].area, &g.f[2].area);
@@ -907,7 +982,15 @@ impl LazySolver3 {
             if !self.no_dt_k {
                 sum = sum + lam(&g.f[2], 2, 0) + lam(&g.f[2], 2, 1);
             }
-            let dt = c(self.cfg.cfl) * &g.vol / (c(0.5) * &sum);
+            // the viscous run adds the diffusive rates `2 lv A^2 / V` of the directions (`compute_dt`: `1 / dt = (sum L + sum d) / (cfl V)`)
+            let mut den = c(0.5) * &sum;
+            if let Some(d) = diff {
+                den = den + &d[0] + &d[1];
+                if !self.no_dt_k {
+                    den += &d[2];
+                }
+            }
+            let dt = c(self.cfg.cfl) * &g.vol / den;
             match &g.fluid {
                 Some(fluid) => select(fluid, dt, c(0.0)),
                 None => dt,
@@ -930,16 +1013,17 @@ impl LazySolver3 {
     /// ```text
     /// u1 = u0 + dt L(u0),   u2 = 3/4 u0 + 1/4 (u1 + dt L(u1)),   u3 = 1/3 u0 + 2/3 (u2 + dt L(u2))
     /// ```
-    fn rk3_3(&self, u0: &Rec3, lim: Limiter) -> (Rec3, A) {
-        let (r0, dt) = self.eval_residual(u0, lim, true);
-        let dt = dt.expect("the residual stage was called with compute_dt = true");
-        let rn = self.residual_norm3(&r0[0]);
-        let u1 = self.keep_solid3(rec3(|k| &u0[k] + &dt * &r0[k]), u0);
-        let r1 = self.eval_residual(&u1, lim, false).0;
-        let u2 = self.keep_solid3(rec3(|k| c(0.25) * (&u1[k] + &dt * &r1[k]) + c(0.75) * &u0[k]), u0);
-        let r2 = self.eval_residual(&u2, lim, false).0;
-        let u3 = self.keep_solid3(rec3(|k| c(2.0 / 3.0) * (&u2[k] + &dt * &r2[k]) + c(1.0 / 3.0) * &u0[k]), u0);
-        (u3, rn)
+    fn rk3_3(&self, u0: &Rec3, mu_t: Option<&A>, lim: Limiter) -> (Rec3, A, A, Resid3) {
+        let r0 = self.residual3(u0, mu_t, lim, true);
+        let dt = r0.dt.clone().expect("the residual stage was called with compute_dt = true");
+        let rn = self.residual_norm3(&r0.res[0]);
+        let u1 = self.keep_solid3(rec3(|k| &u0[k] + &dt * &r0.res[k]), u0);
+        let r1 = self.residual3(&u1, mu_t, lim, false);
+        let u2 = self.keep_solid3(rec3(|k| c(0.25) * (&u1[k] + &dt * &r1.res[k]) + c(0.75) * &u0[k]), u0);
+        let r2 = self.residual3(&u2, mu_t, lim, false);
+        let u3 = self.keep_solid3(rec3(|k| c(2.0 / 3.0) * (&u2[k] + &dt * &r2.res[k]) + c(1.0 / 3.0) * &u0[k]), u0);
+        // the turbulence update reads the last evaluation (`Solver3::turbulence_update` after the stages) and the time step of the first
+        (u3, rn, dt, r2)
     }
 
     fn limiter3(&self, iter: usize) -> Limiter {
@@ -964,8 +1048,10 @@ impl LazySolver3 {
         match self.cfg.scheme {
             Scheme3::Implicit(p) => self.implicit_step3(s, &p, lim),
             Scheme3::Explicit => {
-                let (u, rn) = self.rk3_3(&unpack3(s), lim);
-                pack3(u, rn, &s[6] * c(1.0))
+                let mu_t = self.turb.as_ref().map(|_| s[9].clone());
+                let (u, rn, dt, last) = self.rk3_3(&unpack3(s), mu_t.as_ref(), lim);
+                let turb = self.turb_step3(s, &dt, &last);
+                pack3(u, rn, &s[6] * c(1.0), turb)
             }
         }
     }
@@ -1065,7 +1151,7 @@ impl LazySolver3 {
         let lim = self.cfg.limiter;
         let t0 = std::time::Instant::now();
         for _ in 0..n {
-            std::hint::black_box(self.rk3_3(&u, lim));
+            std::hint::black_box(self.rk3_3(&u, None, lim));
         }
         t0.elapsed().as_secs_f64()
     }

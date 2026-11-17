@@ -109,6 +109,96 @@ fn mv5(a: &[F; 25], x: &V5) -> V5 {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// low-Mach preconditioning (the CPU `crate::lowmach5`; the 2D counterpart is `LmGpu` in `implicit.rs`)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The preconditioning of a run, f32 view of `lowmach5::LowMach`: the lower bound of the reference velocity `U_r` squared.
+#[derive(Clone, Copy)]
+struct LmGpu3 {
+    ur_min2: f32,
+}
+
+/// What a preconditioned step carries: the parameters and the entries of `P` of every cell.
+struct Pc3 {
+    lm: LmGpu3,
+    p: [F; 25],
+}
+
+impl LmGpu3 {
+    /// The preconditioning of the free stream `fs` when `p.low_mach_precond` is set.
+    fn of(p: &ImplicitParams, fs: &[f64; 5]) -> Option<LmGpu3> {
+        crate::lowmach5::LowMach::of(p, fs).map(|l| LmGpu3 { ur_min2: (l.ur_min * l.ur_min) as f32 })
+    }
+
+    /// `U_r^2 = clamp(|u|^2, U_min^2, c^2)` (`U_r = c`, i.e. `P = I`, is reached exactly).
+    fn ur2(&self, q2: &F, c2: &F) -> F {
+        q2.maximum(self.ur_min2).minimum(c2)
+    }
+}
+
+/// `g_0..g_3` of `g = (g - 1)(q^2 / 2, -u, -v, -w, 1)`: `g_4 = g - 1` is a constant.
+fn pressure_row5(u: &F, v: &F, w: &F) -> [F; 4] {
+    let g1 = cf(G1);
+    [0.5f32 * g1 * (u * u + v * v + w * w), -(g1 * u), -(g1 * v), -(g1 * w)]
+}
+
+/// `coef (1, u, v, w, h)`.
+fn scaled_a5(coef: &F, u: &F, v: &F, w: &F, h: &F) -> V5 {
+    [coef.clone(), coef * u, coef * v, coef * w, coef * h]
+}
+
+/// `(I + coef a g^T) X` for `a = (1, u, v, w, h)`, given `ca = coef a`: with `coef = kappa` the matrix `P` applied to `X`, with `coef = -kappa / (1 + kappa c^2)` its
+/// inverse (`g . a = c^2`). Rank one, so `g^T X` is one row of five dot products.
+fn left_rank1_5(x: &Blk5, ca: &V5, g: &[F; 4]) -> Blk5 {
+    let g1 = cf(G1);
+    let row: [E; 5] = std::array::from_fn(|j| x.0[j].scale(&g[0]).add(&x.0[5 + j].scale(&g[1])).add(&x.0[10 + j].scale(&g[2])).add(&x.0[15 + j].scale(&g[3])).add(&x.0[20 + j].muls(g1)));
+    Blk5(std::array::from_fn(|n| x.0[n].add(&row[n % 5].scale(&ca[n / 5]))))
+}
+
+/// Dissipation matrix `P |P^-1 A|` of the Roe-averaged state (`lowmach5::abs_jacobian_pc3`): `|M|` for `M = P^-1 A` (eigenvalues `a` three times and `u' +- c'`) is the
+/// quadratic polynomial through the entropy-fixed `|a|`, `|u' + c'|`, `|u' - c'|` (Newton form), multiplied by `P` (both `P` and `P^-1` applied as rank-one updates).
+fn abs_jacobian_pc_f5(wl: &V5, wr: &V5, n: &N3, eps_fix: f32, lm: &LmGpu3) -> Blk5 {
+    let (sl, sr) = (wl[0].sqrt(), wr[0].sqrt());
+    let inv = 1.0f32 / (&sl + &sr);
+    let u = (&sl * &wl[1] + &sr * &wr[1]) * &inv;
+    let v = (&sl * &wl[2] + &sr * &wr[2]) * &inv;
+    let w = (&sl * &wl[3] + &sr * &wr[3]) * &inv;
+    let ke = |q: &V5| 0.5f32 * (&q[1] * &q[1] + &q[2] * &q[2] + &q[3] * &q[3]);
+    let hl = cf(GAMMA) * &wl[4] / (cf(G1) * &wl[0]) + ke(wl);
+    let hr = cf(GAMMA) * &wr[4] / (cf(G1) * &wr[0]) + ke(wr);
+    let h = (&sl * &hl + &sr * &hr) * &inv;
+    let q2 = &u * &u + &v * &v + &w * &w;
+    let c2 = (cf(G1) * (&h - 0.5f32 * &q2)).maximum(1e-30f32);
+    let c = c2.sqrt();
+    let ur2 = lm.ur2(&q2, &c2);
+    let a = &u * &n[0] + &v * &n[1] + &w * &n[2];
+    // preconditioned eigenvalue data: b = U_r^2 / c^2, u' = a (1 + b) / 2, c' = sqrt(a^2 (1 - b)^2 + 4 b c^2) / 2
+    let b = &ur2 / &c2;
+    let u1 = 0.5f32 * &a * (1.0f32 + &b);
+    let omb = 1.0f32 - &b;
+    let c1 = 0.5f32 * (&a * &a * &omb * &omb + 4.0f32 * &b * &c2).sqrt();
+    let (l2, l3) = (&u1 + &c1, &u1 - &c1);
+    let eps = eps_fix * &c;
+    let fix = |l: &F| -> F {
+        let al = l.abs();
+        select(&al.ge(&eps), &al, 0.5f32 * (l * l / &eps + &eps))
+    };
+    let (e1, e2, e3) = (fix(&a), fix(&l2), fix(&l3));
+    let d1 = (&e2 - &e1) / (&l2 - &a);
+    let d2 = ((&e3 - &e1) / (&l3 - &a) - &d1) / (&l3 - &l2);
+    let am = flux_jacobian_h5(&u, &v, &w, &h, n);
+    let kappa = kappa_f(&ur2, &c2);
+    let g = pressure_row5(&u, &v, &w);
+    let ca_p = scaled_a5(&kappa, &u, &v, &w, &h);
+    let ca_inv = scaled_a5(&(-&kappa / (1.0f32 + &kappa * &c2)), &u, &v, &w, &h);
+    let m = left_rank1_5(&am, &ca_inv, &g);
+    let (b1, b2) = (m.sub_diag(&a), m.sub_diag(&l2));
+    let prod = b1.mm(&b2);
+    let pm = b1.scale(&d1).add(&prod.scale(&d2)).add_diag(&e1);
+    left_rank1_5(&pm, &ca_p, &g)
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // gas, flux Jacobian, dissipation
 // ---------------------------------------------------------------------------------------------------------------------
 
@@ -213,11 +303,25 @@ fn abs_jacobian_f5(wl: &V5, wr: &V5, n: &N3, eps_fix: f32) -> Blk5 {
 
 /// Dissipation matrix of the face between the states `l` and `r`: Roe-type `|A|` blended with the scalar Rusanov `lambda I`, `lambda = max(|u_n| + c)`
 /// of the two states, by the shock weight `t` (`(1 - t) |A| + t lambda I`); `roe = false`: `lambda I` alone.
-fn dissipation_f5(l: &V5, r: &V5, n: &N3, p: &ImplicitParams) -> Blk5 {
+fn dissipation_f5(l: &V5, r: &V5, n: &N3, p: &ImplicitParams, lm: Option<&LmGpu3>) -> Blk5 {
+    if let Some(lm) = lm {
+        return dissipation_pc_f5(l, r, n, p, lm);
+    }
     let lam = spectral_f5(l, n).maximum(spectral_f5(r, n));
     if p.roe {
         let t = shock_weight_f(&l[4], &r[4]);
         abs_jacobian_f5(l, r, n, cf(p.eps_fix)).scale(&(1.0f32 - &t)).add_diag(&(&t * &lam))
+    } else {
+        Blk5::zero().add_diag(&lam)
+    }
+}
+
+/// [`dissipation_f5`] with the low-Mach preconditioning: `P |P^-1 A|` (`lowmach5::abs_jacobian_pc3`) blended with the plain Rusanov `lambda I` of the right-hand side.
+fn dissipation_pc_f5(l: &V5, r: &V5, n: &N3, p: &ImplicitParams, lm: &LmGpu3) -> Blk5 {
+    let lam = spectral_f5(l, n).maximum(spectral_f5(r, n));
+    if p.roe {
+        let t = shock_weight_f(&l[4], &r[4]);
+        abs_jacobian_pc_f5(l, r, n, cf(p.eps_fix), lm).scale(&(1.0f32 - &t)).add_diag(&(&t * &lam))
     } else {
         Blk5::zero().add_diag(&lam)
     }
@@ -420,6 +524,8 @@ struct Factor3 {
     fr: [F; 25],
     s_l: F,
     s_u: F,
+    /// The states of the two end cells of the lines (`m = 0`, `m = n - 1`, `[1, ..]` slices): the ghost Jacobians of the line ends depend on them (the outflow).
+    edge: [V5; 2],
 }
 
 /// Roe-averaged entropy-fixed `|u_n|, |u_n + c|, |u_n - c|` of the face states `wl`, `wr` (the eigenvalues of [`abs_jacobian_f5`]).
@@ -529,12 +635,40 @@ impl LazySolver3 {
     /// matter); the characteristic far field (the i ends and the `j = nj` end) a frozen ghost, `T = 0`, as on the CPU: the f32 finite-difference
     /// Jacobian at the kink of the characteristic branch switch destabilised the left-hand side at CFL ~ 6 (ANF M 2.48 nk 48 froze).
     /// `ImplicitParams::implicit_bc = false` freezes the wall ghosts too.
-    fn ghost_jacobian3(&self, dir: usize, lower: bool, _edge: &V5, p: &ImplicitParams) -> Tj5 {
+    fn ghost_jacobian3(&self, dir: usize, lower: bool, edge: &V5, p: &ImplicitParams) -> Tj5 {
         if !p.implicit_bc {
             return Tj5::Zero;
         }
         let e = &self.lg.edge[dir][!lower as usize];
-        if (dir == 1 && lower) || dir == 2 {
+        // a viscous run: the static-pressure outflow at `i = ni` (`implicit3::pressure_outflow_t`): the ghost of a subsonic face is
+        // `(rho, rho u, rho v, rho w, p_b / (gamma - 1) + rho |u|^2 / 2)`, the cell itself on a supersonic face
+        if dir == 0 && !lower && self.p_out.is_some() {
+            let un = &edge[1] * &e.raw[0] + &edge[2] * &e.raw[1] + &edge[3] * &e.raw[2];
+            let sup = un.ge((cf(GAMMA) * &edge[4] / &edge[0]).sqrt());
+            let mut m = Blk5::eye();
+            let q2 = &edge[1] * &edge[1] + &edge[2] * &edge[2] + &edge[3] * &edge[3];
+            let (z, one) = (0.0f32 * &q2, 1.0f32 + 0.0f32 * &q2);
+            m.0[24] = E::A(select(&sup, &one, &z));
+            m.0[20] = E::A(select(&sup, &z, -0.5f32 * &q2));
+            for a in 0..3 {
+                m.0[21 + a] = E::A(select(&sup, &z, &edge[1 + a]));
+            }
+            return Tj5::Mat(m);
+        }
+        if dir == 1 && lower {
+            // a viscous run: the columns of `Grid3::wall_j0` are the no-slip wall (`diag(1, -1, -1, -1, 1)`), the others the reflection (`implicit3::assemble3`)
+            let refl = reflection_f3(&e.raw);
+            return Tj5::Mat(match (&self.wall_j0_cols, self.visc.is_some()) {
+                (Some(cols), true) => {
+                    let (z, one) = (0.0f32 * &edge[0], 1.0f32 + 0.0f32 * &edge[0]);
+                    let noslip = self.wall_jac_f3(&e.raw, &one);
+                    let (r, nsl) = (refl.dense(&z, &one), noslip.dense(&z, &one));
+                    Blk5::of(&std::array::from_fn(|k| select(cols, &nsl[k], &r[k])))
+                }
+                _ => refl,
+            });
+        }
+        if dir == 2 {
             return Tj5::Mat(reflection_f3(&e.raw));
         }
         Tj5::Zero
@@ -552,17 +686,27 @@ impl LazySolver3 {
     /// Local pseudo-time step from the cell primitives `wk` (f32): `dt = cfl V / (L_i + L_j + L_k)` (`DtMode::Sum`) or `cfl V / (3 min(L_i, L_j, L_k))`
     /// (`DtMode::MinDirection`), `L_d` = half the sum of `(|u.n| + c) S` over the two faces of direction `d`. `cfl` is the one-element array of the
     /// loop state. Zero in solid cells. `no_dt_k`: `L_k` is left out (`L_i + L_j`, or `2 min(L_i, L_j)`).
-    fn pseudo_dt3(&self, wk: &V5, cfl: &F, mode: DtMode) -> F {
+    fn pseudo_dt3(&self, wk: &V5, cfl: &F, mode: DtMode, diff: Option<&[F; 3]>, lm: Option<&LmGpu3>) -> F {
         let g = &self.lg;
         let dims = self.dims3();
-        let cs = (cf(GAMMA) * &wk[4] / &wk[0]).sqrt();
+        let c2 = cf(GAMMA) * &wk[4] / &wk[0];
+        let cs = c2.sqrt();
+        // low-Mach: `|u'| + c'` of the state, `b = U_r^2 / c^2`, `u' = u_n (1 + b) / 2`, `c' = sqrt(u_n^2 (1 - b)^2 + 4 b c^2) / 2` (`lowmach5::spectral_pc3`)
+        let b = lm.map(|l| l.ur2(&(&wk[1] * &wk[1] + &wk[2] * &wk[2] + &wk[3] * &wk[3]), &c2) / &c2);
         let lam = |dir: usize, upper: bool| -> F {
             let d = &g.dir[dir];
             let r = if upper { 1..dims[dir] + 1 } else { 0..dims[dir] };
             let s = |a: &F| a.slice(dir, r.clone());
-            ((&wk[1] * s(&d.n[0]) + &wk[2] * s(&d.n[1]) + &wk[3] * s(&d.n[2])).abs() + &cs) * s(&d.area)
+            let un = &wk[1] * s(&d.n[0]) + &wk[2] * s(&d.n[1]) + &wk[3] * s(&d.n[2]);
+            match &b {
+                None => (un.abs() + &cs) * s(&d.area),
+                Some(b) => {
+                    let omb = 1.0f32 - b;
+                    ((0.5f32 * &un * (1.0f32 + b)).abs() + 0.5f32 * (&un * &un * &omb * &omb + 4.0f32 * b * &c2).sqrt()) * s(&d.area)
+                }
+            }
         };
-        let l: Vec<F> = (0..if self.no_dt_k { 2 } else { 3 }).map(|dir| 0.5f32 * (lam(dir, false) + lam(dir, true))).collect();
+        let l: Vec<F> = (0..if self.no_dt_k { 2 } else { 3 }).map(|dir| 0.5f32 * (lam(dir, false) + lam(dir, true)) + diff.map_or_else(|| 0.0f32 * &g.one, |d| d[dir].clone())).collect();
         let dt = match (mode, l.as_slice()) {
             (DtMode::Sum, [a, b, c]) => cfl * &g.vol / (a + b + c),
             (DtMode::Sum, [a, b]) => cfl * &g.vol / (a + b),
@@ -576,6 +720,26 @@ impl LazySolver3 {
         }
     }
 
+    /// The entries of `P = I + kappa a g^T` of every cell (the identity in solid cells) from the f32 cell primitives `wk` (`LowMach::p_matrix`; `kappa = 0`, i.e.
+    /// `P = I`, where `U_r = c`).
+    fn p_cells3(&self, wk: &V5, lm: &LmGpu3) -> [F; 25] {
+        let [rho, u, v, w, p] = wk;
+        let c2 = cf(GAMMA) * p / rho;
+        let q2 = u * u + v * v + w * w;
+        let kappa = kappa_f(&lm.ur2(&q2, &c2), &c2);
+        let h = cf(GAMMA) * p / (cf(G1) * rho) + 0.5f32 * &q2;
+        let g = pressure_row5(u, v, w);
+        let ca = scaled_a5(&kappa, u, v, w, &h);
+        // the identity as arrays: the constant entries of `Blk5::eye` cannot be scaled (`E::muls`)
+        let eye = Blk5::of(&Blk5::eye().dense(&self.lg.zero, &self.lg.one));
+        let dense = left_rank1_5(&eye, &ca, &g).dense(&self.lg.zero, &self.lg.one);
+        let dense: [F; 25] = match &self.lg.solid {
+            Some(solid) => std::array::from_fn(|k| select(solid, if k % 6 == 0 { 1.0f32 } else { 0.0f32 }, &dense[k])),
+            None => dense,
+        };
+        dense.cache()
+    }
+
     /// The states below / above every face of direction `dir` (`[.., n + 1, ..]` arrays), from the padded primitives `wf` (two ghost layers; ghost states
     /// at the line ends); at a face of a solid box the solid side is the reflection of the fluid side.
     fn face_states3(&self, wf: &V5, dir: usize) -> (V5, V5) {
@@ -586,7 +750,7 @@ impl LazySolver3 {
         let (l, r): (V5, V5) = (v5(|k| line[k].slice(dir, 1..n + 2)), v5(|k| line[k].slice(dir, 2..n + 3)));
         match (&dg.wall_l, &dg.wall_r) {
             (Some(wl), Some(wr)) => {
-                let (r_of_r, r_of_l) = (reflect_f3(&r, &dg.n), reflect_f3(&l, &dg.n));
+                let (r_of_r, r_of_l) = (self.wall_ghost_f3(&r, &dg.n), self.wall_ghost_f3(&l, &dg.n));
                 (v5(|k| select(wl, &r_of_r[k], &l[k])), v5(|k| select(wr, &r_of_l[k], &r[k])))
             }
             _ => (l, r),
@@ -604,14 +768,20 @@ impl LazySolver3 {
     ///
     /// The first / last cell of a line folds `lo T` / `up T` into `d` (`T` from [`LazySolver3::ghost_jacobian3`]), a fluid cell next to a solid cell folds
     /// `lo R` / `up R` (`R` the reflection about that face), and both drop `lo` / `up`. Solid cells: `d = I`, `lo = up = 0`. `lines = false`: point-implicit.
-    fn factor3(&self, wf: &V5, wk: &V5, dt: &F, p: &ImplicitParams, dir: usize) -> Factor3 {
+    fn factor3(&self, wf: &V5, wk: &V5, dt: &F, p: &ImplicitParams, dir: usize, lam: Option<&[F; 3]>, pc: Option<&Pc3>) -> Factor3 {
+        let edge = |at: std::ops::Range<usize>| -> V5 { v5(|k| wk[k].slice(dir, at.clone())) };
         let g = &self.lg;
         let dg = &g.dir[dir];
         let dims = self.dims3();
         let n = dims[dir];
 
         let (l, r) = self.face_states3(wf, dir);
-        let dis = dissipation_f5(&l, &r, &dg.n, p);
+        let dis = dissipation_f5(&l, &r, &dg.n, p, pc.map(|c| &c.lm));
+        // a viscous run: `2 lam_f I` on the dissipation of every face (`lam_f` the diffusive spectral radius of the face)
+        let dis = match lam {
+            Some(l) => dis.add_diag(&(2.0f32 * &l[dir])),
+            None => dis,
+        };
         let fl = flux_jacobian_f5(&l, &dg.n).add(&dis);
         let fr = flux_jacobian_f5(&r, &dg.n).sub(&dis);
         // evaluate the face matrices once: the cell blocks read each of them at two cells
@@ -621,7 +791,8 @@ impl LazySolver3 {
         // cell blocks
         let s = 0.5f32 * dt / &g.vol;
         let (s_l, s_u) = (&s * dg.area.slice(dir, 0..n), &s * dg.area.slice(dir, 1..n + 1));
-        let mut d = Blk5::eye().add(&fl.slice(dir, 1..n + 1).scale(&s_u)).sub(&fr.slice(dir, 0..n).scale(&s_l));
+        let pmat = pc.map_or_else(Blk5::eye, |c| Blk5::of(&c.p));
+        let mut d = pmat.add(&fl.slice(dir, 1..n + 1).scale(&s_u)).sub(&fr.slice(dir, 0..n).scale(&s_l));
         // the wedge's point-implicit pressure Jacobian (`implicit3::assemble3`, `if wedge && dir == 1`; the 2D `cell_blocks` `src`): the pressure of the k faces is the
         // radial-momentum source `-(1/V) (A1 n1 - A0 n0) p`, so `d_{(r + 1) q} += dt/V (A1 n1[r] - A0 n0[r]) dp[q]`, `dp = (g - 1) (|u|^2 / 2, -u, -v, -w, 1)`
         let src = if dir == 1 && self.k_src {
@@ -644,14 +815,13 @@ impl LazySolver3 {
 
         if p.lines {
             // ends of the lines: fold `lo T` / `up T` into `d`
-            let edge = |at: std::ops::Range<usize>| -> V5 { v5(|k| wk[k].slice(dir, at.clone())) };
             let (t_lo, t_hi) = (self.ghost_jacobian3(dir, true, &edge(0..1), p), self.ghost_jacobian3(dir, false, &edge(n - 1..n), p));
             let folds = [times_t5(&lo.slice(dir, 0..1), &t_lo), times_t5(&up.slice(dir, n - 1..n), &t_hi)];
             let (z, o) = (g.zero.slice(dir, 0..1), g.one.slice(dir, 0..1));
             // a fluid cell next to a solid cell sees the wall: `T` = the reflection about the face towards the solid cell
             let walls = [
-                dg.lower_solid.as_ref().map(|m| (m, lo.mm(&reflection_f3(&std::array::from_fn(|q| dg.n[q].slice(dir, 0..n)))))),
-                dg.upper_solid.as_ref().map(|m| (m, up.mm(&reflection_f3(&std::array::from_fn(|q| dg.n[q].slice(dir, 1..n + 1)))))),
+                dg.lower_solid.as_ref().map(|m| (m, lo.mm(&self.wall_jac_f3(&std::array::from_fn(|q| dg.n[q].slice(dir, 0..n)), &dg.one.slice(dir, 0..n))))),
+                dg.upper_solid.as_ref().map(|m| (m, up.mm(&self.wall_jac_f3(&std::array::from_fn(|q| dg.n[q].slice(dir, 1..n + 1)), &dg.one.slice(dir, 1..n + 1))))),
             ];
             let present: [[bool; 25]; 2] = std::array::from_fn(|s| std::array::from_fn(|k| folds[s].as_ref().is_some_and(|b| !matches!(b.0[k], E::Z))));
             let dense: [[F; 25]; 2] = std::array::from_fn(|s| folds[s].as_ref().map_or_else(|| std::array::from_fn(|_| z.clone()), |b| b.dense(&z, &o)));
@@ -696,7 +866,7 @@ impl LazySolver3 {
         // arrays of a direction are never written and read back (the solves cost 7 % more, the three assembly kernels, 0.84 ms, are gone)
         let (z, o) = (&g.zero, &g.one);
         let [lo, d, up] = [lo.dense(z, o), d.dense(z, o), up.dense(z, o)];
-        Factor3 { lo, d, up, fl: fl_faces, fr: fr_faces, s_l, s_u, src }
+        Factor3 { lo, d, up, fl: fl_faces, fr: fr_faces, s_l, s_u, src, edge: [edge(0..1), edge(n - 1..n)] }
     }
 
     /// `x <- (I - dt J_dir)^{-1} x` for every line of direction `dir` (block-tridiagonal solve, `solve_lines3`); the twenty-five block entries and the
@@ -710,17 +880,18 @@ impl LazySolver3 {
     }
 
     /// The approximate factorization `(I - dt J_k)^{-1} (I - dt J_j)^{-1} (I - dt J_i)^{-1} rhs` (wedge mode: without the k factor).
-    fn approx_factor3(&self, fac: &[Factor3], rhs: &V5) -> V5 {
-        self.approx_factor3_parts(fac, rhs).2
+    fn approx_factor3(&self, fac: &[Factor3], rhs: &V5, pm: Option<&[F; 25]>) -> V5 {
+        self.approx_factor3_parts(fac, rhs, pm).2
     }
 
-    /// [`LazySolver3::approx_factor3`] with the intermediates: `(X, Y, dU)`, `X = A_i^{-1} rhs`, `Y = A_j^{-1} X`, `dU = A_k^{-1} Y` (`A_d = I - dt J_d`);
-    /// in wedge mode (`fac` has two factors) `dU = Y`.
-    fn approx_factor3_parts(&self, fac: &[Factor3], rhs: &V5) -> (V5, V5, V5) {
+    /// [`LazySolver3::approx_factor3`] with the intermediates: `(X, Y, dU)`, `X = A_i^{-1} rhs`, `Y = A_j^{-1} P X`, `dU = A_k^{-1} P Y` (`A_d = P - dt J_d`, `P = I`
+    /// without the preconditioning, `pm` the entries of `P`); in wedge mode (`fac` has two factors) `dU = Y`.
+    fn approx_factor3_parts(&self, fac: &[Factor3], rhs: &V5, pm: Option<&[F; 25]>) -> (V5, V5, V5) {
+        let apply_p = |x: &V5| -> V5 { pm.map_or_else(|| x.clone(), |m| mv5(m, x)) };
         let x = self.solve_lines3(&fac[0], 0, rhs);
-        let y = self.solve_lines3(&fac[1], 1, &x);
+        let y = self.solve_lines3(&fac[1], 1, &apply_p(&x));
         let du = match fac.get(2) {
-            Some(f) => self.solve_lines3(f, 2, &y),
+            Some(f) => self.solve_lines3(f, 2, &apply_p(&y)),
             None => y.clone(),
         };
         (x, y, du)
@@ -739,7 +910,7 @@ impl LazySolver3 {
         let n = self.dims3()[dir];
         let (zero, one) = (g.zero.slice(dir, 0..1), g.one.slice(dir, 0..1));
         let end = |lower: bool| -> V5 {
-            match self.ghost_jacobian3(dir, lower, z, p) {
+            match self.ghost_jacobian3(dir, lower, &fac.edge[!lower as usize], p) {
                 Tj5::Mat(t) => {
                     let e: V5 = v5(|k| if lower { z[k].slice(dir, 0..1) } else { z[k].slice(dir, n - 1..n) });
                     mv5(&t.dense(&zero, &one), &e)
@@ -752,7 +923,7 @@ impl LazySolver3 {
         let zr: V5 = v5(|k| luma::concat(dir, [&z[k], &hi_end[k]]));
         let (zl, zr) = match (&dg.wall_l, &dg.wall_r) {
             (Some(wl), Some(wr)) => {
-                let (r_of_r, r_of_l) = (reflect_f3(&zr, &dg.n), reflect_f3(&zl, &dg.n));
+                let (r_of_r, r_of_l) = (self.wall_ghost_f3(&zr, &dg.n), self.wall_ghost_f3(&zl, &dg.n));
                 (v5(|k| select(wl, &r_of_r[k], &zl[k])), v5(|k| select(wr, &r_of_l[k], &zr[k])))
             }
             _ => (zl, zr),
@@ -874,7 +1045,7 @@ impl LazySolver3 {
         let dfac: Vec<DiagFac3> = (0..nd).map(|dir| self.diag_factor3(wf, wk, dt, p, dir)).collect();
         let du0 = self.diag_af3(&dfac, b);
         let du0 = v5(|k| du0[k].clone()).cache();
-        let fac: Vec<Factor3> = (0..nd).map(|dir| self.factor3(wf, wk, dt, p, dir)).collect();
+        let fac: Vec<Factor3> = (0..nd).map(|dir| self.factor3(wf, wk, dt, p, dir, None, None)).collect();
         let nz: Vec<V5> = (0..nd).map(|dir| self.n_apply3(&fac[dir], dir, &du0, p)).collect();
         let r: V5 = v5(|k| nz.iter().fold(&b[k] - &du0[k], |acc, z| acc - &z[k]));
         let corr = self.diag_af3(&dfac, &r.cache());
@@ -910,24 +1081,40 @@ impl LazySolver3 {
     /// products but from the intermediates of the solve, `r = N_i (X - dU) + N_j (Y - dU)` (see [`LazySolver3::n_apply3`]).
     fn implicit_step3(&self, s: &State3, p: &ImplicitParams, lim: Limiter) -> State3 {
         let u = unpack3(s);
-        let (prim, w) = self.padded3(&u);
-        let f = self.face_fluxes3(&w, lim);
-        let (r0, _) = self.cell_residual3(&prim, &f, false);
+        let mu_t = self.turb.as_ref().map(|_| s[9].clone());
+        let rs = self.residual3(&u, mu_t.as_ref(), lim, false);
+        let (prim, w, r0) = (&rs.p, &rs.w, &rs.res);
         let rn = self.residual_norm3(&r0[0]);
 
         // the f32 left-hand side: primitives with ghosts, pseudo-time step, factors
-        let wf: V5 = Self::lhs_rec3(&w).cache();
+        let wf: V5 = Self::lhs_rec3(w).cache();
+        // low-Mach preconditioning (`ImplicitParams::low_mach_precond`, the CPU `implicit3::step`): `P` of every cell from the f32 primitives
+        let pc: Option<Pc3> = LmGpu3::of(p, &self.cfg.freestream).map(|lm| {
+            let wk: V5 = v5(|k| wf[k].slice(0, 2..self.ni + 2).slice(1, 2..self.nj + 2).slice(2, 2..self.nk + 2));
+            Pc3 { p: self.p_cells3(&wk, &lm), lm }
+        });
         let wk: V5 = v5(|k| wf[k].slice(0, 2..self.ni + 2).slice(1, 2..self.nj + 2).slice(2, 2..self.nk + 2));
         let cfl = lhs(&s[6]);
-        let dt = self.pseudo_dt3(&wk, &cfl, p.dt_mode).cache();
+        // a viscous run: the diffusive rates of the directions in the time step and the diffusive spectral radius of every face in the dissipation
+        let (diff, lam): (Option<[F; 3]>, Option<[F; 3]>) = match (&self.visc, &rs.vis) {
+            (Some(vg), Some(vis)) => {
+                let d = self.diffusion_rates3(&vis.cell, &vis.mu_t, &prim[0]);
+                let lam = self.lambda_pass3(vg, w, &vis.cell, &vis.mu_t, vis.wall.as_ref().map(|w| &w[2]));
+                (Some(std::array::from_fn(|k| lhs(&d[k]).cache())), Some(std::array::from_fn(|k| lhs(&lam[k]).cache())))
+            }
+            _ => (None, None),
+        };
+        let dt = self.pseudo_dt3(&wk, &cfl, p.dt_mode, diff.as_ref(), pc.as_ref().map(|c| &c.lm)).cache();
         let b: V5 = v5(|k| &lhs(&r0[k]) * &dt);
+        let lam = lam.as_ref();
         let du = match p.line_solve {
             LineSolve3::DiagonalCorrected => self.diag_du3(&wf, &wk, &dt, p, &b),
             LineSolve3::Block => {
                 let nd = self.n_dirs3();
-                let fac: Vec<Factor3> = (0..nd).map(|dir| self.factor3(&wf, &wk, &dt, p, dir)).collect();
+                let fac: Vec<Factor3> = (0..nd).map(|dir| self.factor3(&wf, &wk, &dt, p, dir, lam, pc.as_ref())).collect();
+                let pm = pc.as_ref().map(|c| &c.p);
                 // right-hand side and defect correction
-                let (x, y, mut du) = self.approx_factor3_parts(&fac, &b);
+                let (x, y, mut du) = self.approx_factor3_parts(&fac, &b, pm);
                 let mut passes = 1;
                 if p.lines && p.sub_iters >= 2 {
                     // the first defect, from the intermediates of the solve: `r = N_i (X - dU) + N_j (Y - dU)` (wedge mode: `Y = dU`, so `r = N_i (X - dU)`)
@@ -938,15 +1125,19 @@ impl LazySolver3 {
                     } else {
                         ni_
                     };
-                    let corr = self.approx_factor3(&fac, &r.cache());
+                    let corr = self.approx_factor3(&fac, &r.cache(), pm);
                     du = v5(|k| &du[k] + &corr[k]);
                     passes = 2;
                 }
                 for _ in passes..p.sub_iters.max(1) {
-                    // `r = b - (A_i + A_j + A_k - 2 I) du` (two factors: `A_i + A_j - I`)
+                    // `r = b - (A_i + A_j + A_k - 2 P) du` (two factors: `A_i + A_j - P`), `P = I` without the preconditioning
                     let a: Vec<V5> = (0..nd).map(|dir| self.apply_factor3(&fac[dir], dir, &du)).collect();
-                    let r: V5 = v5(|k| &b[k] - (a.iter().fold(&du[k] * -((nd - 1) as f32), |acc, x| acc + &x[k])));
-                    let corr = self.approx_factor3(&fac, &r.cache());
+                    let pdu: Option<V5> = pm.map(|m| mv5(m, &du).cache());
+                    let r: V5 = v5(|k| {
+                        let pk = pdu.as_ref().map_or_else(|| du[k].clone(), |p| p[k].clone());
+                        &b[k] - (a.iter().fold(&pk * -((nd - 1) as f32), |acc, x| acc + &x[k]))
+                    });
+                    let corr = self.approx_factor3(&fac, &r.cache(), pm);
                     du = v5(|k| &du[k] + &corr[k]);
                 }
                 du
@@ -962,6 +1153,7 @@ impl LazySolver3 {
         let alpha = from_lhs(&alpha);
         let un: Rec3 = rec3(|k| select(&moved, &u[k] + &alpha * from_lhs(&du[k]), &u[k]));
         let cfl_next = (&s[6] * c(p.growth)).minimum(c(p.cfl_max));
-        pack3(un, rn, cfl_next)
+        let turb = self.turb_step3(s, &from_lhs(&dt), &rs);
+        pack3(un, rn, cfl_next, turb)
     }
 }

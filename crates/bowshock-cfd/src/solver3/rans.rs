@@ -73,6 +73,10 @@ pub struct RansOpts3 {
     /// Static-pressure outflow `p = p_inf` at `i = ni` (subsonic faces take `rho, u` from the cell; supersonic ones extrapolate) instead of the characteristic
     /// ghost, which would impose the free-stream normal velocity on the boundary layer (what the 2D viscous runs use: `Bc::PressureOutflow`).
     pub pressure_outflow: bool,
+    /// The automatic wall treatment of `turbulence3` also for the no-slip faces of the `i` family (the base plane of a body, the blunt leading and trailing edge of a fin).
+    /// `false` (default): those walls are plain resolved walls (`k_w = 0`, `omega_w` Menter's value, `mu_t,w = 0`, gradient strain), as in the 2D solver; see
+    /// [`turbulence3::wall_state_pass`].
+    pub law_i_walls: bool,
 }
 
 impl Default for RansOpts3 {
@@ -82,6 +86,7 @@ impl Default for RansOpts3 {
             bc: [ScalarBc::Inf, ScalarBc::Inf, ScalarBc::Cell, ScalarBc::Inf, ScalarBc::Cell, ScalarBc::Cell],
             ks: Vec::new(),
             pressure_outflow: true,
+            law_i_walls: false,
         }
     }
 }
@@ -93,6 +98,8 @@ pub struct Rans3 {
     /// Back pressure of the `i = ni` outflow (`None`: characteristic ghost).
     pub p_outflow: Option<f64>,
     pub bc: ScalarSides,
+    /// Wall class switch of [`RansOpts3::law_i_walls`].
+    pub law_i_walls: bool,
     /// Geometry of the compact face gradients (`viscous3::face_dirs`).
     pub dirs: FaceDirs3,
     /// Gradient of `(u, v, w, T)`, laminar and eddy viscosity of every cell as of the last residual evaluation.
@@ -166,6 +173,7 @@ impl Solver3 {
             visc: v,
             model,
             bc: opts.bc,
+            law_i_walls: opts.law_i_walls,
             p_outflow: opts.pressure_outflow.then_some(self.cfg.freestream[4]),
             dirs,
             grad: vec![[0.0; 12]; nc],
@@ -232,7 +240,7 @@ impl Solver3 {
         let Some(r) = rans.as_deref_mut() else { return };
         viscous3::cell_pass(&r.visc, grid, solid, w, &mut r.grad, &mut r.mu);
         if !r.wall.is_empty() {
-            turbulence3::wall_state_pass(grid, solid, &r.dirs, w, &r.mu, &r.dwall, &r.ks, &mut r.wall);
+            turbulence3::wall_state_pass(grid, solid, &r.dirs, w, &r.mu, &r.dwall, &r.ks, r.law_i_walls, &mut r.wall);
         }
         viscous3::face_pass(grid, solid, w, &r.dirs, &r.grad, &r.mu, &r.mu_t, &r.wall, &mut r.fvi, &mut r.fvj, &mut r.fvk);
     }
@@ -281,6 +289,7 @@ impl Solver3 {
             wall: &r.wall,
             ks: &r.ks,
             law_strain: true,
+            law_i_walls: r.law_i_walls,
             dwall: &r.dwall,
             fi,
             fj,
