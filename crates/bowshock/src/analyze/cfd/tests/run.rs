@@ -242,3 +242,76 @@ fn a_table_that_stopped_early_is_a_partial_of_the_range_and_nothing_else_is() {
     assert!(kept.store_cfd_table(table.clone()));
     assert!(covers(&table, (0.1, 3.0)));
 }
+
+/// The same solves on this computer and on a remote GPU agree: the 2D drag table and the 3D stability table of the example
+/// (two Mach numbers each) through `solve` and `solve_lift` with `Compute::Remote { target: $BOWSHOCK_REMOTE_TEST_HOST }` and
+/// with `Compute::Local`. Cd and CN to 0.5 %, CP to 0.01 cal (the example's reference diameter, 76.2 mm). Prints the wall times
+/// and the Setup and Device events: `BOWSHOCK_REMOTE_TEST_HOST=sandvoxel@192.168.1.88 cargo test --release -p bowshock -- --ignored a_remote_solve --nocapture`.
+#[test]
+#[ignore = "solves on a local and a remote GPU: minutes; needs BOWSHOCK_REMOTE_TEST_HOST"]
+fn a_remote_solve_agrees_with_the_local_one() {
+    use crate::app::settings::Compute;
+    const CAL: f64 = 0.0762;
+    let host = std::env::var("BOWSHOCK_REMOTE_TEST_HOST").expect("set BOWSHOCK_REMOTE_TEST_HOST (user@host)");
+    let (rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let run = |compute: Compute| {
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let log = events.clone();
+        let t0 = Instant::now();
+        let drag_job =
+            Job { plan: plan.clone(), altitude: 120.0, nodes: vec![0.8, 2.0], stage: 1, grid: CfdGrid::Coarse, compute: compute.clone(), cpu_only: false };
+        let drag = solve(&drag_job, &cancel, {
+            let log = log.clone();
+            move |e| match e {
+                Event::Setup(s) => log.lock().unwrap().push(format!("setup {s}")),
+                Event::Device(d) => log.lock().unwrap().push(format!("device {d}")),
+                _ => {}
+            }
+        })
+        .expect("the drag table solves");
+        let drag_s = t0.elapsed().as_secs_f64();
+        let lift_job = LiftJob { plan: plan.clone(), nodes: vec![0.8, 2.0], compute: compute.clone(), cpu_only: false };
+        let lift = solve_lift(&lift_job, &cancel, move |e| match e {
+            Event::Setup(s) => log.lock().unwrap().push(format!("setup {s}")),
+            Event::Device(d) => log.lock().unwrap().push(format!("device {d}")),
+            _ => {}
+        })
+        .expect("the 3D table solves");
+        println!(
+            "{compute:?}: drag {drag_s:.1} s ({}), 3D {:.1} s ({}); events {:?}",
+            drag.backend,
+            t0.elapsed().as_secs_f64() - drag_s,
+            lift.backend,
+            events.lock().unwrap()
+        );
+        (drag, lift)
+    };
+    let (local_drag, local_lift) = run(Compute::Local);
+    let (remote_drag, remote_lift) = run(Compute::remote(&host));
+    assert!(remote_drag.backend.contains(" on "), "{}", remote_drag.backend);
+    assert_eq!(local_drag.points.len(), remote_drag.points.len());
+    for (l, r) in local_drag.points.iter().zip(&remote_drag.points) {
+        let rel = (l.cd - r.cd).abs() / l.cd;
+        println!("Mach {}: Cd local {:.5} remote {:.5} ({:.3} %)", l.mach, l.cd, r.cd, 100.0 * rel);
+        assert!(rel < 0.005, "Cd at Mach {}: {} vs {}", l.mach, l.cd, r.cd);
+    }
+    assert_eq!(local_lift.points.len(), remote_lift.points.len());
+    for (l, r) in local_lift.points.iter().zip(&remote_lift.points) {
+        let rel = (l.cn - r.cn).abs() / l.cn.abs();
+        let cal = (l.x_cp - r.x_cp).abs() / CAL;
+        println!(
+            "Mach {} a {}: CN local {:.5} remote {:.5} ({:.3} %), CP {:.4} vs {:.4} m ({cal:.4} cal)",
+            l.mach,
+            l.alpha_deg,
+            l.cn,
+            r.cn,
+            100.0 * rel,
+            l.x_cp,
+            r.x_cp
+        );
+        assert!(rel < 0.005, "CN at Mach {} {} deg: {} vs {}", l.mach, l.alpha_deg, l.cn, r.cn);
+        assert!(cal < 0.01, "CP at Mach {} {} deg: {} vs {} m", l.mach, l.alpha_deg, l.x_cp, r.x_cp);
+    }
+}
