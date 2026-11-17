@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-1a9cac13.js";
+            window.path_to_searchindex_js = "searchindex-6894d04a.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-98b8035d.js"></script>
@@ -283,6 +283,7 @@ rule’s window and the tolerance it has to get under. Reporting reads numbers t
 it does not change the iteration or the result. Keep the callback short (send the snapshot to a
 channel and throttle there). Returning <code>ControlFlow::Break(())</code> ends the run at once and the
 analysis returns <code>Error::Cancelled</code>; no point of a cancelled analysis is returned.</p>
+<p><code>on_point(f)</code> streams each finalized primary drag point in solve order; <code>on_lift_point(f)</code> does the same for lift points. Both callbacks receive the point, its actual <code>BackendUsed</code>, and the CPU fallback reason when applicable. Completed points remain available to the callback if a later point is cancelled. Under <code>Auto</code>, a failed GPU sweep may have emitted points before the CPU rerun emits their replacements. Drag callbacks precede the uncertainty sweep, so <code>cd_uncertainty</code> is populated only in the returned polar.</p>
 <pre><code class="language-rust no_run">use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

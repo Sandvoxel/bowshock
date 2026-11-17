@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-1a9cac13.js";
+            window.path_to_searchindex_js = "searchindex-6894d04a.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-98b8035d.js"></script>
@@ -219,6 +219,22 @@ in the viscous step.</p>
 <p>The first call of a sweep also compiles and traces the GPU kernels: about 1 s for the default
 inviscid staging on the cone case, and longer for viscous cases (<code>crates/bowshock-cfd/README.md</code>, “Speed”,
 “First call”).</p>
+<p>Mach sweeps reuse the solver grid and uploaded geometry even with cold starts. Each limiter phase keeps a compiled GPU loop between iteration chunks; changing the configuration invalidates it. Live monitoring downloads boundary stencils rather than the full field, with one full 2D download at completion for domain-wide quality checks.</p>
+<p>Viscous analyses with <code>drag_tolerance &gt;= 1e-3</code> use f32 and retry failed or stalled points in double-float, keeping the retry only when its quality improves. Tighter tolerances retain double-float. Cold starts remain the default; grid reuse does not enable warm starts.</p>
+<p>On an Apple M5 Pro (Metal), <code>bench_viscous --n 200 --sync 50 --levels 0,1 --no-profile</code> measured the following SST implicit G3 steps on 2026-11-16 (best of three GPU runs, microseconds per iteration; no timestamp profiling):</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Grid</th><th>CPU f64</th><th>GPU f32, residual history</th><th>GPU double-float, residual history</th></tr>
+</thead>
+<tbody>
+<tr><td>156x122</td><td>7755</td><td>1476.2</td><td>1750.6</td></tr>
+<tr><td>312x122</td><td>9464</td><td>2111.9</td><td>2493.3</td></tr>
+</tbody>
+</table>
+</div>
+<p>These are per-step measurements, not a before/after speedup or a complete table’s wall time.</p>
+<p>The app’s coarse ten-point example table (ISA 120 m, 60 µm wall roughness, drag tolerance 0.002) completed on the same M5 Pro in 352.6 s: all ten points were <code>Stationary</code>, with 29,400 iterations in total. The existing comparison test passed and points streamed as each Mach number finished. This run overlapped GPU validation, so it is not an isolated throughput benchmark or a before/after speedup.</p>
 <h2 id="resolution"><a class="header" href="#resolution">Resolution</a></h2>
 <p>Each <code>Resolution</code> level roughly doubles the grid along the body (156x122 at level 0, 312x122 at
 level 1 on the G3 body), so the per-iteration cost grows by 1.5 times (GPU f32) to 1.9 times (CPU)
