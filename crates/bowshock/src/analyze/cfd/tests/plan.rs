@@ -145,8 +145,10 @@ fn the_fins_outline_follows_the_document_for_the_3d_engine() {
     vehicle.fin_sets[0].planform = bowshock_sim::FinPlanform::Elliptical;
     assert_eq!(fin_outline(&rocket, &vehicle.fin_sets[0]), solver::FinOutline::Ellipse);
     let mapped = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
-    assert_eq!(mapped.outline, solver::FinOutline::Trapezoid, "the legacy engine flies the equivalent trapezoid");
-    assert!(mapped.notes.iter().any(|n| n.contains("Elliptical fins are solved as equivalent trapezoids")), "{:?}", mapped.notes);
+    // the engine of the run (`BOWSHOCK_ENGINE`) decides: the 3D engine meshes the ellipse, the legacy one flies the equivalent trapezoid and says so
+    let three_d = solver::Engine::from_env() == solver::Engine::Solver3;
+    assert_eq!(mapped.outline, if three_d { solver::FinOutline::Ellipse } else { solver::FinOutline::Trapezoid });
+    assert_eq!(mapped.notes.iter().any(|n| n.contains("Elliptical fins are solved as equivalent trapezoids")), !three_d, "{:?}", mapped.notes);
 
     // a freeform fin: the example's fin set replaced by a quadrilateral of the same span
     let (mut rocket, _) = example();
@@ -161,7 +163,10 @@ fn the_fins_outline_follows_the_document_for_the_3d_engine() {
     assert!(vehicle.fin_sets[0].root_extent.is_some(), "a freeform fin carries its real root");
     assert_eq!(fin_outline(&rocket, &vehicle.fin_sets[0]), solver::FinOutline::Polygon(points));
     let mapped = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
-    assert!(mapped.notes.iter().any(|n| n.contains("Freeform fins are solved as equivalent trapezoids")), "{:?}", mapped.notes);
+    assert_eq!(mapped.notes.iter().any(|n| n.contains("Freeform fins are solved as equivalent trapezoids")), !three_d, "{:?}", mapped.notes);
+    if three_d {
+        assert_eq!(mapped.outline, solver::FinOutline::Polygon(vec![(0.0, 0.0), (0.03, span), (0.06, span), (0.1, 0.0)]));
+    }
 }
 
 #[test]
