@@ -4,6 +4,7 @@
 //! The geometry (`shock_expansion::Ogive`) is non-dimensionalised with the body diameter `d = 1`
 //! (radius `R = 0.5`); the nose runs over `0 <= x <= L_nose` and the cylinder over `L_nose <= x <= L_nose + cyl_length`.
 
+use crate::wedge::Meridian;
 use bowshock_cfd::gas::freestream;
 use bowshock_cfd::grid::Grid;
 use bowshock_cfd::limiter::Limiter;
@@ -230,21 +231,20 @@ pub fn run_ogive(case: &OgiveCase) -> OgiveResult {
     }
     s.eval_residual(false);
     let drop_orders = if rmax > 0.0 { (rmax / residual.last().copied().unwrap_or(rmax)).log10() } else { 0.0 };
-    postprocess(case, &s, residual, drop_orders, reason)
+    postprocess(case, &Meridian::of_solver(&s), residual, drop_orders, reason)
 }
 
 /// [`run_ogive`] on the single-cell wedge of the 3D engine ([`crate::wedge`]): the same grid, free stream, limiter and stop rule (the residual drop counted from
 /// the second-order phase), the same post-processing.
 pub fn run_ogive_wedge(case: &OgiveCase) -> Result<OgiveResult, String> {
-    let mut s = case.build_solver();
-    let run = crate::wedge::run_on_wedge(&mut s, case.mach, case.limiter, case.first_order_iters, case.max_iter, case.drop_orders)?;
+    let (s, run) = crate::wedge::run_on_wedge(&case.build_solver().grid, case.mach, case.limiter, case.first_order_iters, case.max_iter, case.drop_orders)?;
     Ok(postprocess(case, &s, run.residual, run.drop_orders, run.stop_reason))
 }
 
-fn postprocess(case: &OgiveCase, s: &Solver, residual: Vec<f64>, drop_orders: f64, reason: StopReason) -> OgiveResult {
+fn postprocess(case: &OgiveCase, s: &Meridian, residual: Vec<f64>, drop_orders: f64, reason: StopReason) -> OgiveResult {
     let g = &s.grid;
     let (ni, nj) = (g.ni, g.nj);
-    let fs = s.cfg.freestream;
+    let fs = s.freestream;
     let (p_inf, q_inf) = (fs[3], 0.5 * fs[0] * fs[1] * fs[1]);
     let cp = |p: f64| (p - p_inf) / q_inf;
     let (ln, rb2) = (case.body.nose_length(), case.body.radius().powi(2));
@@ -292,7 +292,7 @@ fn postprocess(case: &OgiveCase, s: &Solver, residual: Vec<f64>, drop_orders: f6
     let mut min_rho = f64::INFINITY;
     let mut min_p = f64::INFINITY;
     for q in &s.u {
-        let w = bowshock_cfd::gas::cons_to_prim(q);
+        let w = crate::wedge::prim(q);
         min_rho = min_rho.min(w[0]);
         min_p = min_p.min(w[3]);
     }

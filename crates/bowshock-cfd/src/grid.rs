@@ -36,6 +36,7 @@ impl Face {
     }
 }
 
+#[derive(Clone)]
 pub struct Grid {
     pub ni: usize,
     pub nj: usize,

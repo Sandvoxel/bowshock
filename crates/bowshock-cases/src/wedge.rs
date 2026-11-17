@@ -1,10 +1,11 @@
-//! The cone and ogive cases on the single-cell wedge of the 3D engine (`Case3::wedge`): the CPU Euler solver of the product, run on the 2D case's own meridian
-//! grid revolved by the wedge angle, its final state written back into the 2D solver so the cases' own post-processing (wall pressure, shock angle, forebody
-//! drag) reads it unchanged. Where the wedge reproduces the frozen 2D results (G-W1 and G-W4 in `tests/wedge_gates.rs`) a validation driver can run on it
-//! (`--wedge`); the 2D runners stay until the 2D deletion.
+//! The cone and ogive cases on the single-cell wedge of the 3D engine (`Case3::wedge`): the CPU Euler solver of the product, run on the case's meridian grid
+//! revolved by the wedge angle; its final state is a [`Meridian`] (the grid and the conserved state of the meridian plane) that the cases' own post-processing (wall
+//! pressure, shock angle, forebody drag) reads. Where the wedge reproduces the frozen 2D results (G-W1 and G-W4 in `tests/wedge_gates.rs`) a validation driver can run
+//! on it (`--wedge`); the 2D runners stay until the 2D deletion.
 
+use bowshock_cfd::gas3::GAMMA;
+use bowshock_cfd::grid::Grid;
 use bowshock_cfd::limiter::Limiter;
-use bowshock_cfd::solver::Solver;
 use bowshock_core::engine::case3::Case3;
 use bowshock_core::engine::grid3::{wedge_of_meridian, WEDGE_ANGLE};
 use bowshock_core::engine::result::StopReason;
@@ -18,11 +19,42 @@ pub struct WedgeRun {
     pub stop_reason: StopReason,
 }
 
-/// Iterates the flow of `s2` (its grid, its free stream: Mach `mach`) on the wedge until the density residual has dropped `drop_orders` orders from the peak of
-/// the second-order phase (`first_order_iters` onward, as `StopRule3`), `max_iter`, or a plateau (the 2D runners' rule); writes the final state into `s2` (the
-/// radial momentum from the wedge cell's `y`, `z` momenta) and refreshes its primitives.
-pub fn run_on_wedge(s2: &mut Solver, mach: f64, limiter: Limiter, first_order_iters: usize, max_iter: usize, drop_orders: f64) -> Result<WedgeRun, String> {
-    let g2 = &s2.grid;
+/// The state of a meridian grid: the conserved variables `[rho, rho u, rho v, E]` per cell (`j * ni + i`) and the free stream `[rho, u, v, p]`.
+pub struct Meridian {
+    pub grid: Grid,
+    pub u: Vec<[f64; 4]>,
+    pub freestream: [f64; 4],
+}
+
+/// Primitive variables `[rho, u, v, p]` of a conserved state of the meridian plane.
+pub fn prim(q: &[f64; 4]) -> [f64; 4] {
+    let (rho, u, v) = (q[0], q[1] / q[0], q[2] / q[0]);
+    [rho, u, v, (GAMMA - 1.0) * (q[3] - 0.5 * rho * (u * u + v * v))]
+}
+
+impl Meridian {
+    /// Pressure at the cell centre of `(i, j)`.
+    pub fn pressure(&self, i: usize, j: usize) -> f64 {
+        prim(&self.u[j * self.grid.ni + i])[3]
+    }
+
+    /// The state of a 2D solver (the 2D runners of the cases, until the 2D deletion).
+    pub fn of_solver(s: &bowshock_cfd::solver::Solver) -> Meridian {
+        Meridian { grid: s.grid.clone(), u: s.u.clone(), freestream: s.cfg.freestream }
+    }
+}
+
+/// Iterates the flow on `g2` (free stream Mach number `mach`) on the wedge until the density residual has dropped `drop_orders` orders from the peak of the second-order
+/// phase (`first_order_iters` onward, as `StopRule3`), `max_iter`, or a plateau (the 2D runners' rule); the final state is the [`Meridian`] (the radial momentum from the
+/// wedge cell's `y`, `z` momenta).
+pub fn run_on_wedge(
+    g2: &Grid,
+    mach: f64,
+    limiter: Limiter,
+    first_order_iters: usize,
+    max_iter: usize,
+    drop_orders: f64,
+) -> Result<(Meridian, WedgeRun), String> {
     // the lower boundary is the axis for x < 0 and the body from the tip on
     let n_axis = (0..g2.ni).take_while(|&i| g2.x[i + 1] <= 1e-12).count();
     let grid = wedge_of_meridian(g2, WEDGE_ANGLE, n_axis).map_err(|e| e.to_string())?;
@@ -57,8 +89,9 @@ pub fn run_on_wedge(s2: &mut Solver, mach: f64, limiter: Limiter, first_order_it
             }
         }
     }
-    let (ni, nj) = (s2.grid.ni, s2.grid.nj);
+    let (ni, nj) = (g2.ni, g2.nj);
     let g3 = &s3.grid;
+    let mut u = vec![[0.0; 4]; ni * nj];
     for j in 0..nj {
         for i in 0..ni {
             let c = g3.cell(i, j, 0);
@@ -66,12 +99,12 @@ pub fn run_on_wedge(s2: &mut Solver, mach: f64, limiter: Limiter, first_order_it
             let r = x[1].hypot(x[2]);
             // the wedge cell's radial direction at its centroid: y = r sin(theta), z = r cos(theta)
             let m_r = if r > 0.0 { (q[2] * x[1] + q[3] * x[2]) / r } else { 0.0 };
-            s2.u[j * ni + i] = [q[0], q[1], m_r, q[4]];
+            u[j * ni + i] = [q[0], q[1], m_r, q[4]];
         }
     }
-    s2.eval_residual(false);
     let drop_orders = if rmax > 0.0 { (rmax / residual.last().copied().unwrap_or(rmax)).log10() } else { 0.0 };
-    Ok(WedgeRun { residual, drop_orders, stop_reason: reason })
+    let freestream = [1.0, mach, 0.0, 1.0 / GAMMA];
+    Ok((Meridian { grid: g2.clone(), u, freestream }, WedgeRun { residual, drop_orders, stop_reason: reason }))
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
