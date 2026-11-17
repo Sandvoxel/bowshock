@@ -16,6 +16,8 @@ struct Uniforms {
     wall: vec4<f32>,
     // sheet colour range lo, hi; the sheet scalar's index; the number of tiles the sheets are drawn in
     sheet: vec4<f32>,
+    // the window the sheets are clipped to: axial range lo, hi, largest radius, unused
+    window: vec4<f32>,
     // the two colour maps, evenly spaced entries (linear RGB)
     wall_lut: array<vec4<f32>, 64>,
     sheet_lut: array<vec4<f32>, 64>,
@@ -77,6 +79,8 @@ fn fs_wall(in: WallOut) -> @location(0) vec4<f32> {
 struct SheetOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) value: f32,
+    // the position in the solver's frame: the window is tile-invariant (x and the distance from the axis)
+    @location(1) spos: vec3<f32>,
 };
 
 @vertex
@@ -84,6 +88,7 @@ fn vs_sheet(@builtin(instance_index) instance: u32, @location(0) pos: vec3<f32>,
     let tile = u.tiles[instance];
     var out: SheetOut;
     out.clip = u.view_proj * vec4<f32>(to_world(apply(tile, pos)), 1.0);
+    out.spos = pos;
     let which = u32(u.sheet.z);
     out.value = select(select(select(values.x, values.y, which == 1u), values.z, which == 2u), values.w, which == 3u);
     return out;
@@ -91,6 +96,9 @@ fn vs_sheet(@builtin(instance_index) instance: u32, @location(0) pos: vec3<f32>,
 
 @fragment
 fn fs_sheet(in: SheetOut) -> @location(0) vec4<f32> {
+    if in.spos.x < u.window.x || in.spos.x > u.window.y || length(in.spos.yz) > u.window.z {
+        discard;
+    }
     let t = (in.value - u.sheet.x) / (u.sheet.y - u.sheet.x);
     return vec4<f32>(lookup_sheet(t), 1.0);
 }

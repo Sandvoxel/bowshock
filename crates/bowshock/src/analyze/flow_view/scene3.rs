@@ -171,7 +171,8 @@ pub const SCHLIEREN_DECADES: f32 = 3.0;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
-/// The part of the grid a cut sheet shows: the grid reaches tens of body lengths, the picture is of the rocket and its shock.
+/// The part of the grid a cut sheet shows: the grid reaches tens of body lengths, the picture is of the rocket and its shock. The sheets
+/// are built from the cells that touch it and clipped to it exactly on the GPU.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Window {
     /// Axial range (the solver's `x`).
@@ -189,10 +190,103 @@ impl Window {
         Window { x: (lo[2] - 0.2 * length, lo[2] + 1.25 * length), r_max: (0.45 * length).max(3.0 * radius) }
     }
 
+    /// This window grown by `s` about the vehicle `bounds` (world frame): the axial range from the nose and the radius.
+    pub fn scaled(&self, s: f32, (lo, hi): ([f32; 3], [f32; 3])) -> Window {
+        let (nose, tail) = (lo[2], hi[2]);
+        Window { x: (nose - s * (nose - self.x.0), tail + s * (self.x.1 - tail)), r_max: self.r_max * s }
+    }
+
+    /// The whole grid of `f`.
+    pub fn everything(f: &Field3) -> Window {
+        let (lo, hi) = f.bounds();
+        let r = f.nodes.iter().map(|p| p[1].hypot(p[2])).fold(0.0f32, f32::max);
+        Window { x: (lo[0] - 1.0, hi[0] + 1.0), r_max: r + 1.0 }
+    }
+
     /// Whether the point `p` (solver frame) is inside.
     pub fn contains(&self, p: [f32; 3]) -> bool {
         p[0] >= self.x.0 && p[0] <= self.x.1 && p[1].hypot(p[2]) <= self.r_max
     }
+
+    /// Whether a quad with these corners (solver frame) touches the window.
+    pub fn overlaps(&self, corners: [[f32; 3]; 4]) -> bool {
+        let (mut x_lo, mut x_hi, mut r_lo) = (f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY);
+        for p in corners {
+            x_lo = x_lo.min(p[0]);
+            x_hi = x_hi.max(p[0]);
+            r_lo = r_lo.min(p[1].hypot(p[2]));
+        }
+        x_hi >= self.x.0 && x_lo <= self.x.1 && r_lo <= self.r_max
+    }
+}
+
+/// How far from the vehicle the cut sheets reach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Extent {
+    /// The default window: the rocket and its shock.
+    #[default]
+    Near,
+    /// 2.5 times that, for a bow shock or a wake that leaves it.
+    Wide,
+    /// The whole grid.
+    Far,
+}
+
+impl Extent {
+    /// All three, in the order of the buttons.
+    pub const ALL: [Extent; 3] = [Extent::Near, Extent::Wide, Extent::Far];
+
+    /// The button label.
+    pub fn name(self) -> &'static str {
+        match self {
+            Extent::Near => "Near",
+            Extent::Wide => "Wide",
+            Extent::Far => "Far field",
+        }
+    }
+}
+
+/// Which copies of the solved domain a sheet is drawn in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TileSel {
+    /// Only the tile with this index.
+    One(u32),
+    /// Every tile.
+    All,
+}
+
+/// A sheet mesh and where it is drawn.
+#[derive(Clone, Debug)]
+pub struct SheetDraw {
+    pub mesh: Arc<SheetMesh>,
+    pub tiles: TileSel,
+}
+
+/// The `(tile, layer)` pairs that put cell layers on the whole plane through the axis that contains layer `k` of the solved domain: the
+/// layer itself (tile 0) and the one on the other side of the axis, which lies in the solved range or in another tile (the half
+/// domain's windward side `theta + pi`, or a copy of a sector under the symmetry).
+pub fn plane_through(f: &Field3, tiles: &[Tile], k: usize) -> [(usize, usize); 2] {
+    let azimuth = |t: &Tile, layer: usize| {
+        let th = f.theta_of_layer(layer);
+        let q = t.apply([0.0, th.sin(), th.cos()]);
+        q[1].atan2(q[2])
+    };
+    let own = azimuth(&tiles[0], k);
+    let target = own + std::f32::consts::PI;
+    let dist = |a: f32| {
+        let d = (a - target).rem_euclid(std::f32::consts::TAU);
+        d.min(std::f32::consts::TAU - d)
+    };
+    let mut best = (f32::INFINITY, 0usize, k);
+    for (ti, t) in tiles.iter().enumerate() {
+        for layer in 0..f.nk {
+            let d = dist(azimuth(t, layer));
+            if d < best.0 {
+                best = (d, ti, layer);
+            }
+        }
+    }
+    [(0, k), (best.1, best.2)]
 }
 
 /// A 3D field ready to draw.
@@ -245,11 +339,38 @@ impl Prepared3 {
     }
 
     /// The vertices and triangles of `sheet`.
-    pub fn sheet(&self, sheet: Sheet) -> SheetMesh {
+    pub fn sheet(&self, sheet: Sheet, window: Window) -> SheetMesh {
         let f = &*self.field;
         match sheet {
-            Sheet::Meridian(k) => meridian_sheet(f, k.min(f.nk - 1), self.window),
-            Sheet::Cross(i) => cross_sheet(f, i.min(f.ni - 1), self.window),
+            Sheet::Meridian(k) => meridian_sheet(f, k.min(f.nk - 1), window),
+            Sheet::Cross(i) => cross_sheet(f, i.min(f.ni - 1), window),
+        }
+    }
+
+    /// The window of `extent` around the vehicle (the whole grid for [`Extent::Far`]).
+    pub fn window_of(&self, extent: Extent) -> Window {
+        match extent {
+            Extent::Near => self.window,
+            Extent::Wide => self.window.scaled(2.5, self.bounds),
+            Extent::Far => Window::everything(&self.field),
+        }
+    }
+
+    /// What to draw for `sheet`: a meridian sheet is the whole plane through the axis (the layer and the one opposite it, found through
+    /// the symmetry tiles when that is not in the solved range), or, `tiled`, the layer in every copy of the domain; a cross-flow sheet
+    /// is the disc: the layer in every copy.
+    pub fn sheet_draws(&self, sheet: Sheet, window: Window, tiled: bool) -> Vec<SheetDraw> {
+        let f = &*self.field;
+        match sheet {
+            Sheet::Cross(i) => vec![SheetDraw { mesh: Arc::new(self.sheet(Sheet::Cross(i), window)), tiles: TileSel::All }],
+            Sheet::Meridian(k) if tiled => vec![SheetDraw { mesh: Arc::new(self.sheet(Sheet::Meridian(k), window)), tiles: TileSel::All }],
+            Sheet::Meridian(k) => {
+                let k = k.min(f.nk - 1);
+                let [(t0, l0), (t1, l1)] = plane_through(f, &self.tiles, k);
+                let first = Arc::new(self.sheet(Sheet::Meridian(l0), window));
+                let second = if l1 == l0 { first.clone() } else { Arc::new(self.sheet(Sheet::Meridian(l1), window)) };
+                vec![SheetDraw { mesh: first, tiles: TileSel::One(t0 as u32) }, SheetDraw { mesh: second, tiles: TileSel::One(t1 as u32) }]
+            }
         }
     }
 }
@@ -428,10 +549,13 @@ fn meridian_sheet(f: &Field3, k: usize, window: Window) -> SheetMesh {
     let node = |i: usize, j: usize| (j * (ni + 1) + i) as u32;
     for j in 0..nj {
         for i in 0..ni {
-            if f.solid[f.cell_index(i, j, k)] || !window.contains(f.centre(i, j, k)) {
+            if f.solid[f.cell_index(i, j, k)] {
                 continue;
             }
             let (a, b, c, d) = (node(i, j), node(i + 1, j), node(i + 1, j + 1), node(i, j + 1));
+            if !window.overlaps([a, b, c, d].map(|n| mesh.vertices[n as usize].pos)) {
+                continue;
+            }
             mesh.triangles.extend([a, b, c, a, c, d]);
             mesh.cell_of.extend([f.cell_index(i, j, k) as u32; 2]);
         }
@@ -455,10 +579,13 @@ fn cross_sheet(f: &Field3, i: usize, window: Window) -> SheetMesh {
     let node = |j: usize, k: usize| (k * (nj + 1) + j) as u32;
     for k in 0..nk {
         for j in 0..nj {
-            if f.solid[f.cell_index(i, j, k)] || !window.contains(f.centre(i, j, k)) {
+            if f.solid[f.cell_index(i, j, k)] {
                 continue;
             }
             let (a, b, c, d) = (node(j, k), node(j + 1, k), node(j + 1, k + 1), node(j, k + 1));
+            if !window.overlaps([a, b, c, d].map(|n| mesh.vertices[n as usize].pos)) {
+                continue;
+            }
             mesh.triangles.extend([a, b, c, a, c, d]);
             mesh.cell_of.extend([f.cell_index(i, j, k) as u32; 2]);
         }
@@ -560,17 +687,22 @@ pub(super) mod tests {
         let p = Prepared3::new(anf());
         let f = &*p.field;
         let k = f.layer_of_theta(0.0);
-        let s = p.sheet(Sheet::Meridian(k));
+        let s = p.sheet(Sheet::Meridian(k), p.window);
         assert_eq!(s.vertices.len(), (f.ni + 1) * (f.nj + 1));
-        let shown = |c: usize| {
+        let touches = |c: usize| {
             let (i, j) = (c % f.ni, c / f.ni);
-            f.is_fluid(f.cell_index(i, j, k)) && p.window.contains(f.centre(i, j, k))
+            let q = |di: usize, dj: usize| mid(f.node(i + di, j + dj, k), f.node(i + di, j + dj, k + 1));
+            p.window.overlaps([q(0, 0), q(1, 0), q(1, 1), q(0, 1)])
         };
-        let fluid = (0..f.ni * f.nj).filter(|&c| shown(c)).count();
+        let fluid = (0..f.ni * f.nj).filter(|&c| f.is_fluid(f.cell_index(c % f.ni, c / f.ni, k)) && touches(c)).count();
         let all_fluid = (0..f.ni * f.nj).filter(|&c| f.is_fluid(f.cell_index(c % f.ni, c / f.ni, k))).count();
         assert_eq!(s.triangles.len(), 6 * fluid);
         assert_eq!(s.cell_of.len(), 2 * fluid);
         assert!(fluid < all_fluid, "the window leaves the far field out: {fluid} of {all_fluid}");
+        // the far field is there when asked for
+        let far = p.sheet(Sheet::Meridian(k), p.window_of(Extent::Far));
+        assert_eq!(far.triangles.len(), 6 * all_fluid);
+        assert!(p.sheet(Sheet::Meridian(k), p.window_of(Extent::Wide)).triangles.len() > s.triangles.len());
         // the window holds the vehicle with room to spare: nose to a little past the base, out past the fins
         assert!(p.window.x.0 < 0.0 && p.window.x.1 > 10.0 && p.window.r_max > 4.0);
         let (i, j) = (f.ni / 2, 3);
@@ -585,7 +717,7 @@ pub(super) mod tests {
         let p = Prepared3::new(anf());
         let f = &*p.field;
         let i = f.ni * 3 / 5;
-        let s = p.sheet(Sheet::Cross(i));
+        let s = p.sheet(Sheet::Cross(i), p.window);
         assert_eq!(s.vertices.len(), (f.nj + 1) * (f.nk + 1));
         let x0 = f.node(i, 0, 0)[0];
         let x1 = f.node(i + 1, 0, 0)[0];
@@ -599,7 +731,10 @@ pub(super) mod tests {
         // the one-cell wedge of the 2D fixture: the meridian sheet carries the 2D picture's three scalars at every node
         let f = Arc::new(field3_from_2d(&small2d(2.0)));
         let flat = Prepared::new(f.clone());
-        let s = Prepared3::new(f).sheet(Sheet::Meridian(0));
+        let s = {
+            let p = Prepared3::new(f);
+            p.sheet(Sheet::Meridian(0), p.window_of(Extent::Far))
+        };
         assert_eq!(s.vertices.len(), flat.vertices.len());
         for (a, b) in s.vertices.iter().zip(&flat.vertices) {
             for m in 0..3 {
@@ -607,6 +742,33 @@ pub(super) mod tests {
                 assert!((x.is_nan() && y.is_nan()) || (x - y).abs() < 1e-3 * (1.0 + x.abs()), "{a:?} vs {b:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_plane_through_the_axis_is_the_layer_and_the_one_across_it_in_some_tile() {
+        // the half domain, 0 to pi: the lee layer (tile 0) and the windward one, which is the last layer under the mirror
+        let p = Prepared3::new(anf());
+        let f = &*p.field;
+        assert_eq!(plane_through(f, &p.tiles, 0), [(0, 0), (1, f.nk - 1)]);
+        assert_eq!(plane_through(f, &p.tiles, f.nk - 1), [(0, f.nk - 1), (1, 0)]);
+        // a one-cell wedge of an axisymmetric flow: the half turn is 36 of its 72 copies
+        let w = Prepared3::new(Arc::new(field3_from_2d(&small2d(2.0))));
+        assert_eq!(plane_through(&w.field, &w.tiles, 0), [(0, 0), (36, 0)]);
+    }
+
+    #[test]
+    fn a_meridian_sheet_draw_is_the_plane_and_a_tiled_one_is_every_copy() {
+        let p = Prepared3::new(anf());
+        let draws = p.sheet_draws(Sheet::Meridian(0), p.window, false);
+        assert_eq!(draws.iter().map(|d| d.tiles).collect::<Vec<_>>(), [TileSel::One(0), TileSel::One(1)]);
+        assert_ne!(draws[0].mesh.id, draws[1].mesh.id);
+        assert_eq!(p.sheet_draws(Sheet::Meridian(0), p.window, true).iter().map(|d| d.tiles).collect::<Vec<_>>(), [TileSel::All]);
+        assert_eq!(p.sheet_draws(Sheet::Cross(10), p.window, false).iter().map(|d| d.tiles).collect::<Vec<_>>(), [TileSel::All]);
+        // an axisymmetric wedge: both halves of the plane are the same layer
+        let w = Prepared3::new(Arc::new(field3_from_2d(&small2d(2.0))));
+        let d = w.sheet_draws(Sheet::Meridian(0), w.window, false);
+        assert_eq!(d[0].mesh.id, d[1].mesh.id, "one mesh drawn twice");
+        assert_eq!(d[1].tiles, TileSel::One(36));
     }
 
     /// A body of revolution (a 10 m long cone and tube, 1 m across) in a half domain `ni x nj x nk` cells, its interior solid, with a made-up
@@ -699,10 +861,10 @@ pub(super) mod tests {
         let new_ms = t0.elapsed().as_secs_f64() * 1e3;
         let t1 = Instant::now();
         let k = f.layer_of_theta(0.0);
-        let m = p.sheet(Sheet::Meridian(k));
+        let m = p.sheet(Sheet::Meridian(k), p.window);
         let meridian_ms = t1.elapsed().as_secs_f64() * 1e3;
         let t2 = Instant::now();
-        let c = p.sheet(Sheet::Cross(f.ni / 2));
+        let c = p.sheet(Sheet::Cross(f.ni / 2), p.window);
         let cross_ms = t2.elapsed().as_secs_f64() * 1e3;
         println!(
             "PREPARED3 {} cells {} walls: new {new_ms:.1} ms, meridian sheet {meridian_ms:.1} ms ({} vertices), cross sheet {cross_ms:.1} ms ({} vertices)",

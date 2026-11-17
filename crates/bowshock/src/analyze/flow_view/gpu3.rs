@@ -9,7 +9,7 @@
 #![allow(dead_code)] // the viewer state that draws the scene comes in the next commit
 
 use super::map::{self, LUT};
-use super::scene3::{Prepared3, Scalar3, SheetMesh, WallScalar, WallVertex};
+use super::scene3::{Prepared3, Scalar3, SheetDraw, TileSel, WallScalar, WallVertex, Window};
 use crate::viewport::camera::Camera;
 use iced::wgpu::{self, util::DeviceExt};
 use iced::widget::shader::{self, Viewport};
@@ -31,6 +31,8 @@ pub struct Uniforms {
     pub wall: [f32; 4],
     /// Sheet colour range `lo`, `hi`; the sheet scalar's index; unused.
     pub sheet: [f32; 4],
+    /// The window the sheets are clipped to: axial range `lo`, `hi`, largest radius, unused.
+    pub window: [f32; 4],
     pub wall_lut: [[f32; 4]; LUT],
     pub sheet_lut: [[f32; 4]; LUT],
     /// The rows of each tile's matrix.
@@ -43,10 +45,13 @@ pub struct View3 {
     pub camera: Camera,
     pub scalar: Scalar3,
     pub wall_scalar: WallScalar,
-    /// The cut sheets drawn, already built.
-    pub sheets: Vec<Arc<SheetMesh>>,
-    /// Draw the sheets in every tile, not only in the solved domain.
-    pub tile_sheets: bool,
+    /// The cut sheets drawn, already built, each with the tiles it is drawn in.
+    pub sheets: Vec<SheetDraw>,
+    /// What the sheets are clipped to.
+    pub window: Window,
+    /// The colour range of the sheet scalar and of the wall scalar in use.
+    pub sheet_range: (f32, f32),
+    pub wall_range: (f32, f32),
     /// Draw the wall surface in every tile, not only in the solved domain.
     pub tile_walls: bool,
     /// Draw the wall surface.
@@ -56,8 +61,8 @@ pub struct View3 {
 
 /// The uniform block of `view` of `picture` in a viewport of `size` logical pixels.
 pub fn uniforms(picture: &Prepared3, view: &View3, size: Size) -> Uniforms {
-    let (wlo, whi) = picture.wall_ranges[view.wall_scalar.index()];
-    let (slo, shi) = picture.ranges[view.scalar.index()];
+    let (wlo, whi) = view.wall_range;
+    let (slo, shi) = view.sheet_range;
     let eye = view.camera.eye(size);
     let mut tiles = [[[0.0; 4]; 3]; MAX_TILES];
     for (slot, t) in tiles.iter_mut().zip(&picture.tiles) {
@@ -68,6 +73,7 @@ pub fn uniforms(picture: &Prepared3, view: &View3, size: Size) -> Uniforms {
         eye: [eye.x, eye.y, eye.z, 1.0],
         wall: [wlo, whi, view.wall_scalar.index() as f32, 0.0],
         sheet: [slo, shi, view.scalar.index() as f32, 0.0],
+        window: [view.window.x.0, view.window.x.1, view.window.r_max, 0.0],
         wall_lut: map::lut(view.wall_scalar.stops()),
         sheet_lut: map::lut(view.scalar.stops(view.dark)),
         tiles,
@@ -140,10 +146,12 @@ pub struct Pipeline {
     group: wgpu::BindGroup,
     blit_layout: wgpu::BindGroupLayout,
     walls: Option<WallGpu>,
+    /// The sheets on the GPU, by mesh id.
     sheets: Vec<SheetGpu>,
     draw_walls: bool,
     tiles: u32,
-    sheet_tiles: u32,
+    /// What to draw: an index into `sheets` and the instances (tiles) to draw it in.
+    sheet_draws: Vec<(usize, std::ops::Range<u32>)>,
     offscreen: Option<Offscreen>,
     /// Widget bounds in physical pixels: x, y, width, height.
     viewport: [f32; 4],
@@ -298,7 +306,7 @@ impl shader::Pipeline for Pipeline {
             sheets: Vec::new(),
             draw_walls: true,
             tiles: 1,
-            sheet_tiles: 1,
+            sheet_draws: Vec::new(),
             offscreen: None,
             viewport: [0.0; 4],
         }
@@ -333,8 +341,9 @@ impl Pipeline {
             });
         }
         // the sheets drawn: upload those not on the GPU yet, drop those no longer drawn
-        self.sheets.retain(|g| view.sheets.iter().any(|s| s.id == g.id));
-        for s in &view.sheets {
+        self.sheets.retain(|g| view.sheets.iter().any(|s| s.mesh.id == g.id));
+        for d in &view.sheets {
+            let s = &d.mesh;
             if s.triangles.is_empty() || self.sheets.iter().any(|g| g.id == s.id) {
                 continue;
             }
@@ -349,7 +358,18 @@ impl Pipeline {
         self.draw_walls = view.walls;
         let tiles = picture.tiles.len().clamp(1, MAX_TILES) as u32;
         self.tiles = if view.tile_walls { tiles } else { 1 };
-        self.sheet_tiles = if view.tile_sheets { tiles } else { 1 };
+        self.sheet_draws = view
+            .sheets
+            .iter()
+            .filter_map(|d| {
+                let at = self.sheets.iter().position(|g| g.id == d.mesh.id)?;
+                let instances = match d.tiles {
+                    TileSel::All => 0..tiles,
+                    TileSel::One(t) => t.min(tiles - 1)..t.min(tiles - 1) + 1,
+                };
+                Some((at, instances))
+            })
+            .collect();
         let scale = viewport.scale_factor();
         self.viewport = [bounds.x * scale, bounds.y * scale, bounds.width * scale, bounds.height * scale];
     }
@@ -419,10 +439,11 @@ impl Pipeline {
                 pass.draw_indexed(0..walls.body_indices, 0, 0..self.tiles);
             }
             pass.set_pipeline(&self.sheet);
-            for s in &self.sheets {
+            for (at, instances) in &self.sheet_draws {
+                let s = &self.sheets[*at];
                 pass.set_vertex_buffer(0, s.vertices.slice(..));
                 pass.set_index_buffer(s.indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..s.count, 0, 0..self.sheet_tiles);
+                pass.draw_indexed(0..s.count, 0, instances.clone());
             }
         }
         {
@@ -584,30 +605,41 @@ pub(super) mod tests {
         pixels.chunks(4).filter(|p| p[..3].iter().zip(bg).any(|(a, b)| (i32::from(*a) - i32::from(b)).abs() > 6)).count()
     }
 
+    /// The view the tests start from: walls in every tile, the picture's own colour ranges, nothing cut.
+    pub(in crate::analyze) fn view_of(picture: &Prepared3, camera: Camera) -> View3 {
+        View3 {
+            camera,
+            scalar: Scalar3::Mach,
+            wall_scalar: WallScalar::Cp,
+            sheets: Vec::new(),
+            window: picture.window,
+            sheet_range: picture.ranges[Scalar3::Mach.index()],
+            wall_range: picture.wall_ranges[WallScalar::Cp.index()],
+            tile_walls: true,
+            walls: true,
+            dark: true,
+        }
+    }
+
+    fn rig_for(size: (u32, u32)) -> Option<(wgpu::Adapter, Rig, [u8; 3])> {
+        let (adapter, device, queue) = device()?;
+        let bg = [0x0C, 0x0E, 0x11];
+        let color = wgpu::Color { r: f64::from(bg[0]) / 255.0, g: f64::from(bg[1]) / 255.0, b: f64::from(bg[2]) / 255.0, a: 1.0 };
+        Some((adapter, Rig::new(device, queue, size, color), bg))
+    }
+
     /// The real render on a real device (skipped where there is no adapter) of the ANF fixture: walls coloured by Cp and a meridian Mach
     /// sheet, the same tiled to the whole rocket, and the cost of a frame. With `BOWSHOCK_FLOW_OUT=<dir>` the pictures are written there.
     #[test]
     fn the_finner_renders_with_its_walls_and_sheets_and_costs_milliseconds_a_frame() {
-        let Some((adapter, device, queue)) = device() else {
+        let size = (1280u32, 720u32);
+        let Some((adapter, mut rig, bg)) = rig_for(size) else {
             eprintln!("no graphics adapter: flow3 render test skipped");
             return;
         };
-        let size = (1280u32, 720u32);
-        let bg = [0x0C, 0x0E, 0x11];
-        let mut rig =
-            Rig::new(device, queue, size, wgpu::Color { r: f64::from(bg[0]) / 255.0, g: f64::from(bg[1]) / 255.0, b: f64::from(bg[2]) / 255.0, a: 1.0 });
         let picture = Arc::new(Prepared3::new(anf()));
         let k = picture.field.layer_of_theta(0.0);
-        let view = View3 {
-            camera: camera_for(&picture, size, true, FROM_PLUS_X),
-            scalar: Scalar3::Mach,
-            wall_scalar: WallScalar::Cp,
-            sheets: vec![Arc::new(picture.sheet(Sheet::Meridian(k)))],
-            tile_sheets: false,
-            tile_walls: false,
-            walls: true,
-            dark: true,
-        };
+        let plane = picture.sheet_draws(Sheet::Meridian(k), picture.window, false);
         let out = std::env::var_os("BOWSHOCK_FLOW_OUT").map(std::path::PathBuf::from);
         let shot = |name: &str, pixels: &[u8]| {
             if let Some(dir) = &out {
@@ -615,44 +647,44 @@ pub(super) mod tests {
             }
         };
 
-        // walls only: the background is left alone far from the rocket and the rocket is drawn
+        // walls only, the solved half domain: the background is left alone far from the rocket and the rocket is drawn
         let walls_only =
-            Draw3 { picture: picture.clone(), view: View3 { sheets: Vec::new(), camera: camera_for(&picture, size, false, FROM_PLUS_X), ..view.clone() } };
+            Draw3 { picture: picture.clone(), view: View3 { tile_walls: false, ..view_of(&picture, camera_for(&picture, size, false, FROM_PLUS_X)) } };
         let px = rig.frame(&walls_only, true).unwrap();
         assert_eq!(&px[..3], &bg, "the corner is the background");
         let wall_pixels = lit(&px, bg);
         assert!(wall_pixels > 5_000, "the rocket is drawn: {wall_pixels} px");
         shot("scene-walls-cp.png", &px);
 
-        // with the meridian sheet: more of the picture is covered, and the sheet's colour is a viridis one
-        let with_sheet = Draw3 { picture: picture.clone(), view: view.clone() };
-        let px = rig.frame(&with_sheet, true).unwrap();
+        // the meridian plane with the half domain's walls, seen from its open side
+        let solved = Draw3 {
+            picture: picture.clone(),
+            view: View3 { sheets: plane.clone(), tile_walls: false, ..view_of(&picture, camera_for(&picture, size, true, FROM_PLUS_X)) },
+        };
+        let px = rig.frame(&solved, true).unwrap();
         assert!(lit(&px, bg) > wall_pixels + 5_000, "the sheet adds area: {} vs {wall_pixels}", lit(&px, bg));
         shot("scene-walls-cp-meridian-mach.png", &px);
 
-        // tiled: the walls and the sheet in every copy of the domain: the whole rocket (the half domain is mirrored)
-        let tiled = Draw3 {
-            picture: picture.clone(),
-            view: View3 { tile_sheets: true, tile_walls: true, camera: camera_for(&picture, size, true, FROM_MINUS_X), ..view.clone() },
-        };
+        // the whole rocket in its tiles, the whole plane
+        let tiled =
+            Draw3 { picture: picture.clone(), view: View3 { sheets: plane.clone(), ..view_of(&picture, camera_for(&picture, size, true, FROM_MINUS_X)) } };
         let px = rig.frame(&tiled, true).unwrap();
         shot("scene-walls-cp-meridian-mach-tiled.png", &px);
 
-        // a cross-flow sheet and the schlieren, from the side, light and dark
+        // a cross-flow disc and the schlieren, from the side
         let cross = View3 {
             camera: Camera { yaw: -std::f32::consts::FRAC_PI_2, pitch: 0.2, ..camera_for(&picture, size, true, FROM_MINUS_X) },
-            sheets: vec![Arc::new(picture.sheet(Sheet::Meridian(k))), Arc::new(picture.sheet(Sheet::Cross(picture.field.ni * 3 / 5)))],
+            sheets: [plane.clone(), picture.sheet_draws(Sheet::Cross(picture.field.ni * 3 / 5), picture.window, false)].concat(),
             scalar: Scalar3::Schlieren,
-            tile_sheets: true,
-            tile_walls: true,
-            ..view.clone()
+            sheet_range: picture.ranges[Scalar3::Schlieren.index()],
+            ..view_of(&picture, camera_for(&picture, size, true, FROM_MINUS_X))
         };
         let px = rig.frame(&Draw3 { picture: picture.clone(), view: cross }, true).unwrap();
         shot("scene-schlieren-cross-tiled.png", &px);
 
         // the cost of a frame: the uploads happened once; each frame is a uniform write and the draws
         let frames: usize = std::env::var("BOWSHOCK_FLOW_FRAMES").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
-        for (label, draw) in [("walls and one sheet", &with_sheet), ("walls and one sheet, tiled", &tiled)] {
+        for (label, draw) in [("walls and the meridian plane, half domain", &solved), ("walls and the meridian plane, tiled", &tiled)] {
             rig.frame(draw, false);
             rig.wait();
             let t = Instant::now();
@@ -672,6 +704,43 @@ pub(super) mod tests {
         }
     }
 
+    /// A meridian cut is the whole plane through the axis, the lee and the windward half, and its edge at the window is straight: from the
+    /// side, with the walls hidden, the sheet fills the rows above and below the axis alike, and every row ends at the same column.
+    #[test]
+    fn a_meridian_cut_is_the_whole_plane_and_ends_in_a_straight_window_edge() {
+        let size = (1280u32, 720u32);
+        let Some((_, mut rig, bg)) = rig_for(size) else {
+            eprintln!("no graphics adapter: flow3 render test skipped");
+            return;
+        };
+        let picture = Arc::new(Prepared3::new(anf()));
+        let k = picture.field.layer_of_theta(0.0);
+        // a camera that holds the whole window, so the sheet's outline is all in the picture
+        let w = picture.window;
+        let mut cam = Camera { yaw: -std::f32::consts::FRAC_PI_2, pitch: 0.0, ..Camera::default() };
+        cam.fit(glam::Vec3::new(-w.r_max, -w.r_max, w.x.0), glam::Vec3::new(w.r_max, w.r_max, w.x.1), Size::new(size.0 as f32, size.1 as f32));
+        let mut view = view_of(&picture, cam);
+        view.walls = false;
+        view.sheets = picture.sheet_draws(Sheet::Meridian(k), picture.window, false);
+        assert_eq!(view.sheets.len(), 2, "the layer and the one across the axis");
+        let px = rig.frame(&Draw3 { picture: picture.clone(), view }, true).unwrap();
+        let (w_px, h_px) = (size.0 as usize, size.1 as usize);
+        let is_lit = |row: usize, x: usize| px[(row * w_px + x) * 4..][..3].iter().zip(bg).any(|(a, b)| (i32::from(*a) - i32::from(b)).abs() > 6);
+        let covered = |row: usize| (0..w_px).filter(|&x| is_lit(row, x)).count();
+        let (above, below) = ((0..h_px / 2).map(covered).sum::<usize>(), (h_px / 2..h_px).map(covered).sum::<usize>());
+        assert!(above > 20_000 && below > 20_000, "both half planes are drawn: {above} above, {below} below");
+        assert!((above as f64 / below as f64 - 1.0).abs() < 0.12, "and alike: {above} vs {below}");
+        // the window's far edge is a straight line (the plane is turned about the axis by the layer's azimuth, so under perspective the edge
+        // leans): the rows beside the body (there is no sheet inside it) end on the line through the first and the last of them, to a pixel
+        let mid_row = h_px / 2;
+        let rows: Vec<usize> = (mid_row - 250..mid_row - 130).chain(mid_row + 130..mid_row + 250).collect();
+        let ends: Vec<(usize, usize)> = rows.iter().filter_map(|&row| Some((row, (0..w_px).rev().find(|&x| is_lit(row, x))?))).collect();
+        let ((r0, e0), (r1, e1)) = (ends[0], ends[ends.len() - 1]);
+        let worst =
+            ends.iter().map(|&(r, e)| (e as f64 - (e0 as f64 + (e1 as f64 - e0 as f64) * (r - r0) as f64 / (r1 - r0) as f64)).abs()).fold(0.0, f64::max);
+        assert!(worst <= 1.5, "the sheet ends at a straight edge: {worst} px off the line through ({r0}, {e0}) and ({r1}, {e1})");
+    }
+
     /// The cost of the 3D scene at the sizes the solver will give: the level 0 finner (352 800 cells, `field3_dump --case level0`, if its
     /// file is there) and synthetic bodies of 0.5 and 2 million cells. Prints `FLOW3` lines: building the picture, a sheet, a frame (submit to done).
     /// `cargo nextest run --release -p bowshock flow3_cost --run-ignored only --no-capture`.
@@ -679,12 +748,11 @@ pub(super) mod tests {
     #[ignore = "measures the 3D scene at 0.35, 0.5 and 2 million cells"]
     fn flow3_cost_at_solver_sizes() {
         use super::super::scene3::tests::synthetic;
-        let Some((adapter, device, queue)) = device() else {
+        let size = (1280u32, 720u32);
+        let Some((adapter, mut rig, _)) = rig_for(size) else {
             eprintln!("no graphics adapter: flow3 cost skipped");
             return;
         };
-        let size = (1280u32, 720u32);
-        let mut rig = Rig::new(device, queue, size, wgpu::Color::BLACK);
         let mut cases: Vec<(String, Arc<bowshock_core::Field3>)> = Vec::new();
         if let Ok(bytes) = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../out/field3/anf-level0.field3")) {
             cases.push(("anf-level0".into(), Arc::new(super::super::scene3::decode_fixture(&bytes).unwrap())));
@@ -699,20 +767,16 @@ pub(super) mod tests {
             let new_ms = t0.elapsed().as_secs_f64() * 1e3;
             let k = field.layer_of_theta(0.0);
             let t1 = Instant::now();
-            let meridian = picture.sheet(Sheet::Meridian(k));
+            let meridian = picture.sheet_draws(Sheet::Meridian(k), picture.window, false);
             let meridian_ms = t1.elapsed().as_secs_f64() * 1e3;
             let t2 = Instant::now();
-            let cross = picture.sheet(Sheet::Cross(field.ni / 2));
+            let cross = picture.sheet_draws(Sheet::Cross(field.ni / 2), picture.window, false);
             let cross_ms = t2.elapsed().as_secs_f64() * 1e3;
             let view = View3 {
-                camera: camera_for(&picture, size, true, FROM_MINUS_X),
                 scalar: Scalar3::Schlieren,
-                wall_scalar: WallScalar::Cp,
-                sheets: vec![Arc::new(meridian), Arc::new(cross)],
-                tile_sheets: true,
-                tile_walls: true,
-                walls: true,
-                dark: true,
+                sheets: [meridian, cross].concat(),
+                sheet_range: picture.ranges[Scalar3::Schlieren.index()],
+                ..view_of(&picture, camera_for(&picture, size, true, FROM_MINUS_X))
             };
             let draw = Draw3 { picture: picture.clone(), view };
             rig.frame(&draw, false);
@@ -724,7 +788,7 @@ pub(super) mod tests {
             }
             let frame_ms = t3.elapsed().as_secs_f64() * 1e3 / frames as f64;
             println!(
-                "FLOW3 {{\"case\":\"{name}\",\"cells\":{cells},\"walls\":{},\"tiles\":{},\"new_ms\":{new_ms:.1},\"meridian_sheet_ms\":{meridian_ms:.1},\"cross_sheet_ms\":{cross_ms:.1},\"frame_ms\":{frame_ms:.2},\"adapter\":\"{}\"}}",
+                "FLOW3 {{\"case\":\"{name}\",\"cells\":{cells},\"walls\":{},\"tiles\":{},\"new_ms\":{new_ms:.1},\"meridian_plane_ms\":{meridian_ms:.1},\"cross_disc_ms\":{cross_ms:.1},\"frame_ms\":{frame_ms:.2},\"adapter\":\"{}\"}}",
                 field.walls.len(),
                 picture.tiles.len(),
                 adapter.get_info().name
