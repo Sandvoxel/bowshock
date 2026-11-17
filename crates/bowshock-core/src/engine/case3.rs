@@ -32,6 +32,13 @@ pub struct Numerics3 {
     pub stationary_min_iters: usize,
     /// The same floor for a warm-started run, counted from the warm start.
     pub warm_min_iters: usize,
+    /// Mean-stationary rule ([`crate::engine::run3::StopRule3`]): length of one averaging window \[iterations\] (`0`: off). A run stops [`crate::engine::result::StopReason::MeanStationary`]
+    /// when the means of CA (and, at incidence, of CN and of the moment about the nose) over two consecutive windows agree within `mean_tol` (relative, plus 1e-4 absolute) and
+    /// both windows lie after iteration `mean_from`; the result is then the mean of the second window. For the oscillating subsonic base wake, whose period (50 to 220 iterations)
+    /// the range rule cannot see.
+    pub mean_window: usize,
+    pub mean_from: usize,
+    pub mean_tol: f64,
     /// Explicit 3D line solve overriding the backend default (`None`: [`Numerics3::implicit_for`]).
     pub line_solve: Option<LineSolve3>,
     /// Static-pressure outflow `p = p_inf` at the last `i` plane instead of the characteristic ghost (the plates of the viscous gates; the body cases of the 2D
@@ -60,6 +67,9 @@ impl Numerics3 {
             window: 250,
             stationary_min_iters: 250,
             warm_min_iters: 250,
+            mean_window: 1500,
+            mean_from: 1000,
+            mean_tol: 5e-3,
             line_solve: None,
             pressure_outflow: false,
         }
@@ -87,6 +97,9 @@ impl Numerics3 {
             window: 1000,
             stationary_min_iters: 1000,
             warm_min_iters: 1000,
+            mean_window: 2000,
+            mean_from: 2000,
+            mean_tol: 5e-3,
             line_solve: Some(LineSolve3::Block),
             pressure_outflow: false,
         }
@@ -203,8 +216,15 @@ impl Case3 {
     /// Sting grid of the 2D case ([`crate::engine::case::Case::new`] with `Wake::Sting`), the half domain with `24 << level` azimuthal cells
     /// and [`Numerics3::auto`].
     pub fn new(mach: f64, alpha: f64, body: BaseBody, fins: Option<Fins3>, level: u32) -> Case3 {
+        let finned = fins.is_some();
         let grid = Grid3Params::half(sting_grid(&body, level), fins, Grid3Params::default_nk(level), level);
-        Case3 { mach, alpha, body, grid, numerics: Numerics3::auto(mach, level), tier: Tier::Euler, progress: None, snapshots: None, jet: None, viscous: None }
+        let mut numerics = Numerics3::auto(mach, level);
+        if finned {
+            // the diagonal line solve (the GPU default) blows up on a finned half domain at incidence (M 3, alpha 6 at iteration ~110 on the GPU; ISSUES #24 on the CPU,
+            // the tiny ANF): the block lines are stable on both and equal on both. Block for every finned case until the diagonal solve is fixed
+            numerics.line_solve = Some(LineSolve3::Block);
+        }
+        Case3 { mach, alpha, body, grid, numerics, tier: Tier::Euler, progress: None, snapshots: None, jet: None, viscous: None }
     }
 
     /// This case with a motor jet from the centre of the base (the 2D [`crate::engine::case::Case::with_motor`]): the gap behind the base of the base-wake grid is
@@ -312,7 +332,7 @@ impl Case3 {
     pub fn euler_equations(mut self) -> Case3 {
         self.viscous = None;
         self.numerics = Numerics3::auto(self.mach, self.grid.level);
-        if matches!(self.grid.domain, Domain3::Wedge { .. }) {
+        if matches!(self.grid.domain, Domain3::Wedge { .. }) || self.grid.fins.is_some() {
             self.numerics.line_solve = Some(LineSolve3::Block);
         }
         self

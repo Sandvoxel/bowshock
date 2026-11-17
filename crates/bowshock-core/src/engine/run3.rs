@@ -8,6 +8,7 @@
 //! Wall faces are classified by the part of the solid cell behind them and the direction of the face ([`Wall`]), not by geometry.
 
 use crate::engine::case3::Case3;
+use crate::engine::grid3::Domain3;
 use crate::engine::result::StopReason;
 use crate::engine::run::MONITOR_LIMIT;
 use crate::progress::{drop_orders, spread, Progress};
@@ -19,6 +20,9 @@ use std::ops::ControlFlow;
 
 /// Iterations between samples of the normal force.
 pub const SAMPLE_EVERY: usize = 50;
+/// Iterations between the force samples of the mean-stationary rule (the oscillation of a subsonic base wake has a period of 50 to 220 iterations: the 50-iteration
+/// samples of the range rule alias it).
+pub const MEAN_EVERY: usize = 10;
 /// Orders of density-residual drop that end a run as [`StopReason::ResidualDrop`].
 pub const DROP_ORDERS: f64 = 6.0;
 
@@ -54,6 +58,24 @@ pub struct PointResult3 {
     /// not fill them (the CPU runner, [`run3_on`], does).
     pub y_plus_max: f64,
     pub cp_base: f64,
+    /// Means over the last averaging window of the force samples ([`StopRule3::observe`]) when the run sampled one full window: `cn`, `ca` and `x_cp` above are
+    /// these means when `stop_reason` is `MeanStationary`, the last state otherwise (a `MaxIterations` run of an oscillating wake has them here).
+    pub window: Option<WindowMean>,
+}
+
+/// Mean of the force coefficients over one averaging window of an oscillating run.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowMean {
+    /// Iteration at the end of the window and its length.
+    pub end: usize,
+    pub length: usize,
+    pub ca: f64,
+    /// Zero without incidence.
+    pub cn: f64,
+    /// `cm / cn`, nose diameters from the tip; NaN without incidence.
+    pub x_cp: f64,
+    /// Largest relative half range `(max - min) / (2 |mean|)` of CA (and, at incidence, CN and the moment) over the window: the size of the oscillation, for an unsteady-wake warning.
+    pub oscillation: f64,
 }
 
 /// Wall forces of the current state of `s`: the `j = 0` boundary walls of the grid (the body of a sting grid, up to the base station) and every
@@ -630,6 +652,9 @@ pub fn run3_on(case: &Case3, s: &mut Solver3, warm: bool) -> PointResult3 {
         let r = s.step();
         let cn = ((it + 1) % SAMPLE_EVERY == 0).then(|| monitor(case, s));
         it += 1;
+        if rule.wants_forces(it, MEAN_EVERY) {
+            rule.observe(it, &lift_forces(case, s));
+        }
         if rule.check(it - 1, r, cn).is_some() {
             break;
         }
@@ -659,6 +684,14 @@ pub struct StopRule3 {
     hist: Vec<(usize, f64)>,
     reason: StopReason,
     min_iters: usize,
+    mean_window: usize,
+    mean_from: usize,
+    mean_tol: f64,
+    incidence: bool,
+    /// `(iteration, [CA, CN, CN x_cp])` every [`MEAN_EVERY`] iterations after `mean_from`.
+    samples: Vec<(usize, [f64; 3])>,
+    mean_ready: bool,
+    last_window: Option<WindowMean>,
 }
 
 impl StopRule3 {
@@ -674,6 +707,34 @@ impl StopRule3 {
             hist: Vec::new(),
             reason: StopReason::MaxIterations,
             min_iters: if warm { n.warm_min_iters } else { n.stationary_min_iters },
+            mean_window: n.mean_window,
+            mean_from: n.mean_from,
+            mean_tol: n.mean_tol,
+            incidence: case.alpha.abs() >= 1e-12 && matches!(case.grid.domain, Domain3::Half { .. }),
+            samples: Vec::new(),
+            mean_ready: false,
+            last_window: None,
+        }
+    }
+
+    /// Whether the runner is to feed [`StopRule3::observe`] after `iterations` iterations: the mean rule is on, the iteration is a multiple of `every` and
+    /// past `mean_from`.
+    pub fn wants_forces(&self, iterations: usize, every: usize) -> bool {
+        self.mean_window > 0 && iterations > self.mean_from && iterations.is_multiple_of(every)
+    }
+
+    /// The force coefficients `f` of the state after `iterations` iterations (see [`StopRule3::wants_forces`]); call before [`StopRule3::check`] of the same
+    /// iteration. Whether the means of two consecutive windows of `mean_window` iterations agree ([`window_means`]) is decided here and ends the run, as
+    /// [`StopReason::MeanStationary`], at the next `check` (after the residual and range rules).
+    pub fn observe(&mut self, iterations: usize, f: &LiftForces) {
+        if self.mean_window == 0 || !(f.ca.is_finite() && f.cn.is_finite()) {
+            return;
+        }
+        let cm = if self.incidence && f.x_cp.is_finite() { f.cn * f.x_cp } else { 0.0 };
+        self.samples.push((iterations, [f.ca, f.cn, cm]));
+        if let Some((mean, agree)) = window_means(&self.samples, self.mean_window, self.mean_from, self.mean_tol, self.incidence) {
+            self.last_window = Some(mean);
+            self.mean_ready = agree;
         }
     }
 
@@ -733,6 +794,9 @@ impl StopRule3 {
                 }
             }
         }
+        if self.mean_ready {
+            return stop(self, StopReason::MeanStationary);
+        }
         None
     }
 
@@ -743,12 +807,18 @@ impl StopRule3 {
             reason = StopReason::NonFinite;
         }
         let drop_orders = if self.rmax > 0.0 && self.r.is_finite() { (self.rmax / self.r.max(1e-300)).log10() } else { 0.0 };
+        let mut f = f;
+        if let (StopReason::MeanStationary, Some(w)) = (reason, self.last_window) {
+            // the state at the stop is one phase of the oscillation: the result is the mean of the window
+            (f.ca, f.cn, f.x_cp) = (w.ca, w.cn, if self.incidence { w.x_cp } else { f.x_cp });
+        }
         PointResult3 {
             mach: case.mach,
             alpha: case.alpha,
             cn: f.cn,
             ca: f.ca,
             x_cp: f.x_cp,
+            window: self.last_window,
             iterations,
             stop_reason: reason,
             drop_orders,
@@ -757,6 +827,36 @@ impl StopRule3 {
             cp_base: f64::NAN,
         }
     }
+}
+
+/// Means of CA, CN and the moment over the last window of `length` iterations of `samples` and of the window before it, and whether the two agree: for every
+/// monitored coefficient (CA; at incidence also CN and the moment about the nose) `|m1 - m0| <= tol |m| + 1e-4` with `m = (m0 + m1) / 2`. `None` until both windows
+/// lie after iteration `from` and hold at least 8 samples each. Returns the second window's means with its oscillation (largest relative half range).
+pub fn window_means(samples: &[(usize, [f64; 3])], length: usize, from: usize, tol: f64, incidence: bool) -> Option<(WindowMean, bool)> {
+    let &(end, _) = samples.last()?;
+    if length == 0 || end < from + 2 * length {
+        return None;
+    }
+    let lo1 = end - length;
+    let lo0 = lo1 - length;
+    let second: Vec<&[f64; 3]> = samples.iter().filter(|s| s.0 > lo1).map(|s| &s.1).collect();
+    let first: Vec<&[f64; 3]> = samples.iter().filter(|s| s.0 > lo0 && s.0 <= lo1).map(|s| &s.1).collect();
+    if first.len() < 8 || second.len() < 8 {
+        return None;
+    }
+    let mean = |w: &[&[f64; 3]], c: usize| w.iter().map(|s| s[c]).sum::<f64>() / w.len() as f64;
+    let n = if incidence { 3 } else { 1 };
+    let (mut agree, mut oscillation) = (true, 0.0f64);
+    for c in 0..n {
+        let (m0, m1) = (mean(&first, c), mean(&second, c));
+        let m = 0.5 * (m0 + m1);
+        agree &= (m1 - m0).abs() <= tol * m.abs() + 1e-4;
+        let (lo, hi) = second.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), s| (l.min(s[c]), h.max(s[c])));
+        oscillation = oscillation.max(0.5 * (hi - lo) / m1.abs().max(1e-12));
+    }
+    let (ca, cn, cm) = (mean(&second, 0), mean(&second, 1), mean(&second, 2));
+    let x_cp = if incidence && cn.abs() > 1e-12 { cm / cn } else { f64::NAN };
+    Some((WindowMean { end, length, ca, cn: if incidence { cn } else { 0.0 }, x_cp, oscillation }, agree))
 }
 
 /// Cold run on a fresh solver.
@@ -807,5 +907,74 @@ mod tests {
         // the same drop inside the second-order phase stops the run
         let stop = feed(|it| if it < 200 { 1.0 } else { 1e-7 }, |it| 0.3 + 0.1 * ((it / 50) % 2) as f64);
         assert_eq!(stop, Some((201, StopReason::ResidualDrop)));
+    }
+
+    /// A subsonic base wake as measured on the GPU (M 0.5, 2 degrees): CA oscillating 57 % peak to peak with a period of 222 iterations plus a second line at 108,
+    /// CN 120 % at 108, on a start-up transient that dies out.
+    fn wake(it: usize, drift_per_1000: f64) -> LiftForces {
+        let t = it as f64;
+        let w = |p: f64, ph: f64| (2.0 * std::f64::consts::PI * t / p + ph).sin();
+        let settle = 1.0 + 0.5 * (-t / 600.0).exp();
+        let trend = 1.0 + drift_per_1000 * t / 1000.0;
+        LiftForces {
+            ca: 0.234 * trend * settle * (1.0 + 0.22 * w(222.0, 0.3) + 0.08 * w(108.0, 1.1)),
+            cn: 0.0766 * settle * (1.0 + 0.5 * w(108.0, 0.7) + 0.1 * w(222.0, 2.0)),
+            x_cp: 7.0 + 0.5 * w(150.0, 0.0),
+        }
+    }
+
+    fn run_wake(drift: f64) -> (Option<(usize, StopReason)>, PointResult3) {
+        let case = Case3::tiny_anf(0.5, 2f64.to_radians());
+        let mut rule = StopRule3::new(&case, false);
+        let mut stop = None;
+        let mut last = 0;
+        for it in 1..=8000 {
+            last = it;
+            let f = wake(it, drift);
+            if rule.wants_forces(it, MEAN_EVERY) {
+                rule.observe(it, &f);
+            }
+            // the monitor samples of the range rule every 50 iterations; the residual stays high (a limit cycle)
+            let sample = (it % SAMPLE_EVERY == 0).then_some(f.cn);
+            if let Some(why) = rule.check(it - 1, 1e-2, sample) {
+                stop = Some((it, why));
+                break;
+            }
+        }
+        (stop, rule.finish(&case, wake(last, drift), last))
+    }
+
+    #[test]
+    fn an_oscillating_wake_with_a_stationary_mean_stops_on_the_window_mean() {
+        let (stop, r) = run_wake(0.0);
+        let (it, why) = stop.expect("the run stops");
+        assert_eq!(why, StopReason::MeanStationary);
+        // two windows of 1500 after iteration 1000, and the start-up transient (600 iterations) decayed
+        assert!((4000..=8000).contains(&it), "stopped at {it}");
+        // the result is the window mean (exact: 0.234 times the settled factor), within the leftover of a window that is not a whole number of cycles, and the oscillation is reported
+        let w = r.window.expect("a window");
+        assert!((r.ca - 0.234).abs() < 0.234 * 0.012, "mean CA {} vs 0.234", r.ca);
+        assert_eq!(r.ca, w.ca);
+        assert!((r.cn - 0.0766).abs() < 0.0766 * 0.04, "mean CN {}", r.cn);
+        assert!((r.x_cp - 7.0).abs() < 0.2, "x_cp {}", r.x_cp);
+        assert!(w.oscillation > 0.5 && w.oscillation < 0.7, "oscillation {} (CN: 0.5 + 0.1 half range)", w.oscillation);
+    }
+
+    #[test]
+    fn an_oscillating_wake_whose_mean_drifts_does_not_stop_on_the_mean() {
+        // 4 % of CA per 1000 iterations: the means of consecutive windows differ by 6 %
+        let (stop, r) = run_wake(0.04);
+        assert!(stop.is_none(), "{stop:?}");
+        assert!(r.window.is_some());
+    }
+
+    #[test]
+    fn the_mean_rule_is_off_with_a_zero_window() {
+        let mut case = Case3::tiny_anf(0.5, 2f64.to_radians());
+        case.numerics.mean_window = 0;
+        let mut rule = StopRule3::new(&case, false);
+        assert!(!rule.wants_forces(5000, MEAN_EVERY));
+        rule.observe(5000, &wake(5000, 0.0));
+        assert_eq!(rule.check(4999, 1e-2, None), None);
     }
 }
