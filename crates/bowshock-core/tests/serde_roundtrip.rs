@@ -127,7 +127,16 @@ fn from_spec_of_spec_gives_the_same_run() {
     let b = Analysis::from_spec(&a.spec().unwrap()).unwrap();
     let (pa, pb) = (a.run(&[0.8, 2.0]).unwrap(), b.run(&[0.8, 2.0]).unwrap());
     // JSON writes the NaN of a field without a base wake as null on both sides
-    assert_eq!(serde_json::to_string(&pa).unwrap(), serde_json::to_string(&pb).unwrap());
+    // (the residual is a parallel sum: its last bits are not reproducible, so it is compared to nine digits)
+    let json = |p: &bowshock_core::Polar| {
+        let mut v = serde_json::to_value(p).unwrap();
+        for pt in v["points"].as_array_mut().unwrap() {
+            let d = &mut pt["detail"]["residual_drop_orders"];
+            *d = serde_json::json!((d.as_f64().unwrap() * 1e9).round() / 1e9);
+        }
+        v.to_string()
+    };
+    assert_eq!(json(&pa), json(&pb));
 }
 
 /// A finned point at an angle of attack, with its field: the NaN of what the 3D Euler solver does not give (the base and the total
