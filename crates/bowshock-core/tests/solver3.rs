@@ -173,12 +173,6 @@ fn the_3d_engine_takes_one_to_sixteen_fins_the_legacy_engine_three_to_eight() {
     assert!(polar.points[0].drag.fins.is_some());
 }
 
-#[test]
-fn the_engines_say_whether_they_solve_the_viscous_terms() {
-    assert!(Engine::Legacy.solves_viscous());
-    assert!(!Engine::Solver3.solves_viscous(), "until the viscous stage lands: the const in analysis/solver3.rs");
-}
-
 /// The GPU solver of a point is kept for the next cold point on the same grid (`analysis/solver3.rs`, `POOL`): a point solved on the kept solver is the point a fresh
 /// solver gives, bit for bit. Through `tools/gpuq/gpuq`.
 #[test]
@@ -261,12 +255,6 @@ fn a_viscous_finned_sector_point_fills_every_drag_field_on_the_cpu() {
 #[test]
 fn a_viscous_half_domain_point_fills_every_drag_field_on_the_cpu() {
     viscous_point_is_complete(solver3().fins(fins()), Condition::new(0.5, 4.0));
-}
-
-#[test]
-fn a_viscous_request_on_the_gpu_alone_says_it_is_not_there_yet() {
-    let e = solver3().backend(Backend::Gpu).viscous(flight()).run(&[0.5]).unwrap_err();
-    assert!(matches!(&e, Error::Unsupported(m) if m.contains("GPU")), "{e}");
 }
 
 #[test]

@@ -376,7 +376,10 @@ fn engine3d_finned_timing() {
         table.notes
     );
     for p in &table.points {
-        println!("DRAG M {:.2} cd {:.5} pressure {:.5} base {:.5} fins {:.5} {:?}", p.mach, p.cd, p.pressure, p.base, p.fins, p.quality);
+        println!(
+            "DRAG M {:.2} cd {:.5} friction {:.5} pressure {:.5} base {:.5} fins {:.5} other {:.5} {:?}",
+            p.mach, p.cd, p.friction, p.pressure, p.base, p.fins, p.other, p.quality
+        );
     }
     println!("| dim | Mach | alpha | cells | iters (stop/exec) | stop | build | ctx | upload | reset | first chunk | rest chunks n | rest s | ms/iter | monitor forces | final |");
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");

@@ -483,15 +483,12 @@ fn node_analysis(job: &Job, kind: NodeKind, session: &Session, altitude: f64, gr
         })
         .backend(session.backend())
         .keep_fields(true);
-    if solver::Engine::from_env().solves_viscous() {
-        analysis =
-            analysis.viscous(solver::FlightConditions { atmosphere: solver::Atmosphere::Isa { altitude_m: altitude } }).roughness(job.plan.body_roughness);
-        if kind == NodeKind::Drag {
-            analysis = analysis.drag_tolerance(DRAG_TOLERANCE);
-        }
-        if shared_grid {
-            analysis = analysis.grid_mach(grid_mach);
-        }
+    analysis = analysis.viscous(solver::FlightConditions { atmosphere: solver::Atmosphere::Isa { altitude_m: altitude } }).roughness(job.plan.body_roughness);
+    if kind == NodeKind::Drag {
+        analysis = analysis.drag_tolerance(DRAG_TOLERANCE);
+    }
+    if shared_grid {
+        analysis = analysis.grid_mach(grid_mach);
     }
     if let Some(fins) = &job.plan.fins {
         analysis = analysis.fins(fins.clone()).fin_outline(job.plan.outline.clone());

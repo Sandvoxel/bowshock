@@ -12,18 +12,17 @@
 //! and tips; on the GPU reduced on the device), the wall pressures of [`wall_samples`] and the solved state (the guards of [`quality3`]). Coefficients
 //! are on the nose-base area the engine works on, rescaled to the reference area in one place ([`Analysis::area_ratio`]).
 //!
-//! What the engine does not do yet fails loudly: a viscous request ([`Analysis::viscous`], roughness, a motor, a drag tolerance) is an error under
-//! [`Engine::Solver3`], never a silent Euler run. [`Analysis::wall_flow`] and [`Analysis::tier3`] already map the viscous knobs onto the engine's
-//! [`Tier`]s; [`GPU_SOLVES_VISCOUS`] is the one switch that lets a viscous request run on the GPU (the CPU runner solves them now).
+//! What the engine does not do yet fails loudly: a motor request is an error under [`Engine::Solver3`], never a silent run without the jet. The viscous knobs
+//! ([`Analysis::viscous`], roughness, a drag tolerance) map onto the engine's [`Tier`]s through [`Analysis::wall_flow`] and [`Analysis::tier3`]; both backends solve them.
 
 //!
 //! # The flip
 //!
 //! With `BOWSHOCK_ENGINE=3d` the whole app already runs on this engine (`cfd/run.rs` `node_analysis`, `cfd/plan.rs` fin counts and `*_REV_3D` keys, `cfd/wording.rs`
-//! `Words(true)`, the shared grid), so the flip is: `Engine::DEFAULT = Solver3` (`analysis.rs`); [`GPU_SOLVES_VISCOUS`] true once the GPU RANS step is merged (then the app sends
-//! `viscous`, roughness, the drag tolerance and `grid_mach` to both node kinds by itself, and `tier3` maps them); the Jet patch (the motor request here); then delete the legacy
+//! `Words(true)`, the shared grid), so the flip is: `Engine::DEFAULT = Solver3` (`analysis.rs`); the app already sends
+//! `viscous`, roughness, the drag tolerance and `grid_mach` to both node kinds, and `tier3` maps them; the Jet patch (the motor request here); then delete the legacy
 //! path (the route comment in `analysis.rs` lists it), `Words(false)`, `SOLVER_REV` / `LIFT_REV` (the `_3D` numbers take their place) and the app's two-engine branches
-//! (`solves_3d`, `shared_grid`, the `solves_viscous` ifs).
+//! (`solves_3d`, `shared_grid`).
 
 use super::*;
 use crate::engine::case3::{Tier, WallFlow};
@@ -33,9 +32,6 @@ use crate::engine::planform::Planform;
 use crate::engine::run3::{drag_parts_on, wall_faces, wall_samples, DragParts, Wall};
 use bowshock_cfd::gas3::{cons_to_prim3, Cons3};
 use bowshock_cfd::grid3::{Grid3, PART_FLUID};
-
-/// Whether the engine solves the viscous terms (`Analysis::viscous`, roughness): flip with the stage that makes it so, and [`Analysis::tier3`] maps them.
-pub(super) const GPU_SOLVES_VISCOUS: bool = false;
 
 /// The solved domain of a condition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,7 +107,13 @@ struct Post3 {
 /// Euler. The faces are in the order of [`wall_faces`], which is the order of `Field3::walls`.
 fn viscous_extras(case: &Case3, s: &Solver3) -> (Vec<f32>, Vec<[f32; 3]>) {
     let Some(r) = s.rans() else { return (Vec::new(), Vec::new()) };
-    let eddy = r.mu_t.iter().zip(&r.mu).map(|(t, m)| (t / m) as f32).collect();
+    let ratio: Vec<f64> = r.mu_t.iter().zip(&r.mu).map(|(t, m)| t / m).collect();
+    extras_of(case, &s.grid, &ratio, &s.wall_tractions())
+}
+
+/// [`viscous_extras`] from the eddy ratio per cell and the tractions of the no-slip faces.
+fn extras_of(case: &Case3, g: &Grid3, ratio: &[f64], tractions: &[bowshock_cfd::viscous3::WallTraction]) -> (Vec<f32>, Vec<[f32; 3]>) {
+    let eddy = ratio.iter().map(|&r| r as f32).collect();
     let dir_of = |c: [(usize, usize, usize); 4]| {
         if c.iter().all(|n| n.0 == c[0].0) {
             0
@@ -121,12 +123,12 @@ fn viscous_extras(case: &Case3, s: &Solver3) -> (Vec<f32>, Vec<[f32; 3]>) {
             2
         }
     };
-    let faces = wall_faces(&s.grid);
+    let faces = wall_faces(g);
     let index: std::collections::HashMap<(usize, usize, usize, usize), usize> =
         faces.iter().enumerate().map(|(n, w)| ((dir_of(w.corners), w.corners[0].0, w.corners[0].1, w.corners[0].2), n)).collect();
     let q = 0.5 * case.mach * case.mach;
     let mut cf = vec![[0.0f32; 3]; faces.len()];
-    for t in s.wall_tractions() {
+    for t in tractions {
         if let Some(&n) = index.get(&(t.dir, t.idx[0], t.idx[1], t.idx[2])) {
             cf[n] = t.tau.map(|v| (v / q) as f32);
         }
@@ -215,7 +217,25 @@ impl Runner3 for Gpu3 {
     }
 
     fn post(&self, r: &GpuState, case: &Case3) -> Result<Post3, Error> {
-        Ok(Post3 { drag: r.runner.drag_parts(case)?, u: r.runner.gpu.state_f64()?, eddy: Vec::new(), cf: Vec::new() })
+        let u = r.runner.gpu.state_f64()?;
+        let (mut eddy, mut cf) = (Vec::new(), Vec::new());
+        // a viscous run keeps its field's extras: the eddy ratio from the device's `mu_t` and the molecular viscosity of the device state, the skin friction from the
+        // device's viscous face fluxes (which the wall forces were reduced from)
+        if let (Some(host), Some((_, mu_t)), Some(fluxes)) = (r.runner.host.rans(), r.runner.gpu.turb_state()?, r.runner.gpu.viscous_flux()?) {
+            let g = &r.runner.host.grid;
+            let ratio: Vec<f64> = u
+                .iter()
+                .zip(&mu_t)
+                .map(|(c, t)| {
+                    let w = bowshock_cfd::gas3::cons_to_prim3(c);
+                    t / host.visc.mu(bowshock_cfd::gas3::GAMMA * w[4] / w[0])
+                })
+                .collect();
+            let solid: Vec<bool> = g.part.iter().map(|&p| p != bowshock_cfd::grid3::PART_FLUID).collect();
+            let tractions = bowshock_cfd::viscous3::wall_tractions(g, &solid, &host.dirs, &fluxes[0], &fluxes[1], &fluxes[2]);
+            (eddy, cf) = extras_of(case, g, &ratio, &tractions);
+        }
+        Ok(Post3 { drag: r.runner.drag_parts(case)?, u, eddy, cf })
     }
 
     fn reused(&self, r: &GpuState) -> bool {
@@ -479,17 +499,6 @@ impl Analysis {
         keep: bool,
     ) -> Result<(Vec<PolarPoint>, BackendUsed, Option<String>), Error> {
         let cpu = || guard(|| self.sweep3(&Cpu3, sorted, level, flow, keep));
-        // the RANS step is on the CPU until the GPU one is merged: a viscous request runs there (and says why) under Auto, and is an error on the GPU alone
-        let viscous = flow.is_some();
-        if viscous && !GPU_SOLVES_VISCOUS {
-            match backend {
-                Backend::Gpu => return Err(Error::Unsupported("Engine::Solver3 does not solve the viscous terms on the GPU yet (Backend::Cpu does)".into())),
-                Backend::Auto => {
-                    return Ok((cpu()?, BackendUsed::Cpu, Some("the viscous terms are solved on the CPU: the GPU RANS step is not wired yet".into())))
-                }
-                Backend::Cpu => {}
-            }
-        }
         match backend {
             Backend::Cpu => Ok((cpu()?, BackendUsed::Cpu, None)),
             Backend::Gpu => Ok((self.sweep3_gpu(sorted, level, flow, keep)?, BackendUsed::Gpu, None)),

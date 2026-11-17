@@ -70,7 +70,7 @@ impl Default for Engine {
 
 impl Engine {
     /// THE DEFAULT ENGINE: the one a new [`Analysis`] uses unless `BOWSHOCK_ENGINE` says otherwise and the one an [`AnalysisSpec`] without an `engine` key means. The flip
-    /// to the 3D engine is this one line (with `SOLVES_VISCOUS` in `analysis/solver3.rs` once the engine solves the viscous terms).
+    /// to the 3D engine is this one line.
     pub const DEFAULT: Engine = Engine::Legacy;
 
     /// The engine the `BOWSHOCK_ENGINE` environment variable names (`3d` or `solver3`: [`Engine::Solver3`]; `legacy`: [`Engine::Legacy`]; unset or anything else:
@@ -80,15 +80,6 @@ impl Engine {
             Ok(v) if v.eq_ignore_ascii_case("3d") || v.eq_ignore_ascii_case("solver3") => Engine::Solver3,
             Ok(v) if v.eq_ignore_ascii_case("legacy") => Engine::Legacy,
             _ => Engine::DEFAULT,
-        }
-    }
-
-    /// Whether the engine solves the viscous terms (`Analysis::viscous`, roughness, a drag tolerance) on the backend the product runs, the GPU: the legacy engine does at zero
-    /// incidence; the 3D engine says so when its GPU RANS step is wired (`GPU_SOLVES_VISCOUS` in `analysis/solver3.rs`; its CPU runner solves them already, on request). A caller that would send the viscous settings asks here.
-    pub fn solves_viscous(self) -> bool {
-        match self {
-            Engine::Legacy => true,
-            Engine::Solver3 => solver3::GPU_SOLVES_VISCOUS,
         }
     }
 }

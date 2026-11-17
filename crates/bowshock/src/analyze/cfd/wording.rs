@@ -119,7 +119,6 @@ impl Words {
     pub fn place(self, device: &str, grid: &str, altitude: &str, angles_running: bool) -> String {
         match (angles_running, self.0) {
             (true, false) => format!("{device} · coarse grid · 3D Euler at angles of attack"),
-            (_, true) if !solver::Engine::Solver3.solves_viscous() => format!("{device} · {grid} · Euler"),
             _ => format!("{device} · {grid} · altitude {altitude}"),
         }
     }
