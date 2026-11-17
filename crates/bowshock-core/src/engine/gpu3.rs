@@ -100,6 +100,9 @@ impl GpuRunner3 {
                 let t = Instant::now();
                 let cn = forces_on(case, &self.host.grid, &u, p_inf, x_base).cn;
                 tm.forces_s += t.elapsed().as_secs_f64();
+                if let Some(t) = case.snapshots.as_ref().filter(|t| t.due(done + len)) {
+                    t.send(case, &self.host.grid, &u, done + len);
+                }
                 Some(cn)
             } else {
                 None

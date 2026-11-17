@@ -110,7 +110,7 @@ fn outcome(mach: f64, nodes: &[f64]) -> Outcome {
 fn point(mach: f64, quality: CfdQuality) -> CfdPoint {
     let total = cd(mach);
     let (friction, base, fins) = (0.11, 0.09 + 0.02 * mach.min(1.0), 0.06);
-    CfdPoint { mach, cd: total, friction, pressure: total - friction - base - fins, base, fins, other: 0.0, quality }
+    CfdPoint { mach, cd: total, friction, pressure: total - friction - base - fins, base, fins, other: 0.0, interference: 0.0, quality }
 }
 
 fn quality(o: Outcome) -> CfdQuality {
@@ -445,6 +445,8 @@ pub fn lift_events(demo: Demo, job: &LiftJob) -> Vec<Event> {
         alpha_deg: a,
         cn: a.to_radians() * (2.4 + 0.5 * mach.min(1.2)) * (1.0 - 0.01 * a),
         x_cp: 0.85 + 0.04 * mach.min(1.5),
+        cd: None,
+        cm: None,
         quality: CfdQuality::Converged,
     };
     for (i, &mach) in nodes[..finished].iter().enumerate() {
@@ -930,5 +932,45 @@ mod tests {
         // stepping to another Mach number keeps the angle when it has it
         press(&mut app, Message::Flow(flow_view::Msg::Step(1)));
         assert_eq!(app.analyze().flow.selected_alpha, Some(4.0));
+    }
+
+    #[test]
+    fn the_fields_of_a_stability_solve_are_kept_and_the_flow_view_steps_their_angles() {
+        let (mut app, serial) = app_with(&[Demo::Done, Demo::LiftDone]);
+        play(&mut app, serial, Demo::Done);
+        let table = app.ctx().doc.rocket().cfd_table(1).expect("the drag table").clone();
+        press(&mut app, Message::SolveLift);
+        let lift = app.analyze().cfd.lift_solving.as_ref().expect("the 3D solve started");
+        let serial = lift.stream.serial();
+        let job = LiftJob {
+            plan: app.analyze().cfd.plan.as_ref().clone().unwrap(),
+            nodes: cfd::lift_nodes(app.analyze().cond.mach).unwrap(),
+            compute: Default::default(),
+            cpu_only: false,
+        };
+        // a Mach number that is not a node of the drag table
+        let mach = job.nodes.iter().copied().find(|m| table.points.iter().all(|p| (p.mach - m).abs() > 1e-6)).expect("the stability nodes are not the table's");
+        let fields: Vec<Event> =
+            cfd::LIFT_ALPHAS.iter().filter_map(|&a| fixture_field(mach, a, 3000)).map(|f| Event::PointField { field: cfd::FieldRef(f) }).collect();
+        assert_eq!(fields.len(), 2);
+        // the live picture of the stability solve is the one on show
+        feed(&mut app, serial, fields);
+        let flow = &app.analyze().flow;
+        assert_eq!((flow.picture_mach(), flow.mode()), (Some(mach), flow_view::Mode::Scene));
+        feed(&mut app, serial, lift_events(Demo::LiftDone, &job));
+        assert!(app.ctx().doc.rocket().cfd_table(1).is_some_and(|t| t.lift.is_some()));
+        let store = &app.analyze().cfd.fields;
+        assert_eq!(store.alphas_at(&table, mach), cfd::LIFT_ALPHAS.to_vec());
+        assert_eq!(store.len(), table.points.len() + 2, "the drag solve's fields stay");
+        // the Flow field view lists the stability solve's Mach number too, and steps its angles
+        press(&mut app, Message::Flow(flow_view::Msg::Open(true)));
+        assert!(app.analyze().flow.machs.contains(&mach));
+        press(&mut app, Message::Flow(flow_view::Msg::Pick(mach)));
+        let flow = &app.analyze().flow;
+        assert_eq!((flow.alphas.clone(), flow.selected_alpha), (cfd::LIFT_ALPHAS.to_vec(), Some(cfd::LIFT_ALPHAS[0])));
+        assert_eq!(flow.picture_mach(), Some(mach));
+        press(&mut app, Message::Flow(flow_view::Msg::AlphaStep(1)));
+        assert_eq!(app.analyze().flow.selected_alpha, Some(cfd::LIFT_ALPHAS[1]));
+        assert!(app.analyze().flow.caption().contains(&format!("α {:.1}°", cfd::LIFT_ALPHAS[1])), "{}", app.analyze().flow.caption());
     }
 }

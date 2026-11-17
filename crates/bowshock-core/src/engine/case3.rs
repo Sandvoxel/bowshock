@@ -3,6 +3,7 @@
 
 use crate::engine::body_grid::{BaseBody, Body, Nose};
 use crate::engine::case::sting_grid;
+use crate::engine::field3::Snapshots3;
 use crate::engine::grid3::{body_grid3, Fins3, Grid3Params};
 use crate::error::Error;
 use crate::progress::ProgressSink;
@@ -81,6 +82,8 @@ pub struct Case3 {
     pub numerics: Numerics3,
     /// Where the run reports its progress and can be stopped; `None`: silent.
     pub progress: Option<ProgressSink>,
+    /// Where the run hands snapshots of its flow field; `None`: none.
+    pub snapshots: Option<Snapshots3>,
 }
 
 impl Case3 {
@@ -89,7 +92,7 @@ impl Case3 {
     pub fn new(mach: f64, alpha: f64, body: BaseBody, fins: Option<Fins3>, level: u32) -> Case3 {
         let sting = sting_grid(&body, level);
         let grid = Grid3Params { sting, fins, nk: Grid3Params::default_nk(level), level, fin_chord_cells: None, span_cells: None };
-        Case3 { mach, alpha, body, grid, numerics: Numerics3::auto(mach, level), progress: None }
+        Case3 { mach, alpha, body, grid, numerics: Numerics3::auto(mach, level), progress: None, snapshots: None }
     }
 
     /// Free-stream state at the case's Mach number and incidence.

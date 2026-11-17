@@ -230,6 +230,9 @@ pub fn run3_on(case: &Case3, s: &mut Solver3, warm: bool) -> PointResult3 {
         if rule.check(it - 1, r, cn).is_some() {
             break;
         }
+        if let Some(t) = case.snapshots.as_ref().filter(|t| t.due(it)) {
+            t.send(case, &s.grid, &s.u, it);
+        }
         if cn.is_some() && rule.report(case, it).is_break() {
             rule.cancel();
             break;

@@ -3,7 +3,7 @@
 use crate::proto::{read_frame, sync_magic, to_error, write_frame, ClientMsg, DeviceInfo, Job, WorkerMsg, PROTOCOL};
 use crate::provision::{self, SetupStatus, MISSING_MARKER};
 use crate::WORKER_KEY;
-use bowshock_core::{AnalysisSpec, Error, LiftPolar, Polar, Progress};
+use bowshock_core::{AnalysisSpec, Condition, Error, Field3, Polar, Progress};
 use std::fmt;
 use std::io::{Read, Write};
 use std::ops::ControlFlow;
@@ -156,27 +156,23 @@ impl Remote {
         &self.device
     }
 
-    /// Runs [`Analysis::run`](bowshock_core::Analysis::run) of `spec` on the remote. `progress` sees every progress report;
-    /// `Break` cancels the job and the call returns `Solver(Cancelled)`.
-    pub fn run_drag(&mut self, spec: &AnalysisSpec, machs: &[f64], progress: &dyn Fn(&Progress) -> ControlFlow<()>) -> Result<Polar, RemoteError> {
-        match self.run_job(Job::Drag { spec: spec.clone(), machs: machs.to_vec() }, progress)? {
-            WorkerMsg::Drag(p) => Ok(p),
-            _ => Err(self.protocol("the worker answered a drag job with another result")),
+    /// Runs [`Analysis::run`](bowshock_core::Analysis::run) of `spec` over `conditions` on the remote. `progress` sees every progress
+    /// report; `Break` cancels the job and the call returns `Solver(Cancelled)`. The final fields of the points (with
+    /// [`AnalysisSpec::keep_fields`]) arrive in frames of their own and are in the result's `field3`; the live snapshots of a solve
+    /// stay on the worker.
+    pub fn solve(&mut self, spec: &AnalysisSpec, conditions: &[Condition], progress: &dyn Fn(&Progress) -> ControlFlow<()>) -> Result<Polar, RemoteError> {
+        let mut fields: Vec<(usize, Field3)> = Vec::new();
+        let result = self.run_job(Job::Solve { spec: spec.clone(), conditions: conditions.to_vec() }, progress, &mut fields)?;
+        let WorkerMsg::Solve(mut polar) = result else {
+            return Err(self.protocol("the worker answered a solve job with another result"));
+        };
+        for (point, field) in fields {
+            match polar.points.get_mut(point) {
+                Some(p) => p.field3 = Some(field),
+                None => return Err(self.protocol("the worker sent the field of a point the result does not have")),
+            }
         }
-    }
-
-    /// Runs [`Analysis::run_lift`](bowshock_core::Analysis::run_lift) of `spec` on the remote (see [`Remote::run_drag`]).
-    pub fn run_lift(
-        &mut self,
-        spec: &AnalysisSpec,
-        machs: &[f64],
-        alphas_deg: &[f64],
-        progress: &dyn Fn(&Progress) -> ControlFlow<()>,
-    ) -> Result<LiftPolar, RemoteError> {
-        match self.run_job(Job::Lift { spec: spec.clone(), machs: machs.to_vec(), alphas_deg: alphas_deg.to_vec() }, progress)? {
-            WorkerMsg::Lift(p) => Ok(p),
-            _ => Err(self.protocol("the worker answered a lift job with another result")),
-        }
+        Ok(polar)
     }
 
     fn protocol(&mut self, msg: &str) -> RemoteError {
@@ -196,7 +192,7 @@ impl Remote {
         }
     }
 
-    fn run_job(&mut self, job: Job, progress: &dyn Fn(&Progress) -> ControlFlow<()>) -> Result<WorkerMsg, RemoteError> {
+    fn run_job(&mut self, job: Job, progress: &dyn Fn(&Progress) -> ControlFlow<()>, fields: &mut Vec<(usize, Field3)>) -> Result<WorkerMsg, RemoteError> {
         if self.broken {
             return Err(RemoteError::Protocol("the connection is closed".into()));
         }
@@ -224,7 +220,8 @@ impl Remote {
                 WorkerMsg::Cancelled => return Err(RemoteError::Solver(Error::Cancelled)),
                 WorkerMsg::Error { kind, message } => return Err(RemoteError::Solver(to_error(kind, message))),
                 WorkerMsg::Ready { .. } => return Err(self.protocol("unexpected Ready from the worker")),
-                result @ (WorkerMsg::Drag(_) | WorkerMsg::Lift(_)) => {
+                WorkerMsg::PointField { point, field } => fields.push((point, *field)),
+                result @ WorkerMsg::Solve(_) => {
                     return if cancelled { Err(RemoteError::Solver(Error::Cancelled)) } else { Ok(result) };
                 }
             }

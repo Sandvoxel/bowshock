@@ -2,7 +2,7 @@
 #![cfg(feature = "serde")]
 
 use bowshock_core::{
-    AftSpec, Analysis, Atmosphere, Backend, BodySpec, FinProfile, FinSpec, FlightConditions, MotorSpec, NoseShape, NoseSpec, Polar, Resolution,
+    AftSpec, Analysis, Atmosphere, Backend, BodySpec, Condition, FinProfile, FinSpec, FlightConditions, MotorSpec, NoseShape, NoseSpec, Polar, Resolution,
 };
 
 fn spec() -> BodySpec {
@@ -116,4 +116,63 @@ fn from_spec_of_spec_gives_the_same_run() {
     let (pa, pb) = (a.run(&[0.8, 2.0]).unwrap(), b.run(&[0.8, 2.0]).unwrap());
     // JSON writes the NaN of a field without a base wake as null on both sides
     assert_eq!(serde_json::to_string(&pa).unwrap(), serde_json::to_string(&pb).unwrap());
+}
+
+/// A finned point at an angle of attack, with its field: the NaN of what the 3D Euler solver does not give (the base and the total
+/// drag, the nose pressure drag, the base pressure and `y+`) comes back as NaN, everything else equal; and the condition itself.
+#[test]
+fn a_finned_angle_of_attack_point_round_trips_with_its_nans_and_its_field() {
+    let d = 0.04;
+    let nose_len = 0.5 * d / 10f64.to_radians().tan();
+    let body = BodySpec { nose: NoseSpec { shape: NoseShape::Cone, length: nose_len, diameter: d }, aft: vec![AftSpec::Tube { length: 10.0 * d - nose_len }] };
+    let fins = FinSpec {
+        count: 4,
+        root_chord: d,
+        tip_chord: d,
+        span: d,
+        sweep: 0.0,
+        thickness: 0.08 * d,
+        roughness: 0.0,
+        root_te_to_base: 0.0,
+        profile: FinProfile::Square,
+    };
+    let polar = Analysis::new(&body)
+        .unwrap()
+        .fins(fins)
+        .backend(Backend::Cpu)
+        .resolution(Resolution::Coarse)
+        .case3_hook(|c| {
+            let s = &mut c.grid.sting;
+            s.n_up = 10;
+            s.n_nose = 16;
+            s.n_seg = vec![12];
+            s.n_ext = 10;
+            s.nj = 24;
+            c.grid.nk = 8;
+        })
+        .max_iterations(50)
+        .keep_fields(true)
+        .run(&[Condition::new(2.0, 4.0)])
+        .unwrap();
+    let back: Polar = roundtrip(&polar);
+    let (a, b) = (&polar.points[0], &back.points[0]);
+    assert_eq!((a.alpha_deg, a.forces, &a.field3), (b.alpha_deg, b.forces, &b.field3));
+    assert!(a.forces.is_some() && a.field3.is_some());
+    for (x, y) in [(a.drag.base, b.drag.base), (a.drag.total, b.drag.total), (a.detail.cd_nose, b.detail.cd_nose), (a.detail.cp_base, b.detail.cp_base)] {
+        assert!(x.is_nan() && y.is_nan(), "{x} -> {y}");
+    }
+    assert_eq!(
+        (a.drag.forebody_pressure, a.drag.friction, a.quality, &a.detail.stop_reason),
+        (b.drag.forebody_pressure, b.drag.friction, b.quality, &b.detail.stop_reason)
+    );
+    // a point at zero incidence has none of it
+    assert!(serde_json::to_string(
+        &Analysis::new(&spec()).unwrap().backend(Backend::Cpu).resolution(Resolution::Coarse).max_iterations(20).run(&[0.5]).unwrap()
+    )
+    .unwrap()
+    .find("forces")
+    .is_none());
+    let c = Condition::new(2.0, 4.0);
+    assert_eq!(roundtrip(&c), c);
+    assert_eq!(serde_json::to_string(&c).unwrap(), r#"{"mach":2.0,"alpha_deg":4.0}"#);
 }

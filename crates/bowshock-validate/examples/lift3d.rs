@@ -282,7 +282,7 @@ fn build_case(args: &Args, body: &BaseBody, fins: &Option<bowshock_core::engine:
 }
 
 /// G2: per Mach a cold first incidence, warm later ones (a warm point ending Failed/Stalled is re-run cold, a diverged cold run
-/// once more with `cfl_max` halved, as `Analysis::run_lift`); one `RESULT {json}` line per point.
+/// once more with `cfl_max` halved, as `Analysis::run` does at an angle of attack); one `RESULT {json}` line per point.
 fn sweep(args: &Args, machs: &[f64], alphas_deg: &[f64]) -> Result<(), String> {
     use bowshock_core::engine::gpu3::GpuRunner3;
     use bowshock_core::engine::result::StopReason;

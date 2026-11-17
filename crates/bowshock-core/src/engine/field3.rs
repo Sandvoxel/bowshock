@@ -7,7 +7,7 @@
 //! fluid cell. The viewer's `sum -cp A n` over the walls therefore reproduces the pressure force `run3::forces_on` reports (a test
 //! below).
 //!
-//! The part of a face is decided in [`classify`], the one place that knows how the solver marks the body and the fins.
+//! The part of a face is decided in `classify`, the one place that knows how the solver marks the body and the fins.
 
 use crate::engine::case3::Case3;
 use crate::field3::{Field3, Part, Symmetry, WallFace};
@@ -15,6 +15,44 @@ use bowshock_cfd::gas3::{cons_to_prim3, Cons3};
 use bowshock_cfd::grid3::{Face3, Grid3};
 use bowshock_cfd::solver3::Solver3;
 use std::f32::consts::PI;
+use std::fmt;
+use std::sync::Arc;
+
+/// The receiver of the live snapshots of a 3D run ([`Analysis::on_field3`](crate::Analysis::on_field3)) and how often it is called. It is
+/// carried by the [`Case3`]; a runner that holds the state `u` of the grid `g` after `it` iterations calls [`Snapshots3::due`] and then
+/// [`Snapshots3::send`].
+#[derive(Clone)]
+pub struct Snapshots3 {
+    /// Iterations between two snapshots: a multiple of [`SAMPLE_INTERVAL`](crate::progress::SAMPLE_INTERVAL).
+    pub every: usize,
+    /// Length of a nose diameter in the unit of the field's coordinates (metres for a dimensional body).
+    pub scale: f64,
+    call: Arc<dyn Fn(Field3) + Send + Sync>,
+}
+
+impl Snapshots3 {
+    /// A receiver `f` called about every `every` iterations (rounded up to a multiple of the progress sampling interval).
+    pub fn new(every: usize, scale: f64, f: impl Fn(Field3) + Send + Sync + 'static) -> Snapshots3 {
+        let step = crate::progress::SAMPLE_INTERVAL;
+        Snapshots3 { every: every.max(1).div_ceil(step) * step, scale, call: Arc::new(f) }
+    }
+
+    /// Whether a snapshot is due after `iteration` iterations.
+    pub fn due(&self, iteration: usize) -> bool {
+        iteration.is_multiple_of(self.every)
+    }
+
+    /// Hands the field of the state `u` on `g` after `iteration` iterations to the receiver.
+    pub fn send(&self, case: &Case3, g: &Grid3, u: &[Cons3], iteration: usize) {
+        (self.call)(field3_of(case, g, u, iteration, self.scale));
+    }
+}
+
+impl fmt::Debug for Snapshots3 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Snapshots3").field("every", &self.every).field("scale", &self.scale).finish()
+    }
+}
 
 /// What a wall face is, as far as the solver's topology goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

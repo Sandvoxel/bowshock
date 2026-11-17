@@ -701,6 +701,9 @@ impl State {
             Ok(table) => {
                 solving.tracker.finish();
                 let (summary, brief, lift_key) = (solving.tracker.summary(table.solve_seconds), solving.tracker.brief(table.solve_seconds), table.key);
+                if let Some(t) = &self.cfd.table {
+                    self.cfd.fields.replace_stability(t, std::mem::take(&mut solving.fields));
+                }
                 let stored = self.cfd.table.as_ref().map(|t| CfdTable { lift: Some(table), ..(**t).clone() });
                 if stored.is_some_and(|t| ctx.doc.store_cfd_table(t)) {
                     self.cfd.lift_summary = Some((lift_key, summary));
@@ -746,10 +749,17 @@ impl State {
     fn sync_flow(&mut self) {
         let on = self.method == Method::CfdTable && uses_cfd(self.analysis);
         let table = self.cfd.table.clone().filter(|_| on && self.cfd_ready());
-        if table.is_none() || self.cfd.solving.is_some() {
+        let running = self.cfd.lift_solving.as_ref().or(self.cfd.solving.as_ref());
+        if table.is_none() || running.is_some() {
             self.flow.open = false;
         }
+        // the Mach numbers of the table, and those the 3D stability solve has a field at
         self.flow.machs = table.as_ref().map(|t| t.points.iter().map(|p| p.mach).collect()).unwrap_or_default();
+        if let Some(t) = &table {
+            self.flow.machs.extend(self.cfd.fields.machs(t));
+            self.flow.machs.sort_by(f64::total_cmp);
+            self.flow.machs.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+        }
         if self.flow.selected.is_none_or(|m| !self.flow.machs.iter().any(|x| (x - m).abs() < 1e-9)) {
             self.flow.selected = flow_view::default_mach(&self.flow.machs);
         }
@@ -761,7 +771,7 @@ impl State {
         if self.flow.selected_alpha.is_none_or(|a| !self.flow.alphas.iter().any(|x| (x - a).abs() < 1e-9)) {
             self.flow.selected_alpha = self.flow.alphas.first().copied();
         }
-        let picture: Option<Arc<Field3>> = match (&self.cfd.solving, &table, self.flow.selected, self.flow.selected_alpha) {
+        let picture: Option<Arc<Field3>> = match (running, &table, self.flow.selected, self.flow.selected_alpha) {
             (Some(s), _, _, _) if on => s.picture.clone(),
             (None, Some(t), Some(m), Some(a)) if self.flow.open => self.cfd.fields.get(t, m, a).cloned(),
             _ => None,
