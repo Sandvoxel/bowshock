@@ -79,7 +79,9 @@ impl Env {
                 .unwrap_or_default(),
             example_two_stage: std::env::var("BOWSHOCK_EXAMPLE").is_ok_and(|v| v == "two_stage"),
             recent_file: var("BOWSHOCK_RECENT_FILE").map(PathBuf::from).or_else(|| config_file("recent.txt")),
-            settings_file: var("BOWSHOCK_SETTINGS_FILE").map(PathBuf::from).or_else(|| config_file("settings.json")),
+            // A headless `bowshock drive` (not `animate`) starts from the default settings and keeps none, so a script sees the same
+            // theme, units and compute choice on every machine and never rewrites the user's file; `BOWSHOCK_SETTINGS_FILE` opts in.
+            settings_file: var("BOWSHOCK_SETTINGS_FILE").map(PathBuf::from).or_else(|| if animate { config_file("settings.json") } else { None }),
             motors_dir: default_motors_dir(),
             presets_dir: var("BOWSHOCK_PRESETS_DIR").map(PathBuf::from).or_else(|| config_file("presets")),
             thrustcurve_api: std::env::var("BOWSHOCK_THRUSTCURVE_API").ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty()),
