@@ -796,6 +796,10 @@ impl Analysis {
     ///   later angles start from the field of the previous one, and a warm point that ends `Failed` or `Stalled` is re-run cold. A
     ///   point whose run diverged is re-run once with the implicit CFL limit halved.
     ///
+    /// Under the hidden [`Engine::Solver3`] ([`Analysis::engine`], or `BOWSHOCK_ENGINE=3d`) every condition is the 3D solver's on the base-wake grid instead
+    /// (`analysis/solver3.rs`): the wedge at zero incidence, the sector with fins, the half domain at an angle of attack; Euler only, a viscous request is an
+    /// error. At an angle of attack its [`Drag`] holds the axial force split by surface (the total is [`Forces::ca`]) rather than NaN.
+    ///
     /// Conditions of both kinds in one call run one after the other: the drag sweep first. The backends are as for
     /// [`Analysis::backend`]; [`Polar::backend`] is the GPU only if every condition ran on it.
     pub fn run<C: Into<Condition> + Copy>(&self, conditions: &[C]) -> Result<Polar, Error> {
@@ -803,7 +807,10 @@ impl Analysis {
         self.route(&conditions)
     }
 
-    /// THE ROUTE: the one place that decides which engine solves which condition, and the only place that knows there are two. A
+    /// THE ROUTE: the one place that decides which engine solves which condition, and the only place that knows there are two. With
+    /// [`Engine::Solver3`] it hands every condition to `run_solver3` (`analysis/solver3.rs`) instead: the flip of the default engine, after which the rest of this
+    /// comment is history.
+    /// A
     /// condition at zero incidence goes to [`Analysis::run_drag`] (the axisymmetric solver), one at an angle of attack to
     /// [`Analysis::run_lift_points`] (the 3D Euler solver). When one 3D viscous solver does both, this function becomes a single call
     /// of it and the two paths below are deleted.
