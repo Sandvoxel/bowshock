@@ -11,7 +11,8 @@ move (100, 1000)
 move (102, 1002)
 screenshot sector-default-dark.png
 
-# The viewer shows the walls of the whole rocket (the sector tiled round the axis) coloured by Cp by default; the meridian Mach sheet goes through a fin plane
+# The viewer shows the walls of the whole rocket (the sector tiled round the axis) coloured by Cp by default; the meridian Mach sheet of a sector is the one through
+# its fin (the fin lies on the sector's first plane), a click on Fin plane puts it there when it is not
 click "Fin plane"
 move (100, 1000)
 move (102, 1002)
@@ -20,6 +21,7 @@ screenshot sector-whole-rocket-fin-plane-dark.png
 # the half domain at 6 degrees (the angle stepper: 0, 2, 6)
 click "▶"
 click "▶"
+click "Fin plane"
 move (100, 1000)
 move (102, 1002)
 screenshot half-6deg-whole-rocket-fin-plane-dark.png
