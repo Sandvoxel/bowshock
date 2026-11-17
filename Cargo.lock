@@ -422,6 +422,7 @@ dependencies = [
  "bowshock-reference",
  "ciborium",
  "flate2",
+ "getrandom 0.3.4",
  "roxmltree 0.21.2",
  "serde",
  "serde_json",

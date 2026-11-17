@@ -11,6 +11,7 @@
 
 mod appearance;
 pub mod compute;
+mod editor;
 mod nav;
 pub mod storage;
 mod units;

@@ -559,6 +559,53 @@ impl State {
         stack![area, self.drop_cue(ctx).unwrap_or_else(|| Space::new().boxed())].boxed()
     }
 
+    /// What a carried part over the bin is told: `Drop to delete` for one picked up off the rocket (letting go deletes it) and
+    /// `Drop to put back` for one that came from the bin, with whether it is the deleting one. `None` while nothing is carried or the
+    /// cursor is elsewhere.
+    pub(crate) fn cue_words(&self, ctx: &Ctx) -> Option<(&'static str, bool)> {
+        if !self.hovered || !ctx.drag.in_hand() {
+            return None;
+        }
+        let picked = ctx.drag.axial.as_ref().is_some_and(|d| d.origin.is_some())
+            || ctx.drag.radial.as_ref().is_some_and(|d| d.origin.is_some())
+            || ctx.drag.internal.as_ref().is_some_and(|d| d.origin.is_some())
+            || ctx.drag.lifted.is_some();
+        Some((if picked { DROP_TO_DELETE } else { DROP_TO_PUT_BACK }, picked))
+    }
+
+    /// While a carried part is over the bin: what letting go (or clicking) there does. The bin's rows are dimmed to about a third so
+    /// they read as inactive, a part picked up off the rocket (deleted) also washes the bin in the `err` soft ground, and the words
+    /// sit on their own opaque plate centred in the bin: `err` on a surface ground with an `err` frame for the delete, neutral
+    /// colours for a part from the bin (put back).
+    fn drop_cue<'a>(&self, ctx: &Ctx) -> Option<Element<'a, Message>> {
+        let (words, delete) = self.cue_words(ctx)?;
+        let fill = |alpha: f32, err: bool| {
+            container(Space::new()).width(Fill).height(Fill).style(move |theme: &Theme| {
+                let t = theme::tokens(theme);
+                let ground = if err { t.err.scale_alpha(alpha) } else { t.bg_200.scale_alpha(alpha) };
+                container::Style { background: Some(Background::Color(ground)), ..container::Style::default() }
+            })
+        };
+        let words_style = move |theme: &Theme| {
+            let t = theme::tokens(theme);
+            text::Style { color: Some(if delete { t.err } else { t.ink }), ..text::Style::default() }
+        };
+        let plate = container(text(words).font(MONO).size(TEXT_BODY).style(words_style)).padding([SPACE_2, theme::PAD_PANEL]).style(move |theme: &Theme| {
+            let t = theme::tokens(theme);
+            container::Style {
+                background: Some(Background::Color(t.bg_300)),
+                border: theme::frame(if delete { t.err } else { t.line_200 }),
+                ..container::Style::default()
+            }
+        });
+        let mut layers = stack![fill(0.65, false).boxed()];
+        if delete {
+            layers = layers.push(fill(0.22, true).boxed());
+        }
+        Some(layers.push(container(plate).center(Fill).boxed()).boxed())
+    }
+}
+
 /// `X` / `Shift+X` / the mouse wheel mid-drag: the next (or previous) symmetry count. A radial group in the air takes it as its
 /// own count (a group from the bin also sets the count for the next one; a picked-up group keeps its own); otherwise it is the
 /// bin's count.

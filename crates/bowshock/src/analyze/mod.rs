@@ -27,6 +27,7 @@ use crate::widgets::plot::{PlotMessage, PlotState};
 
 pub mod cfd;
 pub mod compute;
+mod flow_view;
 pub mod flutter;
 pub mod import;
 pub mod optimize;

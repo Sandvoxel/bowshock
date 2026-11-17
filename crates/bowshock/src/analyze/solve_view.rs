@@ -34,6 +34,7 @@ use crate::widgets::field::rule;
 use crate::widgets::glyph::{self, Mark, Tone};
 use crate::widgets::plot::ticks::{fmt_fixed, nice_ticks};
 use crate::widgets::plot::SeriesColor;
+use crate::widgets::segmented::segmented;
 
 // ---------------------------------------------------------------------------------------------------------------------
 // What is on show
