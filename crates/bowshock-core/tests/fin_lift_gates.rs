@@ -93,6 +93,19 @@ fn arcas_body_spec() -> BodySpec {
     }
 }
 
+/// The Arcas fins as the reference crate has them (`bowshock_reference::arcas`): trapezoidal **double wedge**, sharp leading and trailing edge, one mean thickness.
+///
+/// Source (read in the reports, NTRS 19670020031 and 19670020050): NASA TN D-4014 (Babb & Fuller, 1967) p. 4, "The model consisted of a cylindrical centerbody, a
+/// boattailed afterbody, and **trapezoidal double-wedge fins**. The afterbody boattail ended with a reflexed lip." Fig. 1(b), fin details: section 0.150 in thick at
+/// the root and 0.096 in at the tip (a spanwise taper of 1.47 degrees; the model takes the mean, 0.123 in: the mean of `t^2` is the same to 1 %), wedge half angle
+/// 2.72 degrees "normal to 15 degree line", 30 degree leading-edge sweep; fin anchors (tabs 0.220 x 2.165 x 0.035 in) at the roots. Both reports: carborundum
+/// transition strips on the nose and "1/2 in aft of the leading edge of each fin"; D-4013 p. 4: a 1 in diameter sting 11.5 in aft of the base, axial force not corrected
+/// to free-stream conditions at the base except for the summary data at roll 0, alpha 0 (the data used here); D-4014 Fig. 4: the chamber axial-force coefficient is
+/// 0.02-0.04 at alpha 0 (the sign of the correction is not stated).
+///
+/// **A flat-back (blunt trailing edge) section is not supported by these sources** and is not used: an Euler probe (`tests/arcas_probe.rs`) shows a flat-back fin
+/// would close the supersonic increment (DESIGN3D L item 33), but the reports say double wedge; what the double wedge plus flat-plate friction misses at Mach 1.5-2.3
+/// (0.07 / 0.04 / 0.03 of C_A) is **unexplained**: candidates are the fin anchors and the strips on the fins, the sting, and the sign / fin-dependence of the chamber correction.
 fn arcas_fin_spec() -> FinSpec {
     FinSpec {
         count: 4,
