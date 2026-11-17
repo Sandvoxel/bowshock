@@ -387,7 +387,7 @@ fn geometry(args: &Args) -> Result<(), String> {
         [g.x[id], g.y[id], g.z[id]]
     };
     let rad = |p: [f64; 3]| (p[1] * p[1] + p[2] * p[2]).sqrt();
-    println!("grid ni {} nj {} nk {} cells {}; body base x {:.4}, axis_cells {}", g.ni, g.nj, g.nk, g.ni * g.nj * g.nk, case.body.x_base(), g.axis_cells);
+    println!("grid ni {} nj {} nk {} cells {}; body base x {:.4}, axis {:?}", g.ni, g.nj, g.nk, g.ni * g.nj * g.nk, case.body.x_base(), g.axis);
     if let Some(f) = &case.grid.fins {
         println!(
             "requested fins: count {} root {} tip {} span {} sweep {} thickness {} te_to_base {} profile {:?}",

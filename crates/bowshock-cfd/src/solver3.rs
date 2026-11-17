@@ -7,16 +7,17 @@
 //! 3. flux per i / j / k face (`face_flux_lm3`; the lateral velocity is limited in the face's cylindrical frame, [`face_rot`]);
 //! 4. cell residual `R = -(1/V) sum_f S_f F_f`.
 //!
-//! Boundaries (see [`Solver3::new`] for the grid conventions): `i = 0`, `i = ni`, `j = nj` characteristic far field;
-//! `j = 0, i < axis_cells` the symmetry axis (ghost = the cell across the axis, found through the pitch-plane symmetry
-//! `theta -> pi - theta` and a sign flip of `v`); `j = 0, i >= axis_cells` slip wall; `k = 0`, `k = nk` symmetry planes.
-//! Cells inside a [`crate::grid3::SolidBox`] (fins) are never updated and act as slip walls on their fluid neighbours.
+//! Boundaries (see [`Solver3::new`] for the grid conventions): `i = 0`, `i = ni`, `j = nj` characteristic far field; the rows of the grid's axis
+//! runs ([`crate::grid3::AxisRun`]) the symmetry axis (ghost = the state across the axis, [`crate::axis3::AxisMap`]); the rest of `j = 0` a slip wall;
+//! `k = 0`, `k = nk` symmetry planes. Cells with a part ([`Grid3::part`]: the body, the sting, fins) are never updated and act as slip walls on
+//! their fluid neighbours; dead cells are never updated either but do not reflect (the axis ghost shows through them).
 
+use crate::axis3::AxisMap;
 use crate::bc3::characteristic_ghost3;
 use crate::flux::Limiter;
 use crate::flux3::{face_flux_lm3, face_rot};
 use crate::gas3::{cons_to_prim3, prim_to_cons3, reflect3, sound_speed3, Cons3, Prim3};
-use crate::grid3::{Face3, Grid3};
+use crate::grid3::{Face3, Grid3, Symmetry, PART_DEAD, PART_FLUID};
 use crate::implicit::{DtMode, ImplicitParams};
 use rayon::prelude::*;
 
@@ -66,13 +67,15 @@ pub struct Solver3 {
     pub(crate) fj: Vec<Cons3>,
     pub(crate) fk: Vec<Cons3>,
     u0: Vec<Cons3>,
-    /// Per cell: inside a solid box.
+    /// Per cell: not fluid (a wall or a dead cell): never updated.
     pub(crate) solid: Vec<bool>,
+    /// Per cell: a wall for its fluid neighbours (solid and not dead).
+    pub(crate) wall: Vec<bool>,
     pub(crate) n_active: usize,
     /// Iterations since the start of the implicit CFL ramp.
     pub(crate) ramp_k: usize,
-    /// Axis cells: `axis_k[i * nk + k]` is the cell index `k'` across the axis of cell `(i, 0, k)`.
-    axis_k: Vec<usize>,
+    /// Ghost states across the axis runs of the grid.
+    axis: AxisMap,
     /// `face_rot` of every face of the three families.
     rot_i: Vec<[f64; 2]>,
     rot_j: Vec<[f64; 2]>,
@@ -84,36 +87,10 @@ impl Solver3 {
     pub fn new(grid: Grid3, cfg: Config3) -> Solver3 {
         let (ni, nj, nk) = (grid.ni, grid.nj, grid.nk);
         let nc = ni * nj * nk;
-        let mut solid = vec![false; nc];
-        for b in &grid.solid {
-            for k in b.k.clone() {
-                for j in b.j.clone() {
-                    for i in b.i.clone() {
-                        solid[(k * nj + j) * ni + i] = true;
-                    }
-                }
-            }
-        }
+        let solid: Vec<bool> = grid.part.iter().map(|&p| p != PART_FLUID).collect();
+        let wall: Vec<bool> = grid.part.iter().map(|&p| !matches!(p, PART_FLUID | PART_DEAD)).collect();
         let n_active = solid.iter().filter(|s| !**s).count();
-        // cell across the axis: the one whose centroid azimuth is closest to pi - theta
-        let theta = |i: usize, k: usize| {
-            let c = grid.xc[(k * nj) * ni + i];
-            c[1].atan2(c[2])
-        };
-        let mut axis_k = vec![0; grid.axis_cells.min(ni) * nk];
-        for i in 0..grid.axis_cells.min(ni) {
-            for k in 0..nk {
-                let target = std::f64::consts::PI - theta(i, k);
-                let mut best = (f64::INFINITY, 0);
-                for kk in 0..nk {
-                    let d = (theta(i, kk) - target).abs();
-                    if d < best.0 {
-                        best = (d, kk);
-                    }
-                }
-                axis_k[i * nk + k] = best.1;
-            }
-        }
+        let axis = AxisMap::new(&grid);
         let rot = |f: &[Face3]| f.iter().map(|f| face_rot(f.c)).collect::<Vec<_>>();
         let q = prim_to_cons3(&cfg.freestream);
         Solver3 {
@@ -127,15 +104,21 @@ impl Solver3 {
             fk: vec![[0.0; 5]; grid.kface.len()],
             u0: vec![[0.0; 5]; nc],
             solid,
+            wall,
             n_active,
             ramp_k: 0,
-            axis_k,
+            axis,
             rot_i: rot(&grid.iface),
             rot_j: rot(&grid.jface),
             rot_k: rot(&grid.kface),
             grid,
             cfg,
         }
+    }
+
+    /// Whether the grid is a single-cell wedge about an axisymmetric flow: no `k` line solve and no `k` term in the time step.
+    pub(crate) fn is_wedge(&self) -> bool {
+        self.grid.sym == Symmetry::Wedge
     }
 
     /// Restart the CFL ramp of the implicit scheme (call at the start of a run / after a change of the free stream).
@@ -171,7 +154,7 @@ impl Solver3 {
     fn fill_ghosts(&mut self) {
         let (ni, nj, nk) = (self.grid.ni, self.grid.nj, self.grid.nk);
         let fs = self.cfg.freestream;
-        let (w, g, axis_k) = (&mut self.w, &self.grid, &self.axis_k);
+        let (w, g, axis) = (&mut self.w, &self.grid, &self.axis);
         let id = |i: isize, j: isize, k: isize| pidx3(ni, nj, nk, i, j, k);
         let (nii, njj, nkk) = (ni as isize, nj as isize, nk as isize);
         for k in 0..nkk {
@@ -187,14 +170,7 @@ impl Solver3 {
             }
             for i in 0..nii {
                 let iu = i as usize;
-                if iu < g.axis_cells {
-                    let kp = axis_k[iu * nk + k as usize] as isize;
-                    for m in 1..=NG as isize {
-                        let mut s = w[id(i, m - 1, kp)];
-                        s[2] = -s[2];
-                        w[id(i, -m, k)] = s;
-                    }
-                } else {
+                if !g.is_axis(iu, 0) {
                     let f = &g.jface[(k as usize * (nj + 1)) * ni + iu];
                     for m in 1..=NG as isize {
                         w[id(i, -m, k)] = reflect3(&w[id(i, m - 1, k)], f.n);
@@ -204,6 +180,18 @@ impl Solver3 {
                 let gh = Self::ghost_char(&fs, &w[id(i, njj - 1, k)], f.n, 1.0);
                 for m in 1..=NG as isize {
                     w[id(i, njj + m - 1, k)] = gh;
+                }
+            }
+        }
+        // the axis: the state across it (rows below the run's row)
+        for (run, map) in g.axis.iter().zip(&axis.runs) {
+            for k in 0..nk {
+                for i in run.i.clone() {
+                    let ghost = &map.ghost[(i - map.i0) * nk + k];
+                    for m in 1..=NG {
+                        let s = ghost.state(|kk| w[id(i as isize, (run.j + m - 1) as isize, kk as isize)]);
+                        w[id(i as isize, run.j as isize - m as isize, k as isize)] = s;
+                    }
                 }
             }
         }
@@ -236,9 +224,10 @@ impl Solver3 {
             });
         }
         self.fill_ghosts();
-        let Solver3 { grid, w, fi, fj, fk, res, solid, rot_i, rot_j, rot_k, .. } = self;
+        let Solver3 { grid, w, fi, fj, fk, res, solid, wall, rot_i, rot_j, rot_k, .. } = self;
         let has_solid = !grid.solid.is_empty();
-        let fam = Family { ni, nj, nk, w, solid, has_solid, lim, low_mach };
+        let wedge = grid.sym == Symmetry::Wedge;
+        let fam = Family { ni, nj, nk, w, solid, wall, has_solid, lim, low_mach, wedge };
         fam.fluxes(0, &grid.iface, rot_i, fi);
         fam.fluxes(1, &grid.jface, rot_j, fj);
         fam.fluxes(2, &grid.kface, rot_k, fk);
@@ -273,6 +262,7 @@ impl Solver3 {
     /// `lam(f) = (|u.n| + c) area`. Zero in solid cells.
     pub(crate) fn compute_dt(&mut self, cfl: f64, mode: DtMode) {
         let (ni, nj, nk) = (self.grid.ni, self.grid.nj, self.grid.nk);
+        let wedge = self.is_wedge();
         let (grid, w, solid) = (&self.grid, &self.w, &self.solid);
         self.dt.par_chunks_mut(ni * nj).enumerate().for_each(|(k, pl)| {
             for j in 0..nj {
@@ -289,9 +279,10 @@ impl Solver3 {
                     let jl = (k * (nj + 1) + j) * ni + i;
                     let li = 0.5 * (lam(&grid.iface[il]) + lam(&grid.iface[il + 1]));
                     let lj = 0.5 * (lam(&grid.jface[jl]) + lam(&grid.jface[jl + ni]));
-                    let lk = 0.5 * (lam(&grid.kface[c]) + lam(&grid.kface[c + ni * nj]));
+                    let lk = if wedge { 0.0 } else { 0.5 * (lam(&grid.kface[c]) + lam(&grid.kface[c + ni * nj])) };
                     pl[j * ni + i] = match mode {
                         DtMode::Sum => cfl * grid.vol[c] / (li + lj + lk),
+                        DtMode::MinDirection if wedge => cfl * grid.vol[c] / (2.0 * li.min(lj)),
                         DtMode::MinDirection => cfl * grid.vol[c] / (3.0 * li.min(lj).min(lk)),
                     };
                 }
@@ -334,9 +325,12 @@ struct Family<'a> {
     nk: usize,
     w: &'a [Prim3],
     solid: &'a [bool],
+    wall: &'a [bool],
     has_solid: bool,
     lim: Limiter,
     low_mach: bool,
+    /// Single-cell wedge: the `k` faces carry the pressure flux only.
+    wedge: bool,
 }
 
 impl Family<'_> {
@@ -350,6 +344,20 @@ impl Family<'_> {
             && (c[1] as usize) < self.nj
             && (c[2] as usize) < self.nk
             && self.solid[(c[2] as usize * self.nj + c[1] as usize) * self.ni + c[0] as usize]
+    }
+
+    /// Whether the cell is a wall for its fluid neighbours (a solid cell that is not dead: the stencil beyond a dead cell reads the padded state, which
+    /// holds the axis ghost).
+    #[inline]
+    fn is_wall(&self, c: [isize; 3]) -> bool {
+        self.has_solid
+            && c[0] >= 0
+            && c[1] >= 0
+            && c[2] >= 0
+            && (c[0] as usize) < self.ni
+            && (c[1] as usize) < self.nj
+            && (c[2] as usize) < self.nk
+            && self.wall[(c[2] as usize * self.nj + c[1] as usize) * self.ni + c[0] as usize]
     }
 
     #[inline]
@@ -385,6 +393,13 @@ impl Family<'_> {
                     let off = |s: isize| [p0[0] + s * e[0], p0[1] + s * e[1], p0[2] + s * e[2]];
                     let (cm2, cm1, cp1) = (off(-2), off(-1), off(1));
                     let (mut wm2, mut wm1, mut wp0, mut wp1) = (self.at(cm2), self.at(cm1), self.at(p0), self.at(cp1));
+                    if self.wedge && dir == 2 {
+                        // a wedge's `k` faces are the symmetry planes of an axisymmetric flow: the flux is the pressure of the cell (the 2D radial
+                        // momentum source), not a Riemann problem against the mirror image (which would carry acoustic waves across the wedge)
+                        let w = if k == 0 { wp0 } else { wm1 };
+                        po[j * nfi + i] = [0.0, w[4] * f.n[0], w[4] * f.n[1], w[4] * f.n[2], 0.0];
+                        continue;
+                    }
                     if self.has_solid {
                         let (sm1, sp0) = (self.is_solid(cm1), self.is_solid(p0));
                         if sm1 && sp0 {
@@ -398,10 +413,10 @@ impl Family<'_> {
                             wp0 = reflect3(&wm1, f.n);
                             wp1 = if self.is_solid(cm2) { wp0 } else { reflect3(&wm2, f.n) };
                         } else {
-                            if self.is_solid(cm2) {
+                            if self.is_wall(cm2) {
                                 wm2 = reflect3(&wm1, faces[fidx - fstride].n);
                             }
-                            if self.is_solid(cp1) {
+                            if self.is_wall(cp1) {
                                 wp1 = reflect3(&wp0, faces[fidx + fstride].n);
                             }
                         }
@@ -419,7 +434,7 @@ mod tests {
     use crate::flux3::tests::Rng;
     use crate::gas3::freestream3;
     use crate::grid::{cone_grid, ConeGridParams, Grid};
-    use crate::grid3::{revolve, SolidBox};
+    use crate::grid3::{revolve, AxisRun, Part, SolidBox};
 
     fn cfg(fs: Prim3, scheme: Scheme3, limiter: Limiter) -> Config3 {
         Config3 { freestream: fs, cfl: 0.5, limiter, first_order_iters: 0, low_mach: false, scheme }
@@ -454,7 +469,7 @@ mod tests {
             })
             .collect();
         let mut g3 = revolve(&g2, nk, &theta).unwrap();
-        g3.axis_cells = ni;
+        g3.axis = vec![AxisRun { j: 0, i: 0..ni }];
         let fs = freestream3(0.8, 6f64.to_radians());
         let q0 = prim_to_cons3(&fs);
         for (name, scheme) in
@@ -479,7 +494,7 @@ mod tests {
     fn cone3(g2: &Grid, nk: usize) -> Grid3 {
         let theta: Vec<f64> = (0..=nk).map(|k| std::f64::consts::PI * k as f64 / nk as f64).collect();
         let mut g = revolve(g2, nk, &theta).unwrap();
-        g.axis_cells = n_up(g2);
+        g.axis = vec![AxisRun { j: 0, i: 0..n_up(g2) }];
         g
     }
 
@@ -599,8 +614,8 @@ mod tests {
         let g2 = Grid::try_from_nodes(ni, nj, x, r).unwrap();
         let theta: Vec<f64> = (0..=nk).map(|k| std::f64::consts::PI * k as f64 / nk as f64).collect();
         let mut g = revolve(&g2, nk, &theta).unwrap();
-        g.axis_cells = ni;
-        g.solid = vec![SolidBox { i: 3..5, j: 0..3, k: 3..4 }];
+        g.axis = vec![AxisRun { j: 0, i: 0..ni }];
+        g.mark_solid(SolidBox { i: 3..5, j: 0..3, k: 3..4 }, Some(Part::Fin(0)));
         g
     }
 

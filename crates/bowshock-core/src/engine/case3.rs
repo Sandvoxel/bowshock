@@ -2,8 +2,8 @@
 //! CPU solver built from them. Lengths are in nose diameters (`d = 1`).
 
 use crate::engine::body_grid::{BaseBody, Body, Nose};
-use crate::engine::case::sting_grid;
-use crate::engine::grid3::{body_grid3, Fins3, Grid3Params};
+use crate::engine::case::{base_grid, sting_grid};
+use crate::engine::grid3::{body_grid3, Domain3, Fins3, Grid3Params, WEDGE_ANGLE};
 use crate::error::Error;
 use crate::progress::ProgressSink;
 use crate::spec::FinProfile;
@@ -84,12 +84,36 @@ pub struct Case3 {
 }
 
 impl Case3 {
-    /// Sting grid of the 2D case ([`crate::engine::case::Case::new`] with `Wake::Sting`), `24 << level` azimuthal cells and
-    /// [`Numerics3::auto`].
+    /// Sting grid of the 2D case ([`crate::engine::case::Case::new`] with `Wake::Sting`), the half domain with `24 << level` azimuthal cells
+    /// and [`Numerics3::auto`].
     pub fn new(mach: f64, alpha: f64, body: BaseBody, fins: Option<Fins3>, level: u32) -> Case3 {
-        let sting = sting_grid(&body, level);
-        let grid = Grid3Params { sting, fins, nk: Grid3Params::default_nk(level), level, fin_chord_cells: None, span_cells: None };
+        let grid = Grid3Params::half(sting_grid(&body, level), fins, Grid3Params::default_nk(level), level);
         Case3 { mach, alpha, body, grid, numerics: Numerics3::auto(mach, level), progress: None }
+    }
+
+    /// An axisymmetric body at zero incidence as a single-cell wedge of [`WEDGE_ANGLE`] on the base-wake grid of the 2D case
+    /// ([`crate::engine::case::Case::new`] with `Wake::Base`), [`Numerics3::auto`].
+    pub fn wedge(mach: f64, body: BaseBody, level: u32) -> Case3 {
+        let mut c = Case3::new(mach, 0.0, body, None, level);
+        c.grid.base = Some(base_grid(&c.body, level));
+        c.grid.domain = Domain3::Wedge { dtheta: WEDGE_ANGLE };
+        c
+    }
+
+    /// A finless body on the base-wake grid as a half domain (incidence `alpha`), `24 << level` azimuthal cells.
+    pub fn base_half(mach: f64, alpha: f64, body: BaseBody, level: u32) -> Case3 {
+        let mut c = Case3::new(mach, alpha, body, None, level);
+        c.grid.base = Some(base_grid(&c.body, level));
+        c
+    }
+
+    /// A body with `fins.count` fins at zero incidence as the sector `[0, pi/count]` on the sting grid (the fins are not built on the base-wake
+    /// grid yet), `nk` azimuthal cells over the sector.
+    pub fn sector(mach: f64, body: BaseBody, fins: Fins3, nk: usize, level: u32) -> Case3 {
+        let mut c = Case3::new(mach, 0.0, body, Some(fins), level);
+        c.grid.domain = Domain3::Sector;
+        c.grid.nk = nk;
+        c
     }
 
     /// Free-stream state at the case's Mach number and incidence.

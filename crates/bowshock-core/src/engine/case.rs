@@ -52,30 +52,7 @@ impl Case {
     /// Domain `10 L` upstream and radially, `5 L` downstream (`L` = total body length), grid level 0/1/2 (cells per diameter
     /// doubling each level).
     pub fn new(mach: f64, body: BaseBody, level: u32, wake: Wake, numerics: Numerics) -> Case {
-        let f = 1usize << level;
-        let dx_tip = 0.03 / f as f64;
-        let l_body = body.x_base();
-        let n_sting = if body.sting_radius > 0.0 { 4 * f } else { 0 };
-        // cells per segment: tubes are finer than cones, never finer than the end-cell size `dx_tip` allows, never coarser than
-        // `MAX_AXIAL_CELL / f` (see `segment_cells`)
-        let n_seg_base: Vec<usize> = body.segments.iter().map(|s| segment_cells(if s.slope == 0.0 { 40 * f } else { 24 * f }, s.length, f, dx_tip)).collect();
-        let grid_base = BaseGridParams {
-            body: body.clone(),
-            x_up: 10.0 * l_body,
-            x_down: 5.0 * l_body,
-            r_far: 10.0 * l_body,
-            n_up: 28 * f,
-            n_nose: 48 * f,
-            n_seg: n_seg_base,
-            n_wake: 40 * f,
-            n_sting,
-            n_gap: 12 * f,
-            nj_out: 64 * f,
-            dx_tip,
-            dr_wall: 0.03 / f as f64,
-            gap_one_sided: false,
-            nozzle: None,
-        };
+        let grid_base = base_grid(&body, level);
         let grid_sting = sting_grid(&body, level);
         Case { mach, body, wake, grid_base, grid_sting, numerics, viscous: None, motor: None, progress: None, fields: None }
     }
@@ -243,6 +220,33 @@ pub(crate) fn sting_grid(body: &BaseBody, level: u32) -> LargeGridParams {
     }
 }
 
+/// Base-wake grid parameters of [`Case::new`] for `body` at grid level `level` (domain `10 L` upstream and radially, `5 L` downstream).
+pub(crate) fn base_grid(body: &BaseBody, level: u32) -> BaseGridParams {
+    let f = 1usize << level;
+    let dx_tip = 0.03 / f as f64;
+    let l_body = body.x_base();
+    let n_sting = if body.sting_radius > 0.0 { 4 * f } else { 0 };
+    // cells per segment: tubes are finer than cones, never finer than the end-cell size `dx_tip` allows, never coarser than
+    // `MAX_AXIAL_CELL / f` (see `segment_cells`)
+    let n_seg: Vec<usize> = body.segments.iter().map(|s| segment_cells(if s.slope == 0.0 { 40 * f } else { 24 * f }, s.length, f, dx_tip)).collect();
+    BaseGridParams {
+        body: body.clone(),
+        x_up: 10.0 * l_body,
+        x_down: 5.0 * l_body,
+        r_far: 10.0 * l_body,
+        n_up: 28 * f,
+        n_nose: 48 * f,
+        n_seg,
+        n_wake: 40 * f,
+        n_sting,
+        n_gap: 12 * f,
+        nj_out: 64 * f,
+        dx_tip,
+        dr_wall: 0.03 / f as f64,
+        gap_one_sided: false,
+        nozzle: None,
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
