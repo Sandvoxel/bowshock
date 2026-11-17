@@ -1,16 +1,13 @@
-//! Gates of the 3D topology (stage S1): the base-wake grid revolved into a single-cell wedge, the fin sector and the half domain agree with each other and
-//! with the 2D axisymmetric solver. The Euler equations on the CPU; the slow comparisons are `#[ignore]`d (run with `--ignored --nocapture`).
+//! Gates of the 3D topology (stage S1) and of the fins on the base-wake grid: the base-wake grid revolved into a single-cell wedge, the fin sector and the half
+//! domain agree with each other (the comparison with the 2D axisymmetric solver and with Taylor-Maccoll is `tests/wedge_gates.rs`, G-W1 and G-W4 against the
+//! frozen fixture). The Euler equations on the CPU; the slow comparisons are `#[ignore]`d (run with `--ignored --nocapture`).
 
 use bowshock_cfd::gas3::freestream3;
 use bowshock_cfd::grid3::Symmetry;
 use bowshock_cfd::solver3::Solver3;
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
-use bowshock_core::engine::case::{Case, Wake};
 use bowshock_core::engine::case3::{Case3, Tier};
 use bowshock_core::engine::grid3::{Domain3, FinPhase, Fins3};
-use bowshock_core::engine::numerics::Numerics;
-use bowshock_core::engine::result::StopReason;
-use bowshock_core::engine::run::run_cold;
 use bowshock_core::engine::run3::{drag_parts, run3_on, wall_forces, DragParts, Wall};
 
 /// Tangent ogive (fineness 3), 6 d cylinder, 1 d boattail of 5 degrees: nose, one tube and one cone, a base smaller than the body.
@@ -53,7 +50,7 @@ fn rest_state_is_a_fixed_point(case: Case3, what: &str) {
 #[test]
 fn a_gas_at_rest_stays_at_rest_on_every_domain() {
     rest_state_is_a_fixed_point(Case3::wedge(0.5, boattailed(), 0), "wedge on the base grid");
-    rest_state_is_a_fixed_point(small(Case3::base_half(0.5, 0.0, boattailed(), Tier::Euler, 0)), "half domain on the base grid");
+    rest_state_is_a_fixed_point(small(Case3::base_half(0.5, 0.0, boattailed(), None, Tier::Euler, 0)), "half domain on the base grid");
     let mut sector = Case3::tiny_anf(0.5, 0.0);
     sector.grid.domain = Domain3::Sector;
     sector.grid.nk = 5;
@@ -72,7 +69,8 @@ fn a_gas_at_rest_stays_at_rest_on_every_domain() {
 /// nose are found by part and direction.
 #[test]
 fn wall_classes_partition_the_closed_body() {
-    for (case, what) in [(Case3::wedge(0.5, boattailed(), 0), "wedge"), (small(Case3::base_half(0.5, 0.0, boattailed(), Tier::Euler, 0)), "half domain")] {
+    for (case, what) in [(Case3::wedge(0.5, boattailed(), 0), "wedge"), (small(Case3::base_half(0.5, 0.0, boattailed(), None, Tier::Euler, 0)), "half domain")]
+    {
         let s = case.build_solver().unwrap();
         let g = &s.grid;
         let p_inf = case.freestream()[4];
@@ -90,57 +88,59 @@ fn wall_classes_partition_the_closed_body() {
     }
 }
 
+/// ANF body with its fins on the base-wake grid: a sector of `n` fins (`nk` cells) or the half domain, fins flush with the base.
+fn finned_base_case(n: u32, half: Option<FinPhase>, nk: usize) -> Case3 {
+    let mut f = tiny_fins(n);
+    f.profile = bowshock_core::FinProfile::DoubleWedge;
+    let mut c = match half {
+        None => Case3::sector(0.5, cone_cylinder(), f, Tier::Euler, 0),
+        Some(phase) => {
+            let mut c = Case3::base_half(0.5, 0.0, cone_cylinder(), Some(f), Tier::Euler, 0);
+            c.grid.domain = Domain3::Half { phase };
+            c
+        }
+    };
+    c.grid.nk = nk;
+    c
+}
+
+#[test]
+fn a_gas_at_rest_stays_at_rest_with_fins_on_the_base_grid() {
+    rest_state_is_a_fixed_point(finned_base_case(4, None, 5), "N = 4 sector on the base grid");
+    rest_state_is_a_fixed_point(finned_base_case(3, None, 5), "N = 3 sector (odd) on the base grid");
+    rest_state_is_a_fixed_point(finned_base_case(4, Some(FinPhase::InPlane), 8), "N = 4 half domain on the base grid, fins in the pitch plane");
+    rest_state_is_a_fixed_point(finned_base_case(4, Some(FinPhase::Between), 8), "N = 4 half domain on the base grid, fins between");
+}
+
+/// Fins flush with the base: the walls of body, base and fins are one closed surface (a uniform overpressure gives no net force), the fin classes are found by
+/// part and face direction, and the trailing-edge face of a fin pushes the body forward like the base does.
+#[test]
+fn the_walls_of_flush_fins_on_the_base_grid_close_and_are_classed() {
+    for (case, what) in [(finned_base_case(4, None, 5), "sector"), (finned_base_case(4, Some(FinPhase::Between), 8), "half domain")] {
+        let s = case.build_solver().unwrap();
+        let g = &s.grid;
+        let p_inf = case.freestream()[4];
+        let uniform = bowshock_cfd::gas3::prim_to_cons3(&[1.0, 0.0, 0.0, 0.0, 2.0 * p_inf]);
+        let u = vec![uniform; g.ni * g.nj * g.nk];
+        let w = wall_forces(g, &u, p_inf, f64::INFINITY);
+        let classes: Vec<Wall> = w.by.iter().map(|c| c.0).collect();
+        println!("{what}: classes {classes:?}");
+        for want in [Wall::Body(0), Wall::Body(1), Wall::Base, Wall::FinSide, Wall::FinLe, Wall::FinTe, Wall::FinTip] {
+            assert!(classes.contains(&want), "{what}: no {want:?} among {classes:?}");
+        }
+        let fx: f64 = w.by.iter().map(|(_, a)| a[0]).sum();
+        let scale: f64 = w.by.iter().map(|(_, a)| a[0].abs()).fold(0.0, f64::max);
+        assert!(fx.abs() < 1e-12 * scale, "{what}: net axial force {fx:e} of a uniform pressure (largest class {scale:e})");
+        assert!(w.get(Wall::FinLe)[0] > 0.0 && w.get(Wall::FinTe)[0] < 0.0 && w.get(Wall::Base)[0] < 0.0, "{what}: signs of the edge and base forces");
+    }
+}
+
 /// Pressure drag parts of a converged run of `case` (cold start): the parts and the iterations.
 fn converged(case: &Case3) -> (DragParts, usize, String) {
     let mut s = case.build_solver().expect("grid");
     let r = run3_on(case, &mut s, false);
     let p = drag_parts(case, &s.grid, &s.u, s.cfg.freestream[4]);
     (p, r.iterations, format!("{}", r.stop_reason))
-}
-
-fn compare_with_2d(body: BaseBody, mach: f64, tol: f64) {
-    let level = 0;
-    let c2 = Case::new(mach, body.clone(), level, Wake::Base, Numerics::auto(mach, level, Wake::Base));
-    let r2 = run_cold(&c2);
-    let c3 = Case3::wedge(mach, body, level);
-    let (p3, it3, why3) = converged(&c3);
-    let aft2: f64 = r2.cd_aft.iter().sum();
-    let aft3: f64 = p3.aft.iter().sum();
-    println!(
-        "M {mach:.2}: 2D nose {:+.5} aft {:+.5} base {:+.5} total {:+.5} ({} it, {})   wedge nose {:+.5} aft {:+.5} base {:+.5} total {:+.5} ({it3} it, {why3})   d total {:+.2} %",
-        r2.cd_nose,
-        aft2,
-        r2.cd_base,
-        r2.cd_total,
-        r2.iters,
-        r2.stop_reason,
-        p3.nose,
-        aft3,
-        p3.base,
-        p3.total,
-        100.0 * (p3.total / r2.cd_total - 1.0)
-    );
-    let near = |a: f64, b: f64| (a - b).abs() <= tol * r2.cd_total.abs().max(1e-3);
-    assert!(near(p3.nose, r2.cd_nose), "M {mach}: nose {} vs 2D {}", p3.nose, r2.cd_nose);
-    assert!(near(aft3, aft2), "M {mach}: aft {aft3} vs 2D {aft2}");
-    // an inviscid subsonic wake behind a sharp base corner can have no steady state: where the 2D run itself hit its iteration cap the base is not compared
-    if r2.stop_reason == StopReason::MaxIterations {
-        println!("M {mach}: the 2D wake did not settle ({} it): base and total not compared", r2.iters);
-        return;
-    }
-    assert!(near(p3.total, r2.cd_total), "M {mach}: total {} vs 2D {}", p3.total, r2.cd_total);
-    assert!(near(p3.base, r2.cd_base), "M {mach}: base {} vs 2D {}", p3.base, r2.cd_base);
-}
-
-/// G-W1: the single-cell wedge reproduces the 2D axisymmetric Euler solution on the same meridian grid within 2 % (of the total CD; each part too).
-#[test]
-#[ignore = "validation: CPU, minutes"]
-fn the_wedge_matches_the_2d_solver() {
-    for body in [boattailed(), cone_cylinder()] {
-        for mach in [0.5, 0.9, 1.3, 2.0] {
-            compare_with_2d(body.clone(), mach, 0.02);
-        }
-    }
 }
 
 /// G-W2: the wedge angle does not matter (the nodes are area-preserving, `polygon_scale`): against the 2 degree default, 1, 6 and 12 degrees within 0.3 %.
@@ -274,23 +274,6 @@ fn every_fin_count_builds_a_valid_sector_and_half_domain() {
     }
 }
 
-/// G-W4 (sample): the pressure on the cone nose of a wedge is the Taylor-Maccoll surface pressure (a cone's pressure drag on its base area is its `Cp`),
-/// 10 degree half angle at Mach 2 and 3, on the level-0 base-wake grid.
-#[test]
-fn the_wedge_cone_matches_taylor_maccoll() {
-    for mach in [2.0, 3.0] {
-        let cone = bowshock_reference::taylor_maccoll::solve_cone(mach, 10f64.to_radians()).expect("attached cone");
-        let (p, it, why) = converged(&Case3::wedge(mach, cone_cylinder(), 0));
-        println!(
-            "M {mach}: cone Cp {:.5} (Taylor-Maccoll {:.5}, {:+.2} %) in {it} it, {why}",
-            p.nose,
-            cone.cp_surface,
-            100.0 * (p.nose / cone.cp_surface - 1.0)
-        );
-        assert!((p.nose / cone.cp_surface - 1.0).abs() < 0.03, "M {mach}: nose {} vs Taylor-Maccoll {}", p.nose, cone.cp_surface);
-    }
-}
-
 /// The revolved base-wake grid as a half domain (zero incidence, axis ghost of the mirror kind) gives the wedge's drag within 1 %: the same meridian grid, the
 /// same axis, a 3D flow that stays axisymmetric. The nodes are area-preserving, so the cells of 22.5 degrees (8 over the half domain) are +0.7 % (Mach 1.3) and
 /// +0.3 % (Mach 2) off, the inscribed polygon was -2.9 % and -0.4 %; 24 cells of 7.5 degrees: -0.01 % and -0.02 %.
@@ -300,7 +283,7 @@ fn the_half_domain_on_the_base_grid_matches_the_wedge() {
     let mut failed = Vec::new();
     for (mach, nk) in [(1.3, 8), (2.0, 8), (1.3, 24), (2.0, 24)] {
         let (w, itw, whyw) = converged(&Case3::wedge(mach, boattailed(), 0));
-        let mut half = Case3::base_half(mach, 0.0, boattailed(), Tier::Euler, 0);
+        let mut half = Case3::base_half(mach, 0.0, boattailed(), None, Tier::Euler, 0);
         half.grid.nk = nk;
         let (h, ith, whyh) = converged(&half);
         println!(
@@ -364,4 +347,114 @@ fn a_half_domain_at_zero_incidence_has_no_normal_force() {
             assert!(r.cn.abs() <= 1e-4, "N {n} {phase:?} M {mach}: CN {}", r.cn);
         }
     }
+}
+
+/// Fins on the base-wake grid, Euler, Mach 2 (level 0, double-wedge fins of the ANF size, flush with the base): the finned sector against the finless wedge on
+/// the same body. The fin drag (sides, edges, tips) is positive and of the order of Ackeret's wave drag of the fin set, `N cd_w S_fin / (pi/4)`
+/// (`bowshock_reference::fin_wave`), and so is the difference of the totals (the interference changes the body's own parts a little).
+#[test]
+#[ignore = "validation: CPU, minutes"]
+fn finned_sector_on_the_base_grid_adds_the_fin_wave_drag() {
+    let mach = 2.0;
+    let fins = |n| {
+        let mut f = tiny_fins(n);
+        f.profile = bowshock_core::FinProfile::DoubleWedge;
+        f
+    };
+    let (wedge, itw, whyw) = converged(&Case3::wedge(mach, cone_cylinder(), 0));
+    let mut sector = Case3::sector(mach, cone_cylinder(), fins(4), Tier::Euler, 0);
+    sector.grid.nk = 6;
+    sector.numerics.max_iter = 3000;
+    let (s, its, whys) = converged(&sector);
+    let f = fins(4);
+    let ackeret = f64::from(f.count)
+        * bowshock_reference::fin_wave::wave_drag_coefficient(bowshock_reference::fin_wave::double_wedge_slope_integral(), f.thickness / f.root_chord, mach)
+        * (f.root_chord * f.span)
+        / std::f64::consts::FRAC_PI_4;
+    let fin_drag = s.fin_sides + s.fin_edges + s.fin_tips;
+    println!(
+        "M {mach}: wedge total {:+.5} ({itw} it, {whyw});  sector total {:+.5} (nose {:+.5} aft {:+.5} base {:+.5}; fin sides {:+.5} edges {:+.5} tips {:+.5}; {its} it, {whys});  \
+         fin drag {fin_drag:+.5} vs Ackeret {ackeret:.5} ({:+.1} %);  total difference {:+.5} ({:+.1} % of Ackeret)",
+        wedge.total,
+        s.total,
+        s.nose,
+        s.aft.iter().sum::<f64>(),
+        s.base,
+        s.fin_sides,
+        s.fin_edges,
+        s.fin_tips,
+        100.0 * (fin_drag / ackeret - 1.0),
+        s.total - wedge.total,
+        100.0 * ((s.total - wedge.total) / ackeret - 1.0)
+    );
+    assert!(fin_drag > 0.0 && (0.6..1.6).contains(&(fin_drag / ackeret)), "fin drag {fin_drag} vs Ackeret {ackeret}");
+    assert!(
+        s.total - wedge.total > 0.0 && (0.5..2.0).contains(&((s.total - wedge.total) / ackeret)),
+        "difference {} vs Ackeret {ackeret}",
+        s.total - wedge.total
+    );
+}
+
+/// The sector of four fins on the base-wake grid against the half domain (3, 6, 3 gap cells per 45 degrees, the same cells), Mach 2, 2 % of the total drag.
+#[test]
+#[ignore = "validation: CPU, minutes"]
+fn the_sector_matches_the_half_domain_on_the_base_grid() {
+    let mach = 2.0;
+    let mut f = tiny_fins(4);
+    f.profile = bowshock_core::FinProfile::DoubleWedge;
+    let mut sector = Case3::sector(mach, cone_cylinder(), f.clone(), Tier::Euler, 0);
+    sector.grid.nk = 4;
+    let mut half = Case3::base_half(mach, 0.0, cone_cylinder(), Some(f), Tier::Euler, 0);
+    half.grid.nk = 14;
+    let (s, its, whys) = converged(&sector);
+    let (h, ith, whyh) = converged(&half);
+    println!(
+        "M {mach}: sector total {:+.5} (fins {:+.5}, nose {:+.5}, base {:+.5}; {its} it, {whys});  half total {:+.5} (fins {:+.5}, nose {:+.5}, base {:+.5}; {ith} it, {whyh});  d total {:+.2} %",
+        s.total,
+        s.fin_sides + s.fin_edges + s.fin_tips,
+        s.nose,
+        s.base,
+        h.total,
+        h.fin_sides + h.fin_edges + h.fin_tips,
+        h.nose,
+        h.base,
+        100.0 * (s.total / h.total - 1.0)
+    );
+    assert!((s.total / h.total - 1.0).abs() < 0.02, "sector {} vs half {}", s.total, h.total);
+}
+
+/// Consistency of the fin grid with the wedge: fins of vanishing thickness (0.002 d, a fortieth of the ANF's) on the base-wake grid leave the body's own parts
+/// (nose, base) where the finless wedge has them, to 1 % of the total, and their own drag is tiny. A fin-induced change of the base drag would be a grid artefact
+/// of the rebuilt fin segment or of the wake rows below the layer. (Found: regrading the wake cells behind a flush trailing edge, a third as long as the finless grid's,
+/// raised the base drag by 10 %; the wake nodes now stay as the finless grid has them, +0.2 %.)
+#[test]
+#[ignore = "validation: CPU, minutes"]
+fn vanishing_fins_leave_the_wedge_drag() {
+    let mach = 2.0;
+    let (wedge, _, _) = converged(&Case3::wedge(mach, cone_cylinder(), 0));
+    let mut f = tiny_fins(4);
+    f.profile = bowshock_core::FinProfile::DoubleWedge;
+    f.thickness = 0.002;
+    let mut sector = Case3::sector(mach, cone_cylinder(), f, Tier::Euler, 0);
+    sector.grid.nk = 6;
+    let (s, its, whys) = converged(&sector);
+    println!(
+        "M {mach}: wedge nose {:+.5} base {:+.5} total {:+.5};  sector nose {:+.5} base {:+.5} fins {:+.5} total {:+.5} ({its} it, {whys})",
+        wedge.nose,
+        wedge.base,
+        wedge.total,
+        s.nose,
+        s.base,
+        s.fin_sides + s.fin_edges + s.fin_tips,
+        s.total
+    );
+    assert!(
+        (s.nose / wedge.nose - 1.0).abs() < 0.02 && (s.base / wedge.base - 1.0).abs() < 0.02,
+        "nose {} vs {}, base {} vs {}",
+        s.nose,
+        wedge.nose,
+        s.base,
+        wedge.base
+    );
+    assert!((s.total - wedge.total).abs() < 0.01 * wedge.total, "total {} vs {}", s.total, wedge.total);
 }
