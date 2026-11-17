@@ -50,7 +50,17 @@ fn half(mach: f64) -> Case3 {
 fn sector(mach: f64, n: u32, nk: usize) -> Case3 {
     let nose = Body { nose: Nose::Cone { half_angle: 10f64.to_radians() } };
     let body = BaseBody::cylinder(nose, 10.0 - nose.nose_length());
-    let fins = Fins3 { count: n, root_chord: 1.0, tip_chord: 1.0, span: 1.0, sweep: 0.0, thickness: 0.08, te_to_base: 0.0, profile: FinProfile::Square };
+    let fins = Fins3 {
+        count: n,
+        root_chord: 1.0,
+        tip_chord: 1.0,
+        span: 1.0,
+        sweep: 0.0,
+        thickness: 0.08,
+        te_to_base: 0.0,
+        profile: FinProfile::Square,
+        planform: None,
+    };
     let mut c = Case3::sector(mach, body, fins, Tier::Euler, 0);
     c.grid.nk = nk;
     let s = &mut c.grid.sting;

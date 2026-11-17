@@ -55,8 +55,17 @@ fn anf_flow(mach_max: f64) -> WallFlow {
 fn gate_f1_fin_friction_matches_the_flat_plate() {
     let kind = tier_kind();
     let (chord, span, tc, n) = (0.5, 0.5, 0.02, 4u32);
-    let fins =
-        Fins3 { count: n, root_chord: chord, tip_chord: chord, span, sweep: 0.0, thickness: tc * chord, te_to_base: 0.0, profile: FinProfile::DoubleWedge };
+    let fins = Fins3 {
+        count: n,
+        root_chord: chord,
+        tip_chord: chord,
+        span,
+        sweep: 0.0,
+        thickness: tc * chord,
+        te_to_base: 0.0,
+        profile: FinProfile::DoubleWedge,
+        planform: None,
+    };
     let flow = WallFlow { re_c: 1.0e6, mach_max: 2.0, ks_body: 0.0, ks_fin: 0.0 };
     let probe = Case3::sector(2.0, Case3::anf_body(), fins.clone(), tier(kind, flow), 0);
     assert!(
@@ -118,9 +127,10 @@ fn arcas_axial(mach: f64, fins_on: bool, re_per_m: f64) -> Result<(Solved, f64),
             span: f.span / d,
             sweep: f.sweep / d,
             thickness: f.thickness / d,
-            // the mesher puts fins on a tube: the Arcas fin (root chord 1.5 d) cannot straddle the 0.8 d boattail, so its root trailing edge sits where the boattail starts
-            te_to_base: arcas::BOATTAIL_LENGTH / d,
+            // the Arcas fins stand where they are: root trailing edge flush with the base, the root straddling the tube and the boattail
+            te_to_base: 0.0,
             profile: f.profile,
+            planform: None,
         };
         Case3::sector(mach, body, fins, tier(kind, flow), 0)
     } else {

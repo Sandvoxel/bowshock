@@ -294,6 +294,7 @@ impl Case3 {
             thickness: bowshock_reference::anf::FIN_THICKNESS_CAL,
             te_to_base: 0.0,
             profile,
+            planform: None,
         }
     }
 

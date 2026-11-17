@@ -8,6 +8,7 @@ use bowshock_cfd::solver3::Solver3;
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
 use bowshock_core::engine::case3::{Case3, Tier, WallFlow};
 use bowshock_core::engine::grid3::{Domain3, FinPhase, Fins3};
+use bowshock_core::engine::planform::Planform;
 use bowshock_core::engine::run3::{drag_parts, run3_on, wall_forces, wall_samples, DragParts, Wall};
 
 /// Tangent ogive (fineness 3), 6 d cylinder, 1 d boattail of 5 degrees: nose, one tube and one cone, a base smaller than the body.
@@ -579,4 +580,210 @@ fn the_jet_is_an_inflow_at_the_exit_faces() {
     let i_end = (0..g.ni).find(|&i| g.xc[g.cell(i, 0, 0)][0] > c.body.x_base()).expect("a cell behind the base");
     let q = bowshock_cfd::gas3::cons_to_prim3(&s.u[g.cell(i_end, 0, 0)]);
     assert!(q[1] >= 1.0, "axial velocity behind the exit {} against the jet's 2.0", q[1]);
+}
+
+/// The Arcas of NASA TN D-4013 in nose diameters: a tangent ogive of 4.71 d, a tube of 12.68 d and a boattail of 0.80 d down to 0.65 d (12.2 degrees).
+fn arcas_like() -> BaseBody {
+    let nose = Body { nose: Nose::TangentOgive { fineness: 10.6 / 2.25 } };
+    BaseBody::cylinder(nose, 28.54 / 2.25).with_boattail(1.81 / 2.25, f64::atan((0.5 - 0.5 * 1.47 / 2.25) / (1.81 / 2.25)))
+}
+
+/// The Arcas fins (root chord 1.5 d, tip 0.96 d, span 0.93 d, sweep 0.54 d, double wedge), `te_to_base` ahead of the base: 0 = flush, their root straddles the
+/// tube and the boattail.
+fn arcas_fins(n: u32, te_to_base: f64) -> Fins3 {
+    Fins3 {
+        count: n,
+        root_chord: 3.38 / 2.25,
+        tip_chord: 2.165 / 2.25,
+        span: 2.103 / 2.25,
+        sweep: 1.215 / 2.25,
+        thickness: 0.123 / 2.25,
+        te_to_base,
+        profile: bowshock_core::FinProfile::DoubleWedge,
+        planform: None,
+    }
+}
+
+/// Fins whose root follows a conical segment and spans several: the Arcas fins flush with the base (root over the tube and the boattail), on the base-wake grid
+/// as a sector and a half domain and on the sting grid. The grid builds, a gas at rest stays at rest, a uniform overpressure closes (no net force: body, base and
+/// fins are one closed surface), the tube and the boattail are separate parts (the boattail pushes the body forward), the tip of the fin stands on one cylinder
+/// `r_tip = 0.5 + span`, and the fin tip faces are there.
+#[test]
+fn fins_straddling_a_tube_and_a_boattail_build_close_and_are_classed() {
+    let mut sector = Case3::sector(0.5, arcas_like(), arcas_fins(4, 0.0), Tier::Euler, 0);
+    sector.grid.nk = 5;
+    let mut half = Case3::base_half(0.5, 0.0, arcas_like(), Some(arcas_fins(4, 0.0)), Tier::Euler, 0);
+    half.grid.domain = Domain3::Half { phase: FinPhase::Between };
+    // 8 cells of 22.5 degrees over the half domain fold a cell beside these 0.93 d fins (also on the tube alone, with the unmoved fin): 12 are enough
+    half.grid.nk = 12;
+    let mut sting = Case3::new(0.5, 0.0, arcas_like().with_sting(0.1), Some(arcas_fins(4, 0.0)), 0);
+    sting.grid.domain = Domain3::Sector;
+    sting.grid.nk = 5;
+    let r_tip = 0.5 + 2.103 / 2.25;
+    // the nodes of a line sit at 1 + d^2/12 of their radius (d the cell angle): 0.15 % at 9 degrees, 1 % at the 15 degree cells of the half domain
+    for (case, what, tol) in [(sector, "sector, base grid", 5e-3), (half, "half domain, base grid", 1.5e-2), (sting, "sector, sting grid", 5e-3)] {
+        rest_state_is_a_fixed_point(case.clone(), what);
+        let s = case.build_solver().unwrap_or_else(|e| panic!("{what}: {e}"));
+        let g = &s.grid;
+        let p_inf = case.freestream()[4];
+        let uniform = bowshock_cfd::gas3::prim_to_cons3(&[1.0, 0.0, 0.0, 0.0, 2.0 * p_inf]);
+        let u = vec![uniform; g.ni * g.nj * g.nk];
+        let w = wall_forces(g, &u, p_inf, f64::INFINITY);
+        let classes: Vec<Wall> = w.by.iter().map(|c| c.0).collect();
+        for want in [Wall::Body(0), Wall::Body(1), Wall::Body(2), Wall::FinSide, Wall::FinLe, Wall::FinTip] {
+            assert!(classes.contains(&want), "{what}: no {want:?} among {classes:?}");
+        }
+        let fx: f64 = w.by.iter().filter(|(c, _)| *c != Wall::Sting).map(|(_, a)| a[0]).sum();
+        let scale: f64 = w.by.iter().map(|(_, a)| a[0].abs()).fold(0.0, f64::max);
+        // the sting grid's body is open at the base (the sting goes on): only the base-wake grids are closed surfaces
+        if what.contains("base grid") {
+            assert!(fx.abs() < 1e-11 * scale, "{what}: net axial force {fx:e} of a uniform pressure (largest class {scale:e})");
+        }
+        assert!(w.get(Wall::Body(2))[0] < 0.0, "{what}: the boattail pushes the body forward");
+        // the tip faces lie on the cylinder r_tip (the polygon of the nodes sits at 1 + d^2/12 of the nominal radius)
+        let tips: Vec<f64> = wall_samples(g, &u).iter().filter(|w| w.class == Wall::FinTip).map(|w| w.face.c[1].hypot(w.face.c[2])).collect();
+        assert!(!tips.is_empty(), "{what}: no tip faces");
+        let (lo, hi) = (tips.iter().cloned().fold(f64::INFINITY, f64::min), tips.iter().cloned().fold(0.0, f64::max));
+        assert!((lo / r_tip - 1.0).abs() < tol && (hi / r_tip - 1.0).abs() < tol, "{what}: tip faces at r = {lo} .. {hi}, not {r_tip}");
+        println!("{what}: {} x {} x {}, tip r {lo:.4} .. {hi:.4} (nominal {r_tip:.4})", g.ni, g.nj, g.nk);
+    }
+}
+
+/// A fin on the boattail only (root chord inside the 0.8 d cone) and a fin on a flare-free cone-cylinder behind the boattail start: the root follows the cone, the
+/// tip stays on its cylinder (`r_tip` above the largest root radius, the leading-edge radius here), the fin's span fraction rows sit between the surface and the tip.
+#[test]
+fn a_fin_on_a_conical_segment_has_its_tip_on_one_cylinder() {
+    let mut f = arcas_fins(4, 0.1);
+    f.root_chord = 0.5;
+    f.tip_chord = 0.3;
+    f.sweep = 0.1;
+    let mut case = Case3::sector(0.5, arcas_like(), f.clone(), Tier::Euler, 0);
+    case.grid.nk = 5;
+    rest_state_is_a_fixed_point(case.clone(), "fin on the boattail only");
+    let s = case.build_solver().expect("grid");
+    let g = &s.grid;
+    let u = vec![bowshock_cfd::gas3::prim_to_cons3(&[1.0, 0.0, 0.0, 0.0, 2.0 * case.freestream()[4]]); g.ni * g.nj * g.nk];
+    let p_inf = case.freestream()[4];
+    let w = wall_forces(g, &u, p_inf, f64::INFINITY);
+    let fx: f64 = w.by.iter().map(|(_, a)| a[0]).sum();
+    assert!(fx.abs() < 1e-11 * w.by.iter().map(|(_, a)| a[0].abs()).fold(0.0, f64::max), "net axial force {fx:e}");
+    // the largest root radius is the one under the leading edge: the body radius at x_te_root - chord
+    let body = arcas_like();
+    let r_ref = body.r(body.x_base() - 0.1 - 0.5);
+    let tips: Vec<f64> = wall_samples(g, &u).iter().filter(|w| w.class == Wall::FinTip).map(|w| w.face.c[1].hypot(w.face.c[2])).collect();
+    assert!(!tips.is_empty());
+    for r in &tips {
+        assert!((r / (r_ref + f.span) - 1.0).abs() < 5e-3, "tip at r = {r}, nominal {}", r_ref + f.span);
+    }
+}
+
+/// What the mesher cannot do is refused with the reason: a fin whose root starts on the nose, and a fin on a steep boattail or flare (its exposed span changes
+/// by more than a factor 3 along the root).
+#[test]
+fn unsupported_fin_placements_are_rejected_with_the_reason() {
+    // root leading edge on the nose: te_to_base so large that the chord starts ahead of the aft body
+    let mut c = Case3::sector(0.5, arcas_like(), arcas_fins(4, 15.0), Tier::Euler, 0);
+    c.grid.nk = 5;
+    let e = c.build_solver().err().expect("a fin on the nose is refused").to_string();
+    assert!(e.contains("ahead of the aft body") && e.contains("nose"), "{e}");
+    // trailing edge behind the base
+    let mut c = Case3::sector(0.5, arcas_like(), arcas_fins(4, -0.1), Tier::Euler, 0);
+    c.grid.nk = 5;
+    assert!(c.build_solver().is_err(), "a negative te_to_base is invalid");
+    // a flare under the fin: its exposed span changes by more than a factor 3 along the root
+    let flared = |growth: f64| BaseBody::cylinder(Body { nose: Nose::TangentOgive { fineness: 3.0 } }, 6.0).with_boattail(1.0, -f64::atan(growth));
+    let mut f = arcas_fins(4, 0.0);
+    f.span = 0.3;
+    let mut c = Case3::sector(0.5, flared(0.85), f.clone(), Tier::Euler, 0);
+    c.grid.nk = 5;
+    let e = c.build_solver().err().expect("a fin on a steep flare is refused").to_string();
+    assert!(e.contains("exposed span of the fin varies"), "{e}");
+}
+
+/// The ANF's fins with the outline `pf` (double wedge, thickness 0.04 d, flush with the base).
+fn anf_fins_with(pf: Planform) -> Fins3 {
+    Fins3 { thickness: 0.04, profile: bowshock_core::FinProfile::DoubleWedge, ..Case3::anf_fins() }.with_planform(pf)
+}
+
+fn sector_on(grid: &str, fins: Fins3) -> Case3 {
+    let mut c = match grid {
+        "base" => Case3::sector(0.5, cone_cylinder(), fins, Tier::Euler, 0),
+        _ => {
+            let mut c = Case3::new(0.5, 0.0, cone_cylinder(), Some(fins), 0);
+            c.grid.domain = Domain3::Sector;
+            c
+        }
+    };
+    c.grid.nk = 5;
+    c
+}
+
+/// A freeform outline that is a trapezoid (a swept, tapered one) reproduces the grid of the trapezoid's four numbers to round-off, on the sting grid and on the
+/// base-wake grid.
+#[test]
+fn a_freeform_outline_that_is_a_trapezoid_reproduces_the_trapezoid_grid() {
+    let poly = Planform::from_polygon(&[(0.0, 0.0), (0.3, 1.0), (0.9, 1.0), (1.0, 0.0)]).unwrap();
+    for grid in ["base", "sting"] {
+        let with = anf_fins_with(poly.clone());
+        let mut without = with.clone();
+        without.planform = None;
+        let (a, b) = (sector_on(grid, with).build_solver().unwrap().grid, sector_on(grid, without).build_solver().unwrap().grid);
+        assert_eq!((a.ni, a.nj, a.nk), (b.ni, b.nj, b.nk));
+        let worst = [(&a.x, &b.x), (&a.y, &b.y), (&a.z, &b.z)].iter().flat_map(|(p, q)| p.iter().zip(q.iter()).map(|(u, v)| (u - v).abs())).fold(0.0, f64::max);
+        println!("{grid} grid: {} x {} x {}, largest node difference {worst:e}", a.ni, a.nj, a.nk);
+        assert!(worst < 1e-12, "{grid}: the freeform trapezoid differs from the trapezoid by {worst:e}");
+    }
+}
+
+/// Outlines beyond the trapezoid: an ellipse (cut at the tip where the chord is 4 % of the root's), a delta and a forward-swept polygon build on both grids, a gas
+/// at rest stays at rest, a uniform overpressure closes, and the fin side faces have the area of the outline (3 %: the rows sample the curved tip).
+#[test]
+fn elliptical_and_freeform_fins_build_close_and_have_the_area_of_their_outline() {
+    let outlines = [
+        ("ellipse", Planform::ellipse(0.8, 0.9).unwrap()),
+        ("delta", Planform::from_polygon(&[(0.0, 0.0), (0.7, 0.9), (0.8, 0.0)]).unwrap()),
+        ("forward swept", Planform::from_polygon(&[(0.0, 0.0), (-0.1, 0.9), (0.5, 0.9), (0.8, 0.0)]).unwrap()),
+    ];
+    for (name, pf) in outlines {
+        let fins = anf_fins_with(pf.clone());
+        for grid in ["base", "sting"] {
+            let case = sector_on(grid, fins.clone());
+            let what = format!("{name} on the {grid} grid");
+            rest_state_is_a_fixed_point(case.clone(), &what);
+            let s = case.build_solver().unwrap_or_else(|e| panic!("{what}: {e}"));
+            let g = &s.grid;
+            let p_inf = case.freestream()[4];
+            let u = vec![bowshock_cfd::gas3::prim_to_cons3(&[1.0, 0.0, 0.0, 0.0, 2.0 * p_inf]); g.ni * g.nj * g.nk];
+            let w = wall_forces(g, &u, p_inf, f64::INFINITY);
+            if grid == "base" {
+                let fx: f64 = w.by.iter().map(|(_, a)| a[0]).sum();
+                let scale: f64 = w.by.iter().map(|(_, a)| a[0].abs()).fold(0.0, f64::max);
+                assert!(fx.abs() < 1e-11 * scale, "{what}: net axial force {fx:e} (largest class {scale:e})");
+            }
+            // one side of one fin: the faces of the sector's half fin
+            let side: f64 = wall_samples(g, &u).iter().filter(|w| w.class == Wall::FinSide).map(|w| w.face.area).sum();
+            let cut = pf.height_with_chord_at_least(bowshock_core::engine::grid3::TIP_CHORD_FLOOR * pf.root_chord());
+            let rows: Vec<[f64; 3]> = pf.rows().iter().copied().filter(|r| r[0] < cut).chain([[cut, pf.x_le(cut), pf.x_te(cut)]]).collect();
+            let expected = Planform::new(rows).unwrap().area();
+            println!("{what}: fin side area {side:.5} vs outline {expected:.5} ({:+.2} %)", 100.0 * (side / expected - 1.0));
+            assert!((side / expected - 1.0).abs() < 0.03, "{what}: side area {side} vs outline {expected}");
+        }
+    }
+}
+
+/// What the mesher cannot do with an outline is refused with the reason: an overhang past the base of a flush fin, a notched outline, an outline ahead of the
+/// aft segments.
+#[test]
+fn unsupported_outlines_are_rejected_with_the_reason() {
+    // swept tip trailing edge behind the root's, flush with the base
+    let over = Planform::from_polygon(&[(0.0, 0.0), (0.5, 0.9), (1.4, 0.9), (1.0, 0.0)]).unwrap();
+    let e = sector_on("base", anf_fins_with(over)).build_solver().err().expect("an overhanging fin is refused").to_string();
+    assert!(e.contains("behind its root trailing edge") && e.contains("flush with the base"), "{e}");
+    let notched = Planform::from_polygon(&[(0.0, 0.0), (0.0, 1.0), (0.4, 1.0), (0.4, 0.5), (0.6, 0.5), (0.6, 1.0), (1.0, 1.0), (1.0, 0.0)]);
+    assert!(notched.unwrap_err().to_string().contains("chordwise intervals"));
+    // a root longer than the aft body leaves the segments ahead
+    let mut long = anf_fins_with(Planform::trapezoid(8.0, 6.0, 0.9, 0.5).unwrap());
+    long.te_to_base = 5.0;
+    let e = sector_on("base", long).build_solver().err().expect("a fin that starts on the nose is refused").to_string();
+    assert!(e.contains("ahead of the aft body"), "{e}");
 }
