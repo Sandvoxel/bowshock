@@ -156,7 +156,7 @@ pub const DRAFT_AXIAL: f64 = 0.6;
 /// Domain of the Draft tier in body lengths: inflow plane and outer radius, outflow plane (the full tiers: 10 and 5). The grid does not depend on the Mach number
 /// (a table shares it), so this is the size a subsonic far field still tolerates with the characteristic boundary conditions.
 pub const DRAFT_DOMAIN: (f64, f64) = (5.0, 3.0);
-/// First cell height of the gap rows behind the base of the Draft tier (the wall-resolved tiers: the wall spacing, 1e-5 d and less). Env `BOWSHOCK_DRAFT_GAP` overrides it for the study.
+/// First cell height of the gap rows behind the base of the Draft tier (the wall-resolved tiers: the wall spacing, 1e-5 d and less).
 pub const DRAFT_DR_GAP: f64 = 0.01;
 /// End-cell size at the nose tip and the segment ends of the Draft tier.
 pub const DRAFT_DX_TIP: f64 = 0.05;
@@ -171,7 +171,7 @@ pub(crate) fn draft_coarsen(base: &mut BaseGridParams, sting: &mut LargeGridPara
     base.n_seg.iter_mut().zip(&body.segments).for_each(|(n, s)| *n = if s.is_step() { 1 } else { cut(*n) });
     base.n_wake = cut(base.n_wake);
     base.dx_tip = DRAFT_DX_TIP;
-    base.dr_gap = Some(std::env::var("BOWSHOCK_DRAFT_GAP").ok().and_then(|v| v.parse().ok()).unwrap_or(DRAFT_DR_GAP));
+    base.dr_gap = Some(DRAFT_DR_GAP);
     (base.x_up, base.r_far, base.x_down) = (DRAFT_DOMAIN.0 * l, DRAFT_DOMAIN.0 * l, DRAFT_DOMAIN.1 * l);
     sting.n_up = cut(sting.n_up);
     sting.n_nose = cut(sting.n_nose);
