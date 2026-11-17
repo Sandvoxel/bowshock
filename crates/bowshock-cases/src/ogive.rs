@@ -174,6 +174,7 @@ impl OgiveCase {
         }
     }
 
+    /// The 2D solver of the case grid (the deletion set; the wedge runner builds `ogive_grid` only).
     pub fn build_solver(&self) -> Solver {
         let cfg = Config {
             cfl: self.cfl,
@@ -237,7 +238,8 @@ pub fn run_ogive(case: &OgiveCase) -> OgiveResult {
 /// [`run_ogive`] on the single-cell wedge of the 3D engine ([`crate::wedge`]): the same grid, free stream, limiter and stop rule (the residual drop counted from
 /// the second-order phase), the same post-processing.
 pub fn run_ogive_wedge(case: &OgiveCase) -> Result<OgiveResult, String> {
-    let (s, run) = crate::wedge::run_on_wedge(&case.build_solver().grid, case.mach, case.limiter, case.first_order_iters, case.max_iter, case.drop_orders)?;
+    let (s, run) =
+        crate::wedge::run_on_wedge(&ogive_grid(&case.grid_params()), case.mach, case.limiter, case.first_order_iters, case.max_iter, case.drop_orders)?;
     Ok(postprocess(case, &s, run.residual, run.drop_orders, run.stop_reason))
 }
 

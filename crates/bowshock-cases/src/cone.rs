@@ -2,7 +2,7 @@
 
 use crate::wedge::Meridian;
 use bowshock_cfd::gas::freestream;
-use bowshock_cfd::grid::{cone_grid, ConeGridParams};
+use bowshock_cfd::grid::{cone_grid, ConeGridParams, Grid};
 use bowshock_cfd::limiter::Limiter;
 use bowshock_cfd::solver::{Bc, Config, Solver};
 use bowshock_core::engine::result::StopReason;
@@ -58,11 +58,11 @@ pub struct ConeResult {
     pub min_p: f64,
 }
 
-/// Build the case grid + solver. `beta` (shock angle estimate, rad) sizes the outer boundary.
-pub fn build_solver(case: &ConeCase, beta: f64) -> Solver {
+/// The case grid. `beta` (shock angle estimate, rad) sizes the outer boundary.
+pub fn build_grid(case: &ConeCase, beta: f64) -> Grid {
     let length = 1.0;
     let h_end = 1.25 * length * beta.tan();
-    let gp = ConeGridParams {
+    cone_grid(&ConeGridParams {
         ni: case.ni,
         nj: case.nj,
         theta: case.theta_deg.to_radians(),
@@ -71,7 +71,11 @@ pub fn build_solver(case: &ConeCase, beta: f64) -> Solver {
         h_start: 0.4 * h_end,
         h_end,
         cluster: case.cluster,
-    };
+    })
+}
+
+/// The 2D solver of the case grid (the deletion set: `bowshock-gpu-cases`, `examples`; the wedge runner builds [`build_grid`] only).
+pub fn build_solver(case: &ConeCase, beta: f64) -> Solver {
     let cfg = Config {
         cfl: case.cfl,
         limiter: case.limiter,
@@ -79,7 +83,7 @@ pub fn build_solver(case: &ConeCase, beta: f64) -> Solver {
         bc: [Bc::Freestream, Bc::Extrapolate, Bc::SlipWall, Bc::Freestream],
         first_order_iters: case.first_order_iters,
     };
-    Solver::new(cone_grid(&gp), cfg)
+    Solver::new(build_grid(case, beta), cfg)
 }
 
 pub fn run_cone(case: &ConeCase, tm: &ConeSolution) -> ConeResult {
@@ -119,8 +123,7 @@ pub fn run_cone(case: &ConeCase, tm: &ConeSolution) -> ConeResult {
 /// [`run_cone`] on the single-cell wedge of the 3D engine ([`crate::wedge`]): the same grid, free stream, limiter and stop rule (the residual drop counted from the
 /// second-order phase), the same post-processing.
 pub fn run_cone_wedge(case: &ConeCase, tm: &ConeSolution) -> Result<ConeResult, String> {
-    let (s, run) =
-        crate::wedge::run_on_wedge(&build_solver(case, tm.beta).grid, case.mach, case.limiter, case.first_order_iters, case.max_iter, case.drop_orders)?;
+    let (s, run) = crate::wedge::run_on_wedge(&build_grid(case, tm.beta), case.mach, case.limiter, case.first_order_iters, case.max_iter, case.drop_orders)?;
     Ok(postprocess(case, &s, run.residual, run.drop_orders, run.stop_reason))
 }
 
