@@ -22,8 +22,10 @@ mod gpu;
 mod gpu3;
 mod map;
 mod meridian;
+mod pick3;
 mod prepared;
 mod scene3;
+mod scene_view;
 
 use iced::widget::canvas::{self, Action, Event, Frame, Geometry, LineDash, Path, Stroke, Text};
 use iced::widget::{column, container, row, stack, text, Space};
@@ -43,10 +45,12 @@ use crate::units::{Quantity, Unit};
 use crate::widgets::button::{button as push, Weight};
 use crate::widgets::field::rule;
 use crate::widgets::plot::ticks::{fmt_fixed, nice_ticks, range_decimals};
-use crate::widgets::segmented::segmented;
+use crate::widgets::segmented::{segmented, segmented_fill};
 
 pub use map::Scalar;
 pub use prepared::Prepared;
+pub(in crate::analyze) use scene3::decode_fixture;
+use scene_view::{SceneMsg, SceneState};
 
 /// Height of the wall Cp plot under the picture, axis labels included.
 pub const WALL_H: f32 = 84.0;
@@ -130,6 +134,28 @@ pub enum Emphasis {
     Curve,
 }
 
+/// How the flow is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Side-on: the meridian plane (two different halves at an angle of attack), the wall Cp under it.
+    Side,
+    /// The 3D scene: the wall surface and cut sheets, orbited with the mouse.
+    Scene,
+}
+
+impl Mode {
+    /// Both, in the order of the buttons.
+    pub const ALL: [Mode; 2] = [Mode::Side, Mode::Scene];
+
+    /// The button label.
+    pub fn name(self) -> &'static str {
+        match self {
+            Mode::Side => "Side view",
+            Mode::Scene => "3D",
+        }
+    }
+}
+
 /// The flow viewer's messages.
 #[derive(Debug, Clone)]
 pub enum Msg {
@@ -153,8 +179,18 @@ pub enum Msg {
     Step(i32),
     /// The Mach number of the Flow field view is this one.
     Pick(f64),
+    /// The angle of attack of the Flow field view moves by this many angles of the result.
+    AlphaStep(i32),
     /// The solve screen's emphasis.
     Emphasis(Emphasis),
+    /// Draw the flow side-on or as the 3D scene.
+    Mode(Mode),
+    /// A message of the 3D scene.
+    Scene(SceneMsg),
+    /// Fit the side view's colour range to what is on screen.
+    FitRange,
+    /// Back to the picture's own colour range.
+    ResetRange,
 }
 
 /// What is under the pointer.
@@ -169,6 +205,8 @@ pub struct Hover {
     pub in_field: bool,
     /// The flow cell there, if any.
     pub cell: Option<usize>,
+    /// The pointer is below the axis, over the other half of a picture whose halves differ.
+    pub lower: bool,
 }
 
 /// The viewer's state: session-only, not part of the document.
@@ -185,12 +223,25 @@ pub struct State {
     pub selected: Option<f64>,
     /// The Mach numbers of the table on show, ascending, for the stepper.
     pub machs: Vec<f64>,
+    /// The angle of attack (degrees) the Flow field view shows, and the angles the result has at the selected Mach number.
+    pub selected_alpha: Option<f64>,
+    pub alphas: Vec<f64>,
+    /// How the user chose to draw the flow; `None`: the scene for a 3D field, side-on for a one-cell wedge.
+    mode: Option<Mode>,
+    /// The 3D scene's state.
+    pub scene: SceneState,
+    /// The field on show.
+    field: Option<Arc<Field3>>,
     camera: Camera,
     /// The camera is the fit of the picture (nobody zoomed or panned since).
     fitted: bool,
     /// The picture's rectangle (without the wall plot).
     size: Size,
+    /// The side view: the upper half, and the lower one when the flow is not the mirror of the upper (an angle of attack).
     picture: Option<Arc<Prepared>>,
+    lower: Option<Arc<Prepared>>,
+    /// The side view's colour range fitted to the screen, with the scalar it is for.
+    fit: Option<(Scalar, (f32, f32))>,
     hover: Option<Hover>,
 }
 
@@ -210,36 +261,104 @@ impl State {
             emphasis: Emphasis::Flow,
             selected: None,
             machs: Vec::new(),
+            selected_alpha: None,
+            alphas: Vec::new(),
+            mode: None,
+            scene: SceneState::new(),
+            field: None,
             camera: Camera { centre: (0.0, 0.0), scale: 1.0 },
             fitted: true,
             size: Size::ZERO,
             picture: None,
+            lower: None,
+            fit: None,
             hover: None,
+        }
+    }
+
+    /// The mode in use: the user's choice, else the scene for a field with several cells around the axis and side-on for a wedge.
+    pub fn mode(&self) -> Mode {
+        match (&self.field, self.mode) {
+            (Some(f), _) if f.nk <= 1 => Mode::Side,
+            (_, Some(m)) => m,
+            _ => Mode::Scene,
         }
     }
 
     /// Shows `field` (the picture the screen wants now), preparing it if it is not the one already on show.
     pub fn set_field(&mut self, field: Option<&Arc<Field3>>) {
-        match (field, &self.picture) {
-            (Some(f), Some(p)) if Arc::ptr_eq(f, &p.field) => {}
-            (Some(f), _) => {
-                self.picture = Some(Arc::new(Prepared::new(f.clone())));
-                self.hover = None;
+        if let (Some(f), Some(g)) = (field, &self.field) {
+            if Arc::ptr_eq(f, g) {
+                return;
+            }
+        }
+        if field.is_none() && self.field.is_none() {
+            return;
+        }
+        self.field = field.cloned();
+        self.hover = None;
+        self.build();
+    }
+
+    /// Prepares the picture of the mode in use from the field on show.
+    fn build(&mut self) {
+        let Some(field) = self.field.clone() else {
+            self.picture = None;
+            self.lower = None;
+            self.scene.set_field(None);
+            return;
+        };
+        match self.mode() {
+            Mode::Scene => {
+                self.picture = None;
+                self.lower = None;
+                self.scene.set_field(Some(&field));
+            }
+            Mode::Side => {
+                self.scene.set_field(None);
+                let upper_layer = field.layer_of_theta(0.0);
+                let mut upper = Prepared::of_layer(&field, upper_layer);
+                // the other half of the plane through the axis: its own layer when the flow is not the same on both sides
+                let mut lower = (field.nk > 1).then(|| {
+                    let [_, (_, opposite)] = scene3::plane_through(&field, &field.symmetry.tiles(), upper_layer);
+                    Prepared::of_layer(&field, opposite)
+                });
+                if let Some(l) = &mut lower {
+                    upper.share_ranges(l);
+                }
+                self.picture = Some(Arc::new(upper));
+                self.lower = lower.map(Arc::new);
                 self.refit();
             }
-            (None, Some(_)) => self.picture = None,
-            (None, None) => {}
         }
     }
 
+    #[cfg(test)]
     /// `(Mach number, iteration, cells along i, cells along j)` of the picture on show.
     pub fn picture_info(&self) -> Option<(f64, usize, usize, usize)> {
-        self.picture.as_ref().map(|p| (p.field.mach, p.field.iteration, p.field.ni, p.field.nj))
+        self.field.as_ref().map(|f| (f.mach, f.iteration, f.ni, f.nj))
+    }
+
+    /// Whether there is a field on show.
+    pub fn has_picture(&self) -> bool {
+        self.field.is_some()
     }
 
     /// The Mach number of the picture on show.
     pub fn picture_mach(&self) -> Option<f64> {
-        self.picture.as_ref().map(|p| p.field.mach)
+        self.field.as_ref().map(|f| f.mach)
+    }
+
+    /// The line in the corner of the picture: Mach number, angle of attack, iterations, cells.
+    pub fn caption(&self) -> String {
+        let Some(f) = &self.field else { return String::new() };
+        let cells = if f.nk > 1 { format!("{} × {} × {}", f.ni, f.nj, f.nk) } else { format!("{} × {}", f.ni, f.nj) };
+        let alpha = if f.alpha_deg.abs() > 1e-9 { format!(" · α {:.1}°", f.alpha_deg) } else { String::new() };
+        if f.iteration == 0 {
+            format!("M {:.2}{alpha} · free stream · {cells} cells", f.mach)
+        } else {
+            format!("M {:.2}{alpha} · {} iterations · {cells} cells", f.mach, thousands(f.iteration))
+        }
     }
 
     /// Frames the body when the camera is still the fit.
@@ -255,10 +374,22 @@ impl State {
         (0.1 * fit, 400.0 * fit)
     }
 
+    /// The colour range of the side view: the fitted one, else the picture's.
+    pub fn range(&self) -> (f32, f32) {
+        match (&self.fit, &self.picture) {
+            (Some((s, r)), _) if *s == self.scalar => *r,
+            (_, Some(p)) => p.ranges[self.scalar.index()],
+            _ => (0.0, 1.0),
+        }
+    }
+
     /// Handles a message of the viewer.
     pub fn update(&mut self, msg: Msg) {
         match msg {
-            Msg::Scalar(s) => self.scalar = s,
+            Msg::Scalar(s) => {
+                self.scalar = s;
+                self.fit = self.fit.filter(|(f, _)| *f == s);
+            }
             Msg::Grid => self.grid = !self.grid,
             Msg::Fit => {
                 self.fitted = true;
@@ -284,7 +415,47 @@ impl State {
                 self.selected = self.machs.get(to).copied();
             }
             Msg::Pick(mach) => self.selected = Some(mach),
+            Msg::AlphaStep(by) => {
+                let at = self.selected_alpha.and_then(|a| self.alphas.iter().position(|x| (x - a).abs() < 1e-9)).unwrap_or(0) as i32;
+                let to = (at + by).clamp(0, self.alphas.len().saturating_sub(1) as i32) as usize;
+                self.selected_alpha = self.alphas.get(to).copied();
+            }
             Msg::Emphasis(e) => self.emphasis = e,
+            Msg::Mode(m) => {
+                self.mode = Some(m);
+                self.build();
+            }
+            Msg::Scene(m) => self.scene.update(m),
+            Msg::FitRange => self.fit_range(),
+            Msg::ResetRange => self.fit = None,
+        }
+    }
+
+    /// Fits the side view's colour range to the cells on screen: robust percentiles of the scalar over the flow cells whose centre is in
+    /// the picture (both halves).
+    fn fit_range(&mut self) {
+        let Some(p) = &self.picture else { return };
+        let xf = Xf { camera: self.camera, size: self.size };
+        let ((x0, r0), (x1, r1)) = (xf.to_data(Point::ORIGIN), xf.to_data(Point::new(self.size.width, self.size.height)));
+        let r_max = r0.abs().max(r1.abs()) as f32;
+        let mut values: Vec<f32> = Vec::new();
+        for pic in std::iter::once(p).chain(self.lower.iter()) {
+            let m = &pic.mer;
+            for c in 0..m.cells() {
+                if m.solid[c] {
+                    continue;
+                }
+                let (x, r) = m.centre(c % m.ni, c / m.ni);
+                if f64::from(x) >= x0 && f64::from(x) <= x1 && r <= r_max {
+                    let v = pic.value(self.scalar, c);
+                    if v.is_finite() {
+                        values.push(v);
+                    }
+                }
+            }
+        }
+        if let Some(r) = scene_view::robust_range(self.scalar == Scalar::Cp, self.scalar == Scalar::Schlieren, &mut values) {
+            self.fit = Some((self.scalar, r));
         }
     }
 
@@ -292,8 +463,11 @@ impl State {
         let p = self.picture.as_ref()?;
         let in_field = at.y < self.size.height;
         let (x, r) = Xf { camera: self.camera, size: self.size }.to_data(at);
-        let cell = if in_field { p.cell_at(x as f32, r.abs() as f32) } else { None };
-        Some(Hover { at, x, r: r.abs(), in_field, cell })
+        // below the axis the pointer reads the lower half, if the field has one of its own
+        let lower = r < 0.0 && self.lower.is_some();
+        let pic = if lower { self.lower.as_ref()? } else { p };
+        let cell = if in_field { pic.cell_at(x as f32, r.abs() as f32) } else { None };
+        Some(Hover { at, x, r: r.abs(), in_field, cell, lower })
     }
 
     #[cfg(test)]
@@ -302,22 +476,49 @@ impl State {
         self.hover.as_ref()
     }
 
+    /// The Side view / 3D switch and, in the side view, the colour range button; the viewer's first controls.
+    fn mode_controls<'a>(&'a self) -> Vec<Element<'a, Msg>> {
+        let mut items: Vec<Element<'a, Msg>> = Vec::new();
+        if self.field.as_ref().is_some_and(|f| f.nk > 1) {
+            items.push(segmented(&Mode::ALL.map(|m| (m, m.name())), self.mode(), Msg::Mode));
+        }
+        items
+    }
+
     /// The viewer: a row of controls and the colour bar, the picture with the wall Cp under it. `caption` is drawn in the corner of
     /// the picture; `notice` replaces the picture with a line of text (nothing to show); `compact` leaves the wall plot out.
     pub fn viewer<'a>(&'a self, ctx: &'a Ctx, caption: String, notice: Option<String>, compact: bool) -> Element<'a, Msg> {
+        let unit = Quantity::Length.unit_for(ctx.units);
+        let frame = |t: &Theme| container::Style { border: theme::frame(theme::tokens(t).line_200), ..container::Style::default() };
+        let mut controls = row(self.mode_controls()).spacing(SPACE_2).align_y(iced::Center);
+        if self.mode() == Mode::Scene && notice.is_none() && self.scene.picture().is_some() {
+            let picture: Element<'a, Msg> = scene_view::picture(&self.scene, ctx, caption, unit).unwrap_or_else(|| Space::new().boxed());
+            let mode = self.field.as_ref().is_some_and(|f| f.nk > 1).then(|| segmented_fill(&Mode::ALL.map(|m| (m, m.name())), self.mode(), Msg::Mode));
+            let palette = self.scene.palette(ctx, unit, mode);
+            let body = row![palette, container(picture).width(Fill).height(Fill).style(frame)].spacing(SPACE_2).height(Fill);
+            return container(body).padding([SPACE_1, 0.0]).height(Fill).boxed();
+        }
         let scalars = segmented(&Scalar::ALL.map(|s| (s, s.name())), self.scalar, Msg::Scalar);
         let grid: Element<'a, Msg> = push("Grid", if self.grid { Weight::Primary } else { Weight::Secondary }).small().on_press(Msg::Grid).into();
         let fit: Element<'a, Msg> = push("Fit", Weight::Secondary).small().on_press(Msg::Fit).into();
-        let unit = Quantity::Length.unit_for(ctx.units);
-        let mut controls = row![scalars, grid, fit].spacing(SPACE_2).align_y(iced::Center);
+        let fitted = self.fit.is_some_and(|(s, _)| s == self.scalar);
+        let range: Element<'a, Msg> = push("Fit range", if fitted { Weight::Primary } else { Weight::Secondary })
+            .small()
+            .on_press(if fitted { Msg::ResetRange } else { Msg::FitRange })
+            .tooltip(if fitted { "Back to the colour range of the whole picture" } else { "Colour range from what is on screen (robust percentiles)" })
+            .into();
+        controls = controls.push(scalars).push(grid).push(fit).push(range);
         let body: Element<'a, Msg> = match (&self.picture, notice) {
             (Some(picture), None) => {
                 controls = controls.push(Space::new().width(Fill).boxed()).push(
-                    canvas::Canvas::new(Bar { picture, scalar: self.scalar, dark: ctx.dark, unit }).width(Length::Fixed(BAR_W)).height(CONTROL_H).boxed(),
+                    canvas::Canvas::new(Bar { range: self.range(), scalar: self.scalar, dark: ctx.dark, unit, fitted })
+                        .width(Length::Fixed(BAR_W))
+                        .height(CONTROL_H)
+                        .boxed(),
                 );
                 let wall = if compact { 0.0 } else { WALL_H };
                 let tokens = ctx.tokens();
-                let draw = gpu::Draw {
+                let draw = |picture: &Arc<Prepared>, half: gpu::Half| gpu::Draw {
                     picture: picture.clone(),
                     scalar: self.scalar,
                     dark: ctx.dark,
@@ -325,24 +526,27 @@ impl State {
                     line: Color { a: 0.28, ..tokens.ink },
                     centre: self.camera.centre,
                     scale: self.camera.scale,
+                    half,
+                    range: self.range(),
                 };
-                let field = iced::widget::shader(draw).width(Fill).height(Fill);
+                // a lower half of its own is drawn by its own picture below the axis, the upper one above it; else one picture, mirrored
+                let field: Element<'a, Msg> = match &self.lower {
+                    Some(lower) => stack![
+                        iced::widget::shader(draw(picture, gpu::Half::Upper)).width(Fill).height(Fill),
+                        iced::widget::shader(draw(lower, gpu::Half::Lower)).width(Fill).height(Fill)
+                    ]
+                    .width(Fill)
+                    .height(Fill)
+                    .boxed(),
+                    None => iced::widget::shader(draw(picture, gpu::Half::Both)).width(Fill).height(Fill).boxed(),
+                };
                 let under = column![field, Space::new().height(wall)];
-                let overlay = Overlay { picture, camera: self.camera, wall, hover: self.hover.as_ref(), unit, caption };
+                let overlay = Overlay { picture, lower: self.lower.as_deref(), camera: self.camera, wall, hover: self.hover.as_ref(), unit, caption };
                 stack![under, canvas::Canvas::new(overlay).width(Fill).height(Fill)].width(Fill).height(Fill).boxed()
             }
             (_, notice) => container(text(notice.unwrap_or_else(|| "No picture yet".to_string())).size(13).style(theme::muted)).center(Fill).boxed(),
         };
-        column![
-            container(controls).padding([SPACE_1, 0.0]),
-            container(body)
-                .width(Fill)
-                .height(Fill)
-                .style(|t: &Theme| container::Style { border: theme::frame(theme::tokens(t).line_200), ..container::Style::default() })
-        ]
-        .spacing(SPACE_1)
-        .height(Fill)
-        .boxed()
+        column![container(controls).padding([SPACE_1, 0.0]), container(body).width(Fill).height(Fill).style(frame)].spacing(SPACE_1).height(Fill).boxed()
     }
 }
 
@@ -374,6 +578,8 @@ pub struct Interaction {
 
 struct Overlay<'a> {
     picture: &'a Prepared,
+    /// The lower half, when the flow below the axis is not the mirror of the one above it.
+    lower: Option<&'a Prepared>,
     camera: Camera,
     /// Height of the wall plot under the picture (0: none).
     wall: f32,
@@ -476,13 +682,14 @@ impl canvas::Program<Msg> for Overlay<'_> {
                 &Path::line(Point::new(0.0, axis), Point::new(field.width, axis)),
                 Stroke { line_dash: LineDash { segments: &[5.0, 4.0], offset: 0 }, ..line(t.ink_muted.scale_alpha(0.6), 1.0) },
             );
+            let low = self.lower.unwrap_or(picture);
             if picture.outline.len() > 2 {
                 let body = Path::new(|b| {
                     let up = |p: &[f32; 2]| xf.to_screen(f64::from(p[0]), f64::from(p[1]));
                     let down = |p: &[f32; 2]| xf.to_screen(f64::from(p[0]), -f64::from(p[1]));
                     b.move_to(up(&picture.outline[0]));
                     picture.outline[1..].iter().for_each(|p| b.line_to(up(p)));
-                    picture.outline.iter().rev().for_each(|p| b.line_to(down(p)));
+                    low.outline.iter().rev().for_each(|p| b.line_to(down(p)));
                     b.close();
                 });
                 f.fill(&body, t.part_body);
@@ -522,7 +729,8 @@ impl canvas::Program<Msg> for Overlay<'_> {
         if self.wall > 0.0 {
             let (top, bottom) = (field.height + PLOT_TOP, bounds.height - AXIS_H);
             let wall = &picture.wall;
-            let (lo, hi) = wall.iter().fold((0.0f64, 0.0f64), |(l, h), p| (l.min(p.1), h.max(p.1)));
+            let low_wall: &[(f64, f64)] = self.lower.map_or(&[], |l| &l.wall);
+            let (lo, hi) = wall.iter().chain(low_wall).fold((0.0f64, 0.0f64), |(l, h), p| (l.min(p.1), h.max(p.1)));
             let (lo, hi) = if hi - lo < 0.1 { (lo - 0.05, hi + 0.05) } else { (lo, hi) };
             let pad = 0.06 * (hi - lo);
             let (lo, hi) = (lo - pad, hi + pad);
@@ -544,11 +752,21 @@ impl canvas::Program<Msg> for Overlay<'_> {
                     });
                     f.stroke(&path, line(t.ink, 1.5));
                 }
-                put(f, "Cp at the wall", Point::new(bounds.width - 6.0, top + 1.0), t.ink_faint, 10.0, Right, alignment::Vertical::Top);
+                if low_wall.len() > 1 {
+                    let path = Path::new(|b| {
+                        let at = |p: &(f64, f64)| Point::new(xf.to_screen(p.0, 0.0).x, py(p.1));
+                        b.move_to(at(&low_wall[0]));
+                        low_wall[1..].iter().for_each(|p| b.line_to(at(p)));
+                    });
+                    f.stroke(&path, Stroke { line_dash: LineDash { segments: &[5.0, 3.0], offset: 0 }, ..line(t.ink_muted, 1.5) });
+                }
+                let label = if self.lower.is_some() { "Cp at the wall · lee solid, windward dashed" } else { "Cp at the wall" };
+                put(f, label, Point::new(bounds.width - 6.0, top + 1.0), t.ink_faint, 10.0, Right, alignment::Vertical::Top);
                 if let Some(h) = self.hover {
                     let x = xf.to_screen(h.x, 0.0).x;
                     f.stroke(&Path::line(Point::new(x, top), Point::new(x, bottom)), line(t.accent.scale_alpha(0.8), 1.0));
-                    if let Some(cp) = picture.wall_cp_at(h.x) {
+                    let shown = if h.lower { self.lower.unwrap_or(picture) } else { picture };
+                    if let Some(cp) = shown.wall_cp_at(h.x) {
                         f.stroke(&Path::circle(Point::new(x, py(cp)), 3.0), line(t.accent, 1.5));
                     }
                 }
@@ -574,13 +792,13 @@ impl Overlay<'_> {
         let place = format!("x {:.1} {} · r {:.1} {}", u.from_si(h.x), u.symbol, u.from_si(h.r), u.symbol);
         match h.cell.filter(|_| h.in_field) {
             Some(c) => {
-                let p = self.picture;
+                let p = if h.lower { self.lower.unwrap_or(self.picture) } else { self.picture };
                 // the density gradient per unit of the user's length, over the free-stream density
                 let grad = f64::from(p.gradient[c]) * u.to_si;
                 format!("{place} · M {:.2} · Cp {:+.2} · ∇ρ/ρ∞ {} /{}", p.mach[c], p.cp[c], compact_number(grad), u.symbol)
             }
             None if h.in_field => format!("{place} · body"),
-            None => match self.picture.wall_cp_at(h.x) {
+            None => match (if h.lower { self.lower.unwrap_or(self.picture) } else { self.picture }).wall_cp_at(h.x) {
                 Some(cp) => format!("x {:.1} {} · wall Cp {cp:+.3}", u.from_si(h.x), u.symbol),
                 None => format!("x {:.1} {}", u.from_si(h.x), u.symbol),
             },
@@ -603,19 +821,23 @@ fn compact_number(v: f64) -> String {
 }
 
 /// The colour bar with its end labels.
-struct Bar<'a> {
-    picture: &'a Prepared,
+struct Bar {
+    /// The colour range in use.
+    range: (f32, f32),
     scalar: Scalar,
     dark: bool,
     unit: &'static Unit,
+    /// The range is the user's fit, not the picture's own.
+    fitted: bool,
 }
 
-impl Bar<'_> {
+impl Bar {
     /// The labels at the two ends of the bar.
     fn labels(&self) -> (String, String) {
-        let (lo, hi) = self.picture.ranges[self.scalar.index()];
+        let (lo, hi) = self.range;
         match self.scalar {
-            Scalar::Mach => ("0".to_string(), format!("{hi:.2}")),
+            Scalar::Mach if lo == 0.0 => ("0".to_string(), format!("{hi:.2}")),
+            Scalar::Mach => (format!("{lo:.2}"), format!("{hi:.2}")),
             Scalar::Cp => (format!("{lo:+.2}"), format!("{hi:+.2}")),
             Scalar::Schlieren => {
                 let per = |log: f32| compact_number(10f64.powf(f64::from(log)) * self.unit.to_si);
@@ -625,7 +847,7 @@ impl Bar<'_> {
     }
 }
 
-impl canvas::Program<Msg> for Bar<'_> {
+impl canvas::Program<Msg> for Bar {
     type State = ();
 
     fn draw(&self, _: &(), renderer: &Renderer, theme: &Theme, bounds: Rectangle, _: mouse::Cursor) -> Vec<Geometry> {
@@ -641,7 +863,7 @@ impl canvas::Program<Msg> for Bar<'_> {
             let (a, b) = (x0 + (x1 - x0) * k as f32 / steps as f32, x0 + (x1 - x0) * (k + 1) as f32 / steps as f32);
             f.fill_rectangle(Point::new(a, y0), Size::new(b - a + 0.5, h), map::color(stops, (k as f32 + 0.5) / steps as f32));
         }
-        f.stroke(&Path::rectangle(Point::new(x0, y0), Size::new(x1 - x0, h)), line(t.line_200, 1.0));
+        f.stroke(&Path::rectangle(Point::new(x0, y0), Size::new(x1 - x0, h)), line(if self.fitted { t.accent } else { t.line_200 }, 1.0));
         if self.scalar == Scalar::Cp {
             let mid = (x0 + x1) / 2.0;
             f.stroke(&Path::line(Point::new(mid, y0 + h), Point::new(mid, y0 + h + 3.0)), line(t.ink_muted, 1.0));
@@ -785,22 +1007,44 @@ pub fn centre<'a>(state: &'a super::State, ctx: &'a Ctx) -> Option<Element<'a, M
     ]
     .spacing(SPACE_2)
     .align_y(iced::Center);
-    let back: Element<'a, Message> = push("Plots", Weight::Secondary).on_press(Message::Flow(Msg::Open(false))).into();
-    let head =
-        row![ui::label(format!("FLOW FIELD · CFD TABLE · {}", grid.to_uppercase())), Space::new().width(Fill), stepper, Space::new().width(SPACE_3), back]
-            .align_y(iced::Center);
-
-    let picture = flow.picture.as_ref();
-    let notice = match (picture, selected) {
-        (Some(_), _) => None,
-        (None, Some(_)) => Some(why_none(state, table)),
-        (None, None) => Some("No Mach number".to_string()),
+    // the angle of attack, when the stored result has several at this Mach number
+    let alpha_at = flow.selected_alpha.and_then(|a| flow.alphas.iter().position(|x| (x - a).abs() < 1e-9));
+    let alpha_step = |label: &'a str, by: i32, ok: bool| -> Element<'a, Message> {
+        let b = push(label, Weight::Secondary).small();
+        if ok {
+            b.on_press(Message::Flow(Msg::AlphaStep(by))).into()
+        } else {
+            b.disabled("No further angle").into()
+        }
     };
-    let caption = picture
-        .map_or_else(String::new, |p| format!("M {:.2} · {} iterations · {} × {} cells", p.field.mach, thousands(p.field.iteration), p.field.ni, p.field.nj));
+    let mut head_items: Vec<Element<'a, Message>> =
+        vec![ui::label(format!("FLOW FIELD · CFD TABLE · {}", grid.to_uppercase())), Space::new().width(Fill).boxed()];
+    if flow.alphas.len() > 1 {
+        let items = row![
+            ui::label("ANGLE"),
+            alpha_step("◀", -1, alpha_at.is_some_and(|p| p > 0)),
+            text(flow.selected_alpha.map_or_else(|| "—".to_string(), |a| format!("α {a:.1}°"))).font(MONO).size(14).style(theme::ink),
+            alpha_step("▶", 1, alpha_at.is_some_and(|p| p + 1 < flow.alphas.len())),
+        ]
+        .spacing(SPACE_2)
+        .align_y(iced::Center);
+        head_items.push(items.boxed());
+        head_items.push(Space::new().width(SPACE_3).boxed());
+    }
+    head_items.push(stepper.boxed());
+    head_items.push(Space::new().width(SPACE_3).boxed());
+    head_items.push(push("Plots", Weight::Secondary).on_press(Message::Flow(Msg::Open(false))).into());
+    let head = row(head_items).align_y(iced::Center);
+
+    let notice = match (flow.has_picture(), selected) {
+        (true, _) => None,
+        (false, Some(_)) => Some(why_none(state, table)),
+        (false, None) => Some("No Mach number".to_string()),
+    };
+    let caption = flow.caption();
     let viewer = flow.viewer(ctx, caption, notice, false).map(Message::Flow);
 
-    let points: Vec<(f64, f64, bool)> = table.points.iter().map(|p| (p.mach, p.cd, state.cfd.fields.get(table, p.mach).is_some())).collect();
+    let points: Vec<(f64, f64, bool)> = table.points.iter().map(|p| (p.mach, p.cd, state.cfd.fields.has_mach(table, p.mach))).collect();
     let picker = canvas::Canvas::new(Picker { points, selected }).width(Fill).height(Length::Fixed(100.0)).boxed();
     let picker: Element<'a, Message> = picker.map(Message::Flow).boxed();
     let picker = column![container(ui::label("CD · CLICK A POINT")).padding([SPACE_1, 0.0]), picker];
@@ -926,5 +1170,83 @@ mod tests {
         let t = Instant::now();
         let _ = p.cell_at(0.7, 0.2);
         eprintln!("cell_at on {n} cells (debug build): {:?}", t.elapsed());
+    }
+
+    #[test]
+    fn a_field_with_cells_round_the_axis_opens_as_the_scene_and_a_wedge_only_side_on() {
+        let mut s = State::new();
+        s.update(Msg::Resized(Size::new(800.0, 500.0)));
+        s.set_field(Some(&scene3::tests::anf()));
+        assert_eq!(s.mode(), Mode::Scene);
+        assert!(s.scene.picture().is_some() && s.picture.is_none() && s.lower.is_none());
+        // the user's choice: side-on builds the two halves and lets the scene go
+        s.update(Msg::Mode(Mode::Side));
+        assert_eq!(s.mode(), Mode::Side);
+        assert!(s.picture.is_some() && s.lower.is_some() && s.scene.picture().is_none());
+        s.update(Msg::Mode(Mode::Scene));
+        assert!(s.picture.is_none() && s.lower.is_none() && s.scene.picture().is_some());
+        // one cell round the axis: nothing to turn, side-on whatever was chosen
+        s.update(Msg::Mode(Mode::Scene));
+        s.set_field(Some(&Arc::new(small(2.0))));
+        assert_eq!(s.mode(), Mode::Side);
+        assert!(s.picture.is_some() && s.lower.is_none(), "a wedge is its own mirror");
+        s.set_field(None);
+        assert!(!s.has_picture() && s.picture.is_none());
+    }
+
+    #[test]
+    fn at_an_angle_of_attack_the_side_view_draws_the_lee_layer_above_and_the_windward_below() {
+        let mut s = State::new();
+        s.update(Msg::Resized(Size::new(900.0, 400.0)));
+        s.set_field(Some(&scene3::tests::anf()));
+        s.update(Msg::Mode(Mode::Side));
+        let (up, down) = (s.picture.clone().unwrap(), s.lower.clone().unwrap());
+        assert!(up.mer.rho != down.mer.rho && up.mach != down.mach, "different flow above and below");
+        assert_eq!(up.ranges, down.ranges, "one colour scale for both");
+        // a pointer below the axis reads the lower half
+        let xf = Xf { camera: s.camera, size: s.size };
+        let (x, r) = (5.0, 1.0);
+        s.update(Msg::Hover(Some(xf.to_screen(x, -r))));
+        assert!(s.hover().unwrap().lower);
+        s.update(Msg::Hover(Some(xf.to_screen(x, r))));
+        assert!(!s.hover().unwrap().lower);
+    }
+
+    #[test]
+    fn the_side_views_colour_range_fits_to_the_screen_and_goes_back() {
+        let mut s = State::new();
+        s.update(Msg::Resized(Size::new(900.0, 400.0)));
+        s.set_field(Some(&scene3::tests::anf()));
+        s.update(Msg::Mode(Mode::Side));
+        let whole = s.range();
+        s.update(Msg::FitRange);
+        let fitted = s.range();
+        assert!(fitted != whole && fitted.0 >= whole.0 && fitted.1 <= whole.1 + 1e-3, "{fitted:?} in {whole:?}");
+        s.update(Msg::Scalar(Scalar::Cp));
+        assert_eq!(s.range(), s.picture.as_ref().unwrap().ranges[Scalar::Cp.index()], "the fit was for the Mach number");
+        s.update(Msg::Scalar(Scalar::Mach));
+        s.update(Msg::FitRange);
+        s.update(Msg::ResetRange);
+        assert_eq!(s.range(), whole);
+    }
+
+    #[test]
+    fn the_angle_stepper_walks_the_angles_and_the_caption_names_the_flow() {
+        let mut s = State::new();
+        s.alphas = vec![0.0, 2.0, 4.0];
+        s.selected_alpha = Some(2.0);
+        s.update(Msg::AlphaStep(1));
+        assert_eq!(s.selected_alpha, Some(4.0));
+        s.update(Msg::AlphaStep(1));
+        assert_eq!(s.selected_alpha, Some(4.0));
+        s.update(Msg::AlphaStep(-9));
+        assert_eq!(s.selected_alpha, Some(0.0));
+        assert_eq!(s.caption(), "");
+        let f = scene3::tests::anf();
+        s.set_field(Some(&f));
+        let c = s.caption();
+        assert!(c.contains("α 4.0°") && c.contains(&format!("{} × {} × {} cells", f.ni, f.nj, f.nk)), "{c}");
+        s.set_field(Some(&Arc::new(small(2.0))));
+        assert!(!s.caption().contains('α') && s.caption().contains("cells"), "{}", s.caption());
     }
 }

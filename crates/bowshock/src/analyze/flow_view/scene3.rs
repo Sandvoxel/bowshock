@@ -11,9 +11,7 @@
 //! [`world`]: the viewport's frame (`+Z` along the rocket, `+Y` up = the lee side, `+X` = solver `y`), a cyclic permutation, so
 //! handedness is kept and the viewport's camera can be used as it is.
 
-#![allow(dead_code)] // the GPU side (`gpu3`) and the viewer state come in the next commits
-
-use super::map::{Scalar, GREY_DARK, GREY_LIGHT, RDBU, VIRIDIS};
+use super::map::{GREY_DARK, GREY_LIGHT, RDBU, VIRIDIS};
 use bowshock_core::{Field3, Part, Tile};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -56,16 +54,6 @@ impl Scalar3 {
         self as usize
     }
 
-    /// The 2D viewer's scalar of the same name, if it has one.
-    pub fn flat(self) -> Option<Scalar> {
-        match self {
-            Scalar3::Mach => Some(Scalar::Mach),
-            Scalar3::Cp => Some(Scalar::Cp),
-            Scalar3::Schlieren => Some(Scalar::Schlieren),
-            Scalar3::Eddy => None,
-        }
-    }
-
     /// The stops this scalar is coloured with.
     pub fn stops(self, dark: bool) -> &'static [[u8; 3]] {
         match (self, dark) {
@@ -93,8 +81,8 @@ impl WallScalar {
     /// The button label.
     pub fn name(self) -> &'static str {
         match self {
-            WallScalar::Cp => "Cp",
-            WallScalar::Cf => "Cf",
+            WallScalar::Cp => "Wall Cp",
+            WallScalar::Cf => "Skin friction",
         }
     }
 
@@ -309,6 +297,8 @@ pub struct Prepared3 {
     pub bounds: ([f32; 3], [f32; 3]),
     /// The part of the grid the cut sheets show.
     pub window: Window,
+    /// The axial position of the middle of each cell layer `i` (the stations a cross-flow sheet can be put at), ascending.
+    pub stations: Vec<f32>,
 }
 
 impl Prepared3 {
@@ -330,7 +320,8 @@ impl Prepared3 {
         };
         let bounds = bounds_of(f, &tiles);
         let window = Window::around(bounds);
-        Prepared3 { id: NEXT_ID.fetch_add(1, Ordering::Relaxed), field, tiles, ranges, wall_ranges, walls, bounds, window }
+        let stations = (0..f.ni).map(|i| 0.5 * (f.node(i, f.nj / 2, 0)[0] + f.node(i + 1, f.nj / 2, 0)[0])).collect();
+        Prepared3 { id: NEXT_ID.fetch_add(1, Ordering::Relaxed), field, tiles, ranges, wall_ranges, walls, bounds, window, stations }
     }
 
     /// The four scalars of cell `(i, j, k)` (NaN in a solid cell): Mach, Cp, log10 of the density gradient, eddy ratio.

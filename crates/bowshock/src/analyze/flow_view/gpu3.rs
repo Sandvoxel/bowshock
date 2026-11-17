@@ -6,8 +6,6 @@
 //! uniform block, so orbiting, changing what the colours show and toggling the tiling cost a uniform write. A tile is an instance:
 //! the whole rocket is the same buffers drawn once per copy of the solved domain.
 
-#![allow(dead_code)] // the viewer state that draws the scene comes in the next commit
-
 use super::map::{self, LUT};
 use super::scene3::{Prepared3, Scalar3, SheetDraw, TileSel, WallScalar, WallVertex, Window};
 use crate::viewport::camera::Camera;

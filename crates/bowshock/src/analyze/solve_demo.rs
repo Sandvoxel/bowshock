@@ -46,6 +46,11 @@ pub enum Demo {
     ShareMid,
     /// A 3D solve shared by the same three machines, stopped partway.
     LiftShareMid,
+    /// [`Demo::Mid`] with 3D flow fields: the finned finner of the fixture (`BOWSHOCK_FLOW3_FIXTURE`, default the one in
+    /// `crates/bowshock/tests/data`) with its velocities scaled to the point's Mach number, as live snapshots and final fields.
+    Flow3dMid,
+    /// [`Demo::Done`] with 3D flow fields, at two angles of attack per point.
+    Flow3dDone,
 }
 
 impl Demo {
@@ -60,6 +65,8 @@ impl Demo {
             "remote-mid" => Demo::RemoteMid,
             "share-mid" => Demo::ShareMid,
             "lift-share-mid" => Demo::LiftShareMid,
+            "flow3d-mid" => Demo::Flow3dMid,
+            "flow3d-done" => Demo::Flow3dDone,
             _ => return None,
         })
     }
@@ -115,8 +122,69 @@ fn quality(o: Outcome) -> CfdQuality {
 }
 
 /// Snapshots of the point at `mach` at `iterations` (0 is the grid with the free stream on it), as a live local solve sends them.
-fn snapshots(job: &Job, mach: f64, iterations: &[usize]) -> Vec<Event> {
-    iterations.iter().filter_map(|&it| synthetic_field(job, mach, it)).map(|f| Event::Field(cfd::FieldRef(f))).collect()
+fn snapshots(job: &Job, mach: f64, iterations: &[usize], three_d: bool) -> Vec<Event> {
+    let fields = |it: usize| -> Vec<Arc<solver::Field3>> {
+        if three_d {
+            fixture_field(mach, FIXTURE_ALPHA, it).into_iter().collect()
+        } else {
+            synthetic_field(job, mach, it).into_iter().collect()
+        }
+    };
+    iterations.iter().flat_map(|&it| fields(it)).map(|f| Event::Field(cfd::FieldRef(f))).collect()
+}
+
+/// The angle of attack of the fixture's flow (degrees).
+const FIXTURE_ALPHA: f64 = 4.0;
+
+/// The 3D fixture the `flow3d` demos play, read once.
+fn fixture3d() -> Option<&'static Arc<solver::Field3>> {
+    static FIXTURE: std::sync::OnceLock<Option<Arc<solver::Field3>>> = std::sync::OnceLock::new();
+    FIXTURE
+        .get_or_init(|| {
+            let path =
+                std::env::var("BOWSHOCK_FLOW3_FIXTURE").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/anf_m2_a4.field3").to_string());
+            let decoded = std::fs::read(&path).map_err(|e| e.to_string()).and_then(|b| super::flow_view::decode_fixture(&b));
+            match decoded {
+                Ok(f) => Some(Arc::new(f)),
+                Err(e) => {
+                    eprintln!("BOWSHOCK_CFD_DEMO=flow3d: {path}: {e}");
+                    None
+                }
+            }
+        })
+        .as_ref()
+}
+
+/// A made-up 3D field after `iteration` iterations at `mach` and `alpha_deg`: the fixture's flow with its velocities scaled to the Mach
+/// number, its disturbance (the part of the state and the wall pressures that differ from the free stream) scaled with the angle of
+/// attack over the fixture's and with how far the solve has got (settled from iteration 2 000). Nothing here is solved.
+fn fixture_field(mach: f64, alpha_deg: f64, iteration: usize) -> Option<Arc<solver::Field3>> {
+    let base = fixture3d()?;
+    let develop = if iteration >= 2000 { 1.0 } else { 1.0 - (-(iteration as f64) / 700.0).exp() } as f32;
+    let strength = develop * (alpha_deg / FIXTURE_ALPHA) as f32;
+    let speed = (mach / base.mach) as f32;
+    let fs = base.freestream;
+    let mut f = (**base).clone();
+    f.mach = mach;
+    f.alpha_deg = alpha_deg;
+    f.iteration = iteration;
+    f.freestream = [fs[0], fs[1] * f64::from(speed), fs[2], fs[3] * f64::from(speed), fs[4]];
+    for (c, q) in f.prim.iter_mut().enumerate() {
+        if f.solid[c] {
+            continue;
+        }
+        let free = [fs[0] as f32, fs[1] as f32, fs[2] as f32, fs[3] as f32, fs[4] as f32];
+        for m in 0..5 {
+            q[m] = free[m] + strength * (q[m] - free[m]);
+        }
+        for m in 1..4 {
+            q[m] *= speed;
+        }
+    }
+    for w in &mut f.walls {
+        w.cp *= strength;
+    }
+    Some(Arc::new(f))
 }
 
 /// A made-up flow field of the body of `job` at `mach` after `iteration` iterations, on the grid the real solver would use: a cone
@@ -294,12 +362,13 @@ pub fn events(demo: Demo, job: &Job) -> Vec<Event> {
         return out;
     }
     let finished = match demo {
-        Demo::Mid | Demo::RemoteMid | Demo::ShareMid => 4,
+        Demo::Mid | Demo::Flow3dMid | Demo::RemoteMid | Demo::ShareMid => 4,
         Demo::Stopped => 5.min(nodes.len()),
         _ => nodes.len(),
     };
     // Shared by three machines, the first points were taken by the two that were ready.
     let owner = |i: usize| if demo == Demo::ShareMid { [0, 1, 0, 0][i % 4] } else { 0 };
+    let three_d = matches!(demo, Demo::Flow3dMid | Demo::Flow3dDone);
     let mut at = 0.0;
     let mut tally = Tally { points: Vec::new(), notes: job.plan.notes.clone(), gpu: 0, cpu: 0, fallback: None };
     for (i, &mach) in nodes[..finished].iter().enumerate() {
@@ -307,7 +376,14 @@ pub fn events(demo: Demo, job: &Job) -> Vec<Event> {
         let its = if o == Outcome::Stalled { CAP } else { iterations(mach) };
         let p = point(mach, quality(o));
         at += SETUP + its as f64 * PER_ITERATION;
-        out.extend(synthetic_field(job, mach, its).map(|field| Event::PointField { field: cfd::FieldRef(field) }));
+        if three_d {
+            // the result has two angles of attack at every Mach number
+            for alpha in [2.0, FIXTURE_ALPHA] {
+                out.extend(fixture_field(mach, alpha, its).map(|field| Event::PointField { field: cfd::FieldRef(field) }));
+            }
+        } else {
+            out.extend(synthetic_field(job, mach, its).map(|field| Event::PointField { field: cfd::FieldRef(field) }));
+        }
         out.push(Event::Point(PointDone {
             machine: owner(i),
             at,
@@ -324,11 +400,11 @@ pub fn events(demo: Demo, job: &Job) -> Vec<Event> {
         tally.gpu += 1;
     }
     match demo {
-        Demo::Mid => {
+        Demo::Mid | Demo::Flow3dMid => {
             // the next point has reached iteration 1 450 and has shown its flow at 500 and 1 000
             let mach = nodes[finished];
             out.extend(trace(0, mach, None, cd(mach), at + SETUP, 1450));
-            out.extend(snapshots(job, mach, &[0, 500, 1000]));
+            out.extend(snapshots(job, mach, &[0, 500, 1000], three_d));
         }
         Demo::RemoteMid => {
             // a remote machine sends no snapshots
@@ -339,11 +415,11 @@ pub fn events(demo: Demo, job: &Job) -> Vec<Event> {
             // the next two points are in flight, one on each machine that is ready
             let (a, b) = (nodes[finished], nodes[finished + 1]);
             out.extend(trace(0, a, None, cd(a), at + SETUP, 1450));
-            out.extend(snapshots(job, a, &[0, 500, 1000]));
+            out.extend(snapshots(job, a, &[0, 500, 1000], false));
             out.extend(trace(1, b, None, cd(b), at + SETUP, 800));
         }
         Demo::Stopped => {
-            out.extend(snapshots(job, nodes[finished.min(nodes.len() - 1)], &[0, 500]));
+            out.extend(snapshots(job, nodes[finished.min(nodes.len() - 1)], &[0, 500], false));
             out.push(Event::Finished(Err(cfd::CANCELLED.to_string())));
         }
         _ => out.push(Event::Finished(Ok(cfd::table_from(job, tally, nodes.len(), at)))),
@@ -768,7 +844,7 @@ mod tests {
         assert_eq!(store.len(), table.points.len(), "a field for each Mach node");
         let mut bytes = 0;
         for p in &table.points {
-            let f = store.get(&table, p.mach).unwrap_or_else(|| panic!("no field at Mach {}", p.mach));
+            let f = store.get(&table, p.mach, 0.0).unwrap_or_else(|| panic!("no field at Mach {}", p.mach));
             assert_eq!(f.mach, p.mach);
             bytes += 4 * 4 * f.cells();
         }
@@ -797,7 +873,7 @@ mod tests {
         let other = bowshock_model::CfdTable { solved_at: table.solved_at + 1, ..table.clone() };
         assert!(app.ctx_mut().doc.store_cfd_table(other));
         press(&mut app, Message::Ignore);
-        assert!(app.analyze().cfd.fields.get(app.analyze().cfd.table.as_ref().unwrap(), table.points[0].mach).is_none());
+        assert!(app.analyze().cfd.fields.get(app.analyze().cfd.table.as_ref().unwrap(), table.points[0].mach, 0.0).is_none());
         assert!(app.analyze().flow.picture_mach().is_none(), "the viewer says there is no field");
 
         // solved again, then the geometry changes: the table is stale and the fields are gone
@@ -820,6 +896,39 @@ mod tests {
         press(&mut app, Message::CfdKeep);
         let table = app.ctx().doc.rocket().cfd_table(1).expect("kept").clone();
         assert_eq!(app.analyze().cfd.fields.len(), 4);
-        assert!(table.points.iter().all(|p| app.analyze().cfd.fields.get(&table, p.mach).is_some()));
+        assert!(table.points.iter().all(|p| app.analyze().cfd.fields.get(&table, p.mach, 0.0).is_some()));
+    }
+
+    #[test]
+    fn the_3d_demos_show_a_finned_field_live_and_two_angles_per_mach_when_done() {
+        // in flight: the latest snapshot is a 3D field, and the viewer takes it as the scene
+        let (mut app, serial) = app_with(&[Demo::Flow3dMid]);
+        play(&mut app, serial, Demo::Flow3dMid);
+        let live = app.analyze().cfd.solving.as_ref().and_then(|s| s.picture.clone()).expect("the point in flight has shown its flow");
+        assert!(live.nk > 1 && live.iteration == 1000 && !live.fin_theta.is_empty(), "nk {} fins {:?}", live.nk, live.fin_theta);
+        assert_eq!(app.analyze().flow.mode(), flow_view::Mode::Scene);
+        assert!(app.analyze().flow.scene.picture().is_some());
+
+        // done: a field for each angle of each Mach node, and the stepper walks the angles
+        let (mut app, serial) = app_with(&[Demo::Flow3dDone]);
+        play(&mut app, serial, Demo::Flow3dDone);
+        let table = app.ctx().doc.rocket().cfd_table(1).expect("the table is stored").clone();
+        let store = &app.analyze().cfd.fields;
+        assert_eq!(store.len(), 2 * table.points.len());
+        for p in &table.points {
+            assert_eq!(store.alphas_at(&table, p.mach), vec![2.0, 4.0], "Mach {}", p.mach);
+            assert!(store.has_mach(&table, p.mach));
+        }
+        press(&mut app, Message::Flow(flow_view::Msg::Open(true)));
+        let flow = &app.analyze().flow;
+        assert_eq!((flow.alphas.clone(), flow.selected_alpha), (vec![2.0, 4.0], Some(2.0)));
+        assert!(flow.caption().contains("α 2.0°"), "{}", flow.caption());
+        press(&mut app, Message::Flow(flow_view::Msg::AlphaStep(1)));
+        let flow = &app.analyze().flow;
+        assert_eq!(flow.selected_alpha, Some(4.0));
+        assert!(flow.caption().contains("α 4.0°"), "{}", flow.caption());
+        // stepping to another Mach number keeps the angle when it has it
+        press(&mut app, Message::Flow(flow_view::Msg::Step(1)));
+        assert_eq!(app.analyze().flow.selected_alpha, Some(4.0));
     }
 }

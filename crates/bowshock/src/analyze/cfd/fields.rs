@@ -50,11 +50,16 @@ fn same(a: f64, b: f64) -> bool {
     (a - b).abs() < 1e-9
 }
 
-/// The final fields of the table on show, one per Mach node.
+/// Two angles of attack are the same (degrees).
+fn same_alpha(a: f64, b: f64) -> bool {
+    (a - b).abs() < 1e-6
+}
+
+/// The final fields of the table on show, one per Mach node and angle of attack of the result.
 #[derive(Debug, Default)]
 pub struct FieldStore {
     stamp: Option<Stamp>,
-    /// In ascending Mach order.
+    /// In ascending Mach order, then angle of attack.
     fields: Vec<Arc<solver::Field3>>,
 }
 
@@ -63,8 +68,8 @@ impl FieldStore {
     /// of a Mach node of the table are left out.
     pub fn replace(&mut self, table: &CfdTable, fields: impl IntoIterator<Item = Arc<solver::Field3>>) {
         let mut kept: Vec<Arc<solver::Field3>> = fields.into_iter().filter(|f| table.points.iter().any(|p| same(p.mach, f.mach))).collect();
-        kept.sort_by(|a, b| a.mach.total_cmp(&b.mach));
-        kept.dedup_by(|a, b| same(a.mach, b.mach));
+        kept.sort_by(|a, b| a.mach.total_cmp(&b.mach).then(a.alpha_deg.total_cmp(&b.alpha_deg)));
+        kept.dedup_by(|a, b| same(a.mach, b.mach) && same_alpha(a.alpha_deg, b.alpha_deg));
         self.stamp = (!kept.is_empty()).then(|| Stamp::of(table));
         self.fields = kept;
     }
@@ -79,9 +84,22 @@ impl FieldStore {
         }
     }
 
-    /// The field of the point at `mach` of `table`, if the store holds one for that table.
-    pub fn get(&self, table: &CfdTable, mach: f64) -> Option<&Arc<solver::Field3>> {
-        (self.stamp == Some(Stamp::of(table))).then(|| self.fields.iter().find(|f| same(f.mach, mach))).flatten()
+    /// The field of the point at `mach` and `alpha_deg` of `table`, if the store holds one for that table.
+    pub fn get(&self, table: &CfdTable, mach: f64, alpha_deg: f64) -> Option<&Arc<solver::Field3>> {
+        (self.stamp == Some(Stamp::of(table))).then(|| self.fields.iter().find(|f| same(f.mach, mach) && same_alpha(f.alpha_deg, alpha_deg))).flatten()
+    }
+
+    /// The angles of attack (degrees, ascending) the store has a field at `mach` of `table` for.
+    pub fn alphas_at(&self, table: &CfdTable, mach: f64) -> Vec<f64> {
+        if self.stamp != Some(Stamp::of(table)) {
+            return Vec::new();
+        }
+        self.fields.iter().filter(|f| same(f.mach, mach)).map(|f| f.alpha_deg).collect()
+    }
+
+    /// Whether the store has a field at `mach` of `table`, at any angle of attack.
+    pub fn has_mach(&self, table: &CfdTable, mach: f64) -> bool {
+        self.stamp == Some(Stamp::of(table)) && self.fields.iter().any(|f| same(f.mach, mach))
     }
 
     /// Whether the store holds the fields of `table`.
@@ -154,15 +172,15 @@ mod tests {
         // a field of a Mach number the table does not have is left out, the rest come out in Mach order
         store.replace(&t, [field(2.0), field(0.5), field(1.5), field(1.0)]);
         assert_eq!(store.len(), 3);
-        assert_eq!(store.get(&t, 1.0).map(|f| f.mach), Some(1.0));
-        assert_eq!(store.get(&t, 2.0 + 1e-12).map(|f| f.mach), Some(2.0), "the same node within rounding");
-        assert!(store.get(&t, 1.5).is_none());
+        assert_eq!(store.get(&t, 1.0, 0.0).map(|f| f.mach), Some(1.0));
+        assert_eq!(store.get(&t, 2.0 + 1e-12, 0.0).map(|f| f.mach), Some(2.0), "the same node within rounding");
+        assert!(store.get(&t, 1.5, 0.0).is_none());
         // the same geometry solved again is another table: its points have no field here
         let again = table(7, 101, &[0.5, 1.0, 2.0]);
-        assert!(store.get(&again, 1.0).is_none() && !store.has_any(&again));
+        assert!(store.get(&again, 1.0, 0.0).is_none() && !store.has_any(&again));
         // a solve replaces what was kept
         store.replace(&again, [field(1.0)]);
-        assert_eq!((store.len(), store.get(&again, 1.0).is_some(), store.get(&t, 1.0).is_some()), (1, true, false));
+        assert_eq!((store.len(), store.get(&again, 1.0, 0.0).is_some(), store.get(&t, 1.0, 0.0).is_some()), (1, true, false));
     }
 
     #[test]
@@ -184,5 +202,25 @@ mod tests {
             store.retain_for(other.as_ref(), geometry);
             assert!(store.is_empty());
         }
+    }
+
+    #[test]
+    fn several_angles_of_attack_at_one_mach_node_are_kept_apart() {
+        let t = table(7, 100, &[0.5, 1.0]);
+        let at = |mach: f64, alpha: f64| {
+            let mut f = (*field(mach)).clone();
+            f.alpha_deg = alpha;
+            Arc::new(f)
+        };
+        let mut store = FieldStore::default();
+        // out of order, and the same angle twice (within rounding): ascending, once each
+        store.replace(&t, [at(1.0, 4.0), at(0.5, 2.0), at(1.0, 2.0), at(1.0, 2.0 + 1e-9), at(0.5, 4.0)]);
+        assert_eq!(store.len(), 4);
+        assert_eq!(store.alphas_at(&t, 1.0), vec![2.0, 4.0]);
+        assert_eq!(store.get(&t, 1.0, 4.0).map(|f| f.alpha_deg), Some(4.0));
+        assert!(store.get(&t, 1.0, 3.0).is_none() && store.get(&t, 1.0, 0.0).is_none());
+        assert!(store.has_mach(&t, 0.5) && !store.has_mach(&t, 2.0));
+        assert!(store.alphas_at(&t, 2.0).is_empty());
+        assert!(store.alphas_at(&table(7, 101, &[0.5, 1.0]), 1.0).is_empty(), "another table has none");
     }
 }

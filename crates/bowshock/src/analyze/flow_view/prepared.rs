@@ -4,9 +4,11 @@
 //! Built once per picture on the UI thread, when the picture changes (a snapshot arrives, another Mach number is chosen): the
 //! cost is a few passes over the cells (measured in the module tests of `flow_view`).
 
+use super::map::Scalar;
 use super::meridian::Meridian;
 use bowshock_core::Field3;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
 use std::sync::Arc;
 
 /// One vertex of the picture: a grid node and the three scalars there (Mach, Cp, log10 of the density gradient).
@@ -27,8 +29,6 @@ pub const SCHLIEREN_DECADES: f32 = 3.0;
 pub struct Prepared {
     /// Changes with every picture: the GPU side uploads a picture's vertices when it sees a new one.
     pub id: u64,
-    /// The field.
-    pub field: Arc<Field3>,
     /// The meridian layer of the field this picture shows.
     pub mer: Meridian,
     /// Mach number per cell (NaN in blocked cells).
@@ -58,14 +58,15 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 impl Prepared {
     /// Derives everything the viewer draws from the meridian layer of `field` nearest the lee side of the pitch plane (azimuth 0).
+    #[cfg(test)]
     pub fn new(field: Arc<Field3>) -> Prepared {
         let layer = field.layer_of_theta(0.0);
-        Prepared::of_layer(field, layer)
+        Prepared::of_layer(&field, layer)
     }
 
     /// Derives everything the viewer draws from cell layer `layer` of `field`.
-    pub fn of_layer(field: Arc<Field3>, layer: usize) -> Prepared {
-        let mer = Meridian::of_layer(&field, layer);
+    pub fn of_layer(field: &Field3, layer: usize) -> Prepared {
+        let mer = Meridian::of_layer(field, layer);
         let f = &mer;
         let (ni, nj) = (f.ni, f.nj);
         let mach = f.mach_numbers();
@@ -141,22 +142,7 @@ impl Prepared {
         let radius = outline.iter().map(|p| p[1]).fold(0.0f32, f32::max);
         let wall = f.wall.clone();
 
-        Prepared {
-            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
-            field,
-            mer,
-            mach,
-            cp,
-            gradient,
-            ranges,
-            outline,
-            wall,
-            length,
-            radius,
-            vertices,
-            triangles,
-            edges,
-        }
+        Prepared { id: NEXT_ID.fetch_add(1, Ordering::Relaxed), mer, mach, cp, gradient, ranges, outline, wall, length, radius, vertices, triangles, edges }
     }
 
     /// The box the first view shows, `(x0, x1, r_max)`: the body, a little of the flow ahead of it and the wake behind. Falls back
@@ -210,6 +196,28 @@ impl Prepared {
             (Some(a), Some(b)) if b.0 > a.0 => Some(a.1 + (b.1 - a.1) * (x - a.0) / (b.0 - a.0)),
             _ => None,
         }
+    }
+
+    /// The value of `scalar` in cell `c` as the picture colours it (the schlieren as the log10 of the gradient).
+    pub fn value(&self, scalar: Scalar, c: usize) -> f32 {
+        match scalar {
+            Scalar::Mach => self.mach[c],
+            Scalar::Cp => self.cp[c],
+            Scalar::Schlieren => self.gradient[c].max(GRADIENT_FLOOR).log10(),
+        }
+    }
+
+    /// Makes this picture and `other` (the other half of the plane) colour by the same ranges: those of both together.
+    pub fn share_ranges(&mut self, other: &mut Prepared) {
+        let mut ranges = self.ranges;
+        for (s, r) in ranges.iter_mut().enumerate() {
+            let (a, b) = (self.ranges[s], other.ranges[s]);
+            *r = (a.0.min(b.0), a.1.max(b.1));
+        }
+        // the schlieren ramp is a fixed number of decades below its top
+        ranges[Scalar::Schlieren.index()].0 = ranges[Scalar::Schlieren.index()].1 - SCHLIEREN_DECADES;
+        self.ranges = ranges;
+        other.ranges = ranges;
     }
 }
 

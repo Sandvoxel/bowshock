@@ -753,9 +753,17 @@ impl State {
         if self.flow.selected.is_none_or(|m| !self.flow.machs.iter().any(|x| (x - m).abs() < 1e-9)) {
             self.flow.selected = flow_view::default_mach(&self.flow.machs);
         }
-        let picture: Option<Arc<Field3>> = match (&self.cfd.solving, &table, self.flow.selected) {
-            (Some(s), _, _) if on => s.picture.clone(),
-            (None, Some(t), Some(m)) if self.flow.open => self.cfd.fields.get(t, m).cloned(),
+        // the angles of attack the stored result has at the selected Mach number, and the one on show
+        self.flow.alphas = match (&table, self.flow.selected) {
+            (Some(t), Some(m)) => self.cfd.fields.alphas_at(t, m),
+            _ => Vec::new(),
+        };
+        if self.flow.selected_alpha.is_none_or(|a| !self.flow.alphas.iter().any(|x| (x - a).abs() < 1e-9)) {
+            self.flow.selected_alpha = self.flow.alphas.first().copied();
+        }
+        let picture: Option<Arc<Field3>> = match (&self.cfd.solving, &table, self.flow.selected, self.flow.selected_alpha) {
+            (Some(s), _, _, _) if on => s.picture.clone(),
+            (None, Some(t), Some(m), Some(a)) if self.flow.open => self.cfd.fields.get(t, m, a).cloned(),
             _ => None,
         };
         self.flow.set_field(picture.as_ref());

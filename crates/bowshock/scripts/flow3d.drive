@@ -1,0 +1,100 @@
+# The 3D flow viewer: the live picture of a solve in progress, and the Flow field view of a finished table, in the dark and the light
+# theme. A real solve takes minutes and the driver waits for running tasks, so the solves are scripted (`analyze/solve_demo.rs`; the
+# flows are the committed finned-finner fixture with its velocities scaled to each point's Mach number and two made-up angles of attack):
+# The GPU pictures only render with the wgpu test backend (the default software one leaves the shader widgets empty):
+#   ICED_TEST_BACKEND=wgpu BOWSHOCK_CFD_DEMO=flow3d-mid,flow3d-done cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/flow3d.drive out/flow3d-app
+viewport 1500x1100
+click "Analyze"
+click "CFD table"
+move (100, 1000)
+move (102, 1002)
+screenshot live-scene-dark.png
+
+# the sheets by what they show, the walls by skin friction (zero in an Euler run), the schlieren with the cross-flow sheet at the fins
+click "Schlieren"
+click "Cross-flow"
+screenshot live-schlieren-cross-dark.png
+click "Cross-flow"
+click "Mach"
+
+# the pointer over the picture: the readout
+move (700, 500)
+move (702, 502)
+screenshot live-hover-dark.png
+
+# orbit with the right button, then back to the three-quarter view
+press right (700, 500)
+move (640, 470)
+release right
+screenshot live-orbit-dark.png
+click "3/4"
+
+# the same in the light theme
+click "Prefs"
+click "Light"
+click "Done"
+move (100, 1000)
+move (102, 1002)
+screenshot live-scene-light.png
+click "Schlieren"
+screenshot live-schlieren-light.png
+click "Mach"
+
+# back to dark: a finished solve and its Flow field view (3D scene, two angles of attack per Mach number)
+click "Prefs"
+click "Dark"
+click "Done"
+click "Cancel"
+click "Discard"
+click "Re-solve"
+move (100, 1000)
+move (102, 1002)
+click "Flow field"
+move (100, 1000)
+move (102, 1002)
+screenshot field-scene-dark.png
+
+# the whole meridian plane in the schlieren, side-on, and a cross-flow sheet at the fins
+click "Schlieren"
+click "Side"
+move (100, 1000)
+move (102, 1002)
+screenshot field-plane-schlieren-dark.png
+click "Cross-flow"
+click "3/4"
+move (100, 1000)
+move (102, 1002)
+screenshot field-cross-fins-schlieren-dark.png
+
+# hover over the sheet, then over the wall
+move (900, 560)
+move (902, 562)
+screenshot field-hover-sheet-dark.png
+click "Cross-flow"
+click "Mach"
+click "Fit to screen"
+screenshot field-fit-range-dark.png
+click "Default"
+
+# the next Mach number, and the angle of attack
+click "▶"
+move (100, 1000)
+move (102, 1002)
+screenshot field-next-mach-dark.png
+
+# the light theme
+click "Prefs"
+click "Light"
+click "Done"
+move (100, 1000)
+move (102, 1002)
+screenshot field-scene-light.png
+
+# the side view: the two halves of the plane differ at an angle of attack (lee above the axis, windward below)
+click "Side view"
+click "Schlieren"
+move (100, 1000)
+move (102, 1002)
+screenshot field-side-schlieren-light.png
+click "Fit range"
+screenshot field-side-fit-range-light.png

@@ -322,13 +322,7 @@ pub fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Option<Element<'a, Message>
     let mut rows = 10;
     if live {
         let compact = emphasis == Emphasis::Curve;
-        let caption = state.flow.picture_info().map_or_else(String::new, |(mach, iteration, ni, nj)| {
-            if iteration == 0 {
-                format!("M {mach:.2} · free stream · {ni} × {nj} cells")
-            } else {
-                format!("M {mach:.2} · iteration {} · {ni} × {nj} cells", thousands(iteration))
-            }
-        });
+        let caption = state.flow.caption();
         let flow = container(state.flow.viewer(ctx, caption, live_notice(state, t), compact).map(Message::Flow)).padding([0.0, SPACE_3]).width(Fill);
         match emphasis {
             Emphasis::Flow => {
