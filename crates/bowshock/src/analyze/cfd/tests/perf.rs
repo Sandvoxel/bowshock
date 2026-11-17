@@ -381,6 +381,11 @@ fn engine3d_finned_timing() {
             p.mach, p.cd, p.friction, p.pressure, p.base, p.fins, p.other, p.quality
         );
     }
+    if let Some(l) = &table.lift {
+        for p in &l.points {
+            println!("LIFT M {:.2} alpha {:.0} CN {:.4} x_cp {:.4} cd {:?} {:?}", p.mach, p.alpha_deg, p.cn, p.x_cp, p.cd, p.quality);
+        }
+    }
     println!("| dim | Mach | alpha | cells | iters (stop/exec) | stop | build | ctx | upload | reset | first chunk | rest chunks n | rest s | ms/iter | monitor forces | final |");
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     // one row per run of a solver (a retried point has two); the facade's own costs are per point and are summed by kind below
