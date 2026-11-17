@@ -540,16 +540,28 @@ fn face_at(g: &Grid3, dir: usize, i: usize, j: usize, k: usize) -> Face3 {
 }
 
 /// Largest `y+` of the streamwise no-slip walls (the faces whose normal is `j` or `k`: the body surface, the fin sides and tips; not the `i` faces of the base and of
-/// blunt fin edges, where the log law has no meaning): `d_n sqrt(rho |tau|) / mu` of the first cell. `NaN` for Euler.
+/// blunt fin edges, where the log law has no meaning): `d_n sqrt(rho |tau|) / mu` of the first cell. `0` for Euler.
 pub fn y_plus_max(s: &Solver3) -> f64 {
-    let Some(rans) = s.rans() else { return f64::NAN };
+    y_plus_at(s).into_iter().map(|w| w.0).fold(0.0, f64::max)
+}
+
+/// [`y_plus_max`] over the faces of the wall classes for which `keep` holds (the body surface, the fin sides, the fin tips).
+pub fn y_plus_max_of(s: &Solver3, keep: impl Fn(Wall) -> bool) -> f64 {
+    y_plus_at(s).into_iter().filter(|w| keep(w.4)).map(|w| w.0).fold(0.0, f64::max)
+}
+
+/// The `y+` of the first cell at every streamwise no-slip wall face: `(y+, family, [i, j, k] of the face, first fluid cell, wall class)`; empty for Euler.
+pub fn y_plus_at(s: &Solver3) -> Vec<(f64, usize, [usize; 3], usize, Wall)> {
+    let Some(rans) = s.rans() else { return Vec::new() };
     let g = &s.grid;
-    let mut m = 0.0f64;
+    let classes = wall_classes(g);
+    let mut out = Vec::new();
     for t in s.wall_tractions() {
         if t.dir == 0 {
             continue;
         }
         let [i, j, k] = t.idx;
+        let Some(&class) = classes.get(&(t.dir, i, j, k)) else { continue };
         let f = face_at(g, t.dir, i, j, k);
         // the fluid cell of the face: the cell at the face's own index, or the one below it
         let own = g.cell(i.min(g.ni - 1), j.min(g.nj - 1), k.min(g.nk - 1));
@@ -563,9 +575,9 @@ pub fn y_plus_max(s: &Solver3) -> f64 {
         let x = g.xc[cell];
         let d_n = ((x[0] - f.c[0]) * t.n[0] + (x[1] - f.c[1]) * t.n[1] + (x[2] - f.c[2]) * t.n[2]).abs();
         let tau = (t.tau[0] * t.tau[0] + t.tau[1] * t.tau[1] + t.tau[2] * t.tau[2]).sqrt();
-        m = m.max(d_n * (s.u[cell][0] * tau).sqrt() / rans.mu[cell]);
+        out.push((d_n * (s.u[cell][0] * tau).sqrt() / rans.mu[cell], t.dir, t.idx, cell, class));
     }
-    m
+    out
 }
 
 /// Mean pressure coefficient of the base face (area weighted over the `Wall::Base` faces, wall pressure as the force integration has it); `NaN` without a base.
