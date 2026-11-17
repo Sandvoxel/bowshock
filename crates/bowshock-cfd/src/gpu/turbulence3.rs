@@ -62,6 +62,11 @@ pub trait TurbModel3<const N: usize> {
     fn terms(&self, cell: &CellIn3<N>, b: &Blend3) -> ([A; N], [A; N]);
     /// The face value of equation `e` at a no-slip wall from the wall state `[k_w, omega_w, mu_t,w]` (`None`: zero gradient).
     fn wall_value(&self, e: usize, wall: &[A; 3]) -> Option<A>;
+    /// The new value of equation `e` in a smooth wall-adjacent cell (`y_plus`, `u_tau`, `nu` of the cell) from the value of its own equation (`solved`); the default keeps it
+    /// (the CPU `TurbModel::wall_cell`).
+    fn wall_cell(&self, _e: usize, solved: &A, _y_plus: &A, _u_tau: &A, _nu: &A) -> A {
+        solved.clone()
+    }
     /// Clip of the updated value of equation `e`.
     fn clip(&self, e: usize, old: &A, new: &A) -> A;
     /// The eddy viscosity from the (new) scalars of every cell.
@@ -127,6 +132,21 @@ impl TurbModel3<2> for Sst3 {
         Some(wall[e].clone())
     }
 
+    /// `k` of a smooth wall-adjacent cell is capped at the law-of-the-wall value [`k_wall3`] with the weight `x / (1 + x)`, `x = (y+ / Y_PIN)^8`: `min(solved, (1 - w) solved +
+    /// w k_wall)`; `omega` solves its equation.
+    fn wall_cell(&self, e: usize, solved: &A, y_plus: &A, u_tau: &A, _nu: &A) -> A {
+        if e != 0 {
+            return solved.clone();
+        }
+        let y = y_plus / c(cpu3::Y_PIN);
+        let y2 = &y * &y;
+        let y4 = &y2 * &y2;
+        // (bounded: `x^8` of a huge `y+` would overflow, the weight is 1 there)
+        let x = (&y4 * &y4).minimum(c(1e30));
+        let w = &x / (c(1.0) + &x);
+        ((c(1.0) - &w) * solved + &w * k_wall3(u_tau, y_plus)).minimum(solved)
+    }
+
     fn clip(&self, e: usize, old: &A, new: &A) -> A {
         let inf = self.inf();
         new.maximum(c(0.1) * old).maximum(c(1e-3 * inf[e]))
@@ -160,6 +180,13 @@ fn strain2_3(g: &[A]) -> A {
     c(2.0) * s.expect("nine terms") - c(2.0 / 3.0) * &div * &div
 }
 
+/// The wall value of `k` and the cap of `k` in a wall-adjacent cell (`turbulence3::k_wall`): `u_tau^2 / sqrt(beta*) y+^4 / (y+^4 + Y_K^4)`.
+fn k_wall3(u_tau: &A, yp: &A) -> A {
+    let y2 = yp * yp;
+    let y4 = &y2 * &y2;
+    u_tau * u_tau / c(sst2::BETA_STAR.sqrt()) * &y4 / (&y4 + c(cpu3::Y_K.powi(4)))
+}
+
 /// `sqrt(a^2 + b^2)` of two positive fields without the overflow of the squares.
 fn hypot3(a: &A, b: &A) -> A {
     let (m, n) = (a.maximum(b), a.minimum(b));
@@ -167,13 +194,25 @@ fn hypot3(a: &A, b: &A) -> A {
     &m * (c(1.0) + &r * &r).sqrt()
 }
 
-/// One Newton step `u <- max(u - (u U+(y+) - U) / (U+ + y+ dU+/dy+), u / 2)` of the inversion of Reichardt's law of the wall (`turbulence3::u_tau_law`).
-fn newton_step3(u: &A, nu: &A, speed: &A, d: &A) -> A {
+/// `(U+, dU+/dy+)` of the law of the wall of the wall treatment (`turbulence3::{law_uplus, law_duplus}`): Reichardt's law times `1 + b(y+)`, `b` the Gaussian correction
+/// `LAW_BUMP exp(-(ln(y+ / LAW_BUMP_Y) / LAW_BUMP_W)^2)` (zero below `y+ = 1e-3`).
+fn law3(yp: &A) -> (A, A) {
     let kappa = cpu3::KAPPA;
+    let (e11, e3) = ((-yp / c(11.0)).exp(), (-yp / c(3.0)).exp());
+    let up = (c(1.0) + c(kappa) * yp).ln() / c(kappa) + c(7.8) * (c(1.0) - &e11 - yp / c(11.0) * &e3);
+    let dup = c(1.0) / (c(1.0) + c(kappa) * yp) + c(7.8) * (&e11 / c(11.0) - &e3 / c(11.0) + yp / c(33.0) * &e3);
+    let live = yp.ge(c(1e-3));
+    let ys = yp.maximum(c(1e-3));
+    let t = (&ys / c(cpu3::LAW_BUMP_Y)).ln() / c(cpu3::LAW_BUMP_W);
+    let b = select(&live, c(cpu3::LAW_BUMP) * (-(&t * &t)).exp(), c(0.0));
+    let db = select(&live, &b * (-(c(2.0) * &t) / (c(cpu3::LAW_BUMP_W) * &ys)), c(0.0));
+    (&up * (c(1.0) + &b), &dup * (c(1.0) + &b) + &up * &db)
+}
+
+/// One Newton step `u <- max(u - (u U+(y+) - U) / (U+ + y+ dU+/dy+), u / 2)` of the inversion of the law of the wall [`law3`] (`turbulence3::u_tau_law`).
+fn newton_step3(u: &A, nu: &A, speed: &A, d: &A) -> A {
     let yp = d * u / nu;
-    let (e11, e3) = ((-&yp / c(11.0)).exp(), (-&yp / c(3.0)).exp());
-    let up = (c(1.0) + c(kappa) * &yp).ln() / c(kappa) + c(7.8) * (c(1.0) - &e11 - &yp / c(11.0) * &e3);
-    let dup = c(1.0) / (c(1.0) + c(kappa) * &yp) + c(7.8) * (&e11 / c(11.0) - &e3 / c(11.0) + &yp / c(33.0) * &e3);
+    let (up, dup) = law3(&yp);
     (u - (u * &up - speed) / (&up + &yp * &dup)).maximum(c(0.5) * u)
 }
 
@@ -203,6 +242,9 @@ pub(crate) struct TGeo3 {
     fluid: Array<bool>,
     /// The flat indices of the fluid cells with a no-slip face (`None` without any): the wall state is computed on these cells only.
     wall_idx: Option<Array<u32>>,
+    /// Per cell: its position in `wall_idx` (zero elsewhere) and whether it is a wall cell: the gather that puts a result of the wall cells back on the grid.
+    wall_pos: Option<Array<u32>>,
+    wall_cell: Array<bool>,
     /// `1 / V` (zero in solid cells) and `V` (one in solid cells).
     inv_v: A,
     vol: A,
@@ -262,10 +304,20 @@ impl TGeo3 {
             }
         }
         let wall_idx = if wall.is_empty() { None } else { Some(Array::from_slice_on(ctx, &wall, [wall.len()])?) };
+        let mut pos = vec![0u32; ni * nj * nk];
+        let mut is_wall = vec![false; ni * nj * nk];
+        for (m, &cell) in wall.iter().enumerate() {
+            pos[cell as usize] = m as u32;
+            is_wall[cell as usize] = true;
+        }
+        let wall_pos = if wall.is_empty() { None } else { Some(Array::from_slice_on(ctx, &pos, shape)?) };
+        let wall_cell = Array::from_slice_on(ctx, &is_wall, shape)?;
         Ok(TGeo3 {
             dir,
             fluid,
             wall_idx,
+            wall_pos,
+            wall_cell,
             inv_v: up(ctx, &grid.vol.iter().zip(solid).map(|(v, s)| if *s { 0.0 } else { 1.0 / v }).collect::<Vec<_>>(), shape)?,
             vol: up(ctx, &grid.vol.iter().zip(solid).map(|(v, s)| if *s { 1.0 } else { *v }).collect::<Vec<_>>(), shape)?,
             n_active: solid.iter().filter(|s| !**s).count().max(1),
@@ -291,6 +343,24 @@ pub(crate) struct TDev3<const N: usize> {
     dt: A,
     /// The scalars.
     turb: [A; N],
+    /// Speed `|u|` of the cell.
+    speed: A,
+    /// Roughness per cell (`None`: all smooth).
+    ks: Option<A>,
+    /// A smooth wall cell takes its `S^2` from the law of the wall and its `k` is capped (`TurbIn::law_strain`).
+    law_strain: bool,
+    /// The law of the wall at the smooth wall cells ([`LazySolver3::wall_law3`]); filled by [`LazySolver3::turbulence_update3`] (set `None`).
+    law: Option<WallLaw3>,
+}
+
+/// The law of the wall at the smooth wall cells of a `law_strain` update, as cell arrays (zero elsewhere): the mask (`1` where the cell takes the law: `wall[1] > 0`,
+/// `ks == 0`), `S^2` of the law (`strain_law^2`), `y+`, `u_tau` and `nu`.
+pub(crate) struct WallLaw3 {
+    smooth: A,
+    s2: A,
+    yp: A,
+    u_tau: A,
+    nu: A,
 }
 
 /// The scalar convection and diffusion data of every face of one family (the CPU `TFace`): face layout of the family.
@@ -331,24 +401,28 @@ impl LazySolver3 {
     // -----------------------------------------------------------------------------------------------------------------
     // wall treatment
 
-    /// Smooth-wall state `[k_w, omega_w, mu_t,w]` of the automatic treatment (`turbulence3::wall_state_smooth`): the friction velocity is the root of Reichardt's law
-    /// by `WALL_ITERATIONS` Newton steps from `u_vis` (each evaluated, `staging`), zero at rest.
-    fn wall_smooth3(&self, rho: &A, nu: &A, speed: &A, d: &A) -> [A; 3] {
+    /// The friction velocity of the law of the wall (`turbulence3::u_tau_law`): `WALL_ITERATIONS` Newton steps from `u_vis` (each evaluated, `staging`), zero at rest (the
+    /// iteration there is a 0/0 whose result is replaced).
+    fn u_tau3(&self, nu: &A, speed: &A, d: &A) -> A {
         let mut u = (nu * speed / d).sqrt();
         for _ in 0..cpu3::WALL_ITERATIONS {
             u = self.staged3(newton_step3(&u, nu, speed, d));
         }
+        select(&speed.gt(c(0.0)), u, c(0.0))
+    }
+
+    /// Smooth-wall state `[k_w, omega_w, mu_t,w]` of the automatic treatment (`turbulence3::wall_state_smooth`): the friction velocity is the root of the law of the wall
+    /// (`law3`) by `WALL_ITERATIONS` Newton steps from `u_vis` (each evaluated, `staging`), zero at rest.
+    fn wall_smooth3(&self, rho: &A, nu: &A, speed: &A, d: &A) -> [A; 3] {
         let moving = speed.gt(c(0.0));
-        let u_tau = select(&moving, u, c(0.0));
+        let u_tau = self.u_tau3(nu, speed, d);
         let yp = d * &u_tau / nu;
-        let yp2 = &yp * &yp;
-        let yp4 = &yp2 * &yp2;
         let yb = &yp / c(cpu3::Y_BOOST);
         let yb2 = &yb * &yb;
         let boost = c(1.0) + c(cpu3::OMEGA_BOOST - 1.0) / (c(1.0) + &yb2 * &yb2);
         let omega_vis = c(6.0) * nu / (c(sst2::BETA1) * d * d) * &boost;
         let omega_log = &u_tau / (c(sst2::BETA_STAR.sqrt() * cpu3::KAPPA) * d);
-        let k_w = &u_tau * &u_tau / c(sst2::BETA_STAR.sqrt()) * &yp4 / (&yp4 + c(cpu3::Y_K.powi(4)));
+        let k_w = k_wall3(&u_tau, &yp);
         let nu_t = (&u_tau * &u_tau * d / speed - nu).maximum(c(0.0)).minimum(c(sst2::NU_T_WALL_MAX) * nu);
         [k_w, hypot3(&omega_vis, &omega_log), rho * select(&moving, nu_t, c(0.0))]
     }
@@ -435,7 +509,10 @@ impl LazySolver3 {
             d: dev.dwall.clone(),
             phi: phi.clone(),
             grad: grad.clone(),
-            s2: strain2_3(&dev.cell.grad),
+            s2: match &dev.law {
+                Some(l) => select(&l.smooth.gt(c(0.5)), &l.s2, strain2_3(&dev.cell.grad)),
+                None => strain2_3(&dev.cell.grad),
+            },
             mu_t: dev.mu_t.clone(),
         }
     }
@@ -581,14 +658,67 @@ impl LazySolver3 {
             x = tridiag3(dir, &lo, &d, &up, &x);
         }
         let turb: [A; N] = std::array::from_fn(|e| select(fluid, model.clip(e, &dev.turb[e], &(&dev.turb[e] + &x[e])), c(0.0)));
+        // the smooth wall cells of a `law_strain` update take the cap of the model (the CPU `wall_cell`)
+        let turb: [A; N] = match &dev.law {
+            Some(l) => {
+                let smooth = l.smooth.gt(c(0.5));
+                std::array::from_fn(|e| select(&smooth, model.wall_cell(e, &turb[e], &l.yp, &l.u_tau, &l.nu), &turb[e]))
+            }
+            None => turb,
+        };
         let mu_t = select(fluid, model.eddy_viscosity(&self.cell_in3(dev, &turb, grad)), c(0.0));
         let n_active = c(tg.n_active as f64);
         let rnorm: [A; N] = std::array::from_fn(|e| (select(fluid, &ct.r[e] * &ct.r[e], c(0.0)).sum() / n_active).sqrt());
         TUpdate3 { turb, mu_t, rnorm }
     }
 
-    /// One turbulence update from explicit device inputs (`turbulence3::update`): gradients, blends, face data, cell terms, solves and update.
+    /// The law of the wall at the smooth wall cells (`TurbIn::is_smooth_wall` and `wall_law`): `u_tau` of the Newton inversion, `y+`, `strain_law^2` and the mask
+    /// (`wall[1] > 0` and `ks == 0` among the fluid cells with a no-slip face), computed on the gathered wall cells and put back on the grid. `None` without `law_strain` or
+    /// without wall cells.
+    pub(crate) fn wall_law3<const N: usize>(&self, tg: &TGeo3, dev: &TDev3<N>) -> Option<WallLaw3> {
+        if !dev.law_strain {
+            return None;
+        }
+        let (idx, pos) = (tg.wall_idx.as_ref()?, tg.wall_pos.as_ref()?);
+        let at = |a: &A| a.take(idx);
+        let (rho, mu, speed, d, w1) = (at(&dev.rho), at(&dev.cell.mu), at(&dev.speed), at(&dev.dwall), at(&dev.wall[1]));
+        let nu = &mu / &rho;
+        let u_tau = self.u_tau3(&nu, &speed, &d);
+        let yp = &d * &u_tau / &nu;
+        let (_, dup) = law3(&yp);
+        let strain = &u_tau * &u_tau / &nu * &dup;
+        let smooth = match &dev.ks {
+            Some(ks) => w1.gt(c(0.0)) & at(ks).eq(c(0.0)),
+            None => w1.gt(c(0.0)),
+        };
+        let (smooth, s2, yp, u_tau, nu) = self.staged3((select(&smooth, c(1.0), c(0.0)), &strain * &strain, yp, u_tau, nu));
+        let full = |a: &A| select(&tg.wall_cell, a.take(pos), c(0.0));
+        let (smooth, s2, yp, u_tau, nu) = self.staged3((full(&smooth), full(&s2), full(&yp), full(&u_tau), full(&nu)));
+        Some(WallLaw3 { smooth, s2, yp, u_tau, nu })
+    }
+
+    /// `dev` with its [`WallLaw3`] filled.
+    fn with_law3<const N: usize>(&self, tg: &TGeo3, dev: &TDev3<N>) -> TDev3<N> {
+        TDev3 {
+            rho: dev.rho.clone(),
+            cell: VCell3 { grad: dev.cell.grad.clone(), mu: dev.cell.mu.clone() },
+            mu_t: dev.mu_t.clone(),
+            wall: dev.wall.clone(),
+            dwall: dev.dwall.clone(),
+            mass: dev.mass.clone(),
+            dt: dev.dt.clone(),
+            turb: dev.turb.clone(),
+            speed: dev.speed.clone(),
+            ks: dev.ks.clone(),
+            law_strain: dev.law_strain,
+            law: self.wall_law3(tg, dev),
+        }
+    }
+
+    /// One turbulence update from explicit device inputs (`turbulence3::update`): the law of the wall at the smooth wall cells, gradients, blends, face data, cell terms,
+    /// solves and update.
     pub(crate) fn turbulence_update3<M: TurbModel3<N>, const N: usize>(&self, tg: &TGeo3, vg: &VGeo3, model: &M, dev: &TDev3<N>) -> TUpdate3<N> {
+        let dev = &self.with_law3(tg, dev);
         let grad = self.scalar_gradients3(tg, vg, model, dev);
         let blend = self.blends3(tg, model, dev, &grad);
         let tf = self.face_data3(tg, vg, model, dev, &grad, &blend);
@@ -648,6 +778,10 @@ impl LazySolver3 {
                 }
                 a.try_into().unwrap_or_else(|_| unreachable!("N scalars"))
             },
+            speed: (&p[1] * &p[1] + &p[2] * &p[2] + &p[3] * &p[3]).sqrt().cache(),
+            ks: if cx.ks.is_empty() { None } else { Some(per_cell(&|c| cx.ks[c])?) },
+            law_strain: cx.law_strain,
+            law: None,
         };
         Ok((dev, p))
     }
@@ -663,21 +797,21 @@ impl LazySolver3 {
         Ok((vg, tg))
     }
 
-    /// Runs every stage of the update on the host arrays of the CPU `TurbIn` (`sym` the symmetry sides of the domain box, `ks` the roughness per cell, empty: all smooth)
+    /// Runs every stage of the update on the host arrays of the CPU `TurbIn` (`sym` the symmetry sides of the domain box; `cx.ks` the roughness per cell, empty: all smooth; `cx.law_strain`)
     /// and returns every intermediate, downloaded in the layouts of the CPU functions: the wall state of the inputs `w`, `mu`, `dwall`, `ks`, then the stages 2 to 5 from the
     /// `cx.wall` given (the stages chain on the device: the gradients of the stage 1 feed the blends and so on). The kernel-level comparison with `crate::turbulence3`.
-    pub fn turbulence_probe3<M: TurbModel3<N>, const N: usize>(&self, model: &M, cx: &cpu3::TurbIn<N>, sym: &cv3::SymSides, ks: &[f64]) -> Result<TurbProbe<N>> {
+    pub fn turbulence_probe3<M: TurbModel3<N>, const N: usize>(&self, model: &M, cx: &cpu3::TurbIn<N>, sym: &cv3::SymSides) -> Result<TurbProbe<N>> {
         let (vg, tg) = self.geometry_turb3(cx, sym)?;
         let (dev, p) = self.upload_turb3(cx)?;
         let nc = self.ni * self.nj * self.nk;
-        let shape = [self.ni, self.nj, self.nk];
-        let ks_a = if ks.is_empty() { None } else { Some(up(&self.ctx, ks, shape)?) };
-        let wall_out = self.wall_state_pass3(&tg, &p, &dev.cell.mu, &dev.dwall, ks_a.as_ref())?;
-        let grad = self.scalar_gradients3(&tg, &vg, model, &dev);
-        let blend = self.blends3(&tg, model, &dev, &grad);
-        let tf = self.face_data3(&tg, &vg, model, &dev, &grad, &blend);
-        let ct = self.cell_terms3(&tg, model, &dev, &grad, &blend, &tf);
-        let upd = self.solve_and_update3(&tg, model, &dev, &grad, &ct);
+        let wall_out = self.wall_state_pass3(&tg, &p, &dev.cell.mu, &dev.dwall, dev.ks.as_ref())?;
+        let dev = self.with_law3(&tg, &dev);
+        let dev = &dev;
+        let grad = self.scalar_gradients3(&tg, &vg, model, dev);
+        let blend = self.blends3(&tg, model, dev, &grad);
+        let tf = self.face_data3(&tg, &vg, model, dev, &grad, &blend);
+        let ct = self.cell_terms3(&tg, model, dev, &grad, &blend, &tf);
+        let upd = self.solve_and_update3(&tg, model, dev, &grad, &ct);
         let down = |a: &[A]| -> Result<Vec<Vec<f64>>> { a.iter().map(to_f64).collect() };
         let wall_cols = down(&wall_out)?;
         let grad_cols: Vec<Vec<f64>> = grad.iter().flat_map(|g| g.iter()).map(to_f64).collect::<Result<_>>()?;
@@ -718,12 +852,11 @@ impl LazySolver3 {
     /// Kernel launches and GPU time of the wall state pass and of one full turbulence update (stages 1 to 5, the three-factor line solves included) on the inputs of
     /// the CPU `TurbIn`: the device inputs are uploaded first, then each part is run once to compile, both run for half a second to bring the GPU to its working clock, and then `reps` times under the profiler; the run of the least GPU time is
     /// returned (the GPU is shared: a run can be slowed by other work). `(wall pass, update)`.
-    pub fn turbulence_profile3<M: TurbModel3<N>, const N: usize>(&self, model: &M, cx: &cpu3::TurbIn<N>, sym: &cv3::SymSides, ks: &[f64], reps: usize) -> Result<(luma::Profile, luma::Profile)> {
+    pub fn turbulence_profile3<M: TurbModel3<N>, const N: usize>(&self, model: &M, cx: &cpu3::TurbIn<N>, sym: &cv3::SymSides, reps: usize) -> Result<(luma::Profile, luma::Profile)> {
         let (vg, tg) = self.geometry_turb3(cx, sym)?;
         let (dev, p) = self.upload_turb3(cx)?;
-        let ks_a = if ks.is_empty() { None } else { Some(up(&self.ctx, ks, [self.ni, self.nj, self.nk])?) };
         let wall_run = || -> Result<()> {
-            self.wall_state_pass3(&tg, &p, &dev.cell.mu, &dev.dwall, ks_a.as_ref())?.eval()?;
+            self.wall_state_pass3(&tg, &p, &dev.cell.mu, &dev.dwall, dev.ks.as_ref())?.eval()?;
             self.ctx.sync()
         };
         let update_run = || -> Result<()> {
