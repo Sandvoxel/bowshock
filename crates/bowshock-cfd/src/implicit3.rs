@@ -329,6 +329,7 @@ fn assemble3(s: &Solver3, p: &ImplicitParams, dir: usize) -> Factor {
     let (ni, nj, nk) = (s.grid.ni, s.grid.nj, s.grid.nk);
     let (grid, w, dt, solid) = (&s.grid, &s.w, &s.dt, &s.solid);
     let (rans, lm) = (s.rans.as_deref(), s.precond);
+    let wedge = s.is_wedge();
     let n = ni * nj * nk;
     let stride = [1, ni, ni * nj][dir];
     let e: [isize; 3] = match dir {
@@ -351,7 +352,7 @@ fn assemble3(s: &Solver3, p: &ImplicitParams, dir: usize) -> Factor {
             // its pressure and the run froze), so CPU and GPU both use the frozen ghost.
             (0, _) | (1, false) => ZERO5,
             (1, true) => {
-                if i < grid.axis_cells {
+                if grid.is_axis(i, 0) {
                     ZERO5
                 } else {
                     reflection3(f.n)
@@ -374,6 +375,12 @@ fn assemble3(s: &Solver3, p: &ImplicitParams, dir: usize) -> Factor {
                 let (ii, jj, kk) = (i as isize, j as isize, k as isize);
                 let (m, nl) = [(i, ni), (j, nj), (k, nk)][dir];
                 let wk = &w[pidx3(ni, nj, nk, ii, jj, kk)];
+                if dir == 2 && wedge {
+                    // single-cell wedge: nothing in `k` (the pressure of the `k` faces is a source of the radial momentum, as in 2D, treated explicitly: its
+                    // Jacobian is the destabilising part of the hoop term and stays out of the left-hand side)
+                    d_p[cl] = EYE5;
+                    continue;
+                }
                 let (fl, fr) = match dir {
                     0 => {
                         let il = (k * nj + j) * (ni + 1) + i;
@@ -391,6 +398,21 @@ fn assemble3(s: &Solver3, p: &ImplicitParams, dir: usize) -> Factor {
                 let wp = if upper_solid { s.wall_ghost(wk, fr.n) } else { w[pidx3(ni, nj, nk, ii + e[0], jj + e[1], kk + e[2])] };
                 let visc = rans.map_or((0.0, 0.0), |r| r.lam_pair(grid, dir, i, j, k));
                 let (mut l, mut dd, mut u) = cell_blocks3(wk, &wm, &wp, fl, fr, grid.vol[c], dt[c], p, visc, lm.as_ref());
+                if wedge && dir == 1 {
+                    // single-cell wedge: the pressure of the `k` faces is the axisymmetric radial-momentum source, `-(1/V) (A1 n1 - A0 n0) p`; as in 2D
+                    // (`implicit::cell_blocks`) its Jacobian `(I - dt J)_mom = ... + dt/V (A1 n1 - A0 n0) dp/dU` joins the diagonal of the `j` factor
+                    let (a0, a1) = (&grid.kface[c], &grid.kface[c + plane]);
+                    let g1 = GAMMA - 1.0;
+                    let (u, v, ww) = (wk[1], wk[2], wk[3]);
+                    let dp = [0.5 * g1 * (u * u + v * v + ww * ww), -g1 * u, -g1 * v, -g1 * ww, g1];
+                    let f = dt[c] / grid.vol[c];
+                    for r in 0..3 {
+                        let a = f * (a1.area * a1.n[r] - a0.area * a0.n[r]);
+                        for q in 0..5 {
+                            dd[5 * (r + 1) + q] += a * dp[q];
+                        }
+                    }
+                }
                 if m == 0 {
                     let t = ghost_t(true, fl, i, wk);
                     axpy(&mut dd, 1.0, &mm(&l, &t));

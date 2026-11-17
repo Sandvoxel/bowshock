@@ -35,12 +35,13 @@ mod device;
 pub mod engine;
 pub mod error;
 pub mod field;
+pub mod field3;
 mod fins;
 pub mod progress;
 pub mod spec;
 
 pub use analysis::{
-    Analysis, AnalysisSpec, Backend, BackendUsed, Drag, FinDrag, LiftPoint, LiftPolar, PointDetail, Polar, PolarPoint, Quality, Resolution, WallCp, Warning,
+    Analysis, AnalysisSpec, Backend, BackendUsed, Condition, Drag, FinDrag, Forces, PointDetail, Polar, PolarPoint, Quality, Resolution, WallCp, Warning,
 };
 pub use atmosphere::{AirState, Atmosphere, FlightConditions};
 pub use device::gpu_name;
@@ -48,6 +49,7 @@ pub use engine::case::Wake;
 pub use engine::result::StopReason;
 pub use error::Error;
 pub use field::Field;
+pub use field3::{Field3, Part, Symmetry, Tile, WallFace};
 pub use progress::{Progress, ProgressSink};
 pub use spec::{AftSpec, BodySpec, FinProfile, FinSpec, MotorSpec, NoseShape, NoseSpec, SharpShape};
 

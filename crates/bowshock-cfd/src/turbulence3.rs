@@ -578,7 +578,7 @@ pub fn scalar_gradients<M: TurbModel<N>, const N: usize>(cx: &TurbIn<N>, model: 
                         let mut f = [i, j, k];
                         f[dir] += hi as usize;
                         let Some(fc) = face_cells(g, cx.solid, dir, f[0], f[1], f[2]) else { continue };
-                        let nb = cx.side_phi(model, &fc, hi as usize ^ 1, dir);
+                        let nb = cx.side_phi(model, &fc, hi as usize, dir);
                         let (_, face) = face_of(g, dir, f[0], f[1], f[2]);
                         let sgn = if hi { 1.0 } else { -1.0 };
                         for e in 0..N {
@@ -895,7 +895,7 @@ mod tests {
     use crate::flux3::tests::{random_rotation, rot, Rng};
     use crate::grid3::SolidBox;
     use crate::solver::{Turbulence, Viscous};
-    use crate::viscous3::tests::{box_grid, padded, solid_mask};
+    use crate::viscous3::tests::{box_grid, padded, set_solids, solid_mask};
     use crate::viscous3::{cell_pass, face_dirs, face_pass, face_sides3, wall_tractions, SymSides};
     use crate::walldist3::{wall_distance3, wall_faces};
 
@@ -1161,7 +1161,7 @@ mod tests {
         let (n, h) = ([3, 5, 5], [0.01, 0.0004, 0.001]);
         let mut g = box_grid(n, h);
         // walls: y = 0 (solid row j = 0) and z = 0 (solid layer k = 0); the cell (·, 1, 1) touches both
-        g.solid = vec![SolidBox { i: 0..3, j: 0..1, k: 0..5 }, SolidBox { i: 0..3, j: 1..5, k: 0..1 }];
+        set_solids(&mut g, vec![SolidBox { i: 0..3, j: 0..1, k: 0..5 }, SolidBox { i: 0..3, j: 1..5, k: 0..1 }]);
         let solid = solid_mask(&g);
         let dirs = face_dirs(&g, &solid, &[false; 6]);
         let nc = solid.len();
@@ -1199,7 +1199,7 @@ mod tests {
         let re_c = 1.0e6;
         let (n, h) = ([4, 6, 3], [0.02, 0.0002, 0.02]);
         let mut g = box_grid(n, h);
-        g.solid = vec![SolidBox { i: 0..4, j: 0..1, k: 0..3 }];
+        set_solids(&mut g, vec![SolidBox { i: 0..4, j: 0..1, k: 0..3 }]);
         let solid = solid_mask(&g);
         let nc = solid.len();
         let v = visc(re_c);
@@ -1281,7 +1281,7 @@ mod tests {
             nodes.iter().map(|p| p[2]).collect(),
         )
         .unwrap();
-        g.solid = vec![SolidBox { i: 3..5, j: 0..3, k: 2..4 }];
+        set_solids(&mut g, vec![SolidBox { i: 3..5, j: 0..3, k: 2..4 }]);
         g
     }
 
@@ -1627,7 +1627,7 @@ mod tests {
         use std::time::Instant;
         let n = [100, 100, 50];
         let mut g = box_grid(n, [0.02, 0.02, 0.04]);
-        g.solid = vec![SolidBox { i: 20..80, j: 20..80, k: 0..24 }, SolidBox { i: 10..14, j: 10..90, k: 24..50 }];
+        set_solids(&mut g, vec![SolidBox { i: 20..80, j: 20..80, k: 0..24 }, SolidBox { i: 10..14, j: 10..90, k: 24..50 }]);
         let solid = solid_mask(&g);
         let nc = solid.len();
         let re_c = 1.0e6;
@@ -1728,7 +1728,7 @@ mod tests {
         let mut rng = Rng::new(9);
         let n = [6, 5, 4];
         let mut g = box_grid(n, [0.1; 3]);
-        g.solid = vec![SolidBox { i: 2..3, j: 1..4, k: 0..4 }, SolidBox { i: 0..6, j: 0..1, k: 2..3 }];
+        set_solids(&mut g, vec![SolidBox { i: 2..3, j: 1..4, k: 0..4 }, SolidBox { i: 0..6, j: 0..1, k: 2..3 }]);
         let solid = solid_mask(&g);
         let nc = solid.len();
         for dir in 0..3 {

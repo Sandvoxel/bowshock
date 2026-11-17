@@ -14,7 +14,7 @@
 use crate::flux::Limiter;
 use crate::gas3::freestream3;
 use crate::grid::{plate_grid, PlateGridParams};
-use crate::grid3::{Grid3, SolidBox};
+use crate::grid3::{Grid3, Part, SolidBox};
 use crate::implicit::ImplicitParams;
 use crate::solver::{Turbulence, Viscous};
 use crate::solver3::{Config3, RansOpts3, Scheme3, Solver3};
@@ -115,7 +115,7 @@ pub fn plate_grid3(case: &PlateCase) -> Grid3 {
         }
     }
     let mut g = Grid3::try_from_nodes(ni, nj, nk, x, y, z).expect("plate grid");
-    g.solid = vec![SolidBox { i: case.i_le()..ni, j: 0..1, k: 0..nk }];
+    g.mark_solid(SolidBox { i: case.i_le()..ni, j: 0..1, k: 0..nk }, Some(Part::Body(0)));
     g
 }
 

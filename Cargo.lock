@@ -359,6 +359,8 @@ dependencies = [
  "bowshock-sim",
  "bytemuck",
  "chrono",
+ "ciborium",
+ "flate2",
  "glam",
  "iced",
  "iced_test",
@@ -397,7 +399,9 @@ dependencies = [
 name = "bowshock-core"
 version = "0.1.0"
 dependencies = [
+ "bowshock-cases",
  "bowshock-cfd",
+ "bowshock-gpu-cases",
  "bowshock-reference",
  "luma",
  "serde",
@@ -480,6 +484,8 @@ dependencies = [
  "bowshock-core",
  "bowshock-gpu-cases",
  "bowshock-reference",
+ "ciborium",
+ "flate2",
  "luma",
  "rayon",
  "serde_json",

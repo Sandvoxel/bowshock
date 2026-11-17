@@ -26,9 +26,12 @@ bowshock-sim = { path = "../bowshock-sim" }
 # The motor picker searches and downloads from ThrustCurve.org.
 bowshock-motors = { path = "../bowshock-motors", features = ["thrustcurve"] }
 # The CFD solver behind the Analyze screen's `CFD table` method (GPU through Luma, CPU fallback).
-bowshock-core = { workspace = true, features = ["gpu"] }
+bowshock-core = { workspace = true, features = ["gpu", "serde"] }
 # Remote compute: the CFD solves run on another computer's GPU over SSH (`Compute::Remote`).
 bowshock-remote = { path = "../bowshock-remote" }
+# Flow fixtures (`bowshock_core::Field3`, written by the `field3_dump` example) are CBOR, raw-deflated.
+ciborium = "0.2"
+flate2 = "1"
 rfd = "0.18"
 # Parts-bin presets are JSON files.
 serde = { version = "1", features = ["derive"] }

@@ -6,6 +6,7 @@
 //! * The GPU solver (cargo feature `gpu`, on by default): `bowshock_cfd::gpu`, the same solver written in plain
 //!   [Luma](https://github.com/flipnoteman/Luma) array ops (f32 or double-float), validated against the CPU solver.
 
+pub mod axis3;
 pub mod bc;
 pub mod bc3;
 pub mod flux;

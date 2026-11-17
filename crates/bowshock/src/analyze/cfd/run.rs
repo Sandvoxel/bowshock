@@ -80,15 +80,29 @@ pub struct LiftJob {
     pub cpu_only: bool,
 }
 
+/// The stored point of a 3D result: `None` for a point of quality Failed, without forces or with a non-finite normal force or centre
+/// of pressure. The Euler solve has no drag, so `cd` is empty.
+fn lift_point(p: &solver::PolarPoint) -> Option<CfdLiftPoint> {
+    let f = p.forces?;
+    quality(p.quality).filter(|_| f.cn.is_finite() && f.x_cp.is_finite()).map(|q| CfdLiftPoint {
+        mach: p.mach,
+        alpha_deg: p.alpha_deg,
+        cn: f.cn,
+        x_cp: f.x_cp,
+        cd: None,
+        cm: f.cm.is_finite().then_some(f.cm),
+        quality: q,
+    })
+}
+
 /// Keeps the usable points of a 3D solve: points of quality Failed or with a non-finite value are dropped with a note on
 /// `notes`. An error when fewer than two Mach numbers keep a point although two or more were asked for.
-pub fn reduce_lift(raw: &[solver::LiftPoint], requested: usize, notes: &mut Vec<String>) -> Result<Vec<CfdLiftPoint>, String> {
+pub fn reduce_lift(raw: &[solver::PolarPoint], requested: usize, notes: &mut Vec<String>) -> Result<Vec<CfdLiftPoint>, String> {
     let mut points = Vec::with_capacity(raw.len());
     for p in raw {
-        let alpha_deg = p.alpha.to_degrees();
-        match quality(p.quality).filter(|_| p.cn.is_finite() && p.x_cp.is_finite()) {
-            Some(q) => points.push(CfdLiftPoint { mach: p.mach, alpha_deg, cn: p.cn, x_cp: p.x_cp, quality: q }),
-            None => notes.push(format!("3D point Mach {:.2}, {alpha_deg:.0}° did not converge and is left out.", p.mach)),
+        match lift_point(p) {
+            Some(l) => points.push(l),
+            None => notes.push(format!("3D point Mach {:.2}, {:.0}° did not converge and is left out.", p.mach, p.alpha_deg)),
         }
     }
     let mut machs: Vec<f64> = points.iter().map(|p| p.mach).collect();
@@ -249,7 +263,7 @@ fn parts<R>(fleet: &Fleet<R>, cpu: impl Fn(&R) -> bool) -> Vec<Part> {
 
 /// A Mach number of the 3D solve, solved: its points and where.
 struct LiftNode {
-    points: Vec<solver::LiftPoint>,
+    points: Vec<solver::PolarPoint>,
     cpu: bool,
 }
 
@@ -269,15 +283,20 @@ pub fn solve_lift(job: &LiftJob, cancel: &Arc<AtomicBool>, progress: impl Fn(Eve
             let mut analysis = solver::Analysis::new(&job.plan.body)
                 .map_err(|e| Failed::Message(e.to_string()))?
                 .resolution(solver::Resolution::Coarse)
-                .backend(session.backend());
+                .backend(session.backend())
+                .keep_fields(true);
             if let Some(fins) = &job.plan.fins {
                 analysis = analysis.fins(fins.clone());
             }
             let progress = sink(started, cancel.clone(), send.clone(), true, machine);
-            let polar = match session {
-                Session::Remote(r) => analysis.spec().map_err(|e| Failed::local(mach, e)).and_then(|spec| r.lift(&spec, mach, &LIFT_ALPHAS, &progress))?,
+            let conditions: Vec<solver::Condition> = LIFT_ALPHAS.iter().map(|&a| solver::Condition::new(mach, a)).collect();
+            let mut polar = match session {
+                Session::Remote(r) => analysis.spec().map_err(|e| Failed::local(mach, e)).and_then(|spec| r.solve(&spec, &conditions, &progress))?,
                 Session::Local { backend } => {
-                    let polar = analysis.on_progress(progress).run_lift(&[mach], &LIFT_ALPHAS).map_err(|e| Failed::local(mach, e))?;
+                    // A picture of the flow every few hundred iterations; a remote worker brings back only the final fields.
+                    let live = send.clone();
+                    analysis = analysis.on_field3(solver::field::SNAPSHOT_INTERVAL, move |f| live(Event::Field(FieldRef::of(f))));
+                    let polar = analysis.on_progress(progress).run(&conditions).map_err(|e| Failed::local(mach, e))?;
                     if polar.backend == solver::BackendUsed::Cpu {
                         // The GPU did not start: do not try it again for every point.
                         *backend = solver::Backend::Cpu;
@@ -286,24 +305,21 @@ pub fn solve_lift(job: &LiftJob, cancel: &Arc<AtomicBool>, progress: impl Fn(Eve
                 }
             };
             let cpu = polar.backend == solver::BackendUsed::Cpu;
-            for p in &polar.points {
-                let alpha_deg = p.alpha.to_degrees();
-                let lift = quality(p.quality).filter(|_| p.cn.is_finite() && p.x_cp.is_finite()).map(|q| CfdLiftPoint {
-                    mach: p.mach,
-                    alpha_deg,
-                    cn: p.cn,
-                    x_cp: p.x_cp,
-                    quality: q,
-                });
+            for p in &mut polar.points {
+                let lift = lift_point(p);
+                // the final field of each angle goes first, then the point (the viewer and the store see the field before the number)
+                if let Some(field) = p.field3.take() {
+                    send(Event::PointField { field: FieldRef::of(field) });
+                }
                 send(Event::Point(PointDone {
                     machine,
                     at: started.elapsed().as_secs_f64(),
                     mach: p.mach,
-                    alpha_deg: Some(alpha_deg),
+                    alpha_deg: Some(p.alpha_deg),
                     outcome: Outcome::from_quality(lift.map(|l| l.quality)),
                     point: None,
                     lift,
-                    iterations: p.iterations,
+                    iterations: p.detail.iterations,
                     cpu,
                     fallback: polar.fallback.clone(),
                 }));
@@ -313,7 +329,7 @@ pub fn solve_lift(job: &LiftJob, cancel: &Arc<AtomicBool>, progress: impl Fn(Eve
     };
     let fleet = run_fleet(&job.compute, job.cpu_only, total, started, cancel, &send, work)?;
     let mut notes = lost_notes(&fleet);
-    let raw: Vec<solver::LiftPoint> = fleet.done.results.iter().flat_map(|(_, n)| n.points.iter().cloned()).collect();
+    let raw: Vec<solver::PolarPoint> = fleet.done.results.iter().flat_map(|(_, n)| n.points.iter().cloned()).collect();
     let points = reduce_lift(&raw, total, &mut notes)?;
     Ok(CfdLiftTable {
         key: lift_key(job.plan.geometry, &job.nodes),
@@ -549,15 +565,17 @@ pub(super) fn solve_sized(
             }
             let progress = sink(started, cancel.clone(), send.clone(), false, machine);
             let mut polar = match session {
-                Session::Remote(r) => analysis.spec().map_err(|e| Failed::local(mach, e)).and_then(|spec| r.drag(&spec, mach, &progress))?,
+                Session::Remote(r) => {
+                    analysis.spec().map_err(|e| Failed::local(mach, e)).and_then(|spec| r.solve(&spec, &[solver::Condition::from(mach)], &progress))?
+                }
                 Session::Local { backend } => {
                     // A picture of the flow every few hundred iterations (the first is the grid with the free stream on it, at once).
                     // A remote worker brings back only the final field of the point: its snapshots stay on its side.
                     if let Ok(first) = analysis.initial_field(mach) {
-                        send(Event::Field(FieldRef(Arc::new(first))));
+                        send(Event::Field(FieldRef::from_2d(&first)));
                     }
                     let live = send.clone();
-                    analysis = analysis.on_field(solver::field::SNAPSHOT_INTERVAL, move |f| live(Event::Field(FieldRef(Arc::new(f)))));
+                    analysis = analysis.on_field(solver::field::SNAPSHOT_INTERVAL, move |f| live(Event::Field(FieldRef::from_2d(&f))));
                     let polar = analysis.on_progress(progress).run(&[mach]).map_err(|e| Failed::local(mach, e))?;
                     if polar.backend == solver::BackendUsed::Cpu {
                         // The GPU did not start: do not try it again for every point.
@@ -568,7 +586,7 @@ pub(super) fn solve_sized(
             };
             let cpu = polar.backend == solver::BackendUsed::Cpu;
             if let Some(field) = polar.points[0].field.take() {
-                send(Event::PointField { field: FieldRef(Arc::new(field)) });
+                send(Event::PointField { field: FieldRef::from_2d(&field) });
             }
             let p = &polar.points[0];
             let stored = quality(p.quality).filter(|_| p.drag.total.is_finite()).map(|q| {
@@ -583,6 +601,7 @@ pub(super) fn solve_sized(
                     base,
                     fins,
                     other,
+                    interference: 0.0,
                     quality: q,
                 }
             });

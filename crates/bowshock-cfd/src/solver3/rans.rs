@@ -283,7 +283,7 @@ mod tests {
     use super::*;
     use crate::flux::Limiter;
     use crate::gas3::{cons_to_prim3, freestream3, prim_to_cons3};
-    use crate::grid3::SolidBox;
+    use crate::grid3::{Part, SolidBox};
     use crate::implicit::{ImplicitParams, LineSolve3};
     use crate::solver3::{Config3, Scheme3};
     use crate::viscous3::diffusion_rates;
@@ -297,7 +297,7 @@ mod tests {
     fn solver(scheme: Scheme3, mach: f64, limiter: Limiter, block: bool, v: Viscous) -> Solver3 {
         let mut g = box_grid([10, 8, 6], [0.1, 0.1, 0.1]);
         if block {
-            g.solid = vec![SolidBox { i: 3..5, j: 0..3, k: 2..4 }];
+            g.mark_solid(SolidBox { i: 3..5, j: 0..3, k: 2..4 }, Some(Part::Body(0)));
         }
         // the low-Mach flux correction on, as the 2D viscous tests: the right-hand side dissipation the preconditioned left-hand side stands for
         let cfg = Config3 { freestream: freestream3(mach, 0.0), cfl: 0.5, limiter, first_order_iters: 0, low_mach: true, scheme };

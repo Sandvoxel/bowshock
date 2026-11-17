@@ -875,7 +875,17 @@ fn run_flies_the_selected_flights_and_removing_takes_them_all() {
 /// A CFD table of the example rocket's whole stack with the given geometry hash.
 fn cfd_table(geometry: u64) -> bowshock_model::CfdTable {
     use bowshock_model::{CfdGrid, CfdPoint, CfdQuality, CfdTable};
-    let p = |mach: f64| CfdPoint { mach, cd: 0.5, friction: 0.1, pressure: 0.1, base: 0.1, fins: 0.1, other: 0.1, quality: CfdQuality::Converged };
+    let p = |mach: f64| CfdPoint {
+        mach,
+        cd: 0.5,
+        friction: 0.1,
+        pressure: 0.1,
+        base: 0.1,
+        fins: 0.1,
+        other: 0.1,
+        interference: 0.0,
+        quality: CfdQuality::Converged,
+    };
     CfdTable {
         key: geometry ^ 7,
         geometry,

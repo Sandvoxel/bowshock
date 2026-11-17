@@ -298,44 +298,69 @@ struct Geo3 {
     imin: Vec3,
     imax: Vec3,
     jmax: Vec3,
-    /// Unit normals of the slip-wall faces `j = 0`, `i >= axis_cells` (`[ni - axis_cells, 2, nk]`, same face in both layers); `None` if the whole
-    /// `j = 0` plane is axis.
-    slip: Option<Vec3>,
-    /// Flat index (into `[ni, nj, nk]`) of the cell across the axis of every axis ghost: `[axis_cells, 2, nk]`, layers outermost first; `None` without axis cells.
-    axis_idx: Option<Array<u32>>,
+    /// Unit normals of the slip-wall faces of `j = 0` (the columns outside the axis runs at `j = 0`), one entry per run of columns `(i0, i1, normals)`
+    /// (`[i1 - i0, 2, nk]`, same face in both layers).
+    slip: Vec<(usize, usize, Vec3)>,
+    /// The axis runs: the ghost rows below the row of a run are the weighted state across the axis (`AxisMap`).
+    axis: Vec<AxisGeo3>,
     /// Unit normals of the symmetry planes `k = 0` and `k = nk`: `[ni, nj, 2]`.
     ksym: [Vec3; 2],
     solid_faces: [Option<SolidFaces3>; 3],
 }
 
-/// The cell across the axis of every axis cell `(i, 0, k)`, `i < axis_cells`: the one whose centroid azimuth is closest to `pi - theta`
-/// (`axis_k[i * nk + k]`, as `Solver3::new`).
-fn axis_partners3(grid: &Grid3) -> Vec<usize> {
-    let (ni, nj, nk) = (grid.ni, grid.nj, grid.nk);
-    let theta = |i: usize, k: usize| {
-        let cen = grid.xc[(k * nj) * ni + i];
-        cen[1].atan2(cen[2])
-    };
-    let na = grid.axis_cells.min(ni);
-    let mut axis_k = vec![0; na * nk];
-    for i in 0..na {
-        for k in 0..nk {
-            let target = std::f64::consts::PI - theta(i, k);
-            let mut best = (f64::INFINITY, 0);
-            for kk in 0..nk {
-                let d = (theta(i, kk) - target).abs();
-                if d < best.0 {
-                    best = (d, kk);
-                }
-            }
-            axis_k[i * nk + k] = best.1;
-        }
-    }
-    axis_k
+/// The ghosts of one axis run (the CPU `AxisMapRun`), `[i1 - i0, 2, nk]` arrays, layers outermost first (layer 0 the row `j - 2`, sourced from the row
+/// `j + 1`; layer 1 the row `j - 1`, sourced from the row `j`): the flat cell indices (into `[ni, nj, nk]`) of the two sources, their weights, and the
+/// 2x2 matrices (`m00 m01 m10 m11`) acting on `(v, w)`. A one-source ghost has weight 1 and 0 and a harmless second index.
+struct AxisGeo3 {
+    j: usize,
+    i0: usize,
+    i1: usize,
+    idx: [Array<u32>; 2],
+    w: [A; 2],
+    m: [[A; 4]; 2],
 }
 
-/// The solid-face case masks of direction `dir` (see [`SolidFaces3`]); `None` if no face sees a solid cell.
-fn solid_faces3(ctx: &Context, solid: &[bool], dims: [usize; 3], dir: usize) -> Result<Option<SolidFaces3>> {
+impl AxisGeo3 {
+    fn new(ctx: &Context, grid: &Grid3, map: &crate::axis3::AxisMapRun) -> Result<AxisGeo3> {
+        let (ni, nj, nk) = (grid.ni, grid.nj, grid.nk);
+        let n = map.i1 - map.i0;
+        let shape = [n, 2, nk];
+        let len = n * 2 * nk;
+        let mut idx = [Vec::with_capacity(len), Vec::with_capacity(len)];
+        let mut w = [Vec::with_capacity(len), Vec::with_capacity(len)];
+        let mut m: [[Vec<f64>; 4]; 2] = std::array::from_fn(|_| std::array::from_fn(|_| Vec::with_capacity(len)));
+        for k in 0..nk {
+            for layer in 0..2 {
+                for i in map.i0..map.i1 {
+                    let ghost = &map.ghost[(i - map.i0) * nk + k];
+                    let row = map.j + 1 - layer;
+                    for s in 0..2 {
+                        let src = &ghost.src[s];
+                        idx[s].push(((src.k * nj + row) * ni + i) as u32);
+                        w[s].push(if ghost.n == 1 && s == 1 { 0.0 } else { src.w });
+                        for q in 0..4 {
+                            m[s][q].push(src.m[q]);
+                        }
+                    }
+                }
+            }
+        }
+        let arr = |v: &Vec<f64>| up(ctx, v, shape);
+        Ok(AxisGeo3 {
+            j: map.j,
+            i0: map.i0,
+            i1: map.i1,
+            idx: [Array::from_slice_on(ctx, &idx[0], shape)?, Array::from_slice_on(ctx, &idx[1], shape)?],
+            w: [arr(&w[0])?, arr(&w[1])?],
+            m: [[arr(&m[0][0])?, arr(&m[0][1])?, arr(&m[0][2])?, arr(&m[0][3])?], [arr(&m[1][0])?, arr(&m[1][1])?, arr(&m[1][2])?, arr(&m[1][3])?]],
+        })
+    }
+}
+
+/// The solid-face case masks of direction `dir` (see [`SolidFaces3`]); `None` if no face sees a solid cell. `solid`: cells that are never updated (walls and
+/// dead cells, the CPU `Solver3::solid`); `wall`: the ones that reflect for the outer stencil of a fluid face (the CPU `Solver3::wall`: walls only, a dead
+/// cell leaves the padded state there, which holds the axis ghost).
+fn solid_faces3(ctx: &Context, solid: &[bool], wall: &[bool], dims: [usize; 3], dir: usize) -> Result<Option<SolidFaces3>> {
     const Z: u8 = 1;
     const MA: u8 = 2;
     const MB: u8 = 4;
@@ -344,14 +369,14 @@ fn solid_faces3(ctx: &Context, solid: &[bool], dims: [usize; 3], dir: usize) -> 
     const M2S: u8 = 32;
     const M1S: u8 = 64;
     let [ni, nj, nk] = dims;
-    let is_solid = |c: [isize; 3]| {
+    let at = |flags: &[bool], c: [isize; 3]| {
         c[0] >= 0
             && c[1] >= 0
             && c[2] >= 0
             && (c[0] as usize) < ni
             && (c[1] as usize) < nj
             && (c[2] as usize) < nk
-            && solid[(c[2] as usize * nj + c[1] as usize) * ni + c[0] as usize]
+            && flags[(c[2] as usize * nj + c[1] as usize) * ni + c[0] as usize]
     };
     let nf = [ni + (dir == 0) as usize, nj + (dir == 1) as usize, nk + (dir == 2) as usize];
     let mut e = [0isize; 3];
@@ -363,8 +388,10 @@ fn solid_faces3(ctx: &Context, solid: &[bool], dims: [usize; 3], dir: usize) -> 
             for i in 0..nf[0] {
                 let p0 = [i as isize, j as isize, k as isize];
                 let off = |s: isize| [p0[0] + s * e[0], p0[1] + s * e[1], p0[2] + s * e[2]];
-                let (s_m2, s_m1, s_p0, s_p1) = (is_solid(off(-2)), is_solid(off(-1)), is_solid(p0), is_solid(off(1)));
-                if !(s_m2 || s_m1 || s_p0 || s_p1) {
+                // `solid` decides the wall faces and the stencil next to them (`Family::fluxes`: `is_solid`), `wall` the outer stencil cell of a fluid face
+                let (s_m2, s_m1, s_p0, s_p1) = (at(solid, off(-2)), at(solid, off(-1)), at(solid, p0), at(solid, off(1)));
+                let (w_m2, w_p1) = (at(wall, off(-2)), at(wall, off(1)));
+                if !(s_m1 || s_p0 || w_m2 || w_p1) {
                     continue;
                 }
                 let mut bits = 0;
@@ -375,7 +402,7 @@ fn solid_faces3(ctx: &Context, solid: &[bool], dims: [usize; 3], dir: usize) -> 
                 } else if s_p0 {
                     bits |= MB | if s_m2 { MD } else { 0 };
                 } else {
-                    bits |= if s_m2 { M2S } else { 0 } | if s_p1 { M1S } else { 0 };
+                    bits |= if w_m2 { M2S } else { 0 } | if w_p1 { M1S } else { 0 };
                 }
                 class[(k * nf[1] + j) * nf[0] + i] = bits;
                 for (a, x) in [i, j, k].into_iter().enumerate() {
@@ -403,6 +430,19 @@ fn solid_faces3(ctx: &Context, solid: &[bool], dims: [usize; 3], dir: usize) -> 
     Ok(Some(SolidFaces3 { lo, hi, z: mask(Z)?, ma: mask(MA)?, mb: mask(MB)?, mc: mask(MC)?, md: mask(MD)?, m2s: mask(M2S)?, m1s: mask(M1S)? }))
 }
 
+/// Device arrays of the force integration, one entry per wall face (`[faces]`): the cells `a`, `b` of the wall-pressure extrapolation, its coefficient,
+/// the weights of `Fx`, `Fz`, `Mz` and the class masks (all faces, and the faces of the monitor's cut).
+struct ForceGeo3 {
+    ia: Array<u32>,
+    ib: Array<u32>,
+    k: A,
+    cx: A,
+    cz: A,
+    cm: A,
+    class: Vec<Array<bool>>,
+    cut_class: Vec<Array<bool>>,
+}
+
 /// The solver: state, geometry and the loops that advance it. Mirrors `crate::solver3::Solver3` with `Scheme3::Explicit` (`eval_residual` and
 /// `rk3_step`) or `Scheme3::Implicit` (`implicit3.rs`).
 pub struct LazySolver3 {
@@ -418,9 +458,18 @@ pub struct LazySolver3 {
     pub iter: usize,
     /// Number of fluid cells (the residual norm divides by it).
     n_active: usize,
-    axis_cells: usize,
+    /// Wedge-mode switches of the implicit scheme (on for a [`crate::grid3::Symmetry::Wedge`] grid, as on the CPU `Solver3::is_wedge`; `GpuSolver3::set_wedge_parts`
+    /// changes them for experiments). `skip_k`: no k factor in the line solves. `no_dt_k`: no `L_k` in the pseudo-time step. `k_wall_flux`: the flux through the
+    /// two k planes is the pressure of the cell, `[0, p n, 0]` (the hoop term of the axisymmetric equations), not the Riemann flux between the cell and its
+    /// mirror image. `k_src`: the point-implicit pressure Jacobian of that flux joins the diagonal of the j factor (as the 2D `cell_blocks` `src`).
+    pub skip_k: bool,
+    pub no_dt_k: bool,
+    pub k_wall_flux: bool,
+    pub k_src: bool,
     /// The f32 geometry of the implicit left-hand side.
     lg: LGeo3,
+    /// The wall faces of the on-device force integration (`set_wall_faces`).
+    forces: Option<ForceGeo3>,
 }
 
 impl LazySolver3 {
@@ -428,19 +477,12 @@ impl LazySolver3 {
     pub fn new(ctx: &Context, grid: &Grid3, cfg: &Config3) -> Result<LazySolver3> {
         let (ni, nj, nk) = (grid.ni, grid.nj, grid.nk);
         let nc = ni * nj * nk;
-        let mut solid = vec![false; nc];
-        for b in &grid.solid {
-            for k in b.k.clone() {
-                for j in b.j.clone() {
-                    for i in b.i.clone() {
-                        solid[(k * nj + j) * ni + i] = true;
-                    }
-                }
-            }
-        }
+        // never updated: walls and dead cells (`Grid3::part != PART_FLUID`, the CPU `Solver3::solid`); `wall`: the ones that reflect (`Solver3::wall`)
+        let solid: Vec<bool> = grid.part.iter().map(|&p| p != crate::grid3::PART_FLUID).collect();
+        let wall: Vec<bool> = grid.part.iter().map(|&p| p != crate::grid3::PART_FLUID && p != crate::grid3::PART_DEAD).collect();
+        let wedge = grid.sym == crate::grid3::Symmetry::Wedge;
         let n_active = solid.iter().filter(|s| !**s).count();
         let has_solid = n_active < nc;
-        let na = grid.axis_cells.min(ni);
 
         let face_geo = |faces: &[Face3], shape: [usize; 3]| -> Result<FaceGeo3> {
             let get = |g: &dyn Fn(&Face3) -> f64| up(ctx, &faces.iter().map(g).collect::<Vec<_>>(), shape);
@@ -459,31 +501,32 @@ impl LazySolver3 {
         let imin = normals(iface_at(0), -1.0, [2, nj, nk])?;
         let imax = normals(iface_at(ni), 1.0, [2, nj, nk])?;
         // j boundaries `[i, layer, k]`
-        let jface_row = |j: usize, i0: usize| -> Vec<&Face3> {
-            (0..nk).flat_map(|k| (0..2).flat_map(move |_| (i0..ni).map(move |i| (k * (nj + 1) + j) * ni + i))).map(|q| &grid.jface[q]).collect()
+        let jface_row = |j: usize, i0: usize, i1: usize| -> Vec<&Face3> {
+            (0..nk).flat_map(|k| (0..2).flat_map(move |_| (i0..i1).map(move |i| (k * (nj + 1) + j) * ni + i))).map(|q| &grid.jface[q]).collect()
         };
-        let jmax = normals(jface_row(nj, 0), 1.0, [ni, 2, nk])?;
-        let slip = if na < ni { Some(normals(jface_row(0, na), 1.0, [ni - na, 2, nk])?) } else { None };
+        let jmax = normals(jface_row(nj, 0, ni), 1.0, [ni, 2, nk])?;
+        // the columns of `j = 0` outside the axis runs at `j = 0` are the slip wall: one entry per run of such columns
+        let mut slip = Vec::new();
+        let mut i0 = 0;
+        while i0 < ni {
+            if grid.is_axis(i0, 0) {
+                i0 += 1;
+                continue;
+            }
+            let mut i1 = i0;
+            while i1 < ni && !grid.is_axis(i1, 0) {
+                i1 += 1;
+            }
+            slip.push((i0, i1, normals(jface_row(0, i0, i1), 1.0, [i1 - i0, 2, nk])?));
+            i0 = i1;
+        }
         // symmetry planes `[i, j, layer]`
         let kplane = |k: usize| -> Vec<&Face3> {
             (0..2).flat_map(|_| (0..nj).flat_map(move |j| (0..ni).map(move |i| (k * nj + j) * ni + i))).map(|q| &grid.kface[q]).collect()
         };
         let ksym = [normals(kplane(0), 1.0, [ni, nj, 2])?, normals(kplane(nk), 1.0, [ni, nj, 2])?];
-        // the cell across the axis of every axis ghost, `[i, layer, k]`: layer 0 is `j = -2` (the cell `j = 1`), layer 1 `j = -1` (the cell `j = 0`)
-        let axis_idx = if na > 0 {
-            let partner = axis_partners3(grid);
-            let mut v = Vec::with_capacity(na * 2 * nk);
-            for k in 0..nk {
-                for layer in 0..2 {
-                    for i in 0..na {
-                        v.push(((partner[i * nk + k] * nj + (1 - layer)) * ni + i) as u32);
-                    }
-                }
-            }
-            Some(Array::from_slice_on(ctx, &v, [na, 2, nk])?)
-        } else {
-            None
-        };
+        // the axis runs: the ghost rows below the row of a run are the weighted state across the axis
+        let axis = crate::axis3::AxisMap::new(grid).runs.iter().map(|run| AxisGeo3::new(ctx, grid, run)).collect::<Result<Vec<_>>>()?;
         let geo = Geo3 {
             f: [face_geo(&grid.iface, [ni + 1, nj, nk])?, face_geo(&grid.jface, [ni, nj + 1, nk])?, face_geo(&grid.kface, [ni, nj, nk + 1])?],
             inv_v: up(ctx, &grid.vol.iter().zip(&solid).map(|(v, s)| if *s { 0.0 } else { 1.0 / v }).collect::<Vec<_>>(), [ni, nj, nk])?,
@@ -493,17 +536,37 @@ impl LazySolver3 {
             imax,
             jmax,
             slip,
-            axis_idx,
+            axis,
             ksym,
             solid_faces: if has_solid {
-                [solid_faces3(ctx, &solid, [ni, nj, nk], 0)?, solid_faces3(ctx, &solid, [ni, nj, nk], 1)?, solid_faces3(ctx, &solid, [ni, nj, nk], 2)?]
+                [
+                    solid_faces3(ctx, &solid, &wall, [ni, nj, nk], 0)?,
+                    solid_faces3(ctx, &solid, &wall, [ni, nj, nk], 1)?,
+                    solid_faces3(ctx, &solid, &wall, [ni, nj, nk], 2)?,
+                ]
             } else {
                 [None, None, None]
             },
         };
         let lg = LGeo3::new(ctx, grid, &solid)?;
-        let mut s =
-            LazySolver3 { ctx: ctx.clone(), ni, nj, nk, cfg: cfg.clone(), staging: DEFAULT_STAGING, geo, state: None, iter: 0, n_active, axis_cells: na, lg };
+        let mut s = LazySolver3 {
+            ctx: ctx.clone(),
+            ni,
+            nj,
+            nk,
+            cfg: cfg.clone(),
+            staging: DEFAULT_STAGING,
+            geo,
+            state: None,
+            iter: 0,
+            n_active,
+            skip_k: wedge,
+            no_dt_k: wedge,
+            k_wall_flux: wedge,
+            k_src: wedge,
+            lg,
+            forces: None,
+        };
         let q = prim_to_cons3(&cfg.freestream);
         s.set_state(&vec![q; nc])?;
         Ok(s)
@@ -568,6 +631,66 @@ impl LazySolver3 {
         download_state3(self.state.as_ref().ok_or_else(no_state)?)
     }
 
+    /// Uploads the wall faces of the force integration (see [`crate::gpu::WallFace3`]) for `n_classes` classes.
+    pub fn set_wall_faces(&mut self, faces: &[crate::gpu::WallFace3], n_classes: usize) -> Result<()> {
+        let ctx = &self.ctx;
+        let n = faces.len().max(1);
+        let pad = |v: Vec<f64>| -> Vec<f64> {
+            let mut v = v;
+            v.resize(n, 0.0);
+            v
+        };
+        let idx = |f: &dyn Fn(&crate::gpu::WallFace3) -> usize| -> Result<Array<u32>> {
+            let mut v: Vec<u32> = faces.iter().map(|x| f(x) as u32).collect();
+            v.resize(n, 0);
+            Array::from_slice_on(ctx, &v, [n])
+        };
+        let val = |f: &dyn Fn(&crate::gpu::WallFace3) -> f64| up(ctx, &pad(faces.iter().map(f).collect()), [n]);
+        let mask = |f: &dyn Fn(&crate::gpu::WallFace3) -> bool| -> Result<Array<bool>> {
+            let mut v: Vec<bool> = faces.iter().map(f).collect();
+            v.resize(n, false);
+            Array::from_slice_on(ctx, &v, [n])
+        };
+        let class = (0..n_classes).map(|c| mask(&|x| x.class == c)).collect::<Result<Vec<_>>>()?;
+        let cut_class = (0..n_classes).map(|c| mask(&|x| x.class == c && x.cut)).collect::<Result<Vec<_>>>()?;
+        self.forces = Some(ForceGeo3 {
+            ia: idx(&|x| x.a)?,
+            ib: idx(&|x| x.b.unwrap_or(x.a))?,
+            k: val(&|x| if x.b.is_some() { x.k } else { 0.0 })?,
+            cx: val(&|x| x.cx)?,
+            cz: val(&|x| x.cz)?,
+            cm: val(&|x| x.cm)?,
+            class,
+            cut_class,
+        });
+        Ok(())
+    }
+
+    /// Pressure forces of the wall faces by class, `[Fx, Fz, Mz]` as in the CPU `wall_forces` (not scaled to the whole body), reduced on the device and
+    /// read back as `2 n_classes` triples: the classes over all faces, then over the faces flagged `cut` (the monitor's `x <= x_max`). One download of
+    /// `6 n_classes` numbers; the state itself is not downloaded. The wall pressure of a face is `p_a + k (p_a - p_b)` (the extrapolation of the two first cells).
+    pub fn wall_forces(&self, p_inf: f64) -> Result<Vec<[f64; 3]>> {
+        let fg = self.forces.as_ref().ok_or_else(|| luma::LumaError::Unsupported("wall faces are not set".into()))?;
+        let s = self.state.as_ref().ok_or_else(no_state)?;
+        let u = unpack3(s);
+        let pall = cons_to_prim3(u)[4].clone();
+        let (pa, pb) = (pall.take(&fg.ia), pall.take(&fg.ib));
+        let pw = &pa + &fg.k * (&pa - &pb);
+        let d = pw - c(p_inf);
+        let comps = [&d * &fg.cx, &d * &fg.cz, &d * &fg.cm];
+        let mut sums: Vec<A> = Vec::new();
+        for m in fg.class.iter().chain(&fg.cut_class) {
+            for comp in &comps {
+                sums.push(comp.sum_where(m).reshape([1]));
+            }
+        }
+        if sums.is_empty() {
+            return Ok(Vec::new());
+        }
+        let flat = to_f64(&luma::concat_slice(0, &sums))?;
+        Ok(flat.chunks(3).map(|t| [t[0], t[1], t[2]]).collect())
+    }
+
     pub fn set_low_mach(&mut self, on: bool) {
         self.cfg.low_mach = on;
     }
@@ -596,23 +719,46 @@ impl LazySolver3 {
         let edge_top = rec3(|f| p[f].pad([(0, 0), (0, 2)], PadMode::Edge).slice(1, nj..nj + 2));
         w.slice_mut(1, nj + 2..).slice(0, 2..ni + 2).slice(2, 2..nk + 2).assign(characteristic_ghost3(&fs, &edge_top, &g.jmax)).expect(ok);
 
-        // j = 0, i < axis_cells: the cell across the axis (mirror_y of the pitch-plane partner)
-        if let Some(idx) = &g.axis_idx {
-            let mut across = p.take(idx);
-            across[2] = c(-1.0) * &across[2];
-            w.slice_mut(0, 2..self.axis_cells + 2).slice(1, 0..2).slice(2, 2..nk + 2).assign(across).expect(ok);
+        // the axis runs (`Solver3::fill_ghosts`): ghost row `j - m` of a run at row `j` is `sum_s w_s (m_s . (v, w))` of the cell `(i, j + m - 1, k_s)`, the other
+        // primitives copied (`AxisGhost::state`)
+        for run in &g.axis {
+            let (a, b) = (p.take(&run.idx[0]), p.take(&run.idx[1]));
+            let (w0, w1) = (&run.w[0], &run.w[1]);
+            let (m0, m1) = (&run.m[0], &run.m[1]);
+            let mix = |f: usize| w0 * &a[f] + w1 * &b[f];
+            let ghost: Rec3 = [
+                mix(0),
+                mix(1),
+                w0 * (&m0[0] * &a[2] + &m0[1] * &a[3]) + w1 * (&m1[0] * &b[2] + &m1[1] * &b[3]),
+                w0 * (&m0[2] * &a[2] + &m0[3] * &a[3]) + w1 * (&m1[2] * &b[2] + &m1[3] * &b[3]),
+                mix(4),
+            ];
+            w.slice_mut(0, 2 + run.i0..2 + run.i1).slice(1, run.j..run.j + 2).slice(2, 2..nk + 2).assign(ghost).expect(ok);
         }
-        // j = 0, i >= axis_cells: slip wall
-        if let Some(n) = &g.slip {
-            let mirror = rec3(|f| p[f].pad([(0, 0), (2, 0)], PadMode::Mirror).slice(1, 0..2).slice(0, self.axis_cells..ni));
-            w.slice_mut(0, self.axis_cells + 2..ni + 2).slice(1, 0..2).slice(2, 2..nk + 2).assign(reflect3(&mirror, n)).expect(ok);
+        // the rest of j = 0: slip wall
+        for (i0, i1, n) in &g.slip {
+            let mirror = rec3(|f| p[f].pad([(0, 0), (2, 0)], PadMode::Mirror).slice(1, 0..2).slice(0, *i0..*i1));
+            w.slice_mut(0, 2 + i0..2 + i1).slice(1, 0..2).slice(2, 2..nk + 2).assign(reflect3(&mirror, n)).expect(ok);
         }
 
         // k = 0 and k = nk: symmetry planes
-        let mirror_lo = rec3(|f| p[f].pad([(0, 0), (0, 0), (2, 0)], PadMode::Mirror).slice(2, 0..2));
-        w.slice_mut(2, ..2).slice(0, 2..ni + 2).slice(1, 2..nj + 2).assign(reflect3(&mirror_lo, &g.ksym[0])).expect(ok);
-        let mirror_hi = rec3(|f| p[f].pad([(0, 0), (0, 0), (0, 2)], PadMode::Mirror).slice(2, nk..nk + 2));
-        w.slice_mut(2, nk + 2..).slice(0, 2..ni + 2).slice(1, 2..nj + 2).assign(reflect3(&mirror_hi, &g.ksym[1])).expect(ok);
+        if nk == 1 {
+            // One cell between the two planes. The CPU fills layer 1 of both planes from the cell, then layer 2 from "the cell `m - 1` / `nk - m`", which
+            // for `nk = 1` is the first ghost layer of the other plane: layer 2 of a plane is the reflection of the other plane's layer 1 (a double
+            // reflection of the cell). `PadMode::Mirror` cannot say that (a mirror of a one-cell axis repeats the cell), so build the four layers.
+            let n = |side: usize, layer: usize| -> Vec3 { std::array::from_fn(|q| g.ksym[side][q].slice(2, layer..layer + 1)) };
+            let (lo1, hi1) = (reflect3(p, &n(0, 1)), reflect3(p, &n(1, 0)));
+            let (lo2, hi2) = (reflect3(&hi1, &n(0, 0)), reflect3(&lo1, &n(1, 1)));
+            let lo = rec3(|f| luma::concat(2, [&lo2[f], &lo1[f]]));
+            let hi = rec3(|f| luma::concat(2, [&hi1[f], &hi2[f]]));
+            w.slice_mut(2, ..2).slice(0, 2..ni + 2).slice(1, 2..nj + 2).assign(lo).expect(ok);
+            w.slice_mut(2, nk + 2..).slice(0, 2..ni + 2).slice(1, 2..nj + 2).assign(hi).expect(ok);
+        } else {
+            let mirror_lo = rec3(|f| p[f].pad([(0, 0), (0, 0), (2, 0)], PadMode::Mirror).slice(2, 0..2));
+            w.slice_mut(2, ..2).slice(0, 2..ni + 2).slice(1, 2..nj + 2).assign(reflect3(&mirror_lo, &g.ksym[0])).expect(ok);
+            let mirror_hi = rec3(|f| p[f].pad([(0, 0), (0, 0), (0, 2)], PadMode::Mirror).slice(2, nk..nk + 2));
+            w.slice_mut(2, nk + 2..).slice(0, 2..ni + 2).slice(1, 2..nj + 2).assign(reflect3(&mirror_hi, &g.ksym[1])).expect(ok);
+        }
     }
 
     /// `res = dU/dt` of the conserved state `u` (`[ni, nj, nk]` fields) and, if asked, the local time step.
@@ -661,7 +807,16 @@ impl LazySolver3 {
             }
             let cell = |off: usize| line.slice(dir, off..n[dir] + 1 + off);
             let fg = &g.f[dir];
-            let mut f = face_flux_lm3(&cell(0), &cell(1), &cell(2), &cell(3), lim, &fg.n, &fg.rot, lm, split);
+            let mut f = if dir == 2 && self.k_wall_flux {
+                // the two planes of a one-cell wedge: the pressure of the cell on the face normal, nothing else (no mass, no energy)
+                let p = w[4].slice(0, 2..ni + 2).slice(1, 2..nj + 2).slice(2, 2..3);
+                let pp = luma::concat(2, [&p, &p]);
+                // two distinct expressions for the zero mass and energy fluxes (a region assign refuses records that share an array)
+                let (z_mass, z_energy) = (c(0.0) * &pp, &pp * &fg.n[0] * c(0.0));
+                [z_mass, &pp * &fg.n[0], &pp * &fg.n[1], &pp * &fg.n[2], z_energy]
+            } else {
+                face_flux_lm3(&cell(0), &cell(1), &cell(2), &cell(3), lim, &fg.n, &fg.rot, lm, split)
+            };
             // `Fluxes` and up: evaluate the face fluxes before the solid faces are written over them (a lazy write would make every face pay for both
             // expressions); the residual and the stage update then fuse into the next stage's padded record
             if cached {
@@ -748,7 +903,10 @@ impl LazySolver3 {
                 let un = &p[1] * side(&fg.n[0]) + &p[2] * side(&fg.n[1]) + &p[3] * side(&fg.n[2]);
                 (un.abs() + &cs) * side(&fg.area)
             };
-            let sum = lam(&g.f[0], 0, 0) + lam(&g.f[0], 0, 1) + lam(&g.f[1], 1, 0) + lam(&g.f[1], 1, 1) + lam(&g.f[2], 2, 0) + lam(&g.f[2], 2, 1);
+            let mut sum = lam(&g.f[0], 0, 0) + lam(&g.f[0], 0, 1) + lam(&g.f[1], 1, 0) + lam(&g.f[1], 1, 1);
+            if !self.no_dt_k {
+                sum = sum + lam(&g.f[2], 2, 0) + lam(&g.f[2], 2, 1);
+            }
             let dt = c(self.cfg.cfl) * &g.vol / (c(0.5) * &sum);
             match &g.fluid {
                 Some(fluid) => select(fluid, dt, c(0.0)),

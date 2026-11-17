@@ -15,7 +15,7 @@
 use crate::gas::Prim;
 use crate::gas3::{reflect3, Prim3};
 use crate::grid::Grid;
-use crate::grid3::{revolve, Grid3, SolidBox};
+use crate::grid3::{revolve, Grid3, Part, SolidBox};
 use crate::solver::{pidx, Block};
 use crate::solver3::{pidx3, NG};
 use crate::viscous::{self, Walls};
@@ -92,18 +92,18 @@ fn grid2d(ni: usize, nj: usize, wall: bool) -> (Grid, Option<Block>) {
 }
 
 /// Build the 2D grid, the wedge of opening angle `dtheta` and the state `f` on both. `wall`: with a body block. `matched`: the node radii of the wedge are
-/// divided by `cos(dtheta / 2)` so that its flat faces cross the mid-plane at the radii of the 2D grid (the plain `revolve` has its flat faces, a body wall
-/// among them, `O(dtheta^2)` inside the 2D surface: a geometric chord effect that the state of the 2D grid, zero on the body surface, would see as an
-/// `O(dtheta^2 / h)` change of the wall shear).
+/// those of the 2D grid divided by `cos(dtheta / 2)` so that its flat faces cross the mid-plane at the radii of the 2D grid (the `revolve` has its flat faces, a body
+/// wall among them, `O(dtheta^2)` inside the 2D surface: a geometric chord effect that the state of the 2D grid, zero on the body surface, would see as an
+/// `O(dtheta^2 / h)` change of the wall shear); `revolve` scales the radii by `grid3::polygon_scale` (area-preserving rings), which is divided out first.
 pub(crate) fn wedge(ni: usize, nj: usize, wall: bool, dtheta: f64, matched: bool, f: &dyn Fn(f64, f64) -> Prim) -> Wedge {
     let (g2, blk) = grid2d(ni, nj, wall);
     let mut g3 = revolve(&g2, 1, &[0.0, dtheta]).unwrap();
     if matched {
-        let inv = 1.0 / (0.5 * dtheta).cos();
+        let inv = 1.0 / (0.5 * dtheta).cos() / crate::grid3::polygon_scale(&[0.0, dtheta])[0];
         g3 = Grid3::try_from_nodes(ni, nj, 1, g3.x.clone(), g3.y.iter().map(|y| y * inv).collect(), g3.z.iter().map(|z| z * inv).collect()).unwrap();
     }
     if let Some(b) = blk {
-        g3.solid = vec![SolidBox { i: 0..b.i_end, j: 0..b.j_end, k: 0..1 }];
+        g3.mark_solid(SolidBox { i: 0..b.i_end, j: 0..b.j_end, k: 0..1 }, Some(Part::Body(0)));
     }
     let theta_m = 0.5 * dtheta;
     let solid = super::tests::solid_mask(&g3);

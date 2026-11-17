@@ -282,7 +282,7 @@ fn build_case(args: &Args, body: &BaseBody, fins: &Option<bowshock_core::engine:
 }
 
 /// G2: per Mach a cold first incidence, warm later ones (a warm point ending Failed/Stalled is re-run cold, a diverged cold run
-/// once more with `cfl_max` halved, as `Analysis::run_lift`); one `RESULT {json}` line per point.
+/// once more with `cfl_max` halved, as `Analysis::run` does at an angle of attack); one `RESULT {json}` line per point.
 fn sweep(args: &Args, machs: &[f64], alphas_deg: &[f64]) -> Result<(), String> {
     use bowshock_core::engine::gpu3::GpuRunner3;
     use bowshock_core::engine::result::StopReason;
@@ -387,7 +387,7 @@ fn geometry(args: &Args) -> Result<(), String> {
         [g.x[id], g.y[id], g.z[id]]
     };
     let rad = |p: [f64; 3]| (p[1] * p[1] + p[2] * p[2]).sqrt();
-    println!("grid ni {} nj {} nk {} cells {}; body base x {:.4}, axis_cells {}", g.ni, g.nj, g.nk, g.ni * g.nj * g.nk, case.body.x_base(), g.axis_cells);
+    println!("grid ni {} nj {} nk {} cells {}; body base x {:.4}, axis {:?}", g.ni, g.nj, g.nk, g.ni * g.nj * g.nk, case.body.x_base(), g.axis);
     if let Some(f) = &case.grid.fins {
         println!(
             "requested fins: count {} root {} tip {} span {} sweep {} thickness {} te_to_base {} profile {:?}",

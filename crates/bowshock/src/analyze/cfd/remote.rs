@@ -93,20 +93,15 @@ impl Session {
         }
     }
 
-    /// The zero-lift drag at `mach` of the analysis `spec` describes.
-    pub fn drag(&mut self, spec: &solver::AnalysisSpec, mach: f64, progress: &dyn Fn(&solver::Progress) -> ControlFlow<()>) -> Result<solver::Polar, Failed> {
-        self.remote.run_drag(spec, &[mach], progress).map_err(|e| self.failed(e, mach))
-    }
-
-    /// The 3D lift points at `mach` and `alphas_deg`.
-    pub fn lift(
+    /// The points of the analysis `spec` describes at `conditions`, all at the Mach number `mach` (named in the failures).
+    pub fn solve(
         &mut self,
         spec: &solver::AnalysisSpec,
-        mach: f64,
-        alphas_deg: &[f64],
+        conditions: &[solver::Condition],
         progress: &dyn Fn(&solver::Progress) -> ControlFlow<()>,
-    ) -> Result<solver::LiftPolar, Failed> {
-        self.remote.run_lift(spec, &[mach], alphas_deg, progress).map_err(|e| self.failed(e, mach))
+    ) -> Result<solver::Polar, Failed> {
+        let mach = conditions.first().map_or(f64::NAN, |c| c.mach);
+        self.remote.solve(spec, conditions, progress).map_err(|e| self.failed(e, mach))
     }
 }
 

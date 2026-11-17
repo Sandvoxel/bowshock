@@ -30,7 +30,7 @@ fn main() -> Result<(), bowshock_core::Error> {
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `points` | `Vec<PolarPoint>` | one per requested Mach number, in the requested order |
+| `points` | `Vec<PolarPoint>` | one per requested condition (a Mach number, or a `Condition` with an angle of attack), in the requested order |
 | `backend` | `BackendUsed` | `Cpu` or `Gpu`: what ran the sweep |
 | `fallback` | `Option<String>` | why the GPU was not used under `Backend::Auto` |
 | `motor_on` | `bool` | the analysis had a [motor](motor.md) |
@@ -40,13 +40,28 @@ fn main() -> Result<(), bowshock_core::Error> {
 | Field | Meaning |
 | --- | --- |
 | `mach` | Mach number |
-| `alpha` | angle of attack [rad]; always 0.0 |
+| `alpha_deg` | angle of attack [deg]; 0 for the drag solver's points |
+| `forces` | `Some(`[`Forces`](#forces)`)` at an angle of attack (the 3D Euler solver); `None` at zero incidence |
 | `drag` | the [`Drag`](#drag) coefficients |
 | `detail` | the [`PointDetail`](#pointdetail) solver summary |
 | `quality` | [`Quality`](#quality) of the point |
 | `warnings` | [`Warning`](#warnings)s: conditions that make the point less reliable than its quality suggests |
 | `cd_uncertainty` | `Some(d)`, `d` the absolute difference of the total drag to the neighbouring grid level, with `estimate_uncertainty(true)`; else `None` |
-| `field` | `Some(`[`Field`](#field)`)`, the final flow field of the point, with `keep_fields(true)`; else `None` |
+| `field` | `Some(`[`Field`](#field)`)`, the final flow field of a zero-incidence point, with `keep_fields(true)`; else `None` |
+| `field3` | `Some(Field3)`, the final flow field of a point at an angle of attack (3D, metres), with `keep_fields(true)`; else `None` |
+
+A point at an angle of attack has `drag.forebody_pressure` (the axial pressure force on the body and the fins) and NaN or `None` for
+the rest of `drag` (`base`, `total`, `friction`, `fins`); its `detail` has the iterations, the residual drop and the stop reason, the
+other numbers are NaN (`cd_nose`, `cd_base_solver`, `cp_base`, `y_plus_max`), 0 (`cd_friction`, `farfield_dp`) or empty (`cd_aft`, `wall`).
+
+## Forces
+
+| Field | Meaning |
+| --- | --- |
+| `cn` | normal force coefficient on the reference area |
+| `cm` | pitching moment about the nose tip on the reference area and diameter, `-cn x_cp / d` (nose-up positive) |
+| `x_cp` | centre of pressure of the normal force [m from the nose tip]; NaN when the normal force vanishes |
+| `ca` | axial force coefficient of the surface pressure (no friction, no base) |
 
 ## Drag
 
@@ -146,7 +161,7 @@ f)` hands a snapshot of the run in flight to `f` every `every` iterations, see [
 
 With the `serde` feature, the inputs (`BodySpec`, `NoseSpec`, `NoseShape`, `AftSpec`,
 `Atmosphere`, `FlightConditions`, `FinSpec`, `FinProfile`, `MotorSpec`) and the results (`Polar`,
-`PolarPoint`, `PointDetail`, `WallCp`, `Field`, `Drag`, `FinDrag`, `Quality`, `Warning`, `BackendUsed`,
+`PolarPoint`, `PointDetail`, `WallCp`, `Field`, `Field3`, `Condition`, `Forces`, `Drag`, `FinDrag`, `Quality`, `Warning`, `BackendUsed`,
 `StopReason`) implement `Serialize` and `Deserialize`.
 
 ```rust

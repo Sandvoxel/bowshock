@@ -59,7 +59,7 @@ fn timing_report(case: &str, tm: &[solver::engine::gpu::PointTiming], wall: f64)
     );
     let cells = tm.iter().map(|t| t.cells).max().unwrap_or(0);
     if perf {
-        // The 3D solve runs in f32 on the GPU (`Analysis::run_lift`), the 2D drag table in df32.
+        // The 3D solve runs in f32 on the GPU (`Analysis::run` at an angle of attack), the 2D drag table in df32.
         let precision = if case.starts_with("3d") { "f32" } else { "df32" };
         println!(
             "PERF {{\"case\":\"{case}\",\"precision\":\"{precision}\",\"cells\":{cells},\"iters\":{iters},\"us_per_iter\":{:.3},\"launches_per_iter\":null,\"gpu_us_per_iter\":null,\"wall_s\":{wall:.3}}}",

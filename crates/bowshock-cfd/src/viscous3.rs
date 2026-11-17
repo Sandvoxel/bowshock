@@ -621,7 +621,7 @@ pub(crate) mod wedge;
 pub(crate) mod tests {
     use super::*;
     use crate::flux3::tests::{random_rotation, rot, Rng};
-    use crate::grid3::SolidBox;
+    use crate::grid3::{Part, SolidBox};
     use crate::solver3::NG;
 
     const RE_C: f64 = 2.0e3;
@@ -630,6 +630,13 @@ pub(crate) mod tests {
     /// Per-cell solid mask of a grid (`Grid3::is_solid` of every cell, the `Solver3::solid` array).
     pub(crate) fn solid_mask(g: &Grid3) -> Vec<bool> {
         (0..g.ni * g.nj * g.nk).map(|c| g.is_solid(c % g.ni, (c / g.ni) % g.nj, c / (g.ni * g.nj))).collect()
+    }
+
+    /// Declare the boxes solid walls of the grid (`Grid3::mark_solid`, which fills the per-cell `part` that `Grid3::is_solid` and `Solver3` read).
+    pub(crate) fn set_solids(g: &mut Grid3, boxes: Vec<SolidBox>) {
+        for b in boxes {
+            g.mark_solid(b, Some(Part::Body(0)));
+        }
     }
 
     /// Padded primitive array: interior cells from `cells`, every ghost cell a copy of the nearest interior cell, solid cells NaN (a kernel that
@@ -829,7 +836,7 @@ pub(crate) mod tests {
         let (ni, nj, nk) = (4, 8, 3);
         let h = [0.2, 0.05, 0.2];
         let mut g = box_grid([ni, nj, nk], h);
-        g.solid = vec![SolidBox { i: 0..ni, j: 0..1, k: 0..nk }];
+        set_solids(&mut g, vec![SolidBox { i: 0..ni, j: 0..1, k: 0..nk }]);
         let solid = solid_mask(&g);
         let (u_top, hh) = (0.6, (nj - 1) as f64 * h[1]);
         let state = |y: f64| -> Prim3 { [1.0, u_top * (y - h[1]) / hh, 0.0, 0.0, 1.0 / GAMMA] };
@@ -900,7 +907,7 @@ pub(crate) mod tests {
             nodes.iter().map(|p| p[2]).collect(),
         )
         .unwrap();
-        g.solid = vec![SolidBox { i: 2..4, j: 1..3, k: 1..2 }];
+        set_solids(&mut g, vec![SolidBox { i: 2..4, j: 1..3, k: 1..2 }]);
         g
     }
 
@@ -994,7 +1001,7 @@ pub(crate) mod tests {
             nodes_b.iter().map(|p| p[2]).collect(),
         )
         .unwrap();
-        gb.solid = vec![SolidBox { i: (n[0] - 4)..(n[0] - 2), j: 1..3, k: 1..2 }];
+        set_solids(&mut gb, vec![SolidBox { i: (n[0] - 4)..(n[0] - 2), j: 1..3, k: 1..2 }]);
         let solid = solid_mask(&g);
         let solid_b = solid_mask(&gb);
         let mirror_cell = |c: usize| (c / n[0]) * n[0] + (n[0] - 1 - c % n[0]);
@@ -1141,7 +1148,7 @@ pub(crate) mod tests {
             }
         }
         let mut g = Grid3::try_from_nodes(ni, nj, nk, x, y, z).unwrap();
-        g.solid = vec![SolidBox { i: 0..ni, j: 0..1, k: 0..nk }];
+        set_solids(&mut g, vec![SolidBox { i: 0..ni, j: 0..1, k: 0..nk }]);
         let solid = solid_mask(&g);
         // T varies along the wall (x) and away from it; rho uniform; no velocity
         let cells: Vec<Prim3> = (0..ni * nj * nk).map(|c| [1.0, 0.0, 0.0, 0.0, (1.0 + 0.8 * g.xc[c][0] + 0.5 * g.xc[c][1]) / GAMMA]).collect();
@@ -1165,7 +1172,7 @@ pub(crate) mod tests {
         let h = [0.1, 0.2, 0.3];
         let n = [4, 4, 4];
         let mut g = box_grid(n, h);
-        g.solid = vec![SolidBox { i: 1..2, j: 1..2, k: 1..2 }];
+        set_solids(&mut g, vec![SolidBox { i: 1..2, j: 1..2, k: 1..2 }]);
         let solid = solid_mask(&g);
         let (rho, p) = (1.3, 0.9);
         let cells = vec![[rho, 0.2, 0.0, 0.0, p]; solid.len()];

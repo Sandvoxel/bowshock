@@ -346,10 +346,13 @@ fn solve_d3(s: &Solver3, fac: &[DCell<5>], dir: usize, x: &mut [Cons3]) {
 /// against the unfactored block operator `I - dt J_i - dt J_j - dt J_k` (`dU = dU0 + D^-1 (b - (I - dt J_i - dt J_j - dt J_k) dU0)`).
 pub(crate) fn du3(s: &Solver3, p: &ImplicitParams, b: &[Cons3]) -> Vec<Cons3> {
     let n = s.u.len();
-    let facs = [assemble_d3(s, p, 0), assemble_d3(s, p, 1), assemble_d3(s, p, 2)];
+    // a wedge has no acoustic coupling in `k` (only the point-implicit pressure block, which the block operator of the defect correction carries): the
+    // diagonal solve is over `i` and `j`
+    let nd = if s.is_wedge() { 2 } else { 3 };
+    let facs: Vec<Vec<DCell<5>>> = (0..nd).map(|dir| assemble_d3(s, p, dir)).collect();
     let af = |rhs: &[Cons3]| -> Vec<Cons3> {
         let mut x = rhs.to_vec();
-        for dir in 0..3 {
+        for dir in 0..nd {
             solve_d3(s, &facs[dir], dir, &mut x);
         }
         x

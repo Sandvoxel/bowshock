@@ -886,7 +886,17 @@ mod tests {
     #[test]
     fn the_cfd_info_says_when_the_range_starts_below_the_first_node() {
         use bowshock_model::{CfdPoint, CfdQuality};
-        let point = |mach: f64| CfdPoint { mach, cd: 0.5, friction: 0.1, pressure: 0.1, base: 0.1, fins: 0.1, other: 0.1, quality: CfdQuality::Converged };
+        let point = |mach: f64| CfdPoint {
+            mach,
+            cd: 0.5,
+            friction: 0.1,
+            pressure: 0.1,
+            base: 0.1,
+            fins: 0.1,
+            other: 0.1,
+            interference: 0.0,
+            quality: CfdQuality::Converged,
+        };
         let table = CfdTable {
             key: 1,
             geometry: 1,
@@ -989,7 +999,17 @@ mod tests {
     #[test]
     fn dispersion_uses_cfd_drag_table() {
         use bowshock_model::{CfdGrid, CfdPoint, CfdQuality};
-        let point = |mach| CfdPoint { mach, cd: 1.8, friction: 0.4, pressure: 0.8, base: 0.4, fins: 0.2, other: 0.0, quality: CfdQuality::Converged };
+        let point = |mach| CfdPoint {
+            mach,
+            cd: 1.8,
+            friction: 0.4,
+            pressure: 0.8,
+            base: 0.4,
+            fins: 0.2,
+            other: 0.0,
+            interference: 0.0,
+            quality: CfdQuality::Converged,
+        };
         let cfd_table = CfdTable {
             key: 1,
             geometry: 1,
