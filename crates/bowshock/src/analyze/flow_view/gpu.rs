@@ -25,6 +25,28 @@ pub struct Uniforms {
     pub lut: [[f32; 4]; LUT],
 }
 
+/// Which of the two instances of a picture (above the axis, and mirrored below it) is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Half {
+    /// Both: the picture and its mirror image (an axisymmetric flow).
+    Both,
+    /// Above the axis only: the upper half of a picture whose lower half is another picture.
+    Upper,
+    /// Below the axis only: the picture, mirrored, is the lower half.
+    Lower,
+}
+
+impl Half {
+    /// The instances to draw.
+    fn instances(self) -> std::ops::Range<u32> {
+        match self {
+            Half::Both => 0..2,
+            Half::Upper => 0..1,
+            Half::Lower => 1..2,
+        }
+    }
+}
+
 /// What one frame of the picture needs.
 #[derive(Debug, Clone)]
 pub struct Draw {
@@ -37,6 +59,10 @@ pub struct Draw {
     /// Centre of the view in the grid's units, and logical pixels per unit.
     pub centre: (f64, f64),
     pub scale: f64,
+    /// Which half of the plane this draw is.
+    pub half: Half,
+    /// The colour range of the scalar.
+    pub range: (f32, f32),
 }
 
 impl shader::Program<super::Msg> for Draw {
@@ -45,7 +71,7 @@ impl shader::Program<super::Msg> for Draw {
 
     fn draw(&self, _: &(), _: iced::mouse::Cursor, bounds: Rectangle) -> Primitive {
         let (w, h) = (f64::from(bounds.width.max(1.0)), f64::from(bounds.height.max(1.0)));
-        let (lo, hi) = self.picture.ranges[self.scalar.index()];
+        let (lo, hi) = self.range;
         let (line, a) = (iced::advanced::graphics::color::pack(iced::Color { a: 1.0, ..self.line }).components(), self.line.a);
         let uniforms = Uniforms {
             xform: [self.centre.0 as f32, self.centre.1 as f32, (2.0 * self.scale / w) as f32, (2.0 * self.scale / h) as f32],
@@ -53,7 +79,7 @@ impl shader::Program<super::Msg> for Draw {
             line: [line[0] * a, line[1] * a, line[2] * a, a],
             lut: map::lut(self.scalar.stops(self.dark)),
         };
-        Primitive { picture: self.picture.clone(), uniforms, grid: self.grid }
+        Primitive { picture: self.picture.clone(), uniforms, grid: self.grid, half: self.half }
     }
 }
 
@@ -62,21 +88,29 @@ pub struct Primitive {
     picture: Arc<Prepared>,
     uniforms: Uniforms,
     grid: bool,
+    half: Half,
+}
+
+impl Primitive {
+    /// What identifies this primitive's state in the pipeline: iced prepares every primitive of a frame before it renders any.
+    fn key(&self) -> (u64, Half) {
+        (self.picture.id, self.half)
+    }
 }
 
 impl shader::Primitive for Primitive {
     type Pipeline = Pipeline;
 
     fn prepare(&self, pipeline: &mut Pipeline, device: &wgpu::Device, queue: &wgpu::Queue, bounds: &Rectangle, viewport: &Viewport) {
-        pipeline.prepare(device, queue, &self.picture, &self.uniforms, self.grid, bounds, viewport);
+        pipeline.prepare(device, queue, &self.picture, &self.uniforms, self.grid, self.half, bounds, viewport);
     }
 
     fn render(&self, pipeline: &Pipeline, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, clip_bounds: &Rectangle<u32>) {
-        pipeline.render(encoder, target, clip_bounds);
+        pipeline.render(self.key(), encoder, target, clip_bounds);
     }
 }
 
-/// The vertex and index buffers of the picture on the GPU.
+/// The vertex and index buffers of a picture on the GPU.
 struct Uploaded {
     id: u64,
     vertices: wgpu::Buffer,
@@ -86,25 +120,30 @@ struct Uploaded {
     edge_indices: u32,
 }
 
-pub struct Pipeline {
-    fill: wgpu::RenderPipeline,
-    lines: wgpu::RenderPipeline,
+/// One draw of a frame: the uniforms and what to draw, kept apart from the others because iced prepares every primitive of a frame
+/// before it renders any (a picture drawn as two halves is two draws with different uniforms).
+struct Item {
+    key: (u64, Half),
     uniforms: wgpu::Buffer,
     group: wgpu::BindGroup,
-    uploaded: Option<Uploaded>,
     draw_grid: bool,
     /// Widget bounds in physical pixels: x, y, width, height.
     viewport: [f32; 4],
 }
 
+/// Pictures kept on the GPU and draws kept ready: the pictures of one frame, with a few to spare.
+const KEEP: usize = 4;
+
+pub struct Pipeline {
+    fill: wgpu::RenderPipeline,
+    lines: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    uploads: Vec<Uploaded>,
+    items: Vec<Item>,
+}
+
 impl shader::Pipeline for Pipeline {
     fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
-        let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("flow.uniforms"),
-            size: std::mem::size_of::<Uniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("flow.layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -113,11 +152,6 @@ impl shader::Pipeline for Pipeline {
                 ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
                 count: None,
             }],
-        });
-        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("flow.group"),
-            layout: &layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() }],
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("flow.shader"),
@@ -169,7 +203,7 @@ impl shader::Pipeline for Pipeline {
         };
         let fill = make("flow.fill", "vs_fill", "fs_fill", wgpu::PrimitiveTopology::TriangleList, wgpu::BlendState::REPLACE);
         let lines = make("flow.lines", "vs_line", "fs_line", wgpu::PrimitiveTopology::LineList, premultiplied);
-        Pipeline { fill, lines, uniforms, group, uploaded: None, draw_grid: false, viewport: [0.0; 4] }
+        Pipeline { fill, lines, layout, uploads: Vec::new(), items: Vec::new() }
     }
 }
 
@@ -182,13 +216,17 @@ impl Pipeline {
         picture: &Prepared,
         uniforms: &Uniforms,
         grid: bool,
+        half: Half,
         bounds: &Rectangle,
         viewport: &Viewport,
     ) {
-        if self.uploaded.as_ref().is_none_or(|u| u.id != picture.id) {
+        if !self.uploads.iter().any(|u| u.id == picture.id) && !picture.triangles.is_empty() {
             let buffer =
                 |label: &str, contents: &[u8], usage| device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents, usage });
-            self.uploaded = (!picture.triangles.is_empty()).then(|| Uploaded {
+            if self.uploads.len() >= KEEP {
+                self.uploads.remove(0);
+            }
+            self.uploads.push(Uploaded {
                 id: picture.id,
                 vertices: buffer("flow.vertices", bytemuck::cast_slice(&picture.vertices), wgpu::BufferUsages::VERTEX),
                 triangles: buffer("flow.triangles", bytemuck::cast_slice(&picture.triangles), wgpu::BufferUsages::INDEX),
@@ -202,15 +240,38 @@ impl Pipeline {
                 edge_indices: picture.edges.len() as u32,
             });
         }
-        queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(uniforms));
-        self.draw_grid = grid;
+        let key = (picture.id, half);
+        let at = match self.items.iter().position(|i| i.key == key) {
+            Some(at) => at,
+            None => {
+                if self.items.len() >= 2 * KEEP {
+                    self.items.remove(0);
+                }
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("flow.uniforms"),
+                    size: std::mem::size_of::<Uniforms>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("flow.group"),
+                    layout: &self.layout,
+                    entries: &[wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() }],
+                });
+                self.items.push(Item { key, uniforms: buffer, group, draw_grid: false, viewport: [0.0; 4] });
+                self.items.len() - 1
+            }
+        };
+        let item = &mut self.items[at];
+        queue.write_buffer(&item.uniforms, 0, bytemuck::bytes_of(uniforms));
+        item.draw_grid = grid;
         let scale = viewport.scale_factor();
-        self.viewport = [bounds.x * scale, bounds.y * scale, bounds.width * scale, bounds.height * scale];
+        item.viewport = [bounds.x * scale, bounds.y * scale, bounds.width * scale, bounds.height * scale];
     }
 
-    fn render(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, clip: &Rectangle<u32>) {
-        let Some(up) = &self.uploaded else { return };
-        if clip.width == 0 || clip.height == 0 || self.viewport[2] < 1.0 || self.viewport[3] < 1.0 {
+    fn render(&self, key: (u64, Half), encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, clip: &Rectangle<u32>) {
+        let (Some(up), Some(item)) = (self.uploads.iter().find(|u| u.id == key.0), self.items.iter().find(|i| i.key == key)) else { return };
+        if clip.width == 0 || clip.height == 0 || item.viewport[2] < 1.0 || item.viewport[3] < 1.0 {
             return;
         }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -226,22 +287,22 @@ impl Pipeline {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        let [x, y, w, h] = self.viewport;
+        let [x, y, w, h] = item.viewport;
         pass.set_viewport(x, y, w, h, 0.0, 1.0);
         pass.set_scissor_rect(clip.x, clip.y, clip.width, clip.height);
-        pass.set_bind_group(0, &self.group, &[]);
+        pass.set_bind_group(0, &item.group, &[]);
         pass.set_vertex_buffer(0, up.vertices.slice(..));
         pass.set_pipeline(&self.fill);
         pass.set_index_buffer(up.triangles.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..up.triangle_indices, 0, 0..2);
-        if self.draw_grid && up.edge_indices > 0 {
+        let instances = key.1.instances();
+        pass.draw_indexed(0..up.triangle_indices, 0, instances.clone());
+        if item.draw_grid && up.edge_indices > 0 {
             pass.set_pipeline(&self.lines);
             pass.set_index_buffer(up.edges.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..up.edge_indices, 0, 0..2);
+            pass.draw_indexed(0..up.edge_indices, 0, instances);
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::super::prepared::tests::sized;
@@ -266,18 +327,22 @@ mod tests {
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let mut pipeline = Pipeline::new(&device, &queue, format);
         let (w, h) = (1408u32, 500u32);
-        let n = 220 * 124;
         // Mach 1.5 everywhere: the colour range is 0 to 1.5, so every cell is the top of the map
-        let field = bowshock_core::Field {
-            rho: vec![1.0; n],
-            u: vec![1.5; n],
-            v: vec![0.0; n],
-            p: vec![(1.0 / bowshock_core::field::GAMMA) as f32; n],
-            ..sized(220, 124)
-        };
+        let mut field = sized(220, 124);
+        field.prim.iter_mut().for_each(|q| *q = [1.0, 1.5, 0.0, 0.0, (1.0 / bowshock_core::field::GAMMA) as f32]);
         let picture = Arc::new(Prepared::new(Arc::new(field)));
         assert_eq!(picture.ranges[Scalar::Mach.index()], (0.0, 1.5));
-        let draw = Draw { picture, scalar: Scalar::Mach, dark: true, grid: false, line: iced::Color::WHITE, centre: (0.7, 0.0), scale: 600.0 };
+        let draw = Draw {
+            picture,
+            scalar: Scalar::Mach,
+            dark: true,
+            grid: false,
+            line: iced::Color::WHITE,
+            centre: (0.7, 0.0),
+            scale: 600.0,
+            half: Half::Both,
+            range: (0.0, 1.5),
+        };
         let bounds = Rectangle::new(Point::ORIGIN, Size::new(w as f32, h as f32));
         let viewport = Viewport::with_physical_size(Size::new(w, h), iced::advanced::renderer::Scale::default());
         let target = device.create_texture(&wgpu::TextureDescriptor {
@@ -354,7 +419,7 @@ mod tests {
         // The coarse grid of the app (27 000 cells here), and one four times as large; with and without the cell edges.
         let frames: usize = std::env::var("BOWSHOCK_FLOW_FRAMES").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
         let big = Prepared::new(Arc::new(sized(440, 248)));
-        for (cells, picture) in [(n, draw.picture.clone()), (440 * 248, Arc::new(big))] {
+        for (cells, picture) in [(220 * 124, draw.picture.clone()), (440 * 248, Arc::new(big))] {
             for grid in [false, true] {
                 let case = Draw { picture: picture.clone(), grid, ..draw.clone() };
                 frame(&mut pipeline, &case, None);

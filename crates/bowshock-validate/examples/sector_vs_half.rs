@@ -10,7 +10,7 @@
 //! four fins "x", `N nk - 1` for three fins with one in the pitch plane). One line per (N, Mach) with the drag split by surface and the cell widths.
 
 use bowshock_cfd::gpu::Precision;
-use bowshock_core::engine::case3::Case3;
+use bowshock_core::engine::case3::{Case3, Tier};
 use bowshock_core::engine::gpu3::GpuRunner3;
 use bowshock_core::engine::grid3::{Domain3, FinPhase};
 use bowshock_core::engine::run3::DragParts;
@@ -54,7 +54,8 @@ fn main() {
         fins.count = n;
         let (phase, nk_h) = if n % 2 == 0 { (FinPhase::Between, n as usize * nk_s - 2) } else { (FinPhase::InPlane, n as usize * nk_s - 1) };
         for &mach in &machs {
-            let sector = Case3::sector(mach, Case3::anf_body(), fins.clone(), nk_s, 0);
+            let mut sector = Case3::sector(mach, Case3::anf_body(), fins.clone(), Tier::Euler, 0);
+            sector.grid.nk = nk_s;
             let mut half = Case3::new(mach, 0.0, Case3::anf_body(), Some(fins.clone()), 0);
             half.grid.domain = Domain3::Half { phase };
             half.grid.nk = nk_h;

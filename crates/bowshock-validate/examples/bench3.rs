@@ -34,7 +34,7 @@ use bowshock_cfd::gpu::{GpuSolver3, Precision};
 use bowshock_cfd::grid3::Grid3;
 use bowshock_cfd::implicit::{ImplicitParams, LineSolve3};
 use bowshock_cfd::solver3::{Config3, Scheme3};
-use bowshock_core::engine::case3::Case3;
+use bowshock_core::engine::case3::{Case3, Tier};
 use bowshock_core::engine::grid3::body_grid3;
 use bowshock_core::{AftSpec, BodySpec, NoseShape, NoseSpec, Resolution};
 use bowshock_gpu_cases::wedge3::{engine_case, wedge_case3};
@@ -118,7 +118,8 @@ fn wedge_case() -> Result<BenchCase, String> {
 
 /// The real fin sector: the Army-Navy Basic Finner (4 fins, even `N`) as the sector `[0, pi/4]` on the sting grid, `nk` azimuthal cells.
 fn sector_case(nk: usize) -> Result<BenchCase, String> {
-    let case = Case3::sector(2.0, Case3::anf_body(), Case3::anf_fins(), nk, 0);
+    let mut case = Case3::sector(2.0, Case3::anf_body(), Case3::anf_fins(), Tier::Euler, 0);
+    case.grid.nk = nk;
     let grid = body_grid3(&case.grid).map_err(|e| format!("sector grid: {e}"))?;
     Ok(BenchCase { name: "sector", grid, alpha_deg: 0.0, n: 200 })
 }

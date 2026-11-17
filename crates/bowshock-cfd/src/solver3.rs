@@ -13,13 +13,18 @@
 //! their fluid neighbours; dead cells are never updated either but do not reflect (the axis ghost shows through them).
 
 use crate::axis3::AxisMap;
-use crate::bc3::characteristic_ghost3;
+use crate::bc3::{characteristic_ghost3, pressure_outflow_ghost3};
 use crate::flux::Limiter;
 use crate::flux3::{face_flux_lm3, face_rot};
 use crate::gas3::{cons_to_prim3, prim_to_cons3, reflect3, sound_speed3, Cons3, Prim3};
 use crate::grid3::{Face3, Grid3, Symmetry, PART_DEAD, PART_FLUID};
 use crate::implicit::{DtMode, ImplicitParams};
+use crate::lowmach5::{spectral_pc3, LowMach};
+use crate::viscous3::{diffusion_rates, wall_ghost3};
 use rayon::prelude::*;
+
+pub(crate) mod rans;
+pub use rans::RansOpts3;
 
 /// Ghost layers per side.
 pub(crate) const NG: usize = 2;
@@ -80,6 +85,10 @@ pub struct Solver3 {
     rot_i: Vec<[f64; 2]>,
     rot_j: Vec<[f64; 2]>,
     rot_k: Vec<[f64; 2]>,
+    /// Viscous / turbulence state ([`Solver3::set_viscous`], `solver3/rans.rs`); `None`: the Euler equations.
+    pub(crate) rans: Option<Box<rans::Rans3>>,
+    /// Low-Mach preconditioning of the current implicit step (set by `implicit3::step` from `ImplicitParams::low_mach_precond`).
+    pub(crate) precond: Option<LowMach>,
 }
 
 impl Solver3 {
@@ -111,6 +120,8 @@ impl Solver3 {
             rot_i: rot(&grid.iface),
             rot_j: rot(&grid.jface),
             rot_k: rot(&grid.kface),
+            rans: None,
+            precond: None,
             grid,
             cfg,
         }
@@ -143,6 +154,9 @@ impl Solver3 {
             Scheme3::Explicit => self.rk3_step(),
             Scheme3::Implicit(p) => crate::implicit3::step(self, &p),
         };
+        if self.sst() {
+            self.turbulence_update();
+        }
         self.iter += 1;
         rn
     }
@@ -154,6 +168,7 @@ impl Solver3 {
     fn fill_ghosts(&mut self) {
         let (ni, nj, nk) = (self.grid.ni, self.grid.nj, self.grid.nk);
         let fs = self.cfg.freestream;
+        let p_out = self.rans.as_ref().and_then(|r| r.p_outflow);
         let (w, g, axis) = (&mut self.w, &self.grid, &self.axis);
         let id = |i: isize, j: isize, k: isize| pidx3(ni, nj, nk, i, j, k);
         let (nii, njj, nkk) = (ni as isize, nj as isize, nk as isize);
@@ -162,7 +177,11 @@ impl Solver3 {
                 let base = (k as usize * nj + j as usize) * (ni + 1);
                 let (fl, fr) = (&g.iface[base], &g.iface[base + ni]);
                 let gl = Self::ghost_char(&fs, &w[id(0, j, k)], fl.n, -1.0);
-                let gr = Self::ghost_char(&fs, &w[id(nii - 1, j, k)], fr.n, 1.0);
+                // viscous run: static-pressure outflow at `i = ni` (the characteristic ghost would impose the free-stream normal velocity on the boundary layer)
+                let gr = match p_out {
+                    Some(p) => pressure_outflow_ghost3(p, &w[id(nii - 1, j, k)], fr.n),
+                    None => Self::ghost_char(&fs, &w[id(nii - 1, j, k)], fr.n, 1.0),
+                };
                 for m in 1..=NG as isize {
                     w[id(-m, j, k)] = gl;
                     w[id(nii + m - 1, j, k)] = gr;
@@ -224,10 +243,12 @@ impl Solver3 {
             });
         }
         self.fill_ghosts();
+        self.viscous_pass();
+        let noslip = self.rans.is_some();
         let Solver3 { grid, w, fi, fj, fk, res, solid, wall, rot_i, rot_j, rot_k, .. } = self;
         let has_solid = !grid.solid.is_empty();
         let wedge = grid.sym == Symmetry::Wedge;
-        let fam = Family { ni, nj, nk, w, solid, wall, has_solid, lim, low_mach, wedge };
+        let fam = Family { ni, nj, nk, w, solid, wall, has_solid, lim, low_mach, wedge, noslip };
         fam.fluxes(0, &grid.iface, rot_i, fi);
         fam.fluxes(1, &grid.jface, rot_j, fj);
         fam.fluxes(2, &grid.kface, rot_k, fk);
@@ -255,6 +276,7 @@ impl Solver3 {
                 }
             }
         });
+        self.add_viscous_residual();
     }
 
     /// Local pseudo-time step into `self.dt` from the primitives of the last residual evaluation:
@@ -264,6 +286,7 @@ impl Solver3 {
         let (ni, nj, nk) = (self.grid.ni, self.grid.nj, self.grid.nk);
         let wedge = self.is_wedge();
         let (grid, w, solid) = (&self.grid, &self.w, &self.solid);
+        let (rans, lm) = (self.rans.as_deref(), self.precond);
         self.dt.par_chunks_mut(ni * nj).enumerate().for_each(|(k, pl)| {
             for j in 0..nj {
                 for i in 0..ni {
@@ -274,12 +297,22 @@ impl Solver3 {
                     }
                     let wc = &w[pidx3(ni, nj, nk, i as isize, j as isize, k as isize)];
                     let cs = sound_speed3(wc);
-                    let lam = |f: &Face3| ((wc[1] * f.n[0] + wc[2] * f.n[1] + wc[3] * f.n[2]).abs() + cs) * f.area;
+                    let lam = |f: &Face3| match &lm {
+                        Some(l) => spectral_pc3(wc, f.n, l),
+                        None => (wc[1] * f.n[0] + wc[2] * f.n[1] + wc[3] * f.n[2]).abs() + cs,
+                    } * f.area;
                     let il = (k * nj + j) * (ni + 1) + i;
                     let jl = (k * (nj + 1) + j) * ni + i;
-                    let li = 0.5 * (lam(&grid.iface[il]) + lam(&grid.iface[il + 1]));
-                    let lj = 0.5 * (lam(&grid.jface[jl]) + lam(&grid.jface[jl + ni]));
-                    let lk = if wedge { 0.0 } else { 0.5 * (lam(&grid.kface[c]) + lam(&grid.kface[c + ni * nj])) };
+                    let mut li = 0.5 * (lam(&grid.iface[il]) + lam(&grid.iface[il + 1]));
+                    let mut lj = 0.5 * (lam(&grid.jface[jl]) + lam(&grid.jface[jl + ni]));
+                    let mut lk = if wedge { 0.0 } else { 0.5 * (lam(&grid.kface[c]) + lam(&grid.kface[c + ni * nj])) };
+                    if let Some(r) = rans {
+                        let d = diffusion_rates(grid, i, j, k, r.mu[c], r.mu_t[c], wc[0]);
+                        (li, lj) = (li + d[0], lj + d[1]);
+                        if !wedge {
+                            lk += d[2];
+                        }
+                    }
                     pl[j * ni + i] = match mode {
                         DtMode::Sum => cfl * grid.vol[c] / (li + lj + lk),
                         DtMode::MinDirection if wedge => cfl * grid.vol[c] / (2.0 * li.min(lj)),
@@ -329,6 +362,8 @@ struct Family<'a> {
     has_solid: bool,
     lim: Limiter,
     low_mach: bool,
+    /// Viscous run: the solid side of a wall is the no-slip ghost `(rho, -u, -v, -w, p)` instead of the mirror image.
+    noslip: bool,
     /// Single-cell wedge: the `k` faces carry the pressure flux only.
     wedge: bool,
 }
@@ -363,6 +398,16 @@ impl Family<'_> {
     #[inline]
     fn at(&self, c: [isize; 3]) -> Prim3 {
         self.w[pidx3(self.ni, self.nj, self.nk, c[0], c[1], c[2])]
+    }
+
+    /// State of the solid side of a wall with outward normal `n` seen from the fluid state `w`: the no-slip ghost (viscous run) or the mirror image (slip wall).
+    #[inline]
+    fn wall_ghost(&self, w: &Prim3, n: [f64; 3]) -> Prim3 {
+        if self.noslip {
+            wall_ghost3(w)
+        } else {
+            reflect3(w, n)
+        }
     }
 
     /// Fluxes of the faces of direction `dir` (`faces` / `rots` / `out` share the layout of `Grid3::{iface, jface, kface}`).
@@ -407,17 +452,17 @@ impl Family<'_> {
                             continue;
                         }
                         if sm1 {
-                            wm1 = reflect3(&wp0, f.n);
-                            wm2 = if self.is_solid(cp1) { wm1 } else { reflect3(&wp1, f.n) };
+                            wm1 = self.wall_ghost(&wp0, f.n);
+                            wm2 = if self.is_solid(cp1) { wm1 } else { self.wall_ghost(&wp1, f.n) };
                         } else if sp0 {
-                            wp0 = reflect3(&wm1, f.n);
-                            wp1 = if self.is_solid(cm2) { wp0 } else { reflect3(&wm2, f.n) };
+                            wp0 = self.wall_ghost(&wm1, f.n);
+                            wp1 = if self.is_solid(cm2) { wp0 } else { self.wall_ghost(&wm2, f.n) };
                         } else {
                             if self.is_wall(cm2) {
-                                wm2 = reflect3(&wm1, faces[fidx - fstride].n);
+                                wm2 = self.wall_ghost(&wm1, faces[fidx - fstride].n);
                             }
                             if self.is_wall(cp1) {
-                                wp1 = reflect3(&wp0, faces[fidx + fstride].n);
+                                wp1 = self.wall_ghost(&wp0, faces[fidx + fstride].n);
                             }
                         }
                     }

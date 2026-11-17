@@ -23,7 +23,7 @@ use bowshock_cfd::grid::Grid;
 use bowshock_cfd::grid3::{revolve, AxisRun, Grid3, Part, Symmetry};
 use bowshock_cfd::implicit::{ImplicitParams, LineSolve3};
 use bowshock_cfd::solver3::{Config3, Scheme3, Solver3};
-use bowshock_core::engine::case3::{Case3, Numerics3};
+use bowshock_core::engine::case3::{Case3, Numerics3, Tier};
 use bowshock_core::engine::gpu3::GpuRunner3;
 use bowshock_core::engine::grid3::{body_grid3, Fins3, WEDGE_ANGLE};
 use bowshock_core::engine::run3::{wall_forces, wall_samples, Wall};
@@ -345,7 +345,8 @@ impl WedgeRunner for GpuWedge {
                     te_to_base: 0.0,
                     profile: bowshock_core::FinProfile::Square,
                 };
-                let mut c = Case3::sector(mach, body, fins, 6, 0);
+                let mut c = Case3::sector(mach, body, fins, Tier::Euler, 0);
+                c.grid.nk = 6;
                 let s = &mut c.grid.sting;
                 s.n_up = 10;
                 s.n_nose = 16;

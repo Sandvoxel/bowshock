@@ -1,9 +1,11 @@
-//! Mach-sweep analysis of a body: zero-lift drag versus Mach number, on the GPU when one is present.
+//! Analysis of a body over flight conditions: one entry, [`Analysis::run`], takes Mach numbers at zero incidence (the viscous drag
+//! solver) and Mach number and angle of attack pairs (the 3D solver, which gives the normal force and centre of pressure).
 
 use crate::atmosphere::{FlightConditions, SUTHERLAND_S};
 use crate::engine::body_grid::{check_quality, BaseBody, MAX_STRETCHING, MAX_STRETCHING_VISCOUS_J};
 use crate::engine::case::{Case, Jet, Wake};
 use crate::engine::case3::Case3;
+use crate::engine::field3::{field3_of_solver, Snapshots3};
 use crate::engine::grid3::Fins3;
 use crate::engine::numerics::Numerics;
 use crate::engine::result::{PointResult, StopReason};
@@ -11,6 +13,7 @@ use crate::engine::run::run_on;
 use crate::engine::run3::{run3_on, PointResult3};
 use crate::error::Error;
 use crate::field::{Field, FieldSink, FieldTap};
+use crate::field3::Field3;
 use crate::progress::{Progress, ProgressSink};
 use crate::spec::{BodySpec, FinSpec, MotorSpec};
 use bowshock_cfd::gas::GAMMA;
@@ -19,9 +22,9 @@ use bowshock_cfd::solver3::Solver3;
 use bowshock_reference::base_drag::base_drag_coefficient;
 use std::ops::ControlFlow;
 
-/// Lowest and highest Mach number accepted by [`Analysis::run`].
+/// Lowest and highest Mach number of a zero-incidence condition.
 const MACH_RANGE: (f64, f64) = (0.1, 3.0);
-/// Mach range and largest incidence \[deg\] accepted by [`Analysis::run_lift`].
+/// Mach range and largest angle of attack \[deg\] of a condition with an angle of attack.
 const LIFT_MACH_RANGE: (f64, f64) = (0.3, 3.0);
 const LIFT_ALPHA_MAX_DEG: f64 = 15.0;
 
@@ -88,13 +91,14 @@ pub struct Drag {
     /// Skin friction, if it was computed.
     pub friction: Option<f64>,
     /// Base drag: from a correlation when `base_modelled`, otherwise from the solver. With a motor it is the base drag of the annulus
-    /// around the nozzle exit only; the jet's thrust is not a drag term.
+    /// around the nozzle exit only; the jet's thrust is not a drag term. NaN at an angle of attack.
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "nan_or_f64"))]
     pub base: f64,
     /// `base` comes from a correlation (the inviscid wake gives no physical base pressure).
     pub base_modelled: bool,
     /// Fin drag; `Some` when fins were given.
     pub fins: Option<FinDrag>,
-    /// Total drag: forebody pressure + friction + base + fins (non-finite only for a [`Quality::Failed`] point).
+    /// Total drag: forebody pressure + friction + base + fins (non-finite only for a [`Quality::Failed`] point and at an angle of attack).
     #[cfg_attr(feature = "serde", serde(deserialize_with = "nan_or_f64"))]
     pub total: f64,
 }
@@ -143,16 +147,66 @@ pub enum Warning {
     },
 }
 
-/// One Mach number of a sweep.
+/// One flight condition of a run: a Mach number and an angle of attack.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Condition {
+    /// Mach number.
+    pub mach: f64,
+    /// Angle of attack \[deg\]; 0 for the zero-lift drag.
+    pub alpha_deg: f64,
+}
+
+impl Condition {
+    /// The condition at Mach number `mach` and angle of attack `alpha_deg` (degrees).
+    pub const fn new(mach: f64, alpha_deg: f64) -> Condition {
+        Condition { mach, alpha_deg }
+    }
+}
+
+impl From<f64> for Condition {
+    /// A Mach number at zero incidence.
+    fn from(mach: f64) -> Condition {
+        Condition { mach, alpha_deg: 0.0 }
+    }
+}
+
+/// Force coefficients of a point at an angle of attack, on the reference area; lengths in metres. Pressure forces only: the 3D solver
+/// integrates the Euler equations.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Forces {
+    /// Normal force coefficient, positive for positive incidence.
+    pub cn: f64,
+    /// Pitching-moment coefficient about the nose tip, `-cn x_cp / d_ref` (a normal force behind the tip pitches the nose down, so a
+    /// positive CN gives a negative moment), on the reference area and the reference diameter; 0 when `x_cp` is NaN.
+    pub cm: f64,
+    /// Centre of pressure of the normal force, metres from the nose tip (NaN when the normal force vanishes).
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "nan_or_f64"))]
+    pub x_cp: f64,
+    /// Axial force coefficient of the surface pressure (no friction, no base), positive downstream.
+    pub ca: f64,
+}
+
+/// One condition of a run (see [`Analysis::run`]): a Mach number at zero incidence, or at an angle of attack.
+///
+/// At zero incidence the point is the drag solver's: [`PolarPoint::drag`] is complete and `forces` is `None`. At an angle of attack
+/// it is the 3D solver's: `forces` is `Some`, [`Drag::forebody_pressure`] is the pressure axial force of every wall face (body and
+/// fins; no base, no friction), [`Drag::friction`] and [`Drag::fins`] are `None`, [`Drag::base`] and [`Drag::total`] are NaN; the
+/// detail has the iterations, the residual drop and the stop reason, `cd_nose`, `cd_base_solver`, `cp_base` and `y_plus_max` are NaN,
+/// `cd_friction` is 0, `cd_aft` and `wall` are empty, `farfield_dp` is 0 (not measured); there are no warnings and no uncertainty.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PolarPoint {
     /// Mach number of the point.
     pub mach: f64,
-    /// Angle of attack \[rad\]; always 0.0.
-    pub alpha: f64,
+    /// Angle of attack \[deg\].
+    pub alpha_deg: f64,
     /// Drag coefficients.
     pub drag: Drag,
+    /// Normal force, moment, centre of pressure and axial pressure force: `Some` at an angle of attack.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub forces: Option<Forces>,
     /// Solver summary of the point.
     pub detail: PointDetail,
     /// Trust in the point.
@@ -162,9 +216,12 @@ pub struct PolarPoint {
     /// Absolute difference of the total drag to the run at the neighbouring grid level, if [`Analysis::estimate_uncertainty`] was on and
     /// neither point failed.
     pub cd_uncertainty: Option<f64>,
-    /// The final flow field of the point, on the grid its drag was computed on; `Some` only with [`Analysis::keep_fields`].
+    /// The final flow field of a zero-incidence point, on the grid its drag was computed on; `Some` only with [`Analysis::keep_fields`].
     #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
     pub field: Option<Field>,
+    /// The final flow field of a point at an angle of attack (lengths in metres); `Some` only with [`Analysis::keep_fields`].
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub field3: Option<Field3>,
 }
 
 /// Reads an `f64` that a format without NaN (JSON) wrote as `null` back as NaN.
@@ -184,7 +241,8 @@ pub struct PointDetail {
     pub residual_drop_orders: f64,
     /// Why the iteration stopped.
     pub stop_reason: StopReason,
-    /// Pressure drag of the nose.
+    /// Pressure drag of the nose; NaN at an angle of attack.
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "nan_or_f64"))]
     pub cd_nose: f64,
     /// Pressure drag of each aft section, one per [`AftSpec`](crate::AftSpec).
     pub cd_aft: Vec<f64>,
@@ -217,11 +275,11 @@ pub struct WallCp {
     pub cp: f64,
 }
 
-/// Result of a Mach sweep, in the order of the requested Mach numbers.
+/// Result of [`Analysis::run`], in the order of the requested conditions.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Polar {
-    /// One point per requested Mach number.
+    /// One point per requested condition.
     pub points: Vec<PolarPoint>,
     /// Backend that ran the sweep.
     pub backend: BackendUsed,
@@ -295,10 +353,11 @@ pub struct Analysis {
     warm_start: bool,
     estimate_uncertainty: bool,
     grid_mach: Option<f64>,
-    lift_hook: Option<fn(&mut Case3)>,
+    case3_hook: Option<fn(&mut Case3)>,
     progress: Option<ProgressSink>,
     keep_fields: bool,
     field_sink: Option<FieldSink>,
+    field3_sink: Option<Snapshots3>,
 }
 
 /// Free stream of a viscous sweep.
@@ -333,10 +392,11 @@ impl Analysis {
             warm_start: false,
             estimate_uncertainty: false,
             grid_mach: None,
-            lift_hook: None,
+            case3_hook: None,
             progress: None,
             keep_fields: false,
             field_sink: None,
+            field3_sink: None,
         }
     }
 
@@ -355,14 +415,14 @@ impl Analysis {
     /// The serialisable description of this analysis: everything but the progress callback (see [`AnalysisSpec`]).
     /// [`Analysis::from_spec`] rebuilds an analysis that gives the same results, for instance in another process.
     ///
-    /// Fails for an analysis from [`Analysis::from_internal`] and for one with a fixed numerics or a lift-case hook (test hooks that
+    /// Fails for an analysis from [`Analysis::from_internal`] and for one with a fixed numerics or a 3D case hook (test hooks that
     /// have no serialisable form).
     pub fn spec(&self) -> Result<AnalysisSpec, Error> {
         let Some(body) = &self.body_spec else {
             return Err(Error::Unsupported("only an analysis built from a dimensional BodySpec has a spec".into()));
         };
-        if self.numerics.is_some() || self.lift_hook.is_some() {
-            return Err(Error::Unsupported("an analysis with fixed numerics or a lift-case hook has no spec".into()));
+        if self.numerics.is_some() || self.case3_hook.is_some() {
+            return Err(Error::Unsupported("an analysis with fixed numerics or a 3D case hook has no spec".into()));
         }
         Ok(AnalysisSpec {
             body: body.clone(),
@@ -452,14 +512,15 @@ impl Analysis {
         self
     }
 
-    /// Edits every 3D case of [`Analysis::run_lift`] after it is built (tests shrink the grid with it).
+    /// Edits every 3D case after it is built (tests shrink the grid with it). The type of the hook is the engine's own case: it changes
+    /// with the engine.
     #[doc(hidden)]
-    pub fn lift_case_hook(mut self, hook: fn(&mut Case3)) -> Self {
-        self.lift_hook = Some(hook);
+    pub fn case3_hook(mut self, hook: fn(&mut Case3)) -> Self {
+        self.case3_hook = Some(hook);
         self
     }
 
-    /// Caps `max_iter` of whichever numerics is used (the 3D iteration cap of [`Analysis::run_lift`] too).
+    /// Caps `max_iter` of whichever numerics is used (the 3D iteration cap of a condition with an angle of attack too).
     pub fn max_iterations(mut self, cap: usize) -> Self {
         self.max_iterations = Some(cap);
         self
@@ -474,9 +535,9 @@ impl Analysis {
         self
     }
 
-    /// Keep the final flow field of every point in [`PolarPoint::field`] (default off: a field is far larger than the rest of a
-    /// point, see [`crate::field`]). The field is the state the reported drag was integrated from, on the grid of the requested
-    /// resolution and wake treatment. It does not change the iteration or the drag.
+    /// Keep the final flow field of every point in [`PolarPoint::field`] (zero incidence) or [`PolarPoint::field3`] (angle of attack)
+    /// (default off: a field is far larger than the rest of a point, see [`crate::field`]). The field is the state the reported
+    /// coefficients were integrated from, on the grid of the requested resolution. It does not change the iteration or the result.
     pub fn keep_fields(mut self, on: bool) -> Self {
         self.keep_fields = on;
         self
@@ -488,7 +549,7 @@ impl Analysis {
     /// The CPU backend copies the solver's arrays; the GPU backend reads the state back from the device only at these iterations
     /// (a viscous run reads it back every `SAMPLE_INTERVAL` iterations for its drag monitor anyway, so a snapshot adds only the
     /// copy). A snapshot does not change the iteration or the result. The receiver owns the snapshot: keep it short (hand it to a
-    /// channel). The 3D runs of [`Analysis::run_lift`] take no snapshots.
+    /// channel). Conditions at an angle of attack take no `Field` snapshots: [`Analysis::on_field3`] gives theirs.
     ///
     /// Measured on an Apple M1 Max (viscous, Mach 2, the 1.1 m example body, a release build, the GPU backend): every 500 iterations
     /// cost nothing that the run-to-run spread shows, 18.3 s against 18.2 s for 2 000 iterations on the coarse grid and 8.4 s against
@@ -496,6 +557,17 @@ impl Analysis {
     /// read-back per snapshot (not measured).
     pub fn on_field(mut self, every: usize, f: impl Fn(Field) + Send + Sync + 'static) -> Self {
         self.field_sink = Some(FieldSink::new(every, f));
+        self
+    }
+
+    /// Calls `f` with a [`Field3`] snapshot of every 3D run (a condition at an angle of attack) in flight every `every` solver iterations
+    /// (rounded up to a multiple of [`SAMPLE_INTERVAL`](crate::progress::SAMPLE_INTERVAL); [`SNAPSHOT_INTERVAL`](crate::field::SNAPSHOT_INTERVAL)
+    /// is a good value), from the thread that runs the analysis; lengths are in metres. The GPU runner downloads the state of the
+    /// device every `SAMPLE_INTERVAL` iterations for the normal-force monitor anyway, so a snapshot adds the conversion to a field (about
+    /// 6 ms for 350 000 cells); the CPU runner reads its own arrays. A snapshot does not change the iteration or the result. The final
+    /// state of a run is not a snapshot: [`Analysis::keep_fields`] keeps it.
+    pub fn on_field3(mut self, every: usize, f: impl Fn(Field3) + Send + Sync + 'static) -> Self {
+        self.field3_sink = Some(Snapshots3::new(every, self.field_scale(), f));
         self
     }
 
@@ -666,8 +738,84 @@ impl Analysis {
         }
     }
 
-    /// Zero-lift drag at each Mach number of `machs` (each in `[0.1, 3.0]`).
-    pub fn run(&self, machs: &[f64]) -> Result<Polar, Error> {
+    /// Solves every flight condition of `conditions` and gives one [`PolarPoint`] per condition, in the order given. This is the only
+    /// solve entry: `run(&[0.5, 0.9])` (a `f64` is a [`Condition`] at zero incidence) is the zero-lift drag over a Mach sweep and
+    /// `run(&[Condition::new(2.0, 4.0)])` the 3D solve at an angle of attack.
+    ///
+    /// * A condition at zero incidence (Mach number in `[0.1, 3.0]`) is the axisymmetric drag solver's: the full [`Drag`], and with
+    ///   [`Analysis::viscous`] the skin friction, the base drag from the solution, the fins and the motor jet. Several of them are a
+    ///   sweep in ascending Mach order ([`Analysis::warm_start`], [`Analysis::estimate_uncertainty`]).
+    /// * A condition at an angle of attack (Mach number in `[0.3, 3.0]`, angle in `(0, 15]` degrees) is the 3D Euler solver's: the
+    ///   normal force, the pitching moment, the centre of pressure and the axial pressure force ([`PolarPoint::forces`]); see
+    ///   [`PolarPoint`] for what the drag of such a point holds. It needs an analysis built with [`Analysis::new`]. The solver
+    ///   integrates the Euler equations on a sting-mounted body with thick fins: [`Analysis::viscous`], roughness, the motor and the
+    ///   wake are ignored, and so are the fin roughness and the fin-drag model. Fins come from [`Analysis::fins`]; the grid level from
+    ///   [`Analysis::resolution`]. The conditions are solved in ascending Mach number, then angle; each Mach number starts cold and its
+    ///   later angles start from the field of the previous one, and a warm point that ends `Failed` or `Stalled` is re-run cold. A
+    ///   point whose run diverged is re-run once with the implicit CFL limit halved.
+    ///
+    /// Conditions of both kinds in one call run one after the other: the drag sweep first. The backends are as for
+    /// [`Analysis::backend`]; [`Polar::backend`] is the GPU only if every condition ran on it.
+    pub fn run<C: Into<Condition> + Copy>(&self, conditions: &[C]) -> Result<Polar, Error> {
+        let conditions: Vec<Condition> = conditions.iter().map(|&c| c.into()).collect();
+        self.route(&conditions)
+    }
+
+    /// THE ROUTE: the one place that decides which engine solves which condition, and the only place that knows there are two. A
+    /// condition at zero incidence goes to [`Analysis::run_drag`] (the axisymmetric solver), one at an angle of attack to
+    /// [`Analysis::run_lift_points`] (the 3D Euler solver). When one 3D viscous solver does both, this function becomes a single call
+    /// of it and the two paths below are deleted.
+    ///
+    /// Swapping the engine replaces: this function, [`Analysis::run_drag`] with the drag helpers it uses (`prepare`, `case`, `drag`, `point`,
+    /// `detail`, `warnings`, `sweep*`, `Runner`), and the 3D path (`check_lift`, `run_lift_points`, `lift_case`, `lift_point`, `lift_loop`,
+    /// `lift_gpu`, `LiftRunner` and its two runners, `lift_quality`). It keeps the public types ([`Condition`], [`Forces`], [`PolarPoint`] with
+    /// its `alpha_deg`, `forces` and `field3`), the sweep order and the progress, cancel and snapshot contracts: a point at an angle of attack
+    /// is built in `lift_point` (what is NaN there is listed on [`PolarPoint`]), the final `Field3` comes from the runner's state
+    /// (`LiftRunner::field3`) and the live ones from `Case3::snapshots` ([`Snapshots3`]), which a runner calls where it holds the state
+    /// of the grid after a chunk of iterations (`run3_on` and `GpuRunner3::run_on`: three lines each). [`Analysis::case3_hook`] is the tests'
+    /// way to shrink the grid of every 3D case.
+    fn route(&self, conditions: &[Condition]) -> Result<Polar, Error> {
+        if conditions.is_empty() {
+            return Err(Error::InvalidInput("no flight conditions requested".into()));
+        }
+        if let Some(c) = conditions.iter().find(|c| !c.alpha_deg.is_finite()) {
+            return Err(Error::InvalidInput(format!("incidence {} deg is not finite", c.alpha_deg)));
+        }
+        let (drag_at, lift_at): (Vec<usize>, Vec<usize>) = (0..conditions.len()).partition(|&k| conditions[k].alpha_deg == 0.0);
+        let lift_conditions: Vec<Condition> = lift_at.iter().map(|&k| conditions[k]).collect();
+        if !lift_conditions.is_empty() {
+            self.check_lift(&lift_conditions)?;
+        }
+        let mut slots: Vec<Option<PolarPoint>> = (0..conditions.len()).map(|_| None).collect();
+        let mut ran: Option<(BackendUsed, Option<String>)> = None;
+        let mut motor_on = false;
+        if !drag_at.is_empty() {
+            let machs: Vec<f64> = drag_at.iter().map(|&k| conditions[k].mach).collect();
+            let polar = self.run_drag(&machs)?;
+            motor_on = polar.motor_on;
+            ran = Some((polar.backend, polar.fallback));
+            for (&k, p) in drag_at.iter().zip(polar.points) {
+                slots[k] = Some(p);
+            }
+        }
+        if !lift_at.is_empty() {
+            let (points, backend, fallback) = self.run_lift_points(&lift_conditions)?;
+            for (&k, p) in lift_at.iter().zip(points) {
+                slots[k] = Some(p);
+            }
+            ran = Some(match ran {
+                None => (backend, fallback),
+                Some((b, f)) if b == backend => (b, f.or(fallback)),
+                Some((_, f)) => (BackendUsed::Cpu, f.or(fallback)),
+            });
+        }
+        let (backend, fallback) = ran.expect("a condition was solved");
+        let points = slots.into_iter().map(|p| p.expect("every condition has a result")).collect();
+        Ok(Polar { points, backend, fallback, motor_on })
+    }
+
+    /// The drag solver's sweep over `machs` (each in `[0.1, 3.0]`, zero incidence).
+    fn run_drag(&self, machs: &[f64]) -> Result<Polar, Error> {
         let (order, rans, cases) = self.prepare(machs)?;
         let level = self.resolution.level();
         let cmp_cases: Option<Vec<Case>> = self.estimate_uncertainty.then(|| {
@@ -768,7 +916,7 @@ impl Analysis {
             (quality != Quality::Failed && self::quality(o, &od) != Quality::Failed).then(|| (drag.total - od.total).abs())
         });
         let detail = self.detail(&detail);
-        PolarPoint { mach, alpha: 0.0, drag, quality, warnings, cd_uncertainty, detail, field }
+        PolarPoint { mach, alpha_deg: 0.0, drag, forces: None, quality, warnings, cd_uncertainty, detail, field, field3: None }
     }
 
     /// Public summary of a solver result: coefficients on the reference area, wall points in metres.
@@ -903,40 +1051,7 @@ impl Analysis {
     }
 }
 
-/// One (Mach, incidence) point of a 3D lift solve; forces on the reference area, lengths in metres.
-#[derive(Clone, Copy, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct LiftPoint {
-    /// Mach number.
-    pub mach: f64,
-    /// Incidence \[rad\].
-    pub alpha: f64,
-    /// Normal force coefficient on the reference area, positive for positive incidence.
-    pub cn: f64,
-    /// Axial force coefficient of the surface pressure (no friction, no base) on the reference area.
-    pub ca_pressure: f64,
-    /// Centre of pressure of the normal force, metres from the nose tip (NaN when the normal force vanishes).
-    #[cfg_attr(feature = "serde", serde(deserialize_with = "nan_or_f64"))]
-    pub x_cp: f64,
-    /// How the run stopped.
-    pub quality: Quality,
-    /// Iterations of the run that produced the point.
-    pub iterations: usize,
-}
-
-/// Result of [`Analysis::run_lift`], ordered by Mach number, then incidence.
-#[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct LiftPolar {
-    /// Points ordered by Mach number, then incidence.
-    pub points: Vec<LiftPoint>,
-    /// Backend that produced the points.
-    pub backend: BackendUsed,
-    /// Under [`Backend::Auto`], why the GPU was not used.
-    pub fallback: Option<String>,
-}
-
-/// Quality of a 3D result: `Failed` on a non-finite state or force, else by stop reason like the 2D facade.
+/// Quality of a 3D result: `Failed` on a non-finite state or force, else by stop reason like the drag solver.
 fn lift_quality(d: &PointResult3) -> Quality {
     if matches!(d.stop_reason, StopReason::NonFinite | StopReason::Cancelled) || !d.cn.is_finite() || !d.ca.is_finite() {
         return Quality::Failed;
@@ -949,32 +1064,22 @@ fn lift_quality(d: &PointResult3) -> Quality {
     }
 }
 
+/// The conditions at an angle of attack: the 3D Euler solver (see [`Analysis::run`]). Everything here is replaced with the route.
 impl Analysis {
-    /// Normal force and centre of pressure from a 3D Euler solve, for every Mach number of `machs` (each in `[0.3, 3.0]`) at every
-    /// incidence of `alphas_deg` (each in `(0, 15]` degrees).
-    ///
-    /// Needs an analysis built with [`Analysis::new`]. The 3D solver integrates the Euler equations on a sting-mounted body with thick
-    /// fins: viscous settings ([`Analysis::viscous`]), roughness, the motor and the wake are ignored, and so are the fin roughness and
-    /// the 2D fin-drag model. Fins come from [`Analysis::fins`]; the grid level from [`Analysis::resolution`]. Both slices are sorted
-    /// ascending; the points are ordered by Mach number, then incidence. Each Mach number starts cold; later incidences start from the
-    /// field of the previous one, and a warm point that ends `Failed` or `Stalled` is re-run cold. A point whose run diverged is
-    /// re-run once with the implicit CFL limit halved. Coefficients refer to the reference area, `x_cp` is in metres from the tip.
-    /// Backends as for [`Analysis::run`].
-    pub fn run_lift(&self, machs: &[f64], alphas_deg: &[f64]) -> Result<LiftPolar, Error> {
+    /// The input checks of the 3D path for `conditions`, all at an angle of attack.
+    fn check_lift(&self, conditions: &[Condition]) -> Result<(), Error> {
         if !self.dimensional {
-            return Err(Error::InvalidInput("run_lift needs a dimensional BodySpec (Analysis::new)".into()));
+            return Err(Error::InvalidInput("a condition with an angle of attack needs a dimensional BodySpec (Analysis::new)".into()));
         }
-        if machs.is_empty() || alphas_deg.is_empty() {
-            return Err(Error::InvalidInput("no Mach numbers or incidences requested".into()));
-        }
-        for &m in machs {
-            if !(m.is_finite() && (LIFT_MACH_RANGE.0..=LIFT_MACH_RANGE.1).contains(&m)) {
-                return Err(Error::InvalidInput(format!("Mach number {m} is outside [{}, {}] for a lift solve", LIFT_MACH_RANGE.0, LIFT_MACH_RANGE.1)));
+        for c in conditions {
+            if !(c.mach.is_finite() && (LIFT_MACH_RANGE.0..=LIFT_MACH_RANGE.1).contains(&c.mach)) {
+                return Err(Error::InvalidInput(format!(
+                    "Mach number {} is outside [{}, {}] for a condition with an angle of attack",
+                    c.mach, LIFT_MACH_RANGE.0, LIFT_MACH_RANGE.1
+                )));
             }
-        }
-        for &a in alphas_deg {
-            if !(a.is_finite() && a > 0.0 && a <= LIFT_ALPHA_MAX_DEG) {
-                return Err(Error::InvalidInput(format!("incidence {a} deg is outside (0, {LIFT_ALPHA_MAX_DEG}]")));
+            if !(c.alpha_deg > 0.0 && c.alpha_deg <= LIFT_ALPHA_MAX_DEG) {
+                return Err(Error::InvalidInput(format!("incidence {} deg is outside (0, {LIFT_ALPHA_MAX_DEG}]", c.alpha_deg)));
             }
         }
         if !(self.d_ref.is_finite() && self.d_ref > 0.0) {
@@ -983,26 +1088,36 @@ impl Analysis {
         if let Some(f) = &self.fins {
             f.validate()?;
         }
-        let mut machs = machs.to_vec();
-        machs.sort_by(f64::total_cmp);
-        let mut alphas = alphas_deg.to_vec();
-        alphas.sort_by(f64::total_cmp);
+        Ok(())
+    }
 
-        match self.backend {
-            Backend::Cpu => guard(|| self.lift_cpu(&machs, &alphas)),
-            Backend::Gpu => guard(|| self.lift_gpu(&machs, &alphas)),
-            Backend::Auto => {
-                let why = match guard(|| self.lift_gpu(&machs, &alphas)) {
-                    Ok(p) => return Ok(p),
-                    Err(Error::Internal(m)) => m.replacen("solver panicked", "GPU solver panicked", 1),
-                    Err(Error::Cancelled) => return Err(Error::Cancelled),
-                    Err(e) => format!("GPU unavailable: {e}"),
-                };
-                let mut p = guard(|| self.lift_cpu(&machs, &alphas))?;
-                p.fallback = Some(why);
-                Ok(p)
-            }
+    /// Solves `conditions` (all at an angle of attack, checked by [`Analysis::check_lift`]) on the 3D solver: the points in the order
+    /// of `conditions`, the backend that ran them and, under [`Backend::Auto`], why the GPU was not used.
+    fn run_lift_points(&self, conditions: &[Condition]) -> Result<(Vec<PolarPoint>, BackendUsed, Option<String>), Error> {
+        // solved in ascending Mach number, then angle (stable); results go back to the order asked for
+        let mut order: Vec<usize> = (0..conditions.len()).collect();
+        order.sort_by(|&a, &b| conditions[a].mach.total_cmp(&conditions[b].mach).then(conditions[a].alpha_deg.total_cmp(&conditions[b].alpha_deg)));
+        let sorted: Vec<Condition> = order.iter().map(|&k| conditions[k]).collect();
+        let (solved, backend, fallback) = match self.backend {
+            Backend::Cpu => (guard(|| self.lift_loop(&CpuLift, &sorted))?, BackendUsed::Cpu, None),
+            Backend::Gpu => (guard(|| self.lift_gpu(&sorted))?, BackendUsed::Gpu, None),
+            Backend::Auto => match guard(|| self.lift_gpu(&sorted)) {
+                Ok(p) => (p, BackendUsed::Gpu, None),
+                Err(Error::Cancelled) => return Err(Error::Cancelled),
+                Err(e) => {
+                    let why = match e {
+                        Error::Internal(m) => m.replacen("solver panicked", "GPU solver panicked", 1),
+                        e => format!("GPU unavailable: {e}"),
+                    };
+                    (guard(|| self.lift_loop(&CpuLift, &sorted))?, BackendUsed::Cpu, Some(why))
+                }
+            },
+        };
+        let mut slots: Vec<Option<PolarPoint>> = (0..conditions.len()).map(|_| None).collect();
+        for (&k, p) in order.iter().zip(solved) {
+            slots[k] = Some(p);
         }
+        Ok((slots.into_iter().map(|p| p.expect("every condition has a result")).collect(), backend, fallback))
     }
 
     /// Fins of the analysis in nose diameters.
@@ -1035,86 +1150,110 @@ impl Analysis {
             case.numerics.max_iter = case.numerics.max_iter.min(cap);
         }
         case.progress = self.progress.as_ref().map(|p| p.scaled((self.d_nose / self.d_ref).powi(2)));
-        if let Some(hook) = self.lift_hook {
+        case.snapshots = self.field3_sink.clone();
+        if let Some(hook) = self.case3_hook {
             hook(&mut case);
         }
         case
     }
 
-    /// Coefficients on the reference area and lengths in metres.
-    fn lift_point(&self, r: &PointResult3) -> LiftPoint {
+    /// The point of the 3D result `r` of the condition `c`, solved on `case` and left in `state`: coefficients on the reference area,
+    /// lengths in metres, the final field when it is kept.
+    fn lift_point<R: LiftRunner>(&self, runner: &R, state: &R::State, case: &Case3, c: Condition, r: &PointResult3) -> Result<PolarPoint, Error> {
         let q = (self.d_nose / self.d_ref).powi(2);
-        LiftPoint {
-            mach: r.mach,
-            alpha: r.alpha,
-            cn: r.cn * q,
-            ca_pressure: r.ca * q,
-            x_cp: r.x_cp * self.d_nose,
-            quality: lift_quality(r),
+        let (cn, ca, x_cp) = (r.cn * q, r.ca * q, r.x_cp * self.d_nose);
+        let cm = if x_cp.is_finite() { -cn * x_cp / self.d_ref } else { 0.0 };
+        let drag = Drag { forebody_pressure: ca, friction: None, base: f64::NAN, base_modelled: false, fins: None, total: f64::NAN };
+        let detail = PointDetail {
             iterations: r.iterations,
-        }
+            residual_drop_orders: r.drop_orders,
+            stop_reason: r.stop_reason,
+            cd_nose: f64::NAN,
+            cd_aft: Vec::new(),
+            cd_friction: 0.0,
+            cd_base_solver: f64::NAN,
+            cp_base: f64::NAN,
+            wall: Vec::new(),
+            y_plus_max: f64::NAN,
+            farfield_dp: 0.0,
+        };
+        let field3 = if self.keep_fields { Some(runner.field3(state, case, r.iterations, self.field_scale())?) } else { None };
+        Ok(PolarPoint {
+            mach: c.mach,
+            alpha_deg: c.alpha_deg,
+            drag,
+            forces: Some(Forces { cn, cm, x_cp, ca }),
+            quality: lift_quality(r),
+            warnings: Vec::new(),
+            cd_uncertainty: None,
+            detail,
+            field: None,
+            field3,
+        })
     }
 
-    /// The sweep loop shared by the lift backends: per Mach number a cold first incidence, warm later ones. A warm point that ends
-    /// `Failed` or `Stalled` is re-run cold; a cold run that diverged is repeated once with the implicit CFL limit halved.
-    fn lift_loop<R: LiftRunner>(&self, runner: &R, machs: &[f64], alphas_deg: &[f64]) -> Result<Vec<LiftPoint>, Error> {
-        let mut points = Vec::with_capacity(machs.len() * alphas_deg.len());
-        for &m in machs {
-            let mut state: Option<R::State> = None;
-            for &a in alphas_deg {
-                let case = self.lift_case(m, a.to_radians());
-                if let Some(s) = &mut state {
-                    let r = runner.warm(s, &case)?;
-                    if r.stop_reason == StopReason::Cancelled {
-                        return Err(Error::Cancelled);
-                    }
-                    if matches!(lift_quality(&r), Quality::Converged | Quality::Stationary) {
-                        points.push(self.lift_point(&r));
-                        continue;
-                    }
-                }
-                let (mut r, s) = runner.cold(&case)?;
-                state = Some(s);
-                if r.stop_reason == StopReason::NonFinite {
-                    let mut c = case.clone();
-                    c.numerics.implicit.cfl_max *= 0.5;
-                    r = runner.cold(&c)?.0;
-                    state = None;
-                }
+    /// The sweep loop shared by the 3D backends over `sorted` (ascending Mach number, then angle): per Mach number a cold first angle,
+    /// warm later ones. A warm point that ends `Failed` or `Stalled` is re-run cold; a cold run that diverged is repeated once with
+    /// the implicit CFL limit halved.
+    fn lift_loop<R: LiftRunner>(&self, runner: &R, sorted: &[Condition]) -> Result<Vec<PolarPoint>, Error> {
+        let mut points = Vec::with_capacity(sorted.len());
+        let mut state: Option<R::State> = None;
+        let mut state_mach = f64::NAN;
+        for &c in sorted {
+            if c.mach != state_mach {
+                state = None;
+                state_mach = c.mach;
+            }
+            let case = self.lift_case(c.mach, c.alpha_deg.to_radians());
+            if let Some(s) = &mut state {
+                let r = runner.warm(s, &case)?;
                 if r.stop_reason == StopReason::Cancelled {
                     return Err(Error::Cancelled);
                 }
-                if lift_quality(&r) == Quality::Failed {
-                    state = None;
+                if matches!(lift_quality(&r), Quality::Converged | Quality::Stationary) {
+                    points.push(self.lift_point(runner, s, &case, c, &r)?);
+                    continue;
                 }
-                points.push(self.lift_point(&r));
             }
+            let (mut r, mut s) = runner.cold(&case)?;
+            let mut next_warm = true;
+            if r.stop_reason == StopReason::NonFinite {
+                let mut again = case.clone();
+                again.numerics.implicit.cfl_max *= 0.5;
+                (r, s) = runner.cold(&again)?;
+                next_warm = false;
+            }
+            if r.stop_reason == StopReason::Cancelled {
+                return Err(Error::Cancelled);
+            }
+            if lift_quality(&r) == Quality::Failed {
+                next_warm = false;
+            }
+            points.push(self.lift_point(runner, &s, &case, c, &r)?);
+            state = next_warm.then_some(s);
         }
         Ok(points)
     }
 
-    /// CPU backend.
-    fn lift_cpu(&self, machs: &[f64], alphas_deg: &[f64]) -> Result<LiftPolar, Error> {
-        Ok(LiftPolar { points: self.lift_loop(&CpuLift, machs, alphas_deg)?, backend: BackendUsed::Cpu, fallback: None })
-    }
-
-    /// GPU backend of [`Analysis::run_lift`] (`machs` and `alphas_deg` validated and sorted): single precision (`Precision::F32`, within 0.01 % of extended on the ANF table).
+    /// GPU backend of the 3D path (`sorted` validated and sorted): single precision (`Precision::F32`, within 0.01 % of extended on the ANF table).
     #[cfg(feature = "gpu")]
-    fn lift_gpu(&self, machs: &[f64], alphas_deg: &[f64]) -> Result<LiftPolar, Error> {
-        Ok(LiftPolar { points: self.lift_loop(&GpuLift, machs, alphas_deg)?, backend: BackendUsed::Gpu, fallback: None })
+    fn lift_gpu(&self, sorted: &[Condition]) -> Result<Vec<PolarPoint>, Error> {
+        self.lift_loop(&GpuLift, sorted)
     }
 
     #[cfg(not(feature = "gpu"))]
-    fn lift_gpu(&self, _machs: &[f64], _alphas_deg: &[f64]) -> Result<LiftPolar, Error> {
+    fn lift_gpu(&self, _sorted: &[Condition]) -> Result<Vec<PolarPoint>, Error> {
         Err(Error::Unsupported("the `gpu` feature is not enabled".into()))
     }
 }
 
-/// One backend of the 3D lift sweep: a cold run that builds the solver state, and a warm run on it.
+/// One backend of the 3D sweep: a cold run that builds the solver state, a warm run on it, and the flow field of a state.
 trait LiftRunner {
     type State;
     fn cold(&self, case: &Case3) -> Result<(PointResult3, Self::State), Error>;
     fn warm(&self, state: &mut Self::State, case: &Case3) -> Result<PointResult3, Error>;
+    /// The field of `state` after `iterations` iterations, in units of `scale` metres per nose diameter.
+    fn field3(&self, state: &Self::State, case: &Case3, iterations: usize, scale: f64) -> Result<Field3, Error>;
 }
 
 struct CpuLift;
@@ -1130,6 +1269,10 @@ impl LiftRunner for CpuLift {
 
     fn warm(&self, s: &mut Solver3, case: &Case3) -> Result<PointResult3, Error> {
         Ok(run3_on(case, s, true))
+    }
+
+    fn field3(&self, s: &Solver3, case: &Case3, iterations: usize, scale: f64) -> Result<Field3, Error> {
+        Ok(field3_of_solver(case, s, iterations, scale))
     }
 }
 
@@ -1148,6 +1291,10 @@ impl LiftRunner for GpuLift {
 
     fn warm(&self, r: &mut crate::engine::gpu3::GpuRunner3, case: &Case3) -> Result<PointResult3, Error> {
         r.run_on(case, true)
+    }
+
+    fn field3(&self, r: &crate::engine::gpu3::GpuRunner3, case: &Case3, iterations: usize, scale: f64) -> Result<Field3, Error> {
+        Ok(crate::engine::field3::field3_of(case, &r.host.grid, &r.gpu.state_f64()?, iterations, scale))
     }
 }
 

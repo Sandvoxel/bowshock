@@ -214,7 +214,8 @@ pub trait WedgeRunner {
     }
 }
 
-/// The wedge runner. `solver3d` / `gpu3d`: return `Some(Box::new(..))` here once a wedge exists (see [`WedgeRunner`]).
+/// The wedge runner. `solver3d` / `gpu3d`: return `Some(Box::new(..))` here once a wedge exists (see [`WedgeRunner`]). The CPU runner (Euler: G-W1 and the
+/// cone and ogive of G-W4) is `cpu_wedge::CpuWedge` at the end of the file.
 fn wedge_runner() -> Option<Box<dyn WedgeRunner>> {
     // --- GPU runner (gpu3d, stage S2): `BOWSHOCK_WEDGE_BACKEND=gpu`, through `tools/gpuq` (see `wedge_gates/gpu.rs`) ---
     #[cfg(feature = "gpu")]
@@ -222,7 +223,8 @@ fn wedge_runner() -> Option<Box<dyn WedgeRunner>> {
         return Some(Box::new(gpu::GpuWedge::new()));
     }
     // --- end of the GPU runner ---
-    None
+    // --- CPU runner (solver3d): the default, `cpu_wedge` at the end of the file ---
+    Some(Box::new(cpu_wedge::CpuWedge))
 }
 
 /// The GPU half of the wedge runner (`BOWSHOCK_WEDGE_BACKEND=gpu`).
@@ -1045,3 +1047,168 @@ fn bands_and_limits() {
     check_v5(&mut rep, "t", Scheme::Implicit, StateDiff { state: 2e-4, k: 2e-3, omega: 2e-3 });
     assert_eq!(rep.failed, 3, "implicit limits are tighter than the explicit ones");
 }
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// BEGIN solver3d: the CPU wedge runner (Euler, f64, `Solver3` with `Block` lines). `gpu3d` owns the rest of this file.
+
+mod cpu_wedge {
+    use super::*;
+    use bowshock_cfd::gas3::cons_to_prim3;
+    use bowshock_cfd::grid::{cone_grid, ConeGridParams};
+    use bowshock_cfd::solver3::Solver3;
+    use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
+    use bowshock_core::engine::case::Wake;
+    use bowshock_core::engine::case3::Case3;
+    use bowshock_core::engine::grid3::{wedge_of_meridian, WEDGE_ANGLE};
+    use bowshock_core::engine::run3::{drag_parts, run3_on};
+    use bowshock_core::Analysis;
+
+    pub struct CpuWedge;
+
+    fn level_of(r: Resolution) -> u32 {
+        match r {
+            Resolution::Coarse => 0,
+            Resolution::Medium => 1,
+            Resolution::Fine => 2,
+        }
+    }
+
+    fn pressure(s: &Solver3, i: usize, j: usize) -> f64 {
+        cons_to_prim3(&s.u[s.grid.cell(i, j, 0)])[4]
+    }
+
+    /// Mean Cp of the cone surface over `window` (fractions of the length) and the shock angle \[rad\]: `bowshock-cases::cone::postprocess` on the wedge (the
+    /// cell radius is `hypot(y, z)` of the centroid, the wall pressure the linear extrapolation of the first two cells).
+    fn cone_cp_and_beta(s: &Solver3, window: (f64, f64)) -> (f64, f64) {
+        let g = &s.grid;
+        let (ni, nj) = (g.ni, g.nj);
+        let fs = s.cfg.freestream;
+        let p_inf = fs[4];
+        let q_inf = 0.5 * fs[0] * (fs[1] * fs[1] + fs[2] * fs[2] + fs[3] * fs[3]);
+        let length = g.x[ni];
+        let centre = |i: usize, j: usize| {
+            let c = g.xc[g.cell(i, j, 0)];
+            (c[0], c[1].hypot(c[2]))
+        };
+        let mut cps = Vec::new();
+        for i in 0..ni {
+            let f = &g.jface[i];
+            let (xm, rm) = (f.c[0], f.c[1].hypot(f.c[2]));
+            if xm <= 0.0 {
+                continue;
+            }
+            let (p0, p1) = (pressure(s, i, 0), pressure(s, i, 1));
+            let (c0, c1) = (centre(i, 0), centre(i, 1));
+            let (d0, d1) = ((c0.0 - xm).hypot(c0.1 - rm), (c1.0 - xm).hypot(c1.1 - rm));
+            let pw = p0 + (p0 - p1) * d0 / (d1 - d0);
+            if xm / length >= window.0 && xm / length <= window.1 {
+                cps.push((pw - p_inf) / q_inf);
+            }
+        }
+        let cp_avg = cps.iter().sum::<f64>() / cps.len() as f64;
+        // shock angle: per column the steepest pressure gradient (parabolic sub-cell refinement), a line fit over the window
+        let mut pts = Vec::new();
+        for i in 0..ni {
+            let xr = centre(i, 0).0 / length;
+            if xr < window.0 || xr > window.1 {
+                continue;
+            }
+            let gr: Vec<f64> = (0..nj - 1)
+                .map(|j| {
+                    let (a, b) = (centre(i, j), centre(i, j + 1));
+                    (pressure(s, i, j) - pressure(s, i, j + 1)).abs() / (b.0 - a.0).hypot(b.1 - a.1)
+                })
+                .collect();
+            let k = (0..gr.len()).max_by(|&a, &b| gr[a].total_cmp(&gr[b])).unwrap();
+            let mut frac = k as f64;
+            if k > 0 && k + 1 < gr.len() {
+                let (a, b, c) = (gr[k - 1], gr[k], gr[k + 1]);
+                let den = a - 2.0 * b + c;
+                if den < 0.0 {
+                    frac += (0.5 * (a - c) / den).clamp(-0.5, 0.5);
+                }
+            }
+            let pos = |sel: &dyn Fn((f64, f64)) -> f64, f: f64| {
+                let t = f.clamp(0.0, (nj - 2) as f64);
+                let j0 = t.floor() as usize;
+                let mid = |j: usize| 0.5 * (sel(centre(i, j)) + sel(centre(i, j + 1)));
+                let (a, b) = (mid(j0), mid((j0 + 1).min(nj - 2)));
+                a + (t - j0 as f64) * (b - a)
+            };
+            pts.push((pos(&|c| c.0, frac), pos(&|c| c.1, frac)));
+        }
+        let n = pts.len() as f64;
+        let (sx, sr) = (pts.iter().map(|p| p.0).sum::<f64>(), pts.iter().map(|p| p.1).sum::<f64>());
+        let sxx = pts.iter().map(|p| p.0 * p.0).sum::<f64>();
+        let sxr = pts.iter().map(|p| p.0 * p.1).sum::<f64>();
+        (cp_avg, ((n * sxr - sx * sr) / (n * sxx - sx * sx)).atan())
+    }
+
+    impl WedgeRunner for CpuWedge {
+        fn facade_case(&self, c: &FacadeCase) -> Result<Numbers, String> {
+            if c.rans {
+                return Err("RANS is not on the CPU wedge yet (S3/S4)".to_string());
+            }
+            if !c.wake_base {
+                return Err("the wedge is built on the base-wake grid".to_string());
+            }
+            let analysis = Analysis::new(&c.body).map_err(|e| e.to_string())?.resolution(c.resolution).wake(Wake::Base);
+            let case2 = analysis.engine_cases(&[c.mach]).map_err(|e| e.to_string())?.remove(0);
+            let case = Case3::wedge_of(&case2, level_of(c.resolution));
+            let mut s = case.build_solver().map_err(|e| e.to_string())?;
+            let r = run3_on(&case, &mut s, false);
+            let p = drag_parts(&case, &s.grid, &s.u, s.cfg.freestream[4]);
+            // the facade (the fixture) refers to the largest cross-section, the engine to the nose base: one factor, `BaseBody::nose_to_largest_area`
+            let q = case.body.nose_to_largest_area();
+            Ok(Numbers {
+                cd_total: q * p.total,
+                cd_nose: q * p.nose,
+                cd_aft: p.aft.iter().map(|a| q * a).collect(),
+                cd_friction: None,
+                cd_base: Some(q * p.base),
+                cp_base: None,
+                y_plus_max: None,
+                iterations: r.iterations,
+                stop_reason: format!("{}", r.stop_reason),
+            })
+        }
+
+        fn cone(&self, mach: f64, theta_deg: f64, ni: usize, nj: usize) -> Result<ConeNumbers, String> {
+            let theta = theta_deg.to_radians();
+            let tm = bowshock_reference::taylor_maccoll::solve_cone(mach, theta).ok_or("no attached conical shock")?;
+            // the grid of `bowshock-cases::cone::build_solver`: length 1, the outer boundary at 1.25 times the shock's height
+            let h_end = 1.25 * tm.beta.tan();
+            let g2 = cone_grid(&ConeGridParams { ni, nj, theta, length: 1.0, x_up: -0.1, h_start: 0.4 * h_end, h_end, cluster: 0.0 });
+            let n_axis = (0..g2.ni).take_while(|&i| g2.x[i + 1] <= 1e-12).count();
+            let grid = wedge_of_meridian(&g2, WEDGE_ANGLE, n_axis).map_err(|e| e.to_string())?;
+            // the numerics of a Euler wedge; the body only sets where the forces stop (past the grid)
+            let mut case = Case3::wedge(mach, Case3::anf_body(), 0);
+            case.numerics.max_iter = 20_000;
+            let mut s = case.solver_on(grid);
+            let r = run3_on(&case, &mut s, false);
+            let (cp, beta) = cone_cp_and_beta(&s, (0.4, 0.9));
+            println!("INFO cone {theta_deg} deg M {mach} {ni}x{nj}: {} iterations, {}", r.iterations, r.stop_reason);
+            Ok(ConeNumbers { cp, beta_deg: beta.to_degrees() })
+        }
+
+        fn ogive_forebody_cd(&self, mach: f64, level: u32) -> Result<f64, String> {
+            // the fineness-3 tangent ogive and 6 d cylinder of `bowshock-cases::ogive`, on the base-wake grid of the engine at `level`
+            let body = BaseBody::cylinder(Body { nose: Nose::TangentOgive { fineness: 3.0 } }, 6.0);
+            let case = Case3::wedge(mach, body, level);
+            let mut s = case.build_solver().map_err(|e| e.to_string())?;
+            let r = run3_on(&case, &mut s, false);
+            let p = drag_parts(&case, &s.grid, &s.u, s.cfg.freestream[4]);
+            println!(
+                "INFO ogive M {mach} level {level}: {} iterations, {}; nose {:+.5} aft {:+.5} base {:+.5}",
+                r.iterations,
+                r.stop_reason,
+                p.nose,
+                p.aft.iter().sum::<f64>(),
+                p.base
+            );
+            Ok(p.nose + p.aft.iter().sum::<f64>())
+        }
+    }
+}
+
+// END solver3d

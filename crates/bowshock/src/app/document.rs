@@ -415,7 +415,17 @@ mod tests {
         let mut doc = Document::default();
         doc.edit("Add nose", |r| r.insert(0, nose()).unwrap());
         doc.edit("Add tube", |r| r.insert(1, tube(0.5)).unwrap());
-        let point = |mach: f64| CfdPoint { mach, cd: 0.4, friction: 0.1, pressure: 0.1, base: 0.1, fins: 0.1, other: 0.0, quality: CfdQuality::Converged };
+        let point = |mach: f64| CfdPoint {
+            mach,
+            cd: 0.4,
+            friction: 0.1,
+            pressure: 0.1,
+            base: 0.1,
+            fins: 0.1,
+            other: 0.0,
+            interference: 0.0,
+            quality: CfdQuality::Converged,
+        };
         let table = CfdTable {
             key: 1,
             geometry: 2,

@@ -34,6 +34,18 @@ Every Mach number must be finite and in [0.1, 3.0], the list must not be empty; 
 returns `InvalidInput`. Internally the points are solved in ascending Mach order; the result is
 in the order you gave. Duplicates are allowed.
 
+## Angle of attack
+
+`run` takes conditions: `run(&[0.5, 0.9])` is a Mach sweep at zero incidence (a `f64` is a
+`Condition` at zero incidence), and `Condition::new(mach, alpha_deg)` asks for an angle of attack.
+Such a condition (Mach in [0.3, 3.0], angle in (0, 15] degrees; it needs a dimensional body from
+`Analysis::new`) is solved by the 3D Euler solver on a sting-mounted body with thick fins: its point has
+[`PolarPoint::forces`](results.md#forces) (normal force, moment, centre of pressure, axial pressure
+force) and no friction or base drag; `viscous`, roughness, the motor and the wake are ignored.
+Conditions of both kinds can be mixed in one call. `keep_fields(true)` keeps the final `Field3` of
+these points in `PolarPoint::field3`, and `Analysis::on_field3(every, f)` hands `f` a snapshot of
+the run in flight, like `on_field` for the drag solver.
+
 ## Builder methods
 
 | Method | Default | Meaning |
@@ -169,7 +181,8 @@ the option is off.
 
 | Condition | Error |
 | --- | --- |
-| no Mach numbers, or one outside [0.1, 3.0] | `InvalidInput` |
+| no conditions, a Mach number outside [0.1, 3.0] (outside [0.3, 3.0] at an angle of attack), an angle outside (0, 15] degrees, a NaN | `InvalidInput` |
+| an angle of attack without a dimensional body (`Analysis::new`) | `InvalidInput` |
 | reference diameter not finite and > 0 | `InvalidInput` |
 | fins without `viscous`, or invalid `FinSpec` | `InvalidInput` |
 | motor without `viscous`, with `Wake::Sting`, or invalid `MotorSpec` | `InvalidInput` |

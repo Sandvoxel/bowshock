@@ -18,6 +18,15 @@ fn failed_3d_points_are_dropped_and_fewer_than_two_nodes_is_an_error() {
     assert_eq!(pts.len(), 3);
     assert_eq!(notes.len(), 1);
     assert!((pts[1].alpha_deg - 6.0).abs() < 1e-9 && pts[1].quality == CfdQuality::Stalled);
+    // the stored point has the normal force, the centre of pressure and the moment; the Euler solve gives no drag
+    assert_eq!((pts[0].cn, pts[0].x_cp, pts[0].cm, pts[0].cd), (0.3, 1.0, Some(-0.3), None));
+    // a point without forces (a drag point) or with a non-finite centre of pressure is not a stability point
+    let mut no_forces = raw(0.5, 2.0, Converged);
+    no_forces.forces = None;
+    assert!(reduce_lift(&[no_forces], 1, &mut Vec::new()).is_err());
+    let mut vanishing = raw(0.5, 2.0, Converged);
+    vanishing.forces.as_mut().unwrap().x_cp = f64::NAN;
+    assert!(reduce_lift(&[vanishing], 1, &mut Vec::new()).is_err());
 
     let one = [raw(0.5, 2.0, Converged), raw(0.5, 6.0, Converged), raw(0.8, 2.0, Failed), raw(0.8, 6.0, Failed)];
     assert!(reduce_lift(&one, 2, &mut Vec::new()).is_err());
@@ -211,7 +220,7 @@ fn a_table_that_stopped_early_is_a_partial_of_the_range_and_nothing_else_is() {
         mach,
         alpha_deg: None,
         outcome: Outcome::from_quality(quality),
-        point: quality.map(|quality| CfdPoint { mach, cd: 0.5, friction: 0.1, pressure: 0.1, base: 0.2, fins: 0.1, other: 0.0, quality }),
+        point: quality.map(|quality| CfdPoint { mach, cd: 0.5, friction: 0.1, pressure: 0.1, base: 0.2, fins: 0.1, other: 0.0, interference: 0.0, quality }),
         lift: None,
         iterations: 2000,
         cpu: false,
@@ -277,7 +286,17 @@ fn a_stopped_share_keeps_the_machines_that_solved_it_and_the_part_without_a_gap(
         mach,
         alpha_deg: None,
         outcome: Outcome::Converged,
-        point: Some(CfdPoint { mach, cd: 0.5, friction: 0.1, pressure: 0.1, base: 0.2, fins: 0.1, other: 0.0, quality: CfdQuality::Converged }),
+        point: Some(CfdPoint {
+            mach,
+            cd: 0.5,
+            friction: 0.1,
+            pressure: 0.1,
+            base: 0.2,
+            fins: 0.1,
+            other: 0.0,
+            interference: 0.0,
+            quality: CfdQuality::Converged,
+        }),
         lift: None,
         iterations: 2000,
         cpu: false,

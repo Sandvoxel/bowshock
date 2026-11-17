@@ -11,7 +11,7 @@ use bowshock_cfd::grid3::Grid3;
 use bowshock_cfd::implicit::{ImplicitParams, LineSolve3};
 use bowshock_cfd::solver3::{Config3, Scheme3, Solver3};
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
-use bowshock_core::engine::case3::Case3;
+use bowshock_core::engine::case3::{Case3, Tier};
 use bowshock_core::engine::grid3::{body_grid3, Fins3};
 use bowshock_core::FinProfile;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -40,7 +40,7 @@ fn wedge(mach: f64) -> Case3 {
 
 /// The half domain (pitch-plane symmetry) on the tiny base-wake grid, 2 degrees incidence.
 fn half(mach: f64) -> Case3 {
-    let mut c = Case3::base_half(mach, 2f64.to_radians(), body(), 0);
+    let mut c = Case3::base_half(mach, 2f64.to_radians(), body(), None, Tier::Euler, 0);
     tiny_base(&mut c);
     c.grid.nk = 8;
     c
@@ -51,7 +51,8 @@ fn sector(mach: f64, n: u32, nk: usize) -> Case3 {
     let nose = Body { nose: Nose::Cone { half_angle: 10f64.to_radians() } };
     let body = BaseBody::cylinder(nose, 10.0 - nose.nose_length());
     let fins = Fins3 { count: n, root_chord: 1.0, tip_chord: 1.0, span: 1.0, sweep: 0.0, thickness: 0.08, te_to_base: 0.0, profile: FinProfile::Square };
-    let mut c = Case3::sector(mach, body, fins, nk, 0);
+    let mut c = Case3::sector(mach, body, fins, Tier::Euler, 0);
+    c.grid.nk = nk;
     let s = &mut c.grid.sting;
     s.n_up = 10;
     s.n_nose = 16;

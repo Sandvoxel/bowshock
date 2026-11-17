@@ -272,8 +272,9 @@ pub fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Option<Element<'a, Message>
         }
         (false, None) => Space::new().boxed(),
     };
-    // The drag solve has a picture of its flow: how the room is shared with the curve is the user's to say.
-    let live = s.running && t.kind() == Kind::Drag;
+    // A solve has a picture of its flow (the drag solve's meridian, the stability solve's 3D scene): how the room is shared with the
+    // curve is the user's to say.
+    let live = s.running;
     let emphasis = state.flow.emphasis;
     let toggle: Element<'a, Message> = if live {
         segmented(&[(Emphasis::Flow, "Flow"), (Emphasis::Curve, "Curve")], emphasis, |e| Message::Flow(Msg::Emphasis(e)))
@@ -322,13 +323,7 @@ pub fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Option<Element<'a, Message>
     let mut rows = 10;
     if live {
         let compact = emphasis == Emphasis::Curve;
-        let caption = state.flow.picture_info().map_or_else(String::new, |(mach, iteration, ni, nj)| {
-            if iteration == 0 {
-                format!("M {mach:.2} · free stream · {ni} × {nj} cells")
-            } else {
-                format!("M {mach:.2} · iteration {} · {ni} × {nj} cells", thousands(iteration))
-            }
-        });
+        let caption = state.flow.caption();
         let flow = container(state.flow.viewer(ctx, caption, live_notice(state, t), compact).map(Message::Flow)).padding([0.0, SPACE_3]).width(Fill);
         match emphasis {
             Emphasis::Flow => {
@@ -831,7 +826,17 @@ mod tests {
             mach,
             alpha_deg: None,
             outcome: Outcome::from_quality(q),
-            point: cd.zip(q).map(|(cd, quality)| CfdPoint { mach, cd, friction: 0.1, pressure: 0.1, base: 0.1, fins: 0.1, other: 0.0, quality }),
+            point: cd.zip(q).map(|(cd, quality)| CfdPoint {
+                mach,
+                cd,
+                friction: 0.1,
+                pressure: 0.1,
+                base: 0.1,
+                fins: 0.1,
+                other: 0.0,
+                interference: 0.0,
+                quality,
+            }),
             lift: None,
             iterations: 2000,
             cpu: false,
@@ -917,7 +922,7 @@ mod tests {
                 alpha_deg: Some(a),
                 outcome: Outcome::Converged,
                 point: None,
-                lift: Some(CfdLiftPoint { mach: 0.8, alpha_deg: a, cn, x_cp: 0.9, quality: CfdQuality::Converged }),
+                lift: Some(CfdLiftPoint { mach: 0.8, alpha_deg: a, cn, x_cp: 0.9, cd: None, cm: None, quality: CfdQuality::Converged }),
                 iterations: 1500,
                 cpu: false,
                 fallback: None,

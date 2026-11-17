@@ -1,6 +1,6 @@
 //! The client against the worker's serve loop in this process, over a TCP socket on localhost (what ssh's stdin/stdout carry).
 
-use bowshock_core::{AftSpec, Analysis, AnalysisSpec, Backend, BodySpec, Error, FinProfile, FinSpec, NoseShape, NoseSpec, Resolution};
+use bowshock_core::{AftSpec, Analysis, AnalysisSpec, Backend, BodySpec, Condition, Error, FinProfile, FinSpec, NoseShape, NoseSpec, Resolution};
 use bowshock_remote::proto::{read_frame, write_frame, ClientMsg, WorkerMsg, PROTOCOL};
 use bowshock_remote::{worker, Remote, RemoteError, WORKER_KEY};
 use std::net::{TcpListener, TcpStream};
@@ -38,9 +38,9 @@ fn drag_spec(iterations: usize) -> AnalysisSpec {
     AnalysisSpec { fins: None, max_iterations: Some(iterations), ..spec() }
 }
 
-/// The tiny 3D case of the facade's own lift tests.
+/// The tiny 3D case of the facade's own tests at an angle of attack.
 fn tiny(a: Analysis) -> Analysis {
-    a.lift_case_hook(|c| {
+    a.case3_hook(|c| {
         let s = &mut c.grid.sting;
         s.n_up = 10;
         s.n_nose = 16;
@@ -76,7 +76,7 @@ fn a_drag_job_matches_a_local_run_and_reports_progress() {
     let local = Analysis::from_spec(&spec).unwrap().run(&[2.0]).unwrap();
     let frames = AtomicUsize::new(0);
     let polar = remote
-        .run_drag(&spec, &[2.0], &|p| {
+        .solve(&spec, &[Condition::from(2.0)], &|p| {
             assert_eq!(p.mach, 2.0);
             frames.fetch_add(1, Ordering::SeqCst);
             ControlFlow::Continue(())
@@ -85,7 +85,7 @@ fn a_drag_job_matches_a_local_run_and_reports_progress() {
     assert!(frames.load(Ordering::SeqCst) >= 1, "no progress frame");
     assert_eq!(json(&polar), json(&local));
     // the same connection serves the next job
-    let again = remote.run_drag(&spec, &[2.0], &|_| ControlFlow::Continue(())).unwrap();
+    let again = remote.solve(&spec, &[Condition::from(2.0)], &|_| ControlFlow::Continue(())).unwrap();
     assert_eq!(json(&again), json(&local));
     drop(remote);
     server.join().unwrap();
@@ -96,27 +96,27 @@ fn a_drag_job_that_keeps_fields_brings_back_the_field_of_a_local_run() {
     let (mut remote, server) = connect();
     let spec = AnalysisSpec { keep_fields: true, ..drag_spec(200) };
     let local = Analysis::from_spec(&spec).unwrap().run(&[2.0]).unwrap();
-    let polar = remote.run_drag(&spec, &[2.0], &|_| ControlFlow::Continue(())).unwrap();
+    let polar = remote.solve(&spec, &[Condition::from(2.0)], &|_| ControlFlow::Continue(())).unwrap();
     let (remote_field, local_field) = (polar.points[0].field.as_ref().expect("the worker kept the field"), local.points[0].field.as_ref().unwrap());
     assert!(remote_field.cells() > 1000);
     assert_eq!(remote_field, local_field);
     // without the switch the answer carries none
-    let plain = remote.run_drag(&drag_spec(200), &[2.0], &|_| ControlFlow::Continue(())).unwrap();
+    let plain = remote.solve(&drag_spec(200), &[Condition::from(2.0)], &|_| ControlFlow::Continue(())).unwrap();
     assert!(plain.points[0].field.is_none());
     drop(remote);
     server.join().unwrap();
 }
 
 #[test]
-fn a_lift_job_matches_a_local_run() {
+fn a_job_at_angles_of_attack_matches_a_local_run() {
     let (mut remote, server) = connect();
     let spec = spec();
     let t = Instant::now();
-    let local = tiny(Analysis::from_spec(&spec).unwrap()).run_lift(&[2.0], &[2.0, 6.0]).unwrap();
+    let local = tiny(Analysis::from_spec(&spec).unwrap()).run(&[Condition::new(2.0, 2.0), Condition::new(2.0, 6.0)]).unwrap();
     println!("local lift {:.1} s", t.elapsed().as_secs_f64());
     let frames = AtomicUsize::new(0);
     let polar = remote
-        .run_lift(&spec, &[2.0], &[2.0, 6.0], &|_| {
+        .solve(&spec, &[Condition::new(2.0, 2.0), Condition::new(2.0, 6.0)], &|_| {
             frames.fetch_add(1, Ordering::SeqCst);
             ControlFlow::Continue(())
         })
@@ -129,12 +129,33 @@ fn a_lift_job_matches_a_local_run() {
 }
 
 #[test]
+fn a_job_that_keeps_fields_brings_back_the_3d_field_of_each_point_in_its_own_frame() {
+    let (mut remote, server) = connect();
+    let spec = AnalysisSpec { keep_fields: true, max_iterations: Some(150), ..spec() };
+    let conditions = [Condition::new(2.0, 6.0), Condition::new(2.0, 2.0)];
+    let local = tiny(Analysis::from_spec(&spec).unwrap()).run(&conditions).unwrap();
+    let polar = remote.solve(&spec, &conditions, &|_| ControlFlow::Continue(())).unwrap();
+    assert_eq!(polar.points.len(), 2);
+    for (r, l) in polar.points.iter().zip(&local.points) {
+        let (rf, lf) = (r.field3.as_ref().expect("the worker kept the field"), l.field3.as_ref().unwrap());
+        assert!(rf.nk > 1 && rf.cells() > 10_000);
+        assert_eq!((rf.alpha_deg.to_bits(), rf.mesh_id), (lf.alpha_deg.to_bits(), lf.mesh_id));
+        assert_eq!(rf, lf, "the field that crossed the wire is the local one");
+    }
+    // without the switch the answer carries none
+    let plain = remote.solve(&AnalysisSpec { keep_fields: false, ..spec }, &conditions[..1], &|_| ControlFlow::Continue(())).unwrap();
+    assert!(plain.points[0].field3.is_none());
+    drop(remote);
+    server.join().unwrap();
+}
+
+#[test]
 fn cancel_ends_the_job_and_the_connection_serves_the_next() {
     let (mut remote, server) = connect();
     let spec = spec();
     let seen = AtomicUsize::new(0);
     let t = Instant::now();
-    let r = remote.run_lift(&spec, &[2.0], &[2.0, 6.0], &|_| {
+    let r = remote.solve(&spec, &[Condition::new(2.0, 2.0), Condition::new(2.0, 6.0)], &|_| {
         seen.fetch_add(1, Ordering::SeqCst);
         ControlFlow::Break(())
     });
@@ -142,7 +163,7 @@ fn cancel_ends_the_job_and_the_connection_serves_the_next() {
     assert!(matches!(r, Err(RemoteError::Solver(Error::Cancelled))), "{r:?}");
     assert_eq!(seen.load(Ordering::SeqCst), 1, "the callback is not called again after Break");
     // a later job is not hit by the old cancel
-    let ok = remote.run_drag(&drag_spec(60), &[2.0], &|_| ControlFlow::Continue(())).unwrap();
+    let ok = remote.solve(&drag_spec(60), &[Condition::from(2.0)], &|_| ControlFlow::Continue(())).unwrap();
     assert_eq!(ok.points.len(), 1);
     drop(remote);
     server.join().unwrap();
@@ -151,9 +172,9 @@ fn cancel_ends_the_job_and_the_connection_serves_the_next() {
 #[test]
 fn solver_errors_cross_the_wire_with_their_kind() {
     let (mut remote, server) = connect();
-    let r = remote.run_drag(&drag_spec(60), &[9.0], &|_| ControlFlow::Continue(()));
+    let r = remote.solve(&drag_spec(60), &[Condition::from(9.0)], &|_| ControlFlow::Continue(()));
     assert!(matches!(r, Err(RemoteError::Solver(Error::InvalidInput(_)))), "{r:?}");
-    let r = remote.run_lift(&spec(), &[2.0], &[30.0], &|_| ControlFlow::Continue(()));
+    let r = remote.solve(&spec(), &[Condition::new(2.0, 30.0)], &|_| ControlFlow::Continue(()));
     assert!(matches!(r, Err(RemoteError::Solver(Error::InvalidInput(_)))), "{r:?}");
     drop(remote);
     server.join().unwrap();
@@ -209,7 +230,7 @@ fn messages_round_trip_through_cbor_frames() {
     write_frame(&mut buf, &msg).unwrap();
     let WorkerMsg::Progress(p) = read_frame::<_, WorkerMsg>(&mut buf.as_slice()).unwrap().unwrap() else { panic!() };
     assert!(p.monitor.is_nan() && p.iteration == 50 && p.tolerance == Some(0.002));
-    let job = ClientMsg::Job { id: 3, job: bowshock_remote::Job::Lift { spec: spec(), machs: vec![0.5, 2.0], alphas_deg: vec![2.0, 6.0] } };
+    let job = ClientMsg::Job { id: 3, job: bowshock_remote::Job::Solve { spec: spec(), conditions: vec![Condition::from(0.5), Condition::new(2.0, 6.0)] } };
     let mut buf = Vec::new();
     write_frame(&mut buf, &job).unwrap();
     assert_eq!(read_frame::<_, ClientMsg>(&mut buf.as_slice()).unwrap().unwrap(), job);

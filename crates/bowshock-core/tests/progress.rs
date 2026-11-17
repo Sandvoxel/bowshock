@@ -2,7 +2,7 @@
 
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
 use bowshock_core::progress::SAMPLE_INTERVAL;
-use bowshock_core::{AftSpec, Analysis, Backend, BodySpec, Error, FinProfile, FinSpec, NoseShape, NoseSpec, Progress, Resolution};
+use bowshock_core::{AftSpec, Analysis, Backend, BodySpec, Condition, Error, FinProfile, FinSpec, NoseShape, NoseSpec, Progress, Resolution};
 use std::ops::ControlFlow;
 use std::sync::{Arc, Mutex};
 
@@ -79,7 +79,7 @@ fn lift_analysis() -> Analysis {
         .fins(fins)
         .backend(Backend::Cpu)
         .resolution(Resolution::Coarse)
-        .lift_case_hook(|c| {
+        .case3_hook(|c| {
             let s = &mut c.grid.sting;
             s.n_up = 10;
             s.n_nose = 16;
@@ -94,7 +94,7 @@ fn lift_analysis() -> Analysis {
 #[test]
 fn a_3d_run_reports_its_angle_and_a_break_stops_the_sweep() {
     let (seen, sink) = recorder(Some(3));
-    let result = lift_analysis().on_progress(sink).run_lift(&[2.0], &[2.0, 6.0]);
+    let result = lift_analysis().on_progress(sink).run(&[Condition::new(2.0, 2.0), Condition::new(2.0, 6.0)]);
     assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
     let seen = seen.lock().unwrap();
     assert_eq!(seen.len(), 3);

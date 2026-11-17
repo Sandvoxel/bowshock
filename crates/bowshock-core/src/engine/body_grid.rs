@@ -345,6 +345,16 @@ impl BaseBody {
     pub fn base_radius(&self) -> f64 {
         self.station(self.segments.len()).1
     }
+    /// Diameter of the largest cross-section of the body (the nose base, a tube or the end of a flare), in nose diameters.
+    pub fn largest_diameter(&self) -> f64 {
+        2.0 * (0..=self.segments.len()).map(|k| self.station(k).1).fold(self.body.radius(), f64::max)
+    }
+    /// Factor from coefficients on the nose-base area (what the engine's 2D and 3D runs report, `d_nose = 1`) to coefficients on the area of the largest
+    /// cross-section, the facade's default reference (`Analysis::reference_diameter` unset): `(d_nose / d_largest)^2`. The one place the conversion lives: the 2D
+    /// facade applies it as `q`, whatever reports 3D coefficients through the facade must too (a body with a flare is off by the factor without it).
+    pub fn nose_to_largest_area(&self) -> f64 {
+        (2.0 * self.body.radius() / self.largest_diameter()).powi(2)
+    }
     /// Index of the segment containing `x` (`x` between the end of the nose and the base).
     fn segment_at(&self, x: f64) -> Option<(usize, f64, f64)> {
         let (mut x0, mut r0) = (self.body.nose_length(), self.body.radius());
@@ -418,6 +428,36 @@ pub struct BaseGridParams {
 /// cells). Returns the grid and the block to pass to `Solver::set_block`.
 pub fn base_domain_grid(p: &BaseGridParams) -> Result<(Grid, Block), Error> {
     let bb = &p.body;
+    let (xs, i_end) = base_axial_nodes(p)?;
+    let ni = xs.len() - 1;
+    let (j_sting, j_end) = (p.n_sting, p.n_sting + p.n_gap);
+    let nj = j_end + p.nj_out;
+    let re = bb.base_radius();
+    let below = base_rows_below(p, &xs, i_end)?;
+    let sj = radial_fractions(p.dr_wall, p.r_far - re, p.nj_out);
+    let mut x = vec![0.0; (ni + 1) * (nj + 1)];
+    let mut r = vec![0.0; (ni + 1) * (nj + 1)];
+    for i in 0..=ni {
+        let rw = bb.r(xs[i]);
+        for j in 0..=nj {
+            let rad = if j <= j_end {
+                below[j * (ni + 1) + i]
+            } else if i >= i_end {
+                re + sj[j - j_end] * (p.r_far - re)
+            } else {
+                rw + sj[j - j_end] * (p.r_far - rw)
+            };
+            x[j * (ni + 1) + i] = xs[i];
+            r[j * (ni + 1) + i] = rad;
+        }
+    }
+    let grid = Grid::try_from_nodes(ni, nj, x, r).map_err(Error::Grid)?;
+    Ok((grid, Block { i_end, j_end, j_sting }))
+}
+
+/// The axial nodes of the base-wake grid (`n_up + n_nose + sum(n_seg) + n_wake + 1` of them, increasing) and the index of the node on the base plane.
+pub(crate) fn base_axial_nodes(p: &BaseGridParams) -> Result<(Vec<f64>, usize), Error> {
+    let bb = &p.body;
     let ln = bb.body.nose_length();
     let bad = |m: &str| Err(Error::Grid(m.to_string()));
     if !(p.n_up >= 1 && p.n_nose >= 2 && p.n_wake >= 2 && p.n_gap >= 2 && p.nj_out >= 1) {
@@ -460,9 +500,17 @@ pub fn base_domain_grid(p: &BaseGridParams) -> Result<(Grid, Block), Error> {
     for k in 1..=p.n_wake {
         xs.push(x_base + wake[k]);
     }
+    Ok((xs, i_end))
+}
+
+/// Radii of the rows `0..=j_end` at every node column of `xs` (`(j_end + 1) * (ni + 1)`, `j` major): inside the body below its surface for `x < x_base`
+/// (spacing `dr_wall` from the surface down), behind the base the sting rows, the gap between sting (or axis) and base radius (with the nozzle rows of a
+/// motor-on grid) and the row on the base radius.
+pub(crate) fn base_rows_below(p: &BaseGridParams, xs: &[f64], i_end: usize) -> Result<Vec<f64>, Error> {
+    let bb = &p.body;
+    let bad = |m: &str| Err(Error::Grid(m.to_string()));
     let ni = xs.len() - 1;
     let (j_sting, j_end) = (p.n_sting, p.n_sting + p.n_gap);
-    let nj = j_end + p.nj_out;
     let (re, rs) = (bb.base_radius(), bb.sting_radius);
     let gap = if let Some(nz) = p.nozzle {
         if bb.sting_radius != 0.0 {
@@ -483,31 +531,22 @@ pub fn base_domain_grid(p: &BaseGridParams) -> Result<(Grid, Block), Error> {
     } else {
         two_sided_nodes(re - rs, p.n_gap, p.dr_wall)
     };
-    let sj = radial_fractions(p.dr_wall, p.r_far - re, p.nj_out);
-    let mut x = vec![0.0; (ni + 1) * (nj + 1)];
-    let mut r = vec![0.0; (ni + 1) * (nj + 1)];
+    let mut r = vec![0.0; (j_end + 1) * (ni + 1)];
     for i in 0..=ni {
         let rw = bb.r(xs[i]);
-        for j in 0..=nj {
-            let rad = if i >= i_end {
+        for j in 0..=j_end {
+            r[j * (ni + 1) + i] = if i >= i_end {
                 if j <= j_sting {
                     rs - (j_sting - j) as f64 * p.dr_wall
-                } else if j <= j_end {
-                    rs + gap[j - j_sting]
                 } else {
-                    re + sj[j - j_end] * (p.r_far - re)
+                    rs + gap[j - j_sting]
                 }
-            } else if j <= j_end {
-                rw - (j_end - j) as f64 * p.dr_wall
             } else {
-                rw + sj[j - j_end] * (p.r_far - rw)
+                rw - (j_end - j) as f64 * p.dr_wall
             };
-            x[j * (ni + 1) + i] = xs[i];
-            r[j * (ni + 1) + i] = rad;
         }
     }
-    let grid = Grid::try_from_nodes(ni, nj, x, r).map_err(Error::Grid)?;
-    Ok((grid, Block { i_end, j_end, j_sting }))
+    Ok(r)
 }
 
 /// Largest allowed ratio of neighbouring cell sizes checked by [`check_quality`] for inviscid grids.

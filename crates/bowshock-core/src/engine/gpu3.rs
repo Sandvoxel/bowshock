@@ -177,6 +177,10 @@ impl GpuRunner3 {
                 }
             }
             done += len;
+            // the state leaves the device only at a chunk where a snapshot is due
+            if let Some(t) = case.snapshots.as_ref().filter(|t| stop.is_none() && len == SYNC && t.due(done)) {
+                t.send(case, &self.host.grid, &self.gpu.state_f64()?, done);
+            }
             if stop.is_none() && len == SYNC && rule.report(case, done).is_break() {
                 rule.cancel();
                 stop = Some(done);

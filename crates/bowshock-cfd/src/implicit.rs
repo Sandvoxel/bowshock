@@ -77,7 +77,7 @@ pub struct ImplicitParams {
     pub roe: bool,
     /// Entropy-fix level (fraction of `c`) of the Roe-type dissipation matrix.
     pub eps_fix: f64,
-    /// 2D only: Weiss-Smith low-Mach preconditioning of the implicit left-hand side (see `LowMach`, `implicit.rs`; the reference velocity is bounded below by
+    /// Weiss-Smith low-Mach preconditioning of the implicit left-hand side (2D: `LowMach` of this file, 3D: [`crate::lowmach5`], both paths of [`LineSolve3`]; the reference velocity is bounded below by
     /// `LOW_MACH_UREF_EPS c_inf` and `LOW_MACH_UINF_CUTOFF |u_inf|`). The right-hand side and so the converged state are unchanged; it only speeds up
     /// the convergence of low-Mach runs. `false` is the plain scheme.
     pub low_mach_precond: bool,

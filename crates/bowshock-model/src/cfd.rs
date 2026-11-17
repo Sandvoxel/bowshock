@@ -41,8 +41,16 @@ pub struct CfdPoint {
     pub fins: f64,
     /// Drag of what the solver cannot model (lugs, rail buttons, fin sets beyond the solved one), from the build-up method.
     pub other: f64,
+    /// Of the parts above, the fin-body interference drag: what the finned body has beyond the sum of the finless body and the fins
+    /// alone. Informational, it is in the other parts and not added to them; 0 where the solver does not separate it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub interference: f64,
     /// Trust in the point.
     pub quality: CfdQuality,
+}
+
+fn is_zero(x: &f64) -> bool {
+    *x == 0.0
 }
 
 /// The solver grid a table was solved on.
@@ -66,6 +74,14 @@ pub struct CfdLiftPoint {
     pub cn: f64,
     /// Centre of pressure, from the nose tip (m).
     pub x_cp: f64,
+    /// Drag coefficient at this angle of attack on the vehicle's reference area, where the solver gives one (the Euler solve does
+    /// not: it has no friction and no base), so Simulate can fly CD(alpha).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cd: Option<f64>,
+    /// Pitching-moment coefficient about the nose tip on the reference area and diameter (`-cn x_cp / d`, nose-up positive), where the
+    /// solver gives one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cm: Option<f64>,
     /// How far the point can be trusted.
     pub quality: CfdQuality,
 }
@@ -206,7 +222,7 @@ mod tests {
     use super::*;
 
     fn point(mach: f64) -> CfdPoint {
-        CfdPoint { mach, cd: 0.4, friction: 0.1, pressure: 0.1, base: 0.1, fins: 0.1, other: 0.0, quality: CfdQuality::Converged }
+        CfdPoint { mach, cd: 0.4, friction: 0.1, pressure: 0.1, base: 0.1, fins: 0.1, other: 0.0, interference: 0.0, quality: CfdQuality::Converged }
     }
 
     fn table(stage: u32, key: u64) -> CfdTable {
@@ -285,7 +301,7 @@ mod tests {
     }
 
     fn lift(key: u64) -> CfdLiftTable {
-        let p = |mach, alpha_deg| CfdLiftPoint { mach, alpha_deg, cn: 0.2, x_cp: 1.0, quality: CfdQuality::Converged };
+        let p = |mach, alpha_deg| CfdLiftPoint { mach, alpha_deg, cn: 0.2, x_cp: 1.0, cd: None, cm: None, quality: CfdQuality::Converged };
         CfdLiftTable {
             key,
             solved_at: 1_700_000_100,

@@ -284,7 +284,7 @@ mod tests {
     use crate::flux3::tests::Rng;
     use crate::grid::{cone_grid, ConeGridParams};
     use crate::grid3::{revolve, SolidBox};
-    use crate::viscous3::tests::{box_grid, solid_mask};
+    use crate::viscous3::tests::{box_grid, set_solids, solid_mask};
 
     /// Distance of `p` to the triangle by dense sampling of its barycentric coordinates (upper bound, tight to the sampling step).
     fn sampled_dist(p: [f64; 3], a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> f64 {
@@ -346,7 +346,7 @@ mod tests {
         let mut g = box_grid(n, h);
         let solid0 = solid_mask(&g);
         assert!(wall_distance3(&g, &solid0, &wall_faces(&g, &solid0)).iter().all(|d| d.is_infinite()), "no wall: infinite everywhere");
-        g.solid = vec![SolidBox { i: 0..n[0], j: 0..2, k: 0..n[2] }];
+        set_solids(&mut g, vec![SolidBox { i: 0..n[0], j: 0..2, k: 0..n[2] }]);
         let solid = solid_mask(&g);
         let faces = wall_faces(&g, &solid);
         assert_eq!(faces.len(), n[0] * n[2], "one wall face per column");
@@ -374,7 +374,7 @@ mod tests {
             }
         }
         let mut g = Grid3::try_from_nodes(n[0], n[1], n[2], x, y, z).unwrap();
-        g.solid = vec![SolidBox { i: 2..6, j: 2..5, k: 1..4 }, SolidBox { i: 8..12, j: 0..8, k: 4..5 }, SolidBox { i: 0..3, j: 7..8, k: 6..9 }];
+        set_solids(&mut g, vec![SolidBox { i: 2..6, j: 2..5, k: 1..4 }, SolidBox { i: 8..12, j: 0..8, k: 4..5 }, SolidBox { i: 0..3, j: 7..8, k: 6..9 }]);
         let solid = solid_mask(&g);
         let faces = wall_faces(&g, &solid);
         assert!(faces.len() > 100);
@@ -393,7 +393,7 @@ mod tests {
         let nk = 5;
         let theta: Vec<f64> = (0..=nk).map(|k| 0.7 * k as f64 / nk as f64).collect();
         let mut g = revolve(&g2, nk, &theta).unwrap();
-        g.solid = vec![SolidBox { i: 8..24, j: 0..4, k: 0..nk }];
+        set_solids(&mut g, vec![SolidBox { i: 8..24, j: 0..4, k: 0..nk }]);
         let solid = solid_mask(&g);
         let faces = wall_faces(&g, &solid);
         let (a, b) = (wall_distance3(&g, &solid, &faces), wall_distance3_brute(&g, &solid, &faces));
@@ -409,7 +409,7 @@ mod tests {
     fn timing_of_half_a_million_cells() {
         let n = [100, 100, 50];
         let mut g = box_grid(n, [0.02, 0.02, 0.04]);
-        g.solid = vec![SolidBox { i: 20..80, j: 20..80, k: 0..24 }, SolidBox { i: 10..14, j: 10..90, k: 24..50 }];
+        set_solids(&mut g, vec![SolidBox { i: 20..80, j: 20..80, k: 0..24 }, SolidBox { i: 10..14, j: 10..90, k: 24..50 }]);
         let solid = solid_mask(&g);
         let t0 = std::time::Instant::now();
         let faces = wall_faces(&g, &solid);

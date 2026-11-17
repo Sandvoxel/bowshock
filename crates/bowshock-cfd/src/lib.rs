@@ -19,6 +19,7 @@ pub mod implicit;
 pub mod implicit3;
 pub mod lowmach5;
 pub mod multigrid;
+pub mod plate3;
 pub mod solver;
 pub mod solver3;
 pub mod turbulence;
