@@ -58,12 +58,13 @@ fn same<T: std::fmt::Debug>(a: &T, b: &T) -> bool {
     format!("{a:?}") == format!("{b:?}")
 }
 
-/// The point without its residual drop: the 3D solver's residual is a parallel sum whose last bits depend on how the threads were
+/// The point without its residual drop and its field (kept fields are compared on their own): the 3D solver's residual is a parallel sum whose last bits depend on how the threads were
 /// scheduled, so the orders of drop agree to many digits but not to the bit, while the state, the forces and the iteration count do.
 fn settled(p: &bowshock_core::PolarPoint) -> bowshock_core::PolarPoint {
     let mut p = p.clone();
     assert!(p.detail.residual_drop_orders.is_finite());
     p.detail.residual_drop_orders = 0.0;
+    p.field3 = None;
     p
 }
 
