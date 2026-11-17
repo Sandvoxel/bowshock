@@ -241,7 +241,8 @@ impl Grid3 {
                 for i in 0..ni {
                     let v = vol[(k * nj + j) * ni + i];
                     if v < -1e-12 * vmax || v.is_nan() {
-                        return Err(format!("negative cell volume at ({i},{j},{k})"));
+                        let m = xc[(k * nj + j) * ni + i];
+                        return Err(format!("negative cell volume at ({i},{j},{k}), centroid ({:.4}, {:.4}, {:.4}), volume {v:.3e}", m[0], m[1], m[2]));
                     }
                 }
             }

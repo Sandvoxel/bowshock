@@ -108,7 +108,7 @@ impl FinStack {
 #[derive(Clone, Debug)]
 pub struct Grid3Params {
     pub sting: LargeGridParams,
-    /// The base-wake meridian grid: used instead of `sting` when set (no fins on it yet).
+    /// The base-wake meridian grid: used instead of `sting` when set (the product grid; fins stand on it as on the sting grid).
     pub base: Option<BaseGridParams>,
     pub fins: Option<Fins3>,
     /// Azimuthal cells over the domain (the plan default is `24 << level` over `[0, pi]`, see [`Grid3Params::default_nk`]); ignored with a `fin_stack`.
@@ -859,14 +859,6 @@ pub fn body_grid3(p: &Grid3Params) -> Result<Grid3, Error> {
                 }
             }
         }
-        // the rows below the body surface (base-wake grid: the solid body block, and behind the base plane the wake rows down to the axis) keep the angle of the
-        // surface row at every column: the node lines are planes through the axis there, so no cell is sheared where the layer is wide on the surface (a stack
-        // cell would fold otherwise) and the layer tapering behind the trailing edge is a thin sector down to the axis, not a width that jumps at the base radius
-        for j in 0..j_off {
-            for i in 0..=ni {
-                alpha[j * (ni + 1) + i] = alpha[j_off * (ni + 1) + i];
-            }
-        }
     }
 
     let nn = (ni + 1) * (nj + 1) * (nk + 1);
@@ -893,20 +885,26 @@ pub fn body_grid3(p: &Grid3Params) -> Result<Grid3, Error> {
     for j in 0..=nj {
         for i in 0..=ni {
             let c = j * (ni + 1) + i;
+            // the rows below the body surface (base-wake grid: the solid body block, and behind the base plane the wake rows down to the axis) take the node
+            // angles and the scales of the surface row `j_off` at the column: the node lines are planes through the axis there, so no cell is sheared where the
+            // layer is wide on the surface (a stack cell folded otherwise, and so did the cells of a wall-resolved grid, whose height is smaller than the
+            // lateral shift of the side nodes by the polygon scale), and the layer tapering behind the trailing edge is a thin sector down to the axis, not a
+            // width that jumps at the base radius
+            let cr = if plan.is_some() && j < j_off { j_off * (ni + 1) + i } else { c };
             // the rows of the body block upstream of the nose tip lie below the axis: clamped onto it as in `revolve`, their cells are dead
-            let (xc, r) = (xn[c], rn[c].max(0.0));
-            let in_plan = plan.as_ref().is_some_and(|(pl, _)| (pl.i_le..=pl.i_te).contains(&i) && j >= j_off && j - j_off <= pl.j_tip);
+            let (xc, r, r_ref) = (xn[c], rn[c].max(0.0), rn[cr].max(0.0));
+            let in_plan = plan.as_ref().is_some_and(|(pl, _)| (pl.i_le..=pl.i_te).contains(&i) && cr >= j_off * (ni + 1) && cr / (ni + 1) - j_off <= pl.j_tip);
             let scale_of = |theta: &[f64]| polygon_scale_where(theta, |k| !(in_plan && layer_cell[k]));
             match &lay {
                 Some(l) => {
-                    fill_theta(&mut theta, l, alpha[c], span);
-                    if !half_w[c].is_nan() {
+                    fill_theta(&mut theta, l, alpha[cr], span);
+                    if !half_w[cr].is_nan() {
                         // the nodes of a line are scaled by `polygon_scale` (the rings keep the circle's area), which moves the fin faces out by that factor:
                         // put every side node at the angle whose scaled offset is the half-thickness (the scale depends on the neighbouring angles: a few passes)
                         for _ in 0..8 {
                             let s = scale_of(&theta);
                             for &(k, th, sign) in &sides {
-                                theta[k] = th + sign * (half_w[c] / (r * s[k])).min(0.99).asin();
+                                theta[k] = th + sign * (half_w[cr] / (r_ref * s[k])).min(0.99).asin();
                             }
                         }
                     }

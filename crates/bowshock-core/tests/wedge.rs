@@ -6,7 +6,7 @@ use bowshock_cfd::gas3::freestream3;
 use bowshock_cfd::grid3::Symmetry;
 use bowshock_cfd::solver3::Solver3;
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
-use bowshock_core::engine::case3::{Case3, Tier};
+use bowshock_core::engine::case3::{Case3, Tier, WallFlow};
 use bowshock_core::engine::grid3::{Domain3, FinPhase, Fins3};
 use bowshock_core::engine::run3::{drag_parts, run3_on, wall_forces, DragParts, Wall};
 
@@ -457,4 +457,21 @@ fn vanishing_fins_leave_the_wedge_drag() {
         wedge.base
     );
     assert!((s.total - wedge.total).abs() < 0.01 * wedge.total, "total {} vs {}", s.total, wedge.total);
+}
+
+/// The wall-resolved fin sector on the base-wake grid builds (no cell folds) at every Reynolds number: the rows of the body block under the fin root keep the node
+/// angles and the polygon scale of the surface row. (Found by the grid cache's timing test: with only the surface row's layer width copied, grids sized for
+/// `Re_c` >= 5e5 failed with `negative cell volume` at the fin's leading-edge bevel, [INFERENCE] where the first body cells became lower than the lateral shift of the
+/// side nodes by the polygon scale.)
+#[test]
+fn wall_resolved_fin_grids_build_on_the_base_grid_at_every_reynolds_number() {
+    for re_c in [2.0e5, 1.0e6, 1.0e7] {
+        for tier in [Tier::Coarse, Tier::Fine] {
+            let flow = WallFlow { re_c, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0 };
+            let c = Case3::sector(2.0, Case3::anf_body(), Case3::anf_fins(), tier(flow), 0);
+            let s = c.build_solver().unwrap_or_else(|e| panic!("Re_c {re_c:e}: {e}"));
+            let g = &s.grid;
+            assert!(g.vol.iter().all(|v| *v >= 0.0), "Re_c {re_c:e}: a negative volume");
+        }
+    }
 }
