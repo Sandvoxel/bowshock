@@ -155,6 +155,8 @@ pub enum Sheet {
 /// The vertices and triangles of a [`Sheet`].
 #[derive(Debug, Default)]
 pub struct SheetMesh {
+    /// Changes with every mesh built: the GPU side uploads a mesh when it sees a new one.
+    pub id: u64,
     pub vertices: Vec<SheetVertex>,
     /// Three indices per triangle, flow cells only.
     pub triangles: Vec<u32>,
@@ -168,6 +170,30 @@ const GRADIENT_FLOOR: f32 = 1e-3;
 pub const SCHLIEREN_DECADES: f32 = 3.0;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// The part of the grid a cut sheet shows: the grid reaches tens of body lengths, the picture is of the rocket and its shock.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Window {
+    /// Axial range (the solver's `x`).
+    pub x: (f32, f32),
+    /// Largest distance from the axis.
+    pub r_max: f32,
+}
+
+impl Window {
+    /// A little ahead of the nose, to a quarter of a body length behind the base, out to about half a body length (at least three
+    /// radii of the widest part) from the axis; for the vehicle box `bounds` in the world frame.
+    pub fn around((lo, hi): ([f32; 3], [f32; 3])) -> Window {
+        let length = (hi[2] - lo[2]).max(1e-6);
+        let radius = hi[0].abs().max(lo[0].abs()).max(hi[1].abs()).max(lo[1].abs());
+        Window { x: (lo[2] - 0.2 * length, lo[2] + 1.25 * length), r_max: (0.45 * length).max(3.0 * radius) }
+    }
+
+    /// Whether the point `p` (solver frame) is inside.
+    pub fn contains(&self, p: [f32; 3]) -> bool {
+        p[0] >= self.x.0 && p[0] <= self.x.1 && p[1].hypot(p[2]) <= self.r_max
+    }
+}
 
 /// A 3D field ready to draw.
 #[derive(Debug)]
@@ -187,6 +213,8 @@ pub struct Prepared3 {
     pub walls: WallMesh,
     /// The box of the vehicle over all tiles in the world frame (`min`, `max`); the whole grid for a field without wall faces.
     pub bounds: ([f32; 3], [f32; 3]),
+    /// The part of the grid the cut sheets show.
+    pub window: Window,
 }
 
 impl Prepared3 {
@@ -197,16 +225,18 @@ impl Prepared3 {
         let ranges = scalar_ranges(f);
         let walls = wall_mesh(f);
         let wall_ranges = {
-            let (mut cp_max, mut cf_max) = (0.0f32, 0.0f32);
-            for w in f.walls.iter().filter(|w| w.part != Part::Other) {
-                cp_max = cp_max.max(w.cp.abs());
-                cf_max = cf_max.max(w.cf.iter().map(|c| c * c).sum::<f32>().sqrt());
-            }
-            let cp = ((cp_max * 10.0).ceil() / 10.0).max(0.2);
+            // the colour range holds 95 % of the wall pressures: the blunt fin edges set stagnation peaks that would turn the rest of the
+            // body white (what saturates is still told from the rest by its colour)
+            let mut cp: Vec<f32> = f.walls.iter().filter(|w| w.part != Part::Other).map(|w| w.cp.abs()).filter(|c| c.is_finite()).collect();
+            let at = ((cp.len() as f32 * 0.95) as usize).min(cp.len().saturating_sub(1));
+            let top = if cp.is_empty() { 0.0 } else { *cp.select_nth_unstable_by(at, f32::total_cmp).1 };
+            let cf_max = f.walls.iter().filter(|w| w.part != Part::Other).map(|w| w.cf.iter().map(|c| c * c).sum::<f32>().sqrt()).fold(0.0f32, f32::max);
+            let cp = ((top * 20.0).ceil() / 20.0).max(0.05);
             [(-cp, cp), (0.0, if cf_max > 0.0 { cf_max } else { 1e-3 })]
         };
         let bounds = bounds_of(f, &tiles);
-        Prepared3 { id: NEXT_ID.fetch_add(1, Ordering::Relaxed), field, tiles, ranges, wall_ranges, walls, bounds }
+        let window = Window::around(bounds);
+        Prepared3 { id: NEXT_ID.fetch_add(1, Ordering::Relaxed), field, tiles, ranges, wall_ranges, walls, bounds, window }
     }
 
     /// The four scalars of cell `(i, j, k)` (NaN in a solid cell): Mach, Cp, log10 of the density gradient, eddy ratio.
@@ -218,8 +248,8 @@ impl Prepared3 {
     pub fn sheet(&self, sheet: Sheet) -> SheetMesh {
         let f = &*self.field;
         match sheet {
-            Sheet::Meridian(k) => meridian_sheet(f, k.min(f.nk - 1)),
-            Sheet::Cross(i) => cross_sheet(f, i.min(f.ni - 1)),
+            Sheet::Meridian(k) => meridian_sheet(f, k.min(f.nk - 1), self.window),
+            Sheet::Cross(i) => cross_sheet(f, i.min(f.ni - 1), self.window),
         }
     }
 }
@@ -382,10 +412,10 @@ fn mid(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [0, 1, 2].map(|m| 0.5 * (a[m] + b[m]))
 }
 
-fn meridian_sheet(f: &Field3, k: usize) -> SheetMesh {
+fn meridian_sheet(f: &Field3, k: usize, window: Window) -> SheetMesh {
     let (ni, nj) = (f.ni, f.nj);
     let cells: Vec<[f32; 4]> = (0..ni * nj).map(|c| cell_values(f, c % ni, c / ni, k)).collect();
-    let mut mesh = SheetMesh { vertices: Vec::with_capacity((ni + 1) * (nj + 1)), ..Default::default() };
+    let mut mesh = SheetMesh { id: NEXT_ID.fetch_add(1, Ordering::Relaxed), vertices: Vec::with_capacity((ni + 1) * (nj + 1)), ..Default::default() };
     for j in 0..=nj {
         for i in 0..=ni {
             let around = [(i.wrapping_sub(1), j.wrapping_sub(1)), (i, j.wrapping_sub(1)), (i.wrapping_sub(1), j), (i, j)]
@@ -398,7 +428,7 @@ fn meridian_sheet(f: &Field3, k: usize) -> SheetMesh {
     let node = |i: usize, j: usize| (j * (ni + 1) + i) as u32;
     for j in 0..nj {
         for i in 0..ni {
-            if f.solid[f.cell_index(i, j, k)] {
+            if f.solid[f.cell_index(i, j, k)] || !window.contains(f.centre(i, j, k)) {
                 continue;
             }
             let (a, b, c, d) = (node(i, j), node(i + 1, j), node(i + 1, j + 1), node(i, j + 1));
@@ -409,10 +439,10 @@ fn meridian_sheet(f: &Field3, k: usize) -> SheetMesh {
     mesh
 }
 
-fn cross_sheet(f: &Field3, i: usize) -> SheetMesh {
+fn cross_sheet(f: &Field3, i: usize, window: Window) -> SheetMesh {
     let (nj, nk) = (f.nj, f.nk);
     let cells: Vec<[f32; 4]> = (0..nj * nk).map(|c| cell_values(f, i, c % nj, c / nj)).collect();
-    let mut mesh = SheetMesh { vertices: Vec::with_capacity((nj + 1) * (nk + 1)), ..Default::default() };
+    let mut mesh = SheetMesh { id: NEXT_ID.fetch_add(1, Ordering::Relaxed), vertices: Vec::with_capacity((nj + 1) * (nk + 1)), ..Default::default() };
     for k in 0..=nk {
         for j in 0..=nj {
             let around = [(j.wrapping_sub(1), k.wrapping_sub(1)), (j, k.wrapping_sub(1)), (j.wrapping_sub(1), k), (j, k)]
@@ -425,7 +455,7 @@ fn cross_sheet(f: &Field3, i: usize) -> SheetMesh {
     let node = |j: usize, k: usize| (k * (nj + 1) + j) as u32;
     for k in 0..nk {
         for j in 0..nj {
-            if f.solid[f.cell_index(i, j, k)] {
+            if f.solid[f.cell_index(i, j, k)] || !window.contains(f.centre(i, j, k)) {
                 continue;
             }
             let (a, b, c, d) = (node(j, k), node(j + 1, k), node(j + 1, k + 1), node(j, k + 1));
@@ -478,10 +508,12 @@ pub(super) mod tests {
         assert!(cp.1 >= 0.2);
         assert!((s.1 - s.0 - SCHLIEREN_DECADES).abs() < 1e-6);
         assert_eq!(p.ranges[Scalar3::Eddy.index()], (0.0, 1.0), "an Euler run has no eddy viscosity");
-        // an Euler run has no friction: the range is a placeholder, and the wall Cp range holds every wall value
+        // an Euler run has no friction: the range is a placeholder; the wall Cp range holds 95 % of the wall faces
         assert!(p.wall_ranges[WallScalar::Cf.index()].1 > 0.0);
         let wall = p.wall_ranges[WallScalar::Cp.index()];
-        assert!(p.field.walls.iter().filter(|w| w.part != Part::Other).all(|w| w.cp >= wall.0 && w.cp <= wall.1));
+        let faces: Vec<_> = p.field.walls.iter().filter(|w| w.part != Part::Other).collect();
+        let inside = faces.iter().filter(|w| w.cp >= wall.0 && w.cp <= wall.1).count();
+        assert!(inside as f32 >= 0.945 * faces.len() as f32, "{inside} of {} inside {wall:?}", faces.len());
     }
 
     #[test]
@@ -530,9 +562,17 @@ pub(super) mod tests {
         let k = f.layer_of_theta(0.0);
         let s = p.sheet(Sheet::Meridian(k));
         assert_eq!(s.vertices.len(), (f.ni + 1) * (f.nj + 1));
-        let fluid = (0..f.ni * f.nj).filter(|&c| f.is_fluid(f.cell_index(c % f.ni, c / f.ni, k))).count();
+        let shown = |c: usize| {
+            let (i, j) = (c % f.ni, c / f.ni);
+            f.is_fluid(f.cell_index(i, j, k)) && p.window.contains(f.centre(i, j, k))
+        };
+        let fluid = (0..f.ni * f.nj).filter(|&c| shown(c)).count();
+        let all_fluid = (0..f.ni * f.nj).filter(|&c| f.is_fluid(f.cell_index(c % f.ni, c / f.ni, k))).count();
         assert_eq!(s.triangles.len(), 6 * fluid);
         assert_eq!(s.cell_of.len(), 2 * fluid);
+        assert!(fluid < all_fluid, "the window leaves the far field out: {fluid} of {all_fluid}");
+        // the window holds the vehicle with room to spare: nose to a little past the base, out past the fins
+        assert!(p.window.x.0 < 0.0 && p.window.x.1 > 10.0 && p.window.r_max > 4.0);
         let (i, j) = (f.ni / 2, 3);
         let v = s.vertices[j * (f.ni + 1) + i];
         let want = mid(f.node(i, j, k), f.node(i, j, k + 1));
@@ -567,6 +607,84 @@ pub(super) mod tests {
                 assert!((x.is_nan() && y.is_nan()) || (x - y).abs() < 1e-3 * (1.0 + x.abs()), "{a:?} vs {b:?}");
             }
         }
+    }
+
+    /// A body of revolution (a 10 m long cone and tube, 1 m across) in a half domain `ni x nj x nk` cells, its interior solid, with a made-up
+    /// smooth flow: the scale of what the 3D solver will give (`synthetic(200, 100, 100)` is 2 million cells) without running it.
+    pub(in crate::analyze) fn synthetic(ni: usize, nj: usize, nk: usize) -> Field3 {
+        let (length, r_far, jb) = (10.0f32, 5.0f32, nj / 5);
+        let body_r = |x: f32| if x <= 0.0 { 0.0 } else { (0.5 * x / 5.7).min(0.5) };
+        let mut nodes = Vec::with_capacity((ni + 1) * (nj + 1) * (nk + 1));
+        for k in 0..=nk {
+            let th = std::f32::consts::PI * k as f32 / nk as f32;
+            for j in 0..=nj {
+                for i in 0..=ni {
+                    let x = -0.2 * length + 1.4 * length * i as f32 / ni as f32;
+                    let rb = body_r(x);
+                    let r = if j <= jb { rb * j as f32 / jb as f32 } else { rb + (r_far - rb) * ((j - jb) as f32 / (nj - jb) as f32).powi(2) };
+                    nodes.push([x, r * th.sin(), r * th.cos()]);
+                }
+            }
+        }
+        let cells = ni * nj * nk;
+        let mut f = Field3 {
+            mach: 2.0,
+            alpha_deg: 4.0,
+            iteration: 1000,
+            freestream: [1.0, 2.0, 0.0, 0.0, 1.0 / bowshock_core::field::GAMMA],
+            ni,
+            nj,
+            nk,
+            mesh_id: 1,
+            nodes,
+            solid: vec![false; cells],
+            prim: vec![[1.0, 2.0, 0.0, 0.0, 0.714]; cells],
+            eddy_ratio: Vec::new(),
+            walls: Vec::new(),
+            fin_theta: Vec::new(),
+            symmetry: bowshock_core::Symmetry::Mirror { theta0: 0.0, theta1: std::f32::consts::PI },
+        };
+        for k in 0..nk {
+            for j in 0..nj {
+                for i in 0..ni {
+                    let c = f.cell_index(i, j, k);
+                    let ce = f.centre(i, j, k);
+                    let r = ce[1].hypot(ce[2]);
+                    if j < jb && body_r(ce[0]) > 1e-3 {
+                        f.solid[c] = true;
+                        continue;
+                    }
+                    // a shock-like jump along a cone and a smooth decay away from the body
+                    let shock = 0.5 * 0.2 * ce[0].max(0.0) + 0.6;
+                    let behind = if r < shock { 1.0 } else { 0.0 };
+                    f.prim[c] = [
+                        1.0 + 0.4 * behind * (-(r - 0.5).abs()).exp(),
+                        2.0 - 0.3 * behind,
+                        0.1 * ce[2] / (1.0 + r),
+                        0.1 * ce[1] / (1.0 + r),
+                        0.714 * (1.0 + 0.3 * behind),
+                    ];
+                }
+            }
+        }
+        // the wall faces: the top of the solid rows, where the body is
+        for k in 0..nk {
+            for i in 0..ni {
+                let ce = f.centre(i, jb, k);
+                if body_r(ce[0]) <= 1e-3 || f.solid[f.cell_index(i, jb, k)] {
+                    continue;
+                }
+                let id = |ii: usize, kk: usize| f.node_index(ii, jb, kk) as u32;
+                f.walls.push(bowshock_core::WallFace {
+                    nodes: [id(i, k), id(i + 1, k), id(i + 1, k + 1), id(i, k + 1)],
+                    cell: f.cell_index(i, jb, k) as u32,
+                    part: if ce[0] < 5.7 { Part::Nose } else { Part::Body },
+                    cp: 0.05 * (ce[0] * 0.7).sin(),
+                    cf: [0.0; 3],
+                });
+            }
+        }
+        f
     }
 
     /// Cost of preparing a picture and of a sheet on the `out/field3/anf-level0.field3` fixture (352 800 cells), `cargo nextest run

@@ -19,6 +19,7 @@
 
 pub(in crate::analyze) mod axi;
 mod gpu;
+mod gpu3;
 mod map;
 mod meridian;
 mod prepared;
