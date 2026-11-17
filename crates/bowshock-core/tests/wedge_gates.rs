@@ -21,7 +21,7 @@
 //! | gate | what | band |
 //! |---|---|---|
 //! | G-W1 | Euler base cases M 0.5, 0.9, 1.3, 2.0: total, nose, each aft segment, base | 2 % (abs 0.002 near zero) |
-//! | G-W4 | cone 10 / 15 deg vs Taylor-Maccoll; ogive M 1.98 forebody CD vs the 2D CFD | Cp 2 %, shock angle 0.2 deg; ogive 2 % |
+//! | G-W4 | cone 10 / 15 deg vs Taylor-Maccoll; ogive M 1.98 forebody CD vs the 2D CFD; the transonic / subsonic smoke cases of `bowshock-cases` | Cp 2 %, shock angle 0.2 deg; ogive 2 %; the asserts of those tests |
 //! | G-V1 | laminar plate G1 vs Blasius | cf 3 % |
 //! | G-V2 | SST plate G2 (y+ < 2) and rough plate G2r | cf 5 % / 10 % of the correlation |
 //! | G-V3 | G3 body, CPU and GPU | CD 2 %, friction 3 %, base 4 %, y+ max < 3 |
@@ -120,6 +120,16 @@ pub struct ConeNumbers {
     pub beta_deg: f64,
 }
 
+/// A smoke case of the 2D engine (`kind: "case2d"` in the fixture) as the runner gets it.
+#[derive(Clone, Debug)]
+pub struct Case2d {
+    pub id: String,
+    /// How the 2D `bowshock_core::engine::case::Case` was built (`builder`, `mach`, `nose`, `wake`, `grid_sting` / `grid_base`, `first_order_iters`, `max_iter`).
+    pub inputs: Value,
+    /// The 2D result (the keys a runner returns).
+    pub numbers: Value,
+}
+
 /// `max |dU| / (1 + |U|)` of the state (conservative, five components) and of `k`, `omega` between a GPU and a CPU run from the same start.
 #[derive(Clone, Copy, Debug)]
 pub struct StateDiff {
@@ -180,6 +190,13 @@ pub trait WedgeRunner {
         unimplemented_gate("ogive_forebody_cd").map(|()| 0.0)
     }
 
+    /// A smoke case of `bowshock-cases` (transonic / subsonic, `Case2d::inputs` says how the 2D engine case was built: builder, Mach number, grid counts,
+    /// iteration limits) on the wedge: return an object with the keys of `Case2d::numbers` (`iterations`, `residual_finite`, `drop_orders`, `stop_reason`,
+    /// `min_rho`, `min_p`, `cd_nose`, `cp_tip`, `cp_min`, `cp_base`, `cd_base`, `cd_base_plus_cp_base`; those the case's `checks` name).
+    fn case2d(&self, _case: &Case2d) -> Result<Value, String> {
+        unimplemented_gate("case2d").map(|()| Value::Null)
+    }
+
     /// The plate of `case` (a box plate in 3D, same Reynolds number, wall spacing and stations) to its stopping rule: `(x, cf)` at the
     /// stations in `case.stations`, and the first-cell y+ of each.
     fn plate(&self, _case: &PlateCase) -> Result<Vec<(f64, f64, Option<f64>)>, String> {
@@ -220,6 +237,8 @@ pub enum Band {
     Max,
     /// `m < limit` (the reference column is the limit).
     Below,
+    /// `m > limit` (the reference column is the limit).
+    Above,
 }
 
 impl Band {
@@ -232,6 +251,7 @@ impl Band {
             Band::Abs(a) => (measured - reference).abs() <= a,
             Band::Max => measured <= reference,
             Band::Below => measured < reference,
+            Band::Above => measured > reference,
         }
     }
 
@@ -242,6 +262,7 @@ impl Band {
             Band::Abs(a) => format!("abs{a}"),
             Band::Max => "max".to_string(),
             Band::Below => "below".to_string(),
+            Band::Above => "above".to_string(),
         }
     }
 }
@@ -280,6 +301,30 @@ impl Report {
         println!("{line}");
         self.lines.push(line);
         self.failed += 1;
+    }
+
+    /// A text value that has to be one of `allowed`.
+    pub fn check_in(&mut self, id: &str, case: &str, measured: &str, allowed: &[String]) -> bool {
+        let ok = allowed.iter().any(|a| a == measured);
+        let line = format!("GATE {id} {case} {measured} {} in {}", allowed.join("|"), if ok { "PASS" } else { "FAIL" });
+        println!("{line}");
+        self.lines.push(line);
+        if !ok {
+            self.failed += 1;
+        }
+        ok
+    }
+
+    /// A flag that has to be `want` (`None`: missing, fails).
+    pub fn check_is(&mut self, id: &str, case: &str, measured: Option<bool>, want: bool) -> bool {
+        let ok = measured == Some(want);
+        let line = format!("GATE {id} {case} {} {want} is {}", measured.map_or("n/a".to_string(), |m| m.to_string()), if ok { "PASS" } else { "FAIL" });
+        println!("{line}");
+        self.lines.push(line);
+        if !ok {
+            self.failed += 1;
+        }
+        ok
     }
 
     pub fn finish(self) {
@@ -583,6 +628,33 @@ fn gate_w4(r: &dyn WedgeRunner, rep: &mut Report) {
             Err(e) => rep.error("G-W4", &id, &e),
         }
     }
+    // the transonic and subsonic smoke cases: the asserts of the tests of `bowshock-cases` (`checks` in the fixture), strict bounds on the numbers
+    for c in cases_of_kind("case2d") {
+        let case = Case2d { id: s(&c["id"]), inputs: c["inputs"].clone(), numbers: c["numbers"].clone() };
+        match r.case2d(&case) {
+            Ok(m) => {
+                for check in c["checks"].as_array().expect("checks") {
+                    let key = s(&check["key"]);
+                    let name = format!("{}:{key}", case.id);
+                    if let Some(allowed) = check.get("in") {
+                        let allowed: Vec<String> = allowed.as_array().expect("in").iter().map(s).collect();
+                        rep.check_in("G-W4", &name, m[key.as_str()].as_str().unwrap_or(""), &allowed);
+                    } else if let Some(want) = check.get("is") {
+                        rep.check_is("G-W4", &name, m[key.as_str()].as_bool(), want.as_bool().expect("is"));
+                    } else {
+                        let value = m[key.as_str()].as_f64().unwrap_or(f64::NAN);
+                        if let Some(lo) = check["gt"].as_f64() {
+                            rep.check("G-W4", &format!("{name}>"), value, lo, Band::Above);
+                        }
+                        if let Some(hi) = check["lt"].as_f64() {
+                            rep.check("G-W4", &format!("{name}<"), value, hi, Band::Below);
+                        }
+                    }
+                }
+            }
+            Err(e) => rep.error("G-W4", &case.id, &e),
+        }
+    }
 }
 
 /// G-V1 and G-V2 (S3, S4): the plates against their correlations; the 2D value is printed on the same line by the report of the test.
@@ -862,6 +934,10 @@ impl WedgeRunner for Echo {
     fn plate(&self, case: &PlateCase) -> Result<Vec<(f64, f64, Option<f64>)>, String> {
         Ok(case.stations.iter().map(|st| (st.x, st.cf * self.scale, st.y_plus)).collect())
     }
+
+    fn case2d(&self, case: &Case2d) -> Result<Value, String> {
+        Ok(case.numbers.clone())
+    }
 }
 
 fn run_all_data_gates(r: &dyn WedgeRunner) -> Report {
@@ -887,6 +963,7 @@ fn the_fixture_is_complete() {
     assert_eq!(count("plate-"), 3);
     assert_eq!(count("cone-"), 4);
     assert_eq!(count("ogive-"), 2);
+    assert_eq!(count("w4-"), 3);
     for c in fixture()["cases"].as_array().unwrap() {
         assert!(c.get("error").is_none(), "{} failed in the generator", c["id"]);
         assert!(c["wall_s"].as_f64().is_some_and(|w| w > 0.0), "{} has no wall time", c["id"]);

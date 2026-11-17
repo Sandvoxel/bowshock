@@ -21917,6 +21917,301 @@
       },
       "precision": "f64",
       "wall_s": 7.561116031
+    },
+    {
+      "backend": "Cpu",
+      "checks": [
+        {
+          "gt": 1.0,
+          "key": "drop_orders",
+          "lt": null
+        },
+        {
+          "gt": 0.0,
+          "key": "min_rho",
+          "lt": null
+        },
+        {
+          "gt": 0.0,
+          "key": "min_p",
+          "lt": null
+        },
+        {
+          "gt": 0.0,
+          "key": "cd_nose",
+          "lt": 0.12
+        },
+        {
+          "gt": 0.0,
+          "key": "cp_tip",
+          "lt": null
+        },
+        {
+          "gt": null,
+          "key": "cp_min",
+          "lt": 0.0
+        },
+        {
+          "is": true,
+          "key": "residual_finite"
+        }
+      ],
+      "gates": [
+        "G-W4"
+      ],
+      "gpu": null,
+      "group": "w4-tables",
+      "id": "w4-transonic-smoke-M0.90",
+      "inputs": {
+        "builder": "transonic_case",
+        "cyl_length": 6.0,
+        "first_order_iters": 150,
+        "grid_sting": {
+          "dr_wall": 0.04,
+          "dx_tip": 0.04,
+          "n_ext": 14,
+          "n_nose": 32,
+          "n_seg": [
+            16
+          ],
+          "n_up": 16,
+          "nj": 40
+        },
+        "kind": "case2d",
+        "level": 0,
+        "mach": 0.9,
+        "max_iter": 1500,
+        "ni": 78,
+        "nj": 40,
+        "nose": {
+          "cone_fineness": 3.0
+        },
+        "numerics": "transonic_case",
+        "wake": "sting"
+      },
+      "numbers": {
+        "cd_aft": [
+          0.0
+        ],
+        "cd_base": 0.0,
+        "cd_base_minus_5_abs_cd_nose": -0.12604922307865055,
+        "cd_base_plus_cp_base": null,
+        "cd_nose": 0.025209844615730108,
+        "cd_total": 0.025209844615730108,
+        "cp_base": null,
+        "cp_min": -0.617620620716818,
+        "cp_tip": 0.15630710149759056,
+        "drop_orders": 1.8926300402789933,
+        "iterations": 1500,
+        "min_p": 0.4799067334341175,
+        "min_rho": 0.7471563485555666,
+        "residual_finite": true,
+        "stop_reason": "MaxIterations"
+      },
+      "precision": "f64",
+      "wall_s": 1.054497144
+    },
+    {
+      "backend": "Cpu",
+      "checks": [
+        {
+          "gt": null,
+          "key": "iterations",
+          "lt": 1500.0
+        },
+        {
+          "gt": 0.0,
+          "key": "min_rho",
+          "lt": null
+        },
+        {
+          "gt": 0.0,
+          "key": "min_p",
+          "lt": null
+        },
+        {
+          "gt": 0.1,
+          "key": "cp_tip",
+          "lt": null
+        },
+        {
+          "gt": -0.3,
+          "key": "cp_min",
+          "lt": -0.05
+        },
+        {
+          "gt": -0.02,
+          "key": "cd_nose",
+          "lt": 0.02
+        },
+        {
+          "in": [
+            "ResidualDrop"
+          ],
+          "key": "stop_reason"
+        },
+        {
+          "is": true,
+          "key": "residual_finite"
+        }
+      ],
+      "gates": [
+        "G-W4"
+      ],
+      "gpu": null,
+      "group": "w4-tables",
+      "id": "w4-subsonic-smoke-M0.30-sting",
+      "inputs": {
+        "base": false,
+        "builder": "subsonic_case",
+        "cyl_length": 6.0,
+        "domain": [
+          5.0,
+          2.5
+        ],
+        "first_order_iters": 100,
+        "grid_sting": {
+          "dr_wall": 0.08,
+          "dx_tip": 0.08,
+          "n_ext": 12,
+          "n_nose": 24,
+          "n_seg": [
+            20
+          ],
+          "n_up": 12,
+          "nj": 32
+        },
+        "kind": "case2d",
+        "level": 0,
+        "mach": 0.3,
+        "max_iter": 3000,
+        "ni": 68,
+        "nj": 32,
+        "nose": {
+          "tangent_ogive_fineness": 3.0
+        },
+        "numerics": "subsonic_case",
+        "wake": "sting"
+      },
+      "numbers": {
+        "cd_aft": [
+          0.0
+        ],
+        "cd_base": 0.0,
+        "cd_base_minus_5_abs_cd_nose": -0.0358994597899545,
+        "cd_base_plus_cp_base": null,
+        "cd_nose": -0.0071798919579909,
+        "cd_total": -0.0071798919579909,
+        "cp_base": null,
+        "cp_min": -0.11677388992283136,
+        "cp_tip": 0.2914739123065206,
+        "drop_orders": 6.008769163970966,
+        "iterations": 589,
+        "min_p": 0.7095669560958741,
+        "min_rho": 0.9950359995704552,
+        "residual_finite": true,
+        "stop_reason": "ResidualDrop"
+      },
+      "precision": "f64",
+      "wall_s": 1.054033165
+    },
+    {
+      "backend": "Cpu",
+      "checks": [
+        {
+          "gt": 0.0,
+          "key": "min_rho",
+          "lt": null
+        },
+        {
+          "gt": 0.0,
+          "key": "min_p",
+          "lt": null
+        },
+        {
+          "gt": -0.5,
+          "key": "cp_base",
+          "lt": -0.01
+        },
+        {
+          "gt": 0.0,
+          "key": "cd_base",
+          "lt": null
+        },
+        {
+          "gt": -0.001,
+          "key": "cd_base_plus_cp_base",
+          "lt": 0.001
+        },
+        {
+          "gt": 0.0,
+          "key": "cd_base_minus_5_abs_cd_nose",
+          "lt": null
+        },
+        {
+          "in": [
+            "ResidualDrop",
+            "BasePressureStationary"
+          ],
+          "key": "stop_reason"
+        }
+      ],
+      "gates": [
+        "G-W4"
+      ],
+      "gpu": null,
+      "group": "w4-tables",
+      "id": "w4-subsonic-smoke-M0.20-base",
+      "inputs": {
+        "base": true,
+        "builder": "subsonic_case",
+        "cyl_length": 6.0,
+        "first_order_iters": 100,
+        "grid_base": {
+          "dr_wall": 0.03,
+          "dx_tip": 0.03,
+          "n_gap": 12,
+          "n_nose": 48,
+          "n_seg": [
+            40
+          ],
+          "n_up": 28,
+          "n_wake": 40,
+          "nj_out": 64
+        },
+        "kind": "case2d",
+        "level": 0,
+        "mach": 0.2,
+        "max_iter": 6000,
+        "ni": 156,
+        "nj": 76,
+        "nose": {
+          "tangent_ogive_fineness": 3.0
+        },
+        "numerics": "subsonic_case",
+        "wake": "base"
+      },
+      "numbers": {
+        "cd_aft": [
+          0.0
+        ],
+        "cd_base": 0.068780048232329,
+        "cd_base_minus_5_abs_cd_nose": 0.04435812788286718,
+        "cd_base_plus_cp_base": 0.0,
+        "cd_nose": -0.004884384069892364,
+        "cd_total": 0.06389566416243664,
+        "cp_base": -0.068780048232329,
+        "cp_min": -0.11217215804814049,
+        "cp_tip": 0.36406316622202833,
+        "drop_orders": 5.472904903271275,
+        "iterations": 4000,
+        "min_p": 0.6949514112745793,
+        "min_rho": 0.970966001244168,
+        "residual_finite": true,
+        "stop_reason": "BasePressureStationary"
+      },
+      "precision": "f64",
+      "wall_s": 19.34071232
     }
   ],
   "groups": [
@@ -22018,6 +22313,17 @@
       },
       "group": "ogive",
       "group_wall_s": 13.231818582
+    },
+    {
+      "generated": {
+        "date": "2026-11-17T02:42:05-08:00",
+        "dirty": false,
+        "git_sha": "97e34703afd596fbec82041f30ba8c6fa5257f6f",
+        "gpu": "NVIDIA GeForce RTX 3090",
+        "host": "sandvox-mashine"
+      },
+      "group": "w4-tables",
+      "group_wall_s": 21.449369205
     }
   ],
   "schema": 1,
