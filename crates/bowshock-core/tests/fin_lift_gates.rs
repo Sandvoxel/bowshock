@@ -265,13 +265,7 @@ fn gate_f5_anf_cd0() {
                         r.breakdown.fins().ca
                     ),
                 );
-                let id = format!("anf-M{m:.3}-{name}:cd0");
-                // below Mach 2 the drag follows the assumed fin bevel (DESIGN3D L item 37: the shock of the 21.8 degree wedge is detached at 1.832)
-                if m < 2.0 {
-                    lines.check_known(is_gate(kind, &case), "G-F5", &id, measured, cd, Band::Rel(0.08), "DESIGN3D-L-item-37");
-                } else {
-                    lines.check(is_gate(kind, &case), "G-F5", &id, measured, cd, Band::Rel(0.08));
-                }
+                lines.check(is_gate(kind, &case), "G-F5", &format!("anf-M{m:.3}-{name}:cd0"), measured, cd, Band::Rel(0.08));
             }
             Err(e) => {
                 println!("GATE G-F5 anf-M{m:.3}-{name} n/a n/a n/a FAIL ({e})");

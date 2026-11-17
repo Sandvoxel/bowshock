@@ -478,13 +478,14 @@ impl Case3 {
     }
 
     /// ANF fins: four fins of 1 d chord and 1 d exposed span, thickness [`bowshock_reference::anf::FIN_THICKNESS_CAL`], flush with the
-    /// base. Section: sharp leading edge and a blunt trailing edge of the full thickness (0.08 cal), as Abiza et al. (p. 3) describe
-    /// them. The source gives no bevel angle: the `FinProfile::Custom` section `[[0,0],[0.1,1],[1,1]]` (a wedge over the first
-    /// 0.1 chord, about 22 degrees per side, floored at 25 % of the half thickness) is **assumed**, and CN_alpha at M >= 2.35 is
-    /// sensitive to it.
+    /// base. Section (DESIGN3D item 38): a **wedge over the whole chord**, 0.08 cal thick at the trailing edge, with a leading-edge radius of 0.004 cal. The sources:
+    /// Dupuis, DRDC TM 2002-136, p. 18 (second hand, from its optical reading by nrdptel/fusionspace-eridanus): four "1 cal x 1 cal" wedge fins, 0.08 caliber thick at the
+    /// trailing edge, leading-edge and nose radius 0.004 caliber; Bolz and Nicolaides, BRL Report 711 (1949), p. 29: wedge fins 16 % thick; Abiza et al. (p. 3): four 1 x 1
+    /// caliber fins with sharp leading edges and 0.08 caliber trailing-edge thickness. As a `FinProfile::Custom` section (fractions of the maximum thickness): `[[0,0.1],
+    /// [0.5,0.55],[1,1]]`, the leading-edge half thickness `0.1 t/2 = 0.004` cal (the three points make the section one wedge for `fins::section_edges`).
     #[doc(hidden)]
     pub fn anf_fins() -> Fins3 {
-        let profile = FinProfile::Custom { section: vec![[0.0, 0.0], [0.1, 1.0], [1.0, 1.0]] };
+        let profile = FinProfile::Custom { section: vec![[0.0, 0.1], [0.5, 0.55], [1.0, 1.0]] };
         Fins3 {
             count: 4,
             root_chord: 1.0,
