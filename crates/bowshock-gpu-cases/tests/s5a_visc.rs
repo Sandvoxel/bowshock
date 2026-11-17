@@ -15,7 +15,7 @@ use bowshock_cfd::viscous3::{
     add_viscous_residual, cell_pass, diffusion_rates, face_dirs, face_pass, face_shape, lambda_pass, wall_tractions, Grad3, SymSides,
 };
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
-use bowshock_core::engine::case3::Case3;
+use bowshock_core::engine::case3::{Case3, Tier};
 use bowshock_core::engine::grid3::{body_grid3, Fins3};
 use bowshock_core::FinProfile;
 
@@ -73,7 +73,8 @@ fn sector_grid(n: u32) -> Grid3 {
     let nose = Body { nose: Nose::Cone { half_angle: 10f64.to_radians() } };
     let body = BaseBody::cylinder(nose, 10.0 - nose.nose_length());
     let fins = Fins3 { count: n, root_chord: 1.0, tip_chord: 1.0, span: 1.0, sweep: 0.0, thickness: 0.08, te_to_base: 0.0, profile: FinProfile::Square };
-    let mut c = Case3::sector(2.0, body, fins, 6, 0);
+    let mut c = Case3::sector(2.0, body, fins, Tier::Euler, 0);
+    c.grid.nk = 6;
     let s = &mut c.grid.sting;
     s.n_up = 10;
     s.n_nose = 16;

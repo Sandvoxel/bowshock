@@ -596,6 +596,11 @@ impl GpuSolver3 {
         Ok(on3_mut!(self, s => s.profile_viscous3()?))
     }
 
+    /// Are the viscous terms on?
+    pub fn has_viscous(&self) -> bool {
+        on3!(self, s => s.has_viscous())
+    }
+
     /// The viscous face fluxes of the current state on the host (`None` for the Euler equations): the input of `viscous3::wall_tractions`.
     pub fn viscous_flux(&self) -> Result<Option<[Vec<[f64; 5]>; 3]>> {
         if !on3!(self, s => s.has_viscous()) {

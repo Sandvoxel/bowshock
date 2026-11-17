@@ -8,11 +8,11 @@
 use crate::engine::case3::Case3;
 use crate::engine::gpu::{record_timing, PointTiming};
 use crate::engine::run3::{
-    breakdown_from, drag_parts_from, forces_from, wall_faces, zero_incidence, DragParts, LiftBreakdown, LiftForces, PointResult3, StopRule3, Wall, WallForces,
-    SAMPLE_EVERY,
+    breakdown_from, drag_parts_from, forces_from, wall_class, wall_faces, zero_incidence, DragParts, LiftBreakdown, LiftForces, PointResult3, StopRule3, Wall,
+    WallForces, SAMPLE_EVERY,
 };
 use crate::error::Error;
-use bowshock_cfd::gpu::{GpuSolver3, Precision, WallFace3};
+use bowshock_cfd::gpu::{GpuSolver3, Precision, TractionFace3, WallFace3};
 use bowshock_cfd::grid3::Face3;
 use bowshock_cfd::solver3::{Config3, Scheme3, Solver3};
 use std::time::Instant;
@@ -37,8 +37,21 @@ pub struct GpuRunner3 {
 impl GpuRunner3 {
     /// Builds the host solver of `case` and uploads it to the default GPU context.
     pub fn new(case: &Case3, prec: Precision) -> Result<GpuRunner3, Error> {
+        Self::build(case, prec, None)
+    }
+
+    /// [`GpuRunner3::new`] for a viscous run: the host solver gets `Solver3::set_viscous_with(Some(v), opts)` (with `Turbulence::Sst` the SST model and the wall
+    /// distance) before the upload; the wall forces of the runner then include the friction of the no-slip faces.
+    pub fn new_rans(case: &Case3, prec: Precision, v: bowshock_cfd::solver::Viscous, opts: bowshock_cfd::solver3::RansOpts3) -> Result<GpuRunner3, Error> {
+        Self::build(case, prec, Some((v, opts)))
+    }
+
+    fn build(case: &Case3, prec: Precision, rans: Option<(bowshock_cfd::solver::Viscous, bowshock_cfd::solver3::RansOpts3)>) -> Result<GpuRunner3, Error> {
         let t_build = Instant::now();
-        let host = case.build_solver()?;
+        let mut host = case.build_solver()?;
+        if let Some((v, opts)) = rans {
+            host.set_viscous_with(Some(v), opts);
+        }
         let build_seconds = t_build.elapsed().as_secs_f64();
         let t0 = Instant::now();
         let ctx = luma::default_context()?;
@@ -88,7 +101,38 @@ impl GpuRunner3 {
                 }
             })
             .collect();
+        // the no-slip faces of a viscous run: their friction joins the classes (a class that has shear faces only is added)
+        let mut tfaces: Vec<TractionFace3> = Vec::new();
+        if let Some(r) = self.host.rans() {
+            let solid: Vec<bool> = g.part.iter().map(|&p| p != bowshock_cfd::grid3::PART_FLUID).collect();
+            let zero = |n: usize| vec![[0.0; 5]; n];
+            for t in bowshock_cfd::viscous3::wall_tractions(g, &solid, &r.dirs, &zero(g.iface.len()), &zero(g.jface.len()), &zero(g.kface.len())) {
+                let [n0, n1, _] = bowshock_cfd::viscous3::face_shape(g, t.dir);
+                let q = (t.idx[2] * n1 + t.idx[1]) * n0 + t.idx[0];
+                let face = match t.dir {
+                    0 => &g.iface[q],
+                    1 => &g.jface[q],
+                    _ => &g.kface[q],
+                };
+                let sigma = if t.n[0] * face.n[0] + t.n[1] * face.n[1] + t.n[2] * face.n[2] > 0.0 { 1.0 } else { -1.0 };
+                // the solid side: the upper cell where the fluid cell is the lower one (`sigma = +1`), else the lower one
+                let mut sc = t.idx;
+                if sigma < 0.0 {
+                    sc[t.dir] -= 1;
+                }
+                let Some(part) = g.part_of(sc[0], sc[1], sc[2]) else { continue };
+                let class = wall_class(part, t.dir, sigma < 0.0);
+                let ci = classes.iter().position(|&c| c == class).unwrap_or_else(|| {
+                    classes.push(class);
+                    classes.len() - 1
+                });
+                tfaces.push(TractionFace3 { class: ci, dir: t.dir, q, sigma, area: face.area, cx: face.c[0] });
+            }
+        }
         self.gpu.set_wall_faces(&faces, classes.len())?;
+        if self.host.rans().is_some() {
+            self.gpu.set_traction_faces(&tfaces, classes.len())?;
+        }
         self.classes = classes;
         Ok(())
     }
@@ -97,8 +141,34 @@ impl GpuRunner3 {
     pub fn wall_forces(&self) -> Result<(WallForces, WallForces), Error> {
         let sums = self.gpu.wall_forces(self.host.cfg.freestream[4])?;
         let n = self.classes.len();
-        let by = |off: usize| WallForces { by: self.classes.iter().enumerate().map(|(i, &c)| (c, sums[off + i])).collect() };
+        // a viscous run: the shear of the no-slip faces (reduced on the device from the viscous face fluxes) adds to the pressure force of its class
+        let friction = if self.gpu.has_viscous() { Some(self.gpu.viscous_wall_forces()?) } else { None };
+        let by = |off: usize| WallForces {
+            by: self
+                .classes
+                .iter()
+                .enumerate()
+                .map(|(i, &c)| {
+                    let mut a = sums[off + i];
+                    if let Some(f) = &friction {
+                        for q in 0..3 {
+                            a[q] += f[i][q];
+                        }
+                    }
+                    (c, a)
+                })
+                .collect(),
+        };
         Ok((by(0), by(n)))
+    }
+
+    /// The viscous force by wall class alone (`WallForces`, dimensional sums like the pressure forces; empty for the Euler equations).
+    pub fn friction_forces(&self) -> Result<WallForces, Error> {
+        if !self.gpu.has_viscous() {
+            return Ok(WallForces::default());
+        }
+        let f = self.gpu.viscous_wall_forces()?;
+        Ok(WallForces { by: self.classes.iter().enumerate().map(|(i, &c)| (c, f[i])).collect() })
     }
 
     /// [`crate::engine::run3::lift_forces`] of the device state (the sting not counted, the wall faces up to the base station).
@@ -132,7 +202,14 @@ impl GpuRunner3 {
             limiter: n.limiter,
             first_order_iters: n.first_order_iters,
             low_mach: n.low_mach,
-            scheme: Scheme3::Implicit(n.implicit_for(true)),
+            // the diagonal line solve of a viscous run is not ported to the GPU (and diverges on a wedge): the block factorisation
+            scheme: Scheme3::Implicit({
+                let mut p = n.implicit_for(true);
+                if self.host.rans().is_some() {
+                    p.line_solve = bowshock_cfd::implicit::LineSolve3::Block;
+                }
+                p
+            }),
         };
         self.gpu.set_config(&cfg)?;
         self.host.cfg = cfg;

@@ -94,6 +94,10 @@ impl LazySolver3 {
             mass: std::array::from_fn(|d| last.f[d][0].clone()),
             dt: dt.clone(),
             turb: [s[7].clone(), s[8].clone()],
+            speed: (&last.p[1] * &last.p[1] + &last.p[2] * &last.p[2] + &last.p[3] * &last.p[3]).sqrt(),
+            ks: t.ks.clone(),
+            law_strain: true,
+            law: None,
         };
         let u = self.turbulence_update3(&t.tg, vg, &t.model, &dev);
         let [k, om] = u.turb;

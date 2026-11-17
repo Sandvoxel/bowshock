@@ -959,7 +959,7 @@ impl LazySolver3 {
             if let Some(d) = diff {
                 den = den + &d[0] + &d[1];
                 if !self.no_dt_k {
-                    den = den + &d[2];
+                    den += &d[2];
                 }
             }
             let dt = c(self.cfg.cfl) * &g.vol / den;
