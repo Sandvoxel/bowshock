@@ -29,6 +29,8 @@ pub struct Numerics3 {
     pub stationary_min_iters: usize,
     /// The same floor for a warm-started run, counted from the warm start.
     pub warm_min_iters: usize,
+    /// Explicit 3D line solve overriding the backend default (`None`: [`Numerics3::implicit_for`]).
+    pub line_solve: Option<LineSolve3>,
 }
 
 impl Numerics3 {
@@ -39,22 +41,32 @@ impl Numerics3 {
     /// settles to 1e-4 within 200 to 300 iterations, and against the 500-iteration window with a 1000-iteration floor the table moved by
     /// at most 0.18 % in CN and 0.003 cal in `x_cp` while using 40 % fewer iterations (a window of 200 moved M 0.95 by 0.54 %).
     ///
-    /// The three directional factors are solved in diagonalised form with one defect-correction pass against the block operator
-    /// ([`LineSolve3::DiagonalCorrected`]; `sub_iters` is then not used): on the ANF case (level 0, f32, RTX 3090) a step costs 1935 us instead of
-    /// 3151 us, the iterations and CN equal those of the block scheme (CN within 0.01 %) at Mach 0.5, 0.8, 2 and 3, 1.56x faster to the stop rule.
+    /// The line solve is chosen in one place, [`Numerics3::implicit_for`]: block lines on the CPU, the diagonalised form on the GPU.
     pub fn auto(mach: f64, level: u32) -> Numerics3 {
         let subsonic = mach < 0.85;
         Numerics3 {
             limiter: if subsonic { Limiter::VanAlbada } else { Limiter::Minmod },
             low_mach: subsonic,
-            implicit: ImplicitParams { cfl_max: 10.0, line_solve: LineSolve3::DiagonalCorrected, ..ImplicitParams::DEFAULT },
+            implicit: ImplicitParams { cfl_max: 10.0, ..ImplicitParams::DEFAULT },
             first_order_iters: 100,
             max_iter: 8000 << level,
             rel_tol: 0.002,
             window: 250,
             stationary_min_iters: 250,
             warm_min_iters: 250,
+            line_solve: None,
         }
+    }
+
+    /// The implicit parameters for a backend with the line solve resolved: `line_solve` if set, else the backend default.
+    ///
+    /// The default on the GPU is the diagonalised form with one defect-correction pass against the block operator
+    /// ([`LineSolve3::DiagonalCorrected`]; `sub_iters` is then not used). It was measured on the GPU only: on the ANF case (level 0, f32, RTX 3090) a step costs 1935 us instead of
+    /// 3151 us, the iterations and CN equal those of the block scheme (CN within 0.01 %) at Mach 0.5, 0.8, 2 and 3, 1.56x faster to the stop rule.
+    /// The f64 CPU solver with it diverges on the tiny ANF grid at `cfl_max` 10 (it converges at 5), so the CPU default is the block solve.
+    pub fn implicit_for(&self, gpu: bool) -> ImplicitParams {
+        let default = if gpu { LineSolve3::DiagonalCorrected } else { LineSolve3::Block };
+        ImplicitParams { line_solve: self.line_solve.unwrap_or(default), ..self.implicit }
     }
 }
 
@@ -95,7 +107,7 @@ impl Case3 {
             limiter: n.limiter,
             first_order_iters: n.first_order_iters,
             low_mach: n.low_mach,
-            scheme: Scheme3::Implicit(n.implicit),
+            scheme: Scheme3::Implicit(n.implicit_for(false)),
         };
         Ok(Solver3::new(grid, cfg))
     }

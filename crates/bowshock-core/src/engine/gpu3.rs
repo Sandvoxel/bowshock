@@ -62,7 +62,7 @@ impl GpuRunner3 {
             limiter: n.limiter,
             first_order_iters: n.first_order_iters,
             low_mach: n.low_mach,
-            scheme: Scheme3::Implicit(n.implicit),
+            scheme: Scheme3::Implicit(n.implicit_for(true)),
         };
         self.gpu.set_config(&cfg)?;
         self.host.cfg = cfg;

@@ -260,7 +260,7 @@ fn build_case(args: &Args, body: &BaseBody, fins: &Option<bowshock_core::engine:
         case.numerics.implicit.cfl_max = c;
     }
     if let Some(l) = args.line_solve {
-        case.numerics.implicit.line_solve = l;
+        case.numerics.line_solve = Some(l);
     }
     if let Some(n) = args.stat_min {
         case.numerics.stationary_min_iters = n;

@@ -7,7 +7,7 @@
 //!     [--sub-iters 2] [--cfl-max 10] [--line-solve block|diag] [--max-iter N] [--window W] [--stat-min N] [--repeat R]
 //! ```
 //!
-//! `--line-solve` selects the 3D line solve (default: the product's, `Numerics3::auto`: `diag` = `LineSolve3::DiagonalCorrected`; `block` = the block scheme with
+//! `--line-solve` selects the 3D line solve (default: the GPU's, `Numerics3::implicit_for`: `diag` = `LineSolve3::DiagonalCorrected`; `block` = the block scheme with
 //! `--sub-iters` passes). Prints one `CONVERGE {json}` line per run: iterations, stop reason, drop in orders, CN, x_cp, wall seconds and ms per iteration. `--repeat R`
 //! runs the same case R times from the free stream in one process (the first run includes compile and trace; the later ones are warm).
 
@@ -44,11 +44,11 @@ fn main() -> Result<(), String> {
         case.numerics.implicit.sub_iters = v.parse().map_err(|e| format!("--sub-iters: {e}"))?;
     }
     if let Some(v) = value("--line-solve") {
-        case.numerics.implicit.line_solve = match v.as_str() {
+        case.numerics.line_solve = Some(match v.as_str() {
             "block" => LineSolve3::Block,
             "diag" => LineSolve3::DiagonalCorrected,
             other => return Err(format!("--line-solve block|diag, got `{other}`")),
-        };
+        });
     }
     if let Some(v) = value("--cfl-max") {
         case.numerics.implicit.cfl_max = v.parse().map_err(|e| format!("--cfl-max: {e}"))?;
@@ -70,7 +70,7 @@ fn main() -> Result<(), String> {
         let wall = t0.elapsed().as_secs_f64();
         println!(
         "CONVERGE {{\"rep\":{rep},\"case\":\"{case_name}\",\"level\":{level},\"mach\":{mach},\"alpha_deg\":{alpha},\"precision\":\"{pname}\",\"line_solve\":\"{:?}\",\"sub_iters\":{},\"cfl_max\":{},\"iterations\":{},\"stop\":\"{:?}\",\"drop_orders\":{:.2},\"cn\":{:.6},\"x_cp_cal\":{:.4},\"wall_s\":{wall:.3},\"ms_per_iter\":{:.3}}}",
-        case.numerics.implicit.line_solve,
+        case.numerics.implicit_for(true).line_solve,
         case.numerics.implicit.sub_iters,
         case.numerics.implicit.cfl_max,
         r.iterations,
