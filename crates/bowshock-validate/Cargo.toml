@@ -40,13 +40,16 @@ name = "subsonic_gpu"
 path = "src/bin/subsonic_gpu.rs"
 
 [dependencies]
-bowshock-core = { workspace = true, features = ["gpu"] }
+bowshock-core = { workspace = true, features = ["gpu", "serde"] }
 bowshock-cfd = { workspace = true, features = ["gpu"] }
 bowshock-reference.workspace = true
 bowshock-cases.workspace = true
 bowshock-gpu-cases.workspace = true
 luma.workspace = true
 rayon.workspace = true
+# `field3_dump` writes a `Field3` as deflated CBOR, the container of the app's fixtures.
+ciborium = "0.2"
+flate2 = "1"
 
 [dev-dependencies]
 serde_json = "1"

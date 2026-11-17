@@ -480,6 +480,8 @@ dependencies = [
  "bowshock-core",
  "bowshock-gpu-cases",
  "bowshock-reference",
+ "ciborium",
+ "flate2",
  "luma",
  "rayon",
  "serde_json",

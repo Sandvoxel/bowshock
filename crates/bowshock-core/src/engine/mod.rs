@@ -3,6 +3,7 @@
 pub mod body_grid;
 pub mod case;
 pub mod case3;
+pub mod field3;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 #[cfg(feature = "gpu")]
