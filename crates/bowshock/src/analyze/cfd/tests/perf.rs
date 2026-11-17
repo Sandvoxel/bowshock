@@ -548,6 +548,7 @@ fn engine3d_subsonic_wake_history() {
         let first = r.run_on(&case, false).expect("the first 3000 iterations");
         let chunk = 10;
         let mut series: [Vec<f64>; 5] = Default::default();
+        let mut xcp: Vec<f64> = Vec::new();
         for _ in 0..400 {
             r.gpu.run(chunk).unwrap();
             let f = r.lift_forces(&case).unwrap();
@@ -556,7 +557,13 @@ fn engine3d_subsonic_wake_history() {
             for (s, v) in series.iter_mut().zip([f.cn, f.ca, d.base, b.nose.cn, b.afterbody.cn]) {
                 s.push(v);
             }
+            xcp.push(f.x_cp);
         }
+        // the raw histories (iteration, CA, CA of the base, CN, x_cp in nose diameters), every 10 iterations from 3010 on: for the stop rule of the 3D engine
+        std::fs::create_dir_all("out/wake-csv").unwrap();
+        let rows: String =
+            (0..xcp.len()).map(|i| format!("{},{:.8},{:.8},{:.8},{:.6}\n", 3010 + 10 * i, series[1][i], series[2][i], series[0][i], xcp[i])).collect();
+        std::fs::write(format!("out/wake-csv/M{mach}_a{alpha:.0}.csv"), format!("it,ca,ca_base,cn,x_cp\n{rows}")).unwrap();
         println!("INFO M {mach} alpha {alpha}: first 3000 iterations stop {:?}, {:.2} orders", first.stop_reason, first.drop_orders);
         // an offline stop rule on the CN history sampled every 50 iterations (the first 3000 from the run, then every fifth sample of the series): the first
         // iteration at which two successive windows of 5 samples (250 iterations) have means within `tol` of each other, and what that mean is against the mean

@@ -15,7 +15,7 @@ use crate::error::Error;
 use crate::field::{Field, FieldSink, FieldTap};
 use crate::field3::Field3;
 use crate::progress::{Progress, ProgressSink};
-use crate::spec::{BodySpec, FinSpec, MotorSpec};
+use crate::spec::{BodySpec, FinOutline, FinSpec, MotorSpec};
 use bowshock_cfd::gas::GAMMA;
 use bowshock_cfd::solver::{Solver, Turbulence, Viscous};
 use bowshock_cfd::solver3::Solver3;
@@ -83,12 +83,12 @@ impl Engine {
         }
     }
 
-    /// Whether the engine solves the viscous terms (`Analysis::viscous`, roughness, a drag tolerance): the legacy engine does at zero incidence; the 3D engine says so
-    /// when its stage lands (`SOLVES_VISCOUS` in `analysis/solver3.rs`). A caller that would send the viscous settings asks here.
+    /// Whether the engine solves the viscous terms (`Analysis::viscous`, roughness, a drag tolerance) on the backend the product runs, the GPU: the legacy engine does at zero
+    /// incidence; the 3D engine says so when its GPU RANS step is wired (`GPU_SOLVES_VISCOUS` in `analysis/solver3.rs`; its CPU runner solves them already, on request). A caller that would send the viscous settings asks here.
     pub fn solves_viscous(self) -> bool {
         match self {
             Engine::Legacy => true,
-            Engine::Solver3 => solver3::SOLVES_VISCOUS,
+            Engine::Solver3 => solver3::GPU_SOLVES_VISCOUS,
         }
     }
 }
@@ -369,6 +369,10 @@ pub struct AnalysisSpec {
     /// Mach number a viscous grid is sized for ([`Analysis::grid_mach`]), `None` for the highest Mach number of each run.
     #[cfg_attr(feature = "serde", serde(default))]
     pub grid_mach: Option<f64>,
+    /// The outline of the fins ([`Analysis::fin_outline`]); the trapezoid when absent.
+    #[doc(hidden)]
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub fin_outline: FinOutline,
     /// The engine ([`Analysis::engine`]); [`Engine::Legacy`] when absent.
     #[doc(hidden)]
     #[cfg_attr(feature = "serde", serde(default))]
@@ -406,6 +410,7 @@ pub struct Analysis {
     field_sink: Option<FieldSink>,
     field3_sink: Option<Snapshots3>,
     engine: Engine,
+    fin_outline: FinOutline,
 }
 
 mod solver3;
@@ -450,6 +455,7 @@ impl Analysis {
             field_sink: None,
             field3_sink: None,
             engine: Engine::from_env(),
+            fin_outline: FinOutline::Trapezoid,
         }
     }
 
@@ -494,6 +500,7 @@ impl Analysis {
             keep_fields: self.keep_fields,
             grid_mach: self.grid_mach,
             engine: self.engine,
+            fin_outline: self.fin_outline.clone(),
         })
     }
 
@@ -515,7 +522,16 @@ impl Analysis {
         a.keep_fields = spec.keep_fields;
         a.grid_mach = spec.grid_mach;
         a.engine = spec.engine;
+        a.fin_outline = spec.fin_outline.clone();
         Ok(a)
+    }
+
+    /// The outline of the fins of [`Analysis::fins`] when it is not the trapezoid of their four numbers (which are then those of the equivalent trapezoid): the 3D
+    /// engine follows it, the legacy engine ignores it. Hidden with the engine.
+    #[doc(hidden)]
+    pub fn fin_outline(mut self, outline: FinOutline) -> Self {
+        self.fin_outline = outline;
+        self
     }
 
     /// The engine that solves the conditions (default [`Engine::Legacy`], or the one `BOWSHOCK_ENGINE` names). Hidden: the product

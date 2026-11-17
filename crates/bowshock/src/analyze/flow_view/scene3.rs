@@ -375,7 +375,8 @@ fn cell_values(f: &Field3, i: usize, j: usize, k: usize) -> [f32; 4] {
 }
 
 fn scalar_ranges(f: &Field3) -> [(f32, f32); 4] {
-    let (mut mach_max, mut cp_max, mut eddy_max) = (0.0f32, 0.0f32, 0.0f32);
+    let (mut mach_max, mut cp_max) = (0.0f32, 0.0f32);
+    let mut eddy: Vec<f32> = Vec::new();
     for c in 0..f.cells() {
         if f.solid[c] {
             continue;
@@ -389,10 +390,20 @@ fn scalar_ranges(f: &Field3) -> [(f32, f32); 4] {
         }
         if let Some(&e) = f.eddy_ratio.get(c) {
             if e.is_finite() {
-                eddy_max = eddy_max.max(e);
+                eddy.push(e);
             }
         }
     }
+    // the eddy ratio: the 99th percentile of the fluid cells sets the top (the free shear layer and the wake reach ratios in the thousands that would leave the boundary
+    // layers, where it is of the order of 10 to 1000 over the molecular viscosity, a single colour), rounded up to a round number
+    let eddy_max = if eddy.is_empty() {
+        0.0
+    } else {
+        let n = ((eddy.len() as f32 * 0.99) as usize).min(eddy.len() - 1);
+        let top = *eddy.select_nth_unstable_by(n, f32::total_cmp).1;
+        let decade = 10f32.powf(top.max(1.0).log10().floor());
+        (top / decade).ceil() * decade
+    };
     // the schlieren range from a thin sample of the cells: the gradient is the one costly scalar
     let step = ((f.cells() as f32 / 40_000.0).cbrt().ceil() as usize).max(1);
     let mut g: Vec<f32> = Vec::new();
@@ -661,6 +672,17 @@ pub(super) mod tests {
         assert!(cp.1 >= 0.2);
         assert!((s.1 - s.0 - SCHLIEREN_DECADES).abs() < 1e-6);
         assert_eq!(p.ranges[Scalar3::Eddy.index()], (0.0, 1.0), "an Euler run has no eddy viscosity");
+        // a RANS run: the top of the eddy range is the 99th percentile rounded to a round number, not the maximum of a few wake cells
+        let mut f = (*anf()).clone();
+        let fluid: Vec<usize> = (0..f.cells()).filter(|&c| !f.solid[c]).collect();
+        f.eddy_ratio = vec![0.0; f.cells()];
+        for (n, &c) in fluid.iter().enumerate() {
+            f.eddy_ratio[c] = 30.0 * (n % 100) as f32 / 100.0; // 0 to 29.7 over the cells
+        }
+        f.eddy_ratio[fluid[0]] = 5000.0; // one wake cell
+        let (lo, hi) = scalar_ranges(&f)[Scalar3::Eddy.index()];
+        assert_eq!(lo, 0.0);
+        assert!((10.0..=30.0).contains(&hi), "the range follows the bulk, not the 5000 of one cell: {hi}");
         // an Euler run has no friction: the range is a placeholder; the wall Cp range holds 95 % of the wall faces
         assert!(p.wall_ranges[WallScalar::Cf.index()].1 > 0.0);
         let wall = p.wall_ranges[WallScalar::Cp.index()];

@@ -56,6 +56,8 @@ pub use error::Error;
 pub use field::Field;
 pub use field3::{Field3, Part, Symmetry, Tile, WallFace};
 pub use progress::{Progress, ProgressSink};
+#[doc(hidden)]
+pub use spec::FinOutline;
 pub use spec::{AftSpec, BodySpec, FinProfile, FinSpec, MotorSpec, NoseShape, NoseSpec, SharpShape};
 
 /// Compiles and runs the code blocks of the user guide (`guide/src/*.md`) as doctests.

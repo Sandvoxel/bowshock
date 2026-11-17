@@ -494,7 +494,7 @@ fn node_analysis(job: &Job, kind: NodeKind, session: &Session, altitude: f64, gr
         }
     }
     if let Some(fins) = &job.plan.fins {
-        analysis = analysis.fins(fins.clone());
+        analysis = analysis.fins(fins.clone()).fin_outline(job.plan.outline.clone());
     }
     Ok(analysis)
 }

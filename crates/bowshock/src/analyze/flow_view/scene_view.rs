@@ -540,7 +540,7 @@ impl SceneState {
                     .boxed(),
                 line(vec![
                     super::toggle(
-                        "Tile",
+                        "Tile sheets",
                         self.tile_sheets,
                         Msg::Scene(SceneMsg::TileSheets),
                         "The meridian layer in every copy of the solved domain, not as the plane",

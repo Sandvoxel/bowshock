@@ -14,13 +14,13 @@
 //!
 //! What the engine does not do yet fails loudly: a viscous request ([`Analysis::viscous`], roughness, a motor, a drag tolerance) is an error under
 //! [`Engine::Solver3`], never a silent Euler run. [`Analysis::wall_flow`] and [`Analysis::tier3`] already map the viscous knobs onto the engine's
-//! [`Tier`]s; [`SOLVES_VISCOUS`] is the one switch that lets them through.
+//! [`Tier`]s; [`GPU_SOLVES_VISCOUS`] is the one switch that lets a viscous request run on the GPU (the CPU runner solves them now).
 
 //!
 //! # The flip
 //!
 //! With `BOWSHOCK_ENGINE=3d` the whole app already runs on this engine (`cfd/run.rs` `node_analysis`, `cfd/plan.rs` fin counts and `*_REV_3D` keys, `cfd/wording.rs`
-//! `Words(true)`, the shared grid), so the flip is: `Engine::DEFAULT = Solver3` (`analysis.rs`); [`SOLVES_VISCOUS`] true once the viscous stage lands (then the app sends
+//! `Words(true)`, the shared grid), so the flip is: `Engine::DEFAULT = Solver3` (`analysis.rs`); [`GPU_SOLVES_VISCOUS`] true once the GPU RANS step is merged (then the app sends
 //! `viscous`, roughness, the drag tolerance and `grid_mach` to both node kinds by itself, and `tier3` maps them); the Jet patch (the motor request here); then delete the legacy
 //! path (the route comment in `analysis.rs` lists it), `Words(false)`, `SOLVER_REV` / `LIFT_REV` (the `_3D` numbers take their place) and the app's two-engine branches
 //! (`solves_3d`, `shared_grid`, the `solves_viscous` ifs).
@@ -28,12 +28,14 @@
 use super::*;
 use crate::engine::case3::{Tier, WallFlow};
 use crate::engine::field3::field3_of;
-use crate::engine::run3::{drag_parts, wall_samples, DragParts, Wall};
+use crate::engine::grid3::Fins3;
+use crate::engine::planform::Planform;
+use crate::engine::run3::{drag_parts_on, wall_faces, wall_samples, DragParts, Wall};
 use bowshock_cfd::gas3::{cons_to_prim3, Cons3};
 use bowshock_cfd::grid3::{Grid3, PART_FLUID};
 
 /// Whether the engine solves the viscous terms (`Analysis::viscous`, roughness): flip with the stage that makes it so, and [`Analysis::tier3`] maps them.
-pub(super) const SOLVES_VISCOUS: bool = false;
+pub(super) const GPU_SOLVES_VISCOUS: bool = false;
 
 /// The solved domain of a condition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,6 +102,36 @@ fn drop_timed<R: Runner3>(runner: &R, state: Option<R::State>, c: Condition) {
 struct Post3 {
     drag: DragParts,
     u: Vec<Cons3>,
+    /// Eddy over molecular viscosity per cell, and the skin-friction coefficient vector of every wall face of `wall_faces` (empty unless RANS on the CPU).
+    eddy: Vec<f32>,
+    cf: Vec<[f32; 3]>,
+}
+
+/// The eddy-viscosity ratio of every cell and the skin-friction coefficient (over the free stream's `rho |V|^2 / 2`) of every wall face of a RANS state; empty for
+/// Euler. The faces are in the order of [`wall_faces`], which is the order of `Field3::walls`.
+fn viscous_extras(case: &Case3, s: &Solver3) -> (Vec<f32>, Vec<[f32; 3]>) {
+    let Some(r) = s.rans() else { return (Vec::new(), Vec::new()) };
+    let eddy = r.mu_t.iter().zip(&r.mu).map(|(t, m)| (t / m) as f32).collect();
+    let dir_of = |c: [(usize, usize, usize); 4]| {
+        if c.iter().all(|n| n.0 == c[0].0) {
+            0
+        } else if c.iter().all(|n| n.1 == c[0].1) {
+            1
+        } else {
+            2
+        }
+    };
+    let faces = wall_faces(&s.grid);
+    let index: std::collections::HashMap<(usize, usize, usize, usize), usize> =
+        faces.iter().enumerate().map(|(n, w)| ((dir_of(w.corners), w.corners[0].0, w.corners[0].1, w.corners[0].2), n)).collect();
+    let q = 0.5 * case.mach * case.mach;
+    let mut cf = vec![[0.0f32; 3]; faces.len()];
+    for t in s.wall_tractions() {
+        if let Some(&n) = index.get(&(t.dir, t.idx[0], t.idx[1], t.idx[2])) {
+            cf[n] = t.tau.map(|v| (v / q) as f32);
+        }
+    }
+    (eddy, cf)
 }
 
 /// One backend of the sweep: a cold run that builds the solver state, a warm run on it, and what is read from a state afterwards.
@@ -140,7 +172,8 @@ impl Runner3 for Cpu3 {
     }
 
     fn post(&self, s: &Solver3, case: &Case3) -> Result<Post3, Error> {
-        Ok(Post3 { drag: drag_parts(case, &s.grid, &s.u, s.cfg.freestream[4]), u: s.u.clone() })
+        let (eddy, cf) = viscous_extras(case, s);
+        Ok(Post3 { drag: drag_parts_on(case, s), u: s.u.clone(), eddy, cf })
     }
 }
 
@@ -182,7 +215,7 @@ impl Runner3 for Gpu3 {
     }
 
     fn post(&self, r: &GpuState, case: &Case3) -> Result<Post3, Error> {
-        Ok(Post3 { drag: r.runner.drag_parts(case)?, u: r.runner.gpu.state_f64()? })
+        Ok(Post3 { drag: r.runner.drag_parts(case)?, u: r.runner.gpu.state_f64()?, eddy: Vec::new(), cf: Vec::new() })
     }
 
     fn reused(&self, r: &GpuState) -> bool {
@@ -259,11 +292,6 @@ impl Analysis {
 
     /// The input checks of the route.
     fn check_solver3(&self, conditions: &[Condition]) -> Result<(), Error> {
-        if !SOLVES_VISCOUS && self.flight.is_some() {
-            return Err(Error::Unsupported(
-                "Engine::Solver3 solves the Euler equations only: Analysis::viscous is not available under it yet (it would run Euler silently)".into(),
-            ));
-        }
         // the jet patch of the 3D solver does not exist yet: a motor-on request fails whatever else the engine solves
         if self.motor.is_some() && self.flight.is_some() {
             return Err(Error::Unsupported("Engine::Solver3 has no motor jet yet".into()));
@@ -305,11 +333,38 @@ impl Analysis {
         }
         if let Some(f) = &self.fins {
             f.validate_for(Engine::Solver3)?;
+            self.fins3_solver3()?;
             if !self.dimensional {
                 return Err(Error::InvalidInput("fins need a dimensional BodySpec".into()));
             }
         }
         Ok(())
+    }
+
+    /// The fins as the 3D engine takes them: the trapezoid of the spec, or its outline ([`Analysis::fin_outline`]) through the engine's [`Planform`].
+    fn fins3_solver3(&self) -> Result<Option<Fins3>, Error> {
+        let Some(f3) = self.fins3() else { return Ok(None) };
+        let (d, spec) = (self.d_nose, self.fins.as_ref().expect("fins3 has fins"));
+        Ok(Some(match &self.fin_outline {
+            FinOutline::Trapezoid => f3,
+            FinOutline::Ellipse => f3.with_planform(Planform::ellipse(spec.root_chord / d, spec.span / d)?),
+            FinOutline::Polygon(points) => {
+                let scaled: Vec<(f64, f64)> = points.iter().map(|p| (p.0 / d, p.1 / d)).collect();
+                f3.with_planform(Planform::from_polygon(&scaled)?)
+            }
+        }))
+    }
+
+    /// Whether the mesher can build the fins of this analysis (on the coarse Euler sector, which the solve then finds in the grid cache): the mesher's refusal, with its
+    /// cause, as an error. The app asks when it maps a document's fin set.
+    #[doc(hidden)]
+    pub fn mesh_check(&self) -> Result<(), Error> {
+        self.check_solver3(&[Condition::from(2.0)])?;
+        if self.fins.is_none() {
+            return Ok(());
+        }
+        let case = self.solver3_case(Condition::from(2.0), 0, Tier::Euler, false);
+        case.build_solver_cached().map(|_| ())
     }
 
     /// The flow the walls of a wall-resolved grid are sized for: the viscous knobs of the analysis (`viscous`, `roughness`, the fins' roughness, `grid_mach`)
@@ -323,6 +378,7 @@ impl Analysis {
             mach_max: rans.mach_max,
             ks_body: self.roughness_m / self.d_nose,
             ks_fin: self.fins.as_ref().map_or(0.0, |f| f.roughness) / self.d_nose,
+            sutherland: rans.sutherland,
         }))
     }
 
@@ -342,8 +398,8 @@ impl Analysis {
         let body = self.body.clone();
         let mut case = match self.kind_of(c) {
             Kind::Wedge => Case3::wedge(c.mach, body, level).with_tier(tier),
-            Kind::Sector => Case3::sector(c.mach, body, self.fins3().expect("a sector has fins"), tier, level),
-            Kind::Half => Case3::base_half(c.mach, c.alpha_deg.to_radians(), body, self.fins3(), tier, level),
+            Kind::Sector => Case3::sector(c.mach, body, self.fins3_solver3().expect("checked").expect("a sector has fins"), tier, level),
+            Kind::Half => Case3::base_half(c.mach, c.alpha_deg.to_radians(), body, self.fins3_solver3().expect("checked"), tier, level),
         };
         if self.wake == Some(Wake::Sting) {
             case.grid.base = None;
@@ -356,6 +412,15 @@ impl Analysis {
         }
         if let Some(cap) = self.max_iterations {
             case.numerics.max_iter = case.numerics.max_iter.min(cap);
+        }
+        // The half domain runs the block line solve on the GPU too: the diagonalised form (the GPU default) diverges on the finned example at Mach 3 and 6 degrees
+        // (and at Mach 0.8 in some runs) unless cfl_max is 3 or less (gpu3d, M 3 / 6 deg: cfl 10 at iteration 110, cfl 5 at 150, cfl 3 stable); the block form is stable at
+        // cfl 10 and costs about 1.5x a step. The sector's diagonal solve has not diverged on the example's table and keeps the cheaper step.
+        if matches!(self.kind_of(c), Kind::Half) {
+            case.numerics.line_solve = Some(bowshock_cfd::implicit::LineSolve3::Block);
+        }
+        if let Some(tol) = self.drag_tolerance {
+            case.numerics.rel_tol = tol;
         }
         case.progress = self.progress.as_ref().map(|p| p.scaled(self.area_ratio()));
         case.snapshots = if snapshots { self.field3_sink.clone() } else { None };
@@ -414,6 +479,17 @@ impl Analysis {
         keep: bool,
     ) -> Result<(Vec<PolarPoint>, BackendUsed, Option<String>), Error> {
         let cpu = || guard(|| self.sweep3(&Cpu3, sorted, level, flow, keep));
+        // the RANS step is on the CPU until the GPU one is merged: a viscous request runs there (and says why) under Auto, and is an error on the GPU alone
+        let viscous = flow.is_some();
+        if viscous && !GPU_SOLVES_VISCOUS {
+            match backend {
+                Backend::Gpu => return Err(Error::Unsupported("Engine::Solver3 does not solve the viscous terms on the GPU yet (Backend::Cpu does)".into())),
+                Backend::Auto => {
+                    return Ok((cpu()?, BackendUsed::Cpu, Some("the viscous terms are solved on the CPU: the GPU RANS step is not wired yet".into())))
+                }
+                Backend::Cpu => {}
+            }
+        }
         match backend {
             Backend::Cpu => Ok((cpu()?, BackendUsed::Cpu, None)),
             Backend::Gpu => Ok((self.sweep3_gpu(sorted, level, flow, keep)?, BackendUsed::Gpu, None)),
@@ -555,12 +631,17 @@ impl Analysis {
         let cp_base = if base_area > 0.0 { base_cp / base_area } else { f64::NAN };
         let has_base = case.grid.base.is_some();
 
+        // pressure and friction by surface; the friction is the RANS run's shear (zero, and `None`, for Euler)
+        let viscous = case.viscous.is_some();
+        let fr = &d.friction;
         let forebody = (d.nose + d.aft.iter().sum::<f64>()) * q;
         let fin_pressure = (d.fin_sides + d.fin_edges + d.fin_tips) * q;
-        let fins = self.fins.is_some().then_some(FinDrag { friction: 0.0, pressure: fin_pressure });
+        let fin_friction = d.fin_friction() * q;
+        let body_friction = (d.body_friction() + fr.base) * q;
+        let fins = self.fins.is_some().then_some(FinDrag { friction: fin_friction, pressure: fin_pressure });
         let base = d.base * q;
-        let total = forebody + base + fin_pressure;
-        let drag = Drag { forebody_pressure: forebody, friction: None, base, base_modelled: false, fins, total };
+        let total = forebody + body_friction + base + fin_pressure + fin_friction;
+        let drag = Drag { forebody_pressure: forebody, friction: viscous.then_some(body_friction), base, base_modelled: false, fins, total };
 
         let forces = (c.alpha_deg != 0.0).then(|| {
             let (cn, ca, x_cp) = (r.cn * q, r.ca * q, r.x_cp * self.d_nose);
@@ -595,16 +676,25 @@ impl Analysis {
             stop_reason: r.stop_reason,
             cd_nose: d.nose * q,
             cd_aft: d.aft.iter().map(|a| a * q).collect(),
-            cd_friction: 0.0,
+            cd_friction: if viscous { body_friction } else { 0.0 },
             cd_base_solver: if has_base { base } else { f64::NAN },
             cp_base: if has_base { cp_base } else { f64::NAN },
             wall,
-            y_plus_max: f64::NAN,
+            y_plus_max: if viscous && r.y_plus_max.is_finite() { r.y_plus_max } else { f64::NAN },
             farfield_dp,
         };
         tm.host_s = t_host.elapsed().as_secs_f64();
         let t_field = std::time::Instant::now();
-        let field3 = (keep && self.keep_fields).then(|| field3_of(case, g, &post.u, r.iterations, self.field_scale()));
+        let field3 = (keep && self.keep_fields).then(|| {
+            let mut f = field3_of(case, g, &post.u, r.iterations, self.field_scale());
+            if !post.eddy.is_empty() {
+                f.eddy_ratio = post.eddy.clone();
+                for (w, cf) in f.walls.iter_mut().zip(&post.cf) {
+                    w.cf = *cf;
+                }
+            }
+            f
+        });
         tm.field_s = t_field.elapsed().as_secs_f64();
         Ok(PolarPoint { mach: c.mach, alpha_deg: c.alpha_deg, drag, forces, detail, quality, warnings, cd_uncertainty: None, field: None, field3 })
     }

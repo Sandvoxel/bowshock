@@ -78,12 +78,17 @@ fn smoke_hook(c: &mut Case3) {
 
 impl WedgeRunner for FacadeWedge {
     fn facade_case(&self, c: &FacadeCase) -> Result<Numbers, String> {
-        if c.rans {
-            return Err("RANS: Engine::Solver3 fails loudly on a viscous request (the engine is Euler)".into());
-        }
         let mut a = self.analysis(&c.body, c.resolution)?;
         if !c.wake_base {
             a = a.wake(Wake::Sting);
+        }
+        if c.rans {
+            // the RANS tier: the flight conditions and the wall roughness of the fixture case (the viscous terms run on the CPU until the GPU step is wired)
+            let atmosphere = c.atmosphere.ok_or("a RANS case without an atmosphere")?;
+            a = a.viscous(bowshock_core::FlightConditions { atmosphere }).roughness(c.roughness_m);
+            if let Some(tol) = c.drag_tolerance {
+                a = a.drag_tolerance(tol);
+            }
         }
         let polar = a.run(&[c.mach]).map_err(|e| e.to_string())?;
         let p = &polar.points[0];
@@ -93,10 +98,10 @@ impl WedgeRunner for FacadeWedge {
             cd_total: p.drag.total,
             cd_nose: p.detail.cd_nose,
             cd_aft: p.detail.cd_aft.clone(),
-            cd_friction: None,
-            cd_base: c.wake_base.then_some(p.drag.base),
-            cp_base: None,
-            y_plus_max: None,
+            cd_friction: p.drag.friction.map(|f| f + p.drag.fins.map_or(0.0, |x| x.friction)),
+            cd_base: c.wake_base.then_some(p.detail.cd_base_solver),
+            cp_base: p.detail.cp_base.is_finite().then_some(p.detail.cp_base),
+            y_plus_max: p.detail.y_plus_max.is_finite().then_some(p.detail.y_plus_max),
             iterations: p.detail.iterations,
             stop_reason: format!("{:?}", p.detail.stop_reason),
         })

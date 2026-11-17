@@ -44,6 +44,18 @@ fn tiny(c: &mut bowshock_core::engine::case3::Case3) {
     c.grid.fin_chord_cells = Some(8);
 }
 
+/// [`tiny`] for the wall-resolved fin grid: the radial extent (`nj_out`) and the azimuthal stacks stay (the fin tip needs room, the stack sets its own cells).
+fn tiny_stacked(c: &mut bowshock_core::engine::case3::Case3) {
+    if let Some(b) = c.grid.base.as_mut() {
+        b.n_up = 6;
+        b.n_nose = 10;
+        b.n_seg = b.n_seg.iter().map(|&n| (n / 4).max(4)).collect();
+        b.n_wake = 8;
+        b.n_gap = 6;
+    }
+    c.grid.fin_chord_cells = Some(8);
+}
+
 fn solver3() -> Analysis {
     Analysis::new(&body()).unwrap().engine(Engine::Solver3).backend(Backend::Cpu).resolution(Resolution::Coarse).case3_hook(tiny).max_iterations(60)
 }
@@ -61,10 +73,10 @@ fn the_engine_is_legacy_unless_asked_and_travels_in_the_spec() {
 }
 
 #[test]
-fn a_viscous_request_fails_loudly_instead_of_running_euler() {
-    let flight = FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 0.0 } };
-    let e = solver3().viscous(flight).run(&[1.5]).unwrap_err();
-    assert!(matches!(&e, Error::Unsupported(m) if m.contains("Euler")), "{e}");
+fn a_motor_request_and_bad_viscous_settings_fail_loudly() {
+    let motor = bowshock_core::MotorSpec { exit_diameter: 0.02, exit_mach: 2.5, exit_pressure_pa: 101_325.0, total_temperature_k: 1500.0 };
+    let e = solver3().viscous(flight()).motor(motor).run(&[1.5]).unwrap_err();
+    assert!(matches!(&e, Error::Unsupported(m) if m.contains("motor")), "{e}");
     // roughness and a drag tolerance are viscous knobs too
     assert!(matches!(solver3().roughness(1e-6).run(&[1.5]), Err(Error::InvalidInput(_))));
     assert!(matches!(solver3().drag_tolerance(0.01).run(&[1.5]), Err(Error::InvalidInput(_))));
@@ -201,4 +213,74 @@ fn a_kept_gpu_solver_gives_the_point_a_fresh_one_gives() {
     let (f, k) = (fresh.forces.unwrap(), kept.forces.unwrap());
     assert_eq!((f.cn.to_bits(), f.x_cp.to_bits()), (k.cn.to_bits(), k.x_cp.to_bits()), "half: {f:?} {k:?}");
     assert_eq!(fresh.detail.iterations, kept.detail.iterations);
+}
+
+fn flight() -> FlightConditions {
+    FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 0.0 } }
+}
+
+/// A viscous request is a RANS run on the CPU (Backend::Cpu), tiny grid and a short run: every field of the drag is a finite number, the friction is there, the field has its eddy
+/// ratio and the walls their skin friction.
+fn viscous_point_is_complete(a: Analysis, c: Condition) {
+    let polar = a.viscous(flight()).keep_fields(true).max_iterations(40).run(&[c]).unwrap();
+    assert_eq!(polar.backend, BackendUsed::Cpu);
+    let p = &polar.points[0];
+    let d = p.drag;
+    let friction = d.friction.expect("a viscous point has its skin friction");
+    for (name, v) in [
+        ("forebody", d.forebody_pressure),
+        ("friction", friction),
+        ("base", d.base),
+        ("total", d.total),
+        ("cd_friction", p.detail.cd_friction),
+        ("y+", p.detail.y_plus_max),
+    ] {
+        assert!(v.is_finite(), "{name} {v} at {c:?}: {d:?} {:?}", p.detail);
+    }
+    assert!(friction > 0.0, "the shear of the walls: {friction}");
+    assert!(p.detail.cp_base.is_finite() && p.detail.cd_nose.is_finite() && p.detail.cd_aft.iter().all(|x| x.is_finite()));
+    let f = p.field3.as_ref().expect("keep_fields");
+    assert_eq!(f.eddy_ratio.len(), f.cells(), "an eddy ratio per cell");
+    assert!(f.walls.iter().any(|w| w.cf.iter().any(|v| *v != 0.0)), "the skin friction of the walls");
+    if let Some(fd) = d.fins {
+        assert!(fd.friction.is_finite() && fd.pressure.is_finite() && fd.friction > 0.0, "{fd:?}");
+    }
+    assert!((d.total - (d.forebody_pressure + friction + d.base + d.fins.map_or(0.0, |f| f.pressure + f.friction))).abs() < 1e-12);
+}
+
+#[test]
+fn a_viscous_wedge_point_fills_every_drag_field_on_the_cpu() {
+    viscous_point_is_complete(solver3(), Condition::from(0.5));
+}
+
+#[test]
+fn a_viscous_finned_sector_point_fills_every_drag_field_on_the_cpu() {
+    viscous_point_is_complete(solver3().fins(fins()).case3_hook(tiny_stacked), Condition::from(0.5));
+}
+
+#[test]
+fn a_viscous_half_domain_point_fills_every_drag_field_on_the_cpu() {
+    viscous_point_is_complete(solver3().fins(fins()), Condition::new(0.5, 4.0));
+}
+
+#[test]
+fn a_viscous_request_on_the_gpu_alone_says_it_is_not_there_yet() {
+    let e = solver3().backend(Backend::Gpu).viscous(flight()).run(&[0.5]).unwrap_err();
+    assert!(matches!(&e, Error::Unsupported(m) if m.contains("GPU")), "{e}");
+}
+
+#[test]
+fn an_elliptical_and_a_freeform_outline_are_meshed_and_a_notched_one_is_refused_with_its_cause() {
+    use bowshock_core::FinOutline;
+    let ellipse = solver3().fins(FinSpec { tip_chord: 0.0, sweep: 0.5 * D, ..fins() }).fin_outline(FinOutline::Ellipse).run(&[2.0]).unwrap();
+    assert!(ellipse.points[0].drag.fins.is_some_and(|f| f.pressure.is_finite()));
+    // a quadrilateral outline: root 1 d from 0 to 1 d, tip 0.4 d at 0.5 d span, swept
+    let d = D;
+    let polygon = vec![(0.0, 0.0), (0.6 * d, d), (d, d), (d, 0.0)];
+    let free = solver3().fins(FinSpec { tip_chord: 0.4 * d, sweep: 0.6 * d, ..fins() }).fin_outline(FinOutline::Polygon(polygon)).run(&[2.0]).unwrap();
+    assert!(free.points[0].drag.fins.is_some_and(|f| f.pressure.is_finite()));
+    // an outline with two chordwise intervals at one height (a notch) is refused by the check, with the engine's words
+    let notched = vec![(0.0, 0.0), (0.0, d), (0.3 * d, d), (0.3 * d, 0.4 * d), (0.6 * d, 0.4 * d), (0.6 * d, d), (d, d), (d, 0.0)];
+    let e = solver3().fins(fins()).fin_outline(FinOutline::Polygon(notched)).mesh_check().unwrap_err();
+    assert!(e.to_string().contains("chordwise"), "{e}");
 }

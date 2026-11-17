@@ -90,6 +90,9 @@ pub struct Plan {
     pub body: solver::BodySpec,
     /// The fin set the solver models, if the rocket has one it can take.
     pub fins: Option<solver::FinSpec>,
+    /// The outline of those fins when it is not the trapezoid of their numbers (an ellipse, a freeform polygon): what the 3D engine meshes; the legacy engine flies the
+    /// equivalent trapezoid.
+    pub outline: solver::FinOutline,
     /// Equivalent sand-grain roughness of the solved walls (m): the mean of the parts' finish roughness weighted by wetted area.
     pub body_roughness: f64,
     /// The vehicle without the solved fin set: what the build-up method still adds (other fin sets, lugs, rail buttons).
@@ -128,6 +131,33 @@ fn sharp_nose(shape: solver::SharpShape) -> solver::NoseShape {
     }
 }
 
+/// Whether the 3D engine (`BOWSHOCK_ENGINE=3d`) is the one the table is solved with: it follows the fins' real outlines and refuses what its mesher cannot build.
+fn three_d() -> bool {
+    solver::Engine::from_env() == solver::Engine::Solver3
+}
+
+/// The outline the 3D engine meshes for the fin set `set` of the document `rocket`: the half ellipse of an elliptical fin, the polygon of a freeform one (found in the
+/// document by its span and thickness), else the trapezoid.
+fn fin_outline(rocket: &Rocket, set: &FinSet) -> solver::FinOutline {
+    // a freeform fin is flown as its equivalent trapezoid and says so by its real root extent
+    match (set.planform, set.root_extent.is_some()) {
+        (FinPlanform::Elliptical, _) => solver::FinOutline::Ellipse,
+        (FinPlanform::Trapezoidal, false) => solver::FinOutline::Trapezoid,
+        (FinPlanform::Trapezoidal, true) => rocket
+            .radials()
+            .iter()
+            .find_map(|r| match &r.kind {
+                RadialKind::FreeformFin { points, thickness }
+                    if (r.kind.fin_span().unwrap_or(0.0) - set.span).abs() < 1e-6 && (thickness - set.thickness).abs() < 1e-9 =>
+                {
+                    Some(solver::FinOutline::Polygon(points.clone()))
+                }
+                _ => None,
+            })
+            .unwrap_or(solver::FinOutline::Trapezoid),
+    }
+}
+
 /// A fin set as the solver's fins, or why it cannot be.
 pub(super) fn fin_spec(set: &FinSet, x_base: f64) -> Result<solver::FinSpec, String> {
     let (tip_chord, sweep) = match set.planform {
@@ -154,7 +184,9 @@ pub(super) fn fin_spec(set: &FinSet, x_base: f64) -> Result<solver::FinSpec, Str
         sweep,
         thickness: set.thickness,
         roughness: set.roughness,
-        root_te_to_base: (x_base - (set.station + set.root_chord)).max(0.0),
+        // the real root of a freeform fin ends where its polygon's root does (the 3D engine meshes the polygon); the legacy engine flies the equivalent trapezoid
+        root_te_to_base: (x_base - if three_d() { set.root_extent.map_or(set.station + set.root_chord, |e| e.1) } else { set.station + set.root_chord })
+            .max(0.0),
         profile,
     };
     spec.validate_for(solver::Engine::from_env()).map_err(|e| e.to_string())?;
@@ -249,17 +281,34 @@ pub fn plan(rocket: &Rocket, vehicle: &Vehicle, units: UnitSystem) -> Result<Pla
     // The solver models one fin set: the supported one with the most fin area. The rest, and every lug and rail button, are
     // left to the build-up method, whose drag is added to the table.
     let x_base = segments.last().map_or(0.0, |s| s.aft_station());
-    let mut candidates: Vec<(usize, solver::FinSpec)> = Vec::new();
+    let mut candidates: Vec<(usize, solver::FinSpec, solver::FinOutline)> = Vec::new();
     let mut refused: Vec<String> = Vec::new();
     for (i, set) in vehicle.fin_sets.iter().enumerate() {
         match fin_spec(set, x_base) {
-            Ok(spec) => candidates.push((i, spec)),
+            Ok(spec) => {
+                // the 3D engine's mesher says what it cannot build (a fin that folds the grid, a notched outline): that is the fin set's reason
+                let outline = if three_d() { fin_outline(rocket, set) } else { solver::FinOutline::Trapezoid };
+                let meshed = if three_d() {
+                    solver::Analysis::new(&body)
+                        .map_err(|e| e.to_string())
+                        .and_then(|a| a.fins(spec.clone()).fin_outline(outline.clone()).mesh_check().map_err(|e| e.to_string()))
+                } else {
+                    Ok(())
+                };
+                match meshed {
+                    Ok(()) => candidates.push((i, spec, outline)),
+                    Err(e) => refused.push(e),
+                }
+            }
             Err(e) => refused.push(e),
         }
     }
     let area = |i: usize| f64::from(vehicle.fin_sets[i].count) * vehicle.fin_sets[i].fin_area();
-    let solved = candidates.iter().map(|(i, _)| *i).max_by(|&a, &b| area(a).total_cmp(&area(b)));
-    let fins = solved.and_then(|i| candidates.iter().find(|(j, _)| *j == i).map(|(_, s)| s.clone()));
+    let solved = candidates.iter().map(|(i, _, _)| *i).max_by(|&a, &b| area(a).total_cmp(&area(b)));
+    let (fins, outline) = match solved.and_then(|i| candidates.iter().find(|(j, _, _)| *j == i)) {
+        Some((_, s, o)) => (Some(s.clone()), o.clone()),
+        None => (None, solver::FinOutline::Trapezoid),
+    };
     let mut rest = vehicle.clone();
     rest.stages.clear();
     if let Some(i) = solved {
@@ -275,11 +324,14 @@ pub fn plan(rocket: &Rocket, vehicle: &Vehicle, units: UnitSystem) -> Result<Pla
     if !rest.protuberances.is_empty() {
         notes.push(super::wording::APPENDAGES_NOTE.to_string());
     }
-    if rocket.radials().iter().any(|r| matches!(r.kind, RadialKind::FreeformFin { .. })) {
-        notes.push("Freeform fins are solved as equivalent trapezoids.".to_string());
-    }
-    if vehicle.fin_sets.iter().any(|f| matches!(f.planform, FinPlanform::Elliptical)) && fins.is_some() {
-        notes.push("Elliptical fins are solved as equivalent trapezoids.".to_string());
+    // the legacy engine flies the equivalent trapezoid of an outline; the 3D engine meshes the outline itself
+    if !three_d() {
+        if rocket.radials().iter().any(|r| matches!(r.kind, RadialKind::FreeformFin { .. })) {
+            notes.push("Freeform fins are solved as equivalent trapezoids.".to_string());
+        }
+        if vehicle.fin_sets.iter().any(|f| matches!(f.planform, FinPlanform::Elliptical)) && fins.is_some() {
+            notes.push("Elliptical fins are solved as equivalent trapezoids.".to_string());
+        }
     }
     let body_roughness = wetted_mean_roughness(segments);
     notes.push(if body_roughness > 0.0 {
@@ -288,7 +340,7 @@ pub fn plan(rocket: &Rocket, vehicle: &Vehicle, units: UnitSystem) -> Result<Pla
         "Walls solved smooth (the parts' finish is polished).".to_string()
     });
 
-    let mut plan = Plan { body, fins, body_roughness, rest, notes, geometry: 0 };
+    let mut plan = Plan { body, fins, outline, body_roughness, rest, notes, geometry: 0 };
     plan.geometry = plan.hash();
     Ok(plan)
 }
@@ -326,6 +378,19 @@ impl Plan {
         }
         match &self.fins {
             Some(f) => {
+                // a non-trapezoidal outline (3D engine only) is part of the geometry; the trapezoid hashes as it always did
+                match &self.outline {
+                    solver::FinOutline::Trapezoid => {}
+                    solver::FinOutline::Ellipse => {
+                        h.u64(21);
+                    }
+                    solver::FinOutline::Polygon(p) => {
+                        h.u64(22);
+                        p.iter().for_each(|q| {
+                            h.f(q.0).f(q.1);
+                        });
+                    }
+                }
                 h.u64(20).u64(u64::from(f.count)).f(f.root_chord).f(f.tip_chord).f(f.span).f(f.sweep).f(f.thickness).f(f.roughness * 1e6).f(f.root_te_to_base);
                 h.u64(match f.profile {
                     solver::FinProfile::Square => 0,
