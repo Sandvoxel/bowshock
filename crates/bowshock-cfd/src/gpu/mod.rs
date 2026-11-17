@@ -136,6 +136,7 @@ pub mod f32s {
     include!("body3.rs");
     include!("viscous3.rs");
     include!("turbulence3.rs");
+    include!("rans3.rs");
     include!("implicit3.rs");
     include!("implicit.rs");
     include!("viscous.rs");
@@ -201,6 +202,7 @@ pub mod df32s {
     include!("body3.rs");
     include!("viscous3.rs");
     include!("turbulence3.rs");
+    include!("rans3.rs");
     include!("implicit3.rs");
     include!("implicit.rs");
     include!("viscous.rs");
