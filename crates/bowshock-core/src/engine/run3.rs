@@ -2,12 +2,13 @@
 //! wedge or a sector), and integrate the wall pressure into the force coefficients.
 //!
 //! Lengths are in nose diameters, the coefficients are referenced to `S_ref = pi/4` (nose diameter 1; the facade rescales to the
-//! reference diameter). Pressure forces only (Euler). The solved domain spans `theta_span` of the whole azimuth, so its forces are scaled by
+//! reference diameter). The pressure force, and for a viscous solver ([`Solver3::viscous`]) the shear of the wall faces ([`WallForces::shear`], from `Solver3::wall_tractions`: the very momentum flux the mean-flow equations see). The solved domain spans `theta_span` of the whole azimuth, so its forces are scaled by
 //! `2 pi / theta_span` (the half domain `[0, pi]`: doubled).
 //!
 //! Wall faces are classified by the part of the solid cell behind them and the direction of the face ([`Wall`]), not by geometry.
 
 use crate::engine::case3::Case3;
+use crate::engine::grid3::Domain3;
 use crate::engine::result::StopReason;
 use crate::engine::run::MONITOR_LIMIT;
 use crate::progress::{drop_orders, spread, Progress};
@@ -19,6 +20,9 @@ use std::ops::ControlFlow;
 
 /// Iterations between samples of the normal force.
 pub const SAMPLE_EVERY: usize = 50;
+/// Iterations between the force samples of the mean-stationary rule (the oscillation of a subsonic base wake has a period of 50 to 220 iterations: the 50-iteration
+/// samples of the range rule alias it).
+pub const MEAN_EVERY: usize = 10;
 /// Orders of density-residual drop that end a run as [`StopReason::ResidualDrop`].
 pub const DROP_ORDERS: f64 = 6.0;
 
@@ -50,6 +54,28 @@ pub struct PointResult3 {
     pub drop_orders: f64,
     /// `(iteration, CN)` every [`SAMPLE_EVERY`] iterations.
     pub cn_history: Vec<(usize, f64)>,
+    /// Largest `y+` of the streamwise no-slip walls ([`y_plus_max`]) and the mean Cp of the base ([`base_cp`]): `NaN` for Euler and from the GPU runner, which does
+    /// not fill them (the CPU runner, [`run3_on`], does).
+    pub y_plus_max: f64,
+    pub cp_base: f64,
+    /// Means over the last averaging window of the force samples ([`StopRule3::observe`]) when the run sampled one full window: `cn`, `ca` and `x_cp` above are
+    /// these means when `stop_reason` is `MeanStationary`, the last state otherwise (a `MaxIterations` run of an oscillating wake has them here).
+    pub window: Option<WindowMean>,
+}
+
+/// Mean of the force coefficients over one averaging window of an oscillating run.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowMean {
+    /// Iteration at the end of the window and its length.
+    pub end: usize,
+    pub length: usize,
+    pub ca: f64,
+    /// Zero without incidence.
+    pub cn: f64,
+    /// `cm / cn`, nose diameters from the tip; NaN without incidence.
+    pub x_cp: f64,
+    /// Largest relative half range `(max - min) / (2 |mean|)` of CA (and, at incidence, CN and the moment) over the window: the size of the oscillation, for an unsteady-wake warning.
+    pub oscillation: f64,
 }
 
 /// Wall forces of the current state of `s`: the `j = 0` boundary walls of the grid (the body of a sting grid, up to the base station) and every
@@ -63,7 +89,7 @@ pub fn lift_forces(case: &Case3, s: &Solver3) -> LiftForces {
 /// `pw = p0 + (p0 - p1) d0 / (d1 - d0)`, `d` the distance from the face centre to the cell centroid. A fin face whose second cell is solid or outside
 /// the grid uses the first-cell pressure. `dF = (pw - p_inf) area n_into_body`.
 pub fn lift_forces_upto(case: &Case3, s: &Solver3, x_max: f64) -> LiftForces {
-    forces_on(case, &s.grid, &s.u, s.cfg.freestream[4], x_max)
+    forces_from(case, &s.grid, &wall_forces_on(s, x_max))
 }
 
 /// [`lift_forces_upto`] on a grid, a conserved state `u` (index `Grid3::cell`, e.g. downloaded from the GPU) and the free-stream pressure. The sting
@@ -75,7 +101,7 @@ pub fn forces_on(case: &Case3, g: &Grid3, u: &[Cons3], p_inf: f64, x_max: f64) -
 /// [`forces_on`] of wall forces `w` already integrated (the GPU runner reduces them on the device).
 pub(crate) fn forces_from(case: &Case3, g: &Grid3, w: &WallForces) -> LiftForces {
     let (mut fx, mut fz, mut mz) = (0.0, 0.0, 0.0);
-    for (c, a) in &w.by {
+    for (c, a) in w.by.iter().chain(&w.shear) {
         if !matches!(*c, Wall::Sting | Wall::Jet) {
             fx += a[0];
             fz += a[1];
@@ -124,11 +150,16 @@ pub fn breakdown_on(case: &Case3, g: &Grid3, u: &[Cons3], p_inf: f64) -> LiftBre
     breakdown_from(case, g, &wall_forces(g, u, p_inf, case.body.x_base()))
 }
 
+/// [`breakdown_on`] of the solver state: pressure plus, for a viscous solver, the shear of the classes.
+pub fn breakdown_of(case: &Case3, s: &Solver3) -> LiftBreakdown {
+    breakdown_from(case, &s.grid, &wall_forces_on(s, case.body.x_base()))
+}
+
 /// [`breakdown_on`] of wall forces `w` already integrated up to the base station (the GPU runner reduces them on the device).
 pub(crate) fn breakdown_from(case: &Case3, g: &Grid3, w: &WallForces) -> LiftBreakdown {
     let part = |classes: &dyn Fn(Wall) -> bool| {
         let mut a = [0.0; 3];
-        for (c, f) in &w.by {
+        for (c, f) in w.by.iter().chain(&w.shear) {
             if classes(*c) {
                 for q in 0..3 {
                     a[q] += f[q];
@@ -206,6 +237,8 @@ fn wall_class(part: Part, dir: usize, solid_low: bool) -> Wall {
 #[derive(Clone, Debug, Default)]
 pub struct WallForces {
     pub by: Vec<(Wall, [f64; 3])>,
+    /// The viscous (shear) force `[Fx, Fz, Mz]` per wall class, empty for Euler and for the device-side reduction of the GPU runner (pressure only).
+    pub shear: Vec<(Wall, [f64; 3])>,
 }
 
 impl WallForces {
@@ -220,9 +253,31 @@ impl WallForces {
         }
     }
 
-    /// The sums of `class` (zero when no face of it exists).
+    /// The pressure sums of `class` (zero when no face of it exists).
     pub fn get(&self, class: Wall) -> [f64; 3] {
         self.by.iter().find(|(c, _)| *c == class).map_or([0.0; 3], |(_, a)| *a)
+    }
+
+    /// The shear sums of `class`.
+    pub fn get_shear(&self, class: Wall) -> [f64; 3] {
+        self.shear.iter().find(|(c, _)| *c == class).map_or([0.0; 3], |(_, a)| *a)
+    }
+
+    /// Pressure plus shear of `class`.
+    pub fn get_total(&self, class: Wall) -> [f64; 3] {
+        let (p, f) = (self.get(class), self.get_shear(class));
+        [p[0] + f[0], p[1] + f[1], p[2] + f[2]]
+    }
+
+    fn add_shear(&mut self, class: Wall, d: [f64; 3]) {
+        match self.shear.iter_mut().find(|(c, _)| *c == class) {
+            Some((_, a)) => {
+                for q in 0..3 {
+                    a[q] += d[q];
+                }
+            }
+            None => self.shear.push((class, d)),
+        }
     }
 }
 
@@ -380,8 +435,39 @@ pub struct DragParts {
     pub fin_sides: f64,
     pub fin_edges: f64,
     pub fin_tips: f64,
-    /// Nose + aft + base + fins (the sting not counted).
+    /// The friction (shear) drag of the same classes, zero for Euler (and for the device-side reduction of the GPU runner).
+    pub friction: FrictionParts,
+    /// Nose + aft + base + fins, pressure plus friction (the sting not counted).
     pub total: f64,
+}
+
+/// The friction drag of the wall classes of [`DragParts`], coefficients on `pi/4`.
+#[derive(Clone, Debug, Default)]
+pub struct FrictionParts {
+    pub nose: f64,
+    pub aft: Vec<f64>,
+    pub base: f64,
+    pub fin_sides: f64,
+    pub fin_edges: f64,
+    pub fin_tips: f64,
+    /// The sum of the parts above.
+    pub total: f64,
+}
+
+impl DragParts {
+    /// The pressure drag: the parts without the friction.
+    pub fn pressure_total(&self) -> f64 {
+        self.total - self.friction.total
+    }
+
+    /// The friction of the body (nose and afterbody) and of the fins.
+    pub fn body_friction(&self) -> f64 {
+        self.friction.nose + self.friction.aft.iter().sum::<f64>()
+    }
+
+    pub fn fin_friction(&self) -> f64 {
+        self.friction.fin_sides + self.friction.fin_edges + self.friction.fin_tips
+    }
 }
 
 /// [`DragParts`] of the state `u` of `g` for the case `case` (axial force only; every segment of the body of `case`).
@@ -394,11 +480,147 @@ pub fn drag_parts_from(case: &Case3, g: &Grid3, w: &WallForces) -> DragParts {
     let q = 0.5 * case.mach * case.mach;
     let norm = (2.0 * std::f64::consts::PI / g.theta_span) / (q * std::f64::consts::FRAC_PI_4);
     let cd = |c: Wall| norm * w.get(c)[0];
-    let aft: Vec<f64> = (0..case.body.segments.len()).map(|s| cd(Wall::Body(s as u16 + 1))).collect();
+    let cf = |c: Wall| norm * w.get_shear(c)[0];
+    let nseg = case.body.segments.len();
+    let aft: Vec<f64> = (0..nseg).map(|s| cd(Wall::Body(s as u16 + 1))).collect();
     let (nose, base) = (cd(Wall::Body(0)), cd(Wall::Base));
     let (fin_sides, fin_edges, fin_tips) = (cd(Wall::FinSide), cd(Wall::FinLe) + cd(Wall::FinTe), cd(Wall::FinTip));
-    let total = nose + aft.iter().sum::<f64>() + base + fin_sides + fin_edges + fin_tips;
-    DragParts { nose, aft, base, fin_sides, fin_edges, fin_tips, total }
+    let mut friction = FrictionParts {
+        nose: cf(Wall::Body(0)),
+        aft: (0..nseg).map(|s| cf(Wall::Body(s as u16 + 1))).collect(),
+        base: cf(Wall::Base),
+        fin_sides: cf(Wall::FinSide),
+        fin_edges: cf(Wall::FinLe) + cf(Wall::FinTe),
+        fin_tips: cf(Wall::FinTip),
+        total: 0.0,
+    };
+    friction.total = friction.nose + friction.aft.iter().sum::<f64>() + friction.base + friction.fin_sides + friction.fin_edges + friction.fin_tips;
+    let total = nose + aft.iter().sum::<f64>() + base + fin_sides + fin_edges + fin_tips + friction.total;
+    DragParts { nose, aft, base, fin_sides, fin_edges, fin_tips, friction, total }
+}
+
+/// [`drag_parts`] of the solver state: the pressure and, for a viscous solver, the friction of every class.
+pub fn drag_parts_on(case: &Case3, s: &Solver3) -> DragParts {
+    drag_parts_from(case, &s.grid, &wall_forces_on(s, f64::INFINITY))
+}
+
+/// The shear force of the no-slip wall faces of a viscous solver per wall class: `Solver3::wall_tractions` (force per area the fluid exerts on the wall) times
+/// the face area, `[Fx, Fz, Mz]` with `Mz = x Fz` at the face centre; faces with centroid `x > x_max` are left out except the base. Empty for Euler.
+pub fn wall_shear(s: &Solver3, x_max: f64) -> Vec<(Wall, [f64; 3])> {
+    let t = s.wall_tractions();
+    if t.is_empty() {
+        return Vec::new();
+    }
+    let g = &s.grid;
+    let class_of = wall_classes(g);
+    let mut acc = WallForces::default();
+    for tr in &t {
+        let [i, j, k] = tr.idx;
+        let Some(&class) = class_of.get(&(tr.dir, i, j, k)) else { continue };
+        let f = face_at(g, tr.dir, i, j, k);
+        if f.c[0] > x_max + 1e-9 && class != Wall::Base {
+            continue;
+        }
+        let d = [tr.tau[0] * tr.area, tr.tau[2] * tr.area];
+        acc.add_shear(class, [d[0], d[1], d[1] * f.c[0]]);
+    }
+    acc.shear
+}
+
+/// The wall forces of the solver state: the pressure of [`wall_forces`] and, for a viscous solver, the shear of [`wall_shear`].
+pub fn wall_forces_on(s: &Solver3, x_max: f64) -> WallForces {
+    let mut w = wall_forces(&s.grid, &s.u, s.cfg.freestream[4], x_max);
+    w.shear = wall_shear(s, x_max);
+    w
+}
+
+/// `(family, i, j, k)` of every wall face of the grid -> its class: the key is the first node of the face, which is its index in its family
+/// (`Grid3::{iface, jface, kface}`: `(k nj + j)(ni + 1) + i`, `(k (nj + 1) + j) ni + i`, `(k nj + j) ni + i`).
+fn wall_classes(g: &Grid3) -> std::collections::HashMap<(usize, usize, usize, usize), Wall> {
+    wall_faces(g)
+        .into_iter()
+        .map(|w| {
+            let c = w.corners;
+            let dir = if c.iter().all(|n| n.0 == c[0].0) {
+                0
+            } else if c.iter().all(|n| n.1 == c[0].1) {
+                1
+            } else {
+                2
+            };
+            ((dir, c[0].0, c[0].1, c[0].2), w.class)
+        })
+        .collect()
+}
+
+fn face_at(g: &Grid3, dir: usize, i: usize, j: usize, k: usize) -> Face3 {
+    match dir {
+        0 => g.iface[(k * g.nj + j) * (g.ni + 1) + i],
+        1 => g.jface[(k * (g.nj + 1) + j) * g.ni + i],
+        _ => g.kface[(k * g.nj + j) * g.ni + i],
+    }
+}
+
+/// Largest `y+` of the streamwise no-slip walls that are resolved (the faces whose normal is `j` or `k`: the body surface and the fin sides; not the `i` faces of the
+/// base and of blunt fin edges, where the log law has no meaning, and not the fin tips: the tip face is thickness times tip chord, a negligible wetted area, and the
+/// cell above it belongs to the far-field fan, `y+` in the thousands by design; [`y_plus_max_of`] gives them): `d_n sqrt(rho |tau|) / mu` of the first cell. `0` for Euler.
+/// This is the number for quality and warnings.
+pub fn y_plus_max(s: &Solver3) -> f64 {
+    y_plus_max_of(s, |w| w != Wall::FinTip)
+}
+
+/// [`y_plus_max`] over the faces of the wall classes for which `keep` holds (the body surface, the fin sides, the fin tips).
+pub fn y_plus_max_of(s: &Solver3, keep: impl Fn(Wall) -> bool) -> f64 {
+    y_plus_at(s).into_iter().filter(|w| keep(w.4)).map(|w| w.0).fold(0.0, f64::max)
+}
+
+/// The `y+` of the first cell at every streamwise no-slip wall face: `(y+, family, [i, j, k] of the face, first fluid cell, wall class)`; empty for Euler.
+pub fn y_plus_at(s: &Solver3) -> Vec<(f64, usize, [usize; 3], usize, Wall)> {
+    let Some(rans) = s.rans() else { return Vec::new() };
+    let g = &s.grid;
+    let classes = wall_classes(g);
+    let mut out = Vec::new();
+    for t in s.wall_tractions() {
+        if t.dir == 0 {
+            continue;
+        }
+        let [i, j, k] = t.idx;
+        let Some(&class) = classes.get(&(t.dir, i, j, k)) else { continue };
+        let f = face_at(g, t.dir, i, j, k);
+        // the fluid cell of the face: the cell at the face's own index, or the one below it
+        let own = g.cell(i.min(g.ni - 1), j.min(g.nj - 1), k.min(g.nk - 1));
+        let cell = if g.part[own] == bowshock_cfd::grid3::PART_FLUID {
+            own
+        } else if t.dir == 1 {
+            g.cell(i, j - 1, k)
+        } else {
+            g.cell(i, j, k - 1)
+        };
+        let x = g.xc[cell];
+        let d_n = ((x[0] - f.c[0]) * t.n[0] + (x[1] - f.c[1]) * t.n[1] + (x[2] - f.c[2]) * t.n[2]).abs();
+        let tau = (t.tau[0] * t.tau[0] + t.tau[1] * t.tau[1] + t.tau[2] * t.tau[2]).sqrt();
+        out.push((d_n * (s.u[cell][0] * tau).sqrt() / rans.mu[cell], t.dir, t.idx, cell, class));
+    }
+    out
+}
+
+/// Mean pressure coefficient of the base face (area weighted over the `Wall::Base` faces, wall pressure as the force integration has it); `NaN` without a base.
+pub fn base_cp(case: &Case3, s: &Solver3) -> f64 {
+    let p_inf = s.cfg.freestream[4];
+    let q = 0.5 * case.mach * case.mach;
+    let (mut num, mut den) = (0.0, 0.0);
+    for w in wall_samples(&s.grid, &s.u) {
+        if w.class == Wall::Base {
+            let a = w.face.area * w.face.n[0].abs();
+            num += (w.pw - p_inf) * a;
+            den += a;
+        }
+    }
+    if den > 0.0 {
+        num / den / q
+    } else {
+        f64::NAN
+    }
 }
 
 /// The quantity a run waits on: CN of a half domain at incidence; the axial force coefficient of a wedge, a sector, or a half domain at zero incidence (CN is
@@ -432,6 +654,9 @@ pub fn run3_on(case: &Case3, s: &mut Solver3, warm: bool) -> PointResult3 {
         let r = s.step();
         let cn = ((it + 1) % SAMPLE_EVERY == 0).then(|| monitor(case, s));
         it += 1;
+        if rule.wants_forces(it, MEAN_EVERY) {
+            rule.observe(it, &lift_forces(case, s));
+        }
         if rule.check(it - 1, r, cn).is_some() {
             break;
         }
@@ -443,7 +668,10 @@ pub fn run3_on(case: &Case3, s: &mut Solver3, warm: bool) -> PointResult3 {
             break;
         }
     }
-    rule.finish(case, lift_forces(case, s), it)
+    let mut r = rule.finish(case, lift_forces(case, s), it);
+    r.y_plus_max = y_plus_max(s);
+    r.cp_base = base_cp(case, s);
+    r
 }
 
 /// The stop rules of a 3D run, shared by the CPU and GPU runners. Feed it every iteration's residual (and, at iterations
@@ -458,6 +686,14 @@ pub struct StopRule3 {
     hist: Vec<(usize, f64)>,
     reason: StopReason,
     min_iters: usize,
+    mean_window: usize,
+    mean_from: usize,
+    mean_tol: f64,
+    incidence: bool,
+    /// `(iteration, [CA, CN, CN x_cp])` every [`MEAN_EVERY`] iterations after `mean_from`.
+    samples: Vec<(usize, [f64; 3])>,
+    mean_ready: bool,
+    last_window: Option<WindowMean>,
 }
 
 impl StopRule3 {
@@ -473,6 +709,34 @@ impl StopRule3 {
             hist: Vec::new(),
             reason: StopReason::MaxIterations,
             min_iters: if warm { n.warm_min_iters } else { n.stationary_min_iters },
+            mean_window: n.mean_window,
+            mean_from: n.mean_from,
+            mean_tol: n.mean_tol,
+            incidence: case.alpha.abs() >= 1e-12 && matches!(case.grid.domain, Domain3::Half { .. }),
+            samples: Vec::new(),
+            mean_ready: false,
+            last_window: None,
+        }
+    }
+
+    /// Whether the runner is to feed [`StopRule3::observe`] after `iterations` iterations: the mean rule is on, the iteration is a multiple of `every` and
+    /// past `mean_from`.
+    pub fn wants_forces(&self, iterations: usize, every: usize) -> bool {
+        self.mean_window > 0 && iterations > self.mean_from && iterations.is_multiple_of(every)
+    }
+
+    /// The force coefficients `f` of the state after `iterations` iterations (see [`StopRule3::wants_forces`]); call before [`StopRule3::check`] of the same
+    /// iteration. Whether the means of two consecutive windows of `mean_window` iterations agree ([`window_means`]) is decided here and ends the run, as
+    /// [`StopReason::MeanStationary`], at the next `check` (after the residual and range rules).
+    pub fn observe(&mut self, iterations: usize, f: &LiftForces) {
+        if self.mean_window == 0 || !(f.ca.is_finite() && f.cn.is_finite()) {
+            return;
+        }
+        let cm = if self.incidence && f.x_cp.is_finite() { f.cn * f.x_cp } else { 0.0 };
+        self.samples.push((iterations, [f.ca, f.cn, cm]));
+        if let Some((mean, agree)) = window_means(&self.samples, self.mean_window, self.mean_from, self.mean_tol, self.incidence) {
+            self.last_window = Some(mean);
+            self.mean_ready = agree;
         }
     }
 
@@ -532,6 +796,9 @@ impl StopRule3 {
                 }
             }
         }
+        if self.mean_ready {
+            return stop(self, StopReason::MeanStationary);
+        }
         None
     }
 
@@ -542,18 +809,56 @@ impl StopRule3 {
             reason = StopReason::NonFinite;
         }
         let drop_orders = if self.rmax > 0.0 && self.r.is_finite() { (self.rmax / self.r.max(1e-300)).log10() } else { 0.0 };
+        let mut f = f;
+        if let (StopReason::MeanStationary, Some(w)) = (reason, self.last_window) {
+            // the state at the stop is one phase of the oscillation: the result is the mean of the window
+            (f.ca, f.cn, f.x_cp) = (w.ca, w.cn, if self.incidence { w.x_cp } else { f.x_cp });
+        }
         PointResult3 {
             mach: case.mach,
             alpha: case.alpha,
             cn: f.cn,
             ca: f.ca,
             x_cp: f.x_cp,
+            window: self.last_window,
             iterations,
             stop_reason: reason,
             drop_orders,
             cn_history: self.hist,
+            y_plus_max: f64::NAN,
+            cp_base: f64::NAN,
         }
     }
+}
+
+/// Means of CA, CN and the moment over the last window of `length` iterations of `samples` and of the window before it, and whether the two agree: for every
+/// monitored coefficient (CA; at incidence also CN and the moment about the nose) `|m1 - m0| <= tol |m| + 1e-4` with `m = (m0 + m1) / 2`. `None` until both windows
+/// lie after iteration `from` and hold at least 8 samples each. Returns the second window's means with its oscillation (largest relative half range).
+pub fn window_means(samples: &[(usize, [f64; 3])], length: usize, from: usize, tol: f64, incidence: bool) -> Option<(WindowMean, bool)> {
+    let &(end, _) = samples.last()?;
+    if length == 0 || end < from + 2 * length {
+        return None;
+    }
+    let lo1 = end - length;
+    let lo0 = lo1 - length;
+    let second: Vec<&[f64; 3]> = samples.iter().filter(|s| s.0 > lo1).map(|s| &s.1).collect();
+    let first: Vec<&[f64; 3]> = samples.iter().filter(|s| s.0 > lo0 && s.0 <= lo1).map(|s| &s.1).collect();
+    if first.len() < 8 || second.len() < 8 {
+        return None;
+    }
+    let mean = |w: &[&[f64; 3]], c: usize| w.iter().map(|s| s[c]).sum::<f64>() / w.len() as f64;
+    let n = if incidence { 3 } else { 1 };
+    let (mut agree, mut oscillation) = (true, 0.0f64);
+    for c in 0..n {
+        let (m0, m1) = (mean(&first, c), mean(&second, c));
+        let m = 0.5 * (m0 + m1);
+        agree &= (m1 - m0).abs() <= tol * m.abs() + 1e-4;
+        let (lo, hi) = second.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), s| (l.min(s[c]), h.max(s[c])));
+        oscillation = oscillation.max(0.5 * (hi - lo) / m1.abs().max(1e-12));
+    }
+    let (ca, cn, cm) = (mean(&second, 0), mean(&second, 1), mean(&second, 2));
+    let x_cp = if incidence && cn.abs() > 1e-12 { cm / cn } else { f64::NAN };
+    Some((WindowMean { end, length, ca, cn: if incidence { cn } else { 0.0 }, x_cp, oscillation }, agree))
 }
 
 /// Cold run on a fresh solver.
@@ -604,5 +909,74 @@ mod tests {
         // the same drop inside the second-order phase stops the run
         let stop = feed(|it| if it < 200 { 1.0 } else { 1e-7 }, |it| 0.3 + 0.1 * ((it / 50) % 2) as f64);
         assert_eq!(stop, Some((201, StopReason::ResidualDrop)));
+    }
+
+    /// A subsonic base wake as measured on the GPU (M 0.5, 2 degrees): CA oscillating 57 % peak to peak with a period of 222 iterations plus a second line at 108,
+    /// CN 120 % at 108, on a start-up transient that dies out.
+    fn wake(it: usize, drift_per_1000: f64) -> LiftForces {
+        let t = it as f64;
+        let w = |p: f64, ph: f64| (2.0 * std::f64::consts::PI * t / p + ph).sin();
+        let settle = 1.0 + 0.5 * (-t / 600.0).exp();
+        let trend = 1.0 + drift_per_1000 * t / 1000.0;
+        LiftForces {
+            ca: 0.234 * trend * settle * (1.0 + 0.22 * w(222.0, 0.3) + 0.08 * w(108.0, 1.1)),
+            cn: 0.0766 * settle * (1.0 + 0.5 * w(108.0, 0.7) + 0.1 * w(222.0, 2.0)),
+            x_cp: 7.0 + 0.5 * w(150.0, 0.0),
+        }
+    }
+
+    fn run_wake(drift: f64) -> (Option<(usize, StopReason)>, PointResult3) {
+        let case = Case3::tiny_anf(0.5, 2f64.to_radians());
+        let mut rule = StopRule3::new(&case, false);
+        let mut stop = None;
+        let mut last = 0;
+        for it in 1..=8000 {
+            last = it;
+            let f = wake(it, drift);
+            if rule.wants_forces(it, MEAN_EVERY) {
+                rule.observe(it, &f);
+            }
+            // the monitor samples of the range rule every 50 iterations; the residual stays high (a limit cycle)
+            let sample = (it % SAMPLE_EVERY == 0).then_some(f.cn);
+            if let Some(why) = rule.check(it - 1, 1e-2, sample) {
+                stop = Some((it, why));
+                break;
+            }
+        }
+        (stop, rule.finish(&case, wake(last, drift), last))
+    }
+
+    #[test]
+    fn an_oscillating_wake_with_a_stationary_mean_stops_on_the_window_mean() {
+        let (stop, r) = run_wake(0.0);
+        let (it, why) = stop.expect("the run stops");
+        assert_eq!(why, StopReason::MeanStationary);
+        // two windows of 1500 after iteration 1000, and the start-up transient (600 iterations) decayed
+        assert!((4000..=8000).contains(&it), "stopped at {it}");
+        // the result is the window mean (exact: 0.234 times the settled factor), within the leftover of a window that is not a whole number of cycles, and the oscillation is reported
+        let w = r.window.expect("a window");
+        assert!((r.ca - 0.234).abs() < 0.234 * 0.012, "mean CA {} vs 0.234", r.ca);
+        assert_eq!(r.ca, w.ca);
+        assert!((r.cn - 0.0766).abs() < 0.0766 * 0.04, "mean CN {}", r.cn);
+        assert!((r.x_cp - 7.0).abs() < 0.2, "x_cp {}", r.x_cp);
+        assert!(w.oscillation > 0.5 && w.oscillation < 0.7, "oscillation {} (CN: 0.5 + 0.1 half range)", w.oscillation);
+    }
+
+    #[test]
+    fn an_oscillating_wake_whose_mean_drifts_does_not_stop_on_the_mean() {
+        // 4 % of CA per 1000 iterations: the means of consecutive windows differ by 6 %
+        let (stop, r) = run_wake(0.04);
+        assert!(stop.is_none(), "{stop:?}");
+        assert!(r.window.is_some());
+    }
+
+    #[test]
+    fn the_mean_rule_is_off_with_a_zero_window() {
+        let mut case = Case3::tiny_anf(0.5, 2f64.to_radians());
+        case.numerics.mean_window = 0;
+        let mut rule = StopRule3::new(&case, false);
+        assert!(!rule.wants_forces(5000, MEAN_EVERY));
+        rule.observe(5000, &wake(5000, 0.0));
+        assert_eq!(rule.check(4999, 1e-2, None), None);
     }
 }

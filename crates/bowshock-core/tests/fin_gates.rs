@@ -31,12 +31,12 @@ impl FinRun {
 
 /// The wall-resolved grid is sized for Mach 3 at `Re_c` 1e6 for every case (one grid, through the cache): the first body cell for `y+` 1, the fin stack for 15.
 fn flow() -> WallFlow {
-    WallFlow { re_c: 1.0e6, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0 }
+    WallFlow { re_c: 1.0e6, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0, sutherland: 0.368 }
 }
 
 fn run(mach: f64, fins: Fins3, max_iter: usize) -> FinRun {
     let (t, span) = (fins.thickness, fins.span);
-    let mut case = Case3::sector(mach, Case3::anf_body(), fins, Tier::Coarse(flow()), 0);
+    let mut case = Case3::sector(mach, Case3::anf_body(), fins, Tier::Coarse(flow()), 0).euler_equations();
     case.numerics.max_iter = max_iter;
     let mut s: Solver3 = case.build_solver_cached().expect("grid");
     let r = run3_on(&case, &mut s, false);

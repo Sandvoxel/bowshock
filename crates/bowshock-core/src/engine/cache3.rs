@@ -10,6 +10,7 @@
 use crate::engine::case3::Case3;
 use crate::engine::grid3::{body_grid3, Grid3Params};
 use crate::error::Error;
+use bowshock_cfd::axis3::AxisMap;
 use bowshock_cfd::grid3::Grid3;
 use bowshock_cfd::solver3::Solver3;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -28,7 +29,7 @@ impl GridKey {
 /// The most recently used grids, newest last.
 pub struct GridCache {
     capacity: usize,
-    entries: Vec<(GridKey, Arc<Grid3>)>,
+    entries: Vec<(GridKey, Arc<Grid3>, Arc<AxisMap>)>,
     /// Lookups answered from the cache.
     pub hits: usize,
     /// Grids built (lookups that missed).
@@ -43,27 +44,33 @@ impl GridCache {
 
     /// The grid of `p`: the cached one, or built and cached (the least recently used grid goes when the cache is full).
     pub fn grid(&mut self, p: &Grid3Params) -> Result<Arc<Grid3>, Error> {
+        Ok(self.entry(p)?.0)
+    }
+
+    /// The grid of `p` and its axis ghost map (`Solver3::with_axis`), cached together.
+    pub fn entry(&mut self, p: &Grid3Params) -> Result<(Arc<Grid3>, Arc<AxisMap>), Error> {
         let key = GridKey::of(p);
-        if let Some(i) = self.entries.iter().position(|(k, _)| *k == key) {
+        if let Some(i) = self.entries.iter().position(|(k, _, _)| *k == key) {
             let entry = self.entries.remove(i);
-            let grid = entry.1.clone();
+            let out = (entry.1.clone(), entry.2.clone());
             self.entries.push(entry);
             self.hits += 1;
-            return Ok(grid);
+            return Ok(out);
         }
         let grid = Arc::new(body_grid3(p)?);
+        let axis = Arc::new(AxisMap::new(&grid));
         self.builds += 1;
         if self.entries.len() == self.capacity {
             self.entries.remove(0);
         }
-        self.entries.push((key, grid.clone()));
-        Ok(grid)
+        self.entries.push((key, grid.clone(), axis.clone()));
+        Ok((grid, axis))
     }
 
-    /// The implicit CPU solver of `case` on its (cached) grid: [`Case3::build_solver`] without the mesher.
+    /// The implicit CPU solver of `case` on its (cached) grid and axis map: [`Case3::build_solver`] without the mesher and the axis map.
     pub fn solver(&mut self, case: &Case3) -> Result<Solver3, Error> {
-        let grid = self.grid(&case.grid)?;
-        Ok(case.solver_on(Grid3::clone(&grid)))
+        let (grid, axis) = self.entry(&case.grid)?;
+        Ok(case.solver_with_axis(Grid3::clone(&grid), AxisMap::clone(&axis)))
     }
 
     /// Number of grids held.
@@ -121,7 +128,7 @@ mod tests {
     #[test]
     fn the_grid_mach_and_the_domain_are_part_of_the_key() {
         use crate::engine::case3::WallFlow;
-        let flow = |mach_max| WallFlow { re_c: 1e6, mach_max, ks_body: 0.0, ks_fin: 0.0 };
+        let flow = |mach_max| WallFlow { re_c: 1e6, mach_max, ks_body: 0.0, ks_fin: 0.0, sutherland: 0.368 };
         let wedge = |tier| Case3::wedge(2.0, Case3::anf_body(), 0).with_tier(tier);
         let (c1, c2, c3) = (wedge(Tier::Coarse(flow(2.0))), wedge(Tier::Coarse(flow(3.0))), wedge(Tier::Euler));
         let keys: Vec<GridKey> = [&c1, &c2, &c3].iter().map(|c| GridKey::of(&c.grid)).collect();
@@ -167,8 +174,8 @@ mod tests {
     fn a_cached_product_grid_saves_the_mesher() {
         use crate::engine::case3::WallFlow;
         use std::time::Instant;
-        let flow = WallFlow { re_c: 5.0e5, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0 };
-        let c = Case3::sector(2.0, Case3::anf_body(), Case3::anf_fins(), Tier::Coarse(flow), 0);
+        let flow = WallFlow { re_c: 5.0e5, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0, sutherland: 0.368 };
+        let c = Case3::sector(2.0, Case3::anf_body(), Case3::anf_fins(), Tier::Coarse(flow), 0).euler_equations();
         let mut cache = GridCache::new(1);
         let t = Instant::now();
         let a = cache.solver(&c).unwrap();

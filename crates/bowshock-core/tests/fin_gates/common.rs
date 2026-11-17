@@ -8,7 +8,7 @@
 
 use bowshock_cfd::solver3::Solver3;
 use bowshock_core::engine::case3::{Case3, Tier, WallFlow};
-use bowshock_core::engine::run3::{breakdown_on, drag_parts, lift_forces, run3_on, DragParts, LiftBreakdown, LiftForces, PointResult3};
+use bowshock_core::engine::run3::{breakdown_of, drag_parts_on, lift_forces, run3_on, DragParts, LiftBreakdown, LiftForces, PointResult3};
 
 /// Which tier the gate runs: the parameter that turns the same test from Euler (today) into RANS.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,10 +39,11 @@ pub fn tier(kind: TierKind, flow: WallFlow) -> Tier {
     }
 }
 
-/// Does the engine solve the viscous equations? **`phys3d` / `gpu3d`: this is the switch.** Today `Case3` and `Solver3` carry no viscous fluxes (the tiers only size
-/// the grid), so it is `false`; make it read the `Case3` viscous switch when the RANS integration is merged, and fill [`Solved::fin_friction`].
-pub fn engine_is_viscous(_case: &Case3) -> bool {
-    false
+/// Does the engine solve the viscous equations for `case`? The CPU solver does when the case is viscous (`Case3::viscous`: the wall-resolved tiers, a viscous 2D
+/// case on the wedge; `Case3::euler_equations` drops it); the GPU runner is Euler until `gpu3d` integrates the viscous step (`BOWSHOCK_WEDGE_BACKEND=gpu` is then
+/// INFO / "engine is inviscid").
+pub fn engine_is_viscous(case: &Case3) -> bool {
+    case.viscous.is_some() && !gpu_backend()
 }
 
 /// Does a run of `kind` count as a gate (viscous) or as INFO (inviscid)?
@@ -71,7 +72,7 @@ pub struct Solved {
     pub parts: DragParts,
     pub lift: LiftForces,
     pub breakdown: LiftBreakdown,
-    /// Fin friction force coefficient (on `pi/4`, all fins), `None` while the engine is inviscid.
+    /// Fin friction force coefficient (on `pi/4`, all fins: `DragParts::fin_friction`), `None` for an inviscid engine.
     pub fin_friction: Option<f64>,
 }
 
@@ -111,14 +112,9 @@ impl Session {
         match self {
             Session::Cpu(s) => {
                 let point = run3_on(case, s, warm);
-                let p_inf = s.cfg.freestream[4];
-                Ok(Solved {
-                    point,
-                    parts: drag_parts(case, &s.grid, &s.u, p_inf),
-                    lift: lift_forces(case, s),
-                    breakdown: breakdown_on(case, &s.grid, &s.u, p_inf),
-                    fin_friction: None,
-                })
+                let parts = drag_parts_on(case, s);
+                let fin_friction = s.viscous().map(|_| parts.fin_friction());
+                Ok(Solved { point, lift: lift_forces(case, s), breakdown: breakdown_of(case, s), parts, fin_friction })
             }
             #[cfg(feature = "gpu")]
             Session::Gpu(r) => {

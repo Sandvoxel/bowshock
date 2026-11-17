@@ -11,8 +11,9 @@ use crate::spec::FinProfile;
 use bowshock_cfd::flux::Limiter;
 use bowshock_cfd::gas3::freestream3;
 use bowshock_cfd::grid3::{Grid3, PartRoughness};
-use bowshock_cfd::implicit::{ImplicitParams, LineSolve3};
-use bowshock_cfd::solver3::{Config3, Scheme3, Solver3};
+use bowshock_cfd::implicit::{DtMode, ImplicitParams, LineSolve3};
+use bowshock_cfd::solver::{Bc, Scheme, Turbulence, Viscous};
+use bowshock_cfd::solver3::{Config3, RansOpts3, Scheme3, Solver3};
 
 /// Numerical settings and stop-rule tolerances of a 3D run.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -31,8 +32,18 @@ pub struct Numerics3 {
     pub stationary_min_iters: usize,
     /// The same floor for a warm-started run, counted from the warm start.
     pub warm_min_iters: usize,
+    /// Mean-stationary rule ([`crate::engine::run3::StopRule3`]): length of one averaging window \[iterations\] (`0`: off). A run stops [`crate::engine::result::StopReason::MeanStationary`]
+    /// when the means of CA (and, at incidence, of CN and of the moment about the nose) over two consecutive windows agree within `mean_tol` (relative, plus 1e-4 absolute) and
+    /// both windows lie after iteration `mean_from`; the result is then the mean of the second window. For the oscillating subsonic base wake, whose period (50 to 220 iterations)
+    /// the range rule cannot see.
+    pub mean_window: usize,
+    pub mean_from: usize,
+    pub mean_tol: f64,
     /// Explicit 3D line solve overriding the backend default (`None`: [`Numerics3::implicit_for`]).
     pub line_solve: Option<LineSolve3>,
+    /// Static-pressure outflow `p = p_inf` at the last `i` plane instead of the characteristic ghost (the plates of the viscous gates; the body cases of the 2D
+    /// engine, and so these, use the characteristic outflow: `false`). Read by the viscous solver only.
+    pub pressure_outflow: bool,
 }
 
 impl Numerics3 {
@@ -56,8 +67,58 @@ impl Numerics3 {
             window: 250,
             stationary_min_iters: 250,
             warm_min_iters: 250,
+            mean_window: 1500,
+            mean_from: 1000,
+            mean_tol: 5e-3,
             line_solve: None,
+            pressure_outflow: false,
         }
+    }
+
+    /// The settings of a wall-resolved RANS run, as the 2D engine's `Numerics::viscous` has them: van Albada below Mach 0.85 and minmod above, the low-Mach
+    /// correction and (below Mach 1) the low-Mach preconditioning of the implicit left-hand side, `cfl_max` 50 (20 from Mach 1: the supersonic wake diverges at 50),
+    /// `DtMode::Sum`, 200 first-order iterations, the **block** lines (the diagonal solve is unmeasured on viscous wedges and stalls with the preconditioning on plates),
+    /// the characteristic outflow. The stationary rule waits 1000 iterations and a window of 1000 (friction settles slowly).
+    pub fn viscous(mach: f64, level: u32) -> Numerics3 {
+        let subsonic = mach < 0.85;
+        Numerics3 {
+            limiter: if subsonic { Limiter::VanAlbada } else { Limiter::Minmod },
+            low_mach: subsonic,
+            implicit: ImplicitParams {
+                dt_mode: DtMode::Sum,
+                cfl_max: if mach < 1.0 { 50.0 } else { 20.0 },
+                sub_iters: 3,
+                low_mach_precond: mach < 1.0,
+                ..ImplicitParams::DEFAULT
+            },
+            first_order_iters: 200,
+            max_iter: 80_000 << level,
+            rel_tol: 5e-4,
+            window: 1000,
+            stationary_min_iters: 1000,
+            warm_min_iters: 1000,
+            mean_window: 2000,
+            mean_from: 2000,
+            mean_tol: 5e-3,
+            line_solve: Some(LineSolve3::Block),
+            pressure_outflow: false,
+        }
+    }
+
+    /// The numerics of a 2D engine case on the wedge: its limiter, low-Mach flags, first-order iterations, implicit parameters (with the block lines) and outflow;
+    /// the stop rule is [`Numerics3::auto`]'s for an Euler case and [`Numerics3::viscous`]'s for a viscous one.
+    pub fn from_2d(case: &Case, level: u32) -> Numerics3 {
+        let mut n = if case.viscous.is_some() { Numerics3::viscous(case.mach, level) } else { Numerics3::auto(case.mach, level) };
+        n.limiter = case.numerics.limiter;
+        n.low_mach = case.numerics.low_mach;
+        n.first_order_iters = case.numerics.first_order_iters;
+        n.max_iter = case.numerics.max_iter;
+        if let Scheme::Implicit(p) = case.numerics.scheme {
+            n.implicit = ImplicitParams { line_solve: LineSolve3::Block, ..p };
+        }
+        n.line_solve = Some(LineSolve3::Block);
+        n.pressure_outflow = case.numerics.outflow == Bc::PressureOutflow;
+        n
     }
 
     /// The implicit parameters for a backend with the line solve resolved: `line_solve` if set, else the backend default.
@@ -83,7 +144,12 @@ pub struct WallFlow {
     /// Equivalent sand-grain roughness heights of the body and of the fins \[d\].
     pub ks_body: f64,
     pub ks_fin: f64,
+    /// Sutherland's constant over the free-stream temperature, `110.4 K / T_inf` ([`SUTHERLAND_SEA_LEVEL`] for the ISA at sea level): the viscosity law of the RANS run.
+    pub sutherland: f64,
 }
+
+/// `110.4 K / 288.15 K`: the Sutherland ratio of the ISA at sea level.
+pub const SUTHERLAND_SEA_LEVEL: f64 = 110.4 / 288.15;
 
 /// What a 3D grid is resolved for: the wall spacing of the body and of the fin sides, and the azimuthal policy.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -94,7 +160,8 @@ pub enum Tier {
     Coarse(WallFlow),
     /// Body and fin sides `y+` ~ 1.
     Fine(WallFlow),
-    /// The lift tier of a half domain: body and fins `y+` ~ 60 (wall functions), uniform azimuthal cells, `32 << level` over the half domain.
+    /// The lift tier of a half domain: body and fins `y+` ~ 60 (wall functions); without fins uniform azimuthal cells, `32 << level` over the half domain, with fins the
+    /// fin stack of [`FinStack`] at `y+` 60 (a uniform azimuth puts the first cell of a fin side at thousands of wall units).
     Lift(WallFlow),
 }
 
@@ -134,6 +201,9 @@ pub struct Case3 {
     pub snapshots: Option<Snapshots3>,
     /// The motor jet at the nozzle exit of the base ([`Case3::with_motor`]); `None`: power off.
     pub jet: Option<Jet>,
+    /// The viscous (RANS, SST) equations: set by [`Case3::with_tier`] for the wall-resolved tiers and by [`Case3::wedge_of`] for a viscous 2D case, `None`: Euler
+    /// ([`Case3::euler_equations`] keeps a wall-resolved grid and drops the viscous terms). Only `re_c` and `sutherland` are read by the 3D solver.
+    pub viscous: Option<Viscous>,
 }
 
 /// What the solver needs of the motor jet at the nozzle exit faces (`Wall::Jet`): the primitive state `[rho, u, v, w, p]` (axial, supersonic) and `[k, omega]`
@@ -144,8 +214,15 @@ impl Case3 {
     /// Sting grid of the 2D case ([`crate::engine::case::Case::new`] with `Wake::Sting`), the half domain with `24 << level` azimuthal cells
     /// and [`Numerics3::auto`].
     pub fn new(mach: f64, alpha: f64, body: BaseBody, fins: Option<Fins3>, level: u32) -> Case3 {
+        let finned = fins.is_some();
         let grid = Grid3Params::half(sting_grid(&body, level), fins, Grid3Params::default_nk(level), level);
-        Case3 { mach, alpha, body, grid, numerics: Numerics3::auto(mach, level), tier: Tier::Euler, progress: None, snapshots: None, jet: None }
+        let mut numerics = Numerics3::auto(mach, level);
+        if finned {
+            // the diagonal line solve (the GPU default) blows up on a finned half domain at incidence (M 3, alpha 6 at iteration ~110 on the GPU; ISSUES #24 on the CPU,
+            // the tiny ANF): the block lines are stable on both and equal on both. Block for every finned case until the diagonal solve is fixed
+            numerics.line_solve = Some(LineSolve3::Block);
+        }
+        Case3 { mach, alpha, body, grid, numerics, tier: Tier::Euler, progress: None, snapshots: None, jet: None, viscous: None }
     }
 
     /// This case with a motor jet from the centre of the base (the 2D [`crate::engine::case::Case::with_motor`]): the gap behind the base of the base-wake grid is
@@ -183,11 +260,14 @@ impl Case3 {
     }
 
     /// A 2D engine case ([`crate::engine::case::Case::new`] with `Wake::Base`) as a wedge of [`WEDGE_ANGLE`]: its body, its base-wake grid and its sting grid,
-    /// [`Numerics3::auto`] at grid `level` (the 2D case does not keep it). Euler: the wall treatment of a viscous case is not carried over.
+    /// the numerics of the 2D case ([`Numerics3::from_2d`]: limiter, low-Mach flags, implicit parameters with the block lines, outflow) and, for a viscous case, its
+    /// RANS parameters (`Case::viscous`: the grids are already wall-resolved). `level` is the grid level (the 2D case does not keep it).
     pub fn wedge_of(case: &Case, level: u32) -> Case3 {
         let mut c = Case3::new(case.mach, 0.0, case.body.clone(), None, level);
         c.grid.sting = case.grid_sting.clone();
         c.grid.base = Some(case.grid_base.clone());
+        c.numerics = Numerics3::from_2d(case, level);
+        c.viscous = case.viscous;
         c.on_wedge()
     }
 
@@ -234,10 +314,24 @@ impl Case3 {
             self.grid.base = Some(base);
         }
         self.grid.roughness = PartRoughness { body: flow.ks_body, fin: flow.ks_fin };
+        // a wall-resolved tier is a RANS run (SST, the automatic wall treatment): the equations follow the grid; `euler_equations` keeps the grid only
+        self.viscous = Some(Viscous { re_c: flow.re_c, sutherland: flow.sutherland, turbulence: Turbulence::Sst, wall_i_start: 0, roughness: 0.0 });
+        self.numerics = Numerics3::viscous(self.mach, level);
         match (&self.grid.fins, tier) {
-            (Some(f), Tier::Coarse(_) | Tier::Fine(_)) => self.grid.fin_stack = Some(FinStack::from_flow(flow.re_c, flow.mach_max, f.root_chord, y_fin)),
-            (_, Tier::Lift(_)) if matches!(self.grid.domain, Domain3::Half { .. }) => self.grid.nk = 32usize << level,
+            (Some(f), _) => self.grid.fin_stack = Some(FinStack::from_flow(flow.re_c, flow.mach_max, f.root_chord, y_fin)),
+            (None, Tier::Lift(_)) if matches!(self.grid.domain, Domain3::Half { .. }) => self.grid.nk = 32usize << level,
             _ => {}
+        }
+        self
+    }
+
+    /// The Euler equations on the grid of the tier (the fin-stack and wall-resolved grids of the Euler gates): drops the viscous terms and takes the numerics of
+    /// [`Numerics3::auto`] (the block lines on a wedge).
+    pub fn euler_equations(mut self) -> Case3 {
+        self.viscous = None;
+        self.numerics = Numerics3::auto(self.mach, self.grid.level);
+        if matches!(self.grid.domain, Domain3::Wedge { .. }) || self.grid.fins.is_some() {
+            self.numerics.line_solve = Some(LineSolve3::Block);
         }
         self
     }
@@ -254,16 +348,37 @@ impl Case3 {
 
     /// The implicit CPU solver of this case's numerics and free stream on `grid` (a grid the mesher did not build: the validation cases' wedges).
     pub fn solver_on(&self, grid: Grid3) -> Solver3 {
+        let s = Solver3::new(grid, self.config3());
+        self.with_equations(s)
+    }
+
+    /// [`Case3::solver_on`] with the axis map of `grid` already built (the grid cache shares it).
+    pub fn solver_with_axis(&self, grid: Grid3, axis: bowshock_cfd::axis3::AxisMap) -> Solver3 {
+        let s = Solver3::with_axis(grid, axis, self.config3());
+        self.with_equations(s)
+    }
+
+    fn config3(&self) -> Config3 {
         let n = &self.numerics;
-        let cfg = Config3 {
+        Config3 {
             freestream: self.freestream(),
             cfl: 0.5,
             limiter: n.limiter,
             first_order_iters: n.first_order_iters,
             low_mach: n.low_mach,
             scheme: Scheme3::Implicit(n.implicit_for(false)),
-        };
-        let mut s = Solver3::new(grid, cfg);
+        }
+    }
+
+    /// Switches the viscous (SST) terms of `s` on when the case is viscous: the sand-grain roughness of the walls from the grid's per-part values
+    /// (`Grid3::wall_ks`), the outflow of the numerics (characteristic for a body: `RansOpts3::default` would impose a static pressure, right for plates only);
+    /// gives the `Part::Jet` cells of a motor case the jet state.
+    fn with_equations(&self, mut s: Solver3) -> Solver3 {
+        if let Some(v) = self.viscous {
+            let ks = s.grid.wall_ks();
+            let ks = if ks.iter().any(|&k| k > 0.0) { ks } else { Vec::new() };
+            s.set_viscous_with(Some(v), RansOpts3 { pressure_outflow: self.numerics.pressure_outflow, ks, ..RansOpts3::default() });
+        }
         // phys3d hook: the motor jet patch (`Part::Jet` cells of the grid, `Solver3::set_jet`); nothing without a motor
         s.set_jet(self.jet_state3());
         s

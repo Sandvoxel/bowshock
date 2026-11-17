@@ -40,7 +40,13 @@ fn gf1_fins(n: u32) -> Fins3 {
 }
 
 fn flow() -> WallFlow {
-    WallFlow { re_c: env("RE_C", 1.0e6), mach_max: env("MACH_MAX", 2.0), ks_body: 0.0, ks_fin: 0.0 }
+    WallFlow {
+        re_c: env("RE_C", 1.0e6),
+        mach_max: env("MACH_MAX", 2.0),
+        ks_body: 0.0,
+        ks_fin: 0.0,
+        sutherland: bowshock_core::engine::case3::SUTHERLAND_SEA_LEVEL,
+    }
 }
 
 fn tier() -> Tier {

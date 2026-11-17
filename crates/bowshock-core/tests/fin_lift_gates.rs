@@ -42,7 +42,7 @@ fn flat_plate_cf(re_c: f64, mach: f64, chord: f64) -> f64 {
 
 /// The ANF's free stream for tier sizing (sea level, the highest Mach of the tables).
 fn anf_flow(mach_max: f64) -> WallFlow {
-    WallFlow { re_c: re_c_sea_level(0.03), mach_max, ks_body: 0.0, ks_fin: 0.0 }
+    WallFlow { re_c: re_c_sea_level(0.03), mach_max, ks_body: 0.0, ks_fin: 0.0, sutherland: 0.368 }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------
@@ -66,7 +66,7 @@ fn gate_f1_fin_friction_matches_the_flat_plate() {
         profile: FinProfile::DoubleWedge,
         planform: None,
     };
-    let flow = WallFlow { re_c: 1.0e6, mach_max: 2.0, ks_body: 0.0, ks_fin: 0.0 };
+    let flow = WallFlow { re_c: 1.0e6, mach_max: 2.0, ks_body: 0.0, ks_fin: 0.0, sutherland: 0.368 };
     let probe = Case3::sector(2.0, Case3::anf_body(), fins.clone(), tier(kind, flow), 0);
     assert!(
         common::engine_is_viscous(&probe) && kind != TierKind::Euler,
@@ -116,7 +116,7 @@ fn tunnel_re_c(mach: f64, re_per_m: f64) -> f64 {
 fn arcas_axial(mach: f64, fins_on: bool, re_per_m: f64) -> Result<(Solved, f64), String> {
     let (body, _) = arcas_body_spec().to_internal().map_err(|e| e.to_string())?;
     let d = arcas::BODY_DIAMETER;
-    let flow = WallFlow { re_c: tunnel_re_c(mach, re_per_m), mach_max: mach, ks_body: 0.0, ks_fin: 0.0 };
+    let flow = WallFlow { re_c: tunnel_re_c(mach, re_per_m), mach_max: mach, ks_body: 0.0, ks_fin: 0.0, sutherland: 0.368 };
     let kind = tier_kind();
     let case = if fins_on {
         let f = arcas_fin_spec();
@@ -138,7 +138,8 @@ fn arcas_axial(mach: f64, fins_on: bool, re_per_m: f64) -> Result<(Solved, f64),
     };
     let solved = Session::new(&case).and_then(|mut s| s.run(&case, false))?;
     let q = case.body.nose_to_largest_area();
-    let value = q * (solved.body_pressure() + solved.fin_pressure() + solved.fin_friction.unwrap_or(0.0));
+    // the axial force without the base: pressure and friction of the body and the fins (`C_A,corr` of the data)
+    let value = q * (solved.parts.total - solved.parts.base - solved.parts.friction.base);
     Ok((solved, value))
 }
 
@@ -228,7 +229,7 @@ fn gate_f5_anf_cd0() {
         match r {
             Ok((r, case)) => {
                 let q = case.body.nose_to_largest_area();
-                let measured = q * (r.lift.ca + r.fin_friction.unwrap_or(0.0));
+                let measured = q * r.lift.ca;
                 lines.info(
                     "G-F5",
                     &format!("anf-M{m:.3}-{name}:parts"),
@@ -325,7 +326,7 @@ fn gate_s_sector_vs_half_on_the_stack_grids() {
     let kind = tier_kind();
     let items: Vec<(u32, f64)> = [4u32, 3].iter().flat_map(|&n| machs(&[0.8, 2.0]).into_iter().map(move |m| (n, m))).collect();
     let nk_s = 6usize;
-    let flow = |m: f64| WallFlow { re_c: re_c_sea_level(0.03), mach_max: m.max(2.0), ks_body: 0.0, ks_fin: 0.0 };
+    let flow = |m: f64| WallFlow { re_c: re_c_sea_level(0.03), mach_max: m.max(2.0), ks_body: 0.0, ks_fin: 0.0, sutherland: 0.368 };
     let runs = par_map(&items, |&(n, m)| -> Result<(Solved, Solved, Case3), String> {
         let mut sector = Case3::sector(m, Case3::anf_body(), fins_of(n), tier(kind, flow(m)), 0);
         let mut half = Case3::base_half(m, 0.0, Case3::anf_body(), Some(fins_of(n)), tier(kind, flow(m)), 0);
@@ -344,7 +345,7 @@ fn gate_s_sector_vs_half_on_the_stack_grids() {
         let id = format!("anf-N{n}-M{m:.1}");
         match r {
             Ok((rs, rh, case)) => {
-                let (ts, th) = (rs.parts.total + rs.fin_friction.unwrap_or(0.0), rh.parts.total + rh.fin_friction.unwrap_or(0.0));
+                let (ts, th) = (rs.parts.total, rh.parts.total);
                 lines.info(
                     "G-S",
                     &format!("{id}:parts"),

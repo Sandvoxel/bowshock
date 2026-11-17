@@ -1468,7 +1468,7 @@ mod tests {
 
     fn flow() -> crate::engine::case3::WallFlow {
         // the example rocket at Mach 2: Re/m 9.84e6, d = 0.0572 m
-        crate::engine::case3::WallFlow { re_c: 9.84e6 * 0.0572 / 2.0, mach_max: 2.0, ks_body: 2e-5, ks_fin: 1e-4 }
+        crate::engine::case3::WallFlow { re_c: 9.84e6 * 0.0572 / 2.0, mach_max: 2.0, ks_body: 2e-5, ks_fin: 1e-4, sutherland: 0.368 }
     }
 
     #[test]
