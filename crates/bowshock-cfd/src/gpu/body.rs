@@ -6,7 +6,7 @@
 // Every function mirrors the CPU routine of the same name in the CPU modules of this crate expression by expression; the array code is
 // the equation, the doc comment states it.
 
-use crate::flux::{Limiter, LOW_MACH_FLOOR, SHOCK_SENSOR_HI, SHOCK_SENSOR_LO};
+use crate::limiter::{Limiter, LOW_MACH_FLOOR, SHOCK_SENSOR_HI, SHOCK_SENSOR_LO};
 use crate::gas::GAMMA;
 use crate::grid::Grid;
 use crate::solver::{Bc, Block, Config, Nozzle};

@@ -181,9 +181,9 @@ pub mod czarnecki_monta {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bowshock_cfd::flux::Limiter;
     use bowshock_cfd::gas::{cons_to_prim, freestream, prim_to_cons};
     use bowshock_cfd::grid::Grid;
+    use bowshock_cfd::limiter::Limiter;
     use bowshock_cfd::solver::{Bc, Config, Solver};
     use bowshock_core::engine::run::run_cold;
 

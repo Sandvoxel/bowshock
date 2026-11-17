@@ -28,11 +28,11 @@
 //! (`tools/gpuq/gpumem` measures any command the same way).
 //! The viscous + SST step drops in by implementing [`Step`] for its solver and adding a case that builds it; nothing else here is Euler-specific.
 
-use bowshock_cfd::flux::Limiter;
 use bowshock_cfd::gas3::freestream3;
 use bowshock_cfd::gpu::{GpuSolver3, Precision};
 use bowshock_cfd::grid3::Grid3;
 use bowshock_cfd::implicit::{ImplicitParams, LineSolve3};
+use bowshock_cfd::limiter::Limiter;
 use bowshock_cfd::solver3::{Config3, Scheme3};
 use bowshock_core::engine::case3::{Case3, Tier};
 use bowshock_core::engine::grid3::body_grid3;

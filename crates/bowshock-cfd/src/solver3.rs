@@ -14,11 +14,11 @@
 
 use crate::axis3::AxisMap;
 use crate::bc3::{characteristic_ghost3, pressure_outflow_ghost3};
-use crate::flux::Limiter;
 use crate::flux3::{face_flux_lm3, face_rot};
 use crate::gas3::{cons_to_prim3, prim_to_cons3, reflect3, sound_speed3, Cons3, Prim3};
 use crate::grid3::{Face3, Grid3, Symmetry, PART_DEAD, PART_FLUID};
 use crate::implicit::{DtMode, ImplicitParams};
+use crate::limiter::Limiter;
 use crate::lowmach5::{spectral_pc3, LowMach};
 use crate::viscous3::{diffusion_rates, wall_ghost3};
 use rayon::prelude::*;

@@ -3,7 +3,7 @@
 //!
 //! `cargo run --release --example diag -- <theta_deg> <ni> <nj> <minmod|vanalbada> <iters> [window]`
 use bowshock_cases::cone::{build_solver, ConeCase};
-use bowshock_cfd::flux::Limiter;
+use bowshock_cfd::limiter::Limiter;
 use bowshock_reference::taylor_maccoll::solve_cone;
 use std::io::Write;
 

@@ -30,9 +30,9 @@
 //! `sharp-le` is a wedge leading edge (ramp over 0.1 chord) with a full-thickness blunt trailing edge. `--limiter minmod|vanalbada|venkat`
 //! overrides the reconstruction limiter. `--geometry` prints the fin geometry actually meshed (no GPU).
 
-use bowshock_cfd::flux::Limiter;
 use bowshock_cfd::gpu::{GpuSolver3, Precision};
 use bowshock_cfd::implicit::LineSolve3;
+use bowshock_cfd::limiter::Limiter;
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
 use bowshock_core::engine::case3::Case3;
 use bowshock_core::engine::run3::{breakdown_on, PartForces};

@@ -3,7 +3,7 @@
 //! drag) reads it unchanged. Where the wedge reproduces the frozen 2D results (G-W1 and G-W4 in `tests/wedge_gates.rs`) a validation driver can run on it
 //! (`--wedge`); the 2D runners stay until the 2D deletion.
 
-use bowshock_cfd::flux::Limiter;
+use bowshock_cfd::limiter::Limiter;
 use bowshock_cfd::solver::Solver;
 use bowshock_core::engine::case3::Case3;
 use bowshock_core::engine::grid3::{wedge_of_meridian, WEDGE_ANGLE};

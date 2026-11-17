@@ -122,7 +122,7 @@ fn build(case: &Case3) -> Solver3 {
         ..ImplicitParams::DEFAULT
     };
     s.cfg.scheme = Scheme3::Implicit(p);
-    s.cfg.limiter = if subsonic { bowshock_cfd::flux::Limiter::VanAlbada } else { bowshock_cfd::flux::Limiter::Minmod };
+    s.cfg.limiter = if subsonic { bowshock_cfd::limiter::Limiter::VanAlbada } else { bowshock_cfd::limiter::Limiter::Minmod };
     s.cfg.low_mach = subsonic;
     s.cfg.first_order_iters = 200;
     let re_c = flow().re_c;

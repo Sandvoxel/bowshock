@@ -4,7 +4,7 @@
 //! `--quick` runs only the coarse and medium grids. `--wedge` solves on the single-cell wedge of the 3D engine (`bowshock_cases::wedge`) instead of the 2D solver.
 
 use bowshock_cases::cone::{run_cone, run_cone_wedge, ConeCase};
-use bowshock_cfd::flux::Limiter;
+use bowshock_cfd::limiter::Limiter;
 use bowshock_reference::taylor_maccoll::solve_cone;
 use std::fs;
 use std::io::Write;

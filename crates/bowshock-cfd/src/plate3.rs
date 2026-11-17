@@ -11,11 +11,11 @@
 //!
 //! The reference numbers of the 2D solver on the same cases are frozen in `fixtures/ref2d.json` (`plate-g1`, `plate-g2`, `plate-g2r`); the tests print the 3D ones.
 
-use crate::flux::Limiter;
 use crate::gas3::freestream3;
 use crate::grid::{plate_grid, PlateGridParams};
 use crate::grid3::{Grid3, Part, SolidBox};
 use crate::implicit::ImplicitParams;
+use crate::limiter::Limiter;
 use crate::solver::{Turbulence, Viscous};
 use crate::solver3::{Config3, RansOpts3, Scheme3, Solver3};
 

@@ -17,6 +17,7 @@ pub mod grid;
 pub mod grid3;
 pub mod implicit;
 pub mod implicit3;
+pub mod limiter;
 pub mod lowmach5;
 pub mod multigrid;
 pub mod plate3;

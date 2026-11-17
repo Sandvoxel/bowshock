@@ -41,10 +41,10 @@
 //! Not provided (belongs to the solver): where `P` enters the boundary treatment (the ghost Jacobian blocks are unchanged), and the `ImplicitParams` flag
 //! (`low_mach_precond`, documented as 2D only).
 
-use crate::flux::shock_weight;
 use crate::gas3::{sound_speed3, Cons3, Prim3, GAMMA};
 use crate::implicit::{ImplicitParams, LOW_MACH_UINF_CUTOFF, LOW_MACH_UREF_EPS};
 use crate::implicit3::{abs_jacobian3, flux_jacobian3, M5};
+use crate::limiter::shock_weight;
 
 const EYE: M5 = {
     let mut m = [0.0; 25];

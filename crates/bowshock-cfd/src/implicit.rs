@@ -39,9 +39,9 @@
 //! (`(P - dt J_i) X = dt R`, `(P - dt J_j) dU = P X`), the face dissipation `P |P^-1 A|` and the pseudo-time step uses the preconditioned
 //! spectral radius. The right-hand side is not touched: the steady state is the same, only the pseudo-time dynamics at low Mach number change.
 
-use crate::flux::shock_weight;
 use crate::gas::{cons_to_prim, prim_to_cons, sound_speed, Cons, Prim, GAMMA};
 use crate::grid::Face;
+use crate::limiter::shock_weight;
 use crate::solver::{pidx, Bc, Solver};
 use crate::viscous::{self, wall_ghost};
 use rayon::prelude::*;
@@ -1037,8 +1037,8 @@ mod tests {
 
     #[test]
     fn implicit_scheme_preserves_the_free_stream() {
-        use crate::flux::Limiter;
         use crate::gas::freestream;
+        use crate::limiter::Limiter;
         use crate::solver::{Config, Scheme};
         for mach in [0.1, 0.5, 0.9] {
             for outflow in [Bc::Characteristic, Bc::PressureOutflow] {

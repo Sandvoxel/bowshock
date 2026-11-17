@@ -187,8 +187,8 @@ mod tests {
     /// the implicit variants are also compared with each other in the second-order van Albada scheme.
     #[test]
     fn converged_state_is_independent_of_the_acceleration_scheme() {
-        use bowshock_cfd::flux::Limiter;
         use bowshock_cfd::gas::Cons;
+        use bowshock_cfd::limiter::Limiter;
         let mut case = subsonic_case(0.5, Nose::TangentOgive { fineness: 3.0 }, 0, false);
         case.grid_sting.n_up = 12;
         case.grid_sting.n_nose = 20;

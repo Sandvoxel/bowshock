@@ -1,8 +1,8 @@
 //! Cone validation case: set-up, steady-state iteration and post-processing against Taylor-Maccoll.
 
-use bowshock_cfd::flux::Limiter;
 use bowshock_cfd::gas::freestream;
 use bowshock_cfd::grid::{cone_grid, ConeGridParams};
+use bowshock_cfd::limiter::Limiter;
 use bowshock_cfd::solver::{Bc, Config, Solver};
 use bowshock_core::engine::result::StopReason;
 use bowshock_reference::taylor_maccoll::ConeSolution;

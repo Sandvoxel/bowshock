@@ -322,10 +322,10 @@ impl Solver3 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flux::Limiter;
     use crate::gas3::{cons_to_prim3, freestream3, prim_to_cons3};
     use crate::grid3::{Part, SolidBox};
     use crate::implicit::{ImplicitParams, LineSolve3};
+    use crate::limiter::Limiter;
     use crate::solver3::{Config3, Scheme3};
     use crate::viscous3::diffusion_rates;
     use crate::viscous3::tests::box_grid;

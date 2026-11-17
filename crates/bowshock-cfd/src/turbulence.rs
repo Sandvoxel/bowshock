@@ -606,10 +606,10 @@ pub(crate) fn update(s: &mut Solver) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flux::Limiter;
     use crate::gas::freestream;
     use crate::grid::{plate_grid, PlateGridParams};
     use crate::implicit::ImplicitParams;
+    use crate::limiter::Limiter;
     use crate::solver::{Config, Scheme, Turbulence, Viscous};
     use crate::viscous::temperature;
     use crate::viscous::tests::cf_at;

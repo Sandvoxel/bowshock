@@ -8,10 +8,10 @@ use crate::engine::grid3::{body_grid3, Domain3, FinStack, Fins3, Grid3Params, WE
 use crate::error::Error;
 use crate::progress::ProgressSink;
 use crate::spec::FinProfile;
-use bowshock_cfd::flux::Limiter;
 use bowshock_cfd::gas3::freestream3;
 use bowshock_cfd::grid3::{Grid3, PartRoughness};
 use bowshock_cfd::implicit::{DtMode, ImplicitParams, LineSolve3};
+use bowshock_cfd::limiter::Limiter;
 use bowshock_cfd::solver::{Bc, Scheme, Turbulence, Viscous};
 use bowshock_cfd::solver3::{Config3, RansOpts3, Scheme3, Solver3};
 

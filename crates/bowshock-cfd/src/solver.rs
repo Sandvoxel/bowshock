@@ -12,9 +12,10 @@
 //!    fluxes `Fv` that enter the cell residual as `F - Fv`, no-slip wall ghost states.
 
 use crate::bc::{characteristic_ghost, pressure_outflow_ghost};
-use crate::flux::{face_flux_lm, Limiter};
+use crate::flux::face_flux_lm;
 use crate::gas::{cons_to_prim, prim_to_cons, reflect, sound_speed, Cons, Prim};
 use crate::grid::{Face, Grid};
+use crate::limiter::Limiter;
 use crate::viscous::{self, wall_ghost, Walls};
 use rayon::prelude::*;
 

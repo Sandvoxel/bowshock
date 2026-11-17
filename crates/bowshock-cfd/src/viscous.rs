@@ -456,10 +456,10 @@ pub(crate) fn face_lambdas(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::flux::Limiter;
     use crate::gas::freestream;
     use crate::grid::{plate_grid, PlateGridParams};
     use crate::implicit::ImplicitParams;
+    use crate::limiter::Limiter;
     use crate::solver::{Config, Scheme, Solver, Turbulence};
 
     #[test]

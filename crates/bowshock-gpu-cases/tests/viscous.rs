@@ -6,11 +6,11 @@
 //! `max |dU| / (1 + |U|)`, the residual histories by `max |r - r_cpu| / r_cpu` (from the second iteration: the first is round-off of the
 //! uniform start on both sides).
 
-use bowshock_cfd::flux::Limiter;
 use bowshock_cfd::gas::freestream;
 use bowshock_cfd::gpu::{GpuSolver, Precision};
 use bowshock_cfd::grid::{plate_grid, PlateGridParams};
 use bowshock_cfd::implicit::ImplicitParams;
+use bowshock_cfd::limiter::Limiter;
 use bowshock_cfd::solver::{Bc, Config, Scheme, Solver, Turbulence, Viscous};
 use bowshock_cfd::turbulence::K_INF;
 use bowshock_core::atmosphere::{Atmosphere, FlightConditions};

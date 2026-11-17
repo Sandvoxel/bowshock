@@ -13,8 +13,8 @@
 
 use bowshock_cases::ogive::wall_cp_at;
 use bowshock_cases::transonic::{named_body, stoney, tangent_cone_cd, transonic_case};
-use bowshock_cfd::flux::Limiter;
 use bowshock_cfd::implicit::ImplicitParams;
+use bowshock_cfd::limiter::Limiter;
 use bowshock_cfd::solver::{Bc, Scheme};
 use bowshock_core::engine::result::PointResult;
 use bowshock_core::engine::run::run_on;

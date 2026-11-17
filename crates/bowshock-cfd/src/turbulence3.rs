@@ -1506,8 +1506,8 @@ mod tests {
 
     mod parity {
         use super::*;
-        use crate::flux::Limiter;
         use crate::gas::{freestream, prim_to_cons};
+        use crate::limiter::Limiter;
         use crate::solver::{Bc, Config, Solver};
         use crate::viscous::{iface_sides, jface_sides};
         use crate::viscous3::wedge::{col_x, smooth_state, wedge};

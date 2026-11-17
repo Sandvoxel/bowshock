@@ -13,9 +13,9 @@
 
 use bowshock_cases::subsonic::{fox_case, fox_tm_x2439 as fox, subsonic_case};
 use bowshock_cases::transonic::named_body;
-use bowshock_cfd::flux::Limiter;
 use bowshock_cfd::gpu::Precision;
 use bowshock_cfd::implicit::ImplicitParams;
+use bowshock_cfd::limiter::Limiter;
 use bowshock_cfd::solver::Scheme;
 use bowshock_core::engine::body_grid::Body;
 use bowshock_core::engine::case::{Case, Wake};
