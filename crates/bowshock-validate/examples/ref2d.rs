@@ -583,7 +583,7 @@ fn plate_cases() -> Vec<Value> {
             .map(|&xt| {
                 let (x, cf) = p.cf_at(xt);
                 let reference = 0.664 / (p.visc.re_c * p.mach * x).sqrt();
-                json!({"x": x, "cf": cf, "reference": reference, "reference_name": "Blasius 0.664/sqrt(Re_x)", "error": cf / reference - 1.0})
+                json!({"x": x, "cf": cf, "reference": reference, "reference_name": "Blasius 0.664/sqrt(Re_x)", "error": cf / reference - 1.0, "gated": true})
             })
             .collect();
         let inputs = json!({"kind": "plate", "case": "G1", "mach": 0.2, "re_c": 1e6, "turbulence": "laminar", "ks": 0.0,
@@ -608,7 +608,7 @@ fn plate_cases() -> Vec<Value> {
                 } else {
                     (0.37 / (5e6 * x).log10().powf(2.584), "0.37 / log10(5e6 x)^2.584")
                 };
-                json!({"x": x, "cf": cf, "reference": reference, "reference_name": name, "error": cf / reference - 1.0,
+                json!({"x": x, "cf": cf, "reference": reference, "reference_name": name, "error": cf / reference - 1.0, "gated": xt == 0.97,
                        "y_plus": y_plus, "ks_plus": ks_plus, "k_w_plus": k_plus, "omega_w_plus": om_plus, "nu_t_w_over_nu": nut_ratio, "max_mu_t_over_mu_inf": mu_t_max})
             })
             .collect();
@@ -639,7 +639,7 @@ fn cone_cases() -> Vec<Value> {
                            "window": [0.4, 0.9], "first_order_iters": 300},
                 "backend": "Cpu", "precision": "f64", "gpu": null,
                 "theory": {"cp": tm.cp_surface, "beta_deg": tm.beta.to_degrees()},
-                "numbers": {"cp_avg": res.cp_avg, "cp_cell_avg": res.cp_cell_avg, "beta_deg": res.beta_num, "iterations": res.iters,
+                "numbers": {"cp_avg": res.cp_avg, "cp_cell_avg": res.cp_cell_avg, "beta_deg": res.beta_num.to_degrees(), "iterations": res.iters,
                             "drop_orders": res.drop_orders, "stop_reason": format!("{:?}", res.stop_reason)},
                 "wall_s": wall_s,
             }));
