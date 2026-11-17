@@ -5,6 +5,9 @@ use bowshock_sim::{BodyKind, FinCrossSection, FinPlanform, FinSet, NoseShape, Ve
 
 /// Bump when what a stored table means changes (solver, grid level, how the parts are mapped): old tables then read as stale.
 pub(super) const SOLVER_REV: u64 = 5;
+/// The same for a table the 3D engine (`BOWSHOCK_ENGINE=3d`) solved: a separate number, so that a table of one engine is stale to the other, and the legacy keys are unchanged.
+/// At the engine swap this replaces [`SOLVER_REV`] (the legacy engine's tables are then stale, which they are meant to be).
+pub(super) const SOLVER_REV_3D: u64 = 1001;
 /// Relative drag tolerance of the solver's stop rule: a point ends once its total drag varies by less than this over 500
 /// iterations. Measured on the example rocket (coarse grid, RTX 3090, 10 points): about 29 000 iterations in all against about
 /// 82 000 for the default rule, the worst point within 0.39 % of its 12 000-iteration value (the aim is 1 %).
@@ -25,6 +28,25 @@ pub(super) const INTERIOR: [f64; 8] = [0.5, 0.8, 0.9, 1.0, 1.1, 1.3, 1.7, 2.3];
 pub(super) const NODE_GAP: f64 = 0.12;
 /// Bump when what a stored 3D stability solve means changes (solver, grid, how the forces are reduced).
 pub(super) const LIFT_REV: u64 = 4;
+/// [`LIFT_REV`] of the 3D engine (the half domain on the base-wake grid, the base solved, the fins on that grid).
+pub(super) const LIFT_REV_3D: u64 = 1001;
+
+/// The revision of the engine in use: what a stored table's key carries.
+fn solver_rev() -> u64 {
+    if solver::Engine::from_env() == solver::Engine::Solver3 {
+        SOLVER_REV_3D
+    } else {
+        SOLVER_REV
+    }
+}
+
+fn lift_rev() -> u64 {
+    if solver::Engine::from_env() == solver::Engine::Solver3 {
+        LIFT_REV_3D
+    } else {
+        LIFT_REV
+    }
+}
 /// The Mach nodes of a 3D stability solve (sparse: each costs two 3D Euler runs); the solve takes those inside the plotted range.
 pub const LIFT_INTERIOR: [f64; 8] = [0.5, 0.8, 0.95, 1.1, 1.3, 1.7, 2.3, 3.0];
 /// The angles of attack (degrees) every node is solved at.
@@ -135,7 +157,7 @@ pub(super) fn fin_spec(set: &FinSet, x_base: f64) -> Result<solver::FinSpec, Str
         root_te_to_base: (x_base - (set.station + set.root_chord)).max(0.0),
         profile,
     };
-    spec.validate().map_err(|e| e.to_string())?;
+    spec.validate_for(solver::Engine::from_env()).map_err(|e| e.to_string())?;
     Ok(spec)
 }
 
@@ -174,10 +196,10 @@ pub fn plan(rocket: &Rocket, vehicle: &Vehicle, units: UnitSystem) -> Result<Pla
     // contiguous run of segments from the tip.
     let contiguous = segments.windows(2).all(|w| (w[1].station - w[0].aft_station()).abs() < 1e-6);
     if segments.iter().any(|s| s.length <= 1e-9) || !contiguous || segments.first().is_some_and(|s| s.station.abs() > 1e-6) {
-        return Err(super::wording::NO_PODS.to_string());
+        return Err(super::wording::no_pods().to_string());
     }
     if !vehicle.tube_fins.is_empty() {
-        return Err(super::wording::NO_TUBE_FINS.to_string());
+        return Err(super::wording::no_tube_fins().to_string());
     }
     let first = segments.first().ok_or("the rocket has no parts")?;
     let BodyKind::Nose(sim_shape) = first.kind else {
@@ -275,7 +297,7 @@ impl Plan {
     /// Hash of the geometry the table depends on: the body, the solved fins and what the build-up adds.
     fn hash(&self) -> u64 {
         let mut h = Fnv::new();
-        h.u64(SOLVER_REV);
+        h.u64(solver_rev());
         let n = &self.body.nose;
         match n.shape {
             solver::NoseShape::Cone => h.u64(0),
@@ -385,7 +407,7 @@ pub fn lift_nodes(range: (f64, f64)) -> Option<Vec<f64>> {
 /// The key of a 3D stability solve: the geometry, the Mach nodes and the angles. The altitude is not in it (the solve is Euler).
 pub fn lift_key(geometry: u64, nodes: &[f64]) -> u64 {
     let mut h = Fnv::new();
-    h.u64(LIFT_REV).u64(geometry);
+    h.u64(lift_rev()).u64(geometry);
     nodes.iter().for_each(|m| {
         h.f(*m);
     });

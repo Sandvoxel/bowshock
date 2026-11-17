@@ -109,7 +109,7 @@ impl Method {
         match self {
             Method::Barrowman => "Barrowman (1967): linear normal force and CP at zero angle of attack; the angle of attack is ignored",
             Method::Extended => "Barrowman plus body lift and induced drag at the set angle of attack",
-            Method::CfdTable => super::cfd::METHOD_TIP,
+            Method::CfdTable => super::cfd::method_tip(),
         }
     }
 }

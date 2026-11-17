@@ -108,10 +108,10 @@ pub fn reduce_lift(raw: &[solver::PolarPoint], requested: usize, notes: &mut Vec
     let mut machs: Vec<f64> = points.iter().map(|p| p.mach).collect();
     machs.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
     if machs.len() < 2 && requested >= 2 {
-        return Err(wording::ANGLES_FEW.to_string());
+        return Err(wording::angles_few().to_string());
     }
     if points.is_empty() {
-        return Err(wording::ANGLES_NONE.to_string());
+        return Err(wording::angles_none().to_string());
     }
     Ok(points)
 }
@@ -448,10 +448,55 @@ pub fn partial_of(plan: &Result<Plan, String>, table: &CfdTable, altitude: f64, 
     (1..nodes.len()).find(|&n| table.key == table_key(plan.geometry, altitude, &nodes[..n])).map(|n| (n, nodes.len()))
 }
 
-/// The 3D engine (`BOWSHOCK_ENGINE=3d`, [`solver::Engine::Solver3`]) solves the Euler equations only for now: the drag nodes of a solve under it leave out the viscous
-/// settings (fail loudly otherwise). One place, so the engine swap deletes it with the viscous path.
-fn solves_euler_only() -> bool {
+/// Whether the points of a table share one grid, sized for the table's highest Mach number ([`solver::Analysis::grid_mach`]): the 3D engine's wall-resolved grids are
+/// sized from the free stream's Reynolds number, so one table shares one grid shape (and the kernels compiled for it); the legacy 2D engine's grids stay per point
+/// ([`SHARED_GRID`]).
+pub(super) fn shared_grid() -> bool {
+    SHARED_GRID || solver::Engine::from_env() == solver::Engine::Solver3
+}
+
+/// Whether the 3D engine (`BOWSHOCK_ENGINE=3d`) solves this process's nodes: it has no 2D grid to show a picture of before the first snapshot.
+fn solves_3d() -> bool {
     solver::Engine::from_env() == solver::Engine::Solver3
+}
+
+/// What a node needs solved.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NodeKind {
+    /// A Mach number at zero incidence.
+    Drag,
+    /// A Mach number at the angles of attack.
+    Lift,
+}
+
+/// The [`solver::Analysis`] of one node of either kind: the body, the fins, the resolution (a drag node's is the job's grid, the angles are always solved coarse), the
+/// backend and the fields, and, for an engine that solves the viscous terms, the flight conditions, the wall roughness, the drag tolerance (a drag node's stop rule)
+/// and the shared grid. The legacy engine's angle solver ignores the viscous settings; the 3D engine reads them for both kinds. An engine that does not solve them
+/// yet is not asked (it would fail loudly instead of running Euler).
+fn node_analysis(job: &Job, kind: NodeKind, session: &Session, altitude: f64, grid_mach: f64, shared_grid: bool) -> Result<solver::Analysis, Failed> {
+    let mut analysis = solver::Analysis::new(&job.plan.body)
+        .map_err(|e| Failed::Message(e.to_string()))?
+        .resolution(match (kind, job.grid) {
+            // Coarse is the default, for exploring; Medium (Refine) is about 3.5x slower per point and its Cd about 1 % different.
+            (NodeKind::Lift, _) | (_, CfdGrid::Coarse) => solver::Resolution::Coarse,
+            (NodeKind::Drag, CfdGrid::Medium) => solver::Resolution::Medium,
+        })
+        .backend(session.backend())
+        .keep_fields(true);
+    if solver::Engine::from_env().solves_viscous() {
+        analysis =
+            analysis.viscous(solver::FlightConditions { atmosphere: solver::Atmosphere::Isa { altitude_m: altitude } }).roughness(job.plan.body_roughness);
+        if kind == NodeKind::Drag {
+            analysis = analysis.drag_tolerance(DRAG_TOLERANCE);
+        }
+        if shared_grid {
+            analysis = analysis.grid_mach(grid_mach);
+        }
+    }
+    if let Some(fins) = &job.plan.fins {
+        analysis = analysis.fins(fins.clone());
+    }
+    Ok(analysis)
 }
 
 /// A Mach number of the drag table, solved: its point (none when the solver gave none) and where.
@@ -487,6 +532,8 @@ impl Node {
 /// viscosity and roughness.
 fn solve_lift_node(
     job: &Job,
+    grid_mach: f64,
+    shared_grid: bool,
     mach: f64,
     session: &mut Session,
     machine: usize,
@@ -494,14 +541,7 @@ fn solve_lift_node(
     cancel: &Arc<AtomicBool>,
     send: &Outbox,
 ) -> Result<LiftNode, Failed> {
-    let mut analysis = solver::Analysis::new(&job.plan.body)
-        .map_err(|e| Failed::Message(e.to_string()))?
-        .resolution(solver::Resolution::Coarse)
-        .backend(session.backend())
-        .keep_fields(true);
-    if let Some(fins) = &job.plan.fins {
-        analysis = analysis.fins(fins.clone());
-    }
+    let mut analysis = node_analysis(job, NodeKind::Lift, session, job.altitude.clamp(0.0, SOLVER_CEILING), grid_mach, shared_grid)?;
     let progress = sink(started, cancel.clone(), send.clone(), true, machine);
     let conditions: Vec<solver::Condition> = LIFT_ALPHAS.iter().map(|&a| solver::Condition::new(mach, a)).collect();
     let mut polar = match session {
@@ -549,7 +589,7 @@ fn solve_lift_node(
 /// points finished by then were all sent. The result carries which machines solved it, the build-up drag the solver left out, and
 /// notes on points that did not converge and machines that were left out.
 pub fn solve(job: &Job, cancel: &Arc<AtomicBool>, progress: impl Fn(Event) + Send + Sync + 'static) -> Result<CfdTable, String> {
-    solve_sized(job, cancel, progress, SHARED_GRID)
+    solve_sized(job, cancel, progress, shared_grid())
 }
 
 /// [`solve`], with the grid of every point sized for the table's highest Mach number (`shared_grid`) or, as before, for the point's own.
@@ -573,31 +613,10 @@ pub(super) fn solve_sized(
         let (job, cancel, send) = (Arc::new(job.clone()), cancel.clone(), send.clone());
         move |session: &mut Session, machine: usize, node: usize| -> Result<Node, Failed> {
             if node >= n_drag {
-                return solve_lift_node(&job, job.stability[node - n_drag], session, machine, started, &cancel, &send).map(Node::Lift);
+                return solve_lift_node(&job, grid_mach, shared_grid, job.stability[node - n_drag], session, machine, started, &cancel, &send).map(Node::Lift);
             }
             let mach = job.nodes[node];
-            let mut analysis = solver::Analysis::new(&job.plan.body)
-                .map_err(|e| Failed::Message(e.to_string()))?
-                .resolution(match job.grid {
-                    // Coarse is the default, for exploring; Medium (Refine) is about 3.5x slower per point and its Cd about 1 % different.
-                    CfdGrid::Coarse => solver::Resolution::Coarse,
-                    CfdGrid::Medium => solver::Resolution::Medium,
-                })
-                .backend(session.backend())
-                .keep_fields(true);
-            // The 3D engine (BOWSHOCK_ENGINE=3d) solves the Euler equations only for now: a viscous request would fail, so the drag nodes ask for none of it.
-            if !solves_euler_only() {
-                analysis = analysis
-                    .viscous(solver::FlightConditions { atmosphere: solver::Atmosphere::Isa { altitude_m: altitude } })
-                    .drag_tolerance(DRAG_TOLERANCE)
-                    .roughness(job.plan.body_roughness);
-                if shared_grid {
-                    analysis = analysis.grid_mach(grid_mach);
-                }
-            }
-            if let Some(fins) = &job.plan.fins {
-                analysis = analysis.fins(fins.clone());
-            }
+            let mut analysis = node_analysis(&job, NodeKind::Drag, session, altitude, grid_mach, shared_grid)?;
             let progress = sink(started, cancel.clone(), send.clone(), false, machine);
             let mut polar = match session {
                 Session::Remote(r) => {
@@ -606,7 +625,7 @@ pub(super) fn solve_sized(
                 Session::Local { backend } => {
                     // A picture of the flow every few hundred iterations (the first is the grid with the free stream on it, at once).
                     // A remote worker brings back only the final field of the point: its snapshots stay on its side.
-                    if !solves_euler_only() {
+                    if !solves_3d() {
                         if let Ok(first) = analysis.initial_field(mach) {
                             send(Event::Field(FieldRef::from_2d(&first)));
                         }

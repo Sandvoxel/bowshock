@@ -52,24 +52,43 @@ pub enum BackendUsed {
 
 /// Which engine solves a [`Condition`]: hidden until the 3D solver replaces the legacy pair (see [`Analysis::engine`]).
 #[doc(hidden)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Engine {
     /// The axisymmetric drag solver at zero incidence, the sting-grid 3D Euler solver at an angle of attack.
-    #[default]
     Legacy,
-    /// The 3D solver on the base-wake grid for both: the one-cell wedge at zero incidence, the half domain at an angle of attack
-    /// (`analysis_solver3.rs`).
+    /// The 3D solver on the base-wake grid for both: the one-cell wedge at zero incidence, the sector with fins, the half domain at an angle of attack
+    /// (`analysis/solver3.rs`).
     Solver3,
 }
 
+impl Default for Engine {
+    fn default() -> Engine {
+        Engine::DEFAULT
+    }
+}
+
 impl Engine {
-    /// The engine the `BOWSHOCK_ENGINE` environment variable names (`3d`, `solver3`: [`Engine::Solver3`]; anything else or unset:
-    /// [`Engine::Legacy`]): the default of every new [`Analysis`], so that the app and the tests can switch without code.
+    /// THE DEFAULT ENGINE: the one a new [`Analysis`] uses unless `BOWSHOCK_ENGINE` says otherwise and the one an [`AnalysisSpec`] without an `engine` key means. The flip
+    /// to the 3D engine is this one line (with `SOLVES_VISCOUS` in `analysis/solver3.rs` once the engine solves the viscous terms).
+    pub const DEFAULT: Engine = Engine::Legacy;
+
+    /// The engine the `BOWSHOCK_ENGINE` environment variable names (`3d` or `solver3`: [`Engine::Solver3`]; `legacy`: [`Engine::Legacy`]; unset or anything else:
+    /// [`Engine::DEFAULT`]): the default of every new [`Analysis`], so that the app and the tests can switch without code.
     pub fn from_env() -> Engine {
         match std::env::var("BOWSHOCK_ENGINE").as_deref().map(str::trim) {
             Ok(v) if v.eq_ignore_ascii_case("3d") || v.eq_ignore_ascii_case("solver3") => Engine::Solver3,
-            _ => Engine::Legacy,
+            Ok(v) if v.eq_ignore_ascii_case("legacy") => Engine::Legacy,
+            _ => Engine::DEFAULT,
+        }
+    }
+
+    /// Whether the engine solves the viscous terms (`Analysis::viscous`, roughness, a drag tolerance): the legacy engine does at zero incidence; the 3D engine says so
+    /// when its stage lands (`SOLVES_VISCOUS` in `analysis/solver3.rs`). A caller that would send the viscous settings asks here.
+    pub fn solves_viscous(self) -> bool {
+        match self {
+            Engine::Legacy => true,
+            Engine::Solver3 => solver3::SOLVES_VISCOUS,
         }
     }
 }
@@ -390,6 +409,8 @@ pub struct Analysis {
 }
 
 mod solver3;
+#[doc(hidden)]
+pub use solver3::{take_facade_timings, FacadeTiming};
 
 /// Free stream of a viscous sweep.
 struct Rans {

@@ -145,3 +145,50 @@ fn the_uncertainty_estimate_runs_the_neighbouring_level() {
     let polar = solver3().estimate_uncertainty(true).run(&[2.0]).unwrap();
     assert!(polar.points[0].cd_uncertainty.is_some_and(|u| u.is_finite()));
 }
+
+#[test]
+fn the_3d_engine_takes_one_to_sixteen_fins_the_legacy_engine_three_to_eight() {
+    for (count, legacy, solver3) in
+        [(1, false, true), (2, false, true), (3, true, true), (8, true, true), (9, false, true), (16, false, true), (17, false, false)]
+    {
+        let f = FinSpec { count, ..fins() };
+        assert_eq!(f.validate_for(Engine::Legacy).is_ok(), legacy, "{count} fins, legacy");
+        assert_eq!(f.validate_for(Engine::Solver3).is_ok(), solver3, "{count} fins, 3D engine");
+        assert_eq!(f.validate().is_ok(), legacy, "validate() is the legacy rule");
+    }
+    // and the route builds a 12-fin sector
+    let polar = solver3().fins(FinSpec { count: 12, ..fins() }).run(&[2.0]).unwrap();
+    assert!(polar.points[0].drag.fins.is_some());
+}
+
+#[test]
+fn the_engines_say_whether_they_solve_the_viscous_terms() {
+    assert!(Engine::Legacy.solves_viscous());
+    assert!(!Engine::Solver3.solves_viscous(), "until the viscous stage lands: the const in analysis/solver3.rs");
+}
+
+/// The GPU solver of a point is kept for the next cold point on the same grid (`analysis/solver3.rs`, `POOL`): a point solved on the kept solver is the point a fresh
+/// solver gives, bit for bit. Through `tools/gpuq/gpuq`.
+#[test]
+#[ignore = "GPU: through tools/gpuq"]
+fn a_kept_gpu_solver_gives_the_point_a_fresh_one_gives() {
+    // each case on its own thread (the pool is per thread): the last point of `conditions` after the earlier ones, which leave their solver for it
+    let last = |conditions: &'static [Condition]| {
+        std::thread::spawn(move || {
+            let a = solver3().backend(Backend::Gpu).max_iterations(200);
+            conditions.iter().map(|&c| a.run(&[c]).unwrap().points.remove(0)).last().unwrap()
+        })
+        .join()
+        .unwrap()
+    };
+    // the wedge, then the half domain (a grid the kept wedge solver was not built for, then one it was)
+    let fresh = last(&[Condition { mach: 2.0, alpha_deg: 0.0 }]);
+    let kept = last(&[Condition { mach: 1.5, alpha_deg: 0.0 }, Condition { mach: 2.0, alpha_deg: 0.0 }]);
+    assert_eq!(fresh.drag.total.to_bits(), kept.drag.total.to_bits(), "wedge: {} {}", fresh.drag.total, kept.drag.total);
+    assert_eq!((fresh.detail.iterations, fresh.detail.cp_base.to_bits()), (kept.detail.iterations, kept.detail.cp_base.to_bits()));
+    let fresh = last(&[Condition { mach: 2.0, alpha_deg: 4.0 }]);
+    let kept = last(&[Condition { mach: 2.0, alpha_deg: 0.0 }, Condition { mach: 1.5, alpha_deg: 4.0 }, Condition { mach: 2.0, alpha_deg: 4.0 }]);
+    let (f, k) = (fresh.forces.unwrap(), kept.forces.unwrap());
+    assert_eq!((f.cn.to_bits(), f.x_cp.to_bits()), (k.cn.to_bits(), k.x_cp.to_bits()), "half: {f:?} {k:?}");
+    assert_eq!(fresh.detail.iterations, kept.detail.iterations);
+}

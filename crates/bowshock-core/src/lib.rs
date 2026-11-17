@@ -41,11 +41,14 @@ pub mod progress;
 pub mod spec;
 
 #[doc(hidden)]
-pub use analysis::Engine;
+pub use analysis::{take_facade_timings, Engine, FacadeTiming};
 pub use analysis::{
     Analysis, AnalysisSpec, Backend, BackendUsed, Condition, Drag, FinDrag, Forces, PointDetail, Polar, PolarPoint, Quality, Resolution, WallCp, Warning,
 };
 pub use atmosphere::{AirState, Atmosphere, FlightConditions};
+#[cfg(feature = "gpu")]
+#[doc(hidden)]
+pub use bowshock_cfd::gpu::Precision;
 pub use device::gpu_name;
 pub use engine::case::Wake;
 pub use engine::result::StopReason;

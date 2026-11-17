@@ -325,7 +325,7 @@ fn angles_row(state: &State) -> Option<Element<'_, Message>> {
         return None;
     }
     let strip = crate::widgets::segmented::segmented(&[(true, "On"), (false, "Off")], state.cfd.angles, Message::Angles);
-    let tip: Element<'_, Message> = tooltip(strip, bubble(cfd::ANGLES_TIP)).position(tooltip::Position::Bottom).gap(SPACE_1).boxed();
+    let tip: Element<'_, Message> = tooltip(strip, bubble(cfd::angles_tip())).position(tooltip::Position::Bottom).gap(SPACE_1).boxed();
     Some(row_of(cfd::ANGLES_LABEL, tip))
 }
 

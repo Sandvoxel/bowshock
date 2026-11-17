@@ -200,8 +200,19 @@ pub struct FinSpec {
 impl FinSpec {
     /// Check the fin set; the error names the offending field as `fins.<field>`.
     pub fn validate(&self) -> Result<(), Error> {
-        if !(3..=8).contains(&self.count) {
-            return invalid("fins.count", &format!("must be in 3..=8, got {}", self.count));
+        self.validate_for(crate::analysis::Engine::Legacy)
+    }
+
+    /// [`FinSpec::validate`] for `engine`: the legacy engine takes 3 to 8 fins (its empirical fin-drag model and its sting-grid fin layout), the 3D engine 1 to 16
+    /// (the sector and the half domain build any count).
+    #[doc(hidden)]
+    pub fn validate_for(&self, engine: crate::analysis::Engine) -> Result<(), Error> {
+        let counts = match engine {
+            crate::analysis::Engine::Legacy => 3..=8,
+            crate::analysis::Engine::Solver3 => 1..=16,
+        };
+        if !counts.contains(&self.count) {
+            return invalid("fins.count", &format!("must be in {}..={}, got {}", counts.start(), counts.end(), self.count));
         }
         positive("fins.root_chord", self.root_chord)?;
         positive("fins.span", self.span)?;

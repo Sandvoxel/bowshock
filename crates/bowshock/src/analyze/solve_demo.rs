@@ -777,13 +777,20 @@ mod tests {
         let lift = table.lift.as_ref().expect("the 3D angles that were in");
         assert_eq!(lift.points.len(), 2 * kept);
         assert_eq!(lift.key, cfd::lift_key(j.plan.geometry, &j.stability[..kept]), "the key is the partial list's: it reads as stale");
-        assert_eq!(stopped.keep_label, format!("Keep {} points · 3D at {kept} Mach", j.nodes.len()));
-        assert!(table.notes.iter().any(|n| n.starts_with("Stopped early") && n.contains("3D Mach numbers solved")), "{:?}", table.notes);
+        assert_eq!(stopped.keep_label, format!("Keep {} points · {} at {kept} Mach", j.nodes.len(), if three_d() { "angles" } else { "3D" }));
+        assert!(
+            table
+                .notes
+                .iter()
+                .any(|n| n.starts_with("Stopped early") && n.contains(if three_d() { "angle Mach numbers solved" } else { "3D Mach numbers solved" })),
+            "{:?}",
+            table.notes
+        );
         assert!(app.ctx().doc.rocket().cfd_table(1).is_none(), "nothing is stored until Keep");
         press(&mut app, Message::CfdKeep);
         let stored = app.ctx().doc.rocket().cfd_table(1).expect("kept").clone();
         assert_eq!(stored.lift.as_ref().map(|l| l.points.len()), Some(2 * kept));
-        assert_eq!(notice(&app), format!("Kept {} points, 3D at {kept} Mach numbers", j.nodes.len()));
+        assert_eq!(notice(&app), format!("Kept {} points, {} at {kept} Mach numbers", j.nodes.len(), if three_d() { "angles" } else { "3D" }));
         // it is a partial table of the range, not a fresh one
         assert_eq!(app.analyze().solve_status(), cfd::Status::Stale);
     }
@@ -822,9 +829,20 @@ mod tests {
         feed(&mut app, serial, events(Demo::Done, &j));
         let table = app.ctx().doc.rocket().cfd_table(1).expect("stored").clone();
         assert_eq!(table.lift.as_ref().map(|l| l.points.len()), Some(2 * j.stability.len()));
-        assert_eq!(notice(&app), format!("Solved {} points and 3D stability · 1 not converged · 12 min 21 s", table.points.len()));
+        assert_eq!(
+            notice(&app),
+            format!("Solved {} points and {} · 1 not converged · 12 min 21 s", table.points.len(), if three_d() { "the angles" } else { "3D stability" })
+        );
         let (_, row) = app.analyze().cfd.summary.clone().expect("the account");
-        assert!(row.starts_with(&format!("Solved {} Mach points and 3D stability at {} Mach numbers in ", table.points.len(), j.stability.len())), "{row}");
+        assert!(
+            row.starts_with(&format!(
+                "Solved {} Mach points and {} at {} Mach numbers in ",
+                table.points.len(),
+                if three_d() { "the angles" } else { "3D stability" },
+                j.stability.len()
+            )),
+            "{row}"
+        );
         assert_eq!(app.analyze().solve_status(), cfd::Status::Fresh);
         assert_eq!(app.analyze().cfd.status, cfd::Status::Fresh);
     }
@@ -901,6 +919,11 @@ mod tests {
     }
 
     use crate::analyze::flow_view;
+
+    /// Whether the screens speak for the 3D engine (`BOWSHOCK_ENGINE=3d`): the app's tests hold under both settings.
+    fn three_d() -> bool {
+        solver::Engine::from_env() == solver::Engine::Solver3
+    }
 
     /// Plays the script of `demo` into the solve `serial` of `app`.
     fn play(app: &mut App, serial: u64, demo: Demo) {

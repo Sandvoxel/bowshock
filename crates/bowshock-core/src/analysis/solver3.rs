@@ -24,7 +24,7 @@ use bowshock_cfd::gas3::{cons_to_prim3, Cons3};
 use bowshock_cfd::grid3::{Grid3, PART_FLUID};
 
 /// Whether the engine solves the viscous terms (`Analysis::viscous`, roughness): flip with the stage that makes it so, and [`Analysis::tier3`] maps them.
-const SOLVES_VISCOUS: bool = false;
+pub(super) const SOLVES_VISCOUS: bool = false;
 
 /// The solved domain of a condition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,6 +32,57 @@ enum Kind {
     Wedge,
     Sector,
     Half,
+}
+
+/// Where the facade's time of one point went outside the runner's own `PointTiming` (instrumentation only): the case and the run call, what is read back from the
+/// state and the teardown of a solver state. Logged per point and read with [`take_facade_timings`]; printed as `TIMING3 {json}` under `BOWSHOCK_TIMING`.
+#[derive(Clone, Debug, Default)]
+#[doc(hidden)]
+pub struct FacadeTiming {
+    /// `"point"` or `"drop"` (the teardown of a state).
+    pub what: &'static str,
+    pub mach: f64,
+    pub alpha_deg: f64,
+    pub kind: &'static str,
+    /// Building the case ([`Analysis::solver3_case`]).
+    pub case_s: f64,
+    /// The whole run call: `cold` (grid or cache, context, upload, kernels, iterations) or `warm`.
+    pub run_s: f64,
+    /// [`Runner3::post`]: the device force reduction and the state download.
+    pub post_s: f64,
+    /// The guards, the wall samples and the point's numbers on the host.
+    pub host_s: f64,
+    /// The final `Field3`.
+    pub field_s: f64,
+    /// Dropping a solver state (device arrays, kernels).
+    pub drop_s: f64,
+}
+
+static FACADE_TIMINGS: std::sync::Mutex<Vec<FacadeTiming>> = std::sync::Mutex::new(Vec::new());
+
+fn record_facade(t: FacadeTiming) {
+    if std::env::var_os("BOWSHOCK_TIMING").is_some() {
+        eprintln!(
+            "TIMING3 {{\"what\":\"{}\",\"kind\":\"{}\",\"mach\":{},\"alpha_deg\":{:.1},\"case_s\":{:.4},\"run_s\":{:.4},\"post_s\":{:.4},\"host_s\":{:.4},\"field_s\":{:.4},\"drop_s\":{:.4}}}",
+            t.what, t.kind, t.mach, t.alpha_deg, t.case_s, t.run_s, t.post_s, t.host_s, t.field_s, t.drop_s
+        );
+    }
+    FACADE_TIMINGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(t);
+}
+
+/// Drains the facade's timing log (see [`FacadeTiming`]).
+#[doc(hidden)]
+pub fn take_facade_timings() -> Vec<FacadeTiming> {
+    std::mem::take(&mut *FACADE_TIMINGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+}
+
+/// Hands `state` back to the runner (dropped or kept), logging how long that took.
+fn drop_timed<R: Runner3>(runner: &R, state: Option<R::State>, c: Condition) {
+    if let Some(s) = state {
+        let t = std::time::Instant::now();
+        runner.recycle(s);
+        record_facade(FacadeTiming { what: "drop", mach: c.mach, alpha_deg: c.alpha_deg, drop_s: t.elapsed().as_secs_f64(), ..Default::default() });
+    }
 }
 
 /// What a backend hands back about a finished run: the class forces, the state and its grid.
@@ -48,6 +99,14 @@ trait Runner3 {
     fn grid<'a>(&self, state: &'a Self::State) -> &'a Grid3;
     /// The class forces and the state of `state` (the one download of a point).
     fn post(&self, state: &Self::State, case: &Case3) -> Result<Post3, Error>;
+    /// A cold run in the precision above the backend's usual one, for a point whose usual run went non-finite (`None`: there is none, the CPU runs in double).
+    fn cold_precise(&self, _case: &Case3) -> Option<Result<(PointResult3, Self::State), Error>> {
+        None
+    }
+    /// A state that is no longer needed: dropped, or kept for the next cold run on the same grid.
+    fn recycle(&self, state: Self::State) {
+        drop(state);
+    }
 }
 
 struct Cpu3;
@@ -74,35 +133,74 @@ impl Runner3 for Cpu3 {
     }
 }
 
+/// A GPU solver with the grid and precision it was built for.
+#[cfg(feature = "gpu")]
+struct GpuState {
+    runner: crate::engine::gpu3::GpuRunner3,
+    key: (crate::engine::cache3::GridKey, bool),
+}
+
+#[cfg(feature = "gpu")]
+thread_local! {
+    /// The GPU solver of the last point of this thread, kept for the next cold run on the same grid: the device arrays, the uploaded geometry and the traced
+    /// kernels are the cost of a point that does not depend on its Mach number (a cold run resets the state to the free stream of its case). The fleet's machine
+    /// thread solves the nodes of a table one after the other, one `run` call each.
+    static POOL: std::cell::RefCell<Option<GpuState>> = const { std::cell::RefCell::new(None) };
+}
+
 #[cfg(feature = "gpu")]
 struct Gpu3;
 
 #[cfg(feature = "gpu")]
 impl Runner3 for Gpu3 {
-    type State = crate::engine::gpu3::GpuRunner3;
+    type State = GpuState;
 
-    fn cold(&self, case: &Case3) -> Result<(PointResult3, Self::State), Error> {
+    fn cold(&self, case: &Case3) -> Result<(PointResult3, GpuState), Error> {
         // The wedge (a few thousand cells, solved to a tight stop rule at low Mach number too) runs in extended precision as the axisymmetric solver did; the half
         // domain and the sector (hundreds of thousands of cells, within 0.01 % of extended on the ANF table) in single precision.
-        let precision = match case.grid.domain {
-            crate::engine::grid3::Domain3::Wedge { .. } => bowshock_cfd::gpu::Precision::Extended,
-            _ => bowshock_cfd::gpu::Precision::F32,
+        self.cold_in(case, matches!(case.grid.domain, crate::engine::grid3::Domain3::Wedge { .. }))
+    }
+
+    fn cold_precise(&self, case: &Case3) -> Option<Result<(PointResult3, GpuState), Error>> {
+        // the wedge already runs in the higher precision
+        (!matches!(case.grid.domain, crate::engine::grid3::Domain3::Wedge { .. })).then(|| self.cold_in(case, true))
+    }
+
+    fn warm(&self, r: &mut GpuState, case: &Case3) -> Result<PointResult3, Error> {
+        r.runner.run_on(case, true)
+    }
+
+    fn grid<'a>(&self, r: &'a GpuState) -> &'a Grid3 {
+        &r.runner.host.grid
+    }
+
+    fn post(&self, r: &GpuState, case: &Case3) -> Result<Post3, Error> {
+        Ok(Post3 { drag: r.runner.drag_parts(case)?, u: r.runner.gpu.state_f64()? })
+    }
+
+    fn recycle(&self, state: GpuState) {
+        // `BOWSHOCK_NO_RUNNER_REUSE` is the A/B switch of the measurements: every cold point builds its own solver
+        if std::env::var_os("BOWSHOCK_NO_RUNNER_REUSE").is_none() {
+            POOL.with(|p| *p.borrow_mut() = Some(state));
+        }
+    }
+}
+
+#[cfg(feature = "gpu")]
+impl Gpu3 {
+    /// A cold run in extended (`extended`) or single precision, on the pooled solver of this thread when it was built for the same grid and precision.
+    fn cold_in(&self, case: &Case3, extended: bool) -> Result<(PointResult3, GpuState), Error> {
+        let key = (crate::engine::cache3::GridKey::of(&case.grid), extended);
+        let kept = POOL.with(|p| p.borrow_mut().take()).filter(|s| s.key == key);
+        let mut state = match kept {
+            Some(s) => s,
+            None => {
+                let precision = if extended { bowshock_cfd::gpu::Precision::Extended } else { bowshock_cfd::gpu::Precision::F32 };
+                GpuState { runner: crate::engine::gpu3::GpuRunner3::new(case, precision)?, key }
+            }
         };
-        let mut r = crate::engine::gpu3::GpuRunner3::new(case, precision)?;
-        let p = r.run_on(case, false)?;
-        Ok((p, r))
-    }
-
-    fn warm(&self, r: &mut Self::State, case: &Case3) -> Result<PointResult3, Error> {
-        r.run_on(case, true)
-    }
-
-    fn grid<'a>(&self, r: &'a Self::State) -> &'a Grid3 {
-        &r.host.grid
-    }
-
-    fn post(&self, r: &Self::State, case: &Case3) -> Result<Post3, Error> {
-        Ok(Post3 { drag: r.drag_parts(case)?, u: r.gpu.state_f64()? })
+        let p = state.runner.run_on(case, false)?;
+        Ok((p, state))
     }
 }
 
@@ -194,7 +292,7 @@ impl Analysis {
             )));
         }
         if let Some(f) = &self.fins {
-            f.validate()?;
+            f.validate_for(Engine::Solver3)?;
             if !self.dimensional {
                 return Err(Error::InvalidInput("fins need a dimensional BodySpec".into()));
             }
@@ -332,55 +430,100 @@ impl Analysis {
     }
 
     /// The sweep loop shared by the backends over `sorted`: a cold first point per domain and Mach number, warm later angles (and, with
-    /// [`Analysis::warm_start`], warm later Mach numbers at zero incidence). A warm point that ends `Failed` or `Stalled` is re-run cold; a cold run that
+    /// [`Analysis::warm_start`], warm later Mach numbers). A warm point that ends `Failed` or `Stalled` is re-run cold; a cold run that
     /// diverged is repeated once with the implicit CFL limit halved.
     fn sweep3<R: Runner3>(&self, runner: &R, sorted: &[Condition], level: u32, flow: Option<WallFlow>, keep: bool) -> Result<Vec<PolarPoint>, Error> {
+        use std::time::Instant;
         let mut points = Vec::with_capacity(sorted.len());
         let mut state: Option<R::State> = None;
         let mut at: Option<(Kind, f64)> = None;
+        let mut last = Condition::from(0.1);
         for &c in sorted {
             let kind = self.kind_of(c);
-            let same = at.is_some_and(|(k, m)| k == kind && (m == c.mach || (self.warm_start && kind != Kind::Half)));
+            let same = at.is_some_and(|(k, m)| k == kind && (m == c.mach || self.warm_start));
             if !same {
-                state = None;
+                drop_timed(runner, state.take(), last);
             }
-            at = Some((kind, c.mach));
+            (at, last) = (Some((kind, c.mach)), c);
+            let t_case = Instant::now();
             let case = self.solver3_case(c, level, Self::tier3(c, self.resolution, flow), keep);
+            let mut tm = FacadeTiming {
+                what: "point",
+                mach: c.mach,
+                alpha_deg: c.alpha_deg,
+                kind: match kind {
+                    Kind::Wedge => "wedge",
+                    Kind::Sector => "sector",
+                    Kind::Half => "half",
+                },
+                case_s: t_case.elapsed().as_secs_f64(),
+                ..Default::default()
+            };
             if let Some(s) = &mut state {
+                let t = Instant::now();
                 let r = runner.warm(s, &case)?;
+                tm.run_s = t.elapsed().as_secs_f64();
                 if r.stop_reason == StopReason::Cancelled {
                     return Err(Error::Cancelled);
                 }
                 if matches!(lift_quality(&r), Quality::Converged | Quality::Stationary) {
-                    points.push(self.point3(runner, s, &case, c, &r, keep)?);
+                    points.push(self.point3(runner, s, &case, c, &r, keep, &mut tm)?);
+                    record_facade(tm);
                     continue;
                 }
             }
+            let t = Instant::now();
             let (mut r, mut s) = runner.cold(&case)?;
             let mut next_warm = true;
             if r.stop_reason == StopReason::NonFinite {
-                let mut again = case.clone();
-                again.numerics.implicit.cfl_max *= 0.5;
-                (r, s) = runner.cold(&again)?;
                 next_warm = false;
+                // a run that went non-finite is repeated in the next precision up where there is one (the single-precision half domain of the finned example at Mach 3
+                // and 6 degrees did, which the f64 CPU solver does not), then with the implicit CFL limit halved
+                if let Some(again) = runner.cold_precise(&case) {
+                    drop_timed(runner, Some(s), c);
+                    (r, s) = again?;
+                }
+                if r.stop_reason == StopReason::NonFinite {
+                    let mut again = case.clone();
+                    again.numerics.implicit.cfl_max *= 0.5;
+                    drop_timed(runner, Some(s), c);
+                    (r, s) = runner.cold_precise(&again).unwrap_or_else(|| runner.cold(&again))?;
+                }
             }
+            tm.run_s += t.elapsed().as_secs_f64();
             if r.stop_reason == StopReason::Cancelled {
                 return Err(Error::Cancelled);
             }
             if lift_quality(&r) == Quality::Failed {
                 next_warm = false;
             }
-            points.push(self.point3(runner, &s, &case, c, &r, keep)?);
+            points.push(self.point3(runner, &s, &case, c, &r, keep, &mut tm)?);
+            record_facade(tm);
+            drop_timed(runner, state.take(), c);
             state = next_warm.then_some(s);
         }
+        drop_timed(runner, state, last);
         Ok(points)
     }
 
     /// The point of the run `r` of `c` on `case`, left in `state`: [`Drag`] and [`PointDetail`] from the class forces and the wall samples, [`Forces`] at
     /// an angle of attack. What `drag` holds at an angle of attack is the axial force split by surface (its total is `forces.ca`, not a drag).
-    fn point3<R: Runner3>(&self, runner: &R, state: &R::State, case: &Case3, c: Condition, r: &PointResult3, keep: bool) -> Result<PolarPoint, Error> {
+    #[allow(clippy::too_many_arguments)]
+    fn point3<R: Runner3>(
+        &self,
+        runner: &R,
+        state: &R::State,
+        case: &Case3,
+        c: Condition,
+        r: &PointResult3,
+        keep: bool,
+        tm: &mut FacadeTiming,
+    ) -> Result<PolarPoint, Error> {
         let (g, q) = (runner.grid(state), self.area_ratio());
+        let t_post = std::time::Instant::now();
         let post = runner.post(state, case)?;
+        tm.post_s = t_post.elapsed().as_secs_f64();
+        let t_host = std::time::Instant::now();
         let p_inf = case.freestream()[4];
         let q_inf = 0.5 * c.mach * c.mach;
         let d = &post.drag;
@@ -452,7 +595,10 @@ impl Analysis {
             y_plus_max: f64::NAN,
             farfield_dp,
         };
+        tm.host_s = t_host.elapsed().as_secs_f64();
+        let t_field = std::time::Instant::now();
         let field3 = (keep && self.keep_fields).then(|| field3_of(case, g, &post.u, r.iterations, self.field_scale()));
+        tm.field_s = t_field.elapsed().as_secs_f64();
         Ok(PolarPoint { mach: c.mach, alpha_deg: c.alpha_deg, drag, forces, detail, quality, warnings, cd_uncertainty: None, field: None, field3 })
     }
 }

@@ -336,3 +336,339 @@ fn half_domain_against_the_sting_grid() {
         );
     }
 }
+
+/// Where the time of the 3D engine goes, through the app path: the FINNED example rocket as the app solves it under `BOWSHOCK_ENGINE=3d` (Euler today): 10 sector points
+/// at zero incidence, then 8 Mach numbers at 2 and 6 degrees on the half domain, one `run` per node (`solve`). Prints one line per solved point (the runner's
+/// `PointTiming` joined with the facade's `FacadeTiming`), the sums by kind and the whole solve, and a `PERF` line.
+/// `tools/gpuq/gpuq submit --host local --name engine3d-timing -- env BOWSHOCK_ENGINE=3d cargo nextest run --release -p bowshock engine3d_finned_timing --run-ignored only --no-capture`.
+#[test]
+#[ignore = "BOWSHOCK_ENGINE=3d: solves the finned example's table and angles on the GPU"]
+fn engine3d_finned_timing() {
+    assert_eq!(solver::Engine::from_env(), solver::Engine::Solver3, "run with BOWSHOCK_ENGINE=3d");
+    let (rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    assert!(plan.fins.is_some());
+    let shared = std::env::var("BOWSHOCK_SHARED_GRID").is_ok();
+    let job = Job {
+        plan,
+        altitude: 120.0,
+        nodes: nodes((0.1, 3.0)).unwrap(),
+        stage: 1,
+        grid: CfdGrid::Coarse,
+        compute: Default::default(),
+        cpu_only: false,
+        stability: lift_nodes((0.1, 3.0)).unwrap(),
+    };
+    let _ = solver::engine::gpu::take_timings();
+    let _ = solver::take_facade_timings();
+    let t0 = Instant::now();
+    let table = solve_sized(&job, &Arc::new(AtomicBool::new(false)), |_| (), shared).expect("the example solves");
+    let wall = t0.elapsed().as_secs_f64();
+    let runs = solver::engine::gpu::take_timings();
+    let facade = solver::take_facade_timings();
+    println!(
+        "{} points + {} angle points on {}; {:.1} s wall (app solve {:.1} s); notes {:?}",
+        table.points.len(),
+        table.lift.as_ref().map_or(0, |l| l.points.len()),
+        table.backend,
+        wall,
+        table.solve_seconds,
+        table.notes
+    );
+    for p in &table.points {
+        println!("DRAG M {:.2} cd {:.5} pressure {:.5} base {:.5} fins {:.5} {:?}", p.mach, p.cd, p.pressure, p.base, p.fins, p.quality);
+    }
+    println!("| dim | Mach | alpha | cells | iters (stop/exec) | stop | build | ctx | upload | reset | first chunk | rest chunks n | rest s | ms/iter | monitor forces | final |");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    // one row per run of a solver (a retried point has two); the facade's own costs are per point and are summed by kind below
+    let mut sums = [0.0f64; 8];
+    for r in &runs {
+        let per_iter = if r.chunks_rest > 0 { 1000.0 * r.rest_chunks_s / (r.chunks_rest * 50) as f64 } else { f64::NAN };
+        println!(
+            "| {}D | {:.2} | {:.0} | {} | {}/{} | {} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {} | {:.3} | {:.2} | {:.3} | {:.3} |",
+            r.dim,
+            r.mach,
+            r.alpha_deg,
+            r.cells,
+            r.iters_stop,
+            r.iters_exec,
+            r.stop,
+            r.build_s,
+            r.ctx_s,
+            r.upload_s,
+            r.reset_s,
+            r.first_chunk_s,
+            r.chunks_rest,
+            r.rest_chunks_s,
+            per_iter,
+            r.forces_s + r.download_s,
+            r.final_s,
+        );
+        for (k, v) in
+            [r.build_s, r.ctx_s, r.upload_s, r.reset_s, r.first_chunk_s, r.rest_chunks_s, r.forces_s + r.download_s, r.final_s].into_iter().enumerate()
+        {
+            sums[k] += v;
+        }
+    }
+    println!("| runs | build | ctx | upload | reset | first chunk | rest chunks | monitor forces | final |");
+    println!("| {} runs | {} |", runs.len(), sums.iter().map(|x| format!("{x:.2}")).collect::<Vec<_>>().join(" | "));
+    let by = |what: &str, f: &dyn Fn(&solver::FacadeTiming) -> f64| facade.iter().filter(|t| t.what == what).map(f).sum::<f64>();
+    let (case_s, post_s, host_s, field_s, drop_s) =
+        (by("point", &|t| t.case_s), by("point", &|t| t.post_s), by("point", &|t| t.host_s), by("point", &|t| t.field_s), by("drop", &|t| t.drop_s));
+    println!("| facade: {} points | case {case_s:.3} | post (device reduction + state download) {post_s:.3} | host (guards, wall samples) {host_s:.3} | Field3 {field_s:.3} | teardown {drop_s:.3} |", facade.iter().filter(|t| t.what == "point").count());
+    let iterations: f64 = runs.iter().map(|r| r.iters_exec as f64).sum();
+    let capped: Vec<String> =
+        runs.iter().filter(|r| r.iters_exec >= 7500).map(|r| format!("{:.2}/{:.0} ({} it, {:.1} s)", r.mach, r.alpha_deg, r.iters_exec, r.run_s)).collect();
+    let capped_s: f64 = runs.iter().filter(|r| r.iters_exec >= 7500).map(|r| r.run_s).sum();
+    let run_total: f64 = runs.iter().map(|r| r.run_s).sum();
+    let fixed = sums[0] + sums[1] + sums[2] + sums[3] + sums[4] + case_s + post_s + host_s + field_s + drop_s;
+    println!("SUM {} runs, {iterations} iterations: iterating {run_total:.1} s of {wall:.1} s wall; fixed costs per point (build, context, upload, reset, first chunk, facade) {fixed:.1} s; points at the iteration cap: {capped:?} = {capped_s:.1} s", runs.len());
+    let all = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, iterations];
+    println!("PERF {}", serde_json_perf(wall, all[13]));
+}
+
+fn serde_json_perf(wall: f64, iters: f64) -> String {
+    format!(
+        "{{\"case\":\"3d-engine-finned-example\",\"precision\":\"f32\",\"cells\":null,\"iters\":{iters},\"us_per_iter\":{:.3},\"wall_s\":{wall:.3}}}",
+        1e6 * wall / iters
+    )
+}
+
+/// A/B of warm starts across Mach numbers on the 3D engine: the finned example's zero-incidence sector table (10 Mach numbers) cold per point against
+/// `warm_start(true)` (ascending, each point from the neighbouring Mach number's field): iterations, Cd and wall per point, and the largest change of Cd.
+/// The legacy 2D path found warm starts slower; this measures the 3D engine. `BOWSHOCK_WARM_HALF=1` does the same for the half domain (8 Mach numbers at 2 and 6 degrees).
+#[test]
+#[ignore = "A/B on the GPU: solves the finned example's sector table twice"]
+fn engine3d_warm_start_ab() {
+    let (rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    let half = std::env::var("BOWSHOCK_WARM_HALF").is_ok();
+    let conditions: Vec<solver::Condition> = if half {
+        lift_nodes((0.1, 3.0)).unwrap().iter().flat_map(|&m| LIFT_ALPHAS.iter().map(move |&a| solver::Condition::new(m, a))).collect()
+    } else {
+        nodes((0.1, 3.0)).unwrap().into_iter().map(solver::Condition::from).collect()
+    };
+    let run = |warm: bool| {
+        let mut a = solver::Analysis::new(&plan.body)
+            .unwrap()
+            .engine(solver::Engine::Solver3)
+            .resolution(solver::Resolution::Coarse)
+            .backend(solver::Backend::Gpu)
+            .warm_start(warm);
+        if let Some(f) = &plan.fins {
+            a = a.fins(f.clone());
+        }
+        let t = Instant::now();
+        let polar = a.run(&conditions).expect("the points solve");
+        (polar, t.elapsed().as_secs_f64())
+    };
+    let ((cold, t_cold), (warm, t_warm)) = (run(false), run(true));
+    println!("cold {t_cold:.1} s, warm {t_warm:.1} s");
+    println!("| Mach | alpha | its cold | its warm | stop cold | stop warm | value cold | value warm | change % |");
+    println!("|---|---|---|---|---|---|---|---|---|");
+    let (mut worst, mut its_c, mut its_w) = (0.0f64, 0usize, 0usize);
+    for (c, w) in cold.points.iter().zip(&warm.points) {
+        let value = |p: &solver::PolarPoint| p.forces.map_or(p.drag.total, |f| f.cn);
+        let rel = 100.0 * (value(w) - value(c)) / value(c);
+        worst = worst.max(rel.abs());
+        its_c += c.detail.iterations;
+        its_w += w.detail.iterations;
+        println!(
+            "| {:.2} | {:.0} | {} | {} | {:?} | {:?} | {:.5} | {:.5} | {:+.3} |",
+            c.mach,
+            c.alpha_deg,
+            c.detail.iterations,
+            w.detail.iterations,
+            c.detail.stop_reason,
+            w.detail.stop_reason,
+            value(c),
+            value(w),
+            rel
+        );
+    }
+    println!("WARM total iterations cold {its_c} warm {its_w}; worst change {worst:.3} % ({})", if half { "CN" } else { "Cd" });
+}
+
+/// What oscillates at the points the finless half domain does not settle (see the table of `half_domain_against_the_sting_grid`): the finless example body on
+/// the base-wake half domain at M 0.5 and 0.8 at 2 and 6 degrees, M 0.95 at 2 degrees, with M 1.1 and 1.3 as settled controls. Runs 3000 iterations cold, then
+/// 4000 more in chunks of 10 sampling CN, CA, the base axial force, the nose and afterbody CN from the device reductions: per series the mean, the slope over
+/// the window (relative drift), the peak-to-peak and the dominant period (iterations) of the detrended samples.
+#[test]
+#[ignore = "GPU: eight cases of 7000 iterations on the half domain"]
+fn engine3d_subsonic_wake_history() {
+    use std::sync::Mutex;
+    static CASE: Mutex<Option<solver::engine::case3::Case3>> = Mutex::new(None);
+    fn capture(c: &mut solver::engine::case3::Case3) {
+        *CASE.lock().unwrap() = Some(c.clone());
+    }
+    let (rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    let analysis = || {
+        solver::Analysis::new(&plan.body)
+            .unwrap()
+            .engine(solver::Engine::Solver3)
+            .resolution(solver::Resolution::Coarse)
+            .case3_hook(capture)
+            .max_iterations(1)
+            .backend(solver::Backend::Cpu)
+    };
+    // dominant period of a detrended series sampled every `dt` iterations: the largest DFT bin below Nyquist, (period, amplitude)
+    let spectrum = |x: &[f64], dt: f64| -> (f64, f64) {
+        let n = x.len();
+        let mean = x.iter().sum::<f64>() / n as f64;
+        let (mut best, mut at) = (0.0, 0usize);
+        for k in 1..n / 2 {
+            let (mut re, mut im) = (0.0, 0.0);
+            for (i, v) in x.iter().enumerate() {
+                let ph = std::f64::consts::TAU * (k * i) as f64 / n as f64;
+                re += (v - mean) * ph.cos();
+                im += (v - mean) * ph.sin();
+            }
+            let amp = 2.0 * re.hypot(im) / n as f64;
+            if amp > best {
+                (best, at) = (amp, k);
+            }
+        }
+        (n as f64 * dt / at.max(1) as f64, best)
+    };
+    println!("| Mach | alpha | series | mean | drift over window % | p2p % of mean | dominant period (its) | amp % of mean |");
+    println!("|---|---|---|---|---|---|---|---|");
+    for (mach, alpha) in [(0.5, 2.0), (0.5, 6.0), (0.8, 2.0), (0.8, 6.0), (0.95, 2.0), (1.1, 6.0), (1.3, 2.0)] {
+        let _ = analysis().run(&[solver::Condition::new(mach, alpha)]);
+        let mut case = CASE.lock().unwrap().take().expect("the hook saw the case");
+        case.numerics.max_iter = 3000;
+        case.numerics.rel_tol = 0.0;
+        case.snapshots = None;
+        let mut r = solver::engine::gpu3::GpuRunner3::new(&case, solver::Precision::F32).expect("a GPU");
+        let first = r.run_on(&case, false).expect("the first 3000 iterations");
+        let chunk = 10;
+        let mut series: [Vec<f64>; 5] = Default::default();
+        for _ in 0..400 {
+            r.gpu.run(chunk).unwrap();
+            let f = r.lift_forces(&case).unwrap();
+            let b = r.breakdown(&case).unwrap();
+            let d = r.drag_parts(&case).unwrap();
+            for (s, v) in series.iter_mut().zip([f.cn, f.ca, d.base, b.nose.cn, b.afterbody.cn]) {
+                s.push(v);
+            }
+        }
+        println!("INFO M {mach} alpha {alpha}: first 3000 iterations stop {:?}, {:.2} orders", first.stop_reason, first.drop_orders);
+        // an offline stop rule on the CN history sampled every 50 iterations (the first 3000 from the run, then every fifth sample of the series): the first
+        // iteration at which two successive windows of 5 samples (250 iterations) have means within `tol` of each other, and what that mean is against the mean
+        // over iterations 3000 to 7000
+        let mut hist: Vec<(usize, f64)> = first.cn_history.clone();
+        hist.extend(series[0].iter().enumerate().filter(|(i, _)| i % 5 == 4).map(|(i, v)| (3000 + 10 * (i + 1), *v)));
+        let late = series[0].iter().sum::<f64>() / series[0].len() as f64;
+        for tol in [0.002, 0.005, 0.01, 0.02] {
+            let win = |end: usize| hist[end - 5..end].iter().map(|h| h.1).sum::<f64>() / 5.0;
+            let fired = (15..=hist.len()).find(|&e| {
+                let (m0, m1, m2) = (win(e - 10), win(e - 5), win(e));
+                (m1 - m0).abs() < tol * m1.abs() && (m2 - m1).abs() < tol * m2.abs()
+            });
+            match fired {
+                Some(e) => println!(
+                    "RULE M {mach} alpha {alpha}: mean-stationary within {:.1} % fires at iteration {}, window mean {:.5} vs late mean {late:.5} ({:+.2} %)",
+                    100.0 * tol,
+                    hist[e - 1].0,
+                    win(e),
+                    100.0 * (win(e) - late) / late
+                ),
+                None => println!(
+                    "RULE M {mach} alpha {alpha}: mean-stationary within {:.1} % never fires by iteration {}",
+                    100.0 * tol,
+                    hist.last().map_or(0, |h| h.0)
+                ),
+            }
+        }
+        for (name, x) in ["CN", "CA", "CA base", "CN nose", "CN aft"].iter().zip(&series) {
+            let n = x.len() as f64;
+            let mean = x.iter().sum::<f64>() / n;
+            let (lo, hi) = x.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), v| (l.min(*v), h.max(*v)));
+            // least-squares slope over the window, as the change across it
+            let tbar = (n - 1.0) / 2.0;
+            let slope = x.iter().enumerate().map(|(i, v)| (i as f64 - tbar) * (v - mean)).sum::<f64>()
+                / x.iter().enumerate().map(|(i, _)| (i as f64 - tbar).powi(2)).sum::<f64>();
+            let (period, amp) = spectrum(x, chunk as f64);
+            println!(
+                "| {mach} | {alpha:.0} | {name} | {mean:.5} | {:+.2} | {:.2} | {period:.0} | {:.2} |",
+                100.0 * slope * (n - 1.0) / mean.abs().max(1e-12),
+                100.0 * (hi - lo) / mean.abs().max(1e-12),
+                100.0 * amp / mean.abs().max(1e-12)
+            );
+        }
+    }
+}
+
+/// The finned example's half domain at Mach 3.0 and 6 degrees on the GPU: single precision went non-finite there (the f64 CPU solver converges), the route repeats it in
+/// extended precision. Prints the point; fails if it is `Failed`.
+#[test]
+#[ignore = "GPU: one half-domain point, with the precision retry"]
+fn engine3d_mach3_6deg_survives_the_precision_retry() {
+    let (rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    let mut a = solver::Analysis::new(&plan.body).unwrap().engine(solver::Engine::Solver3).resolution(solver::Resolution::Coarse).backend(solver::Backend::Gpu);
+    if let Some(f) = &plan.fins {
+        a = a.fins(f.clone());
+    }
+    let t = Instant::now();
+    let p = a.run(&[solver::Condition::new(3.0, 6.0)]).expect("solves").points.remove(0);
+    let f = p.forces.unwrap();
+    println!(
+        "M3 6deg: CN {:.4} CA {:.4} x_cp {:.4} m, {} iterations, {:?} {:?}, {:.1} s (CPU f64 reference: CN 0.9102 CA 0.3062 on the ANF case)",
+        f.cn,
+        f.ca,
+        f.x_cp,
+        p.detail.iterations,
+        p.detail.stop_reason,
+        p.quality,
+        t.elapsed().as_secs_f64()
+    );
+    assert_ne!(p.quality, solver::Quality::Failed);
+}
+
+/// The host-side costs of a 3D point that do not need a device: building the grid of the finned example (sector and half domain; cache miss, then hit), building the CPU
+/// solver from it, the wall samples and the `Field3` of a free-stream state. CPU only.
+#[test]
+#[ignore = "CPU: builds the finned example's 3D grids"]
+fn engine3d_host_costs() {
+    use solver::engine::case3::{Case3, Tier};
+    let (rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    let a = solver::Analysis::new(&plan.body).unwrap().engine(solver::Engine::Solver3).resolution(solver::Resolution::Coarse).fins(plan.fins.clone().unwrap());
+    static CASE: Mutex<Vec<Case3>> = Mutex::new(Vec::new());
+    fn capture(c: &mut Case3) {
+        CASE.lock().unwrap().push(c.clone());
+    }
+    let a = a.case3_hook(capture).max_iterations(1).backend(solver::Backend::Cpu);
+    let _ = a.run(&[solver::Condition::from(2.0), solver::Condition::new(2.0, 6.0)]);
+    let cases = std::mem::take(&mut *CASE.lock().unwrap());
+    let _ = Tier::Euler;
+    for case in &cases {
+        let t = Instant::now();
+        let s = case.build_solver_cached().expect("grid");
+        let miss = t.elapsed().as_secs_f64();
+        let t = Instant::now();
+        let _ = case.build_solver_cached().expect("grid");
+        let hit = t.elapsed().as_secs_f64();
+        let t = Instant::now();
+        let samples = solver::engine::run3::wall_samples(&s.grid, &s.u);
+        let ws = t.elapsed().as_secs_f64();
+        let t = Instant::now();
+        let f = solver::engine::field3::field3_of(case, &s.grid, &s.u, 100, 1.0);
+        let fs = t.elapsed().as_secs_f64();
+        let t = Instant::now();
+        let d = solver::engine::run3::drag_parts(case, &s.grid, &s.u, s.cfg.freestream[4]);
+        let dp = t.elapsed().as_secs_f64();
+        println!(
+            "HOST {:?}: {}x{}x{} = {} cells; grid {miss:.3} s then {hit:.3} s from the cache (incl. the solver tables); wall_samples {ws:.3} s ({} faces); Field3 {fs:.3} s ({} cells); drag_parts {dp:.3} s ({:.3})",
+            case.grid.domain,
+            s.grid.ni,
+            s.grid.nj,
+            s.grid.nk,
+            s.grid.ni * s.grid.nj * s.grid.nk,
+            samples.len(),
+            f.cells(),
+            d.total
+        );
+    }
+}
