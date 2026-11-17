@@ -65,7 +65,8 @@ impl Numerics3 {
     /// The default on the GPU is the diagonalised form with one defect-correction pass against the block operator
     /// ([`LineSolve3::DiagonalCorrected`]; `sub_iters` is then not used). It was measured on the GPU only: on the ANF case (level 0, f32, RTX 3090) a step costs 1935 us instead of
     /// 3151 us, the iterations and CN equal those of the block scheme (CN within 0.01 %) at Mach 0.5, 0.8, 2 and 3, 1.56x faster to the stop rule.
-    /// The f64 CPU solver with it diverges on the tiny ANF grid at `cfl_max` 10 (it converges at 5), so the CPU default is the block solve.
+    /// The f64 CPU solver with it diverges on the tiny ANF grid at `cfl_max` 10 (it converges at 5), so the CPU default is the block solve. A wedge is always
+    /// `Block` ([`Case3::on_wedge`] sets `line_solve`): the diagonal solve does not carry the wedge's pressure-source block.
     pub fn implicit_for(&self, gpu: bool) -> ImplicitParams {
         let default = if gpu { LineSolve3::DiagonalCorrected } else { LineSolve3::Block };
         ImplicitParams { line_solve: self.line_solve.unwrap_or(default), ..self.implicit }
@@ -142,12 +143,11 @@ impl Case3 {
     }
 
     /// An axisymmetric body at zero incidence as a single-cell wedge of [`WEDGE_ANGLE`] on the base-wake grid of the 2D case
-    /// ([`crate::engine::case::Case::new`] with `Wake::Base`), [`Numerics3::auto`].
+    /// ([`crate::engine::case::Case::new`] with `Wake::Base`), [`Numerics3::auto`] with the block line solve ([`Case3::on_wedge`]).
     pub fn wedge(mach: f64, body: BaseBody, level: u32) -> Case3 {
         let mut c = Case3::new(mach, 0.0, body, None, level);
         c.grid.base = Some(base_grid(&c.body, level));
-        c.grid.domain = Domain3::Wedge { dtheta: WEDGE_ANGLE };
-        c
+        c.on_wedge()
     }
 
     /// A 2D engine case ([`crate::engine::case::Case::new`] with `Wake::Base`) as a wedge of [`WEDGE_ANGLE`]: its body, its base-wake grid and its sting grid,
@@ -156,8 +156,17 @@ impl Case3 {
         let mut c = Case3::new(case.mach, 0.0, case.body.clone(), None, level);
         c.grid.sting = case.grid_sting.clone();
         c.grid.base = Some(case.grid_base.clone());
-        c.grid.domain = Domain3::Wedge { dtheta: WEDGE_ANGLE };
-        c
+        c.on_wedge()
+    }
+
+    /// This case on a single-cell wedge of [`WEDGE_ANGLE`], with the block line solve on every backend: [`LineSolve3::DiagonalCorrected`] (the GPU default of
+    /// [`Numerics3::implicit_for`]) is non-finite on the wedge at every `cfl_max` (iteration 72 to 88, CPU f64 and GPU alike, ISSUES #24: its diagonal solve does
+    /// not carry the source block of the wedge's pressure source), `Block` converges at `cfl_max` 10 in 350 to 1750 iterations. Whoever builds a wedge goes through
+    /// here, so the choice cannot be forgotten.
+    pub fn on_wedge(mut self) -> Case3 {
+        self.grid.domain = Domain3::Wedge { dtheta: WEDGE_ANGLE };
+        self.numerics.line_solve = Some(LineSolve3::Block);
+        self
     }
 
     /// A body, finned or not, on the base-wake grid as a half domain (incidence `alpha`, fins between the pitch plane and each other): `24 << level` azimuthal

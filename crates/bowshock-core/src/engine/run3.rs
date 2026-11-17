@@ -410,10 +410,11 @@ fn monitor(case: &Case3, s: &Solver3) -> f64 {
 }
 
 /// Iterate `s` (built from `case`) until a stop rule fires, in this order at every iteration: a non-finite residual (or, at a sample,
-/// CN) gives `NonFinite`; a residual drop of [`DROP_ORDERS`] orders below the peak residual (from iteration 20 cold, from the start
-/// warm) gives `ResidualDrop`; at a sample with `it + 1 >= max(window, the floor of [`Numerics3`])` and a range of the last
-/// `window / SAMPLE_EVERY` CN samples below `rel_tol |mean|` (whatever the residual did) gives `CdStationary`; the iteration cap
-/// gives `MaxIterations`.
+/// CN) gives `NonFinite`; a residual drop of [`DROP_ORDERS`] orders below the peak residual of the second-order phase (counted from iteration
+/// `first_order_iters` cold, from the start warm: the first-order start-up's residual is another scale, and a drop measured against it fired inside the
+/// start-up on the cone and ogive wedges, at 147 iterations with a surface pressure 4 % low) gives `ResidualDrop`; at a sample with
+/// `it + 1 >= max(window, the floor of [`Numerics3`])` and a range of the last `window / SAMPLE_EVERY` CN samples below `rel_tol |mean|` (whatever the
+/// residual did) gives `CdStationary`; the iteration cap gives `MaxIterations`.
 ///
 /// `warm`: keep the field of the previous run, set the free stream of `case` and restart the CFL ramp (no first-order start-up).
 pub fn run3_on(case: &Case3, s: &mut Solver3, warm: bool) -> PointResult3 {
@@ -460,7 +461,7 @@ impl StopRule3 {
     pub fn new(case: &Case3, warm: bool) -> StopRule3 {
         let n = &case.numerics;
         StopRule3 {
-            skip: if warm { 0 } else { 20 },
+            skip: if warm { 0 } else { n.first_order_iters.max(20) },
             nwin: (n.window / SAMPLE_EVERY).max(1),
             window: n.window,
             rel_tol: n.rel_tol,
@@ -584,10 +585,21 @@ mod tests {
     #[test]
     fn a_stationary_state_with_a_residual_drop_still_stops_stationary() {
         // identical CN samples but the residual fell 2 orders (a converged limit): CdStationary as before
-        let stop = feed(|it| if it < 100 { 1.0 } else { 1e-2 }, |_| 0.3);
+        let stop = feed(|it| if it < 150 { 1.0 } else { 1e-2 }, |_| 0.3);
         assert_eq!(stop, Some((250, StopReason::CdStationary)));
         // a CN that wiggles at round-off level without a drop is not frozen (not bit-identical): CdStationary
         let stop = feed(|_| 0.5, |it| 0.3 + 1e-9 * (it % 3) as f64);
         assert_eq!(stop, Some((250, StopReason::CdStationary)));
+    }
+
+    #[test]
+    fn the_residual_drop_is_counted_from_the_second_order_phase() {
+        // the first-order start-up (100 iterations) has a residual 6 orders above the second-order phase's, which is flat: no drop within the phase that
+        // counts, so no stop on the drop (CN keeps changing, so not stationary either)
+        let stop = feed(|it| if it < 100 { 1e3 } else { 1e-3 }, |it| 0.3 + 0.1 * ((it / 50) % 2) as f64);
+        assert_eq!(stop, None);
+        // the same drop inside the second-order phase stops the run
+        let stop = feed(|it| if it < 200 { 1.0 } else { 1e-7 }, |it| 0.3 + 0.1 * ((it / 50) % 2) as f64);
+        assert_eq!(stop, Some((201, StopReason::ResidualDrop)));
     }
 }
