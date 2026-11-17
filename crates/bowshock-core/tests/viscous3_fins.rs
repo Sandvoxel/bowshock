@@ -441,7 +441,13 @@ fn rocket_sector_case(mach: f64) -> Case3 {
     if env("FINLESS", 0u8) != 0 {
         return Case3::base_half(mach, 0.0, body, None, tier, 0);
     }
-    Case3::sector(mach, body, fins, tier, 0)
+    let chord = fins.root_chord;
+    let mut c = Case3::sector(mach, body, fins, tier, 0);
+    // `FIN_YP`: the fin stack sized for another `y+` than the tier's (a coarser first cell and growth of the stack)
+    if let Some(yp) = std::env::var("FIN_YP").ok().and_then(|v| v.parse::<f64>().ok()) {
+        c.grid.fin_stack = Some(bowshock_core::engine::grid3::FinStack::from_flow(flow.re_c, flow.mach_max, chord, yp));
+    }
+    c
 }
 
 /// A run as `run3::run3_on` does it (the same stop rule, the same samples) on the solver `Case3::build_solver` gives (the viscous tier, its numerics: the engine's, not
