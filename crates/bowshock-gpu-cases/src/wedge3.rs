@@ -7,7 +7,7 @@
 //! (the block hangs `n_gap` rows below the surface, below the axis ahead of the nose) are clamped to the axis: zero-volume solid cells.
 //! The k planes are the reflecting planes of today's solver. Good enough to compare the GPU solver with the CPU solver on the same grid, wrong physics.
 
-use bowshock_cfd::grid3::{Grid3, SolidBox};
+use bowshock_cfd::grid3::{Grid3, Part, SolidBox};
 use bowshock_core::engine::body_grid::{base_domain_grid, BaseGridParams};
 use bowshock_core::{Analysis, Atmosphere, BodySpec, FlightConditions, Resolution, Wake};
 
@@ -47,7 +47,6 @@ pub fn wedge_grid(p: &BaseGridParams, nk: usize, opening_deg: f64) -> Grid3 {
         }
     }
     let mut g = Grid3::try_from_nodes(g2.ni, g2.nj, nk, x, y, z).expect("the revolved wedge has no negative volume");
-    g.solid = vec![SolidBox { i: 0..block.i_end, j: 0..block.j_end, k: 0..nk }];
-    g.axis_cells = 0;
+    g.mark_solid(SolidBox { i: 0..block.i_end, j: 0..block.j_end, k: 0..nk }, Some(Part::Body(0)));
     g
 }

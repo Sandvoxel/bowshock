@@ -33,7 +33,7 @@
 use bowshock_cfd::flux::Limiter;
 use bowshock_cfd::gas3::freestream3;
 use bowshock_cfd::gpu::{GpuSolver3, Precision};
-use bowshock_cfd::grid3::{Grid3, SolidBox};
+use bowshock_cfd::grid3::{Grid3, Part, SolidBox};
 use bowshock_cfd::implicit::{ImplicitParams, LineSolve3};
 use bowshock_cfd::solver3::{Config3, Scheme3};
 use bowshock_core::engine::body_grid::base_domain_grid;
@@ -122,7 +122,7 @@ fn sector_case(nk: usize) -> BenchCase {
     let (_, block) = base_domain_grid(&p).expect("base grid");
     let mut grid = wedge_grid(&p, nk, 45.0);
     // the fin stand-in: a one-cell layer on the k = 0 plane over the last 28 cells of the body, 60 rows high
-    grid.solid.push(SolidBox { i: block.i_end - 30..block.i_end - 2, j: block.j_end..block.j_end + 60, k: 0..1 });
+    grid.mark_solid(SolidBox { i: block.i_end - 30..block.i_end - 2, j: block.j_end..block.j_end + 60, k: 0..1 }, Some(Part::Fin(0)));
     BenchCase { name: "sector", grid, alpha_deg: 0.0, n: 200, wedge: false }
 }
 
