@@ -359,6 +359,8 @@ dependencies = [
  "bowshock-sim",
  "bytemuck",
  "chrono",
+ "ciborium",
+ "flate2",
  "glam",
  "iced",
  "iced_test",
