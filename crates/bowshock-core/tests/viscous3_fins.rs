@@ -402,7 +402,8 @@ fn anf_incidence_case(mach: f64, alpha_deg: f64) -> Case3 {
         Ok("fine") => Tier::Fine(flow),
         _ => Tier::Lift(flow),
     };
-    let mut c = Case3::base_half(mach, alpha_deg.to_radians(), body(), Some(Case3::anf_fins()), tier, env("LEVEL", 0));
+    let fins = (env("FINS", 1u8) != 0).then(Case3::anf_fins);
+    let mut c = Case3::base_half(mach, alpha_deg.to_radians(), body(), fins, tier, env("LEVEL", 0));
     let phase = if std::env::var("PHASE").as_deref() == Ok("inplane") { FinPhase::InPlane } else { FinPhase::Between };
     c.grid.domain = Domain3::Half { phase };
     resolution(c)
@@ -423,7 +424,21 @@ fn fin_half_incidence_series() {
     if let Some(c) = std::env::var("CFL_MAX").ok().and_then(|v| v.parse().ok()) {
         case.numerics.implicit.cfl_max = c;
     }
+    // the cause hunt's knobs: the CFL growth per iteration, the factored solves per iteration, the low-Mach preconditioning (`0`/`1`), the first-order iterations
+    let imp = &mut case.numerics.implicit;
+    (imp.growth, imp.sub_iters) = (env("GROWTH", imp.growth), env("SUB", imp.sub_iters));
+    imp.low_mach_precond = env("PRECOND", u8::from(imp.low_mach_precond)) != 0;
+    case.numerics.first_order_iters = env("FIRST", case.numerics.first_order_iters);
     let mut s = case.build_solver().expect("solver");
+    // `EULER=1`: the same grid and numerics without the viscous terms; `MODEL=laminar`: the viscous terms without the turbulence model
+    if env("EULER", 0u8) != 0 {
+        s.set_viscous_with(None, bowshock_cfd::solver3::RansOpts3::default());
+    } else if std::env::var("MODEL").as_deref() == Ok("laminar") {
+        let v = s.viscous().map(|v| Viscous { turbulence: Turbulence::Laminar, ..v });
+        let ks = s.grid.wall_ks();
+        let opts = RansOpts3 { pressure_outflow: false, ks: if ks.iter().any(|&k| k > 0.0) { ks } else { Vec::new() }, ..RansOpts3::default() };
+        s.set_viscous_with(v, opts);
+    }
     describe("half", &s.grid);
     println!(
         "  tier {:?}, scheme {:?}, limiter {:?}, viscous {}, max_iter {}, stop rule window {} rel_tol {}",
@@ -442,13 +457,17 @@ fn fin_half_incidence_series() {
     let mut series: Vec<(usize, f64, f64, f64)> = Vec::new();
     let mut it = 0;
     let mut hist = Vec::new();
-    let diag_from: usize = env("DIAG_FROM", 100);
+    let track_from: usize = env("TRACK_FROM", usize::MAX);
+    let diag_from: usize = env("DIAG_FROM", 100).min(track_from);
     let mut prev: Vec<bowshock_cfd::gas3::Cons3> = Vec::new();
     while it < case.numerics.max_iter {
         if it >= diag_from {
             prev.clone_from(&s.u);
         }
         let r = s.step();
+        if it >= track_from && (it + 1) % env("TRACK_EVERY", 1usize) == 0 {
+            track_change(&s, &prev, it + 1, env("TRACK_N", 3));
+        }
         let monitor = ((it + 1) % SAMPLE_EVERY == 0).then(|| {
             let f = lift_forces(&case, &s);
             if alpha.abs() < 1e-12 {
@@ -523,34 +542,76 @@ fn fin_half_incidence_series() {
     }
 }
 
+/// The place of cell `c` in the grid: indices, `x`, radius, azimuth, volume, whether it is on the axis, and the solid parts among its six neighbours.
+fn cell_place(g: &Grid3, c: usize) -> String {
+    let (i, j, k) = (c % g.ni, (c / g.ni) % g.nj, c / (g.ni * g.nj));
+    let x = g.xc[c];
+    let mut near = String::new();
+    for (di, dj, dk) in [(-1i64, 0i64, 0i64), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)] {
+        let (a, b, d) = (i as i64 + di, j as i64 + dj, k as i64 + dk);
+        if a >= 0 && b >= 0 && d >= 0 && (a as usize) < g.ni && (b as usize) < g.nj && (d as usize) < g.nk {
+            if let Some(p) = g.part_of(a as usize, b as usize, d as usize) {
+                near.push_str(&format!("{p:?} "));
+            }
+        }
+    }
+    format!(
+        "({i}, {j}, {k}) x {:.3} r {:.4} theta {:.3} vol {:.2e} axis {} next to [{near}]",
+        x[0],
+        x[1].hypot(x[2]),
+        x[1].atan2(x[2]),
+        g.vol[c],
+        g.is_axis(i, j)
+    )
+}
+
+/// The cells whose density or pressure changed most in the step from `prev` to the current state (relative to `prev`), and the largest change of the whole fluid: where an
+/// instability starts, before any cell is far from the free stream. Prints a line for `n` cells.
+fn track_change(s: &Solver3, prev: &[bowshock_cfd::gas3::Cons3], it: usize, n: usize) {
+    let g = &s.grid;
+    let mut rows: Vec<(f64, usize)> = (0..prev.len())
+        .filter(|&c| g.part[c] == 0)
+        .map(|c| {
+            let (a, b) = (cons_to_prim3(&prev[c]), cons_to_prim3(&s.u[c]));
+            (((b[0] - a[0]) / a[0]).abs().max(((b[4] - a[4]) / a[4]).abs()), c)
+        })
+        .collect();
+    rows.sort_by(|a, b| b.0.total_cmp(&a.0));
+    for (d, c) in rows.iter().take(n) {
+        let w = cons_to_prim3(&s.u[*c]);
+        println!("  TRACK {it} d {d:.3e} rho {:.3} p {:.3} |u| {:.2} at {}", w[0], w[4], (w[1] * w[1] + w[2] * w[2] + w[3] * w[3]).sqrt(), cell_place(g, *c));
+        if std::env::var_os("TRACK_DETAIL").is_some() {
+            let (i, j, k) = (*c % g.ni, (*c / g.ni) % g.nj, *c / (g.ni * g.nj));
+            let show = |tag: &str, a: i64, b: i64, e: i64| {
+                let (ii, jj, kk) = (i as i64 + a, j as i64 + b, k as i64 + e);
+                if ii < 0 || jj < 0 || kk < 0 || ii as usize >= g.ni || jj as usize >= g.nj || kk as usize >= g.nk {
+                    return;
+                }
+                let n = g.cell(ii as usize, jj as usize, kk as usize);
+                if g.part[n] != 0 {
+                    return;
+                }
+                let (p0, p1) = (cons_to_prim3(&prev[n]), cons_to_prim3(&s.u[n]));
+                println!(
+                    "      {tag:>3} ({ii},{jj},{kk}) rho {:.4}->{:.4} u {:.3}->{:.3} v {:.3}->{:.3} w {:.3}->{:.3} p {:.4}->{:.4}",
+                    p0[0], p1[0], p0[1], p1[1], p0[2], p1[2], p0[3], p1[3], p0[4], p1[4]
+                );
+            };
+            show("c", 0, 0, 0);
+            for (tag, a, b, e) in [("i-", -1, 0, 0), ("i+", 1, 0, 0), ("j-", 0, -1, 0), ("j+", 0, 1, 0), ("k-", 0, 0, -1), ("k+", 0, 0, 1)] {
+                show(tag, a, b, e);
+            }
+        }
+    }
+}
+
 /// Where a state is about to blow up: the cells of lowest pressure, lowest density and highest speed (and any non-finite one), with their place in the grid.
 fn blowup_report(s: &Solver3, u: &[bowshock_cfd::gas3::Cons3]) {
     let g = &s.grid;
     let rows: Vec<(usize, [f64; 5])> = (0..u.len()).filter(|&c| g.part[c] == 0).map(|c| (c, cons_to_prim3(&u[c]))).collect();
     let bad = rows.iter().filter(|(_, w)| !w.iter().all(|x| x.is_finite())).count();
     println!("    non-finite fluid cells: {bad} of {}", rows.len());
-    let place = |c: usize| {
-        let (i, j, k) = (c % g.ni, (c / g.ni) % g.nj, c / (g.ni * g.nj));
-        let x = g.xc[c];
-        // the fin / body part touching the cell (a solid neighbour)
-        let mut near = String::new();
-        for (di, dj, dk) in [(-1i64, 0i64, 0i64), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)] {
-            let (a, b, d) = (i as i64 + di, j as i64 + dj, k as i64 + dk);
-            if a >= 0 && b >= 0 && d >= 0 && (a as usize) < g.ni && (b as usize) < g.nj && (d as usize) < g.nk {
-                if let Some(p) = g.part_of(a as usize, b as usize, d as usize) {
-                    near.push_str(&format!("{p:?} "));
-                }
-            }
-        }
-        format!(
-            "({i}, {j}, {k}) x {:.3} r {:.4} theta {:.3} vol {:.2e} axis {} next to [{near}]",
-            x[0],
-            x[1].hypot(x[2]),
-            x[1].atan2(x[2]),
-            g.vol[c],
-            g.is_axis(i, j)
-        )
-    };
+    let place = |c: usize| cell_place(g, c);
     let mut by_p: Vec<&(usize, [f64; 5])> = rows.iter().filter(|(_, w)| w[4].is_finite()).collect();
     by_p.sort_by(|a, b| a.1[4].total_cmp(&b.1[4]));
     for (c, w) in by_p.iter().take(4) {
@@ -563,5 +624,114 @@ fn blowup_report(s: &Solver3, u: &[bowshock_cfd::gas3::Cons3]) {
     }
     if let Some((c, _)) = rows.iter().find(|(_, w)| !w.iter().all(|x| x.is_finite())) {
         println!("    first non-finite cell at {}", place(*c));
+    }
+}
+
+/// The geometry of the cells behind the flush fin trailing edge at the base corner (where the half domain blows up at large CFL): for the fin with the lowest `k`, the fluid
+/// cells at the columns `TE_COLS` (default 5) behind the trailing edge, the rows `j_root - 3 ..= j_root + 2` of the fin root and the `k` cells from one before the fin to one
+/// after it: volume, the three cell lengths between the face centres, the three face areas (`+` faces), the solid neighbours (`-i +i -j +j -k +k`, `w` wall, `.` fluid, `d`
+/// dead), the wall distance, the volume ratios to the neighbours in `i`, `j` and `k` (lower / upper), and the cosine between the face normal and the line to the lower
+/// neighbour (1: orthogonal). `TIER` as `anf_incidence_case`; the same table for the Coarse tier shows what differs.
+#[test]
+#[ignore]
+fn corner_geometry() {
+    use bowshock_cfd::grid3::{PART_DEAD, PART_FLUID};
+    let case = anf_incidence_case(env("MACH", 2.0), env("ALPHA", 2.0));
+    let s = case.build_solver().expect("solver");
+    describe("half", &s.grid);
+    let g = &s.grid;
+    let rans = s.rans().expect("viscous");
+    let is_fin = |i: usize, j: usize, k: usize| matches!(g.part_of(i, j, k), Some(Part::Fin(_)));
+    // the trailing edge column and the root row of the fin with the lowest k
+    let (mut i_te, mut j_root, mut k_lo, mut k_hi) = (0usize, usize::MAX, usize::MAX, 0usize);
+    for k in 0..g.nk {
+        for j in 0..g.nj {
+            for i in 0..g.ni {
+                if is_fin(i, j, k) {
+                    i_te = i_te.max(i);
+                    j_root = j_root.min(j);
+                }
+            }
+        }
+        if (0..g.nj).any(|j| (0..g.ni).any(|i| is_fin(i, j, k))) && k_lo == usize::MAX {
+            k_lo = k;
+        }
+    }
+    for k in k_lo..g.nk {
+        if (0..g.nj).any(|j| is_fin(i_te, j, k)) {
+            k_hi = k;
+        } else if k_hi >= k_lo && k > k_hi + 1 {
+            break;
+        }
+    }
+    println!("  trailing edge column i {i_te}, root row j {j_root}, fin cells k {k_lo}..={k_hi} (at the trailing edge column)");
+    let flag = |i: i64, j: i64, k: i64| -> char {
+        if i < 0 || j < 0 || k < 0 || i as usize >= g.ni || j as usize >= g.nj || k as usize >= g.nk {
+            return 'o';
+        }
+        match g.part[g.cell(i as usize, j as usize, k as usize)] {
+            PART_FLUID => '.',
+            PART_DEAD => 'd',
+            _ => 'w',
+        }
+    };
+    let vol = |i: i64, j: i64, k: i64| -> f64 {
+        if i < 0 || j < 0 || k < 0 || i as usize >= g.ni || j as usize >= g.nj || k as usize >= g.nk {
+            f64::NAN
+        } else {
+            g.vol[g.cell(i as usize, j as usize, k as usize)]
+        }
+    };
+    let dist = |a: [f64; 3], b: [f64; 3]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+    println!("   cell            vol       dx       dj       dk       Ai       Aj       Ak  walls   dwall    Vi-   Vi+   Vj-   Vj+   Vk-   Vk+   cos(i j k)");
+    let cols = env("TE_COLS", 5usize);
+    for i in i_te..=(i_te + cols).min(g.ni - 1) {
+        for j in j_root.saturating_sub(3)..(j_root + 3).min(g.nj) {
+            for k in k_lo.saturating_sub(1)..=(k_hi + 1).min(g.nk - 1) {
+                let c = g.cell(i, j, k);
+                if g.part[c] != PART_FLUID {
+                    continue;
+                }
+                let (il, jl) = ((k * g.nj + j) * (g.ni + 1) + i, (k * (g.nj + 1) + j) * g.ni + i);
+                let (fi0, fi1, fj0, fj1, fk0, fk1) =
+                    (&g.iface[il], &g.iface[il + 1], &g.jface[jl], &g.jface[jl + g.ni], &g.kface[c], &g.kface[c + g.ni * g.nj]);
+                let (ii, jj, kk) = (i as i64, j as i64, k as i64);
+                let walls: String =
+                    [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)].iter().map(|&(a, b, d)| flag(ii + a, jj + b, kk + d)).collect();
+                let ratio = |a: i64, b: i64, d: i64| vol(ii + a, jj + b, kk + d) / g.vol[c];
+                let cosine = |nb: Option<usize>, f: &bowshock_cfd::grid3::Face3| {
+                    nb.map_or(f64::NAN, |n| {
+                        let (x, y) = (g.xc[n], g.xc[c]);
+                        let l = dist(x, y).max(1e-300);
+                        ((y[0] - x[0]) * f.n[0] + (y[1] - x[1]) * f.n[1] + (y[2] - x[2]) * f.n[2]) / l
+                    })
+                };
+                let cs = [
+                    cosine((i > 0).then(|| g.cell(i - 1, j, k)), fi0),
+                    cosine((j > 0).then(|| g.cell(i, j - 1, k)), fj0),
+                    cosine((k > 0).then(|| g.cell(i, j, k - 1)), fk0),
+                ];
+                println!(
+                    "  ({i:3},{j:3},{k:3}) {:9.2e} {:8.2e} {:8.2e} {:8.2e} {:8.2e} {:8.2e} {:8.2e}  {walls}  {:7.2e} {:5.2} {:5.2} {:5.2} {:5.2} {:5.2} {:5.2}   {:.3} {:.3} {:.3}",
+                    g.vol[c],
+                    dist(fi0.c, fi1.c),
+                    dist(fj0.c, fj1.c),
+                    dist(fk0.c, fk1.c),
+                    fi1.area,
+                    fj1.area,
+                    fk1.area,
+                    rans.dwall[c],
+                    ratio(-1, 0, 0),
+                    ratio(1, 0, 0),
+                    ratio(0, -1, 0),
+                    ratio(0, 1, 0),
+                    ratio(0, 0, -1),
+                    ratio(0, 0, 1),
+                    cs[0],
+                    cs[1],
+                    cs[2]
+                );
+            }
+        }
     }
 }

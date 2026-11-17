@@ -824,3 +824,79 @@ fn cost_point() {
         1e3 * t0.elapsed().as_secs_f64() / it.max(1) as f64
     );
 }
+
+/// What the CPU holds in the jet cells (`Part::Jet`, the ghosts of the exit faces) of a TP-2005 case, `k`, `omega`, `mu_t`, `mu` and the density, at the three moments a dump can
+/// take it: after `step()` (the turbulence update has run, the jet fix not since), after `eval_residual()` (`viscous_pass` -> `jet_viscous_fix`), and the values the jet gives (`JetState3`).
+#[test]
+#[ignore]
+fn jet_turb_probe() {
+    use bowshock_cfd::grid3::Part;
+    let (mach, exit_mach, p_exit): (f64, f64, f64) = (env("MACH", 2.5), env("EXIT_MACH", 1.69), env("P_EXIT", 34_497.438_192_913_876));
+    let case = tp2005_case(mach, exit_mach, p_exit, env("LEVEL", 0));
+    let (_, mut s) = build3(&case, bowshock_core::engine::grid3::WEDGE_ANGLE, env("LEVEL", 0));
+    let jet = s.jet().expect("the wedge has the jet");
+    let (rho, kj, oj) = (jet.state[0], jet.turb[0], jet.turb[1]);
+    let mu_j = s.viscous().expect("viscous").mu(bowshock_cfd::gas::GAMMA * jet.state[4] / rho);
+    println!(
+        "jet: rho {rho:.5} p {:.5} u {:.5}  k {kj:.4e} omega {oj:.4e}  mu {mu_j:.4e}  rho k / omega {:.4e} (= {:.2} mu)",
+        jet.state[4],
+        jet.state[1],
+        rho * kj / oj,
+        rho * kj / oj / mu_j
+    );
+    let cells: Vec<usize> = (0..s.grid.part.len())
+        .filter(|&c| s.grid.part_of(c % s.grid.ni, (c / s.grid.ni) % s.grid.nj, c / (s.grid.ni * s.grid.nj)) == Some(Part::Jet))
+        .collect();
+    println!("{} jet cells", cells.len());
+    let show = |s: &Solver3, tag: &str| {
+        let r = s.rans().expect("viscous");
+        let c = cells[cells.len() / 2];
+        let (i, j, k) = (c % s.grid.ni, (c / s.grid.ni) % s.grid.nj, c / (s.grid.ni * s.grid.nj));
+        let f = s.grid.cell(i + 1, j, k);
+        println!(
+            "  {tag:>28}: jet cell ({i},{j},{k}) k {:.4e} omega {:.4e} mu_t {:.4e} mu {:.4e} | fluid cell behind: k {:.4e} omega {:.4e} mu_t {:.4e} mu {:.4e}",
+            r.turb[c][0], r.turb[c][1], r.mu_t[c], r.mu[c], r.turb[f][0], r.turb[f][1], r.mu_t[f], r.mu[f]
+        );
+    };
+    show(&s, "before any step");
+    for n in [1usize, 5, 30] {
+        while s.iter < n {
+            s.step();
+        }
+        show(&s, &format!("after step {n}"));
+        s.eval_residual();
+        show(&s, &format!("then eval_residual {n}"));
+    }
+}
+
+/// The sensitivity of the TP-2005 base pressure to the turbulence of the jet: the G-J case (`MACH`, `EXIT_MACH`, `P_EXIT`, `LEVEL`, `ITERS`) on the wedge with `k` of the jet scaled by
+/// `K_SCALE` (`omega` kept, so `mu_t = rho k / omega` scales with it; 1: the gate's jet), the area-mean base `Cp` and `p_b / p_inf` as in `gate_j_tp2005_jet_case_on_the_wedge`.
+#[test]
+#[ignore]
+fn jet_turbulence_sensitivity() {
+    let (mach, exit_mach, p_exit): (f64, f64, f64) = (env("MACH", 2.5), env("EXIT_MACH", 1.69), env("P_EXIT", 34_497.438_192_913_876));
+    let (iters, level): (usize, u32) = (env("ITERS", 3000), env("LEVEL", 0));
+    let scale: f64 = env("K_SCALE", 1.0);
+    let mut case = tp2005_case(mach, exit_mach, p_exit, level);
+    if let Some(j) = case.motor.as_mut() {
+        j.turb[0] *= scale;
+    }
+    let (c3, mut s3) = build3(&case, bowshock_core::engine::grid3::WEDGE_ANGLE, level);
+    iterate3(&c3, &mut s3, iters, 1000);
+    let f = forces3(&c3, &s3);
+    let samples = run3::wall_samples(&s3.grid, &s3.u);
+    let (mut a, mut pa) = (0.0, 0.0);
+    for w in samples.iter().filter(|w| w.class == run3::Wall::Base) {
+        a += w.face.area;
+        pa += w.pw * w.face.area;
+    }
+    let cp3 = (pa / a - s3.cfg.freestream[4]) / (0.5 * mach * mach);
+    println!(
+        "JETK scale {scale}: {iters} its  cp_base {cp3:.5}  pb/pinf {:.5}  CD p {:.5} friction {:.5} base {:.5} total {:.5}",
+        1.0 + 0.7 * mach * mach * cp3,
+        f.cd_pressure,
+        f.cd_friction,
+        f.cd_base,
+        f.total()
+    );
+}

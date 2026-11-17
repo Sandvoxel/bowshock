@@ -551,6 +551,14 @@ fn fill_theta(theta: &mut [f64], lay: &Layers, alpha: f64, big: f64) {
     theta[nk] = big;
 }
 
+/// Columns over which the layer behind a flush fin trailing edge tapers from the fin's thickness (at the base plane) to the nominal cell width. The layer cell behind the trailing
+/// edge is as wide as the fin (0.074 d across on the ANF Lift-tier grid) and its two neighbours are the thin first cells of the fin stack (7e-4 d): over 4 columns (the value of the
+/// other fin edges) its side faces tilt by up to 23 degrees against the axis (the cosine between a face normal and the line to the lower neighbour is 0.918 in `k`, 0.934 in `i`)
+/// and its volume falls by up to a factor 10 per column. The viscous Lift-tier half domain with fins is then non-finite in iteration 150 to 190 at `cfl_max` 20 (Mach 2) and
+/// 50 (Mach 0.8); the first cells to go lie right behind the trailing edge at the body radius (`DESIGN3D.md`, "The viscous half domain at incidence"). Over 8 columns the cosines
+/// are 0.968 and 0.986 and the Mach 2 runs hold at `cfl_max` 20 and 30 (4 columns: 0.918 / 0.934, non-finite; 2: 0.83 / 0.85, earlier).
+const TE_TAPER_COLUMNS: f64 = 8.0;
+
 fn smoothstep(u: f64) -> f64 {
     let u = u.clamp(0.0, 1.0);
     u * u * (3.0 - 2.0 * u)
@@ -1022,11 +1030,12 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
                 let r = rn[j * (ni + 1) + i];
                 let di = if i < pl.i_le { pl.i_le - i } else { i.saturating_sub(pl.i_te) };
                 let dj = jj.saturating_sub(pl.j_tip);
-                let d = di.max(dj);
+                let u_i = if i > pl.i_te { di as f64 / TE_TAPER_COLUMNS } else { di as f64 / 4.0 };
+                let u = u_i.max(dj as f64 / 4.0);
                 let (ic, jc) = (i.clamp(pl.i_le, pl.i_te), jj.min(pl.j_tip));
                 let h_f = h_at(ic, jc);
                 let nominal = 0.5 * r * cell_ang;
-                let w = if d == 0 { h_f } else { h_f + (nominal - h_f) * smoothstep(d as f64 / 4.0) };
+                let w = if u == 0.0 { h_f } else { h_f + (nominal - h_f) * smoothstep(u) };
                 alpha[j * (ni + 1) + i] = if r < 1e-12 { (0.5 * cell_ang).asin() } else { (w / r).min(0.99).asin() };
                 if r >= 1e-12 {
                     half_w[j * (ni + 1) + i] = w;
