@@ -675,3 +675,25 @@ fn engine3d_host_costs() {
         );
     }
 }
+
+/// Cold single points of the finned example's half domain (the points that diverged in the table runs), each its own `run` call, capped at 1000 iterations:
+/// the stop reason, iterations and quality: the same test at two commits tells whether the divergence came with a change of code.
+#[test]
+#[ignore = "GPU: five cold half-domain points"]
+fn engine3d_probe_cold_half_points() {
+    let (rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    for (mach, alpha) in [(0.5, 2.0), (0.8, 2.0), (0.8, 6.0), (3.0, 2.0), (3.0, 6.0)] {
+        let mut a = solver::Analysis::new(&plan.body)
+            .unwrap()
+            .engine(solver::Engine::Solver3)
+            .resolution(solver::Resolution::Coarse)
+            .backend(solver::Backend::Gpu)
+            .max_iterations(1000);
+        if let Some(f) = &plan.fins {
+            a = a.fins(f.clone());
+        }
+        let p = a.run(&[solver::Condition::new(mach, alpha)]).expect("solves").points.remove(0);
+        println!("PROBE M {mach} alpha {alpha}: {} iterations, {:?}, {:?}", p.detail.iterations, p.detail.stop_reason, p.quality);
+    }
+}
