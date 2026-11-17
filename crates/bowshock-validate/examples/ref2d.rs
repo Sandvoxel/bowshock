@@ -779,7 +779,8 @@ fn smoke_cases() -> Vec<Value> {
             check("min_p", Some(0.0), None),
             check("cd_nose", Some(0.0), Some(0.12)),
             check("cp_tip", Some(0.0), None),
-            check("cp_min", None, Some(0.0))
+            check("cp_min", None, Some(0.0)),
+            {"key": "residual_finite", "is": true}
         ]),
         &c,
     ));
