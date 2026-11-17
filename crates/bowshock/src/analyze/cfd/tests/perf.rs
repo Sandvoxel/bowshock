@@ -720,7 +720,15 @@ fn engine3d_probe_cold_half_points() {
 #[ignore = "solves the finned example's table on the GPU"]
 fn finned_drag_split() {
     let (rocket, vehicle) = example();
-    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    let mut plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    // BOWSHOCK_SMOOTH=1: the walls solved smooth (the body and the fins), to compare with a direct engine run that has no roughness
+    if std::env::var_os("BOWSHOCK_SMOOTH").is_some() {
+        plan.body_roughness = 0.0;
+        if let Some(f) = plan.fins.as_mut() {
+            f.roughness = 0.0;
+        }
+    }
+    println!("ROUGHNESS body {:.1} um, fins {:.1} um", plan.body_roughness * 1e6, plan.fins.as_ref().map_or(0.0, |f| f.roughness * 1e6));
     // BOWSHOCK_MACHS=1.0,1.1 picks the Mach numbers (default: the table's ten), BOWSHOCK_GRID=draft the quick grid
     let machs: Vec<f64> =
         std::env::var("BOWSHOCK_MACHS").map(|v| v.split(',').map(|m| m.trim().parse().unwrap()).collect()).unwrap_or_else(|_| nodes((0.1, 3.0)).unwrap());
