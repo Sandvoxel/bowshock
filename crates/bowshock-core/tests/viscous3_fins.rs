@@ -116,7 +116,7 @@ fn build(case: &Case3) -> Solver3 {
         dt_mode: DtMode::Sum,
         cfl_max: env("CFL", if subsonic { 50.0 } else { 20.0 }),
         growth: env("GROWTH", 1.02),
-        sub_iters: 3,
+        sub_iters: env("SUB", 3),
         low_mach_precond: env("PRECOND", u8::from(subsonic)) != 0,
         line_solve: if std::env::var("LINES").as_deref() == Ok("diag") { LineSolve3::DiagonalCorrected } else { LineSolve3::Block },
         ..ImplicitParams::DEFAULT
