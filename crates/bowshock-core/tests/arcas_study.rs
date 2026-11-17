@@ -57,7 +57,9 @@ fn the_arcas_axial_force_by_part() {
         let mut f = Case3::anf_fins();
         // STUDY_LE=<f>: the leading-edge wedge of the flat-back section over the fraction f of the chord (the code's default is 0.1: a 21.8 degree half angle)
         if let Some(le) = std::env::var("STUDY_LE").ok().and_then(|v| v.parse::<f64>().ok()) {
-            f.profile = FinProfile::Custom { section: vec![[0.0, 0.0], [le, 1.0], [1.0, 1.0]] };
+            // STUDY_Z0=<z>: the leading-edge thickness as a fraction of the maximum (a blunt edge: DRDC gives a leading-edge radius of 0.004 cal on a 0.08 cal trailing edge, z = 0.1)
+            let z0: f64 = env("STUDY_Z0", 0.0);
+            f.profile = FinProfile::Custom { section: vec![[0.0, z0], [le, 1.0], [1.0, 1.0]] };
         }
         (Case3::anf_body(), f, flow)
     } else {
