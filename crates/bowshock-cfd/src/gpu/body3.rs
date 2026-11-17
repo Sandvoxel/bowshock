@@ -38,9 +38,30 @@ fn upload_state3(ctx: &Context, u: &[Cons3], shape: [usize; 3], cfl: f64) -> Res
     Ok([comp(0)?, comp(1)?, comp(2)?, comp(3)?, comp(4)?, up(ctx, &[0.0], 1)?, up(ctx, &[cfl], 1)?])
 }
 
+/// The five conserved components stacked `[5, ..]` (component fastest) and read back with one sync.
+fn read_stacked3(s: &State3, ri: std::ops::Range<usize>, rj: std::ops::Range<usize>, rk: std::ops::Range<usize>) -> Result<Vec<f64>> {
+    let part = |k: usize| s[k].slice(0, ri.clone()).slice(1, rj.clone()).slice(2, rk.clone());
+    to_f64(&luma::stack(0, [&part(0), &part(1), &part(2), &part(3), &part(4)]))
+}
+
 fn download_state3(s: &State3) -> Result<Vec<Cons3>> {
-    let v: Vec<Vec<f64>> = (0..5).map(|k| to_f64(&s[k])).collect::<Result<_>>()?;
-    Ok((0..v[0].len()).map(|q| [v[0][q], v[1][q], v[2][q], v[3][q], v[4][q]]).collect())
+    let d = s[0].shape().dims();
+    let v = read_stacked3(s, 0..d[0], 0..d[1], 0..d[2])?;
+    Ok(v.as_chunks::<5>().0.to_vec())
+}
+
+/// Reads the cells `ri x rj x rk` of the state into `u` (`(k * nj + j) * ni + i`) with one sync.
+fn read_box3_into(s: &State3, (ni, nj): (usize, usize), ri: std::ops::Range<usize>, rj: std::ops::Range<usize>, rk: std::ops::Range<usize>, u: &mut [Cons3]) -> Result<()> {
+    if ri.is_empty() || rj.is_empty() || rk.is_empty() {
+        return Ok(());
+    }
+    let v = read_stacked3(s, ri.clone(), rj.clone(), rk.clone())?;
+    let (w, h) = (ri.len(), rj.len());
+    for (n, &q) in v.as_chunks::<5>().0.iter().enumerate() {
+        let (i, j, k) = (ri.start + n % w, rj.start + n / w % h, rk.start + n / (w * h));
+        u[(k * nj + j) * ni + i] = q;
+    }
+    Ok(())
 }
 
 /// `select(cond, a, b)` of two records.
@@ -421,6 +442,9 @@ pub struct LazySolver3 {
     axis_cells: usize,
     /// The f32 geometry of the implicit left-hand side.
     lg: LGeo3,
+    /// The traced loop per limiter phase with the staging, the step count and the sync interval it was compiled for; cleared by `set_config`
+    /// and `set_low_mach`.
+    compiled: [Option<(Staging, usize, usize, luma::CompiledUntil<State3>)>; 2],
 }
 
 impl LazySolver3 {
@@ -503,7 +527,7 @@ impl LazySolver3 {
         };
         let lg = LGeo3::new(ctx, grid, &solid)?;
         let mut s =
-            LazySolver3 { ctx: ctx.clone(), ni, nj, nk, cfg: cfg.clone(), staging: DEFAULT_STAGING, geo, state: None, iter: 0, n_active, axis_cells: na, lg };
+            LazySolver3 { ctx: ctx.clone(), ni, nj, nk, cfg: cfg.clone(), staging: DEFAULT_STAGING, geo, state: None, iter: 0, n_active, axis_cells: na, lg, compiled: [None, None] };
         let q = prim_to_cons3(&cfg.freestream);
         s.set_state(&vec![q; nc])?;
         Ok(s)
@@ -526,6 +550,7 @@ impl LazySolver3 {
     /// does not ([`LazySolver3::restart_ramp`]).
     pub fn set_config(&mut self, cfg: &Config3) -> Result<()> {
         let scheme_changed = cfg.scheme != self.cfg.scheme;
+        self.compiled = [None, None];
         self.cfg = cfg.clone();
         if scheme_changed {
             self.restart_ramp()?;
@@ -570,6 +595,7 @@ impl LazySolver3 {
 
     pub fn set_low_mach(&mut self, on: bool) {
         self.cfg.low_mach = on;
+        self.compiled = [None, None];
     }
 
     /// `sqrt(sum (d rho / dt)^2 / N)`, `N` the number of fluid cells.
@@ -820,14 +846,40 @@ impl LazySolver3 {
         while left > 0 {
             let seg = self.phase_len3(left);
             let lim = self.limiter3(self.iter);
+            let slot = usize::from(lim != Limiter::FirstOrder);
             let init = self.state.take().ok_or_else(no_state)?;
-            let run = luma::iterate_until_all(init, records3(luma::Until::new(seg).check_every(sync)), |s, _| self.step3(s, lim))?;
+            let hit = matches!(&self.compiled[slot], Some((st, m, ce, _)) if *st == self.staging && seg <= *m && *ce == sync);
+            if !hit {
+                let max_s = sync.max(seg);
+                self.compiled[slot] = match luma::compile_until_all(&init, records3(luma::Until::new(max_s).check_every(sync)), |s, _| self.step3(s, lim)) {
+                    Ok(cu) => Some((self.staging, max_s, sync, cu)),
+                    Err(e) if matches!(e.root(), luma::LumaError::Unsupported(_) | luma::LumaError::Chunked(_)) => None,
+                    Err(e) => return Err(e),
+                };
+            }
+            let run = match &mut self.compiled[slot] {
+                Some((.., cu)) => cu.run_steps(init, seg)?,
+                None => luma::iterate_until_all(init, records3(luma::Until::new(seg).check_every(sync)), |s, _| self.step3(s, lim))?,
+            };
             history.extend(read_history3(&run)?);
             self.state = Some(run.state);
             self.iter += seg;
             left -= seg;
         }
         Ok(history)
+    }
+
+    /// Reads only the cells `forces_on` / `breakdown_on` use into `u` (`Grid3::cell` layout): the two wall layers of the body surface and
+    /// the halo of two cells around every solid box.
+    pub fn read_boundary_into(&self, grid: &Grid3, u: &mut [Cons3]) -> Result<()> {
+        let s = self.state.as_ref().ok_or_else(no_state)?;
+        let (ni, nj, nk) = (self.ni, self.nj, self.nk);
+        read_box3_into(s, (ni, nj), self.axis_cells.min(ni)..ni, 0..2.min(nj), 0..nk, u)?;
+        for b in &grid.solid {
+            let halo = |r: &std::ops::Range<usize>, n: usize| r.start.saturating_sub(2)..(r.end + 2).min(n);
+            read_box3_into(s, (ni, nj), halo(&b.i, ni), halo(&b.j, nj), halo(&b.k, nk), u)?;
+        }
+        Ok(())
     }
 
     /// `n` iterations as one `iterate_all` replay per limiter phase (no residual history).

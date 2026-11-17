@@ -13,10 +13,11 @@ use crate::error::Error;
 use crate::progress::{Progress, ProgressSink};
 use crate::spec::{BodySpec, FinSpec, MotorSpec};
 use bowshock_cfd::gas::GAMMA;
-use bowshock_cfd::solver::{Solver, Turbulence, Viscous};
+use bowshock_cfd::solver::{Bc, Solver, Turbulence, Viscous};
 use bowshock_cfd::solver3::Solver3;
 use bowshock_reference::base_drag::base_drag_coefficient;
 use std::ops::ControlFlow;
+use std::sync::Arc;
 
 /// Lowest and highest Mach number accepted by [`Analysis::run`].
 const MACH_RANGE: (f64, f64) = (0.1, 3.0);
@@ -249,6 +250,28 @@ pub struct Analysis {
     estimate_uncertainty: bool,
     lift_hook: Option<fn(&mut Case3)>,
     progress: Option<ProgressSink>,
+    lift_sink: Option<LiftSink>,
+    point_sink: Option<PointSink>,
+}
+
+/// Callback that receives each [`LiftPoint`] as it ends, with the backend that ran it and why the GPU was not used (under `Auto`).
+#[derive(Clone)]
+struct LiftSink(Arc<dyn Fn(&LiftPoint, BackendUsed, Option<&str>) + Send + Sync>);
+
+impl std::fmt::Debug for LiftSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LiftSink")
+    }
+}
+
+/// Callback that receives each [`PolarPoint`] of a sweep as it is decided, with the backend that ran it and why the GPU was not used.
+#[derive(Clone)]
+struct PointSink(Arc<dyn Fn(&PolarPoint, BackendUsed, Option<&str>) + Send + Sync>);
+
+impl std::fmt::Debug for PointSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PointSink")
+    }
 }
 
 /// Free stream of a viscous sweep.
@@ -283,6 +306,8 @@ impl Analysis {
             estimate_uncertainty: false,
             lift_hook: None,
             progress: None,
+            lift_sink: None,
+            point_sink: None,
         }
     }
 
@@ -355,6 +380,21 @@ impl Analysis {
     /// viscous drag run and of a 3D run is reported as a coefficient on the reference area.
     pub fn on_progress(mut self, f: impl Fn(&Progress) -> ControlFlow<()> + Send + Sync + 'static) -> Self {
         self.progress = Some(ProgressSink::new(f));
+        self
+    }
+
+    /// Calls `f` with each point of [`Analysis::run_lift`] as soon as its run ends, from the thread that runs the analysis, with the
+    /// backend that ran it and, under [`Backend::Auto`] when the CPU ran because the GPU did not, the reason (as in [`LiftPolar::fallback`]).
+    pub fn on_lift_point(mut self, f: impl Fn(&LiftPoint, BackendUsed, Option<&str>) + Send + Sync + 'static) -> Self {
+        self.lift_sink = Some(LiftSink(Arc::new(f)));
+        self
+    }
+
+    /// Calls `f` with each point of [`Analysis::run`] as soon as it is decided (after any extended-precision re-run), from the thread
+    /// that runs the analysis, with the backend that ran it and, under [`Backend::Auto`] when the CPU ran because the GPU did not,
+    /// the reason (as in [`Polar::fallback`]). The comparison sweep of [`Analysis::estimate_uncertainty`] is not reported.
+    pub fn on_point(mut self, f: impl Fn(&PolarPoint, BackendUsed, Option<&str>) + Send + Sync + 'static) -> Self {
+        self.point_sink = Some(PointSink(Arc::new(f)));
         self
     }
 
@@ -500,7 +540,9 @@ impl Analysis {
         Ok(self.prepare(machs)?.2)
     }
 
-    /// Zero-lift drag at each Mach number of `machs` (each in `[0.1, 3.0]`).
+    /// Zero-lift drag at each Mach number of `machs` (each in `[0.1, 3.0]`). Each point goes to [`Analysis::on_point`] as soon as it
+    /// is decided, so without an uncertainty estimate the reports and the result agree; with one, the reported points have
+    /// no [`PolarPoint::cd_uncertainty`] (the comparison sweep runs after the primary one).
     pub fn run(&self, machs: &[f64]) -> Result<Polar, Error> {
         let (order, rans, cases) = self.prepare(machs)?;
         let level = self.resolution.level();
@@ -512,27 +554,31 @@ impl Analysis {
             check_grid(&c[0])?;
         }
 
-        let (results, backend, mut fallback) = self.sweep_on(&cases, self.backend)?;
-        let cmp_results = match &cmp_cases {
-            Some(c) => {
-                let b = match backend {
-                    BackendUsed::Cpu => Backend::Cpu,
-                    BackendUsed::Gpu => self.backend,
-                };
-                let (r, _, note) = self.sweep_on(c, b)?;
-                if let Some(note) = note {
-                    fallback = Some(format!("uncertainty sweep: {note}"));
-                }
-                Some(r)
+        let mut primary = |case: &Case, detail: PointResult, backend: BackendUsed, fallback: Option<&str>| {
+            let p = self.point(case.mach, detail);
+            if let Some(sink) = &self.point_sink {
+                (sink.0)(&p, backend, fallback);
             }
-            None => None,
+            p
         };
+        let (mut points, backend, mut fallback) = self.sweep_on(&cases, self.backend, &mut primary)?;
+        if let Some(c) = &cmp_cases {
+            let b = match backend {
+                BackendUsed::Cpu => Backend::Cpu,
+                BackendUsed::Gpu => self.backend,
+            };
+            let (others, _, note) = self.sweep_on(c, b, &mut |_: &Case, r: PointResult, _: BackendUsed, _: Option<&str>| r)?;
+            if let Some(note) = note {
+                fallback = Some(format!("uncertainty sweep: {note}"));
+            }
+            for (p, other) in points.iter_mut().zip(&others) {
+                p.cd_uncertainty = self.uncertainty(p, other);
+            }
+        }
 
-        let mut cmp_iter = cmp_results.map(Vec::into_iter);
         let mut slots: Vec<Option<PolarPoint>> = (0..machs.len()).map(|_| None).collect();
-        for (&k, detail) in order.iter().zip(results) {
-            let other = cmp_iter.as_mut().and_then(Iterator::next);
-            slots[k] = Some(self.point(machs[k], detail, other.as_ref()));
+        for (&k, p) in order.iter().zip(points) {
+            slots[k] = Some(p);
         }
         let points = slots.into_iter().map(|p| p.expect("every Mach number has a result")).collect();
         Ok(Polar { points, backend, fallback, motor_on: self.motor.is_some() })
@@ -588,16 +634,19 @@ impl Analysis {
         Drag { forebody_pressure: forebody_pressure * q, friction: friction.map(|f| f * q), base: base * q, base_modelled, fins, total }
     }
 
-    fn point(&self, mach: f64, detail: PointResult, other: Option<&PointResult>) -> PolarPoint {
+    /// The public point of a solver result, without an uncertainty estimate (that comes from the comparison sweep, after this one).
+    fn point(&self, mach: f64, detail: PointResult) -> PolarPoint {
         let drag = self.drag(mach, &detail);
         let quality = quality(&detail, &drag);
         let warnings = self.warnings(mach, &detail);
-        let cd_uncertainty = other.and_then(|o| {
-            let od = self.drag(mach, o);
-            (quality != Quality::Failed && self::quality(o, &od) != Quality::Failed).then(|| (drag.total - od.total).abs())
-        });
         let detail = self.detail(&detail);
-        PolarPoint { mach, alpha: 0.0, drag, quality, warnings, cd_uncertainty, detail }
+        PolarPoint { mach, alpha: 0.0, drag, quality, warnings, cd_uncertainty: None, detail }
+    }
+
+    /// Total-drag difference of `point` to the result `other` of the comparison grid; `None` when either one failed.
+    fn uncertainty(&self, point: &PolarPoint, other: &PointResult) -> Option<f64> {
+        let od = self.drag(point.mach, other);
+        (point.quality != Quality::Failed && quality(other, &od) != Quality::Failed).then(|| (point.drag.total - od.total).abs())
     }
 
     /// Public summary of a solver result: coefficients on the reference area, wall points in metres.
@@ -654,27 +703,49 @@ impl Analysis {
         before.atan() - first.slope.atan() > limit || segs.windows(2).any(|w| w[0].slope.atan() - w[1].slope.atan() > limit)
     }
 
-    /// Sweeps `cases` (ascending Mach) on `backend`; returns the backend used and, under `Auto`, why the GPU was not.
-    fn sweep_on(&self, cases: &[Case], backend: Backend) -> Result<(Vec<PointResult>, BackendUsed, Option<String>), Error> {
+    /// Sweeps `cases` (ascending Mach) on `backend`; returns the backend used and, under `Auto`, why the GPU was not. `finish` turns
+    /// each final solver result into the sweep's output as soon as the point is decided, with the backend that ran it and why that
+    /// is not the GPU.
+    fn sweep_on<T>(
+        &self,
+        cases: &[Case],
+        backend: Backend,
+        finish: &mut impl FnMut(&Case, PointResult, BackendUsed, Option<&str>) -> T,
+    ) -> Result<(Vec<T>, BackendUsed, Option<String>), Error> {
         match backend {
-            Backend::Cpu => Ok((guard(|| self.sweep_cpu(cases))?, BackendUsed::Cpu, None)),
-            Backend::Gpu => Ok((guard(|| self.sweep_gpu_required(cases))?, BackendUsed::Gpu, None)),
-            Backend::Auto => self.sweep_auto(cases),
+            Backend::Cpu => Ok((guard(|| self.sweep_cpu(cases, None, finish))?, BackendUsed::Cpu, None)),
+            Backend::Gpu => Ok((guard(|| self.sweep_gpu_required(cases, finish))?, BackendUsed::Gpu, None)),
+            Backend::Auto => self.sweep_auto(cases, finish),
         }
     }
 
     /// The sweep logic shared by the backends: first point cold; later points warm (when enabled) against the residual peak
-    /// of the most recent cold start; a warm point that ends `Failed` or `Stalled` is re-run cold on a fresh solver, and a point
-    /// after a `Failed` point starts cold on a fresh solver.
-    fn sweep<R: Runner<Error = Error>>(&self, runner: &R, cases: &[Case]) -> Result<Vec<PointResult>, Error> {
+    /// of the most recent cold start; a warm point that ends `Failed` or `Stalled` is re-run cold, and a point after a `Failed`
+    /// point starts cold. Cold points reuse the solver of the earlier points (grid and geometry upload). With a `rescue` backend,
+    /// a point that ends `Failed` or `Stalled` is re-run once on it and kept if that ends better. `backend` and `fallback` say
+    /// what `runner` is, for `finish`.
+    fn sweep<R: Runner<Error = Error>, T>(
+        &self,
+        runner: &R,
+        rescue: Option<&R>,
+        backend: BackendUsed,
+        fallback: Option<&str>,
+        cases: &[Case],
+        finish: &mut impl FnMut(&Case, PointResult, BackendUsed, Option<&str>) -> T,
+    ) -> Result<Vec<T>, Error> {
         let quality_of = |case: &Case, d: &PointResult| quality(d, &self.drag(case.mach, d));
-        let mut out: Vec<PointResult> = Vec::with_capacity(cases.len());
+        let rank = |q: Quality| match q {
+            Quality::Failed => 0,
+            Quality::Stalled => 1,
+            _ => 2,
+        };
+        let mut out: Vec<T> = Vec::with_capacity(cases.len());
         let mut state: Option<R::State> = None;
         let mut r_ref = 0.0;
         let mut previous_failed = false;
         for case in cases {
-            let warm = match (&mut state, previous_failed) {
-                (Some(s), false) => {
+            let warm = match &mut state {
+                Some(s) if self.warm_start && !previous_failed => {
                     let r = runner.warm(s, case, r_ref)?;
                     if r.stop_reason == StopReason::Cancelled {
                         return Err(Error::Cancelled);
@@ -683,52 +754,96 @@ impl Analysis {
                 }
                 _ => None,
             };
-            let result = match warm {
+            let mut result = match warm {
                 Some(r) => r,
                 None => {
-                    let (r, s) = runner.cold(case)?;
+                    let r = match &mut state {
+                        Some(s) => runner.cold_reuse(s, case)?,
+                        None => {
+                            let (r, s) = runner.cold(case)?;
+                            state = Some(s);
+                            r
+                        }
+                    };
                     r_ref = r.residual_peak;
-                    state = self.warm_start.then_some(s);
                     r
                 }
             };
             if result.stop_reason == StopReason::Cancelled {
                 return Err(Error::Cancelled);
             }
+            let mut accepted_rescue = false;
+            if let Some(rescue) = rescue {
+                let q = quality_of(case, &result);
+                if matches!(q, Quality::Failed | Quality::Stalled) {
+                    let (r, _) = rescue.cold(case)?;
+                    if r.stop_reason == StopReason::Cancelled {
+                        return Err(Error::Cancelled);
+                    }
+                    if rank(quality_of(case, &r)) > rank(q) {
+                        result = r;
+                        accepted_rescue = true;
+                    }
+                }
+            }
+            if accepted_rescue {
+                // the field of the failed or stalled low-precision run is not a start for the next point
+                state = None;
+            }
             previous_failed = quality_of(case, &result) == Quality::Failed;
-            out.push(result);
+            out.push(finish(case, result, backend, fallback));
         }
         Ok(out)
     }
 
-    fn sweep_cpu(&self, cases: &[Case]) -> Result<Vec<PointResult>, Error> {
-        self.sweep(&CpuBackend, cases)
+    /// CPU sweep; `fallback` is why the GPU was not used, under `Auto`.
+    fn sweep_cpu<T>(
+        &self,
+        cases: &[Case],
+        fallback: Option<&str>,
+        finish: &mut impl FnMut(&Case, PointResult, BackendUsed, Option<&str>) -> T,
+    ) -> Result<Vec<T>, Error> {
+        self.sweep(&CpuBackend, None, BackendUsed::Cpu, fallback, cases, finish)
     }
 
     #[cfg(feature = "gpu")]
-    fn sweep_gpu_required(&self, cases: &[Case]) -> Result<Vec<PointResult>, Error> {
-        self.sweep(&GpuBackend, cases)
+    fn sweep_gpu_required<T>(&self, cases: &[Case], finish: &mut impl FnMut(&Case, PointResult, BackendUsed, Option<&str>) -> T) -> Result<Vec<T>, Error> {
+        use bowshock_cfd::gpu::Precision;
+        // a loose drag tolerance is met within f32 round-off; a point that stalls or fails there is re-run in extended precision
+        if self.drag_tolerance.is_some_and(|tol| tol >= 1e-3) {
+            self.sweep(&GpuBackend { prec: Precision::F32 }, Some(&GpuBackend { prec: Precision::Extended }), BackendUsed::Gpu, None, cases, finish)
+        } else {
+            self.sweep(&GpuBackend { prec: Precision::Extended }, None, BackendUsed::Gpu, None, cases, finish)
+        }
     }
 
     #[cfg(not(feature = "gpu"))]
-    fn sweep_gpu_required(&self, _cases: &[Case]) -> Result<Vec<PointResult>, Error> {
+    fn sweep_gpu_required<T>(&self, _cases: &[Case], _finish: &mut impl FnMut(&Case, PointResult, BackendUsed, Option<&str>) -> T) -> Result<Vec<T>, Error> {
         Err(Error::Unsupported("the `gpu` feature is not enabled".into()))
     }
 
     #[cfg(feature = "gpu")]
-    fn sweep_auto(&self, cases: &[Case]) -> Result<(Vec<PointResult>, BackendUsed, Option<String>), Error> {
-        let why = match guard(|| self.sweep_gpu_required(cases)) {
+    fn sweep_auto<T>(
+        &self,
+        cases: &[Case],
+        finish: &mut impl FnMut(&Case, PointResult, BackendUsed, Option<&str>) -> T,
+    ) -> Result<(Vec<T>, BackendUsed, Option<String>), Error> {
+        let why = match guard(|| self.sweep_gpu_required(cases, finish)) {
             Ok(results) => return Ok((results, BackendUsed::Gpu, None)),
             Err(Error::Internal(m)) => m.replacen("solver panicked", "GPU solver panicked", 1),
             Err(Error::Cancelled) => return Err(Error::Cancelled),
             Err(e) => format!("GPU unavailable: {e}"),
         };
-        Ok((guard(|| self.sweep_cpu(cases))?, BackendUsed::Cpu, Some(why)))
+        Ok((guard(|| self.sweep_cpu(cases, Some(&why), finish))?, BackendUsed::Cpu, Some(why)))
     }
 
     #[cfg(not(feature = "gpu"))]
-    fn sweep_auto(&self, cases: &[Case]) -> Result<(Vec<PointResult>, BackendUsed, Option<String>), Error> {
-        Ok((guard(|| self.sweep_cpu(cases))?, BackendUsed::Cpu, None))
+    fn sweep_auto<T>(
+        &self,
+        cases: &[Case],
+        finish: &mut impl FnMut(&Case, PointResult, BackendUsed, Option<&str>) -> T,
+    ) -> Result<(Vec<T>, BackendUsed, Option<String>), Error> {
+        Ok((guard(|| self.sweep_cpu(cases, None, finish))?, BackendUsed::Cpu, None))
     }
 }
 
@@ -818,7 +933,7 @@ impl Analysis {
         alphas.sort_by(f64::total_cmp);
 
         match self.backend {
-            Backend::Cpu => guard(|| self.lift_cpu(&machs, &alphas)),
+            Backend::Cpu => guard(|| self.lift_cpu(&machs, &alphas, None)),
             Backend::Gpu => guard(|| self.lift_gpu(&machs, &alphas)),
             Backend::Auto => {
                 let why = match guard(|| self.lift_gpu(&machs, &alphas)) {
@@ -827,9 +942,7 @@ impl Analysis {
                     Err(Error::Cancelled) => return Err(Error::Cancelled),
                     Err(e) => format!("GPU unavailable: {e}"),
                 };
-                let mut p = guard(|| self.lift_cpu(&machs, &alphas))?;
-                p.fallback = Some(why);
-                Ok(p)
+                guard(|| self.lift_cpu(&machs, &alphas, Some(&why)))
             }
         }
     }
@@ -884,53 +997,87 @@ impl Analysis {
         }
     }
 
-    /// The sweep loop shared by the lift backends: per Mach number a cold first incidence, warm later ones. A warm point that ends
-    /// `Failed` or `Stalled` is re-run cold; a cold run that diverged is repeated once with the implicit CFL limit halved.
-    fn lift_loop<R: LiftRunner>(&self, runner: &R, machs: &[f64], alphas_deg: &[f64]) -> Result<Vec<LiftPoint>, Error> {
+    /// A cold run of `case` on the solver state kept in `state`, or on a new one when there is none yet.
+    fn lift_cold<R: LiftRunner>(runner: &R, state: &mut Option<R::State>, case: &Case3) -> Result<PointResult3, Error> {
+        match state {
+            Some(s) => runner.cold_reuse(s, case),
+            None => {
+                let (r, s) = runner.cold(case)?;
+                *state = Some(s);
+                Ok(r)
+            }
+        }
+    }
+
+    /// Records a finished point and hands it, with the backend that ran it and under `Auto` why that is not the GPU, to the
+    /// [`Analysis::on_lift_point`] callback.
+    fn lift_emit(&self, points: &mut Vec<LiftPoint>, r: &PointResult3, backend: BackendUsed, fallback: Option<&str>) {
+        let p = self.lift_point(r);
+        if let Some(sink) = &self.lift_sink {
+            (sink.0)(&p, backend, fallback);
+        }
+        points.push(p);
+    }
+
+    /// The sweep loop shared by the lift backends: per Mach number a cold first incidence, warm later ones. The solver state (grid,
+    /// GPU buffers) is kept across Mach numbers. A warm point that ends `Failed` or `Stalled` is re-run cold; a cold run that
+    /// diverged is repeated once with the implicit CFL limit halved. `backend` and `fallback` describe the runner for the callback.
+    fn lift_loop<R: LiftRunner>(
+        &self,
+        runner: &R,
+        backend: BackendUsed,
+        fallback: Option<&str>,
+        machs: &[f64],
+        alphas_deg: &[f64],
+    ) -> Result<Vec<LiftPoint>, Error> {
         let mut points = Vec::with_capacity(machs.len() * alphas_deg.len());
+        let mut state: Option<R::State> = None;
         for &m in machs {
-            let mut state: Option<R::State> = None;
+            let mut can_warm = false;
             for &a in alphas_deg {
                 let case = self.lift_case(m, a.to_radians());
-                if let Some(s) = &mut state {
-                    let r = runner.warm(s, &case)?;
-                    if r.stop_reason == StopReason::Cancelled {
-                        return Err(Error::Cancelled);
-                    }
-                    if matches!(lift_quality(&r), Quality::Converged | Quality::Stationary) {
-                        points.push(self.lift_point(&r));
-                        continue;
+                if can_warm {
+                    if let Some(s) = &mut state {
+                        let r = runner.warm(s, &case)?;
+                        if r.stop_reason == StopReason::Cancelled {
+                            return Err(Error::Cancelled);
+                        }
+                        if matches!(lift_quality(&r), Quality::Converged | Quality::Stationary) {
+                            self.lift_emit(&mut points, &r, backend, fallback);
+                            continue;
+                        }
                     }
                 }
-                let (mut r, s) = runner.cold(&case)?;
-                state = Some(s);
+                let mut r = Self::lift_cold(runner, &mut state, &case)?;
+                can_warm = true;
                 if r.stop_reason == StopReason::NonFinite {
                     let mut c = case.clone();
                     c.numerics.implicit.cfl_max *= 0.5;
-                    r = runner.cold(&c)?.0;
-                    state = None;
+                    r = Self::lift_cold(runner, &mut state, &c)?;
+                    can_warm = false;
                 }
                 if r.stop_reason == StopReason::Cancelled {
                     return Err(Error::Cancelled);
                 }
                 if lift_quality(&r) == Quality::Failed {
-                    state = None;
+                    can_warm = false;
                 }
-                points.push(self.lift_point(&r));
+                self.lift_emit(&mut points, &r, backend, fallback);
             }
         }
         Ok(points)
     }
 
-    /// CPU backend.
-    fn lift_cpu(&self, machs: &[f64], alphas_deg: &[f64]) -> Result<LiftPolar, Error> {
-        Ok(LiftPolar { points: self.lift_loop(&CpuLift, machs, alphas_deg)?, backend: BackendUsed::Cpu, fallback: None })
+    /// CPU backend; `fallback` is why the GPU was not used, under `Auto`.
+    fn lift_cpu(&self, machs: &[f64], alphas_deg: &[f64], fallback: Option<&str>) -> Result<LiftPolar, Error> {
+        let points = self.lift_loop(&CpuLift, BackendUsed::Cpu, fallback, machs, alphas_deg)?;
+        Ok(LiftPolar { points, backend: BackendUsed::Cpu, fallback: fallback.map(str::to_string) })
     }
 
     /// GPU backend of [`Analysis::run_lift`] (`machs` and `alphas_deg` validated and sorted): extended precision.
     #[cfg(feature = "gpu")]
     fn lift_gpu(&self, machs: &[f64], alphas_deg: &[f64]) -> Result<LiftPolar, Error> {
-        Ok(LiftPolar { points: self.lift_loop(&GpuLift, machs, alphas_deg)?, backend: BackendUsed::Gpu, fallback: None })
+        Ok(LiftPolar { points: self.lift_loop(&GpuLift, BackendUsed::Gpu, None, machs, alphas_deg)?, backend: BackendUsed::Gpu, fallback: None })
     }
 
     #[cfg(not(feature = "gpu"))]
@@ -939,10 +1086,12 @@ impl Analysis {
     }
 }
 
-/// One backend of the 3D lift sweep: a cold run that builds the solver state, and a warm run on it.
+/// One backend of the 3D lift sweep: a cold run that builds the solver state, a cold run on a state kept from an earlier point
+/// (any Mach number of the sweep: the grid does not depend on it), and a warm run on it.
 trait LiftRunner {
     type State;
     fn cold(&self, case: &Case3) -> Result<(PointResult3, Self::State), Error>;
+    fn cold_reuse(&self, state: &mut Self::State, case: &Case3) -> Result<PointResult3, Error>;
     fn warm(&self, state: &mut Self::State, case: &Case3) -> Result<PointResult3, Error>;
 }
 
@@ -955,6 +1104,12 @@ impl LiftRunner for CpuLift {
         let mut s = case.build_solver()?;
         let r = run3_on(case, &mut s, false);
         Ok((r, s))
+    }
+
+    // the CPU loop restarts only the free stream, so a cold run needs a fresh field
+    fn cold_reuse(&self, s: &mut Solver3, case: &Case3) -> Result<PointResult3, Error> {
+        *s = case.build_solver()?;
+        Ok(run3_on(case, s, false))
     }
 
     fn warm(&self, s: &mut Solver3, case: &Case3) -> Result<PointResult3, Error> {
@@ -973,6 +1128,10 @@ impl LiftRunner for GpuLift {
         let mut r = crate::engine::gpu3::GpuRunner3::new(case, bowshock_cfd::gpu::Precision::Extended)?;
         let p = r.run_on(case, false)?;
         Ok((p, r))
+    }
+
+    fn cold_reuse(&self, r: &mut crate::engine::gpu3::GpuRunner3, case: &Case3) -> Result<PointResult3, Error> {
+        r.run_on(case, false)
     }
 
     fn warm(&self, r: &mut crate::engine::gpu3::GpuRunner3, case: &Case3) -> Result<PointResult3, Error> {
@@ -1028,6 +1187,8 @@ trait Runner {
     type State;
     type Error;
     fn cold(&self, case: &Case) -> Result<(PointResult, Self::State), Self::Error>;
+    /// A cold run on the solver of an earlier point of the same sweep: the grid and the geometry are kept, the field restarts.
+    fn cold_reuse(&self, state: &mut Self::State, case: &Case) -> Result<PointResult, Self::Error>;
     fn warm(&self, state: &mut Self::State, case: &Case, r_ref: f64) -> Result<PointResult, Self::Error>;
 }
 
@@ -1043,13 +1204,30 @@ impl Runner for CpuBackend {
         Ok((r, s))
     }
 
+    fn cold_reuse(&self, s: &mut Solver, case: &Case) -> Result<PointResult, Error> {
+        let same = (s.grid.ni, s.grid.nj) == case.cells()
+            && s.viscous() == case.viscous
+            && s.block().is_some() == (case.wake == Wake::Base)
+            && s.nozzle().map(|z| (z.state, z.turb)) == case.motor.map(|j| (j.state, j.turb));
+        if same {
+            if case.viscous.is_none() {
+                s.cfg.bc = [Bc::Characteristic, case.numerics.outflow, Bc::SlipWall, Bc::Characteristic];
+            }
+        } else {
+            *s = case.try_build_solver()?;
+        }
+        Ok(run_on(case, s, false, None))
+    }
+
     fn warm(&self, s: &mut Solver, case: &Case, r_ref: f64) -> Result<PointResult, Error> {
         Ok(run_on(case, s, true, Some(r_ref)))
     }
 }
 
 #[cfg(feature = "gpu")]
-struct GpuBackend;
+struct GpuBackend {
+    prec: bowshock_cfd::gpu::Precision,
+}
 
 #[cfg(feature = "gpu")]
 impl Runner for GpuBackend {
@@ -1057,9 +1235,16 @@ impl Runner for GpuBackend {
     type Error = Error;
 
     fn cold(&self, case: &Case) -> Result<(PointResult, crate::engine::gpu::GpuRunner), Error> {
-        let mut r = crate::engine::gpu::GpuRunner::new(case, bowshock_cfd::gpu::Precision::Extended)?;
+        let mut r = crate::engine::gpu::GpuRunner::new(case, self.prec)?;
         let run = r.run_on(case, false, None)?;
         Ok((run.result, r))
+    }
+
+    fn cold_reuse(&self, r: &mut crate::engine::gpu::GpuRunner, case: &Case) -> Result<PointResult, Error> {
+        if !r.matches_case(case, self.prec) {
+            *r = crate::engine::gpu::GpuRunner::new(case, self.prec)?;
+        }
+        Ok(r.run_on(case, false, None)?.result)
     }
 
     fn warm(&self, r: &mut crate::engine::gpu::GpuRunner, case: &Case, r_ref: f64) -> Result<PointResult, Error> {

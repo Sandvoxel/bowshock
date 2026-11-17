@@ -29,6 +29,7 @@ impl LazySolver {
             self.geo.bnd[side].fixed = fixed_ghost(&self.ctx, cfg, side, shape)?;
         }
         self.cfg = cfg.clone();
+        self.compiled = [None, None];
         Ok(())
     }
 

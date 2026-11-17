@@ -16,7 +16,7 @@ use crate::engine::run::{finish, monitor, report, stop_reason, wall_distribution
 use crate::error::Error;
 use bowshock_cfd::gas::{cons_to_prim, freestream};
 use bowshock_cfd::gpu::{GpuSolver, Precision};
-use bowshock_cfd::solver::Solver;
+use bowshock_cfd::solver::{Bc, Solver};
 use std::time::Instant;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -65,6 +65,16 @@ impl GpuRunner {
         Ok(GpuRunner { gpu, host, setup_seconds: t0.elapsed().as_secs_f64() })
     }
 
+    /// Whether this runner (precision, grid size, viscous parameters, base block, nozzle jet) can run `case` after only a free-stream,
+    /// numerics and boundary-condition change, as the cases of one sweep of one body can. It does not compare the body geometry.
+    pub(crate) fn matches_case(&self, case: &Case, prec: Precision) -> bool {
+        self.gpu.precision() == prec
+            && (self.gpu.ni, self.gpu.nj) == case.cells()
+            && self.host.viscous() == case.viscous
+            && self.host.block().is_some() == (case.wake == Wake::Base)
+            && self.host.nozzle().map(|z| (z.state, z.turb)) == case.motor.map(|j| (j.state, j.turb))
+    }
+
     /// Copies the GPU state into the host solver's `u`.
     pub fn download(&mut self) -> Result<()> {
         self.host.u = self.gpu.state_f64()?;
@@ -81,6 +91,9 @@ impl GpuRunner {
         cfg.cfl = n.cfl;
         cfg.limiter = n.limiter;
         cfg.first_order_iters = n.first_order_iters;
+        if case.viscous.is_none() {
+            self.host.cfg.bc = [Bc::Characteristic, n.outflow, Bc::SlipWall, Bc::Characteristic];
+        }
         self.gpu.set_config(&self.host.cfg)?;
         self.host.low_mach = n.low_mach;
         self.gpu.set_low_mach(n.low_mach);
@@ -115,12 +128,12 @@ impl GpuRunner {
                 Some(match &sampler {
                     Some(sampler) => sampler.cp_base(&self.gpu.base_cells()?),
                     None if viscous => {
-                        // total CD incl. friction: needs only the mean state (`u`) on the host, which `download` provides
-                        self.download()?;
+                        // total CD incl. friction: needs only the wall and base stencil cells of `u` on the host
+                        self.gpu.read_boundary_into(&mut self.host.u)?;
                         monitor(case, &self.host)
                     }
                     None => {
-                        self.download()?;
+                        self.gpu.read_boundary_into(&mut self.host.u)?;
                         wall_distribution(&case.body, &self.host).1
                     }
                 })

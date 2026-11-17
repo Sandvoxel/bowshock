@@ -71,10 +71,9 @@ struct VGeo {
     fold: Option<[[Array<bool>; 2]; 2]>,
     /// The wall distance of every cell centroid (`f64::INFINITY` capped to `1e10`) of the SST model.
     dwall: Option<A>,
-    /// A rough-wall run (`Viscous::rough`): the cells above a rough no-slip face (`Walls::rough_jface`: the body surface) as a mask `[ni, nj]`.
-    rough_cells: Option<Array<bool>>,
-    /// A rough-wall run: the roughness `ks rough_ramp(i)` of every cell (`ks` outside the rough wall cells, where it is not used).
-    rough_ks: Option<A>,
+    /// A rough-wall run (`Viscous::rough`) with rough cells: the columns `i_range` of the row `j_row` above the rough no-slip faces
+    /// (`Walls::rough_jface`: the body surface), their wall distance and roughness `ks rough_ramp(i)`, each `[i_range.len(), 1]`.
+    rough_strip: Option<(std::ops::Range<usize>, usize, A, A)>,
 }
 
 /// `Walls::noslip_jface`: is the j-face `(i, j)` a no-slip wall?
@@ -204,9 +203,25 @@ impl VGeo {
         };
         let noslip_fold =
             |d: usize, i: usize, j: usize| first_refl(d, i, j) && if d == 0 { noslip_iface(blk, nozzle, i, j) } else { noslip_jface(&v, jmin_slip, blk, i, j) };
-        let dwall = (v.turbulence == Turbulence::Sst)
-            .then(|| -> Result<A> { up(ctx, &wall_distances(grid, v, &cfg.bc, blk, nozzle).iter().map(|d| d.min(1e10)).collect::<Vec<_>>(), [ni, nj]) })
-            .transpose()?;
+        let dist: Option<Vec<f64>> = (v.turbulence == Turbulence::Sst).then(|| wall_distances(grid, v, &cfg.bc, blk, nozzle).iter().map(|d| d.min(1e10)).collect());
+        let dwall = dist.as_ref().map(|d| up(ctx, d, [ni, nj])).transpose()?;
+        let rough_strip = match (&dist, v.rough()) {
+            (Some(dist), true) => {
+                let (i_range, j_row) = match blk {
+                    None if jmin_slip => (v.wall_i_start.min(ni)..ni, 0),
+                    None => (0..0, 0),
+                    Some(b) => (v.wall_i_start.min(b.i_end)..b.i_end, b.j_end),
+                };
+                if i_range.is_empty() {
+                    None
+                } else {
+                    let d: Vec<f64> = i_range.clone().map(|i| dist[j_row * ni + i]).collect();
+                    let ks: Vec<f64> = i_range.clone().map(|i| v.roughness * crate::turbulence::rough_ramp(i, v.wall_i_start)).collect();
+                    Some((i_range.clone(), j_row, up(ctx, &d, [i_range.len(), 1])?, up(ctx, &ks, [i_range.len(), 1])?))
+                }
+            }
+            _ => None,
+        };
         Ok(VGeo {
             v,
             dir: [dir(0)?, dir(1)?],
@@ -237,26 +252,7 @@ impl VGeo {
                 None => None,
             },
             dwall,
-            rough_cells: v
-                .rough()
-                .then(|| {
-                    mask_array(ctx, [ni, nj], &|i, j| match blk {
-                        None => j == 0 && jmin_slip && i >= v.wall_i_start,
-                        Some(b) => j == b.j_end && i >= v.wall_i_start && i < b.i_end,
-                    })
-                })
-                .transpose()?,
-            rough_ks: v
-                .rough()
-                .then(|| {
-                    let rough_cell = |i: usize, j: usize| match blk {
-                        None => j == 0 && jmin_slip && i >= v.wall_i_start,
-                        Some(b) => j == b.j_end && i >= v.wall_i_start && i < b.i_end,
-                    };
-                    let ks: Vec<f64> = (0..ni * nj).map(|c| if rough_cell(c % ni, c / ni) { v.roughness * crate::turbulence::rough_ramp(c % ni, v.wall_i_start) } else { v.roughness }).collect();
-                    up(ctx, &ks, [ni, nj])
-                })
-                .transpose()?,
+            rough_strip,
         })
     }
 }
@@ -299,6 +295,7 @@ impl LazySolver {
     /// touched).
     pub fn set_viscous(&mut self, v: Option<Viscous>, grid: &Grid) -> Result<()> {
         assert_eq!((grid.ni, grid.nj), (self.ni, self.nj), "set_viscous: the grid of the solver");
+        self.compiled = [None, None];
         self.visc = v.map(|v| VGeo::new(&self.ctx, grid, &self.cfg, self.block, self.nozzle, v)).transpose()?;
         let u = self.state_f64()?;
         self.init_turb(&u)
@@ -515,14 +512,36 @@ impl LazySolver {
         let [g0, g1, g2, g3, g4, g5] = grad;
         let rough = v.rough().then(|| {
             let d = vg.dwall.as_ref().expect("an SST run computes the wall distance in set_viscous");
-            let speed = (&p[1] * &p[1] + &p[2] * &p[2]).sqrt();
             let nu = &mu / &p[0];
-            let ks = vg.rough_ks.as_ref().expect("a rough run builds the roughness array");
-            let [k_w, om_w, nu_t] = self.aupoix_wall(&nu, &speed, d, ks);
-            let mask = vg.rough_cells.as_ref().expect("a rough run builds the rough-cell mask");
-            // the other no-slip cells (base wall, sting) keep the smooth state `[0, 60 nu / (beta1 d^2), 0]`
             let smooth = c(60.0) * &nu / (c(BETA1) * d * d);
-            staged(self.staging, [select(mask, &k_w, c(0.0)), select(mask, &om_w, &smooth), select(mask, &p[0] * nu_t, c(0.0))])
+            // the other no-slip cells (base wall, sting) keep the smooth state `[0, 60 nu / (beta1 d^2), 0]`
+            let Some((ri, j_row, d_s, ks_s)) = &vg.rough_strip else {
+                return staged(self.staging, [vg.zero.clone(), smooth, vg.zero.clone()]);
+            };
+            let strip = |a: &A| a.slice(0, ri.clone()).slice(1, *j_row..*j_row + 1);
+            let (rho_s, u_s, v_s, mu_s) = (strip(&p[0]), strip(&p[1]), strip(&p[2]), strip(&mu));
+            let speed_s = (&u_s * &u_s + &v_s * &v_s).sqrt();
+            let nu_s = &mu_s / &rho_s;
+            let [kw_s, omw_s, nut_s] = self.aupoix_wall(&nu_s, &speed_s, d_s, ks_s);
+            // `vg.zero` is shared and never written
+            let [kw_s, omw_s, mutw_s] = staged(self.staging, [kw_s, omw_s, &rho_s * &nut_s]);
+            let widths = [(ri.start, self.ni - ri.end), (*j_row, self.nj - *j_row - 1)];
+            let (k_w, mu_tw) = (kw_s.pad(widths, PadMode::Zero), mutw_s.pad(widths, PadMode::Zero));
+            let rows = |r: std::ops::Range<usize>, cols: std::ops::Range<usize>| smooth.slice(0, cols).slice(1, r);
+            let mut om_w = omw_s;
+            if ri.start > 0 {
+                om_w = concat(0, [&rows(*j_row..*j_row + 1, 0..ri.start), &om_w]);
+            }
+            if ri.end < self.ni {
+                om_w = concat(0, [&om_w, &rows(*j_row..*j_row + 1, ri.end..self.ni)]);
+            }
+            if *j_row > 0 {
+                om_w = concat(1, [&rows(0..*j_row, 0..self.ni), &om_w]);
+            }
+            if *j_row + 1 < self.nj {
+                om_w = concat(1, [&om_w, &rows(*j_row + 1..self.nj, 0..self.ni)]);
+            }
+            staged(self.staging, [k_w, om_w, mu_tw])
         });
         let mu_t = mu_t.cloned().unwrap_or_else(|| vg.zero.clone());
         let cell = staged(self.staging, [g0, g1, g2, g3, g4, g5, mu, mu_t]);

@@ -73,71 +73,60 @@ pub fn reduce_lift(raw: &[solver::LiftPoint], requested: usize, notes: &mut Vec<
     Ok(points)
 }
 
-/// Solves the 3D stability table of `job`: blocking, one Mach number (at both angles) after another. `progress` is given
-/// [`Event::Device`] first, then the running run's [`Event::Iteration`]s (with its angle) and, when a Mach number's runs are in,
-/// an [`Event::Point`] for each of its angles. A set `cancel` ends the run in flight within one report and the solve with
-/// [`CANCELLED`]. The Euler solve ignores altitude, viscosity and roughness.
+/// Solves the 3D stability table of `job`: blocking, all Mach numbers (at both angles) in one sweep that keeps the grid and the GPU
+/// buffers. `progress` is given [`Event::Device`] first, then the running run's [`Event::Iteration`]s (with its angle) and an
+/// [`Event::Point`] for each Mach number and angle as soon as it ends. A set `cancel` ends the run in flight within one report and
+/// the solve with [`CANCELLED`]. The Euler solve ignores altitude, viscosity and roughness.
 pub fn solve_lift(job: &LiftJob, cancel: &Arc<AtomicBool>, progress: impl Fn(Event) + Send + Sync + 'static) -> Result<CfdLiftTable, String> {
     let started = Instant::now();
     let send: Outbox = Arc::new(progress);
     let total = job.nodes.len();
-    let mut raw: Vec<solver::LiftPoint> = Vec::new();
-    let (mut gpu, mut cpu) = (0usize, 0usize);
-    let mut backend = solver::Backend::Auto;
     send(Event::Device(device_label()));
-    for &mach in &job.nodes {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(CANCELLED.to_string());
-        }
-        let mut analysis = solver::Analysis::new(&job.plan.body)
-            .map_err(|e| e.to_string())?
-            .resolution(solver::Resolution::Coarse)
-            .backend(backend)
-            .on_progress(sink(started, cancel.clone(), send.clone(), true));
-        if let Some(fins) = &job.plan.fins {
-            analysis = analysis.fins(fins.clone());
-        }
-        let polar = match analysis.run_lift(&[mach], &LIFT_ALPHAS) {
-            Ok(polar) => polar,
-            Err(solver::Error::Cancelled) => return Err(CANCELLED.to_string()),
-            Err(e) => return Err(format!("Mach {mach:.2}: {e}")),
-        };
-        let on_cpu = polar.backend == solver::BackendUsed::Cpu;
-        if on_cpu {
-            cpu += 1;
-            backend = solver::Backend::Cpu;
-        } else {
-            gpu += 1;
-        }
-        for p in &polar.points {
-            let alpha_deg = p.alpha.to_degrees();
-            let lift = quality(p.quality).filter(|_| p.cn.is_finite() && p.x_cp.is_finite()).map(|q| CfdLiftPoint {
-                mach: p.mach,
-                alpha_deg,
-                cn: p.cn,
-                x_cp: p.x_cp,
-                quality: q,
-            });
-            send(Event::Point(PointDone {
-                at: started.elapsed().as_secs_f64(),
-                mach: p.mach,
-                alpha_deg: Some(alpha_deg),
-                outcome: Outcome::from_quality(lift.map(|l| l.quality)),
-                point: None,
-                lift,
-                iterations: p.iterations,
-                cpu: on_cpu,
-                fallback: polar.fallback.clone(),
-            }));
-        }
-        raw.extend(polar.points);
+    if cancel.load(Ordering::Relaxed) {
+        return Err(CANCELLED.to_string());
     }
+    let mut analysis = solver::Analysis::new(&job.plan.body)
+        .map_err(|e| e.to_string())?
+        .resolution(solver::Resolution::Coarse)
+        .backend(solver::Backend::Auto)
+        .on_progress(sink(started, cancel.clone(), send.clone(), true))
+        .on_lift_point({
+            let send = send.clone();
+            move |p, backend, fallback| {
+                let alpha_deg = p.alpha.to_degrees();
+                let lift = quality(p.quality).filter(|_| p.cn.is_finite() && p.x_cp.is_finite()).map(|q| CfdLiftPoint {
+                    mach: p.mach,
+                    alpha_deg,
+                    cn: p.cn,
+                    x_cp: p.x_cp,
+                    quality: q,
+                });
+                send(Event::Point(PointDone {
+                    at: started.elapsed().as_secs_f64(),
+                    mach: p.mach,
+                    alpha_deg: Some(alpha_deg),
+                    outcome: Outcome::from_quality(lift.map(|l| l.quality)),
+                    point: None,
+                    lift,
+                    iterations: p.iterations,
+                    cpu: backend == solver::BackendUsed::Cpu,
+                    fallback: fallback.map(str::to_string),
+                }));
+            }
+        });
+    if let Some(fins) = &job.plan.fins {
+        analysis = analysis.fins(fins.clone());
+    }
+    let polar = match analysis.run_lift(&job.nodes, &LIFT_ALPHAS) {
+        Ok(polar) => polar,
+        Err(solver::Error::Cancelled) => return Err(CANCELLED.to_string()),
+        Err(e) => return Err(e.to_string()),
+    };
     let mut notes = Vec::new();
-    let points = reduce_lift(&raw, total, &mut notes)?;
-    let backend_name = match (gpu, cpu) {
-        (_, 0) => "GPU (Luma)",
-        (0, _) => "CPU",
-        _ => "GPU (Luma) and CPU",
+    let points = reduce_lift(&polar.points, total, &mut notes)?;
+    let backend_name = match polar.backend {
+        solver::BackendUsed::Gpu => "GPU (Luma)",
+        solver::BackendUsed::Cpu => "CPU",
     };
     Ok(CfdLiftTable {
         key: lift_key(job.plan.geometry, &job.nodes),
@@ -300,86 +289,91 @@ pub fn partial_of(plan: &Result<Plan, String>, table: &CfdTable, altitude: f64, 
     (1..nodes.len()).find(|&n| table.key == table_key(plan.geometry, altitude, &nodes[..n])).map(|n| (n, nodes.len()))
 }
 
-/// Solves the table of `job`: blocking, one Mach number after another. `progress` is given [`Event::Device`] first, then for each
-/// point its [`Event::Iteration`]s (about ten a second; the solver reports every 50 iterations) and an [`Event::Point`] when it
-/// ends. A set `cancel` ends the point in flight within one report (a few tens of milliseconds on a GPU) and the solve with
-/// [`CANCELLED`]; the points finished by then were all sent. The result carries what the solver reports of its backend, the
-/// build-up drag the solver left out, and notes on points that did not converge.
+/// The stored point of a solver point at `mach`, with the build-up drag the solver left out; `None` for a point that failed or has no
+/// finite drag (the table interpolates there).
+fn stored_point(plan: &Plan, p: &solver::PolarPoint, altitude: f64) -> Option<CfdPoint> {
+    quality(p.quality).filter(|_| p.drag.total.is_finite()).map(|q| {
+        let fins = p.drag.fins.map_or(0.0, |f| f.friction + f.pressure);
+        let other = built_up(plan, p.mach, altitude);
+        let (friction, base) = (p.drag.friction.unwrap_or(0.0), p.drag.base);
+        CfdPoint {
+            mach: p.mach,
+            cd: p.drag.forebody_pressure + friction + base + fins + other,
+            friction,
+            pressure: p.drag.forebody_pressure,
+            base,
+            fins,
+            other,
+            quality: q,
+        }
+    })
+}
+
+/// Solves the table of `job`: blocking, all Mach numbers in one sweep that keeps the grid and the GPU buffers. `progress` is given
+/// [`Event::Device`] first, then for each point its [`Event::Iteration`]s (about ten a second; the solver reports every 50
+/// iterations) and an [`Event::Point`] as soon as it ends. A set `cancel` ends the point in flight within one report (a few tens of
+/// milliseconds on a GPU) and the solve with [`CANCELLED`]; the points finished by then were all sent. The result carries what the
+/// solver reports of its backend, the build-up drag the solver left out, and notes on points that did not converge.
 pub fn solve(job: &Job, cancel: &Arc<AtomicBool>, progress: impl Fn(Event) + Send + Sync + 'static) -> Result<CfdTable, String> {
     let started = Instant::now();
     let send: Outbox = Arc::new(progress);
     let altitude = job.altitude.clamp(0.0, SOLVER_CEILING);
     let total = job.nodes.len();
     let mut tally = Tally { points: Vec::with_capacity(total), notes: job.plan.notes.clone(), gpu: 0, cpu: 0, fallback: None };
-    let mut backend = solver::Backend::Auto;
     if job.altitude > SOLVER_CEILING {
         tally.notes.push("The solver's atmosphere ends at 20 km; solved there.".to_string());
     }
     send(Event::Device(device_label()));
-    for &mach in &job.nodes {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(CANCELLED.to_string());
-        }
-        let mut analysis = solver::Analysis::new(&job.plan.body)
-            .map_err(|e| e.to_string())?
-            .viscous(solver::FlightConditions { atmosphere: solver::Atmosphere::Isa { altitude_m: altitude } })
-            .drag_tolerance(DRAG_TOLERANCE)
-            .resolution(match job.grid {
-                // Coarse is the default, for exploring; Medium (Refine) is about 3.5x slower per point and its Cd about 1 % different.
-                CfdGrid::Coarse => solver::Resolution::Coarse,
-                CfdGrid::Medium => solver::Resolution::Medium,
-            })
-            .roughness(job.plan.body_roughness)
-            .backend(backend)
-            .on_progress(sink(started, cancel.clone(), send.clone(), false));
-        if let Some(fins) = &job.plan.fins {
-            analysis = analysis.fins(fins.clone());
-        }
-        let polar = match analysis.run(&[mach]) {
-            Ok(polar) => polar,
-            Err(solver::Error::Cancelled) => return Err(CANCELLED.to_string()),
-            Err(e) => return Err(format!("Mach {mach:.2}: {e}")),
-        };
-        let cpu = polar.backend == solver::BackendUsed::Cpu;
-        if cpu {
-            tally.cpu += 1;
-            // The GPU did not start: do not try it again for every point.
-            backend = solver::Backend::Cpu;
-        } else {
-            tally.gpu += 1;
-        }
-        tally.fallback = tally.fallback.or(polar.fallback.clone());
-        let p = &polar.points[0];
-        let stored = quality(p.quality).filter(|_| p.drag.total.is_finite()).map(|q| {
-            let fins = p.drag.fins.map_or(0.0, |f| f.friction + f.pressure);
-            let other = built_up(&job.plan, mach, altitude);
-            let (friction, base) = (p.drag.friction.unwrap_or(0.0), p.drag.base);
-            CfdPoint {
-                mach,
-                cd: p.drag.forebody_pressure + friction + base + fins + other,
-                friction,
-                pressure: p.drag.forebody_pressure,
-                base,
-                fins,
-                other,
-                quality: q,
+    if cancel.load(Ordering::Relaxed) {
+        return Err(CANCELLED.to_string());
+    }
+    let mut analysis = solver::Analysis::new(&job.plan.body)
+        .map_err(|e| e.to_string())?
+        .viscous(solver::FlightConditions { atmosphere: solver::Atmosphere::Isa { altitude_m: altitude } })
+        .drag_tolerance(DRAG_TOLERANCE)
+        .resolution(match job.grid {
+            // Coarse is the default, for exploring; Medium (Refine) is about 3.5x slower per point and its Cd about 1 % different.
+            CfdGrid::Coarse => solver::Resolution::Coarse,
+            CfdGrid::Medium => solver::Resolution::Medium,
+        })
+        .roughness(job.plan.body_roughness)
+        .backend(solver::Backend::Auto)
+        .on_progress(sink(started, cancel.clone(), send.clone(), false))
+        .on_point({
+            let (send, plan) = (send.clone(), job.plan.clone());
+            move |p, backend, fallback| {
+                let stored = stored_point(&plan, p, altitude);
+                send(Event::Point(PointDone {
+                    at: started.elapsed().as_secs_f64(),
+                    mach: p.mach,
+                    alpha_deg: None,
+                    outcome: Outcome::from_quality(stored.map(|s| s.quality)),
+                    point: stored,
+                    lift: None,
+                    iterations: p.detail.iterations,
+                    cpu: backend == solver::BackendUsed::Cpu,
+                    fallback: fallback.map(str::to_string),
+                }));
             }
         });
-        match stored {
+    if let Some(fins) = &job.plan.fins {
+        analysis = analysis.fins(fins.clone());
+    }
+    let polar = match analysis.run(&job.nodes) {
+        Ok(polar) => polar,
+        Err(solver::Error::Cancelled) => return Err(CANCELLED.to_string()),
+        Err(e) => return Err(e.to_string()),
+    };
+    match polar.backend {
+        solver::BackendUsed::Cpu => tally.cpu = total,
+        solver::BackendUsed::Gpu => tally.gpu = total,
+    }
+    tally.fallback = polar.fallback;
+    for p in &polar.points {
+        match stored_point(&job.plan, p, altitude) {
             Some(point) => tally.points.push(point),
-            None => tally.notes.push(fallback_note(mach)),
+            None => tally.notes.push(fallback_note(p.mach)),
         }
-        send(Event::Point(PointDone {
-            at: started.elapsed().as_secs_f64(),
-            mach,
-            alpha_deg: None,
-            outcome: Outcome::from_quality(stored.map(|s| s.quality)),
-            point: stored,
-            lift: None,
-            iterations: p.detail.iterations,
-            cpu,
-            fallback: polar.fallback.clone(),
-        }));
     }
     if tally.points.len() < 2 && total >= 2 {
         return Err("the solver did not converge at enough Mach numbers".to_string());

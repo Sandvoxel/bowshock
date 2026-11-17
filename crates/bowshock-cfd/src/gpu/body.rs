@@ -46,9 +46,29 @@ fn upload_state(ctx: &Context, u: &[[f64; 4]], shape: [usize; 2], cfl: f64) -> R
     Ok([comp(0)?, comp(1)?, comp(2)?, comp(3)?, up(ctx, &[0.0], 1)?, up(ctx, &[cfl], 1)?, dummy()?, dummy()?, dummy()?, dummy()?])
 }
 
+/// The four conserved components stacked `[4, ..]` (component fastest) and read back with one sync.
+fn read_stacked(s: &State, ri: std::ops::Range<usize>, rj: std::ops::Range<usize>) -> Result<Vec<f64>> {
+    let part = |k: usize| s[k].slice(0, ri.clone()).slice(1, rj.clone());
+    to_f64(&luma::stack(0, [&part(0), &part(1), &part(2), &part(3)]))
+}
+
 fn download_state(s: &State) -> Result<Vec<[f64; 4]>> {
-    let v: Vec<Vec<f64>> = (0..4).map(|k| to_f64(&s[k])).collect::<Result<_>>()?;
-    Ok((0..v[0].len()).map(|c| [v[0][c], v[1][c], v[2][c], v[3][c]]).collect())
+    let (ni, nj) = (s[0].shape().dims()[0], s[0].shape().dims()[1]);
+    let v = read_stacked(s, 0..ni, 0..nj)?;
+    Ok(v.as_chunks::<4>().0.to_vec())
+}
+
+/// Reads the cells `ri x rj` of the state into `u` (`j * ni + i`) with one sync.
+fn read_rect_into(s: &State, ni: usize, ri: std::ops::Range<usize>, rj: std::ops::Range<usize>, u: &mut [[f64; 4]]) -> Result<()> {
+    if ri.is_empty() || rj.is_empty() {
+        return Ok(());
+    }
+    let v = read_stacked(s, ri.clone(), rj.clone())?;
+    let w = ri.len();
+    for (n, &q) in v.as_chunks::<4>().0.iter().enumerate() {
+        u[(rj.start + n / w) * ni + ri.start + n % w] = q;
+    }
+    Ok(())
 }
 
 const G1: f64 = GAMMA - 1.0;
@@ -354,6 +374,9 @@ pub struct LazySolver {
     lb: Option<LBlockGeo>,
     /// The viscous terms (`set_viscous`; `None`: the Euler equations).
     visc: Option<VGeo>,
+    /// The traced loop per limiter phase (`[first order, configured limiter]`) with the staging, the step count and the sync interval it was
+    /// compiled for; cleared by every setter that changes what `step` captures.
+    compiled: [Option<(Staging, usize, usize, luma::CompiledUntil<State>)>; 2],
 }
 
 impl LazySolver {
@@ -393,7 +416,7 @@ impl LazySolver {
             area: up(ctx, &grid.area, [ni, nj])?,
             bnd: [boundary(0)?, boundary(1)?, boundary(2)?, boundary(3)?],
         };
-        let mut s = LazySolver { ctx: ctx.clone(), ni, nj, cfg: cfg.clone(), low_mach: false, staging: DEFAULT_STAGING, geo, state: None, iter: 0, block: None, nozzle: None, n_active: ni * nj, scheme: Scheme::Explicit, lg: LGeo::new(ctx, grid)?, lb: None, visc: None };
+        let mut s = LazySolver { ctx: ctx.clone(), ni, nj, cfg: cfg.clone(), low_mach: false, staging: DEFAULT_STAGING, geo, state: None, iter: 0, block: None, nozzle: None, n_active: ni * nj, scheme: Scheme::Explicit, lg: LGeo::new(ctx, grid)?, lb: None, visc: None, compiled: [None, None] };
         let q = crate::gas::prim_to_cons(&cfg.freestream);
         s.set_state(&vec![q; ni * nj])?;
         Ok(s)
@@ -430,6 +453,7 @@ impl LazySolver {
             );
         }
         assert!(self.visc.is_none(), "declare the block before the viscous terms (`set_viscous`)");
+        self.compiled = [None, None];
         self.block = block;
         self.nozzle = None;
         self.lb = block.map(|b| LBlockGeo::new(&self.ctx, self.ni, self.nj, b, None)).transpose()?;
@@ -448,6 +472,7 @@ impl LazySolver {
             let b = self.block.expect("a nozzle needs a block");
             assert!(b.j_sting == 0 && n.j_end >= 2 && n.j_end + 2 <= b.j_end && n.j_end % 2 == 0, "nozzle out of range");
         }
+        self.compiled = [None, None];
         self.nozzle = nozzle;
         self.lb = self.block.map(|b| LBlockGeo::new(&self.ctx, self.ni, self.nj, b, nozzle)).transpose()?;
         Ok(())
@@ -532,6 +557,7 @@ impl LazySolver {
 
     pub fn set_low_mach(&mut self, on: bool) {
         self.low_mach = on;
+        self.compiled = [None, None];
     }
 
     /// Overwrites the conserved state and restarts the iteration counter and the CFL ramp.
@@ -740,16 +766,45 @@ impl LazySolver {
         while left > 0 {
             let seg = self.phase_len(left);
             let lim = self.limiter(self.iter);
+            let slot = usize::from(lim != Limiter::FirstOrder);
             let init = self.state.take().ok_or_else(no_state)?;
-            let run = luma::iterate_until_all(init, records(luma::Until::new(seg).check_every(sync)), |s, _| {
-                self.step(s, lim)
-            })?;
+            let hit = matches!(&self.compiled[slot], Some((st, m, ce, _)) if *st == self.staging && seg <= *m && *ce == sync);
+            if !hit {
+                let max_s = sync.max(seg);
+                self.compiled[slot] = match luma::compile_until_all(&init, records(luma::Until::new(max_s).check_every(sync)), |s, _| self.step(s, lim)) {
+                    Ok(cu) => Some((self.staging, max_s, sync, cu)),
+                    Err(e) if matches!(e.root(), luma::LumaError::Unsupported(_) | luma::LumaError::Chunked(_)) => None,
+                    Err(e) => return Err(e),
+                };
+            }
+            let run = match &mut self.compiled[slot] {
+                Some((.., cu)) => cu.run_steps(init, seg)?,
+                None => luma::iterate_until_all(init, records(luma::Until::new(seg).check_every(sync)), |s, _| self.step(s, lim))?,
+            };
             history.extend(read_history(&run)?);
             self.state = Some(run.state);
             self.iter += seg;
             left -= seg;
         }
         Ok(history)
+    }
+
+    /// Reads only the boundary stencil cells of `wall_distribution`, `friction` and `base_state` into `u` (`j * ni + i`): the first two rows
+    /// of the body wall (and the two columns behind the base face with a block).
+    pub fn read_boundary_into(&self, u: &mut [[f64; 4]]) -> Result<()> {
+        let s = self.state.as_ref().ok_or_else(no_state)?;
+        let (ni, nj) = (self.ni, self.nj);
+        match self.block {
+            None => read_rect_into(s, ni, 0..ni, 0..2.min(nj), u),
+            Some(b) => {
+                read_rect_into(s, ni, 0..b.i_end, b.j_end..(b.j_end + 2).min(nj), u)?;
+                read_rect_into(s, ni, b.i_end..(b.i_end + 2).min(ni), b.j_sting..b.j_end, u)?;
+                if b.j_sting > 0 {
+                    read_rect_into(s, ni, b.i_end..ni, b.j_sting..(b.j_sting + 1).min(nj), u)?;
+                }
+                Ok(())
+            }
+        }
     }
 
     /// `n` iterations as one `iterate_all` replay per limiter phase (no residual history).

@@ -30,6 +30,21 @@ The first call of a sweep also compiles and traces the GPU kernels: about 1 s fo
 inviscid staging on the cone case, and longer for viscous cases (`crates/bowshock-cfd/README.md`, "Speed",
 "First call").
 
+Mach sweeps reuse the solver grid and uploaded geometry even with cold starts. Each limiter phase keeps a compiled GPU loop between iteration chunks; changing the configuration invalidates it. Live monitoring downloads boundary stencils rather than the full field, with one full 2D download at completion for domain-wide quality checks.
+
+Viscous analyses with `drag_tolerance >= 1e-3` use f32 and retry failed or stalled points in double-float, keeping the retry only when its quality improves. Tighter tolerances retain double-float. Cold starts remain the default; grid reuse does not enable warm starts.
+
+On an Apple M5 Pro (Metal), `bench_viscous --n 200 --sync 50 --levels 0,1 --no-profile` measured the following SST implicit G3 steps on 2026-11-16 (best of three GPU runs, microseconds per iteration; no timestamp profiling):
+
+| Grid | CPU f64 | GPU f32, residual history | GPU double-float, residual history |
+| --- | --- | --- | --- |
+| 156x122 | 7755 | 1476.2 | 1750.6 |
+| 312x122 | 9464 | 2111.9 | 2493.3 |
+
+These are per-step measurements, not a before/after speedup or a complete table's wall time.
+
+The app's coarse ten-point example table (ISA 120 m, 60 µm wall roughness, drag tolerance 0.002) completed on the same M5 Pro in 352.6 s: all ten points were `Stationary`, with 29,400 iterations in total. The existing comparison test passed and points streamed as each Mach number finished. This run overlapped GPU validation, so it is not an isolated throughput benchmark or a before/after speedup.
+
 ## Resolution
 
 Each `Resolution` level roughly doubles the grid along the body (156x122 at level 0, 312x122 at

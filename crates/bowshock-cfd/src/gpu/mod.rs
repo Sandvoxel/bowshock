@@ -397,6 +397,12 @@ impl GpuSolver {
         Ok(on_mut!(self, s => s.run(n, RUN_SYNC.min(n.max(1)))?))
     }
 
+    /// Reads only the boundary stencil cells of `wall_distribution`, `friction` and `base_state` into `u` (`ni * nj`, `j * ni + i`).
+    pub fn read_boundary_into(&self, u: &mut [[f64; 4]]) -> Result<()> {
+        on!(self, s => s.read_boundary_into(u))?;
+        Ok(())
+    }
+
     /// Conserved state of the two first cells behind the base face, `[(i_end, j), (i_end + 1, j)]`, for every row `j_sting..j_end` (the
     /// extrapolation stencil of `bowshock_core::engine::run::base_state`). Reads back only these rows.
     pub fn base_cells(&self) -> Result<Vec<[[f64; 4]; 2]>> {
@@ -510,6 +516,12 @@ impl GpuSolver3 {
     /// Conserved state, `ni * nj * nk`, same layout as `crate::solver3::Solver3::u` (`Grid3::cell`).
     pub fn state_f64(&self) -> Result<Vec<Cons3>> {
         Ok(on3!(self, s => s.state_f64()?))
+    }
+
+    /// Reads only the boundary stencil cells of `forces_on` / `breakdown_on` into `u` (`(k * nj + j) * ni + i`, `ni * nj * nk` long).
+    pub fn read_boundary_into(&self, grid: &Grid3, u: &mut [Cons3]) -> Result<()> {
+        on3!(self, s => s.read_boundary_into(grid, u))?;
+        Ok(())
     }
 
     /// Runs `n` iterations and returns the density residual of every one (L2 of `d rho / dt` over `sqrt(N)` of the fluid cells, as in the CPU

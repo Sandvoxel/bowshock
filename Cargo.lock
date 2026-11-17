@@ -1873,8 +1873,7 @@ checksum = "ef9ac18847474e638e3702b76c65d4eb93428471a74778ef0f1be711717f89b5"
 [[package]]
 name = "luma"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "abf4a36245f13ebf61c0082a5d062491648c645621a88448f9f2bade3b9c2d58"
+source = "git+https://github.com/flipnoteman/Luma.git?rev=5a592c4c53137ff93e4d0437818d47a24c1f3fbc#5a592c4c53137ff93e4d0437818d47a24c1f3fbc"
 dependencies = [
  "bytemuck",
  "encase",

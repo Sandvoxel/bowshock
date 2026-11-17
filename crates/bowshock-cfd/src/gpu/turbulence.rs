@@ -54,9 +54,9 @@ fn bc_inf(bc: Bc) -> bool {
 }
 
 impl LazySolver {
-    /// Aupoix (2015) "Colebrook" rough-wall state `[k_w, omega_w, nu_t,w]` of every cell (`crate::turbulence::aupoix_wall`, which documents the
+    /// Aupoix (2015) "Colebrook" rough-wall state `[k_w, omega_w, nu_t,w]` of every cell of the arrays (the rough wall strip; `crate::turbulence::aupoix_wall`, which documents the
     /// formulas) from `nu`, the speed `|u|`, the wall distance `d` and the roughness `ks > 0` of every cell: `AUPOIX_ITERATIONS` fixed-point iterations of `u_tau^2 = (nu + nu_t,w) |u|
-    /// from `nu |u| / d`, each evaluated (`staging`) before the next. `ks+` is floored at `1e-30` and `omega_w+ u_tau^2 / nu` evaluated in the closed form
+    /// from `nu |u| / d`, evaluated (`staging`) every fourth. `ks+` is floored at `1e-30` and `omega_w+ u_tau^2 / nu` evaluated in the closed form
     /// `300 nu / ks^2 / tanh(15 / (4 ks+)) + 191 u_tau / ks (1 - exp(-ks+ / 250))`, so a cell at rest stays finite.
     fn aupoix_wall(&self, nu: &A, speed: &A, d: &A, ks: &A) -> [A; 3] {
         let smooth = c(60.0) * nu / (c(BETA1) * d * d);
@@ -72,8 +72,12 @@ impl LazySolver {
             [k_w, om_w, nu_t]
         };
         let mut u2 = nu * speed / d;
-        for _ in 0..AUPOIX_ITERATIONS {
-            u2 = staged(self.staging, [(nu + &at(&u2)[2]) * speed / d]).into_iter().next().expect("one array");
+        // the arrays are the rough wall strip: a few cheap launches, evaluated every 4 iterations to bound the fused expression
+        for it in 0..AUPOIX_ITERATIONS {
+            u2 = (nu + &at(&u2)[2]) * speed / d;
+            if it % 4 == 3 {
+                u2 = staged(self.staging, [u2]).into_iter().next().expect("one array");
+            }
         }
         at(&u2)
     }

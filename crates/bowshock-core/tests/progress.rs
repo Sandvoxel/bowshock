@@ -2,7 +2,7 @@
 
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
 use bowshock_core::progress::SAMPLE_INTERVAL;
-use bowshock_core::{AftSpec, Analysis, Backend, BodySpec, Error, FinProfile, FinSpec, NoseShape, NoseSpec, Progress, Resolution};
+use bowshock_core::{AftSpec, Analysis, Backend, BackendUsed, BodySpec, Error, FinProfile, FinSpec, NoseShape, NoseSpec, PolarPoint, Progress, Resolution};
 use std::ops::ControlFlow;
 use std::sync::{Arc, Mutex};
 
@@ -113,5 +113,42 @@ fn the_gpu_name_is_a_name_or_nothing() {
     if let Some(name) = bowshock_core::gpu_name() {
         assert!(!name.trim().is_empty());
         println!("GPU: {name}");
+    }
+}
+
+#[test]
+fn a_sweep_streams_each_point_before_the_next_starts_and_matches_separate_runs() {
+    #[derive(Debug, PartialEq)]
+    enum Ev {
+        Progress(f64),
+        Point(f64, BackendUsed, Option<String>),
+    }
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let (on_progress, on_point) = (log.clone(), log.clone());
+    let sweep = drag_analysis()
+        .on_progress(move |p: &Progress| {
+            on_progress.lock().unwrap().push(Ev::Progress(p.mach));
+            ControlFlow::Continue(())
+        })
+        .on_point(move |p: &PolarPoint, backend, fallback| {
+            on_point.lock().unwrap().push(Ev::Point(p.mach, backend, fallback.map(str::to_string)));
+        })
+        .run(&[1.5, 0.9])
+        .unwrap();
+
+    let log = log.lock().unwrap();
+    let at = |ev: Ev| log.iter().position(|e| *e == ev).unwrap_or_else(|| panic!("{ev:?} not reported"));
+    let first_of_second = log.iter().position(|e| *e == Ev::Progress(1.5)).expect("the second Mach number reports progress");
+    // points are reported in solve order (ascending Mach), the first one before the second one's first report
+    assert!(at(Ev::Point(0.9, BackendUsed::Cpu, None)) < first_of_second);
+    assert!(at(Ev::Point(0.9, BackendUsed::Cpu, None)) < at(Ev::Point(1.5, BackendUsed::Cpu, None)));
+    assert_eq!(log.iter().filter(|e| matches!(e, Ev::Point(..))).count(), 2);
+
+    // the polar is in input order and each point equals the one of a run on a fresh solver
+    assert_eq!((sweep.points[0].mach, sweep.points[1].mach), (1.5, 0.9));
+    for p in &sweep.points {
+        let alone = drag_analysis().run(&[p.mach]).unwrap();
+        assert_eq!(p.drag, alone.points[0].drag, "Mach {}", p.mach);
+        assert_eq!(p.detail.iterations, alone.points[0].detail.iterations, "Mach {}", p.mach);
     }
 }

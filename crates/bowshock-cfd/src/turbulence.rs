@@ -54,7 +54,7 @@
 
 use crate::gas::{Cons, Prim};
 use crate::grid::{Face, Grid};
-use crate::implicit::{solve_lines, Factor, EYE, M4, ZERO};
+use crate::implicit::{fit, solve_lines, Factor, LineScratch, EYE, M4, ZERO};
 use crate::solver::{pidx, Bc, Block, Nozzle, Solver, Viscous};
 use crate::viscous::{face_mu, iface_centre, iface_sides, jface_centre, jface_sides, stencil, FaceSides, Side, Walls};
 use rayon::prelude::*;
@@ -334,12 +334,12 @@ struct Blend {
 }
 
 /// Kernel 1: Green-Gauss gradient `(k_x, k_r, omega_x, omega_r)` of every fluid cell, `phi_f = (phi_c + phi_neighbour) / 2`.
-fn scalar_gradients(cx: &Ctx) -> Vec<[f64; 4]> {
-    let (ni, nj) = (cx.grid.ni, cx.grid.nj);
-    let mut out = vec![[0.0; 4]; ni * nj];
+fn scalar_gradients(cx: &Ctx, out: &mut [[f64; 4]]) {
+    let ni = cx.grid.ni;
     out.par_chunks_mut(ni).enumerate().for_each(|(j, row)| {
         for (i, g_out) in row.iter_mut().enumerate() {
             if cx.solid(i, j) {
+                *g_out = [0.0; 4];
                 continue;
             }
             let c = j * ni + i;
@@ -369,16 +369,15 @@ fn scalar_gradients(cx: &Ctx) -> Vec<[f64; 4]> {
             *g_out = g;
         }
     });
-    out
 }
 
 /// Kernel 2: `F1` and the cross-diffusion `X` of every fluid cell.
-fn blends(cx: &Ctx, tg: &[[f64; 4]]) -> Vec<Blend> {
-    let (ni, nj) = (cx.grid.ni, cx.grid.nj);
-    let mut out = vec![Blend::default(); ni * nj];
+fn blends(cx: &Ctx, tg: &[[f64; 4]], out: &mut [Blend]) {
+    let ni = cx.grid.ni;
     out.par_chunks_mut(ni).enumerate().for_each(|(j, row)| {
         for (i, b) in row.iter_mut().enumerate() {
             if cx.solid(i, j) {
+                *b = Blend::default();
                 continue;
             }
             let c = j * ni + i;
@@ -395,7 +394,6 @@ fn blends(cx: &Ctx, tg: &[[f64; 4]]) -> Vec<Blend> {
             *b = Blend { f1: a.powi(4).tanh(), x };
         }
     });
-    out
 }
 
 /// Scalar diffusion and convection data of one face (`l` / `r`: the two sides, lower / upper index).
@@ -437,29 +435,30 @@ fn tface(cx: &Ctx, tg: &[[f64; 4]], blend: &[Blend], sides: &FaceSides, kind: Ki
 }
 
 /// Kernel 3: scalar face data of every i-face and j-face.
-fn face_pass(cx: &Ctx, tg: &[[f64; 4]], blend: &[Blend], fi: &[Cons], fj: &[Cons]) -> (Vec<TFace>, Vec<TFace>) {
-    let (ni, nj) = (cx.grid.ni, cx.grid.nj);
-    let mut ti = vec![TFace::default(); (ni + 1) * nj];
+fn face_pass(cx: &Ctx, tg: &[[f64; 4]], blend: &[Blend], fi: &[Cons], fj: &[Cons], ti: &mut [TFace], tj: &mut [TFace]) {
+    let ni = cx.grid.ni;
     ti.par_chunks_mut(ni + 1).enumerate().for_each(|(j, row)| {
         for (i, out) in row.iter_mut().enumerate() {
             if let Some((sides, kind)) = cx.iface(i, j) {
                 let f = &cx.grid.iface[j * (ni + 1) + i];
                 let (xf, rf) = iface_centre(cx.grid, i, j);
                 *out = tface(cx, tg, blend, &sides, kind, f, xf, rf, fi[j * (ni + 1) + i][0] * f.w());
+            } else {
+                *out = TFace::default();
             }
         }
     });
-    let mut tj = vec![TFace::default(); ni * (nj + 1)];
     tj.par_chunks_mut(ni).enumerate().for_each(|(j, row)| {
         for (i, out) in row.iter_mut().enumerate() {
             if let Some((sides, kind)) = cx.jface(i, j) {
                 let f = &cx.grid.jface[j * ni + i];
                 let (xf, rf) = jface_centre(cx.grid, i, j);
                 *out = tface(cx, tg, blend, &sides, kind, f, xf, rf, fj[j * ni + i][0] * f.w());
+            } else {
+                *out = TFace::default();
             }
         }
     });
-    (ti, tj)
 }
 
 /// Residual and line coefficients of one cell, per scalar.
@@ -475,13 +474,13 @@ struct CellTerms {
 }
 
 /// Kernel 4: residual `R`, `diag0` and the line coefficients of every fluid cell.
-fn cell_terms(cx: &Ctx, grad: &[[f64; 6]], blend: &[Blend], dt: &[f64], ti: &[TFace], tj: &[TFace]) -> Vec<CellTerms> {
+fn cell_terms(cx: &Ctx, grad: &[[f64; 6]], blend: &[Blend], dt: &[f64], ti: &[TFace], tj: &[TFace], out: &mut [CellTerms]) {
     let (ni, nj) = (cx.grid.ni, cx.grid.nj);
     let blk = cx.walls.blk;
-    let mut out = vec![CellTerms::default(); ni * nj];
     out.par_chunks_mut(ni).enumerate().for_each(|(j, row)| {
         for (i, o) in row.iter_mut().enumerate() {
             if cx.solid(i, j) {
+                *o = CellTerms::default();
                 continue;
             }
             let c = j * ni + i;
@@ -517,7 +516,6 @@ fn cell_terms(cx: &Ctx, grad: &[[f64; 6]], blend: &[Blend], dt: &[f64], ti: &[TF
             }
         }
     });
-    out
 }
 
 #[inline]
@@ -546,20 +544,27 @@ pub(crate) fn update(s: &mut Solver) {
     let (ni, nj) = (s.grid.ni, s.grid.nj);
     let n = ni * nj;
     let inf = [K_INF, omega_inf(v.re_c)];
-    let (turb, mu_t, rnorm) = {
+    let mut ws = std::mem::take(&mut s.turb_ws);
+    ws.fit(n, ni, nj);
+    let rnorm = {
+        let Workspace { tg, blend, ti, tj, cells, fac_i, fac_j, x, turb, mu_t, lines } = &mut ws;
         let cx =
             Ctx { rough: &s.rough_wall, grid: &s.grid, w: &s.w, walls: s.walls(), bc: s.cfg.bc, mu: &s.mu, mu_t: &s.mu_t, turb: &s.turb, dwall: &s.dwall, inf };
-        let tg = scalar_gradients(&cx);
-        let blend = blends(&cx, &tg);
-        let (ti, tj) = face_pass(&cx, &tg, &blend, &s.fi, &s.fj);
-        let cells = cell_terms(&cx, &s.grad, &blend, &s.dt, &ti, &tj);
+        scalar_gradients(&cx, tg);
+        blends(&cx, tg, blend);
+        face_pass(&cx, tg, blend, &s.fi, &s.fj, ti, tj);
+        cell_terms(&cx, &s.grad, blend, &s.dt, ti, tj, cells);
 
         // coefficients of the two linear systems
-        let mut fac_i = Factor { lo: vec![ZERO; n], d: vec![EYE; n], up: vec![ZERO; n] };
-        let mut fac_j = Factor { lo: vec![ZERO; n], d: vec![EYE; n], up: vec![ZERO; n] };
-        let mut x: Vec<Cons> = vec![[0.0; 4]; n];
         for c in 0..n {
             if cx.solid(c % ni, c / ni) {
+                fac_i.lo[c] = ZERO;
+                fac_i.d[c] = EYE;
+                fac_i.up[c] = ZERO;
+                fac_j.lo[c] = ZERO;
+                fac_j.d[c] = EYE;
+                fac_j.up[c] = ZERO;
+                x[c] = [0.0; 4];
                 continue;
             }
             let t = &cells[c];
@@ -572,16 +577,17 @@ pub(crate) fn update(s: &mut Solver) {
             fac_j.up[c] = offdiag(t.up[1][0] / t.d0[0], t.up[1][1] / t.d0[1]);
             fac_j.d[c] = diag(1.0 + t.dd[1][0] / t.d0[0], 1.0 + t.dd[1][1] / t.d0[1]);
         }
-        solve_lines(s, &fac_i, true, &mut x);
-        solve_lines(s, &fac_j, false, &mut x);
+        solve_lines(s, fac_i, true, x, lines);
+        solve_lines(s, fac_j, false, x, lines);
 
-        // clipped update and eddy viscosity
-        let mut turb = vec![[0.0; 2]; n];
-        let mut mu_t = vec![0.0; n];
+        // clipped update and eddy viscosity (solid cells zero)
+        let x: &[Cons] = x;
         turb.par_chunks_mut(ni).zip(mu_t.par_chunks_mut(ni)).enumerate().for_each(|(j, (trow, mrow))| {
             for i in 0..ni {
                 let c = j * ni + i;
                 if cx.solid(i, j) {
+                    trow[i] = [0.0; 2];
+                    mrow[i] = 0.0;
                     continue;
                 }
                 let [k0, w0] = s.turb[c];
@@ -596,11 +602,46 @@ pub(crate) fn update(s: &mut Solver) {
             }
         });
         let sum: f64 = cells.par_iter().map(|t| t.r[0] * t.r[0]).sum();
-        (turb, mu_t, (sum / s.n_active as f64).sqrt())
+        (sum / s.n_active as f64).sqrt()
     };
-    s.turb = turb;
-    s.mu_t = mu_t;
+    std::mem::swap(&mut s.turb, &mut ws.turb);
+    std::mem::swap(&mut s.mu_t, &mut ws.mu_t);
     s.turb_rnorm = rnorm;
+    s.turb_ws = ws;
+}
+
+/// Scratch of `update`, sized on the first call and reused by every later one.
+#[derive(Clone, Default)]
+pub(crate) struct Workspace {
+    tg: Vec<[f64; 4]>,
+    blend: Vec<Blend>,
+    ti: Vec<TFace>,
+    tj: Vec<TFace>,
+    cells: Vec<CellTerms>,
+    fac_i: Factor,
+    fac_j: Factor,
+    x: Vec<Cons>,
+    turb: Vec<[f64; 2]>,
+    mu_t: Vec<f64>,
+    lines: LineScratch,
+}
+
+impl Workspace {
+    fn fit(&mut self, n: usize, ni: usize, nj: usize) {
+        fit(&mut self.tg, n, [0.0; 4]);
+        fit(&mut self.blend, n, Blend::default());
+        fit(&mut self.ti, (ni + 1) * nj, TFace::default());
+        fit(&mut self.tj, ni * (nj + 1), TFace::default());
+        fit(&mut self.cells, n, CellTerms::default());
+        for f in [&mut self.fac_i, &mut self.fac_j] {
+            fit(&mut f.lo, n, ZERO);
+            fit(&mut f.d, n, EYE);
+            fit(&mut f.up, n, ZERO);
+        }
+        fit(&mut self.x, n, [0.0; 4]);
+        fit(&mut self.turb, n, [0.0; 2]);
+        fit(&mut self.mu_t, n, 0.0);
+    }
 }
 
 #[cfg(test)]

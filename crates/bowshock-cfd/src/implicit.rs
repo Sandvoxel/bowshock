@@ -174,15 +174,17 @@ pub fn inv4(m: &M4) -> M4 {
     inv
 }
 
-/// Block-tridiagonal solve `lo_k x_{k-1} + d_k x_k + up_k x_{k+1} = rhs_k` (in place in `rhs`); `y` is scratch (`n` blocks).
-fn block_thomas(n: usize, lo: &[M4], d: &[M4], up: &[M4], rhs: &mut [Cons], y: &mut [M4]) {
+/// Block-tridiagonal solve `lo_k x_{k-1} + d_k x_k + up_k x_{k+1} = rhs_k` (in place in `rhs`) for the blocks at `base + k stride`
+/// of `lo`, `d`, `up`; `y` is scratch (`n` blocks).
+fn block_thomas(n: usize, base: usize, stride: usize, lo: &[M4], d: &[M4], up: &[M4], rhs: &mut [Cons], y: &mut [M4]) {
     for k in 0..n {
-        let mut m = d[k];
+        let c = base + k * stride;
+        let mut m = d[c];
         let mut r = rhs[k];
         if k > 0 {
-            let t = mm(&lo[k], &y[k - 1]);
+            let t = mm(&lo[c], &y[k - 1]);
             axpy(&mut m, -1.0, &t);
-            let lg = mv(&lo[k], &rhs[k - 1]);
+            let lg = mv(&lo[c], &rhs[k - 1]);
             for q in 0..4 {
                 r[q] -= lg[q];
             }
@@ -190,7 +192,7 @@ fn block_thomas(n: usize, lo: &[M4], d: &[M4], up: &[M4], rhs: &mut [Cons], y: &
         let minv = inv4(&m);
         rhs[k] = mv(&minv, &r);
         if k + 1 < n {
-            y[k] = mm(&minv, &up[k]);
+            y[k] = mm(&minv, &up[c]);
         }
     }
     for k in (0..n.saturating_sub(1)).rev() {
@@ -366,14 +368,15 @@ fn cell_blocks(
 
 /// Blocks `(lo, d, up)` of the factor `I - dt J_dir` for every cell, stored per cell index (`c = j ni + i`).
 /// Cells of a solid block have zero blocks and are not part of any line.
+#[derive(Clone, Default)]
 pub(crate) struct Factor {
     pub(crate) lo: Vec<M4>,
     pub(crate) d: Vec<M4>,
     pub(crate) up: Vec<M4>,
 }
 
-/// Assemble the i factor (`dir_i = true`, lines along i) or the j factor.
-fn assemble(s: &Solver, p: &ImplicitParams, dir_i: bool) -> Factor {
+/// Assemble the i factor (`dir_i = true`, lines along i) or the j factor into `fac` (sized by `Workspace::fit`).
+fn assemble_into(s: &Solver, p: &ImplicitParams, dir_i: bool, fac: &mut Factor) {
     let (ni, nj) = (s.grid.ni, s.grid.nj);
     let blk = s.block;
     let fs = s.cfg.freestream;
@@ -394,12 +397,14 @@ fn assemble(s: &Solver, p: &ImplicitParams, dir_i: bool) -> Factor {
     let viscous_on = s.viscous.is_some();
     let (mu, mu_t, rough) = (&s.mu, &s.mu_t, &s.rough_wall);
     let n = ni * nj;
-    let mut fac = Factor { lo: vec![ZERO; n], d: vec![ZERO; n], up: vec![ZERO; n] };
     let (lo, d, up) = (&mut fac.lo, &mut fac.d, &mut fac.up);
+    debug_assert!(lo.len() == n && d.len() == n && up.len() == n);
     lo.par_chunks_mut(ni).zip(d.par_chunks_mut(ni)).zip(up.par_chunks_mut(ni)).enumerate().for_each(|(j, ((lo_r, d_r), up_r))| {
         for i in 0..ni {
             if blk.is_some_and(|b| b.solid(i, j)) {
+                lo_r[i] = ZERO;
                 d_r[i] = EYE;
+                up_r[i] = ZERO;
                 continue;
             }
             let c = j * ni + i;
@@ -459,7 +464,6 @@ fn assemble(s: &Solver, p: &ImplicitParams, dir_i: bool) -> Factor {
             up_r[i] = u;
         }
     });
-    fac
 }
 
 /// Segment start of the line through `(i, j)` in the given direction (first fluid cell; the line length if the row is solid).
@@ -472,55 +476,100 @@ fn seg_start(blk: Option<crate::solver::Block>, dir_i: bool, ni: usize, i: usize
     }
 }
 
-/// `x <- (I - dt J_dir)^{-1} x` for every line of the given direction.
-pub(crate) fn solve_lines(s: &Solver, fac: &Factor, dir_i: bool, x: &mut [Cons]) {
-    let (ni, nj) = (s.grid.ni, s.grid.nj);
-    let blk = s.block;
-    if dir_i {
-        x.par_chunks_mut(ni).enumerate().for_each(|(j, row)| {
-            let k0 = seg_start(blk, true, ni, 0, j);
-            let n = ni - k0;
-            if n == 0 {
-                return;
-            }
-            let r = j * ni + k0..(j + 1) * ni;
-            let mut y = vec![ZERO; n];
-            block_thomas(n, &fac.lo[r.clone()], &fac.d[r.clone()], &fac.up[r], &mut row[k0..], &mut y);
-        });
-    } else {
-        let x_in: &[Cons] = x;
-        let cols: Vec<Vec<Cons>> = (0..ni)
-            .into_par_iter()
-            .map(|i| {
-                let k0 = seg_start(blk, false, ni, i, 0);
-                let n = nj - k0;
-                let idx = |k: usize| (k0 + k) * ni + i;
-                let lo: Vec<M4> = (0..n).map(|k| fac.lo[idx(k)]).collect();
-                let d: Vec<M4> = (0..n).map(|k| fac.d[idx(k)]).collect();
-                let up: Vec<M4> = (0..n).map(|k| fac.up[idx(k)]).collect();
-                let mut rhs: Vec<Cons> = (0..n).map(|k| x_in[idx(k)]).collect();
-                let mut y = vec![ZERO; n];
-                block_thomas(n, &lo, &d, &up, &mut rhs, &mut y);
-                rhs
-            })
-            .collect();
-        for (i, col) in cols.iter().enumerate() {
-            let k0 = seg_start(blk, false, ni, i, 0);
-            for (k, v) in col.iter().enumerate() {
-                x[(k0 + k) * ni + i] = *v;
+/// Per-line scratch of `solve_lines`, sized on first use: the Thomas `y` blocks per row, and the transposed right-hand sides
+/// and `y` blocks of the column solves (`[i][k]`).
+#[derive(Clone, Default)]
+pub(crate) struct LineScratch {
+    row_y: Vec<M4>,
+    col_rhs: Vec<Cons>,
+    col_y: Vec<M4>,
+}
+
+/// Resize `v` to `n` copies of `z` unless it already has length `n`.
+pub(crate) fn fit<T: Clone>(v: &mut Vec<T>, n: usize, z: T) {
+    if v.len() != n {
+        v.clear();
+        v.resize(n, z);
+    }
+}
+
+/// Scratch of `step`, sized on the first implicit iteration and reused by every later one.
+#[derive(Clone, Default)]
+pub(crate) struct Workspace {
+    fi: Factor,
+    fj: Factor,
+    b: Vec<Cons>,
+    du: Vec<Cons>,
+    ai: Vec<Cons>,
+    aj: Vec<Cons>,
+    r: Vec<Cons>,
+    corr: Vec<Cons>,
+    lines: LineScratch,
+}
+
+impl Workspace {
+    fn fit(&mut self, n: usize, defect: bool) {
+        for f in [&mut self.fi, &mut self.fj] {
+            fit(&mut f.lo, n, ZERO);
+            fit(&mut f.d, n, ZERO);
+            fit(&mut f.up, n, ZERO);
+        }
+        fit(&mut self.b, n, [0.0; 4]);
+        fit(&mut self.du, n, [0.0; 4]);
+        if defect {
+            for v in [&mut self.ai, &mut self.aj, &mut self.r, &mut self.corr] {
+                fit(v, n, [0.0; 4]);
             }
         }
     }
 }
 
-/// `(I - dt J_dir) x` (matrix-vector product with the stored blocks).
-fn apply_factor(s: &Solver, fac: &Factor, dir_i: bool, x: &[Cons]) -> Vec<Cons> {
+/// `x <- (I - dt J_dir)^{-1} x` for every line of the given direction.
+pub(crate) fn solve_lines(s: &Solver, fac: &Factor, dir_i: bool, x: &mut [Cons], sc: &mut LineScratch) {
     let (ni, nj) = (s.grid.ni, s.grid.nj);
     let blk = s.block;
-    let mut out = vec![[0.0; 4]; ni * nj];
+    if dir_i {
+        fit(&mut sc.row_y, ni * nj, ZERO);
+        sc.row_y.par_chunks_mut(ni).zip(x.par_chunks_mut(ni)).enumerate().for_each(|(j, (y, row))| {
+            let k0 = seg_start(blk, true, ni, 0, j);
+            let n = ni - k0;
+            if n == 0 {
+                return;
+            }
+            block_thomas(n, j * ni + k0, 1, &fac.lo, &fac.d, &fac.up, &mut row[k0..], &mut y[..n]);
+        });
+    } else {
+        fit(&mut sc.col_rhs, ni * nj, [0.0; 4]);
+        fit(&mut sc.col_y, ni * nj, ZERO);
+        let x_in: &[Cons] = x;
+        sc.col_rhs.par_chunks_mut(nj).zip(sc.col_y.par_chunks_mut(nj)).enumerate().for_each(|(i, (rhs, y))| {
+            let k0 = seg_start(blk, false, ni, i, 0);
+            let n = nj - k0;
+            for (k, v) in rhs[..n].iter_mut().enumerate() {
+                *v = x_in[(k0 + k) * ni + i];
+            }
+            block_thomas(n, k0 * ni + i, ni, &fac.lo, &fac.d, &fac.up, &mut rhs[..n], &mut y[..n]);
+        });
+        let col_rhs = &sc.col_rhs;
+        x.par_chunks_mut(ni).enumerate().for_each(|(j, row)| {
+            for (i, v) in row.iter_mut().enumerate() {
+                let k0 = seg_start(blk, false, ni, i, 0);
+                if j >= k0 {
+                    *v = col_rhs[i * nj + j - k0];
+                }
+            }
+        });
+    }
+}
+
+/// `out <- (I - dt J_dir) x` (matrix-vector product with the stored blocks).
+fn apply_factor_into(s: &Solver, fac: &Factor, dir_i: bool, x: &[Cons], out: &mut [Cons]) {
+    let (ni, nj) = (s.grid.ni, s.grid.nj);
+    let blk = s.block;
     out.par_chunks_mut(ni).enumerate().for_each(|(j, row)| {
         for i in 0..ni {
             if blk.is_some_and(|b| b.solid(i, j)) {
+                row[i] = [0.0; 4];
                 continue;
             }
             let c = j * ni + i;
@@ -542,7 +591,6 @@ fn apply_factor(s: &Solver, fac: &Factor, dir_i: bool, x: &[Cons]) -> Vec<Cons> 
             row[i] = v;
         }
     });
-    out
 }
 
 /// One implicit iteration; returns the density residual at the start of the iteration.
@@ -559,30 +607,30 @@ pub(crate) fn step(s: &mut Solver, p: &ImplicitParams) -> f64 {
 
     let (ni, nj) = (s.grid.ni, s.grid.nj);
     let blk = s.block;
-    let fi = assemble(s, p, true);
-    let fj = assemble(s, p, false);
+    let mut ws = std::mem::take(&mut s.imp_ws);
+    ws.fit(ni * nj, p.sub_iters > 1);
+    assemble_into(s, p, true, &mut ws.fi);
+    assemble_into(s, p, false, &mut ws.fj);
+    let Workspace { fi, fj, b, du, ai, aj, r, corr, lines } = &mut ws;
 
-    let b: Vec<Cons> = s.res.iter().zip(s.dt.iter()).map(|(r, d)| [r[0] * d, r[1] * d, r[2] * d, r[3] * d]).collect();
-    let af = |rhs: &[Cons]| -> Vec<Cons> {
-        let mut x = rhs.to_vec();
-        solve_lines(s, &fi, true, &mut x);
-        solve_lines(s, &fj, false, &mut x);
-        x
-    };
-    let mut du = af(&b);
+    for ((b, r), d) in b.iter_mut().zip(s.res.iter()).zip(s.dt.iter()) {
+        *b = [r[0] * d, r[1] * d, r[2] * d, r[3] * d];
+    }
+    du.copy_from_slice(b);
+    solve_lines(s, fi, true, du, lines);
+    solve_lines(s, fj, false, du, lines);
     for _ in 1..p.sub_iters.max(1) {
-        let (ai, aj) = (apply_factor(s, &fi, true, &du), apply_factor(s, &fj, false, &du));
-        let r: Vec<Cons> = (0..ni * nj)
-            .into_par_iter()
-            .map(|c| {
-                let mut v = [0.0; 4];
-                for q in 0..4 {
-                    v[q] = b[c][q] - (ai[c][q] + aj[c][q] - du[c][q]);
-                }
-                v
-            })
-            .collect();
-        let corr = af(&r);
+        apply_factor_into(s, fi, true, du, ai);
+        apply_factor_into(s, fj, false, du, aj);
+        let (b, du_r, ai, aj) = (&*b, &*du, &*ai, &*aj);
+        r.par_iter_mut().enumerate().for_each(|(c, v)| {
+            for q in 0..4 {
+                v[q] = b[c][q] - (ai[c][q] + aj[c][q] - du_r[c][q]);
+            }
+        });
+        corr.copy_from_slice(r);
+        solve_lines(s, fi, true, corr, lines);
+        solve_lines(s, fj, false, corr, lines);
         du.par_iter_mut().zip(corr.par_iter()).for_each(|(d, c)| {
             for q in 0..4 {
                 d[q] += c[q];
@@ -591,6 +639,7 @@ pub(crate) fn step(s: &mut Solver, p: &ImplicitParams) -> f64 {
     }
 
     // ---- update with positivity damping ----
+    let du: &[Cons] = du;
     s.u.par_chunks_mut(ni).enumerate().for_each(|(j, row)| {
         for i in 0..ni {
             if blk.is_some_and(|b| b.solid(i, j)) {
@@ -609,6 +658,7 @@ pub(crate) fn step(s: &mut Solver, p: &ImplicitParams) -> f64 {
             }
         }
     });
+    s.imp_ws = ws;
     rn
 }
 
@@ -694,7 +744,7 @@ mod tests {
         let rhs: Vec<Cons> = (0..n).map(|_| [rnd(), rnd(), rnd(), rnd()]).collect();
         let mut x = rhs.clone();
         let mut y = vec![ZERO; n];
-        block_thomas(n, &lo, &d, &up, &mut x, &mut y);
+        block_thomas(n, 0, 1, &lo, &d, &up, &mut x, &mut y);
         for k in 0..n {
             let mut r = mv(&d[k], &x[k]);
             if k > 0 {

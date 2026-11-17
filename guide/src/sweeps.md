@@ -114,6 +114,8 @@ it does not change the iteration or the result. Keep the callback short (send th
 channel and throttle there). Returning `ControlFlow::Break(())` ends the run at once and the
 analysis returns `Error::Cancelled`; no point of a cancelled analysis is returned.
 
+`on_point(f)` streams each finalized primary drag point in solve order; `on_lift_point(f)` does the same for lift points. Both callbacks receive the point, its actual `BackendUsed`, and the CPU fallback reason when applicable. Completed points remain available to the callback if a later point is cancelled. Under `Auto`, a failed GPU sweep may have emitted points before the CPU rerun emits their replacements. Drag callbacks precede the uncertainty sweep, so `cd_uncertainty` is populated only in the returned polar.
+
 ```rust,no_run
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};

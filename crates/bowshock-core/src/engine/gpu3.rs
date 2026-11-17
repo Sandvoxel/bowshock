@@ -66,7 +66,12 @@ impl GpuRunner3 {
         while done < n.max_iter && stop.is_none() {
             let len = SYNC.min(n.max_iter - done);
             let h = self.gpu.run(len)?;
-            let cn = if len == SYNC { Some(forces_on(case, &self.host.grid, &self.gpu.state_f64()?, p_inf, x_base).cn) } else { None };
+            let cn = if len == SYNC {
+                self.gpu.read_boundary_into(&self.host.grid, &mut self.host.u)?;
+                Some(forces_on(case, &self.host.grid, &self.host.u, p_inf, x_base).cn)
+            } else {
+                None
+            };
             for (k, r) in h.into_iter().enumerate() {
                 let it = done + k;
                 let sample = if it % SYNC == SYNC - 1 { cn } else { None };
@@ -81,7 +86,8 @@ impl GpuRunner3 {
                 stop = Some(done);
             }
         }
-        let f = forces_on(case, &self.host.grid, &self.gpu.state_f64()?, p_inf, x_base);
+        self.gpu.read_boundary_into(&self.host.grid, &mut self.host.u)?;
+        let f = forces_on(case, &self.host.grid, &self.host.u, p_inf, x_base);
         Ok(rule.finish(case, f, stop.unwrap_or(done)))
     }
 }

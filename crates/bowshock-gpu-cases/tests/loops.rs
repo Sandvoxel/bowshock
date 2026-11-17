@@ -20,13 +20,15 @@ macro_rules! check {
                     s.run_replay(20).unwrap();
                     Vec::new()
                 }
-                _ => s.run_eval(20).unwrap().read().unwrap(),
+                2 => s.run_eval(20).unwrap().read().unwrap(),
+                _ => [4, 6, 6, 4].into_iter().flat_map(|n| s.run(n, 7).unwrap()).collect(),
             };
             (s.state_f64().unwrap(), history)
         };
         let (u_until, h_until) = run(0);
         let (u_replay, _) = run(1);
         let (u_eval, h_eval) = run(2);
+        let (u_chunks, h_chunks) = run(3);
         let worst =
             |a: &[[f64; 4]], b: &[[f64; 4]]| a.iter().zip(b).fold(0.0f64, |m, (x, y)| (0..4).fold(m, |m, k| m.max((x[k] - y[k]).abs() / (1.0 + y[k].abs()))));
         let hist = h_until.iter().zip(&h_eval).fold(0.0f64, |m, (a, b)| m.max((a - b).abs() / b));
@@ -41,6 +43,9 @@ macro_rules! check {
         );
         assert_eq!((h_until.len(), h_eval.len()), (20, 20));
         assert!(worst(&u_until, &u_eval) <= 1e-6 && worst(&u_replay, &u_eval) <= 1e-6 && hist <= 1e-6);
+        assert_eq!(h_chunks.len(), h_eval.len());
+        assert!(worst(&u_chunks, &u_eval) <= 1e-6);
+        assert!(h_chunks.iter().zip(&h_eval).all(|(a, b)| (a - b).abs() <= 1e-6 * b.abs()));
     }};
 }
 

@@ -249,6 +249,9 @@ pub struct Solver {
     pub turb: Vec<[f64; 2]>,
     pub(crate) dwall: Vec<f64>,
     pub(crate) turb_rnorm: f64,
+    /// Scratch of `implicit::step` and `turbulence::update`, empty until the first call.
+    pub(crate) imp_ws: crate::implicit::Workspace,
+    pub(crate) turb_ws: crate::turbulence::Workspace,
 }
 
 #[inline]
@@ -293,6 +296,8 @@ impl Solver {
             turb: Vec::new(),
             dwall: Vec::new(),
             turb_rnorm: 0.0,
+            imp_ws: Default::default(),
+            turb_ws: Default::default(),
             grid,
             cfg,
         }

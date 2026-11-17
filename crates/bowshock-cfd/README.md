@@ -639,9 +639,11 @@ double-float `Array<Df32>`). Supported: `Scheme::Explicit` and `Scheme::Implicit
 `Case`, Euler or RANS: `Backend::Auto` uses it when `luma::default_context()` opens a real GPU (a software Vulkan device counts as none).
 
 The `LazySolver`s are also public (`bowshock_cfd::gpu::{f32s, df32s}::LazySolver`) for the benchmarks and the tests that vary the `Staging` or the loop form
-(`run` = `iterate_until_all` with the residual recorded, `run_replay` = `iterate_all`, `run_eval` = `eval_all` every iteration).
-The step is traced and its kernels compiled when a run starts, and the free stream and the limiter phase are constants of the traced step, so a
-run after `set_config` with another free stream traces (and, if Luma's program cache misses, compiles) its kernels again, so a sweep point pays the "First call" cost below (0.05 s f32, 0.9 s double-float on a 100x50 cone grid); `run(n)` calls with the same configuration reuse them. [INFERENCE: the cache miss is not measured separately.]
+(`run` = cached `CompiledUntil` loops with the residual recorded, `run_replay` = `iterate_all`, `run_eval` = `eval_all` every iteration).
+`run` keeps one compiled loop per limiter phase, reused while staging and sync interval match and the requested segment fits its capacity.
+Configuration, low-Mach, block, nozzle, scheme and viscous changes invalidate those loops; state resets and CFL-ramp restarts do not.
+Conserved-state downloads stack components into one readback. `read_boundary_into` downloads only the wall/base stencils used by monitoring and force integration; other host cells are unchanged.
+The CPU implicit and SST updates reuse factor, line-solve and field scratch buffers after their first iteration. Rough-wall GPU iterations operate only on the wall strip and never mutate shared geometry arrays.
 
 ## What is in it
 

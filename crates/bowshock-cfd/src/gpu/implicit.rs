@@ -849,6 +849,7 @@ impl LazySolver {
             return Err(luma::LumaError::Unsupported("the lazy solver covers Scheme::Explicit and Scheme::Implicit only".into()));
         }
         self.scheme = scheme;
+        self.compiled = [None, None];
         self.restart_ramp()?;
         Ok(())
     }
