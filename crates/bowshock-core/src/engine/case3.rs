@@ -17,11 +17,15 @@ use bowshock_cfd::solver::{Bc, Scheme};
 use bowshock_cfd::solver3::{Config3, RansOpts3, Scheme3, Solver3};
 use bowshock_cfd::sst::{Turbulence, Viscous};
 
-/// `cfl_max` of a wall-resolved (viscous) **half domain**: 20, so Mach 0.8 and below take 20 instead of `Numerics3::viscous`'s 50. With the mesh before `TE_TAPER_COLUMNS` = 8 (`engine::grid3`)
-/// the Lift-tier half domain of the ANF nose with fins went non-finite at iteration 150 to 200 at 20 (Mach 2) and 50 (Mach 0.8), and ran at 10; with the 8-column taper (CPU f64, short body,
-/// 692k cells, 2 degrees) Mach 2 holds at 20 to 560 iterations and at 30 to 260, Mach 0.8 holds at 20 to 520 (residual 0.03, CN 0.7042, CA 0.6709 against the cfl 10 GPU run's 0.70804 /
-/// 0.67429), but at 30 it is non-finite at 300 (near the nose-tube junction, x 2.76: a second limit, not the fin) and at 40 and 50 at 215 and 200.
-pub const HALF_DOMAIN_CFL_MAX: f64 = 20.0;
+/// `cfl_max` of a wall-resolved (viscous) **3D** grid, a half domain or a sector (the wedge, one azimuthal cell, keeps `Numerics3::viscous`'s 50 below Mach 1 and 20 above): 10.
+/// The three-factor implicit step has a CFL limit on every 3D grid tried, finned or not, between 30 and 40 at Mach 0.5 and lower supersonic (CPU f64, Draft tier of the example rocket: the
+/// sector holds at 10, 15, 20 and 30 and is non-finite at iteration 200 at 40 and 50, as the finless uniform-azimuth half domain is at 50; the fin section, sweep, thickness, the Euler
+/// equations, laminar flow, `first_order_iters` 400, `sub_iters` 6 and the implicit entropy fix do not change it; only the scalar (Rusanov) implicit dissipation holds at 50, and converges
+/// slower). The defaults of 50 / 20 went non-finite after the ramp passed 40 (iteration 190 to 215 at Mach 0.1 to 0.9 on the GPU, f32, Coarse and Draft sectors) and, at 20, at iteration 411 /
+/// 932 / 4508 (Mach 3 Draft, Mach 3 Coarse, Mach 2.3 Coarse). GPU f32, Draft sector, the ten Mach numbers 0.1 to 3.0 at 10: every one finite; 8 stop on the mean rule after 6890 to 11830
+/// iterations, Mach 0.1 and 0.8 (unsteady base wake) reach the 12000 cap; at 20 Mach 3 is non-finite at 411 and the others stop after 25 to 35 % fewer iterations, which a cap
+/// of 20 would buy where it holds. The Lift-tier gates (G-L1, G-F5) ran at 10.
+pub const VISCOUS_3D_CFL_MAX: f64 = 10.0;
 
 /// Numerical settings and stop-rule tolerances of a 3D run.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -395,8 +399,8 @@ impl Case3 {
             // at the medium level go non-finite with one): same state, 20-25 % cheaper (DESIGN3D item 35)
             self.numerics.implicit.sub_iters = 1;
         }
-        if matches!(self.grid.domain, Domain3::Half { .. }) {
-            self.numerics.implicit.cfl_max = self.numerics.implicit.cfl_max.min(HALF_DOMAIN_CFL_MAX);
+        if !matches!(self.grid.domain, Domain3::Wedge { .. }) {
+            self.numerics.implicit.cfl_max = self.numerics.implicit.cfl_max.min(VISCOUS_3D_CFL_MAX);
         }
         match (&self.grid.fins, tier) {
             (Some(f), Tier::Draft(..)) => {
@@ -521,18 +525,22 @@ impl Case3 {
 mod tests {
     use super::*;
 
-    /// A viscous half domain takes [`HALF_DOMAIN_CFL_MAX`]; a viscous sector and a viscous wedge keep the engine's limit (50 below Mach 1, 20 above).
+    /// A viscous half domain and a viscous sector take [`VISCOUS_3D_CFL_MAX`], finned or not; a viscous wedge keeps the engine's limit (50 below Mach 1, 20 above), Euler its own.
     #[test]
-    fn only_the_viscous_half_domain_takes_the_lower_cfl() {
+    fn every_viscous_3d_grid_takes_the_lower_cfl() {
         let flow = WallFlow { re_c: 7.0e5, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0, sutherland: SUTHERLAND_SEA_LEVEL };
         let cfl = |c: &Case3| c.numerics.implicit.cfl_max;
-        for (mach, base) in [(0.8, 50.0), (2.0, 20.0)] {
+        for (mach, wedge) in [(0.8, 50.0), (2.0, 20.0)] {
             let half = Case3::base_half(mach, 2f64.to_radians(), Case3::anf_body(), Some(Case3::anf_fins()), Tier::Lift(flow), 0);
-            assert_eq!(cfl(&half), HALF_DOMAIN_CFL_MAX, "half domain at Mach {mach}");
+            assert_eq!(cfl(&half), VISCOUS_3D_CFL_MAX, "half domain at Mach {mach}");
             let finless = Case3::base_half(mach, 0.0, Case3::anf_body(), None, Tier::Lift(flow), 0);
-            assert_eq!(cfl(&finless), HALF_DOMAIN_CFL_MAX, "finless half domain at Mach {mach}");
-            let sector = Case3::sector(mach, Case3::anf_body(), Case3::anf_fins(), Tier::Coarse(flow), 0);
-            assert_eq!(cfl(&sector), base, "sector at Mach {mach}");
+            assert_eq!(cfl(&finless), VISCOUS_3D_CFL_MAX, "finless half domain at Mach {mach}");
+            for tier in [Tier::Coarse(flow), Tier::draft(flow)] {
+                let sector = Case3::sector(mach, Case3::anf_body(), Case3::anf_fins(), tier, 0);
+                assert_eq!(cfl(&sector), VISCOUS_3D_CFL_MAX, "sector {tier:?} at Mach {mach}");
+            }
+            let on_wedge = Case3::wedge(mach, Case3::anf_body(), 0).with_tier(Tier::Coarse(flow));
+            assert_eq!(cfl(&on_wedge), wedge, "wedge at Mach {mach}");
             let euler = Case3::base_half(mach, 0.0, Case3::anf_body(), Some(Case3::anf_fins()), Tier::Euler, 0);
             assert_eq!(cfl(&euler), Numerics3::auto(mach, 0).implicit.cfl_max, "Euler half domain at Mach {mach}");
         }
