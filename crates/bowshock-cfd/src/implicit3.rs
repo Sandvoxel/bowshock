@@ -324,6 +324,24 @@ fn cell_blocks3(
     (lo, d, up)
 }
 
+/// The Jacobian block of the wedge's pressure source, `dt/V (A1 n1 - A0 n0) dp/dU` in the momentum rows `1..4` of a `5 x 5` block (`wk` the cell's primitive state, `a0`,
+/// `a1` its `k` faces): the pressure of the `k` faces is the axisymmetric radial-momentum source of a wedge. It joins the diagonal of the `j` factor of the block scheme;
+/// the diagonal scheme (`diag3`) solves it point-implicitly.
+pub(crate) fn wedge_source_block(wk: &Prim3, a0: &Face3, a1: &Face3, dt: f64, vol: f64) -> M5 {
+    let g1 = GAMMA - 1.0;
+    let (u, v, ww) = (wk[1], wk[2], wk[3]);
+    let dp = [0.5 * g1 * (u * u + v * v + ww * ww), -g1 * u, -g1 * v, -g1 * ww, g1];
+    let f = dt / vol;
+    let mut m = ZERO5;
+    for r in 0..3 {
+        let a = f * (a1.area * a1.n[r] - a0.area * a0.n[r]);
+        for q in 0..5 {
+            m[5 * (r + 1) + q] = a * dp[q];
+        }
+    }
+    m
+}
+
 /// Assemble the factor of direction `dir` (0, 1, 2 = i, j, k).
 fn assemble3(s: &Solver3, p: &ImplicitParams, dir: usize) -> Factor {
     let (ni, nj, nk) = (s.grid.ni, s.grid.nj, s.grid.nk);
@@ -408,17 +426,7 @@ fn assemble3(s: &Solver3, p: &ImplicitParams, dir: usize) -> Factor {
                 if wedge && dir == 1 {
                     // single-cell wedge: the pressure of the `k` faces is the axisymmetric radial-momentum source, `-(1/V) (A1 n1 - A0 n0) p`; as in 2D
                     // (`implicit::cell_blocks`) its Jacobian `(I - dt J)_mom = ... + dt/V (A1 n1 - A0 n0) dp/dU` joins the diagonal of the `j` factor
-                    let (a0, a1) = (&grid.kface[c], &grid.kface[c + plane]);
-                    let g1 = GAMMA - 1.0;
-                    let (u, v, ww) = (wk[1], wk[2], wk[3]);
-                    let dp = [0.5 * g1 * (u * u + v * v + ww * ww), -g1 * u, -g1 * v, -g1 * ww, g1];
-                    let f = dt[c] / grid.vol[c];
-                    for r in 0..3 {
-                        let a = f * (a1.area * a1.n[r] - a0.area * a0.n[r]);
-                        for q in 0..5 {
-                            dd[5 * (r + 1) + q] += a * dp[q];
-                        }
-                    }
+                    axpy(&mut dd, 1.0, &wedge_source_block(wk, &grid.kface[c], &grid.kface[c + plane], dt[c], grid.vol[c]));
                 }
                 if m == 0 {
                     let t = ghost_t(true, fl, i, wk);
