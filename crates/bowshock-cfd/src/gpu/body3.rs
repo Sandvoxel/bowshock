@@ -422,8 +422,8 @@ pub struct LazySolver3 {
     /// Wedge-mode switches of the implicit scheme, for a one-cell wedge (`nk == 1`, where the k faces are the two reflecting planes and `V / (c A_k)` is only
     /// the stiffness of a one-cell azimuth). `skip_k`: no k factor in the line solves. `no_dt_k`: no `L_k` in the pseudo-time step. `k_wall_flux`: the flux
     /// through the two k planes is the pressure of the cell, `[0, p n, 0]` (the wall flux: the hoop term of the axisymmetric equations), not the
-    /// Riemann flux between the cell and its mirror image. All off by default; see [`GpuSolver3::set_wedge_mode`] for what works together (the
-    /// Riemann flux through the planes is stiff, with it the k factor cannot be dropped).
+    /// Riemann flux between the cell and its mirror image. All off by default; see [`GpuSolver3::set_wedge_mode`] (measured: without the k factor the iteration
+    /// diverges at `cfl_max` 10 with the Riemann flux and with the pressure flux, and converges only at `cfl_max` of about 1 with the pressure flux).
     pub skip_k: bool,
     pub no_dt_k: bool,
     pub k_wall_flux: bool,

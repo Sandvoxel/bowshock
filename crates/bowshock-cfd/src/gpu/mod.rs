@@ -496,8 +496,8 @@ impl GpuSolver3 {
     }
 
     /// Wedge mode of a one-cell wedge (`nk == 1`): no k factor in the line solves, no `L_k` in the pseudo-time step, and the flux through the two k planes
-    /// is the cell's pressure on the face normal instead of the Riemann flux of the cell against its mirror image (which is stiff: with it the k factor
-    /// cannot be dropped, the iteration diverges). Needs `nk == 1`.
+    /// is the cell's pressure on the face normal instead of the Riemann flux of the cell against its mirror image. Measured (`wedge3d`): without the k factor
+    /// the iteration diverges at `cfl_max` 10 and converges only at `cfl_max` of about 1 (ISSUES.md #22). Needs `nk == 1`.
     pub fn set_wedge_mode(&mut self, on: bool) -> Result<()> {
         if on && self.nk != 1 {
             return Err(GpuError::Unsupported("wedge mode needs nk == 1"));

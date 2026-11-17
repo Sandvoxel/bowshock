@@ -167,9 +167,10 @@ fn wedge_and_thin_sectors_match_cpu() {
 }
 
 /// Wedge mode (`GpuSolver3::set_wedge_mode`: no k factor, no `L_k` in the time step, the pressure of the cell as the flux through the two k planes) on the
-/// one-cell wedge, M 0.5 Euler, the small base grid, df32, 400 iterations. Measured (`DESIGN3D` section A2 proposes dropping the k factor): the iteration
-/// without the k factor is stable only at a small `cfl_max` (1 on this grid: 2 drifts, 5 and 10 diverge, `Block` and `DiagonalCorrected`), whatever the flux
-/// through the planes, so the wedge runs at `cfl_max` 1. Three runs per line solve:
+/// one-cell wedge, M 0.5 Euler, the small base grid, df32, 400 iterations. Measured (`DESIGN3D` section A2 proposes dropping the k factor; scan of
+/// 1500 iterations, `cfl_max` 0.5, 1, 2, 5, 10): with the pressure flux through the planes the iteration without the k factor converges at `cfl_max` 1 and
+/// below, rises at 2, is O(1) at 5 (`Block`) / NaN (`DiagonalCorrected`) and NaN at 10; with the Riemann flux it was NaN at 10 (only that was run), with the
+/// k factor kept the pressure flux is stable at 10 (`Block`). So the wedge runs at `cfl_max` 1. Three runs per line solve:
 ///
 /// * the reference, the product's operator: k factor, `L_k` in the time step, Riemann flux through the planes, `cfl_max` 10 (`Block`) / 5 (`DiagonalCorrected`,
 ///   which diverges at 10 on this grid: ISSUES #20);
