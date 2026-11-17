@@ -644,6 +644,19 @@ impl GpuSolver3 {
         Ok(on3_mut!(self, s => s.profile_replay(n)?))
     }
 
+    /// Host seconds to trace the lazy expression of one step `n` times, nothing evaluated.
+    pub fn trace_step_seconds(&self, n: usize) -> f64 {
+        on3!(self, s => s.trace_step_seconds(n))
+    }
+
+    /// `n` iterations calling the step every iteration and evaluating the new state (no replay): the loop a host-driven solver would run.
+    pub fn run_eval(&mut self, n: usize) -> Result<()> {
+        on3_mut!(self, s => {
+            s.run_eval(n)?;
+        });
+        Ok(())
+    }
+
     /// `n` iterations as `iterate_all` replays (no residual history: what a benchmark times); call [`GpuSolver3::sync`] to wait for the GPU.
     pub fn run_replay(&mut self, n: usize) -> Result<()> {
         on3_mut!(self, s => s.run_replay(n)?);

@@ -1228,4 +1228,16 @@ impl LazySolver3 {
         }
         t0.elapsed().as_secs_f64()
     }
+
+    /// Host seconds to build the lazy expression of one step of the configured scheme (the implicit step when `Scheme3::Implicit`) from the current state, `n` times, without
+    /// evaluating anything: what the loop's one trace costs, and what an eval-per-iteration loop pays every iteration.
+    pub fn trace_step_seconds(&self, n: usize) -> f64 {
+        let s = self.state.as_ref().expect("trace_step_seconds needs a state");
+        let lim = self.limiter3(self.iter);
+        let t0 = std::time::Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(self.step3(s, lim));
+        }
+        t0.elapsed().as_secs_f64()
+    }
 }

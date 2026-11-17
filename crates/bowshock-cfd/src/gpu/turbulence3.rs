@@ -506,21 +506,16 @@ impl LazySolver3 {
 
     /// [`LazySolver3::wall_speed_at3`] on the grid: the unpadded primitives `p`, zero at the cells that are no wall cells.
     pub(crate) fn wall_speed_grid3(&self, tg: &TGeo3, p: &Rec3) -> Result<A> {
-        let mut out = A::zeros_on(&self.ctx, [self.ni, self.nj, self.nk])?;
-        if let Some(idx) = &tg.wall_idx {
-            let s = self.wall_speed_at3(tg, &p[1].take(idx), &p[2].take(idx), &p[3].take(idx));
-            out.put(idx, &s)?;
-        }
-        Ok(out)
+        let (Some(idx), Some(pos)) = (&tg.wall_idx, &tg.wall_pos) else { return Ok(c(0.0) * &p[0]) };
+        let s = self.wall_speed_at3(tg, &p[1].take(idx), &p[2].take(idx), &p[3].take(idx));
+        Ok(select(&tg.wall_cell, s.take(pos), c(0.0)))
     }
 
     /// `turbulence3::wall_state_pass`: the wall state `[k_w, omega_w, mu_t,w]` of every fluid cell with a no-slip face (zero elsewhere) from the unpadded primitives `p`,
     /// the viscosity `mu`, the wall distance `dwall` and the roughness per cell `ks` (`None`: all smooth). The state is computed on the gathered wall cells only (the
     /// Newton and fixed-point iterations are transcendental: in `Df32` they cost as much as the rest of the update on all cells) and scattered into zeros.
     fn wall_state_pass3(&self, tg: &TGeo3, p: &Rec3, mu: &A, dwall: &A, ks: Option<&A>) -> Result<[A; 3]> {
-        let shape = [self.ni, self.nj, self.nk];
-        let mut out: [A; 3] = [A::zeros_on(&self.ctx, shape)?, A::zeros_on(&self.ctx, shape)?, A::zeros_on(&self.ctx, shape)?];
-        let Some(idx) = &tg.wall_idx else { return Ok(out) };
+        let Some(idx) = &tg.wall_idx else { return Ok(std::array::from_fn(|_| c(0.0) * &p[0])) };
         let at = |a: &A| a.take(idx);
         let (rho, mu, d) = (at(&p[0]), at(mu), at(dwall));
         let nu = &mu / &rho;
@@ -538,10 +533,10 @@ impl LazySolver3 {
                 [pick(k_w, &smooth[0]), pick(om_w, &smooth[1]), pick(&rho * nu_t, &smooth[2])]
             }
         };
-        for (o, v) in out.iter_mut().zip(&state) {
-            o.put(idx, v)?;
-        }
-        Ok(out)
+        // scattered back by a gather over the grid (`wall_pos`) and a select, not `zeros_on` + `put`: a host-side clear aborts the recording of the loop step (the replay
+        // would re-trace and run the whole step eagerly every iteration: 25 ms of host time per iteration on the wedge)
+        let pos = tg.wall_pos.as_ref().expect("wall cells have positions");
+        Ok(std::array::from_fn(|e| select(&tg.wall_cell, state[e].take(pos), c(0.0))))
     }
 
     // -----------------------------------------------------------------------------------------------------------------

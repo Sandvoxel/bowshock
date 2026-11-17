@@ -308,6 +308,34 @@ fn bench_combo(case: &BenchCase, precision: (Precision, &'static str), solve: (L
         _ => unreachable!("one of the two solvers is built"),
     };
     let (first_call_s, us, p, last) = measure(s, n)?;
+    {
+        // where the loop time goes: the host time to trace one step, the eval-per-iteration loop, the `run` loop with the residual history, and the replay against its own GPU time
+        let m = 20;
+        let trace_ms = 1e3 * s.trace_step_seconds(3) / 3.0;
+        s.reset().map_err(|e| e.to_string())?;
+        s.run_replay(20).map_err(|e| e.to_string())?;
+        s.sync().map_err(|e| e.to_string())?;
+        let t = Instant::now();
+        s.run_eval(m).map_err(|e| e.to_string())?;
+        s.sync().map_err(|e| e.to_string())?;
+        let eval_ms = 1e3 * t.elapsed().as_secs_f64() / m as f64;
+        let t = Instant::now();
+        s.run(50).map_err(|e| e.to_string())?;
+        let run_ms = 1e3 * t.elapsed().as_secs_f64() / 50.0;
+        let t = Instant::now();
+        s.run_replay(50).map_err(|e| e.to_string())?;
+        s.sync().map_err(|e| e.to_string())?;
+        let replay_ms = 1e3 * t.elapsed().as_secs_f64() / 50.0;
+        let rp = s.profile_replay(20).map_err(|e| e.to_string())?;
+        println!(
+            "LOOP {} {} {}: trace of one step {trace_ms:.1} ms host; eval-per-iteration {eval_ms:.2} ms; run(50) {run_ms:.2} ms / iteration; replay(50) {replay_ms:.2} ms / iteration; replay GPU time {:.2} ms / iteration in {:.0} launches",
+            case.name,
+            precision.1,
+            case.cells(),
+            rp.total().as_secs_f64() * 1e3 / 20.0,
+            rp.launches() as f64 / 20.0
+        );
+    }
     if o.stages {
         s.reset().map_err(|e| e.to_string())?;
         s.run_replay(20).map_err(|e| e.to_string())?;
