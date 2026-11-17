@@ -117,7 +117,7 @@ pub fn reduce_lift(raw: &[solver::PolarPoint], requested: usize, notes: &mut Vec
 }
 
 /// What a machine is during a solve.
-enum Session {
+pub(super) enum Session {
     /// This computer, solving on `backend` (it turns to the CPU for good once the GPU does not start).
     Local { backend: solver::Backend },
     /// A remote GPU.
@@ -456,24 +456,30 @@ pub(super) fn shared_grid() -> bool {
 }
 
 /// Whether the 3D engine (`BOWSHOCK_ENGINE=3d`) solves this process's nodes: it has no 2D grid to show a picture of before the first snapshot.
-fn solves_3d() -> bool {
+pub(super) fn solves_3d() -> bool {
     solver::Engine::from_env() == solver::Engine::Solver3
 }
 
 /// What a node needs solved.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum NodeKind {
+pub(super) enum NodeKind {
     /// A Mach number at zero incidence.
     Drag,
     /// A Mach number at the angles of attack.
     Lift,
 }
 
-/// The [`solver::Analysis`] of one node of either kind: the body, the fins, the resolution (a drag node's is the job's grid, the angles are always solved coarse), the
-/// backend and the fields, and, for an engine that solves the viscous terms, the flight conditions, the wall roughness, the drag tolerance (a drag node's stop rule)
-/// and the shared grid. The legacy engine's angle solver ignores the viscous settings; the 3D engine reads them for both kinds. An engine that does not solve them
-/// yet is not asked (it would fail loudly instead of running Euler).
-fn node_analysis(job: &Job, kind: NodeKind, session: &Session, altitude: f64, grid_mach: f64, shared_grid: bool) -> Result<solver::Analysis, Failed> {
+/// The [`solver::Analysis`] of one node of either kind: the body, the fins with their outline, the resolution (a drag node's is the job's grid, the angles are always solved
+/// coarse), the backend and the fields, the flight conditions, the wall roughness, the drag tolerance (a drag node's stop rule) and the shared grid. The legacy engine's
+/// angle solver ignores the viscous settings; the 3D engine reads them for both kinds.
+pub(super) fn node_analysis(
+    job: &Job,
+    kind: NodeKind,
+    session: &Session,
+    altitude: f64,
+    grid_mach: f64,
+    shared_grid: bool,
+) -> Result<solver::Analysis, Failed> {
     let mut analysis = solver::Analysis::new(&job.plan.body)
         .map_err(|e| Failed::Message(e.to_string()))?
         .resolution(match (kind, job.grid) {

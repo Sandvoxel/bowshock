@@ -78,12 +78,16 @@ fn smoke_hook(c: &mut Case3) {
 
 impl WedgeRunner for FacadeWedge {
     fn facade_case(&self, c: &FacadeCase) -> Result<Numbers, String> {
+        // `BOWSHOCK_FACADE_ONLY=<id>` runs only that case (the others are `Err`), for the gates whose cases repeat on the CPU (G-V3's two rows are one case)
+        if std::env::var("BOWSHOCK_FACADE_ONLY").is_ok_and(|id| id != c.id) {
+            return Err("not selected (BOWSHOCK_FACADE_ONLY)".to_string());
+        }
         let mut a = self.analysis(&c.body, c.resolution)?;
         if !c.wake_base {
             a = a.wake(Wake::Sting);
         }
         if c.rans {
-            // the RANS tier: the flight conditions and the wall roughness of the fixture case (the viscous terms run on the CPU until the GPU step is wired)
+            // the RANS tier: the flight conditions and the wall roughness of the fixture case
             let atmosphere = c.atmosphere.ok_or("a RANS case without an atmosphere")?;
             a = a.viscous(bowshock_core::FlightConditions { atmosphere }).roughness(c.roughness_m);
             if let Some(tol) = c.drag_tolerance {

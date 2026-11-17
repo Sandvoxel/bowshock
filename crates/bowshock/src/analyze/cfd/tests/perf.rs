@@ -337,7 +337,7 @@ fn half_domain_against_the_sting_grid() {
     }
 }
 
-/// Where the time of the 3D engine goes, through the app path: the FINNED example rocket as the app solves it under `BOWSHOCK_ENGINE=3d` (Euler today): 10 sector points
+/// Where the time of the 3D engine goes, through the app path: the FINNED example rocket as the app solves it under `BOWSHOCK_ENGINE=3d`: 10 sector points
 /// at zero incidence, then 8 Mach numbers at 2 and 6 degrees on the half domain, one `run` per node (`solve`). Prints one line per solved point (the runner's
 /// `PointTiming` joined with the facade's `FacadeTiming`), the sums by kind and the whole solve, and a `PERF` line.
 /// `tools/gpuq/gpuq submit --host local --name engine3d-timing -- env BOWSHOCK_ENGINE=3d cargo nextest run --release -p bowshock engine3d_finned_timing --run-ignored only --no-capture`.
@@ -706,4 +706,54 @@ fn engine3d_probe_cold_half_points() {
         let p = a.run(&[solver::Condition::new(mach, alpha)]).expect("solves").points.remove(0);
         println!("PROBE M {mach} alpha {alpha}: {} iterations, {:?}, {:?}", p.detail.iterations, p.detail.stop_reason, p.quality);
     }
+}
+
+/// The finned example's drag table with the drag split the app's table does not keep, per Mach number: body friction, forebody pressure, base, fin friction, fin pressure
+/// (the facade's `Drag`), the point's wall time, iterations and ms/iter, y+, from the analysis the app builds for its drag nodes (`node_analysis`). Works for both
+/// engines (`BOWSHOCK_ENGINE=3d` or unset, the legacy 2D RANS with the empirical fins: its split has no fin friction).
+#[test]
+#[ignore = "solves the finned example's table on the GPU"]
+fn finned_drag_split() {
+    let (rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    let machs = nodes((0.1, 3.0)).unwrap();
+    let grid_mach = machs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let job = Job {
+        plan,
+        altitude: 120.0,
+        nodes: machs.clone(),
+        stage: 1,
+        grid: CfdGrid::Coarse,
+        compute: Default::default(),
+        cpu_only: false,
+        stability: Vec::new(),
+    };
+    let session = Session::Local { backend: solver::Backend::Gpu };
+    println!("ENGINE {:?}", solver::Engine::from_env());
+    println!(
+        "| Mach | CD | body friction | forebody pressure | base | fin friction | fin pressure | iterations | wall s | ms/iter | y+ max | Cp base | stop |"
+    );
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    let t_all = Instant::now();
+    for &mach in &machs {
+        let analysis = node_analysis(&job, NodeKind::Drag, &session, 120.0, grid_mach, solves_3d()).unwrap_or_else(|_| panic!("the node analysis"));
+        let t = Instant::now();
+        let polar = analysis.run(&[mach]).expect("the point solves");
+        let wall = t.elapsed().as_secs_f64();
+        let (p, d) = (&polar.points[0], &polar.points[0].drag);
+        let (ff, fp) = d.fins.map_or((f64::NAN, f64::NAN), |f| (f.friction, f.pressure));
+        println!(
+            "| {mach:.2} | {:.5} | {:.5} | {:.5} | {:.5} | {ff:.5} | {fp:.5} | {} | {wall:.1} | {:.2} | {:.2} | {:.4} | {} |",
+            d.total,
+            d.friction.unwrap_or(f64::NAN),
+            d.forebody_pressure,
+            d.base,
+            p.detail.iterations,
+            1000.0 * wall / p.detail.iterations as f64,
+            p.detail.y_plus_max,
+            p.detail.cp_base,
+            p.detail.stop_reason
+        );
+    }
+    println!("TOTAL {:.1} s for {} points", t_all.elapsed().as_secs_f64(), machs.len());
 }

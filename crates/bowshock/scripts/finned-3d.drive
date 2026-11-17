@@ -1,4 +1,4 @@
-# The finned example rocket solved by the 3D engine (BOWSHOCK_ENGINE=3d, Euler today): the fin sector at zero incidence and the half domain at 6 degrees, in the 3D scene
+# The finned example rocket solved by the 3D engine (BOWSHOCK_ENGINE=3d): the fin sector at zero incidence and the half domain at 6 degrees, in the 3D scene
 # of the whole rocket, wall Cp on the walls and a meridian Mach sheet through a fin plane. A real solve (a few minutes on the GPU: the headless driver waits for it),
 # through the queue:
 #   tools/gpuq/gpuq submit --host local --name finned-3d -- env BOWSHOCK_ENGINE=3d ICED_TEST_BACKEND=wgpu \

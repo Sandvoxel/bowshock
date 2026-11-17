@@ -138,7 +138,7 @@ fn three_d() -> bool {
 
 /// The outline the 3D engine meshes for the fin set `set` of the document `rocket`: the half ellipse of an elliptical fin, the polygon of a freeform one (found in the
 /// document by its span and thickness), else the trapezoid.
-fn fin_outline(rocket: &Rocket, set: &FinSet) -> solver::FinOutline {
+pub(super) fn fin_outline(rocket: &Rocket, set: &FinSet) -> solver::FinOutline {
     // a freeform fin is flown as its equivalent trapezoid and says so by its real root extent
     match (set.planform, set.root_extent.is_some()) {
         (FinPlanform::Elliptical, _) => solver::FinOutline::Ellipse,
