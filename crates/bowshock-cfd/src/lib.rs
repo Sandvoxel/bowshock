@@ -16,6 +16,7 @@ pub mod grid;
 pub mod grid3;
 pub mod implicit;
 pub mod implicit3;
+pub mod lowmach5;
 pub mod multigrid;
 pub mod solver;
 pub mod solver3;
