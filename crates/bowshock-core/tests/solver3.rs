@@ -186,8 +186,14 @@ fn a_kept_gpu_solver_gives_the_point_a_fresh_one_gives() {
         .unwrap()
     };
     // the wedge, then the half domain (a grid the kept wedge solver was not built for, then one it was)
+    let _ = bowshock_core::take_facade_timings();
     let fresh = last(&[Condition { mach: 2.0, alpha_deg: 0.0 }]);
+    let t0 = bowshock_core::take_facade_timings();
+    assert!(t0.iter().filter(|t| t.what == "point").all(|t| !t.reused), "a fresh thread has no kept solver");
     let kept = last(&[Condition { mach: 1.5, alpha_deg: 0.0 }, Condition { mach: 2.0, alpha_deg: 0.0 }]);
+    let t1 = bowshock_core::take_facade_timings();
+    let reused: Vec<bool> = t1.iter().filter(|t| t.what == "point").map(|t| t.reused).collect();
+    assert_eq!(reused, [false, true], "the second wedge point is solved on the kept solver");
     assert_eq!(fresh.drag.total.to_bits(), kept.drag.total.to_bits(), "wedge: {} {}", fresh.drag.total, kept.drag.total);
     assert_eq!((fresh.detail.iterations, fresh.detail.cp_base.to_bits()), (kept.detail.iterations, kept.detail.cp_base.to_bits()));
     let fresh = last(&[Condition { mach: 2.0, alpha_deg: 4.0 }]);

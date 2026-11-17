@@ -16,6 +16,15 @@
 //! [`Engine::Solver3`], never a silent Euler run. [`Analysis::wall_flow`] and [`Analysis::tier3`] already map the viscous knobs onto the engine's
 //! [`Tier`]s; [`SOLVES_VISCOUS`] is the one switch that lets them through.
 
+//!
+//! # The flip
+//!
+//! With `BOWSHOCK_ENGINE=3d` the whole app already runs on this engine (`cfd/run.rs` `node_analysis`, `cfd/plan.rs` fin counts and `*_REV_3D` keys, `cfd/wording.rs`
+//! `Words(true)`, the shared grid), so the flip is: `Engine::DEFAULT = Solver3` (`analysis.rs`); [`SOLVES_VISCOUS`] true once the viscous stage lands (then the app sends
+//! `viscous`, roughness, the drag tolerance and `grid_mach` to both node kinds by itself, and `tier3` maps them); the Jet patch (the motor request here); then delete the legacy
+//! path (the route comment in `analysis.rs` lists it), `Words(false)`, `SOLVER_REV` / `LIFT_REV` (the `_3D` numbers take their place) and the app's two-engine branches
+//! (`solves_3d`, `shared_grid`, the `solves_viscous` ifs).
+
 use super::*;
 use crate::engine::case3::{Tier, WallFlow};
 use crate::engine::field3::field3_of;
@@ -56,6 +65,8 @@ pub struct FacadeTiming {
     pub field_s: f64,
     /// Dropping a solver state (device arrays, kernels).
     pub drop_s: f64,
+    /// The cold run was on a solver kept from an earlier point (see `POOL`).
+    pub reused: bool,
 }
 
 static FACADE_TIMINGS: std::sync::Mutex<Vec<FacadeTiming>> = std::sync::Mutex::new(Vec::new());
@@ -63,8 +74,8 @@ static FACADE_TIMINGS: std::sync::Mutex<Vec<FacadeTiming>> = std::sync::Mutex::n
 fn record_facade(t: FacadeTiming) {
     if std::env::var_os("BOWSHOCK_TIMING").is_some() {
         eprintln!(
-            "TIMING3 {{\"what\":\"{}\",\"kind\":\"{}\",\"mach\":{},\"alpha_deg\":{:.1},\"case_s\":{:.4},\"run_s\":{:.4},\"post_s\":{:.4},\"host_s\":{:.4},\"field_s\":{:.4},\"drop_s\":{:.4}}}",
-            t.what, t.kind, t.mach, t.alpha_deg, t.case_s, t.run_s, t.post_s, t.host_s, t.field_s, t.drop_s
+            "TIMING3 {{\"what\":\"{}\",\"kind\":\"{}\",\"mach\":{},\"alpha_deg\":{:.1},\"case_s\":{:.4},\"run_s\":{:.4},\"post_s\":{:.4},\"host_s\":{:.4},\"field_s\":{:.4},\"drop_s\":{:.4},\"reused\":{}}}",
+            t.what, t.kind, t.mach, t.alpha_deg, t.case_s, t.run_s, t.post_s, t.host_s, t.field_s, t.drop_s, t.reused
         );
     }
     FACADE_TIMINGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(t);
@@ -99,9 +110,9 @@ trait Runner3 {
     fn grid<'a>(&self, state: &'a Self::State) -> &'a Grid3;
     /// The class forces and the state of `state` (the one download of a point).
     fn post(&self, state: &Self::State, case: &Case3) -> Result<Post3, Error>;
-    /// A cold run in the precision above the backend's usual one, for a point whose usual run went non-finite (`None`: there is none, the CPU runs in double).
-    fn cold_precise(&self, _case: &Case3) -> Option<Result<(PointResult3, Self::State), Error>> {
-        None
+    /// Whether `state` was built for an earlier point and kept (see [`Runner3::recycle`]).
+    fn reused(&self, _state: &Self::State) -> bool {
+        false
     }
     /// A state that is no longer needed: dropped, or kept for the next cold run on the same grid.
     fn recycle(&self, state: Self::State) {
@@ -138,6 +149,7 @@ impl Runner3 for Cpu3 {
 struct GpuState {
     runner: crate::engine::gpu3::GpuRunner3,
     key: (crate::engine::cache3::GridKey, bool),
+    reused: bool,
 }
 
 #[cfg(feature = "gpu")]
@@ -161,11 +173,6 @@ impl Runner3 for Gpu3 {
         self.cold_in(case, matches!(case.grid.domain, crate::engine::grid3::Domain3::Wedge { .. }))
     }
 
-    fn cold_precise(&self, case: &Case3) -> Option<Result<(PointResult3, GpuState), Error>> {
-        // the wedge already runs in the higher precision
-        (!matches!(case.grid.domain, crate::engine::grid3::Domain3::Wedge { .. })).then(|| self.cold_in(case, true))
-    }
-
     fn warm(&self, r: &mut GpuState, case: &Case3) -> Result<PointResult3, Error> {
         r.runner.run_on(case, true)
     }
@@ -178,9 +185,14 @@ impl Runner3 for Gpu3 {
         Ok(Post3 { drag: r.runner.drag_parts(case)?, u: r.runner.gpu.state_f64()? })
     }
 
+    fn reused(&self, r: &GpuState) -> bool {
+        r.reused
+    }
+
     fn recycle(&self, state: GpuState) {
-        // `BOWSHOCK_NO_RUNNER_REUSE` is the A/B switch of the measurements: every cold point builds its own solver
-        if std::env::var_os("BOWSHOCK_NO_RUNNER_REUSE").is_none() {
+        // Opt-in (`BOWSHOCK_RUNNER_REUSE=1`) until it is shown to change nothing: the fixed cost it saves is under 4 % of a table (see the measurements in the report of
+        // the engine timing), and a pooled finned half domain diverged at points a fresh solver does not.
+        if std::env::var_os("BOWSHOCK_RUNNER_REUSE").is_some() {
             POOL.with(|p| *p.borrow_mut() = Some(state));
         }
     }
@@ -193,10 +205,10 @@ impl Gpu3 {
         let key = (crate::engine::cache3::GridKey::of(&case.grid), extended);
         let kept = POOL.with(|p| p.borrow_mut().take()).filter(|s| s.key == key);
         let mut state = match kept {
-            Some(s) => s,
+            Some(s) => GpuState { reused: true, ..s },
             None => {
                 let precision = if extended { bowshock_cfd::gpu::Precision::Extended } else { bowshock_cfd::gpu::Precision::F32 };
-                GpuState { runner: crate::engine::gpu3::GpuRunner3::new(case, precision)?, key }
+                GpuState { runner: crate::engine::gpu3::GpuRunner3::new(case, precision)?, key, reused: false }
             }
         };
         let p = state.runner.run_on(case, false)?;
@@ -476,19 +488,13 @@ impl Analysis {
             let (mut r, mut s) = runner.cold(&case)?;
             let mut next_warm = true;
             if r.stop_reason == StopReason::NonFinite {
+                // a run that went non-finite is repeated once with the implicit CFL limit halved (measured: extended precision does not cure it: the finned example's
+                // half domain diverges at the same iteration in both precisions at Mach 0.8, 3.0 and 6 degrees)
+                let mut again = case.clone();
+                again.numerics.implicit.cfl_max *= 0.5;
+                drop_timed(runner, Some(s), c);
+                (r, s) = runner.cold(&again)?;
                 next_warm = false;
-                // a run that went non-finite is repeated in the next precision up where there is one (the single-precision half domain of the finned example at Mach 3
-                // and 6 degrees did, which the f64 CPU solver does not), then with the implicit CFL limit halved
-                if let Some(again) = runner.cold_precise(&case) {
-                    drop_timed(runner, Some(s), c);
-                    (r, s) = again?;
-                }
-                if r.stop_reason == StopReason::NonFinite {
-                    let mut again = case.clone();
-                    again.numerics.implicit.cfl_max *= 0.5;
-                    drop_timed(runner, Some(s), c);
-                    (r, s) = runner.cold_precise(&again).unwrap_or_else(|| runner.cold(&again))?;
-                }
             }
             tm.run_s += t.elapsed().as_secs_f64();
             if r.stop_reason == StopReason::Cancelled {
@@ -497,6 +503,7 @@ impl Analysis {
             if lift_quality(&r) == Quality::Failed {
                 next_warm = false;
             }
+            tm.reused = runner.reused(&s);
             points.push(self.point3(runner, &s, &case, c, &r, keep, &mut tm)?);
             record_facade(tm);
             drop_timed(runner, state.take(), c);
