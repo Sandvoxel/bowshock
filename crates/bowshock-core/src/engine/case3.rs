@@ -75,7 +75,7 @@ impl Numerics3 {
             warm_min_iters: 250,
             mean_window: 1500,
             mean_from: 1000,
-            mean_tol: 5e-3,
+            mean_tol: 1e-2,
             line_solve: None,
             pressure_outflow: false,
         }
@@ -280,13 +280,14 @@ impl Case3 {
 
     /// A 2D engine case ([`crate::engine::case::Case::new`] with `Wake::Base`) as a wedge of [`WEDGE_ANGLE`]: its body, its base-wake grid and its sting grid,
     /// the numerics of the 2D case ([`Numerics3::from_2d`]: limiter, low-Mach flags, implicit parameters with the block lines, outflow) and, for a viscous case, its
-    /// RANS parameters (`Case::viscous`: the grids are already wall-resolved). `level` is the grid level (the 2D case does not keep it).
+    /// RANS parameters (`Case::viscous`: the grids are already wall-resolved) and motor jet (`Case::with_motor`: the grid already has the nozzle rows). `level` is the grid level (the 2D case does not keep it).
     pub fn wedge_of(case: &Case, level: u32) -> Case3 {
         let mut c = Case3::new(case.mach, 0.0, case.body.clone(), None, level);
         c.grid.sting = case.grid_sting.clone();
         c.grid.base = Some(case.grid_base.clone());
         c.numerics = Numerics3::from_2d(case, level);
         c.viscous = case.viscous;
+        c.jet = case.motor;
         c.on_wedge()
     }
 
@@ -394,15 +395,14 @@ impl Case3 {
 
     /// Switches the viscous (SST) terms of `s` on when the case is viscous: the sand-grain roughness of the walls from the grid's per-part values
     /// (`Grid3::wall_ks`), the outflow of the numerics (characteristic for a body: `RansOpts3::default` would impose a static pressure, right for plates only);
-    /// gives the `Part::Jet` cells of a motor case the jet state.
+    /// gives the `Part::Jet` cells of a motor case their jet state (`Solver3::set_jet`, nothing without a motor).
     fn with_equations(&self, mut s: Solver3) -> Solver3 {
+        s.set_jet(self.jet_state3());
         if let Some(v) = self.viscous {
             let ks = s.grid.wall_ks();
             let ks = if ks.iter().any(|&k| k > 0.0) { ks } else { Vec::new() };
             s.set_viscous_with(Some(v), RansOpts3 { pressure_outflow: self.numerics.pressure_outflow, ks, ..RansOpts3::default() });
         }
-        // phys3d hook: the motor jet patch (`Part::Jet` cells of the grid, `Solver3::set_jet`); nothing without a motor
-        s.set_jet(self.jet_state3());
         s
     }
 

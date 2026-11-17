@@ -801,3 +801,49 @@ fn a_fold_beside_wide_fins_is_refused_naming_the_cause_and_the_nk() {
     c.grid.nk = nk;
     c.build_solver().unwrap_or_else(|e| panic!("the suggested nk = {nk} does not build: {e}"));
 }
+
+/// S13: a diameter step is one cell, a chamfer of `width` and slope `|dr| / width`: a body with a forward step (the radius grows by 0.15 d) and one with a backward
+/// step (it shrinks by 0.15 d) build on the sting grid and on the base-wake grid, as a wedge and as a half domain at incidence, at two levels; the step is one cell
+/// of the meridian grid and every volume is positive.
+#[test]
+fn a_diameter_step_is_one_cell_and_the_grids_build_around_it() {
+    for (dr, name) in [(0.15, "forward"), (-0.15, "backward")] {
+        for level in [0u32, 1] {
+            let width = 0.1 / (1usize << level) as f64;
+            let body = BaseBody::cylinder(Body { nose: Nose::TangentOgive { fineness: 3.0 } }, 3.0).with_step(dr, width);
+            let body = BaseBody { segments: [body.segments, vec![bowshock_core::engine::body_grid::Segment { length: 3.0, slope: 0.0 }]].concat(), ..body };
+            assert!(body.segments[1].is_step() && !body.segments[0].is_step());
+            let c = Case3::wedge(2.0, body.clone(), level);
+            let base = c.grid.base.as_ref().unwrap();
+            assert_eq!(base.n_seg[1], 1, "{name} level {level}: the step is one cell");
+            let s = c.build_solver().unwrap_or_else(|e| panic!("{name} level {level}: {e}"));
+            let g = &s.grid;
+            assert!(g.vol.iter().all(|v| *v >= 0.0), "{name} level {level}: a negative volume");
+            assert!(dr.abs() / width >= bowshock_core::engine::body_grid::STEP_SLOPE, "{name} level {level}: not a step");
+            // the sting grid builds too
+            let c = Case3::new(2.0, 0.0, body.clone(), None, level);
+            bowshock_core::engine::grid3::body_grid3(&c.grid).unwrap_or_else(|e| panic!("{name} level {level} sting grid: {e}"));
+            let mut h = Case3::base_half(2.0, 2f64.to_radians(), body.clone(), None, Tier::Euler, level);
+            h.grid.nk = 8;
+            h.build_solver().unwrap_or_else(|e| panic!("{name} level {level} half domain: {e}"));
+        }
+    }
+}
+
+/// Fins refuse a root across a diameter step, naming it; fins beside the step (on the tube behind it) build.
+#[test]
+fn fins_across_a_diameter_step_are_refused_and_fins_behind_it_build() {
+    let step = |dr: f64| {
+        let b = BaseBody::cylinder(Body { nose: Nose::TangentOgive { fineness: 3.0 } }, 3.0).with_step(dr, 0.1);
+        BaseBody { segments: [b.segments, vec![bowshock_core::engine::body_grid::Segment { length: 4.0, slope: 0.0 }]].concat(), ..b }
+    };
+    let fins = |chord: f64| Fins3 { root_chord: chord, tip_chord: 0.4 * chord, span: 0.8, sweep: 0.3 * chord, thickness: 0.05, ..Case3::anf_fins() };
+    // root chord 2 d on the 4 d tube behind the step: builds
+    let mut c = Case3::sector(2.0, step(0.15), fins(2.0), Tier::Euler, 0);
+    c.grid.nk = 8;
+    c.build_solver().expect("fins behind the step build");
+    // root chord 5 d starts ahead of the step's end
+    let c = Case3::sector(2.0, step(0.15), fins(5.0), Tier::Euler, 0);
+    let e = c.build_solver().err().expect("refused").to_string();
+    assert!(e.contains("diameter step"), "{e}");
+}

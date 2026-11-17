@@ -49,7 +49,19 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 
 /// The 2D engine case of a fixture facade case.
 fn engine_case_of(c: &FacadeCase) -> Result<bowshock_core::engine::case::Case, String> {
-    let a = Analysis::new(&c.body).map_err(err)?.resolution(c.resolution).wake(if c.wake_base { Wake::Base } else { Wake::Sting });
+    let mut a = Analysis::new(&c.body).map_err(err)?.resolution(c.resolution);
+    a = if c.rans {
+        // the wall-resolved grid of the facade's viscous analysis (ISA 120 m unless the fixture says otherwise), the wall roughness of the fixture
+        let a = a.viscous(bowshock_core::FlightConditions { atmosphere: c.atmosphere.unwrap_or(bowshock_core::Atmosphere::Isa { altitude_m: 120.0 }) });
+        let a = if c.roughness_m > 0.0 { a.roughness(c.roughness_m) } else { a };
+        // the motor of the fixture case (TP-2005): the nozzle rows of the 2D base grid and the jet state (`Case3::wedge_of` carries both)
+        match c.motor {
+            Some(m) => a.motor(m),
+            None => a,
+        }
+    } else {
+        a.wake(if c.wake_base { Wake::Base } else { Wake::Sting })
+    };
     Ok(a.engine_cases(&[c.mach]).map_err(err)?.remove(0))
 }
 
@@ -142,12 +154,39 @@ fn p_of(q: &Cons3) -> f64 {
     cons_to_prim3(q)[4]
 }
 
+impl GpuWedge {
+    /// A RANS case of the facade on the single-cell wedge of its wall-resolved 2D grid, on the GPU: `Case3::wedge_of` carries the 2D case's viscous parameters and numerics
+    /// (block lines), `GpuRunner3` runs SST with the shear of the no-slip faces in its device-side class forces and in the monitor.
+    fn rans_case(&self, c: &FacadeCase, case2: &bowshock_core::engine::case::Case) -> Result<Numbers, String> {
+        let case = Case3::wedge_of(case2, 0);
+        let mut r = GpuRunner3::new(&case, self.precision.unwrap_or_else(|| precision_of(c))).map_err(err)?;
+        let t = Instant::now();
+        let p = r.run_on(&case, false).map_err(err)?;
+        let wall_s = t.elapsed().as_secs_f64();
+        let d = r.drag_parts(&case).map_err(err)?;
+        // the facade reports on the largest cross-section (`BaseBody::nose_to_largest_area`), the solver on the nose-base area
+        let q = case.body.nose_to_largest_area();
+        println!("INFO RANS wedge {} on the GPU: {} iterations, {wall_s:.1} s, stop {:?}, {:.2} orders", c.id, p.iterations, p.stop_reason, p.drop_orders);
+        Ok(Numbers {
+            cd_total: q * d.total,
+            cd_nose: q * d.nose,
+            cd_aft: d.aft.iter().map(|x| q * x).collect(),
+            cd_friction: Some(q * d.friction.total),
+            cd_base: Some(q * (d.base + d.friction.base)),
+            cp_base: p.cp_base.is_finite().then_some(p.cp_base),
+            y_plus_max: p.y_plus_max.is_finite().then_some(p.y_plus_max),
+            iterations: p.iterations,
+            stop_reason: format!("{:?}", p.stop_reason),
+        })
+    }
+}
+
 impl WedgeRunner for GpuWedge {
     fn facade_case(&self, c: &FacadeCase) -> Result<Numbers, String> {
-        if c.rans {
-            return Err("RANS on the 3D GPU solver is stage S5 (viscous3 / turbulence3 / walldist3 are not ported)".into());
-        }
         let case2 = engine_case_of(c)?;
+        if c.rans {
+            return self.rans_case(c, &case2);
+        }
         let mut case = if c.wake_base {
             wedge_case3(&case2)
         } else {

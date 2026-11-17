@@ -74,7 +74,7 @@ pub struct WindowMean {
     pub cn: f64,
     /// `cm / cn`, nose diameters from the tip; NaN without incidence.
     pub x_cp: f64,
-    /// Largest relative half range `(max - min) / (2 |mean|)` of CA (and, at incidence, CN and the moment) over the window: the size of the oscillation, for an unsteady-wake warning.
+    /// Largest relative half range `(max - min) / (2 |mean|)` of CA (and, at incidence, CN) over the window: the size of the oscillation, for an unsteady-wake warning.
     pub oscillation: f64,
 }
 
@@ -217,7 +217,7 @@ pub enum Wall {
 
 /// The class of a wall face between a fluid cell and a cell of `part`: `dir` the direction of the face (0, 1, 2 = `i`, `j`, `k`), `solid_low` whether
 /// the solid is on the low-index side of the face.
-fn wall_class(part: Part, dir: usize, solid_low: bool) -> Wall {
+pub(crate) fn wall_class(part: Part, dir: usize, solid_low: bool) -> Wall {
     match part {
         Part::Body(_) if dir == 0 && solid_low => Wall::Base,
         Part::Body(s) => Wall::Body(s),
@@ -854,7 +854,10 @@ pub fn window_means(samples: &[(usize, [f64; 3])], length: usize, from: usize, t
         let m = 0.5 * (m0 + m1);
         agree &= (m1 - m0).abs() <= tol * m.abs() + 1e-4;
         let (lo, hi) = second.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), s| (l.min(s[c]), h.max(s[c])));
-        oscillation = oscillation.max(0.5 * (hi - lo) / m1.abs().max(1e-12));
+        // the moment is a ratio (CN x_cp) whose mean can vanish while its swing does not: it takes part in the agreement, not in the oscillation
+        if c < 2 {
+            oscillation = oscillation.max(0.5 * (hi - lo) / m1.abs().max(1e-12));
+        }
     }
     let (ca, cn, cm) = (mean(&second, 0), mean(&second, 1), mean(&second, 2));
     let x_cp = if incidence && cn.abs() > 1e-12 { cm / cn } else { f64::NAN };

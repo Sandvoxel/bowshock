@@ -134,7 +134,11 @@ pub mod f32s {
 
     include!("body.rs");
     include!("body3.rs");
+    include!("viscous3.rs");
+    include!("turbulence3.rs");
+    include!("rans3.rs");
     include!("implicit3.rs");
+    include!("stages3.rs");
     include!("implicit.rs");
     include!("viscous.rs");
     include!("turbulence.rs");
@@ -197,7 +201,11 @@ pub mod df32s {
 
     include!("body.rs");
     include!("body3.rs");
+    include!("viscous3.rs");
+    include!("turbulence3.rs");
+    include!("rans3.rs");
     include!("implicit3.rs");
+    include!("stages3.rs");
     include!("implicit.rs");
     include!("viscous.rs");
     include!("turbulence.rs");
@@ -423,6 +431,33 @@ pub struct WallFace3 {
     pub cut: bool,
 }
 
+/// One no-slip face of the viscous force reduction: the class (an index chosen by the caller), the family `dir` of the face (0: i, 1: j, 2: k), its flat index `q`
+/// in the family layout (`viscous3::face_of`), `sigma` (+1 where the fluid cell is the lower side: `viscous3::wall_tractions`), the area and the abscissa of the
+/// centroid.
+#[derive(Clone, Copy, Debug)]
+pub struct TractionFace3 {
+    pub class: usize,
+    pub dir: usize,
+    pub q: usize,
+    pub sigma: f64,
+    pub area: f64,
+    pub cx: f64,
+}
+
+/// Everything the viscous kernels produce on a padded host state, downloaded (`LazySolver3::viscous_probe3`): the cell gradients and viscosity, the viscous face
+/// fluxes `Fv.n` of the three families (mass component 0), the diffusive spectral radius of every face, the diffusion rates and the viscous residual of every
+/// cell, and the viscous wall forces by class (`[Fx, Fz, Mz]`, empty without traction faces).
+#[derive(Clone, Debug)]
+pub struct VisProbe {
+    pub grad: Vec<[f64; 12]>,
+    pub mu: Vec<f64>,
+    pub fv: [Vec<[f64; 5]>; 3],
+    pub lambda: [Vec<f64>; 3],
+    pub dr: Vec<[f64; 3]>,
+    pub residual: Vec<[f64; 5]>,
+    pub tractions: Vec<[f64; 3]>,
+}
+
 enum Inner3 {
     F32(f32s::LazySolver3),
     Ext(df32s::LazySolver3),
@@ -552,9 +587,74 @@ impl GpuSolver3 {
         Ok(on3_mut!(self, s => s.profile_step()?))
     }
 
+    /// Switches the 3D viscous kernels on (the host geometry of the face passes: `grid`, the symmetry sides of the domain box); see `LazySolver3::set_viscous3`.
+    pub fn set_viscous(&mut self, grid: &Grid3, v: crate::solver::Viscous, sym: &crate::viscous3::SymSides) -> Result<()> {
+        on3_mut!(self, s => s.set_viscous3(grid, v, sym)?);
+        Ok(())
+    }
+
+    /// Launches and GPU time of one evaluation of the viscous residual of the current state (kernels alone); needs [`GpuSolver3::set_viscous`].
+    pub fn profile_viscous(&mut self) -> Result<luma::Profile> {
+        Ok(on3_mut!(self, s => s.profile_viscous3()?))
+    }
+
+    /// The stages of one implicit block step and their GPU profiles (best of `reps`), the state unchanged: see `stages3.rs`.
+    pub fn profile_stages(&mut self, reps: usize) -> Result<Vec<(String, luma::Profile)>> {
+        Ok(on3_mut!(self, s => s.profile_stages3(reps)?))
+    }
+
+    /// Are the viscous terms on?
+    pub fn has_viscous(&self) -> bool {
+        on3!(self, s => s.has_viscous())
+    }
+
+    /// Sets the motor jet of the run (the solver was built from a host that has one: `Solver3::set_jet`); the jet cells of the current state take it. A warm run at another Mach
+    /// number sets its jet this way.
+    pub fn set_jet(&mut self, jet: crate::solver3::JetState3) -> Result<()> {
+        on3_mut!(self, s => s.set_jet(jet)?);
+        Ok(())
+    }
+
+    /// The viscous face fluxes of the current state on the host (`None` for the Euler equations): the input of `viscous3::wall_tractions`.
+    pub fn viscous_flux(&self) -> Result<Option<[Vec<[f64; 5]>; 3]>> {
+        if !on3!(self, s => s.has_viscous()) {
+            return Ok(None);
+        }
+        Ok(Some(on3!(self, s => s.viscous_flux_f64()?)))
+    }
+
+    /// `[k, omega]` and `mu_t` of every cell on the host (`None` without SST).
+    pub fn turb_state(&self) -> Result<Option<(Vec<[f64; 2]>, Vec<f64>)>> {
+        Ok(on3!(self, s => s.turb_f64()?))
+    }
+
+    /// Uploads the no-slip faces of the viscous force reduction (see [`TractionFace3`]).
+    pub fn set_traction_faces(&mut self, faces: &[TractionFace3], n_classes: usize) -> Result<()> {
+        on3_mut!(self, s => s.set_traction_faces(faces, n_classes)?);
+        Ok(())
+    }
+
+    /// The viscous wall force by class `[Fx, Fz, Mz]` of the current state, reduced on the device.
+    pub fn viscous_wall_forces(&self) -> Result<Vec<[f64; 3]>> {
+        Ok(on3!(self, s => s.viscous_wall_forces()?))
+    }
+
     /// GPU time per kernel of `n` iterations of the `iterate_all` replay (the profile adds up all `n`).
     pub fn profile_replay(&mut self, n: usize) -> Result<luma::Profile> {
         Ok(on3_mut!(self, s => s.profile_replay(n)?))
+    }
+
+    /// Host seconds to trace the lazy expression of one step `n` times, nothing evaluated.
+    pub fn trace_step_seconds(&self, n: usize) -> f64 {
+        on3!(self, s => s.trace_step_seconds(n))
+    }
+
+    /// `n` iterations calling the step every iteration and evaluating the new state (no replay): the loop a host-driven solver would run.
+    pub fn run_eval(&mut self, n: usize) -> Result<()> {
+        on3_mut!(self, s => {
+            s.run_eval(n)?;
+        });
+        Ok(())
     }
 
     /// `n` iterations as `iterate_all` replays (no residual history: what a benchmark times); call [`GpuSolver3::sync`] to wait for the GPU.

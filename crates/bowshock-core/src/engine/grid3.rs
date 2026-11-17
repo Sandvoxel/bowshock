@@ -590,6 +590,13 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>, host: &Host) -> Resu
     let k1 = (k0..nseg).find(|&k| x_te_root > bb.station(k).0 + 1e-9 && x_te_root <= seg_end(k) + 1e-9).ok_or_else(|| {
         Error::Unsupported(format!("the fin root trailing edge (x = {x_te_root:.4} d) lies behind the body base or ahead of its leading edge"))
     })?;
+    if let Some(k) = (k0..=k1).find(|&k| bb.segments[k].is_step()) {
+        return Err(Error::Unsupported(format!(
+            "the fin root crosses a diameter step (segment {k}, x = {:.4} to {:.4} d): fins stand on tubes, boattails and flares",
+            bb.station(k).0,
+            seg_end(k)
+        )));
+    }
     let a = host.n_up + host.n_nose + host.n_seg[..k0].iter().sum::<usize>();
     let b_old = host.n_up + host.n_nose + host.n_seg[..=k1].iter().sum::<usize>();
     let (x_a, x_b) = (xs[a], xs[b_old]);

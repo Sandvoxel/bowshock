@@ -297,6 +297,23 @@ pub struct Segment {
     pub slope: f64,
 }
 
+/// A segment of at least this slope (45 degrees: boattails and flares are far below) is a diameter step: one grid cell wide, see [`Segment::step`].
+pub const STEP_SLOPE: f64 = 1.0;
+
+impl Segment {
+    /// A change of radius `dr` (positive: the body gets wider) as a very steep ramp `width` long: the chamfer of one grid cell the meridian grids give a
+    /// step. `width` is the axial size of the cells next to it (a chamfer much narrower than its neighbours is a jump of the cell size the solver sees);
+    /// the slope `|dr| / width` must be at least [`STEP_SLOPE`].
+    pub fn step(dr: f64, width: f64) -> Segment {
+        Segment { length: width, slope: dr / width }
+    }
+
+    /// Whether this segment is a diameter step (one cell, never clustered or subdivided by the builders).
+    pub fn is_step(&self) -> bool {
+        self.slope.abs() >= STEP_SLOPE
+    }
+}
+
 /// Nose followed by a list of conical segments (tubes, flares, boattails) and a flat base, on a sting or free (wake behind the base).
 ///
 /// The axial profile is `body.r(x)` up to the end of the nose `x = L_n`, then the segments in order (`r` linear in `x` on each),
@@ -317,6 +334,11 @@ impl BaseBody {
     /// Append a conical boattail of the given length and half-angle [rad].
     pub fn with_boattail(mut self, length: f64, half_angle: f64) -> BaseBody {
         self.segments.push(Segment { length, slope: -half_angle.tan() });
+        self
+    }
+    /// Append a diameter step: the radius changes by `dr` over an axial `width` (see [`Segment::step`]); the meridian grids give it one cell.
+    pub fn with_step(mut self, dr: f64, width: f64) -> BaseBody {
+        self.segments.push(Segment::step(dr, width));
         self
     }
     /// Set the sting radius behind the base.
