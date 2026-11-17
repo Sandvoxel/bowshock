@@ -154,3 +154,6 @@ second curve for the lower half when it differs), Cp/Mach/Schlieren colour bar, 
   function the force integration uses), not from positions. `Part::Other` is the sting (hidden). `MAX_TILES` is 256 (the solver's 2 degree wedge is 180 copies).
 * Toggles are SegmentedControl one-segment strips (`flow_view::toggle`: `bg-300` and the accent underline when on): the primary button's accent fill is
   for the one commit action of a region (kit, Button).
+* **Schlieren along the axis**: `Field3::density_gradient_at` gives the two rows of cells next to an axis the gradient of the row beyond them (the azimuthal
+  differences there run over a few per cent of a cell and amplify the density's round-off, which drew a grey line along the axis ahead of the nose). The
+  one-cell wedge (no azimuthal difference) and the wall rows are untouched. The 2D side view computes its gradient in the meridian plane and never had it.
