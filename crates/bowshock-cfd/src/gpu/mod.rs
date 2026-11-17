@@ -407,6 +407,22 @@ impl GpuSolver {
     }
 }
 
+/// One wall face of the device force integration: the class (an index chosen by the caller), the first fluid cell `a` and the fluid cell `b` behind it
+/// (`Grid3::cell` indices), `k = d0 / (d1 - d0)` of the extrapolation `p_w = p_a + k (p_a - p_b)` (`d` the distances of the cell centroids to the face centre),
+/// the weights `cx = w n_x`, `cz = w n_z`, `cm = w n_z c_x` with `w = area * sign` (`Fx = sum (p_w - p_inf) cx`, `Fz`, `Mz` likewise), and whether the
+/// face counts for the monitor's cut (`c_x <= x_max`, or the base).
+#[derive(Clone, Copy, Debug)]
+pub struct WallFace3 {
+    pub class: usize,
+    pub a: usize,
+    pub b: Option<usize>,
+    pub k: f64,
+    pub cx: f64,
+    pub cz: f64,
+    pub cm: f64,
+    pub cut: bool,
+}
+
 enum Inner3 {
     F32(f32s::LazySolver3),
     Ext(df32s::LazySolver3),
@@ -495,25 +511,16 @@ impl GpuSolver3 {
         Ok(())
     }
 
-    /// Wedge mode of a one-cell wedge (`nk == 1`): no k factor in the line solves, no `L_k` in the pseudo-time step, and the flux through the two k planes
-    /// is the cell's pressure on the face normal instead of the Riemann flux of the cell against its mirror image. Measured (`wedge3d`): without the k factor
-    /// the iteration diverges at `cfl_max` 10 and converges only at `cfl_max` of about 1 (ISSUES.md #22). Needs `nk == 1`.
-    pub fn set_wedge_mode(&mut self, on: bool) -> Result<()> {
-        if on && self.nk != 1 {
-            return Err(GpuError::Unsupported("wedge mode needs nk == 1"));
-        }
-        on3_mut!(self, s => s.set_wedge_mode(on));
-        Ok(())
+    /// The four parts of wedge mode one by one: `(skip_k, no_dt_k, k_wall_flux, k_src)` (experiments). They are all on for a grid with `Symmetry::Wedge`, as on the
+    /// CPU (`Solver3::is_wedge`): no k factor, no `L_k` in the pseudo-time step, the pressure of the cell as the flux through the two k planes, and the 2D-style
+    /// pressure-source block on the diagonal of the j factor.
+    pub fn set_wedge_parts(&mut self, skip_k: bool, no_dt_k: bool, k_wall_flux: bool, k_src: bool) {
+        on3_mut!(self, s => (s.skip_k, s.no_dt_k, s.k_wall_flux, s.k_src) = (skip_k, no_dt_k, k_wall_flux, k_src))
     }
 
-    /// The three parts of wedge mode one by one: `(skip_k, no_dt_k, k_wall_flux)` (experiments; [`GpuSolver3::set_wedge_mode`] sets them together).
-    pub fn set_wedge_parts(&mut self, skip_k: bool, no_dt_k: bool, k_wall_flux: bool) {
-        on3_mut!(self, s => (s.skip_k, s.no_dt_k, s.k_wall_flux) = (skip_k, no_dt_k, k_wall_flux))
-    }
-
-    /// Whether wedge mode is on (all three parts).
+    /// Whether all four parts of wedge mode are on.
     pub fn wedge_mode(&self) -> bool {
-        on3!(self, s => s.skip_k && s.no_dt_k && s.k_wall_flux)
+        on3!(self, s => s.skip_k && s.no_dt_k && s.k_wall_flux && s.k_src)
     }
 
     /// Overwrites the conserved state (e.g. with a CPU solution) and restarts the iteration counter and the CFL ramp.
@@ -560,5 +567,16 @@ impl GpuSolver3 {
     pub fn sync(&self) -> Result<()> {
         on3!(self, s => s.sync()?);
         Ok(())
+    }
+
+    /// Uploads the wall faces of the on-device force integration (`n_classes` classes): see [`WallFace3`].
+    pub fn set_wall_faces(&mut self, faces: &[WallFace3], n_classes: usize) -> Result<()> {
+        on3_mut!(self, s => s.set_wall_faces(faces, n_classes)?);
+        Ok(())
+    }
+
+    /// Pressure forces `[Fx, Fz, Mz]` per class reduced on the device (`2 n_classes` triples: all faces, then the faces flagged `cut`); no state download.
+    pub fn wall_forces(&self, p_inf: f64) -> Result<Vec<[f64; 3]>> {
+        Ok(on3!(self, s => s.wall_forces(p_inf)?))
     }
 }

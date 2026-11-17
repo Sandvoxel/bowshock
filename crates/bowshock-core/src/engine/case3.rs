@@ -3,6 +3,7 @@
 
 use crate::engine::body_grid::{BaseBody, Body, Nose};
 use crate::engine::case::{base_grid, resolve_walls, sting_grid, wall_spacing, Case};
+use crate::engine::field3::Snapshots3;
 use crate::engine::grid3::{body_grid3, Domain3, FinStack, Fins3, Grid3Params, WEDGE_ANGLE};
 use crate::error::Error;
 use crate::progress::ProgressSink;
@@ -128,6 +129,8 @@ pub struct Case3 {
     pub tier: Tier,
     /// Where the run reports its progress and can be stopped; `None`: silent.
     pub progress: Option<ProgressSink>,
+    /// Where the run hands snapshots of its flow field; `None`: none.
+    pub snapshots: Option<Snapshots3>,
 }
 
 impl Case3 {
@@ -135,7 +138,7 @@ impl Case3 {
     /// and [`Numerics3::auto`].
     pub fn new(mach: f64, alpha: f64, body: BaseBody, fins: Option<Fins3>, level: u32) -> Case3 {
         let grid = Grid3Params::half(sting_grid(&body, level), fins, Grid3Params::default_nk(level), level);
-        Case3 { mach, alpha, body, grid, numerics: Numerics3::auto(mach, level), tier: Tier::Euler, progress: None }
+        Case3 { mach, alpha, body, grid, numerics: Numerics3::auto(mach, level), tier: Tier::Euler, progress: None, snapshots: None }
     }
 
     /// An axisymmetric body at zero incidence as a single-cell wedge of [`WEDGE_ANGLE`] on the base-wake grid of the 2D case

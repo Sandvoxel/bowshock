@@ -23,7 +23,9 @@ Read these before trusting a number:
 
 - **Axisymmetric bodies only.** The body is a nose followed by tubes and conical transitions,
   ending in a flat base.
-- **Zero lift.** The angle of attack is always 0; `PolarPoint::alpha` is 0.0.
+- **Zero lift, or the 3D Euler solver.** `run(&[0.5, 0.9])` is the zero-lift drag. A `Condition::new(mach, alpha_deg)` at an angle of attack
+  (Mach 0.3 to 3, up to 15 degrees) is the 3D Euler solver: the normal force, the centre of pressure and the axial pressure force in
+  `PolarPoint::forces`, but no drag (the total, the base and the friction are not given), see [Results](results.md).
 - **Fully turbulent, smooth walls.** Viscous analyses solve the Reynolds-averaged Navier-Stokes
   equations with the k-omega SST model; there is no transition model and no wall roughness.
 - **Mach 0.1 to 3.** Other values are an `InvalidInput` error.

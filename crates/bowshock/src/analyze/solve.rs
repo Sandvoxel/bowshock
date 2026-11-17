@@ -767,7 +767,7 @@ mod tests {
     }
 
     fn point(mach: f64, cd: f64, quality: CfdQuality) -> CfdPoint {
-        CfdPoint { mach, cd, friction: 0.1, pressure: 0.1, base: 0.1, fins: 0.1, other: 0.0, quality }
+        CfdPoint { mach, cd, friction: 0.1, pressure: 0.1, base: 0.1, fins: 0.1, other: 0.0, interference: 0.0, quality }
     }
 
     fn done(at: f64, mach: f64, iterations: usize, quality: Option<CfdQuality>) -> PointDone {
@@ -895,7 +895,7 @@ mod tests {
         // the 6 degree run begins: the 2 degree run is over (its result comes with the Mach number's)
         t.on_iteration(&r(20.0, 0.8, 6.0, 50));
         assert!(matches!(t.slot(0), Slot::Running { ended: Some(e), .. } if *e == 20.0));
-        let lift = |a: f64| CfdLiftPoint { mach: 0.8, alpha_deg: a, cn: 0.1 * a, x_cp: 0.9, quality: CfdQuality::Converged };
+        let lift = |a: f64| CfdLiftPoint { mach: 0.8, alpha_deg: a, cn: 0.1 * a, x_cp: 0.9, cd: None, cm: None, quality: CfdQuality::Converged };
         for (a, iters) in [(2.0, 1000), (6.0, 400)] {
             t.on_done(&PointDone {
                 machine: 0,

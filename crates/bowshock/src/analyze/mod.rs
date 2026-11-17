@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::app::worker;
-use bowshock_core::Field;
+use bowshock_core::Field3;
 use bowshock_model::{CfdGrid, CfdLiftTable, CfdTable};
 use bowshock_sim::from_model::Phase;
 use iced::{keyboard, Element, Task};
@@ -701,6 +701,9 @@ impl State {
             Ok(table) => {
                 solving.tracker.finish();
                 let (summary, brief, lift_key) = (solving.tracker.summary(table.solve_seconds), solving.tracker.brief(table.solve_seconds), table.key);
+                if let Some(t) = &self.cfd.table {
+                    self.cfd.fields.replace_stability(t, std::mem::take(&mut solving.fields));
+                }
                 let stored = self.cfd.table.as_ref().map(|t| CfdTable { lift: Some(table), ..(**t).clone() });
                 if stored.is_some_and(|t| ctx.doc.store_cfd_table(t)) {
                     self.cfd.lift_summary = Some((lift_key, summary));
@@ -746,16 +749,31 @@ impl State {
     fn sync_flow(&mut self) {
         let on = self.method == Method::CfdTable && uses_cfd(self.analysis);
         let table = self.cfd.table.clone().filter(|_| on && self.cfd_ready());
-        if table.is_none() || self.cfd.solving.is_some() {
+        let running = self.cfd.lift_solving.as_ref().or(self.cfd.solving.as_ref());
+        if table.is_none() || running.is_some() {
             self.flow.open = false;
         }
+        // the Mach numbers of the table, and those the 3D stability solve has a field at
         self.flow.machs = table.as_ref().map(|t| t.points.iter().map(|p| p.mach).collect()).unwrap_or_default();
+        if let Some(t) = &table {
+            self.flow.machs.extend(self.cfd.fields.machs(t));
+            self.flow.machs.sort_by(f64::total_cmp);
+            self.flow.machs.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+        }
         if self.flow.selected.is_none_or(|m| !self.flow.machs.iter().any(|x| (x - m).abs() < 1e-9)) {
             self.flow.selected = flow_view::default_mach(&self.flow.machs);
         }
-        let picture: Option<Arc<Field>> = match (&self.cfd.solving, &table, self.flow.selected) {
-            (Some(s), _, _) if on => s.picture.clone(),
-            (None, Some(t), Some(m)) if self.flow.open => self.cfd.fields.get(t, m).cloned(),
+        // the angles of attack the stored result has at the selected Mach number, and the one on show
+        self.flow.alphas = match (&table, self.flow.selected) {
+            (Some(t), Some(m)) => self.cfd.fields.alphas_at(t, m),
+            _ => Vec::new(),
+        };
+        if self.flow.selected_alpha.is_none_or(|a| !self.flow.alphas.iter().any(|x| (x - a).abs() < 1e-9)) {
+            self.flow.selected_alpha = self.flow.alphas.first().copied();
+        }
+        let picture: Option<Arc<Field3>> = match (running, &table, self.flow.selected, self.flow.selected_alpha) {
+            (Some(s), _, _, _) if on => s.picture.clone(),
+            (None, Some(t), Some(m), Some(a)) if self.flow.open => self.cfd.fields.get(t, m, a).cloned(),
             _ => None,
         };
         self.flow.set_field(picture.as_ref());
@@ -917,9 +935,9 @@ pub(crate) struct Solving {
     key: Option<u64>,
     stream: worker::StreamHandle,
     /// The latest picture of the flow of a point in flight (or the final field of the point that ended last): the live view.
-    pub(crate) picture: Option<Arc<Field>>,
+    pub(crate) picture: Option<Arc<Field3>>,
     /// The final fields of the points that ended, for the store of the table the solve makes.
-    fields: Vec<Arc<Field>>,
+    fields: Vec<Arc<Field3>>,
 }
 
 /// A drag solve that was cancelled after some points: the partial curve and, with two or more points, the table to keep.
@@ -939,7 +957,7 @@ pub(crate) struct Stopped {
     /// The label of the Keep button: `Keep 5 solved points`.
     pub(crate) keep_label: String,
     /// The final fields of the points solved, kept with the table if it is.
-    fields: Vec<Arc<Field>>,
+    fields: Vec<Arc<Field3>>,
 }
 
 /// Whether the analysis uses the CFD table when the method is `CFD table` (the others do not use the method).

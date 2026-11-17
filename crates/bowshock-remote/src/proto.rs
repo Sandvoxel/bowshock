@@ -2,12 +2,12 @@
 //! followed by the body. The stream starts with [`MAGIC`] from the worker, so output that a login shell prints before the worker
 //! starts is skipped.
 
-use bowshock_core::{AnalysisSpec, Error, LiftPolar, Polar, Progress};
+use bowshock_core::{AnalysisSpec, Condition, Error, Field3, Polar, Progress};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
 /// Version of the protocol; a worker of another version is refused.
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 /// The worker's first bytes on stdout.
 pub const MAGIC: &[u8; 8] = b"BSHKWRK1";
 /// Largest accepted frame body.
@@ -16,21 +16,13 @@ pub const MAX_FRAME: usize = 256 << 20;
 /// A solve job; one connection serves many.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Job {
-    /// Zero-lift drag: [`Analysis::run`](bowshock_core::Analysis::run) over `machs`.
-    Drag {
+    /// [`Analysis::run`](bowshock_core::Analysis::run) over `conditions`: Mach numbers at zero incidence (the drag solver) and
+    /// conditions at an angle of attack (the 3D solver).
+    Solve {
         /// The analysis to run.
         spec: AnalysisSpec,
-        /// Mach numbers.
-        machs: Vec<f64>,
-    },
-    /// Normal force and centre of pressure: [`Analysis::run_lift`](bowshock_core::Analysis::run_lift).
-    Lift {
-        /// The analysis to run.
-        spec: AnalysisSpec,
-        /// Mach numbers.
-        machs: Vec<f64>,
-        /// Angles of attack \[deg\].
-        alphas_deg: Vec<f64>,
+        /// The flight conditions, in the order the result's points come back.
+        conditions: Vec<Condition>,
     },
 }
 
@@ -101,10 +93,18 @@ pub enum WorkerMsg {
     },
     /// Progress of the running job.
     Progress(Progress),
-    /// Result of a [`Job::Drag`].
-    Drag(Polar),
-    /// Result of a [`Job::Lift`].
-    Lift(LiftPolar),
+    /// The final [`Field3`] of the point `point` of the running job's result, in a frame of its own (a half-domain field is tens of
+    /// megabytes and a frame is at most [`MAX_FRAME`]). The [`Polar`] of [`WorkerMsg::Solve`] that ends the job has these points'
+    /// `field3` empty; the client puts them back. Only with [`AnalysisSpec::keep_fields`]; the live snapshots of a solve stay on the
+    /// worker.
+    PointField {
+        /// Index into the result's points (the order of the job's conditions).
+        point: usize,
+        /// The field.
+        field: Box<Field3>,
+    },
+    /// Result of a [`Job::Solve`], after its [`WorkerMsg::PointField`] frames.
+    Solve(Polar),
     /// The job failed.
     Error {
         /// Kind of the solver error.

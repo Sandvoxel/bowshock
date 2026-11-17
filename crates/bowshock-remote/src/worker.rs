@@ -127,16 +127,21 @@ fn run_job<W: Write + Send + 'static>(
         ControlFlow::Continue(())
     };
     let run = || -> Result<WorkerMsg, Error> {
-        match job {
-            Job::Drag { spec, machs } => {
-                let analysis = prepare(Analysis::from_spec(&spec)?).on_progress(sink);
-                Ok(WorkerMsg::Drag(analysis.run(&machs)?))
-            }
-            Job::Lift { spec, machs, alphas_deg } => {
-                let analysis = prepare(Analysis::from_spec(&spec)?).on_progress(sink);
-                Ok(WorkerMsg::Lift(analysis.run_lift(&machs, &alphas_deg)?))
+        let Job::Solve { spec, conditions } = job;
+        let analysis = prepare(Analysis::from_spec(&spec)?).on_progress(sink);
+        let mut polar = analysis.run(&conditions)?;
+        // the final fields go in frames of their own, ahead of the result: a half-domain field of a few million cells is tens of megabytes
+        for (point, p) in polar.points.iter_mut().enumerate() {
+            if let Some(field) = p.field3.take() {
+                match write_frame(&mut *writer.lock().unwrap(), &WorkerMsg::PointField { point, field: Box::new(field) }) {
+                    Ok(()) => {}
+                    // a field that does not fit a frame is left out; the point stays
+                    Err(e) if e.kind() == io::ErrorKind::InvalidData => {}
+                    Err(e) => return Err(Error::Internal(format!("sending a field failed: {e}"))),
+                }
             }
         }
+        Ok(WorkerMsg::Solve(polar))
     };
     match catch_unwind(AssertUnwindSafe(run)) {
         Ok(Ok(msg)) => msg,

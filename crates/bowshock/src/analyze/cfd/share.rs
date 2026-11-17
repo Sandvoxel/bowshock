@@ -1,6 +1,6 @@
 //! The work queue that shares a solve's Mach numbers over the machines that are on.
 //!
-//! A solve is a list of *nodes* (one Mach number: one `run` for the drag table, one `run_lift` at both angles for the 3D solve, so
+//! A solve is a list of *nodes* (one Mach number: one `run` for the drag table, one `run` at both angles for the 3D solve, so
 //! a node keeps its warm-start sequence on one machine). There is one thread per machine. Each connects (in parallel with the
 //! others), then takes the next node of the queue whenever it is free, so a faster machine does more of them. A machine that cannot
 //! connect is skipped; a machine that fails in the middle of a node is dropped for the rest of the solve and the node goes back to

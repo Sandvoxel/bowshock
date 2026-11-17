@@ -1,5 +1,5 @@
 //! Runs bowshock solves on another machine over `ssh`: the app (or any program) calls [`Remote::connect`], which installs the
-//! worker on the remote machine when it is missing (building it from the embedded source set), and then runs drag and 3D lift jobs
+//! worker on the remote machine when it is missing (building it from the embedded source set), and then runs solve jobs (the drag sweep and the 3D conditions at an angle of attack of `Analysis::run`)
 //! on that machine's GPU, with progress and cancellation, as [`bowshock_core::Analysis`] does locally.
 //!
 //! * [`proto`]: the wire protocol (CBOR frames over the ssh stdin/stdout).

@@ -2,18 +2,16 @@
 //!
 //! ```text
 //! cargo run --release -p bowshock-validate --example bench3 -- --case wedge|sector|anf|all [--precision f32,df32] [--solve block,diag]
-//!                                                              [--n N] [--mem] [--no-profile] [--no-perf] [--nk N] [--no-wedge-mode]
+//!                                                              [--n N] [--mem] [--no-profile] [--no-perf] [--nk N]
 //! ```
 //!
-//! Cases (all at Mach 2, `Scheme3::Implicit`, `cfl_max` 10, `first_order_iters` 0: the timed step is the MUSCL one, from the free stream):
+//! Cases (all at Mach 2, `Scheme3::Implicit`, `cfl_max` 10, `first_order_iters` 0: the timed step is the MUSCL one, from the free stream). The grids are
+//! the S1 ones (`body_grid3`: revolved base-wake grid with dead cells and axis runs, the fin sectors, the wedge with its pressure flux and source block):
 //!
-//! * `wedge`: the base-wake grid of the example table at its highest node (the wall-resolved grid sized for Mach 3 of the example rocket: 156 x 140 cells
-//!   as the 2D table), one azimuthal cell (`nk` 1) over 6 degrees, the body block a solid box. Run with the k factor (the default, `cfl_max` 10) and in wedge
-//!   mode (`GpuSolver3::set_wedge_mode`: no k factor, no `L_k` in the time step, pressure flux through the k planes; `cfl_max` 1, the largest the
-//!   iteration without the k factor tolerates, see `tests/wedge3d.rs`; `--no-wedge-mode` skips the second). The step time does not depend on `cfl_max`.
-//! * `sector`: the same meridian grid with 20 more cells along the last body segment (176 x 140), 18 azimuthal cells over 45 degrees (a 4-fin sector), and a
-//!   one-cell fin stand-in (a solid box on the `k = 0` plane, 28 cells along the body, 60 rows high) so the solid-face masks and the wall folds are in the
-//!   step. Euler step on today's `Grid3` (no axis runs, no fin mesher: S1 builds the real one); the cost per cell is what it measures.
+//! * `wedge`: `Case3::wedge` on the base-wake grid of the example table's highest node (the wall-resolved grid sized for Mach 3 of the example rocket: 156 x 140
+//!   cells as the 2D table), one azimuthal cell over `WEDGE_ANGLE` (no k factor, no `L_k` in the time step, pressure flux through the k planes, the source
+//!   block on the j diagonal). The step time does not depend on `cfl_max`.
+//! * `sector`: `Case3::sector` of the Army-Navy Basic Finner (4 fins, `[0, pi/4]`), `nk` (18) azimuthal cells, on the sting grid with the real fin boxes.
 //! * `anf`: the Army-Navy Basic Finner half domain of the lift solve (`Case3::new(2, 2 deg, anf_body, anf_fins, 0)`: 210 x 70 x 24 = 352 800 cells).
 //!
 //! For every (case, precision, line solve): 20 warm-up iterations (compile and trace), then `N` timed iterations of the `iterate_all` replay (best of 3),
@@ -21,7 +19,7 @@
 //! one ledger line
 //!
 //! ```text
-//! PERF {"case":"3d-wedge-euler-block-nok","precision":"df32","cells":..,"iters":N,"us_per_iter":..,"launches_per_iter":..,"gpu_us_per_iter":..,"wall_s":null,"peak_device_mib":..}
+//! PERF {"case":"3d-wedge-euler-block","precision":"df32","cells":..,"iters":N,"us_per_iter":..,"launches_per_iter":..,"gpu_us_per_iter":..,"wall_s":null,"peak_device_mib":..}
 //! ```
 //!
 //! (`--no-perf` suppresses it). `--mem` samples the device memory of this process (`nvidia-smi --query-compute-apps=pid,used_memory`, every 50 ms from a
@@ -33,13 +31,13 @@
 use bowshock_cfd::flux::Limiter;
 use bowshock_cfd::gas3::freestream3;
 use bowshock_cfd::gpu::{GpuSolver3, Precision};
-use bowshock_cfd::grid3::{Grid3, Part, SolidBox};
+use bowshock_cfd::grid3::Grid3;
 use bowshock_cfd::implicit::{ImplicitParams, LineSolve3};
 use bowshock_cfd::solver3::{Config3, Scheme3};
-use bowshock_core::engine::body_grid::base_domain_grid;
-use bowshock_core::engine::case3::Case3;
+use bowshock_core::engine::case3::{Case3, Tier};
+use bowshock_core::engine::grid3::body_grid3;
 use bowshock_core::{AftSpec, BodySpec, NoseShape, NoseSpec, Resolution};
-use bowshock_gpu_cases::wedge3::{base_grid_params, wedge_grid};
+use bowshock_gpu_cases::wedge3::{engine_case, wedge_case3};
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -84,8 +82,6 @@ struct BenchCase {
     alpha_deg: f64,
     /// Default number of timed iterations.
     n: usize,
-    /// Whether wedge mode applies (`nk == 1`).
-    wedge: bool,
 }
 
 impl BenchCase {
@@ -93,8 +89,8 @@ impl BenchCase {
         self.grid.ni * self.grid.nj * self.grid.nk
     }
 
-    fn config(&self, solve: LineSolve3, wedge_mode: bool) -> Config3 {
-        let params = ImplicitParams { cfl_max: if wedge_mode { 1.0 } else { 10.0 }, line_solve: solve, ..ImplicitParams::DEFAULT };
+    fn config(&self, solve: LineSolve3) -> Config3 {
+        let params = ImplicitParams { cfl_max: 10.0, line_solve: solve, ..ImplicitParams::DEFAULT };
         Config3 {
             freestream: freestream3(2.0, self.alpha_deg.to_radians()),
             cfl: 0.5,
@@ -111,25 +107,27 @@ fn example_body() -> BodySpec {
     BodySpec { nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762 }, aft: vec![AftSpec::Tube { length: 0.9134 }] }
 }
 
-fn wedge_case(nk: usize) -> BenchCase {
-    let p = base_grid_params(&example_body(), 3.0, true, Resolution::Coarse);
-    BenchCase { name: "wedge", grid: wedge_grid(&p, nk, 6.0), alpha_deg: 0.0, n: 1000, wedge: nk == 1 }
+/// The wedge of the example table's highest node: the wall-resolved base-wake grid sized for Mach 3 (156 x 140 cells as the 2D table), one cell over
+/// `WEDGE_ANGLE`.
+fn wedge_case() -> Result<BenchCase, String> {
+    let c2 = engine_case(&example_body(), 3.0, true, Resolution::Coarse);
+    let case = wedge_case3(&c2);
+    let grid = body_grid3(&case.grid).map_err(|e| format!("wedge grid: {e}"))?;
+    Ok(BenchCase { name: "wedge", grid, alpha_deg: 0.0, n: 1000 })
 }
 
-fn sector_case(nk: usize) -> BenchCase {
-    let mut p = base_grid_params(&example_body(), 3.0, true, Resolution::Coarse);
-    *p.n_seg.last_mut().expect("one aft segment") += 20;
-    let (_, block) = base_domain_grid(&p).expect("base grid");
-    let mut grid = wedge_grid(&p, nk, 45.0);
-    // the fin stand-in: a one-cell layer on the k = 0 plane over the last 28 cells of the body, 60 rows high
-    grid.mark_solid(SolidBox { i: block.i_end - 30..block.i_end - 2, j: block.j_end..block.j_end + 60, k: 0..1 }, Some(Part::Fin(0)));
-    BenchCase { name: "sector", grid, alpha_deg: 0.0, n: 200, wedge: false }
+/// The real fin sector: the Army-Navy Basic Finner (4 fins, even `N`) as the sector `[0, pi/4]` on the sting grid, `nk` azimuthal cells.
+fn sector_case(nk: usize) -> Result<BenchCase, String> {
+    let mut case = Case3::sector(2.0, Case3::anf_body(), Case3::anf_fins(), Tier::Euler, 0);
+    case.grid.nk = nk;
+    let grid = body_grid3(&case.grid).map_err(|e| format!("sector grid: {e}"))?;
+    Ok(BenchCase { name: "sector", grid, alpha_deg: 0.0, n: 200 })
 }
 
 fn anf_case() -> Result<BenchCase, String> {
     let case = Case3::new(2.0, 2f64.to_radians(), Case3::anf_body(), Some(Case3::anf_fins()), 0);
     let host = case.build_solver().map_err(|e| format!("ANF grid: {e}"))?;
-    Ok(BenchCase { name: "anf", grid: host.grid.clone(), alpha_deg: 2.0, n: 200, wedge: false })
+    Ok(BenchCase { name: "anf", grid: host.grid.clone(), alpha_deg: 2.0, n: 200 })
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------
@@ -205,7 +203,6 @@ struct Result3 {
     cells: usize,
     precision: &'static str,
     solve: &'static str,
-    wedge_mode: bool,
     us: f64,
     launches: u32,
     gpu_us: f64,
@@ -217,6 +214,8 @@ struct Opts {
     perf: bool,
     profile: bool,
     mem: bool,
+    /// Time a combination whose 100-iteration sanity run diverges (the step cost does not depend on the values), with a warning.
+    allow_nonfinite: bool,
     n: Option<usize>,
 }
 
@@ -246,28 +245,20 @@ fn measure<S: Step>(s: &mut S, n: usize) -> Result<(f64, f64, luma::Profile, f64
 }
 
 /// One (case, precision, line solve, wedge mode): context of its own, kernels built, timed, profiled, memory sampled.
-fn bench_combo(
-    case: &BenchCase,
-    precision: (Precision, &'static str),
-    solve: (LineSolve3, &'static str),
-    wedge_mode: bool,
-    o: &Opts,
-) -> Result<Result3, String> {
+fn bench_combo(case: &BenchCase, precision: (Precision, &'static str), solve: (LineSolve3, &'static str), o: &Opts) -> Result<Result3, String> {
     let n = o.n.unwrap_or(case.n);
     let sampler = if o.mem { MemSampler::start() } else { None };
     let ctx = luma::Context::new().map_err(|e| format!("no GPU context: {e}"))?;
-    let cfg = case.config(solve.0, wedge_mode);
+    let cfg = case.config(solve.0);
     let mut s = GpuSolver3::new(&ctx, &case.grid, &cfg, precision.0).map_err(|e| format!("{}: {e}", precision.1))?;
-    s.set_wedge_mode(wedge_mode).map_err(|e| e.to_string())?;
     let (first_call_s, us, p, last) = measure(&mut s, n)?;
     if o.profile {
         println!(
-            "\n### {} {} {} {}{} - one implicit step as the eval loop launches it: {} kernel launches, {:.0} us GPU time, {} fusion cuts\n```\n{}```",
+            "\n### {} {} {} {} - one implicit step as the eval loop launches it: {} kernel launches, {:.0} us GPU time, {} fusion cuts\n```\n{}```",
             case.name,
             precision.1,
             solve.1,
             case.grid.nk,
-            if wedge_mode { " (wedge mode)" } else { "" },
             p.launches(),
             p.total().as_secs_f64() * 1e6,
             p.splits.len(),
@@ -275,15 +266,20 @@ fn bench_combo(
         );
     }
     if !last.is_finite() {
-        return Err(format!("{} {} {}: residual {last} after 100 iterations", case.name, precision.1, solve.1));
+        if !o.allow_nonfinite {
+            return Err(format!("{} {} {}: residual {last} after 100 iterations", case.name, precision.1, solve.1));
+        }
+        eprintln!(
+            "WARNING {} {} {}: residual {last} after 100 iterations (--allow-nonfinite: the step time is of a diverging iteration)",
+            case.name, precision.1, solve.1
+        );
     }
     let peak_mib = sampler.map(MemSampler::stop);
     Ok(Result3 {
-        case: format!("{}{}", case.name, if wedge_mode { "-nok" } else { "" }),
+        case: case.name.to_string(),
         cells: case.cells(),
         precision: precision.1,
         solve: solve.1,
-        wedge_mode,
         us,
         launches: p.launches(),
         gpu_us: p.total().as_secs_f64() * 1e6,
@@ -312,14 +308,14 @@ fn main() -> Result<(), String> {
         perf: !flag("--no-perf"),
         profile: !flag("--no-profile"),
         mem: flag("--mem"),
+        allow_nonfinite: flag("--allow-nonfinite"),
         n: value("--n").map(|n| n.parse::<usize>().map_err(|e| format!("--n: {e}"))).transpose()?,
     };
-    let nk = |default: usize| value("--nk").map_or(Ok(default), |v| v.parse::<usize>().map_err(|e| format!("--nk: {e}")));
     let mut cases = Vec::new();
     for c in if which == "all" { vec!["wedge", "sector", "anf"] } else { vec![which.as_str()] } {
         cases.push(match c {
-            "wedge" => wedge_case(nk(1)?),
-            "sector" => sector_case(nk(18)?),
+            "wedge" => wedge_case()?,
+            "sector" => sector_case(value("--nk").map_or(Ok(18), |v| v.parse::<usize>().map_err(|e| format!("--nk: {e}")))?)?,
             "anf" => anf_case()?,
             other => return Err(format!("--case wedge|sector|anf|all, got `{other}`")),
         });
@@ -341,50 +337,46 @@ fn main() -> Result<(), String> {
         );
         for &precision in &precisions {
             for &solve in &solves {
-                for wedge_mode in if case.wedge && !flag("--no-wedge-mode") { vec![false, true] } else { vec![false] } {
-                    let r = bench_combo(case, precision, solve, wedge_mode, &opts)?;
+                let r = bench_combo(case, precision, solve, &opts)?;
+                println!(
+                    "{} {} {} {}: {:.1} us / iteration (replay of {} after 20 warm-up, best of 3), {} launches / {:.1} us GPU per step, first call {:.1} s{}",
+                    r.case,
+                    r.precision,
+                    r.solve,
+                    r.cells,
+                    r.us,
+                    opts.n.unwrap_or(case.n),
+                    r.launches,
+                    r.gpu_us,
+                    r.first_call_s,
+                    r.peak_mib.map_or(String::new(), |m| format!(", peak device memory of this process {m} MiB"))
+                );
+                if opts.perf {
                     println!(
-                        "{} {} {} {}: {:.1} us / iteration (replay of {} after 20 warm-up, best of 3), {} launches / {:.1} us GPU per step, first call {:.1} s{}",
-                        r.case,
-                        r.precision,
+                        "PERF {{\"case\":\"3d-{}-euler-{}\",\"precision\":\"{}\",\"cells\":{},\"iters\":{},\"us_per_iter\":{:.3},\"launches_per_iter\":{},\"gpu_us_per_iter\":{:.3},\"wall_s\":null{}}}",
+                        case.name,
                         r.solve,
+                        r.precision,
                         r.cells,
-                        r.us,
                         opts.n.unwrap_or(case.n),
+                        r.us,
                         r.launches,
                         r.gpu_us,
-                        r.first_call_s,
-                        r.peak_mib.map_or(String::new(), |m| format!(", peak device memory of this process {m} MiB"))
+                        r.peak_mib.map_or(String::new(), |m| format!(",\"peak_device_mib\":{m}"))
                     );
-                    if opts.perf {
-                        println!(
-                            "PERF {{\"case\":\"3d-{}-euler-{}{}\",\"precision\":\"{}\",\"cells\":{},\"iters\":{},\"us_per_iter\":{:.3},\"launches_per_iter\":{},\"gpu_us_per_iter\":{:.3},\"wall_s\":null{}}}",
-                            case.name,
-                            r.solve,
-                            if r.wedge_mode { "-nok" } else { "" },
-                            r.precision,
-                            r.cells,
-                            opts.n.unwrap_or(case.n),
-                            r.us,
-                            r.launches,
-                            r.gpu_us,
-                            r.peak_mib.map_or(String::new(), |m| format!(",\"peak_device_mib\":{m}"))
-                        );
-                    }
-                    results.push(r);
                 }
+                results.push(r);
             }
         }
     }
-    println!("\n| case | cells | precision | line solve | wedge mode | us / iter | launches | GPU us / step | peak MiB (this process) |\n|---|---|---|---|---|---|---|---|---|");
+    println!("\n| case | cells | precision | line solve | us / iter | launches | GPU us / step | peak MiB (this process) |\n|---|---|---|---|---|---|---|---|");
     for r in &results {
         println!(
-            "| {} | {} | {} | {} | {} | {:.0} | {} | {:.0} | {} |",
-            r.case.trim_end_matches("-nok"),
+            "| {} | {} | {} | {} | {:.0} | {} | {:.0} | {} |",
+            r.case,
             r.cells,
             r.precision,
             r.solve,
-            if r.wedge_mode { "no k factor" } else { "-" },
             r.us,
             r.launches,
             r.gpu_us,

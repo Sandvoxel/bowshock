@@ -13,6 +13,9 @@
 # Results: done/<id>/{log,status,meta,out/}. Lines of the log starting with "PERF "
 # are appended (as JSON plus run metadata) to <repo>/perf/ledger.jsonl.
 # Status "timeout" with a passing log becomes "ok-hung" (NVIDIA driver exit hang).
+# Build cache: each worktree builds in its own subdirectory of the worker's CARGO_TARGET_DIR (wt-<hash of the repo path>); a target dir shared between worktrees
+# lets cargo reuse another worktree's workspace-crate artifacts (mtime freshness against rsync -a snapshots). The job log prints the target dir it used, and
+# cargo's "Compiling bowshock-* (.../snap/<id>/...)" lines show which crates were built from the snapshot.
 
 set -u
 
@@ -45,7 +48,17 @@ cmd_submit() {
   local sha dirty
   sha=$(git -C "$repo" rev-parse HEAD)
   if git -C "$repo" status --porcelain | grep -q .; then dirty=1; else dirty=0; fi
+  # Cargo decides whether a workspace crate is fresh by the mtimes of its sources against the build in the target dir, and the artifacts of a workspace member
+  # do not depend on where the snapshot lives. The snapshot keeps the mtimes (rsync -a), so a target dir shared by several worktrees hands a job the artifacts of
+  # another worktree's sources whenever those were built after this worktree's files were last touched. Every worktree therefore gets a target dir of its own,
+  # a subdirectory (keyed by the repo path) of whatever CARGO_TARGET_DIR the worker sets, local or remote: set inside the job's command, so the submit side is
+  # enough and the worker script needs no change. Inside one worktree the mtimes are the real ones, as in an ordinary cargo build there.
+  local key; key=$(printf '%s' "$repo" | sha1sum | cut -c1-10)
   local cmd; cmd=$(printf '%q ' "$@"); cmd=${cmd% }
+  # A reused artifact also keeps the paths baked into it (env!("CARGO_MANIFEST_DIR"): the fixture of the wedge gates, the out dirs of the cone binaries), which
+  # point into the snapshot of the job that built it, deleted long ago. The job therefore runs in a run dir that is stable per worktree (rsync -a --delete of its
+  # snapshot, mtimes kept; the worker runs one job at a time per host) and copies out/ back to the snapshot for the worker to collect.
+  cmd="if [ -n \"\${CARGO_TARGET_DIR:-}\" ]; then export CARGO_TARGET_DIR=\"\$CARGO_TARGET_DIR/wt-$key\"; fi; GQ_SNAP=\$PWD; GQ_RUN=\"\${GPUQ_RUN_ROOT:-\$HOME/.cache/bowshock-gpuq/run}/wt-$key\"; { mkdir -p \"\$GQ_RUN\" && rsync -a --delete \"\$GQ_SNAP\"/ \"\$GQ_RUN\"/ && cd \"\$GQ_RUN\" && rm -rf out; } || { echo 'gpuq: run dir setup failed'; exit 97; }; echo \"gpuq: target dir \${CARGO_TARGET_DIR:-default}, run dir \$GQ_RUN (worktree $repo)\"; $cmd; GQ_RC=\$?; if [ -d out ]; then rsync -a out/ \"\$GQ_SNAP\"/out/; fi; exit \$GQ_RC"
   {
     echo "host=$host"
     echo "name=$name"

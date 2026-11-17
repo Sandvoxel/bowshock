@@ -312,6 +312,8 @@ struct LGeo3 {
     one: F,
     /// Solid cells (`None` without solid boxes).
     solid: Option<Array<bool>>,
+    /// `A1 n1 - A0 n0` of the two k faces of every cell (the wedge's pressure source), `None` except for a wedge.
+    ksrc: Option<[F; 3]>,
     /// `edge[dir][side]`, side 0 = lower end (`m = 0`), 1 = upper end.
     edge: [[EdgeGeo3; 2]; 3],
 }
@@ -382,6 +384,21 @@ impl LGeo3 {
             zero: ones(dims, 0.0)?,
             one: ones(dims, 1.0)?,
             solid: if has_solid { Some(Array::from_slice_on(ctx, solid, dims)?) } else { None },
+            ksrc: if grid.sym == crate::grid3::Symmetry::Wedge {
+                let plane = ni * nj;
+                let comp = |r: usize| {
+                    let v: Vec<f64> = (0..ni * nj * nk)
+                        .map(|c| {
+                            let (a0, a1) = (&grid.kface[c], &grid.kface[c + plane]);
+                            a1.area * a1.n[r] - a0.area * a0.n[r]
+                        })
+                        .collect();
+                    up_lhs(ctx, &v, dims)
+                };
+                Some([comp(0)?, comp(1)?, comp(2)?])
+            } else {
+                None
+            },
             edge: [
                 [edge(iend(0), [1, nj, nk])?, edge(iend(ni), [1, nj, nk])?],
                 [edge(jend(0), [ni, 1, nk])?, edge(jend(nj), [ni, 1, nk])?],
@@ -393,6 +410,8 @@ impl LGeo3 {
 
 /// The blocks `lo`, `d`, `up` of `I - dt J_dir` of every cell (`[ni, nj, nk]` arrays, lazy expressions of the face matrices below), and the face matrices.
 struct Factor3 {
+    /// The wedge's pressure-source block of the j factor: `(a_r = dt/V (A1 n1[r] - A0 n0[r]), dp)` (see `factor3`), `None` elsewhere.
+    src: Option<([F; 3], [F; 5])>,
     lo: [F; 25],
     d: [F; 25],
     up: [F; 25],
@@ -603,6 +622,24 @@ impl LazySolver3 {
         let s = 0.5f32 * dt / &g.vol;
         let (s_l, s_u) = (&s * dg.area.slice(dir, 0..n), &s * dg.area.slice(dir, 1..n + 1));
         let mut d = Blk5::eye().add(&fl.slice(dir, 1..n + 1).scale(&s_u)).sub(&fr.slice(dir, 0..n).scale(&s_l));
+        // the wedge's point-implicit pressure Jacobian (`implicit3::assemble3`, `if wedge && dir == 1`; the 2D `cell_blocks` `src`): the pressure of the k faces is the
+        // radial-momentum source `-(1/V) (A1 n1 - A0 n0) p`, so `d_{(r + 1) q} += dt/V (A1 n1[r] - A0 n0[r]) dp[q]`, `dp = (g - 1) (|u|^2 / 2, -u, -v, -w, 1)`
+        let src = if dir == 1 && self.k_src {
+            g.ksrc.as_ref().map(|ks| {
+                let f = dt / &g.vol;
+                let ar: [F; 3] = std::array::from_fn(|r| &f * &ks[r]);
+                let (u, v, ww) = (&wk[1], &wk[2], &wk[3]);
+                let dp: [F; 5] = [cf(G1) * (0.5f32 * (u * u + v * v + ww * ww)), -(cf(G1) * u), -(cf(G1) * v), -(cf(G1) * ww), cf(G1) * &g.one];
+                for r in 0..3 {
+                    for q in 0..5 {
+                        d.0[5 * (r + 1) + q] = d.0[5 * (r + 1) + q].add(&E::A(&ar[r] * &dp[q]));
+                    }
+                }
+                (ar, dp)
+            })
+        } else {
+            None
+        };
         let (mut lo, mut up) = if p.lines { (fl.slice(dir, 0..n).scale(&(-&s_l)), fr.slice(dir, 1..n + 1).scale(&s_u)) } else { (Blk5::zero(), Blk5::zero()) };
 
         if p.lines {
@@ -659,7 +696,7 @@ impl LazySolver3 {
         // arrays of a direction are never written and read back (the solves cost 7 % more, the three assembly kernels, 0.84 ms, are gone)
         let (z, o) = (&g.zero, &g.one);
         let [lo, d, up] = [lo.dense(z, o), d.dense(z, o), up.dense(z, o)];
-        Factor3 { lo, d, up, fl: fl_faces, fr: fr_faces, s_l, s_u }
+        Factor3 { lo, d, up, fl: fl_faces, fr: fr_faces, s_l, s_u, src }
     }
 
     /// `x <- (I - dt J_dir)^{-1} x` for every line of direction `dir` (block-tridiagonal solve, `solve_lines3`); the twenty-five block entries and the
@@ -722,8 +759,13 @@ impl LazySolver3 {
         };
         let (a, b) = (mv5(&fac.fl, &zl), mv5(&fac.fr, &zr));
         let gf: V5 = v5(|q| &a[q] + &b[q]).cache();
+        // the wedge's pressure-source block (the diagonal of the j factor, `factor3`): rows 1..=3 get `a_r dp . z`
+        let dpz = fac.src.as_ref().filter(|_| dir == 1).map(|(_, dp)| &dp[0] * &z[0] + &dp[1] * &z[1] + &dp[2] * &z[2] + &dp[3] * &z[3] + &dp[4] * &z[4]);
         v5(|q| {
-            let nz = &fac.s_u * gf[q].slice(dir, 1..n + 1) - &fac.s_l * gf[q].slice(dir, 0..n);
+            let mut nz = &fac.s_u * gf[q].slice(dir, 1..n + 1) - &fac.s_l * gf[q].slice(dir, 0..n);
+            if let (Some((ar, _)), Some(dpz), 1..=3) = (fac.src.as_ref().filter(|_| dir == 1), dpz.as_ref(), q) {
+                nz = nz + &ar[q - 1] * dpz;
+            }
             match &g.solid {
                 Some(solid) => select(solid, 0.0f32, &nz),
                 None => nz,

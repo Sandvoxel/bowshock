@@ -4,7 +4,7 @@
 //!
 //! The tests delete `~/.cache/bowshock/worker` on that machine first (set `BOWSHOCK_REMOTE_TEST_KEEP=1` to keep it).
 
-use bowshock_core::{AftSpec, Analysis, AnalysisSpec, Backend, BodySpec, Error, FinProfile, FinSpec, NoseShape, NoseSpec, Resolution};
+use bowshock_core::{AftSpec, Analysis, AnalysisSpec, Backend, BodySpec, Condition, Error, FinProfile, FinSpec, NoseShape, NoseSpec, Resolution};
 use bowshock_remote::provision::{sh_command, NO_PREBUILT_ENV};
 use bowshock_remote::{Remote, RemoteError, RemoteHost, SetupStatus};
 use std::ops::ControlFlow;
@@ -97,7 +97,7 @@ fn provision_from_scratch_then_run_jobs_and_cancel() {
     let frames = AtomicUsize::new(0);
     let t = Instant::now();
     let remote_lift = remote
-        .run_lift(&spec, &[2.0], &[2.0], &|_| {
+        .solve(&spec, &[Condition::new(2.0, 2.0)], &|_| {
             frames.fetch_add(1, Ordering::SeqCst);
             ControlFlow::Continue(())
         })
@@ -105,18 +105,22 @@ fn provision_from_scratch_then_run_jobs_and_cancel() {
     println!("remote lift {:.1} s, {} progress frames", t.elapsed().as_secs_f64(), frames.load(Ordering::SeqCst));
     assert!(frames.load(Ordering::SeqCst) > 0);
     let t = Instant::now();
-    let local_lift = Analysis::from_spec(&spec).unwrap().run_lift(&[2.0], &[2.0]).unwrap();
+    let local_lift = Analysis::from_spec(&spec).unwrap().run(&[Condition::new(2.0, 2.0)]).unwrap();
     println!("local lift {:.1} s", t.elapsed().as_secs_f64());
     let (r, l) = (&remote_lift.points[0], &local_lift.points[0]);
-    println!("lift remote CN {:.5} xcp {:.5} ({} it) | local CN {:.5} xcp {:.5} ({} it)", r.cn, r.x_cp, r.iterations, l.cn, l.x_cp, l.iterations);
-    assert!((r.cn - l.cn).abs() <= 0.005 * l.cn.abs(), "CN {} vs {}", r.cn, l.cn);
+    let (rf, lf) = (r.forces.unwrap(), l.forces.unwrap());
+    println!(
+        "lift remote CN {:.5} xcp {:.5} ({} it) | local CN {:.5} xcp {:.5} ({} it)",
+        rf.cn, rf.x_cp, r.detail.iterations, lf.cn, lf.x_cp, l.detail.iterations
+    );
+    assert!((rf.cn - lf.cn).abs() <= 0.005 * lf.cn.abs(), "CN {} vs {}", rf.cn, lf.cn);
 
     // drag: 2D Euler
     let spec = drag_spec();
     let frames = AtomicUsize::new(0);
     let t = Instant::now();
     let remote_drag = remote
-        .run_drag(&spec, &[0.8, 2.0], &|_| {
+        .solve(&spec, &[Condition::from(0.8), Condition::from(2.0)], &|_| {
             frames.fetch_add(1, Ordering::SeqCst);
             ControlFlow::Continue(())
         })
@@ -131,11 +135,11 @@ fn provision_from_scratch_then_run_jobs_and_cancel() {
 
     // cancel
     let t = Instant::now();
-    let r = remote.run_lift(&spec_lift_again(), &[2.0], &[2.0, 6.0], &|_| ControlFlow::Break(()));
+    let r = remote.solve(&spec_lift_again(), &[Condition::new(2.0, 2.0), Condition::new(2.0, 6.0)], &|_| ControlFlow::Break(()));
     println!("cancelled after {:.2} s", t.elapsed().as_secs_f64());
     assert!(matches!(r, Err(RemoteError::Solver(Error::Cancelled))), "{r:?}");
     // and the connection still works
-    let again = remote.run_drag(&drag_spec(), &[2.0], &|_| ControlFlow::Continue(())).unwrap();
+    let again = remote.solve(&drag_spec(), &[Condition::from(2.0)], &|_| ControlFlow::Continue(())).unwrap();
     assert_eq!(again.points.len(), 1);
 }
 
