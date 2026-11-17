@@ -973,4 +973,57 @@ mod tests {
         assert_eq!(app.analyze().flow.selected_alpha, Some(cfd::LIFT_ALPHAS[1]));
         assert!(app.analyze().flow.caption().contains(&format!("α {:.1}°", cfd::LIFT_ALPHAS[1])), "{}", app.analyze().flow.caption());
     }
+
+    /// A real 3D solve of the example (GPU, a few minutes at most) through the app's own path: the events of `solve_lift` (the live snapshots
+    /// of a running point and the final field of each) reach the app, and the Flow field view shows the stability solve's fields.
+    /// `cargo nextest run --release -p bowshock a_real_3d_solve --run-ignored only --no-capture` (through `tools/gpuq/gpuq`).
+    #[test]
+    #[ignore = "solves the example's 3D stability table on the GPU"]
+    fn a_real_3d_solve_through_the_app_ends_with_its_fields_in_the_store() {
+        let (mut app, serial) = app_with(&[Demo::Done]);
+        // the drag table is the scripted one (a real one is the same code path, minutes); the 3D solve is real
+        play(&mut app, serial, Demo::Done);
+        let table = app.ctx().doc.rocket().cfd_table(1).expect("the drag table").clone();
+        press(&mut app, Message::SolveLift);
+        let serial = app.analyze().cfd.lift_solving.as_ref().expect("the 3D solve started").stream.serial();
+        let job = LiftJob {
+            plan: app.analyze().cfd.plan.as_ref().clone().unwrap(),
+            nodes: cfd::lift_nodes(app.analyze().cond.mach).unwrap(),
+            compute: Default::default(),
+            cpu_only: false,
+        };
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = log.clone();
+        let t = std::time::Instant::now();
+        let result = cfd::solve_lift(&job, &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), move |e| sink.lock().unwrap().push(e));
+        let seconds = t.elapsed().as_secs_f64();
+        let mut events = std::mem::take(&mut *log.lock().unwrap());
+        let (snapshots, finals) =
+            (events.iter().filter(|e| matches!(e, Event::Field(_))).count(), events.iter().filter(|e| matches!(e, Event::PointField { .. })).count());
+        println!("REAL3D solve_lift {seconds:.1} s, {} nodes, {snapshots} live snapshots, {finals} final fields", job.nodes.len());
+        events.push(Event::LiftFinished(result));
+        feed(&mut app, serial, events);
+        assert!(app.ctx().doc.rocket().cfd_table(1).is_some_and(|t| t.lift.is_some()), "the 3D solve is stored: {}", notice(&app));
+        assert!(snapshots >= job.nodes.len() && finals == 2 * job.nodes.len(), "{snapshots} snapshots, {finals} final fields");
+        let store = &app.analyze().cfd.fields;
+        for &m in &job.nodes {
+            assert_eq!(store.alphas_at(&table, m).iter().filter(|a| **a > 0.0).count(), 2, "Mach {m}: both angles have a field");
+        }
+        // the viewer shows a real one: cells in the hundreds of thousands, the fins, the angle on the caption
+        press(&mut app, Message::Flow(flow_view::Msg::Open(true)));
+        press(&mut app, Message::Flow(flow_view::Msg::Pick(job.nodes[job.nodes.len() / 2])));
+        for _ in 0..2 {
+            press(&mut app, Message::Flow(flow_view::Msg::AlphaStep(1)));
+        }
+        let flow = &app.analyze().flow;
+        let picture = flow.scene.picture().expect("the 3D scene shows the real field");
+        println!(
+            "REAL3D field {} cells, {} wall faces, {} tiles, caption {}",
+            picture.field.cells(),
+            picture.field.walls.len(),
+            picture.tiles.len(),
+            flow.caption()
+        );
+        assert!(picture.field.cells() > 100_000 && !picture.field.fin_theta.is_empty() && picture.field.iteration > 100);
+    }
 }

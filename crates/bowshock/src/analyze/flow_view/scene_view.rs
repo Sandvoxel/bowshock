@@ -493,9 +493,8 @@ impl SceneState {
     pub fn palette<'a>(&'a self, ctx: &'a Ctx, unit: &'static Unit, mode: Option<Element<'a, Msg>>) -> Element<'a, Msg> {
         let Some(p) = &self.prepared else { return Space::new().boxed() };
         let f = &*p.field;
-        let toggle = |label: &'static str, on: bool, msg: SceneMsg, tip: &'static str| -> Element<'a, Msg> {
-            push(label, if on { Weight::Primary } else { Weight::Secondary }).small().width(Fill).on_press(Msg::Scene(msg)).tooltip(tip).into()
-        };
+        let toggle =
+            |label: &'static str, on: bool, msg: SceneMsg, tip: &'static str| -> Element<'a, Msg> { super::toggle(label, on, Msg::Scene(msg), tip, true) };
         let step = |label: &'static str, msg: SceneMsg, tip: &'static str| -> Element<'a, Msg> {
             push(label, Weight::Secondary).small().on_press(Msg::Scene(msg)).tooltip(tip).into()
         };
@@ -540,11 +539,13 @@ impl SceneState {
                     .height(CONTROL_H)
                     .boxed(),
                 line(vec![
-                    push("Tile", if self.tile_sheets { Weight::Primary } else { Weight::Secondary })
-                        .small()
-                        .on_press(Msg::Scene(SceneMsg::TileSheets))
-                        .tooltip("The meridian layer in every copy of the solved domain, not as the plane")
-                        .into(),
+                    super::toggle(
+                        "Tile",
+                        self.tile_sheets,
+                        Msg::Scene(SceneMsg::TileSheets),
+                        "The meridian layer in every copy of the solved domain, not as the plane",
+                        false,
+                    ),
                     segmented_fill(&Extent::ALL.map(|e| (e, e.name())), self.extent, |e| Msg::Scene(SceneMsg::Extent(e))),
                 ])
                 .boxed(),

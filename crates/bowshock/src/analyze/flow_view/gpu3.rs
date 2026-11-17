@@ -17,7 +17,7 @@ use std::sync::Arc;
 const SAMPLES: u32 = 4;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// Most tiles one draw takes (the uniform block holds this many).
-pub const MAX_TILES: usize = 128;
+pub const MAX_TILES: usize = 256;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]

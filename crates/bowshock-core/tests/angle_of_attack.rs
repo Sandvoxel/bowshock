@@ -1,4 +1,6 @@
 use bowshock_core::{AftSpec, Analysis, Backend, BackendUsed, BodySpec, Condition, Error, FinProfile, FinSpec, NoseShape, NoseSpec, Quality, Resolution};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 const D: f64 = 0.04;
@@ -120,4 +122,64 @@ fn gpu_matches_cpu_tiny() {
         assert!((gf.cn - cf.cn).abs() <= 0.005 * cf.cn.abs(), "CN {} vs {}", gf.cn, cf.cn);
         assert!((gf.x_cp - cf.x_cp).abs() <= 0.01 * D, "x_cp {} vs {}", gf.x_cp / D, cf.x_cp / D);
     }
+}
+
+/// The same rocket on the real 3D grid (level 0: the 353 000 cells of the example table), no test hook.
+fn analysis_full() -> Analysis {
+    let nose_len = 0.5 * D / 10f64.to_radians().tan();
+    let spec = BodySpec { nose: NoseSpec { shape: NoseShape::Cone, length: nose_len, diameter: D }, aft: vec![AftSpec::Tube { length: 10.0 * D - nose_len }] };
+    let fins = FinSpec {
+        count: 4,
+        root_chord: D,
+        tip_chord: D,
+        span: D,
+        sweep: 0.0,
+        thickness: 0.08 * D,
+        roughness: 0.0,
+        root_te_to_base: 0.0,
+        profile: FinProfile::Square,
+    };
+    Analysis::new(&spec).unwrap().fins(fins).backend(Backend::Gpu).resolution(Resolution::Coarse)
+}
+
+/// What the flow field of a running 3D solve costs: the same two conditions on the GPU with and without `on_field3(500)` and `keep_fields`,
+/// alternating, three times each. The solve does not change (same iterations, same CN); the wall time is printed (`SNAPSHOT_COST`).
+/// `cargo test --release -p bowshock-core --features gpu --test angle_of_attack -- --ignored --nocapture gpu_snapshots`, through `tools/gpuq/gpuq`.
+#[test]
+#[ignore = "needs a GPU: run through tools/gpuq/gpuq"]
+fn gpu_snapshots_and_kept_fields_cost_nothing_measurable() {
+    let conditions = [Condition::new(2.0, 2.0), Condition::new(2.0, 6.0)];
+    let mut times = [Vec::new(), Vec::new()];
+    let mut seen = 0usize;
+    for round in 0..3 {
+        for (with, name) in [(false, "plain"), (true, "snapshots + kept fields")] {
+            let count = Arc::new(AtomicUsize::new(0));
+            let c = count.clone();
+            let analysis = if with {
+                analysis_full().keep_fields(true).on_field3(500, move |_| {
+                    c.fetch_add(1, Ordering::SeqCst);
+                })
+            } else {
+                analysis_full()
+            };
+            let t = Instant::now();
+            let polar = analysis.run(&conditions).unwrap();
+            let secs = t.elapsed().as_secs_f64();
+            let iters: usize = polar.points.iter().map(|p| p.detail.iterations).sum();
+            println!(
+                "round {round} {name}: {secs:.2} s, {iters} iterations, {} snapshots, fields kept {}",
+                count.load(Ordering::SeqCst),
+                polar.points.iter().all(|p| p.field3.is_some())
+            );
+            times[usize::from(with)].push(secs);
+            if with {
+                seen = count.load(Ordering::SeqCst);
+            }
+        }
+    }
+    let mean = |v: &Vec<f64>| v.iter().sum::<f64>() / v.len() as f64;
+    let (plain, with) = (mean(&times[0]), mean(&times[1]));
+    println!("SNAPSHOT_COST {{\"plain_s\":{plain:.3},\"with_snapshots_s\":{with:.3},\"ratio\":{:.4},\"snapshots_per_solve\":{seen},\"plain_runs\":{:?},\"with_runs\":{:?}}}", with / plain, times[0], times[1]);
+    assert!(seen >= 2, "snapshots arrived");
+    assert!(with < plain * 1.10, "snapshots and kept fields cost {:.1} %", 100.0 * (with / plain - 1.0));
 }

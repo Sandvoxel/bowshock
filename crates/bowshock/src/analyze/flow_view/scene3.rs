@@ -617,6 +617,18 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn the_solvers_two_degree_wedge_is_drawn_in_as_many_copies_as_fit_the_circle() {
+        use bowshock_core::engine::case3::Case3;
+        let case = Case3::wedge(2.0, Case3::anf_body(), 0);
+        let s = case.build_solver().unwrap();
+        let f = bowshock_core::engine::field3::field3_of_solver(&case, &s, 0, 1.0);
+        let p = Prepared3::new(Arc::new(f));
+        assert_eq!(p.tiles.len(), 180);
+        assert!(p.tiles.len() <= super::super::gpu3::MAX_TILES, "the GPU side has room for every copy");
+        assert!(p.sheet_draws(Sheet::Meridian(0), p.window, true).iter().all(|d| d.mesh.triangles.len() > 0));
+    }
+
+    #[test]
     fn the_ranges_follow_the_flow() {
         let p = Prepared3::new(anf());
         let (m, cp, s) = (p.ranges[Scalar3::Mach.index()], p.ranges[Scalar3::Cp.index()], p.ranges[Scalar3::Schlieren.index()]);

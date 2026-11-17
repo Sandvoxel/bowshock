@@ -499,14 +499,16 @@ impl State {
             return container(body).padding([SPACE_1, 0.0]).height(Fill).boxed();
         }
         let scalars = segmented(&Scalar::ALL.map(|s| (s, s.name())), self.scalar, Msg::Scalar);
-        let grid: Element<'a, Msg> = push("Grid", if self.grid { Weight::Primary } else { Weight::Secondary }).small().on_press(Msg::Grid).into();
+        let grid = toggle("Grid", self.grid, Msg::Grid, "Draw the cell edges", false);
         let fit: Element<'a, Msg> = push("Fit", Weight::Secondary).small().on_press(Msg::Fit).into();
         let fitted = self.fit.is_some_and(|(s, _)| s == self.scalar);
-        let range: Element<'a, Msg> = push("Fit range", if fitted { Weight::Primary } else { Weight::Secondary })
-            .small()
-            .on_press(if fitted { Msg::ResetRange } else { Msg::FitRange })
-            .tooltip(if fitted { "Back to the colour range of the whole picture" } else { "Colour range from what is on screen (robust percentiles)" })
-            .into();
+        let range = toggle(
+            "Fit range",
+            fitted,
+            if fitted { Msg::ResetRange } else { Msg::FitRange },
+            if fitted { "Back to the colour range of the whole picture" } else { "Colour range from what is on screen (robust percentiles)" },
+            false,
+        );
         controls = controls.push(scalars).push(grid).push(fit).push(range);
         let body: Element<'a, Msg> = match (&self.picture, notice) {
             (Some(picture), None) => {
@@ -971,6 +973,15 @@ fn why_none(state: &super::State, table: &CfdTable) -> String {
     } else {
         "No flow fields for this table: it was loaded from a file, not solved in this session. Re-solve to see them.".to_string()
     }
+}
+
+/// A toggle in the kit's on-state: a one-segment strip (SegmentedControl: `bg-300` with the `accent` underline when it is on, a plain frame
+/// when it is off). The accent fill of the primary button is for the one commit action of a region, not for a switch. `fill`: the strip
+/// takes the width of its column.
+pub(super) fn toggle<'a>(label: &'static str, on: bool, msg: Msg, tip: &'static str, fill: bool) -> Element<'a, Msg> {
+    let strip = if fill { segmented_fill(&[(true, label)], on, move |_| msg.clone()) } else { segmented(&[(true, label)], on, move |_| msg.clone()) };
+    let bubble = container(text(tip).size(crate::tokens::TEXT_BODY)).padding([SPACE_1, SPACE_2]).style(|t: &Theme| theme::tooltip(t));
+    iced::widget::tooltip(strip, bubble).position(iced::widget::tooltip::Position::Bottom).gap(SPACE_1).boxed()
 }
 
 /// The Mach number the Flow field view starts at: the node nearest Mach 2, where the nose shock is a clean cone to look at.
