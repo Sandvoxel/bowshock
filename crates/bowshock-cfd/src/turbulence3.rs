@@ -457,7 +457,7 @@ pub fn scalar_gradients<M: TurbModel<N>, const N: usize>(cx: &TurbIn<N>, model: 
                         let mut f = [i, j, k];
                         f[dir] += hi as usize;
                         let Some(fc) = face_cells(g, cx.solid, dir, f[0], f[1], f[2]) else { continue };
-                        let nb = cx.side_phi(model, &fc, hi as usize ^ 1, dir);
+                        let nb = cx.side_phi(model, &fc, hi as usize, dir);
                         let (_, face) = face_of(g, dir, f[0], f[1], f[2]);
                         let sgn = if hi { 1.0 } else { -1.0 };
                         for e in 0..N {
