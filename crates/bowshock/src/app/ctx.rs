@@ -79,6 +79,12 @@ pub struct Ctx {
     pub physics: Physics,
     /// The display unit system (top bar).
     pub units: UnitSystem,
+    /// Where the CFD solves run (Analyze, CFD table); kept in the user's settings.
+    pub compute: super::settings::Compute,
+    /// What the last successful connection test of the remote GPU found (`NVIDIA GeForce RTX 3090 on omarchy`); `None` until one ran.
+    pub compute_device: Option<String>,
+    /// The device the solves on this computer use (Preferences > Compute); kept in the user's settings.
+    pub local_solver: super::settings::LocalSolver,
     /// Where the user's settings (the unit set) are written; `None` keeps them for the session only.
     pub settings_file: Option<PathBuf>,
     /// The process environment as read at start-up (see [`env`]).
@@ -134,7 +140,7 @@ pub struct Ctx {
 
 impl Ctx {
     #[cfg(test)]
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Ctx::with_env(env::Env::for_tests())
     }
 
@@ -145,6 +151,9 @@ impl Ctx {
             drag: Drags::default(),
             physics: Physics::from_env(&env),
             units: UnitSystem::default(),
+            compute: super::settings::Compute::default(),
+            compute_device: None,
+            local_solver: super::settings::LocalSolver::default(),
             settings_file: env.settings_file.clone(),
             env,
             cursor: None,

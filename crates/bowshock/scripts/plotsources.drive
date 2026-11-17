@@ -2,7 +2,7 @@
 # presets row sets common layouts, panels add/remove/move, and overlaying flights combines with multiple sources.
 #   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/plotsources.drive out/plotsources
 viewport 1280x800
-click (663, 18)
+click (625, 18)
 click "Run"
 screenshot 01-default.png
 

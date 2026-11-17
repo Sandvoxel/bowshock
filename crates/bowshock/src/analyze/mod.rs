@@ -114,6 +114,8 @@ pub enum Message {
     CfdDiscard,
     /// Solve the 3D stability table (Solve stability (3D)).
     SolveLift,
+    /// Open Preferences at Compute (where the solves run).
+    OpenPrefs,
     /// A message of the Optimize screen.
     Optimize(optimize_view::Msg),
     /// A message from the running optimisation (with the run's serial: a cancelled run's last words are ignored).
@@ -336,7 +338,8 @@ impl State {
             Message::CfdCancel => self.cancel_solve(ctx),
             Message::CfdKeep => self.keep_stopped(ctx),
             Message::CfdDiscard => self.cfd.stopped = None,
-            Message::SolveLift => return self.start_lift(),
+            Message::SolveLift => return self.start_lift(ctx),
+            Message::OpenPrefs => return Task::done(app::Message::Prefs(crate::prefs::Message::Open(crate::prefs::Section::Compute))),
             Message::Optimize(m) => return self.optimize.update(m, ctx),
             Message::OptEvent(serial, event) => self.optimize.event(serial, event, ctx),
         }
@@ -474,7 +477,7 @@ impl State {
     }
 
     /// Solve stability (3D) was pressed: solves the lift table for the Mach range on screen, unless a solve already runs.
-    fn start_lift(&mut self) -> Task<app::Message> {
+    fn start_lift(&mut self, ctx: &Ctx) -> Task<app::Message> {
         if self.method != Method::CfdTable || !uses_cfd(self.analysis) || self.cfd.solving.is_some() || self.cfd.lift_solving.is_some() {
             return Task::none();
         }
@@ -483,10 +486,12 @@ impl State {
             return Task::none();
         };
         self.cfd.serial += 1;
+        self.cfd.lift_error = None;
         let serial = self.cfd.serial;
         let key = Some(cfd::lift_key(plan.geometry, &nodes));
         let tracker = solve::Tracker::new(solve::Kind::Stability, solve::Tracker::stability_units(&nodes, &cfd::LIFT_ALPHAS), "");
-        let job = cfd::LiftJob { plan: plan.clone(), nodes };
+        let job =
+            cfd::LiftJob { plan: plan.clone(), nodes, compute: ctx.compute.clone(), cpu_only: ctx.local_solver == crate::app::settings::LocalSolver::Cpu };
         let script = self.cfd.demo.pop_front().map(|demo| solve_demo::lift_events(demo, &job));
         let scripted = script.is_some();
         let (task, stream) = match script {
@@ -544,7 +549,15 @@ impl State {
         self.cfd.serial += 1;
         let serial = self.cfd.serial;
         let grid = force.unwrap_or(CfdGrid::Coarse);
-        let job = Arc::new(cfd::Job { plan: plan.clone(), altitude: self.cond.altitude, nodes: nodes.clone(), stage, grid });
+        let job = Arc::new(cfd::Job {
+            plan: plan.clone(),
+            altitude: self.cond.altitude,
+            nodes: nodes.clone(),
+            stage,
+            grid,
+            compute: ctx.compute.clone(),
+            cpu_only: ctx.local_solver == crate::app::settings::LocalSolver::Cpu,
+        });
         let tracker = solve::Tracker::new(solve::Kind::Drag, solve::Tracker::drag_units(&nodes), "");
         let script = self.cfd.demo.pop_front().map(|demo| solve_demo::events(demo, &job));
         let scripted = script.is_some();
@@ -587,6 +600,7 @@ impl State {
         let solving = [self.cfd.solving.as_mut(), self.cfd.lift_solving.as_mut()].into_iter().flatten().find(|s| s.stream.serial() == serial);
         let Some(solving) = solving else { return };
         match event {
+            cfd::Event::Setup(step) => solving.tracker.setup = step,
             cfd::Event::Device(name) => solving.tracker.device = name,
             cfd::Event::Iteration(it) => solving.tracker.on_iteration(&it),
             cfd::Event::Point(done) => solving.tracker.on_done(&done),
@@ -653,7 +667,10 @@ impl State {
                 }
             }
             Err(e) if e == cfd::CANCELLED => ctx.notify("3D stability solve cancelled"),
-            Err(e) => ctx.notify(format!("3D stability solve stopped: {e}")),
+            Err(e) => {
+                ctx.notify(format!("3D stability solve stopped: {e}"));
+                self.cfd.lift_error = Some(e);
+            }
         }
     }
 
@@ -781,6 +798,8 @@ pub(crate) struct Cfd {
     pub(crate) summary: Option<(u64, String)>,
     /// The same for the 3D stability solve and the key of its table.
     pub(crate) lift_summary: Option<(u64, String)>,
+    /// Why the last 3D stability solve ended without a table (not a cancel), until the next one starts.
+    pub(crate) lift_error: Option<String>,
     /// The key a solve was last wanted for and why it ended without a table (a failure or a cancel): no solve starts by itself
     /// again until the key changes or Re-solve is pressed.
     pub(crate) failed: Option<(Option<u64>, String)>,
@@ -802,6 +821,7 @@ impl Default for Cfd {
             stopped: None,
             summary: None,
             lift_summary: None,
+            lift_error: None,
             failed: None,
             force: None,
             serial: 0,

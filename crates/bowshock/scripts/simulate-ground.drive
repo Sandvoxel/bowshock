@@ -2,7 +2,7 @@
 #   cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/simulate-ground.drive out/simulate-ground
 viewport 1280x1100
 
-click (663, 18)
+click (625, 18)
 click "Run"
 screenshot GroundTrack-dark.png
 

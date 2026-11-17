@@ -33,7 +33,7 @@ fn failed_3d_points_are_dropped_and_fewer_than_two_nodes_is_an_error() {
 fn a_tiny_grid_solves_and_is_sane() {
     let (rocket, vehicle) = example();
     let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
-    let job = Job { plan, altitude: 120.0, nodes: vec![0.6, 2.0], stage: 1, grid: CfdGrid::Coarse };
+    let job = Job { plan, altitude: 120.0, nodes: vec![0.6, 2.0], stage: 1, grid: CfdGrid::Coarse, compute: Default::default(), cpu_only: false };
     let points = Arc::new(Mutex::new(0usize));
     let counter = points.clone();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -62,7 +62,7 @@ fn the_example_table_solves_and_agrees_with_extended() {
     let (mut rocket, vehicle) = example();
     let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
     let nodes = nodes((0.1, 3.0)).unwrap();
-    let job = Job { plan, altitude: 120.0, nodes, stage: 1, grid: CfdGrid::Coarse };
+    let job = Job { plan, altitude: 120.0, nodes, stage: 1, grid: CfdGrid::Coarse, compute: Default::default(), cpu_only: false };
     let t0 = Instant::now();
     let table = solve(&job, &Arc::new(AtomicBool::new(false)), move |e| {
         if let Event::Point(p) = e {
@@ -90,7 +90,15 @@ fn the_example_table_solves_and_agrees_with_extended() {
 #[test]
 fn a_cancel_stops_before_the_next_point() {
     let (rocket, vehicle) = example();
-    let job = Job { plan: plan(&rocket, &vehicle, UnitSystem::default()).unwrap(), altitude: 120.0, nodes: vec![0.6, 2.0], stage: 1, grid: CfdGrid::Coarse };
+    let job = Job {
+        plan: plan(&rocket, &vehicle, UnitSystem::default()).unwrap(),
+        altitude: 120.0,
+        nodes: vec![0.6, 2.0],
+        stage: 1,
+        grid: CfdGrid::Coarse,
+        compute: Default::default(),
+        cpu_only: false,
+    };
     let cancel = Arc::new(AtomicBool::new(true));
     assert_eq!(solve(&job, &cancel, |_| ()).unwrap_err(), CANCELLED);
 }
@@ -102,7 +110,15 @@ fn a_cancel_stops_before_the_next_point() {
 #[ignore = "starts the solver: seconds"]
 fn a_cancel_ends_the_point_in_flight_within_a_report() {
     let (rocket, vehicle) = example();
-    let job = Job { plan: plan(&rocket, &vehicle, UnitSystem::default()).unwrap(), altitude: 120.0, nodes: vec![1.0, 2.0], stage: 1, grid: CfdGrid::Coarse };
+    let job = Job {
+        plan: plan(&rocket, &vehicle, UnitSystem::default()).unwrap(),
+        altitude: 120.0,
+        nodes: vec![1.0, 2.0],
+        stage: 1,
+        grid: CfdGrid::Coarse,
+        compute: Default::default(),
+        cpu_only: false,
+    };
     let cancel = Arc::new(AtomicBool::new(false));
     let seen = Arc::new(Mutex::new(Vec::<String>::new()));
     let (flag, log) = (cancel.clone(), seen.clone());
@@ -134,7 +150,15 @@ fn a_cancel_ends_the_point_in_flight_within_a_report() {
 #[ignore = "solves one point: about 30 s"]
 fn a_real_point_streams_progress() {
     let (rocket, vehicle) = example();
-    let job = Job { plan: plan(&rocket, &vehicle, UnitSystem::default()).unwrap(), altitude: 120.0, nodes: vec![2.0], stage: 1, grid: CfdGrid::Coarse };
+    let job = Job {
+        plan: plan(&rocket, &vehicle, UnitSystem::default()).unwrap(),
+        altitude: 120.0,
+        nodes: vec![2.0],
+        stage: 1,
+        grid: CfdGrid::Coarse,
+        compute: Default::default(),
+        cpu_only: false,
+    };
     let events = Arc::new(Mutex::new(Vec::<Event>::new()));
     let log = events.clone();
     let t0 = Instant::now();
@@ -171,7 +195,15 @@ fn reports_go_on_at_about_ten_hertz_and_the_first_of_a_run_always_goes() {
 fn a_table_that_stopped_early_is_a_partial_of_the_range_and_nothing_else_is() {
     let (rocket, vehicle) = example();
     let mapped = plan(&rocket, &vehicle, UnitSystem::default());
-    let job = Job { plan: mapped.clone().unwrap(), altitude: 120.0, nodes: nodes((0.1, 3.0)).unwrap(), stage: 1, grid: CfdGrid::Coarse };
+    let job = Job {
+        plan: mapped.clone().unwrap(),
+        altitude: 120.0,
+        nodes: nodes((0.1, 3.0)).unwrap(),
+        stage: 1,
+        grid: CfdGrid::Coarse,
+        compute: Default::default(),
+        cpu_only: false,
+    };
     let mut tracker = Tracker::new(crate::analyze::solve::Kind::Drag, Tracker::drag_units(&job.nodes), "Test GPU");
     let done = |mach: f64, quality: Option<CfdQuality>| PointDone {
         at: 10.0,

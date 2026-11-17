@@ -30,9 +30,9 @@ click (312, 20)
 screenshot added-tube-undone.png
 
 # The mode switch: Simulate and Analyze keep the top bar and status strip.
-click (663, 18)
+click (625, 18)
 screenshot simulate.png
-click (737, 18)
+click (690, 18)
 screenshot analyze.png
-click (598, 18)
+click (565, 18)
 screenshot back-to-build.png

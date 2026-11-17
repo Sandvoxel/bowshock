@@ -116,7 +116,7 @@ fn cfd_against_openrocket() {
             .collect();
         rows.sort_by(|a, b| a.0.total_cmp(&b.0));
         let nodes = nodes((0.1, 3.0)).unwrap();
-        let job = Job { plan, altitude: 0.0, nodes, stage: 1, grid: CfdGrid::Coarse };
+        let job = Job { plan, altitude: 0.0, nodes, stage: 1, grid: CfdGrid::Coarse, compute: Default::default(), cpu_only: false };
         let t0 = Instant::now();
         let table = match solve(&job, &Arc::new(AtomicBool::new(false)), |_| ()) {
             Ok(t) => t,

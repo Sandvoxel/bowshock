@@ -1,0 +1,38 @@
+# Remote compute: where the CFD solves run. The choice lives in Preferences > Compute; Analyze > CFD table has the one-line
+# `Runs on:` indicator with a Change… button that opens it. Run headless with a scratch settings file and the scripted solves
+# (the real remote solve takes minutes and the driver waits for running tasks; `remote-setup` is a solve still building its worker
+# on the remote, `remote-mid` one running on the remote GPU):
+#   BOWSHOCK_SETTINGS_FILE=/tmp/remote-compute-settings.json BOWSHOCK_CFD_DEMO=remote-setup,remote-mid \
+#     cargo run --release -q -p bowshock -- drive --example crates/bowshock/scripts/remote-compute.drive out/remote-compute
+# `Test connection` talks to the real host below over SSH (key auth; the first run provisions the worker there).
+viewport 1300x800
+click "Analyze"
+
+# Local: the CFD table method's indicator reads `Runs on: This computer`.
+click "CFD table"
+move (100, 700)
+move (102, 702)
+screenshot compute-1-local-analyze.png
+
+# Preferences > Compute, This computer.
+click "Change…"
+screenshot compute-2-prefs-local.png
+
+# Remote GPU with the target typed in.
+click "Remote GPU"
+click "user@host"
+type "sandvoxel@192.168.1.88"
+screenshot compute-3-prefs-remote.png
+
+# Test connection against the real host: the set-up steps, then `<gpu> on <host>`.
+click "Test connection"
+screenshot compute-4-prefs-tested.png
+
+# Back on Analyze: the first scripted solve (still building the worker on the remote) is cancelled and the second, `remote-mid`,
+# runs on the remote GPU: the device line reads `<gpu> on <host>`.
+click "Done"
+click "Cancel"
+click "Re-solve"
+move (100, 700)
+move (102, 702)
+screenshot compute-5-remote-solve.png

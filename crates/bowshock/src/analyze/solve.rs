@@ -212,6 +212,8 @@ pub struct Tracker {
     live: Option<Live>,
     /// Where the solve runs: the GPU's name, or `CPU`.
     pub device: String,
+    /// The step of setting up a remote GPU, shown until `device` is known.
+    pub setup: String,
     /// Why the GPU was not used, when it was not.
     pub fallback: Option<String>,
     cursor: f64,
@@ -225,7 +227,20 @@ impl Tracker {
     /// A solve of `units` (in the order they run) on `device`.
     pub fn new(kind: Kind, units: Vec<Unit>, device: impl Into<String>) -> Tracker {
         let slots = vec![Slot::Pending; units.len()];
-        Tracker { kind, units, slots, live: None, device: device.into(), fallback: None, cursor: 0.0, clock: 0.0, fraction: 0.0, cpu_units: 0, gpu_units: 0 }
+        Tracker {
+            kind,
+            units,
+            slots,
+            live: None,
+            device: device.into(),
+            setup: String::new(),
+            fallback: None,
+            cursor: 0.0,
+            clock: 0.0,
+            fraction: 0.0,
+            cpu_units: 0,
+            gpu_units: 0,
+        }
     }
 
     /// The units of a drag table at `nodes`.

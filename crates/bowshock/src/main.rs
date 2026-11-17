@@ -15,6 +15,7 @@ mod gallery;
 mod icons;
 mod logo;
 mod platform;
+mod prefs;
 mod print;
 mod simulate;
 mod theme;

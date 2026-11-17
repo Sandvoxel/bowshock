@@ -10,7 +10,7 @@ use super::{part_menu, scale, Mode};
 use crate::build::{inspector, lanes, parts_bin};
 use crate::units::UnitSystem;
 use crate::viewport;
-use crate::{analyze, chrome, export, print, simulate};
+use crate::{analyze, chrome, export, prefs, print, simulate};
 
 /// A key press, as the subscription reports it.
 #[derive(Debug, Clone)]
@@ -108,6 +108,8 @@ pub enum Message {
     Export(export::Message),
     /// The print / PDF dialog.
     Print(print::Message),
+    /// The Preferences window.
+    Prefs(prefs::Message),
 }
 
 /// What a click means while a field is in pick mode (the viewport and the lanes are pickable): `Some(Some(part))` opens the part's
@@ -151,6 +153,7 @@ pub(super) fn shortcut(press: &KeyPress) -> Option<Message> {
                 ("e", false) => Some(Message::Example),
                 ("l", false) => Some(Message::Chrome(chrome::Message::NewConfiguration)),
                 ("p", false) => Some(Message::Print(print::Message::Open)),
+                (",", false) => Some(Message::Prefs(prefs::Message::Show)),
                 _ => None,
             }
         }

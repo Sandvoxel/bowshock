@@ -1,5 +1,6 @@
 //! The top bar (design/components/Navigation, BuilderScreen): logo and name, the document's file name with its dirty marker,
-//! undo and redo, the Build / Simulate / Analyze switch in the centre, the unit system select and the primary Simulate button.
+//! undo and redo, the Build / Simulate / Analyze switch in the centre, the theme toggle and Preferences gear, the unit system select
+//! and the primary Simulate button.
 
 use std::fmt;
 
@@ -10,6 +11,7 @@ use super::Message as ChromeMessage;
 use crate::app::document::EXTENSION;
 use crate::app::{Ctx, Message, Mode};
 use crate::logo;
+use crate::prefs;
 use crate::theme::{self, MONO, SANS_SEMIBOLD};
 use crate::tokens::{CONTROL_H, SPACE_1, SPACE_2, SPACE_3, TEXT_BODY, TEXT_LABEL, TOPBAR_H};
 use crate::units::UnitSystem;
@@ -73,15 +75,7 @@ pub fn top_bar(ctx: &Ctx) -> Element<'_, Message> {
 
     let modes = segmented(&[(Mode::Build, "Build"), (Mode::Simulate, "Simulate"), (Mode::Analyze, "Analyze")], ctx.mode, Message::Mode);
 
-    let current = ctx.units;
-    let mut systems: Vec<SystemLabel> = UnitSystem::PRESETS.iter().copied().map(SystemLabel::Preset).collect();
-    systems.push(SystemLabel::Custom(current));
-    let shown = if current.preset().is_some() { SystemLabel::Preset(current) } else { SystemLabel::Custom(current) };
-    let units = container(field::select(systems, Some(shown), |s| match s {
-        SystemLabel::Preset(set) => Message::Units(set),
-        SystemLabel::Custom(_) => Message::Chrome(ChromeMessage::OpenUnits),
-    }))
-    .width(UNITS_W);
+    let units = container(units_select(ctx.units, Message::Units, Message::Chrome(ChromeMessage::OpenUnits))).width(UNITS_W);
     let theme_toggle = theme_toggle(ctx.dark);
     let simulate: Element<'_, Message> = button("Simulate", Weight::Primary).icon(Mark::Play).key("F5").on_press(Message::Run).into();
     let menu: Element<'_, Message> =
@@ -94,10 +88,23 @@ pub fn top_bar(ctx: &Ctx) -> Element<'_, Message> {
     let simulate = row![simulate, divider, menu].spacing(0);
 
     container(
-        row![logo, rule(), file, rule(), undo, redo, Space::new().width(Fill), modes, Space::new().width(Fill), theme_toggle, units, simulate,]
-            .spacing(SPACE_3)
-            .padding([0.0, SPACE_3])
-            .align_y(Center),
+        row![
+            logo,
+            rule(),
+            file,
+            rule(),
+            undo,
+            redo,
+            Space::new().width(Fill),
+            modes,
+            Space::new().width(Fill),
+            row![theme_toggle, gear_button()],
+            units,
+            simulate,
+        ]
+        .spacing(SPACE_3)
+        .padding([0.0, SPACE_3])
+        .align_y(Center),
     )
     .height(TOPBAR_H)
     .center_y(TOPBAR_H)
@@ -108,6 +115,52 @@ pub fn top_bar(ctx: &Ctx) -> Element<'_, Message> {
 /// A vertical hairline between regions of the bar.
 fn rule<'a>() -> Element<'a, Message> {
     container(Space::new()).width(1).height(20).style(theme::hairline).boxed()
+}
+
+/// The unit system select: the named sets and `Custom`. Choosing a set sends `on_set(set)`; choosing the custom entry sends `on_custom`.
+/// The top bar and Preferences > Units both draw it, so they offer the same entries.
+pub fn units_select<'a, M: Clone + 'a>(current: UnitSystem, on_set: impl Fn(UnitSystem) -> M + 'a, on_custom: M) -> Element<'a, M> {
+    let mut systems: Vec<SystemLabel> = UnitSystem::PRESETS.iter().copied().map(SystemLabel::Preset).collect();
+    systems.push(SystemLabel::Custom(current));
+    let shown = if current.preset().is_some() { SystemLabel::Preset(current) } else { SystemLabel::Custom(current) };
+    field::select(systems, Some(shown), move |s| match s {
+        SystemLabel::Preset(set) => on_set(set),
+        SystemLabel::Custom(_) => on_custom.clone(),
+    })
+}
+
+/// The Preferences gear (⌘, / Ctrl+,). Its (transparent) word is also in the button so a script can `click "Prefs"`.
+fn gear_button<'a>() -> Element<'a, Message> {
+    let glyph = canvas(GearGlyph).width(CONTROL_H).height(CONTROL_H);
+    let hidden = container(text("Prefs").size(8).style(|_: &Theme| text::Style { color: Some(iced::Color::TRANSPARENT), selection: None })).center(Fill);
+    let body = iced::widget::stack![glyph, hidden].width(CONTROL_H).height(CONTROL_H);
+    let button = iced::widget::button(body).padding(0).style(theme::ghost).on_press(Message::Prefs(prefs::Message::Show));
+    let tip = if cfg!(target_os = "macos") { "Preferences  ⌘," } else { "Preferences  Ctrl+," };
+    iced::widget::tooltip(button, container(text(tip).size(TEXT_LABEL + 1.0)).padding([SPACE_1, SPACE_2]).style(theme::tooltip))
+        .position(iced::widget::tooltip::Position::Bottom)
+        .boxed()
+}
+
+/// A gear: a ring with eight teeth, in the button's text colour.
+struct GearGlyph;
+
+impl canvas::Program<Message> for GearGlyph {
+    type State = ();
+
+    fn draw(&self, _: &(), renderer: &iced::Renderer, theme: &Theme, bounds: iced::Rectangle, cursor: iced::mouse::Cursor) -> Vec<canvas::Geometry> {
+        let t = theme::tokens(theme);
+        let color = if cursor.is_over(bounds) { t.ink } else { t.ink_muted };
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let c = iced::Point::new(bounds.width / 2.0, bounds.height / 2.0);
+        frame.stroke(&canvas::Path::circle(c, 4.2), canvas::Stroke::default().with_color(color).with_width(1.6));
+        frame.stroke(&canvas::Path::circle(c, 1.5), canvas::Stroke::default().with_color(color).with_width(1.2));
+        let teeth = canvas::Stroke::default().with_color(color).with_width(2.4);
+        for i in 0..8 {
+            let (s, k) = (i as f32 * std::f32::consts::FRAC_PI_4).sin_cos();
+            frame.stroke(&canvas::Path::line(iced::Point::new(c.x + k * 5.4, c.y + s * 5.4), iced::Point::new(c.x + k * 7.4, c.y + s * 7.4)), teeth);
+        }
+        vec![frame.into_geometry()]
+    }
 }
 
 /// The theme toggle: a sun on the dark theme (click for light), a moon on the light one. The word it switches to ("Light" /

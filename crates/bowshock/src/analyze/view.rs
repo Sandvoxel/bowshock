@@ -69,7 +69,7 @@ fn left<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
     } else {
         vec![
             head("METHOD", false),
-            container(method(state)).padding([0.0, SPACE_3]).boxed(),
+            container(method(state, ctx)).padding([0.0, SPACE_3]).boxed(),
             head("CONDITIONS", true),
             container(conditions(state, ctx)).padding([0.0, SPACE_3]).boxed(),
             Space::new().height(SPACE_3).boxed(),
@@ -113,7 +113,7 @@ fn bubble<'a>(tip: &'a str) -> Element<'a, Message> {
     container(text(tip).size(TEXT_BODY)).width(260).padding([SPACE_1, SPACE_2]).style(|t: &Theme| theme::tooltip(t)).boxed()
 }
 
-fn method(state: &State) -> Element<'_, Message> {
+fn method<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
     let mut cells: Vec<Element<'_, Message>> = Vec::new();
     for (i, m) in [Method::Barrowman, Method::Extended, Method::CfdTable].into_iter().enumerate() {
         if i > 0 {
@@ -191,6 +191,9 @@ fn method(state: &State) -> Element<'_, Message> {
     if let Some(lift) = lift_row {
         col = col.push(lift);
     }
+    if cfd_line {
+        col = col.push(runs_on(ctx));
+    }
     if let Some(stopped) = state.cfd.stopped.as_ref().filter(|s| cfd_line && !solving && s.table.is_some()) {
         let keep: Element<'_, Message> = push(&stopped.keep_label, Weight::Primary).on_press(Message::CfdKeep).into();
         let discard: Element<'_, Message> = push("Discard", Weight::Secondary).on_press(Message::CfdDiscard).into();
@@ -231,6 +234,17 @@ fn method(state: &State) -> Element<'_, Message> {
     col.boxed()
 }
 
+/// `Runs on: This computer` / `Runs on: <gpu> on <host>` and the button that opens Preferences at Compute.
+fn runs_on<'a>(ctx: &'a Ctx) -> Element<'a, Message> {
+    let place = match (&ctx.compute, &ctx.compute_device) {
+        (crate::app::settings::Compute::Local, _) => "This computer".to_string(),
+        (_, Some(device)) => device.clone(),
+        (c, None) => format!("Remote GPU ({})", if c.text().is_empty() { "no target yet".to_string() } else { c.text() }),
+    };
+    let change: Element<'_, Message> = push("Change…", Weight::Ghost).on_press(Message::OpenPrefs).small().into();
+    row![muted(format!("Runs on: {place}"), 12.0), change].spacing(SPACE_2).align_y(iced::Center).boxed()
+}
+
 /// The provenance of the CFD table method, line by line: the solve in progress, or what the table is and was not (the kit's
 /// `42 Mach × 9 AoA points · solved on GPU (Luma) · 6 min ago`, here Mach points only: the solver has no angle of attack), then why
 /// the plots show another method if they do.
@@ -253,8 +267,13 @@ fn cfd_lines(state: &State) -> Vec<String> {
                 });
                 lines.push(format!("Showing {base} until one is solved; Re-solve starts a solve."));
             }
-            cfd::Status::Fresh | cfd::Status::Stale => {}
+            cfd::Status::Fresh | cfd::Status::Stale => {
+                lines.extend(cfd.failed.iter().filter(|(_, why)| why != "solve cancelled").map(|(_, why)| format!("Solve stopped: {why}")));
+            }
         }
+    }
+    if cfd.lift_solving.is_none() {
+        lines.extend(cfd.lift_error.iter().map(|why| format!("3D stability solve stopped: {why}")));
     }
     if let Some((out, info)) = state.output().and_then(|o| o.cfd.as_ref().map(|i| (o, i))) {
         if let Some((_, summary)) = cfd.summary.as_ref().filter(|(key, _)| cfd.table.as_ref().is_some_and(|t| t.key == *key)) {

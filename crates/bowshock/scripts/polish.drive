@@ -22,7 +22,7 @@ release (800, 118)
 click (916, 124)
 screenshot polish-4-tail-light.png
 # Simulate: rename a flight by double-clicking its name.
-click (663, 18)
+click (625, 18)
 click "Nominal"
 click "Nominal"
 type "Windy run"
@@ -31,5 +31,5 @@ screenshot polish-5-simulate-renamed.png
 click "Run"
 screenshot polish-6-simulate-light.png
 # Analyze in light.
-click (722, 18)
+click (690, 18)
 screenshot polish-7-analyze-light.png

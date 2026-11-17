@@ -225,6 +225,7 @@ fn menu_rows(recent: &Recent) -> (Vec<Row>, Vec<Row>) {
         m("Export 3D model…", String::new(), Message::Export(crate::export::Message::Open(crate::export::Kind::Model))),
         m("Export image…", String::new(), Message::Export(crate::export::Message::Open(crate::export::Kind::Image))),
         m("Open example", format!("{MOD}E"), Message::Example),
+        m("Preferences…", format!("{MOD},"), Message::Prefs(crate::prefs::Message::Show)),
     ];
     let recents = recent
         .paths()
@@ -518,7 +519,18 @@ mod menu_tests {
         let labels: Vec<&str> = commands.iter().map(|r| r.0.as_str()).collect();
         assert_eq!(
             labels,
-            ["New", "Open…", "Import OpenRocket (.ork)…", "Save", "Save as…", "Print / export PDF…", "Export 3D model…", "Export image…", "Open example"]
+            [
+                "New",
+                "Open…",
+                "Import OpenRocket (.ork)…",
+                "Save",
+                "Save as…",
+                "Print / export PDF…",
+                "Export 3D model…",
+                "Export image…",
+                "Open example",
+                "Preferences…"
+            ]
         );
         let routes: Vec<bool> = vec![
             matches!(commands[0].2, Some(Message::New)),
@@ -530,6 +542,7 @@ mod menu_tests {
             matches!(commands[6].2, Some(Message::Export(crate::export::Message::Open(crate::export::Kind::Model)))),
             matches!(commands[7].2, Some(Message::Export(crate::export::Message::Open(crate::export::Kind::Image)))),
             matches!(commands[8].2, Some(Message::Example)),
+            matches!(commands[9].2, Some(Message::Prefs(crate::prefs::Message::Show))),
         ];
         assert!(routes.iter().all(|&ok| ok), "{routes:?}");
         assert_eq!(commands[3].1, format!("{MOD}S"));

@@ -7,7 +7,7 @@ viewport 1280x800
 scale 1
 
 # The select, open: the named sets and Custom….
-click (1008, 18)
+click (982, 18)
 screenshot units-select.png
 click "Custom…"
 screenshot units-panel-open.png
@@ -23,6 +23,6 @@ click (580, 600)
 screenshot units-build.png
 
 # Simulate in the same set.
-click (663, 18)
+click (625, 18)
 click "Run"
 screenshot units-simulate.png

@@ -35,7 +35,7 @@ use crate::build::{self, inspector, lanes, parts_bin};
 use crate::chrome;
 use crate::theme;
 use crate::viewport;
-use crate::{analyze, export, print, simulate};
+use crate::{analyze, export, prefs, print, simulate};
 use route::part_ids;
 
 /// The application state.
@@ -56,6 +56,8 @@ pub struct App {
     export: export::State,
     /// The print / PDF dialog.
     print: print::State,
+    /// The Preferences window.
+    prefs: prefs::State,
 }
 
 impl App {
@@ -80,6 +82,7 @@ impl App {
             chrome: chrome::State::new(),
             export: export::State::new(),
             print: print::State::new(),
+            prefs: prefs::State::new(),
         }
     }
 
@@ -104,7 +107,8 @@ impl App {
         app.ctx.recent = files::Recent::load(app.ctx.env.recent_file.clone());
         // Unit choices are the user's, kept across documents and runs. Unit tests start from the defaults, never the real file.
         app.ctx.settings_file = app.ctx.env.settings_file.clone();
-        app.ctx.units = settings::Settings::load(app.ctx.settings_file.as_deref()).units;
+        let settings = settings::Settings::load(app.ctx.settings_file.as_deref());
+        app.ctx.apply_settings(settings);
         app.after_update();
         // A headless `drive` run delivers no key subscription events, so `BOWSHOCK_DRIVE_TAB=1` presses Tab once at start-up.
         if app.ctx.env.drive_tab {
@@ -123,6 +127,11 @@ impl App {
     #[cfg(test)]
     pub fn ctx_mut(&mut self) -> &mut Ctx {
         &mut self.ctx
+    }
+    /// The Preferences window's state (tests).
+    #[cfg(test)]
+    pub fn prefs(&self) -> &prefs::State {
+        &self.prefs
     }
 
     /// The Analyze screen's state (tests).
@@ -248,6 +257,7 @@ impl App {
         layers.extend(files::unsaved_modal(ctx));
         layers.extend(self.export.view());
         layers.extend(self.print.view());
+        layers.extend(self.prefs.view(ctx));
         layers.extend(refs::menu_view(ctx));
         layers.extend(part_menu::view(ctx));
         layers.extend(scale::view(ctx));

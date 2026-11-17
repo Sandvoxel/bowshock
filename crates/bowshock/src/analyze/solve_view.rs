@@ -103,6 +103,7 @@ fn clock(t: &Tracker, elapsed: f64) -> (String, String) {
 /// Where it runs: `Apple M1 Max · GPU (Luma)`, or `CPU`.
 fn device(t: &Tracker) -> String {
     match t.device.as_str() {
+        "" if !t.setup.is_empty() => t.setup.clone(),
         "" => "starting the solver".to_string(),
         "CPU" => "CPU".to_string(),
         gpu => format!("{gpu} · GPU (Luma)"),

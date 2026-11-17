@@ -5,7 +5,7 @@
 viewport 1280x800
 
 # Simulate: the example stores the kit's four flights; the document is clean.
-click (663, 18)
+click (625, 18)
 screenshot FlightsStored-list.png
 
 # Fly Nominal, then edit Windy's wind: the title gets its dirty dot and Nominal's result stays current (not faint).
@@ -25,6 +25,6 @@ click (352, 20)
 screenshot FlightsStored-undo.png
 
 # Build and back: the flights are still there.
-click (597, 18)
-click (663, 18)
+click (565, 18)
+click (625, 18)
 screenshot FlightsStored-back.png

@@ -1,6 +1,6 @@
 # Charts QA: Simulate (run, hover, zoom, compare), ground track, Analyze, dark and light.
 viewport 1300x900
-click (663, 18)
+click (625, 18)
 click "Run"
 move (560, 300)
 move (570, 300)

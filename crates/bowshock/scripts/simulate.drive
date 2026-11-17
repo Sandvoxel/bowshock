@@ -4,7 +4,7 @@
 viewport 1280x800
 
 # Simulate mode (the top bar's switch), before anything has run.
-click (663, 18)
+click (625, 18)
 screenshot SimulateScreen-empty.png
 
 # Run the selected flight (Nominal) on a worker thread; the result lands before the next step.

@@ -1,6 +1,8 @@
 use super::fresh::now;
 use super::plan::{lift_key, nodes, table_key, Plan, DRAG_TOLERANCE, LIFT_ALPHAS, SOLVER_CEILING};
+use super::remote::{self, Failed};
 use crate::analyze::solve::{Iteration, Outcome, PointDone, Slot, Tracker};
+use crate::app::settings::Compute;
 use bowshock_core as solver;
 use bowshock_model::{CfdGrid, CfdLiftPoint, CfdLiftTable, CfdPoint, CfdQuality, CfdTable};
 use bowshock_sim::{vs_mach, Atmosphere};
@@ -22,6 +24,10 @@ pub struct Job {
     pub stage: u32,
     /// The grid to solve on.
     pub grid: CfdGrid,
+    /// Where to solve: this computer, or a remote GPU over SSH.
+    pub compute: Compute,
+    /// Solve on this computer's CPU even if it has a usable GPU (Preferences > Compute); ignored for a remote GPU.
+    pub cpu_only: bool,
 }
 
 /// A message from a running solve (the drag table's or the 3D stability solve's).
@@ -29,6 +35,8 @@ pub struct Job {
 pub enum Event {
     /// Where the solve runs, sent first (the GPU's name, or `CPU`).
     Device(String),
+    /// A step of setting up a remote GPU (`Connecting`, `Building the worker: …`), until [`Event::Device`] says where it runs.
+    Setup(String),
     /// The running Mach number (and angle) reports, about ten times a second.
     Iteration(Iteration),
     /// A Mach number (and angle) ended.
@@ -49,6 +57,10 @@ pub struct LiftJob {
     pub plan: Plan,
     /// The Mach numbers to solve, ascending ([`lift_nodes`]).
     pub nodes: Vec<f64>,
+    /// Where to solve: this computer, or a remote GPU over SSH.
+    pub compute: Compute,
+    /// Solve on this computer's CPU even if it has a usable GPU (Preferences > Compute); ignored for a remote GPU.
+    pub cpu_only: bool,
 }
 
 /// Keeps the usable points of a 3D solve: points of quality Failed or with a non-finite value are dropped with a note on
@@ -83,8 +95,11 @@ pub fn solve_lift(job: &LiftJob, cancel: &Arc<AtomicBool>, progress: impl Fn(Eve
     let total = job.nodes.len();
     let mut raw: Vec<solver::LiftPoint> = Vec::new();
     let (mut gpu, mut cpu) = (0usize, 0usize);
-    let mut backend = solver::Backend::Auto;
-    send(Event::Device(device_label()));
+    let mut backend = if job.cpu_only { solver::Backend::Cpu } else { solver::Backend::Auto };
+    let mut remote = remote::open(&job.compute, &send)?;
+    if remote.is_none() {
+        send(Event::Device(if job.cpu_only { "CPU".to_string() } else { device_label() }));
+    }
     for &mach in &job.nodes {
         if cancel.load(Ordering::Relaxed) {
             return Err(CANCELLED.to_string());
@@ -92,15 +107,20 @@ pub fn solve_lift(job: &LiftJob, cancel: &Arc<AtomicBool>, progress: impl Fn(Eve
         let mut analysis = solver::Analysis::new(&job.plan.body)
             .map_err(|e| e.to_string())?
             .resolution(solver::Resolution::Coarse)
-            .backend(backend)
-            .on_progress(sink(started, cancel.clone(), send.clone(), true));
+            // A remote solve never falls back to the CPU: its failure is the solve's.
+            .backend(if remote.is_some() { solver::Backend::Gpu } else { backend });
         if let Some(fins) = &job.plan.fins {
             analysis = analysis.fins(fins.clone());
         }
-        let polar = match analysis.run_lift(&[mach], &LIFT_ALPHAS) {
+        let progress = sink(started, cancel.clone(), send.clone(), true);
+        let result = match remote.as_mut() {
+            Some(session) => analysis.spec().map_err(|e| Failed::local(mach, e)).and_then(|spec| session.lift(&spec, mach, &LIFT_ALPHAS, &progress)),
+            None => analysis.on_progress(progress).run_lift(&[mach], &LIFT_ALPHAS).map_err(|e| Failed::local(mach, e)),
+        };
+        let polar = match result {
             Ok(polar) => polar,
-            Err(solver::Error::Cancelled) => return Err(CANCELLED.to_string()),
-            Err(e) => return Err(format!("Mach {mach:.2}: {e}")),
+            Err(Failed::Cancelled) => return Err(CANCELLED.to_string()),
+            Err(Failed::Message(m)) => return Err(m),
         };
         let on_cpu = polar.backend == solver::BackendUsed::Cpu;
         if on_cpu {
@@ -134,16 +154,17 @@ pub fn solve_lift(job: &LiftJob, cancel: &Arc<AtomicBool>, progress: impl Fn(Eve
     }
     let mut notes = Vec::new();
     let points = reduce_lift(&raw, total, &mut notes)?;
-    let backend_name = match (gpu, cpu) {
-        (_, 0) => "GPU (Luma)",
-        (0, _) => "CPU",
-        _ => "GPU (Luma) and CPU",
+    let backend_name = match (&remote, gpu, cpu) {
+        (Some(session), ..) => format!("GPU (Luma) · {}", session.label),
+        (None, _, 0) => "GPU (Luma)".to_string(),
+        (None, 0, _) => "CPU".to_string(),
+        _ => "GPU (Luma) and CPU".to_string(),
     };
     Ok(CfdLiftTable {
         key: lift_key(job.plan.geometry, &job.nodes),
         solved_at: now(),
         solve_seconds: started.elapsed().as_secs_f64(),
-        backend: backend_name.to_string(),
+        backend: backend_name,
         points,
         notes,
     })
@@ -290,7 +311,11 @@ pub fn partial_table(job: &Job, tracker: &Tracker, seconds: f64) -> Option<CfdTa
     );
     notes.push(format!("Stopped early: {attempted} of {} Mach points solved.", job.nodes.len()));
     let (cpu, gpu) = tracker.units_by_device();
-    Some(table_from(job, Tally { points, notes, gpu, cpu, fallback: tracker.fallback.clone() }, attempted, seconds))
+    let mut table = table_from(job, Tally { points, notes, gpu, cpu, fallback: tracker.fallback.clone() }, attempted, seconds);
+    if job.compute.is_remote() && !tracker.device.is_empty() {
+        table.backend = format!("GPU (Luma) · {}", tracker.device);
+    }
+    Some(table)
 }
 
 /// How much of the table of the current range `table` is, when it is a table that stopped early: `(solved, of)` Mach numbers,
@@ -311,11 +336,14 @@ pub fn solve(job: &Job, cancel: &Arc<AtomicBool>, progress: impl Fn(Event) + Sen
     let altitude = job.altitude.clamp(0.0, SOLVER_CEILING);
     let total = job.nodes.len();
     let mut tally = Tally { points: Vec::with_capacity(total), notes: job.plan.notes.clone(), gpu: 0, cpu: 0, fallback: None };
-    let mut backend = solver::Backend::Auto;
+    let mut backend = if job.cpu_only { solver::Backend::Cpu } else { solver::Backend::Auto };
     if job.altitude > SOLVER_CEILING {
         tally.notes.push("The solver's atmosphere ends at 20 km; solved there.".to_string());
     }
-    send(Event::Device(device_label()));
+    let mut remote = remote::open(&job.compute, &send)?;
+    if remote.is_none() {
+        send(Event::Device(if job.cpu_only { "CPU".to_string() } else { device_label() }));
+    }
     for &mach in &job.nodes {
         if cancel.load(Ordering::Relaxed) {
             return Err(CANCELLED.to_string());
@@ -330,15 +358,20 @@ pub fn solve(job: &Job, cancel: &Arc<AtomicBool>, progress: impl Fn(Event) + Sen
                 CfdGrid::Medium => solver::Resolution::Medium,
             })
             .roughness(job.plan.body_roughness)
-            .backend(backend)
-            .on_progress(sink(started, cancel.clone(), send.clone(), false));
+            // A remote solve never falls back to the CPU: its failure is the solve's.
+            .backend(if remote.is_some() { solver::Backend::Gpu } else { backend });
         if let Some(fins) = &job.plan.fins {
             analysis = analysis.fins(fins.clone());
         }
-        let polar = match analysis.run(&[mach]) {
+        let progress = sink(started, cancel.clone(), send.clone(), false);
+        let result = match remote.as_mut() {
+            Some(session) => analysis.spec().map_err(|e| Failed::local(mach, e)).and_then(|spec| session.drag(&spec, mach, &progress)),
+            None => analysis.on_progress(progress).run(&[mach]).map_err(|e| Failed::local(mach, e)),
+        };
+        let polar = match result {
             Ok(polar) => polar,
-            Err(solver::Error::Cancelled) => return Err(CANCELLED.to_string()),
-            Err(e) => return Err(format!("Mach {mach:.2}: {e}")),
+            Err(Failed::Cancelled) => return Err(CANCELLED.to_string()),
+            Err(Failed::Message(m)) => return Err(m),
         };
         let cpu = polar.backend == solver::BackendUsed::Cpu;
         if cpu {
@@ -384,5 +417,9 @@ pub fn solve(job: &Job, cancel: &Arc<AtomicBool>, progress: impl Fn(Event) + Sen
     if tally.points.len() < 2 && total >= 2 {
         return Err("the solver did not converge at enough Mach numbers".to_string());
     }
-    Ok(table_from(job, tally, total, started.elapsed().as_secs_f64()))
+    let mut table = table_from(job, tally, total, started.elapsed().as_secs_f64());
+    if let Some(session) = &remote {
+        table.backend = format!("GPU (Luma) · {}", session.label);
+    }
+    Ok(table)
 }

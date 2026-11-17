@@ -4,10 +4,10 @@ use bowshock_model::PartId;
 use iced::{keyboard, Task};
 
 use super::message::{pick_intercept, shortcut};
-use super::{drag, files, part_menu, scale, settings, App, KeyPress, Message, Mode, Pending, Selection};
+use super::{drag, files, part_menu, scale, App, KeyPress, Message, Mode, Pending, Selection};
 use crate::build::{inspector, parts_bin};
 use crate::viewport;
-use crate::{chrome, export, print, simulate};
+use crate::{chrome, export, prefs, print, simulate};
 
 impl App {
     /// The modal overlays (unsaved changes, export, print, scale) take everything: Escape cancels, Enter confirms, and only the
@@ -46,6 +46,23 @@ impl App {
                 | Message::Key(_)
                 | Message::Export(_)
                 | Message::Print(_)
+                | Message::Viewport(viewport::Message::Fit(_) | viewport::Message::Resized(_))
+                | Message::Chrome(chrome::Message::Nothing) => {}
+                _ => return true,
+            }
+        }
+        if self.prefs.is_open() {
+            match message {
+                Message::Cancel => *message = Message::Prefs(prefs::Message::Close),
+                Message::Frame(_)
+                | Message::Cursor(_)
+                | Message::Resized(_)
+                | Message::Released
+                | Message::Key(_)
+                | Message::Prefs(_)
+                // Results of work that was already running (a solve, a flight) still arrive; the scrim keeps clicks from the page.
+                | Message::Analyze(_)
+                | Message::Simulate(_)
                 | Message::Viewport(viewport::Message::Fit(_) | viewport::Message::Resized(_))
                 | Message::Chrome(chrome::Message::Nothing) => {}
                 _ => return true,
@@ -102,15 +119,8 @@ impl App {
                 ctx.mode = mode;
                 self.chrome.dismiss();
             }
-            Message::ToggleTheme => ctx.dark = !ctx.dark,
-            Message::Units(units) => {
-                crate::units::clear_unit_overrides();
-                ctx.units = units;
-                let saved = settings::Settings { units }.save(ctx.settings_file.as_deref());
-                if let Err(e) = saved {
-                    ctx.notify(format!("Could not save settings: {e}"));
-                }
-            }
+            Message::ToggleTheme => ctx.set_dark(!ctx.dark),
+            Message::Units(units) => ctx.set_units(units),
             Message::Frame(now) => {
                 if let Some((_, since)) = ctx.flash {
                     if crate::viewport::flash::done(crate::viewport::flash::age(since, now, ctx.env.freeze_flash)) {
@@ -264,6 +274,7 @@ impl App {
             Message::Chrome(m) => return self.chrome.update(m, ctx),
             Message::Export(m) => return self.export.update(m, ctx, &mut self.viewport),
             Message::Print(m) => return self.print.update(m, ctx),
+            Message::Prefs(m) => return self.prefs.update(m, ctx),
         }
         Task::none()
     }
@@ -272,6 +283,10 @@ impl App {
     pub(super) fn key(&mut self, press: KeyPress) -> Task<Message> {
         if let Some(message) = shortcut(&press) {
             return self.route(message);
+        }
+        // Typing in Preferences is not a shortcut of the screen behind it.
+        if self.prefs.is_open() {
+            return Task::none();
         }
         if press.captured {
             return Task::none();

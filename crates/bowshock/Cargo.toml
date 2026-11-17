@@ -27,6 +27,8 @@ bowshock-sim = { path = "../bowshock-sim" }
 bowshock-motors = { path = "../bowshock-motors", features = ["thrustcurve"] }
 # The CFD solver behind the Analyze screen's `CFD table` method (GPU through Luma, CPU fallback).
 bowshock-core = { workspace = true, features = ["gpu"] }
+# Remote compute: the CFD solves run on another computer's GPU over SSH (`Compute::Remote`).
+bowshock-remote = { path = "../bowshock-remote" }
 rfd = "0.18"
 # Parts-bin presets are JSON files.
 serde = { version = "1", features = ["derive"] }

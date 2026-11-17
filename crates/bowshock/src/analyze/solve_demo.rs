@@ -32,6 +32,10 @@ pub enum Demo {
     LiftMid,
     /// A 3D solve that finished.
     LiftDone,
+    /// A drag solve that is still setting up a remote GPU (building the worker there).
+    RemoteSetup,
+    /// A drag solve stopped partway on a remote GPU.
+    RemoteMid,
 }
 
 impl Demo {
@@ -42,6 +46,8 @@ impl Demo {
             "stopped" => Demo::Stopped,
             "lift-mid" => Demo::LiftMid,
             "lift-done" => Demo::LiftDone,
+            "remote-setup" => Demo::RemoteSetup,
+            "remote-mid" => Demo::RemoteMid,
             _ => return None,
         })
     }
@@ -126,12 +132,16 @@ fn trace(mach: f64, alpha_deg: Option<f64>, target: f64, from: f64, until: usize
 /// The events of a scripted drag solve of `job`.
 pub fn events(demo: Demo, job: &Job) -> Vec<Event> {
     let nodes = &job.nodes;
+    if demo == Demo::RemoteSetup {
+        return vec![Event::Setup("Building the worker: Compiling bowshock-cfd v0.1.0 (31/118)".to_string())];
+    }
     let finished = match demo {
-        Demo::Mid => 4,
+        Demo::Mid | Demo::RemoteMid => 4,
         Demo::Stopped => 5.min(nodes.len()),
         _ => nodes.len(),
     };
-    let mut out = vec![Event::Device("Apple M1 Max".to_string())];
+    let device = if demo == Demo::RemoteMid { "NVIDIA GeForce RTX 3090 on omarchy" } else { "Apple M1 Max" };
+    let mut out = vec![Event::Device(device.to_string())];
     let mut at = 0.0;
     let mut tally = Tally { points: Vec::new(), notes: job.plan.notes.clone(), gpu: 0, cpu: 0, fallback: None };
     for &mach in &nodes[..finished] {
@@ -144,7 +154,7 @@ pub fn events(demo: Demo, job: &Job) -> Vec<Event> {
         tally.gpu += 1;
     }
     match demo {
-        Demo::Mid => {
+        Demo::Mid | Demo::RemoteMid => {
             // the next point has reached iteration 1 450
             let mach = nodes[finished];
             out.extend(trace(mach, None, cd(mach), at + SETUP, 1450));
@@ -228,7 +238,15 @@ mod tests {
     #[test]
     fn the_script_is_the_stream_the_tracker_expects() {
         let nodes = [0.1, 0.5, 0.8, 0.9, 1.0, 1.1, 1.3, 1.7, 2.3, 3.0];
-        let job = Job { plan: crate::analyze::cfd::test_plan(), altitude: 0.0, nodes: nodes.to_vec(), stage: 1, grid: bowshock_model::CfdGrid::Coarse };
+        let job = Job {
+            plan: crate::analyze::cfd::test_plan(),
+            altitude: 0.0,
+            nodes: nodes.to_vec(),
+            stage: 1,
+            grid: bowshock_model::CfdGrid::Coarse,
+            compute: Default::default(),
+            cpu_only: false,
+        };
         let mut t = Tracker::new(Kind::Drag, Tracker::drag_units(&nodes), "");
         for e in events(Demo::Mid, &job) {
             match e {
@@ -386,7 +404,12 @@ mod tests {
         let lift = app.analyze().cfd.lift_solving.as_ref().expect("Solve stability (3D) starts the 3D solve");
         let (serial, job) = (
             lift.stream.serial(),
-            LiftJob { plan: app.analyze().cfd.plan.as_ref().clone().unwrap(), nodes: cfd::lift_nodes(app.analyze().cond.mach).unwrap() },
+            LiftJob {
+                plan: app.analyze().cfd.plan.as_ref().clone().unwrap(),
+                nodes: cfd::lift_nodes(app.analyze().cond.mach).unwrap(),
+                compute: Default::default(),
+                cpu_only: false,
+            },
         );
         assert_eq!(lift.tracker.total(), 2 * job.nodes.len(), "a run per Mach number and angle");
         feed(&mut app, serial, lift_events(Demo::LiftMid, &job));
@@ -410,5 +433,34 @@ mod tests {
         assert_eq!(notice(&app), "Solved 3D stability · all converged · 3 min 28 s");
         let row = app.analyze().cfd.lift_summary.as_ref().map(|(_, s)| s.clone()).unwrap_or_default();
         assert!(row.starts_with("Solved 3D stability at ") && row.contains(" on Apple M1 Max · all converged"), "{row}");
+    }
+
+    #[test]
+    fn the_compute_setting_goes_with_the_solve_and_a_failed_connect_shows_on_the_screen() {
+        use crate::app::settings::Compute;
+        let mut app = App::with_example();
+        app.analyze_mut().cfd.demo = [Demo::RemoteSetup].into_iter().collect();
+        drop(app.update(AppMessage::Mode(Mode::Analyze)));
+        let remote = Compute::remote("nobody@invalid.invalid");
+        app.ctx_mut().compute = remote.clone();
+        // The solve the method starts carries it, and shows the set-up step where the device goes.
+        drop(app.update(AppMessage::Analyze(Message::Method(Method::CfdTable))));
+        let solving = app.analyze().cfd.solving.as_ref().expect("the method starts a solve");
+        let (serial, job) = (solving.stream.serial(), job(&app));
+        assert_eq!(job.compute, remote);
+        feed(&mut app, serial, events(Demo::RemoteSetup, &job));
+        let t = &app.analyze().cfd.solving.as_ref().unwrap().tracker;
+        assert_eq!((t.device.as_str(), t.setup.as_str()), ("", "Building the worker: Compiling bowshock-cfd v0.1.0 (31/118)"));
+        assert!(solve_view::compact(app.analyze()).len() > 1);
+        // A connect that fails is the solve's error: no table, the text on the screen, no CPU fallback.
+        let why = crate::analyze::cfd::remote::error_text(
+            "nobody@invalid.invalid",
+            &bowshock_remote::RemoteError::Ssh("Could not resolve hostname invalid.invalid".to_string()),
+        );
+        feed(&mut app, serial, vec![Event::Finished(Err(why.clone()))]);
+        assert!(app.analyze().cfd.solving.is_none());
+        assert_eq!(app.analyze().cfd.failed.as_ref().map(|f| f.1.as_str()), Some(why.as_str()));
+        assert!(notice(&app).contains("Could not resolve hostname"), "{}", notice(&app));
+        assert!(app.ctx().doc.rocket().cfd_table(1).is_none());
     }
 }

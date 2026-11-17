@@ -23,7 +23,7 @@ use crate::units::{Family, Quantity, UnitSystem};
 use crate::widgets::glyph::{self, Mark, Tone};
 use crate::widgets::segmented::{segmented_dense, Dense};
 pub use status_strip::status_strip;
-pub use top_bar::top_bar;
+pub use top_bar::{top_bar, units_select};
 
 /// Id of the rename field, so it can take focus when it appears.
 const RENAME_ID: iced::widget::Id = iced::widget::Id::new("rename-configuration");
@@ -323,20 +323,26 @@ fn run_menu<'a>(ctx: &'a Ctx) -> Element<'a, Message> {
     floating(panel.boxed(), Anchor::TopRight)
 }
 
-/// The custom units panel (the top bar's `Custom…`): one selector per quantity family, so lengths can be in inches and masses in
-/// kilograms at once. Every choice applies at once and is kept in the user's settings. It hangs from the top bar's right end.
-fn units_panel<'a>(ctx: &'a Ctx) -> Element<'a, Message> {
+/// One selector per quantity family (`mm cm m in ft`…), so lengths can be in inches and masses in kilograms at once: the body of
+/// the custom units panel and of Preferences > Units. `on_set` maps the whole unit set with one family changed to a message.
+pub fn unit_rows<'a, M: Clone + 'a>(units: UnitSystem, on_set: impl Fn(UnitSystem) -> M) -> Element<'a, M> {
     let dense = Dense { height: 22.0, pad: 6.0, size: 11.5 };
-    let mut rows = column![container(text("CUSTOM UNITS").font(MONO).size(TEXT_LABEL).style(theme::faint)).padding([SPACE_2, MENU_PAD])].spacing(0);
+    let mut rows = column![].spacing(6);
     for family in Family::ALL {
-        let units = family.quantity().units();
-        let options: Vec<(usize, &'static str)> = units.iter().enumerate().map(|(i, u)| (i, u.symbol)).collect();
-        let current = family.quantity().unit_index(ctx.units.unit(family));
-        let set = ctx.units;
-        let strip = segmented_dense(&options, current, move |i| Message::SetUnits(set.with(family, units[i].symbol)), dense, false);
+        let options: Vec<(usize, &'static str)> = family.quantity().units().iter().enumerate().map(|(i, u)| (i, u.symbol)).collect();
+        let current = family.quantity().unit_index(units.unit(family));
+        let strip = segmented_dense(&options, current, |i| on_set(units.with(family, family.quantity().units()[i].symbol)), dense, false);
         let line = row![container(text(family.label()).size(MENU_SIZE).style(theme::muted)).width(UNITS_LABEL_W), strip].align_y(Center).spacing(SPACE_2);
-        rows = rows.push(container(line).padding([3.0, MENU_PAD]).boxed());
+        rows = rows.push(line);
     }
+    rows.boxed()
+}
+
+/// The custom units panel (the top bar's `Custom…`): [`unit_rows`] under a head. Every choice applies at once and is kept in the
+/// user's settings. It hangs from the top bar's right end.
+fn units_panel<'a>(ctx: &'a Ctx) -> Element<'a, Message> {
+    let head = container(text("CUSTOM UNITS").font(MONO).size(TEXT_LABEL).style(theme::faint)).padding([SPACE_2, MENU_PAD]);
+    let mut rows = column![head, container(unit_rows(ctx.units, Message::SetUnits)).padding([3.0, MENU_PAD])].spacing(0);
     let note = "Areas and roughness follow length; angles are degrees, time is seconds.";
     rows = rows.push(container(text(note).size(TEXT_LABEL).style(theme::faint)).padding([SPACE_2, MENU_PAD]).boxed());
     let panel = container(mouse_area(rows).on_press(Message::Nothing)).width(UNITS_PANEL_W).style(theme::overlay);

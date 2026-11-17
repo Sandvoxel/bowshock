@@ -28,6 +28,7 @@
 mod fresh;
 mod interp;
 mod plan;
+pub mod remote;
 mod run;
 #[cfg(test)]
 mod tests;

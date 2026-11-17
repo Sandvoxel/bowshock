@@ -30,7 +30,7 @@ release (935, 250)
 click (1175, 763)
 type "3"
 type enter
-click (663, 18)
+click (625, 18)
 click "Run"
 click "Roll"
 screenshot cant-3-simulate-roll.png
