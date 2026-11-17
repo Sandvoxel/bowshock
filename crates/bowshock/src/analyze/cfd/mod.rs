@@ -30,6 +30,7 @@ mod interp;
 mod plan;
 pub mod remote;
 mod run;
+mod share;
 #[cfg(test)]
 mod tests;
 

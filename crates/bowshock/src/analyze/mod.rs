@@ -489,7 +489,7 @@ impl State {
         self.cfd.lift_error = None;
         let serial = self.cfd.serial;
         let key = Some(cfd::lift_key(plan.geometry, &nodes));
-        let tracker = solve::Tracker::new(solve::Kind::Stability, solve::Tracker::stability_units(&nodes, &cfd::LIFT_ALPHAS), "");
+        let tracker = solve::Tracker::new(solve::Kind::Stability, solve::Tracker::stability_units(&nodes, &cfd::LIFT_ALPHAS));
         let job =
             cfd::LiftJob { plan: plan.clone(), nodes, compute: ctx.compute.clone(), cpu_only: ctx.local_solver == crate::app::settings::LocalSolver::Cpu };
         let script = self.cfd.demo.pop_front().map(|demo| solve_demo::lift_events(demo, &job));
@@ -558,7 +558,7 @@ impl State {
             compute: ctx.compute.clone(),
             cpu_only: ctx.local_solver == crate::app::settings::LocalSolver::Cpu,
         });
-        let tracker = solve::Tracker::new(solve::Kind::Drag, solve::Tracker::drag_units(&nodes), "");
+        let tracker = solve::Tracker::new(solve::Kind::Drag, solve::Tracker::drag_units(&nodes));
         let script = self.cfd.demo.pop_front().map(|demo| solve_demo::events(demo, &job));
         let scripted = script.is_some();
         let (task, stream) = match script {
@@ -600,8 +600,8 @@ impl State {
         let solving = [self.cfd.solving.as_mut(), self.cfd.lift_solving.as_mut()].into_iter().flatten().find(|s| s.stream.serial() == serial);
         let Some(solving) = solving else { return };
         match event {
-            cfd::Event::Setup(step) => solving.tracker.setup = step,
-            cfd::Event::Device(name) => solving.tracker.device = name,
+            cfd::Event::Machines(infos) => solving.tracker.set_machines(&infos),
+            cfd::Event::Machine { index, at, state } => solving.tracker.on_machine(index, at, state),
             cfd::Event::Iteration(it) => solving.tracker.on_iteration(&it),
             cfd::Event::Point(done) => solving.tracker.on_done(&done),
             cfd::Event::Tick => {}

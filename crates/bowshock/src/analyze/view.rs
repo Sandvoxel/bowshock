@@ -234,13 +234,9 @@ fn method<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
     col.boxed()
 }
 
-/// `Runs on: This computer` / `Runs on: <gpu> on <host>` and the button that opens Preferences at Compute.
+/// `Runs on: This computer`, `Runs on: <gpu> on <host>` or `Runs on: Shared: 3 machines`, and the button that opens Preferences at Compute.
 fn runs_on<'a>(ctx: &'a Ctx) -> Element<'a, Message> {
-    let place = match (&ctx.compute, &ctx.compute_device) {
-        (crate::app::settings::Compute::Local, _) => "This computer".to_string(),
-        (_, Some(device)) => device.clone(),
-        (c, None) => format!("Remote GPU ({})", if c.text().is_empty() { "no target yet".to_string() } else { c.text() }),
-    };
+    let place = ctx.compute.runs_on(&ctx.compute_devices);
     let change: Element<'_, Message> = push("Change…", Weight::Ghost).on_press(Message::OpenPrefs).small().into();
     row![muted(format!("Runs on: {place}"), 12.0), change].spacing(SPACE_2).align_y(iced::Center).boxed()
 }

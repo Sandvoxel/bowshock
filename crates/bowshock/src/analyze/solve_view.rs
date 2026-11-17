@@ -21,7 +21,7 @@ use iced::{alignment, mouse, Color, Element, Fill, Length, Pixels, Point, Rectan
 use bowshock_model::CfdGrid;
 
 use super::compute::Data;
-use super::solve::{duration_text, eta_text, thousands, Kind, Live, Outcome, Slot, Tracker, Unit};
+use super::solve::{duration_text, eta_text, thousands, Kind, Live, MachineRow, MachineState, Outcome, Slot, Tracker, Unit};
 use super::{Message, State, Stopped};
 use crate::app::{ui, Ctx};
 use crate::theme::{self, MONO, SANS_SEMIBOLD};
@@ -80,18 +80,25 @@ fn name(kind: Kind) -> &'static str {
     }
 }
 
-/// `Mach 0.80 · point 4 of 10`, or with the angle `Mach 0.80 · 6° · run 4 of 16`.
+/// `Mach 0.80 · point 4 of 10`, or with the angle `Mach 0.80 · 6° · run 4 of 16`; with several in flight at once `3 points running ·
+/// 4 of 10 done`.
 fn headline(t: &Tracker) -> String {
-    match t.live() {
-        Some((u, _)) => {
+    let mut lives = t.lives();
+    match (lives.next(), lives.next()) {
+        (Some((u, _)), None) => {
             let at = t.units().iter().position(|x| x == u).map_or(1, |i| i + 1);
             match u.alpha_deg {
                 Some(a) => format!("Mach {:.2} · {a:.0}° · run {at} of {}", u.mach, t.total()),
                 None => format!("Mach {:.2} · point {at} of {}", u.mach, t.total()),
             }
         }
-        None if t.done_count() == 0 => "Starting the solver".to_string(),
-        None => format!("{} of {} done", t.done_count(), t.total()),
+        (Some(_), Some(_)) => {
+            let n = t.lives().count();
+            let what = if t.kind() == Kind::Drag { "points" } else { "runs" };
+            format!("{n} {what} running · {} of {} done", t.done_count(), t.total())
+        }
+        (None, _) if t.done_count() == 0 => "Starting the solver".to_string(),
+        (None, _) => format!("{} of {} done", t.done_count(), t.total()),
     }
 }
 
@@ -100,14 +107,52 @@ fn clock(t: &Tracker, elapsed: f64) -> (String, String) {
     (format!("{} elapsed", duration_text(elapsed)), t.eta().map_or_else(|| "estimating…".to_string(), |s| format!("{} left", eta_text(s))))
 }
 
-/// Where it runs: `Apple M1 Max · GPU (Luma)`, or `CPU`.
-fn device(t: &Tracker) -> String {
-    match t.device.as_str() {
-        "" if !t.setup.is_empty() => t.setup.clone(),
-        "" => "starting the solver".to_string(),
-        "CPU" => "CPU".to_string(),
-        gpu => format!("{gpu} · GPU (Luma)"),
+/// How one machine reads: `Apple M1 Max · GPU (Luma)`, `CPU`, the set-up step, or why it left.
+fn machine_text(m: &MachineRow) -> String {
+    match &m.state {
+        MachineState::Connecting(step) if step.is_empty() => "starting the solver".to_string(),
+        MachineState::Connecting(step) => step.clone(),
+        MachineState::Ready(d) if d == "CPU" => "CPU".to_string(),
+        MachineState::Ready(gpu) => format!("{gpu} · GPU (Luma)"),
+        MachineState::Skipped(why) => format!("left out: {why}"),
+        MachineState::Dropped(why) => format!("lost: {why}"),
     }
+}
+
+/// Where it runs: `Apple M1 Max · GPU (Luma)`, or `CPU`; with several machines how many are working.
+fn device(t: &Tracker) -> String {
+    match t.machines() {
+        [] => "starting the solver".to_string(),
+        [one] => machine_text(one),
+        many => {
+            let alive = many.iter().filter(|m| m.alive()).count();
+            format!("{alive} of {} machines", many.len())
+        }
+    }
+}
+
+/// One line per machine when there are several: its name, what it is doing or why it left, and how many it has finished.
+fn machine_lines<'a>(t: &Tracker, running: bool) -> Vec<Element<'a, Message>> {
+    if t.machines().len() < 2 {
+        return Vec::new();
+    }
+    t.machines()
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let doing = t.lives().find(|(_, l)| l.machine == i).map(|(u, _)| match u.alpha_deg {
+                Some(a) => format!("Mach {:.2} · {a:.0}°", u.mach),
+                None => format!("Mach {:.2}", u.mach),
+            });
+            let state = match (&m.state, doing) {
+                (MachineState::Ready(_), Some(at)) => format!("{} · {at}", machine_text(m)),
+                (MachineState::Ready(_), None) if running => format!("{} · idle", machine_text(m)),
+                _ => machine_text(m),
+            };
+            let done = if m.done > 0 { format!(" · {} done", m.done) } else { String::new() };
+            muted(format!("{} · {state}{done}", m.name), 12.0)
+        })
+        .collect()
 }
 
 fn grid_name(grid: CfdGrid) -> &'static str {
@@ -166,12 +211,13 @@ pub fn compact(state: &State) -> Vec<Element<'_, Message>> {
     out.push(muted(format!("{:.0} % · {elapsed}", 100.0 * t.fraction()), 12.0));
     out.push(muted(left, 12.0));
     out.push(muted(format!("{} · {}", device(t), grid_name(s.grid)), 12.0));
+    out.extend(machine_lines(t, true));
     out
 }
 
 /// What a solve on the CPU after the GPU failed says (`GPU unavailable: …`), if it does.
 fn fallback_chip<'a>(t: &Tracker) -> Option<Element<'a, Message>> {
-    (t.device == "CPU").then(|| {
+    t.machines().iter().any(|m| !m.remote && m.device() == Some("CPU")).then(|| {
         let why = t.fallback.as_deref().unwrap_or("no GPU");
         chip(Severity::Warn, format!("Solving on the CPU · {why}")).into()
     })
@@ -246,6 +292,7 @@ pub fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Option<Element<'a, Message>
     };
     let mut place_row: Vec<Element<'a, Message>> = vec![muted(place, 12.0)];
     place_row.extend(fallback_chip(t));
+    let machines = machine_lines(t, s.running);
 
     let mut top: Vec<Element<'a, Message>> = vec![head.boxed(), line];
     if s.running {
@@ -253,14 +300,21 @@ pub fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Option<Element<'a, Message>
     }
     top.push(figures.boxed());
     top.push(row(place_row).spacing(SPACE_3).align_y(iced::Center).boxed());
+    if !machines.is_empty() {
+        top.push(column(machines).spacing(2).boxed());
+    }
     let header = column(top).spacing(SPACE_2);
 
     let data = plot_data(t, reference(state, ctx, t.kind()));
     let curve = container(canvas::Canvas::new(SolvePlot { data }).width(Fill).height(Fill)).width(Fill).height(Fill).padding([0.0, SPACE_3]);
 
     let mut body: Vec<Element<'a, Message>> = vec![pad(header.boxed()), curve.boxed()];
-    if let Some((unit, live)) = t.live().filter(|_| s.running) {
-        body.push(pad(now(t.kind(), unit, live)));
+    if s.running {
+        let named = t.machines().len() > 1;
+        for (unit, live) in t.lives() {
+            let machine = named.then(|| t.machines()[live.machine].name.as_str());
+            body.push(pad(now(t.kind(), unit, live, machine)));
+        }
     }
     body.push(rule());
     body.push(container(points(t)).height(Length::Fixed(list_height(t))).padding([0.0, SPACE_3]).boxed());
@@ -274,8 +328,9 @@ fn list_height(t: &Tracker) -> f32 {
 
 const ROW_H: f32 = 20.0;
 
-/// The point in flight: iteration, residual, the monitor and its range against the tolerance, and the monitor's trace.
-fn now<'a>(kind: Kind, unit: &Unit, live: &'a Live) -> Element<'a, Message> {
+/// A point in flight: iteration, residual, the monitor and its range against the tolerance, and the monitor's trace; with several
+/// machines working there is one of these per busy machine, headed with its name.
+fn now<'a>(kind: Kind, unit: &Unit, live: &'a Live, machine: Option<&'a str>) -> Element<'a, Message> {
     let q = name(kind);
     let at = match unit.alpha_deg {
         Some(a) => format!("Mach {:.2} · {a:.0}°", unit.mach),
@@ -287,22 +342,20 @@ fn now<'a>(kind: Kind, unit: &Unit, live: &'a Live) -> Element<'a, Message> {
         (None, Some(tol)) => format!("collecting the first 500 iterations · the point ends when the {q} range is under {:.2} %", 100.0 * tol),
         _ => "the point ends when the residual has dropped enough".to_string(),
     };
-    let text_col = column![
-        row![ui::label("NOW"), mono(at, 12.5, |t| t.ink), mono(format!("iteration {}", thousands(live.iteration)), 12.5, |t| t.ink)]
-            .spacing(SPACE_2)
-            .align_y(iced::Center),
-        row![
-            muted(format!("residual down {:.1} orders", live.residual_orders), 12.0),
-            muted("·", 12.0),
-            mono(value, 12.0, |t| t.ink_muted),
-            muted(format!("· cap {}", thousands(live.max_iterations)), 12.0)
-        ]
-        .spacing(SPACE_1),
-        muted(settle, 12.0),
+    let head = row![ui::label(machine.unwrap_or("NOW")), mono(at, 12.5, |t| t.ink), mono(format!("iteration {}", thousands(live.iteration)), 12.5, |t| t.ink)]
+        .spacing(SPACE_2)
+        .align_y(iced::Center);
+    let figures = row![
+        muted(format!("residual down {:.1} orders", live.residual_orders), 12.0),
+        muted("·", 12.0),
+        mono(value, 12.0, |t| t.ink_muted),
+        muted(format!("· cap {}", thousands(live.max_iterations)), 12.0)
     ]
-    .spacing(SPACE_1)
-    .width(Fill);
-    let trace = canvas::Canvas::new(Trace { history: &live.history, tolerance: live.tolerance }).width(Length::Fixed(220.0)).height(Length::Fixed(56.0));
+    .spacing(SPACE_1);
+    // With several machines at work each strip is short: the stop rule's sentence is left to the single-machine screen.
+    let text_col = if machine.is_some() { column![head, figures] } else { column![head, figures, muted(settle, 12.0)] }.spacing(SPACE_1).width(Fill);
+    let trace_h = if machine.is_some() { 40.0 } else { 56.0 };
+    let trace = canvas::Canvas::new(Trace { history: &live.history, tolerance: live.tolerance }).width(Length::Fixed(220.0)).height(Length::Fixed(trace_h));
     row![text_col, trace].spacing(SPACE_3).align_y(iced::Center).boxed()
 }
 
@@ -310,13 +363,22 @@ fn now<'a>(kind: Kind, unit: &Unit, live: &'a Live) -> Element<'a, Message> {
 fn points<'a>(t: &'a Tracker) -> Element<'a, Message> {
     let cell = |s: String, width: Length, color: fn(&Tokens) -> Color| -> Element<'a, Message> { container(mono(s, 12.0, color)).width(width).boxed() };
     let q = name(t.kind());
+    let several = t.machines().len() > 1;
+    let machine_of = |i: usize| -> String {
+        match t.slot(i) {
+            Slot::Done(d) => t.machines().get(d.machine).map(|m| m.name.clone()),
+            Slot::Running { machine, .. } => t.machines().get(*machine).map(|m| m.name.clone()),
+            Slot::Pending => None,
+        }
+        .unwrap_or_default()
+    };
     let mut rows: Vec<Element<'a, Message>> = Vec::new();
     for (i, u) in t.units().iter().enumerate() {
         let what = match u.alpha_deg {
             Some(a) => format!("M {:.2} · {a:.0}°", u.mach),
             None => format!("M {:.2}", u.mach),
         };
-        let running = t.live().is_some_and(|(l, _)| l == u);
+        let running = t.lives().any(|(l, _)| l == u);
         let (mark, state, value, iters, time): (Element<'a, Message>, (String, fn(&Tokens) -> Color), String, String, String) = match t.slot(i) {
             Slot::Done(d) => {
                 let (mark, tone): (Element<'a, Message>, fn(&Tokens) -> Color) = if d.outcome.is_settled() {
@@ -332,7 +394,7 @@ fn points<'a>(t: &'a Tracker) -> Element<'a, Message> {
                 (mark, (d.outcome.word().to_string(), tone), value, format!("{} it", thousands(d.iterations)), duration_text(d.seconds))
             }
             Slot::Running { iterations, ended, .. } => {
-                let it = if running { t.live().map_or(*iterations, |(_, l)| l.iteration) } else { *iterations };
+                let it = if running { t.lives().find(|(l, _)| *l == u).map_or(*iterations, |(_, l)| l.iteration) } else { *iterations };
                 let (tone, word): (Tone, &str) = match (running, ended) {
                     (true, _) => (Tone::Accent, "solving"),
                     (false, Some(_)) => (Tone::Muted, "finishing"),
@@ -354,10 +416,11 @@ fn points<'a>(t: &'a Tracker) -> Element<'a, Message> {
                 row![
                     mark,
                     cell(what, 112.0.into(), dim),
-                    cell(state.0, 88.0.into(), state.1),
+                    cell(state.0, if several { 80.0 } else { 88.0 }.into(), state.1),
+                    cell(if several { machine_of(i) } else { String::new() }, if several { Length::Fixed(104.0) } else { Length::Shrink }, |t| t.ink_muted),
                     cell(value, Fill, |t| t.ink_muted),
-                    cell(iters, 84.0.into(), |t| t.ink_muted),
-                    cell(time, 76.0.into(), |t| t.ink_muted)
+                    cell(iters, if several { 74.0 } else { 84.0 }.into(), |t| t.ink_muted),
+                    cell(time, if several { 64.0 } else { 76.0 }.into(), |t| t.ink_muted)
                 ]
                 .spacing(SPACE_2)
                 .align_y(iced::Center),
@@ -409,8 +472,8 @@ pub struct PlotData {
     pub reference: Option<(String, Vec<(f64, f64)>)>,
     /// The curves: one for the drag table, one per angle for the 3D solve.
     pub curves: Vec<CurveData>,
-    /// The point in flight at the monitor's value now.
-    pub live: Option<(f64, f64)>,
+    /// The points in flight (one per busy machine) at the monitor's value now.
+    pub live: Vec<(f64, f64)>,
     /// The quantity (`Cd` or `CN`).
     pub quantity: &'static str,
 }
@@ -472,7 +535,7 @@ pub fn plot_data(t: &Tracker, reference: Option<(String, Vec<(f64, f64)>)>) -> P
     let y = (0.0, (top * 1.12).max(0.1));
     // The solver's first iterations swing far off the answer (a real run reports a Cd of 1.43 before it settles at 0.41): the ring
     // is held at the edge of the range, not the range stretched to it.
-    let live = t.live().and_then(|(u, l)| l.monitor.is_finite().then_some((u.mach, l.monitor.clamp(y.0, y.1))));
+    let live = t.lives().filter_map(|(u, l)| l.monitor.is_finite().then_some((u.mach, l.monitor.clamp(y.0, y.1)))).collect();
     PlotData { x: (lo - pad, hi + pad), y, reference, curves, live, quantity }
 }
 
@@ -594,7 +657,7 @@ impl canvas::Program<Message> for SolvePlot {
                 }
             }
         }
-        if let Some((mach, y)) = d.live {
+        for &(mach, y) in &d.live {
             let at = Point::new(px(mach), py(y));
             f.stroke(&Path::circle(at, 7.0), stroke(t.accent, 1.8, None));
             f.fill(&Path::circle(at, 2.2), t.accent);
@@ -633,7 +696,7 @@ impl canvas::Program<Message> for SolvePlot {
             },
             "not settled",
         );
-        if d.live.is_some() {
+        if !d.live.is_empty() {
             key(
                 &mut f,
                 &|f, p| {
@@ -703,6 +766,7 @@ mod tests {
 
     fn drag_done(mach: f64, cd: Option<f64>, q: Option<CfdQuality>, at: f64) -> PointDone {
         PointDone {
+            machine: 0,
             at,
             mach,
             alpha_deg: None,
@@ -721,7 +785,7 @@ mod tests {
 
     #[test]
     fn solved_points_are_solid_the_rest_sit_on_the_reference_and_a_fallback_has_no_value_of_its_own() {
-        let mut t = Tracker::new(Kind::Drag, Tracker::drag_units(&[0.1, 0.5, 1.0, 2.0]), "GPU");
+        let mut t = Tracker::new(Kind::Drag, Tracker::drag_units(&[0.1, 0.5, 1.0, 2.0]));
         t.on_done(&drag_done(0.1, Some(0.42), Some(CfdQuality::Converged), 10.0));
         t.on_done(&drag_done(0.5, None, None, 20.0));
         let d = plot_data(&t, reference());
@@ -733,7 +797,7 @@ mod tests {
         assert!((c.solved[1].y - (0.4 + 0.4 * 0.4 / 0.9)).abs() < 1e-12);
         assert_eq!(c.pending, vec![(1.0, 0.8), (2.0, 0.8 - 0.4 * (1.0 / 2.0))]);
         assert_eq!(d.quantity, "Cd");
-        assert!(d.live.is_none());
+        assert!(d.live.is_empty());
         // from zero, to the largest value with headroom; the Mach range is padded
         assert_eq!(d.y.0, 0.0);
         assert!((d.y.1 - 0.8 * 1.12).abs() < 1e-12);
@@ -742,9 +806,10 @@ mod tests {
 
     #[test]
     fn the_point_in_flight_is_at_the_monitors_value_and_without_a_reference_the_rest_follow_the_last_solved_point() {
-        let mut t = Tracker::new(Kind::Drag, Tracker::drag_units(&[0.5, 0.9, 1.0]), "GPU");
+        let mut t = Tracker::new(Kind::Drag, Tracker::drag_units(&[0.5, 0.9, 1.0]));
         t.on_done(&drag_done(0.5, Some(0.45), Some(CfdQuality::Converged), 10.0));
         t.on_iteration(&Iteration {
+            machine: 0,
             at: 12.0,
             mach: 0.9,
             alpha_deg: None,
@@ -756,11 +821,12 @@ mod tests {
             tolerance: Some(0.002),
         });
         let d = plot_data(&t, None);
-        assert_eq!(d.live, Some((0.9, 0.47)));
+        assert_eq!(d.live, vec![(0.9, 0.47)]);
         assert_eq!(d.curves[0].pending, vec![(0.9, 0.45), (1.0, 0.45)], "no reference: held at the nearest solved point");
         // the first iterations swing far off the answer (a real run reports Cd 1.43 before it settles at 0.41): the ring is held
         // at the top of the range instead of the range being stretched to it
         t.on_iteration(&Iteration {
+            machine: 0,
             at: 13.0,
             mach: 0.9,
             alpha_deg: None,
@@ -772,19 +838,20 @@ mod tests {
             tolerance: Some(0.002),
         });
         let d = plot_data(&t, None);
-        assert_eq!(d.live, Some((0.9, d.y.1)));
+        assert_eq!(d.live, vec![(0.9, d.y.1)]);
         assert!((d.y.1 - 0.45 * 1.12).abs() < 1e-12);
         // nothing known at all: a visible default
-        let empty = plot_data(&Tracker::new(Kind::Drag, Tracker::drag_units(&[0.5, 1.0]), ""), None);
+        let empty = plot_data(&Tracker::new(Kind::Drag, Tracker::drag_units(&[0.5, 1.0])), None);
         assert_eq!(empty.curves[0].pending, vec![(0.5, 0.5), (1.0, 0.5)]);
     }
 
     #[test]
     fn the_3d_solve_has_a_curve_per_angle() {
         let units = Tracker::stability_units(&[0.8, 1.1], &[2.0, 6.0]);
-        let mut t = Tracker::new(Kind::Stability, units, "GPU");
+        let mut t = Tracker::new(Kind::Stability, units);
         for (a, cn) in [(2.0, 0.09), (6.0, 0.3)] {
             t.on_done(&PointDone {
+                machine: 0,
                 at: 10.0,
                 mach: 0.8,
                 alpha_deg: Some(a),
@@ -806,9 +873,10 @@ mod tests {
 
     #[test]
     fn the_headline_names_the_point_and_the_clock_waits_for_two_points() {
-        let mut t = Tracker::new(Kind::Drag, Tracker::drag_units(&[0.1, 0.5, 0.8]), "GPU");
+        let mut t = Tracker::new(Kind::Drag, Tracker::drag_units(&[0.1, 0.5, 0.8]));
         assert_eq!(headline(&t), "Starting the solver");
         t.on_iteration(&Iteration {
+            machine: 0,
             at: 3.0,
             mach: 0.5,
             alpha_deg: None,

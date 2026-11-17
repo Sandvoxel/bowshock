@@ -1,37 +1,14 @@
-//! The solves on another computer's GPU (`Compute::Remote`): the app side of `bowshock-remote`.
+//! The solves on another computer's GPU: the app side of `bowshock-remote`.
 //!
-//! A solve opens one [`Session`] (an SSH connection to a `bowshock-worker` it has provisioned if need be), runs each Mach number
-//! through it with the same events a local solve sends, and drops it when the solve ends. A connection or set-up failure is the
-//! solve's error: there is no quiet fall back to this computer's CPU.
+//! A solve opens one [`Session`] per remote machine (an SSH connection to a `bowshock-worker` it has provisioned if need be), runs
+//! Mach numbers through it with the same events a local solve sends, and drops it when the solve ends. A connection or set-up
+//! failure takes that machine out of the solve (see [`super::share`]); there is no quiet fall back to this computer's CPU.
 
 use super::run::{Event, Outbox};
-use crate::app::settings::Compute;
+use crate::analyze::solve::MachineState;
 use bowshock_core as solver;
 use bowshock_remote::{DeviceInfo, Remote, RemoteError, RemoteHost, SetupStatus};
 use std::ops::ControlFlow;
-
-/// Where a solve runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Route {
-    /// This computer.
-    Local,
-    /// The GPU behind this SSH host.
-    Remote(RemoteHost),
-    /// Remote compute with no target typed in.
-    NoTarget,
-}
-
-/// Where a solve under `compute` runs.
-pub fn route(compute: &Compute) -> Route {
-    match (compute.is_remote(), compute.host()) {
-        (false, _) => Route::Local,
-        (true, Some(host)) => Route::Remote(host),
-        (true, None) => Route::NoTarget,
-    }
-}
-
-/// The text of the error of remote compute with no target.
-pub const NO_TARGET: &str = "Remote GPU: type the target (user@host) in the Compute control, or switch to This computer.";
 
 /// How a run through a [`Session`] failed.
 pub(super) enum Failed {
@@ -51,9 +28,11 @@ impl Failed {
     }
 }
 
-/// A connection to the remote GPU for the length of one solve.
+/// A connection to a remote GPU for the length of one solve.
 pub(super) struct Session {
     remote: Remote,
+    /// What the screen calls the machine.
+    name: String,
     /// `NVIDIA GeForce RTX 3090 on omarchy`.
     pub label: String,
 }
@@ -94,19 +73,15 @@ pub fn error_text(target: &str, error: &RemoteError) -> String {
     format!("Remote GPU {target}: {what}")
 }
 
-/// Opens the session of a solve under `compute`: `None` for this computer. Sends [`Event::Setup`] for each step of the set-up
-/// and [`Event::Device`] once connected. Blocks (the first connection to a computer that has no worker builds one, minutes).
-pub(super) fn open(compute: &Compute, send: &Outbox) -> Result<Option<Session>, String> {
-    let host = match route(compute) {
-        Route::Local => return Ok(None),
-        Route::NoTarget => return Err(NO_TARGET.to_string()),
-        Route::Remote(host) => host,
-    };
-    let status = |s: SetupStatus| send(Event::Setup(status_text(&s)));
-    let remote = Remote::connect(&host, &status).map_err(|e| error_text(&host.target, &e))?;
+/// Opens the session of machine `index`, called `name`, at `host`: sends [`Event::Machine`] for each step of the set-up and once
+/// connected. Blocks (the first connection to a computer that has no worker builds one, minutes).
+pub(super) fn connect(host: &RemoteHost, name: &str, index: usize, started: std::time::Instant, send: &Outbox) -> Result<Session, String> {
+    let at = || started.elapsed().as_secs_f64();
+    let status = |s: SetupStatus| send(Event::Machine { index, at: at(), state: MachineState::Connecting(status_text(&s)) });
+    let remote = Remote::connect(host, &status).map_err(|e| error_text(name, &e))?;
     let label = device_label(remote.device());
-    send(Event::Device(label.clone()));
-    Ok(Some(Session { remote, label }))
+    send(Event::Machine { index, at: at(), state: MachineState::Ready(label.clone()) });
+    Ok(Session { remote, name: name.to_string(), label })
 }
 
 impl Session {
@@ -114,7 +89,7 @@ impl Session {
         match e {
             RemoteError::Solver(solver::Error::Cancelled) => Failed::Cancelled,
             RemoteError::Solver(e) => Failed::Message(format!("Mach {mach:.2}: {e}")),
-            other => Failed::Message(error_text(&self.label, &other)),
+            other => Failed::Message(error_text(&self.name, &other)),
         }
     }
 
@@ -144,51 +119,11 @@ pub enum Probe {
     Done(Result<String, String>),
 }
 
-/// Tests the connection to `compute`'s host (provisioning the worker if need be): blocking; `report` gets each step.
-pub fn test(compute: &Compute, report: impl Fn(Probe)) -> Probe {
-    let host = match route(compute) {
-        Route::Remote(host) => host,
-        Route::NoTarget => return Probe::Done(Err(NO_TARGET.to_string())),
-        Route::Local => return Probe::Done(Err("Compute is set to This computer.".to_string())),
-    };
+/// Tests the connection to `host`, called `name` (provisioning the worker if need be): blocking; `report` gets each step.
+pub fn test(host: &RemoteHost, name: &str, report: impl Fn(Probe)) -> Probe {
     Probe::Done(
-        bowshock_remote::test_connection(&host, &|s| report(Probe::Status(status_text(&s))))
+        bowshock_remote::test_connection(host, &|s| report(Probe::Status(status_text(&s))))
             .map(|device| device_label(&device))
-            .map_err(|e| error_text(&host.target, &e)),
+            .map_err(|e| error_text(name, &e)),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_route_follows_the_setting() {
-        assert_eq!(route(&Compute::Local), Route::Local);
-        assert_eq!(route(&Compute::remote("me@box:2200")), Route::Remote(RemoteHost { target: "me@box".to_string(), port: Some(2200) }));
-        assert_eq!(route(&Compute::remote("  ")), Route::NoTarget);
-    }
-
-    #[test]
-    fn remote_with_no_target_is_the_solves_error() {
-        let send: Outbox = std::sync::Arc::new(|_| {});
-        assert_eq!(open(&Compute::remote(""), &send).err().as_deref(), Some(NO_TARGET));
-        assert!(matches!(open(&Compute::Local, &send), Ok(None)));
-    }
-
-    #[test]
-    fn a_host_that_does_not_exist_fails_the_solve_with_ssh_s_words() {
-        use super::super::{solve, test_plan, Job, CANCELLED};
-        use std::sync::atomic::AtomicBool;
-        use std::sync::{Arc, Mutex};
-        let plan = test_plan();
-        let compute = Compute::remote("nobody@invalid.invalid");
-        let job = Job { plan, altitude: 0.0, nodes: vec![0.6, 2.0], stage: 1, grid: bowshock_model::CfdGrid::Coarse, compute, cpu_only: false };
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let seen = events.clone();
-        let err = solve(&job, &Arc::new(AtomicBool::new(false)), move |e| seen.lock().unwrap().push(e)).expect_err("nothing answers there");
-        assert!(err.starts_with("Remote GPU nobody@invalid.invalid: "), "{err}");
-        assert_ne!(err, CANCELLED);
-        assert!(!events.lock().unwrap().iter().any(|e| matches!(e, Event::Device(_) | Event::Point(_))), "no solve ran, on any device");
-    }
 }

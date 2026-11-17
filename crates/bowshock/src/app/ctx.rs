@@ -81,8 +81,8 @@ pub struct Ctx {
     pub units: UnitSystem,
     /// Where the CFD solves run (Analyze, CFD table); kept in the user's settings.
     pub compute: super::settings::Compute,
-    /// What the last successful connection test of the remote GPU found (`NVIDIA GeForce RTX 3090 on omarchy`); `None` until one ran.
-    pub compute_device: Option<String>,
+    /// What the last successful connection test of each machine found (`NVIDIA GeForce RTX 3090 on omarchy`), by `Machine::key`.
+    pub compute_devices: std::collections::BTreeMap<String, String>,
     /// The device the solves on this computer use (Preferences > Compute); kept in the user's settings.
     pub local_solver: super::settings::LocalSolver,
     /// Where the user's settings (the unit set) are written; `None` keeps them for the session only.
@@ -152,7 +152,7 @@ impl Ctx {
             physics: Physics::from_env(&env),
             units: UnitSystem::default(),
             compute: super::settings::Compute::default(),
-            compute_device: None,
+            compute_devices: std::collections::BTreeMap::new(),
             local_solver: super::settings::LocalSolver::default(),
             settings_file: env.settings_file.clone(),
             env,

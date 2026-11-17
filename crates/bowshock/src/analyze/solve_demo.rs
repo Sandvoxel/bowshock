@@ -17,7 +17,7 @@ use std::collections::VecDeque;
 use bowshock_model::{CfdLiftPoint, CfdLiftTable, CfdPoint, CfdQuality};
 
 use super::cfd::{self, Event, Job, LiftJob, Tally};
-use super::solve::{Iteration, Outcome, PointDone};
+use super::solve::{Iteration, MachineInfo, MachineState, Outcome, PointDone};
 
 /// Which scripted solve to play.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +36,11 @@ pub enum Demo {
     RemoteSetup,
     /// A drag solve stopped partway on a remote GPU.
     RemoteMid,
+    /// A drag solve shared by three machines (this computer, a remote GPU, one still building its worker), stopped partway with
+    /// two points in flight.
+    ShareMid,
+    /// A 3D solve shared by the same three machines, stopped partway.
+    LiftShareMid,
 }
 
 impl Demo {
@@ -48,6 +53,8 @@ impl Demo {
             "lift-done" => Demo::LiftDone,
             "remote-setup" => Demo::RemoteSetup,
             "remote-mid" => Demo::RemoteMid,
+            "share-mid" => Demo::ShareMid,
+            "lift-share-mid" => Demo::LiftShareMid,
             _ => return None,
         })
     }
@@ -103,8 +110,8 @@ fn quality(o: Outcome) -> CfdQuality {
 }
 
 /// Reports of a unit settling from a transient: the monitor `target` approached with a decaying wobble, a report every 50
-/// iterations up to `until`, the clock starting at `from` (s) and running at the script's rate.
-fn trace(mach: f64, alpha_deg: Option<f64>, target: f64, from: f64, until: usize) -> Vec<Event> {
+/// iterations up to `until`, the clock starting at `from` (s) and running at the script's rate, reported by `machine`.
+fn trace(machine: usize, mach: f64, alpha_deg: Option<f64>, target: f64, from: f64, until: usize) -> Vec<Event> {
     let mut samples: Vec<f64> = Vec::new();
     (1..=until / 50)
         .map(|k| {
@@ -115,6 +122,7 @@ fn trace(mach: f64, alpha_deg: Option<f64>, target: f64, from: f64, until: usize
             let (lo, hi) = window.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), v| (l.min(*v), h.max(*v)));
             let spread = (window.len() == 10).then(|| (hi - lo) / (window.iter().sum::<f64>() / 10.0));
             Event::Iteration(Iteration {
+                machine,
                 at: from + it as f64 * PER_ITERATION,
                 mach,
                 alpha_deg,
@@ -129,27 +137,61 @@ fn trace(mach: f64, alpha_deg: Option<f64>, target: f64, from: f64, until: usize
         .collect()
 }
 
+/// The machines of a script and where each is: the first events of every script.
+fn fleet(demo: Demo) -> Vec<Event> {
+    let info = |name: &str, remote: bool| MachineInfo { name: name.to_string(), remote };
+    let ready = |index: usize, device: &str| Event::Machine { index, at: 0.0, state: MachineState::Ready(device.to_string()) };
+    let building = |index: usize| Event::Machine {
+        index,
+        at: 0.0,
+        state: MachineState::Connecting("Building the worker: Compiling bowshock-cfd v0.1.0 (31/118)".to_string()),
+    };
+    match demo {
+        Demo::RemoteSetup => vec![Event::Machines(vec![info("omarchy", true)]), building(0)],
+        Demo::RemoteMid => vec![Event::Machines(vec![info("omarchy", true)]), ready(0, "NVIDIA GeForce RTX 3080 Laptop GPU on omarchy")],
+        Demo::ShareMid | Demo::LiftShareMid => vec![
+            Event::Machines(vec![info("This computer", false), info("omarchy", true), info("lab", true)]),
+            ready(0, "NVIDIA GeForce RTX 3090"),
+            ready(1, "NVIDIA GeForce RTX 3080 Laptop GPU on omarchy"),
+            building(2),
+        ],
+        _ => vec![Event::Machines(vec![info("This computer", false)]), ready(0, "Apple M1 Max")],
+    }
+}
+
 /// The events of a scripted drag solve of `job`.
 pub fn events(demo: Demo, job: &Job) -> Vec<Event> {
     let nodes = &job.nodes;
+    let mut out = fleet(demo);
     if demo == Demo::RemoteSetup {
-        return vec![Event::Setup("Building the worker: Compiling bowshock-cfd v0.1.0 (31/118)".to_string())];
+        return out;
     }
     let finished = match demo {
-        Demo::Mid | Demo::RemoteMid => 4,
+        Demo::Mid | Demo::RemoteMid | Demo::ShareMid => 4,
         Demo::Stopped => 5.min(nodes.len()),
         _ => nodes.len(),
     };
-    let device = if demo == Demo::RemoteMid { "NVIDIA GeForce RTX 3090 on omarchy" } else { "Apple M1 Max" };
-    let mut out = vec![Event::Device(device.to_string())];
+    // Shared by three machines, the first points were taken by the two that were ready.
+    let owner = |i: usize| if demo == Demo::ShareMid { [0, 1, 0, 0][i % 4] } else { 0 };
     let mut at = 0.0;
     let mut tally = Tally { points: Vec::new(), notes: job.plan.notes.clone(), gpu: 0, cpu: 0, fallback: None };
-    for &mach in &nodes[..finished] {
+    for (i, &mach) in nodes[..finished].iter().enumerate() {
         let o = outcome(mach, nodes);
         let its = if o == Outcome::Stalled { CAP } else { iterations(mach) };
         let p = point(mach, quality(o));
         at += SETUP + its as f64 * PER_ITERATION;
-        out.push(Event::Point(PointDone { at, mach, alpha_deg: None, outcome: o, point: Some(p), lift: None, iterations: its, cpu: false, fallback: None }));
+        out.push(Event::Point(PointDone {
+            machine: owner(i),
+            at,
+            mach,
+            alpha_deg: None,
+            outcome: o,
+            point: Some(p),
+            lift: None,
+            iterations: its,
+            cpu: false,
+            fallback: None,
+        }));
         tally.points.push(p);
         tally.gpu += 1;
     }
@@ -157,7 +199,13 @@ pub fn events(demo: Demo, job: &Job) -> Vec<Event> {
         Demo::Mid | Demo::RemoteMid => {
             // the next point has reached iteration 1 450
             let mach = nodes[finished];
-            out.extend(trace(mach, None, cd(mach), at + SETUP, 1450));
+            out.extend(trace(0, mach, None, cd(mach), at + SETUP, 1450));
+        }
+        Demo::ShareMid => {
+            // the next two points are in flight, one on each machine that is ready
+            let (a, b) = (nodes[finished], nodes[finished + 1]);
+            out.extend(trace(0, a, None, cd(a), at + SETUP, 1450));
+            out.extend(trace(1, b, None, cd(b), at + SETUP, 800));
         }
         Demo::Stopped => out.push(Event::Finished(Err(cfd::CANCELLED.to_string()))),
         _ => out.push(Event::Finished(Ok(cfd::table_from(job, tally, nodes.len(), at)))),
@@ -168,8 +216,13 @@ pub fn events(demo: Demo, job: &Job) -> Vec<Event> {
 /// The events of a scripted 3D stability solve of `job`.
 pub fn lift_events(demo: Demo, job: &LiftJob) -> Vec<Event> {
     let nodes = &job.nodes;
-    let finished = if demo == Demo::LiftMid { (nodes.len() / 2).min(nodes.len().saturating_sub(1)) } else { nodes.len() };
-    let mut out = vec![Event::Device("Apple M1 Max".to_string())];
+    let finished = match demo {
+        Demo::LiftMid => (nodes.len() / 2).min(nodes.len().saturating_sub(1)),
+        Demo::LiftShareMid => 2.min(nodes.len().saturating_sub(2)),
+        _ => nodes.len(),
+    };
+    let mut out = fleet(demo);
+    let owner = |i: usize| if demo == Demo::LiftShareMid { i % 2 } else { 0 };
     let mut at = 0.0;
     let mut points: Vec<CfdLiftPoint> = Vec::new();
     // CN grows with the angle (slightly sub-linearly) and with Mach up to the transonic range; CP sits about 60 % of the length aft.
@@ -180,14 +233,15 @@ pub fn lift_events(demo: Demo, job: &LiftJob) -> Vec<Event> {
         x_cp: 0.85 + 0.04 * mach.min(1.5),
         quality: CfdQuality::Converged,
     };
-    for &mach in &nodes[..finished] {
+    for (i, &mach) in nodes[..finished].iter().enumerate() {
         let mut hand = Vec::new();
         for (k, &a) in cfd::LIFT_ALPHAS.iter().enumerate() {
             let its = if k == 0 { 1800 } else { 700 };
-            out.extend(trace(mach, Some(a), lift(mach, a).cn, at + SETUP, its));
+            out.extend(trace(owner(i), mach, Some(a), lift(mach, a).cn, at + SETUP, its));
             at += SETUP + its as f64 * PER_ITERATION;
             let p = lift(mach, a);
             hand.push(PointDone {
+                machine: owner(i),
                 at: 0.0,
                 mach,
                 alpha_deg: Some(a),
@@ -205,12 +259,20 @@ pub fn lift_events(demo: Demo, job: &LiftJob) -> Vec<Event> {
             out.push(Event::Point(d));
         }
     }
-    if demo == Demo::LiftMid {
+    if demo == Demo::LiftShareMid {
+        // the next two Mach numbers, one on each machine that is ready: the first has run its first angle and is at iteration 600
+        // of its second; the other is at iteration 900 of its first
+        let (a, b) = (nodes[finished], nodes[finished + 1]);
+        let [a2, a6] = cfd::LIFT_ALPHAS;
+        out.extend(trace(0, a, Some(a2), lift(a, a2).cn, at + SETUP, 1800));
+        out.extend(trace(0, a, Some(a6), lift(a, a6).cn, at + SETUP + 1800.0 * PER_ITERATION, 600));
+        out.extend(trace(1, b, Some(a2), lift(b, a2).cn, at + SETUP, 900));
+    } else if demo == Demo::LiftMid {
         // the next Mach number: its first angle has run, its second is at iteration 600
         let mach = nodes[finished];
-        out.extend(trace(mach, Some(cfd::LIFT_ALPHAS[0]), lift(mach, cfd::LIFT_ALPHAS[0]).cn, at + SETUP, 1800));
+        out.extend(trace(0, mach, Some(cfd::LIFT_ALPHAS[0]), lift(mach, cfd::LIFT_ALPHAS[0]).cn, at + SETUP, 1800));
         at += SETUP + 1800.0 * PER_ITERATION;
-        out.extend(trace(mach, Some(cfd::LIFT_ALPHAS[1]), lift(mach, cfd::LIFT_ALPHAS[1]).cn, at, 600));
+        out.extend(trace(0, mach, Some(cfd::LIFT_ALPHAS[1]), lift(mach, cfd::LIFT_ALPHAS[1]).cn, at, 600));
     } else {
         out.push(Event::LiftFinished(Ok(CfdLiftTable {
             key: cfd::lift_key(job.plan.geometry, nodes),
@@ -228,6 +290,21 @@ pub fn lift_events(demo: Demo, job: &LiftJob) -> Vec<Event> {
 mod tests {
     use super::*;
     use crate::analyze::solve::{Kind, Slot, Tracker};
+
+    /// A tracker fed the events of a script: the machines, iterations and points (not the end).
+    fn tracked(kind: Kind, units: Vec<crate::analyze::solve::Unit>, events: &[Event]) -> Tracker {
+        let mut t = Tracker::new(kind, units);
+        for e in events {
+            match e {
+                Event::Machines(m) => t.set_machines(m),
+                Event::Machine { index, at, state } => t.on_machine(*index, *at, state.clone()),
+                Event::Iteration(i) => t.on_iteration(i),
+                Event::Point(p) => t.on_done(p),
+                _ => {}
+            }
+        }
+        t
+    }
 
     #[test]
     fn the_names_parse_in_order_and_unknown_names_are_skipped() {
@@ -247,16 +324,9 @@ mod tests {
             compute: Default::default(),
             cpu_only: false,
         };
-        let mut t = Tracker::new(Kind::Drag, Tracker::drag_units(&nodes), "");
-        for e in events(Demo::Mid, &job) {
-            match e {
-                Event::Iteration(i) => t.on_iteration(&i),
-                Event::Point(p) => t.on_done(&p),
-                _ => {}
-            }
-        }
+        let t = tracked(Kind::Drag, Tracker::drag_units(&nodes), &events(Demo::Mid, &job));
         assert_eq!(t.done_count(), 4);
-        assert_eq!(t.live().unwrap().1.iteration, 1450);
+        assert_eq!(t.lives().next().unwrap().1.iteration, 1450);
         assert!(matches!(t.slot(3), Slot::Done(d) if d.outcome == Outcome::Stalled), "Mach 0.9 hit the cap");
         assert!(t.eta().is_some(), "four points are solved: the estimate is up");
     }
@@ -305,15 +375,15 @@ mod tests {
         let t = &s.tracker;
         let total = t.total();
         assert!(total >= 6, "the example's table has its Mach nodes: {total}");
-        assert_eq!((t.done_count(), t.live().map(|(u, l)| (u.mach, l.iteration))), (4, Some((t.units()[4].mach, 1450))));
-        assert_eq!(t.device, "Apple M1 Max");
+        assert_eq!((t.done_count(), t.lives().next().map(|(u, l)| (u.mach, l.iteration))), (4, Some((t.units()[4].mach, 1450))));
+        assert_eq!(t.device(), "Apple M1 Max");
         assert!(t.fraction() > 0.0 && t.fraction() < 1.0 && t.eta().is_some_and(|s| s > 0.0));
         // the curve: four solved points (one flagged), the one in flight and the rest to come
         let data = solve_view::plot_data(t, None);
         assert_eq!(data.curves[0].solved.len(), 4);
         assert_eq!(data.curves[0].solved.iter().filter(|m| !m.outcome.is_settled()).count(), 1);
         assert_eq!(data.curves[0].pending.len(), total - 4);
-        assert!(data.live.is_some());
+        assert!(!data.live.is_empty());
         assert!(app.ctx().doc.rocket().cfd_table(1).is_none(), "nothing is stored before the solve ends");
         assert!(solve_view::active(app.analyze()));
     }
@@ -364,7 +434,7 @@ mod tests {
         // Re-solve; this time the cancel comes after one point only
         press(&mut app, Message::Resolve);
         let serial = app.analyze().cfd.solving.as_ref().expect("Re-solve starts a solve").stream.serial();
-        let first: Vec<Event> = events(Demo::Mid, &job(&app)).into_iter().take_while(|e| !matches!(e, Event::Iteration(_))).take(2).collect();
+        let first: Vec<Event> = events(Demo::Mid, &job(&app)).into_iter().take_while(|e| !matches!(e, Event::Iteration(_))).take(3).collect();
         assert!(matches!(first.last(), Some(Event::Point(_))));
         feed(&mut app, serial, first);
         press(&mut app, Message::CfdCancel);
@@ -414,7 +484,7 @@ mod tests {
         assert_eq!(lift.tracker.total(), 2 * job.nodes.len(), "a run per Mach number and angle");
         feed(&mut app, serial, lift_events(Demo::LiftMid, &job));
         let t = &app.analyze().cfd.lift_solving.as_ref().unwrap().tracker;
-        let (unit, live) = t.live().unwrap();
+        let (unit, live) = t.lives().next().unwrap();
         assert_eq!((unit.alpha_deg, live.iteration), (Some(cfd::LIFT_ALPHAS[1]), 600));
         assert!(t.done_count() >= 2);
         assert_eq!(solve_view::plot_data(t, None).curves.len(), 2, "a curve per angle");
@@ -437,11 +507,15 @@ mod tests {
 
     #[test]
     fn the_compute_setting_goes_with_the_solve_and_a_failed_connect_shows_on_the_screen() {
-        use crate::app::settings::Compute;
+        use crate::app::settings::{Compute, Machine, MachineRef, Mode as ComputeMode};
         let mut app = App::with_example();
         app.analyze_mut().cfd.demo = [Demo::RemoteSetup].into_iter().collect();
         drop(app.update(AppMessage::Mode(Mode::Analyze)));
-        let remote = Compute::remote("nobody@invalid.invalid");
+        let remote = Compute {
+            machines: vec![Machine::parse("nobody@invalid.invalid")],
+            mode: ComputeMode::Pick(MachineRef::Machine("nobody@invalid.invalid".into())),
+            ..Compute::default()
+        };
         app.ctx_mut().compute = remote.clone();
         // The solve the method starts carries it, and shows the set-up step where the device goes.
         drop(app.update(AppMessage::Analyze(Message::Method(Method::CfdTable))));
@@ -450,7 +524,8 @@ mod tests {
         assert_eq!(job.compute, remote);
         feed(&mut app, serial, events(Demo::RemoteSetup, &job));
         let t = &app.analyze().cfd.solving.as_ref().unwrap().tracker;
-        assert_eq!((t.device.as_str(), t.setup.as_str()), ("", "Building the worker: Compiling bowshock-cfd v0.1.0 (31/118)"));
+        assert_eq!(t.device(), "");
+        assert_eq!(t.machines()[0].state, MachineState::Connecting("Building the worker: Compiling bowshock-cfd v0.1.0 (31/118)".to_string()));
         assert!(solve_view::compact(app.analyze()).len() > 1);
         // A connect that fails is the solve's error: no table, the text on the screen, no CPU fallback.
         let why = crate::analyze::cfd::remote::error_text(
@@ -462,5 +537,54 @@ mod tests {
         assert_eq!(app.analyze().cfd.failed.as_ref().map(|f| f.1.as_str()), Some(why.as_str()));
         assert!(notice(&app).contains("Could not resolve hostname"), "{}", notice(&app));
         assert!(app.ctx().doc.rocket().cfd_table(1).is_none());
+    }
+
+    #[test]
+    fn a_shared_solve_has_a_point_in_flight_per_machine_and_a_stop_keeps_what_the_machines_solved() {
+        use crate::analyze::solve::MachineState;
+        let (mut app, serial) = app_with(&[Demo::ShareMid]);
+        let script = events(Demo::ShareMid, &job(&app));
+        feed(&mut app, serial, script);
+        let t = &app.analyze().cfd.solving.as_ref().expect("still solving").tracker;
+        assert_eq!(t.machines().iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["This computer", "omarchy", "lab"]);
+        assert_eq!(t.machines().iter().map(|m| m.done).collect::<Vec<_>>(), [3, 1, 0]);
+        assert!(matches!(t.machines()[2].state, MachineState::Connecting(ref step) if step.starts_with("Building the worker")));
+        let lives: Vec<(usize, usize)> = t.lives().map(|(_, l)| (l.machine, l.iteration)).collect();
+        assert_eq!(lives, vec![(0, 1450), (1, 800)], "one point in flight on each machine that is ready");
+        assert_eq!(solve_view::plot_data(t, None).live.len(), 2, "both are ringed on the chart");
+        assert!(t.eta().is_some(), "the time left comes from the machines' combined rate");
+        assert_eq!(t.device(), "NVIDIA GeForce RTX 3090, NVIDIA GeForce RTX 3080 Laptop GPU on omarchy");
+        // the left panel lists the three machines under the device line
+        assert!(solve_view::compact(app.analyze()).len() >= 8);
+
+        // Cancel: the four points solved are a table, and it says which machines made it
+        press(&mut app, Message::CfdCancel);
+        let table = app.analyze().cfd.stopped.as_ref().and_then(|s| s.table.as_ref()).expect("four points are on offer");
+        assert_eq!(table.points.len(), 4);
+        assert_eq!(table.backend, "GPU (Luma) · NVIDIA GeForce RTX 3090 on this computer, NVIDIA GeForce RTX 3080 Laptop GPU on omarchy");
+    }
+
+    #[test]
+    fn a_shared_3d_solve_has_a_run_in_flight_per_machine() {
+        let (mut app, serial) = app_with(&[Demo::Done, Demo::LiftShareMid]);
+        let script = events(Demo::Done, &job(&app));
+        feed(&mut app, serial, script);
+        press(&mut app, Message::SolveLift);
+        let lift = app.analyze().cfd.lift_solving.as_ref().expect("Solve stability (3D) starts the 3D solve");
+        let (serial, job) = (
+            lift.stream.serial(),
+            LiftJob {
+                plan: app.analyze().cfd.plan.as_ref().clone().unwrap(),
+                nodes: cfd::lift_nodes(app.analyze().cond.mach).unwrap(),
+                compute: Default::default(),
+                cpu_only: false,
+            },
+        );
+        feed(&mut app, serial, lift_events(Demo::LiftShareMid, &job));
+        let t = &app.analyze().cfd.lift_solving.as_ref().unwrap().tracker;
+        let lives: Vec<(usize, Option<f64>, usize)> = t.lives().map(|(u, l)| (l.machine, u.alpha_deg, l.iteration)).collect();
+        assert_eq!(lives, vec![(0, Some(cfd::LIFT_ALPHAS[1]), 600), (1, Some(cfd::LIFT_ALPHAS[0]), 900)]);
+        assert_eq!(t.done_count(), 4, "two Mach numbers at two angles, one on each machine");
+        assert_eq!(solve_view::plot_data(t, None).live.len(), 2);
     }
 }
