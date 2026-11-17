@@ -156,7 +156,7 @@ impl LazySolver3 {
             Some(TurbRun3 {
                 re_c: r.visc.re_c,
                 model: Sst3 { re_c: r.visc.re_c },
-                tg: TGeo3::new(&self.ctx, g, &self.solid_host, &sym, &r.bc, &vg)?,
+                tg: TGeo3::new(&self.ctx, g, &self.solid_host, &sym, &r.bc, &vg, r.law_i_walls)?,
                 dwall: up(&self.ctx, &r.dwall.iter().map(|d| d.min(1e10)).collect::<Vec<_>>(), shape)?,
                 ks: if r.ks.is_empty() { None } else { Some(up(&self.ctx, &r.ks, shape)?) },
             })

@@ -48,7 +48,17 @@ fn wedge_case(tiny: bool) -> Case3 {
 fn sector_case(tiny: bool, n: u32, nk: usize) -> Case3 {
     let nose = Body { nose: Nose::Cone { half_angle: 10f64.to_radians() } };
     let body = BaseBody::cylinder(nose, 10.0 - nose.nose_length());
-    let fins = Fins3 { count: n, root_chord: 1.0, tip_chord: 1.0, span: 1.0, sweep: 0.0, thickness: 0.08, te_to_base: 0.0, profile: FinProfile::Square };
+    let fins = Fins3 {
+        count: n,
+        root_chord: 1.0,
+        tip_chord: 1.0,
+        span: 1.0,
+        sweep: 0.0,
+        thickness: 0.08,
+        te_to_base: 0.0,
+        profile: FinProfile::Square,
+        planform: None,
+    };
     let mut c = Case3::sector(2.0, body, fins, Tier::Euler, 0);
     c.grid.nk = nk;
     if tiny {
@@ -143,6 +153,8 @@ struct Case {
     ks: Vec<f64>,
     /// `TurbIn::law_strain`: the wall cells take the law of the wall for `S^2` and the `k` cap (the wall cases), or the 2D treatment (the wedge / sector parity cases).
     law_strain: bool,
+    /// `TurbIn::law_i_walls`: the no-slip faces of the `i` family take the law of the wall too (else a cell with only such faces is a plain wall cell).
+    law_i_walls: bool,
     f: [Vec<Cons3>; 3],
     dt: Vec<f64>,
     turb: Vec<[f64; 2]>,
@@ -158,7 +170,19 @@ enum Flow {
 
 impl Case {
     #[allow(clippy::too_many_arguments)]
-    fn new(name: &str, grid: Grid3, cfg: Config3, sym: SymSides, bc: ScalarSides, re_c: f64, flow: Flow, rough: bool, law_strain: bool, seed: u64) -> Case {
+    fn new(
+        name: &str,
+        grid: Grid3,
+        cfg: Config3,
+        sym: SymSides,
+        bc: ScalarSides,
+        re_c: f64,
+        flow: Flow,
+        rough: bool,
+        law_strain: bool,
+        law_i_walls: bool,
+        seed: u64,
+    ) -> Case {
         let mut rng = Rng::new(seed);
         let (ni, nj, nk) = (grid.ni, grid.nj, grid.nk);
         let nc = ni * nj * nk;
@@ -201,7 +225,7 @@ impl Case {
         // roughness on every third cell (a fraction of the wall distance: the walls of the box are rough there)
         let ks: Vec<f64> = (0..nc).map(|c| if rough && c % 3 == 0 && dwall[c].is_finite() { 0.3 * dwall[c] } else { 0.0 }).collect();
         let mut wall = vec![[0.0; 3]; nc];
-        t3::wall_state_pass(&grid, &solid, &dirs, &w, &mu, &dwall, &ks, &mut wall);
+        t3::wall_state_pass(&grid, &solid, &dirs, &w, &mu, &dwall, &ks, law_i_walls, &mut wall);
         let mut turb: Vec<[f64; 2]> = (0..nc).map(|_| [10f64.powf(rng.range(-6.0, -2.0)), 10f64.powf(rng.range(0.0, 2.0))]).collect();
         // the wall cells of the sweep carry `k+ = k / u_tau^2` from 0.3 to 40, so that the `k` cap of the law of the wall acts where its weight is not small (`y+ >~ 3`)
         for &(c, u_star) in &u_stars {
@@ -247,7 +271,7 @@ impl Case {
             v
         });
         let dt: Vec<f64> = (0..nc).map(|_| rng.range(0.02, 0.2)).collect();
-        Case { name: name.into(), grid, cfg, solid, w, dirs, bc, sym, mu, mu_t, grad, wall, dwall, ks, law_strain, f, dt, turb, re_c }
+        Case { name: name.into(), grid, cfg, solid, w, dirs, bc, sym, mu, mu_t, grad, wall, dwall, ks, law_strain, law_i_walls, f, dt, turb, re_c }
     }
 
     fn input(&self) -> TurbIn<'_, 2> {
@@ -263,6 +287,7 @@ impl Case {
             wall: &self.wall,
             ks: &self.ks,
             law_strain: self.law_strain,
+            law_i_walls: self.law_i_walls,
             dwall: &self.dwall,
             fi: &self.f[0],
             fj: &self.f[1],
@@ -308,9 +333,13 @@ fn cases() -> Vec<Case> {
     let mut v = Vec::new();
     let re_box = 5.0e4;
     let block = [SolidBox { i: 3..5, j: 0..3, k: 2..4 }];
-    for (name, sym, law) in [("box, Inf ghosts, law_strain", false, true), ("box, symmetry planes", true, false)] {
+    for (name, sym, law, law_i) in [
+        ("box, Inf ghosts, law_strain (plain i walls)", false, true, false),
+        ("box, Inf ghosts, law_strain, law_i_walls", false, true, true),
+        ("box, symmetry planes", true, false, false),
+    ] {
         let (s, bc) = box_sides(sym);
-        v.push(Case::new(name, box_grid([8, 7, 6], &block, &mut Rng::new(11)), box_config(), s, bc, re_box, Flow::Random, true, law, 3));
+        v.push(Case::new(name, box_grid([8, 7, 6], &block, &mut Rng::new(11)), box_config(), s, bc, re_box, Flow::Random, true, law, law_i, 3));
     }
     // a wall row `j = 0` along 24 columns, 3 cells deep in k: the first cell row is the `y+` sweep (a rectangular box: one wall distance per column)
     let (s, bc) = box_sides(false);
@@ -328,14 +357,26 @@ fn cases() -> Vec<Case> {
     for (name, rough) in [("y+ sweep 0.1 .. 300, smooth, law_strain", false), ("y+ sweep 0.1 .. 300, rough cells, law_strain", true)] {
         let mut g = Grid3::try_from_nodes(n[0], n[1], n[2], x.clone(), y.clone(), z.clone()).expect("sweep grid");
         g.mark_solid(SolidBox { i: 0..n[0], j: 0..1, k: 0..n[2] }, Some(Part::Body(0)));
-        v.push(Case::new(name, g, box_config(), s, bc, 5.0e4, Flow::YPlusSweep, rough, true, 7));
+        v.push(Case::new(name, g, box_config(), s, bc, 5.0e4, Flow::YPlusSweep, rough, true, false, 7));
     }
     let wedge_sym = [false, false, false, false, true, true];
     let wedge_bc = [ScalarBc::Inf, ScalarBc::Inf, ScalarBc::Cell, ScalarBc::Inf, ScalarBc::Cell, ScalarBc::Cell];
     let c = wedge_case(true);
-    v.push(Case::new("wedge (tiny)", body_grid3(&c.grid).expect("wedge grid"), config(&c), wedge_sym, wedge_bc, 2.0e5, Flow::Random, true, false, 13));
+    v.push(Case::new("wedge (tiny)", body_grid3(&c.grid).expect("wedge grid"), config(&c), wedge_sym, wedge_bc, 2.0e5, Flow::Random, true, false, false, 13));
     let c = sector_case(true, 4, 6);
-    v.push(Case::new("sector N 4 (tiny)", body_grid3(&c.grid).expect("sector grid"), config(&c), wedge_sym, wedge_bc, 2.0e5, Flow::Random, true, false, 17));
+    v.push(Case::new(
+        "sector N 4 (tiny)",
+        body_grid3(&c.grid).expect("sector grid"),
+        config(&c),
+        wedge_sym,
+        wedge_bc,
+        2.0e5,
+        Flow::Random,
+        true,
+        false,
+        false,
+        17,
+    ));
     v
 }
 
@@ -578,12 +619,12 @@ fn turbulence_update_launches_and_time() {
     // a wedge-like grid of 156 x 140 x 1 cells (a jittered box with a solid body block, the wedge's one k cell with its symmetry planes and no k line)
     let mut g = box_grid([156, 140, 1], &[SolidBox { i: 0..60, j: 0..8, k: 0..1 }], &mut Rng::new(23));
     g.sym = Symmetry::Wedge;
-    big.push(Case::new("wedge-like", g, box_config(), wedge_sym, wedge_bc, 2.0e5, Flow::Random, true, true, 29));
+    big.push(Case::new("wedge-like", g, box_config(), wedge_sym, wedge_bc, 2.0e5, Flow::Random, true, true, false, 29));
     let c = wedge_case(false);
-    big.push(Case::new("wedge", body_grid3(&c.grid).expect("wedge grid"), config(&c), wedge_sym, wedge_bc, 2.0e5, Flow::Random, true, true, 13));
+    big.push(Case::new("wedge", body_grid3(&c.grid).expect("wedge grid"), config(&c), wedge_sym, wedge_bc, 2.0e5, Flow::Random, true, true, false, 13));
     let c = sector_case(false, 4, 18);
     let nk = c.grid.nk;
-    big.push(Case::new("sector", body_grid3(&c.grid).expect("sector grid"), config(&c), wedge_sym, wedge_bc, 2.0e5, Flow::Random, true, true, 17));
+    big.push(Case::new("sector", body_grid3(&c.grid).expect("sector grid"), config(&c), wedge_sym, wedge_bc, 2.0e5, Flow::Random, true, true, false, 17));
     println!("sector nk {nk}");
     let mut bad = Vec::new();
     println!("\n| grid | cells (fluid) | prec | staging | wall pass: launches, ms | update: launches, ms |\n|---|---|---|---|---|---|");

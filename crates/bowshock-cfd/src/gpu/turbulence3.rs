@@ -245,9 +245,11 @@ pub(crate) struct TGeo3 {
     /// Per cell: its position in `wall_idx` (zero elsewhere) and whether it is a wall cell: the gather that puts a result of the wall cells back on the grid.
     wall_pos: Option<Array<u32>>,
     wall_cell: Array<bool>,
-    /// The wall cells' faces: no-slip flags and directions `e` of the six faces (`None` without wall cells), gathered like `wall_idx`.
+    /// The wall cells' faces of the law class: flags and directions `e` of the six faces (the `i` faces are never flagged without `law_i_walls`; `None` without wall
+    /// cells), gathered like `wall_idx`; `wall_counted`: the cell has such a face (it takes the law of the wall; a plain wall cell does not).
     wall_ns: Option<[Array<bool>; 6]>,
     wall_e: Option<[[A; 3]; 6]>,
+    wall_counted: Option<Array<bool>>,
     /// `1 / V` (zero in solid cells) and `V` (one in solid cells).
     inv_v: A,
     vol: A,
@@ -257,7 +259,7 @@ pub(crate) struct TGeo3 {
 impl TGeo3 {
     /// `solid` is the per-cell update mask, `sym` the symmetry sides of the domain box, `bc` the scalar ghost kind of the six domain sides, `vg` the viscous geometry of the
     /// same grid, mask and `sym` (its no-slip masks give the wall cells).
-    pub(crate) fn new(ctx: &Context, grid: &Grid3, solid: &[bool], sym: &cv3::SymSides, bc: &cpu3::ScalarSides, vg: &VGeo3) -> Result<TGeo3> {
+    pub(crate) fn new(ctx: &Context, grid: &Grid3, solid: &[bool], sym: &cv3::SymSides, bc: &cpu3::ScalarSides, vg: &VGeo3, law_i_walls: bool) -> Result<TGeo3> {
         let (ni, nj, nk) = (grid.ni, grid.nj, grid.nk);
         let n = [ni, nj, nk];
         let family = |dir: usize| -> Result<TFam3> {
@@ -316,13 +318,14 @@ impl TGeo3 {
         let wall_pos = if wall.is_empty() { None } else { Some(Array::from_slice_on(ctx, &pos, shape)?) };
         let wall_cell = Array::from_slice_on(ctx, &is_wall, shape)?;
         // the no-slip faces of every wall cell (its six faces: `i`, `j`, `k` lower and upper) and their directions `e` for the tangential speed of the law of the wall
-        let (wall_ns, wall_e) = if wall.is_empty() {
-            (None, None)
+        let (wall_ns, wall_e, wall_counted) = if wall.is_empty() {
+            (None, None, None)
         } else {
             let dirs = cv3::face_dirs(grid, solid, sym);
             let mut ns: Vec<Vec<bool>> = (0..6).map(|_| Vec::with_capacity(wall.len())).collect();
             let mut ev: Vec<[Vec<f64>; 3]> = (0..6).map(|_| [Vec::new(), Vec::new(), Vec::new()]).collect();
-            for &cell in &wall {
+            let mut any_counted = vec![false; wall.len()];
+            for (m, &cell) in wall.iter().enumerate() {
                 let c = cell as usize;
                 let lo = [c % ni, (c / ni) % nj, c / (ni * nj)];
                 for f in 0..6 {
@@ -330,16 +333,22 @@ impl TGeo3 {
                     let mut at = lo;
                     at[d] += upper as usize;
                     let fd = &dirs.family(d)[face_q3(grid, d, at)];
-                    ns[f].push(fd.noslip);
+                    // the faces of the law class: the `j` and `k` families, the `i` faces only with `law_i_walls` (`turbulence3::wall_speed`)
+                    let counted = fd.noslip && (law_i_walls || f >= 2);
+                    ns[f].push(counted);
+                    if counted {
+                        any_counted[m] = true;
+                    }
                     for a in 0..3 {
-                        ev[f][a].push(if fd.noslip { fd.e[a] } else { 0.0 });
+                        ev[f][a].push(if counted { fd.e[a] } else { 0.0 });
                     }
                 }
             }
             let nw = [wall.len()];
             let ns: Result<Vec<Array<bool>>> = ns.iter().map(|v| Array::from_slice_on(ctx, v, nw)).collect();
             let ev: Result<Vec<[A; 3]>> = ev.iter().map(|v| Ok([up(ctx, &v[0], nw)?, up(ctx, &v[1], nw)?, up(ctx, &v[2], nw)?])).collect();
-            (ns?.try_into().ok(), ev?.try_into().ok())
+            let counted = Array::from_slice_on(ctx, &any_counted, nw)?;
+            (ns?.try_into().ok(), ev?.try_into().ok(), Some(counted))
         };
         Ok(TGeo3 {
             dir,
@@ -349,6 +358,7 @@ impl TGeo3 {
             wall_cell,
             wall_ns,
             wall_e,
+            wall_counted,
             inv_v: up(ctx, &grid.vol.iter().zip(solid).map(|(v, s)| if *s { 0.0 } else { 1.0 / v }).collect::<Vec<_>>(), shape)?,
             vol: up(ctx, &grid.vol.iter().zip(solid).map(|(v, s)| if *s { 1.0 } else { *v }).collect::<Vec<_>>(), shape)?,
             n_active: solid.iter().filter(|s| !**s).count().max(1),
@@ -742,9 +752,10 @@ impl LazySolver3 {
         let yp = &d * &u_tau / &nu;
         let (_, dup) = law3(&yp);
         let strain = &u_tau * &u_tau / &nu * &dup;
+        let counted = tg.wall_counted.as_ref()?;
         let smooth = match &dev.ks {
-            Some(ks) => w1.gt(c(0.0)) & at(ks).eq(c(0.0)),
-            None => w1.gt(c(0.0)),
+            Some(ks) => w1.gt(c(0.0)) & at(ks).eq(c(0.0)) & counted,
+            None => w1.gt(c(0.0)) & counted,
         };
         let (smooth, s2, yp, u_tau, nu) = self.staged3((select(&smooth, c(1.0), c(0.0)), &strain * &strain, yp, u_tau, nu));
         let full = |a: &A| select(&tg.wall_cell, a.take(pos), c(0.0));
@@ -848,7 +859,7 @@ impl LazySolver3 {
         }
         let visc = crate::solver::Viscous { re_c: 1.0, sutherland: 0.368, turbulence: crate::solver::Turbulence::Sst, wall_i_start: 0, roughness: 0.0 };
         let vg = VGeo3::new(&self.ctx, cx.grid, cx.solid, sym, visc)?;
-        let tg = TGeo3::new(&self.ctx, cx.grid, cx.solid, sym, cx.bc, &vg)?;
+        let tg = TGeo3::new(&self.ctx, cx.grid, cx.solid, sym, cx.bc, &vg, cx.law_i_walls)?;
         Ok((vg, tg))
     }
 
