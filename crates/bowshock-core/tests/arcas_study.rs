@@ -30,12 +30,6 @@ fn the_arcas_axial_force_by_part() {
     let re_per_m = if mach < 1.3 { arcas::TRANSONIC_RE_PER_M } else { arcas::SUPERSONIC_RE_PER_M };
     let flow = WallFlow { re_c: re_per_m * d / mach, mach_max: mach, ks_body: 0.0, ks_fin: 0.0, sutherland: 0.368 };
     let tier_name: String = env("STUDY_TIER", "coarse".to_string());
-    let tier = match tier_name.as_str() {
-        "fine" => Tier::Fine(flow),
-        "euler" => Tier::Euler,
-        "draft" => Tier::draft(flow),
-        _ => Tier::Coarse(flow),
-    };
     let level: u32 = env("STUDY_LEVEL", 0);
     let chord: usize = env("STUDY_CHORD", 0);
     let span: usize = env("STUDY_SPAN", 0);
@@ -56,6 +50,20 @@ fn the_arcas_axial_force_by_part() {
         profile,
         planform: None,
     };
+    let anf = env("STUDY_BODY", "arcas".to_string()) == "anf";
+    let (body, fins, flow) = if anf {
+        // the Army-Navy Finner (0.03 m) at the sea-level atmosphere, the grid sized for Mach 3.147 as in G-F5
+        let flow = WallFlow { re_c: 1.225 * 340.294 * 0.03 / 1.7894e-5, mach_max: env("STUDY_GRID_MACH", 3.147), ks_body: 0.0, ks_fin: 0.0, sutherland: 0.368 };
+        (Case3::anf_body(), Case3::anf_fins(), flow)
+    } else {
+        (body, fins, flow)
+    };
+    let tier = match tier_name.as_str() {
+        "fine" => Tier::Fine(flow),
+        "euler" => Tier::Euler,
+        "draft" => Tier::draft(flow),
+        _ => Tier::Coarse(flow),
+    };
     let mut case = if fins_on { Case3::sector(mach, body, fins, tier, level) } else { Case3::wedge(mach, body, level).with_tier(tier) };
     if chord > 0 {
         case.grid.fin_chord_cells = Some(chord);
@@ -70,7 +78,8 @@ fn the_arcas_axial_force_by_part() {
     let p = &r.parts;
     let ca_nobase = q * (p.total - p.base - p.friction.base);
     println!(
-        "STUDY {tier_name} L{level} chord {} span {} {profile_name} fins {} M {mach}: {} x {} x {} = {} cells, {} ({:.0} s); C_A without base {:.4} | pressure nose {:.4} aft {:.4} fin sides {:+.4} edges {:+.4} tips {:+.4} | friction body {:.4} fin {:.4} | base {:.4}",
+        "STUDY {} {tier_name} L{level} chord {} span {} {profile_name} fins {} M {mach}: {} x {} x {} = {} cells, {} ({:.0} s); C_A without base {:.4}, total {:.4} | pressure nose {:.4} aft {:.4} fin sides {:+.4} edges {:+.4} tips {:+.4} | friction body {:.4} fin {:.4} | base {:.4}",
+        if anf { "anf" } else { "arcas" },
         if chord > 0 { chord.to_string() } else { "default".to_string() },
         if span > 0 { span.to_string() } else { "default".to_string() },
         if fins_on { "on" } else { "off" },
@@ -81,6 +90,7 @@ fn the_arcas_axial_force_by_part() {
         r.stop(),
         t0.elapsed().as_secs_f64(),
         ca_nobase,
+        q * p.total,
         q * p.nose,
         q * p.aft.iter().sum::<f64>(),
         q * p.fin_sides,
