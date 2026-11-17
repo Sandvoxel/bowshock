@@ -16,6 +16,11 @@ use bowshock_cfd::implicit::{DtMode, ImplicitParams, LineSolve3};
 use bowshock_cfd::solver::{Bc, Scheme, Turbulence, Viscous};
 use bowshock_cfd::solver3::{Config3, RansOpts3, Scheme3, Solver3};
 
+/// `cfl_max` of a wall-resolved (viscous) **half domain**: the engine's `Numerics3::viscous` value (50 below Mach 1, 20 above) is not usable there. The Lift-tier half domain of
+/// the ANF nose with fins (short body, 692k cells) at 2 and 6 degrees goes non-finite at iteration 176 to 192 at Mach 0.8 and 2 (the ramp passes about 15 to 40, in the first-order
+/// phase), and runs at 10 (stable to 500 iterations, the longest run).
+pub const HALF_DOMAIN_CFL_MAX: f64 = 10.0;
+
 /// Numerical settings and stop-rule tolerances of a 3D run.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Numerics3 {
@@ -331,6 +336,9 @@ impl Case3 {
         // a wall-resolved tier is a RANS run (SST, the automatic wall treatment): the equations follow the grid; `euler_equations` keeps the grid only
         self.viscous = Some(Viscous { re_c: flow.re_c, sutherland: flow.sutherland, turbulence: Turbulence::Sst, wall_i_start: 0, roughness: 0.0 });
         self.numerics = Numerics3::viscous(self.mach, level);
+        if matches!(self.grid.domain, Domain3::Half { .. }) {
+            self.numerics.implicit.cfl_max = self.numerics.implicit.cfl_max.min(HALF_DOMAIN_CFL_MAX);
+        }
         match (&self.grid.fins, tier) {
             (Some(f), _) => self.grid.fin_stack = Some(FinStack::from_flow(flow.re_c, flow.mach_max, f.root_chord, y_fin)),
             (None, Tier::Lift(_)) if matches!(self.grid.domain, Domain3::Half { .. }) => self.grid.nk = 32usize << level,
@@ -442,5 +450,27 @@ impl Case3 {
         c.grid.fin_chord_cells = Some(16);
         c.numerics.max_iter = 3000;
         c
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A viscous half domain takes [`HALF_DOMAIN_CFL_MAX`]; a viscous sector and a viscous wedge keep the engine's limit (50 below Mach 1, 20 above).
+    #[test]
+    fn only_the_viscous_half_domain_takes_the_lower_cfl() {
+        let flow = WallFlow { re_c: 7.0e5, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0, sutherland: SUTHERLAND_SEA_LEVEL };
+        let cfl = |c: &Case3| c.numerics.implicit.cfl_max;
+        for (mach, base) in [(0.8, 50.0), (2.0, 20.0)] {
+            let half = Case3::base_half(mach, 2f64.to_radians(), Case3::anf_body(), Some(Case3::anf_fins()), Tier::Lift(flow), 0);
+            assert_eq!(cfl(&half), HALF_DOMAIN_CFL_MAX, "half domain at Mach {mach}");
+            let finless = Case3::base_half(mach, 0.0, Case3::anf_body(), None, Tier::Lift(flow), 0);
+            assert_eq!(cfl(&finless), HALF_DOMAIN_CFL_MAX, "finless half domain at Mach {mach}");
+            let sector = Case3::sector(mach, Case3::anf_body(), Case3::anf_fins(), Tier::Coarse(flow), 0);
+            assert_eq!(cfl(&sector), base, "sector at Mach {mach}");
+            let euler = Case3::base_half(mach, 0.0, Case3::anf_body(), Some(Case3::anf_fins()), Tier::Euler, 0);
+            assert_eq!(cfl(&euler), Numerics3::auto(mach, 0).implicit.cfl_max, "Euler half domain at Mach {mach}");
+        }
     }
 }
