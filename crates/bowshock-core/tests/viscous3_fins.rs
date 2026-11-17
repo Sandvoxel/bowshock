@@ -511,11 +511,27 @@ fn fin_half_incidence_series() {
     let track_from: usize = env("TRACK_FROM", usize::MAX);
     let diag_from: usize = env("DIAG_FROM", 100).min(track_from);
     let mut prev: Vec<bowshock_cfd::gas3::Cons3> = Vec::new();
+    // `ROLLBACK=1`: a snapshot every 50 iterations; a residual that is not finite or above 1e5 returns to the last snapshot with `cfl_max` x0.7 (the CFL controller of the 3D step)
+    let rollback = env("ROLLBACK", 0u8) != 0;
+    let (mut snap, mut snap_it, mut cap, mut rollbacks) = (s.snapshot(), 0usize, case.numerics.implicit.cfl_max, 0usize);
     while it < case.numerics.max_iter {
         if it >= diag_from {
             prev.clone_from(&s.u);
         }
         let r = s.step();
+        if rollback && (!r.is_finite() || r > 1e5) {
+            cap = (cap * 0.7).max(2.0);
+            rollbacks += 1;
+            println!("  rollback {rollbacks}: failure at iteration {}, back to {snap_it} with cfl_max {cap:.1}", it + 1);
+            s.restore(&snap);
+            if let Scheme3::Implicit(p) = &mut s.cfg.scheme {
+                p.cfl_max = cap;
+            }
+            it = snap_it;
+            hist.truncate(snap_it);
+            series.retain(|t| t.0 <= snap_it);
+            continue;
+        }
         if it >= track_from && (it + 1) % env("TRACK_EVERY", 1usize) == 0 {
             track_change(&s, &prev, it + 1, env("TRACK_N", 3));
         }
@@ -528,6 +544,9 @@ fn fin_half_incidence_series() {
             }
         });
         it += 1;
+        if rollback && it % 50 == 0 {
+            (snap, snap_it) = (s.snapshot(), it);
+        }
         if rule.wants_forces(it, MEAN_EVERY) {
             let f = lift_forces(&case, &s);
             rule.observe(it, &f);

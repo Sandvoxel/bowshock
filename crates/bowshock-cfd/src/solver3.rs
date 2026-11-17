@@ -67,6 +67,15 @@ pub struct Config3 {
     pub scheme: Scheme3,
 }
 
+/// The evolving state of a [`Solver3`] ([`Solver3::snapshot`]).
+#[derive(Clone, Debug)]
+pub struct Snapshot3 {
+    u: Vec<Cons3>,
+    turb: Option<Vec<[f64; 2]>>,
+    ramp_k: usize,
+    iter: usize,
+}
+
 pub struct Solver3 {
     pub grid: Grid3,
     pub cfg: Config3,
@@ -157,6 +166,20 @@ impl Solver3 {
     /// Restart the CFL ramp of the implicit scheme (call at the start of a run / after a change of the free stream).
     pub fn restart_ramp(&mut self) {
         self.ramp_k = 0;
+    }
+
+    /// A copy of the state that evolves (the conserved variables, the turbulence variables, the CFL ramp and the iteration count) to come back to with [`Solver3::restore`].
+    pub fn snapshot(&self) -> Snapshot3 {
+        Snapshot3 { u: self.u.clone(), turb: self.rans.as_ref().map(|r| r.turb.clone()), ramp_k: self.ramp_k, iter: self.iter }
+    }
+
+    /// Return to a [`Solver3::snapshot`] of this solver.
+    pub fn restore(&mut self, s: &Snapshot3) {
+        self.u.clone_from(&s.u);
+        if let (Some(r), Some(t)) = (self.rans.as_mut(), s.turb.as_ref()) {
+            r.turb.clone_from(t);
+        }
+        (self.ramp_k, self.iter) = (s.ramp_k, s.iter);
     }
 
     /// Primitive state of interior cell `(i, j, k)` as of the last residual evaluation.
@@ -841,5 +864,28 @@ mod tests {
         let x = half.grid.xc[0];
         let cap = WEDGE_AXIS_DT * x[1].hypot(x[2]) / c_inf;
         assert!(half.dt[0] > 1.5 * cap, "the axis cell of a half domain is limited: dt {:e} vs {cap:e}", half.dt[0]);
+    }
+
+    /// `restore` of a `snapshot` taken mid-run gives back the run: the same steps afterwards reach the same state, the conserved variables bit for bit (the residual norms
+    /// to the order of the parallel sum).
+    #[test]
+    fn a_snapshot_restores_the_run_exactly() {
+        let g3 = cone3(&cone2d(24, 12), 6);
+        let fs = freestream3(2.0, 3f64.to_radians());
+        let ip = ImplicitParams { cfl_max: 10.0, ..ImplicitParams::DEFAULT };
+        let mut s = Solver3::new(g3, cfg(fs, Scheme3::Implicit(ip), Limiter::Minmod));
+        for _ in 0..4 {
+            s.step();
+        }
+        let snap = s.snapshot();
+        let first: Vec<f64> = (0..6).map(|_| s.step()).collect();
+        let u_first = s.u.clone();
+        s.restore(&snap);
+        assert_eq!((s.iter, s.ramp_k), (4, 4));
+        let again: Vec<f64> = (0..6).map(|_| s.step()).collect();
+        for (a, b) in first.iter().zip(&again) {
+            assert!((a - b).abs() <= 1e-12 * a.abs(), "the residuals of the repeated steps: {a} vs {b}");
+        }
+        assert_eq!(u_first, s.u, "the state after the repeated steps");
     }
 }
