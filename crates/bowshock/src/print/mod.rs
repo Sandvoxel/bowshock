@@ -284,4 +284,36 @@ mod tests {
         let text = String::from_utf8_lossy(&bytes);
         assert!(text.contains("Fin templates") && text.contains("Fin marking guide"));
     }
+
+    #[test]
+    fn the_example_wraps_page_shows_the_nose_and_the_guide_is_one_sideways_page() {
+        let rocket = example();
+        let (drawings, notes) = templates::wrap_drawings(&rocket, UnitSystem::MM_G_S);
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(drawings.len(), 1, "the example's ogive nose is drawn as gores");
+        assert!(drawings[0].path_bbox().is_some_and(|(x0, y0, x1, y1)| y1 - y0 > 10.0 && x1 - x0 > 100.0));
+        let guide = templates::marking_drawings(&rocket, UnitSystem::MM_G_S);
+        assert_eq!(guide.len(), 1);
+        let mut pdf = Pdf::new("t");
+        assert_eq!(templates::emit(&mut pdf, PageSize::Letter, "Guide", &guide), 1, "the whole guide on one page");
+        assert!(String::from_utf8_lossy(&pdf.to_bytes()).contains("/MediaBox [0 0 792.00 612.00]"));
+    }
+
+    /// Writes the example's PDF to `$BOWSHOCK_PDF_OUT` (default `/tmp/bowshock-example.pdf`): `cargo test -p bowshock write_the_example_pdf -- --ignored`.
+    #[test]
+    #[ignore = "writes a file"]
+    fn write_the_example_pdf() {
+        let rocket = example();
+        let inputs = report::Inputs {
+            units: UnitSystem::MM_G_S,
+            balance: Err("none".into()),
+            configs: Vec::new(),
+            warnings: Vec::new(),
+            flights: Vec::new(),
+            motors: Default::default(),
+        };
+        let pdf = build(&rocket, &inputs, None, Options::default(), PageSize::Letter, "x");
+        let out = std::env::var("BOWSHOCK_PDF_OUT").unwrap_or_else(|_| "/tmp/bowshock-example.pdf".into());
+        std::fs::write(out, pdf.to_bytes()).unwrap();
+    }
 }

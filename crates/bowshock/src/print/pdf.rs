@@ -87,17 +87,29 @@ fn win_ansi(c: char) -> u8 {
 #[derive(Clone, Debug)]
 pub struct Page {
     size: PageSize,
+    landscape: bool,
     ops: String,
 }
 
 impl Page {
-    fn new(size: PageSize) -> Page {
-        Page { size, ops: String::new() }
+    fn new(size: PageSize, landscape: bool) -> Page {
+        Page { size, landscape, ops: String::new() }
     }
 
-    /// The page's width and height, mm.
+    /// The page's width and height as it is printed, points.
+    fn dims(&self) -> (f64, f64) {
+        let (w, h) = self.size.points();
+        if self.landscape {
+            (h, w)
+        } else {
+            (w, h)
+        }
+    }
+
+    /// The page's width and height as it is printed, mm: swapped for a landscape page.
     pub fn size_mm(&self) -> (f64, f64) {
-        self.size.mm()
+        let (w, h) = self.dims();
+        (w / PT, h / PT)
     }
 
     /// x in points of `mm`.
@@ -107,7 +119,7 @@ impl Page {
 
     /// y in points (from the bottom) of `mm` from the top.
     fn y(&self, mm: f64) -> f64 {
-        self.size.points().1 - mm * PT
+        self.dims().1 - mm * PT
     }
 
     fn point(&self, p: (f64, f64)) -> String {
@@ -239,7 +251,13 @@ impl Pdf {
 
     /// Adds a blank page and returns it for drawing.
     pub fn page(&mut self, size: PageSize) -> &mut Page {
-        self.pages.push(Page::new(size));
+        self.pages.push(Page::new(size, false));
+        self.pages.last_mut().expect("just pushed")
+    }
+
+    /// Adds a blank page turned on its side (the long edge is the width) and returns it for drawing.
+    pub fn landscape_page(&mut self, size: PageSize) -> &mut Page {
+        self.pages.push(Page::new(size, true));
         self.pages.last_mut().expect("just pushed")
     }
 
@@ -285,7 +303,7 @@ impl Pdf {
         object(&mut out, 5, &info);
         for (i, page) in self.pages.iter().enumerate() {
             let (page_obj, content_obj) = (6 + 2 * i, 7 + 2 * i);
-            let (w, h) = page.size.points();
+            let (w, h) = page.dims();
             object(
                 &mut out,
                 page_obj,
@@ -386,6 +404,22 @@ mod tests {
         assert!((Page::text_width(10.0, false, "é") - em(556.0, 10.0)).abs() < 1e-9);
         assert_eq!(HELVETICA.len(), 95);
         assert_eq!(HELVETICA_BOLD.len(), 95);
+    }
+
+    #[test]
+    fn a_landscape_page_swaps_its_sides() {
+        let mut pdf = Pdf::new("t");
+        let (w, h) = pdf.landscape_page(PageSize::A4).size_mm();
+        assert!((w - 297.0).abs() < 0.1 && (h - 210.0).abs() < 0.1);
+        let bytes = pdf.to_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("/MediaBox [0 0 841.89 595.28]"), "{text}");
+        // The top-left corner stays the origin: 10 mm from the top is 10 mm below the page's height.
+        let mut pdf = Pdf::new("t");
+        pdf.landscape_page(PageSize::A4).text((0.0, 10.0), 9.0, false, "x");
+        let bytes = pdf.to_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("0.000 566.93"), "{text}");
     }
 
     #[test]

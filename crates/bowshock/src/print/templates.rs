@@ -11,7 +11,7 @@
 
 use std::f64::consts::{PI, TAU};
 
-use bowshock_model::{instance_letter, FinTab, InternalKind, NoseShape, PartKind, RadialKind, Rocket};
+use bowshock_model::{instance_letter, FinTab, InternalKind, NoseShape, Part, PartKind, RadialKind, Rocket};
 
 use super::pdf::{Page, PageSize, Pdf};
 use crate::app::ui;
@@ -27,6 +27,8 @@ const FOOTER: f64 = 31.0;
 const OVERLAP: f64 = 10.0;
 /// Gap between packed drawings, mm.
 const GAP: f64 = 6.0;
+/// How many gores make up a curved nose.
+const GORES: usize = 6;
 /// Width of the glue tab of a flat pattern, mm.
 const GLUE_TAB: f64 = 10.0;
 /// The largest side a pattern is drawn at, mm.
@@ -295,7 +297,46 @@ fn wrap_drawing(name: &str, r1: f64, r2: f64, length: f64, material: &str, thick
     Ok(d)
 }
 
-/// The flat patterns of the transitions and conical noses, and a note for each part that has none.
+/// The gore of the nose cone `part`: one of `GORES` identical petals that, edge to edge, make up the nose.
+///
+/// A nose that curves along its length has no exact flat pattern. At each point of the outline, `s` metres along it, the gore is
+/// `2π·r(s)/GORES` wide: the circumference there divided between the gores, which is how a globe's gores are cut. The tip is at the left.
+fn gore_drawing(name: &str, part: &Part, units: UnitSystem) -> Result<Drawing, String> {
+    let PartKind::NoseCone { shape, length, diameter } = part.kind else { return Err(format!("{name}: not a nose cone")) };
+    let (material, thickness) = (part.material.name(), part.thickness);
+    // The outline in 96 steps, finer than the model's 32, so that the cut edge is smooth.
+    let profile: Vec<(f64, f64)> = (0..=96).map(|i| length * f64::from(i) / 96.0).map(|z| (z, part.kind.radius_at(z))).collect();
+    let mut s_mm = 0.0;
+    let mut rows: Vec<(f64, f64)> = Vec::with_capacity(profile.len());
+    let mut last = profile.first().copied().unwrap_or((0.0, 0.0));
+    for &(z, r) in &profile {
+        s_mm += (z - last.0).hypot(r - last.1) * 1000.0;
+        last = (z, r);
+        rows.push((s_mm, r * 1000.0 * PI / GORES as f64));
+    }
+    let half = rows.iter().map(|r| r.1).fold(0.0, f64::max);
+    if s_mm > MAX_SIDE || half * 2.0 > MAX_SIDE {
+        return Err(format!("{name}: the pattern is larger than {MAX_SIDE} mm"));
+    }
+    // Lying down, tip to the left: the gore is longer than it is wide, and a long drawing fits a sideways page.
+    let mut outline: Vec<(f64, f64)> = rows.iter().map(|&(s, w)| (s, half - w)).collect();
+    outline.extend(rows.iter().rev().map(|&(s, w)| (s, half + w)));
+    let mut d = Drawing::new();
+    d.path(outline, true, OUTLINE, None);
+    d.path(vec![(0.0, half), (s_mm, half)], false, 0.2, Some(1.5));
+    let lines = [
+        name.to_string(),
+        format!("{} nose · Ø {} · Length {} · Along the surface {}", shape.name(), len(diameter, units), len(length, units), len(s_mm / 1000.0, units)),
+        format!("Cut {GORES} gores, each {} wide at the base (dashed line is the centre), and join them edge to edge", len(half * 2.0 / 1000.0, units)),
+        format!("{material}, {} · An approximate pattern: a curved nose cannot be flattened exactly", len(thickness, units)),
+    ];
+    d.h = label_lines(&mut d, half * 2.0 + 3.0, &lines);
+    d.fit_width(s_mm);
+    Ok(d)
+}
+
+/// The flat patterns of the transitions and conical noses, the gores of the other noses, and a note for each part whose
+/// pattern is too large.
 pub fn wrap_drawings(rocket: &Rocket, units: UnitSystem) -> (Vec<Drawing>, Vec<String>) {
     let mut drawings = Vec::new();
     let mut notes = Vec::new();
@@ -312,10 +353,7 @@ pub fn wrap_drawings(rocket: &Rocket, units: UnitSystem) -> (Vec<Drawing>, Vec<S
             PartKind::NoseCone { shape: NoseShape::Conical, length, diameter } => {
                 wrap_drawing(&name, 0.0, diameter / 2.0, length, part.material.name(), part.thickness, units)
             }
-            PartKind::NoseCone { shape, .. } => {
-                notes.push(format!("{name}: no flat pattern for a {} nose", shape.name().to_lowercase()));
-                continue;
-            }
+            PartKind::NoseCone { .. } => gore_drawing(&name, part, units),
             PartKind::BodyTube { .. } => continue,
         };
         match pattern {
@@ -393,9 +431,9 @@ pub fn notes_drawing(notes: &[String]) -> Option<Drawing> {
     Some(d)
 }
 
-/// The printable area of a page: `(x, y, width, height)` mm.
-fn area(size: PageSize) -> (f64, f64, f64, f64) {
-    let (w, h) = size.mm();
+/// The printable area of a page, upright or turned on its side: `(x, y, width, height)` mm.
+fn area(size: PageSize, landscape: bool) -> (f64, f64, f64, f64) {
+    let (w, h) = if landscape { (size.mm().1, size.mm().0) } else { size.mm() };
     (MARGIN, MARGIN + HEADER, w - 2.0 * MARGIN, h - 2.0 * MARGIN - HEADER - FOOTER)
 }
 
@@ -427,10 +465,23 @@ fn crop_marks(page: &mut Page, origin: (f64, f64), size: (f64, f64)) {
     }
 }
 
+/// How many tiles `(columns, rows)` the drawing `d` takes on a printable area `aw` × `ah`, tiles overlapping by [`OVERLAP`].
+fn tiles(d: &Drawing, aw: f64, ah: f64) -> (usize, usize) {
+    if d.w <= aw && d.h <= ah {
+        return (1, 1);
+    }
+    let cols = (((d.w - OVERLAP) / (aw - OVERLAP)).ceil() as usize).max(1);
+    let rows = (((d.h - OVERLAP) / (ah - OVERLAP)).ceil() as usize).max(1);
+    (cols, rows)
+}
+
 /// Pages for `drawings`, each page titled `title`; returns how many pages were added.
+///
+/// Drawings that fit an upright page share pages. A drawing that does not is put on a page of its own, turned on its side when
+/// that fits it on one page (or needs fewer tiles), and otherwise tiled at 1:1 with the overlap, crop marks and tile numbers.
 pub fn emit(pdf: &mut Pdf, size: PageSize, title: &str, drawings: &[Drawing]) -> usize {
     let before = pdf.page_count();
-    let (x0, y0, aw, ah) = area(size);
+    let (x0, y0, aw, ah) = area(size, false);
     let (small, big): (Vec<&Drawing>, Vec<&Drawing>) = drawings.iter().partition(|d| d.w <= aw && d.h <= ah);
     // Shelf packing, tallest first.
     let mut small = small;
@@ -462,15 +513,29 @@ pub fn emit(pdf: &mut Pdf, size: PageSize, title: &str, drawings: &[Drawing]) ->
         }
     }
     for d in big {
+        let upright = tiles(d, aw, ah);
+        let (lx0, ly0, law, lah) = area(size, true);
+        let sideways = tiles(d, law, lah);
+        let landscape = sideways.0 * sideways.1 < upright.0 * upright.1;
+        let ((x0, y0, aw, ah), (cols, rows)) = if landscape { ((lx0, ly0, law, lah), sideways) } else { ((x0, y0, aw, ah), upright) };
         let step = (aw - OVERLAP, ah - OVERLAP);
-        let cols = (((d.w - OVERLAP) / step.0).ceil() as usize).max(1);
-        let rows = (((d.h - OVERLAP) / step.1).ceil() as usize).max(1);
         for r in 0..rows {
             for c in 0..cols {
                 let shift = (c as f64 * step.0, r as f64 * step.1);
                 let clip = ((d.w - shift.0).min(aw), (d.h - shift.1).min(ah));
-                let page = pdf.page(size);
-                frame(page, title, Some(&format!("Tile {}/{} of {rows}×{cols} (rows × columns), 10 mm overlap", r + 1, c + 1)));
+                let page = if landscape { pdf.landscape_page(size) } else { pdf.page(size) };
+                let note = match (rows * cols, landscape) {
+                    (1, true) => Some("Landscape page".to_string()),
+                    (1, false) => None,
+                    (n, _) => Some(format!(
+                        "Tile {}/{n} (row {} of {rows}, column {} of {cols}), 10 mm overlap{}",
+                        r * cols + c + 1,
+                        r + 1,
+                        c + 1,
+                        if landscape { ", landscape" } else { "" }
+                    )),
+                };
+                frame(page, title, note.as_deref());
                 crop_marks(page, (x0, y0), clip);
                 page.clip_rect((x0, y0), clip);
                 d.draw(page, (x0, y0), shift);
@@ -525,29 +590,30 @@ mod tests {
     }
 
     #[test]
-    fn wraps_cover_cones_and_transitions_and_say_what_has_none() {
+    fn wraps_cover_noses_and_transitions() {
         let mut rocket = Rocket::default();
         rocket.insert(0, PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.076 }).unwrap();
         rocket.insert(1, PartKind::Transition { length: 0.076, fore_diameter: 0.076, aft_diameter: 0.054 }).unwrap();
         rocket.insert(2, PartKind::BodyTube { length: 0.3, diameter: 0.054 }).unwrap();
         let (drawings, notes) = wrap_drawings(&rocket, UnitSystem::MM_G_S);
-        assert_eq!(drawings.len(), 1);
-        assert_eq!(notes, vec!["Nose cone: no flat pattern for a tangent ogive nose".to_string()]);
+        // The ogive (as gores) and the transition (as a frustum).
+        assert_eq!(drawings.len(), 2);
+        assert!(notes.is_empty(), "{notes:?}");
     }
 
     #[test]
     fn a_big_drawing_is_tiled_with_overlap() {
         let mut d = Drawing::new();
         d.w = 400.0;
-        d.h = 100.0;
-        d.path(vec![(0.0, 0.0), (400.0, 100.0)], false, 0.3, None);
+        d.h = 400.0;
+        d.path(vec![(0.0, 0.0), (400.0, 400.0)], false, 0.3, None);
         let mut pdf = Pdf::new("t");
         let pages = emit(&mut pdf, PageSize::Letter, "Tiles", &[d]);
-        // 190.5 mm printable width, 10 mm overlap: 180.5 mm steps, 3 columns; 100 mm fits one row.
-        assert_eq!(pages, 3);
+        // 190.5 mm printable width and 213 mm height, 10 mm overlap: 3 columns by 2 rows; sideways it is 2 by 3, no better.
+        assert_eq!(pages, 6);
         let bytes = pdf.to_bytes();
         let text = String::from_utf8_lossy(&bytes);
-        assert!(text.contains("Tile 1/3 of 1\\3273") && text.contains("Print at 100 % \\(no scaling\\)"));
+        assert!(text.contains("Tile 1/6 \\(row 1 of 2, column 1 of 3\\)") && text.contains("Print at 100 % \\(no scaling\\)"));
     }
 
     #[test]
@@ -560,5 +626,115 @@ mod tests {
         let mut pdf = Pdf::new("t");
         let fins = fin_drawings(&rocket, UnitSystem::MM_G_S);
         assert_eq!(emit(&mut pdf, PageSize::A4, "Fins", &[fins[0].clone(), fins[0].clone()]), 1);
+    }
+
+    fn pages_in(pdf: &Pdf, size: PageSize, landscape: bool) -> usize {
+        let (w, h) = size.points();
+        let (w, h) = if landscape { (h, w) } else { (w, h) };
+        let bytes = pdf.to_bytes();
+        String::from_utf8_lossy(&bytes).matches(&format!("/MediaBox [0 0 {w:.2} {h:.2}]")).count()
+    }
+
+    /// Whether a drawing of `d` fits the printable area of an upright or a sideways page.
+    fn fits_a_page(d: &Drawing, size: PageSize) -> bool {
+        [false, true].into_iter().any(|landscape| {
+            let (_, _, aw, ah) = area(size, landscape);
+            d.w <= aw && d.h <= ah
+        })
+    }
+
+    #[test]
+    fn a_curved_nose_gets_gores_that_close_round_it() {
+        let rocket = rocket_with_fin(0.120, 0.050, 0.080, 0.060);
+        let (drawings, notes) = wrap_drawings(&rocket, UnitSystem::MM_G_S);
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(drawings.len(), 1, "the ogive has a pattern");
+        let (x0, y0, x1, y1) = drawings[0].path_bbox().unwrap();
+        // 76 mm diameter: the gore is 2π·38/6 ≈ 39.8 mm across at the base and as long as the outline (a little over 200 mm).
+        assert!((y1 - y0 - TAU * 38.0 / GORES as f64).abs() < 0.5, "width {}", y1 - y0);
+        assert!(x1 - x0 > 200.0 && x1 - x0 < 215.0, "length {}", x1 - x0);
+        let texts: Vec<&str> = drawings[0].items.iter().filter_map(|i| if let Item::Text { s, .. } = i { Some(s.as_str()) } else { None }).collect();
+        assert!(texts.iter().any(|t| t.starts_with("Cut 6 gores")), "{texts:?}");
+        let mut pdf = Pdf::new("t");
+        assert_eq!(emit(&mut pdf, PageSize::Letter, "Wraps", &drawings), 1);
+    }
+
+    #[test]
+    fn a_conical_nose_is_a_sector_and_a_rocket_without_cones_has_no_wraps() {
+        let mut rocket = Rocket::default();
+        rocket.insert(0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.15, diameter: 0.054 }).unwrap();
+        rocket.insert(1, PartKind::BodyTube { length: 0.3, diameter: 0.054 }).unwrap();
+        let (drawings, _) = wrap_drawings(&rocket, UnitSystem::MM_G_S);
+        assert_eq!(drawings.len(), 1);
+        let (x0, _, x1, _) = drawings[0].path_bbox().unwrap();
+        assert!(x1 - x0 > 54.0 / 2.0, "a sector ~ the cone's slant wide");
+        let mut tubes = Rocket::default();
+        tubes.insert(0, PartKind::BodyTube { length: 0.3, diameter: 0.054 }).unwrap();
+        let (drawings, notes) = wrap_drawings(&tubes, UnitSystem::MM_G_S);
+        assert!(drawings.is_empty() && notes.is_empty());
+        assert_eq!(emit(&mut Pdf::new("t"), PageSize::A4, "Wraps", &drawings), 0);
+    }
+
+    #[test]
+    fn the_marking_guide_of_a_76_mm_tube_fits_one_landscape_page() {
+        let rocket = rocket_with_fin(0.120, 0.050, 0.080, 0.060);
+        let strips = marking_drawings(&rocket, UnitSystem::MM_G_S);
+        assert_eq!(strips.len(), 1);
+        // 239 mm round: wider than an upright page's printable width, not than a sideways page's.
+        for size in [PageSize::Letter, PageSize::A4] {
+            assert!(strips[0].w > area(size, false).2 && fits_a_page(&strips[0], size), "{size:?}: {} x {}", strips[0].w, strips[0].h);
+            let mut pdf = Pdf::new("t");
+            assert_eq!(emit(&mut pdf, size, "Guide", &strips), 1);
+            assert_eq!(pages_in(&pdf, size, true), 1);
+            assert_eq!(pages_in(&pdf, size, false), 0);
+        }
+    }
+
+    #[test]
+    fn a_wide_tube_tiles_the_guide_with_overlap_and_covers_all_of_it() {
+        // 200 mm tube: 628 mm round.
+        let mut rocket = Rocket::default();
+        rocket.insert(0, PartKind::NoseCone { shape: NoseShape::Conical, length: 0.3, diameter: 0.2 }).unwrap();
+        let tube = rocket.insert(1, PartKind::BodyTube { length: 0.9, diameter: 0.2 }).unwrap();
+        let _ = rocket.attach_radial(tube, 0.7, 0.0, 4, RadialKind::FinSet { root_chord: 0.3, tip_chord: 0.1, span: 0.15, sweep: 0.1, thickness: 0.004 });
+        let strips = marking_drawings(&rocket, UnitSystem::MM_G_S);
+        assert_eq!(strips.len(), 1);
+        let d = &strips[0];
+        assert!(!fits_a_page(d, PageSize::A4));
+        let (_, _, aw, ah) = area(PageSize::A4, true);
+        let (cols, rows) = tiles(d, aw, ah);
+        assert_eq!(rows, 1);
+        assert!(cols as f64 * (aw - OVERLAP) + OVERLAP >= d.w, "{cols} tiles of {aw} mm cover {} mm", d.w);
+        assert!((cols - 1) as f64 * (aw - OVERLAP) + OVERLAP < d.w, "no tile is empty");
+        let mut pdf = Pdf::new("t");
+        assert_eq!(emit(&mut pdf, PageSize::A4, "Guide", &strips), cols);
+        assert_eq!(pages_in(&pdf, PageSize::A4, true), cols, "tiled on sideways pages, which need fewer");
+    }
+
+    #[test]
+    fn a_long_fin_goes_sideways_when_that_saves_pages() {
+        // 230 mm root: wider than the upright page's 190 mm, within the sideways page's 254 mm.
+        let rocket = rocket_with_fin(0.230, 0.100, 0.060, 0.120);
+        let fins = fin_drawings(&rocket, UnitSystem::MM_G_S);
+        assert!(fits_a_page(&fins[0], PageSize::Letter) && fins[0].w > area(PageSize::Letter, false).2);
+        let mut pdf = Pdf::new("t");
+        assert_eq!(emit(&mut pdf, PageSize::Letter, "Fins", &fins), 1);
+        assert_eq!(pages_in(&pdf, PageSize::Letter, true), 1);
+    }
+
+    #[test]
+    fn the_guide_and_fin_drawings_stay_inside_their_own_bounds() {
+        // Everything a drawing draws lies inside its `w` × `h`, so a page that holds the drawing holds all of it.
+        for rocket in [rocket_with_fin(0.120, 0.050, 0.080, 0.060), rocket_with_fin(0.400, 0.200, 0.050, 0.300)] {
+            for d in marking_drawings(&rocket, UnitSystem::MM_G_S).iter().chain(fin_drawings(&rocket, UnitSystem::MM_G_S).iter()) {
+                let (x0, y0, x1, y1) = d.path_bbox().unwrap();
+                assert!(x0 >= -1e-9 && y0 >= -1e-9 && x1 <= d.w + 1e-9 && y1 <= d.h + 1e-9, "{x0} {y0} {x1} {y1} in {} x {}", d.w, d.h);
+                for item in &d.items {
+                    if let Item::Text { at, size, bold, s } = item {
+                        assert!(at.0 + Page::text_width(*size, *bold, s) <= d.w + 1e-9, "{s}");
+                    }
+                }
+            }
+        }
     }
 }
