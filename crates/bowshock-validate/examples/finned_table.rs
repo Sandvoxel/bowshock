@@ -68,6 +68,9 @@ fn main() -> Result<(), String> {
     if let Some(s) = value("--sub") {
         case.numerics.implicit.sub_iters = s.parse().map_err(|e| format!("--sub: {e}"))?;
     }
+    if let Some(n) = value("--chord") {
+        case.grid.fin_chord_cells = Some(n.parse().map_err(|e| format!("--chord: {e}"))?);
+    }
     if let Some(c) = value("--cfl-max") {
         case.numerics.implicit.cfl_max = c.parse().map_err(|e| format!("--cfl-max: {e}"))?;
     }
@@ -119,5 +122,30 @@ fn main() -> Result<(), String> {
         d.fin_sides + d.fin_edges + d.fin_tips,
         p.y_plus_max
     );
+    if !run.cfl_rollbacks.is_empty() {
+        println!("TABLE-ROLLBACKS {tier_name} M{mach}: {} (iteration of the failure, new cfl_max): {:?}", run.cfl_rollbacks.len(), run.cfl_rollbacks);
+    }
+    if args.iter().any(|a| a == "--worst") {
+        // where the field is worst (run to a `--max-iter` before the blow-up): the fluid cells of lowest pressure and density, with their indices and centroids
+        let u = run.gpu.state_f64().map_err(|e| e.to_string())?;
+        let g = &run.host.grid;
+        let fs = run.host.cfg.freestream;
+        let mut cells: Vec<(f64, f64, usize)> = (0..u.len())
+            .filter(|&c| g.part[c] == bowshock_cfd::grid3::PART_FLUID)
+            .map(|c| {
+                let q = u[c];
+                let p = (bowshock_cfd::gas3::GAMMA - 1.0) * (q[4] - 0.5 * (q[1] * q[1] + q[2] * q[2] + q[3] * q[3]) / q[0]);
+                (p / fs[4], q[0] / fs[0], c)
+            })
+            .collect();
+        for (name, key) in [("p/p_inf", 0usize), ("rho/rho_inf", 1)] {
+            cells.sort_by(|a, b| (if key == 0 { a.0 } else { a.1 }).total_cmp(&(if key == 0 { b.0 } else { b.1 })));
+            for &(p, r, c) in cells.iter().take(8) {
+                let (i, j, k) = (c % g.ni, (c / g.ni) % g.nj, c / (g.ni * g.nj));
+                let x = g.xc[c];
+                println!("WORST lowest {name}: cell ({i},{j},{k}) x = ({:.4}, {:.4}, {:.4}) p/p_inf {p:.4} rho/rho_inf {r:.4}", x[0], x[1], x[2]);
+            }
+        }
+    }
     Ok(())
 }
