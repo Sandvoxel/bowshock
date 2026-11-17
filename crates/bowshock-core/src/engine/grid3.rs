@@ -1,24 +1,30 @@
-//! 3D body-fitted grid of the half domain (`theta` in `[0, pi]`, pitch-plane symmetry) around a sting-mounted body with thick fins.
+//! 3D body-fitted grids around a body with thick fins: the axisymmetric meridian grid of the 2D case ([`super::body_grid`]) revolved into `nk`
+//! azimuthal cells, in one of three domains ([`Domain3`]): the half domain (`theta` in `[0, pi]`, pitch-plane symmetry, for incidence), the sector
+//! `[0, pi/n]` of a body with `n` identical fins (a fin mid-plane to mid-gap, symmetry planes at both ends) and the single-cell wedge of an
+//! axisymmetric flow. Two meridian grids: the sting grid (`large_domain_grid`: the body is the `j = 0` wall, no base) and the base-wake grid
+//! (`base_domain_grid`: the body interior is a solid block, the base its rear face, the wake reaches the axis behind it).
 //!
-//! The axisymmetric large-domain grid ([`super::body_grid`]) is revolved into `nk` azimuthal cells. Fins are one-cell-thick solid
-//! layers in `k` (see `Grid3::solid`): the layer edges follow the fin thickness over the planform and relax to the nominal cell width
-//! away from it, so the fin faces are flat planes through the body axis. Lengths are in nose diameters.
+//! Fins are one-cell-thick solid layers in `k` (see `Grid3::part`): the layer edges follow the fin thickness over the planform and relax to
+//! the nominal cell width away from it, so the fin faces are flat planes through the body axis. Lengths are in nose diameters.
 //!
 //! * `Grid3` nodes are `(x, r sin(theta), r cos(theta))`: the pitch plane is `y = 0`, `theta = 0` points to `+z` (the lee side
 //!   for `alpha > 0`) and `theta = pi` to `-z`.
-//! * Fins sit at `theta_f = pi/n + 2 pi m / n`; those in `[0, pi]` are kept. For odd `n` the fin at `theta = pi` lies in the
-//!   symmetry plane and is a half fin owning the last cell `k = nk - 1`.
+//! * Half domain: fins sit at `theta_f = phi0 + 2 pi m / n` with `phi0 = pi/n` ([`FinPhase::Between`]: no fin in the pitch plane) or `0`
+//!   ([`FinPhase::InPlane`]); those in `[0, pi]` are kept. A fin on `theta = 0` or `pi` lies in a symmetry plane and is a half fin owning the
+//!   first / last cell.
+//! * Sector: one half fin on the `theta = 0` plane (cell `k = 0`), `nk - 1` gap cells up to the mid-gap plane `theta = pi/n`.
 //! * With fins, the root chord must lie on one tube segment. That segment is rebuilt as upstream piece, fin piece and downstream piece
 //!   (`32 << level` cells over the root chord, clustered at both edges); the sweep and taper are applied as a piecewise-linear
 //!   remap of the segment's `x` nodes per row (the cells outside the fin stretch or shrink instead of folding), blended away over
-//!   four rows above the fin tip. The radial fractions are remapped so that a node row lies exactly on the fin tip.
+//!   four rows above the fin tip. The radial fractions are remapped so that a node row lies exactly on the fin tip. Fins are built on the sting
+//!   grid only for now.
 
-use super::body_grid::{axial_nodes, radial_fractions, two_sided_nodes, LargeGridParams};
+use super::body_grid::{axial_nodes, base_domain_grid, radial_fractions, two_sided_nodes, BaseGridParams, LargeGridParams};
 use crate::error::Error;
 use crate::fins::normalised;
 use crate::spec::FinProfile;
 use bowshock_cfd::grid::geometric_offsets;
-use bowshock_cfd::grid3::{Grid3, SolidBox};
+use bowshock_cfd::grid3::{revolve, AxisRun, Grid3, Part, SolidBox, Symmetry};
 use std::f64::consts::PI;
 
 /// Trapezoidal fins in nose diameters.
@@ -38,12 +44,39 @@ pub struct Fins3 {
     pub profile: FinProfile,
 }
 
-/// Grid parameters: the sting grid of the 2D case plus the fins and the azimuthal resolution.
+/// Where the fins sit relative to the pitch plane of a half domain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FinPhase {
+    /// Fins at `pi/n + 2 pi m/n`: the pitch plane lies between two fins (the "x" orientation of four fins).
+    Between,
+    /// Fins at `2 pi m/n`: a fin lies in the pitch plane at `theta = 0` (the "+" orientation of four fins).
+    InPlane,
+}
+
+/// The solved part of the body.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Domain3 {
+    /// `theta` in `[0, pi]`, the pitch plane a symmetry plane: any incidence in the pitch plane.
+    Half { phase: FinPhase },
+    /// `theta` in `[0, pi/n]` of a body with `n` fins (`fins` required), zero incidence.
+    Sector,
+    /// A single cell of angle `dtheta` of an axisymmetric flow (no fins), zero incidence; `nk` is ignored.
+    Wedge { dtheta: f64 },
+}
+
+/// Default angle of a wedge domain, 2 degrees. The flat-faced cells divide the radial flux divergence by `cos(d/2)` (the face area is the chord, the
+/// volume the polygon's), so the drag has a bias of about `-0.17 d^2` (Mach 0.9, boattailed body, against 2 degrees: 6 degrees -0.17 %, 12 degrees -0.76 %).
+pub const WEDGE_ANGLE: f64 = 2.0 * PI / 180.0;
+
+/// Grid parameters: the meridian grid of the 2D case (sting grid, or base-wake grid when `base` is set) plus the fins, the domain and the
+/// azimuthal resolution.
 #[derive(Clone, Debug)]
 pub struct Grid3Params {
     pub sting: LargeGridParams,
+    /// The base-wake meridian grid: used instead of `sting` when set (no fins on it yet).
+    pub base: Option<BaseGridParams>,
     pub fins: Option<Fins3>,
-    /// Azimuthal cells over `[0, pi]` (the plan default is `24 << level`, see [`Grid3Params::default_nk`]).
+    /// Azimuthal cells over the domain (the plan default is `24 << level` over `[0, pi]`, see [`Grid3Params::default_nk`]).
     pub nk: usize,
     /// Grid level: sets the cells over the fin root chord (`32 << level`) unless `fin_chord_cells` overrides it.
     pub level: u32,
@@ -54,12 +87,18 @@ pub struct Grid3Params {
     /// `[R, R + span]` starting at the wall spacing (uniform when that is already finer than `span / n`), then a geometric fan of
     /// at least the sting grid's outer cell count with growth `<= 1.2` to the far boundary. `nj` grows accordingly.
     pub span_cells: Option<usize>,
+    pub domain: Domain3,
 }
 
 impl Grid3Params {
     /// Default azimuthal cell count of a grid level.
     pub fn default_nk(level: u32) -> usize {
         24usize << level
+    }
+
+    /// Half domain on the sting grid, fins between the pitch plane and each other (the layout of the incidence solves).
+    pub fn half(sting: LargeGridParams, fins: Option<Fins3>, nk: usize, level: u32) -> Grid3Params {
+        Grid3Params { sting, base: None, fins, nk, level, fin_chord_cells: None, span_cells: None, domain: Domain3::Half { phase: FinPhase::Between } }
     }
 }
 
@@ -119,54 +158,77 @@ struct FinPlan {
 /// Azimuthal layer structure: fin angles and the number of cells in each gap.
 struct Layers {
     theta_f: Vec<f64>,
+    /// The first / last layer is a half fin on the `theta = 0` / end plane: it owns only its own half thickness and has no gap before / after it.
+    half_first: bool,
     half_last: bool,
-    /// Cells of the gap before each layer, plus one trailing gap behind the last layer unless that is a half fin.
+    /// Cells of the gap before each layer (0 before a half first layer) and one trailing gap behind the last (0 behind a half last layer).
     gaps: Vec<usize>,
-    /// First `k` of the cell owned by each layer.
+    /// `k` of the cell owned by each layer.
     k_f: Vec<usize>,
 }
 
-fn layers(count: u32, nk: usize) -> Result<Layers, Error> {
-    let n = count as f64;
+/// Layers of a half domain `[0, pi]` with `count` fins at `phase`.
+fn layers(count: u32, nk: usize, phase: FinPhase) -> Result<Layers, Error> {
+    let n = f64::from(count);
+    let phi0 = match phase {
+        FinPhase::Between => PI / n,
+        FinPhase::InPlane => 0.0,
+    };
     let mut theta_f = Vec::new();
-    let mut half_last = false;
     for m in 0..count {
-        let th = PI / n + 2.0 * PI * m as f64 / n;
+        let th = phi0 + 2.0 * PI * f64::from(m) / n;
         if th <= PI + 1e-9 {
-            if (PI - th).abs() < 1e-9 {
-                half_last = true;
-                theta_f.push(PI);
+            theta_f.push(if th < 1e-9 {
+                0.0
+            } else if (PI - th).abs() < 1e-9 {
+                PI
             } else {
-                theta_f.push(th);
-            }
+                th
+            });
         }
     }
     let nl = theta_f.len();
+    let half_first = theta_f[0] == 0.0;
+    let half_last = theta_f[nl - 1] == PI;
     let nh = PI / (2.0 * nk as f64);
-    let mut widths = Vec::new();
+    // gap `s` (before layer `s`, `s = nl`: behind the last) between the end of the previous layer and the start of the next
+    let present: Vec<bool> = (0..=nl).map(|s| !(s == 0 && half_first) && !(s == nl && half_last)).collect();
+    let mut widths = vec![0.0; nl + 1];
     let mut prev = 0.0;
     for (l, &th) in theta_f.iter().enumerate() {
-        let half = half_last && l + 1 == nl;
-        widths.push((if half { PI - nh } else { th - nh }) - prev);
-        prev = if half { PI } else { th + nh };
+        let (hf, hl) = (half_first && l == 0, half_last && l + 1 == nl);
+        let lo = if hl {
+            PI - nh
+        } else if hf {
+            0.0
+        } else {
+            th - nh
+        };
+        widths[l] = if hf { 0.0 } else { lo - prev };
+        prev = if hl {
+            PI
+        } else if hf {
+            nh
+        } else {
+            th + nh
+        };
     }
-    if !half_last {
-        widths.push(PI - prev);
-    }
+    widths[nl] = if half_last { 0.0 } else { PI - prev };
+    let slots = present.iter().filter(|p| **p).count();
     let too_close = || Error::Grid("fins too close for nk cells".to_string());
-    if nk < nl || widths.iter().any(|&w| w <= 0.0) || nk - nl < 2 * widths.len() {
+    if nk < nl || (0..=nl).any(|s| present[s] && widths[s] <= 0.0) || nk - nl < 2 * slots {
         return Err(too_close());
     }
     let remaining = nk - nl;
     let total: f64 = widths.iter().sum();
     let q: Vec<f64> = widths.iter().map(|w| remaining as f64 * w / total).collect();
-    let mut gaps: Vec<usize> = q.iter().map(|&x| (x.round() as usize).max(2)).collect();
+    let mut gaps: Vec<usize> = (0..=nl).map(|s| if present[s] { (q[s].round() as usize).max(2) } else { 0 }).collect();
     while gaps.iter().sum::<usize>() != remaining {
         if gaps.iter().sum::<usize>() > remaining {
-            let i = (0..gaps.len()).filter(|&i| gaps[i] > 2).max_by(|&a, &b| (gaps[a] as f64 - q[a]).total_cmp(&(gaps[b] as f64 - q[b])));
+            let i = (0..=nl).filter(|&i| present[i] && gaps[i] > 2).max_by(|&a, &b| (gaps[a] as f64 - q[a]).total_cmp(&(gaps[b] as f64 - q[b])));
             gaps[i.ok_or_else(too_close)?] -= 1;
         } else {
-            let i = (0..gaps.len()).max_by(|&a, &b| (q[a] - gaps[a] as f64).total_cmp(&(q[b] - gaps[b] as f64))).unwrap();
+            let i = (0..=nl).filter(|&i| present[i]).max_by(|&a, &b| (q[a] - gaps[a] as f64).total_cmp(&(q[b] - gaps[b] as f64))).unwrap();
             gaps[i] += 1;
         }
     }
@@ -177,19 +239,39 @@ fn layers(count: u32, nk: usize) -> Result<Layers, Error> {
         k_f.push(k);
         k += 1;
     }
-    Ok(Layers { theta_f, half_last, gaps, k_f })
+    Ok(Layers { theta_f, half_first, half_last, gaps, k_f })
 }
 
-/// Azimuth of the nodes `k = 0..=nk` of one `(i, j)` column for the layer half-angle `alpha`.
-fn fill_theta(theta: &mut [f64], lay: &Layers, alpha: f64) {
+/// Layers of a sector `[0, pi/n]`: a half fin on the `theta = 0` plane and `nk - 1` gap cells to the mid-gap plane.
+fn sector_layers(nk: usize) -> Result<Layers, Error> {
+    if nk < 3 {
+        return Err(Error::Grid("a sector needs nk >= 3".to_string()));
+    }
+    Ok(Layers { theta_f: vec![0.0], half_first: true, half_last: false, gaps: vec![0, nk - 1], k_f: vec![0] })
+}
+
+/// Azimuth of the nodes `k = 0..=nk` of one `(i, j)` column for the layer half-angle `alpha` in the domain `[0, big]`.
+fn fill_theta(theta: &mut [f64], lay: &Layers, alpha: f64, big: f64) {
     let nk = theta.len() - 1;
     theta[0] = 0.0;
     let (mut k, mut prev) = (0usize, 0.0f64);
     let nl = lay.theta_f.len();
     for (l, &th) in lay.theta_f.iter().enumerate() {
-        let half = lay.half_last && l + 1 == nl;
-        let lo = if half { PI - alpha } else { th - alpha };
-        let hi = if half { PI } else { th + alpha };
+        let (hf, hl) = (lay.half_first && l == 0, lay.half_last && l + 1 == nl);
+        let lo = if hl {
+            big - alpha
+        } else if hf {
+            0.0
+        } else {
+            th - alpha
+        };
+        let hi = if hl {
+            big
+        } else if hf {
+            alpha
+        } else {
+            th + alpha
+        };
         let ng = lay.gaps[l];
         for m in 1..=ng {
             theta[k + m] = prev + (lo - prev) * m as f64 / ng as f64;
@@ -199,13 +281,11 @@ fn fill_theta(theta: &mut [f64], lay: &Layers, alpha: f64) {
         k += 1;
         prev = hi;
     }
-    if lay.gaps.len() > nl {
-        let ng = lay.gaps[nl];
-        for m in 1..=ng {
-            theta[k + m] = prev + (PI - prev) * m as f64 / ng as f64;
-        }
+    let ng = lay.gaps[nl];
+    for m in 1..=ng {
+        theta[k + m] = prev + (big - prev) * m as f64 / ng as f64;
     }
-    theta[nk] = PI;
+    theta[nk] = big;
 }
 
 fn smoothstep(u: f64) -> f64 {
@@ -406,12 +486,28 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>) -> Result<FinPlan, E
     Ok(FinPlan { i_seg0: a, i_seg1, i_le, i_te, j_tip, x_le_root, x_te_root, r_t, sj, s_remap })
 }
 
+/// Azimuth span and symmetry of the domain of `p`.
+fn domain_span(p: &Grid3Params) -> Result<(f64, Symmetry), Error> {
+    Ok(match (p.domain, &p.fins) {
+        (Domain3::Half { .. }, _) => (PI, Symmetry::Half),
+        (Domain3::Sector, Some(f)) if f.count >= 1 => (PI / f64::from(f.count), Symmetry::Sector { n: f.count }),
+        (Domain3::Sector, _) => return Err(Error::InvalidInput("a sector needs fins".to_string())),
+        (Domain3::Wedge { dtheta }, None) if dtheta > 0.0 && dtheta < PI => (dtheta, Symmetry::Wedge),
+        (Domain3::Wedge { .. }, _) => return Err(Error::InvalidInput("a wedge needs 0 < dtheta < pi and no fins".to_string())),
+    })
+}
+
 /// Build the 3D grid. With fins the grid has `sting.nj`, `nk` cells in `j`, `k` and the axial count of `axial_nodes` changed by
 /// the rebuilt fin segment.
 pub fn body_grid3(p: &Grid3Params) -> Result<Grid3, Error> {
+    if let Some(bp) = &p.base {
+        return base_grid3(p, bp);
+    }
     let sp = &p.sting;
-    let nk = p.nk;
-    if nk < 2 {
+    let (span, sym) = domain_span(p)?;
+    let wedge = sym == Symmetry::Wedge;
+    let nk = if wedge { 1 } else { p.nk };
+    if nk < 2 && !wedge {
         return Err(Error::Grid("nk >= 2 is required".to_string()));
     }
     if !(sp.nj >= 1 && sp.dr_wall > 0.0 && sp.r_far > 0.0) {
@@ -422,9 +518,10 @@ pub fn body_grid3(p: &Grid3Params) -> Result<Grid3, Error> {
         Some(f) => Some((plan_fins(p, f, &mut xs)?, f)),
         None => None,
     };
-    let lay = match &p.fins {
-        Some(f) => Some(layers(f.count, nk)?),
-        None => None,
+    let lay = match (p.domain, &p.fins) {
+        (Domain3::Half { phase }, Some(f)) => Some(layers(f.count, nk, phase)?),
+        (Domain3::Sector, Some(_)) => Some(sector_layers(nk)?),
+        _ => None,
     };
     let ni = xs.len() - 1;
     let sj = match &plan {
@@ -506,9 +603,9 @@ pub fn body_grid3(p: &Grid3Params) -> Result<Grid3, Error> {
                 let d = di.max(dj);
                 let (ic, jc) = (i.clamp(pl.i_le, pl.i_te), j.min(pl.j_tip));
                 let h_f = h_at(ic, jc);
-                let nominal = 0.5 * r * PI / nk as f64;
+                let nominal = 0.5 * r * span / nk as f64;
                 let w = if d == 0 { h_f } else { h_f + (nominal - h_f) * smoothstep(d as f64 / 4.0) };
-                alpha[j * (ni + 1) + i] = if r < 1e-12 { (PI / (2.0 * nk as f64)).asin() } else { (w / r).min(0.99).asin() };
+                alpha[j * (ni + 1) + i] = if r < 1e-12 { (span / (2.0 * nk as f64)).asin() } else { (w / r).min(0.99).asin() };
             }
         }
     }
@@ -520,10 +617,10 @@ pub fn body_grid3(p: &Grid3Params) -> Result<Grid3, Error> {
         for i in 0..=ni {
             let c = j * (ni + 1) + i;
             match &lay {
-                Some(l) => fill_theta(&mut theta, l, alpha[c]),
+                Some(l) => fill_theta(&mut theta, l, alpha[c], span),
                 None => {
                     for (k, t) in theta.iter_mut().enumerate() {
-                        *t = PI * k as f64 / nk as f64;
+                        *t = span * k as f64 / nk as f64;
                     }
                 }
             }
@@ -537,25 +634,78 @@ pub fn body_grid3(p: &Grid3Params) -> Result<Grid3, Error> {
         }
     }
     let mut g = Grid3::try_from_nodes(ni, nj, nk, x, y, z).map_err(Error::Grid)?;
-    g.axis_cells = sp.n_up;
+    g.axis = vec![AxisRun { j: 0, i: 0..sp.n_up }];
+    g.sym = sym;
+    g.theta_span = span;
+    // the body is the `j = 0` wall: its runs by body segment (the nose, each aft segment, then the sting extension)
+    let col = |x: f64| xs.partition_point(|&v| v < x - 1e-9 * (1.0 + x.abs())).min(ni);
+    let bb = &sp.body;
+    let mut i0 = sp.n_up;
+    for s in 0..=bb.segments.len() {
+        let x_end = if s == 0 { bb.body.nose_length() } else { bb.station(s).0 };
+        let i1 = col(x_end).max(i0);
+        g.wall_j0.push((i0..i1, Part::Body(s as u16)));
+        i0 = i1;
+    }
+    g.wall_j0.push((i0..ni, Part::Sting));
     if let (Some((pl, _)), Some(l)) = (&plan, &lay) {
-        g.solid = l.k_f.iter().map(|&kf| SolidBox { i: pl.i_le..pl.i_te, j: 0..pl.j_tip, k: kf..kf + 1 }).collect();
-        for k in 0..nk {
-            for j in 0..nj {
-                for i in 0..ni {
-                    if !g.is_solid(i, j, k) && g.vol[g.cell(i, j, k)] <= 0.0 {
-                        return Err(Error::Grid(format!("non-positive fluid cell volume at ({i},{j},{k})")));
-                    }
+        for &kf in &l.k_f {
+            g.mark_solid(SolidBox { i: pl.i_le..pl.i_te, j: 0..pl.j_tip, k: kf..kf + 1 }, Some(Part::Fin(0)));
+        }
+    }
+    for k in 0..nk {
+        for j in 0..nj {
+            for i in 0..ni {
+                if !g.is_solid(i, j, k) && g.vol[g.cell(i, j, k)] <= 0.0 && i >= sp.n_up {
+                    return Err(Error::Grid(format!("non-positive fluid cell volume at ({i},{j},{k})")));
                 }
             }
         }
-    } else {
-        for k in 0..nk {
-            for j in 0..nj {
-                for i in 0..ni {
-                    if g.vol[g.cell(i, j, k)] <= 0.0 && i >= sp.n_up {
-                        return Err(Error::Grid(format!("non-positive fluid cell volume at ({i},{j},{k})")));
-                    }
+    }
+    Ok(g)
+}
+
+/// Build a finless grid on the base-wake meridian grid `bp` (`base_domain_grid`): the body block (the cells inside the body, from the nose tip to the
+/// base plane) is solid, split by body segment for the force classes, its cells upstream of the nose tip are dead (their nodes lie on or behind the axis,
+/// see `revolve`), a sting behind the base is its own part. Axis runs: the line `j = j_end` upstream of the nose and, without a sting, the rows
+/// `j = 0` behind the base.
+fn base_grid3(p: &Grid3Params, bp: &BaseGridParams) -> Result<Grid3, Error> {
+    if p.fins.is_some() {
+        return Err(Error::Unsupported("fins on the base-wake grid are not built yet".to_string()));
+    }
+    let (span, sym) = domain_span(p)?;
+    let nk = if sym == Symmetry::Wedge { 1 } else { p.nk };
+    if nk < 2 && sym != Symmetry::Wedge {
+        return Err(Error::Grid("nk >= 2 is required".to_string()));
+    }
+    let (g2, blk) = base_domain_grid(bp)?;
+    let theta: Vec<f64> = (0..=nk).map(|k| span * k as f64 / nk as f64).collect();
+    let mut g = revolve(&g2, nk, &theta).map_err(Error::Grid)?;
+    let (ni, n_up) = (g.ni, bp.n_up);
+    g.axis.push(AxisRun { j: blk.j_end, i: 0..n_up });
+    if blk.j_sting == 0 {
+        g.axis.push(AxisRun { j: 0, i: blk.i_end..ni });
+    }
+    g.sym = sym;
+    g.theta_span = span;
+    let (rows, ks) = (0..blk.j_end, 0..nk);
+    g.mark_solid(SolidBox { i: 0..n_up, j: rows.clone(), k: ks.clone() }, None);
+    let mut i0 = n_up;
+    for (s, n) in std::iter::once(bp.n_nose).chain(bp.n_seg.iter().copied()).enumerate() {
+        g.mark_solid(SolidBox { i: i0..i0 + n, j: rows.clone(), k: ks.clone() }, Some(Part::Body(s as u16)));
+        i0 += n;
+    }
+    if i0 != blk.i_end {
+        return Err(Error::Grid(format!("the body block ends at {} but its segments at {i0}", blk.i_end)));
+    }
+    if blk.j_sting > 0 {
+        g.mark_solid(SolidBox { i: blk.i_end..ni, j: 0..blk.j_sting, k: ks }, Some(Part::Sting));
+    }
+    for k in 0..nk {
+        for j in 0..g.nj {
+            for i in 0..ni {
+                if !g.is_solid(i, j, k) && g.vol[g.cell(i, j, k)] <= 0.0 {
+                    return Err(Error::Grid(format!("non-positive fluid cell volume at ({i},{j},{k})")));
                 }
             }
         }
@@ -586,7 +736,7 @@ mod tests {
     }
 
     fn params(level: u32, fins: Option<Fins3>) -> Grid3Params {
-        Grid3Params { sting: anf_sting(level), fins, nk: Grid3Params::default_nk(level), level, fin_chord_cells: None, span_cells: None }
+        Grid3Params::half(anf_sting(level), fins, Grid3Params::default_nk(level), level)
     }
 
     /// Distance of node `(i, j, k)` from the fin mid-plane at angle `th`.
@@ -665,7 +815,7 @@ mod tests {
         let flat = p.nk as f64 * (PI / p.nk as f64).sin() * v2;
         assert!((v3 / flat - 1.0).abs() < 1e-10, "{v3} vs {flat}");
         assert!((v3 / (PI * v2) - 1.0).abs() < 1e-3, "{v3} vs {}", PI * v2);
-        assert_eq!(g.axis_cells, p.sting.n_up);
+        assert_eq!(g.axis, vec![AxisRun { j: 0, i: 0..p.sting.n_up }]);
         assert!(g.solid.is_empty());
     }
 

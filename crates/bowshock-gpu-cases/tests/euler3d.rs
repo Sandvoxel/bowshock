@@ -45,7 +45,7 @@ fn tiny_anf_grid() -> Grid3 {
         dr_wall: 0.03,
     };
     let fins = Fins3 { count: 4, root_chord: 1.0, tip_chord: 1.0, span: 1.0, sweep: 0.0, thickness: 0.08, te_to_base: 0.0, profile: FinProfile::Square };
-    body_grid3(&Grid3Params { sting, fins: Some(fins), nk: 8, level: 0, fin_chord_cells: None, span_cells: None }).expect("the tiny ANF grid builds")
+    body_grid3(&Grid3Params::half(sting, Some(fins), 8, 0)).expect("the tiny ANF grid builds")
 }
 
 fn config(mach: f64, alpha_deg: f64, limiter: Limiter, low_mach: bool) -> Config3 {
@@ -141,7 +141,7 @@ fn implicit_params(steep: bool) -> ImplicitParams {
 #[test]
 fn tiny_anf_state_after_30_iterations_matches_cpu() {
     let grid = tiny_anf_grid();
-    println!("tiny ANF grid: {} x {} x {} cells, {} solid boxes, axis_cells {}", grid.ni, grid.nj, grid.nk, grid.solid.len(), grid.axis_cells);
+    println!("tiny ANF grid: {} x {} x {} cells, {} solid boxes, axis {:?}", grid.ni, grid.nj, grid.nk, grid.solid.len(), grid.axis);
     let mut rows = Vec::new();
     for (mach, limiter, low_mach) in [(0.5, Limiter::VanAlbada, true), (2.0, Limiter::Minmod, false), (2.0, Limiter::Venkatakrishnan, false)] {
         let cfg = config(mach, 2.0, limiter, low_mach);
@@ -249,7 +249,7 @@ fn far_field_box_grid(ni: usize, nj: usize, nk: usize) -> Grid3 {
         })
         .collect();
     let mut g3 = revolve(&g2, nk, &theta).unwrap();
-    g3.axis_cells = ni;
+    g3.axis = vec![bowshock_cfd::grid3::AxisRun { j: 0, i: 0..ni }];
     g3
 }
 
@@ -369,14 +369,16 @@ fn tiny_anf_step_profile() {
 fn solid_pattern_grid(boxes: &[usize]) -> Grid3 {
     let (ni, nj, nk) = (12, 10, 8);
     let mut grid = far_field_box_grid(ni, nj, nk);
-    // `axis_cells = 0`: the whole `j = 0` plane of the revolved box (zero-area faces on the axis) is the slip-wall branch; the solid boxes stay off it
-    grid.axis_cells = 0;
+    // no axis run: the whole `j = 0` plane of the revolved box (zero-area faces on the axis) is the slip-wall branch; the solid boxes stay off it
+    grid.axis.clear();
     let all = [
         bowshock_cfd::grid3::SolidBox { i: 4..5, j: 2..6, k: 2..3 },
         bowshock_cfd::grid3::SolidBox { i: 4..7, j: 2..6, k: 4..5 },
         bowshock_cfd::grid3::SolidBox { i: 8..10, j: 3..7, k: nk - 1..nk },
     ];
-    grid.solid = boxes.iter().map(|&b| all[b].clone()).collect();
+    for &b in boxes {
+        grid.mark_solid(all[b].clone(), Some(bowshock_cfd::grid3::Part::Fin(0)));
+    }
     grid
 }
 

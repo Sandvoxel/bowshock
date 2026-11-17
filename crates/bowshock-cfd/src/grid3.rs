@@ -14,12 +14,53 @@ pub struct Face3 {
     pub c: [f64; 3],
 }
 
-/// Block of cells that are solid (fins): never updated, treated as walls by their fluid neighbours.
+/// Block of cells that are not fluid (the body, a sting, fins, cells outside the domain): never updated. Written by the mesher through
+/// [`Grid3::mark_solid`], which also fills [`Grid3::part`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SolidBox {
     pub i: Range<usize>,
     pub j: Range<usize>,
     pub k: Range<usize>,
+}
+
+/// [`Grid3::part`] of a fluid cell.
+pub const PART_FLUID: u8 = 0;
+/// [`Grid3::part`] of a cell that is not part of the domain at all (the cells of a body block upstream of the nose tip, whose nodes lie on or
+/// behind the axis): never updated, and unlike a wall it does not reflect: the stencils of the fluid cells next to it read the axis ghost.
+pub const PART_DEAD: u8 = u8::MAX;
+
+/// What a solid cell belongs to. The mesher writes it, the force integration classifies wall faces from it and the direction of the face.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Part {
+    /// Body segment `n` (`0` the nose, `1..` the aft segments in order); its `+i` face behind the last segment is the base.
+    Body(u16),
+    /// The sting behind the base.
+    Sting,
+    /// Fin set `n`.
+    Fin(u16),
+    /// Appendage `n` (lug, rail button, ...).
+    Appendage(u16),
+}
+
+/// How the solved domain relates to the whole body: what the axis ghost states and the force scaling assume.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Symmetry {
+    /// `theta in [0, pi]`, mirror planes `theta = 0` and `pi` (the pitch plane): the whole body is the domain and its mirror image.
+    Half,
+    /// `theta in [0, pi/n]` of a body with `n` identical fins: mirror planes `theta = 0` (a fin mid-plane) and `pi/n` (mid-gap), the rest is
+    /// their dihedral group `D_n`.
+    Sector { n: u32 },
+    /// A single-cell wedge of any angle about an axisymmetric flow (`nk = 1`): the flow is axisymmetric, there is nothing in the `k`
+    /// direction (no line solve, no time-step term).
+    Wedge,
+}
+
+/// Axis cells: the row `j` of cells for `i` in `i` lie on the axis (degenerate faces on their `j` side); the ghost rows are the rows
+/// below `j`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AxisRun {
+    pub j: usize,
+    pub i: Range<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -40,9 +81,21 @@ pub struct Grid3 {
     /// `ni*nj*nk`, index `(k*nj+j)*ni+i`.
     pub vol: Vec<f64>,
     pub xc: Vec<[f64; 3]>,
+    /// The boxes of every non-fluid region, as [`Grid3::mark_solid`] was given them (what the GPU solver reads; [`Grid3::part`] is the
+    /// per-cell truth).
     pub solid: Vec<SolidBox>,
-    /// `j = 0` cells with `i < axis_cells` lie on the axis (degenerate faces); the rest of `j = 0` is the body/sting wall.
-    pub axis_cells: usize,
+    /// Per cell: [`PART_FLUID`], [`PART_DEAD`] or `1 + index` into [`Grid3::parts`]. A cell with another value than [`PART_FLUID`] is never
+    /// updated; one with a part is a wall for its fluid neighbours.
+    pub part: Vec<u8>,
+    pub parts: Vec<Part>,
+    /// Axis rows (degenerate faces). The `j = 0` boundary outside these runs is a slip wall.
+    pub axis: Vec<AxisRun>,
+    /// The `j = 0` boundary walls (slip, no solid cells behind them: the body of a sting grid) by `i` range, for the force classes; boundary faces
+    /// outside these runs and the axis runs are not counted.
+    pub wall_j0: Vec<(Range<usize>, Part)>,
+    pub sym: Symmetry,
+    /// Azimuth span `theta_max - theta_min` of the domain; the forces of the domain are scaled by `2 pi / theta_span` to the whole body.
+    pub theta_span: f64,
 }
 
 fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
@@ -171,7 +224,26 @@ impl Grid3 {
                 }
             }
         }
-        Ok(Grid3 { ni, nj, nk, x, y, z, iface, jface, kface, vol, xc, solid: Vec::new(), axis_cells: 0 })
+        Ok(Grid3 {
+            ni,
+            nj,
+            nk,
+            x,
+            y,
+            z,
+            iface,
+            jface,
+            kface,
+            vol,
+            xc,
+            solid: Vec::new(),
+            part: vec![PART_FLUID; ni * nj * nk],
+            parts: Vec::new(),
+            axis: Vec::new(),
+            wall_j0: Vec::new(),
+            sym: Symmetry::Half,
+            theta_span: std::f64::consts::PI,
+        })
     }
 
     /// Cell index `(k*nj+j)*ni+i`.
@@ -180,14 +252,61 @@ impl Grid3 {
         (k * self.nj + j) * self.ni + i
     }
 
-    /// Whether cell `(i, j, k)` lies in a [`SolidBox`].
+    /// Whether cell `(i, j, k)` is not fluid (a wall or a dead cell): never updated.
+    #[inline]
     pub fn is_solid(&self, i: usize, j: usize, k: usize) -> bool {
-        self.solid.iter().any(|b| b.i.contains(&i) && b.j.contains(&j) && b.k.contains(&k))
+        self.part[self.cell(i, j, k)] != PART_FLUID
+    }
+
+    /// Whether cell `(i, j, k)` is a wall for its fluid neighbours (a solid cell that is not dead).
+    #[inline]
+    pub fn is_wall(&self, i: usize, j: usize, k: usize) -> bool {
+        !matches!(self.part[self.cell(i, j, k)], PART_FLUID | PART_DEAD)
+    }
+
+    /// The part of cell `(i, j, k)`, `None` for a fluid or a dead cell.
+    pub fn part_of(&self, i: usize, j: usize, k: usize) -> Option<Part> {
+        match self.part[self.cell(i, j, k)] {
+            PART_FLUID | PART_DEAD => None,
+            p => Some(self.parts[usize::from(p) - 1]),
+        }
+    }
+
+    /// Whether the cells `(i, j)` of every `k` lie on an axis run.
+    pub fn is_axis(&self, i: usize, j: usize) -> bool {
+        self.axis.iter().any(|r| r.j == j && r.i.contains(&i))
+    }
+
+    /// Declare the cells of `b` solid: a wall of `part`, or dead cells (`None`). Later boxes overwrite earlier ones.
+    pub fn mark_solid(&mut self, b: SolidBox, part: Option<Part>) {
+        let id = match part {
+            None => PART_DEAD,
+            Some(p) => {
+                let n = match self.parts.iter().position(|q| *q == p) {
+                    Some(n) => n,
+                    None => {
+                        self.parts.push(p);
+                        self.parts.len() - 1
+                    }
+                };
+                u8::try_from(n + 1).expect("fewer than 254 parts")
+            }
+        };
+        for k in b.k.clone() {
+            for j in b.j.clone() {
+                for i in b.i.clone() {
+                    let c = self.cell(i, j, k);
+                    self.part[c] = id;
+                }
+            }
+        }
+        self.solid.push(b);
     }
 }
 
-/// Revolve a 2D grid about the x axis: node `(i, j, k)` is `(x, r sin(theta_k), r cos(theta_k))`. `theta` has `nk + 1`
-/// increasing angles over `[0, pi]` (0 is the +z side, `pi` the -z side).
+/// Revolve a 2D grid about the x axis: node `(i, j, k)` is `(x, r sin(theta_k), r cos(theta_k))`, `r` clamped at 0 (the rows of a body block
+/// below the axis of a 2D grid have negative radius; their cells collapse onto the axis and are never updated). `theta` has `nk + 1`
+/// increasing angles (the sectors of this module start at 0; 0 is the +z side, `pi` the -z side).
 pub fn revolve(g2: &crate::grid::Grid, nk: usize, theta: &[f64]) -> Result<Grid3, String> {
     if theta.len() != nk + 1 {
         return Err(format!("theta has {} entries, expected {}", theta.len(), nk + 1));
@@ -200,8 +319,8 @@ pub fn revolve(g2: &crate::grid::Grid, nk: usize, theta: &[f64]) -> Result<Grid3
         let (s, c) = th.sin_cos();
         for n in 0..n2 {
             x.push(g2.x[n]);
-            y.push(g2.r[n] * s);
-            z.push(g2.r[n] * c);
+            y.push(g2.r[n].max(0.0) * s);
+            z.push(g2.r[n].max(0.0) * c);
         }
     }
     Grid3::try_from_nodes(g2.ni, g2.nj, nk, x, y, z)
@@ -262,7 +381,7 @@ mod tests {
         assert_eq!(g.jface[0].n, [0.0, 1.0, 0.0]);
         assert_eq!(g.kface[0].n, [0.0, 0.0, 1.0]);
         assert!((g.iface[0].area - 1.0 / 9.0).abs() < 1e-15);
-        assert!(g.solid.is_empty() && g.axis_cells == 0 && !g.is_solid(0, 0, 0));
+        assert!(g.solid.is_empty() && g.axis.is_empty() && !g.is_solid(0, 0, 0));
         closure_check(&g);
     }
 

@@ -83,7 +83,7 @@ fn axisymmetric_nose_drag_matches_2d() {
         let (g, p_inf) = (&s.grid, s.cfg.freestream[4]);
         let mut fx = 0.0;
         for k in 0..g.nk {
-            for i in g.axis_cells..g.ni {
+            for i in g.axis[0].i.end..g.ni {
                 let f = &g.jface[k * (g.nj + 1) * g.ni + i];
                 if f.c[0] <= l_nose {
                     let p = cons_to_prim3(&s.u[g.cell(i, 0, k)])[4];
