@@ -135,16 +135,16 @@ fn a_viscous_finned_drag_sweep_gives_the_numbers_of_the_old_entry_to_the_last_bi
 fn conditions_at_an_angle_of_attack_give_the_numbers_of_the_old_lift_entry_to_the_last_bit() {
     // asked for 6 degrees first: solved 2 degrees cold, then 6 degrees warm; the points come back in the order asked for
     let p = finned_3d().max_iterations(3000).run(&[Condition::new(2.0, 6.0), Condition::new(2.0, 2.0)]).unwrap();
-    // (angle, CN, CA of the pressure, x_cp [m], iterations)
+    // (angle, CN, CA of the pressure, x_cp [m], iterations, stop): the 8-column trailing-edge taper of the fin layer moved these (CN by 1e-5, CA of the pressure by +3.9 % / +2.7 %)
     let want = [
-        (6.0, 0x3ff479dbbeffc770u64, 0x3ff2bbf51859ca99u64, 0x3fd172bbb96a6cb5u64, 350),
-        (2.0, 0x3fd97c0153c6281c, 0x3ff30ccf0a80f081, 0x3fd20fdd562fc92b, 350),
+        (6.0, 0x3ff479c3ff3f07cau64, 0x3ff37591ab2a5ab3u64, 0x3fd172b25983f571u64, 279, Quality::Converged),
+        (2.0, 0x3fd97bdcb0648aff, 0x3ff3c6b8f19c0032, 0x3fd20fd213d2674e, 292, Quality::Converged),
     ];
-    for (pt, (alpha, cn, ca, x_cp, iters)) in p.points.iter().zip(want) {
+    for (pt, (alpha, cn, ca, x_cp, iters, quality)) in p.points.iter().zip(want) {
         let f = pt.forces.expect("forces at an angle of attack");
         assert_eq!((pt.mach, pt.alpha_deg), (2.0, alpha));
         assert_eq!((bits(f.cn), bits(f.ca), bits(f.x_cp)), (cn, ca, x_cp), "alpha {alpha}");
-        assert_eq!((pt.detail.iterations, pt.quality), (iters, Quality::Stationary));
+        assert_eq!((pt.detail.iterations, pt.quality), (iters, quality));
         // what a point at an angle of attack holds besides its forces (see PolarPoint)
         assert_eq!(bits(pt.drag.forebody_pressure), bits(f.ca));
         assert!(pt.drag.friction.is_none() && pt.drag.fins.is_none() && pt.drag.base.is_nan() && pt.drag.total.is_nan() && !pt.drag.base_modelled);
