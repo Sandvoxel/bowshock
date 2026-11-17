@@ -97,7 +97,7 @@ impl GpuRunner3 {
     pub fn wall_forces(&self) -> Result<(WallForces, WallForces), Error> {
         let sums = self.gpu.wall_forces(self.host.cfg.freestream[4])?;
         let n = self.classes.len();
-        let by = |off: usize| WallForces { by: self.classes.iter().enumerate().map(|(i, &c)| (c, sums[off + i])).collect() };
+        let by = |off: usize| WallForces { by: self.classes.iter().enumerate().map(|(i, &c)| (c, sums[off + i])).collect(), ..Default::default() };
         Ok((by(0), by(n)))
     }
 
