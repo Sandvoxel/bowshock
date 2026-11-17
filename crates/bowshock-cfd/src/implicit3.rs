@@ -17,7 +17,19 @@
 //! * Ghost Jacobians on the first / last cell of a line: characteristic far field `T = 0` (frozen ghost), slip wall and
 //!   symmetry planes `T = reflection3(n_face)`, the axis `T = 0` (the ghost depends on another cell, frozen);
 //!   `ImplicitParams::implicit_bc = false` freezes the wall ones too.
-//! * Euler only: no source term and no viscous terms.
+//! * Viscous runs ([`Solver3::set_viscous`], `solver3/rans.rs`): the dissipation matrix of every face gets `2 lam_f I` (`lam_f` the diffusive spectral radius of the
+//!   face, `viscous3::face_lambda3`), the solid side of a no-slip wall is the ghost `(rho, -u, -v, -w, p)` with the Jacobian `diag(1, -1, -1, -1, 1)`, the
+//!   `i = ni` static-pressure outflow ghost has the analytic Jacobian [`pressure_outflow_t`]. Low-Mach preconditioning (`ImplicitParams::low_mach_precond`,
+//!   [`crate::lowmach5`]): `P` in the time term of every factor, `P x` between the sweeps (`(P - dt J_i) X = rhs, (P - dt J_j) Y = P X, (P - dt J_k) dU = P Y`) and
+//!   in the defect `b - (sum_d (P - dt J_d) - 2 P) dU`, the preconditioned dissipation `P |P^-1 A|` and time step `|u'| + c'`. The preconditioning needs the low-Mach
+//!   flux correction of the right-hand side (`Config3::low_mach`): without it the implicit and explicit dissipations disagree by `1 / M` and every variant blows up
+//!   (the 2D scheme does the same). The diagonal path has the closed-form eigensystem of `P^-1 A` (`L P^-1` on the first sweep only: `P` cancels between the
+//!   sweeps), exact for one cell (`lowmach5` tests), **but it does not work as a solver with the preconditioning**: measured on the viscous block of the `rans`
+//!   tests at Mach 0.1 (`U_r = 0.1 c`) the block lines + `P` converge in 486 iterations (CFL 3; 1211 without `P`, the diagonal form without `P` 1205) while the
+//!   diagonal form + `P` stalls (residual `1e-3` after 500 iterations at CFL 3, `2e-2` at CFL 10: the cell-wise frozen eigenvectors of `P^-1 A` differ too much
+//!   between neighbours of different `U_r`, near a wall `U_r` goes from `0.1 c` to `|u|`, for the one defect-correction pass to repair). The low-Mach route is
+//!   `LineSolve3::Block`.
+//! * No source term.
 //!
 //! `ImplicitParams::line_solve = LineSolve3::DiagonalCorrected` replaces the block lines by diagonalised factors (`diag3`): per cell the eigensystem
 //! of the flux Jacobian turns each directional solve into five scalar tridiagonal solves, and one defect-correction pass against the block
@@ -26,9 +38,10 @@
 mod diag3;
 
 use crate::flux::shock_weight;
-use crate::gas3::{cons_to_prim3, reflect3, sound_speed3, Cons3, Prim3, GAMMA};
+use crate::gas3::{cons_to_prim3, sound_speed3, Cons3, Prim3, GAMMA};
 use crate::grid3::Face3;
 use crate::implicit::{ImplicitParams, LineSolve3};
+use crate::lowmach5::{abs_jacobian_pc3, LowMach};
 use crate::solver3::{pidx3, Solver3};
 use rayon::prelude::*;
 
@@ -222,13 +235,43 @@ pub fn reflection3(n: [f64; 3]) -> M5 {
     m
 }
 
+/// `d U_ghost / d U` of the static-pressure outflow ghost ([`crate::bc3::pressure_outflow_ghost3`]) of the cell state `w`: the ghost of a subsonic face is
+/// `(rho, rho u, rho v, rho w, p_b / (gamma - 1) + rho |u|^2 / 2)` (`dE_g = -|u|^2 / 2 d rho + u . d(rho u)`), the cell itself on a supersonic face.
+pub fn pressure_outflow_t(w: &Prim3, n: [f64; 3]) -> M5 {
+    if (w[1] * n[0] + w[2] * n[1] + w[3] * n[2]) >= sound_speed3(w) {
+        return EYE5;
+    }
+    let mut m = EYE5;
+    m[24] = 0.0;
+    m[20] = -0.5 * (w[1] * w[1] + w[2] * w[2] + w[3] * w[3]);
+    m[21] = w[1];
+    m[22] = w[2];
+    m[23] = w[3];
+    m
+}
+
 /// Blocks `(lo, d, up)` of `I - dt J` of a cell with states `wk` (cell), `wm` / `wp` (lower / upper neighbour or ghost), faces
 /// `fl`, `fr` (normals towards the upper neighbour) and volume `vol`.
-fn cell_blocks3(wk: &Prim3, wm: &Prim3, wp: &Prim3, fl: &Face3, fr: &Face3, vol: f64, dt: f64, p: &ImplicitParams) -> (M5, M5, M5) {
+#[allow(clippy::too_many_arguments)]
+fn cell_blocks3(
+    wk: &Prim3,
+    wm: &Prim3,
+    wp: &Prim3,
+    fl: &Face3,
+    fr: &Face3,
+    vol: f64,
+    dt: f64,
+    p: &ImplicitParams,
+    visc: (f64, f64),
+    lm: Option<&LowMach>,
+) -> (M5, M5, M5) {
     let s = 0.5 * dt / vol;
     let (al, ar) = (fl.area, fr.area);
-    let (dis_l, dis_r) = if p.roe {
-        let (mut dl, mut dr) = (abs_jacobian3(wm, wk, fl.n, p.eps_fix), abs_jacobian3(wk, wp, fr.n, p.eps_fix));
+    let (mut dis_l, mut dis_r) = if p.roe {
+        let (mut dl, mut dr) = match lm {
+            Some(l) => (abs_jacobian_pc3(wm, wk, fl.n, p.eps_fix, l), abs_jacobian_pc3(wk, wp, fr.n, p.eps_fix, l)),
+            None => (abs_jacobian3(wm, wk, fl.n, p.eps_fix), abs_jacobian3(wk, wp, fr.n, p.eps_fix)),
+        };
         let (tl, tr) = (shock_weight(wm[4], wk[4]), shock_weight(wk[4], wp[4]));
         if tl > 0.0 || tr > 0.0 {
             let lam_l = spectral(wk, fl.n).max(spectral(wm, fl.n));
@@ -255,7 +298,12 @@ fn cell_blocks3(wk: &Prim3, wm: &Prim3, wp: &Prim3, fl: &Face3, fr: &Face3, vol:
         }
         (dl, dr)
     };
-    let mut d = EYE5;
+    // viscous run: `2 lam_f I` on the dissipation of a face (the diffusive spectral radius of the face, see `viscous3::face_lambda3`)
+    for q in 0..5 {
+        dis_l[6 * q] += 2.0 * visc.0;
+        dis_r[6 * q] += 2.0 * visc.1;
+    }
+    let mut d = lm.map_or(EYE5, |l| l.p_matrix(wk));
     axpy(&mut d, s * ar, &flux_jacobian3(wk, fr.n));
     axpy(&mut d, -s * al, &flux_jacobian3(wk, fl.n));
     axpy(&mut d, s * ar, &dis_r);
@@ -280,6 +328,7 @@ fn cell_blocks3(wk: &Prim3, wm: &Prim3, wp: &Prim3, fl: &Face3, fr: &Face3, vol:
 fn assemble3(s: &Solver3, p: &ImplicitParams, dir: usize) -> Factor {
     let (ni, nj, nk) = (s.grid.ni, s.grid.nj, s.grid.nk);
     let (grid, w, dt, solid) = (&s.grid, &s.w, &s.dt, &s.solid);
+    let (rans, lm) = (s.rans.as_deref(), s.precond);
     let wedge = s.is_wedge();
     let n = ni * nj * nk;
     let stride = [1, ni, ni * nj][dir];
@@ -289,11 +338,15 @@ fn assemble3(s: &Solver3, p: &ImplicitParams, dir: usize) -> Factor {
         _ => [0, 0, 1],
     };
     // ghost Jacobian of the lower (`lower`) / upper end of a line
-    let ghost_t = |lower: bool, f: &Face3, i: usize| -> M5 {
+    let p_outflow = s.rans.as_ref().is_some_and(|r| r.p_outflow.is_some());
+    let ghost_t = |lower: bool, f: &Face3, i: usize, wk: &Prim3| -> M5 {
         if !p.implicit_bc {
             return ZERO5;
         }
         match (dir, lower) {
+            // viscous run: static-pressure outflow at `i = ni`, the ghost `(rho, rho u, rho v, rho w, p_b / (gamma - 1) + rho |u|^2 / 2)` of the cell (subsonic) or the
+            // cell itself (supersonic)
+            (0, false) if p_outflow => pressure_outflow_t(wk, f.n),
             // Characteristic far field (i ends, j = nj): frozen ghost, T = 0. The f32 finite-difference Jacobian at the kink of the
             // characteristic branch switch destabilised the GPU left-hand side at CFL ~ 6 (ANF M 2.48 nk 48: a far-field corner cell lost
             // its pressure and the run froze), so CPU and GPU both use the frozen ghost.
@@ -301,6 +354,9 @@ fn assemble3(s: &Solver3, p: &ImplicitParams, dir: usize) -> Factor {
             (1, true) => {
                 if grid.is_axis(i, 0) {
                     ZERO5
+                } else if grid.wall_j0.iter().any(|(r, _)| r.contains(&i)) {
+                    // the body-surface boundary face: the no-slip ghost of a viscous run, the reflection otherwise
+                    s.wall_jacobian(f.n)
                 } else {
                     reflection3(f.n)
                 }
@@ -341,9 +397,10 @@ fn assemble3(s: &Solver3, p: &ImplicitParams, dir: usize) -> Factor {
                 };
                 let lower_solid = m > 0 && solid[c - stride];
                 let upper_solid = m + 1 < nl && solid[c + stride];
-                let wm = if lower_solid { reflect3(wk, fl.n) } else { w[pidx3(ni, nj, nk, ii - e[0], jj - e[1], kk - e[2])] };
-                let wp = if upper_solid { reflect3(wk, fr.n) } else { w[pidx3(ni, nj, nk, ii + e[0], jj + e[1], kk + e[2])] };
-                let (mut l, mut dd, mut u) = cell_blocks3(wk, &wm, &wp, fl, fr, grid.vol[c], dt[c], p);
+                let wm = if lower_solid { s.wall_ghost(wk, fl.n) } else { w[pidx3(ni, nj, nk, ii - e[0], jj - e[1], kk - e[2])] };
+                let wp = if upper_solid { s.wall_ghost(wk, fr.n) } else { w[pidx3(ni, nj, nk, ii + e[0], jj + e[1], kk + e[2])] };
+                let visc = rans.map_or((0.0, 0.0), |r| r.lam_pair(grid, dir, i, j, k));
+                let (mut l, mut dd, mut u) = cell_blocks3(wk, &wm, &wp, fl, fr, grid.vol[c], dt[c], p, visc, lm.as_ref());
                 if wedge && dir == 1 {
                     // single-cell wedge: the pressure of the `k` faces is the axisymmetric radial-momentum source, `-(1/V) (A1 n1 - A0 n0) p`; as in 2D
                     // (`implicit::cell_blocks`) its Jacobian `(I - dt J)_mom = ... + dt/V (A1 n1 - A0 n0) dp/dU` joins the diagonal of the `j` factor
@@ -360,19 +417,19 @@ fn assemble3(s: &Solver3, p: &ImplicitParams, dir: usize) -> Factor {
                     }
                 }
                 if m == 0 {
-                    let t = ghost_t(true, fl, i);
+                    let t = ghost_t(true, fl, i, wk);
                     axpy(&mut dd, 1.0, &mm(&l, &t));
                     l = ZERO5;
                 } else if lower_solid {
-                    axpy(&mut dd, 1.0, &mm(&l, &reflection3(fl.n)));
+                    axpy(&mut dd, 1.0, &mm(&l, &s.wall_jacobian(fl.n)));
                     l = ZERO5;
                 }
                 if m == nl - 1 {
-                    let t = ghost_t(false, fr, i);
+                    let t = ghost_t(false, fr, i, wk);
                     axpy(&mut dd, 1.0, &mm(&u, &t));
                     u = ZERO5;
                 } else if upper_solid {
-                    axpy(&mut dd, 1.0, &mm(&u, &reflection3(fr.n)));
+                    axpy(&mut dd, 1.0, &mm(&u, &s.wall_jacobian(fr.n)));
                     u = ZERO5;
                 }
                 lo_p[cl] = l;
@@ -446,27 +503,35 @@ fn apply_factor3(s: &Solver3, fac: &Factor, dir: usize, x: &[Cons3]) -> Vec<Cons
     out
 }
 
-/// The correction `dU` of the block scheme for the right-hand side `b = dt R`: the three-factor solve with block-tridiagonal lines and
-/// `ImplicitParams::sub_iters - 1` defect-correction passes against the unfactored operator.
+/// The correction `dU` of the block scheme for the right-hand side `b = dt R`: the three-factor solve (two on a wedge: it has no `k` line, and a `k` factor of
+/// `I` between `P`s would be a second `P^-1`) with block-tridiagonal lines and `ImplicitParams::sub_iters - 1` defect-correction passes against the unfactored operator.
 fn du_block(s: &Solver3, p: &ImplicitParams, b: &[Cons3]) -> Vec<Cons3> {
     let n = s.u.len();
-    let facs = [assemble3(s, p, 0), assemble3(s, p, 1), assemble3(s, p, 2)];
+    let nd = if s.is_wedge() { 2 } else { 3 };
+    let facs: Vec<Factor> = (0..nd).map(|dir| assemble3(s, p, dir)).collect();
+    let pm = precond_blocks(s);
     let af = |rhs: &[Cons3]| -> Vec<Cons3> {
         let mut x = rhs.to_vec();
-        for dir in 0..3 {
+        for dir in 0..nd {
             solve_lines3(s, &facs[dir], dir, &mut x);
+            // low-Mach run: `(P - dt J_i) X = rhs, (P - dt J_j) Y = P X, (P - dt J_k) dU = P Y`
+            if let (Some(pm), true) = (&pm, dir + 1 < nd) {
+                apply_p(pm, &mut x);
+            }
         }
         x
     };
     let mut du = af(b);
     for _ in 1..p.sub_iters.max(1) {
-        let a: Vec<Vec<Cons3>> = (0..3).map(|dir| apply_factor3(s, &facs[dir], dir, &du)).collect();
+        let a: Vec<Vec<Cons3>> = (0..nd).map(|dir| apply_factor3(s, &facs[dir], dir, &du)).collect();
         let r: Vec<Cons3> = (0..n)
             .into_par_iter()
             .map(|c| {
+                // (P - dt J_i) + (P - dt J_j) + (P - dt J_k) - 2 P = P - dt (J_i + J_j + J_k)
+                let pdu = pm.as_ref().map_or(du[c], |pm| mv(&pm[c], &du[c]));
                 let mut v = [0.0; 5];
                 for q in 0..5 {
-                    v[q] = b[c][q] - (a[0][c][q] + a[1][c][q] + a[2][c][q] - 2.0 * du[c][q]);
+                    v[q] = b[c][q] - (a.iter().map(|f| f[c][q]).sum::<f64>() - (nd - 1) as f64 * pdu[q]);
                 }
                 v
             })
@@ -481,6 +546,25 @@ fn du_block(s: &Solver3, p: &ImplicitParams, b: &[Cons3]) -> Vec<Cons3> {
     du
 }
 
+/// The preconditioning matrix `P` of every cell (the identity in solid cells), `None` without low-Mach preconditioning.
+pub(crate) fn precond_blocks(s: &Solver3) -> Option<Vec<M5>> {
+    let lm = s.precond?;
+    let (ni, nj, nk) = (s.grid.ni, s.grid.nj, s.grid.nk);
+    Some(
+        (0..s.u.len())
+            .into_par_iter()
+            .map(
+                |c| if s.solid[c] { EYE5 } else { lm.p_matrix(&s.w[pidx3(ni, nj, nk, (c % ni) as isize, ((c / ni) % nj) as isize, (c / (ni * nj)) as isize)]) },
+            )
+            .collect(),
+    )
+}
+
+/// `x <- P x` per cell.
+pub(crate) fn apply_p(pm: &[M5], x: &mut [Cons3]) {
+    x.par_iter_mut().zip(pm.par_iter()).for_each(|(x, m)| *x = mv(m, x));
+}
+
 /// One implicit iteration; returns the density residual at the start of the iteration.
 ///
 /// `ImplicitParams::sub_iters > 1` repeats the factorised solve as a defect correction against the unfactored operator
@@ -490,7 +574,9 @@ pub(crate) fn step(s: &mut Solver3, p: &ImplicitParams) -> f64 {
     s.ramp_k += 1;
     s.eval_residual();
     let rn = s.density_residual();
+    s.precond = LowMach::of(p, &s.cfg.freestream);
     s.compute_dt(cfl, p.dt_mode);
+    s.face_lambdas();
 
     let b: Vec<Cons3> = s.res.iter().zip(s.dt.iter()).map(|(r, d)| [r[0] * d, r[1] * d, r[2] * d, r[3] * d, r[4] * d]).collect();
     let du = match p.line_solve {
@@ -523,7 +609,7 @@ pub(crate) fn step(s: &mut Solver3, p: &ImplicitParams) -> f64 {
 mod tests {
     use super::*;
     use crate::flux3::tests::Rng;
-    use crate::gas3::{physical_flux3, prim_to_cons3};
+    use crate::gas3::{physical_flux3, prim_to_cons3, reflect3};
 
     fn unit(rng: &mut Rng) -> [f64; 3] {
         let n = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)];
@@ -579,6 +665,33 @@ mod tests {
         let want = prim_to_cons3(&reflect3(&w, n));
         for q in 0..5 {
             assert!((got[q] - want[q]).abs() < 1e-14);
+        }
+    }
+
+    /// `pressure_outflow_t` is the Jacobian of the static-pressure outflow ghost in conservative variables: subsonic (`p_b` fixed) and supersonic (extrapolation).
+    #[test]
+    fn pressure_outflow_jacobian_matches_finite_differences() {
+        let ghost = |u: &Cons3, n: [f64; 3]| prim_to_cons3(&crate::bc3::pressure_outflow_ghost3(0.7, &cons_to_prim3(u), n));
+        for (w, n) in
+            [([1.2, 0.5, -0.4, 0.3, 0.8], [1.0, 0.0, 0.0]), ([0.9, 0.2, 0.1, -0.3, 1.1], [0.6, 0.8, 0.0]), ([1.0, 2.5, 0.2, 0.0, 0.7], [1.0, 0.0, 0.0])]
+        {
+            let u0 = prim_to_cons3(&w);
+            let t = pressure_outflow_t(&w, n);
+            for q in 0..5 {
+                let h = 1e-6;
+                let (mut up, mut um) = (u0, u0);
+                up[q] += h;
+                um[q] -= h;
+                let (gp, gm) = (ghost(&up, n), ghost(&um, n));
+                for r in 0..5 {
+                    assert!(
+                        ((gp[r] - gm[r]) / (2.0 * h) - t[5 * r + q]).abs() < 1e-7,
+                        "w {w:?}: T[{r}][{q}] = {} vs fd {}",
+                        t[5 * r + q],
+                        (gp[r] - gm[r]) / (2.0 * h)
+                    );
+                }
+            }
         }
     }
 
