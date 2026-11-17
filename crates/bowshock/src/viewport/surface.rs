@@ -1,7 +1,8 @@
 //! The overlay for dragging a radial part (fin set, lug, rail button) over the rocket. These have no attach nodes: they snap to
 //! the surface under the cursor, at an offset along the part and an angle round it. This canvas works out that target from the
-//! cursor, reports it when it changes and the drop on release, and marks the target with a ring, a leader and a tag. The ghost
-//! copies themselves are drawn in 3D by the model mesh.
+//! cursor, reports it when it changes and the drop on release (or on a click, when parts are placed by clicking), and marks the
+//! target with a ring, a leader and a tag. The ghost copies themselves are drawn in 3D by the model mesh: on the surface, or
+//! held in the air at the cursor when there is no surface under it.
 //!
 //! A group picked up off the rocket slides along the rocket by default, keeping its angle and following the cursor along the
 //! axis wherever the cursor is (onto other parts as it passes them). Pulled [`DETACH_PX`] clear of the rocket's surface it comes
@@ -63,6 +64,8 @@ pub struct Overlay<'a> {
     pub margin: Option<f64>,
     /// The display unit set the tag's stations are written in.
     pub units: UnitSystem,
+    /// Parts are placed by clicking (Preferences > Editor): a group pulled free of the rocket is not removed by releasing.
+    pub click: bool,
 }
 
 #[derive(Debug, Default)]
@@ -155,9 +158,13 @@ impl canvas::Program<Message> for Overlay<'_> {
             };
             return Some(if steps == 0.0 { Action::capture() } else { Action::publish(Message::CopiesStep(steps > 0.0)).and_capture() });
         }
+        // A release over the viewport drops and a press places a part held with no button down (the app decides what each does:
+        // see `drag::end_carry`); elsewhere the app decides.
         if let Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) = event {
-            // Releasing over the viewport drops (or, with no target, cancels); elsewhere the app cancels.
             return cursor.position_over(bounds).map(|_| Action::publish(Message::DropRadial).and_capture());
+        }
+        if let Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event {
+            return cursor.position_over(bounds).map(|_| Action::publish(Message::PlaceHere).and_capture());
         }
         let (target, detached) = cursor.position_in(bounds).map_or((None, false), |p| self.choose(state, p, bounds.size()));
         ((target, detached) != (self.drag.target, self.drag.detached)).then(|| Action::publish(Message::Surface(target, detached)))
@@ -206,36 +213,8 @@ impl canvas::Program<Message> for Overlay<'_> {
                 );
                 tag_with(&mut frame, cursor, 0.0, &label, margin_suffix(self.rocket, t, self.margin), t.ink, t.line_200, t.bg_200);
             }
-            // Pulled free of the rocket over empty space: the group follows the cursor as a ghost, and releasing removes it.
-            None if self.drag.detached => {
-                let first = self.drag.origin.as_ref().map_or(0.0, |o| o.angle);
-                let n = usize::from(self.drag.count.max(1));
-                // One outline per copy, spaced evenly round the axis; the set is centred on the cursor as a whole.
-                let outlines: Vec<Vec<Point>> = (0..n)
-                    .map(|k| pick::radial_silhouette(&self.camera, size, &self.drag.kind, (first + std::f64::consts::TAU * k as f64 / n as f64) as f32))
-                    .collect();
-                let (min, max) = outlines.iter().flatten().fold((Point::new(f32::MAX, f32::MAX), Point::new(f32::MIN, f32::MIN)), |(lo, hi), p| {
-                    (Point::new(lo.x.min(p.x), lo.y.min(p.y)), Point::new(hi.x.max(p.x), hi.y.max(p.y)))
-                });
-                let shift = cursor - Point::new((min.x + max.x) / 2.0, (min.y + max.y) / 2.0);
-                for outline in &outlines {
-                    let ghost = Path::new(|p| {
-                        for (i, point) in outline.iter().enumerate() {
-                            let at = *point + shift;
-                            if i == 0 {
-                                p.move_to(at);
-                            } else {
-                                p.line_to(at);
-                            }
-                        }
-                        p.close();
-                    });
-                    frame.fill(&ghost, t.accent.scale_alpha(0.18));
-                    frame.stroke(
-                        &ghost,
-                        Stroke { line_dash: LineDash { segments: &[4.0, 3.0], offset: 0 }, ..Stroke::default().with_color(t.accent).with_width(1.0) },
-                    );
-                }
+            // Pulled free of the rocket over empty space: the group is drawn in the air by the model mesh; releasing removes it.
+            None if self.drag.detached && !self.click => {
                 let times = if self.drag.count > 1 { format!(" ×{}", self.drag.count) } else { String::new() };
                 no_entry(&mut frame, cursor + iced::Vector::new(14.0, 14.0), t.err);
                 tag(&mut frame, cursor, 18.0, &format!("{}{times} · release to remove", self.drag.kind.name()), t.ink, t.line_200, t.bg_200);
@@ -284,7 +263,7 @@ mod tests {
     }
 
     fn overlay<'a>(r: &'a Rocket, drag: &'a RadialDrag) -> Overlay<'a> {
-        Overlay { rocket: r, drag, camera: camera(), snap: 0, snap_step: 0.001, cursor: None, margin: None, units: UnitSystem::default() }
+        Overlay { rocket: r, drag, camera: camera(), snap: 0, snap_step: 0.001, cursor: None, margin: None, units: UnitSystem::default(), click: false }
     }
 
     fn at(z: f32, y: f32) -> Point {

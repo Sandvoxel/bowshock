@@ -425,6 +425,7 @@ impl Rocket {
         if group.count < 2 || index >= usize::from(group.count) {
             return Err(RadialError::NoSuchRadial);
         }
+        self.release_touching(&[id]);
         let free = self.free_copy(&group, index);
         let free_id = free.id;
         let angles = group.angles();
@@ -467,6 +468,7 @@ impl Rocket {
         if group.count < 2 {
             return Ok(vec![id]);
         }
+        self.release_touching(&[id]);
         let position = self.radials.iter().position(|r| r.id == id).ok_or(RadialError::NoSuchRadial)?;
         let mut ids = vec![id];
         let mut copies = Vec::new();
@@ -538,6 +540,7 @@ impl Rocket {
         if g.count >= MAX_COUNT {
             return Err(RadialError::BadCount);
         }
+        self.release_touching(&[part, group]);
         let count = g.count + 1;
         let (per_copy, per_copy_cd) = match winner {
             Winner::Group => (g.mass_override.map(|m| m / f64::from(g.count)), g.cd_override.map(|c| c / f64::from(g.count))),

@@ -2,7 +2,7 @@ use super::super::handles::{self, Context};
 use super::super::markers::{self, BalanceMarks};
 use super::super::pick::{self, Pick};
 use super::super::{Camera, InsideView, Message};
-use super::{visible, Drag, Edit, Hover, Live, Overlay, State, Visible};
+use super::{visible, Drag, Edit, Hand, Hover, Live, Overlay, State, Visible};
 use crate::units::UnitSystem;
 use bowshock_model::{Dim, PartId, Rocket};
 use glam::Vec3;
@@ -101,6 +101,7 @@ mod edit_tests {
             drive_modifiers: keyboard::Modifiers::empty(),
             pod: None,
             balance: None,
+            hand: Hand::default(),
         };
         let v = o.parse(Dim::Length, "50").unwrap();
         assert!((v - 0.05).abs() < 1e-12);
@@ -128,6 +129,7 @@ mod edit_tests {
             drive_modifiers: keyboard::Modifiers::empty(),
             pod: None,
             balance: None,
+            hand: Hand::default(),
         };
         let v = vis(&r, tube, false, InsideView::Solid);
         let h = v.placed.iter().find(|p| p.spec.dim == Dim::Length).copied().unwrap();
@@ -195,6 +197,7 @@ mod label_tests {
             drive_modifiers: keyboard::Modifiers::empty(),
             pod: None,
             balance: Some(BalanceMarks { cg: 0.7035, cp: 0.8517, margin: 1.94, show: (true, true), staged: false }),
+            hand: Hand::default(),
         }
     }
 
@@ -345,6 +348,7 @@ mod carry_tests {
             drive_modifiers: keyboard::Modifiers::empty(),
             pod: None,
             balance: None,
+            hand: Hand::default(),
         }
     }
 
@@ -426,5 +430,48 @@ mod carry_tests {
         send(&o, &mut state, right(mouse::Event::ButtonPressed), at(0.9, 0.01));
         moved(&o, &mut state, at(0.8, 0.01));
         assert!(send(&o, &mut state, right(mouse::Event::ButtonReleased), at(0.8, 0.01)).is_none());
+    }
+
+    #[test]
+    fn clicking_to_place_a_carried_internal_part_survives_the_release_and_ends_with_a_press() {
+        let (r, [_, bay, _], mount) = rocket();
+        let mut o = overlay(&r, InsideView::Cutaway);
+        o.hand = Hand { click: true, lifted: None };
+        let mut state = State::default();
+        press(&o, &mut state, at(0.9, 0.01));
+        assert!(matches!(moved(&o, &mut state, at(0.88, 0.01)), Some(Message::Edit(Edit::Carry(id))) if id == mount));
+        // The app has the part in hand (the overlay is rebuilt with it). Released: nothing is sent and the part stays in hand,
+        // following the cursor with no button down.
+        o.hand.lifted = Some(mount);
+        let release = send(&o, &mut state, Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)), at(0.88, 0.01));
+        assert!(release.is_none() && state.carry.is_some());
+        let place = moved(&o, &mut state, at(0.5, 0.01));
+        assert!(matches!(place, Some(Message::Edit(Edit::Place(m, p, _))) if m == mount && p == bay), "{place:?}");
+        // A press puts it down: one edit ends; the release after it is nothing.
+        let end = send(&o, &mut state, Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)), at(0.5, 0.01));
+        assert!(matches!(end, Some(Message::Edit(Edit::End))) && state.carry.is_none());
+        assert!(send(&o, &mut state, Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)), at(0.5, 0.01)).is_none());
+
+        // A carry the app has put back (Esc, the parts bin) is forgotten by the overlay, so it never draws or places a stale one.
+        press(&o, &mut state, at(0.9, 0.01));
+        moved(&o, &mut state, at(0.88, 0.01));
+        assert!(state.carry.is_some());
+        o.hand.lifted = None;
+        moved(&o, &mut state, at(0.8, 0.01));
+        assert!(state.carry.is_some(), "not seen in hand yet: kept (the app has not caught up)");
+        o.hand.lifted = Some(mount);
+        moved(&o, &mut state, at(0.7, 0.01));
+        o.hand.lifted = None;
+        moved(&o, &mut state, at(0.6, 0.01));
+        assert!(state.carry.is_none());
+    }
+
+    #[test]
+    fn pressing_an_airframe_part_reports_where_it_was_pressed() {
+        let (r, [_, bay, _], _) = rocket();
+        let (o, mut state) = (overlay(&r, InsideView::Solid), State::default());
+        // The bay runs 0.2 to 0.7: pressed at 0.35 it is 0.15 behind the fore face.
+        let held = send(&o, &mut state, Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)), at(0.35, 0.01));
+        assert!(matches!(held, Some(Message::Held(id, hold)) if id == bay && (hold - 0.15).abs() < 1e-4), "{held:?}");
     }
 }

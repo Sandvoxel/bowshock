@@ -210,6 +210,7 @@ impl App {
         ctx.sanitize_selection();
         self.simulate.sync(&self.ctx, reloaded);
         self.ctx.selected_flight = Some(self.simulate.selected_id());
+        self.viewport.resnap(&mut self.ctx);
         self.viewport.sync(&self.ctx);
         if std::mem::take(&mut self.ctx.camera_fit) {
             self.viewport.fit(self.ctx.env.animate);

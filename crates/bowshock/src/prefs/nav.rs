@@ -87,6 +87,12 @@ impl canvas::Program<Message> for Glyph {
                 frame.fill(&half, color);
                 frame.stroke(&canvas::Path::circle(c, 6.0), stroke);
             }
+            Section::Editor => {
+                // A tube with a ring at each end: a part held by its ends.
+                frame.stroke(&canvas::Path::rectangle(p(4.0, 5.0), Size::new(8.0, 6.0)), stroke);
+                frame.stroke(&canvas::Path::circle(p(2.0, 8.0), 1.5), stroke);
+                frame.stroke(&canvas::Path::circle(p(14.0, 8.0), 1.5), stroke);
+            }
             Section::Units => {
                 frame.stroke(&canvas::Path::rectangle(p(1.0, 5.0), Size::new(14.0, 6.0)), stroke);
                 for i in 1..=4 {

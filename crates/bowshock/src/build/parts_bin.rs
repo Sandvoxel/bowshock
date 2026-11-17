@@ -54,6 +54,11 @@ pub const SYMMETRY: [(u8, &str); 6] = [(1, "1"), (2, "2"), (3, "3"), (4, "4"), (
 /// Angle snap choices for radial parts, in degrees.
 pub const ANGLE_SNAP: [(u8, &str); 3] = [(0, "off"), (15, "15°"), (45, "45°")];
 
+/// The cue over the bin for a part picked up off the rocket (letting go deletes it), and for one that came from the bin (letting go
+/// puts it back).
+pub const DROP_TO_DELETE: &str = "Drop to delete";
+pub const DROP_TO_PUT_BACK: &str = "Drop to put back";
+
 /// The rail's categories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Category {
@@ -121,6 +126,8 @@ pub enum Message {
     SizeToSelection(bool),
     /// Left button pressed on a row.
     RowPress(RowId),
+    /// Left button pressed on the bin while a part is held (click to place; the bin only reports it then).
+    BinPress,
     /// The cursor entered or left a row.
     RowHover(Option<RowId>),
     /// The cursor entered or left the bin (the rail keys `1`..`7` only work while it is over).
@@ -308,9 +315,18 @@ impl State {
             Message::Search(s) => self.search = s,
             Message::FocusSearch => return iced::widget::operation::focus(SEARCH_ID),
             Message::SizeToSelection(on) => self.size_to_selection = on,
+            Message::RowPress(_) | Message::BinPress if ctx.click_to_place && ctx.drag.in_hand() => {
+                // Click to place: a click on the bin with a part in hand puts it back (a part from the bin) or deletes it (one
+                // picked up off the rocket). The row is not pressed.
+                drag::end_carry(ctx, drag::Gesture::Press, drag::Over::Bin);
+            }
             Message::RowPress(row) => self.press = Some(Press { row, origin: ctx.cursor }),
             Message::RowHover(row) => self.row_hover = row,
-            Message::Hover(on) => self.hovered = on,
+            Message::Hover(on) => {
+                self.hovered = on;
+                ctx.over_bin = on;
+            }
+            Message::BinPress => {}
             Message::CursorMoved => {
                 let at = ctx.cursor;
                 let started = self.press.as_ref().filter(|p| matches!((p.origin, at), (Some(o), Some(at)) if o.distance(at) > DRAG_SLOP)).map(|p| p.row);
@@ -320,11 +336,21 @@ impl State {
                 }
             }
             Message::Released => {
-                self.dragging = None;
+                // A part in hand (click to place) keeps its row marked while it is carried.
+                if !(ctx.click_to_place && ctx.drag.active()) {
+                    self.dragging = None;
+                }
                 if let Some(press) = self.press.take() {
                     let Some(item) = self.item(press.row, ctx).filter(|i| self.unavailable(i, ctx).is_none()) else {
                         return Task::none();
                     };
+                    // Click to place: a click on a row that can be carried picks the part up, as a drag out of the row does.
+                    if ctx.click_to_place && matches!(item, Item::Axial(..) | Item::Radial(..) | Item::Internal(..)) {
+                        if !ctx.drag.active() {
+                            self.start_drag(press.row, ctx);
+                        }
+                        return Task::none();
+                    }
                     let now = Instant::now();
                     if self.last_click.is_some_and(|(row, at)| row == press.row && now.duration_since(at) < DOUBLE_CLICK) {
                         // The first click already added the part: the second only moves on to editing it.
@@ -524,9 +550,14 @@ impl State {
         let rule = || container(Space::new()).width(Fill).height(1).style(theme::hairline);
         let body = column![header, rule(), controls, rule(), list, rule(), symmetry_footer(ctx)].width(Fill).height(Fill);
         let content = container(row![rail, body]).height(Fill).style(theme::panel);
-        mouse_area(content).on_enter(Message::Hover(true)).on_exit(Message::Hover(false)).boxed()
+        let mut area = mouse_area(content).on_enter(Message::Hover(true)).on_exit(Message::Hover(false));
+        // Click to place: with a part in hand, a press on the bin (that no row or button took) puts it back or deletes it.
+        if ctx.click_to_place && ctx.drag.in_hand() {
+            area = area.on_press(Message::BinPress);
+        }
+        // Always a stack, the cue or nothing over the bin, so the bin's hover state survives the cue coming and going.
+        stack![area, self.drop_cue(ctx).unwrap_or_else(|| Space::new().boxed())].boxed()
     }
-}
 
 /// `X` / `Shift+X` / the mouse wheel mid-drag: the next (or previous) symmetry count. A radial group in the air takes it as its
 /// own count (a group from the bin also sets the count for the next one; a picked-up group keeps its own); otherwise it is the

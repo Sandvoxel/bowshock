@@ -393,15 +393,6 @@ fn conditions<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
             rows.push(muted("One-sigma spreads: wind 1 m/s and 10°, rail tilt 1°, thrust 3 %, drag 5 %, dry mass 2 %.", 12.0));
         }
         Analysis::Optimize => {}
-        Analysis::Components => {
-            rows.push(row_of("Mach", mach_input(state, MachField::Fixed)));
-            let alpha = unit_input("Angle of attack", c.alpha, Quantity::Angle, units).label_width(LABEL_W).on_commit(Message::Alpha).on_scrub(Message::Alpha);
-            rows.push(if state.method == Method::Barrowman { alpha.hint("Barrowman ignores the angle (α = 0)").into() } else { alpha.into() });
-            rows.push(input("Altitude", c.altitude, Quantity::Altitude, Message::Altitude));
-            rows.push(burnout);
-            rows.push(finish);
-            rows.push(muted("Each part's share of the build-up at this condition. A part's Cd override replaces its computed drag.", 12.0));
-        }
     }
     column(rows).spacing(SPACE_2).boxed()
 }
@@ -435,6 +426,9 @@ fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
     if let Some(solving) = super::solve_view::centre(state, ctx) {
         return solving;
     }
+    if let Some(flow) = super::flow_view::centre(state, ctx) {
+        return flow;
+    }
     let (Some(out), Some(built)) = (state.output(), state.built.as_ref()) else {
         return centred(state.error.as_ref().map_or_else(|| "Solving…".to_string(), |e| format!("Nothing to analyse: {e}")));
     };
@@ -447,7 +441,7 @@ fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
     }
     let bar = |e: Element<'a, Message>| container(e).padding([SPACE_2, SPACE_3]).boxed();
 
-    let body: Element<'a, Message> = if state.show_table || out.analysis == Analysis::Components {
+    let body: Element<'a, Message> = if state.show_table {
         container(framed(table(state))).padding([0.0, SPACE_3]).height(Fill).boxed()
     } else if out.analysis == Analysis::Dispersion {
         dispersion(state, built)
@@ -598,18 +592,32 @@ fn row_view<'a>(r: Row) -> Element<'a, Message> {
 fn export<'a>(state: &'a State, ready: bool, index: usize) -> Element<'a, Message> {
     let mut table = push(if state.show_table { "Plots" } else { "Table view" }, Weight::Secondary);
     let mut csv = push("CSV", Weight::Secondary);
-    let tabular = state.analysis == Analysis::Components;
-    table = if ready && !tabular {
-        table.on_press(Message::Table(!state.show_table))
-    } else if tabular {
-        table.disabled("This analysis is a table")
-    } else {
-        table.disabled("Nothing computed yet")
-    };
+    table = if ready { table.on_press(Message::Table(!state.show_table)) } else { table.disabled("Nothing computed yet") };
     csv = if ready { csv.on_press(Message::ExportCsv) } else { csv.disabled("Nothing computed yet") };
     let cdx = push("RASAero .CDX1", Weight::Secondary).disabled(RASAERO_REASON);
     let (table, csv, cdx): (Element<'a, Message>, Element<'a, Message>, Element<'a, Message>) = (table.into(), csv.into(), cdx.into());
-    section(index, "Export", true, vec![row![table, csv, cdx].spacing(SPACE_2).boxed()])
+    let flow: Element<'a, Message> = flow_button(state).into();
+    section(index, "Export", true, vec![row![table, flow].spacing(SPACE_2).boxed(), row![csv, cdx].spacing(SPACE_2).boxed()])
+}
+
+/// The `Flow field` button beside `Table view`: the flow fields of the CFD table solved in this session, or why there are none.
+fn flow_button(state: &State) -> crate::widgets::button::Button<'_, Message> {
+    let open = state.flow.open;
+    let b = push(if open { "Plots" } else { "Flow field" }, Weight::Secondary);
+    if open {
+        return b.on_press(Message::Flow(super::flow_view::Msg::Open(false)));
+    }
+    let cfd = state.method == Method::CfdTable && super::uses_cfd(state.analysis);
+    let table = state.cfd.table.as_ref().filter(|_| state.cfd_ready());
+    match table {
+        _ if !cfd => b.disabled("Choose the CFD table method: the flow fields are what the solver left of each point"),
+        _ if state.cfd.solving.is_some() || state.cfd.lift_solving.is_some() => b.disabled("A solve is running: its flow is on show"),
+        None => b.disabled("Solve the CFD table first"),
+        Some(t) if !state.cfd.fields.has_any(t) => {
+            b.disabled("No flow fields for this table: it was loaded from a file or its geometry changed. Re-solve to see them")
+        }
+        Some(_) => b.on_press(Message::Flow(super::flow_view::Msg::Open(true))).tooltip("The flow of each solved Mach number"),
+    }
 }
 
 /// A numbered section of the right panel: tighter than the inspector's so the whole readout fits in 800 px.

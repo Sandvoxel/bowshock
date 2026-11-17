@@ -137,6 +137,17 @@ pub struct Rocket {
     /// ignored, not removed. Empty (and not written) while every separation is automatic.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub(crate) separation_joints: std::collections::BTreeMap<PartId, PartId>,
+    /// The assembly definitions this document carries (see [`crate::assembly`]): every definition an instance uses, and shelf
+    /// definitions nothing uses yet. Not written while there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) assemblies: Vec<crate::assembly::AssemblyDef>,
+    /// The uses of the definitions: which ordinary parts of this document are the members of which definition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) instances: Vec<crate::assembly::AssemblyInstance>,
+    /// The stand-in host tube of an assembly opened as a document ([`AssemblyDef::to_rocket`](crate::AssemblyDef::to_rocket)): not
+    /// part of the assembly, stripped again by [`AssemblyDef::from_rocket`](crate::AssemblyDef::from_rocket).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) stand_in: Option<PartId>,
 }
 
 impl Default for Rocket {
@@ -158,6 +169,9 @@ impl Default for Rocket {
             plots: crate::flights::PlotLayout::default(),
             cfd: crate::cfd::CfdStore::default(),
             separation_joints: std::collections::BTreeMap::new(),
+            assemblies: Vec::new(),
+            instances: Vec::new(),
+            stand_in: None,
         }
     }
 }
@@ -250,7 +264,7 @@ impl Rocket {
         out.sanitized_tip()
     }
 
-    fn fresh_id(&mut self) -> PartId {
+    pub(crate) fn fresh_id(&mut self) -> PartId {
         let id = self.next_id;
         self.next_id += 1;
         id
@@ -407,8 +421,10 @@ impl Rocket {
         true
     }
 
-    /// Removes radial part `id`, returning it.
+    /// Removes radial part `id`, returning it. An instance of an assembly it is a member of is detached first.
     pub fn remove_radial(&mut self, id: PartId) -> Option<RadialPart> {
+        let doomed = self.carried_ids(id);
+        self.release_touching(&doomed);
         if self.pod_index(id).is_some() {
             return self.in_pod(id, |s| s.remove_radial(id)).flatten();
         }
@@ -552,8 +568,10 @@ impl Rocket {
         true
     }
 
-    /// Removes internal part `id`, returning it. Motors configured for it are dropped from every configuration.
+    /// Removes internal part `id`, returning it. Motors configured for it are dropped from every configuration. An instance of an
+    /// assembly it is a member of is detached first.
     pub fn remove_internal(&mut self, id: PartId) -> Option<InternalPart> {
+        self.release_touching(&[id]);
         if self.pod_index(id).is_some() {
             return self.in_pod(id, |s| s.remove_internal(id)).flatten();
         }
@@ -722,8 +740,11 @@ impl Rocket {
     }
 
     /// Removes the axial part with `id` (and the radial and internal parts on it), returning it. Motors configured for
-    /// removed motor mounts are dropped from every configuration.
+    /// removed motor mounts are dropped from every configuration. Instances of assemblies that have any of the removed parts
+    /// as members are detached first (their other members stay as ordinary parts).
     pub fn remove(&mut self, id: PartId) -> Option<Part> {
+        let doomed = self.carried_ids(id);
+        self.release_touching(&doomed);
         if let Some(i) = self.pod_index(id) {
             let pod = self.radials[i].id;
             let part = self.in_pod(id, |s| s.remove(id)).flatten();

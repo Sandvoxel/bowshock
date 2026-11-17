@@ -24,6 +24,7 @@ fn the_wheel_mid_radial_drag_steps_the_count_and_does_not_zoom() {
         cursor: None,
         margin: None,
         units: Default::default(),
+        click: false,
     };
     let bounds = iced::Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
     let cursor = mouse::Cursor::Available(Point::new(400.0, 300.0));

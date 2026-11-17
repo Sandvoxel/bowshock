@@ -7,8 +7,12 @@
 //! motor mounts. Flights (stored Simulate scenarios, [`FlightDef`]) are part of the document too. A document saves to and loads
 //! from the binary `.bowshock` format ([`Rocket::to_bytes`], [`Rocket::from_bytes`]).
 //!
+//! A rocket also holds reusable assemblies (a bay, a stage, a set of fins): [`AssemblyDef`]s with [`AssemblyInstance`]s whose members
+//! are ordinary parts ([`Rocket::group`], [`Rocket::place`], [`Rocket::update_assembly`]).
+//!
 //! The model has no UI and no physics dependencies; `bowshock-sim` and the app read it.
 
+mod assembly;
 mod bands;
 mod cfd;
 mod config;
@@ -33,6 +37,11 @@ mod symmetry;
 
 /// Stable identifier of a part within a [`Rocket`], whatever class of part it is.
 pub type PartId = u64;
+
+pub use assembly::{
+    AssemblyDef, AssemblyError, AssemblyId, AssemblyInstance, Fit, Fragment, FragmentKind, Host, InstanceId, InstanceUpdate, Placed, Placement,
+    ASSEMBLY_FORMAT_VERSION, ASSEMBLY_MAGIC,
+};
 
 pub use bands::StabilityBands;
 pub use cfd::{CfdGrid, CfdLiftPoint, CfdLiftTable, CfdPoint, CfdQuality, CfdStore, CfdTable, MAX_CFD_TABLES};

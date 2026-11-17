@@ -29,6 +29,19 @@ fn hovering_the_parts_bin_keeps_the_menu_open() {
     assert!(app.ctx.menu.is_none(), "a real action closes it");
 }
 
+/// News from a worker (a solve's progress about ten times a second, a finished lookup) must not close an open menu.
+#[test]
+fn worker_news_keeps_the_menus_open() {
+    use crate::analyze::cfd::Event;
+    let (mut app, _) = app();
+    app.update(Message::Menu(Some(crate::chrome::TopMenu::File)));
+    app.update(Message::Analyze(crate::analyze::Message::Cfd(0, Event::Machines(Vec::new()))));
+    app.update(Message::MotorsFetched(0, Vec::new()));
+    assert!(app.ctx.menu.is_some(), "a solver's report must not dismiss the menu");
+    app.update(Message::Menu(None));
+    assert!(app.ctx.menu.is_none());
+}
+
 #[test]
 fn undo_redo_shortcuts_and_the_dirty_flag() {
     let (mut app, _) = app();

@@ -44,6 +44,8 @@ pub struct Case {
     pub motor: Option<Jet>,
     /// Where the run reports its progress and can be stopped; `None`: silent.
     pub progress: Option<ProgressSink>,
+    /// What the run does with its flow field (snapshots in flight, the final field in the result); `None`: nothing.
+    pub fields: Option<crate::field::FieldTap>,
 }
 
 impl Case {
@@ -75,7 +77,7 @@ impl Case {
             nozzle: None,
         };
         let grid_sting = sting_grid(&body, level);
-        Case { mach, body, wake, grid_base, grid_sting, numerics, viscous: None, motor: None, progress: None }
+        Case { mach, body, wake, grid_base, grid_sting, numerics, viscous: None, motor: None, progress: None, fields: None }
     }
 
     /// Wall-resolved RANS case: [`Case::new`] with [`Numerics::viscous`], first cell height at the wall for `y+ ~ 1` at the highest

@@ -10,7 +10,10 @@
 //! ```
 //!
 //! The numbers are made up (a smooth transonic drag rise, iteration counts of the order the HANDOFF reports, one point that hits
-//! the iteration cap); nothing here comes from the solver. The real event stream is covered by the ignored tests of [`super::cfd`].
+//! the iteration cap) and so are the flow fields (`synthetic_field`: a cone shock, a stagnation region, a shoulder expansion and a
+//! wake painted on the real grid of the body); nothing here comes from the solver. `mid` plays the picture of the point in flight
+//! (at iterations 0, 500 and 1 000) and `done` the final field of every point. The real event stream is covered by the ignored tests
+//! of [`super::cfd`].
 
 use std::collections::VecDeque;
 
@@ -18,6 +21,8 @@ use bowshock_model::{CfdLiftPoint, CfdLiftTable, CfdPoint, CfdQuality};
 
 use super::cfd::{self, Event, Job, LiftJob, Tally};
 use super::solve::{Iteration, MachineInfo, MachineState, Outcome, PointDone};
+use bowshock_core as solver;
+use std::sync::Arc;
 
 /// Which scripted solve to play.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +114,128 @@ fn quality(o: Outcome) -> CfdQuality {
     }
 }
 
+/// Snapshots of the point at `mach` at `iterations` (0 is the grid with the free stream on it), as a live local solve sends them.
+fn snapshots(job: &Job, mach: f64, iterations: &[usize]) -> Vec<Event> {
+    iterations.iter().filter_map(|&it| synthetic_field(job, mach, it)).map(|f| Event::Field(cfd::FieldRef(f))).collect()
+}
+
+/// A made-up flow field of the body of `job` at `mach` after `iteration` iterations, on the grid the real solver would use: a cone
+/// shock (a bow shock for M just above 1, none below), the stagnation region at the nose, the suction at the shoulder, a thin
+/// boundary layer and a dead-water wake behind the base. It is shaped like a flow, not computed from one; its shock grows out of the
+/// body as the iterations go (settled from about 2 000).
+fn synthetic_field(job: &Job, mach: f64, iteration: usize) -> Option<Arc<solver::Field>> {
+    let mut f = solver::Analysis::new(&job.plan.body)
+        .ok()?
+        .viscous(solver::FlightConditions { atmosphere: solver::Atmosphere::Isa { altitude_m: job.altitude.clamp(0.0, 20_000.0) } })
+        .resolution(match job.grid {
+            bowshock_model::CfdGrid::Coarse => solver::Resolution::Coarse,
+            bowshock_model::CfdGrid::Medium => solver::Resolution::Medium,
+        })
+        .initial_field(mach)
+        .ok()?;
+    let develop = if iteration >= 2000 { 1.0 } else { 1.0 - (-(iteration as f64) / 700.0).exp() };
+    if develop > 0.0 {
+        paint(&mut f, develop);
+    }
+    f.iteration = iteration;
+    Some(Arc::new(f))
+}
+
+/// Fills the flow cells of `f` with the made-up flow, `develop` in 0 to 1 of the way to its settled shape.
+fn paint(f: &mut solver::Field, develop: f64) {
+    let g = solver::field::GAMMA;
+    let m = f.mach;
+    // the body: its profile from the nose tip to the base corner
+    let surface = f.surface();
+    let start = surface.iter().position(|p| p[0] >= -1e-9).unwrap_or(0);
+    let end = surface.iter().rposition(|p| p[1] > 1e-9).map_or(start, |e| e + 1);
+    let profile: Vec<(f64, f64)> = surface[start..end].iter().map(|p| (f64::from(p[0]), f64::from(p[1]))).collect();
+    let (Some(&(length, base_r)), true) = (profile.last(), profile.len() > 1) else { return };
+    let radius = |x: f64| -> f64 {
+        if !(0.0..=length).contains(&x) {
+            return 0.0;
+        }
+        let i = profile.partition_point(|p| p.0 < x).clamp(1, profile.len() - 1);
+        let (a, b) = (profile[i - 1], profile[i]);
+        if b.0 > a.0 {
+            a.1 + (b.1 - a.1) * (x - a.0) / (b.0 - a.0)
+        } else {
+            b.1
+        }
+    };
+    let h = 0.01 * length;
+    let slope = |x: f64| {
+        let (a, b) = ((x - h).max(0.0), (x + h).min(length));
+        (radius(b) - radius(a)) / (b - a).max(1e-9)
+    };
+    let nose_angle = (0..40).map(|k| slope(0.4 * length * f64::from(k) / 40.0)).fold(0.0f64, f64::max).atan();
+    let r_max = profile.iter().map(|q| q.1).fold(0.0, f64::max);
+    let shoulder = profile.iter().find(|p| p.1 >= 0.99 * r_max).map_or(0.3 * length, |p| p.0);
+
+    // the shock: a cone of the Mach angle plus most of the nose angle, with a rounded tip; its strength fades behind the shoulder
+    let supersonic = m > 0.97;
+    // a transonic body gets a weak bow shock standing off the nose, as if it flew a little above Mach 1
+    let m_shock = m.max(1.12);
+    let beta = ((1.0 / m_shock).asin() + 0.9 * nose_angle).min(1.45);
+    let (x_a, stand) = (-0.03 * length, 0.02 * length * (1.0 + 6.0 / (m_shock * m_shock)));
+    let shock_r = |x: f64| beta.tan() * ((x - x_a).max(0.0) * (x - x_a + 2.0 * stand)).sqrt();
+    let ms2 = (m_shock * beta.sin()).powi(2);
+    let p_ratio = 1.0 + 2.0 * g / (g + 1.0) * (ms2 - 1.0).max(0.0);
+    let rho_ratio = (g + 1.0) * ms2 / ((g - 1.0) * ms2 + 2.0);
+    let entropy = rho_ratio / p_ratio.powf(1.0 / g);
+    let cp_shock = 2.0 * (p_ratio - 1.0) / (g * m * m);
+    let cp_wall = |x: f64| -> f64 {
+        let t = slope(x).atan();
+        let dip = if x > shoulder { -0.1 * (-(x - shoulder) / (0.05 * length)).exp() } else { 0.0 };
+        (2.0 * t.sin().powi(2) + dip) * if x <= length { 1.0 } else { 0.0 }
+    };
+    let amp = 0.4 + 0.6 * develop;
+    let (p_inf, h0) = (1.0 / g, 1.0 / (g - 1.0) + 0.5 * m * m);
+    let width = 0.006 * length;
+
+    let (ni, nj) = (f.ni, f.nj);
+    for j in 0..nj {
+        for i in 0..ni {
+            let c = j * ni + i;
+            if f.solid[c] {
+                continue;
+            }
+            let (x, r) = f.centre(i, j);
+            let (x, r) = (f64::from(x), f64::from(r));
+            let rb = radius(x);
+            let d = (r - rb).max(0.0);
+            let wake =
+                if x > length { (-(x - length) / (3.5 * base_r)).exp() * if r < base_r * 1.05 { 1.0 } else { (-(r - base_r) / base_r).exp() } } else { 0.0 };
+            let (mut cp, mut inside, mut front) = (0.0, 0.0, 0.0);
+            if supersonic {
+                let rs = rb + (shock_r(x) - rb) * develop;
+                if x > x_a && rs > rb {
+                    front = 1.0 / (1.0 + (-(rs - r) / width).exp());
+                    inside = ((r - rb) / (rs - rb)).clamp(0.0, 1.0);
+                    let fade = if x > shoulder { 1.0 / (1.0 + (x - shoulder) / (0.9 * length)) } else { 1.0 };
+                    cp = (cp_wall(x) + (cp_shock * fade - cp_wall(x)) * inside * inside) * front;
+                }
+            } else {
+                cp = cp_wall(x) * (-d / (0.12 * length)).exp() / (1.0 - (m * m).min(0.9)).sqrt();
+            }
+            cp = cp * amp - 0.12 * wake * develop;
+            let p = p_inf + cp * 0.5 * m * m;
+            let rho = (p / p_inf).max(0.05).powf(1.0 / g) * (1.0 + (entropy - 1.0) * front);
+            let mut speed = (2.0 * (h0 - g / (g - 1.0) * p / rho)).max(0.01).sqrt();
+            if (0.0..=length).contains(&x) {
+                let delta = 0.0025 + 0.01 * (x / length);
+                speed *= (d / delta).tanh().max(0.0);
+            }
+            speed *= 1.0 - 0.85 * wake * develop;
+            let angle = if supersonic { slope(x).atan() * (1.0 - inside) } else { slope(x).atan() * (-d / (0.1 * length)).exp() };
+            f.rho[c] = rho as f32;
+            f.u[c] = (speed * angle.cos()) as f32;
+            f.v[c] = (speed * angle.sin()) as f32;
+            f.p[c] = p as f32;
+        }
+    }
+}
+
 /// Reports of a unit settling from a transient: the monitor `target` approached with a decaying wobble, a report every 50
 /// iterations up to `until`, the clock starting at `from` (s) and running at the script's rate, reported by `machine`.
 fn trace(machine: usize, mach: f64, alpha_deg: Option<f64>, target: f64, from: f64, until: usize) -> Vec<Event> {
@@ -180,6 +307,7 @@ pub fn events(demo: Demo, job: &Job) -> Vec<Event> {
         let its = if o == Outcome::Stalled { CAP } else { iterations(mach) };
         let p = point(mach, quality(o));
         at += SETUP + its as f64 * PER_ITERATION;
+        out.extend(synthetic_field(job, mach, its).map(|field| Event::PointField { field: cfd::FieldRef(field) }));
         out.push(Event::Point(PointDone {
             machine: owner(i),
             at,
@@ -196,8 +324,14 @@ pub fn events(demo: Demo, job: &Job) -> Vec<Event> {
         tally.gpu += 1;
     }
     match demo {
-        Demo::Mid | Demo::RemoteMid => {
-            // the next point has reached iteration 1 450
+        Demo::Mid => {
+            // the next point has reached iteration 1 450 and has shown its flow at 500 and 1 000
+            let mach = nodes[finished];
+            out.extend(trace(0, mach, None, cd(mach), at + SETUP, 1450));
+            out.extend(snapshots(job, mach, &[0, 500, 1000]));
+        }
+        Demo::RemoteMid => {
+            // a remote machine sends no snapshots
             let mach = nodes[finished];
             out.extend(trace(0, mach, None, cd(mach), at + SETUP, 1450));
         }
@@ -205,9 +339,13 @@ pub fn events(demo: Demo, job: &Job) -> Vec<Event> {
             // the next two points are in flight, one on each machine that is ready
             let (a, b) = (nodes[finished], nodes[finished + 1]);
             out.extend(trace(0, a, None, cd(a), at + SETUP, 1450));
+            out.extend(snapshots(job, a, &[0, 500, 1000]));
             out.extend(trace(1, b, None, cd(b), at + SETUP, 800));
         }
-        Demo::Stopped => out.push(Event::Finished(Err(cfd::CANCELLED.to_string()))),
+        Demo::Stopped => {
+            out.extend(snapshots(job, nodes[finished.min(nodes.len() - 1)], &[0, 500]));
+            out.push(Event::Finished(Err(cfd::CANCELLED.to_string())));
+        }
         _ => out.push(Event::Finished(Ok(cfd::table_from(job, tally, nodes.len(), at)))),
     }
     out
@@ -434,7 +572,8 @@ mod tests {
         // Re-solve; this time the cancel comes after one point only
         press(&mut app, Message::Resolve);
         let serial = app.analyze().cfd.solving.as_ref().expect("Re-solve starts a solve").stream.serial();
-        let first: Vec<Event> = events(Demo::Mid, &job(&app)).into_iter().take_while(|e| !matches!(e, Event::Iteration(_))).take(3).collect();
+        // the machines, then the first point's final field and the point itself
+        let first: Vec<Event> = events(Demo::Mid, &job(&app)).into_iter().take_while(|e| !matches!(e, Event::Iteration(_))).take(4).collect();
         assert!(matches!(first.last(), Some(Event::Point(_))));
         feed(&mut app, serial, first);
         press(&mut app, Message::CfdCancel);
@@ -586,5 +725,101 @@ mod tests {
         assert_eq!(lives, vec![(0, Some(cfd::LIFT_ALPHAS[1]), 600), (1, Some(cfd::LIFT_ALPHAS[0]), 900)]);
         assert_eq!(t.done_count(), 4, "two Mach numbers at two angles, one on each machine");
         assert_eq!(solve_view::plot_data(t, None).live.len(), 2);
+    }
+
+    use crate::analyze::flow_view;
+
+    /// Plays the script of `demo` into the solve `serial` of `app`.
+    fn play(app: &mut App, serial: u64, demo: Demo) {
+        let script = events(demo, &job(app));
+        feed(app, serial, script);
+    }
+
+    #[test]
+    fn a_solve_in_flight_shows_the_latest_picture_of_its_point_and_a_remote_machine_says_why_there_is_none() {
+        let (mut app, serial) = app_with(&[Demo::Mid]);
+        play(&mut app, serial, Demo::Mid);
+        let s = app.analyze().cfd.solving.as_ref().expect("still solving");
+        let live = s.picture.as_ref().expect("the point in flight has shown its flow");
+        assert_eq!(live.iteration, 1000, "the latest snapshot");
+        assert!(live.cells() > 10_000, "the real grid of the body: {} cells", live.cells());
+        assert_eq!(s.tracker.lives().next().map(|(u, _)| u.mach), Some(live.mach));
+        // the viewer holds it, and no solve screen asks for a notice
+        let info = app.analyze().flow.picture_info().expect("the viewer shows the picture");
+        assert_eq!((info.0, info.1), (live.mach, 1000));
+        assert_eq!(solve_view::live_notice(app.analyze(), &s.tracker), None);
+        // a solve on a remote machine sends no snapshots: the picture area says so
+        let (mut app, serial) = app_with(&[Demo::RemoteMid]);
+        play(&mut app, serial, Demo::RemoteMid);
+        let s = app.analyze().cfd.solving.as_ref().expect("still solving");
+        let notice = solve_view::live_notice(app.analyze(), &s.tracker).expect("a notice");
+        assert!(notice.starts_with("No live picture: solving on omarchy"), "{notice}");
+        // the final field of each point that ended does arrive, and is the picture until the next point shows its own
+        assert!(s.picture.is_some() && s.tracker.done_count() == 4);
+    }
+
+    #[test]
+    fn the_fields_of_a_finished_solve_are_kept_per_mach_node_for_the_session_and_dropped_with_the_geometry() {
+        use crate::analyze::cfd::Status;
+        let (mut app, serial) = app_with(&[Demo::Done]);
+        play(&mut app, serial, Demo::Done);
+        let table = app.ctx().doc.rocket().cfd_table(1).expect("the table is stored").clone();
+        let store = &app.analyze().cfd.fields;
+        assert_eq!(store.len(), table.points.len(), "a field for each Mach node");
+        let mut bytes = 0;
+        for p in &table.points {
+            let f = store.get(&table, p.mach).unwrap_or_else(|| panic!("no field at Mach {}", p.mach));
+            assert_eq!(f.mach, p.mach);
+            bytes += 4 * 4 * f.cells();
+        }
+        // session only: the document is far smaller than the fields and has none of them
+        let saved = app.ctx().doc.rocket().to_bytes();
+        assert!(saved.len() * 4 < bytes, "{} bytes saved against {bytes} of fields", saved.len());
+
+        // the Flow field view shows the selected Mach number's field and the stepper moves it
+        press(&mut app, Message::Flow(flow_view::Msg::Open(true)));
+        let flow = &app.analyze().flow;
+        assert!(flow.open);
+        let first = flow.selected.expect("a Mach number is selected");
+        assert_eq!(flow.picture_mach(), Some(first));
+        let at = flow.machs.iter().position(|m| *m == first).unwrap();
+        let step = if at + 1 < flow.machs.len() { 1 } else { -1 };
+        press(&mut app, Message::Flow(flow_view::Msg::Step(step)));
+        let next = app.analyze().flow.picture_mach().expect("the next point's picture");
+        assert_ne!(next, first);
+        assert_eq!(app.analyze().flow.selected, Some(next));
+        // opening it closes the table view, and a new solve closes it
+        press(&mut app, Message::Table(true));
+        assert!(!app.analyze().flow.open);
+
+        // another table of the same geometry (a file opened, an undo) has none of these fields
+        press(&mut app, Message::Flow(flow_view::Msg::Open(true)));
+        let other = bowshock_model::CfdTable { solved_at: table.solved_at + 1, ..table.clone() };
+        assert!(app.ctx_mut().doc.store_cfd_table(other));
+        press(&mut app, Message::Ignore);
+        assert!(app.analyze().cfd.fields.get(app.analyze().cfd.table.as_ref().unwrap(), table.points[0].mach).is_none());
+        assert!(app.analyze().flow.picture_mach().is_none(), "the viewer says there is no field");
+
+        // solved again, then the geometry changes: the table is stale and the fields are gone
+        let (mut app, serial) = app_with(&[Demo::Done]);
+        play(&mut app, serial, Demo::Done);
+        assert!(!app.analyze().cfd.fields.is_empty());
+        let nose = app.ctx().doc.rocket().parts()[0].id;
+        app.ctx_mut().doc.edit("Lengthen nose", |r| r.set_dim(nose, bowshock_model::Dim::Length, 0.3));
+        press(&mut app, Message::Ignore);
+        assert_eq!(app.analyze().cfd.status, Status::Stale);
+        assert!(app.analyze().cfd.fields.is_empty(), "dropped with the geometry they were solved for");
+    }
+
+    #[test]
+    fn a_stopped_solve_keeps_the_fields_of_its_points_with_the_table_it_keeps() {
+        let (mut app, serial) = app_with(&[Demo::Mid]);
+        play(&mut app, serial, Demo::Mid);
+        press(&mut app, Message::CfdCancel);
+        assert!(app.analyze().cfd.fields.is_empty(), "nothing before Keep");
+        press(&mut app, Message::CfdKeep);
+        let table = app.ctx().doc.rocket().cfd_table(1).expect("kept").clone();
+        assert_eq!(app.analyze().cfd.fields.len(), 4);
+        assert!(table.points.iter().all(|p| app.analyze().cfd.fields.get(&table, p.mach).is_some()));
     }
 }

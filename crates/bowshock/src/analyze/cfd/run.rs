@@ -1,3 +1,4 @@
+use super::fields::FieldRef;
 use super::fresh::now;
 use super::plan::{lift_key, nodes, table_key, Plan, DRAG_TOLERANCE, LIFT_ALPHAS, SOLVER_CEILING};
 use super::remote::{self, Failed};
@@ -47,6 +48,14 @@ pub enum Event {
     },
     /// A running Mach number (and angle) reports, about ten times a second per machine.
     Iteration(Iteration),
+    /// A picture of the flow of the point in flight, every few hundred iterations (the first of a point is the grid with the free
+    /// stream on it). A remote machine sends none.
+    Field(FieldRef),
+    /// The final flow field of a point (the Mach number is the field's), sent before its [`Event::Point`].
+    PointField {
+        /// The field, on the grid the point's drag was computed on.
+        field: FieldRef,
+    },
     /// A Mach number (and angle) ended.
     Point(PointDone),
     /// A beat every quarter second from the worker's side, so the clock on screen keeps moving between reports (the grid and
@@ -519,14 +528,22 @@ pub fn solve(job: &Job, cancel: &Arc<AtomicBool>, progress: impl Fn(Event) + Sen
                     CfdGrid::Medium => solver::Resolution::Medium,
                 })
                 .roughness(job.plan.body_roughness)
-                .backend(session.backend());
+                .backend(session.backend())
+                .keep_fields(true);
             if let Some(fins) = &job.plan.fins {
                 analysis = analysis.fins(fins.clone());
             }
             let progress = sink(started, cancel.clone(), send.clone(), false, machine);
-            let polar = match session {
+            let mut polar = match session {
                 Session::Remote(r) => analysis.spec().map_err(|e| Failed::local(mach, e)).and_then(|spec| r.drag(&spec, mach, &progress))?,
                 Session::Local { backend } => {
+                    // A picture of the flow every few hundred iterations (the first is the grid with the free stream on it, at once).
+                    // A remote worker brings back only the final field of the point: its snapshots stay on its side.
+                    if let Ok(first) = analysis.initial_field(mach) {
+                        send(Event::Field(FieldRef(Arc::new(first))));
+                    }
+                    let live = send.clone();
+                    analysis = analysis.on_field(solver::field::SNAPSHOT_INTERVAL, move |f| live(Event::Field(FieldRef(Arc::new(f)))));
                     let polar = analysis.on_progress(progress).run(&[mach]).map_err(|e| Failed::local(mach, e))?;
                     if polar.backend == solver::BackendUsed::Cpu {
                         // The GPU did not start: do not try it again for every point.
@@ -536,6 +553,9 @@ pub fn solve(job: &Job, cancel: &Arc<AtomicBool>, progress: impl Fn(Event) + Sen
                 }
             };
             let cpu = polar.backend == solver::BackendUsed::Cpu;
+            if let Some(field) = polar.points[0].field.take() {
+                send(Event::PointField { field: FieldRef(Arc::new(field)) });
+            }
             let p = &polar.points[0];
             let stored = quality(p.quality).filter(|_| p.drag.total.is_finite()).map(|q| {
                 let fins = p.drag.fins.map_or(0.0, |f| f.friction + f.pressure);

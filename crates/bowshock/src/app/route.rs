@@ -100,22 +100,45 @@ impl App {
             }
         }
         // Pointer movement is not a decision: a hover highlight (the parts bin's rows, its keyboard-focus flag) must never close
-        // a menu. Only clicks, Esc and choosing an item do.
-        let passive = matches!(
-            message,
-            Message::Frame(_) | Message::Cursor(_) | Message::Released | Message::PartsBin(parts_bin::Message::Hover(_) | parts_bin::Message::RowHover(_))
-        );
+        // a menu, and neither must news from a worker (a solve's progress). Only clicks, Esc and choosing an item do.
+        let passive = message.background()
+            || matches!(
+                message,
+                Message::Frame(_) | Message::Cursor(_) | Message::Released | Message::PartsBin(parts_bin::Message::Hover(_) | parts_bin::Message::RowHover(_))
+            );
         if !passive && !matches!(message, Message::OpenPartMenu(_) | Message::PartMenu(_) | Message::Chrome(chrome::Message::Nothing)) {
             self.ctx.part_menu = None;
         }
         if !passive && !matches!(message, Message::Menu(_) | Message::Chrome(chrome::Message::Nothing)) {
             self.ctx.menu = None;
         }
+        // A part held with no button down (click to place) is out of the rocket: a command that reads or replaces the document
+        // puts it back first, so a save never leaves it out.
+        if matches!(
+            message,
+            Message::Save
+                | Message::SaveAs
+                | Message::New
+                | Message::Open
+                | Message::Example
+                | Message::ImportOrk
+                | Message::OpenRecent(_)
+                | Message::Run
+                | Message::RunSelected
+                | Message::RunPerConfiguration
+        ) {
+            drag::cancel(&mut self.ctx);
+        }
         let ctx = &mut self.ctx;
         match message {
             Message::Resized(e) => self.layout.resize(e),
             Message::Mode(mode) => {
                 ctx.mode = mode;
+                // The viewport, the lanes and the bin only exist in Build: a part in hand goes back when it is left.
+                if mode != Mode::Build {
+                    drag::cancel(ctx);
+                    ctx.over_bin = false;
+                }
                 // Simulate shows the results itself.
                 if mode == Mode::Simulate {
                     ctx.run = None;
@@ -145,7 +168,9 @@ impl App {
             }
             Message::Released => {
                 let task = self.parts_bin.update(parts_bin::Message::Released, ctx);
-                drag::cancel(ctx);
+                // A release no overlay took: over the bin it is the bin drop, anywhere else it ends the carry (drag and drop); a part
+                // held by click to place stays in hand.
+                drag::end_carry(ctx, drag::Gesture::Release, if ctx.over_bin { drag::Over::Bin } else { drag::Over::Elsewhere });
                 ctx.doc.seal();
                 return task;
             }
@@ -282,7 +307,13 @@ impl App {
             Message::Chrome(m) => return self.chrome.update(m, ctx),
             Message::Export(m) => return self.export.update(m, ctx, &mut self.viewport),
             Message::Print(m) => return self.print.update(m, ctx),
-            Message::Prefs(m) => return self.prefs.update(m, ctx),
+            Message::Prefs(m) => {
+                // The window takes the screen: a part in hand goes back first.
+                if matches!(m, prefs::Message::Show | prefs::Message::Open(_)) {
+                    drag::cancel(ctx);
+                }
+                return self.prefs.update(m, ctx);
+            }
             Message::MotorsFetched(ticket, results) => motor_fetch::apply(ctx, ticket, results),
         }
         Task::none()
@@ -303,6 +334,7 @@ impl App {
         // Tab folds both side columns away for a full-screen viewport (and brings them back).
         if press.key == keyboard::Key::Named(keyboard::key::Named::Tab) && press.modifiers.is_empty() && self.ctx.mode == Mode::Build {
             self.layout.toggle_sides();
+            self.ctx.over_bin = false;
             return Task::none();
         }
         let (key, modifiers) = (&press.key, press.modifiers);

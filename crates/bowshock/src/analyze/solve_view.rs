@@ -21,6 +21,7 @@ use iced::{alignment, mouse, Color, Element, Fill, Length, Pixels, Point, Rectan
 use bowshock_model::CfdGrid;
 
 use super::compute::Data;
+use super::flow_view::{Emphasis, Msg};
 use super::solve::{duration_text, eta_text, thousands, Kind, Live, MachineRow, MachineState, Outcome, Slot, Tracker, Unit};
 use super::{Message, State, Stopped};
 use crate::app::{ui, Ctx};
@@ -270,7 +271,15 @@ pub fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Option<Element<'a, Message>
         }
         (false, None) => Space::new().boxed(),
     };
-    let head = row![ui::label(title), Space::new().width(Fill), action].align_y(iced::Center);
+    // The drag solve has a picture of its flow: how the room is shared with the curve is the user's to say.
+    let live = s.running && t.kind() == Kind::Drag;
+    let emphasis = state.flow.emphasis;
+    let toggle: Element<'a, Message> = if live {
+        segmented(&[(Emphasis::Flow, "Flow"), (Emphasis::Curve, "Curve")], emphasis, |e| Message::Flow(Msg::Emphasis(e)))
+    } else {
+        Space::new().boxed()
+    };
+    let head = row![ui::label(title), Space::new().width(Fill), toggle, Space::new().width(SPACE_2), action].align_y(iced::Center);
 
     let line = if s.running {
         text(headline(t)).size(20).font(SANS_SEMIBOLD).boxed()
@@ -306,9 +315,34 @@ pub fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Option<Element<'a, Message>
     let header = column(top).spacing(SPACE_2);
 
     let data = plot_data(t, reference(state, ctx, t.kind()));
-    let curve = container(canvas::Canvas::new(SolvePlot { data }).width(Fill).height(Fill)).width(Fill).height(Fill).padding([0.0, SPACE_3]);
+    let curve = container(canvas::Canvas::new(SolvePlot { data }).width(Fill).height(Fill)).width(Fill).padding([0.0, SPACE_3]);
 
-    let mut body: Vec<Element<'a, Message>> = vec![pad(header.boxed()), curve.boxed()];
+    let mut body: Vec<Element<'a, Message>> = vec![pad(header.boxed())];
+    let mut rows = 10;
+    if live {
+        let compact = emphasis == Emphasis::Curve;
+        let caption = state.flow.picture_info().map_or_else(String::new, |(mach, iteration, ni, nj)| {
+            if iteration == 0 {
+                format!("M {mach:.2} · free stream · {ni} × {nj} cells")
+            } else {
+                format!("M {mach:.2} · iteration {} · {ni} × {nj} cells", thousands(iteration))
+            }
+        });
+        let flow = container(state.flow.viewer(ctx, caption, live_notice(state, t), compact).map(Message::Flow)).padding([0.0, SPACE_3]).width(Fill);
+        match emphasis {
+            Emphasis::Flow => {
+                body.push(flow.height(Fill).boxed());
+                body.push(curve.height(Length::Fixed(CURVE_STRIP)).boxed());
+                rows = 4;
+            }
+            Emphasis::Curve => {
+                body.push(flow.height(Length::Fixed(FLOW_STRIP)).boxed());
+                body.push(curve.height(Fill).boxed());
+            }
+        }
+    } else {
+        body.push(curve.height(Fill).boxed());
+    }
     if s.running {
         let named = t.machines().len() > 1;
         for (unit, live) in t.lives() {
@@ -317,13 +351,35 @@ pub fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Option<Element<'a, Message>
         }
     }
     body.push(rule());
-    body.push(container(points(t)).height(Length::Fixed(list_height(t))).padding([0.0, SPACE_3]).boxed());
+    body.push(container(points(t)).height(Length::Fixed(list_height(t, rows))).padding([0.0, SPACE_3]).boxed());
     Some(column(body).height(Fill).boxed())
 }
 
-/// Height of the list of points: every row up to a cap, then it scrolls.
-fn list_height(t: &Tracker) -> f32 {
-    (ROW_H * (t.total().min(10) as f32 + 1.0) + SPACE_2).max(120.0)
+/// Height of the Cd curve while the flow has the room, and of the flow while the curve has it (px).
+const CURVE_STRIP: f32 = 126.0;
+const FLOW_STRIP: f32 = 150.0;
+
+/// What the live picture says when it is not the flow of the point in flight: a remote machine sends no snapshots (its final field of
+/// each point arrives when the point ends), and before the first one there is nothing yet.
+pub fn live_notice(state: &State, t: &Tracker) -> Option<String> {
+    let shown = state.flow.picture_mach();
+    let flying: Vec<(usize, f64)> = t.lives().map(|(u, l)| (l.machine, u.mach)).collect();
+    let on = |m: &usize| t.machines().get(*m);
+    let elsewhere = !flying.is_empty() && flying.iter().all(|(m, _)| on(m).is_some_and(|r| r.remote));
+    let current = shown.is_some_and(|pm| flying.iter().any(|(_, m)| (m - pm).abs() < 1e-9));
+    match (elsewhere, shown) {
+        (true, _) if !current => {
+            let name = flying.first().and_then(|(m, _)| on(m)).map_or("a remote machine", |r| r.name.as_str());
+            Some(format!("No live picture: solving on {name}. The field of each point arrives when it ends."))
+        }
+        (_, None) => Some("Waiting for the first picture".to_string()),
+        _ => None,
+    }
+}
+
+/// Height of the list of points: every row up to `rows`, then it scrolls.
+fn list_height(t: &Tracker, rows: usize) -> f32 {
+    (ROW_H * (t.total().min(rows) as f32 + 1.0) + SPACE_2).max(120.0)
 }
 
 const ROW_H: f32 = 20.0;
@@ -546,7 +602,7 @@ struct SolvePlot {
 
 const GUTTER_L: f32 = 46.0;
 const GUTTER_R: f32 = 18.0;
-const GUTTER_T: f32 = 12.0;
+const GUTTER_T: f32 = 34.0;
 const GUTTER_B: f32 = 40.0;
 
 fn put(frame: &mut Frame, content: &str, at: Point, color: Color, size: f32, ax: iced::advanced::text::Alignment, ay: alignment::Vertical) {
@@ -579,7 +635,7 @@ impl canvas::Program<Message> for SolvePlot {
         let py = |y: f64| plot.y + plot.height - ((y - d.y.0) / (d.y.1 - d.y.0)) as f32 * plot.height;
 
         // grid and ticks
-        for v in nice_ticks(d.y.0, d.y.1, 5) {
+        for v in nice_ticks(d.y.0, d.y.1, ((plot.height / 24.0) as usize).clamp(2, 5)) {
             let y = py(v).floor() + 0.5;
             f.stroke(&Path::line(Point::new(plot.x, y), Point::new(plot.x + plot.width, y)), stroke(t.line_100, 1.0, None));
             put(&mut f, &fmt_fixed(v, if d.y.1 > 2.0 { 1 } else { 2 }), Point::new(plot.x - 6.0, y), t.ink_faint, 10.5, Right, alignment::Vertical::Center);
@@ -604,8 +660,8 @@ impl canvas::Program<Message> for SolvePlot {
                     }),
                     stroke(t.ink_faint, 1.4, None),
                 );
-                let end = pts[pts.len() - 1];
-                put(&mut f, label, Point::new(end.x - 4.0, end.y - 6.0), t.ink_faint, 10.5, Right, alignment::Vertical::Bottom);
+                // the reference's name: in the header row, left, clear of the data
+                put(&mut f, label, Point::new(plot.x, 10.0), t.ink_faint, 10.5, Left, alignment::Vertical::Center);
             }
         }
 
@@ -663,9 +719,12 @@ impl canvas::Program<Message> for SolvePlot {
             f.fill(&Path::circle(at, 2.2), t.accent);
         }
 
-        // the key
-        let mut x = plot.x + 10.0;
-        let y = plot.y + 12.0;
+        // the key: a header row above the plot, right-aligned, so no label sits on data
+        let labels = ["solved", "to come", "not settled", "solving now"];
+        let shown = if d.live.is_empty() { &labels[..3] } else { &labels[..] };
+        let width: f32 = shown.iter().map(|l| 28.0 + 6.3 * l.chars().count() as f32).sum::<f32>() - 14.0;
+        let mut x = (plot.x + plot.width - width).max(plot.x);
+        let y = 10.0;
         let mut key = |f: &mut Frame, glyph: &dyn Fn(&mut Frame, Point), label: &str| {
             glyph(f, Point::new(x + 4.0, y));
             put(f, label, Point::new(x + 14.0, y), t.ink_muted, 10.5, Left, alignment::Vertical::Center);

@@ -51,16 +51,13 @@ pub enum Analysis {
     Flutter,
     /// Landing scatter and apogee spread of a Monte Carlo of flights.
     Dispersion,
-    /// Normal force, CP and drag of each part at one condition.
-    Components,
     /// A search for the dimensions that reach a goal (its own state and worker; see [`super::optimize`]).
     Optimize,
 }
 
 impl Analysis {
     /// Every analysis, in list order.
-    pub const ALL: [Analysis; 7] =
-        [Analysis::Aerodynamics, Analysis::Stability, Analysis::Drag, Analysis::Flutter, Analysis::Dispersion, Analysis::Components, Analysis::Optimize];
+    pub const ALL: [Analysis; 5] = [Analysis::Aerodynamics, Analysis::Stability, Analysis::Drag, Analysis::Flutter, Analysis::Dispersion];
 
     /// The list row's name.
     pub fn name(self) -> &'static str {
@@ -70,7 +67,6 @@ impl Analysis {
             Analysis::Drag => "Drag breakdown",
             Analysis::Flutter => "Fin flutter",
             Analysis::Dispersion => "Dispersion",
-            Analysis::Components => "Components",
             Analysis::Optimize => "Optimize",
         }
     }
@@ -82,7 +78,6 @@ impl Analysis {
             Analysis::Stability => "vs AoA",
             Analysis::Flutter => "margin",
             Analysis::Dispersion => "Monte Carlo",
-            Analysis::Components => "per part",
             Analysis::Optimize => "design",
         }
     }
@@ -328,75 +323,6 @@ pub enum Data {
     Flutter(Option<FlutterAnalysis>),
     /// A Monte Carlo; `None` when the configuration cannot fly (no motor).
     Dispersion(Option<Scatter>),
-    /// The parts at the conditions' single Mach and angle of attack, merged by part, then the whole-vehicle total.
-    Components(Vec<ComponentRow>),
-}
-
-/// One part's share of the aerodynamics (see [`components`]); the last row of a list is the vehicle's total.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ComponentRow {
-    /// The part's display name (`Total` for the last row).
-    pub name: String,
-    /// The part, `None` for the total.
-    pub part: Option<bowshock_model::PartId>,
-    /// Normal force slope (/rad).
-    pub cn_alpha: f64,
-    /// Centre of pressure from the tip (m); NaN for a part without lift.
-    pub cp: f64,
-    /// Drag by source.
-    pub drag: DragBreakdown,
-    /// Whether the drag is the part's override.
-    pub overridden: bool,
-}
-
-/// The parts of `vehicle` at `mach` and angle of attack `alpha` (rad), with the Reynolds number of the standard atmosphere at
-/// `altitude` above the site and the motor burning unless `burnout`: the build-up's components merged by part (normal force
-/// summed, CP the normal-force-weighted mean, drag summed; parts without lift or drag left out), then a `Total` row equal to
-/// the whole vehicle's stability and drag at the condition.
-pub fn components(vehicle: &Vehicle, mach: f64, alpha: f64, altitude: f64, burnout: bool) -> Vec<ComponentRow> {
-    let aero = bowshock_sim::Aero::new(vehicle);
-    let air = Atmosphere::standard().at_agl(altitude);
-    let re = mach * air.speed_of_sound / air.kinematic_viscosity();
-    let mut rows: Vec<(ComponentRow, f64)> = Vec::new(); // (row, sum CNα·CP)
-    for c in aero.components(mach, re, !burnout, alpha) {
-        let moment = if c.cn_alpha != 0.0 { c.cn_alpha * c.cp } else { 0.0 };
-        let same = |r: &&mut (ComponentRow, f64)| if c.part.is_some() { r.0.part == c.part } else { r.0.part.is_none() && r.0.name == c.name };
-        match rows.iter_mut().find(same) {
-            Some((row, m)) => {
-                row.cn_alpha += c.cn_alpha;
-                *m += moment;
-                let d = &mut row.drag;
-                d.friction += c.drag.friction;
-                d.pressure += c.drag.pressure;
-                d.base += c.drag.base;
-                d.fins += c.drag.fins;
-                d.protuberances += c.drag.protuberances;
-                d.total += c.drag.total;
-                row.overridden |= c.overridden;
-            }
-            None => {
-                rows.push((ComponentRow { name: c.name, part: c.part, cn_alpha: c.cn_alpha, cp: f64::NAN, drag: c.drag, overridden: c.overridden }, moment))
-            }
-        }
-    }
-    let mut out: Vec<ComponentRow> = rows
-        .into_iter()
-        .filter(|(r, _)| r.cn_alpha != 0.0 || r.drag.total != 0.0 || r.overridden)
-        .map(|(mut r, m)| {
-            r.cp = if r.cn_alpha.abs() > 1e-12 { m / r.cn_alpha } else { f64::NAN };
-            r
-        })
-        .collect();
-    let st = aero.stability(mach, alpha);
-    out.push(ComponentRow {
-        name: "Total".to_string(),
-        part: None,
-        cn_alpha: st.cn_alpha,
-        cp: st.cp,
-        drag: aero.drag_at_alpha(mach, re, !burnout, alpha),
-        overridden: false,
-    });
-    out
 }
 
 /// One configuration's result with what the plots and readouts need of its vehicle.
@@ -676,11 +602,7 @@ pub fn compute(request: &Request) -> Output {
                     Data::Dispersion(scatter(job, &vehicle, &cond, tables))
                 }
                 // The optimiser has its own worker and never asks for a computation.
-                Analysis::Optimize => Data::Components(Vec::new()),
-                Analysis::Components => {
-                    let alpha = if request.method == Method::Barrowman { 0.0 } else { cond.alpha };
-                    Data::Components(components(&vehicle, cond.mach_fixed, alpha, cond.altitude, cond.burnout))
-                }
+                Analysis::Optimize => Data::Mach(Vec::new()),
             };
             let mut run = run_of(job, &vehicle, data);
             if matches!(request.analysis, Analysis::Aerodynamics | Analysis::Drag) {
@@ -786,7 +708,6 @@ impl Output {
             Data::Alpha(p) => p.len(),
             Data::Flutter(f) => f.as_ref().map_or(0, |f| f.trace.points.len()),
             Data::Dispersion(d) => d.as_ref().map_or(0, |d| d.landings.len()),
-            Data::Components(rows) => rows.len().saturating_sub(1),
         });
         match self.analysis {
             Analysis::Aerodynamics | Analysis::Drag => {
@@ -797,10 +718,6 @@ impl Output {
             Analysis::Flutter => format!("{n} flight samples"),
             Analysis::Dispersion => format!("{n} runs per configuration"),
             Analysis::Optimize => String::new(),
-            Analysis::Components => {
-                let aoa = if self.method == Method::Barrowman { 0.0 } else { self.conditions.alpha.to_degrees() };
-                format!("{n} parts at Mach {:.2}, α {aoa:.1}°", self.conditions.mach_fixed)
-            }
         }
     }
 
@@ -929,46 +846,6 @@ impl Output {
                 ]
             }
             Analysis::Optimize => Vec::new(),
-            Analysis::Components => {
-                let several = self.runs.len() > 1;
-                for run in &self.runs {
-                    let Data::Components(parts) = &run.data else { continue };
-                    let total = parts.last().map_or(0.0, |t| t.drag.total);
-                    for p in parts {
-                        let mut row = if several { vec![run.name.clone()] } else { Vec::new() };
-                        let d = &p.drag;
-                        row.extend([
-                            p.name.clone(),
-                            s(p.cn_alpha, 3),
-                            if p.cp.is_finite() { q(Quantity::Length, p.cp, 1) } else { "-".to_string() },
-                            s(d.friction, 4),
-                            s(d.pressure, 4),
-                            s(d.base, 4),
-                            s(d.fins, 4),
-                            s(d.protuberances, 4),
-                            s(d.total, 4),
-                            if total > 0.0 { s(100.0 * d.total / total, 1) } else { "-".to_string() },
-                            if p.overridden { "override".to_string() } else { String::new() },
-                        ]);
-                        rows.push(row);
-                    }
-                }
-                let mut headers = if several { vec!["Configuration".to_string()] } else { Vec::new() };
-                headers.extend([
-                    "Part".to_string(),
-                    "CNa".to_string(),
-                    format!("CP ({})", sym(Quantity::Length)),
-                    "Cd skin".to_string(),
-                    "Cd pres".to_string(),
-                    "Cd base".to_string(),
-                    "Cd fins".to_string(),
-                    "Cd prot".to_string(),
-                    "Cd".to_string(),
-                    "% of Cd".to_string(),
-                    "Note".to_string(),
-                ]);
-                headers
-            }
         };
         Table { headers, rows }
     }
@@ -1202,31 +1079,6 @@ mod tests {
         for job in &jobs {
             assert_eq!(Some(&job.name), rocket.configuration_name(job.id).as_ref());
         }
-    }
-
-    #[test]
-    fn components_split_the_drag_tab_by_part() {
-        // At burnout the base carries no exhaust, as in the Drag tab's sweep.
-        let cond = Conditions { mach_fixed: 0.3, mach: (0.3, 0.3), alpha: 0.0, burnout: true, ..Conditions::default() };
-        let out = run(Analysis::Components, Method::Extended, cond);
-        let Data::Components(rows) = &out.runs[0].data else { panic!() };
-        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
-        for expected in ["Nose cone", "Body tube", "Fin set", "Rail button", "Total"] {
-            assert!(names.iter().any(|n| n.contains(expected)), "{names:?}");
-        }
-        assert_eq!(names.last(), Some(&"Total"));
-        let (total, parts) = rows.split_last().unwrap();
-        let sum: f64 = parts.iter().map(|r| r.drag.total).sum();
-        assert!((sum - total.drag.total).abs() < 1e-12, "{sum} vs {}", total.drag.total);
-        let drag = run(Analysis::Drag, Method::Extended, cond);
-        let Data::Mach(points) = &drag.runs[0].data else { panic!() };
-        assert!((points[0].drag.total - total.drag.total).abs() < 1e-12, "{} vs {}", points[0].drag.total, total.drag.total);
-        // The parts' normal force sums to the vehicle's; the CP is the weighted mean.
-        let cn: f64 = parts.iter().map(|r| r.cn_alpha).sum();
-        assert!((cn - total.cn_alpha).abs() < 1e-9);
-        let table = out.table(UnitSystem::MM_G_S);
-        assert_eq!(table.rows.len(), rows.len());
-        assert!(table.rows.iter().all(|r| r.len() == table.headers.len()) && table.headers[0] == "Part");
     }
 
     #[test]

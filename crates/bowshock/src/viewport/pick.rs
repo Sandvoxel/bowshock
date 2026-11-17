@@ -458,12 +458,6 @@ pub fn stack_distance(rocket: &Rocket, camera: &Camera, at: Point, size: Size, p
     }
 }
 
-/// The screen outline of one copy of `kind` standing at the origin on a surface of radius 0 at `angle`: its convex hull, to be
-/// moved wherever the part is drawn (a part carried free of the rocket).
-pub fn radial_silhouette(camera: &Camera, size: Size, kind: &RadialKind, angle: f32) -> Vec<Point> {
-    hull(radial::outline_points(kind, Placement { z0: 0.0, base: 0.0, angle, cant: 0.0 }).into_iter().map(|p| camera.project(p, size)).collect())
-}
-
 /// Screen positions of `kind`'s profile sampled round the axis, its fore face at station `z0`.
 fn profile_points(camera: &Camera, size: Size, z0: f64, kind: &PartKind) -> Vec<Point> {
     kind.profile()

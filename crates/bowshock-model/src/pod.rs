@@ -143,6 +143,9 @@ impl Rocket {
             plots: crate::flights::PlotLayout::default(),
             cfd: crate::cfd::CfdStore::default(),
             separation_joints: std::collections::BTreeMap::new(),
+            assemblies: Vec::new(),
+            instances: Vec::new(),
+            stand_in: None,
         }
     }
 

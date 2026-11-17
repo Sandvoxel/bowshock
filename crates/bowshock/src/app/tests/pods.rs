@@ -288,6 +288,7 @@ fn a_pod_is_dragged_in_filled_with_fins_extended_moved_and_undone_as_one_body() 
         pod_snap: Some((pod, 2)),
         surface: None,
         count: 2,
+        hold: 0.05,
     });
     vp(&mut app, Vp::DropAxial);
     assert_eq!(app.ctx.doc.rocket().radial(pod).unwrap().kind.pod_body().unwrap().parts().len(), 3);

@@ -16,6 +16,10 @@
 //!
 //! * **1** (current): the first release of the format. The nose cone's `tip_radius` (the spherical tip, 0 and left out when
 //!   pointed) was added to it without a new version, as the rules below allow.
+//!   The assembly definitions and their instances (`assemblies`, `instances`, and the editor's `stand_in` flag, see
+//!   [`crate::AssemblyDef`]) were added the same way: a document without assemblies writes none of the three keys. A standalone
+//!   assembly file is its own container of this family: the magic `BOWSHASM`, a `u16` version
+//!   ([`ASSEMBLY_FORMAT_VERSION`](crate::ASSEMBLY_FORMAT_VERSION)), then the definition as deflated CBOR.
 //!
 //! # Changing the format
 //!
@@ -85,12 +89,17 @@ impl std::error::Error for FormatError {}
 
 /// Header, then `value` as deflated CBOR.
 pub(crate) fn pack<T: Serialize>(value: &T) -> Vec<u8> {
+    pack_as(MAGIC, FORMAT_VERSION, value)
+}
+
+/// Like [`pack`] for another container of the same family (the assembly file): its own magic and version.
+pub(crate) fn pack_as<T: Serialize>(magic: &[u8; 8], version: u32, value: &T) -> Vec<u8> {
     let mut cbor = Vec::new();
     // Every value is a plain number, string or enum and the sink is a Vec; serialising cannot fail.
     ciborium::into_writer(value, &mut cbor).expect("rocket documents always serialise");
     let mut out = Vec::with_capacity(HEADER_LEN + cbor.len() / 4);
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&(FORMAT_VERSION as u16).to_le_bytes());
+    out.extend_from_slice(magic);
+    out.extend_from_slice(&(version as u16).to_le_bytes());
     let mut deflate = DeflateEncoder::new(out, Compression::best());
     deflate.write_all(&cbor).expect("writing to a Vec cannot fail");
     deflate.finish().expect("writing to a Vec cannot fail")
@@ -98,11 +107,16 @@ pub(crate) fn pack<T: Serialize>(value: &T) -> Vec<u8> {
 
 /// Checks the header and returns the inflated CBOR that follows it.
 fn unpack(bytes: &[u8]) -> Result<Vec<u8>, FormatError> {
-    if bytes.len() < HEADER_LEN || &bytes[..MAGIC.len()] != MAGIC {
+    unpack_as(bytes, MAGIC, FORMAT_VERSION)
+}
+
+/// Like [`unpack`] for a container with another `magic` whose newest version is `current`.
+pub(crate) fn unpack_as(bytes: &[u8], magic: &[u8; 8], current: u32) -> Result<Vec<u8>, FormatError> {
+    if bytes.len() < HEADER_LEN || &bytes[..magic.len()] != magic {
         return Err(FormatError::NotBowshock);
     }
-    let version = u32::from(u16::from_le_bytes([bytes[MAGIC.len()], bytes[MAGIC.len() + 1]]));
-    if version == 0 || version > FORMAT_VERSION {
+    let version = u32::from(u16::from_le_bytes([bytes[magic.len()], bytes[magic.len() + 1]]));
+    if version == 0 || version > current {
         return Err(FormatError::UnsupportedVersion(version));
     }
     let mut cbor = Vec::new();
@@ -208,6 +222,7 @@ impl Rocket {
         self.repair_plots();
         self.repair_cfd();
         self.repair_formulas();
+        self.repair_assemblies();
         Ok(())
     }
 }

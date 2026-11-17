@@ -92,6 +92,22 @@ fn a_drag_job_matches_a_local_run_and_reports_progress() {
 }
 
 #[test]
+fn a_drag_job_that_keeps_fields_brings_back_the_field_of_a_local_run() {
+    let (mut remote, server) = connect();
+    let spec = AnalysisSpec { keep_fields: true, ..drag_spec(200) };
+    let local = Analysis::from_spec(&spec).unwrap().run(&[2.0]).unwrap();
+    let polar = remote.run_drag(&spec, &[2.0], &|_| ControlFlow::Continue(())).unwrap();
+    let (remote_field, local_field) = (polar.points[0].field.as_ref().expect("the worker kept the field"), local.points[0].field.as_ref().unwrap());
+    assert!(remote_field.cells() > 1000);
+    assert_eq!(remote_field, local_field);
+    // without the switch the answer carries none
+    let plain = remote.run_drag(&drag_spec(200), &[2.0], &|_| ControlFlow::Continue(())).unwrap();
+    assert!(plain.points[0].field.is_none());
+    drop(remote);
+    server.join().unwrap();
+}
+
+#[test]
 fn a_lift_job_matches_a_local_run() {
     let (mut remote, server) = connect();
     let spec = spec();

@@ -34,6 +34,7 @@ mod device;
 #[doc(hidden)]
 pub mod engine;
 pub mod error;
+pub mod field;
 mod fins;
 pub mod progress;
 pub mod spec;
@@ -46,6 +47,7 @@ pub use device::gpu_name;
 pub use engine::case::Wake;
 pub use engine::result::StopReason;
 pub use error::Error;
+pub use field::Field;
 pub use progress::{Progress, ProgressSink};
 pub use spec::{AftSpec, BodySpec, FinProfile, FinSpec, MotorSpec, NoseShape, NoseSpec, SharpShape};
 

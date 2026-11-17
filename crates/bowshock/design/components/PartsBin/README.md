@@ -7,7 +7,8 @@ Where parts come from. A narrow **category rail** (icons only, like a vehicle-as
 - **Size to selection** (on by default): defaults follow the selected part's diameter, so a tube dragged onto a 76.2 mm rocket is already 76.2 mm. This replaces the "fix the diameter after you add it" step.
 - **Hover** `bg-400`. **Dragging**: an `accent-soft` row with an `accent` inside edge while the ghost goes into the viewport. **Unavailable**: 45 % opacity, with the reason in a tooltip ("Payload bay needs a coupler above it").
 - **Every row is drag-and-drop.** Drag it into the viewport to snap onto an attach node, or onto Station Lanes to drop it at an exact station (the ruler shows it live). Radial parts arrive as a linked symmetry group.
-- Click = attach aft of the selection (or at the best node). Double-click = attach and focus the first field in the inspector.
+- Click = attach aft of the selection (or at the best node). Double-click = attach and focus the first field in the inspector. With **Click to place** (Preferences > Editor) a click on a row instead picks the part up and it stays in hand until a click puts it down.
+- **The bin takes parts back.** Over the bin a carried part is put back (a part from the bin: `Drop to put back`) or deleted (one picked up off the rocket: `Drop to delete` on an `err` soft ground), by letting go there or, clicking to place, by a click. See ViewportOverlay.
 - **Symmetry footer** (pinned at the bottom, KSP-style): the count for radial parts (1 / 2 / 3 / 4 / 6 / 8, with `X` cycling it, also mid-drag) and angle snap (off / 15° / 45°). It applies to the next radial part you place. See Symmetry.
 - `/` focuses search. Search covers every category and the material and preset libraries.
 - **Presets** holds user-saved assemblies (a whole fin can, a nose with its shoulder and bulkhead) and parts imported from vendor catalogues.

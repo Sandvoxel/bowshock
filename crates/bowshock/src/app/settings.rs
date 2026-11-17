@@ -1,8 +1,9 @@
 //! App settings kept per user, not per document: they live in the user config directory next to the recent-files list and the
 //! user motors (`~/.config/bowshock/settings.json`, or `$BOWSHOCK_SETTINGS_FILE`), so they follow the person to every rocket.
 //!
-//! Today that is the display unit set (Preferences > Units), the theme, where CFD solves run ([`Compute`]) and which
-//! device the local ones use ([`LocalSolver`]); Preferences (`crate::prefs`) edits all of them. A missing, unreadable or malformed
+//! Today that is the display unit set (Preferences > Units), the theme, where CFD solves run ([`Compute`]), which
+//! device the local ones use ([`LocalSolver`]) and how parts are placed (drag and drop or click to place); Preferences
+//! (`crate::prefs`) edits all of them. A missing, unreadable or malformed
 //! file is the defaults; unknown keys and unit symbols are ignored, so a newer or older build never refuses to start over a settings
 //! file.
 
@@ -27,6 +28,9 @@ struct Stored {
     /// `"auto"` or `"cpu"` (loose, like `compute`).
     #[serde(default)]
     solver: Option<serde_json::Value>,
+    /// `"drag"` or `"click"` (loose, like `compute`).
+    #[serde(default)]
+    placing: Option<serde_json::Value>,
 }
 
 /// Which device the solves that run on this computer use.
@@ -262,11 +266,13 @@ pub struct Settings {
     pub dark: bool,
     /// The device local solves use.
     pub local_solver: LocalSolver,
+    /// Parts are placed by clicking instead of dragging and dropping.
+    pub click_to_place: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { units: UnitSystem::default(), compute: Compute::default(), dark: true, local_solver: LocalSolver::default() }
+        Settings { units: UnitSystem::default(), compute: Compute::default(), dark: true, local_solver: LocalSolver::default(), click_to_place: false }
     }
 }
 
@@ -278,7 +284,8 @@ impl Settings {
         compute.normalise();
         let dark = stored.theme.as_ref().and_then(|v| v.as_str()) != Some("light");
         let local_solver = if stored.solver.as_ref().and_then(|v| v.as_str()) == Some("cpu") { LocalSolver::Cpu } else { LocalSolver::Auto };
-        Settings { units: UnitSystem::from_symbols(stored.units.iter().map(|(k, v)| (k.as_str(), v.as_str()))), compute, dark, local_solver }
+        let click_to_place = stored.placing.as_ref().and_then(|v| v.as_str()) == Some("click");
+        Settings { units: UnitSystem::from_symbols(stored.units.iter().map(|(k, v)| (k.as_str(), v.as_str()))), compute, dark, local_solver, click_to_place }
     }
 
     /// Writes the settings to `file` (creating its directory); `None` is a session with nowhere to keep them.
@@ -292,6 +299,7 @@ impl Settings {
             compute: serde_json::to_value(&self.compute).ok(),
             theme: Some(if self.dark { "dark" } else { "light" }.into()),
             solver: Some(if self.local_solver == LocalSolver::Cpu { "cpu" } else { "auto" }.into()),
+            placing: Some(if self.click_to_place { "click" } else { "drag" }.into()),
         };
         let text = serde_json::to_string_pretty(&stored).map_err(std::io::Error::other)?;
         std::fs::write(file, text)
@@ -301,7 +309,7 @@ impl Settings {
 impl super::Ctx {
     /// The settings as the context holds them now.
     pub fn settings(&self) -> Settings {
-        Settings { units: self.units, compute: self.compute.clone(), dark: self.dark, local_solver: self.local_solver }
+        Settings { units: self.units, compute: self.compute.clone(), dark: self.dark, local_solver: self.local_solver, click_to_place: self.click_to_place }
     }
 
     /// Loads `settings` into the context (at start-up).
@@ -310,6 +318,7 @@ impl super::Ctx {
         self.compute = settings.compute;
         self.dark = settings.dark;
         self.local_solver = settings.local_solver;
+        self.click_to_place = settings.click_to_place;
     }
 
     /// Writes every user setting to the settings file; a failure is a status message, never a stop.
@@ -329,6 +338,16 @@ impl super::Ctx {
     /// Switches between the dark and the light theme (Preferences) and keeps the choice.
     pub fn set_dark(&mut self, dark: bool) {
         self.dark = dark;
+        self.save_settings();
+    }
+
+    /// Chooses how parts are placed (Preferences > Editor): `true` to click to place, `false` to drag and drop. A part in hand
+    /// when it changes is put back, so one gesture never ends under the other's rules.
+    pub fn set_click_to_place(&mut self, click: bool) {
+        if self.click_to_place != click {
+            super::drag::cancel(self);
+        }
+        self.click_to_place = click;
         self.save_settings();
     }
 }
@@ -488,6 +507,28 @@ mod tests {
         // A file from before these settings existed is dark with Auto.
         std::fs::write(&file, r#"{"units":{"length":"in"}}"#).unwrap();
         assert!(Settings::load(Some(&file)).dark);
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn how_parts_are_placed_survives_a_restart() {
+        let file = temp("placing.json");
+        assert!(!Settings::default().click_to_place, "drag and drop is the default");
+        Settings { click_to_place: true, ..Settings::default() }.save(Some(&file)).unwrap();
+        assert!(std::fs::read_to_string(&file).unwrap().contains(r#""placing": "click""#));
+        assert!(Settings::load(Some(&file)).click_to_place);
+        Settings::default().save(Some(&file)).unwrap();
+        assert!(!Settings::load(Some(&file)).click_to_place);
+        // A value this build does not know, and a file from before the setting existed, are drag and drop.
+        std::fs::write(&file, r#"{"units":{"length":"in"},"placing":7}"#).unwrap();
+        assert!(!Settings::load(Some(&file)).click_to_place);
+        std::fs::write(&file, r#"{"units":{"length":"in"}}"#).unwrap();
+        assert!(!Settings::load(Some(&file)).click_to_place);
+        // The context keeps it and writes it with everything else.
+        let mut ctx = crate::app::Ctx::new();
+        ctx.settings_file = Some(file.clone());
+        ctx.set_click_to_place(true);
+        assert!(Settings::load(Some(&file)).click_to_place && ctx.settings().click_to_place);
         let _ = std::fs::remove_file(&file);
     }
 }

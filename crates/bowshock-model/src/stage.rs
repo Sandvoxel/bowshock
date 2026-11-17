@@ -274,6 +274,8 @@ impl Rocket {
         if !(a > TOL && a < length - TOL) {
             return Err(SplitError::OutOfRange);
         }
+        let carried = self.carried_ids(id);
+        self.release_touching(&carried);
         let b = length - a;
         let (fore_kind, aft_kind) = match part.kind {
             PartKind::Transition { fore_diameter, aft_diameter, .. } => {

@@ -2,7 +2,8 @@
 //! the section on the right. Every control applies at once and is kept in the user's settings (`app/settings.rs`); there is
 //! nothing to confirm except clearing a cache.
 //!
-//! Sections: [`Section::Appearance`] (theme), [`Section::Units`] (the unit set), [`Section::Compute`] (where solves run, in
+//! Sections: [`Section::Appearance`] (theme), [`Section::Editor`] (how parts are placed, in [`editor`]), [`Section::Units`] (the
+//! unit set), [`Section::Compute`] (where solves run, in
 //! [`compute`]) and [`Section::Storage`] (where files live and what the caches hold, in [`storage`]).
 //!
 //! Module contract (see `ARCHITECTURE.md`): [`State`] is the window's state, [`Message`] its messages (wrapped in
@@ -37,6 +38,8 @@ pub enum Section {
     /// The theme.
     #[default]
     Appearance,
+    /// How parts are placed.
+    Editor,
     /// The display unit set.
     Units,
     /// Where solves run.
@@ -47,12 +50,13 @@ pub enum Section {
 
 impl Section {
     /// The sections in the order of the list.
-    pub const ALL: [Section; 4] = [Section::Appearance, Section::Units, Section::Compute, Section::Storage];
+    pub const ALL: [Section; 5] = [Section::Appearance, Section::Editor, Section::Units, Section::Compute, Section::Storage];
 
     /// The name in the list and over the page.
     pub fn label(self) -> &'static str {
         match self {
             Section::Appearance => "Appearance",
+            Section::Editor => "Editor",
             Section::Units => "Units",
             Section::Compute => "Compute",
             Section::Storage => "Storage",
@@ -62,6 +66,7 @@ impl Section {
     fn blurb(self) -> &'static str {
         match self {
             Section::Appearance => "How Bowshock looks.",
+            Section::Editor => "How you work in the Build screen.",
             Section::Units => "The units every length, mass, pressure and speed is shown in.",
             Section::Compute => "Where the CFD and 3D stability solves run.",
             Section::Storage => "Where Bowshock keeps its files, and the caches you can clear.",
@@ -84,6 +89,8 @@ pub enum Message {
     Select(Section),
     /// Appearance: dark (`true`) or light.
     Theme(bool),
+    /// Editor: parts are placed by clicking (`true`) or by dragging and dropping.
+    Placing(bool),
     /// Units: the unit set.
     Units(UnitSystem),
     /// Compute: the device local solves use.
@@ -157,6 +164,7 @@ impl State {
             Message::Nothing => {}
             Message::Select(section) => return self.go(section, ctx),
             Message::Theme(dark) => ctx.set_dark(dark),
+            Message::Placing(click) => ctx.set_click_to_place(click),
             Message::Units(units) => ctx.set_units(units),
             Message::Solver(solver) => {
                 ctx.local_solver = solver;
@@ -176,6 +184,7 @@ impl State {
         let list = nav::list(self.section);
         let page: Element<'a, Message> = match self.section {
             Section::Appearance => appearance::view(ctx),
+            Section::Editor => editor::view(ctx),
             Section::Units => units::view(ctx),
             Section::Compute => self.compute_page(ctx),
             Section::Storage => self.storage.view(),

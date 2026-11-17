@@ -143,9 +143,15 @@ pub fn apply(edit: Edit, ctx: &mut Ctx) -> Task<app::Message> {
             ctx.doc.end_drag(true);
         }
         Edit::End => {
-            ctx.doc.end_drag(true);
+            // A carried internal part is placed (or, over the parts bin, deleted) by the same decision as every other carry.
+            if ctx.drag.lifted.is_some() {
+                crate::app::drag::end_lifted(ctx);
+            } else {
+                ctx.doc.end_drag(true);
+            }
         }
         Edit::Cancel => {
+            ctx.drag.lifted = None;
             ctx.doc.end_drag(false);
         }
         Edit::AddVertex(id, after, z, h) => {
@@ -158,16 +164,20 @@ pub fn apply(edit: Edit, ctx: &mut Ctx) -> Task<app::Message> {
             let name = ctx.doc.rocket().kind_of(id).map(|p| p.name()).unwrap_or_default();
             ctx.doc.begin_drag(&format!("Move {}", name.to_lowercase()));
             ctx.selection = app::Selection::Part(id);
+            ctx.drag.lifted = Some(id);
             ctx.symmetry.instance = None;
         }
         Edit::Place(id, parent, offset) => {
-            ctx.doc.drag_update(|r| {
-                let reparented = r.internal(id).is_some_and(|p| p.parent != parent);
-                if r.move_internal(id, parent, offset).is_ok() && reparented && r.internal(id).is_some_and(|p| p.kind.is_motor_mount()) {
-                    // A motor mount is placed from the bottom of its body part, wherever it is moved to.
-                    r.set_anchor(id, Anchor::Bottom);
-                }
-            });
+            // Only the part in hand moves (a stale overlay, after the carry was put back, sends nothing that counts).
+            if ctx.drag.lifted == Some(id) {
+                ctx.doc.drag_update(|r| {
+                    let reparented = r.internal(id).is_some_and(|p| p.parent != parent);
+                    if r.move_internal(id, parent, offset).is_ok() && reparented && r.internal(id).is_some_and(|p| p.kind.is_motor_mount()) {
+                        // A motor mount is placed from the bottom of its body part, wherever it is moved to.
+                        r.set_anchor(id, Anchor::Bottom);
+                    }
+                });
+            }
         }
         Edit::Focus(dim) => return Task::done(app::Message::Inspector(crate::build::inspector::Message::Focus(dim))),
     }
@@ -200,6 +210,19 @@ pub struct Overlay<'a> {
     pub pod: Option<PodView>,
     /// The CG / CP markers' values, so labels keep off the marker labels.
     pub balance: Option<BalanceMarks>,
+    /// How a part in hand is put down, and which internal part is being carried along the rocket (see [`Hand`]).
+    pub hand: Hand,
+}
+
+/// What the overlay needs to know of a part in hand: an internal part carried along the rocket stays in it, so the overlay carries
+/// it, and when parts are placed by clicking the carry survives the release and ends with the next press.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Hand {
+    /// Parts are placed by clicking (Preferences > Editor).
+    pub click: bool,
+    /// The internal part the app has in hand (`ctx.drag.lifted`): a carry the overlay thinks it has that the app does not (put back
+    /// by Esc, or by the bin) is forgotten.
+    pub lifted: Option<PartId>,
 }
 
 /// A press on a part (or on empty space) that has not yet become a click or a pick-up.
@@ -244,6 +267,8 @@ struct Carried {
     landing: Option<Landing>,
     /// The last place sent to the document `(part, parent, offset)`, so a move that changes nothing sends nothing.
     placed: Option<(PartId, PartId, f64)>,
+    /// The app has been seen to have this part in hand (`Hand::lifted`): from then on a carry the app has dropped is forgotten.
+    confirmed: bool,
 }
 
 #[derive(Debug, Default)]

@@ -80,6 +80,11 @@ pub fn run_on(case: &Case, s: &mut Solver, warm: bool, r_ref: Option<f64>) -> Po
             reason = why;
             break;
         }
+        if it % MONITOR_EVERY == MONITOR_EVERY - 1 {
+            if let Some(tap) = case.fields.as_ref().filter(|t| t.due(it + 1)) {
+                tap.send(s, case.mach, it + 1, case.wake);
+            }
+        }
         if it % MONITOR_EVERY == MONITOR_EVERY - 1 && report(case, it + 1, r, r_ref.unwrap_or(rmax), &hist).is_break() {
             reason = StopReason::Cancelled;
             break;
@@ -383,6 +388,7 @@ pub fn finish(case: &Case, s: &Solver, residual: Vec<f64>, rmax: f64, hist: Vec<
     let (cd_total, cd_total_model) = (fore + cd_friction + cd_base, fore + cd_friction + cd_base_model);
     let last = residual.last().copied().unwrap_or(rmax);
     let drop_orders = if rmax > 0.0 && last > 0.0 { (rmax / last).log10() } else { 0.0 };
+    let field = case.fields.as_ref().and_then(|t| t.last(s, case.mach, residual.len(), case.wake));
     PointResult {
         mach: case.mach,
         alpha: 0.0,
@@ -415,6 +421,7 @@ pub fn finish(case: &Case, s: &Solver, residual: Vec<f64>, rmax: f64, hist: Vec<
         min_rho,
         min_p,
         y_plus_max,
+        field,
     }
 }
 

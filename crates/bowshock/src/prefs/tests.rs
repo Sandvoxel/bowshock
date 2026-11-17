@@ -26,9 +26,9 @@ fn key(app: &mut App, key: keyboard::Key, modifiers: keyboard::Modifiers) {
 }
 
 #[test]
-fn the_list_has_the_four_sections_in_order() {
+fn the_list_has_the_five_sections_in_order() {
     let labels: Vec<_> = Section::ALL.iter().map(|s| s.label()).collect();
-    assert_eq!(labels, ["Appearance", "Units", "Compute", "Storage"]);
+    assert_eq!(labels, ["Appearance", "Editor", "Units", "Compute", "Storage"]);
 }
 
 #[test]
@@ -124,4 +124,19 @@ fn every_page_draws() {
         state.update(Message::Open(section), &mut ctx);
         assert!(state.view(&ctx).is_some(), "{section:?}");
     }
+}
+
+#[test]
+fn placing_parts_is_set_in_the_editor_section_and_kept() {
+    let (mut app, file) = open_app("placing");
+    assert!(!app.ctx().click_to_place);
+    app.update(app::Message::Prefs(Message::Open(Section::Editor)));
+    assert_eq!(app.prefs().section(), Section::Editor);
+    app.update(app::Message::Prefs(Message::Placing(true)));
+    assert!(app.ctx().click_to_place);
+    assert!(Settings::load(Some(&file)).click_to_place, "Click to place is in the settings file");
+    app.update(app::Message::Prefs(Message::Placing(false)));
+    assert!(!app.ctx().click_to_place && !Settings::load(Some(&file)).click_to_place);
+    assert_eq!(super::editor::PLACING_NOTE, "Click to place keeps a part in hand after you let go; click to put it down, Esc to put it back.");
+    let _ = std::fs::remove_file(&file);
 }

@@ -202,7 +202,7 @@ pub fn default_cursor(out: &Output, active: ConfigId) -> f64 {
         }
         Data::Alpha(_) => 0.0,
         Data::Flutter(f) => f.as_ref().map_or(0.0, |f| f.trace.worst().t),
-        Data::Dispersion(_) | Data::Components(_) => 0.0,
+        Data::Dispersion(_) => 0.0,
     }
 }
 
@@ -229,7 +229,6 @@ pub fn readout(out: &Output, x_si: Option<f64>, active: ConfigId, units: UnitSys
         Data::Alpha(_) => alpha(out, run, x, units),
         Data::Flutter(f) => flutter(run, f.as_ref(), x, units),
         Data::Dispersion(d) => dispersion(run, d.as_ref(), units),
-        Data::Components(rows) => components(out, run, rows, units),
     }
 }
 
@@ -273,38 +272,6 @@ pub fn compare_section(out: &Output, overlay: &Overlay, x_si: Option<f64>, activ
         rows.push(Row::new("CN", format!("{t:.3}"), "").swatch(color).tag(Tag::Plain(format!("Δ {}{:.3} · ours {mine:.3}", sign(d), d.abs()))));
     }
     (!rows.is_empty()).then(|| Section { title: format!("Compare · {}", overlay.label), rows })
-}
-
-/// The Components readout: the whole vehicle's margin, CP and drag at the condition, then each part's share of the drag.
-fn components(out: &Output, run: &Run, rows: &[super::compute::ComponentRow], units: UnitSystem) -> Readout {
-    let cursor = format!("M {:.2}", out.conditions.mach_fixed);
-    let Some((total, parts)) = rows.split_last() else { return Readout { cursor, sections: Vec::new() } };
-    let p = MachPointLike {
-        x: out.conditions.mach_fixed,
-        margin: (total.cp - run.cg(out.conditions.burnout)) / run.reference_diameter,
-        cp: total.cp,
-        cn_alpha: total.cn_alpha,
-    };
-    let mut drag = vec![Row::new("Total Cd", cd(total.drag.total), "").big()];
-    let mut by_drag: Vec<&super::compute::ComponentRow> = parts.iter().collect();
-    by_drag.sort_by(|a, b| b.drag.total.total_cmp(&a.drag.total));
-    for part in by_drag {
-        let mut row = Row::new(part.name.clone(), cd(part.drag.total), "");
-        if total.drag.total > 0.0 {
-            row = row.share(part.drag.total / total.drag.total);
-        }
-        if part.overridden {
-            row = row.tag(Tag::Plain("override".to_string()));
-        }
-        drag.push(row);
-    }
-    Readout {
-        cursor,
-        sections: vec![
-            Section { title: format!("Stability · {}", run.name), rows: stability_rows(run, &p, units, out) },
-            Section { title: "Drag by part".into(), rows: drag },
-        ],
-    }
 }
 
 fn stability_rows(run: &Run, p: &MachPointLike, units: UnitSystem, out: &Output) -> Vec<Row> {

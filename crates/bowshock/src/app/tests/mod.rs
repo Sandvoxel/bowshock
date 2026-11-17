@@ -3,6 +3,7 @@
 mod carry;
 mod commands;
 mod edit;
+mod placing;
 mod pods;
 mod preview;
 mod view;

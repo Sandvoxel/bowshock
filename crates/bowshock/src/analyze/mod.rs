@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::app::worker;
+use bowshock_core::Field;
 use bowshock_model::{CfdGrid, CfdLiftTable, CfdTable};
 use bowshock_sim::from_model::Phase;
 use iced::{keyboard, Element, Task};
@@ -120,6 +121,8 @@ pub enum Message {
     Optimize(optimize_view::Msg),
     /// A message from the running optimisation (with the run's serial: a cancelled run's last words are ignored).
     OptEvent(u64, optimize::Event),
+    /// A message of the flow viewer (the Flow field view of a table, the picture of a solve).
+    Flow(flow_view::Msg),
 }
 
 /// What a computation was for; a result is used only while it is still the one wanted.
@@ -179,6 +182,8 @@ pub struct State {
     pub(crate) cfd: Cfd,
     /// The optimiser's setup and run.
     pub(crate) optimize: optimize_view::State,
+    /// The flow viewer: what its picture is coloured by, the camera, the Mach number of the Flow field view. Session-only.
+    pub(crate) flow: flow_view::State,
 }
 
 impl Default for State {
@@ -229,6 +234,7 @@ impl State {
             base_method: Method::Extended,
             cfd: Cfd { demo: solve_demo::from_names(&env.cfd_demo), ..Cfd::default() },
             optimize: optimize_view::State::new(),
+            flow: flow_view::State::new(),
         }
     }
 
@@ -248,6 +254,7 @@ impl State {
             Message::Select(a) => {
                 self.analysis = a;
                 self.show_table = false;
+                self.flow.open = false;
                 self.plot.set_hover(None);
             }
             Message::Method(m) => {
@@ -274,7 +281,18 @@ impl State {
             Message::Plot(PlotMessage::Hover(None)) => self.plot.set_hover(self.default_x),
             Message::Plot(m) => self.plot.update(m),
             Message::Ignore => {}
-            Message::Table(on) => self.show_table = on,
+            Message::Table(on) => {
+                self.show_table = on;
+                if on {
+                    self.flow.open = false;
+                }
+            }
+            Message::Flow(m) => {
+                if matches!(m, flow_view::Msg::Open(true)) {
+                    self.show_table = false;
+                }
+                self.flow.update(m);
+            }
             Message::ExportCsv => return self.export(ctx),
             Message::Exported(result) => match result {
                 Ok(Some(path)) => ctx.notify(format!("Wrote {}", path.display())),
@@ -472,6 +490,7 @@ impl State {
                 }
             }
         }
+        self.sync_flow();
         self.sync_view(ctx);
         task
     }
@@ -498,8 +517,19 @@ impl State {
             Some(events) => spawn_script(events, serial),
             None => spawn_lift(job, serial),
         };
-        self.cfd.lift_solving =
-            Some(Solving { tracker, job: None, grid: CfdGrid::Coarse, altitude: None, started: Instant::now(), cancelling: false, scripted, key, stream });
+        self.cfd.lift_solving = Some(Solving {
+            tracker,
+            job: None,
+            grid: CfdGrid::Coarse,
+            altitude: None,
+            started: Instant::now(),
+            cancelling: false,
+            scripted,
+            key,
+            stream,
+            picture: None,
+            fields: Vec::new(),
+        });
         task
     }
 
@@ -531,6 +561,9 @@ impl State {
             Some(t) => self.cfd.table = Some(Arc::new(t.clone())),
             None => self.cfd.table = None,
         }
+        // The fields belong to the table they were solved for and the geometry it was solved for.
+        let geometry = (*self.cfd.plan).as_ref().ok().map(|p| p.geometry);
+        self.cfd.fields.retain_for(self.cfd.table.as_deref(), geometry);
         let force = std::mem::take(&mut self.cfd.force);
         let (Ok(plan), Some(nodes)) = (self.cfd.plan.as_ref(), cfd::nodes(self.cond.mach)) else {
             return Task::none();
@@ -578,6 +611,8 @@ impl State {
             scripted,
             key,
             stream,
+            picture: None,
+            fields: Vec::new(),
         });
         task
     }
@@ -603,6 +638,11 @@ impl State {
             cfd::Event::Machines(infos) => solving.tracker.set_machines(&infos),
             cfd::Event::Machine { index, at, state } => solving.tracker.on_machine(index, at, state),
             cfd::Event::Iteration(it) => solving.tracker.on_iteration(&it),
+            cfd::Event::Field(field) => solving.picture = Some(field.0),
+            cfd::Event::PointField { field } => {
+                solving.picture = Some(field.0.clone());
+                solving.fields.push(field.0);
+            }
             cfd::Event::Point(done) => solving.tracker.on_done(&done),
             cfd::Event::Tick => {}
             cfd::Event::Finished(result) => self.drag_finished(result, ctx),
@@ -620,6 +660,7 @@ impl State {
                 solving.tracker.finish();
                 let (summary, brief) = (solving.tracker.summary(table.solve_seconds), solving.tracker.brief(table.solve_seconds));
                 let table_key = table.key;
+                self.cfd.fields.replace(&table, std::mem::take(&mut solving.fields));
                 if ctx.doc.store_cfd_table(table) {
                     self.cfd.summary = Some((table_key, summary));
                     ctx.notify(brief);
@@ -637,7 +678,8 @@ impl State {
                         ctx.notify(format!("CFD solve cancelled after {done} of {total} points"));
                         let (grid, altitude) = (solving.grid, solving.altitude.unwrap_or_default());
                         let keep_label = format!("Keep {} solved points", table.points.len());
-                        self.cfd.stopped = Some(Stopped { key, tracker: solving.tracker, table: Some(table), seconds, grid, altitude, keep_label });
+                        let fields = std::mem::take(&mut solving.fields);
+                        self.cfd.stopped = Some(Stopped { key, tracker: solving.tracker, table: Some(table), seconds, grid, altitude, keep_label, fields });
                     }
                     None => ctx.notify("CFD solve cancelled"),
                 }
@@ -689,11 +731,33 @@ impl State {
 
     /// Keep N solved points was pressed: the table of the points a cancelled solve had is stored with the document.
     fn keep_stopped(&mut self, ctx: &mut Ctx) {
-        let Some(table) = self.cfd.stopped.take().and_then(|s| s.table) else { return };
+        let Some(stopped) = self.cfd.stopped.take() else { return };
+        let Some(table) = stopped.table else { return };
         let (n, lo, hi) = (table.points.len(), table.points[0].mach, table.points[table.points.len() - 1].mach);
+        self.cfd.fields.replace(&table, stopped.fields);
         if ctx.doc.store_cfd_table(table) {
             ctx.notify(format!("Kept {n} solved points, Mach {lo:.2} to {hi:.2}"));
         }
+    }
+
+    /// Keeps the flow viewer's picture current: the live snapshot of the solve running, else (in the Flow field view) the final field of
+    /// the selected Mach number of the table on show. The viewer closes when there is no table to look at.
+    fn sync_flow(&mut self) {
+        let on = self.method == Method::CfdTable && uses_cfd(self.analysis);
+        let table = self.cfd.table.clone().filter(|_| on && self.cfd_ready());
+        if table.is_none() || self.cfd.solving.is_some() {
+            self.flow.open = false;
+        }
+        self.flow.machs = table.as_ref().map(|t| t.points.iter().map(|p| p.mach).collect()).unwrap_or_default();
+        if self.flow.selected.is_none_or(|m| !self.flow.machs.iter().any(|x| (x - m).abs() < 1e-9)) {
+            self.flow.selected = flow_view::default_mach(&self.flow.machs);
+        }
+        let picture: Option<Arc<Field>> = match (&self.cfd.solving, &table, self.flow.selected) {
+            (Some(s), _, _) if on => s.picture.clone(),
+            (None, Some(t), Some(m)) if self.flow.open => self.cfd.fields.get(t, m).cloned(),
+            _ => None,
+        };
+        self.flow.set_field(picture.as_ref());
     }
 
     fn sync_view(&mut self, ctx: &Ctx) {
@@ -721,8 +785,7 @@ impl State {
         // The crosshair starts at the cursor's default (the flight's maximum Mach) and returns there when the pointer leaves.
         let active = ctx.doc.rocket().active_config_id();
         let previous = self.default_x;
-        self.default_x =
-            (!matches!(out.analysis, Analysis::Dispersion | Analysis::Components)).then(|| readout::default_cursor(&out, active) / built.scale.x_si);
+        self.default_x = (out.analysis != Analysis::Dispersion).then(|| readout::default_cursor(&out, active) / built.scale.x_si);
         if self.plot.hover_x().is_none() || self.plot.hover_x() == previous {
             self.plot.set_hover(self.default_x);
         }
@@ -788,6 +851,8 @@ pub(crate) struct Cfd {
     pub(crate) status: cfd::Status,
     /// The table stored with the document for the stack on show.
     pub(crate) table: Option<Arc<CfdTable>>,
+    /// The final flow fields of the points of that table, solved in this session: not saved with the document.
+    pub(crate) fields: cfd::FieldStore,
     /// The solve in progress.
     pub(crate) solving: Option<Solving>,
     /// The 3D stability solve in progress.
@@ -816,6 +881,7 @@ impl Default for Cfd {
             plan: Arc::new(Err("the geometry has not been mapped yet".to_string())),
             status: cfd::Status::Missing,
             table: None,
+            fields: cfd::FieldStore::default(),
             solving: None,
             lift_solving: None,
             stopped: None,
@@ -849,6 +915,10 @@ pub(crate) struct Solving {
     /// The key of the table it will produce.
     key: Option<u64>,
     stream: worker::StreamHandle,
+    /// The latest picture of the flow of a point in flight (or the final field of the point that ended last): the live view.
+    pub(crate) picture: Option<Arc<Field>>,
+    /// The final fields of the points that ended, for the store of the table the solve makes.
+    fields: Vec<Arc<Field>>,
 }
 
 /// A drag solve that was cancelled after some points: the partial curve and, with two or more points, the table to keep.
@@ -867,6 +937,8 @@ pub(crate) struct Stopped {
     pub(crate) altitude: f64,
     /// The label of the Keep button: `Keep 5 solved points`.
     pub(crate) keep_label: String,
+    /// The final fields of the points solved, kept with the table if it is.
+    fields: Vec<Arc<Field>>,
 }
 
 /// Whether the analysis uses the CFD table when the method is `CFD table` (the others do not use the method).

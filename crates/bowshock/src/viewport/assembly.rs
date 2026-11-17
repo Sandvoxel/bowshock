@@ -1,10 +1,15 @@
 //! The drag overlay: while a part is dragged in from the parts bin or picked up it shows the valid attach nodes on the
-//! rocket's centreline and, over a tube's side, the radial surface target (design/components/ViewportOverlay). A node within
-//! [`NODE_PX`] of the cursor wins (the part stacks); otherwise the tube under the cursor does: the part becomes a pod, `count`
-//! copies standing on the tube's surface (KSP-style radial attachment of an ordinary part); else the nearest node. The ghost part
-//! itself is drawn in 3D by the model mesh.
+//! rocket's centreline and, over a tube's side, the radial surface target (design/components/ViewportOverlay).
+//!
+//! An axial part is held at its hold point ([`Drag::hold`]: where it was grabbed, or its middle for a part from the bin) under the
+//! cursor. [`free_pose`] is where its fore and aft faces then are in the air, and that is what both the ghost and the snapping
+//! work from: a node catches the part when one of the part's *ends* (see [`End`]) projects within the node's catch disc, the
+//! nearer end of the part for a joint between parts, the aft end for the node ahead of the first part, the fore end for the node
+//! behind the last. The cursor itself is no snap point for a node. Failing a node, the tube under the cursor wins: the part becomes
+//! a pod, `count` copies standing on the tube's surface (KSP-style radial attachment of an ordinary part); else the node beside the
+//! rocket along its axis that an end is nearest. The ghost part itself is drawn in 3D by the model mesh.
 
-use bowshock_model::{InternalPart, Part, PartId, PartKind, PodBody, RadialKind, RadialPart, Rocket};
+use bowshock_model::{InternalKind, InternalPart, Part, PartId, PartKind, PodBody, RadialKind, RadialPart, Rocket};
 use glam::Vec3;
 use iced::widget::canvas::{self, Action, Event, Frame, Geometry, LineDash, Path, Stroke, Text};
 use iced::{alignment, mouse, Color, Point, Rectangle, Renderer, Size, Theme, Vector};
@@ -55,6 +60,9 @@ pub struct Drag {
     pub count: u8,
     /// The node of a pod's stack it would drop onto instead: `(pod, node index)`. At most one of `snap` and `pod_snap` is set.
     pub pod_snap: Option<(PartId, usize)>,
+    /// Where the part is held while it is carried: the distance (metres) from its fore face to the point under the cursor. Where
+    /// it was grabbed for a part picked up off the rocket, its middle for one from the bin. See [`Drag::held`].
+    pub hold: f64,
 }
 
 /// A part of the rocket picked up for moving: it is out of the rocket while dragged, and goes back as it was if the drag is
@@ -67,6 +75,112 @@ pub struct Origin {
     pub radials: Vec<RadialPart>,
     /// The internal parts it carries, likewise.
     pub internals: Vec<InternalPart>,
+}
+
+impl Drag {
+    /// The hold point for a grab `grab` metres behind the part's fore face (`None`: its middle), limited to the part.
+    pub fn held(kind: &PartKind, grab: Option<f64>) -> f64 {
+        let length = kind.length();
+        grab.unwrap_or(length / 2.0).clamp(0.0, length)
+    }
+}
+
+/// The origin of a part that came from the parts bin, for drawing it as a held part: the part alone, placeholder id 0, carrying
+/// nothing.
+pub fn bin_origin(kind: &PartKind) -> Origin {
+    Origin { part: Part::new(0, kind.clone()), radials: Vec::new(), internals: Vec::new() }
+}
+
+/// A bare tube of `radius` and `length` as a rocket of its own: what a held radial group is built on.
+pub fn stand_in_tube(radius: f64, length: f64) -> Option<(Rocket, PartId)> {
+    let mut rocket = Rocket::default();
+    let id = rocket.insert(0, PartKind::BodyTube { length: length.max(0.01), diameter: (2.0 * radius).max(0.005) }).ok()?;
+    Some((rocket, id))
+}
+
+/// A tube whose bore is `bore` wide with the internal part `kind` in it at its fore end: what a held internal part is built on.
+pub fn stand_in_internal(kind: &InternalKind, bore: f64) -> Option<(Rocket, PartId)> {
+    let length = kind.extent().max(0.01);
+    let bore = bore.max(0.005);
+    // The tube's wall is its default one: widen the tube by twice the wall so the bore is the one asked for.
+    let wall = (bore - Part::new(0, PartKind::BodyTube { length, diameter: bore }).inner_diameter_at(length / 2.0)) / 2.0;
+    let (mut rocket, tube) = stand_in_tube((bore + 2.0 * wall) / 2.0, length)?;
+    let id = rocket.attach_internal(tube, 0.0, kind.clone()).ok()?;
+    Some((rocket, id))
+}
+
+/// The radius of the body a held radial or internal part would most plausibly go on: the selected part's (or, for a selected
+/// radial or internal part, that of the part it stands on or in), else the rocket's widest body.
+pub fn plausible_radius(rocket: &Rocket, selected: Option<PartId>) -> f64 {
+    let radius = |p: &Part| p.kind.fore_diameter().max(p.kind.aft_diameter()) / 2.0;
+    selected
+        .and_then(|id| rocket.part(id).or_else(|| rocket.parent_of(id).and_then(|p| rocket.part(p))))
+        .map(radius)
+        .or_else(|| rocket.parts().iter().map(radius).max_by(f64::total_cmp))
+        .unwrap_or(0.03)
+}
+
+/// The bore of the body a held internal part would most plausibly go in: the selected body part's (or that of the part a selected
+/// radial or internal part is on), else the widest bore in the rocket.
+pub fn plausible_bore(rocket: &Rocket, selected: Option<PartId>) -> f64 {
+    let bore = |p: &Part| p.inner_diameter_at(p.kind.length() / 2.0);
+    selected
+        .and_then(|id| rocket.part(id).or_else(|| rocket.parent_of(id).and_then(|p| rocket.part(p))))
+        .map(bore)
+        .or_else(|| rocket.parts().iter().map(bore).max_by(f64::total_cmp))
+        .unwrap_or(0.05)
+}
+
+/// The point under screen point `at` on the plane through the rocket's axis that faces the camera (looking along the axis there is
+/// no such plane: the one through the view target). `None` when the cursor's ray runs parallel to the plane.
+pub fn plane_point(camera: &Camera, size: Size, at: Point) -> Option<Vec3> {
+    let (from, dir) = camera.ray(at, size);
+    let back = camera.back();
+    let across = back - Vec3::Z * back.z;
+    let (normal, through) = if across.length() > 0.05 { (across.normalize(), Vec3::ZERO) } else { (back, camera.target) };
+    let facing = normal.dot(dir);
+    if facing.abs() < 1e-4 {
+        return None;
+    }
+    Some(from + dir * (normal.dot(through - from) / facing))
+}
+
+/// A held part in the air: where its fore and aft faces are, on its axis (parallel to the rocket's, the nose end towards the
+/// rocket's nose).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FreePose {
+    /// World position of the fore face's centre.
+    pub fore: Vec3,
+    /// World position of the aft face's centre.
+    pub aft: Vec3,
+}
+
+impl FreePose {
+    /// The end `end`.
+    pub fn end(&self, end: End) -> Vec3 {
+        match end {
+            End::Fore => self.fore,
+            End::Aft => self.aft,
+        }
+    }
+}
+
+/// One end of a held part.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum End {
+    /// The fore face (towards the rocket's nose).
+    Fore,
+    /// The aft face.
+    Aft,
+}
+
+/// The free pose of a part `length` metres long held `hold` metres behind its fore face with the hold point under screen point
+/// `at`: the one place both the ghost drawn in the air and the snapping take the part's position from, so what is drawn is what
+/// snaps. `None` when the cursor's ray runs parallel to the plane the part is held in.
+pub fn free_pose(camera: &Camera, size: Size, at: Point, length: f64, hold: f64) -> Option<FreePose> {
+    let hit = plane_point(camera, size, at)?;
+    let fore = Vec3::new(hit.x, hit.y, hit.z - hold.clamp(0.0, length) as f32);
+    Some(FreePose { fore, aft: fore + Vec3::Z * length as f32 })
 }
 
 pub struct Overlay<'a> {
@@ -202,31 +316,78 @@ impl Overlay<'_> {
         (CATCH_SCALE * at.distance(rim)).clamp(NODE_PX, CATCH_MAX_PX)
     }
 
+    /// The held part's fore and aft faces on screen for the cursor at `at`: the [`free_pose`] projected. `None` when the part cannot
+    /// be placed in the air (the cursor's ray runs parallel to the plane it is held in).
+    fn ends(&self, at: Point, size: Size) -> Option<[(End, Point); 2]> {
+        let pose = free_pose(&self.camera, size, at, self.drag.kind.length(), self.drag.hold)?;
+        Some([End::Fore, End::Aft].map(|end| (end, self.camera.project(pose.end(end), size))))
+    }
+
+    /// The ends of the held part that may meet node `snap`: either end at a joint between parts, only the aft end at the node ahead
+    /// of the first part (the part goes in front of it) and only the fore end at the node behind the last. An empty stack takes
+    /// either.
+    fn meets(&self, snap: Snap) -> &'static [End] {
+        let (index, stack) = match snap {
+            Snap::Core(index) => (index, self.rocket.parts().len()),
+            Snap::Pod(pod, index) => (index, self.rocket.radial(pod).and_then(|p| p.kind.pod_body()).map_or(0, |b| b.parts().len())),
+        };
+        match (index == 0, index >= stack) {
+            (true, false) => &[End::Aft],
+            (false, true) => &[End::Fore],
+            _ => &[End::Fore, End::Aft],
+        }
+    }
+
+    /// What the cursor at `at` chooses, as the fields of the drag it sets: `(snap, pod_snap, surface)`. For the viewport to apply the
+    /// decision itself when the view changes under a cursor that has not moved (see `View::resnap`).
+    pub fn resolve(&self, at: Point, size: Size) -> (Option<usize>, Option<(PartId, usize)>, Option<SurfaceTarget>) {
+        match self.choice(at, size) {
+            Some(Choice::Node(Snap::Core(index))) => (Some(index), None, None),
+            Some(Choice::Node(Snap::Pod(pod, index))) => (None, Some((pod, index)), None),
+            Some(Choice::Surface(target)) => (None, None, Some(target)),
+            None => (None, None, None),
+        }
+    }
+
     /// What the cursor at `at` chooses: over a part's surface in a view along the rocket, the node at that part's far end;
-    /// else a node whose catch disc holds the cursor (the nearest centre), else the tube side under it (a part that carries a
-    /// pod cannot become one), else the node beside the rocket along its axis.
+    /// else the node a part's end is in the catch disc of (the nearest end and node), else the tube side under the cursor (a part
+    /// that carries a pod cannot become one), else the node beside the rocket that an end is nearest along its axis.
     fn choice(&self, at: Point, size: Size) -> Option<Choice> {
+        self.decide(at, size).map(|(choice, _)| choice)
+    }
+
+    /// [`choice`](Self::choice), and the end of the part that a node choice is made by (`None` for a surface, a far end, and an
+    /// empty rocket's one node). It depends on the free pose and the cursor only, never on where the snapped ghost is drawn.
+    fn decide(&self, at: Point, size: Size) -> Option<(Choice, Option<End>)> {
         let nodes = self.nodes(size);
         if let Some(snap) = self.far_end(&nodes, at, size) {
-            return Some(Choice::Node(snap));
+            return Some((Choice::Node(snap), None));
         }
-        let nearest = nodes.iter().map(|n| (n.snap, n.at.distance(at))).min_by(|a, b| a.1.total_cmp(&b.1));
-        let caught = nodes.iter().map(|n| (n.snap, n.at.distance(at), n.catch)).filter(|n| n.1 <= n.2).min_by(|a, b| a.1.total_cmp(&b.1));
-        if let Some((snap, ..)) = caught {
-            return Some(Choice::Node(snap));
+        let ends = self.ends(at, size);
+        let mut caught: Option<(Snap, End, f32)> = None;
+        for &(end, point) in ends.iter().flatten() {
+            for node in nodes.iter().filter(|n| self.meets(n.snap).contains(&end)) {
+                let distance = node.at.distance(point);
+                if distance <= node.catch && caught.is_none_or(|(_, _, best)| distance < best) {
+                    caught = Some((node.snap, end, distance));
+                }
+            }
+        }
+        if let Some((snap, end, _)) = caught {
+            return Some((Choice::Node(snap), Some(end)));
         }
         if !self.carries_pod() {
             if let Some(target) = self.surface_under(at, size) {
-                return Some(Choice::Surface(target));
+                return Some((Choice::Surface(target), None));
             }
         }
-        // In the open space beside the rocket (within [`VOID_PX`] of its axis line), the node nearest along the axis takes the
-        // part, so dropping a part just below the stack still stacks it at the joint above.
-        if let Some(snap) = self.beside(at, size) {
-            return Some(Choice::Node(snap));
+        // In the open space beside the rocket (the hold point within [`VOID_PX`] of its axis line), the node nearest along the axis to
+        // an end takes the part, so dropping a part just below the stack still stacks it at the joint above.
+        if let Some((snap, end)) = self.beside(at, size) {
+            return Some((Choice::Node(snap), Some(end)));
         }
         // Far from the rocket there is no target ("no node"); an empty rocket has only its first node.
-        nearest.filter(|_| self.rocket.parts().is_empty()).map(|(snap, ..)| Choice::Node(snap))
+        nodes.first().filter(|_| self.rocket.parts().is_empty()).map(|n| (Choice::Node(n.snap), None))
     }
 
     /// The tube side under the cursor, where the part would stand as a pod.
@@ -248,9 +409,10 @@ impl Overlay<'_> {
         nodes.iter().any(|n| n.snap == snap).then_some(snap)
     }
 
-    /// The core node nearest the cursor measured along the rocket's axis, when the cursor is within [`VOID_PX`] of the axis line
-    /// on screen and not past either end by more than that.
-    fn beside(&self, at: Point, size: Size) -> Option<Snap> {
+    /// The core node nearest along the rocket's axis to an end of the held part (one the node takes, see [`meets`](Self::meets)),
+    /// when the hold point (the cursor) is within [`VOID_PX`] of the axis line on screen and the end is not past either end of the
+    /// rocket by more than that; with the end it is nearest.
+    fn beside(&self, at: Point, size: Size) -> Option<(Snap, End)> {
         let nodes: Vec<Node> = self.nodes(size).into_iter().filter(|n| matches!(n.snap, Snap::Core(_))).collect();
         let first = nodes.iter().min_by(|a, b| a.station.total_cmp(&b.station))?;
         let last = nodes.iter().max_by(|a, b| a.station.total_cmp(&b.station))?;
@@ -261,19 +423,27 @@ impl Overlay<'_> {
         }
         let dir = Vector::new(axis.x / len, axis.y / len);
         let rel = at - first.at;
-        let along = rel.x * dir.x + rel.y * dir.y;
-        let across = (rel.x * dir.y - rel.y * dir.x).abs();
-        if across > VOID_PX || along < -VOID_PX || along > len + VOID_PX {
+        if (rel.x * dir.y - rel.y * dir.x).abs() > VOID_PX {
             return None;
         }
-        nodes
-            .iter()
-            .map(|n| {
-                let r = n.at - first.at;
-                (n.snap, (r.x * dir.x + r.y * dir.y - along).abs())
-            })
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(snap, _)| snap)
+        let along = |p: Point| {
+            let r = p - first.at;
+            r.x * dir.x + r.y * dir.y
+        };
+        let mut best: Option<(Snap, End, f32)> = None;
+        for (end, point) in self.ends(at, size)? {
+            let end_along = along(point);
+            if end_along < -VOID_PX || end_along > len + VOID_PX {
+                continue;
+            }
+            for node in nodes.iter().filter(|n| self.meets(n.snap).contains(&end)) {
+                let distance = (along(node.at) - end_along).abs();
+                if best.is_none_or(|(_, _, b)| distance < b) {
+                    best = Some((node.snap, end, distance));
+                }
+            }
+        }
+        best.map(|(snap, end, _)| (snap, end))
     }
 
     /// Where the drag is snapped now.
@@ -346,9 +516,13 @@ impl canvas::Program<Message> for Overlay<'_> {
     type State = State;
 
     fn update(&self, state: &mut State, event: &Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<Action<Message>> {
+        // A release over the viewport drops (the app decides what that does: see `drag::end_carry`), and so does a press, which
+        // places a part held with no button down (click to place); elsewhere the app decides.
         if let Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) = event {
-            // Releasing over the viewport drops (or, with no snap target, cancels); elsewhere the app cancels.
             return cursor.position_over(bounds).map(|_| Action::publish(Message::DropAxial).and_capture());
+        }
+        if let Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event {
+            return cursor.position_over(bounds).map(|_| Action::publish(Message::PlaceHere).and_capture());
         }
         if let (Event::Mouse(mouse::Event::WheelScrolled { delta }), true) = (event, self.drag.surface.is_some()) {
             // Over a tube's side the wheel steps the number of copies rather than zooming.
@@ -403,6 +577,20 @@ impl canvas::Program<Message> for Overlay<'_> {
         let Some(cursor) = local.filter(|c| (0.0..=size.width).contains(&c.x) && (0.0..=size.height).contains(&c.y)) else {
             return vec![frame.into_geometry()];
         };
+
+        // Where the part's ends are in the air: a hollow ring at each, filled where an end is caught by a node. A part that would
+        // attach to a tube's side has no ends in play.
+        if self.drag.surface.is_none() {
+            let caught = self.decide(cursor, size).and_then(|(choice, end)| end.filter(|_| matches!(choice, Choice::Node(_))));
+            for (end, at) in self.ends(cursor, size).into_iter().flatten() {
+                if caught == Some(end) {
+                    frame.fill(&Path::circle(at, RING / 2.0), t.accent);
+                    frame.stroke(&Path::circle(at, RING / 2.0), Stroke::default().with_color(t.accent).with_width(1.5));
+                } else {
+                    frame.stroke(&Path::circle(at, RING / 2.0), Stroke::default().with_color(t.ink_muted).with_width(1.5));
+                }
+            }
+        }
 
         if let Some(target) = self.drag.surface {
             // Radial: a ring where the part would stand on the tube, a leader to it and what releasing does.
@@ -528,8 +716,10 @@ mod tests {
         (r, tube)
     }
 
+    /// A new part from the bin: held by its middle.
     fn drag(kind: PartKind) -> Drag {
-        Drag { row: Some(0), origin: None, name: "Part", kind, snap: None, surface: None, count: 3, pod_snap: None }
+        let hold = Drag::held(&kind, None);
+        Drag { row: Some(0), origin: None, name: "Part", kind, snap: None, surface: None, count: 3, pod_snap: None, hold }
     }
 
     /// Orthographic, 500 px per metre, looking at the middle of the rocket.
@@ -547,14 +737,19 @@ mod tests {
         let (rocket, tube) = rocket();
         let drag = drag(PartKind::BodyTube { length: 0.3, diameter: 0.1 });
         // Side view (+z to the right, 500 px/m): the joint at 0.2 m is at x = 375 and the Ø0.1 tube is 25 px in radius there, so
-        // its disc is 1.15 * 25 = 28.75 px (NODE_PX alone is 20).
+        // its disc is 1.15 * 25 = 28.75 px (NODE_PX alone is 20). The tube is held by its middle: its fore end is 75 px (half its
+        // length) fore of the cursor, so the cursor goes 75 px aft of where the end should be.
         let side = camera(-std::f32::consts::FRAC_PI_2, 0.0);
-        assert_eq!(choose(&rocket, &drag, side, Point::new(400.0, 200.0)), Some(Choice::Node(Snap::Core(1))), "25 px along the body is inside the disc");
-        let outside = choose(&rocket, &drag, side, Point::new(405.0, 200.0));
-        assert!(matches!(outside, Some(Choice::Surface(t)) if t.parent == tube), "30 px along the body is outside it: the side: {outside:?}");
-        // A small tube (radius 5 px at 100 px/m) keeps the 20 px base.
+        assert_eq!(
+            choose(&rocket, &drag, side, Point::new(475.0, 200.0)),
+            Some(Choice::Node(Snap::Core(1))),
+            "the fore end 25 px along the body is inside the disc"
+        );
+        let outside = choose(&rocket, &drag, side, Point::new(480.0, 200.0));
+        assert!(matches!(outside, Some(Choice::Surface(t)) if t.parent == tube), "the fore end 30 px along the body is outside it: the side: {outside:?}");
+        // A small tube (radius 5 px at 100 px/m, 30 px long) keeps the 20 px base: the fore end 18 px aft of the joint is caught.
         let far = Camera { scale: 100.0, ..side };
-        assert_eq!(choose(&rocket, &drag, far, Point::new(450.0 + (0.2 - 0.35) * 100.0 + 18.0, 200.0)), Some(Choice::Node(Snap::Core(1))));
+        assert_eq!(choose(&rocket, &drag, far, Point::new(450.0 + (0.2 - 0.35) * 100.0 + 18.0 + 15.0, 200.0)), Some(Choice::Node(Snap::Core(1))));
     }
 
     #[test]
@@ -584,5 +779,124 @@ mod tests {
         let camera = camera(std::f32::consts::PI, 0.5);
         let choice = choose(&rocket, &drag, camera, camera.project(Vec3::new(0.0, 0.05, 0.45), SIZE));
         assert!(matches!(choice, Some(Choice::Surface(t)) if t.parent == tube), "{choice:?}");
+    }
+
+    /// The side view the end tests share: +z to the right, 500 px per metre, node 0 at x = 275, node 1 at 375, node 2 at 625.
+    fn side() -> Camera {
+        camera(-std::f32::consts::FRAC_PI_2, 0.0)
+    }
+
+    /// What the overlay decides for the cursor at `at`.
+    fn decide(rocket: &Rocket, drag: &Drag, at: Point) -> Option<(Choice, Option<End>)> {
+        let overlay = Overlay { rocket, drag, camera: side(), cursor: None, snap_angle: 0, snap_step: 0.001, margin: None, units: UnitSystem::default() };
+        overlay.decide(at, SIZE)
+    }
+
+    #[test]
+    fn the_free_pose_holds_the_part_by_the_hold_point_under_the_cursor() {
+        let camera = side();
+        let at = Point::new(500.0, 150.0);
+        let pose = free_pose(&camera, SIZE, at, 0.3, 0.1).unwrap();
+        // Parallel to the rocket's axis, nose end towards the nose, the right length, the hold point (0.1 behind the fore face) under
+        // the cursor.
+        assert!((pose.aft - pose.fore - Vec3::Z * 0.3).length() < 1e-6);
+        let held = camera.project(pose.fore + Vec3::Z * 0.1, SIZE);
+        assert!(held.distance(at) < 1e-3, "{held:?}");
+        // A hold point beyond the part is limited to it.
+        let past = free_pose(&camera, SIZE, at, 0.3, 5.0).unwrap();
+        assert!(camera.project(past.aft, SIZE).distance(at) < 1e-3);
+    }
+
+    #[test]
+    fn a_tube_held_by_its_middle_snaps_by_its_fore_end_at_the_last_node_with_the_cursor_half_a_tube_away() {
+        let (rocket, _) = rocket();
+        let drag = drag(PartKind::BodyTube { length: 0.3, diameter: 0.1 });
+        // The fore end at the last node (x = 625): the cursor is 75 px, half the tube, aft of it. A tube is a metre-ish thing: the
+        // cursor is nowhere near the node.
+        let got = decide(&rocket, &drag, Point::new(700.0, 200.0));
+        assert_eq!(got, Some((Choice::Node(Snap::Core(2)), Some(End::Fore))));
+        // The cursor's own distance to the node is 75 px, well outside the 28.75 px disc.
+        assert!(Point::new(700.0, 200.0).distance(Point::new(625.0, 200.0)) > 70.0);
+    }
+
+    #[test]
+    fn the_aft_end_snaps_at_a_joint_and_at_the_node_ahead_of_the_first_part() {
+        let (rocket, _) = rocket();
+        let drag = drag(PartKind::BodyTube { length: 0.3, diameter: 0.1 });
+        // The aft end at the joint (x = 375): the cursor is 75 px fore of it, over the nose.
+        assert_eq!(decide(&rocket, &drag, Point::new(300.0, 200.0)), Some((Choice::Node(Snap::Core(1)), Some(End::Aft))));
+        // The fore end at the joint, too, either end serving a joint between parts.
+        assert_eq!(decide(&rocket, &drag, Point::new(450.0, 200.0)), Some((Choice::Node(Snap::Core(1)), Some(End::Fore))));
+        // The node ahead of the first part (x = 275) takes the aft end: on a rocket with no nose yet, a nose cone (0.2 m, 100 px)
+        // held by its middle with its aft end there has the cursor 50 px fore of it.
+        let mut bare = Rocket::default();
+        bare.insert(0, PartKind::BodyTube { length: 0.5, diameter: 0.1 }).unwrap();
+        let nose = self::drag(PartKind::NoseCone { shape: NoseShape::TangentOgive, length: 0.2, diameter: 0.1, tip_radius: 0.0 });
+        assert_eq!(decide(&bare, &nose, Point::new(225.0, 200.0)), Some((Choice::Node(Snap::Core(0)), Some(End::Aft))));
+    }
+
+    #[test]
+    fn the_aft_end_at_the_node_behind_the_last_part_and_the_fore_end_ahead_of_the_first_do_not_snap() {
+        let (rocket, tube) = rocket();
+        let drag = drag(PartKind::BodyTube { length: 0.3, diameter: 0.1 });
+        // The aft end at the last node (x = 625): the cursor is 75 px fore of it, on the tube. Only a fore end can meet that node.
+        let got = decide(&rocket, &drag, Point::new(550.0, 200.0));
+        assert!(matches!(got, Some((Choice::Surface(t), None)) if t.parent == tube), "{got:?}");
+        // The fore end at the node ahead of the first part (x = 275): the cursor is 75 px aft of it, over the nose. Only an aft end
+        // can meet that node (the other nodes are further than their discs).
+        let got = decide(&rocket, &drag, Point::new(350.0, 200.0));
+        assert!(!matches!(got, Some((Choice::Node(Snap::Core(0)), _))), "{got:?}");
+    }
+
+    #[test]
+    fn the_cursor_on_a_node_with_both_ends_far_away_does_not_snap() {
+        let (rocket, tube) = rocket();
+        let drag = drag(PartKind::BodyTube { length: 0.3, diameter: 0.1 });
+        // Zoomed in (1500 px/m) the Ø0.1 body is 75 px in radius and the joint's catch disc 86 px. The cursor 60 px above the joint is
+        // well inside it (the old rule snapped there), but the tube's ends are 225 px either side of the cursor: no node catches
+        // either end, and the cursor is not a snap point. It is over the body's side, which makes a pod.
+        let camera = Camera { scale: 1500.0, ..side() };
+        let overlay =
+            Overlay { rocket: &rocket, drag: &drag, camera, cursor: None, snap_angle: 0, snap_step: 0.001, margin: None, units: UnitSystem::default() };
+        let joint = camera.project(Vec3::new(0.0, 0.0, 0.2), SIZE);
+        let cursor = Point::new(joint.x, joint.y - 60.0);
+        assert!(cursor.distance(joint) < 86.0);
+        let got = overlay.decide(cursor, SIZE);
+        assert!(matches!(got, Some((Choice::Surface(t), None)) if t.parent == tube || t.parent == rocket.parts()[0].id), "{got:?}");
+    }
+
+    #[test]
+    fn a_picked_up_part_is_held_where_it_was_grabbed() {
+        let (rocket, _) = rocket();
+        let mut drag = drag(PartKind::BodyTube { length: 0.3, diameter: 0.1 });
+        // Held by the middle (a part from the bin), the fore end is 75 px fore of the cursor: with the cursor at x = 700 it is on the
+        // last node (625).
+        assert_eq!(decide(&rocket, &drag, Point::new(700.0, 200.0)), Some((Choice::Node(Snap::Core(2)), Some(End::Fore))));
+        // Grabbed 0.02 m behind its fore face the fore end is only 10 px fore of the cursor: the same cursor leaves it 65 px past the
+        // node (beyond the 48 px of open space that still counts as beside the rocket), so nothing is caught; the cursor 10 px aft of
+        // the node catches it by that end.
+        drag.hold = Drag::held(&drag.kind, Some(0.02));
+        let got = decide(&rocket, &drag, Point::new(700.0, 200.0));
+        assert!(!matches!(got, Some((Choice::Node(_), _))), "{got:?}");
+        assert_eq!(decide(&rocket, &drag, Point::new(635.0, 200.0)), Some((Choice::Node(Snap::Core(2)), Some(End::Fore))));
+        // Grabbed 0.28 m behind it (near its aft end) the fore end is 140 px fore of the cursor.
+        drag.hold = Drag::held(&drag.kind, Some(0.28));
+        assert_eq!(decide(&rocket, &drag, Point::new(765.0, 200.0)), Some((Choice::Node(Snap::Core(2)), Some(End::Fore))));
+        // A grab beyond the part is limited to it.
+        assert_eq!(Drag::held(&drag.kind, Some(9.0)), 0.3);
+        assert_eq!(Drag::held(&drag.kind, Some(-1.0)), 0.0);
+    }
+
+    #[test]
+    fn the_decision_does_not_depend_on_where_the_snapped_ghost_is_drawn() {
+        let (rocket, _) = rocket();
+        let free = drag(PartKind::BodyTube { length: 0.3, diameter: 0.1 });
+        // Snapped to the last node (the ghost is drawn there) or free (it is drawn at the cursor), the same cursor decides the same
+        // thing: no flicker at the boundary of a catch disc.
+        let snapped = Drag { snap: Some(2), ..free.clone() };
+        for x in (640..720).step_by(5) {
+            let at = Point::new(x as f32, 200.0);
+            assert_eq!(decide(&rocket, &free, at), decide(&rocket, &snapped, at), "x = {x}");
+        }
     }
 }

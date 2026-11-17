@@ -25,6 +25,7 @@
 //!
 //! `bowshock-core` and its guide (`guide/src/performance.md` for timings); Menter (1994) for the k-omega SST model it solves.
 
+mod fields;
 mod fresh;
 mod interp;
 mod plan;
@@ -34,6 +35,7 @@ mod share;
 #[cfg(test)]
 mod tests;
 
+pub use fields::*;
 pub use fresh::*;
 pub use interp::*;
 pub use plan::*;

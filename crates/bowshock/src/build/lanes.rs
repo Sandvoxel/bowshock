@@ -88,12 +88,14 @@ pub enum Message {
         /// Where it is now.
         station: f64,
     },
-    /// An airframe part picked up by dragging its bar.
-    GrabAxial(PartId),
+    /// An airframe part picked up by dragging its bar, grabbed this many metres behind its fore edge.
+    GrabAxial(PartId, f64),
     /// A carried part (from the bin, or picked up here) is over the lanes with its fore edge at this station.
     CarryAt(f64),
     /// The button was released: lands a carried part, or ends a move or resize.
     EditEnd,
+    /// The button was pressed over the lanes with a part held and no button down (click to place): puts it down on its landing.
+    Place,
     /// A free part was released on a symmetry group's bar: offer to rejoin it (the inspector asks whose settings win).
     DropOnGroup {
         /// The free part.
@@ -169,16 +171,16 @@ impl State {
             Message::ResizeTo { id, end, station } => {
                 ctx.doc.edit_merging("Resize part", &format!("resize:{id}"), |r| edit::resize_part(r, id, end, station));
             }
-            Message::GrabAxial(id) => drag::grab(ctx, Pick::Axial(id)),
+            Message::GrabAxial(id, grab) => drag::grab(ctx, Pick::Axial(id), Some(grab)),
             Message::CarryAt(start) => carry_at(ctx, start),
             Message::SeparationTo(stage, joint) => drag::move_separation(ctx, stage, joint),
             Message::SeparationEnd(commit) => drag::finish_separation(ctx, commit),
             Message::EditEnd => {
-                drag::finish_axial(ctx, true);
-                drag::finish_radial(ctx, true);
-                drag::finish_internal(ctx, true);
+                // A release over the parts bin (a bar can be released anywhere) is the bin drop; else it ends the carry over the lanes.
+                drag::end_carry(ctx, drag::Gesture::Release, if ctx.over_bin { drag::Over::Bin } else { drag::Over::Surface });
                 ctx.doc.seal();
             }
+            Message::Place => drag::end_carry(ctx, drag::Gesture::Press, drag::Over::Surface),
             Message::DropOnGroup { part, group } => {
                 // The move ended on a group's bar: seal it, then ask (in the inspector) whose settings win.
                 ctx.doc.seal();
@@ -493,7 +495,7 @@ mod tests {
         app.sync();
         let [nose, tube, transition] = [0, 1, 2].map(|i| app.ctx().doc.rocket().parts()[i].id);
         let _ = nose;
-        lanes(&mut app, Message::GrabAxial(transition));
+        lanes(&mut app, Message::GrabAxial(transition, 0.05));
         assert!(app.ctx().drag.axial.is_some() && app.ctx().doc.rocket().part(transition).is_none());
         // Carried to the fore end of the tube (station 0.2): the node between nose and tube.
         lanes(&mut app, Message::CarryAt(0.2));

@@ -385,7 +385,7 @@ impl canvas::Program<Message> for Lanes<'_> {
                             Zone::Body if bar.edit.movable => {
                                 state.mode = Mode::Moving { id, grab };
                                 if bar.class == Some(PartClass::Axial) && bar.pod.is_none() {
-                                    return Some(Action::publish(Message::GrabAxial(id)));
+                                    return Some(Action::publish(Message::GrabAxial(id, grab)));
                                 }
                                 let start = self.start_for(Some(hit.key), axis.station(p.x), grab, &axis, shift);
                                 Some(Action::publish(Message::MoveTo { id, start }).and_capture())
@@ -430,7 +430,8 @@ impl canvas::Program<Message> for Lanes<'_> {
             Event::Mouse(mouse::Event::ButtonPressed(button)) => {
                 let p = local.filter(|p| p.x >= 0.0 && p.y >= 0.0 && p.x <= bounds.width && p.y <= bounds.height)?;
                 if self.carry.is_some() {
-                    return None;
+                    // A part held with no button down (click to place) is put down by a left press over the lanes.
+                    return (*button == mouse::Button::Left).then(|| Action::publish(Message::Place).and_capture());
                 }
                 match button {
                     mouse::Button::Left => self.press(state, &axis, &rows, p, bounds.width, bounds.height),

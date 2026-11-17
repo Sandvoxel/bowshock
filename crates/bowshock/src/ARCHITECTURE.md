@@ -17,7 +17,7 @@ app/dialogs.rs           every rfd file dialog; BOWSHOCK_EXPORT_FILE override in
 app/selection_set.rs     PickMode, MultiSet<Id>: primary + extras + range anchor, shared by app/multi.rs and simulate/mod.rs
 app/document.rs          Document: the rocket + path + dirty + undo/redo (every mutation goes through it)
 app/physics.rs           cached balance (mass, CG, CP, margin), warnings, stages, motor db, per-stage CFD plans / drag tables (bowshock-sim / -motors)
-app/drag.rs              shared drags (bin -> viewport, grab, move) + delete, built on Document's drag support
+app/drag.rs              shared drags (bin -> viewport, grab, move) + delete, built on Document's drag support. `end_carry(ctx, Gesture, Over)` is the one decision point for what a release or a click does to a part in hand, in drag and drop and in click to place (`ctx.click_to_place`): every overlay, the lanes, the bin and the window root report to it; a part dropped on the bin (`ctx.over_bin`, set by the bin) is deleted through the same `delete_parts` Delete uses, or discarded if it came from the bin
 app/files.rs             New / Open / Save / Save As / the built-in example, unsaved-changes guard; `.ork` import, which first registers the thrust curves stored in the file (`use_embedded_curves`) so they never reach the ThrustCurve lookup
 app/motor_fetch.rs       after a load (`Ctx::fetch_wanted`, `load_ticket`), looks up motors the database cannot resolve on ThrustCurve.org (one worker task; exactly-one-match rule; `Env::fetch_motors` gates it) and adds them via `add_downloaded`
 app/ui.rs                shared UI helpers: `label`, `mm`; re-exports the unit readouts from `units`
@@ -36,14 +36,16 @@ viewport/manipulate/     selection / handle overlay: `mod` (state, Edit), `query
 viewport/capture.rs      One-shot offscreen render of the model at a chosen pixel size (image export): `Capture` request, read back in `Primitive::prepare`, pixels returned on a oneshot channel.
 export/                  File > Export 3D model… / Export image… (State + Message, modal dialogs); `mesh_export.rs` writes OBJ / binary STL (mm) from the viewport mesh.
 print/                   File > Print / export PDF…: `pdf.rs` (PDF 1.4 writer, Helvetica core fonts), `templates.rs` (full-size fin / ring / wrap / marking templates, tiling), `report.rs` (parts list, design report); built on a worker thread.
-prefs/                   Edit > Preferences… (top bar Preferences button, ⌘, / Ctrl+,): the modal window, a section list and a page each: `appearance.rs` (theme), `units.rs` (unit set select and per-quantity rows), `compute.rs` (the machines the solves run on: switches, per-machine connection test, use one / share), `storage.rs` (files and caches, sizes measured off-thread, Open folder / Clear). Every control applies at once through `Ctx::{set_dark, set_units, save_settings}` and is kept in `app/settings.rs`; the app intercepts all other messages while it is open (`route.rs`).
+prefs/                   Edit > Preferences… (top bar Preferences button, ⌘, / Ctrl+,): the modal window, a section list and a page each: `appearance.rs` (theme), `editor.rs` (how parts are placed: drag and drop or click to place), `units.rs` (unit set select and per-quantity rows), `compute.rs` (the machines the solves run on: switches, per-machine connection test, use one / share), `storage.rs` (files and caches, sizes measured off-thread, Open folder / Clear). Every control applies at once through `Ctx::{set_dark, set_click_to_place, set_units, save_settings}` and is kept in `app/settings.rs`; the app intercepts all other messages while it is open (`route.rs`).
 simulate/mod.rs          Simulate screen (`format.rs`: flight-only formatting: bearing, landing, spin). A staged flight's result carries one `bowshock_sim::Branch` per separation (the dropped stage flown on its own, `flight/branch.rs`): `plots.rs` draws each as a dashed line from the separation (the `Dropped stages` header toggle hides them), a thin `StripRow` under the events strip and a dashed ground `Track::dropped`; `results.rs` adds a section per branch after the recovery
 analyze/mod.rs           Analyze screen
 analyze/cfd/             CFD table method: `plan` (document -> `bowshock-core` mapping, table keys, coarse (default) or medium (Refine) grid), `fresh` (table status), `run` (off-thread solve, events), `share` (the work queue that hands Mach numbers to the machines that are on), `remote` (a machine over SSH through `bowshock-remote`), `interp` (table -> plot points, Mach / alpha interpolation).
                          Tables are stored in the document (`bowshock_model::CfdTable`, a cache: not an edit, not in undo).
+                         The final flow field of each point (`bowshock_core::Field`) rides the solve's events (`Event::PointField`; a local solve also sends `Event::Field` snapshots every 500 iterations) into `cfd/fields.rs`' `FieldStore`: session-only, beside the table state, keyed by Mach node, never saved, dropped when the geometry or the table it belongs to changes.
 analyze/solve.rs         Live state of a CFD solve (`Tracker`): units (Mach points, or Mach x angle), per-point outcome, weighted progress fraction and time left from the measured throughput. Pure, no clock.
 analyze/solve_view.rs    The solve on screen: headline, bar, the Cd(Mach) (or CN) curve filling in, the point in flight with its monitor trace, the points list; replaces the plots while a solve runs.
 analyze/solve_demo.rs    `BOWSHOCK_CFD_DEMO`: scripted solve events for screenshots (the driver cannot wait on a minutes-long real solve) and the screen-level tests.
+analyze/flow_view.rs     The flow viewer, in the solve screen (the live picture) and as the `Flow field` view of a finished table: `State` (scalar, grid, camera, Mach stepper), the screen transform `Xf` with the mirror about the axis, the canvas overlay (body, ticks, hover readout, wall Cp under it, sharing the x axis) and the Cd(Mach) picker. `flow_view/prepared.rs` (a field made ready: Mach, Cp, schlieren per cell and their ranges, one vertex per grid node, the cell under the pointer), `flow_view/map.rs` (colour maps: viridis, ColorBrewer RdBu, grey), `flow_view/gpu.rs` + `flow.wgsl` (the cells drawn by a `shader` primitive: vertices uploaded once per picture, pan / zoom / scalar are uniforms).
 widgets/                 shared widgets (read-only for screens; do not edit from a screen task); `modal.rs` (modal card + `scrim`), `unit_input/` (the unit field: `builder`, `logic`, `widget`, `cells`)
 units.rs                 unit set (UnitSystem), all SI/display formatting (`readout`, `with_unit`, `bare`, `len`, `len_unit`, `num_scaled`, `with_unit_scaled`, `signed`), expression parsing
 ```
@@ -260,6 +262,15 @@ buffer, picker) is `chrome::State`; its messages are `chrome::Message`. The moto
 `chrome/config_picker.rs` (`Picker`, `Message`, `Outcome`). Its ThrustCurve.org source returns `Outcome::Debounce`, `Search` and
 `Download`, which `chrome::State::update` turns into tasks that run on worker threads (`config_picker::debounce`, `search`,
 `download`); `$BOWSHOCK_THRUSTCURVE_API` points the client elsewhere (`scripts/thrustcurve-offline.drive`).
+
+## The flow viewer (`analyze/flow_view*`)
+
+Rendering: the cells are drawn by a `shader` primitive (`flow_view/gpu.rs`), a canvas overlay on top draws the body, ticks, readout
+and wall Cp and takes the mouse. A canvas-only picture would re-tessellate every cell whenever the view moves. Measured by the test
+`the_picture_renders_on_a_device_…` (Apple M1 Max, a 1408 x 500 px target, debug build, submit to done, 300 frames):
+0.70 ms a frame for 27 280 cells (0.74 ms with the cell edges), 0.85 ms for 109 120 cells (0.98 ms with edges); the mirror draws
+each twice. `Prepared::new` (once per picture, UI thread) took 38 ms for 27 280 cells and the hover lookup 2 ms, both in a debug
+build (a release build is unmeasured). Live snapshot cost on the solver side is in the docs of `Analysis::on_field`.
 
 ## Tests and the drive harness
 

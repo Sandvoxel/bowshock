@@ -75,8 +75,8 @@ pub struct Marks<'a> {
     pub ghost_radial: Option<GhostRadial<'a>>,
     /// A part shown inserted at this node of a pod's stack: `(pod, ghost)`.
     pub ghost_pod: Option<(PartId, Ghost<'a>)>,
-    /// A part picked up from the rocket and pulled free of it: drawn with what it carries, `at` metres from the origin (the
-    /// world position of its fore face), in the ghost state.
+    /// A carried part held in the air, clear of every target: drawn at the cursor in the ghost state, never part of the rocket (not
+    /// listed in `parts`, not pickable, outside the bounds). See [`Free`].
     pub free: Option<Free<'a>>,
     /// Parts drawn in the ghost state whatever else they are (what a ghost carries).
     pub ghosted: &'a [PartId],
@@ -113,12 +113,25 @@ pub struct Carried<'a> {
     pub base: Option<&'a Rocket>,
 }
 
-/// A carried part pulled free of the rocket.
+/// A carried part held in the air.
 #[derive(Debug, Clone, Copy)]
 pub struct Free<'a> {
-    pub carried: Carried<'a>,
-    /// World position of the part's fore face on its axis.
+    pub what: FreeKind<'a>,
+    /// World position of the part's fore face on its axis (an axial part), or of the fore face of the stand-in tube (a radial or
+    /// internal one: its fore end, at the axis through the free pose).
     pub at: Vec3,
+}
+
+/// What is held in the air.
+#[derive(Debug, Clone, Copy)]
+pub enum FreeKind<'a> {
+    /// An axial part, with what it carries when it was picked up off the rocket (a part from the bin has the placeholder origin
+    /// [`assembly::bin_origin`] and carries nothing).
+    Axial(Carried<'a>),
+    /// A radial group: `count` copies of `kind` round an axis, the first at `angle`, on a body of radius `radius`.
+    Radial { kind: &'a RadialKind, count: u8, angle: f64, radius: f64 },
+    /// An internal part inside a body whose bore is `bore` wide.
+    Internal { kind: &'a InternalKind, bore: f64 },
 }
 
 /// A radial part being dragged onto the rocket: every copy is drawn as a ghost.
@@ -387,33 +400,46 @@ impl Mesh {
             None => Mesh::build(rocket, marks),
         };
         if let Some(free) = marks.free {
-            let ids = assembly::carried_ids(free.carried.origin);
-            let sub = assembly::free_rocket(free.carried.origin, free.carried.base);
-            let part = Mesh::build(&sub, Marks { ghosted: &ids, motors: marks.motors, cut: marks.cut, ..Marks::default() });
-            mesh.append(part, free.at);
+            if let Some(part) = Mesh::free_part(&free.what, marks.motors, marks.cut) {
+                mesh.append(part, free.at);
+            }
         }
         mesh
     }
 
-    /// Adds `other` to the mesh, moved by `shift`: its parts and leaders are not listed (a free ghost is not pickable) and the
-    /// bounds stay the rocket's.
-    fn append(&mut self, other: Mesh, shift: Vec3) {
-        let slice = |m: &Mesh, r: &Range<u32>| m.vertices[r.start as usize..r.end as usize].to_vec();
-        let moved = |r: &Range<u32>| {
-            slice(&other, r)
-                .into_iter()
-                .map(|mut v| {
-                    v.position = (Vec3::from(v.position) + shift).to_array();
-                    v
-                })
-                .collect::<Vec<_>>()
+    /// A held part as a mesh of its own, at the origin (its fore end on the axis at `z = 0`), only what is drawn in the ghost
+    /// state: the part and what it carries, without the stand-in tube a radial or internal part is built on. `None` when the
+    /// stand-in cannot be made.
+    pub fn free_part(what: &FreeKind, motors: Option<&MotorDb>, cut: Cut) -> Option<Mesh> {
+        let (sub, ids, radial) = match *what {
+            FreeKind::Axial(c) => (assembly::free_rocket(c.origin, c.base), assembly::carried_ids(c.origin), None),
+            FreeKind::Radial { kind, count, angle, radius } => {
+                let (sub, tube) = assembly::stand_in_tube(radius, kind.extent())?;
+                (sub, Vec::new(), Some(GhostRadial { kind, parent: tube, offset: 0.0, angle, count }))
+            }
+            FreeKind::Internal { kind, bore } => {
+                let (sub, id) = assembly::stand_in_internal(kind, bore)?;
+                (sub, vec![id], None)
+            }
         };
-        let mut vertices = Vec::with_capacity(self.vertices.len() + other.vertices.len());
-        let mut ranges = Vec::new();
-        for (mine, theirs) in [(&self.inner, &other.inner), (&self.caps, &other.caps), (&self.outer, &other.outer)] {
+        Some(Mesh::build(&sub, Marks { ghosted: &ids, ghost_radial: radial, motors, cut, ..Marks::default() }))
+    }
+
+    /// Adds the ghost-state vertices of `other` to the mesh, moved by `shift`: its parts and leaders are not listed (a free ghost
+    /// is not pickable) and the bounds stay the rocket's.
+    pub fn append(&mut self, other: Mesh, shift: Vec3) {
+        let theirs = [&other.inner, &other.caps, &other.outer];
+        let ghosts: usize = theirs.iter().map(|r| other.vertices[r.start as usize..r.end as usize].iter().filter(|v| v.state == GHOST).count()).sum();
+        let mut vertices = Vec::with_capacity(self.vertices.len() + ghosts);
+        let mut ranges = Vec::with_capacity(3);
+        for (mine, theirs) in [(&self.inner, theirs[0]), (&self.caps, theirs[1]), (&self.outer, theirs[2])] {
             let start = vertices.len() as u32;
-            vertices.extend(slice(self, mine));
-            vertices.extend(moved(theirs));
+            vertices.extend_from_slice(&self.vertices[mine.start as usize..mine.end as usize]);
+            vertices.extend(other.vertices[theirs.start as usize..theirs.end as usize].iter().filter(|v| v.state == GHOST).map(|v| {
+                let mut v = *v;
+                v.position = (Vec3::from(v.position) + shift).to_array();
+                v
+            }));
             ranges.push(start..vertices.len() as u32);
         }
         self.vertices = vertices;
@@ -1155,7 +1181,7 @@ mod tests {
         // Free: the same part and fins, moved wholesale, and not listed as parts of the rocket.
         let bare = Mesh::from_rocket(&rest, Marks::default());
         let shift = Vec3::new(0.3, 0.2, 1.0);
-        let free = Mesh::from_rocket(&rest, Marks { free: Some(Free { carried, at: shift }), ..Marks::default() });
+        let free = Mesh::from_rocket(&rest, Marks { free: Some(Free { what: FreeKind::Axial(carried), at: shift }), ..Marks::default() });
         assert_eq!(free.parts.len(), bare.parts.len());
         let ghosted = |m: &Mesh| m.vertices.iter().filter(|v| v.state == GHOST).count();
         assert_eq!(ghosted(&bare), 0);
@@ -1163,5 +1189,73 @@ mod tests {
         assert_eq!(free.vertices.len() - bare.vertices.len(), ghosted(&free));
         let free_min_z = free.vertices.iter().filter(|v| v.state == GHOST).map(|v| v.position[2]).fold(f32::MAX, f32::min);
         assert!(free_min_z >= shift.z - 1e-4);
+    }
+
+    #[test]
+    fn a_held_radial_group_and_internal_part_are_ghosts_in_the_air_without_their_stand_in() {
+        let rocket = Rocket::from_bytes(include_bytes!("../../assets/examples/hpr_l1_cert.bowshock")).unwrap();
+        let bare = Mesh::from_rocket(&rocket, Marks::default());
+        let ghosted = |m: &Mesh, layer: f32| m.vertices.iter().filter(|v| v.state == GHOST && v.layer == layer).count();
+        let at = Vec3::new(0.2, 0.1, 0.5);
+        let fins = RadialKind::FinSet { root_chord: 0.1, tip_chord: 0.05, span: 0.06, sweep: 0.04, thickness: 0.003 };
+        let group = |count| {
+            let what = FreeKind::Radial { kind: &fins, count, angle: 0.0, radius: 0.04 };
+            Mesh::from_rocket(&rocket, Marks { free: Some(Free { what, at }), ..Marks::default() })
+        };
+        let three = group(3);
+        // Only the copies are added (the tube they stand on is not drawn); more copies are more triangles; nothing is listed or bounded.
+        assert!(ghosted(&three, LAYER_RADIAL) > 0 && three.vertices.len() - bare.vertices.len() == ghosted(&three, LAYER_RADIAL));
+        assert_eq!(ghosted(&three, LAYER_SHELL), 0);
+        assert_eq!(ghosted(&group(6), LAYER_RADIAL), 2 * ghosted(&three, LAYER_RADIAL));
+        assert_eq!((three.parts.len(), three.min, three.max), (bare.parts.len(), bare.min, bare.max));
+        // The group stands where it is held: its fore end at `at.z`.
+        let fore = three.vertices.iter().filter(|v| v.state == GHOST).map(|v| v.position[2]).fold(f32::MAX, f32::min);
+        assert!((fore - at.z).abs() < 0.02, "{fore}");
+
+        let ring = InternalKind::CenteringRing { outer_diameter: None, inner_diameter: None, thickness: 0.006 };
+        let what = FreeKind::Internal { kind: &ring, bore: 0.06 };
+        let held = Mesh::from_rocket(&rocket, Marks { free: Some(Free { what, at }), ..Marks::default() });
+        let all_ghosts = held.vertices.iter().filter(|v| v.state == GHOST).count();
+        assert!(ghosted(&held, LAYER_INTERNAL) > 0 && held.vertices.len() - bare.vertices.len() == all_ghosts);
+        assert_eq!(ghosted(&held, LAYER_SHELL), 0);
+        // Auto-sized for the bore it was asked for: a ring that fills the Ø60 bore, up to its wall.
+        let widest =
+            held.vertices.iter().filter(|v| v.state == GHOST).map(|v| (v.position[0] - at.x).abs().max((v.position[1] - at.y).abs())).fold(0.0f32, f32::max);
+        assert!((widest - 0.03).abs() < 0.002, "{widest}");
+    }
+
+    /// The cost of building the mesh once per cursor move while a part is held in the air, on the example rocket. Run with
+    /// `cargo test --release -p bowshock free_ghost_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement, not a check"]
+    fn free_ghost_cost_per_cursor_move() {
+        let rocket = Rocket::from_bytes(include_bytes!("../../assets/examples/hpr_l1_cert.bowshock")).unwrap();
+        let db = MotorDb::bundled();
+        let timed = |what: &dyn Fn(f32) -> Mesh| {
+            let start = std::time::Instant::now();
+            let mut vertices = 0;
+            for i in 0..50 {
+                vertices = what(i as f32 * 0.01).vertices.len();
+            }
+            (start.elapsed().as_secs_f64() * 1000.0 / 50.0, vertices)
+        };
+        let tube = PartKind::BodyTube { length: 0.3, diameter: 0.1 };
+        let (rest, origin, _) = pick_up(&rocket);
+        let origin_bin = assembly::bin_origin(&tube);
+        let fins = RadialKind::FinSet { root_chord: 0.1, tip_chord: 0.05, span: 0.06, sweep: 0.04, thickness: 0.003 };
+        let (without, v0) = timed(&|_| Mesh::from_rocket(&rocket, Marks { motors: Some(&db), ..Marks::default() }));
+        let (axial, v1) = timed(&|x| {
+            let what = FreeKind::Axial(Carried { origin: &origin_bin, base: None });
+            Mesh::from_rocket(&rocket, Marks { motors: Some(&db), free: Some(Free { what, at: Vec3::new(x, 0.0, 0.0) }), ..Marks::default() })
+        });
+        let (picked, v2) = timed(&|x| {
+            let what = FreeKind::Axial(Carried { origin: &origin, base: Some(&rocket) });
+            Mesh::from_rocket(&rest, Marks { motors: Some(&db), free: Some(Free { what, at: Vec3::new(x, 0.0, 0.0) }), ..Marks::default() })
+        });
+        let (radial, v3) = timed(&|x| {
+            let what = FreeKind::Radial { kind: &fins, count: 3, angle: 0.0, radius: 0.04 };
+            Mesh::from_rocket(&rocket, Marks { motors: Some(&db), free: Some(Free { what, at: Vec3::new(x, 0.0, 0.0) }), ..Marks::default() })
+        });
+        println!("rocket alone: {without:.2} ms ({v0} vertices); bin tube held: {axial:.2} ms ({v1}); picked-up part held: {picked:.2} ms ({v2}); fins held: {radial:.2} ms ({v3})");
     }
 }

@@ -10,6 +10,7 @@ use crate::engine::result::{PointResult, StopReason};
 use crate::engine::run::run_on;
 use crate::engine::run3::{run3_on, PointResult3};
 use crate::error::Error;
+use crate::field::{Field, FieldSink, FieldTap};
 use crate::progress::{Progress, ProgressSink};
 use crate::spec::{BodySpec, FinSpec, MotorSpec};
 use bowshock_cfd::gas::GAMMA;
@@ -161,6 +162,9 @@ pub struct PolarPoint {
     /// Absolute difference of the total drag to the run at the neighbouring grid level, if [`Analysis::estimate_uncertainty`] was on and
     /// neither point failed.
     pub cd_uncertainty: Option<f64>,
+    /// The final flow field of the point, on the grid its drag was computed on; `Some` only with [`Analysis::keep_fields`].
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub field: Option<Field>,
 }
 
 /// Reads an `f64` that a format without NaN (JSON) wrote as `null` back as NaN.
@@ -258,6 +262,9 @@ pub struct AnalysisSpec {
     pub warm_start: bool,
     /// Grid-level uncertainty estimate ([`Analysis::estimate_uncertainty`]).
     pub estimate_uncertainty: bool,
+    /// Keep the final flow field of every point ([`Analysis::keep_fields`]).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub keep_fields: bool,
 }
 
 /// Configuration of a sweep over Mach number for one body.
@@ -286,6 +293,8 @@ pub struct Analysis {
     estimate_uncertainty: bool,
     lift_hook: Option<fn(&mut Case3)>,
     progress: Option<ProgressSink>,
+    keep_fields: bool,
+    field_sink: Option<FieldSink>,
 }
 
 /// Free stream of a viscous sweep.
@@ -321,6 +330,8 @@ impl Analysis {
             estimate_uncertainty: false,
             lift_hook: None,
             progress: None,
+            keep_fields: false,
+            field_sink: None,
         }
     }
 
@@ -362,6 +373,7 @@ impl Analysis {
             drag_tolerance: self.drag_tolerance,
             warm_start: self.warm_start,
             estimate_uncertainty: self.estimate_uncertainty,
+            keep_fields: self.keep_fields,
         })
     }
 
@@ -380,6 +392,7 @@ impl Analysis {
         a.drag_tolerance = spec.drag_tolerance;
         a.warm_start = spec.warm_start;
         a.estimate_uncertainty = spec.estimate_uncertainty;
+        a.keep_fields = spec.keep_fields;
         Ok(a)
     }
 
@@ -441,6 +454,31 @@ impl Analysis {
     /// viscous drag run and of a 3D run is reported as a coefficient on the reference area.
     pub fn on_progress(mut self, f: impl Fn(&Progress) -> ControlFlow<()> + Send + Sync + 'static) -> Self {
         self.progress = Some(ProgressSink::new(f));
+        self
+    }
+
+    /// Keep the final flow field of every point in [`PolarPoint::field`] (default off: a field is far larger than the rest of a
+    /// point, see [`crate::field`]). The field is the state the reported drag was integrated from, on the grid of the requested
+    /// resolution and wake treatment. It does not change the iteration or the drag.
+    pub fn keep_fields(mut self, on: bool) -> Self {
+        self.keep_fields = on;
+        self
+    }
+
+    /// Calls `f` with a snapshot of the flow field of the run in flight every `every` solver iterations (rounded up to a multiple of
+    /// [`SAMPLE_INTERVAL`](crate::progress::SAMPLE_INTERVAL); [`SNAPSHOT_INTERVAL`](crate::field::SNAPSHOT_INTERVAL) is a good value
+    /// for a picture that follows the solve), from the thread that runs the analysis, before the progress report of that iteration.
+    /// The CPU backend copies the solver's arrays; the GPU backend reads the state back from the device only at these iterations
+    /// (a viscous run reads it back every `SAMPLE_INTERVAL` iterations for its drag monitor anyway, so a snapshot adds only the
+    /// copy). A snapshot does not change the iteration or the result. The receiver owns the snapshot: keep it short (hand it to a
+    /// channel). The 3D runs of [`Analysis::run_lift`] take no snapshots.
+    ///
+    /// Measured on an Apple M1 Max (viscous, Mach 2, the 1.1 m example body, a release build, the GPU backend): every 500 iterations
+    /// cost nothing that the run-to-run spread shows, 18.3 s against 18.2 s for 2 000 iterations on the coarse grid and 8.4 s against
+    /// 8.4 s for 1 000 on the medium one (two runs each). An Euler run on the GPU does not read the state back otherwise and pays one
+    /// read-back per snapshot (not measured).
+    pub fn on_field(mut self, every: usize, f: impl Fn(Field) + Send + Sync + 'static) -> Self {
+        self.field_sink = Some(FieldSink::new(every, f));
         self
     }
 
@@ -586,6 +624,25 @@ impl Analysis {
         Ok(self.prepare(machs)?.2)
     }
 
+    /// The grid of the analysis at `mach` with the free stream on it: the state a cold run starts from, as a [`Field`] (iteration
+    /// 0). Builds the grid only; nothing is solved. `mach` is checked like the Mach numbers of [`Analysis::run`].
+    pub fn initial_field(&self, mach: f64) -> Result<Field, Error> {
+        let (_, _, cases) = self.prepare(&[mach])?;
+        let case = &cases[0];
+        let mut s = case.try_build_solver()?;
+        s.u.fill(bowshock_cfd::gas::prim_to_cons(&bowshock_cfd::gas::freestream(mach)));
+        Ok(Field::of_solver(&s, mach, 0, case.wake, self.field_scale()))
+    }
+
+    /// Length of a solver length unit (a nose diameter) in the unit of a [`Field`]'s coordinates: metres for a dimensional body.
+    fn field_scale(&self) -> f64 {
+        if self.dimensional {
+            self.d_nose
+        } else {
+            1.0
+        }
+    }
+
     /// Zero-lift drag at each Mach number of `machs` (each in `[0.1, 3.0]`).
     pub fn run(&self, machs: &[f64]) -> Result<Polar, Error> {
         let (order, rans, cases) = self.prepare(machs)?;
@@ -647,6 +704,10 @@ impl Analysis {
         }
         let q = if self.flight.is_some() { (self.d_nose / self.d_ref).powi(2) } else { 1.0 };
         case.progress = self.progress.as_ref().map(|p| p.scaled(q));
+        // Snapshots come from every run; the final field is kept only on the grid of the requested resolution (the uncertainty
+        // sweep runs the neighbouring level, whose drag is not the one reported).
+        let keep = self.keep_fields && level == self.resolution.level();
+        case.fields = (keep || self.field_sink.is_some()).then(|| FieldTap { scale: self.field_scale(), keep, live: self.field_sink.clone() });
         match rans.and_then(|r| r.jet) {
             Some(jet) => case.with_motor(jet),
             None => case,
@@ -674,7 +735,8 @@ impl Analysis {
         Drag { forebody_pressure: forebody_pressure * q, friction: friction.map(|f| f * q), base: base * q, base_modelled, fins, total }
     }
 
-    fn point(&self, mach: f64, detail: PointResult, other: Option<&PointResult>) -> PolarPoint {
+    fn point(&self, mach: f64, mut detail: PointResult, other: Option<&PointResult>) -> PolarPoint {
+        let field = detail.field.take();
         let drag = self.drag(mach, &detail);
         let quality = quality(&detail, &drag);
         let warnings = self.warnings(mach, &detail);
@@ -683,7 +745,7 @@ impl Analysis {
             (quality != Quality::Failed && self::quality(o, &od) != Quality::Failed).then(|| (drag.total - od.total).abs())
         });
         let detail = self.detail(&detail);
-        PolarPoint { mach, alpha: 0.0, drag, quality, warnings, cd_uncertainty, detail }
+        PolarPoint { mach, alpha: 0.0, drag, quality, warnings, cd_uncertainty, detail, field }
     }
 
     /// Public summary of a solver result: coefficients on the reference area, wall points in metres.
@@ -1190,6 +1252,7 @@ mod tests {
             min_rho: 0.1,
             min_p: 0.1,
             y_plus_max: 1.0,
+            field: None,
         }
     }
 

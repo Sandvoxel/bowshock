@@ -113,6 +113,22 @@ pub enum Message {
     MotorsFetched(u64, Vec<super::motor_fetch::Outcome>),
 }
 
+impl Message {
+    /// Whether the message is news from work running off the UI thread (a solver's progress, a finished flight, a lookup's
+    /// answer) or a report of the keys held, as opposed to something the person did. Such a message must not close an open
+    /// menu: a solve reports about ten times a second.
+    pub(super) fn background(&self) -> bool {
+        use analyze::Message as Analyze;
+        use simulate::Message as Simulate;
+        matches!(
+            self,
+            Message::MotorsFetched(..)
+                | Message::Analyze(Analyze::Cfd(..) | Analyze::OptEvent(..) | Analyze::Done(..) | Analyze::CompareDone(..))
+                | Message::Simulate(Simulate::Done(_) | Simulate::Dispersed(_) | Simulate::ForecastDone(_) | Simulate::Modifiers(_))
+        )
+    }
+}
+
 /// What a click means while a field is in pick mode (the viewport and the lanes are pickable): `Some(Some(part))` opens the part's
 /// value menu, `Some(None)` is swallowed (a click on nothing, a grab, a drag of a bar), `None` is not a pick at all.
 pub(super) fn pick_intercept(message: &Message) -> Option<Option<PartId>> {
@@ -127,7 +143,7 @@ pub(super) fn pick_intercept(message: &Message) -> Option<Option<PartId>> {
         Message::Lanes(Lanes::Select(Some(key)) | Lanes::Toggle(key)) => Some(Some(key.part())),
         Message::Viewport(Viewport::PartMenu(_)) | Message::Lanes(Lanes::PartMenu(_)) => Some(None),
         Message::Lanes(
-            Lanes::Select(None) | Lanes::SelectSeparation(_) | Lanes::Focus(_) | Lanes::GrabAxial(_) | Lanes::MoveTo { .. } | Lanes::ResizeTo { .. },
+            Lanes::Select(None) | Lanes::SelectSeparation(_) | Lanes::Focus(_) | Lanes::GrabAxial(..) | Lanes::MoveTo { .. } | Lanes::ResizeTo { .. },
         ) => Some(None),
         _ => None,
     }

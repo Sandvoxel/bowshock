@@ -143,6 +143,11 @@ pub struct Ctx {
     pub selected_flight: Option<bowshock_model::FlightId>,
     /// The report of the last background run, shown as a toast away from Simulate (see [`super::run_report`]).
     pub run: Option<super::run_report::RunReport>,
+    /// Parts are placed by clicking (Preferences > Editor > Placing parts): a carried part stays in hand when the button is
+    /// released and is put down by the next click. Kept in the user's settings.
+    pub click_to_place: bool,
+    /// The cursor is over the parts bin (the bin reports it): a carried part released or clicked there is deleted or put back.
+    pub over_bin: bool,
 }
 
 impl Ctx {
@@ -189,6 +194,8 @@ impl Ctx {
             scale: None,
             selected_flight: None,
             run: None,
+            click_to_place: false,
+            over_bin: false,
         }
     }
 

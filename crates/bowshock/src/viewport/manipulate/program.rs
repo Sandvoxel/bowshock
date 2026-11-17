@@ -17,6 +17,14 @@ impl canvas::Program<Message> for Overlay<'_> {
 
     fn update(&self, state: &mut State, event: &Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<Action<Message>> {
         let size = bounds.size();
+        // A carry the app has put back (Esc, or the parts bin) is forgotten.
+        if let Some(carried) = state.carry.as_mut() {
+            if self.hand.lifted == Some(carried.carry.id) {
+                carried.confirmed = true;
+            } else if carried.confirmed {
+                state.carry = None;
+            }
+        }
         let edit = |e: Edit| Some(Action::publish(Message::Edit(e)).and_capture());
         // The right button orbits (the scene below sees it too); pressed and released in place on a part it opens that part's
         // context menu instead, so the event is never captured here.
@@ -93,6 +101,10 @@ impl canvas::Program<Message> for Overlay<'_> {
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let at = cursor.position_in(bounds)?;
+                // A part held with no button down (click to place) is put down where it is by a left press.
+                if self.hand.click && state.carry.take().is_some() {
+                    return edit(Edit::End);
+                }
                 let vis = self.visible(size, state.modifiers.unwrap_or(self.drive_modifiers));
                 if let Some(h) = self.handle_at(at, size, state.modifiers.unwrap_or(self.drive_modifiers)) {
                     let id = self.selected?;
@@ -137,8 +149,19 @@ impl canvas::Program<Message> for Overlay<'_> {
                         return Some(Action::publish(Message::Select(Some(Pick::Radial { id: pod, instance: 0 }))).and_capture());
                     }
                 }
-                state.press = Some(Press { at, target: pick::pick_inside(self.rocket, &self.camera, at, size, self.shown_inside()) });
-                Some(Action::capture())
+                let target = pick::pick_inside(self.rocket, &self.camera, at, size, self.shown_inside());
+                state.press = Some(Press { at, target });
+                // An airframe part of the core pressed here is held where it was pressed if the press becomes a pick-up.
+                let held = match target {
+                    Some(Pick::Axial(id)) if self.rocket.pod_of(id).is_none() => {
+                        pick::axis_station(&self.camera, at, size).zip(self.rocket.part_station(id)).map(|(z, fore)| (id, z - fore))
+                    }
+                    _ => None,
+                };
+                Some(match held {
+                    Some((id, hold)) => Action::publish(Message::Held(id, hold)).and_capture(),
+                    None => Action::capture(),
+                })
             }
             Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 let at = cursor.position().map(|p| Point::new(p.x - bounds.x, p.y - bounds.y))?;
@@ -171,7 +194,7 @@ impl canvas::Program<Message> for Overlay<'_> {
                         // An internal part is carried where it stands: along the rocket, into the next body part past the end.
                         Pick::Internal(id) => {
                             let carry = Carry::new(self.rocket, id, pick::axis_station(&self.camera, from, size)?)?;
-                            state.carry = Some(Carried { carry, landing: None, placed: None });
+                            state.carry = Some(Carried { carry, landing: None, placed: None, confirmed: false });
                             Some(Action::publish(Message::Edit(Edit::Carry(id))))
                         }
                         pick => Some(Action::publish(Message::Grab(pick)).and_capture()),
@@ -181,8 +204,16 @@ impl canvas::Program<Message> for Overlay<'_> {
                 (hover != self.hover).then(|| Action::publish(Message::Hover(hover)))
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                if state.carry.take().is_some() || state.drag.take().is_some() {
+                if state.drag.take().is_some() {
+                    return edit(Edit::End);
+                }
+                if state.carry.is_some() {
+                    // Placing by clicking, the part stays in hand after the release: the next press puts it down.
+                    if self.hand.click {
+                        return None;
+                    }
                     // The edit is over: the document records its one undo step.
+                    state.carry = None;
                     return edit(Edit::End);
                 }
                 let press = state.press.take()?;
