@@ -11,6 +11,7 @@ pub mod gpu;
 pub mod gpu3;
 pub mod grid3;
 pub mod numerics;
+pub mod planform;
 pub mod result;
 pub mod run;
 pub mod run3;

@@ -1,9 +1,9 @@
 //! Cone validation driver: M=2 flow over 10 and 15 degree cones vs Taylor-Maccoll.
 //!
-//! Usage: `cargo run --release --bin cone [-- --quick] [--limiter minmod|vanalbada] [--mach M]`
-//! `--quick` runs only the coarse and medium grids.
+//! Usage: `cargo run --release --bin cone [-- --quick] [--limiter minmod|vanalbada] [--mach M] [--wedge]`
+//! `--quick` runs only the coarse and medium grids. `--wedge` solves on the single-cell wedge of the 3D engine (`bowshock_cases::wedge`) instead of the 2D solver.
 
-use bowshock_cases::cone::{run_cone, ConeCase};
+use bowshock_cases::cone::{run_cone, run_cone_wedge, ConeCase};
 use bowshock_cfd::flux::Limiter;
 use bowshock_reference::taylor_maccoll::solve_cone;
 use std::fs;
@@ -14,6 +14,7 @@ use std::time::Instant;
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let quick = args.iter().any(|a| a == "--quick");
+    let wedge = args.iter().any(|a| a == "--wedge");
     let arg = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let limiter = match arg("--limiter").as_deref() {
         Some("vanalbada") => Limiter::VanAlbada,
@@ -44,7 +45,7 @@ fn main() {
             let mut case = ConeCase::new(mach, theta, ni, nj);
             case.limiter = limiter;
             let t0 = Instant::now();
-            let res = run_cone(&case, &tm);
+            let res = if wedge { run_cone_wedge(&case, &tm).expect("wedge run") } else { run_cone(&case, &tm) };
             let dt = t0.elapsed().as_secs_f64();
             let lim = match limiter {
                 Limiter::VanAlbada => "vanalbada",
