@@ -35,6 +35,7 @@ use bowshock_cfd::grid3::Grid3;
 use bowshock_cfd::implicit::{ImplicitParams, LineSolve3};
 use bowshock_cfd::solver3::{Config3, Scheme3};
 use bowshock_core::engine::case3::{Case3, Tier};
+use bowshock_core::engine::gpu3::GpuRunner3;
 use bowshock_core::engine::grid3::body_grid3;
 use bowshock_core::{AftSpec, BodySpec, NoseShape, NoseSpec, Resolution};
 use bowshock_gpu_cases::wedge3::{engine_case, wedge_case3};
@@ -83,7 +84,7 @@ struct BenchCase {
     /// Default number of timed iterations.
     n: usize,
     /// A viscous SST case: the 2D engine case whose wedge it runs (`None`: Euler on `grid`).
-    rans: Option<bowshock_core::engine::case::Case>,
+    rans: Option<Case3>,
 }
 
 impl BenchCase {
@@ -136,8 +137,29 @@ fn anf_case() -> Result<BenchCase, String> {
 /// preconditioning below Mach 1), the free stream of that Mach number.
 fn wedge_rans_case(mach: f64) -> Result<BenchCase, String> {
     let c2 = engine_case(&example_body(), mach, true, Resolution::Coarse);
-    let grid = Case3::wedge_of(&c2, 0).build_solver().map_err(|e| format!("wedge grid: {e}"))?.grid;
-    Ok(BenchCase { name: "wedge", grid, alpha_deg: 0.0, n: 500, rans: Some(c2) })
+    let c3 = Case3::wedge_of(&c2, 0);
+    let grid = c3.build_solver().map_err(|e| format!("wedge grid: {e}"))?.grid;
+    Ok(BenchCase { name: "wedge", grid, alpha_deg: 0.0, n: 500, rans: Some(c3) })
+}
+
+/// The G-F1 case: the four-fin sector of the Army-Navy body at `Re_c` 1e6 (chord 0.5 d, span 0.5 d, t/c 2 %, double wedge) on the Coarse tier (walls resolved, SST),
+/// Mach `mach`.
+fn sector_rans_case(mach: f64) -> Result<BenchCase, String> {
+    let fins = bowshock_core::engine::grid3::Fins3 {
+        count: 4,
+        root_chord: 0.5,
+        tip_chord: 0.5,
+        span: 0.5,
+        sweep: 0.0,
+        thickness: 0.02 * 0.5,
+        te_to_base: 0.0,
+        profile: bowshock_core::FinProfile::DoubleWedge,
+        planform: None,
+    };
+    let flow = bowshock_core::engine::case3::WallFlow { re_c: 1.0e6, mach_max: 2.0, ks_body: 0.0, ks_fin: 0.0, sutherland: 0.368 };
+    let c3 = Case3::sector(mach, Case3::anf_body(), fins, Tier::Coarse(flow), 0);
+    let grid = c3.build_solver().map_err(|e| format!("sector grid: {e}"))?.grid;
+    Ok(BenchCase { name: "sector", grid, alpha_deg: 0.0, n: 100, rans: Some(c3) })
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------
@@ -229,6 +251,8 @@ struct Opts {
     /// Also profile the viscous residual (the S5a kernels) on the grid.
     viscous: bool,
     n: Option<usize>,
+    /// The per-stage profile of one step (viscous cases).
+    stages: bool,
 }
 
 /// The measurement of a solver: first call (compile, trace, 20 iterations), us / iteration of the `iterate_all` replay of `n` (best of 3, after 20 warm-up
@@ -262,18 +286,76 @@ fn bench_combo(case: &BenchCase, precision: (Precision, &'static str), solve: (L
     let sampler = if o.mem { MemSampler::start() } else { None };
     let ctx = luma::Context::new().map_err(|e| format!("no GPU context: {e}"))?;
     let cfg = case.config(solve.0);
-    let mut s = match &case.rans {
-        // the viscous SST wedge: `Case3::wedge_of` carries the 2D case's numerics and viscous parameters (first-order start-up 0: the timed step is the MUSCL one)
-        Some(c2) => {
-            let mut host = Case3::wedge_of(c2, 0).build_solver().map_err(|e| format!("wedge solver: {e}"))?;
-            let bowshock_cfd::solver::Scheme::Implicit(p) = c2.numerics.scheme else { return Err("the viscous numerics are implicit".into()) };
-            host.cfg.scheme = Scheme3::Implicit(ImplicitParams { line_solve: solve.0, ..p });
-            host.cfg.first_order_iters = 0;
-            GpuSolver3::from_host(&ctx, &host, precision.0).map_err(|e| format!("{}: {e}", precision.1))?
+    let mut runner: Option<GpuRunner3> = None;
+    let mut plain: Option<GpuSolver3> = None;
+    match &case.rans {
+        // a viscous SST case through the runner (`Case3::viscous`: wedge_of carries the 2D numerics, a tier the 3D ones; first-order start-up 0: the timed step is the MUSCL one)
+        Some(c3) => {
+            let mut r = GpuRunner3::new(c3, precision.0).map_err(|e| format!("{}: {e}", precision.1))?;
+            let mut cfg = r.host.cfg.clone();
+            cfg.first_order_iters = 0;
+            if let Scheme3::Implicit(p) = &mut cfg.scheme {
+                p.line_solve = solve.0;
+            }
+            r.gpu.set_config(&cfg).map_err(|e| e.to_string())?;
+            runner = Some(r);
         }
-        None => GpuSolver3::new(&ctx, &case.grid, &cfg, precision.0).map_err(|e| format!("{}: {e}", precision.1))?,
+        None => plain = Some(GpuSolver3::new(&ctx, &case.grid, &cfg, precision.0).map_err(|e| format!("{}: {e}", precision.1))?),
+    }
+    let s: &mut GpuSolver3 = match (&mut runner, &mut plain) {
+        (Some(r), _) => &mut r.gpu,
+        (_, Some(p)) => p,
+        _ => unreachable!("one of the two solvers is built"),
     };
-    let (first_call_s, us, p, last) = measure(&mut s, n)?;
+    let (first_call_s, us, p, last) = measure(s, n)?;
+    if o.stages {
+        s.reset().map_err(|e| e.to_string())?;
+        s.run_replay(20).map_err(|e| e.to_string())?;
+        let stages = s.profile_stages(3).map_err(|e| format!("profile_stages: {e}"))?;
+        let total: f64 = stages.iter().map(|(_, p)| p.total().as_secs_f64() * 1e3).sum();
+        let launches: u32 = stages.iter().map(|(_, p)| p.launches()).sum();
+        println!(
+            "\n### {} {} {} {}: stages of one implicit step (each stage evaluated alone, best of 3; fused step {:.2} ms in {} launches, replay {:.2} ms / iteration)\n| stage | launches | GPU ms |\n|---|---|---|",
+            case.name,
+            precision.1,
+            solve.1,
+            case.cells(),
+            p.total().as_secs_f64() * 1e3,
+            p.launches(),
+            us / 1e3
+        );
+        for (name, pr) in &stages {
+            println!("| {name} | {} | {:.3} |", pr.launches(), pr.total().as_secs_f64() * 1e3);
+        }
+        println!("| sum of the stages | {launches} | {total:.3} |");
+        for (name, pr) in &stages {
+            println!("\n#### {name}: {} launches, {:.0} us\n```\n{}```", pr.launches(), pr.total().as_secs_f64() * 1e6, compact(pr));
+        }
+    }
+    if let (Some(r), Some(c3)) = (&runner, &case.rans) {
+        // the stop-rule read-backs: the forces of the chunk (device reduction of the class sums and one download), the residual history download per chunk
+        let t = Instant::now();
+        for _ in 0..20 {
+            r.lift_forces(c3).map_err(|e| e.to_string())?;
+        }
+        let wall_ms = 1e3 * t.elapsed().as_secs_f64() / 20.0;
+        let (res, profile) = r.gpu.context().profile(|| r.lift_forces(c3)).map_err(|e| e.to_string())?;
+        res.map_err(|e| e.to_string())?;
+        println!(
+            "\n### {} {} forces of the stop rule (lift_forces: pressure + shear class sums, one download): {:.2} ms wall per call, {} launches, {:.3} ms GPU\n```\n{}```",
+            case.name,
+            precision.1,
+            wall_ms,
+            profile.launches(),
+            profile.total().as_secs_f64() * 1e3,
+            compact(&profile)
+        );
+    }
+    let s: &mut GpuSolver3 = match (&mut runner, &mut plain) {
+        (Some(r), _) => &mut r.gpu,
+        (_, Some(p)) => p,
+        _ => unreachable!("one of the two solvers is built"),
+    };
     if o.profile {
         println!(
             "\n### {} {} {} {} - one implicit step as the eval loop launches it: {} kernel launches, {:.0} us GPU time, {} fusion cuts\n```\n{}```",
@@ -372,6 +454,7 @@ fn main() -> Result<(), String> {
         allow_nonfinite: flag("--allow-nonfinite"),
         viscous: flag("--viscous"),
         n: value("--n").map(|n| n.parse::<usize>().map_err(|e| format!("--n: {e}"))).transpose()?,
+        stages: flag("--stages"),
     };
     let mut cases = Vec::new();
     for c in if which == "all" { vec!["wedge", "sector", "anf"] } else { vec![which.as_str()] } {
@@ -380,7 +463,8 @@ fn main() -> Result<(), String> {
             "sector" => sector_case(value("--nk").map_or(Ok(18), |v| v.parse::<usize>().map_err(|e| format!("--nk: {e}")))?)?,
             "anf" => anf_case()?,
             r if r.starts_with("wedge-rans:") => wedge_rans_case(r[11..].parse::<f64>().map_err(|e| format!("--case wedge-rans:<mach>: {e}"))?)?,
-            other => return Err(format!("--case wedge|sector|anf|wedge-rans:<mach>|all, got `{other}`")),
+            r if r.starts_with("sector-rans:") => sector_rans_case(r[12..].parse::<f64>().map_err(|e| format!("--case sector-rans:<mach>: {e}"))?)?,
+            other => return Err(format!("--case wedge|sector|anf|wedge-rans:<mach>|sector-rans:<mach>|all, got `{other}`")),
         });
     }
     if opts.mem && MemSampler::start().map(MemSampler::stop).is_none() {

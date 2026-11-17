@@ -138,6 +138,7 @@ pub mod f32s {
     include!("turbulence3.rs");
     include!("rans3.rs");
     include!("implicit3.rs");
+    include!("stages3.rs");
     include!("implicit.rs");
     include!("viscous.rs");
     include!("turbulence.rs");
@@ -204,6 +205,7 @@ pub mod df32s {
     include!("turbulence3.rs");
     include!("rans3.rs");
     include!("implicit3.rs");
+    include!("stages3.rs");
     include!("implicit.rs");
     include!("viscous.rs");
     include!("turbulence.rs");
@@ -594,6 +596,11 @@ impl GpuSolver3 {
     /// Launches and GPU time of one evaluation of the viscous residual of the current state (kernels alone); needs [`GpuSolver3::set_viscous`].
     pub fn profile_viscous(&mut self) -> Result<luma::Profile> {
         Ok(on3_mut!(self, s => s.profile_viscous3()?))
+    }
+
+    /// The stages of one implicit block step and their GPU profiles (best of `reps`), the state unchanged: see `stages3.rs`.
+    pub fn profile_stages(&mut self, reps: usize) -> Result<Vec<(String, luma::Profile)>> {
+        Ok(on3_mut!(self, s => s.profile_stages3(reps)?))
     }
 
     /// Are the viscous terms on?
