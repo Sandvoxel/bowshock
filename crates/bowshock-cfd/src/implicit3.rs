@@ -329,6 +329,7 @@ fn assemble3(s: &Solver3, p: &ImplicitParams, dir: usize) -> Factor {
     let (ni, nj, nk) = (s.grid.ni, s.grid.nj, s.grid.nk);
     let (grid, w, dt, solid) = (&s.grid, &s.w, &s.dt, &s.solid);
     let (rans, lm) = (s.rans.as_deref(), s.precond);
+    let jet = s.jet.as_deref().map(|j| &j.mask[..]);
     let wedge = s.is_wedge();
     let n = ni * nj * nk;
     let stride = [1, ni, ni * nj][dir];
@@ -397,8 +398,11 @@ fn assemble3(s: &Solver3, p: &ImplicitParams, dir: usize) -> Factor {
                 };
                 let lower_solid = m > 0 && solid[c - stride];
                 let upper_solid = m + 1 < nl && solid[c + stride];
-                let wm = if lower_solid { s.wall_ghost(wk, fl.n) } else { w[pidx3(ni, nj, nk, ii - e[0], jj - e[1], kk - e[2])] };
-                let wp = if upper_solid { s.wall_ghost(wk, fr.n) } else { w[pidx3(ni, nj, nk, ii + e[0], jj + e[1], kk + e[2])] };
+                // a `Part::Jet` neighbour is the fixed jet state (padded `w` holds it): no wall ghost, no Jacobian to the interior
+                let lower_jet = lower_solid && jet.is_some_and(|m| m[c - stride]);
+                let upper_jet = upper_solid && jet.is_some_and(|m| m[c + stride]);
+                let wm = if lower_solid && !lower_jet { s.wall_ghost(wk, fl.n) } else { w[pidx3(ni, nj, nk, ii - e[0], jj - e[1], kk - e[2])] };
+                let wp = if upper_solid && !upper_jet { s.wall_ghost(wk, fr.n) } else { w[pidx3(ni, nj, nk, ii + e[0], jj + e[1], kk + e[2])] };
                 let visc = rans.map_or((0.0, 0.0), |r| r.lam_pair(grid, dir, i, j, k));
                 let (mut l, mut dd, mut u) = cell_blocks3(wk, &wm, &wp, fl, fr, grid.vol[c], dt[c], p, visc, lm.as_ref());
                 if wedge && dir == 1 {
@@ -421,7 +425,9 @@ fn assemble3(s: &Solver3, p: &ImplicitParams, dir: usize) -> Factor {
                     axpy(&mut dd, 1.0, &mm(&l, &t));
                     l = ZERO5;
                 } else if lower_solid {
-                    axpy(&mut dd, 1.0, &mm(&l, &s.wall_jacobian(fl.n)));
+                    if !lower_jet {
+                        axpy(&mut dd, 1.0, &mm(&l, &s.wall_jacobian(fl.n)));
+                    }
                     l = ZERO5;
                 }
                 if m == nl - 1 {
@@ -429,7 +435,9 @@ fn assemble3(s: &Solver3, p: &ImplicitParams, dir: usize) -> Factor {
                     axpy(&mut dd, 1.0, &mm(&u, &t));
                     u = ZERO5;
                 } else if upper_solid {
-                    axpy(&mut dd, 1.0, &mm(&u, &s.wall_jacobian(fr.n)));
+                    if !upper_jet {
+                        axpy(&mut dd, 1.0, &mm(&u, &s.wall_jacobian(fr.n)));
+                    }
                     u = ZERO5;
                 }
                 lo_p[cl] = l;

@@ -23,7 +23,9 @@ use crate::lowmach5::{spectral_pc3, LowMach};
 use crate::viscous3::{diffusion_rates, wall_ghost3};
 use rayon::prelude::*;
 
+pub(crate) mod jet;
 pub(crate) mod rans;
+pub use jet::JetState3;
 pub use rans::RansOpts3;
 
 /// Ghost layers per side.
@@ -89,6 +91,8 @@ pub struct Solver3 {
     pub(crate) rans: Option<Box<rans::Rans3>>,
     /// Low-Mach preconditioning of the current implicit step (set by `implicit3::step` from `ImplicitParams::low_mach_precond`).
     pub(crate) precond: Option<LowMach>,
+    /// The motor-jet patch ([`Solver3::set_jet`], `solver3/jet.rs`); `None`: no jet (the `Part::Jet` cells, if any, are walls).
+    pub(crate) jet: Option<Box<jet::JetPatch>>,
 }
 
 impl Solver3 {
@@ -127,6 +131,7 @@ impl Solver3 {
             rot_k: rot(&grid.kface),
             rans: None,
             precond: None,
+            jet: None,
             grid,
             cfg,
         }
@@ -254,10 +259,11 @@ impl Solver3 {
         self.fill_ghosts();
         self.viscous_pass();
         let noslip = self.rans.is_some();
-        let Solver3 { grid, w, fi, fj, fk, res, solid, wall, rot_i, rot_j, rot_k, .. } = self;
+        let Solver3 { grid, w, fi, fj, fk, res, solid, wall, rot_i, rot_j, rot_k, jet, .. } = self;
         let has_solid = !grid.solid.is_empty();
         let wedge = grid.sym == Symmetry::Wedge;
-        let fam = Family { ni, nj, nk, w, solid, wall, has_solid, lim, low_mach, wedge, noslip };
+        let jet = jet.as_deref().map(|j| (&j.mask[..], j.state.state));
+        let fam = Family { ni, nj, nk, w, solid, wall, has_solid, lim, low_mach, wedge, noslip, jet };
         fam.fluxes(0, &grid.iface, rot_i, fi);
         fam.fluxes(1, &grid.jface, rot_j, fj);
         fam.fluxes(2, &grid.kface, rot_k, fk);
@@ -375,6 +381,8 @@ struct Family<'a> {
     noslip: bool,
     /// Single-cell wedge: the `k` faces carry the pressure flux only.
     wedge: bool,
+    /// Motor jet: the per-cell mask of the `Part::Jet` cells and the jet state they hold; a solid jet cell is no wall.
+    jet: Option<(&'a [bool], Prim3)>,
 }
 
 impl Family<'_> {
@@ -388,6 +396,14 @@ impl Family<'_> {
             && (c[1] as usize) < self.nj
             && (c[2] as usize) < self.nk
             && self.solid[(c[2] as usize * self.nj + c[1] as usize) * self.ni + c[0] as usize]
+    }
+
+    /// The jet state if the cell is a `Part::Jet` cell of the motor-jet patch (inside the grid), else `None`.
+    #[inline]
+    fn jet_at(&self, c: [isize; 3]) -> Option<Prim3> {
+        let (mask, state) = self.jet?;
+        let inside = c.iter().all(|&x| x >= 0) && (c[0] as usize) < self.ni && (c[1] as usize) < self.nj && (c[2] as usize) < self.nk;
+        (inside && mask[(c[2] as usize * self.nj + c[1] as usize) * self.ni + c[0] as usize]).then_some(state)
     }
 
     /// Whether the cell is a wall for its fluid neighbours (a solid cell that is not dead: the stencil beyond a dead cell reads the padded state, which
@@ -461,11 +477,20 @@ impl Family<'_> {
                             continue;
                         }
                         if sm1 {
-                            wm1 = self.wall_ghost(&wp0, f.n);
-                            wm2 = if self.is_solid(cp1) { wm1 } else { self.wall_ghost(&wp1, f.n) };
+                            if let Some(j) = self.jet_at(cm1) {
+                                // the exit face of a motor jet: the stencil behind it is the jet state (the 2D `(jet, jet, p0, p1)`)
+                                (wm1, wm2) = (j, j);
+                            } else {
+                                wm1 = self.wall_ghost(&wp0, f.n);
+                                wm2 = if self.is_solid(cp1) { wm1 } else { self.wall_ghost(&wp1, f.n) };
+                            }
                         } else if sp0 {
-                            wp0 = self.wall_ghost(&wm1, f.n);
-                            wp1 = if self.is_solid(cm2) { wp0 } else { self.wall_ghost(&wm2, f.n) };
+                            if let Some(j) = self.jet_at(p0) {
+                                (wp0, wp1) = (j, j);
+                            } else {
+                                wp0 = self.wall_ghost(&wm1, f.n);
+                                wp1 = if self.is_solid(cm2) { wp0 } else { self.wall_ghost(&wm2, f.n) };
+                            }
                         } else {
                             if self.is_wall(cm2) {
                                 wm2 = self.wall_ghost(&wm1, faces[fidx - fstride].n);

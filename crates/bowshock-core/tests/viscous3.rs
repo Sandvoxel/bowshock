@@ -45,6 +45,7 @@ fn g3_case(mach: f64, level: u32) -> Case {
 /// The 3D solver on the wedge of `case` with the numerics of the 2D case and its viscous parameters.
 fn build3(case: &Case, dtheta: f64, level: u32) -> (Case3, Solver3) {
     let mut c3 = Case3::wedge_of(case, level);
+    c3.jet = case.motor;
     c3.grid.domain = Domain3::Wedge { dtheta };
     let mut s = c3.build_solver().unwrap();
     let n = &case.numerics;
@@ -556,4 +557,75 @@ fn report_residuals(label: &str, r2: &[[f64; 4]], r3: &[Cons3], g: &Grid3) {
         let skew = ((v[0] * f.n[0] + v[1] * f.n[1] + v[2] * f.n[2]).abs() / (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()).acos().to_degrees();
         println!("      skew of the lower j face: {skew:.1} deg");
     }
+}
+
+/// The TP-2005 motor-on case of `ref2d.json` (`tp2005-M<mach>-Me<exit_mach>`): the ogive-cylinder of 0.0635 m (3 d nose, 10 d tube), the facade's atmosphere (11 455 Pa,
+/// 210.42 K), Mach `mach`, a nozzle of 0.8 d at exit Mach `exit_mach`, exit pressure `p_exit` Pa, total temperature 305 K, SST, the wake of the base; the jet state as
+/// `Analysis::viscous` builds it (`k = 1.5 (0.01 u)^2`, `omega = rho k / (10 mu)`).
+fn tp2005_case(mach: f64, exit_mach: f64, p_exit: f64, level: u32) -> Case {
+    use bowshock_core::engine::case::Jet;
+    // the facade cases' atmosphere of each Mach number (`ref2d.json` inputs)
+    let (temperature_k, pressure_pa) = match mach {
+        m if m < 1.8 => (210.424_084_564_550_17, 11_455.082_439_789_36),
+        m if m < 2.2 => (180.555_555_555_555_51, 7_672.259_674_998_845),
+        _ => (144.444_444_444_444_46, 4_484.817_118_370_865),
+    };
+    let air = Atmosphere::Explicit { temperature_k, pressure_pa }.state().unwrap();
+    let d = 0.0635;
+    let body = BaseBody::cylinder(Body { nose: Nose::TangentOgive { fineness: 3.0 } }, 10.0);
+    let (re_c, sutherland) = (air.density * air.sound_speed * d / air.viscosity, 110.4 / air.temperature_k);
+    let t = 305.0 / (1.0 + 0.2 * exit_mach * exit_mach) / air.temperature_k;
+    let p = p_exit / air.pressure_pa;
+    let (rho, u) = (p / t, exit_mach * t.sqrt());
+    let k = 1.5 * (0.01 * u).powi(2);
+    let mu = bowshock_cfd::solver::Viscous { re_c, sutherland, turbulence: Turbulence::Sst, wall_i_start: 0, roughness: 0.0 }.mu(t);
+    let jet = Jet { r_exit: 0.5 * 0.0508 / d, state: [rho, u, 0.0, p / bowshock_cfd::gas::GAMMA], turb: [k, rho * k / (10.0 * mu)] };
+    Case::viscous(mach, body, level, Wake::Base, re_c, sutherland, mach).with_motor(jet)
+}
+
+/// G-J on the CPU wedge: one TP-2005 case (`MACH`, `EXIT_MACH`, `P_EXIT` Pa; default Mach 2.5, exit Mach 1.69, 149 368 Pa) as a wedge against the 2D solver on the same grid
+/// (`LEVEL`, 1: the facade's `Medium`): the area-mean base `Cp` of the annulus and `p_b / p_inf = 1 + 0.7 M^2 Cp` (the gate: within 0.15 of the 2D value) and the force parts.
+#[test]
+#[ignore]
+fn gate_j_tp2005_jet_case_on_the_wedge() {
+    let (mach, exit_mach, p_exit): (f64, f64, f64) = (env("MACH", 2.5), env("EXIT_MACH", 1.69), env("P_EXIT", 34_497.438_192_913_876));
+    let (iters, level): (usize, u32) = (env("ITERS", 4000), env("LEVEL", 1));
+    let case = tp2005_case(mach, exit_mach, p_exit, level);
+    let (_, r2, secs2) = run2(&case, iters, 1000);
+    let ratio = |cp: f64| 1.0 + 0.7 * mach * mach * cp;
+    println!(
+        "G-J 2D {iters} its ({secs2:.1} s): cp_base {:.4}  pb/pinf {:.4}  CD nose+aft {:.4} friction {:.4} base {:.4} total {:.4}",
+        r2.cp_base,
+        ratio(r2.cp_base),
+        r2.cd_nose + r2.cd_aft.iter().sum::<f64>(),
+        r2.cd_friction,
+        r2.cd_base,
+        r2.cd_total
+    );
+    let (c3, mut s3) = build3(&case, bowshock_core::engine::grid3::WEDGE_ANGLE, level);
+    assert!(s3.jet().is_some(), "the wedge has the jet");
+    println!("G-J grid {} x {}, {} cells", s3.grid.ni, s3.grid.nj, s3.grid.ni * s3.grid.nj);
+    let t0 = Instant::now();
+    iterate3(&c3, &mut s3, iters, 1000);
+    let secs = t0.elapsed().as_secs_f64();
+    let f = forces3(&c3, &s3);
+    let samples = run3::wall_samples(&s3.grid, &s3.u);
+    let (mut a, mut pa) = (0.0, 0.0);
+    for w in samples.iter().filter(|w| w.class == run3::Wall::Base) {
+        a += w.face.area;
+        pa += w.pw * w.face.area;
+    }
+    let cp3 = (pa / a - s3.cfg.freestream[4]) / (0.5 * mach * mach);
+    println!(
+        "G-J 3D {iters} its ({secs:.1} s, {:.0} ms each): cp_base {cp3:.4}  pb/pinf {:.4}  CD p {:.4} friction {:.4} base {:.4} total {:.4}  y+ {:.3}",
+        1e3 * secs / iters as f64,
+        ratio(cp3),
+        f.cd_pressure,
+        f.cd_friction,
+        f.cd_base,
+        f.total(),
+        f.y_plus_max
+    );
+    println!("G-J 3D vs 2D: pb/pinf {:+.4} (band 0.15), CD {:+.2} %", ratio(cp3) - ratio(r2.cp_base), 100.0 * (f.total() / r2.cd_total - 1.0));
+    assert!((ratio(cp3) - ratio(r2.cp_base)).abs() < 0.15, "base pressure ratio {} against the 2D solver's {}", ratio(cp3), ratio(r2.cp_base));
 }

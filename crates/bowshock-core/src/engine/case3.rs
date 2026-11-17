@@ -9,7 +9,7 @@ use crate::error::Error;
 use crate::progress::ProgressSink;
 use crate::spec::FinProfile;
 use bowshock_cfd::flux::Limiter;
-use bowshock_cfd::gas3::{freestream3, Prim3};
+use bowshock_cfd::gas3::freestream3;
 use bowshock_cfd::grid3::{Grid3, PartRoughness};
 use bowshock_cfd::implicit::{ImplicitParams, LineSolve3};
 use bowshock_cfd::solver3::{Config3, Scheme3, Solver3};
@@ -136,12 +136,9 @@ pub struct Case3 {
     pub jet: Option<Jet>,
 }
 
-/// What the solver needs of the motor jet at the nozzle exit faces (`Wall::Jet`): the primitive state `[rho, u, v, w, p]` (axial, supersonic) and `[k, omega]`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct JetState3 {
-    pub state: Prim3,
-    pub turb: [f64; 2],
-}
+/// What the solver needs of the motor jet at the nozzle exit faces (`Wall::Jet`): the primitive state `[rho, u, v, w, p]` (axial, supersonic) and `[k, omega]`
+/// (defined with the solver: `bowshock_cfd::solver3::JetState3`, `Solver3::set_jet`).
+pub use bowshock_cfd::solver3::JetState3;
 
 impl Case3 {
     /// Sting grid of the 2D case ([`crate::engine::case::Case::new`] with `Wake::Sting`), the half domain with `24 << level` azimuthal cells
@@ -266,7 +263,10 @@ impl Case3 {
             low_mach: n.low_mach,
             scheme: Scheme3::Implicit(n.implicit_for(false)),
         };
-        Solver3::new(grid, cfg)
+        let mut s = Solver3::new(grid, cfg);
+        // phys3d hook: the motor jet patch (`Part::Jet` cells of the grid, `Solver3::set_jet`); nothing without a motor
+        s.set_jet(self.jet_state3());
+        s
     }
 
     /// Army-Navy Basic Finner body: 10 d long, 10 degree half-angle cone nose, cylindrical afterbody.

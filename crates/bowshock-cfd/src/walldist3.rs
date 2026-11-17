@@ -58,7 +58,8 @@ pub fn wall_faces(grid: &Grid3, solid: &[bool]) -> Vec<WallFace> {
                     let mut lo = c;
                     lo[dir] -= 1;
                     let (a, b) = (grid.cell(lo[0], lo[1], lo[2]), grid.cell(i, j, k));
-                    if solid[a] == solid[b] {
+                    // a fluid/solid face; the exit of a motor jet (the solid side is a `Part::Jet` cell) is no wall
+                    if solid[a] == solid[b] || crate::viscous3::is_jet_cell(grid, if solid[a] { a } else { b }) {
                         continue;
                     }
                     let (_, face) = crate::viscous3::face_of(grid, dir, i, j, k);

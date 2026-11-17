@@ -174,6 +174,7 @@ fn assemble_d3(s: &Solver3, p: &ImplicitParams, dir: usize) -> Vec<DCell<5>> {
         1 => [0, 1, 0],
         _ => [0, 0, 1],
     };
+    let jet = s.jet.as_deref().map(|j| &j.mask[..]);
     let mut out = vec![DCell::<5>::unit(); n];
     let plane = ni * nj;
     out.par_chunks_mut(plane).enumerate().for_each(|(k, pl)| {
@@ -199,8 +200,11 @@ fn assemble_d3(s: &Solver3, p: &ImplicitParams, dir: usize) -> Vec<DCell<5>> {
                 };
                 let lower_solid = m > 0 && solid[c - stride];
                 let upper_solid = m + 1 < nl && solid[c + stride];
-                let wm = if lower_solid { s.wall_ghost(wk, fl.n) } else { w[pidx3(ni, nj, nk, ii - e[0], jj - e[1], kk - e[2])] };
-                let wp = if upper_solid { s.wall_ghost(wk, fr.n) } else { w[pidx3(ni, nj, nk, ii + e[0], jj + e[1], kk + e[2])] };
+                // a `Part::Jet` neighbour is the fixed jet state (padded `w` holds it), not a wall
+                let lower_jet = lower_solid && jet.is_some_and(|m| m[c - stride]);
+                let upper_jet = upper_solid && jet.is_some_and(|m| m[c + stride]);
+                let wm = if lower_solid && !lower_jet { s.wall_ghost(wk, fl.n) } else { w[pidx3(ni, nj, nk, ii - e[0], jj - e[1], kk - e[2])] };
+                let wp = if upper_solid && !upper_jet { s.wall_ghost(wk, fr.n) } else { w[pidx3(ni, nj, nk, ii + e[0], jj + e[1], kk + e[2])] };
                 // cell normal: normalised mean of the two face normals
                 let mut nc = [fl.n[0] + fr.n[0], fl.n[1] + fr.n[1], fl.n[2] + fr.n[2]];
                 let nn = (nc[0] * nc[0] + nc[1] * nc[1] + nc[2] * nc[2]).sqrt();
