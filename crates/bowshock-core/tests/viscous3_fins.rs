@@ -437,6 +437,10 @@ fn rocket_sector_case(mach: f64) -> Case3 {
         Ok("coarse") => Tier::Coarse(flow),
         _ => Tier::draft(flow),
     };
+    // `FINLESS=1`: the same body without fins on the half domain (uniform azimuthal cells, no fin stack), for what the stack of the sector costs
+    if env("FINLESS", 0u8) != 0 {
+        return Case3::base_half(mach, 0.0, body, None, tier, 0);
+    }
     Case3::sector(mach, body, fins, tier, 0)
 }
 
@@ -463,6 +467,12 @@ fn fin_half_incidence_series() {
     imp.roe = env("ROE", u8::from(imp.roe)) != 0;
     imp.eps_fix = env("EPS_FIX", imp.eps_fix);
     imp.implicit_bc = env("IMPLICIT_BC", u8::from(imp.implicit_bc)) != 0;
+    // the pseudo-time step: `DTMODE=sum` (CFL V / (L_i + L_j + L_k)) or `min` (CFL V / (3 min L_d): sized by the weakest direction)
+    imp.dt_mode = match std::env::var("DTMODE").as_deref() {
+        Ok("min") => DtMode::MinDirection,
+        Ok("sum") => DtMode::Sum,
+        _ => imp.dt_mode,
+    };
     case.numerics.first_order_iters = env("FIRST", case.numerics.first_order_iters);
     let mut s = case.build_solver().expect("solver");
     // `EULER=1`: the same grid and numerics without the viscous terms; `MODEL=laminar`: the viscous terms without the turbulence model

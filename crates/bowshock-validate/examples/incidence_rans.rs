@@ -4,7 +4,7 @@
 //! ```text
 //! cargo run --release -p bowshock-validate --example incidence_rans -- [--mach 2.0] [--alpha 2.0] [--body short|anf|example] [--tier lift|coarse|fine|draft] [--fins 1|0]
 //!     [--chord-cells N] [--span-cells N] [--cfl-max X] [--sub-iters N] [--max-iter N] [--precision f32|df32] [--phase between|inplane] [--first-order N] [--fin-yp Y]
-//!     [--domain half|sector] [--sector-fins gf1|anf|example] [--roe 0|1] [--eps-fix X] [--history-every N]
+//!     [--domain half|sector] [--sector-fins gf1|anf|example] [--roe 0|1] [--eps-fix X] [--dt-mode sum|min] [--growth G] [--dt-mode sum|min] [--history-every N]
 //! ```
 //!
 //! The grid is `Case3::base_half` as the G-L1 gate builds it (ANF fins, the sea-level `Re_c` of the 0.03 m ANF, the grid sized for Mach 3.147); `short` is the ANF nose on a
@@ -16,7 +16,7 @@
 //! fin_tips base base_friction_nose+aft fin_friction` (the parts with pressure and shear as `LiftBreakdown`, base and the friction of `DragParts`).
 
 use bowshock_cfd::gpu::Precision;
-use bowshock_cfd::implicit_params::{ImplicitParams, LineSolve3};
+use bowshock_cfd::implicit_params::{DtMode, ImplicitParams, LineSolve3};
 use bowshock_cfd::solver3::{Config3, Scheme3};
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
 use bowshock_core::engine::case3::{Case3, Tier, WallFlow, SUTHERLAND_SEA_LEVEL};
@@ -118,6 +118,16 @@ fn main() -> Result<(), String> {
     }
     if let Some(v) = value("--eps-fix") {
         case.numerics.implicit.eps_fix = v.parse().map_err(|e| format!("--eps-fix: {e}"))?;
+    }
+    if let Some(v) = value("--growth") {
+        case.numerics.implicit.growth = v.parse().map_err(|e| format!("--growth: {e}"))?;
+    }
+    if let Some(v) = value("--dt-mode") {
+        case.numerics.implicit.dt_mode = match v.as_str() {
+            "sum" => DtMode::Sum,
+            "min" => DtMode::MinDirection,
+            other => return Err(format!("--dt-mode sum|min, got `{other}`")),
+        };
     }
     if let Some(v) = value("--max-iter") {
         case.numerics.max_iter = v.parse().map_err(|e| format!("--max-iter: {e}"))?;
