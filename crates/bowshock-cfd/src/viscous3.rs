@@ -71,8 +71,11 @@
 //! Wedge parity (`parity` tests): a one-cell wedge `grid3::revolve(g2, 1, [0, dtheta])` with symmetry planes in `k` reproduces the viscous residual of
 //! `viscous.rs` including its hoop-stress source. The wedge-angle error alone (against the same wedge at 0.05 degrees) falls like `dtheta^2` (ratios 4.0 / 9.0 /
 //! 4.0 for 12 -> 6 -> 2 -> 1 degrees) and is `<= 5e-4` (relative `L2` of the cells away from the axis and the domain boundary) at 2 degrees; what is left against
-//! the 2D residual is the difference of the two discretisations (area-weighted 3D against planar 2D Green-Gauss gradients), second order in the interior and
-//! `O(h / r)` in the first cells beside the axis and the wall. The `report` test prints the table.
+//! the 2D residual is the difference of the two discretisations (area-weighted 3D against planar 2D Green-Gauss gradients, and the ghost of a no-slip wall: the plane
+//! mirror here, so that the compact gradient is wall-normal and an adiabatic wall has no heat flux on a sheared grid, the point image of the cell centre in the face
+//! centre in 2D), second order in the interior and `O(h / r)` in the first cells beside the axis and `O(1)` in the wall cells of a sheared grid (the nose of the G3
+//! body: 18.8 degrees, the same on every refinement; `tests/viscous3.rs` `wedge_residual_of_the_2d_state`: the viscous part of the residual of the converged 2D state
+//! differs by `0.05` in the radial momentum of those cells at 0.5, 2 and 8 degrees and on two grids). The `report` test prints the table.
 
 use crate::gas3::{Cons3, Prim3, GAMMA};
 use crate::grid3::{Face3, Grid3};

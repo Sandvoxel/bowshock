@@ -300,6 +300,20 @@ fn state_difference(s2: &Solver, s3: &Solver3, r_min: f64) -> ([f64; 5], (usize,
     (worst, at)
 }
 
+/// The wedge state as the 2D state of its cells: `(rho, rho u, rho v_r, E)`, the radial momentum from the Cartesian components at the mid-plane of the wedge.
+fn as_2d(s3: &Solver3) -> Vec<[f64; 4]> {
+    let (sn, cs) = (0.5 * s3.grid.theta_span).sin_cos();
+    s3.u.iter().map(|b| [b[0], b[1], b[2] * sn + b[3] * cs, b[4]]).collect()
+}
+
+/// The largest `|dU| / (1 + |U|)` between two 2D-form states `a` (the reference) and `b` over the fluid cells of `g` with `r >= r_min`.
+fn array_difference(a: &[[f64; 4]], b: &[[f64; 4]], g: &Grid3, r_min: f64) -> f64 {
+    (0..g.ni * g.nj)
+        .filter(|&c| g.part[c] == 0 && g.xc[c][1].hypot(g.xc[c][2]) >= r_min)
+        .map(|c| (0..4).map(|q| (a[c][q] - b[c][q]).abs() / (1.0 + a[c][q].abs())).fold(0.0, f64::max))
+        .fold(0.0, f64::max)
+}
+
 /// What the grid of the wedge looks like: dead cells, walls, axis runs and the fluid / dead faces.
 #[test]
 #[ignore]
@@ -346,7 +360,10 @@ fn laminar_wedge_matches_the_2d_state() {
         r2.y_plus_max
     );
     let mut worst = Vec::new();
-    let degs: Vec<f64> = std::env::var("DEGS").unwrap_or_else(|_| "2,1".into()).split(',').filter_map(|d| d.parse().ok()).collect();
+    let mut states: Vec<(f64, Vec<[f64; 4]>)> = Vec::new();
+    // the last angle is the reference of the angle convergence
+    let degs: Vec<f64> = std::env::var("DEGS").unwrap_or_else(|_| "2,1,0.5".into()).split(',').filter_map(|d| d.parse().ok()).collect();
+    let mut grid = None;
     for deg in degs {
         let (c3, mut s3) = build3(&case, deg.to_radians(), level);
         let t0 = Instant::now();
@@ -359,20 +376,32 @@ fn laminar_wedge_matches_the_2d_state() {
             let (d, at) = state_difference(&s2, &s3, r_min);
             let m = d[..4].iter().copied().fold(0.0, f64::max);
             println!(
-                "G-V1 wedge {deg} deg, cells with r >= {r_min}: max |dU|/(1+|U|) {m:.3e} at {at:?} per component {:.2e} {:.2e} {:.2e} {:.2e}  swirl {:.1e}",
+                "G-V1 wedge {deg} deg vs 2D, cells with r >= {r_min}: max |dU|/(1+|U|) {m:.3e} at {at:?} per component {:.2e} {:.2e} {:.2e} {:.2e}  swirl {:.1e}",
                 d[0], d[1], d[2], d[3], d[4]
             );
             row.push(m);
         }
         println!("G-V1 wedge {deg} deg ({secs:.1} s): cd p {:.5} f {:.5} base {:.5}  y+ {:.3}", f.cd_pressure, f.cd_friction, f.cd_base, f.y_plus_max);
         worst.push(row);
+        states.push((deg, as_2d(&s3)));
+        grid = Some(s3.grid.clone());
     }
-    if worst.len() == 2 {
-        for (q, r_min) in R_MINS.iter().enumerate() {
-            println!("G-V1 wedge: r >= {r_min}: ratio 2 deg / 1 deg {:.2}", worst[0][q] / worst[1][q]);
+    // the wedge-angle error: each wedge against the smallest one (its own `O(dtheta^2)` error is in the reference, so the ratio of 2 and 1 degrees is `(4 - 1/4) / (1 - 1/4)` = 5)
+    let g = grid.expect("at least one angle");
+    let mut angle_err = Vec::new();
+    if let Some((ref_deg, reference)) = states.last() {
+        for (deg, s) in &states[..states.len() - 1] {
+            let e: Vec<f64> = R_MINS.iter().map(|&r| array_difference(reference, s, &g, r)).collect();
+            println!("G-V1 wedge {deg} deg against {ref_deg} deg: max |dU|/(1+|U|) {:.3e} (r >= 0), {:.3e} (r >= 0.1), {:.3e} (r >= 0.25)", e[0], e[1], e[2]);
+            angle_err.push(e);
         }
     }
-    assert!(worst[0][1] <= 5e-4, "wedge vs 2D state at 2 degrees, r >= {}: {}", R_MINS[1], worst[0][1]);
+    if angle_err.len() >= 2 {
+        for (q, r_min) in R_MINS.iter().enumerate() {
+            println!("G-V1 wedge: r >= {r_min}: angle error ratio {:.2} (first / second angle)", angle_err[0][q] / angle_err[1][q]);
+        }
+    }
+    assert!(angle_err[0][0] <= 5e-4, "wedge at {} degrees against the smallest wedge: {}", states[0].0, angle_err[0][0]);
 }
 
 /// G-V3 on the CPU: the G3 ogive-cylinder RANS case of `tests/viscous.rs` (Mach 0.5, ISA sea level, d = 0.1 m, `Resolution::Coarse`) on the wedge against
@@ -412,7 +441,7 @@ fn g3_ogive_cylinder_rans_on_the_wedge() {
 fn g3_wedge_against_the_2d_state() {
     let iters: usize = env("ITERS", 4000);
     let level: u32 = env("LEVEL", 0);
-    let case = g3_case(0.5, level);
+    let case = g3_case(env("MACH", 0.5), level);
     let (s2, r2, secs2) = run2(&case, iters, 1000);
     println!(
         "G-V3 2D {iters} iterations ({secs2:.1} s, {:.1} ms each): CD {:.5}  p {:.5}  friction {:.5}  base {:.5}  cp_base {:.4}  y+ {:.3}",
@@ -425,7 +454,9 @@ fn g3_wedge_against_the_2d_state() {
         r2.y_plus_max
     );
     let (c3, mut s3) = build3(&case, bowshock_core::engine::grid3::WEDGE_ANGLE, level);
+    let t3 = Instant::now();
     iterate3(&c3, &mut s3, iters, 1000);
+    println!("G-V3 3D cost: {:.1} ms per iteration (the 2D solver {:.1})", 1e3 * t3.elapsed().as_secs_f64() / iters as f64, 1e3 * secs2 / iters as f64);
     let f = forces3(&c3, &s3);
     println!(
         "G-V3 3D {iters} iterations: CD {:.5}  p {:.5}  friction {:.5}  base {:.5}  y+ {:.3}",
@@ -517,5 +548,11 @@ fn report_residuals(label: &str, r2: &[[f64; 4]], r3: &[Cons3], g: &Grid3) {
             a.map(|x| (x * 1e6).round() / 1e6),
             b.map(|x| (x * 1e6).round() / 1e6)
         );
+        // the skew of the cell over its lower j face: the angle between the face normal and the line from the face centroid to the cell centroid (the wall normal and the
+        // direction of the 2D solver's ghost, a point image in the face centre, apart)
+        let f = &g.jface[(c / g.ni) * g.ni + c % g.ni];
+        let v = [g.xc[*c][0] - f.c[0], g.xc[*c][1] - f.c[1], g.xc[*c][2] - f.c[2]];
+        let skew = ((v[0] * f.n[0] + v[1] * f.n[1] + v[2] * f.n[2]).abs() / (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()).acos().to_degrees();
+        println!("      skew of the lower j face: {skew:.1} deg");
     }
 }
