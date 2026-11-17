@@ -5,7 +5,7 @@
 //!
 //! * the headline (`Mach 0.80 · point 4 of 10`), the overall bar with the elapsed time and the time left from the measured
 //!   throughput ("estimating…" until two points are done), and where it runs (the GPU's name, or CPU with the reason);
-//! * the curve: the zero-lift Cd(Mach) of the drag table, or CN(Mach) at each angle of the 3D solve, with the solved points
+//! * the curve of the part that is running: Cd(Mach) of the drag table, then CN(Mach) at each angle, with the solved points
 //!   solid (a warning triangle where a point did not settle), the points to come hollow on a dashed line at the reference
 //!   method's value, and the point in flight ringed in `accent` at the value the solver's monitor has now;
 //! * the point in flight: its iteration, how far the residual has dropped, the monitor's value and its range against the stop

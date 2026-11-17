@@ -1,7 +1,7 @@
 //! The live state of a CFD solve: what the Analyze screen shows while the solver works, as pure data with no clock of its own.
 //!
-//! A solve is a list of *units*: one per Mach number for the zero-lift drag table, one per (Mach number, angle of attack) for the
-//! 3D stability solve. The worker thread sends [`Iteration`] reports (where the running unit is: iteration, residual drop, the
+//! A solve is a list of *units*: one per Mach number of the drag table (no angle), then one per (Mach number, angle of attack) of the
+//! stability part when the solve has one ([`Tracker::solve_units`]); [`Phase`] says which part is running. The worker thread sends [`Iteration`] reports (where the running unit is: iteration, residual drop, the
 //! monitor the solver's stop rule watches and its recent range) and a [`PointDone`] when a unit ends; [`Tracker`] folds them into
 //! what the screen draws: the unit in flight, the finished units with their outcome, the partial curve, a progress fraction
 //! weighted by the work each unit takes, and a time estimate from the measured throughput. Every event carries `at`, the seconds
@@ -90,7 +90,7 @@ impl Outcome {
 pub struct Unit {
     /// Mach number.
     pub mach: f64,
-    /// Angle of attack (degrees) for the 3D solve; `None` for the zero-lift drag table.
+    /// Angle of attack (degrees) of a stability unit; `None` for a drag unit (zero incidence).
     pub alpha_deg: Option<f64>,
 }
 

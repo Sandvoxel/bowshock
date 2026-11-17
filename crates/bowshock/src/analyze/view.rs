@@ -180,7 +180,12 @@ fn method<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
     if let Some(stopped) = state.cfd.stopped.as_ref().filter(|s| cfd_line && !solving && s.table.is_some()) {
         let keep: Element<'_, Message> = push(&stopped.keep_label, Weight::Primary).on_press(Message::CfdKeep).into();
         let discard: Element<'_, Message> = push("Discard", Weight::Secondary).on_press(Message::CfdDiscard).into();
-        col = col.push(row![keep, discard].spacing(SPACE_2).boxed());
+        // the label with the 3D angles in it is too long to leave room for Discard beside it in the narrow panel
+        col = col.push(if stopped.keep_label.chars().count() > 22 {
+            column![keep, discard].spacing(SPACE_2).boxed()
+        } else {
+            row![keep, discard].spacing(SPACE_2).boxed()
+        });
     }
     if state.compare_open {
         let item = |label: &'static str, message: Message| -> Element<'_, Message> { push(label, Weight::Secondary).on_press(message).small().into() };
