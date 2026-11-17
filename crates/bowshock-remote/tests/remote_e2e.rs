@@ -38,7 +38,7 @@ fn connect(host: &RemoteHost) -> (Remote, f64) {
             SetupStatus::Building { line } => {
                 let mut l = last.lock().unwrap();
                 *l = line.clone();
-                if build_lines.fetch_add(1, Ordering::SeqCst) % 25 == 0 {
+                if build_lines.fetch_add(1, Ordering::SeqCst).is_multiple_of(25) {
                     println!("  [{:7.2} s] build: {line}", t.elapsed().as_secs_f64());
                 }
                 return;
