@@ -1319,6 +1319,27 @@ RTX 3090): wedge 156 x 140 x 1 f32 7 launches / 53 us, df32 7 / 249 us; sector 2
 (the face energy flux): `1537 inlined operations > 1536` (f32; df32 adds two `recomputations of an expression cost more than storing it` cuts); harmless here (one extra launch). [INFERENCE: a `cache()` of the
 face gradient record removes it; not tried, for S5b to decide with the whole step in view.]
 
+### The 3D SST update on the GPU (stage S5a: `gpu/turbulence3.rs`, `tests/s5a_turb.rs`)
+
+Port of `turbulence3.rs` (written by the `GpuTurb3` agent in the worktree `gpu3d-turb`, merged), kernel level only: `TurbModel3<N>` with `Sst3` (`N` = 2; the lists of scalars are written for `N` as on the CPU), `wall_state_pass3`
+(Reichardt inversion with its fixed 8 Newton steps, the Aupoix state with its fixed 16 steps, per-cell `ks`; run on the gathered wall cells only, `take` / `put`: in df32 the transcendental iterations on all cells cost
+as much as the rest of the update), `scalar_gradients3`, `blends3`, `face_data3`, `cell_terms3` (four `staged3` groups), `solve_and_update3` (the three scalar tridiagonal line solves of Luma's parts solver, one launch per
+direction, no k line when `skip_k`, solid rows identity, a ghost that follows its cell adds nothing to the diagonal) and `turbulence_update3`; the wall distance is computed on the host (`walldist3`) and uploaded.
+`LazySolver3::turbulence_probe3` runs the stages on the CPU `TurbIn` and returns every stage; the geometry is a standalone `TGeo3` (`VFace3.noslip` of the viscous geometry gives the wall cells).
+
+Tests (`--test s5a_turb`, through gpuq; a jittered box with a solid block, the same box with symmetry planes, a y+ sweep 0.2-300 with rough cells, the tiny wedge, the tiny sector; each stage against the CPU,
+relative to its own largest value, floor 1e-3, gradient normwise): f32 worst: wall state 3.2e-5, gradients 5.8e-6, F1 and X 3.3e-5, face data 9.9e-6, R and d0 7.0e-6, line coefficients 2.3e-7, new `k`, `omega` 8.4e-6, `mu_t` 1.2e-5;
+df32 worst: 1.2e-12 (wall state), 1.4e-13, 1.6e-12, 4.9e-13, 4.9e-13, 1.3e-14, **1.1e-5** (`k`, `omega` after the line solves) and **8.1e-6** (`mu_t`): Luma's tridiagonal parts solver takes `f32` arrays only, so `dphi` is
+f32-accurate in both precisions and `mu_t` inherits it (it acts as pseudo-time damping; the fixed point `R = 0` is the same). The df32 target 1e-8 is therefore asserted at 5e-5 for those two rows; iterative refinement
+is the way to a true df32 solve (not done).
+
+Kernels alone (`turbulence_profile3`, best of 20 after warm-up, `Staging::Fluxes`, RTX 3090, other agents' jobs share the GPU: single runs came out up to 5x slower): wall-state pass / update, wedge-like 156 x 140 x 1:
+f32 27 launches 0.09 ms / 16 launches 0.087 ms, df32 27 / 0.24 ms, 17 / 0.164 ms; sector 210 x 70 x 18: f32 27 / 0.14 ms, 17 / 0.83 ms, df32 27 / 0.35 ms, 18 / 1.53 ms. No fusion cuts under `Fluxes`; under
+`Staging::Fusion` the update is 2-10x slower (f32 1.8 ms wedge-like, 1.3 ms sector; df32 6.9 ms, 7-12 ms) with the usual `1537 inlined operations > 1536` cuts. Device memory with them allocated is not measured separately.
+
+CPU findings of the port: `scalar_gradients` took the cell as its own face neighbour (`hi as usize ^ 1`: every scalar gradient about zero, the ghosts never entered); fixed in this tree, `phys3d` takes the same
+one-line fix. The GPU runs every kernel on all cells and ends each stage with a select to the CPU's solid-cell values; at rest the Newton `0/0` is `u_tau = 0`; `hypot` is `m sqrt(1 + (n/m)^2)` (no `hypot` for `Df32`);
+the arguments of F1 and F2 are capped at 1e3 as in the 2D `turbulence.rs`; the probe clamps the wall distance (inf in solid cells) and sanitises solid-cell primitives (the solver's padded array must stay finite there).
 **Reading `lowmach5.rs` (S5a item 5; not ported, `phys3d` has not integrated it on the CPU yet): what the GPU block and diagonal paths will need.** `P = I + kappa a g^T` is rank one in conservative variables
 (`kappa = 1/U_r^2 - 1/c^2`, `a = (1, u, v, w, H)`, `g = (gamma - 1)(q^2/2, -u, -v, -w, 1)`, `U_r = clamp(|u|, ur_min, c)`, `kappa = 0` and so `P = I` where `U_r = c`: no branch is needed), so `P x` costs a dot product
 and five multiply-adds per cell, never a 25-array block.

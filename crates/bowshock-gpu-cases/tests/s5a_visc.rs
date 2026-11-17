@@ -212,7 +212,7 @@ fn compare(case: &Case, f32_precision: bool) -> Result<Errors, String> {
     // the viscous wall forces: class = (family, side of the solid)
     let tr = wall_tractions(g, &solid, &dirs, &fvi, &fvj, &fvk);
     let mut faces = Vec::new();
-    let mut cpu_forces = vec![[0.0f64; 3]; 6];
+    let mut cpu_forces = [[0.0f64; 3]; 6];
     for t in &tr {
         let [n0, n1, _] = face_shape(g, t.dir);
         let q = (t.idx[2] * n1 + t.idx[1]) * n0 + t.idx[0];
