@@ -7,7 +7,7 @@
 
 use bowshock_core::engine::case3::{Case3, Tier, WallFlow, SUTHERLAND_SEA_LEVEL};
 use bowshock_core::engine::grid3::{Domain3, FinPhase};
-use bowshock_core::engine::run3::{drag_parts_on, lift_forces, y_plus_max};
+use bowshock_core::engine::run3::{drag_parts_on, lift_forces, y_plus_at, y_plus_max, y_plus_max_of};
 use bowshock_core::FinProfile;
 
 fn env<T: std::str::FromStr>(key: &str, default: T) -> T {
@@ -114,6 +114,20 @@ fn run(case: &Case3, iters: usize, what: &str) {
         f.x_cp,
         y_plus_max(&s)
     );
+    let mut yp = y_plus_at(&s);
+    yp.sort_by(|a, b| b.0.total_cmp(&a.0));
+    for (y, dir, idx, cell, class) in yp.iter().take(3) {
+        println!("  y+ {y:.1} at the {} face {idx:?} ({class:?}): {}", ["i", "j", "k"][*dir], region(case, &g, *cell));
+    }
+    use bowshock_core::engine::run3::Wall;
+    println!(
+        "  y+max by class: body {:.2}, fin sides {:.2}, fin tips {:.2}",
+        y_plus_max_of(&s, |c| matches!(c, Wall::Body(_))),
+        y_plus_max_of(&s, |c| c == Wall::FinSide),
+        y_plus_max_of(&s, |c| c == Wall::FinTip)
+    );
+    let n_high = yp.iter().filter(|w| w.0 > 100.0).count();
+    println!("  {} of {} streamwise wall faces have y+ > 100", n_high, yp.len());
     assert!(p.body_friction() > 0.0 && (est_fin == 0.0 || p.fin_friction() > 0.0), "friction of body and fins must be positive");
 }
 

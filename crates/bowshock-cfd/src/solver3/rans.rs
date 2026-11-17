@@ -7,6 +7,7 @@
 //! ```text
 //!  1. cons -> prim into the padded array w; ghost fill                       (eval_residual, unchanged)
 //!  2. viscous_pass:  viscous3::cell_pass          w -> grad[c] (12), mu[c]
+//!                    jet_viscous_fix              (motor jet only) mu, mu_t, scalars, gradient of the Part::Jet cells = the ghost of the exit faces (jet.rs)
 //!                    turbulence3::wall_state_pass w, mu, dwall, ks -> wall[c] = [k_w, omega_w, mu_t,w]   (SST only; cells with a no-slip face)
 //!                    viscous3::face_pass          w, grad, mu, mu_t, wall, dirs -> fvi, fvj, fvk  (Fv.n of every face)
 //!  3. inviscid face fluxes fi, fj, fk (Family::fluxes): the solid side of a wall is the NO-SLIP ghost (rho, -u, -v, -w, p), also in the MUSCL stencil
@@ -39,10 +40,13 @@
 //!
 //! `RansOpts3::sym` (which sides of the domain box have a mirror-image ghost layer: a symmetry plane or the slip wall `j = 0`) goes to `viscous3::face_dirs`, and
 //! `RansOpts3::bc` (the scalar ghost of every side: free stream or the cell's own value) to `turbulence3`. The defaults match the boundary conditions of
-//! [`Solver3`]: `i0, i1, j1` far field (`Inf`), `j0` slip wall / axis, `k0, k1` symmetry planes. Every fluid/solid face is a no-slip adiabatic wall
-//! (the viscous solver has no slip solid walls), and so is every `j = 0` boundary face inside a run of `Grid3::wall_j0` (the body surface of a grid without solid
+//! [`Solver3`]: `i0, i1, j1` far field (`Inf`), `j0` slip wall / axis, `k0, k1` symmetry planes. Every fluid/solid face is a no-slip adiabatic wall (the viscous solver
+//! has no slip solid walls) except the exit faces of a motor jet (`Part::Jet` cells, `solver3/jet.rs`: an inflow with the jet state, no wall, no wall state, no wall
+//! distance); and so is every `j = 0` boundary face inside a run of `Grid3::wall_j0` (the body surface of a grid without solid
 //! cells under it): `viscous3::face_cells` returns the `Wall` side, `fill_ghosts` fills the `j = -1, -2` layers with the no-slip ghost, `assemble3` uses the
 //! no-slip ghost Jacobian and `walldist3::wall_faces` lists the face for the wall distance. A `j = 0` face outside the runs stays a slip wall.
+//! The wall treatment of `turbulence3` is per wall class: the no-slip faces of the `i` family (a body's base plane, a blunt fin edge) get the plain wall state of a
+//! resolved wall unless `RansOpts3::law_i_walls`; the streamwise walls (`j`, `k` families) the automatic all-`y+` treatment (`turbulence3::wall_state_pass`).
 //!
 //! # Wedge (`Symmetry::Wedge`)
 //!
@@ -236,9 +240,15 @@ impl Solver3 {
 
     /// Step 2 of the iteration: viscosity and gradients, the wall state, the viscous face fluxes. A no-op for the Euler equations.
     pub(crate) fn viscous_pass(&mut self) {
+        {
+            let Solver3 { grid, w, solid, rans, .. } = self;
+            let Some(r) = rans.as_deref_mut() else { return };
+            viscous3::cell_pass(&r.visc, grid, solid, w, &mut r.grad, &mut r.mu);
+        }
+        // the jet cells are the ghosts of the exit faces: their viscosity, scalars and gradient (`cell_pass` leaves the solid cells at zero)
+        self.jet_viscous_fix();
         let Solver3 { grid, w, solid, rans, .. } = self;
         let Some(r) = rans.as_deref_mut() else { return };
-        viscous3::cell_pass(&r.visc, grid, solid, w, &mut r.grad, &mut r.mu);
         if !r.wall.is_empty() {
             turbulence3::wall_state_pass(grid, solid, &r.dirs, w, &r.mu, &r.dwall, &r.ks, r.law_i_walls, &mut r.wall);
         }

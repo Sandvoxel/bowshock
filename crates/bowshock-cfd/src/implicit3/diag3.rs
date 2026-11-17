@@ -174,6 +174,7 @@ fn assemble_d3(s: &Solver3, p: &ImplicitParams, dir: usize) -> Vec<DCell<5>> {
         1 => [0, 1, 0],
         _ => [0, 0, 1],
     };
+    let jet = s.jet.as_deref().map(|j| &j.mask[..]);
     let mut out = vec![DCell::<5>::unit(); n];
     let plane = ni * nj;
     out.par_chunks_mut(plane).enumerate().for_each(|(k, pl)| {
@@ -199,8 +200,11 @@ fn assemble_d3(s: &Solver3, p: &ImplicitParams, dir: usize) -> Vec<DCell<5>> {
                 };
                 let lower_solid = m > 0 && solid[c - stride];
                 let upper_solid = m + 1 < nl && solid[c + stride];
-                let wm = if lower_solid { s.wall_ghost(wk, fl.n) } else { w[pidx3(ni, nj, nk, ii - e[0], jj - e[1], kk - e[2])] };
-                let wp = if upper_solid { s.wall_ghost(wk, fr.n) } else { w[pidx3(ni, nj, nk, ii + e[0], jj + e[1], kk + e[2])] };
+                // a `Part::Jet` neighbour is the fixed jet state (padded `w` holds it), not a wall
+                let lower_jet = lower_solid && jet.is_some_and(|m| m[c - stride]);
+                let upper_jet = upper_solid && jet.is_some_and(|m| m[c + stride]);
+                let wm = if lower_solid && !lower_jet { s.wall_ghost(wk, fl.n) } else { w[pidx3(ni, nj, nk, ii - e[0], jj - e[1], kk - e[2])] };
+                let wp = if upper_solid && !upper_jet { s.wall_ghost(wk, fr.n) } else { w[pidx3(ni, nj, nk, ii + e[0], jj + e[1], kk + e[2])] };
                 // cell normal: normalised mean of the two face normals
                 let mut nc = [fl.n[0] + fr.n[0], fl.n[1] + fr.n[1], fl.n[2] + fr.n[2]];
                 let nn = (nc[0] * nc[0] + nc[1] * nc[1] + nc[2] * nc[2]).sqrt();
@@ -346,10 +350,12 @@ fn solve_d3(s: &Solver3, fac: &[DCell<5>], dir: usize, x: &mut [Cons3]) {
 /// against the unfactored block operator `I - dt J_i - dt J_j - dt J_k` (`dU = dU0 + D^-1 (b - (I - dt J_i - dt J_j - dt J_k) dU0)`).
 pub(crate) fn du3(s: &Solver3, p: &ImplicitParams, b: &[Cons3]) -> Vec<Cons3> {
     let n = s.u.len();
-    // a wedge has no acoustic coupling in `k` (only the point-implicit pressure block, which the block operator of the defect correction carries): the
-    // diagonal solve is over `i` and `j`
+    // a wedge has no acoustic coupling in `k`: the diagonal solve is over `i` and `j`, and the defect against the two factors (as `du_block`: with `P` a `k` factor of
+    // `I` is a second `P^-1`). The diagonal solve is still non-finite on a viscous wedge at iteration 85 to 87 whatever the CFL (the Euler wedge's ISSUES #24): a point-implicit
+    // solve of the pressure source block before the sweeps (`wedge_source_block`, `x <- (P + S)^-1 P x`) made it worse (iteration 25 to 60), so the cause is not that block alone
     let nd = if s.is_wedge() { 2 } else { 3 };
     let facs: Vec<Vec<DCell<5>>> = (0..nd).map(|dir| assemble_d3(s, p, dir)).collect();
+    let pm = precond_blocks(s);
     let af = |rhs: &[Cons3]| -> Vec<Cons3> {
         let mut x = rhs.to_vec();
         for dir in 0..nd {
@@ -358,16 +364,15 @@ pub(crate) fn du3(s: &Solver3, p: &ImplicitParams, b: &[Cons3]) -> Vec<Cons3> {
         x
     };
     let mut du = af(b);
-    let bf = [assemble3(s, p, 0), assemble3(s, p, 1), assemble3(s, p, 2)];
-    let a: Vec<Vec<Cons3>> = (0..3).map(|dir| apply_factor3(s, &bf[dir], dir, &du)).collect();
-    let pm = precond_blocks(s);
+    let bf: Vec<Factor> = (0..nd).map(|dir| assemble3(s, p, dir)).collect();
+    let a: Vec<Vec<Cons3>> = (0..nd).map(|dir| apply_factor3(s, &bf[dir], dir, &du)).collect();
     let r: Vec<Cons3> = (0..n)
         .into_par_iter()
         .map(|c| {
             let pdu = pm.as_ref().map_or(du[c], |pm| mv(&pm[c], &du[c]));
             let mut v = [0.0; 5];
             for q in 0..5 {
-                v[q] = b[c][q] - (a[0][c][q] + a[1][c][q] + a[2][c][q] - 2.0 * pdu[q]);
+                v[q] = b[c][q] - (a.iter().map(|f| f[c][q]).sum::<f64>() - (nd - 1) as f64 * pdu[q]);
             }
             v
         })

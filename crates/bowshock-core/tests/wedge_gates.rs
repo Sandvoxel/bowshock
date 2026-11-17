@@ -896,7 +896,7 @@ fn gate_p1_finned_table_time_and_memory() {
 }
 
 #[test]
-#[ignore = "S9b: needs the motor-on patch of the 3D solver (TP-2005 jet cases)"]
+#[ignore = "validation: CPU, tens of minutes per case (BOWSHOCK_CPU_ONLY=<id> runs one)"]
 fn gate_j_tp2005_jet_cases() {
     let mut rep = Report::default();
     gate_jets(runner().as_ref(), &mut rep);
@@ -1151,9 +1151,6 @@ mod cpu_wedge {
             if std::env::var("BOWSHOCK_CPU_ONLY").is_ok_and(|id| id != c.id) {
                 return Err("not selected (BOWSHOCK_CPU_ONLY)".to_string());
             }
-            if c.motor.is_some() {
-                return Err("motor on: the solver's jet patch is not implemented (DESIGN3D L item 20)".to_string());
-            }
             if !c.wake_base {
                 return Err("the wedge is built on the base-wake grid".to_string());
             }
@@ -1161,6 +1158,9 @@ mod cpu_wedge {
             if c.rans {
                 let atmosphere = c.atmosphere.ok_or("a RANS case without an atmosphere")?;
                 analysis = analysis.viscous(bowshock_core::FlightConditions { atmosphere }).roughness(c.roughness_m);
+                if let Some(m) = c.motor {
+                    analysis = analysis.motor(m);
+                }
             }
             let case2 = analysis.engine_cases(&[c.mach]).map_err(|e| e.to_string())?.remove(0);
             let case = Case3::wedge_of(&case2, level_of(c.resolution));

@@ -9,7 +9,7 @@ use crate::error::Error;
 use crate::progress::ProgressSink;
 use crate::spec::FinProfile;
 use bowshock_cfd::flux::Limiter;
-use bowshock_cfd::gas3::{freestream3, Prim3};
+use bowshock_cfd::gas3::freestream3;
 use bowshock_cfd::grid3::{Grid3, PartRoughness};
 use bowshock_cfd::implicit::{DtMode, ImplicitParams, LineSolve3};
 use bowshock_cfd::solver::{Bc, Scheme, Turbulence, Viscous};
@@ -32,6 +32,13 @@ pub struct Numerics3 {
     pub stationary_min_iters: usize,
     /// The same floor for a warm-started run, counted from the warm start.
     pub warm_min_iters: usize,
+    /// Mean-stationary rule ([`crate::engine::run3::StopRule3`]): length of one averaging window \[iterations\] (`0`: off). A run stops [`crate::engine::result::StopReason::MeanStationary`]
+    /// when the means of CA (and, at incidence, of CN and of the moment about the nose) over two consecutive windows agree within `mean_tol` (relative, plus 1e-4 absolute) and
+    /// both windows lie after iteration `mean_from`; the result is then the mean of the second window. For the oscillating subsonic base wake, whose period (50 to 220 iterations)
+    /// the range rule cannot see.
+    pub mean_window: usize,
+    pub mean_from: usize,
+    pub mean_tol: f64,
     /// Explicit 3D line solve overriding the backend default (`None`: [`Numerics3::implicit_for`]).
     pub line_solve: Option<LineSolve3>,
     /// Static-pressure outflow `p = p_inf` at the last `i` plane instead of the characteristic ghost (the plates of the viscous gates; the body cases of the 2D
@@ -60,6 +67,9 @@ impl Numerics3 {
             window: 250,
             stationary_min_iters: 250,
             warm_min_iters: 250,
+            mean_window: 1500,
+            mean_from: 1000,
+            mean_tol: 1e-2,
             line_solve: None,
             pressure_outflow: false,
         }
@@ -87,6 +97,9 @@ impl Numerics3 {
             window: 1000,
             stationary_min_iters: 1000,
             warm_min_iters: 1000,
+            mean_window: 2000,
+            mean_from: 2000,
+            mean_tol: 5e-3,
             line_solve: Some(LineSolve3::Block),
             pressure_outflow: false,
         }
@@ -147,7 +160,8 @@ pub enum Tier {
     Coarse(WallFlow),
     /// Body and fin sides `y+` ~ 1.
     Fine(WallFlow),
-    /// The lift tier of a half domain: body and fins `y+` ~ 60 (wall functions), uniform azimuthal cells, `32 << level` over the half domain.
+    /// The lift tier of a half domain: body and fins `y+` ~ 60 (wall functions); without fins uniform azimuthal cells, `32 << level` over the half domain, with fins the
+    /// fin stack of [`FinStack`] at `y+` 60 (a uniform azimuth puts the first cell of a fin side at thousands of wall units).
     Lift(WallFlow),
 }
 
@@ -192,19 +206,23 @@ pub struct Case3 {
     pub viscous: Option<Viscous>,
 }
 
-/// What the solver needs of the motor jet at the nozzle exit faces (`Wall::Jet`): the primitive state `[rho, u, v, w, p]` (axial, supersonic) and `[k, omega]`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct JetState3 {
-    pub state: Prim3,
-    pub turb: [f64; 2],
-}
+/// What the solver needs of the motor jet at the nozzle exit faces (`Wall::Jet`): the primitive state `[rho, u, v, w, p]` (axial, supersonic) and `[k, omega]`
+/// (defined with the solver: `bowshock_cfd::solver3::JetState3`, `Solver3::set_jet`).
+pub use bowshock_cfd::solver3::JetState3;
 
 impl Case3 {
     /// Sting grid of the 2D case ([`crate::engine::case::Case::new`] with `Wake::Sting`), the half domain with `24 << level` azimuthal cells
     /// and [`Numerics3::auto`].
     pub fn new(mach: f64, alpha: f64, body: BaseBody, fins: Option<Fins3>, level: u32) -> Case3 {
+        let finned = fins.is_some();
         let grid = Grid3Params::half(sting_grid(&body, level), fins, Grid3Params::default_nk(level), level);
-        Case3 { mach, alpha, body, grid, numerics: Numerics3::auto(mach, level), tier: Tier::Euler, progress: None, snapshots: None, jet: None, viscous: None }
+        let mut numerics = Numerics3::auto(mach, level);
+        if finned {
+            // the diagonal line solve (the GPU default) blows up on a finned half domain at incidence (M 3, alpha 6 at iteration ~110 on the GPU; ISSUES #24 on the CPU,
+            // the tiny ANF): the block lines are stable on both and equal on both. Block for every finned case until the diagonal solve is fixed
+            numerics.line_solve = Some(LineSolve3::Block);
+        }
+        Case3 { mach, alpha, body, grid, numerics, tier: Tier::Euler, progress: None, snapshots: None, jet: None, viscous: None }
     }
 
     /// This case with a motor jet from the centre of the base (the 2D [`crate::engine::case::Case::with_motor`]): the gap behind the base of the base-wake grid is
@@ -243,13 +261,14 @@ impl Case3 {
 
     /// A 2D engine case ([`crate::engine::case::Case::new`] with `Wake::Base`) as a wedge of [`WEDGE_ANGLE`]: its body, its base-wake grid and its sting grid,
     /// the numerics of the 2D case ([`Numerics3::from_2d`]: limiter, low-Mach flags, implicit parameters with the block lines, outflow) and, for a viscous case, its
-    /// RANS parameters (`Case::viscous`: the grids are already wall-resolved). `level` is the grid level (the 2D case does not keep it).
+    /// RANS parameters (`Case::viscous`: the grids are already wall-resolved) and motor jet (`Case::with_motor`: the grid already has the nozzle rows). `level` is the grid level (the 2D case does not keep it).
     pub fn wedge_of(case: &Case, level: u32) -> Case3 {
         let mut c = Case3::new(case.mach, 0.0, case.body.clone(), None, level);
         c.grid.sting = case.grid_sting.clone();
         c.grid.base = Some(case.grid_base.clone());
         c.numerics = Numerics3::from_2d(case, level);
         c.viscous = case.viscous;
+        c.jet = case.motor;
         c.on_wedge()
     }
 
@@ -300,8 +319,8 @@ impl Case3 {
         self.viscous = Some(Viscous { re_c: flow.re_c, sutherland: flow.sutherland, turbulence: Turbulence::Sst, wall_i_start: 0, roughness: 0.0 });
         self.numerics = Numerics3::viscous(self.mach, level);
         match (&self.grid.fins, tier) {
-            (Some(f), Tier::Coarse(_) | Tier::Fine(_)) => self.grid.fin_stack = Some(FinStack::from_flow(flow.re_c, flow.mach_max, f.root_chord, y_fin)),
-            (_, Tier::Lift(_)) if matches!(self.grid.domain, Domain3::Half { .. }) => self.grid.nk = 32usize << level,
+            (Some(f), _) => self.grid.fin_stack = Some(FinStack::from_flow(flow.re_c, flow.mach_max, f.root_chord, y_fin)),
+            (None, Tier::Lift(_)) if matches!(self.grid.domain, Domain3::Half { .. }) => self.grid.nk = 32usize << level,
             _ => {}
         }
         self
@@ -312,7 +331,7 @@ impl Case3 {
     pub fn euler_equations(mut self) -> Case3 {
         self.viscous = None;
         self.numerics = Numerics3::auto(self.mach, self.grid.level);
-        if matches!(self.grid.domain, Domain3::Wedge { .. }) {
+        if matches!(self.grid.domain, Domain3::Wedge { .. }) || self.grid.fins.is_some() {
             self.numerics.line_solve = Some(LineSolve3::Block);
         }
         self
@@ -353,8 +372,10 @@ impl Case3 {
     }
 
     /// Switches the viscous (SST) terms of `s` on when the case is viscous: the sand-grain roughness of the walls from the grid's per-part values
-    /// (`Grid3::wall_ks`), the outflow of the numerics (characteristic for a body: `RansOpts3::default` would impose a static pressure, right for plates only).
+    /// (`Grid3::wall_ks`), the outflow of the numerics (characteristic for a body: `RansOpts3::default` would impose a static pressure, right for plates only);
+    /// gives the `Part::Jet` cells of a motor case their jet state (`Solver3::set_jet`, nothing without a motor).
     fn with_equations(&self, mut s: Solver3) -> Solver3 {
+        s.set_jet(self.jet_state3());
         if let Some(v) = self.viscous {
             let ks = s.grid.wall_ks();
             let ks = if ks.iter().any(|&k| k > 0.0) { ks } else { Vec::new() };

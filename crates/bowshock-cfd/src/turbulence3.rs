@@ -554,7 +554,8 @@ impl<const N: usize> TurbIn<'_, N> {
     fn side_phi<M: TurbModel<N>>(&self, model: &M, fc: &FaceCells, s: usize, dir: usize) -> [f64; N] {
         let c = fc.cell[s];
         match fc.kind[s] {
-            SideKind::Cell => self.turb[c],
+            // a jet ghost holds the jet's `[k, omega]` (the jet cell's entry of the scalars: 2D `Kind::Fixed`)
+            SideKind::Cell | SideKind::Jet => self.turb[c],
             SideKind::Domain => match self.bc[2 * dir + s] {
                 ScalarBc::Inf => model.inf(),
                 ScalarBc::Cell => self.turb[c],
