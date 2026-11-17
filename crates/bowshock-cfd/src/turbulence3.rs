@@ -60,12 +60,14 @@
 //! roughness `ks` of the cell (an array: body and fins may differ; `0` smooth; the roughness ramp along a body is the caller's, put it into the array):
 //!
 //! ```text
-//!   smooth (ks = 0):  u_tau  = root of  u U+(d u / nu) = U,   U+ = Reichardt's law of the wall (viscous sublayer, buffer layer and log layer in one function),
-//!                              by 8 Newton iterations from u_vis = sqrt(nu U / d)
+//!   smooth (ks = 0):  u_tau  = root of  u U+(d u / nu) = U,   U+ = law_uplus: Reichardt's law of the wall (viscous sublayer, buffer layer and log layer in one function)
+//!                              times (1 + 0.04 exp(-(ln(y+ / 6) / 0.5)^2)) (the buffer-layer correction towards the SST model's own profile), by 8 Newton iterations
 //!                     tau_w = rho u_tau^2,   y+ = d u_tau / nu
 //!                     mu_t,w = max(rho u_tau^2 d / U - mu, 0)      (so the wall flux (mu + mu_t,w) U / d IS tau_w: viscous3's momentum flux through the wall face)
 //!                     omega_w = sqrt(omega_vis^2 + omega_log^2),  omega_vis = 6 nu / (beta1 d^2) (1 + 9 / (1 + (y+ / 4)^4)),  omega_log = u_tau / (sqrt(beta*) kappa d)
-//!                     k_w = u_tau^2 / sqrt(beta*) y+^4 / (y+^4 + 15^4)
+//!                     k_w = u_tau^2 / sqrt(beta*) y+^4 / (y+^4 + 12^4)
+//!                     S^2 of the cell = ((u_tau^2 / nu) dU+/dy+)^2  instead of its Green-Gauss gradient (TurbIn::law_strain)
+//!                     k of the cell <= (1 - w) k + w k_w  with w = (y+/4)^8 / (1 + (y+/4)^8)   (Sst::wall_cell)
 //!   rough (ks > 0):   [k_w, omega_w, nu_t,w] = turbulence::aupoix_wall(nu, U, d, ks) verbatim (replaces the law of the wall),  mu_t,w = rho nu_t,w,  u_tau^2 = (nu + nu_t,w) U / d
 //! ```
 //!
@@ -81,8 +83,18 @@
 //!   `y+ = 30`.
 //! * `k_w`, the face value of `k` (the ghost is `2 k_w - k_c`), is 0 in the sublayer like the 2D wall and the log-layer `k = u_tau^2 / sqrt(beta*)` at `y+ >= 30`, so the first cell
 //!   is not drained by a `k = 0` wall face where `k` is not small.
+//! * **The strain of a wall cell comes from the law of the wall** ([`strain_law`]), not from the cell's gradient: the Green-Gauss gradient of a first cell is its velocity over
+//!   its height, `1 / (kappa y+)` times the log-layer value, so the production `mu_t S^2` was several `10` times too high and `k+` reached `134` in a first cell of `y+ = 40`
+//!   (`3.3` in the log layer). Equal to the gradient in the sublayer (the first cell of the `y+ = 0.36` plate is unchanged: `cf` identical to 5 digits).
+//! * **`k` of a wall cell is capped** at the law-of-the-wall value from `y+ ~ 3` on ([`Sst::wall_cell`]): a first cell of `y+ = 6` still reached `k+ = 31` (`4.5` at most in a
+//!   resolved layer). `omega` solves its equation (a pin of `k` and `omega` together to the law values blew up at the leading edge of the `y+ = 1` plate).
+//! * **The law of the wall is Reichardt's with a `4 %` Gaussian correction at `y+ ~ 6`** ([`law_uplus`]): the profile of the resolved SST model lies `2 %` above Reichardt's there,
+//!   which put the wall shear of the `y+ = 5` first-cell run `6.6 %` above that of the resolved run (`4.5 %` with the correction).
 //!
-//! Numbers (`wall_state_follows_the_sublayer_and_the_log_layer`, wall values against the 2D ones `60 nu / (beta1 d^2)`): for `y+ <= 1` `mu_t,w = 0`, `k_w < 1e-4 u_tau^2`,
+//! Plate results (`plate3`, `Re_x = 4.85e6`, resolved `y+ = 0.51`: `cf = 2.6786e-3`): first-cell `y+ = 1.0 / 2.0 / 3.0 / 5.2 / 8.1 / 15.2 / 30.4` gives `-1.9 / -2.6 / +0.1 / +4.5 /
+//! +0.9 / -0.7 / -0.1 %`.
+//!
+//! Numbers (`wall_state_follows_the_sublayer_and_the_log_layer`, wall values against the 2D ones `60 nu / (beta1 d^2)`): for `y+ <= 1` `mu_t,w = 0`, `k_w < 1e-3 u_tau^2`,
 //! `omega_w` within 0.4 % of the 2D value, the wall shear within 1 % of the viscous one; for `y+ >= 30` the wall shear is within 4 % of the log law (Reichardt's constant
 //! differs from `E = 9.793` by 2 % in `U+`), `omega_w` within 6 % of `omega_log` and `k_w` of `u_tau^2 / sqrt(beta*)` within 7 %.
 
@@ -104,8 +116,13 @@ pub const LOG_E: f64 = 9.793;
 pub const OMEGA_BOOST: f64 = 10.0;
 /// `y+` at which the boost of `omega_vis` has lost half of its excess.
 pub const Y_BOOST: f64 = 4.0;
-/// `y+` at which the wall face value `k_w` reaches half of the log-layer value `u_tau^2 / sqrt(beta*)`.
-pub const Y_K: f64 = 15.0;
+/// `y+` at which the wall value of `k` (and the cap of `k` in a wall-adjacent cell, [`Sst::wall_cell`]) reaches half of the log-layer value `u_tau^2 / sqrt(beta*)` (a
+/// fourth-power switch: `k+` is `1.6e-4` at `y+ = 1`, `0.07` at 5, `0.5` at 8, `2.2` at 15, `3.2` at 30; the SST profile of a resolved boundary layer has `0.5` at 5.7, `1.5`
+/// at 9, `2.4` at 17, `2.9` at 29, `3.2` at 100).
+pub const Y_K: f64 = 12.0;
+/// `y+` at which the cap of `k` in a wall-adjacent cell has half weight (`weight = x / (1 + x)`, `x = (y+ / Y_PIN)^8`): `0.004` at `y+ = 2`, `0.1` at 3, `0.89` at 5.2, `1` from
+/// 8: an eighth power, so a wall-resolved cell (`y+ < 2.5`) solves its equations untouched (a fourth power let the cap destabilise the leading edge of the plate at `y+ = 1`).
+pub const Y_PIN: f64 = 4.0;
 /// Newton iterations of the inversion of the law of the wall (from `u_vis`; the error after 8 is below `1e-12` for `y+ <= 1e4`).
 pub const WALL_ITERATIONS: usize = 8;
 
@@ -125,7 +142,56 @@ pub fn reichardt_uplus(yp: f64) -> f64 {
     (1.0 + KAPPA * yp).ln() / KAPPA + 7.8 * (1.0 - (-yp / 11.0).exp() - yp / 11.0 * (-yp / 3.0).exp())
 }
 
-/// The friction velocity of the law of the wall at speed `speed`, distance `d`, kinematic viscosity `nu`: the root of `u U+(d u / nu) = U` by Newton iteration from
+/// `d U+ / d y+` of [`reichardt_uplus`]: 1 in the viscous sublayer, `1 / (kappa y+)` in the log layer.
+#[inline]
+pub fn reichardt_duplus(yp: f64) -> f64 {
+    1.0 / (1.0 + KAPPA * yp) + 7.8 * ((-yp / 11.0).exp() / 11.0 - (-yp / 3.0).exp() / 11.0 + yp / 33.0 * (-yp / 3.0).exp())
+}
+
+/// Amplitude, centre (`y+`) and width (in `ln y+`) of the Gaussian correction of Reichardt's law. The velocity profile of the resolved SST model (`y+ = 0.36` plate,
+/// `x = 0.97`) lies `2 %` above Reichardt's between `y+ = 5` and `10` (`5.62 / 5.51` at 5.7, `6.92 / 6.75` at 7.4, `8.11 / 7.96` at 9.3) and `3 - 4 %` below it between 20 and 60
+/// (`11.67 / 12.01` at 20, `12.96 / 13.46` at 29, `14.08 / 14.59` at 40). The law the wall treatment inverts should be the model's own where a wall cell does not resolve the
+/// layer: against Reichardt's the wall shear of a first cell at `y+ = 5.2` was `6.6 %` above that of the resolved run. Only the upper bump is corrected, with `4 %` (twice the
+/// excess of the resolved profile: the wall cell is first-order accurate where the profile bends) so that the first-cell `y+ = 5` run is within the `5 %` of the G-V2 sweep (`4.5 %`
+/// with it, `6.6 %` without); the grids of `y+ >= 8` are within `1 %` of the resolved run without any lower correction.
+pub const LAW_BUMP: f64 = 0.04;
+pub const LAW_BUMP_Y: f64 = 6.0;
+pub const LAW_BUMP_W: f64 = 0.5;
+
+/// The Gaussian correction `b(y+)` of the law of the wall and its derivative `db / dy+`.
+#[inline]
+fn law_bump(yp: f64) -> (f64, f64) {
+    if yp < 1e-3 {
+        return (0.0, 0.0);
+    }
+    let t = (yp / LAW_BUMP_Y).ln() / LAW_BUMP_W;
+    let b = LAW_BUMP * (-t * t).exp();
+    (b, b * (-2.0 * t / (LAW_BUMP_W * yp)))
+}
+
+/// The law of the wall of the wall treatment, `U+(y+) = U+_Reichardt (1 + b)`: viscous sublayer, buffer layer and log layer of the SST model in one smooth monotone function.
+#[inline]
+pub fn law_uplus(yp: f64) -> f64 {
+    reichardt_uplus(yp) * (1.0 + law_bump(yp).0)
+}
+
+/// `d U+ / d y+` of [`law_uplus`].
+#[inline]
+pub fn law_duplus(yp: f64) -> f64 {
+    let (b, db) = law_bump(yp);
+    reichardt_duplus(yp) * (1.0 + b) + reichardt_uplus(yp) * db
+}
+
+/// The strain rate `dU/dy = (u_tau^2 / nu) dU+/dy+` the law of the wall has at the centroid of a wall cell (distance `d`, speed `speed`, kinematic viscosity `nu`): the
+/// wall shear rate `U / d` in the viscous sublayer, `u_tau / (kappa d)` in the log layer. The mean-flow gradient of the cell is neither there: its Green-Gauss
+/// value is the first-cell velocity over the cell height (`U / d`), `1 / (kappa y+)` times too large in the log layer, which feeds the production of `k`
+/// `mu_t S^2` of the cell with `S^2` several `10` times too high (measured: `k+ = 134` in a first cell of `y+ = 40`, `3.3` expected).
+pub fn strain_law(nu: f64, speed: f64, d: f64) -> f64 {
+    let u = u_tau_law(nu, speed, d);
+    u * u / nu * law_duplus(d * u / nu)
+}
+
+/// The friction velocity of the law of the wall ([`law_uplus`]) at speed `speed`, distance `d`, kinematic viscosity `nu`: the root of `u U+(d u / nu) = U` by Newton iteration from
 /// the viscous value `u_vis = sqrt(nu U / d)` (`F(u) = u U+(y+) - U` is increasing and convex, so the iteration converges monotonically after the first step;
 /// a step is limited to halving `u`). Zero at rest.
 pub fn u_tau_law(nu: f64, speed: f64, d: f64) -> f64 {
@@ -135,9 +201,7 @@ pub fn u_tau_law(nu: f64, speed: f64, d: f64) -> f64 {
     let mut u = (nu * speed / d).sqrt();
     for _ in 0..WALL_ITERATIONS {
         let yp = d * u / nu;
-        let (e11, e3) = ((-yp / 11.0).exp(), (-yp / 3.0).exp());
-        let up = (1.0 + KAPPA * yp).ln() / KAPPA + 7.8 * (1.0 - e11 - yp / 11.0 * e3);
-        let dup = 1.0 / (1.0 + KAPPA * yp) + 7.8 * (e11 / 11.0 - e3 / 11.0 + yp / 33.0 * e3);
+        let (up, dup) = (law_uplus(yp), law_duplus(yp));
         u = (u - (u * up - speed) / (up + yp * dup)).max(0.5 * u);
     }
     u
@@ -163,9 +227,16 @@ pub fn wall_state_smooth(rho: f64, nu: f64, speed: f64, d: f64) -> WallState {
     let boost = 1.0 + (OMEGA_BOOST - 1.0) / (1.0 + (yp / Y_BOOST).powi(4));
     let omega_vis = 6.0 * nu / (BETA1 * d * d) * boost;
     let omega_log = u_tau / (BETA_STAR.sqrt() * KAPPA * d);
-    let k_w = u_tau * u_tau / BETA_STAR.sqrt() * yp.powi(4) / (yp.powi(4) + Y_K.powi(4));
+    let k_w = k_wall(u_tau, yp);
     let nu_t_w = if speed > 0.0 { (u_tau * u_tau * d / speed - nu).clamp(0.0, NU_T_WALL_MAX * nu) } else { 0.0 };
     WallState { u_tau, k_w, omega_w: omega_vis.hypot(omega_log), mu_t_w: rho * nu_t_w }
+}
+
+/// The wall value of `k` and the cap of `k` in a wall-adjacent cell: `u_tau^2 / sqrt(beta*) y+^4 / (y+^4 + Y_K^4)` (`0` in the viscous sublayer, the log-layer `k` above `y+ ~ 30`).
+#[inline]
+pub fn k_wall(u_tau: f64, yp: f64) -> f64 {
+    let y4 = yp.powi(4);
+    u_tau * u_tau / BETA_STAR.sqrt() * y4 / (y4 + Y_K.powi(4))
 }
 
 /// Wall state of a cell: the automatic smooth treatment for `ks == 0`, the Aupoix (2015) rough-wall state ([`aupoix_wall`], verbatim) for `ks > 0`, whose
@@ -265,6 +336,12 @@ pub trait TurbModel<const N: usize>: Sync {
     fn terms(&self, c: &CellIn<N>, b: &Blend) -> ([f64; N], [f64; N]);
     /// The face value of equation `e` at a no-slip wall from the wall state `[k_w, omega_w, mu_t,w]` (`None`: zero gradient, the ghost is the cell value).
     fn wall_value(&self, e: usize, wall: &[f64; 3]) -> Option<f64>;
+    /// The new value of equation `e` in a smooth wall-adjacent cell of centroid `y+` (friction velocity `u_tau`, kinematic viscosity `nu`) from the value the cell's own
+    /// equation gave (`solved`); the default keeps it. The wall-function regime: a cell of `y+ ~ 5` and more does not resolve the sublayer its equations describe
+    /// (measured with the `k` equation alone: `k+ = 31` in a first cell of `y+ = 6`, `4.5` at most in a resolved layer).
+    fn wall_cell(&self, _e: usize, solved: f64, _y_plus: f64, _u_tau: f64, _nu: f64) -> f64 {
+        solved
+    }
     /// Clip of the updated value of equation `e`.
     fn clip(&self, e: usize, old: f64, new: f64) -> f64;
     /// The eddy viscosity from the (new) scalars of a cell.
@@ -339,6 +416,19 @@ impl TurbModel<2> for Sst {
         Some(wall[e])
     }
 
+    /// `k` of a smooth wall-adjacent cell is capped at the law-of-the-wall value [`k_wall`] with the weight `x / (1 + x)`, `x = (y+ / Y_PIN)^8`: `min(solved, (1 - w) solved +
+    /// w k_wall)`. Without the cap a cell of `y+ = 6` carries `k+ = 31` (`4.5` at most in a resolved layer: the production `mu_t S^2` of the cell feeds `mu_t = a1 k / S`, and
+    /// the sublayer diffusion that bounds the resolved layer is missing); a cap only, never a raise, so the cell is not driven by the law (a pin of `k` and `omega` together
+    /// blew up at the leading edge of the `y+ = 1` plate). `omega` solves its equation.
+    fn wall_cell(&self, e: usize, solved: f64, y_plus: f64, u_tau: f64, _nu: f64) -> f64 {
+        if e != 0 {
+            return solved;
+        }
+        let x = (y_plus / Y_PIN).powi(8);
+        let w = x / (1.0 + x);
+        ((1.0 - w) * solved + w * k_wall(u_tau, y_plus)).min(solved)
+    }
+
     fn clip(&self, e: usize, old: f64, new: f64) -> f64 {
         let inf = self.inf();
         new.max(0.1 * old).max(1e-3 * inf[e])
@@ -381,6 +471,11 @@ pub struct TurbIn<'a, const N: usize> {
     pub grad: &'a [Grad3],
     /// `[k_w, omega_w, mu_t,w]` of the wall cells ([`wall_state_pass`]); full length (entries of cells without a no-slip face are not read).
     pub wall: &'a [[f64; 3]],
+    /// Roughness per cell (empty: all smooth).
+    pub ks: &'a [f64],
+    /// A smooth wall cell takes its `S^2` from the law of the wall ([`strain_law`]) instead of its mean-flow gradient (a rough one always keeps the gradient). `false`
+    /// is the 2D module's treatment (the wedge parity tests); the solver runs with `true`.
+    pub law_strain: bool,
     /// Wall distance of the cell centroids (`walldist3`; `f64::INFINITY` without a wall).
     pub dwall: &'a [f64],
     /// Inviscid face fluxes (layouts of `Grid3::{iface, jface, kface}`): `F[0] A` is the mass flow the scalars are convected with.
@@ -433,8 +528,34 @@ impl<const N: usize> TurbIn<'_, N> {
 
     #[inline]
     fn cell_in(&self, c: usize, phi: [f64; N], grad: SGrad<N>) -> CellIn<N> {
-        let rho = self.rho(c);
-        CellIn { rho, nu: self.mu[c] / rho, d: self.dwall[c], phi, grad, s2: strain2(&self.grad[c]), mu_t: self.mu_t[c] }
+        let g = self.grid;
+        let w = &self.w[pidx3(g.ni, g.nj, g.nk, (c % g.ni) as isize, ((c / g.ni) % g.nj) as isize, (c / (g.ni * g.nj)) as isize)];
+        let nu = self.mu[c] / w[0];
+        let s2 = if self.is_smooth_wall(c) {
+            let s = strain_law(nu, (w[1] * w[1] + w[2] * w[2] + w[3] * w[3]).sqrt(), self.dwall[c]);
+            s * s
+        } else {
+            strain2(&self.grad[c])
+        };
+        CellIn { rho: w[0], nu, d: self.dwall[c], phi, grad, s2, mu_t: self.mu_t[c] }
+    }
+
+    /// Does the cell take the law of the wall for its strain and its pinned scalars (`law_strain`, a no-slip face, smooth)?
+    #[inline]
+    fn is_smooth_wall(&self, c: usize) -> bool {
+        self.law_strain && self.wall.get(c).is_some_and(|w| w[1] > 0.0) && self.ks.get(c).is_none_or(|&ks| ks == 0.0)
+    }
+
+    /// The pin `(y+, u_tau, nu)` of the law of the wall of a smooth wall cell.
+    fn wall_law(&self, c: usize) -> Option<(f64, f64, f64)> {
+        if !self.is_smooth_wall(c) {
+            return None;
+        }
+        let g = self.grid;
+        let w = &self.w[pidx3(g.ni, g.nj, g.nk, (c % g.ni) as isize, ((c / g.ni) % g.nj) as isize, (c / (g.ni * g.nj)) as isize)];
+        let nu = self.mu[c] / w[0];
+        let u_tau = u_tau_law(nu, (w[1] * w[1] + w[2] * w[2] + w[3] * w[3]).sqrt(), self.dwall[c]);
+        Some((self.dwall[c] * u_tau / nu, u_tau, nu))
     }
 }
 
@@ -732,6 +853,11 @@ pub fn solve_and_update<M: TurbModel<N>, const N: usize>(cx: &TurbIn<N>, model: 
         for e in 0..N {
             t[e] = model.clip(e, old[e], old[e] + x[c][e]);
         }
+        if let Some((yp, u_tau, nu)) = cx.wall_law(c) {
+            for e in 0..N {
+                t[e] = model.wall_cell(e, t[e], yp, u_tau, nu);
+            }
+        }
         *m = model.eddy_viscosity(&cx.cell_in(c, *t, tg[c]));
     });
     let n_active = cx.solid.iter().filter(|s| !**s).count().max(1) as f64;
@@ -883,6 +1009,8 @@ mod tests {
                 mu_t: &self.mu_t,
                 grad: &self.grad,
                 wall: &self.wall,
+                ks: &[],
+                law_strain: false,
                 dwall: &self.dwall,
                 fi: &self.f[0],
                 fj: &self.f[1],
@@ -902,11 +1030,52 @@ mod tests {
         for yp in [0.01, 0.1, 0.5, 1.0, 3.0, 5.0, 10.0, 15.0, 30.0, 60.0, 100.0, 300.0, 1e3, 1e4] {
             let u_star = 0.37;
             let d = yp * nu / u_star;
-            let u = u_star * reichardt_uplus(yp);
+            let u = u_star * law_uplus(yp);
             let got = u_tau_law(nu, u, d);
             assert!((got / u_star - 1.0).abs() < 1e-11, "y+ {yp}: {got} vs {u_star}");
         }
         assert_eq!(u_tau_law(nu, 0.0, 1e-4), 0.0);
+    }
+
+    /// `reichardt_duplus` / `law_duplus` are the derivatives of `reichardt_uplus` / `law_uplus`, and `strain_law` is the wall shear rate `U / d` in the sublayer and `u_tau / (kappa d)` in the log layer.
+    #[test]
+    fn law_of_the_wall_strain() {
+        for yp in [0.1, 1.0, 5.0, 15.0, 30.0, 300.0] {
+            let h = 1e-5 * yp;
+            let fd = (reichardt_uplus(yp + h) - reichardt_uplus(yp - h)) / (2.0 * h);
+            assert!((reichardt_duplus(yp) - fd).abs() < 1e-8 * (1.0 + fd), "y+ {yp}: {} vs {fd}", reichardt_duplus(yp));
+            let fd = (law_uplus(yp + h) - law_uplus(yp - h)) / (2.0 * h);
+            assert!((law_duplus(yp) - fd).abs() < 1e-8 * (1.0 + fd), "law y+ {yp}: {} vs {fd}", law_duplus(yp));
+        }
+        let nu = 1.0e-6;
+        for (yp, tol) in [(0.1, 2e-3), (300.0, 2.5e-2)] {
+            let u_star = 0.3;
+            let d = yp * nu / u_star;
+            let speed = u_star * law_uplus(yp);
+            let s = strain_law(nu, speed, d);
+            let want = if yp < 1.0 { speed / d } else { u_star / (KAPPA * d) };
+            assert!((s / want - 1.0).abs() < tol, "y+ {yp}: {s} vs {want}");
+        }
+    }
+
+    /// The `k` cap of a wall-adjacent cell: untouched where the layer is resolved (`y+ <= 2`: weight `<= 4e-3`), never a raise, the log-layer value `k_wall` where the cell is in the
+    /// buffer / log layer (`y+ >= 8`), `omega` never touched.
+    #[test]
+    fn k_cap_of_the_wall_cell() {
+        let sst = Sst { re_c: 2.5e7 };
+        let (u_tau, nu) = (0.01, 4.0e-8);
+        let k_big = 31.0 * u_tau * u_tau;
+        assert!((sst.wall_cell(0, k_big, 0.5, u_tau, nu) / k_big - 1.0).abs() < 1e-6);
+        assert!((sst.wall_cell(0, k_big, 2.0, u_tau, nu) / k_big - 1.0).abs() < 5e-3 * (1.0 - k_wall(u_tau, 2.0) / k_big) + 1e-12);
+        for yp in [8.0, 15.0, 40.0] {
+            let got = sst.wall_cell(0, k_big, yp, u_tau, nu);
+            // weight 0.996 at y+ = 8 (0.4 % of the solved value stays: 0.12 u_tau^2 on 0.55), 1 - 3e-5 at 15
+            let tol = if yp < 10.0 { 0.25 } else { 0.01 };
+            assert!(got >= k_wall(u_tau, yp) && got / k_wall(u_tau, yp) - 1.0 < tol, "y+ {yp}: {got} vs {}", k_wall(u_tau, yp));
+            let small = 1e-3 * k_wall(u_tau, yp);
+            assert_eq!(sst.wall_cell(0, small, yp, u_tau, nu), small, "a cap, never a raise");
+        }
+        assert_eq!(sst.wall_cell(1, 123.0, 15.0, u_tau, nu), 123.0);
     }
 
     /// `y+` behaviour of the smooth wall state against the laws of the wall at `y+ = 0.5, 1, 5, 15, 30, 100` (printed by `cargo test -- --nocapture`): the wall shear
@@ -916,10 +1085,10 @@ mod tests {
     #[test]
     fn wall_state_follows_the_sublayer_and_the_log_layer() {
         let (rho, nu) = (1.2, 1.0e-6);
-        println!("  y+   tau_w/tau_visc  tau_w/tau_Reichardt  tau_blend/tau_R   omega_w/omega_2D  omega_w/omega_log  k_w+  mu_t,w/mu");
+        println!("  y+   tau_w/tau_visc  tau_w/tau_law  tau_blend/tau_law  omega_w/omega_2D  omega_w/omega_log  k_w+  mu_t,w/mu");
         for yp in [0.5, 1.0, 5.0, 15.0, 30.0, 100.0] {
             let (u_star, d) = (0.2, yp * 1.0e-6 / 0.2);
-            let u = u_star * reichardt_uplus(yp);
+            let u = u_star * law_uplus(yp);
             let s = wall_state_smooth(rho, nu, u, d);
             let tau = s.u_tau * s.u_tau;
             let tau_visc = nu * u / d;
@@ -949,7 +1118,7 @@ mod tests {
             if yp <= 1.0 {
                 // the 2D wall state: mu_t,w = 0, k_w ~ 0, omega_w within 0.5 % of 60 nu / (beta1 d^2); the wall shear within 1 % of the viscous one
                 assert_eq!(s.mu_t_w, 0.0, "y+ {yp}");
-                assert!(s.k_w < 1e-4 * tau, "y+ {yp}: k_w+ {}", s.k_w / tau);
+                assert!(s.k_w < 1e-3 * tau, "y+ {yp}: k_w+ {}", s.k_w / tau);
                 assert!((s.omega_w / om_2d - 1.0).abs() < 5e-3, "y+ {yp}: omega_w / omega_2D = {}", s.omega_w / om_2d);
                 assert!((tau / tau_visc - 1.0).abs() < 1e-2, "y+ {yp}");
             }
@@ -1038,7 +1207,7 @@ mod tests {
         let nu = v.mu(1.0) / rho;
         let d = 0.5 * h[1];
         let u_star = 15.0 * nu / d;
-        let u1 = u_star * reichardt_uplus(15.0);
+        let u1 = u_star * law_uplus(15.0);
         // a profile that grows away from the wall; the first cell (j = 1) sits at y+ = 15
         let cells: Vec<Prim3> = (0..nc).map(|c| [rho, u1 * (1.0 + 0.4 * ((c / n[0]) % n[1]) as f64 - 0.4), 0.0, 0.0, p]).collect();
         let w = padded(&g, &solid, &cells);
@@ -1075,7 +1244,7 @@ mod tests {
         for t in &tr0 {
             assert!((t.tau[0] / visc_shear - 1.0).abs() < 1e-12);
         }
-        assert!((tr[0].tau[0] / tr0[0].tau[0] - 15.0 / reichardt_uplus(15.0)).abs() < 1e-9);
+        assert!((tr[0].tau[0] / tr0[0].tau[0] - 15.0 / law_uplus(15.0)).abs() < 1e-9);
     }
 
     // ---- the update -------------------------------------------------------------------------------------------------------------------------------
@@ -1516,6 +1685,8 @@ mod tests {
             mu_t: &mu_t,
             grad: &grad,
             wall: &wall,
+            ks: &[],
+            law_strain: false,
             dwall: &dwall,
             fi: &f[0],
             fj: &f[1],
@@ -1629,6 +1800,13 @@ mod tests {
                 None
             }
         }
+        fn wall_cell(&self, e: usize, solved: f64, y_plus: f64, u_tau: f64, nu: f64) -> f64 {
+            if e < 2 {
+                self.0.wall_cell(e, solved, y_plus, u_tau, nu)
+            } else {
+                solved
+            }
+        }
         fn clip(&self, e: usize, old: f64, new: f64) -> f64 {
             if e < 2 {
                 self.0.clip(e, old, new)
@@ -1673,6 +1851,8 @@ mod tests {
             mu_t: &case.mu_t,
             grad: &case.grad,
             wall: &case.wall,
+            ks: &[],
+            law_strain: false,
             dwall: &case.dwall,
             fi: &case.f[0],
             fj: &case.f[1],
