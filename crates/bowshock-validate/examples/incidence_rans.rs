@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! cargo run --release -p bowshock-validate --example incidence_rans -- [--mach 2.0] [--alpha 2.0] [--body short|anf] [--tier lift|coarse|fine] [--fins 1|0]
-//!     [--chord-cells N] [--span-cells N] [--cfl-max X] [--sub-iters N] [--max-iter N] [--precision f32|df32] [--phase between|inplane] [--first-order N]
+//!     [--chord-cells N] [--span-cells N] [--cfl-max X] [--sub-iters N] [--max-iter N] [--precision f32|df32] [--phase between|inplane] [--first-order N] [--fin-yp Y]
 //! ```
 //!
 //! The grid is `Case3::base_half` as the G-L1 gate builds it (ANF fins, the sea-level `Re_c` of the 0.03 m ANF, the grid sized for Mach 3.147); `short` is the ANF nose on a
@@ -47,6 +47,11 @@ fn main() -> Result<(), String> {
     }
     if let Some(n) = value("--span-cells") {
         case.grid.span_cells = Some(n.parse().map_err(|e| format!("--span-cells: {e}"))?);
+    }
+    // the fin stack at another `y+` than the tier's (the tier sets the body `y+` and the stack: Coarse 1 / 15, Lift 60 / 60, Fine 1 / 1)
+    if let (Some(v), Some(f)) = (value("--fin-yp"), case.grid.fins.as_ref()) {
+        let yp: f64 = v.parse().map_err(|e| format!("--fin-yp: {e}"))?;
+        case.grid.fin_stack = Some(bowshock_core::engine::grid3::FinStack::from_flow(flow.re_c, flow.mach_max, f.root_chord, yp));
     }
     if let Some(v) = value("--cfl-max") {
         case.numerics.implicit.cfl_max = v.parse().map_err(|e| format!("--cfl-max: {e}"))?;

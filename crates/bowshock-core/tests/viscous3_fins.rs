@@ -580,6 +580,28 @@ fn track_change(s: &Solver3, prev: &[bowshock_cfd::gas3::Cons3], it: usize, n: u
     for (d, c) in rows.iter().take(n) {
         let w = cons_to_prim3(&s.u[*c]);
         println!("  TRACK {it} d {d:.3e} rho {:.3} p {:.3} |u| {:.2} at {}", w[0], w[4], (w[1] * w[1] + w[2] * w[2] + w[3] * w[3]).sqrt(), cell_place(g, *c));
+        if std::env::var_os("TRACK_DETAIL").is_some() {
+            let (i, j, k) = (*c % g.ni, (*c / g.ni) % g.nj, *c / (g.ni * g.nj));
+            let show = |tag: &str, a: i64, b: i64, e: i64| {
+                let (ii, jj, kk) = (i as i64 + a, j as i64 + b, k as i64 + e);
+                if ii < 0 || jj < 0 || kk < 0 || ii as usize >= g.ni || jj as usize >= g.nj || kk as usize >= g.nk {
+                    return;
+                }
+                let n = g.cell(ii as usize, jj as usize, kk as usize);
+                if g.part[n] != 0 {
+                    return;
+                }
+                let (p0, p1) = (cons_to_prim3(&prev[n]), cons_to_prim3(&s.u[n]));
+                println!(
+                    "      {tag:>3} ({ii},{jj},{kk}) rho {:.4}->{:.4} u {:.3}->{:.3} v {:.3}->{:.3} w {:.3}->{:.3} p {:.4}->{:.4}",
+                    p0[0], p1[0], p0[1], p1[1], p0[2], p1[2], p0[3], p1[3], p0[4], p1[4]
+                );
+            };
+            show("c", 0, 0, 0);
+            for (tag, a, b, e) in [("i-", -1, 0, 0), ("i+", 1, 0, 0), ("j-", 0, -1, 0), ("j+", 0, 1, 0), ("k-", 0, 0, -1), ("k+", 0, 0, 1)] {
+                show(tag, a, b, e);
+            }
+        }
     }
 }
 
@@ -602,5 +624,114 @@ fn blowup_report(s: &Solver3, u: &[bowshock_cfd::gas3::Cons3]) {
     }
     if let Some((c, _)) = rows.iter().find(|(_, w)| !w.iter().all(|x| x.is_finite())) {
         println!("    first non-finite cell at {}", place(*c));
+    }
+}
+
+/// The geometry of the cells behind the flush fin trailing edge at the base corner (where the half domain blows up at large CFL): for the fin with the lowest `k`, the fluid
+/// cells at the columns `TE_COLS` (default 5) behind the trailing edge, the rows `j_root - 3 ..= j_root + 2` of the fin root and the `k` cells from one before the fin to one
+/// after it: volume, the three cell lengths between the face centres, the three face areas (`+` faces), the solid neighbours (`-i +i -j +j -k +k`, `w` wall, `.` fluid, `d`
+/// dead), the wall distance, the volume ratios to the neighbours in `i`, `j` and `k` (lower / upper), and the cosine between the face normal and the line to the lower
+/// neighbour (1: orthogonal). `TIER` as `anf_incidence_case`; the same table for the Coarse tier shows what differs.
+#[test]
+#[ignore]
+fn corner_geometry() {
+    use bowshock_cfd::grid3::{PART_DEAD, PART_FLUID};
+    let case = anf_incidence_case(env("MACH", 2.0), env("ALPHA", 2.0));
+    let s = case.build_solver().expect("solver");
+    describe("half", &s.grid);
+    let g = &s.grid;
+    let rans = s.rans().expect("viscous");
+    let is_fin = |i: usize, j: usize, k: usize| matches!(g.part_of(i, j, k), Some(Part::Fin(_)));
+    // the trailing edge column and the root row of the fin with the lowest k
+    let (mut i_te, mut j_root, mut k_lo, mut k_hi) = (0usize, usize::MAX, usize::MAX, 0usize);
+    for k in 0..g.nk {
+        for j in 0..g.nj {
+            for i in 0..g.ni {
+                if is_fin(i, j, k) {
+                    i_te = i_te.max(i);
+                    j_root = j_root.min(j);
+                }
+            }
+        }
+        if (0..g.nj).any(|j| (0..g.ni).any(|i| is_fin(i, j, k))) && k_lo == usize::MAX {
+            k_lo = k;
+        }
+    }
+    for k in k_lo..g.nk {
+        if (0..g.nj).any(|j| is_fin(i_te, j, k)) {
+            k_hi = k;
+        } else if k_hi >= k_lo && k > k_hi + 1 {
+            break;
+        }
+    }
+    println!("  trailing edge column i {i_te}, root row j {j_root}, fin cells k {k_lo}..={k_hi} (at the trailing edge column)");
+    let flag = |i: i64, j: i64, k: i64| -> char {
+        if i < 0 || j < 0 || k < 0 || i as usize >= g.ni || j as usize >= g.nj || k as usize >= g.nk {
+            return 'o';
+        }
+        match g.part[g.cell(i as usize, j as usize, k as usize)] {
+            PART_FLUID => '.',
+            PART_DEAD => 'd',
+            _ => 'w',
+        }
+    };
+    let vol = |i: i64, j: i64, k: i64| -> f64 {
+        if i < 0 || j < 0 || k < 0 || i as usize >= g.ni || j as usize >= g.nj || k as usize >= g.nk {
+            f64::NAN
+        } else {
+            g.vol[g.cell(i as usize, j as usize, k as usize)]
+        }
+    };
+    let dist = |a: [f64; 3], b: [f64; 3]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+    println!("   cell            vol       dx       dj       dk       Ai       Aj       Ak  walls   dwall    Vi-   Vi+   Vj-   Vj+   Vk-   Vk+   cos(i j k)");
+    let cols = env("TE_COLS", 5usize);
+    for i in i_te..=(i_te + cols).min(g.ni - 1) {
+        for j in j_root.saturating_sub(3)..(j_root + 3).min(g.nj) {
+            for k in k_lo.saturating_sub(1)..=(k_hi + 1).min(g.nk - 1) {
+                let c = g.cell(i, j, k);
+                if g.part[c] != PART_FLUID {
+                    continue;
+                }
+                let (il, jl) = ((k * g.nj + j) * (g.ni + 1) + i, (k * (g.nj + 1) + j) * g.ni + i);
+                let (fi0, fi1, fj0, fj1, fk0, fk1) =
+                    (&g.iface[il], &g.iface[il + 1], &g.jface[jl], &g.jface[jl + g.ni], &g.kface[c], &g.kface[c + g.ni * g.nj]);
+                let (ii, jj, kk) = (i as i64, j as i64, k as i64);
+                let walls: String =
+                    [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)].iter().map(|&(a, b, d)| flag(ii + a, jj + b, kk + d)).collect();
+                let ratio = |a: i64, b: i64, d: i64| vol(ii + a, jj + b, kk + d) / g.vol[c];
+                let cosine = |nb: Option<usize>, f: &bowshock_cfd::grid3::Face3| {
+                    nb.map_or(f64::NAN, |n| {
+                        let (x, y) = (g.xc[n], g.xc[c]);
+                        let l = dist(x, y).max(1e-300);
+                        ((y[0] - x[0]) * f.n[0] + (y[1] - x[1]) * f.n[1] + (y[2] - x[2]) * f.n[2]) / l
+                    })
+                };
+                let cs = [
+                    cosine((i > 0).then(|| g.cell(i - 1, j, k)), fi0),
+                    cosine((j > 0).then(|| g.cell(i, j - 1, k)), fj0),
+                    cosine((k > 0).then(|| g.cell(i, j, k - 1)), fk0),
+                ];
+                println!(
+                    "  ({i:3},{j:3},{k:3}) {:9.2e} {:8.2e} {:8.2e} {:8.2e} {:8.2e} {:8.2e} {:8.2e}  {walls}  {:7.2e} {:5.2} {:5.2} {:5.2} {:5.2} {:5.2} {:5.2}   {:.3} {:.3} {:.3}",
+                    g.vol[c],
+                    dist(fi0.c, fi1.c),
+                    dist(fj0.c, fj1.c),
+                    dist(fk0.c, fk1.c),
+                    fi1.area,
+                    fj1.area,
+                    fk1.area,
+                    rans.dwall[c],
+                    ratio(-1, 0, 0),
+                    ratio(1, 0, 0),
+                    ratio(0, -1, 0),
+                    ratio(0, 1, 0),
+                    ratio(0, 0, -1),
+                    ratio(0, 0, 1),
+                    cs[0],
+                    cs[1],
+                    cs[2]
+                );
+            }
+        }
     }
 }
