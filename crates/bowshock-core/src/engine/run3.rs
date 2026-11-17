@@ -2,7 +2,7 @@
 //! wedge or a sector), and integrate the wall pressure into the force coefficients.
 //!
 //! Lengths are in nose diameters, the coefficients are referenced to `S_ref = pi/4` (nose diameter 1; the facade rescales to the
-//! reference diameter). Pressure forces only (Euler). The solved domain spans `theta_span` of the whole azimuth, so its forces are scaled by
+//! reference diameter). The pressure force, and for a viscous solver ([`Solver3::viscous`]) the shear of the wall faces ([`WallForces::shear`], from `Solver3::wall_tractions`: the very momentum flux the mean-flow equations see). The solved domain spans `theta_span` of the whole azimuth, so its forces are scaled by
 //! `2 pi / theta_span` (the half domain `[0, pi]`: doubled).
 //!
 //! Wall faces are classified by the part of the solid cell behind them and the direction of the face ([`Wall`]), not by geometry.
@@ -50,6 +50,10 @@ pub struct PointResult3 {
     pub drop_orders: f64,
     /// `(iteration, CN)` every [`SAMPLE_EVERY`] iterations.
     pub cn_history: Vec<(usize, f64)>,
+    /// Largest `y+` of the streamwise no-slip walls ([`y_plus_max`]) and the mean Cp of the base ([`base_cp`]): `NaN` for Euler and from the GPU runner, which does
+    /// not fill them (the CPU runner, [`run3_on`], does).
+    pub y_plus_max: f64,
+    pub cp_base: f64,
 }
 
 /// Wall forces of the current state of `s`: the `j = 0` boundary walls of the grid (the body of a sting grid, up to the base station) and every
@@ -63,7 +67,7 @@ pub fn lift_forces(case: &Case3, s: &Solver3) -> LiftForces {
 /// `pw = p0 + (p0 - p1) d0 / (d1 - d0)`, `d` the distance from the face centre to the cell centroid. A fin face whose second cell is solid or outside
 /// the grid uses the first-cell pressure. `dF = (pw - p_inf) area n_into_body`.
 pub fn lift_forces_upto(case: &Case3, s: &Solver3, x_max: f64) -> LiftForces {
-    forces_on(case, &s.grid, &s.u, s.cfg.freestream[4], x_max)
+    forces_from(case, &s.grid, &wall_forces_on(s, x_max))
 }
 
 /// [`lift_forces_upto`] on a grid, a conserved state `u` (index `Grid3::cell`, e.g. downloaded from the GPU) and the free-stream pressure. The sting
@@ -75,8 +79,8 @@ pub fn forces_on(case: &Case3, g: &Grid3, u: &[Cons3], p_inf: f64, x_max: f64) -
 /// [`forces_on`] of wall forces `w` already integrated (the GPU runner reduces them on the device).
 pub(crate) fn forces_from(case: &Case3, g: &Grid3, w: &WallForces) -> LiftForces {
     let (mut fx, mut fz, mut mz) = (0.0, 0.0, 0.0);
-    for (c, a) in &w.by {
-        if *c != Wall::Sting {
+    for (c, a) in w.by.iter().chain(&w.shear) {
+        if !matches!(*c, Wall::Sting | Wall::Jet) {
             fx += a[0];
             fz += a[1];
             mz += a[2];
@@ -124,11 +128,16 @@ pub fn breakdown_on(case: &Case3, g: &Grid3, u: &[Cons3], p_inf: f64) -> LiftBre
     breakdown_from(case, g, &wall_forces(g, u, p_inf, case.body.x_base()))
 }
 
+/// [`breakdown_on`] of the solver state: pressure plus, for a viscous solver, the shear of the classes.
+pub fn breakdown_of(case: &Case3, s: &Solver3) -> LiftBreakdown {
+    breakdown_from(case, &s.grid, &wall_forces_on(s, case.body.x_base()))
+}
+
 /// [`breakdown_on`] of wall forces `w` already integrated up to the base station (the GPU runner reduces them on the device).
 pub(crate) fn breakdown_from(case: &Case3, g: &Grid3, w: &WallForces) -> LiftBreakdown {
     let part = |classes: &dyn Fn(Wall) -> bool| {
         let mut a = [0.0; 3];
-        for (c, f) in &w.by {
+        for (c, f) in w.by.iter().chain(&w.shear) {
             if classes(*c) {
                 for q in 0..3 {
                     a[q] += f[q];
@@ -180,6 +189,8 @@ pub enum Wall {
     /// Fin tip (normal in `j`).
     FinTip,
     Appendage,
+    /// The nozzle exit of a motor-on case (the `+i` faces of `Part::Jet` cells): an inflow with the jet state, not a wall; no pressure force of the exit is counted.
+    Jet,
 }
 
 /// The class of a wall face between a fluid cell and a cell of `part`: `dir` the direction of the face (0, 1, 2 = `i`, `j`, `k`), `solid_low` whether
@@ -196,6 +207,7 @@ fn wall_class(part: Part, dir: usize, solid_low: bool) -> Wall {
             _ => Wall::FinSide,
         },
         Part::Appendage(_) => Wall::Appendage,
+        Part::Jet => Wall::Jet,
     }
 }
 
@@ -203,6 +215,8 @@ fn wall_class(part: Part, dir: usize, solid_low: bool) -> Wall {
 #[derive(Clone, Debug, Default)]
 pub struct WallForces {
     pub by: Vec<(Wall, [f64; 3])>,
+    /// The viscous (shear) force `[Fx, Fz, Mz]` per wall class, empty for Euler and for the device-side reduction of the GPU runner (pressure only).
+    pub shear: Vec<(Wall, [f64; 3])>,
 }
 
 impl WallForces {
@@ -217,9 +231,31 @@ impl WallForces {
         }
     }
 
-    /// The sums of `class` (zero when no face of it exists).
+    /// The pressure sums of `class` (zero when no face of it exists).
     pub fn get(&self, class: Wall) -> [f64; 3] {
         self.by.iter().find(|(c, _)| *c == class).map_or([0.0; 3], |(_, a)| *a)
+    }
+
+    /// The shear sums of `class`.
+    pub fn get_shear(&self, class: Wall) -> [f64; 3] {
+        self.shear.iter().find(|(c, _)| *c == class).map_or([0.0; 3], |(_, a)| *a)
+    }
+
+    /// Pressure plus shear of `class`.
+    pub fn get_total(&self, class: Wall) -> [f64; 3] {
+        let (p, f) = (self.get(class), self.get_shear(class));
+        [p[0] + f[0], p[1] + f[1], p[2] + f[2]]
+    }
+
+    fn add_shear(&mut self, class: Wall, d: [f64; 3]) {
+        match self.shear.iter_mut().find(|(c, _)| *c == class) {
+            Some((_, a)) => {
+                for q in 0..3 {
+                    a[q] += d[q];
+                }
+            }
+            None => self.shear.push((class, d)),
+        }
     }
 }
 
@@ -377,8 +413,39 @@ pub struct DragParts {
     pub fin_sides: f64,
     pub fin_edges: f64,
     pub fin_tips: f64,
-    /// Nose + aft + base + fins (the sting not counted).
+    /// The friction (shear) drag of the same classes, zero for Euler (and for the device-side reduction of the GPU runner).
+    pub friction: FrictionParts,
+    /// Nose + aft + base + fins, pressure plus friction (the sting not counted).
     pub total: f64,
+}
+
+/// The friction drag of the wall classes of [`DragParts`], coefficients on `pi/4`.
+#[derive(Clone, Debug, Default)]
+pub struct FrictionParts {
+    pub nose: f64,
+    pub aft: Vec<f64>,
+    pub base: f64,
+    pub fin_sides: f64,
+    pub fin_edges: f64,
+    pub fin_tips: f64,
+    /// The sum of the parts above.
+    pub total: f64,
+}
+
+impl DragParts {
+    /// The pressure drag: the parts without the friction.
+    pub fn pressure_total(&self) -> f64 {
+        self.total - self.friction.total
+    }
+
+    /// The friction of the body (nose and afterbody) and of the fins.
+    pub fn body_friction(&self) -> f64 {
+        self.friction.nose + self.friction.aft.iter().sum::<f64>()
+    }
+
+    pub fn fin_friction(&self) -> f64 {
+        self.friction.fin_sides + self.friction.fin_edges + self.friction.fin_tips
+    }
 }
 
 /// [`DragParts`] of the state `u` of `g` for the case `case` (axial force only; every segment of the body of `case`).
@@ -391,11 +458,145 @@ pub fn drag_parts_from(case: &Case3, g: &Grid3, w: &WallForces) -> DragParts {
     let q = 0.5 * case.mach * case.mach;
     let norm = (2.0 * std::f64::consts::PI / g.theta_span) / (q * std::f64::consts::FRAC_PI_4);
     let cd = |c: Wall| norm * w.get(c)[0];
-    let aft: Vec<f64> = (0..case.body.segments.len()).map(|s| cd(Wall::Body(s as u16 + 1))).collect();
+    let cf = |c: Wall| norm * w.get_shear(c)[0];
+    let nseg = case.body.segments.len();
+    let aft: Vec<f64> = (0..nseg).map(|s| cd(Wall::Body(s as u16 + 1))).collect();
     let (nose, base) = (cd(Wall::Body(0)), cd(Wall::Base));
     let (fin_sides, fin_edges, fin_tips) = (cd(Wall::FinSide), cd(Wall::FinLe) + cd(Wall::FinTe), cd(Wall::FinTip));
-    let total = nose + aft.iter().sum::<f64>() + base + fin_sides + fin_edges + fin_tips;
-    DragParts { nose, aft, base, fin_sides, fin_edges, fin_tips, total }
+    let mut friction = FrictionParts {
+        nose: cf(Wall::Body(0)),
+        aft: (0..nseg).map(|s| cf(Wall::Body(s as u16 + 1))).collect(),
+        base: cf(Wall::Base),
+        fin_sides: cf(Wall::FinSide),
+        fin_edges: cf(Wall::FinLe) + cf(Wall::FinTe),
+        fin_tips: cf(Wall::FinTip),
+        total: 0.0,
+    };
+    friction.total = friction.nose + friction.aft.iter().sum::<f64>() + friction.base + friction.fin_sides + friction.fin_edges + friction.fin_tips;
+    let total = nose + aft.iter().sum::<f64>() + base + fin_sides + fin_edges + fin_tips + friction.total;
+    DragParts { nose, aft, base, fin_sides, fin_edges, fin_tips, friction, total }
+}
+
+/// [`drag_parts`] of the solver state: the pressure and, for a viscous solver, the friction of every class.
+pub fn drag_parts_on(case: &Case3, s: &Solver3) -> DragParts {
+    drag_parts_from(case, &s.grid, &wall_forces_on(s, f64::INFINITY))
+}
+
+/// The shear force of the no-slip wall faces of a viscous solver per wall class: `Solver3::wall_tractions` (force per area the fluid exerts on the wall) times
+/// the face area, `[Fx, Fz, Mz]` with `Mz = x Fz` at the face centre; faces with centroid `x > x_max` are left out except the base. Empty for Euler.
+pub fn wall_shear(s: &Solver3, x_max: f64) -> Vec<(Wall, [f64; 3])> {
+    let t = s.wall_tractions();
+    if t.is_empty() {
+        return Vec::new();
+    }
+    let g = &s.grid;
+    let class_of = wall_classes(g);
+    let mut acc = WallForces::default();
+    for tr in &t {
+        let [i, j, k] = tr.idx;
+        let Some(&class) = class_of.get(&(tr.dir, i, j, k)) else { continue };
+        let f = face_at(g, tr.dir, i, j, k);
+        if f.c[0] > x_max + 1e-9 && class != Wall::Base {
+            continue;
+        }
+        let d = [tr.tau[0] * tr.area, tr.tau[2] * tr.area];
+        acc.add_shear(class, [d[0], d[1], d[1] * f.c[0]]);
+    }
+    acc.shear
+}
+
+/// The wall forces of the solver state: the pressure of [`wall_forces`] and, for a viscous solver, the shear of [`wall_shear`].
+pub fn wall_forces_on(s: &Solver3, x_max: f64) -> WallForces {
+    let mut w = wall_forces(&s.grid, &s.u, s.cfg.freestream[4], x_max);
+    w.shear = wall_shear(s, x_max);
+    w
+}
+
+/// `(family, i, j, k)` of every wall face of the grid -> its class: the key is the first node of the face, which is its index in its family
+/// (`Grid3::{iface, jface, kface}`: `(k nj + j)(ni + 1) + i`, `(k (nj + 1) + j) ni + i`, `(k nj + j) ni + i`).
+fn wall_classes(g: &Grid3) -> std::collections::HashMap<(usize, usize, usize, usize), Wall> {
+    wall_faces(g)
+        .into_iter()
+        .map(|w| {
+            let c = w.corners;
+            let dir = if c.iter().all(|n| n.0 == c[0].0) {
+                0
+            } else if c.iter().all(|n| n.1 == c[0].1) {
+                1
+            } else {
+                2
+            };
+            ((dir, c[0].0, c[0].1, c[0].2), w.class)
+        })
+        .collect()
+}
+
+fn face_at(g: &Grid3, dir: usize, i: usize, j: usize, k: usize) -> Face3 {
+    match dir {
+        0 => g.iface[(k * g.nj + j) * (g.ni + 1) + i],
+        1 => g.jface[(k * (g.nj + 1) + j) * g.ni + i],
+        _ => g.kface[(k * g.nj + j) * g.ni + i],
+    }
+}
+
+/// Largest `y+` of the streamwise no-slip walls (the faces whose normal is `j` or `k`: the body surface, the fin sides and tips; not the `i` faces of the base and of
+/// blunt fin edges, where the log law has no meaning): `d_n sqrt(rho |tau|) / mu` of the first cell. `0` for Euler.
+pub fn y_plus_max(s: &Solver3) -> f64 {
+    y_plus_at(s).into_iter().map(|w| w.0).fold(0.0, f64::max)
+}
+
+/// [`y_plus_max`] over the faces of the wall classes for which `keep` holds (the body surface, the fin sides, the fin tips).
+pub fn y_plus_max_of(s: &Solver3, keep: impl Fn(Wall) -> bool) -> f64 {
+    y_plus_at(s).into_iter().filter(|w| keep(w.4)).map(|w| w.0).fold(0.0, f64::max)
+}
+
+/// The `y+` of the first cell at every streamwise no-slip wall face: `(y+, family, [i, j, k] of the face, first fluid cell, wall class)`; empty for Euler.
+pub fn y_plus_at(s: &Solver3) -> Vec<(f64, usize, [usize; 3], usize, Wall)> {
+    let Some(rans) = s.rans() else { return Vec::new() };
+    let g = &s.grid;
+    let classes = wall_classes(g);
+    let mut out = Vec::new();
+    for t in s.wall_tractions() {
+        if t.dir == 0 {
+            continue;
+        }
+        let [i, j, k] = t.idx;
+        let Some(&class) = classes.get(&(t.dir, i, j, k)) else { continue };
+        let f = face_at(g, t.dir, i, j, k);
+        // the fluid cell of the face: the cell at the face's own index, or the one below it
+        let own = g.cell(i.min(g.ni - 1), j.min(g.nj - 1), k.min(g.nk - 1));
+        let cell = if g.part[own] == bowshock_cfd::grid3::PART_FLUID {
+            own
+        } else if t.dir == 1 {
+            g.cell(i, j - 1, k)
+        } else {
+            g.cell(i, j, k - 1)
+        };
+        let x = g.xc[cell];
+        let d_n = ((x[0] - f.c[0]) * t.n[0] + (x[1] - f.c[1]) * t.n[1] + (x[2] - f.c[2]) * t.n[2]).abs();
+        let tau = (t.tau[0] * t.tau[0] + t.tau[1] * t.tau[1] + t.tau[2] * t.tau[2]).sqrt();
+        out.push((d_n * (s.u[cell][0] * tau).sqrt() / rans.mu[cell], t.dir, t.idx, cell, class));
+    }
+    out
+}
+
+/// Mean pressure coefficient of the base face (area weighted over the `Wall::Base` faces, wall pressure as the force integration has it); `NaN` without a base.
+pub fn base_cp(case: &Case3, s: &Solver3) -> f64 {
+    let p_inf = s.cfg.freestream[4];
+    let q = 0.5 * case.mach * case.mach;
+    let (mut num, mut den) = (0.0, 0.0);
+    for w in wall_samples(&s.grid, &s.u) {
+        if w.class == Wall::Base {
+            let a = w.face.area * w.face.n[0].abs();
+            num += (w.pw - p_inf) * a;
+            den += a;
+        }
+    }
+    if den > 0.0 {
+        num / den / q
+    } else {
+        f64::NAN
+    }
 }
 
 /// The quantity a run waits on: CN of a half domain at incidence; the axial force coefficient of a wedge, a sector, or a half domain at zero incidence (CN is
@@ -440,7 +641,10 @@ pub fn run3_on(case: &Case3, s: &mut Solver3, warm: bool) -> PointResult3 {
             break;
         }
     }
-    rule.finish(case, lift_forces(case, s), it)
+    let mut r = rule.finish(case, lift_forces(case, s), it);
+    r.y_plus_max = y_plus_max(s);
+    r.cp_base = base_cp(case, s);
+    r
 }
 
 /// The stop rules of a 3D run, shared by the CPU and GPU runners. Feed it every iteration's residual (and, at iterations
@@ -549,6 +753,8 @@ impl StopRule3 {
             stop_reason: reason,
             drop_orders,
             cn_history: self.hist,
+            y_plus_max: f64::NAN,
+            cp_base: f64::NAN,
         }
     }
 }

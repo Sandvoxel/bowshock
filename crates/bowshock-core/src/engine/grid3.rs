@@ -28,6 +28,7 @@
 use super::body_grid::{
     axial_nodes, base_axial_nodes, base_domain_grid, base_rows_below, radial_fractions, two_sided_nodes, BaseBody, BaseGridParams, LargeGridParams,
 };
+use crate::engine::planform::Planform;
 use crate::error::Error;
 use crate::fins::normalised;
 use crate::spec::FinProfile;
@@ -50,6 +51,24 @@ pub struct Fins3 {
     /// Distance by which the root trailing edge lies ahead of the body base (0 = flush).
     pub te_to_base: f64,
     pub profile: FinProfile,
+    /// The outline when it is not the trapezoid of `root_chord`, `tip_chord`, `span` and `sweep` ([`Fins3::with_planform`] keeps the four numbers consistent with it).
+    pub planform: Option<Planform>,
+}
+
+/// The chord at which a pointed or elliptical planform is cut at the tip, as a fraction of the root chord.
+pub const TIP_CHORD_FLOOR: f64 = 0.04;
+
+impl Fins3 {
+    /// These fins with the outline `pf` (an ellipse, a freeform polygon, ...): the four trapezoid numbers become those of the outline (root chord, tip chord, span,
+    /// sweep of the tip leading edge) so that everything that reads them stays consistent; the mesher follows the outline.
+    pub fn with_planform(mut self, pf: Planform) -> Fins3 {
+        self.root_chord = pf.root_chord();
+        self.tip_chord = pf.tip_chord();
+        self.span = pf.span();
+        self.sweep = pf.sweep();
+        self.planform = Some(pf);
+        self
+    }
 }
 
 /// Where the fins sit relative to the pitch plane of a half domain.
@@ -195,7 +214,7 @@ pub(crate) fn half_thickness(profile: &FinProfile, t: f64, chord: f64, xi: f64) 
 
 /// Node-index layout of the fins on the axial/radial lines.
 struct FinPlan {
-    /// Node range `a..=b` of the rebuilt tube segment.
+    /// Node range `a..=b` of the rebuilt segments under the fin root (one tube, or several segments).
     i_seg0: usize,
     i_seg1: usize,
     i_le: usize,
@@ -203,11 +222,34 @@ struct FinPlan {
     j_tip: usize,
     x_le_root: f64,
     x_te_root: f64,
+    /// The largest body radius under the root (the reference of the stack and of the span), and the tip radius `r_t + span`: the tip stands on one cylinder
+    /// whatever the body radius under the root does.
     r_t: f64,
+    r_tip: f64,
+    /// The span the grid meshes: the planform's, cut where the chord of a pointed or elliptical outline falls to [`TIP_CHORD_FLOOR`] of the root chord.
+    span: f64,
+    /// The outline (`None`: the trapezoid of the four numbers of `Fins3`).
+    planform: Option<Planform>,
     /// Radial fractions of the node rows, including the extra rows of `span_cells` (`nj + 1`).
     sj: Vec<f64>,
-    /// Remapped radial fractions (`nj + 1`).
-    s_remap: Vec<f64>,
+}
+
+impl FinPlan {
+    /// Radial fraction (of the way from the body surface to the outer boundary) of the node row `jj` above the surface in a column whose tip row sits at the
+    /// fraction `target` (`(r_tip - r_body) / (r_far - r_body)`): the rows below the tip scale with it, the rows above it fan to the boundary.
+    fn remap(&self, jj: usize, target: f64) -> f64 {
+        let tip = self.sj[self.j_tip];
+        if jj <= self.j_tip {
+            self.sj[jj] * target / tip
+        } else {
+            target + (self.sj[jj] - tip) * (1.0 - target) / (1.0 - tip)
+        }
+    }
+
+    /// Fraction of the span (from the body surface to the tip) of the node row `jj`.
+    fn span_fraction(&self, jj: usize) -> f64 {
+        self.sj[jj.min(self.j_tip)] / self.sj[self.j_tip]
+    }
 }
 
 /// Azimuthal layer structure: fin angles, the number of cells in each gap and where the nodes of a gap lie.
@@ -522,7 +564,13 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>, host: &Host) -> Resu
     let (nj0, r_far) = (host.sj0.len() - 1, host.r_far);
     let bad = |m: &str| Err(Error::InvalidInput(m.to_string()));
     let ok = |v: f64| v.is_finite();
-    if !(f.count >= 1 && ok(f.root_chord) && f.root_chord > 0.0 && ok(f.tip_chord) && f.tip_chord >= 0.0 && ok(f.span) && f.span > 0.0)
+    let custom = f.planform.is_some();
+    if let Some(pf) = &f.planform {
+        if (pf.root_chord() - f.root_chord).abs() > 1e-9 * (1.0 + f.root_chord) {
+            return bad("Fins3.root_chord disagrees with the planform: build the fins with Fins3::with_planform");
+        }
+    }
+    if !(f.count >= 1 && ok(f.root_chord) && f.root_chord > 0.0 && (custom || (ok(f.tip_chord) && f.tip_chord >= 0.0 && ok(f.span) && f.span > 0.0)))
         || !(ok(f.sweep) && ok(f.thickness) && f.thickness > 0.0 && ok(f.te_to_base) && f.te_to_base >= 0.0)
     {
         return bad("3D fins need count >= 1, positive root chord, span and thickness, tip chord >= 0 and te_to_base >= 0");
@@ -531,25 +579,44 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>, host: &Host) -> Resu
     let x_te_root = bb.x_base() - f.te_to_base;
     let x_le_root = x_te_root - f.root_chord;
     let nseg = bb.segments.len();
-    let unsupported = || Error::Unsupported("3D fins must sit on a tube".to_string());
-    let k = (0..nseg)
-        .find(|&k| {
-            let x0 = bb.station(k).0;
-            bb.segments[k].slope == 0.0 && x_le_root >= x0 - 1e-9 && x_te_root <= x0 + bb.segments[k].length + 1e-9
-        })
-        .ok_or_else(unsupported)?;
-    let a = host.n_up + host.n_nose + host.n_seg[..k].iter().sum::<usize>();
-    let b_old = a + host.n_seg[k];
+    let seg_end = |k: usize| bb.station(k).0 + bb.segments[k].length;
+    // the aft segments under the root: the one that holds the leading edge to the one that holds the trailing edge (tubes, boattails, flares, any number)
+    let k0 = (0..nseg).find(|&k| x_le_root >= bb.station(k).0 - 1e-9 && x_le_root < seg_end(k) - 1e-9).ok_or_else(|| {
+        Error::Unsupported(format!(
+            "the fin root leading edge (x = {x_le_root:.4} d) lies ahead of the aft body (the nose ends at {:.4} d) or behind its last segment: fins stand on the aft segments",
+            bb.body.nose_length()
+        ))
+    })?;
+    let k1 = (k0..nseg).find(|&k| x_te_root > bb.station(k).0 + 1e-9 && x_te_root <= seg_end(k) + 1e-9).ok_or_else(|| {
+        Error::Unsupported(format!("the fin root trailing edge (x = {x_te_root:.4} d) lies behind the body base or ahead of its leading edge"))
+    })?;
+    let a = host.n_up + host.n_nose + host.n_seg[..k0].iter().sum::<usize>();
+    let b_old = host.n_up + host.n_nose + host.n_seg[..=k1].iter().sum::<usize>();
     let (x_a, x_b) = (xs[a], xs[b_old]);
     let x_le_root = if x_le_root - x_a > 1e-9 { x_le_root } else { x_a };
     let x_te_root = if x_b - x_te_root > 1e-9 { x_te_root } else { x_b };
     let flush = x_te_root >= x_b;
+    // the body radius under the root: piecewise linear, its largest value is at an end or a station between the segments; the tip stands `span` above it
+    let r_ref = (k0 + 1..=k1).map(|k| bb.station(k).1).chain([bb.r(x_le_root), bb.r(x_te_root)]).fold(0.0, f64::max);
     let nf = p.fin_chord_cells.unwrap_or(32usize << p.level);
     if nf < 2 {
         return Err(Error::InvalidInput("3D fins need at least 2 cells over the root chord".to_string()));
     }
     let mut fin_offs = two_sided_nodes(f.root_chord, nf, 0.3 * f.root_chord / nf as f64);
     fin_offs[nf] = x_te_root - x_le_root;
+    // the stations between the segments under the root stay nodes (the body parts are split there): the nearest chord node moves onto each
+    for k in k0 + 1..=k1 {
+        let off = bb.station(k).0 - x_le_root;
+        if off > 1e-9 && off < fin_offs[nf] - 1e-9 {
+            let m = (1..nf).min_by(|&p, &q| (fin_offs[p] - off).abs().total_cmp(&(fin_offs[q] - off).abs())).unwrap();
+            fin_offs[m] = off;
+        }
+    }
+    if fin_offs.windows(2).any(|w| w[1] - w[0] <= 1e-9) {
+        return Err(Error::Unsupported(
+            "two segment stations lie within one chord cell of each other under the fin root: use more cells over the root chord".to_string(),
+        ));
+    }
     let dx_f = fin_offs[1] - fin_offs[0];
     // Regrade: the fin piece replaces the original nodes over its chord. Geometric fans (growth <= 1.2) lead from its end cells
     // to the first original node where the spacing has caught up with the original one (ratio <= 1.5 on both sides).
@@ -592,12 +659,17 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>, host: &Host) -> Resu
     let i_seg1 = if flush { i_te } else { i_te + m_down + (b_old - o_down) };
     *xs = new;
 
-    let r_t = bb.station(k).1;
-    if r_far.is_nan() || r_far <= r_t + f.span || nj0 < 6 {
+    let r_t = r_ref;
+    // the grid cannot take a chord that goes to zero: a pointed or elliptical planform is cut where its chord has fallen to a few per cent of the root's
+    let span = match &f.planform {
+        Some(pf) => pf.height_with_chord_at_least(TIP_CHORD_FLOOR * f.root_chord),
+        None => f.span,
+    };
+    if r_far.is_nan() || r_far <= r_t + span || nj0 < 6 {
         return Err(Error::Grid("the fin tip must lie inside the domain".to_string()));
     }
     let sj0 = host.sj0.clone();
-    let target = f.span / (r_far - r_t);
+    let target = span / (r_far - r_t);
     let j_tip0 = (1..=nj0).min_by(|&a, &b| (sj0[a] - target).abs().total_cmp(&(sj0[b] - target).abs())).unwrap();
     let (sj, s_remap, j_tip) = match p.span_cells {
         None => {
@@ -667,13 +739,26 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>, host: &Host) -> Resu
     if j_tip + 4 > nj {
         return Err(Error::Grid("the fin tip is too close to the outer boundary".to_string()));
     }
-    // the swept tip trailing edge must stay inside the rebuilt segment (flush: not behind the base)
-    let x_te_tip = x_le_root + f.sweep + f.tip_chord;
+    // the outline must stay inside the rebuilt segment: not ahead of its start, not behind the root trailing edge room (flush: not behind the base)
     let room = if i_te == i_seg1 { 1e-9 } else { 0.5 * (x_b - x_te_root) };
-    if x_te_tip > x_te_root + room || x_le_root + f.sweep < x_a - 1e-9 {
-        return Err(Error::Unsupported("3D fin tip trailing edge lies behind the root trailing edge room".to_string()));
+    let (x_front, x_back) = match &f.planform {
+        Some(pf) => pf.x_extent_up_to(span),
+        None => (f.sweep.min(0.0), (f.sweep + f.tip_chord).max(f.root_chord)),
+    };
+    if x_le_root + x_front < x_a - 1e-9 {
+        return Err(Error::Unsupported(format!(
+            "the fin outline reaches {:.4} d ahead of its root leading edge, past the start of the aft segments under the root",
+            -x_front
+        )));
     }
-    Ok(FinPlan { i_seg0: a, i_seg1, i_le, i_te, j_tip, x_le_root, x_te_root, r_t, sj, s_remap })
+    if x_le_root + x_back > x_te_root + room {
+        return Err(Error::Unsupported(format!(
+            "the fin outline reaches {:.4} d behind its root trailing edge{}: a fin may not overhang the base",
+            x_le_root + x_back - x_te_root,
+            if i_te == i_seg1 { " (flush with the base)" } else { "" }
+        )));
+    }
+    Ok(FinPlan { i_seg0: a, i_seg1, i_le, i_te, j_tip, x_le_root, x_te_root, r_t, r_tip: r_ref + span, span, planform: f.planform.clone(), sj })
 }
 
 /// Azimuth span and symmetry of the domain of `p`.
@@ -696,6 +781,27 @@ fn domain_span(p: &Grid3Params) -> Result<(f64, Symmetry), Error> {
 /// plane `x = x_base` there. Behind the plane the layer continues as fluid cells that taper over four columns to the nominal width; below the base radius
 /// (the wake rows under the surface) the layer keeps the angle it has on the surface row, so it is a thin sector that narrows to the axis, never a jump.
 pub fn body_grid3(p: &Grid3Params) -> Result<Grid3, Error> {
+    let first = body_grid3_inner(p);
+    let Err(Error::Grid(m)) = &first else { return first };
+    if !(m.starts_with("negative cell volume") || m.starts_with("non-positive fluid cell volume")) || p.fins.is_none() || p.fin_stack.is_some() || p.nk < 2 {
+        return first;
+    }
+    // uniform azimuthal cells beside a fin that fold: name the cause and the smallest `nk` that does not (a negative volume is never the reason the caller sees)
+    let (span, _) = domain_span(p)?;
+    let cell = span.to_degrees() / p.nk as f64;
+    let f = p.fins.as_ref().expect("fins");
+    let valid = (p.nk + 1..=(3 * p.nk).max(p.nk + 8)).find(|&nk| body_grid3_inner(&Grid3Params { nk, ..p.clone() }).is_ok());
+    Err(Error::Grid(format!(
+        "the {} azimuthal cells of the domain are {cell:.1} degrees wide, too wide for the fins ({:.3} d thick, {:.2} d exposed span): a cell beside a fin folds ({m}): the gap cells on the two sides of the fin differ in width (the counts are rounded), so the polygon scale puts its two faces at different radii and shears the thin layer{}",
+        p.nk,
+        f.thickness,
+        f.span,
+        valid.map_or(", and no nk up to three times as large builds either: check the fins".to_string(), |n| format!("; use nk >= {n} ({:.1} degree cells)", span.to_degrees() / n as f64))
+    )))
+}
+
+/// [`body_grid3`] without the explanation of a fold.
+fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
     if let (Some(bp), None) = (&p.base, &p.fins) {
         return base_grid3(p, bp);
     }
@@ -794,17 +900,33 @@ pub fn body_grid3(p: &Grid3Params) -> Result<Grid3, Error> {
                 (1.0 - (d as f64 - 4.0) / 4.0).max(0.0)
             }
         };
+        // the tip row stands on one cylinder `r_tip` over the fin: the fraction of its way from the body surface under each column to the boundary
+        let exposed = (pl.i_le..=pl.i_te).map(|i| pl.r_tip - r_in[i]);
+        // the tip stands `span` above the largest root radius, so the exposed span is at least `span` there
+        let (h_min, h_max) = (exposed.clone().fold(f64::INFINITY, f64::min), exposed.fold(0.0, f64::max));
+        if h_max > 3.0 * h_min {
+            return Err(Error::Unsupported(format!(
+                "the exposed span of the fin varies from {h_min:.3} d to {h_max:.3} d along its root (a steep boattail or flare under the fin): the grid rows cannot follow a fin whose exposed span changes by more than a factor 3"
+            )));
+        }
+        let target_ref = pl.span / (r_far - pl.r_t);
+        let tcol: Vec<f64> = r_in.iter().map(|&r| ((pl.r_tip - r) / (r_far - r)).max(0.2 * target_ref)).collect();
         for j in j_off..=nj {
             for i in 0..=ni {
-                let s = sj[j - j_off] + wcol(i) * (pl.s_remap[j - j_off] - sj[j - j_off]);
+                let s = sj[j - j_off] + wcol(i) * (pl.remap(j - j_off, tcol[i]) - sj[j - j_off]);
                 rn[j * (ni + 1) + i] = r_in[i] + s * (r_far - r_in[i]);
             }
         }
         // planform of the row `jj` above the surface
         let row = |jj: usize| -> (f64, f64, f64) {
-            let r = pl.r_t + pl.s_remap[jj.min(pl.j_tip)] * (r_far - pl.r_t);
-            let frac = ((r - pl.r_t) / f.span).clamp(0.0, 1.0);
-            (frac, pl.x_le_root + f.sweep * frac, f.root_chord + (f.tip_chord - f.root_chord) * frac)
+            let frac = pl.span_fraction(jj);
+            match &pl.planform {
+                Some(pf) => {
+                    let h = frac * pl.span;
+                    (frac, pl.x_le_root + pf.x_le(h), pf.chord(h))
+                }
+                None => (frac, pl.x_le_root + f.sweep * frac, f.root_chord + (f.tip_chord - f.root_chord) * frac),
+            }
         };
         // sweep and taper: piecewise-linear remap of the segment nodes
         let nodes0: Vec<f64> = xs.clone();
@@ -954,6 +1076,7 @@ pub fn body_grid3(p: &Grid3Params) -> Result<Grid3, Error> {
             if bp.n_sting > 0 {
                 g.mark_solid(SolidBox { i: ie..ni, j: 0..bp.n_sting, k: ks }, Some(Part::Sting));
             }
+            mark_jet(&mut g, bp, ie, nk);
         }
         _ => {
             g.axis = vec![AxisRun { j: 0, i: 0..host.n_up }];
@@ -996,6 +1119,15 @@ pub fn wedge_of_meridian(g2: &bowshock_cfd::grid::Grid, dtheta: f64, n_axis: usi
     Ok(g)
 }
 
+/// Motor-on grids: the nozzle rows of the 2D base grid (`NozzleRows`, rows `0..n_jet` behind the base, none of them a wall) as a face patch on the base. The two
+/// cell columns of the body block just ahead of the base plane (`i_end - 2..i_end`, the ghost cells the 2D solver fills with the jet state) in those rows, every
+/// `k`, become `Part::Jet`; the `+i` faces between them and the fluid behind the base are the exit (`Wall::Jet`), the rest of the base stays `Wall::Base`.
+fn mark_jet(g: &mut Grid3, bp: &BaseGridParams, i_end: usize, nk: usize) {
+    if let Some(nz) = &bp.nozzle {
+        g.mark_solid(SolidBox { i: i_end - 2..i_end, j: 0..nz.n_jet, k: 0..nk }, Some(Part::Jet));
+    }
+}
+
 /// Build a finless grid on the base-wake meridian grid `bp` (`base_domain_grid`): the body block (the cells inside the body, from the nose tip to the
 /// base plane) is solid, split by body segment for the force classes, its cells upstream of the nose tip are dead (their nodes lie on or behind the axis,
 /// see `revolve`), a sting behind the base is its own part. Axis runs: the line `j = j_end` upstream of the nose and, without a sting, the rows
@@ -1030,6 +1162,7 @@ fn base_grid3(p: &Grid3Params, bp: &BaseGridParams) -> Result<Grid3, Error> {
     if blk.j_sting > 0 {
         g.mark_solid(SolidBox { i: blk.i_end..ni, j: 0..blk.j_sting, k: ks }, Some(Part::Sting));
     }
+    mark_jet(&mut g, bp, blk.i_end, nk);
     for k in 0..nk {
         for j in 0..g.nj {
             for i in 0..ni {
@@ -1102,7 +1235,7 @@ mod tests {
     }
 
     fn anf_fins(profile: FinProfile) -> Fins3 {
-        Fins3 { count: 4, root_chord: 1.0, tip_chord: 1.0, span: 1.0, sweep: 0.0, thickness: 0.08, te_to_base: 0.0, profile }
+        Fins3 { count: 4, root_chord: 1.0, tip_chord: 1.0, span: 1.0, sweep: 0.0, thickness: 0.08, te_to_base: 0.0, profile, planform: None }
     }
 
     fn params(level: u32, fins: Option<Fins3>) -> Grid3Params {
@@ -1122,7 +1255,17 @@ mod tests {
 
     #[test]
     fn planform_area_of_a_swept_tapered_fin_set() {
-        let f = Fins3 { count: 4, root_chord: 1.0, tip_chord: 0.6, span: 1.0, sweep: 0.3, thickness: 0.08, te_to_base: 0.0, profile: FinProfile::Square };
+        let f = Fins3 {
+            count: 4,
+            root_chord: 1.0,
+            tip_chord: 0.6,
+            span: 1.0,
+            sweep: 0.3,
+            thickness: 0.08,
+            te_to_base: 0.0,
+            profile: FinProfile::Square,
+            planform: None,
+        };
         let g = body_grid3(&params(0, Some(f))).unwrap();
         assert_eq!(g.solid.len(), 2);
         for b in &g.solid {
@@ -1135,7 +1278,17 @@ mod tests {
     #[test]
     fn fin_faces_follow_the_profile() {
         for profile in [FinProfile::Rounded, FinProfile::Airfoil, FinProfile::DoubleWedge, FinProfile::Square] {
-            let f = Fins3 { count: 4, root_chord: 1.0, tip_chord: 0.6, span: 1.0, sweep: 0.3, thickness: 0.08, te_to_base: 0.0, profile: profile.clone() };
+            let f = Fins3 {
+                count: 4,
+                root_chord: 1.0,
+                tip_chord: 0.6,
+                span: 1.0,
+                sweep: 0.3,
+                thickness: 0.08,
+                te_to_base: 0.0,
+                profile: profile.clone(),
+                planform: None,
+            };
             let g = body_grid3(&params(0, Some(f.clone()))).unwrap();
             for (m, b) in g.solid.iter().enumerate() {
                 let th = PI / 4.0 + PI / 2.0 * m as f64;
@@ -1315,7 +1468,7 @@ mod tests {
 
     fn flow() -> crate::engine::case3::WallFlow {
         // the example rocket at Mach 2: Re/m 9.84e6, d = 0.0572 m
-        crate::engine::case3::WallFlow { re_c: 9.84e6 * 0.0572 / 2.0, mach_max: 2.0, ks_body: 2e-5, ks_fin: 1e-4 }
+        crate::engine::case3::WallFlow { re_c: 9.84e6 * 0.0572 / 2.0, mach_max: 2.0, ks_body: 2e-5, ks_fin: 1e-4, sutherland: 0.368 }
     }
 
     #[test]

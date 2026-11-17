@@ -1206,6 +1206,7 @@ impl Analysis {
                 thickness: f.thickness / d,
                 te_to_base: f.root_te_to_base / d,
                 profile: f.profile.clone(),
+                planform: None,
             }
         })
     }

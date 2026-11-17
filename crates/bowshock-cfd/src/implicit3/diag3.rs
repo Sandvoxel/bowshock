@@ -9,6 +9,7 @@
 //! `dU = dU0 + D^-1 (b - (I - dt J_i - dt J_j - dt J_k) dU0)`.
 
 use super::*;
+use crate::lowmach5::{eig_pc5, face_dis_pc5, lam_pc5};
 
 /// Row-major `N x N` matrix.
 type Mat<const N: usize> = [[f64; N]; N];
@@ -165,6 +166,7 @@ fn face_dis3(wa: &Prim3, wb: &Prim3, n: [f64; 3], p: &ImplicitParams) -> [f64; 5
 fn assemble_d3(s: &Solver3, p: &ImplicitParams, dir: usize) -> Vec<DCell<5>> {
     let (ni, nj, nk) = (s.grid.ni, s.grid.nj, s.grid.nk);
     let (grid, w, dt, solid) = (&s.grid, &s.w, &s.dt, &s.solid);
+    let (rans, lm) = (s.rans.as_deref(), s.precond);
     let n = ni * nj * nk;
     let stride = [1, ni, ni * nj][dir];
     let e: [isize; 3] = match dir {
@@ -197,8 +199,8 @@ fn assemble_d3(s: &Solver3, p: &ImplicitParams, dir: usize) -> Vec<DCell<5>> {
                 };
                 let lower_solid = m > 0 && solid[c - stride];
                 let upper_solid = m + 1 < nl && solid[c + stride];
-                let wm = if lower_solid { reflect3(wk, fl.n) } else { w[pidx3(ni, nj, nk, ii - e[0], jj - e[1], kk - e[2])] };
-                let wp = if upper_solid { reflect3(wk, fr.n) } else { w[pidx3(ni, nj, nk, ii + e[0], jj + e[1], kk + e[2])] };
+                let wm = if lower_solid { s.wall_ghost(wk, fl.n) } else { w[pidx3(ni, nj, nk, ii - e[0], jj - e[1], kk - e[2])] };
+                let wp = if upper_solid { s.wall_ghost(wk, fr.n) } else { w[pidx3(ni, nj, nk, ii + e[0], jj + e[1], kk + e[2])] };
                 // cell normal: normalised mean of the two face normals
                 let mut nc = [fl.n[0] + fr.n[0], fl.n[1] + fr.n[1], fl.n[2] + fr.n[2]];
                 let nn = (nc[0] * nc[0] + nc[1] * nc[1] + nc[2] * nc[2]).sqrt();
@@ -209,10 +211,31 @@ fn assemble_d3(s: &Solver3, p: &ImplicitParams, dir: usize) -> Vec<DCell<5>> {
                 } else {
                     nc = fl.n;
                 }
-                let (r, l) = eig3(wk, nc);
+                // low-Mach run: eigensystem of `P^-1 A` (the first sweep carries `L P^-1`, the others `L`: the `P` between the sweeps cancels)
+                let (r, l) = match &lm {
+                    Some(lmv) => {
+                        let e = eig_pc5(wk, nc, lmv.u_ref(wk, sound_speed3(wk)));
+                        (e.r, if dir == 0 { e.l_pinv } else { e.l })
+                    }
+                    None => eig3(wk, nc),
+                };
                 let s0 = 0.5 * dt[c] / grid.vol[c];
-                let (dl, dr) = (face_dis3(&wm, wk, fl.n, p), face_dis3(wk, &wp, fr.n, p));
-                let (mut lo, d, mut up) = coeffs(s0, fl.area, fr.area, &lam3(&wm, fl.n), &lam3(wk, fl.n), &lam3(wk, fr.n), &lam3(&wp, fr.n), &dl, &dr);
+                let lam = |w: &Prim3, n: [f64; 3]| match &lm {
+                    Some(l) => lam_pc5(w, n, l),
+                    None => lam3(w, n),
+                };
+                let dis = |a: &Prim3, b: &Prim3, n: [f64; 3]| match &lm {
+                    Some(l) => face_dis_pc5(a, b, n, p, l),
+                    None => face_dis3(a, b, n, p),
+                };
+                let (mut dl, mut dr) = (dis(&wm, wk, fl.n), dis(wk, &wp, fr.n));
+                // viscous run: `2 lam_f` on the dissipation eigenvalues of a face
+                let (vl, vr) = rans.map_or((0.0, 0.0), |r| r.lam_pair(grid, dir, i, j, k));
+                for q in 0..5 {
+                    dl[q] += 2.0 * vl;
+                    dr[q] += 2.0 * vr;
+                }
+                let (mut lo, d, mut up) = coeffs(s0, fl.area, fr.area, &lam(&wm, fl.n), &lam(wk, fl.n), &lam(wk, fr.n), &lam(&wp, fr.n), &dl, &dr);
                 if !p.lines {
                     lo = [0.0; 5];
                     up = [0.0; 5];
@@ -337,12 +360,14 @@ pub(crate) fn du3(s: &Solver3, p: &ImplicitParams, b: &[Cons3]) -> Vec<Cons3> {
     let mut du = af(b);
     let bf = [assemble3(s, p, 0), assemble3(s, p, 1), assemble3(s, p, 2)];
     let a: Vec<Vec<Cons3>> = (0..3).map(|dir| apply_factor3(s, &bf[dir], dir, &du)).collect();
+    let pm = precond_blocks(s);
     let r: Vec<Cons3> = (0..n)
         .into_par_iter()
         .map(|c| {
+            let pdu = pm.as_ref().map_or(du[c], |pm| mv(&pm[c], &du[c]));
             let mut v = [0.0; 5];
             for q in 0..5 {
-                v[q] = b[c][q] - (a[0][c][q] + a[1][c][q] + a[2][c][q] - 2.0 * du[c][q]);
+                v[q] = b[c][q] - (a[0][c][q] + a[1][c][q] + a[2][c][q] - 2.0 * pdu[q]);
             }
             v
         })

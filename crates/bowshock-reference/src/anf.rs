@@ -82,6 +82,12 @@ const fn pt(mach: f64, cn_per_deg: f64, cm_per_deg: f64) -> AnfPoint {
     AnfPoint { mach, cn_alpha: cn_per_deg * DEG, x_cp_cal: CG_CAL - cm_per_deg / cn_per_deg }
 }
 
+/// Zero-incidence drag coefficient `C_D0` of the ANF (reference area `pi d^2 / 4`, base drag included) as `(Mach, C_D0)`: 0.46 at Mach 0.5 to 0.7 (two rows of
+/// the same value) and 0.585, 0.484, 0.435, 0.373 at Mach 1.832, 2.375, 2.718, 3.147, the values the G-F5 gate of the 3D engine is set against (given with the
+/// gate; the table the source figure was read from is not in this repository, +-8 % is the gate's band, not an uncertainty of the data).
+#[allow(clippy::approx_constant)] // 2.718 is a Mach number of the table, not e
+pub const CD0: &[(f64, f64)] = &[(0.5, 0.46), (0.7, 0.46), (1.832, 0.585), (2.375, 0.484), (2.718, 0.435), (3.147, 0.373)];
+
 /// Wind-tunnel points (Dupuis; digitised from Yayla 2021 Fig. 3.10 p. 35 and Fig. 4.4 p. 40, digitised, ±3 %).
 /// Clusters within ΔM ≈ 0.04 are averaged.
 #[allow(clippy::approx_constant)] // 0.318 is a digitised reading, not 1/π

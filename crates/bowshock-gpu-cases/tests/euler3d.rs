@@ -44,7 +44,17 @@ fn tiny_anf_grid() -> Grid3 {
         dx_tip: 0.03,
         dr_wall: 0.03,
     };
-    let fins = Fins3 { count: 4, root_chord: 1.0, tip_chord: 1.0, span: 1.0, sweep: 0.0, thickness: 0.08, te_to_base: 0.0, profile: FinProfile::Square };
+    let fins = Fins3 {
+        count: 4,
+        root_chord: 1.0,
+        tip_chord: 1.0,
+        span: 1.0,
+        sweep: 0.0,
+        thickness: 0.08,
+        te_to_base: 0.0,
+        profile: FinProfile::Square,
+        planform: None,
+    };
     body_grid3(&Grid3Params::half(sting, Some(fins), 8, 0)).expect("the tiny ANF grid builds")
 }
 

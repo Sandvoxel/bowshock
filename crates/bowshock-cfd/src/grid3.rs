@@ -40,6 +40,9 @@ pub enum Part {
     Fin(u16),
     /// Appendage `n` (lug, rail button, ...).
     Appendage(u16),
+    /// The motor jet's exit: the two cell columns of the chamber just ahead of the base plane in the rows of the nozzle (`i_end - 2..i_end`, `j < n_jet`, every
+    /// `k`). They are not a wall: the solver gives them the jet state, and the `+i` faces between them and the fluid are the exit (`Wall::Jet`).
+    Jet,
 }
 
 /// Equivalent sand-grain roughness height `ks` of the walls by kind of part, in nose diameters (0: smooth). The wall treatment reads it per cell through
@@ -56,7 +59,7 @@ impl PartRoughness {
     /// `ks` of the wall of `part`.
     pub fn of(&self, part: Part) -> f64 {
         match part {
-            Part::Body(_) | Part::Sting | Part::Appendage(_) => self.body,
+            Part::Body(_) | Part::Sting | Part::Appendage(_) | Part::Jet => self.body,
             Part::Fin(_) => self.fin,
         }
     }

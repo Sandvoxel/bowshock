@@ -17,11 +17,16 @@ pub mod grid;
 pub mod grid3;
 pub mod implicit;
 pub mod implicit3;
+pub mod lowmach5;
 pub mod multigrid;
+pub mod plate3;
 pub mod solver;
 pub mod solver3;
 pub mod turbulence;
+pub mod turbulence3;
 pub mod viscous;
+pub mod viscous3;
+pub mod walldist3;
 
 #[cfg(feature = "gpu")]
 pub mod gpu;

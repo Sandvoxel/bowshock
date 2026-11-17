@@ -1091,7 +1091,7 @@ mod cpu_wedge {
     use bowshock_core::engine::case::Wake;
     use bowshock_core::engine::case3::Case3;
     use bowshock_core::engine::grid3::{wedge_of_meridian, WEDGE_ANGLE};
-    use bowshock_core::engine::run3::{drag_parts, run3_on};
+    use bowshock_core::engine::run3::{drag_parts_on, run3_on};
     use bowshock_core::Analysis;
 
     pub struct CpuWedge;
@@ -1176,29 +1176,38 @@ mod cpu_wedge {
     }
 
     impl WedgeRunner for CpuWedge {
+        /// Euler and RANS fixture cases on the wedge through `Case3::wedge_of` (the 2D case's grids and numerics, its viscous parameters). `BOWSHOCK_CPU_ONLY=<id>`
+        /// runs only the case with that id (the others are `Err("not selected")`), for running the points of a table in parallel processes.
         fn facade_case(&self, c: &FacadeCase) -> Result<Numbers, String> {
-            if c.rans {
-                return Err("RANS is not on the CPU wedge yet (S3/S4)".to_string());
+            if std::env::var("BOWSHOCK_CPU_ONLY").is_ok_and(|id| id != c.id) {
+                return Err("not selected (BOWSHOCK_CPU_ONLY)".to_string());
+            }
+            if c.motor.is_some() {
+                return Err("motor on: the solver's jet patch is not implemented (DESIGN3D L item 20)".to_string());
             }
             if !c.wake_base {
                 return Err("the wedge is built on the base-wake grid".to_string());
             }
-            let analysis = Analysis::new(&c.body).map_err(|e| e.to_string())?.resolution(c.resolution).wake(Wake::Base);
+            let mut analysis = Analysis::new(&c.body).map_err(|e| e.to_string())?.resolution(c.resolution).wake(Wake::Base);
+            if c.rans {
+                let atmosphere = c.atmosphere.ok_or("a RANS case without an atmosphere")?;
+                analysis = analysis.viscous(bowshock_core::FlightConditions { atmosphere }).roughness(c.roughness_m);
+            }
             let case2 = analysis.engine_cases(&[c.mach]).map_err(|e| e.to_string())?.remove(0);
             let case = Case3::wedge_of(&case2, level_of(c.resolution));
             let mut s = case.build_solver().map_err(|e| e.to_string())?;
             let r = run3_on(&case, &mut s, false);
-            let p = drag_parts(&case, &s.grid, &s.u, s.cfg.freestream[4]);
+            let p = drag_parts_on(&case, &s);
             // the facade (the fixture) refers to the largest cross-section, the engine to the nose base: one factor, `BaseBody::nose_to_largest_area`
             let q = case.body.nose_to_largest_area();
             Ok(Numbers {
                 cd_total: q * p.total,
                 cd_nose: q * p.nose,
                 cd_aft: p.aft.iter().map(|a| q * a).collect(),
-                cd_friction: None,
-                cd_base: Some(q * p.base),
-                cp_base: None,
-                y_plus_max: None,
+                cd_friction: c.rans.then_some(q * p.friction.total),
+                cd_base: Some(q * (p.base + p.friction.base)),
+                cp_base: r.cp_base.is_finite().then_some(r.cp_base),
+                y_plus_max: r.y_plus_max.is_finite().then_some(r.y_plus_max),
                 iterations: r.iterations,
                 stop_reason: format!("{}", r.stop_reason),
             })
@@ -1228,7 +1237,7 @@ mod cpu_wedge {
             let case = Case3::wedge(mach, body, level);
             let mut s = case.build_solver().map_err(|e| e.to_string())?;
             let r = run3_on(&case, &mut s, false);
-            let p = drag_parts(&case, &s.grid, &s.u, s.cfg.freestream[4]);
+            let p = drag_parts_on(&case, &s);
             println!(
                 "INFO ogive M {mach} level {level}: {} iterations, {}; nose {:+.5} aft {:+.5} base {:+.5}",
                 r.iterations,
