@@ -56,7 +56,7 @@ impl Runner3 for Cpu3 {
     type State = Solver3;
 
     fn cold(&self, case: &Case3) -> Result<(PointResult3, Solver3), Error> {
-        let mut s = case.build_solver()?;
+        let mut s = case.build_solver_cached()?;
         let r = run3_on(case, &mut s, false);
         Ok((r, s))
     }
@@ -149,15 +149,14 @@ impl Analysis {
 
     /// The input checks of the route.
     fn check_solver3(&self, conditions: &[Condition]) -> Result<(), Error> {
-        if !SOLVES_VISCOUS {
-            if self.flight.is_some() {
-                return Err(Error::Unsupported(
-                    "Engine::Solver3 solves the Euler equations only: Analysis::viscous is not available under it yet (it would run Euler silently)".into(),
-                ));
-            }
-            if self.motor.is_some() {
-                return Err(Error::Unsupported("Engine::Solver3 has no motor jet yet".into()));
-            }
+        if !SOLVES_VISCOUS && self.flight.is_some() {
+            return Err(Error::Unsupported(
+                "Engine::Solver3 solves the Euler equations only: Analysis::viscous is not available under it yet (it would run Euler silently)".into(),
+            ));
+        }
+        // the jet patch of the 3D solver does not exist yet: a motor-on request fails whatever else the engine solves
+        if self.motor.is_some() && self.flight.is_some() {
+            return Err(Error::Unsupported("Engine::Solver3 has no motor jet yet".into()));
         }
         if self.flight.is_none() {
             if self.drag_tolerance.is_some() {
@@ -476,4 +475,24 @@ fn farfield_dp(g: &Grid3, u: &[Cons3], p_inf: f64) -> f64 {
         }
     }
     dp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::spec::{AftSpec, NoseShape, NoseSpec};
+
+    #[test]
+    fn the_facades_area_factor_is_the_engines_nose_to_largest_area_for_the_default_reference() {
+        // a nose of 0.1 m and a tube of 0.14 m: the largest section is the tube's
+        let spec = BodySpec {
+            nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.3, diameter: 0.1 },
+            aft: vec![AftSpec::Transition { length: 0.1, aft_diameter: 0.14 }, AftSpec::Tube { length: 0.5 }],
+        };
+        let a = Analysis::new(&spec).unwrap();
+        assert!((a.area_ratio() - a.body.nose_to_largest_area()).abs() < 1e-12, "{} {}", a.area_ratio(), a.body.nose_to_largest_area());
+        // an explicit reference diameter is the facade's own business
+        let b = Analysis::new(&spec).unwrap().reference_diameter(0.1);
+        assert!((b.area_ratio() - 1.0).abs() < 1e-12);
+    }
 }

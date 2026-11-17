@@ -38,7 +38,7 @@ impl GpuRunner3 {
     /// Builds the host solver of `case` and uploads it to the default GPU context.
     pub fn new(case: &Case3, prec: Precision) -> Result<GpuRunner3, Error> {
         let t_build = Instant::now();
-        let host = case.build_solver()?;
+        let host = case.build_solver_cached()?;
         let build_seconds = t_build.elapsed().as_secs_f64();
         let t0 = Instant::now();
         let ctx = luma::default_context()?;
