@@ -7,7 +7,7 @@
 //     rho dk/dt     = (-conv_k + diff_k) / V + P - beta* rho omega k
 //     rho domega/dt = (-conv_w + diff_w) / V + gamma rho P / max(mu_t, 1e-30) - beta rho omega^2 + (1 - F1) X
 //
-// With a wall roughness `Viscous::roughness > 0` the wall cells carry the Aupoix (2015) "Colebrook" state of `crate::turbulence::aupoix_wall`
+// With a wall roughness `Viscous::roughness > 0` the wall cells carry the Aupoix (2015) "Colebrook" state of `crate::sst::aupoix_wall`
 // (`LazySolver::aupoix_wall`, evaluated with the viscous quantities in `VFlow::rough`): `k` and `omega` ghosts `2 k_w - k`, `2 omega_w - omega`, and the
 // eddy viscosity of a no-slip face is `mu_t,w` instead of 0; with `ks = 0` none of it is built.
 //
@@ -20,7 +20,7 @@
 // `Stage::mass` is `F[0]` of the face fluxes, `dt` the time step of the iteration (the pseudo time step of the implicit scheme, in the
 // element type).
 
-use crate::turbulence::{AUPOIX_ITERATIONS, A1, BETA1, BETA2, BETA_STAR, GAMMA1, GAMMA2, NU_T_WALL_MAX, SIGMA_K1, SIGMA_K2, SIGMA_W1, SIGMA_W2};
+use crate::sst::{A1, AUPOIX_ITERATIONS, BETA1, BETA2, BETA_STAR, GAMMA1, GAMMA2, NU_T_WALL_MAX, SIGMA_K1, SIGMA_K2, SIGMA_W1, SIGMA_W2};
 
 /// `S^2 = 2 (u_x^2 + v_r^2 + (v/r)^2) + (u_r + v_x)^2 - 2/3 div^2` of a cell from its gradient `g = (u_x, u_r, v_x, v_r, ..)`, radial
 /// velocity `v` and radius `r`.
@@ -54,7 +54,7 @@ fn bc_inf(bc: Bc) -> bool {
 }
 
 impl LazySolver {
-    /// Aupoix (2015) "Colebrook" rough-wall state `[k_w, omega_w, nu_t,w]` of every cell (`crate::turbulence::aupoix_wall`, which documents the
+    /// Aupoix (2015) "Colebrook" rough-wall state `[k_w, omega_w, nu_t,w]` of every cell (`crate::sst::aupoix_wall`, which documents the
     /// formulas) from `nu`, the speed `|u|`, the wall distance `d` and the roughness `ks > 0` of every cell: `AUPOIX_ITERATIONS` fixed-point iterations of `u_tau^2 = (nu + nu_t,w) |u|
     /// from `nu |u| / d`, each evaluated (`staging`) before the next. `ks+` is floored at `1e-30` and `omega_w+ u_tau^2 / nu` evaluated in the closed form
     /// `300 nu / ks^2 / tanh(15 / (4 ks+)) + 191 u_tau / ks (1 - exp(-ks+ / 250))`, so a cell at rest stays finite.

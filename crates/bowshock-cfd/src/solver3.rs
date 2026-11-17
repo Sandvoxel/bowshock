@@ -399,6 +399,8 @@ impl Family<'_> {
     }
 
     /// The jet state if the cell is a `Part::Jet` cell of the motor-jet patch (inside the grid), else `None`.
+    /// Whether the cell is a wall for its fluid neighbours (a solid cell that is not dead: the stencil beyond a dead cell reads the padded state, which
+    /// holds the axis ghost).
     #[inline]
     fn jet_at(&self, c: [isize; 3]) -> Option<Prim3> {
         let (mask, state) = self.jet?;

@@ -16,7 +16,7 @@
 // constants 0 / 1 (`E::Z`, `E::O`), so that the structurally zero entries of the flux Jacobian cost nothing. The line solves are
 // Luma's `solve_block_tridiagonal_parts` on the sixteen entries of each block (no stacking); a vector field is four `[ni, nj]` arrays.
 
-use crate::implicit::{DtMode, ImplicitParams, LineSolve3};
+use crate::implicit_params::{DtMode, ImplicitParams, LineSolve3};
 use crate::solver::Scheme;
 
 /// Array of the f32 left-hand side.
