@@ -123,7 +123,7 @@ fn snapshots(job: &Job, mach: f64, iterations: &[usize]) -> Vec<Event> {
 /// shock (a bow shock for M just above 1, none below), the stagnation region at the nose, the suction at the shoulder, a thin
 /// boundary layer and a dead-water wake behind the base. It is shaped like a flow, not computed from one; its shock grows out of the
 /// body as the iterations go (settled from about 2 000).
-fn synthetic_field(job: &Job, mach: f64, iteration: usize) -> Option<Arc<solver::Field>> {
+fn synthetic_field(job: &Job, mach: f64, iteration: usize) -> Option<Arc<solver::Field3>> {
     let mut f = solver::Analysis::new(&job.plan.body)
         .ok()?
         .viscous(solver::FlightConditions { atmosphere: solver::Atmosphere::Isa { altitude_m: job.altitude.clamp(0.0, 20_000.0) } })
@@ -138,7 +138,7 @@ fn synthetic_field(job: &Job, mach: f64, iteration: usize) -> Option<Arc<solver:
         paint(&mut f, develop);
     }
     f.iteration = iteration;
-    Some(Arc::new(f))
+    Some(cfd::FieldRef::from_2d(&f).0)
 }
 
 /// Fills the flow cells of `f` with the made-up flow, `develop` in 0 to 1 of the way to its settled shape.

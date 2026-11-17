@@ -47,12 +47,12 @@ bowshock-cases.workspace = true
 bowshock-gpu-cases.workspace = true
 luma.workspace = true
 rayon.workspace = true
-# `field3_dump` writes a `Field3` as deflated CBOR, the container of the app's fixtures.
-ciborium = "0.2"
-flate2 = "1"
 
 [dev-dependencies]
 serde_json = "1"
+# `field3_dump` writes a `Field3` as deflated CBOR, the container of the app's fixtures.
+ciborium = "0.2"
+flate2 = "1"
 
 [lints]
 workspace = true

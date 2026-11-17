@@ -4,7 +4,8 @@
 //! Built once per picture on the UI thread, when the picture changes (a snapshot arrives, another Mach number is chosen): the
 //! cost is a few passes over the cells (measured in the module tests of `flow_view`).
 
-use bowshock_core::Field;
+use super::meridian::Meridian;
+use bowshock_core::Field3;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -27,7 +28,9 @@ pub struct Prepared {
     /// Changes with every picture: the GPU side uploads a picture's vertices when it sees a new one.
     pub id: u64,
     /// The field.
-    pub field: Arc<Field>,
+    pub field: Arc<Field3>,
+    /// The meridian layer of the field this picture shows.
+    pub mer: Meridian,
     /// Mach number per cell (NaN in blocked cells).
     pub mach: Vec<f32>,
     /// Pressure coefficient per cell.
@@ -54,9 +57,16 @@ pub struct Prepared {
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 impl Prepared {
-    /// Derives everything the viewer draws from `field`.
-    pub fn new(field: Arc<Field>) -> Prepared {
-        let f = &*field;
+    /// Derives everything the viewer draws from the meridian layer of `field` nearest the lee side of the pitch plane (azimuth 0).
+    pub fn new(field: Arc<Field3>) -> Prepared {
+        let layer = field.layer_of_theta(0.0);
+        Prepared::of_layer(field, layer)
+    }
+
+    /// Derives everything the viewer draws from cell layer `layer` of `field`.
+    pub fn of_layer(field: Arc<Field3>, layer: usize) -> Prepared {
+        let mer = Meridian::of_layer(&field, layer);
+        let f = &mer;
         let (ni, nj) = (f.ni, f.nj);
         let mach = f.mach_numbers();
         let cp = f.pressure_coefficients();
@@ -129,16 +139,31 @@ impl Prepared {
         }
         let length = outline.iter().map(|p| p[0]).fold(0.0f32, f32::max);
         let radius = outline.iter().map(|p| p[1]).fold(0.0f32, f32::max);
-        let wall = f.wall().iter().map(|w| (w.x, w.cp)).collect();
+        let wall = f.wall.clone();
 
-        Prepared { id: NEXT_ID.fetch_add(1, Ordering::Relaxed), field, mach, cp, gradient, ranges, outline, wall, length, radius, vertices, triangles, edges }
+        Prepared {
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            field,
+            mer,
+            mach,
+            cp,
+            gradient,
+            ranges,
+            outline,
+            wall,
+            length,
+            radius,
+            vertices,
+            triangles,
+            edges,
+        }
     }
 
     /// The box the first view shows, `(x0, x1, r_max)`: the body, a little of the flow ahead of it and the wake behind. Falls back
     /// to the whole grid for a field without a body in it.
     pub fn fit_box(&self) -> (f32, f32, f32) {
         if self.length <= 0.0 {
-            let f = &*self.field;
+            let f = &self.mer;
             let (x0, x1) = f.x.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), x| (a.min(*x), b.max(*x)));
             let r1 = f.r.iter().copied().fold(0.0f32, f32::max);
             return (x0, x1, r1.max(1e-6));
@@ -150,7 +175,7 @@ impl Prepared {
 
     /// The flow cell that holds the point `(x, r)` of the meridian plane (`r` is a radius: the picture is mirrored).
     pub fn cell_at(&self, x: f32, r: f32) -> Option<usize> {
-        let f = &*self.field;
+        let f = &self.mer;
         let (ni, nj) = (f.ni, f.nj);
         for j in 0..nj {
             for i in 0..ni {
@@ -190,13 +215,24 @@ impl Prepared {
 
 #[cfg(test)]
 pub(super) mod tests {
+    use super::super::axi::field3_from_2d;
     use super::super::map::Scalar;
     use super::*;
-    use bowshock_core::{field::GAMMA, Wake};
+    use bowshock_core::{field::GAMMA, Field, Wake};
+
+    /// [`small2d`] as the viewer takes it: the wedge of a `Field3`.
+    pub(in crate::analyze) fn small(mach: f64) -> Field3 {
+        field3_from_2d(&small2d(mach))
+    }
+
+    /// [`sized2d`] as the viewer takes it: the wedge of a `Field3`.
+    pub(in crate::analyze) fn sized(ni: usize, nj: usize) -> Field3 {
+        field3_from_2d(&sized2d(ni, nj))
+    }
 
     /// A 4 x 3 grid of unit squares: x from -1 (ahead of the nose tip at 0), r from 0, with a 'body' of blocked cells at columns 1 and 2
     /// of row 0 (the body spans x in [0, 2], r in [0, 1]) and a pressure that rises with x.
-    pub(in crate::analyze) fn small(mach: f64) -> Field {
+    pub(in crate::analyze) fn small2d(mach: f64) -> Field {
         let (ni, nj) = (4usize, 3usize);
         let (mut x, mut r) = (Vec::new(), Vec::new());
         for j in 0..=nj {
@@ -229,7 +265,7 @@ pub(super) mod tests {
 
     /// A grid of `ni` x `nj` cells with a flow in it: x from -0.2 to 1.6, r from 0 to 0.3 (finer at the axis), a blocked 'body' of
     /// 60 % of the columns and two rows, the density rising downstream, at Mach 2. 220 x 124 is the size of the app's coarse grid.
-    pub(in crate::analyze) fn sized(ni: usize, nj: usize) -> Field {
+    pub(in crate::analyze) fn sized2d(ni: usize, nj: usize) -> Field {
         let (mut x, mut r) = (Vec::new(), Vec::new());
         for j in 0..=nj {
             for i in 0..=ni {
@@ -293,7 +329,8 @@ pub(super) mod tests {
         assert!(cp.1 >= 0.2);
         assert!((s.1 - s.0 - SCHLIEREN_DECADES).abs() < 1e-6);
         // the free stream (no gradient) is below the schlieren range's top
-        let quiet = bowshock_core::Field { rho: vec![1.0; 12], ..small(2.0) };
+        let mut quiet = small(2.0);
+        quiet.prim.iter_mut().for_each(|q| q[0] = 1.0);
         let q = Prepared::new(Arc::new(quiet));
         assert!(q.gradient.iter().all(|g| g.is_nan() || *g < 1e-6));
         assert!(q.ranges[2].1 >= 1.0);

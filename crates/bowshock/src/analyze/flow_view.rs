@@ -17,8 +17,10 @@
 //! The pointer is in a screen transform [`Xf`] with the mirror in it: screen y runs down, the radius up, and a pointer below the axis
 //! reads the same flow as its mirror above it.
 
+pub(in crate::analyze) mod axi;
 mod gpu;
 mod map;
+mod meridian;
 mod prepared;
 
 use iced::widget::canvas::{self, Action, Event, Frame, Geometry, LineDash, Path, Stroke, Text};
@@ -27,7 +29,7 @@ use iced::{alignment, mouse, Color, Element, Fill, Length, Pixels, Point, Rectan
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bowshock_core::Field;
+use bowshock_core::Field3;
 use bowshock_model::CfdTable;
 
 use super::solve::thousands;
@@ -215,7 +217,7 @@ impl State {
     }
 
     /// Shows `field` (the picture the screen wants now), preparing it if it is not the one already on show.
-    pub fn set_field(&mut self, field: Option<&Arc<Field>>) {
+    pub fn set_field(&mut self, field: Option<&Arc<Field3>>) {
         match (field, &self.picture) {
             (Some(f), Some(p)) if Arc::ptr_eq(f, &p.field) => {}
             (Some(f), _) => {

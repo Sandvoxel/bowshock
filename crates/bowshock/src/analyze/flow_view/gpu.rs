@@ -266,15 +266,9 @@ mod tests {
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let mut pipeline = Pipeline::new(&device, &queue, format);
         let (w, h) = (1408u32, 500u32);
-        let n = 220 * 124;
         // Mach 1.5 everywhere: the colour range is 0 to 1.5, so every cell is the top of the map
-        let field = bowshock_core::Field {
-            rho: vec![1.0; n],
-            u: vec![1.5; n],
-            v: vec![0.0; n],
-            p: vec![(1.0 / bowshock_core::field::GAMMA) as f32; n],
-            ..sized(220, 124)
-        };
+        let mut field = sized(220, 124);
+        field.prim.iter_mut().for_each(|q| *q = [1.0, 1.5, 0.0, 0.0, (1.0 / bowshock_core::field::GAMMA) as f32]);
         let picture = Arc::new(Prepared::new(Arc::new(field)));
         assert_eq!(picture.ranges[Scalar::Mach.index()], (0.0, 1.5));
         let draw = Draw { picture, scalar: Scalar::Mach, dark: true, grid: false, line: iced::Color::WHITE, centre: (0.7, 0.0), scale: 600.0 };
@@ -354,7 +348,7 @@ mod tests {
         // The coarse grid of the app (27 000 cells here), and one four times as large; with and without the cell edges.
         let frames: usize = std::env::var("BOWSHOCK_FLOW_FRAMES").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
         let big = Prepared::new(Arc::new(sized(440, 248)));
-        for (cells, picture) in [(n, draw.picture.clone()), (440 * 248, Arc::new(big))] {
+        for (cells, picture) in [(220 * 124, draw.picture.clone()), (440 * 248, Arc::new(big))] {
             for grid in [false, true] {
                 let case = Draw { picture: picture.clone(), grid, ..draw.clone() };
                 frame(&mut pipeline, &case, None);

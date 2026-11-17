@@ -1,6 +1,6 @@
 //! The flow fields of the points of the table on show: kept for the session beside the table, never saved.
 //!
-//! A solve brings back the final flow field of every point it solves ([`bowshock_core::Field`], about 0.5 MB on the coarse grid and
+//! A solve brings back the final flow field of every point it solves ([`bowshock_core::Field3`], about 0.5 MB on the coarse grid and
 //! 1.1 MB on the medium one). The table in the document is a cache of drag numbers and stays small, so the fields live here, in the
 //! app's state: not in the `.bowshock` file, not in undo. A table loaded from a file has none until it is solved again. They are
 //! dropped as soon as the geometry they were solved for is no longer the document's (see [`FieldStore::retain_for`]).
@@ -12,12 +12,19 @@ use std::sync::Arc;
 
 /// A field carried by an [`Event`](super::Event): shared, because the events are cloned and a field is large.
 #[derive(Clone)]
-pub struct FieldRef(pub Arc<solver::Field>);
+pub struct FieldRef(pub Arc<solver::Field3>);
+
+impl FieldRef {
+    /// The field of the axisymmetric 2D solver, as the one-cell wedge of a 3D field (see `flow_view::axi`, which goes with the 2D solver).
+    pub fn from_2d(field: &solver::Field) -> FieldRef {
+        FieldRef(Arc::new(crate::analyze::flow_view::axi::field3_from_2d(field)))
+    }
+}
 
 impl fmt::Debug for FieldRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let g = &*self.0;
-        write!(f, "Field(Mach {}, {} x {} cells, iteration {})", g.mach, g.ni, g.nj, g.iteration)
+        write!(f, "Field3(Mach {}, alpha {}, {} x {} x {} cells, iteration {})", g.mach, g.alpha_deg, g.ni, g.nj, g.nk, g.iteration)
     }
 }
 
@@ -48,14 +55,14 @@ fn same(a: f64, b: f64) -> bool {
 pub struct FieldStore {
     stamp: Option<Stamp>,
     /// In ascending Mach order.
-    fields: Vec<Arc<solver::Field>>,
+    fields: Vec<Arc<solver::Field3>>,
 }
 
 impl FieldStore {
     /// Keeps `fields` (the final fields of the points of the solve that made `table`) in place of what was kept; those that are not
     /// of a Mach node of the table are left out.
-    pub fn replace(&mut self, table: &CfdTable, fields: impl IntoIterator<Item = Arc<solver::Field>>) {
-        let mut kept: Vec<Arc<solver::Field>> = fields.into_iter().filter(|f| table.points.iter().any(|p| same(p.mach, f.mach))).collect();
+    pub fn replace(&mut self, table: &CfdTable, fields: impl IntoIterator<Item = Arc<solver::Field3>>) {
+        let mut kept: Vec<Arc<solver::Field3>> = fields.into_iter().filter(|f| table.points.iter().any(|p| same(p.mach, f.mach))).collect();
         kept.sort_by(|a, b| a.mach.total_cmp(&b.mach));
         kept.dedup_by(|a, b| same(a.mach, b.mach));
         self.stamp = (!kept.is_empty()).then(|| Stamp::of(table));
@@ -73,7 +80,7 @@ impl FieldStore {
     }
 
     /// The field of the point at `mach` of `table`, if the store holds one for that table.
-    pub fn get(&self, table: &CfdTable, mach: f64) -> Option<&Arc<solver::Field>> {
+    pub fn get(&self, table: &CfdTable, mach: f64) -> Option<&Arc<solver::Field3>> {
         (self.stamp == Some(Stamp::of(table))).then(|| self.fields.iter().find(|f| same(f.mach, mach))).flatten()
     }
 
@@ -120,8 +127,8 @@ mod tests {
         }
     }
 
-    fn field(mach: f64) -> Arc<solver::Field> {
-        Arc::new(solver::Field {
+    fn field(mach: f64) -> Arc<solver::Field3> {
+        FieldRef::from_2d(&solver::Field {
             mach,
             iteration: 100,
             wake: solver::Wake::Base,
@@ -136,6 +143,7 @@ mod tests {
             p: vec![0.7],
             freestream: [1.0, mach, 0.0, 1.0 / solver::field::GAMMA],
         })
+        .0
     }
 
     #[test]

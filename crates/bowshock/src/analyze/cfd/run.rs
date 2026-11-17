@@ -554,10 +554,10 @@ pub(super) fn solve_sized(
                     // A picture of the flow every few hundred iterations (the first is the grid with the free stream on it, at once).
                     // A remote worker brings back only the final field of the point: its snapshots stay on its side.
                     if let Ok(first) = analysis.initial_field(mach) {
-                        send(Event::Field(FieldRef(Arc::new(first))));
+                        send(Event::Field(FieldRef::from_2d(&first)));
                     }
                     let live = send.clone();
-                    analysis = analysis.on_field(solver::field::SNAPSHOT_INTERVAL, move |f| live(Event::Field(FieldRef(Arc::new(f)))));
+                    analysis = analysis.on_field(solver::field::SNAPSHOT_INTERVAL, move |f| live(Event::Field(FieldRef::from_2d(&f))));
                     let polar = analysis.on_progress(progress).run(&[mach]).map_err(|e| Failed::local(mach, e))?;
                     if polar.backend == solver::BackendUsed::Cpu {
                         // The GPU did not start: do not try it again for every point.
@@ -568,7 +568,7 @@ pub(super) fn solve_sized(
             };
             let cpu = polar.backend == solver::BackendUsed::Cpu;
             if let Some(field) = polar.points[0].field.take() {
-                send(Event::PointField { field: FieldRef(Arc::new(field)) });
+                send(Event::PointField { field: FieldRef::from_2d(&field) });
             }
             let p = &polar.points[0];
             let stored = quality(p.quality).filter(|_| p.drag.total.is_finite()).map(|q| {

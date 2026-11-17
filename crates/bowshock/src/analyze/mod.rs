@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::app::worker;
-use bowshock_core::Field;
+use bowshock_core::Field3;
 use bowshock_model::{CfdGrid, CfdLiftTable, CfdTable};
 use bowshock_sim::from_model::Phase;
 use iced::{keyboard, Element, Task};
@@ -753,7 +753,7 @@ impl State {
         if self.flow.selected.is_none_or(|m| !self.flow.machs.iter().any(|x| (x - m).abs() < 1e-9)) {
             self.flow.selected = flow_view::default_mach(&self.flow.machs);
         }
-        let picture: Option<Arc<Field>> = match (&self.cfd.solving, &table, self.flow.selected) {
+        let picture: Option<Arc<Field3>> = match (&self.cfd.solving, &table, self.flow.selected) {
             (Some(s), _, _) if on => s.picture.clone(),
             (None, Some(t), Some(m)) if self.flow.open => self.cfd.fields.get(t, m).cloned(),
             _ => None,
@@ -917,9 +917,9 @@ pub(crate) struct Solving {
     key: Option<u64>,
     stream: worker::StreamHandle,
     /// The latest picture of the flow of a point in flight (or the final field of the point that ended last): the live view.
-    pub(crate) picture: Option<Arc<Field>>,
+    pub(crate) picture: Option<Arc<Field3>>,
     /// The final fields of the points that ended, for the store of the table the solve makes.
-    fields: Vec<Arc<Field>>,
+    fields: Vec<Arc<Field3>>,
 }
 
 /// A drag solve that was cancelled after some points: the partial curve and, with two or more points, the table to keep.
@@ -939,7 +939,7 @@ pub(crate) struct Stopped {
     /// The label of the Keep button: `Keep 5 solved points`.
     pub(crate) keep_label: String,
     /// The final fields of the points solved, kept with the table if it is.
-    fields: Vec<Arc<Field>>,
+    fields: Vec<Arc<Field3>>,
 }
 
 /// Whether the analysis uses the CFD table when the method is `CFD table` (the others do not use the method).
