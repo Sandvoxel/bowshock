@@ -1,8 +1,10 @@
-//! The parts list and the design report: a side view with the CG and CP, the summary and configuration tables, the flights table
-//! and the health warnings, all in the user's unit set.
+//! The parts list and the design report: a side view with the CG and CP, the summary and configuration tables, the flights table,
+//! the health warnings and the stability page ([`stability`]: CG, CP and margin against Mach, the 3D solve's when there is one),
+//! all in the user's unit set.
 //!
-//! What needs the app's context (the balance, the health list, the flights' conditions and the motor database) is gathered on
-//! the UI thread by [`gather`]; the flights are then prepared and flown on the worker that builds the file ([`Flown::fly`]).
+//! What needs the app's context (the balance, the health list, the flights' conditions, the stored CFD tables and the motor
+//! database) is gathered on the UI thread by [`gather`]; the flights are then prepared and flown, and the stability page built,
+//! on the worker that builds the file ([`Flown::fly`]).
 
 use std::sync::Arc;
 
@@ -12,6 +14,7 @@ use bowshock_sim::from_model::{self, Balance, Level, Phase, Warning};
 use bowshock_sim::Summary;
 
 use super::pdf::{Page, PageSize, Pdf};
+use super::stability;
 use super::templates::MARGIN;
 use crate::app::{ui, Ctx};
 use crate::simulate::flight::{prepare_rocket, Spec};
@@ -47,6 +50,8 @@ pub struct Inputs {
     pub flights: Vec<(String, Spec)>,
     /// The motor database the flights fly with.
     pub motors: Arc<MotorDb>,
+    /// What the stability page is made from (`None` without the design report).
+    pub stability: Option<stability::Inputs>,
 }
 
 /// Gathers [`Inputs`]. The flights are neither prepared nor flown here.
@@ -71,17 +76,38 @@ pub fn gather(ctx: &Ctx, with_flights: bool) -> Inputs {
         .collect();
     let flights = if with_flights { rocket.flights().iter().map(|def| (def.name.clone(), Spec::of(def))).collect() } else { Vec::new() };
     let motors = Arc::new(if with_flights { motors.clone() } else { MotorDb::default() });
-    Inputs { units: ctx.units, balance, configs, warnings, flights, motors }
+    let stability = with_flights.then(|| stability_inputs(ctx));
+    Inputs { units: ctx.units, balance, configs, warnings, flights, motors, stability }
 }
 
-/// The flights' outcomes, in document order.
-pub struct Flown(pub Vec<(String, Result<Summary, String>)>);
+/// What the stability page needs of the session: the stored CFD drag table of the whole stack when it is the rocket's now (it is
+/// named in the provenance) and whether its 3D stability solve is fresh, which is the solve the flights fly on.
+fn stability_inputs(ctx: &Ctx) -> stability::Inputs {
+    let rocket = ctx.doc.rocket();
+    stability::Inputs {
+        table: ctx.physics.stored_table(rocket, 1).ok().cloned(),
+        lift_fresh: ctx.physics.lift_table(rocket, 1).is_ok(),
+        date: stability::date_utc(crate::analyze::cfd::now()),
+    }
+}
+
+/// What the worker makes of [`Inputs`] and the document: the flights' outcomes in document order, and the stability page.
+pub struct Flown {
+    /// Each flight's name and summary, or why it could not be flown.
+    pub flights: Vec<(String, Result<Summary, String>)>,
+    /// The stability page, `None` when [`Inputs::stability`] is (the report was not asked for), or why it could not be made.
+    pub stability: Option<Result<stability::Stability, String>>,
+}
 
 impl Flown {
-    /// Prepares (with [`prepare_rocket`]) and flies every flight of `inputs` with `rocket`: the slow part, for the worker.
+    /// Prepares (with [`prepare_rocket`]) and flies every flight of `inputs` with `rocket`, and builds the stability page: the
+    /// slow part, for the worker.
     pub fn fly(rocket: &Rocket, inputs: &Inputs) -> Flown {
         let fly = |spec: &Spec| prepare_rocket(rocket.clone(), &inputs.motors, spec).map(|(input, _)| bowshock_sim::simulate(&input).summary);
-        Flown(inputs.flights.iter().map(|(name, spec)| (name.clone(), fly(spec))).collect())
+        Flown {
+            flights: inputs.flights.iter().map(|(name, spec)| (name.clone(), fly(spec))).collect(),
+            stability: inputs.stability.as_ref().map(|s| stability::compute(rocket, &inputs.motors, s)),
+        }
     }
 }
 
@@ -407,7 +433,7 @@ pub fn design_report(pdf: &mut Pdf, rocket: &Rocket, inputs: &Inputs, flown: Opt
     flow.y += 2.0;
     let mut errors = Vec::new();
     let flights: Vec<Vec<String>> = match flown {
-        Some(Flown(list)) => list
+        Some(Flown { flights: list, .. }) => list
             .iter()
             .map(|(flight_name, outcome)| match outcome {
                 Ok(s) => vec![
@@ -461,6 +487,56 @@ pub fn design_report(pdf: &mut Pdf, rocket: &Rocket, inputs: &Inputs, flown: Opt
     if inputs.warnings.is_empty() {
         flow.paragraph(8.5, false, "No health information (the rocket could not be balanced).");
     }
+    match flown.and_then(|f| f.stability.as_ref()) {
+        Some(Ok(st)) => stability_page(&mut flow, name, st, u),
+        Some(Err(why)) => flow.paragraph(8.5, false, &format!("Stability page not made: {why}")),
+        None => {}
+    }
+}
+
+/// The stability page: the CG, the margin against the guidance, the Mach table and where the numbers come from.
+fn stability_page(flow: &mut Flow<'_>, name: &str, st: &stability::Stability, u: UnitSystem) {
+    flow.new_page();
+    flow.y += 5.0;
+    let y = flow.y;
+    flow.page().text((MARGIN, y), 14.0, true, &format!("{name}: stability"));
+    flow.y += 2.0;
+    for fact in st.facts(u) {
+        flow.paragraph(8.5, false, &fact);
+    }
+
+    flow.heading("Centre of gravity (calculated)");
+    let unit = ui::len_unit(u);
+    let cg_header = format!("CG from the nose tip ({unit})");
+    flow.table(&[(60.0, "Condition", Align::Left), (55.0, &cg_header, Align::Right), (45.0, "CG (cal from the tip)", Align::Right)], &st.cg_rows(u), false);
+
+    flow.heading("Summary");
+    flow.paragraph(8.0, false, &stability::guidance_note());
+    for line in &st.summary {
+        flow.paragraph(8.5, line.contains("BELOW"), &format!("- {line}"));
+    }
+
+    flow.heading("Provenance");
+    for line in &st.provenance {
+        flow.paragraph(8.0, false, &format!("- {line}"));
+    }
+
+    flow.heading("How measured");
+    flow.paragraph(8.0, false, stability::HOW_MEASURED);
+
+    // The table (a row per 0.1 Mach) takes a page of its own, so it is never split over two.
+    flow.new_page();
+    flow.y += 5.0;
+    let y = flow.y;
+    flow.page().text((MARGIN, y), 14.0, true, &format!("{name}: stability against Mach"));
+    flow.y += 2.0;
+    flow.paragraph(8.0, false, &st.table_note());
+    let (header, rows) = st.table(u);
+    let first = 15.0;
+    let rest = (flow.width() - first) / (header.len() - 1) as f64;
+    let cols: Vec<(f64, &str, Align)> =
+        header.iter().enumerate().map(|(i, h)| (if i == 0 { first } else { rest }, h.as_str(), if i == 0 { Align::Left } else { Align::Right })).collect();
+    flow.table(&cols, &rows, false);
 }
 
 #[cfg(test)]
@@ -501,6 +577,7 @@ mod tests {
             warnings: Vec::new(),
             flights: Vec::new(),
             motors: Default::default(),
+            stability: None,
         };
         let mut pdf = Pdf::new("t");
         design_report(&mut pdf, &rocket, &inputs, None, PageSize::A4);
@@ -508,6 +585,33 @@ mod tests {
         let mut pdf = Pdf::new("t");
         parts_list(&mut pdf, &rocket, UnitSystem::IN_OZ_S, PageSize::Letter);
         assert!(pdf.page_count() >= 1);
+    }
+
+    #[test]
+    fn the_stability_pages_follow_the_health_list_when_they_could_be_made() {
+        let rocket = example();
+        let inputs = Inputs {
+            units: UnitSystem::MM_G_S,
+            balance: Err("none".into()),
+            configs: Vec::new(),
+            warnings: Vec::new(),
+            flights: Vec::new(),
+            motors: Arc::new(MotorDb::bundled()),
+            stability: Some(stability::Inputs { table: None, lift_fresh: false, date: "2026-11-15".into() }),
+        };
+        let flown = Flown::fly(&rocket, &inputs);
+        assert!(flown.stability.as_ref().is_some_and(Result::is_ok));
+        let mut pdf = Pdf::new("t");
+        design_report(&mut pdf, &rocket, &inputs, Some(&flown), PageSize::A4);
+        assert_eq!(pdf.page_count(), 4, "the report's two pages, the stability page and its Mach table");
+        let text = String::from_utf8_lossy(&pdf.to_bytes()).into_owned();
+        assert!(text.contains("stability") && text.contains("Centre of gravity") && text.contains("stability against Mach"));
+        // A failed page is said, not dropped silently.
+        let failed = Flown { flights: Vec::new(), stability: Some(Err("no sweep".into())) };
+        let mut pdf = Pdf::new("t");
+        design_report(&mut pdf, &rocket, &inputs, Some(&failed), PageSize::A4);
+        assert_eq!(pdf.page_count(), 2);
+        assert!(String::from_utf8_lossy(&pdf.to_bytes()).contains("Stability page not made: no sweep"));
     }
 
     #[test]
@@ -521,8 +625,10 @@ mod tests {
             warnings: Vec::new(),
             flights,
             motors: Arc::new(MotorDb::bundled()),
+            stability: None,
         };
-        let Flown(list) = Flown::fly(&rocket, &inputs);
+        let Flown { flights: list, stability } = Flown::fly(&rocket, &inputs);
+        assert!(stability.is_none(), "no stability inputs, no page");
         assert_eq!(list.len(), rocket.flights().len());
         assert!(list.iter().all(|(_, s)| s.as_ref().is_ok_and(|s| s.apogee > 100.0)), "{:?}", list.iter().map(|l| &l.1).collect::<Vec<_>>());
     }

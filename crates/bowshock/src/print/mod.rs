@@ -6,6 +6,7 @@
 
 pub mod pdf;
 pub mod report;
+pub mod stability;
 pub mod templates;
 
 use std::path::PathBuf;
@@ -267,6 +268,7 @@ mod tests {
             warnings: Vec::new(),
             flights: Vec::new(),
             motors: Default::default(),
+            stability: None,
         };
         let all = build(&rocket, &inputs, None, Options::default(), PageSize::Letter, "x");
         let report_only = build(

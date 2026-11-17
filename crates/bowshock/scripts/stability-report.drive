@@ -1,0 +1,21 @@
+# The design report's stability page (File > Print / export PDF… > Design report): CG at liftoff and burnout, CP, margin and CNalpha
+# against Mach (the 3D solve's and Extended's side by side when the document carries a fresh 3D solve), the minimum margin against the
+# RASAero guidance, thrust-to-weight against Tripoli 7-1.4, provenance. The headless driver has no file dialog, so BOWSHOCK_EXPORT_FILE
+# names the PDF the button writes. The CFD_DEMO scripts stand in for the two solves (their numbers are made up: see solve_demo.rs);
+# with a document that carries real tables (BOWSHOCK_OPEN=<file.bowshock>, see cfd-lift.drive) leave BOWSHOCK_CFD_DEMO out and the
+# page holds the real solves. The drive screenshots the dialog and the status strip; the page itself is in the PDF:
+#   pdftoppm -r 80 -png /tmp/stability-report.pdf out/stability-report/page
+#   BOWSHOCK_CFD_DEMO=done,lift-done BOWSHOCK_EXPORT_FILE=/tmp/stability-report.pdf \
+#     cargo run --release -q -p bowshock -- drive --example crates/bowshock/scripts/stability-report.drive out/stability-report
+viewport 1300x800
+click "Analyze"
+click "CFD table"
+click "Solve stability (3D)"
+click "Aerodynamics"
+click "hpr_l1_cert"
+click "Print / export PDF…"
+screenshot print-dialog-dark.png
+click "Save PDF…"
+move (100, 700)
+move (102, 702)
+screenshot saved-dark.png

@@ -276,6 +276,11 @@ impl Physics {
         }
     }
 
+    /// The stored CFD table of the stack from `stage` when it is the rocket's now, or why the stack flies on the build-up instead.
+    pub fn stored_table<'a>(&self, rocket: &'a Rocket, stage: usize) -> Result<&'a bowshock_model::CfdTable, String> {
+        self.fresh_table(rocket, stage).map(|(table, _)| table)
+    }
+
     /// The stored CFD drag table the stack from `stage` flies on, or why it flies on the build-up instead.
     pub fn drag_table(&self, rocket: &Rocket, stage: usize) -> Result<bowshock_sim::DragTable, String> {
         self.fresh_table(rocket, stage).map(|(table, _)| bowshock_sim::DragTable::from_cfd(table))
