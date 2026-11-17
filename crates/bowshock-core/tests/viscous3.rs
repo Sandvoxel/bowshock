@@ -10,9 +10,10 @@
 
 use bowshock_cfd::gas3::Cons3;
 use bowshock_cfd::grid3::Grid3;
-use bowshock_cfd::implicit::{ImplicitParams, LineSolve3};
-use bowshock_cfd::solver::{Scheme, Solver, Turbulence};
+use bowshock_cfd::implicit_params::{ImplicitParams, LineSolve3};
+use bowshock_cfd::solver::{Scheme, Solver};
 use bowshock_cfd::solver3::{RansOpts3, Scheme3, Solver3};
+use bowshock_cfd::sst::Turbulence;
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
 use bowshock_core::engine::case::Case;
 use bowshock_core::engine::case3::Case3;
@@ -69,7 +70,7 @@ fn build3(case: &Case, dtheta: f64, level: u32) -> (Case3, Solver3) {
     s.cfg.first_order_iters = n.first_order_iters;
     let visc = match std::env::var("MODEL").as_deref() {
         Ok("euler") => None,
-        Ok("laminar") => case.viscous.map(|v| bowshock_cfd::solver::Viscous { turbulence: Turbulence::Laminar, ..v }),
+        Ok("laminar") => case.viscous.map(|v| bowshock_cfd::sst::Viscous { turbulence: Turbulence::Laminar, ..v }),
         _ => case.viscous,
     };
     // the outflow plane of the 2D case: characteristic (the wall-resolved body cases) or static pressure (the plates); `LAW_I=1`: the automatic wall treatment on the i walls
@@ -578,8 +579,8 @@ fn tp2005_case(mach: f64, exit_mach: f64, p_exit: f64, level: u32) -> Case {
     let p = p_exit / air.pressure_pa;
     let (rho, u) = (p / t, exit_mach * t.sqrt());
     let k = 1.5 * (0.01 * u).powi(2);
-    let mu = bowshock_cfd::solver::Viscous { re_c, sutherland, turbulence: Turbulence::Sst, wall_i_start: 0, roughness: 0.0 }.mu(t);
-    let jet = Jet { r_exit: 0.5 * 0.0508 / d, state: [rho, u, 0.0, p / bowshock_cfd::gas::GAMMA], turb: [k, rho * k / (10.0 * mu)] };
+    let mu = bowshock_cfd::sst::Viscous { re_c, sutherland, turbulence: Turbulence::Sst, wall_i_start: 0, roughness: 0.0 }.mu(t);
+    let jet = Jet { r_exit: 0.5 * 0.0508 / d, state: [rho, u, 0.0, p / bowshock_cfd::gas3::GAMMA], turb: [k, rho * k / (10.0 * mu)] };
     Case::viscous(mach, body, level, Wake::Base, re_c, sutherland, mach).with_motor(jet)
 }
 

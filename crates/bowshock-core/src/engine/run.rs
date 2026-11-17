@@ -243,7 +243,7 @@ pub fn friction(case: &Case, s: &Solver) -> (f64, f64) {
             let d_n = ((g.xc[c] - xm) * f.nx + (g.rc[c] - f.rm) * f.nr).abs();
             let mu = v.mu(temperature(&w));
             // rough wall: the discrete wall shear is (mu + mu_t,w) u_t / d_n with the Aupoix wall eddy viscosity of the cell state (0 for a smooth wall)
-            let mu_tw = if v.rough() { w[0] * bowshock_cfd::turbulence::aupoix_wall(mu / w[0], w[1].hypot(w[2]), d_n, v.roughness)[2] } else { 0.0 };
+            let mu_tw = if v.rough() { w[0] * bowshock_cfd::sst::aupoix_wall(mu / w[0], w[1].hypot(w[2]), d_n, v.roughness)[2] } else { 0.0 };
             let tau = (mu + mu_tw) * u_t / d_n;
             cd += 2.0 * tau * tx * f.rm * f.len / (q_inf * r2);
             y_plus_max = y_plus_max.max(d_n * (w[0] * tau.abs()).sqrt() / mu);
@@ -430,7 +430,7 @@ mod tests {
     use super::*;
     use crate::engine::body_grid::{Body, Nose};
     use crate::engine::numerics::Numerics;
-    use bowshock_cfd::solver::{Turbulence, Viscous};
+    use bowshock_cfd::sst::{Turbulence, Viscous};
 
     fn case(tol: Option<f64>, wake: Wake) -> Case {
         let mut n = Numerics::transonic();

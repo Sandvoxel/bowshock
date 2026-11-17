@@ -42,8 +42,8 @@
 //! (`low_mach_precond`, documented as 2D only).
 
 use crate::gas3::{sound_speed3, Cons3, Prim3, GAMMA};
-use crate::implicit::{ImplicitParams, LOW_MACH_UINF_CUTOFF, LOW_MACH_UREF_EPS};
 use crate::implicit3::{abs_jacobian3, flux_jacobian3, M5};
+use crate::implicit_params::{ImplicitParams, LOW_MACH_UINF_CUTOFF, LOW_MACH_UREF_EPS};
 use crate::limiter::shock_weight;
 
 const EYE: M5 = {

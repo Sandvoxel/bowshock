@@ -10,10 +10,11 @@ use crate::progress::ProgressSink;
 use crate::spec::FinProfile;
 use bowshock_cfd::gas3::freestream3;
 use bowshock_cfd::grid3::{Grid3, PartRoughness};
-use bowshock_cfd::implicit::{DtMode, ImplicitParams, LineSolve3};
+use bowshock_cfd::implicit_params::{DtMode, ImplicitParams, LineSolve3};
 use bowshock_cfd::limiter::Limiter;
-use bowshock_cfd::solver::{Bc, Scheme, Turbulence, Viscous};
+use bowshock_cfd::solver::{Bc, Scheme};
 use bowshock_cfd::solver3::{Config3, RansOpts3, Scheme3, Solver3};
+use bowshock_cfd::sst::{Turbulence, Viscous};
 
 /// Numerical settings and stop-rule tolerances of a 3D run.
 #[derive(Clone, Copy, Debug, PartialEq)]

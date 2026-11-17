@@ -13,7 +13,7 @@
 
 use bowshock_cases::transonic::{named_body, stoney, tangent_cone_cd, transonic_case};
 use bowshock_cfd::gpu::Precision;
-use bowshock_cfd::implicit::ImplicitParams;
+use bowshock_cfd::implicit_params::ImplicitParams;
 use bowshock_cfd::limiter::Limiter;
 use bowshock_cfd::solver::{Bc, Scheme};
 use bowshock_core::engine::case::Case;

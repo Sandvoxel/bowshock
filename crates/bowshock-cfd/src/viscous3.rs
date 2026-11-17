@@ -66,7 +66,7 @@
 //!    `rho u_tau^2` (`turbulence3::wall_shear_vector`) is carried exactly as the tangential part of that flux.
 //!
 //! Plain functions of their inputs; every pass writes the whole output arrays (zero where there is no flux / no fluid) and keeps no state. The parameters
-//! are the 2D ones (`crate::solver::Viscous`: only `re_c`, `sutherland` are read, `wall_i_start` is not used in 3D).
+//! are the 2D ones (`crate::sst::Viscous`: only `re_c`, `sutherland` are read, `wall_i_start` is not used in 3D).
 //!
 //! Wedge parity (`parity` tests): a one-cell wedge `grid3::revolve(g2, 1, [0, dtheta])` with symmetry planes in `k` reproduces the viscous residual of
 //! `viscous.rs` including its hoop-stress source. The wedge-angle error alone (against the same wedge at 0.05 degrees) falls like `dtheta^2` (ratios 4.0 / 9.0 /
@@ -79,8 +79,8 @@
 
 use crate::gas3::{Cons3, Prim3, GAMMA};
 use crate::grid3::{Face3, Grid3, Part, PART_DEAD, PART_FLUID};
-use crate::solver::{Viscous, PRANDTL, PRANDTL_T};
 use crate::solver3::pidx3;
+use crate::sst::{Viscous, PRANDTL, PRANDTL_T};
 use rayon::prelude::*;
 
 /// Cell gradient `[u_x u_y u_z, v_x v_y v_z, w_x w_y w_z, T_x T_y T_z]`: `grad[3 m + d] = d phi_m / d x_d` of `phi = (u, v, w, T)`.
@@ -648,7 +648,7 @@ pub(crate) mod tests {
     use crate::solver3::NG;
 
     const RE_C: f64 = 2.0e3;
-    pub(crate) const VISC: Viscous = Viscous { re_c: RE_C, sutherland: 0.368, turbulence: crate::solver::Turbulence::Laminar, wall_i_start: 0, roughness: 0.0 };
+    pub(crate) const VISC: Viscous = Viscous { re_c: RE_C, sutherland: 0.368, turbulence: crate::sst::Turbulence::Laminar, wall_i_start: 0, roughness: 0.0 };
 
     /// Per-cell solid mask of a grid (`Grid3::is_solid` of every cell, the `Solver3::solid` array).
     pub(crate) fn solid_mask(g: &Grid3) -> Vec<bool> {

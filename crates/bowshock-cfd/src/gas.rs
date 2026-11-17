@@ -3,7 +3,7 @@
 //! * primitive    `Prim = [rho, u, v, p]`
 //!   with `u` the axial (x) and `v` the radial (r) velocity.
 
-pub const GAMMA: f64 = 1.4;
+pub use crate::gas3::GAMMA;
 
 pub type Cons = [f64; 4];
 pub type Prim = [f64; 4];

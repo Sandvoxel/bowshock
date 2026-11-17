@@ -14,10 +14,10 @@
 use crate::gas3::freestream3;
 use crate::grid::{plate_grid, PlateGridParams};
 use crate::grid3::{Grid3, Part, SolidBox};
-use crate::implicit::ImplicitParams;
+use crate::implicit_params::ImplicitParams;
 use crate::limiter::Limiter;
-use crate::solver::{Turbulence, Viscous};
 use crate::solver3::{Config3, RansOpts3, Scheme3, Solver3};
+use crate::sst::{Turbulence, Viscous};
 
 /// Sutherland constant of the plate cases (`110.4 K / 300 K`, the 2D tests').
 pub const SUTHERLAND: f64 = 0.368;
@@ -153,7 +153,7 @@ pub fn plate_solver3(case: &PlateCase, params: ImplicitParams) -> Solver3 {
         opts.ks = vec![0.0; grid.ni * grid.nj * grid.nk];
         for i in case.i_le()..grid.ni {
             for k in 0..grid.nk {
-                opts.ks[grid.cell(i, case.j_first(), k)] = case.ks * crate::turbulence::rough_ramp(i, case.i_le());
+                opts.ks[grid.cell(i, case.j_first(), k)] = case.ks * crate::sst::rough_ramp(i, case.i_le());
             }
         }
     }
@@ -256,7 +256,7 @@ pub fn mills_hang(x: f64, ks: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::implicit::LineSolve3;
+    use crate::implicit_params::LineSolve3;
 
     /// The grid is a flat plate: nodes of the plate row on `y = 0` for the columns of the slab, the first fluid row `dr_wall` thick, and a slab of the 2D
     /// parameters.

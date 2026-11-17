@@ -88,7 +88,7 @@ pub mod fox_tm_x2439 {
 mod tests {
     use super::*;
     use bowshock_cfd::gas::freestream;
-    use bowshock_cfd::implicit::ImplicitParams;
+    use bowshock_cfd::implicit_params::ImplicitParams;
     use bowshock_cfd::solver::Scheme;
     use bowshock_core::engine::result::StopReason;
     use bowshock_core::engine::run::run_cold;

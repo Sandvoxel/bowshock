@@ -9,10 +9,11 @@
 use bowshock_cfd::gas::freestream;
 use bowshock_cfd::gpu::{GpuSolver, Precision};
 use bowshock_cfd::grid::{plate_grid, PlateGridParams};
-use bowshock_cfd::implicit::ImplicitParams;
+use bowshock_cfd::implicit_params::ImplicitParams;
 use bowshock_cfd::limiter::Limiter;
-use bowshock_cfd::solver::{Bc, Config, Scheme, Solver, Turbulence, Viscous};
-use bowshock_cfd::turbulence::K_INF;
+use bowshock_cfd::solver::{Bc, Config, Scheme, Solver};
+use bowshock_cfd::sst::K_INF;
+use bowshock_cfd::sst::{Turbulence, Viscous};
 use bowshock_core::atmosphere::{Atmosphere, FlightConditions};
 use bowshock_core::engine::body_grid::BaseBody;
 use bowshock_core::engine::case::{Case, Wake};

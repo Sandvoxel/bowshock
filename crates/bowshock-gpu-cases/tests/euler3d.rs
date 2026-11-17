@@ -17,7 +17,7 @@ use bowshock_cfd::gas3::{freestream3, prim_to_cons3, Cons3};
 use bowshock_cfd::gpu::{GpuSolver3, Precision, Staging};
 use bowshock_cfd::grid::Grid;
 use bowshock_cfd::grid3::{revolve, Grid3};
-use bowshock_cfd::implicit::{ImplicitParams, LineSolve3};
+use bowshock_cfd::implicit_params::{ImplicitParams, LineSolve3};
 use bowshock_cfd::limiter::Limiter;
 use bowshock_cfd::solver3::{Config3, Scheme3, Solver3};
 use bowshock_core::engine::body_grid::{BaseBody, Body, LargeGridParams, Nose};

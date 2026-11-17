@@ -39,22 +39,9 @@
 
 use crate::gas::{reflect, Cons, Prim, GAMMA};
 use crate::grid::{Face, Grid};
-use crate::solver::{pidx, Bc, Block, Nozzle, Turbulence, Viscous, PRANDTL, PRANDTL_T};
+use crate::solver::{pidx, Bc, Block, Nozzle};
+use crate::sst::{Turbulence, Viscous, PRANDTL, PRANDTL_T};
 use rayon::prelude::*;
-
-impl Viscous {
-    /// Dynamic viscosity (Sutherland's law) at the static temperature `t` (free-stream temperature = 1).
-    #[inline]
-    pub fn mu(&self, t: f64) -> f64 {
-        t.powf(1.5) * (1.0 + self.sutherland) / (t + self.sutherland) / self.re_c
-    }
-
-    /// Does the run use a rough wall (SST with `roughness > 0`)? Then `Solver::rough_wall` holds the Aupoix wall state of the wall cells.
-    #[inline]
-    pub fn rough(&self) -> bool {
-        self.turbulence == Turbulence::Sst && self.roughness > 0.0
-    }
-}
 
 /// Static temperature `gamma p / rho` of a primitive state.
 #[inline]
@@ -398,11 +385,11 @@ pub(crate) fn rough_pass(grid: &Grid, w: &[Prim], walls: &Walls, dwall: &[f64], 
             let wc = &w[pidx(ni, i as isize, j as isize)];
             let nu = mu[c] / wc[0];
             *o = if rough {
-                let ks_eff = ks * crate::turbulence::rough_ramp(i, wall_i_start);
-                let [k_w, om_w, nu_t] = crate::turbulence::aupoix_wall(nu, wc[1].hypot(wc[2]), dwall[c], ks_eff);
+                let ks_eff = ks * crate::sst::rough_ramp(i, wall_i_start);
+                let [k_w, om_w, nu_t] = crate::sst::aupoix_wall(nu, wc[1].hypot(wc[2]), dwall[c], ks_eff);
                 [k_w, om_w, wc[0] * nu_t]
             } else {
-                [0.0, 60.0 * nu / (crate::turbulence::BETA1 * dwall[c] * dwall[c]), 0.0]
+                [0.0, 60.0 * nu / (crate::sst::BETA1 * dwall[c] * dwall[c]), 0.0]
             };
         }
     });
@@ -458,9 +445,10 @@ pub(crate) mod tests {
     use super::*;
     use crate::gas::freestream;
     use crate::grid::{plate_grid, PlateGridParams};
-    use crate::implicit::ImplicitParams;
+    use crate::implicit_params::ImplicitParams;
     use crate::limiter::Limiter;
-    use crate::solver::{Config, Scheme, Solver, Turbulence};
+    use crate::solver::{Config, Scheme, Solver};
+    use crate::sst::Turbulence;
 
     #[test]
     fn uniform_flow_is_preserved_with_viscous_terms_on_a_curved_axisymmetric_grid() {
@@ -493,7 +481,7 @@ pub(crate) mod tests {
         let dn = ((g.xc[i] - xf) * f.nx + (g.rc[i] - rf) * f.nr).abs();
         let mu = v.mu(temperature(&w));
         // rough wall: the wall shear is (mu + mu_t,w) u_t / d_n with the Aupoix wall eddy viscosity of the cell state
-        let mu_tw = if v.rough() { w[0] * crate::turbulence::aupoix_wall(mu / w[0], w[1].hypot(w[2]), dn, v.roughness)[2] } else { 0.0 };
+        let mu_tw = if v.rough() { w[0] * crate::sst::aupoix_wall(mu / w[0], w[1].hypot(w[2]), dn, v.roughness)[2] } else { 0.0 };
         (xf, (mu + mu_tw) * ut / dn / (0.5 * mach * mach))
     }
 

@@ -16,6 +16,7 @@ use crate::flux::face_flux_lm;
 use crate::gas::{cons_to_prim, prim_to_cons, reflect, sound_speed, Cons, Prim};
 use crate::grid::{Face, Grid};
 use crate::limiter::Limiter;
+use crate::sst::{Turbulence, Viscous};
 use crate::viscous::{self, wall_ghost, Walls};
 use rayon::prelude::*;
 
@@ -150,36 +151,8 @@ pub enum Scheme {
     /// FAS multigrid cycle with an SSP-RK3 smoother (first-order coarse levels).
     Multigrid(MgParams),
     /// Line-implicit approximate-factorization pseudo-time stepping with a CFL ramp (`implicit.rs`).
-    Implicit(crate::implicit::ImplicitParams),
+    Implicit(crate::implicit_params::ImplicitParams),
 }
-
-/// Turbulence model of a viscous run: `Laminar` (`mu_t = 0`) or the Menter SST k-omega model (`turbulence.rs`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Turbulence {
-    Laminar,
-    Sst,
-}
-
-/// Viscous-flow parameters (non-dimensionalisation of `viscous.rs`: `rho_inf = c_inf = 1`, lengths in nose diameters).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Viscous {
-    /// Reynolds number `rho_inf c_inf d_nose / mu_inf` of the free stream.
-    pub re_c: f64,
-    /// Sutherland constant `110.4 K / T_inf[K]`.
-    pub sutherland: f64,
-    pub turbulence: Turbulence,
-    /// First `i` index (column) of the no-slip surface: the wall upstream of it (e.g. the axis or the approach to a plate)
-    /// stays a slip wall.
-    pub wall_i_start: usize,
-    /// Equivalent sand-grain roughness `ks` of the no-slip walls in nose diameters; `0.0` is a smooth wall. With `ks > 0` the SST model
-    /// uses the Wilcox (1988) rough-wall `omega` at the wall and the Hellsten & Laine (1997) `F3` limiter correction, see `turbulence.rs`.
-    pub roughness: f64,
-}
-
-/// Laminar Prandtl number.
-pub const PRANDTL: f64 = 0.72;
-/// Turbulent Prandtl number.
-pub const PRANDTL_T: f64 = 0.9;
 
 /// Nozzle exit on the base face: rows `0..j_end` of `i = i_end` are a fixed inflow state instead of a wall (needs a block with
 /// `j_sting == 0`); rows `j_end..block.j_end` stay wall (the annulus).

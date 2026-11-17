@@ -140,7 +140,7 @@ fn implicit_scheme_converged_state_matches_cpu() {
 fn implicit_transonic_warm_start_matches_cpu() {
     let mut case = transonic_level(0.8);
     case.numerics.limiter = Limiter::VanAlbada;
-    case.numerics.scheme = Scheme::Implicit(bowshock_cfd::implicit::ImplicitParams::DEFAULT);
+    case.numerics.scheme = Scheme::Implicit(bowshock_cfd::implicit_params::ImplicitParams::DEFAULT);
     case.numerics.first_order_iters = 100;
     case.numerics.max_iter = 150;
     let mut s = case.build_solver();

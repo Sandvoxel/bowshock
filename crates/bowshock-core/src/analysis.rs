@@ -16,9 +16,10 @@ use crate::field::{Field, FieldSink, FieldTap};
 use crate::field3::Field3;
 use crate::progress::{Progress, ProgressSink};
 use crate::spec::{BodySpec, FinSpec, MotorSpec};
-use bowshock_cfd::gas::GAMMA;
-use bowshock_cfd::solver::{Solver, Turbulence, Viscous};
+use bowshock_cfd::gas3::GAMMA;
+use bowshock_cfd::solver::Solver;
 use bowshock_cfd::solver3::Solver3;
+use bowshock_cfd::sst::{Turbulence, Viscous};
 use bowshock_reference::base_drag::base_drag_coefficient;
 use std::ops::ControlFlow;
 

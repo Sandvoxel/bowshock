@@ -34,7 +34,7 @@ use std::fmt;
 use std::sync::Arc;
 
 /// Ratio of specific heats of the gas the solver uses (air).
-pub const GAMMA: f64 = bowshock_cfd::gas::GAMMA;
+pub const GAMMA: f64 = bowshock_cfd::gas3::GAMMA;
 
 /// Solver iterations between two snapshots that an interactive caller should ask [`Analysis::on_field`](crate::Analysis::on_field)
 /// for (the cost of a snapshot is in the documentation of that method).

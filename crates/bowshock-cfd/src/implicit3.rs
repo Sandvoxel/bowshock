@@ -39,7 +39,7 @@ mod diag3;
 
 use crate::gas3::{cons_to_prim3, sound_speed3, Cons3, Prim3, GAMMA};
 use crate::grid3::Face3;
-use crate::implicit::{ImplicitParams, LineSolve3};
+use crate::implicit_params::{ImplicitParams, LineSolve3};
 use crate::limiter::shock_weight;
 use crate::lowmach5::{abs_jacobian_pc3, LowMach};
 use crate::solver3::{pidx3, Solver3};

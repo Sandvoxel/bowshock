@@ -6,7 +6,8 @@ use crate::error::Error;
 use crate::progress::ProgressSink;
 use bowshock_cfd::gas::freestream;
 use bowshock_cfd::gas::Prim;
-use bowshock_cfd::solver::{Bc, Config, Nozzle, Solver, Turbulence, Viscous};
+use bowshock_cfd::solver::{Bc, Config, Nozzle, Solver};
+use bowshock_cfd::sst::{Turbulence, Viscous};
 
 /// Treatment of the region behind the body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

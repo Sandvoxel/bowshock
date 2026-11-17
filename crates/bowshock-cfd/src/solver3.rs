@@ -17,7 +17,7 @@ use crate::bc3::{characteristic_ghost3, pressure_outflow_ghost3};
 use crate::flux3::{face_flux_lm3, face_rot};
 use crate::gas3::{cons_to_prim3, prim_to_cons3, reflect3, sound_speed3, Cons3, Prim3};
 use crate::grid3::{Face3, Grid3, Symmetry, PART_DEAD, PART_FLUID};
-use crate::implicit::{DtMode, ImplicitParams};
+use crate::implicit_params::{DtMode, ImplicitParams};
 use crate::limiter::Limiter;
 use crate::lowmach5::{spectral_pc3, LowMach};
 use crate::viscous3::{diffusion_rates, wall_ghost3};
@@ -399,8 +399,6 @@ impl Family<'_> {
     }
 
     /// The jet state if the cell is a `Part::Jet` cell of the motor-jet patch (inside the grid), else `None`.
-    /// Whether the cell is a wall for its fluid neighbours (a solid cell that is not dead: the stencil beyond a dead cell reads the padded state, which
-    /// holds the axis ghost).
     #[inline]
     fn jet_at(&self, c: [isize; 3]) -> Option<Prim3> {
         let (mask, state) = self.jet?;
@@ -664,7 +662,7 @@ mod tests {
         let us = t0.elapsed().as_secs_f64() * 1e6 / (s3.iter as f64 * s3.u.len() as f64);
         println!("3D nk={nk}: {us:.2} us per cell per implicit iteration ({} cells, {} threads)", s3.u.len(), rayon::current_num_threads());
         println!("3D nk={nk} residual {r:e} (r0 {r0:e}) after {} iterations", s3.iter);
-        let (pinf, q) = (1.0 / crate::gas::GAMMA, 0.5 * mach * mach);
+        let (pinf, q) = (1.0 / crate::gas3::GAMMA, 0.5 * mach * mach);
         let mut e = 0.0f64;
         for i in n_up(&g2)..g2.ni {
             let cp2 = (cons_to_prim(&s2.u[i])[3] - pinf) / q;

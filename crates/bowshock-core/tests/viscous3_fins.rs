@@ -9,9 +9,9 @@
 
 use bowshock_cfd::gas3::cons_to_prim3;
 use bowshock_cfd::grid3::{Grid3, Part};
-use bowshock_cfd::implicit::{DtMode, ImplicitParams, LineSolve3};
-use bowshock_cfd::solver::{Turbulence, Viscous};
+use bowshock_cfd::implicit_params::{DtMode, ImplicitParams, LineSolve3};
 use bowshock_cfd::solver3::{RansOpts3, Scheme3, Solver3};
+use bowshock_cfd::sst::{Turbulence, Viscous};
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
 use bowshock_core::engine::case3::{Case3, Tier, WallFlow};
 use bowshock_core::engine::grid3::{body_grid3, Fins3};

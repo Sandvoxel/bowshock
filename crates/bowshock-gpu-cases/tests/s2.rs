@@ -8,7 +8,7 @@
 use bowshock_cfd::gas3::Cons3;
 use bowshock_cfd::gpu::Staging;
 use bowshock_cfd::grid3::Grid3;
-use bowshock_cfd::implicit::{ImplicitParams, LineSolve3};
+use bowshock_cfd::implicit_params::{ImplicitParams, LineSolve3};
 use bowshock_cfd::solver3::{Config3, Scheme3, Solver3};
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
 use bowshock_core::engine::case3::{Case3, Tier};
