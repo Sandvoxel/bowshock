@@ -125,3 +125,24 @@ second curve for the lower half when it differs), Cp/Mach/Schlieren colour bar, 
 6. State/messages/controls: mode toggle, sheets, tiling, steppers, wall scalar, hover readout, free-stream arrow; drive script `flow3d.drive`.
 7. Angle-of-attack stepper + `FieldStore` keys; live snapshots in 3D (demo `flow3d` stream), prepare off-thread.
 8. Performance pass (0.5 M / 2 M cell numbers), `ARCHITECTURE.md`, `design` conformance review, final screenshots.
+
+## 8. As built: where it differs from the design above
+* `flow_view.rs` was not renamed to `mod.rs`; `camera3.rs` does not exist (the world mapping and framing are in `gpu3.rs`/`scene_view.rs`,
+  the camera is `viewport::camera::Camera`); the picking is `pick3.rs`, the scene's state and palette `scene_view.rs`.
+* **Sheets are windowed, not cut.** A sheet covers the cells of a window of the grid (`Extent` Near / Wide / Far, `Prepared3::window_of`)
+  and the fragment shader `discard`s what lies outside it (straight edges). The meridian sheet is the *whole plane* through the axis (a
+  layer and the layer opposite it, through the symmetry tiles: `plane_through`), the cross-flow sheet a disc.
+* **Controls are a palette** left of the picture (`PALETTE_W` 236 px: mode, sheets, walls, colour range, view), not a row above it; a row
+  wrapped to four lines and left the picture 215 px high. The colour bars are drawn in the picture (bottom right).
+* **Colour ranges**: the default is the picture's (the 2D viewer's rules); `Fit to screen` (and `Fit range` in the side view, which is new
+  there) uses robust percentiles of the cells on screen (2 - 98 %, schlieren 10 - 99.5 % in log10 and at least a decade, Cp symmetric,
+  rounded to 0.05).
+* **Side view at an angle of attack**: two `Prepared`s (upper = lee layer, lower = the layer across the axis), two `shader` widgets
+  (`gpu::Half::{Upper, Lower}`), ranges shared (`Prepared::share_ranges`). The wall Cp strip draws the lower half dashed.
+* **`Prepared3` runs on the UI thread**, not in a `Task` (design section 3): 4 - 13 ms to build and 10 - 28 ms per snapshot at 0.35 - 2 million
+  cells, measured (see `ARCHITECTURE.md`). A `Task` is the next step if a real 2 M cell field is slower.
+* Parts of the grid that are not drawn: `Part::Other` (the sting) has no wall mesh.
+* `FieldStore` is keyed by `(mach, alpha_deg)` (`get`, `alphas_at`, `has_mach`), the angle stepper shows with two or more angles at the Mach number.
+* `gpu3.rs` draws one picture per frame (a single pipeline instance); `gpu.rs` keys its GPU items by (picture id, half) because the side view
+  draws two at once. If the scene is ever shown twice at once `gpu3.rs` needs the same treatment.
+* Drive screenshots of GPU content need `ICED_TEST_BACKEND=wgpu`; the default backend leaves the picture blank.

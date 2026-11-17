@@ -697,7 +697,7 @@ impl Bar {
     fn draw(&self, f: &mut Frame, at: Point, width: f32, t: &crate::tokens::Tokens) {
         use iced::advanced::text::Alignment::{Left, Right};
         let h = 10.0;
-        let (x0, x1) = (at.x + 92.0, at.x + width - 70.0);
+        let (x0, x1) = (at.x + 100.0, at.x + width - 72.0);
         let y0 = at.y + 6.0;
         f.fill_rectangle(at, Size::new(width, 22.0), t.bg_100.scale_alpha(0.86));
         let steps = 40;
@@ -711,9 +711,9 @@ impl Bar {
             f.stroke(&Path::line(Point::new(mid, y0 + h), Point::new(mid, y0 + h + 3.0)), line(t.ink_muted, 1.0));
         }
         let cy = at.y + 11.0;
-        put(f, self.title, Point::new(at.x + 5.0, cy), t.ink_faint, 10.0, Left, alignment::Vertical::Center);
-        put(f, &self.labels.0, Point::new(x0 - 4.0, cy), t.ink_muted, 10.0, Right, alignment::Vertical::Center);
-        put(f, &self.labels.1, Point::new(x1 + 4.0, cy), t.ink_muted, 10.0, Left, alignment::Vertical::Center);
+        put(f, self.title, Point::new(at.x + 5.0, cy), t.ink_faint, 11.0, Left, alignment::Vertical::Center);
+        put(f, &self.labels.0, Point::new(x0 - 4.0, cy), t.ink_muted, 11.0, Right, alignment::Vertical::Center);
+        put(f, &self.labels.1, Point::new(x1 + 4.0, cy), t.ink_muted, 11.0, Left, alignment::Vertical::Center);
     }
 }
 
@@ -932,7 +932,7 @@ impl canvas::Program<Msg> for Overlay3 {
                 name,
                 Point::new(origin.x + 33.0 * s.x, origin.y + 33.0 * s.y),
                 t.ink_muted,
-                10.5,
+                11.0,
                 iced::advanced::text::Alignment::Center,
                 alignment::Vertical::Center,
             );
@@ -943,7 +943,7 @@ impl canvas::Program<Msg> for Overlay3 {
         let base = Point::new(origin.x + 96.0, origin.y);
         let tip = Point::new(base.x + 34.0 * s.x, base.y + 34.0 * s.y);
         if (s.x * s.x + s.y * s.y).sqrt() > 0.12 {
-            f.stroke(&Path::line(Point::new(base.x - 34.0 * s.x, base.y - 34.0 * s.y), tip), line(t.accent, 1.8));
+            f.stroke(&Path::line(Point::new(base.x - 34.0 * s.x, base.y - 34.0 * s.y), tip), line(t.ink, 1.8));
             let ang = s.y.atan2(s.x);
             let head = |da: f32| Point::new(tip.x - 8.0 * (ang + da).cos(), tip.y - 8.0 * (ang + da).sin());
             f.stroke(
@@ -952,16 +952,16 @@ impl canvas::Program<Msg> for Overlay3 {
                     b.line_to(tip);
                     b.line_to(head(-0.45));
                 }),
-                line(t.accent, 1.8),
+                line(t.ink, 1.8),
             );
         } else {
-            f.stroke(&Path::circle(base, 5.0), line(t.accent, 1.8));
-            f.fill(&Path::circle(base, 1.8), t.accent);
+            f.stroke(&Path::circle(base, 5.0), line(t.ink, 1.8));
+            f.fill(&Path::circle(base, 1.8), t.ink);
         }
         let fs_text = format!("V∞ · M {:.2} · α {:.1}°", self.mach, self.alpha);
         let fs_at = Point::new(base.x + 44.0, base.y - 9.0);
         f.fill_rectangle(fs_at, Size::new(6.6 * fs_text.chars().count() as f32 + 12.0, 18.0), t.bg_100.scale_alpha(0.86));
-        put(&mut f, &fs_text, Point::new(fs_at.x + 6.0, base.y), t.ink, 10.5, Left, alignment::Vertical::Center);
+        put(&mut f, &fs_text, Point::new(fs_at.x + 6.0, base.y), t.ink, 11.0, Left, alignment::Vertical::Center);
 
         // the readout under the pointer (a line or two) and the caption: beside the readout when there is room, else under it
         let panel = |f: &mut Frame, s: &str, at: Point, right: bool| {

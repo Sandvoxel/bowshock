@@ -41,11 +41,11 @@ simulate/mod.rs          Simulate screen (`format.rs`: flight-only formatting: b
 analyze/mod.rs           Analyze screen
 analyze/cfd/             CFD table method: `plan` (document -> `bowshock-core` mapping, table keys, coarse (default) or medium (Refine) grid), `fresh` (table status), `run` (off-thread solve, events), `share` (the work queue that hands Mach numbers to the machines that are on), `remote` (a machine over SSH through `bowshock-remote`), `interp` (table -> plot points, Mach / alpha interpolation).
                          Tables are stored in the document (`bowshock_model::CfdTable`, a cache: not an edit, not in undo).
-                         The final flow field of each point (`bowshock_core::Field`) rides the solve's events (`Event::PointField`; a local solve also sends `Event::Field` snapshots every 500 iterations) into `cfd/fields.rs`' `FieldStore`: session-only, beside the table state, keyed by Mach node, never saved, dropped when the geometry or the table it belongs to changes.
+                         The final flow field of each point (`bowshock_core::Field3`, shared as `Arc`) rides the solve's events (`Event::PointField`; a local solve also sends `Event::Field` snapshots every 500 iterations) into `cfd/fields.rs`' `FieldStore`: session-only, beside the table state, keyed by Mach node and angle of attack, never saved, dropped when the geometry or the table it belongs to changes. The 2D solver's `Field` becomes a `Field3` in `flow_view/axi.rs` (`FieldRef::from_2d`), the one place the viewer names it.
 analyze/solve.rs         Live state of a CFD solve (`Tracker`): units (Mach points, or Mach x angle), per-point outcome, weighted progress fraction and time left from the measured throughput. Pure, no clock.
 analyze/solve_view.rs    The solve on screen: headline, bar, the Cd(Mach) (or CN) curve filling in, the point in flight with its monitor trace, the points list; replaces the plots while a solve runs.
-analyze/solve_demo.rs    `BOWSHOCK_CFD_DEMO`: scripted solve events for screenshots (the driver cannot wait on a minutes-long real solve) and the screen-level tests.
-analyze/flow_view.rs     The flow viewer, in the solve screen (the live picture) and as the `Flow field` view of a finished table: `State` (scalar, grid, camera, Mach stepper), the screen transform `Xf` with the mirror about the axis, the canvas overlay (body, ticks, hover readout, wall Cp under it, sharing the x axis) and the Cd(Mach) picker. `flow_view/prepared.rs` (a field made ready: Mach, Cp, schlieren per cell and their ranges, one vertex per grid node, the cell under the pointer), `flow_view/map.rs` (colour maps: viridis, ColorBrewer RdBu, grey), `flow_view/gpu.rs` + `flow.wgsl` (the cells drawn by a `shader` primitive: vertices uploaded once per picture, pan / zoom / scalar are uniforms).
+analyze/solve_demo.rs    `BOWSHOCK_CFD_DEMO`: scripted solve events for screenshots (the driver cannot wait on a minutes-long real solve) and the screen-level tests. `flow3d-mid` / `flow3d-done` stream the committed finned 3D fixture (`BOWSHOCK_FLOW3_FIXTURE` overrides the file) as the flow of each point, two angles of attack per Mach node when done.
+analyze/flow_view.rs     The flow viewer, in the solve screen (the live picture) and as the `Flow field` view of a finished table. `State` (mode, scalar, grid, camera, Mach and angle steppers), the side view's screen transform `Xf`, canvas overlay (body, ticks, hover readout, wall Cp under it) and the Cd(Mach) picker. Two modes (`Mode`): `Side` (a meridian plane, drawn by `gpu.rs`) and `Scene` (a 3D scene, `gpu3.rs`). Files in `flow_view/`: `meridian.rs` (one cell layer of a `Field3` as a 2D quad mesh), `prepared.rs` (a meridian made ready: Mach, Cp, schlieren per cell, ranges, one vertex per node, the cell under the pointer), `map.rs` (colour maps), `gpu.rs` + `flow.wgsl` (the side view: a `shader` primitive per half-plane), `scene3.rs` (`Prepared3`: ranges, wall mesh, sheet builders, the plane through the axis), `gpu3.rs` + `scene3.wgsl` (the scene), `pick3.rs` (CPU ray picking for the hover), `scene_view.rs` (`SceneState`, the palette, the overlay canvas, orbit / pan / zoom), `axi.rs` (the 2D `Field` adapter). See "The flow viewer" below.
 widgets/                 shared widgets (read-only for screens; do not edit from a screen task); `modal.rs` (modal card + `scrim`), `unit_input/` (the unit field: `builder`, `logic`, `widget`, `cells`)
 units.rs                 unit set (UnitSystem), all SI/display formatting (`readout`, `with_unit`, `bare`, `len`, `len_unit`, `num_scaled`, `with_unit_scaled`, `signed`), expression parsing
 ```
@@ -265,12 +265,49 @@ buffer, picker) is `chrome::State`; its messages are `chrome::Message`. The moto
 
 ## The flow viewer (`analyze/flow_view*`)
 
-Rendering: the cells are drawn by a `shader` primitive (`flow_view/gpu.rs`), a canvas overlay on top draws the body, ticks, readout
-and wall Cp and takes the mouse. A canvas-only picture would re-tessellate every cell whenever the view moves. Measured by the test
-`the_picture_renders_on_a_device_…` (Apple M1 Max, a 1408 x 500 px target, debug build, submit to done, 300 frames):
-0.70 ms a frame for 27 280 cells (0.74 ms with the cell edges), 0.85 ms for 109 120 cells (0.98 ms with edges); the mirror draws
-each twice. `Prepared::new` (once per picture, UI thread) took 38 ms for 27 280 cells and the hover lookup 2 ms, both in a debug
-build (a release build is unmeasured). Live snapshot cost on the solver side is in the docs of `Analysis::on_field`.
+The data is a `bowshock_core::Field3` (`field3.rs`: grid nodes, per-cell `[rho, u, v, w, p]`, solid flags, the wall faces with Cp and
+skin friction, the symmetry the solved domain stands for). The solver world is x along the rocket, z up the lee side, the free stream
+towards +z at angle of attack; the scene's world is `(X, Y, Z) = (solver y, z, x)`, so the camera is `viewport::camera::Camera`.
+The viewer has two modes; the toggle (`Side view | 3D`) is hidden for a field with one cell round the axis (the 2D solver's), which
+opens side-on.
+
+* **Side** (`State`, `gpu.rs`): one meridian layer of the field (`Meridian`, then `Prepared`) as the picture it always was. At an
+  angle of attack the flow is not mirror-symmetric, so the layer on the lee side is drawn above the axis and the layer across the
+  axis (`scene3::plane_through`) below, each its own `Prepared` and its own `shader` widget (`gpu::Half`), one colour scale for both;
+  the wall Cp under the picture has a dashed curve for the lower half. For a one-cell field both halves are the same and the lower
+  one is not built. `Fit range` sets the colour range to what is on screen (robust percentiles of the cells in view).
+* **Scene** (`SceneState`, `gpu3.rs`, `scene3.wgsl`): the vehicle's wall faces coloured by Cp or skin friction, a *meridian* sheet
+  (the whole plane through the axis: layer `k` and the layer opposite it, found through the symmetry tiles, or one layer in every copy
+  with `Tile`) and a *cross-flow* sheet (one cell layer along the rocket, a disc), coloured by Mach, Cp or schlieren. The sheets cover
+  a window of the grid (`Extent`: Near / Wide / Far); a fragment `discard` clips them at its edge. Everything is drawn once per
+  symmetry tile (instances), so the half-domain ANF grid shows as the whole rocket. Orbit: right or left drag; pan: middle drag or
+  Shift; zoom: wheel or pinch; `F` or a double click frames it. The hover is a CPU ray (`pick3.rs`) against the sheets' cells and the
+  wall faces. The colour bars, the axes of the solver's frame, the free-stream arrow (`V∞`, Mach and angle) and the readout are a
+  canvas over the picture.
+
+`Prepared3` (ranges, wall mesh, the stations of the grid, sheet builders) is made on the UI thread when a picture arrives: a snapshot
+of the same mesh (`Field3::mesh_id`) keeps the user's choices (sheets, station, plane, camera, a fitted range is refitted) and builds
+the picture again; a new mesh starts at the defaults. Measured in release on an RTX 3090 and this machine's CPU
+(`flow3_cost_at_solver_sizes`, `snapshot_cost_at_solver_sizes`,
+both `#[ignore]`: `cargo nextest run --release -p bowshock <name> --run-ignored only --no-capture`; the level 0 finned ANF case is real
+solver output, `field3_dump --case level0`; the 0.5 M and 2 M cases are synthetic bodies without fins, 7 - 17 k wall faces):
+
+| case | cells | `Prepared3::new` | whole meridian plane | cross-flow disc | frame (1280 x 720, 4x MSAA) | first frame, upload | `set_field` of a snapshot |
+|---|---|---|---|---|---|---|---|
+| ANF level 0 | 352 800 | 4.2 ms | 4.0 ms | 0.4 ms | 0.12 ms | 0.9 ms | 10.6 ms |
+| synthetic | 499 200 | 4.1 ms | 1.8 ms | 0.4 ms | 0.14 ms | 0.4 ms | 10.5 ms |
+| synthetic | 2 000 000 | 13.2 ms | 3.1 ms | 1.6 ms | 0.17 ms | 0.7 ms | 28 ms |
+
+A snapshot comes every 500 iterations (seconds apart), so a 10 - 30 ms pause on the UI thread is accepted for now; moving
+`Prepared3::new` into a `Task` is the next step if a real 2 M cell field is slower. On the solver side `field3_of` took 0.53 ms for
+20 352 cells and 6.2 ms for 352 800 (the CBOR fixture encoding, 0.7 s for the latter, is only the dump tool). The side view's
+`Prepared::new` was 38 ms for 27 280 cells (M1 Max, debug build); its frame cost was 0.70 ms for 27 280 cells.
+
+Drive screenshots of GPU content need the wgpu test backend: `ICED_TEST_BACKEND=wgpu cargo run -p bowshock -- drive ...`. The
+default software renderer draws no `shader` widgets, so the picture area is blank. `scripts/flow3d.drive` with
+`BOWSHOCK_CFD_DEMO=flow3d-mid,flow3d-done` plays the committed finned-finner fixture (`tests/data/anf_m2_a4.field3`, Mach 2, 4 degrees,
+20 352 cells; its velocities are scaled to each point's Mach number and its disturbance to the angle, nothing is solved) as a solve in
+flight and as a finished table with two angles per Mach number; `scripts/flow-view.drive` keeps the 2D wedge picture.
 
 ## Tests and the drive harness
 

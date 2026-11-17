@@ -62,9 +62,14 @@ move (102, 1002)
 screenshot field-plane-schlieren-dark.png
 click "Cross-flow"
 click "3/4"
+click (468, 259)
 move (100, 1000)
 move (102, 1002)
 screenshot field-cross-fins-schlieren-dark.png
+click "Mach"
+move (100, 1000)
+move (102, 1002)
+screenshot field-cross-fins-mach-dark.png
 
 # hover over the sheet, then over the wall
 move (900, 560)
