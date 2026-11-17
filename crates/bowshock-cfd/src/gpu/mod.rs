@@ -583,6 +583,17 @@ impl GpuSolver3 {
         Ok(on3_mut!(self, s => s.profile_step()?))
     }
 
+    /// Switches the 3D viscous kernels on (the host geometry of the face passes: `grid`, the symmetry sides of the domain box); see `LazySolver3::set_viscous3`.
+    pub fn set_viscous(&mut self, grid: &Grid3, v: crate::solver::Viscous, sym: &crate::viscous3::SymSides) -> Result<()> {
+        on3_mut!(self, s => s.set_viscous3(grid, v, sym)?);
+        Ok(())
+    }
+
+    /// Launches and GPU time of one evaluation of the viscous residual of the current state (kernels alone); needs [`GpuSolver3::set_viscous`].
+    pub fn profile_viscous(&mut self) -> Result<luma::Profile> {
+        Ok(on3_mut!(self, s => s.profile_viscous3()?))
+    }
+
     /// GPU time per kernel of `n` iterations of the `iterate_all` replay (the profile adds up all `n`).
     pub fn profile_replay(&mut self, n: usize) -> Result<luma::Profile> {
         Ok(on3_mut!(self, s => s.profile_replay(n)?))

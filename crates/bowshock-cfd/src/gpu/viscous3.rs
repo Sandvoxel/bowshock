@@ -32,7 +32,8 @@ pub(crate) struct VFace3 {
     flux: Array<bool>,
     /// `face_cells` is `Some`: the face counts in the Green-Gauss sum of its cells.
     fc: Array<bool>,
-    /// A no-slip wall face (a fluid / solid face).
+    /// A no-slip wall face (a fluid / solid face); read by the integration (S5b: the wall flux and the traction faces).
+    #[allow(dead_code)]
     noslip: Array<bool>,
     /// The lower / upper side is not a cell: a domain ghost or the wall ghost. A ghost side carries the data of the fluid cell next to it.
     ghost: [Array<bool>; 2],
@@ -304,7 +305,8 @@ impl LazySolver3 {
         })
     }
 
-    /// The face flux of a viscous run, `F - Fv` componentwise (the mass component is the inviscid one).
+    /// The face flux of a viscous run, `F - Fv` componentwise (the mass component is the inviscid one); used by the integration (S5b).
+    #[allow(dead_code)]
     fn total_flux3(f: &Rec3, fv: &Vec4) -> Rec3 {
         [f[0].clone(), &f[1] - &fv[0], &f[2] - &fv[1], &f[3] - &fv[2], &f[4] - &fv[3]]
     }
@@ -437,5 +439,32 @@ impl LazySolver3 {
             residual: res_rows,
             tractions,
         })
+    }
+}
+
+impl LazySolver3 {
+    /// One evaluation of the viscous residual of the current state (laminar: `mu_t` = 0; the cell pass, the face fluxes of the three families, the residual and the
+    /// diffusive spectral radius of the faces), the padded primitives evaluated before the profile starts: the launches and GPU time of the kernels alone, and where
+    /// fusion cut the expressions. Needs [`LazySolver3::set_viscous3`] and a state.
+    pub fn profile_viscous3(&mut self) -> Result<luma::Profile> {
+        let ctx = self.ctx.clone();
+        let run = |s: &LazySolver3| -> Result<()> {
+            let vg = s.visc.as_ref().ok_or_else(|| luma::LumaError::Unsupported("viscous terms are not set".into()))?;
+            let u = unpack3(s.state.as_ref().ok_or_else(no_state)?);
+            let (p, w) = s.padded3(&u);
+            let cell = s.viscous_cells3(vg, &p, &w);
+            let mu_t = &cell.mu * c(0.0);
+            let fv = s.viscous_fluxes3(vg, &w, &cell, &mu_t, None);
+            let res = s.viscous_residual3(&fv);
+            let lam = s.lambda_pass3(vg, &w, &cell, &mu_t, None);
+            let mut all: Vec<&A> = res.iter().collect();
+            all.extend(lam.iter());
+            luma::eval_all(&all)?;
+            s.ctx.sync()
+        };
+        run(self)?;
+        let (out, profile) = ctx.profile(|| run(self))?;
+        out?;
+        Ok(profile)
     }
 }

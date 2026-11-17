@@ -215,6 +215,8 @@ struct Opts {
     mem: bool,
     /// Time a combination whose 100-iteration sanity run diverges (the step cost does not depend on the values), with a warning.
     allow_nonfinite: bool,
+    /// Also profile the viscous residual (the S5a kernels) on the grid.
+    viscous: bool,
     n: Option<usize>,
 }
 
@@ -274,6 +276,42 @@ fn bench_combo(case: &BenchCase, precision: (Precision, &'static str), solve: (L
         );
     }
     let peak_mib = sampler.map(MemSampler::stop);
+    if o.viscous {
+        // the viscous residual of the current state (stage S5a kernels, laminar), the kernels alone, the host data of the face passes allocated
+        let sampler = if o.mem { MemSampler::start() } else { None };
+        let sym = [false, false, false, false, true, true];
+        let v = bowshock_cfd::solver::Viscous {
+            re_c: 2.0e6,
+            sutherland: 0.368,
+            turbulence: bowshock_cfd::solver::Turbulence::Laminar,
+            wall_i_start: 0,
+            roughness: 0.0,
+        };
+        s.set_viscous(&case.grid, v, &sym).map_err(|e| format!("set_viscous: {e}"))?;
+        let pv = s.profile_viscous().map_err(|e| format!("profile_viscous: {e}"))?;
+        let peak_v = sampler.map(MemSampler::stop);
+        let (launches, gpu_us) = (pv.launches(), pv.total().as_secs_f64() * 1e6);
+        println!(
+            "{} {} viscous residual {}: {launches} launches / {gpu_us:.1} us GPU, {} fusion cuts{}",
+            case.name,
+            precision.1,
+            case.cells(),
+            pv.splits.len(),
+            peak_v.map_or(String::new(), |m| format!(", peak device memory of this process {m} MiB"))
+        );
+        if o.profile {
+            println!("```\n{}```", compact(&pv));
+        }
+        if o.perf {
+            println!(
+                "PERF {{\"case\":\"3d-{}-viscous-residual\",\"precision\":\"{}\",\"cells\":{},\"iters\":1,\"us_per_iter\":{gpu_us:.3},\"launches_per_iter\":{launches},\"gpu_us_per_iter\":{gpu_us:.3},\"wall_s\":null{}}}",
+                case.name,
+                precision.1,
+                case.cells(),
+                peak_v.map_or(String::new(), |m| format!(",\"peak_device_mib\":{m}"))
+            );
+        }
+    }
     Ok(Result3 {
         case: case.name.to_string(),
         cells: case.cells(),
@@ -308,6 +346,7 @@ fn main() -> Result<(), String> {
         profile: !flag("--no-profile"),
         mem: flag("--mem"),
         allow_nonfinite: flag("--allow-nonfinite"),
+        viscous: flag("--viscous"),
         n: value("--n").map(|n| n.parse::<usize>().map_err(|e| format!("--n: {e}"))).transpose()?,
     };
     let mut cases = Vec::new();
