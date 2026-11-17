@@ -58,3 +58,10 @@ opt-level = 3
 [patch."https://github.com/iced-rs/iced.git"]
 iced_core = { path = "vendor/iced_core" }
 iced_winit = { path = "vendor/iced_winit" }
+
+# The worker that `bowshock-remote` builds on the remote machine on first use: the first build should take minutes, not tens of
+# minutes; the solves are GPU-bound and do not notice.
+[profile.worker]
+inherits = "release"
+lto = false
+codegen-units = 16

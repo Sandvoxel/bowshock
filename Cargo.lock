@@ -355,6 +355,7 @@ dependencies = [
  "bowshock-core",
  "bowshock-model",
  "bowshock-motors",
+ "bowshock-remote",
  "bowshock-sim",
  "bytemuck",
  "chrono",
@@ -446,6 +447,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bowshock-remote"
+version = "0.1.0"
+dependencies = [
+ "bowshock-core",
+ "ciborium",
+ "flate2",
+ "serde",
+ "sha2",
+ "tar",
+]
+
+[[package]]
 name = "bowshock-sim"
 version = "0.1.0"
 dependencies = [
@@ -467,6 +480,14 @@ dependencies = [
  "luma",
  "rayon",
  "serde_json",
+]
+
+[[package]]
+name = "bowshock-worker"
+version = "0.1.0"
+dependencies = [
+ "bowshock-core",
+ "bowshock-remote",
 ]
 
 [[package]]
@@ -1002,6 +1023,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
 dependencies = [
  "simd-adler32",
+]
+
+[[package]]
+name = "filetime"
+version = "0.2.30"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1255e7a9f1902190d4c10a75f2f7f495d3d3ce13e9ba26e6c48683a0f4dbed7"
+dependencies = [
+ "cfg-if",
+ "libc",
 ]
 
 [[package]]
@@ -3221,6 +3252,16 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8eab9a99a024a169fe8a903cf9d4a3b3601109bcc13bd9e3c6fff259138626c4"
 dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
  "libc",
 ]
 

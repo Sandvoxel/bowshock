@@ -1,0 +1,15 @@
+[package]
+name = "bowshock-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "The process that bowshock-remote starts on a remote machine over ssh: serves solve jobs on that machine's GPU"
+
+[dependencies]
+bowshock-core = { workspace = true, features = ["gpu", "serde"] }
+bowshock-remote = { path = "../bowshock-remote" }
+
+[lints]
+workspace = true

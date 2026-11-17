@@ -10,6 +10,7 @@ use bowshock_cfd::solver::{Bc, Config, Nozzle, Solver, Turbulence, Viscous};
 
 /// Treatment of the region behind the body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Wake {
     /// The cylinder continues as a sting to the outflow plane (`large_domain_grid`), no base.
     Sting,

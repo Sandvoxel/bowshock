@@ -1,0 +1,25 @@
+[package]
+name = "bowshock-remote"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+build = "build.rs"
+description = "Runs bowshock solves on another machine over ssh: wire protocol, client, self-provisioning of the remote worker and the worker's serve loop"
+
+[dependencies]
+bowshock-core = { workspace = true, features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+ciborium = "0.2"
+sha2 = "0.10"
+tar = { version = "0.4", default-features = false }
+flate2 = "1"
+
+[build-dependencies]
+sha2 = "0.10"
+tar = { version = "0.4", default-features = false }
+flate2 = "1"
+
+[lints]
+workspace = true

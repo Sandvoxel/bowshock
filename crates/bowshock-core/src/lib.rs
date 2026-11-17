@@ -38,7 +38,7 @@ mod fins;
 pub mod progress;
 pub mod spec;
 
-pub use analysis::{Analysis, Backend, BackendUsed, Drag, FinDrag, LiftPoint, LiftPolar, PointDetail, Polar, PolarPoint, Quality, Resolution, WallCp, Warning};
+pub use analysis::{Analysis, AnalysisSpec, Backend, BackendUsed, Drag, FinDrag, LiftPoint, LiftPolar, PointDetail, Polar, PolarPoint, Quality, Resolution, WallCp, Warning};
 pub use atmosphere::{AirState, Atmosphere, FlightConditions};
 pub use device::gpu_name;
 pub use engine::case::Wake;

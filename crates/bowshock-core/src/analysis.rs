@@ -26,6 +26,7 @@ const LIFT_ALPHA_MAX_DEG: f64 = 15.0;
 
 /// Where a sweep runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Backend {
     /// The GPU when one is available, otherwise the CPU (reported in [`Polar::fallback`]). A software Vulkan device (llvmpipe) counts as no GPU.
     Auto,
@@ -47,6 +48,7 @@ pub enum BackendUsed {
 
 /// Grid resolution (grid level 0, 1, 2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Resolution {
     /// Grid level 0.
     Coarse,
@@ -225,10 +227,45 @@ pub struct Polar {
     pub motor_on: bool,
 }
 
+/// The serialisable configuration of an [`Analysis`] ([`Analysis::spec`], [`Analysis::from_spec`]): the dimensional body and every
+/// builder setting except the progress callback. It is what a remote worker needs to rebuild the analysis.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct AnalysisSpec {
+    /// The body of [`Analysis::new`].
+    pub body: BodySpec,
+    /// Reference diameter \[m\] of the coefficients ([`Analysis::reference_diameter`]).
+    pub reference_diameter: f64,
+    /// Equivalent sand-grain roughness \[m\] ([`Analysis::roughness`]).
+    pub roughness_m: f64,
+    /// Grid resolution ([`Analysis::resolution`]).
+    pub resolution: Resolution,
+    /// Wake treatment, `None` for the default ([`Analysis::wake`]).
+    pub wake: Option<Wake>,
+    /// Flight conditions of a viscous analysis ([`Analysis::viscous`]).
+    pub flight: Option<FlightConditions>,
+    /// Fins ([`Analysis::fins`]).
+    pub fins: Option<FinSpec>,
+    /// Motor ([`Analysis::motor`]).
+    pub motor: Option<MotorSpec>,
+    /// Backend ([`Analysis::backend`]).
+    pub backend: Backend,
+    /// Iteration cap ([`Analysis::max_iterations`]).
+    pub max_iterations: Option<usize>,
+    /// Relative drag tolerance ([`Analysis::drag_tolerance`]).
+    pub drag_tolerance: Option<f64>,
+    /// Warm starts ([`Analysis::warm_start`]).
+    pub warm_start: bool,
+    /// Grid-level uncertainty estimate ([`Analysis::estimate_uncertainty`]).
+    pub estimate_uncertainty: bool,
+}
+
 /// Configuration of a sweep over Mach number for one body.
 #[derive(Clone, Debug)]
 pub struct Analysis {
     body: BaseBody,
+    /// The dimensional body description of [`Analysis::new`] (`None` for [`Analysis::from_internal`]).
+    body_spec: Option<BodySpec>,
     /// Nose diameter and reference diameter, in the same unit (metres, or internal units).
     d_nose: f64,
     d_ref: f64,
@@ -266,6 +303,7 @@ impl Analysis {
     pub fn from_internal(body: BaseBody) -> Analysis {
         Analysis {
             body,
+            body_spec: None,
             d_nose: 1.0,
             d_ref: 1.0,
             dimensional: false,
@@ -294,6 +332,54 @@ impl Analysis {
         a.d_nose = scale.d_nose;
         a.d_ref = spec.reference_diameter();
         a.dimensional = true;
+        a.body_spec = Some(spec.clone());
+        Ok(a)
+    }
+
+    /// The serialisable description of this analysis: everything but the progress callback (see [`AnalysisSpec`]).
+    /// [`Analysis::from_spec`] rebuilds an analysis that gives the same results, for instance in another process.
+    ///
+    /// Fails for an analysis from [`Analysis::from_internal`] and for one with a fixed numerics or a lift-case hook (test hooks that
+    /// have no serialisable form).
+    pub fn spec(&self) -> Result<AnalysisSpec, Error> {
+        let Some(body) = &self.body_spec else {
+            return Err(Error::Unsupported("only an analysis built from a dimensional BodySpec has a spec".into()));
+        };
+        if self.numerics.is_some() || self.lift_hook.is_some() {
+            return Err(Error::Unsupported("an analysis with fixed numerics or a lift-case hook has no spec".into()));
+        }
+        Ok(AnalysisSpec {
+            body: body.clone(),
+            reference_diameter: self.d_ref,
+            roughness_m: self.roughness_m,
+            resolution: self.resolution,
+            wake: self.wake,
+            flight: self.flight,
+            fins: self.fins.clone(),
+            motor: self.motor,
+            backend: self.backend,
+            max_iterations: self.max_iterations,
+            drag_tolerance: self.drag_tolerance,
+            warm_start: self.warm_start,
+            estimate_uncertainty: self.estimate_uncertainty,
+        })
+    }
+
+    /// An analysis from its description (without a progress callback: add one with [`Analysis::on_progress`]).
+    pub fn from_spec(spec: &AnalysisSpec) -> Result<Analysis, Error> {
+        let mut a = Analysis::new(&spec.body)?;
+        a.d_ref = spec.reference_diameter;
+        a.roughness_m = spec.roughness_m;
+        a.resolution = spec.resolution;
+        a.wake = spec.wake;
+        a.flight = spec.flight;
+        a.fins = spec.fins.clone();
+        a.motor = spec.motor;
+        a.backend = spec.backend;
+        a.max_iterations = spec.max_iterations;
+        a.drag_tolerance = spec.drag_tolerance;
+        a.warm_start = spec.warm_start;
+        a.estimate_uncertainty = spec.estimate_uncertainty;
         Ok(a)
     }
 
