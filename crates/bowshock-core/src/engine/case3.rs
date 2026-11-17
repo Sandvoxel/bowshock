@@ -9,7 +9,7 @@ use crate::error::Error;
 use crate::progress::ProgressSink;
 use crate::spec::FinProfile;
 use bowshock_cfd::flux::Limiter;
-use bowshock_cfd::gas3::{freestream3, Prim3};
+use bowshock_cfd::gas3::freestream3;
 use bowshock_cfd::grid3::{Grid3, PartRoughness};
 use bowshock_cfd::implicit::{DtMode, ImplicitParams, LineSolve3};
 use bowshock_cfd::solver::{Bc, Scheme, Turbulence, Viscous};
@@ -69,7 +69,7 @@ impl Numerics3 {
             warm_min_iters: 250,
             mean_window: 1500,
             mean_from: 1000,
-            mean_tol: 5e-3,
+            mean_tol: 1e-2,
             line_solve: None,
             pressure_outflow: false,
         }
@@ -206,12 +206,9 @@ pub struct Case3 {
     pub viscous: Option<Viscous>,
 }
 
-/// What the solver needs of the motor jet at the nozzle exit faces (`Wall::Jet`): the primitive state `[rho, u, v, w, p]` (axial, supersonic) and `[k, omega]`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct JetState3 {
-    pub state: Prim3,
-    pub turb: [f64; 2],
-}
+/// What the solver needs of the motor jet at the nozzle exit faces (`Wall::Jet`): the primitive state `[rho, u, v, w, p]` (axial, supersonic) and `[k, omega]`
+/// (defined with the solver: `bowshock_cfd::solver3::JetState3`, `Solver3::set_jet`).
+pub use bowshock_cfd::solver3::JetState3;
 
 impl Case3 {
     /// Sting grid of the 2D case ([`crate::engine::case::Case::new`] with `Wake::Sting`), the half domain with `24 << level` azimuthal cells
@@ -374,8 +371,10 @@ impl Case3 {
     }
 
     /// Switches the viscous (SST) terms of `s` on when the case is viscous: the sand-grain roughness of the walls from the grid's per-part values
-    /// (`Grid3::wall_ks`), the outflow of the numerics (characteristic for a body: `RansOpts3::default` would impose a static pressure, right for plates only).
+    /// (`Grid3::wall_ks`), the outflow of the numerics (characteristic for a body: `RansOpts3::default` would impose a static pressure, right for plates only);
+    /// gives the `Part::Jet` cells of a motor case their jet state (`Solver3::set_jet`, nothing without a motor).
     fn with_equations(&self, mut s: Solver3) -> Solver3 {
+        s.set_jet(self.jet_state3());
         if let Some(v) = self.viscous {
             let ks = s.grid.wall_ks();
             let ks = if ks.iter().any(|&k| k > 0.0) { ks } else { Vec::new() };

@@ -78,7 +78,7 @@
 //! differs by `0.05` in the radial momentum of those cells at 0.5, 2 and 8 degrees and on two grids). The `report` test prints the table.
 
 use crate::gas3::{Cons3, Prim3, GAMMA};
-use crate::grid3::{Face3, Grid3};
+use crate::grid3::{Face3, Grid3, Part, PART_DEAD, PART_FLUID};
 use crate::solver::{Viscous, PRANDTL, PRANDTL_T};
 use crate::solver3::pidx3;
 use rayon::prelude::*;
@@ -134,6 +134,10 @@ pub enum SideKind {
     Domain,
     /// The solid side of a fluid/solid face: the no-slip wall ghost of the fluid cell ([`wall_ghost3`]).
     Wall,
+    /// The exit of a motor jet: the solid cell `Part::Jet` behind the face holds the jet state (never updated), which is the ghost of the face ([`is_jet_cell`]); its
+    /// viscosity, eddy viscosity and gradient are those the solver stored in the jet cell (the 2D `Side::fixed`: `mu(T_jet)`, `rho_jet k / omega`; the gradient of the fluid
+    /// cell). Not a no-slip wall.
+    Jet,
 }
 
 /// The two sides of a face (`l`: lower index, `r`: upper index) as indices: the fluid cell of each side (for a ghost: the adjacent fluid cell), its kind and
@@ -151,6 +155,14 @@ impl FaceCells {
     pub fn noslip(&self) -> bool {
         self.kind[0] == SideKind::Wall || self.kind[1] == SideKind::Wall
     }
+}
+
+/// Is cell `c` a `Part::Jet` cell, the exit of a motor jet? It is solid (never updated) and holds the jet state, but is no wall: no reflection or no-slip ghost is built
+/// at its faces. See [`SideKind::Jet`].
+#[inline]
+pub fn is_jet_cell(grid: &Grid3, c: usize) -> bool {
+    let p = grid.part[c];
+    p != PART_FLUID && p != PART_DEAD && grid.parts[usize::from(p) - 1] == Part::Jet
 }
 
 /// Sides of face `(i, j, k)` of family `dir`; `None` for a face that carries no flux: `area == 0`, between two solid cells, or on the domain boundary
@@ -175,10 +187,12 @@ pub fn face_cells(grid: &Grid3, solid: &[bool], dir: usize, i: usize, j: usize, 
     let mut l = [i as isize, j as isize, k as isize];
     l[dir] -= 1;
     let lo_p = pidx3(ni, nj, nk, l[0], l[1], l[2]);
-    use SideKind::{Cell, Domain, Wall};
+    use SideKind::{Cell, Domain, Jet, Wall};
     match (lo, hi) {
         (Some(a), Some(b)) => match (solid[a], solid[b]) {
             (true, true) => None,
+            (true, false) if is_jet_cell(grid, a) => Some(FaceCells { cell: [a, b], kind: [Jet, Cell], pad: [lo_p, hi_p] }),
+            (false, true) if is_jet_cell(grid, b) => Some(FaceCells { cell: [a, b], kind: [Cell, Jet], pad: [lo_p, hi_p] }),
             (true, false) => Some(FaceCells { cell: [b, b], kind: [Wall, Cell], pad: [hi_p, hi_p] }),
             (false, true) => Some(FaceCells { cell: [a, a], kind: [Cell, Wall], pad: [lo_p, lo_p] }),
             (false, false) => Some(FaceCells { cell: [a, b], kind: [Cell, Cell], pad: [lo_p, hi_p] }),
@@ -283,7 +297,8 @@ pub fn face_dirs(grid: &Grid3, solid: &[bool], sym: &SymSides) -> FaceDirs3 {
             let Some(fc) = face_cells(grid, solid, dir, i, j, k) else { return FaceDir3::NONE };
             let (_, face) = face_of(grid, dir, i, j, k);
             let pos = |s: usize| {
-                let x = grid.xc[fc.cell[s]];
+                // the ghost of a jet face is the jet cell's state, placed (as a wall ghost) at the mirror image of the centre of the fluid cell
+                let x = grid.xc[if fc.kind[s] == SideKind::Jet { fc.cell[1 - s] } else { fc.cell[s] }];
                 if fc.kind[s] == SideKind::Cell {
                     x
                 } else {
