@@ -73,3 +73,106 @@ pub fn run_on_wedge(s2: &mut Solver, mach: f64, limiter: Limiter, first_order_it
     let drop_orders = if rmax > 0.0 { (rmax / residual.last().copied().unwrap_or(rmax)).log10() } else { 0.0 };
     Ok(WedgeRun { residual, drop_orders, stop_reason: reason })
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The sting and base-wake cases of the transonic and subsonic families on the wedge: no 2D solver, no 2D `PointResult`.
+// ---------------------------------------------------------------------------------------------------------------------
+
+use bowshock_cfd::gas3::{cons_to_prim3, sound_speed3};
+use bowshock_cfd::grid3::PART_FLUID;
+use bowshock_cfd::solver3::Solver3;
+use bowshock_core::engine::body_grid::BaseBody;
+use bowshock_core::engine::result::WallPoint;
+use bowshock_core::engine::run3::{base_cp, drag_parts_on, run3_on, wall_samples, y_plus_max, Wall};
+
+/// A body with the cylinder continuing as a sting to the outflow plane (no base), as a single-cell wedge on the sting grid at grid `level`: the Euler wedge numerics of
+/// the Mach regime ([`bowshock_core::engine::case3::Numerics3::euler_wedge`]).
+pub fn sting_case(mach: f64, body: BaseBody, level: u32) -> Case3 {
+    let mut c = Case3::new(mach, 0.0, body, None, level);
+    c.numerics = bowshock_core::engine::case3::Numerics3::euler_wedge(mach, level);
+    c.on_wedge()
+}
+
+/// A finite body with a flat base and a wake region (the base-wake grid) as a single-cell wedge at grid `level`.
+pub fn base_case(mach: f64, body: BaseBody, level: u32) -> Case3 {
+    Case3::wedge(mach, body, level)
+}
+
+/// What a run of a sting or base-wake case on the wedge reports: the quantities the transonic and subsonic drivers print and compare with the published data.
+/// Drag coefficients refer to the nose base area (`d = 1`); the wall `Cp` is the extrapolated wall value, as `bowshock_core::engine::run3::lift_forces` has it.
+#[derive(Clone, Debug)]
+pub struct WedgeResult {
+    pub mach: f64,
+    pub iters: usize,
+    pub stop_reason: StopReason,
+    pub drop_orders: f64,
+    pub cd_nose: f64,
+    /// One per aft segment.
+    pub cd_aft: Vec<f64>,
+    pub cd_base: f64,
+    /// Friction and largest `y+` of a viscous case (`0`, `NaN` for Euler).
+    pub cd_friction: f64,
+    pub y_plus_max: f64,
+    /// Mean base `Cp` (area weighted, NaN without a base) and the `Cp` of the base face per radius.
+    pub cp_base: f64,
+    pub base_wall: Vec<(f64, f64)>,
+    /// The body wall in axial order (`s0`, `s1`, `cp_cell` unused: NaN).
+    pub wall: Vec<WallPoint>,
+    pub cp_min: f64,
+    pub x_cp_min: f64,
+    /// Largest Mach number of the flow field.
+    pub m_max: f64,
+    pub min_rho: f64,
+    pub min_p: f64,
+}
+
+/// Iterates `s` (built from `case`, [`Case3::build_solver`]) to its stop rule ([`run3_on`]; `warm`: from the state it holds) and collects the [`WedgeResult`].
+pub fn run_wedge_point(case: &Case3, s: &mut Solver3, warm: bool) -> WedgeResult {
+    let r = run3_on(case, s, warm);
+    let p = drag_parts_on(case, s);
+    let (p_inf, q) = (s.cfg.freestream[4], 0.5 * case.mach * case.mach);
+    let mut wall = Vec::new();
+    let mut base_wall = Vec::new();
+    for w in wall_samples(&s.grid, &s.u) {
+        let cp = (w.pw - p_inf) / q;
+        let (x, rad) = (w.face.c[0], w.face.c[1].hypot(w.face.c[2]));
+        match w.class {
+            Wall::Body(_) | Wall::Sting => wall.push(WallPoint { x, r: rad, s0: f64::NAN, s1: f64::NAN, cp, cp_cell: f64::NAN }),
+            Wall::Base => base_wall.push((rad, cp)),
+            _ => {}
+        }
+    }
+    wall.sort_by(|a, b| a.x.total_cmp(&b.x));
+    base_wall.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (cp_min, x_cp_min) = wall.iter().fold((f64::INFINITY, f64::NAN), |(m, xm), w| if w.cp < m { (w.cp, w.x) } else { (m, xm) });
+    let (mut m_max, mut min_rho, mut min_p) = (0.0f64, f64::INFINITY, f64::INFINITY);
+    for (c, u) in s.u.iter().enumerate() {
+        if s.grid.part[c] != PART_FLUID {
+            continue;
+        }
+        let w = cons_to_prim3(u);
+        m_max = m_max.max((w[1] * w[1] + w[2] * w[2] + w[3] * w[3]).sqrt() / sound_speed3(&w));
+        min_rho = min_rho.min(w[0]);
+        min_p = min_p.min(w[4]);
+    }
+    let friction = p.friction.total;
+    WedgeResult {
+        mach: case.mach,
+        iters: r.iterations,
+        stop_reason: r.stop_reason,
+        drop_orders: r.drop_orders,
+        cd_nose: p.nose,
+        cd_aft: p.aft,
+        cd_base: p.base,
+        cd_friction: friction,
+        y_plus_max: if s.rans().is_some() { y_plus_max(s) } else { f64::NAN },
+        cp_base: base_cp(case, s),
+        base_wall,
+        wall,
+        cp_min,
+        x_cp_min,
+        m_max,
+        min_rho,
+        min_p,
+    }
+}

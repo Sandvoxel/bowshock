@@ -4,7 +4,7 @@
 use crate::atmosphere::{FlightConditions, SUTHERLAND_S};
 use crate::engine::body_grid::{check_quality, BaseBody, MAX_STRETCHING, MAX_STRETCHING_VISCOUS_J};
 use crate::engine::case::Case;
-use crate::engine::case3::Case3;
+use crate::engine::case3::{Case3, Tier, WallFlow};
 use crate::engine::field3::{field3_of_solver, Snapshots3};
 use crate::engine::grid3::Fins3;
 use crate::engine::meshing::Jet;
@@ -720,6 +720,36 @@ impl Analysis {
     #[doc(hidden)]
     pub fn engine_cases(&self, machs: &[f64]) -> Result<Vec<Case>, Error> {
         Ok(self.prepare(machs)?.2)
+    }
+
+    /// The axisymmetric cases of a sweep as single-cell wedges of the 3D engine (`Case3::wedge`; [`Analysis::viscous`]: the wall-resolved coarse tier of the flow, the
+    /// roughness of [`Analysis::roughness`] on the body, the motor jet of [`Analysis::motor`]), in ascending Mach order, for the validation crates and the gates that drive
+    /// the solver themselves. The base-wake grid only (a sting analysis is `Err`). The numerics are the 3D engine's for a wedge; the numerics overrides of the analysis
+    /// are not applied.
+    #[doc(hidden)]
+    pub fn wedge_cases(&self, machs: &[f64]) -> Result<Vec<Case3>, Error> {
+        if self.wake_used() != Wake::Base {
+            return Err(Error::InvalidInput("the wedge is built on the base-wake grid".into()));
+        }
+        let (order, rans, _) = self.prepare(machs)?;
+        let level = self.resolution.level();
+        order
+            .iter()
+            .map(|&k| {
+                let mut case = Case3::wedge(machs[k], self.body.clone(), level);
+                if let Some(r) = &rans {
+                    let flow = WallFlow { re_c: r.re_c, mach_max: r.mach_max, ks_body: self.roughness_m / self.d_nose, ks_fin: 0.0, sutherland: r.sutherland };
+                    case = case.with_tier(Tier::Coarse(flow));
+                    if let Some(jet) = r.jet {
+                        case = case.with_motor(jet)?;
+                    }
+                }
+                if let Some(cap) = self.max_iterations {
+                    case.numerics.max_iter = case.numerics.max_iter.min(cap);
+                }
+                Ok(case)
+            })
+            .collect()
     }
 
     /// The grid of the analysis at `mach` with the free stream on it: the state a cold run starts from, as a [`Field`] (iteration

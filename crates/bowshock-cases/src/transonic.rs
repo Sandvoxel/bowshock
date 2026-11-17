@@ -16,6 +16,11 @@ pub fn transonic_case(mach: f64, level: u32, body: Body, cyl_length: f64) -> Cas
     Case::new(mach, BaseBody::cylinder(body, cyl_length), level, Wake::Sting, Numerics::transonic())
 }
 
+/// [`transonic_case`] on the single-cell wedge of the 3D engine ([`crate::wedge::sting_case`]): the same nose + cylinder on the sting grid at grid `level`.
+pub fn transonic_wedge_case(mach: f64, level: u32, body: Body, cyl_length: f64) -> bowshock_core::engine::case3::Case3 {
+    crate::wedge::sting_case(mach, BaseBody::cylinder(body, cyl_length), level)
+}
+
 /// Published free-flight nose pressure-drag data, zero lift, fineness-ratio-3 noses on a cylinder.
 ///
 /// Source: W. E. Stoney Jr., "Transonic Drag Measurements of Eight Body-Nose Shapes", NACA RM L53K17 (Langley, 1954),

@@ -20,6 +20,23 @@ pub fn subsonic_case(mach: f64, nose: Nose, level: u32, base: bool) -> Case {
     Case::new(mach, body, level, wake, Numerics::subsonic(level, wake))
 }
 
+/// [`subsonic_case`] on the single-cell wedge of the 3D engine: the base-wake grid (`base`) or the sting grid at grid `level`.
+pub fn subsonic_wedge_case(mach: f64, nose: Nose, level: u32, base: bool) -> bowshock_core::engine::case3::Case3 {
+    let body = BaseBody::cylinder(Body { nose }, 6.0);
+    if base {
+        crate::wedge::base_case(mach, body, level)
+    } else {
+        crate::wedge::sting_case(mach, body, level)
+    }
+}
+
+/// [`fox_case`] on the single-cell wedge of the 3D engine (base-wake grid, the sting behind the base).
+pub fn fox_wedge_case(cone: bool, mach: f64, level: u32) -> bowshock_core::engine::case3::Case3 {
+    let nose = if cone { Nose::Cone { half_angle: 10f64.to_radians() } } else { Nose::TangentOgive { fineness: 2.0 } };
+    let body = BaseBody::cylinder(Body { nose }, 2.0).with_boattail(1.0, 10f64.to_radians()).with_sting(fox_tm_x2439::STING_RADIUS);
+    crate::wedge::base_case(mach, body, level)
+}
+
 /// NASA TM X-2439 test body (`cone = false`: configuration 4, 2-caliber tangent ogive; `cone = true`: configuration 2, 10 deg cone)
 /// with cylinder, 10 deg boattail and the flat annular base on a sting (`fox_tm_x2439`), at Mach number `mach`.
 pub fn fox_case(cone: bool, mach: f64, level: u32) -> Case {

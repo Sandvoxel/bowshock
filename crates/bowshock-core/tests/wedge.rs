@@ -847,3 +847,38 @@ fn fins_across_a_diameter_step_are_refused_and_fins_behind_it_build() {
     let e = c.build_solver().err().expect("refused").to_string();
     assert!(e.contains("diameter step"), "{e}");
 }
+
+/// The wall-resolved wedge of a 2D case (`Case3::wedge_of`) and the wedge built directly (`Case3::wedge` with the coarse tier of the same flow) are one case: the same
+/// grids, the same viscous parameters and the same numerics. The direct form is what stays when the 2D engine goes (DESIGN3D F3), so the frozen 2D table is reproduced
+/// by it as well as by `wedge_of` (G-V3 / G-V4 in `tests/wedge_gates.rs`).
+#[test]
+fn the_wedge_of_a_2d_rans_case_is_the_wedge_built_with_the_tier() {
+    use bowshock_core::engine::case::Case;
+    use bowshock_core::engine::meshing::Wake;
+    let body = BaseBody::cylinder(Body { nose: Nose::TangentOgive { fineness: 3.0 } }, 6.0);
+    for (mach, level) in [(0.5, 0u32), (2.3, 0), (0.9, 1)] {
+        let (re_c, sutherland, mach_max) = (6.989e5, 0.368, 3.0);
+        let case2 = Case::viscous(mach, body.clone(), level, Wake::Base, re_c, sutherland, mach_max);
+        let via2d = Case3::wedge_of(&case2, level);
+        let flow = WallFlow { re_c, mach_max, ks_body: 0.0, ks_fin: 0.0, sutherland };
+        let direct = Case3::wedge(mach, body.clone(), level).with_tier(Tier::Coarse(flow));
+        assert_eq!(format!("{:?}", via2d.grid.base), format!("{:?}", direct.grid.base), "M {mach} level {level}: base grid");
+        assert_eq!(format!("{:?}", via2d.grid.sting), format!("{:?}", direct.grid.sting), "M {mach} level {level}: sting grid");
+        assert_eq!(
+            via2d.viscous.map(|v| (v.re_c, v.sutherland, v.turbulence)),
+            direct.viscous.map(|v| (v.re_c, v.sutherland, v.turbulence)),
+            "M {mach}: viscous"
+        );
+        assert_eq!(via2d.numerics, direct.numerics, "M {mach} level {level}: numerics");
+        assert_eq!(via2d.grid.domain, direct.grid.domain);
+    }
+    // the Euler wedge of a 2D case (`Numerics::auto`) is `Case3::wedge`
+    for (mach, level) in [(0.5, 0u32), (0.9, 0), (2.3, 1)] {
+        let case2 = Case::new(mach, body.clone(), level, Wake::Base, bowshock_core::engine::numerics::Numerics::auto(mach, level, Wake::Base));
+        let via2d = Case3::wedge_of(&case2, level);
+        let direct = Case3::wedge(mach, body.clone(), level);
+        assert_eq!(format!("{:?}", via2d.grid.base), format!("{:?}", direct.grid.base), "Euler M {mach} level {level}: base grid");
+        assert_eq!(format!("{:?}", via2d.grid.sting), format!("{:?}", direct.grid.sting), "Euler M {mach} level {level}: sting grid");
+        assert_eq!(via2d.numerics, direct.numerics, "Euler M {mach} level {level}: numerics");
+    }
+}

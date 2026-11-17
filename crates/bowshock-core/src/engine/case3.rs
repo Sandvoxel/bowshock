@@ -77,6 +77,23 @@ impl Numerics3 {
         }
     }
 
+    /// The settings of an Euler wedge, the 2D engine's `Numerics::auto` for the base-wake grid: below Mach 0.85 the subsonic ones ([`Numerics3::auto`] with the implicit
+    /// defaults' CFL limit 30 and `10 000 << level` iterations), from Mach 0.85 the transonic ones (300 first-order iterations, 60 000 iterations; the 2D explicit
+    /// scheme of that regime has no 3D counterpart, the implicit CFL limit stays 10). Block lines. What [`Case3::wedge`] runs with; the facade's Euler tables of the
+    /// frozen 2D reference (G-V4 table-euler, G-W1) are the 2D engine's numbers.
+    pub fn euler_wedge(mach: f64, level: u32) -> Numerics3 {
+        let mut n = Numerics3::auto(mach, level);
+        if mach < 0.85 {
+            n.implicit = ImplicitParams::DEFAULT;
+            n.max_iter = 10_000 << level;
+        } else {
+            n.first_order_iters = 300;
+            n.max_iter = 60_000;
+        }
+        n.line_solve = Some(LineSolve3::Block);
+        n
+    }
+
     /// The settings of a wall-resolved RANS run, as the 2D engine's `Numerics::viscous` has them: van Albada below Mach 0.85 and minmod above, the low-Mach
     /// correction and (below Mach 1) the low-Mach preconditioning of the implicit left-hand side, `cfl_max` 50 (20 from Mach 1: the supersonic wake diverges at 50),
     /// `DtMode::Sum`, 200 first-order iterations, the **block** lines (the diagonal solve is unmeasured on viscous wedges and stalls with the preconditioning on plates),
@@ -258,6 +275,7 @@ impl Case3 {
     pub fn wedge(mach: f64, body: BaseBody, level: u32) -> Case3 {
         let mut c = Case3::new(mach, 0.0, body, None, level);
         c.grid.base = Some(base_grid(&c.body, level));
+        c.numerics = Numerics3::euler_wedge(mach, level);
         c.on_wedge()
     }
 

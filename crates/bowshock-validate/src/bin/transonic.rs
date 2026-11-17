@@ -21,7 +21,7 @@ use bowshock_core::engine::run::run_on;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 const DEFAULT_MACH: [f64; 12] = [0.7, 0.8, 0.85, 0.9, 0.95, 0.98, 1.0, 1.02, 1.05, 1.1, 1.2, 1.5];
@@ -54,6 +54,11 @@ fn main() {
         .unwrap_or_else(|| format!("{body_name}_L{level}{}{}", if implicit { "_imp" } else { "" }, if warm { "_warm" } else { "" }));
     let out_dir: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join("out").join("transonic");
     fs::create_dir_all(&out_dir).expect("create out dir");
+
+    if args.iter().any(|a| a == "--wedge") {
+        wedge_sweep(&machs, level, body_name, &body, data, &tag, &out_dir, &args);
+        return;
+    }
 
     let make_case = |m: f64| {
         let cyl = 6.0;
@@ -278,4 +283,62 @@ fn write_case_files(out_dir: &std::path::Path, tag: &str, res: &PointResult) {
             None => writeln!(f, "{},{:e},", i + 1, r).unwrap(),
         }
     }
+}
+
+/// The sweep on the single-cell wedge of the 3D engine (`--wedge`): the same body, grid level and Mach numbers; the Euler numerics of the 3D engine for a wedge (the line
+/// solver of the product, [`bowshock_cases::wedge::run_wedge_point`]). `--warm` starts each Mach number from the previous state.
+#[allow(clippy::too_many_arguments)]
+fn wedge_sweep(
+    machs: &[f64],
+    level: u32,
+    body_name: &str,
+    body: &bowshock_core::engine::body_grid::Body,
+    data: Option<&'static [(f64, f64)]>,
+    tag: &str,
+    out_dir: &Path,
+    args: &[String],
+) {
+    use bowshock_cases::transonic::transonic_wedge_case;
+    use bowshock_cases::wedge::run_wedge_point;
+    let warm = args.iter().any(|a| a == "--warm");
+    let max_iter: Option<usize> = arg(args, "--max-iter").and_then(|v| v.parse().ok());
+    println!("bowshock-cfd transonic on the wedge: body {body_name}, grid L{level}, {}", if warm { "warm-start sweep" } else { "cold start for every Mach" });
+    let mut csv = String::from(
+        "mach,iters,seconds,stop_reason,drop_orders,cd_nose,cp_min,x_cp_min,m_max,stoney_digitised,cfd_minus_stoney,cd_tangent_cone_or_taylor_maccoll\n",
+    );
+    let mut solver = None;
+    for (k, &m) in machs.iter().enumerate() {
+        let mut case = transonic_wedge_case(m, level, *body, 6.0);
+        if let Some(n) = max_iter {
+            case.numerics.max_iter = n;
+        }
+        let t0 = Instant::now();
+        if !warm || k == 0 {
+            solver = Some(case.build_solver().expect("wedge grid"));
+        }
+        let r = run_wedge_point(&case, solver.as_mut().expect("solver"), warm && k > 0);
+        let dt = t0.elapsed().as_secs_f64();
+        let st = data.and_then(|d| stoney::interp(d, m));
+        let tc = tangent_cone_cd(body, m);
+        println!(
+            "M = {m:<5} {:>6} iters ({dt:6.1} s) stop: {:<22} drop {:.1} orders, CD_nose = {:.5}, Cp_min {:.3} @ x={:.2}, M_max {:.2}, min rho {:.3} min p {:.3}",
+            r.iters, r.stop_reason, r.drop_orders, r.cd_nose, r.cp_min, r.x_cp_min, r.m_max, r.min_rho, r.min_p
+        );
+        writeln!(
+            csv,
+            "{m},{},{dt:.1},{},{:.2},{:.6},{:.5},{:.3},{:.4},{},{},{}",
+            r.iters,
+            r.stop_reason,
+            r.drop_orders,
+            r.cd_nose,
+            r.cp_min,
+            r.x_cp_min,
+            r.m_max,
+            st.map_or(String::new(), |v| format!("{v:.4}")),
+            st.map_or(String::new(), |v| format!("{:+.4}", r.cd_nose - v)),
+            if tc.is_nan() { String::new() } else { format!("{tc:.5}") }
+        )
+        .unwrap();
+    }
+    fs::write(out_dir.join(format!("{tag}_wedge_cmp.csv")), csv).expect("write csv");
 }
