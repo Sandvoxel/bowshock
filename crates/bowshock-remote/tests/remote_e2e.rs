@@ -24,11 +24,7 @@ fn wipe(host: &RemoteHost) {
     if std::env::var_os("BOWSHOCK_REMOTE_TEST_KEEP").is_some() {
         return;
     }
-    let out = Command::new("ssh")
-        .args(["-o", "BatchMode=yes", &host.target])
-        .arg(sh_command("rm -rf \"$HOME/.cache/bowshock/worker\""))
-        .output()
-        .expect("ssh");
+    let out = Command::new("ssh").args(["-o", "BatchMode=yes", &host.target]).arg(sh_command("rm -rf \"$HOME/.cache/bowshock/worker\"")).output().expect("ssh");
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -64,7 +60,17 @@ fn body() -> BodySpec {
 }
 
 fn lift_spec() -> AnalysisSpec {
-    let fins = FinSpec { count: 4, root_chord: D, tip_chord: D, span: D, sweep: 0.0, thickness: 0.08 * D, roughness: 0.0, root_te_to_base: 0.0, profile: FinProfile::Square };
+    let fins = FinSpec {
+        count: 4,
+        root_chord: D,
+        tip_chord: D,
+        span: D,
+        sweep: 0.0,
+        thickness: 0.08 * D,
+        roughness: 0.0,
+        root_te_to_base: 0.0,
+        profile: FinProfile::Square,
+    };
     Analysis::new(&body()).unwrap().fins(fins).backend(Backend::Gpu).resolution(Resolution::Coarse).spec().unwrap()
 }
 

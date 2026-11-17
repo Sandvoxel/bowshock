@@ -103,7 +103,12 @@ impl Remote {
     /// A connection over the given streams to a worker that speaks the protocol (tests run the worker in a thread).
     /// `require_gpu` makes a worker without a GPU an error.
     #[doc(hidden)]
-    pub fn over_streams(reader: impl Read + Send + 'static, writer: impl Write + Send + 'static, expect_key: &str, require_gpu: bool) -> Result<Remote, RemoteError> {
+    pub fn over_streams(
+        reader: impl Read + Send + 'static,
+        writer: impl Write + Send + 'static,
+        expect_key: &str,
+        require_gpu: bool,
+    ) -> Result<Remote, RemoteError> {
         Remote::handshake(Box::new(reader), Box::new(writer), None, Arc::new(Mutex::new(String::new())), expect_key, require_gpu)
     }
 

@@ -16,7 +16,17 @@ fn body() -> BodySpec {
 }
 
 fn fins() -> FinSpec {
-    FinSpec { count: 4, root_chord: D, tip_chord: D, span: D, sweep: 0.0, thickness: 0.08 * D, roughness: 0.0, root_te_to_base: 0.0, profile: FinProfile::Square }
+    FinSpec {
+        count: 4,
+        root_chord: D,
+        tip_chord: D,
+        span: D,
+        sweep: 0.0,
+        thickness: 0.08 * D,
+        roughness: 0.0,
+        root_te_to_base: 0.0,
+        profile: FinProfile::Square,
+    }
 }
 
 fn spec() -> AnalysisSpec {

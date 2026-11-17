@@ -162,7 +162,13 @@ struct Output {
 
 /// Runs `script` on `host`, feeding `input` to its stdin (`on_sent` sees the bytes sent so far) and passing every stdout line to
 /// `on_line`.
-fn ssh_run(host: &RemoteHost, script: &str, input: Option<&mut dyn Read>, on_sent: &mut dyn FnMut(u64), on_line: &mut dyn FnMut(&str)) -> Result<Output, RemoteError> {
+fn ssh_run(
+    host: &RemoteHost,
+    script: &str,
+    input: Option<&mut dyn Read>,
+    on_sent: &mut dyn FnMut(u64),
+    on_line: &mut dyn FnMut(&str),
+) -> Result<Output, RemoteError> {
     let mut child = ssh_spawn(host, script)?;
     let stderr = drain(child.stderr.take().unwrap());
     let mut stdin = child.stdin.take().unwrap();
