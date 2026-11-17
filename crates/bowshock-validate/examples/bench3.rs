@@ -263,18 +263,12 @@ fn bench_combo(case: &BenchCase, precision: (Precision, &'static str), solve: (L
     let ctx = luma::Context::new().map_err(|e| format!("no GPU context: {e}"))?;
     let cfg = case.config(solve.0);
     let mut s = match &case.rans {
-        // the viscous SST wedge: the host solver with the 2D case's numerics and viscous parameters (first-order start-up 0: the timed step is the MUSCL one)
+        // the viscous SST wedge: `Case3::wedge_of` carries the 2D case's numerics and viscous parameters (first-order start-up 0: the timed step is the MUSCL one)
         Some(c2) => {
             let mut host = Case3::wedge_of(c2, 0).build_solver().map_err(|e| format!("wedge solver: {e}"))?;
             let bowshock_cfd::solver::Scheme::Implicit(p) = c2.numerics.scheme else { return Err("the viscous numerics are implicit".into()) };
-            host.cfg.freestream = freestream3(c2.mach, 0.0);
             host.cfg.scheme = Scheme3::Implicit(ImplicitParams { line_solve: solve.0, ..p });
-            host.cfg.limiter = c2.numerics.limiter;
-            host.cfg.low_mach = c2.numerics.low_mach;
             host.cfg.first_order_iters = 0;
-            let opts =
-                bowshock_cfd::solver3::RansOpts3 { pressure_outflow: c2.numerics.outflow == bowshock_cfd::solver::Bc::PressureOutflow, ..Default::default() };
-            host.set_viscous_with(c2.viscous, opts);
             GpuSolver3::from_host(&ctx, &host, precision.0).map_err(|e| format!("{}: {e}", precision.1))?
         }
         None => GpuSolver3::new(&ctx, &case.grid, &cfg, precision.0).map_err(|e| format!("{}: {e}", precision.1))?,

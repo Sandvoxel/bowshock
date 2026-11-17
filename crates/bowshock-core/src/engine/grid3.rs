@@ -781,6 +781,27 @@ fn domain_span(p: &Grid3Params) -> Result<(f64, Symmetry), Error> {
 /// plane `x = x_base` there. Behind the plane the layer continues as fluid cells that taper over four columns to the nominal width; below the base radius
 /// (the wake rows under the surface) the layer keeps the angle it has on the surface row, so it is a thin sector that narrows to the axis, never a jump.
 pub fn body_grid3(p: &Grid3Params) -> Result<Grid3, Error> {
+    let first = body_grid3_inner(p);
+    let Err(Error::Grid(m)) = &first else { return first };
+    if !(m.starts_with("negative cell volume") || m.starts_with("non-positive fluid cell volume")) || p.fins.is_none() || p.fin_stack.is_some() || p.nk < 2 {
+        return first;
+    }
+    // uniform azimuthal cells beside a fin that fold: name the cause and the smallest `nk` that does not (a negative volume is never the reason the caller sees)
+    let (span, _) = domain_span(p)?;
+    let cell = span.to_degrees() / p.nk as f64;
+    let f = p.fins.as_ref().expect("fins");
+    let valid = (p.nk + 1..=(3 * p.nk).max(p.nk + 8)).find(|&nk| body_grid3_inner(&Grid3Params { nk, ..p.clone() }).is_ok());
+    Err(Error::Grid(format!(
+        "the {} azimuthal cells of the domain are {cell:.1} degrees wide, too wide for the fins ({:.3} d thick, {:.2} d exposed span): a cell beside a fin folds ({m}): the gap cells on the two sides of the fin differ in width (the counts are rounded), so the polygon scale puts its two faces at different radii and shears the thin layer{}",
+        p.nk,
+        f.thickness,
+        f.span,
+        valid.map_or(", and no nk up to three times as large builds either: check the fins".to_string(), |n| format!("; use nk >= {n} ({:.1} degree cells)", span.to_degrees() / n as f64))
+    )))
+}
+
+/// [`body_grid3`] without the explanation of a fold.
+fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
     if let (Some(bp), None) = (&p.base, &p.fins) {
         return base_grid3(p, bp);
     }
@@ -1447,7 +1468,7 @@ mod tests {
 
     fn flow() -> crate::engine::case3::WallFlow {
         // the example rocket at Mach 2: Re/m 9.84e6, d = 0.0572 m
-        crate::engine::case3::WallFlow { re_c: 9.84e6 * 0.0572 / 2.0, mach_max: 2.0, ks_body: 2e-5, ks_fin: 1e-4 }
+        crate::engine::case3::WallFlow { re_c: 9.84e6 * 0.0572 / 2.0, mach_max: 2.0, ks_body: 2e-5, ks_fin: 1e-4, sutherland: 0.368 }
     }
 
     #[test]

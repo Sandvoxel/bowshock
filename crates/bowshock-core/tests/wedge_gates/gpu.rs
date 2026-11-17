@@ -153,41 +153,16 @@ fn p_of(q: &Cons3) -> f64 {
     cons_to_prim3(q)[4]
 }
 
-/// The settings of a RANS run on the wedge: the 2D case's own (van Albada / minmod, the low-Mach correction and preconditioning below Mach 1, 200 first-order
-/// iterations, the summed-direction time step), the block line solve; the stop rule on the total CD: 5 orders of residual drop or a CD range below `1e-4` over 2000
-/// iterations (the 2D rule `monitor_tol` / `monitor_window`).
-fn rans_numerics3(case2: &bowshock_core::engine::case::Case) -> Result<Numerics3, String> {
-    let n = &case2.numerics;
-    let bowshock_cfd::solver::Scheme::Implicit(p) = n.scheme else { return Err("the viscous numerics are implicit".into()) };
-    Ok(Numerics3 {
-        limiter: n.limiter,
-        low_mach: n.low_mach,
-        implicit: ImplicitParams { line_solve: LineSolve3::Block, ..p },
-        first_order_iters: n.first_order_iters,
-        max_iter: n.max_iter,
-        rel_tol: n.monitor_tol.unwrap_or(1e-4),
-        window: n.monitor_window,
-        stationary_min_iters: n.monitor_window,
-        warm_min_iters: n.monitor_window,
-        line_solve: Some(LineSolve3::Block),
-    })
-}
-
 impl GpuWedge {
-    /// A RANS case of the facade on the single-cell wedge of its wall-resolved 2D grid, on the GPU: SST, the 2D numerics, friction of the body surface from the device
-    /// state (`GpuRunner3::friction_report`), the wall forces of the monitor with the friction included.
+    /// A RANS case of the facade on the single-cell wedge of its wall-resolved 2D grid, on the GPU: `Case3::wedge_of` carries the 2D case's viscous parameters and numerics
+    /// (block lines), `GpuRunner3` runs SST with the shear of the no-slip faces in its device-side class forces and in the monitor.
     fn rans_case(&self, c: &FacadeCase, case2: &bowshock_core::engine::case::Case) -> Result<Numbers, String> {
-        let mut case = Case3::wedge_of(case2, 0);
-        case.numerics = rans_numerics3(case2)?;
-        let v = case2.viscous.ok_or("the engine case of a RANS facade case is viscous")?;
-        let opts =
-            bowshock_cfd::solver3::RansOpts3 { pressure_outflow: case2.numerics.outflow == bowshock_cfd::solver::Bc::PressureOutflow, ..Default::default() };
-        let mut r = GpuRunner3::new_rans(&case, self.precision.unwrap_or_else(|| precision_of(c)), v, opts).map_err(err)?;
+        let case = Case3::wedge_of(case2, 0);
+        let mut r = GpuRunner3::new(&case, self.precision.unwrap_or_else(|| precision_of(c))).map_err(err)?;
         let t = Instant::now();
         let p = r.run_on(&case, false).map_err(err)?;
         let wall_s = t.elapsed().as_secs_f64();
         let d = r.drag_parts(&case).map_err(err)?;
-        let (cd_friction, y_plus_max) = r.friction_report(&case).map_err(err)?.ok_or("no viscous state on the runner")?;
         // the facade reports on the largest cross-section (`BaseBody::nose_to_largest_area`), the solver on the nose-base area
         let q = case.body.nose_to_largest_area();
         println!("INFO RANS wedge {} on the GPU: {} iterations, {wall_s:.1} s, stop {:?}, {:.2} orders", c.id, p.iterations, p.stop_reason, p.drop_orders);
@@ -195,10 +170,10 @@ impl GpuWedge {
             cd_total: q * d.total,
             cd_nose: q * d.nose,
             cd_aft: d.aft.iter().map(|x| q * x).collect(),
-            cd_friction: Some(q * cd_friction),
+            cd_friction: Some(q * d.friction.total),
             cd_base: Some(q * d.base),
-            cp_base: None,
-            y_plus_max: Some(y_plus_max),
+            cp_base: p.cp_base.is_finite().then_some(p.cp_base),
+            y_plus_max: p.y_plus_max.is_finite().then_some(p.y_plus_max),
             iterations: p.iterations,
             stop_reason: format!("{:?}", p.stop_reason),
         })

@@ -15,3 +15,4 @@ pub mod planform;
 pub mod result;
 pub mod run;
 pub mod run3;
+pub mod symmetry3;

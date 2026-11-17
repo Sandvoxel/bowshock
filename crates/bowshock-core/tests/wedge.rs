@@ -468,10 +468,9 @@ fn vanishing_fins_leave_the_wedge_drag() {
 fn wall_resolved_fin_grids_build_on_the_base_grid_at_every_reynolds_number() {
     for re_c in [2.0e5, 1.0e6, 1.0e7] {
         for tier in [Tier::Coarse, Tier::Fine] {
-            let flow = WallFlow { re_c, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0 };
+            let flow = WallFlow { re_c, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0, sutherland: 0.368 };
             let c = Case3::sector(2.0, Case3::anf_body(), Case3::anf_fins(), tier(flow), 0);
-            let s = c.build_solver().unwrap_or_else(|e| panic!("Re_c {re_c:e}: {e}"));
-            let g = &s.grid;
+            let g = &bowshock_core::engine::grid3::body_grid3(&c.grid).unwrap_or_else(|e| panic!("Re_c {re_c:e}: {e}"));
             assert!(g.vol.iter().all(|v| *v >= 0.0), "Re_c {re_c:e}: a negative volume");
         }
     }
@@ -483,15 +482,15 @@ fn wall_resolved_fin_grids_build_on_the_base_grid_at_every_reynolds_number() {
 #[test]
 fn half_domains_at_incidence_on_the_base_grid_build_for_both_roll_phases_and_tiers() {
     for re_c in [2.0e5, 1.0e6] {
-        let flow = WallFlow { re_c, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0 };
+        let flow = WallFlow { re_c, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0, sutherland: 0.368 };
         for (tier, name) in [(Tier::Lift(flow), "lift"), (Tier::Coarse(flow), "coarse")] {
             for phase in [FinPhase::Between, FinPhase::InPlane] {
                 let mut c = Case3::base_half(0.8, 3f64.to_radians(), Case3::anf_body(), Some(Case3::anf_fins()), tier, 0);
                 c.grid.domain = Domain3::Half { phase };
-                let s = c.build_solver().unwrap_or_else(|e| panic!("Re_c {re_c:e} {name} {phase:?}: {e}"));
-                let g = &s.grid;
+                let g = &bowshock_core::engine::grid3::body_grid3(&c.grid).unwrap_or_else(|e| panic!("Re_c {re_c:e} {name} {phase:?}: {e}"));
                 assert!(g.vol.iter().all(|v| *v >= 0.0), "Re_c {re_c:e} {name} {phase:?}: a negative volume");
-                let fin_faces = wall_samples(g, &s.u).iter().filter(|w| w.class == Wall::FinSide).count();
+                let u = vec![bowshock_cfd::gas3::prim_to_cons3(&c.freestream()); g.ni * g.nj * g.nk];
+                let fin_faces = wall_samples(g, &u).iter().filter(|w| w.class == Wall::FinSide).count();
                 assert!(fin_faces >= 1, "Re_c {re_c:e} {name} {phase:?}: no fin wall faces");
                 if name == "lift" {
                     assert_eq!(g.nk, 32, "uniform azimuth over the half domain");
@@ -786,4 +785,20 @@ fn unsupported_outlines_are_rejected_with_the_reason() {
     long.te_to_base = 5.0;
     let e = sector_on("base", long).build_solver().err().expect("a fin that starts on the nose is refused").to_string();
     assert!(e.contains("ahead of the aft body"), "{e}");
+}
+
+/// 8 azimuthal cells of 22.5 degrees over the half domain fold a cell beside the 0.93 d Arcas fins (the gap cells on the two sides of a fin are 22.5 and 45 degrees
+/// wide, so the polygon scale puts the fin's two faces at different radii): the mesher refuses with the cause and the smallest `nk` that builds, never with a
+/// bare "negative cell volume", and that `nk` builds.
+#[test]
+fn a_fold_beside_wide_fins_is_refused_naming_the_cause_and_the_nk() {
+    let mut c = Case3::base_half(0.5, 0.0, arcas_like(), Some(arcas_fins(4, 0.0)), Tier::Euler, 0);
+    c.grid.domain = Domain3::Half { phase: FinPhase::Between };
+    c.grid.nk = 8;
+    let e = c.build_solver().err().expect("8 cells fold beside these fins").to_string();
+    assert!(e.contains("22.5 degrees wide") && e.contains("two sides of the fin") && !e.starts_with("negative"), "{e}");
+    let nk: usize =
+        e.split("use nk >= ").nth(1).and_then(|t| t.split_whitespace().next()).and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("no nk in `{e}`"));
+    c.grid.nk = nk;
+    c.build_solver().unwrap_or_else(|e| panic!("the suggested nk = {nk} does not build: {e}"));
 }
