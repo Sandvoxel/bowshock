@@ -8,8 +8,8 @@
 use crate::engine::case3::Case3;
 use crate::engine::gpu::{record_timing, PointTiming};
 use crate::engine::run3::{
-    breakdown_from, drag_parts_from, forces_from, wall_class, wall_faces, zero_incidence, DragParts, LiftBreakdown, LiftForces, PointResult3, StopRule3, Wall,
-    WallForces, MEAN_EVERY, SAMPLE_EVERY,
+    breakdown_from, coefficients, drag_parts_from, forces_from, wall_class, wall_faces, zero_incidence, DragParts, LiftBreakdown, LiftForces, PointResult3,
+    StopRule3, Wall, WallForces, MEAN_EVERY, SAMPLE_EVERY,
 };
 use crate::error::Error;
 use bowshock_cfd::gpu::{GpuSolver3, Precision, TractionFace3, WallFace3};
@@ -134,16 +134,23 @@ impl GpuRunner3 {
             }
         }
         self.gpu.set_wall_faces(&faces, classes.len())?;
-        if self.host.rans().is_some() {
-            // the shear sums `[all faces (classes 0..n), faces up to the base station (n..2n)]` like the pressure: the faces of the second set are listed again
-            let n = classes.len();
-            let tfaces: Vec<TractionFace3> = pending
+        // the shear sums `[all faces (classes 0..n), faces up to the base station (n..2n)]` like the pressure: the faces of the second set are listed again
+        let n = classes.len();
+        let tfaces: Vec<TractionFace3> = if self.host.rans().is_some() {
+            pending
                 .iter()
                 .map(|(_, f, _)| *f)
                 .chain(pending.iter().filter(|(_, _, cut)| *cut).map(|(ci, f, _)| TractionFace3 { class: n + ci, ..*f }))
-                .collect();
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if self.host.rans().is_some() {
             self.gpu.set_traction_faces(&tfaces, 2 * n)?;
         }
+        // the force monitor of the loop: the sums of `lift_forces` (the cut faces, the sting and the jet not counted), reduced in every step
+        let keep: Vec<bool> = classes.iter().map(|c| !matches!(c, Wall::Sting | Wall::Jet)).collect();
+        self.gpu.set_force_monitor(&faces, &tfaces, &keep)?;
         self.classes = classes;
         Ok(())
     }
@@ -260,12 +267,13 @@ impl GpuRunner3 {
         let mut done = 0usize;
         let mut stop: Option<usize> = None;
         while done < n.max_iter && stop.is_none() {
-            // the mean-stationary rule needs the forces every `MEAN_EVERY` iterations once it is past `mean_from` (a 50-iteration chunk would alias the wake periods): chunks
-            // of 10 from there on, 50 before (`SYNC`, the sampling interval of the range rule)
-            let len = if rule.wants_forces(done + MEAN_EVERY, MEAN_EVERY) { MEAN_EVERY } else { SYNC }.min(n.max_iter - done);
+            // chunks of `SYNC` iterations (the sampling interval of the range rule); the forces of the rules come from the loop itself: the force monitor of the step records
+            // `[Fx, Fz, Mz]` of the state each iteration started from (so the sample of an iteration count is one iteration old), the mean rule reads every `MEAN_EVERY`-th
+            // of them, and the one exact `lift_forces` is the result's
+            let len = SYNC.min(n.max_iter - done);
             let end = done + len;
             let t_chunk = Instant::now();
-            let h = self.gpu.run(len)?;
+            let (h, mon) = self.gpu.run_monitored(len)?;
             let dt_chunk = t_chunk.elapsed().as_secs_f64();
             if done == 0 {
                 tm.first_chunk_s = dt_chunk;
@@ -273,23 +281,14 @@ impl GpuRunner3 {
                 tm.chunks_rest += 1;
                 tm.rest_chunks_s += dt_chunk;
             }
-            // the force coefficients of the state after the chunk: for the mean rule (`observe` before the `check`s of the chunk) and for the CN sample of the range rule
-            let sample_due = end.is_multiple_of(SYNC);
-            let wants = rule.wants_forces(end, MEAN_EVERY);
-            let cn = if wants || sample_due {
-                let t = Instant::now();
-                let f = self.lift_forces(case)?;
-                tm.forces_s += t.elapsed().as_secs_f64();
-                if wants {
-                    rule.observe(end, &f);
-                }
-                sample_due.then(|| if zero_incidence(&self.host.grid) || case.alpha.abs() < 1e-12 { f.ca } else { f.cn })
-            } else {
-                None
-            };
+            let coeffs = |k: usize| coefficients(case, &self.host.grid, mon[k]);
+            let by_incidence = |f: &LiftForces| if zero_incidence(&self.host.grid) || case.alpha.abs() < 1e-12 { f.ca } else { f.cn };
             for (k, r) in h.into_iter().enumerate() {
                 let it = done + k;
-                let sample = if it % SYNC == SYNC - 1 { cn } else { None };
+                if rule.wants_forces(it + 1, MEAN_EVERY) {
+                    rule.observe(it + 1, &coeffs(k));
+                }
+                let sample = (it % SYNC == SYNC - 1).then(|| by_incidence(&coeffs(k)));
                 if rule.check(it, r, sample).is_some() {
                     stop = Some(it + 1);
                     break;

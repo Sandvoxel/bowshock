@@ -302,6 +302,38 @@ fn bench_combo(case: &BenchCase, precision: (Precision, &'static str), solve: (L
         }
         None => plain = Some(GpuSolver3::new(&ctx, &case.grid, &cfg, precision.0).map_err(|e| format!("{}: {e}", precision.1))?),
     }
+    if let Some(r) = runner.as_mut() {
+        // the force monitor of the loop against the exact device reduction of the same state: after 60 iterations, the one-step run's first entry is the forces of that state
+        r.gpu.reset().map_err(|e| e.to_string())?;
+        r.gpu.run_monitored(60).map_err(|e| e.to_string())?;
+        let (_, m) = r.gpu.run_monitored(1).map_err(|e| e.to_string())?;
+        let w = r.wall_forces().map_err(|e| e.to_string())?.1;
+        let mut exact = [0.0f64; 3];
+        for (c, a) in w.by.iter().chain(&w.shear) {
+            if !matches!(c, bowshock_core::engine::run3::Wall::Sting | bowshock_core::engine::run3::Wall::Jet) {
+                for q in 0..3 {
+                    exact[q] += a[q];
+                }
+            }
+        }
+        // `exact` is of the state after 61 iterations, the monitor's entry 0 of the state after 60: compare against the entry of a second one-step run for the same state
+        let (_, m2) = r.gpu.run_monitored(1).map_err(|e| e.to_string())?;
+        println!(
+            "MONITOR-CHECK {} {}: exact (state after 61 its) [{:.6e} {:.6e} {:.6e}]; monitor entry of the next step [{:.6e} {:.6e} {:.6e}] (rel {:.2e}); entry of the step before (state 60) [{:.6e} {:.6e} {:.6e}]",
+            case.name,
+            precision.1,
+            exact[0],
+            exact[1],
+            exact[2],
+            m2[0][0],
+            m2[0][1],
+            m2[0][2],
+            (0..3).map(|q| (m2[0][q] - exact[q]).abs() / exact[q].abs().max(1e-300)).fold(0.0, f64::max),
+            m[0][0],
+            m[0][1],
+            m[0][2]
+        );
+    }
     let s: &mut GpuSolver3 = match (&mut runner, &mut plain) {
         (Some(r), _) => &mut r.gpu,
         (_, Some(p)) => p,

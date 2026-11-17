@@ -16,9 +16,10 @@ pub type Rec3 = [A; 5];
 /// Three components of a vector field (a face normal).
 pub type Vec3 = [A; 3];
 /// The loop state: the conserved record, the density residual of the step that produced it (one element), the CFL of the next iteration
-/// (one element; the ramp of the implicit scheme is loop state, the explicit scheme passes it through) and the SST scalars `k`, `omega` and the eddy
-/// viscosity `mu_t` (cell arrays of an SST run, one-element placeholders otherwise).
-pub type State3 = [A; 10];
+/// (one element; the ramp of the implicit scheme is loop state, the explicit scheme passes it through), the SST scalars `k`, `omega` and the eddy
+/// viscosity `mu_t` (cell arrays of an SST run, one-element placeholders otherwise) and the force monitor `[Fx, Fz, Mz]` of the state the step started from (three
+/// elements, zero without a monitor: see [`LazySolver3::set_force_monitor`]).
+pub type State3 = [A; 11];
 
 fn rec3(f: impl FnMut(usize) -> A) -> Rec3 {
     std::array::from_fn(f)
@@ -28,10 +29,10 @@ fn unpack3(s: &State3) -> Rec3 {
     rec3(|k| s[k].clone())
 }
 
-fn pack3(u: Rec3, rn: A, cfl: A, turb: [A; 3]) -> State3 {
+fn pack3(u: Rec3, rn: A, cfl: A, turb: [A; 3], mon: A) -> State3 {
     let [u0, u1, u2, u3, u4] = u;
     let [k, om, mt] = turb;
-    [u0, u1, u2, u3, u4, rn, cfl, k, om, mt]
+    [u0, u1, u2, u3, u4, rn, cfl, k, om, mt, mon]
 }
 
 /// The turbulence part passed on unchanged (a placeholder is a fresh expression so the loop state does not alias).
@@ -43,7 +44,7 @@ fn turb_pass(s: &State3) -> [A; 3] {
 fn upload_state3(ctx: &Context, u: &[Cons3], shape: [usize; 3], cfl: f64) -> Result<State3> {
     let comp = |k: usize| up(ctx, &u.iter().map(|q| q[k]).collect::<Vec<_>>(), shape);
     let zero = || up(ctx, &[0.0], 1);
-    Ok([comp(0)?, comp(1)?, comp(2)?, comp(3)?, comp(4)?, zero()?, up(ctx, &[cfl], 1)?, zero()?, zero()?, zero()?])
+    Ok([comp(0)?, comp(1)?, comp(2)?, comp(3)?, comp(4)?, zero()?, up(ctx, &[cfl], 1)?, zero()?, zero()?, zero()?, up(ctx, &[0.0, 0.0, 0.0], 3)?])
 }
 
 fn download_state3(s: &State3) -> Result<Vec<Cons3>> {
@@ -478,6 +479,24 @@ struct ForceGeo3 {
     cut_class: Vec<Array<bool>>,
 }
 
+/// The force monitor's faces: the pressure faces with the weights of `Fx`, `Fz`, `Mz` of the monitored classes (zero elsewhere) and the no-slip faces of the monitored
+/// classes per family (`-sigma area` and `-sigma area x_c`).
+struct MonitorGeo3 {
+    ia: Array<u32>,
+    ib: Array<u32>,
+    k: A,
+    wx: A,
+    wz: A,
+    wm: A,
+    fam: [Option<MonitorFam3>; 3],
+}
+
+struct MonitorFam3 {
+    idx: Array<u32>,
+    w: A,
+    wm: A,
+}
+
 /// The solver: state, geometry and the loops that advance it. Mirrors `crate::solver3::Solver3` with `Scheme3::Explicit` (`eval_residual` and
 /// `rk3_step`) or `Scheme3::Implicit` (`implicit3.rs`).
 pub struct LazySolver3 {
@@ -524,6 +543,8 @@ pub struct LazySolver3 {
     swirl: Option<(f64, f64)>,
     /// The motor jet: its state and the jet cells (`None`: no jet).
     jet: Option<JetGpu>,
+    /// The force monitor of the loop (`set_force_monitor`).
+    monitor: Option<MonitorGeo3>,
 }
 
 impl LazySolver3 {
@@ -648,6 +669,7 @@ impl LazySolver3 {
             wall_j0_cols: None,
             swirl: None,
             jet: jet_gpu,
+            monitor: None,
         };
         let q = prim_to_cons3(&cfg.freestream);
         s.set_state(&vec![q; nc])?;
@@ -779,6 +801,67 @@ impl LazySolver3 {
         Ok(())
     }
 
+    /// The force monitor: the forces `[Fx, Fz, Mz]` of the classes `keep` (pressure on the cut faces, the shear of the no-slip faces of the second set of traction
+    /// classes: the `wall_forces().1` sums of the runner, classes not kept left out) summed in every step of the loop from the pressure and the viscous face fluxes
+    /// the step evaluates anyway, and recorded in the history of [`LazySolver3::run_monitored`]. `faces` / `tfaces` are the lists given to `set_wall_faces` /
+    /// `set_traction_faces` (the classes `n..2n` of the traction faces are the cut copies of the classes `0..n`, `n = keep.len()`).
+    pub fn set_force_monitor(&mut self, faces: &[crate::gpu::WallFace3], tfaces: &[crate::gpu::TractionFace3], keep: &[bool]) -> Result<()> {
+        let ctx = &self.ctx;
+        let n = faces.len().max(1);
+        let sel = |f: &crate::gpu::WallFace3| f64::from(u8::from(f.cut && keep[f.class]));
+        let padded = |g: &dyn Fn(&crate::gpu::WallFace3) -> f64| -> Vec<f64> {
+            let mut v: Vec<f64> = faces.iter().map(g).collect();
+            v.resize(n, 0.0);
+            v
+        };
+        let mut idx_a: Vec<u32> = faces.iter().map(|f| f.a as u32).collect();
+        let mut idx_b: Vec<u32> = faces.iter().map(|f| f.b.unwrap_or(f.a) as u32).collect();
+        idx_a.resize(n, 0);
+        idx_b.resize(n, 0);
+        let mut fam: [Option<MonitorFam3>; 3] = [None, None, None];
+        for (dir, slot) in fam.iter_mut().enumerate() {
+            let list: Vec<&crate::gpu::TractionFace3> = tfaces.iter().filter(|f| f.dir == dir && f.class >= keep.len() && keep[f.class - keep.len()]).collect();
+            if list.is_empty() {
+                continue;
+            }
+            let m = list.len();
+            let w: Vec<f64> = list.iter().map(|f| -f.sigma * f.area).collect();
+            *slot = Some(MonitorFam3 {
+                idx: Array::from_slice_on(ctx, &list.iter().map(|f| f.q as u32).collect::<Vec<_>>(), [m])?,
+                wm: up(ctx, &list.iter().zip(&w).map(|(f, w)| w * f.cx).collect::<Vec<_>>(), [m])?,
+                w: up(ctx, &w, [m])?,
+            });
+        }
+        self.monitor = Some(MonitorGeo3 {
+            ia: Array::from_slice_on(ctx, &idx_a, [n])?,
+            ib: Array::from_slice_on(ctx, &idx_b, [n])?,
+            k: up(ctx, &padded(&|f| if f.b.is_some() { f.k } else { 0.0 }), [n])?,
+            wx: up(ctx, &padded(&|f| sel(f) * f.cx), [n])?,
+            wz: up(ctx, &padded(&|f| sel(f) * f.cz), [n])?,
+            wm: up(ctx, &padded(&|f| sel(f) * f.cm), [n])?,
+            fam,
+        });
+        Ok(())
+    }
+
+    /// The force monitor of the state whose primitive pressure is `pressure` and whose viscous face fluxes are `fv` (`None` without a monitor): `[Fx, Fz, Mz]`.
+    fn force_monitor3(&self, pressure: &A, fv: Option<&[Vec4; 3]>) -> Option<A> {
+        let m = self.monitor.as_ref()?;
+        let (pa, pb) = (pressure.take(&m.ia), pressure.take(&m.ib));
+        let d = &pa + &m.k * (&pa - &pb) - c(self.cfg.freestream[4]);
+        let (mut x, mut z, mut mm) = (vec![&d * &m.wx], vec![&d * &m.wz], vec![&d * &m.wm]);
+        if let Some(fv) = fv {
+            for (dir, f) in m.fam.iter().enumerate() {
+                let Some(f) = f else { continue };
+                let (fx, fz) = (fv[dir][0].take(&f.idx), fv[dir][2].take(&f.idx));
+                x.push(&fx * &f.w);
+                mm.push(&fz * &f.wm);
+                z.push(&fz * &f.w);
+            }
+        }
+        let sum = |v: Vec<A>| luma::concat_slice(0, &v).sum().reshape([1]);
+        Some(luma::concat_slice(0, &[sum(x), sum(z), sum(mm)]))
+    }
     /// Pressure forces of the wall faces by class, `[Fx, Fz, Mz]` as in the CPU `wall_forces` (not scaled to the whole body), reduced on the device and
     /// read back as `2 n_classes` triples: the classes over all faces, then over the faces flagged `cut` (the monitor's `x <= x_max`). One download of
     /// `6 n_classes` numbers; the state itself is not downloaded. The wall pressure of a face is `p_a + k (p_a - p_b)` (the extrapolation of the two first cells).
@@ -1124,7 +1207,7 @@ impl LazySolver3 {
                 let mu_t = self.turb.as_ref().map(|_| s[9].clone());
                 let (u, rn, dt, last) = self.rk3_3(&unpack3(s), mu_t.as_ref(), lim);
                 let turb = self.turb_step3(s, &dt, &last);
-                pack3(u, rn, &s[6] * c(1.0), turb)
+                pack3(u, rn, &s[6] * c(1.0), turb, &s[10] * c(1.0))
             }
         }
     }
@@ -1132,19 +1215,30 @@ impl LazySolver3 {
     /// `n` iterations as one `iterate_until_all` loop per limiter phase (the step is traced once and its kernels replayed, the density residual
     /// recorded on the GPU every iteration, the host waits once per `sync` iterations); returns the residual history.
     pub fn run(&mut self, n: usize, sync: usize) -> Result<Vec<f64>> {
+        Ok(self.run_monitored(n, sync)?.0)
+    }
+
+    /// [`LazySolver3::run`] that also returns the force monitor of every iteration (`[Fx, Fz, Mz]` summed over the monitored classes, see
+    /// [`LazySolver3::set_force_monitor`]; empty without a monitor): entry `i` belongs to the state the step `i` started from, one iteration behind the residual.
+    pub fn run_monitored(&mut self, n: usize, sync: usize) -> Result<(Vec<f64>, Vec<[f64; 3]>)> {
         let mut history = Vec::with_capacity(n);
+        let mut forces = Vec::new();
+        let monitor = self.monitor.is_some();
         let mut left = n;
         while left > 0 {
             let seg = self.phase_len3(left);
             let lim = self.limiter3(self.iter);
             let init = self.state.take().ok_or_else(no_state)?;
-            let run = luma::iterate_until_all(init, records3(luma::Until::new(seg).check_every(sync)), |s, _| self.step3(s, lim))?;
+            let run = luma::iterate_until_all(init, records3(luma::Until::new(seg).check_every(sync), monitor), |s, _| self.step3(s, lim))?;
             history.extend(read_history3(&run)?);
+            if monitor {
+                forces.extend(read_forces3(&run)?);
+            }
             self.state = Some(run.state);
             self.iter += seg;
             left -= seg;
         }
-        Ok(history)
+        Ok((history, forces))
     }
 
     /// `n` iterations as one `iterate_all` replay per limiter phase (no residual history).
