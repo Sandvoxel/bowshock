@@ -34,7 +34,7 @@
 use std::f32::consts::TAU;
 
 /// Ratio of specific heats of the gas the solver uses (air).
-pub use crate::field::GAMMA;
+pub use bowshock_cfd::gas3::GAMMA;
 
 /// The part of the vehicle a wall face belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

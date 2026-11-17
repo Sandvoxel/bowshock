@@ -45,7 +45,7 @@ pub use analysis::{
 };
 pub use atmosphere::{AirState, Atmosphere, FlightConditions};
 pub use device::gpu_name;
-pub use engine::case::Wake;
+pub use engine::meshing::Wake;
 pub use engine::result::StopReason;
 pub use error::Error;
 pub use field::Field;

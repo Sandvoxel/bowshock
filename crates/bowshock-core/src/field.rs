@@ -27,7 +27,7 @@
 //! coefficient and the density gradient ([`Field::mach_numbers`], [`Field::pressure_coefficients`], [`Field::density_gradient`]).
 //! Values are stored as `f32`: a snapshot is for looking at, the drag is integrated from the solver's own `f64` state.
 
-use crate::engine::case::Wake;
+use crate::engine::meshing::Wake;
 use bowshock_cfd::gas::cons_to_prim;
 use bowshock_cfd::solver::Solver;
 use std::fmt;

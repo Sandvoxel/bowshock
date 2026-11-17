@@ -6,11 +6,11 @@
 //! execute up to `SYNC - 1` further iterations and the final forces are those of the state after them.
 
 use crate::engine::case3::Case3;
-use crate::engine::gpu::{record_timing, PointTiming};
 use crate::engine::run3::{
     breakdown_from, drag_parts_from, forces_from, wall_faces, zero_incidence, DragParts, LiftBreakdown, LiftForces, PointResult3, StopRule3, Wall, WallForces,
     SAMPLE_EVERY,
 };
+use crate::engine::timing::{record_timing, PointTiming};
 use crate::error::Error;
 use bowshock_cfd::gpu::{GpuSolver3, Precision, WallFace3};
 use bowshock_cfd::grid3::Face3;

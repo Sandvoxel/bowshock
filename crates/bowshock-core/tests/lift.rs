@@ -1,8 +1,9 @@
 //! 3D Euler lift engine: tiny ANF-like case on the CPU.
 
 use bowshock_cfd::gas3::cons_to_prim3;
-use bowshock_core::engine::case::{Case, Wake};
+use bowshock_core::engine::case::Case;
 use bowshock_core::engine::case3::Case3;
+use bowshock_core::engine::meshing::Wake;
 use bowshock_core::engine::numerics::Numerics;
 use bowshock_core::engine::run::run_cold;
 use bowshock_core::engine::run3::{lift_forces_upto, run3_cold, run3_on};

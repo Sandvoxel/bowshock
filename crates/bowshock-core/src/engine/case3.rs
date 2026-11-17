@@ -2,9 +2,10 @@
 //! CPU solver built from them. Lengths are in nose diameters (`d = 1`).
 
 use crate::engine::body_grid::{BaseBody, Body, Nose};
-use crate::engine::case::{base_grid, motor_rows, resolve_walls, sting_grid, wall_spacing, Case, Jet};
+use crate::engine::case::Case;
 use crate::engine::field3::Snapshots3;
 use crate::engine::grid3::{body_grid3, Domain3, FinStack, Fins3, Grid3Params, WEDGE_ANGLE};
+use crate::engine::meshing::{base_grid, motor_rows, resolve_walls, sting_grid, wall_spacing, Jet};
 use crate::error::Error;
 use crate::progress::ProgressSink;
 use crate::spec::FinProfile;

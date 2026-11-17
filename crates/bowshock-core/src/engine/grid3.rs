@@ -1227,7 +1227,8 @@ pub fn fin_stack_report(g: &Grid3) -> Option<StackReport> {
 mod tests {
     use super::*;
     use crate::engine::body_grid::{BaseBody, Body, Nose};
-    use crate::engine::case::{Case, Wake};
+    use crate::engine::case::Case;
+    use crate::engine::meshing::Wake;
     use crate::engine::numerics::Numerics;
     use bowshock_cfd::grid::Grid;
 

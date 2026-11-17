@@ -526,7 +526,7 @@ struct LBlockGeo {
 }
 
 impl LBlockGeo {
-    fn new(ctx: &Context, ni: usize, nj: usize, b: crate::solver::Block, nozzle: Option<crate::solver::Nozzle>) -> Result<LBlockGeo> {
+    fn new(ctx: &Context, ni: usize, nj: usize, b: crate::grid::Block, nozzle: Option<crate::solver::Nozzle>) -> Result<LBlockGeo> {
         let mask = |shape: [usize; 2], f: &dyn Fn(usize, usize) -> bool| {
             let v: Vec<bool> = (0..shape[1]).flat_map(|j| (0..shape[0]).map(move |i| (i, j))).map(|(i, j)| f(i, j)).collect();
             Array::from_slice_on(ctx, &v, shape)

@@ -1057,9 +1057,9 @@ mod cpu_wedge {
     use bowshock_cfd::grid::{cone_grid, ConeGridParams};
     use bowshock_cfd::solver3::Solver3;
     use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
-    use bowshock_core::engine::case::Wake;
     use bowshock_core::engine::case3::Case3;
     use bowshock_core::engine::grid3::{wedge_of_meridian, WEDGE_ANGLE};
+    use bowshock_core::engine::meshing::Wake;
     use bowshock_core::engine::run3::{drag_parts_on, run3_on};
     use bowshock_core::Analysis;
 

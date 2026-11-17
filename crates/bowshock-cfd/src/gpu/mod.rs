@@ -19,9 +19,10 @@
 //! [`df32s::LazySolver3`], behind [`GpuSolver3`].
 
 use crate::gas3::Cons3;
+use crate::grid::Block;
 use crate::grid::Grid;
 use crate::grid3::Grid3;
-use crate::solver::{Block, Config, Nozzle, Scheme, Solver};
+use crate::solver::{Config, Nozzle, Scheme, Solver};
 use crate::solver3::{Config3, Solver3};
 use crate::sst::Viscous;
 use luma::Context;

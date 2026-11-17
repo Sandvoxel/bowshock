@@ -14,7 +14,7 @@
 use crate::bc::{characteristic_ghost, pressure_outflow_ghost};
 use crate::flux::face_flux_lm;
 use crate::gas::{cons_to_prim, prim_to_cons, reflect, sound_speed, Cons, Prim};
-use crate::grid::{Face, Grid};
+use crate::grid::{Block, Face, Grid};
 use crate::limiter::Limiter;
 use crate::sst::{Turbulence, Viscous};
 use crate::viscous::{self, wall_ghost, Walls};
@@ -47,60 +47,6 @@ pub struct Config {
     pub bc: [Bc; 4],
     /// Number of initial iterations run with first-order reconstruction (start-up robustness).
     pub first_order_iters: usize,
-}
-
-/// Solid body region of the structured grid. Cells `i < i_end && j < j_end` are inside the body, and (with a sting) cells
-/// `i >= i_end && j < j_sting` are inside the sting; they are never updated.
-///
-/// * The grid line `j = j_end` (for `i < i_end`) is the body surface (slip wall) and the grid line `i = i_end` (for
-///   `j_sting <= j < j_end`) is the flat base wall.
-/// * For `i >= i_end` the line `j = j_sting` is the sting surface (slip wall); with `j_sting = 0` there is no sting and the
-///   first `j_end` rows behind the base are ordinary wake cells reaching the axis.
-///
-/// All indices must be even (multigrid coarsening halves them) and `j_sting` is `0` or `>= 2`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Block {
-    pub i_end: usize,
-    pub j_end: usize,
-    pub j_sting: usize,
-}
-
-impl Block {
-    #[inline]
-    pub fn solid(&self, i: usize, j: usize) -> bool {
-        if i < self.i_end {
-            j < self.j_end
-        } else {
-            j < self.j_sting
-        }
-    }
-    /// First fluid cell of row `j` (`None` if the whole row is solid).
-    #[inline]
-    pub fn row_start(&self, j: usize) -> Option<usize> {
-        if j < self.j_sting {
-            None
-        } else if j < self.j_end {
-            Some(self.i_end)
-        } else {
-            Some(0)
-        }
-    }
-    /// First fluid cell of column `i`.
-    #[inline]
-    pub fn col_start(&self, i: usize) -> usize {
-        if i < self.i_end {
-            self.j_end
-        } else {
-            self.j_sting
-        }
-    }
-    pub fn coarsen(&self) -> Option<Block> {
-        (self.i_end.is_multiple_of(2) && self.j_end.is_multiple_of(2) && self.j_sting.is_multiple_of(2)).then_some(Block {
-            i_end: self.i_end / 2,
-            j_end: self.j_end / 2,
-            j_sting: self.j_sting / 2,
-        })
-    }
 }
 
 /// Variable-coefficient implicit residual smoothing (Jameson / Martinelli): `(1 - eps_i d_ii)(1 - eps_j d_jj) R_bar = R`,

@@ -22,8 +22,8 @@
 //! the same fractions in every column: `r = r_body(x) + s_j (r_far - r_body(x))`.
 
 use crate::error::Error;
+use bowshock_cfd::grid::Block;
 use bowshock_cfd::grid::{geometric_offsets, Grid};
-use bowshock_cfd::solver::Block;
 use bowshock_reference::shock_expansion::Ogive;
 
 /// Nose shape of the body (diameter `d = 1`, nose length `L_n`).

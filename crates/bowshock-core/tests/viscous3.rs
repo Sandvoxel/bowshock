@@ -564,7 +564,7 @@ fn report_residuals(label: &str, r2: &[[f64; 4]], r3: &[Cons3], g: &Grid3) {
 /// 210.42 K), Mach `mach`, a nozzle of 0.8 d at exit Mach `exit_mach`, exit pressure `p_exit` Pa, total temperature 305 K, SST, the wake of the base; the jet state as
 /// `Analysis::viscous` builds it (`k = 1.5 (0.01 u)^2`, `omega = rho k / (10 mu)`).
 fn tp2005_case(mach: f64, exit_mach: f64, p_exit: f64, level: u32) -> Case {
-    use bowshock_core::engine::case::Jet;
+    use bowshock_core::engine::meshing::Jet;
     // the facade cases' atmosphere of each Mach number (`ref2d.json` inputs)
     let (temperature_k, pressure_pa) = match mach {
         m if m < 1.8 => (210.424_084_564_550_17, 11_455.082_439_789_36),

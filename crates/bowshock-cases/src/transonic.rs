@@ -6,7 +6,8 @@
 //! or `Bc::PressureOutflow`; axis/body `Bc::SlipWall`. Lengths are in body diameters.
 
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
-use bowshock_core::engine::case::{Case, Wake};
+use bowshock_core::engine::case::Case;
+use bowshock_core::engine::meshing::Wake;
 use bowshock_core::engine::numerics::Numerics;
 
 /// Transonic validation case: nose + cylinder `cyl_length` long, sting wake (no base), explicit minmod numerics

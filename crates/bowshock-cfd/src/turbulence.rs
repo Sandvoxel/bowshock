@@ -53,9 +53,10 @@
 //! `k` and `omega` coefficients, entries 10 and 15 are `1` on the diagonal block and `0` elsewhere).
 
 use crate::gas::{Cons, Prim};
+use crate::grid::Block;
 use crate::grid::{Face, Grid};
 use crate::implicit::{solve_lines, Factor, EYE, M4, ZERO};
-use crate::solver::{pidx, Bc, Block, Nozzle, Solver};
+use crate::solver::{pidx, Bc, Nozzle, Solver};
 use crate::sst::Viscous;
 use crate::sst::{omega_inf, A1, BETA1, BETA2, BETA_STAR, GAMMA1, GAMMA2, K_INF, SIGMA_K1, SIGMA_K2, SIGMA_W1, SIGMA_W2};
 use crate::viscous::{face_mu, iface_centre, iface_sides, jface_centre, jface_sides, stencil, FaceSides, Side, Walls};

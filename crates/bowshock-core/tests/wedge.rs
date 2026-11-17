@@ -500,8 +500,8 @@ fn half_domains_at_incidence_on_the_base_grid_build_for_both_roll_phases_and_tie
 }
 
 /// A supersonic axial jet in the units of the free stream (`rho_inf = 1`, `a_inf = 1`, `p_inf = 1/gamma`): Mach 1.7 at the exit.
-fn test_jet(r_exit: f64) -> bowshock_core::engine::case::Jet {
-    bowshock_core::engine::case::Jet { r_exit, state: [0.5, 2.0, 0.0, 0.5], turb: [1e-4, 10.0] }
+fn test_jet(r_exit: f64) -> bowshock_core::engine::meshing::Jet {
+    bowshock_core::engine::meshing::Jet { r_exit, state: [0.5, 2.0, 0.0, 0.5], turb: [1e-4, 10.0] }
 }
 
 /// Motor on, mesher side: the nozzle rows of the 2D base grid become a face patch on the base, `Wall::Jet`, all `k`, in the rows `j < n_jet` of the plane `i = i_end`;
@@ -557,8 +557,8 @@ fn the_nozzle_rows_become_a_jet_patch_on_the_base() {
 #[test]
 fn a_motor_needs_a_supersonic_jet_inside_the_base() {
     let jet = test_jet(0.25);
-    assert!(Case3::wedge(2.0, cone_cylinder(), 0).with_motor(bowshock_core::engine::case::Jet { state: [0.5, 0.5, 0.0, 0.5], ..jet }).is_err(), "subsonic");
-    assert!(Case3::wedge(2.0, cone_cylinder(), 0).with_motor(bowshock_core::engine::case::Jet { r_exit: 0.6, ..jet }).is_err(), "wider than the base");
+    assert!(Case3::wedge(2.0, cone_cylinder(), 0).with_motor(bowshock_core::engine::meshing::Jet { state: [0.5, 0.5, 0.0, 0.5], ..jet }).is_err(), "subsonic");
+    assert!(Case3::wedge(2.0, cone_cylinder(), 0).with_motor(bowshock_core::engine::meshing::Jet { r_exit: 0.6, ..jet }).is_err(), "wider than the base");
     assert!(Case3::new(2.0, 0.0, cone_cylinder(), None, 0).with_motor(jet).is_err(), "sting grid");
 }
 

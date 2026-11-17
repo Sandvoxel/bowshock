@@ -3,10 +3,12 @@
 
 use crate::atmosphere::{FlightConditions, SUTHERLAND_S};
 use crate::engine::body_grid::{check_quality, BaseBody, MAX_STRETCHING, MAX_STRETCHING_VISCOUS_J};
-use crate::engine::case::{Case, Jet, Wake};
+use crate::engine::case::Case;
 use crate::engine::case3::Case3;
 use crate::engine::field3::{field3_of_solver, Snapshots3};
 use crate::engine::grid3::Fins3;
+use crate::engine::meshing::Jet;
+use crate::engine::meshing::Wake;
 use crate::engine::numerics::Numerics;
 use crate::engine::result::{PointResult, StopReason};
 use crate::engine::run::run_on;

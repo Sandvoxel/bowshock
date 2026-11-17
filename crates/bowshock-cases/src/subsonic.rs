@@ -6,7 +6,8 @@
 //! maximum cross-section `pi R^2`.
 
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
-use bowshock_core::engine::case::{Case, Wake};
+use bowshock_core::engine::case::Case;
+use bowshock_core::engine::meshing::Wake;
 use bowshock_core::engine::numerics::Numerics;
 
 /// Body `nose + 6 d` cylinder (no boattail, no sting), domain `10 L` upstream and radially, `5 L` downstream (`L` = total body

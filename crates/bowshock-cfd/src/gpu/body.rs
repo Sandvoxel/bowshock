@@ -7,7 +7,8 @@
 // the equation, the doc comment states it.
 
 use crate::grid::Grid;
-use crate::solver::{Bc, Block, Config, Nozzle};
+use crate::solver::{Bc, Config, Nozzle};
+use crate::grid::{Block};
 
 /// Four fields: primitive `[rho, u, v, p]`, conservative `[rho, rho u, rho v, E]` or a flux. A record of arrays
 /// (`luma::Fields`): `slice`, `pad`, `assign` and `cache` apply to the four fields at once.

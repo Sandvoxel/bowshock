@@ -579,7 +579,7 @@ fn assemble(s: &Solver, p: &ImplicitParams, dir_i: bool, lm: Option<&LowMach>) -
 
 /// Segment start of the line through `(i, j)` in the given direction (first fluid cell; the line length if the row is solid).
 #[inline]
-fn seg_start(blk: Option<crate::solver::Block>, dir_i: bool, ni: usize, i: usize, j: usize) -> usize {
+fn seg_start(blk: Option<crate::grid::Block>, dir_i: bool, ni: usize, i: usize, j: usize) -> usize {
     match blk {
         Some(b) if dir_i => b.row_start(j).unwrap_or(ni),
         Some(b) => b.col_start(i),

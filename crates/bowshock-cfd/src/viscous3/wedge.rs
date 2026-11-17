@@ -14,9 +14,10 @@
 
 use crate::gas::Prim;
 use crate::gas3::{reflect3, Prim3};
+use crate::grid::Block;
 use crate::grid::Grid;
 use crate::grid3::{revolve, Grid3, Part, SolidBox};
-use crate::solver::{pidx, Block};
+use crate::solver::pidx;
 use crate::solver3::{pidx3, NG};
 use crate::viscous::{self, Walls};
 

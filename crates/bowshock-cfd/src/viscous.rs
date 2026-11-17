@@ -38,8 +38,9 @@
 //! gradient), that of a slip face the reflection about the face normal.
 
 use crate::gas::{reflect, Cons, Prim, GAMMA};
+use crate::grid::Block;
 use crate::grid::{Face, Grid};
-use crate::solver::{pidx, Bc, Block, Nozzle};
+use crate::solver::{pidx, Bc, Nozzle};
 use crate::sst::{Turbulence, Viscous, PRANDTL, PRANDTL_T};
 use rayon::prelude::*;
 
