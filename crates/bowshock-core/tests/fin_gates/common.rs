@@ -118,12 +118,14 @@ impl Session {
             #[cfg(feature = "gpu")]
             Session::Gpu(r) => {
                 let point = r.run_on(case, warm).map_err(|e| e.to_string())?;
+                let parts = r.drag_parts(case).map_err(|e| e.to_string())?;
+                let fin_friction = r.host.rans().map(|_| parts.fin_friction());
                 Ok(Solved {
                     point,
-                    parts: r.drag_parts(case).map_err(|e| e.to_string())?,
+                    parts,
                     lift: r.lift_forces(case).map_err(|e| e.to_string())?,
                     breakdown: r.breakdown(case).map_err(|e| e.to_string())?,
-                    fin_friction: None,
+                    fin_friction,
                 })
             }
         }

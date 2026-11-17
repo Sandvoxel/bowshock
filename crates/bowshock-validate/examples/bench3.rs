@@ -35,6 +35,7 @@ use bowshock_cfd::implicit_params::{ImplicitParams, LineSolve3};
 use bowshock_cfd::limiter::Limiter;
 use bowshock_cfd::solver3::{Config3, Scheme3};
 use bowshock_core::engine::case3::{Case3, Tier};
+use bowshock_core::engine::gpu3::GpuRunner3;
 use bowshock_core::engine::grid3::body_grid3;
 use bowshock_core::{AftSpec, BodySpec, NoseShape, NoseSpec, Resolution};
 use bowshock_gpu_cases::wedge3::{engine_case, wedge_case3};
@@ -82,6 +83,8 @@ struct BenchCase {
     alpha_deg: f64,
     /// Default number of timed iterations.
     n: usize,
+    /// A viscous SST case: the 2D engine case whose wedge it runs (`None`: Euler on `grid`).
+    rans: Option<Case3>,
 }
 
 impl BenchCase {
@@ -113,7 +116,7 @@ fn wedge_case() -> Result<BenchCase, String> {
     let c2 = engine_case(&example_body(), 3.0, true, Resolution::Coarse);
     let case = wedge_case3(&c2);
     let grid = body_grid3(&case.grid).map_err(|e| format!("wedge grid: {e}"))?;
-    Ok(BenchCase { name: "wedge", grid, alpha_deg: 0.0, n: 1000 })
+    Ok(BenchCase { name: "wedge", grid, alpha_deg: 0.0, n: 1000, rans: None })
 }
 
 /// The real fin sector: the Army-Navy Basic Finner (4 fins, even `N`) as the sector `[0, pi/4]` on the sting grid, `nk` azimuthal cells.
@@ -121,13 +124,42 @@ fn sector_case(nk: usize) -> Result<BenchCase, String> {
     let mut case = Case3::sector(2.0, Case3::anf_body(), Case3::anf_fins(), Tier::Euler, 0);
     case.grid.nk = nk;
     let grid = body_grid3(&case.grid).map_err(|e| format!("sector grid: {e}"))?;
-    Ok(BenchCase { name: "sector", grid, alpha_deg: 0.0, n: 200 })
+    Ok(BenchCase { name: "sector", grid, alpha_deg: 0.0, n: 200, rans: None })
 }
 
 fn anf_case() -> Result<BenchCase, String> {
     let case = Case3::new(2.0, 2f64.to_radians(), Case3::anf_body(), Some(Case3::anf_fins()), 0);
     let host = case.build_solver().map_err(|e| format!("ANF grid: {e}"))?;
-    Ok(BenchCase { name: "anf", grid: host.grid.clone(), alpha_deg: 2.0, n: 200 })
+    Ok(BenchCase { name: "anf", grid: host.grid.clone(), alpha_deg: 2.0, n: 200, rans: None })
+}
+
+/// The viscous SST wedge of the example table's node at `mach`: the wall-resolved grid sized for it, the 2D case's numerics (block lines; the low-Mach
+/// preconditioning below Mach 1), the free stream of that Mach number.
+fn wedge_rans_case(mach: f64) -> Result<BenchCase, String> {
+    let c2 = engine_case(&example_body(), mach, true, Resolution::Coarse);
+    let c3 = Case3::wedge_of(&c2, 0);
+    let grid = c3.build_solver().map_err(|e| format!("wedge grid: {e}"))?.grid;
+    Ok(BenchCase { name: "wedge", grid, alpha_deg: 0.0, n: 500, rans: Some(c3) })
+}
+
+/// The G-F1 case: the four-fin sector of the Army-Navy body at `Re_c` 1e6 (chord 0.5 d, span 0.5 d, t/c 2 %, double wedge) on the Coarse tier (walls resolved, SST),
+/// Mach `mach`.
+fn sector_rans_case(mach: f64) -> Result<BenchCase, String> {
+    let fins = bowshock_core::engine::grid3::Fins3 {
+        count: 4,
+        root_chord: 0.5,
+        tip_chord: 0.5,
+        span: 0.5,
+        sweep: 0.0,
+        thickness: 0.02 * 0.5,
+        te_to_base: 0.0,
+        profile: bowshock_core::FinProfile::DoubleWedge,
+        planform: None,
+    };
+    let flow = bowshock_core::engine::case3::WallFlow { re_c: 1.0e6, mach_max: 2.0, ks_body: 0.0, ks_fin: 0.0, sutherland: 0.368 };
+    let c3 = Case3::sector(mach, Case3::anf_body(), fins, Tier::Coarse(flow), 0);
+    let grid = c3.build_solver().map_err(|e| format!("sector grid: {e}"))?.grid;
+    Ok(BenchCase { name: "sector", grid, alpha_deg: 0.0, n: 100, rans: Some(c3) })
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------
@@ -216,7 +248,11 @@ struct Opts {
     mem: bool,
     /// Time a combination whose 100-iteration sanity run diverges (the step cost does not depend on the values), with a warning.
     allow_nonfinite: bool,
+    /// Also profile the viscous residual (the S5a kernels) on the grid.
+    viscous: bool,
     n: Option<usize>,
+    /// The per-stage profile of one step (viscous cases).
+    stages: bool,
 }
 
 /// The measurement of a solver: first call (compile, trace, 20 iterations), us / iteration of the `iterate_all` replay of `n` (best of 3, after 20 warm-up
@@ -250,8 +286,104 @@ fn bench_combo(case: &BenchCase, precision: (Precision, &'static str), solve: (L
     let sampler = if o.mem { MemSampler::start() } else { None };
     let ctx = luma::Context::new().map_err(|e| format!("no GPU context: {e}"))?;
     let cfg = case.config(solve.0);
-    let mut s = GpuSolver3::new(&ctx, &case.grid, &cfg, precision.0).map_err(|e| format!("{}: {e}", precision.1))?;
-    let (first_call_s, us, p, last) = measure(&mut s, n)?;
+    let mut runner: Option<GpuRunner3> = None;
+    let mut plain: Option<GpuSolver3> = None;
+    match &case.rans {
+        // a viscous SST case through the runner (`Case3::viscous`: wedge_of carries the 2D numerics, a tier the 3D ones; first-order start-up 0: the timed step is the MUSCL one)
+        Some(c3) => {
+            let mut r = GpuRunner3::new(c3, precision.0).map_err(|e| format!("{}: {e}", precision.1))?;
+            let mut cfg = r.host.cfg.clone();
+            cfg.first_order_iters = 0;
+            if let Scheme3::Implicit(p) = &mut cfg.scheme {
+                p.line_solve = solve.0;
+            }
+            r.gpu.set_config(&cfg).map_err(|e| e.to_string())?;
+            runner = Some(r);
+        }
+        None => plain = Some(GpuSolver3::new(&ctx, &case.grid, &cfg, precision.0).map_err(|e| format!("{}: {e}", precision.1))?),
+    }
+    let s: &mut GpuSolver3 = match (&mut runner, &mut plain) {
+        (Some(r), _) => &mut r.gpu,
+        (_, Some(p)) => p,
+        _ => unreachable!("one of the two solvers is built"),
+    };
+    let (first_call_s, us, p, last) = measure(s, n)?;
+    {
+        // where the loop time goes: the host time to trace one step, the eval-per-iteration loop, the `run` loop with the residual history, and the replay against its own GPU time
+        let m = 20;
+        let trace_ms = 1e3 * s.trace_step_seconds(3) / 3.0;
+        s.reset().map_err(|e| e.to_string())?;
+        s.run_replay(20).map_err(|e| e.to_string())?;
+        s.sync().map_err(|e| e.to_string())?;
+        let t = Instant::now();
+        s.run_eval(m).map_err(|e| e.to_string())?;
+        s.sync().map_err(|e| e.to_string())?;
+        let eval_ms = 1e3 * t.elapsed().as_secs_f64() / m as f64;
+        let t = Instant::now();
+        s.run(50).map_err(|e| e.to_string())?;
+        let run_ms = 1e3 * t.elapsed().as_secs_f64() / 50.0;
+        let t = Instant::now();
+        s.run_replay(50).map_err(|e| e.to_string())?;
+        s.sync().map_err(|e| e.to_string())?;
+        let replay_ms = 1e3 * t.elapsed().as_secs_f64() / 50.0;
+        let rp = s.profile_replay(20).map_err(|e| e.to_string())?;
+        println!(
+            "LOOP {} {} {}: trace of one step {trace_ms:.1} ms host; eval-per-iteration {eval_ms:.2} ms; run(50) {run_ms:.2} ms / iteration; replay(50) {replay_ms:.2} ms / iteration; replay GPU time {:.2} ms / iteration in {:.0} launches",
+            case.name,
+            precision.1,
+            case.cells(),
+            rp.total().as_secs_f64() * 1e3 / 20.0,
+            rp.launches() as f64 / 20.0
+        );
+    }
+    if o.stages {
+        s.reset().map_err(|e| e.to_string())?;
+        s.run_replay(20).map_err(|e| e.to_string())?;
+        let stages = s.profile_stages(3).map_err(|e| format!("profile_stages: {e}"))?;
+        let total: f64 = stages.iter().map(|(_, p)| p.total().as_secs_f64() * 1e3).sum();
+        let launches: u32 = stages.iter().map(|(_, p)| p.launches()).sum();
+        println!(
+            "\n### {} {} {} {}: stages of one implicit step (each stage evaluated alone, best of 3; fused step {:.2} ms in {} launches, replay {:.2} ms / iteration)\n| stage | launches | GPU ms |\n|---|---|---|",
+            case.name,
+            precision.1,
+            solve.1,
+            case.cells(),
+            p.total().as_secs_f64() * 1e3,
+            p.launches(),
+            us / 1e3
+        );
+        for (name, pr) in &stages {
+            println!("| {name} | {} | {:.3} |", pr.launches(), pr.total().as_secs_f64() * 1e3);
+        }
+        println!("| sum of the stages | {launches} | {total:.3} |");
+        for (name, pr) in &stages {
+            println!("\n#### {name}: {} launches, {:.0} us\n```\n{}```", pr.launches(), pr.total().as_secs_f64() * 1e6, compact(pr));
+        }
+    }
+    if let (Some(r), Some(c3)) = (&runner, &case.rans) {
+        // the stop-rule read-backs: the forces of the chunk (device reduction of the class sums and one download), the residual history download per chunk
+        let t = Instant::now();
+        for _ in 0..20 {
+            r.lift_forces(c3).map_err(|e| e.to_string())?;
+        }
+        let wall_ms = 1e3 * t.elapsed().as_secs_f64() / 20.0;
+        let (res, profile) = r.gpu.context().profile(|| r.lift_forces(c3)).map_err(|e| e.to_string())?;
+        res.map_err(|e| e.to_string())?;
+        println!(
+            "\n### {} {} forces of the stop rule (lift_forces: pressure + shear class sums, one download): {:.2} ms wall per call, {} launches, {:.3} ms GPU\n```\n{}```",
+            case.name,
+            precision.1,
+            wall_ms,
+            profile.launches(),
+            profile.total().as_secs_f64() * 1e3,
+            compact(&profile)
+        );
+    }
+    let s: &mut GpuSolver3 = match (&mut runner, &mut plain) {
+        (Some(r), _) => &mut r.gpu,
+        (_, Some(p)) => p,
+        _ => unreachable!("one of the two solvers is built"),
+    };
     if o.profile {
         println!(
             "\n### {} {} {} {} - one implicit step as the eval loop launches it: {} kernel launches, {:.0} us GPU time, {} fusion cuts\n```\n{}```",
@@ -275,6 +407,40 @@ fn bench_combo(case: &BenchCase, precision: (Precision, &'static str), solve: (L
         );
     }
     let peak_mib = sampler.map(MemSampler::stop);
+    if o.viscous {
+        // the viscous residual of the current state (stage S5a kernels, laminar), the kernels alone, the host data of the face passes allocated
+        let sampler = if o.mem { MemSampler::start() } else { None };
+        let sym = [false, false, false, false, true, true];
+        let v =
+            bowshock_cfd::sst::Viscous { re_c: 2.0e6, sutherland: 0.368, turbulence: bowshock_cfd::sst::Turbulence::Laminar, wall_i_start: 0, roughness: 0.0 };
+        s.set_viscous(&case.grid, v, &sym).map_err(|e| format!("set_viscous: {e}"))?;
+        let pv = s.profile_viscous().map_err(|e| format!("profile_viscous: {e}"))?;
+        let peak_v = sampler.map(MemSampler::stop);
+        let (launches, gpu_us) = (pv.launches(), pv.total().as_secs_f64() * 1e6);
+        println!(
+            "{} {} viscous residual {}: {launches} launches / {gpu_us:.1} us GPU, {} fusion cuts{}",
+            case.name,
+            precision.1,
+            case.cells(),
+            pv.splits.len(),
+            peak_v.map_or(String::new(), |m| format!(", peak device memory of this process {m} MiB"))
+        );
+        for sp in &pv.splits {
+            println!("  fusion cut: {sp}");
+        }
+        if o.profile {
+            println!("```\n{}```", compact(&pv));
+        }
+        if o.perf {
+            println!(
+                "PERF {{\"case\":\"3d-{}-viscous-residual\",\"precision\":\"{}\",\"cells\":{},\"iters\":1,\"us_per_iter\":{gpu_us:.3},\"launches_per_iter\":{launches},\"gpu_us_per_iter\":{gpu_us:.3},\"wall_s\":null{}}}",
+                case.name,
+                precision.1,
+                case.cells(),
+                peak_v.map_or(String::new(), |m| format!(",\"peak_device_mib\":{m}"))
+            );
+        }
+    }
     Ok(Result3 {
         case: case.name.to_string(),
         cells: case.cells(),
@@ -309,7 +475,9 @@ fn main() -> Result<(), String> {
         profile: !flag("--no-profile"),
         mem: flag("--mem"),
         allow_nonfinite: flag("--allow-nonfinite"),
+        viscous: flag("--viscous"),
         n: value("--n").map(|n| n.parse::<usize>().map_err(|e| format!("--n: {e}"))).transpose()?,
+        stages: flag("--stages"),
     };
     let mut cases = Vec::new();
     for c in if which == "all" { vec!["wedge", "sector", "anf"] } else { vec![which.as_str()] } {
@@ -317,7 +485,9 @@ fn main() -> Result<(), String> {
             "wedge" => wedge_case()?,
             "sector" => sector_case(value("--nk").map_or(Ok(18), |v| v.parse::<usize>().map_err(|e| format!("--nk: {e}")))?)?,
             "anf" => anf_case()?,
-            other => return Err(format!("--case wedge|sector|anf|all, got `{other}`")),
+            r if r.starts_with("wedge-rans:") => wedge_rans_case(r[11..].parse::<f64>().map_err(|e| format!("--case wedge-rans:<mach>: {e}"))?)?,
+            r if r.starts_with("sector-rans:") => sector_rans_case(r[12..].parse::<f64>().map_err(|e| format!("--case sector-rans:<mach>: {e}"))?)?,
+            other => return Err(format!("--case wedge|sector|anf|wedge-rans:<mach>|sector-rans:<mach>|all, got `{other}`")),
         });
     }
     if opts.mem && MemSampler::start().map(MemSampler::stop).is_none() {
@@ -353,8 +523,9 @@ fn main() -> Result<(), String> {
                 );
                 if opts.perf {
                     println!(
-                        "PERF {{\"case\":\"3d-{}-euler-{}\",\"precision\":\"{}\",\"cells\":{},\"iters\":{},\"us_per_iter\":{:.3},\"launches_per_iter\":{},\"gpu_us_per_iter\":{:.3},\"wall_s\":null{}}}",
+                        "PERF {{\"case\":\"3d-{}-{}-{}\",\"precision\":\"{}\",\"cells\":{},\"iters\":{},\"us_per_iter\":{:.3},\"launches_per_iter\":{},\"gpu_us_per_iter\":{:.3},\"wall_s\":null{}}}",
                         case.name,
+                        if case.rans.is_some() { "rans" } else { "euler" },
                         r.solve,
                         r.precision,
                         r.cells,
