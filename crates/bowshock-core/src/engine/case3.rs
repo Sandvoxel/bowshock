@@ -415,6 +415,20 @@ impl Case3 {
         self
     }
 
+    /// The safe variant of the [`Tier::Draft`] grid for Mach numbers below 0.8 (DESIGN3D item 32: the subsonic base wake of the example body is at the edge of shedding, and the coarse gap rows,
+    /// the small domain and the short wake push it over): the gap rows behind the base from the wall spacing, the full domain (10 L upstream and radially, 5 L downstream) and the full
+    /// wake columns of the wall-resolved tiers, everything else (axial counts x 0.6 elsewhere, the wall functions, the fin stack) as the Draft tier. Other tiers: unchanged.
+    pub fn draft_subsonic(mut self) -> Case3 {
+        let Tier::Draft(flow, y) = self.tier else { return self };
+        let Some(mut base) = self.grid.base.take() else { return self };
+        let full = base_grid(&self.body, self.grid.level);
+        (base.x_up, base.r_far, base.x_down, base.n_wake, base.dr_gap) = (full.x_up, full.r_far, full.x_down, full.n_wake, None);
+        let y1 = wall_spacing(&self.body, flow.re_c, flow.mach_max, y);
+        resolve_walls(&mut base, &mut self.grid.sting, &self.body, y1);
+        self.grid.base = Some(base);
+        self
+    }
+
     /// The Euler equations on the grid of the tier (the fin-stack and wall-resolved grids of the Euler gates): drops the viscous terms and takes the numerics of
     /// [`Numerics3::auto`] (the block lines on a wedge).
     pub fn euler_equations(mut self) -> Case3 {
@@ -482,13 +496,14 @@ impl Case3 {
     }
 
     /// ANF fins: four fins of 1 d chord and 1 d exposed span, thickness [`bowshock_reference::anf::FIN_THICKNESS_CAL`], flush with the
-    /// base. Section: sharp leading edge and a blunt trailing edge of the full thickness (0.08 cal), as Abiza et al. (p. 3) describe
-    /// them. The source gives no bevel angle: the `FinProfile::Custom` section `[[0,0],[0.1,1],[1,1]]` (a wedge over the first
-    /// 0.1 chord, about 22 degrees per side, floored at 25 % of the half thickness) is **assumed**, and CN_alpha at M >= 2.35 is
-    /// sensitive to it.
+    /// base. Section (DESIGN3D item 38): a **wedge over the whole chord**, 0.08 cal thick at the trailing edge, with a leading-edge radius of 0.004 cal. The sources:
+    /// Dupuis, DRDC TM 2002-136, p. 18 (second hand, from its optical reading by nrdptel/fusionspace-eridanus): four "1 cal x 1 cal" wedge fins, 0.08 caliber thick at the
+    /// trailing edge, leading-edge and nose radius 0.004 caliber; Bolz and Nicolaides, BRL Report 711 (1949), p. 29: wedge fins 16 % thick; Abiza et al. (p. 3): four 1 x 1
+    /// caliber fins with sharp leading edges and 0.08 caliber trailing-edge thickness. As a `FinProfile::Custom` section (fractions of the maximum thickness): `[[0,0.1],
+    /// [0.5,0.55],[1,1]]`, the leading-edge half thickness `0.1 t/2 = 0.004` cal (the three points make the section one wedge for `fins::section_edges`).
     #[doc(hidden)]
     pub fn anf_fins() -> Fins3 {
-        let profile = FinProfile::Custom { section: vec![[0.0, 0.0], [0.1, 1.0], [1.0, 1.0]] };
+        let profile = FinProfile::Custom { section: vec![[0.0, 0.1], [0.5, 0.55], [1.0, 1.0]] };
         Fins3 {
             count: 4,
             root_chord: 1.0,

@@ -83,17 +83,31 @@ cmd_submit() {
 # jobval FILE KEY
 jobval() { sed -n "s/^$2=//p" "$1" | head -n 1; }
 
-claim() { # claim WHO -> prints id or nothing
-  local who=$1 f id h
+# The priority class of a queue entry: the digit of a `N-` prefix, `u` for an entry without one. The sorted ids group the classes (`0-` .. `2-` < unprefixed < `3-` .. `9-`).
+prio_class() { case $1 in [0-9]-*) echo "${1%%-*}" ;; *) echo u ;; esac; }
+
+# claim WHO -> prints id or nothing. The first eligible entry (for WHO or `any`) in id order fixes the priority class; among the eligible entries of that class the
+# one of the worktree (the job's `repo`) that was served longest ago goes first (ties: id order), so one session's stream of equal-priority jobs cannot starve another's:
+# the sessions alternate. `$GPUQ_DIR/served` holds `repo epoch` lines, updated at every claim.
+claim() {
+  local who=$1 f h cls="" c repo t best="" best_t=0 served="$GPUQ_DIR/served"
   for f in $(ls "$GPUQ_DIR/queue" 2>/dev/null | sort); do
     case $f in .*) continue ;; esac
     h=$(jobval "$GPUQ_DIR/queue/$f" host)
-    if [ "$h" = "$who" ] || [ "$h" = any ]; then
-      if mv "$GPUQ_DIR/queue/$f" "$GPUQ_DIR/running/$f" 2>/dev/null; then
-        echo "$f"; return 0
-      fi
-    fi
+    [ "$h" = "$who" ] || [ "$h" = any ] || continue
+    c=$(prio_class "$f")
+    if [ -z "$cls" ]; then cls=$c; elif [ "$c" != "$cls" ]; then break; fi
+    repo=$(jobval "$GPUQ_DIR/queue/$f" repo)
+    t=$(awk -v r="$repo" '$1 == r { print $2 }' "$served" 2>/dev/null | head -n 1)
+    t=${t:-0}
+    if [ -z "$best" ] || [ "$t" -lt "$best_t" ]; then best=$f; best_t=$t; fi
   done
+  [ -n "$best" ] || return 1
+  repo=$(jobval "$GPUQ_DIR/queue/$best" repo)
+  if mv "$GPUQ_DIR/queue/$best" "$GPUQ_DIR/running/$best" 2>/dev/null; then
+    { awk -v r="$repo" '$1 != r' "$served" 2>/dev/null; echo "$repo $(date +%s)"; } > "$served.tmp" && mv "$served.tmp" "$served"
+    echo "$best"; return 0
+  fi
   return 1
 }
 
