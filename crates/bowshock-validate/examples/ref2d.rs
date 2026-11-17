@@ -22,6 +22,8 @@
 
 use bowshock_cases::cone::{run_cone, ConeCase};
 use bowshock_cases::ogive::{perkins_jorgensen as pj, run_ogive, wall_cp_at, OgiveCase};
+use bowshock_cases::subsonic::subsonic_case;
+use bowshock_cases::transonic::transonic_case;
 use bowshock_cfd::flux::Limiter;
 use bowshock_cfd::gas::freestream;
 use bowshock_cfd::grid::{plate_grid, PlateGridParams};
@@ -29,6 +31,9 @@ use bowshock_cfd::implicit::ImplicitParams;
 use bowshock_cfd::solver::{Bc, Config, Scheme, Solver, Turbulence, Viscous};
 use bowshock_cfd::turbulence::{aupoix_wall, BETA1};
 use bowshock_cfd::viscous::temperature;
+use bowshock_core::engine::body_grid::{Body, Nose};
+use bowshock_core::engine::case::Case;
+use bowshock_core::engine::run::run_cold;
 use bowshock_core::{
     AftSpec, Analysis, Atmosphere, Backend, BackendUsed, BodySpec, FinProfile, FinSpec, FlightConditions, MotorSpec, NoseShape, NoseSpec, Resolution, Wake,
 };
@@ -43,7 +48,7 @@ use std::time::Instant;
 const R_AIR: f64 = 287.052_87;
 /// Schema version of the fixture; bump when a key changes meaning.
 const SCHEMA: u64 = 1;
-const GROUPS: [&str; 9] = ["g3", "table-rans", "table-euler", "euler-base", "arcas", "tp2005", "plates", "cones", "ogive"];
+const GROUPS: [&str; 10] = ["g3", "table-rans", "table-euler", "euler-base", "arcas", "tp2005", "plates", "cones", "ogive", "w4-tables"];
 
 // ---------------------------------------------------------------------------------------------------------------------------------
 // The example rocket of the app (`assets/examples/hpr_l1_cert.bowshock`) as `analyze/cfd/plan.rs::plan` maps it (Debug of `Plan::body`,
@@ -673,6 +678,146 @@ fn ogive_cases() -> Vec<Value> {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------
+// The transonic and subsonic smoke cases of `bowshock-cases` (`transonic_smoke_coarse_m09`, `subsonic_smoke_no_base`, `subsonic_smoke_with_base`): the
+// 2D engine `Case` built exactly as those tests build it, run cold on the CPU. The `checks` of a record are the asserts of the test (strict bounds on a
+// key of `numbers`); the tests are the numeric tolerance of these tables (director decision, S0 follow-up). Not carried: the identities of the 2D
+// post-processing the tests also assert (sum of the parts to 1e-14, modelled base drag, `base_wall.len() == n_gap`): they test 2D arithmetic, not physics.
+
+/// The case of `bowshock-cases::subsonic` test `small(base, mach)`: coarse grids, the Euler base-wake or the sting grid.
+fn subsonic_small(base: bool, mach: f64) -> Case {
+    let mut c = subsonic_case(mach, Nose::TangentOgive { fineness: 3.0 }, 0, base).with_domain(5.0, 2.5);
+    c.grid_base.n_up = 12;
+    c.grid_base.n_nose = 24;
+    c.grid_base.n_seg[0] = 20;
+    c.grid_base.n_wake = 16;
+    c.grid_base.n_gap = 8;
+    c.grid_base.nj_out = 24;
+    c.grid_base.dx_tip = 0.08;
+    c.grid_base.dr_wall = 0.08;
+    c.grid_sting.n_up = 12;
+    c.grid_sting.n_nose = 24;
+    c.grid_sting.n_seg[0] = 20;
+    c.grid_sting.n_ext = 12;
+    c.grid_sting.nj = 32;
+    c.grid_sting.dx_tip = 0.08;
+    c.grid_sting.dr_wall = 0.08;
+    c.numerics.first_order_iters = 100;
+    c.numerics.max_iter = 3000;
+    c
+}
+
+/// The case of `bowshock-cases::transonic` test `transonic_smoke_coarse_m09`.
+fn transonic_small() -> Case {
+    let mut case = transonic_case(0.9, 0, Body { nose: Nose::cone_fineness(3.0) }, 6.0);
+    case.grid_sting.n_up = 16;
+    case.grid_sting.n_nose = 32;
+    case.grid_sting.n_seg[0] = 16;
+    case.grid_sting.n_ext = 14;
+    case.grid_sting.nj = 40;
+    case.grid_sting.dx_tip = 0.04;
+    case.grid_sting.dr_wall = 0.04;
+    case.numerics.max_iter = 1500;
+    case.numerics.first_order_iters = 150;
+    case
+}
+
+fn smoke_record(id: &str, inputs: Value, checks: Value, case: &Case) -> Value {
+    println!("ref2d: {id} ...");
+    let t0 = Instant::now();
+    let r = run_cold(case);
+    let wall_s = t0.elapsed().as_secs_f64();
+    let (ni, nj) = case.cells();
+    let mut inputs = inputs;
+    inputs["ni"] = json!(ni);
+    inputs["nj"] = json!(nj);
+    json!({
+        "id": id, "group": "w4-tables", "gates": ["G-W4"],
+        "inputs": inputs,
+        "backend": "Cpu", "precision": "f64", "gpu": null,
+        "checks": checks,
+        "numbers": {
+            "iterations": r.iters,
+            "residual_finite": r.residual.iter().all(|x| x.is_finite()),
+            "drop_orders": r.drop_orders,
+            "stop_reason": format!("{:?}", r.stop_reason),
+            "min_rho": r.min_rho,
+            "min_p": r.min_p,
+            "cd_nose": r.cd_nose,
+            "cd_aft": r.cd_aft,
+            "cd_base": finite(r.cd_base),
+            "cd_total": r.cd_total,
+            "cp_tip": r.wall.first().map_or(Value::Null, |w| json!(w.cp)),
+            "cp_min": r.cp_min,
+            "cp_base": finite(r.cp_base),
+            "cd_base_plus_cp_base": finite(r.cd_base + r.cp_base),
+            // the base drag dominates the nose drag five times over (a check of the subsonic base smoke test)
+            "cd_base_minus_5_abs_cd_nose": finite(r.cd_base - 5.0 * r.cd_nose.abs()),
+        },
+        "wall_s": wall_s,
+    })
+}
+
+fn smoke_cases() -> Vec<Value> {
+    let check = |key: &str, lo: Option<f64>, hi: Option<f64>| json!({"key": key, "gt": lo, "lt": hi});
+    let sting_overrides = |c: &Case, nose: Value, mach: f64, builder: &str| {
+        let g = &c.grid_sting;
+        json!({
+            "kind": "case2d", "builder": builder, "mach": mach, "level": 0, "wake": "sting", "nose": nose, "cyl_length": 6.0,
+            "grid_sting": {"n_up": g.n_up, "n_nose": g.n_nose, "n_seg": g.n_seg, "n_ext": g.n_ext, "nj": g.nj, "dx_tip": g.dx_tip, "dr_wall": g.dr_wall},
+            "first_order_iters": c.numerics.first_order_iters, "max_iter": c.numerics.max_iter, "numerics": builder,
+        })
+    };
+    let mut out = Vec::new();
+    // transonic: finite residual falling more than one order, positive state, a plausible nose drag, the tip stagnation and the shoulder suction
+    let c = transonic_small();
+    out.push(smoke_record(
+        "w4-transonic-smoke-M0.90",
+        sting_overrides(&c, json!({"cone_fineness": 3.0}), 0.9, "transonic_case"),
+        json!([
+            check("drop_orders", Some(1.0), None),
+            check("min_rho", Some(0.0), None),
+            check("min_p", Some(0.0), None),
+            check("cd_nose", Some(0.0), Some(0.12)),
+            check("cp_tip", Some(0.0), None),
+            check("cp_min", None, Some(0.0))
+        ]),
+        &c,
+    ));
+    // subsonic, no base: converged in < 1500 iterations, slender-body signature, nose drag near d'Alembert's zero
+    let c = subsonic_small(false, 0.3);
+    let mut inputs = sting_overrides(&c, json!({"tangent_ogive_fineness": 3.0}), 0.3, "subsonic_case");
+    inputs["domain"] = json!([5.0, 2.5]);
+    inputs["base"] = json!(false);
+    out.push(smoke_record(
+        "w4-subsonic-smoke-M0.30-sting",
+        inputs,
+        json!([check("iterations", None, Some(1500.0)), check("min_rho", Some(0.0), None), check("min_p", Some(0.0), None), check("cp_tip", Some(0.1), None),
+               check("cp_min", Some(-0.3), Some(-0.05)), check("cd_nose", Some(-0.02), Some(0.02)), {"key": "stop_reason", "in": ["ResidualDrop"]},
+               {"key": "residual_finite", "is": true}]),
+        &c,
+    ));
+    // subsonic with a base: the standard level-0 base-wake grid, 6000 iterations at most; stationary base pressure, base suction, base drag = -Cp_b
+    let mut c = subsonic_case(0.2, Nose::TangentOgive { fineness: 3.0 }, 0, true);
+    c.numerics.max_iter = 6000;
+    let g = &c.grid_base;
+    let inputs = json!({
+        "kind": "case2d", "builder": "subsonic_case", "mach": 0.2, "level": 0, "wake": "base", "nose": {"tangent_ogive_fineness": 3.0}, "cyl_length": 6.0, "base": true,
+        "grid_base": {"n_up": g.n_up, "n_nose": g.n_nose, "n_seg": g.n_seg, "n_wake": g.n_wake, "n_gap": g.n_gap, "nj_out": g.nj_out, "dx_tip": g.dx_tip, "dr_wall": g.dr_wall},
+        "first_order_iters": c.numerics.first_order_iters, "max_iter": 6000, "numerics": "subsonic_case",
+    });
+    out.push(smoke_record(
+        "w4-subsonic-smoke-M0.20-base",
+        inputs,
+        json!([check("min_rho", Some(0.0), None), check("min_p", Some(0.0), None), check("cp_base", Some(-0.5), Some(-0.01)), check("cd_base", Some(0.0), None),
+               // base CD = -Cp_b: the 2D test asserts 1e-12 (post-processing identity); the gate band is chosen, a flat-face wedge has a 1e-4 chord error
+               check("cd_base_plus_cp_base", Some(-1e-3), Some(1e-3)), check("cd_base_minus_5_abs_cd_nose", Some(0.0), None),
+               {"key": "stop_reason", "in": ["ResidualDrop", "BasePressureStationary"]}]),
+        &c,
+    ));
+    out
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
 
 fn git_sha() -> (String, bool) {
     if let Ok(sha) = std::env::var("REF2D_SHA") {
@@ -705,6 +850,7 @@ fn run_group(group: &str, errors: &mut usize) -> Vec<Value> {
         "plates" => plate_cases(),
         "cones" => cone_cases(),
         "ogive" => ogive_cases(),
+        "w4-tables" => smoke_cases(),
         other => panic!("unknown group {other}; known: {GROUPS:?}"),
     }
 }
