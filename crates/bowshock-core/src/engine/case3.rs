@@ -386,8 +386,9 @@ impl Case3 {
         // a wall-resolved tier is a RANS run (SST, the automatic wall treatment): the equations follow the grid; `euler_equations` keeps the grid only
         self.viscous = Some(Viscous { re_c: flow.re_c, sutherland: flow.sutherland, turbulence: Turbulence::Sst, wall_i_start: 0, roughness: 0.0 });
         self.numerics = Numerics3::viscous(self.mach, level);
-        if matches!(self.grid.domain, Domain3::Wedge { .. }) {
-            // one factored solve per iteration on the wedge (the finned domains keep three): same state, 20-25 % cheaper (DESIGN3D item 35)
+        if matches!(self.grid.domain, Domain3::Wedge { .. }) && self.mach < 1.0 {
+            // one factored solve per iteration on a subsonic wedge (the finned domains and the supersonic wedges keep three: Arcas fins-off Mach 2.3 and TP-2005 Mach 1.65
+            // at the medium level go non-finite with one): same state, 20-25 % cheaper (DESIGN3D item 35)
             self.numerics.implicit.sub_iters = 1;
         }
         if matches!(self.grid.domain, Domain3::Half { .. }) {

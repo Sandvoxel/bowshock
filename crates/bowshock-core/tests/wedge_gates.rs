@@ -1170,6 +1170,9 @@ mod cpu_wedge {
             }
             let mut case = analysis.wedge_cases(&[c.mach]).map_err(|e| e.to_string())?.remove(0);
             // BOWSHOCK_MEAN_WINDOW=<iterations> overrides the window of the mean-stationary rule (0: off), to see an oscillating wake's last state
+            if let Some(n) = std::env::var("BOWSHOCK_SUB_ITERS").ok().and_then(|v| v.parse().ok()) {
+                case.numerics.implicit.sub_iters = n;
+            }
             if let Some(w) = std::env::var("BOWSHOCK_MEAN_WINDOW").ok().and_then(|v| v.parse().ok()) {
                 case.numerics.mean_window = w;
             }
