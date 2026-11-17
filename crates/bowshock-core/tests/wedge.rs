@@ -475,3 +475,27 @@ fn wall_resolved_fin_grids_build_on_the_base_grid_at_every_reynolds_number() {
         }
     }
 }
+
+/// The half domain at incidence on the base-wake grid with its fins builds for both roll phases on the lift tier (uniform `32 << level` azimuth, wall functions) and
+/// on the wall-resolved coarse tier (fin stacks), at the Reynolds numbers of the example flights: the S7 mesher side. The fin boxes stand on the body in every
+/// phase (`Between`: whole fins between the pitch plane and each other; `InPlane`: a half fin on each plane).
+#[test]
+fn half_domains_at_incidence_on_the_base_grid_build_for_both_roll_phases_and_tiers() {
+    for re_c in [2.0e5, 1.0e6] {
+        let flow = WallFlow { re_c, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0 };
+        for (tier, name) in [(Tier::Lift(flow), "lift"), (Tier::Coarse(flow), "coarse")] {
+            for phase in [FinPhase::Between, FinPhase::InPlane] {
+                let mut c = Case3::base_half(0.8, 3f64.to_radians(), Case3::anf_body(), Some(Case3::anf_fins()), tier, 0);
+                c.grid.domain = Domain3::Half { phase };
+                let s = c.build_solver().unwrap_or_else(|e| panic!("Re_c {re_c:e} {name} {phase:?}: {e}"));
+                let g = &s.grid;
+                assert!(g.vol.iter().all(|v| *v >= 0.0), "Re_c {re_c:e} {name} {phase:?}: a negative volume");
+                let fin_faces = bowshock_core::engine::run3::wall_samples(g, &s.u).iter().filter(|w| w.class == Wall::FinSide).count();
+                assert!(fin_faces >= 1, "Re_c {re_c:e} {name} {phase:?}: no fin wall faces");
+                if name == "lift" {
+                    assert_eq!(g.nk, 32, "uniform azimuth over the half domain");
+                }
+            }
+        }
+    }
+}
