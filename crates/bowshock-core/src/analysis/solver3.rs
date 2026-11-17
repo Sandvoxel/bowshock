@@ -403,11 +403,12 @@ impl Analysis {
     }
 
     /// The engine's tier of condition `c`: Euler without wall flow; with it the lift tier at an angle of attack and, at zero incidence, `Coarse` for
-    /// [`Resolution::Coarse`] and `Fine` for the finer resolutions.
+    /// [`Resolution::Coarse`], `Draft` for [`Resolution::Draft`] and `Fine` for the finer resolutions.
     fn tier3(c: Condition, resolution: Resolution, flow: Option<WallFlow>) -> Tier {
         match flow {
             None => Tier::Euler,
             Some(f) if c.alpha_deg != 0.0 => Tier::Lift(f),
+            Some(f) if resolution == Resolution::Draft => Tier::draft(f),
             Some(f) if resolution == Resolution::Coarse => Tier::Coarse(f),
             Some(f) => Tier::Fine(f),
         }

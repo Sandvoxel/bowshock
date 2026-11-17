@@ -186,6 +186,7 @@ fn machine_lines<'a>(t: &Tracker, running: bool) -> Vec<Element<'a, Message>> {
 fn grid_name(grid: CfdGrid) -> &'static str {
     match grid {
         CfdGrid::Coarse => "coarse grid",
+        CfdGrid::Draft => "draft grid",
         CfdGrid::Medium => "medium grid",
     }
 }

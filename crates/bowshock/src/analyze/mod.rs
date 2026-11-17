@@ -64,6 +64,8 @@ pub enum Message {
     Resolve,
     /// Re-solve the table on the medium grid.
     Refine,
+    /// Re-solve on the draft grid (the 3D solver's quick option).
+    Quick,
     /// A Mach field was typed in.
     MachText(MachField, String),
     /// Enter in a Mach field: parse and apply.
@@ -278,6 +280,7 @@ impl State {
             }
             Message::Resolve => self.request_solve(CfdGrid::Coarse),
             Message::Refine => self.request_solve(CfdGrid::Medium),
+            Message::Quick => self.request_solve(CfdGrid::Draft),
             Message::MachText(field, text) => self.mach_text[field as usize] = text,
             Message::MachCommit => self.commit_mach(ctx),
             Message::Alpha(a) => self.cond.alpha = a.clamp(-30f64.to_radians(), 30f64.to_radians()),

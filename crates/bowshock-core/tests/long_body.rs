@@ -62,7 +62,7 @@ fn coarsest_cell_at_the_old_limit(rans: bool, resolution: Resolution) -> f64 {
     let mut case = cases(&spec, rans, resolution).remove(0);
     if !rans {
         let f = match resolution {
-            Resolution::Coarse => 1,
+            Resolution::Draft | Resolution::Coarse => 1,
             Resolution::Medium => 2,
             Resolution::Fine => 4,
         };

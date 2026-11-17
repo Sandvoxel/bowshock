@@ -330,6 +330,10 @@ pub fn kept_text(table: &CfdTable) -> String {
 /// Claims: the drag parts and where the fins' drag comes from, for the provenance of a table with no angles.
 pub const DRAG_FROM: &str = "Drag from the solver";
 
+/// The tooltip of the Quick button (the 3D solver's draft grid).
+pub const DRAFT_TOOLTIP: &str =
+    "Re-solve on the draft grid: wall functions and about a quarter of the cells, much quicker, Cd within about 1 % at Mach 2 and less certain below Mach 0.8";
+
 /// What a stopped solve is called.
 pub const STOPPED_TITLE: &str = "STOPPED · CFD TABLE";
 

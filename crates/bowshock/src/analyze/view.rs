@@ -162,7 +162,12 @@ fn method<'a>(state: &'a State, ctx: &'a Ctx) -> Element<'a, Message> {
     let compare: Element<'_, Message> = push("Compare ▾", Weight::Ghost).on_press(Message::CompareMenu).into();
     let mut buttons: Vec<Element<'_, Message>> = vec![resolve];
     let shown = matches!(state.cfd.status, cfd::Status::Fresh | cfd::Status::Stale);
-    if cfd_line && !solving && shown && state.cfd.table.as_ref().is_some_and(|t| t.grid == CfdGrid::Coarse) {
+    let solved_grid = state.cfd.table.as_ref().map(|t| t.grid);
+    if cfd_line && !solving && shown && solved_grid.is_some_and(|g| g != CfdGrid::Draft) && cfd::solves_3d() {
+        let quick: Element<'_, Message> = push("Quick", Weight::Secondary).on_press(Message::Quick).into();
+        buttons.push(tooltip(quick, bubble(cfd::DRAFT_TOOLTIP)).position(tooltip::Position::Bottom).gap(SPACE_1).boxed());
+    }
+    if cfd_line && !solving && shown && matches!(solved_grid, Some(CfdGrid::Coarse | CfdGrid::Draft)) {
         let refine: Element<'_, Message> = push("Refine", Weight::Secondary).on_press(Message::Refine).into();
         buttons.push(
             tooltip(refine, bubble("Re-solve on the medium grid: about 3.5x slower, Cd about 1 % different"))
@@ -280,6 +285,7 @@ pub(super) fn cfd_lines(state: &State) -> Vec<String> {
         };
         let grid = match info.grid {
             CfdGrid::Coarse => "coarse",
+            CfdGrid::Draft => "draft",
             CfdGrid::Medium => "medium",
         };
         let below = info.scaled_below.map_or_else(String::new, |m| format!(" · M<{m:.1} scaled from Extended"));

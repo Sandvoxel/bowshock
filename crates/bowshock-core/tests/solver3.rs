@@ -272,3 +272,24 @@ fn an_elliptical_and_a_freeform_outline_are_meshed_and_a_notched_one_is_refused_
     let e = solver3().fins(fins()).fin_outline(FinOutline::Polygon(notched)).mesh_check().unwrap_err();
     assert!(e.to_string().contains("chordwise"), "{e}");
 }
+
+#[test]
+fn the_draft_resolution_is_a_viscous_wedge_with_wall_functions_and_fewer_cells() {
+    use bowshock_core::Resolution;
+    let run = |r: Resolution| {
+        solver3()
+            .resolution(r)
+            .backend(Backend::Cpu)
+            .viscous(flight())
+            .keep_fields(true)
+            .max_iterations(20)
+            .case3_hook(|_| ())
+            .run(&[2.0])
+            .unwrap()
+            .points
+            .remove(0)
+    };
+    let (draft, coarse) = (run(Resolution::Draft), run(Resolution::Coarse));
+    assert!(draft.drag.total.is_finite() && draft.drag.friction.is_some());
+    assert!(draft.field3.unwrap().cells() < coarse.field3.unwrap().cells(), "a draft grid has fewer cells");
+}

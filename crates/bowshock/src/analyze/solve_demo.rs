@@ -195,6 +195,7 @@ fn synthetic_field(job: &Job, mach: f64, iteration: usize) -> Option<Arc<solver:
         .viscous(solver::FlightConditions { atmosphere: solver::Atmosphere::Isa { altitude_m: job.altitude.clamp(0.0, 20_000.0) } })
         .resolution(match job.grid {
             bowshock_model::CfdGrid::Coarse => solver::Resolution::Coarse,
+            bowshock_model::CfdGrid::Draft => solver::Resolution::Draft,
             bowshock_model::CfdGrid::Medium => solver::Resolution::Medium,
         })
         .initial_field(mach)

@@ -456,7 +456,7 @@ pub(super) fn shared_grid() -> bool {
 }
 
 /// Whether the 3D engine (`BOWSHOCK_ENGINE=3d`) solves this process's nodes: it has no 2D grid to show a picture of before the first snapshot.
-pub(super) fn solves_3d() -> bool {
+pub fn solves_3d() -> bool {
     solver::Engine::from_env() == solver::Engine::Solver3
 }
 
@@ -486,6 +486,7 @@ pub(super) fn node_analysis(
             // Coarse is the default, for exploring; Medium (Refine) is about 3.5x slower per point and its Cd about 1 % different.
             (NodeKind::Lift, _) | (_, CfdGrid::Coarse) => solver::Resolution::Coarse,
             (NodeKind::Drag, CfdGrid::Medium) => solver::Resolution::Medium,
+            (NodeKind::Drag, CfdGrid::Draft) => solver::Resolution::Draft,
         })
         .backend(session.backend())
         .keep_fields(true);

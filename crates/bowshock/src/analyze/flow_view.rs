@@ -1001,6 +1001,7 @@ pub fn centre<'a>(state: &'a super::State, ctx: &'a Ctx) -> Option<Element<'a, M
     let pos = selected.and_then(|m| flow.machs.iter().position(|x| (x - m).abs() < 1e-9));
     let grid = match table.grid {
         bowshock_model::CfdGrid::Coarse => "coarse grid",
+        bowshock_model::CfdGrid::Draft => "draft grid",
         bowshock_model::CfdGrid::Medium => "medium grid",
     };
     let at = |label: &'a str, by: i32, ok: bool| -> Element<'a, Message> {

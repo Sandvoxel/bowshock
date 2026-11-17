@@ -91,6 +91,9 @@ impl Engine {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Resolution {
+    /// Grid level 0 with wall functions on the body and the fins and about a quarter of the cells (`Tier::Draft`): the 3D engine's quick option at zero incidence
+    /// with the viscous terms; everywhere else (Euler, the angles, the legacy engine) it is [`Resolution::Coarse`].
+    Draft,
     /// Grid level 0.
     Coarse,
     /// Grid level 1.
@@ -102,7 +105,7 @@ pub enum Resolution {
 impl Resolution {
     fn level(self) -> u32 {
         match self {
-            Resolution::Coarse => 0,
+            Resolution::Draft | Resolution::Coarse => 0,
             Resolution::Medium => 1,
             Resolution::Fine => 2,
         }

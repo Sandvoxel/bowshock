@@ -56,6 +56,8 @@ fn is_zero(x: &f64) -> bool {
 /// The solver grid a table was solved on.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CfdGrid {
+    /// Quick: wall functions and a quarter of the cells (the 3D solver only); a first look.
+    Draft,
     /// The default: quick enough to explore with.
     #[default]
     Coarse,
