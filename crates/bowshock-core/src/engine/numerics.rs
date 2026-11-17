@@ -30,6 +30,14 @@ const SUPERSONIC_MACH: f64 = 1.0;
 /// one of those, at Mach 1.5, 2, 2.5 and 3, reaches a stationary drag.
 const RANS_IMPLICIT_SUPERSONIC: ImplicitParams = ImplicitParams { cfl_max: 20.0, ..RANS_IMPLICIT };
 
+/// [`RANS_IMPLICIT`] with the low-Mach preconditioning of the implicit left-hand side ([`ImplicitParams::low_mach_precond`]), for wall-resolved runs at a
+/// free-stream Mach number below [`SUPERSONIC_MACH`]. Measured on the example drag table (10 viscous Mach points over [0.1, 3.0], coarse grid, RTX 3090,
+/// double-float, the app's stop rule): 34 050 -> 20 950 iterations and 25.8 s -> 17.1 s of the solves, all of it from the Mach 0.10 point (14 100 -> 1 200
+/// iterations; it stops on `CdStationary` at the steady `C_D` 0.3584 instead of on `MeanStationary` of a limit cycle whose mean was 0.3637); Mach 0.5 to 0.9
+/// change by at most 5 % in iterations and 3 % in seconds. From Mach 1 on the preconditioning changes nothing (`P = I` in the free stream) and costs
+/// 4.5 % per step, so it stays off there.
+const RANS_IMPLICIT_LOW_MACH: ImplicitParams = ImplicitParams { low_mach_precond: true, ..RANS_IMPLICIT };
+
 /// Numerical settings of one run.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Numerics {
@@ -115,13 +123,16 @@ impl Numerics {
     /// below), van Albada limiter and the
     /// low-Mach correction below [`REGIME_SPLIT_MACH`], minmod without correction otherwise; stationary tolerance 1e-4 on the
     /// total CD, and the mean-stationary rule with a window of 6000 iterations (one period of the limit cycle of the subsonic runs).
+    ///
+    /// Below Mach 1 the implicit left-hand side is low-Mach preconditioned ([`RANS_IMPLICIT_LOW_MACH`]: example drag table 34 050 -> 20 950 iterations,
+    /// 25.8 s -> 17.1 s, Mach 0.10 from 14 100 to 1 200 iterations at the steady `C_D` 0.3584 instead of the limit-cycle mean 0.3637; Mach >= 1 untouched).
     pub fn viscous(mach: f64, level: u32) -> Numerics {
         let subsonic = mach < REGIME_SPLIT_MACH;
         Numerics {
             cfl: 0.5,
             limiter: if subsonic { Limiter::VanAlbada } else { Limiter::Minmod },
             low_mach: subsonic,
-            scheme: Scheme::Implicit(if mach < SUPERSONIC_MACH { RANS_IMPLICIT } else { RANS_IMPLICIT_SUPERSONIC }),
+            scheme: Scheme::Implicit(if mach < SUPERSONIC_MACH { RANS_IMPLICIT_LOW_MACH } else { RANS_IMPLICIT_SUPERSONIC }),
             first_order_iters: 200,
             max_iter: 80_000 << level,
             min_iter: 0,

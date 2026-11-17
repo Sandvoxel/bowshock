@@ -16,7 +16,7 @@
 // constants 0 / 1 (`E::Z`, `E::O`), so that the structurally zero entries of the flux Jacobian cost nothing. The line solves are
 // Luma's `solve_block_tridiagonal_parts` on the sixteen entries of each block (no stacking); a vector field is four `[ni, nj]` arrays.
 
-use crate::implicit::{DtMode, ImplicitParams};
+use crate::implicit::{DtMode, ImplicitParams, LineSolve3};
 use crate::solver::Scheme;
 
 /// Array of the f32 left-hand side.
@@ -32,6 +32,122 @@ fn cf(x: f64) -> f32 {
 fn up_lhs(ctx: &Context, data: &[f64], shape: impl Into<luma::Shape>) -> Result<F> {
     let v: Vec<f32> = data.iter().map(|&x| x as f32).collect();
     Array::from_slice_on(ctx, &v, shape)
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// low-Mach preconditioning (`ImplicitParams::low_mach_precond`; the CPU counterpart is `crate::implicit::LowMach`)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The preconditioning of a run, f32 view of the CPU `LowMach`: Weiss-Smith `P` in both factors, the defect operator and between the sweeps,
+/// `P |P^-1 A|` as the dissipation matrix, the preconditioned spectral radius in the local time step. Holds the lower bound of the reference
+/// velocity `U_r` squared.
+#[derive(Clone, Copy)]
+struct LmGpu {
+    ur_min2: f32,
+}
+
+impl LmGpu {
+    /// The preconditioning of the free stream `fs` when `p.low_mach_precond` is set.
+    fn of(p: &ImplicitParams, fs: &[f64; 4]) -> Option<LmGpu> {
+        p.low_mach_precond.then(|| {
+            let ur_min = crate::implicit::LowMach::for_freestream(fs).ur_min;
+            LmGpu { ur_min2: (ur_min * ur_min) as f32 }
+        })
+    }
+
+    /// `U_r^2 = clamp(|u|^2, U_min^2, c^2)` (`U_r = c`, i.e. `P = I`, is reached exactly).
+    fn ur2(&self, q2: &F, c2: &F) -> F {
+        q2.maximum(self.ur_min2).minimum(c2)
+    }
+}
+
+/// `kappa = 1 / U_r^2 - 1 / c^2` (exactly 0 for `U_r = c`).
+fn kappa_f(ur2: &F, c2: &F) -> F {
+    select(&ur2.ge(c2), 0.0f32, 1.0f32 / ur2 - 1.0f32 / c2)
+}
+
+/// `(g_0, g_1, g_2)` of `g = (g - 1)(q^2 / 2, -u, -v, 1)`: `g_3 = g - 1` is a constant.
+fn pressure_row(u: &F, v: &F) -> [F; 3] {
+    let g1 = cf(G1);
+    [0.5f32 * g1 * (u * u + v * v), -(g1 * u), -(g1 * v)]
+}
+
+/// `(I + coef a g^T) X` for `a = (1, u, v, h)`, given `ca = coef a`: with `coef = kappa` the preconditioning matrix `P` applied to
+/// `X`, with `coef = -kappa / (1 + kappa c^2)` its inverse (`g . a = c^2`). Rank one, so `g^T X` is one row of four dot products.
+fn left_rank1(x: &Blk, ca: &[F; 4], g: &[F; 3]) -> Blk {
+    let g1 = cf(G1);
+    let row: [E; 4] = std::array::from_fn(|j| x.0[j].scale(&g[0]).add(&x.0[4 + j].scale(&g[1])).add(&x.0[8 + j].scale(&g[2])).add(&x.0[12 + j].muls(g1)));
+    Blk(std::array::from_fn(|n| x.0[n].add(&row[n % 4].scale(&ca[n / 4]))))
+}
+
+/// `coef (1, u, v, h)`.
+fn scaled_a(coef: &F, u: &F, v: &F, h: &F) -> [F; 4] {
+    [coef.clone(), coef * u, coef * v, coef * h]
+}
+
+/// Dissipation matrix `P |P^-1 A|` of the Roe-averaged state (`abs_jacobian_pc`): `|M|` for `M = P^-1 A` (eigenvalues `a`
+/// twice and `u' +- c'`) is the quadratic polynomial through the entropy-fixed `|a|`, `|u' + c'|`, `|u' - c'|` (Newton form), then
+/// multiplied by `P`. `P` and `P^-1` are applied as rank-one updates (identical to the dense products). With `U_r = c` everywhere
+/// in the argument (`b = 1`) this is the entry-for-entry formula of [`abs_jacobian_f`].
+fn abs_jacobian_pc_f(wl: &V4, wr: &V4, nx: &F, nr: &F, eps_fix: f32, lm: &LmGpu) -> Blk {
+    let (sl, sr) = (wl[0].sqrt(), wr[0].sqrt());
+    let inv = 1.0f32 / (&sl + &sr);
+    let u = (&sl * &wl[1] + &sr * &wr[1]) * &inv;
+    let v = (&sl * &wl[2] + &sr * &wr[2]) * &inv;
+    let hl = cf(GAMMA) * &wl[3] / (cf(G1) * &wl[0]) + 0.5f32 * (&wl[1] * &wl[1] + &wl[2] * &wl[2]);
+    let hr = cf(GAMMA) * &wr[3] / (cf(G1) * &wr[0]) + 0.5f32 * (&wr[1] * &wr[1] + &wr[2] * &wr[2]);
+    let h = (&sl * &hl + &sr * &hr) * &inv;
+    let q2 = &u * &u + &v * &v;
+    let c2 = (cf(G1) * (&h - 0.5f32 * &q2)).maximum(1e-30f32);
+    let c = c2.sqrt();
+    let ur2 = lm.ur2(&q2, &c2);
+    let a = &u * nx + &v * nr;
+    // preconditioned eigenvalue data: b = U_r^2 / c^2, u' = a (1 + b) / 2, c' = sqrt(a^2 (1 - b)^2 + 4 b c^2) / 2
+    let b = &ur2 / &c2;
+    let u1 = 0.5f32 * &a * (1.0f32 + &b);
+    let omb = 1.0f32 - &b;
+    let c1 = 0.5f32 * (&a * &a * &omb * &omb + 4.0f32 * &b * &c2).sqrt();
+    let (l2, l3) = (&u1 + &c1, &u1 - &c1);
+    let eps = eps_fix * &c;
+    let fix = |l: &F| -> F {
+        let al = l.abs();
+        select(&al.ge(&eps), &al, 0.5f32 * (l * l / &eps + &eps))
+    };
+    let (e1, e2, e3) = (fix(&a), fix(&l2), fix(&l3));
+    let d1 = (&e2 - &e1) / (&l2 - &a);
+    let d2 = ((&e3 - &e1) / (&l3 - &a) - &d1) / (&l3 - &l2);
+    let kappa = kappa_f(&ur2, &c2);
+    let f = &kappa / (1.0f32 + &kappa * &c2);
+    let g = pressure_row(&u, &v);
+    let am = flux_jacobian_h(&u, &v, &h, nx, nr);
+    let m = left_rank1(&am, &scaled_a(&-&f, &u, &v, &h), &g);
+    let b1 = m.sub_diag(&a);
+    let b2 = m.sub_diag(&l2);
+    let prod = b1.mm(&b2);
+    let pm = b1.scale(&d1).add(&prod.scale(&d2)).add_diag(&e1);
+    left_rank1(&pm, &scaled_a(&kappa, &u, &v, &h), &g)
+}
+
+/// The preconditioning matrix `P` of every cell (`[ni, nj]` entries, `P = I` where `U_r = c` and in solid cells) from the cell
+/// primitives `wk`; `solid` masks the solid cells.
+fn precond_p(wk: &V4, lm: &LmGpu, solid: Option<&Array<bool>>) -> [F; 16] {
+    let [rho, u, v, p] = wk;
+    let q2 = u * u + v * v;
+    let c2 = cf(GAMMA) * p / rho;
+    let h = cf(GAMMA) * p / (cf(G1) * rho) + 0.5f32 * &q2;
+    let kappa = kappa_f(&lm.ur2(&q2, &c2), &c2);
+    let ka = scaled_a(&kappa, u, v, &h);
+    let g = pressure_row(u, v);
+    let g1 = cf(G1);
+    std::array::from_fn(|n| {
+        let (i, j) = (n / 4, n % 4);
+        let gj = if j < 3 { &ka[i] * &g[j] } else { &ka[i] * g1 };
+        let e = if i == j { 1.0f32 + gj } else { gj };
+        match solid {
+            Some(s) => select(s, if i == j { 1.0f32 } else { 0.0f32 }, &e),
+            None => e,
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -64,6 +180,15 @@ impl E {
             (E::O, E::A(b)) => E::A(1.0f32 - b),
             (E::A(a), E::O) => E::A(a - 1.0f32),
             (E::Z, E::O) | (E::O, E::O) => unreachable!("-1 and 1 - 1 are not entries of any block of the scheme"),
+        }
+    }
+
+    /// Every array entry times the constant `s` (no entry of the blocks it is used on is the constant 1).
+    fn muls(&self, s: f32) -> E {
+        match self {
+            E::Z => E::Z,
+            E::A(a) => E::A(a * s),
+            E::O => unreachable!("a constant 1 entry times a constant is not an entry of any block of the scheme"),
         }
     }
 
@@ -269,6 +394,18 @@ fn dissipation_f(l: &V4, r: &V4, nx: &F, nr: &F, p: &ImplicitParams) -> Blk {
     if p.roe {
         let t = shock_weight_f(&l[3], &r[3]);
         abs_jacobian_f(l, r, nx, nr, cf(p.eps_fix)).scale(&(1.0f32 - &t)).add_diag(&(&t * &lam))
+    } else {
+        Blk::zero().add_diag(&lam)
+    }
+}
+
+/// [`dissipation_f`] with the preconditioning: the Roe-type part is `P |P^-1 A|` ([`abs_jacobian_pc_f`]); the Rusanov part (shock blend,
+/// `lambda = max(|u_n| + c)` of the two states) and `roe = false` are those of the right-hand side's `lambda`.
+fn dissipation_pc_f(l: &V4, r: &V4, nx: &F, nr: &F, p: &ImplicitParams, lm: &LmGpu) -> Blk {
+    let lam = spectral_f(l, nx, nr).maximum(spectral_f(r, nx, nr));
+    if p.roe {
+        let t = shock_weight_f(&l[3], &r[3]);
+        abs_jacobian_pc_f(l, r, nx, nr, cf(p.eps_fix), lm).scale(&(1.0f32 - &t)).add_diag(&(&t * &lam))
     } else {
         Blk::zero().add_diag(&lam)
     }
@@ -566,14 +703,25 @@ impl LazySolver {
     /// Local pseudo-time step from the cell primitives `wk` (f32): `dt = cfl A / (L_i + L_j)` (`DtMode::Sum`) or
     /// `cfl A / (2 min(L_i, L_j))` (`DtMode::MinDirection`), `L_d` = half the sum of `(|u.n| + c) len` over the two faces of direction `d`.
     /// `cfl` is the one-element array of the loop state.
-    fn pseudo_dt(&self, wk: &V4, cfl: &F, mode: DtMode, xij: Option<(F, F)>) -> F {
+    fn pseudo_dt(&self, wk: &V4, cfl: &F, mode: DtMode, xij: Option<(F, F)>, lm: Option<&LmGpu>) -> F {
         let g = &self.lg;
-        let cs = (cf(GAMMA) * &wk[3] / &wk[0]).sqrt();
+        let c2 = cf(GAMMA) * &wk[3] / &wk[0];
+        let cs = c2.sqrt();
+        // preconditioned: `U_r^2 / c^2 = b`, `|u'| + c'` with `u' = u_n (1 + b) / 2`, `c' = sqrt(u_n^2 (1 - b)^2 + 4 b c^2) / 2`
+        let b = lm.map(|l| &l.ur2(&(&wk[1] * &wk[1] + &wk[2] * &wk[2]), &c2) / &c2);
         let lam = |dir: usize, upper: bool| -> F {
             let d = &g.dir[dir];
             let n = self.line_len(dir);
             let r = if upper { 1..n + 1 } else { 0..n };
-            ((&wk[1] * d.nx.slice(dir, r.clone()) + &wk[2] * d.nr.slice(dir, r.clone())).abs() + &cs) * d.len.slice(dir, r)
+            let un = &wk[1] * d.nx.slice(dir, r.clone()) + &wk[2] * d.nr.slice(dir, r.clone());
+            let rad = match &b {
+                Some(b) => {
+                    let omb = 1.0f32 - b;
+                    (0.5f32 * &un * (1.0f32 + b)).abs() + 0.5f32 * (&un * &un * &omb * &omb + 4.0f32 * b * &c2).sqrt()
+                }
+                None => un.abs() + &cs,
+            };
+            rad * d.len.slice(dir, r)
         };
         let li = 0.5f32 * (lam(0, false) + lam(0, true));
         let lj = 0.5f32 * (lam(1, false) + lam(1, true));
@@ -600,7 +748,7 @@ impl LazySolver {
     /// The source `S = (0, 0, p A / V, 0)` adds `-dt dS/dU` to rows 2 of `d`: with `c = -dt (A / V) (g - 1)`,
     /// `(c q^2 / 2, -c u, -c v, c)` in columns 0..3. The first / last cell of a line folds `lo T` / `up T` into `d` (`T` from
     /// [`LazySolver::ghost_jacobian`]) and drops `lo` / `up`. `lines = false`: point-implicit, `lo = up = 0`.
-    fn factor(&self, wf: &V4, wk: &V4, dt: &F, p: &ImplicitParams, dir: usize, vf: Option<&VFlow>) -> Factor {
+    fn factor(&self, wf: &V4, wk: &V4, dt: &F, p: &ImplicitParams, dir: usize, vf: Option<&VFlow>, lm: Option<&LmGpu>, pk: Option<&[F; 16]>) -> Factor {
         let (ni, nj) = (self.ni, self.nj);
         let g = &self.lg;
         let dg = &g.dir[dir];
@@ -632,7 +780,10 @@ impl LazySolver {
             Some(lb) => (&lb.first_bc[dir], &lb.first[dir]),
             None => (&dg.first, &dg.first),
         };
-        let dis = dissipation_f(&l, &r, &dg.nx, &dg.nr, p);
+        let dis = match lm {
+            Some(lmc) => dissipation_pc_f(&l, &r, &dg.nx, &dg.nr, p, lmc),
+            None => dissipation_f(&l, &r, &dg.nx, &dg.nr, p),
+        };
         // a viscous run adds the diffusive spectral radius `2 lam I` to the dissipation matrix of every face
         let dis = match vf {
             Some(v) => dis.add_diag(&self.two_lambda(v, dir, &l[0], &r[0])),
@@ -647,7 +798,7 @@ impl LazySolver {
         // cell blocks
         let s = 0.5f32 * dt / &g.vol;
         let (s_l, s_u) = (&s * dg.w.slice(dir, 0..n), &s * dg.w.slice(dir, 1..n + 1));
-        let mut d = Blk::eye().add(&fl.slice(dir, 1..n + 1).scale(&s_u)).sub(&fr.slice(dir, 0..n).scale(&s_l));
+        let mut d = pk.map_or_else(Blk::eye, Blk::of).add(&fl.slice(dir, 1..n + 1).scale(&s_u)).sub(&fr.slice(dir, 0..n).scale(&s_l));
         if dir == 1 {
             let c = -(dt * &g.src) * cf(G1);
             let src = [0.5f32 * &c * (&wk[1] * &wk[1] + &wk[2] * &wk[2]), -(&c * &wk[1]), -(&c * &wk[2]), c.clone()];
@@ -733,9 +884,14 @@ impl LazySolver {
         }
     }
 
-    /// The approximate factorization `(I - dt J_j)^{-1} (I - dt J_i)^{-1} rhs`.
-    fn approx_factor(&self, fi: &Factor, fj: &Factor, rhs: &V4) -> V4 {
-        self.solve_lines(fj, 1, &self.solve_lines(fi, 0, rhs))
+    /// The approximate factorization `(I - dt J_j)^{-1} (I - dt J_i)^{-1} rhs`; preconditioned (`pm` = `P`):
+    /// `(P - dt J_j)^{-1} P (P - dt J_i)^{-1} rhs`.
+    fn approx_factor(&self, fi: &Factor, fj: &Factor, rhs: &V4, pm: Option<&[F; 16]>) -> V4 {
+        let x = self.solve_lines(fi, 0, rhs);
+        match pm {
+            Some(pm) => self.solve_lines(fj, 1, &mv(pm, &x).cache()),
+            None => self.solve_lines(fj, 1, &x),
+        }
     }
 
     /// `(I - dt J_dir) x` (`apply_factor`): `d x + lo x_{k-1} + up x_{k+1}`, the missing neighbours at the ends of a line being 0 (their
@@ -791,22 +947,30 @@ impl LazySolver {
             let (xi, xj) = self.diffusion_rates(v, &st.p[0]);
             (lhs(&xi), lhs(&xj))
         });
-        let dt = self.pseudo_dt(&wk, &cfl, p.dt_mode, xij);
+        // low-Mach preconditioning (`ImplicitParams::low_mach_precond`): `P` of every cell, identity in solid cells
+        let lm = LmGpu::of(p, &self.cfg.freestream);
+        let pk: Option<[F; 16]> = lm.as_ref().map(|l| precond_p(&wk, l, self.lb.as_ref().map(|lb| &lb.solid)).cache());
+        let dt = self.pseudo_dt(&wk, &cfl, p.dt_mode, xij, lm.as_ref());
         // solid cells: dt = 0 (as on the CPU), so that `dt R`, the right-hand side of the solves, is zero there
         let dt = match &self.lb {
             Some(lb) => select(&lb.solid, 0.0f32, &dt),
             None => dt,
         };
-        let (fi, fj) = (self.factor(&wf, &wk, &dt, p, 0, st.vf.as_ref()), self.factor(&wf, &wk, &dt, p, 1, st.vf.as_ref()));
+        let (fi, fj) = (
+            self.factor(&wf, &wk, &dt, p, 0, st.vf.as_ref(), lm.as_ref(), pk.as_ref()),
+            self.factor(&wf, &wk, &dt, p, 1, st.vf.as_ref(), lm.as_ref(), pk.as_ref()),
+        );
 
         // right-hand side and defect correction
         let b: V4 = std::array::from_fn(|k| &lhs(&r0[k]) * &dt);
         let b = b.cache();
-        let mut du = self.approx_factor(&fi, &fj, &b);
+        let mut du = self.approx_factor(&fi, &fj, &b, pk.as_ref());
         for _ in 1..p.sub_iters.max(1) {
             let (ai, aj) = (self.apply_factor(&fi, 0, &du), self.apply_factor(&fj, 1, &du));
-            let r: V4 = std::array::from_fn(|k| &b[k] - (&ai[k] + &aj[k] - &du[k]));
-            let corr = self.approx_factor(&fi, &fj, &r.cache());
+            // the defect operator `A_i + A_j - P` with the preconditioned factors
+            let pdu = pk.as_ref().map_or_else(|| du.clone(), |pm| mv(pm, &du));
+            let r: V4 = std::array::from_fn(|k| &b[k] - (&ai[k] + &aj[k] - &pdu[k]));
+            let corr = self.approx_factor(&fi, &fj, &r.cache(), pk.as_ref());
             du = std::array::from_fn(|k| &du[k] + &corr[k]);
         }
 
