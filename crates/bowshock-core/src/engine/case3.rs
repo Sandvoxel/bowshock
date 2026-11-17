@@ -261,13 +261,14 @@ impl Case3 {
 
     /// A 2D engine case ([`crate::engine::case::Case::new`] with `Wake::Base`) as a wedge of [`WEDGE_ANGLE`]: its body, its base-wake grid and its sting grid,
     /// the numerics of the 2D case ([`Numerics3::from_2d`]: limiter, low-Mach flags, implicit parameters with the block lines, outflow) and, for a viscous case, its
-    /// RANS parameters (`Case::viscous`: the grids are already wall-resolved). `level` is the grid level (the 2D case does not keep it).
+    /// RANS parameters (`Case::viscous`: the grids are already wall-resolved) and motor jet (`Case::with_motor`: the grid already has the nozzle rows). `level` is the grid level (the 2D case does not keep it).
     pub fn wedge_of(case: &Case, level: u32) -> Case3 {
         let mut c = Case3::new(case.mach, 0.0, case.body.clone(), None, level);
         c.grid.sting = case.grid_sting.clone();
         c.grid.base = Some(case.grid_base.clone());
         c.numerics = Numerics3::from_2d(case, level);
         c.viscous = case.viscous;
+        c.jet = case.motor;
         c.on_wedge()
     }
 
