@@ -4,12 +4,15 @@
 //!
 //! ```text
 //! cargo run --release -p bowshock-validate --example converge3d -- [--case anf|ogive] [--level 0|1] [--mach 2.0] [--alpha 2.0] [--precision df32|f32]
-//!     [--sub-iters 2] [--cfl-max 10] [--max-iter N]
+//!     [--sub-iters 2] [--cfl-max 10] [--line-solve block|diag] [--max-iter N] [--window W] [--stat-min N] [--repeat R]
 //! ```
 //!
-//! Prints one `CONVERGE {json}` line: iterations, stop reason, drop in orders, CN, x_cp, wall seconds and ms per iteration.
+//! `--line-solve` selects the 3D line solve (default: the product's, `Numerics3::auto`: `diag` = `LineSolve3::DiagonalCorrected`; `block` = the block scheme with
+//! `--sub-iters` passes). Prints one `CONVERGE {json}` line per run: iterations, stop reason, drop in orders, CN, x_cp, wall seconds and ms per iteration. `--repeat R`
+//! runs the same case R times from the free stream in one process (the first run includes compile and trace; the later ones are warm).
 
 use bowshock_cfd::gpu::Precision;
+use bowshock_cfd::implicit::LineSolve3;
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
 use bowshock_core::engine::case3::Case3;
 use bowshock_core::engine::gpu3::GpuRunner3;
@@ -40,18 +43,34 @@ fn main() -> Result<(), String> {
     if let Some(v) = value("--sub-iters") {
         case.numerics.implicit.sub_iters = v.parse().map_err(|e| format!("--sub-iters: {e}"))?;
     }
+    if let Some(v) = value("--line-solve") {
+        case.numerics.implicit.line_solve = match v.as_str() {
+            "block" => LineSolve3::Block,
+            "diag" => LineSolve3::DiagonalCorrected,
+            other => return Err(format!("--line-solve block|diag, got `{other}`")),
+        };
+    }
     if let Some(v) = value("--cfl-max") {
         case.numerics.implicit.cfl_max = v.parse().map_err(|e| format!("--cfl-max: {e}"))?;
     }
     if let Some(v) = value("--max-iter") {
         case.numerics.max_iter = v.parse().map_err(|e| format!("--max-iter: {e}"))?;
     }
+    if let Some(v) = value("--window") {
+        case.numerics.window = v.parse().map_err(|e| format!("--window: {e}"))?;
+    }
+    if let Some(v) = value("--stat-min") {
+        case.numerics.stationary_min_iters = v.parse().map_err(|e| format!("--stat-min: {e}"))?;
+    }
     let mut runner = GpuRunner3::new(&case, prec).map_err(|e| format!("{e}"))?;
-    let t0 = Instant::now();
-    let r = runner.run_on(&case, false).map_err(|e| format!("{e}"))?;
-    let wall = t0.elapsed().as_secs_f64();
-    println!(
-        "CONVERGE {{\"case\":\"{case_name}\",\"level\":{level},\"mach\":{mach},\"alpha_deg\":{alpha},\"precision\":\"{pname}\",\"sub_iters\":{},\"cfl_max\":{},\"iterations\":{},\"stop\":\"{:?}\",\"drop_orders\":{:.2},\"cn\":{:.6},\"x_cp_cal\":{:.4},\"wall_s\":{wall:.2},\"ms_per_iter\":{:.3}}}",
+    let repeat = num("--repeat", 1.0)? as usize;
+    for rep in 0..repeat {
+        let t0 = Instant::now();
+        let r = runner.run_on(&case, false).map_err(|e| format!("{e}"))?;
+        let wall = t0.elapsed().as_secs_f64();
+        println!(
+        "CONVERGE {{\"rep\":{rep},\"case\":\"{case_name}\",\"level\":{level},\"mach\":{mach},\"alpha_deg\":{alpha},\"precision\":\"{pname}\",\"line_solve\":\"{:?}\",\"sub_iters\":{},\"cfl_max\":{},\"iterations\":{},\"stop\":\"{:?}\",\"drop_orders\":{:.2},\"cn\":{:.6},\"x_cp_cal\":{:.4},\"wall_s\":{wall:.3},\"ms_per_iter\":{:.3}}}",
+        case.numerics.implicit.line_solve,
         case.numerics.implicit.sub_iters,
         case.numerics.implicit.cfl_max,
         r.iterations,
@@ -61,5 +80,6 @@ fn main() -> Result<(), String> {
         r.x_cp,
         1e3 * wall / r.iterations.max(1) as f64
     );
+    }
     Ok(())
 }

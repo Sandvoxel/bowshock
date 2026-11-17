@@ -9,7 +9,7 @@ use crate::progress::ProgressSink;
 use crate::spec::FinProfile;
 use bowshock_cfd::flux::Limiter;
 use bowshock_cfd::gas3::freestream3;
-use bowshock_cfd::implicit::ImplicitParams;
+use bowshock_cfd::implicit::{ImplicitParams, LineSolve3};
 use bowshock_cfd::solver3::{Config3, Scheme3, Solver3};
 
 /// Numerical settings and stop-rule tolerances of a 3D run.
@@ -38,12 +38,16 @@ impl Numerics3 {
     /// table and moves CN by 1 %). The stationary window is 250 iterations with a floor of one window: CN of the ANF and the example rocket
     /// settles to 1e-4 within 200 to 300 iterations, and against the 500-iteration window with a 1000-iteration floor the table moved by
     /// at most 0.18 % in CN and 0.003 cal in `x_cp` while using 40 % fewer iterations (a window of 200 moved M 0.95 by 0.54 %).
+    ///
+    /// The three directional factors are solved in diagonalised form with one defect-correction pass against the block operator
+    /// ([`LineSolve3::DiagonalCorrected`]; `sub_iters` is then not used): on the ANF case (level 0, f32, RTX 3090) a step costs 1935 us instead of
+    /// 3151 us, the iterations and CN equal those of the block scheme (CN within 0.01 %) at Mach 0.5, 0.8, 2 and 3, 1.56x faster to the stop rule.
     pub fn auto(mach: f64, level: u32) -> Numerics3 {
         let subsonic = mach < 0.85;
         Numerics3 {
             limiter: if subsonic { Limiter::VanAlbada } else { Limiter::Minmod },
             low_mach: subsonic,
-            implicit: ImplicitParams { cfl_max: 10.0, ..ImplicitParams::DEFAULT },
+            implicit: ImplicitParams { cfl_max: 10.0, line_solve: LineSolve3::DiagonalCorrected, ..ImplicitParams::DEFAULT },
             first_order_iters: 100,
             max_iter: 8000 << level,
             rel_tol: 0.002,

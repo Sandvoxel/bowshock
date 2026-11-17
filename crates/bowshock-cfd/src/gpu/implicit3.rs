@@ -403,6 +403,98 @@ struct Factor3 {
     s_u: F,
 }
 
+/// Roe-averaged entropy-fixed `|u_n|, |u_n + c|, |u_n - c|` of the face states `wl`, `wr` (the eigenvalues of [`abs_jacobian_f5`]).
+fn roe_eigs_f5(wl: &V5, wr: &V5, n: &N3, eps_fix: f32) -> [F; 3] {
+    let (sl, sr) = (wl[0].sqrt(), wr[0].sqrt());
+    let inv = 1.0f32 / (&sl + &sr);
+    let u = (&sl * &wl[1] + &sr * &wr[1]) * &inv;
+    let v = (&sl * &wl[2] + &sr * &wr[2]) * &inv;
+    let w = (&sl * &wl[3] + &sr * &wr[3]) * &inv;
+    let ke = |q: &V5| 0.5f32 * (&q[1] * &q[1] + &q[2] * &q[2] + &q[3] * &q[3]);
+    let hl = cf(GAMMA) * &wl[4] / (cf(G1) * &wl[0]) + ke(wl);
+    let hr = cf(GAMMA) * &wr[4] / (cf(G1) * &wr[0]) + ke(wr);
+    let h = (&sl * &hl + &sr * &hr) * &inv;
+    let c = (cf(G1) * (&h - 0.5f32 * (&u * &u + &v * &v + &w * &w))).maximum(1e-30f32).sqrt();
+    let a = &u * &n[0] + &v * &n[1] + &w * &n[2];
+    let eps = eps_fix * &c;
+    let fix = |l: &F| -> F {
+        let al = l.abs();
+        select(&al.ge(&eps), &al, 0.5f32 * (l * l / &eps + &eps))
+    };
+    [fix(&a), fix(&(&a + &c)), fix(&(&a - &c))]
+}
+
+/// The eigensystem `A(w, n) = R diag(u_n, u_n, u_n, u_n + c, u_n - c) L` in conservative variables (the CPU `diag3::eig3`), as arrays over the cells; `R`
+/// and `L` are applied by formula, never formed.
+struct Eig {
+    n: N3,
+    t1: N3,
+    t2: N3,
+    vel: N3,
+    c: F,
+    k: F,
+    h: F,
+    th: F,
+    b2: F,
+    vt1: F,
+    vt2: F,
+}
+
+impl Eig {
+    /// From the primitive cell state `w` and the unit normal `n`; the tangents `t1 = e x n` (normalised) and `t2 = n x t1`, `e` the axis of the smallest `|n|`.
+    fn new(w: &V5, n: &N3) -> Eig {
+        let (a0, a1, a2) = (n[0].abs(), n[1].abs(), n[2].abs());
+        // ties go to the lower axis within 1e-4, as on the CPU (`diag3::tangents`): the choice of the pair changes the scheme, so it must not depend on rounding
+        let c0 = a0.le(&a1 + 1e-4f32) & a0.le(&a2 + 1e-4f32);
+        let c1 = a1.le(&a2 + 1e-4f32);
+        let ex = select(&c0, 1.0f32, 0.0f32);
+        let ey = select(&c0, 0.0f32, select(&c1, 1.0f32, 0.0f32));
+        let ez = 1.0f32 - &ex - &ey;
+        let t1: N3 = [&ey * &n[2] - &ez * &n[1], &ez * &n[0] - &ex * &n[2], &ex * &n[1] - &ey * &n[0]];
+        let len = (&t1[0] * &t1[0] + &t1[1] * &t1[1] + &t1[2] * &t1[2]).sqrt();
+        let t1: N3 = std::array::from_fn(|q| &t1[q] / &len);
+        let t2: N3 = [&n[1] * &t1[2] - &n[2] * &t1[1], &n[2] * &t1[0] - &n[0] * &t1[2], &n[0] * &t1[1] - &n[1] * &t1[0]];
+        let n = n.clone();
+        let vel: N3 = [w[1].clone(), w[2].clone(), w[3].clone()];
+        let c = (cf(GAMMA) * &w[4] / &w[0]).sqrt();
+        let k = 0.5f32 * (&vel[0] * &vel[0] + &vel[1] * &vel[1] + &vel[2] * &vel[2]);
+        let h = &c * &c / cf(G1) + &k;
+        let th = &vel[0] * &n[0] + &vel[1] * &n[1] + &vel[2] * &n[2];
+        let b2 = cf(G1) / (&c * &c);
+        let vt1 = &vel[0] * &t1[0] + &vel[1] * &t1[1] + &vel[2] * &t1[2];
+        let vt2 = &vel[0] * &t2[0] + &vel[1] * &t2[1] + &vel[2] * &t2[2];
+        Eig { n, t1, t2, vel, c, k, h, th, b2, vt1, vt2 }
+    }
+
+    /// `y = L x`: with `a = b1 x0 - b2 u.x + b2 x4` (`b1 = b2 k`) and `q = (n.x - u_n x0) / c`: `y = (x0 - a, t1.x - vt1 x0, t2.x - vt2 x0, (a + q) / 2, (a - q) / 2)`.
+    fn cons_to_char(&self, x: &V5) -> V5 {
+        let ur = &self.vel[0] * &x[1] + &self.vel[1] * &x[2] + &self.vel[2] * &x[3];
+        let nr = &self.n[0] * &x[1] + &self.n[1] * &x[2] + &self.n[2] * &x[3];
+        let a = &self.b2 * &self.k * &x[0] - &self.b2 * &ur + &self.b2 * &x[4];
+        let q = (&nr - &self.th * &x[0]) / &self.c;
+        let tx = |t: &N3, vt: &F| &t[0] * &x[1] + &t[1] * &x[2] + &t[2] * &x[3] - vt * &x[0];
+        [&x[0] - &a, tx(&self.t1, &self.vt1), tx(&self.t2, &self.vt2), 0.5f32 * (&a + &q), 0.5f32 * (&a - &q)]
+    }
+
+    /// `x = R y`: with `s = y3 + y4`, `d = y3 - y4`: `x = (y0 + s, vel (y0 + s) + t1 y1 + t2 y2 + c n d, k y0 + vt1 y1 + vt2 y2 + h s + c u_n d)`.
+    fn char_to_cons(&self, y: &V5) -> V5 {
+        let s = &y[3] + &y[4];
+        let d = &y[3] - &y[4];
+        let m = &y[0] + &s;
+        let cd = &self.c * &d;
+        let mom = |q: usize| &self.vel[q] * &m + &self.t1[q] * &y[1] + &self.t2[q] * &y[2] + &self.n[q] * &cd;
+        [m.clone(), mom(0), mom(1), mom(2), &self.k * &y[0] + &self.vt1 * &y[1] + &self.vt2 * &y[2] + &self.h * &s + &self.th * &cd]
+    }
+}
+
+/// The diagonal factor of one direction: the eigensystem and the scalar coefficients of the three distinct eigenvalues (`u_n`, `u_n + c`, `u_n - c`).
+struct DiagFac3 {
+    eig: Eig,
+    lo: [F; 3],
+    d: [F; 3],
+    up: [F; 3],
+}
+
 impl LazySolver3 {
     /// The f32 view of the state `a` (the left-hand side runs in f32; see the module comment).
     fn lhs_rec3(r: &Rec3) -> V5 {
@@ -453,6 +545,23 @@ impl LazySolver3 {
         }
     }
 
+    /// The states below / above every face of direction `dir` (`[.., n + 1, ..]` arrays), from the padded primitives `wf` (two ghost layers; ghost states
+    /// at the line ends); at a face of a solid box the solid side is the reflection of the fluid side.
+    fn face_states3(&self, wf: &V5, dir: usize) -> (V5, V5) {
+        let dg = &self.lg.dir[dir];
+        let dims = self.dims3();
+        let n = dims[dir];
+        let line: V5 = v5(|k| (0..3).filter(|&a| a != dir).fold(wf[k].clone(), |a, ax| a.slice(ax, 2..dims[ax] + 2)));
+        let (l, r): (V5, V5) = (v5(|k| line[k].slice(dir, 1..n + 2)), v5(|k| line[k].slice(dir, 2..n + 3)));
+        match (&dg.wall_l, &dg.wall_r) {
+            (Some(wl), Some(wr)) => {
+                let (r_of_r, r_of_l) = (reflect_f3(&r, &dg.n), reflect_f3(&l, &dg.n));
+                (v5(|k| select(wl, &r_of_r[k], &l[k])), v5(|k| select(wr, &r_of_l[k], &r[k])))
+            }
+            _ => (l, r),
+        }
+    }
+
     /// Blocks `(lo, d, up)` of `I - dt J_dir` for every cell (`assemble3`, `cell_blocks3`). With the face matrices `FL = A(U_L) + D`, `FR = A(U_R) - D` of
     /// every face (`D` the dissipation matrix of the face, `L` / `R` its lower / upper state, ghost states at the ends of a line, the solid side of a wall
     /// face the reflection of its fluid side, `A` evaluated with the face normal) and the cell coefficients `s_l = dt S_l / (2 V)`, `s_u = dt S_u / (2 V)`
@@ -470,17 +579,7 @@ impl LazySolver3 {
         let dims = self.dims3();
         let n = dims[dir];
 
-        // face matrices: the states below / above every face of the direction, from the padded primitives (two ghost layers)
-        let line: V5 = v5(|k| (0..3).filter(|&a| a != dir).fold(wf[k].clone(), |a, ax| a.slice(ax, 2..dims[ax] + 2)));
-        let (l, r): (V5, V5) = (v5(|k| line[k].slice(dir, 1..n + 2)), v5(|k| line[k].slice(dir, 2..n + 3)));
-        // a face of a solid box: the solid side is the reflection of the fluid side about the face
-        let (l, r) = match (&dg.wall_l, &dg.wall_r) {
-            (Some(wl), Some(wr)) => {
-                let (r_of_r, r_of_l) = (reflect_f3(&r, &dg.n), reflect_f3(&l, &dg.n));
-                (v5(|k| select(wl, &r_of_r[k], &l[k])), v5(|k| select(wr, &r_of_l[k], &r[k])))
-            }
-            _ => (l, r),
-        };
+        let (l, r) = self.face_states3(wf, dir);
         let dis = dissipation_f5(&l, &r, &dg.n, p);
         let fl = flux_jacobian_f5(&l, &dg.n).add(&dis);
         let fr = flux_jacobian_f5(&r, &dg.n).sub(&dis);
@@ -628,6 +727,98 @@ impl LazySolver3 {
         v5(|q| &dx[q] + &lx[q] + &ux[q])
     }
 
+    /// The diagonal factor of direction `dir` (`LineSolve3::DiagonalCorrected`, the CPU `diag3::assemble_d3`): the eigensystem of `A(w_k, n_k)`
+    /// with `n_k` the normalised mean of the two face normals, and the scalar coefficients of the three distinct eigenvalues `u_n`, `u_n + c`, `u_n - c`
+    /// (`lo_q = -s_l FL_q(lower face)`, `d_q = 1 + s_u FL_q(upper face) - s_l FR_q(lower face)`, `up_q = s_u FR_q(upper face)`, with the face
+    /// quantities `FL_q = lam_q(l) + D_q`, `FR_q = lam_q(r) - D_q` of the face states `l`, `r`), the line ends and the neighbours of solid cells frozen
+    /// (`lo` / `up` dropped), solid cells the identity.
+    fn diag_factor3(&self, wf: &V5, wk: &V5, dt: &F, p: &ImplicitParams, dir: usize) -> DiagFac3 {
+        let g = &self.lg;
+        let dg = &g.dir[dir];
+        let n = self.dims3()[dir];
+        let (l, r) = self.face_states3(wf, dir);
+        let cs = |w: &V5| (cf(GAMMA) * &w[4] / &w[0]).sqrt();
+        let th = |w: &V5| &w[1] * &dg.n[0] + &w[2] * &dg.n[1] + &w[3] * &dg.n[2];
+        let (thl, cl, thr, cr) = (th(&l), cs(&l), th(&r), cs(&r));
+        let lamf = spectral_f5(&l, &dg.n).maximum(spectral_f5(&r, &dg.n));
+        let [d1, d2, d3]: [F; 3] = if p.roe {
+            let [e1, e2, e3] = roe_eigs_f5(&l, &r, &dg.n, cf(p.eps_fix));
+            let t = shock_weight_f(&l[4], &r[4]);
+            let blend = |e: F| (1.0f32 - &t) * e + &t * &lamf;
+            [blend(e1), blend(e2), blend(e3)]
+        } else {
+            [lamf.clone(), lamf.clone(), lamf.clone()]
+        };
+        let fl = [&thl + &d1, &thl + &cl + &d2, &thl - &cl + &d3];
+        let fr = [&thr - &d1, &thr + &cr - &d2, &thr - &cr - &d3];
+        // evaluated once: the cells read each face at two cells
+        let [fl, fr]: [[F; 3]; 2] = [fl, fr].cache();
+
+        let s = 0.5f32 * dt / &g.vol;
+        let (s_l, s_u) = (&s * dg.area.slice(dir, 0..n), &s * dg.area.slice(dir, 1..n + 1));
+        let solid = |a: F, diag: bool| -> F {
+            match &g.solid {
+                Some(solid) => select(solid, if diag { 1.0f32 } else { 0.0f32 }, &a),
+                None => a,
+            }
+        };
+        let lo: [F; 3] = std::array::from_fn(|q| {
+            if p.lines { solid(select(&dg.cut_lo, 0.0f32, -&s_l * fl[q].slice(dir, 0..n)), false) } else { g.zero.clone() }
+        });
+        let up: [F; 3] = std::array::from_fn(|q| {
+            if p.lines { solid(select(&dg.cut_up, 0.0f32, &s_u * fr[q].slice(dir, 1..n + 1)), false) } else { g.zero.clone() }
+        });
+        let d: [F; 3] = std::array::from_fn(|q| solid(1.0f32 + &s_u * fl[q].slice(dir, 1..n + 1) - &s_l * fr[q].slice(dir, 0..n), true));
+
+        // the eigensystem of the cell: normalised mean of the face normals (the lower face normal if that is zero)
+        let nl: N3 = std::array::from_fn(|q| dg.n[q].slice(dir, 0..n));
+        let nm: N3 = std::array::from_fn(|q| &nl[q] + dg.n[q].slice(dir, 1..n + 1));
+        let nn = (&nm[0] * &nm[0] + &nm[1] * &nm[1] + &nm[2] * &nm[2]).sqrt();
+        let big = nn.gt(1e-12f32);
+        let nc: N3 = std::array::from_fn(|q| select(&big, &nm[q] / &nn, &nl[q]));
+        DiagFac3 { eig: Eig::new(wk, &nc), lo, d, up }
+    }
+
+    /// `x <- T diag(...)^{-1} T^{-1} x` of direction `dir`: transform to the characteristic variables, the five scalar tridiagonal systems in one call
+    /// (fields 0-2 share their coefficients), transform back. Solid cells keep `x`.
+    fn diag_dir3(&self, fac: &DiagFac3, dir: usize, x: &V5) -> V5 {
+        let solid = &self.lg.solid;
+        let pick = |keep: &V5, a: V5| -> V5 {
+            match solid {
+                Some(sol) => v5(|k| select(sol, &keep[k], &a[k])),
+                None => a,
+            }
+        };
+        let y = pick(x, fac.eig.cons_to_char(x));
+        // evaluated before the solve: the five systems and the neighbours of a line read it several times (measured: 1.0 ms -> 0.74 ms a step)
+        let y = y.cache();
+        let sys = |q: usize, g: usize| (&fac.lo[g], &fac.d[g], &fac.up[g], &y[q]);
+        let sol = luma::solve_tridiagonal_parts(dir, [sys(0, 0), sys(1, 0), sys(2, 0), sys(3, 1), sys(4, 2)]);
+        let sol: V5 = v5(|k| sol[k].clone());
+        pick(&sol, fac.eig.char_to_cons(&sol))
+    }
+
+    /// `D_2^{-1} D_1^{-1} D_0^{-1} rhs`: the diagonal factorisation.
+    fn diag_af3(&self, fac: &[DiagFac3; 3], rhs: &V5) -> V5 {
+        let x = self.diag_dir3(&fac[0], 0, rhs);
+        let y = self.diag_dir3(&fac[1], 1, &x);
+        self.diag_dir3(&fac[2], 2, &y)
+    }
+
+    /// The correction of the diagonal scheme for `b = dt R` (`LineSolve3::DiagonalCorrected`, the CPU `diag3::du3`): the diagonal solve `dU0 = D^{-1} b`
+    /// and one defect-correction pass against the unfactored BLOCK operator `I + N_i + N_j + N_k` (`n_apply3`, no block solves):
+    /// `dU = dU0 + D^{-1} (b - (I + N_i + N_j + N_k) dU0)`.
+    fn diag_du3(&self, wf: &V5, wk: &V5, dt: &F, p: &ImplicitParams, b: &V5) -> V5 {
+        let dfac: [DiagFac3; 3] = std::array::from_fn(|dir| self.diag_factor3(wf, wk, dt, p, dir));
+        let du0 = self.diag_af3(&dfac, b);
+        let du0 = v5(|k| du0[k].clone()).cache();
+        let fac: [Factor3; 3] = std::array::from_fn(|dir| self.factor3(wf, wk, dt, p, dir));
+        let nz: [V5; 3] = std::array::from_fn(|dir| self.n_apply3(&fac[dir], dir, &du0, p));
+        let r: V5 = v5(|k| &b[k] - &du0[k] - &nz[0][k] - &nz[1][k] - &nz[2][k]);
+        let corr = self.diag_af3(&dfac, &r.cache());
+        v5(|k| &du0[k] + &corr[k])
+    }
+
     /// Positivity damping: `alpha` is the first of `1, 1/2, .., 1/128` for which `U + alpha dU` has `rho > 0`, `p > 0` and five finite components, `0` if
     /// there is none. Decided in f32 from the f32 view of `U`.
     fn damping3(&self, u: &V5, du: &V5) -> F {
@@ -667,27 +858,32 @@ impl LazySolver3 {
         let wk: V5 = v5(|k| wf[k].slice(0, 2..self.ni + 2).slice(1, 2..self.nj + 2).slice(2, 2..self.nk + 2));
         let cfl = lhs(&s[6]);
         let dt = self.pseudo_dt3(&wk, &cfl, p.dt_mode).cache();
-        let fac: [Factor3; 3] = std::array::from_fn(|dir| self.factor3(&wf, &wk, &dt, p, dir));
-
-        // right-hand side and defect correction
         let b: V5 = v5(|k| &lhs(&r0[k]) * &dt);
-        let (x, y, mut du) = self.approx_factor3_parts(&fac, &b);
-        let mut passes = 1;
-        if p.lines && p.sub_iters >= 2 {
-            // the first defect, from the intermediates of the solve: `r = N_i (X - dU) + N_j (Y - dU)`
-            let (dx, dy): (V5, V5) = (v5(|k| &x[k] - &du[k]), v5(|k| &y[k] - &du[k]));
-            let (ni_, nj_) = (self.n_apply3(&fac[0], 0, &dx, p), self.n_apply3(&fac[1], 1, &dy, p));
-            let r: V5 = v5(|k| &ni_[k] + &nj_[k]);
-            let corr = self.approx_factor3(&fac, &r.cache());
-            du = v5(|k| &du[k] + &corr[k]);
-            passes = 2;
-        }
-        for _ in passes..p.sub_iters.max(1) {
-            let a: [V5; 3] = std::array::from_fn(|dir| self.apply_factor3(&fac[dir], dir, &du));
-            let r: V5 = v5(|k| &b[k] - (&a[0][k] + &a[1][k] + &a[2][k] - 2.0f32 * &du[k]));
-            let corr = self.approx_factor3(&fac, &r.cache());
-            du = v5(|k| &du[k] + &corr[k]);
-        }
+        let du = match p.line_solve {
+            LineSolve3::DiagonalCorrected => self.diag_du3(&wf, &wk, &dt, p, &b),
+            LineSolve3::Block => {
+                let fac: [Factor3; 3] = std::array::from_fn(|dir| self.factor3(&wf, &wk, &dt, p, dir));
+                // right-hand side and defect correction
+                let (x, y, mut du) = self.approx_factor3_parts(&fac, &b);
+                let mut passes = 1;
+                if p.lines && p.sub_iters >= 2 {
+                    // the first defect, from the intermediates of the solve: `r = N_i (X - dU) + N_j (Y - dU)`
+                    let (dx, dy): (V5, V5) = (v5(|k| &x[k] - &du[k]), v5(|k| &y[k] - &du[k]));
+                    let (ni_, nj_) = (self.n_apply3(&fac[0], 0, &dx, p), self.n_apply3(&fac[1], 1, &dy, p));
+                    let r: V5 = v5(|k| &ni_[k] + &nj_[k]);
+                    let corr = self.approx_factor3(&fac, &r.cache());
+                    du = v5(|k| &du[k] + &corr[k]);
+                    passes = 2;
+                }
+                for _ in passes..p.sub_iters.max(1) {
+                    let a: [V5; 3] = std::array::from_fn(|dir| self.apply_factor3(&fac[dir], dir, &du));
+                    let r: V5 = v5(|k| &b[k] - (&a[0][k] + &a[1][k] + &a[2][k] - 2.0f32 * &du[k]));
+                    let corr = self.approx_factor3(&fac, &r.cache());
+                    du = v5(|k| &du[k] + &corr[k]);
+                }
+                du
+            }
+        };
 
         // update with positivity damping
         let alpha = self.damping3(&Self::lhs_rec3(&u), &du);

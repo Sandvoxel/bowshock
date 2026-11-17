@@ -18,7 +18,7 @@ use bowshock_cfd::gas3::{freestream3, prim_to_cons3, Cons3};
 use bowshock_cfd::gpu::{GpuSolver3, Precision, Staging};
 use bowshock_cfd::grid::Grid;
 use bowshock_cfd::grid3::{revolve, Grid3};
-use bowshock_cfd::implicit::ImplicitParams;
+use bowshock_cfd::implicit::{ImplicitParams, LineSolve3};
 use bowshock_cfd::solver3::{Config3, Scheme3, Solver3};
 use bowshock_core::engine::body_grid::{BaseBody, Body, LargeGridParams, Nose};
 use bowshock_core::engine::grid3::{body_grid3, Fins3, Grid3Params};
@@ -165,6 +165,27 @@ fn tiny_anf_implicit_state_after_30_iterations_matches_cpu() {
         }
     }
     report("tiny ANF, implicit, 30 iterations", &rows);
+}
+
+/// The diagonalised scheme with one defect-correction pass (`LineSolve3::DiagonalCorrected`, what `Numerics3::auto` selects) on the tiny ANF case against
+/// the CPU solver with the same parameters, 20 iterations from the free stream (the first 5 first order), M = 0.5 and M = 2, the `Numerics3::auto` ramp
+/// and the steep one, `Fluxes` staging, both precisions. The f32 target is 1e-2, not the 1e-3 of the block scheme: the correction pass amplifies the f32
+/// rounding of the left-hand side on the steep ramp (CFL 3 -> 10 in 20 iterations; measured 6.0e-3 at M 0.5 and 1.1e-3 at M 2; the other f32 rows and
+/// all df32 rows are within 1e-3 / 1e-4).
+#[test]
+fn tiny_anf_diag_state_after_20_iterations_matches_cpu() {
+    const DIAG: Targets = (1e-2, 1e-4);
+    let grid = tiny_anf_grid();
+    let mut rows = Vec::new();
+    for (mach, limiter, low_mach) in [(0.5, Limiter::VanAlbada, true), (2.0, Limiter::Minmod, false)] {
+        for steep in [false, true] {
+            let params = ImplicitParams { line_solve: LineSolve3::DiagonalCorrected, ..implicit_params(steep) };
+            let cfg = Config3 { scheme: Scheme3::Implicit(params), ..config(mach, 2.0, limiter, low_mach) };
+            let tag = if steep { "steep" } else { "auto" };
+            compare(&format!("M {mach} diag {tag} cold"), &grid, &cfg, 0, 20, &[Staging::Fluxes], DIAG, &mut rows);
+        }
+    }
+    report("tiny ANF, diagonalised implicit, 20 iterations", &rows);
 }
 
 /// The implicit scheme on every solid-face pattern of `solid_box_patterns_match_cpu` (lines cut by the solid cells in all three directions, the first

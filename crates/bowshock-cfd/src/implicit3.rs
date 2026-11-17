@@ -18,11 +18,17 @@
 //!   symmetry planes `T = reflection3(n_face)`, the axis `T = 0` (the ghost depends on another cell, frozen);
 //!   `ImplicitParams::implicit_bc = false` freezes the wall ones too.
 //! * Euler only: no source term and no viscous terms.
+//!
+//! `ImplicitParams::line_solve = LineSolve3::DiagonalCorrected` replaces the block lines by diagonalised factors (`diag3`): per cell the eigensystem
+//! of the flux Jacobian turns each directional solve into five scalar tridiagonal solves, and one defect-correction pass against the block
+//! operator recovers the accuracy of the block scheme.
+
+mod diag3;
 
 use crate::flux::shock_weight;
 use crate::gas3::{cons_to_prim3, reflect3, sound_speed3, Cons3, Prim3, GAMMA};
 use crate::grid3::Face3;
-use crate::implicit::ImplicitParams;
+use crate::implicit::{ImplicitParams, LineSolve3};
 use crate::solver3::{pidx3, Solver3};
 use rayon::prelude::*;
 
@@ -418,20 +424,11 @@ fn apply_factor3(s: &Solver3, fac: &Factor, dir: usize, x: &[Cons3]) -> Vec<Cons
     out
 }
 
-/// One implicit iteration; returns the density residual at the start of the iteration.
-///
-/// `ImplicitParams::sub_iters > 1` repeats the factorised solve as a defect correction against the unfactored operator
-/// `I - dt J_i - dt J_j - dt J_k`.
-pub(crate) fn step(s: &mut Solver3, p: &ImplicitParams) -> f64 {
-    let cfl = (p.cfl0 * p.growth.powi(s.ramp_k.min(10_000) as i32)).min(p.cfl_max);
-    s.ramp_k += 1;
-    s.eval_residual();
-    let rn = s.density_residual();
-    s.compute_dt(cfl, p.dt_mode);
-
+/// The correction `dU` of the block scheme for the right-hand side `b = dt R`: the three-factor solve with block-tridiagonal lines and
+/// `ImplicitParams::sub_iters - 1` defect-correction passes against the unfactored operator.
+fn du_block(s: &Solver3, p: &ImplicitParams, b: &[Cons3]) -> Vec<Cons3> {
     let n = s.u.len();
     let facs = [assemble3(s, p, 0), assemble3(s, p, 1), assemble3(s, p, 2)];
-    let b: Vec<Cons3> = s.res.iter().zip(s.dt.iter()).map(|(r, d)| [r[0] * d, r[1] * d, r[2] * d, r[3] * d, r[4] * d]).collect();
     let af = |rhs: &[Cons3]| -> Vec<Cons3> {
         let mut x = rhs.to_vec();
         for dir in 0..3 {
@@ -439,7 +436,7 @@ pub(crate) fn step(s: &mut Solver3, p: &ImplicitParams) -> f64 {
         }
         x
     };
-    let mut du = af(&b);
+    let mut du = af(b);
     for _ in 1..p.sub_iters.max(1) {
         let a: Vec<Vec<Cons3>> = (0..3).map(|dir| apply_factor3(s, &facs[dir], dir, &du)).collect();
         let r: Vec<Cons3> = (0..n)
@@ -459,6 +456,25 @@ pub(crate) fn step(s: &mut Solver3, p: &ImplicitParams) -> f64 {
             }
         });
     }
+    du
+}
+
+/// One implicit iteration; returns the density residual at the start of the iteration.
+///
+/// `ImplicitParams::sub_iters > 1` repeats the factorised solve as a defect correction against the unfactored operator
+/// `I - dt J_i - dt J_j - dt J_k`; `ImplicitParams::line_solve` selects block lines or the diagonalised factors ([`diag3`]).
+pub(crate) fn step(s: &mut Solver3, p: &ImplicitParams) -> f64 {
+    let cfl = (p.cfl0 * p.growth.powi(s.ramp_k.min(10_000) as i32)).min(p.cfl_max);
+    s.ramp_k += 1;
+    s.eval_residual();
+    let rn = s.density_residual();
+    s.compute_dt(cfl, p.dt_mode);
+
+    let b: Vec<Cons3> = s.res.iter().zip(s.dt.iter()).map(|(r, d)| [r[0] * d, r[1] * d, r[2] * d, r[3] * d, r[4] * d]).collect();
+    let du = match p.line_solve {
+        LineSolve3::Block => du_block(s, p, &b),
+        LineSolve3::DiagonalCorrected => diag3::du3(s, p, &b),
+    };
 
     // ---- update with positivity damping ----
     let solid = &s.solid;

@@ -20,7 +20,8 @@
 //!
 //! `--sweep --mach <list> --alpha 2,6 [--level L]`: one `RESULT {json}` line per (Mach, alpha) point (cold first alpha, warm later ones).
 //! Refinement knobs (defaults reproduce the level grid): `--nk N` (azimuthal cells), `--fin-chord N` (cells over the fin root chord),
-//! `--span-cells N` (radial cells from the wall to the fin tip), `--max-iter N`, `--cfl-max X`; `--history` appends the CN samples
+//! `--span-cells N` (radial cells from the wall to the fin tip), `--max-iter N`, `--cfl-max X`, `--line-solve block|diag` (default: the product's, `diag` =
+//! `LineSolve3::DiagonalCorrected`; `block` selects the block scheme, `sub_iters` 2, of the A/B); `--history` appends the CN samples
 //! `[[iteration, cn], ..]` to the RESULT line. RESULT lines carry the grid (`nk`, `ni`, `nj`, `cells`, `fin_chord_cells`, `span_cells`).
 //! `--fin-profile square|rounded|double-wedge|airfoil` replaces the fin section; `--breakdown` adds CN, CA and x_cp (calibers) of the
 //! nose, afterbody and fins (`fin`, and its parts `fin_sides`, `fin_edges`, `fin_tips`) to the RESULT line (`*_cn`, `*_ca`, `*_xcp`).
@@ -33,6 +34,7 @@ use bowshock_cfd::gpu::{GpuSolver3, Precision};
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
 use bowshock_core::engine::case3::Case3;
 use bowshock_cfd::flux::Limiter;
+use bowshock_cfd::implicit::LineSolve3;
 use bowshock_core::engine::run3::{breakdown_on, PartForces};
 use bowshock_core::spec::FinProfile;
 use std::time::Instant;
@@ -63,6 +65,7 @@ struct Args {
     span_cells: Option<usize>,
     max_iter: Option<usize>,
     cfl_max: Option<f64>,
+    line_solve: Option<LineSolve3>,
     history: bool,
     breakdown: bool,
     fin_profile: Option<String>,
@@ -127,6 +130,12 @@ fn parse(args: &[String]) -> Result<Args, String> {
     }
     let num = |name: &str| -> Result<Option<usize>, String> { value(name).transpose()?.map(|v| v.parse::<usize>().map_err(|e| format!("{name}: {e}"))).transpose() };
     let cfl_max = value("--cfl-max").transpose()?.map(|v| v.parse::<f64>().map_err(|e| format!("--cfl-max: {e}"))).transpose()?;
+    let line_solve = match value("--line-solve").transpose()?.as_deref() {
+        None => None,
+        Some("block") => Some(LineSolve3::Block),
+        Some("diag") => Some(LineSolve3::DiagonalCorrected),
+        Some(other) => return Err(format!("--line-solve block|diag, got `{other}`")),
+    };
     Ok(Args {
         case,
         level,
@@ -138,6 +147,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         span_cells: num("--span-cells")?,
         max_iter: num("--max-iter")?,
         cfl_max,
+        line_solve,
         history: flag("--history"),
         breakdown: flag("--breakdown"),
         fin_profile,
@@ -248,6 +258,9 @@ fn build_case(args: &Args, body: &BaseBody, fins: &Option<bowshock_core::engine:
     }
     if let Some(c) = args.cfl_max {
         case.numerics.implicit.cfl_max = c;
+    }
+    if let Some(l) = args.line_solve {
+        case.numerics.implicit.line_solve = l;
     }
     if let Some(n) = args.stat_min {
         case.numerics.stationary_min_iters = n;
