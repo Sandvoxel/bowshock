@@ -11,9 +11,9 @@ Sections 1-9 below are the 2026-11-17 hand-off and stay as written; where this s
 to about 4" and items 43-44.
 
 - **Luma pinned at v0.5.0** (`7fafed6`: CUDA through the driver's NVVM, graph-replayed gated loops, shared transient buffers). `gpu_name` asks Luma (`Context::device`).
-  Sector step time is the same on CUDA and wgpu (8.5 ms); CUDA is slower on small grids (Luma issue #6). Device peak of the full solve 8.4 GiB (was 10.3).
+  Sector step time is the same on CUDA and wgpu (8.5 ms); CUDA is slower on small grids (Luma issue #6). Device peak of the full solve 8.9 GiB (was 10.3).
 - **Full Coarse solve of the example rocket** (10 sector points + 8 stability points, RTX 3090, f32, `engine3d_finned_timing`): 2 481 s (old pin, fixed cfl 10) /
-  1 654 s (v0.5.0, controller) -> **about 245-260 s** (jobs `1-20261118-024355-31072`, `2-20261118-035445-23374`). What did it, in order of effect:
+  1 654 s (v0.5.0, controller) -> **257 s** on the merged tip (39 300 iterations, job `3-20261118-043226-29707`; 245 s before the TE fan). What did it, in order of effect:
   - DDADI (omega 1) with the implicit face dissipation x 1.7 at `cfl_max` 100 on every non-wedge viscous domain (`Case3::with_tier`, `DDADI_CFL_MAX`, `DDADI_DIS_BOOST`);
   - the extrapolated-drift stop rule (`StopReason::Settled`);
   - one stability angle (2 degrees; CN_alpha and x_cp from it);
@@ -31,13 +31,16 @@ to about 4" and items 43-44.
   Mach 1.85 -0.7 %, 2.364 -3.7 %, 2.741 +1.3 %, 2.970 -1.2 % (Lift tier, job `1-20261118-035444-11012`). Refuted on the way: more cells across the fin thickness
   (`fin_cells_across`, opt-in, item 43). Measured: a finer leading edge (48 / 64 chord cells) adds +2 / +3 %; an isothermal wall at T_inf adds friction x1.16 / x1.35 at
   Mach 1.8 / 3.1 (Van Driest II), opt-in only.
+- **Production-tier accuracy** (the product runs CD0 on the Coarse sector, the stability angle on the Lift half domain; DESIGN3D item 46): Coarse sector CD0 of the
+  Finner against the zero-cant free flight **+4.6 % (Mach 0.766), -1.9 % (1.85), -4.4 % (2.364), +0.1 % (2.741), -2.7 % (2.970)**; the sting-mounted tunnel
+  points +8 / +9 % (INFO). CN_alpha (Lift tier, G-L1): supersonic +3 to +10 %, x_cp within 0.25 cal everywhere (0.12 cal subsonic).
 - **Still open:**
-  - subsonic Finner CD0: +7.7 % against free flight at Mach 0.766 (G-F5 now gates there, 8 % band, PASS; `anf::CD0`), +12 % against the sting-mounted tunnel (INFO);
-  - subsonic CN_alpha: +14 % against the tunnel at Mach 0.79 (G-L1 FAIL, 13 % band), +11 % against free flight (±17 %). The excess is in the fin lift and follows the
-    blunt section: the same planform as a sharp 2 % double wedge gives +6.5 %; 64 chord cells, the y+ 15 fin stack and the Coarse tier do not move it (subsonic branch,
-    `incidence_rans --fin-section thin`). The steady-RANS Kutta condition at the 0.08 cal blunt trailing edge is the suspect;
+  - subsonic CN_alpha: +14 % against the tunnel at Mach 0.79 (G-L1 FAIL, 13 % band), +11 % against free flight (±14-17 % in the data). The excess is in the fin
+    lift and follows the blunt section: the same planform as a sharp 2 % double wedge gives +6.5 %; 64 chord cells, the y+ 15 fin stack and the Coarse tier do not
+    move it (subsonic branch, `incidence_rans --fin-section thin`). Literature (item 46): a thick trailing edge raises the subsonic lift slope in experiment too, and
+    peer RANS of the Finner is -14 to -7 % there, so this is at the steady-RANS / data limit; left: a 0-1 degree slope definition and a sting for the tunnel points;
+  - the Lift-tier gate CD0 at Mach 0.766 reads 0.547 (+7.7 %, G-F5 8 % band, PASS), 2-3 % above the production Coarse sector;
   - the Arcas supersonic fin increment (KNOWN: the test article had anchors, a lip and grit strips the model lacks).
-  x_cp passes everywhere; supersonic CN_alpha is within +3 to +10 %.
 
 ## 1. State on one screen
 
