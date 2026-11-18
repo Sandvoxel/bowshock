@@ -818,7 +818,7 @@ fn example_fins_dump() {
 
 /// The stop rule of an angle-of-attack point of the stability solve, as the app solves it (the example rocket's half domain at 2 degrees, the Lift tier on the Coarse grid, one cold
 /// `run` per Mach number): stop reason, iterations, wall seconds, CN and `x_cp` (calibres from the nose). `BOWSHOCK_INC_REF=1` runs the reference instead: the range rule off, the mean rule at
-/// 5e-4, 24 000 iterations at most. `BOWSHOCK_MACHS=0.5,1.1,2.3` picks the Mach numbers.
+/// 5e-4 over windows of 2000, 24 000 iterations at most. `BOWSHOCK_MACHS=0.5,1.1,2.3` picks the Mach numbers.
 #[test]
 #[ignore = "BOWSHOCK_ENGINE=3d: three half-domain points on the GPU"]
 fn engine3d_incidence_stop_rule() {
@@ -843,13 +843,14 @@ fn engine3d_incidence_stop_rule() {
             a = a.case3_hook(|c| {
                 c.numerics.rel_tol = 0.0;
                 c.numerics.incidence_tol = 5e-4;
+                (c.numerics.incidence_window, c.numerics.incidence_from) = (2000, 2000);
                 c.numerics.max_iter = 24_000;
             });
         } else if std::env::var_os("BOWSHOCK_INC_WIN").is_some() {
             // a shorter mean window at incidence (BOWSHOCK_INC_WIN, BOWSHOCK_INC_FROM), the range rule as it is
             a = a.case3_hook(|c| {
-                c.numerics.mean_window = std::env::var("BOWSHOCK_INC_WIN").unwrap().parse().unwrap();
-                c.numerics.mean_from = std::env::var("BOWSHOCK_INC_FROM").unwrap().parse().unwrap();
+                c.numerics.incidence_window = std::env::var("BOWSHOCK_INC_WIN").unwrap().parse().unwrap();
+                c.numerics.incidence_from = std::env::var("BOWSHOCK_INC_FROM").unwrap().parse().unwrap();
             });
         }
         let t = Instant::now();
