@@ -565,17 +565,8 @@ impl Analysis {
                 }
             }
             let t = Instant::now();
-            let (mut r, mut s) = runner.cold(&case)?;
+            let (r, s) = runner.cold(&case)?;
             let mut next_warm = true;
-            if r.stop_reason == StopReason::NonFinite {
-                // a run that went non-finite is repeated once with the implicit CFL limit halved (measured: extended precision does not cure it: the finned example's
-                // half domain diverges at the same iteration in both precisions at Mach 0.8, 3.0 and 6 degrees)
-                let mut again = case.clone();
-                again.numerics.implicit.cfl_max *= 0.5;
-                drop_timed(runner, Some(s), c);
-                (r, s) = runner.cold(&again)?;
-                next_warm = false;
-            }
             tm.run_s += t.elapsed().as_secs_f64();
             if r.stop_reason == StopReason::Cancelled {
                 return Err(Error::Cancelled);
@@ -661,6 +652,10 @@ impl Analysis {
         if farfield_dp > 0.02 {
             warnings.push(Warning::FarFieldDisturbed { dp: farfield_dp });
         }
+        // a run the CFL controller took back is a point obtained on a second attempt at other numerics, and says so
+        if let (Some(first), Some(last)) = (r.cfl_events.first(), r.cfl_events.last()) {
+            warnings.push(Warning::RestartedAtLowerCfl { rollbacks: r.cfl_events.len(), cfl_from: first.cfl_before, cfl_to: last.cfl_after });
+        }
 
         // the wall Cp along the body of an axisymmetric or sector domain (a half domain has a ring of faces at every station: none)
         let x_base = self.body.x_base();
@@ -686,6 +681,12 @@ impl Analysis {
             wall,
             y_plus_max: if viscous && r.y_plus_max.is_finite() { r.y_plus_max } else { f64::NAN },
             farfield_dp,
+            cfl_limit: Some(r.final_cfl_cap().unwrap_or(case.numerics.implicit.cfl_max)),
+            rollbacks: r
+                .cfl_events
+                .iter()
+                .map(|e| Rollback { iteration: e.iteration, restored_to: e.restored_to, cfl_before: e.cfl_before, cfl_after: e.cfl_after })
+                .collect(),
         };
         tm.host_s = t_host.elapsed().as_secs_f64();
         let t_field = std::time::Instant::now();

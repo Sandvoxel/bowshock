@@ -885,6 +885,7 @@ fn cfd_table(geometry: u64) -> bowshock_model::CfdTable {
         other: 0.1,
         interference: 0.0,
         quality: CfdQuality::Converged,
+        restart: None,
     };
     CfdTable {
         key: geometry ^ 7,

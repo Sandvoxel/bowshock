@@ -453,7 +453,9 @@ fn points<'a>(t: &'a Tracker) -> Element<'a, Message> {
         let running = t.lives().any(|(l, _)| l == u);
         let (mark, state, value, iters, time): (Element<'a, Message>, (String, fn(&Tokens) -> Color), String, String, String) = match t.slot(i) {
             Slot::Done(d) => {
-                let (mark, tone): (Element<'a, Message>, fn(&Tokens) -> Color) = if d.outcome.is_settled() {
+                // a point the solver had to restart at a lower CFL limit says so, in the warning tone
+                let restart = d.point.and_then(|p| p.restart);
+                let (mark, tone): (Element<'a, Message>, fn(&Tokens) -> Color) = if d.outcome.is_settled() && restart.is_none() {
                     (glyph::icon(Mark::Check, Tone::Ok, 12.0), |t| t.ink)
                 } else {
                     (glyph::icon(Mark::Warning, Tone::Warn, 12.0), |t| t.warn)
@@ -463,7 +465,11 @@ fn points<'a>(t: &'a Tracker) -> Element<'a, Message> {
                     Some(cp) => format!("{value} · CP {cp:.3} m"),
                     None => value,
                 };
-                (mark, (d.outcome.word().to_string(), tone), value, format!("{} it", thousands(d.iterations)), duration_text(d.seconds))
+                let word = match &restart {
+                    Some(r) => format!("{} · {}", d.outcome.word(), super::cfd::restart_tag(r)),
+                    None => d.outcome.word().to_string(),
+                };
+                (mark, (word, tone), value, format!("{} it", thousands(d.iterations)), duration_text(d.seconds))
             }
             Slot::Running { iterations, ended, .. } => {
                 let it = if running { t.lives().find(|(l, _)| *l == u).map_or(*iterations, |(_, l)| l.iteration) } else { *iterations };
@@ -863,6 +869,7 @@ mod tests {
                 other: 0.0,
                 interference: 0.0,
                 quality,
+                restart: None,
             }),
             lift: None,
             iterations: 2000,

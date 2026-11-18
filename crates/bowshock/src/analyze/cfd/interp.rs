@@ -31,6 +31,7 @@ pub fn at(table: &CfdTable, mach: f64) -> CfdPoint {
         other: l(a.other, b.other),
         interference: l(a.interference, b.interference),
         quality: worse(a.quality, b.quality),
+        restart: None,
     }
 }
 
@@ -83,7 +84,18 @@ pub(super) fn below(first: &CfdPoint, ext0_m: &DragBreakdown, ext0_lo: &DragBrea
     let base = scale(first.base, ext0_m.base, ext0_lo.base);
     let fins = scale(first.fins, ext0_m.fins, ext0_lo.fins);
     let other = scale(first.other, ext0_m.protuberances, ext0_lo.protuberances);
-    CfdPoint { mach, cd: friction + pressure + base + fins + other, friction, pressure, base, fins, other, interference: 0.0, quality: first.quality }
+    CfdPoint {
+        mach,
+        cd: friction + pressure + base + fins + other,
+        friction,
+        pressure,
+        base,
+        fins,
+        other,
+        interference: 0.0,
+        quality: first.quality,
+        restart: None,
+    }
 }
 
 /// The Mach sweep with the table's zero-lift drag: stability (margin, CP, `CNα`) from `extended` (the Extended method at the set

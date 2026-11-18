@@ -334,6 +334,17 @@ pub const DRAG_FROM: &str = "Drag from the solver";
 pub const DRAFT_TOOLTIP: &str =
     "Re-solve on the draft grid: wall functions and about a quarter of the cells, much quicker, Cd within about 1 % at Mach 2 and less certain below Mach 0.8";
 
+/// The note for a point that converged only after the solver took the run back to an earlier state and restarted it at a lower CFL limit (the 3D solver's controller).
+pub fn restart_note(mach: f64, r: &bowshock_model::CfdRestart) -> String {
+    let times = if r.rollbacks == 1 { "after a restart".to_string() } else { format!("after {} restarts", r.rollbacks) };
+    format!("Mach {mach:.2} converged {times} at a lower CFL limit ({:.1} to {:.1}): the run first went unstable, so the point is from different numerics than the others.", r.cfl_from, r.cfl_to)
+}
+
+/// The short form for the point list of the solve screen.
+pub fn restart_tag(r: &bowshock_model::CfdRestart) -> String {
+    format!("restarted at CFL {:.1}", r.cfl_to)
+}
+
 /// What a stopped solve is called.
 pub const STOPPED_TITLE: &str = "STOPPED · CFD TABLE";
 

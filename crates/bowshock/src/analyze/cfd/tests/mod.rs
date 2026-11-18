@@ -61,6 +61,8 @@ pub(super) fn raw(mach: f64, alpha_deg: f64, q: solver::Quality) -> solver::Pola
             wall: Vec::new(),
             y_plus_max: f64::NAN,
             farfield_dp: 0.0,
+            cfl_limit: None,
+            rollbacks: Vec::new(),
         },
         quality: q,
         warnings: Vec::new(),
@@ -80,6 +82,7 @@ pub(super) fn table() -> CfdTable {
         other: cd * 0.1,
         interference: 0.0,
         quality: CfdQuality::Converged,
+        restart: None,
     };
     CfdTable {
         key: 1,

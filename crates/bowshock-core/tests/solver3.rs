@@ -293,3 +293,32 @@ fn the_draft_resolution_is_a_viscous_wedge_with_wall_functions_and_fewer_cells()
     assert!(draft.drag.total.is_finite() && draft.drag.friction.is_some());
     assert!(draft.field3.unwrap().cells() < coarse.field3.unwrap().cells(), "a draft grid has fewer cells");
 }
+
+/// A run the solver's CFL controller took back is a point obtained at other numerics, and the point says so: the rollbacks, the CFL limit of the run that gave the result and
+/// the warning. A run that goes through carries none of them.
+#[test]
+fn a_run_taken_back_by_the_cfl_controller_says_so() {
+    use bowshock_core::Warning;
+    let run = |cfl: Option<f64>| {
+        let a = solver3().backend(Backend::Cpu).max_iterations(400);
+        let a = match cfl {
+            Some(_) => a.case3_hook(|c| c.numerics.implicit.cfl_max = 400.0),
+            None => a,
+        };
+        a.run(&[2.0]).unwrap().points.remove(0)
+    };
+    let clean = run(None);
+    assert!(clean.detail.rollbacks.is_empty() && clean.detail.cfl_limit.is_some());
+    assert_eq!(clean.detail.attempts(), 1);
+    assert!(!clean.warnings.iter().any(|w| matches!(w, Warning::RestartedAtLowerCfl { .. })));
+    let taken = run(Some(400.0));
+    let d = &taken.detail;
+    assert!(!d.rollbacks.is_empty(), "no failure at cfl_max 400: raise it");
+    assert_eq!(d.attempts(), 1 + d.rollbacks.len());
+    assert!(d.cfl_limit.unwrap() < 400.0 && d.cfl_limit == d.rollbacks.last().map(|r| r.cfl_after));
+    let w = taken.warnings.iter().find_map(|w| match w {
+        Warning::RestartedAtLowerCfl { rollbacks, cfl_from, cfl_to } => Some((*rollbacks, *cfl_from, *cfl_to)),
+        _ => None,
+    });
+    assert_eq!(w, Some((d.rollbacks.len(), 400.0, d.cfl_limit.unwrap())));
+}

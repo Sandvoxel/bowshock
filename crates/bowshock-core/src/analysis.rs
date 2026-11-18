@@ -185,6 +185,30 @@ pub enum Warning {
         /// Max - min of the total drag over the averaging windows.
         cd_range: f64,
     },
+    /// The run went unstable and the solver's CFL controller took it back to an earlier state at a lower CFL limit (`rollbacks` times, from `cfl_from` to `cfl_to`
+    /// in the end): the point converged, but on a second attempt at different numerics (see [`PointDetail::rollbacks`]).
+    RestartedAtLowerCfl {
+        /// How many times the run was taken back.
+        rollbacks: usize,
+        /// The CFL limit the run started with.
+        cfl_from: f64,
+        /// The CFL limit of the run that gave the result.
+        cfl_to: f64,
+    },
+}
+
+/// One answer of the solver's CFL controller to an unstable stretch of a run: the run went back to an earlier state (of iteration `restored_to`) with the CFL limit lowered.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Rollback {
+    /// Iteration at which the instability showed.
+    pub iteration: usize,
+    /// Iteration of the state the run went back to.
+    pub restored_to: usize,
+    /// The CFL limit before the answer.
+    pub cfl_before: f64,
+    /// The CFL limit after the answer.
+    pub cfl_after: f64,
 }
 
 /// One flight condition of a run: a Mach number and an angle of attack.
@@ -301,6 +325,19 @@ pub struct PointDetail {
     pub y_plus_max: f64,
     /// Largest relative pressure deviation from the free stream at the outer boundaries.
     pub farfield_dp: f64,
+    /// The implicit CFL limit of the run that gave the point (the 3D engine; `None` for the legacy one).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub cfl_limit: Option<f64>,
+    /// How the point was obtained when the run had to be taken back: the answers of the CFL controller in order (empty: the run went through at its first CFL limit).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub rollbacks: Vec<Rollback>,
+}
+
+impl PointDetail {
+    /// How many attempts the point took: the run, and one more for every rollback.
+    pub fn attempts(&self) -> usize {
+        1 + self.rollbacks.len()
+    }
 }
 
 /// Pressure coefficient at one body-surface face.
@@ -1055,6 +1092,8 @@ impl Analysis {
             wall: d.wall.iter().filter(|w| w.x < x_base).map(|w| WallCp { x: w.x * self.d_nose, r: w.r * self.d_nose, cp: w.cp }).collect(),
             y_plus_max: d.y_plus_max,
             farfield_dp: d.farfield_dp,
+            cfl_limit: None,
+            rollbacks: Vec::new(),
         }
     }
 
@@ -1296,6 +1335,8 @@ impl Analysis {
             wall: Vec::new(),
             y_plus_max: f64::NAN,
             farfield_dp: 0.0,
+            cfl_limit: None,
+            rollbacks: Vec::new(),
         };
         let field3 = if self.keep_fields { Some(runner.field3(state, case, r.iterations, self.field_scale())?) } else { None };
         Ok(PolarPoint {

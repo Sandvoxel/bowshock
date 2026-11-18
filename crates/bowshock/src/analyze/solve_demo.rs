@@ -110,7 +110,7 @@ fn outcome(mach: f64, nodes: &[f64]) -> Outcome {
 fn point(mach: f64, quality: CfdQuality) -> CfdPoint {
     let total = cd(mach);
     let (friction, base, fins) = (0.11, 0.09 + 0.02 * mach.min(1.0), 0.06);
-    CfdPoint { mach, cd: total, friction, pressure: total - friction - base - fins, base, fins, other: 0.0, interference: 0.0, quality }
+    CfdPoint { mach, cd: total, friction, pressure: total - friction - base - fins, base, fins, other: 0.0, interference: 0.0, quality, restart: None }
 }
 
 fn quality(o: Outcome) -> CfdQuality {

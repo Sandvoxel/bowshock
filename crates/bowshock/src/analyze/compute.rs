@@ -891,6 +891,7 @@ mod tests {
             other: 0.1,
             interference: 0.0,
             quality: CfdQuality::Converged,
+            restart: None,
         };
         let table = CfdTable {
             key: 1,
@@ -1004,6 +1005,7 @@ mod tests {
             other: 0.0,
             interference: 0.0,
             quality: CfdQuality::Converged,
+            restart: None,
         };
         let cfd_table = CfdTable {
             key: 1,

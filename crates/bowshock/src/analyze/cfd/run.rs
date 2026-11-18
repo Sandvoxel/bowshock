@@ -7,7 +7,7 @@ use super::wording;
 use crate::analyze::solve::{Iteration, MachineInfo, MachineState, Outcome, PointDone, Slot, Tracker};
 use crate::app::settings::{Compute, Where};
 use bowshock_core as solver;
-use bowshock_model::{CfdGrid, CfdLiftPoint, CfdLiftTable, CfdPoint, CfdQuality, CfdTable};
+use bowshock_model::{CfdGrid, CfdLiftPoint, CfdLiftTable, CfdPoint, CfdQuality, CfdRestart, CfdTable};
 use bowshock_sim::{vs_mach, Atmosphere};
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -379,6 +379,12 @@ pub(in crate::analyze) fn table_from(job: &Job, tally: Tally, attempted: usize, 
     }
 }
 
+/// How a point that was taken back by the solver's CFL controller was obtained, for the stored point: `None` when the run went through.
+pub(super) fn restart_of(d: &solver::PointDetail) -> Option<CfdRestart> {
+    let (first, last) = (d.rollbacks.first()?, d.rollbacks.last()?);
+    Some(CfdRestart { rollbacks: d.rollbacks.len() as u32, cfl_from: first.cfl_before, cfl_to: last.cfl_after })
+}
+
 /// The note for a Mach number the solver gave no point at.
 pub(super) fn fallback_note(mach: f64) -> String {
     format!("Mach {mach:.2} did not converge and is interpolated from its neighbours.")
@@ -668,6 +674,7 @@ pub(super) fn solve_sized(
                     other,
                     interference: 0.0,
                     quality: q,
+                    restart: restart_of(&p.detail),
                 }
             });
             send(Event::Point(PointDone {
@@ -699,7 +706,12 @@ pub(super) fn solve_sized(
                 }
                 tally.fallback = tally.fallback.take().or_else(|| node.fallback.clone());
                 match node.point {
-                    Some(point) => tally.points.push(point),
+                    Some(point) => {
+                        if let Some(r) = point.restart {
+                            tally.notes.push(wording::restart_note(point.mach, &r));
+                        }
+                        tally.points.push(point);
+                    }
                     None => tally.notes.push(fallback_note(job.nodes[k])),
                 }
             }

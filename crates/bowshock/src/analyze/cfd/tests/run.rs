@@ -233,7 +233,18 @@ fn a_table_that_stopped_early_is_a_partial_of_the_range_and_nothing_else_is() {
         mach,
         alpha_deg: None,
         outcome: Outcome::from_quality(quality),
-        point: quality.map(|quality| CfdPoint { mach, cd: 0.5, friction: 0.1, pressure: 0.1, base: 0.2, fins: 0.1, other: 0.0, interference: 0.0, quality }),
+        point: quality.map(|quality| CfdPoint {
+            mach,
+            cd: 0.5,
+            friction: 0.1,
+            pressure: 0.1,
+            base: 0.2,
+            fins: 0.1,
+            other: 0.0,
+            interference: 0.0,
+            quality,
+            restart: None,
+        }),
         lift: None,
         iterations: 2000,
         cpu: false,
@@ -310,6 +321,7 @@ fn a_stopped_share_keeps_the_machines_that_solved_it_and_the_part_without_a_gap(
             other: 0.0,
             interference: 0.0,
             quality: CfdQuality::Converged,
+            restart: None,
         }),
         lift: None,
         iterations: 2000,
@@ -452,4 +464,27 @@ fn a_remote_and_a_shared_solve_agree_with_the_local_one() {
             assert!(cal < 0.01, "{name} CP at Mach {} {} deg: {} vs {} m", l.mach, l.alpha_deg, l.x_cp, r.x_cp);
         }
     }
+}
+
+/// A point the solver restarted at a lower CFL limit keeps that in the stored point (so a reloaded table still says it) and in the table's notes.
+#[test]
+fn a_restarted_point_is_flagged_in_the_stored_point_and_the_notes() {
+    let mut d = raw(0.5, 0.0, solver::Quality::Converged).detail;
+    assert_eq!(restart_of(&d), None);
+    d.rollbacks = vec![
+        solver::Rollback { iteration: 250, restored_to: 200, cfl_before: 10.0, cfl_after: 7.0 },
+        solver::Rollback { iteration: 900, restored_to: 850, cfl_before: 7.0, cfl_after: 4.9 },
+    ];
+    let r = restart_of(&d).unwrap();
+    assert_eq!((r.rollbacks, r.cfl_from, r.cfl_to), (2, 10.0, 4.9));
+    let note = restart_note(0.5, &r);
+    assert!(note.contains("Mach 0.50") && note.contains("2 restarts") && note.contains("10.0 to 4.9"), "{note}");
+    // stored with the table: round trip, and a table written before the field existed reads as no restart
+    let mut p = table().points[0];
+    p.restart = Some(r);
+    let json = serde_json::to_value(p).unwrap();
+    assert_eq!(serde_json::from_value::<CfdPoint>(json).unwrap(), p);
+    let mut old = serde_json::to_value(table().points[0]).unwrap();
+    assert!(old.as_object_mut().unwrap().remove("restart").is_none(), "an unrestarted point writes no key");
+    assert_eq!(serde_json::from_value::<CfdPoint>(old).unwrap().restart, None);
 }

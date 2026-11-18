@@ -43,7 +43,8 @@ pub mod spec;
 #[doc(hidden)]
 pub use analysis::{take_facade_timings, Engine, FacadeTiming};
 pub use analysis::{
-    Analysis, AnalysisSpec, Backend, BackendUsed, Condition, Drag, FinDrag, Forces, PointDetail, Polar, PolarPoint, Quality, Resolution, WallCp, Warning,
+    Analysis, AnalysisSpec, Backend, BackendUsed, Condition, Drag, FinDrag, Forces, PointDetail, Polar, PolarPoint, Quality, Resolution, Rollback, WallCp,
+    Warning,
 };
 pub use atmosphere::{AirState, Atmosphere, FlightConditions};
 #[cfg(feature = "gpu")]

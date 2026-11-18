@@ -815,7 +815,7 @@ mod tests {
     }
 
     fn point(mach: f64, cd: f64, quality: CfdQuality) -> CfdPoint {
-        CfdPoint { mach, cd, friction: 0.1, pressure: 0.1, base: 0.1, fins: 0.1, other: 0.0, interference: 0.0, quality }
+        CfdPoint { mach, cd, friction: 0.1, pressure: 0.1, base: 0.1, fins: 0.1, other: 0.0, interference: 0.0, quality, restart: None }
     }
 
     fn done(at: f64, mach: f64, iterations: usize, quality: Option<CfdQuality>) -> PointDone {
