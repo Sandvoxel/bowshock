@@ -15,7 +15,6 @@
 // base wall of the block it is the wall ghost of the first fluid cell. A ghost carries the gradient, viscosity and eddy viscosity of its
 // fluid cell (`cell_sides`) and sits at the mirror image of that cell's centre in the face centre (the geometry arrays `VDir`).
 
-use crate::sst::{PRANDTL, PRANDTL_T, Turbulence, Viscous};
 use crate::turbulence::{wall_distances};
 use crate::sst::{K_INF, omega_inf};
 
