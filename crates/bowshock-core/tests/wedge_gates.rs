@@ -1075,12 +1075,13 @@ fn a_gate_without_a_runner_method_fails() {
     struct Nothing;
     impl WedgeRunner for Nothing {}
     let rep = run_all_data_gates(&Nothing);
-    assert!(rep.failed > 0 && rep.failed == rep.lines.len() && rep.lines.iter().all(|l| l.contains(" FAIL")), "{:?}", rep.lines);
+    // the checks the harness does not carry print INFO naming their covering test; every other line fails
+    assert!(rep.failed > 0 && rep.lines.iter().all(|l| l.contains(" FAIL") || l.starts_with("INFO")), "{:?}", rep.lines);
     let mut rep = Report::default();
     gate_v5(&Nothing, &mut rep);
     gate_p1(&Nothing, &mut rep);
     gate_jets(&Nothing, &mut rep);
-    assert_eq!(rep.failed, rep.lines.len());
+    assert_eq!(rep.failed, rep.lines.iter().filter(|l| !l.starts_with("INFO")).count());
 }
 
 /// The band arithmetic and the G-V5 / G-P1 limits, on values on both sides of each limit (they need no fixture numbers).
