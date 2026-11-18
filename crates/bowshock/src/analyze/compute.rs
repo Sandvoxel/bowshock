@@ -846,6 +846,14 @@ impl Output {
     }
 }
 
+/// `BOWSHOCK_CFD_RESTRICT=1.0,1.7` (a diagnostic, for measuring a part of the table through the app): the Mach range a new analysis starts with, and the 3D angles
+/// start off (see [`restricted_range`] users). Unset or malformed: `None`.
+pub(crate) fn restricted_range() -> Option<(f64, f64)> {
+    let v = std::env::var("BOWSHOCK_CFD_RESTRICT").ok()?;
+    let (a, b) = v.split_once(',')?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1108,12 +1116,4 @@ mod tests {
         let t = Table { headers: vec!["a".into(), "b".into()], rows: vec![vec!["x, y".into(), "z".into()]] };
         assert_eq!(t.csv(), "a,b\n\"x, y\",z\n");
     }
-}
-
-/// `BOWSHOCK_CFD_RESTRICT=1.0,1.7` (a diagnostic, for measuring a part of the table through the app): the Mach range a new analysis starts with, and the 3D angles
-/// start off (see [`restricted_range`] users). Unset or malformed: `None`.
-pub(crate) fn restricted_range() -> Option<(f64, f64)> {
-    let v = std::env::var("BOWSHOCK_CFD_RESTRICT").ok()?;
-    let (a, b) = v.split_once(',')?;
-    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
 }
