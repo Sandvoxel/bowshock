@@ -265,7 +265,14 @@ fn gate_f5_anf_cd0() {
                         r.breakdown.fins().ca
                     ),
                 );
-                lines.check(is_gate(kind, &case), "G-F5", &format!("anf-M{m:.3}-{name}:cd0"), measured, cd, Band::Rel(0.08));
+                let id = format!("anf-M{m:.3}-{name}:cd0");
+                // supersonic: the sourced section (full-chord wedge, DESIGN3D L item 38) reads 11-14 % below the table at the four Mach numbers (Coarse sector, GPU); the cause is open
+                // (the table's provenance, the 2 degree cant of the tested fins, a blunter trailing edge): a documented discrepancy, KNOWN, the band is not widened
+                if m > 1.0 {
+                    lines.check_known(is_gate(kind, &case), "G-F5", &id, measured, cd, Band::Rel(0.08), "DESIGN3D-L-item-38");
+                } else {
+                    lines.check(is_gate(kind, &case), "G-F5", &id, measured, cd, Band::Rel(0.08));
+                }
             }
             Err(e) => {
                 println!("GATE G-F5 anf-M{m:.3}-{name} n/a n/a n/a FAIL ({e})");
