@@ -1,8 +1,111 @@
-# Release-candidate gate lines (DESIGN3D item 42). Candidate: cfd-3d 3ec6e84 (code), tools/release_gates.sh groups.
-# Each section names the snapshot that produced it; sections marked PENDING are the rc4-* gpuq jobs on 3ec6e84 (to be replaced by their logs).
+# Release-candidate gate lines (DESIGN3D item 42, HANDOFF3D.md). Candidate code: cfd-3d 3ec6e84; harness / docs on top: 562edd6.
+# The shared 3090 queue did not reach the rc3 / rc4 / rc5 jobs on the candidate in 3 h (prio 1 behind app-integrate's and others' long jobs; cancelled at hand-off),
+# so a single snapshot for the whole file does NOT exist. Every section names the snapshot it ran on; MISSING = not run on any snapshot of this candidate family.
 
-## wedge (GPU) -- snapshot 0922310 (before euler_wedge first-order fix, CFL controller default); rc4-wedge on 3ec6e84 PENDING
-GATE G-V2 plate-g2r n/a n/a n/a FAIL (plate: not implemented by the runner)
+## G-W1, G-W4, G-J (CPU f64)
+# snapshot 562edd6 (job: local CPU, /tmp/solver3d_rc5_cpu.log); G-W1 arcas M2.00 PASS after the euler_wedge fix of 3ec6e84; G-W4 smoke cases are INFO naming their covering tests
+INFO G-W1 table-euler-M0.50 not gated: the 2D reference stopped on the iteration cap (10000 iterations); wedge cd_total 0.054868 2D 0.133290
+INFO G-W1 table-euler-M0.90 not gated (transonic wake): wedge cd_total 0.173815 base 0.176273 2D cd_total 0.174802 base 0.177359
+GATE G-W1 table-euler-M1.30:cd_total 0.375416 0.375437 rel2%+abs0.002 PASS
+GATE G-W1 table-euler-M1.30:cd_nose 0.103930 0.103940 rel2%+abs0.002 PASS
+GATE G-W1 table-euler-M1.30:cd_aft0 -0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 table-euler-M1.30:cd_base 0.271485 0.271497 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M0.50:cd_total 0.073166 0.073151 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M0.50:cd_nose -0.004269 -0.004268 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M0.50:cd_aft0 -0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M0.50:cd_aft1 0.017345 0.017343 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M0.50:cd_base 0.060089 0.060076 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M0.90:cd_total 0.088580 0.089043 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M0.90:cd_nose -0.003514 -0.003051 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M0.90:cd_aft0 -0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M0.90:cd_aft1 0.036385 0.036085 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M0.90:cd_base 0.055709 0.056010 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M1.30:cd_total 0.283175 0.283187 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M1.30:cd_nose 0.103939 0.103949 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M1.30:cd_aft0 -0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M1.30:cd_aft1 0.047840 0.047843 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M1.30:cd_base 0.131396 0.131396 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M2.00:cd_total 0.238765 0.238770 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M2.00:cd_nose 0.096182 0.096190 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M2.00:cd_aft0 -0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M2.00:cd_aft1 0.029033 0.029034 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M2.00:cd_base 0.113550 0.113546 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M0.50:cd_total 0.039254 0.039238 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M0.50:cd_nose -0.001894 -0.001895 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M0.50:cd_aft0 -0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M0.50:cd_aft1 0.045099 0.045095 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M0.50:cd_base -0.003952 -0.003962 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M0.90:cd_total 0.110747 0.110516 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M0.90:cd_nose -0.001558 -0.001289 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M0.90:cd_aft0 -0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M0.90:cd_aft1 0.137833 0.137423 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M0.90:cd_base -0.025528 -0.025618 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M1.30:cd_total 0.241795 0.241807 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M1.30:cd_nose 0.046085 0.046090 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M1.30:cd_aft0 -0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M1.30:cd_aft1 0.153216 0.153225 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M1.30:cd_base 0.042494 0.042493 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M2.00:cd_total 0.188238 0.188246 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M2.00:cd_nose 0.043006 0.043010 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M2.00:cd_aft0 -0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M2.00:cd_aft1 0.085901 0.085905 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M2.00:cd_base 0.059331 0.059330 rel2%+abs0.002 PASS
+INFO window mean of 1500 iterations to 4010: CA 0.19835 oscillation 0.409
+INFO G-W1 euler-base-two-stage-46d-M0.50 not gated: the 2D reference stopped on the iteration cap (10000 iterations); wedge cd_total 0.107387 2D 0.117186
+INFO window mean of 1500 iterations to 4000: CA 0.38673 oscillation 0.010
+GATE G-W1 euler-base-two-stage-46d-M0.90:cd_total 0.194179 0.192105 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M0.90:cd_nose -2.4930e-4 -1.5357e-4 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M0.90:cd_aft0 0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M0.90:cd_aft1 0.033689 0.033464 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M0.90:cd_aft2 0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M0.90:cd_base 0.160739 0.158795 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M1.30:cd_total 0.415160 0.415230 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M1.30:cd_nose 0.020547 0.020549 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M1.30:cd_aft0 0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M1.30:cd_aft1 0.118890 0.118899 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M1.30:cd_aft2 -0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M1.30:cd_base 0.275723 0.275782 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M2.00:cd_total 0.315879 0.316337 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M2.00:cd_nose 0.019248 0.019250 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M2.00:cd_aft0 0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M2.00:cd_aft1 0.079231 0.079237 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M2.00:cd_aft2 0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M2.00:cd_base 0.217400 0.217850 rel2%+abs0.002 PASS
+GATE G-W4 cone-10deg-M2.0-coarse:cp 0.104099 0.104471 rel2% PASS
+GATE G-W4 cone-10deg-M2.0-coarse:beta_deg 31.252766 31.206091 abs0.2 PASS
+INFO cone 10 deg M 2 200x100: 400 iterations, CD stationary
+GATE G-W4 cone-10deg-M2.0-medium:cp 0.104328 0.104471 rel2% PASS
+GATE G-W4 cone-10deg-M2.0-medium:beta_deg 31.262978 31.206091 abs0.2 PASS
+INFO cone 15 deg M 2 100x50: 350 iterations, CD stationary
+GATE G-W4 cone-15deg-M2.0-coarse:cp 0.201678 0.202248 rel2% PASS
+GATE G-W4 cone-15deg-M2.0-coarse:beta_deg 33.993306 33.914698 abs0.2 PASS
+INFO cone 15 deg M 2 200x100: 400 iterations, CD stationary
+GATE G-W4 cone-15deg-M2.0-medium:cp 0.201938 0.202248 rel2% PASS
+GATE G-W4 cone-15deg-M2.0-medium:beta_deg 33.943883 33.914698 abs0.2 PASS
+INFO ogive M 1.98 level 0: 350 iterations, CD stationary; nose +0.09637 aft -0.00000 base +0.20740
+GATE G-W4 ogive-M1.98-level0:cd_forebody 0.096367 0.095648 rel2% PASS
+INFO ogive M 1.98 level 1: 450 iterations, CD stationary; nose +0.09718 aft -0.00000 base +0.21607
+GATE G-W4 ogive-M1.98-level1:cd_forebody 0.097182 0.096935 rel2% PASS
+INFO G-W4 w4-transonic-smoke-M0.90 not a harness runner check; covered by bowshock-cases tests subsonic / transonic (nextest: PASS) and subsonic::tests::subsonic_smoke_with_base (--ignored: PASS)
+INFO G-W4 w4-subsonic-smoke-M0.30-sting not a harness runner check; covered by bowshock-cases tests subsonic / transonic (nextest: PASS) and subsonic::tests::subsonic_smoke_with_base (--ignored: PASS)
+INFO G-W4 w4-subsonic-smoke-M0.20-base not a harness runner check; covered by bowshock-cases tests subsonic / transonic (nextest: PASS) and subsonic::tests::subsonic_smoke_with_base (--ignored: PASS)
+GATE G-J tp2005-M1.65-Me1.69:pb_over_pinf 1.053362 1.052957 abs0.02 PASS
+INFO window mean of 2000 iterations to 6000: CA 0.23668 oscillation 0.003
+GATE G-J tp2005-M1.65-Me1.97:pb_over_pinf 0.973270 0.974093 abs0.02 PASS
+INFO window mean of 2000 iterations to 6000: CA 0.26265 oscillation 0.002
+GATE G-J tp2005-M1.65-Me2.33:pb_over_pinf 0.838168 0.837859 abs0.02 PASS
+INFO window mean of 2000 iterations to 6000: CA 0.27372 oscillation 0.002
+GATE G-J tp2005-M1.65-Me2.53:pb_over_pinf 0.781636 0.780554 abs0.02 PASS
+GATE G-J tp2005-M2.00-Me1.69:pb_over_pinf 0.912717 0.912295 abs0.02 PASS
+GATE G-J tp2005-M2.00-Me1.97:pb_over_pinf 0.825761 0.825311 abs0.02 PASS
+GATE G-J tp2005-M2.00-Me2.33:pb_over_pinf 0.720221 0.719958 abs0.02 PASS
+GATE G-J tp2005-M2.00-Me2.53:pb_over_pinf 0.680204 0.680268 abs0.02 PASS
+GATE G-J tp2005-M2.50-Me1.69:pb_over_pinf 0.748046 0.748001 abs0.02 PASS
+GATE G-J tp2005-M2.50-Me1.97:pb_over_pinf 0.683746 0.683670 abs0.02 PASS
+GATE G-J tp2005-M2.50-Me2.53:pb_over_pinf 0.587671 0.587628 abs0.02 PASS
+
+## G-V3, G-V4, G-V5 (GPU wedge runner, f32/df32)
+# snapshot 0922310 (gpuq 0-20261117-173948-14374, 3090); G-V1 / G-V2 / G-P1 lines of that run (n/a FAIL, harness had no runner) removed: the harness prints INFO since 562edd6, NOT RUN on the GPU on a later snapshot; before the euler_wedge first-order fix (G-V4 table-euler rows at Mach >= 1.2 not re-run since)
 GATE G-V3 g3-cpu:cd_total 0.213279 0.213002 rel2% PASS
 GATE G-V3 g3-cpu:cd_friction 0.090042 0.090032 rel3% PASS
 GATE G-V3 g3-cpu:cd_base 0.122852 0.122572 rel4% PASS
@@ -115,7 +218,8 @@ GATE G-V5 sector-df32-implicit:state 3.2074e-7 1.0000e-4 max PASS
 GATE G-V5 sector-df32-implicit:k 0.000000 0.001000 max PASS
 GATE G-V5 sector-df32-implicit:omega 0.000000 0.001000 max PASS
 
-## lift (G-F5, G-L1, Lift tier GPU) -- snapshot 0922310; rc4-lift on 3ec6e84 PENDING
+## G-F5, G-L1 (Lift tier, GPU f32)
+# snapshot 0922310 (gpuq 0-20261117-173949-12378, 3090, 4311 s), sourced Finner section; before the CFL controller default (6d009f5)
 GATE G-F5 anf-M0.500-between:cd0 0.507728 0.460000 rel8% FAIL
 INFO G-F5 anf-M0.500-inplane:parts ca +0.5055 (12000 it, mean stationary), nose +0.0364 base +0.1564 fins +0.2232
 GATE G-F5 anf-M0.500-inplane:cd0 0.505526 0.460000 rel8% FAIL
@@ -187,92 +291,26 @@ GATE G-L1 ff-M2.665-inplane:cn_alpha 9.216153 8.880846 rel13% PASS
 GATE G-L1 ff-M2.665-inplane:x_cp 7.162722 7.293548 rel0%+abs0.25 PASS
 INFO G-L1 ff-M2.665-inplane:alpha6 CNa(6) 9.82 (+6.6 % of CNa(2)), x_cp(6) 7.098; 2500 it, CD stationary / 4750 it, CD stationary
 
-## cpu (G-W1, G-W4, G-V1, G-V2) -- tree 2bc06aa, CPU f64; G-F2 / G-F3 / G-J still running when this was written
-GATE G-V2 plate-g2r n/a n/a n/a FAIL (plate: not implemented by the runner)
-INFO G-W1 table-euler-M0.50 not gated: the 2D reference stopped on the iteration cap (10000 iterations); wedge cd_total 0.054868 2D 0.133290
-INFO G-W1 table-euler-M0.90 not gated (transonic wake): wedge cd_total 0.173815 base 0.176273 2D cd_total 0.174802 base 0.177359
-GATE G-W1 table-euler-M1.30:cd_total 0.375447 0.375437 rel2%+abs0.002 PASS
-GATE G-W1 table-euler-M1.30:cd_nose 0.103930 0.103940 rel2%+abs0.002 PASS
-GATE G-W1 table-euler-M1.30:cd_aft0 -0.000000 0.000000 rel2%+abs0.002 PASS
-GATE G-W1 table-euler-M1.30:cd_base 0.271517 0.271497 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-g3-transition-M0.50:cd_total 0.073166 0.073151 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-g3-transition-M0.50:cd_nose -0.004269 -0.004268 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-g3-transition-M0.50:cd_aft0 -0.000000 0.000000 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-g3-transition-M0.50:cd_aft1 0.017345 0.017343 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-g3-transition-M0.50:cd_base 0.060089 0.060076 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-g3-transition-M0.90:cd_total 0.088580 0.089043 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-g3-transition-M0.90:cd_nose -0.003514 -0.003051 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-g3-transition-M0.90:cd_aft0 -0.000000 0.000000 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-g3-transition-M0.90:cd_aft1 0.036385 0.036085 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-g3-transition-M0.90:cd_base 0.055709 0.056010 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-g3-transition-M1.30:cd_total 0.283175 0.283187 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-g3-transition-M1.30:cd_nose 0.103939 0.103949 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-g3-transition-M1.30:cd_aft0 -0.000000 0.000000 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-g3-transition-M1.30:cd_aft1 0.047840 0.047843 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-g3-transition-M1.30:cd_base 0.131396 0.131396 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-g3-transition-M2.00:cd_total 0.238765 0.238770 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-g3-transition-M2.00:cd_nose 0.096182 0.096190 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-g3-transition-M2.00:cd_aft0 -0.000000 0.000000 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-g3-transition-M2.00:cd_aft1 0.029033 0.029034 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-g3-transition-M2.00:cd_base 0.113551 0.113546 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-arcas-M0.50:cd_total 0.039254 0.039238 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-arcas-M0.50:cd_nose -0.001894 -0.001895 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-arcas-M0.50:cd_aft0 -0.000000 0.000000 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-arcas-M0.50:cd_aft1 0.045099 0.045095 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-arcas-M0.50:cd_base -0.003952 -0.003962 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-arcas-M0.90:cd_total 0.110747 0.110516 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-arcas-M0.90:cd_nose -0.001558 -0.001289 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-arcas-M0.90:cd_aft0 -0.000000 0.000000 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-arcas-M0.90:cd_aft1 0.137833 0.137423 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-arcas-M0.90:cd_base -0.025528 -0.025618 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-arcas-M1.30:cd_total 0.241792 0.241807 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-arcas-M1.30:cd_nose 0.046085 0.046090 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-arcas-M1.30:cd_aft0 -0.000000 0.000000 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-arcas-M1.30:cd_aft1 0.153216 0.153225 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-arcas-M1.30:cd_base 0.042491 0.042493 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-arcas-M2.00:cd_total 0.222837 0.188246 rel2%+abs0.002 FAIL
-GATE G-W1 euler-base-arcas-M2.00:cd_nose 0.043033 0.043010 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-arcas-M2.00:cd_aft0 -0.000000 0.000000 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-arcas-M2.00:cd_aft1 0.081463 0.085905 rel2%+abs0.002 FAIL
-GATE G-W1 euler-base-arcas-M2.00:cd_base 0.098340 0.059330 rel2%+abs0.002 FAIL
-INFO window mean of 1500 iterations to 4010: CA 0.19835 oscillation 0.409
-INFO G-W1 euler-base-two-stage-46d-M0.50 not gated: the 2D reference stopped on the iteration cap (10000 iterations); wedge cd_total 0.107387 2D 0.117186
-INFO window mean of 1500 iterations to 4000: CA 0.38673 oscillation 0.010
-GATE G-W1 euler-base-two-stage-46d-M0.90:cd_total 0.194179 0.192105 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-two-stage-46d-M0.90:cd_nose -2.4930e-4 -1.5357e-4 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-two-stage-46d-M0.90:cd_aft0 0.000000 0.000000 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-two-stage-46d-M0.90:cd_aft1 0.033689 0.033464 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-two-stage-46d-M0.90:cd_aft2 0.000000 0.000000 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-two-stage-46d-M0.90:cd_base 0.160739 0.158795 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-two-stage-46d-M1.30:cd_total 0.415171 0.415230 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-two-stage-46d-M1.30:cd_nose 0.020547 0.020549 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-two-stage-46d-M1.30:cd_aft0 0.000000 0.000000 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-two-stage-46d-M1.30:cd_aft1 0.118890 0.118899 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-two-stage-46d-M1.30:cd_aft2 -0.000000 0.000000 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-two-stage-46d-M1.30:cd_base 0.275734 0.275782 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-two-stage-46d-M2.00:cd_total 0.316862 0.316337 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-two-stage-46d-M2.00:cd_nose 0.019248 0.019250 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-two-stage-46d-M2.00:cd_aft0 0.000000 0.000000 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-two-stage-46d-M2.00:cd_aft1 0.079231 0.079237 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-two-stage-46d-M2.00:cd_aft2 0.000000 0.000000 rel2%+abs0.002 PASS
-GATE G-W1 euler-base-two-stage-46d-M2.00:cd_base 0.218383 0.217850 rel2%+abs0.002 PASS
-GATE G-W4 cone-10deg-M2.0-coarse:cp 0.104099 0.104471 rel2% PASS
-GATE G-W4 cone-10deg-M2.0-coarse:beta_deg 31.252768 31.206091 abs0.2 PASS
-INFO cone 10 deg M 2 200x100: 550 iterations, CD stationary
-GATE G-W4 cone-10deg-M2.0-medium:cp 0.104328 0.104471 rel2% PASS
-GATE G-W4 cone-10deg-M2.0-medium:beta_deg 31.262784 31.206091 abs0.2 PASS
-INFO cone 15 deg M 2 100x50: 550 iterations, CD stationary
-GATE G-W4 cone-15deg-M2.0-coarse:cp 0.201678 0.202248 rel2% PASS
-GATE G-W4 cone-15deg-M2.0-coarse:beta_deg 33.993306 33.914698 abs0.2 PASS
-INFO cone 15 deg M 2 200x100: 550 iterations, CD stationary
-GATE G-W4 cone-15deg-M2.0-medium:cp 0.201938 0.202248 rel2% PASS
-GATE G-W4 cone-15deg-M2.0-medium:beta_deg 33.943841 33.914698 abs0.2 PASS
-INFO ogive M 1.98 level 0: 550 iterations, CD stationary; nose +0.09637 aft -0.00000 base +0.20740
-GATE G-W4 ogive-M1.98-level0:cd_forebody 0.096367 0.095648 rel2% PASS
-INFO ogive M 1.98 level 1: 650 iterations, CD stationary; nose +0.09718 aft -0.00000 base +0.21603
-GATE G-W4 ogive-M1.98-level1:cd_forebody 0.097182 0.096935 rel2% PASS
-GATE G-W4 w4-transonic-smoke-M0.90 n/a n/a n/a FAIL (case2d: not implemented by the runner)
-GATE G-W4 w4-subsonic-smoke-M0.30-sting n/a n/a n/a FAIL (case2d: not implemented by the runner)
-GATE G-W4 w4-subsonic-smoke-M0.20-base n/a n/a n/a FAIL (case2d: not implemented by the runner)
-GATE G-W1 euler-base-arcas-M2.00:cd_total 0.188238 0.188246 rel2%+abs0.002 PASS   # after the euler_wedge fix (single case, BOWSHOCK_CPU_ONLY)
-GATE G-W1 euler-base-arcas-M2.00:cd_base 0.059331 0.059330 rel2%+abs0.002 PASS   # after the euler_wedge fix
+## G-S (sector vs half domain, Coarse, GPU f32)
+# snapshot 0922310-era tree of 15:13 (gpuq 0-20261117-151300-3912): cfl 10 on every viscous grid, sourced section; before the CFL controller default
+INFO G-S anf-N4-M0.8:parts sector total +0.51055 (nose +0.01610 base +0.17527 fins +0.17899; 9940 it, mean stationary), half +0.51470 (nose +0.01610 base +0.17583 fins +0.18331; 8370 it, mean stationary); nk 8 / 4
+GATE G-S anf-N4-M0.8:cd_total 0.510548 0.514698 rel1% PASS
+INFO G-S anf-N4-M2.0:parts sector total +0.48204 (nose +0.10634 base +0.16390 fins +0.11552; 6940 it, mean stationary), half +0.48590 (nose +0.10634 base +0.16397 fins +0.11965; 6350 it, mean stationary); nk 8 / 4
+GATE G-S anf-N4-M2.0:cd_total 0.482044 0.485898 rel1% PASS
+INFO G-S anf-N3-M0.8:parts sector total +0.44217 (nose +0.01626 base +0.16523 fins +0.13040; 9740 it, mean stationary), half +0.44402 (nose +0.01626 base +0.16561 fins +0.13224; 9260 it, mean stationary); nk 8 / 3
+GATE G-S anf-N3-M0.8:cd_total 0.442169 0.444024 rel1% PASS
+INFO G-S anf-N3-M2.0:parts sector total +0.45262 (nose +0.10658 base +0.16830 fins +0.08760; 6400 it, mean stationary), half +0.45405 (nose +0.10658 base +0.16833 fins +0.08919; 6060 it, mean stationary); nk 8 / 3
+GATE G-S anf-N3-M2.0:cd_total 0.452617 0.454054 rel1% PASS
+
+## G-F1 (Coarse sector, GPU f32)
+# snapshot b9d3501 (gpuq 0-20261117-154122-7481); the Mach 0.5 line is KNOWN since cfd-3d-gpu d609c95 (gpu3d: 0.9194 Coarse / 0.9278 Fine, grid independent), not re-run on 3ec6e84
+GATE G-F1 fin-friction-M0.5 0.013424 0.014593 ratio[0.92,1.12] FAIL
+GATE G-F1 fin-friction-M2.0 0.008205 0.008477 ratio[0.92,1.12] PASS
+
+## G-F4 (Arcas fins on/off): MISSING as GATE lines on this candidate. KNOWN markers in tests/fin_lift_gates.rs (Mach 1.5 / 1.8 fins-on and increment: FAIL KNOWN DESIGN3D-L-item-37). Last measurements: Coarse sector GPU job 0-20261117-164014-25405 (snapshot 75cc89d): Mach 1.5 fins off C_A 0.3243 (data 0.340), fins on 0.4169 (data 0.505), increment 0.0926 (data 0.165); gpu3d: Mach 1.8 fins on 0.4380 vs 0.438 data? see DESIGN3D item 37
+
+## G-F2, G-F3 (Euler fins, stack grids): MISSING on the candidate. Their meshes are bit-identical to earlier PASS runs for every built-in profile (grid3 test sharp_edges_keep_their_needle_and_blunt_ones_their_floor); the GPU run (rc5-fingates) and a CPU run (still running at 3 h under load) did not finish
+
+## bowshock-gpu-cases suite: last run by gpu3d on cfd-3d-gpu 73e91b4 (job suite2-gpucases, 57 tests 0 failed, per gpu3d's report); NOT RUN on the candidate (rc5-gpucases cancelled)
+
+## Not covered by the harness: G-V1 / G-V2 plates (bowshock-cfd plate3 unit tests, in the nextest run of the candidate: PASS), G-P1 finned table (bowshock-validate example finned_table, gpu3d, DESIGN3D item 41)
