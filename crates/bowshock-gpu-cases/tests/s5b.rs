@@ -197,7 +197,7 @@ fn low_mach_block_matches_cpu() {
 }
 
 /// DDADI and the dissipation boost on the viscous block scheme (`ImplicitParams::ddadi`, `lhs_dis_boost`): the laminar box (three directions, no-slip block and dead block cut the
-/// lines, static-pressure outflow) at Mach 0.3 and 2, `omega` 1 and 0.5 with the boost 0.35 and the boost alone, a steep ramp (CFL 3 -> 20, 10 without DDADI) so that the factorisation error is large;
+/// lines, static-pressure outflow) at Mach 0.3 and 2, `omega` 1 and 0.5 with the boost 0.35 and the boost alone, a steep ramp (CFL 3 -> 20; the boost-only rows, whose plain factors cannot take it, CFL 1 -> 4.3) so that the factorisation error is large;
 /// and Mach 0.1 with the low-Mach preconditioning (`D` between the factors where `P` stood). 30 iterations from the free stream, the targets of the plain block scheme.
 #[test]
 fn ddadi_block_matches_cpu() {
@@ -206,10 +206,10 @@ fn ddadi_block_matches_cpu() {
     let scheme = |ddadi: Option<f64>, boost: f64, precond: bool| {
         Scheme3::Implicit(ImplicitParams {
             line_solve: LineSolve3::Block,
-            cfl0: 3.0,
-            growth: 1.25,
-            // the plain factors (no DDADI) diverge on both sides at CFL 20 at Mach 2: the boost-only rows stop at 10
-            cfl_max: if ddadi.is_some() { 20.0 } else { 10.0 },
+            // the plain factors (no DDADI) diverge on both sides on the steep ramp at Mach 2: the boost-only rows use a gentle one (CFL 1 -> 4.3)
+            cfl0: if ddadi.is_some() { 3.0 } else { 1.0 },
+            growth: if ddadi.is_some() { 1.25 } else { 1.05 },
+            cfl_max: 20.0,
             low_mach_precond: precond,
             ddadi,
             lhs_dis_boost: boost,
