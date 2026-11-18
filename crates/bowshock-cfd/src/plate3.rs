@@ -455,6 +455,46 @@ mod tests {
         assert!((st.cf / corr - 1.0).abs() < 0.10, "G2r: skin friction off by {:.2} % from the Mills & Hang correlation", 100.0 * (st.cf / corr - 1.0));
     }
 
+    /// The rough plate G2r at the first-cell `y+` of the Coarse fin stack and above (the `y+` of the smooth first cell 0.5, 5, 15, 30 at the gate station), Mach 0.2 and 2: `cf` against
+    /// Mills & Hang and against the resolved (`y+` 0.5) run, and the wall state of the first cell at the gate station (`ks+`, `y+`, `k_w / u_tau^2`, `omega_w nu / u_tau^2`, `mu_t,w / mu`).
+    /// `ROUGH_SWEEP_MACH` (default `0.2,2.0`) and `ROUGH_SWEEP_YP` (default `0.5,5,15,30`) restrict it.
+    #[test]
+    #[ignore]
+    fn g2r_yplus_sweep() {
+        let list =
+            |key: &str, default: &str| -> Vec<f64> { std::env::var(key).unwrap_or_else(|_| default.into()).split(',').map(|v| v.parse().unwrap()).collect() };
+        for mach in list("ROUGH_SWEEP_MACH", "0.2,2.0") {
+            let mut base = f64::NAN;
+            for y in list("ROUGH_SWEEP_YP", "0.5,5,15,30") {
+                let mut case = PlateCase::g2r();
+                case.mach = mach;
+                case.grid.dr_wall = 4e-6 * y / 0.358;
+                let (s, info, _) = converge(&case, ImplicitParams::VISCOUS, 4.0, 12_000, 0.97);
+                let (st, _) = report(&s, &case, 0.97);
+                let r = s.rans().unwrap();
+                let c = s.grid.cell(st.col, case.j_first(), 0);
+                let (w, rho, mu) = (r.wall[c], s.prim(st.col, case.j_first(), 0)[0], r.mu[c]);
+                let nu = mu / rho;
+                let u_tau = (st.cf * 0.5 * s.cfg.freestream[0] * mach * mach / rho).abs().sqrt();
+                if base.is_nan() {
+                    base = st.cf;
+                }
+                println!(
+                    "G2r y+ sweep: M {mach}  target y+ {y:5.1}: cf {:.5e} vs resolved {:+7.2} %  vs Mills-Hang {:+7.2} %  | first cell y+ {:7.2} ks+ {:7.1} k_w+ {:6.3} omega_w+ {:9.3e} mu_t,w/mu {:8.2}  ({} its)",
+                    st.cf,
+                    100.0 * (st.cf / base - 1.0),
+                    100.0 * (st.cf / mills_hang(st.x, case.ks) - 1.0),
+                    st.y_plus,
+                    u_tau * case.ks / nu,
+                    w[0] / (u_tau * u_tau),
+                    w[1] * nu / (u_tau * u_tau),
+                    w[2] / mu,
+                    info.iters
+                );
+            }
+        }
+    }
+
     /// Run `case` under every `(name, line solve, preconditioning, cfl_max)` and print the iterations to the stop rule, the wall time and `cf` at the gate station.
     fn variants(case: &PlateCase, drop: f64, x_gate: f64, list: &[(&str, LineSolve3, bool, f64)]) {
         for &(name, line_solve, low_mach_precond, cfl_max) in list {

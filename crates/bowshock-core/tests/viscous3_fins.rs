@@ -432,7 +432,14 @@ fn rocket_sector_case(mach: f64) -> Case3 {
         profile,
         planform: None,
     };
-    let flow = WallFlow { re_c: 1.7e6, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0, sutherland: bowshock_core::engine::case3::SUTHERLAND_SEA_LEVEL };
+    // `KS_BODY`, `KS_FIN`: the sand-grain roughness of the body and of the fins in nose diameters (d = 0.0762 m: 60 um = 7.87e-4), smooth by default
+    let flow = WallFlow {
+        re_c: 1.7e6,
+        mach_max: 3.0,
+        ks_body: env("KS_BODY", 0.0),
+        ks_fin: env("KS_FIN", 0.0),
+        sutherland: bowshock_core::engine::case3::SUTHERLAND_SEA_LEVEL,
+    };
     let tier = match std::env::var("TIER").as_deref() {
         Ok("coarse") => Tier::Coarse(flow),
         _ => Tier::draft(flow),
@@ -584,6 +591,25 @@ fn fin_half_incidence_series() {
         "  result: {:?} after {} iterations: CN {:.5} CA {:.5} x_cp {:.4} y+ max (n/a) window {:?}",
         result.stop_reason, result.iterations, result.cn, result.ca, result.x_cp, result.window
     );
+    {
+        let d = run3::drag_parts_on(&case, &s);
+        println!(
+            "  drag parts: total {:.5} friction {:.5} (body {:.5}, fin {:.5} = sides {:.5} + edges {:.5} + tips {:.5}) base {:.5} nose {:.5}",
+            d.total,
+            d.friction.total,
+            d.body_friction(),
+            d.fin_friction(),
+            d.friction.fin_sides,
+            d.friction.fin_edges,
+            d.friction.fin_tips,
+            d.base,
+            d.nose
+        );
+    }
+    let top: usize = env("WALL_REPORT", 0);
+    if top > 0 {
+        wall_report(&s, top);
+    }
     // the oscillation of each force over the last windows of 500 / 1000 / 2000 iterations: mean and half range / |mean|
     for w in [500usize, 1000, 2000] {
         let tail: Vec<_> = series.iter().filter(|(i, ..)| *i + w > it).collect();
@@ -609,6 +635,72 @@ fn fin_half_incidence_series() {
             xc.1,
             100.0 * xc.2
         );
+    }
+}
+
+/// The `top` no-slip faces of highest `y+` of the state of `s` (`y+ = d u_tau / nu`, `d` the wall distance of the fluid cell's centroid, `u_tau` from the traction of the face) with the
+/// wall state of their cell: where they are, the roughness, `ks+`, the cell speed and `Re_d`, `k_w / u_tau^2`, `omega_w nu / u_tau^2` and `mu_t,w / mu`; then the same for the
+/// largest friction coefficient and, per class of face (`body` / `fin side` / `fin edge` / `fin tip`), the number of faces and the largest `mu_t,w / mu`.
+fn wall_report(s: &Solver3, top: usize) {
+    use bowshock_cfd::grid3::PART_FLUID;
+    let (g, r) = (&s.grid, s.rans().expect("viscous"));
+    let q_inf = 0.5 * s.cfg.freestream[0] * s.cfg.freestream[1] * s.cfg.freestream[1];
+    let mut rows: Vec<(f64, String, String)> = Vec::new();
+    for t in s.wall_tractions() {
+        let [i, j, k] = t.idx;
+        let e = [(1usize, 0usize, 0usize), (0, 1, 0), (0, 0, 1)][t.dir];
+        let n = [g.ni, g.nj, g.nk][t.dir];
+        let hi = (i < g.ni && j < g.nj && k < g.nk).then(|| g.cell(i, j, k)).filter(|&c| g.part[c] == PART_FLUID && [i, j, k][t.dir] < n);
+        let lo = ([i, j, k][t.dir] > 0).then(|| g.cell(i - e.0, j - e.1, k - e.2)).filter(|&c| g.part[c] == PART_FLUID);
+        let Some(c) = hi.or(lo) else { continue };
+        // the part behind the face
+        let behind =
+            if Some(c) == hi { (lo.is_none() && [i, j, k][t.dir] > 0).then(|| g.part_of(i - e.0, j - e.1, k - e.2)).flatten() } else { g.part_of(i, j, k) };
+        let class = match (t.dir, behind) {
+            (_, Some(Part::Fin(_))) => ["fin LE/TE", "fin tip", "fin side"][t.dir],
+            (_, Some(Part::Body(_))) => "body",
+            (_, Some(p)) => {
+                if matches!(p, Part::Sting) {
+                    "sting"
+                } else {
+                    "other"
+                }
+            }
+            _ => "?",
+        };
+        let w = s.prim(c % g.ni, (c / g.ni) % g.nj, c / (g.ni * g.nj));
+        let (rho, mu, d) = (w[0], r.mu[c], r.dwall[c]);
+        let nu = mu / rho;
+        let tau = (t.tau[0].powi(2) + t.tau[1].powi(2) + t.tau[2].powi(2)).sqrt();
+        let u_tau = (tau / rho).sqrt();
+        let ks = r.ks.get(c).copied().unwrap_or(0.0);
+        let speed = (w[1] * w[1] + w[2] * w[2] + w[3] * w[3]).sqrt();
+        let ws = r.wall[c];
+        let line = format!(
+            "{class:9} {}  d {d:.2e} ks {ks:.2e}  y+ {:9.2} ks+ {:8.1}  U {speed:.3} Re_d {:8.1}  cf {:.5}  k_w+ {:.3} omega_w+ {:.3e} mu_t,w/mu {:.3e}",
+            cell_place(g, c),
+            d * u_tau / nu,
+            ks * u_tau / nu,
+            d * speed / nu,
+            tau / q_inf,
+            ws[0] / (u_tau * u_tau),
+            ws[1] * nu / (u_tau * u_tau),
+            ws[2] / mu
+        );
+        rows.push((d * u_tau / nu, class.to_string(), line));
+    }
+    rows.sort_by(|a, b| b.0.total_cmp(&a.0));
+    println!("  wall report: {} faces; the {top} of highest y+:", rows.len());
+    for (_, _, l) in rows.iter().take(top) {
+        println!("    {l}");
+    }
+    for class in ["body", "fin side", "fin LE/TE", "fin tip", "sting", "other", "?"] {
+        let ys: Vec<f64> = rows.iter().filter(|r| r.1 == class).map(|r| r.0).collect();
+        if !ys.is_empty() {
+            let mut v = ys.clone();
+            v.sort_by(f64::total_cmp);
+            println!("    {class:10}: {:6} faces, y+ median {:8.2} 90 % {:8.2} max {:10.2}", v.len(), v[v.len() / 2], v[v.len() * 9 / 10], v[v.len() - 1]);
+        }
     }
 }
 
