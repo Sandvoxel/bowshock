@@ -629,9 +629,10 @@ mod thermal_tests {
     }
 
     /// A laminar isothermal plate at Mach 2 against the reference-temperature Blasius: the cold wall (`T_w = T_inf`, well below the adiabatic `T_aw = 1.68`) has a friction
-    /// coefficient above the adiabatic plate's by `sqrt(C*_cold / C*_adiabatic)` (about 1.15 here). The method's own accuracy (the `T*` fit, the induced pressure of the weak
-    /// interaction that the edge state leaves out) is what the 6 % absolute and 3 % ratio bounds allow. The cold plate takes heat out of the fluid (`kappa dT/dy > 0`
-    /// at its wall), the adiabatic plate has none.
+    /// coefficient above the adiabatic plate's by `sqrt(C*_cold / C*_adiabatic)` (1.037 here: the Chapman-Rubesin factor `rho mu` falls with `T` almost as fast as the edge
+    /// shear grows, so the cold wall's friction is only slightly higher); measured on this grid: both `cf` within 0.5 % of the reference at both stations, the ratio within 0.4 %. The
+    /// wall heat flux is the Reynolds analogy's `q_w = rho_e u_e c_p St (T_aw - T_w)`, `St = cf / (2 Pr^(2/3))` (measured within 0.5 %), taken out of the fluid
+    /// (`kappa dT/dy > 0` at the cold wall); the adiabatic plate has none.
     #[test]
     fn isothermal_laminar_plate_follows_the_reference_temperature_blasius() {
         let adiabatic = supersonic_plate(WallThermal::Adiabatic);
@@ -649,17 +650,19 @@ mod thermal_tests {
                 cf_c[n] / cf_a[n],
                 ref_c / ref_a
             );
-            assert!((cf_a[n] / ref_a - 1.0).abs() < 0.06, "adiabatic plate x = {x}: cf {:.5e} against {ref_a:.5e}", cf_a[n]);
-            assert!((cf_c[n] / ref_c - 1.0).abs() < 0.06, "cold plate x = {x}: cf {:.5e} against {ref_c:.5e}", cf_c[n]);
+            assert!((cf_a[n] / ref_a - 1.0).abs() < 0.02, "adiabatic plate x = {x}: cf {:.5e} against {ref_a:.5e}", cf_a[n]);
+            assert!((cf_c[n] / ref_c - 1.0).abs() < 0.02, "cold plate x = {x}: cf {:.5e} against {ref_c:.5e}", cf_c[n]);
             assert!(
-                (cf_c[n] / cf_a[n] / (ref_c / ref_a) - 1.0).abs() < 0.03,
+                (cf_c[n] / cf_a[n] / (ref_c / ref_a) - 1.0).abs() < 0.01,
                 "cold / adiabatic ratio x = {x}: {:.4} against {:.4}",
                 cf_c[n] / cf_a[n],
                 ref_c / ref_a
             );
         }
-        println!("wall energy flux Fv[4] at x = 0.5: adiabatic {q_a:.3e}, cold {q_c:.3e}");
-        assert!(q_c > 0.0, "the cold wall must pull heat out of the fluid: kappa dT/dy = {q_c}");
+        let t_aw = 1.0 + PRANDTL.sqrt() * 0.5 * (GAMMA - 1.0) * cold.mach * cold.mach;
+        let q_analogy = cold.mach / (GAMMA - 1.0) * (t_aw - 1.0) * (0.5 * cf_c[0]) / PRANDTL.powf(2.0 / 3.0);
+        println!("wall energy flux Fv[4] at x = 0.5: adiabatic {q_a:.3e}, cold {q_c:.3e}, Reynolds analogy {q_analogy:.3e}");
+        assert!((q_c / q_analogy - 1.0).abs() < 0.05, "the cold wall's heat flux {q_c:.4e} against the Reynolds analogy {q_analogy:.4e}");
         assert!(q_a.abs() < 1e-2 * q_c, "adiabatic wall energy flux {q_a} against the cold {q_c}");
     }
 }
