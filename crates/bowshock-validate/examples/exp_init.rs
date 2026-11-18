@@ -39,10 +39,10 @@ fn example_fins() -> Fins3 {
     }
 }
 
-fn with_progress(mut case: Case3, label: &'static str) -> Case3 {
+fn with_progress(mut case: Case3, label: &'static str, every: usize) -> Case3 {
     case.progress = Some(ProgressSink::new(move |p| {
-        if p.iteration % 500 == 0 {
-            println!("PROG {label} it {} cd {:.5} drop {:.2}", p.iteration, p.monitor, p.residual_drop_orders);
+        if p.iteration % every == 0 {
+            println!("PROG {label} it {} cd {:.6} drop {:.2}", p.iteration, p.monitor, p.residual_drop_orders);
         }
         ControlFlow::Continue(())
     }));
@@ -77,8 +77,15 @@ fn main() -> Result<(), String> {
     if let Some(n) = value("--first-order") {
         sector.numerics.first_order_iters = n.parse().map_err(|e| format!("--first-order: {e}"))?;
     }
-    let sector = with_progress(sector, "sector");
-    let wedge = with_progress(wedge, "wedge");
+    // `--fixed N`: the sector runs exactly N iterations (every stop rule off: no range rule, no mean rule) and reports its CD monitor every 50
+    let fixed: Option<usize> = value("--fixed").map(|v| v.parse()).transpose().map_err(|e| format!("--fixed: {e}"))?;
+    if let Some(n) = fixed {
+        sector.numerics.max_iter = n;
+        sector.numerics.rel_tol = -1.0;
+        sector.numerics.mean_window = 0;
+    }
+    let sector = with_progress(sector, "sector", if fixed.is_some() { 50 } else { 500 });
+    let wedge = with_progress(wedge, "wedge", 500);
 
     let t_total = Instant::now();
     let (mut wedge_iters, mut wedge_s) = (0usize, 0.0f64);
@@ -111,6 +118,7 @@ fn main() -> Result<(), String> {
         runner.gpu.set_state_turb(&m.u, Some(&m.turb)).map_err(|e| e.to_string())?;
     }
     let p = runner.run_on(&sector, !cold).map_err(|e| e.to_string())?;
+    println!("CN {:.3e} (zero incidence: the monitor of the PROG lines is CA = CD)", p.cn);
     let d = runner.drag_parts(&sector).map_err(|e| e.to_string())?;
     let sector_s = sector_t0.elapsed().as_secs_f64();
     let total_s = t_total.elapsed().as_secs_f64();
