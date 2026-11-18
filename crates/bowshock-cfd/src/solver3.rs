@@ -168,6 +168,29 @@ impl Solver3 {
         self.ramp_k = 0;
     }
 
+    /// The CFL of the next implicit step: the ramp's `cfl0 growth^k` capped at `cfl_max` (as [`crate::implicit3`]'s step takes it); `NaN` for the explicit scheme.
+    pub fn current_cfl(&self) -> f64 {
+        match &self.cfg.scheme {
+            Scheme3::Implicit(p) => (p.cfl0 * p.growth.powi(self.ramp_k.min(10_000) as i32)).min(p.cfl_max),
+            Scheme3::Explicit => f64::NAN,
+        }
+    }
+
+    /// The `cfl_max` of the implicit scheme (the CFL of the explicit one).
+    pub fn cfl_cap(&self) -> f64 {
+        match &self.cfg.scheme {
+            Scheme3::Implicit(p) => p.cfl_max,
+            Scheme3::Explicit => self.cfg.cfl,
+        }
+    }
+
+    /// Sets the `cfl_max` of the implicit scheme (the CFL controller lowers it after a failure); nothing for the explicit scheme.
+    pub fn set_cfl_cap(&mut self, cap: f64) {
+        if let Scheme3::Implicit(p) = &mut self.cfg.scheme {
+            p.cfl_max = cap;
+        }
+    }
+
     /// A copy of the state that evolves (the conserved variables, the turbulence variables, the CFL ramp and the iteration count) to come back to with [`Solver3::restore`].
     pub fn snapshot(&self) -> Snapshot3 {
         Snapshot3 { u: self.u.clone(), turb: self.rans.as_ref().map(|r| r.turb.clone()), ramp_k: self.ramp_k, iter: self.iter }
