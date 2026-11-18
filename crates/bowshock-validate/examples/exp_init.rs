@@ -9,8 +9,8 @@
 //! One `INIT {json}` line at the end; `PROG` lines every 500 iterations of the sector (its stop-rule monitor: CD).
 
 use bowshock_cfd::gpu::Precision;
-use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
 use bowshock_core::engine::axisym_init::axisym_to_sector;
+use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
 use bowshock_core::engine::case3::{Case3, Tier, WallFlow, SUTHERLAND_SEA_LEVEL};
 use bowshock_core::engine::gpu3::GpuRunner3;
 use bowshock_core::engine::grid3::Fins3;

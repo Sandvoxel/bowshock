@@ -156,13 +156,7 @@ fn main() -> Result<(), String> {
     let (lo, hi) = tail.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), &c| (l.min(c), h.max(c)));
     let w = r.window;
     let bd = runner.breakdown(&case).map_err(|e| format!("{e}"))?;
-    let split = format!(
-        "{{\"nose\":{:.5},\"afterbody\":{:.5},\"fins\":{:.5},\"x_cp_fins\":{:.4}}}",
-        bd.nose.cn,
-        bd.afterbody.cn,
-        bd.fins().cn,
-        bd.fins().x_cp
-    );
+    let split = format!("{{\"nose\":{:.5},\"afterbody\":{:.5},\"fins\":{:.5},\"x_cp_fins\":{:.4}}}", bd.nose.cn, bd.afterbody.cn, bd.fins().cn, bd.fins().x_cp);
     println!(
         "INCIDENCE {{\"mach\":{mach},\"alpha_deg\":{alpha},\"tier\":\"{}\",\"cfl_max\":{},\"sub_iters\":{},\"roe\":{},\"precision\":\"{pname}\",\"iterations\":{},\"stop\":\"{:?}\",\"drop_orders\":{:.2},\"cn\":{:.5},\"ca\":{:.5},\"x_cp\":{:.4},\"cn_parts\":{split},\"window\":{},\"cn_last1000_half_range_rel\":{:.4},\"y_plus_max\":{:.1},\"wall_s\":{wall:.1},\"ms_per_iter\":{:.2}}}",
         value("--tier").unwrap_or_else(|| "lift".into()),

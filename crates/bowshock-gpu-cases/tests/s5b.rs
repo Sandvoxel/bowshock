@@ -219,7 +219,9 @@ fn ddadi_block_matches_cpu() {
     for (mach, re, precond) in [(0.3, 500.0, false), (2.0, 2e3, false), (0.1, 500.0, true)] {
         let v = viscous(Turbulence::Laminar, re);
         let pre = if precond { " + P" } else { "" };
-        for (tag, ddadi, boost) in [("ddadi 1 + boost 0.35", Some(1.0), 0.35), ("ddadi 0.5 + boost 0.35", Some(0.5), 0.35), ("ddadi 0.5", Some(0.5), 0.0), ("boost 0.35", None, 0.35)] {
+        for (tag, ddadi, boost) in
+            [("ddadi 1 + boost 0.35", Some(1.0), 0.35), ("ddadi 0.5 + boost 0.35", Some(0.5), 0.35), ("ddadi 0.5", Some(0.5), 0.0), ("boost 0.35", None, 0.35)]
+        {
             compare(&format!("laminar M {mach} Re {re} {tag}{pre}"), &g, mach, scheme(ddadi, boost, precond), v, 30, IMPLICIT, &mut rows);
         }
     }

@@ -859,7 +859,12 @@ fn engine3d_incidence_stop_rule() {
         let f = p.forces.expect("forces");
         println!(
             "INC M {mach} its {} stop {:?} wall {wall:.1} s CN {:.5} x_cp {:.4} m {:.4} cal quality {:?}",
-            p.detail.iterations, p.detail.stop_reason, f.cn, f.x_cp, f.x_cp / cal, p.quality
+            p.detail.iterations,
+            p.detail.stop_reason,
+            f.cn,
+            f.x_cp,
+            f.x_cp / cal,
+            p.quality
         );
     }
 }

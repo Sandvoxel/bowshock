@@ -1269,7 +1269,9 @@ fn lift_quality(d: &PointResult3) -> Quality {
     }
     match d.stop_reason {
         StopReason::ResidualDrop => Quality::Converged,
-        StopReason::CdStationary | StopReason::MeanStationary | StopReason::Settled | StopReason::BasePressureStationary | StopReason::ResidualPlateau => Quality::Stationary,
+        StopReason::CdStationary | StopReason::MeanStationary | StopReason::Settled | StopReason::BasePressureStationary | StopReason::ResidualPlateau => {
+            Quality::Stationary
+        }
         StopReason::MaxIterations => Quality::Stalled,
         StopReason::NonFinite | StopReason::Cancelled => Quality::Failed,
     }
@@ -1549,7 +1551,9 @@ fn quality(d: &PointResult, drag: &Drag) -> Quality {
     }
     match d.stop_reason {
         StopReason::ResidualDrop => Quality::Converged,
-        StopReason::CdStationary | StopReason::MeanStationary | StopReason::Settled | StopReason::BasePressureStationary | StopReason::ResidualPlateau => Quality::Stationary,
+        StopReason::CdStationary | StopReason::MeanStationary | StopReason::Settled | StopReason::BasePressureStationary | StopReason::ResidualPlateau => {
+            Quality::Stationary
+        }
         StopReason::MaxIterations => Quality::Stalled,
         StopReason::NonFinite | StopReason::Cancelled => Quality::Failed,
     }

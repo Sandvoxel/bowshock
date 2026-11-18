@@ -150,9 +150,7 @@ impl<S: Clone> CflControl<S> {
         let cap = before * CFL_BACKOFF;
         let from = match self.restored_at.filter(|&r| iteration <= r + REPEAT_WITHIN) {
             // a repeat: past the state restored last time, to the latest that came from a CFL the new cap allows (the oldest if none did)
-            Some(r) => {
-                self.snaps.iter().rposition(|s| s.1 < r && s.2 <= cap).or_else(|| self.snaps.iter().position(|s| s.1 < r)).unwrap_or(0)
-            }
+            Some(r) => self.snaps.iter().rposition(|s| s.1 < r && s.2 <= cap).or_else(|| self.snaps.iter().position(|s| s.1 < r)).unwrap_or(0),
             None => self.snaps.len() - 1,
         };
         self.snaps.truncate(from + 1);

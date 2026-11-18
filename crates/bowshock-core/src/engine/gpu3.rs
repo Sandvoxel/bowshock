@@ -7,8 +7,8 @@
 
 use crate::engine::case3::Case3;
 use crate::engine::run3::{
-    breakdown_from, coefficients, collapsed, drag_parts_from, forces_from, wall_class, wall_faces, zero_incidence, CflControl, CflEvent, DragParts, LiftBreakdown,
-    LiftForces, PointResult3, StopRule3, Wall, WallForces, MEAN_EVERY, ROLLBACK_RESIDUAL, SAMPLE_EVERY,
+    breakdown_from, coefficients, collapsed, drag_parts_from, forces_from, wall_class, wall_faces, zero_incidence, CflControl, CflEvent, DragParts,
+    LiftBreakdown, LiftForces, PointResult3, StopRule3, Wall, WallForces, MEAN_EVERY, ROLLBACK_RESIDUAL, SAMPLE_EVERY,
 };
 use crate::engine::timing::{record_timing, PointTiming};
 use crate::error::Error;

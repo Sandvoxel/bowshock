@@ -48,14 +48,24 @@ fn hook(c: &mut solver::engine::case3::Case3) {
                     continue;
                 }
                 let [rho, _, _, _, p] = f.prim[c].map(|v| v as f64);
-                if rho < rho_lo.0 { rho_lo = (rho, c); }
-                if p < p_lo.0 { p_lo = (p, c); }
-                if rho > rho_hi.0 { rho_hi = (rho, c); }
-                if p > p_hi.0 { p_hi = (p, c); }
+                if rho < rho_lo.0 {
+                    rho_lo = (rho, c);
+                }
+                if p < p_lo.0 {
+                    p_lo = (p, c);
+                }
+                if rho > rho_hi.0 {
+                    rho_hi = (rho, c);
+                }
+                if p > p_hi.0 {
+                    p_hi = (p, c);
+                }
                 let (i, j) = (c % f.ni, (c / f.ni) % f.nj);
                 if i == 0 || i == f.ni - 1 || j == f.nj - 1 {
                     let d = (p / fs[4] - 1.0).abs();
-                    if d > dp_far.0 { dp_far = (d, c); }
+                    if d > dp_far.0 {
+                        dp_far = (d, c);
+                    }
                 }
             }
             let at = |c: usize| {
@@ -65,7 +75,17 @@ fn hook(c: &mut solver::engine::case3::Case3) {
             };
             println!(
                 "SNAP it {} rho_min {:.3e} {} | p_min {:.3e} {} | rho_max {:.3} {} | p_max {:.3} {} | far dp {:.3e} {}",
-                f.iteration, rho_lo.0, at(rho_lo.1), p_lo.0, at(p_lo.1), rho_hi.0, at(rho_hi.1), p_hi.0, at(p_hi.1), dp_far.0, at(dp_far.1)
+                f.iteration,
+                rho_lo.0,
+                at(rho_lo.1),
+                p_lo.0,
+                at(p_lo.1),
+                rho_hi.0,
+                at(rho_hi.1),
+                p_hi.0,
+                at(p_hi.1),
+                dp_far.0,
+                at(dp_far.1)
             );
         }));
     }

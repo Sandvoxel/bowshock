@@ -308,7 +308,10 @@ fn gate_f5_anf_cd0() {
                     lines.info(
                         "G-F5",
                         &format!("anf-M{m:.3}-{name}:cd0-pooled"),
-                        &format!("measured {measured:.4} vs DREV-TM-9703 Table IX pooled (cant 0/2/4) {pooled:.4} at this Mach: {:+.1} %", 100.0 * (measured / pooled - 1.0)),
+                        &format!(
+                            "measured {measured:.4} vs DREV-TM-9703 Table IX pooled (cant 0/2/4) {pooled:.4} at this Mach: {:+.1} %",
+                            100.0 * (measured / pooled - 1.0)
+                        ),
                     );
                 }
                 // supersonic: the sourced section (full-chord wedge, DESIGN3D L item 38) reads 9-12 % below the pooled table; against the zero-cant single fits the discrepancy is
@@ -317,7 +320,10 @@ fn gate_f5_anf_cd0() {
                     lines.info(
                         "G-F5",
                         &format!("anf-M{m:.3}-{name}:cd0-tunnel"),
-                        &format!("measured {measured:.4} vs ARL-TR-6725 Fig. 5 sting-mounted tunnel {cd:.3} (+-0.015): {:+.1} %", 100.0 * (measured / cd - 1.0)),
+                        &format!(
+                            "measured {measured:.4} vs ARL-TR-6725 Fig. 5 sting-mounted tunnel {cd:.3} (+-0.015): {:+.1} %",
+                            100.0 * (measured / cd - 1.0)
+                        ),
                     );
                 } else if m > 1.0 {
                     lines.check_known(is_gate(kind, &case), "G-F5", &id, measured, cd, Band::Rel(0.08), "DESIGN3D-L-item-38");

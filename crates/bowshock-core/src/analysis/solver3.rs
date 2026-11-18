@@ -25,15 +25,15 @@
 //! (`solves_3d`, `shared_grid`).
 
 use super::*;
+use crate::engine::axisym_init::{axisym_to_sector, AxisymInit};
 use crate::engine::case3::{Tier, WallFlow};
-use bowshock_cfd::sst::WallThermal;
 use crate::engine::field3::field3_of;
 use crate::engine::grid3::Fins3;
 use crate::engine::planform::Planform;
 use crate::engine::run3::{drag_parts_on, wall_faces, wall_samples, DragParts, Wall};
-use crate::engine::axisym_init::{axisym_to_sector, AxisymInit};
 use bowshock_cfd::gas3::{cons_to_prim3, prim_to_cons3, Cons3};
 use bowshock_cfd::grid3::{Grid3, PART_FLUID};
+use bowshock_cfd::sst::WallThermal;
 
 /// The solved domain of a condition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,7 +167,8 @@ impl Seed {
             let w = cons_to_prim3(&u[c]);
             w.iter().all(|x| x.is_finite()) && w[0] > 0.0 && w[4] > 0.0
         };
-        let fine = (0..u.len()).filter(|&c| grid.part[c] == PART_FLUID).all(sound) && turb.as_ref().is_none_or(|t| t.iter().all(|x| x.iter().all(|v| v.is_finite())));
+        let fine =
+            (0..u.len()).filter(|&c| grid.part[c] == PART_FLUID).all(sound) && turb.as_ref().is_none_or(|t| t.iter().all(|x| x.iter().all(|v| v.is_finite())));
         (lift_quality(r) != Quality::Failed && fine).then_some(Seed { grid, u, turb, iterations: r.iterations })
     }
 
@@ -386,7 +387,9 @@ fn quality3(stop: StopReason, mach: f64, min_rho: f64, min_p: f64, finite: bool,
     }
     match stop {
         StopReason::ResidualDrop => Quality::Converged,
-        StopReason::CdStationary | StopReason::MeanStationary | StopReason::Settled | StopReason::BasePressureStationary | StopReason::ResidualPlateau => Quality::Stationary,
+        StopReason::CdStationary | StopReason::MeanStationary | StopReason::Settled | StopReason::BasePressureStationary | StopReason::ResidualPlateau => {
+            Quality::Stationary
+        }
         StopReason::MaxIterations => Quality::Stalled,
         StopReason::NonFinite | StopReason::Cancelled => Quality::Failed,
     }
@@ -918,7 +921,8 @@ mod tests {
     fn tiny_finned() -> Analysis {
         const D: f64 = 0.04;
         let nose_len = 0.5 * D / 10f64.to_radians().tan();
-        let spec = BodySpec { nose: NoseSpec { shape: NoseShape::Cone, length: nose_len, diameter: D }, aft: vec![AftSpec::Tube { length: 10.0 * D - nose_len }] };
+        let spec =
+            BodySpec { nose: NoseSpec { shape: NoseShape::Cone, length: nose_len, diameter: D }, aft: vec![AftSpec::Tube { length: 10.0 * D - nose_len }] };
         let fins = crate::spec::FinSpec {
             count: 4,
             root_chord: D,
@@ -984,7 +988,10 @@ mod tests {
         let seed = Cpu3.seed(&wedge).unwrap().expect("the wedge converges");
         let (cold, _) = Cpu3.cold(&sector).unwrap();
         let (seeded, _) = Cpu3.cold_from(&sector, &seed).unwrap();
-        println!("wedge {} iterations; sector cold {} ({:?}) CA {:.5}, seeded {} ({:?}) CA {:.5}", seed.iterations, cold.iterations, cold.stop_reason, cold.ca, seeded.iterations, seeded.stop_reason, seeded.ca);
+        println!(
+            "wedge {} iterations; sector cold {} ({:?}) CA {:.5}, seeded {} ({:?}) CA {:.5}",
+            seed.iterations, cold.iterations, cold.stop_reason, cold.ca, seeded.iterations, seeded.stop_reason, seeded.ca
+        );
         assert!(matches!(lift_quality(&seeded), Quality::Converged | Quality::Stationary));
         assert!((seeded.ca / cold.ca - 1.0).abs() < 0.01, "CA {} vs {}", seeded.ca, cold.ca);
     }

@@ -431,7 +431,16 @@ fn sector_layers(nk: usize, big: f64, n: usize) -> Result<Layers, Error> {
         return Err(Error::Grid(format!("a sector needs nk >= {}", c + 2)));
     }
     let gaps = vec![0, nk - c];
-    Ok(Layers { theta_f: vec![0.0], half_first: true, half_last: false, gap_frac: uniform_fractions(&gaps), gaps, k_f: vec![0], n_f: vec![c], cell_ang: big / nk as f64 })
+    Ok(Layers {
+        theta_f: vec![0.0],
+        half_first: true,
+        half_last: false,
+        gap_frac: uniform_fractions(&gaps),
+        gaps,
+        k_f: vec![0],
+        n_f: vec![c],
+        cell_ang: big / nk as f64,
+    })
 }
 
 /// Cell heights of a stack that starts with `h1` at a wall and grows by `growth_bl` until it is `delta` high and by `growth_out` beyond, over a gap of height
@@ -1932,19 +1941,19 @@ mod tests {
         stacked_in_plane.fin_stack = Some(stack);
         stacked_in_plane.domain = Domain3::Half { phase: FinPhase::InPlane };
         let coarse = Case3::sector(2.0, Case3::anf_body(), Case3::anf_fins(), Tier::Coarse(fl), 0).grid;
-        let all = [
-            params(0, Some(anf_fins(FinProfile::Square))),
-            params(0, Some(three)),
-            sector,
-            stacked_sector,
-            stacked_half,
-            stacked_in_plane,
-            coarse,
-        ];
+        let all = [params(0, Some(anf_fins(FinProfile::Square))), params(0, Some(three)), sector, stacked_sector, stacked_half, stacked_in_plane, coarse];
         let got: Vec<u64> = all.iter().map(|p| fingerprint(&body_grid3(p).unwrap())).collect();
         eprintln!("fingerprints {got:x?}");
         assert!(all.iter().all(|p| p.fin_cells_across == 1));
-        let expected: [u64; 7] = [9370751059839986959, 14583859758804283294, 6453443399358374581, 17893710889803027280, 1387836882980492884, 5755310565696465849, 11535300992460737863];
+        let expected: [u64; 7] = [
+            9370751059839986959,
+            14583859758804283294,
+            6453443399358374581,
+            17893710889803027280,
+            1387836882980492884,
+            5755310565696465849,
+            11535300992460737863,
+        ];
         assert_eq!(got, expected);
     }
 
@@ -1990,7 +1999,8 @@ mod tests {
                         for i in b.i.start..=b.i.end {
                             let p0 = node(&g, i, j, b.k.start);
                             let theta: Vec<f64> = (0..=g.nk).map(|k| node(&g, i, j, k)).map(|q| q[1].atan2(q[2])).collect();
-                            let r = (p0[1] * p0[1] + p0[2] * p0[2]).sqrt() / polygon_scale_where(&theta, |k| !g.solid.iter().any(|s| s.k.contains(&k)))[b.k.start];
+                            let r =
+                                (p0[1] * p0[1] + p0[2] * p0[2]).sqrt() / polygon_scale_where(&theta, |k| !g.solid.iter().any(|s| s.k.contains(&k)))[b.k.start];
                             let frac = (r - R) / f.span;
                             let chord = f.root_chord + (f.tip_chord - f.root_chord) * frac;
                             let xi = (p0[0] - (g.x[b.i.start] + f.sweep * frac)) / chord;
@@ -2014,11 +2024,9 @@ mod tests {
     fn n_cells_across_in_a_sector_and_a_half_domain() {
         let fl = flow();
         let st = FinStack::from_flow(fl.re_c, fl.mach_max, 1.0, 15.0);
-        for (label, domain) in [
-            ("sector", Domain3::Sector),
-            ("half", Domain3::Half { phase: FinPhase::Between }),
-            ("in plane", Domain3::Half { phase: FinPhase::InPlane }),
-        ] {
+        for (label, domain) in
+            [("sector", Domain3::Sector), ("half", Domain3::Half { phase: FinPhase::Between }), ("in plane", Domain3::Half { phase: FinPhase::InPlane })]
+        {
             let build = |n: usize| {
                 let mut p = params(0, Some(anf_fins(FinProfile::Square)));
                 p.domain = domain;
@@ -2079,7 +2087,10 @@ mod tests {
                     }
                 }
                 let rep = fin_stack_report(&g).unwrap();
-                assert!((rep.y1 / rep1.y1 - 1.0).abs() < 0.02 && rep.growth_max <= 1.35 + 1e-9 && rep.cells == rep1.cells, "{label} n {n}: {rep:?} vs {rep1:?}");
+                assert!(
+                    (rep.y1 / rep1.y1 - 1.0).abs() < 0.02 && rep.growth_max <= 1.35 + 1e-9 && rep.cells == rep1.cells,
+                    "{label} n {n}: {rep:?} vs {rep1:?}"
+                );
             }
         }
     }

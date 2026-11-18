@@ -5,6 +5,34 @@ per-session sections are `handoff/gpu.md` (gpu3d), `handoff/physics.md` (phys3d)
 branches when they were reported (a missing file means that session had not reported when this was written). Every number below carries its source (gpuq job id,
 commit, test); "not re-measured" marks a number from an earlier tree.
 
+## 0. Update 2026-11-18 (branch `perf5`, merged into `cfd-3d`): Luma v0.5.0, the full solve in about 4 minutes, the supersonic finned drag fixed
+
+Sections 1-9 below are the 2026-11-17 hand-off and stay as written; where this section disagrees, this section is current. Detail: DESIGN3D "Solve time: from 41 minutes
+to about 4" and items 43-44.
+
+- **Luma pinned at v0.5.0** (`7fafed6`: CUDA through the driver's NVVM, graph-replayed gated loops, shared transient buffers). `gpu_name` asks Luma (`Context::device`).
+  Sector step time is the same on CUDA and wgpu (8.5 ms); CUDA is slower on small grids (Luma issue #6). Device peak of the full solve 8.4 GiB (was 10.3).
+- **Full Coarse solve of the example rocket** (10 sector points + 8 stability points, RTX 3090, f32, `engine3d_finned_timing`): 2 481 s (old pin, fixed cfl 10) /
+  1 654 s (v0.5.0, controller) -> **about 245-260 s** (jobs `1-20261118-024355-31072`, `2-20261118-035445-23374`). What did it, in order of effect:
+  - DDADI (omega 1) with the implicit face dissipation x 1.7 at `cfl_max` 100 on every non-wedge viscous domain (`Case3::with_tier`, `DDADI_CFL_MAX`, `DDADI_DIS_BOOST`);
+  - the extrapolated-drift stop rule (`StopReason::Settled`);
+  - one stability angle (2 degrees; CN_alpha and x_cp from it);
+  - the axisymmetric seed of every cold finned sector (`Analysis::seed_axisymmetric`, default on).
+- **CFL controller** also rolls back on a collapsing state (density or pressure below 1e-3 of the free stream, a device reduction per chunk) and, on a repeated failure,
+  goes back past the restored state (`ad152aa`): the unseeded Mach 1.3 sector at CFL 100 ended `Failed` without it.
+- **Supersonic finned drag:** the 9-12 % shortfall of the Finner was a 3-10x axial cell-size jump right behind the flush fin trailing edge. A graded fan there
+  (`be3c9b8`) gives G-F5 against the zero-cant free-flight singles of DREV-TM-9703 Table VIII (`anf::CD0`, re-sourced; pooled Table IX is `CD0_POOLED`, INFO):
+  Mach 1.85 -0.7 %, 2.364 -3.7 %, 2.741 +1.3 %, 2.970 -1.2 % (Lift tier, job `1-20261118-035444-11012`). Refuted on the way: more cells across the fin thickness
+  (`fin_cells_across`, opt-in, item 43). Measured: a finer leading edge (48 / 64 chord cells) adds +2 / +3 %; an isothermal wall at T_inf adds friction x1.16 / x1.35 at
+  Mach 1.8 / 3.1 (Van Driest II), opt-in only.
+- **Still open:**
+  - subsonic Finner CD0: +7.7 % against free flight at Mach 0.766 (G-F5 now gates there, 8 % band, PASS; `anf::CD0`), +12 % against the sting-mounted tunnel (INFO);
+  - subsonic CN_alpha: +14 % against the tunnel at Mach 0.79 (G-L1 FAIL, 13 % band), +11 % against free flight (±17 %). The excess is in the fin lift and follows the
+    blunt section: the same planform as a sharp 2 % double wedge gives +6.5 %; 64 chord cells, the y+ 15 fin stack and the Coarse tier do not move it (subsonic branch,
+    `incidence_rans --fin-section thin`). The steady-RANS Kutta condition at the 0.08 cal blunt trailing edge is the suspect;
+  - the Arcas supersonic fin increment (KNOWN: the test article had anchors, a lip and grit strips the model lacks).
+  x_cp passes everywhere; supersonic CN_alpha is within +3 to +10 %.
+
 ## 1. State on one screen
 
 **Works (verified on the candidate or its close ancestors, sources below):**
