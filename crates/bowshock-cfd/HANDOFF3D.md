@@ -41,6 +41,9 @@ to about 4" and items 43-44.
     peer RANS of the Finner is -14 to -7 % there, so this is at the steady-RANS / data limit; left: a 0-1 degree slope definition and a sting for the tunnel points;
   - the Lift-tier gate CD0 at Mach 0.766 reads 0.547 (+7.7 %, G-F5 8 % band, PASS), 2-3 % above the production Coarse sector;
   - the Arcas supersonic fin increment (KNOWN: the test article had anchors, a lip and grit strips the model lacks).
+- **Gates on the merged tip** (`22ffd8e`; later commits are docs and a test speed-up; `tools/release_gates.sh`, local 3090 / remote 3080 Laptop, jobs
+  `1-20261118-043225-*`): wedge 61 PASS; fins G-F1, G-S and 14 G-F4 PASS, 4 G-F4 KNOWN (Arcas, item 37); lift G-F5 10/10 PASS, G-L1 28 PASS and 3 FAIL (subsonic
+  CN_alpha, above); gpucases all pass; CPU workspace (without gpu-cases) 1571 pass; clippy and rustfmt clean.
 
 ## 1. State on one screen
 
