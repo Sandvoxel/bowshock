@@ -94,8 +94,10 @@ impl Numerics3 {
     }
 
     /// The settings of an Euler wedge, the 2D engine's `Numerics::auto` for the base-wake grid: below Mach 0.85 the subsonic ones ([`Numerics3::auto`] with the implicit
-    /// defaults' CFL limit 30 and `10 000 << level` iterations), from Mach 0.85 the transonic ones (300 first-order iterations, 60 000 iterations; the 2D explicit
-    /// scheme of that regime has no 3D counterpart, the implicit CFL limit stays 10). Block lines. What [`Case3::wedge`] runs with; the facade's Euler tables of the
+    /// defaults' CFL limit 30 and `10 000 << level` iterations), from Mach 0.85 the transonic ones (60 000 iterations; 300 first-order iterations below Mach 1.2 and the 100 of
+    /// [`Numerics3::auto`] above: 300 first-order iterations at Mach 2 take the Euler wake of the boattailed Arcas to a second steady state, base `CD` 0.098 against the 2D
+    /// reference's 0.059 (G-W1 `euler-base-arcas-M2.00`, found by bisection to the viscous wiring commit 5f89ed1, which took the 2D numerics over); the 2D explicit
+    /// scheme of the transonic regime has no 3D counterpart, the implicit CFL limit stays 10). Block lines. What [`Case3::wedge`] runs with; the facade's Euler tables of the
     /// frozen 2D reference (G-V4 table-euler, G-W1) are the 2D engine's numbers.
     pub fn euler_wedge(mach: f64, level: u32) -> Numerics3 {
         let mut n = Numerics3::auto(mach, level);
@@ -103,7 +105,7 @@ impl Numerics3 {
             n.implicit = ImplicitParams::DEFAULT;
             n.max_iter = 10_000 << level;
         } else {
-            n.first_order_iters = 300;
+            n.first_order_iters = if mach < 1.2 { 300 } else { n.first_order_iters };
             n.max_iter = 60_000;
         }
         n.line_solve = Some(LineSolve3::Block);
