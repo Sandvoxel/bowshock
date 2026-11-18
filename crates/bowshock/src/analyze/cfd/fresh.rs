@@ -9,13 +9,20 @@ pub fn lift_status(plan: &Result<Plan, String>, lift: Option<&CfdLiftTable>, mac
         Err(why) => return Status::Unsupported(why.clone()),
     };
     let Some(nodes) = lift_nodes(mach) else {
-        return Status::Unsupported(format!("the 3D solve covers Mach up to 3; the Mach range is {:.2} to {:.2}", mach.0, mach.1));
+        return Status::Unsupported(super::wording::angles_range(mach));
     };
     match lift {
         None => Status::Missing,
         Some(l) if l.key == lift_key(plan.geometry, &nodes) => Status::Fresh,
         Some(_) => Status::Stale,
     }
+}
+
+/// How much of the 3D angles of the current range `lift` is, when it is the leading Mach numbers of a solve that stopped early:
+/// `(solved, of)` Mach numbers. `None` for any other.
+pub fn lift_partial_of(plan: &Result<Plan, String>, lift: &CfdLiftTable, mach: (f64, f64)) -> Option<(usize, usize)> {
+    let (plan, nodes) = (plan.as_ref().ok()?, lift_nodes(mach)?);
+    (1..nodes.len()).find(|&n| lift.key == lift_key(plan.geometry, &nodes[..n])).map(|n| (n, nodes.len()))
 }
 
 /// How a stored table relates to the rocket and the conditions on screen.
@@ -44,6 +51,16 @@ pub fn status(plan: &Result<Plan, String>, table: Option<&CfdTable>, altitude: f
         None => Status::Missing,
         Some(t) if t.key == table_key(plan.geometry, altitude, &nodes) => Status::Fresh,
         Some(_) => Status::Stale,
+    }
+}
+
+/// The verdict on a stored table as one solve (see `State::solve_status`): `drag` is [`status`], `lift` is [`lift_status`], `angles` whether
+/// the solve takes the 3D angles. A table whose drag is fresh is stale when the angles are wanted and are missing or stale; a Mach range the 3D
+/// solve does not cover (`lift` unsupported) wants nothing of it.
+pub fn solve_status(drag: &Status, lift: &Status, angles: bool) -> Status {
+    match (drag, lift) {
+        (Status::Fresh, Status::Missing | Status::Stale) if angles => Status::Stale,
+        _ => drag.clone(),
     }
 }
 

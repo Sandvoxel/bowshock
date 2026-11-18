@@ -109,7 +109,7 @@ pub const DRAG_PARTS: [(&str, SeriesColor); 4] =
 /// One plain sentence for a row label: what the quantity is and what moves it, shown as the row's tooltip (the drag sources'
 /// sentences live here and nowhere else). `None` for labels that need no explanation (names of configurations, units).
 pub fn help(label: &str) -> Option<&'static str> {
-    let label = label.strip_suffix(super::compute::LIFT_LABEL).unwrap_or(label);
+    let label = label.strip_suffix(super::cfd::LIFT_LABEL).unwrap_or(label);
     Some(match label {
         "Skin friction" => "Air rubbing along every outer surface. Grows with wetted area and a rougher finish.",
         "Pressure" => "Drag from the nose and transitions pushing air aside; rises sharply near Mach 1 as shocks form. Includes lugs and rail buttons.",
@@ -277,7 +277,7 @@ pub fn compare_section(out: &Output, overlay: &Overlay, x_si: Option<f64>, activ
 fn stability_rows(run: &Run, p: &MachPointLike, units: UnitSystem, out: &Output) -> Vec<Row> {
     let (cp, u) = length(p.cp, units);
     let burnout = out.conditions.burnout;
-    let lift = if out.lift_3d() { super::compute::LIFT_LABEL } else { "" };
+    let lift = if out.lift_3d() { super::cfd::LIFT_LABEL } else { "" };
     let (cg, _) = length(run.cg(burnout), units);
     let mut rows = vec![Row::new(format!("Static margin{lift}"), cal(p.margin), "cal").big()];
     if out.runs.len() > 1 {
@@ -310,10 +310,10 @@ fn per_run_margin(run: &Run, x: f64) -> Option<f64> {
 }
 
 /// The stability section's title: under the CFD table it says where the numbers come from (Extended, the drag solver being
-/// zero-lift, or the 3D stability solve when a fresh one feeds them).
+/// not solved, or the 3D solve when a fresh one feeds them).
 fn stability_title(out: &Output) -> String {
     if out.lift_3d() {
-        "Stability · CFD (3D)".into()
+        format!("Stability · {}", super::cfd::PANEL_FROM_3D)
     } else if out.cfd.is_some() {
         "Stability · Extended".into()
     } else {

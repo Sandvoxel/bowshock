@@ -1,12 +1,11 @@
-# The Flow field view of a REAL 3D solve, not the demo: the example rocket's drag table and its 3D stability solve (2 and 6 degrees at the
-# Mach nodes) are solved on the GPU as the app solves them; the headless driver waits for every running task, so each click returns when its solve is
-# done (a few minutes in all). The picture is the final Field3 of the stability solve at one Mach number: the finned example on the 3D grid.
+# The Flow field view of a REAL 3D solve, not the demo: the example rocket's drag table and its 3D angles (2 and 6 degrees at the
+# Mach nodes) are solved on the GPU as the app solves them, in one solve that choosing the method starts; the headless driver waits for every
+# running task, so each click returns when the solve is done (a few minutes in all). The picture is the final Field3 of the stability solve at one Mach number: the finned example on the 3D grid.
 # GPU pictures need the wgpu test backend, a real solve the GPU: through the queue,
 #   tools/gpuq/gpuq submit --host local --name flow3d-real -- env ICED_TEST_BACKEND=wgpu cargo run --release -q -p bowshock -- drive --example crates/bowshock/scripts/flow3d-real.drive out/flow3d-real
 viewport 1500x1100
 click "Analyze"
 click "CFD table"
-click "Solve stability (3D)"
 click "Flow field"
 move (100, 1000)
 move (102, 1002)

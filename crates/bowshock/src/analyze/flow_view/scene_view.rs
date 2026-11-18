@@ -540,7 +540,7 @@ impl SceneState {
                     .boxed(),
                 line(vec![
                     super::toggle(
-                        "Tile",
+                        "Tile sheets",
                         self.tile_sheets,
                         Msg::Scene(SceneMsg::TileSheets),
                         "The meridian layer in every copy of the solved domain, not as the plane",
@@ -825,6 +825,26 @@ pub struct Overlay3 {
     bars: Vec<Bar>,
 }
 
+impl Overlay3 {
+    /// Width and left edge of the colour bars, bottom right.
+    fn bars_at(width: f32) -> (f32, f32) {
+        let w = 300.0f32.min(width * 0.6);
+        (w, width - w - 8.0)
+    }
+
+    /// Top left of the free-stream label of width `w`: beside the arrow of the axes (bottom left) when it ends before the bars start, else above the axes, which
+    /// the bars (the bottom rows) never reach.
+    fn label_at(size: Size, w: f32) -> Point {
+        let (origin_x, origin_y) = (40.0, size.height - 40.0);
+        let beside = Point::new(origin_x + 96.0 + 44.0, origin_y - 9.0);
+        if beside.x + w + 8.0 <= Self::bars_at(size.width).1 {
+            beside
+        } else {
+            Point::new(8.0, origin_y - 60.0)
+        }
+    }
+}
+
 impl canvas::Program<Msg> for Overlay3 {
     type State = Interaction3;
 
@@ -959,10 +979,14 @@ impl canvas::Program<Msg> for Overlay3 {
             f.stroke(&Path::circle(base, 5.0), line(t.ink, 1.8));
             f.fill(&Path::circle(base, 1.8), t.ink);
         }
+        // The label sits beside the arrow when it ends before the colour bars start (bottom right, `bars_at`); in a picture too narrow for both it goes above the
+        // axes instead, clear of the bars whatever the size (they take the bottom two or three rows, from the picture's lower edge up).
         let fs_text = format!("V∞ · M {:.2} · α {:.1}°", self.mach, self.alpha);
-        let fs_at = Point::new(base.x + 44.0, base.y - 9.0);
-        f.fill_rectangle(fs_at, Size::new(6.6 * fs_text.chars().count() as f32 + 12.0, 18.0), t.bg_100.scale_alpha(0.86));
-        put(&mut f, &fs_text, Point::new(fs_at.x + 6.0, base.y), t.ink, 11.0, Left, alignment::Vertical::Center);
+        let fs_w = 6.6 * fs_text.chars().count() as f32 + 12.0;
+        let (bar_w, bars_x) = Self::bars_at(bounds.width);
+        let fs_at = Self::label_at(bounds.size(), fs_w);
+        f.fill_rectangle(fs_at, Size::new(fs_w, 18.0), t.bg_100.scale_alpha(0.86));
+        put(&mut f, &fs_text, Point::new(fs_at.x + 6.0, fs_at.y + 9.0), t.ink, 11.0, Left, alignment::Vertical::Center);
 
         // the readout under the pointer (a line or two) and the caption: beside the readout when there is room, else under it
         let panel = |f: &mut Frame, s: &str, at: Point, right: bool| {
@@ -984,9 +1008,8 @@ impl canvas::Program<Msg> for Overlay3 {
             }
         }
         // the colour bars, bottom right
-        let bar_w = 300.0f32.min(bounds.width * 0.6);
         for (n, b) in self.bars.iter().rev().enumerate() {
-            b.draw(&mut f, Point::new(bounds.width - bar_w - 8.0, bounds.height - 24.0 - 24.0 * n as f32), bar_w, t);
+            b.draw(&mut f, Point::new(bars_x, bounds.height - 24.0 - 24.0 * n as f32), bar_w, t);
         }
         vec![f.into_geometry()]
     }
@@ -1011,6 +1034,23 @@ mod tests {
         s.update(SceneMsg::Resized(Size::new(900.0, 600.0)));
         s.set_field(Some(&anf()));
         s
+    }
+
+    #[test]
+    fn the_free_stream_label_never_collides_with_the_colour_bars_at_any_size() {
+        let label_w = 6.6 * "V∞ · M 10.00 · α 10.0°".chars().count() as f32 + 12.0;
+        for width in (200..1800).step_by(7) {
+            for height in [260.0f32, 400.0, 800.0] {
+                let at = Overlay3::label_at(Size::new(width as f32, height), label_w);
+                let (_, bars_x) = Overlay3::bars_at(width as f32);
+                // two bars of 22 px at rows 24 px apart from the bottom edge: the top of the upper one
+                let bars_top = height - 24.0 - 24.0;
+                let apart_x = at.x + label_w <= bars_x;
+                let apart_y = at.y + 18.0 <= bars_top;
+                assert!(apart_x || apart_y, "{width} x {height}: label at {at:?}, bars from x {bars_x}");
+                assert!(at.x >= 0.0 && at.y >= 0.0, "{width} x {height}: label at {at:?} is off the picture");
+            }
+        }
     }
 
     #[test]

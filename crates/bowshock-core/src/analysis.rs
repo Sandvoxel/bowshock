@@ -17,7 +17,7 @@ use crate::error::Error;
 use crate::field::{Field, FieldSink, FieldTap};
 use crate::field3::Field3;
 use crate::progress::{Progress, ProgressSink};
-use crate::spec::{BodySpec, FinSpec, MotorSpec};
+use crate::spec::{BodySpec, FinOutline, FinSpec, MotorSpec};
 use bowshock_cfd::gas3::GAMMA;
 use bowshock_cfd::solver::Solver;
 use bowshock_cfd::solver3::Solver3;
@@ -53,10 +53,47 @@ pub enum BackendUsed {
     Gpu,
 }
 
+/// Which engine solves a [`Condition`]: hidden until the 3D solver replaces the legacy pair (see [`Analysis::engine`]).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum Engine {
+    /// The axisymmetric drag solver at zero incidence, the sting-grid 3D Euler solver at an angle of attack.
+    Legacy,
+    /// The 3D solver on the base-wake grid for both: the one-cell wedge at zero incidence, the sector with fins, the half domain at an angle of attack
+    /// (`analysis/solver3.rs`).
+    Solver3,
+}
+
+impl Default for Engine {
+    fn default() -> Engine {
+        Engine::DEFAULT
+    }
+}
+
+impl Engine {
+    /// THE DEFAULT ENGINE: the one a new [`Analysis`] uses unless `BOWSHOCK_ENGINE` says otherwise and the one an [`AnalysisSpec`] without an `engine` key means. The flip
+    /// to the 3D engine is this one line.
+    pub const DEFAULT: Engine = Engine::Legacy;
+
+    /// The engine the `BOWSHOCK_ENGINE` environment variable names (`3d` or `solver3`: [`Engine::Solver3`]; `legacy`: [`Engine::Legacy`]; unset or anything else:
+    /// [`Engine::DEFAULT`]): the default of every new [`Analysis`], so that the app and the tests can switch without code.
+    pub fn from_env() -> Engine {
+        match std::env::var("BOWSHOCK_ENGINE").as_deref().map(str::trim) {
+            Ok(v) if v.eq_ignore_ascii_case("3d") || v.eq_ignore_ascii_case("solver3") => Engine::Solver3,
+            Ok(v) if v.eq_ignore_ascii_case("legacy") => Engine::Legacy,
+            _ => Engine::DEFAULT,
+        }
+    }
+}
+
 /// Grid resolution (grid level 0, 1, 2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Resolution {
+    /// Grid level 0 with wall functions on the body and the fins and about a quarter of the cells (`Tier::Draft`): the 3D engine's quick option at zero incidence
+    /// with the viscous terms; everywhere else (Euler, the angles, the legacy engine) it is [`Resolution::Coarse`].
+    Draft,
     /// Grid level 0.
     Coarse,
     /// Grid level 1.
@@ -68,7 +105,7 @@ pub enum Resolution {
 impl Resolution {
     fn level(self) -> u32 {
         match self {
-            Resolution::Coarse => 0,
+            Resolution::Draft | Resolution::Coarse => 0,
             Resolution::Medium => 1,
             Resolution::Fine => 2,
         }
@@ -148,6 +185,30 @@ pub enum Warning {
         /// Max - min of the total drag over the averaging windows.
         cd_range: f64,
     },
+    /// The run went unstable and the solver's CFL controller took it back to an earlier state at a lower CFL limit (`rollbacks` times, from `cfl_from` to `cfl_to`
+    /// in the end): the point converged, but on a second attempt at different numerics (see [`PointDetail::rollbacks`]).
+    RestartedAtLowerCfl {
+        /// How many times the run was taken back.
+        rollbacks: usize,
+        /// The CFL limit the run started with.
+        cfl_from: f64,
+        /// The CFL limit of the run that gave the result.
+        cfl_to: f64,
+    },
+}
+
+/// One answer of the solver's CFL controller to an unstable stretch of a run: the run went back to an earlier state (of iteration `restored_to`) with the CFL limit lowered.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Rollback {
+    /// Iteration at which the instability showed.
+    pub iteration: usize,
+    /// Iteration of the state the run went back to.
+    pub restored_to: usize,
+    /// The CFL limit before the answer.
+    pub cfl_before: f64,
+    /// The CFL limit after the answer.
+    pub cfl_after: f64,
 }
 
 /// One flight condition of a run: a Mach number and an angle of attack.
@@ -264,6 +325,19 @@ pub struct PointDetail {
     pub y_plus_max: f64,
     /// Largest relative pressure deviation from the free stream at the outer boundaries.
     pub farfield_dp: f64,
+    /// The implicit CFL limit of the run that gave the point (the 3D engine; `None` for the legacy one).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub cfl_limit: Option<f64>,
+    /// How the point was obtained when the run had to be taken back: the answers of the CFL controller in order (empty: the run went through at its first CFL limit).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub rollbacks: Vec<Rollback>,
+}
+
+impl PointDetail {
+    /// How many attempts the point took: the run, and one more for every rollback.
+    pub fn attempts(&self) -> usize {
+        1 + self.rollbacks.len()
+    }
 }
 
 /// Pressure coefficient at one body-surface face.
@@ -329,6 +403,14 @@ pub struct AnalysisSpec {
     /// Mach number a viscous grid is sized for ([`Analysis::grid_mach`]), `None` for the highest Mach number of each run.
     #[cfg_attr(feature = "serde", serde(default))]
     pub grid_mach: Option<f64>,
+    /// The outline of the fins ([`Analysis::fin_outline`]); the trapezoid when absent.
+    #[doc(hidden)]
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub fin_outline: FinOutline,
+    /// The engine ([`Analysis::engine`]); [`Engine::Legacy`] when absent.
+    #[doc(hidden)]
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub engine: Engine,
 }
 
 /// Configuration of a sweep over Mach number for one body.
@@ -361,7 +443,13 @@ pub struct Analysis {
     keep_fields: bool,
     field_sink: Option<FieldSink>,
     field3_sink: Option<Snapshots3>,
+    engine: Engine,
+    fin_outline: FinOutline,
 }
+
+mod solver3;
+#[doc(hidden)]
+pub use solver3::{take_facade_timings, FacadeTiming};
 
 /// Free stream of a viscous sweep.
 struct Rans {
@@ -400,6 +488,8 @@ impl Analysis {
             keep_fields: false,
             field_sink: None,
             field3_sink: None,
+            engine: Engine::from_env(),
+            fin_outline: FinOutline::Trapezoid,
         }
     }
 
@@ -443,6 +533,8 @@ impl Analysis {
             estimate_uncertainty: self.estimate_uncertainty,
             keep_fields: self.keep_fields,
             grid_mach: self.grid_mach,
+            engine: self.engine,
+            fin_outline: self.fin_outline.clone(),
         })
     }
 
@@ -463,7 +555,25 @@ impl Analysis {
         a.estimate_uncertainty = spec.estimate_uncertainty;
         a.keep_fields = spec.keep_fields;
         a.grid_mach = spec.grid_mach;
+        a.engine = spec.engine;
+        a.fin_outline = spec.fin_outline.clone();
         Ok(a)
+    }
+
+    /// The outline of the fins of [`Analysis::fins`] when it is not the trapezoid of their four numbers (which are then those of the equivalent trapezoid): the 3D
+    /// engine follows it, the legacy engine ignores it. Hidden with the engine.
+    #[doc(hidden)]
+    pub fn fin_outline(mut self, outline: FinOutline) -> Self {
+        self.fin_outline = outline;
+        self
+    }
+
+    /// The engine that solves the conditions (default [`Engine::Legacy`], or the one `BOWSHOCK_ENGINE` names). Hidden: the product
+    /// flips by changing the default, not through this call; tests and the app's switch use it.
+    #[doc(hidden)]
+    pub fn engine(mut self, engine: Engine) -> Self {
+        self.engine = engine;
+        self
     }
 
     /// Reference diameter \[m\] of the drag coefficients (internal units for [`Analysis::from_internal`]).
@@ -790,6 +900,10 @@ impl Analysis {
     ///   later angles start from the field of the previous one, and a warm point that ends `Failed` or `Stalled` is re-run cold. A
     ///   point whose run diverged is re-run once with the implicit CFL limit halved.
     ///
+    /// Under the hidden [`Engine::Solver3`] ([`Analysis::engine`], or `BOWSHOCK_ENGINE=3d`) every condition is the 3D solver's on the base-wake grid instead
+    /// (`analysis/solver3.rs`): the wedge at zero incidence, the sector with fins, the half domain at an angle of attack; Euler only, a viscous request is an
+    /// error. At an angle of attack its [`Drag`] holds the axial force split by surface (the total is [`Forces::ca`]) rather than NaN.
+    ///
     /// Conditions of both kinds in one call run one after the other: the drag sweep first. The backends are as for
     /// [`Analysis::backend`]; [`Polar::backend`] is the GPU only if every condition ran on it.
     pub fn run<C: Into<Condition> + Copy>(&self, conditions: &[C]) -> Result<Polar, Error> {
@@ -797,7 +911,10 @@ impl Analysis {
         self.route(&conditions)
     }
 
-    /// THE ROUTE: the one place that decides which engine solves which condition, and the only place that knows there are two. A
+    /// THE ROUTE: the one place that decides which engine solves which condition, and the only place that knows there are two. With
+    /// [`Engine::Solver3`] it hands every condition to `run_solver3` (`analysis/solver3.rs`) instead: the flip of the default engine, after which the rest of this
+    /// comment is history.
+    /// A
     /// condition at zero incidence goes to [`Analysis::run_drag`] (the axisymmetric solver), one at an angle of attack to
     /// [`Analysis::run_lift_points`] (the 3D Euler solver). When one 3D viscous solver does both, this function becomes a single call
     /// of it and the two paths below are deleted.
@@ -816,6 +933,9 @@ impl Analysis {
         }
         if let Some(c) = conditions.iter().find(|c| !c.alpha_deg.is_finite()) {
             return Err(Error::InvalidInput(format!("incidence {} deg is not finite", c.alpha_deg)));
+        }
+        if self.engine == Engine::Solver3 {
+            return self.run_solver3(conditions);
         }
         let (drag_at, lift_at): (Vec<usize>, Vec<usize>) = (0..conditions.len()).partition(|&k| conditions[k].alpha_deg == 0.0);
         let lift_conditions: Vec<Condition> = lift_at.iter().map(|&k| conditions[k]).collect();
@@ -972,6 +1092,8 @@ impl Analysis {
             wall: d.wall.iter().filter(|w| w.x < x_base).map(|w| WallCp { x: w.x * self.d_nose, r: w.r * self.d_nose, cp: w.cp }).collect(),
             y_plus_max: d.y_plus_max,
             farfield_dp: d.farfield_dp,
+            cfl_limit: None,
+            rollbacks: Vec::new(),
         }
     }
 
@@ -1213,6 +1335,8 @@ impl Analysis {
             wall: Vec::new(),
             y_plus_max: f64::NAN,
             farfield_dp: 0.0,
+            cfl_limit: None,
+            rollbacks: Vec::new(),
         };
         let field3 = if self.keep_fields { Some(runner.field3(state, case, r.iterations, self.field_scale())?) } else { None };
         Ok(PolarPoint {

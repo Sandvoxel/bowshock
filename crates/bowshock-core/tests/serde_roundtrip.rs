@@ -109,13 +109,34 @@ fn an_analysis_spec_round_trips_through_json_and_rebuilds_the_analysis() {
     .is_err());
 }
 
+/// The engine is additive on the wire: a spec written before it (no `engine` key) is the legacy engine's, and the 3D engine survives the round trip.
+#[test]
+fn the_engine_of_a_spec_defaults_to_legacy_and_round_trips() {
+    let s = full_analysis().engine(bowshock_core::Engine::Solver3).spec().unwrap();
+    let back: bowshock_core::AnalysisSpec = roundtrip(&s);
+    assert_eq!(back.engine, bowshock_core::Engine::Solver3);
+    let mut v = serde_json::to_value(&s).unwrap();
+    v.as_object_mut().unwrap().remove("engine");
+    let old: bowshock_core::AnalysisSpec = serde_json::from_value(v).unwrap();
+    assert_eq!(old.engine, bowshock_core::Engine::Legacy);
+}
+
 #[test]
 fn from_spec_of_spec_gives_the_same_run() {
     let a = Analysis::new(&spec()).unwrap().backend(Backend::Cpu).resolution(Resolution::Coarse).max_iterations(40);
     let b = Analysis::from_spec(&a.spec().unwrap()).unwrap();
     let (pa, pb) = (a.run(&[0.8, 2.0]).unwrap(), b.run(&[0.8, 2.0]).unwrap());
     // JSON writes the NaN of a field without a base wake as null on both sides
-    assert_eq!(serde_json::to_string(&pa).unwrap(), serde_json::to_string(&pb).unwrap());
+    // (the residual is a parallel sum: its last bits are not reproducible, so it is compared to nine digits)
+    let json = |p: &bowshock_core::Polar| {
+        let mut v = serde_json::to_value(p).unwrap();
+        for pt in v["points"].as_array_mut().unwrap() {
+            let d = &mut pt["detail"]["residual_drop_orders"];
+            *d = serde_json::json!((d.as_f64().unwrap() * 1e9).round() / 1e9);
+        }
+        v.to_string()
+    };
+    assert_eq!(json(&pa), json(&pb));
 }
 
 /// A finned point at an angle of attack, with its field: the NaN of what the 3D Euler solver does not give (the base and the total

@@ -3,10 +3,11 @@ use super::fresh::now;
 use super::plan::{lift_key, nodes, table_key, Plan, DRAG_TOLERANCE, LIFT_ALPHAS, SHARED_GRID, SOLVER_CEILING};
 use super::remote::{self, Failed};
 use super::share::{self, Lost, Stop};
+use super::wording;
 use crate::analyze::solve::{Iteration, MachineInfo, MachineState, Outcome, PointDone, Slot, Tracker};
 use crate::app::settings::{Compute, Where};
 use bowshock_core as solver;
-use bowshock_model::{CfdGrid, CfdLiftPoint, CfdLiftTable, CfdPoint, CfdQuality, CfdTable};
+use bowshock_model::{CfdGrid, CfdLiftPoint, CfdLiftTable, CfdPoint, CfdQuality, CfdRestart, CfdTable};
 use bowshock_sim::{vs_mach, Atmosphere};
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,9 +31,23 @@ pub struct Job {
     pub compute: Compute,
     /// Solve on this computer's CPU even if it has a usable GPU (Preferences > Compute); ignored for a remote machine.
     pub cpu_only: bool,
+    /// The Mach numbers of the stability part, solved at [`LIFT_ALPHAS`] ([`lift_nodes`]), ascending; empty: the drag table alone.
+    pub stability: Vec<f64>,
 }
 
-/// A message from a running solve (the drag table's or the 3D stability solve's).
+impl Job {
+    /// The units the screen tracks for it (see [`Tracker::solve_units`]).
+    pub fn units(&self) -> Vec<crate::analyze::solve::Unit> {
+        Tracker::solve_units(&self.nodes, &self.stability, &LIFT_ALPHAS)
+    }
+
+    /// Work items for the machines: one per drag node, then one per stability node (its angles run warm one after the other).
+    pub fn work_items(&self) -> usize {
+        self.nodes.len() + self.stability.len()
+    }
+}
+
+/// A message from a running solve (the drag table, and its 3D stability part when it has one).
 #[derive(Debug, Clone)]
 pub enum Event {
     /// The machines the solve runs on, sent first.
@@ -61,23 +76,8 @@ pub enum Event {
     /// A beat every quarter second from the worker's side, so the clock on screen keeps moving between reports (the grid and
     /// the GPU kernels of a point take seconds to build).
     Tick,
-    /// The drag solve is over: the table, or why there is none ([`CANCELLED`] for a cancel).
+    /// The solve is over: the table (with its 3D stability part), or why there is none ([`CANCELLED`] for a cancel).
     Finished(Result<CfdTable, String>),
-    /// The 3D stability solve is over: the lift table, or why there is none ([`CANCELLED`] for a cancel).
-    LiftFinished(Result<CfdLiftTable, String>),
-}
-
-/// What a 3D stability solve was asked for.
-#[derive(Debug, Clone)]
-pub struct LiftJob {
-    /// The mapped geometry.
-    pub plan: Plan,
-    /// The Mach numbers to solve, ascending ([`lift_nodes`]).
-    pub nodes: Vec<f64>,
-    /// Where to solve: this computer and the machines that are on, one or all of them.
-    pub compute: Compute,
-    /// Solve on this computer's CPU even if it has a usable GPU (Preferences > Compute); ignored for a remote machine.
-    pub cpu_only: bool,
 }
 
 /// The stored point of a 3D result: `None` for a point of quality Failed, without forces or with a non-finite normal force or centre
@@ -102,22 +102,22 @@ pub fn reduce_lift(raw: &[solver::PolarPoint], requested: usize, notes: &mut Vec
     for p in raw {
         match lift_point(p) {
             Some(l) => points.push(l),
-            None => notes.push(format!("3D point Mach {:.2}, {:.0}° did not converge and is left out.", p.mach, p.alpha_deg)),
+            None => notes.push(wording::angle_left_out(p.mach, p.alpha_deg)),
         }
     }
     let mut machs: Vec<f64> = points.iter().map(|p| p.mach).collect();
     machs.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
     if machs.len() < 2 && requested >= 2 {
-        return Err("the 3D solver did not converge at enough Mach numbers".to_string());
+        return Err(wording::angles_few().to_string());
     }
     if points.is_empty() {
-        return Err("the 3D solver returned no usable point".to_string());
+        return Err(wording::angles_none().to_string());
     }
     Ok(points)
 }
 
 /// What a machine is during a solve.
-enum Session {
+pub(super) enum Session {
     /// This computer, solving on `backend` (it turns to the CPU for good once the GPU does not start).
     Local { backend: solver::Backend },
     /// A remote GPU.
@@ -261,86 +261,6 @@ fn parts<R>(fleet: &Fleet<R>, cpu: impl Fn(&R) -> bool) -> Vec<Part> {
         .collect()
 }
 
-/// A Mach number of the 3D solve, solved: its points and where.
-struct LiftNode {
-    points: Vec<solver::PolarPoint>,
-    cpu: bool,
-}
-
-/// Solves the 3D stability table of `job`: blocking. Every Mach number (at both angles, the second warm-started from the first)
-/// is one node, solved on one machine; with several machines on, they take the next node as they become free. `progress` is given
-/// [`Event::Machines`] first, then each machine's [`Event::Iteration`]s (with its angle) and, when a Mach number's runs are in, an
-/// [`Event::Point`] for each of its angles. A set `cancel` ends the solve with [`CANCELLED`] at once and the runs in flight within
-/// one report. The Euler solve ignores altitude, viscosity and roughness.
-pub fn solve_lift(job: &LiftJob, cancel: &Arc<AtomicBool>, progress: impl Fn(Event) + Send + Sync + 'static) -> Result<CfdLiftTable, String> {
-    let started = Instant::now();
-    let send: Outbox = Arc::new(progress);
-    let total = job.nodes.len();
-    let work = {
-        let (job, cancel, send) = (Arc::new(job.clone()), cancel.clone(), send.clone());
-        move |session: &mut Session, machine: usize, node: usize| -> Result<LiftNode, Failed> {
-            let mach = job.nodes[node];
-            let mut analysis = solver::Analysis::new(&job.plan.body)
-                .map_err(|e| Failed::Message(e.to_string()))?
-                .resolution(solver::Resolution::Coarse)
-                .backend(session.backend())
-                .keep_fields(true);
-            if let Some(fins) = &job.plan.fins {
-                analysis = analysis.fins(fins.clone());
-            }
-            let progress = sink(started, cancel.clone(), send.clone(), true, machine);
-            let conditions: Vec<solver::Condition> = LIFT_ALPHAS.iter().map(|&a| solver::Condition::new(mach, a)).collect();
-            let mut polar = match session {
-                Session::Remote(r) => analysis.spec().map_err(|e| Failed::local(mach, e)).and_then(|spec| r.solve(&spec, &conditions, &progress))?,
-                Session::Local { backend } => {
-                    // A picture of the flow every few hundred iterations; a remote worker brings back only the final fields.
-                    let live = send.clone();
-                    analysis = analysis.on_field3(solver::field::SNAPSHOT_INTERVAL, move |f| live(Event::Field(FieldRef::of(f))));
-                    let polar = analysis.on_progress(progress).run(&conditions).map_err(|e| Failed::local(mach, e))?;
-                    if polar.backend == solver::BackendUsed::Cpu {
-                        // The GPU did not start: do not try it again for every point.
-                        *backend = solver::Backend::Cpu;
-                    }
-                    polar
-                }
-            };
-            let cpu = polar.backend == solver::BackendUsed::Cpu;
-            for p in &mut polar.points {
-                let lift = lift_point(p);
-                // the final field of each angle goes first, then the point (the viewer and the store see the field before the number)
-                if let Some(field) = p.field3.take() {
-                    send(Event::PointField { field: FieldRef::of(field) });
-                }
-                send(Event::Point(PointDone {
-                    machine,
-                    at: started.elapsed().as_secs_f64(),
-                    mach: p.mach,
-                    alpha_deg: Some(p.alpha_deg),
-                    outcome: Outcome::from_quality(lift.map(|l| l.quality)),
-                    point: None,
-                    lift,
-                    iterations: p.detail.iterations,
-                    cpu,
-                    fallback: polar.fallback.clone(),
-                }));
-            }
-            Ok(LiftNode { points: polar.points, cpu })
-        }
-    };
-    let fleet = run_fleet(&job.compute, job.cpu_only, total, started, cancel, &send, work)?;
-    let mut notes = lost_notes(&fleet);
-    let raw: Vec<solver::PolarPoint> = fleet.done.results.iter().flat_map(|(_, n)| n.points.iter().cloned()).collect();
-    let points = reduce_lift(&raw, total, &mut notes)?;
-    Ok(CfdLiftTable {
-        key: lift_key(job.plan.geometry, &job.nodes),
-        solved_at: now(),
-        solve_seconds: started.elapsed().as_secs_f64(),
-        backend: backend_text(&parts(&fleet, |n| n.cpu)),
-        points,
-        notes,
-    })
-}
-
 /// The text of a cancelled solve's error.
 pub const CANCELLED: &str = "cancelled";
 
@@ -459,6 +379,12 @@ pub(in crate::analyze) fn table_from(job: &Job, tally: Tally, attempted: usize, 
     }
 }
 
+/// How a point that was taken back by the solver's CFL controller was obtained, for the stored point: `None` when the run went through.
+pub(super) fn restart_of(d: &solver::PointDetail) -> Option<CfdRestart> {
+    let (first, last) = (d.rollbacks.first()?, d.rollbacks.last()?);
+    Some(CfdRestart { rollbacks: d.rollbacks.len() as u32, cfl_from: first.cfl_before, cfl_to: last.cfl_after })
+}
+
 /// The note for a Mach number the solver gave no point at.
 pub(super) fn fallback_note(mach: f64) -> String {
     format!("Mach {mach:.2} did not converge and is interpolated from its neighbours.")
@@ -484,7 +410,6 @@ pub fn partial_table(job: &Job, tracker: &Tracker, seconds: f64) -> Option<CfdTa
             .filter(|(i, _)| matches!(tracker.slot(*i), Slot::Done(d) if d.outcome == Outcome::Fallback))
             .map(|(_, u)| fallback_note(u.mach)),
     );
-    notes.push(format!("Stopped early: {attempted} of {} Mach points solved.", job.nodes.len()));
     let parts: Vec<Part> = tracker
         .prefix_machines()
         .into_iter()
@@ -493,11 +418,32 @@ pub fn partial_table(job: &Job, tracker: &Tracker, seconds: f64) -> Option<CfdTa
             Some(Part { device: row.device().unwrap_or_default().to_string(), remote: row.remote, units, cpu_units })
         })
         .collect();
+    // The 3D angles: the leading Mach numbers with every angle in are kept (like the drag points they read as stale for the whole
+    // range); a Mach number with only some of its angles is left out, and says so.
+    let (lift_points, lift_kept, half) = tracker.stability_kept();
+    let mut stability = None;
+    if job.stability.is_empty() {
+        notes.push(wording::stopped_early(attempted, job.nodes.len(), None));
+    } else {
+        notes.push(wording::stopped_early(attempted, job.nodes.len(), Some((lift_kept, job.stability.len()))));
+        notes.extend(half.map(wording::half_angle_note));
+        if lift_kept > 0 {
+            stability = Some(CfdLiftTable {
+                key: lift_key(job.plan.geometry, &job.stability[..lift_kept]),
+                solved_at: now(),
+                solve_seconds: seconds,
+                backend: backend_text(&parts),
+                points: lift_points,
+                notes: Vec::new(),
+            });
+        }
+    }
     let (cpu, gpu) = (parts.iter().map(|p| p.cpu_units).sum(), parts.iter().map(|p| p.units - p.cpu_units).sum());
     let mut table = table_from(job, Tally { points, notes, gpu, cpu, fallback: tracker.fallback.clone() }, attempted, seconds);
     if parts.iter().any(|p| p.remote) {
         table.backend = backend_text(&parts);
     }
+    table.lift = stability;
     Some(table)
 }
 
@@ -508,6 +454,61 @@ pub fn partial_of(plan: &Result<Plan, String>, table: &CfdTable, altitude: f64, 
     (1..nodes.len()).find(|&n| table.key == table_key(plan.geometry, altitude, &nodes[..n])).map(|n| (n, nodes.len()))
 }
 
+/// Whether the points of a table share one grid, sized for the table's highest Mach number ([`solver::Analysis::grid_mach`]): the 3D engine's wall-resolved grids are
+/// sized from the free stream's Reynolds number, so one table shares one grid shape (and the kernels compiled for it); the legacy 2D engine's grids stay per point
+/// ([`SHARED_GRID`]).
+pub(super) fn shared_grid() -> bool {
+    SHARED_GRID || solver::Engine::from_env() == solver::Engine::Solver3
+}
+
+/// Whether the 3D engine (`BOWSHOCK_ENGINE=3d`) solves this process's nodes: it has no 2D grid to show a picture of before the first snapshot.
+pub fn solves_3d() -> bool {
+    solver::Engine::from_env() == solver::Engine::Solver3
+}
+
+/// What a node needs solved.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum NodeKind {
+    /// A Mach number at zero incidence.
+    Drag,
+    /// A Mach number at the angles of attack.
+    Lift,
+}
+
+/// The [`solver::Analysis`] of one node of either kind: the body, the fins with their outline, the resolution (a drag node's is the job's grid, the angles are always solved
+/// coarse), the backend and the fields, the flight conditions, the wall roughness, the drag tolerance (a drag node's stop rule) and the shared grid. The legacy engine's
+/// angle solver ignores the viscous settings; the 3D engine reads them for both kinds.
+pub(super) fn node_analysis(
+    job: &Job,
+    kind: NodeKind,
+    session: &Session,
+    altitude: f64,
+    grid_mach: f64,
+    shared_grid: bool,
+) -> Result<solver::Analysis, Failed> {
+    let mut analysis = solver::Analysis::new(&job.plan.body)
+        .map_err(|e| Failed::Message(e.to_string()))?
+        .resolution(match (kind, job.grid) {
+            // Coarse is the default, for exploring; Medium (Refine) is about 3.5x slower per point and its Cd about 1 % different.
+            (NodeKind::Lift, _) | (_, CfdGrid::Coarse) => solver::Resolution::Coarse,
+            (NodeKind::Drag, CfdGrid::Medium) => solver::Resolution::Medium,
+            (NodeKind::Drag, CfdGrid::Draft) => solver::Resolution::Draft,
+        })
+        .backend(session.backend())
+        .keep_fields(true);
+    analysis = analysis.viscous(solver::FlightConditions { atmosphere: solver::Atmosphere::Isa { altitude_m: altitude } }).roughness(job.plan.body_roughness);
+    if kind == NodeKind::Drag {
+        analysis = analysis.drag_tolerance(DRAG_TOLERANCE);
+    }
+    if shared_grid {
+        analysis = analysis.grid_mach(grid_mach);
+    }
+    if let Some(fins) = &job.plan.fins {
+        analysis = analysis.fins(fins.clone()).fin_outline(job.plan.outline.clone());
+    }
+    Ok(analysis)
+}
+
 /// A Mach number of the drag table, solved: its point (none when the solver gave none) and where.
 struct DragNode {
     point: Option<CfdPoint>,
@@ -515,14 +516,90 @@ struct DragNode {
     fallback: Option<String>,
 }
 
-/// Solves the table of `job`: blocking. Every Mach number is one node, solved on one machine; with several machines on they take
-/// the next node as they become free. `progress` is given [`Event::Machines`] first, then for each point its [`Event::Iteration`]s
+/// A Mach number of the stability part, solved at every angle: its points and where.
+struct LiftNode {
+    points: Vec<solver::PolarPoint>,
+    cpu: bool,
+}
+
+/// What a machine solved of a work item (see [`Job::work_items`]).
+enum Node {
+    Drag(DragNode),
+    Lift(LiftNode),
+}
+
+impl Node {
+    fn cpu(&self) -> bool {
+        match self {
+            Node::Drag(n) => n.cpu,
+            Node::Lift(n) => n.cpu,
+        }
+    }
+}
+
+/// Solves the stability node at `mach`: every angle of [`LIFT_ALPHAS`] in one `run` (the second warm-started from the first), on the
+/// coarse grid, with the live snapshots of the running angle and the final field of each. The Euler solve ignores altitude,
+/// viscosity and roughness.
+fn solve_lift_node(
+    job: &Job,
+    grid_mach: f64,
+    shared_grid: bool,
+    mach: f64,
+    session: &mut Session,
+    machine: usize,
+    started: Instant,
+    cancel: &Arc<AtomicBool>,
+    send: &Outbox,
+) -> Result<LiftNode, Failed> {
+    let mut analysis = node_analysis(job, NodeKind::Lift, session, job.altitude.clamp(0.0, SOLVER_CEILING), grid_mach, shared_grid)?;
+    let progress = sink(started, cancel.clone(), send.clone(), true, machine);
+    let conditions: Vec<solver::Condition> = LIFT_ALPHAS.iter().map(|&a| solver::Condition::new(mach, a)).collect();
+    let mut polar = match session {
+        Session::Remote(r) => analysis.spec().map_err(|e| Failed::local(mach, e)).and_then(|spec| r.solve(&spec, &conditions, &progress))?,
+        Session::Local { backend } => {
+            // A picture of the flow every few hundred iterations; a remote worker brings back only the final fields.
+            let live = send.clone();
+            analysis = analysis.on_field3(solver::field::SNAPSHOT_INTERVAL, move |f| live(Event::Field(FieldRef::of(f))));
+            let polar = analysis.on_progress(progress).run(&conditions).map_err(|e| Failed::local(mach, e))?;
+            if polar.backend == solver::BackendUsed::Cpu {
+                // The GPU did not start: do not try it again for every point.
+                *backend = solver::Backend::Cpu;
+            }
+            polar
+        }
+    };
+    let cpu = polar.backend == solver::BackendUsed::Cpu;
+    for p in &mut polar.points {
+        let lift = lift_point(p);
+        // the final field of each angle goes first, then the point (the viewer and the store see the field before the number)
+        if let Some(field) = p.field3.take() {
+            send(Event::PointField { field: FieldRef::of(field) });
+        }
+        send(Event::Point(PointDone {
+            machine,
+            at: started.elapsed().as_secs_f64(),
+            mach: p.mach,
+            alpha_deg: Some(p.alpha_deg),
+            outcome: Outcome::from_quality(lift.map(|l| l.quality)),
+            point: None,
+            lift,
+            iterations: p.detail.iterations,
+            cpu,
+            fallback: polar.fallback.clone(),
+        }));
+    }
+    Ok(LiftNode { points: polar.points, cpu })
+}
+
+/// Solves the table of `job`: blocking. Every Mach number of the drag table is one node, then every Mach number of the stability part
+/// (both angles, see [`solve_lift_node`]); each is solved on one machine, and with several machines on they take the next node as they
+/// become free. `progress` is given [`Event::Machines`] first, then for each point its [`Event::Iteration`]s
 /// (about ten a second per machine; the solver reports every 50 iterations) and an [`Event::Point`] when it ends. A set `cancel`
 /// ends the solve with [`CANCELLED`] at once and the points in flight within one report (a few tens of milliseconds on a GPU); the
 /// points finished by then were all sent. The result carries which machines solved it, the build-up drag the solver left out, and
 /// notes on points that did not converge and machines that were left out.
 pub fn solve(job: &Job, cancel: &Arc<AtomicBool>, progress: impl Fn(Event) + Send + Sync + 'static) -> Result<CfdTable, String> {
-    solve_sized(job, cancel, progress, SHARED_GRID)
+    solve_sized(job, cancel, progress, shared_grid())
 }
 
 /// [`solve`], with the grid of every point sized for the table's highest Mach number (`shared_grid`) or, as before, for the point's own.
@@ -536,33 +613,20 @@ pub(super) fn solve_sized(
     let grid_mach = job.nodes.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let send: Outbox = Arc::new(progress);
     let altitude = job.altitude.clamp(0.0, SOLVER_CEILING);
-    let total = job.nodes.len();
+    let n_drag = job.nodes.len();
+    let total = job.work_items();
     let mut notes = job.plan.notes.clone();
     if job.altitude > SOLVER_CEILING {
         notes.push("The solver's atmosphere ends at 20 km; solved there.".to_string());
     }
     let work = {
         let (job, cancel, send) = (Arc::new(job.clone()), cancel.clone(), send.clone());
-        move |session: &mut Session, machine: usize, node: usize| -> Result<DragNode, Failed> {
+        move |session: &mut Session, machine: usize, node: usize| -> Result<Node, Failed> {
+            if node >= n_drag {
+                return solve_lift_node(&job, grid_mach, shared_grid, job.stability[node - n_drag], session, machine, started, &cancel, &send).map(Node::Lift);
+            }
             let mach = job.nodes[node];
-            let mut analysis = solver::Analysis::new(&job.plan.body)
-                .map_err(|e| Failed::Message(e.to_string()))?
-                .viscous(solver::FlightConditions { atmosphere: solver::Atmosphere::Isa { altitude_m: altitude } })
-                .drag_tolerance(DRAG_TOLERANCE)
-                .resolution(match job.grid {
-                    // Coarse is the default, for exploring; Medium (Refine) is about 3.5x slower per point and its Cd about 1 % different.
-                    CfdGrid::Coarse => solver::Resolution::Coarse,
-                    CfdGrid::Medium => solver::Resolution::Medium,
-                })
-                .roughness(job.plan.body_roughness)
-                .backend(session.backend())
-                .keep_fields(true);
-            if let Some(fins) = &job.plan.fins {
-                analysis = analysis.fins(fins.clone());
-            }
-            if shared_grid {
-                analysis = analysis.grid_mach(grid_mach);
-            }
+            let mut analysis = node_analysis(&job, NodeKind::Drag, session, altitude, grid_mach, shared_grid)?;
             let progress = sink(started, cancel.clone(), send.clone(), false, machine);
             let mut polar = match session {
                 Session::Remote(r) => {
@@ -571,11 +635,15 @@ pub(super) fn solve_sized(
                 Session::Local { backend } => {
                     // A picture of the flow every few hundred iterations (the first is the grid with the free stream on it, at once).
                     // A remote worker brings back only the final field of the point: its snapshots stay on its side.
-                    if let Ok(first) = analysis.initial_field(mach) {
-                        send(Event::Field(FieldRef::from_2d(&first)));
+                    if !solves_3d() {
+                        if let Ok(first) = analysis.initial_field(mach) {
+                            send(Event::Field(FieldRef::from_2d(&first)));
+                        }
                     }
-                    let live = send.clone();
-                    analysis = analysis.on_field(solver::field::SNAPSHOT_INTERVAL, move |f| live(Event::Field(FieldRef::from_2d(&f))));
+                    let (live, live3) = (send.clone(), send.clone());
+                    analysis = analysis
+                        .on_field(solver::field::SNAPSHOT_INTERVAL, move |f| live(Event::Field(FieldRef::from_2d(&f))))
+                        .on_field3(solver::field::SNAPSHOT_INTERVAL, move |f| live3(Event::Field(FieldRef::of(f))));
                     let polar = analysis.on_progress(progress).run(&[mach]).map_err(|e| Failed::local(mach, e))?;
                     if polar.backend == solver::BackendUsed::Cpu {
                         // The GPU did not start: do not try it again for every point.
@@ -585,8 +653,11 @@ pub(super) fn solve_sized(
                 }
             };
             let cpu = polar.backend == solver::BackendUsed::Cpu;
+            // the final field: the axisymmetric solver's (2D), or the 3D engine's wedge (a Field3 the viewer shows side-on, like a 2D one)
             if let Some(field) = polar.points[0].field.take() {
                 send(Event::PointField { field: FieldRef::from_2d(&field) });
+            } else if let Some(field) = polar.points[0].field3.take() {
+                send(Event::PointField { field: FieldRef::of(field) });
             }
             let p = &polar.points[0];
             let stored = quality(p.quality).filter(|_| p.drag.total.is_finite()).map(|q| {
@@ -603,6 +674,7 @@ pub(super) fn solve_sized(
                     other,
                     interference: 0.0,
                     quality: q,
+                    restart: restart_of(&p.detail),
                 }
             });
             send(Event::Point(PointDone {
@@ -617,28 +689,65 @@ pub(super) fn solve_sized(
                 cpu,
                 fallback: polar.fallback.clone(),
             }));
-            Ok(DragNode { point: stored, cpu, fallback: polar.fallback })
+            Ok(Node::Drag(DragNode { point: stored, cpu, fallback: polar.fallback }))
         }
     };
     let fleet = run_fleet(&job.compute, job.cpu_only, total, started, cancel, &send, work)?;
-    let mut tally = Tally { points: Vec::with_capacity(total), notes, gpu: 0, cpu: 0, fallback: None };
+    let mut tally = Tally { points: Vec::with_capacity(n_drag), notes, gpu: 0, cpu: 0, fallback: None };
     tally.notes.extend(lost_notes(&fleet));
-    for (&mach, (_, node)) in job.nodes.iter().zip(&fleet.done.results) {
-        if node.cpu {
-            tally.cpu += 1;
-        } else {
-            tally.gpu += 1;
-        }
-        tally.fallback = tally.fallback.take().or_else(|| node.fallback.clone());
-        match node.point {
-            Some(point) => tally.points.push(point),
-            None => tally.notes.push(fallback_note(mach)),
+    let mut raw: Vec<solver::PolarPoint> = Vec::new();
+    for (k, (_, node)) in fleet.done.results.iter().enumerate() {
+        match node {
+            Node::Drag(node) => {
+                if node.cpu {
+                    tally.cpu += 1;
+                } else {
+                    tally.gpu += 1;
+                }
+                tally.fallback = tally.fallback.take().or_else(|| node.fallback.clone());
+                match node.point {
+                    Some(point) => {
+                        if let Some(r) = point.restart {
+                            tally.notes.push(wording::restart_note(point.mach, &r));
+                        }
+                        tally.points.push(point);
+                    }
+                    None => tally.notes.push(fallback_note(job.nodes[k])),
+                }
+            }
+            Node::Lift(node) => raw.extend(node.points.iter().cloned()),
         }
     }
-    if tally.points.len() < 2 && total >= 2 {
+    if tally.points.len() < 2 && n_drag >= 2 {
         return Err("the solver did not converge at enough Mach numbers".to_string());
     }
-    let mut table = table_from(job, tally, total, started.elapsed().as_secs_f64());
-    table.backend = backend_text(&parts(&fleet, |n| n.cpu));
+    // The angles of the table: a stability part that gave too little leaves the drag table whole, with its reason in the notes.
+    let mut stability_notes = Vec::new();
+    let stability = if job.stability.is_empty() {
+        None
+    } else {
+        match reduce_lift(&raw, job.stability.len(), &mut stability_notes) {
+            Ok(points) => Some(points),
+            Err(why) => {
+                stability_notes.push(wording::stability_left_out(&why));
+                None
+            }
+        }
+    };
+    let backend = backend_text(&parts(&fleet, Node::cpu));
+    let seconds = started.elapsed().as_secs_f64();
+    let mut table = table_from(job, tally, n_drag, seconds);
+    table.backend.clone_from(&backend);
+    table.lift = stability.map(|points| CfdLiftTable {
+        key: lift_key(job.plan.geometry, &job.stability),
+        solved_at: now(),
+        solve_seconds: seconds,
+        backend,
+        points,
+        notes: stability_notes.clone(),
+    });
+    if table.lift.is_none() {
+        table.notes.extend(stability_notes);
+    }
     Ok(table)
 }

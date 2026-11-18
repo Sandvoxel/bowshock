@@ -5,6 +5,9 @@ use bowshock_sim::{BodyKind, FinCrossSection, FinPlanform, FinSet, NoseShape, Ve
 
 /// Bump when what a stored table means changes (solver, grid level, how the parts are mapped): old tables then read as stale.
 pub(super) const SOLVER_REV: u64 = 5;
+/// The same for a table the 3D engine (`BOWSHOCK_ENGINE=3d`) solved: a separate number, so that a table of one engine is stale to the other, and the legacy keys are unchanged.
+/// At the engine swap this replaces [`SOLVER_REV`] (the legacy engine's tables are then stale, which they are meant to be).
+pub(super) const SOLVER_REV_3D: u64 = 1001;
 /// Relative drag tolerance of the solver's stop rule: a point ends once its total drag varies by less than this over 500
 /// iterations. Measured on the example rocket (coarse grid, RTX 3090, 10 points): about 29 000 iterations in all against about
 /// 82 000 for the default rule, the worst point within 0.39 % of its 12 000-iteration value (the aim is 1 %).
@@ -25,6 +28,25 @@ pub(super) const INTERIOR: [f64; 8] = [0.5, 0.8, 0.9, 1.0, 1.1, 1.3, 1.7, 2.3];
 pub(super) const NODE_GAP: f64 = 0.12;
 /// Bump when what a stored 3D stability solve means changes (solver, grid, how the forces are reduced).
 pub(super) const LIFT_REV: u64 = 4;
+/// [`LIFT_REV`] of the 3D engine (the half domain on the base-wake grid, the base solved, the fins on that grid).
+pub(super) const LIFT_REV_3D: u64 = 1001;
+
+/// The revision of the engine in use: what a stored table's key carries.
+fn solver_rev() -> u64 {
+    if solver::Engine::from_env() == solver::Engine::Solver3 {
+        SOLVER_REV_3D
+    } else {
+        SOLVER_REV
+    }
+}
+
+fn lift_rev() -> u64 {
+    if solver::Engine::from_env() == solver::Engine::Solver3 {
+        LIFT_REV_3D
+    } else {
+        LIFT_REV
+    }
+}
 /// The Mach nodes of a 3D stability solve (sparse: each costs two 3D Euler runs); the solve takes those inside the plotted range.
 pub const LIFT_INTERIOR: [f64; 8] = [0.5, 0.8, 0.95, 1.1, 1.3, 1.7, 2.3, 3.0];
 /// The angles of attack (degrees) every node is solved at.
@@ -68,6 +90,9 @@ pub struct Plan {
     pub body: solver::BodySpec,
     /// The fin set the solver models, if the rocket has one it can take.
     pub fins: Option<solver::FinSpec>,
+    /// The outline of those fins when it is not the trapezoid of their numbers (an ellipse, a freeform polygon): what the 3D engine meshes; the legacy engine flies the
+    /// equivalent trapezoid.
+    pub outline: solver::FinOutline,
     /// Equivalent sand-grain roughness of the solved walls (m): the mean of the parts' finish roughness weighted by wetted area.
     pub body_roughness: f64,
     /// The vehicle without the solved fin set: what the build-up method still adds (other fin sets, lugs, rail buttons).
@@ -106,6 +131,33 @@ fn sharp_nose(shape: solver::SharpShape) -> solver::NoseShape {
     }
 }
 
+/// Whether the 3D engine (`BOWSHOCK_ENGINE=3d`) is the one the table is solved with: it follows the fins' real outlines and refuses what its mesher cannot build.
+fn three_d() -> bool {
+    solver::Engine::from_env() == solver::Engine::Solver3
+}
+
+/// The outline the 3D engine meshes for the fin set `set` of the document `rocket`: the half ellipse of an elliptical fin, the polygon of a freeform one (found in the
+/// document by its span and thickness), else the trapezoid.
+pub(super) fn fin_outline(rocket: &Rocket, set: &FinSet) -> solver::FinOutline {
+    // a freeform fin is flown as its equivalent trapezoid and says so by its real root extent
+    match (set.planform, set.root_extent.is_some()) {
+        (FinPlanform::Elliptical, _) => solver::FinOutline::Ellipse,
+        (FinPlanform::Trapezoidal, false) => solver::FinOutline::Trapezoid,
+        (FinPlanform::Trapezoidal, true) => rocket
+            .radials()
+            .iter()
+            .find_map(|r| match &r.kind {
+                RadialKind::FreeformFin { points, thickness }
+                    if (r.kind.fin_span().unwrap_or(0.0) - set.span).abs() < 1e-6 && (thickness - set.thickness).abs() < 1e-9 =>
+                {
+                    Some(solver::FinOutline::Polygon(points.clone()))
+                }
+                _ => None,
+            })
+            .unwrap_or(solver::FinOutline::Trapezoid),
+    }
+}
+
 /// A fin set as the solver's fins, or why it cannot be.
 pub(super) fn fin_spec(set: &FinSet, x_base: f64) -> Result<solver::FinSpec, String> {
     let (tip_chord, sweep) = match set.planform {
@@ -132,10 +184,12 @@ pub(super) fn fin_spec(set: &FinSet, x_base: f64) -> Result<solver::FinSpec, Str
         sweep,
         thickness: set.thickness,
         roughness: set.roughness,
-        root_te_to_base: (x_base - (set.station + set.root_chord)).max(0.0),
+        // the real root of a freeform fin ends where its polygon's root does (the 3D engine meshes the polygon); the legacy engine flies the equivalent trapezoid
+        root_te_to_base: (x_base - if three_d() { set.root_extent.map_or(set.station + set.root_chord, |e| e.1) } else { set.station + set.root_chord })
+            .max(0.0),
         profile,
     };
-    spec.validate().map_err(|e| e.to_string())?;
+    spec.validate_for(solver::Engine::from_env()).map_err(|e| e.to_string())?;
     Ok(spec)
 }
 
@@ -174,10 +228,10 @@ pub fn plan(rocket: &Rocket, vehicle: &Vehicle, units: UnitSystem) -> Result<Pla
     // contiguous run of segments from the tip.
     let contiguous = segments.windows(2).all(|w| (w[1].station - w[0].aft_station()).abs() < 1e-6);
     if segments.iter().any(|s| s.length <= 1e-9) || !contiguous || segments.first().is_some_and(|s| s.station.abs() > 1e-6) {
-        return Err("pods and strap-ons are bodies beside the axis; the solver takes one axisymmetric stack".to_string());
+        return Err(super::wording::no_pods().to_string());
     }
     if !vehicle.tube_fins.is_empty() {
-        return Err("tube fins (open pod tubes) are bodies beside the axis; the solver takes one axisymmetric stack".to_string());
+        return Err(super::wording::no_tube_fins().to_string());
     }
     let first = segments.first().ok_or("the rocket has no parts")?;
     let BodyKind::Nose(sim_shape) = first.kind else {
@@ -227,17 +281,34 @@ pub fn plan(rocket: &Rocket, vehicle: &Vehicle, units: UnitSystem) -> Result<Pla
     // The solver models one fin set: the supported one with the most fin area. The rest, and every lug and rail button, are
     // left to the build-up method, whose drag is added to the table.
     let x_base = segments.last().map_or(0.0, |s| s.aft_station());
-    let mut candidates: Vec<(usize, solver::FinSpec)> = Vec::new();
+    let mut candidates: Vec<(usize, solver::FinSpec, solver::FinOutline)> = Vec::new();
     let mut refused: Vec<String> = Vec::new();
     for (i, set) in vehicle.fin_sets.iter().enumerate() {
         match fin_spec(set, x_base) {
-            Ok(spec) => candidates.push((i, spec)),
+            Ok(spec) => {
+                // the 3D engine's mesher says what it cannot build (a fin that folds the grid, a notched outline): that is the fin set's reason
+                let outline = if three_d() { fin_outline(rocket, set) } else { solver::FinOutline::Trapezoid };
+                let meshed = if three_d() {
+                    solver::Analysis::new(&body)
+                        .map_err(|e| e.to_string())
+                        .and_then(|a| a.fins(spec.clone()).fin_outline(outline.clone()).mesh_check().map_err(|e| e.to_string()))
+                } else {
+                    Ok(())
+                };
+                match meshed {
+                    Ok(()) => candidates.push((i, spec, outline)),
+                    Err(e) => refused.push(e),
+                }
+            }
             Err(e) => refused.push(e),
         }
     }
     let area = |i: usize| f64::from(vehicle.fin_sets[i].count) * vehicle.fin_sets[i].fin_area();
-    let solved = candidates.iter().map(|(i, _)| *i).max_by(|&a, &b| area(a).total_cmp(&area(b)));
-    let fins = solved.and_then(|i| candidates.iter().find(|(j, _)| *j == i).map(|(_, s)| s.clone()));
+    let solved = candidates.iter().map(|(i, _, _)| *i).max_by(|&a, &b| area(a).total_cmp(&area(b)));
+    let (fins, outline) = match solved.and_then(|i| candidates.iter().find(|(j, _, _)| *j == i)) {
+        Some((_, s, o)) => (Some(s.clone()), o.clone()),
+        None => (None, solver::FinOutline::Trapezoid),
+    };
     let mut rest = vehicle.clone();
     rest.stages.clear();
     if let Some(i) = solved {
@@ -251,13 +322,16 @@ pub fn plan(rocket: &Rocket, vehicle: &Vehicle, units: UnitSystem) -> Result<Pla
         notes.push(format!("Only one fin set is solved; {extra} more come{} from the build-up.", if extra == 1 { "s" } else { "" }));
     }
     if !rest.protuberances.is_empty() {
-        notes.push("Lugs and rail buttons come from the build-up (the solver is axisymmetric).".to_string());
+        notes.push(super::wording::APPENDAGES_NOTE.to_string());
     }
-    if rocket.radials().iter().any(|r| matches!(r.kind, RadialKind::FreeformFin { .. })) {
-        notes.push("Freeform fins are solved as equivalent trapezoids.".to_string());
-    }
-    if vehicle.fin_sets.iter().any(|f| matches!(f.planform, FinPlanform::Elliptical)) && fins.is_some() {
-        notes.push("Elliptical fins are solved as equivalent trapezoids.".to_string());
+    // the legacy engine flies the equivalent trapezoid of an outline; the 3D engine meshes the outline itself
+    if !three_d() {
+        if rocket.radials().iter().any(|r| matches!(r.kind, RadialKind::FreeformFin { .. })) {
+            notes.push("Freeform fins are solved as equivalent trapezoids.".to_string());
+        }
+        if vehicle.fin_sets.iter().any(|f| matches!(f.planform, FinPlanform::Elliptical)) && fins.is_some() {
+            notes.push("Elliptical fins are solved as equivalent trapezoids.".to_string());
+        }
     }
     let body_roughness = wetted_mean_roughness(segments);
     notes.push(if body_roughness > 0.0 {
@@ -266,7 +340,7 @@ pub fn plan(rocket: &Rocket, vehicle: &Vehicle, units: UnitSystem) -> Result<Pla
         "Walls solved smooth (the parts' finish is polished).".to_string()
     });
 
-    let mut plan = Plan { body, fins, body_roughness, rest, notes, geometry: 0 };
+    let mut plan = Plan { body, fins, outline, body_roughness, rest, notes, geometry: 0 };
     plan.geometry = plan.hash();
     Ok(plan)
 }
@@ -275,7 +349,7 @@ impl Plan {
     /// Hash of the geometry the table depends on: the body, the solved fins and what the build-up adds.
     fn hash(&self) -> u64 {
         let mut h = Fnv::new();
-        h.u64(SOLVER_REV);
+        h.u64(solver_rev());
         let n = &self.body.nose;
         match n.shape {
             solver::NoseShape::Cone => h.u64(0),
@@ -304,6 +378,19 @@ impl Plan {
         }
         match &self.fins {
             Some(f) => {
+                // a non-trapezoidal outline (3D engine only) is part of the geometry; the trapezoid hashes as it always did
+                match &self.outline {
+                    solver::FinOutline::Trapezoid => {}
+                    solver::FinOutline::Ellipse => {
+                        h.u64(21);
+                    }
+                    solver::FinOutline::Polygon(p) => {
+                        h.u64(22);
+                        p.iter().for_each(|q| {
+                            h.f(q.0).f(q.1);
+                        });
+                    }
+                }
                 h.u64(20).u64(u64::from(f.count)).f(f.root_chord).f(f.tip_chord).f(f.span).f(f.sweep).f(f.thickness).f(f.roughness * 1e6).f(f.root_te_to_base);
                 h.u64(match f.profile {
                     solver::FinProfile::Square => 0,
@@ -385,7 +472,7 @@ pub fn lift_nodes(range: (f64, f64)) -> Option<Vec<f64>> {
 /// The key of a 3D stability solve: the geometry, the Mach nodes and the angles. The altitude is not in it (the solve is Euler).
 pub fn lift_key(geometry: u64, nodes: &[f64]) -> u64 {
     let mut h = Fnv::new();
-    h.u64(LIFT_REV).u64(geometry);
+    h.u64(lift_rev()).u64(geometry);
     nodes.iter().for_each(|m| {
         h.f(*m);
     });

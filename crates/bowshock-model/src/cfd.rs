@@ -47,6 +47,21 @@ pub struct CfdPoint {
     pub interference: f64,
     /// Trust in the point.
     pub quality: CfdQuality,
+    /// Set when the point was obtained on a second attempt: the solver's CFL controller took the run back to an earlier state at a lower CFL limit. `None` for a run that
+    /// went through, and for tables stored before this was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart: Option<CfdRestart>,
+}
+
+/// How a point that needed a restart was obtained.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CfdRestart {
+    /// How many times the run was taken back.
+    pub rollbacks: u32,
+    /// The implicit CFL limit the run started with.
+    pub cfl_from: f64,
+    /// The CFL limit of the run that gave the result.
+    pub cfl_to: f64,
 }
 
 fn is_zero(x: &f64) -> bool {
@@ -56,6 +71,8 @@ fn is_zero(x: &f64) -> bool {
 /// The solver grid a table was solved on.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CfdGrid {
+    /// Quick: wall functions and a quarter of the cells (the 3D solver only); a first look.
+    Draft,
     /// The default: quick enough to explore with.
     #[default]
     Coarse,
@@ -222,7 +239,18 @@ mod tests {
     use super::*;
 
     fn point(mach: f64) -> CfdPoint {
-        CfdPoint { mach, cd: 0.4, friction: 0.1, pressure: 0.1, base: 0.1, fins: 0.1, other: 0.0, interference: 0.0, quality: CfdQuality::Converged }
+        CfdPoint {
+            mach,
+            cd: 0.4,
+            friction: 0.1,
+            pressure: 0.1,
+            base: 0.1,
+            fins: 0.1,
+            other: 0.0,
+            interference: 0.0,
+            quality: CfdQuality::Converged,
+            restart: None,
+        }
     }
 
     fn table(stage: u32, key: u64) -> CfdTable {

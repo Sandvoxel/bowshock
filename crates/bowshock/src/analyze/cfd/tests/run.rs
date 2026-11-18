@@ -42,7 +42,16 @@ fn failed_3d_points_are_dropped_and_fewer_than_two_nodes_is_an_error() {
 fn a_tiny_grid_solves_and_is_sane() {
     let (rocket, vehicle) = example();
     let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
-    let job = Job { plan, altitude: 120.0, nodes: vec![0.6, 2.0], stage: 1, grid: CfdGrid::Coarse, compute: Default::default(), cpu_only: false };
+    let job = Job {
+        plan,
+        altitude: 120.0,
+        nodes: vec![0.6, 2.0],
+        stage: 1,
+        grid: CfdGrid::Coarse,
+        compute: Default::default(),
+        cpu_only: false,
+        stability: Vec::new(),
+    };
     let points = Arc::new(Mutex::new(0usize));
     let counter = points.clone();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -71,7 +80,7 @@ fn the_example_table_solves_and_agrees_with_extended() {
     let (mut rocket, vehicle) = example();
     let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
     let nodes = nodes((0.1, 3.0)).unwrap();
-    let job = Job { plan, altitude: 120.0, nodes, stage: 1, grid: CfdGrid::Coarse, compute: Default::default(), cpu_only: false };
+    let job = Job { plan, altitude: 120.0, nodes, stage: 1, grid: CfdGrid::Coarse, compute: Default::default(), cpu_only: false, stability: Vec::new() };
     let t0 = Instant::now();
     let table = solve(&job, &Arc::new(AtomicBool::new(false)), move |e| {
         if let Event::Point(p) = e {
@@ -107,6 +116,7 @@ fn a_cancel_stops_before_the_next_point() {
         grid: CfdGrid::Coarse,
         compute: Default::default(),
         cpu_only: false,
+        stability: Vec::new(),
     };
     let cancel = Arc::new(AtomicBool::new(true));
     assert_eq!(solve(&job, &cancel, |_| ()).unwrap_err(), CANCELLED);
@@ -127,6 +137,7 @@ fn a_cancel_ends_the_point_in_flight_within_a_report() {
         grid: CfdGrid::Coarse,
         compute: Default::default(),
         cpu_only: false,
+        stability: Vec::new(),
     };
     let cancel = Arc::new(AtomicBool::new(false));
     let seen = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -167,6 +178,7 @@ fn a_real_point_streams_progress() {
         grid: CfdGrid::Coarse,
         compute: Default::default(),
         cpu_only: false,
+        stability: Vec::new(),
     };
     let events = Arc::new(Mutex::new(Vec::<Event>::new()));
     let log = events.clone();
@@ -212,15 +224,27 @@ fn a_table_that_stopped_early_is_a_partial_of_the_range_and_nothing_else_is() {
         grid: CfdGrid::Coarse,
         compute: Default::default(),
         cpu_only: false,
+        stability: Vec::new(),
     };
-    let mut tracker = Tracker::new(crate::analyze::solve::Kind::Drag, Tracker::drag_units(&job.nodes));
+    let mut tracker = Tracker::new(Tracker::drag_units(&job.nodes));
     let done = |mach: f64, quality: Option<CfdQuality>| PointDone {
         machine: 0,
         at: 10.0,
         mach,
         alpha_deg: None,
         outcome: Outcome::from_quality(quality),
-        point: quality.map(|quality| CfdPoint { mach, cd: 0.5, friction: 0.1, pressure: 0.1, base: 0.2, fins: 0.1, other: 0.0, interference: 0.0, quality }),
+        point: quality.map(|quality| CfdPoint {
+            mach,
+            cd: 0.5,
+            friction: 0.1,
+            pressure: 0.1,
+            base: 0.2,
+            fins: 0.1,
+            other: 0.0,
+            interference: 0.0,
+            quality,
+            restart: None,
+        }),
         lift: None,
         iterations: 2000,
         cpu: false,
@@ -275,8 +299,9 @@ fn a_stopped_share_keeps_the_machines_that_solved_it_and_the_part_without_a_gap(
         grid: CfdGrid::Coarse,
         compute: Default::default(),
         cpu_only: false,
+        stability: Vec::new(),
     };
-    let mut t = Tracker::new(crate::analyze::solve::Kind::Drag, Tracker::drag_units(&job.nodes));
+    let mut t = Tracker::new(Tracker::drag_units(&job.nodes));
     t.set_machines(&[MachineInfo { name: "This computer".into(), remote: false }, MachineInfo { name: "omarchy".into(), remote: true }]);
     t.on_machine(0, 0.0, MachineState::Ready("RTX 3090".into()));
     t.on_machine(1, 0.0, MachineState::Ready("RTX 3080 on omarchy".into()));
@@ -296,6 +321,7 @@ fn a_stopped_share_keeps_the_machines_that_solved_it_and_the_part_without_a_gap(
             other: 0.0,
             interference: 0.0,
             quality: CfdQuality::Converged,
+            restart: None,
         }),
         lift: None,
         iterations: 2000,
@@ -328,7 +354,8 @@ fn solves_that_cannot_reach_a_machine_fail_with_its_error_or_with_every_machines
     let run = |compute: Compute| {
         events.lock().unwrap().clear();
         let log = events.clone();
-        let job = Job { plan: plan.clone(), altitude: 0.0, nodes: vec![0.6, 2.0], stage: 1, grid: CfdGrid::Coarse, compute, cpu_only: false };
+        let job =
+            Job { plan: plan.clone(), altitude: 0.0, nodes: vec![0.6, 2.0], stage: 1, grid: CfdGrid::Coarse, compute, cpu_only: false, stability: Vec::new() };
         solve(&job, &Arc::new(AtomicBool::new(false)), move |e| log.lock().unwrap().push(e))
     };
     // one machine, picked: its error as it is
@@ -384,16 +411,23 @@ fn a_remote_and_a_shared_solve_agree_with_the_local_one() {
             }
         };
         let t0 = Instant::now();
-        let drag_job =
-            Job { plan: plan.clone(), altitude: 120.0, nodes: nodes.clone(), stage: 1, grid: CfdGrid::Coarse, compute: compute.clone(), cpu_only: false };
-        let drag = solve(&drag_job, &cancel, tap(log.clone())).expect("the drag table solves");
+        let job = Job {
+            plan: plan.clone(),
+            altitude: 120.0,
+            nodes: nodes.clone(),
+            stage: 1,
+            grid: CfdGrid::Coarse,
+            compute,
+            cpu_only: false,
+            stability: nodes.clone(),
+        };
+        let mut drag = solve(&job, &cancel, tap(log.clone())).expect("the table solves");
+        let lift = drag.lift.take().expect("the 3D angles solve");
         let drag_s = t0.elapsed().as_secs_f64();
-        let lift_job = LiftJob { plan: plan.clone(), nodes: nodes.clone(), compute, cpu_only: false };
-        let lift = solve_lift(&lift_job, &cancel, tap(log.clone())).expect("the 3D table solves");
-        let lift_s = t0.elapsed().as_secs_f64() - drag_s;
+        let lift_s = lift.solve_seconds;
         let log = log.lock().unwrap();
         let per = |m: usize| log.1.iter().filter(|&&p| p == m).count();
-        println!("{label}: drag {drag_s:.1} s [{}], 3D {lift_s:.1} s [{}]", drag.backend, lift.backend);
+        println!("{label}: the whole solve {drag_s:.1} s ({lift_s:.1} s at its end) [{}]", drag.backend);
         println!("  machines {:?}; points per machine (drag and 3D together) {:?}", log.0, (0..2).map(per).collect::<Vec<_>>());
         (drag, lift)
     };
@@ -430,4 +464,27 @@ fn a_remote_and_a_shared_solve_agree_with_the_local_one() {
             assert!(cal < 0.01, "{name} CP at Mach {} {} deg: {} vs {} m", l.mach, l.alpha_deg, l.x_cp, r.x_cp);
         }
     }
+}
+
+/// A point the solver restarted at a lower CFL limit keeps that in the stored point (so a reloaded table still says it) and in the table's notes.
+#[test]
+fn a_restarted_point_is_flagged_in_the_stored_point_and_the_notes() {
+    let mut d = raw(0.5, 0.0, solver::Quality::Converged).detail;
+    assert_eq!(restart_of(&d), None);
+    d.rollbacks = vec![
+        solver::Rollback { iteration: 250, restored_to: 200, cfl_before: 10.0, cfl_after: 7.0 },
+        solver::Rollback { iteration: 900, restored_to: 850, cfl_before: 7.0, cfl_after: 4.9 },
+    ];
+    let r = restart_of(&d).unwrap();
+    assert_eq!((r.rollbacks, r.cfl_from, r.cfl_to), (2, 10.0, 4.9));
+    let note = restart_note(0.5, &r);
+    assert!(note.contains("Mach 0.50") && note.contains("2 restarts") && note.contains("10.0 to 4.9"), "{note}");
+    // stored with the table: round trip, and a table written before the field existed reads as no restart
+    let mut p = table().points[0];
+    p.restart = Some(r);
+    let json = serde_json::to_value(p).unwrap();
+    assert_eq!(serde_json::from_value::<CfdPoint>(json).unwrap(), p);
+    let mut old = serde_json::to_value(table().points[0]).unwrap();
+    assert!(old.as_object_mut().unwrap().remove("restart").is_none(), "an unrestarted point writes no key");
+    assert_eq!(serde_json::from_value::<CfdPoint>(old).unwrap().restart, None);
 }

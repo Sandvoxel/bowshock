@@ -1,0 +1,32 @@
+# The 3D engine (BOWSHOCK_ENGINE=3d) through the app, on the finless example (a wedge per drag node, the half domain on the base-wake grid for the angles). The
+# document is the example without its fin sets:
+#   BOWSHOCK_FINLESS_FIXTURE=/tmp/example-finless.bowshock cargo test -p bowshock -- --ignored the_finless_example
+# A real solve: the GPU through the queue (the headless driver waits for the solve, a minute or two),
+#   tools/gpuq/gpuq submit --host local --name finless-3d -- env BOWSHOCK_ENGINE=3d BOWSHOCK_OPEN=/tmp/example-finless.bowshock ICED_TEST_BACKEND=wgpu \
+#     cargo run --release -q -p bowshock -- drive --example crates/bowshock/scripts/finless-3d.drive out/finless-3d
+viewport 1500x1100
+click "Analyze"
+click "CFD table"
+click "Flow field"
+move (100, 1000)
+move (102, 1002)
+screenshot wedge-field-mach-dark.png
+
+# the wedge's field is a Field3 of one cell round the axis: the viewer shows it side-on, as a 2D field
+click "Schlieren"
+move (560, 280)
+move (562, 282)
+screenshot wedge-field-schlieren-dark.png
+click "Cp"
+screenshot wedge-field-cp-dark.png
+
+# the angle stepper: the drag node's wedge at 0 degrees, then the half domain at 2 and 6 degrees (the 3D scene)
+click "Mach"
+click "▶"
+move (100, 1000)
+move (102, 1002)
+screenshot half-domain-2deg-dark.png
+click "▶"
+move (100, 1000)
+move (102, 1002)
+screenshot half-domain-6deg-dark.png

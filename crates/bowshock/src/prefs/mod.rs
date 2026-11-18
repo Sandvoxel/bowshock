@@ -69,7 +69,7 @@ impl Section {
             Section::Appearance => "How Bowshock looks.",
             Section::Editor => "How you work in the Build screen.",
             Section::Units => "The units every length, mass, pressure and speed is shown in.",
-            Section::Compute => "Where the CFD and 3D stability solves run.",
+            Section::Compute => "Where the CFD solve runs.",
             Section::Storage => "Where Bowshock keeps its files, and the caches you can clear.",
         }
     }
