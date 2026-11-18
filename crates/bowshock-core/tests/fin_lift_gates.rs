@@ -247,10 +247,23 @@ fn anf_half(mach: f64, alpha_deg: f64, phase: FinPhase, mach_max: f64) -> Case3 
     c
 }
 
+/// Linear interpolation of an ascending `(x, y)` table, clamped at its ends.
+fn interp(t: &[(f64, f64)], x: f64) -> f64 {
+    match t.windows(2).find(|w| x <= w[1].0) {
+        Some(w) if x > w[0].0 => w[0].1 + (w[1].1 - w[0].1) * (x - w[0].0) / (w[1].0 - w[0].0),
+        Some(w) => w[0].1,
+        None => t[t.len() - 1].1,
+    }
+}
+
 const PHASES: [(FinPhase, &str); 2] = [(FinPhase::Between, "between"), (FinPhase::InPlane, "inplane")];
 
 /// G-F5: the ANF's zero-incidence drag `C_D0` (base included, `pi d^2 / 4`) on the half domain of the base-wake grid with the lift tier, in both roll phases, against
-/// `bowshock_reference::anf::CD0` (0.46 at M 0.5-0.7; 0.585 / 0.484 / 0.435 / 0.373 at M 1.832 / 2.375 / 2.718 / 3.147), 8 %.
+/// `bowshock_reference::anf::CD0`, 8 %: zero fin cant throughout (the solver models uncanted fins; shots of cant 2 and 4 degrees carry roll-induced drag). Supersonic
+/// (M 1.850 / 2.364 / 2.741 / 2.970: 0.567 / 0.478 / 0.400 / 0.3805) the zero-cant free-flight single fits of DREV-TM-9703 Table VIII (`:cd0[TM9703-T8-cant0]`);
+/// subsonic (M 0.5 / 0.7: 0.467 / 0.479, +-0.015) the 0-degree-roll tunnel points as replotted in ARL-TR-6725 Fig. 5 (`:cd0[ARL6725-F5-wt]`). The pooled Table IX values
+/// (`anf::CD0_POOLED`, cant 0 / 2 / 4 mixed, linearly interpolated to the run's Mach number) are INFO (`:cd0-pooled`). Both the range models (cold wall, about +14 % friction)
+/// and the cant make the zero-cant references a bias source the solver's adiabatic wall does not share.
 #[test]
 #[ignore = "validation: viscous lift tier on the GPU; Euler on the CPU gives INFO (pressure drag only)"]
 fn gate_f5_anf_cd0() {
@@ -281,9 +294,18 @@ fn gate_f5_anf_cd0() {
                         r.breakdown.fins().ca
                     ),
                 );
-                let id = format!("anf-M{m:.3}-{name}:cd0");
-                // supersonic: the sourced section (full-chord wedge, DESIGN3D L item 38) reads 11-14 % below the table at the four Mach numbers (Coarse sector, GPU); the cause is open
-                // (the table's provenance, the 2 degree cant of the tested fins, a blunter trailing edge): a documented discrepancy, KNOWN, the band is not widened
+                let src = if m > 1.0 { "TM9703-T8-cant0" } else { "ARL6725-F5-wt" };
+                let id = format!("anf-M{m:.3}-{name}:cd0[{src}]");
+                if m > 1.0 {
+                    let pooled = interp(anf::CD0_POOLED, m);
+                    lines.info(
+                        "G-F5",
+                        &format!("anf-M{m:.3}-{name}:cd0-pooled"),
+                        &format!("measured {measured:.4} vs DREV-TM-9703 Table IX pooled (cant 0/2/4) {pooled:.4} at this Mach: {:+.1} %", 100.0 * (measured / pooled - 1.0)),
+                    );
+                }
+                // supersonic: the sourced section (full-chord wedge, DESIGN3D L item 38) reads 9-12 % below the pooled table; against the zero-cant single fits the discrepancy is
+                // documented as KNOWN (cold-wall friction of the range models, fin trailing-edge base, leading-edge resolution; DESIGN3D L item 44), the band is not widened
                 if m > 1.0 {
                     lines.check_known(is_gate(kind, &case), "G-F5", &id, measured, cd, Band::Rel(0.08), "DESIGN3D-L-item-38");
                 } else {
@@ -302,6 +324,12 @@ fn gate_f5_anf_cd0() {
 /// G-L1: the ANF's `CN_alpha` (`CN / alpha` at 2 degrees, per rad) and `x_cp` (calibers from the tip) at 2 and 6 degrees (6 degrees is warm-started from 2) on the half
 /// domain with the lift tier in both roll phases, against `bowshock_reference::anf` at the points the Euler gate gates (`out/gate/anf_3d.md`: wind tunnel M 0.69,
 /// 0.79, 1.728, 1.99, 2.48; free flight 1.8, 2.351, 2.665): CN_alpha 13 %, `x_cp` 0.25 cal, no worse than that gate. The 6-degree nonlinearity is INFO.
+///
+/// Provenance of the references: they are digitised from Yayla (2021) Fig. 3.10 / 4.4, which replot Dupuis' tunnel (WT) and free-flight points. The roll position of the
+/// WT points is not stated there nor in ARL-TR-6725 Fig. 5 (the public replot, which shows one WT series; its M 0.8 C_Nalpha reads about 16-17, consistent with 16.27), so
+/// they are not verifiably the 0-degree-roll values. DRDC TM 2002-136 Tables 12 and 13 list the tunnel's C_Nalpha, C_malpha and CP at 0 and 45 degrees roll (Mach 0.496
+/// to 4.101); that report does not allow redistribution and no public copy of the 45-degree values was found, so there is no 45-degree INFO line. Which fin cant the replotted
+/// free-flight points belong to is not stated either.
 #[test]
 #[ignore = "validation: lift tier on the GPU (minutes); Euler on the CPU gives INFO"]
 fn gate_l1_anf_cn_alpha_and_cp() {
