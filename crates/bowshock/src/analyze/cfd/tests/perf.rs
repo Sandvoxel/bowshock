@@ -845,6 +845,12 @@ fn engine3d_incidence_stop_rule() {
                 c.numerics.incidence_tol = 5e-4;
                 c.numerics.max_iter = 24_000;
             });
+        } else if std::env::var_os("BOWSHOCK_INC_WIN").is_some() {
+            // a shorter mean window at incidence (BOWSHOCK_INC_WIN, BOWSHOCK_INC_FROM), the range rule as it is
+            a = a.case3_hook(|c| {
+                c.numerics.mean_window = std::env::var("BOWSHOCK_INC_WIN").unwrap().parse().unwrap();
+                c.numerics.mean_from = std::env::var("BOWSHOCK_INC_FROM").unwrap().parse().unwrap();
+            });
         }
         let t = Instant::now();
         let p = a.run(&[solver::Condition::new(mach, LIFT_ALPHAS[0])]).expect("solves").points.remove(0);
