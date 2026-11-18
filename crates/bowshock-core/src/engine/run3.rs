@@ -642,7 +642,7 @@ pub fn wall_forces_on(s: &Solver3, x_max: f64) -> WallForces {
 
 /// `(family, i, j, k)` of every wall face of the grid -> its class: the key is the first node of the face, which is its index in its family
 /// (`Grid3::{iface, jface, kface}`: `(k nj + j)(ni + 1) + i`, `(k (nj + 1) + j) ni + i`, `(k nj + j) ni + i`).
-fn wall_classes(g: &Grid3) -> std::collections::HashMap<(usize, usize, usize, usize), Wall> {
+pub(crate) fn wall_classes(g: &Grid3) -> std::collections::HashMap<(usize, usize, usize, usize), Wall> {
     wall_faces(g)
         .into_iter()
         .map(|w| {

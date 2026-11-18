@@ -276,7 +276,8 @@ pub fn u_tau_rough_law(nu: f64, speed: f64, d: f64, ks: f64) -> f64 {
         let (sh, dsh) = rough_shift(kp);
         let g = law_uplus(yp) - sh;
         let dg = law_duplus(yp) * d / nu - dsh * ks / nu;
-        u = (u - (u * g - speed) / (g + u * dg)).clamp(0.5 * u, speed);
+        // `max` then `min`, not `clamp(0.5 u, U)`: at `Re_d = d U / nu < 1` the viscous start value `sqrt(nu U / d)` is above `U` and `clamp` panics (min > max)
+        u = (u - (u * g - speed) / (g + u * dg)).max(0.5 * u).min(speed);
     }
     u
 }

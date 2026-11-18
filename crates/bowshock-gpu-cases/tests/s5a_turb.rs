@@ -222,8 +222,15 @@ impl Case {
         }
         let (mut grad, mut mu) = (vec![[0.0; 12]; nc], vec![0.0; nc]);
         v3::cell_pass(&visc, &grid, &solid, &w, &mut grad, &mut mu);
-        // roughness on every third cell (a fraction of the wall distance: the walls of the box are rough there)
-        let ks: Vec<f64> = (0..nc).map(|c| if rough && c % 3 == 0 && dwall[c].is_finite() { 0.3 * dwall[c] } else { 0.0 }).collect();
+        // roughness on two cells of three: `d / ks` of 3.3 (the blend band of the rough law of the wall), 100 and 1000 (a cell far above the roughness: the rough law and the
+        // runaway guard of `turbulence3::wall_state`, the fin tips of the example rocket)
+        let ks: Vec<f64> = (0..nc)
+            .map(|c| match (rough, c % 3) {
+                (true, 0) if dwall[c].is_finite() => 0.3 * dwall[c],
+                (true, 1) if dwall[c].is_finite() => dwall[c] / if c % 2 == 0 { 100.0 } else { 1000.0 },
+                _ => 0.0,
+            })
+            .collect();
         let mut wall = vec![[0.0; 3]; nc];
         t3::wall_state_pass(&grid, &solid, &dirs, &w, &mu, &dwall, &ks, law_i_walls, &mut wall);
         let mut turb: Vec<[f64; 2]> = (0..nc).map(|_| [10f64.powf(rng.range(-6.0, -2.0)), 10f64.powf(rng.range(0.0, 2.0))]).collect();

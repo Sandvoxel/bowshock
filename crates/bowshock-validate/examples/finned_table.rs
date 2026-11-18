@@ -42,9 +42,16 @@ fn main() -> Result<(), String> {
     let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let mach: f64 = value("--mach").ok_or("--mach <M>")?.parse().map_err(|e| format!("--mach: {e}"))?;
     let tier_name = value("--tier").unwrap_or_else(|| "coarse".into());
+    // the roughness heights of the body and the fins (nose diameters, `WallFlow::ks_*`; the app passes roughness_m / d)
+    let ks_body: f64 = value("--ks-body").map_or(Ok(0.0), |v| v.parse()).map_err(|e| format!("--ks-body: {e}"))?;
+    let ks_fin: f64 = value("--ks-fin").map_or(Ok(0.0), |v| v.parse()).map_err(|e| format!("--ks-fin: {e}"))?;
     // the table's grid is sized for its highest Mach number (3) at the example rocket's Reynolds number (120 m)
-    let flow = WallFlow { re_c: 1.7e6, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0, sutherland: SUTHERLAND_SEA_LEVEL };
-    let tier = if tier_name == "coarse" { Tier::Coarse(flow) } else { Tier::draft(flow) };
+    let flow = WallFlow { re_c: 1.7e6, mach_max: 3.0, ks_body, ks_fin, sutherland: SUTHERLAND_SEA_LEVEL };
+    let tier = match tier_name.as_str() {
+        "coarse" => Tier::Coarse(flow),
+        "fine" => Tier::Fine(flow),
+        _ => Tier::draft(flow),
+    };
     let mut case = Case3::sector(mach, example_body(), example_fins(), tier, 0);
     if args.iter().any(|a| a == "--gf1") {
         // the G-F1 case (`bench3 --case sector-rans`): the Army-Navy body, four thin double-wedge fins, Re_c 1e6, Coarse tier sized for Mach 2
@@ -59,8 +66,9 @@ fn main() -> Result<(), String> {
             profile: FinProfile::DoubleWedge,
             planform: None,
         };
-        let flow = WallFlow { re_c: 1.0e6, mach_max: 2.0, ks_body: 0.0, ks_fin: 0.0, sutherland: 0.368 };
-        case = Case3::sector(mach, Case3::anf_body(), fins, Tier::Coarse(flow), 0);
+        let flow = WallFlow { re_c: 1.0e6, mach_max: 2.0, ks_body, ks_fin, sutherland: 0.368 };
+        let tier = if tier_name == "fine" { Tier::Fine(flow) } else { Tier::Coarse(flow) };
+        case = Case3::sector(mach, Case3::anf_body(), fins, tier, 0);
     }
     if tier_name == "draft-safe" {
         case = case.draft_subsonic();
@@ -91,14 +99,16 @@ fn main() -> Result<(), String> {
         let p = bowshock_core::engine::run3::run3_on(&case, &mut s, false);
         let d = bowshock_core::engine::run3::drag_parts_on(&case, &s);
         println!(
-            "TABLE-CPU {tier_name} M{mach}: {ni}x{nj}x{nk} cells, {} iterations ({:?}), {:.1} s; CD {:.5} (friction {:.5}, base {:.5}, nose {:.5})",
+            "TABLE-CPU {tier_name} M{mach}: {ni}x{nj}x{nk} cells, {} iterations ({:?}), {:.1} s; CD {:.5} (body friction {:.5}, fin friction {:.5}, base {:.5}, forebody pressure {:.5}, fin pressure {:.5})",
             p.iterations,
             p.stop_reason,
             t.elapsed().as_secs_f64(),
             d.total,
-            d.friction.total,
+            d.body_friction(),
+            d.fin_friction(),
             d.base,
-            d.nose
+            d.nose,
+            d.fin_sides + d.fin_edges + d.fin_tips
         );
         return Ok(());
     }
@@ -125,6 +135,11 @@ fn main() -> Result<(), String> {
         d.fin_sides + d.fin_edges + d.fin_tips,
         p.y_plus_max
     );
+    if args.iter().any(|a| a == "--gf1") {
+        // the G-F1 reference (flat plate from the leading edge, fully turbulent, Re_c 1e6): the gate's fin friction of Mach 0.5 and 2
+        let reference = if mach < 1.0 { 0.014593 } else { 0.008477 };
+        println!("GF1-RATIO {tier_name} M{mach}: fin friction {:.6} / reference {reference} = {:.4}", d.fin_friction(), d.fin_friction() / reference);
+    }
     println!(
         "TABLE-RUN {tier_name} M{mach}: cfl_max_start {} cfl_max_end {} cfl_ref {} sub_iters {} accepted {} wasted {} wall_s {wall:.1} stop {:?} ca {:.5} window_osc {}",
         case.numerics.implicit.cfl_max,
