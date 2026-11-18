@@ -1670,6 +1670,20 @@ mod tests {
         assert!((half_thickness(&FinProfile::Square, t, chord, 0.0) - r).abs() < 1e-15);
         let blunt = FinProfile::Custom { section: vec![[0.0, 0.1], [0.5, 1.0], [1.0, 0.1]] };
         assert!((half_thickness(&blunt, t, chord, 0.0) - BLUNT_EDGE_FLOOR * r).abs() < 1e-15, "{}", half_thickness(&blunt, t, chord, 0.0));
+        // the floor of a blunt edge went from 25 % to 10 % of t/2 (DESIGN3D item 38): no built-in profile and no section with a sharp or a full-thickness end changes (the
+        // old rule re-implemented here); only a section whose end is blunt but thinner than t/4 does (the Finner's 0.004 cal leading edge)
+        let old = |profile: &FinProfile, xi: f64| {
+            let raw = |x: f64| half_thickness(profile, t, chord, x.clamp(0.0, 1.0));
+            let sharp_end = raw(if xi < 0.5 { 0.0 } else { 1.0 }) < 0.05 * r;
+            half_thickness(profile, t, chord, xi).max(if sharp_end { 0.0 } else { 0.25 * r })
+        };
+        let hexagon = FinProfile::Hexagonal { wedge_fraction: 0.25 };
+        for profile in [FinProfile::Square, FinProfile::Rounded, FinProfile::Airfoil, FinProfile::DoubleWedge, hexagon, FinProfile::Biconvex, anf.clone()] {
+            for n in 0..=200 {
+                let xi = n as f64 / 200.0;
+                assert_eq!(half_thickness(&profile, t, chord, xi), old(&profile, xi), "{profile:?} at {xi}");
+            }
+        }
         // on the grid the leading-edge face of a double wedge is a sliver: its area against a square fin's
         let area = |profile: FinProfile| {
             let g = body_grid3(&params(0, Some(anf_fins(profile)))).unwrap();

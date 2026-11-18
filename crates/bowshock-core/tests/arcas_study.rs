@@ -107,4 +107,36 @@ fn the_arcas_axial_force_by_part() {
         q * (p.friction.fin_sides + p.friction.fin_edges + p.friction.fin_tips),
         q * p.base
     );
+    println!(
+        "STUDY-BASE {} {} M {mach}: body base Cp {:+.3} (base radius {:.4})",
+        if anf { "anf" } else { "arcas" },
+        if fins_on { "fins on" } else { "fins off" },
+        -p.base / (case.body.base_radius() / 0.5).powi(2),
+        case.body.base_radius()
+    );
+    if let Some(f) = case.grid.fins.as_ref().filter(|_| fins_on) {
+        // the leading and trailing edge faces apart, as pressure coefficients on their own area (units of the nose reference area pi/4; positive = overpressure on the
+        // leading edge, suction behind the trailing edge); the leading-edge half thickness after the mesher's floors (2 % of t/2 at a sharp edge, 10 % at a blunt one)
+        let z0 = match &f.profile {
+            FinProfile::Custom { section } => section[0][1] / section.iter().fold(0.0f64, |m, p| m.max(p[1])),
+            _ => 0.0,
+        };
+        let le_frac = if z0 < 0.05 { 0.02 } else { z0.max(0.1) };
+        let area = |h: f64| f64::from(f.count) * 2.0 * h * f.span / std::f64::consts::FRAC_PI_4;
+        let (a_te, a_le) = (area(0.5 * f.thickness), area(0.5 * f.thickness * le_frac));
+        let a_base = (case.body.base_radius() / 0.5).powi(2);
+        println!(
+            "STUDY-EDGES {} M {mach}: leading edge {:+.4} (nose-reference units) on {:.4} areas = Cp {:+.3}; trailing edge {:+.4} on {:.4} = Cp {:+.3}; body base {:+.4} on {:.3} = Cp {:+.3}",
+            if anf { "anf" } else { "arcas" },
+            p.fin_le,
+            a_le,
+            p.fin_le / a_le,
+            p.fin_te,
+            a_te,
+            -p.fin_te / a_te,
+            p.base,
+            a_base,
+            -p.base / a_base
+        );
+    }
 }
