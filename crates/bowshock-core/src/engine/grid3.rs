@@ -10,7 +10,7 @@
 //! The nodes of a `k` line are scaled out to `s_k r` ([`bowshock_cfd::grid3::polygon_scale`]) so that every polygonal ring has the cross-section area of the
 //! circular one (the inscribed polygon lacks `dtheta^2 / 6` of it); the fin faces are put where their scaled offset is the fin half-thickness. With a
 //! [`FinStack`] the cells of every gap grow from the fin sides (first cell from a target `y+`, 1.25 inside the boundary layer, 1.35 beyond) and the azimuthal
-//! count follows from it. Sharp fin edges keep a needle (2 % of the half thickness at really sharp nodes; 25 % at blunt ends), tapered over four cells ahead of
+//! count follows from it. Sharp fin edges keep a needle (2 % of the half thickness at really sharp nodes; 10 % at blunt ends), tapered over four cells ahead of
 //! the leading edge, behind the trailing edge and above the tip. Per-part roughness is carried on the grid ([`Grid3Params::roughness`]).
 //!
 //! * `Grid3` nodes are `(x, r sin(theta), r cos(theta))`: the pitch plane is `y = 0`, `theta = 0` points to `+z` (the lee side
@@ -218,7 +218,10 @@ impl Grid3Params {
 
 /// Half thickness of the fin section at the chordwise fraction `xi` (chord length `chord`, maximum thickness `t`). At an end that is really sharp (the section's
 /// thickness there is below 5 % of `t/2`: a wedge, an airfoil, the circle of a rounded edge) it is floored at 2 % of `t/2`, a needle the nodes follow (a zero-area
-/// edge face, the polygon of the clustered nodes for a round edge); at a blunt end (a square section, a blunt trailing edge) 25 % of `t/2` as before.
+/// edge face, the polygon of the clustered nodes for a round edge); at a blunt end (a square section, a blunt trailing edge, a leading edge of radius `0.1 t/2`) [`BLUNT_EDGE_FLOOR`] of `t/2` (it was 25 %: a blunt edge below that, the 0.004 cal leading edge of the Basic Finner against 0.04 cal of half thickness, was inflated 2.5 times).
+/// Smallest half thickness of a blunt fin edge as a fraction of `t/2`.
+const BLUNT_EDGE_FLOOR: f64 = 0.1;
+
 pub(crate) fn half_thickness(profile: &FinProfile, t: f64, chord: f64, xi: f64) -> f64 {
     let r = 0.5 * t;
     let raw = |xi: f64| -> f64 {
@@ -254,7 +257,7 @@ pub(crate) fn half_thickness(profile: &FinProfile, t: f64, chord: f64, xi: f64) 
     };
     let xi = xi.clamp(0.0, 1.0);
     let sharp_end = raw(if xi < 0.5 { 0.0 } else { 1.0 }) < 0.05 * r;
-    raw(xi).max(if sharp_end { 0.02 * r } else { 0.25 * r })
+    raw(xi).max(if sharp_end { 0.02 * r } else { BLUNT_EDGE_FLOOR * r })
 }
 
 /// Node-index layout of the fins on the axial/radial lines.
@@ -1652,7 +1655,7 @@ mod tests {
     fn sharp_edges_keep_their_needle_and_blunt_ones_their_floor() {
         let (t, chord) = (0.08, 1.0);
         let r = 0.5 * t;
-        // a double wedge: both ends sharp, the floor 2 % of the half thickness, no 25 % flat face
+        // a double wedge: both ends sharp, the floor 2 % of the half thickness, no flat face
         assert!((half_thickness(&FinProfile::DoubleWedge, t, chord, 0.0) - 0.02 * r).abs() < 1e-15);
         assert!((half_thickness(&FinProfile::DoubleWedge, t, chord, 1.0) - 0.02 * r).abs() < 1e-15);
         // the rounded edge: the node at the nose is a point, the next one on the circle
@@ -1666,7 +1669,7 @@ mod tests {
         // a square section and a blunt end are not touched
         assert!((half_thickness(&FinProfile::Square, t, chord, 0.0) - r).abs() < 1e-15);
         let blunt = FinProfile::Custom { section: vec![[0.0, 0.1], [0.5, 1.0], [1.0, 0.1]] };
-        assert!((half_thickness(&blunt, t, chord, 0.0) - 0.25 * r).abs() < 1e-15, "{}", half_thickness(&blunt, t, chord, 0.0));
+        assert!((half_thickness(&blunt, t, chord, 0.0) - BLUNT_EDGE_FLOOR * r).abs() < 1e-15, "{}", half_thickness(&blunt, t, chord, 0.0));
         // on the grid the leading-edge face of a double wedge is a sliver: its area against a square fin's
         let area = |profile: FinProfile| {
             let g = body_grid3(&params(0, Some(anf_fins(profile)))).unwrap();

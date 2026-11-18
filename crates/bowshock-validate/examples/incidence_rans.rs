@@ -2,19 +2,21 @@
 //! `x_cp`, CA, iterations and the oscillation of the last averaging window, for the Lift tier (wall functions, `y+` 60) or the wall-resolved tiers.
 //!
 //! ```text
-//! cargo run --release -p bowshock-validate --example incidence_rans -- [--mach 2.0] [--alpha 2.0] [--body short|anf] [--tier lift|coarse|fine] [--fins 1|0]
+//! cargo run --release -p bowshock-validate --example incidence_rans -- [--mach 2.0] [--alpha 2.0] [--body short|anf|example] [--tier lift|coarse|fine|draft] [--fins 1|0]
 //!     [--chord-cells N] [--span-cells N] [--cfl-max X] [--sub-iters N] [--max-iter N] [--precision f32|df32] [--phase between|inplane] [--first-order N] [--fin-yp Y]
-//!     [--domain half|sector] [--sector-fins gf1|anf] [--history-every N]
+//!     [--domain half|sector] [--sector-fins gf1|anf|example] [--roe 0|1] [--eps-fix X] [--dt-mode sum|min] [--growth G] [--dt-mode sum|min] [--history-every N]
 //! ```
 //!
 //! The grid is `Case3::base_half` as the G-L1 gate builds it (ANF fins, the sea-level `Re_c` of the 0.03 m ANF, the grid sized for Mach 3.147); `short` is the ANF nose on a
 //! tube of 1.5 calibres. Prints one `INCIDENCE {json}` line; `--history` also prints the CN samples (every 50 iterations). `--domain sector` is the finned sector at zero incidence
-//! as the G-F1 gate builds it (four thin fins, t/c 2 %, chord and span 0.5 d, `Re_c` 1e6, the grid sized for Mach 2; `--sector-fins anf` takes the ANF fins and flow).
+//! as the G-F1 gate builds it (four thin fins, t/c 2 %, chord and span 0.5 d, `Re_c` 1e6, the grid sized for Mach 2; `--sector-fins anf` takes the ANF fins and flow;
+//! `--sector-fins example --body example` the application's example rocket: ogive, four swept square-section fins, `Re_c` 1.7e6, sized for Mach 3). `--roe 0` is the scalar
+//! (Rusanov) dissipation in the implicit operator, `--eps-fix` the entropy-fix level of the Roe one: the left-hand side only, the converged state is the same.
 //! `--history-every N` (a multiple of 50) replaces the stop rule: a cold run to `--max-iter` printing, every N iterations, `H it residual CA CN nose afterbody fin_sides fin_edges
 //! fin_tips base base_friction_nose+aft fin_friction` (the parts with pressure and shear as `LiftBreakdown`, base and the friction of `DragParts`).
 
 use bowshock_cfd::gpu::Precision;
-use bowshock_cfd::implicit_params::{ImplicitParams, LineSolve3};
+use bowshock_cfd::implicit_params::{DtMode, ImplicitParams, LineSolve3};
 use bowshock_cfd::solver3::{Config3, Scheme3};
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
 use bowshock_core::engine::case3::{Case3, Tier, WallFlow, SUTHERLAND_SEA_LEVEL};
@@ -31,12 +33,17 @@ fn main() -> Result<(), String> {
     let body = match value("--body").as_deref().unwrap_or("short") {
         "short" => BaseBody::cylinder(Body { nose: Nose::Cone { half_angle: 10f64.to_radians() } }, 1.5),
         "anf" => Case3::anf_body(),
-        other => return Err(format!("--body short|anf, got `{other}`")),
+        "example" => BaseBody::cylinder(Body { nose: Nose::TangentOgive { fineness: 0.2286 / 0.0762 } }, 0.9134 / 0.0762),
+        other => return Err(format!("--body short|anf|example, got `{other}`")),
     };
     let sector = value("--domain").as_deref() == Some("sector");
-    let thin = sector && value("--sector-fins").as_deref() != Some("anf");
+    let sector_fins = value("--sector-fins");
+    let thin = sector && sector_fins.as_deref().is_none_or(|f| f == "gf1");
+    let example = sector && sector_fins.as_deref() == Some("example");
     let flow = if thin {
         WallFlow { re_c: 1.0e6, mach_max: 2.0, ks_body: 0.0, ks_fin: 0.0, sutherland: 0.368 }
+    } else if example {
+        WallFlow { re_c: 1.7e6, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0, sutherland: SUTHERLAND_SEA_LEVEL }
     } else {
         WallFlow { re_c: 1.225 * 340.294 * 0.03 / 1.7894e-5, mach_max: 3.147, ks_body: 0.0, ks_fin: 0.0, sutherland: SUTHERLAND_SEA_LEVEL }
     };
@@ -44,7 +51,8 @@ fn main() -> Result<(), String> {
         "lift" => Tier::Lift(flow),
         "coarse" => Tier::Coarse(flow),
         "fine" => Tier::Fine(flow),
-        other => return Err(format!("--tier lift|coarse|fine, got `{other}`")),
+        "draft" => Tier::draft(flow),
+        other => return Err(format!("--tier lift|coarse|fine|draft, got `{other}`")),
     };
     let fins = if thin {
         let (chord, tc) = (0.5, 0.02);
@@ -57,6 +65,19 @@ fn main() -> Result<(), String> {
             thickness: tc * chord,
             te_to_base: 0.0,
             profile: FinProfile::DoubleWedge,
+            planform: None,
+        })
+    } else if example {
+        let d = 0.0762;
+        Some(Fins3 {
+            count: 4,
+            root_chord: 0.12 / d,
+            tip_chord: 0.05 / d,
+            span: 0.0762 / d,
+            sweep: 0.06 / d,
+            thickness: 0.00318 / d,
+            te_to_base: 0.0,
+            profile: FinProfile::Square,
             planform: None,
         })
     } else {
@@ -92,6 +113,22 @@ fn main() -> Result<(), String> {
     if let Some(v) = value("--sub-iters") {
         case.numerics.implicit.sub_iters = v.parse().map_err(|e| format!("--sub-iters: {e}"))?;
     }
+    if let Some(v) = value("--roe") {
+        case.numerics.implicit.roe = v != "0";
+    }
+    if let Some(v) = value("--eps-fix") {
+        case.numerics.implicit.eps_fix = v.parse().map_err(|e| format!("--eps-fix: {e}"))?;
+    }
+    if let Some(v) = value("--growth") {
+        case.numerics.implicit.growth = v.parse().map_err(|e| format!("--growth: {e}"))?;
+    }
+    if let Some(v) = value("--dt-mode") {
+        case.numerics.implicit.dt_mode = match v.as_str() {
+            "sum" => DtMode::Sum,
+            "min" => DtMode::MinDirection,
+            other => return Err(format!("--dt-mode sum|min, got `{other}`")),
+        };
+    }
     if let Some(v) = value("--max-iter") {
         case.numerics.max_iter = v.parse().map_err(|e| format!("--max-iter: {e}"))?;
     }
@@ -110,10 +147,11 @@ fn main() -> Result<(), String> {
     let (lo, hi) = tail.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), &c| (l.min(c), h.max(c)));
     let w = r.window;
     println!(
-        "INCIDENCE {{\"mach\":{mach},\"alpha_deg\":{alpha},\"tier\":\"{}\",\"cfl_max\":{},\"sub_iters\":{},\"precision\":\"{pname}\",\"iterations\":{},\"stop\":\"{:?}\",\"drop_orders\":{:.2},\"cn\":{:.5},\"ca\":{:.5},\"x_cp\":{:.4},\"window\":{},\"cn_last1000_half_range_rel\":{:.4},\"y_plus_max\":{:.1},\"wall_s\":{wall:.1},\"ms_per_iter\":{:.2}}}",
+        "INCIDENCE {{\"mach\":{mach},\"alpha_deg\":{alpha},\"tier\":\"{}\",\"cfl_max\":{},\"sub_iters\":{},\"roe\":{},\"precision\":\"{pname}\",\"iterations\":{},\"stop\":\"{:?}\",\"drop_orders\":{:.2},\"cn\":{:.5},\"ca\":{:.5},\"x_cp\":{:.4},\"window\":{},\"cn_last1000_half_range_rel\":{:.4},\"y_plus_max\":{:.1},\"wall_s\":{wall:.1},\"ms_per_iter\":{:.2}}}",
         value("--tier").unwrap_or_else(|| "lift".into()),
         case.numerics.implicit.cfl_max,
         case.numerics.implicit.sub_iters,
+        case.numerics.implicit.roe,
         r.iterations,
         r.stop_reason,
         r.drop_orders,
