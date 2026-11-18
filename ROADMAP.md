@@ -221,3 +221,6 @@ used in `crates/bowshock-gpu-cases/tests`.
 - Fins and other non-axisymmetric parts.
 - RANS (SST). Revisit only if M4b validation shows the integral method is not enough.
 - Real-gas effects and Mach numbers above the validated range.
+
+> **3D status (2026-11-17):** the items above marked out of scope (angle of attack, normal force, centre of pressure, fins) are built in the 3D viscous solver on the `cfd-3d` branch
+> (not default, not pushed): see `crates/bowshock-cfd/HANDOFF3D.md`.

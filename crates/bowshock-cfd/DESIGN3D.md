@@ -1,5 +1,7 @@
 # DESIGN3D: one 3D viscous solver for drag, fin drag and lift (design + staged plan, no code written)
 
+**Status at hand-off (2026-11-17): built and gated on `cfd-3d`; the default is not flipped and the 2D solver is not deleted. Start at [`HANDOFF3D.md`](HANDOFF3D.md); this file is the detailed record (the text below is the original design, section L the as-built log, items 21-42).**
+
 Author: `solver3d`, 2026-11-17. Branch `cfd-3d`, HEAD 008d69d (merge of `origin/ui` 6375190; the design was written against the pre-merge tree and section F re-read after it). Tags: **[M: src]** measured / read from a file,
 **[E]** my estimate (method given), **[R]** read in a paper or page tonight, **[S]** abstract or search summary only (not read in full).
 Lengths in nose diameters `d` unless stated. "2D" = `crates/bowshock-cfd/src/{solver,flux,implicit,viscous,turbulence,multigrid,grid,bc,gas}.rs`
