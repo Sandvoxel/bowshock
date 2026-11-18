@@ -762,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    fn a_cancel_in_the_angles_keeps_the_drag_table_and_the_mach_numbers_with_both_angles() {
+    fn a_cancel_in_the_angles_keeps_the_drag_table_and_the_mach_numbers_solved() {
         let (mut app, serial) = app_with(&[Demo::AngleStopped]);
         let j = job(&app);
         feed(&mut app, serial, events(Demo::AngleStopped, &j));
@@ -772,7 +772,7 @@ mod tests {
         let kept = j.stability.len() / 2;
         assert_eq!(table.points.len(), j.nodes.len());
         let lift = table.lift.as_ref().expect("the 3D angles that were in");
-        assert_eq!(lift.points.len(), 2 * kept);
+        assert_eq!(lift.points.len(), kept);
         assert_eq!(lift.key, cfd::lift_key(j.plan.geometry, &j.stability[..kept]), "the key is the partial list's: it reads as stale");
         assert_eq!(stopped.keep_label, format!("Keep {} points · {} at {kept} Mach", j.nodes.len(), if three_d() { "angles" } else { "3D" }));
         assert!(
@@ -798,10 +798,10 @@ mod tests {
         let j = job(&app);
         feed(&mut app, serial, events(Demo::Done, &j));
         let table = app.ctx().doc.rocket().cfd_table(1).expect("stored").clone();
-        assert_eq!(table.lift.as_ref().map(|l| l.points.len()), Some(2 * j.stability.len()));
+        assert_eq!(table.lift.as_ref().map(|l| l.points.len()), Some(j.stability.len()));
         assert_eq!(
             notice(&app),
-            format!("Solved {} points and {} · 1 not converged · 12 min 21 s", table.points.len(), if three_d() { "the angles" } else { "3D stability" })
+            format!("Solved {} points and {} · 1 not converged · 11 min 12 s", table.points.len(), if three_d() { "the angles" } else { "3D stability" })
         );
         let (_, row) = app.analyze().cfd.summary.clone().expect("the account");
         assert!(
@@ -1043,7 +1043,7 @@ mod tests {
         assert!(app.analyze().cfd.fields.is_empty(), "nothing before Keep");
         press(&mut app, Message::CfdKeep);
         let store = &app.analyze().cfd.fields;
-        assert_eq!(store.len(), table.points.len() + 2 * kept, "the drag nodes' fields and both angles of each kept Mach number; the running one is not kept");
+        assert_eq!(store.len(), table.points.len() + kept, "the drag nodes' fields and the angle of each kept Mach number; the running one is not kept");
     }
 
     /// A real solve of the example (GPU, minutes) through the app's own path: the events of the one `solve` (the drag nodes, then the 3D

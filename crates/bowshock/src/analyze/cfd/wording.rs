@@ -1,6 +1,6 @@
 //! What the screens say about what the CFD table is made of, in one place.
 //!
-//! One solve gives the drag table (zero incidence) and, unless it is left out, the normal force and centre of pressure at two angles
+//! One solve gives the drag table (zero incidence) and, unless it is left out, the normal force and centre of pressure at an angle
 //! of attack. What each part comes from is the engine's business and changes when the engine does: **this file is the only place
 //! that names it**. Today the zero-incidence drag is the axisymmetric solver's and the angles are a 3D Euler solve; the fins' drag in
 //! the table is the empirical model's. When the engine swap makes one 3D viscous solver do all of it, the strings that say otherwise
@@ -27,7 +27,7 @@ impl Words {
         if self.0 {
             "Drag, margin, CP and CNα solved by CFD on a Mach table (the 3D solver on the GPU: the fins and the base are solved); margin and CP from Extended when the angles are left out"
         } else {
-            "Drag solved by CFD on a Mach table (the zero-incidence solver on the GPU, with the fins' empirical drag); margin, CP and CNα from a 3D Euler solve at two angles of attack, or from Extended when the angles are left out"
+            "Drag solved by CFD on a Mach table (the zero-incidence solver on the GPU, with the fins' empirical drag); margin, CP and CNα from a 3D Euler solve at an angle of attack, or from Extended when the angles are left out"
         }
     }
 
@@ -90,17 +90,17 @@ impl Words {
     /// The tooltip of the angles option.
     pub fn angles_tip(self) -> &'static str {
         if self.0 {
-            "Also solve the normal force and CP at 2° and 6° (up to 8 Mach numbers more); off: the drag table alone, a quick table"
+            "Also solve the normal force and CP at 2° (up to 8 Mach numbers more); off: the drag table alone, a quick table"
         } else {
-            "Also solve the normal force and CP in 3D at 2° and 6° (up to 8 Mach numbers, minutes on a fast GPU); off: the drag table alone, a quick table"
+            "Also solve the normal force and CP in 3D at 2° (up to 8 Mach numbers, minutes on a fast GPU); off: the drag table alone, a quick table"
         }
     }
 
     /// The hint under the angle of attack field for the CFD method, by whether the angles are in the solve.
     pub fn alpha_hint(self, angles: bool) -> &'static str {
         match (angles, self.0) {
-            (true, true) => "Drag solved at α = 0; margin, CP and CNα from the solve at 2° and 6°",
-            (true, false) => "Drag solved at α = 0; margin, CP and CNα from the 3D solve at 2° and 6°",
+            (true, true) => "Drag solved at α = 0; margin, CP and CNα from the solve at 2°",
+            (true, false) => "Drag solved at α = 0; margin, CP and CNα from the 3D solve at 2°",
             (false, _) => "Solved at α = 0; Extended adds the change with angle",
         }
     }
@@ -355,7 +355,7 @@ pub const PARTIAL_ACTION: &str = "Re-solve for the rest.";
 pub const APPENDAGES_NOTE: &str = "Lugs and rail buttons are not in the solved geometry: their drag comes from the build-up.";
 
 /// The subtitle note of a plot panel the CFD table method takes from the Extended method (the solver gives the drag at zero
-/// incidence and, when it was solved, the normal force and CP at two angles: nothing else).
+/// incidence and, when it was solved, the normal force and CP at the angle: nothing else).
 pub const PANEL_FROM_EXTENDED: &str = "Extended (not solved by CFD)";
 /// The subtitle note of a stability panel fed by a fresh solve of the angles.
 pub const PANEL_FROM_3D: &str = "CFD (3D)";
@@ -365,7 +365,7 @@ pub const LIFT_LABEL: &str = " · CFD (3D)";
 /// The Conditions panel's row for the option to leave the angles out.
 pub const ANGLES_LABEL: &str = "3D angles";
 
-/// `2° and 6°`: the angles a stability solve has points at.
+/// `2°`: the angles a stability solve has points at.
 fn angle_list(l: &CfdLiftTable) -> String {
     let mut a: Vec<f64> = Vec::new();
     for p in &l.points {
@@ -396,7 +396,7 @@ mod tests {
     fn lift(machs: &[f64]) -> CfdLiftTable {
         let points = machs
             .iter()
-            .flat_map(|&m| [2.0, 6.0].map(|a| CfdLiftPoint { mach: m, alpha_deg: a, cn: 0.1, x_cp: 1.0, cd: None, cm: None, quality: CfdQuality::Converged }))
+            .map(|&m| CfdLiftPoint { mach: m, alpha_deg: 2.0, cn: 0.1, x_cp: 1.0, cd: None, cm: None, quality: CfdQuality::Converged })
             .collect();
         CfdLiftTable { key: 1, solved_at: 0, solve_seconds: 1.0, backend: "GPU (Luma)".to_string(), points, notes: Vec::new() }
     }
@@ -410,8 +410,8 @@ mod tests {
         assert_eq!(old.solved_brief(10, true), "10 points and 3D stability");
         assert_eq!(new.solved_brief(10, true), "10 points and the angles");
         assert_eq!(old.table_points(10, None), "10 Mach points at zero incidence");
-        assert_eq!(old.table_points(10, Some(&lift(&[0.5, 0.8]))), "10 Mach points at zero incidence · 2 Mach numbers at 2° and 6° in 3D");
-        assert_eq!(new.table_points(10, Some(&lift(&[0.5, 0.8]))), "10 Mach points at zero incidence · 2 Mach numbers at 2° and 6°");
+        assert_eq!(old.table_points(10, Some(&lift(&[0.5, 0.8]))), "10 Mach points at zero incidence · 2 Mach numbers at 2° in 3D");
+        assert_eq!(new.table_points(10, Some(&lift(&[0.5, 0.8]))), "10 Mach points at zero incidence · 2 Mach numbers at 2°");
         assert_eq!(old.progress_text((4, 10), (0, 0)), "4 of 10 Mach points");
         assert_eq!(old.progress_text((10, 10), (8, 16)), "10 of 10 Mach points and 8 of 16 3D runs");
         assert_eq!(new.progress_text((10, 10), (8, 16)), "10 of 10 Mach points and 8 of 16 angle runs");

@@ -1102,8 +1102,8 @@ mod tests {
         }
     }
 
-    fn run_wake(drift: f64) -> (Option<(usize, StopReason)>, PointResult3) {
-        let case = Case3::tiny_anf(0.5, 2f64.to_radians());
+    fn run_wake(drift: f64, alpha_deg: f64) -> (Option<(usize, StopReason)>, PointResult3) {
+        let case = Case3::tiny_anf(0.5, alpha_deg.to_radians());
         let mut rule = StopRule3::new(&case, false);
         let mut stop = None;
         let mut last = 0;
@@ -1125,7 +1125,7 @@ mod tests {
 
     #[test]
     fn an_oscillating_wake_with_a_stationary_mean_stops_on_the_window_mean() {
-        let (stop, r) = run_wake(0.0);
+        let (stop, r) = run_wake(0.0, 2.0);
         let (it, why) = stop.expect("the run stops");
         assert_eq!(why, StopReason::MeanStationary);
         // two windows of 1500 after iteration 1000, and the start-up transient (600 iterations) decayed
@@ -1142,9 +1142,16 @@ mod tests {
     #[test]
     fn an_oscillating_wake_whose_mean_drifts_does_not_stop_on_the_mean() {
         // 4 % of CA per 1000 iterations: the means of consecutive windows differ by 6 %
-        let (stop, r) = run_wake(0.04);
+        let (stop, r) = run_wake(0.04, 0.0);
         assert!(stop.is_none(), "{stop:?}");
         assert!(r.window.is_some());
+    }
+
+    #[test]
+    fn at_incidence_a_drift_of_ca_alone_does_not_hold_the_mean_rule() {
+        // the same CA drift at 2 degrees: CN and the moment are stationary in the mean, CA is not a target
+        let (stop, _) = run_wake(0.04, 2.0);
+        assert!(matches!(stop, Some((_, StopReason::MeanStationary))), "{stop:?}");
     }
 
     #[test]
