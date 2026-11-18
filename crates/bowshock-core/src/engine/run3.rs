@@ -835,7 +835,6 @@ pub struct StopRule3 {
     mean_window: usize,
     mean_from: usize,
     mean_tol: f64,
-    incidence_tol: f64,
     incidence: bool,
     /// `(iteration, [CA, CN, CN x_cp])` every [`MEAN_EVERY`] iterations after `mean_from`.
     samples: Vec<(usize, [f64; 3])>,
@@ -849,6 +848,10 @@ pub struct StopRule3 {
 impl StopRule3 {
     pub fn new(case: &Case3, warm: bool) -> StopRule3 {
         let n = &case.numerics;
+        let incidence = case.alpha.abs() >= 1e-12 && matches!(case.grid.domain, Domain3::Half { .. });
+        // at incidence the mean rule has its own window, start and tolerance, judging CN and the moment (CA is not a product there)
+        let (mean_window, mean_from, mean_tol) =
+            if incidence { (n.incidence_window, n.incidence_from, n.incidence_tol) } else { (n.mean_window, n.mean_from, n.mean_tol) };
         StopRule3 {
             skip: if warm { 0 } else { n.first_order_iters.max(20) },
             nwin: (n.window / SAMPLE_EVERY).max(1),
@@ -859,11 +862,10 @@ impl StopRule3 {
             hist: Vec::new(),
             reason: StopReason::MaxIterations,
             min_iters: if warm { n.warm_min_iters } else { n.stationary_min_iters },
-            mean_window: n.mean_window,
-            mean_from: n.mean_from,
-            mean_tol: n.mean_tol,
-            incidence_tol: n.incidence_tol,
-            incidence: case.alpha.abs() >= 1e-12 && matches!(case.grid.domain, Domain3::Half { .. }),
+            mean_window,
+            mean_from,
+            mean_tol,
+            incidence,
             samples: Vec::new(),
             mean_ready: false,
             last_window: None,
@@ -903,8 +905,9 @@ impl StopRule3 {
         let cm = if self.incidence && f.x_cp.is_finite() { f.cn * f.x_cp } else { 0.0 };
         self.samples.push((iterations, [f.ca, f.cn, cm]));
         let s = self.scale();
-        let tol = if self.incidence { self.incidence_tol } else { self.mean_tol };
-        if let Some((mean, agree)) = window_means(&self.samples, (self.mean_window as f64 * s).round() as usize, (self.mean_from as f64 * s) as usize, tol, self.incidence) {
+        if let Some((mean, agree)) =
+            window_means(&self.samples, (self.mean_window as f64 * s).round() as usize, (self.mean_from as f64 * s) as usize, self.mean_tol, self.incidence)
+        {
             self.last_window = Some(mean);
             self.mean_ready = agree;
         }
@@ -1128,8 +1131,8 @@ mod tests {
         let (stop, r) = run_wake(0.0, 2.0);
         let (it, why) = stop.expect("the run stops");
         assert_eq!(why, StopReason::MeanStationary);
-        // two windows of 1500 after iteration 1000, and the start-up transient (600 iterations) decayed
-        assert!((4000..=8000).contains(&it), "stopped at {it}");
+        // two windows of 1000 after iteration 1000, and the start-up transient (600 iterations) decayed
+        assert!((3000..=8000).contains(&it), "stopped at {it}");
         // the result is the window mean (exact: 0.234 times the settled factor), within the leftover of a window that is not a whole number of cycles, and the oscillation is reported
         let w = r.window.expect("a window");
         assert!((r.ca - 0.234).abs() < 0.234 * 0.012, "mean CA {} vs 0.234", r.ca);
@@ -1176,6 +1179,7 @@ mod tests {
     fn the_mean_rule_is_off_with_a_zero_window() {
         let mut case = Case3::tiny_anf(0.5, 2f64.to_radians());
         case.numerics.mean_window = 0;
+        case.numerics.incidence_window = 0;
         let mut rule = StopRule3::new(&case, false);
         assert!(!rule.wants_forces(5000, MEAN_EVERY));
         rule.observe(5000, &wake(5000, 0.0));

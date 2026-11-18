@@ -51,8 +51,11 @@ pub struct Numerics3 {
     pub mean_window: usize,
     pub mean_from: usize,
     pub mean_tol: f64,
-    /// The mean rule at incidence (a half domain at an angle of attack): the tolerance (relative, plus 1e-4 absolute) of the two windows' means of CN and of the moment about the
-    /// nose, the only quantities judged there (CA is not a product of an angle-of-attack point, so it is not waited on and `mean_tol` is not used).
+    /// The mean rule at incidence (a half domain at an angle of attack) uses these instead of `mean_window`, `mean_from` and `mean_tol`, and judges CN and the moment about the nose
+    /// only (CA is not a product of an angle-of-attack point). Measured on the example rocket's half domain at 2 degrees (Lift tier, Coarse, Mach 0.5, 1.1, 2.3): windows of
+    /// 1000 from 1000 stop at 3000 iterations instead of 6000, CN within 0.01 % and `x_cp` within 0.003 cal of the 5e-4 reference. `incidence_window` 0: off.
+    pub incidence_window: usize,
+    pub incidence_from: usize,
     pub incidence_tol: f64,
     /// Explicit 3D line solve overriding the backend default (`None`: [`Numerics3::implicit_for`]).
     pub line_solve: Option<LineSolve3>,
@@ -93,6 +96,8 @@ impl Numerics3 {
             mean_window: 1500,
             mean_from: 1000,
             mean_tol: 1e-2,
+            incidence_window: 1000,
+            incidence_from: 1000,
             incidence_tol: 2e-3,
             line_solve: None,
             pressure_outflow: false,
@@ -148,6 +153,8 @@ impl Numerics3 {
             mean_window: 2000,
             mean_from: 2000,
             mean_tol: 5e-3,
+            incidence_window: 1000,
+            incidence_from: 1000,
             incidence_tol: 2e-3,
             line_solve: Some(LineSolve3::Block),
             cfl_ref: 20.0,
