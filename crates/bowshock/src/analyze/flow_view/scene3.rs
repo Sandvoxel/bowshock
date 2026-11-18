@@ -314,7 +314,11 @@ impl Prepared3 {
             let mut cp: Vec<f32> = f.walls.iter().filter(|w| w.part != Part::Other).map(|w| w.cp.abs()).filter(|c| c.is_finite()).collect();
             let at = ((cp.len() as f32 * 0.95) as usize).min(cp.len().saturating_sub(1));
             let top = if cp.is_empty() { 0.0 } else { *cp.select_nth_unstable_by(at, f32::total_cmp).1 };
-            let cf_max = f.walls.iter().filter(|w| w.part != Part::Other).map(|w| w.cf.iter().map(|c| c * c).sum::<f32>().sqrt()).fold(0.0f32, f32::max);
+            // the skin friction the same way: the fin leading edges and the nose tip peak far above the body's own level
+            let mut cf: Vec<f32> =
+                f.walls.iter().filter(|w| w.part != Part::Other).map(|w| w.cf.iter().map(|c| c * c).sum::<f32>().sqrt()).filter(|c| c.is_finite()).collect();
+            let at = ((cf.len() as f32 * 0.95) as usize).min(cf.len().saturating_sub(1));
+            let cf_max = if cf.is_empty() { 0.0 } else { *cf.select_nth_unstable_by(at, f32::total_cmp).1 };
             let cp = ((top * 20.0).ceil() / 20.0).max(0.05);
             [(-cp, cp), (0.0, if cf_max > 0.0 { cf_max } else { 1e-3 })]
         };
@@ -394,12 +398,12 @@ fn scalar_ranges(f: &Field3) -> [(f32, f32); 4] {
             }
         }
     }
-    // the eddy ratio: the 99th percentile of the fluid cells sets the top (the free shear layer and the wake reach ratios in the thousands that would leave the boundary
+    // the eddy ratio: the 95th percentile of the fluid cells sets the top (the free shear layer and the wake reach ratios in the thousands that would leave the boundary
     // layers, where it is of the order of 10 to 1000 over the molecular viscosity, a single colour), rounded up to a round number
     let eddy_max = if eddy.is_empty() {
         0.0
     } else {
-        let n = ((eddy.len() as f32 * 0.99) as usize).min(eddy.len() - 1);
+        let n = ((eddy.len() as f32 * 0.95) as usize).min(eddy.len() - 1);
         let top = *eddy.select_nth_unstable_by(n, f32::total_cmp).1;
         let decade = 10f32.powf(top.max(1.0).log10().floor());
         (top / decade).ceil() * decade
@@ -672,7 +676,7 @@ pub(super) mod tests {
         assert!(cp.1 >= 0.2);
         assert!((s.1 - s.0 - SCHLIEREN_DECADES).abs() < 1e-6);
         assert_eq!(p.ranges[Scalar3::Eddy.index()], (0.0, 1.0), "an Euler run has no eddy viscosity");
-        // a RANS run: the top of the eddy range is the 99th percentile rounded to a round number, not the maximum of a few wake cells
+        // a RANS run: the top of the eddy range is the 95th percentile rounded to a round number, not the maximum of a few wake cells
         let mut f = (*anf()).clone();
         let fluid: Vec<usize> = (0..f.cells()).filter(|&c| !f.solid[c]).collect();
         f.eddy_ratio = vec![0.0; f.cells()];
