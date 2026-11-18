@@ -34,6 +34,13 @@ to about 4" and items 43-44.
 - **Production-tier accuracy** (the product runs CD0 on the Coarse sector, the stability angle on the Lift half domain; DESIGN3D item 46): Coarse sector CD0 of the
   Finner against the zero-cant free flight **+4.6 % (Mach 0.766), -1.9 % (1.85), -4.4 % (2.364), +0.1 % (2.741), -2.7 % (2.970)**; the sting-mounted tunnel
   points +8 / +9 % (INFO). CN_alpha (Lift tier, G-L1): supersonic +3 to +10 %, x_cp within 0.25 cal everywhere (0.12 cal subsonic).
+- **Grid convergence of the Finner sector** (branch `gridconv`, DESIGN3D item 47; `finned_table --refine S / --chord N / --drift-tol X`, `Case3::with_refinement`; 6 similar grids
+  of 0.25-3.4 M cells, r 1.3-1.46 because r 1.5-2 needs more than the 3090's 24 GB): the Coarse CD0 is **not grid-converged**. The fin pressure (leading-edge face: 32 chord
+  cells, 0.0094 d, against a face about 0.004 d tall) is 2.8 / 4.4 / 6.8 % of CD0 too low at Mach 0.766 / 1.85 / 2.741; forebody pressure, base, body friction and the
+  trailing-edge face are converged to a few per cent, fin friction is 2-7 % high. The grid-converged model over-predicts free flight by **+5.6 / +2.6 / +6.5 %**, so the
+  Coarse +4.6 / -1.9 / +0.1 % is a cancellation (stop rule +1.0 / +0.6 / +0.3, discretisation -2.0 / -5.0 / -6.6, model +5.6 / +2.6 / +6.5 points). The default stop
+  (`drift_tol` 5e-3) is itself 0.3-1.0 % high. Do not tune the model to the Coarse CD0; 64 chord cells (+20 % cells, same iterations, `Settled`) bring it within 0.8 %
+  of the converged value, but 96 or more chord cells stop on `MeanStationary` at Mach 0.766 / 1.85.
 - **Still open:**
   - subsonic CN_alpha: +14 % against the tunnel at Mach 0.79 (G-L1 FAIL, 13 % band), +11 % against free flight (±14-17 % in the data). The excess is in the fin
     lift and follows the blunt section: the same planform as a sharp 2 % double wedge gives +6.5 %; 64 chord cells, the y+ 15 fin stack and the Coarse tier do not

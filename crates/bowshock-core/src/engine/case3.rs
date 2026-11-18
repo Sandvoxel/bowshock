@@ -679,6 +679,31 @@ impl Case3 {
 mod tests {
     use super::*;
 
+    /// `with_refinement(1)` changes nothing; `with_refinement(2)` doubles every cell count of the base-wake grid and of the fin chord, halves the wall spacings and the stack's first
+    /// cell and takes the excess of the stack's growth over 1 to half (DESIGN3D item 47).
+    #[test]
+    fn refinement_scales_counts_spacings_and_growths_uniformly() {
+        let flow = WallFlow { re_c: 7.0e5, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0, sutherland: SUTHERLAND_SEA_LEVEL };
+        let base = Case3::sector(2.0, Case3::anf_body(), Case3::anf_fins(), Tier::Coarse(flow), 0);
+        let same = base.clone().with_refinement(1.0);
+        let (b0, b1) = (base.grid.base.as_ref().unwrap(), same.grid.base.as_ref().unwrap());
+        assert_eq!((b0.n_up, b0.n_nose, &b0.n_seg, b0.n_wake, b0.n_gap, b0.nj_out), (b1.n_up, b1.n_nose, &b1.n_seg, b1.n_wake, b1.n_gap, b1.nj_out));
+        assert_eq!(same.grid.fin_stack, base.grid.fin_stack);
+        assert_eq!(same.grid.fin_chord_cells, Some(32));
+        let fine = base.clone().with_refinement(2.0);
+        let b2 = fine.grid.base.as_ref().unwrap();
+        assert_eq!(
+            (b2.n_up, b2.n_nose, b2.n_seg[0], b2.n_wake, b2.n_gap, b2.nj_out),
+            (2 * b0.n_up, 2 * b0.n_nose, 2 * b0.n_seg[0], 2 * b0.n_wake, 2 * b0.n_gap, 2 * b0.nj_out)
+        );
+        assert_eq!(fine.grid.fin_chord_cells, Some(64));
+        assert!((b2.dr_wall - 0.5 * b0.dr_wall).abs() < 1e-18 && (b2.dx_tip - 0.5 * b0.dx_tip).abs() < 1e-18);
+        let (s0, s2) = (base.grid.fin_stack.unwrap(), fine.grid.fin_stack.unwrap());
+        assert!((s2.y1 - 0.5 * s0.y1).abs() < 1e-18);
+        assert!((s2.growth_bl - 1.0 - 0.5 * (s0.growth_bl - 1.0)).abs() < 1e-12 && (s2.growth_out - 1.0 - 0.5 * (s0.growth_out - 1.0)).abs() < 1e-12);
+        assert_eq!(fine.grid.fin_cells_across, base.grid.fin_cells_across);
+    }
+
     /// Every viscous 3D domain (half domain, sector) starts at [`DDADI_CFL_MAX`] with the DDADI line solve and the runners' rollback controller on; the wedge at the engine's
     /// `cfl_max` (50 below Mach 1, 20 above) with the plain factors; [`Case3::without_cfl_control`] takes the fixed [`VISCOUS_3D_CFL_MAX`] on a half domain or a sector (not the
     /// wedge), Euler keeps its own.
