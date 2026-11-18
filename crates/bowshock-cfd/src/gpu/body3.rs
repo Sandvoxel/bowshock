@@ -796,8 +796,14 @@ impl LazySolver3 {
         Ok(())
     }
 
-    /// Overwrites the conserved state and restarts the iteration counter and the CFL ramp.
+    /// Overwrites the conserved state and restarts the iteration counter and the CFL ramp (`k`, `omega`, `mu_t` of an SST run at the free stream).
     pub fn set_state(&mut self, u: &[Cons3]) -> Result<()> {
+        self.set_state_turb(u, None)
+    }
+
+    /// [`LazySolver3::set_state`] with the `[k, omega]` of every cell given (`Some`; `mu_t = min(rho k / omega, 1e5 / re_c)`, the host init's value for a cell without strain and
+    /// wall distance). Solid cells and jet cells are as in `set_state`; `None` is the free stream.
+    pub fn set_state_turb(&mut self, u: &[Cons3], turb_in: Option<&[[f64; 2]]>) -> Result<()> {
         // the jet cells hold the jet state whatever the caller passes (a reset to the free stream, a state of another Mach number)
         let mut u = u.to_vec();
         if let Some(j) = &self.jet {
@@ -807,9 +813,18 @@ impl LazySolver3 {
             }
         }
         let mut s = upload_state3(&self.ctx, &u, [self.ni, self.nj, self.nk], self.cfl_start())?;
-        // an SST run restarts `k`, `omega`, `mu_t` at the free stream (the host `turbulence3::init`); the other runs carry three one-element placeholders
+        // an SST run restarts `k`, `omega`, `mu_t` at the free stream (the host `turbulence3::init`) or at the given scalars; the other runs carry three one-element placeholders
         if let Some(t) = &self.turb {
             let (mut turb, mut mu_t) = t.init_host(&self.solid_host, self.cfg.freestream[0]);
+            if let Some(given) = turb_in {
+                let cap = 1e5 / t.re_c;
+                for c in 0..turb.len() {
+                    if !self.solid_host[c] {
+                        turb[c] = given[c];
+                        mu_t[c] = (u[c][0] * given[c][0] / given[c][1]).min(cap);
+                    }
+                }
+            }
             if let Some(j) = &self.jet {
                 for &c in &j.cells {
                     turb[c] = j.state.turb;
