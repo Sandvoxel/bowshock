@@ -45,12 +45,15 @@ pub struct Numerics3 {
     /// The same floor for a warm-started run, counted from the warm start.
     pub warm_min_iters: usize,
     /// Mean-stationary rule ([`crate::engine::run3::StopRule3`]): length of one averaging window \[iterations\] (`0`: off). A run stops [`crate::engine::result::StopReason::MeanStationary`]
-    /// when the means of CA (and, at incidence, of CN and of the moment about the nose) over two consecutive windows agree within `mean_tol` (relative, plus 1e-4 absolute) and
+    /// when the means of CA (at incidence instead: of CN and of the moment about the nose, within `incidence_tol`) over two consecutive windows agree within `mean_tol` (relative, plus 1e-4 absolute) and
     /// both windows lie after iteration `mean_from`; the result is then the mean of the second window. For the oscillating subsonic base wake, whose period (50 to 220 iterations)
     /// the range rule cannot see.
     pub mean_window: usize,
     pub mean_from: usize,
     pub mean_tol: f64,
+    /// The mean rule at incidence (a half domain at an angle of attack): the tolerance (relative, plus 1e-4 absolute) of the two windows' means of CN and of the moment about the
+    /// nose, the only quantities judged there (CA is not a product of an angle-of-attack point, so it is not waited on and `mean_tol` is not used).
+    pub incidence_tol: f64,
     /// Explicit 3D line solve overriding the backend default (`None`: [`Numerics3::implicit_for`]).
     pub line_solve: Option<LineSolve3>,
     /// Static-pressure outflow `p = p_inf` at the last `i` plane instead of the characteristic ghost (the plates of the viscous gates; the body cases of the 2D
@@ -64,6 +67,14 @@ pub struct Numerics3 {
     /// The runners answer a failed stretch (a residual that is not finite or above 1e5, a non-finite force monitor) by going back to the last snapshot with `cfl_max` x 0.7, down
     /// to `run3::CFL_FLOOR` (`run3::CflControl`): the default, with the engine's `cfl_max`. Off: no rollback, and [`Case3::without_cfl_control`] takes the fixed [`VISCOUS_3D_CFL_MAX`].
     pub cfl_control: bool,
+    /// Extrapolated-drift rule ([`crate::engine::run3::StopRule3`], [`crate::engine::result::StopReason::Settled`]): the judged coefficients (CA; at incidence CN and the moment about the
+    /// nose) are averaged over blocks of `drift_block` summed CFL (sum over the iterations of the CFL in force: the settling of a run is pseudo-time, so a block is the same stretch of it at
+    /// any CFL); three consecutive block means `m1, m2, m3` give the ratio `rho = (m3 - m2) / (m2 - m1)` of a geometric tail and the remaining change `e = (m3 - m2) rho / (1 - rho)`.
+    /// The run stops when, for every judged coefficient, `0 < rho < 0.95`, `rho` is within 0.15 of the previous block's and `|e| <= drift_tol |m3| + 1e-4`. Replayed offline on the
+    /// stored G-F1 sector histories (Mach 0.5 and 2, CFL 20-50, 8 000-12 000 iterations; blocks of 500 iterations at CFL 20, `drift_tol` 5e-3): it stops after 2 000-6 000 iterations
+    /// (mean 4 800, against 6 000-8 000 for the mean rule), 0.2-1.1 % from the converged CA. `0`: off.
+    pub drift_block: f64,
+    pub drift_tol: f64,
 }
 
 impl Numerics3 {
@@ -90,10 +101,13 @@ impl Numerics3 {
             mean_window: 1500,
             mean_from: 1000,
             mean_tol: 1e-2,
+            incidence_tol: 2e-3,
             line_solve: None,
             pressure_outflow: false,
             cfl_ref: 10.0,
             cfl_control: true,
+            drift_block: 0.0,
+            drift_tol: 5e-3,
         }
     }
 
@@ -144,10 +158,13 @@ impl Numerics3 {
             mean_window: 2000,
             mean_from: 2000,
             mean_tol: 5e-3,
+            incidence_tol: 2e-3,
             line_solve: Some(LineSolve3::Block),
             cfl_ref: 20.0,
             cfl_control: true,
             pressure_outflow: false,
+            drift_block: 10_000.0,
+            drift_tol: 5e-3,
         }
     }
 

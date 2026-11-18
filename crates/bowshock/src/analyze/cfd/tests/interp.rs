@@ -21,22 +21,18 @@ fn below_the_first_node_the_3d_solve_is_scaled_by_extended() {
     let at = lift_at(&lift, 0.5, &ext).unwrap();
     assert!((at.a2.0 - 0.1 * 0.8).abs() < 1e-12, "{at:?}");
     assert!((at.a2.1 - (1.0 - 0.2)).abs() < 1e-12);
-    let (cn6, cp6) = at.a6.unwrap();
-    assert!((cn6 - 0.4 * 0.8).abs() < 1e-12 && (cp6 - (1.1 - 0.2)).abs() < 1e-12);
 }
 
 #[test]
 fn the_angle_rules_of_the_3d_solve() {
-    let at = lift_at(&lift_table(1), 0.8, &no_ext).unwrap(); // CN 0.1 @ 2°, 0.4 @ 6°; CP 1.0, 1.1
+    let at = lift_at(&lift_table(1), 0.8, &no_ext).unwrap(); // CN 0.1 @ 2°, CP 1.0
     let deg = f64::to_radians;
     let (cn, cp) = at.at_alpha(deg(1.0));
     assert!((cn - 0.05).abs() < 1e-12 && (cp - 1.0).abs() < 1e-12, "linear to the origin, CP of 2°");
-    let (cn, cp) = at.at_alpha(deg(4.0));
-    assert!((cn - 0.25).abs() < 1e-12 && (cp - 1.05).abs() < 1e-12, "between the angles");
     let (cn, cp) = at.at_alpha(deg(10.0));
-    assert!((cn - (0.4 + 0.075 * 4.0)).abs() < 1e-12 && (cp - 1.1).abs() < 1e-12, "slope of 2°..6° beyond, CP held");
+    assert!((cn - 0.5).abs() < 1e-12 && (cp - 1.0).abs() < 1e-12, "CNα·α beyond the angle, CP held");
     let (cn, cp) = at.at_alpha(deg(-4.0));
-    assert!((cn + 0.25).abs() < 1e-12 && (cp - 1.05).abs() < 1e-12, "negative angles mirror");
+    assert!((cn + 0.2).abs() < 1e-12 && (cp - 1.0).abs() < 1e-12, "negative angles mirror");
     assert_eq!(at.at_alpha(0.0).0, 0.0);
 }
 

@@ -7,7 +7,7 @@
 //! # What a solve gives
 //!
 //! One solve, one job: the drag at zero incidence at each Mach node of the table and, unless the Conditions leave them out, the
-//! normal force and centre of pressure at two angles of attack at the sparser stability nodes ([`lift_nodes`]). Both go through the
+//! normal force and centre of pressure at an angle of attack at the sparser stability nodes ([`lift_nodes`]). Both go through the
 //! one `bowshock_core::Analysis::run` (a node of each kind has its own [`Analysis`](bowshock_core::Analysis): the drag nodes are the
 //! viscous axisymmetric solve, the angle nodes the coarse 3D one), the result is one [`CfdTable`](bowshock_model::CfdTable) whose
 //! `lift` part is the angles, and the screen has one action, one progress screen, one cancel and one staleness verdict for it. The

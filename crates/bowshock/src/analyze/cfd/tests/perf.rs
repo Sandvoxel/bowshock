@@ -815,3 +815,50 @@ fn example_fins_dump() {
         );
     }
 }
+
+/// The stop rule of an angle-of-attack point of the stability solve, as the app solves it (the example rocket's half domain at 2 degrees, the Lift tier on the Coarse grid, one cold
+/// `run` per Mach number): stop reason, iterations, wall seconds, CN and `x_cp` (calibres from the nose). `BOWSHOCK_INC_REF=1` runs the reference instead: the range rule off, the mean rule at
+/// 5e-4, 24 000 iterations at most. `BOWSHOCK_MACHS=0.5,1.1,2.3` picks the Mach numbers.
+#[test]
+#[ignore = "BOWSHOCK_ENGINE=3d: three half-domain points on the GPU"]
+fn engine3d_incidence_stop_rule() {
+    let (rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    let machs: Vec<f64> =
+        std::env::var("BOWSHOCK_MACHS").map(|v| v.split(',').map(|m| m.trim().parse().unwrap()).collect()).unwrap_or_else(|_| vec![0.5, 1.1, 2.3]);
+    let reference = std::env::var_os("BOWSHOCK_INC_REF").is_some();
+    let cal = plan.body.nose.diameter;
+    println!("ENGINE {:?} reference {reference}", solver::Engine::from_env());
+    for mach in machs {
+        let mut a = solver::Analysis::new(&plan.body)
+            .unwrap()
+            .resolution(solver::Resolution::Coarse)
+            .backend(solver::Backend::Gpu)
+            .viscous(solver::FlightConditions { atmosphere: solver::Atmosphere::Isa { altitude_m: 0.0 } })
+            .roughness(plan.body_roughness);
+        if let Some(f) = &plan.fins {
+            a = a.fins(f.clone()).fin_outline(plan.outline.clone());
+        }
+        if reference {
+            a = a.case3_hook(|c| {
+                c.numerics.rel_tol = 0.0;
+                c.numerics.incidence_tol = 5e-4;
+                c.numerics.max_iter = 24_000;
+            });
+        } else if std::env::var_os("BOWSHOCK_INC_WIN").is_some() {
+            // a shorter mean window at incidence (BOWSHOCK_INC_WIN, BOWSHOCK_INC_FROM), the range rule as it is
+            a = a.case3_hook(|c| {
+                c.numerics.mean_window = std::env::var("BOWSHOCK_INC_WIN").unwrap().parse().unwrap();
+                c.numerics.mean_from = std::env::var("BOWSHOCK_INC_FROM").unwrap().parse().unwrap();
+            });
+        }
+        let t = Instant::now();
+        let p = a.run(&[solver::Condition::new(mach, LIFT_ALPHAS[0])]).expect("solves").points.remove(0);
+        let wall = t.elapsed().as_secs_f64();
+        let f = p.forces.expect("forces");
+        println!(
+            "INC M {mach} its {} stop {:?} wall {wall:.1} s CN {:.5} x_cp {:.4} m {:.4} cal quality {:?}",
+            p.detail.iterations, p.detail.stop_reason, f.cn, f.x_cp, f.x_cp / cal, p.quality
+        );
+    }
+}

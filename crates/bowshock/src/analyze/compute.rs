@@ -8,7 +8,7 @@
 //! * **Extended** is Barrowman plus the body lift and induced drag `bowshock-sim` adds at an angle of attack: the
 //!   margin, CP, `CNα` and drag follow the angle the Conditions set.
 //! * **CFD table** is the drag at zero incidence solved by `bowshock-core` (see [`super::cfd`]) on a table of Mach numbers and,
-//!   unless left out, the margin, CP and `CNα` from its 3D solve at two angles of attack; Extended's change of drag with the angle
+//!   unless left out, the margin, CP and `CNα` from its 3D solve at an angle of attack; Extended's change of drag with the angle
 //!   is added to the solved drag, and Extended gives whatever the solve did not (what the screens say about it is `cfd::wording`).
 //!
 //! # References

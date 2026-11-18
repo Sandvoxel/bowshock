@@ -26,7 +26,7 @@ Lengths in nose diameters `d` unless stated. "2D" = `crates/bowshock-cfd/src/{so
   6. Consumers of the 2D path the brief did not list: `field.rs::Field` (meridian field built from the 2D `Solver`/`Wake`, kept by `Analysis::keep_fields`, streamed live by `on_field`, drawn by the app's
      `analyze/flow_view.rs` + `flow_view/`); `bowshock-remote` (`proto.rs`: `Job::{Drag, Lift}`, `WorkerMsg::{Drag(Polar), Lift(LiftPolar)}`, `PROTOCOL` 1, frames <= 256 MB) and `bowshock-worker`, which is
      rebuilt on the remote from an embedded source set of the crates `bowshock-{cfd,core,reference,remote,worker}` hashed with SHA-256 (`sourceset.rs: CRATES`), so every solver change re-keys it and a **new crate would have to be added to `CRATES`**.
-  7. Stored-result constants live in `crates/bowshock/src/analyze/cfd/plan.rs`: `SOLVER_REV` 5 (l.7), `LIFT_REV` 4 (l.27), `SHARED_GRID` false (l.16), `LIFT_ALPHAS` [2, 6] deg (l.31), `LIFT_INTERIOR` 8 Mach nodes (l.29).
+  7. Stored-result constants live in `crates/bowshock/src/analyze/cfd/plan.rs`: `SOLVER_REV` 5 (l.7), `LIFT_REV` 5 (l.27), `SHARED_GRID` false (l.16), `LIFT_ALPHAS` [2] deg (l.31), `LIFT_INTERIOR` 8 Mach nodes (l.29).
      `bowshock-model::FORMAT_VERSION` is 1 and additive `#[serde(default)]` fields need no bump (`format.rs` rules). The app solves **one Mach node per call** (`analyze/cfd/run.rs`: `analysis.run(&[mach])` l.561,
      `run_lift(&[mach], &LIFT_ALPHAS)` l.280, nodes shared out over local and remote GPUs by `run_fleet`), so grid, wall distance and kernels must be reusable across calls (section E).
   8. `FinSpec::validate` accepts `count` 3..=8; the document allows 1..=16 (`geometry.rs: MAX_COUNT`), per-fin angles, cant, three sections
