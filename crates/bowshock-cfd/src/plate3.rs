@@ -612,16 +612,18 @@ mod thermal_tests {
     }
 
     /// `cf` at `x = 0.5` and `0.9` of a converged supersonic laminar plate and the energy component of the viscous flux of its wall face at `x = 0.5` (`kappa dT/dy`, positive
-    /// where the fluid is hotter than the wall).
+    /// where the fluid is hotter than the wall). At most 2000 iterations: the cold plate settles (`cf` within 1e-4 over 250 iterations) at 1250, the adiabatic one never
+    /// does (its wall temperature creeps), but its `cf` at 2000 iterations is that of 6000 to 0.02 % (36 s for the test instead of 200).
     fn run_plate(case: &PlateCase) -> ([f64; 2], f64) {
         let mut s = plate_solver3(case, ImplicitParams::VISCOUS);
         let mut prev = [f64::NAN; 2];
-        run(&mut s, 5.0, 6000, 250, |_, s| {
+        let info = run(&mut s, 5.0, 2000, 250, |_, s| {
             let cf = [station(s, case, 0.5).cf, station(s, case, 0.9).cf];
-            let settled = cf.iter().zip(&prev).all(|(c, p)| (c / p - 1.0).abs() < 1e-5);
+            let settled = cf.iter().zip(&prev).all(|(c, p)| (c / p - 1.0).abs() < 1e-4);
             prev = cf;
             settled
         });
+        println!("{:?} wall: {} iterations, {:.2} orders", case.wall_thermal, info.iters, info.drop_orders());
         let st = [station(&s, case, 0.5), station(&s, case, 0.9)];
         let q = st[0].col; // the plate is the `j = 0` boundary: face `(i, 0, 0)` of the j family
         let r = s.rans().expect("viscous run");
@@ -637,8 +639,11 @@ mod thermal_tests {
     fn isothermal_laminar_plate_follows_the_reference_temperature_blasius() {
         let adiabatic = supersonic_plate(WallThermal::Adiabatic);
         let cold = supersonic_plate(WallThermal::Isothermal(1.0));
-        let (cf_a, q_a) = run_plate(&adiabatic);
-        let (cf_c, q_c) = run_plate(&cold);
+        let (cf_a, q_a, cf_c, q_c) = std::thread::scope(|sc| {
+            let a = sc.spawn(|| run_plate(&adiabatic));
+            let ((cf_c, q_c), (cf_a, q_a)) = (run_plate(&cold), a.join().expect("adiabatic plate"));
+            (cf_a, q_a, cf_c, q_c)
+        });
         for (n, x) in [0.5, 0.9].into_iter().enumerate() {
             let (ref_a, ref_c) = (cf_reference_temperature(&adiabatic, x, None), cf_reference_temperature(&cold, x, Some(1.0)));
             println!(

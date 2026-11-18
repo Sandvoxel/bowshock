@@ -18,6 +18,12 @@ to about 4" and items 43-44.
   - the extrapolated-drift stop rule (`StopReason::Settled`);
   - one stability angle (2 degrees; CN_alpha and x_cp from it);
   - the axisymmetric seed of every cold finned sector (`Analysis::seed_axisymmetric`, default on).
+- **GPU scaling** (the same tree, grids and 38 300 iterations on both; jobs `1-20261118-024355-31072`, `2-20261118-025211-28376`): RTX 3080 Laptop 16 GB
+  (48 SMs, 130 W, 384 GB/s) 490.5 s against the RTX 3090 (82 SMs, 1.8 GHz under load, 936 GB/s) 244.6 s: x2.01. Sector and stability steps go x2.06-2.10
+  (8.38 -> 17.61 ms at Mach 0.5): the SM-count x clock ratio (about 2.0-2.1 if the laptop holds about 1.5 GHz; not measured), not the bandwidth ratio (x2.44), so
+  the step is SM-throughput / latency bound at these sizes, not DRAM bound. The 20 k-cell seed wedges go only x1.3-1.45 (launch latency). With the measured step
+  ratio x2.08, `T = S / throughput + C` over the two leaves C about 17 s of the 3090's 245 s unscaled (seed wedges about 21 s of wall, host grid build 4.6 s, upload
+  5.6 s, partly hidden by the wedges' own scaling): a GPU with twice the 3090's SM throughput would take about 131 s (x1.87).
 - **CFL controller** also rolls back on a collapsing state (density or pressure below 1e-3 of the free stream, a device reduction per chunk) and, on a repeated failure,
   goes back past the restored state (`ad152aa`): the unseeded Mach 1.3 sector at CFL 100 ended `Failed` without it.
 - **Supersonic finned drag:** the 9-12 % shortfall of the Finner was a 3-10x axial cell-size jump right behind the flush fin trailing edge. A graded fan there
