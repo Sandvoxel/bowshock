@@ -9,6 +9,8 @@ N=${N:-10000}
 cargo build --release -p bowshock-validate --example exp_init 2>&1 | tail -1
 BIN="${CARGO_TARGET_DIR:-target}/release/examples/exp_init"
 for m in $MACHS; do
-  "$BIN" --tier "$TIER" --mach "$m" --fixed "$N" --cold | sed "s/^PROG/PROG-cold M$m/"
-  "$BIN" --tier "$TIER" --mach "$m" --fixed "$N" | sed "s/^PROG sector/PROG-wedge M$m sector/;s/^PROG wedge/PROG-wedgerun M$m/"
+  tier=$TIER
+  if [ "$TIER" = draft ] && awk "BEGIN{exit !($m < 0.8)}"; then tier=draft-safe; fi
+  "$BIN" --tier "$tier" --mach "$m" --fixed "$N" --cold | sed "s/^PROG/PROG-cold M$m/"
+  "$BIN" --tier "$tier" --mach "$m" --fixed "$N" | sed "s/^PROG sector/PROG-wedge M$m sector/;s/^PROG wedge/PROG-wedgerun M$m/"
 done
