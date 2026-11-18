@@ -27,9 +27,9 @@ pub(super) const INTERIOR: [f64; 8] = [0.5, 0.8, 0.9, 1.0, 1.1, 1.3, 1.7, 2.3];
 /// An interior node this close to an end of the range is left out (the end stands for it).
 pub(super) const NODE_GAP: f64 = 0.12;
 /// Bump when what a stored 3D stability solve means changes (solver, grid, how the forces are reduced).
-pub(super) const LIFT_REV: u64 = 4;
+pub(super) const LIFT_REV: u64 = 5;
 /// [`LIFT_REV`] of the 3D engine (the half domain on the base-wake grid, the base solved, the fins on that grid).
-pub(super) const LIFT_REV_3D: u64 = 1001;
+pub(super) const LIFT_REV_3D: u64 = 1002;
 
 /// The revision of the engine in use: what a stored table's key carries.
 fn solver_rev() -> u64 {
@@ -47,10 +47,10 @@ fn lift_rev() -> u64 {
         LIFT_REV
     }
 }
-/// The Mach nodes of a 3D stability solve (sparse: each costs two 3D Euler runs); the solve takes those inside the plotted range.
+/// The Mach nodes of a 3D stability solve (sparse: each costs a 3D Euler run); the solve takes those inside the plotted range.
 pub const LIFT_INTERIOR: [f64; 8] = [0.5, 0.8, 0.95, 1.1, 1.3, 1.7, 2.3, 3.0];
 /// The angles of attack (degrees) every node is solved at.
-pub const LIFT_ALPHAS: [f64; 2] = [2.0, 6.0];
+pub const LIFT_ALPHAS: [f64; 1] = [2.0];
 /// The lowest and highest Mach number of the 3D solve.
 pub(super) const LIFT_MACH: (f64, f64) = (0.5, 3.0);
 

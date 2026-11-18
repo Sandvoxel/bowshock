@@ -20,7 +20,7 @@ pub(super) fn example() -> (Rocket, Vehicle) {
     (rocket, vehicle)
 }
 pub(super) fn lift_table(key: u64) -> CfdLiftTable {
-    // CN(2°) = 0.1 and 0.2 at M 0.8 and 2.0; CN(6°) = 0.4 and 0.8; CP 1.0 / 1.4 m at 2°, 1.1 / 1.5 m at 6°
+    // CN(2°) = 0.1 and 0.2 at M 0.8 and 2.0; CP 1.0 / 1.4 m
     let p = |mach: f64, alpha_deg: f64, cn: f64, x_cp: f64| bowshock_model::CfdLiftPoint {
         mach,
         alpha_deg,
@@ -35,7 +35,7 @@ pub(super) fn lift_table(key: u64) -> CfdLiftTable {
         solved_at: 1,
         solve_seconds: 60.0,
         backend: "GPU (Luma)".into(),
-        points: vec![p(0.8, 2.0, 0.1, 1.0), p(0.8, 6.0, 0.4, 1.1), p(2.0, 2.0, 0.2, 1.4), p(2.0, 6.0, 0.8, 1.5)],
+        points: vec![p(0.8, 2.0, 0.1, 1.0), p(2.0, 2.0, 0.2, 1.4)],
         notes: Vec::new(),
     }
 }

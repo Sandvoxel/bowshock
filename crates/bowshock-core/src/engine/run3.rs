@@ -835,6 +835,7 @@ pub struct StopRule3 {
     mean_window: usize,
     mean_from: usize,
     mean_tol: f64,
+    incidence_tol: f64,
     incidence: bool,
     /// `(iteration, [CA, CN, CN x_cp])` every [`MEAN_EVERY`] iterations after `mean_from`.
     samples: Vec<(usize, [f64; 3])>,
@@ -861,6 +862,7 @@ impl StopRule3 {
             mean_window: n.mean_window,
             mean_from: n.mean_from,
             mean_tol: n.mean_tol,
+            incidence_tol: n.incidence_tol,
             incidence: case.alpha.abs() >= 1e-12 && matches!(case.grid.domain, Domain3::Half { .. }),
             samples: Vec::new(),
             mean_ready: false,
@@ -901,9 +903,8 @@ impl StopRule3 {
         let cm = if self.incidence && f.x_cp.is_finite() { f.cn * f.x_cp } else { 0.0 };
         self.samples.push((iterations, [f.ca, f.cn, cm]));
         let s = self.scale();
-        if let Some((mean, agree)) =
-            window_means(&self.samples, (self.mean_window as f64 * s).round() as usize, (self.mean_from as f64 * s) as usize, self.mean_tol, self.incidence)
-        {
+        let tol = if self.incidence { self.incidence_tol } else { self.mean_tol };
+        if let Some((mean, agree)) = window_means(&self.samples, (self.mean_window as f64 * s).round() as usize, (self.mean_from as f64 * s) as usize, tol, self.incidence) {
             self.last_window = Some(mean);
             self.mean_ready = agree;
         }
@@ -1003,7 +1004,7 @@ impl StopRule3 {
 }
 
 /// Means of CA, CN and the moment over the last window of `length` iterations of `samples` and of the window before it, and whether the two agree: for every
-/// monitored coefficient (CA; at incidence also CN and the moment about the nose) `|m1 - m0| <= tol |m| + 1e-4` with `m = (m0 + m1) / 2`. `None` until both windows
+/// judged coefficient (CA; at incidence CN and the moment about the nose instead, CA is not judged) `|m1 - m0| <= tol |m| + 1e-4` with `m = (m0 + m1) / 2`. `None` until both windows
 /// lie after iteration `from` and hold at least 8 samples each. Returns the second window's means with its oscillation (largest relative half range).
 pub fn window_means(samples: &[(usize, [f64; 3])], length: usize, from: usize, tol: f64, incidence: bool) -> Option<(WindowMean, bool)> {
     let &(end, _) = samples.last()?;
@@ -1023,7 +1024,9 @@ pub fn window_means(samples: &[(usize, [f64; 3])], length: usize, from: usize, t
     for c in 0..n {
         let (m0, m1) = (mean(&first, c), mean(&second, c));
         let m = 0.5 * (m0 + m1);
-        agree &= (m1 - m0).abs() <= tol * m.abs() + 1e-4;
+        if !incidence || c > 0 {
+            agree &= (m1 - m0).abs() <= tol * m.abs() + 1e-4;
+        }
         let (lo, hi) = second.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), s| (l.min(s[c]), h.max(s[c])));
         // the moment is a ratio (CN x_cp) whose mean can vanish while its swing does not: it takes part in the agreement, not in the oscillation
         if c < 2 {
@@ -1142,6 +1145,24 @@ mod tests {
         let (stop, r) = run_wake(0.04);
         assert!(stop.is_none(), "{stop:?}");
         assert!(r.window.is_some());
+    }
+
+    #[test]
+    fn at_incidence_the_window_means_judge_cn_and_the_moment_only() {
+        // samples every 10 iterations to 400, windows of 100: CA drifts 10 % per window, CN and the moment are steady
+        let steady = |ca_drift: f64, cn_drift: f64| -> Vec<(usize, [f64; 3])> {
+            (1..=40).map(|k| (k * 10, [0.3 * (1.0 + ca_drift * k as f64 / 10.0), 0.1 * (1.0 + cn_drift * k as f64 / 10.0), 0.7])).collect()
+        };
+        let drifting_ca = steady(0.1, 0.0);
+        let (_, agree) = window_means(&drifting_ca, 100, 100, 5e-3, false).expect("windows");
+        assert!(!agree, "CA drifting: the zero-incidence rule waits");
+        let (w, agree) = window_means(&drifting_ca, 100, 100, 2e-3, true).expect("windows");
+        assert!(agree, "CA is not judged at incidence");
+        assert!((w.cn - 0.1).abs() < 1e-12 && (w.x_cp - 7.0).abs() < 1e-12);
+        // CN drifting 1 % per window is judged against incidence_tol
+        let drifting_cn = steady(0.0, 0.01);
+        assert!(!window_means(&drifting_cn, 100, 100, 2e-3, true).expect("windows").1);
+        assert!(window_means(&drifting_cn, 100, 100, 2e-2, true).expect("windows").1);
     }
 
     #[test]

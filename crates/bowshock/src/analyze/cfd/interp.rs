@@ -149,11 +149,10 @@ pub struct ExtStab {
     pub cp: f64,
 }
 
-/// The 3D solve's CN and CP at one Mach number: at 2° and, when solved, at 6°.
+/// The 3D solve's CN and CP at one Mach number: at 2°.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LiftAt {
     pub(super) a2: (f64, f64),
-    pub(super) a6: Option<(f64, f64)>,
 }
 
 /// Whether the solve has what the plots need (a point at 2°).
@@ -190,9 +189,7 @@ pub(super) fn lift_series_at(series: &[(f64, f64, f64)], mach: f64, ext: &dyn Fn
 /// The 3D solve at `mach` (`ext`: Extended's stability at 2° at any Mach, for the scaling below the first node). `None` without
 /// a point at 2°.
 pub fn lift_at(lift: &CfdLiftTable, mach: f64, ext: &dyn Fn(f64) -> Option<ExtStab>) -> Option<LiftAt> {
-    let a2 = lift_series_at(&lift_series(lift, LIFT_ALPHAS[0]), mach, ext)?;
-    let a6 = lift_series_at(&lift_series(lift, LIFT_ALPHAS[1]), mach, ext);
-    Some(LiftAt { a2, a6 })
+    Some(LiftAt { a2: lift_series_at(&lift_series(lift, LIFT_ALPHAS[0]), mach, ext)? })
 }
 
 impl LiftAt {
@@ -206,21 +203,10 @@ impl LiftAt {
         self.a2.1
     }
 
-    /// CN and CP at an angle of attack (rad), negative angles mirrored. Up to 2° CN is `CNα·α` with CP from 2°; between 2° and 6°
-    /// both are interpolated; above 6° CN continues with the slope of 2° to 6° and CP is held at 6°.
+    /// CN and CP at an angle of attack (rad), negative angles mirrored: CN is `CNα·α` (linear through the origin from the 2° point), CP is the 2° point's.
     pub fn at_alpha(&self, alpha: f64) -> (f64, f64) {
-        let a = alpha.abs().to_degrees();
         let (cn2, cp2) = self.a2;
-        let (cn, cp) = match self.a6 {
-            None => (cn2 * a / LIFT_ALPHAS[0], cp2),
-            Some(_) if a <= LIFT_ALPHAS[0] => (cn2 * a / LIFT_ALPHAS[0], cp2),
-            Some((cn6, cp6)) if a <= LIFT_ALPHAS[1] => {
-                let t = (a - LIFT_ALPHAS[0]) / (LIFT_ALPHAS[1] - LIFT_ALPHAS[0]);
-                (cn2 + (cn6 - cn2) * t, cp2 + (cp6 - cp2) * t)
-            }
-            Some((cn6, cp6)) => (cn6 + (cn6 - cn2) / (LIFT_ALPHAS[1] - LIFT_ALPHAS[0]) * (a - LIFT_ALPHAS[1]), cp6),
-        };
-        (cn.copysign(alpha), cp)
+        ((cn2 * alpha.abs().to_degrees() / LIFT_ALPHAS[0]).copysign(alpha), cp2)
     }
 }
 
