@@ -21,11 +21,11 @@ fn example_body() -> BaseBody {
     BaseBody::cylinder(Body { nose: Nose::TangentOgive { fineness: 0.2286 / 0.0762 } }, 0.9134 / 0.0762)
 }
 
-/// The finned example rocket's fins (`tests/grid_census.rs`).
+/// The finned example rocket's fins: THREE square fins (the example document and the frozen 2D fixture; `tests/grid_census.rs` has four, the first version of this helper copied it).
 fn example_fins() -> Fins3 {
     let d = 0.0762;
     Fins3 {
-        count: 4,
+        count: 3,
         root_chord: 0.12 / d,
         tip_chord: 0.05 / d,
         span: 0.0762 / d,
