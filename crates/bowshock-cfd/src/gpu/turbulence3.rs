@@ -549,14 +549,14 @@ impl LazySolver3 {
         let (u, v, w) = (at(&p[1]), at(&p[2]), at(&p[3]));
         // the density and kinematic viscosity of the law of the wall: the cell's, or the ones at the wall temperature of an isothermal wall (`turbulence3::wall_props`)
         let (rho, nu) = match tg.iso {
-            None => {
-                let nu = &mu / &rho;
-                (rho, nu)
-            }
-            Some(i) => {
+            Some(i) if i.law => {
                 let rho_w = c(GAMMA) * at(&p[4]) / c(i.t_w);
                 let nu = c(i.mu_w) / &rho_w;
                 (rho_w, nu)
+            }
+            _ => {
+                let nu = &mu / &rho;
+                (rho, nu)
             }
         };
         let speed = self.wall_speed_at3(tg, &u, &v, &w);
@@ -800,8 +800,8 @@ impl LazySolver3 {
         let at = |a: &A| a.take(idx);
         let (rho, mu, speed, d, w1) = (at(&dev.rho), at(&dev.cell.mu), at(&dev.speed), at(&dev.dwall), at(&dev.wall[1]));
         let nu = match tg.iso {
-            None => &mu / &rho,
-            Some(i) => c(i.mu_w * i.t_w) / (c(GAMMA) * at(&dev.pres)),
+            Some(i) if i.law => c(i.mu_w * i.t_w) / (c(GAMMA) * at(&dev.pres)),
+            _ => &mu / &rho,
         };
         let u_tau = self.u_tau3(&nu, &speed, &d);
         let yp = &d * &u_tau / &nu;

@@ -239,12 +239,12 @@ impl LazySolver3 {
         let mut_l = select(&f.wall[0], c(2.0) * &cl[2] - &cl[1], &cl[1]);
         let mut_r = select(&f.wall[1], c(2.0) * &cr[2] - &cr[1], &cr[1]);
         let mu_f = match vg.iso {
-            None => c(0.5) * (&cl[0] + &cr[0]),
-            Some(i) => {
+            Some(i) if i.mu_face => {
                 let mu_l = select(&f.wall[0], c(2.0 * i.mu_w) - &cl[0], &cl[0]);
                 let mu_r = select(&f.wall[1], c(2.0 * i.mu_w) - &cr[0], &cr[0]);
                 c(0.5) * (&mu_l + &mu_r)
             }
+            _ => c(0.5) * (&cl[0] + &cr[0]),
         };
         (mu_f, c(0.5) * (&mut_l + &mut_r))
     }
@@ -359,7 +359,7 @@ impl LazySolver3 {
             let rho_f = c(0.5) * (&l[0] + &r[0]);
             let lam = c(GAMMA) * (&mu_f / c(PRANDTL) + &mut_f / c(PRANDTL_T)) / &rho_f * &f.inv_d;
             // an isothermal wall face conducts with the ghost `T_g = 2 T_w - T`: twice the derivative of an interior face (`viscous3::face_lambda3`)
-            let lam = if vg.iso.is_some() { select(&f.noslip, c(2.0) * &lam, lam) } else { lam };
+            let lam = if vg.iso.is_some_and(|i| i.lam2) { select(&f.noslip, c(2.0) * &lam, lam) } else { lam };
             select(&f.flux, lam, c(0.0))
         })
     }

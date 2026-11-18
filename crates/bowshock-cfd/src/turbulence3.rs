@@ -339,11 +339,11 @@ pub fn wall_state(rho: f64, nu: f64, speed: f64, d: f64, ks: f64) -> WallState {
 #[inline]
 pub fn wall_props(w: &Prim3, mu_c: f64, iso: Option<IsoWall>) -> (f64, f64) {
     match iso {
-        None => (w[0], mu_c / w[0]),
-        Some(i) => {
+        Some(i) if i.law => {
             let rho_w = GAMMA * w[4] / i.t_w;
             (rho_w, i.mu_w / rho_w)
         }
+        _ => (w[0], mu_c / w[0]),
     }
 }
 

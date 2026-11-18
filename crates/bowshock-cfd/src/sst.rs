@@ -59,6 +59,9 @@ pub enum WallThermal {
 pub struct IsoWall {
     pub t_w: f64,
     pub mu_w: f64,
+    pub mu_face: bool,
+    pub law: bool,
+    pub lam2: bool,
 }
 
 impl WallThermal {
@@ -68,7 +71,13 @@ impl WallThermal {
             WallThermal::Adiabatic => None,
             WallThermal::Isothermal(t_w) => {
                 assert!(t_w.is_finite() && t_w > 0.0, "wall temperature must be positive: {t_w}");
-                Some(IsoWall { t_w, mu_w: v.mu(t_w) })
+                Some(IsoWall {
+                    t_w,
+                    mu_w: v.mu(t_w),
+                    mu_face: std::env::var_os("ISO_NO_MU").is_none(),
+                    law: std::env::var_os("ISO_NO_LAW").is_none(),
+                    lam2: std::env::var_os("ISO_NO_LAM2").is_none(),
+                })
             }
         }
     }
