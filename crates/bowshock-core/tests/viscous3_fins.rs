@@ -526,6 +526,10 @@ fn fin_half_incidence_series() {
         if it >= diag_from {
             prev.clone_from(&s.u);
         }
+        // `RAMP_AT_SWITCH=1`: the CFL ramp restarts at the iteration where the first-order reconstruction gives way to the limited second-order one
+        if env("RAMP_AT_SWITCH", 0u8) != 0 && it == s.cfg.first_order_iters {
+            s.restart_ramp();
+        }
         let r = s.step();
         if rollback && (!r.is_finite() || r > 1e5) {
             cap = (cap * 0.7).max(2.0);
@@ -610,6 +614,25 @@ fn fin_half_incidence_series() {
     let top: usize = env("WALL_REPORT", 0);
     if top > 0 {
         wall_report(&s, top);
+    }
+    let worst: usize = env("WORST", 0);
+    if worst > 0 {
+        // where the field is worst: the fluid cells of lowest pressure and density (indices, centroid, solid neighbours)
+        let g = &s.grid;
+        let fs = s.cfg.freestream;
+        let mut cells: Vec<(f64, f64, usize)> = (0..g.ni * g.nj * g.nk)
+            .filter(|&c| g.part[c] == bowshock_cfd::grid3::PART_FLUID)
+            .map(|c| {
+                let w = s.prim(c % g.ni, (c / g.ni) % g.nj, c / (g.ni * g.nj));
+                (w[4] / fs[4], w[0] / fs[0], c)
+            })
+            .collect();
+        for (name, key) in [("p/p_inf", 0usize), ("rho/rho_inf", 1)] {
+            cells.sort_by(|a, b| (if key == 0 { a.0 } else { a.1 }).total_cmp(&(if key == 0 { b.0 } else { b.1 })));
+            for &(p, r, c) in cells.iter().take(worst) {
+                println!("WORST lowest {name}: {} p/p_inf {p:.4} rho/rho_inf {r:.4}", cell_place(g, c));
+            }
+        }
     }
     // the oscillation of each force over the last windows of 500 / 1000 / 2000 iterations: mean and half range / |mean|
     for w in [500usize, 1000, 2000] {

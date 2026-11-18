@@ -91,6 +91,10 @@ fn main() -> Result<(), String> {
     if let Some(n) = value("--max-iter") {
         case.numerics.max_iter = n.parse().map_err(|e| format!("--max-iter: {e}"))?;
     }
+    if args.iter().any(|a| a == "--no-control") {
+        // the fixed cap, no rollback (the controller's failures show as `NonFinite`)
+        case.numerics.cfl_control = false;
+    }
     if args.iter().any(|a| a == "--cpu") {
         // the f64 CPU solver on the same case (a cross-check of a GPU failure: slow, use `--max-iter`)
         let t = Instant::now();
@@ -113,7 +117,12 @@ fn main() -> Result<(), String> {
         return Ok(());
     }
     let t = Instant::now();
-    let mut run = GpuRunner3::new(&case, Precision::F32).map_err(|e| e.to_string())?;
+    let precision = match value("--precision").as_deref() {
+        None | Some("f32") => Precision::F32,
+        Some("df32") => Precision::Extended,
+        Some(other) => return Err(format!("--precision f32|df32, not {other}")),
+    };
+    let mut run = GpuRunner3::new(&case, precision).map_err(|e| e.to_string())?;
     let g = &run.host.grid;
     let (ni, nj, nk) = (g.ni, g.nj, g.nk);
     let setup = t.elapsed().as_secs_f64();
