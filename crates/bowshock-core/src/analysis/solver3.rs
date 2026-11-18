@@ -146,6 +146,9 @@ fn extras_of(case: &Case3, g: &Grid3, ratio: &[f64], tractions: &[bowshock_cfd::
 /// The most iterations of a seed wedge: it only has to settle the base wake roughly, the finned run takes it from there.
 const SEED_MAX_ITERATIONS: usize = 3000;
 
+/// Factor on [`crate::engine::case3::Numerics3::drift_tol`] of a seeded run.
+const SEED_DRIFT_TOL_FACTOR: f64 = 0.5;
+
 /// The axisymmetric solution a finned sector starts from: the wedge of its body, Mach number and tier (see [`Analysis::seed_axisymmetric`]).
 struct Seed {
     grid: Grid3,
@@ -590,7 +593,11 @@ impl Analysis {
             tm.seed = "no-seed";
             return runner.cold(case);
         };
-        let (r, s) = runner.cold_from(case, seed)?;
+        // a seeded run is judged twice as tightly by the extrapolated-drift rule: it starts close to the answer and the rule would stop it on the first geometric tail of the
+        // slow base-wake adjustment (Draft example sector, Mach 0.8-1.1: 0.5-1.1 % high with the tolerance of the cold runs, which reach their stop 900-1000 iterations later)
+        let mut seeded = case.clone();
+        seeded.numerics.drift_tol *= SEED_DRIFT_TOL_FACTOR;
+        let (r, s) = runner.cold_from(&seeded, seed)?;
         if r.stop_reason == StopReason::Cancelled || matches!(lift_quality(&r), Quality::Converged | Quality::Stationary) {
             tm.seed = "seeded";
             return Ok((r, s));
