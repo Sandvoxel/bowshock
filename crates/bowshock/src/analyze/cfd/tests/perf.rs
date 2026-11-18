@@ -80,7 +80,7 @@ fn perf_2d_table_example() {
         altitude: 120.0,
         nodes: nodes((0.1, 3.0)).unwrap(),
         stage: 1,
-        grid: if std::env::var("BOWSHOCK_GRID").is_ok_and(|g| g == "draft") { CfdGrid::Draft } else { CfdGrid::Coarse },
+        grid: CfdGrid::Coarse,
         compute: Default::default(),
         cpu_only: false,
         stability: Vec::new(),
@@ -354,7 +354,7 @@ fn engine3d_finned_timing() {
         altitude: 120.0,
         nodes: nodes((0.1, 3.0)).unwrap(),
         stage: 1,
-        grid: CfdGrid::Coarse,
+        grid: if std::env::var("BOWSHOCK_GRID").is_ok_and(|g| g == "draft") { CfdGrid::Draft } else { CfdGrid::Coarse },
         compute: Default::default(),
         cpu_only: false,
         stability: lift_nodes((0.1, 3.0)).unwrap(),
@@ -788,5 +788,30 @@ fn finned_subsonic_failure_path() {
     println!("APP RESULT after {:.1} s: {:?}", t.elapsed().as_secs_f64(), table.as_ref().map(|t| (t.points.len(), t.notes.clone())));
     for r in solver::engine::timing::take_timings() {
         println!("RUN M {:.2}: {} cells, {} its (stop {}), {:.1} s, {}", r.mach, r.cells, r.iters_exec, r.iters_stop, r.run_s, r.stop);
+    }
+}
+
+/// The fins the app's plan gives the example document, for comparing with another harness's helper.
+#[test]
+#[ignore = "prints the example's solved fins"]
+fn example_fins_dump() {
+    let (rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    let d = plan.body.nose.diameter;
+    println!("NOSE D {d}  REF D {}", vehicle.reference_diameter);
+    println!("FINS {:?}", plan.fins);
+    if let Some(f) = &plan.fins {
+        println!(
+            "FINS in calibres: count {} root {:.4} tip {:.4} span {:.4} sweep {:.4} t {:.5} te_to_base {:.4} roughness {} profile {:?}",
+            f.count,
+            f.root_chord / d,
+            f.tip_chord / d,
+            f.span / d,
+            f.sweep / d,
+            f.thickness / d,
+            f.root_te_to_base / d,
+            f.roughness,
+            f.profile
+        );
     }
 }
