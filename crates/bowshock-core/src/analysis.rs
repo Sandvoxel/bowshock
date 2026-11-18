@@ -366,6 +366,11 @@ pub struct Polar {
     pub motor_on: bool,
 }
 
+#[cfg(feature = "serde")]
+fn seed_default() -> bool {
+    true
+}
+
 /// The serialisable configuration of an [`Analysis`] ([`Analysis::spec`], [`Analysis::from_spec`]): the dimensional body and every
 /// builder setting except the progress callback. It is what a remote worker needs to rebuild the analysis.
 #[derive(Clone, Debug, PartialEq)]
@@ -395,6 +400,10 @@ pub struct AnalysisSpec {
     pub drag_tolerance: Option<f64>,
     /// Warm starts ([`Analysis::warm_start`]).
     pub warm_start: bool,
+    /// Axisymmetric seeding of the finned sectors ([`Analysis::seed_axisymmetric`]); on when absent.
+    #[doc(hidden)]
+    #[cfg_attr(feature = "serde", serde(default = "seed_default"))]
+    pub seed_axisymmetric: bool,
     /// Grid-level uncertainty estimate ([`Analysis::estimate_uncertainty`]).
     pub estimate_uncertainty: bool,
     /// Keep the final flow field of every point ([`Analysis::keep_fields`]).
@@ -436,6 +445,7 @@ pub struct Analysis {
     max_iterations: Option<usize>,
     drag_tolerance: Option<f64>,
     warm_start: bool,
+    seed_axisymmetric: bool,
     estimate_uncertainty: bool,
     grid_mach: Option<f64>,
     case3_hook: Option<fn(&mut Case3)>,
@@ -481,6 +491,7 @@ impl Analysis {
             max_iterations: None,
             drag_tolerance: None,
             warm_start: false,
+            seed_axisymmetric: true,
             estimate_uncertainty: false,
             grid_mach: None,
             case3_hook: None,
@@ -530,6 +541,7 @@ impl Analysis {
             max_iterations: self.max_iterations,
             drag_tolerance: self.drag_tolerance,
             warm_start: self.warm_start,
+            seed_axisymmetric: self.seed_axisymmetric,
             estimate_uncertainty: self.estimate_uncertainty,
             keep_fields: self.keep_fields,
             grid_mach: self.grid_mach,
@@ -552,6 +564,7 @@ impl Analysis {
         a.max_iterations = spec.max_iterations;
         a.drag_tolerance = spec.drag_tolerance;
         a.warm_start = spec.warm_start;
+        a.seed_axisymmetric = spec.seed_axisymmetric;
         a.estimate_uncertainty = spec.estimate_uncertainty;
         a.keep_fields = spec.keep_fields;
         a.grid_mach = spec.grid_mach;
@@ -699,6 +712,16 @@ impl Analysis {
     /// point always starts cold.
     pub fn warm_start(mut self, on: bool) -> Self {
         self.warm_start = on;
+        self
+    }
+
+    /// Seed every cold run of a finned sector ([`Engine::Solver3`], zero incidence) with the axisymmetric wedge solution of the same body, Mach number and wall tier (default on):
+    /// the wedge is solved first (single precision on the GPU, at most 3000 iterations, one per Mach number and tier of a sweep), its field is carried to the sector grid and
+    /// the point restarts from it. On the Draft tier it reaches the same coefficients (within 0.2-0.4 % of a long run) in a quarter of the iterations or fewer. A seeded point that
+    /// ends `Failed` or `Stalled` is re-run from the free stream, and a wedge that fails gives a plain cold start. Off: every cold run starts from the free stream. The half domain
+    /// at incidence is not seeded (its seeded runs took more iterations than the cold ones, measured) and neither are points without fins (the wedge itself).
+    pub fn seed_axisymmetric(mut self, on: bool) -> Self {
+        self.seed_axisymmetric = on;
         self
     }
 

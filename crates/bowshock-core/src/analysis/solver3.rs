@@ -30,7 +30,8 @@ use crate::engine::field3::field3_of;
 use crate::engine::grid3::Fins3;
 use crate::engine::planform::Planform;
 use crate::engine::run3::{drag_parts_on, wall_faces, wall_samples, DragParts, Wall};
-use bowshock_cfd::gas3::{cons_to_prim3, Cons3};
+use crate::engine::axisym_init::{axisym_to_sector, AxisymInit};
+use bowshock_cfd::gas3::{cons_to_prim3, prim_to_cons3, Cons3};
 use bowshock_cfd::grid3::{Grid3, PART_FLUID};
 
 /// The solved domain of a condition.
@@ -65,6 +66,12 @@ pub struct FacadeTiming {
     pub drop_s: f64,
     /// The cold run was on a solver kept from an earlier point (see `POOL`).
     pub reused: bool,
+    /// The axisymmetric seed of the point (see [`Analysis::seed_axisymmetric`]): `""` none (wedge point, no fins, opted out, or a warm run), `"seeded"` the run started from the
+    /// wedge, `"no-seed"` the wedge failed and the run started cold, `"rerun"` the seeded run ended `Failed` or `Stalled` and was run again from the free stream.
+    pub seed: &'static str,
+    /// Wall seconds and iterations of the seed wedge solved for this point (zero when the wedge of its Mach number and tier was solved for an earlier point of the sweep).
+    pub seed_s: f64,
+    pub seed_iters: usize,
 }
 
 static FACADE_TIMINGS: std::sync::Mutex<Vec<FacadeTiming>> = std::sync::Mutex::new(Vec::new());
@@ -72,8 +79,8 @@ static FACADE_TIMINGS: std::sync::Mutex<Vec<FacadeTiming>> = std::sync::Mutex::n
 fn record_facade(t: FacadeTiming) {
     if std::env::var_os("BOWSHOCK_TIMING").is_some() {
         eprintln!(
-            "TIMING3 {{\"what\":\"{}\",\"kind\":\"{}\",\"mach\":{},\"alpha_deg\":{:.1},\"case_s\":{:.4},\"run_s\":{:.4},\"post_s\":{:.4},\"host_s\":{:.4},\"field_s\":{:.4},\"drop_s\":{:.4},\"reused\":{}}}",
-            t.what, t.kind, t.mach, t.alpha_deg, t.case_s, t.run_s, t.post_s, t.host_s, t.field_s, t.drop_s, t.reused
+            "TIMING3 {{\"what\":\"{}\",\"kind\":\"{}\",\"mach\":{},\"alpha_deg\":{:.1},\"case_s\":{:.4},\"run_s\":{:.4},\"post_s\":{:.4},\"host_s\":{:.4},\"field_s\":{:.4},\"drop_s\":{:.4},\"reused\":{},\"seed\":\"{}\",\"seed_s\":{:.4},\"seed_iters\":{}}}",
+            t.what, t.kind, t.mach, t.alpha_deg, t.case_s, t.run_s, t.post_s, t.host_s, t.field_s, t.drop_s, t.reused, t.seed, t.seed_s, t.seed_iters
         );
     }
     FACADE_TIMINGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(t);
@@ -136,11 +143,61 @@ fn extras_of(case: &Case3, g: &Grid3, ratio: &[f64], tractions: &[bowshock_cfd::
     (eddy, cf)
 }
 
+/// The most iterations of a seed wedge: it only has to settle the base wake roughly, the finned run takes it from there.
+const SEED_MAX_ITERATIONS: usize = 3000;
+
+/// Factor on [`crate::engine::case3::Numerics3::drift_tol`] of a seeded run.
+const SEED_DRIFT_TOL_FACTOR: f64 = 0.5;
+
+/// The axisymmetric solution a finned sector starts from: the wedge of its body, Mach number and tier (see [`Analysis::seed_axisymmetric`]).
+struct Seed {
+    grid: Grid3,
+    u: Vec<Cons3>,
+    /// `[k, omega]` of every wedge cell (`None`: Euler).
+    turb: Option<Vec<[f64; 2]>>,
+    iterations: usize,
+}
+
+impl Seed {
+    /// The seed of a finished wedge run: `None` unless it ended without failing (a run capped at [`SEED_MAX_ITERATIONS`] is a seed) and every fluid cell holds a finite
+    /// state of positive density and pressure.
+    fn of(r: &PointResult3, grid: Grid3, u: Vec<Cons3>, turb: Option<Vec<[f64; 2]>>) -> Option<Seed> {
+        let sound = |c: usize| {
+            let w = cons_to_prim3(&u[c]);
+            w.iter().all(|x| x.is_finite()) && w[0] > 0.0 && w[4] > 0.0
+        };
+        let fine = (0..u.len()).filter(|&c| grid.part[c] == PART_FLUID).all(sound) && turb.as_ref().is_none_or(|t| t.iter().all(|x| x.iter().all(|v| v.is_finite())));
+        (lift_quality(r) != Quality::Failed && fine).then_some(Seed { grid, u, turb, iterations: r.iterations })
+    }
+
+    /// This field carried to the fluid cells of `dst` ([`axisym_to_sector`]: the nearest meridian cell, the velocity rotated to the azimuth of the cell, which holds for any
+    /// azimuth range of `dst`: the sector, and the half domain with its pitch plane at `theta = 0` and `pi`); the other cells keep the free stream of `case`.
+    fn on(&self, case: &Case3, dst: &Grid3) -> AxisymInit {
+        let fs = prim_to_cons3(&case.freestream());
+        let turb_fs = case.viscous.map_or([0.0; 2], |v| [bowshock_cfd::sst::K_INF, bowshock_cfd::sst::omega_inf(v.re_c)]);
+        // an Euler seed has no `k`, `omega`: the transfer takes zeros and its `turb` is not used
+        let none;
+        let src_turb = match &self.turb {
+            Some(t) => t.as_slice(),
+            None => {
+                none = vec![[0.0; 2]; self.u.len()];
+                &none
+            }
+        };
+        axisym_to_sector(&self.grid, &self.u, src_turb, dst, fs, turb_fs)
+    }
+}
+
 /// One backend of the sweep: a cold run that builds the solver state, a warm run on it, and what is read from a state afterwards.
 trait Runner3 {
     type State;
     fn cold(&self, case: &Case3) -> Result<(PointResult3, Self::State), Error>;
+    /// A cold run that starts from the axisymmetric `seed` instead of the free stream: the field carried to the grid of `case` and a warm run on it (the first-order start-up
+    /// skipped, the CFL ramp restarted).
+    fn cold_from(&self, case: &Case3, seed: &Seed) -> Result<(PointResult3, Self::State), Error>;
     fn warm(&self, state: &mut Self::State, case: &Case3) -> Result<PointResult3, Error>;
+    /// Solves the wedge `case` to its stop rule and returns its field; `None` when it failed.
+    fn seed(&self, wedge: &Case3) -> Result<Option<Seed>, Error>;
     fn grid<'a>(&self, state: &'a Self::State) -> &'a Grid3;
     /// The class forces and the state of `state` (the one download of a point).
     fn post(&self, state: &Self::State, case: &Case3) -> Result<Post3, Error>;
@@ -165,8 +222,26 @@ impl Runner3 for Cpu3 {
         Ok((r, s))
     }
 
+    fn cold_from(&self, case: &Case3, seed: &Seed) -> Result<(PointResult3, Solver3), Error> {
+        let mut s = case.build_solver_cached()?;
+        let m = seed.on(case, &s.grid);
+        s.set_state_turb(&m.u, seed.turb.is_some().then_some(m.turb.as_slice()));
+        let r = run3_on(case, &mut s, true);
+        Ok((r, s))
+    }
+
     fn warm(&self, s: &mut Solver3, case: &Case3) -> Result<PointResult3, Error> {
         Ok(run3_on(case, s, true))
+    }
+
+    fn seed(&self, wedge: &Case3) -> Result<Option<Seed>, Error> {
+        let mut s = wedge.build_solver_cached()?;
+        let r = run3_on(wedge, &mut s, false);
+        if r.stop_reason == StopReason::Cancelled {
+            return Err(Error::Cancelled);
+        }
+        let turb = s.rans().map(|r| r.turb.clone()).filter(|t| !t.is_empty());
+        Ok(Seed::of(&r, s.grid.clone(), s.u.clone(), turb))
     }
 
     fn grid<'a>(&self, s: &'a Solver3) -> &'a Grid3 {
@@ -205,11 +280,26 @@ impl Runner3 for Gpu3 {
     fn cold(&self, case: &Case3) -> Result<(PointResult3, GpuState), Error> {
         // The wedge (a few thousand cells, solved to a tight stop rule at low Mach number too) runs in extended precision as the axisymmetric solver did; the half
         // domain and the sector (hundreds of thousands of cells, within 0.01 % of extended on the ANF table) in single precision.
-        self.cold_in(case, matches!(case.grid.domain, crate::engine::grid3::Domain3::Wedge { .. }))
+        self.cold_in(case, matches!(case.grid.domain, crate::engine::grid3::Domain3::Wedge { .. }), None)
+    }
+
+    fn cold_from(&self, case: &Case3, seed: &Seed) -> Result<(PointResult3, GpuState), Error> {
+        self.cold_in(case, false, Some(seed))
     }
 
     fn warm(&self, r: &mut GpuState, case: &Case3) -> Result<PointResult3, Error> {
         r.runner.run_on(case, true)
+    }
+
+    fn seed(&self, wedge: &Case3) -> Result<Option<Seed>, Error> {
+        // single precision like the finned run it seeds (the wedge's own product runs stay extended: `Gpu3::cold`); the solver is dropped on return
+        let mut runner = crate::engine::gpu3::GpuRunner3::new(wedge, bowshock_cfd::gpu::Precision::F32)?;
+        let r = runner.run_on(wedge, false)?;
+        if r.stop_reason == StopReason::Cancelled {
+            return Err(Error::Cancelled);
+        }
+        let (u, turb) = (runner.gpu.state_f64()?, runner.gpu.turb_state()?.map(|(t, _)| t));
+        Ok(Seed::of(&r, runner.host.grid.clone(), u, turb))
     }
 
     fn grid<'a>(&self, r: &'a GpuState) -> &'a Grid3 {
@@ -253,8 +343,9 @@ impl Runner3 for Gpu3 {
 
 #[cfg(feature = "gpu")]
 impl Gpu3 {
-    /// A cold run in extended (`extended`) or single precision, on the pooled solver of this thread when it was built for the same grid and precision.
-    fn cold_in(&self, case: &Case3, extended: bool) -> Result<(PointResult3, GpuState), Error> {
+    /// A cold run in extended (`extended`) or single precision, on the pooled solver of this thread when it was built for the same grid and precision; from the free stream, or
+    /// (`seed`) from the field of an axisymmetric wedge.
+    fn cold_in(&self, case: &Case3, extended: bool, seed: Option<&Seed>) -> Result<(PointResult3, GpuState), Error> {
         let key = (crate::engine::cache3::GridKey::of(&case.grid), extended);
         let kept = POOL.with(|p| p.borrow_mut().take()).filter(|s| s.key == key);
         let mut state = match kept {
@@ -264,7 +355,14 @@ impl Gpu3 {
                 GpuState { runner: crate::engine::gpu3::GpuRunner3::new(case, precision)?, key, reused: false }
             }
         };
-        let p = state.runner.run_on(case, false)?;
+        let p = match seed {
+            Some(seed) => {
+                let m = seed.on(case, &state.runner.host.grid);
+                state.runner.gpu.set_state_turb(&m.u, seed.turb.is_some().then_some(m.turb.as_slice()))?;
+                state.runner.run_on(case, true)?
+            }
+            None => state.runner.run_on(case, false)?,
+        };
         Ok((p, state))
     }
 }
@@ -416,8 +514,13 @@ impl Analysis {
 
     /// The case of condition `c` at grid `level`, with the numerics overrides, progress, snapshots and the test hook applied.
     fn solver3_case(&self, c: Condition, level: u32, tier: Tier, snapshots: bool) -> Case3 {
+        self.case_of(self.kind_of(c), c, level, tier, snapshots)
+    }
+
+    /// The case of `c` on the domain `kind` (the one of the condition, or the wedge of a seed).
+    fn case_of(&self, kind: Kind, c: Condition, level: u32, tier: Tier, snapshots: bool) -> Case3 {
         let body = self.body.clone();
-        let mut case = match self.kind_of(c) {
+        let mut case = match kind {
             Kind::Wedge => Case3::wedge(c.mach, body, level).with_tier(tier),
             Kind::Sector => Case3::sector(c.mach, body, self.fins3_solver3().expect("checked").expect("a sector has fins"), tier, level),
             Kind::Half => Case3::base_half(c.mach, c.alpha_deg.to_radians(), body, self.fins3_solver3().expect("checked"), tier, level),
@@ -443,6 +546,66 @@ impl Analysis {
             hook(&mut case);
         }
         case
+    }
+
+    /// The axisymmetric counterpart of the finned case `case` of `c`: the wedge of its body, Mach number and tier (`case.tier`: the meridian of the wall-resolved tiers is the
+    /// same), with the numerics overrides and the test hook of the analysis, silent (no progress, no snapshots) and capped at [`SEED_MAX_ITERATIONS`].
+    fn seed_case(&self, case: &Case3, c: Condition, level: u32) -> Case3 {
+        let mut wedge = self.case_of(Kind::Wedge, c, level, case.tier, false);
+        wedge.progress = None;
+        wedge.numerics.max_iter = wedge.numerics.max_iter.min(SEED_MAX_ITERATIONS);
+        wedge
+    }
+
+    /// Whether the cold runs of `kind` start from the axisymmetric wedge: the finned sector at zero incidence, unless [`Analysis::seed_axisymmetric`] is off (or `BOWSHOCK_NO_SEED`
+    /// is set, the switch of the timing runs that compare against the plain cold start). The half domain at incidence is not seeded: measured on the Draft example (GPU f32,
+    /// DDADI) its seeded points took 1.4 to 1.9 times the iterations of the cold ones (Mach 0.5 1570 against 810, 1.1 870 against 610, 3.0 1170 against 810) and each paid its own wedge.
+    fn seeded(&self, kind: Kind) -> bool {
+        self.seed_axisymmetric && self.fins.is_some() && kind == Kind::Sector && std::env::var_os("BOWSHOCK_NO_SEED").is_none()
+    }
+
+    /// The cold run of `case` (condition `c` on `kind`): from the free stream, or from the wedge seed of its Mach number and tier ([`Analysis::seeded`]; `seeds` keeps the
+    /// wedges of the sweep, `None` for one that failed). A seeded run that ends `Failed` or `Stalled` is run again from the free stream, and a wedge that fails gives a plain
+    /// cold start.
+    #[allow(clippy::too_many_arguments)]
+    fn cold_point<R: Runner3>(
+        &self,
+        runner: &R,
+        case: &Case3,
+        c: Condition,
+        kind: Kind,
+        level: u32,
+        seeds: &mut std::collections::HashMap<String, Option<Seed>>,
+        tm: &mut FacadeTiming,
+    ) -> Result<(PointResult3, R::State), Error> {
+        if !self.seeded(kind) {
+            return runner.cold(case);
+        }
+        let key = format!("{:016x}|{:?}", c.mach.to_bits(), case.tier);
+        if !seeds.contains_key(&key) {
+            let t = std::time::Instant::now();
+            let seed = runner.seed(&self.seed_case(case, c, level))?;
+            tm.seed_s = t.elapsed().as_secs_f64();
+            tm.seed_iters = seed.as_ref().map_or(0, |s| s.iterations);
+            seeds.insert(key.clone(), seed);
+        }
+        let Some(seed) = &seeds[&key] else {
+            tm.seed = "no-seed";
+            return runner.cold(case);
+        };
+        // a seeded run is judged twice as tightly by the extrapolated-drift rule: it starts close to the answer and the rule would stop it on the first geometric tail of the
+        // slow base-wake adjustment (Draft example sector, Mach 0.8-1.1: 0.5-1.1 % high with the tolerance of the cold runs, which reach their stop 900-1000 iterations later)
+        let mut seeded = case.clone();
+        seeded.numerics.drift_tol *= SEED_DRIFT_TOL_FACTOR;
+        let (r, s) = runner.cold_from(&seeded, seed)?;
+        if r.stop_reason == StopReason::Cancelled || matches!(lift_quality(&r), Quality::Converged | Quality::Stationary) {
+            tm.seed = "seeded";
+            return Ok((r, s));
+        }
+        // the seeded run did not settle: the plain cold run decides the point (the failed state is released first)
+        tm.seed = "rerun";
+        runner.recycle(s);
+        runner.cold(case)
     }
 
     /// The conditions on the 3D solver (see the module docs): the points in the order of `conditions`.
@@ -523,13 +686,16 @@ impl Analysis {
 
     /// The sweep loop shared by the backends over `sorted`: a cold first point per domain and Mach number, warm later angles (and, with
     /// [`Analysis::warm_start`], warm later Mach numbers). A warm point that ends `Failed` or `Stalled` is re-run cold; a cold run that
-    /// diverged is repeated once with the implicit CFL limit halved.
+    /// diverged is repeated once with the implicit CFL limit halved. The cold run of a finned sector starts from the axisymmetric wedge of its Mach number
+    /// and tier ([`Analysis::seed_axisymmetric`], [`Analysis::cold_point`]).
     fn sweep3<R: Runner3>(&self, runner: &R, sorted: &[Condition], level: u32, flow: Option<WallFlow>, keep: bool) -> Result<Vec<PolarPoint>, Error> {
         use std::time::Instant;
         let mut points = Vec::with_capacity(sorted.len());
         let mut state: Option<R::State> = None;
         let mut at: Option<(Kind, f64)> = None;
         let mut last = Condition::from(0.1);
+        // the axisymmetric seeds of the sweep by Mach number and tier
+        let mut seeds = std::collections::HashMap::new();
         for &c in sorted {
             let kind = self.kind_of(c);
             let same = at.is_some_and(|(k, m)| k == kind && (m == c.mach || self.warm_start));
@@ -565,7 +731,7 @@ impl Analysis {
                 }
             }
             let t = Instant::now();
-            let (r, s) = runner.cold(&case)?;
+            let (r, s) = self.cold_point(runner, &case, c, kind, level, &mut seeds, &mut tm)?;
             let mut next_warm = true;
             tm.run_s += t.elapsed().as_secs_f64();
             if r.stop_reason == StopReason::Cancelled {
@@ -742,5 +908,80 @@ mod tests {
         // an explicit reference diameter is the facade's own business
         let b = Analysis::new(&spec).unwrap().reference_diameter(0.1);
         assert!((b.area_ratio() - 1.0).abs() < 1e-12);
+    }
+
+    /// The ANF-like rocket on the tiny sting grid (20 k cells), Euler, CPU: a sector at zero incidence and a half domain at 4 degrees.
+    fn tiny_finned() -> Analysis {
+        const D: f64 = 0.04;
+        let nose_len = 0.5 * D / 10f64.to_radians().tan();
+        let spec = BodySpec { nose: NoseSpec { shape: NoseShape::Cone, length: nose_len, diameter: D }, aft: vec![AftSpec::Tube { length: 10.0 * D - nose_len }] };
+        let fins = crate::spec::FinSpec {
+            count: 4,
+            root_chord: D,
+            tip_chord: D,
+            span: D,
+            sweep: 0.0,
+            thickness: 0.08 * D,
+            roughness: 0.0,
+            root_te_to_base: 0.0,
+            profile: crate::spec::FinProfile::Square,
+        };
+        Analysis::new(&spec)
+            .unwrap()
+            .fins(fins)
+            .engine(Engine::Solver3)
+            .backend(Backend::Cpu)
+            .wake(Wake::Sting)
+            .resolution(Resolution::Coarse)
+            .case3_hook(|c| {
+                let s = &mut c.grid.sting;
+                s.n_up = 10;
+                s.n_nose = 16;
+                s.n_seg = vec![12];
+                s.n_ext = 10;
+                s.nj = 24;
+                c.grid.nk = 8;
+            })
+            .max_iterations(3000)
+    }
+
+    /// Only the finned sector at zero incidence is seeded, unless `seed_axisymmetric(false)`: not the half domain at incidence (slower than its cold run), not a finless body,
+    /// not the wedge; and a half-domain point is the cold run whatever the flag says.
+    #[test]
+    fn only_the_finned_sector_is_seeded_and_the_opt_out_is_cold() {
+        let on = tiny_finned();
+        let off = tiny_finned().seed_axisymmetric(false);
+        assert!(on.seed_axisymmetric && !off.seed_axisymmetric);
+        assert_eq!([Kind::Wedge, Kind::Sector, Kind::Half].map(|k| on.seeded(k)), [false, true, false]);
+        assert_eq!([Kind::Wedge, Kind::Sector, Kind::Half].map(|k| off.seeded(k)), [false, false, false]);
+        let mut finless = tiny_finned();
+        finless.fins = None;
+        assert_eq!([Kind::Wedge, Kind::Sector, Kind::Half].map(|k| finless.seeded(k)), [false, false, false]);
+
+        let conditions = [Condition::new(2.0, 4.0)];
+        let _ = take_facade_timings();
+        let a = on.run(&conditions).unwrap();
+        let b = off.run(&conditions).unwrap();
+        let timings = take_facade_timings();
+        assert!(timings.iter().all(|t| t.seed.is_empty() && t.seed_iters == 0), "{timings:?}");
+        assert_eq!(format!("{:?}", a.points[0].forces), format!("{:?}", b.points[0].forces));
+        assert_eq!(a.points[0].detail.iterations, b.points[0].detail.iterations);
+    }
+
+    /// The same on the sector at zero incidence (the Euler tiny ANF sector, CPU): its wedge is the body's on the same meridian, its coefficient the axial force, and a
+    /// seeded run carries on from the wedge's field without the first-order start-up.
+    #[test]
+    fn a_seeded_sector_reaches_the_axial_force_of_the_cold_run() {
+        let mut sector = Case3::tiny_anf(2.0, 0.0);
+        sector.grid.domain = crate::engine::grid3::Domain3::Sector;
+        let mut wedge = sector.clone();
+        wedge.grid.fins = None;
+        let wedge = wedge.on_wedge();
+        let seed = Cpu3.seed(&wedge).unwrap().expect("the wedge converges");
+        let (cold, _) = Cpu3.cold(&sector).unwrap();
+        let (seeded, _) = Cpu3.cold_from(&sector, &seed).unwrap();
+        println!("wedge {} iterations; sector cold {} ({:?}) CA {:.5}, seeded {} ({:?}) CA {:.5}", seed.iterations, cold.iterations, cold.stop_reason, cold.ca, seeded.iterations, seeded.stop_reason, seeded.ca);
+        assert!(matches!(lift_quality(&seeded), Quality::Converged | Quality::Stationary));
+        assert!((seeded.ca / cold.ca - 1.0).abs() < 0.01, "CA {} vs {}", seeded.ca, cold.ca);
     }
 }

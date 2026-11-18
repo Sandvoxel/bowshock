@@ -110,3 +110,55 @@ pub fn axisym_to_sector(src: &Grid3, src_u: &[Cons3], src_turb: &[[f64; 2]], dst
     }
     AxisymInit { u, turb, max_dx, max_dr, fallbacks }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::case3::Case3;
+
+    /// The velocity of a transferred cell is the radial velocity of the wedge cell it took, along the radial direction of the destination cell: on the half domain
+    /// (`theta` in `[0, pi]`, the pitch plane at `0` and `pi`, both signs of `z`) and on the sector, with the axial momentum and the scalars carried unchanged.
+    #[test]
+    fn the_radial_velocity_is_rotated_to_the_azimuth_of_every_destination_cell() {
+        let wedge = Case3::wedge(2.0, Case3::anf_body(), 0).build_solver_cached().unwrap().grid;
+        assert_eq!(wedge.nk, 1);
+        let (mr, mx) = (0.5, 0.3);
+        let src_u: Vec<Cons3> = wedge
+            .xc
+            .iter()
+            .map(|c| {
+                let th = c[1].atan2(c[2]);
+                [1.0 + 0.01 * c[0], mx, mr * th.sin(), mr * th.cos(), 2.0]
+            })
+            .collect();
+        let src_turb: Vec<[f64; 2]> = wedge.xc.iter().map(|c| [c[0], 7.0]).collect();
+        let fs = [9.0; 5];
+        let mut cases = vec![Case3::tiny_anf(2.0, 0.0)];
+        let mut sector = Case3::tiny_anf(2.0, 0.0);
+        sector.grid.domain = crate::engine::grid3::Domain3::Sector;
+        cases.push(sector);
+        for case in cases {
+            let dst = case.build_solver_cached().unwrap().grid;
+            let m = axisym_to_sector(&wedge, &src_u, &src_turb, &dst, fs, [1.0, 1.0]);
+            let (mut fluid, mut lee, mut windward) = (0, 0, 0);
+            for c in 0..dst.xc.len() {
+                if dst.part[c] != PART_FLUID {
+                    assert_eq!((m.u[c], m.turb[c]), (fs, [1.0, 1.0]), "a solid cell keeps the free stream");
+                    continue;
+                }
+                fluid += 1;
+                let th = dst.xc[c][1].atan2(dst.xc[c][2]);
+                lee += usize::from(dst.xc[c][2] > 0.0);
+                windward += usize::from(dst.xc[c][2] < 0.0);
+                let [_, ux, uy, uz, e] = m.u[c];
+                let radial = uy * th.sin() + uz * th.cos();
+                let azimuthal = uy * th.cos() - uz * th.sin();
+                assert!((radial - mr).abs() < 1e-12 && azimuthal.abs() < 1e-12 && (ux - mx).abs() < 1e-12 && e == 2.0, "cell {c}: {:?}", m.u[c]);
+                assert_eq!(m.turb[c][1], 7.0);
+            }
+            assert!(fluid > 0 && lee > 0);
+            // the half domain reaches the windward side, the sector (`[0, pi/4]` of four fins) does not
+            assert_eq!(windward > 0, matches!(dst.sym, bowshock_cfd::grid3::Symmetry::Half), "windward cells {windward}");
+        }
+    }
+}

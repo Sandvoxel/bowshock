@@ -57,6 +57,7 @@ the run in flight, like `on_field` for the drag solver.
 | `wake(w)` | sting (Euler), base (viscous) | treatment of the region behind the body |
 | `max_iterations(n)` | per-Mach default | cap on the solver iterations of each point |
 | `warm_start(on)` | off | start each Mach number from the previous converged field |
+| `seed_axisymmetric(on)` | on | start finned zero-incidence points from the axisymmetric solution of the same body |
 | `estimate_uncertainty(on)` | off | also run one grid level away |
 | `fins(f)` | none | add [fin drag](fins.md) |
 | `motor(m)` | none | [motor-on](motor.md) base flow |
@@ -168,6 +169,17 @@ iterations than cold starts at every Mach spacing from 0.05 to 0.3, and the GPU 
 diverges on a warm start to Mach 0.8. A warm-started point that ends `Failed` or `Stalled` is
 re-run cold, and the point after a `Failed` point always starts cold. Turn it on only after
 measuring that it helps your sweep.
+
+### Axisymmetric seed
+
+On the 3D engine every cold run of a finned point at zero incidence (the sector) first solves the axisymmetric wedge of the same body, Mach number and wall tier (a few
+seconds, at most 3000 iterations, single precision on the GPU), carries its field to the 3D grid
+and restarts from it. The point reaches the coefficients of a run from the free stream in a
+fraction of the iterations. `seed_axisymmetric(false)` (or the environment variable
+`BOWSHOCK_NO_SEED`) starts from the free stream. A seeded point that ends `Failed` or `Stalled` is
+re-run from the free stream, and a wedge that fails gives a plain cold start. Points at an
+angle of attack (the half domain, which took more iterations seeded than cold) and bodies without
+fins are unaffected.
 
 ### Uncertainty estimate
 
