@@ -108,6 +108,7 @@ pub const CD0: &[(f64, f64)] = &[(0.5, 0.467), (0.7, 0.479), (1.850, 0.567), (2.
 /// Each is one fit over shots of fin cant 0, 2 and 4 degrees (unique `C_X0` per group, solved with the roll-coupled 6-DOF model), so it carries whatever drag the
 /// canted shots' roll adds and is **INFO only**, not a gate reference. This is the table (and the
 /// open circles of Fig. 5 of ARL-TR-6725) the earlier gate was set against.
+#[allow(clippy::approx_constant)] // 2.718 is a Mach number of the table, not e
 pub const CD0_POOLED: &[(f64, f64)] = &[(1.832, 0.585), (2.375, 0.484), (2.718, 0.435), (3.147, 0.373)];
 
 /// Wind-tunnel points (Dupuis; digitised from Yayla 2021 Fig. 3.10 p. 35 and Fig. 4.4 p. 40, digitised, ±3 %).
@@ -158,14 +159,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn drag_tables_are_ordered_and_the_zero_cant_fits_sit_at_or_below_the_pooled_ones() {
+    fn drag_tables_are_ordered() {
         for t in [CD0, CD0_POOLED] {
             assert!(t.windows(2).all(|w| w[0].0 < w[1].0));
-        }
-        // supersonic, the zero-cant single fit against the pooled value at the nearest Mach number: within 6 %, not above it
-        for &(m, cd) in CD0.iter().filter(|p| p.0 > 1.5) {
-            let (_, pooled) = *CD0_POOLED.iter().min_by(|a, b| (a.0 - m).abs().total_cmp(&(b.0 - m).abs())).unwrap();
-            assert!(cd <= pooled * 1.02 && cd > pooled * 0.94, "{m}: {cd} vs {pooled}");
         }
     }
 

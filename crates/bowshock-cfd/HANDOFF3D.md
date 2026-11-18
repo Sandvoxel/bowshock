@@ -77,7 +77,7 @@ missing. CPU verification of the final tree is in section 9.
 **Every FAIL and KNOWN, measured / reference / band:**
 - G-F5 KNOWN (`DESIGN3D-L-item-38`), Finner CD0, sourced section, Lift tier: Mach 1.832 0.5298 / 0.585 (-9.4 %), 2.375 0.4297 / 0.484 (-11.2 %), 2.718 0.3844 / 0.435
   (-11.6 %), 3.147 0.3390 / 0.373 (-9.1 %), band 8 % (both roll phases within 0.4 %). Coarse sector (job 0-20261117-164014-25405): 0.5146 / 0.4185 / 0.3761 / 0.3310.
-  The table itself is not in the repository (given with the gate). Part by part the 3D parts match independent estimates and the solver is 8 % above their sum
+  Reference now re-sourced (DESIGN3D item 44): zero-cant single fits 0.567 / 0.478 / 0.400 / 0.3805 at Mach 1.850 / 2.364 / 2.741 / 2.970 (the Mach 3.147 pooled value was cant 0/2/4). On the 128-chord Coarse sector Mach 1.832 reads 0.5333 (-5.9 % against 0.567), default 0.5148 (-9.2 %). Part by part the 3D parts match independent estimates and the solver is 8 % above their sum
   (DESIGN3D item 40): not a biased solver part; the missing physics is unidentified.
 - G-F5 FAIL (plain), Mach 0.5 / 0.7: 0.5077 (between), 0.5055 (inplane) / 0.460 (+10.4 / +9.9 %); 0.5152 / 0.5105 / 0.460 (+12.0 / +11.0 %), band 8 %. Not investigated;
   phys3d's section may add a controller re-run.
@@ -141,7 +141,7 @@ only that file (it does).
 2. **Angle-of-attack memory and time** (Lift half domain: 10.3 GiB peak per the brief; G-L1 + G-F5 4 311 s on the 3090).
 3. **Supersonic fin-drag shortfall against two references** (Arcas -45 % increment, Finner -9..-12 %): independent estimates give the 3D within 8 %; the references exceed them.
    Untested: the SST compressibility correction (research item 9: Sarkar / Wilcox dilatation dissipation as a flag in `turbulence3.rs` and the GPU kernels, run on the finless wedge and the Finner),
-   the 2 degree cant of the tested Finner fins (about 2-3 % of CD0), open fin slots / strips of the Arcas model, the Finner table's provenance (not in the repository).
+   the 2 degree cant of the tested Finner fins (about 2-3 % of CD0), open fin slots / strips of the Arcas model, the Finner table's provenance (resolved: pooled over cant 0/2/4, DESIGN3D item 44; the zero-cant fits are lower, the chord resolution of the fin leading edge is worth +3.6 % at Mach 1.832).
 4. **Subsonic CN_alpha high** (Finner Mach 0.79 +13.3 %; the earlier +8 % mean) and Finner subsonic CD0 +10..+12 %.
 5. **Quick (Draft) tier subsonic bias:** Mach 0.5 Draft with default levers -5.1 %, +2.3 % with the safe variant (`Case3::draft_subsonic`); supersonic +0.6 % (item 32).
 6. **Fully turbulent walls / transition:** all walls are fully turbulent (SST), fin friction on a 1.3e6 chord may be transitional in the references.
