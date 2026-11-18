@@ -14,8 +14,10 @@
 //! # Drag
 //!
 //! [`CD0`] is the zero-incidence drag the 3D solver is gated against: **zero-cant** free-flight single fits (supersonic, DREV-TM-9703 Table VIII; Dupuis & Hathaway,
-//! DTIC ADA636861, <https://archive.org/details/DTIC_ADA636861>) and 0-degree-roll tunnel points (subsonic, ARL-TR-6725 Fig. 5, DTIC ADA592550,
-//! <https://archive.org/details/DTIC_ADA592550>; the replot only, DRDC TM 2002-136 does not allow redistribution of its tables). The solver models uncanted fins;
+//! DTIC ADA636861, <https://archive.org/details/DTIC_ADA636861>) and, subsonic, the one free-flight point (Mach 0.766, `C_X0` 0.508, pooled, fin cant 2 degrees, 1 % standard
+//! error) of DRDC TM 2002-136 Table 7 as replotted in ARL-TR-6725 Fig. 5 (DTIC ADA592550, <https://archive.org/details/DTIC_ADA592550>; the replot only, TM 2002-136 does
+//! not allow redistribution of its tables, so no other value of it is committed). The sting-mounted wind-tunnel points of the same figure ([`CD0_TUNNEL`], 0 degree roll,
+//! Mach 0.5 / 0.7) are INFO: the sting and its support interfere with the base flow. The solver models uncanted fins;
 //! the shots with 2 and 4 degree fin cant spin up and carry roll-induced drag, and the pooled fits of Table IX ([`CD0_POOLED`]) mix all three cants. The range
 //! models flew with a cold wall (launched at ambient temperature, so well below the recovery temperature), the solver's wall is adiabatic: the friction of the
 //! data is higher (Van Driest II, estimated at about +14 % body and +12 % fin friction at Mach 1.8), a bias of the references no choice of table removes. In Table VIII a shot is zero-cant when its roll-moment-due-to-cant `Cl_delta` is 0.00 (the
@@ -98,11 +100,15 @@ const fn pt(mach: f64, cn_per_deg: f64, cm_per_deg: f64) -> AnfPoint {
 /// - Supersonic (Mach 1.850, 2.364, 2.741, 2.970): the **single-fit** `C_X0` of the zero-cant shots, Dupuis & Hathaway, DREV-TM-9703 (DTIC ADA636861), **Table VIII**
 ///   (pdf pp. 44-47): shot DA95021308 (A08) Mach 1.850 0.567; DA95020907 (A07) 2.364 0.478; DA95020906 (A06) 2.741 0.400; the two zero-cant shots at the nominal
 ///   Mach 3 charge, DA95030603 (A05) 2.969 0.385 and DA95022205 (A03) 2.970 0.376, are one row here at their mean 0.3805 (2 % apart; the printed probable errors of C_X0 round to 0 %). The pooled table has no zero-cant point at Mach 3.147, so the gate point moved to Mach 2.970.
-/// - Subsonic (Mach 0.5, 0.7): the tunnel (DRDC WT, 0 degree roll) points as replotted in Fig. 5 of Bhagwandin & Sahu, ARL-TR-6725 (DTIC
-///   ADA592550, p. 15, top left panel, filled markers): 0.467 at Mach 0.497 and 0.479 at Mach 0.692, read off the figure at 600 dpi to **+-0.015**
-///   (marker size and the 0.2 gridline spacing) and **+-0.02 in Mach**; used at the nominal Mach 0.5 and 0.7.
+/// - Subsonic (Mach 0.766): the free-flight pooled `C_X0` 0.508 of DRDC TM 2002-136 Table 7 (fin cant 2 degrees, standard error 1 %), read from the ARL-TR-6725 Fig. 5
+///   replot (see the module documentation). It is the only subsonic gate point; the fin cant adds roll-induced drag the uncanted solver does not model.
 #[allow(clippy::approx_constant)] // 2.718 is a Mach number of the table, not e
-pub const CD0: &[(f64, f64)] = &[(0.5, 0.467), (0.7, 0.479), (1.850, 0.567), (2.364, 0.478), (2.741, 0.400), (2.970, 0.3805)];
+pub const CD0: &[(f64, f64)] = &[(0.766, 0.508), (1.850, 0.567), (2.364, 0.478), (2.741, 0.400), (2.970, 0.3805)];
+
+/// The sting-mounted wind-tunnel (DRDC WT, 0 degree roll) subsonic `C_D0` as replotted in Fig. 5 of Bhagwandin & Sahu, ARL-TR-6725 (DTIC ADA592550, p. 15, top left panel,
+/// filled markers): 0.467 at Mach 0.497 and 0.479 at Mach 0.692, read off the figure at 600 dpi to **+-0.015** (marker size and the 0.2 gridline spacing) and **+-0.02 in
+/// Mach**; used at the nominal Mach 0.5 and 0.7. **INFO only** (sting interference), see [`CD0`].
+pub const CD0_TUNNEL: &[(f64, f64)] = &[(0.5, 0.467), (0.7, 0.479)];
 
 /// The pooled ("multiple-fit") range values, DREV-TM-9703 **Table IX** (pdf pp. 48-49): `C_X0` 0.585 / 0.484 / 0.435 / 0.373 at Mach 1.832 / 2.375 / 2.718 / 3.147.
 /// Each is one fit over shots of fin cant 0, 2 and 4 degrees (unique `C_X0` per group, solved with the roll-coupled 6-DOF model), so it carries whatever drag the
@@ -160,7 +166,7 @@ mod tests {
 
     #[test]
     fn drag_tables_are_ordered() {
-        for t in [CD0, CD0_POOLED] {
+        for t in [CD0, CD0_TUNNEL, CD0_POOLED] {
             assert!(t.windows(2).all(|w| w[0].0 < w[1].0));
         }
     }
