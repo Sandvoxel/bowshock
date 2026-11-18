@@ -400,7 +400,7 @@ pub struct AnalysisSpec {
     pub drag_tolerance: Option<f64>,
     /// Warm starts ([`Analysis::warm_start`]).
     pub warm_start: bool,
-    /// Axisymmetric seeding of the finned 3D points ([`Analysis::seed_axisymmetric`]); on when absent.
+    /// Axisymmetric seeding of the finned sectors ([`Analysis::seed_axisymmetric`]); on when absent.
     #[doc(hidden)]
     #[cfg_attr(feature = "serde", serde(default = "seed_default"))]
     pub seed_axisymmetric: bool,
@@ -715,11 +715,11 @@ impl Analysis {
         self
     }
 
-    /// Seed every cold run of a finned 3D point ([`Engine::Solver3`]: the sector at zero incidence, the half domain at incidence) with the axisymmetric wedge solution of the
-    /// same body, Mach number and wall tier (default on): the wedge is solved first (single precision on the GPU, at most 3000 iterations, one per
-    /// Mach number and tier of a sweep), its field is carried to the 3D grid and the point restarts from it. On the Draft tier it reaches the same coefficients (within 0.2-0.4 %
-    /// of a long run) in a quarter of the iterations or fewer. A seeded point that ends `Failed` or `Stalled` is re-run from the free stream, and a wedge that fails gives a plain cold
-    /// start. Off: every cold run starts from the free stream. Points without fins (the wedge itself) are not affected.
+    /// Seed every cold run of a finned sector ([`Engine::Solver3`], zero incidence) with the axisymmetric wedge solution of the same body, Mach number and wall tier (default on):
+    /// the wedge is solved first (single precision on the GPU, at most 3000 iterations, one per Mach number and tier of a sweep), its field is carried to the sector grid and
+    /// the point restarts from it. On the Draft tier it reaches the same coefficients (within 0.2-0.4 % of a long run) in a quarter of the iterations or fewer. A seeded point that
+    /// ends `Failed` or `Stalled` is re-run from the free stream, and a wedge that fails gives a plain cold start. Off: every cold run starts from the free stream. The half domain
+    /// at incidence is not seeded (its seeded runs took more iterations than the cold ones, measured) and neither are points without fins (the wedge itself).
     pub fn seed_axisymmetric(mut self, on: bool) -> Self {
         self.seed_axisymmetric = on;
         self

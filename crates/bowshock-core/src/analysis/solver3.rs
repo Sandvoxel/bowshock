@@ -146,7 +146,7 @@ fn extras_of(case: &Case3, g: &Grid3, ratio: &[f64], tractions: &[bowshock_cfd::
 /// The most iterations of a seed wedge: it only has to settle the base wake roughly, the finned run takes it from there.
 const SEED_MAX_ITERATIONS: usize = 3000;
 
-/// The axisymmetric solution a finned 3D point starts from: the wedge of its body, Mach number and tier (see [`Analysis::seed_axisymmetric`]).
+/// The axisymmetric solution a finned sector starts from: the wedge of its body, Mach number and tier (see [`Analysis::seed_axisymmetric`]).
 struct Seed {
     grid: Grid3,
     u: Vec<Cons3>,
@@ -168,7 +168,7 @@ impl Seed {
     }
 
     /// This field carried to the fluid cells of `dst` ([`axisym_to_sector`]: the nearest meridian cell, the velocity rotated to the azimuth of the cell, which holds for any
-    /// azimuth range of `dst`: the sector, the half domain with its pitch plane at `theta = 0` and `pi`); the other cells keep the free stream of `case`.
+    /// azimuth range of `dst`: the sector, and the half domain with its pitch plane at `theta = 0` and `pi`); the other cells keep the free stream of `case`.
     fn on(&self, case: &Case3, dst: &Grid3) -> AxisymInit {
         let fs = prim_to_cons3(&case.freestream());
         let turb_fs = case.viscous.map_or([0.0; 2], |v| [bowshock_cfd::sst::K_INF, bowshock_cfd::sst::omega_inf(v.re_c)]);
@@ -554,10 +554,11 @@ impl Analysis {
         wedge
     }
 
-    /// Whether the cold runs of `kind` start from the axisymmetric wedge: finned 3D domains, unless [`Analysis::seed_axisymmetric`] is off (or `BOWSHOCK_NO_SEED` is set, the
-    /// switch of the timing runs that compare against the plain cold start).
+    /// Whether the cold runs of `kind` start from the axisymmetric wedge: the finned sector at zero incidence, unless [`Analysis::seed_axisymmetric`] is off (or `BOWSHOCK_NO_SEED`
+    /// is set, the switch of the timing runs that compare against the plain cold start). The half domain at incidence is not seeded: measured on the Draft example (GPU f32,
+    /// DDADI) its seeded points took 1.4 to 1.9 times the iterations of the cold ones (Mach 0.5 1570 against 810, 1.1 870 against 610, 3.0 1170 against 810) and each paid its own wedge.
     fn seeded(&self, kind: Kind) -> bool {
-        self.seed_axisymmetric && self.fins.is_some() && kind != Kind::Wedge && std::env::var_os("BOWSHOCK_NO_SEED").is_none()
+        self.seed_axisymmetric && self.fins.is_some() && kind == Kind::Sector && std::env::var_os("BOWSHOCK_NO_SEED").is_none()
     }
 
     /// The cold run of `case` (condition `c` on `kind`): from the free stream, or from the wedge seed of its Mach number and tier ([`Analysis::seeded`]; `seeds` keeps the
@@ -678,8 +679,8 @@ impl Analysis {
 
     /// The sweep loop shared by the backends over `sorted`: a cold first point per domain and Mach number, warm later angles (and, with
     /// [`Analysis::warm_start`], warm later Mach numbers). A warm point that ends `Failed` or `Stalled` is re-run cold; a cold run that
-    /// diverged is repeated once with the implicit CFL limit halved. The cold run of a finned point starts from the axisymmetric wedge of its Mach number and tier
-    /// ([`Analysis::seed_axisymmetric`], [`Analysis::cold_point`]).
+    /// diverged is repeated once with the implicit CFL limit halved. The cold run of a finned sector starts from the axisymmetric wedge of its Mach number
+    /// and tier ([`Analysis::seed_axisymmetric`], [`Analysis::cold_point`]).
     fn sweep3<R: Runner3>(&self, runner: &R, sorted: &[Condition], level: u32, flow: Option<WallFlow>, keep: bool) -> Result<Vec<PolarPoint>, Error> {
         use std::time::Instant;
         let mut points = Vec::with_capacity(sorted.len());
@@ -937,32 +938,27 @@ mod tests {
             .max_iterations(3000)
     }
 
-    /// A finned half-domain point starts from the axisymmetric wedge by default and ends on the coefficients of the cold run; `seed_axisymmetric(false)` is the cold run, and a
-    /// finless body (the wedge itself for the drag, a half domain without fins at incidence) is never seeded.
+    /// Only the finned sector at zero incidence is seeded, unless `seed_axisymmetric(false)`: not the half domain at incidence (slower than its cold run), not a finless body,
+    /// not the wedge; and a half-domain point is the cold run whatever the flag says.
     #[test]
-    fn a_seeded_finned_point_reaches_the_coefficients_of_the_cold_run_and_the_opt_out_is_cold() {
-        let conditions = [Condition::new(1.5, 4.0), Condition::new(2.0, 4.0)];
-        let _ = take_facade_timings();
-        let seeded = tiny_finned().run(&conditions).unwrap();
-        let on = take_facade_timings();
-        let cold = tiny_finned().seed_axisymmetric(false).run(&conditions).unwrap();
-        let off = take_facade_timings();
-        let seeds = |t: &[FacadeTiming]| t.iter().filter(|t| t.what == "point").map(|t| (t.kind, t.seed)).collect::<Vec<_>>();
-        assert_eq!(seeds(&on), [("half", "seeded"), ("half", "seeded")], "{on:?}");
-        assert_eq!(seeds(&off), [("half", ""), ("half", "")], "{off:?}");
-        assert!(on.iter().filter(|t| t.what == "point").all(|t| t.seed_iters > 0 && t.seed_s > 0.0));
-        for (a, b) in seeded.points.iter().zip(&cold.points) {
-            println!("M {}: seeded {} iterations ({:?}), cold {} ({:?})", a.mach, a.detail.iterations, a.quality, b.detail.iterations, b.quality);
-            assert!(matches!(a.quality, Quality::Converged | Quality::Stationary) && matches!(b.quality, Quality::Converged | Quality::Stationary));
-            let (fa, fb) = (a.forces.unwrap(), b.forces.unwrap());
-            assert!((fa.cn / fb.cn - 1.0).abs() < 0.01, "CN {} vs {}", fa.cn, fb.cn);
-            assert!((fa.x_cp - fb.x_cp).abs() < 0.02 * 0.04, "x_cp {} vs {}", fa.x_cp, fb.x_cp);
-        }
-        let _ = take_facade_timings();
+    fn only_the_finned_sector_is_seeded_and_the_opt_out_is_cold() {
+        let on = tiny_finned();
+        let off = tiny_finned().seed_axisymmetric(false);
+        assert!(on.seed_axisymmetric && !off.seed_axisymmetric);
+        assert_eq!([Kind::Wedge, Kind::Sector, Kind::Half].map(|k| on.seeded(k)), [false, true, false]);
+        assert_eq!([Kind::Wedge, Kind::Sector, Kind::Half].map(|k| off.seeded(k)), [false, false, false]);
         let mut finless = tiny_finned();
         finless.fins = None;
-        finless.max_iterations(50).run(&[Condition::new(2.0, 4.0)]).unwrap();
-        assert!(take_facade_timings().iter().all(|t| t.seed.is_empty() && t.seed_iters == 0));
+        assert_eq!([Kind::Wedge, Kind::Sector, Kind::Half].map(|k| finless.seeded(k)), [false, false, false]);
+
+        let conditions = [Condition::new(2.0, 4.0)];
+        let _ = take_facade_timings();
+        let a = on.run(&conditions).unwrap();
+        let b = off.run(&conditions).unwrap();
+        let timings = take_facade_timings();
+        assert!(timings.iter().all(|t| t.seed.is_empty() && t.seed_iters == 0), "{timings:?}");
+        assert_eq!(format!("{:?}", a.points[0].forces), format!("{:?}", b.points[0].forces));
+        assert_eq!(a.points[0].detail.iterations, b.points[0].detail.iterations);
     }
 
     /// The same on the sector at zero incidence (the Euler tiny ANF sector, CPU): its wedge is the body's on the same meridian, its coefficient the axial force, and a

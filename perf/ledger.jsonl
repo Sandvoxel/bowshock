@@ -1,0 +1,1 @@
+{"case":"3d-engine-finned-example","precision":"f32","cells":null,"iters":50150,"us_per_iter":5289.045,"wall_s":265.246,"date":"2026-11-18T02:31:33-08:00","host":"local","gpu":"NVIDIA GeForce RTX 3090","sha":"2cfe71bdbc62c18fc719f8948376d438d7e4980f","dirty":0,"job":"1-20261118-021827-21721"}
