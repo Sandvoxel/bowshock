@@ -614,6 +614,12 @@ impl GpuSolver3 {
         Ok(())
     }
 
+    /// [`GpuSolver3::set_state`] with the `[k, omega]` of every cell (`Some`; SST runs only, `mu_t = rho k / omega` capped as the host init): a warm start from another field.
+    pub fn set_state_turb(&mut self, u: &[Cons3], turb: Option<&[[f64; 2]]>) -> Result<()> {
+        on3_mut!(self, s => s.set_state_turb(u, turb)?);
+        Ok(())
+    }
+
     /// A copy of the loop state (the device buffers are shared, nothing moves) to return to with [`GpuSolver3::restore`]: the CFL controller of the 3D runner.
     pub fn snapshot(&self) -> Result<Snapshot3> {
         Ok(Snapshot3(match &self.inner {
