@@ -2,7 +2,7 @@
 //! Coarse tier, the Draft tier (`--tier draft`) or the Draft tier's safe subsonic variant (`--tier draft-safe`: `Case3::draft_subsonic`), `GpuRunner3` in f32, to the case's stop rule.
 //!
 //! ```text
-//! cargo run --release -p bowshock-validate --example finned_table -- --tier coarse|draft|draft-safe --mach 2.0 [--sub N] [--max-iter N] [--ddadi OMEGA] [--dis-boost DELTA] [--history-every N]
+//! cargo run --release -p bowshock-validate --example finned_table -- --tier coarse|draft|draft-safe --mach 2.0 [--sub N] [--max-iter N] [--ddadi OMEGA] [--dis-boost DELTA] [--history-every N] [--dt-mode sum|min]
 //! ```
 //!
 //! One `TABLE` line: tier, Mach number, grid, cells, iterations, stop reason, wall seconds (the whole run, set-up included), ms per iteration, CD total and its parts (coefficients on pi/4
@@ -10,6 +10,7 @@
 //! memory peak is `tools/gpuq/gpumem`'s (`--label`), not printed here.
 
 use bowshock_cfd::gpu::Precision;
+use bowshock_cfd::implicit_params::DtMode;
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
 use bowshock_core::engine::case3::{Case3, Tier, WallFlow, SUTHERLAND_SEA_LEVEL};
 use bowshock_core::engine::gpu3::GpuRunner3;
@@ -88,6 +89,13 @@ fn main() -> Result<(), String> {
     }
     if let Some(d) = value("--dis-boost") {
         case.numerics.implicit.lhs_dis_boost = d.parse().map_err(|e| format!("--dis-boost: {e}"))?;
+    }
+    // `--dt-mode sum|min`: `DtMode::Sum` (`CFL V / (L_i + L_j + L_k)`) or `DtMode::MinDirection` (`CFL V / (3 min L_d)`, the weakest direction sizes the step)
+    match value("--dt-mode").as_deref() {
+        None => {}
+        Some("sum") => case.numerics.implicit.dt_mode = DtMode::Sum,
+        Some("min") => case.numerics.implicit.dt_mode = DtMode::MinDirection,
+        Some(other) => return Err(format!("--dt-mode sum|min, not {other}")),
     }
     if let Some(c) = value("--cfl-ref") {
         case.numerics.cfl_ref = c.parse().map_err(|e| format!("--cfl-ref: {e}"))?;
