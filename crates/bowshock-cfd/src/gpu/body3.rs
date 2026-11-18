@@ -943,6 +943,15 @@ impl LazySolver3 {
         let sum = |v: Vec<A>| luma::concat_slice(0, &v).sum().reshape([1]);
         Some(luma::concat_slice(0, &[sum(x), sum(z), sum(mm)]))
     }
+    /// The smallest density and pressure of the state, `[rho_min, p_min]` over every cell (the solid ones hold the free stream), reduced on the device: two numbers are
+    /// downloaded, the state is not. The health check of the CFL controller ([`crate::gpu::GpuSolver3::state_extrema`]).
+    pub fn state_extrema(&self) -> Result<[f64; 2]> {
+        let s = self.state.as_ref().ok_or_else(no_state)?;
+        let w = cons_to_prim3(unpack3(s));
+        let v = to_f64(&luma::concat_slice(0, &[w[0].min().reshape([1]), w[4].min().reshape([1])]))?;
+        Ok([v[0], v[1]])
+    }
+
     /// Pressure forces of the wall faces by class, `[Fx, Fz, Mz]` as in the CPU `wall_forces` (not scaled to the whole body), reduced on the device and
     /// read back as `2 n_classes` triples: the classes over all faces, then over the faces flagged `cut` (the monitor's `x <= x_max`). One download of
     /// `6 n_classes` numbers; the state itself is not downloaded. The wall pressure of a face is `p_a + k (p_a - p_b)` (the extrapolation of the two first cells).

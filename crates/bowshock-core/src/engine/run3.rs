@@ -32,10 +32,37 @@ pub const DROP_ORDERS: f64 = 6.0;
 /// A step whose density residual is above this, or not finite, or a force monitor that is not finite, is a failure of the CFL controller ([`CflControl`]): the residual of a healthy
 /// start is 1e1 to 1e3 at most.
 pub const ROLLBACK_RESIDUAL: f64 = 1e5;
+/// A state with a density or a pressure below this fraction of the free stream's in any cell is a failure of the CFL controller ([`CflControl`]) at the next sample, whatever the
+/// residual says: the residual and the monitor stay finite and below [`ROLLBACK_RESIDUAL`] while an unstable wake collapses towards vacuum (rho 5e-10 at iteration 1250 of the
+/// finned example at Mach 1.3 under DDADI at `cfl_max` 100, the blow-up 25 iterations later), and every snapshot taken in between holds that damage, so the rollbacks that follow
+/// the blow-up restore it, lower the CFL and never recover. [`collapsed`].
+pub const COLLAPSE_FLOOR: f64 = 1e-3;
+
+/// Whether the smallest density `rho_min` and pressure `p_min` of a state are below [`COLLAPSE_FLOOR`] of the free stream `fs` (`[rho, u, v, w, p]`); a NaN counts.
+pub fn collapsed(rho_min: f64, p_min: f64, fs: &[f64; 5]) -> bool {
+    !(rho_min >= COLLAPSE_FLOOR * fs[0] && p_min >= COLLAPSE_FLOOR * fs[4])
+}
+
+/// [`collapsed`] for the state `u` on `g`, over the fluid cells.
+pub fn state_collapsed(g: &Grid3, u: &[Cons3], fs: &[f64; 5]) -> bool {
+    let (mut rho, mut p) = (f64::INFINITY, f64::INFINITY);
+    for (cell, q) in u.iter().enumerate() {
+        if g.part[cell] == bowshock_cfd::grid3::PART_FLUID {
+            let w = cons_to_prim3(q);
+            (rho, p) = (rho.min(w[0]), p.min(w[4]));
+            if w[0].is_nan() || w[4].is_nan() {
+                return true;
+            }
+        }
+    }
+    collapsed(rho, p, fs)
+}
 /// The factor of `cfl_max` after a failure.
 pub const CFL_BACKOFF: f64 = 0.7;
-/// A failure within this many iterations of a restore goes back to the older snapshot: the snapshot taken right before a failure can already hold the growing mode.
-pub const RECENT_RESTORE: usize = 10;
+/// A failure within this many iterations of a restore is a repeat: the state restored holds the growing mode ([`CflControl::fail`] goes back past it, to a state that came from a CFL
+/// at or below the new cap). A mode that grows slowly (the far wake of the finned example at Mach 1.3 under DDADI at `cfl_max` 100 collapses 50 to 150 iterations after a restore to a
+/// state 50 iterations older than the failure) is not cured by the snapshot before the failure and a lower cap.
+pub const REPEAT_WITHIN: usize = 250;
 /// Failures after which the controller gives up (0.7^12 = 0.014 of the start cap): the run then fails as it would have without it.
 pub const MAX_ROLLBACKS: usize = 12;
 /// The hard floor of the controller: it never lowers `cfl_max` below this (half of the fixed rule's `VISCOUS_3D_CFL_MAX` of 10); a point that fails again there is a failed point,
@@ -68,9 +95,11 @@ pub struct Restore<S> {
 
 /// The CFL controller by rollback (DESIGN3D "A CFL controller by rollback"): the CFL that is stable differs by case and the settling of a finned run is pseudo-time, proportional
 /// to 1 / CFL, so a fixed cap leaves a factor of two to five on the table. The runner starts at the engine's `cfl_max`, hands over a snapshot of its state (`S`: what it needs to
-/// come back, the solver's state and the stop rule's) after every good stretch of [`SAMPLE_EVERY`] iterations ([`CflControl::accept`], the last two are kept) and asks what to do
-/// at a failure ([`CflControl::fail`]): back to the last snapshot (to the one before it when the failure follows a restore within [`RECENT_RESTORE`] iterations), `cfl_max` times
-/// [`CFL_BACKOFF`], the stretch run again. The cap only goes down; the converged state does not depend on it. Every answer is logged in [`CflControl::events`].
+/// come back, the solver's state and the stop rule's) after every good stretch of [`SAMPLE_EVERY`] iterations ([`CflControl::accept`]: the last two are kept, and every one taken while
+/// the CFL ramp was still below the cap) and asks what to do at a failure ([`CflControl::fail`]): back to the last snapshot, `cfl_max` times [`CFL_BACKOFF`], the stretch run again;
+/// when the failure repeats within [`REPEAT_WITHIN`] iterations of a restore the restored state is itself damaged, and the run goes back to the latest snapshot older than it that
+/// came from a CFL at or below the new cap (the ramp's: a state the lower cap would have produced from the start). The cap only goes down; the converged state does not depend on
+/// it. Every answer is logged in [`CflControl::events`].
 pub struct CflControl<S> {
     snaps: Vec<(S, usize, f64)>,
     restored_at: Option<usize>,
@@ -102,12 +131,14 @@ impl<S: Clone> CflControl<S> {
         self
     }
 
-    /// The state after a good stretch ending at `iteration` with the CFL `cfl` in force.
+    /// The state after a good stretch ending at `iteration` with the CFL `cfl` in force. Kept: the last two, and those taken below the cap (the ramp's).
     pub fn accept(&mut self, snapshot: S, iteration: usize, cfl: f64) {
         self.snaps.push((snapshot, iteration, cfl));
-        if self.snaps.len() > 2 {
-            self.snaps.remove(0);
-        }
+        let (n, cap, mut i) = (self.snaps.len(), self.cap, 0);
+        self.snaps.retain(|s| {
+            i += 1;
+            i + 2 > n || s.2 < cap
+        });
     }
 
     /// A failure at `iteration` with the CFL `cfl_reached` in force: where to go back to, or `None` when the controller has given up.
@@ -115,15 +146,21 @@ impl<S: Clone> CflControl<S> {
         if !self.active() {
             return None;
         }
-        let recent = self.restored_at.is_some_and(|r| iteration <= r + RECENT_RESTORE);
-        let from = if recent && self.snaps.len() >= 2 { self.snaps.len() - 2 } else { self.snaps.len() - 1 };
+        let before = self.cap;
+        let cap = before * CFL_BACKOFF;
+        let from = match self.restored_at.filter(|&r| iteration <= r + REPEAT_WITHIN) {
+            // a repeat: past the state restored last time, to the latest that came from a CFL the new cap allows (the oldest if none did)
+            Some(r) => {
+                self.snaps.iter().rposition(|s| s.1 < r && s.2 <= cap).or_else(|| self.snaps.iter().position(|s| s.1 < r)).unwrap_or(0)
+            }
+            None => self.snaps.len() - 1,
+        };
         self.snaps.truncate(from + 1);
         let (snapshot, at, cfl_at) = self.snaps[from].clone();
-        let before = self.cap;
-        self.cap *= CFL_BACKOFF;
+        self.cap = cap;
         self.restored_at = Some(at);
-        self.events.push(CflEvent { iteration, cfl_reached, cfl_before: before, cfl_after: self.cap, restored_to: at });
-        Some(Restore { snapshot, iteration: at, cfl: cfl_at.min(self.cap), cap: self.cap })
+        self.events.push(CflEvent { iteration, cfl_reached, cfl_before: before, cfl_after: cap, restored_to: at });
+        Some(Restore { snapshot, iteration: at, cfl: cfl_at.min(cap), cap })
     }
 }
 
@@ -783,7 +820,10 @@ pub fn run3_on(case: &Case3, s: &mut Solver3, warm: bool) -> PointResult3 {
         let cfl_now = s.current_cfl();
         let r = s.step();
         let cn = ((it + 1) % SAMPLE_EVERY == 0).then(|| monitor(case, s));
-        if !r.is_finite() || r > ROLLBACK_RESIDUAL || cn.is_some_and(|c| !c.is_finite() || c.abs() > MONITOR_LIMIT) {
+        if !r.is_finite()
+            || r > ROLLBACK_RESIDUAL
+            || cn.is_some_and(|c| !c.is_finite() || c.abs() > MONITOR_LIMIT || state_collapsed(&s.grid, &s.u, &case.freestream()))
+        {
             if let Some(back) = ctl.as_mut().and_then(|c| c.fail(it + 1, cfl_now)) {
                 let (snapshot, saved_rule) = back.snapshot;
                 s.restore(&snapshot);
@@ -1298,8 +1338,8 @@ mod tests {
         assert!(at10 as f64 > 1.25 * told_nothing as f64, "cfl 10 stopped at {at10}, cfl 20 at {told_nothing}");
     }
 
-    /// The controller goes back to the last snapshot, to the one before it when the failure follows a restore within `RECENT_RESTORE` iterations, lowers the cap by `CFL_BACKOFF`
-    /// each time, logs it, and gives up after `MAX_ROLLBACKS`.
+    /// The controller goes back to the last snapshot, lowers the cap by `CFL_BACKOFF` each time, logs it, and gives up after `MAX_ROLLBACKS`; a failure that repeats within
+    /// `REPEAT_WITHIN` iterations of a restore goes back past the restored state, to the latest older snapshot taken at a CFL the new cap allows.
     #[test]
     fn the_cfl_controller_goes_back_and_logs() {
         let mut ctl = CflControl::new('a', 50.0, 1.0);
@@ -1314,19 +1354,40 @@ mod tests {
         assert!((again.cap - 24.5).abs() < 1e-12 && (again.cfl - 2.7).abs() < 1e-12);
         // a failure long after it: the last one
         ctl.accept('d', 150, 5.0);
-        let later = ctl.fail(190, 20.0).expect("answers");
+        let later = ctl.fail(400, 20.0).expect("answers");
         assert_eq!((later.snapshot, later.iteration), ('d', 150));
         assert_eq!(ctl.events.len(), 3);
         let e = ctl.events[0];
         assert_eq!((e.iteration, e.restored_to), (120, 100));
         assert!((e.cfl_before - 50.0).abs() < 1e-12 && (e.cfl_after - 35.0).abs() < 1e-12 && (e.cfl_reached - 12.0).abs() < 1e-12);
-        while ctl.fail(500, 3.0).is_some() {}
+        while ctl.fail(5000 + 1000 * ctl.events.len(), 3.0).is_some() {}
         // the floor ends it: the cap never goes below CFL_FLOOR (50 x 0.7^k: 35, 24.5, 17.15, 12.0, 8.4, 5.88)
         assert!(ctl.cap() >= CFL_FLOOR && ctl.cap() * CFL_BACKOFF < CFL_FLOOR, "cap {}", ctl.cap());
         assert!(ctl.events.len() < MAX_ROLLBACKS);
         assert!(!ctl.active());
         let mut off = CflControl::new('a', 50.0, 1.0).with_enabled(false);
         assert!(off.fail(100, 9.0).is_none() && off.events.is_empty());
+    }
+
+    /// The ramp's snapshots are kept: a slowly growing mode that survives a restore to the snapshot before the failure is answered by a restore to a state the lower cap would have
+    /// produced from the start (CFL ramp x1.02 per iteration to a cap of 100, a snapshot every 50 iterations).
+    #[test]
+    fn a_repeated_failure_goes_back_to_the_ramp() {
+        let mut ctl = CflControl::new(0usize, 100.0, 1.0);
+        let cfl = |it: usize| 1.02f64.powi(it as i32).min(100.0);
+        for it in (50..=450).step_by(50) {
+            ctl.accept(it, it, cfl(it));
+        }
+        // the ramp (iterations 0 to 200, below the cap) and the last two are kept
+        let first = ctl.fail(500, 100.0).expect("answers");
+        assert_eq!(first.iteration, 450);
+        // collapse again within a chunk of the restore: back to a state at a CFL of at most 49 (iteration 150: 19.5; 200 is at 52.5)
+        let again = ctl.fail(500, 70.0).expect("answers");
+        assert_eq!((again.snapshot, again.iteration), (150, 150));
+        assert!((again.cap - 49.0).abs() < 1e-9 && (again.cfl - cfl(150)).abs() < 1e-12);
+        // and once more: at most 34.3
+        let third = ctl.fail(300, 49.0).expect("answers");
+        assert!(third.iteration < 150 && cfl(third.iteration) <= 34.3, "{}", third.iteration);
     }
 
     /// A run that goes unstable at a large `cfl_max` is taken back by the CPU runner with a lower one and finishes; the events are in the result and cost iterations.
