@@ -2,7 +2,7 @@
 //! Coarse tier, the Draft tier (`--tier draft`) or the Draft tier's safe subsonic variant (`--tier draft-safe`: `Case3::draft_subsonic`), `GpuRunner3` in f32, to the case's stop rule.
 //!
 //! ```text
-//! cargo run --release -p bowshock-validate --example finned_table -- --tier coarse|draft|draft-safe --mach 2.0 [--anf] [--wedge] [--tw RATIO] [--gf1] [--fin-cells N] [--sub N] [--max-iter N] [--ddadi OMEGA] [--dis-boost DELTA] [--history-every N] [--dt-mode sum|min]
+//! cargo run --release -p bowshock-validate --example finned_table -- --tier coarse|draft|draft-safe --mach 2.0 [--anf] [--wedge] [--tw RATIO] [--gf1] [--fin-cells N] [--chord N] [--te-to-base X (with --anf)] [--sub N] [--max-iter N] [--ddadi OMEGA] [--dis-boost DELTA] [--history-every N] [--dt-mode sum|min]
 //! ```
 //!
 //! One `TABLE` line: tier, Mach number, grid, cells, iterations, stop reason, wall seconds (the whole run, set-up included), ms per iteration, CD total and its parts (coefficients on pi/4
@@ -76,11 +76,16 @@ fn main() -> Result<(), String> {
         // the G-F5 case on the sector: the Army-Navy Basic Finner with the sourced fin section, sea-level Reynolds number of the 30 mm model, grid sized for Mach 3.147
         let flow = WallFlow { re_c: 1.225 * 340.294 * 0.03 / 1.7894e-5, mach_max: 3.147, ks_body, ks_fin, sutherland: 0.368 };
         let tier = if tier_name == "fine" { Tier::Fine(flow) } else { Tier::Coarse(flow) };
+        // `--te-to-base X`: the fin's root trailing edge X calibers ahead of the base plane (0 is flush, the sourced Finner), to see the trailing-edge face's pressure with the fin off the base
+        let mut fins = Case3::anf_fins();
+        if let Some(x) = value("--te-to-base") {
+            fins.te_to_base = x.parse().map_err(|e| format!("--te-to-base: {e}"))?;
+        }
         // `--wedge`: the finless ANF body on the axisymmetric wedge (`Case3::wedge`) instead of the four-fin sector (the friction and base of the body alone)
         case = if args.iter().any(|a| a == "--wedge") {
             Case3::wedge(mach, Case3::anf_body(), 0).with_tier(tier)
         } else {
-            Case3::sector(mach, Case3::anf_body(), Case3::anf_fins(), tier, 0)
+            Case3::sector(mach, Case3::anf_body(), fins, tier, 0)
         };
     }
     if tier_name == "draft-safe" {
