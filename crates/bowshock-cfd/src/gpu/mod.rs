@@ -768,6 +768,11 @@ impl GpuSolver3 {
         Ok(())
     }
 
+    /// `[rho_min, p_min]` of the state over every cell, reduced on the device (see `LazySolver3::state_extrema`): the CFL controller's health check.
+    pub fn state_extrema(&self) -> Result<[f64; 2]> {
+        Ok(on3!(self, s => s.state_extrema()?))
+    }
+
     /// Pressure forces `[Fx, Fz, Mz]` per class reduced on the device (`2 n_classes` triples: all faces, then the faces flagged `cut`); no state download.
     pub fn wall_forces(&self, p_inf: f64) -> Result<Vec<[f64; 3]>> {
         Ok(on3!(self, s => s.wall_forces(p_inf)?))

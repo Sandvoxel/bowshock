@@ -7,7 +7,7 @@
 
 use crate::engine::case3::Case3;
 use crate::engine::run3::{
-    breakdown_from, coefficients, drag_parts_from, forces_from, wall_class, wall_faces, zero_incidence, CflControl, CflEvent, DragParts, LiftBreakdown,
+    breakdown_from, coefficients, collapsed, drag_parts_from, forces_from, wall_class, wall_faces, zero_incidence, CflControl, CflEvent, DragParts, LiftBreakdown,
     LiftForces, PointResult3, StopRule3, Wall, WallForces, MEAN_EVERY, ROLLBACK_RESIDUAL, SAMPLE_EVERY,
 };
 use crate::engine::timing::{record_timing, PointTiming};
@@ -300,7 +300,13 @@ impl GpuRunner3 {
             let t_chunk = Instant::now();
             let (h, mon) = self.gpu.run_monitored(len)?;
             let dt_chunk = t_chunk.elapsed().as_secs_f64();
-            let failure = h.iter().position(|r| !r.is_finite() || *r > ROLLBACK_RESIDUAL).or_else(|| mon.iter().position(|m| m.iter().any(|x| !x.is_finite())));
+            // the state's own health: a wake that collapses towards vacuum keeps a finite residual below the limit (`COLLAPSE_FLOOR`); the failure is then the chunk's last iteration
+            let [rho_min, p_min] = self.gpu.state_extrema()?;
+            let failure = h
+                .iter()
+                .position(|r| !r.is_finite() || *r > ROLLBACK_RESIDUAL)
+                .or_else(|| mon.iter().position(|m| m.iter().any(|x| !x.is_finite())))
+                .or_else(|| collapsed(rho_min, p_min, &case.freestream()).then_some(len - 1));
             if let Some(back) = failure.and_then(|k| ctl.fail(done + k + 1, (cfl_host * ip.growth.powi(k as i32)).min(ctl.cap()))) {
                 let mut cfg = self.host.cfg.clone();
                 if let Scheme3::Implicit(p) = &mut cfg.scheme {

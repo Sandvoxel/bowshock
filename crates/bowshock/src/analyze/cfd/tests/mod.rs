@@ -6,6 +6,7 @@ use bowshock_sim::Vehicle;
 
 use super::*;
 
+mod diag13;
 mod interp;
 mod openrocket;
 mod perf;
