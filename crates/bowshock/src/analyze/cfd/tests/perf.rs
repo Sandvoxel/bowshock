@@ -790,3 +790,28 @@ fn finned_subsonic_failure_path() {
         println!("RUN M {:.2}: {} cells, {} its (stop {}), {:.1} s, {}", r.mach, r.cells, r.iters_exec, r.iters_stop, r.run_s, r.stop);
     }
 }
+
+/// The fins the app's plan gives the example document, for comparing with another harness's helper.
+#[test]
+#[ignore = "prints the example's solved fins"]
+fn example_fins_dump() {
+    let (rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    let d = plan.body.nose.diameter;
+    println!("NOSE D {d}  REF D {}", vehicle.reference_diameter);
+    println!("FINS {:?}", plan.fins);
+    if let Some(f) = &plan.fins {
+        println!(
+            "FINS in calibres: count {} root {:.4} tip {:.4} span {:.4} sweep {:.4} t {:.5} te_to_base {:.4} roughness {} profile {:?}",
+            f.count,
+            f.root_chord / d,
+            f.tip_chord / d,
+            f.span / d,
+            f.sweep / d,
+            f.thickness / d,
+            f.root_te_to_base / d,
+            f.roughness,
+            f.profile
+        );
+    }
+}
