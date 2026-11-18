@@ -100,14 +100,18 @@ pub fn wall_ghost3(w: &Prim3) -> Prim3 {
     [w[0], -w[1], -w[2], -w[3], w[4]]
 }
 
-/// Ghost state of the *viscous* kernels across a no-slip wall: the adiabatic [`wall_ghost3`] for `iso == None`; across an isothermal wall `(rho_g, -u, -v, -w, p)` with the
-/// ghost temperature `T_g = 2 T_w - T` ([`IsoWall::ghost_t`]) at the same pressure, `rho_g = gamma p / T_g`, so that the face value of `T` is `T_w` and the compact
-/// gradient `(T_g - T) / d` is the heat-flux gradient of the wall. (The inviscid fluxes and the implicit Jacobian keep the adiabatic ghost: the wall pressure is what they need.)
+/// Ghost state of the *viscous* kernels across a no-slip wall: the adiabatic [`wall_ghost3`] for `iso == None`; across an isothermal wall the ghost has the temperature
+/// `T_g = 2 T_w - T` exactly (so the face value of `T` is `T_w` and the compact gradient `(T_g - T) / d` is the heat-flux gradient of the wall, whatever the cell temperature:
+/// a first cell in the log layer of a fin stack at Mach 3 is hotter than `2 T_w`, where a positive ghost temperature would not exist). The viscous kernels read the ghost only
+/// through `(u, v, w, T)` and the density of the diffusive spectral radius, so the ghost keeps the density of its cell, `(rho, -u, -v, -w, p_g)`, and carries `T_g` in its pressure
+/// `p_g = rho T_g / gamma = 2 T_w rho / gamma - p` (negative for a cell hotter than `2 T_w`: it is a carrier of `T`, not a pressure). The face density of the implicit diffusion
+/// operator is then that of the cell, as for an adiabatic wall (with `rho_g = gamma p / T_g`, which grows without bound as `T_g -> 0`, the operator would lose its damping exactly
+/// where the wall cell is hottest). The inviscid fluxes and the implicit Jacobian keep the adiabatic ghost: the wall pressure is what they need.
 #[inline]
 pub fn wall_ghost_thermal3(w: &Prim3, iso: Option<IsoWall>) -> Prim3 {
     match iso {
         None => wall_ghost3(w),
-        Some(i) => [GAMMA * w[4] / i.ghost_t(temperature3(w)), -w[1], -w[2], -w[3], w[4]],
+        Some(i) => [w[0], -w[1], -w[2], -w[3], 2.0 * i.t_w * w[0] / GAMMA - w[4]],
     }
 }
 
@@ -932,9 +936,9 @@ pub(crate) mod tests {
         }
     }
 
-    /// An isothermal wall under a uniform fluid at rest at `T = 1.5` with `T_w = 1`: the ghost temperature is `2 T_w - T = 0.5` at the cell's pressure (floored at
-    /// `ISO_GHOST_T_MIN T_w` for a hot cell), the face value of `T` is `T_w`, the wall flux is `kappa(T_w) 2 (T - T_w) / h` (the compact gradient across `h / 2`, the viscosity `mu(T_w)`
-    /// of the face) and nothing else moves; the adiabatic wall of the same state has no flux at all.
+    /// An isothermal wall under a uniform fluid at rest at `T = 1.5` with `T_w = 1`: the ghost has the temperature `2 T_w - T = 0.5` and the density of its cell (also for a cell
+    /// hotter than `2 T_w`, where the carrier pressure is negative and `T_g` is still exact), the face value of `T` is `T_w`, the wall flux is `kappa(T_w) 2 (T - T_w) / h` (the compact
+    /// gradient across `h / 2`, the viscosity `mu(T_w)` of the face) and nothing else moves; the adiabatic wall of the same state has no flux at all.
     #[test]
     fn isothermal_wall_conducts_with_the_wall_viscosity() {
         let (ni, nj, nk) = (3, 5, 2);
@@ -948,9 +952,10 @@ pub(crate) mod tests {
         let iso = crate::sst::WallThermal::Isothermal(t_wall).iso(&VISC).expect("isothermal");
         assert!((iso.mu_w - VISC.mu(t_wall)).abs() < 1e-15);
         let ghost = wall_ghost_thermal3(&cells[0], Some(iso));
-        assert!((temperature3(&ghost) - 0.5).abs() < 1e-14 && ghost[4] == cells[0][4] && ghost[1] == 0.0, "{ghost:?}");
+        assert!((temperature3(&ghost) - 0.5).abs() < 1e-14 && ghost[0] == cells[0][0] && ghost[1] == 0.0, "{ghost:?}");
         let hot = [rho, 0.0, 0.0, 0.0, rho * 3.0 / GAMMA];
-        assert!((temperature3(&wall_ghost_thermal3(&hot, Some(iso))) - crate::sst::ISO_GHOST_T_MIN * t_wall).abs() < 1e-14, "the ghost temperature is floored");
+        let ghost = wall_ghost_thermal3(&hot, Some(iso));
+        assert!((temperature3(&ghost) - (2.0 * t_wall - 3.0)).abs() < 1e-14 && ghost[0] == rho, "the ghost temperature of a hot cell is exact: {ghost:?}");
         assert_eq!(wall_ghost_thermal3(&hot, None), wall_ghost3(&hot));
 
         let run = |iso: Option<IsoWall>| {

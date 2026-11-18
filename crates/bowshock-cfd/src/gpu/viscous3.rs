@@ -15,7 +15,7 @@
 // kernel is the padded primitive record `w` (`[ni + 4, nj + 4, nk + 4]`, `pidx3`) that `assign_ghosts3` fills; the face data of the host (`face_dirs`,
 // `face_cells`) is uploaded once as `VGeo3`.
 
-use crate::sst::{IsoWall, ISO_GHOST_T_MIN};
+use crate::sst::IsoWall;
 use crate::viscous3::{face_cells, face_dirs, face_shape, SideKind, SymSides};
 
 /// Four fields: the momentum and energy components of a viscous flux (the mass component is zero), or the quantities `(u, v, w, T)`.
@@ -120,7 +120,7 @@ fn pad_edge3<F: Fields<Elem = S>>(a: &F, dir: usize, before: usize, after: usize
 impl VGeo3 {
     /// The primitive states of the two sides of every face of `dir` from the padded record `w`: the lower and the upper cell of the face (a domain ghost layer
     /// at the boundary), a no-slip wall side replaced by the wall ghost of the fluid cell on its other side (`face_sides3`): `(rho, -u, -v, -w, p)`, or for an isothermal wall
-    /// `rho = gamma p / T_g` with `T_g = max(2 T_w - T, ISO_GHOST_T_MIN T_w)` (`viscous3::wall_ghost_thermal3`).
+    /// `(rho, -u, -v, -w, p_g)` with `p_g = 2 T_w rho / gamma - p`, which carries `T_g = 2 T_w - T` (`viscous3::wall_ghost_thermal3`).
     fn side_states3(&self, w: &Rec3, dir: usize, n: [usize; 3]) -> (Rec3, Rec3) {
         let mut line = w.clone();
         for a in (0..3).filter(|&a| a != dir) {
@@ -128,14 +128,11 @@ impl VGeo3 {
         }
         let (lo, hi) = (line.slice(dir, 1..n[dir] + 2), line.slice(dir, 2..n[dir] + 3));
         let ghost = |s: &Rec3| -> Rec3 {
-            let rho = match self.iso {
-                None => s[0].clone(),
-                Some(i) => {
-                    let t_g = (c(2.0 * i.t_w) - temperature3(s)).maximum(c(ISO_GHOST_T_MIN * i.t_w));
-                    c(GAMMA) * &s[4] / &t_g
-                }
+            let p = match self.iso {
+                None => s[4].clone(),
+                Some(i) => c(2.0 * i.t_w / GAMMA) * &s[0] - &s[4],
             };
-            [rho, -&s[1], -&s[2], -&s[3], s[4].clone()]
+            [s[0].clone(), -&s[1], -&s[2], -&s[3], p]
         };
         let f = &self.dir[dir];
         (select3(&f.wall[0], &ghost(&hi), &lo), select3(&f.wall[1], &ghost(&lo), &hi))

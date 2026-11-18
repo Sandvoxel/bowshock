@@ -54,22 +54,11 @@ pub enum WallThermal {
     Isothermal(f64),
 }
 
-/// Fraction of `T_w` below which the ghost temperature `2 T_w - T_cell` of an isothermal wall is floored (a first cell hotter than `2 T_w` would give a negative ghost).
-pub const ISO_GHOST_T_MIN: f64 = 0.1;
-
 /// An isothermal wall resolved against the gas law: the wall temperature and the laminar viscosity `mu(T_w)` at it. Kernels take `Option<IsoWall>`, `None` for an adiabatic wall.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IsoWall {
     pub t_w: f64,
     pub mu_w: f64,
-}
-
-impl IsoWall {
-    /// Ghost temperature across the wall from the cell temperature: `2 T_w - T`, floored at [`ISO_GHOST_T_MIN`] `T_w`.
-    #[inline]
-    pub fn ghost_t(&self, t_cell: f64) -> f64 {
-        (2.0 * self.t_w - t_cell).max(ISO_GHOST_T_MIN * self.t_w)
-    }
 }
 
 impl WallThermal {

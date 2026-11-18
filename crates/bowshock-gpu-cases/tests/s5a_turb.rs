@@ -406,8 +406,8 @@ fn cases() -> Vec<Case> {
         false,
         17,
     ));
-    // isothermal walls (`T_w = 1.2`; the noisy states have `T` of 0.7 to 1.9, so the floor of the ghost temperature acts in a few cells): the ghost of the viscous kernels, the wall
-    // viscosity of the face, the law of the wall at the wall temperature (`wall_props`: `rho_w`, `nu_w`) in the wall state, the strain and the `k` pin
+    // isothermal walls (`T_w = 1.2`; the noisy states have `T` of 0.7 to 1.9, so cells hotter than `2 T_w` have a ghost temperature below zero in a few cells): the ghost of the viscous
+    // kernels, the wall viscosity of the face, the law of the wall at the wall temperature (`wall_props`: `rho_w`, `nu_w`) in the wall state, the strain and the `k` pin
     let cold = WallThermal::Isothermal(1.2);
     let block = [SolidBox { i: 3..5, j: 0..3, k: 2..4 }];
     let (s, bc) = box_sides(false);

@@ -309,7 +309,7 @@ fn viscous_kernels_match_cpu() {
             laminar: true,
             thermal: WallThermal::Adiabatic,
         },
-        // isothermal walls (`T_w = 0.8`: the ghost `2 T_w - T` of the noisy states stays above the floor): the ghost, the wall viscosity `mu(T_w)` of the face and the heat flux
+        // isothermal walls (`T_w = 0.8`): the ghost temperature `2 T_w - T`, the wall viscosity `mu(T_w)` of the face and the heat flux
         Case { name: "box, solid blocks, laminar, isothermal".into(), grid: box_grid(), sym: [false; 6], laminar: true, thermal: cold },
         Case {
             name: "wedge, k planes symmetric, mu_t + wall, isothermal".into(),
