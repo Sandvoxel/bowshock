@@ -196,8 +196,9 @@ pub struct WallFlow {
 /// `110.4 K / 288.15 K`: the Sutherland ratio of the ISA at sea level.
 pub const SUTHERLAND_SEA_LEVEL: f64 = 110.4 / 288.15;
 
-/// Cells over the fin root chord of the Draft tier at level 0 (the others: 32).
-pub const DRAFT_CHORD_CELLS: usize = 20;
+/// Cells over the fin root chord of the Draft tier at level 0: 32, as the other tiers (it was 20 in the first Draft; 32 closes the Draft fin-pressure gap for +11 % cells,
+/// DESIGN3D item 41).
+pub const DRAFT_CHORD_CELLS: usize = 32;
 
 /// Window \[iterations\] of the relative drag rule on a wedge ([`Case3::with_drag_tolerance`]; the number of the 2D engine's rule).
 pub const DRAG_REL_WINDOW: usize = 500;
@@ -404,7 +405,7 @@ impl Case3 {
         }
         match (&self.grid.fins, tier) {
             (Some(f), Tier::Draft(..)) => {
-                // growth 1.35 / 1.6 in and outside the layer (1.25 / 1.35), 20 cells over the root chord (32)
+                // growth 1.35 / 1.6 in and outside the layer (1.25 / 1.35), 32 cells over the root chord (as the others)
                 self.grid.fin_stack = Some(FinStack { growth_bl: 1.35, growth_out: 1.6, ..FinStack::from_flow(flow.re_c, flow.mach_max, f.root_chord, y_fin) });
                 self.grid.fin_chord_cells = Some(DRAFT_CHORD_CELLS << level);
             }
