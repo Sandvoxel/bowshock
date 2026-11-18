@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! cargo run --release -p bowshock-validate --example incidence_rans -- [--mach 2.0] [--alpha 2.0] [--body short|anf|example] [--tier lift|coarse|fine|draft] [--fins 1|0]
-//!     [--chord-cells N] [--span-cells N] [--cfl-max X] [--sub-iters N] [--max-iter N] [--precision f32|df32] [--phase between|inplane] [--first-order N] [--fin-yp Y]
+//!     [--chord-cells N] [--fin-section anf|thin] [--span-cells N] [--cfl-max X] [--sub-iters N] [--max-iter N] [--precision f32|df32] [--phase between|inplane] [--first-order N] [--fin-yp Y]
 //!     [--domain half|sector] [--sector-fins gf1|anf|example] [--roe 0|1] [--eps-fix X] [--dt-mode sum|min] [--growth G] [--dt-mode sum|min] [--history-every N]
 //! ```
 //!
@@ -81,7 +81,16 @@ fn main() -> Result<(), String> {
             planform: None,
         })
     } else {
-        (num("--fins", 1.0)? != 0.0).then(Case3::anf_fins)
+        // `--fin-section thin`: the ANF planform with a sharp double wedge of t/c 2 % instead of the blunt-edged 8 % section (the Kutta-condition experiment)
+        let thin_section = value("--fin-section").as_deref() == Some("thin");
+        (num("--fins", 1.0)? != 0.0).then(|| {
+            let f = Case3::anf_fins();
+            if thin_section {
+                Fins3 { thickness: 0.02 * f.root_chord, profile: FinProfile::DoubleWedge, ..f }
+            } else {
+                f
+            }
+        })
     };
     let (prec, pname) = match value("--precision").as_deref().unwrap_or("f32") {
         "f32" => (Precision::F32, "f32"),
@@ -146,8 +155,16 @@ fn main() -> Result<(), String> {
     let tail: Vec<f64> = r.cn_history.iter().filter(|(it, _)| *it + 1000 > r.iterations).map(|&(_, c)| c).collect();
     let (lo, hi) = tail.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), &c| (l.min(c), h.max(c)));
     let w = r.window;
+    let bd = runner.breakdown(&case).map_err(|e| format!("{e}"))?;
+    let split = format!(
+        "{{\"nose\":{:.5},\"afterbody\":{:.5},\"fins\":{:.5},\"x_cp_fins\":{:.4}}}",
+        bd.nose.cn,
+        bd.afterbody.cn,
+        bd.fins().cn,
+        bd.fins().x_cp
+    );
     println!(
-        "INCIDENCE {{\"mach\":{mach},\"alpha_deg\":{alpha},\"tier\":\"{}\",\"cfl_max\":{},\"sub_iters\":{},\"roe\":{},\"precision\":\"{pname}\",\"iterations\":{},\"stop\":\"{:?}\",\"drop_orders\":{:.2},\"cn\":{:.5},\"ca\":{:.5},\"x_cp\":{:.4},\"window\":{},\"cn_last1000_half_range_rel\":{:.4},\"y_plus_max\":{:.1},\"wall_s\":{wall:.1},\"ms_per_iter\":{:.2}}}",
+        "INCIDENCE {{\"mach\":{mach},\"alpha_deg\":{alpha},\"tier\":\"{}\",\"cfl_max\":{},\"sub_iters\":{},\"roe\":{},\"precision\":\"{pname}\",\"iterations\":{},\"stop\":\"{:?}\",\"drop_orders\":{:.2},\"cn\":{:.5},\"ca\":{:.5},\"x_cp\":{:.4},\"cn_parts\":{split},\"window\":{},\"cn_last1000_half_range_rel\":{:.4},\"y_plus_max\":{:.1},\"wall_s\":{wall:.1},\"ms_per_iter\":{:.2}}}",
         value("--tier").unwrap_or_else(|| "lift".into()),
         case.numerics.implicit.cfl_max,
         case.numerics.implicit.sub_iters,

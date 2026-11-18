@@ -261,16 +261,22 @@ const PHASES: [(FinPhase, &str); 2] = [(FinPhase::Between, "between"), (FinPhase
 /// G-F5: the ANF's zero-incidence drag `C_D0` (base included, `pi d^2 / 4`) on the half domain of the base-wake grid with the lift tier, in both roll phases, against
 /// `bowshock_reference::anf::CD0`, 8 %: zero fin cant throughout (the solver models uncanted fins; shots of cant 2 and 4 degrees carry roll-induced drag). Supersonic
 /// (M 1.850 / 2.364 / 2.741 / 2.970: 0.567 / 0.478 / 0.400 / 0.3805) the zero-cant free-flight single fits of DREV-TM-9703 Table VIII (`:cd0[TM9703-T8-cant0]`);
-/// subsonic (M 0.5 / 0.7: 0.467 / 0.479, +-0.015) the 0-degree-roll tunnel points as replotted in ARL-TR-6725 Fig. 5 (`:cd0[ARL6725-F5-wt]`). The pooled Table IX values
+/// subsonic (M 0.766: 0.508, pooled free flight, fin cant 2 degrees, 1 % standard error) the DRDC TM 2002-136 Table 7 point as replotted in ARL-TR-6725 Fig. 5
+/// (`:cd0[TM2002136-T7-ff]`; the cant adds roll-induced drag the uncanted solver does not model). The sting-mounted tunnel points (M 0.5 / 0.7: 0.467 / 0.479, +-0.015,
+/// `anf::CD0_TUNNEL`) are INFO (`:cd0-tunnel`). The pooled Table IX values
 /// (`anf::CD0_POOLED`, cant 0 / 2 / 4 mixed, linearly interpolated to the run's Mach number) are INFO (`:cd0-pooled`). Both the range models (cold wall, about +14 % friction)
 /// and the cant make the zero-cant references a bias source the solver's adiabatic wall does not share.
 #[test]
 #[ignore = "validation: viscous lift tier on the GPU; Euler on the CPU gives INFO (pressure drag only)"]
 fn gate_f5_anf_cd0() {
-    let table: Vec<f64> = anf::CD0.iter().map(|p| p.0).collect();
+    let table: Vec<f64> = anf::CD0.iter().chain(anf::CD0_TUNNEL).map(|p| p.0).collect();
     let keep = machs(&table);
-    let items: Vec<(f64, f64, FinPhase, &str)> =
-        anf::CD0.iter().filter(|p| keep.contains(&p.0)).flat_map(|&(m, cd)| PHASES.iter().map(move |&(ph, name)| (m, cd, ph, name))).collect();
+    let items: Vec<(f64, f64, FinPhase, &str)> = anf::CD0
+        .iter()
+        .chain(anf::CD0_TUNNEL)
+        .filter(|p| keep.contains(&p.0))
+        .flat_map(|&(m, cd)| PHASES.iter().map(move |&(ph, name)| (m, cd, ph, name)))
+        .collect();
     let runs = par_map(&items, |&(m, _, ph, _)| {
         let case = anf_half(m, 0.0, ph, 3.147);
         Session::new(&case).and_then(|mut s| s.run(&case, false)).map(|r| (r, case))
@@ -294,7 +300,8 @@ fn gate_f5_anf_cd0() {
                         r.breakdown.fins().ca
                     ),
                 );
-                let src = if m > 1.0 { "TM9703-T8-cant0" } else { "ARL6725-F5-wt" };
+                let tunnel = anf::CD0_TUNNEL.iter().any(|p| p.0 == m);
+                let src = if m > 1.0 { "TM9703-T8-cant0" } else { "TM2002136-T7-ff" };
                 let id = format!("anf-M{m:.3}-{name}:cd0[{src}]");
                 if m > 1.0 {
                     let pooled = interp(anf::CD0_POOLED, m);
@@ -306,7 +313,13 @@ fn gate_f5_anf_cd0() {
                 }
                 // supersonic: the sourced section (full-chord wedge, DESIGN3D L item 38) reads 9-12 % below the pooled table; against the zero-cant single fits the discrepancy is
                 // documented as KNOWN (cold-wall friction of the range models, fin trailing-edge base, leading-edge resolution; DESIGN3D L item 44), the band is not widened
-                if m > 1.0 {
+                if tunnel {
+                    lines.info(
+                        "G-F5",
+                        &format!("anf-M{m:.3}-{name}:cd0-tunnel"),
+                        &format!("measured {measured:.4} vs ARL-TR-6725 Fig. 5 sting-mounted tunnel {cd:.3} (+-0.015): {:+.1} %", 100.0 * (measured / cd - 1.0)),
+                    );
+                } else if m > 1.0 {
                     lines.check_known(is_gate(kind, &case), "G-F5", &id, measured, cd, Band::Rel(0.08), "DESIGN3D-L-item-38");
                 } else {
                     lines.check(is_gate(kind, &case), "G-F5", &id, measured, cd, Band::Rel(0.08));
@@ -459,7 +472,8 @@ fn the_flat_plate_friction_reference_is_sane() {
 #[test]
 fn the_arcas_and_anf_data_are_wired() {
     assert_eq!(arcas::TRANSONIC.len() + arcas::SUPERSONIC.len(), 10);
-    assert_eq!(anf::CD0.len(), 6);
+    assert_eq!(anf::CD0.len(), 5);
+    assert_eq!(anf::CD0_TUNNEL.len(), 2);
     let (body, scale) = arcas_body_spec().to_internal().expect("arcas body");
     assert!((scale.d_nose - arcas::BODY_DIAMETER).abs() < 1e-12);
     assert!((body.nose_to_largest_area() - 1.0).abs() < 1e-12, "the tube is the largest section");
