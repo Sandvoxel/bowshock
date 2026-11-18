@@ -188,11 +188,16 @@ impl GpuRunner3 {
         let u = self.gpu.state_f64()?;
         let solid: Vec<bool> = g.part.iter().map(|&p| p != bowshock_cfd::grid3::PART_FLUID).collect();
         let mut y_plus_max = 0.0f64;
+        let classes = crate::engine::run3::wall_classes(g);
         for t in bowshock_cfd::viscous3::wall_tractions(g, &solid, &r.dirs, &fluxes[0], &fluxes[1], &fluxes[2]) {
             if t.dir == 0 {
                 continue;
             }
             let [i, j, k] = t.idx;
+            // as the CPU `run3::y_plus_max`: not the fin tips (the cell above a tip face belongs to the far-field fan, `y+` in the thousands by design)
+            if classes.get(&(t.dir, i, j, k)) == Some(&Wall::FinTip) {
+                continue;
+            }
             let f = match t.dir {
                 1 => g.jface[(k * (g.nj + 1) + j) * g.ni + i],
                 _ => g.kface[(k * g.nj + j) * g.ni + i],
