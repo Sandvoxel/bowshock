@@ -239,15 +239,94 @@ pub fn k_wall(u_tau: f64, yp: f64) -> f64 {
     u_tau * u_tau / BETA_STAR.sqrt() * y4 / (y4 + Y_K.powi(4))
 }
 
-/// Wall state of a cell: the automatic smooth treatment for `ks == 0`, the Aupoix (2015) rough-wall state ([`aupoix_wall`], verbatim) for `ks > 0`, whose
-/// fixed point also gives the friction velocity `u_tau^2 = (nu + nu_t,w) U / d`.
-pub fn wall_state(rho: f64, nu: f64, speed: f64, d: f64, ks: f64) -> WallState {
-    if ks > 0.0 {
-        let [k_w, omega_w, nu_t_w] = aupoix_wall(nu, speed, d, ks);
-        WallState { u_tau: ((nu + nu_t_w) * speed / d).sqrt(), k_w, omega_w, mu_t_w: rho * nu_t_w }
-    } else {
-        wall_state_smooth(rho, nu, speed, d)
+/// `d / ks` below which a rough cell keeps the Aupoix state and from [`ROUGH_LAW_FULL`] on takes the rough law of the wall ([`wall_state_rough_law`]), blended between (smoothstep in
+/// `ln(d / ks)`). The Aupoix (2015) wall values are a wall-resolved boundary condition: the wall eddy viscosity `nu_t,w = k_w / omega_w` of the first cell, `k_w+ ~ 3 tanh(..)`,
+/// `omega_w` capped by Menter's smooth value `60 nu / (beta1 d^2)`. Where the cell is far above the roughness (`d >> ks`: the tip cells of a fin, `d = 0.1` calibre against `ks` 8e-4) the
+/// map `u_tau^2 -> (nu + nu_t,w) U / d` has two fixed points and neither is the rough-wall shear: `nu_t,w` grows with `u_tau^2 d^2` and for `Re_d = d U / nu` above
+/// `60 / (beta1 k_w+) ~ 340` the iteration runs to the cap `1e5 nu` (`cf` 0.8, `y+` 1e5: the example rocket's fin-friction runaway), or, with `ks+ < 3` (`k_w+ = 0`), stays on the
+/// laminar branch (`cf` 1e-5, no friction at all). Cells of a wall-resolved grid have `d / ks` of 0.01 to 0.3 (fin stack `y+` 5 to 25, body `y+` 1) and keep the state unchanged.
+pub const ROUGH_LAW_FROM: f64 = 1.0;
+/// `d / ks` from which the rough law of the wall is the whole state of a rough cell: at `y = ks` the shifted law has `U+ = ln(kappa / 0.3) / kappa + 7.8 = 8.56`, Nikuradse's fully rough `8.5`.
+pub const ROUGH_LAW_FULL: f64 = 4.0;
+
+/// Weight of the rough law of the wall in the state of a rough cell at wall distance `d`: 0 up to `d = ROUGH_LAW_FROM ks`, 1 from `ROUGH_LAW_FULL ks`.
+#[inline]
+pub fn rough_law_weight(d: f64, ks: f64) -> f64 {
+    let t = ((d / ks).ln() / (ROUGH_LAW_FULL / ROUGH_LAW_FROM).ln() - (ROUGH_LAW_FROM.ln() / (ROUGH_LAW_FULL / ROUGH_LAW_FROM).ln())).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Roughness shift of the law of the wall `Delta U+(ks+) = ln(1 + 0.3 ks+) / kappa` (Cebeci & Bradshaw's fully rough form with the `1 +` that makes it vanish with `ks+`; the Hama
+/// shift `ln(ks+) / kappa - 3.3` for large `ks+` within 0.1) and its derivative with respect to `ks+`.
+#[inline]
+pub fn rough_shift(ks_plus: f64) -> (f64, f64) {
+    ((1.0 + 0.3 * ks_plus).ln() / KAPPA, 0.3 / (KAPPA * (1.0 + 0.3 * ks_plus)))
+}
+
+/// The friction velocity of the rough law of the wall `U = u_tau (U+(d u_tau / nu) - Delta U+(ks u_tau / nu))` ([`law_uplus`] shifted by [`rough_shift`]): the root of
+/// `F(u) = u (U+ - Delta U+) - U` by Newton iteration from the viscous value `sqrt(nu U / d)`, a step limited to halving `u` and to `u <= U`. For `d >= ks` the bracket is positive
+/// (`kappa y+ > 0.3 ks+`) and the root unique. Zero at rest.
+pub fn u_tau_rough_law(nu: f64, speed: f64, d: f64, ks: f64) -> f64 {
+    if speed <= 0.0 {
+        return 0.0;
     }
+    let mut u = (nu * speed / d).sqrt();
+    for _ in 0..ROUGH_LAW_ITERATIONS {
+        let (yp, kp) = (d * u / nu, ks * u / nu);
+        let (sh, dsh) = rough_shift(kp);
+        let g = law_uplus(yp) - sh;
+        let dg = law_duplus(yp) * d / nu - dsh * ks / nu;
+        u = (u - (u * g - speed) / (g + u * dg)).clamp(0.5 * u, speed);
+    }
+    u
+}
+
+/// Newton iterations of [`u_tau_rough_law`] (the root is found from the viscous value `sqrt(nu U / d)`, far below it for a cell with `d U / nu` of 1e5).
+pub const ROUGH_LAW_ITERATIONS: usize = 16;
+
+/// The rough law of the wall state of a cell: [`wall_state_smooth`] with the friction velocity of [`u_tau_rough_law`] (the wall values of `k` and `omega` of the log layer, the
+/// wall eddy viscosity that makes the discrete shear `(mu + mu_t,w) U / d` the law's `rho u_tau^2`).
+pub fn wall_state_rough_law(rho: f64, nu: f64, speed: f64, d: f64, ks: f64) -> WallState {
+    let u_tau = u_tau_rough_law(nu, speed, d, ks);
+    let yp = d * u_tau / nu;
+    let boost = 1.0 + (OMEGA_BOOST - 1.0) / (1.0 + (yp / Y_BOOST).powi(4));
+    let omega_vis = 6.0 * nu / (BETA1 * d * d) * boost;
+    let omega_log = u_tau / (BETA_STAR.sqrt() * KAPPA * d);
+    let nu_t_w = if speed > 0.0 { (u_tau * u_tau * d / speed - nu).clamp(0.0, NU_T_WALL_MAX * nu) } else { 0.0 };
+    WallState { u_tau, k_w: k_wall(u_tau, yp), omega_w: omega_vis.hypot(omega_log), mu_t_w: rho * nu_t_w }
+}
+
+/// `mu_t,w / mu` of the Aupoix state from which [`wall_state`] takes it for a runaway and starts to replace it by the smooth state (smoothstep up to [`ROUGH_RUNAWAY_FULL`], from where
+/// the smooth state is the whole answer). A wall-resolved rough cell has `mu_t,w / mu` of 0 to 10 (a fully rough one about 30); the runaway goes to the cap of `1e5`.
+pub const ROUGH_RUNAWAY_FROM: f64 = 300.0;
+/// `mu_t,w / mu` of the Aupoix state from which [`wall_state`] returns the smooth state alone (before the rough-law blend of [`rough_law_weight`]).
+pub const ROUGH_RUNAWAY_FULL: f64 = 1000.0;
+
+/// Wall state of a cell: the automatic smooth treatment for `ks == 0`; for `ks > 0` the Aupoix (2015) rough-wall state ([`aupoix_wall`], verbatim; its fixed point also gives the
+/// friction velocity `u_tau^2 = (nu + nu_t,w) U / d`) while the cell is within the roughness layer (`d <= ROUGH_LAW_FROM ks`), the rough law of the wall ([`wall_state_rough_law`]) from
+/// `d = ROUGH_LAW_FULL ks`, and the blend of the two between ([`rough_law_weight`]). Where the Aupoix state has run away (`mu_t,w / mu` from [`ROUGH_RUNAWAY_FROM`]: a cell whose
+/// speed is that of the free stream, the first cell at a leading edge, has no fixed point below the cap) it is replaced by the smooth state, mixed in between, before the blend.
+pub fn wall_state(rho: f64, nu: f64, speed: f64, d: f64, ks: f64) -> WallState {
+    if ks <= 0.0 {
+        return wall_state_smooth(rho, nu, speed, d);
+    }
+    let mix = |w: f64, a: WallState, b: WallState| WallState {
+        u_tau: (1.0 - w) * a.u_tau + w * b.u_tau,
+        k_w: (1.0 - w) * a.k_w + w * b.k_w,
+        omega_w: (1.0 - w) * a.omega_w + w * b.omega_w,
+        mu_t_w: (1.0 - w) * a.mu_t_w + w * b.mu_t_w,
+    };
+    let [k_w, omega_w, nu_t_w] = aupoix_wall(nu, speed, d, ks);
+    let mut state = WallState { u_tau: ((nu + nu_t_w) * speed / d).sqrt(), k_w, omega_w, mu_t_w: rho * nu_t_w };
+    let t = ((nu_t_w / nu - ROUGH_RUNAWAY_FROM) / (ROUGH_RUNAWAY_FULL - ROUGH_RUNAWAY_FROM)).clamp(0.0, 1.0);
+    if t > 0.0 {
+        state = mix(t * t * (3.0 - 2.0 * t), state, wall_state_smooth(rho, nu, speed, d));
+    }
+    let w = rough_law_weight(d, ks);
+    if w > 0.0 {
+        state = mix(w, state, wall_state_rough_law(rho, nu, speed, d, ks));
+    }
+    state
 }
 
 /// The wall state `[k_w, omega_w, mu_t,w]` of every fluid cell with a no-slip face (zero elsewhere), from the primitives `w` (padded), the viscosity `mu`
@@ -1184,24 +1263,56 @@ mod tests {
         }
     }
 
-    /// `ks > 0` takes `turbulence::aupoix_wall` verbatim (state and `mu_t,w = rho nu_t,w`, `u_tau^2 = (nu + nu_t,w) U / d`); a tiny `ks` is its smooth limit,
-    /// the 2D wall state `[0, 60 nu / (beta1 d^2), 0]`; `ks = 0` is the automatic treatment; at rest everything is finite.
+    /// A rough cell within the roughness layer (`d <= ks`) takes `turbulence::aupoix_wall` verbatim (state and `mu_t,w = rho nu_t,w`, `u_tau^2 = (nu + nu_t,w) U / d`); `ks = 0` is the
+    /// automatic treatment, and so is a tiny `ks` (the rough law of a cell far above the roughness: no shift); at rest everything is finite.
     #[test]
-    fn rough_wall_state_is_aupoix_verbatim() {
+    fn rough_wall_state_is_aupoix_verbatim_inside_the_roughness_layer() {
         let (rho, nu, d, speed) = (0.9, 1.0e-6, 2.0e-4, 1.3);
-        for ks in [1e-5, 1e-4, 1e-3] {
+        for ks in [2e-4, 1e-3, 1e-2] {
             let s = wall_state(rho, nu, speed, d, ks);
             let [k_w, om_w, nut] = aupoix_wall(nu, speed, d, ks);
             assert_eq!((s.k_w, s.omega_w, s.mu_t_w), (k_w, om_w, rho * nut));
             assert!((s.u_tau * s.u_tau - (nu + nut) * speed / d).abs() < 1e-15);
         }
-        let tiny = wall_state(rho, nu, speed, d, 1e-12);
-        assert_eq!((tiny.k_w, tiny.mu_t_w), (0.0, 0.0));
-        assert_eq!(tiny.omega_w, 60.0 * nu / (BETA1 * d * d));
-        assert_eq!(wall_state(rho, nu, speed, d, 0.0), wall_state_smooth(rho, nu, speed, d));
-        for ks in [0.0, 1e-4] {
+        let (tiny, smooth) = (wall_state(rho, nu, speed, d, 1e-12), wall_state_smooth(rho, nu, speed, d));
+        for (a, b) in [(tiny.u_tau, smooth.u_tau), (tiny.k_w, smooth.k_w), (tiny.omega_w, smooth.omega_w), (tiny.mu_t_w, smooth.mu_t_w)] {
+            assert!((a - b).abs() <= 1e-6 * b.abs().max(1e-30), "{a} vs {b}");
+        }
+        assert_eq!(wall_state(rho, nu, speed, d, 0.0), smooth);
+        for ks in [0.0, 1e-4, 1e-6] {
             let s = wall_state(rho, nu, 0.0, d, ks);
             assert!(s.u_tau.is_finite() && s.k_w.is_finite() && s.omega_w.is_finite() && s.mu_t_w.is_finite() && s.omega_w > 0.0);
+        }
+    }
+
+    /// The tip cell of the example rocket's fin (`d = 0.1`, `U = 1.1`, `nu = 5.9e-7`, `ks` 60 and 150 um in calibres): far above the roughness the Aupoix state had two fixed points,
+    /// the laminar one (`ks+ < 3`: `cf` 1e-5) and the capped one (`cf` 0.8); the rough law has one, satisfies its own equation, is more than the smooth shear by the roughness shift
+    /// (1.5 to 3 times at these `ks+`), and the blend between the two states is continuous across the band `ks <= d <= 4 ks`.
+    #[test]
+    fn a_rough_cell_far_above_the_roughness_takes_the_rough_law_of_the_wall() {
+        let (rho, nu, speed, d) = (1.0, 5.9e-7, 1.1, 0.1);
+        let smooth = wall_state_smooth(rho, nu, speed, d);
+        for ks in [7.87e-4, 1.6e-3] {
+            let s = wall_state(rho, nu, speed, d, ks);
+            let ratio = s.u_tau * s.u_tau / (smooth.u_tau * smooth.u_tau);
+            assert!(ratio > 1.5 && ratio < 3.0, "ks {ks}: shear {ratio} times the smooth value");
+            let (yp, kp) = (d * s.u_tau / nu, ks * s.u_tau / nu);
+            let u = s.u_tau * (law_uplus(yp) - rough_shift(kp).0);
+            assert!((u - speed).abs() < 1e-9 * speed, "the law's own equation: {u} vs {speed}");
+            assert!(s.mu_t_w < 1e3 * rho * nu, "mu_t,w / mu = {}", s.mu_t_w / (rho * nu));
+            assert!(wall_state(rho, nu, speed, d, ks) == s);
+        }
+        // the blend across the band: ratios of 1.03 in d change no component of the state by more than 30 % (`omega_w` alone falls with `d^-2`: 6 % a step)
+        let ks = 7.87e-4;
+        let mut prev = wall_state(rho, nu, speed, 0.5 * ks, ks);
+        let mut x = 0.5 * ks;
+        while x < 10.0 * ks {
+            x *= 1.03;
+            let s = wall_state(rho, nu, speed, x, ks);
+            for (a, b) in [(s.u_tau, prev.u_tau), (s.k_w, prev.k_w), (s.omega_w, prev.omega_w), (s.mu_t_w, prev.mu_t_w)] {
+                assert!((a - b).abs() < 0.3 * b.abs().max(a.abs()).max(1e-30), "d = {x:e}: {a:e} after {b:e}");
+            }
+            prev = s;
         }
     }
 
