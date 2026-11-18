@@ -409,6 +409,47 @@ fn anf_incidence_case(mach: f64, alpha_deg: f64) -> Case3 {
     resolution(c)
 }
 
+/// The example rocket of the application (`tests/grid_census.rs`: tangent ogive, 4 swept square-section fins) as the sector at zero incidence on the Draft tier (`TIER=coarse`: the
+/// Coarse one), `f` = `Re_c` 1.7e6 and `mach_max` 3: `CASE=rocket` of [`fin_half_incidence_series`] (run it with `ALPHA=0`). One-at-a-time changes of the fins: `PROFILE`
+/// (`square` | `rounded` | `airfoil` | `wedge`), `SWEEP` (calibres, 0.787), `THICK` (calibres, 0.0417), `TIP` (tip chord, calibres, 0.656), `N` (fins, 4).
+fn rocket_sector_case(mach: f64) -> Case3 {
+    let d = 0.0762;
+    let body = BaseBody::cylinder(Body { nose: Nose::TangentOgive { fineness: 0.2286 / d } }, 0.9134 / d);
+    let profile = match std::env::var("PROFILE").as_deref() {
+        Ok("rounded") => FinProfile::Rounded,
+        Ok("airfoil") => FinProfile::Airfoil,
+        Ok("wedge") => FinProfile::DoubleWedge,
+        _ => FinProfile::Square,
+    };
+    let fins = Fins3 {
+        count: env("N", 4u32),
+        root_chord: 0.12 / d,
+        tip_chord: env("TIP", 0.05 / d),
+        span: 0.0762 / d,
+        sweep: env("SWEEP", 0.06 / d),
+        thickness: env("THICK", 0.00318 / d),
+        te_to_base: 0.0,
+        profile,
+        planform: None,
+    };
+    let flow = WallFlow { re_c: 1.7e6, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0, sutherland: bowshock_core::engine::case3::SUTHERLAND_SEA_LEVEL };
+    let tier = match std::env::var("TIER").as_deref() {
+        Ok("coarse") => Tier::Coarse(flow),
+        _ => Tier::draft(flow),
+    };
+    // `FINLESS=1`: the same body without fins on the half domain (uniform azimuthal cells, no fin stack), for what the stack of the sector costs
+    if env("FINLESS", 0u8) != 0 {
+        return Case3::base_half(mach, 0.0, body, None, tier, 0);
+    }
+    let chord = fins.root_chord;
+    let mut c = Case3::sector(mach, body, fins, tier, 0);
+    // `FIN_YP`: the fin stack sized for another `y+` than the tier's (a coarser first cell and growth of the stack)
+    if let Some(yp) = std::env::var("FIN_YP").ok().and_then(|v| v.parse::<f64>().ok()) {
+        c.grid.fin_stack = Some(bowshock_core::engine::grid3::FinStack::from_flow(flow.re_c, flow.mach_max, chord, yp));
+    }
+    c
+}
+
 /// A run as `run3::run3_on` does it (the same stop rule, the same samples) on the solver `Case3::build_solver` gives (the viscous tier, its numerics: the engine's, not
 /// the 2D ones of `build`), recording CA, CN and x_cp every `MEAN_EVERY` iterations: the verdict of the mean-stationary rule and the oscillation of every force over the
 /// last `WINDOW` iterations.
@@ -417,7 +458,7 @@ fn anf_incidence_case(mach: f64, alpha_deg: f64) -> Case3 {
 fn fin_half_incidence_series() {
     use bowshock_core::engine::run3::{lift_forces, StopRule3, MEAN_EVERY, SAMPLE_EVERY};
     let (mach, alpha): (f64, f64) = (env("MACH", 0.8), env("ALPHA", 2.0));
-    let mut case = anf_incidence_case(mach, alpha);
+    let mut case = if std::env::var("CASE").as_deref() == Ok("rocket") { rocket_sector_case(mach) } else { anf_incidence_case(mach, alpha) };
     if let Some(n) = std::env::var("MAX_ITER").ok().and_then(|v| v.parse().ok()) {
         case.numerics.max_iter = n;
     }
@@ -428,6 +469,16 @@ fn fin_half_incidence_series() {
     let imp = &mut case.numerics.implicit;
     (imp.growth, imp.sub_iters) = (env("GROWTH", imp.growth), env("SUB", imp.sub_iters));
     imp.low_mach_precond = env("PRECOND", u8::from(imp.low_mach_precond)) != 0;
+    // the implicit operator: the Roe-type (`1`) or scalar (`0`) dissipation of the left-hand side, its entropy-fix level, the linearised ghost states
+    imp.roe = env("ROE", u8::from(imp.roe)) != 0;
+    imp.eps_fix = env("EPS_FIX", imp.eps_fix);
+    imp.implicit_bc = env("IMPLICIT_BC", u8::from(imp.implicit_bc)) != 0;
+    // the pseudo-time step: `DTMODE=sum` (CFL V / (L_i + L_j + L_k)) or `min` (CFL V / (3 min L_d): sized by the weakest direction)
+    imp.dt_mode = match std::env::var("DTMODE").as_deref() {
+        Ok("min") => DtMode::MinDirection,
+        Ok("sum") => DtMode::Sum,
+        _ => imp.dt_mode,
+    };
     case.numerics.first_order_iters = env("FIRST", case.numerics.first_order_iters);
     let mut s = case.build_solver().expect("solver");
     // `EULER=1`: the same grid and numerics without the viscous terms; `MODEL=laminar`: the viscous terms without the turbulence model
@@ -460,11 +511,27 @@ fn fin_half_incidence_series() {
     let track_from: usize = env("TRACK_FROM", usize::MAX);
     let diag_from: usize = env("DIAG_FROM", 100).min(track_from);
     let mut prev: Vec<bowshock_cfd::gas3::Cons3> = Vec::new();
+    // `ROLLBACK=1`: a snapshot every 50 iterations; a residual that is not finite or above 1e5 returns to the last snapshot with `cfl_max` x0.7 (the CFL controller of the 3D step)
+    let rollback = env("ROLLBACK", 0u8) != 0;
+    let (mut snap, mut snap_it, mut cap, mut rollbacks) = (s.snapshot(), 0usize, case.numerics.implicit.cfl_max, 0usize);
     while it < case.numerics.max_iter {
         if it >= diag_from {
             prev.clone_from(&s.u);
         }
         let r = s.step();
+        if rollback && (!r.is_finite() || r > 1e5) {
+            cap = (cap * 0.7).max(2.0);
+            rollbacks += 1;
+            println!("  rollback {rollbacks}: failure at iteration {}, back to {snap_it} with cfl_max {cap:.1}", it + 1);
+            s.restore(&snap);
+            if let Scheme3::Implicit(p) = &mut s.cfg.scheme {
+                p.cfl_max = cap;
+            }
+            it = snap_it;
+            hist.truncate(snap_it);
+            series.retain(|t| t.0 <= snap_it);
+            continue;
+        }
         if it >= track_from && (it + 1) % env("TRACK_EVERY", 1usize) == 0 {
             track_change(&s, &prev, it + 1, env("TRACK_N", 3));
         }
@@ -477,6 +544,9 @@ fn fin_half_incidence_series() {
             }
         });
         it += 1;
+        if rollback && it % 50 == 0 {
+            (snap, snap_it) = (s.snapshot(), it);
+        }
         if rule.wants_forces(it, MEAN_EVERY) {
             let f = lift_forces(&case, &s);
             rule.observe(it, &f);
@@ -636,7 +706,8 @@ fn blowup_report(s: &Solver3, u: &[bowshock_cfd::gas3::Cons3]) {
 #[ignore]
 fn corner_geometry() {
     use bowshock_cfd::grid3::{PART_DEAD, PART_FLUID};
-    let case = anf_incidence_case(env("MACH", 2.0), env("ALPHA", 2.0));
+    let (mach, alpha) = (env("MACH", 2.0), env("ALPHA", 2.0));
+    let case = if std::env::var("CASE").as_deref() == Ok("rocket") { rocket_sector_case(mach) } else { anf_incidence_case(mach, alpha) };
     let s = case.build_solver().expect("solver");
     describe("half", &s.grid);
     let g = &s.grid;
@@ -686,8 +757,8 @@ fn corner_geometry() {
     println!("   cell            vol       dx       dj       dk       Ai       Aj       Ak  walls   dwall    Vi-   Vi+   Vj-   Vj+   Vk-   Vk+   cos(i j k)");
     let cols = env("TE_COLS", 5usize);
     for i in i_te..=(i_te + cols).min(g.ni - 1) {
-        for j in j_root.saturating_sub(3)..(j_root + 3).min(g.nj) {
-            for k in k_lo.saturating_sub(1)..=(k_hi + 1).min(g.nk - 1) {
+        for j in j_root.saturating_sub(3)..(j_root + env("J_SPAN", 3usize)).min(g.nj) {
+            for k in k_lo.saturating_sub(1)..=(k_hi + env("K_SPAN", 1usize)).min(g.nk - 1) {
                 let c = g.cell(i, j, k);
                 if g.part[c] != PART_FLUID {
                     continue;
