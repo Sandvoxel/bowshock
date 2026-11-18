@@ -196,6 +196,37 @@ fn low_mach_block_matches_cpu() {
     report("S5b low-Mach preconditioning (10 x 8 x 6 box, no-slip block, dead block), 30 iterations from the free stream", &rows);
 }
 
+/// DDADI and the dissipation boost on the viscous block scheme (`ImplicitParams::ddadi`, `lhs_dis_boost`): the laminar box (three directions, no-slip block and dead block cut the
+/// lines, static-pressure outflow) at Mach 0.3 and 2, `omega` 1 and 0.5 with the boost 0.35 and the boost alone, a steep ramp (CFL 3 -> 20; the boost-only rows, whose plain factors cannot take it, CFL 1 -> 4.3) so that the factorisation error is large;
+/// and Mach 0.1 with the low-Mach preconditioning (`D` between the factors where `P` stood). 30 iterations from the free stream, the targets of the plain block scheme.
+#[test]
+fn ddadi_block_matches_cpu() {
+    let g = box_grid();
+    let mut rows = Vec::new();
+    let scheme = |ddadi: Option<f64>, boost: f64, precond: bool| {
+        Scheme3::Implicit(ImplicitParams {
+            line_solve: LineSolve3::Block,
+            // the plain factors (no DDADI) diverge on both sides on the steep ramp at Mach 2: the boost-only rows use a gentle one (CFL 1 -> 4.3)
+            cfl0: if ddadi.is_some() { 3.0 } else { 1.0 },
+            growth: if ddadi.is_some() { 1.25 } else { 1.05 },
+            cfl_max: 20.0,
+            low_mach_precond: precond,
+            ddadi,
+            lhs_dis_boost: boost,
+            ..ImplicitParams::VISCOUS
+        })
+    };
+    for (mach, re, precond) in [(0.3, 500.0, false), (2.0, 2e3, false), (0.1, 500.0, true)] {
+        let v = viscous(Turbulence::Laminar, re);
+        let pre = if precond { " + P" } else { "" };
+        for (tag, ddadi, boost) in [("ddadi 1 + boost 0.35", Some(1.0), 0.35), ("ddadi 0.5 + boost 0.35", Some(0.5), 0.35), ("ddadi 0.5", Some(0.5), 0.0), ("boost 0.35", None, 0.35)] {
+            compare(&format!("laminar M {mach} Re {re} {tag}{pre}"), &g, mach, scheme(ddadi, boost, precond), v, 30, IMPLICIT, &mut rows);
+        }
+    }
+    compare("SST M 0.3 Re 2e3 ddadi 1 + boost 0.35", &g, 0.3, scheme(Some(1.0), 0.35, false), viscous(Turbulence::Sst, 2e3), 30, IMPLICIT, &mut rows);
+    report("S5b DDADI and dissipation boost (10 x 8 x 6 box, no-slip block, dead block), 30 iterations from the free stream", &rows);
+}
+
 /// The viscous single-cell wedge of an axisymmetric body (`Case3::wedge_of`, the G3 ogive-cylinder at Mach 0.5, level 0, SST, the 2D case's numerics: block lines,
 /// the low-Mach correction and preconditioning, characteristic outflow; the body surface is `Grid3::wall_j0`, a no-slip wall of a viscous run) after 20 iterations:
 /// the swirl projection, the tangential wall speed, the no-slip `j = 0` ghost and its Jacobian, `P` with two factors.
@@ -212,11 +243,16 @@ fn viscous_wedge_matches_cpu() {
     let (re_c, sutherland) = (air.density * air.sound_speed * 0.1 / air.viscosity, 110.4 / air.temperature_k);
     let body = BaseBody::cylinder(Body { nose: Nose::TangentOgive { fineness: 3.0 } }, 6.0);
     let case = Case::viscous(0.5, body, 0, Wake::Base, re_c, sutherland, 0.5);
-    let make = |turbulence: Turbulence| -> Solver3 {
+    // `dd`: DDADI (`omega`, `lhs_dis_boost`) on a steep ramp (CFL 3 -> its cap in 10 iterations), `None`: the case's own numerics
+    let make = |turbulence: Turbulence, dd: Option<(f64, f64)>| -> Solver3 {
         let c3 = Case3::wedge_of(&case, 0);
         let mut s = c3.build_solver().unwrap();
         let n = &case.numerics;
         let Scheme::Implicit(p) = n.scheme else { panic!("the viscous numerics are implicit") };
+        let p = match dd {
+            Some((omega, boost)) => ImplicitParams { cfl0: 3.0, growth: 1.25, ddadi: Some(omega), lhs_dis_boost: boost, ..p },
+            None => p,
+        };
         s.cfg.scheme = Scheme3::Implicit(ImplicitParams { line_solve: LineSolve3::Block, ..p });
         s.cfg.limiter = n.limiter;
         s.cfg.low_mach = n.low_mach;
@@ -227,8 +263,11 @@ fn viscous_wedge_matches_cpu() {
         s
     };
     let mut rows = Vec::new();
-    compare_with("G3 wedge laminar M 0.5 block + P", &|| make(Turbulence::Laminar), 20, IMPLICIT, &mut rows);
-    compare_with("G3 wedge SST M 0.5 block + P", &|| make(Turbulence::Sst), 20, IMPLICIT, &mut rows);
+    compare_with("G3 wedge laminar M 0.5 block + P", &|| make(Turbulence::Laminar, None), 20, IMPLICIT, &mut rows);
+    compare_with("G3 wedge SST M 0.5 block + P", &|| make(Turbulence::Sst, None), 20, IMPLICIT, &mut rows);
+    // DDADI on the wedge: two factors, `D = d_i + d_j - P` (the source block on the j diagonal), `D` between them
+    compare_with("G3 wedge laminar M 0.5 ddadi 1 + boost 0.35 + P", &|| make(Turbulence::Laminar, Some((1.0, 0.35))), 20, IMPLICIT, &mut rows);
+    compare_with("G3 wedge SST M 0.5 ddadi 0.5 + boost 0.35 + P", &|| make(Turbulence::Sst, Some((0.5, 0.35))), 20, IMPLICIT, &mut rows);
     report("S5b viscous wedge (G3 ogive-cylinder, level 0), 20 iterations from the free stream", &rows);
 }
 

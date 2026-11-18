@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! cargo run --release -p bowshock-validate --example bench3 -- --case wedge|sector|anf|all [--precision f32,df32] [--solve block,diag]
-//!                                                              [--n N] [--mem] [--no-profile] [--no-perf] [--nk N]
+//!                                                              [--n N] [--mem] [--no-profile] [--no-perf] [--nk N] [--ddadi OMEGA] [--dis-boost DELTA]
 //! ```
 //!
 //! Cases (all at Mach 2, `Scheme3::Implicit`, `cfl_max` 10, `first_order_iters` 0: the timed step is the MUSCL one, from the free stream). The grids are
@@ -92,8 +92,8 @@ impl BenchCase {
         self.grid.ni * self.grid.nj * self.grid.nk
     }
 
-    fn config(&self, solve: LineSolve3) -> Config3 {
-        let params = ImplicitParams { cfl_max: 10.0, line_solve: solve, ..ImplicitParams::DEFAULT };
+    fn config(&self, solve: LineSolve3, o: &Opts) -> Config3 {
+        let params = ImplicitParams { cfl_max: 10.0, line_solve: solve, ddadi: o.ddadi, lhs_dis_boost: o.dis_boost, ..ImplicitParams::DEFAULT };
         Config3 {
             freestream: freestream3(2.0, self.alpha_deg.to_radians()),
             cfl: 0.5,
@@ -253,6 +253,10 @@ struct Opts {
     n: Option<usize>,
     /// The per-stage profile of one step (viscous cases).
     stages: bool,
+    /// `--ddadi <omega>`: the diagonally dominant factorisation (`ImplicitParams::ddadi`).
+    ddadi: Option<f64>,
+    /// `--dis-boost <delta>`: `ImplicitParams::lhs_dis_boost`.
+    dis_boost: f64,
 }
 
 /// The measurement of a solver: first call (compile, trace, 20 iterations), us / iteration of the `iterate_all` replay of `n` (best of 3, after 20 warm-up
@@ -285,7 +289,7 @@ fn bench_combo(case: &BenchCase, precision: (Precision, &'static str), solve: (L
     let n = o.n.unwrap_or(case.n);
     let sampler = if o.mem { MemSampler::start() } else { None };
     let ctx = luma::Context::new().map_err(|e| format!("no GPU context: {e}"))?;
-    let cfg = case.config(solve.0);
+    let cfg = case.config(solve.0, o);
     let mut runner: Option<GpuRunner3> = None;
     let mut plain: Option<GpuSolver3> = None;
     match &case.rans {
@@ -296,6 +300,8 @@ fn bench_combo(case: &BenchCase, precision: (Precision, &'static str), solve: (L
             cfg.first_order_iters = 0;
             if let Scheme3::Implicit(p) = &mut cfg.scheme {
                 p.line_solve = solve.0;
+                p.ddadi = o.ddadi;
+                p.lhs_dis_boost = o.dis_boost;
             }
             r.gpu.set_config(&cfg).map_err(|e| e.to_string())?;
             runner = Some(r);
@@ -526,6 +532,8 @@ fn main() -> Result<(), String> {
         viscous: flag("--viscous"),
         n: value("--n").map(|n| n.parse::<usize>().map_err(|e| format!("--n: {e}"))).transpose()?,
         stages: flag("--stages"),
+        ddadi: value("--ddadi").map(|v| v.parse::<f64>().map_err(|e| format!("--ddadi: {e}"))).transpose()?,
+        dis_boost: value("--dis-boost").map_or(Ok(0.0), |v| v.parse::<f64>().map_err(|e| format!("--dis-boost: {e}")))?,
     };
     let mut cases = Vec::new();
     for c in if which == "all" { vec!["wedge", "sector", "anf"] } else { vec![which.as_str()] } {

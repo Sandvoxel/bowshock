@@ -27,6 +27,13 @@ use bowshock_cfd::sst::{Turbulence, Viscous};
 /// of 20 would buy where it holds. The Lift-tier gates (G-L1, G-F5) ran at 10.
 pub const VISCOUS_3D_CFL_MAX: f64 = 10.0;
 
+/// `cfl_max` of a viscous 3D domain (half domain, sector) with the DDADI line solve ([`Case3::with_tier`]): the rollback controller starts here.
+pub const DDADI_CFL_MAX: f64 = 100.0;
+
+/// [`bowshock_cfd::implicit_params::ImplicitParams::lhs_dis_boost`] of the DDADI line solve on the viscous 3D domains (CPU f64 viscous block: 0.7 is the smallest boost that holds
+/// CFL 100-300 without the period-2 cycle at Mach 2; at Mach 0.5 with the low-Mach preconditioning any value from 0 holds).
+pub const DDADI_DIS_BOOST: f64 = 0.7;
+
 /// Numerical settings and stop-rule tolerances of a 3D run.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Numerics3 {
@@ -457,8 +464,16 @@ impl Case3 {
             // 0.00822 for both: 24-32 % less wall, the same state. One is not stable on the finned sector (see [`Numerics3::viscous`])
             self.numerics.implicit.sub_iters = 2;
         }
-        // the engine's own `cfl_max` (50 below Mach 1, 20 above) with the rollback controller of the runners ([`Numerics3::cfl_control`]); the fixed rule of
-        // [`VISCOUS_3D_CFL_MAX`] is [`Case3::without_cfl_control`]
+        if !matches!(self.grid.domain, Domain3::Wedge { .. }) {
+            // the diagonally dominant factors (DDADI, omega 1) with the implicit face dissipation x 1.7 hold `cfl_max` 100 where the plain factors stop at 14-35 (GPU f32,
+            // Draft example sector: CA within 0.5 % of the plain run's converged value after 800 / 850 iterations at Mach 0.5 / 2.3 against 3100 / 4150, no rollback,
+            // +5.7 % per step on the G-F1 sector; CPU f64 viscous block: a boost of 0.7 removes the period-2 cycle of omega 1 up to CFL 300 at Mach 2, 0.2 at Mach 0.5)
+            self.numerics.implicit.ddadi = Some(1.0);
+            self.numerics.implicit.lhs_dis_boost = DDADI_DIS_BOOST;
+            self.numerics.implicit.cfl_max = DDADI_CFL_MAX;
+        }
+        // the engine's `cfl_max` (100 with DDADI on the 3D domains; on the wedge 50 below Mach 1, 20 above) with the rollback controller of the runners
+        // ([`Numerics3::cfl_control`]); the fixed rule of [`VISCOUS_3D_CFL_MAX`] is [`Case3::without_cfl_control`]
         match (&self.grid.fins, tier) {
             (Some(f), Tier::Draft(..)) => {
                 // growth 1.35 / 1.6 in and outside the layer (1.25 / 1.35), 32 cells over the root chord as the other tiers (`DRAFT_CHORD_CELLS`)
@@ -596,8 +611,9 @@ impl Case3 {
 mod tests {
     use super::*;
 
-    /// Every viscous 3D grid starts at the engine's `cfl_max` (50 below Mach 1, 20 above) with the runners' rollback controller on; [`Case3::without_cfl_control`] takes the fixed
-    /// [`VISCOUS_3D_CFL_MAX`] on a half domain or a sector (not the wedge), Euler keeps its own.
+    /// Every viscous 3D domain (half domain, sector) starts at [`DDADI_CFL_MAX`] with the DDADI line solve and the runners' rollback controller on; the wedge at the engine's
+    /// `cfl_max` (50 below Mach 1, 20 above) with the plain factors; [`Case3::without_cfl_control`] takes the fixed [`VISCOUS_3D_CFL_MAX`] on a half domain or a sector (not the
+    /// wedge), Euler keeps its own.
     #[test]
     fn viscous_3d_grids_start_at_the_engine_cfl_with_the_controller() {
         let flow = WallFlow { re_c: 7.0e5, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0, sutherland: SUTHERLAND_SEA_LEVEL };
@@ -608,13 +624,15 @@ mod tests {
             let sectors: Vec<Case3> =
                 [Tier::Coarse(flow), Tier::draft(flow)].into_iter().map(|tier| Case3::sector(mach, Case3::anf_body(), Case3::anf_fins(), tier, 0)).collect();
             for c in [&half, &finless].into_iter().chain(&sectors) {
-                assert_eq!(cfl(c), engine, "Mach {mach}");
+                assert_eq!(cfl(c), DDADI_CFL_MAX, "Mach {mach}");
+                assert_eq!((c.numerics.implicit.ddadi, c.numerics.implicit.lhs_dis_boost), (Some(1.0), DDADI_DIS_BOOST), "Mach {mach}");
                 assert!(c.numerics.cfl_control);
                 let fixed = c.clone().without_cfl_control();
                 assert_eq!((cfl(&fixed), fixed.numerics.cfl_control), (VISCOUS_3D_CFL_MAX, false), "Mach {mach}");
             }
             let on_wedge = Case3::wedge(mach, Case3::anf_body(), 0).with_tier(Tier::Coarse(flow));
             assert_eq!(cfl(&on_wedge), engine, "wedge at Mach {mach}");
+            assert_eq!(on_wedge.numerics.implicit.ddadi, None, "the wedge keeps the plain factors");
             assert_eq!(cfl(&on_wedge.clone().without_cfl_control()), engine, "the wedge keeps the engine's limit");
             let euler = Case3::base_half(mach, 0.0, Case3::anf_body(), Some(Case3::anf_fins()), Tier::Euler, 0);
             assert_eq!(cfl(&euler), Numerics3::auto(mach, 0).implicit.cfl_max, "Euler half domain at Mach {mach}");
