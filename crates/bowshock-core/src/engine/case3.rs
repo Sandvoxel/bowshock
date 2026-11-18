@@ -391,9 +391,15 @@ impl Case3 {
         self.viscous = Some(Viscous { re_c: flow.re_c, sutherland: flow.sutherland, turbulence: Turbulence::Sst, wall_i_start: 0, roughness: 0.0 });
         self.numerics = Numerics3::viscous(self.mach, level);
         if matches!(self.grid.domain, Domain3::Wedge { .. }) && self.mach < 1.0 {
-            // one factored solve per iteration on a subsonic wedge (the finned domains and the supersonic wedges keep three: Arcas fins-off Mach 2.3 and TP-2005 Mach 1.65
-            // at the medium level go non-finite with one): same state, 20-25 % cheaper (DESIGN3D item 35)
+            // one factored solve per iteration on a subsonic wedge (the supersonic wedges keep three: Arcas fins-off Mach 2.3 and TP-2005 Mach 1.65 at the medium level go
+            // non-finite with one; the finned domains take two, below): same state, 20-25 % cheaper (DESIGN3D item 35)
             self.numerics.implicit.sub_iters = 1;
+        }
+        if self.grid.fins.is_some() {
+            // two factored solves per iteration on a finned domain (GPU, G-F1 Coarse sector, 677 k cells, f32): Mach 0.5 6800 iterations in 59 s against 7100 in 87 s with three,
+            // CD 0.24575 against 0.24584, fin friction 0.01342 against 0.01343; Mach 2 7000 iterations in 57 s against 6940 in 76 s, CD 0.34993 against 0.35017, fin friction
+            // 0.00822 for both: 24-32 % less wall, the same state. One is not stable on the finned sector (see [`Numerics3::viscous`])
+            self.numerics.implicit.sub_iters = 2;
         }
         if matches!(self.grid.domain, Domain3::Half { .. }) {
             self.numerics.implicit.cfl_max = self.numerics.implicit.cfl_max.min(HALF_DOMAIN_CFL_MAX);
