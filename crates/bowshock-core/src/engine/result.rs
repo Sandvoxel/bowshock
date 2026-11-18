@@ -15,6 +15,9 @@ pub enum StopReason {
     /// The monitored total drag oscillates in a bounded limit cycle whose mean is stationary; the run stopped where the drag
     /// crosses that mean.
     MeanStationary,
+    /// The monitored forces converge geometrically and the extrapolated remaining change is below the tolerance (the 3D runners' drift rule,
+    /// [`crate::engine::case3::Numerics3::drift_block`]).
+    Settled,
     /// The residual stopped decreasing.
     ResidualPlateau,
     /// The iteration cap was reached.
@@ -32,6 +35,7 @@ impl fmt::Display for StopReason {
             StopReason::CdStationary => "CD stationary",
             StopReason::BasePressureStationary => "base pressure stationary",
             StopReason::MeanStationary => "mean stationary",
+            StopReason::Settled => "settled",
             StopReason::ResidualPlateau => "residual plateau",
             StopReason::MaxIterations => "max iterations",
             StopReason::NonFinite => "non-finite residual",

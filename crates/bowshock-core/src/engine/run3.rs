@@ -844,6 +844,9 @@ pub struct StopRule3 {
     /// `cfl_ref` of the numerics and the CFL in force (`NaN`: not told): the windows and floors are multiplied by `max(1, cfl_ref / cfl_now)`.
     cfl_ref: f64,
     cfl_now: f64,
+    /// The extrapolated-drift rule ([`crate::engine::case3::Numerics3::drift_block`]) and the iteration after which it is fed (past the first-order start-up).
+    drift: Drift,
+    drift_from: usize,
 }
 
 impl StopRule3 {
@@ -869,6 +872,8 @@ impl StopRule3 {
             last_window: None,
             cfl_ref: n.cfl_ref,
             cfl_now: f64::NAN,
+            drift: Drift::new(n.drift_block, n.drift_tol, case.alpha.abs() >= 1e-12 && matches!(case.grid.domain, Domain3::Half { .. })),
+            drift_from: if warm { 0 } else { n.first_order_iters.max(20) } + 2 * SAMPLE_EVERY,
         }
     }
 
@@ -887,22 +892,31 @@ impl StopRule3 {
         }
     }
 
-    /// Whether the runner is to feed [`StopRule3::observe`] after `iterations` iterations: the mean rule is on, the iteration is a multiple of `every` and
-    /// past `mean_from` (scaled with the CFL).
+    /// Whether the runner is to feed [`StopRule3::observe`] after `iterations` iterations: the iteration is a multiple of `every` and the mean rule is on and past
+    /// `mean_from` (scaled with the CFL), or the drift rule is on and past the start-up.
     pub fn wants_forces(&self, iterations: usize, every: usize) -> bool {
-        self.mean_window > 0 && iterations as f64 > self.mean_from as f64 * self.scale() && iterations.is_multiple_of(every)
+        let mean = self.mean_window > 0 && iterations as f64 > self.mean_from as f64 * self.scale();
+        let drift = self.drift.on() && iterations > self.drift_from;
+        (mean || drift) && iterations.is_multiple_of(every)
     }
 
     /// The force coefficients `f` of the state after `iterations` iterations (see [`StopRule3::wants_forces`]); call before [`StopRule3::check`] of the same
     /// iteration. Whether the means of two consecutive windows of `mean_window` iterations agree ([`window_means`]) is decided here and ends the run, as
-    /// [`StopReason::MeanStationary`], at the next `check` (after the residual and range rules).
+    /// [`StopReason::MeanStationary`], at the next `check` (after the residual and range rules); so is the drift rule's [`StopReason::Settled`].
     pub fn observe(&mut self, iterations: usize, f: &LiftForces) {
-        if self.mean_window == 0 || !(f.ca.is_finite() && f.cn.is_finite()) {
+        if !(f.ca.is_finite() && f.cn.is_finite()) {
             return;
         }
         let cm = if self.incidence && f.x_cp.is_finite() { f.cn * f.x_cp } else { 0.0 };
-        self.samples.push((iterations, [f.ca, f.cn, cm]));
+        if self.drift.on() && iterations > self.drift_from {
+            let cfl = if self.cfl_now > 0.0 { self.cfl_now } else { self.cfl_ref.max(1.0) };
+            self.drift.feed(iterations, cfl, [f.ca, f.cn, cm]);
+        }
         let s = self.scale();
+        if self.mean_window == 0 || iterations as f64 <= self.mean_from as f64 * s {
+            return;
+        }
+        self.samples.push((iterations, [f.ca, f.cn, cm]));
         let tol = if self.incidence { self.incidence_tol } else { self.mean_tol };
         if let Some((mean, agree)) = window_means(&self.samples, (self.mean_window as f64 * s).round() as usize, (self.mean_from as f64 * s) as usize, tol, self.incidence) {
             self.last_window = Some(mean);
@@ -970,6 +984,9 @@ impl StopRule3 {
         if self.mean_ready {
             return stop(self, StopReason::MeanStationary);
         }
+        if self.drift.settled {
+            return stop(self, StopReason::Settled);
+        }
         None
     }
 
@@ -1000,6 +1017,74 @@ impl StopRule3 {
             cp_base: f64::NAN,
             cfl_events: Vec::new(),
         }
+    }
+}
+
+/// The extrapolated-drift rule of [`StopRule3`] ([`crate::engine::case3::Numerics3::drift_block`]): block means of the judged coefficients over `block` summed CFL, and from
+/// the last three of them the ratio `rho` of a geometric tail and the remaining change `e = (m3 - m2) rho / (1 - rho)`.
+#[derive(Clone, Debug)]
+struct Drift {
+    block: f64,
+    tol: f64,
+    /// The judged coefficients of `[CA, CN, CN x_cp]`: CA at zero incidence, CN and the moment at incidence.
+    judged: [bool; 3],
+    last_it: Option<usize>,
+    /// Summed CFL, sums and count of the block being filled.
+    summed: f64,
+    acc: [f64; 3],
+    n: usize,
+    means: Vec<[f64; 3]>,
+    prev_rho: [Option<f64>; 3],
+    settled: bool,
+}
+
+impl Drift {
+    fn new(block: f64, tol: f64, incidence: bool) -> Drift {
+        let judged = if incidence { [false, true, true] } else { [true, false, false] };
+        Drift { block, tol, judged, last_it: None, summed: 0.0, acc: [0.0; 3], n: 0, means: Vec::new(), prev_rho: [None; 3], settled: false }
+    }
+
+    fn on(&self) -> bool {
+        self.block > 0.0
+    }
+
+    /// The coefficients `x` of the state after `it` iterations, `cfl` the CFL of the iterations since the last sample. A sample at or before the last one (the runner went
+    /// back to a snapshot) starts the blocks again.
+    fn feed(&mut self, it: usize, cfl: f64, x: [f64; 3]) {
+        let Some(last) = self.last_it.filter(|&l| it > l) else {
+            *self = Drift { last_it: Some(it), ..Drift::new(self.block, self.tol, self.judged[1]) };
+            return;
+        };
+        self.last_it = Some(it);
+        self.summed += cfl * (it - last) as f64;
+        for c in 0..3 {
+            self.acc[c] += x[c];
+        }
+        self.n += 1;
+        if self.summed >= self.block && self.n >= 3 {
+            self.means.push(self.acc.map(|a| a / self.n as f64));
+            (self.summed, self.acc, self.n) = (0.0, [0.0; 3], 0);
+            self.judge();
+        }
+    }
+
+    /// Whether every judged coefficient has settled: its last two block changes are both below a fifth of the tolerance, or the tail is geometric (`0 < rho < 0.95`,
+    /// within 0.15 of the previous block's `rho`) with an extrapolated remaining change within the tolerance.
+    fn judge(&mut self) {
+        let Some(&[m1, m2, m3]) = self.means.last_chunk::<3>() else { return };
+        let mut settled = true;
+        for c in (0..3).filter(|&c| self.judged[c]) {
+            let (d1, d2) = (m2[c] - m1[c], m3[c] - m2[c]);
+            let tol = self.tol * m3[c].abs() + 1e-4;
+            let flat = d1.abs() <= 0.2 * tol && d2.abs() <= 0.2 * tol;
+            let rho = d2 / d1;
+            let geometric = rho > 0.0 && rho < 0.95;
+            let stable = self.prev_rho[c].is_some_and(|p| (rho - p).abs() < 0.15);
+            let small = geometric && (d2 * rho / (1.0 - rho)).abs() <= tol;
+            self.prev_rho[c] = geometric.then_some(rho);
+            settled &= flat || (geometric && stable && small);
+        }
+        self.settled = settled;
     }
 }
 
@@ -1256,5 +1341,47 @@ mod tests {
         for w in r.cfl_events.windows(2) {
             assert!(w[1].cfl_before == w[0].cfl_after, "the cap only goes down, one step at a time: {:?}", r.cfl_events);
         }
+    }
+
+    /// Feeds `x(it)` every `MEAN_EVERY` iterations from 300 at CFL `cfl`; the iteration at which the drift rule settles, if it does by `max_it`.
+    fn drift_stop(cfl: f64, max_it: usize, x: impl Fn(usize) -> f64) -> Option<usize> {
+        let mut d = Drift::new(10_000.0, 5e-3, false);
+        (300..=max_it).step_by(MEAN_EVERY).find(|&it| {
+            d.feed(it, cfl, [x(it), 0.0, 0.0]);
+            d.settled
+        })
+    }
+
+    #[test]
+    fn the_drift_rule_stops_a_geometric_tail_within_its_tolerance_of_the_limit() {
+        // CA -> 0.35 with an e-fold of 50 000 summed CFL (2 500 iterations at CFL 20), the G-F1 sector's slow mode, 10 % away at the start
+        let ca = |it: usize| 0.35 * (1.0 + 0.1 * (-(it as f64) * 20.0 / 50_000.0).exp());
+        let stop = drift_stop(20.0, 20_000, ca).expect("a geometric tail settles");
+        let err = (ca(stop) / 0.35 - 1.0).abs();
+        assert!(err < 6e-3, "stopped at {stop} with {err:.4} left");
+        assert!(stop < 9_000, "stopped late: {stop}");
+        // the same tail at CFL 100 is the same stretch of pseudo-time: five times fewer iterations
+        let fast = |it: usize| 0.35 * (1.0 + 0.1 * (-(it as f64) * 100.0 / 50_000.0).exp());
+        let stop100 = drift_stop(100.0, 20_000, fast).expect("settles");
+        assert!(stop100 * 4 < stop, "{stop100} vs {stop}");
+    }
+
+    #[test]
+    fn the_drift_rule_does_not_stop_an_oscillation_or_a_steady_drift() {
+        // a limit cycle of 4 % around a fixed mean whose period (3 blocks) aliases the block means into an oscillation: rho < 0, never settled by the drift rule
+        assert_eq!(drift_stop(20.0, 20_000, |it| 0.4 * (1.0 + 0.04 * (it as f64 * std::f64::consts::TAU / 1_500.0).sin())), None);
+        // a linear drift: rho = 1
+        assert_eq!(drift_stop(20.0, 20_000, |it| 0.4 + 1e-6 * it as f64), None);
+    }
+
+    #[test]
+    fn a_rollback_starts_the_drift_blocks_again() {
+        let mut d = Drift::new(10_000.0, 5e-3, false);
+        for it in (300..=3_000).step_by(MEAN_EVERY) {
+            d.feed(it, 20.0, [0.4, 0.0, 0.0]);
+        }
+        assert!(d.settled, "a flat CA settles");
+        d.feed(2_000, 14.0, [0.4, 0.0, 0.0]);
+        assert!(!d.settled && d.means.is_empty(), "the run went back: no block survives");
     }
 }

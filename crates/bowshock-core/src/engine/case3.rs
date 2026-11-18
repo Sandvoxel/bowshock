@@ -67,6 +67,14 @@ pub struct Numerics3 {
     /// The runners answer a failed stretch (a residual that is not finite or above 1e5, a non-finite force monitor) by going back to the last snapshot with `cfl_max` x 0.7, down
     /// to `run3::CFL_FLOOR` (`run3::CflControl`): the default, with the engine's `cfl_max`. Off: no rollback, and [`Case3::without_cfl_control`] takes the fixed [`VISCOUS_3D_CFL_MAX`].
     pub cfl_control: bool,
+    /// Extrapolated-drift rule ([`crate::engine::run3::StopRule3`], [`crate::engine::result::StopReason::Settled`]): the judged coefficients (CA; at incidence CN and the moment about the
+    /// nose) are averaged over blocks of `drift_block` summed CFL (sum over the iterations of the CFL in force: the settling of a run is pseudo-time, so a block is the same stretch of it at
+    /// any CFL); three consecutive block means `m1, m2, m3` give the ratio `rho = (m3 - m2) / (m2 - m1)` of a geometric tail and the remaining change `e = (m3 - m2) rho / (1 - rho)`.
+    /// The run stops when, for every judged coefficient, `0 < rho < 0.95`, `rho` is within 0.15 of the previous block's and `|e| <= drift_tol |m3| + 1e-4`. Replayed offline on the
+    /// stored G-F1 sector histories (Mach 0.5 and 2, CFL 20-50, 8 000-12 000 iterations; blocks of 500 iterations at CFL 20, `drift_tol` 5e-3): it stops after 2 000-6 000 iterations
+    /// (mean 4 800, against 6 000-8 000 for the mean rule), 0.2-1.1 % from the converged CA. `0`: off.
+    pub drift_block: f64,
+    pub drift_tol: f64,
 }
 
 impl Numerics3 {
@@ -98,6 +106,8 @@ impl Numerics3 {
             pressure_outflow: false,
             cfl_ref: 10.0,
             cfl_control: true,
+            drift_block: 0.0,
+            drift_tol: 5e-3,
         }
     }
 
@@ -153,6 +163,8 @@ impl Numerics3 {
             cfl_ref: 20.0,
             cfl_control: true,
             pressure_outflow: false,
+            drift_block: 10_000.0,
+            drift_tol: 5e-3,
         }
     }
 

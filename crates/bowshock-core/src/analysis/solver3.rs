@@ -287,7 +287,7 @@ fn quality3(stop: StopReason, mach: f64, min_rho: f64, min_p: f64, finite: bool,
     }
     match stop {
         StopReason::ResidualDrop => Quality::Converged,
-        StopReason::CdStationary | StopReason::MeanStationary | StopReason::BasePressureStationary | StopReason::ResidualPlateau => Quality::Stationary,
+        StopReason::CdStationary | StopReason::MeanStationary | StopReason::Settled | StopReason::BasePressureStationary | StopReason::ResidualPlateau => Quality::Stationary,
         StopReason::MaxIterations => Quality::Stalled,
         StopReason::NonFinite | StopReason::Cancelled => Quality::Failed,
     }
