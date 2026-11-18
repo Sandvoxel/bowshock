@@ -64,8 +64,26 @@ fn connect() -> (Remote, std::thread::JoinHandle<()>) {
     (remote, server)
 }
 
+/// The JSON of `x` with the residual drop rounded to 9 digits: the 3D CPU solver's residual is a parallel sum, whose last bits depend on how the threads were scheduled
+/// (the points and everything else are compared exactly).
 fn json<T: serde::Serialize>(x: &T) -> String {
-    serde_json::to_string(x).unwrap()
+    fn round(v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::Object(m) => {
+                for (k, v) in m.iter_mut() {
+                    match (k.as_str(), v.as_f64()) {
+                        ("residual_drop_orders", Some(x)) => *v = serde_json::json!((x * 1e9).round() / 1e9),
+                        _ => round(v),
+                    }
+                }
+            }
+            serde_json::Value::Array(a) => a.iter_mut().for_each(round),
+            _ => {}
+        }
+    }
+    let mut v = serde_json::to_value(x).unwrap();
+    round(&mut v);
+    serde_json::to_string(&v).unwrap()
 }
 
 #[test]

@@ -1,38 +1,47 @@
-# The CFD solve screens: a solve in progress, cancelled with its solved points on offer, finished, the 3D stability solve in
-# progress and finished. A real solve takes minutes and the driver waits for running tasks, so the solves are scripted
-# (`analyze/solve_demo.rs`: the same events the worker sends, made-up numbers; the real stream is covered by the ignored tests
-# of `analyze/cfd.rs`):
-#   BOWSHOCK_CFD_DEMO=mid,done,lift-mid,lift-done cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/cfd-progress.drive out/cfd-progress
+# The CFD solve screens, one solve that does the drag table and the 3D angles: in progress at a drag node, cancelled with its solved points
+# on offer, the idle screen with the one action, finished with its provenance, in progress at an angle node, cancelled in the angles with
+# the Mach numbers solved at both angles on offer. A real solve takes minutes and the driver waits for running tasks, so the solves are
+# scripted (`analyze/solve_demo.rs`: the same events the worker sends, made-up numbers; the real stream is covered by the ignored tests
+# of `analyze/cfd/tests`):
+#   ICED_TEST_BACKEND=wgpu BOWSHOCK_CFD_DEMO=mid,done,flow3d-mid,mid cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/cfd-progress.drive out/cfd-progress
 viewport 1300x800
 click "Analyze"
 click "CFD table"
 move (100, 700)
 move (102, 702)
-screenshot solve-mid-dark.png
+screenshot solve-drag-node-dark.png
 
 # Cancel with four points solved: the points are on offer.
 click "Cancel"
 move (100, 700)
 move (102, 702)
 screenshot solve-stopped-dark.png
-click "Discard"
 
-# A whole solve, finished: the summary row.
+# Discard: the idle screen, the one action (Re-solve) and the option to leave the 3D angles out.
+click "Discard"
+move (100, 700)
+move (102, 702)
+screenshot idle-dark.png
+
+# A whole solve, finished: the summary row and the provenance.
 click "Re-solve"
 move (100, 700)
 move (102, 702)
 screenshot solve-done-dark.png
 
-# The 3D stability solve in progress and finished.
-click "Solve stability (3D)"
+# The same solve in progress at an angle node (the drag table is in; `flow3d-mid` shows the 3D fixture flow at it, `angle-mid` has none), then cancelled in the angles: the Mach numbers with both angles are on offer.
+click "Re-solve"
 move (100, 700)
 move (102, 702)
-screenshot solve-3d-mid-dark.png
+screenshot solve-angle-node-dark.png
 click "Cancel"
-click "Solve stability (3D)"
 move (100, 700)
 move (102, 702)
-screenshot solve-3d-done-dark.png
+screenshot solve-angles-stopped-dark.png
+click "Keep 10 points · 3D at 4 Mach"
+move (100, 700)
+move (102, 702)
+screenshot solve-angles-kept-dark.png
 
 # The same mid-solve screen in the light theme.
 click "Re-solve"

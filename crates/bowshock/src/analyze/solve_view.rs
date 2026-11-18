@@ -5,7 +5,7 @@
 //!
 //! * the headline (`Mach 0.80 · point 4 of 10`), the overall bar with the elapsed time and the time left from the measured
 //!   throughput ("estimating…" until two points are done), and where it runs (the GPU's name, or CPU with the reason);
-//! * the curve: the zero-lift Cd(Mach) of the drag table, or CN(Mach) at each angle of the 3D solve, with the solved points
+//! * the curve of the part that is running: Cd(Mach) of the drag table, then CN(Mach) at each angle, with the solved points
 //!   solid (a warning triangle where a point did not settle), the points to come hollow on a dashed line at the reference
 //!   method's value, and the point in flight ringed in `accent` at the value the solver's monitor has now;
 //! * the point in flight: its iteration, how far the residual has dropped, the monitor's value and its range against the stop
@@ -22,7 +22,7 @@ use bowshock_model::CfdGrid;
 
 use super::compute::Data;
 use super::flow_view::{Emphasis, Msg};
-use super::solve::{duration_text, eta_text, thousands, Kind, Live, MachineRow, MachineState, Outcome, Slot, Tracker, Unit};
+use super::solve::{duration_text, eta_text, thousands, Live, MachineRow, MachineState, Outcome, Phase, Slot, Tracker, Unit};
 use super::{Message, State, Stopped};
 use crate::app::{ui, Ctx};
 use crate::theme::{self, MONO, SANS_SEMIBOLD};
@@ -55,7 +55,7 @@ struct Shown<'a> {
 
 fn shown(state: &State) -> Option<Shown<'_>> {
     let cfd = &state.cfd;
-    if let Some(s) = cfd.lift_solving.as_ref().or(cfd.solving.as_ref()) {
+    if let Some(s) = cfd.solving.as_ref() {
         return Some(Shown {
             tracker: &s.tracker,
             elapsed: s.started.elapsed().as_secs_f64().max(s.tracker.clock()),
@@ -75,10 +75,19 @@ pub fn active(state: &State) -> bool {
     state.method == super::Method::CfdTable && super::uses_cfd(state.analysis) && shown(state).is_some()
 }
 
-fn name(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Drag => "Cd",
-        Kind::Stability => "CN",
+fn name(phase: Phase) -> &'static str {
+    match phase {
+        Phase::Drag => "Cd",
+        Phase::Stability => "CN",
+    }
+}
+
+/// The phase a unit is in.
+fn phase_of(unit: &Unit) -> Phase {
+    if unit.alpha_deg.is_some() {
+        Phase::Stability
+    } else {
+        Phase::Drag
     }
 }
 
@@ -88,20 +97,37 @@ fn headline(t: &Tracker) -> String {
     let mut lives = t.lives();
     match (lives.next(), lives.next()) {
         (Some((u, _)), None) => {
-            let at = t.units().iter().position(|x| x == u).map_or(1, |i| i + 1);
+            // counted among the units of its own part of the solve: drag points, then 3D runs
+            let same: Vec<&Unit> = t.units().iter().filter(|x| phase_of(x) == phase_of(u)).collect();
+            let at = same.iter().position(|x| *x == u).map_or(1, |i| i + 1);
             match u.alpha_deg {
-                Some(a) => format!("Mach {:.2} · {a:.0}° · run {at} of {}", u.mach, t.total()),
-                None => format!("Mach {:.2} · point {at} of {}", u.mach, t.total()),
+                Some(a) => format!("Mach {:.2} · {a:.0}° · run {at} of {}", u.mach, same.len()),
+                None => format!("Mach {:.2} · point {at} of {}", u.mach, same.len()),
             }
         }
         (Some(_), Some(_)) => {
             let n = t.lives().count();
-            let what = if t.kind() == Kind::Drag { "points" } else { "runs" };
+            let what = if t.phase() == Phase::Drag { "points" } else { "runs" };
             format!("{n} {what} running · {} of {} done", t.done_count(), t.total())
         }
         (None, _) if t.done_count() == 0 => "Starting the solver".to_string(),
         (None, _) => format!("{} of {} done", t.done_count(), t.total()),
     }
+}
+
+/// `4 of 10 Mach points`, with the 3D runs when the solve has them: how much of the solve is in.
+pub(super) fn how_far(t: &Tracker) -> String {
+    super::cfd::progress_text(counts(t).0, counts(t).1)
+}
+
+/// The toast's form of [`how_far`].
+pub(super) fn how_far_brief(t: &Tracker) -> String {
+    super::cfd::progress_brief(counts(t).0, counts(t).1)
+}
+
+/// (drag units done, in all), (angle units done, in all).
+fn counts(t: &Tracker) -> ((usize, usize), (usize, usize)) {
+    ((t.drag_done(), t.drag_count()), (t.done_count() - t.drag_done(), t.total() - t.drag_count()))
 }
 
 /// `1 min 12 s elapsed`, and `about 1 min 40 s left` or `estimating…`.
@@ -160,6 +186,7 @@ fn machine_lines<'a>(t: &Tracker, running: bool) -> Vec<Element<'a, Message>> {
 fn grid_name(grid: CfdGrid) -> &'static str {
     match grid {
         CfdGrid::Coarse => "coarse grid",
+        CfdGrid::Draft => "draft grid",
         CfdGrid::Medium => "medium grid",
     }
 }
@@ -203,7 +230,7 @@ pub fn compact(state: &State) -> Vec<Element<'_, Message>> {
     let t = s.tracker;
     let mut out: Vec<Element<'_, Message>> = Vec::new();
     if let Some(stopped) = s.stopped {
-        out.push(text(format!("Stopped after {} of {} points", t.done_count(), t.total())).size(TEXT_BODY).boxed());
+        out.push(text(format!("Stopped after {}", how_far(t))).size(TEXT_BODY).boxed());
         out.push(muted(format!("{} on {}", duration_text(stopped.seconds), device(t)), 12.0));
         return out;
     }
@@ -231,8 +258,8 @@ fn fallback_chip<'a>(t: &Tracker) -> Option<Element<'a, Message>> {
 
 /// The reference curve: the Cd(Mach) of the method the plots show, for the drag table; `None` for the 3D solve (the plots have no
 /// CN(Mach) of another method) and when there is no Mach sweep.
-fn reference(state: &State, ctx: &Ctx, kind: Kind) -> Option<(String, Vec<(f64, f64)>)> {
-    if kind != Kind::Drag {
+fn reference(state: &State, ctx: &Ctx, phase: Phase) -> Option<(String, Vec<(f64, f64)>)> {
+    if phase != Phase::Drag {
         return None;
     }
     let out = state.output()?;
@@ -254,11 +281,7 @@ pub fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Option<Element<'a, Message>
     let pad = |e: Element<'a, Message>| container(e).padding([SPACE_2, SPACE_3]).width(Fill).boxed();
 
     // Headline row: what it is, and the button.
-    let title = match (t.kind(), s.running) {
-        (Kind::Drag, true) => "SOLVING · CFD TABLE · ZERO-LIFT DRAG",
-        (Kind::Stability, true) => "SOLVING · 3D STABILITY · NORMAL FORCE AND CP",
-        (_, false) => "STOPPED · CFD TABLE · ZERO-LIFT DRAG",
-    };
+    let title = if s.running { super::cfd::solving_title(t.phase() == Phase::Stability) } else { super::cfd::STOPPED_TITLE };
     let action: Element<'a, Message> = match (s.running, s.stopped) {
         (true, _) if s.cancelling => push("Cancelling…", Weight::Secondary).disabled("The solver is ending the run in flight").into(),
         (true, _) => push("Cancel", Weight::Secondary).on_press(Message::CfdCancel).into(),
@@ -286,7 +309,7 @@ pub fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Option<Element<'a, Message>
     let line = if s.running {
         text(headline(t)).size(20).font(SANS_SEMIBOLD).boxed()
     } else {
-        text(format!("{} of {} points solved", t.done_count(), t.total())).size(20).font(SANS_SEMIBOLD).boxed()
+        text(format!("{} solved", how_far(t))).size(20).font(SANS_SEMIBOLD).boxed()
     };
 
     let (elapsed, left) = clock(t, s.elapsed);
@@ -297,10 +320,8 @@ pub fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Option<Element<'a, Message>
     } else {
         row![muted(format!("ran {}", duration_text(s.elapsed)), 12.0)]
     };
-    let place = match s.altitude {
-        Some(h) => format!("{} · {} · altitude {}", device(t), grid_name(s.grid), crate::units::with_unit_scaled(h, Quantity::Altitude, ctx.units, 0)),
-        None => format!("{} · coarse grid · Euler, 3D", device(t)),
-    };
+    let altitude = crate::units::with_unit_scaled(s.altitude.unwrap_or_default(), Quantity::Altitude, ctx.units, 0);
+    let place = super::cfd::place(&device(t), grid_name(s.grid), &altitude, s.running && t.phase() == Phase::Stability);
     let mut place_row: Vec<Element<'a, Message>> = vec![muted(place, 12.0)];
     place_row.extend(fallback_chip(t));
     let machines = machine_lines(t, s.running);
@@ -316,7 +337,7 @@ pub fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Option<Element<'a, Message>
     }
     let header = column(top).spacing(SPACE_2);
 
-    let data = plot_data(t, reference(state, ctx, t.kind()));
+    let data = plot_data(t, reference(state, ctx, t.phase()));
     let curve = container(canvas::Canvas::new(SolvePlot { data }).width(Fill).height(Fill)).width(Fill).padding([0.0, SPACE_3]);
 
     let mut body: Vec<Element<'a, Message>> = vec![pad(header.boxed())];
@@ -343,7 +364,7 @@ pub fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Option<Element<'a, Message>
         let named = t.machines().len() > 1;
         for (unit, live) in t.lives() {
             let machine = named.then(|| t.machines()[live.machine].name.as_str());
-            body.push(pad(now(t.kind(), unit, live, machine)));
+            body.push(pad(now(unit, live, machine)));
         }
     }
     body.push(rule());
@@ -382,8 +403,8 @@ const ROW_H: f32 = 20.0;
 
 /// A point in flight: iteration, residual, the monitor and its range against the tolerance, and the monitor's trace; with several
 /// machines working there is one of these per busy machine, headed with its name.
-fn now<'a>(kind: Kind, unit: &Unit, live: &'a Live, machine: Option<&'a str>) -> Element<'a, Message> {
-    let q = name(kind);
+fn now<'a>(unit: &Unit, live: &'a Live, machine: Option<&'a str>) -> Element<'a, Message> {
+    let q = name(phase_of(unit));
     let at = match unit.alpha_deg {
         Some(a) => format!("Mach {:.2} · {a:.0}°", unit.mach),
         None => format!("Mach {:.2}", unit.mach),
@@ -414,7 +435,6 @@ fn now<'a>(kind: Kind, unit: &Unit, live: &'a Live, machine: Option<&'a str>) ->
 /// Every unit with its state: a mark, Mach (and angle), outcome, value, iterations and time.
 fn points<'a>(t: &'a Tracker) -> Element<'a, Message> {
     let cell = |s: String, width: Length, color: fn(&Tokens) -> Color| -> Element<'a, Message> { container(mono(s, 12.0, color)).width(width).boxed() };
-    let q = name(t.kind());
     let several = t.machines().len() > 1;
     let machine_of = |i: usize| -> String {
         match t.slot(i) {
@@ -433,17 +453,23 @@ fn points<'a>(t: &'a Tracker) -> Element<'a, Message> {
         let running = t.lives().any(|(l, _)| l == u);
         let (mark, state, value, iters, time): (Element<'a, Message>, (String, fn(&Tokens) -> Color), String, String, String) = match t.slot(i) {
             Slot::Done(d) => {
-                let (mark, tone): (Element<'a, Message>, fn(&Tokens) -> Color) = if d.outcome.is_settled() {
+                // a point the solver had to restart at a lower CFL limit says so, in the warning tone
+                let restart = d.point.and_then(|p| p.restart);
+                let (mark, tone): (Element<'a, Message>, fn(&Tokens) -> Color) = if d.outcome.is_settled() && restart.is_none() {
                     (glyph::icon(Mark::Check, Tone::Ok, 12.0), |t| t.ink)
                 } else {
                     (glyph::icon(Mark::Warning, Tone::Warn, 12.0), |t| t.warn)
                 };
-                let value = d.value.map_or_else(|| "interpolated".to_string(), |v| format!("{q} {v:.4}"));
+                let value = d.value.map_or_else(|| "interpolated".to_string(), |v| format!("{} {v:.4}", name(phase_of(u))));
                 let value = match d.cp {
                     Some(cp) => format!("{value} · CP {cp:.3} m"),
                     None => value,
                 };
-                (mark, (d.outcome.word().to_string(), tone), value, format!("{} it", thousands(d.iterations)), duration_text(d.seconds))
+                let word = match &restart {
+                    Some(r) => format!("{} · {}", d.outcome.word(), super::cfd::restart_tag(r)),
+                    None => d.outcome.word().to_string(),
+                };
+                (mark, (word, tone), value, format!("{} it", thousands(d.iterations)), duration_text(d.seconds))
             }
             Slot::Running { iterations, ended, .. } => {
                 let it = if running { t.lives().find(|(l, _)| *l == u).map_or(*iterations, |(_, l)| l.iteration) } else { *iterations };
@@ -548,16 +574,23 @@ fn at(curve: &[(f64, f64)], x: f64) -> Option<f64> {
 /// A point to come is expected on the reference curve, or at the nearest solved point of its curve without one, or at 0.5; a point
 /// the solver gave no value for sits there too.
 pub fn plot_data(t: &Tracker, reference: Option<(String, Vec<(f64, f64)>)>) -> PlotData {
-    let machs = t.machs();
+    let phase = t.phase();
+    let in_phase = |u: &Unit| phase_of(u) == phase;
+    let mut machs: Vec<f64> = Vec::new();
+    for u in t.units().iter().filter(|u| in_phase(u)) {
+        if machs.last().is_none_or(|l| (l - u.mach).abs() > 1e-9) {
+            machs.push(u.mach);
+        }
+    }
     let (lo, hi) = (machs.first().copied().unwrap_or(0.0), machs.last().copied().unwrap_or(1.0));
     let pad = if hi > lo { 0.04 * (hi - lo) } else { 0.1 };
     let mut alphas: Vec<Option<f64>> = Vec::new();
-    for u in t.units() {
+    for u in t.units().iter().filter(|u| in_phase(u)) {
         if !alphas.contains(&u.alpha_deg) {
             alphas.push(u.alpha_deg);
         }
     }
-    let quantity = name(t.kind());
+    let quantity = name(phase);
     let ref_curve = reference.as_ref().map(|r| r.1.as_slice()).unwrap_or_default();
     let mut curves = Vec::new();
     for (k, alpha) in alphas.iter().enumerate() {
@@ -836,6 +869,7 @@ mod tests {
                 other: 0.0,
                 interference: 0.0,
                 quality,
+                restart: None,
             }),
             lift: None,
             iterations: 2000,
@@ -850,7 +884,7 @@ mod tests {
 
     #[test]
     fn solved_points_are_solid_the_rest_sit_on_the_reference_and_a_fallback_has_no_value_of_its_own() {
-        let mut t = Tracker::new(Kind::Drag, Tracker::drag_units(&[0.1, 0.5, 1.0, 2.0]));
+        let mut t = Tracker::new(Tracker::drag_units(&[0.1, 0.5, 1.0, 2.0]));
         t.on_done(&drag_done(0.1, Some(0.42), Some(CfdQuality::Converged), 10.0));
         t.on_done(&drag_done(0.5, None, None, 20.0));
         let d = plot_data(&t, reference());
@@ -871,7 +905,7 @@ mod tests {
 
     #[test]
     fn the_point_in_flight_is_at_the_monitors_value_and_without_a_reference_the_rest_follow_the_last_solved_point() {
-        let mut t = Tracker::new(Kind::Drag, Tracker::drag_units(&[0.5, 0.9, 1.0]));
+        let mut t = Tracker::new(Tracker::drag_units(&[0.5, 0.9, 1.0]));
         t.on_done(&drag_done(0.5, Some(0.45), Some(CfdQuality::Converged), 10.0));
         t.on_iteration(&Iteration {
             machine: 0,
@@ -906,14 +940,14 @@ mod tests {
         assert_eq!(d.live, vec![(0.9, d.y.1)]);
         assert!((d.y.1 - 0.45 * 1.12).abs() < 1e-12);
         // nothing known at all: a visible default
-        let empty = plot_data(&Tracker::new(Kind::Drag, Tracker::drag_units(&[0.5, 1.0])), None);
+        let empty = plot_data(&Tracker::new(Tracker::drag_units(&[0.5, 1.0])), None);
         assert_eq!(empty.curves[0].pending, vec![(0.5, 0.5), (1.0, 0.5)]);
     }
 
     #[test]
     fn the_3d_solve_has_a_curve_per_angle() {
         let units = Tracker::stability_units(&[0.8, 1.1], &[2.0, 6.0]);
-        let mut t = Tracker::new(Kind::Stability, units);
+        let mut t = Tracker::new(units);
         for (a, cn) in [(2.0, 0.09), (6.0, 0.3)] {
             t.on_done(&PointDone {
                 machine: 0,
@@ -938,7 +972,7 @@ mod tests {
 
     #[test]
     fn the_headline_names_the_point_and_the_clock_waits_for_two_points() {
-        let mut t = Tracker::new(Kind::Drag, Tracker::drag_units(&[0.1, 0.5, 0.8]));
+        let mut t = Tracker::new(Tracker::drag_units(&[0.1, 0.5, 0.8]));
         assert_eq!(headline(&t), "Starting the solver");
         t.on_iteration(&Iteration {
             machine: 0,

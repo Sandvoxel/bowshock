@@ -1,0 +1,27 @@
+# The finned example rocket solved by the 3D engine (BOWSHOCK_ENGINE=3d): the fin sector at zero incidence and the half domain at 6 degrees, in the 3D scene
+# of the whole rocket, wall Cp on the walls and a meridian Mach sheet through a fin plane. A real solve (a few minutes on the GPU: the headless driver waits for it),
+# through the queue:
+#   tools/gpuq/gpuq submit --host local --name finned-3d -- env BOWSHOCK_ENGINE=3d ICED_TEST_BACKEND=wgpu \
+#     cargo run --release -q -p bowshock -- drive --example crates/bowshock/scripts/finned-3d.drive out/finned-3d
+viewport 1500x1100
+click "Analyze"
+click "CFD table"
+click "Flow field"
+move (100, 1000)
+move (102, 1002)
+screenshot sector-default-dark.png
+
+# The viewer shows the walls of the whole rocket (the sector tiled round the axis) coloured by Cp by default; the meridian Mach sheet of a sector is the one through
+# its fin (the fin lies on the sector's first plane), a click on Fin plane puts it there when it is not
+click "Fin plane"
+move (100, 1000)
+move (102, 1002)
+screenshot sector-whole-rocket-fin-plane-dark.png
+
+# the half domain at 6 degrees (the angle stepper: 0, 2, 6)
+click "▶"
+click "▶"
+click "Fin plane"
+move (100, 1000)
+move (102, 1002)
+screenshot half-6deg-whole-rocket-fin-plane-dark.png

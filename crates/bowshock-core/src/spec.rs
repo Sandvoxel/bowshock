@@ -170,6 +170,22 @@ pub enum FinProfile {
     },
 }
 
+/// The outline of a fin set when it is not the trapezoid of [`FinSpec`]'s four numbers (see [`crate::Analysis::fin_outline`]; read by the 3D engine, the legacy engine
+/// flies the equivalent trapezoid the numbers describe).
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum FinOutline {
+    /// The trapezoid of `root_chord`, `tip_chord`, `span` and `sweep`.
+    #[default]
+    Trapezoid,
+    /// The half ellipse standing on the root: semi-axes `root_chord / 2` along the body and `span` out.
+    Ellipse,
+    /// A closed polygon of `(z, height)` points in metres, `z` along the axis from the fore end of the root, `height` above the body; the first and the last point are
+    /// the ends of the root (height 0). One chordwise interval per height.
+    Polygon(Vec<(f64, f64)>),
+}
+
 /// One set of identical trapezoidal fins, in metres. `sweep` is the axial distance from the root leading edge to the tip leading edge (positive aft).
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -200,8 +216,19 @@ pub struct FinSpec {
 impl FinSpec {
     /// Check the fin set; the error names the offending field as `fins.<field>`.
     pub fn validate(&self) -> Result<(), Error> {
-        if !(3..=8).contains(&self.count) {
-            return invalid("fins.count", &format!("must be in 3..=8, got {}", self.count));
+        self.validate_for(crate::analysis::Engine::Legacy)
+    }
+
+    /// [`FinSpec::validate`] for `engine`: the legacy engine takes 3 to 8 fins (its empirical fin-drag model and its sting-grid fin layout), the 3D engine 1 to 16
+    /// (the sector and the half domain build any count).
+    #[doc(hidden)]
+    pub fn validate_for(&self, engine: crate::analysis::Engine) -> Result<(), Error> {
+        let counts = match engine {
+            crate::analysis::Engine::Legacy => 3..=8,
+            crate::analysis::Engine::Solver3 => 1..=16,
+        };
+        if !counts.contains(&self.count) {
+            return invalid("fins.count", &format!("must be in {}..={}, got {}", counts.start(), counts.end(), self.count));
         }
         positive("fins.root_chord", self.root_chord)?;
         positive("fins.span", self.span)?;

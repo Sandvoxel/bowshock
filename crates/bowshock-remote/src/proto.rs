@@ -6,8 +6,9 @@ use bowshock_core::{AnalysisSpec, Condition, Error, Field3, Polar, Progress};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
-/// Version of the protocol; a worker of another version is refused.
-pub const PROTOCOL: u32 = 2;
+/// Version of the protocol; a worker of another version is refused. 3: the spec carries the engine (`AnalysisSpec::engine`), which an older worker would
+/// silently ignore (and solve with the legacy one).
+pub const PROTOCOL: u32 = 3;
 /// The worker's first bytes on stdout.
 pub const MAGIC: &[u8; 8] = b"BSHKWRK1";
 /// Largest accepted frame body.

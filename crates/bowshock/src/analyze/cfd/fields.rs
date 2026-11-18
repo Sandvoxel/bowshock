@@ -193,6 +193,7 @@ mod tests {
                     other: 0.0,
                     interference: 0.0,
                     quality: CfdQuality::Converged,
+                    restart: None,
                 })
                 .collect(),
             grid: CfdGrid::Coarse,

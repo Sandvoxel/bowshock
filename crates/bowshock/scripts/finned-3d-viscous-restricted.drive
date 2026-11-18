@@ -1,0 +1,32 @@
+# The finned example, 3D engine, viscous, Mach 1.0 to 1.7 at zero incidence (BOWSHOCK_CFD_RESTRICT=1.0,1.7: four Mach numbers, no angles): the Coarse table, then the same
+# on the Quick (draft) grid. Through the queue (local 3090):
+#   tools/gpuq/gpuq submit --host local --prio 1 -- env BOWSHOCK_ENGINE=3d BOWSHOCK_CFD_RESTRICT=1.0,1.7 ICED_TEST_BACKEND=wgpu \
+#     cargo run --release -q -p bowshock -- drive --example crates/bowshock/scripts/finned-3d-viscous-restricted.drive out/finned-3d-restricted
+viewport 1500x1100
+click "Analyze"
+click "CFD table"
+click "Flow field"
+move (100, 1000)
+move (102, 1002)
+screenshot coarse-default-dark.png
+click "Fin plane"
+click "Eddy ratio"
+move (100, 1000)
+move (102, 1002)
+screenshot coarse-eddy-ratio-fin-plane-dark.png
+click "Skin friction"
+move (100, 1000)
+move (102, 1002)
+screenshot coarse-skin-friction-dark.png
+click "CFD table"
+click "Quick"
+click "Flow field"
+click "Fin plane"
+click "Eddy ratio"
+move (100, 1000)
+move (102, 1002)
+screenshot quick-eddy-ratio-fin-plane-dark.png
+click "Skin friction"
+move (100, 1000)
+move (102, 1002)
+screenshot quick-skin-friction-dark.png

@@ -46,9 +46,9 @@ costs what its Mach neighbours that settled took, interpolated; 3000 until one i
 iterations per second and reads "estimating…" until two points are done. Cancel ends the point in flight within one report (measured:
 12.1 s from start to `Cancelled` on an M1 Max, 10 of them the first point's set-up); the points finished by then make a partial table
 (two or more points) offered as "Keep N solved points", whose key is that of the Mach numbers tried, so it reads as a partial table of
-the range (`cfd::partial_of`) and as stale until the rest is solved. A cancelled 3D solve is discarded: its points are of use only whole.
+the range (`cfd::partial_of`) and as stale until the rest is solved. The angles of the one solve are kept the same way: the leading Mach numbers with both angles in (a Mach number with one is left out and noted).
 
-`BOWSHOCK_CFD_DEMO=mid,done,lift-mid,lift-done` plays scripted event streams instead of solving (made-up numbers; for
+`BOWSHOCK_CFD_DEMO=mid,done,angle-mid,angle-stopped` plays scripted event streams instead of solving (made-up numbers; for
 `scripts/cfd-progress.drive` screenshots and the screen-level tests in `analyze/solve_demo.rs`).
 
 ### Done on `cfd-2d`

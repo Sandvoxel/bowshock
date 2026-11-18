@@ -1,0 +1,36 @@
+# The finned example rocket solved by the 3D engine with the viscous terms (BOWSHOCK_ENGINE=3d, RANS on the GPU): the fin sector at zero incidence and the half domain at
+# 6 degrees, in the 3D scene of the whole rocket: the eddy-viscosity ratio on a meridian sheet through a fin plane, and the skin friction on the walls. A real solve (a
+# few minutes on the GPU: the headless driver waits for it), through the queue:
+#   tools/gpuq/gpuq submit --host local --name finned-3d-viscous -- env BOWSHOCK_ENGINE=3d ICED_TEST_BACKEND=wgpu \
+#     cargo run --release -q -p bowshock -- drive --example crates/bowshock/scripts/finned-3d-viscous.drive out/finned-3d-viscous
+viewport 1500x1100
+click "Analyze"
+click "CFD table"
+click "Flow field"
+move (100, 1000)
+move (102, 1002)
+screenshot sector-default-dark.png
+
+click "Fin plane"
+click "Eddy ratio"
+move (100, 1000)
+move (102, 1002)
+screenshot sector-eddy-ratio-fin-plane-dark.png
+
+click "Skin friction"
+move (100, 1000)
+move (102, 1002)
+screenshot sector-skin-friction-eddy-dark.png
+
+# the half domain at 6 degrees (the angle stepper: 0, 2, 6)
+click "▶"
+click "▶"
+click "Fin plane"
+move (100, 1000)
+move (102, 1002)
+screenshot half-6deg-skin-friction-eddy-dark.png
+click "Mach"
+click "Wall Cp"
+move (100, 1000)
+move (102, 1002)
+screenshot half-6deg-mach-wall-cp-dark.png
