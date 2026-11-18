@@ -447,6 +447,47 @@ impl Case3 {
         c.with_tier(tier)
     }
 
+    /// This case's grids refined by the uniform factor `s` (`s = 1`: unchanged; opt-in, for grid-convergence studies, DESIGN3D item 47): every cell count of the meridian grids (axial,
+    /// radial, gap rows, cells over the fin root chord and the span) is multiplied by `s` (rounded to an even count, at least 2; a count of 1, a diameter step, and 0 stay), the end-cell sizes
+    /// and the wall spacings (`dx_tip`, `dr_wall`, `dr_gap`, the first cell `y1` of the fin stack) are divided by `s`, and the growth ratios of the fin stack become `1 + (g - 1) / s` (a
+    /// fixed growth ratio would refine only the wall layer: the cell size at a distance `x` from a wall is about `(g - 1) x`). The geometric fans of the meridian grids keep their
+    /// shape by themselves (the first cell and the cell count set the growth). The cells across the fin thickness (`fin_cells_across`, a half fin owning half of them, at least one) are
+    /// scaled to the nearest whole count of half-fin cells, so they follow `s` only for whole factors. Call it after [`Case3::with_tier`] / [`Case3::sector`]; the tier's `y+` becomes `y+ / s`. A motor's
+    /// nozzle rows are not scaled.
+    pub fn with_refinement(mut self, s: f64) -> Case3 {
+        assert!(s > 0.0 && s.is_finite(), "refinement factor must be positive");
+        let n = |c: usize| -> usize {
+            if c <= 1 {
+                c
+            } else {
+                (2 * (c as f64 * s / 2.0).round() as usize).max(2)
+            }
+        };
+        let sting = &mut self.grid.sting;
+        (sting.n_up, sting.n_nose, sting.n_ext, sting.nj) = (n(sting.n_up), n(sting.n_nose), n(sting.n_ext), n(sting.nj));
+        sting.n_seg.iter_mut().for_each(|c| *c = n(*c));
+        (sting.dx_tip, sting.dr_wall) = (sting.dx_tip / s, sting.dr_wall / s);
+        if let Some(b) = &mut self.grid.base {
+            (b.n_up, b.n_nose, b.n_wake, b.n_sting, b.n_gap, b.nj_out) = (n(b.n_up), n(b.n_nose), n(b.n_wake), n(b.n_sting), n(b.n_gap), n(b.nj_out));
+            b.n_seg.iter_mut().for_each(|c| *c = n(*c));
+            (b.dx_tip, b.dr_wall) = (b.dx_tip / s, b.dr_wall / s);
+            b.dr_gap = b.dr_gap.map(|d| d / s);
+        }
+        if self.grid.fins.is_some() {
+            self.grid.fin_chord_cells = Some(n(self.grid.fin_chord_cells.unwrap_or(32usize << self.grid.level)));
+            self.grid.span_cells = self.grid.span_cells.map(n);
+            let half0 = (self.grid.fin_cells_across / 2).max(1);
+            let half = ((half0 as f64 * s).round() as usize).max(1);
+            if half != half0 {
+                self.grid.fin_cells_across = 2 * half;
+            }
+        }
+        if let Some(st) = &mut self.grid.fin_stack {
+            (st.y1, st.growth_bl, st.growth_out) = (st.y1 / s, 1.0 + (st.growth_bl - 1.0) / s, 1.0 + (st.growth_out - 1.0) / s);
+        }
+        self
+    }
+
     /// This case with `n` cells across the thickness of its fins ([`Grid3Params::fin_cells_across`]; 1 is the one-cell layer of the default grids): the fin, the columns
     /// ahead of its leading edge and the base region behind a blunt trailing edge get `n` cells in `k`, a half fin on a symmetry plane (a sector) half of them. They are
     /// added to the cells of the fin stack, so the sector has `n / 2 - 1` more `k` cells than the default; a case without fins is unchanged.

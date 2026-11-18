@@ -2,7 +2,7 @@
 //! Coarse tier, the Draft tier (`--tier draft`) or the Draft tier's safe subsonic variant (`--tier draft-safe`: `Case3::draft_subsonic`), `GpuRunner3` in f32, to the case's stop rule.
 //!
 //! ```text
-//! cargo run --release -p bowshock-validate --example finned_table -- --tier coarse|draft|draft-safe --mach 2.0 [--anf] [--wedge] [--tw RATIO] [--gf1] [--fin-cells N] [--chord N] [--te-to-base X (with --anf)] [--sub N] [--max-iter N] [--ddadi OMEGA] [--dis-boost DELTA] [--history-every N] [--dt-mode sum|min]
+//! cargo run --release -p bowshock-validate --example finned_table -- --tier coarse|fine|draft|draft-safe --mach 2.0 [--anf] [--wedge] [--tw RATIO] [--gf1] [--fin-cells N] [--chord N] [--refine S] [--grid-only] [--te-to-base X (with --anf)] [--sub N] [--max-iter N] [--ddadi OMEGA] [--dis-boost DELTA] [--history-every N] [--dt-mode sum|min]
 //! ```
 //!
 //! One `TABLE` line: tier, Mach number, grid, cells, iterations, stop reason, wall seconds (the whole run, set-up included), ms per iteration, CD total and its parts (coefficients on pi/4
@@ -91,6 +91,12 @@ fn main() -> Result<(), String> {
     if tier_name == "draft-safe" {
         case = case.draft_subsonic();
     }
+    // `--refine S`: every cell count of the meridian grids and of the fin (chord, span) x S, the wall spacings and the fin stack's first cell / S, the stack's growth `1 + (g - 1) / S`
+    // (`Case3::with_refinement`; the grid-convergence family of DESIGN3D item 47: S = 1 is the production grid, the default)
+    let refine: f64 = value("--refine").map_or(Ok(1.0), |v| v.parse()).map_err(|e| format!("--refine: {e}"))?;
+    if refine != 1.0 {
+        case = case.with_refinement(refine);
+    }
     // `--tw RATIO`: isothermal walls at `T_w = RATIO T_inf` (`Case3::with_wall_thermal`; adiabatic without)
     if let Some(t) = value("--tw") {
         case = case.with_wall_thermal(WallThermal::Isothermal(t.parse().map_err(|e| format!("--tw: {e}"))?));
@@ -134,6 +140,30 @@ fn main() -> Result<(), String> {
     if args.iter().any(|a| a == "--no-control") {
         // the fixed cap, no rollback (the controller's failures show as `NonFinite`)
         case.numerics.cfl_control = false;
+    }
+    // `--grid-only`: build the mesh, print the `GRID` line and stop (no solve)
+    if let Some(g) = args.iter().any(|a| a == "--grid-only").then(|| bowshock_core::engine::grid3::body_grid3(&case.grid)) {
+        let g = g.map_err(|e| e.to_string())?;
+        let b = case.grid.base.as_ref().ok_or("--grid-only needs the base-wake grid")?;
+        println!(
+            "GRID {tier_name} M{mach} refine {refine}: {}x{}x{} = {} cells; base n_up {} n_nose {} n_seg {:?} n_wake {} n_gap {} nj_out {} dx_tip {:.5} dr_wall {:.3e}; chord cells {:?}; fin stack {:?}; fin cells across {}",
+            g.ni,
+            g.nj,
+            g.nk,
+            g.ni * g.nj * g.nk,
+            b.n_up,
+            b.n_nose,
+            b.n_seg,
+            b.n_wake,
+            b.n_gap,
+            b.nj_out,
+            b.dx_tip,
+            b.dr_wall,
+            case.grid.fin_chord_cells,
+            case.grid.fin_stack,
+            case.grid.fin_cells_across
+        );
+        return Ok(());
     }
     if args.iter().any(|a| a == "--cpu") {
         // the f64 CPU solver on the same case (a cross-check of a GPU failure: slow, use `--max-iter`)
