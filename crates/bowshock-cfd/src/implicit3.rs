@@ -303,6 +303,10 @@ fn cell_blocks3(
         dis_l[6 * q] += 2.0 * visc.0;
         dis_r[6 * q] += 2.0 * visc.1;
     }
+    if p.lhs_dis_boost != 0.0 {
+        let f = 1.0 + p.lhs_dis_boost;
+        dis_l.iter_mut().chain(dis_r.iter_mut()).for_each(|x| *x *= f);
+    }
     let mut d = lm.map_or(EYE5, |l| l.p_matrix(wk));
     axpy(&mut d, s * ar, &flux_jacobian3(wk, fr.n));
     axpy(&mut d, -s * al, &flux_jacobian3(wk, fl.n));

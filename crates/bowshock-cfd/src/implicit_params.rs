@@ -42,6 +42,11 @@ pub struct ImplicitParams {
     /// the state of the plain scheme from CFL 3 to 300. The converged state is that of the plain scheme, only the path changes. CPU (f64) measurements in DESIGN3D. The GPU ports ignore
     /// this field until they implement it: leave it `None` there.
     pub ddadi: Option<f64>,
+    /// `delta`: the face dissipation of the implicit left-hand side (inviscid and viscous, every factor and the defect operator) is multiplied by `1 + delta`. The right-hand
+    /// side and so the converged state are unchanged. Meant for the DDADI solve at `omega = 1`: the odd-even mode of an accurate first-order solve against the limited
+    /// MUSCL residual has the amplification `1 - (1 + a - b) 2 sigma / (1 + 2 sigma) / (1 + delta)` at large CFL (`1 + a - b` up to 2.3 for van Albada, 2 for minmod), so
+    /// `delta` 0.3-0.5 keeps it above -1 while the smooth modes change by `O(delta theta)`. 0 is the plain scheme.
+    pub lhs_dis_boost: f64,
 }
 
 /// Lower bound of the reference velocity of the low-Mach preconditioning in units of the free-stream sound speed. Measured on the example
@@ -81,6 +86,7 @@ impl ImplicitParams {
         low_mach_precond: false,
         line_solve: LineSolve3::Block,
         ddadi: None,
+        lhs_dis_boost: 0.0,
     };
 
     /// Parameters for viscous runs: the weaker-direction pseudo-time step with a lower CFL limit and one more defect-correction pass.
