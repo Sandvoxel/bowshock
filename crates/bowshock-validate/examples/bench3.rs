@@ -467,7 +467,7 @@ fn bench_combo(case: &BenchCase, precision: (Precision, &'static str), solve: (L
         let sym = [false, false, false, false, true, true];
         let v =
             bowshock_cfd::sst::Viscous { re_c: 2.0e6, sutherland: 0.368, turbulence: bowshock_cfd::sst::Turbulence::Laminar, wall_i_start: 0, roughness: 0.0 };
-        s.set_viscous(&case.grid, v, &sym).map_err(|e| format!("set_viscous: {e}"))?;
+        s.set_viscous(&case.grid, v, &sym, None).map_err(|e| format!("set_viscous: {e}"))?;
         let pv = s.profile_viscous().map_err(|e| format!("profile_viscous: {e}"))?;
         let peak_v = sampler.map(MemSampler::stop);
         let (launches, gpu_us) = (pv.launches(), pv.total().as_secs_f64() * 1e6);

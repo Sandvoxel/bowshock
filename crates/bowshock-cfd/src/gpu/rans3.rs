@@ -87,6 +87,7 @@ impl LazySolver3 {
         let wall = vis.wall.clone().expect("an SST evaluation computes the wall state");
         let dev = TDev3 {
             rho: last.p[0].clone(),
+            pres: last.p[4].clone(),
             cell: VCell3 { grad: vis.cell.grad.clone(), mu: vis.cell.mu.clone() },
             mu_t: vis.mu_t.clone(),
             wall,
@@ -193,7 +194,7 @@ impl LazySolver3 {
             })
         };
         let sym: crate::viscous3::SymSides = [sym_side(0, false), sym_side(0, true), sym_side(1, false), sym_side(1, true), sym_side(2, false), sym_side(2, true)];
-        let vg = VGeo3::new(&self.ctx, g, &self.solid_host, &sym, r.visc)?;
+        let vg = VGeo3::new(&self.ctx, g, &self.solid_host, &sym, r.visc, r.iso)?;
         self.p_out = r.p_outflow;
         self.turb = if r.visc.turbulence == Turbulence::Sst {
             let shape = [g.ni, g.nj, g.nk];

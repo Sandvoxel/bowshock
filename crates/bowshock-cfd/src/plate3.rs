@@ -2,7 +2,7 @@
 //! plate G2r against Mills & Hang) on a thin box grid: the cells of the 2D plate grid ([`crate::grid::plate_grid`], flat: `r0` is not used) extruded by `nk`
 //! cells of width `dz / nk` between two symmetry planes (`k = 0, nk`), with a one-cell slab of solid cells under the plate for `x >= 0`.
 //!
-//! * The plate surface is the face between the solid slab and the first fluid row: a no-slip adiabatic wall (the viscous solver's only wall). The slab is one cell
+//! * The plate surface is the face between the solid slab and the first fluid row: a no-slip wall, adiabatic unless [`PlateCase::wall_thermal`] says otherwise. The slab is one cell
 //!   of the height of the first fluid cell (`dr_wall`), so the leading edge is a forward-facing step of that height (G1 `2e-4`, G2 `4e-6`: a fraction of the
 //!   boundary-layer thickness at the first station, `5 x / sqrt(Re_x)` = `8e-4` at `x = 0.005` for G1). Upstream of the leading edge the bottom of the domain
 //!   (`y = -dr_wall`) is the slip wall of [`Solver3`] (a `j = 0` boundary), as the 2D plate (`wall_i_start`) has.
@@ -17,7 +17,7 @@ use crate::grid3::{Grid3, Part, SolidBox};
 use crate::implicit_params::ImplicitParams;
 use crate::limiter::Limiter;
 use crate::solver3::{Config3, RansOpts3, Scheme3, Solver3};
-use crate::sst::{Turbulence, Viscous};
+use crate::sst::{Turbulence, Viscous, WallThermal};
 
 /// Sutherland constant of the plate cases (`110.4 K / 300 K`, the 2D tests').
 pub const SUTHERLAND: f64 = 0.368;
@@ -40,6 +40,8 @@ pub struct PlateCase {
     /// Thickness of the solid slab under the plate in units of `dr_wall` (the height of the leading-edge step); `0`: no slab, the plate is the `j = 0` boundary of the
     /// grid ([`Grid3::wall_j0`]) and the leading edge is step-free, as in the 2D plate ([`PlateCase::boundary_wall`]).
     pub slab: f64,
+    /// Thermal condition of the plate (`Adiabatic`, or `Isothermal(T_w / T_inf)`).
+    pub wall_thermal: WallThermal,
 }
 
 impl PlateCase {
@@ -54,6 +56,7 @@ impl PlateCase {
             nk: 1,
             dz: 0.005,
             slab: 1.0,
+            wall_thermal: WallThermal::Adiabatic,
         }
     }
 
@@ -68,6 +71,7 @@ impl PlateCase {
             nk: 1,
             dz: 0.002,
             slab: 1.0,
+            wall_thermal: WallThermal::Adiabatic,
         }
     }
 
@@ -148,7 +152,7 @@ pub fn plate_solver3(case: &PlateCase, params: ImplicitParams) -> Solver3 {
         scheme: Scheme3::Implicit(params),
     };
     let grid = plate_grid3(case);
-    let mut opts = RansOpts3::default();
+    let mut opts = RansOpts3 { wall_thermal: case.wall_thermal, ..RansOpts3::default() };
     if case.ks > 0.0 {
         opts.ks = vec![0.0; grid.ni * grid.nj * grid.nk];
         for i in case.i_le()..grid.ni {
@@ -580,5 +584,85 @@ mod tests {
             r.wall[g.cell(st.col, case.j_first(), 0)][1],
             r.wall[g.cell(st.col, case.j_first(), 0)][2] / r.mu[g.cell(st.col, case.j_first(), 0)]
         );
+    }
+}
+
+#[cfg(test)]
+mod thermal_tests {
+    use super::*;
+    use crate::gas3::GAMMA;
+    use crate::sst::PRANDTL;
+
+    /// Skin friction of the laminar flat plate by the reference-temperature (Eckert) method, `cf = 0.664 sqrt(C*) / sqrt(Re_x)` with the Chapman-Rubesin factor
+    /// `C* = rho* mu* / (rho_e mu_e)` at `T* / T_e = 0.5 + 0.039 M_e^2 + 0.5 T_w / T_e` (White, Viscous Fluid Flow, section 7-3), the viscosity law of the solver, and the edge state
+    /// the free stream (the weak viscous interaction of the plate is not in it). `t_wall`: `T_w / T_inf`, `None`: the adiabatic wall, `T_aw = 1 + sqrt(Pr) (gamma - 1) / 2 M^2`.
+    fn cf_reference_temperature(case: &PlateCase, x: f64, t_wall: Option<f64>) -> f64 {
+        let m2 = case.mach * case.mach;
+        let t_aw = 1.0 + PRANDTL.sqrt() * 0.5 * (GAMMA - 1.0) * m2;
+        let t_w = t_wall.unwrap_or(t_aw);
+        let t_star = 0.5 + 0.039 * m2 + 0.5 * t_w;
+        let v = case.viscous();
+        let c_star = v.mu(t_star) / v.mu(1.0) / t_star;
+        0.664 * c_star.sqrt() / (case.re_c * case.mach * x).sqrt()
+    }
+
+    /// G1 of the supersonic plate (Mach 2, `Re_x = 5e5` at `x = 0.5`) on the step-free boundary-wall grid, with the wall thermal condition `thermal`.
+    fn supersonic_plate(thermal: WallThermal) -> PlateCase {
+        PlateCase { mach: 2.0, re_c: 5e5, wall_thermal: thermal, ..PlateCase::g1().boundary_wall() }
+    }
+
+    /// `cf` at `x = 0.5` and `0.9` of a converged supersonic laminar plate and the energy component of the viscous flux of its wall face at `x = 0.5` (`kappa dT/dy`, positive
+    /// where the fluid is hotter than the wall).
+    fn run_plate(case: &PlateCase) -> ([f64; 2], f64) {
+        let mut s = plate_solver3(case, ImplicitParams::VISCOUS);
+        let mut prev = [f64::NAN; 2];
+        run(&mut s, 5.0, 6000, 250, |_, s| {
+            let cf = [station(s, case, 0.5).cf, station(s, case, 0.9).cf];
+            let settled = cf.iter().zip(&prev).all(|(c, p)| (c / p - 1.0).abs() < 1e-5);
+            prev = cf;
+            settled
+        });
+        let st = [station(&s, case, 0.5), station(&s, case, 0.9)];
+        let q = st[0].col; // the plate is the `j = 0` boundary: face `(i, 0, 0)` of the j family
+        let r = s.rans().expect("viscous run");
+        (st.map(|t| t.cf), r.fvj[q][4])
+    }
+
+    /// A laminar isothermal plate at Mach 2 against the reference-temperature Blasius: the cold wall (`T_w = T_inf`, well below the adiabatic `T_aw = 1.68`) has a friction
+    /// coefficient above the adiabatic plate's by `sqrt(C*_cold / C*_adiabatic)` (1.037 here: the Chapman-Rubesin factor `rho mu` falls with `T` almost as fast as the edge
+    /// shear grows, so the cold wall's friction is only slightly higher); measured on this grid: both `cf` within 0.5 % of the reference at both stations, the ratio within 0.4 %. The
+    /// wall heat flux is the Reynolds analogy's `q_w = rho_e u_e c_p St (T_aw - T_w)`, `St = cf / (2 Pr^(2/3))` (measured within 0.5 %), taken out of the fluid
+    /// (`kappa dT/dy > 0` at the cold wall); the adiabatic plate has none.
+    #[test]
+    fn isothermal_laminar_plate_follows_the_reference_temperature_blasius() {
+        let adiabatic = supersonic_plate(WallThermal::Adiabatic);
+        let cold = supersonic_plate(WallThermal::Isothermal(1.0));
+        let (cf_a, q_a) = run_plate(&adiabatic);
+        let (cf_c, q_c) = run_plate(&cold);
+        for (n, x) in [0.5, 0.9].into_iter().enumerate() {
+            let (ref_a, ref_c) = (cf_reference_temperature(&adiabatic, x, None), cf_reference_temperature(&cold, x, Some(1.0)));
+            println!(
+                "x = {x}: cf adiabatic {:.5e} (reference {ref_a:.5e}, {:+.2} %)  cold {:.5e} (reference {ref_c:.5e}, {:+.2} %)  ratio {:.4} (reference {:.4})",
+                cf_a[n],
+                100.0 * (cf_a[n] / ref_a - 1.0),
+                cf_c[n],
+                100.0 * (cf_c[n] / ref_c - 1.0),
+                cf_c[n] / cf_a[n],
+                ref_c / ref_a
+            );
+            assert!((cf_a[n] / ref_a - 1.0).abs() < 0.02, "adiabatic plate x = {x}: cf {:.5e} against {ref_a:.5e}", cf_a[n]);
+            assert!((cf_c[n] / ref_c - 1.0).abs() < 0.02, "cold plate x = {x}: cf {:.5e} against {ref_c:.5e}", cf_c[n]);
+            assert!(
+                (cf_c[n] / cf_a[n] / (ref_c / ref_a) - 1.0).abs() < 0.01,
+                "cold / adiabatic ratio x = {x}: {:.4} against {:.4}",
+                cf_c[n] / cf_a[n],
+                ref_c / ref_a
+            );
+        }
+        let t_aw = 1.0 + PRANDTL.sqrt() * 0.5 * (GAMMA - 1.0) * cold.mach * cold.mach;
+        let q_analogy = cold.mach / (GAMMA - 1.0) * (t_aw - 1.0) * (0.5 * cf_c[0]) / PRANDTL.powf(2.0 / 3.0);
+        println!("wall energy flux Fv[4] at x = 0.5: adiabatic {q_a:.3e}, cold {q_c:.3e}, Reynolds analogy {q_analogy:.3e}");
+        assert!((q_c / q_analogy - 1.0).abs() < 0.05, "the cold wall's heat flux {q_c:.4e} against the Reynolds analogy {q_analogy:.4e}");
+        assert!(q_a.abs() < 1e-2 * q_c, "adiabatic wall energy flux {q_a} against the cold {q_c}");
     }
 }

@@ -15,7 +15,7 @@ use bowshock_cfd::implicit_params::{DtMode, ImplicitParams, LineSolve3};
 use bowshock_cfd::limiter::Limiter;
 use bowshock_cfd::solver::{Bc, Scheme};
 use bowshock_cfd::solver3::{Config3, RansOpts3, Scheme3, Solver3};
-use bowshock_cfd::sst::{Turbulence, Viscous};
+use bowshock_cfd::sst::{Turbulence, Viscous, WallThermal};
 
 /// `cfl_max` of a wall-resolved (viscous) **3D** grid, a half domain or a sector (the wedge, one azimuthal cell, keeps `Numerics3::viscous`'s 50 below Mach 1 and 20 above): 10.
 /// The three-factor implicit step has a CFL limit on every 3D grid tried, finned or not, between 30 and 40 at Mach 0.5 and lower supersonic (CPU f64, Draft tier of the example rocket: the
@@ -316,6 +316,9 @@ pub struct Case3 {
     /// The viscous (RANS, SST) equations: set by [`Case3::with_tier`] for the wall-resolved tiers and by [`Case3::wedge_of`] for a viscous 2D case, `None`: Euler
     /// ([`Case3::euler_equations`] keeps a wall-resolved grid and drops the viscous terms). Only `re_c` and `sutherland` are read by the 3D solver.
     pub viscous: Option<Viscous>,
+    /// Thermal condition of the no-slip walls of the viscous equations ([`WallThermal`]): adiabatic by default; [`Case3::with_wall_thermal`]. Not part of the grid: the wall
+    /// spacing of the tiers is sized for the adiabatic wall, and a cold wall (higher wall density, lower wall viscosity) raises the `y+` of the first cells.
+    pub wall_thermal: WallThermal,
 }
 
 /// What the solver needs of the motor jet at the nozzle exit faces (`Wall::Jet`): the primitive state `[rho, u, v, w, p]` (axial, supersonic) and `[k, omega]`
@@ -334,7 +337,19 @@ impl Case3 {
             // the tiny ANF): the block lines are stable on both and equal on both. Block for every finned case until the diagonal solve is fixed
             numerics.line_solve = Some(LineSolve3::Block);
         }
-        Case3 { mach, alpha, body, grid, numerics, tier: Tier::Euler, progress: None, snapshots: None, jet: None, viscous: None }
+        Case3 {
+            mach,
+            alpha,
+            body,
+            grid,
+            numerics,
+            tier: Tier::Euler,
+            progress: None,
+            snapshots: None,
+            jet: None,
+            viscous: None,
+            wall_thermal: WallThermal::Adiabatic,
+        }
     }
 
     /// This case with a motor jet from the centre of the base (the 2D [`crate::engine::case::Case::with_motor`]): the gap behind the base of the base-wake grid is
@@ -437,6 +452,13 @@ impl Case3 {
     /// added to the cells of the fin stack, so the sector has `n / 2 - 1` more `k` cells than the default; a case without fins is unchanged.
     pub fn with_fin_cells_across(mut self, n: usize) -> Case3 {
         self.grid.fin_cells_across = n;
+        self
+    }
+
+    /// This case with the thermal condition `thermal` on its no-slip walls (the viscous equations only: an Euler case has no heat flux). `Isothermal(t)` is the wall temperature
+    /// over the free-stream static temperature; the ghost, the wall viscosity and the wall properties of the law of the wall follow `bowshock_cfd::sst::WallThermal`.
+    pub fn with_wall_thermal(mut self, thermal: WallThermal) -> Case3 {
+        self.wall_thermal = thermal;
         self
     }
 
@@ -562,7 +584,10 @@ impl Case3 {
         if let Some(v) = self.viscous {
             let ks = s.grid.wall_ks();
             let ks = if ks.iter().any(|&k| k > 0.0) { ks } else { Vec::new() };
-            s.set_viscous_with(Some(v), RansOpts3 { pressure_outflow: self.numerics.pressure_outflow, ks, ..RansOpts3::default() });
+            s.set_viscous_with(
+                Some(v),
+                RansOpts3 { pressure_outflow: self.numerics.pressure_outflow, ks, wall_thermal: self.wall_thermal, ..RansOpts3::default() },
+            );
         }
         s
     }

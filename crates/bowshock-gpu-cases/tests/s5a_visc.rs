@@ -10,7 +10,7 @@ use bowshock_cfd::gpu::TractionFace3;
 use bowshock_cfd::grid3::{Face3, Grid3, Part, SolidBox, PART_FLUID};
 use bowshock_cfd::implicit_params::ImplicitParams;
 use bowshock_cfd::solver3::{Config3, Scheme3};
-use bowshock_cfd::sst::{Turbulence, Viscous};
+use bowshock_cfd::sst::{Turbulence, Viscous, WallThermal};
 use bowshock_cfd::viscous3::{
     add_viscous_residual, cell_pass, diffusion_rates, face_dirs, face_pass, face_shape, lambda_pass, wall_tractions, Grad3, SymSides,
 };
@@ -152,6 +152,7 @@ struct Case {
     grid: Grid3,
     sym: SymSides,
     laminar: bool,
+    thermal: WallThermal,
 }
 
 /// Relative maximum error of `a` against `b` over the entries where `keep` holds, scaled by the maximum of `|b|` (`1e-30` floor).
@@ -181,7 +182,7 @@ macro_rules! probe {
             scheme: Scheme3::Explicit,
         };
         let mut lazy = bowshock_cfd::gpu::$module::LazySolver3::new($ctx, &$case.grid, &cfg).map_err(|e| format!("new: {e}"))?;
-        lazy.set_viscous3(&$case.grid, VISC, &$case.sym).map_err(|e| format!("set_viscous3: {e}"))?;
+        lazy.set_viscous3(&$case.grid, VISC, &$case.sym, $case.thermal.iso(&VISC)).map_err(|e| format!("set_viscous3: {e}"))?;
         lazy.set_traction_faces($faces, $ncl).map_err(|e| format!("traction faces: {e}"))?;
         lazy.viscous_probe3($w, $mu_t, $wall).map_err(|e| format!("probe: {e}"))?
     }};
@@ -200,14 +201,15 @@ fn compare(case: &Case, f32_precision: bool) -> Result<Errors, String> {
 
     // the CPU
     let (mut grad, mut mu) = (vec![[0.0; 12] as Grad3; nc], vec![0.0; nc]);
-    cell_pass(&VISC, g, &solid, &w, &mut grad, &mut mu);
+    let iso = case.thermal.iso(&VISC);
+    cell_pass(&VISC, g, &solid, &w, iso, &mut grad, &mut mu);
     let dirs = face_dirs(g, &solid, &case.sym);
     let (mut fvi, mut fvj, mut fvk) = (vec![[0.0; 5]; g.iface.len()], vec![[0.0; 5]; g.jface.len()], vec![[0.0; 5]; g.kface.len()]);
-    face_pass(g, &solid, &w, &dirs, &grad, &mu, &mu_t, &wall3, &mut fvi, &mut fvj, &mut fvk);
+    face_pass(g, &solid, &w, &dirs, &grad, &mu, &mu_t, &wall3, iso, &mut fvi, &mut fvj, &mut fvk);
     let mut res = vec![[0.0; 5]; nc];
     add_viscous_residual(g, &solid, &fvi, &fvj, &fvk, &mut res);
     let (mut li, mut lj, mut lk) = (vec![0.0; g.iface.len()], vec![0.0; g.jface.len()], vec![0.0; g.kface.len()]);
-    lambda_pass(g, &solid, &w, &dirs, &mu, &mu_t, &wall3, &mut li, &mut lj, &mut lk);
+    lambda_pass(g, &solid, &w, &dirs, &mu, &mu_t, &wall3, iso, &mut li, &mut lj, &mut lk);
     let idx = |i: usize, j: usize, k: usize| ((k + 2) * (nj + 4) + (j + 2)) * (ni + 4) + (i + 2);
     let mut dr = vec![[0.0; 3]; nc];
     for k in 0..nk {
@@ -269,27 +271,59 @@ fn compare(case: &Case, f32_precision: bool) -> Result<Errors, String> {
 
 #[test]
 fn viscous_kernels_match_cpu() {
+    let cold = WallThermal::Isothermal(0.8);
     let cases = vec![
-        Case { name: "box, solid blocks, laminar".into(), grid: box_grid(), sym: [false; 6], laminar: true },
+        Case { name: "box, solid blocks, laminar".into(), grid: box_grid(), sym: [false; 6], laminar: true, thermal: WallThermal::Adiabatic },
         Case {
             name: "box, solid blocks, mu_t + wall, k and j symmetry planes".into(),
             grid: box_grid(),
             sym: [false, false, true, false, true, true],
             laminar: false,
+            thermal: WallThermal::Adiabatic,
         },
-        Case { name: "wedge, k planes symmetric, laminar".into(), grid: wedge_grid(), sym: [false, false, false, false, true, true], laminar: true },
-        Case { name: "wedge, k planes symmetric, mu_t + wall".into(), grid: wedge_grid(), sym: [false, false, false, false, true, true], laminar: false },
+        Case {
+            name: "wedge, k planes symmetric, laminar".into(),
+            grid: wedge_grid(),
+            sym: [false, false, false, false, true, true],
+            laminar: true,
+            thermal: WallThermal::Adiabatic,
+        },
+        Case {
+            name: "wedge, k planes symmetric, mu_t + wall".into(),
+            grid: wedge_grid(),
+            sym: [false, false, false, false, true, true],
+            laminar: false,
+            thermal: WallThermal::Adiabatic,
+        },
         Case {
             name: "sector N 4 (fin), k planes symmetric, mu_t + wall".into(),
             grid: sector_grid(4),
             sym: [false, false, false, false, true, true],
             laminar: false,
+            thermal: WallThermal::Adiabatic,
         },
         Case {
             name: "sector N 3 (fin), k planes symmetric, laminar".into(),
             grid: sector_grid(3),
             sym: [false, false, false, false, true, true],
             laminar: true,
+            thermal: WallThermal::Adiabatic,
+        },
+        // isothermal walls (`T_w = 0.8`): the ghost temperature `2 T_w - T`, the wall viscosity `mu(T_w)` of the face and the heat flux
+        Case { name: "box, solid blocks, laminar, isothermal".into(), grid: box_grid(), sym: [false; 6], laminar: true, thermal: cold },
+        Case {
+            name: "wedge, k planes symmetric, mu_t + wall, isothermal".into(),
+            grid: wedge_grid(),
+            sym: [false, false, false, false, true, true],
+            laminar: false,
+            thermal: cold,
+        },
+        Case {
+            name: "sector N 4 (fin), k planes symmetric, mu_t + wall, isothermal".into(),
+            grid: sector_grid(4),
+            sym: [false, false, false, false, true, true],
+            laminar: false,
+            thermal: cold,
         },
     ];
     let _ = ImplicitParams::DEFAULT;
