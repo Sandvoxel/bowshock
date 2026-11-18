@@ -436,7 +436,12 @@ pub struct DragParts {
     pub aft: Vec<f64>,
     pub base: f64,
     pub fin_sides: f64,
+    /// Leading plus trailing edge faces of the fins: `fin_le + fin_te`.
     pub fin_edges: f64,
+    /// The leading-edge faces alone (the stagnation overpressure).
+    pub fin_le: f64,
+    /// The trailing-edge faces alone (the blunt base of the fin; a positive number is a suction, as for the body base).
+    pub fin_te: f64,
     pub fin_tips: f64,
     /// The friction (shear) drag of the same classes, zero for Euler (and for the device-side reduction of the GPU runner).
     pub friction: FrictionParts,
@@ -487,7 +492,8 @@ pub fn drag_parts_from(case: &Case3, g: &Grid3, w: &WallForces) -> DragParts {
     let nseg = case.body.segments.len();
     let aft: Vec<f64> = (0..nseg).map(|s| cd(Wall::Body(s as u16 + 1))).collect();
     let (nose, base) = (cd(Wall::Body(0)), cd(Wall::Base));
-    let (fin_sides, fin_edges, fin_tips) = (cd(Wall::FinSide), cd(Wall::FinLe) + cd(Wall::FinTe), cd(Wall::FinTip));
+    let (fin_sides, fin_le, fin_te, fin_tips) = (cd(Wall::FinSide), cd(Wall::FinLe), cd(Wall::FinTe), cd(Wall::FinTip));
+    let fin_edges = fin_le + fin_te;
     let mut friction = FrictionParts {
         nose: cf(Wall::Body(0)),
         aft: (0..nseg).map(|s| cf(Wall::Body(s as u16 + 1))).collect(),
@@ -499,7 +505,7 @@ pub fn drag_parts_from(case: &Case3, g: &Grid3, w: &WallForces) -> DragParts {
     };
     friction.total = friction.nose + friction.aft.iter().sum::<f64>() + friction.base + friction.fin_sides + friction.fin_edges + friction.fin_tips;
     let total = nose + aft.iter().sum::<f64>() + base + fin_sides + fin_edges + fin_tips + friction.total;
-    DragParts { nose, aft, base, fin_sides, fin_edges, fin_tips, friction, total }
+    DragParts { nose, aft, base, fin_sides, fin_edges, fin_le, fin_te, fin_tips, friction, total }
 }
 
 /// [`drag_parts`] of the solver state: the pressure and, for a viscous solver, the friction of every class.
