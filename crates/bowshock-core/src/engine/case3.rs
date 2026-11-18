@@ -451,9 +451,8 @@ impl Case3 {
     /// radial, gap rows, cells over the fin root chord and the span) is multiplied by `s` (rounded to an even count, at least 2; a count of 1, a diameter step, and 0 stay), the end-cell sizes
     /// and the wall spacings (`dx_tip`, `dr_wall`, `dr_gap`, the first cell `y1` of the fin stack) are divided by `s`, and the growth ratios of the fin stack become `1 + (g - 1) / s` (a
     /// fixed growth ratio would refine only the wall layer: the cell size at a distance `x` from a wall is about `(g - 1) x`). The geometric fans of the meridian grids keep their
-    /// shape by themselves (the first cell and the cell count set the growth). The cells across the fin thickness (`fin_cells_across`, a half fin owning half of them, at least one) are
-    /// scaled to the nearest whole count of half-fin cells, so they follow `s` only for whole factors. Call it after [`Case3::with_tier`] / [`Case3::sector`]; the tier's `y+` becomes `y+ / s`. A motor's
-    /// nozzle rows are not scaled.
+    /// shape by themselves (the first cell and the cell count set the growth). The cells across the fin thickness (`fin_cells_across`) are an integer count that cannot follow a fractional `s`: they
+    /// are left as they are (set them with [`Case3::with_fin_cells_across`]). Call it after [`Case3::with_tier`] / [`Case3::sector`]; the tier's `y+` becomes `y+ / s`. A motor's nozzle rows are not scaled.
     pub fn with_refinement(mut self, s: f64) -> Case3 {
         assert!(s > 0.0 && s.is_finite(), "refinement factor must be positive");
         let n = |c: usize| -> usize {
@@ -476,11 +475,6 @@ impl Case3 {
         if self.grid.fins.is_some() {
             self.grid.fin_chord_cells = Some(n(self.grid.fin_chord_cells.unwrap_or(32usize << self.grid.level)));
             self.grid.span_cells = self.grid.span_cells.map(n);
-            let half0 = (self.grid.fin_cells_across / 2).max(1);
-            let half = ((half0 as f64 * s).round() as usize).max(1);
-            if half != half0 {
-                self.grid.fin_cells_across = 2 * half;
-            }
         }
         if let Some(st) = &mut self.grid.fin_stack {
             (st.y1, st.growth_bl, st.growth_out) = (st.y1 / s, 1.0 + (st.growth_bl - 1.0) / s, 1.0 + (st.growth_out - 1.0) / s);

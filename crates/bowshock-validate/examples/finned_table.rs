@@ -2,7 +2,7 @@
 //! Coarse tier, the Draft tier (`--tier draft`) or the Draft tier's safe subsonic variant (`--tier draft-safe`: `Case3::draft_subsonic`), `GpuRunner3` in f32, to the case's stop rule.
 //!
 //! ```text
-//! cargo run --release -p bowshock-validate --example finned_table -- --tier coarse|fine|draft|draft-safe --mach 2.0 [--anf] [--wedge] [--tw RATIO] [--gf1] [--fin-cells N] [--chord N] [--refine S] [--grid-only] [--te-to-base X (with --anf)] [--sub N] [--max-iter N] [--ddadi OMEGA] [--dis-boost DELTA] [--history-every N] [--dt-mode sum|min]
+//! cargo run --release -p bowshock-validate --example finned_table -- --tier coarse|fine|draft|draft-safe --mach 2.0 [--anf] [--wedge] [--tw RATIO] [--gf1] [--fin-cells N] [--chord N] [--refine S] [--grid-only] [--drift-tol X] [--te-to-base X (with --anf)] [--sub N] [--max-iter N] [--ddadi OMEGA] [--dis-boost DELTA] [--history-every N] [--dt-mode sum|min]
 //! ```
 //!
 //! One `TABLE` line: tier, Mach number, grid, cells, iterations, stop reason, wall seconds (the whole run, set-up included), ms per iteration, CD total and its parts (coefficients on pi/4
@@ -136,6 +136,10 @@ fn main() -> Result<(), String> {
     }
     if let Some(n) = value("--max-iter") {
         case.numerics.max_iter = n.parse().map_err(|e| format!("--max-iter: {e}"))?;
+    }
+    // `--drift-tol X`: the extrapolated-drift rule's tolerance (`Numerics3::drift_tol`, relative remaining change of CA; the default 5e-3 stops up to about 0.5 % from the converged CA)
+    if let Some(t) = value("--drift-tol") {
+        case.numerics.drift_tol = t.parse().map_err(|e| format!("--drift-tol: {e}"))?;
     }
     if args.iter().any(|a| a == "--no-control") {
         // the fixed cap, no rollback (the controller's failures show as `NonFinite`)
