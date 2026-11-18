@@ -117,7 +117,7 @@ fn run_grid(grid: Grid3, mach: f64, first_order_iters: usize, max_iter: usize, d
     let host = Solver3::new(grid, cfg);
     let ctx = luma::default_context().map_err(err)?;
     if ctx.is_cpu() {
-        return Err("no GPU: Luma opened a software (CPU) Vulkan device".into());
+        return Err("no GPU: Luma opened its CPU backend".into());
     }
     let mut gpu = GpuSolver3::from_host(&ctx, &host, prec).map_err(err)?;
     let (mut residual, mut rmax, mut stop) = (Vec::<f64>::new(), 0.0f64, "MaxIterations");

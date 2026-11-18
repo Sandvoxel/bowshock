@@ -67,9 +67,9 @@ impl GpuRunner {
         let t0 = Instant::now();
         let ctx = luma::default_context()?;
         let ctx_seconds = t0.elapsed().as_secs_f64();
-        // The native CPU solver is faster than the GPU kernels on a software rasterizer, so `Backend::Auto` falls back to it.
+        // The native CPU solver is faster than the GPU kernels on Luma's CPU backend, so `Backend::Auto` falls back to it.
         if ctx.is_cpu() {
-            return Err(Error::Gpu("no GPU: Luma opened a software (CPU) Vulkan device".into()));
+            return Err(Error::Gpu("no GPU: Luma opened its CPU backend".into()));
         }
         let t1 = Instant::now();
         let gpu = GpuSolver::from_host(&ctx, &host, prec)?;

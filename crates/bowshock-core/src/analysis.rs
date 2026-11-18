@@ -35,7 +35,7 @@ const LIFT_ALPHA_MAX_DEG: f64 = 15.0;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Backend {
-    /// The GPU when one is available, otherwise the CPU (reported in [`Polar::fallback`]). A software Vulkan device (llvmpipe) counts as no GPU.
+    /// The GPU when one is available, otherwise the CPU (reported in [`Polar::fallback`]). Luma's CPU backend counts as no GPU.
     Auto,
     /// The CPU solver.
     Cpu,

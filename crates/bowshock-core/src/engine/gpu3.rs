@@ -52,7 +52,7 @@ impl GpuRunner3 {
         let ctx = luma::default_context()?;
         let ctx_seconds = t0.elapsed().as_secs_f64();
         if ctx.is_cpu() {
-            return Err(Error::Gpu("no GPU: Luma opened a software (CPU) Vulkan device".into()));
+            return Err(Error::Gpu("no GPU: Luma opened its CPU backend".into()));
         }
         let t1 = Instant::now();
         let gpu = GpuSolver3::from_host(&ctx, &host, prec)?;
