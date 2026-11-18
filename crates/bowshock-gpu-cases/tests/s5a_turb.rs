@@ -10,7 +10,7 @@ use bowshock_cfd::gpu::Staging;
 use bowshock_cfd::grid3::{Grid3, Part, SolidBox, Symmetry, PART_FLUID};
 use bowshock_cfd::implicit_params::ImplicitParams;
 use bowshock_cfd::solver3::{Config3, Scheme3};
-use bowshock_cfd::sst::{Turbulence, Viscous};
+use bowshock_cfd::sst::{IsoWall, Turbulence, Viscous, WallThermal};
 use bowshock_cfd::turbulence3::{self as t3, Blend, CellIn, CellTerms, ScalarBc, ScalarSides, Sst, TFace, TurbIn, TurbModel, Update};
 use bowshock_cfd::viscous3::{self as v3, face_dirs, face_of, face_shape, face_sides3, Grad3, SymSides};
 use bowshock_cfd::walldist3::{wall_distance3, wall_faces};
@@ -159,6 +159,7 @@ struct Case {
     dt: Vec<f64>,
     turb: Vec<[f64; 2]>,
     re_c: f64,
+    iso: Option<IsoWall>,
 }
 
 /// How the speed of the first cell row above the solid row `j = 0` is set: random, or a sweep of the `y+` of the wall cells over `i` (0.1 to 300).
@@ -183,11 +184,31 @@ impl Case {
         law_i_walls: bool,
         seed: u64,
     ) -> Case {
+        Case::with_wall(name, grid, cfg, sym, bc, re_c, flow, rough, law_strain, law_i_walls, seed, WallThermal::Adiabatic)
+    }
+
+    /// [`Case::new`] with the thermal condition of the no-slip walls.
+    #[allow(clippy::too_many_arguments)]
+    fn with_wall(
+        name: &str,
+        grid: Grid3,
+        cfg: Config3,
+        sym: SymSides,
+        bc: ScalarSides,
+        re_c: f64,
+        flow: Flow,
+        rough: bool,
+        law_strain: bool,
+        law_i_walls: bool,
+        seed: u64,
+        thermal: WallThermal,
+    ) -> Case {
         let mut rng = Rng::new(seed);
         let (ni, nj, nk) = (grid.ni, grid.nj, grid.nk);
         let nc = ni * nj * nk;
         let solid: Vec<bool> = grid.part.iter().map(|&p| p != PART_FLUID).collect();
         let visc = Viscous { re_c, sutherland: 0.368, turbulence: Turbulence::Sst, wall_i_start: 0, roughness: 0.0 };
+        let iso = thermal.iso(&visc);
         let model = Sst { re_c };
         let mut cells: Vec<Prim3> =
             (0..nc).map(|_| [rng.range(0.8, 1.2), rng.range(-0.3, 0.9), rng.range(-0.3, 0.3), rng.range(-0.3, 0.3), rng.range(0.6, 1.1)]).collect();
@@ -199,7 +220,7 @@ impl Case {
             for i in 0..ni {
                 let c = grid.cell(i, 1, 0);
                 let yp = 0.1 * (300.0f64 / 0.1).powf(i as f64 / (ni - 1) as f64);
-                let nu = visc.mu(GAMMA * cells[c][4] / cells[c][0]) / cells[c][0];
+                let nu = t3::wall_props(&cells[c], visc.mu(GAMMA * cells[c][4] / cells[c][0]), iso).1;
                 let u_star = yp * nu / dwall[c];
                 cells[c][1] = u_star * t3::law_uplus(yp);
                 cells[c][2] = 0.0;
@@ -221,7 +242,7 @@ impl Case {
             }
         }
         let (mut grad, mut mu) = (vec![[0.0; 12]; nc], vec![0.0; nc]);
-        v3::cell_pass(&visc, &grid, &solid, &w, &mut grad, &mut mu);
+        v3::cell_pass(&visc, &grid, &solid, &w, iso, &mut grad, &mut mu);
         // roughness on two cells of three: `d / ks` of 3.3 (the blend band of the rough law of the wall), 100 and 1000 (a cell far above the roughness: the rough law and the
         // runaway guard of `turbulence3::wall_state`, the fin tips of the example rocket)
         let ks: Vec<f64> = (0..nc)
@@ -232,7 +253,7 @@ impl Case {
             })
             .collect();
         let mut wall = vec![[0.0; 3]; nc];
-        t3::wall_state_pass(&grid, &solid, &dirs, &w, &mu, &dwall, &ks, law_i_walls, &mut wall);
+        t3::wall_state_pass(&grid, &solid, &dirs, &w, &mu, &dwall, &ks, iso, law_i_walls, &mut wall);
         let mut turb: Vec<[f64; 2]> = (0..nc).map(|_| [10f64.powf(rng.range(-6.0, -2.0)), 10f64.powf(rng.range(0.0, 2.0))]).collect();
         // the wall cells of the sweep carry `k+ = k / u_tau^2` from 0.3 to 40, so that the `k` cap of the law of the wall acts where its weight is not small (`y+ >~ 3`)
         for &(c, u_star) in &u_stars {
@@ -252,7 +273,7 @@ impl Case {
         let f = [0, 1, 2].map(|dir| {
             let [n0, n1, n2] = face_shape(&grid, dir);
             let mut v = vec![[0.0; 5]; n0 * n1 * n2];
-            let one = |i: usize, j: usize, k: usize, q: usize| match face_sides3(&grid, &solid, &w, dir, i, j, k) {
+            let one = |i: usize, j: usize, k: usize, q: usize| match face_sides3(&grid, &solid, &w, iso, dir, i, j, k) {
                 Some(s) => {
                     let n = face_of(&grid, dir, i, j, k).1.n;
                     let mf = |w: &Prim3| w[0] * (w[1] * n[0] + w[2] * n[1] + w[3] * n[2]);
@@ -278,7 +299,7 @@ impl Case {
             v
         });
         let dt: Vec<f64> = (0..nc).map(|_| rng.range(0.02, 0.2)).collect();
-        Case { name: name.into(), grid, cfg, solid, w, dirs, bc, sym, mu, mu_t, grad, wall, dwall, ks, law_strain, law_i_walls, f, dt, turb, re_c }
+        Case { name: name.into(), grid, cfg, solid, w, dirs, bc, sym, mu, mu_t, grad, wall, dwall, ks, law_strain, law_i_walls, f, dt, turb, re_c, iso }
     }
 
     fn input(&self) -> TurbIn<'_, 2> {
@@ -292,6 +313,7 @@ impl Case {
             mu_t: &self.mu_t,
             grad: &self.grad,
             wall: &self.wall,
+            iso: self.iso,
             ks: &self.ks,
             law_strain: self.law_strain,
             law_i_walls: self.law_i_walls,
@@ -316,7 +338,7 @@ impl Case {
                 continue;
             }
             let w = &self.w[pidx3(ni, nj, nk, (c % ni) as isize, ((c / ni) % nj) as isize, (c / (ni * nj)) as isize)];
-            let nu = self.mu[c] / w[0];
+            let nu = t3::wall_props(w, self.mu[c], self.iso).1;
             let speed = (w[1] * w[1] + w[2] * w[2] + w[3] * w[3]).sqrt();
             let yp = self.dwall[c] * t3::u_tau_law(nu, speed, self.dwall[c]) / nu;
             r = (r.0.min(yp), r.1.max(yp));
@@ -383,6 +405,36 @@ fn cases() -> Vec<Case> {
         false,
         false,
         17,
+    ));
+    // isothermal walls (`T_w = 1.2`; the noisy states have `T` of 0.7 to 1.9, so the floor of the ghost temperature acts in a few cells): the ghost of the viscous kernels, the wall
+    // viscosity of the face, the law of the wall at the wall temperature (`wall_props`: `rho_w`, `nu_w`) in the wall state, the strain and the `k` pin
+    let cold = WallThermal::Isothermal(1.2);
+    let block = [SolidBox { i: 3..5, j: 0..3, k: 2..4 }];
+    let (s, bc) = box_sides(false);
+    for (name, law_i) in [("box, Inf ghosts, law_strain, isothermal wall", false), ("box, Inf ghosts, law_strain, law_i_walls, isothermal wall", true)] {
+        v.push(Case::with_wall(name, box_grid([8, 7, 6], &block, &mut Rng::new(11)), box_config(), s, bc, re_box, Flow::Random, true, true, law_i, 3, cold));
+    }
+    for (name, rough) in
+        [("y+ sweep 0.1 .. 300, smooth, law_strain, isothermal wall", false), ("y+ sweep 0.1 .. 300, rough cells, law_strain, isothermal wall", true)]
+    {
+        let mut g = Grid3::try_from_nodes(n[0], n[1], n[2], x.clone(), y.clone(), z.clone()).expect("sweep grid");
+        g.mark_solid(SolidBox { i: 0..n[0], j: 0..1, k: 0..n[2] }, Some(Part::Body(0)));
+        v.push(Case::with_wall(name, g, box_config(), s, bc, 5.0e4, Flow::YPlusSweep, rough, true, false, 7, cold));
+    }
+    let c = sector_case(true, 4, 6);
+    v.push(Case::with_wall(
+        "sector N 4 (tiny), isothermal wall",
+        body_grid3(&c.grid).expect("sector grid"),
+        config(&c),
+        wedge_sym,
+        wedge_bc,
+        2.0e5,
+        Flow::Random,
+        true,
+        false,
+        false,
+        17,
+        cold,
     ));
     v
 }

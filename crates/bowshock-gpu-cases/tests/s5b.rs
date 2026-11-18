@@ -300,3 +300,36 @@ fn motor_jet_wedge_matches_cpu() {
     compare_with("jet SST block", &|| make(Some(Turbulence::Sst), false), 30, IMPLICIT, &mut rows);
     report("S5b motor jet on the wedge (ANF body, jet 0.25 d, Mach 2), 30 iterations from the free stream", &rows);
 }
+
+/// [`host`] with isothermal no-slip walls at `T_w / T_inf = t_wall` (`RansOpts3::wall_thermal`).
+fn host_isothermal(grid: &Grid3, mach: f64, scheme: Scheme3, v: Viscous, t_wall: f64) -> Solver3 {
+    use bowshock_cfd::solver3::RansOpts3;
+    use bowshock_cfd::sst::WallThermal;
+    let low_mach = matches!(scheme, Scheme3::Implicit(p) if p.low_mach_precond);
+    let cfg = Config3 { freestream: freestream3(mach, 0.0), cfl: 0.5, limiter: Limiter::VanAlbada, first_order_iters: 5, low_mach, scheme };
+    let mut s = Solver3::new(grid.clone(), cfg);
+    s.set_viscous_with(Some(v), RansOpts3 { wall_thermal: WallThermal::Isothermal(t_wall), ..RansOpts3::default() });
+    s
+}
+
+/// Isothermal walls (`WallThermal::Isothermal`: the viscous ghost `2 T_w - T`, the wall viscosity `mu(T_w)`, the law of the wall at the wall temperature) on the box of the
+/// laminar and SST runs: the wall at 0.8 `T_inf` under the Mach 0.3 flow (heat to the wall) and at 1.2 under the Mach 2 flow (both signs, the stagnation temperature 1.8), explicit
+/// and implicit block, 30 iterations from the free stream, the targets of the adiabatic rows.
+#[test]
+fn isothermal_box_matches_cpu() {
+    let g = box_grid();
+    let mut rows = Vec::new();
+    for (turbulence, mach, re, t_wall) in [
+        (Turbulence::Laminar, 0.3, 500.0, 0.8),
+        (Turbulence::Laminar, 2.0, 2e3, 1.2),
+        (Turbulence::Sst, 0.3, 2e3, 0.8),
+        (Turbulence::Sst, 0.3, 2e5, 0.8),
+        (Turbulence::Sst, 2.0, 2e5, 1.2),
+    ] {
+        let v = viscous(turbulence, re);
+        let name = format!("{turbulence:?} M {mach} Re {re:.0e} Tw {t_wall}");
+        compare_with(&format!("{name} explicit"), &|| host_isothermal(&g, mach, Scheme3::Explicit, v, t_wall), 30, EXPLICIT, &mut rows);
+        compare_with(&format!("{name} implicit block"), &|| host_isothermal(&g, mach, block(), v, t_wall), 30, IMPLICIT, &mut rows);
+    }
+    report("S5b isothermal viscous box (10 x 8 x 6, no-slip block, dead block), 30 iterations from the free stream", &rows);
+}

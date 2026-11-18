@@ -404,6 +404,10 @@ pub struct AnalysisSpec {
     #[doc(hidden)]
     #[cfg_attr(feature = "serde", serde(default = "seed_default"))]
     pub seed_axisymmetric: bool,
+    /// Isothermal wall temperature over the free-stream static temperature ([`Analysis::wall_temperature_ratio`]); `None` (adiabatic walls) when absent.
+    #[doc(hidden)]
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub wall_temperature_ratio: Option<f64>,
     /// Grid-level uncertainty estimate ([`Analysis::estimate_uncertainty`]).
     pub estimate_uncertainty: bool,
     /// Keep the final flow field of every point ([`Analysis::keep_fields`]).
@@ -446,6 +450,7 @@ pub struct Analysis {
     drag_tolerance: Option<f64>,
     warm_start: bool,
     seed_axisymmetric: bool,
+    wall_temperature_ratio: Option<f64>,
     estimate_uncertainty: bool,
     grid_mach: Option<f64>,
     case3_hook: Option<fn(&mut Case3)>,
@@ -492,6 +497,7 @@ impl Analysis {
             drag_tolerance: None,
             warm_start: false,
             seed_axisymmetric: true,
+            wall_temperature_ratio: None,
             estimate_uncertainty: false,
             grid_mach: None,
             case3_hook: None,
@@ -542,6 +548,7 @@ impl Analysis {
             drag_tolerance: self.drag_tolerance,
             warm_start: self.warm_start,
             seed_axisymmetric: self.seed_axisymmetric,
+            wall_temperature_ratio: self.wall_temperature_ratio,
             estimate_uncertainty: self.estimate_uncertainty,
             keep_fields: self.keep_fields,
             grid_mach: self.grid_mach,
@@ -565,6 +572,7 @@ impl Analysis {
         a.drag_tolerance = spec.drag_tolerance;
         a.warm_start = spec.warm_start;
         a.seed_axisymmetric = spec.seed_axisymmetric;
+        a.wall_temperature_ratio = spec.wall_temperature_ratio;
         a.estimate_uncertainty = spec.estimate_uncertainty;
         a.keep_fields = spec.keep_fields;
         a.grid_mach = spec.grid_mach;
@@ -725,6 +733,17 @@ impl Analysis {
         self
     }
 
+    /// Isothermal no-slip walls at `T_w = ratio T_inf` of the free-stream static temperature (`None`, the default: adiabatic walls) in the 3D engine ([`Engine::Solver3`]; the viscous
+    /// terms only). The ghost temperature of the wall is `2 T_w - T`, the wall viscosity `mu(T_w)`, and the law of the wall of the SST treatment takes the density and
+    /// viscosity at the wall temperature (`bowshock_cfd::sst::WallThermal`). The wall spacing of the grid tiers stays that of the adiabatic wall. A cold wall (a model in a
+    /// tunnel or a free-flight range, `ratio` near 1) raises the friction drag by the van Driest factor (about 1.14 at Mach 1.8 and 1.3 at Mach 3, Reynolds number 1e7 on the finless ANF body).
+    /// Needs [`Analysis::viscous`]; `ratio` must be finite and positive.
+    #[doc(hidden)]
+    pub fn wall_temperature_ratio(mut self, ratio: Option<f64>) -> Self {
+        self.wall_temperature_ratio = ratio;
+        self
+    }
+
     /// Also run the sweep one grid level away (`level - 1`, or `level + 1` on the coarsest level) and report the difference of the
     /// total drag in [`PolarPoint::cd_uncertainty`]. Costs a second sweep.
     pub fn estimate_uncertainty(mut self, on: bool) -> Self {
@@ -815,6 +834,17 @@ impl Analysis {
         }
         if self.roughness_m > 0.0 && (self.flight.is_none() || !self.dimensional) {
             return Err(Error::InvalidInput("roughness needs Analysis::viscous and a dimensional BodySpec".into()));
+        }
+        if let Some(t) = self.wall_temperature_ratio {
+            if !(t.is_finite() && t > 0.0) {
+                return Err(Error::InvalidInput(format!("wall temperature ratio {t} must be finite and > 0")));
+            }
+            if self.flight.is_none() {
+                return Err(Error::InvalidInput("wall temperature needs Analysis::viscous".into()));
+            }
+            if self.engine != Engine::Solver3 {
+                return Err(Error::Unsupported("an isothermal wall needs the 3D engine (Engine::Solver3)".into()));
+            }
         }
         if let Some(f) = &self.fins {
             f.validate()?;

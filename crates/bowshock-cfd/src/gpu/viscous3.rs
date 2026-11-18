@@ -15,6 +15,7 @@
 // kernel is the padded primitive record `w` (`[ni + 4, nj + 4, nk + 4]`, `pidx3`) that `assign_ghosts3` fills; the face data of the host (`face_dirs`,
 // `face_cells`) is uploaded once as `VGeo3`.
 
+use crate::sst::{IsoWall, ISO_GHOST_T_MIN};
 use crate::viscous3::{face_cells, face_dirs, face_shape, SideKind, SymSides};
 
 /// Four fields: the momentum and energy components of a viscous flux (the mass component is zero), or the quantities `(u, v, w, T)`.
@@ -46,11 +47,13 @@ pub(crate) struct VGeo3 {
     dir: [VFace3; 3],
     sym: SymSides,
     v: Viscous,
+    /// Isothermal wall condition (`None`: adiabatic): the ghost of the no-slip walls and their viscosity (`viscous3::wall_ghost_thermal3`, `face_mu_cells`).
+    iso: Option<IsoWall>,
 }
 
 impl VGeo3 {
     /// `solid` is the per-cell update mask (solid + dead cells, the CPU `Solver3::solid`), `sym` the symmetry sides of the domain box.
-    pub(crate) fn new(ctx: &Context, grid: &Grid3, solid: &[bool], sym: &SymSides, v: Viscous) -> Result<VGeo3> {
+    pub(crate) fn new(ctx: &Context, grid: &Grid3, solid: &[bool], sym: &SymSides, v: Viscous, iso: Option<IsoWall>) -> Result<VGeo3> {
         let dirs = face_dirs(grid, solid, sym);
         let family = |dir: usize| -> Result<VFace3> {
             let shape = face_shape(grid, dir);
@@ -85,7 +88,7 @@ impl VGeo3 {
                 wall: [mask(&wall[0])?, mask(&wall[1])?],
             })
         };
-        Ok(VGeo3 { dir: [family(0)?, family(1)?, family(2)?], sym: *sym, v })
+        Ok(VGeo3 { dir: [family(0)?, family(1)?, family(2)?], sym: *sym, v, iso })
     }
 }
 
@@ -116,14 +119,24 @@ fn pad_edge3<F: Fields<Elem = S>>(a: &F, dir: usize, before: usize, after: usize
 
 impl VGeo3 {
     /// The primitive states of the two sides of every face of `dir` from the padded record `w`: the lower and the upper cell of the face (a domain ghost layer
-    /// at the boundary), a no-slip wall side replaced by the wall ghost `(rho, -u, -v, -w, p)` of the fluid cell on its other side (`face_sides3`).
+    /// at the boundary), a no-slip wall side replaced by the wall ghost of the fluid cell on its other side (`face_sides3`): `(rho, -u, -v, -w, p)`, or for an isothermal wall
+    /// `rho = gamma p / T_g` with `T_g = max(2 T_w - T, ISO_GHOST_T_MIN T_w)` (`viscous3::wall_ghost_thermal3`).
     fn side_states3(&self, w: &Rec3, dir: usize, n: [usize; 3]) -> (Rec3, Rec3) {
         let mut line = w.clone();
         for a in (0..3).filter(|&a| a != dir) {
             line = line.slice(a, 2..n[a] + 2);
         }
         let (lo, hi) = (line.slice(dir, 1..n[dir] + 2), line.slice(dir, 2..n[dir] + 3));
-        let ghost = |s: &Rec3| -> Rec3 { [s[0].clone(), -&s[1], -&s[2], -&s[3], s[4].clone()] };
+        let ghost = |s: &Rec3| -> Rec3 {
+            let rho = match self.iso {
+                None => s[0].clone(),
+                Some(i) => {
+                    let t_g = (c(2.0 * i.t_w) - temperature3(s)).maximum(c(ISO_GHOST_T_MIN * i.t_w));
+                    c(GAMMA) * &s[4] / &t_g
+                }
+            };
+            [rho, -&s[1], -&s[2], -&s[3], s[4].clone()]
+        };
         let f = &self.dir[dir];
         (select3(&f.wall[0], &ghost(&hi), &lo), select3(&f.wall[1], &ghost(&lo), &hi))
     }
@@ -174,10 +187,10 @@ impl LazySolver3 {
     }
 
     /// Switches the viscous terms on: the host geometry of the face passes (`grid`, `sym` the symmetry sides of the domain box) and the gas parameters.
-    pub fn set_viscous3(&mut self, grid: &Grid3, v: Viscous, sym: &SymSides) -> Result<()> {
+    pub fn set_viscous3(&mut self, grid: &Grid3, v: Viscous, sym: &SymSides, iso: Option<IsoWall>) -> Result<()> {
         self.compiled = None;
         let solid: Vec<bool> = grid.part.iter().map(|&p| p != crate::grid3::PART_FLUID).collect();
-        self.visc = Some(VGeo3::new(&self.ctx, grid, &solid, sym, v)?);
+        self.visc = Some(VGeo3::new(&self.ctx, grid, &solid, sym, v, iso)?);
         Ok(())
     }
 
@@ -222,12 +235,21 @@ impl LazySolver3 {
     }
 
     /// Face viscosity and eddy viscosity (`viscous3::face_mu3`): the mean of the two sides, a ghost side taking its cell's values, the eddy viscosity of a wall
-    /// ghost `2 mu_t,w - mu_t` (`mu_t,w` zero for a smooth wall: `-mu_t`, a face value 0). `cl`, `cr`: the cell sides of `[mu, mu_t, mu_t,w]`.
+    /// ghost `2 mu_t,w - mu_t` (`mu_t,w` zero for a smooth wall: `-mu_t`, a face value 0) and, across an isothermal wall, the laminar viscosity `2 mu(T_w) - mu` (a face value `mu(T_w)`).
+    /// `cl`, `cr`: the cell sides of `[mu, mu_t, mu_t,w]`.
     fn face_mu3(&self, vg: &VGeo3, dir: usize, cl: &[A; 3], cr: &[A; 3]) -> (A, A) {
         let f = &vg.dir[dir];
         let mut_l = select(&f.wall[0], c(2.0) * &cl[2] - &cl[1], &cl[1]);
         let mut_r = select(&f.wall[1], c(2.0) * &cr[2] - &cr[1], &cr[1]);
-        (c(0.5) * (&cl[0] + &cr[0]), c(0.5) * (&mut_l + &mut_r))
+        let mu_f = match vg.iso {
+            None => c(0.5) * (&cl[0] + &cr[0]),
+            Some(i) => {
+                let mu_l = select(&f.wall[0], c(2.0 * i.mu_w) - &cl[0], &cl[0]);
+                let mu_r = select(&f.wall[1], c(2.0 * i.mu_w) - &cr[0], &cr[0]);
+                c(0.5) * (&mu_l + &mu_r)
+            }
+        };
+        (mu_f, c(0.5) * (&mut_l + &mut_r))
     }
 
     /// Pass 2 (`viscous3::face_pass`): the viscous flux `Fv.n` of every face of the three families, as `[Fv_x, Fv_y, Fv_z, Fv_E]` (the mass component is zero),

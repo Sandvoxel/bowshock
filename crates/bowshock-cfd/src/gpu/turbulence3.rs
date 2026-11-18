@@ -237,6 +237,8 @@ fn face_q3(grid: &Grid3, dir: usize, f: [usize; 3]) -> usize {
 
 /// The host-built geometry of the turbulence kernels.
 pub(crate) struct TGeo3 {
+    /// Isothermal wall condition (`None`: adiabatic) of the viscous geometry: the law of the wall takes the density and viscosity at the wall temperature (`turbulence3::wall_props`).
+    iso: Option<sst2::IsoWall>,
     dir: [TFam3; 3],
     /// Fluid cells.
     fluid: Array<bool>,
@@ -351,6 +353,7 @@ impl TGeo3 {
             (ns?.try_into().ok(), ev?.try_into().ok(), Some(counted))
         };
         Ok(TGeo3 {
+            iso: vg.iso,
             dir,
             fluid,
             wall_idx,
@@ -370,6 +373,8 @@ impl TGeo3 {
 pub(crate) struct TDev3<const N: usize> {
     /// Density.
     rho: A,
+    /// Static pressure (the wall density of an isothermal wall is `gamma p / T_w`).
+    pres: A,
     /// `mu` and the mean-flow gradient of the viscous cell pass.
     cell: VCell3,
     /// Eddy viscosity of the previous update.
@@ -541,8 +546,19 @@ impl LazySolver3 {
         let Some(idx) = &tg.wall_idx else { return Ok(std::array::from_fn(|_| c(0.0) * &p[0])) };
         let at = |a: &A| a.take(idx);
         let (rho, mu, d) = (at(&p[0]), at(mu), at(dwall));
-        let nu = &mu / &rho;
         let (u, v, w) = (at(&p[1]), at(&p[2]), at(&p[3]));
+        // the density and kinematic viscosity of the law of the wall: the cell's, or the ones at the wall temperature of an isothermal wall (`turbulence3::wall_props`)
+        let (rho, nu) = match tg.iso {
+            None => {
+                let nu = &mu / &rho;
+                (rho, nu)
+            }
+            Some(i) => {
+                let rho_w = c(GAMMA) * at(&p[4]) / c(i.t_w);
+                let nu = c(i.mu_w) / &rho_w;
+                (rho_w, nu)
+            }
+        };
         let speed = self.wall_speed_at3(tg, &u, &v, &w);
         let smooth = self.wall_smooth3(&rho, &nu, &speed, &d);
         let state = match ks {
@@ -783,7 +799,10 @@ impl LazySolver3 {
         let (idx, pos) = (tg.wall_idx.as_ref()?, tg.wall_pos.as_ref()?);
         let at = |a: &A| a.take(idx);
         let (rho, mu, speed, d, w1) = (at(&dev.rho), at(&dev.cell.mu), at(&dev.speed), at(&dev.dwall), at(&dev.wall[1]));
-        let nu = &mu / &rho;
+        let nu = match tg.iso {
+            None => &mu / &rho,
+            Some(i) => c(i.mu_w * i.t_w) / (c(GAMMA) * at(&dev.pres)),
+        };
         let u_tau = self.u_tau3(&nu, &speed, &d);
         let yp = &d * &u_tau / &nu;
         let (_, dup) = law3(&yp);
@@ -803,6 +822,7 @@ impl LazySolver3 {
     fn with_law3<const N: usize>(&self, tg: &TGeo3, dev: &TDev3<N>) -> TDev3<N> {
         TDev3 {
             rho: dev.rho.clone(),
+            pres: dev.pres.clone(),
             cell: VCell3 { grad: dev.cell.grad.clone(), mu: dev.cell.mu.clone() },
             mu_t: dev.mu_t.clone(),
             wall: dev.wall.clone(),
@@ -867,6 +887,7 @@ impl LazySolver3 {
         };
         let dev = TDev3 {
             rho: p[0].clone(),
+            pres: p[4].clone(),
             cell: VCell3 { grad, mu: per_cell(&|c| cx.mu[c])? },
             mu_t: per_cell(&|c| cx.mu_t[c])?,
             wall: [per_cell(&|c| cx.wall[c][0])?, per_cell(&|c| cx.wall[c][1])?, per_cell(&|c| cx.wall[c][2])?],
@@ -894,7 +915,7 @@ impl LazySolver3 {
             return Err(luma::LumaError::Unsupported("the grid of the turbulence inputs differs from the grid of the solver".into()));
         }
         let visc = crate::sst::Viscous { re_c: 1.0, sutherland: 0.368, turbulence: crate::sst::Turbulence::Sst, wall_i_start: 0, roughness: 0.0 };
-        let vg = VGeo3::new(&self.ctx, cx.grid, cx.solid, sym, visc)?;
+        let vg = VGeo3::new(&self.ctx, cx.grid, cx.solid, sym, visc, cx.iso)?;
         let tg = TGeo3::new(&self.ctx, cx.grid, cx.solid, sym, cx.bc, &vg, cx.law_i_walls)?;
         Ok((vg, tg))
     }

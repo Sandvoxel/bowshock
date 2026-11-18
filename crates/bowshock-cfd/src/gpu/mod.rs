@@ -674,9 +674,9 @@ impl GpuSolver3 {
         Ok(on3_mut!(self, s => s.profile_step()?))
     }
 
-    /// Switches the 3D viscous kernels on (the host geometry of the face passes: `grid`, the symmetry sides of the domain box); see `LazySolver3::set_viscous3`.
-    pub fn set_viscous(&mut self, grid: &Grid3, v: crate::sst::Viscous, sym: &crate::viscous3::SymSides) -> Result<()> {
-        on3_mut!(self, s => s.set_viscous3(grid, v, sym)?);
+    /// Switches the 3D viscous kernels on (the host geometry of the face passes: `grid`, the symmetry sides of the domain box, the isothermal wall condition, `None`: adiabatic); see `LazySolver3::set_viscous3`.
+    pub fn set_viscous(&mut self, grid: &Grid3, v: crate::sst::Viscous, sym: &crate::viscous3::SymSides, iso: Option<crate::sst::IsoWall>) -> Result<()> {
+        on3_mut!(self, s => s.set_viscous3(grid, v, sym, iso)?);
         Ok(())
     }
 

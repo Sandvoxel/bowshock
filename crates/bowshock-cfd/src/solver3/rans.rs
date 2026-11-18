@@ -40,8 +40,8 @@
 //!
 //! `RansOpts3::sym` (which sides of the domain box have a mirror-image ghost layer: a symmetry plane or the slip wall `j = 0`) goes to `viscous3::face_dirs`, and
 //! `RansOpts3::bc` (the scalar ghost of every side: free stream or the cell's own value) to `turbulence3`. The defaults match the boundary conditions of
-//! [`Solver3`]: `i0, i1, j1` far field (`Inf`), `j0` slip wall / axis, `k0, k1` symmetry planes. Every fluid/solid face is a no-slip adiabatic wall (the viscous solver
-//! has no slip solid walls) except the exit faces of a motor jet (`Part::Jet` cells, `solver3/jet.rs`: an inflow with the jet state, no wall, no wall state, no wall
+//! [`Solver3`]: `i0, i1, j1` far field (`Inf`), `j0` slip wall / axis, `k0, k1` symmetry planes. Every fluid/solid face is a no-slip wall (adiabatic, or isothermal with
+//! [`RansOpts3::wall_thermal`]: the viscous ghost `2 T_w - T`, face viscosity `mu(T_w)`, the law of the wall at the wall temperature; the inviscid flux and the implicit wall Jacobian keep the adiabatic ghost) except the exit faces of a motor jet (`Part::Jet` cells, `solver3/jet.rs`: an inflow with the jet state, no wall, no wall state, no wall
 //! distance); and so is every `j = 0` boundary face inside a run of `Grid3::wall_j0` (the body surface of a grid without solid
 //! cells under it): `viscous3::face_cells` returns the `Wall` side, `fill_ghosts` fills the `j = -1, -2` layers with the no-slip ghost, `assemble3` uses the
 //! no-slip ghost Jacobian and `walldist3::wall_faces` lists the face for the wall distance. A `j = 0` face outside the runs stays a slip wall.
@@ -59,7 +59,7 @@
 use super::Solver3;
 use crate::gas3::{Cons3, Prim3};
 use crate::grid3::Grid3;
-use crate::sst::{Turbulence, Viscous};
+use crate::sst::{IsoWall, Turbulence, Viscous, WallThermal};
 use crate::turbulence3::{self, ScalarBc, ScalarSides, Sst, TurbIn};
 use crate::viscous3::{self, face_shape, FaceDirs3, Grad3, SymSides, WallTraction};
 use crate::walldist3::{wall_distance3, wall_faces};
@@ -81,6 +81,9 @@ pub struct RansOpts3 {
     /// `false` (default): those walls are plain resolved walls (`k_w = 0`, `omega_w` Menter's value, `mu_t,w = 0`, gradient strain), as in the 2D solver; see
     /// [`turbulence3::wall_state_pass`].
     pub law_i_walls: bool,
+    /// Thermal condition of the no-slip walls ([`WallThermal`]; `Adiabatic` is the default and leaves every result bit-identical). An isothermal wall changes the ghost of the viscous
+    /// kernels (`T_g = 2 T_w - T`, face viscosity `mu(T_w)`) and gives the law of the wall the density and viscosity at the wall temperature; the inviscid fluxes keep the adiabatic ghost.
+    pub wall_thermal: WallThermal,
 }
 
 impl Default for RansOpts3 {
@@ -91,6 +94,7 @@ impl Default for RansOpts3 {
             ks: Vec::new(),
             pressure_outflow: true,
             law_i_walls: false,
+            wall_thermal: WallThermal::Adiabatic,
         }
     }
 }
@@ -104,6 +108,8 @@ pub struct Rans3 {
     pub bc: ScalarSides,
     /// Wall class switch of [`RansOpts3::law_i_walls`].
     pub law_i_walls: bool,
+    /// Isothermal wall condition of the viscous kernels (`None`: adiabatic), [`RansOpts3::wall_thermal`] resolved against the gas.
+    pub iso: Option<IsoWall>,
     /// Geometry of the compact face gradients (`viscous3::face_dirs`).
     pub dirs: FaceDirs3,
     /// Gradient of `(u, v, w, T)`, laminar and eddy viscosity of every cell as of the last residual evaluation.
@@ -145,7 +151,7 @@ impl Solver3 {
 
     /// Switch the viscous terms on (`Some`) or off. Allocates the gradient, viscosity and face-flux arrays; with `Turbulence::Sst` also the turbulence state (the
     /// free stream), the exact wall distance of every cell ([`wall_distance3`], once) and the wall roughness. Every fluid/solid face of the grid is a no-slip
-    /// adiabatic wall; faces with `area == 0` carry no flux.
+    /// wall, adiabatic unless `opts.wall_thermal` is isothermal; faces with `area == 0` carry no flux.
     pub fn set_viscous_with(&mut self, v: Option<Viscous>, opts: RansOpts3) {
         let Some(v) = v else {
             self.rans = None;
@@ -178,6 +184,7 @@ impl Solver3 {
             model,
             bc: opts.bc,
             law_i_walls: opts.law_i_walls,
+            iso: opts.wall_thermal.iso(&v),
             p_outflow: opts.pressure_outflow.then_some(self.cfg.freestream[4]),
             dirs,
             grad: vec![[0.0; 12]; nc],
@@ -263,16 +270,16 @@ impl Solver3 {
         {
             let Solver3 { grid, w, solid, rans, .. } = self;
             let Some(r) = rans.as_deref_mut() else { return };
-            viscous3::cell_pass(&r.visc, grid, solid, w, &mut r.grad, &mut r.mu);
+            viscous3::cell_pass(&r.visc, grid, solid, w, r.iso, &mut r.grad, &mut r.mu);
         }
         // the jet cells are the ghosts of the exit faces: their viscosity, scalars and gradient (`cell_pass` leaves the solid cells at zero)
         self.jet_viscous_fix();
         let Solver3 { grid, w, solid, rans, .. } = self;
         let Some(r) = rans.as_deref_mut() else { return };
         if !r.wall.is_empty() {
-            turbulence3::wall_state_pass(grid, solid, &r.dirs, w, &r.mu, &r.dwall, &r.ks, r.law_i_walls, &mut r.wall);
+            turbulence3::wall_state_pass(grid, solid, &r.dirs, w, &r.mu, &r.dwall, &r.ks, r.iso, r.law_i_walls, &mut r.wall);
         }
-        viscous3::face_pass(grid, solid, w, &r.dirs, &r.grad, &r.mu, &r.mu_t, &r.wall, &mut r.fvi, &mut r.fvj, &mut r.fvk);
+        viscous3::face_pass(grid, solid, w, &r.dirs, &r.grad, &r.mu, &r.mu_t, &r.wall, r.iso, &mut r.fvi, &mut r.fvj, &mut r.fvk);
     }
 
     /// Step 4: `res += (1/V) sum S Fv`. On a wedge the azimuthal momentum of the residual is then projected out: the flow of a wedge has none (the pressure of its `k`
@@ -300,7 +307,7 @@ impl Solver3 {
         let Solver3 { grid, solid, w, rans, .. } = self;
         let Some(r) = rans.as_deref_mut() else { return };
         let [li, lj, lk] = &mut r.lam;
-        viscous3::lambda_pass(grid, solid, w, &r.dirs, &r.mu, &r.mu_t, &r.wall, li, lj, lk);
+        viscous3::lambda_pass(grid, solid, w, &r.dirs, &r.mu, &r.mu_t, &r.wall, r.iso, li, lj, lk);
     }
 
     /// Step 7: one update of `k`, `omega` and the eddy viscosity from the state and face fluxes of this iteration's residual evaluation.
@@ -317,6 +324,7 @@ impl Solver3 {
             mu_t: &r.mu_t,
             grad: &r.grad,
             wall: &r.wall,
+            iso: r.iso,
             ks: &r.ks,
             law_strain: true,
             law_i_walls: r.law_i_walls,

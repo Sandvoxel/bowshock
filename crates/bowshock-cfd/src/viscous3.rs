@@ -24,8 +24,10 @@
 //! What is a wall, a boundary and a ghost (the single classification of every kernel here, [`face_cells`]):
 //!
 //! * `solid[c]` is the per-cell solid mask (`Solver3::solid`; every cell of a body, a fin or an appendage). The state `w` of a solid cell is never read.
-//!   A face between a fluid and a solid cell is a **no-slip adiabatic wall**: the solid side is the ghost `(rho, -u, -v, -w, p)` of the fluid cell
-//!   ([`wall_ghost3`]). A face between two solid cells carries no flux, nor does a face with `area == 0` (the cells of an axis run have degenerate faces).
+//!   A face between a fluid and a solid cell is a **no-slip wall**, adiabatic by default: the solid side is the ghost `(rho, -u, -v, -w, p)` of the fluid cell
+//!   ([`wall_ghost3`]); with an isothermal wall (`iso: Option<IsoWall>`, [`crate::sst::WallThermal`]) the ghost of these kernels has the temperature `T_g = 2 T_w - T` at the same
+//!   pressure ([`wall_ghost_thermal3`]: the face value of `T` is `T_w` and the compact gradient is the heat-flux gradient of the wall) and the face viscosity is `mu(T_w)`
+//!   ([`face_mu_cells`]). A face between two solid cells carries no flux, nor does a face with `area == 0` (the cells of an axis run have degenerate faces).
 //! * A face on the domain boundary (`i = 0, ni`, `j = 0, nj`, `k = 0, nk`) has the first ghost layer of the padded array `w` ([`pidx3`]) on its outer side:
 //!   whatever the solver put there (far field, symmetry reflection, axis map). A face on the boundary whose inner cell is solid carries no flux.
 //! * A ghost sits at the mirror image of the centre of its fluid cell **in the plane of the face** (through its centroid, normal `Face3::n`; the 2D module
@@ -80,7 +82,7 @@
 use crate::gas3::{Cons3, Prim3, GAMMA};
 use crate::grid3::{Face3, Grid3, Part, PART_DEAD, PART_FLUID};
 use crate::solver3::pidx3;
-use crate::sst::{Viscous, PRANDTL, PRANDTL_T};
+use crate::sst::{IsoWall, Viscous, PRANDTL, PRANDTL_T};
 use rayon::prelude::*;
 
 /// Cell gradient `[u_x u_y u_z, v_x v_y v_z, w_x w_y w_z, T_x T_y T_z]`: `grad[3 m + d] = d phi_m / d x_d` of `phi = (u, v, w, T)`.
@@ -96,6 +98,17 @@ pub fn temperature3(w: &Prim3) -> f64 {
 #[inline]
 pub fn wall_ghost3(w: &Prim3) -> Prim3 {
     [w[0], -w[1], -w[2], -w[3], w[4]]
+}
+
+/// Ghost state of the *viscous* kernels across a no-slip wall: the adiabatic [`wall_ghost3`] for `iso == None`; across an isothermal wall `(rho_g, -u, -v, -w, p)` with the
+/// ghost temperature `T_g = 2 T_w - T` ([`IsoWall::ghost_t`]) at the same pressure, `rho_g = gamma p / T_g`, so that the face value of `T` is `T_w` and the compact
+/// gradient `(T_g - T) / d` is the heat-flux gradient of the wall. (The inviscid fluxes and the implicit Jacobian keep the adiabatic ghost: the wall pressure is what they need.)
+#[inline]
+pub fn wall_ghost_thermal3(w: &Prim3, iso: Option<IsoWall>) -> Prim3 {
+    match iso {
+        None => wall_ghost3(w),
+        Some(i) => [GAMMA * w[4] / i.ghost_t(temperature3(w)), -w[1], -w[2], -w[3], w[4]],
+    }
 }
 
 /// `(u, v, w, T)` of a primitive state.
@@ -223,12 +236,13 @@ pub struct FaceSides3 {
     pub noslip: bool,
 }
 
-/// States of the two sides of face `(i, j, k)` of family `dir` (see [`face_cells`]); `w` is the padded primitive array of `Solver3`.
-pub fn face_sides3(grid: &Grid3, solid: &[bool], w: &[Prim3], dir: usize, i: usize, j: usize, k: usize) -> Option<FaceSides3> {
+/// States of the two sides of face `(i, j, k)` of family `dir` (see [`face_cells`]); `w` is the padded primitive array of `Solver3`, `iso` the isothermal wall
+/// condition (`None`: adiabatic; see [`wall_ghost_thermal3`]).
+pub fn face_sides3(grid: &Grid3, solid: &[bool], w: &[Prim3], iso: Option<IsoWall>, dir: usize, i: usize, j: usize, k: usize) -> Option<FaceSides3> {
     let fc = face_cells(grid, solid, dir, i, j, k)?;
     let side = |s: usize| {
         let st = w[fc.pad[s]];
-        Side3 { w: if fc.kind[s] == SideKind::Wall { wall_ghost3(&st) } else { st }, cell: fc.cell[s], ghost: fc.kind[s] != SideKind::Cell }
+        Side3 { w: if fc.kind[s] == SideKind::Wall { wall_ghost_thermal3(&st, iso) } else { st }, cell: fc.cell[s], ghost: fc.kind[s] != SideKind::Cell }
     };
     Some(FaceSides3 { l: side(0), r: side(1), noslip: fc.noslip() })
 }
@@ -324,7 +338,8 @@ pub fn face_dirs(grid: &Grid3, solid: &[bool], sym: &SymSides) -> FaceDirs3 {
 
 /// Pass 1: viscosity and Green-Gauss gradient of `(u, v, w, T)` of every fluid cell (zero in solid cells). The neighbour across a no-slip wall is the wall
 /// ghost, so the face value of the velocity there is 0; a face without flux (zero area) adds nothing.
-pub fn cell_pass(v: &Viscous, grid: &Grid3, solid: &[bool], w: &[Prim3], grad: &mut [Grad3], mu: &mut [f64]) {
+#[allow(clippy::too_many_arguments)]
+pub fn cell_pass(v: &Viscous, grid: &Grid3, solid: &[bool], w: &[Prim3], iso: Option<IsoWall>, grad: &mut [Grad3], mu: &mut [f64]) {
     let (ni, nj, nk) = (grid.ni, grid.nj, grid.nk);
     let plane = ni * nj;
     grad.par_chunks_mut(plane).zip(mu.par_chunks_mut(plane)).enumerate().for_each(|(k, (gpl, mpl))| {
@@ -345,7 +360,7 @@ pub fn cell_pass(v: &Viscous, grid: &Grid3, solid: &[bool], w: &[Prim3], grad: &
                         let mut f = [i, j, k];
                         f[dir] += hi as usize;
                         let (_, face) = face_of(grid, dir, f[0], f[1], f[2]);
-                        let Some(s) = face_sides3(grid, solid, w, dir, f[0], f[1], f[2]) else { continue };
+                        let Some(s) = face_sides3(grid, solid, w, iso, dir, f[0], f[1], f[2]) else { continue };
                         let pn = phi3(&if hi { s.r.w } else { s.l.w });
                         let sign = if hi { 1.0 } else { -1.0 };
                         for m in 0..4 {
@@ -367,15 +382,16 @@ pub fn cell_pass(v: &Viscous, grid: &Grid3, solid: &[bool], w: &[Prim3], grad: &
 }
 
 /// Face viscosity and eddy viscosity: mean of the two sides, a ghost taking its cell's values (eddy viscosity `2 mu_t,w - mu_t` across a no-slip face, `-mu_t`
-/// for `wall` empty: the face value is the wall eddy viscosity `mu_t,w = wall[cell][2]`, 0 when smooth).
+/// for `wall` empty: the face value is the wall eddy viscosity `mu_t,w = wall[cell][2]`, 0 when smooth). Across an isothermal wall (`iso`) the laminar ghost viscosity
+/// is `2 mu(T_w) - mu`, so the face value is `mu(T_w)`, the viscosity at the wall.
 #[inline]
-pub fn face_mu3(mu: &[f64], mu_t: &[f64], wall: &[[f64; 3]], sides: &FaceSides3) -> (f64, f64) {
-    face_mu_cells(mu, mu_t, wall, [sides.l.cell, sides.r.cell], [sides.l.ghost, sides.r.ghost], sides.noslip)
+pub fn face_mu3(mu: &[f64], mu_t: &[f64], wall: &[[f64; 3]], iso: Option<IsoWall>, sides: &FaceSides3) -> (f64, f64) {
+    face_mu_cells(mu, mu_t, wall, iso, [sides.l.cell, sides.r.cell], [sides.l.ghost, sides.r.ghost], sides.noslip)
 }
 
 /// [`face_mu3`] from the fluid cells of the two sides (`cell`, for a ghost the adjacent fluid cell) and their ghost flags.
 #[inline]
-pub fn face_mu_cells(mu: &[f64], mu_t: &[f64], wall: &[[f64; 3]], cell: [usize; 2], ghost: [bool; 2], noslip: bool) -> (f64, f64) {
+pub fn face_mu_cells(mu: &[f64], mu_t: &[f64], wall: &[[f64; 3]], iso: Option<IsoWall>, cell: [usize; 2], ghost: [bool; 2], noslip: bool) -> (f64, f64) {
     let mut_side = |s: usize| {
         let c = cell[s];
         if ghost[s] && noslip {
@@ -388,7 +404,11 @@ pub fn face_mu_cells(mu: &[f64], mu_t: &[f64], wall: &[[f64; 3]], cell: [usize; 
             mu_t[c]
         }
     };
-    (0.5 * (mu[cell[0]] + mu[cell[1]]), 0.5 * (mut_side(0) + mut_side(1)))
+    let mu_side = |s: usize| match iso {
+        Some(i) if ghost[s] && noslip => 2.0 * i.mu_w - mu[cell[s]],
+        _ => mu[cell[s]],
+    };
+    (0.5 * (mu_side(0) + mu_side(1)), 0.5 * (mut_side(0) + mut_side(1)))
 }
 
 /// The gradient record of the mirror image of the field about the plane with unit normal `n`: the field `phi_g(x) = R phi(R x)` of a symmetry-plane ghost
@@ -435,9 +455,18 @@ pub fn face_gradient(dir: &FaceDir3, n: [f64; 3], grad: &[Grad3], sides: &FaceSi
 
 /// Viscous flux `Fv.n` of one face (per unit area; see the module documentation); `[0; 5]` for a face without flux (`dir.d == 0`).
 #[allow(clippy::too_many_arguments)]
-pub fn viscous_flux3(face: &Face3, dir: &FaceDir3, grad: &[Grad3], mu: &[f64], mu_t: &[f64], wall: &[[f64; 3]], sides: &FaceSides3) -> Cons3 {
+pub fn viscous_flux3(
+    face: &Face3,
+    dir: &FaceDir3,
+    grad: &[Grad3],
+    mu: &[f64],
+    mu_t: &[f64],
+    wall: &[[f64; 3]],
+    iso: Option<IsoWall>,
+    sides: &FaceSides3,
+) -> Cons3 {
     let gf = face_gradient(dir, face.n, grad, sides);
-    let (mu_f, mut_f) = face_mu3(mu, mu_t, wall, sides);
+    let (mu_f, mut_f) = face_mu3(mu, mu_t, wall, iso, sides);
     let uf = [0.5 * (sides.l.w[1] + sides.r.w[1]), 0.5 * (sides.l.w[2] + sides.r.w[2]), 0.5 * (sides.l.w[3] + sides.r.w[3])];
     let div = gf[0] + gf[4] + gf[8];
     let mue = mu_f + mut_f;
@@ -468,6 +497,7 @@ pub fn face_pass(
     mu: &[f64],
     mu_t: &[f64],
     wall: &[[f64; 3]],
+    iso: Option<IsoWall>,
     fvi: &mut [Cons3],
     fvj: &mut [Cons3],
     fvk: &mut [Cons3],
@@ -478,8 +508,8 @@ pub fn face_pass(
             if fam[q].d == 0.0 {
                 return [0.0; 5];
             }
-            let s = face_sides3(grid, solid, w, dir, i, j, k).expect("a face with a direction carries flux");
-            viscous_flux3(face_of(grid, dir, i, j, k).1, &fam[q], grad, mu, mu_t, wall, &s)
+            let s = face_sides3(grid, solid, w, iso, dir, i, j, k).expect("a face with a direction carries flux");
+            viscous_flux3(face_of(grid, dir, i, j, k).1, &fam[q], grad, mu, mu_t, wall, iso, &s)
         });
     }
 }
@@ -582,6 +612,7 @@ pub fn face_lambda3(
     mu: &[f64],
     mu_t: &[f64],
     wall: &[[f64; 3]],
+    iso: Option<IsoWall>,
     dir: usize,
     i: usize,
     j: usize,
@@ -592,8 +623,8 @@ pub fn face_lambda3(
     if d == 0.0 {
         return 0.0;
     }
-    let s = face_sides3(grid, solid, w, dir, i, j, k).expect("a face with a direction carries flux");
-    let (mu_f, mut_f) = face_mu3(mu, mu_t, wall, &s);
+    let s = face_sides3(grid, solid, w, iso, dir, i, j, k).expect("a face with a direction carries flux");
+    let (mu_f, mut_f) = face_mu3(mu, mu_t, wall, iso, &s);
     let rho_f = 0.5 * (s.l.w[0] + s.r.w[0]);
     GAMMA * (mu_f / PRANDTL + mut_f / PRANDTL_T) / (rho_f * d)
 }
@@ -608,6 +639,7 @@ pub fn face_lambdas(
     mu: &[f64],
     mu_t: &[f64],
     wall: &[[f64; 3]],
+    iso: Option<IsoWall>,
     dir: usize,
     i: usize,
     j: usize,
@@ -615,7 +647,7 @@ pub fn face_lambdas(
 ) -> (f64, f64) {
     let mut up = [i, j, k];
     up[dir] += 1;
-    (face_lambda3(grid, solid, w, dirs, mu, mu_t, wall, dir, i, j, k), face_lambda3(grid, solid, w, dirs, mu, mu_t, wall, dir, up[0], up[1], up[2]))
+    (face_lambda3(grid, solid, w, dirs, mu, mu_t, wall, iso, dir, i, j, k), face_lambda3(grid, solid, w, dirs, mu, mu_t, wall, iso, dir, up[0], up[1], up[2]))
 }
 
 /// [`face_lambda3`] of every face of the three families (layouts of `Grid3::{iface, jface, kface}`).
@@ -628,12 +660,13 @@ pub fn lambda_pass(
     mu: &[f64],
     mu_t: &[f64],
     wall: &[[f64; 3]],
+    iso: Option<IsoWall>,
     li: &mut [f64],
     lj: &mut [f64],
     lk: &mut [f64],
 ) {
     for (dir, out) in [(0, li), (1, lj), (2, lk)] {
-        map_faces(grid, dir, out, |i, j, k, _| face_lambda3(grid, solid, w, dirs, mu, mu_t, wall, dir, i, j, k));
+        map_faces(grid, dir, out, |i, j, k, _| face_lambda3(grid, solid, w, dirs, mu, mu_t, wall, iso, dir, i, j, k));
     }
 }
 
@@ -706,10 +739,10 @@ pub(crate) mod tests {
     ) -> (Vec<Grad3>, Vec<f64>, Vec<Cons3>, Vec<Cons3>, Vec<Cons3>) {
         let nc = g.ni * g.nj * g.nk;
         let (mut grad, mut mu) = (vec![[0.0; 12]; nc], vec![0.0; nc]);
-        cell_pass(&VISC, g, solid, w, &mut grad, &mut mu);
+        cell_pass(&VISC, g, solid, w, None, &mut grad, &mut mu);
         let dirs = face_dirs(g, solid, sym);
         let (mut fvi, mut fvj, mut fvk) = (vec![[0.0; 5]; g.iface.len()], vec![[0.0; 5]; g.jface.len()], vec![[0.0; 5]; g.kface.len()]);
-        face_pass(g, solid, w, &dirs, &grad, &mu, mu_t, wall, &mut fvi, &mut fvj, &mut fvk);
+        face_pass(g, solid, w, &dirs, &grad, &mu, mu_t, wall, None, &mut fvi, &mut fvj, &mut fvk);
         (grad, mu, fvi, fvj, fvk)
     }
 
@@ -895,6 +928,52 @@ pub(crate) mod tests {
                     assert!(r[1].abs() < 1e-11 && r[2].abs() < 1e-13 && r[3].abs() < 1e-13, "{r:?}");
                 }
                 assert_eq!(res[g.cell(i, 0, k)], [0.0; 5]);
+            }
+        }
+    }
+
+    /// An isothermal wall under a uniform fluid at rest at `T = 1.5` with `T_w = 1`: the ghost temperature is `2 T_w - T = 0.5` at the cell's pressure (floored at
+    /// `ISO_GHOST_T_MIN T_w` for a hot cell), the face value of `T` is `T_w`, the wall flux is `kappa(T_w) 2 (T - T_w) / h` (the compact gradient across `h / 2`, the viscosity `mu(T_w)`
+    /// of the face) and nothing else moves; the adiabatic wall of the same state has no flux at all.
+    #[test]
+    fn isothermal_wall_conducts_with_the_wall_viscosity() {
+        let (ni, nj, nk) = (3, 5, 2);
+        let h = [0.2, 0.05, 0.2];
+        let mut g = box_grid([ni, nj, nk], h);
+        set_solids(&mut g, vec![SolidBox { i: 0..ni, j: 0..1, k: 0..nk }]);
+        let solid = solid_mask(&g);
+        let (rho, t_cell, t_wall) = (1.0, 1.5, 1.0);
+        let cells = vec![[rho, 0.0, 0.0, 0.0, rho * t_cell / GAMMA]; ni * nj * nk];
+        let w = padded(&g, &solid, &cells);
+        let iso = crate::sst::WallThermal::Isothermal(t_wall).iso(&VISC).expect("isothermal");
+        assert!((iso.mu_w - VISC.mu(t_wall)).abs() < 1e-15);
+        let ghost = wall_ghost_thermal3(&cells[0], Some(iso));
+        assert!((temperature3(&ghost) - 0.5).abs() < 1e-14 && ghost[4] == cells[0][4] && ghost[1] == 0.0, "{ghost:?}");
+        let hot = [rho, 0.0, 0.0, 0.0, rho * 3.0 / GAMMA];
+        assert!((temperature3(&wall_ghost_thermal3(&hot, Some(iso))) - crate::sst::ISO_GHOST_T_MIN * t_wall).abs() < 1e-14, "the ghost temperature is floored");
+        assert_eq!(wall_ghost_thermal3(&hot, None), wall_ghost3(&hot));
+
+        let run = |iso: Option<IsoWall>| {
+            let nc = ni * nj * nk;
+            let (mut grad, mut mu) = (vec![[0.0; 12] as Grad3; nc], vec![0.0; nc]);
+            cell_pass(&VISC, &g, &solid, &w, iso, &mut grad, &mut mu);
+            let dirs = face_dirs(&g, &solid, &[false; 6]);
+            let (mut fvi, mut fvj, mut fvk) = (vec![[0.0; 5]; g.iface.len()], vec![[0.0; 5]; g.jface.len()], vec![[0.0; 5]; g.kface.len()]);
+            face_pass(&g, &solid, &w, &dirs, &grad, &mu, &vec![0.0; nc], &[], iso, &mut fvi, &mut fvj, &mut fvk);
+            (grad, fvj)
+        };
+        let (grad_c, fvj_c) = run(Some(iso));
+        let (grad_a, fvj_a) = run(None);
+        let want = iso.mu_w / PRANDTL / (GAMMA - 1.0) * 2.0 * (t_cell - t_wall) / h[1];
+        for k in 0..nk {
+            for i in 0..ni {
+                let (q, face) = face_of(&g, 1, i, 1, k);
+                assert_eq!(face.n, [0.0, 1.0, 0.0]);
+                close(fvj_c[q][4], want, 1e-12, "cold wall heat flux");
+                assert!(fvj_c[q][1].abs() < 1e-14 && fvj_c[q][2].abs() < 1e-14 && fvj_c[q][3].abs() < 1e-14);
+                close(grad_c[g.cell(i, 1, k)][10], (t_cell - t_wall) / h[1], 1e-12, "T_y of the first fluid cell: the face value is T_w");
+                assert_eq!(fvj_a[q][4], 0.0, "adiabatic: no heat flux");
+                assert_eq!(grad_a[g.cell(i, 1, k)][10], 0.0);
             }
         }
     }
@@ -1212,7 +1291,7 @@ pub(crate) mod tests {
             close(*rate, crate::viscous::diffusion_rate(mu[c], mu_t[c], rho, f.area, g.vol[c]), 1e-12, "the 2D formula");
         }
         let (mut li, mut lj, mut lk) = (vec![0.0; g.iface.len()], vec![0.0; g.jface.len()], vec![0.0; g.kface.len()]);
-        lambda_pass(&g, &solid, &w, &dirs, &mu, &mu_t, &[], &mut li, &mut lj, &mut lk);
+        lambda_pass(&g, &solid, &w, &dirs, &mu, &mu_t, &[], None, &mut li, &mut lj, &mut lk);
         // interior face between two fluid cells: d = h
         let (q, _) = face_of(&g, 0, 3, 2, 2);
         let (mu_f, mut_f) = (mu[c], 0.5 * (mu_t[g.cell(2, 2, 2)] + mu_t[g.cell(3, 2, 2)]));
@@ -1226,7 +1305,7 @@ pub(crate) mod tests {
         let (q_in, _) = face_of(&g, 0, 1, 1, 1);
         assert!(dirs.i[q_in].noslip && li[q_in] > 0.0);
         // lambda_pass and the single-face function agree, `face_lambdas` returns the lower and upper face of a cell
-        let (lo, hi) = face_lambdas(&g, &solid, &w, &dirs, &mu, &mu_t, &[], 0, 2, 2, 2);
+        let (lo, hi) = face_lambdas(&g, &solid, &w, &dirs, &mu, &mu_t, &[], None, 0, 2, 2, 2);
         assert_eq!((lo, hi), (li[face_of(&g, 0, 2, 2, 2).0], li[face_of(&g, 0, 3, 2, 2).0]));
     }
 }

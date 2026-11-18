@@ -98,10 +98,10 @@
 //! `omega_w` within 0.4 % of the 2D value, the wall shear within 1 % of the viscous one; for `y+ >= 30` the wall shear is within 4 % of the log law (Reichardt's constant
 //! differs from `E = 9.793` by 2 % in `U+`), `omega_w` within 6 % of `omega_log` and `k_w` of `u_tau^2 / sqrt(beta*)` within 7 %.
 
-use crate::gas3::{Cons3, Prim3};
+use crate::gas3::{Cons3, Prim3, GAMMA};
 use crate::grid3::Grid3;
 use crate::solver3::pidx3;
-use crate::sst::{aupoix_wall, A1, BETA1, BETA2, BETA_STAR, GAMMA1, GAMMA2, NU_T_WALL_MAX, SIGMA_K1, SIGMA_K2, SIGMA_W1, SIGMA_W2};
+use crate::sst::{aupoix_wall, IsoWall, A1, BETA1, BETA2, BETA_STAR, GAMMA1, GAMMA2, NU_T_WALL_MAX, SIGMA_K1, SIGMA_K2, SIGMA_W1, SIGMA_W2};
 use crate::viscous3::{face_cells, face_mu_cells, face_of, face_shape, map_faces, FaceCells, FaceDirs3, Grad3, SideKind};
 use rayon::prelude::*;
 
@@ -330,12 +330,29 @@ pub fn wall_state(rho: f64, nu: f64, speed: f64, d: f64, ks: f64) -> WallState {
     state
 }
 
+/// Density and kinematic viscosity the law of the wall takes in a wall-adjacent cell of state `w` and laminar viscosity `mu_c`: those of the cell for an adiabatic wall; for an
+/// isothermal one (`iso`) the values **at the wall temperature** and the cell's pressure, `rho_w = gamma p / T_w`, `nu_w = mu(T_w) / rho_w`. This is the approximation the cold
+/// wall makes of the automatic treatment: the law `U+(y+)` and the wall shear `tau_w = rho_w u_tau^2` are evaluated with the wall properties and no density (van Driest)
+/// transformation of the velocity between the wall and the cell centre, which is exact in the viscous sublayer (the first cell of a wall-resolved grid) and, in the log layer
+/// of a cold-wall boundary layer (`y+ ~ 15` first cells of the fin stacks), misses the factor `sqrt(rho_w / rho)` of the strain by a few per cent. The wall flux that the mean flow sees
+/// is `(mu(T_w) + mu_t,w) U / d` with `mu_t,w` chosen so that it IS `rho_w u_tau^2`.
+#[inline]
+pub fn wall_props(w: &Prim3, mu_c: f64, iso: Option<IsoWall>) -> (f64, f64) {
+    match iso {
+        None => (w[0], mu_c / w[0]),
+        Some(i) => {
+            let rho_w = GAMMA * w[4] / i.t_w;
+            (rho_w, i.mu_w / rho_w)
+        }
+    }
+}
+
 /// The wall state `[k_w, omega_w, mu_t,w]` of every fluid cell with a no-slip face (zero elsewhere), from the primitives `w` (padded), the viscosity `mu`
 /// (`viscous3::cell_pass`), the wall distance `dwall` (`walldist3`) and the roughness per cell `ks` (empty: all smooth); this is the `wall` array of
 /// `viscous3::face_mu3` and of [`update`]. Needed after every change of the mean flow, before the viscous face pass. The speed of the wall treatment is the one
 /// tangential to the wall (`|u - (u.n) n|`, `n` = `FaceDir3::e` of a no-slip face; the largest over the cell's no-slip faces): the cells in front of the base plane
 /// of a body see the recirculation hit the wall, a normal velocity that is no shear (with the total speed the base corner cells carried `tau` 1000 times a
-/// log-law value at `y+ ~ 1600`).
+/// log-law value at `y+ ~ 1600`). `iso` (an isothermal wall) gives the law of the wall the density and viscosity at the wall temperature ([`wall_props`]).
 ///
 /// **Wall classes** (`law_i_walls`): the automatic all-`y+` treatment is that of the streamwise walls, the no-slip faces of the `j` and `k` families (a body surface, the
 /// sides and tip of a fin). A cell whose only no-slip faces are `i` faces (the base plane of a body, the blunt leading and trailing edge of a fin) gets the plain wall state
@@ -351,6 +368,7 @@ pub fn wall_state_pass(
     mu: &[f64],
     dwall: &[f64],
     ks: &[f64],
+    iso: Option<IsoWall>,
     law_i_walls: bool,
     out: &mut [[f64; 3]],
 ) {
@@ -371,9 +389,9 @@ pub fn wall_state_pass(
                     continue;
                 }
                 let wc = &w[pidx3(ni, nj, nk, i as isize, j as isize, k as isize)];
-                let nu = mu[c] / wc[0];
+                let (rho_w, nu) = wall_props(wc, mu[c], iso);
                 let speed = wall_speed(grid, dirs, i, j, k, wc, law_i_walls).unwrap_or(0.0);
-                let s = wall_state(wc[0], nu, speed, dwall[c], ks.get(c).copied().unwrap_or(0.0));
+                let s = wall_state(rho_w, nu, speed, dwall[c], ks.get(c).copied().unwrap_or(0.0));
                 pl[j * ni + i] = [s.k_w, s.omega_w, s.mu_t_w];
             }
         }
@@ -594,6 +612,8 @@ pub struct TurbIn<'a, const N: usize> {
     pub grad: &'a [Grad3],
     /// `[k_w, omega_w, mu_t,w]` of the wall cells ([`wall_state_pass`]); full length (entries of cells without a no-slip face are not read).
     pub wall: &'a [[f64; 3]],
+    /// Isothermal wall condition (`None`: adiabatic): the wall properties of the law of the wall ([`wall_props`]) and the wall viscosity of the scalar diffusion.
+    pub iso: Option<IsoWall>,
     /// Roughness per cell (empty: all smooth).
     pub ks: &'a [f64],
     /// A smooth wall cell takes its `S^2` from the law of the wall ([`strain_law`]) instead of its mean-flow gradient (a rough one always keeps the gradient). `false`
@@ -659,7 +679,7 @@ impl<const N: usize> TurbIn<'_, N> {
         let nu = self.mu[c] / w[0];
         let s2 = match self.law_speed(c, w) {
             Some(speed) => {
-                let s = strain_law(nu, speed, self.dwall[c]);
+                let s = strain_law(wall_props(w, self.mu[c], self.iso).1, speed, self.dwall[c]);
                 s * s
             }
             None => strain2(&self.grad[c]),
@@ -683,7 +703,7 @@ impl<const N: usize> TurbIn<'_, N> {
         let g = self.grid;
         let w = &self.w[pidx3(g.ni, g.nj, g.nk, (c % g.ni) as isize, ((c / g.ni) % g.nj) as isize, (c / (g.ni * g.nj)) as isize)];
         let speed = self.law_speed(c, w)?;
-        let nu = self.mu[c] / w[0];
+        let nu = wall_props(w, self.mu[c], self.iso).1;
         let u_tau = u_tau_law(nu, speed, self.dwall[c]);
         Some((self.dwall[c] * u_tau / nu, u_tau, nu))
     }
@@ -772,7 +792,7 @@ fn tface<M: TurbModel<N>, const N: usize>(cx: &TurbIn<N>, model: &M, tg: &[SGrad
     let (l, r) = (cx.side_phi(model, &fc, 0, dir), cx.side_phi(model, &fc, 1, dir));
     let m = cx.flux(dir)[q][0] * face.area;
     let ghost = [fc.kind[0] != SideKind::Cell, fc.kind[1] != SideKind::Cell];
-    let (mu_f, mut_f) = face_mu_cells(cx.mu, cx.mu_t, cx.wall, fc.cell, ghost, fc.noslip());
+    let (mu_f, mut_f) = face_mu_cells(cx.mu, cx.mu_t, cx.wall, cx.iso, fc.cell, ghost, fc.noslip());
     let reflect = |g: [f64; 3]| {
         let d = g[0] * face.n[0] + g[1] * face.n[1] + g[2] * face.n[2];
         [g[0] - 2.0 * d * face.n[0], g[1] - 2.0 * d * face.n[1], g[2] - 2.0 * d * face.n[2]]
@@ -1078,14 +1098,14 @@ mod tests {
             let dirs = face_dirs(&grid, &solid, &sym);
             let nc = solid.len();
             let (mut grad, mut mu) = (vec![[0.0; 12]; nc], vec![0.0; nc]);
-            cell_pass(&visc(re_c), &grid, &solid, &w, &mut grad, &mut mu);
+            cell_pass(&visc(re_c), &grid, &solid, &w, None, &mut grad, &mut mu);
             let dwall = wall_distance3(&grid, &solid, &wall_faces(&grid, &solid));
             let mut wall = vec![[0.0; 3]; nc];
-            wall_state_pass(&grid, &solid, &dirs, &w, &mu, &dwall, ks, false, &mut wall);
+            wall_state_pass(&grid, &solid, &dirs, &w, &mu, &dwall, ks, None, false, &mut wall);
             let f = [0, 1, 2].map(|dir| {
                 let [n0, n1, n2] = face_shape(&grid, dir);
                 let mut v = vec![[0.0; 5]; n0 * n1 * n2];
-                map_faces(&grid, dir, &mut v, |i, j, k, q| match face_sides3(&grid, &solid, &w, dir, i, j, k) {
+                map_faces(&grid, dir, &mut v, |i, j, k, q| match face_sides3(&grid, &solid, &w, None, dir, i, j, k) {
                     Some(s) => {
                         let n = face_of(&grid, dir, i, j, k).1.n;
                         let mf = |w: &Prim3| w[0] * (w[1] * n[0] + w[2] * n[1] + w[3] * n[2]);
@@ -1139,6 +1159,7 @@ mod tests {
                 mu_t: &self.mu_t,
                 grad: &self.grad,
                 wall: &self.wall,
+                iso: None,
                 ks: &[],
                 law_strain: false,
                 law_i_walls: false,
@@ -1336,7 +1357,7 @@ mod tests {
         ks[g.cell(1, 1, 1)] = 1e-4; // rough junction cell
         ks[g.cell(1, 2, 1)] = 0.0; // smooth: a cell above the z wall only (j = 2 is beside no y wall)
         let mut out = vec![[0.0; 3]; nc];
-        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &ks, false, &mut out);
+        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &ks, None, false, &mut out);
         let st = |c: usize, k: f64| {
             let s = wall_state(1.0, 1.0e-6, 0.8, dwall[c], k);
             [s.k_w, s.omega_w, s.mu_t_w]
@@ -1379,7 +1400,7 @@ mod tests {
         assert!((wall_speed(&g, &dirs, 2, 2, 1, &cell, true).unwrap() - 0.3).abs() < 1e-14, "tangential to the i wall: the v component");
         assert!((wall_speed(&g, &dirs, 3, 1, 1, &cell, false).unwrap() - 0.8).abs() < 1e-14, "tangential to the floor: the u component");
         let mut out = vec![[0.0; 3]; nc];
-        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &[], false, &mut out);
+        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &[], None, false, &mut out);
         let same = |a: [f64; 3], b: [f64; 3]| a.iter().zip(&b).all(|(x, y)| (x - y).abs() <= 1e-12 * (x.abs() + y.abs()));
         assert!(same(out[only_i], state(only_i, 0.0)), "{:?}", out[only_i]);
         assert_eq!(out[only_i][0], 0.0);
@@ -1388,7 +1409,7 @@ mod tests {
         assert!((out[only_i][1] / menter - 1.0).abs() < 1e-12, "Menter's 2D value {} vs {menter}", out[only_i][1]);
         assert!(same(out[floor], state(floor, 0.8)), "{:?}", out[floor]);
         assert!(same(out[both], state(both, 0.8)), "the i wall does not enter the speed of a cell with a streamwise wall: {:?}", out[both]);
-        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &[], true, &mut out);
+        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &[], None, true, &mut out);
         assert!(same(out[only_i], state(only_i, 0.3)), "{:?}", out[only_i]);
         assert!(same(out[floor], state(floor, 0.8)));
         assert!(same(out[both], state(both, 0.8)));
@@ -1416,14 +1437,14 @@ mod tests {
         let w = padded(&g, &solid, &cells);
         let dirs = face_dirs(&g, &solid, &[false; 6]);
         let (mut grad, mut mu) = (vec![[0.0; 12]; nc], vec![0.0; nc]);
-        cell_pass(&v, &g, &solid, &w, &mut grad, &mut mu);
+        cell_pass(&v, &g, &solid, &w, None, &mut grad, &mut mu);
         let dwall = wall_distance3(&g, &solid, &wall_faces(&g, &solid));
         let mut wall = vec![[0.0; 3]; nc];
-        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &[], false, &mut wall);
+        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &[], None, false, &mut wall);
         let mu_t = vec![0.0; nc];
         let run = |wall: &[[f64; 3]]| {
             let (mut fi, mut fj, mut fk) = (vec![[0.0; 5]; g.iface.len()], vec![[0.0; 5]; g.jface.len()], vec![[0.0; 5]; g.kface.len()]);
-            face_pass(&g, &solid, &w, &dirs, &grad, &mu, &mu_t, wall, &mut fi, &mut fj, &mut fk);
+            face_pass(&g, &solid, &w, &dirs, &grad, &mu, &mu_t, wall, None, &mut fi, &mut fj, &mut fk);
             wall_tractions(&g, &solid, &dirs, &fi, &fj, &fk)
         };
         let tr = run(&wall);
@@ -1851,22 +1872,22 @@ mod tests {
         let t_dist = t.elapsed();
         let (mut grad, mut mu) = (vec![[0.0; 12]; nc], vec![0.0; nc]);
         let t = Instant::now();
-        cell_pass(&visc(re_c), &g, &solid, &w, &mut grad, &mut mu);
+        cell_pass(&visc(re_c), &g, &solid, &w, None, &mut grad, &mut mu);
         let t_cell = t.elapsed();
         let mut wall = vec![[0.0; 3]; nc];
         let t = Instant::now();
-        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &[], false, &mut wall);
+        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &[], None, false, &mut wall);
         let t_wall = t.elapsed();
         let mu_t = vec![1e-5; nc];
         let (mut fi, mut fj, mut fk) = (vec![[0.0; 5]; g.iface.len()], vec![[0.0; 5]; g.jface.len()], vec![[0.0; 5]; g.kface.len()]);
         let t = Instant::now();
-        face_pass(&g, &solid, &w, &dirs, &grad, &mu, &mu_t, &wall, &mut fi, &mut fj, &mut fk);
+        face_pass(&g, &solid, &w, &dirs, &grad, &mu, &mu_t, &wall, None, &mut fi, &mut fj, &mut fk);
         let t_face = t.elapsed();
         // mass flux for the update
         let f = [0, 1, 2].map(|dir| {
             let [n0, n1, n2] = face_shape(&g, dir);
             let mut v = vec![[0.0; 5]; n0 * n1 * n2];
-            map_faces(&g, dir, &mut v, |i, j, k, _| match face_sides3(&g, &solid, &w, dir, i, j, k) {
+            map_faces(&g, dir, &mut v, |i, j, k, _| match face_sides3(&g, &solid, &w, None, dir, i, j, k) {
                 Some(s) => {
                     let n = face_of(&g, dir, i, j, k).1.n;
                     let mf = |w: &Prim3| w[0] * (w[1] * n[0] + w[2] * n[1] + w[3] * n[2]);
@@ -1888,6 +1909,7 @@ mod tests {
             mu_t: &mu_t,
             grad: &grad,
             wall: &wall,
+            iso: None,
             ks: &[],
             law_strain: false,
             law_i_walls: false,
@@ -2055,6 +2077,7 @@ mod tests {
             mu_t: &case.mu_t,
             grad: &case.grad,
             wall: &case.wall,
+            iso: None,
             ks: &[],
             law_strain: false,
             law_i_walls: false,

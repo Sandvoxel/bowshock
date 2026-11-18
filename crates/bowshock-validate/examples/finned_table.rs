@@ -2,7 +2,7 @@
 //! Coarse tier, the Draft tier (`--tier draft`) or the Draft tier's safe subsonic variant (`--tier draft-safe`: `Case3::draft_subsonic`), `GpuRunner3` in f32, to the case's stop rule.
 //!
 //! ```text
-//! cargo run --release -p bowshock-validate --example finned_table -- --tier coarse|draft|draft-safe --mach 2.0 [--anf] [--gf1] [--fin-cells N] [--sub N] [--max-iter N] [--ddadi OMEGA] [--dis-boost DELTA] [--history-every N] [--dt-mode sum|min]
+//! cargo run --release -p bowshock-validate --example finned_table -- --tier coarse|draft|draft-safe --mach 2.0 [--anf] [--wedge] [--tw RATIO] [--gf1] [--fin-cells N] [--sub N] [--max-iter N] [--ddadi OMEGA] [--dis-boost DELTA] [--history-every N] [--dt-mode sum|min]
 //! ```
 //!
 //! One `TABLE` line: tier, Mach number, grid, cells, iterations, stop reason, wall seconds (the whole run, set-up included), ms per iteration, CD total and its parts (coefficients on pi/4
@@ -11,6 +11,7 @@
 
 use bowshock_cfd::gpu::Precision;
 use bowshock_cfd::implicit_params::DtMode;
+use bowshock_cfd::sst::WallThermal;
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
 use bowshock_core::engine::case3::{Case3, Tier, WallFlow, SUTHERLAND_SEA_LEVEL};
 use bowshock_core::engine::gpu3::GpuRunner3;
@@ -75,10 +76,19 @@ fn main() -> Result<(), String> {
         // the G-F5 case on the sector: the Army-Navy Basic Finner with the sourced fin section, sea-level Reynolds number of the 30 mm model, grid sized for Mach 3.147
         let flow = WallFlow { re_c: 1.225 * 340.294 * 0.03 / 1.7894e-5, mach_max: 3.147, ks_body, ks_fin, sutherland: 0.368 };
         let tier = if tier_name == "fine" { Tier::Fine(flow) } else { Tier::Coarse(flow) };
-        case = Case3::sector(mach, Case3::anf_body(), Case3::anf_fins(), tier, 0);
+        // `--wedge`: the finless ANF body on the axisymmetric wedge (`Case3::wedge`) instead of the four-fin sector (the friction and base of the body alone)
+        case = if args.iter().any(|a| a == "--wedge") {
+            Case3::wedge(mach, Case3::anf_body(), 0).with_tier(tier)
+        } else {
+            Case3::sector(mach, Case3::anf_body(), Case3::anf_fins(), tier, 0)
+        };
     }
     if tier_name == "draft-safe" {
         case = case.draft_subsonic();
+    }
+    // `--tw RATIO`: isothermal walls at `T_w = RATIO T_inf` (`Case3::with_wall_thermal`; adiabatic without)
+    if let Some(t) = value("--tw") {
+        case = case.with_wall_thermal(WallThermal::Isothermal(t.parse().map_err(|e| format!("--tw: {e}"))?));
     }
     // `--fin-cells N`: N cells across the fin thickness (`Grid3Params::fin_cells_across`; a half fin in the sector owns N / 2, at least one)
     if let Some(n) = value("--fin-cells") {
@@ -169,7 +179,7 @@ fn main() -> Result<(), String> {
         d.fin_sides + d.fin_edges + d.fin_tips,
         p.y_plus_max
     );
-    {
+    if !args.iter().any(|a| a == "--wedge") {
         // the fin's leading / trailing edge faces: their projected area (sector units) and the area-mean pressure coefficient, cells across the fin
         let g = &run.host.grid;
         let (mut a_le, mut a_te, mut cells, mut across) = (0.0, 0.0, 0usize, 0usize);

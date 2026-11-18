@@ -44,6 +44,47 @@ impl Viscous {
     }
 }
 
+/// Thermal condition of the no-slip walls of a 3D run (`Case3`, `RansOpts3`; the 2D solver has adiabatic walls only).
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum WallThermal {
+    /// Zero normal temperature gradient: the wall ghost mirrors `T` (the default; bit-identical to a build without the option).
+    #[default]
+    Adiabatic,
+    /// Isothermal wall at `T_w / T_inf` (the free-stream static temperature is 1 in the solver's units).
+    Isothermal(f64),
+}
+
+/// Fraction of `T_w` below which the ghost temperature `2 T_w - T_cell` of an isothermal wall is floored (a first cell hotter than `2 T_w` would give a negative ghost).
+pub const ISO_GHOST_T_MIN: f64 = 0.1;
+
+/// An isothermal wall resolved against the gas law: the wall temperature and the laminar viscosity `mu(T_w)` at it. Kernels take `Option<IsoWall>`, `None` for an adiabatic wall.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IsoWall {
+    pub t_w: f64,
+    pub mu_w: f64,
+}
+
+impl IsoWall {
+    /// Ghost temperature across the wall from the cell temperature: `2 T_w - T`, floored at [`ISO_GHOST_T_MIN`] `T_w`.
+    #[inline]
+    pub fn ghost_t(&self, t_cell: f64) -> f64 {
+        (2.0 * self.t_w - t_cell).max(ISO_GHOST_T_MIN * self.t_w)
+    }
+}
+
+impl WallThermal {
+    /// The isothermal wall of this setting for the gas `v` (`None`: adiabatic).
+    pub fn iso(&self, v: &Viscous) -> Option<IsoWall> {
+        match *self {
+            WallThermal::Adiabatic => None,
+            WallThermal::Isothermal(t_w) => {
+                assert!(t_w.is_finite() && t_w > 0.0, "wall temperature must be positive: {t_w}");
+                Some(IsoWall { t_w, mu_w: v.mu(t_w) })
+            }
+        }
+    }
+}
+
 /// Free-stream specific turbulence kinetic energy.
 pub const K_INF: f64 = 9e-9;
 

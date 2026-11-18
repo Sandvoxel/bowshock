@@ -26,6 +26,7 @@
 
 use super::*;
 use crate::engine::case3::{Tier, WallFlow};
+use bowshock_cfd::sst::WallThermal;
 use crate::engine::field3::field3_of;
 use crate::engine::grid3::Fins3;
 use crate::engine::planform::Planform;
@@ -525,6 +526,9 @@ impl Analysis {
             Kind::Sector => Case3::sector(c.mach, body, self.fins3_solver3().expect("checked").expect("a sector has fins"), tier, level),
             Kind::Half => Case3::base_half(c.mach, c.alpha_deg.to_radians(), body, self.fins3_solver3().expect("checked"), tier, level),
         };
+        if let Some(t) = self.wall_temperature_ratio {
+            case.wall_thermal = WallThermal::Isothermal(t);
+        }
         if self.wake == Some(Wake::Sting) {
             case.grid.base = None;
         }

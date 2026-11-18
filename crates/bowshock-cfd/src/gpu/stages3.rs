@@ -252,6 +252,7 @@ impl LazySolver3 {
             let wall = wall.clone().expect("an SST evaluation computes the wall state");
             let dev = TDev3 {
                 rho: prim[0].clone(),
+                pres: prim[4].clone(),
                 cell: VCell3 { grad: cell.grad.clone(), mu: cell.mu.clone() },
                 mu_t: mu_t.clone(),
                 wall,
