@@ -289,7 +289,7 @@ impl GpuRunner3 {
         // tracked on the host (the device's ramp, `cfl0 growth^k` up to the cap) and told to the stop rule, whose windows lengthen as the CFL falls below `Numerics3::cfl_ref`.
         let Scheme3::Implicit(ip) = self.host.cfg.scheme else { return Err(Error::Gpu("the GPU 3D runner needs the implicit scheme".into())) };
         let mut cfl_host = ip.cfl0.min(ip.cfl_max);
-        let mut ctl = CflControl::new(self.gpu.snapshot()?, ip.cfl_max, cfl_host);
+        let mut ctl = CflControl::new(self.gpu.snapshot()?, ip.cfl_max, cfl_host).with_enabled(n.cfl_control);
         rule.set_cfl(cfl_host);
         while done < n.max_iter && stop.is_none() {
             // chunks of `SYNC` iterations (the sampling interval of the range rule); the forces of the rules come from the loop itself: the force monitor of the step records

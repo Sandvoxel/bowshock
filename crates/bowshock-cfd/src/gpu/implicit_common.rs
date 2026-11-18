@@ -83,3 +83,8 @@ fn shock_weight_f(pl: &F, pr: &F) -> F {
     &t * &t * (3.0f32 - 2.0f32 * &t)
 }
 
+
+/// `kappa = 1 / U_r^2 - 1 / c^2` (exactly 0 for `U_r = c`).
+fn kappa_f(ur2: &F, c2: &F) -> F {
+    select(&ur2.ge(c2), 0.0f32, 1.0f32 / ur2 - 1.0f32 / c2)
+}

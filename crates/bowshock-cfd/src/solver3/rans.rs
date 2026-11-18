@@ -355,6 +355,11 @@ mod tests {
         implicit_cfl(line_solve, precond, 10.0)
     }
 
+    /// The diagonally dominant factorisation ([`ImplicitParams::ddadi`]) of the block lines with the correction relaxed by `omega`.
+    fn implicit_dd(precond: bool, cfl_max: f64, omega: f64) -> Scheme3 {
+        Scheme3::Implicit(ImplicitParams { cfl_max, growth: 1.5, low_mach_precond: precond, ddadi: Some(omega), ..ImplicitParams::VISCOUS })
+    }
+
     const SCHEMES: [(&str, Option<(LineSolve3, bool)>); 5] = [
         ("explicit", None),
         ("block", Some((LineSolve3::Block, false))),
@@ -377,8 +382,9 @@ mod tests {
     fn free_stream_is_preserved_by_every_scheme() {
         let q0 = prim_to_cons3(&freestream3(0.3, 0.0));
         for turbulence in [Turbulence::Laminar, Turbulence::Sst] {
-            for (name, c) in SCHEMES {
-                let mut s = solver(scheme_of(c), 0.3, Limiter::VanAlbada, false, viscous(turbulence, 2e3));
+            let dd = [("ddadi", implicit_dd(false, 10.0, 0.5)), ("ddadi + P", implicit_dd(true, 10.0, 0.5))];
+            for (name, scheme) in SCHEMES.map(|(n, c)| (n, scheme_of(c))).into_iter().chain(dd) {
+                let mut s = solver(scheme, 0.3, Limiter::VanAlbada, false, viscous(turbulence, 2e3));
                 for _ in 0..3 {
                     s.step();
                 }
@@ -480,16 +486,22 @@ mod tests {
         }
     }
 
-    /// Block lines, diagonal factors and block lines with the low-Mach preconditioning converge to the same steady state of the viscous flow round the block at Mach
-    /// 0.1 (first-order reconstruction: smooth, no limiter chatter, CFL 3); the right-hand side is the same, so the preconditioning and the diagonalisation only
-    /// change the path, and the preconditioning shortens it (the iteration counts are printed). The diagonal form with the preconditioning is not in the
-    /// list: it does not converge here (see the header of `implicit3`).
+    /// Block lines, diagonal factors, block lines with the low-Mach preconditioning and the diagonally dominant block factors (DDADI, with and without the preconditioning)
+    /// converge to the same steady state of the viscous flow round the block at Mach 0.1 (first-order reconstruction: smooth, no limiter chatter, CFL 3); the right-hand
+    /// side is the same, so the preconditioning, the diagonalisation and the factorisation only change the path, and the preconditioning shortens it (the iteration counts
+    /// are printed). The diagonal form with the preconditioning is not in the list: it does not converge here (see the header of `implicit3`).
     #[test]
     fn implicit_variants_converge_to_the_same_viscous_state() {
-        let variants = [("block", LineSolve3::Block, false), ("diagonal", LineSolve3::DiagonalCorrected, false), ("block + P", LineSolve3::Block, true)];
+        let variants = [
+            ("block", implicit_cfl(LineSolve3::Block, false, 3.0)),
+            ("diagonal", implicit_cfl(LineSolve3::DiagonalCorrected, false, 3.0)),
+            ("block + P", implicit_cfl(LineSolve3::Block, true, 3.0)),
+            ("ddadi", implicit_dd(false, 3.0, 0.5)),
+            ("ddadi + P", implicit_dd(true, 3.0, 0.5)),
+        ];
         let mut states: Vec<(&str, Vec<crate::gas3::Cons3>, usize)> = Vec::new();
-        for (name, line_solve, precond) in variants {
-            let mut s = solver(implicit_cfl(line_solve, precond, 3.0), 0.1, Limiter::FirstOrder, true, viscous(Turbulence::Laminar, 500.0));
+        for (name, scheme) in variants {
+            let mut s = solver(scheme, 0.1, Limiter::FirstOrder, true, viscous(Turbulence::Laminar, 500.0));
             let (mut peak, mut last, mut iters) = (0.0f64, 0.0, 0);
             for it in 0..4000 {
                 let rn = s.step();
@@ -512,6 +524,74 @@ mod tests {
             assert!(d < 1e-8, "{name}: {d:e}");
         }
         assert!(states[2].2 < states[0].2, "the preconditioning must shorten the run: {} vs {}", states[2].2, states[0].2);
+    }
+
+    /// 400 steps of the viscous block (van Albada, SST, `re_c` 2e4) at `scheme`: the density residual after 100 / 200 / 400 steps (or the step of the first non-finite
+    /// value), the final state and the last residual.
+    fn run_block(scheme: Scheme3, mach: f64) -> (String, Option<Vec<crate::gas3::Cons3>>, f64) {
+        let mut s = solver(scheme, mach, Limiter::VanAlbada, true, viscous(Turbulence::Sst, 2e4));
+        let mut outcome = String::new();
+        let mut last = f64::NAN;
+        for it in 0..400 {
+            last = s.step();
+            if !last.is_finite() || last > 1e6 {
+                return (format!("fails at {it}"), None, last);
+            }
+            if [99, 199, 399].contains(&it) {
+                outcome.push_str(&format!(" {last:.1e}"));
+            }
+        }
+        (outcome, Some(s.u.clone()), last)
+    }
+
+    fn max_diff(a: &[crate::gas3::Cons3], b: &[crate::gas3::Cons3]) -> f64 {
+        a.iter().zip(b).flat_map(|(a, b)| (0..5).map(move |k| (a[k] - b[k]).abs())).fold(0.0, f64::max)
+    }
+
+    /// The plain block factors die above CFL ~40 (the factorisation error grows with the CFL until the defect-correction passes diverge); the diagonally dominant factors do not, but
+    /// their accurate solve of the first-order left-hand side against the limited second-order residual has a period-2 mode that the error of the plain factors was damping: at CFL 10
+    /// the correction of weight 1 stays on a limit cycle (residual 6e-3 for ever, state 5e-3 off), and the correction of weight 0.5 converges to the state of the plain scheme at CFL 50
+    /// where the plain factors are non-finite (Mach 2, 400 steps).
+    #[test]
+    fn relaxed_ddadi_converges_where_the_plain_factors_fail() {
+        let mach = 2.0;
+        let (_, reference, r_ref) = run_block(implicit_cfl(LineSolve3::Block, false, 6.0), mach);
+        let reference = reference.expect("the plain scheme at CFL 6");
+        assert!(r_ref < 1e-12, "the reference: {r_ref:e}");
+        let (outcome, state, _) = run_block(implicit_cfl(LineSolve3::Block, false, 50.0), mach);
+        assert!(state.is_none(), "the plain factors at CFL 50: {outcome}");
+        let (outcome, state, r) = run_block(implicit_dd(false, 10.0, 1.0), mach);
+        let d = max_diff(&state.expect("finite"), &reference);
+        assert!(r > 1e-4 && d > 1e-4, "an accurate solve without the relaxation stalls on a cycle ({outcome}): residual {r:e}, state {d:e}");
+        let (outcome, state, r) = run_block(implicit_dd(false, 50.0, 0.5), mach);
+        let d = max_diff(&state.expect("finite"), &reference);
+        assert!(r < 1e-10 && d < 1e-8, "the relaxed correction at CFL 50 ({outcome}): residual {r:e}, state {d:e}");
+    }
+
+    /// The plain and the diagonally dominant block factors on the viscous block over the CFL, the correction of weight 1 and of weight 0.5: residuals after 100 / 200 / 400 steps and
+    /// the largest difference of the state from the converged state of the plain scheme at CFL 6 (`cargo test -- --ignored ddadi_cfl_scan --nocapture`).
+    #[test]
+    #[ignore]
+    fn ddadi_cfl_scan() {
+        for mach in [0.5, 2.0] {
+            let reference = run_block(implicit_cfl(LineSolve3::Block, false, 6.0), mach).1.expect("the reference run");
+            for cfl in [3.0, 6.0, 10.0, 20.0, 50.0, 300.0] {
+                let mut row = format!("Mach {mach} cfl {cfl:6.0}:");
+                for (name, scheme) in [
+                    ("plain", implicit_cfl(LineSolve3::Block, false, cfl)),
+                    ("ddadi 1.0", implicit_dd(false, cfl, 1.0)),
+                    ("ddadi 0.8", implicit_dd(false, cfl, 0.8)),
+                    ("ddadi 0.7", implicit_dd(false, cfl, 0.7)),
+                    ("ddadi 0.6", implicit_dd(false, cfl, 0.6)),
+                    ("ddadi 0.5", implicit_dd(false, cfl, 0.5)),
+                ] {
+                    let (outcome, u, _) = run_block(scheme, mach);
+                    let d = u.map_or(f64::NAN, |u| max_diff(&u, &reference));
+                    row.push_str(&format!("  {name}: {outcome:26} dU {d:.1e}"));
+                }
+                println!("{row}");
+            }
+        }
     }
 
     /// SST on the block: `k`, `omega` positive, `mu_t` non-negative and finite, the update residual finite, the wall state of the wall cells set.

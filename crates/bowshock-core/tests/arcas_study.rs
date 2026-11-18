@@ -51,6 +51,7 @@ fn the_arcas_axial_force_by_part() {
         planform: None,
     };
     let anf = env("STUDY_BODY", "arcas".to_string()) == "anf";
+    let flow_re_c = if anf { 1.225 * 340.294 * 0.03 / 1.7894e-5 } else { re_per_m * d / mach };
     let (body, fins, flow) = if anf {
         // the Army-Navy Finner (0.03 m) at the sea-level atmosphere, the grid sized for Mach 3.147 as in G-F5
         let flow = WallFlow { re_c: 1.225 * 340.294 * 0.03 / 1.7894e-5, mach_max: env("STUDY_GRID_MACH", 3.147), ks_body: 0.0, ks_fin: 0.0, sutherland: 0.368 };
@@ -60,6 +61,19 @@ fn the_arcas_axial_force_by_part() {
             // STUDY_Z0=<z>: the leading-edge thickness as a fraction of the maximum (a blunt edge: DRDC gives a leading-edge radius of 0.004 cal on a 0.08 cal trailing edge, z = 0.1)
             let z0: f64 = env("STUDY_Z0", 0.0);
             f.profile = FinProfile::Custom { section: vec![[0.0, z0], [le, 1.0], [1.0, 1.0]] };
+        }
+        // STUDY_FIN_T=<t/d>, STUDY_FIN_CHORD=<c/d> (the span follows it), STUDY_FIN_DW=1: a thinner / shorter fin and a double-wedge section (DESIGN3D item 41: why the Finner's fin
+        // friction is below the flat plate where G-F1's is not)
+        if let Some(t) = std::env::var("STUDY_FIN_T").ok().and_then(|v| v.parse::<f64>().ok()) {
+            f.thickness = t;
+        }
+        if let Some(c) = std::env::var("STUDY_FIN_CHORD").ok().and_then(|v| v.parse::<f64>().ok()) {
+            f.root_chord = c;
+            f.tip_chord = c;
+            f.span = c;
+        }
+        if std::env::var("STUDY_FIN_DW").is_ok() {
+            f.profile = FinProfile::DoubleWedge;
         }
         (Case3::anf_body(), f, flow)
     } else {
@@ -107,6 +121,15 @@ fn the_arcas_axial_force_by_part() {
         q * (p.friction.fin_sides + p.friction.fin_edges + p.friction.fin_tips),
         q * p.base
     );
+    if let Some(f) = case.grid.fins.as_ref().filter(|_| fins_on) {
+        // the facade's fin friction model (Niskanen 3.78-3.81, as G-F1): `2 Cf A_fin N / (pi/4)`, A_fin = chord x span in d^2
+        let re = flow_re_c * mach * f.root_chord;
+        let cf = 1.0 / (1.5 * re.ln() - 5.6).powi(2);
+        let cf = if mach < 1.0 { cf * (1.0 - 0.1 * mach * mach) } else { cf / (1.0 + 0.15 * mach * mach).powf(0.58) };
+        let reference = 2.0 * cf * f.root_chord * f.span * f64::from(f.count) / std::f64::consts::FRAC_PI_4;
+        let fin_friction = q * (p.friction.fin_sides + p.friction.fin_edges + p.friction.fin_tips);
+        println!("STUDY-FINFRICTION M {mach}: fin friction {fin_friction:.4} (sides {:.4}) against the flat plate {reference:.4} (Cf {cf:.5}, Re_c {re:.3e}): ratio {:.3}", q * p.friction.fin_sides, fin_friction / reference);
+    }
     println!(
         "STUDY-BASE {} {} M {mach}: body base Cp {:+.3} (base radius {:.4})",
         if anf { "anf" } else { "arcas" },

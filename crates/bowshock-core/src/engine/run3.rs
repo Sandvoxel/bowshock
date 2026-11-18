@@ -38,6 +38,9 @@ pub const CFL_BACKOFF: f64 = 0.7;
 pub const RECENT_RESTORE: usize = 10;
 /// Failures after which the controller gives up (0.7^12 = 0.014 of the start cap): the run then fails as it would have without it.
 pub const MAX_ROLLBACKS: usize = 12;
+/// The hard floor of the controller: it never lowers `cfl_max` below this (half of the fixed rule's `VISCOUS_3D_CFL_MAX` of 10); a point that fails again there is a failed point,
+/// not retried.
+pub const CFL_FLOOR: f64 = 5.0;
 
 /// One answer of the CFL controller to a failed stretch of a run: the run went back to the snapshot at `restored_to` with `cfl_max` lowered.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -72,6 +75,7 @@ pub struct CflControl<S> {
     snaps: Vec<(S, usize, f64)>,
     restored_at: Option<usize>,
     cap: f64,
+    enabled: bool,
     /// The answers so far.
     pub events: Vec<CflEvent>,
 }
@@ -79,7 +83,7 @@ pub struct CflControl<S> {
 impl<S: Clone> CflControl<S> {
     /// A controller whose first snapshot is `first` (iteration 0, the CFL `cfl` in force) under the cap `cap`.
     pub fn new(first: S, cap: f64, cfl: f64) -> CflControl<S> {
-        CflControl { snaps: vec![(first, 0, cfl)], restored_at: None, cap, events: Vec::new() }
+        CflControl { snaps: vec![(first, 0, cfl)], restored_at: None, cap, enabled: true, events: Vec::new() }
     }
 
     /// The current `cfl_max`.
@@ -87,9 +91,15 @@ impl<S: Clone> CflControl<S> {
         self.cap
     }
 
-    /// Whether the controller still answers failures.
+    /// Whether the controller still answers failures: switched on, under [`MAX_ROLLBACKS`] answers and a next cap that is not below [`CFL_FLOOR`] (a point that still fails there fails).
     pub fn active(&self) -> bool {
-        self.events.len() < MAX_ROLLBACKS
+        self.enabled && self.events.len() < MAX_ROLLBACKS && self.cap * CFL_BACKOFF >= CFL_FLOOR
+    }
+
+    /// The controller answers failures (`true`, the default) or only watches (`false`: [`crate::engine::case3::Numerics3::cfl_control`] off).
+    pub fn with_enabled(mut self, on: bool) -> CflControl<S> {
+        self.enabled = on;
+        self
     }
 
     /// The state after a good stretch ending at `iteration` with the CFL `cfl` in force.
@@ -766,7 +776,8 @@ pub fn run3_on(case: &Case3, s: &mut Solver3, warm: bool) -> PointResult3 {
     }
     let mut rule = StopRule3::new(case, warm);
     rule.set_cfl(s.current_cfl());
-    let mut ctl = matches!(s.cfg.scheme, Scheme3::Implicit(_)).then(|| CflControl::new((s.snapshot(), rule.clone()), s.cfl_cap(), s.current_cfl()));
+    let mut ctl = matches!(s.cfg.scheme, Scheme3::Implicit(_))
+        .then(|| CflControl::new((s.snapshot(), rule.clone()), s.cfl_cap(), s.current_cfl()).with_enabled(case.numerics.cfl_control));
     let mut it = 0;
     while it < case.numerics.max_iter {
         let cfl_now = s.current_cfl();
@@ -1193,8 +1204,12 @@ mod tests {
         assert_eq!((e.iteration, e.restored_to), (120, 100));
         assert!((e.cfl_before - 50.0).abs() < 1e-12 && (e.cfl_after - 35.0).abs() < 1e-12 && (e.cfl_reached - 12.0).abs() < 1e-12);
         while ctl.fail(500, 3.0).is_some() {}
-        assert_eq!(ctl.events.len(), MAX_ROLLBACKS);
+        // the floor ends it: the cap never goes below CFL_FLOOR (50 x 0.7^k: 35, 24.5, 17.15, 12.0, 8.4, 5.88)
+        assert!(ctl.cap() >= CFL_FLOOR && ctl.cap() * CFL_BACKOFF < CFL_FLOOR, "cap {}", ctl.cap());
+        assert!(ctl.events.len() < MAX_ROLLBACKS);
         assert!(!ctl.active());
+        let mut off = CflControl::new('a', 50.0, 1.0).with_enabled(false);
+        assert!(off.fail(100, 9.0).is_none() && off.events.is_empty());
     }
 
     /// A run that goes unstable at a large `cfl_max` is taken back by the CPU runner with a lower one and finishes; the events are in the result and cost iterations.

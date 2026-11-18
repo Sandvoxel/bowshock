@@ -3,6 +3,7 @@
 
 use crate::gas3::GAMMA;
 use crate::gpu::Staging;
+use crate::sst::{Turbulence, Viscous, PRANDTL, PRANDTL_T};
 use crate::limiter::{Limiter, LOW_MACH_FLOOR, SHOCK_SENSOR_HI, SHOCK_SENSOR_LO};
 use luma::{concat, select, Array, Context, Fields, PadMode, Result};
 

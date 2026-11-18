@@ -61,6 +61,9 @@ pub struct Numerics3 {
     /// less drift for the same remaining error and fires early (the application's rule at `cfl_max` 10 on that sector: 1.5 % high, at 20: 0.9 %). [`crate::engine::run3::StopRule3`]
     /// multiplies every window and floor by `max(1, cfl_ref / CFL in force)`: unchanged at and above `cfl_ref`, twice as long at 10 for a viscous run. `0`: off.
     pub cfl_ref: f64,
+    /// The runners answer a failed stretch (a residual that is not finite or above 1e5, a non-finite force monitor) by going back to the last snapshot with `cfl_max` x 0.7, down
+    /// to `run3::CFL_FLOOR` (`run3::CflControl`): the default, with the engine's `cfl_max`. Off: no rollback, and [`Case3::without_cfl_control`] takes the fixed [`VISCOUS_3D_CFL_MAX`].
+    pub cfl_control: bool,
 }
 
 impl Numerics3 {
@@ -90,12 +93,15 @@ impl Numerics3 {
             line_solve: None,
             pressure_outflow: false,
             cfl_ref: 10.0,
+            cfl_control: true,
         }
     }
 
     /// The settings of an Euler wedge, the 2D engine's `Numerics::auto` for the base-wake grid: below Mach 0.85 the subsonic ones ([`Numerics3::auto`] with the implicit
-    /// defaults' CFL limit 30 and `10 000 << level` iterations), from Mach 0.85 the transonic ones (300 first-order iterations, 60 000 iterations; the 2D explicit
-    /// scheme of that regime has no 3D counterpart, the implicit CFL limit stays 10). Block lines. What [`Case3::wedge`] runs with; the facade's Euler tables of the
+    /// defaults' CFL limit 30 and `10 000 << level` iterations), from Mach 0.85 the transonic ones (60 000 iterations; 300 first-order iterations below Mach 1.2 and the 100 of
+    /// [`Numerics3::auto`] above: 300 first-order iterations at Mach 2 take the Euler wake of the boattailed Arcas to a second steady state, base `CD` 0.098 against the 2D
+    /// reference's 0.059 (G-W1 `euler-base-arcas-M2.00`, found by bisection to the viscous wiring commit 5f89ed1, which took the 2D numerics over); the 2D explicit
+    /// scheme of the transonic regime has no 3D counterpart, the implicit CFL limit stays 10). Block lines. What [`Case3::wedge`] runs with; the facade's Euler tables of the
     /// frozen 2D reference (G-V4 table-euler, G-W1) are the 2D engine's numbers.
     pub fn euler_wedge(mach: f64, level: u32) -> Numerics3 {
         let mut n = Numerics3::auto(mach, level);
@@ -103,7 +109,7 @@ impl Numerics3 {
             n.implicit = ImplicitParams::DEFAULT;
             n.max_iter = 10_000 << level;
         } else {
-            n.first_order_iters = 300;
+            n.first_order_iters = if mach < 1.2 { 300 } else { n.first_order_iters };
             n.max_iter = 60_000;
         }
         n.line_solve = Some(LineSolve3::Block);
@@ -140,6 +146,7 @@ impl Numerics3 {
             mean_tol: 5e-3,
             line_solve: Some(LineSolve3::Block),
             cfl_ref: 20.0,
+            cfl_control: true,
             pressure_outflow: false,
         }
     }
@@ -159,7 +166,10 @@ impl Numerics3 {
         let mut n = if case.viscous.is_some() { Numerics3::viscous(case.mach, level) } else { Numerics3::auto(case.mach, level) };
         n.limiter = case.numerics.limiter;
         n.low_mach = case.numerics.low_mach;
-        n.first_order_iters = case.numerics.first_order_iters;
+        // not the 300 of the 2D transonic regime for an Euler case from Mach 1.2: [`Numerics3::euler_wedge`] explains why
+        if case.viscous.is_some() || case.mach < 1.2 {
+            n.first_order_iters = case.numerics.first_order_iters;
+        }
         n.max_iter = case.numerics.max_iter;
         if let Scheme::Implicit(p) = case.numerics.scheme {
             let sub_iters = if case.viscous.is_some() && case.mach < 1.0 { 1 } else { p.sub_iters };
@@ -203,8 +213,9 @@ pub struct WallFlow {
 /// `110.4 K / 288.15 K`: the Sutherland ratio of the ISA at sea level.
 pub const SUTHERLAND_SEA_LEVEL: f64 = 110.4 / 288.15;
 
-/// Cells over the fin root chord of the Draft tier at level 0 (the others: 32).
-pub const DRAFT_CHORD_CELLS: usize = 20;
+/// Cells over the fin root chord of the Draft tier at level 0 (the other tiers: 32). 20 left the fin pressure 8-10 % low (example rocket, Mach 1.0 / 1.7: 0.1582 / 0.1534 against
+/// 0.1709 / 0.1674 on Coarse); 32 closes it (0.1720 / 0.1683) for 11 % more cells, 17 % more wall and the same memory, and puts Draft within 0.1 % of Coarse at Mach 1.7 (GPU, cfl 20).
+pub const DRAFT_CHORD_CELLS: usize = 32;
 
 /// Window \[iterations\] of the relative drag rule on a wedge ([`Case3::with_drag_tolerance`]; the number of the 2D engine's rule).
 pub const DRAG_REL_WINDOW: usize = 500;
@@ -362,6 +373,16 @@ impl Case3 {
         self
     }
 
+    /// The fixed rule instead of the controller: [`Numerics3::cfl_control`] off and, on a viscous half domain or sector (not the wedge, which keeps the engine's 50 / 20), `cfl_max`
+    /// at most [`VISCOUS_3D_CFL_MAX`]. For the CPU runner of a test that pins its numerics and for a run that must not roll back.
+    pub fn without_cfl_control(mut self) -> Case3 {
+        self.numerics.cfl_control = false;
+        if self.viscous.is_some() && !matches!(self.grid.domain, Domain3::Wedge { .. }) {
+            self.numerics.implicit.cfl_max = self.numerics.implicit.cfl_max.min(VISCOUS_3D_CFL_MAX);
+        }
+        self
+    }
+
     /// A body, finned or not, on the base-wake grid as a half domain (incidence `alpha`, fins between the pitch plane and each other): `24 << level` azimuthal
     /// cells (`32 << level` on the lift tier), the walls resolved for `tier`.
     pub fn base_half(mach: f64, alpha: f64, body: BaseBody, fins: Option<Fins3>, tier: Tier, level: u32) -> Case3 {
@@ -412,12 +433,11 @@ impl Case3 {
             // 0.00822 for both: 24-32 % less wall, the same state. One is not stable on the finned sector (see [`Numerics3::viscous`])
             self.numerics.implicit.sub_iters = 2;
         }
-        if !matches!(self.grid.domain, Domain3::Wedge { .. }) {
-            self.numerics.implicit.cfl_max = self.numerics.implicit.cfl_max.min(VISCOUS_3D_CFL_MAX);
-        }
+        // the engine's own `cfl_max` (50 below Mach 1, 20 above) with the rollback controller of the runners ([`Numerics3::cfl_control`]); the fixed rule of
+        // [`VISCOUS_3D_CFL_MAX`] is [`Case3::without_cfl_control`]
         match (&self.grid.fins, tier) {
             (Some(f), Tier::Draft(..)) => {
-                // growth 1.35 / 1.6 in and outside the layer (1.25 / 1.35), 20 cells over the root chord (32)
+                // growth 1.35 / 1.6 in and outside the layer (1.25 / 1.35), 32 cells over the root chord as the other tiers (`DRAFT_CHORD_CELLS`)
                 self.grid.fin_stack = Some(FinStack { growth_bl: 1.35, growth_out: 1.6, ..FinStack::from_flow(flow.re_c, flow.mach_max, f.root_chord, y_fin) });
                 self.grid.fin_chord_cells = Some(DRAFT_CHORD_CELLS << level);
             }
@@ -552,22 +572,26 @@ impl Case3 {
 mod tests {
     use super::*;
 
-    /// A viscous half domain and a viscous sector take [`VISCOUS_3D_CFL_MAX`], finned or not; a viscous wedge keeps the engine's limit (50 below Mach 1, 20 above), Euler its own.
+    /// Every viscous 3D grid starts at the engine's `cfl_max` (50 below Mach 1, 20 above) with the runners' rollback controller on; [`Case3::without_cfl_control`] takes the fixed
+    /// [`VISCOUS_3D_CFL_MAX`] on a half domain or a sector (not the wedge), Euler keeps its own.
     #[test]
-    fn every_viscous_3d_grid_takes_the_lower_cfl() {
+    fn viscous_3d_grids_start_at_the_engine_cfl_with_the_controller() {
         let flow = WallFlow { re_c: 7.0e5, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0, sutherland: SUTHERLAND_SEA_LEVEL };
         let cfl = |c: &Case3| c.numerics.implicit.cfl_max;
-        for (mach, wedge) in [(0.8, 50.0), (2.0, 20.0)] {
+        for (mach, engine) in [(0.8, 50.0), (2.0, 20.0)] {
             let half = Case3::base_half(mach, 2f64.to_radians(), Case3::anf_body(), Some(Case3::anf_fins()), Tier::Lift(flow), 0);
-            assert_eq!(cfl(&half), VISCOUS_3D_CFL_MAX, "half domain at Mach {mach}");
             let finless = Case3::base_half(mach, 0.0, Case3::anf_body(), None, Tier::Lift(flow), 0);
-            assert_eq!(cfl(&finless), VISCOUS_3D_CFL_MAX, "finless half domain at Mach {mach}");
-            for tier in [Tier::Coarse(flow), Tier::draft(flow)] {
-                let sector = Case3::sector(mach, Case3::anf_body(), Case3::anf_fins(), tier, 0);
-                assert_eq!(cfl(&sector), VISCOUS_3D_CFL_MAX, "sector {tier:?} at Mach {mach}");
+            let sectors: Vec<Case3> =
+                [Tier::Coarse(flow), Tier::draft(flow)].into_iter().map(|tier| Case3::sector(mach, Case3::anf_body(), Case3::anf_fins(), tier, 0)).collect();
+            for c in [&half, &finless].into_iter().chain(&sectors) {
+                assert_eq!(cfl(c), engine, "Mach {mach}");
+                assert!(c.numerics.cfl_control);
+                let fixed = c.clone().without_cfl_control();
+                assert_eq!((cfl(&fixed), fixed.numerics.cfl_control), (VISCOUS_3D_CFL_MAX, false), "Mach {mach}");
             }
             let on_wedge = Case3::wedge(mach, Case3::anf_body(), 0).with_tier(Tier::Coarse(flow));
-            assert_eq!(cfl(&on_wedge), wedge, "wedge at Mach {mach}");
+            assert_eq!(cfl(&on_wedge), engine, "wedge at Mach {mach}");
+            assert_eq!(cfl(&on_wedge.clone().without_cfl_control()), engine, "the wedge keeps the engine's limit");
             let euler = Case3::base_half(mach, 0.0, Case3::anf_body(), Some(Case3::anf_fins()), Tier::Euler, 0);
             assert_eq!(cfl(&euler), Numerics3::auto(mach, 0).implicit.cfl_max, "Euler half domain at Mach {mach}");
         }

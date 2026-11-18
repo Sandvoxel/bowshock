@@ -124,11 +124,6 @@ impl LmGpu {
     }
 }
 
-/// `kappa = 1 / U_r^2 - 1 / c^2` (exactly 0 for `U_r = c`).
-fn kappa_f(ur2: &F, c2: &F) -> F {
-    select(&ur2.ge(c2), 0.0f32, 1.0f32 / ur2 - 1.0f32 / c2)
-}
-
 /// `(g_0, g_1, g_2)` of `g = (g - 1)(q^2 / 2, -u, -v, 1)`: `g_3 = g - 1` is a constant.
 fn pressure_row(u: &F, v: &F) -> [F; 3] {
     let g1 = cf(G1);

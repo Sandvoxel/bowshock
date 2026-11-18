@@ -519,20 +519,46 @@ fn apply_factor3(s: &Solver3, fac: &Factor, dir: usize, x: &[Cons3]) -> Vec<Cons
     out
 }
 
+/// The diagonal `D = sum_d (I - dt J_d)_diag - (nd - 1) P` of the unfactored operator `A = D + sum_d O_d` (`O_d` the off-diagonal blocks of direction `d`) of every cell, written
+/// as the diagonal of every factor: the diagonally dominant factors `D + O_d` of [`ImplicitParams::ddadi`] (`P` the identity without the preconditioning).
+fn dd_diagonal(facs: &mut [Factor], pm: Option<&[M5]>) -> Vec<M5> {
+    let nd = facs.len();
+    let dfull: Vec<M5> = (0..facs[0].d.len())
+        .into_par_iter()
+        .map(|c| {
+            let mut d = ZERO5;
+            for f in facs.iter() {
+                axpy(&mut d, 1.0, &f.d[c]);
+            }
+            axpy(&mut d, -((nd - 1) as f64), &pm.map_or(EYE5, |pm| pm[c]));
+            d
+        })
+        .collect();
+    for f in facs.iter_mut() {
+        f.d.clone_from(&dfull);
+    }
+    dfull
+}
+
 /// The correction `dU` of the block scheme for the right-hand side `b = dt R`: the three-factor solve (two on a wedge: it has no `k` line, and a `k` factor of
 /// `I` between `P`s would be a second `P^-1`) with block-tridiagonal lines and `ImplicitParams::sub_iters - 1` defect-correction passes against the unfactored operator.
+/// With `ImplicitParams::ddadi = Some(omega)` the factors are `D + O_d` and `D` stands between them where `P` stood ([`dd_diagonal`]): the unfactored operator is the same, the
+/// factorisation error is bounded at any CFL (the plain one grows with it until the defect passes diverge), and the correction is multiplied by `omega` at the end (the
+/// accurate solve of the first-order operator against the limited second-order residual has a period-2 mode that the plain factors' error damps).
 fn du_block(s: &Solver3, p: &ImplicitParams, b: &[Cons3]) -> Vec<Cons3> {
     let n = s.u.len();
     let nd = if s.is_wedge() { 2 } else { 3 };
-    let facs: Vec<Factor> = (0..nd).map(|dir| assemble3(s, p, dir)).collect();
+    let mut facs: Vec<Factor> = (0..nd).map(|dir| assemble3(s, p, dir)).collect();
     let pm = precond_blocks(s);
+    // the matrix between the factors and in the unfactored operator: `P` (identity without preconditioning), or `D` of the diagonally dominant scheme
+    let centre = if p.ddadi.is_some() { Some(dd_diagonal(&mut facs, pm.as_deref())) } else { pm };
     let af = |rhs: &[Cons3]| -> Vec<Cons3> {
         let mut x = rhs.to_vec();
         for dir in 0..nd {
             solve_lines3(s, &facs[dir], dir, &mut x);
             // low-Mach run: `(P - dt J_i) X = rhs, (P - dt J_j) Y = P X, (P - dt J_k) dU = P Y`
-            if let (Some(pm), true) = (&pm, dir + 1 < nd) {
-                apply_p(pm, &mut x);
+            if let (Some(c), true) = (&centre, dir + 1 < nd) {
+                apply_p(c, &mut x);
             }
         }
         x
@@ -544,7 +570,7 @@ fn du_block(s: &Solver3, p: &ImplicitParams, b: &[Cons3]) -> Vec<Cons3> {
             .into_par_iter()
             .map(|c| {
                 // (P - dt J_i) + (P - dt J_j) + (P - dt J_k) - 2 P = P - dt (J_i + J_j + J_k)
-                let pdu = pm.as_ref().map_or(du[c], |pm| mv(&pm[c], &du[c]));
+                let pdu = centre.as_ref().map_or(du[c], |m| mv(&m[c], &du[c]));
                 let mut v = [0.0; 5];
                 for q in 0..5 {
                     v[q] = b[c][q] - (a.iter().map(|f| f[c][q]).sum::<f64>() - (nd - 1) as f64 * pdu[q]);
@@ -558,6 +584,9 @@ fn du_block(s: &Solver3, p: &ImplicitParams, b: &[Cons3]) -> Vec<Cons3> {
                 d[q] += c[q];
             }
         });
+    }
+    if let Some(omega) = p.ddadi.filter(|&w| w != 1.0) {
+        du.par_iter_mut().for_each(|d| d.iter_mut().for_each(|x| *x *= omega));
     }
     du
 }

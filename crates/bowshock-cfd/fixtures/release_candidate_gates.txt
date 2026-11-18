@@ -1,0 +1,278 @@
+# Release-candidate gate lines (DESIGN3D item 42). Candidate: cfd-3d 3ec6e84 (code), tools/release_gates.sh groups.
+# Each section names the snapshot that produced it; sections marked PENDING are the rc4-* gpuq jobs on 3ec6e84 (to be replaced by their logs).
+
+## wedge (GPU) -- snapshot 0922310 (before euler_wedge first-order fix, CFL controller default); rc4-wedge on 3ec6e84 PENDING
+GATE G-V2 plate-g2r n/a n/a n/a FAIL (plate: not implemented by the runner)
+GATE G-V3 g3-cpu:cd_total 0.213279 0.213002 rel2% PASS
+GATE G-V3 g3-cpu:cd_friction 0.090042 0.090032 rel3% PASS
+GATE G-V3 g3-cpu:cd_base 0.122852 0.122572 rel4% PASS
+GATE G-V3 g3-cpu:y_plus_max 0.648969 3.000000 below PASS
+INFO G-V3 g3-cpu iterations wedge 2900 2D 4000; stop wedge CdStationary 2D CdStationary
+INFO RANS wedge g3-gpu on the GPU: 2900 iterations, 2.7 s, stop CdStationary, 1.75 orders
+GATE G-V3 g3-gpu:cd_total 0.213279 0.213002 rel2% PASS
+GATE G-V3 g3-gpu:cd_friction 0.090042 0.090032 rel3% PASS
+GATE G-V3 g3-gpu:cd_base 0.122852 0.122572 rel4% PASS
+GATE G-V3 g3-gpu:y_plus_max 0.648969 3.000000 below PASS
+INFO G-V3 g3-gpu iterations wedge 2900 2D 4000; stop wedge CdStationary 2D CdStationary
+GATE G-V4 arcas-off-M0.60:cd_total 0.206315 0.206253 rel2% PASS
+INFO G-V4 arcas-off-M0.60 parts wedge friction Some(0.18306881904409503) nose 8.7663e-4 aft [0.0, 0.0494605590019465] base Some(-0.027089896781041855) | 2D friction Some(0.18304453633346623) nose 8.9574e-4 aft [0.0, 0.049436092556278705] base Some(-0.027123708040603885) | iterations wedge 2150 2D 4000
+INFO RANS wedge arcas-off-M0.80 on the GPU: 2200 iterations, 3.7 s, stop CdStationary, 1.36 orders
+GATE G-V4 arcas-off-M0.80:cd_total 0.206818 0.206760 rel2% PASS
+INFO G-V4 arcas-off-M0.80 parts wedge friction Some(0.1782331814035939) nose 0.001120 aft [0.0, 0.05865644333723713] base Some(-0.031190898823734558) | 2D friction Some(0.17820999461018605) nose 0.001137 aft [0.0, 0.0586334062734532] base Some(-0.031220080768681168) | iterations wedge 2200 2D 4000
+INFO RANS wedge arcas-off-M0.90 on the GPU: 2950 iterations, 3.0 s, stop CdStationary, 1.35 orders
+GATE G-V4 arcas-off-M0.90:cd_total 0.237001 0.236896 rel3% PASS
+INFO G-V4 arcas-off-M0.90 parts wedge friction Some(0.17319768318260167) nose 0.002124 aft [0.0, 0.0854117033221585] base Some(-0.023732034891230647) | 2D friction Some(0.17312976930005297) nose 0.002106 aft [0.0, 0.08540657675771945] base Some(-0.02374611276846572) | iterations wedge 2950 2D 4500
+INFO RANS wedge arcas-off-M0.95 on the GPU: 4350 iterations, 4.6 s, stop CdStationary, 1.53 orders
+GATE G-V4 arcas-off-M0.95:cd_total 0.278780 0.278702 rel3% PASS
+INFO G-V4 arcas-off-M0.95 parts wedge friction Some(0.17084536339929574) nose 0.002526 aft [0.0, 0.10593957757950827] base Some(-0.0005323616611408354) | 2D friction Some(0.1707878967366642) nose 0.002515 aft [0.0, 0.10594139266382788] base Some(-0.000542431619202452) | iterations wedge 4350 2D 6000
+INFO RANS wedge arcas-off-M1.00 on the GPU: 5550 iterations, 9.9 s, stop CdStationary, 1.55 orders
+GATE G-V4 arcas-off-M1.00:cd_total 0.390878 0.390683 rel3% PASS
+INFO G-V4 arcas-off-M1.00 parts wedge friction Some(0.17401033970538246) nose 0.023208 aft [0.0, 0.19043377156938165] base Some(0.0032260883547610584) | 2D friction Some(0.1739757276124521) nose 0.023173 aft [0.0, 0.19029090458773587] base Some(0.00324381462984869) | iterations wedge 5550 2D 9000
+INFO RANS wedge arcas-off-M1.20 on the GPU: 2700 iterations, 3.8 s, stop CdStationary, 1.17 orders
+GATE G-V4 arcas-off-M1.20:cd_total 0.387962 0.387883 rel2% PASS
+INFO G-V4 arcas-off-M1.20 parts wedge friction Some(0.16967347448561898) nose 0.050121 aft [0.0, 0.155292569833831] base Some(0.012875091028130012) | 2D friction Some(0.16964776529013895) nose 0.050145 aft [0.0, 0.1552795362649795] base Some(0.012810213212497236) | iterations wedge 2700 2D 4000
+INFO RANS wedge arcas-off-M1.50 on the GPU: 2350 iterations, 3.4 s, stop CdStationary, 1.19 orders
+GATE G-V4 arcas-off-M1.50:cd_total 0.352822 0.352739 rel2% PASS
+INFO G-V4 arcas-off-M1.50 parts wedge friction Some(0.16132847948225587) nose 0.048879 aft [0.0, 0.11605519485617359] base Some(0.026559831397134623) | 2D friction Some(0.16130388286548347) nose 0.048901 aft [0.0, 0.11605589040918596] base Some(0.026478203220704145) | iterations wedge 2350 2D 4000
+INFO RANS wedge arcas-off-M1.80 on the GPU: 2200 iterations, 3.6 s, stop CdStationary, 1.38 orders
+GATE G-V4 arcas-off-M1.80:cd_total 0.323705 0.323623 rel2% PASS
+INFO G-V4 arcas-off-M1.80 parts wedge friction Some(0.15287123613856154) nose 0.047582 aft [0.0, 0.0901562489711993] base Some(0.03309693151390973) | 2D friction Some(0.1528481714796016) nose 0.047603 aft [0.0, 0.09015933837999208] base Some(0.03301249001551019) | iterations wedge 2200 2D 4000
+INFO RANS wedge arcas-off-M2.30 on the GPU: 2000 iterations, 3.1 s, stop CdStationary, 1.11 orders
+GATE G-V4 arcas-off-M2.30:cd_total 0.283666 0.283594 rel2% PASS
+INFO G-V4 arcas-off-M2.30 parts wedge friction Some(0.13909980860744456) nose 0.045735 aft [0.0, 0.06296878211079093] base Some(0.03586464635735043) | 2D friction Some(0.13907864636444475) nose 0.045753 aft [0.0, 0.06297415058921216] base Some(0.035788406315132935) | iterations wedge 2000 2D 4000
+INFO RANS wedge arcas-off-M2.96 on the GPU: 1750 iterations, 2.5 s, stop CdStationary, 1.05 orders
+GATE G-V4 arcas-off-M2.96:cd_total 0.240824 0.240810 rel2% PASS
+INFO G-V4 arcas-off-M2.96 parts wedge friction Some(0.12294374794805607) nose 0.043803 aft [0.0, 0.042262503792411255] base Some(0.0318180372023818) | 2D friction Some(0.12292517703643197) nose 0.043819 aft [0.0, 0.04226692628979107] base Some(0.031798877686032394) | iterations wedge 1750 2D 4000
+GATE G-V4 table-rans-M0.10:cd_total 0.360041 0.358435 rel2% PASS
+INFO G-V4 table-rans-M0.10 parts wedge friction Some(0.2466016322241443) nose -5.3665e-4 aft [0.0] base Some(0.11397668206001135) | 2D friction Some(0.2460111069734524) nose 0.002427 aft [0.0] base Some(0.1099972694249703) | iterations wedge 1350 2D 1200
+INFO RANS wedge table-rans-M0.50 on the GPU: 2200 iterations, 3.6 s, stop CdStationary, 1.49 orders
+GATE G-V4 table-rans-M0.50:cd_total 0.341124 0.341053 rel2% PASS
+INFO G-V4 table-rans-M0.50 parts wedge friction Some(0.22307609283712065) nose 0.002454 aft [0.0] base Some(0.1155946452373732) | 2D friction Some(0.223166535932793) nose 0.002416 aft [0.0] base Some(0.11547010505536597) | iterations wedge 2200 2D 2100
+INFO RANS wedge table-rans-M0.80 on the GPU: 1650 iterations, 2.0 s, stop CdStationary, 1.30 orders
+GATE G-V4 table-rans-M0.80:cd_total 0.342799 0.342774 rel2% PASS
+INFO G-V4 table-rans-M0.80 parts wedge friction Some(0.212296664015912) nose 0.003185 aft [0.0] base Some(0.12731734842482595) | 2D friction Some(0.21247455602078305) nose 0.003171 aft [0.0] base Some(0.12712783548148582) | iterations wedge 1650 2D 1550
+INFO RANS wedge table-rans-M0.90 on the GPU: 1850 iterations, 2.7 s, stop CdStationary, 1.25 orders
+GATE G-V4 table-rans-M0.90:cd_total 0.357141 0.357142 rel3% PASS
+INFO G-V4 table-rans-M0.90 parts wedge friction Some(0.20778664060737936) nose 0.005527 aft [0.0] base Some(0.14382707477557952) | 2D friction Some(0.20796595052935604) nose 0.005506 aft [0.0] base Some(0.14366990778181576) | iterations wedge 1850 2D 1850
+INFO RANS wedge table-rans-M1.00 on the GPU: 3000 iterations, 4.3 s, stop CdStationary, 1.19 orders
+GATE G-V4 table-rans-M1.00:cd_total 0.456921 0.456896 rel3% PASS
+INFO G-V4 table-rans-M1.00 parts wedge friction Some(0.20316816726752865) nose 0.051432 aft [0.0] base Some(0.2023209403309161) | 2D friction Some(0.2033579039664479) nose 0.051451 aft [0.0] base Some(0.20208671458090244) | iterations wedge 3000 2D 3000
+INFO RANS wedge table-rans-M1.10 on the GPU: 2850 iterations, 4.7 s, stop CdStationary, 1.29 orders
+GATE G-V4 table-rans-M1.10:cd_total 0.497677 0.497641 rel3% PASS
+INFO G-V4 table-rans-M1.10 parts wedge friction Some(0.1975873228033122) nose 0.103916 aft [0.0] base Some(0.19617371498170424) | 2D friction Some(0.1977777803860882) nose 0.103947 aft [0.0] base Some(0.19591651685861655) | iterations wedge 2850 2D 2850
+INFO RANS wedge table-rans-M1.30 on the GPU: 2600 iterations, 3.6 s, stop CdStationary, 1.35 orders
+GATE G-V4 table-rans-M1.30:cd_total 0.488190 0.488180 rel2% PASS
+INFO G-V4 table-rans-M1.30 parts wedge friction Some(0.18825608637731137) nose 0.109883 aft [0.0] base Some(0.19005116599196029) | 2D friction Some(0.18849335610966697) nose 0.109928 aft [0.0] base Some(0.1897592110086951) | iterations wedge 2600 2D 2600
+INFO RANS wedge table-rans-M1.70 on the GPU: 2150 iterations, 3.1 s, stop CdStationary, 1.50 orders
+GATE G-V4 table-rans-M1.70:cd_total 0.444156 0.444225 rel2% PASS
+INFO G-V4 table-rans-M1.70 parts wedge friction Some(0.16843348373843972) nose 0.105526 aft [0.0] base Some(0.17019793696471772) | 2D friction Some(0.16874592026813143) nose 0.105580 aft [0.0] base Some(0.1698998306955398) | iterations wedge 2150 2D 2150
+INFO RANS wedge table-rans-M2.30 on the GPU: 1700 iterations, 2.5 s, stop CdStationary, 0.98 orders
+GATE G-V4 table-rans-M2.30:cd_total 0.376124 0.376383 rel2% PASS
+INFO G-V4 table-rans-M2.30 parts wedge friction Some(0.13985892789743007) nose 0.098930 aft [0.0] base Some(0.13733700724060177) | 2D friction Some(0.1402207064987381) nose 0.098985 aft [0.0] base Some(0.1371774612289338) | iterations wedge 1700 2D 1650
+INFO RANS wedge table-rans-M3.00 on the GPU: 1050 iterations, 1.7 s, stop CdStationary, 0.54 orders
+GATE G-V4 table-rans-M3.00:cd_total 0.308123 0.307857 rel2% PASS
+INFO G-V4 table-rans-M3.00 parts wedge friction Some(0.11208977125709872) nose 0.093321 aft [0.0] base Some(0.10271492159240041) | 2D friction Some(0.11249249074330958) nose 0.093380 aft [0.0] base Some(0.10198475975204672) | iterations wedge 1050 2D 2000
+GATE G-V4 table-euler-M0.10:cd_total 0.046553 0.046391 rel2% PASS
+INFO G-V4 table-euler-M0.10 parts wedge friction None nose -0.004277 aft [0.0] base Some(0.050830058111758294) | 2D friction None nose -0.004227 aft [0.0] base Some(0.05061748978697876) | iterations wedge 2200 2D 4000
+INFO G-V4 table-euler-M0.50 not gated: an inviscid wake that cycles (2D stop MaxIterations, 10000 iterations; wedge stop MeanStationary, 4020 iterations); wedge cd_total 0.148057 2D 0.133290
+GATE G-V4 table-euler-M0.80:cd_total 0.135124 0.135118 rel2% PASS
+INFO G-V4 table-euler-M0.80 parts wedge friction None nose -0.002917 aft [0.0] base Some(0.1380411809529573) | 2D friction None nose -0.002917 aft [0.0] base Some(0.13803496714032523) | iterations wedge 450 2D 764
+GATE G-V4 table-euler-M0.90:cd_total 0.173805 0.174802 rel3% PASS
+INFO G-V4 table-euler-M0.90 parts wedge friction None nose -0.002455 aft [0.0] base Some(0.17625980704294422) | 2D friction None nose -0.002556 aft [0.0] base Some(0.1773585593935946) | iterations wedge 850 2D 13500
+GATE G-V4 table-euler-M1.00:cd_total 0.300444 0.300144 rel3% PASS
+INFO G-V4 table-euler-M1.00 parts wedge friction None nose 0.043778 aft [0.0] base Some(0.25666588916737054) | 2D friction None nose 0.044020 aft [0.0] base Some(0.25612379746885267) | iterations wedge 750 2D 7000
+GATE G-V4 table-euler-M1.10:cd_total 0.360288 0.359830 rel3% PASS
+INFO G-V4 table-euler-M1.10 parts wedge friction None nose 0.098042 aft [0.0] base Some(0.26224570412101034) | 2D friction None nose 0.097956 aft [0.0] base Some(0.26187401873440896) | iterations wedge 650 2D 4000
+GATE G-V4 table-euler-M1.30:cd_total 0.375445 0.375437 rel2% PASS
+INFO G-V4 table-euler-M1.30 parts wedge friction None nose 0.103931 aft [0.0] base Some(0.27151416487019325) | 2D friction None nose 0.103940 aft [0.0] base Some(0.27149749373509435) | iterations wedge 650 2D 4000
+GATE G-V4 table-euler-M1.70:cd_total 0.334599 0.334609 rel2% PASS
+INFO G-V4 table-euler-M1.70 parts wedge friction None nose 0.099513 aft [0.0] base Some(0.2350861672881918) | 2D friction None nose 0.099522 aft [0.0] base Some(0.23508757803435387) | iterations wedge 600 2D 4000
+GATE G-V4 table-euler-M2.30:cd_total 0.268852 0.268853 rel2% PASS
+INFO G-V4 table-euler-M2.30 parts wedge friction None nose 0.093457 aft [0.0] base Some(0.17539583230074002) | 2D friction None nose 0.093464 aft [0.0] base Some(0.175388968077672) | iterations wedge 600 2D 4000
+GATE G-V4 table-euler-M3.00:cd_total 0.209873 0.210101 rel2% PASS
+INFO G-V4 table-euler-M3.00 parts wedge friction None nose 0.088291 aft [0.0] base Some(0.12158189696973903) | 2D friction None nose 0.088299 aft [0.0] base Some(0.12180208956059366) | iterations wedge 1000 2D 4000
+GATE G-V5 wedge-f32-explicit:k 0.000000 0.010000 max PASS
+GATE G-V5 wedge-f32-explicit:omega 0.000000 0.010000 max PASS
+GATE G-V5 wedge-f32-implicit:state 3.6593e-5 1.0000e-4 max PASS
+GATE G-V5 wedge-f32-implicit:k 0.000000 0.001000 max PASS
+GATE G-V5 wedge-f32-implicit:omega 0.000000 0.001000 max PASS
+GATE G-V5 wedge-df32-explicit:state 1.2846e-12 0.001000 max PASS
+GATE G-V5 wedge-df32-explicit:k 0.000000 0.010000 max PASS
+GATE G-V5 wedge-df32-explicit:omega 0.000000 0.010000 max PASS
+GATE G-V5 wedge-df32-implicit:state 3.8881e-8 1.0000e-4 max PASS
+GATE G-V5 wedge-df32-implicit:k 0.000000 0.001000 max PASS
+GATE G-V5 wedge-df32-implicit:omega 0.000000 0.001000 max PASS
+GATE G-V5 sector-f32-explicit:state 1.8940e-6 0.001000 max PASS
+GATE G-V5 sector-f32-explicit:k 0.000000 0.010000 max PASS
+GATE G-V5 sector-f32-explicit:omega 0.000000 0.010000 max PASS
+GATE G-V5 sector-f32-implicit:state 3.0994e-6 1.0000e-4 max PASS
+GATE G-V5 sector-f32-implicit:k 0.000000 0.001000 max PASS
+GATE G-V5 sector-f32-implicit:omega 0.000000 0.001000 max PASS
+GATE G-V5 sector-df32-explicit:state 7.5855e-14 0.001000 max PASS
+GATE G-V5 sector-df32-explicit:k 0.000000 0.010000 max PASS
+GATE G-V5 sector-df32-explicit:omega 0.000000 0.010000 max PASS
+GATE G-V5 sector-df32-implicit:state 3.2074e-7 1.0000e-4 max PASS
+GATE G-V5 sector-df32-implicit:k 0.000000 0.001000 max PASS
+GATE G-V5 sector-df32-implicit:omega 0.000000 0.001000 max PASS
+
+## lift (G-F5, G-L1, Lift tier GPU) -- snapshot 0922310; rc4-lift on 3ec6e84 PENDING
+GATE G-F5 anf-M0.500-between:cd0 0.507728 0.460000 rel8% FAIL
+INFO G-F5 anf-M0.500-inplane:parts ca +0.5055 (12000 it, mean stationary), nose +0.0364 base +0.1564 fins +0.2232
+GATE G-F5 anf-M0.500-inplane:cd0 0.505526 0.460000 rel8% FAIL
+INFO G-F5 anf-M0.700-between:parts ca +0.5152 (12000 it, mean stationary), nose +0.0361 base +0.1704 fins +0.2284
+GATE G-F5 anf-M0.700-between:cd0 0.515229 0.460000 rel8% FAIL
+INFO G-F5 anf-M0.700-inplane:parts ca +0.5105 (12000 it, mean stationary), nose +0.0361 base +0.1701 fins +0.2239
+GATE G-F5 anf-M0.700-inplane:cd0 0.510504 0.460000 rel8% FAIL
+INFO G-F5 anf-M1.832-between:parts ca +0.5298 (12000 it, mean stationary), nose +0.1292 base +0.1805 fins +0.1640
+GATE G-F5 anf-M1.832-between:cd0 0.529822 0.585000 rel8% FAIL KNOWN DESIGN3D-L-item-38
+INFO G-F5 anf-M1.832-inplane:parts ca +0.5282 (7150 it, CD stationary), nose +0.1292 base +0.1802 fins +0.1626
+GATE G-F5 anf-M1.832-inplane:cd0 0.528188 0.585000 rel8% FAIL KNOWN DESIGN3D-L-item-38
+INFO G-F5 anf-M2.375-between:parts ca +0.4297 (12000 it, mean stationary), nose +0.1154 base +0.1395 fins +0.1273
+GATE G-F5 anf-M2.375-between:cd0 0.429676 0.484000 rel8% FAIL KNOWN DESIGN3D-L-item-38
+INFO G-F5 anf-M2.375-inplane:parts ca +0.4281 (12000 it, mean stationary), nose +0.1154 base +0.1394 fins +0.1257
+GATE G-F5 anf-M2.375-inplane:cd0 0.428093 0.484000 rel8% FAIL KNOWN DESIGN3D-L-item-38
+INFO G-F5 anf-M2.718-between:parts ca +0.3844 (12000 it, mean stationary), nose +0.1094 base +0.1212 fins +0.1108
+GATE G-F5 anf-M2.718-between:cd0 0.384351 0.435000 rel8% FAIL KNOWN DESIGN3D-L-item-38
+INFO G-F5 anf-M2.718-inplane:parts ca +0.3828 (12000 it, mean stationary), nose +0.1094 base +0.1212 fins +0.1092
+GATE G-F5 anf-M2.718-inplane:cd0 0.382755 0.435000 rel8% FAIL KNOWN DESIGN3D-L-item-38
+INFO G-F5 anf-M3.147-between:parts ca +0.3390 (12000 it, mean stationary), nose +0.1037 base +0.1022 fins +0.0951
+GATE G-F5 anf-M3.147-between:cd0 0.338967 0.373000 rel8% FAIL KNOWN DESIGN3D-L-item-38
+INFO G-F5 anf-M3.147-inplane:parts ca +0.3374 (12000 it, mean stationary), nose +0.1037 base +0.1023 fins +0.0935
+GATE G-F5 anf-M3.147-inplane:cd0 0.337354 0.373000 rel8% FAIL KNOWN DESIGN3D-L-item-38
+GATE G-L1 wt-M0.690-between:x_cp 8.301443 8.208029 rel0%+abs0.25 PASS
+INFO G-L1 wt-M0.690-between:alpha6 CNa(6) 17.74 (+1.1 % of CNa(2)), x_cp(6) 8.308; 5850 it, CD stationary / 3150 it, CD stationary
+GATE G-L1 wt-M0.690-inplane:cn_alpha 17.630526 15.699044 rel13% PASS
+GATE G-L1 wt-M0.690-inplane:x_cp 8.301735 8.208029 rel0%+abs0.25 PASS
+INFO G-L1 wt-M0.690-inplane:alpha6 CNa(6) 18.39 (+4.3 % of CNa(2)), x_cp(6) 8.353; 6150 it, CD stationary / 12000 it, mean stationary
+GATE G-L1 wt-M0.790-between:cn_alpha 18.428304 16.272001 rel13% FAIL
+GATE G-L1 wt-M0.790-between:x_cp 8.355440 8.242958 rel0%+abs0.25 PASS
+INFO G-L1 wt-M0.790-between:alpha6 CNa(6) 18.69 (+1.4 % of CNa(2)), x_cp(6) 8.364; 4850 it, CD stationary / 3300 it, CD stationary
+GATE G-L1 wt-M0.790-inplane:cn_alpha 18.521123 16.272001 rel13% FAIL
+GATE G-L1 wt-M0.790-inplane:x_cp 8.355052 8.242958 rel0%+abs0.25 PASS
+INFO G-L1 wt-M0.790-inplane:alpha6 CNa(6) 19.40 (+4.7 % of CNa(2)), x_cp(6) 8.411; 5450 it, CD stationary / 6650 it, CD stationary
+GATE G-L1 wt-M1.728-between:cn_alpha 12.894663 11.917522 rel13% PASS
+GATE G-L1 wt-M1.728-between:x_cp 7.946856 7.937500 rel0%+abs0.25 PASS
+INFO G-L1 wt-M1.728-between:alpha6 CNa(6) 13.22 (+2.5 % of CNa(2)), x_cp(6) 7.889; 2500 it, CD stationary / 2500 it, CD stationary
+GATE G-L1 wt-M1.728-inplane:cn_alpha 12.855683 11.917522 rel13% PASS
+GATE G-L1 wt-M1.728-inplane:x_cp 7.941362 7.937500 rel0%+abs0.25 PASS
+INFO G-L1 wt-M1.728-inplane:alpha6 CNa(6) 13.24 (+3.0 % of CNa(2)), x_cp(6) 7.877; 2750 it, CD stationary / 4900 it, CD stationary
+GATE G-L1 wt-M1.990-between:cn_alpha 11.305321 10.599719 rel13% PASS
+GATE G-L1 wt-M1.990-between:x_cp 7.682239 7.678378 rel0%+abs0.25 PASS
+INFO G-L1 wt-M1.990-between:alpha6 CNa(6) 11.69 (+3.4 % of CNa(2)), x_cp(6) 7.614; 2450 it, CD stationary / 2500 it, CD stationary
+GATE G-L1 wt-M1.990-inplane:cn_alpha 11.293458 10.599719 rel13% PASS
+GATE G-L1 wt-M1.990-inplane:x_cp 7.681472 7.678378 rel0%+abs0.25 PASS
+INFO G-L1 wt-M1.990-inplane:alpha6 CNa(6) 11.72 (+3.8 % of CNa(2)), x_cp(6) 7.604; 2700 it, CD stationary / 4850 it, CD stationary
+GATE G-L1 wt-M2.480-between:cn_alpha 9.634919 9.339212 rel13% PASS
+GATE G-L1 wt-M2.480-between:x_cp 7.282574 7.266871 rel0%+abs0.25 PASS
+INFO G-L1 wt-M2.480-between:alpha6 CNa(6) 10.16 (+5.5 % of CNa(2)), x_cp(6) 7.222; 2400 it, CD stationary / 2450 it, CD stationary
+GATE G-L1 wt-M2.480-inplane:cn_alpha 9.629386 9.339212 rel13% PASS
+GATE G-L1 wt-M2.480-inplane:x_cp 7.285765 7.266871 rel0%+abs0.25 PASS
+INFO G-L1 wt-M2.480-inplane:alpha6 CNa(6) 10.19 (+5.8 % of CNa(2)), x_cp(6) 7.211; 2550 it, CD stationary / 4750 it, CD stationary
+GATE G-L1 ff-M1.800-between:cn_alpha 12.383237 11.287269 rel13% PASS
+GATE G-L1 ff-M1.800-between:x_cp 7.871828 8.063452 rel0%+abs0.25 PASS
+INFO G-L1 ff-M1.800-between:alpha6 CNa(6) 12.72 (+2.7 % of CNa(2)), x_cp(6) 7.808; 2500 it, CD stationary / 2500 it, CD stationary
+GATE G-L1 ff-M1.800-inplane:cn_alpha 12.339970 11.287269 rel13% PASS
+GATE G-L1 ff-M1.800-inplane:x_cp 7.865857 8.063452 rel0%+abs0.25 PASS
+INFO G-L1 ff-M1.800-inplane:alpha6 CNa(6) 12.74 (+3.2 % of CNa(2)), x_cp(6) 7.797; 2750 it, CD stationary / 4850 it, CD stationary
+GATE G-L1 ff-M2.351-between:cn_alpha 9.977615 10.370536 rel13% PASS
+GATE G-L1 ff-M2.351-between:x_cp 7.376494 7.395028 rel0%+abs0.25 PASS
+INFO G-L1 ff-M2.351-between:alpha6 CNa(6) 10.47 (+4.9 % of CNa(2)), x_cp(6) 7.311; 2400 it, CD stationary / 2400 it, CD stationary
+GATE G-L1 ff-M2.351-inplane:cn_alpha 9.973107 10.370536 rel13% PASS
+GATE G-L1 ff-M2.351-inplane:x_cp 7.379675 7.395028 rel0%+abs0.25 PASS
+INFO G-L1 ff-M2.351-inplane:alpha6 CNa(6) 10.49 (+5.2 % of CNa(2)), x_cp(6) 7.300; 2600 it, CD stationary / 4750 it, CD stationary
+GATE G-L1 ff-M2.665-between:cn_alpha 9.224714 8.880846 rel13% PASS
+GATE G-L1 ff-M2.665-between:x_cp 7.159562 7.293548 rel0%+abs0.25 PASS
+INFO G-L1 ff-M2.665-between:alpha6 CNa(6) 9.79 (+6.1 % of CNa(2)), x_cp(6) 7.108; 2400 it, CD stationary / 2400 it, CD stationary
+GATE G-L1 ff-M2.665-inplane:cn_alpha 9.216153 8.880846 rel13% PASS
+GATE G-L1 ff-M2.665-inplane:x_cp 7.162722 7.293548 rel0%+abs0.25 PASS
+INFO G-L1 ff-M2.665-inplane:alpha6 CNa(6) 9.82 (+6.6 % of CNa(2)), x_cp(6) 7.098; 2500 it, CD stationary / 4750 it, CD stationary
+
+## cpu (G-W1, G-W4, G-V1, G-V2) -- tree 2bc06aa, CPU f64; G-F2 / G-F3 / G-J still running when this was written
+GATE G-V2 plate-g2r n/a n/a n/a FAIL (plate: not implemented by the runner)
+INFO G-W1 table-euler-M0.50 not gated: the 2D reference stopped on the iteration cap (10000 iterations); wedge cd_total 0.054868 2D 0.133290
+INFO G-W1 table-euler-M0.90 not gated (transonic wake): wedge cd_total 0.173815 base 0.176273 2D cd_total 0.174802 base 0.177359
+GATE G-W1 table-euler-M1.30:cd_total 0.375447 0.375437 rel2%+abs0.002 PASS
+GATE G-W1 table-euler-M1.30:cd_nose 0.103930 0.103940 rel2%+abs0.002 PASS
+GATE G-W1 table-euler-M1.30:cd_aft0 -0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 table-euler-M1.30:cd_base 0.271517 0.271497 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M0.50:cd_total 0.073166 0.073151 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M0.50:cd_nose -0.004269 -0.004268 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M0.50:cd_aft0 -0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M0.50:cd_aft1 0.017345 0.017343 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M0.50:cd_base 0.060089 0.060076 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M0.90:cd_total 0.088580 0.089043 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M0.90:cd_nose -0.003514 -0.003051 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M0.90:cd_aft0 -0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M0.90:cd_aft1 0.036385 0.036085 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M0.90:cd_base 0.055709 0.056010 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M1.30:cd_total 0.283175 0.283187 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M1.30:cd_nose 0.103939 0.103949 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M1.30:cd_aft0 -0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M1.30:cd_aft1 0.047840 0.047843 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M1.30:cd_base 0.131396 0.131396 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M2.00:cd_total 0.238765 0.238770 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M2.00:cd_nose 0.096182 0.096190 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M2.00:cd_aft0 -0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M2.00:cd_aft1 0.029033 0.029034 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-g3-transition-M2.00:cd_base 0.113551 0.113546 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M0.50:cd_total 0.039254 0.039238 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M0.50:cd_nose -0.001894 -0.001895 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M0.50:cd_aft0 -0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M0.50:cd_aft1 0.045099 0.045095 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M0.50:cd_base -0.003952 -0.003962 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M0.90:cd_total 0.110747 0.110516 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M0.90:cd_nose -0.001558 -0.001289 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M0.90:cd_aft0 -0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M0.90:cd_aft1 0.137833 0.137423 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M0.90:cd_base -0.025528 -0.025618 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M1.30:cd_total 0.241792 0.241807 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M1.30:cd_nose 0.046085 0.046090 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M1.30:cd_aft0 -0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M1.30:cd_aft1 0.153216 0.153225 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M1.30:cd_base 0.042491 0.042493 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M2.00:cd_total 0.222837 0.188246 rel2%+abs0.002 FAIL
+GATE G-W1 euler-base-arcas-M2.00:cd_nose 0.043033 0.043010 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M2.00:cd_aft0 -0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-arcas-M2.00:cd_aft1 0.081463 0.085905 rel2%+abs0.002 FAIL
+GATE G-W1 euler-base-arcas-M2.00:cd_base 0.098340 0.059330 rel2%+abs0.002 FAIL
+INFO window mean of 1500 iterations to 4010: CA 0.19835 oscillation 0.409
+INFO G-W1 euler-base-two-stage-46d-M0.50 not gated: the 2D reference stopped on the iteration cap (10000 iterations); wedge cd_total 0.107387 2D 0.117186
+INFO window mean of 1500 iterations to 4000: CA 0.38673 oscillation 0.010
+GATE G-W1 euler-base-two-stage-46d-M0.90:cd_total 0.194179 0.192105 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M0.90:cd_nose -2.4930e-4 -1.5357e-4 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M0.90:cd_aft0 0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M0.90:cd_aft1 0.033689 0.033464 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M0.90:cd_aft2 0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M0.90:cd_base 0.160739 0.158795 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M1.30:cd_total 0.415171 0.415230 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M1.30:cd_nose 0.020547 0.020549 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M1.30:cd_aft0 0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M1.30:cd_aft1 0.118890 0.118899 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M1.30:cd_aft2 -0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M1.30:cd_base 0.275734 0.275782 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M2.00:cd_total 0.316862 0.316337 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M2.00:cd_nose 0.019248 0.019250 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M2.00:cd_aft0 0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M2.00:cd_aft1 0.079231 0.079237 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M2.00:cd_aft2 0.000000 0.000000 rel2%+abs0.002 PASS
+GATE G-W1 euler-base-two-stage-46d-M2.00:cd_base 0.218383 0.217850 rel2%+abs0.002 PASS
+GATE G-W4 cone-10deg-M2.0-coarse:cp 0.104099 0.104471 rel2% PASS
+GATE G-W4 cone-10deg-M2.0-coarse:beta_deg 31.252768 31.206091 abs0.2 PASS
+INFO cone 10 deg M 2 200x100: 550 iterations, CD stationary
+GATE G-W4 cone-10deg-M2.0-medium:cp 0.104328 0.104471 rel2% PASS
+GATE G-W4 cone-10deg-M2.0-medium:beta_deg 31.262784 31.206091 abs0.2 PASS
+INFO cone 15 deg M 2 100x50: 550 iterations, CD stationary
+GATE G-W4 cone-15deg-M2.0-coarse:cp 0.201678 0.202248 rel2% PASS
+GATE G-W4 cone-15deg-M2.0-coarse:beta_deg 33.993306 33.914698 abs0.2 PASS
+INFO cone 15 deg M 2 200x100: 550 iterations, CD stationary
+GATE G-W4 cone-15deg-M2.0-medium:cp 0.201938 0.202248 rel2% PASS
+GATE G-W4 cone-15deg-M2.0-medium:beta_deg 33.943841 33.914698 abs0.2 PASS
+INFO ogive M 1.98 level 0: 550 iterations, CD stationary; nose +0.09637 aft -0.00000 base +0.20740
+GATE G-W4 ogive-M1.98-level0:cd_forebody 0.096367 0.095648 rel2% PASS
+INFO ogive M 1.98 level 1: 650 iterations, CD stationary; nose +0.09718 aft -0.00000 base +0.21603
+GATE G-W4 ogive-M1.98-level1:cd_forebody 0.097182 0.096935 rel2% PASS
+GATE G-W4 w4-transonic-smoke-M0.90 n/a n/a n/a FAIL (case2d: not implemented by the runner)
+GATE G-W4 w4-subsonic-smoke-M0.30-sting n/a n/a n/a FAIL (case2d: not implemented by the runner)
+GATE G-W4 w4-subsonic-smoke-M0.20-base n/a n/a n/a FAIL (case2d: not implemented by the runner)
+GATE G-W1 euler-base-arcas-M2.00:cd_total 0.188238 0.188246 rel2%+abs0.002 PASS   # after the euler_wedge fix (single case, BOWSHOCK_CPU_ONLY)
+GATE G-W1 euler-base-arcas-M2.00:cd_base 0.059331 0.059330 rel2%+abs0.002 PASS   # after the euler_wedge fix

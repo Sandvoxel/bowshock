@@ -3,6 +3,9 @@
 //! share their grid through the engine's grid cache. Slow: `#[ignore]`d, run with `--run-ignored only --no-capture`; the output lines are
 //! `GATE <id> <case> <measured> <reference> <band> PASS|FAIL`.
 
+#[path = "fin_gates/common.rs"]
+mod common;
+
 use bowshock_cfd::solver3::Solver3;
 use bowshock_core::engine::case3::{Case3, Tier, WallFlow};
 use bowshock_core::engine::grid3::Fins3;
@@ -38,6 +41,14 @@ fn run(mach: f64, fins: Fins3, max_iter: usize) -> FinRun {
     let (t, span) = (fins.thickness, fins.span);
     let mut case = Case3::sector(mach, Case3::anf_body(), fins, Tier::Coarse(flow()), 0).euler_equations();
     case.numerics.max_iter = max_iter;
+    if common::gpu_backend() {
+        // `BOWSHOCK_WEDGE_BACKEND=gpu`: the same Euler case on the GPU runner, one case at a time on the device
+        static DEVICE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _one = DEVICE.lock().unwrap_or_else(|e| e.into_inner());
+        let r = common::Session::new(&case).and_then(|mut s| s.run(&case, false)).expect("gpu run");
+        let cd_le = r.parts.fin_le * FRAC_PI_4 / (f64::from(N_FINS) * t * span);
+        return FinRun { cd_le, iterations: r.point.iterations, stop: format!("{}", r.point.stop_reason), parts: r.parts };
+    }
     let mut s: Solver3 = case.build_solver_cached().expect("grid");
     let r = run3_on(&case, &mut s, false);
     let p_inf = s.cfg.freestream[4];
