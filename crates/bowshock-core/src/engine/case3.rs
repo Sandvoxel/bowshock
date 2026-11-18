@@ -166,7 +166,10 @@ impl Numerics3 {
         let mut n = if case.viscous.is_some() { Numerics3::viscous(case.mach, level) } else { Numerics3::auto(case.mach, level) };
         n.limiter = case.numerics.limiter;
         n.low_mach = case.numerics.low_mach;
-        n.first_order_iters = case.numerics.first_order_iters;
+        // not the 300 of the 2D transonic regime for an Euler case from Mach 1.2: [`Numerics3::euler_wedge`] explains why
+        if case.viscous.is_some() || case.mach < 1.2 {
+            n.first_order_iters = case.numerics.first_order_iters;
+        }
         n.max_iter = case.numerics.max_iter;
         if let Scheme::Implicit(p) = case.numerics.scheme {
             let sub_iters = if case.viscous.is_some() && case.mach < 1.0 { 1 } else { p.sub_iters };
