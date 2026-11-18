@@ -195,6 +195,26 @@ impl Solver3 {
         }));
     }
 
+    /// Replaces the flow state by `u` (the conserved variables of every cell, the free stream in the solid ones) and, for an SST run with `turb` given, the `[k, omega]` of the
+    /// fluid cells with `mu_t = min(rho k / omega, 1e5 / re_c)` (the value of the initial state's cap; the GPU's `set_state_turb` does the same): a start from another field, for
+    /// instance the axisymmetric solution carried to a 3D grid. The iteration count and the CFL ramp are not touched.
+    pub fn set_state_turb(&mut self, u: &[Cons3], turb: Option<&[[f64; 2]]>) {
+        assert_eq!(u.len(), self.u.len(), "one state per cell");
+        self.u.copy_from_slice(u);
+        let (Some(r), Some(given)) = (self.rans.as_mut(), turb) else { return };
+        if r.turb.is_empty() {
+            return;
+        }
+        assert_eq!(given.len(), r.turb.len(), "one [k, omega] per cell");
+        let cap = 1e5 / r.model.re_c;
+        for c in 0..given.len() {
+            if !self.solid[c] {
+                r.turb[c] = given[c];
+                r.mu_t[c] = (u[c][0] * given[c][0] / given[c][1]).min(cap);
+            }
+        }
+    }
+
     /// Viscous-flow parameters, `None` for the Euler equations.
     pub fn viscous(&self) -> Option<Viscous> {
         self.rans.as_ref().map(|r| r.visc)
