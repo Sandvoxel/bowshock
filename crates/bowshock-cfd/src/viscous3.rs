@@ -630,7 +630,13 @@ pub fn face_lambda3(
     let s = face_sides3(grid, solid, w, iso, dir, i, j, k).expect("a face with a direction carries flux");
     let (mu_f, mut_f) = face_mu3(mu, mu_t, wall, iso, &s);
     let rho_f = 0.5 * (s.l.w[0] + s.r.w[0]);
-    GAMMA * (mu_f / PRANDTL + mut_f / PRANDTL_T) / (rho_f * d)
+    let lam = GAMMA * (mu_f / PRANDTL + mut_f / PRANDTL_T) / (rho_f * d);
+    // an isothermal wall face conducts with the ghost `T_g = 2 T_w - T`: the derivative of its flux against the cell is twice that of an interior face (the adiabatic ghost has none)
+    if iso.is_some() && s.noslip {
+        2.0 * lam
+    } else {
+        lam
+    }
 }
 
 /// [`face_lambda3`] of the lower and upper face of cell `(i, j, k)` in the direction `dir` (the 2D `viscous::face_lambdas`).
