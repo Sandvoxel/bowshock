@@ -689,7 +689,9 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>, host: &Host) -> Resu
     if nf < 2 {
         return Err(Error::InvalidInput("3D fins need at least 2 cells over the root chord".to_string()));
     }
-    let mut fin_offs = two_sided_nodes(f.root_chord, nf, std::env::var("BOWSHOCK_FIN_CLUSTER").ok().and_then(|v| v.parse().ok()).unwrap_or(0.3) * f.root_chord / nf as f64); // EXPERIMENT knob: minimum spacing factor
+    // minimum chord spacing 0.3 c / nf at the edges: 0.2 resolves the blunt leading edge like 48 cells (ANF face Cp 0.78 -> 1.02) at +1 % cells, 0.1 and below diverge on the
+    // example rocket (DESIGN3D item 44)
+    let mut fin_offs = two_sided_nodes(f.root_chord, nf, 0.3 * f.root_chord / nf as f64);
     fin_offs[nf] = x_te_root - x_le_root;
     // the stations between the segments under the root stay nodes (the body parts are split there): the nearest chord node moves onto each
     for k in k0 + 1..=k1 {
