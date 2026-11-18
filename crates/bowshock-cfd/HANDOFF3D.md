@@ -150,7 +150,7 @@ only that file (it does).
 
 ## 9. What was and was not verified on the final sha
 
-- **Verified on the final sha:** `cargo check --workspace --all-targets` (clean) and `cargo nextest run --release -p bowshock-core --test wedge_gates` (5 passed; includes the fix of `a_gate_without_a_runner_method_fails`, which the INFO change of 562edd6 had broken: only G-V1 / G-V2 / G-P1 / G-W4 become INFO, every other runner-less line still FAILs). Nothing else.
+- **Verified on the final sha (push):** `cargo check --workspace --all-targets` clean, `cargo +stable fmt --all --check` clean, `cargo test --release -p bowshock-core --test wedge_gates` self-tests 5 passed (including `a_gate_without_a_runner_method_fails`). Root `Cargo.toml` pins Luma by git rev 5a592c4 (no path patch). Nothing else was re-run.
 - **Verified on ancestors (not re-run on the final sha):** on `3ec6e84` family (`/tmp/solver3d_ci2.log`, before the last test-harness / docs / phys merge): `cargo fmt --check`, `cargo clippy
   --workspace --all-targets -D warnings`, app group 1188 tests (one run showed 1 failure that did not reproduce, test not identified), cfd / reference / cases / core release
   345 tests (the one failure, `the_wedge_of_a_2d_rans_case_is_the_wedge_built_with_the_tier`, fixed in 3ec6e84 and re-run green together with the lib tests), serde_roundtrip, `subsonic_smoke_with_base`, doc tests, `cargo doc`, the three CI drive smokes (ancestor `9a2b18e` / `0922310`).
