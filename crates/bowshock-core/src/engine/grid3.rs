@@ -592,8 +592,8 @@ fn smoothstep(u: f64) -> f64 {
 }
 
 /// Choose the first candidate `(node, distance, outer cell width)` that a geometric fan of `m` cells starting at `dx` with growth
-/// `q <= 1.2` reaches with a last cell within 1.4 of the outer width; returns `(node, m, q)` (the best compromise if none does).
-fn fan(dx: f64, cands: &[(usize, f64, f64)]) -> Option<(usize, usize, f64)> {
+/// `q <= 1.2` reaches with a last cell within `join` of the outer width (1.4 ahead of the fin, 1.25 behind a flush trailing edge on the base-wake grid, where the fan is the whole transition); returns `(node, m, q)` (the best compromise if none does).
+fn fan(dx: f64, cands: &[(usize, f64, f64)], join: f64) -> Option<(usize, usize, f64)> {
     let growth = |m: usize, d: f64| -> f64 {
         // dx (q^m - 1)/(q - 1) = d
         let (mut lo, mut hi) = (0.2f64, 3.0f64);
@@ -613,7 +613,7 @@ fn fan(dx: f64, cands: &[(usize, f64, f64)]) -> Option<(usize, usize, f64)> {
         for m in 1..=200usize {
             let q = growth(m, d);
             let last = dx * q.powi(m as i32 - 1);
-            let score = (q.max(1.0 / q) / 1.2).max((last / w).max(w / last) / 1.4);
+            let score = (q.max(1.0 / q) / 1.2).max((last / w).max(w / last) / join);
             if score <= 1.0 {
                 return Some((o, m, q));
             }
@@ -709,13 +709,13 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>, host: &Host) -> Resu
     // to the first original node where the spacing has caught up with the original one (ratio <= 1.5 on both sides).
     // Candidates: `(node, distance from the fin edge, width of the original cell beyond the node)`.
     let up: Vec<(usize, f64, f64)> = (a..b_old).rev().filter(|&o| x_le_root - xs[o] > 1e-9).map(|o| (o, x_le_root - xs[o], xs[o] - xs[o - 1])).collect();
-    let o_max = if flush && !host.keep_wake { (b_old + 60).min(xs.len() - 1) } else { b_old };
+    let o_max = if flush { (b_old + 60).min(xs.len() - 1) } else { b_old };
     let down: Vec<(usize, f64, f64)> = (a..=o_max)
         .filter(|&o| xs[o] - x_te_root > 1e-9)
         .map(|o| (o, xs[o] - x_te_root, if o + 1 < xs.len() { xs[o + 1] - xs[o] } else { xs[o] - xs[o - 1] }))
         .collect();
     let mut new = xs[..=a].to_vec();
-    if let Some((o, m, q)) = fan(dx_f, &up) {
+    if let Some((o, m, q)) = fan(dx_f, &up, 1.4) {
         {
             new = xs[..=o].to_vec();
             let sizes: Vec<f64> = (0..m).rev().map(|i| dx_f * q.powi(i as i32)).collect();
@@ -730,7 +730,7 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>, host: &Host) -> Resu
     let i_le = new.len() - 1;
     new.extend((1..=nf).map(|i| x_le_root + fin_offs[i]));
     let i_te = new.len() - 1;
-    let (o_down, m_down) = match fan(dx_f, &down) {
+    let (o_down, m_down) = match fan(dx_f, &down, if flush && host.keep_wake { 1.25 } else { 1.4 }) {
         Some((o, m, q)) => {
             let mut s = 0.0;
             for i in 0..m - 1 {
@@ -1799,6 +1799,24 @@ mod tests {
     }
 
     #[test]
+    fn the_axial_nodes_grow_smoothly_through_both_fin_edges_on_the_base_grid() {
+        for nf in [32usize, 48, 64] {
+            let mut f = anf_fins(FinProfile::Square);
+            f.te_to_base = 0.0;
+            let mut p = crate::engine::case3::Case3::sector(2.0, crate::engine::case3::Case3::anf_body(), f, crate::engine::case3::Tier::Euler, 0).grid;
+            p.nk = 6;
+            p.fin_chord_cells = Some(nf);
+            let g = body_grid3(&p).unwrap();
+            let (i_end, j_off) = base_plane(&g);
+            let fin = g.solid.iter().find(|b| matches!(g.part_of(b.i.start, b.j.start, b.k.start), Some(Part::Fin(0)))).unwrap();
+            let x = |i: usize| g.x[(fin.k.start * (g.nj + 1) + j_off) * (g.ni + 1) + i];
+            let worst = (fin.i.start.saturating_sub(15)..i_end + 20).map(|i| (x(i + 1) - x(i)) / (x(i) - x(i - 1))).map(|r| r.max(1.0 / r)).fold(0.0, f64::max);
+            let all: Vec<String> = (fin.i.start.saturating_sub(15)..i_end + 20).map(|i| format!("{i}:{:.2}", (x(i + 1) - x(i)) / (x(i) - x(i - 1)))).collect();
+            assert!(worst <= 1.25, "nf {nf} i_end {i_end}: largest neighbour ratio {worst}; {}", all.join(" "));
+        }
+    }
+
+    #[test]
     fn flush_fins_on_the_base_grid_end_on_the_base_plane_and_taper_behind_it() {
         let (p, g) = base_fin_grid(FinProfile::Square, 0.0, 6);
         let (i_end, j_off) = base_plane(&g);
@@ -1924,7 +1942,7 @@ mod tests {
         let got: Vec<u64> = all.iter().map(|p| fingerprint(&body_grid3(p).unwrap())).collect();
         eprintln!("fingerprints {got:x?}");
         assert!(all.iter().all(|p| p.fin_cells_across == 1));
-        let expected: [u64; 7] = [9370751059839986959, 14583859758804283294, 6453443399358374581, 17893710889803027280, 1387836882980492884, 5755310565696465849, 1420058427995223498];
+        let expected: [u64; 7] = [9370751059839986959, 14583859758804283294, 6453443399358374581, 17893710889803027280, 1387836882980492884, 5755310565696465849, 11535300992460737863];
         assert_eq!(got, expected);
     }
 
