@@ -39,8 +39,8 @@ pub struct ImplicitParams {
     /// `|b - A du| / |b|` of the factored solve on the Draft example sector: 0.03 at an effective CFL of 2.7, 1.1-1.4 at 18-20 for the plain factors, 0.2-0.8 from 2.7 to 50 with DDADI,
     /// every pass then reducing it by about 0.7). The factorisation error of the plain factors also damps a period-2 mode of the accurate solve (the first-order left-hand side against the
     /// limited second-order residual), which `omega < 1` has to replace: `omega = 1` stalls on a limit cycle at CFL >= 6 on the viscous block of the tests, `omega = 0.5` converges to
-    /// the state of the plain scheme from CFL 3 to 300. The converged state is that of the plain scheme, only the path changes. CPU (f64) measurements in DESIGN3D. The GPU ports ignore
-    /// this field until they implement it: leave it `None` there.
+    /// the state of the plain scheme from CFL 3 to 300. The converged state is that of the plain scheme, only the path changes. CPU (f64) measurements in DESIGN3D. The 3D GPU block scheme
+    /// (`gpu/implicit3.rs`) implements it; the 2D scheme and the diagonalised line solve ignore this field.
     pub ddadi: Option<f64>,
     /// `delta`: the face dissipation of the implicit left-hand side (inviscid and viscous, every factor and the defect operator) is multiplied by `1 + delta`. The right-hand
     /// side and so the converged state are unchanged. Meant for the DDADI solve at `omega = 1`: the odd-even mode of an accurate first-order solve against the limited

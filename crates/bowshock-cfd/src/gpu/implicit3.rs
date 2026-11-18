@@ -63,6 +63,11 @@ impl Blk5 {
         Blk5(std::array::from_fn(|k| self.0[k].scale(s)))
     }
 
+    /// Every array entry times the constant `s` (the entries of a dissipation matrix are arrays or zero).
+    fn muls(&self, s: f32) -> Blk5 {
+        Blk5(std::array::from_fn(|k| self.0[k].muls(s)))
+    }
+
     /// `self + d I`.
     fn add_diag(&self, d: &F) -> Blk5 {
         Blk5(std::array::from_fn(|k| if k % 6 == 0 { self.0[k].add(&E::A(d.clone())) } else { self.0[k].clone() }))
@@ -791,6 +796,8 @@ impl LazySolver3 {
             Some(l) => dis.add_diag(&(2.0f32 * &l[dir])),
             None => dis,
         };
+        // `ImplicitParams::lhs_dis_boost`: the face dissipation of the left-hand side times `1 + delta` (the CPU `cell_blocks3`)
+        let dis = if p.lhs_dis_boost != 0.0 { dis.muls(cf(1.0 + p.lhs_dis_boost)) } else { dis };
         let fl = flux_jacobian_f5(&l, &dg.n).add(&dis);
         let fr = flux_jacobian_f5(&r, &dg.n).sub(&dis);
         // evaluate the face matrices once: the cell blocks read each of them at two cells
@@ -951,6 +958,38 @@ impl LazySolver3 {
                 None => nz,
             }
         })
+    }
+
+    /// The off-diagonal part of `(D + O_dir) x`: `lo x_{m-1} + up x_{m+1}` (the missing neighbours at the ends of a line being 0).
+    fn off_diag3(&self, fac: &Factor3, dir: usize, x: &V5) -> V5 {
+        let mut lower = [0isize; 3];
+        lower[dir] = 1;
+        let upper = lower.map(|s| -s);
+        let xm: V5 = v5(|k| x[k].shift_fill(lower, 0.0));
+        let xp: V5 = v5(|k| x[k].shift_fill(upper, 0.0));
+        let (lx, ux) = (mv5(&fac.lo, &xm), mv5(&fac.up, &xp));
+        v5(|q| &lx[q] + &ux[q])
+    }
+
+    /// The full diagonal `D = sum_d d_d - (nd - 1) P` of the unfactored operator `A = D + sum_d O_d` of every cell (`P = I` without the preconditioning), written as
+    /// the diagonal of every factor: the diagonally dominant factors `D + O_d` of `ImplicitParams::ddadi` (the CPU `dd_diagonal`). Evaluated once (25 arrays): the three
+    /// line solves, the defect operator and the products between the factors read it.
+    fn dd_diagonal3(&self, facs: &mut [Factor3], pm: Option<&[F; 25]>) -> [F; 25] {
+        let nd = facs.len();
+        let g = &self.lg;
+        let dfull: [F; 25] = std::array::from_fn(|k| {
+            let sum = facs.iter().skip(1).fold(facs[0].d[k].clone(), |a, f| &a + &f.d[k]);
+            match pm {
+                Some(m) => sum - ((nd - 1) as f32) * &m[k],
+                None if k % 6 == 0 => sum - ((nd - 1) as f32) * &g.one,
+                None => sum,
+            }
+        })
+        .cache();
+        for f in facs.iter_mut() {
+            f.d = dfull.clone();
+        }
+        dfull
     }
 
     /// `(I - dt J_dir) x` (`apply_factor3`): `d x + lo x_{m-1} + up x_{m+1}`, the missing neighbours at the ends of a line being 0 (their blocks are
@@ -1122,34 +1161,44 @@ impl LazySolver3 {
                 let nd = self.n_dirs3();
                 let fac: Vec<Factor3> = (0..nd).map(|dir| self.factor3(&wf, &wk, &dt, p, dir, lam, pc.as_ref())).collect();
                 let pm = pc.as_ref().map(|c| &c.p);
+                // DDADI (`ImplicitParams::ddadi`): every factor gets the full diagonal `D` and `D` stands where `P` stood (the CPU `dd_diagonal`)
+                let mut fac = fac;
+                let dd: Option<[F; 25]> = p.ddadi.map(|_| self.dd_diagonal3(&mut fac, pm));
+                let centre: Option<&[F; 25]> = dd.as_ref().or(pm);
                 // right-hand side and defect correction
-                let (x, y, mut du) = self.approx_factor3_parts(&fac, &b, pm);
+                let (x, y, mut du) = self.approx_factor3_parts(&fac, &b, centre);
                 let mut passes = 1;
                 if p.lines && p.sub_iters >= 2 {
-                    // the first defect, from the intermediates of the solve: `r = N_i (X - dU) + N_j (Y - dU)` (wedge mode: `Y = dU`, so `r = N_i (X - dU)`)
-                    let ni_ = self.n_apply3(&fac[0], 0, &v5(|k| &x[k] - &du[k]), p);
+                    // the first defect, from the intermediates of the solve: `r = N_i (X - dU) + N_j (Y - dU)` (wedge mode: `Y = dU`, so `r = N_i (X - dU)`); with the full
+                    // diagonal the same expansion holds with the off-diagonal parts `O_d` for `N_d` (`(D + O_i) X = b`, `(D + O_j) Y = D X`, `(D + O_k) dU = D Y`)
+                    let nop = |dir: usize, z: &V5| if dd.is_some() { self.off_diag3(&fac[dir], dir, z) } else { self.n_apply3(&fac[dir], dir, z, p) };
+                    let ni_ = nop(0, &v5(|k| &x[k] - &du[k]));
                     let r: V5 = if nd == 3 {
-                        let nj_ = self.n_apply3(&fac[1], 1, &v5(|k| &y[k] - &du[k]), p);
+                        let nj_ = nop(1, &v5(|k| &y[k] - &du[k]));
                         v5(|k| &ni_[k] + &nj_[k])
                     } else {
                         ni_
                     };
-                    let corr = self.approx_factor3(&fac, &r.cache(), pm);
+                    let corr = self.approx_factor3(&fac, &r.cache(), centre);
                     du = v5(|k| &du[k] + &corr[k]);
                     passes = 2;
                 }
                 for _ in passes..p.sub_iters.max(1) {
-                    // `r = b - (A_i + A_j + A_k - 2 P) du` (two factors: `A_i + A_j - P`), `P = I` without the preconditioning
+                    // `r = b - (A_i + A_j + A_k - 2 P) du` (two factors: `A_i + A_j - P`), `P = I` without the preconditioning, `D` for DDADI
                     let a: Vec<V5> = (0..nd).map(|dir| self.apply_factor3(&fac[dir], dir, &du)).collect();
-                    let pdu: Option<V5> = pm.map(|m| mv5(m, &du).cache());
+                    let pdu: Option<V5> = centre.map(|m| mv5(m, &du).cache());
                     let r: V5 = v5(|k| {
                         let pk = pdu.as_ref().map_or_else(|| du[k].clone(), |p| p[k].clone());
                         &b[k] - (a.iter().fold(&pk * -((nd - 1) as f32), |acc, x| acc + &x[k]))
                     });
-                    let corr = self.approx_factor3(&fac, &r.cache(), pm);
+                    let corr = self.approx_factor3(&fac, &r.cache(), centre);
                     du = v5(|k| &du[k] + &corr[k]);
                 }
-                du
+                // the correction of DDADI is relaxed by `omega`
+                match p.ddadi.filter(|&w| w != 1.0) {
+                    Some(omega) => v5(|k| &du[k] * cf(omega)),
+                    None => du,
+                }
             }
         };
 

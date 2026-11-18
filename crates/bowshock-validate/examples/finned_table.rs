@@ -2,7 +2,7 @@
 //! Coarse tier, the Draft tier (`--tier draft`) or the Draft tier's safe subsonic variant (`--tier draft-safe`: `Case3::draft_subsonic`), `GpuRunner3` in f32, to the case's stop rule.
 //!
 //! ```text
-//! cargo run --release -p bowshock-validate --example finned_table -- --tier coarse|draft|draft-safe --mach 2.0 [--sub N] [--max-iter N]
+//! cargo run --release -p bowshock-validate --example finned_table -- --tier coarse|draft|draft-safe --mach 2.0 [--sub N] [--max-iter N] [--ddadi OMEGA] [--dis-boost DELTA] [--history-every N]
 //! ```
 //!
 //! One `TABLE` line: tier, Mach number, grid, cells, iterations, stop reason, wall seconds (the whole run, set-up included), ms per iteration, CD total and its parts (coefficients on pi/4
@@ -81,6 +81,13 @@ fn main() -> Result<(), String> {
     }
     if let Some(c) = value("--cfl-max") {
         case.numerics.implicit.cfl_max = c.parse().map_err(|e| format!("--cfl-max: {e}"))?;
+    }
+    // DDADI (`ImplicitParams::ddadi`, the diagonally dominant block factors, correction x omega) and the boost of the left-hand side dissipation (`lhs_dis_boost`)
+    if let Some(w) = value("--ddadi") {
+        case.numerics.implicit.ddadi = Some(w.parse().map_err(|e| format!("--ddadi: {e}"))?);
+    }
+    if let Some(d) = value("--dis-boost") {
+        case.numerics.implicit.lhs_dis_boost = d.parse().map_err(|e| format!("--dis-boost: {e}"))?;
     }
     if let Some(c) = value("--cfl-ref") {
         case.numerics.cfl_ref = c.parse().map_err(|e| format!("--cfl-ref: {e}"))?;
@@ -161,6 +168,13 @@ fn main() -> Result<(), String> {
         p.ca,
         p.window.map_or("null".to_string(), |w| format!("{:.4}", w.oscillation))
     );
+    // `--history-every N`: the sampled CA (CN with incidence) every N iterations (a multiple of the 50-iteration sampling) of the accepted path, one line each
+    if let Some(n) = value("--history-every") {
+        let n: usize = n.parse().map_err(|e| format!("--history-every: {e}"))?;
+        for (it, ca) in p.cn_history.iter().filter(|(it, _)| it % n.max(1) == 0) {
+            println!("HIST {tier_name} M{mach}: {it} {ca:.6}");
+        }
+    }
     if !p.cfl_events.is_empty() {
         let list: Vec<String> = p
             .cfl_events

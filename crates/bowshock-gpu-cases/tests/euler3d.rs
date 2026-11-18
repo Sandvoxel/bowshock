@@ -198,6 +198,24 @@ fn tiny_anf_diag_state_after_20_iterations_matches_cpu() {
     report("tiny ANF, diagonalised implicit, 20 iterations", &rows);
 }
 
+/// DDADI (`ImplicitParams::ddadi`: the full diagonal `D` in every factor and between them, the correction times `omega`) and `lhs_dis_boost` of the block scheme on the tiny ANF
+/// case (fins: lines cut by solid cells in three directions) against the CPU solver with the same parameters, 30 iterations from the free stream (the first 5 first order), M = 0.5
+/// (van Albada, low-Mach correction) and M = 2 (minmod), the steep ramp (CFL 3 -> 10), `Fluxes` staging, both precisions: `omega` 1 and 0.5 with the boost 0.35, and the boost
+/// alone. The targets are those of the plain block scheme.
+#[test]
+fn tiny_anf_ddadi_state_after_30_iterations_matches_cpu() {
+    let grid = tiny_anf_grid();
+    let mut rows = Vec::new();
+    for (mach, limiter, low_mach) in [(0.5, Limiter::VanAlbada, true), (2.0, Limiter::Minmod, false)] {
+        for (tag, ddadi, boost) in [("ddadi 1 + boost 0.35", Some(1.0), 0.35), ("ddadi 0.5 + boost 0.35", Some(0.5), 0.35), ("boost 0.35", None, 0.35)] {
+            let params = ImplicitParams { ddadi, lhs_dis_boost: boost, ..implicit_params(true) };
+            let cfg = Config3 { scheme: Scheme3::Implicit(params), ..config(mach, 2.0, limiter, low_mach) };
+            compare(&format!("M {mach} {tag}"), &grid, &cfg, 0, 30, &[Staging::Fluxes], IMPLICIT, &mut rows);
+        }
+    }
+    report("tiny ANF, DDADI and dissipation boost, 30 iterations", &rows);
+}
+
 /// The implicit scheme on every solid-face pattern of `solid_box_patterns_match_cpu` (lines cut by the solid cells in all three directions, the first
 /// and last cell of a line next to a solid cell, a half layer against the symmetry plane), M = 2. Two runs on the three boxes, each box alone and
 /// together:
