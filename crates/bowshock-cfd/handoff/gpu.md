@@ -83,6 +83,7 @@ Draft with three fins (prod3-draft `1-20261117-192608-14774`), the 3-fin chord 2
 - No batching of Mach numbers (estimate below); no grid sequencing; the controller has no cap recovery (cap only goes down).
 - The 4-fin example-rocket numbers above were never rerun on 3 fins for chord 20 vs 32 (the DRAFT_CHORD_CELLS 32 decision rests on them).
 - A rollback recompiles the loop (1-8 s on f32/df32 respectively; df32 first compile up to 28 s).
+- DDADI (`ImplicitParams::ddadi`) and `lhs_dis_boost` are ported to the 3D block scheme only (`LazySolver3::dd_diagonal3`, `off_diag3`; the diagonal line solve and the 2D scheme ignore `ddadi`). Agreement with the CPU at the block scheme's tolerances (`euler3d::tiny_anf_ddadi_*`, `s5b::ddadi_block_matches_cpu`, the DDADI rows of `viscous_wedge_matches_cpu`). Step cost on `bench3 --case sector-rans:0.5` f32: 8.58 -> 9.07 ms/it (+5.7 %), replay wall = GPU time.
 
 ## 11. Open performance items, in order
 1. **Buffer reuse inside a Luma recording** (Plan.retired not reused): the cheapest big cut, 2.4 GiB per plan; luma-perf has the question.
