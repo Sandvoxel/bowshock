@@ -409,7 +409,7 @@ pub fn face_mu_cells(mu: &[f64], mu_t: &[f64], wall: &[[f64; 3]], iso: Option<Is
         }
     };
     let mu_side = |s: usize| match iso {
-        Some(i) if i.mu_face && ghost[s] && noslip => 2.0 * i.mu_w - mu[cell[s]],
+        Some(i) if ghost[s] && noslip => 2.0 * i.mu_w - mu[cell[s]],
         _ => mu[cell[s]],
     };
     (0.5 * (mu_side(0) + mu_side(1)), 0.5 * (mut_side(0) + mut_side(1)))
@@ -632,7 +632,7 @@ pub fn face_lambda3(
     let rho_f = 0.5 * (s.l.w[0] + s.r.w[0]);
     let lam = GAMMA * (mu_f / PRANDTL + mut_f / PRANDTL_T) / (rho_f * d);
     // an isothermal wall face conducts with the ghost `T_g = 2 T_w - T`: the derivative of its flux against the cell is twice that of an interior face (the adiabatic ghost has none)
-    if iso.is_some_and(|i| i.lam2) && s.noslip {
+    if iso.is_some() && s.noslip {
         2.0 * lam
     } else {
         lam
