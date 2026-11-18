@@ -480,6 +480,7 @@ fn fin_half_incidence_series() {
     imp.roe = env("ROE", u8::from(imp.roe)) != 0;
     imp.eps_fix = env("EPS_FIX", imp.eps_fix);
     imp.implicit_bc = env("IMPLICIT_BC", u8::from(imp.implicit_bc)) != 0;
+    imp.ddadi = if env("DDADI", 0u8) != 0 { Some(env("DDADI_RELAX", 0.5)) } else { imp.ddadi };
     // the pseudo-time step: `DTMODE=sum` (CFL V / (L_i + L_j + L_k)) or `min` (CFL V / (3 min L_d): sized by the weakest direction)
     imp.dt_mode = match std::env::var("DTMODE").as_deref() {
         Ok("min") => DtMode::MinDirection,
@@ -695,11 +696,14 @@ fn wall_report(s: &Solver3, top: usize) {
         println!("    {l}");
     }
     for class in ["body", "fin side", "fin LE/TE", "fin tip", "sting", "other", "?"] {
-        let ys: Vec<f64> = rows.iter().filter(|r| r.1 == class).map(|r| r.0).collect();
-        if !ys.is_empty() {
-            let mut v = ys.clone();
+        let of_class: Vec<&(f64, String, String)> = rows.iter().filter(|r| r.1 == class).collect();
+        if !of_class.is_empty() {
+            let mut v: Vec<f64> = of_class.iter().map(|r| r.0).collect();
             v.sort_by(f64::total_cmp);
             println!("    {class:10}: {:6} faces, y+ median {:8.2} 90 % {:8.2} max {:10.2}", v.len(), v[v.len() / 2], v[v.len() * 9 / 10], v[v.len() - 1]);
+            // `of_class` is sorted by falling y+: the face at the median, and the one at the 90th percentile from the top
+            println!("      median face: {}", of_class[of_class.len() / 2].2);
+            println!("      10 % face:   {}", of_class[of_class.len() / 10].2);
         }
     }
 }

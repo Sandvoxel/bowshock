@@ -32,6 +32,16 @@ pub struct ImplicitParams {
     pub low_mach_precond: bool,
     /// 3D only: how the three directional factors are solved ([`LineSolve3`]).
     pub line_solve: LineSolve3,
+    /// `Some(omega)`: the diagonally dominant approximate factorisation of the block lines (DDADI; `LineSolve3::Block` only) with the correction multiplied by `omega`. The unfactored
+    /// operator is `A = D + O_i + O_j + O_k` with the full diagonal `D = P + dt sum_d Dg_d` (`Dg_d` the diagonal blocks of the directional Jacobians, `P` the identity without the
+    /// preconditioning); the factors are `D + O_d` instead of `P + dt Dg_d + O_d`, and `D` stands between them where `P` stood. The product of the factors is `A` plus the cross terms
+    /// `O_i D^-1 O_j ...`, whose size the full diagonal bounds as the CFL grows; with the plain factors it grows with the CFL until the defect-correction passes diverge (the defect
+    /// `|b - A du| / |b|` of the factored solve on the Draft example sector: 0.03 at an effective CFL of 2.7, 1.1-1.4 at 18-20 for the plain factors, 0.2-0.8 from 2.7 to 50 with DDADI,
+    /// every pass then reducing it by about 0.7). The factorisation error of the plain factors also damps a period-2 mode of the accurate solve (the first-order left-hand side against the
+    /// limited second-order residual), which `omega < 1` has to replace: `omega = 1` stalls on a limit cycle at CFL >= 6 on the viscous block of the tests, `omega = 0.5` converges to
+    /// the state of the plain scheme from CFL 3 to 300. The converged state is that of the plain scheme, only the path changes. CPU (f64) measurements in DESIGN3D. The GPU ports ignore
+    /// this field until they implement it: leave it `None` there.
+    pub ddadi: Option<f64>,
 }
 
 /// Lower bound of the reference velocity of the low-Mach preconditioning in units of the free-stream sound speed. Measured on the example
@@ -70,6 +80,7 @@ impl ImplicitParams {
         eps_fix: 0.1,
         low_mach_precond: false,
         line_solve: LineSolve3::Block,
+        ddadi: None,
     };
 
     /// Parameters for viscous runs: the weaker-direction pseudo-time step with a lower CFL limit and one more defect-correction pass.
