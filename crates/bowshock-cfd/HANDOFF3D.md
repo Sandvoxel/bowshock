@@ -150,10 +150,10 @@ only that file (it does).
 
 ## 9. What was and was not verified on the final sha
 
-- **Verified on the final sha:** `cargo check --workspace --all-targets` only (run at hand-off, see the commit).
+- **Verified on the final sha:** `cargo check --workspace --all-targets` (clean) and `cargo nextest run --release -p bowshock-core --test wedge_gates` (5 passed; includes the fix of `a_gate_without_a_runner_method_fails`, which the INFO change of 562edd6 had broken: only G-V1 / G-V2 / G-P1 / G-W4 become INFO, every other runner-less line still FAILs). Nothing else.
 - **Verified on ancestors (not re-run on the final sha):** on `3ec6e84` family (`/tmp/solver3d_ci2.log`, before the last test-harness / docs / phys merge): `cargo fmt --check`, `cargo clippy
   --workspace --all-targets -D warnings`, app group 1188 tests (one run showed 1 failure that did not reproduce, test not identified), cfd / reference / cases / core release
   345 tests (the one failure, `the_wedge_of_a_2d_rans_case_is_the_wedge_built_with_the_tier`, fixed in 3ec6e84 and re-run green together with the lib tests), serde_roundtrip, `subsonic_smoke_with_base`, doc tests, `cargo doc`, the three CI drive smokes (ancestor `9a2b18e` / `0922310`).
   The CPU verification chain on the last merge (phys handoff, docs only) was **cancelled** at hand-off.
 - **Not run on the candidate:** the GPU gate groups (queue), G-F2 / G-F3, G-F4 as GATE lines, the gpu-cases suite (section 4).
-- **Not merged:** `cfd-3d-lumaperf` 8d5fd93 (conflicts in `gpu/body3.rs`, `gpu/rans3.rs`; see `handoff/luma.md`). `handoff/gpu.md`, `app.md`, `luma.md` are stubs; `physics.md` is phys3d's (84b2333).
+- **Not merged:** `cfd-3d-lumaperf` 8d5fd93 (conflicts in `gpu/body3.rs`, `gpu/rans3.rs`; see the stub `handoff/luma.md`). Merged: cfd-3d-gpu 76172b9 (`handoff/gpu.md`), cfd-3d-phys 84b2333 (`handoff/physics.md`), cfd-3d-viz a7ff98a (`handoff/app.md`; app-integrate ran fmt, clippy, serde, remote/worker/validate/model 213, doc 20, app 796 on its own merge of f271e83: not re-run here).
