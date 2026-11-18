@@ -4,8 +4,8 @@
 //! axisymmetric flow. Two meridian grids: the sting grid (`large_domain_grid`: the body is the `j = 0` wall, no base) and the base-wake grid
 //! (`base_domain_grid`: the body interior is a solid block, the base its rear face, the wake reaches the axis behind it).
 //!
-//! Fins are one-cell-thick solid layers in `k` (see `Grid3::part`): the layer edges follow the fin thickness over the planform and relax to
-//! the nominal cell width away from it, so the fin faces are flat planes through the body axis. Lengths are in nose diameters.
+//! Fins are solid layers in `k` ([`Grid3Params::fin_cells_across`] cells across the thickness, one by default; see `Grid3::part`): the layer edges follow the fin thickness over the planform and relax to
+//! the nominal width (that many cells of the neighbouring spacing) away from it, so the fin faces are flat planes through the body axis; the nodes between the two faces are spread uniformly over the local thickness.
 //!
 //! The nodes of a `k` line are scaled out to `s_k r` ([`bowshock_cfd::grid3::polygon_scale`]) so that every polygonal ring has the cross-section area of the
 //! circular one (the inscribed polygon lacks `dtheta^2 / 6` of it); the fin faces are put where their scaled offset is the fin half-thickness. With a
@@ -18,7 +18,7 @@
 //! * Half domain: fins sit at `theta_f = phi0 + 2 pi m / n` with `phi0 = pi/n` ([`FinPhase::Between`]: no fin in the pitch plane) or `0`
 //!   ([`FinPhase::InPlane`]); those in `[0, pi]` are kept. A fin on `theta = 0` or `pi` lies in a symmetry plane and is a half fin owning the
 //!   first / last cell.
-//! * Sector: one half fin on the `theta = 0` plane (cell `k = 0`), `nk - 1` gap cells up to the mid-gap plane `theta = pi/n`.
+//! * Sector: one half fin on the `theta = 0` plane (cells `k = 0..`: half the cells of a fin, at least one), `nk` minus those gap cells up to the mid-gap plane `theta = pi/n`.
 //! * With fins, the root chord must lie on one tube segment. That segment is rebuilt as upstream piece, fin piece and downstream piece
 //!   (`32 << level` cells over the root chord, clustered at both edges); the sweep and taper are applied as a piecewise-linear
 //!   remap of the segment's `x` nodes per row (the cells outside the fin stretch or shrink instead of folding), blended away over
@@ -136,6 +136,11 @@ pub struct Grid3Params {
     pub level: u32,
     /// Cells over the fin root chord (`None`: `32 << level`; the ANF study found 16 too coarse for the fin loading at M >= 2).
     pub fin_chord_cells: Option<usize>,
+    /// Cells across the thickness of a fin (>= 1; 1 is the one-cell layer of the first grids, bit for bit). They are in `k`, for the solid fin and for the fluid columns
+    /// ahead of the leading edge and behind the trailing edge (the base region of a blunt trailing edge has that many cells across); a half fin on a symmetry plane
+    /// (a sector, an in-plane fin of a half domain) owns half of them, rounded down, at least one. With a `fin_stack` they are added to the stack's cells; without, they
+    /// come out of the `nk` of the domain.
+    pub fin_cells_across: usize,
     /// Radial cells from the body wall to the fin tip (`None`: whatever the sting grid's radial spacing puts there, with the tip
     /// row snapped to the nearest node). With `Some(n)` the radial fractions are regraded for the whole grid: `n` cells in
     /// `[R, R + span]` starting at the wall spacing (uniform when that is already finer than `span / n`), then a geometric fan of
@@ -166,6 +171,7 @@ impl Grid3Params {
             span_cells: None,
             domain: Domain3::Half { phase: FinPhase::Between },
             fin_stack: None,
+            fin_cells_across: 1,
             roughness: PartRoughness::default(),
         }
     }
@@ -310,8 +316,10 @@ struct Layers {
     gaps: Vec<usize>,
     /// Node positions of each gap as fractions of its width, `gaps[s] + 1` of them from 0 to 1 (empty for an absent gap).
     gap_frac: Vec<Vec<f64>>,
-    /// `k` of the cell owned by each layer.
+    /// First `k` of the cells owned by each layer.
     k_f: Vec<usize>,
+    /// Cells owned by each layer: [`Grid3Params::fin_cells_across`], half of them (at least one) for a half fin on a symmetry plane.
+    n_f: Vec<usize>,
     /// Azimuth width of the cells next to a layer: what a layer cell relaxes to away from the fin.
     cell_ang: f64,
 }
@@ -340,14 +348,20 @@ fn fin_angles(count: u32, phase: FinPhase) -> (Vec<f64>, bool, bool) {
     (theta_f, first == 0.0, last == PI)
 }
 
-/// `k` of the cell owned by each layer, for the cells of every gap.
-fn layer_cells(gaps: &[usize]) -> Vec<usize> {
+/// Cells owned by each of `nl` layers for `n` cells across a fin: half of them (at least one) for the half fins on the symmetry planes.
+fn layer_counts(n: usize, nl: usize, half_first: bool, half_last: bool) -> Vec<usize> {
+    (0..nl).map(|l| if (half_first && l == 0) || (half_last && l + 1 == nl) { (n / 2).max(1) } else { n }).collect()
+}
+
+/// First `k` of the cells owned by each layer (`n_f` cells), for the cells of every gap.
+fn layer_cells(gaps: &[usize], n_f: &[usize]) -> Vec<usize> {
     let mut k = 0;
     (0..gaps.len() - 1)
         .map(|l| {
             k += gaps[l];
-            k += 1;
-            k - 1
+            let first = k;
+            k += n_f[l];
+            first
         })
         .collect()
 }
@@ -356,11 +370,13 @@ fn uniform_fractions(gaps: &[usize]) -> Vec<Vec<f64>> {
     gaps.iter().map(|&n| if n == 0 { Vec::new() } else { (0..=n).map(|m| m as f64 / n as f64).collect() }).collect()
 }
 
-/// Layers of a half domain `[0, pi]` with `count` fins at `phase`, `nk` cells in all, uniform in every gap.
-fn layers(count: u32, nk: usize, phase: FinPhase) -> Result<Layers, Error> {
+/// Layers of a half domain `[0, pi]` with `count` fins at `phase` of `n` cells across, `nk` cells in all, uniform in every gap.
+fn layers(count: u32, nk: usize, phase: FinPhase, n: usize) -> Result<Layers, Error> {
     let (theta_f, half_first, half_last) = fin_angles(count, phase);
     let nl = theta_f.len();
-    let nh = PI / (2.0 * nk as f64);
+    let n_f = layer_counts(n, nl, half_first, half_last);
+    let owned: usize = n_f.iter().sum();
+    let nh = n as f64 * PI / (2.0 * nk as f64);
     // gap `s` (before layer `s`, `s = nl`: behind the last) between the end of the previous layer and the start of the next
     let present: Vec<bool> = (0..=nl).map(|s| !(s == 0 && half_first) && !(s == nl && half_last)).collect();
     let mut widths = vec![0.0; nl + 1];
@@ -386,10 +402,10 @@ fn layers(count: u32, nk: usize, phase: FinPhase) -> Result<Layers, Error> {
     widths[nl] = if half_last { 0.0 } else { PI - prev };
     let slots = present.iter().filter(|p| **p).count();
     let too_close = || Error::Grid("fins too close for nk cells".to_string());
-    if nk < nl || (0..=nl).any(|s| present[s] && widths[s] <= 0.0) || nk - nl < 2 * slots {
+    if nk < owned || (0..=nl).any(|s| present[s] && widths[s] <= 0.0) || nk - owned < 2 * slots {
         return Err(too_close());
     }
-    let remaining = nk - nl;
+    let remaining = nk - owned;
     let total: f64 = widths.iter().sum();
     let q: Vec<f64> = widths.iter().map(|w| remaining as f64 * w / total).collect();
     let mut gaps: Vec<usize> = (0..=nl).map(|s| if present[s] { (q[s].round() as usize).max(2) } else { 0 }).collect();
@@ -402,18 +418,20 @@ fn layers(count: u32, nk: usize, phase: FinPhase) -> Result<Layers, Error> {
             gaps[i] += 1;
         }
     }
-    let k_f = layer_cells(&gaps);
+    let k_f = layer_cells(&gaps, &n_f);
     let gap_frac = uniform_fractions(&gaps);
-    Ok(Layers { theta_f, half_first, half_last, gaps, gap_frac, k_f, cell_ang: PI / nk as f64 })
+    Ok(Layers { theta_f, half_first, half_last, gaps, gap_frac, k_f, n_f, cell_ang: PI / nk as f64 })
 }
 
-/// Layers of a sector `[0, big]`, `big = pi/n`: a half fin on the `theta = 0` plane and `nk - 1` gap cells to the mid-gap plane.
-fn sector_layers(nk: usize, big: f64) -> Result<Layers, Error> {
-    if nk < 3 {
-        return Err(Error::Grid("a sector needs nk >= 3".to_string()));
+/// Layers of a sector `[0, big]`, `big = pi/n`: a half fin on the `theta = 0` plane (`n` cells across a whole fin, half of them here) and the other cells of the `nk`
+/// as the gap to the mid-gap plane.
+fn sector_layers(nk: usize, big: f64, n: usize) -> Result<Layers, Error> {
+    let c = (n / 2).max(1);
+    if nk < c + 2 {
+        return Err(Error::Grid(format!("a sector needs nk >= {}", c + 2)));
     }
-    let gaps = vec![0, nk - 1];
-    Ok(Layers { theta_f: vec![0.0], half_first: true, half_last: false, gap_frac: uniform_fractions(&gaps), gaps, k_f: vec![0], cell_ang: big / nk as f64 })
+    let gaps = vec![0, nk - c];
+    Ok(Layers { theta_f: vec![0.0], half_first: true, half_last: false, gap_frac: uniform_fractions(&gaps), gaps, k_f: vec![0], n_f: vec![c], cell_ang: big / nk as f64 })
 }
 
 /// Cell heights of a stack that starts with `h1` at a wall and grows by `growth_bl` until it is `delta` high and by `growth_out` beyond, over a gap of height
@@ -488,7 +506,7 @@ fn stack_fractions(width: f64, wall_lo: bool, wall_hi: bool, st: &FinStack, y1: 
 
 /// Layers whose gaps are stacked from the fin sides: `fins` is `Some((count, phase))` for a half domain, `None` for a sector `[0, big]` with its half fin on
 /// `theta = 0`. `r_root` and `h_max` are the fin's root radius and its largest half-thickness (the nominal angle of the fin side).
-fn stacked_layers(fins: Option<(u32, FinPhase)>, st: &FinStack, r_root: f64, h_max: f64, big: f64) -> Result<Layers, Error> {
+fn stacked_layers(fins: Option<(u32, FinPhase)>, st: &FinStack, r_root: f64, h_max: f64, big: f64, n: usize) -> Result<Layers, Error> {
     let (theta_f, half_first, half_last) = match fins {
         Some((count, phase)) => fin_angles(count, phase),
         None => (vec![0.0], true, false),
@@ -512,8 +530,9 @@ fn stacked_layers(fins: Option<(u32, FinPhase)>, st: &FinStack, r_root: f64, h_m
         gaps[s] = frac.len() - 1;
         gap_frac[s] = frac;
     }
-    let k_f = layer_cells(&gaps);
-    Ok(Layers { theta_f, half_first, half_last, gaps, gap_frac, k_f, cell_ang: y1 })
+    let n_f = layer_counts(n, nl, half_first, half_last);
+    let k_f = layer_cells(&gaps, &n_f);
+    Ok(Layers { theta_f, half_first, half_last, gaps, gap_frac, k_f, n_f, cell_ang: y1 })
 }
 
 /// Azimuth of the nodes `k = 0..=nk` of one `(i, j)` column for the layer half-angle `alpha` in the domain `[0, big]`.
@@ -543,8 +562,13 @@ fn fill_theta(theta: &mut [f64], lay: &Layers, alpha: f64, big: f64) {
             theta[k + m] = prev + (lo - prev) * lay.gap_frac[l][m];
         }
         k += ng;
-        theta[k + 1] = hi;
-        k += 1;
+        // the nodes across the layer: uniform between its two faces
+        let c = lay.n_f[l];
+        for m in 1..c {
+            theta[k + m] = lo + (hi - lo) * m as f64 / c as f64;
+        }
+        theta[k + c] = hi;
+        k += c;
         prev = hi;
     }
     let ng = lay.gaps[nl];
@@ -874,6 +898,10 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
     if nk_req < 2 && !wedge && p.fin_stack.is_none() {
         return Err(Error::Grid("nk >= 2 is required".to_string()));
     }
+    let n_fin = p.fin_cells_across;
+    if n_fin == 0 && p.fins.is_some() {
+        return Err(Error::InvalidInput("fin_cells_across >= 1 is required".to_string()));
+    }
     // the meridian grid the fins stand on: its axial nodes, the host data of `plan_fins`, the first row above the body surface
     let (mut xs, host, j_off) = match &p.base {
         None => {
@@ -912,15 +940,15 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
     };
     let root = plan.as_ref().map(|(pl, f)| (pl.r_t, 0.5 * f.thickness));
     let lay = match (p.domain, &p.fins, &p.fin_stack, root) {
-        (Domain3::Half { phase }, Some(f), None, _) => Some(layers(f.count, nk_req, phase)?),
-        (Domain3::Sector, Some(_), None, _) => Some(sector_layers(nk_req, span)?),
-        (Domain3::Half { phase }, Some(f), Some(st), Some((r, h))) => Some(stacked_layers(Some((f.count, phase)), st, r, h, span)?),
-        (Domain3::Sector, Some(_), Some(st), Some((r, h))) => Some(stacked_layers(None, st, r, h, span)?),
+        (Domain3::Half { phase }, Some(f), None, _) => Some(layers(f.count, nk_req, phase, n_fin)?),
+        (Domain3::Sector, Some(_), None, _) => Some(sector_layers(nk_req, span, n_fin)?),
+        (Domain3::Half { phase }, Some(f), Some(st), Some((r, h))) => Some(stacked_layers(Some((f.count, phase)), st, r, h, span, n_fin)?),
+        (Domain3::Sector, Some(_), Some(st), Some((r, h))) => Some(stacked_layers(None, st, r, h, span, n_fin)?),
         _ => None,
     };
     // with a stack the cells of the gaps, not `nk`, set the azimuthal count
     let nk = match (&lay, &p.fin_stack) {
-        (Some(l), Some(_)) => l.k_f.len() + l.gaps.iter().sum::<usize>(),
+        (Some(l), Some(_)) => l.n_f.iter().sum::<usize>() + l.gaps.iter().sum::<usize>(),
         _ => nk_req,
     };
     let ni = xs.len() - 1;
@@ -1037,7 +1065,8 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
                 let u = u_i.max(dj as f64 / 4.0);
                 let (ic, jc) = (i.clamp(pl.i_le, pl.i_te), jj.min(pl.j_tip));
                 let h_f = h_at(ic, jc);
-                let nominal = 0.5 * r * cell_ang;
+                // a layer of `n_fin` cells across is as wide as that many neighbouring cells away from the fin (a half fin: half of it)
+                let nominal = 0.5 * r * cell_ang * n_fin as f64;
                 let w = if u == 0.0 { h_f } else { h_f + (nominal - h_f) * smoothstep(u) };
                 alpha[j * (ni + 1) + i] = if r < 1e-12 { (0.5 * cell_ang).asin() } else { (w / r).min(0.99).asin() };
                 if r >= 1e-12 {
@@ -1050,23 +1079,37 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
     let nn = (ni + 1) * (nj + 1) * (nk + 1);
     let (mut x, mut y, mut z) = (vec![0.0; nn], vec![0.0; nn], vec![0.0; nn]);
     let mut theta = vec![0.0; nk + 1];
-    // nodes bounding the fin layers (not the symmetry planes) with the azimuth of their layer and the side: the node's lateral offset from the fin mid-plane,
-    // `s_k r sin(theta_k - theta_f)`, is the fin half-thickness
-    let sides: Vec<(usize, f64, f64)> = lay
-        .iter()
-        .flat_map(|l| {
-            let nl = l.theta_f.len();
-            (0..nl).flat_map(move |m| {
-                let (hf, hl) = (l.half_first && m == 0, l.half_last && m + 1 == nl);
-                [(!hf).then_some((l.k_f[m], l.theta_f[m], -1.0)), (!hl).then_some((l.k_f[m] + 1, l.theta_f[m], 1.0))]
-            })
-        })
-        .flatten()
-        .collect();
+    // nodes across the fin layers (not the symmetry planes) with the azimuth of their layer and their place between the faces as a fraction of the half-thickness
+    // from the mid-plane (-1 and +1 at the two faces, uniform between): the node's lateral offset from the fin mid-plane, `s_k r sin(theta_k - theta_f)`, is
+    // that fraction of the fin half-thickness
+    let mut sides: Vec<(usize, f64, f64)> = Vec::new();
+    if let Some(l) = &lay {
+        let nl = l.theta_f.len();
+        for m in 0..nl {
+            let (hf, hl) = (l.half_first && m == 0, l.half_last && m + 1 == nl);
+            let c = l.n_f[m];
+            let (f_lo, f_hi) = (if hf { 0.0 } else { -1.0 }, if hl { 0.0 } else { 1.0 });
+            for q in 0..=c {
+                if (q == 0 && hf) || (q == c && hl) {
+                    continue;
+                }
+                let frac = if q == 0 {
+                    f_lo
+                } else if q == c {
+                    f_hi
+                } else {
+                    f_lo + (f_hi - f_lo) * q as f64 / c as f64
+                };
+                sides.push((l.k_f[m] + q, l.theta_f[m], frac));
+            }
+        }
+    }
     // cells of the fin layers, solid inside the planform: they do not set the scale of the lines at their sides
     let mut layer_cell = vec![false; nk];
-    for &kf in lay.iter().flat_map(|l| &l.k_f) {
-        layer_cell[kf] = true;
+    if let Some(l) = &lay {
+        for (&kf, &c) in l.k_f.iter().zip(&l.n_f) {
+            layer_cell[kf..kf + c].fill(true);
+        }
     }
     for j in 0..=nj {
         for i in 0..=ni {
@@ -1089,8 +1132,8 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
                         // put every side node at the angle whose scaled offset is the half-thickness (the scale depends on the neighbouring angles: a few passes)
                         for _ in 0..8 {
                             let s = scale_of(&theta);
-                            for &(k, th, sign) in &sides {
-                                theta[k] = th + sign * (half_w[cr] / (r_ref * s[k])).min(0.99).asin();
+                            for &(k, th, frac) in &sides {
+                                theta[k] = th + frac.signum() * (frac.abs() * half_w[cr] / (r_ref * s[k])).min(0.99).asin();
                             }
                         }
                     }
@@ -1156,8 +1199,8 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
         }
     }
     if let (Some((pl, _)), Some(l)) = (&plan, &lay) {
-        for &kf in &l.k_f {
-            g.mark_solid(SolidBox { i: pl.i_le..pl.i_te, j: j_off..j_off + pl.j_tip, k: kf..kf + 1 }, Some(Part::Fin(0)));
+        for (&kf, &c) in l.k_f.iter().zip(&l.n_f) {
+            g.mark_solid(SolidBox { i: pl.i_le..pl.i_te, j: j_off..j_off + pl.j_tip, k: kf..kf + c }, Some(Part::Fin(0)));
         }
     }
     for k in 0..nk {
@@ -1252,7 +1295,7 @@ pub struct StackReport {
 
 /// [`StackReport`] of the first fin layer of `g` (at its root row, the body surface); `None` without fins.
 pub fn fin_stack_report(g: &Grid3) -> Option<StackReport> {
-    let b = g.solid.iter().find(|b| b.k.len() == 1 && matches!(g.part_of(b.i.start, b.j.start, b.k.start), Some(Part::Fin(_))))?;
+    let b = g.solid.iter().find(|b| matches!(g.part_of(b.i.start, b.j.start, b.k.start), Some(Part::Fin(_))))?;
     let (i, j) = ((b.i.start + b.i.end) / 2, b.j.start);
     let node = |k: usize| {
         let id = (k * (g.nj + 1) + j) * (g.ni + 1) + i;
@@ -1832,5 +1875,192 @@ mod tests {
         eprintln!("stack on the sting grid {a:?} (nk {}), on the base grid {b:?} (nk {})", sting.nk, g.nk);
         assert!((b.y1 / a.y1 - 1.0).abs() < 0.01 && b.growth_max <= 1.35 + 1e-9 && b.cells == a.cells, "{a:?} {b:?}");
         assert_eq!(g.nk, sting.nk);
+    }
+
+    /// FNV-1a of the node coordinates, the part flags and the solid boxes of a grid.
+    fn fingerprint(g: &Grid3) -> u64 {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        let mut eat = |v: u64| {
+            for b in v.to_le_bytes() {
+                h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+            }
+        };
+        [g.ni, g.nj, g.nk].iter().for_each(|&n| eat(n as u64));
+        g.x.iter().chain(&g.y).chain(&g.z).for_each(|v| eat(v.to_bits()));
+        g.part.iter().for_each(|&p| eat(p as u64));
+        g.solid.iter().for_each(|b| [b.i.start, b.i.end, b.j.start, b.j.end, b.k.start, b.k.end].iter().for_each(|&n| eat(n as u64)));
+        h
+    }
+
+    /// The grids of the default `fin_cells_across = 1` (uniform and stacked, half domain and sector, half fins in the planes, the base-wake grid) as the first
+    /// (one-cell-layer) mesher built them: the fingerprints were taken before the parameter existed.
+    #[test]
+    fn one_cell_across_reproduces_the_first_grids_exactly() {
+        use crate::engine::case3::{Case3, Tier};
+        let fl = flow();
+        let stack = FinStack::from_flow(fl.re_c, fl.mach_max, 1.0, 15.0);
+        let mut three = anf_fins(FinProfile::Square);
+        three.count = 3;
+        let mut sector = params(0, Some(anf_fins(FinProfile::DoubleWedge)));
+        sector.domain = Domain3::Sector;
+        sector.nk = 20;
+        let mut stacked_sector = sector.clone();
+        stacked_sector.fin_stack = Some(stack);
+        let mut stacked_half = params(0, Some(anf_fins(FinProfile::Airfoil)));
+        stacked_half.fin_stack = Some(stack);
+        let mut stacked_in_plane = params(0, Some(anf_fins(FinProfile::Square)));
+        stacked_in_plane.fin_stack = Some(stack);
+        stacked_in_plane.domain = Domain3::Half { phase: FinPhase::InPlane };
+        let coarse = Case3::sector(2.0, Case3::anf_body(), Case3::anf_fins(), Tier::Coarse(fl), 0).grid;
+        let all = [
+            params(0, Some(anf_fins(FinProfile::Square))),
+            params(0, Some(three)),
+            sector,
+            stacked_sector,
+            stacked_half,
+            stacked_in_plane,
+            coarse,
+        ];
+        let got: Vec<u64> = all.iter().map(|p| fingerprint(&body_grid3(p).unwrap())).collect();
+        eprintln!("fingerprints {got:x?}");
+        assert!(all.iter().all(|p| p.fin_cells_across == 1));
+        let expected: [u64; 7] = [9370751059839986959, 14583859758804283294, 6453443399358374581, 17893710889803027280, 1387836882980492884, 5755310565696465849, 1420058427995223498];
+        assert_eq!(got, expected);
+    }
+
+    /// The number of solid cells of the fin layers.
+    fn fin_cells(g: &Grid3) -> usize {
+        let mut n = 0;
+        for k in 0..g.nk {
+            for j in 0..g.nj {
+                for i in 0..g.ni {
+                    n += usize::from(matches!(g.part_of(i, j, k), Some(Part::Fin(_))));
+                }
+            }
+        }
+        n
+    }
+
+    /// `n` cells across a fin, on the uniform half domain: every box is `n` cells thick, its faces are at the profile's half-thickness and the nodes between are
+    /// uniform over it (the fin of the first test, swept and tapered, every profile).
+    #[test]
+    fn n_cells_across_follow_the_profile_with_uniform_nodes() {
+        for n in [2usize, 4] {
+            for profile in [FinProfile::Airfoil, FinProfile::DoubleWedge, FinProfile::Square] {
+                let f = Fins3 {
+                    count: 4,
+                    root_chord: 1.0,
+                    tip_chord: 0.6,
+                    span: 1.0,
+                    sweep: 0.3,
+                    thickness: 0.08,
+                    te_to_base: 0.0,
+                    profile: profile.clone(),
+                    planform: None,
+                };
+                let mut p = params(0, Some(f.clone()));
+                p.fin_cells_across = n;
+                let g = body_grid3(&p).unwrap();
+                assert_eq!(g.nk, p.nk);
+                assert_eq!(g.solid.len(), 2);
+                for (m, b) in g.solid.iter().enumerate() {
+                    assert_eq!(b.k.len(), n);
+                    let th = PI / 4.0 + PI / 2.0 * m as f64;
+                    for j in 0..=b.j.end {
+                        for i in b.i.start..=b.i.end {
+                            let p0 = node(&g, i, j, b.k.start);
+                            let theta: Vec<f64> = (0..=g.nk).map(|k| node(&g, i, j, k)).map(|q| q[1].atan2(q[2])).collect();
+                            let r = (p0[1] * p0[1] + p0[2] * p0[2]).sqrt() / polygon_scale_where(&theta, |k| !g.solid.iter().any(|s| s.k.contains(&k)))[b.k.start];
+                            let frac = (r - R) / f.span;
+                            let chord = f.root_chord + (f.tip_chord - f.root_chord) * frac;
+                            let xi = (p0[0] - (g.x[b.i.start] + f.sweep * frac)) / chord;
+                            let h = half_thickness(&profile, f.thickness, chord, xi);
+                            for q in 0..=n {
+                                let want = h * (-1.0 + 2.0 * q as f64 / n as f64);
+                                let d = dist(&g, i, j, b.k.start + q, th);
+                                assert!((d - want).abs() < 1e-8, "n {n} {profile:?} ({i},{j}) node {q}: {d} vs {want}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// `n` = 2 and 4 on the wall-resolved sector, the half domain and the in-plane half domain: positive volumes, the fin faces at the half-thickness, the nodes
+    /// between them uniform, `n` times today's solid cells (a half fin in a plane: half of them, at least one), the stack unchanged, and the azimuthal count the
+    /// stack's plus the extra layer cells.
+    #[test]
+    fn n_cells_across_in_a_sector_and_a_half_domain() {
+        let fl = flow();
+        let st = FinStack::from_flow(fl.re_c, fl.mach_max, 1.0, 15.0);
+        for (label, domain) in [
+            ("sector", Domain3::Sector),
+            ("half", Domain3::Half { phase: FinPhase::Between }),
+            ("in plane", Domain3::Half { phase: FinPhase::InPlane }),
+        ] {
+            let build = |n: usize| {
+                let mut p = params(0, Some(anf_fins(FinProfile::Square)));
+                p.domain = domain;
+                p.fin_stack = Some(st);
+                p.fin_cells_across = n;
+                body_grid3(&p).unwrap()
+            };
+            let n_up = anf_sting(0).n_up;
+            let g1 = build(1);
+            let per_layer = fin_cells(&g1) / g1.solid.iter().filter(|b| matches!(g1.part_of(b.i.start, b.j.start, b.k.start), Some(Part::Fin(_)))).count();
+            let rep1 = fin_stack_report(&g1).unwrap();
+            for n in [2usize, 4] {
+                let g = build(n);
+                let layers: Vec<&SolidBox> = g.solid.iter().filter(|b| matches!(g.part_of(b.i.start, b.j.start, b.k.start), Some(Part::Fin(_)))).collect();
+                // a half fin on a symmetry plane (k = 0, or the last cell of the half domain at pi) owns half the cells
+                let half = |b: &SolidBox| b.k.start == 0 || b.k.end == g.nk;
+                let cells: usize = layers.iter().map(|b| b.k.len()).sum();
+                for b in &layers {
+                    assert_eq!(b.k.len(), if half(b) { n / 2 } else { n }, "{label} n {n}: {b:?}");
+                }
+                assert_eq!(fin_cells(&g), per_layer * cells, "{label} n {n}: solid cells");
+                let (c1, c): (usize, usize) = (g1.solid.iter().map(|b| b.k.len()).sum(), cells);
+                assert_eq!(g.nk, g1.nk + c - c1, "{label} n {n}: the extra layer cells are extra k cells");
+                if label == "sector" {
+                    assert_eq!(fin_cells(&g), per_layer * (n / 2).max(1));
+                }
+                if label == "half" {
+                    assert_eq!(fin_cells(&g), n * fin_cells(&g1), "half domain: n times today's solid cells");
+                }
+                for k in 0..g.nk {
+                    for j in 0..g.nj {
+                        for i in 0..g.ni {
+                            if !g.is_solid(i, j, k) && i >= n_up {
+                                assert!(g.vol[g.cell(i, j, k)] > 0.0, "{label} n {n}: volume at ({i},{j},{k})");
+                            }
+                        }
+                    }
+                }
+                // faces at the half-thickness 0.04 and uniform nodes between (a half fin: from its mid-plane), mid-chord, root row and a row near the tip
+                for b in &layers {
+                    let th = if b.k.start == 0 {
+                        0.0
+                    } else if b.k.end == g.nk {
+                        PI
+                    } else if matches!(domain, Domain3::Half { .. }) {
+                        let node = |k: usize| node(&g, (b.i.start + b.i.end) / 2, 0, k);
+                        0.5 * (node(b.k.start)[1].atan2(node(b.k.start)[2]) + node(b.k.end)[1].atan2(node(b.k.end)[2]))
+                    } else {
+                        unreachable!()
+                    };
+                    let (lo, hi) = (if half(b) && b.k.start == 0 { 0.0 } else { -0.04 }, if half(b) && b.k.end == g.nk { 0.0 } else { 0.04 });
+                    for (i, j) in [((b.i.start + b.i.end) / 2, 0), (b.i.end - 2, b.j.end - 1)] {
+                        for q in 0..=b.k.len() {
+                            let want = lo + (hi - lo) * q as f64 / b.k.len() as f64;
+                            let d = dist(&g, i, j, b.k.start + q, th);
+                            assert!((d - want).abs() < 1e-8, "{label} n {n} ({i},{j}) node {q}: {d} vs {want}");
+                        }
+                    }
+                }
+                let rep = fin_stack_report(&g).unwrap();
+                assert!((rep.y1 / rep1.y1 - 1.0).abs() < 0.02 && rep.growth_max <= 1.35 + 1e-9 && rep.cells == rep1.cells, "{label} n {n}: {rep:?} vs {rep1:?}");
+            }
+        }
     }
 }

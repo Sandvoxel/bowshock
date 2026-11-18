@@ -432,6 +432,14 @@ impl Case3 {
         c.with_tier(tier)
     }
 
+    /// This case with `n` cells across the thickness of its fins ([`Grid3Params::fin_cells_across`]; 1 is the one-cell layer of the default grids): the fin, the columns
+    /// ahead of its leading edge and the base region behind a blunt trailing edge get `n` cells in `k`, a half fin on a symmetry plane (a sector) half of them. They are
+    /// added to the cells of the fin stack, so the sector has `n / 2 - 1` more `k` cells than the default; a case without fins is unchanged.
+    pub fn with_fin_cells_across(mut self, n: usize) -> Case3 {
+        self.grid.fin_cells_across = n;
+        self
+    }
+
     /// This case sized for `tier`: the first cell of the body walls on both meridian grids for the body `y+`, the fin stack for the fin `y+` (the wall-resolved
     /// tiers; the lift tier keeps uniform azimuthal cells, `32 << level` over a half domain), the roughness of the body and of the fins carried on the grid.
     pub fn with_tier(mut self, tier: Tier) -> Case3 {
