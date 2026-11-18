@@ -456,17 +456,40 @@ impl LazySolver3 {
     /// Smooth-wall state `[k_w, omega_w, mu_t,w]` of the automatic treatment (`turbulence3::wall_state_smooth`): the friction velocity is the root of the law of the wall
     /// (`law3`) by `WALL_ITERATIONS` Newton steps from `u_vis` (each evaluated, `staging`), zero at rest.
     fn wall_smooth3(&self, rho: &A, nu: &A, speed: &A, d: &A) -> [A; 3] {
-        let moving = speed.gt(c(0.0));
         let u_tau = self.u_tau3(nu, speed, d);
-        let yp = d * &u_tau / nu;
+        self.wall_state_at_u_tau3(rho, nu, speed, d, &u_tau)
+    }
+
+    /// The wall state `[k_w, omega_w, mu_t,w]` of the log-layer wall values at the friction velocity `u_tau` (`turbulence3::wall_state_smooth` and
+    /// `wall_state_rough_law` after their friction velocity): `omega_w` from the viscous and the log value, the eddy viscosity that makes the discrete shear the law's.
+    fn wall_state_at_u_tau3(&self, rho: &A, nu: &A, speed: &A, d: &A, u_tau: &A) -> [A; 3] {
+        let moving = speed.gt(c(0.0));
+        let yp = d * u_tau / nu;
         let yb = &yp / c(cpu3::Y_BOOST);
         let yb2 = &yb * &yb;
         let boost = c(1.0) + c(cpu3::OMEGA_BOOST - 1.0) / (c(1.0) + &yb2 * &yb2);
         let omega_vis = c(6.0) * nu / (c(sst2::BETA1) * d * d) * &boost;
-        let omega_log = &u_tau / (c(sst2::BETA_STAR.sqrt() * cpu3::KAPPA) * d);
-        let k_w = k_wall3(&u_tau, &yp);
-        let nu_t = (&u_tau * &u_tau * d / speed - nu).maximum(c(0.0)).minimum(c(sst2::NU_T_WALL_MAX) * nu);
+        let omega_log = u_tau / (c(sst2::BETA_STAR.sqrt() * cpu3::KAPPA) * d);
+        let k_w = k_wall3(u_tau, &yp);
+        let nu_t = (u_tau * u_tau * d / speed - nu).maximum(c(0.0)).minimum(c(sst2::NU_T_WALL_MAX) * nu);
         [k_w, hypot3(&omega_vis, &omega_log), rho * select(&moving, nu_t, c(0.0))]
+    }
+
+    /// The friction velocity of the rough law of the wall (`turbulence3::u_tau_rough_law`): `U = u_tau (U+(d u_tau / nu) - ln(1 + 0.3 ks u_tau / nu) / kappa)`, the root by
+    /// `ROUGH_LAW_ITERATIONS` Newton steps from `u_vis` (each evaluated, `staging`), a step limited to halving `u` and to `u <= U`; zero at rest. `d >= ks`.
+    fn u_tau_rough3(&self, nu: &A, speed: &A, d: &A, ks: &A) -> A {
+        let mut u = (nu * speed / d).sqrt();
+        for _ in 0..cpu3::ROUGH_LAW_ITERATIONS {
+            let (yp, kp) = (d * &u / nu, ks * &u / nu);
+            let (up, dup) = law3(&yp);
+            let kappa = cpu3::KAPPA;
+            let shift = (c(1.0) + c(0.3) * &kp).ln() / c(kappa);
+            let dshift = c(0.3 / kappa) / (c(1.0) + c(0.3) * &kp);
+            let (g, dg) = (&up - &shift, &dup * d / nu - &dshift * ks / nu);
+            let next = (&u - (&u * &g - speed) / (&g + &u * &dg)).maximum(c(0.5) * &u).minimum(speed);
+            u = self.staged3(next);
+        }
+        select(&speed.gt(c(0.0)), u, c(0.0))
     }
 
     /// Aupoix (2015) rough-wall state `[k_w, omega_w, nu_t,w]` (`turbulence::aupoix_wall`, as the 2D `LazySolver::aupoix_wall`): `AUPOIX_ITERATIONS` fixed-point iterations
@@ -529,8 +552,26 @@ impl LazySolver3 {
                 let rough_cell = ks.gt(c(0.0));
                 let ks_safe = select(&rough_cell, &ks, c(1.0));
                 let [k_w, om_w, nu_t] = self.aupoix3(&nu, &speed, &d, &ks_safe);
-                let pick = |r: A, s: &A| select(&rough_cell, r, s);
-                [pick(k_w, &smooth[0]), pick(om_w, &smooth[1]), pick(&rho * nu_t, &smooth[2])]
+                let aupoix = [k_w, om_w, &rho * &nu_t];
+                // `turbulence3::wall_state`: a runaway of the Aupoix state (`nu_t,w / nu` from `ROUGH_RUNAWAY_FROM`: a cell far above the roughness) is replaced by the smooth state,
+                // smoothstep up to `ROUGH_RUNAWAY_FULL`; from `d = ROUGH_LAW_FROM ks` the rough law of the wall takes over (smoothstep in `ln(d / ks)`, whole from `ROUGH_LAW_FULL ks`)
+                let mix = |w: &A, a: &[A; 3], b: &[A; 3]| -> [A; 3] { std::array::from_fn(|e| &a[e] * (c(1.0) - w) + &b[e] * w) };
+                let smoothstep = |x: &A| x * x * (c(3.0) - c(2.0) * x);
+                let t = ((&nu_t / &nu - c(cpu3::ROUGH_RUNAWAY_FROM)) / c(cpu3::ROUGH_RUNAWAY_FULL - cpu3::ROUGH_RUNAWAY_FROM)).maximum(c(0.0)).minimum(c(1.0));
+                let blended = mix(&smoothstep(&t), &aupoix, &smooth);
+                let state = std::array::from_fn(|e| select(&t.gt(c(0.0)), &blended[e], &aupoix[e]));
+                let x = ((&d / &ks_safe).ln() / c((cpu3::ROUGH_LAW_FULL / cpu3::ROUGH_LAW_FROM).ln()) - c(cpu3::ROUGH_LAW_FROM.ln() / (cpu3::ROUGH_LAW_FULL / cpu3::ROUGH_LAW_FROM).ln()))
+                    .maximum(c(0.0))
+                    .minimum(c(1.0));
+                let w = smoothstep(&x);
+                // the rough law at `d >= ks` only (the Newton bracket is positive there); the cells below take the Aupoix state whatever it returns
+                let d_r = d.maximum(&ks_safe);
+                let u_rough = self.u_tau_rough3(&nu, &speed, &d_r, &ks_safe);
+                let rough = self.wall_state_at_u_tau3(&rho, &nu, &speed, &d_r, &u_rough);
+                let blended = mix(&w, &state, &rough);
+                let state: [A; 3] = std::array::from_fn(|e| select(&w.gt(c(0.0)), &blended[e], &state[e]));
+                let pick = |r: &A, s: &A| select(&rough_cell, r, s);
+                [pick(&state[0], &smooth[0]), pick(&state[1], &smooth[1]), pick(&state[2], &smooth[2])]
             }
         };
         // scattered back by a gather over the grid (`wall_pos`) and a select, not `zeros_on` + `put`: a host-side clear aborts the recording of the loop step (the replay

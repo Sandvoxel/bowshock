@@ -14,7 +14,7 @@ use crate::progress::{drop_orders, spread, Progress};
 use bowshock_cfd::gas3::cons_to_prim3;
 use bowshock_cfd::gas3::Cons3;
 use bowshock_cfd::grid3::{Face3, Grid3, Part, Symmetry};
-use bowshock_cfd::solver3::Solver3;
+use bowshock_cfd::solver3::{Scheme3, Solver3};
 use std::ops::ControlFlow;
 
 /// Largest magnitude of the convergence monitor (a drag or pressure coefficient) of a meaningful solution; a sample beyond it, or a
@@ -28,6 +28,94 @@ pub const SAMPLE_EVERY: usize = 50;
 pub const MEAN_EVERY: usize = 10;
 /// Orders of density-residual drop that end a run as [`StopReason::ResidualDrop`].
 pub const DROP_ORDERS: f64 = 6.0;
+
+/// A step whose density residual is above this, or not finite, or a force monitor that is not finite, is a failure of the CFL controller ([`CflControl`]): the residual of a healthy
+/// start is 1e1 to 1e3 at most.
+pub const ROLLBACK_RESIDUAL: f64 = 1e5;
+/// The factor of `cfl_max` after a failure.
+pub const CFL_BACKOFF: f64 = 0.7;
+/// A failure within this many iterations of a restore goes back to the older snapshot: the snapshot taken right before a failure can already hold the growing mode.
+pub const RECENT_RESTORE: usize = 10;
+/// Failures after which the controller gives up (0.7^12 = 0.014 of the start cap): the run then fails as it would have without it.
+pub const MAX_ROLLBACKS: usize = 12;
+
+/// One answer of the CFL controller to a failed stretch of a run: the run went back to the snapshot at `restored_to` with `cfl_max` lowered.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CflEvent {
+    /// Iteration (of the accepted path of the run) at which the failure showed.
+    pub iteration: usize,
+    /// The CFL in force at the failure (the ramp's value, at most `cfl_before`).
+    pub cfl_reached: f64,
+    /// `cfl_max` before and after the answer.
+    pub cfl_before: f64,
+    pub cfl_after: f64,
+    /// Iteration of the snapshot the run returned to: `iteration - restored_to` iterations were run for nothing.
+    pub restored_to: usize,
+}
+
+/// Where a run goes back to after a failure ([`CflControl::fail`]).
+pub struct Restore<S> {
+    pub snapshot: S,
+    /// Its iteration and the CFL in force then.
+    pub iteration: usize,
+    pub cfl: f64,
+    /// The new `cfl_max`.
+    pub cap: f64,
+}
+
+/// The CFL controller by rollback (DESIGN3D "A CFL controller by rollback"): the CFL that is stable differs by case and the settling of a finned run is pseudo-time, proportional
+/// to 1 / CFL, so a fixed cap leaves a factor of two to five on the table. The runner starts at the engine's `cfl_max`, hands over a snapshot of its state (`S`: what it needs to
+/// come back, the solver's state and the stop rule's) after every good stretch of [`SAMPLE_EVERY`] iterations ([`CflControl::accept`], the last two are kept) and asks what to do
+/// at a failure ([`CflControl::fail`]): back to the last snapshot (to the one before it when the failure follows a restore within [`RECENT_RESTORE`] iterations), `cfl_max` times
+/// [`CFL_BACKOFF`], the stretch run again. The cap only goes down; the converged state does not depend on it. Every answer is logged in [`CflControl::events`].
+pub struct CflControl<S> {
+    snaps: Vec<(S, usize, f64)>,
+    restored_at: Option<usize>,
+    cap: f64,
+    /// The answers so far.
+    pub events: Vec<CflEvent>,
+}
+
+impl<S: Clone> CflControl<S> {
+    /// A controller whose first snapshot is `first` (iteration 0, the CFL `cfl` in force) under the cap `cap`.
+    pub fn new(first: S, cap: f64, cfl: f64) -> CflControl<S> {
+        CflControl { snaps: vec![(first, 0, cfl)], restored_at: None, cap, events: Vec::new() }
+    }
+
+    /// The current `cfl_max`.
+    pub fn cap(&self) -> f64 {
+        self.cap
+    }
+
+    /// Whether the controller still answers failures.
+    pub fn active(&self) -> bool {
+        self.events.len() < MAX_ROLLBACKS
+    }
+
+    /// The state after a good stretch ending at `iteration` with the CFL `cfl` in force.
+    pub fn accept(&mut self, snapshot: S, iteration: usize, cfl: f64) {
+        self.snaps.push((snapshot, iteration, cfl));
+        if self.snaps.len() > 2 {
+            self.snaps.remove(0);
+        }
+    }
+
+    /// A failure at `iteration` with the CFL `cfl_reached` in force: where to go back to, or `None` when the controller has given up.
+    pub fn fail(&mut self, iteration: usize, cfl_reached: f64) -> Option<Restore<S>> {
+        if !self.active() {
+            return None;
+        }
+        let recent = self.restored_at.is_some_and(|r| iteration <= r + RECENT_RESTORE);
+        let from = if recent && self.snaps.len() >= 2 { self.snaps.len() - 2 } else { self.snaps.len() - 1 };
+        self.snaps.truncate(from + 1);
+        let (snapshot, at, cfl_at) = self.snaps[from].clone();
+        let before = self.cap;
+        self.cap *= CFL_BACKOFF;
+        self.restored_at = Some(at);
+        self.events.push(CflEvent { iteration, cfl_reached, cfl_before: before, cfl_after: self.cap, restored_to: at });
+        Some(Restore { snapshot, iteration: at, cfl: cfl_at.min(self.cap), cap: self.cap })
+    }
+}
 
 /// Pressure-force coefficients of the body plus fins.
 #[derive(Clone, Copy, Debug)]
@@ -64,6 +152,21 @@ pub struct PointResult3 {
     /// Means over the last averaging window of the force samples ([`StopRule3::observe`]) when the run sampled one full window: `cn`, `ca` and `x_cp` above are
     /// these means when `stop_reason` is `MeanStationary`, the last state otherwise (a `MaxIterations` run of an oscillating wake has them here).
     pub window: Option<WindowMean>,
+    /// The answers of the CFL controller to failures of the run, in order ([`CflControl`]); empty when it never had to step in. The `iterations` above count the accepted path;
+    /// [`PointResult3::wasted_iterations`] are the ones run for nothing.
+    pub cfl_events: Vec<CflEvent>,
+}
+
+impl PointResult3 {
+    /// Iterations run and thrown away by the CFL controller.
+    pub fn wasted_iterations(&self) -> usize {
+        self.cfl_events.iter().map(|e| e.iteration - e.restored_to).sum()
+    }
+
+    /// The `cfl_max` the run ended with: the last event's, `None` when the controller never stepped in.
+    pub fn final_cfl_cap(&self) -> Option<f64> {
+        self.cfl_events.last().map(|e| e.cfl_after)
+    }
 }
 
 /// Mean of the force coefficients over one averaging window of an oscillating run.
@@ -545,7 +648,7 @@ pub fn wall_forces_on(s: &Solver3, x_max: f64) -> WallForces {
 
 /// `(family, i, j, k)` of every wall face of the grid -> its class: the key is the first node of the face, which is its index in its family
 /// (`Grid3::{iface, jface, kface}`: `(k nj + j)(ni + 1) + i`, `(k (nj + 1) + j) ni + i`, `(k nj + j) ni + i`).
-fn wall_classes(g: &Grid3) -> std::collections::HashMap<(usize, usize, usize, usize), Wall> {
+pub(crate) fn wall_classes(g: &Grid3) -> std::collections::HashMap<(usize, usize, usize, usize), Wall> {
     wall_faces(g)
         .into_iter()
         .map(|w| {
@@ -651,6 +754,10 @@ fn monitor(case: &Case3, s: &Solver3) -> f64 {
 /// residual did) gives `CdStationary`; the iteration cap gives `MaxIterations`.
 ///
 /// `warm`: keep the field of the previous run, set the free stream of `case` and restart the CFL ramp (no first-order start-up).
+///
+/// The CFL controller ([`CflControl`]) watches the run: a step whose residual is not finite or above [`ROLLBACK_RESIDUAL`], or a monitor sample that is not finite, sends it back to
+/// the last snapshot (taken at every sample iteration, with the stop rule as it was there) with `cfl_max` times [`CFL_BACKOFF`]; the answers are in `PointResult3::cfl_events`. A run
+/// that never fails is bit for bit what it was without the controller.
 pub fn run3_on(case: &Case3, s: &mut Solver3, warm: bool) -> PointResult3 {
     s.cfg.freestream = case.freestream();
     s.restart_ramp();
@@ -658,16 +765,32 @@ pub fn run3_on(case: &Case3, s: &mut Solver3, warm: bool) -> PointResult3 {
         s.iter = s.iter.max(case.numerics.first_order_iters);
     }
     let mut rule = StopRule3::new(case, warm);
+    rule.set_cfl(s.current_cfl());
+    let mut ctl = matches!(s.cfg.scheme, Scheme3::Implicit(_)).then(|| CflControl::new((s.snapshot(), rule.clone()), s.cfl_cap(), s.current_cfl()));
     let mut it = 0;
     while it < case.numerics.max_iter {
+        let cfl_now = s.current_cfl();
         let r = s.step();
         let cn = ((it + 1) % SAMPLE_EVERY == 0).then(|| monitor(case, s));
+        if !r.is_finite() || r > ROLLBACK_RESIDUAL || cn.is_some_and(|c| !c.is_finite() || c.abs() > MONITOR_LIMIT) {
+            if let Some(back) = ctl.as_mut().and_then(|c| c.fail(it + 1, cfl_now)) {
+                let (snapshot, saved_rule) = back.snapshot;
+                s.restore(&snapshot);
+                s.set_cfl_cap(back.cap);
+                (rule, it) = (saved_rule, back.iteration);
+                rule.set_cfl(s.current_cfl());
+                continue;
+            }
+        }
         it += 1;
         if rule.wants_forces(it, MEAN_EVERY) {
             rule.observe(it, &lift_forces(case, s));
         }
         if rule.check(it - 1, r, cn).is_some() {
             break;
+        }
+        if let (Some(c), true) = (ctl.as_mut(), cn.is_some()) {
+            c.accept((s.snapshot(), rule.clone()), it, s.current_cfl());
         }
         if let Some(t) = case.snapshots.as_ref().filter(|t| t.due(it)) {
             t.send(case, &s.grid, &s.u, it);
@@ -676,15 +799,18 @@ pub fn run3_on(case: &Case3, s: &mut Solver3, warm: bool) -> PointResult3 {
             rule.cancel();
             break;
         }
+        rule.set_cfl(s.current_cfl());
     }
     let mut r = rule.finish(case, lift_forces(case, s), it);
     r.y_plus_max = y_plus_max(s);
     r.cp_base = base_cp(case, s);
+    r.cfl_events = ctl.map(|c| c.events).unwrap_or_default();
     r
 }
 
 /// The stop rules of a 3D run, shared by the CPU and GPU runners. Feed it every iteration's residual (and, at iterations
 /// `it + 1 = 0 mod SAMPLE_EVERY`, the sampled CN); see [`run3_on`] for the order of the rules.
+#[derive(Clone)]
 pub struct StopRule3 {
     skip: usize,
     nwin: usize,
@@ -703,6 +829,9 @@ pub struct StopRule3 {
     samples: Vec<(usize, [f64; 3])>,
     mean_ready: bool,
     last_window: Option<WindowMean>,
+    /// `cfl_ref` of the numerics and the CFL in force (`NaN`: not told): the windows and floors are multiplied by `max(1, cfl_ref / cfl_now)`.
+    cfl_ref: f64,
+    cfl_now: f64,
 }
 
 impl StopRule3 {
@@ -725,13 +854,30 @@ impl StopRule3 {
             samples: Vec::new(),
             mean_ready: false,
             last_window: None,
+            cfl_ref: n.cfl_ref,
+            cfl_now: f64::NAN,
+        }
+    }
+
+    /// Tells the rule the CFL in force (a runner calls it before the iterations it is about to feed): every window and floor of the rules scales with `max(1, cfl_ref / cfl)`, so that
+    /// a run at a lower CFL, whose settling takes proportionally more iterations, is judged over proportionally longer windows ([`crate::engine::case3::Numerics3::cfl_ref`]).
+    pub fn set_cfl(&mut self, cfl: f64) {
+        self.cfl_now = cfl;
+    }
+
+    /// The factor of the windows and floors now: 1 at and above `cfl_ref`, without a CFL or with `cfl_ref` 0.
+    fn scale(&self) -> f64 {
+        if self.cfl_ref > 0.0 && self.cfl_now > 0.0 {
+            (self.cfl_ref / self.cfl_now).max(1.0)
+        } else {
+            1.0
         }
     }
 
     /// Whether the runner is to feed [`StopRule3::observe`] after `iterations` iterations: the mean rule is on, the iteration is a multiple of `every` and
-    /// past `mean_from`.
+    /// past `mean_from` (scaled with the CFL).
     pub fn wants_forces(&self, iterations: usize, every: usize) -> bool {
-        self.mean_window > 0 && iterations > self.mean_from && iterations.is_multiple_of(every)
+        self.mean_window > 0 && iterations as f64 > self.mean_from as f64 * self.scale() && iterations.is_multiple_of(every)
     }
 
     /// The force coefficients `f` of the state after `iterations` iterations (see [`StopRule3::wants_forces`]); call before [`StopRule3::check`] of the same
@@ -743,7 +889,10 @@ impl StopRule3 {
         }
         let cm = if self.incidence && f.x_cp.is_finite() { f.cn * f.x_cp } else { 0.0 };
         self.samples.push((iterations, [f.ca, f.cn, cm]));
-        if let Some((mean, agree)) = window_means(&self.samples, self.mean_window, self.mean_from, self.mean_tol, self.incidence) {
+        let s = self.scale();
+        if let Some((mean, agree)) =
+            window_means(&self.samples, (self.mean_window as f64 * s).round() as usize, (self.mean_from as f64 * s) as usize, self.mean_tol, self.incidence)
+        {
             self.last_window = Some(mean);
             self.mean_ready = agree;
         }
@@ -793,14 +942,15 @@ impl StopRule3 {
                 return stop(self, StopReason::NonFinite);
             }
             self.hist.push((it + 1, cn));
-            if it + 1 >= self.window.max(self.min_iters) && self.hist.len() >= self.nwin {
-                let w = &self.hist[self.hist.len() - self.nwin..];
+            let (nwin, floor) = (((self.nwin as f64) * self.scale()).ceil() as usize, (self.window.max(self.min_iters) as f64 * self.scale()) as usize);
+            if it + 1 >= floor && self.hist.len() >= nwin {
+                let w = &self.hist[self.hist.len() - nwin..];
                 // a state that no longer changes (every sample bit-identical) without a residual drop is a frozen run, not a converged one
                 if drop < 1.0 && w.iter().all(|&(_, c)| c.to_bits() == w[0].1.to_bits()) {
                     return stop(self, StopReason::NonFinite);
                 }
                 let (lo, hi, sum) = w.iter().fold((f64::INFINITY, f64::NEG_INFINITY, 0.0), |a, &(_, c)| (a.0.min(c), a.1.max(c), a.2 + c));
-                if hi - lo < self.rel_tol * (sum / self.nwin as f64).abs() {
+                if hi - lo < self.rel_tol * (sum / nwin as f64).abs() {
                     return stop(self, StopReason::CdStationary);
                 }
             }
@@ -836,6 +986,7 @@ impl StopRule3 {
             cn_history: self.hist,
             y_plus_max: f64::NAN,
             cp_base: f64::NAN,
+            cfl_events: Vec::new(),
         }
     }
 }
@@ -990,5 +1141,77 @@ mod tests {
         assert!(!rule.wants_forces(5000, MEAN_EVERY));
         rule.observe(5000, &wake(5000, 0.0));
         assert_eq!(rule.check(4999, 1e-2, None), None);
+    }
+
+    /// The windows and floors of the range rule lengthen as the CFL in force falls below `cfl_ref`: an algebraic settling `1 + 50 / t` looks stationary (5e-4 over a window) later
+    /// with a window of 2000 iterations than with 1000, and a CFL at or above `cfl_ref` changes nothing.
+    #[test]
+    fn the_stop_rule_windows_scale_with_the_cfl() {
+        let mut case = Case3::tiny_anf(2.0, 0.0);
+        case.numerics = crate::engine::case3::Numerics3::viscous(2.0, 0);
+        let stop_at = |cfl: Option<f64>| {
+            let mut rule = StopRule3::new(&case, false);
+            if let Some(c) = cfl {
+                rule.set_cfl(c);
+            }
+            for it in 0..30_000 {
+                let sample = (it + 1) % SAMPLE_EVERY == 0;
+                if let Some(why) = rule.check(it, 1.0, sample.then(|| 1.0 + 50.0 / (it + 1) as f64)) {
+                    return (it + 1, why);
+                }
+            }
+            panic!("no stop");
+        };
+        let (told_nothing, why) = stop_at(None);
+        assert_eq!(why, StopReason::CdStationary);
+        assert_eq!(stop_at(Some(20.0)), (told_nothing, why), "at cfl_ref");
+        assert_eq!(stop_at(Some(50.0)), (told_nothing, why), "above cfl_ref");
+        let (at10, _) = stop_at(Some(10.0));
+        assert!(at10 as f64 > 1.25 * told_nothing as f64, "cfl 10 stopped at {at10}, cfl 20 at {told_nothing}");
+    }
+
+    /// The controller goes back to the last snapshot, to the one before it when the failure follows a restore within `RECENT_RESTORE` iterations, lowers the cap by `CFL_BACKOFF`
+    /// each time, logs it, and gives up after `MAX_ROLLBACKS`.
+    #[test]
+    fn the_cfl_controller_goes_back_and_logs() {
+        let mut ctl = CflControl::new('a', 50.0, 1.0);
+        ctl.accept('b', 50, 2.7);
+        ctl.accept('c', 100, 7.2);
+        let back = ctl.fail(120, 12.0).expect("answers");
+        assert_eq!((back.snapshot, back.iteration), ('c', 100));
+        assert!((back.cap - 35.0).abs() < 1e-12 && (back.cfl - 7.2).abs() < 1e-12);
+        // a failure straight after the restore: the older snapshot
+        let again = ctl.fail(105, 8.0).expect("answers");
+        assert_eq!((again.snapshot, again.iteration), ('b', 50));
+        assert!((again.cap - 24.5).abs() < 1e-12 && (again.cfl - 2.7).abs() < 1e-12);
+        // a failure long after it: the last one
+        ctl.accept('d', 150, 5.0);
+        let later = ctl.fail(190, 20.0).expect("answers");
+        assert_eq!((later.snapshot, later.iteration), ('d', 150));
+        assert_eq!(ctl.events.len(), 3);
+        let e = ctl.events[0];
+        assert_eq!((e.iteration, e.restored_to), (120, 100));
+        assert!((e.cfl_before - 50.0).abs() < 1e-12 && (e.cfl_after - 35.0).abs() < 1e-12 && (e.cfl_reached - 12.0).abs() < 1e-12);
+        while ctl.fail(500, 3.0).is_some() {}
+        assert_eq!(ctl.events.len(), MAX_ROLLBACKS);
+        assert!(!ctl.active());
+    }
+
+    /// A run that goes unstable at a large `cfl_max` is taken back by the CPU runner with a lower one and finishes; the events are in the result and cost iterations.
+    #[test]
+    fn the_cpu_runner_answers_a_failure_with_a_lower_cfl() {
+        let mut case = Case3::tiny_anf(2.0, 2f64.to_radians());
+        case.numerics.implicit.cfl_max = 400.0;
+        case.numerics.implicit.growth = 1.15;
+        case.numerics.max_iter = 600;
+        let mut s = case.build_solver().expect("solver");
+        let r = run3_on(&case, &mut s, false);
+        assert!(!r.cfl_events.is_empty(), "no failure at cfl_max 400: raise it");
+        assert!(r.stop_reason != StopReason::NonFinite, "{:?} after {} iterations with {:?}", r.stop_reason, r.iterations, r.cfl_events);
+        assert!(r.cn.is_finite() && r.ca.is_finite());
+        assert!(r.final_cfl_cap().unwrap() < 400.0 && r.wasted_iterations() > 0);
+        for w in r.cfl_events.windows(2) {
+            assert!(w[1].cfl_before == w[0].cfl_after, "the cap only goes down, one step at a time: {:?}", r.cfl_events);
+        }
     }
 }

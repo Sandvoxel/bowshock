@@ -56,6 +56,11 @@ pub struct Numerics3 {
     /// Static-pressure outflow `p = p_inf` at the last `i` plane instead of the characteristic ghost (the plates of the viscous gates; the body cases of the 2D
     /// engine, and so these, use the characteristic outflow: `false`). Read by the viscous solver only.
     pub pressure_outflow: bool,
+    /// The CFL the windows and floors above are calibrated for (10: the Euler numerics' cap; 20: the viscous ones). The settling of a run is pseudo-time, it runs at the CFL (the
+    /// iterations to a given error times `cfl_max` are constant on the G-F1 sector at 20, 30 and 50), so a drift-based rule that watches a window of iterations at a lower CFL sees
+    /// less drift for the same remaining error and fires early (the application's rule at `cfl_max` 10 on that sector: 1.5 % high, at 20: 0.9 %). [`crate::engine::run3::StopRule3`]
+    /// multiplies every window and floor by `max(1, cfl_ref / CFL in force)`: unchanged at and above `cfl_ref`, twice as long at 10 for a viscous run. `0`: off.
+    pub cfl_ref: f64,
 }
 
 impl Numerics3 {
@@ -84,6 +89,7 @@ impl Numerics3 {
             mean_tol: 1e-2,
             line_solve: None,
             pressure_outflow: false,
+            cfl_ref: 10.0,
         }
     }
 
@@ -133,6 +139,7 @@ impl Numerics3 {
             mean_from: 2000,
             mean_tol: 5e-3,
             line_solve: Some(LineSolve3::Block),
+            cfl_ref: 20.0,
             pressure_outflow: false,
         }
     }
@@ -396,9 +403,15 @@ impl Case3 {
         self.viscous = Some(Viscous { re_c: flow.re_c, sutherland: flow.sutherland, turbulence: Turbulence::Sst, wall_i_start: 0, roughness: 0.0 });
         self.numerics = Numerics3::viscous(self.mach, level);
         if matches!(self.grid.domain, Domain3::Wedge { .. }) && self.mach < 1.0 {
-            // one factored solve per iteration on a subsonic wedge (the finned domains and the supersonic wedges keep three: Arcas fins-off Mach 2.3 and TP-2005 Mach 1.65
-            // at the medium level go non-finite with one): same state, 20-25 % cheaper (DESIGN3D item 35)
+            // one factored solve per iteration on a subsonic wedge (the supersonic wedges keep three: Arcas fins-off Mach 2.3 and TP-2005 Mach 1.65 at the medium level go
+            // non-finite with one; the finned domains take two, below): same state, 20-25 % cheaper (DESIGN3D item 35)
             self.numerics.implicit.sub_iters = 1;
+        }
+        if self.grid.fins.is_some() {
+            // two factored solves per iteration on a finned domain (GPU, G-F1 Coarse sector, 677 k cells, f32): Mach 0.5 6800 iterations in 59 s against 7100 in 87 s with three,
+            // CD 0.24575 against 0.24584, fin friction 0.01342 against 0.01343; Mach 2 7000 iterations in 57 s against 6940 in 76 s, CD 0.34993 against 0.35017, fin friction
+            // 0.00822 for both: 24-32 % less wall, the same state. One is not stable on the finned sector (see [`Numerics3::viscous`])
+            self.numerics.implicit.sub_iters = 2;
         }
         if !matches!(self.grid.domain, Domain3::Wedge { .. }) {
             self.numerics.implicit.cfl_max = self.numerics.implicit.cfl_max.min(VISCOUS_3D_CFL_MAX);

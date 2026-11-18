@@ -15,6 +15,6 @@ for t in "$@"; do
     [ -n "$cfl" ] && flags="$flags --cfl-max $cfl"
     [ -n "${SUB:-}" ] && flags="$flags --sub $SUB"
     [ -n "${CHORD:-}" ] && flags="$flags --chord $CHORD"
-    tools/gpuq/gpumem --label "$tier-M$m" -- "$BIN" --tier "$tier" --mach "$m" $flags ${EXTRA:-} 2>&1 | grep -E "^TABLE|^MEM|^WORST|panicked|Error" | sed "s/^TABLE/TABLE [cfl=${cfl:-default} sub=${SUB:-default} chord=${CHORD:-default}]/"
+    tools/gpuq/gpumem --label "$tier-M$m" -- "$BIN" --tier "$tier" --mach "$m" $flags ${EXTRA:-} 2>&1 | grep -E "^TABLE|^GF1-RATIO|^MEM|^WORST|panicked|Error" | sed "s/^TABLE/TABLE [cfl=${cfl:-default} sub=${SUB:-default} chord=${CHORD:-default}]/"
   done
 done
