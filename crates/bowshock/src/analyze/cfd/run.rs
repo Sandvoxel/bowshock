@@ -1,6 +1,6 @@
 use super::fields::FieldRef;
 use super::fresh::{now, Status};
-use super::plan::{lift_key, nodes, table_key, Plan, DRAG_TOLERANCE, LIFT_ALPHAS, SHARED_GRID, SOLVER_CEILING};
+use super::plan::{lift_key, nodes, table_key, Plan, DRAG_SIZING_MACH_FLOOR, DRAG_TOLERANCE, LIFT_ALPHAS, SHARED_GRID, SOLVER_CEILING};
 use super::remote::{self, Failed};
 use super::share::{self, Lost, Stop};
 use super::wording;
@@ -490,6 +490,16 @@ pub(super) enum NodeKind {
     Lift,
 }
 
+/// The Mach number the walls of a node's grid are sized for on a table with a shared sizing (DESIGN3D item 57): the angle nodes take the table's highest (`table_max`), a drag node its own
+/// Mach number but not below [`DRAG_SIZING_MACH_FLOOR`] (and not above `table_max`). Sized for its own Mach number a low-Mach node has a first cell at 30-50 wall units on the fins and
+/// is not grid-converged (Mach 0.1: CD +8 % at refinement 1, still falling at 1.333); sized for Mach 1 and up it is within 0.3 % of the Mach-3 sizing for a third to half less time.
+pub(super) fn sizing_mach(kind: NodeKind, mach: f64, table_max: f64) -> f64 {
+    match kind {
+        NodeKind::Lift => table_max,
+        NodeKind::Drag => mach.max(DRAG_SIZING_MACH_FLOOR).min(table_max),
+    }
+}
+
 /// The [`solver::Analysis`] of one node of either kind: the body, the fins with their outline, the resolution (a drag node's is the job's grid, the angles are always solved
 /// coarse), the backend and the fields, the flight conditions, the wall roughness, the drag tolerance (a drag node's stop rule) and the shared grid. The legacy engine's
 /// angle solver ignores the viscous settings; the 3D engine reads them for both kinds.
@@ -500,6 +510,7 @@ pub(super) fn node_analysis(
     altitude: f64,
     grid_mach: f64,
     shared_grid: bool,
+    mach: f64,
 ) -> Result<solver::Analysis, Failed> {
     let mut analysis = solver::Analysis::new(&job.plan.body)
         .map_err(|e| Failed::Message(e.to_string()))?
@@ -516,7 +527,7 @@ pub(super) fn node_analysis(
         analysis = analysis.drag_tolerance(DRAG_TOLERANCE);
     }
     if shared_grid {
-        analysis = analysis.grid_mach(grid_mach);
+        analysis = analysis.grid_mach(sizing_mach(kind, mach, grid_mach));
     }
     if let Some(fins) = &job.plan.fins {
         analysis = analysis.fins(fins.clone()).fin_outline(job.plan.outline.clone());
@@ -566,7 +577,7 @@ fn solve_lift_node(
     cancel: &Arc<AtomicBool>,
     send: &Outbox,
 ) -> Result<LiftNode, Failed> {
-    let mut analysis = node_analysis(job, NodeKind::Lift, session, job.altitude.clamp(0.0, SOLVER_CEILING), grid_mach, shared_grid)?;
+    let mut analysis = node_analysis(job, NodeKind::Lift, session, job.altitude.clamp(0.0, SOLVER_CEILING), grid_mach, shared_grid, mach)?;
     let progress = sink(started, cancel.clone(), send.clone(), true, machine);
     let conditions: Vec<solver::Condition> = LIFT_ALPHAS.iter().map(|&a| solver::Condition::new(mach, a)).collect();
     let mut polar = match session {
@@ -641,7 +652,7 @@ pub(super) fn solve_sized(
                 return solve_lift_node(&job, grid_mach, shared_grid, job.stability[node - n_drag], session, machine, started, &cancel, &send).map(Node::Lift);
             }
             let mach = job.nodes[node];
-            let mut analysis = node_analysis(&job, NodeKind::Drag, session, altitude, grid_mach, shared_grid)?;
+            let mut analysis = node_analysis(&job, NodeKind::Drag, session, altitude, grid_mach, shared_grid, mach)?;
             let progress = sink(started, cancel.clone(), send.clone(), false, machine);
             let mut polar = match session {
                 Session::Remote(r) => {
@@ -783,5 +794,20 @@ mod draft_first_tests {
         assert!(!rule(false, false, CfdGrid::Coarse, Status::Missing));
         assert!(!rule(true, true, CfdGrid::Coarse, Status::Missing));
         assert!(!rule(true, false, CfdGrid::Coarse, Status::Unsupported("x".into())));
+    }
+}
+
+#[cfg(test)]
+mod sizing_tests {
+    use super::*;
+
+    /// The angle nodes keep the table's sizing, a drag node its own Mach number with a floor, and none goes above the table's highest.
+    #[test]
+    fn the_drag_nodes_are_sized_for_their_own_mach_number_with_a_floor() {
+        assert_eq!(sizing_mach(NodeKind::Lift, 0.5, 3.0), 3.0);
+        assert_eq!(sizing_mach(NodeKind::Drag, 0.1, 3.0), DRAG_SIZING_MACH_FLOOR);
+        assert_eq!(sizing_mach(NodeKind::Drag, 2.3, 3.0), 2.3);
+        assert_eq!(sizing_mach(NodeKind::Drag, 0.1, 0.5), 0.5);
+        assert_eq!(sizing_mach(NodeKind::Drag, 3.0, 3.0), 3.0);
     }
 }

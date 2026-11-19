@@ -880,7 +880,7 @@ fn finned_drag_split() {
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     let t_all = Instant::now();
     for &mach in &machs {
-        let analysis = node_analysis(&job, NodeKind::Drag, &session, 120.0, grid_mach, solves_3d()).unwrap_or_else(|_| panic!("the node analysis"));
+        let analysis = node_analysis(&job, NodeKind::Drag, &session, 120.0, grid_mach, solves_3d(), mach).unwrap_or_else(|_| panic!("the node analysis"));
         let _ = solver::engine::timing::take_timings();
         let t = Instant::now();
         let polar = analysis.run(&[mach]).expect("the point solves");
