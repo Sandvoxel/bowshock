@@ -301,7 +301,30 @@ impl Case {
             v
         });
         let dt: Vec<f64> = (0..nc).map(|_| rng.range(0.02, 0.2)).collect();
-        Case { name: name.into(), grid, cfg, solid, w, dirs, bc, sym, mu, mu_t, grad, wall, dwall, ks, gamma: Vec::new(), law_strain, law_i_walls, f, dt, turb, re_c, iso }
+        Case {
+            name: name.into(),
+            grid,
+            cfg,
+            solid,
+            w,
+            dirs,
+            bc,
+            sym,
+            mu,
+            mu_t,
+            grad,
+            wall,
+            dwall,
+            ks,
+            gamma: Vec::new(),
+            law_strain,
+            law_i_walls,
+            f,
+            dt,
+            turb,
+            re_c,
+            iso,
+        }
     }
 
     /// This case with a prescribed transition: the cells with `x` below the median `x` of the fluid cells are laminar (`gamma = 0`, a station that cuts the wall cells, the rough ones
@@ -311,7 +334,19 @@ impl Case {
         xs.sort_by(f64::total_cmp);
         let x_tr = xs[xs.len() / 2];
         self.gamma = (0..self.solid.len()).map(|c| if self.grid.xc[c][0] < x_tr { 0.0 } else { 1.0 }).collect();
-        t3::wall_state_pass(&self.grid, &self.solid, &self.dirs, &self.w, &self.mu, &self.dwall, &self.ks, &self.gamma, self.iso, self.law_i_walls, &mut self.wall);
+        t3::wall_state_pass(
+            &self.grid,
+            &self.solid,
+            &self.dirs,
+            &self.w,
+            &self.mu,
+            &self.dwall,
+            &self.ks,
+            &self.gamma,
+            self.iso,
+            self.law_i_walls,
+            &mut self.wall,
+        );
         for c in 0..self.mu_t.len() {
             self.mu_t[c] *= self.gamma[c];
         }
@@ -409,10 +444,38 @@ fn cases() -> Vec<Case> {
     // prescribed transition (`turbulence3::TurbIn::gamma`): the left half of the cells laminar; with rough cells, the law of the wall and the cold wall
     let (s, bc) = box_sides(false);
     let block = [SolidBox { i: 3..5, j: 0..3, k: 2..4 }];
-    v.push(Case::new("box, Inf ghosts, law_strain", box_grid([8, 7, 6], &block, &mut Rng::new(11)), box_config(), s, bc, re_box, Flow::Random, true, true, false, 3).with_transition());
     v.push(
-        Case::with_wall("box, Inf ghosts, law_strain, isothermal wall", box_grid([8, 7, 6], &block, &mut Rng::new(11)), box_config(), s, bc, re_box, Flow::Random, true, true, true, 3, WallThermal::Isothermal(1.2))
-            .with_transition(),
+        Case::new(
+            "box, Inf ghosts, law_strain",
+            box_grid([8, 7, 6], &block, &mut Rng::new(11)),
+            box_config(),
+            s,
+            bc,
+            re_box,
+            Flow::Random,
+            true,
+            true,
+            false,
+            3,
+        )
+        .with_transition(),
+    );
+    v.push(
+        Case::with_wall(
+            "box, Inf ghosts, law_strain, isothermal wall",
+            box_grid([8, 7, 6], &block, &mut Rng::new(11)),
+            box_config(),
+            s,
+            bc,
+            re_box,
+            Flow::Random,
+            true,
+            true,
+            true,
+            3,
+            WallThermal::Isothermal(1.2),
+        )
+        .with_transition(),
     );
     for rough in [false, true] {
         let mut g = Grid3::try_from_nodes(n[0], n[1], n[2], x.clone(), y.clone(), z.clone()).expect("sweep grid");

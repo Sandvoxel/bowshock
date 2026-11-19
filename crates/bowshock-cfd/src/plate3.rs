@@ -428,7 +428,11 @@ mod tests {
         assert!(mu_t_max > 50.0, "max mu_t / mu_inf = {mu_t_max}");
         // the transition length: from the trip to the station where cf passes the mean of the laminar and the fully turbulent value
         if let Some(&(xm, _, _)) = cf_t.iter().find(|&&(x, cf, cf0)| x > x_tr && cf > 0.5 * (blasius(&case, x) + cf0)) {
-            println!("transition length (cf at half way from the laminar to the turbulent curve): {:.3} from the trip = {:.2} of x_tr", xm - x_tr, (xm - x_tr) / x_tr);
+            println!(
+                "transition length (cf at half way from the laminar to the turbulent curve): {:.3} from the trip = {:.2} of x_tr",
+                xm - x_tr,
+                (xm - x_tr) / x_tr
+            );
         }
     }
 

@@ -52,11 +52,7 @@ fn laminar(grid: &Grid3, f: &WallFace, tr: Transition, rows: &HashMap<(u16, usiz
         }
         c
     };
-    let solid_cell = if f.idx[f.dir] == 0 || f.idx[f.dir] >= n {
-        None
-    } else {
-        [cell(true), cell(false)].into_iter().find(|c| grid.is_wall(c[0], c[1], c[2]))
-    };
+    let solid_cell = if f.idx[f.dir] == 0 || f.idx[f.dir] >= n { None } else { [cell(true), cell(false)].into_iter().find(|c| grid.is_wall(c[0], c[1], c[2])) };
     let part = match solid_cell {
         Some(c) => grid.part_of(c[0], c[1], c[2]),
         None if f.dir == 1 && j == 0 => grid.wall_j0.iter().find(|(r, _)| r.contains(&i)).map(|(_, p)| *p),

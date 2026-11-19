@@ -573,7 +573,7 @@ impl LazySolver3 {
             None => smooth,
             Some(ks) => {
                 let ks = match &laminar {
-                    Some(l) => select(l, c(0.0), &at(ks)),
+                    Some(l) => select(l, c(0.0), at(ks)),
                     None => at(ks),
                 };
                 let rough_cell = ks.gt(c(0.0));

@@ -634,7 +634,13 @@ impl Case3 {
             let ks = if ks.iter().any(|&k| k > 0.0) { ks } else { Vec::new() };
             s.set_viscous_with(
                 Some(v),
-                RansOpts3 { pressure_outflow: self.numerics.pressure_outflow, ks, wall_thermal: self.wall_thermal, transition: self.transition, ..RansOpts3::default() },
+                RansOpts3 {
+                    pressure_outflow: self.numerics.pressure_outflow,
+                    ks,
+                    wall_thermal: self.wall_thermal,
+                    transition: self.transition,
+                    ..RansOpts3::default()
+                },
             );
         }
         s

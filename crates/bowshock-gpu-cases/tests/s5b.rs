@@ -360,7 +360,13 @@ fn transition_box_matches_cpu() {
         let gamma = &s.rans().expect("viscous").gamma;
         let laminar = gamma.iter().filter(|&&x| x == 0.0).count();
         assert!(laminar > 0 && laminar < gamma.len(), "the field must have laminar and turbulent cells ({laminar} of {})", gamma.len());
-        compare_with(&format!("SST transition M {mach} Re {re:.0e} explicit"), &|| host_transition(&g, mach, Scheme3::Explicit, v, 0.4), 30, EXPLICIT, &mut rows);
+        compare_with(
+            &format!("SST transition M {mach} Re {re:.0e} explicit"),
+            &|| host_transition(&g, mach, Scheme3::Explicit, v, 0.4),
+            30,
+            EXPLICIT,
+            &mut rows,
+        );
         compare_with(&format!("SST transition M {mach} Re {re:.0e} implicit block"), &|| host_transition(&g, mach, block(), v, 0.4), 30, IMPLICIT, &mut rows);
     }
     report("S5b SST box with a prescribed transition at x = 0.4 (10 x 8 x 6, no-slip block, dead block), 30 iterations from the free stream", &rows);
