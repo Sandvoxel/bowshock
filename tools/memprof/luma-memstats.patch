@@ -1,0 +1,68 @@
+diff -r a/src/context/record.rs b/src/context/record.rs
+--- a/src/context/record.rs	2026-11-18 18:54:31.858290609 -0800
++++ b/src/context/record.rs	2026-11-18 18:54:46.471538730 -0800
+@@ -388,6 +388,7 @@
+                 becomes[n] = Some(*owner[slot].get_or_insert(n));
+             }
+         }
++        self.memstats(&transient, &intervals, &becomes);
+         let merged: FxMap<u64, Buffer> = becomes
+             .iter()
+             .enumerate()
+@@ -424,3 +425,56 @@
+         }
+     }
+ }
++
++impl Recording {
++    /// Diagnostic (env `LUMA_MEMSTATS=<file>`): appends the live intervals and sizes of the buffers of this recording to the file (memory-profiling patch, not upstream).
++    fn memstats(&self, transient: &[Buffer], intervals: &FxMap<u64, Option<Interval>>, becomes: &[Option<usize>]) {
++        use std::io::Write;
++        static SEQ: AtomicU64 = AtomicU64::new(0);
++        let Some(path) = std::env::var_os("LUMA_MEMSTATS") else { return };
++        let mut out = String::new();
++        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
++        // logical bytes, first/last use, writer, per buffer id
++        struct Use { class: u64, logical: u64, first: usize, last: usize, writer: Option<usize>, usage: BufferUsage }
++        let mut uses: FxMap<u64, Use> = FxMap::default();
++        for (at, cmd) in self.cmds.iter().enumerate() {
++            for arg in &cmd.args {
++                if let CmdArg::Storage { buffer, bytes, writable } = arg {
++                    let u = uses.entry(buffer.id()).or_insert(Use { class: buffer.size(), logical: 0, first: at, last: at, writer: None, usage: buffer.usage() });
++                    u.logical = u.logical.max(*bytes);
++                    u.last = at;
++                    if *writable && u.writer.is_none() { u.writer = Some(at); }
++                }
++            }
++        }
++        out += &format!("REC {seq} cmds={} transient_buffers={} retired_total={}\n", self.cmds.len(), transient.len(), self.retired.len());
++        for (at, cmd) in self.cmds.iter().enumerate() {
++            out += &format!("C {seq} {at} {} size={:?} wg={:?}\n", cmd.kernel.label, cmd.size, cmd.workgroups);
++        }
++        let trans_ids: FxSet<u64> = transient.iter().map(Buffer::id).collect();
++        let mut pre = 0u64; let mut post = 0u64;
++        let mut ev_class: Vec<(usize, i64)> = Vec::new();
++        let mut ev_log: Vec<(usize, i64)> = Vec::new();
++        for (n, b) in transient.iter().enumerate() {
++            let Some(Some((first, last))) = intervals.get(&b.id()) else { continue };
++            let u = &uses[&b.id()];
++            pre += b.size();
++            if becomes[n] == Some(n) { post += b.size(); }
++            let owner = becomes[n].map_or(0, |o| transient[o].id());
++            let w = u.writer.map_or("-".to_string(), |w| format!("{w}:{}", self.cmds[w].kernel.label));
++            out += &format!("T {seq} id={} class={} logical={} first={first} last={last} writer={w} owner={owner} usage={:?}\n", b.id(), b.size(), u.logical, u.usage);
++            ev_class.push((*first, b.size() as i64)); ev_class.push((*last + 1, -(b.size() as i64)));
++            ev_log.push((*first, u.logical as i64)); ev_log.push((*last + 1, -(u.logical as i64)));
++        }
++        let peak = |mut ev: Vec<(usize, i64)>| { ev.sort(); let (mut cur, mut pk) = (0i64, 0i64); for (_, d) in ev { cur += d; pk = pk.max(cur); } pk };
++        let (mut s_n, mut s_cls, mut p_n, mut p_cls) = (0, 0u64, 0, 0u64);
++        for (id, u) in &uses {
++            if trans_ids.contains(id) { continue; }
++            let fresh = self.fresh.contains(id);
++            out += &format!("{} {seq} id={id} class={} logical={} first={} last={} writer={} usage={:?}\n", if fresh { "S" } else { "P" }, u.class, u.logical, u.first, u.last, u.writer.map_or("-".to_string(), |w| format!("{w}:{}", self.cmds[w].kernel.label)), u.usage);
++            if fresh { s_n += 1; s_cls += u.class; } else { p_n += 1; p_cls += u.class; }
++        }
++        out += &format!("SUM {seq} transient_before_sharing_class_bytes={pre} transient_after_sharing_class_bytes={post} peak_live_class_bytes={} peak_live_logical_bytes={} fresh_survivors={s_n}/{s_cls} preexisting_bound={p_n}/{p_cls}\n", peak(ev_class), peak(ev_log));
++        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) { let _ = f.write_all(out.as_bytes()); }
++    }
++}
