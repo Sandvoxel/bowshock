@@ -560,7 +560,8 @@ pub fn drag_note(ctx: &Ctx, spec: &Spec) -> Option<String> {
     // a stack whose table has no power-on part for the motor it flies (the table was solved before the motor changed, or without one) takes the exit area out of the base drag
     let no_jet = || {
         stages.clone().any(|stage| {
-            drag_table(rocket, ctx, stage).is_ok_and(|t| t.power_on.is_empty()) && ctx.physics.cfd_plan(stage).is_some_and(|p| p.as_ref().is_ok_and(|p| p.motor.is_some()))
+            drag_table(rocket, ctx, stage).is_ok_and(|t| t.power_on.is_empty())
+                && ctx.physics.cfd_plan(stage).is_some_and(|p| p.as_ref().is_ok_and(|p| p.motor.is_some()))
         })
     };
     fallback
