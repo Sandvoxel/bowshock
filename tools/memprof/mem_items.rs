@@ -3,9 +3,10 @@
 //! back), for a chain of runners in one process.
 //!
 //! ```text
-//! mem_items --chain anf[,gf1,anfwedge,half,anfhalf,wedge,..] [--sub N] [--keep] [--iters N]
+//! mem_items --chain anf[@SUB][,gf1,anfwedge,half,anfhalf,wedge,..] [--sub N] [--keep] [--iters N] [--reclaim]
 //! ```
 //! `anf` (default) is `finned_table --anf --tier coarse`; `gf1` the G-F1 sector of `mem_stages`; `anfhalf` the ANF half domain at 2 degrees (Lift tier, `Between`); `half` the same with the G-F1 fins.
+//! `--reclaim` gives the idle pool back after every row (measures the steady state; without it the rows show the natural footprint, pool included).
 //! `--keep` holds every runner of the chain alive (as the product keeps a table's solver); without it each runner is dropped before the next is built.
 
 use bowshock_cfd::gpu::Precision;
@@ -35,15 +36,30 @@ fn smi() -> u64 {
     .unwrap_or(0)
 }
 
-fn row(ctx: &luma::Context, tag: &str) {
+static PEAK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Samples the process figure of nvidia-smi in the background and keeps the maximum since the last row.
+fn start_sampler() {
+    std::thread::spawn(|| loop {
+        PEAK.fetch_max(smi(), std::sync::atomic::Ordering::Relaxed);
+        std::thread::sleep(std::time::Duration::from_millis(40));
+    });
+}
+
+fn row(ctx: &luma::Context, tag: &str, reclaim: bool) {
     ctx.sync().ok();
     let (res, idle, n) = ctx.debug_mem();
     let before = smi();
-    ctx.debug_reclaim().ok();
-    ctx.sync().ok();
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    let after = smi();
-    println!("MEMITEM {tag:<64} smi {before:>6} MiB  luma resident {:>6} MiB  idle pool {:>6} MiB ({n} buffers)  smi after reclaim {after:>6} MiB", res >> 20, idle >> 20);
+    let peak = PEAK.swap(0, std::sync::atomic::Ordering::Relaxed).max(before);
+    let after = if reclaim {
+        ctx.debug_reclaim().ok();
+        ctx.sync().ok();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        smi()
+    } else {
+        0
+    };
+    println!("MEMITEM {tag:<64} smi {before:>6} MiB (peak since last row {peak:>6})  luma resident {:>6} MiB  idle pool {:>6} MiB ({n} buffers)  smi after reclaim {after:>6} MiB", res >> 20, idle >> 20);
     if let Some(p) = std::env::var_os("LUMA_MEMSTATS") {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
@@ -90,30 +106,37 @@ fn main() -> Result<(), String> {
     let sub = value("--sub").map(|v| v.parse::<usize>().map_err(|e| e.to_string())).transpose()?;
     let iters: usize = value("--iters").map_or(Ok(50), |v| v.parse().map_err(|e| format!("{e}")))?;
     let ctx = luma::default_context().map_err(|e| e.to_string())?;
-    row(&ctx, "start (context only)");
+    let reclaim = args.iter().any(|a| a == "--reclaim");
+    start_sampler();
+    row(&ctx, "start (context only)", reclaim);
     let mut kept: Vec<GpuRunner3> = Vec::new();
-    for which in chain.split(',') {
-        let case = case_of(which, 2.0, sub)?;
+    for item in chain.split(',') {
+        // `name@N`: `sub_iters` N for this item
+        let (which, sub_item) = match item.split_once('@') {
+            Some((w, n)) => (w, Some(n.parse::<usize>().map_err(|e| e.to_string())?)),
+            None => (item, sub),
+        };
+        let case = case_of(which, 2.0, sub_item)?;
         let mut r = GpuRunner3::new(&case, Precision::F32).map_err(|e| e.to_string())?;
         let cells = r.host.grid.ni * r.host.grid.nj * r.host.grid.nk;
         let persistent: usize = r.gpu.memory_report().iter().map(|(_, b)| b).sum();
         println!("MEMITEM == {which}: {cells} cells ({} x {} x {}), sub_iters {}, ledger of persistent arrays {} MiB ({:.0} B/cell)", r.host.grid.ni, r.host.grid.nj, r.host.grid.nk, case.numerics.implicit.sub_iters, persistent >> 20, persistent as f64 / cells as f64);
-        row(&ctx, &format!("{which}: after GpuRunner3::new"));
+        row(&ctx, &format!("{which}: after GpuRunner3::new"), reclaim);
         r.gpu.run_monitored(1).map_err(|e| e.to_string())?;
-        row(&ctx, &format!("{which}: after the compile (run_monitored(1))"));
+        row(&ctx, &format!("{which}: after the compile (run_monitored(1))"), reclaim);
         r.gpu.run_monitored(iters).map_err(|e| e.to_string())?;
-        row(&ctx, &format!("{which}: after run_monitored({iters})"));
+        row(&ctx, &format!("{which}: after run_monitored({iters})"), reclaim);
         r.wall_forces().map_err(|e| e.to_string())?;
-        row(&ctx, &format!("{which}: after wall_forces (eager)"));
+        row(&ctx, &format!("{which}: after wall_forces (eager)"), reclaim);
         if keep {
             kept.push(r);
         } else {
             drop(r);
-            row(&ctx, &format!("{which}: runner dropped"));
+            row(&ctx, &format!("{which}: runner dropped"), reclaim);
         }
     }
-    row(&ctx, "end of chain");
+    row(&ctx, "end of chain", reclaim);
     drop(kept);
-    row(&ctx, "all runners dropped");
+    row(&ctx, "all runners dropped", reclaim);
     Ok(())
 }
