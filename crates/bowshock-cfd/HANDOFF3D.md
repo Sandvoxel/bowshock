@@ -41,16 +41,24 @@ to about 4" and items 43-44.
   Coarse +4.6 / -1.9 / +0.1 % is a cancellation (stop rule +1.0 / +0.6 / +0.3, discretisation -2.0 / -5.0 / -6.6, model +5.6 / +2.6 / +6.5 points). The default stop
   (`drift_tol` 5e-3) is itself 0.3-1.0 % high. Do not tune the model to the Coarse CD0; 64 chord cells (+20 % cells, same iterations, `Settled`) bring it within 0.8 %
   of the converged value, but 96 or more chord cells stop on `MeanStationary` at Mach 0.766 / 1.85.
+- **2026-11-19 (branch `lumabump`):**
+  - Luma pinned at `231c986` (#9: in-recording reuse, exact-size sharing, `memory_stats`/`trim`). Trims around every trace and on a grid-shape change, a memory guard
+    (`device_bytes3`, refuses with a clear error; `BOWSHOCK_GPU_MEM_GUARD=off`), CFL snapshots on the host. Full-solve device peak 8.9 -> 4.1 GiB; 6.8 M cells now fit
+    on the 3090 (item 49; follow-up on Luma #9).
+  - **Coarse and Fine take 64 fin chord cells** (`COARSE_CHORD_CELLS`; Draft and Lift keep 32): full solve 254.5 -> **266.6 s** on the 3090 (544 s on the 3080 Laptop),
+    38 800 iterations. The Coarse CD0 is now the grid-converged model, +6.4 / +2.6 / +6.7 % over free flight at Mach 0.766 / 1.85 / 2.741 (fully turbulent).
+  - Prescribed transition, opt-in (`Case3::with_transition`, item 50): a laminar nose run of 6-9 calibres closes the gap on the smooth Finner model; the default stays
+    fully turbulent (painted, rail-buttoned rockets trip near the tip; it is the conservative side).
+  - Tunnel like-for-like (item 51): G-L1 tunnel points at `Re_L` 4e6 with the 0.63 sting; slope definition, Re and sting move subsonic CN_alpha by only about -1.5 %.
+  - G-S at 64 chord cells (item 52): 2 cells across the fin in both domains; Mach 0.8 is `FAIL KNOWN` (+2.3 / +4.6 %): the half domain's free fins carry an
+    asymmetric, oscillating trailing-edge wake the symmetric sector cannot; Mach 2 agrees to 0.003 %.
 - **Still open:**
-  - subsonic CN_alpha: +14 % against the tunnel at Mach 0.79 (G-L1 FAIL, 13 % band), +11 % against free flight (±14-17 % in the data). The excess is in the fin
-    lift and follows the blunt section: the same planform as a sharp 2 % double wedge gives +6.5 %; 64 chord cells, the y+ 15 fin stack and the Coarse tier do not
-    move it (subsonic branch, `incidence_rans --fin-section thin`). Literature (item 46): a thick trailing edge raises the subsonic lift slope in experiment too, and
-    peer RANS of the Finner is -14 to -7 % there, so this is at the steady-RANS / data limit; left: a 0-1 degree slope definition and a sting for the tunnel points;
-  - the Lift-tier gate CD0 at Mach 0.766 reads 0.547 (+7.7 %, G-F5 8 % band, PASS), 2-3 % above the production Coarse sector;
+  - subsonic CN_alpha: +13.4 % against the tunnel at Mach 0.79 in-plane (G-L1 FAIL, 13 % band), +11 % against free flight (±14-17 % in the data); at the steady-RANS /
+    data limit (items 46, 51);
+  - subsonic and supersonic CD0 +3-7 % fully turbulent on a smooth model (transition, item 50);
   - the Arcas supersonic fin increment (KNOWN: the test article had anchors, a lip and grit strips the model lacks).
-- **Gates on the merged tip** (`22ffd8e`; later commits are docs and a test speed-up; `tools/release_gates.sh`, local 3090 / remote 3080 Laptop, jobs
-  `1-20261118-043225-*`): wedge 61 PASS; fins G-F1, G-S and 14 G-F4 PASS, 4 G-F4 KNOWN (Arcas, item 37); lift G-F5 10/10 PASS, G-L1 28 PASS and 3 FAIL (subsonic
-  CN_alpha, above); gpucases all pass; CPU workspace (without gpu-cases) 1571 pass; clippy and rustfmt clean.
+- **Gates on `lumabump` with 64 chord cells** (local 3090 / remote 3080 Laptop): wedge 60 PASS; fins G-F1 and 14 G-F4 PASS, 4 G-F4 KNOWN (Arcas), G-S Mach 2 PASS,
+  Mach 0.8 FAIL KNOWN; lift G-F5 10/10 PASS, G-L1 30 PASS and 1 FAIL (above); gpucases all pass; CPU workspace (without gpu-cases) 1576 pass; clippy and rustfmt clean.
 
 ## 1. State on one screen
 

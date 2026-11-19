@@ -48,7 +48,11 @@ fn polar(p: [f64; 3]) -> (f64, f64) {
 }
 
 fn fin_boxes(g: &Grid3) -> Vec<(std::ops::Range<usize>, std::ops::Range<usize>, std::ops::Range<usize>)> {
-    g.solid.iter().filter(|b| matches!(g.part_of(b.i.start, b.j.start, b.k.start), Some(bowshock_cfd::grid3::Part::Fin(_)))).map(|b| (b.i.clone(), b.j.clone(), b.k.clone())).collect()
+    g.solid
+        .iter()
+        .filter(|b| matches!(g.part_of(b.i.start, b.j.start, b.k.start), Some(bowshock_cfd::grid3::Part::Fin(_))))
+        .map(|b| (b.i.clone(), b.j.clone(), b.k.clone()))
+        .collect()
 }
 
 fn describe(label: &str, g: &Grid3) {
@@ -142,7 +146,12 @@ fn run(args: &[String]) {
     }
     println!(
         "case {domain} N{n} M{mach} chord {:?} cfl_max {} sub {} drift_tol {} drift_block {} max_iter {}",
-        case.grid.fin_chord_cells, case.numerics.implicit.cfl_max, case.numerics.implicit.sub_iters, case.numerics.drift_tol, case.numerics.drift_block, case.numerics.max_iter
+        case.grid.fin_chord_cells,
+        case.numerics.implicit.cfl_max,
+        case.numerics.implicit.sub_iters,
+        case.numerics.drift_tol,
+        case.numerics.drift_block,
+        case.numerics.max_iter
     );
     let t = std::time::Instant::now();
     let mut s = Session::new(&case).expect("session");
@@ -243,8 +252,12 @@ fn per_fin(case: &Case3, n: u32, s: &Session) {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("grid") => grid_compare(args[1].parse().unwrap(), args.get(2).filter(|c| *c != "-").map(|c| c.parse().unwrap()), args.get(3).map_or(1, |a| a.parse().unwrap())),
+        Some("grid") => {
+            grid_compare(args[1].parse().unwrap(), args.get(2).filter(|c| *c != "-").map(|c| c.parse().unwrap()), args.get(3).map_or(1, |a| a.parse().unwrap()))
+        }
         Some("run") => run(&args[1..]),
-        _ => eprintln!("usage: gs_diag grid <n> [chord] | run <sector|half> <n> <mach> [--chord C] [--across A] [--iters N] [--drift-tol X] [--sub S] [--cfl C] [--ext]"),
+        _ => eprintln!(
+            "usage: gs_diag grid <n> [chord] | run <sector|half> <n> <mach> [--chord C] [--across A] [--iters N] [--drift-tol X] [--sub S] [--cfl C] [--ext]"
+        ),
     }
 }
