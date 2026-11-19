@@ -230,7 +230,7 @@ pub struct CfdTable {
     pub lift: Option<CfdLiftTable>,
     /// The drag with the motor jet on, when there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub power_on: Option<CfdPowerOn>,
+    pub power_on: Option<Box<CfdPowerOn>>,
 }
 
 impl CfdTable {

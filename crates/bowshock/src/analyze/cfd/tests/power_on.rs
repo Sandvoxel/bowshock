@@ -60,9 +60,9 @@ fn the_example_flies_higher_on_a_jet_that_lowers_the_base_drag() {
     let mut table = stored;
     let correction = fly(&rocket, Some(DragTable::from_cfd(&table, Some(&jet)))).0;
     let on = |base: f64| CfdPowerOn { jet, solved_at: 0, solve_seconds: 1.0, points: vec![point(0.5, base), point(0.9, base)], notes: Vec::new() };
-    table.power_on = Some(on(1.0));
+    table.power_on = Some(Box::new(on(1.0)));
     let all = fly(&rocket, Some(DragTable::from_cfd(&table, Some(&jet)))).0;
-    table.power_on = Some(on(0.25));
+    table.power_on = Some(Box::new(on(0.25)));
     let quarter = fly(&rocket, Some(DragTable::from_cfd(&table, Some(&jet)))).0;
     let other = bowshock_model::CfdJet { exit_diameter: jet.exit_diameter * 1.1, ..jet };
     let stale = fly(&rocket, Some(DragTable::from_cfd(&table, Some(&other)))).0;
@@ -130,7 +130,7 @@ pub(super) fn long_burn(rocket: &Rocket, table: &CfdTable, maker: &str, designat
         1e-5 * jet.exit_pressure_pa
     );
     let points = solve_ratios("long burn", &plan, table, grid);
-    let table = CfdTable { power_on: Some(CfdPowerOn { jet, solved_at: 0, solve_seconds: 0.0, points, notes: Vec::new() }), ..table.clone() };
+    let table = CfdTable { power_on: Some(Box::new(CfdPowerOn { jet, solved_at: 0, solve_seconds: 0.0, points, notes: Vec::new() })), ..table.clone() };
     print_apogee_effect(&format!("long burn {} {}", motor.manufacturer, motor.designation), &other, &table, Some(&jet));
 }
 

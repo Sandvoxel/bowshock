@@ -136,7 +136,13 @@ mod tests {
             points: vec![point(0.1), point(0.5), point(0.9), point(3.0)],
             grid: CfdGrid::Coarse,
             lift: None,
-            power_on: Some(CfdPowerOn { jet: jet(0.03), solved_at: 0, solve_seconds: 1.0, points: vec![on(0.5, 0.5), on(0.9, 0.75)], notes: Vec::new() }),
+            power_on: Some(Box::new(CfdPowerOn {
+                jet: jet(0.03),
+                solved_at: 0,
+                solve_seconds: 1.0,
+                points: vec![on(0.5, 0.5), on(0.9, 0.75)],
+                notes: Vec::new(),
+            })),
         }
     }
 

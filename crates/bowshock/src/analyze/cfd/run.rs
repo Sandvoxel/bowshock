@@ -837,7 +837,7 @@ pub(super) fn solve_sized(
         } else {
             let ratios: Vec<(f64, f64)> = power.iter().map(|p| (p.mach, p.base)).collect();
             table.notes.push(wording::power_on_note(&jet, &ratios));
-            table.power_on = Some(CfdPowerOn { jet, solved_at: now(), solve_seconds: seconds, points: power, notes: Vec::new() });
+            table.power_on = Some(Box::new(CfdPowerOn { jet, solved_at: now(), solve_seconds: seconds, points: power, notes: Vec::new() }));
         }
     }
     Ok(table)
