@@ -723,6 +723,29 @@ mod tests {
         assert_eq!(fine.grid.fin_cells_across, base.grid.fin_cells_across);
     }
 
+    /// Prescribed transition is opt-in: the default case and `with_transition(0, 0)` hand the solver no intermittency field (fully turbulent, bit-identical to the solver without the
+    /// feature); `with_transition(x_tr, f)` gives the near-wall cells of the body upstream of `x_tr` calibers `gamma = 0` and those downstream `1`, `RansOpts3::transition`.
+    #[test]
+    fn transition_is_opt_in_and_reaches_the_solver() {
+        let flow = WallFlow { re_c: 7.0e5, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0, sutherland: SUTHERLAND_SEA_LEVEL };
+        let base = Case3::sector(2.0, Case3::anf_body(), Case3::anf_fins(), Tier::Coarse(flow), 0);
+        assert_eq!(base.transition, None);
+        let gamma_of = |c: &Case3| {
+            let s = c.build_solver().unwrap();
+            let r = s.rans().expect("viscous");
+            let near: Vec<(f64, f64)> =
+                (0..s.grid.vol.len()).filter(|&i| r.dwall[i] < 0.02).map(|i| (s.grid.xc[i][0], r.gamma.get(i).copied().unwrap_or(1.0))).collect();
+            (r.gamma.is_empty(), near)
+        };
+        assert!(gamma_of(&base).0);
+        assert!(gamma_of(&base.clone().with_transition(0.0, 0.0)).0);
+        let (empty, near) = gamma_of(&base.with_transition(2.0, 0.0));
+        assert!(!empty);
+        assert!(near.iter().filter(|&&(x, _)| x < 1.5).all(|&(_, g)| g == 0.0), "the body wall cells upstream of the trip are laminar");
+        assert!(near.iter().filter(|&&(x, _)| x > 2.5 && x < 8.5).all(|&(_, g)| g == 1.0), "and the ones downstream turbulent");
+        assert!(near.iter().any(|&(x, _)| x < 1.5) && near.iter().any(|&(x, _)| x > 2.5 && x < 8.5));
+    }
+
     /// Every viscous 3D domain (half domain, sector) starts at [`DDADI_CFL_MAX`] with the DDADI line solve and the runners' rollback controller on; the wedge at the engine's
     /// `cfl_max` (50 below Mach 1, 20 above) with the plain factors; [`Case3::without_cfl_control`] takes the fixed [`VISCOUS_3D_CFL_MAX`] on a half domain or a sector (not the
     /// wedge), Euler keeps its own.
