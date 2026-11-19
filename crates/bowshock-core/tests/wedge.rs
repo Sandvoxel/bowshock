@@ -841,7 +841,10 @@ fn the_facades_steps_build_for_every_height_and_place() {
         for (place, aft) in [
             ("behind the nose", vec![AftSpec::Step { aft_diameter }, AftSpec::Tube { length: 0.8 }]),
             ("between tubes", vec![AftSpec::Tube { length: 0.4 }, AftSpec::Step { aft_diameter }, AftSpec::Tube { length: 0.6 }]),
-            ("before a boattail", vec![AftSpec::Tube { length: 0.4 }, AftSpec::Step { aft_diameter }, AftSpec::Transition { length: 0.1, aft_diameter: 0.9 * aft_diameter }]),
+            (
+                "before a boattail",
+                vec![AftSpec::Tube { length: 0.4 }, AftSpec::Step { aft_diameter }, AftSpec::Transition { length: 0.1, aft_diameter: 0.9 * aft_diameter }],
+            ),
             ("at the base", vec![AftSpec::Tube { length: 0.8 }, AftSpec::Step { aft_diameter }]),
         ] {
             let spec = BodySpec { nose, aft };

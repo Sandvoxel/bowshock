@@ -112,9 +112,11 @@ fn dir() -> PathBuf {
 }
 
 fn fixtures() -> Vec<Fixture> {
-    let mut paths: Vec<_> = std::fs::read_dir(dir()).unwrap().filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
+    let mut paths: Vec<_> =
+        std::fs::read_dir(dir()).unwrap().filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
     paths.sort();
-    let all: Vec<Fixture> = paths.iter().map(|p| serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap_or_else(|e| panic!("{}: {e}", p.display()))).collect();
+    let all: Vec<Fixture> =
+        paths.iter().map(|p| serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap_or_else(|e| panic!("{}: {e}", p.display()))).collect();
     match std::env::var("FLIGHTVAL_CASES") {
         Ok(list) => {
             let ids: Vec<&str> = list.split(',').map(str::trim).collect();
@@ -315,7 +317,16 @@ fn flight_validation() {
             };
             let t0 = Instant::now();
             let table = solve(&job, &Arc::new(AtomicBool::new(false)), |_| ()).unwrap_or_else(|e| panic!("{}: solve failed: {e}", f.id));
-            println!("{}: {engine} solved {} points + {} angle points on {} in {:.1} s wall ({:.1} s app); notes {:?}", f.id, table.points.len(), table.lift.as_ref().map_or(0, |l| l.points.len()), table.backend, t0.elapsed().as_secs_f64(), table.solve_seconds, table.notes);
+            println!(
+                "{}: {engine} solved {} points + {} angle points on {} in {:.1} s wall ({:.1} s app); notes {:?}",
+                f.id,
+                table.points.len(),
+                table.lift.as_ref().map_or(0, |l| l.points.len()),
+                table.backend,
+                t0.elapsed().as_secs_f64(),
+                table.solve_seconds,
+                table.notes
+            );
             write_table(&format!("{}.{engine}.json", f.id), &table);
         }
     }
@@ -388,7 +399,8 @@ fn stepped_rocket_solves_and_settles() {
     let f = fixtures().into_iter().find(|f| f.id == "rabia-short-fin-can").expect("the Rabia fixture");
     let mut stepped = f;
     stepped.nose.diameter = 3.0;
-    stepped.body = vec![SectionF { length: 71.5, fore_diameter: 3.126, aft_diameter: 3.126 }, SectionF { length: 12.5, fore_diameter: 3.19, aft_diameter: 3.19 }];
+    stepped.body =
+        vec![SectionF { length: 71.5, fore_diameter: 3.126, aft_diameter: 3.126 }, SectionF { length: 12.5, fore_diameter: 3.19, aft_diameter: 3.19 }];
     let v = vehicle(&stepped, &MotorDb::bundled()).unwrap();
     let p = plan_of(&v).expect("the 3D engine takes steps");
     let steps = p.body.aft.iter().filter(|a| matches!(a, solver::AftSpec::Step { .. })).count();
@@ -407,16 +419,33 @@ fn stepped_rocket_solves_and_settles() {
     };
     let t0 = Instant::now();
     let table = solve(&job, &Arc::new(AtomicBool::new(false)), |_| ()).expect("the stepped rocket solves");
-    println!("stepped: {} points + {} angle points on {} in {:.1} s wall; notes {:?}", table.points.len(), table.lift.as_ref().map_or(0, |l| l.points.len()), table.backend, t0.elapsed().as_secs_f64(), table.notes);
+    println!(
+        "stepped: {} points + {} angle points on {} in {:.1} s wall; notes {:?}",
+        table.points.len(),
+        table.lift.as_ref().map_or(0, |l| l.points.len()),
+        table.backend,
+        t0.elapsed().as_secs_f64(),
+        table.notes
+    );
     for p in &table.points {
-        println!("DRAG M {:.2} cd {:.5} friction {:.5} pressure {:.5} base {:.5} fins {:.5} other {:.5} {:?}", p.mach, p.cd, p.friction, p.pressure, p.base, p.fins, p.other, p.quality);
+        println!(
+            "DRAG M {:.2} cd {:.5} friction {:.5} pressure {:.5} base {:.5} fins {:.5} other {:.5} {:?}",
+            p.mach, p.cd, p.friction, p.pressure, p.base, p.fins, p.other, p.quality
+        );
     }
     for p in table.lift.iter().flat_map(|l| &l.points) {
         println!("LIFT M {:.2} alpha {:.0} CN {:.4} x_cp {:.4} {:?}", p.mach, p.alpha_deg, p.cn, p.x_cp, p.quality);
     }
-    let bad: Vec<_> = table.points.iter().filter(|p| !matches!(p.quality, CfdQuality::Converged | CfdQuality::Stationary)).map(|p| (p.mach, p.quality)).collect();
+    let bad: Vec<_> =
+        table.points.iter().filter(|p| !matches!(p.quality, CfdQuality::Converged | CfdQuality::Stationary)).map(|p| (p.mach, p.quality)).collect();
     assert!(bad.is_empty(), "points that did not settle: {bad:?}");
-    let lift_bad: Vec<_> = table.lift.iter().flat_map(|l| &l.points).filter(|p| !matches!(p.quality, CfdQuality::Converged | CfdQuality::Stationary)).map(|p| (p.mach, p.alpha_deg, p.quality)).collect();
+    let lift_bad: Vec<_> = table
+        .lift
+        .iter()
+        .flat_map(|l| &l.points)
+        .filter(|p| !matches!(p.quality, CfdQuality::Converged | CfdQuality::Stationary))
+        .map(|p| (p.mach, p.alpha_deg, p.quality))
+        .collect();
     assert!(lift_bad.is_empty(), "angle points that did not settle: {lift_bad:?}");
     write_table("stepped-rabia.3d.json", &table);
 }

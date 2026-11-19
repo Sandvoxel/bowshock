@@ -504,7 +504,9 @@ mod tests {
         assert!((s.area_ratio - (0.1f64 / 0.12).powi(2)).abs() < 1e-12);
         // a step is at least 45 degrees, however small, and a long one is a tenth of a diameter wide
         for aft_diameter in [0.101, 0.12, 0.15] {
-            let (b, _) = BodySpec { aft: vec![AftSpec::Tube { length: 0.3 }, AftSpec::Step { aft_diameter }, AftSpec::Tube { length: 0.3 }], ..spec() }.to_internal().unwrap();
+            let (b, _) = BodySpec { aft: vec![AftSpec::Tube { length: 0.3 }, AftSpec::Step { aft_diameter }, AftSpec::Tube { length: 0.3 }], ..spec() }
+                .to_internal()
+                .unwrap();
             assert!(b.segments[1].is_step() && b.segments[1].length <= 0.1 + 1e-12);
         }
         // a step down at the end adds its chamfer; no step, no height, a tall one, or a section shorter than the chamfer are refused
