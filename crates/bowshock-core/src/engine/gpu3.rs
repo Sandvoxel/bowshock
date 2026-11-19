@@ -46,7 +46,8 @@ fn make_room(ctx: &luma::Context, host: &Solver3, prec: Precision) -> Result<(),
 }
 
 /// Luma keeps 80 % of the device's memory as its budget for array data (`ContextOptions::memory_budget`), and the trace of a loop takes the rest: the 6.8 M-cell sector peaked at
-/// 22.1 GiB on the 24 GiB 3090 with a budget of 18.9 GiB (DESIGN3D item 49). The guard lets a solver use the device, 5/4 of the budget, less 5 % for the driver and the desktop.
+/// 14.7 GiB on the 24 GiB 3090 (22.1 GiB with Luma 231c986), the 4.8 M-cell one at 13.2 GiB (DESIGN3D item 53). The guard lets a solver use the device, 5/4 of the budget, less 5 % for
+/// the driver and the desktop.
 const DEVICE_PER_BUDGET: (u64, u64) = (5, 4);
 const DEVICE_USABLE: (u64, u64) = (19, 20);
 

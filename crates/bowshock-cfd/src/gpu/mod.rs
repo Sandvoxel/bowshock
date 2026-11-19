@@ -67,27 +67,31 @@ pub enum Precision {
     Extended,
 }
 
-/// Peak device bytes per cell of a [`GpuSolver3`] (f32, SST, `sub_iters` 2) and the other settings' factors, measured by the process figure of `nvidia-smi -lms 5` less the 256 MiB
-/// CUDA context, on the Finner sector at refinements 1 to 2.25 (0.69 to 6.8 M cells), the half domain (1.35 M) and G-F1, Luma 231c986 (DESIGN3D item 49): 2950 to 4091 B per cell
-/// (the power-of-two size classes of the line-solve scratch and the plan make it jump with the cell count); the largest is the bound. `sub_iters` 1 / 3 / 4 measured 93 / 101 / 102 % of
-/// `sub_iters` 2, double-float 143 %, Euler 85 %.
-const BYTES_PER_CELL3: f64 = 4100.0;
-const EXTENDED_FACTOR3: f64 = 1.45;
-const EULER_FACTOR3: f64 = 0.86;
-/// The CUDA context and the kernels of the process.
+/// Peak device memory of a [`GpuSolver3`] (f32, SST, `sub_iters` 2) from the cell count `n`: `CONTEXT + PER_CELL * n + PER_CLASS_CELL * n.next_power_of_two()`, and the other settings'
+/// factors. Measured by the process figure of `nvidia-smi -lms 5` (`fast_peak`: the trace of the loop) on the Finner sector at refinements 1 to 2.25 (0.69 to 6.8 M cells, 1.9 to 14.7 GiB),
+/// the half domain (1.35 M) on the 3090 and the 3080 Laptop, Luma 620c688 (DESIGN3D item 53). The exact-size state is 630 B per cell and the plan and the line-solve scratch of the loop are
+/// Luma's power-of-two size classes (the resident bytes of 825 k and 688 k cells are equal, those of 4.8 M and 6.8 M differ by the state only), so the peak is a staircase in the cells: the
+/// fit above reproduces the seven measurements from 0 to +15 % (+3 % at the 6.8 M-cell sector that fills its class, the dearest per cell); a linear bound would turn away grids just
+/// below a power of two that fit. `sub_iters` 1 / 5 measured 96 / 108 % of `sub_iters` 2 (3 % per sub-iteration above two), double-float 157 %, Euler 80 % at 2.16 M cells.
 const CONTEXT_BYTES3: u64 = 300 << 20;
+const BYTES_PER_CELL3: f64 = 850.0;
+const BYTES_PER_CLASS_CELL3: f64 = 1200.0;
+const SUB_ITER_FACTOR3: f64 = 0.03;
+const EXTENDED_FACTOR3: f64 = 1.6;
+const EULER_FACTOR3: f64 = 0.82;
 
 /// The device memory (bytes) a 3D solver of `cells` cells needs at its peak, which is the trace of its loop (persistent arrays, the plan Luma keeps and the intermediates of the step while
-/// they are recorded). Linear in the cells, an upper bound of everything measured; `sub_iters` above 3 and `Precision::Extended` raise it, a solver without the SST terms lowers it.
+/// they are recorded). A staircase in the cells (see above), an upper bound of everything measured; `sub_iters` above 2 and `Precision::Extended` raise it, a solver without the SST terms lowers it.
 pub fn device_bytes3(cells: usize, prec: Precision, sub_iters: usize, rans: bool) -> u64 {
-    let mut per_cell = BYTES_PER_CELL3 + 100.0 * sub_iters.saturating_sub(3) as f64;
+    let mut variable = BYTES_PER_CELL3 * cells as f64 + BYTES_PER_CLASS_CELL3 * cells.next_power_of_two() as f64;
+    variable *= 1.0 + SUB_ITER_FACTOR3 * sub_iters.saturating_sub(2) as f64;
     if prec == Precision::Extended {
-        per_cell *= EXTENDED_FACTOR3;
+        variable *= EXTENDED_FACTOR3;
     }
     if !rans {
-        per_cell *= EULER_FACTOR3;
+        variable *= EULER_FACTOR3;
     }
-    CONTEXT_BYTES3 + (cells as f64 * per_cell) as u64
+    CONTEXT_BYTES3 + variable as u64
 }
 
 /// Iterations of one `iterate_until_all` submission inside [`GpuSolver::run`]: the host waits once per `RUN_SYNC` iterations.
@@ -806,21 +810,28 @@ impl GpuSolver3 {
 mod tests {
     use super::*;
 
-    const GIB: f64 = (1u64 << 30) as f64;
+    const MIB: f64 = (1u64 << 20) as f64;
 
-    /// The estimate is linear in the cells and reproduces the measured peaks of item 49 from above: the Finner sector (688 k cells, 2.54 GiB), refinement 2.0 (4.8 M, 17.9 GiB) and
-    /// 2.25 (6.8 M, 21.9 GiB) in f32 with SST, and orders the settings: more `sub_iters`, double-float state and the SST terms cost, Euler saves.
+    /// The estimate reproduces the measured peaks of item 53 from above (the Finner sector at 0.69 to 6.8 M cells, 1.9 to 14.7 GiB, and the 1.35 M half domain, f32 with SST) within
+    /// 20 %, is a staircase in the cells (the power-of-two size classes of Luma) and orders the settings: more `sub_iters`, double-float state and the SST terms cost, Euler saves.
     #[test]
     fn the_device_estimate_bounds_the_measured_peaks() {
-        let est = |cells: usize, prec, sub, rans| device_bytes3(cells, prec, sub, rans) as f64 / GIB;
-        for (cells, peak_gib) in
-            [(687_960usize, 2.54 - 0.25), (1_350_048, 4.48 - 0.25), (2_155_608, 8.2 - 0.25), (4_823_000, 17.87 - 0.25), (6_802_432, 21.86 - 0.25)]
-        {
-            assert!(est(cells, Precision::F32, 2, true) >= peak_gib, "{cells} cells need {peak_gib} GiB, estimated {}", est(cells, Precision::F32, 2, true));
-            assert!(est(cells, Precision::F32, 2, true) < peak_gib * 1.4 + 0.5, "{cells} cells: the estimate is not far above the measurement");
+        let est = |cells: usize, prec, sub, rans| device_bytes3(cells, prec, sub, rans) as f64 / MIB;
+        // (cells, process peak MiB, `fast_peak`): the 3090 jobs `1-20261119-132953-27426` (688 k, 825 k, 1.35 M, 2.16 M, 4.8 M, 6.8 M), the 3080L `0-20261119-142733-17544` (3.29 M)
+        for (cells, peak) in [(687_960usize, 1890.0), (824_850, 1954.0), (1_350_048, 3490.0), (2_155_608, 6370.0), (3_290_496, 6562.0), (4_823_000, 13474.0), (6_802_432, 15010.0)] {
+            let e = est(cells, Precision::F32, 2, true);
+            assert!(e >= peak, "{cells} cells peak at {peak} MiB, estimated {e}");
+            assert!(e < peak * 1.2, "{cells} cells: the estimate {e} MiB is not within 20 % of the measurement {peak}");
         }
-        let (a, b) = (device_bytes3(1_000_000, Precision::F32, 2, true), device_bytes3(2_000_000, Precision::F32, 2, true));
-        assert_eq!(b - a, a - CONTEXT_BYTES3);
+        // double-float 9858, Euler 5056, `sub_iters` 5 / 1 6758 / 6048 MiB at 2.16 M cells
+        assert!(est(2_155_608, Precision::Extended, 2, true) >= 9858.0);
+        assert!(est(2_155_608, Precision::F32, 2, false) >= 5056.0);
+        assert!(est(2_155_608, Precision::F32, 5, true) >= 6758.0);
+        assert!(est(2_155_608, Precision::F32, 1, true) >= 6048.0);
+        // the staircase: the classes of 2^23 hold 4.8 M and 8.4 M cells at nearly the same estimate, one more cell above a power of two is a step
+        assert!(est(8_388_608, Precision::F32, 2, true) < 1.25 * est(4_823_000, Precision::F32, 2, true));
+        assert!(est(4_194_305, Precision::F32, 2, true) > 1.3 * est(4_194_304, Precision::F32, 2, true));
+        let a = device_bytes3(1_000_000, Precision::F32, 2, true);
         assert!(device_bytes3(1_000_000, Precision::F32, 5, true) > a);
         assert!(device_bytes3(1_000_000, Precision::Extended, 2, true) > a);
         assert!(device_bytes3(1_000_000, Precision::F32, 2, false) < a);
