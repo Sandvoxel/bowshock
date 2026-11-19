@@ -100,10 +100,15 @@ const fn pt(mach: f64, cn_per_deg: f64, cm_per_deg: f64) -> AnfPoint {
 /// - Supersonic (Mach 1.850, 2.364, 2.741, 2.970): the **single-fit** `C_X0` of the zero-cant shots, Dupuis & Hathaway, DREV-TM-9703 (DTIC ADA636861), **Table VIII**
 ///   (pdf pp. 44-47): shot DA95021308 (A08) Mach 1.850 0.567; DA95020907 (A07) 2.364 0.478; DA95020906 (A06) 2.741 0.400; the two zero-cant shots at the nominal
 ///   Mach 3 charge, DA95030603 (A05) 2.969 0.385 and DA95022205 (A03) 2.970 0.376, are one row here at their mean 0.3805 (2 % apart; the printed probable errors of C_X0 round to 0 %). The pooled table has no zero-cant point at Mach 3.147, so the gate point moved to Mach 2.970.
+/// - Transonic (Mach 1.056, 1.332): the same table's zero-cant single fits (pdf p. 44; image checked): shot DA95022010 Mach 1.056 `C_X0` 0.868 (`Cl_delta` -0.001) and shot DA95022009
+///   Mach 1.332 0.701 (`Cl_delta` -0.011, against 0.29-0.93 of every canted shot of the page: 1.058 / 1.116 / 1.254 / 1.377 with 0.288 / 0.562 / 0.340 / 0.925). The canted shot DA95022219 at Mach 1.058
+///   reads the same 0.868, which is the only evidence of the cant's size here (none at 1.056); the other canted shots, 0.854 at 1.116, 0.760 at 1.254, 0.708 at 1.377, are not used. The
+///   printed probable error of `C_X0` is 0 % in both. The 8 % gate band is kept: the source scatter does not justify a wider one, but the Mach spread is the limit of what it can resolve:
+///   the table's drag falls by 0.6 per Mach number between the two points (0.868 to 0.701), the Mach number of a shot is the mid-range one of its flight, so +-0.02 in Mach is +-1.4 %.
 /// - Subsonic (Mach 0.766): the free-flight pooled `C_X0` 0.508 of DRDC TM 2002-136 Table 7 (fin cant 2 degrees, standard error 1 %), read from the ARL-TR-6725 Fig. 5
 ///   replot (see the module documentation). It is the only subsonic gate point; the fin cant adds roll-induced drag the uncanted solver does not model.
 #[allow(clippy::approx_constant)] // 2.718 is a Mach number of the table, not e
-pub const CD0: &[(f64, f64)] = &[(0.766, 0.508), (1.850, 0.567), (2.364, 0.478), (2.741, 0.400), (2.970, 0.3805)];
+pub const CD0: &[(f64, f64)] = &[(0.766, 0.508), (1.056, 0.868), (1.332, 0.701), (1.850, 0.567), (2.364, 0.478), (2.741, 0.400), (2.970, 0.3805)];
 
 /// The sting-mounted wind-tunnel (DRDC WT, 0 degree roll) subsonic `C_D0` as replotted in Fig. 5 of Bhagwandin & Sahu, ARL-TR-6725 (DTIC ADA592550, p. 15, top left panel,
 /// filled markers): 0.467 at Mach 0.497 and 0.479 at Mach 0.692, read off the figure at 600 dpi to **+-0.015** (marker size and the 0.2 gridline spacing) and **+-0.02 in

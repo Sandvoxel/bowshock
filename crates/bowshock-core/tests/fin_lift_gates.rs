@@ -317,7 +317,7 @@ fn gate_f5_anf_cd0() {
                 let tunnel = anf::CD0_TUNNEL.iter().any(|p| p.0 == m);
                 let src = if m > 1.0 { "TM9703-T8-cant0" } else { "TM2002136-T7-ff" };
                 let id = format!("anf-M{m:.3}-{name}:cd0[{src}]");
-                if m > 1.0 {
+                if m > 1.5 {
                     let pooled = interp(anf::CD0_POOLED, m);
                     lines.info(
                         "G-F5",
@@ -339,7 +339,7 @@ fn gate_f5_anf_cd0() {
                             100.0 * (measured / cd - 1.0)
                         ),
                     );
-                } else if m > 1.0 {
+                } else if m > 1.5 {
                     lines.check_known(is_gate(kind, &case), "G-F5", &id, measured, cd, Band::Rel(0.08), "DESIGN3D-L-item-38");
                 } else {
                     lines.check(is_gate(kind, &case), "G-F5", &id, measured, cd, Band::Rel(0.08));
@@ -347,6 +347,56 @@ fn gate_f5_anf_cd0() {
             }
             Err(e) => {
                 println!("GATE G-F5 anf-M{m:.3}-{name} n/a n/a n/a FAIL ({e})");
+                lines.failed += 1;
+            }
+        }
+    }
+    lines.finish();
+}
+
+/// G-F5s: the ANF's zero-incidence drag on the four-fin **sector** (`Case3::sector`, the product's table path: `BOWSHOCK_FIN_TIER=coarse`, 64 chord cells) against the same
+/// `bowshock_reference::anf::CD0` references and band (8 %) as G-F5 (which runs the Lift half domain): the free stream is the sea-level one of the 30 mm model, the grid is sized for Mach
+/// 3.147 (as G-F5 and `finned_table --anf`). Total drag on `pi d^2 / 4` of the sector rocket (`DragParts::total`). The three Mach numbers below 2 are the ones the product's drag nodes
+/// need most (peak drag near Mach 1.1); the supersonic ones keep their KNOWN marker (DESIGN3D L item 38) as in G-F5.
+#[test]
+#[ignore = "validation: Coarse sector on the GPU (minutes per point)"]
+fn gate_f5s_anf_cd0_sector() {
+    let table: Vec<f64> = anf::CD0.iter().map(|p| p.0).collect();
+    let keep = machs(&table);
+    let items: Vec<(f64, f64)> = anf::CD0.iter().copied().filter(|p| keep.contains(&p.0)).collect();
+    let runs = par_map(&items, |&(m, _)| {
+        let case = Case3::sector(m, Case3::anf_body(), Case3::anf_fins(), tier(tier_kind(), anf_flow(3.147)), 0);
+        Session::new(&case).and_then(|mut s| s.run(&case, false)).map(|r| (r, case))
+    });
+    let kind = tier_kind();
+    let mut lines = Lines::default();
+    for (&(m, cd), r) in items.iter().zip(runs) {
+        match r {
+            Ok((r, case)) => {
+                let measured = case.body.nose_to_largest_area() * r.parts.total;
+                lines.info(
+                    "G-F5s",
+                    &format!("anf-M{:.3}-sector:parts", m),
+                    &format!(
+                        "cd {measured:.4} ({}), body pressure {:+.4} base {:+.4} fin pressure {:+.4} friction body {:.4} fins {:.4}",
+                        r.stop(),
+                        r.body_pressure(),
+                        r.parts.base,
+                        r.fin_pressure(),
+                        r.parts.body_friction(),
+                        r.fin_friction.unwrap_or(f64::NAN)
+                    ),
+                );
+                let src = if m > 1.0 { "TM9703-T8-cant0" } else { "TM2002136-T7-ff" };
+                let id = format!("anf-M{m:.3}-sector:cd0[{src}]");
+                if m > 1.5 {
+                    lines.check_known(is_gate(kind, &case), "G-F5s", &id, measured, cd, Band::Rel(0.08), "DESIGN3D-L-item-38");
+                } else {
+                    lines.check(is_gate(kind, &case), "G-F5s", &id, measured, cd, Band::Rel(0.08));
+                }
+            }
+            Err(e) => {
+                println!("GATE G-F5s anf-M{m:.3}-sector n/a n/a n/a FAIL ({e})");
                 lines.failed += 1;
             }
         }
