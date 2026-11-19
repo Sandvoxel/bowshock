@@ -115,8 +115,12 @@ fn fixtures() -> Vec<Fixture> {
     let mut paths: Vec<_> =
         std::fs::read_dir(dir()).unwrap().filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
     paths.sort();
-    let all: Vec<Fixture> =
+    let mut all: Vec<Fixture> =
         paths.iter().map(|p| serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap_or_else(|e| panic!("{}: {e}", p.display()))).collect();
+    // a probe: `FLIGHTVAL_TIP_IN=0.5` gives every fin that tip chord (in)
+    if let Some(tip) = std::env::var("FLIGHTVAL_TIP_IN").ok().and_then(|v| v.parse().ok()) {
+        all.iter_mut().for_each(|f| f.fins.tip_chord = tip);
+    }
     match std::env::var("FLIGHTVAL_CASES") {
         Ok(list) => {
             let ids: Vec<&str> = list.split(',').map(str::trim).collect();
@@ -406,8 +410,8 @@ fn print_table(fixtures: &[Fixture], db: &MotorDb) {
 }
 
 /// A rocket with two real diameter steps solved on the GPU by the 3D engine (DESIGN3D item 56, `BOWSHOCK_ENGINE=3d`): the Rabia short-fin-can rocket with a 3.0 in nose behind
-/// which the 3.126 in airframe starts (a shoulder step) and with its 3.19 in fin can stepping out abruptly 12.5 in from the base (the fins stand on the can, behind the step)
-/// instead of the conical shoulder. Prints the table and the point qualities; every point must have settled or converged, none failed.
+/// which the 3.126 in airframe starts (a shoulder step) and with its 3.19 in fin can stepping out abruptly 6 in (2 calibres) ahead of the fin root instead of the conical shoulder
+/// 1 in ahead of it. Prints the table and the point qualities; every point must have settled or converged, none failed.
 /// `tools/gpuq/gpuq submit --host any --name stepped -- env BOWSHOCK_ENGINE=3d cargo nextest run --release -p bowshock stepped_rocket_solves_and_settles --run-ignored only --no-capture`.
 #[test]
 #[ignore = "BOWSHOCK_ENGINE=3d: solves a stepped rocket's table and angles on the GPU"]
@@ -417,7 +421,7 @@ fn stepped_rocket_solves_and_settles() {
     let mut stepped = f;
     stepped.nose.diameter = 3.0;
     stepped.body =
-        vec![SectionF { length: 71.5, fore_diameter: 3.126, aft_diameter: 3.126 }, SectionF { length: 12.5, fore_diameter: 3.19, aft_diameter: 3.19 }];
+        vec![SectionF { length: 66.25, fore_diameter: 3.126, aft_diameter: 3.126 }, SectionF { length: 17.75, fore_diameter: 3.19, aft_diameter: 3.19 }];
     let v = vehicle(&stepped, &MotorDb::bundled()).unwrap();
     let p = plan_of(&v).expect("the 3D engine takes steps");
     let steps = p.body.aft.iter().filter(|a| matches!(a, solver::AftSpec::Step { .. })).count();
