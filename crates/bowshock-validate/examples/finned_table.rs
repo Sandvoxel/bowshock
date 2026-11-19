@@ -2,7 +2,7 @@
 //! Coarse tier, the Draft tier (`--tier draft`) or the Draft tier's safe subsonic variant (`--tier draft-safe`: `Case3::draft_subsonic`), `GpuRunner3` in f32, to the case's stop rule.
 //!
 //! ```text
-//! cargo run --release -p bowshock-validate --example finned_table -- --tier coarse|fine|draft|draft-safe --mach 2.0 [--anf] [--wedge] [--tw RATIO] [--gf1] [--fin-cells N] [--chord N] [--refine S] [--grid-only] [--drift-tol X] [--x-tr X] [--fin-tr F] [--te-to-base X (with --anf)] [--sub N] [--max-iter N] [--ddadi OMEGA] [--dis-boost DELTA] [--history-every N] [--dt-mode sum|min]
+//! cargo run --release -p bowshock-validate --example finned_table -- --tier coarse|fine|draft|draft-safe --mach 2.0 [--anf] [--wedge] [--tw RATIO] [--gf1] [--fin-cells N] [--chord N] [--refine S] [--mach-max M] [--grid-only] [--drift-tol X] [--x-tr X] [--fin-tr F] [--te-to-base X (with --anf)] [--sub N] [--max-iter N] [--ddadi OMEGA] [--dis-boost DELTA] [--history-every N] [--dt-mode sum|min]
 //! ```
 //!
 //! One `TABLE` line: tier, Mach number, grid, cells, iterations, stop reason, wall seconds (the whole run, set-up included), ms per iteration, CD total and its parts (coefficients on pi/4
@@ -48,7 +48,9 @@ fn main() -> Result<(), String> {
     let ks_body: f64 = value("--ks-body").map_or(Ok(0.0), |v| v.parse()).map_err(|e| format!("--ks-body: {e}"))?;
     let ks_fin: f64 = value("--ks-fin").map_or(Ok(0.0), |v| v.parse()).map_err(|e| format!("--ks-fin: {e}"))?;
     // the table's grid is sized for its highest Mach number (3) at the example rocket's Reynolds number (120 m)
-    let flow = WallFlow { re_c: 1.7e6, mach_max: 3.0, ks_body, ks_fin, sutherland: SUTHERLAND_SEA_LEVEL };
+    // `--mach-max M`: the Mach number the walls are sized for (default 3: the app's shared grid; the node's own Mach number is the per-point grid, DESIGN3D item 57)
+    let mach_max: f64 = value("--mach-max").map_or(Ok(3.0), |v| v.parse()).map_err(|e| format!("--mach-max: {e}"))?;
+    let flow = WallFlow { re_c: 1.7e6, mach_max, ks_body, ks_fin, sutherland: SUTHERLAND_SEA_LEVEL };
     let tier = match tier_name.as_str() {
         "coarse" => Tier::Coarse(flow),
         "fine" => Tier::Fine(flow),
@@ -157,7 +159,7 @@ fn main() -> Result<(), String> {
         let g = g.map_err(|e| e.to_string())?;
         let b = case.grid.base.as_ref().ok_or("--grid-only needs the base-wake grid")?;
         println!(
-            "GRID {tier_name} M{mach} refine {refine}: {}x{}x{} = {} cells; base n_up {} n_nose {} n_seg {:?} n_wake {} n_gap {} nj_out {} dx_tip {:.5} dr_wall {:.3e}; chord cells {:?}; fin stack {:?}; fin cells across {}",
+            "GRID {tier_name} M{mach} refine {refine}: {}x{}x{} = {} cells; base n_up {} n_nose {} n_seg {:?} n_wake {} n_gap {} nj_out {} dx_tip {:.5} dr_wall {:.3e} x_up {:.1} x_down {:.1} r_far {:.1}; chord cells {:?}; fin stack {:?}; fin cells across {}",
             g.ni,
             g.nj,
             g.nk,
@@ -170,6 +172,9 @@ fn main() -> Result<(), String> {
             b.nj_out,
             b.dx_tip,
             b.dr_wall,
+            b.x_up,
+            b.x_down,
+            b.r_far,
             case.grid.fin_chord_cells,
             case.grid.fin_stack,
             case.grid.fin_cells_across
