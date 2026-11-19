@@ -275,10 +275,10 @@ impl Aero {
                 other: scale(end.other, tab.protuberances, at_end.protuberances),
             }
         });
-        let jet = jet.unwrap_or(PowerRatio { mach: m, friction: 1.0, pressure: 1.0, base: 1.0, fins: 1.0 });
+        let jet = jet.unwrap_or(PowerRatio { mach: m, friction: 1.0, pressure: 1.0, base: 1.0 });
         let friction = (t.friction * jet.friction + now.friction - tab.friction).max(0.0);
         let pressure = (t.pressure * jet.pressure + now.pressure - tab.pressure).max(0.0);
-        let fins = (t.fins * jet.fins + now.fins - tab.fins).max(0.0);
+        let fins = (t.fins + now.fins - tab.fins).max(0.0);
         let protuberances = (t.other + now.protuberances - tab.protuberances).max(0.0);
         let base = if tab.base < 1e-12 { t.base * jet.base } else { t.base * jet.base * now.base / tab.base }.max(0.0);
         DragBreakdown { friction, pressure, base, fins, protuberances, total: friction + pressure + base + fins + protuberances }

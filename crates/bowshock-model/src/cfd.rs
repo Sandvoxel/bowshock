@@ -104,25 +104,24 @@ impl CfdJet {
     }
 }
 
-/// The zero-lift drag of one Mach number solved with the motor jet on: the same parts as [`CfdPoint`] (reference area of the vehicle; `base` is the base annulus around the nozzle
-/// exit, whose pressure force is the jet's, not drag; the parts the solver does not model are not repeated here, the power-off point's stay).
+/// What the motor jet does to the drag at one Mach number: the parts of the axisymmetric body (no fins, the wedge of the 3D engine) solved with the jet on over the same
+/// parts solved with it off, both on the same grid. Ratios, because the jet changes the base flow and the base wake of the body alone carries that change to the finned rocket
+/// (a finned sector with the jet in it costs 1.5 to 2.5 times the table's whole per-point time, the body alone about a tenth of it; DESIGN3D item 58).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CfdPowerPoint {
     /// Mach number.
     pub mach: f64,
-    /// Skin friction of the body.
+    /// Skin friction, power on over power off.
     pub friction: f64,
-    /// Pressure drag of the nose and the aft body.
+    /// Pressure drag of the nose and the aft body, power on over power off.
     pub pressure: f64,
-    /// Base drag of the annulus around the exit.
+    /// Base drag: the annulus around the nozzle exit with the jet on (the exit's pressure force is the jet's, not drag) over the whole base without it.
     pub base: f64,
-    /// Fin drag.
-    pub fins: f64,
-    /// Trust in the point.
+    /// Trust in the point (the worse of the two runs).
     pub quality: CfdQuality,
 }
 
-/// The power-on part of a drag table: the points solved with the jet of the stack's motor. It rides on the table like the 3D stability solve ([`CfdLiftTable`]): kept when a new drag table
+/// The power-on part of a drag table: the jet of the stack's motor at a few Mach numbers. It rides on the table like the 3D stability solve ([`CfdLiftTable`]): kept when a new drag table
 /// replaces it, and fresh while its [`jet`](CfdPowerOn::jet) is the one the motor gives now.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CfdPowerOn {
@@ -144,7 +143,7 @@ impl CfdPowerOn {
         !self.points.is_empty()
             && self.solve_seconds.is_finite()
             && self.points.windows(2).all(|w| w[0].mach < w[1].mach)
-            && self.points.iter().all(|p| [p.mach, p.friction, p.pressure, p.base, p.fins].iter().all(|v| v.is_finite()))
+            && self.points.iter().all(|p| [p.mach, p.friction, p.pressure, p.base].iter().all(|v| v.is_finite() && *v >= 0.0))
     }
 }
 

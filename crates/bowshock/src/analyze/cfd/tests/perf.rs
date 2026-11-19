@@ -354,7 +354,8 @@ fn engine3d_finned_timing() {
     let shared = std::env::var("BOWSHOCK_SHARED_GRID").is_ok();
     // the power-on part of the app's table (the motor's jet at the nodes of `POWER_ON_NODES`) is part of the full solve; BOWSHOCK_NO_POWER_ON=1 leaves it out (the baseline)
     let jet = plan.jet();
-    let power_on = if plan.motor.is_some() && std::env::var_os("BOWSHOCK_NO_POWER_ON").is_none() { power_on_nodes(&nodes((0.1, 3.0)).unwrap()) } else { Vec::new() };
+    let power_on =
+        if plan.motor.is_some() && std::env::var_os("BOWSHOCK_NO_POWER_ON").is_none() { power_on_nodes(&nodes((0.1, 3.0)).unwrap()) } else { Vec::new() };
     let job = Job {
         plan,
         altitude: 120.0,
@@ -396,18 +397,18 @@ fn engine3d_finned_timing() {
     if let Some(on) = &table.power_on {
         println!("JET {:?}", on.jet);
         for p in &on.points {
-            println!(
-                "POWER M {:.2} friction {:.5} pressure {:.5} base {:.5} fins {:.5} {:?} (power off base {:.5})",
-                p.mach,
-                p.friction,
-                p.pressure,
-                p.base,
-                p.fins,
-                p.quality,
-                table.points.iter().find(|o| (o.mach - p.mach).abs() < 1e-9).map_or(f64::NAN, |o| o.base)
-            );
+            println!("POWER M {:.2} friction x{:.4} pressure x{:.4} base x{:.4} {:?}", p.mach, p.friction, p.pressure, p.base, p.quality);
         }
         super::power_on::print_apogee_effect("example", &rocket, &table, jet.as_ref());
+        // the same ratios on the Draft grid (BOWSHOCK_NO_DRAFT_RATIOS=1 leaves it out): what a cheaper power-on solve would give
+        if std::env::var_os("BOWSHOCK_NO_DRAFT_RATIOS").is_none() {
+            let plan = super::plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+            super::power_on::solve_ratios("example", &plan, &table, CfdGrid::Draft);
+        }
+        // the long-burn case (BOWSHOCK_NO_LONG_BURN=1 leaves it out): the same rocket with a 6.5 s motor, its jet at the same nodes, on the example's table
+        if std::env::var_os("BOWSHOCK_NO_LONG_BURN").is_none() {
+            super::power_on::long_burn(&rocket, &table, "RATT", "I90L", table.grid);
+        }
     }
     println!("| dim | Mach | alpha | cells | iters (stop/exec) | stop | build | ctx | upload | reset | first chunk | rest chunks n | rest s | ms/iter | monitor forces | final |");
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");

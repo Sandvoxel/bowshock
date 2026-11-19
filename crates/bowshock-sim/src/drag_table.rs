@@ -19,7 +19,7 @@ pub struct DragTablePoint {
     pub other: f64,
 }
 
-/// What the motor jet does to the drag parts at one Mach node: each part solved with the jet on over the same part solved with it off (1 where the part has no drag to scale).
+/// What the motor jet does to the drag parts at one Mach node: each part solved with the jet on over the same part solved with it off (the fins' drag is not scaled).
 #[derive(Clone, Debug, PartialEq)]
 pub struct PowerRatio {
     /// Mach number of the node.
@@ -28,10 +28,8 @@ pub struct PowerRatio {
     pub friction: f64,
     /// Pressure drag of the bodies.
     pub pressure: f64,
-    /// Base drag (the annulus around the nozzle exit with the jet on, over the whole base without it).
+    /// Base drag (the annulus around the nozzle exit with the jet on over the whole base without it).
     pub base: f64,
-    /// Fin drag.
-    pub fins: f64,
 }
 
 /// Zero-lift drag parts per Mach (ascending, at least one point) solved at the ISA `altitude` (m), which sets their Reynolds number.
@@ -59,21 +57,7 @@ impl DragTable {
             altitude: t.altitude,
         };
         if let Some(on) = t.power_on.as_ref().filter(|on| jet.is_some_and(|j| j.same_as(&on.jet))) {
-            let ratio = |on: f64, off: f64| if off.abs() > 1e-9 && on.is_finite() { on / off } else { 1.0 };
-            table.power_on = on
-                .points
-                .iter()
-                .filter_map(|p| {
-                    let off = table.inside(p.mach)?;
-                    Some(PowerRatio {
-                        mach: p.mach,
-                        friction: ratio(p.friction, off.friction),
-                        pressure: ratio(p.pressure, off.pressure),
-                        base: ratio(p.base, off.base),
-                        fins: ratio(p.fins, off.fins),
-                    })
-                })
-                .collect();
+            table.power_on = on.points.iter().map(|p| PowerRatio { mach: p.mach, friction: p.friction, pressure: p.pressure, base: p.base }).collect();
         }
         table
     }
@@ -91,7 +75,7 @@ impl DragTable {
         let (a, b) = (&self.power_on[i - 1], &self.power_on[i]);
         let t = ((mach - a.mach) / (b.mach - a.mach)).clamp(0.0, 1.0);
         let l = |x: f64, y: f64| x + (y - x) * t;
-        Some(PowerRatio { mach, friction: l(a.friction, b.friction), pressure: l(a.pressure, b.pressure), base: l(a.base, b.base), fins: l(a.fins, b.fins) })
+        Some(PowerRatio { mach, friction: l(a.friction, b.friction), pressure: l(a.pressure, b.pressure), base: l(a.base, b.base) })
     }
 
     /// Parts linearly interpolated at `mach`, or `None` outside the nodes.
@@ -138,7 +122,7 @@ mod tests {
             quality: CfdQuality::Converged,
             restart: None,
         };
-        let on = |mach: f64, base: f64| CfdPowerPoint { mach, friction: 0.1, pressure: 0.1, base, fins: 0.11, quality: CfdQuality::Converged };
+        let on = |mach: f64, base: f64| CfdPowerPoint { mach, friction: 1.0, pressure: 1.1, base, quality: CfdQuality::Converged };
         CfdTable {
             key: 1,
             geometry: 1,
@@ -152,16 +136,16 @@ mod tests {
             points: vec![point(0.1), point(0.5), point(0.9), point(3.0)],
             grid: CfdGrid::Coarse,
             lift: None,
-            power_on: Some(CfdPowerOn { jet: jet(0.03), solved_at: 0, solve_seconds: 1.0, points: vec![on(0.5, 0.1), on(0.9, 0.15)], notes: Vec::new() }),
+            power_on: Some(CfdPowerOn { jet: jet(0.03), solved_at: 0, solve_seconds: 1.0, points: vec![on(0.5, 0.5), on(0.9, 0.75)], notes: Vec::new() }),
         }
     }
 
     #[test]
-    fn the_power_on_part_is_taken_as_ratios_to_the_power_off_parts_when_the_jet_is_the_motors() {
+    fn the_power_on_part_is_taken_when_the_jet_is_the_motors() {
         let t = DragTable::from_cfd(&table(), Some(&jet(0.03)));
         assert_eq!(t.power_on.len(), 2);
         assert!((t.power_on[0].base - 0.5).abs() < 1e-12 && (t.power_on[1].base - 0.75).abs() < 1e-12);
-        assert!((t.power_on[0].fins - 1.1).abs() < 1e-12 && (t.power_on[0].friction - 1.0).abs() < 1e-12);
+        assert!((t.power_on[0].pressure - 1.1).abs() < 1e-12 && (t.power_on[0].friction - 1.0).abs() < 1e-12);
         // linear between the nodes, held outside them
         let r = t.power_ratio(0.7).unwrap();
         assert!((r.base - 0.625).abs() < 1e-12);
@@ -174,10 +158,5 @@ mod tests {
         assert!(DragTable::from_cfd(&table(), Some(&jet(0.04))).power_on.is_empty());
         assert!(DragTable::from_cfd(&table(), None).power_on.is_empty());
         assert!(DragTable::from_cfd(&table(), None).power_ratio(0.5).is_none());
-        // a node outside the table has no power-off part to compare with
-        let mut t = table();
-        t.points.truncate(3);
-        t.power_on.as_mut().unwrap().points.push(CfdPowerPoint { mach: 2.0, friction: 0.1, pressure: 0.1, base: 0.1, fins: 0.1, quality: CfdQuality::Converged });
-        assert_eq!(DragTable::from_cfd(&t, Some(&jet(0.03))).power_on.len(), 2);
     }
 }

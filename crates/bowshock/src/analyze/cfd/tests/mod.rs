@@ -10,8 +10,8 @@ mod diag13;
 mod interp;
 mod openrocket;
 mod perf;
-mod power_on;
 mod plan;
+mod power_on;
 mod run;
 
 const EXAMPLE: &[u8] = include_bytes!("../../../../assets/examples/hpr_l1_cert.bowshock");
