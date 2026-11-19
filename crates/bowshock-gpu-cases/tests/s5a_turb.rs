@@ -581,7 +581,7 @@ fn cases() -> Vec<Case> {
     // the sector (rough cells, `i` family walls) with the three corrections that differ most
     let block = [SolidBox { i: 3..5, j: 0..3, k: 2..4 }];
     let (s, bc) = box_sides(false);
-    for comp in [Compressibility::Sarkar, Compressibility::Wilcox, Compressibility::Zeman, Compressibility::WilcoxShear] {
+    for comp in [Compressibility::Off, Compressibility::Sarkar, Compressibility::Wilcox, Compressibility::Zeman, Compressibility::WilcoxShear] {
         v.push(
             Case::new(
                 "box, Inf ghosts, law_strain",
@@ -599,7 +599,7 @@ fn cases() -> Vec<Case> {
             .with_compressibility(comp),
         );
     }
-    for comp in [Compressibility::Wilcox, Compressibility::WilcoxShear] {
+    for comp in [Compressibility::Off, Compressibility::Wilcox, Compressibility::WilcoxShear] {
         let c = sector_case(true, 4, 6);
         v.push(
             Case::new(
