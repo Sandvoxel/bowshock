@@ -381,9 +381,9 @@ impl Case {
             let a2 = GAMMA * w[4] / w[0];
             let mt = 0.1 * 15f64.powf(((c * 7919) % nc) as f64 / nc as f64);
             self.turb[c][0] = 0.5 * mt * mt * a2;
-            // `omega` reset with it so that `mu_t / mu` stays about 50 (a random `omega` of 1 to 100 under `k` of order 1 caps `mu_t` at `1e5 / re_c`: a diffusion-dominated, ill-conditioned
+            // `omega` reset with it so that `mu_t / mu` stays about 2 (the plain cases' level) (a random `omega` of 1 to 100 under `k` of order 1 caps `mu_t` at `1e5 / re_c`: a diffusion-dominated, ill-conditioned
             // line system whose f32 left-hand side amplifies its round-off 10 times in the updated scalars, which says nothing about the corrections)
-            self.turb[c][1] = self.turb[c][0] / 50.0 * w[0] / self.mu[c];
+            self.turb[c][1] = self.turb[c][0] / 2.0 * w[0] / self.mu[c];
             self.mu_t[c] = model.eddy_viscosity(&CellIn {
                 rho: w[0],
                 nu: self.mu[c] / w[0],
