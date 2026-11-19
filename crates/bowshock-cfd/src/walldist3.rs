@@ -138,21 +138,29 @@ pub fn point_triangle_dist2(p: [f64; 3], a: [f64; 3], b: [f64; 3], c: [f64; 3]) 
     dot(d, d)
 }
 
-/// The non-degenerate triangles `(0, 1, 2)` and `(0, 2, 3)` of every wall quad.
-fn triangles(faces: &[WallFace]) -> Vec<[[f64; 3]; 3]> {
+/// The non-degenerate triangles `(0, 1, 2)` and `(0, 2, 3)` of every wall quad, each with the index of its face in `faces`.
+fn triangles_tagged(faces: &[WallFace]) -> Vec<Tri> {
     let mut out = Vec::with_capacity(2 * faces.len());
-    for f in faces {
+    for (face, f) in faces.iter().enumerate() {
         let q = &f.corners;
         for t in [[q[0], q[1], q[2]], [q[0], q[2], q[3]]] {
             let (u, v) = (sub(t[1], t[0]), sub(t[2], t[0]));
             let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
             if dot(n, n) > 1e-300 {
-                out.push(t);
+                out.push((t, face as u32));
             }
         }
     }
     out
 }
+
+/// The non-degenerate triangles of every wall quad (see [`triangles_tagged`]).
+fn triangles(faces: &[WallFace]) -> Vec<[[f64; 3]; 3]> {
+    triangles_tagged(faces).into_iter().map(|(t, _)| t).collect()
+}
+
+/// A wall triangle and the index of the wall face it belongs to.
+type Tri = ([[f64; 3]; 3], u32);
 
 /// A node of the hierarchy: the box and either the two children (`count == 0`) or the triangle range `start..start + count`.
 #[derive(Clone, Copy)]
@@ -168,7 +176,7 @@ struct Node {
 /// Bounding-volume hierarchy over the wall triangles; [`WallBvh::distance`] is the exact distance of a point to the nearest one.
 pub struct WallBvh {
     nodes: Vec<Node>,
-    tris: Vec<[[f64; 3]; 3]>,
+    tris: Vec<Tri>,
 }
 
 const LEAF: usize = 4;
@@ -176,7 +184,7 @@ const LEAF: usize = 4;
 impl WallBvh {
     /// Hierarchy of the triangles of `faces` (empty hierarchy: every distance is infinite).
     pub fn new(faces: &[WallFace]) -> WallBvh {
-        let mut tris = triangles(faces);
+        let mut tris = triangles_tagged(faces);
         let mut nodes = Vec::new();
         if !tris.is_empty() {
             let n = tris.len();
@@ -185,10 +193,10 @@ impl WallBvh {
         WallBvh { nodes, tris }
     }
 
-    fn build(nodes: &mut Vec<Node>, tris: &mut [[[f64; 3]; 3]], start: usize, end: usize) -> u32 {
+    fn build(nodes: &mut Vec<Node>, tris: &mut [Tri], start: usize, end: usize) -> u32 {
         let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
         let (mut clo, mut chi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
-        for t in &tris[start..end] {
+        for (t, _) in &tris[start..end] {
             let cen = [(t[0][0] + t[1][0] + t[2][0]) / 3.0, (t[0][1] + t[1][1] + t[2][1]) / 3.0, (t[0][2] + t[1][2] + t[2][2]) / 3.0];
             for a in 0..3 {
                 for v in t {
@@ -206,7 +214,7 @@ impl WallBvh {
         }
         let axis = (0..3).max_by(|&x, &y| (chi[x] - clo[x]).total_cmp(&(chi[y] - clo[y]))).unwrap();
         let mid = (start + end) / 2;
-        let key = |t: &[[f64; 3]; 3]| t[0][axis] + t[1][axis] + t[2][axis];
+        let key = |t: &Tri| t.0[0][axis] + t.0[1][axis] + t.0[2][axis];
         tris[start..end].select_nth_unstable_by(mid - start, |p, q| key(p).total_cmp(&key(q)));
         let l = Self::build(nodes, tris, start, mid);
         let r = Self::build(nodes, tris, mid, end);
@@ -229,10 +237,16 @@ impl WallBvh {
 
     /// Distance of `p` to the nearest wall triangle (`f64::INFINITY` without a wall).
     pub fn distance(&self, p: [f64; 3]) -> f64 {
+        self.nearest(p).0
+    }
+
+    /// Distance of `p` to the nearest wall triangle and the index (into the `faces` the hierarchy was built from) of the face the triangle belongs to
+    /// (`(f64::INFINITY, u32::MAX)` without a wall).
+    pub fn nearest(&self, p: [f64; 3]) -> (f64, u32) {
         if self.nodes.is_empty() {
-            return f64::INFINITY;
+            return (f64::INFINITY, u32::MAX);
         }
-        let mut best = f64::INFINITY;
+        let (mut best, mut face) = (f64::INFINITY, u32::MAX);
         let mut stack = [0u32; 96];
         let mut sp = 1;
         while sp > 0 {
@@ -242,8 +256,11 @@ impl WallBvh {
                 continue;
             }
             if n.count > 0 {
-                for t in &self.tris[n.a as usize..(n.a + n.count) as usize] {
-                    best = best.min(point_triangle_dist2(p, t[0], t[1], t[2]));
+                for (t, f) in &self.tris[n.a as usize..(n.a + n.count) as usize] {
+                    let d = point_triangle_dist2(p, t[0], t[1], t[2]);
+                    if d < best {
+                        (best, face) = (d, *f);
+                    }
                 }
             } else {
                 let (dl, dr) = (Self::box_dist2(&self.nodes[n.a as usize], p), Self::box_dist2(&self.nodes[n.b as usize], p));
@@ -258,8 +275,20 @@ impl WallBvh {
                 }
             }
         }
-        best.sqrt()
+        (best.sqrt(), face)
     }
+}
+
+/// The index into `faces` of the wall face nearest to every fluid cell centroid (`u32::MAX` in solid cells and without a wall face): [`wall_distance3`] with the face.
+pub fn wall_nearest_face3(grid: &Grid3, solid: &[bool], faces: &[WallFace]) -> Vec<u32> {
+    let bvh = WallBvh::new(faces);
+    let mut f = vec![u32::MAX; grid.ni * grid.nj * grid.nk];
+    f.par_iter_mut().enumerate().for_each(|(c, out)| {
+        if !solid[c] {
+            *out = bvh.nearest(grid.xc[c]).1;
+        }
+    });
+    f
 }
 
 /// Distance of every fluid cell centroid (`Grid3::xc`) to the nearest of the wall `faces` ([`wall_faces`]); `f64::INFINITY` in solid cells and when there is no

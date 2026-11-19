@@ -26,6 +26,7 @@ pub mod solver;
 pub mod solver3;
 pub mod sst;
 pub mod turbulence;
+pub mod transition3;
 pub mod turbulence3;
 pub mod viscous;
 pub mod viscous3;

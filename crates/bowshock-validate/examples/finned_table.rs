@@ -2,7 +2,7 @@
 //! Coarse tier, the Draft tier (`--tier draft`) or the Draft tier's safe subsonic variant (`--tier draft-safe`: `Case3::draft_subsonic`), `GpuRunner3` in f32, to the case's stop rule.
 //!
 //! ```text
-//! cargo run --release -p bowshock-validate --example finned_table -- --tier coarse|fine|draft|draft-safe --mach 2.0 [--anf] [--wedge] [--tw RATIO] [--gf1] [--fin-cells N] [--chord N] [--refine S] [--grid-only] [--drift-tol X] [--te-to-base X (with --anf)] [--sub N] [--max-iter N] [--ddadi OMEGA] [--dis-boost DELTA] [--history-every N] [--dt-mode sum|min]
+//! cargo run --release -p bowshock-validate --example finned_table -- --tier coarse|fine|draft|draft-safe --mach 2.0 [--anf] [--wedge] [--tw RATIO] [--gf1] [--fin-cells N] [--chord N] [--refine S] [--grid-only] [--drift-tol X] [--x-tr X] [--fin-tr F] [--te-to-base X (with --anf)] [--sub N] [--max-iter N] [--ddadi OMEGA] [--dis-boost DELTA] [--history-every N] [--dt-mode sum|min]
 //! ```
 //!
 //! One `TABLE` line: tier, Mach number, grid, cells, iterations, stop reason, wall seconds (the whole run, set-up included), ms per iteration, CD total and its parts (coefficients on pi/4
@@ -96,6 +96,13 @@ fn main() -> Result<(), String> {
     let refine: f64 = value("--refine").map_or(Ok(1.0), |v| v.parse()).map_err(|e| format!("--refine: {e}"))?;
     if refine != 1.0 {
         case = case.with_refinement(refine);
+    }
+    // `--x-tr X` / `--fin-tr F`: prescribed transition (`Case3::with_transition`, DESIGN3D item 50): the body laminar upstream of X calibers from the nose tip, the fins laminar over the
+    // fraction F of their local chord from the leading edge (F 1: all laminar); either one given switches the feature on, the other defaults to 0 (turbulent); none: fully turbulent from the tip
+    let x_tr = value("--x-tr").map(|v| v.parse::<f64>().map_err(|e| format!("--x-tr: {e}"))).transpose()?;
+    let fin_tr = value("--fin-tr").map(|v| v.parse::<f64>().map_err(|e| format!("--fin-tr: {e}"))).transpose()?;
+    if x_tr.is_some() || fin_tr.is_some() {
+        case = case.with_transition(x_tr.unwrap_or(0.0), fin_tr.unwrap_or(0.0));
     }
     // `--tw RATIO`: isothermal walls at `T_w = RATIO T_inf` (`Case3::with_wall_thermal`; adiabatic without)
     if let Some(t) = value("--tw") {

@@ -18,6 +18,7 @@ use crate::implicit_params::ImplicitParams;
 use crate::limiter::Limiter;
 use crate::solver3::{Config3, RansOpts3, Scheme3, Solver3};
 use crate::sst::{Turbulence, Viscous, WallThermal};
+use crate::transition3::Transition;
 
 /// Sutherland constant of the plate cases (`110.4 K / 300 K`, the 2D tests').
 pub const SUTHERLAND: f64 = 0.368;
@@ -42,6 +43,8 @@ pub struct PlateCase {
     pub slab: f64,
     /// Thermal condition of the plate (`Adiabatic`, or `Isothermal(T_w / T_inf)`).
     pub wall_thermal: WallThermal,
+    /// Prescribed transition of the plate (`Transition::x_tr` the station on the plate, from its leading edge; `fin_frac` is not used): laminar upstream. `None`: as `turbulence` says.
+    pub transition: Option<Transition>,
 }
 
 impl PlateCase {
@@ -57,6 +60,7 @@ impl PlateCase {
             dz: 0.005,
             slab: 1.0,
             wall_thermal: WallThermal::Adiabatic,
+            transition: None,
         }
     }
 
@@ -72,6 +76,7 @@ impl PlateCase {
             dz: 0.002,
             slab: 1.0,
             wall_thermal: WallThermal::Adiabatic,
+            transition: None,
         }
     }
 
@@ -152,7 +157,7 @@ pub fn plate_solver3(case: &PlateCase, params: ImplicitParams) -> Solver3 {
         scheme: Scheme3::Implicit(params),
     };
     let grid = plate_grid3(case);
-    let mut opts = RansOpts3 { wall_thermal: case.wall_thermal, ..RansOpts3::default() };
+    let mut opts = RansOpts3 { wall_thermal: case.wall_thermal, transition: case.transition, ..RansOpts3::default() };
     if case.ks > 0.0 {
         opts.ks = vec![0.0; grid.ni * grid.nj * grid.nk];
         for i in case.i_le()..grid.ni {
@@ -372,6 +377,59 @@ mod tests {
         let r = s.rans().unwrap();
         let mu_t_max = (0..s.grid.nj).map(|j| r.mu_t[s.grid.cell(st.col, j, 0)]).fold(0.0f64, f64::max) * case.re_c;
         (st, mu_t_max)
+    }
+
+    /// Prescribed transition on the G2 plate (`Re_x = 5e6 x`, trip at `x = 0.2`, `Re_x,tr = 1e6`): laminar upstream of the trip (`cf` within 5 % of Blasius at `x = 0.06 / 0.12 / 0.18`,
+    /// the eddy viscosity of the layer exactly zero), turbulent downstream (`cf` at `x = 0.97` within 8 % of the fully turbulent value of the same grid and above
+    /// the laminar one by a factor 3, the eddy viscosity developed); prints `cf` along the plate, the tripped and the fully turbulent run, and the distance from the trip
+    /// over which `cf` crosses the mean of the laminar and turbulent curves.
+    #[test]
+    #[ignore]
+    fn transition_plate_is_laminar_then_turbulent() {
+        let mut case = PlateCase::g2();
+        let x_tr = 0.2;
+        case.transition = Some(Transition { x_tr, fin_frac: 0.0 });
+        let (s, info, _) = converge(&case, ImplicitParams::VISCOUS, 4.0, 20_000, 0.97);
+        let (s0, _, _) = converge(&PlateCase::g2(), ImplicitParams::VISCOUS, 4.0, 20_000, 0.97);
+        let xs: Vec<f64> = vec![0.03, 0.06, 0.09, 0.12, 0.15, 0.18, 0.2, 0.22, 0.25, 0.3, 0.35, 0.4, 0.5, 0.6, 0.75, 0.97];
+        println!("transition plate (3D, {} iterations): trip at x = {x_tr} (Re_x = {:.2e})", info.iters, case.re_c * case.mach * x_tr);
+        println!("     x      cf(tripped)   cf(turbulent)   Blasius      correlation   y+   max mu_t/mu (tripped)");
+        let mut cf_t = Vec::new();
+        for &x in &xs {
+            let (st, mu_t_max) = report(&s, &case, x);
+            let (st0, _) = report(&s0, &case, x);
+            cf_t.push((st.x, st.cf, st0.cf));
+            println!(
+                "  {:.4}   {:.5e}   {:.5e}   {:.5e}   {:.5e}   {:.2}   {mu_t_max:.2}",
+                st.x,
+                st.cf,
+                st0.cf,
+                blasius(&case, st.x),
+                turbulent_correlation(st.x),
+                st.y_plus
+            );
+        }
+        // laminar upstream of the trip: Blasius, and no eddy viscosity in the layer
+        for x in [0.06, 0.12, 0.18] {
+            let st = station(&s, &case, x);
+            let b = blasius(&case, st.x);
+            assert!((st.cf / b - 1.0).abs() < 0.05, "x = {x}: cf {:.4e} against Blasius {b:.4e}", st.cf);
+            let g = &s.grid;
+            let r = s.rans().unwrap();
+            let mu_t_max = (0..g.nj).map(|j| r.mu_t[g.cell(st.col, j, 0)]).fold(0.0f64, f64::max);
+            assert_eq!(mu_t_max, 0.0, "x = {x}: the laminar layer has no eddy viscosity");
+        }
+        // turbulent downstream
+        let (x, cf, cf0) = *cf_t.last().unwrap();
+        let lam = blasius(&case, x);
+        assert!((cf / cf0 - 1.0).abs() < 0.08, "x = {x}: cf {cf:.4e} against the fully turbulent {cf0:.4e}");
+        assert!(cf > 3.0 * lam, "x = {x}: cf {cf:.4e} not turbulent (laminar {lam:.4e})");
+        let (_, mu_t_max) = report(&s, &case, 0.97);
+        assert!(mu_t_max > 50.0, "max mu_t / mu_inf = {mu_t_max}");
+        // the transition length: from the trip to the station where cf passes the mean of the laminar and the fully turbulent value
+        if let Some(&(xm, _, _)) = cf_t.iter().find(|&&(x, cf, cf0)| x > x_tr && cf > 0.5 * (blasius(&case, x) + cf0)) {
+            println!("transition length (cf at half way from the laminar to the turbulent curve): {:.3} from the trip = {:.2} of x_tr", xm - x_tr, (xm - x_tr) / x_tr);
+        }
     }
 
     /// G2: fully turbulent plate (`Re_x = 4.85e6` at `x = 0.97`): `cf` within 5 % of `0.37 / log10(5e6 x)^2.584`, first-cell `y+ < 2`, developed eddy viscosity.

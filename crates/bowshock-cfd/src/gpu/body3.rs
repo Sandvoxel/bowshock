@@ -821,7 +821,7 @@ impl LazySolver3 {
                 for c in 0..turb.len() {
                     if !self.solid_host[c] {
                         turb[c] = given[c];
-                        mu_t[c] = (u[c][0] * given[c][0] / given[c][1]).min(cap);
+                        mu_t[c] = (u[c][0] * given[c][0] / given[c][1]).min(cap) * t.gamma_host.get(c).copied().unwrap_or(1.0);
                     }
                 }
             }
