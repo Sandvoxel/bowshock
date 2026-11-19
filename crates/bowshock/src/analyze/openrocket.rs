@@ -28,7 +28,7 @@ fn comments(table: &CfdTable, what: &str) -> String {
         format!("# Bowshock CFD {what} table: {} grid, {}, altitude {:.0} m\n", format!("{:?}", table.grid).to_lowercase(), table.backend, table.altitude);
     if table.bands {
         out.push_str(
-            "# 3D solver: expect the drag 3-7 % high against free flight (fully turbulent smooth model) and the centre of pressure up to 0.25 caliber off\n",
+            "# CFD solve: expect the drag 3-7 % high against free flight (fully turbulent smooth model) and the centre of pressure up to 0.25 caliber off\n",
         );
         out.push_str("# (subsonic: 0.12 caliber too far aft, so the stability is overstated). Lugs and rail buttons are not meshed.\n");
     }

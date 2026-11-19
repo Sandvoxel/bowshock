@@ -117,7 +117,7 @@ pub fn help(label: &str) -> Option<&'static str> {
         "Fins" => "The fins' own skin friction plus leading- and trailing-edge pressure drag.",
         "Other" => "Launch lugs and rail buttons sticking out into the airflow.",
         "Cd band" => "Where the true drag coefficient is expected, from the measured errors of the CFD solve against free flight (a high smooth-model bias, the stop rule, the grid, the wall temperature). The solve is more likely to read high than low. It does not include lugs and rail buttons that are not meshed: one lug raised the apogee drag of a model-scale rocket by 16 % when it was measured.",
-        "Not meshed" => "Launch lugs and rail buttons are not meshed by the 3D solver; the table adds the build-up method's drag for them. One lug changed the apogee of a model-scale rocket by +16 % when it was measured, so a rocket with large buttons is outside the Cd band.",
+        "Not meshed" => "Launch lugs and rail buttons are not meshed by the CFD solve; the table adds the build-up method's drag for them. One lug changed the apogee of a model-scale rocket by +16 % when it was measured, so a rocket with large buttons is outside the Cd band.",
         "Margin lower bound" => "The static margin if the centre of pressure is as far forward as the CFD comparison with free flight allows (0.12 caliber subsonic, 0.25 caliber supersonic). The solve puts the centre of pressure too far aft and the normal-force slope 3-11 % high, so it overstates stability: judge the rocket by this number.",
         "Total Cd" => "Total drag coefficient: drag force divided by dynamic pressure and reference area. Lower is better.",
         "Static margin" => {

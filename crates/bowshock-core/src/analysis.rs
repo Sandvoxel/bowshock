@@ -528,16 +528,17 @@ impl Analysis {
             keep_fields: false,
             field_sink: None,
             field3_sink: None,
-            engine: Engine::from_env(),
+            engine: Engine::Legacy,
             fin_outline: FinOutline::Trapezoid,
         }
     }
 
-    /// Analysis of a dimensional body (same defaults as [`Analysis::from_internal`]); drag coefficients refer to the largest
+    /// Analysis of a dimensional body (same defaults as [`Analysis::from_internal`], but the engine is [`Engine::from_env`]: the 3D engine needs a dimensional body, an internal one is always the legacy engine's); drag coefficients refer to the largest
     /// cross-section of the body unless [`Analysis::reference_diameter`] says otherwise.
     pub fn new(spec: &BodySpec) -> Result<Analysis, Error> {
         let (body, scale) = spec.to_internal()?;
         let mut a = Analysis::from_internal(body);
+        a.engine = Engine::from_env();
         a.d_nose = scale.d_nose;
         a.d_ref = spec.reference_diameter();
         a.dimensional = true;

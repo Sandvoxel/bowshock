@@ -163,7 +163,8 @@ fn the_bands_come_from_the_measured_terms_without_a_second_sweep() {
     let band = p.cd_band.expect("a drag band at zero incidence");
     assert!(band.low > band.high && band.high > 0.0, "{band:?}");
     assert_eq!(p.cd_uncertainty, Some(band.half_width()));
-    assert!(p.x_cp_band.is_none() && a.cd_band.is_none());
+    assert!(p.x_cp_band.is_none());
+    assert_eq!(a.cd_band.is_some(), a.drag.total.is_finite());
     let cp = a.x_cp_band.expect("a centre-of-pressure band at an angle");
     assert!(cp.low > 0.0);
 }
