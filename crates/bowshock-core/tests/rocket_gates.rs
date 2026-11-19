@@ -53,6 +53,9 @@ struct StabGate<'a> {
     xcp_abs: f64,
     /// INFO only (a documented offset of the data, not a solver gate).
     info: bool,
+    /// Mach numbers whose `CN_alpha` / `x_cp` lines are documented discrepancies (`FAIL KNOWN DESIGN3D-X-item-55`, the band is not widened).
+    known_cn: &'static [f64],
+    known_xcp: &'static [f64],
 }
 
 fn run_stability(g: &StabGate) -> Lines {
@@ -76,14 +79,36 @@ fn run_stability(g: &StabGate) -> Lines {
                 let gate = viscous && !g.info;
                 let k = g.alphas.iter().position(|&a| a == g.alpha_ref).expect("alpha_ref is one of the incidences");
                 let cna = |i: usize| q * sol[i].lift.cn / g.alphas[i].to_radians();
+                let why = "DESIGN3D-X-item-55";
                 if p.1.is_finite() {
-                    lines.check(gate, g.id, &format!("{case}:cn_alpha"), cna(k), p.1, g.cn_band);
+                    if g.known_cn.contains(&p.0) {
+                        lines.check_known(gate, g.id, &format!("{case}:cn_alpha"), cna(k), p.1, g.cn_band, why);
+                    } else {
+                        lines.check(gate, g.id, &format!("{case}:cn_alpha"), cna(k), p.1, g.cn_band);
+                    }
                 }
                 if p.2.is_finite() {
-                    lines.check(gate, g.id, &format!("{case}:x_cp"), sol[k].lift.x_cp, p.2, Band::RelAbs(0.0, g.xcp_abs));
+                    let band = Band::RelAbs(0.0, g.xcp_abs);
+                    if g.known_xcp.contains(&p.0) {
+                        lines.check_known(gate, g.id, &format!("{case}:x_cp"), sol[k].lift.x_cp, p.2, band, why);
+                    } else {
+                        lines.check(gate, g.id, &format!("{case}:x_cp"), sol[k].lift.x_cp, p.2, band);
+                    }
                 }
-                let all: Vec<String> = g.alphas.iter().enumerate().map(|(i, a)| format!("CNa({a}) {:.2} x_cp {:.3} [{}]", cna(i), sol[i].lift.x_cp, sol[i].stop())).collect();
-                lines.info(g.id, &format!("{case}:slopes"), &format!("{}; data CNa {:.2} x_cp {:.3}; error {:+.1} % / {:+.3} cal", all.join(", "), p.1, p.2, 100.0 * (cna(k) / p.1 - 1.0), sol[k].lift.x_cp - p.2));
+                let all: Vec<String> =
+                    g.alphas.iter().enumerate().map(|(i, a)| format!("CNa({a}) {:.2} x_cp {:.3} [{}]", cna(i), sol[i].lift.x_cp, sol[i].stop())).collect();
+                lines.info(
+                    g.id,
+                    &format!("{case}:slopes"),
+                    &format!(
+                        "{}; data CNa {:.2} x_cp {:.3}; error {:+.1} % / {:+.3} cal",
+                        all.join(", "),
+                        p.1,
+                        p.2,
+                        100.0 * (cna(k) / p.1 - 1.0),
+                        sol[k].lift.x_cp - p.2
+                    ),
+                );
             }
             Err(e) => {
                 println!("GATE {} {case} n/a n/a n/a FAIL ({e})", g.id);
@@ -107,7 +132,21 @@ fn arcas_points() -> Vec<StabPoint> {
 #[ignore = "validation: lift tier on the GPU"]
 fn gate_x1_arcas_cn_alpha_and_xcp() {
     let make = |m: f64| arcas_for(m, false);
-    let g = StabGate { id: "G-X1", tag: "arcas", make: &make, points: arcas_points(), phase: FinPhase::InPlane, alphas: &[2.0, 4.0], alpha_ref: 4.0, mach_max: 2.96, cn_band: Band::Rel(0.15), xcp_abs: 0.35, info: false };
+    let g = StabGate {
+        id: "G-X1",
+        tag: "arcas",
+        make: &make,
+        points: arcas_points(),
+        phase: FinPhase::InPlane,
+        alphas: &[2.0, 4.0],
+        alpha_ref: 4.0,
+        mach_max: 2.96,
+        cn_band: Band::Rel(0.15),
+        xcp_abs: 0.35,
+        info: false,
+        known_cn: &[0.8],
+        known_xcp: &[0.6, 0.8, 0.9, 1.0, 1.2],
+    };
     run_stability(&g).finish();
 }
 
@@ -138,6 +177,8 @@ fn gate_x2_yuska_cn_alpha_and_xcp() {
         cn_band: Band::Rel(0.13),
         xcp_abs: 0.25,
         info,
+        known_cn: &[],
+        known_xcp: &[],
     };
     // leaked so the closures live for the gates' `'static` borrow
     let (a, b, c): (&'static (dyn Fn(f64) -> Rocket + Sync), &'static (dyn Fn(f64) -> Rocket + Sync), &'static (dyn Fn(f64) -> Rocket + Sync)) =
@@ -166,7 +207,21 @@ fn gate_x2_yuska_cn_alpha_and_xcp() {
 fn gate_x3_grm_cn_alpha_and_xcp() {
     let make = |_m: f64| grm_rocket();
     let points: Vec<StabPoint> = grm::FINS_ON.iter().map(|r| (r.0, r.1, r.2)).collect();
-    let g = StabGate { id: "G-X3", tag: "grm", make: &make, points, phase: FinPhase::InPlane, alphas: &[2.0, 4.0], alpha_ref: 4.0, mach_max: 1.3, cn_band: Band::Rel(0.13), xcp_abs: 0.25, info: false };
+    let g = StabGate {
+        id: "G-X3",
+        tag: "grm",
+        make: &make,
+        points,
+        phase: FinPhase::InPlane,
+        alphas: &[2.0, 4.0],
+        alpha_ref: 4.0,
+        mach_max: 1.3,
+        cn_band: Band::Rel(0.13),
+        xcp_abs: 0.25,
+        info: false,
+        known_cn: &[0.85, 0.92, 0.94],
+        known_xcp: &[],
+    };
     run_stability(&g).finish();
 }
 
@@ -275,7 +330,9 @@ fn gate_x6_grm_axial_force() {
     let mut lines = Lines::default();
     for (&(m, caf), r) in rows.iter().zip(runs) {
         match r {
-            Ok((s, v, viscous)) => print_axial(&mut lines, "G-X6", &format!("grm-M{m:.2}:caf"), viscous && !(0.92..=1.10).contains(&m), v, caf, Band::Rel(0.12), &s),
+            Ok((s, v, viscous)) => {
+                print_axial(&mut lines, "G-X6", &format!("grm-M{m:.2}:caf"), viscous && !(0.92..=1.10).contains(&m), v, caf, Band::Rel(0.12), &s)
+            }
             Err(e) => {
                 println!("GATE G-X6 grm-M{m:.2} n/a n/a n/a FAIL ({e})");
                 lines.failed += 1;

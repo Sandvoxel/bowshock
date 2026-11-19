@@ -164,12 +164,8 @@ pub const MODEL_A_ROLL0_10X10: [(f64, f64, f64, f64); 6] = [
 /// Model A, roll 0, 8 x 6 ft tunnel (squares). The Mach 1.98 x_cp square is buried in a cluster of symbols (NAN); its C_N,alpha and C_A
 /// squares are partly overlapped by a diamond (+-0.05 and +-0.004). Fig. 4 puts the 8 x 6 ft slopes (12.9 at Mach 1.79) above the
 /// extension of the 10 x 10 ft ones; the report attributes offsets in this tunnel to flow angularity or fin cant error.
-pub const MODEL_A_ROLL0_8X6: [(f64, f64, f64, f64); 4] = [
-    (1.79, 12.87, 8.831, 0.521),
-    (1.88, 12.70, 8.741, 0.492),
-    (1.98, 11.80, f64::NAN, 0.466),
-    (2.08, 10.86, 8.707, 0.445),
-];
+pub const MODEL_A_ROLL0_8X6: [(f64, f64, f64, f64); 4] =
+    [(1.79, 12.87, 8.831, 0.521), (1.88, 12.70, 8.741, 0.492), (1.98, 11.80, f64::NAN, 0.466), (2.08, 10.86, 8.707, 0.445)];
 
 /// Model A, roll 45, 10 x 10 ft tunnel (diamonds). Mach 2.00 diamond is largely hidden behind a square and a circle (C_N,alpha +-0.06,
 /// C_A +-0.004, x_cp not readable); the Mach 2.09 diamond was not found (hidden behind the Mach 2.09 circle in Fig. 4; absent from Fig. 5). Mach 2.38 and 2.78
@@ -185,30 +181,19 @@ pub const MODEL_A_ROLL45_10X10: [(f64, f64, f64, f64); 6] = [
 
 /// Model B (A without the 4.2 in cylinder section; length 61.7 in), roll 0, 10 x 10 ft tunnel. Five Mach numbers (no marker at 2.09).
 /// x_cp is measured from the nose tip of the shortened body. The Mach 3.47 C_N,alpha lies above the Mach 3.17 value (8.84 -> 9.12).
-pub const MODEL_B_ROLL0_10X10: [(f64, f64, f64, f64); 5] = [
-    (2.00, 11.53, 8.198, 0.456),
-    (2.38, 9.98, 8.018, 0.403),
-    (2.78, 9.41, 7.867, 0.351),
-    (3.17, 8.84, 7.749, 0.287),
-    (3.47, 9.12, 7.677, 0.271),
-];
+pub const MODEL_B_ROLL0_10X10: [(f64, f64, f64, f64); 5] =
+    [(2.00, 11.53, 8.198, 0.456), (2.38, 9.98, 8.018, 0.403), (2.78, 9.41, 7.867, 0.351), (3.17, 8.84, 7.749, 0.287), (3.47, 9.12, 7.677, 0.271)];
 
 /// Model C (fin planform area 70.34 in^2, span 4.38 in; length 65.9 in), roll 0, 10 x 10 ft tunnel. The Mach 3.17 and 3.47 C_N,alpha markers
 /// lie at the bottom edge of the plotted C_N,alpha scale (8.0 gridline, 8.03 and 8.15 read; +-0.03 as elsewhere).
-pub const MODEL_C_ROLL0_10X10: [(f64, f64, f64, f64); 5] = [
-    (2.00, 10.30, 8.576, 0.416),
-    (2.38, 9.21, 8.360, 0.366),
-    (2.78, 9.00, 8.131, 0.325),
-    (3.17, 8.03, 8.002, 0.286),
-    (3.47, 8.15, 7.997, 0.267),
-];
+pub const MODEL_C_ROLL0_10X10: [(f64, f64, f64, f64); 5] =
+    [(2.00, 10.30, 8.576, 0.416), (2.38, 9.21, 8.360, 0.366), (2.78, 9.00, 8.131, 0.325), (3.17, 8.03, 8.002, 0.286), (3.47, 8.15, 7.997, 0.267)];
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ALL: [&[(f64, f64, f64, f64)]; 5] =
-        [&MODEL_A_ROLL0_10X10, &MODEL_A_ROLL0_8X6, &MODEL_A_ROLL45_10X10, &MODEL_B_ROLL0_10X10, &MODEL_C_ROLL0_10X10];
+    const ALL: [&[(f64, f64, f64, f64)]; 5] = [&MODEL_A_ROLL0_10X10, &MODEL_A_ROLL0_8X6, &MODEL_A_ROLL45_10X10, &MODEL_B_ROLL0_10X10, &MODEL_C_ROLL0_10X10];
 
     #[test]
     fn mach_increases_and_matches_table_ii() {
@@ -222,10 +207,12 @@ mod tests {
 
     #[test]
     fn dynamic_pressure_matches_total_pressure() {
-        // q = 0.7 p M^2 with p = p0 (1 + 0.2 M^2)^-3.5; the printed values agree within 1 %.
+        // q = 0.7 p M^2 with p = p0 (1 + 0.2 M^2)^-3.5; the printed values agree within 1 %, except the 8 x 6 ft tunnel's Mach 2.08 row, whose printed 1353 is
+        // 5.9 % above the isentropic 1278 (checked on the scan: it is printed so, a misprint of the report; its Reynolds number 5.03e6 per ft is that of the other rows).
         for &(m, p0, q, _) in &TEST_CONDITIONS {
             let p = p0 * (1.0 + 0.2 * m * m).powf(-3.5);
-            assert!((0.7 * p * m * m / q - 1.0).abs() < 0.01, "M {m}");
+            let tol = if (m - 2.08).abs() < 1e-12 { 0.07 } else { 0.01 };
+            assert!((0.7 * p * m * m / q - 1.0).abs() < tol, "M {m}");
         }
     }
 

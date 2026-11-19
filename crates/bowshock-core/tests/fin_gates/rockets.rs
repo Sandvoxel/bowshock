@@ -66,7 +66,17 @@ fn full_chord_wedge() -> FinProfile {
 }
 
 fn fins_from(count: u32, root: f64, tip: f64, span: f64, sweep: f64, thickness: f64, te_to_base: f64, profile: FinProfile, d: f64) -> Fins3 {
-    Fins3 { count, root_chord: root / d, tip_chord: tip / d, span: span / d, sweep: sweep / d, thickness: thickness / d, te_to_base: te_to_base / d, profile, planform: None }
+    Fins3 {
+        count,
+        root_chord: root / d,
+        tip_chord: tip / d,
+        span: span / d,
+        sweep: sweep / d,
+        thickness: thickness / d,
+        te_to_base: te_to_base / d,
+        profile,
+        planform: None,
+    }
 }
 
 /// The Arcas short model (NASA TN D-4013 / D-4014 configuration 1, l/d 18.2; geometry and fins as `bowshock_reference::arcas`, the double-wedge fins of G-F4). `long` adds the
@@ -77,9 +87,22 @@ pub fn arcas_rocket(long_extra_tube: f64, re_per_m: f64, t0: f64) -> Rocket {
         name: if long_extra_tube > 0.0 { "arcas-long" } else { "arcas-short" },
         body: BodySpec {
             nose: NoseSpec { shape: NoseShape::TangentOgive, length: arcas::NOSE_LENGTH, diameter: d },
-            aft: vec![AftSpec::Tube { length: arcas::TUBE_LENGTH + long_extra_tube }, AftSpec::Transition { length: arcas::BOATTAIL_LENGTH, aft_diameter: arcas::BASE_DIAMETER }],
+            aft: vec![
+                AftSpec::Tube { length: arcas::TUBE_LENGTH + long_extra_tube },
+                AftSpec::Transition { length: arcas::BOATTAIL_LENGTH, aft_diameter: arcas::BASE_DIAMETER },
+            ],
         },
-        fins: fins_from(4, arcas::FIN_ROOT_CHORD, arcas::FIN_TIP_CHORD, arcas::FIN_SPAN, arcas::FIN_SWEEP, arcas::FIN_THICKNESS, 0.0, FinProfile::DoubleWedge, d),
+        fins: fins_from(
+            4,
+            arcas::FIN_ROOT_CHORD,
+            arcas::FIN_TIP_CHORD,
+            arcas::FIN_SPAN,
+            arcas::FIN_SWEEP,
+            arcas::FIN_THICKNESS,
+            0.0,
+            FinProfile::DoubleWedge,
+            d,
+        ),
         d,
         re_per_m,
         t0,
