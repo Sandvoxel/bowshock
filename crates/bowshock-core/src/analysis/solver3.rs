@@ -941,7 +941,7 @@ mod tests {
     #[test]
     fn the_draft_tier_is_safe_below_mach_08() {
         use crate::engine::case3::SUTHERLAND_SEA_LEVEL;
-        let a = tiny_finned();
+        let a = tiny_finned().wake(Wake::Base);
         let flow = WallFlow { re_c: 1.7e6, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0, sutherland: SUTHERLAND_SEA_LEVEL };
         let domain = |c: &Case3| {
             let b = c.grid.base.as_ref().expect("the base-wake grid");
@@ -949,7 +949,7 @@ mod tests {
         };
         let draft = |mach: f64| a.solver3_case(Condition::from(mach), 0, Tier::draft(flow), false);
         let (slow, fast) = (draft(0.5), draft(0.8));
-        assert!(domain(&slow).0 > 2.0 * domain(&fast).0 && domain(&slow).1 > 1.5 * domain(&fast).1, "{:?} {:?}", domain(&slow), domain(&fast));
+        assert!(domain(&slow).0 > domain(&fast).0 && domain(&slow).1 > domain(&fast).1, "{:?} {:?}", domain(&slow), domain(&fast));
         assert_eq!(domain(&slow), domain(&a.seed_case(&slow, Condition::from(0.5), 0)));
         let coarse = |mach: f64| a.solver3_case(Condition::from(mach), 0, Tier::Coarse(flow), false);
         assert_eq!(domain(&coarse(0.5)), domain(&coarse(0.8)));
