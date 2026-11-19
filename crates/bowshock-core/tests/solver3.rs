@@ -3,7 +3,7 @@
 
 use bowshock_core::{
     AftSpec, Analysis, Atmosphere, Backend, BackendUsed, BodySpec, Condition, Engine, Error, FinProfile, FinSpec, FlightConditions, NoseShape, NoseSpec,
-    Quality, Resolution, StopReason, Symmetry,
+    Quality, Resolution, StopReason, Symmetry, Wake,
 };
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -72,11 +72,39 @@ fn the_engine_is_legacy_unless_asked_and_travels_in_the_spec() {
     assert_eq!(Analysis::from_spec(&spec).unwrap().spec().unwrap().engine, Engine::Solver3);
 }
 
+/// [`tiny`] for a motor case: the nozzle rows of the gap (`n_jet + n_ann`, set by the motor from the wall spacing) stay, the rest shrinks.
+fn tiny_jet(c: &mut bowshock_core::engine::case3::Case3) {
+    if let Some(b) = c.grid.base.as_mut() {
+        b.n_up = 6;
+        b.n_nose = 10;
+        b.n_seg = b.n_seg.iter().map(|&n| (n / 4).max(4)).collect();
+        b.n_wake = 8;
+        b.nj_out = 10;
+    }
+}
+
+fn motor() -> bowshock_core::MotorSpec {
+    bowshock_core::MotorSpec { exit_diameter: 0.02, exit_mach: 2.5, exit_pressure_pa: 101_325.0, total_temperature_k: 1500.0 }
+}
+
+/// The jet is the engine's: a motor-on wedge runs with the nozzle rows in the grid (a bigger gap than the power-off one), says so (`Polar::motor_on`), and its base is the annulus
+/// around the exit (the base of the same body without the motor covers the whole base); the checks of the motor are the facade's.
 #[test]
-fn a_motor_request_and_bad_viscous_settings_fail_loudly() {
-    let motor = bowshock_core::MotorSpec { exit_diameter: 0.02, exit_mach: 2.5, exit_pressure_pa: 101_325.0, total_temperature_k: 1500.0 };
-    let e = solver3().viscous(flight()).motor(motor).run(&[1.5]).unwrap_err();
-    assert!(matches!(&e, Error::Unsupported(m) if m.contains("motor")), "{e}");
+fn a_motor_runs_the_jet_on_the_wedge_and_its_checks_fail_loudly() {
+    let on = solver3().case3_hook(tiny_jet).max_iterations(30).viscous(flight()).motor(motor()).keep_fields(true).run(&[2.0]).unwrap();
+    assert!(on.motor_on);
+    let p = &on.points[0];
+    assert!(p.drag.total.is_finite() && p.drag.base.is_finite() && p.detail.cp_base.is_finite(), "{:?}", p.drag);
+    assert!(!p.drag.base_modelled);
+    let off = solver3().case3_hook(tiny_jet).max_iterations(30).viscous(flight()).keep_fields(true).run(&[2.0]).unwrap();
+    assert!(!off.motor_on);
+    let cells = |p: &bowshock_core::Polar| p.points[0].field3.as_ref().map_or(0, |f| f.cells());
+    assert!(cells(&on) > cells(&off), "the nozzle rows make the gap behind the base finer: {} against {} cells", cells(&on), cells(&off));
+    // a motor needs the viscous solve, the base wake and a nozzle that fits the base
+    assert!(matches!(solver3().motor(motor()).run(&[1.5]), Err(Error::InvalidInput(m)) if m.contains("viscous")));
+    assert!(matches!(solver3().viscous(flight()).wake(Wake::Sting).motor(motor()).run(&[1.5]), Err(Error::InvalidInput(m)) if m.contains("base wake")));
+    let wide = bowshock_core::MotorSpec { exit_diameter: 0.99 * D, ..motor() };
+    assert!(matches!(solver3().viscous(flight()).motor(wide).run(&[1.5]), Err(Error::InvalidInput(m)) if m.contains("exit_diameter")));
     // roughness and a drag tolerance are viscous knobs too
     assert!(matches!(solver3().roughness(1e-6).run(&[1.5]), Err(Error::InvalidInput(_))));
     assert!(matches!(solver3().drag_tolerance(0.01).run(&[1.5]), Err(Error::InvalidInput(_))));
