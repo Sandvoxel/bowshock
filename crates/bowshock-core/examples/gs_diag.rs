@@ -13,6 +13,7 @@ mod common;
 use bowshock_cfd::grid3::Grid3;
 use bowshock_core::engine::case3::{Case3, WallFlow};
 use bowshock_core::engine::grid3::{body_grid3, Domain3, FinPhase, Fins3};
+use bowshock_core::engine::run3::{wall_samples, Wall};
 use common::{tier, Session, TierKind};
 use std::f64::consts::PI;
 
@@ -167,6 +168,7 @@ fn run(args: &[String]) {
         p.friction.fin_sides,
         t.elapsed().as_secs_f64()
     );
+    per_fin(&case, n, &s);
     println!("cfl_events {:?}", r.point.cfl_events.iter().map(|e| (e.iteration, e.cfl_after)).collect::<Vec<_>>());
     let h = &r.point.cn_history;
     let line: Vec<String> = h.iter().filter(|(it, _)| it % 250 == 0).map(|(it, c)| format!("{it}:{c:.5}")).collect();
@@ -181,6 +183,43 @@ fn run(args: &[String]) {
     }
     if let Some(w) = r.point.window {
         println!("window mean CA {:.6} oscillation {:.3} %", w.ca, 100.0 * w.oscillation);
+    }
+}
+
+/// The pressure drag of the fin faces by fin (the fin nearest in azimuth), each as `N x` the force of one whole fin on `pi/4`: the half fin on a symmetry plane counts twice,
+/// a whole fin once, so the entries of a sector and of a half domain are comparable fin by fin and their mean is the `fin_*` part. The wall pressures are those of the device
+/// state downloaded at the end of the run (the instantaneous state, not an average).
+fn per_fin(case: &Case3, n: u32, s: &Session) {
+    #[cfg(feature = "gpu")]
+    if let Session::Gpu(r) = s {
+        let g = &r.host.grid;
+        let angles: Vec<f64> = match case.grid.domain {
+            Domain3::Sector => vec![0.0],
+            Domain3::Half { phase } => {
+                let phi0 = if phase == FinPhase::Between { PI / f64::from(n) } else { 0.0 };
+                (0..n).map(|m| phi0 + 2.0 * PI * f64::from(m) / f64::from(n)).filter(|&t| t <= PI + 1e-9).collect()
+            }
+            Domain3::Wedge { .. } => return,
+        };
+        let q = 0.5 * case.mach * case.mach * std::f64::consts::FRAC_PI_4;
+        let p_inf = r.host.cfg.freestream[4];
+        let mut acc = vec![[0.0f64; 3]; angles.len()];
+        for w in wall_samples(g, &r.host.u) {
+            let slot = match w.class {
+                Wall::FinLe => 0,
+                Wall::FinTe => 1,
+                Wall::FinSide => 2,
+                _ => continue,
+            };
+            let th = w.face.c[1].atan2(w.face.c[2]);
+            let f = (0..angles.len()).min_by(|&a, &b| (angles[a] - th).abs().total_cmp(&(angles[b] - th).abs())).unwrap();
+            acc[f][slot] += (w.pw - p_inf) * w.face.area * w.sign * w.face.n[0];
+        }
+        for (f, a) in acc.iter().enumerate() {
+            let on_plane = angles[f] < 1e-9 || (PI - angles[f]).abs() < 1e-9;
+            let k = if on_plane { 2.0 } else { 1.0 } * f64::from(n) / q;
+            println!("FIN theta {:6.2} deg ({}): N x per-fin CD  le {:.6} te {:.6} sides {:.6}", angles[f].to_degrees(), if on_plane { "half fin on a symmetry plane" } else { "whole fin" }, k * a[0], k * a[1], k * a[2]);
+        }
     }
 }
 
