@@ -359,7 +359,7 @@ fn gate_f5_anf_cd0() {
 /// 0.79, 1.728, 1.99, 2.48; free flight 1.8, 2.351, 2.665): CN_alpha 13 %, `x_cp` 0.25 cal, no worse than that gate. The 6-degree nonlinearity is INFO. The tunnel (`wt`)
 /// points run on the tunnel setup (`Re_L` 4e6, balance sting of 0.63 base diameters), the free-flight points as before. DESIGN3D item 51: CN_alpha is insensitive to the
 /// slope definition (0-1 degree slope, 2 degree secant, least squares over 0..5 degrees: within 2 %), the Reynolds number and the sting (within 1.5 %), so the 2-degree
-/// secant is kept and the tunnel's offset (+11 to +14 % subsonic) is not a like-for-like artefact.
+/// secant is kept; on the tunnel setup the subsonic offset is +11 to +13.4 % (one FAIL, Mach 0.79 in-plane), so it is not a like-for-like artefact.
 ///
 /// Provenance of the references: they are digitised from Yayla (2021) Fig. 3.10 / 4.4, which replot Dupuis' tunnel (WT) and free-flight points. The roll position of the
 /// WT points is not stated there nor in ARL-TR-6725 Fig. 5 (the public replot, which shows one WT series; its M 0.8 C_Nalpha reads about 16-17, consistent with 16.27), so
