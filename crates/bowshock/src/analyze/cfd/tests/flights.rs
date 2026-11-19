@@ -117,9 +117,12 @@ fn fixtures() -> Vec<Fixture> {
     paths.sort();
     let mut all: Vec<Fixture> =
         paths.iter().map(|p| serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap_or_else(|e| panic!("{}: {e}", p.display()))).collect();
-    // a probe: `FLIGHTVAL_TIP_IN=0.5` gives every fin that tip chord (in)
+    // probes: `FLIGHTVAL_TIP_IN=0.5` gives every fin that tip chord, `FLIGHTVAL_BLUNT_IN=0` every nose that tip radius (in)
     if let Some(tip) = std::env::var("FLIGHTVAL_TIP_IN").ok().and_then(|v| v.parse().ok()) {
         all.iter_mut().for_each(|f| f.fins.tip_chord = tip);
+    }
+    if let Some(blunt) = std::env::var("FLIGHTVAL_BLUNT_IN").ok().and_then(|v| v.parse().ok()) {
+        all.iter_mut().for_each(|f| f.nose.blunt_radius = blunt);
     }
     match std::env::var("FLIGHTVAL_CASES") {
         Ok(list) => {
