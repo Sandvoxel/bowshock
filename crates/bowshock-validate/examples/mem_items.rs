@@ -3,11 +3,11 @@
 //! compile peak), before and after `Context::trim` (idle pool given back), for a chain of runners in one process.
 //!
 //! ```text
-//! mem_items --chain anf[@SUB][,gf1,anfwedge,half,anfhalf,wedge,..] [--sub N] [--keep] [--iters N] [--reclaim] [--ext] [--run-on N] [--snaps N]
+//! mem_items --chain anf[@SUB][,gf1,anfwedge,half,anfhalf,wedge,..] [--sub N] [--keep] [--iters N] [--reclaim] [--ext] [--euler] [--run-on N] [--snaps N]
 //! ```
 //! `anf` (default) is `finned_table --anf --tier coarse`; `gf1` the G-F1 sector of `mem_stages`; `anfhalf` the ANF half domain at 2 degrees (Lift tier, `Between`); `half` the same with the G-F1 fins.
 //! `--reclaim` gives the idle pool back after every row (measures the steady state; without it the rows show the natural footprint, pool included).
-//! `--ext` builds the runners in extended (double-float) precision.
+//! `--ext` builds the runners in extended (double-float) precision, `--euler` without the viscous (SST) terms.
 //! `--keep` holds every runner of the chain alive (as the product keeps a table's solver); without it each runner is dropped before the next is built.
 
 use bowshock_cfd::gpu::Precision;
@@ -143,7 +143,10 @@ fn main() -> Result<(), String> {
             Some((w, n)) => (w, Some(n.parse::<usize>().map_err(|e| e.to_string())?)),
             None => (item, sub),
         };
-        let case = case_of(which, 2.0, sub_item)?;
+        let mut case = case_of(which, 2.0, sub_item)?;
+        if args.iter().any(|a| a == "--euler") {
+            case.viscous = None;
+        }
         let mut r = GpuRunner3::new(&case, if args.iter().any(|a| a == "--ext") { Precision::Extended } else { Precision::F32 }).map_err(|e| e.to_string())?;
         let cells = r.host.grid.ni * r.host.grid.nj * r.host.grid.nk;
         let persistent: usize = r.gpu.memory_report().iter().map(|(_, b)| b).sum();
