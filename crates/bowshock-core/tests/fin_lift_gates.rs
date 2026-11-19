@@ -240,9 +240,22 @@ fn gate_f4_arcas_axial_force_with_and_without_fins() {
 // ---------------------------------------------------------------------------------------------------------------------------------
 // G-F5, G-L1: the ANF on the half domain
 
-fn anf_half(mach: f64, alpha_deg: f64, phase: FinPhase, mach_max: f64) -> Case3 {
+/// Reynolds number `Re_L` (body length, 10 calibres) of the DRDC wind-tunnel runs (task statement, ~4e6) and the radius of the balance sting over the base radius
+/// (19 mm on the 30 mm base: 0.63). DESIGN3D item 51: the sting-mounted tunnel points are compared on this setup.
+const TUNNEL_RE_L: f64 = 4.0e6;
+const TUNNEL_STING_OVER_BASE: f64 = 0.63;
+
+/// `tunnel`: the sting-mounted wind-tunnel setup (a sting of [`TUNNEL_STING_OVER_BASE`] behind the base, `Re_L` [`TUNNEL_RE_L`] instead of the sea-level free-flight value;
+/// the grid is still sized for `mach_max`).
+fn anf_half(mach: f64, alpha_deg: f64, phase: FinPhase, mach_max: f64, tunnel: bool) -> Case3 {
     let kind = if tier_kind() == TierKind::Euler { TierKind::Euler } else { TierKind::Lift };
-    let mut c = Case3::base_half(mach, alpha_deg.to_radians(), Case3::anf_body(), Some(Case3::anf_fins()), tier(kind, anf_flow(mach_max)), 0);
+    let (body, flow) = if tunnel {
+        let body = Case3::anf_body().with_sting(0.5 * TUNNEL_STING_OVER_BASE);
+        (body, WallFlow { re_c: TUNNEL_RE_L / (10.0 * mach), ..anf_flow(mach_max) })
+    } else {
+        (Case3::anf_body(), anf_flow(mach_max))
+    };
+    let mut c = Case3::base_half(mach, alpha_deg.to_radians(), body, Some(Case3::anf_fins()), tier(kind, flow), 0);
     c.grid.domain = Domain3::Half { phase };
     c
 }
@@ -278,7 +291,8 @@ fn gate_f5_anf_cd0() {
         .flat_map(|&(m, cd)| PHASES.iter().map(move |&(ph, name)| (m, cd, ph, name)))
         .collect();
     let runs = par_map(&items, |&(m, _, ph, _)| {
-        let case = anf_half(m, 0.0, ph, 3.147);
+        let tunnel = anf::CD0_TUNNEL.iter().any(|p| p.0 == m);
+        let case = anf_half(m, 0.0, ph, 3.147, tunnel);
         Session::new(&case).and_then(|mut s| s.run(&case, false)).map(|r| (r, case))
     });
     let kind = tier_kind();
@@ -342,7 +356,10 @@ fn gate_f5_anf_cd0() {
 
 /// G-L1: the ANF's `CN_alpha` (`CN / alpha` at 2 degrees, per rad) and `x_cp` (calibers from the tip) at 2 and 6 degrees (6 degrees is warm-started from 2) on the half
 /// domain with the lift tier in both roll phases, against `bowshock_reference::anf` at the points the Euler gate gates (`out/gate/anf_3d.md`: wind tunnel M 0.69,
-/// 0.79, 1.728, 1.99, 2.48; free flight 1.8, 2.351, 2.665): CN_alpha 13 %, `x_cp` 0.25 cal, no worse than that gate. The 6-degree nonlinearity is INFO.
+/// 0.79, 1.728, 1.99, 2.48; free flight 1.8, 2.351, 2.665): CN_alpha 13 %, `x_cp` 0.25 cal, no worse than that gate. The 6-degree nonlinearity is INFO. The tunnel (`wt`)
+/// points run on the tunnel setup (`Re_L` 4e6, balance sting of 0.63 base diameters), the free-flight points as before. DESIGN3D item 51: CN_alpha is insensitive to the
+/// slope definition (0-1 degree slope, 2 degree secant, least squares over 0..5 degrees: within 2 %), the Reynolds number and the sting (within 1.5 %), so the 2-degree
+/// secant is kept; on the tunnel setup the subsonic offset is +11 to +13.4 % (one FAIL, Mach 0.79 in-plane), so it is not a like-for-like artefact.
 ///
 /// Provenance of the references: they are digitised from Yayla (2021) Fig. 3.10 / 4.4, which replot Dupuis' tunnel (WT) and free-flight points. The roll position of the
 /// WT points is not stated there nor in ARL-TR-6725 Fig. 5 (the public replot, which shows one WT series; its M 0.8 C_Nalpha reads about 16-17, consistent with 16.27), so
@@ -360,8 +377,9 @@ fn gate_l1_anf_cn_alpha_and_cp() {
     let mut points = pick(anf::WIND_TUNNEL, &wt, "wt");
     points.extend(pick(anf::FREE_FLIGHT, &ff, "ff"));
     let items: Vec<(&str, anf::AnfPoint, FinPhase, &str)> = points.iter().flat_map(|&(t, p)| PHASES.iter().map(move |&(ph, name)| (t, p, ph, name))).collect();
-    let runs = par_map(&items, |&(_, p, ph, _)| -> Result<(Solved, Solved, Case3), String> {
-        let (c2, c6) = (anf_half(p.mach, 2.0, ph, 3.147), anf_half(p.mach, 6.0, ph, 3.147));
+    let runs = par_map(&items, |&(tag, p, ph, _)| -> Result<(Solved, Solved, Case3), String> {
+        let tunnel = tag == "wt";
+        let (c2, c6) = (anf_half(p.mach, 2.0, ph, 3.147, tunnel), anf_half(p.mach, 6.0, ph, 3.147, tunnel));
         let mut s = Session::new(&c2)?;
         let r2 = s.run(&c2, false)?;
         let r6 = s.run(&c6, true)?;

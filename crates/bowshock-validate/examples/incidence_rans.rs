@@ -45,7 +45,10 @@ fn main() -> Result<(), String> {
     } else if example {
         WallFlow { re_c: 1.7e6, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0, sutherland: SUTHERLAND_SEA_LEVEL }
     } else {
-        WallFlow { re_c: 1.225 * 340.294 * 0.03 / 1.7894e-5, mach_max: 3.147, ks_body: 0.0, ks_fin: 0.0, sutherland: SUTHERLAND_SEA_LEVEL }
+        // `--re-l X`: the Reynolds number of the 10-calibre ANF body `Re_L = re_c * mach * 10` (the tunnel's ~4e6) instead of the sea-level free-flight value
+        let re_c = value("--re-l")
+            .map_or(Ok(1.225 * 340.294 * 0.03 / 1.7894e-5), |v| v.parse::<f64>().map(|re_l| re_l / (10.0 * mach)).map_err(|e| format!("--re-l: {e}")))?;
+        WallFlow { re_c, mach_max: 3.147, ks_body: 0.0, ks_fin: 0.0, sutherland: SUTHERLAND_SEA_LEVEL }
     };
     let tier = match value("--tier").as_deref().unwrap_or("lift") {
         "lift" => Tier::Lift(flow),
@@ -91,6 +94,11 @@ fn main() -> Result<(), String> {
                 f
             }
         })
+    };
+    // `--sting R`: a sting of radius `R` given as the ratio of the sting to the base diameter (the tunnel balance: 19 mm on 30 mm, 0.63) behind the base
+    let body = match value("--sting") {
+        Some(v) => body.with_sting(0.5 * v.parse::<f64>().map_err(|e| format!("--sting: {e}"))?),
+        None => body,
     };
     let (prec, pname) = match value("--precision").as_deref().unwrap_or("f32") {
         "f32" => (Precision::F32, "f32"),
@@ -148,16 +156,24 @@ fn main() -> Result<(), String> {
     if let Some(v) = value("--history-every") {
         return history(&mut runner, &case, v.parse().map_err(|e| format!("--history-every: {e}"))?);
     }
-    let t0 = Instant::now();
-    let r = runner.run_on(&case, false).map_err(|e| format!("{e}"))?;
-    let wall = t0.elapsed().as_secs_f64();
-    // CN over the last 1000 iterations of the 50-iteration samples: the oscillation of the monitor
-    let tail: Vec<f64> = r.cn_history.iter().filter(|(it, _)| *it + 1000 > r.iterations).map(|&(_, c)| c).collect();
-    let (lo, hi) = tail.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), &c| (l.min(c), h.max(c)));
-    let w = r.window;
-    let bd = runner.breakdown(&case).map_err(|e| format!("{e}"))?;
-    let split = format!("{{\"nose\":{:.5},\"afterbody\":{:.5},\"fins\":{:.5},\"x_cp_fins\":{:.4}}}", bd.nose.cn, bd.afterbody.cn, bd.fins().cn, bd.fins().x_cp);
-    println!(
+    // `--alphas a,b,c` (degrees): one INCIDENCE line per angle in order, the first cold, the others warm-started from the previous one (CN_alpha slopes in one process)
+    let alphas: Vec<f64> = match value("--alphas") {
+        Some(v) => v.split(',').map(|a| a.parse::<f64>().map_err(|e| format!("--alphas: {e}"))).collect::<Result<_, _>>()?,
+        None => vec![alpha],
+    };
+    for (n, &alpha) in alphas.iter().enumerate() {
+        case.alpha = alpha.to_radians();
+        let t0 = Instant::now();
+        let r = runner.run_on(&case, n > 0).map_err(|e| format!("{e}"))?;
+        let wall = t0.elapsed().as_secs_f64();
+        // CN over the last 1000 iterations of the 50-iteration samples: the oscillation of the monitor
+        let tail: Vec<f64> = r.cn_history.iter().filter(|(it, _)| *it + 1000 > r.iterations).map(|&(_, c)| c).collect();
+        let (lo, hi) = tail.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), &c| (l.min(c), h.max(c)));
+        let w = r.window;
+        let bd = runner.breakdown(&case).map_err(|e| format!("{e}"))?;
+        let split =
+            format!("{{\"nose\":{:.5},\"afterbody\":{:.5},\"fins\":{:.5},\"x_cp_fins\":{:.4}}}", bd.nose.cn, bd.afterbody.cn, bd.fins().cn, bd.fins().x_cp);
+        println!(
         "INCIDENCE {{\"mach\":{mach},\"alpha_deg\":{alpha},\"tier\":\"{}\",\"cfl_max\":{},\"sub_iters\":{},\"roe\":{},\"precision\":\"{pname}\",\"iterations\":{},\"stop\":\"{:?}\",\"drop_orders\":{:.2},\"cn\":{:.5},\"ca\":{:.5},\"x_cp\":{:.4},\"cn_parts\":{split},\"window\":{},\"cn_last1000_half_range_rel\":{:.4},\"y_plus_max\":{:.1},\"wall_s\":{wall:.1},\"ms_per_iter\":{:.2}}}",
         value("--tier").unwrap_or_else(|| "lift".into()),
         case.numerics.implicit.cfl_max,
@@ -177,9 +193,10 @@ fn main() -> Result<(), String> {
         r.y_plus_max,
         1e3 * wall / r.iterations.max(1) as f64
     );
-    if args.iter().any(|a| a == "--history") {
-        for (it, c) in &r.cn_history {
-            println!("CN {it} {c:.6}");
+        if args.iter().any(|a| a == "--history") {
+            for (it, c) in &r.cn_history {
+                println!("CN {it} {c:.6}");
+            }
         }
     }
     Ok(())
