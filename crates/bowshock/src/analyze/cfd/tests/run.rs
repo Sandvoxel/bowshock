@@ -105,6 +105,23 @@ fn the_example_table_solves_and_agrees_with_extended() {
     }
 }
 
+/// With no GPU the default engine is the legacy one, and the table says why (`solver::Engine::no_gpu_fallback`); with a GPU, or an engine named by `BOWSHOCK_ENGINE`, it
+/// says nothing of the kind.
+#[test]
+fn a_table_says_why_the_legacy_engine_solved_it_when_there_is_no_gpu() {
+    let (rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    let job =
+        Job { plan, altitude: 120.0, nodes: vec![0.6], stage: 1, grid: CfdGrid::Coarse, compute: Default::default(), cpu_only: false, stability: Vec::new() };
+    let notes = job_notes(&job);
+    match solver::Engine::no_gpu_fallback() {
+        Some(why) => {
+            assert!(notes.iter().any(|n| n == why) && !solves_3d());
+        }
+        None => assert!(notes.len() == job.plan.notes.len()),
+    }
+}
+
 #[test]
 fn a_cancel_stops_before_the_next_point() {
     let (rocket, vehicle) = example();

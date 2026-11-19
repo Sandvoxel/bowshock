@@ -350,7 +350,7 @@ pub(in crate::analyze) struct Tally {
 }
 
 /// The notes a table starts with: the plan's, and why the legacy engine solved it when the 3D engine would have but there is no GPU ([`solver::Engine::no_gpu_fallback`]).
-fn job_notes(job: &Job) -> Vec<String> {
+pub(super) fn job_notes(job: &Job) -> Vec<String> {
     let mut notes = job.plan.notes.clone();
     notes.extend(solver::Engine::no_gpu_fallback().map(str::to_string));
     notes

@@ -67,6 +67,7 @@ fn the_engine_is_the_3d_one_unless_asked_and_travels_in_the_spec() {
     // BOWSHOCK_ENGINE decides the default of a new analysis, and a machine without a GPU falls back to the legacy engine with a reason; the tests run without the variable
     if std::env::var("BOWSHOCK_ENGINE").is_err() {
         let expect = if bowshock_core::gpu_name().is_some() { Engine::Solver3 } else { Engine::Legacy };
+        eprintln!("gpu {:?}: the default engine is {expect:?}", bowshock_core::gpu_name());
         assert_eq!(a.spec().unwrap().engine, expect);
         assert_eq!(Engine::no_gpu_fallback().is_some(), expect == Engine::Legacy);
     }

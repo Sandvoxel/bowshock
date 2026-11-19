@@ -52,6 +52,18 @@ to about 4" and items 43-44.
   - Tunnel like-for-like (item 51): G-L1 tunnel points at `Re_L` 4e6 with the 0.63 sting; slope definition, Re and sting move subsonic CN_alpha by only about -1.5 %.
   - G-S at 64 chord cells (item 52): 2 cells across the fin in both domains; Mach 0.8 is `FAIL KNOWN` (+2.3 / +4.6 %): the half domain's free fins carry an
     asymmetric, oscillating trailing-edge wake the symmetric sector cannot; Mach 2 agrees to 0.003 %.
+- **2026-11-19 (branch `product`): the 3D engine is the product default.** `Engine::DEFAULT = Solver3` (`analysis.rs`); `Analysis::new` and a spec without an `engine` key take
+  it, `Analysis::from_internal` stays legacy (the 3D engine needs a dimensional body), `Analysis::legacy(&body)` asks for the legacy engine explicitly (the legacy tests, tools and
+  the scripted solve demo use it; `BOWSHOCK_ENGINE=legacy` forces it for the app). **No GPU:** `Engine::from_env` falls back to `Legacy` when `gpu_name()` is `None` (a 3D solve
+  on the CPU takes hours) and `Engine::no_gpu_fallback()` carries the reason, which the CFD table shows as a note; `BOWSHOCK_ENGINE=3d` still runs the 3D solver on the CPU,
+  and a machine with only a remote GPU must set it too (the fleet's engine is the process's). **OpenRocket export:** Analyze > Export > `OpenRocket CFD` writes
+  `<name>-drag.csv` (`Mach,AoA,Cd`) and `<name>-stability.csv` (`Mach,AoA,Cn,Cm,Cp`, Cp in metres from the nose, Cm about the nose tip, a zero-angle row with Cn 0) in the formats of the
+  OpenRocket guide (*Aerodynamic lookup tables*); `analyze/openrocket.rs`, read back by `import.rs` (new `Cm` column) in the round-trip tests. **Uncertainty bands, no second
+  sweep:** `bowshock_core::uncertainty` is the one table of measured terms with their DESIGN3D items (46/47 model bias 2.6-6.7 % high, stop rule 0.3-1 %, grid 0.8 % at 64 chord
+  cells and 2.8-6.8 % low for Draft, item 45 wall temperature up to +6 % from Mach 1.5, 1 % reference scatter; x_cp 0.12 cal aft subsonic, 0.25 cal supersonic; CN_alpha 11 / 10 % high);
+  `PolarPoint::{cd_band, x_cp_band}` (and `cd_uncertainty` = the larger half) are filled by `Engine::Solver3` for every point, `estimate_uncertainty` is the legacy engine's only.
+  `CfdTable::bands` / `CfdLiftTable::bands` mark a table as the 3D engine's; Analyze shows `Cd band`, `Margin lower bound` and `Not meshed: lugs, buttons` (one lug changed an
+  apogee by +16 % at model scale; the lugs' build-up drag is in the table but is not in the band).
 - **Still open:**
   - subsonic CN_alpha: +13.4 % against the tunnel at Mach 0.79 in-plane (G-L1 FAIL, 13 % band), +11 % against free flight (±14-17 % in the data); at the steady-RANS /
     data limit (items 46, 51);
