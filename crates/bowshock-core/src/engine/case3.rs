@@ -259,6 +259,9 @@ pub const DRAG_REL_WINDOW: usize = 500;
 /// Target `y+` of the first cell of the Draft tier on the body and on the fin sides.
 pub const DRAFT_Y_PLUS: f64 = 40.0;
 
+/// Below this Mach number the Draft tier takes its safe variant ([`Case3::draft_subsonic`], DESIGN3D item 32): the facade applies it to every Draft case (and its seed wedge) under it.
+pub const DRAFT_SAFE_BELOW_MACH: f64 = 0.8;
+
 /// What a 3D grid is resolved for: the wall spacing of the body and of the fin sides, and the azimuthal policy.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Tier {

@@ -489,10 +489,11 @@ pub(super) fn node_analysis(
     let mut analysis = solver::Analysis::new(&job.plan.body)
         .map_err(|e| Failed::Message(e.to_string()))?
         .resolution(match (kind, job.grid) {
-            // Coarse is the default, for exploring; Medium (Refine) is about 3.5x slower per point and its Cd about 1 % different.
-            (NodeKind::Lift, _) | (_, CfdGrid::Coarse) => solver::Resolution::Coarse,
+            // Coarse is the default, for exploring; Medium (Refine) is about 3.5x slower per point and its Cd about 1 % different. The angles are solved coarse, and
+            // on the Draft grid on the Draft tier's half domain.
+            (NodeKind::Lift, CfdGrid::Coarse | CfdGrid::Medium) | (NodeKind::Drag, CfdGrid::Coarse) => solver::Resolution::Coarse,
             (NodeKind::Drag, CfdGrid::Medium) => solver::Resolution::Medium,
-            (NodeKind::Drag, CfdGrid::Draft) => solver::Resolution::Draft,
+            (_, CfdGrid::Draft) => solver::Resolution::Draft,
         })
         .backend(session.backend())
         .keep_fields(true);

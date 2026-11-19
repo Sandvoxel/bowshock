@@ -26,7 +26,7 @@
 
 use super::*;
 use crate::engine::axisym_init::{axisym_to_sector, AxisymInit};
-use crate::engine::case3::{Tier, WallFlow};
+use crate::engine::case3::{Tier, WallFlow, DRAFT_SAFE_BELOW_MACH};
 use crate::engine::field3::field3_of;
 use crate::engine::grid3::Fins3;
 use crate::engine::planform::Planform;
@@ -504,13 +504,14 @@ impl Analysis {
         }))
     }
 
-    /// The engine's tier of condition `c`: Euler without wall flow; with it the lift tier at an angle of attack and, at zero incidence, `Coarse` for
-    /// [`Resolution::Coarse`], `Draft` for [`Resolution::Draft`] and `Fine` for the finer resolutions.
+    /// The engine's tier of condition `c`: Euler without wall flow; with it `Draft` for [`Resolution::Draft`] (at any incidence: the half domain of the Draft tier is about half the
+    /// cells of the lift tier's, DESIGN3D item 57), otherwise the lift tier at an angle of attack and, at zero incidence, `Coarse` for [`Resolution::Coarse`] and `Fine` for the
+    /// finer resolutions.
     fn tier3(c: Condition, resolution: Resolution, flow: Option<WallFlow>) -> Tier {
         match flow {
             None => Tier::Euler,
-            Some(f) if c.alpha_deg != 0.0 => Tier::Lift(f),
             Some(f) if resolution == Resolution::Draft => Tier::draft(f),
+            Some(f) if c.alpha_deg != 0.0 => Tier::Lift(f),
             Some(f) if resolution == Resolution::Coarse => Tier::Coarse(f),
             Some(f) => Tier::Fine(f),
         }
@@ -529,6 +530,9 @@ impl Analysis {
             Kind::Sector => Case3::sector(c.mach, body, self.fins3_solver3().expect("checked").expect("a sector has fins"), tier, level),
             Kind::Half => Case3::base_half(c.mach, c.alpha_deg.to_radians(), body, self.fins3_solver3().expect("checked"), tier, level),
         };
+        if matches!(tier, Tier::Draft(..)) && c.mach < DRAFT_SAFE_BELOW_MACH {
+            case = case.draft_subsonic();
+        }
         if let Some(t) = self.wall_temperature_ratio {
             case.wall_thermal = WallThermal::Isothermal(t);
         }
