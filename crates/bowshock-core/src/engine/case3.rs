@@ -245,9 +245,13 @@ pub struct WallFlow {
 /// `110.4 K / 288.15 K`: the Sutherland ratio of the ISA at sea level.
 pub const SUTHERLAND_SEA_LEVEL: f64 = 110.4 / 288.15;
 
-/// Cells over the fin root chord of the Draft tier at level 0 (the other tiers: 32). 20 left the fin pressure 8-10 % low (example rocket, Mach 1.0 / 1.7: 0.1582 / 0.1534 against
+/// Cells over the fin root chord of the Draft tier at level 0 (Coarse and Fine: [`COARSE_CHORD_CELLS`]). 20 left the fin pressure 8-10 % low (example rocket, Mach 1.0 / 1.7: 0.1582 / 0.1534 against
 /// 0.1709 / 0.1674 on Coarse); 32 closes it (0.1720 / 0.1683) for 11 % more cells, 17 % more wall and the same memory, and puts Draft within 0.1 % of Coarse at Mach 1.7 (GPU, cfl 20).
 pub const DRAFT_CHORD_CELLS: usize = 32;
+
+/// Cells over the fin root chord of the Coarse and Fine tiers at level 0 (Lift keeps the grid default, 32). 32 under-resolves the fin leading edge (2-7 % of CD0 against the
+/// grid-converged value, DESIGN3D item 47); 64 lands within 0.8 %.
+pub const COARSE_CHORD_CELLS: usize = 64;
 
 /// Window \[iterations\] of the relative drag rule on a wedge ([`Case3::with_drag_tolerance`]; the number of the 2D engine's rule).
 pub const DRAG_REL_WINDOW: usize = 500;
@@ -554,9 +558,13 @@ impl Case3 {
         // ([`Numerics3::cfl_control`]); the fixed rule of [`VISCOUS_3D_CFL_MAX`] is [`Case3::without_cfl_control`]
         match (&self.grid.fins, tier) {
             (Some(f), Tier::Draft(..)) => {
-                // growth 1.35 / 1.6 in and outside the layer (1.25 / 1.35), 32 cells over the root chord as the other tiers (`DRAFT_CHORD_CELLS`)
+                // growth 1.35 / 1.6 in and outside the layer (1.25 / 1.35), 32 cells over the root chord (`DRAFT_CHORD_CELLS`; Coarse and Fine: `COARSE_CHORD_CELLS`)
                 self.grid.fin_stack = Some(FinStack { growth_bl: 1.35, growth_out: 1.6, ..FinStack::from_flow(flow.re_c, flow.mach_max, f.root_chord, y_fin) });
                 self.grid.fin_chord_cells = Some(DRAFT_CHORD_CELLS << level);
+            }
+            (Some(f), Tier::Coarse(..) | Tier::Fine(..)) => {
+                self.grid.fin_stack = Some(FinStack::from_flow(flow.re_c, flow.mach_max, f.root_chord, y_fin));
+                self.grid.fin_chord_cells = Some(COARSE_CHORD_CELLS << level);
             }
             (Some(f), _) => self.grid.fin_stack = Some(FinStack::from_flow(flow.re_c, flow.mach_max, f.root_chord, y_fin)),
             (None, Tier::Lift(_)) if matches!(self.grid.domain, Domain3::Half { .. }) => self.grid.nk = 32usize << level,
@@ -708,14 +716,14 @@ mod tests {
         let (b0, b1) = (base.grid.base.as_ref().unwrap(), same.grid.base.as_ref().unwrap());
         assert_eq!((b0.n_up, b0.n_nose, &b0.n_seg, b0.n_wake, b0.n_gap, b0.nj_out), (b1.n_up, b1.n_nose, &b1.n_seg, b1.n_wake, b1.n_gap, b1.nj_out));
         assert_eq!(same.grid.fin_stack, base.grid.fin_stack);
-        assert_eq!(same.grid.fin_chord_cells, Some(32));
+        assert_eq!(same.grid.fin_chord_cells, Some(64));
         let fine = base.clone().with_refinement(2.0);
         let b2 = fine.grid.base.as_ref().unwrap();
         assert_eq!(
             (b2.n_up, b2.n_nose, b2.n_seg[0], b2.n_wake, b2.n_gap, b2.nj_out),
             (2 * b0.n_up, 2 * b0.n_nose, 2 * b0.n_seg[0], 2 * b0.n_wake, 2 * b0.n_gap, 2 * b0.nj_out)
         );
-        assert_eq!(fine.grid.fin_chord_cells, Some(64));
+        assert_eq!(fine.grid.fin_chord_cells, Some(128));
         assert!((b2.dr_wall - 0.5 * b0.dr_wall).abs() < 1e-18 && (b2.dx_tip - 0.5 * b0.dx_tip).abs() < 1e-18);
         let (s0, s2) = (base.grid.fin_stack.unwrap(), fine.grid.fin_stack.unwrap());
         assert!((s2.y1 - 0.5 * s0.y1).abs() < 1e-18);
