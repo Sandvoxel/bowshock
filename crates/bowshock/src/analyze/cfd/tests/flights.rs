@@ -272,6 +272,23 @@ fn engine_name() -> &'static str {
     }
 }
 
+/// The Mach nodes and stability nodes of a solve: the app's, or `FLIGHTVAL_MACHS=0.8,2.0` (drag nodes only, no angle points) for a quick look.
+fn job_nodes() -> (Vec<f64>, Vec<f64>) {
+    match std::env::var("FLIGHTVAL_MACHS") {
+        Ok(list) => (list.split(',').map(|m| m.trim().parse().unwrap()).collect(), Vec::new()),
+        Err(_) => (nodes((0.1, 3.0)).unwrap(), lift_nodes((0.1, 3.0)).unwrap()),
+    }
+}
+
+/// The solve's progress for the log: one line per finished Mach number (and angle) with its time, iterations and how it ended.
+fn log_points(label: String) -> impl Fn(Event) + Send + Sync + 'static {
+    move |e| {
+        if let Event::Point(p) = e {
+            println!("{label} POINT at {:.0} s: M {:.2} alpha {:?} {} iterations, {:?}", p.at, p.mach, p.alpha_deg, p.iterations, p.outcome);
+        }
+    }
+}
+
 fn plan_of(v: &Vehicle) -> Result<Plan, String> {
     plan(&Rocket::default(), v, UnitSystem::default())
 }
@@ -308,15 +325,15 @@ fn flight_validation() {
             let job = Job {
                 plan: p,
                 altitude: f.site.altitude_ft * FT,
-                nodes: nodes((0.1, 3.0)).unwrap(),
+                nodes: job_nodes().0,
                 stage: 1,
                 grid: CfdGrid::Coarse,
                 compute: Default::default(),
                 cpu_only: false,
-                stability: lift_nodes((0.1, 3.0)).unwrap(),
+                stability: job_nodes().1,
             };
             let t0 = Instant::now();
-            let table = solve(&job, &Arc::new(AtomicBool::new(false)), |_| ()).unwrap_or_else(|e| panic!("{}: solve failed: {e}", f.id));
+            let table = solve(&job, &Arc::new(AtomicBool::new(false)), log_points(f.id.clone())).unwrap_or_else(|e| panic!("{}: solve failed: {e}", f.id));
             println!(
                 "{}: {engine} solved {} points + {} angle points on {} in {:.1} s wall ({:.1} s app); notes {:?}",
                 f.id,
@@ -410,15 +427,15 @@ fn stepped_rocket_solves_and_settles() {
     let job = Job {
         plan: p,
         altitude: stepped.site.altitude_ft * FT,
-        nodes: nodes((0.1, 3.0)).unwrap(),
+        nodes: job_nodes().0,
         stage: 1,
         grid: CfdGrid::Coarse,
         compute: Default::default(),
         cpu_only: false,
-        stability: lift_nodes((0.1, 3.0)).unwrap(),
+        stability: job_nodes().1,
     };
     let t0 = Instant::now();
-    let table = solve(&job, &Arc::new(AtomicBool::new(false)), |_| ()).expect("the stepped rocket solves");
+    let table = solve(&job, &Arc::new(AtomicBool::new(false)), log_points("stepped".into())).expect("the stepped rocket solves");
     println!(
         "stepped: {} points + {} angle points on {} in {:.1} s wall; notes {:?}",
         table.points.len(),
