@@ -204,6 +204,8 @@ fn per_fin(case: &Case3, n: u32, s: &Session) {
         let q = 0.5 * case.mach * case.mach * std::f64::consts::FRAC_PI_4;
         let p_inf = r.host.cfg.freestream[4];
         let mut acc = vec![[0.0f64; 3]; angles.len()];
+        // the mean trailing-edge base pressure (Cp) on the two sides of each fin's mid-plane (azimuth below / above the fin's): equal when the wake is symmetric about the fin
+        let mut sides = vec![[(0.0f64, 0.0f64); 2]; angles.len()];
         for w in wall_samples(g, &r.host.u) {
             let slot = match w.class {
                 Wall::FinLe => 0,
@@ -214,11 +216,26 @@ fn per_fin(case: &Case3, n: u32, s: &Session) {
             let th = w.face.c[1].atan2(w.face.c[2]);
             let f = (0..angles.len()).min_by(|&a, &b| (angles[a] - th).abs().total_cmp(&(angles[b] - th).abs())).unwrap();
             acc[f][slot] += (w.pw - p_inf) * w.face.area * w.sign * w.face.n[0];
+            if slot == 1 {
+                let side = usize::from(th > angles[f]);
+                sides[f][side].0 += (w.pw - p_inf) * w.face.area;
+                sides[f][side].1 += w.face.area;
+            }
         }
         for (f, a) in acc.iter().enumerate() {
             let on_plane = angles[f] < 1e-9 || (PI - angles[f]).abs() < 1e-9;
             let k = if on_plane { 2.0 } else { 1.0 } * f64::from(n) / q;
-            println!("FIN theta {:6.2} deg ({}): N x per-fin CD  le {:.6} te {:.6} sides {:.6}", angles[f].to_degrees(), if on_plane { "half fin on a symmetry plane" } else { "whole fin" }, k * a[0], k * a[1], k * a[2]);
+            let cp = |(a, b): (f64, f64)| if b > 0.0 { a / b / (0.5 * case.mach * case.mach) } else { f64::NAN };
+            println!(
+                "FIN theta {:6.2} deg ({}): N x per-fin CD  le {:.6} te {:.6} sides {:.6}; TE face Cp below / above the fin plane {:.4} / {:.4}",
+                angles[f].to_degrees(),
+                if on_plane { "half fin on a symmetry plane" } else { "whole fin" },
+                k * a[0],
+                k * a[1],
+                k * a[2],
+                cp(sides[f][0]),
+                cp(sides[f][1])
+            );
         }
     }
 }
