@@ -264,6 +264,17 @@ fn main() -> Result<(), String> {
         let reference = if mach < 1.0 { 0.014593 } else { 0.008477 };
         println!("GF1-RATIO {tier_name} M{mach}: fin friction {:.6} / reference {reference} = {:.4}", d.fin_friction(), d.fin_friction() / reference);
     }
+    // the turbulent Mach number `M_t^2 = 2 k / a^2` of the fluid cells (DESIGN3D item 54): the largest value and the number of cells above the Wilcox threshold 1/16
+    if let (Ok(u), Ok(Some((turb, _)))) = (run.gpu.state_f64(), run.gpu.turb_state()) {
+        let g = &run.host.grid;
+        let (mut max, mut above, mut fluid) = (0.0f64, 0usize, 0usize);
+        for c in (0..u.len().min(turb.len())).filter(|&c| g.part[c] == bowshock_cfd::grid3::PART_FLUID) {
+            let w = bowshock_cfd::gas3::cons_to_prim3(&u[c]);
+            let mt2 = 2.0 * turb[c][0] / (bowshock_cfd::gas3::GAMMA * w[4] / w[0]);
+            (max, above, fluid) = (max.max(mt2), above + usize::from(mt2 > 0.0625), fluid + 1);
+        }
+        println!("MT2 {tier_name} M{mach}: max M_t^2 {max:.4}, {above} of {fluid} fluid cells above 1/16");
+    }
     println!(
         "TABLE-RUN {tier_name} M{mach}: cfl_max_start {} cfl_max_end {} cfl_ref {} sub_iters {} accepted {} wasted {} wall_s {wall:.1} stop {:?} ca {:.5} window_osc {}",
         case.numerics.implicit.cfl_max,

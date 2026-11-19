@@ -18,7 +18,7 @@ use bowshock_cfd::sst::Compressibility;
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
 use bowshock_core::engine::case3::{Case3, Tier, WallFlow};
 use bowshock_core::engine::gpu3::GpuRunner3;
-use bowshock_core::engine::run3::{wall_samples, Wall};
+use bowshock_core::engine::run3::{drag_parts_on, run3_on, wall_samples, Wall};
 
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -53,12 +53,38 @@ fn main() -> Result<(), String> {
         Some(other) => return Err(format!("--precision f32|df32, not {other}")),
     };
     let t = std::time::Instant::now();
-    let mut run = GpuRunner3::new(&case, precision).map_err(|e| e.to_string())?;
-    let p = run.run_on(&case, false).map_err(|e| e.to_string())?;
-    let d = run.drag_parts(&case).map_err(|e| e.to_string())?;
+    // `--cpu`: the f64 CPU solver (no GPU queue); else `GpuRunner3`
+    let (p, d, g, u, fs, turb) = if args.iter().any(|a| a == "--cpu") {
+        let mut s = case.build_solver().map_err(|e| e.to_string())?;
+        let p = run3_on(&case, &mut s, false);
+        let d = drag_parts_on(&case, &s);
+        let turb = s.rans().map(|r| r.turb.clone()).unwrap_or_default();
+        (p, d, s.grid.clone(), s.u.clone(), s.cfg.freestream, turb)
+    } else {
+        let mut run = GpuRunner3::new(&case, precision).map_err(|e| e.to_string())?;
+        let p = run.run_on(&case, false).map_err(|e| e.to_string())?;
+        let d = run.drag_parts(&case).map_err(|e| e.to_string())?;
+        let u = run.gpu.state_f64().map_err(|e| e.to_string())?;
+        let turb = run.gpu.turb_state().map_err(|e| e.to_string())?.map(|t| t.0).unwrap_or_default();
+        (p, d, run.host.grid.clone(), u, run.host.cfg.freestream, turb)
+    };
     let wall = t.elapsed().as_secs_f64();
-    let g = &run.host.grid;
-    let u = run.gpu.state_f64().map_err(|e| e.to_string())?;
+    let g = &g;
+    // the turbulent Mach number `M_t^2 = 2 k / a^2` of the fluid cells: where the compressibility corrections can act (Wilcox from `M_t^2 > 1/16`)
+    let (mut mt2_max, mut at, mut above) = (0.0f64, [0.0; 2], 0usize);
+    for c in 0..u.len().min(turb.len()) {
+        if g.part[c] != bowshock_cfd::grid3::PART_FLUID {
+            continue;
+        }
+        let w = cons_to_prim3(&u[c]);
+        let mt2 = 2.0 * turb[c][0] / (bowshock_cfd::gas3::GAMMA * w[4] / w[0]);
+        above += usize::from(mt2 > 0.0625);
+        if mt2 > mt2_max {
+            (mt2_max, at) =
+                (mt2, [(g.xc[c][0] - case.body.station(case.body.segments.len()).0) / 0.5, (g.xc[c][1] * g.xc[c][1] + g.xc[c][2] * g.xc[c][2]).sqrt() / 0.5]);
+        }
+    }
+    println!("BASEMT max M_t^2 {mt2_max:.4} at x/R {:.2} (from the base) r/R {:.2}; {above} fluid cells above the Wilcox threshold 1/16", at[0], at[1]);
     println!(
         "BASEFLOW comp {comp:?} M{mach} Re_D {re_d:.3e} nose {half_angle} deg len {len} D refine {refine}: {}x{}x{} = {} cells, {} iterations ({:?}), {wall:.1} s; Cp_base {:.4} (measured -0.102, {:+.1} %); CD {:.5} = friction {:.5} + nose {:.5} + afterbody {:.5} + base {:.5}",
         g.ni,
@@ -75,7 +101,6 @@ fn main() -> Result<(), String> {
         d.aft.iter().sum::<f64>(),
         d.base
     );
-    let fs = run.host.cfg.freestream;
     let (rho_inf, u_inf, p_inf) = (fs[0], mach, fs[4]);
     // the base profile: wall pressure of the base faces by radius (Cp as `base_cp`)
     let q = 0.5 * mach * mach;
