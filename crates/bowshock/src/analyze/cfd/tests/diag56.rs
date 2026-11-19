@@ -103,6 +103,7 @@ fn diag56_point() {
         flights::plan_and_altitude(&rocket)
     };
     assert!(plan.fins.is_some());
+    println!("PLAN fins {:?} outline {:?} body {:?}", plan.fins, plan.outline, plan.body);
     let machs: Vec<f64> = std::env::var("DIAG_MACHS").map(|v| v.split(',').map(|m| m.trim().parse().unwrap()).collect()).unwrap_or_else(|_| vec![0.8]);
     for mach in machs {
         let res = match std::env::var("DIAG_RES").as_deref() {

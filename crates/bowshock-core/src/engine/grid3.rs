@@ -1449,7 +1449,10 @@ pub fn print_quality(label: &str, g: &Grid3) {
     );
     println!("GRID {label}: min angle between cell edges {:.2} deg at {}", skew.0, at(skew.1, skew.2, skew.3));
     for (d, n) in ["i", "j", "k"].iter().enumerate() {
-        let (_, i, j, k) = ratio[d];
+        let (r, i, j, k) = ratio[d];
+        if r == 0.0 {
+            continue;
+        }
         let nb = [(1, 0, 0), (0, 1, 0), (0, 0, 1)][d];
         println!(
             "GRID {label}: max volume ratio of neighbours in {n} {:.2} at {} (edges {:?} against {:?})",
