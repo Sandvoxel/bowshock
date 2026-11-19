@@ -1334,6 +1334,133 @@ pub fn fin_stack_report(g: &Grid3) -> Option<StackReport> {
     Some(StackReport { y1: height(first), growth_max, cells: ks.len() })
 }
 
+#[doc(hidden)]
+fn sub3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn len3(a: [f64; 3]) -> f64 {
+    (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
+}
+
+/// Diagnostic: prints the quality numbers of the fluid cells of `g`: volume, edge lengths, aspect ratio, the angles between the mean edge directions, the volume ratio to the neighbours.
+pub fn print_quality(label: &str, g: &Grid3) {
+    let (ni, nj, nk) = (g.ni, g.nj, g.nk);
+    let node = |i: usize, j: usize, k: usize| {
+        let n = (k * (nj + 1) + j) * (ni + 1) + i;
+        [g.x[n], g.y[n], g.z[n]]
+    };
+    let at = |i: usize, j: usize, k: usize| {
+        let c = g.xc[g.cell(i, j, k)];
+        format!("({i},{j},{k}) x {:.4} r {:.4} th {:.1}", c[0], c[1].hypot(c[2]), c[2].atan2(c[1]).to_degrees())
+    };
+    // (value, i, j, k)
+    let mut vol_min = (f64::INFINITY, 0, 0, 0);
+    let mut aspect = (0.0f64, 0, 0, 0);
+    let mut skew = (90.0f64, 0, 0, 0);
+    let mut ratio = [(0.0f64, 0, 0, 0); 3];
+    let mut fluid = 0usize;
+    let mut aspect_hist = [0usize; 5];
+    let mut vol_sum = 0.0;
+    let r_max = (0..g.y.len()).map(|n| g.y[n].hypot(g.z[n])).fold(0.0, f64::max);
+    let dims = |i: usize, j: usize, k: usize| {
+        let m = |a: [f64; 3], b: [f64; 3]| len3(sub3(a, b));
+        [m(node(i + 1, j, k), node(i, j, k)), m(node(i, j + 1, k), node(i, j, k)), m(node(i, j, k + 1), node(i, j, k))]
+    };
+    for k in 0..nk {
+        for j in 0..nj {
+            for i in 0..ni {
+                let c = g.cell(i, j, k);
+                if g.part[c] != bowshock_cfd::grid3::PART_FLUID {
+                    continue;
+                }
+                fluid += 1;
+                let v = g.vol[c];
+                vol_sum += v;
+                if v < vol_min.0 {
+                    vol_min = (v, i, j, k);
+                }
+                let mut e = [[0.0; 3]; 3];
+                for a in 0..2 {
+                    for b in 0..2 {
+                        let d = [
+                            sub3(node(i + 1, j + a, k + b), node(i, j + a, k + b)),
+                            sub3(node(i + b, j + 1, k + a), node(i + b, j, k + a)),
+                            sub3(node(i + a, j + b, k + 1), node(i + a, j + b, k)),
+                        ];
+                        for (m, dm) in d.iter().enumerate() {
+                            for q in 0..3 {
+                                e[m][q] += 0.25 * dm[q];
+                            }
+                        }
+                    }
+                }
+                let l = [len3(e[0]), len3(e[1]), len3(e[2])];
+                // the cells on the axis are degenerate by construction: the aspect and the ratios are of the others
+                if g.xc[c][1].hypot(g.xc[c][2]) < 0.01 * r_max {
+                    continue;
+                }
+                let asp = l.iter().cloned().fold(0.0, f64::max) / l.iter().cloned().fold(f64::INFINITY, f64::min);
+                if asp > aspect.0 {
+                    aspect = (asp, i, j, k);
+                }
+                let bin = if asp < 10.0 {
+                    0
+                } else if asp < 100.0 {
+                    1
+                } else if asp < 1000.0 {
+                    2
+                } else if asp < 10000.0 {
+                    3
+                } else {
+                    4
+                };
+                aspect_hist[bin] += 1;
+                for (m, n) in [(0, 1), (0, 2), (1, 2)] {
+                    let cs = (e[m][0] * e[n][0] + e[m][1] * e[n][1] + e[m][2] * e[n][2]) / (l[m] * l[n]);
+                    // angle between the two edge directions as lines: 90 is orthogonal
+                    let ang = cs.abs().min(1.0).acos().to_degrees();
+                    if ang < skew.0 {
+                        skew = (ang, i, j, k);
+                    }
+                }
+                for (d, (di, dj, dk)) in [(1, 0, 0), (0, 1, 0), (0, 0, 1)].into_iter().enumerate() {
+                    let (i2, j2, k2) = (i + di, j + dj, k + dk);
+                    if i2 < ni && j2 < nj && k2 < nk && g.part[g.cell(i2, j2, k2)] == bowshock_cfd::grid3::PART_FLUID {
+                        let (a, b) = (g.vol[c], g.vol[g.cell(i2, j2, k2)]);
+                        let r = (a / b).max(b / a);
+                        if r.is_finite() && r > ratio[d].0 {
+                            ratio[d] = (r, i, j, k);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    println!(
+        "GRID {label}: {ni} x {nj} x {nk} = {} cells, {fluid} fluid, fluid volume {vol_sum:.4e} (aspect and ratios without the cells within 1 % of the axis)",
+        ni * nj * nk
+    );
+    println!("GRID {label}: min volume {:.3e} at {}", vol_min.0, at(vol_min.1, vol_min.2, vol_min.3));
+    println!(
+        "GRID {label}: max aspect {:.1} at {}; cells with aspect <10 / <100 / <1e3 / <1e4 / more: {aspect_hist:?}",
+        aspect.0,
+        at(aspect.1, aspect.2, aspect.3)
+    );
+    println!("GRID {label}: min angle between cell edges {:.2} deg at {}", skew.0, at(skew.1, skew.2, skew.3));
+    for (d, n) in ["i", "j", "k"].iter().enumerate() {
+        let (_, i, j, k) = ratio[d];
+        let nb = [(1, 0, 0), (0, 1, 0), (0, 0, 1)][d];
+        println!(
+            "GRID {label}: max volume ratio of neighbours in {n} {:.2} at {} (edges {:?} against {:?})",
+            ratio[d].0,
+            at(i, j, k),
+            dims(i, j, k),
+            dims(i + nb.0, j + nb.1, k + nb.2)
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

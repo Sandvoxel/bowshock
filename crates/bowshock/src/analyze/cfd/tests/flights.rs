@@ -124,6 +124,20 @@ fn fixtures() -> Vec<Fixture> {
     if let Some(blunt) = std::env::var("FLIGHTVAL_BLUNT_IN").ok().and_then(|v| v.parse().ok()) {
         all.iter_mut().for_each(|f| f.nose.blunt_radius = blunt);
     }
+    // `FLIGHTVAL_SHOULDER=0` merges the body sections into one tube of the first section's diameter (no fin can, no conical shoulder); `FLIGHTVAL_FIN_THICK_IN`,
+    // `FLIGHTVAL_SPAN_IN`, `FLIGHTVAL_SWEEP_IN` set the fin's thickness, span and sweep
+    if std::env::var("FLIGHTVAL_SHOULDER").is_ok_and(|v| v == "0") {
+        for f in &mut all {
+            let (d, l) = (f.body[0].fore_diameter, f.body.iter().map(|s| s.length).sum());
+            f.body = vec![SectionF { length: l, fore_diameter: d, aft_diameter: d }];
+        }
+    }
+    let probe = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<f64>().ok());
+    for f in &mut all {
+        f.fins.thickness = probe("FLIGHTVAL_FIN_THICK_IN").unwrap_or(f.fins.thickness);
+        f.fins.span = probe("FLIGHTVAL_SPAN_IN").unwrap_or(f.fins.span);
+        f.fins.sweep = probe("FLIGHTVAL_SWEEP_IN").unwrap_or(f.fins.sweep);
+    }
     match std::env::var("FLIGHTVAL_CASES") {
         Ok(list) => {
             let ids: Vec<&str> = list.split(',').map(str::trim).collect();
@@ -298,6 +312,13 @@ fn log_points(label: String) -> impl Fn(Event) + Send + Sync + 'static {
 
 fn plan_of(v: &Vehicle) -> Result<Plan, String> {
     plan(&Rocket::default(), v, UnitSystem::default())
+}
+
+/// The plan of the fixture `id` (with the probes of the environment applied) and its launch altitude in metres, for the diagnostics of `diag56`.
+pub(super) fn plan_and_altitude(id: &str) -> (Plan, f64) {
+    let f = fixtures().into_iter().find(|f| f.id == id).unwrap_or_else(|| panic!("no fixture {id}"));
+    let v = vehicle(&f, &MotorDb::bundled()).unwrap();
+    (plan_of(&v).unwrap(), f.site.altitude_ft * FT)
 }
 
 #[test]

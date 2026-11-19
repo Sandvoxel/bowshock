@@ -7,6 +7,7 @@ use bowshock_sim::Vehicle;
 use super::*;
 
 mod diag13;
+mod diag56;
 mod flights;
 mod interp;
 mod openrocket;
