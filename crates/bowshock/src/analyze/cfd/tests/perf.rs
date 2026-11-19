@@ -480,6 +480,7 @@ fn engine3d_draft_first() {
         }
         (table, wall)
     };
+    println!("DEVICE {:?}", solver::gpu_name());
     let (draft, t_draft) = solve(CfdGrid::Draft);
     println!("DRAFT-FIRST first result: {} points on {} in {t_draft:.1} s", draft.points.len(), draft.backend);
     if std::env::var_os("BOWSHOCK_DRAFT_ONLY").is_some() {
