@@ -93,6 +93,11 @@ fn main() -> Result<(), String> {
     if tier_name == "draft-safe" {
         case = case.draft_subsonic();
     }
+    // `--fin-y1-scale X`: the first cell of the fin stack times X (the fin y+ of the tier times X; DESIGN3D item 57: a per-point grid at low Mach with the fin y+ brought down)
+    if let Some(x) = value("--fin-y1-scale") {
+        let x: f64 = x.parse().map_err(|e| format!("--fin-y1-scale: {e}"))?;
+        case.grid.fin_stack.as_mut().ok_or("--fin-y1-scale needs a fin stack")?.y1 *= x;
+    }
     // `--refine S`: every cell count of the meridian grids and of the fin (chord, span) x S, the wall spacings and the fin stack's first cell / S, the stack's growth `1 + (g - 1) / S`
     // (`Case3::with_refinement`; the grid-convergence family of DESIGN3D item 47: S = 1 is the production grid, the default)
     let refine: f64 = value("--refine").map_or(Ok(1.0), |v| v.parse()).map_err(|e| format!("--refine: {e}"))?;
