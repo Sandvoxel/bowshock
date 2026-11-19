@@ -3,8 +3,9 @@
 //! back), for a chain of runners in one process.
 //!
 //! ```text
-//! mem_items --chain sector[,wedge,half,..] [--sub N] [--keep] [--iters N]
+//! mem_items --chain anf[,gf1,anfwedge,half,anfhalf,wedge,..] [--sub N] [--keep] [--iters N]
 //! ```
+//! `anf` (default) is `finned_table --anf --tier coarse`; `gf1` the G-F1 sector of `mem_stages`; `anfhalf` the ANF half domain at 2 degrees (Lift tier, `Between`); `half` the same with the G-F1 fins.
 //! `--keep` holds every runner of the chain alive (as the product keeps a table's solver); without it each runner is dropped before the next is built.
 
 use bowshock_cfd::gpu::Precision;
@@ -54,6 +55,8 @@ fn row(ctx: &luma::Context, tag: &str) {
 fn case_of(which: &str, mach: f64, sub: Option<usize>) -> Result<Case3, String> {
     let fins = Fins3 { count: 4, root_chord: 0.5, tip_chord: 0.5, span: 0.5, sweep: 0.0, thickness: 0.01, te_to_base: 0.0, profile: FinProfile::DoubleWedge, planform: None };
     let flow = WallFlow { re_c: 1.0e6, mach_max: 2.0, ks_body: 0.0, ks_fin: 0.0, sutherland: 0.368 };
+    // `finned_table --anf --tier coarse`: the Army-Navy Basic Finner with the sourced fin section, grid sized for Mach 3.147
+    let anf_flow = WallFlow { re_c: 1.225 * 340.294 * 0.03 / 1.7894e-5, mach_max: 3.147, ks_body: 0.0, ks_fin: 0.0, sutherland: 0.368 };
     let mut case = match which {
         "wedge" => {
             let body = BodySpec { nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762 }, aft: vec![AftSpec::Tube { length: 0.9134 }] };
@@ -65,7 +68,13 @@ fn case_of(which: &str, mach: f64, sub: Option<usize>) -> Result<Case3, String> 
             c.grid.domain = Domain3::Half { phase: FinPhase::Between };
             c
         }
-        _ => Case3::sector(mach, Case3::anf_body(), fins, Tier::Coarse(flow), 0),
+        "gf1" => Case3::sector(mach, Case3::anf_body(), fins, Tier::Coarse(flow), 0),
+        "anfhalf" => {
+            let mut c = Case3::base_half(mach, 2f64.to_radians(), Case3::anf_body(), Some(Case3::anf_fins()), Tier::Lift(anf_flow), 0);
+            c.grid.domain = Domain3::Half { phase: FinPhase::Between };
+            c
+        }
+        _ => Case3::sector(mach, Case3::anf_body(), Case3::anf_fins(), Tier::Coarse(anf_flow), 0),
     };
     if let Some(s) = sub {
         case.numerics.implicit.sub_iters = s;
