@@ -1,20 +1,8 @@
 #!/usr/bin/env bash
-# Diagnostic runner (DESIGN3D item 48): builds an example against a copy of the pinned Luma rev (7fafed6, from the cargo git checkout) patched with
-# tools/memprof/luma-memstats.patch (env-gated `LUMA_MEMSTATS=<file>`: live intervals and sizes of every buffer of each recording; no behaviour change),
-# runs it, and prints the stats file.   Usage: tools/memprof/run.sh <example args...>   e.g.  --case sector --sub 3
+# Device-memory profile of the 3D GPU step (DESIGN3D items 48 and 49): builds and runs `mem_items` (crates/bowshock-validate/examples/mem_items.rs)
+# against the pinned Luma, which has `Context::memory_stats` / `trim` since 231c986. (Item 48's per-buffer live intervals needed a patch of Luma 7fafed6: branch `memprof`, 2c0e356.)
+# Usage: tools/memprof/run.sh <example args...>   e.g.  --chain anf --sub 2 --reclaim --run-on 200
 set -euo pipefail
-here=$(cd "$(dirname "$0")" && pwd)
-root=$(cd "$here/../.." && pwd)
-copy=${MEMPROF_LUMA:-$HOME/.cache/bowshock-memprof-luma}
-rm -rf "$copy"; mkdir -p "$copy"
-cp -r "$(ls -d "$HOME"/.cargo/git/checkouts/luma-*/7fafed6 | head -1)"/. "$copy"/
-patch -p1 -d "$copy" < "$here/luma-memstats.patch" >/dev/null
-stats=${MEMPROF_STATS:-$(mktemp /tmp/memstats.XXXXXX)}
-: > "$stats"
+root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$root"
-cp "$here/mem_items.rs" crates/bowshock-validate/examples/mem_items.rs
-LUMA_MEMSTATS="$stats" cargo run --release \
-  --config "patch.\"https://github.com/flipnoteman/Luma.git\".luma.path=\"$copy\"" \
-  -p bowshock-validate --example "${MEMPROF_EXAMPLE:-mem_items}" -- "$@"
-echo "=== LUMA_MEMSTATS $stats"
-cat "$stats"
+cargo run --release -p bowshock-validate --example "${MEMPROF_EXAMPLE:-mem_items}" -- "$@"

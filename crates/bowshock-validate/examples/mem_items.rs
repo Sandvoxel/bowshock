@@ -1,12 +1,13 @@
-//! `mem_items` (DESIGN3D item 48, only builds against the memstats-patched Luma: `tools/memprof/run.sh`): device memory of the 3D GPU step by phase, with Luma's own counters
-//! (`Context::debug_mem`: bytes of resident segments + plans, idle pooled bytes) next to the process figure of nvidia-smi, before and after `debug_reclaim` (idle pool given
-//! back), for a chain of runners in one process.
+//! `mem_items` (DESIGN3D items 48 and 49, `tools/memprof/run.sh`): device memory of the 3D GPU step by phase, with Luma's own counters
+//! (`Context::memory_stats`: resident bytes of arrays + plans, idle pooled bytes) next to the process figure of nvidia-smi (sampled every 40 ms: the peak since the last row is the
+//! compile peak), before and after `Context::trim` (idle pool given back), for a chain of runners in one process.
 //!
 //! ```text
-//! mem_items --chain anf[@SUB][,gf1,anfwedge,half,anfhalf,wedge,..] [--sub N] [--keep] [--iters N] [--reclaim] [--run-on N] [--snaps N]
+//! mem_items --chain anf[@SUB][,gf1,anfwedge,half,anfhalf,wedge,..] [--sub N] [--keep] [--iters N] [--reclaim] [--ext] [--run-on N] [--snaps N]
 //! ```
 //! `anf` (default) is `finned_table --anf --tier coarse`; `gf1` the G-F1 sector of `mem_stages`; `anfhalf` the ANF half domain at 2 degrees (Lift tier, `Between`); `half` the same with the G-F1 fins.
 //! `--reclaim` gives the idle pool back after every row (measures the steady state; without it the rows show the natural footprint, pool included).
+//! `--ext` builds the runners in extended (double-float) precision.
 //! `--keep` holds every runner of the chain alive (as the product keeps a table's solver); without it each runner is dropped before the next is built.
 
 use bowshock_cfd::gpu::Precision;
@@ -48,24 +49,19 @@ fn start_sampler() {
 
 fn row(ctx: &luma::Context, tag: &str, reclaim: bool) {
     ctx.sync().ok();
-    let (res, idle, n) = ctx.debug_mem();
+    let m = ctx.memory_stats();
+    let (res, idle) = (m.resident_bytes, m.pooled_bytes);
     let before = smi();
     let peak = PEAK.swap(0, std::sync::atomic::Ordering::Relaxed).max(before);
     let after = if reclaim {
-        ctx.debug_reclaim().ok();
+        ctx.trim().ok();
         ctx.sync().ok();
         std::thread::sleep(std::time::Duration::from_millis(300));
         smi()
     } else {
         0
     };
-    println!("MEMITEM {tag:<64} smi {before:>6} MiB (peak since last row {peak:>6})  luma resident {:>6} MiB  idle pool {:>6} MiB ({n} buffers)  smi after reclaim {after:>6} MiB", res >> 20, idle >> 20);
-    if let Some(p) = std::env::var_os("LUMA_MEMSTATS") {
-        use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
-            let _ = writeln!(f, "ROW {tag} smi={before} resident={res} idle={idle} smi_after_reclaim={after}");
-        }
-    }
+    println!("MEMITEM {tag:<64} smi {before:>6} MiB (peak since last row {peak:>6})  luma resident {:>6} MiB  idle pool {:>6} MiB  smi after reclaim {after:>6} MiB", res >> 20, idle >> 20);
 }
 
 fn case_of(which: &str, mach: f64, sub: Option<usize>) -> Result<Case3, String> {
@@ -117,7 +113,7 @@ fn main() -> Result<(), String> {
             None => (item, sub),
         };
         let case = case_of(which, 2.0, sub_item)?;
-        let mut r = GpuRunner3::new(&case, Precision::F32).map_err(|e| e.to_string())?;
+        let mut r = GpuRunner3::new(&case, if args.iter().any(|a| a == "--ext") { Precision::Extended } else { Precision::F32 }).map_err(|e| e.to_string())?;
         let cells = r.host.grid.ni * r.host.grid.nj * r.host.grid.nk;
         let persistent: usize = r.gpu.memory_report().iter().map(|(_, b)| b).sum();
         println!("MEMITEM == {which}: {cells} cells ({} x {} x {}), sub_iters {}, ledger of persistent arrays {} MiB ({:.0} B/cell)", r.host.grid.ni, r.host.grid.nj, r.host.grid.nk, case.numerics.implicit.sub_iters, persistent >> 20, persistent as f64 / cells as f64);
