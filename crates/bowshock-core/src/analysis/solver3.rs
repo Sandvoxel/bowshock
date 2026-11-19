@@ -510,6 +510,7 @@ impl Analysis {
         match flow {
             None => Tier::Euler,
             Some(f) if c.alpha_deg != 0.0 => Tier::Lift(f),
+            Some(f) if resolution == Resolution::Draft => Tier::draft(f),
             Some(f) if resolution == Resolution::Coarse => Tier::Coarse(f),
             Some(f) => Tier::Fine(f),
         }
@@ -917,6 +918,22 @@ mod tests {
         // an explicit reference diameter is the facade's own business
         let b = Analysis::new(&spec).unwrap().reference_diameter(0.1);
         assert!((b.area_ratio() - 1.0).abs() < 1e-12);
+    }
+
+    /// Each resolution maps to its own tier at zero incidence, and every one to the lift tier at an angle of attack.
+    #[test]
+    fn the_resolutions_map_to_their_tiers() {
+        use crate::engine::case3::SUTHERLAND_SEA_LEVEL;
+        let flow = WallFlow { re_c: 1.7e6, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0, sutherland: SUTHERLAND_SEA_LEVEL };
+        let tier = |alpha: f64, r: Resolution| Analysis::tier3(Condition::new(1.0, alpha), r, Some(flow));
+        assert!(matches!(tier(0.0, Resolution::Draft), Tier::Draft(..)));
+        assert!(matches!(tier(0.0, Resolution::Coarse), Tier::Coarse(_)));
+        assert!(matches!(tier(0.0, Resolution::Medium), Tier::Fine(_)));
+        assert!(matches!(tier(0.0, Resolution::Fine), Tier::Fine(_)));
+        for r in [Resolution::Draft, Resolution::Coarse, Resolution::Medium, Resolution::Fine] {
+            assert!(matches!(tier(2.0, r), Tier::Lift(_)));
+            assert!(matches!(Analysis::tier3(Condition::new(1.0, 0.0), r, None), Tier::Euler));
+        }
     }
 
     /// The Draft tier takes its safe subsonic variant (`Case3::draft_subsonic`: the full domain and wake) below Mach 0.8, in the case of the facade and in the wedge that seeds a
