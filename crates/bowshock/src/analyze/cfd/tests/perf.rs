@@ -337,9 +337,20 @@ fn half_domain_against_the_sting_grid() {
     }
 }
 
+/// The grid setting of the timing runs: what the app does (`shared_grid()`), unless `BOWSHOCK_SHARED_GRID` says `1` / `on` / `true` (every node on the grid sized for the table's highest
+/// Mach number) or `0` / `off` / `false` (every node on the grid sized for its own Mach number).
+fn shared_grid_setting() -> bool {
+    match std::env::var("BOWSHOCK_SHARED_GRID").ok().as_deref().map(str::to_ascii_lowercase).as_deref() {
+        Some("1" | "on" | "true") => true,
+        Some("0" | "off" | "false") => false,
+        _ => shared_grid(),
+    }
+}
+
 /// Where the time of the 3D engine goes, through the app path: the FINNED example rocket as the app solves it under `BOWSHOCK_ENGINE=3d`: 10 sector points
 /// at zero incidence, then 8 Mach numbers at 2 and 6 degrees on the half domain, one `run` per node (`solve`). Prints one line per solved point (the runner's
 /// `PointTiming` joined with the facade's `FacadeTiming`), the sums by kind and the whole solve, and a `PERF` line.
+/// The grid setting is the app's (`shared_grid()`) unless `BOWSHOCK_SHARED_GRID=0|1` overrides it (see [`shared_grid_setting`]).
 /// `tools/gpuq/gpuq submit --host local --name engine3d-timing -- env BOWSHOCK_ENGINE=3d cargo nextest run --release -p bowshock engine3d_finned_timing --run-ignored only --no-capture`.
 #[test]
 #[ignore = "BOWSHOCK_ENGINE=3d: solves the finned example's table and angles on the GPU"]
@@ -348,7 +359,7 @@ fn engine3d_finned_timing() {
     let (rocket, vehicle) = example();
     let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
     assert!(plan.fins.is_some());
-    let shared = std::env::var("BOWSHOCK_SHARED_GRID").is_ok();
+    let shared = shared_grid_setting();
     // `BOWSHOCK_MACHS=3.0` (a comma list): these Mach numbers instead of the table's, for the drag and for the angles (one node of each: the biggest grids, in a minute)
     let machs: Option<Vec<f64>> = std::env::var("BOWSHOCK_MACHS").ok().map(|v| v.split(',').filter_map(|m| m.trim().parse().ok()).collect());
     let draft = std::env::var("BOWSHOCK_GRID").is_ok_and(|g| g == "draft");
@@ -472,7 +483,7 @@ fn engine3d_draft_first() {
     let solve = |grid: CfdGrid| {
         let _ = solver::engine::timing::take_timings();
         let t = Instant::now();
-        let table = solve_sized(&job(grid), &Arc::new(AtomicBool::new(false)), |_| (), true).expect("the example solves");
+        let table = solve_sized(&job(grid), &Arc::new(AtomicBool::new(false)), |_| (), shared_grid_setting()).expect("the example solves");
         let wall = t.elapsed().as_secs_f64();
         for r in solver::engine::timing::take_timings() {
             let per_iter = if r.chunks_rest > 0 { 1000.0 * r.rest_chunks_s / (r.chunks_rest * 50) as f64 } else { f64::NAN };
