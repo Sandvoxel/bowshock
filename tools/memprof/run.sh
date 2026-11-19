@@ -12,8 +12,9 @@ patch -p1 -d "$copy" < "$here/luma-memstats.patch" >/dev/null
 stats=${MEMPROF_STATS:-$(mktemp /tmp/memstats.XXXXXX)}
 : > "$stats"
 cd "$root"
+cp "$here/mem_items.rs" crates/bowshock-validate/examples/mem_items.rs
 LUMA_MEMSTATS="$stats" cargo run --release \
   --config "patch.\"https://github.com/flipnoteman/Luma.git\".luma.path=\"$copy\"" \
-  -p bowshock-validate --example "${MEMPROF_EXAMPLE:-mem_stages}" -- "$@"
+  -p bowshock-validate --example "${MEMPROF_EXAMPLE:-mem_items}" -- "$@"
 echo "=== LUMA_MEMSTATS $stats"
 cat "$stats"

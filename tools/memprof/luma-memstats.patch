@@ -1,7 +1,42 @@
+diff -r a/src/context/mod.rs b/src/context/mod.rs
+--- a/src/context/mod.rs	2026-11-18 18:54:31.858259329 -0800
++++ b/src/context/mod.rs	2026-11-18 19:00:15.526033190 -0800
+@@ -700,6 +700,17 @@
+     }
+ 
+     /// Which segments of arrays currently hold a device buffer.
++    /// Diagnostic (memory-profiling patch): `(resident segment+plan bytes, idle pooled bytes, idle pooled buffers)`.
++    pub fn debug_mem(&self) -> (u64, u64, usize) {
++        let (idle, n) = lock(&self.inner.pool).idle_stats();
++        (self.pager().resident_now(), idle, n)
++    }
++
++    /// Diagnostic: gives every idle pooled buffer back to the device.
++    pub fn debug_reclaim(&self) -> Result<()> {
++        self.reclaim_idle_buffers()
++    }
++
+     pub(crate) fn pager(&self) -> &Pager {
+         &self.inner.pager
+     }
 diff -r a/src/context/record.rs b/src/context/record.rs
 --- a/src/context/record.rs	2026-11-18 18:54:31.858290609 -0800
-+++ b/src/context/record.rs	2026-11-18 18:54:46.471538730 -0800
-@@ -388,6 +388,7 @@
++++ b/src/context/record.rs	2026-11-18 19:00:15.526483100 -0800
+@@ -209,6 +209,13 @@
+                 for buffer in recording.share_transients() {
+                     self.recycle(buffer);
+                 }
++                if let Some(path) = std::env::var_os("LUMA_MEMSTATS") {
++                    use std::io::Write;
++                    let (res, idle, n) = self.debug_mem();
++                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
++                        let _ = writeln!(f, "MEM end_recording resident={res} idle_pool={idle} idle_buffers={n} transient_kept={}", recording.transient.iter().map(Buffer::size).sum::<u64>());
++                    }
++                }
+                 let kept: u64 = recording.transient.iter().map(Buffer::size).sum();
+                 if kept > 0 {
+                     recording.resident = Some(Accounted::new(self, kept));
+@@ -388,6 +395,7 @@
                  becomes[n] = Some(*owner[slot].get_or_insert(n));
              }
          }
@@ -9,7 +44,7 @@ diff -r a/src/context/record.rs b/src/context/record.rs
          let merged: FxMap<u64, Buffer> = becomes
              .iter()
              .enumerate()
-@@ -424,3 +425,56 @@
+@@ -424,3 +432,56 @@
          }
      }
  }
@@ -66,3 +101,35 @@ diff -r a/src/context/record.rs b/src/context/record.rs
 +        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) { let _ = f.write_all(out.as_bytes()); }
 +    }
 +}
+diff -r a/src/gpu/pager.rs b/src/gpu/pager.rs
+--- a/src/gpu/pager.rs	2026-11-18 18:54:31.858980775 -0800
++++ b/src/gpu/pager.rs	2026-11-18 19:00:15.525797844 -0800
+@@ -88,6 +88,13 @@
+     }
+ }
+ 
++impl Pager {
++    /// Diagnostic: bytes counted resident.
++    pub(crate) fn resident_now(&self) -> u64 {
++        self.resident_bytes.load(Ordering::Relaxed)
++    }
++}
++
+ /// Bytes of device buffers that no segment owns but a recorded plan holds, counted in the
+ /// pager's `resident_bytes` (so the memory budget sees them) until this is dropped.
+ #[derive(Debug)]
+diff -r a/src/gpu/pool.rs b/src/gpu/pool.rs
+--- a/src/gpu/pool.rs	2026-11-18 18:54:31.859012616 -0800
++++ b/src/gpu/pool.rs	2026-11-18 19:00:15.525456514 -0800
+@@ -39,6 +39,11 @@
+         BufferPool { free: HashMap::new(), pooled_bytes: 0, clock: 0, cap }
+     }
+ 
++    /// Diagnostic: (idle bytes, idle buffers).
++    pub(crate) fn idle_stats(&self) -> (u64, usize) {
++        (self.pooled_bytes, self.free.values().map(VecDeque::len).sum())
++    }
++
+     /// Takes the most recently returned idle buffer of exactly `class` bytes with exactly
+     /// `usage`, if one exists.
+     pub(crate) fn take(&mut self, class: u64, usage: BufferUsage) -> Option<Buffer> {
