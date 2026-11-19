@@ -777,6 +777,20 @@ impl LazySolver3 {
         Ok(())
     }
 
+    /// Puts the CFL of the implicit scheme's ramp at `cfl` (at most `cfl_max`) instead of restarting it at `cfl0`: a warm start from a converged field of a neighbouring
+    /// point goes on at the CFL the neighbour ended at (the ramp then continues from there up to `cfl_max`).
+    pub fn set_cfl(&mut self, cfl: f64) -> Result<()> {
+        let cfl = match self.cfg.scheme {
+            Scheme3::Implicit(p) => cfl.min(p.cfl_max),
+            Scheme3::Explicit => self.cfg.cfl,
+        };
+        let cfl = up(&self.ctx, &[cfl], 1)?;
+        if let Some(s) = &mut self.state {
+            s[6] = cfl;
+        }
+        Ok(())
+    }
+
     /// A copy of the loop state to return to ([`LazySolver3::restore`]), downloaded to host memory (the raw `S` elements: a restore gives back the state bit for bit): the CFL
     /// controller of the runner keeps up to seven of them, 49 B per cell each of an SST run, which as device arrays would be 340 B per cell of the pool (DESIGN3D item 49).
     pub fn snapshot(&self) -> Result<Snapshot3> {

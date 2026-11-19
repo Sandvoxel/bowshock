@@ -83,6 +83,9 @@ pub struct GpuRunner3 {
     pub upload_seconds: f64,
     /// The answers of the CFL controller to failures of the last run ([`CflControl`]); empty when it never had to step in. The same list is in the result's `cfl_events`.
     pub cfl_events: Vec<CflEvent>,
+    /// The CFL the next warm run starts its ramp at instead of restarting it at `cfl0` (taken by [`GpuRunner3::run_on`]; at most the run's `cfl_max`): a run that goes on from
+    /// a converged field (a neighbouring Mach number, the next angle) is not a start-up, so it need not creep up from `cfl0`. `None`: the ramp restarts.
+    pub start_cfl: Option<f64>,
 }
 
 impl GpuRunner3 {
@@ -115,6 +118,7 @@ impl GpuRunner3 {
             ctx_seconds,
             upload_seconds,
             cfl_events: Vec::new(),
+            start_cfl: None,
         };
         runner.upload_wall_faces(case)?;
         Ok(runner)
@@ -317,10 +321,15 @@ impl GpuRunner3 {
         if let Some(jet) = case.jet_state3() {
             self.gpu.set_jet(jet)?;
         }
+        // a warm run restarts the CFL ramp, or (`start_cfl`) goes on at the CFL it was given
+        let start = self.start_cfl.take().filter(|_| warm);
         if warm {
             let it = self.gpu.iter().max(n.first_order_iters);
             self.gpu.set_iter(it);
-            self.gpu.restart_ramp()?;
+            match start {
+                Some(cfl) => self.gpu.set_cfl(cfl)?,
+                None => self.gpu.restart_ramp()?,
+            }
         } else {
             self.gpu.reset()?;
         }
@@ -336,7 +345,7 @@ impl GpuRunner3 {
         // restore), `cfl_max` is multiplied by `CFL_BACKOFF` and the chunk is run again. The cap only goes down; the converged state does not depend on it. The CFL in force is
         // tracked on the host (the device's ramp, `cfl0 growth^k` up to the cap) and told to the stop rule, whose windows lengthen as the CFL falls below `Numerics3::cfl_ref`.
         let Scheme3::Implicit(ip) = self.host.cfg.scheme else { return Err(Error::Gpu("the GPU 3D runner needs the implicit scheme".into())) };
-        let mut cfl_host = ip.cfl0.min(ip.cfl_max);
+        let mut cfl_host = start.unwrap_or(ip.cfl0).min(ip.cfl_max);
         let mut ctl = CflControl::new(self.gpu.snapshot()?, ip.cfl_max, cfl_host).with_enabled(n.cfl_control);
         rule.set_cfl(cfl_host);
         while done < n.max_iter && stop.is_none() {

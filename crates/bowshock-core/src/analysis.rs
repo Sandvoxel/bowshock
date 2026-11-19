@@ -464,7 +464,7 @@ pub struct Analysis {
 
 mod solver3;
 #[doc(hidden)]
-pub use solver3::{take_facade_timings, FacadeTiming};
+pub use solver3::{take_facade_timings, warm_split_mach, FacadeTiming};
 
 /// Free stream of a viscous sweep.
 struct Rans {
@@ -714,10 +714,16 @@ impl Analysis {
         self
     }
 
-    /// Start each Mach number from the converged field of the previous one (default off: measured on the solver, warm-started points
-    /// needed 2-5 times more iterations than cold starts at every Mach spacing from 0.05 to 0.3, and the GPU implicit scheme diverges
-    /// on a warm start to Mach 0.8). A warm-started point that ends `Failed` or `Stalled` is re-run cold, and the point after a `Failed`
-    /// point always starts cold.
+    /// Start each Mach number from the converged field of a neighbouring one (default off). On the legacy engine each point starts from the previous one of the ascending sweep
+    /// (measured on that solver: warm-started points needed 2-5 times more iterations than cold starts at every Mach spacing from 0.05 to 0.3, and the GPU implicit scheme
+    /// diverges on a warm start to Mach 0.8). A warm-started point that ends `Failed` or `Stalled` is re-run cold, and the point after a `Failed` point always starts cold.
+    ///
+    /// On [`Engine::Solver3`] the points of a domain (sector, half domain, wedge) are solved in the order of `engine::warm3::warm_plan` (the points above Mach 0.9 from the highest
+    /// downward, the others from the lowest upward, so each has a converged neighbour), each carried to the new free stream (`engine::warm3::rescale`: velocities with the Mach
+    /// number, the deviations of density and pressure from the free stream with its square, `k` and `omega` kept) and run from there without the first-order start-up and without
+    /// restarting the CFL ramp (at the neighbour's final CFL). The first point of each run of the plan starts as it does without the flag (the axisymmetric seed of a finned sector,
+    /// or the free stream), and so does one whose neighbour failed or did not settle; a warm point that ends `Failed` or `Stalled` is run again that way. Results come back in the
+    /// order asked for. Measurements: `DESIGN3D.md` item 59.
     pub fn warm_start(mut self, on: bool) -> Self {
         self.warm_start = on;
         self

@@ -158,6 +158,7 @@ fn perf_2d_table_grid_ab() {
             }
         },
         shared,
+        false,
     )
     .expect("the example solves");
     let wall = t0.elapsed().as_secs_f64();
@@ -362,7 +363,7 @@ fn engine3d_finned_timing() {
     let _ = solver::engine::timing::take_timings();
     let _ = solver::take_facade_timings();
     let t0 = Instant::now();
-    let table = solve_sized(&job, &Arc::new(AtomicBool::new(false)), |_| (), shared).expect("the example solves");
+    let table = solve_sized(&job, &Arc::new(AtomicBool::new(false)), |_| (), shared, warm_start()).expect("the example solves");
     let wall = t0.elapsed().as_secs_f64();
     let runs = solver::engine::timing::take_timings();
     let facade = solver::take_facade_timings();
@@ -375,6 +376,12 @@ fn engine3d_finned_timing() {
         table.solve_seconds,
         table.notes
     );
+    for t in facade.iter().filter(|t| t.what == "point") {
+        println!(
+            "START {} M {:.2} alpha {:.0}: seed {:?} neighbour {:?} wedge {} its {:.1} s, run {:.1} s",
+            t.kind, t.mach, t.alpha_deg, t.seed, t.neighbour, t.seed_iters, t.seed_s, t.run_s
+        );
+    }
     for p in &table.points {
         println!(
             "DRAG M {:.2} cd {:.5} friction {:.5} pressure {:.5} base {:.5} fins {:.5} other {:.5} {:?}",
@@ -744,7 +751,7 @@ fn finned_drag_split() {
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     let t_all = Instant::now();
     for &mach in &machs {
-        let analysis = node_analysis(&job, NodeKind::Drag, &session, 120.0, grid_mach, solves_3d()).unwrap_or_else(|_| panic!("the node analysis"));
+        let analysis = node_analysis(&job, NodeKind::Drag, &session, 120.0, grid_mach, solves_3d(), false).unwrap_or_else(|_| panic!("the node analysis"));
         let _ = solver::engine::timing::take_timings();
         let t = Instant::now();
         let polar = analysis.run(&[mach]).expect("the point solves");
@@ -784,7 +791,7 @@ fn finned_subsonic_failure_path() {
     let _ = solver::engine::timing::take_timings();
     let t = Instant::now();
     let table =
-        solve_sized(&job, &Arc::new(AtomicBool::new(false)), |e| println!("EVENT {}", format!("{e:?}").chars().take(160).collect::<String>()), solves_3d());
+        solve_sized(&job, &Arc::new(AtomicBool::new(false)), |e| println!("EVENT {}", format!("{e:?}").chars().take(160).collect::<String>()), solves_3d(), false);
     println!("APP RESULT after {:.1} s: {:?}", t.elapsed().as_secs_f64(), table.as_ref().map(|t| (t.points.len(), t.notes.clone())));
     for r in solver::engine::timing::take_timings() {
         println!("RUN M {:.2}: {} cells, {} its (stop {}), {:.1} s, {}", r.mach, r.cells, r.iters_exec, r.iters_stop, r.run_s, r.stop);

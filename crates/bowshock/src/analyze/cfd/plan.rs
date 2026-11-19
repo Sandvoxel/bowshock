@@ -17,6 +17,10 @@ pub(super) const DRAG_TOLERANCE: f64 = 0.002;
 /// time warm and the kernel compile of every point but the first when the cache is cold, but moves Cd by +2.5 % at M 0.1 and +0.7 % at
 /// M 1.0 (base drag; the tolerance is 0.5 %). Turning it on needs a `SOLVER_REV` bump.
 pub(super) const SHARED_GRID: bool = false;
+/// Whether the points of a table of the 3D engine start from the converged field of a neighbouring Mach number (`Analysis::warm_start`) instead of the free stream or the
+/// axisymmetric seed. Off: opt-in with `BOWSHOCK_WARM_START` until the measurements of `DESIGN3D.md` item 59 are taken for the default; turning it on needs a `SOLVER_REV_3D` bump
+/// (the converged points differ within the stop rule's noise).
+pub(super) const WARM_START: bool = false;
 /// The Mach range the solver accepts.
 pub const SOLVER_MACH: (f64, f64) = (0.1, 3.0);
 /// The highest altitude the solver's standard atmosphere has (m).

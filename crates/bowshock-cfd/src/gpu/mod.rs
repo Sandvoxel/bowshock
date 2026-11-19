@@ -619,6 +619,12 @@ impl GpuSolver3 {
         Ok(())
     }
 
+    /// Puts the ramp of the implicit scheme at `cfl` (at most `cfl_max`) instead of restarting it ([`LazySolver3::set_cfl`]).
+    pub fn set_cfl(&mut self, cfl: f64) -> Result<()> {
+        on3_mut!(self, s => s.set_cfl(cfl)?);
+        Ok(())
+    }
+
     /// The four parts of wedge mode one by one: `(skip_k, no_dt_k, k_wall_flux, k_src)` (experiments). They are all on for a grid with `Symmetry::Wedge`, as on the
     /// CPU (`Solver3::is_wedge`): no k factor, no `L_k` in the pseudo-time step, the pressure of the cell as the flux through the two k planes, and the 2D-style
     /// pressure-source block on the diagonal of the j factor.
