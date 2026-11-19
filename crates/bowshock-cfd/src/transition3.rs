@@ -23,8 +23,10 @@
 //! **Why not the alternatives.** A full `gamma-Re_theta` model needs two more transport equations, a calibrated free-stream turbulence intensity and pressure-gradient
 //! correlations that are not validated for supersonic slender bodies (Tu of a free-flight range is not known to a factor of 10); the transition location of a rocket in free flight
 //! is a roughness and Reynolds-number question (see DESIGN3D item 50), so the location is the parameter. A `mu_t` trip of the Baldwin-Lomax kind (`mu_t` zeroed, production left on) hides
-//! a developed `k` in the laminar layer that appears at once at the trip; with the production off the turbulence grows from the free-stream value over a distance of
-//! the order of the trip location itself, like a physical transition length (the plate test of the module measures it).
+//! a developed `k` in the laminar layer that appears at once at the trip; with the production off the turbulence grows from the free-stream value: on the plate test of `plate3`
+//! (`Re_x = 1e6` at the trip) `cf` is the Blasius value within 3 % up to 0.1 `x_tr` ahead of the trip, passes half way to the turbulent curve `0.11 x_tr` behind it, overshoots the
+//! turbulent value by 14 % at `0.25 x_tr` behind the trip and is 2.5 % above the fully turbulent run at `Re_x = 4.85e6` (the tripped layer is thinner): a transition length of 10 to
+//! 15 % of the trip station (the flight cone of Fisher and Dougherty, NASA TP-1971, has an onset-to-end Reynolds number ratio of 0.86: 16 %).
 
 use crate::grid3::{Grid3, Part};
 use crate::walldist3::{wall_nearest_face3, WallFace};
